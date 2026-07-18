@@ -1,7 +1,7 @@
 // compiler.check_validate — read the resolved AST and count type errors.
 // This pass validates calls, fields, matches, operands, indices, returns, assignment, and traits.
 { Expr, Stmt, Decl, Func, Param, Ty, StructDecl, EnumDecl, GenEnumDecl, GenericData, Field, ImplData, TraitDefData, ArmData, MatchData, BlockData, LetData, VariantDef, AssignData, IndexSetData, IndexData, CallData, MethodCallData, LambdaData, BinData, MakeStructData, FieldInit, FnTData, GlobalData, is_fnt, has_fnt_param, is_expr_null, subst_ty_in, call, arm, dforeign, impl_cname_in, no_tys, ti32, ti64, tu8, tf64, tbool, tstring_view, tnamed, tptr, tptr_k, tslice, tvoid, k_raw_ptr, k_mut_ptr, ptr_kw, gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ Env, DeclIndex, build_decl_index, env_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, bind_tparams, tparam_declared, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, mode_fits, ptr_kind_of, write_thru_readonly, lvalue_writes_readonly, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
+{ Env, DeclIndex, build_decl_index, env_func, env_gstruct, idx_func, infer_expr, fits, ty_eq, is_str_t, ty_rank, is_f64_ty, enum_name, recv_name, call_targ, is_lit_numeric, is_void_ty, the_func, fn_params, params_env, bind_tparams, tparam_declared, empty_params, tag_const, extend_env, arm_env, subj_variant_payload, is_bound, is_local, var_or_global, no_stmts, resolve_module, dbuf, tnode, loop_env, rc_calls_body, is_readonly_ptr_ty, is_nullable_ptr_ty, is_nonnull_ptr_ty, is_ptr_ty_g, is_raw_ptr_ty, mode_fits, ptr_kind_of, write_thru_readonly, lvalue_writes_readonly, is_intrinsic, AliasCands, alias_ufcs_candidates } = compiler.check
 { Token, scan } = compiler.lex
 { Allocator, Malloc } = std.mem.alloc
 { expect } = std.core.result
@@ -18,6 +18,8 @@ env_params = (env: Env, fn: string_view) [Param] { env.env_func(fn).params }
 // tmethod_idx folds every DImpl.methods name + every DTraitDefault fn name; import_idx every DImport name).
 env_trait_method = (env: Env, fn: string_view) bool { env.didx.tmethod_idx.get(fn, 0 - 1) >= 0 }
 env_imported = (env: Env, fn: string_view) bool { env.didx.import_idx.get(fn, 0 - 1) >= 0 }
+env_is_gen_struct = (env: Env, name: string_view) bool { env.didx.genstruct_idx.get(name, 0 - 1) >= 0 }
+env_is_gen_enum = (env: Env, name: string_view) bool { env.didx.genenum_idx.get(name, 0 - 1) >= 0 }
 // O(1) indexed struct presence/field lookups (Env carries the decl index).
 env_is_struct = (env: Env, name: string_view) bool { env.didx.struct_idx.get(name, 0 - 1) >= 0 }
 // A CONCRETE enum (`DEnum`) by name — enums carry variants, not fields, so `e.field` on one is always
@@ -942,10 +944,10 @@ dup_init_errs = (inits: [FieldInit]) i32 {
 }
 makestruct_err = (env: Env, m: MakeStructData) i32 {
     (m.targs.len > 0).match ({
-        true  => env.decls.cv_is_gen_struct(m.ty).match ({
+        true  => env.env_is_gen_struct(m.ty).match ({
             true  => {
-                gf := env.decls.gen_struct_fields(m.ty)
-                env.gen_struct_init_errs(env.decls.gen_struct_tparams(m.ty), m.targs, gf, m.inits) + gf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs()
+                gf := env.env_gstruct(m.ty).fields
+                env.gen_struct_init_errs(env.env_gstruct(m.ty).tparams, m.targs, gf, m.inits) + gf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs()
             },
             false => 0,
         }),
@@ -1007,12 +1009,12 @@ member_err = (env: Env, obj: Ptr<Expr>, field: string_view) i32 {
                 }),
                 false => {
                     base := rty.gen_base_of()
-                    (is_empty(base) == false && env.decls.cv_is_gen_struct(base)).match ({
-                        true  => env.decls.gen_struct_fields(base).has_field(field).match ({
+                    (is_empty(base) == false && env.env_is_gen_struct(base)).match ({
+                        true  => env.env_gstruct(base).fields.has_field(field).match ({
                             true  => 0,
                             false => 1,
                         }),
-                        false => (env.env_is_enum(sname) || is_empty(base) == false && env.decls.cv_is_gen_enum(base)).match ({
+                        false => (env.env_is_enum(sname) || is_empty(base) == false && env.env_is_gen_enum(base)).match ({
                             true  => field.is_enum_repr_field().match ({ true => 0, false => 1 }),
                             false => rty.is_fieldless_prim().match ({ true => 1, false => 0 }),
                         }),
@@ -3783,7 +3785,7 @@ denrich_member_msg = (env: Env, field: string_view, objty: Ty) string_view {
     a := env.a
     objty.match ({
         // a generic-enum instance (`Result<i32,IoError>`) reaches here via its base name.
-        .Generic(g)    => env.decls.cv_is_gen_enum(g.name).match ({
+        .Generic(g)    => env.env_is_gen_enum(g.name).match ({
             true  => a.denrich_enum_member_msg(g.name, field),
             false => a.denrich_member_noty(field, objty),
         }),
@@ -6168,43 +6170,43 @@ ae_is_addr_local = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
 // the send-message escape (SENDABILITY rule 3) uses the NON-hopping escape check: a laundered send
 // (`send(.Poke(launder(local.addr())))`) is the sendability pass's concern (kind `sendable`), so the
 // call-following added for return-escape must NOT pre-empt it here — hop=false preserves that split.
-ae_send_pos = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+ae_send_pos = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c) => (eq(c.fn, "send") && c.args.len >= 2 && a.ae_escapes(decls, locals, c.args[1].addr(), false)).match ({
+        .Call(c) => (eq(c.fn, "send") && c.args.len >= 2 && a.ae_escapes(decls, idx, locals, c.args[1].addr(), false)).match ({
             true  => c.pos.pos_or(1),
             false => 0,
         }),
         _        => 0,
     })
 }
-ae_block_val_escapes = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, stmts: [Stmt], hop: bool) bool {
+ae_block_val_escapes = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, stmts: [Stmt], hop: bool) bool {
     (stmts.len == 0).match ({
         true  => false,
         false => stmts[stmts.len - 1].match ({
-            .ExprStmt(e) => a.ae_escapes(decls, locals, e, hop),
-            .Return(r)   => a.ae_escapes(decls, locals, r, hop),
+            .ExprStmt(e) => a.ae_escapes(decls, idx, locals, e, hop),
+            .Return(r)   => a.ae_escapes(decls, idx, locals, r, hop),
             _            => false,
         }),
     })
 }
-ae_inits_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, inits: [FieldInit], hop: bool) bool {
+ae_inits_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, inits: [FieldInit], hop: bool) bool {
     f := false
     inits.loop((h, i, fi) {
-        f = a.ae_escapes(decls, locals, fi.value, hop).match ({ true => true, false => f })
+        f = a.ae_escapes(decls, idx, locals, fi.value, hop).match ({ true => true, false => f })
     })
     f
 }
-ae_arms_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, arms: [ArmData], hop: bool) bool {
+ae_arms_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, arms: [ArmData], hop: bool) bool {
     f := false
     arms.loop((h, i, ar) {
-        f = a.ae_escapes(decls, locals, ar.body, hop).match ({ true => true, false => f })
+        f = a.ae_escapes(decls, idx, locals, ar.body, hop).match ({ true => true, false => f })
     })
     f
 }
-ae_items_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, items: [Expr], hop: bool) bool {
+ae_items_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, items: [Expr], hop: bool) bool {
     f := false
     items.loop((h, i, it) {
-        f = a.ae_escapes(decls, locals, it.addr(), hop).match ({ true => true, false => f })
+        f = a.ae_escapes(decls, idx, locals, it.addr(), hop).match ({ true => true, false => f })
     })
     f
 }
@@ -6218,76 +6220,76 @@ ae_items_escape = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, item
 // arg must be an addr-of-LOCAL (the only tainted shape) AND the callee must actually thread that param to
 // its result; a callee that reads through the pointer and returns a fresh/copied value threads nothing.
 // does local fn `fn`'s return value derive from its param at index `pi`? (bounded interprocedural)
-ae_fn_returns_param = (a: MutPtr<Malloc>, decls: [Decl], fn: string_view, pi: i32, depth: i32) bool {
+ae_fn_returns_param = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, fn: string_view, pi: i32, depth: i32) bool {
     (depth <= 0).match ({
         true  => false,
         false => {
-            f := decls.the_func(fn)
+            f := idx.idx_func(decls, fn)
             (eq(f.name, "") == false && pi >= 0 && pi < f.params.len).match ({
-                true  => a.ae_ret_body(decls, f.body, f.params[pi].name, depth),
+                true  => a.ae_ret_body(decls, idx, f.body, f.params[pi].name, depth),
                 false => false,
             })
         },
     })
 }
 // value position: does expr `e` yield the tracked param `name` (directly, forwarded, or via one hop)?
-ae_ret_yields = (a: MutPtr<Malloc>, decls: [Decl], name: string_view, e: Ptr<Expr>, depth: i32) bool {
+ae_ret_yields = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: string_view, e: Ptr<Expr>, depth: i32) bool {
     load(e).match ({
         .Var(v)        => eq(v.name, name),
         .Call(c)       => (eq(c.fn, "slice") && c.args.len > 0).match ({
-            true  => a.ae_ret_yields(decls, name, c.args[0].addr(), depth),
-            false => a.ae_ret_call(decls, c, name, depth),
+            true  => a.ae_ret_yields(decls, idx, name, c.args[0].addr(), depth),
+            false => a.ae_ret_call(decls, idx, c, name, depth),
         }),
-        .MakeStruct(s) => a.ae_ret_inits(decls, s.inits, name, depth),
-        .MakeEnum(mk)  => a.ae_ret_yields(decls, name, mk.payload, depth),
-        .Match(m)      => a.ae_ret_valarms(decls, m.arms, name, depth),
-        .Cond(d)       => a.ae_ret_yields(decls, name, d.t, depth) || a.ae_ret_yields(decls, name, d.e, depth),
-        .Block(b)      => a.ae_ret_blockval(decls, b.stmts, name, depth),
-        .SliceLit(sd)  => a.ae_ret_items(decls, sd.items, name, depth),
+        .MakeStruct(s) => a.ae_ret_inits(decls, idx, s.inits, name, depth),
+        .MakeEnum(mk)  => a.ae_ret_yields(decls, idx, name, mk.payload, depth),
+        .Match(m)      => a.ae_ret_valarms(decls, idx, m.arms, name, depth),
+        .Cond(d)       => a.ae_ret_yields(decls, idx, name, d.t, depth) || a.ae_ret_yields(decls, idx, name, d.e, depth),
+        .Block(b)      => a.ae_ret_blockval(decls, idx, b.stmts, name, depth),
+        .SliceLit(sd)  => a.ae_ret_items(decls, idx, sd.items, name, depth),
         _              => false,
     })
 }
-ae_ret_inits = (a: MutPtr<Malloc>, decls: [Decl], inits: [FieldInit], name: string_view, depth: i32) bool {
+ae_ret_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, inits: [FieldInit], name: string_view, depth: i32) bool {
     f := false
     inits.loop((h, i, fi) {
-        f = a.ae_ret_yields(decls, name, fi.value, depth).match ({ true => true, false => f })
+        f = a.ae_ret_yields(decls, idx, name, fi.value, depth).match ({ true => true, false => f })
     })
     f
 }
-ae_ret_valarms = (a: MutPtr<Malloc>, decls: [Decl], arms: [ArmData], name: string_view, depth: i32) bool {
+ae_ret_valarms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, arms: [ArmData], name: string_view, depth: i32) bool {
     f := false
     arms.loop((h, i, ar) {
-        f = a.ae_ret_yields(decls, name, ar.body, depth).match ({ true => true, false => f })
+        f = a.ae_ret_yields(decls, idx, name, ar.body, depth).match ({ true => true, false => f })
     })
     f
 }
-ae_ret_items = (a: MutPtr<Malloc>, decls: [Decl], items: [Expr], name: string_view, depth: i32) bool {
+ae_ret_items = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, items: [Expr], name: string_view, depth: i32) bool {
     f := false
     items.loop((h, i, it) {
-        f = a.ae_ret_yields(decls, name, it.addr(), depth).match ({ true => true, false => f })
+        f = a.ae_ret_yields(decls, idx, name, it.addr(), depth).match ({ true => true, false => f })
     })
     f
 }
-ae_ret_blockval = (a: MutPtr<Malloc>, decls: [Decl], stmts: [Stmt], name: string_view, depth: i32) bool {
+ae_ret_blockval = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, stmts: [Stmt], name: string_view, depth: i32) bool {
     (stmts.len == 0).match ({
         true  => false,
         false => stmts[stmts.len - 1].match ({
-            .ExprStmt(e) => a.ae_ret_yields(decls, name, e, depth),
-            .Return(r)   => a.ae_ret_yields(decls, name, r, depth),
+            .ExprStmt(e) => a.ae_ret_yields(decls, idx, name, e, depth),
+            .Return(r)   => a.ae_ret_yields(decls, idx, name, r, depth),
             _            => false,
         }),
     })
 }
 // one interprocedural hop: a call whose arg[i] yields `name` AND whose callee returns its param `i`.
-ae_ret_call = (a: MutPtr<Malloc>, decls: [Decl], c: CallData, name: string_view, depth: i32) bool {
+ae_ret_call = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, name: string_view, depth: i32) bool {
     (depth <= 1).match ({
         true  => false,
         false => {
-            f := decls.the_func(c.fn)
+            f := idx.idx_func(decls, c.fn)
             found := false
             (eq(f.name, "") == false && f.params.len == c.args.len).then({
                 c.args.loop((h, i, ar) {
-                    (a.ae_ret_yields(decls, name, ar.addr(), depth - 1) && a.ae_fn_returns_param(decls, c.fn, i, depth - 1)).then({
+                    (a.ae_ret_yields(decls, idx, name, ar.addr(), depth - 1) && a.ae_fn_returns_param(decls, idx, c.fn, i, depth - 1)).then({
                         found = true
                     })
                 })
@@ -6297,15 +6299,15 @@ ae_ret_call = (a: MutPtr<Malloc>, decls: [Decl], c: CallData, name: string_view,
     })
 }
 // returns-only statement walker over the callee body (mirrors the escape walker; trailing handled by caller).
-ae_ret_body = (a: MutPtr<Malloc>, decls: [Decl], body: [Stmt], name: string_view, depth: i32) bool {
+ae_ret_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], name: string_view, depth: i32) bool {
     f := false
     body.loop((h, i, st) {
-        f = a.ae_ret_stmt(decls, st, name, depth).match ({ true => true, false => f })
+        f = a.ae_ret_stmt(decls, idx, st, name, depth).match ({ true => true, false => f })
     })
     (body.len == 0).match ({
         true  => f,
         false => body[body.len - 1].match ({
-            .ExprStmt(e) => a.ae_ret_yields(decls, name, e, depth).match ({
+            .ExprStmt(e) => a.ae_ret_yields(decls, idx, name, e, depth).match ({
                 true  => true,
                 false => f,
             }),
@@ -6313,29 +6315,29 @@ ae_ret_body = (a: MutPtr<Malloc>, decls: [Decl], body: [Stmt], name: string_view
         }),
     })
 }
-ae_ret_stmt = (a: MutPtr<Malloc>, decls: [Decl], st: Stmt, name: string_view, depth: i32) bool {
+ae_ret_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, st: Stmt, name: string_view, depth: i32) bool {
     st.match ({
-        .Return(r)   => a.ae_ret_yields(decls, name, r, depth),
-        .If(f)       => a.ae_ret_body(decls, f.then, name, depth) || a.ae_ret_body(decls, f.els, name, depth),
-        .While(w)    => a.ae_ret_body(decls, w.body, name, depth),
-        .ExprStmt(e) => a.ae_ret_estmt(decls, e, name, depth),
+        .Return(r)   => a.ae_ret_yields(decls, idx, name, r, depth),
+        .If(f)       => a.ae_ret_body(decls, idx, f.then, name, depth) || a.ae_ret_body(decls, idx, f.els, name, depth),
+        .While(w)    => a.ae_ret_body(decls, idx, w.body, name, depth),
+        .ExprStmt(e) => a.ae_ret_estmt(decls, idx, e, name, depth),
         _            => false,
     })
 }
-ae_ret_estmt = (a: MutPtr<Malloc>, decls: [Decl], e: Ptr<Expr>, name: string_view, depth: i32) bool {
+ae_ret_estmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>, name: string_view, depth: i32) bool {
     load(e).match ({
-        .Match(m) => a.ae_ret_stmtarms(decls, m.arms, name, depth),
-        .Cond(d)  => a.ae_ret_estmt(decls, d.t, name, depth) || a.ae_ret_estmt(decls, d.e, name, depth),
-        .Block(b) => a.ae_ret_body(decls, b.stmts, name, depth),
-        .Loop(l)  => a.ae_ret_body(decls, l.body, name, depth),
+        .Match(m) => a.ae_ret_stmtarms(decls, idx, m.arms, name, depth),
+        .Cond(d)  => a.ae_ret_estmt(decls, idx, d.t, name, depth) || a.ae_ret_estmt(decls, idx, d.e, name, depth),
+        .Block(b) => a.ae_ret_body(decls, idx, b.stmts, name, depth),
+        .Loop(l)  => a.ae_ret_body(decls, idx, l.body, name, depth),
         _         => false,
     })
 }
-ae_ret_stmtarms = (a: MutPtr<Malloc>, decls: [Decl], arms: [ArmData], name: string_view, depth: i32) bool {
+ae_ret_stmtarms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, arms: [ArmData], name: string_view, depth: i32) bool {
     f := false
     arms.loop((h, i, ar) {
         hit := load(ar.body).match ({
-            .Block(b) => a.ae_ret_body(decls, b.stmts, name, depth),
+            .Block(b) => a.ae_ret_body(decls, idx, b.stmts, name, depth),
             _         => false,
         })
         f = hit.match ({ true => true, false => f })
@@ -6343,12 +6345,12 @@ ae_ret_stmtarms = (a: MutPtr<Malloc>, decls: [Decl], arms: [ArmData], name: stri
     f
 }
 // the call-following forward for the escape walk: a local's address escaping into a returning-param arg.
-ae_call_escapes = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, c: CallData) bool {
-    f := decls.the_func(c.fn)
+ae_call_escapes = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, c: CallData) bool {
+    f := idx.idx_func(decls, c.fn)
     found := false
     (eq(f.name, "") == false && f.params.len == c.args.len).then({
         c.args.loop((h, i, ar) {
-            (a.ae_escapes(decls, locals, ar.addr(), true) && a.ae_fn_returns_param(decls, c.fn, i, consume_depth())).then({
+            (a.ae_escapes(decls, idx, locals, ar.addr(), true) && a.ae_fn_returns_param(decls, idx, c.fn, i, consume_depth())).then({
                 found = true
             })
         })
@@ -6359,74 +6361,77 @@ ae_call_escapes = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, c: C
 // when `hop`) through a call to a fn that returns one of its pointer params (identity/wrapper laundering).
 // `hop` is on for the return/trailing escape (the actual stack-escape-via-fn vuln) and off for the send
 // path, which the sendability pass owns (so a laundered send stays kind `sendable`, not `escape`).
-ae_escapes = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, e: Ptr<Expr>, hop: bool) bool {
+ae_escapes = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, e: Ptr<Expr>, hop: bool) bool {
     locals.ae_is_addr_local(e).match ({
         true  => true,
         false => load(e).match ({
             .Call(c)       => (eq(c.fn, "slice") && c.args.len > 0).match ({
-                true  => a.ae_escapes(decls, locals, c.args[0].addr(), hop),
-                false => hop.match ({ true => a.ae_call_escapes(decls, locals, c), false => false }),
+                true  => a.ae_escapes(decls, idx, locals, c.args[0].addr(), hop),
+                false => hop.match ({
+                    true  => a.ae_call_escapes(decls, idx, locals, c),
+                    false => false,
+                }),
             }),
-            .MakeEnum(mk)  => a.ae_escapes(decls, locals, mk.payload, hop),
-            .MakeStruct(s) => a.ae_inits_escape(decls, locals, s.inits, hop),
-            .Match(m)      => a.ae_arms_escape(decls, locals, m.arms, hop),
-            .Cond(d)       => a.ae_escapes(decls, locals, d.t, hop) || a.ae_escapes(decls, locals, d.e, hop),
-            .Block(b)      => a.ae_block_val_escapes(decls, locals, b.stmts, hop),
-            .SliceLit(sd)  => a.ae_items_escape(decls, locals, sd.items, hop),
+            .MakeEnum(mk)  => a.ae_escapes(decls, idx, locals, mk.payload, hop),
+            .MakeStruct(s) => a.ae_inits_escape(decls, idx, locals, s.inits, hop),
+            .Match(m)      => a.ae_arms_escape(decls, idx, locals, m.arms, hop),
+            .Cond(d)       => a.ae_escapes(decls, idx, locals, d.t, hop) || a.ae_escapes(decls, idx, locals, d.e, hop),
+            .Block(b)      => a.ae_block_val_escapes(decls, idx, locals, b.stmts, hop),
+            .SliceLit(sd)  => a.ae_items_escape(decls, idx, locals, sd.items, hop),
             _              => false,
         }),
     })
 }
 // position walk (mirrors kv_escape_*): the source offset of the first escaping return/trailing, 0 = none.
-ae_kv_arm = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, body: Ptr<Expr>) i32 {
+ae_kv_arm = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, body: Ptr<Expr>) i32 {
     load(body).match ({
-        .Block(b) => a.ae_kv_stmts(decls, locals, b.stmts),
+        .Block(b) => a.ae_kv_stmts(decls, idx, locals, b.stmts),
         _         => 0,
     })
 }
-ae_kv_arms = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, arms: [ArmData]) i32 {
+ae_kv_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(a.ae_kv_arm(decls, locals, ar.body))
+        acc = acc.kv_kor(a.ae_kv_arm(decls, idx, locals, ar.body))
     })
     acc
 }
-ae_kv_expr_stmt = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+ae_kv_expr_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Match(m) => a.ae_kv_arms(decls, locals, m.arms),
-        .Cond(d)  => a.ae_kv_expr_stmt(decls, locals, d.t).kv_kor(a.ae_kv_expr_stmt(decls, locals, d.e)),
-        .Block(b) => a.ae_kv_stmts(decls, locals, b.stmts),
-        .Loop(l)  => a.ae_kv_stmts(decls, locals, l.body),
+        .Match(m) => a.ae_kv_arms(decls, idx, locals, m.arms),
+        .Cond(d)  => a.ae_kv_expr_stmt(decls, idx, locals, d.t).kv_kor(a.ae_kv_expr_stmt(decls, idx, locals, d.e)),
+        .Block(b) => a.ae_kv_stmts(decls, idx, locals, b.stmts),
+        .Loop(l)  => a.ae_kv_stmts(decls, idx, locals, l.body),
         _         => 0,
     })
 }
-ae_kv_stmt = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, st: Stmt) i32 {
+ae_kv_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
-        .Return(r)   => a.ae_escapes(decls, locals, r, true).match ({
+        .Return(r)   => a.ae_escapes(decls, idx, locals, r, true).match ({
             true  => load(r).expr_pos().pos_or(1),
             false => 0,
         }),
-        .If(f)       => a.ae_kv_stmts(decls, locals, f.then).kv_kor(a.ae_kv_stmts(decls, locals, f.els)),
-        .While(w)    => a.ae_kv_stmts(decls, locals, w.body),
-        .Let(l)      => a.ae_send_pos(decls, locals, l.value),
-        .Assign(x)   => a.ae_send_pos(decls, locals, x.value),
-        .ExprStmt(e) => a.ae_kv_expr_stmt(decls, locals, e).kv_kor(a.ae_send_pos(decls, locals, e)),
+        .If(f)       => a.ae_kv_stmts(decls, idx, locals, f.then).kv_kor(a.ae_kv_stmts(decls, idx, locals, f.els)),
+        .While(w)    => a.ae_kv_stmts(decls, idx, locals, w.body),
+        .Let(l)      => a.ae_send_pos(decls, idx, locals, l.value),
+        .Assign(x)   => a.ae_send_pos(decls, idx, locals, x.value),
+        .ExprStmt(e) => a.ae_kv_expr_stmt(decls, idx, locals, e).kv_kor(a.ae_send_pos(decls, idx, locals, e)),
         _            => 0,
     })
 }
-ae_kv_stmts = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, body: [Stmt]) i32 {
+ae_kv_stmts = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, body: [Stmt]) i32 {
     acc := 0
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.ae_kv_stmt(decls, locals, st))
+        acc = acc.kv_kor(a.ae_kv_stmt(decls, idx, locals, st))
     })
     acc
 }
-ae_kv_body = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, body: [Stmt]) i32 {
-    acc := a.ae_kv_stmts(decls, locals, body)
+ae_kv_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := a.ae_kv_stmts(decls, idx, locals, body)
     acc.kv_kor((body.len == 0).match ({
         true  => 0,
         false => body[body.len - 1].match ({
-            .ExprStmt(e) => a.ae_escapes(decls, locals, e, true).match ({
+            .ExprStmt(e) => a.ae_escapes(decls, idx, locals, e, true).match ({
                 true  => load(e).expr_pos().pos_or(1),
                 false => 0,
             }),
@@ -6434,15 +6439,16 @@ ae_kv_body = (a: MutPtr<Malloc>, decls: [Decl], locals: Ptr<DeadList>, body: [St
         }),
     }))
 }
-ae_check_func = (a: MutPtr<Malloc>, decls: [Decl], f: Func) i32 {
+ae_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     locals := a.ae_collect(a.dead_nil(), f.body)
-    a.ae_kv_body(decls, locals, f.body)
+    a.ae_kv_body(decls, idx, locals, f.body)
 }
 check_module_addr_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    idx := a.build_decl_index(decls)
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => a.ae_check_func(decls, f),
+            .DFunc(f) => a.ae_check_func(decls, idx, f),
             _         => 0,
         }))
     })
