@@ -509,12 +509,52 @@ ProvidedSymbol*: {
     is_type: bool,
     is_pub: bool,
 }    // is_pub: the decl name carries the `*` export marker (imported symbols: false)
+// ── ModuleSig: first-class per-module signature (Stage B3) ───────────────────────────────────────
+// One O(1) name → flags map per module, built ONCE when the module's source is symbol-scanned and
+// carried on its ModuleGraph (the ModuleTable keys it by ModuleId). Every consumer that used to
+// re-scan the [ProvidedSymbol] array per query — import-head validation, visibility enforcement,
+// `graph.has` — now asks the sig. Flags pack the per-name facts (decoded by /bit%2, no bitwise ops):
+//   SIG_PUB       the decl name carries the `*` export marker
+//   SIG_TYPE      a struct/enum decl
+//   SIG_IMPORTED  bound by an import head (re-export pass-through)
+//   SIG_FOREIGN   a bodyless foreign decl
+// A raw C-keyword decl name (`double`) is ALSO stored under its `_zk`-escaped form, so raw source
+// queries (visibility scans) and escaped import-head queries (check_head) hit the same entry —
+// exactly the pair `symbol_matches` accepted. Insertion is first-occurrence-wins (put-if-absent),
+// matching the old first-match array scans.
+SIG_PUB := 1
+SIG_TYPE := 2
+SIG_IMPORTED := 4
+SIG_FOREIGN := 8
+ModuleSig*: {
+    names: Map<i64>,
+    has = (s: ModuleSig, name: string_view) bool { s.names.has(name) }
+    flags = (s: ModuleSig, name: string_view) i64 { s.names.get(name, 0 - 1) }
+    private = (s: ModuleSig, name: string_view) bool {
+        // defined here but NOT exported? (imported pass-through = sanctioned re-export, stays visible;
+        // an unknown name is NOT private — it is left to the unknown-name validation.)
+        f := s.names.get(name, 0 - 1)
+        (f < 0).match ({
+            true  => false,
+            false => f / SIG_IMPORTED % 2 == 0 && f / SIG_PUB % 2 == 0,
+        })
+    }
+    exports_value = (s: ModuleSig, name: string_view) bool {
+        // a value export: public, defined here (not imported), and not a type.
+        f := s.names.get(name, 0 - 1)
+        (f < 0).match ({
+            true  => false,
+            false => f / SIG_PUB % 2 == 1 && f / SIG_IMPORTED % 2 == 0 && f / SIG_TYPE % 2 == 0,
+        })
+    }
+}
 ModuleGraph*: {
     imports: [ImportEdge],
     symbols: [ProvidedSymbol],
+    sig: ModuleSig,
     import_count = (g: ModuleGraph) i64 { g.imports.len }
     symbol_count = (g: ModuleGraph) i64 { g.symbols.len }
-    has = (g: ModuleGraph, name: string_view) bool { g.symbols.has_symbol(name) }
+    has = (g: ModuleGraph, name: string_view) bool { g.sig.has(name) }
 }
 decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String { a.symbol_names_into_in(a.gstr_string(256), g.symbols, 0, false, false) }
 // Like decl_names_in, but ALSO excludes TYPE (struct/enum) decls. A namespace alias prefixes only the
@@ -1456,24 +1496,54 @@ provided_symbols_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_view
     })
 }
 provided_symbols* = (a: MutPtr<Malloc>, src: string_view) Result<[ProvidedSymbol], IoError> { a.provided_symbols_in(a, src) }
+// flags word for one scanned symbol (see ModuleSig).
+sym_sig_flags = (s: ProvidedSymbol) i64 {
+    f: i64 := 0
+    s.is_pub.then({
+        f = f + SIG_PUB
+    })
+    s.is_type.then({
+        f = f + SIG_TYPE
+    })
+    s.imported.then({
+        f = f + SIG_IMPORTED
+    })
+    s.foreign.then({
+        f = f + SIG_FOREIGN
+    })
+    f
+}
+// Build the sig map from one symbol scan: first occurrence wins, and a raw C-keyword decl name is
+// additionally registered under its `_zk`-escaped key (see ModuleSig).
+sig_of_symbols = (a: MutPtr<Malloc>, symbols: [ProvidedSymbol]) ModuleSig {
+    seed: i64 := 0 - 1
+    m := of(a, "", seed).expect("std.internal.resolve: sig alloc")
+    symbols.loop((h, i, s) {
+        f := s.sym_sig_flags()
+        (m.has(s.name) == false).then({
+            m = m.put(a, s.name, f).expect("std.internal.resolve: sig alloc")
+        })
+        e := s.name.res_ident_end(0)
+        s.name.is_c_kw_name_span(0, e).then({
+            key := s.symbol_key_in(a).expect("std.internal.resolve: sig alloc")
+            ke := cstr(key.ptr)
+            (m.has(ke) == false).then({
+                m = m.put(a, ke, f).expect("std.internal.resolve: sig alloc")
+            })
+        })
+    })
+    ModuleSig(names: m)
+}
 module_graph* = (a: MutPtr<Malloc>, src: string_view) ModuleGraph { a.module_graph_in(a, src) }
 module_graph_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_view) ModuleGraph {
+    imports := alloc.import_edges(src).expect("std.internal.resolve: allocation failed")
+    symbols := a.provided_symbols_in(alloc, src).expect("std.internal.resolve: allocation failed")
     ModuleGraph(
-        imports: alloc.import_edges(src).expect("std.internal.resolve: allocation failed"),
-        symbols: a.provided_symbols_in(alloc, src).expect("std.internal.resolve: allocation failed"),
+        imports: imports,
+        symbols: symbols,
+        sig: a.sig_of_symbols(symbols),
     )
 }
-name_prefix_eq = (raw: string_view, wanted: string_view, i: i32, e: i32) bool {
-    (i == e).match ({
-        true  => true,
-        false => raw.at(i) == wanted.at(i) && raw.name_prefix_eq(wanted, i + 1, e),
-    })
-}
-escaped_name_eq = (raw: string_view, wanted: string_view) bool {
-    e := raw.res_ident_end(0)
-    raw.is_c_kw_name_span(0, e) && raw.name_prefix_eq(wanted, 0, e) && wanted.at(e) == '_' && wanted.at(e + 1) == 'z' && wanted.at(e + 2) == 'k' && wanted.at(e + 3) == 0
-}
-symbol_matches = (s: ProvidedSymbol, name: string_view) bool { eq(s.name, name) || s.name.escaped_name_eq(name) }
 symbol_key_in*<A> = (s: ProvidedSymbol, a: MutPtr<A>) Result<String, IoError> {
     e := s.name.res_ident_end(0)
     n := s.name.symbol_name_len(0, e, true)
@@ -1488,13 +1558,6 @@ symbol_key_in*<A> = (s: ProvidedSymbol, a: MutPtr<A>) Result<String, IoError> {
         },
         .Err(e2) => err(e2),
     })
-}
-has_symbol = (symbols: [ProvidedSymbol], name: string_view) bool {
-    found := false
-    symbols.loop((h, i, s) {
-        found = s.symbol_matches(name).match ({ true => true, false => found })
-    })
-    found
 }
 span_has_byte = (s: string_view, p: i32, e: i32, b: u8) bool {
     (p >= e).match ({
@@ -1594,9 +1657,9 @@ mimport_head_name = (a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) String
 }
 check_import_names_table = (table: ModuleTable, a: MutPtr<Malloc>, src: string_view, p: i32, id: String, inpath: string_view) i32 {
     entry := table.module_id(id)
-    src.check_head(a, src.lstrip(p) + 1, entry.graph.symbols, id, inpath)
+    src.check_head(a, src.lstrip(p) + 1, entry.graph.sig, id, inpath)
 }
-check_head = (src: string_view, a: MutPtr<Malloc>, p: i32, provided: [ProvidedSymbol], id: String, inpath: string_view) i32 {
+check_head = (src: string_view, a: MutPtr<Malloc>, p: i32, provided: ModuleSig, id: String, inpath: string_view) i32 {
     pos := p
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
@@ -1612,7 +1675,7 @@ check_head = (src: string_view, a: MutPtr<Malloc>, p: i32, provided: [ProvidedSy
                         raw := a.mimport_name_span(src, pos, ie)
                         hd := a.mimport_head_name(src, pos, ie)
                         nm := hd.gstr_finish(a)
-                        provided.has_symbol(nm).match ({
+                        provided.has(nm).match ({
                             true  => 0,
                             false => a.fail_unknown_name(inpath, raw, id),
                         })
@@ -2305,32 +2368,9 @@ vis_report_mode = () bool { is_empty(getEnv("ZEN_VIS_REPORT")).match ({
     true  => false,
     false => true,
 }) }
-// 1-based line number of byte `p` (loop over the source slice, not recursion: sources are large).
-vis_line_of = (s: string_view, p: i32) i32 {
-    n := 1
-    bs: [u8] := s.view()
-    bs.loop((h, i, b) {
-        (to_i32(i) >= p).match ({
-            true  => {
-                h.break
-            },
-            false => (b == '\n').then({
-                n = n + 1
-            }),
-        })
-    })
-    n
-}
-// start of the line containing `p` (backward scan; lines are short, recursion is bounded).
-vis_bol = (s: string_view, p: i32) i32 {
-    (p <= 0).match ({
-        true  => 0,
-        false => (s.at(p - 1) == '\n').match ({ true => p, false => s.vis_bol(p - 1) }),
-    })
-}
 vis_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, pos: i32, width: i32, name: String, id: String, report: bool) i32 {
-    line := src.vis_line_of(pos)
-    col := pos - src.vis_bol(pos) + 1
+    line := src.res_line_of(pos)
+    col := src.res_col_of(pos)
     m0 := a.gstr_string(192).gstr_append(a, "`")
     m1 := a.mappend_string(m0, name)
     m2 := m1.gstr_append(a, "` is private in module '")
@@ -2341,24 +2381,6 @@ vis_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, pos: i32, wi
     hint := h1.gstr_append(a, "*` in the defining module, or use the module's public surface").gstr_finish(a)
     eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-name", msg, hint, 1))
     report.match ({ true => 0, false => exit(1) })
-}
-// does `name` match a symbol the target module DEFINES but does not export? (imported symbols
-// pass through — re-export; unknown names are left to the existing unknown-name validation.)
-vis_symbol_private = (symbols: [ProvidedSymbol], name: string_view) bool {
-    priv := false
-    found := false
-    symbols.loop((h, i, s) {
-        (found == false).then({
-            s.symbol_matches(name).then({
-                found = true
-                priv = s.imported.match ({
-                    true  => false,
-                    false => s.is_pub.match ({ true => false, false => true }),
-                })
-            })
-        })
-    })
-    priv
 }
 // flat import head `{ a, b } = mod` at line start `p`: every name must be exported by `mod`.
 vis_check_head = (a: MutPtr<Malloc>, path: string_view, src: string_view, p: i32, target: ModuleGraph, id: String, report: bool) i32 {
@@ -2375,7 +2397,7 @@ vis_check_head = (a: MutPtr<Malloc>, path: string_view, src: string_view, p: i32
                     true  => {
                         ie := src.res_ident_end(pos)
                         hd := a.mimport_head_name(src, pos, ie)
-                        target.symbols.vis_symbol_private(hd.gstr_finish(a)).then({
+                        target.sig.private(hd.gstr_finish(a)).then({
                             a.vis_fail(path, src, pos, ie - pos, a.mimport_name_span(src, pos, ie), id, report)
                         })
                         pos = ie
@@ -2493,7 +2515,7 @@ vis_scan_quals = (a: MutPtr<Malloc>, path: string_view, src: string_view, alias:
                                         true  => {
                                             me := src.res_ident_end(ie + 1)
                                             nm := a.mimport_name_span(src, ie + 1, me)
-                                            target.symbols.vis_symbol_private(nm.gstr_finish(a)).then({
+                                            target.sig.private(nm.gstr_finish(a)).then({
                                                 a.vis_fail(path, src, ie + 1, me - ie - 1, a.mimport_name_span(src, ie + 1, me), id, report)
                                             })
                                             pos = me
