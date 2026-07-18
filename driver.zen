@@ -19,7 +19,7 @@
 { genJsModuleIn } = compiler.genjs
 { pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, import_edges, seen_name, add_name } = std.internal.resolve
+{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, import_edges, seen_name, add_name, module_path } = std.internal.resolve
 say = (s: string_view) i64 {
     out(s).or(0)
     out("\n").or(0)
@@ -308,15 +308,9 @@ CacheWalk: {
     h: i64,
 }
 edges_of = (mp: MutPtr<Malloc>, src: string_view) [ImportEdge] { mp.import_edges(src).expect("zenc: cache probe: allocation failed") }
-// id "u/<name>" -> <progdir>/<name>.zen (sibling); anything else -> <root>/zen/<id>.zen — the same
-// mapping as the resolver's module_path.
-cache_module_path = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, id: string_view) string_view {
-    v: [u8] := id.view()
-    (v.len >= 2 && v[0] == 'u' && v[1] == '/').match ({
-        true  => push_prefix(mp.gstr_string(64).gstr_append(mp, progdir).gstr_push(mp, '/'), mp, v, 2, v.len).gstr_append(mp, ".zen").gstr_finish(mp),
-        false => mp.gstr_string(64).gstr_append(mp, root).gstr_append(mp, "/zen/").gstr_append(mp, id).gstr_append(mp, ".zen").gstr_finish(mp),
-    })
-}
+// id → file through the resolver's ONE exported module_path (the canonical ModuleId → path fn),
+// so the probe can never drift from the loader's mapping.
+cache_module_path = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, id: string_view) string_view { mp.module_path(root, progdir, mp.gstr_string(24).gstr_append(mp, id)) }
 cache_walk_one = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, id: string_view, st: CacheWalk) CacheWalk {
     idn := mp.gstr_string(24).gstr_append(mp, id)
     st.seen.seen_name(idn).match ({

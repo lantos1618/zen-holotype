@@ -135,10 +135,42 @@ gen_repeat = (mp: MutPtr<Malloc>, chunk: string_view, n: i32) string_view {
     }
     mp.finish_in(s).expect("harness: oom")
 }
-// fresh temp project dir, then every file written into it (paths are mod_dir + basename).
+// directory part of a project-relative file name ("app/utils.zen" → "app"; "" when flat) — dotted
+// module fixtures write NESTED files, so the writers mkdir the subdirectory first.
+file_dir_of = (mp: MutPtr<Malloc>, name: string_view) string_view {
+    cut := 0 - 1
+    v: [u8] := view(name)
+    v.loop((h, i, b) {
+        (b == '/').then({
+            cut = to_i32(i)
+        })
+    })
+    (cut < 0).match ({
+        true  => "",
+        false => {
+            s := mp.new_in().expect("harness: oom")
+            v.loop((h, i, b) {
+                (to_i32(i) < cut).then({
+                    s = s.push_in(mp, b).expect("harness: oom")
+                })
+            })
+            mp.finish_in(s).expect("harness: oom")
+        },
+    })
+}
+// ensure the subdirectory of `name` exists under the slash-terminated `dirslash` (no-op when flat).
+ensure_file_dir = (mp: MutPtr<Malloc>, dirslash: string_view, name: string_view) void {
+    d := mp.file_dir_of(name)
+    (is_empty(d) == false).then({
+        shell(mp.zo_cmd(mp.join3("mkdir -p ", dirslash, d)))
+    })
+}
+// fresh temp project dir, then every file written into it (paths are mod_dir + name, which may
+// carry a subdirectory — `app/utils.zen` — for dotted-module fixtures).
 write_files = (mp: MutPtr<Malloc>, files: [ModFile]) void {
     shell(mp.zo_cmd("rm -rf $ZT/zo_mods && mkdir -p $ZT/zo_mods"))
     files.loop((h, i, f) {
+        mp.ensure_file_dir(mp.mod_dir(), f.name)
         p := mp.join2(mp.mod_dir(), f.name)
         save(p, f.src, len(f.src))
     })
@@ -268,6 +300,7 @@ mod_write_files_id = (mp: MutPtr<Malloc>, gid: i64, files: [ModFile]) void {
     dir := mp.mod_dir_id(gid)
     shell(mp.zo_cmd(mp.join2(mp.join3("rm -rf ", dir, " && mkdir -p "), dir)))
     files.loop((h, i, f) {
+        mp.ensure_file_dir(mp.join2(dir, "/"), f.name)
         p := mp.join3(dir, "/", f.name)
         save(p, f.src, len(f.src))
     })
@@ -2050,7 +2083,88 @@ harness_modules_run* = () i32 {
     // check_all_parsed_modules + module_link_decls: validates EVERY module body against its import graph.
     //   Root-only check passes (main calls left.thing()), but left's internal helper.value(1) arity
     //   error is caught by the all-modules pass (> 0).
-    v + d + e + dc + sd + dl
+    // ── dotted USER module ids (module-system Stage B1) ──────────────────────────────────────────
+    // User ids form ONE flat progdir-rooted logical namespace: `app.utils` → <progdir>/app/utils.zen,
+    // and a dotted module names its own dependencies by FULL id from that same root (`app.core`),
+    // never relative to its own subdirectory. Namespace binds accept dotted ids too. Edge id/alias
+    // buffers are sized exactly, so ids/aliases longer than the old fixed 128/64-byte caps resolve
+    // without silent truncation. A missing nested file keeps the unknown-module error naming the
+    // attempted path, and `*` privacy is enforced unchanged for dotted modules.
+    dv := run_mod_values("modules value (dotted user module ids)", [ModValCase(
+        files: [ModFile(
+            name: "app/utils.zen",
+            src: "seven* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ seven } = app.utils\nmain = () i32 { seven() * 6 }\n",
+        )],
+        entry: "p.zen",
+        want: 42,
+    ), ModValCase(
+        files: [ModFile(
+            name: "app/core.zen",
+            src: "base* = () i32 { 40 }\n",
+        ), ModFile(
+            name: "app/utils.zen",
+            src: "{ base } = app.core\nseven* = () i32 { base() - 33 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ seven } = app.utils\nmain = () i32 { seven() * 6 }\n",
+        )],
+        entry: "p.zen",
+        want: 42,
+    ), ModValCase(
+        files: [ModFile(
+            name: "app/utils.zen",
+            src: "seven* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "u = app.utils\nmain = () i32 { u.seven() * 6 }\n",
+        )],
+        entry: "p.zen",
+        want: 42,
+    ), ModValCase(
+        files: [ModFile(
+            name: "verylongmodulename_abcdefghijklmnopqrstuvwxyz0123456789_abcdefghijklmnopqrstuvwxyz0123456789_abcdefghijklmnopqrstuvwxyz0123456789_end.zen",
+            src: "val* = () i32 { 21 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ val } = verylongmodulename_abcdefghijklmnopqrstuvwxyz0123456789_abcdefghijklmnopqrstuvwxyz0123456789_abcdefghijklmnopqrstuvwxyz0123456789_end\nmain = () i32 { val() * 2 }\n",
+        )],
+        entry: "p.zen",
+        want: 42,
+    ), ModValCase(
+        files: [ModFile(
+            name: "app/utils.zen",
+            src: "seven* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "averyveryveryveryveryveryveryveryveryveryverylongaliasname_0123456789_tail = app.utils\nmain = () i32 { averyveryveryveryveryveryveryveryveryveryverylongaliasname_0123456789_tail.seven() * 6 }\n",
+        )],
+        entry: "p.zen",
+        want: 42,
+    )])
+    dd := run_mod_verdicts("modules verdict (dotted user module ids)", [ModVerdictCase(
+        files: [ModFile(
+            name: "app/utils.zen",
+            src: "seven* = () i32 { 7 }\nhidden = () i32 { 9 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ hidden } = app.utils\nmain = () i32 { hidden() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[private-name]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "{ x } = app.nothere\nmain = () i32 { x() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "unknown module 'app.nothere' (no app/nothere.zen next to",
+    )])
+    v + d + e + dc + sd + dl + dv + dd
 }
 // ── deep-loader driver builders (paths injected at runtime) ──────────────────────────────────────
 // Each returns a full `zenc run` driver program with THIS run's mod_dir baked in as the progdir and

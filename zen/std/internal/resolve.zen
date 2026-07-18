@@ -49,10 +49,12 @@ resolve_span_eq = (s: string_view, p: i32, lit: string_view, i: i32) bool {
 is_std_marker_at = (s: string_view, p: i32) bool { s.resolve_span_eq(p, "= std.", 0) }
 is_compiler_marker_at = (s: string_view, p: i32) bool { s.resolve_span_eq(p, "= compiler.", 0) }
 is_marker_at = (s: string_view, p: i32) bool { s.is_std_marker_at(p) || s.is_compiler_marker_at(p) }
-// A user-module alias `name = sibling` — `= <ident>` whose RHS is a bare module name. The RHS must NOT be
-// a qualified path (`= pkg.mod`, caught by `!= '.'`) NOR a call (`= compute()`); without the `!= '('` guard
-// a value-global `pi = compute()` is mis-read as importing a module `compute` (spurious "unknown module").
-is_user_marker_at = (s: string_view, p: i32) bool { s.at(p) == '=' && s.at(p + 1) == ' ' && s.at(p + 2).is_alpha() && s.at(s.res_ident_end(p + 2)) != '.' && s.at(s.res_ident_end(p + 2)) != '(' }
+// A user-module marker `= sibling` or `= pkg.mod` — `= <dotted-ident-path>` naming a user module id.
+// `std.`/`compiler.` heads keep their own markers (excluded via `is_marker_at`). The RHS must NOT be
+// a call (`= compute()`; without the `!= '('` guard a value-global `pi = compute()` is mis-read as
+// importing a module `compute` — spurious "unknown module") NOR carry a trailing bare dot (`= a.`
+// stays a plain decl, exactly as before dotted user ids existed).
+is_user_marker_at = (s: string_view, p: i32) bool { s.at(p) == '=' && s.at(p + 1) == ' ' && s.at(p + 2).is_alpha() && s.at(s.dotted_path_end(p + 2)) != '.' && s.at(s.dotted_path_end(p + 2)) != '(' && s.is_marker_at(p) == false }
 is_any_marker_at = (s: string_view, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
 is_import_line* = (s: string_view, p: i32) bool {
     ls := s.lstrip(p)
@@ -267,14 +269,15 @@ module_name_pos = (s: string_view, p: i32) i32 {
         }),
     })
 }
-take_name = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
+// Copy a dotted module id (`utils.strings`) verbatim — alnum and interior dots (for messages).
+take_dotted = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     cur := out
     pos := p
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
         ii := to_i32(i)
         (ii < pos == false).then({
-            s.at(pos).is_alnum().match ({
+            (s.at(pos).is_alnum() || s.at(pos) == '.').match ({
                 true  => {
                     cur = cur.rpush(a, s.at(pos))
                     pos = pos + 1
@@ -329,7 +332,7 @@ import_id = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
             false => s.is_user_marker_at(p).match ({
                 true  => {
                     base := cur.rappend(a, "u/")
-                    cur = base.take_name(a, s, p + USER_MARKER_LEN)
+                    cur = base.take_module_path(a, s, p + USER_MARKER_LEN)
                 },
                 false => {
                     cur = cur.import_id(a, s, p + 1)
@@ -460,7 +463,7 @@ mappend_id_name = (a: MutPtr<Malloc>, out: String, id: String) String {
     cur := out
     id.id_is_user().match ({
         true  => {
-            cur = a.mcopy_from(cur, id, 2)
+            cur = a.mcopy_id_dotted(cur, id, 2)
         },
         false => {
             cur = a.mcopy_id_dotted(cur, id, 0)
@@ -600,13 +603,14 @@ ParsedProgram*: {
         found
     }
 }
-ModuleCount: {
+// One-pass DFS loader state: `entries[0..n)` is the table so far (entry 0 = root, then DFS
+// import-edge preorder), `seen` the id dedup set. The buffer grows geometrically, so each
+// dependency is read from disk and symbol-scanned exactly ONCE (the old shape ran a counting
+// pass that read+scanned every dep, then a fill pass that read+scanned them all AGAIN).
+ModuleLoad: {
     seen: String,
-    count: i32,
-}
-ModuleFill: {
-    seen: String,
-    next: i32,
+    entries: [ModuleEntry],
+    n: i64,
 }
 exit = (code: i32) i32
 eprint = (s: string_view) i64 {
@@ -645,7 +649,7 @@ append_id_name = (out: String, a: MutPtr<Malloc>, id: String) String {
     cur := out
     id.id_is_user().match ({
         true  => {
-            cur = cur.rcopy_from(a, id, 2)
+            cur = cur.copy_id_dotted(a, id, 2)
         },
         false => {
             cur = cur.copy_id_dotted(a, id, 0)
@@ -689,11 +693,6 @@ fail_unknown_module = (a: MutPtr<Malloc>, inpath: string_view, id: String, path:
     exit(1)
     0
 }
-// ── DOTTED LOCAL IMPORT GUARD ──────────────────────────────────────────────────────────────────
-// `{ help } = util.helpers` matches NO marker: it isn't `= std.`/`= compiler.`, and the sibling
-// marker requires a bare name (no dot). The line was silently skipped by the loader, the checker
-// trusted the imported names, and the build died at link ("undefined reference to `help`") behind
-// the compiler-bug banner. Catch the shape up front and tell the real story instead.
 // end of a dotted module path (`util.helpers`) whose first identifier starts at `p`.
 dotted_path_end = (s: string_view, p: i32) i32 {
     e := s.res_ident_end(p)
@@ -701,58 +700,6 @@ dotted_path_end = (s: string_view, p: i32) i32 {
         true  => s.dotted_path_end(e + 1),
         false => e,
     })
-}
-// `= <ident>.<ident>…` where the head segment is neither `std` nor `compiler`.
-is_dotted_user_marker_at = (s: string_view, p: i32) bool {
-    (s.at(p) == '=' && s.at(p + 1) == ' ' && s.at(p + 2).is_alpha() && s.at(s.res_ident_end(p + 2)) == '.' && s.at(s.res_ident_end(p + 2) + 1).is_alpha()).match ({
-        true  => s.is_marker_at(p).match ({ true => false, false => true }),
-        false => false,
-    })
-}
-dotted_marker_after = (s: string_view, p: i32) i32 {
-    (s.at(p) == ' ').match ({
-        true  => s.dotted_marker_after(p + 1),
-        false => s.is_dotted_user_marker_at(p).match ({ true => p, false => 0 - 1 }),
-    })
-}
-// within ONE line: position of a `= a.b` marker after the import's closing `}`, else -1.
-dotted_marker_from = (s: string_view, p: i32) i32 {
-    b := s.at(p)
-    (b == 0 || b == '\n').match ({
-        true  => 0 - 1,
-        false => (b == '}').match ({
-            true  => s.dotted_marker_after(p + 1),
-            false => s.dotted_marker_from(p + 1),
-        }),
-    })
-}
-fail_dotted_import = (a: MutPtr<Malloc>, inpath: string_view, src: string_view, p: i32) i32 {
-    e := src.dotted_path_end(p)
-    msg := a.gstr_string(256).gstr_append(a, "zenc: ").gstr_append(a, inpath).gstr_append(a, ": error: no module '")
-    m2 := msg.rappend_span(a, src, p, e).gstr_append(a, "' (local imports name a single sibling file: `{ f } = helper` loads helper.zen next to ").gstr_append(a, inpath).gstr_append(a, "; only std/compiler modules use dotted paths, e.g. `std.text.fmt`)")
-    line := m2.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
-}
-scan_dotted_imports = (a: MutPtr<Malloc>, inpath: string_view, src: string_view) i32 {
-    pos := 0
-    bs: [u8] := src.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < pos == false).then({
-            ls := src.lstrip(pos)
-            mk := src.opens_import(ls).match ({
-                true  => src.dotted_marker_from(ls),
-                false => 0 - 1,
-            })
-            (mk >= 0).then({
-                a.fail_dotted_import(inpath, src, mk + 2)
-            })
-            pos = src.next_line(pos)
-        })
-    })
-    0
 }
 fail_unreadable = (a: MutPtr<Malloc>, inpath: string_view, path: string_view) string_view {
     msg := a.gstr_string(160).gstr_append(a, "zenc: ").gstr_append(a, inpath).gstr_append(a, ": error: cannot read module file ")
@@ -765,10 +712,7 @@ fail_unreadable = (a: MutPtr<Malloc>, inpath: string_view, path: string_view) st
 read_module_file = (a: MutPtr<Malloc>, path: string_view) Result<string_view, IoError> { a.contents_in(path) }
 read_module = (a: MutPtr<Malloc>, inpath: string_view, path: string_view) string_view {
     a.read_module_file(path).match ({
-        .Ok(s)  => {
-            a.scan_dotted_imports(path, s)
-            s
-        },
+        .Ok(s)  => s,
         .Err(e) => a.fail_unreadable(inpath, path),
     })
 }
@@ -803,8 +747,8 @@ edge_buf<A> = (a: MutPtr<A>, n: i64) Result<[ImportEdge], IoError> {
         .Err(e) => err(e),
     })
 }
-EDGE_MODULE_CAP := 128
-EDGE_ALIAS_CAP := 64
+// Edge id/alias buffers are sized EXACTLY (measure, then allocate): a module id or namespace alias
+// of any length round-trips — the old fixed 128/64-byte caps silently truncated long ids.
 copy_lit_to = (buf: RawPtr<u8>, start: i64, lit: string_view, cap: i64) i64 {
     cur := start
     bs: [u8] := lit.view()
@@ -881,32 +825,55 @@ write_import_id_at = (buf: RawPtr<u8>, s: string_view, p: i32, cap: i64) i64 {
         false => s.is_compiler_marker_at(p).match ({
             true  => buf.copy_module_path_to(buf.copy_lit_to(0, "compiler/", cap), s, p + COMPILER_MARKER_LEN, cap),
             false => s.is_user_marker_at(p).match ({
-                true  => buf.copy_name_to(buf.copy_lit_to(0, "u/", cap), s, p + USER_MARKER_LEN, cap),
+                true  => buf.copy_module_path_to(buf.copy_lit_to(0, "u/", cap), s, p + USER_MARKER_LEN, cap),
                 false => 0,
             }),
         }),
     })
 }
-import_id_alloc<A> = (a: MutPtr<A>, s: string_view, p: i32) Result<string_view, IoError> {
-    a.try_acquire(EDGE_MODULE_CAP).match ({
-        .Ok(buf) => {
-            pos := p
-            out: i64 := 0
-            bs: [u8] := s.view()
-            bs.loop((h, i, b) {
-                ii := to_i32(i)
-                (ii < pos == false).then({
-                    out = buf.write_import_id_at(s, pos, EDGE_MODULE_CAP)
-                    (out > 0).match ({
-                        true  => {
-                            h.break
-                        },
-                        false => {
-                            pos = pos + 1
-                        },
-                    })
-                })
+// First position at/after `p` where an import/ns marker (`= std.` / `= compiler.` / `= <user-id>`)
+// starts. Callers only pass lines already classified as import/ns lines, so a marker exists on the
+// line; the scan is a loop, constant stack.
+marker_pos = (s: string_view, p: i32) i32 {
+    pos := p
+    bs: [u8] := s.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos == false).then({
+            s.is_any_marker_at(pos).match ({
+                true  => {
+                    h.break
+                },
+                false => {
+                    pos = pos + 1
+                },
             })
+        })
+    })
+    pos
+}
+// End of the module-path span starting at `p`: alnum and '.' bytes (mirrors copy_module_path_to).
+module_path_span_end = (s: string_view, p: i32) i32 { (s.at(p).is_alnum() || s.at(p) == '.').match ({
+    true  => s.module_path_span_end(p + 1),
+    false => p,
+}) }
+// Exact byte length of the id written for the marker at `mk` — prefix plus module-path span. This
+// is what makes edge-id allocation exact: no cap, no silent truncation, ids of any length resolve.
+import_id_len_at = (s: string_view, mk: i32) i64 {
+    s.is_std_marker_at(mk).match ({
+        true  => 4 + to_i64(s.module_path_span_end(mk + STD_MARKER_LEN) - (mk + STD_MARKER_LEN)),
+        false => s.is_compiler_marker_at(mk).match ({
+            true  => 9 + to_i64(s.module_path_span_end(mk + COMPILER_MARKER_LEN) - (mk + COMPILER_MARKER_LEN)),
+            false => 2 + to_i64(s.module_path_span_end(mk + USER_MARKER_LEN) - (mk + USER_MARKER_LEN)),
+        }),
+    })
+}
+import_id_alloc<A> = (a: MutPtr<A>, s: string_view, p: i32) Result<string_view, IoError> {
+    mk := s.marker_pos(p)
+    cap := s.import_id_len_at(mk) + 1
+    a.try_acquire(cap).match ({
+        .Ok(buf) => {
+            out := buf.write_import_id_at(s, mk, cap)
             buf.offset(out).store(0)
             ok(cstr(buf))
         },
@@ -914,10 +881,11 @@ import_id_alloc<A> = (a: MutPtr<A>, s: string_view, p: i32) Result<string_view, 
     })
 }
 ns_qualifier_alloc<A> = (a: MutPtr<A>, s: string_view, p: i32) Result<string_view, IoError> {
-    a.try_acquire(EDGE_ALIAS_CAP).match ({
+    ls := s.lstrip(p)
+    cap := to_i64(s.res_ident_end(ls) - ls) + 1
+    a.try_acquire(cap).match ({
         .Ok(buf) => {
-            ls := s.lstrip(p)
-            out := buf.copy_name_to(0, s, ls, EDGE_ALIAS_CAP)
+            out := buf.copy_name_to(0, s, ls, cap)
             buf.offset(out).store(0)
             ok(cstr(buf))
         },
@@ -1043,7 +1011,16 @@ fail_no_progdir = (a: MutPtr<Malloc>, inpath: string_view, id: String) i32 {
     exit(1)
     0
 }
-module_path = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, id: String) string_view {
+// ── CANONICAL ModuleId → path ────────────────────────────────────────────────────────────────
+// THE one id→file mapping — every id→path decision (table build, closure load, the driver's cache
+// probe) goes through here; it is the future Stage-B World key, so it stays pure (no IO).
+//   std/… , compiler/…      → <root>/zen/<id>.zen                    (repo tree, unchanged)
+//   u/<seg>[/<seg>…]        → <progdir>/<seg>[/<seg>…].zen
+// USER ids form ONE flat progdir-rooted logical namespace: source id `utils.strings` is internal id
+// `u/utils/strings` → <progdir>/utils/strings.zen, where progdir is the ENTRY PROGRAM's directory.
+// A user module in a subdirectory names its own dependencies by full dotted id from that same root
+// (`utils.helpers`, never a relative/implicit sibling) — one registered source root, no ambiguity.
+module_path* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, id: String) string_view {
     out := a.gstr_string(64)
     id.id_is_user().match ({
         true  => {
@@ -1068,39 +1045,26 @@ guard_module = (a: MutPtr<Malloc>, progdir: string_view, inpath: string_view, id
     })
     file_exists(path).match ({ true => 0, false => a.fail_unknown_module(inpath, id, path) })
 }
-module_count_one = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, id: String, st: ModuleCount) ModuleCount {
-    st.seen.seen_name(id).match ({
-        true  => st,
-        false => {
-            path := a.module_path(root, progdir, id)
-            a.guard_module(progdir, inpath, id, path)
-            src := a.read_module(inpath, path)
-            // counting only follows IMPORT edges — skip the (expensive) provided-symbol scan the full
-            // module_graph would also run; the fill pass builds the real graph for each module once.
-            edges := a.import_edges(src).expect("std.internal.resolve: allocation failed")
-            next := ModuleCount(
-                seen: st.seen.add_name(a, id),
-                count: st.count + 1,
-            )
-            a.module_count_edges(root, progdir, inpath, edges, next)
-        },
-    })
-}
-module_count_edges = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, edges: [ImportEdge], st: ModuleCount) ModuleCount {
-    cur := st
-    edges.loop((h, i, edge) {
-        cur = a.module_count_one(root, progdir, inpath, edge.edge_id_in(a), cur)
-    })
-    cur
-}
-module_table_count_graph = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, graph: ModuleGraph) i32 {
-    a.module_count_edges(root, progdir, inpath, graph.imports, ModuleCount(
-        seen: a.gstr_string(256),
-        count: 1,
-    )).count
-}
 module_entry_buf = (a: MutPtr<Malloc>, n: i64) [ModuleEntry] { slice(a.acquire(n * sizeof(ModuleEntry)), n) }
-fill_module_one = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, id: String, out: [ModuleEntry], st: ModuleFill) ModuleFill {
+// Append an entry, doubling the buffer when full (DFS preorder is preserved: an entry is pushed
+// BEFORE its own import edges are followed, exactly the order the old fill pass wrote).
+mload_push = (a: MutPtr<Malloc>, st: ModuleLoad, e: ModuleEntry) ModuleLoad {
+    buf := st.entries
+    (st.n >= buf.len).then({
+        grown := a.module_entry_buf(buf.len * 2)
+        buf.loop((h, i, m) {
+            grown[i] = m
+        })
+        buf = grown
+    })
+    buf[st.n] = e
+    ModuleLoad(
+        seen: st.seen,
+        entries: buf,
+        n: st.n + 1,
+    )
+}
+fill_module_one = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, id: String, st: ModuleLoad) ModuleLoad {
     st.seen.seen_name(id).match ({
         true  => st,
         false => {
@@ -1108,41 +1072,39 @@ fill_module_one = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, i
             a.guard_module(progdir, inpath, id, path)
             src := a.read_module(inpath, path)
             graph := a.module_graph(src)
-            next_seen := st.seen.add_name(a, id)
-            out[st.next] = ModuleEntry(
+            next := a.mload_push(ModuleLoad(
+                seen: st.seen.add_name(a, id),
+                entries: st.entries,
+                n: st.n,
+            ), ModuleEntry(
                 id: id.gstr_finish(a),
                 path: path,
                 source: src,
                 graph: graph,
-            )
-            next := ModuleFill(
-                seen: next_seen,
-                next: st.next + 1,
-            )
-            a.fill_module_edges(root, progdir, inpath, graph.imports, out, next)
+            ))
+            a.fill_module_edges(root, progdir, inpath, graph.imports, next)
         },
     })
 }
-fill_module_edges = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, edges: [ImportEdge], out: [ModuleEntry], st: ModuleFill) ModuleFill {
+fill_module_edges = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, edges: [ImportEdge], st: ModuleLoad) ModuleLoad {
     cur := st
     edges.loop((h, i, edge) {
-        cur = a.fill_module_one(root, progdir, inpath, edge.edge_id_in(a), out, cur)
+        cur = a.fill_module_one(root, progdir, inpath, edge.edge_id_in(a), cur)
     })
     cur
 }
 module_table_graph* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, mainsrc: string_view, graph: ModuleGraph) ModuleTable {
-    entries := a.module_entry_buf(a.module_table_count_graph(root, progdir, inpath, graph))
-    entries[0] = ModuleEntry(
+    st := a.fill_module_edges(root, progdir, inpath, graph.imports, a.mload_push(ModuleLoad(
+        seen: a.gstr_string(256),
+        entries: a.module_entry_buf(8),
+        n: 0,
+    ), ModuleEntry(
         id: "",
         path: inpath,
         source: mainsrc,
         graph: graph,
-    )
-    a.fill_module_edges(root, progdir, inpath, graph.imports, entries, ModuleFill(
-        seen: a.gstr_string(256),
-        next: 1,
-    ))
-    ModuleTable(modules: entries)
+    )))
+    ModuleTable(modules: slice(st.entries.ptr, st.n))
 }
 module_table* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, mainsrc: string_view) ModuleTable {
     graph := a.module_graph(mainsrc)
@@ -1723,7 +1685,7 @@ fui_scan = (out: String, a: MutPtr<Malloc>, src: string_view, p: i32) String {
                         mk := src.import_marker_from(src.lstrip(pos))
                         src.is_user_marker_at(mk).match ({
                             true  => {
-                                cur = cur.take_name(a, src, mk + USER_MARKER_LEN)
+                                cur = cur.take_dotted(a, src, mk + USER_MARKER_LEN)
                                 done = true
                                 h.break
                             },
@@ -3104,7 +3066,6 @@ check_alias_collisions = (a: MutPtr<Malloc>, table: ModuleTable, graph: ModuleGr
 resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, mainsrc: string_view) ResolvedProgram {
     a.alias_prefixes_reset()    // fresh per program: the checker's UFCS-alias set is exactly the aliases stamped below
     a.uregions_reset()    // fresh per program: user-module body spans recorded during closure load
-    a.scan_dotted_imports(inpath, mainsrc)
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
     a.enforce_visibility(table, vis_report_mode())
