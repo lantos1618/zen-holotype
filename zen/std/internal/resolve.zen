@@ -479,16 +479,20 @@ madd_str_name = (a: MutPtr<Malloc>, set: String, name: string_view) String {
     hs := set.gstr_append(a, name)
     hs.gstr_push(a, 10)
 }
+// `useen` is the cross-module duplicate-definition map: dedup key → table index of the module that
+// FIRST provided that name (so a later redefinition names BOTH modules in the diagnostic). An O(1)
+// import-map replacing the old newline-delimited `key\tORIGIN` String and its linear rescans.
 Closure*: {
     seen: String,
     out: String,
-    useen: String,
+    useen: Map<i64>,
 }
 empty_closure = (a: MutPtr<Malloc>) Closure {
+    seed: i64 := 0 - 1
     Closure(
         seen: a.gstr_string(256),
         out: a.gstr_string(4096),
-        useen: a.gstr_string(64),
+        useen: of(a, "", seed).expect("std.internal.resolve: useen alloc"),
     )
 }
 ImportEdge*: {
@@ -1181,7 +1185,7 @@ load_closure_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view
             entry := table.module_id(id)
             graph := entry.graph
             u2 := id.id_is_user().match ({
-                true  => a.user_decls_from_symbols(c.useen, graph.symbols, 0, id, inpath),
+                true  => a.user_decls_from_symbols(c.useen, graph.symbols, 0, table, id, inpath),
                 false => c.useen,
             })
             c2 := Closure(
@@ -1690,62 +1694,29 @@ check_head = (src: string_view, a: MutPtr<Malloc>, p: i32, provided: ModuleSig, 
     })
     0
 }
-// `useen` entries are `key\tORIGIN_ID\n`: the dedup key plus the id of the module that FIRST
-// provided that name, so a later redefinition can name BOTH modules in the diagnostic. Only
-// user_symbol_seen reads/writes useen, so this richer format stays internal to these helpers.
-useen_key_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
-    (j == m).match ({
-        true  => set.res_sbyte(i) == '\t',
-        false => (set.res_sbyte(i) == name.res_sbyte(j)).match ({
-            true  => set.useen_key_eq(i + 1, name, j + 1, m),
-            false => false,
-        }),
-    })
-}
-useen_tab = (set: String, i: i64) i64 {
-    (i >= set.len || set.res_sbyte(i) == '\n').match ({
-        true  => i,
-        false => (set.res_sbyte(i) == '\t').match ({ true => i + 1, false => set.useen_tab(i + 1) }),
-    })
-}
-useen_line_origin = (out: String, a: MutPtr<Malloc>, set: String, i: i64) String {
-    (i >= set.len || set.res_sbyte(i) == '\n').match ({
-        true  => out,
-        false => out.rpush(a, set.res_sbyte(i)).useen_line_origin(a, set, i + 1),
-    })
-}
-// Origin id of `key` in `useen`, or an empty String if `key` has not been registered yet.
-useen_origin = (a: MutPtr<Malloc>, useen: String, key: String, i: i64) String {
-    (i >= useen.len).match ({
-        true  => a.gstr_string(1),
-        false => useen.useen_key_eq(i, key, 0, key.len).match ({
-            true  => useen_line_origin(a.gstr_string(24), a, useen, useen.useen_tab(i)),
-            false => a.useen_origin(useen, key, useen.snext_line(i)),
-        }),
-    })
-}
-useen_add = (a: MutPtr<Malloc>, useen: String, key: String, id: String) String { useen.rappend_string(a, key).rpush(a, '\t').rappend_string(a, id).rpush(a, 10) }
-user_symbol_seen = (a: MutPtr<Malloc>, useen: String, s: ProvidedSymbol, id: String, inpath: string_view) String {
+// Register one module-defined symbol in `useen` (key → origin table index); a key already present
+// is a cross-module duplicate — fail naming BOTH the redefining module and the first provider.
+user_symbol_seen = (a: MutPtr<Malloc>, useen: Map<i64>, s: ProvidedSymbol, table: ModuleTable, id: String, inpath: string_view) Map<i64> {
     key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
-    origin := a.useen_origin(useen, key, 0)
-    (origin.len > 0).match ({
-        true  => a.fail_dup_user(inpath, id, s.symbol_name_in(a), origin),
-        false => 0,
+    kv := cstr(key.ptr)
+    prev := useen.get(kv, 0 - 1)
+    (prev >= 0).then({
+        origin := a.gstr_string(24).gstr_append(a, table.modules[prev].id)
+        a.fail_dup_user(inpath, id, s.symbol_name_in(a), origin)
     })
-    a.useen_add(useen, key, id)
+    useen.put(a, kv, table.index_of_id(id)).expect("std.internal.resolve: useen alloc")
 }
-user_decls_from_symbols = (a: MutPtr<Malloc>, useen: String, symbols: [ProvidedSymbol], i: i64, id: String, inpath: string_view) String {
+user_decls_from_symbols = (a: MutPtr<Malloc>, useen: Map<i64>, symbols: [ProvidedSymbol], i: i64, table: ModuleTable, id: String, inpath: string_view) Map<i64> {
     cur := useen
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
-                cur = a.user_symbol_seen(cur, sym, id, inpath)
+                cur = a.user_symbol_seen(cur, sym, table, id, inpath)
             })
         })
     })
     cur
 }
-user_decls_into = (a: MutPtr<Malloc>, useen: String, src: string_view, p: i32, id: String, inpath: string_view) String { a.user_decls_from_symbols(useen, a.module_graph(src).symbols, 0, id, inpath) }
 first_user_import_in* = (a: MutPtr<Malloc>, src: string_view) string_view {
     hs := fui_scan(a.gstr_string(16), a, src, 0)
     hs.gstr_finish(a)
