@@ -33,7 +33,7 @@ GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zenc regen clean harness harness-fast docs-check setup-git resolve-seed
+.PHONY: zenc regen clean harness harness-fast difftest docs-check setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -78,6 +78,16 @@ harness: zenc
 #   make -f bootstrap/Makefile harness-fast
 harness-fast: zenc
 	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
+
+# Differential gate (module-system campaign): compare two zenc binaries over the whole fixture +
+# example + dispatch corpus — check stdout/stderr/exit, emitted C bytes, run exit/stdout. Diffs not
+# listed in scripts/difftest-allow.txt fail the target. Defaults compare the built compiler with
+# itself (a self-consistency smoke); point OLD at a saved baseline for the real gate:
+#   make -f bootstrap/Makefile difftest OLD=/tmp/zenc-b4-baseline
+OLD ?= $(ZENC)
+NEW ?= $(ZENC)
+difftest: zenc
+	cd $(ROOT) && ./scripts/difftest.sh $(OLD) $(NEW)
 
 docs-check:
 	cd $(ROOT) && ./scripts/check-docs.sh
