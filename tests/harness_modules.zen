@@ -564,6 +564,16 @@ harness_modules_run* = () i32 {
         want: 42,
     ), ModValCase(
         files: [ModFile(
+            name: "libm.zen",
+            src: "{ println } = std.text.fmt\nlen* = (s: string_view) i64 { 7 }\nrun2* = (s: string_view) i64 { len(s) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ run2 } = libm\nmain = () i32 { to_i32(run2(\"ab\")) }\n",
+        )],
+        entry: "p.zen",
+        want: 7,
+    ), ModValCase(
+        files: [ModFile(
             name: "m1.zen",
             src: "one* = () i32 { 1 }\n",
         ), ModFile(
@@ -1463,6 +1473,25 @@ harness_modules_run* = () i32 {
         needle: "",
     ), ModVerdictCase(
         files: [ModFile(
+            name: "lsh.zen",
+            src: "{ println } = std.text.fmt\nlen* = (s: string_view) i64 { 9 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ len } = lsh\nmain = () i32 { to_i32(len(\"xy\")) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[dup-fn]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "{ len } = std.text.str\nlen = (s: string_view) i64 { 9 }\nmain = () i32 { to_i32(len(\"a\")) }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "p.zen:2:1: error[dup-fn]",
+    ), ModVerdictCase(
+        files: [ModFile(
             name: "p.zen",
             src: "{ println } = std.text.fmt\n{ Rc } = std.mem.rc\nmain = () i32 { 0 }\n",
         )],
@@ -1781,6 +1810,13 @@ harness_modules_run* = () i32 {
     // the checker-path dup-fn diagnostic NAMES the colliding symbol (the resolver's rich
     // fail_dup_user only covers imported-user-module vs imported-user-module) and anchors
     // file:line:col at the LATER definition in flat order.
+    // NON-MAIN user modules get the SAME shadow protection (per-module `zshadowN__name` regions):
+    // a library module whose own `len` collides with an unimported transitive std export keeps its
+    // decl — see the `libm`/`run2` VALUE case above (7, not std strlen's 2). Two edges stay LOUD,
+    // never silent: another module importing the shadowed name BY NAME from the library rejects
+    // with error[dup-fn] (the rename would misbind the importer), and import-then-redefine in ONE
+    // module rejects with error[dup-fn] anchored at the USER's definition line (p.zen:2:1), naming
+    // the import — not at the library decl the flat order happens to put later.
     // ENTRY-vs-DEP name collisions no longer reject: an entry decl whose name is ALSO defined by a
     // dependency the entry never imported BY NAME is shadow-renamed at flatten (`zshadow__name`), so the
     // entry keeps its own decl and the dep keeps its own — see the two should_pass:true cases above and the

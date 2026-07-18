@@ -1165,7 +1165,11 @@ load_closure_table = (a: MutPtr<Malloc>, table: ModuleTable, inpath: string_view
             )
             c3 := a.load_import_graph_table(table, inpath, entry.source, graph, id.id_is_user(), c2)
             ns := a.collect_ns_graph_table(table, inpath, entry.source, graph, a.ns_scan(c3))
+            blo := ns.c.out.len
             body := ns.c.out.strip_ns_into(a, entry.source, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, false)
+            id.id_is_user().then({
+                note_uregion(entry.id, blo, body.len)
+            })
             Closure(
                 seen: ns.c.seen,
                 out: body,
@@ -2544,14 +2548,23 @@ enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 
 // Only fires for USER programs (never internal sources → seed unchanged) and only when it is provably
 // safe (see shadow_rename_set). check_module never sees two same-named decls, so no dup-fn fires.
 shadow_alias_of = (a: MutPtr<Malloc>) String { a.gstr_string(16).gstr_append(a, "zshadow") }
-shadow_mangled = (a: MutPtr<Malloc>, name: String) String { a.gstr_string(name.len + 10).gstr_append(a, "zshadow__").rappend_string(a, name) }
-// The set of user-body value-decl names to rename. A name qualifies iff it is a value decl (not a type,
-// not an import binding) defined EXACTLY ONCE in the user body [lo,hi) (a name defined twice is a real
-// user-vs-user dup → keep the error), whose name ALSO exists as a non-imported value decl OUTSIDE the
-// body (the transitive/std export), that the user did NOT import by name, and whose mangled form is not
-// already taken (else fall back to the dup-fn error rather than silently rebind).
-shadow_rename_set = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], mainsrc: string_view, lo: i64, hi: i64) String {
-    imported := a.imported_value_name_set(a.rset_new(), a.module_graph(mainsrc).symbols)
+// per-region alias for USER-MODULE renames: `zshadow0`, `zshadow1`, … — the region index keeps two
+// modules that shadow the SAME std name (each defining its own `len`) from colliding on one mangled form.
+shadow_alias_idx = (a: MutPtr<Malloc>, idx: i64) String { a.gstr_string(20).gstr_append(a, "zshadow").res_udec(a, to_i32(idx)) }
+shadow_mangled = (a: MutPtr<Malloc>, alias: String, name: String) String { a.gstr_string(alias.len + name.len + 4).rappend_string(a, alias).rappend(a, "__").rappend_string(a, name) }
+// the renameable set plus its unrenameable remainder (see shadow_name_sets).
+ShadowSets: {
+    ren: String,
+    bad: String,
+}
+// The sets of module-body value-decl names for the region [lo,hi). `ren` — the names to rename — holds
+// each name that is a value decl (not a type, not an import binding) defined EXACTLY ONCE in the region
+// (a name defined twice is a real user-vs-user dup → keep the error), whose name ALSO exists as a
+// non-imported value decl OUTSIDE the region (the transitive/std export), that the module did NOT import
+// by name, and whose mangled form is not already taken. `bad` holds the colliding names whose mangled
+// form IS taken — those cannot be renamed, and silence is never allowed, so region callers fail loudly.
+shadow_name_sets = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], modsrc: string_view, lo: i64, hi: i64, alias: String) ShadowSets {
+    imported := a.imported_value_name_set(a.rset_new(), a.module_graph(modsrc).symbols)
     allnames := a.value_symbol_name_set(a.rset_new(), syms)
     mainseen := a.rset_new()
     maindup := a.rset_new()
@@ -2576,6 +2589,7 @@ shadow_rename_set = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], mainsrc: string_
     })
     // `out` stays the newline-delimited String the rewrite consumes; `outset` is its O(1) `fresh` mirror.
     out := a.gstr_string(64)
+    bad := a.gstr_string(16)
     outset := a.rset_new()
     syms.loop((h, i, s) {
         ((s.imported || s.foreign || s.is_type) == false).then({
@@ -2586,19 +2600,29 @@ shadow_rename_set = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], mainsrc: string_
                 false => true,
             })
             unimported := imported.rset_has(key).match ({ true => false, false => true })
-            free := allnames.rset_has(a.shadow_mangled(key)).match ({
+            free := allnames.rset_has(a.shadow_mangled(alias, key)).match ({
                 true  => false,
                 false => true,
             })
             fresh := outset.rset_has(key).match ({ true => false, false => true })
-            (inmain && once && nonmain.rset_has(key) && unimported && free && fresh).then({
+            collide := inmain && once && nonmain.rset_has(key) && unimported
+            (collide && free && fresh).then({
                 out = a.madd_name(out, key)
                 outset = outset.rset_add(a, key)
             })
+            (collide && free == false).then({
+                bad = a.madd_name(bad, key)
+            })
         })
     })
-    out
+    ShadowSets(
+        ren: out,
+        bad: bad,
+    )
 }
+// main-body form: the historical entry point (alias `zshadow`, unrenameable remainder ignored — a
+// kept main-body dup still surfaces as the checker's dup-fn).
+shadow_rename_set = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], mainsrc: string_view, lo: i64, hi: i64) String { a.shadow_name_sets(syms, mainsrc, lo, hi, a.shadow_alias_of()).ren }
 ShadowFlat*: {
     flat: string_view,
     bodyend: i64,
@@ -2634,6 +2658,234 @@ shadow_flat = (a: MutPtr<Malloc>, pre: string_view, presyms: [ProvidedSymbol], m
             renamed: false,
         ),
     })
+}
+// ── USER-MODULE region registry ─────────────────────────────────────────────────────────────────
+// The main-body guard above only protects decls in [nsl, bodyend) — a NON-MAIN user module whose own
+// top-level decl collides with an unimported transitive std export used to lose that decl SILENTLY
+// (dedup keeps the FIRST occurrence, and dependency bodies precede the module's own). Each user
+// module's stripped body span in the append-only flat is recorded here during closure load, so
+// shadow_flat_users can run the same guarded rename per module. Reset per program (see
+// alias_prefixes_reset for the pattern); internal builds never read it (enable=false → seed unchanged).
+UserRegion: {
+    id: string_view,
+    lo: i64,
+    hi: i64,
+}
+UREGION_CAP := 512
+no_uregions = () [UserRegion] { slice(null_ptr(), 0) }
+uregion_buf := no_uregions()
+uregion_n := 0
+uregions_reset = (a: MutPtr<Malloc>) void {
+    uregion_buf = slice(a.acquire(UREGION_CAP * sizeof(UserRegion)), UREGION_CAP)
+    uregion_n = 0
+}
+note_uregion = (id: string_view, lo: i64, hi: i64) void {
+    (uregion_n < uregion_buf.len).then({
+        uregion_buf[uregion_n] = UserRegion(
+            id: id,
+            lo: lo,
+            hi: hi,
+        )
+        uregion_n = uregion_n + 1
+    })
+}
+uregions_get = () [UserRegion] { slice(uregion_buf.ptr, uregion_n) }
+// name-decl offset of `nm` in a module's ORIGINAL source graph (for error line/col attribution).
+symbol_start_of = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: string_view) i32 {
+    posn := 0
+    syms.loop((h, i, s) {
+        ((s.imported || s.foreign || s.is_type) == false && posn == 0).then({
+            key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+            eq(cstr(key.ptr), nm).then({
+                posn = s.start
+            })
+        })
+    })
+    posn
+}
+// does the import head `{ a, b, … }` starting at edge offset `p0` bind `nm` by name?
+edge_head_has_name = (src: string_view, p0: i32, nm: string_view) bool {
+    found := false
+    pos := src.lstrip(p0) + 1
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos == false).then({
+            (b == '}' || b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => b.is_alpha().match ({
+                    true  => {
+                        ie := src.res_ident_end(pos)
+                        src.span_eq_name(pos, ie, nm).then({
+                            found = true
+                        })
+                        pos = ie
+                    },
+                    false => {
+                        pos = pos + 1
+                    },
+                }),
+            })
+        })
+    })
+    found
+}
+// error[dup-fn], anchored at the USER module's own definition: the decl collides with an unimported
+// closure export AND another module imports it from here by name — renaming would silently misbind
+// the importer, and dropping either copy is silent misbinding too, so reject loudly with the fix.
+fail_shadow_import = (a: MutPtr<Malloc>, entry: ModuleEntry, importer: string_view, nm: string_view) i32 {
+    pos := a.symbol_start_of(entry.graph.symbols, nm)
+    line := entry.source.res_line_of(pos)
+    col := entry.source.res_col_of(pos)
+    m0 := a.gstr_string(320).gstr_append(a, "zenc: ").gstr_append(a, entry.path).gstr_push(a, ':').res_udec(a, line).gstr_push(a, ':').res_udec(a, col).gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `").gstr_append(a, nm).gstr_push(a, '`')
+    l1 := m0.gstr_push(a, 10)
+    d0 := l1.gstr_append(a, "  `").gstr_append(a, nm).gstr_append(a, "` also exists in this module's import closure (an export it never imported by name), and `")
+    d1 := eq(importer, "").match ({
+        true  => d0.gstr_append(a, "your program"),
+        false => a.mappend_id_str_dotted(d0, importer),
+    })
+    d2 := d1.gstr_append(a, "` imports `").gstr_append(a, nm).gstr_append(a, "` from this module — the definition cannot be shadow-renamed")
+    l2 := d2.gstr_push(a, 10)
+    h0 := l2.gstr_append(a, "hint: rename `").gstr_append(a, nm).gstr_append(a, "`, or import this module under a namespace alias and qualify the call")
+    eprint(h0.gstr_push(a, 10).gstr_finish(a))
+    exit(1)
+    0
+}
+// error[dup-fn] for a colliding decl whose mangled shadow form is already taken (never silent).
+fail_shadow_mangled = (a: MutPtr<Malloc>, entry: ModuleEntry, bad: String, alias: String) i32 {
+    nm := line_name(a.gstr_string(16), a, bad, 0).gstr_finish(a)
+    pos := a.symbol_start_of(entry.graph.symbols, nm)
+    line := entry.source.res_line_of(pos)
+    col := entry.source.res_col_of(pos)
+    m0 := a.gstr_string(320).gstr_append(a, "zenc: ").gstr_append(a, entry.path).gstr_push(a, ':').res_udec(a, line).gstr_push(a, ':').res_udec(a, col).gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `").gstr_append(a, nm).gstr_push(a, '`')
+    l1 := m0.gstr_push(a, 10)
+    d0 := l1.gstr_append(a, "  `").gstr_append(a, nm).gstr_append(a, "` collides with an unimported name from this module's import closure, and its shadow form `")
+    d1 := a.mappend_string(d0, alias).gstr_append(a, "__").gstr_append(a, nm).gstr_append(a, "` is already taken")
+    l2 := d1.gstr_push(a, 10)
+    h0 := l2.gstr_append(a, "hint: rename `").gstr_append(a, nm).gstr_push(a, '`')
+    eprint(h0.gstr_push(a, 10).gstr_finish(a))
+    exit(1)
+    0
+}
+// reject when ANY other module imports a to-be-renamed name from `entry` by name (see fail_shadow_import).
+shadow_guard_one = (a: MutPtr<Malloc>, table: ModuleTable, entry: ModuleEntry, nm: string_view) i32 {
+    table.modules.loop((h, i, m) {
+        (eq(m.id, entry.id) == false).then({
+            m.graph.imports.loop((h2, j, e) {
+                (e.namespace == false && eq(e.module, entry.id)).then({
+                    m.source.edge_head_has_name(e.start, nm).then({
+                        a.fail_shadow_import(entry, m.id, nm)
+                    })
+                })
+            })
+        })
+    })
+    0
+}
+shadow_guard_names = (a: MutPtr<Malloc>, table: ModuleTable, entry: ModuleEntry, names: String, i: i64) i32 {
+    (i >= names.len).match ({
+        true  => 0,
+        false => {
+            nm := line_name(a.gstr_string(16), a, names, i).gstr_finish(a)
+            a.shadow_guard_one(table, entry, nm)
+            a.shadow_guard_names(table, entry, names, names.snext_line(i))
+        },
+    })
+}
+ShadowUsers: {
+    flat: string_view,
+    shift: i64,
+    renamed: bool,
+}
+// Per-USER-MODULE shadow pass: every recorded region gets the same guarded rename as the main body,
+// so a module's own top-level value decl wins over an unimported transitive std/compiler export.
+// Regions are processed LAST-to-FIRST (descending offset) so earlier offsets stay valid; regions at
+// or past `prebodylen` were shifted by the main-body rewrite (`maindelta`), and rewrites BEFORE the
+// ns-prefix end `nsl` shift the main-body window by the returned `shift`. Internal sources pass
+// through untouched (enable=false — the self-host flat stays byte-identical).
+shadow_flat_users = (a: MutPtr<Malloc>, pre: string_view, table: ModuleTable, prebodylen: i64, maindelta: i64, nsl: i64, enable: bool) ShadowUsers {
+    regions := uregions_get()
+    (enable && regions.len > 0).match ({
+        true  => {
+            cur := pre
+            shift := 0
+            renamed := false
+            syms := a.module_graph(cur).symbols
+            n := regions.len
+            regions.loop((h, i, r0) {
+                idx := n - 1 - i
+                r := regions[idx]
+                adj := (r.lo < prebodylen).match ({ true => 0, false => maindelta })
+                lo := r.lo + adj
+                hi := r.hi + adj
+                entry := table.module(r.id)
+                alias := a.shadow_alias_idx(idx)
+                ss := a.shadow_name_sets(syms, entry.source, lo, hi, alias)
+                (ss.bad.len > 0).then({
+                    a.fail_shadow_mangled(entry, ss.bad, alias)
+                })
+                (ss.ren.len > 0).then({
+                    a.shadow_guard_names(table, entry, ss.ren, 0)
+                    seg := a.gstr_string(hi - lo + 1).rappend_span(a, cur, to_i32(lo), to_i32(hi)).gstr_finish(a)
+                    rew := a.gstr_string(4096).rewrite_alias_names(a, seg, 0, ss.ren, alias)
+                    cur = a.gstr_string(4096).rappend_span(a, cur, 0, to_i32(lo)).rappend_string(a, rew).append_to_nul(a, cur, to_i32(hi)).gstr_finish(a)
+                    (hi <= nsl).then({
+                        shift = shift + (rew.len - (hi - lo))
+                    })
+                    renamed = true
+                    syms = a.module_graph(cur).symbols
+                })
+            })
+            ShadowUsers(
+                flat: cur,
+                shift: shift,
+                renamed: renamed,
+            )
+        },
+        false => ShadowUsers(
+            flat: pre,
+            shift: 0,
+            renamed: false,
+        ),
+    })
+}
+// ── import-then-redefine attribution ────────────────────────────────────────────────────────────
+// A module that imports a name BY NAME (`{ len } = std.text.str`) and ALSO defines it locally is a
+// genuine dup — but the checker's dup-fn anchors at the LATER decl in flat order, which is the
+// LIBRARY's line (main-body decls precede their dependencies' bodies). Catch the shape at resolve
+// time instead: point at the USER's definition line and name the import. Runs for the entry module
+// and user modules only (internal builds skip the caller entirely).
+mid_is_user = (id: string_view) bool { id.at(0) == 'u' && id.at(1) == '/' }
+fail_import_redef = (a: MutPtr<Malloc>, m: ModuleEntry, s: ProvidedSymbol, nm: String) i32 {
+    line := m.source.res_line_of(s.start)
+    col := m.source.res_col_of(s.start)
+    m0 := a.gstr_string(256).gstr_append(a, "zenc: ").gstr_append(a, m.path).gstr_push(a, ':').res_udec(a, line).gstr_push(a, ':').res_udec(a, col).gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `")
+    m1 := a.mappend_string(m0, nm).gstr_append(a, "` — this module also imports `")
+    m2 := a.mappend_string(m1, nm).gstr_append(a, "` by name")
+    l1 := m2.gstr_push(a, 10)
+    h0 := l1.gstr_append(a, "hint: drop `")
+    h1 := a.mappend_string(h0, nm).gstr_append(a, "` from the import list, or rename the local definition")
+    eprint(h1.gstr_push(a, 10).gstr_finish(a))
+    exit(1)
+    0
+}
+check_import_redefs = (a: MutPtr<Malloc>, table: ModuleTable) i32 {
+    table.modules.loop((h, i, m) {
+        (is_empty(m.id) || m.id.mid_is_user()).then({
+            imported := a.imported_value_name_set(a.rset_new(), m.graph.symbols)
+            m.graph.symbols.loop((h2, j, s) {
+                ((s.imported || s.foreign || s.is_type) == false).then({
+                    key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+                    imported.rset_has(key).then({
+                        a.fail_import_redef(m, s, key)
+                    })
+                })
+            })
+        })
+    })
+    0
 }
 // ── MODULE-ALIAS NAME-COLLISION ATTRIBUTION (#66a) ───────────────────────────────────────────────
 // A module alias `alias = std.x.y` flattens y's value decls under an `alias__` prefix, INCLUDING the
@@ -2851,13 +3103,17 @@ check_alias_collisions = (a: MutPtr<Malloc>, table: ModuleTable, graph: ModuleGr
 // source, load transitive imports, then dedup names across the flat program.
 resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, mainsrc: string_view) ResolvedProgram {
     a.alias_prefixes_reset()    // fresh per program: the checker's UFCS-alias set is exactly the aliases stamped below
+    a.uregions_reset()    // fresh per program: user-module body spans recorded during closure load
     a.scan_dotted_imports(inpath, mainsrc)
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
     a.enforce_visibility(table, vis_report_mode())
     inpath.internal_source_path().match ({
         true  => 0,
-        false => a.check_alias_collisions(table, graph, mainsrc, inpath),
+        false => {
+            a.check_alias_collisions(table, graph, mainsrc, inpath)
+            a.check_import_redefs(table)
+        },
     })
     ns := a.collect_ns_graph_table(table, inpath, mainsrc, graph, a.ns_scan(a.empty_closure()))
     nsl := ns.c.out.len
@@ -2876,13 +3132,20 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_v
         true  => false,
         false => true,
     }))
-    dsyms := sf.renamed.match ({ true => a.module_graph(sf.flat).symbols, false => fsyms })
-    flat := a.dedup_impls(a.dedup_decls_syms(sf.flat, dsyms, nsl, sf.bodyend, internal))
+    su := a.shadow_flat_users(sf.flat, table, body.len, sf.bodyend - body.len, nsl, internal.match ({
+        true  => false,
+        false => true,
+    }))
+    dsyms := (sf.renamed || su.renamed).match ({
+        true  => a.module_graph(su.flat).symbols,
+        false => fsyms,
+    })
+    flat := a.dedup_impls(a.dedup_decls_syms(su.flat, dsyms, nsl + su.shift, sf.bodyend + su.shift, internal))
     ResolvedProgram(
         table: table,
         flat: flat,
-        body_start: nsl,
-        body_end: sf.bodyend,
+        body_start: nsl + su.shift,
+        body_end: sf.bodyend + su.shift,
     )
 }
 resolve_program* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, inpath: string_view, mainsrc: string_view) string_view { a.resolve_program_data(root, progdir, inpath, mainsrc).flat }
