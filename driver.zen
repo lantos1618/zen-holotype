@@ -273,8 +273,9 @@ fnv_flags = (h: i64, mp: MutPtr<Malloc>, s: string_view) i64 {
 }
 // the compiler's own identity: the hash of the running zenc binary (argv[0]). A rebuilt zenc — new
 // checker, new codegen, new zenrt.c, all compiled in — yields a new stamp, so an old binary's entries
-// can never be replayed by a new one. An unreadable argv[0] (bare PATH lookup) degrades to 0 and the
-// key falls back to the version string alone.
+// can never be replayed by a new one. An unreadable argv[0] (bare PATH lookup) yields 0 and the
+// probe DISABLES the cache for the run (an empty key) — degrading to a shared stamp would replay
+// stale entries across rebuilds.
 cache_self = (mp: MutPtr<Malloc>) i64 {
     contents_in(mp, arg(0)).match ({
         .Ok(b)  => FNV_BASIS().fnv_str(b),
@@ -344,7 +345,13 @@ cache_walk_edges = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view,
 }
 // the on-disk entry for one (kind, program) pair: <dir>/<kind>_<16 hex digits>.
 cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: string_view, src: string_view, ccflags: string_view, links: string_view) string_view {
-    h0 := mp.cache_self().fnv_str(VERSION()).fnv_str(kind).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(src)
+    // An unreadable argv[0] means the compiler-identity stamp is unavailable; a shared degenerate
+    // stamp would let a REBUILT compiler replay a stale entry. Empty key = cache disabled for this run.
+    self := mp.cache_self()
+    (self == 0).then({
+        return ""
+    })
+    h0 := self.fnv_str(VERSION()).fnv_str(kind).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(src)
     st := mp.cache_walk_edges(root, mp.dirname(path), mp.edges_of(src), CacheWalk(
         seen: mp.gstr_string(256),
         h: h0,
@@ -370,11 +377,11 @@ cache_store_bin = (mp: MutPtr<Malloc>, cb: string_view, out: string_view) i32 {
 // resolve-onward re-verification (the key proves the identical closure already compiled cleanly).
 compile_to = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view) i32 {
     cb := mp.cache_probe("bin", root, path, src, ccflags, links)
-    (cache_on() && file_exists(cb) && mp.cache_bin_cmd(cb, out).system() == 0).match ({
+    (cache_on() && eq(cb, "") == false && file_exists(cb) && mp.cache_bin_cmd(cb, out).system() == 0).match ({
         true  => 0,
         false => {
             rc := mp.compile_flat(root, path, src, out, ccflags, links)
-            (rc == 0 && cache_on()).then({
+            (rc == 0 && cache_on() && eq(cb, "") == false).then({
                 mp.cache_store_bin(cb, out)
             })
             rc
@@ -551,7 +558,7 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
         .Ok(src) => {
             // a probe hit means this exact closure content already checked clean: replay the ok line.
             ck := mp.cache_probe("check", root, spec.source, src, spec.ccflags, spec.links)
-            (cache_on() && file_exists(ck)).match ({
+            (cache_on() && eq(ck, "") == false && file_exists(ck)).match ({
                 true  => check_ok_line(spec.source),
                 false => {
                     rp := mp.resolve_prog(root, spec.source, src)
@@ -561,7 +568,7 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
                             decls := mp.resolve_module(raw)
                             (mp.report_check(raw, decls, rp, spec.source, src) == 0).match ({
                                 true  => {
-                                    cache_on().then({
+                                    (cache_on() && eq(ck, "") == false).then({
                                         cache_put_ok(ck)
                                     })
                                     check_ok_line(spec.source)

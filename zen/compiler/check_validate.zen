@@ -1686,17 +1686,23 @@ owner_base = (t: Ty) string_view {
         _           => "",
     })
 }
+// Consume verbs are matched with `sx_named` (bare OR `…__verb` alias-suffixed), never plain `eq`: a
+// namespace bind (`m = sibling`) flattens the bound module's `release`/`drop` fns to `m__release`/
+// `m__drop`, and a qualified call site (`m.drop(r, a)`) arrives here ALREADY prefixed — a bare-`eq`
+// matcher would silently skip the consume and miss the use-after-free. Same policy as the send/spawn
+// matchers below (see sx_named). A user fn deliberately named `x__drop` matches too — consistent with
+// how a fn simply NAMED `drop` already matches today; the owner-typed-arg gate still applies.
 is_consume_method = (env: Env, c: CallData) bool {
     (c.args.len > 0).match ({
         true  => {
             base := env.infer_expr(c.args[0].addr()).owner_base()
-            eq(c.fn, "release").match ({
+            c.fn.sx_named("release", "__release").match ({
                 true  => eq(base, "Own"),
-                false => eq(c.fn, "release_in").match ({
+                false => c.fn.sx_named("release_in", "__release_in").match ({
                     true  => eq(base, "Own"),
-                    false => eq(c.fn, "drop").match ({
+                    false => c.fn.sx_named("drop", "__drop").match ({
                         true  => eq(base, "Rc") || eq(base, "Arc"),
-                        false => eq(c.fn, "drop_in").match ({
+                        false => c.fn.sx_named("drop_in", "__drop_in").match ({
                             true  => eq(base, "Rc") || eq(base, "Arc"),
                             false => false,
                         }),
@@ -1711,9 +1717,9 @@ is_default_owner_method = (env: Env, c: CallData) bool {
     (c.args.len > 0).match ({
         true  => {
             base := env.infer_expr(c.args[0].addr()).owner_base()
-            eq(c.fn, "release").match ({
+            c.fn.sx_named("release", "__release").match ({
                 true  => eq(base, "Own"),
-                false => eq(c.fn, "drop").match ({
+                false => c.fn.sx_named("drop", "__drop").match ({
                     true  => eq(base, "Rc") || eq(base, "Arc"),
                     false => false,
                 }),
@@ -1898,7 +1904,7 @@ is_owner_base = (b: string_view) bool { eq(b, "Own") || eq(b, "Rc") || eq(b, "Ar
 owner_ptr_base = (t: Ty) string_view { t.pointee_of().owner_base() }
 // the owner-consume verbs, matched by NAME (no receiver-type infer — the callee's params/locals are not in
 // the caller env that drives the summary, so detection must be structural + the call-site param-type gate).
-is_consume_fn_name = (fn: string_view) bool { eq(fn, "release") || eq(fn, "release_in") || eq(fn, "drop") || eq(fn, "drop_in") }
+is_consume_fn_name = (fn: string_view) bool { fn.sx_named("release", "__release") || fn.sx_named("release_in", "__release_in") || fn.sx_named("drop", "__drop") || fn.sx_named("drop_in", "__drop_in") }
 // `<owner>.addr()` where the receiver is an Own/Rc/Arc local -> that owner's var name, else "". Inferred in
 // the CALLER env (which HAS the local bound by the time own_step reaches the call), so infer resolves it.
 addr_owner_var = (env: Env, e: Ptr<Expr>) string_view {
@@ -2342,14 +2348,14 @@ mode_sendable* = (m: i32) bool { m == md_owned() || m == md_frozen() }
 // `release` from the owner `o.release(a)` consume (handled by is_consume_method). Returns the freed
 // bare-local name, or "" when nothing simple is freed.
 alloc_free_call_name = (env: Env, c: CallData) string_view {
-    eq(c.fn, "free").match ({
+    c.fn.sx_named("free", "__free").match ({
         true  => (c.args.len == 1).match ({ true => c.arg_var_name(0), false => "" }),
-        false => eq(c.fn, "release").match ({
+        false => c.fn.sx_named("release", "__release").match ({
             true  => (c.args.len == 2 && env.infer_expr(c.args[0].addr()).ty_is_ptr_t()).match ({
                 true  => c.arg_var_name(1),
                 false => "",
             }),
-            false => eq(c.fn, "resize").match ({
+            false => c.fn.sx_named("resize", "__resize").match ({
                 true  => (c.args.len == 3 && env.infer_expr(c.args[0].addr()).ty_is_ptr_t()).match ({
                     true  => c.arg_var_name(1),
                     false => "",
@@ -5892,7 +5898,7 @@ expr_root_var = (e: Ptr<Expr>) string_view {
 // hazard; Scope.acquire itself never binds a local).
 is_scope_acquire = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
     load(e).match ({
-        .Call(c) => (eq(c.fn, "acquire") && c.args.len > 0).match ({
+        .Call(c) => (c.fn.sx_named("acquire", "__acquire") && c.args.len > 0).match ({
             true  => svars.dead_has(c.args[0].addr().expr_root_var()),
             false => false,
         }),
@@ -5903,7 +5909,7 @@ is_scope_acquire = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
 // Var), NOT `s.alloc.acquire(…)` (whose first arg is the `.alloc` member — Scope's legit accessor).
 is_direct_scope_acquire = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
     load(e).match ({
-        .Call(c) => (eq(c.fn, "acquire") && c.args.len > 0).match ({
+        .Call(c) => (c.fn.sx_named("acquire", "__acquire") && c.args.len > 0).match ({
             true  => c.args[0].match ({
                 .Var(v) => svars.dead_has(v.name),
                 _       => false,
@@ -6175,7 +6181,7 @@ ae_is_addr_local = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
 // call-following added for return-escape must NOT pre-empt it here — hop=false preserves that split.
 ae_send_pos = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c) => (eq(c.fn, "send") && c.args.len >= 2 && a.ae_escapes(decls, idx, locals, c.args[1].addr(), false)).match ({
+        .Call(c) => (c.fn.sx_named("send", "__send") && c.args.len >= 2 && a.ae_escapes(decls, idx, locals, c.args[1].addr(), false)).match ({
             true  => c.pos.pos_or(1),
             false => 0,
         }),
@@ -6499,7 +6505,7 @@ sd_msg_rc = (env: Env, e: Ptr<Expr>) bool {
 // a `send(_, msg)` whose message carries an Rc → the source offset of the call, else 0. `&&` short-
 // circuits, so `c.args[1]` is only touched when the arity check passed.
 sd_call_pos = (env: Env, c: CallData) i32 {
-    (eq(c.fn, "send") && c.args.len >= 2 && env.sd_msg_rc(c.args[1].addr())).match ({
+    (c.fn.sx_named("send", "__send") && c.args.len >= 2 && env.sd_msg_rc(c.args[1].addr())).match ({
         true  => c.pos.pos_or(1),
         false => 0,
     })
@@ -6705,7 +6711,7 @@ sm_call_pos = (env: Env, c: CallData) i32 {
 // handle carrying M is the RECEIVER for `h.send(m)` (its first type arg is M). For `p.pool_send(h, m)`
 // the receiver is the pool (M unresolved → tvoid), which falls back to the payload-expression descent.
 sm_mcall_pos = (env: Env, mc: MethodCallData) i32 {
-    (eq(mc.method, "send") && mc.args.len >= 1 || eq(mc.method, "pool_send") && mc.args.len == 2).match ({
+    (mc.method.sx_named("send", "__send") && mc.args.len >= 1 || mc.method.sx_named("pool_send", "__pool_send") && mc.args.len == 2).match ({
         true  => env.sm_msg_mut(env.infer_expr(mc.recv).first_gen_arg(), mc.args[mc.args.len - 1].addr()).match ({
             true  => mc.pos.pos_or(1),
             false => 0,
@@ -6757,8 +6763,8 @@ KSCRATCHSTATE = () i32 { 35 }    // spawn's initial actor state embeds spawner-l
 // surface form (flat `acquire(a, n)` or UFCS `a.acquire(n)` — this pass runs pre-desugar).
 sx_is_acquire = (e: Ptr<Expr>) bool {
     load(e).match ({
-        .Call(c)        => eq(c.fn, "acquire") && c.args.len >= 1,
-        .MethodCall(mc) => eq(mc.method, "acquire"),
+        .Call(c)        => c.fn.sx_named("acquire", "__acquire") && c.args.len >= 1,
+        .MethodCall(mc) => mc.method.sx_named("acquire", "__acquire"),
         _               => false,
     })
 }
@@ -6767,12 +6773,12 @@ sx_is_acquire = (e: Ptr<Expr>) bool {
 // (an `.expect` whose receiver is NOT a scratch source still classifies clean, e.g. Arc `new_in`).
 sx_is_make_in = (e: Ptr<Expr>) bool {
     load(e).match ({
-        .Call(c)        => eq(c.fn, "make_in") && c.args.len >= 1 || eq(c.fn, "expect") && c.args.len >= 1 && c.args[0].match ({
-            .Call(c2)        => eq(c2.fn, "make_in") && c2.args.len >= 1,
-            .MethodCall(mc2) => eq(mc2.method, "make_in"),
+        .Call(c)        => c.fn.sx_named("make_in", "__make_in") && c.args.len >= 1 || c.fn.sx_named("expect", "__expect") && c.args.len >= 1 && c.args[0].match ({
+            .Call(c2)        => c2.fn.sx_named("make_in", "__make_in") && c2.args.len >= 1,
+            .MethodCall(mc2) => mc2.method.sx_named("make_in", "__make_in"),
             _                => false,
         }),
-        .MethodCall(mc) => eq(mc.method, "make_in") || eq(mc.method, "expect") && mc.recv.sx_is_make_in(),
+        .MethodCall(mc) => mc.method.sx_named("make_in", "__make_in") || mc.method.sx_named("expect", "__expect") && mc.recv.sx_is_make_in(),
         _               => false,
     })
 }
@@ -6891,11 +6897,11 @@ sx_call_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, c: CallData) i32 {
     sk.kv_kor(st)
 }
 sx_mcall_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, mc: MethodCallData) i32 {
-    sk := (eq(mc.method, "send") && mc.args.len >= 1 || eq(mc.method, "pool_send") && mc.args.len == 2).match ({
+    sk := (mc.method.sx_named("send", "__send") && mc.args.len >= 1 || mc.method.sx_named("pool_send", "__pool_send") && mc.args.len == 2).match ({
         true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSEND()),
         false => 0,
     })
-    st := (eq(mc.method, "spawn") && (mc.args.len == 2 || mc.args.len == 3)).match ({
+    st := (mc.method.sx_named("spawn", "__spawn") && (mc.args.len == 2 || mc.args.len == 3)).match ({
         true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSTATE()),
         false => 0,
     })
