@@ -1901,6 +1901,53 @@ harness_modules_run* = () i32 {
     ), ModVerdictCase(
         files: [ModFile(
             name: "vv.zen",
+            src: "Secret: { v: i32 }\nmk* = () Secret { Secret(v: 1) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ mk } = vv\nmain = () i32 {\n  mk()\n  0\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[private-leak]: exported `mk` exposes private type `Secret`",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "Secret*: { v: i32 }\nmk* = () Secret { Secret(v: 1) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ mk, Secret } = vv\nmain = () i32 { mk().v - 1 }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
+            src: "Secret: { v: i32 }\nuse* = (s: Secret) i32 { s.v }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "m = vv\nmain = () i32 { 0 }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[private-leak]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "aa.zen",
+            src: "Pt*: { v: i32 }\n",
+        ), ModFile(
+            name: "bb.zen",
+            src: "{ Pt } = aa\nbump* = (p: Pt) Pt { Pt(v: p.v + 1) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ bump } = bb\n{ Pt } = aa\nmain = () i32 { bump(Pt(v: 1)).v - 2 }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vv.zen",
             src: "shown* = (x: i32) i32 { x + 1 }\nhidden = (x: i32) i32 { x - 1 }\n",
         ), ModFile(
             name: "p.zen",
@@ -1994,6 +2041,10 @@ harness_modules_run* = () i32 {
     // flat `{ hidden } = vv`, qualified `m.hidden(…)`, and a qualified private TYPE all reject;
     // exported names accept via both forms; a name the module itself imports stays importable
     // (transitive re-export — visibility is decided at the defining module).
+    // ── exported sigs must not EXPOSE private types — error[private-leak] ────────────────────
+    // an exported fn returning (or taking) a type its own module defines but does not export
+    // rejects naming BOTH the fn and the type; exporting the type accepts; a type imported from
+    // another module (transitive re-export) stays sanctioned.
     // ── the net is NOT hollow: cross-module calls are arity/arg-type checked (test_modules_oracle) ──
     // ── transitive / clash rejections (test_resolver_oracle) ─────────────────────────────────
     // ── namespace-bound diagnostics keep the USER source span (test_user_imports) ────────────

@@ -2608,6 +2608,151 @@ enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 
     })
     0
 }
+// ── error[private-leak]: an EXPORTED value decl must not EXPOSE a private type ───────────────────
+// The per-name wall above cannot see one hole: an exported (`*`) fn whose SIGNATURE names a type
+// the SAME module defines but does NOT export (`mk* = () Secret { … }` with a private `Secret:`).
+// The importer never writes the private name, so error[private-name] stays silent — yet it now
+// holds a value whose type it cannot name. Every non-entry module in the table (the modules whose
+// exports someone can actually import; the entry's exports leak to nobody) gets each exported
+// value decl's signature scanned over the ORIGINAL module source, so the diagnostic carries the
+// user's file:line:col at the offending type use. An ident in TYPE position — after `:` in the
+// param list / generic bounds, or in the return-type region between the params' closing `)` and
+// the body `{` (bodyless foreign decls run to the decl end), recursing naturally through
+// Ptr/MutPtr/RawPtr/slice/generic arguments because every ident inside a type expression is a
+// type — is looked up in the module's OWN sig: recorded as a TYPE, neither exported nor imported
+// → error[private-leak]. Types from OTHER modules never hit (absent from this sig, or
+// SIG_IMPORTED = the sanctioned transitive re-export); builtins / primitives / generic params are
+// absent the same way. `.`-qualified idents are skipped (a qualified type lives behind an alias,
+// i.e. in another module, by construction). Internal (std/compiler) sources are scanned too — the
+// tree is clean, so no internal gate. ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly
+// like error[private-name].
+sig_private_type = (s: ModuleSig, name: string_view) bool {
+    f := s.names.get(name, 0 - 1)
+    (f < 0).match ({
+        true  => false,
+        false => f / SIG_TYPE % 2 == 1 && f / SIG_PUB % 2 == 0 && f / SIG_IMPORTED % 2 == 0,
+    })
+}
+leak_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, pos: i32, width: i32, fname: string_view, tname: String, report: bool) i32 {
+    line := src.res_line_of(pos)
+    col := src.res_col_of(pos)
+    m0 := a.gstr_string(192).gstr_append(a, "exported `").gstr_append(a, fname).gstr_append(a, "` exposes private type `")
+    msg := a.mappend_string(m0, tname).gstr_append(a, "`").gstr_finish(a)
+    h0 := a.gstr_string(128).gstr_append(a, "export `")
+    hint := a.mappend_string(h0, tname).gstr_append(a, "*` or make `").gstr_append(a, fname).gstr_append(a, "` private").gstr_finish(a)
+    eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-leak", msg, hint, 1))
+    report.match ({ true => 0, false => exit(1) })
+}
+// ONE exported value decl's signature, scanned textually (mirroring vis_scan_quals: comment/quote
+// spans are skipped). A tiny state machine tracks TYPE position: `:` opens a type expression at
+// the current nesting depth (`:=` is a value initializer — nothing after it is a signature type,
+// the scan stops; a bare `=` whose RHS is not a param list `(` stops the same way), `,` at the
+// opening depth or any dedent below it closes it, and the params' closing `)` back at depth 0
+// opens the return-type region, which runs to the body `{`.
+leak_scan_decl = (a: MutPtr<Malloc>, path: string_view, src: string_view, sym: ProvidedSymbol, sig: ModuleSig, report: bool) i32 {
+    pos := src.res_ident_end(sym.start) + 1    // past `name*`
+    (pos < sym.decl_next).then({
+        base := pos
+        depth := 0
+        in_type := false
+        tdepth := 0
+        span: [u8] := slice(src.offset(base), to_i64(sym.decl_next - base))
+        span.loop((h, i, b) {
+            ii := base + to_i32(i)
+            (ii < pos == false).then({
+                src.line_comment_at(ii).match ({
+                    true  => {
+                        pos = src.next_line(ii)
+                    },
+                    false => src.block_comment_at(ii).match ({
+                        true  => {
+                            pos = src.vis_skip_block(ii)
+                        },
+                        false => src.quoted_at(ii).match ({
+                            true  => {
+                                pos = src.vis_skip_lit(ii)
+                            },
+                            false => (b == 0 || b == '{').match ({
+                                true  => {
+                                    h.break
+                                },
+                                false => b.is_alpha().match ({
+                                    true  => {
+                                        ie := src.res_ident_end(ii)
+                                        (in_type && src.at(ii - 1) != '.').then({
+                                            nm := a.mimport_name_span(src, ii, ie)
+                                            sig.sig_private_type(nm.gstr_finish(a)).then({
+                                                a.leak_fail(path, src, ii, ie - ii, sym.name, a.mimport_name_span(src, ii, ie), report)
+                                            })
+                                        })
+                                        pos = ie
+                                    },
+                                    false => {
+                                        pos = ii + 1
+                                        (b == '(' || b == '[' || b == '<').then({
+                                            depth = depth + 1
+                                        })
+                                        (b == ']' || b == '>').then({
+                                            depth = depth - 1
+                                            (depth < tdepth).then({
+                                                in_type = false
+                                            })
+                                        })
+                                        (b == ')').then({
+                                            depth = depth - 1
+                                            (depth < tdepth).then({
+                                                in_type = false
+                                            })
+                                            (depth == 0).then({
+                                                in_type = true    // the params closed: the return-type region opens
+                                                tdepth = 0
+                                            })
+                                        })
+                                        (b == ',' && depth == tdepth).then({
+                                            in_type = false
+                                        })
+                                        // `:=` is a value initializer, and so is a bare `=` whose RHS
+                                        // is not a param list `(` — no signature follows either: stop.
+                                        (b == ':').then({
+                                            (src.at(ii + 1) == '=').match ({
+                                                true  => {
+                                                    h.break
+                                                },
+                                                false => {
+                                                    in_type = true
+                                                    tdepth = depth
+                                                },
+                                            })
+                                        })
+                                        (b == '=').then({
+                                            in_type = false
+                                            (src.at(src.lstrip(ii + 1)) == '(' == false).then({
+                                                h.break
+                                            })
+                                        })
+                                    },
+                                }),
+                            }),
+                        }),
+                    }),
+                })
+            })
+        })
+    })
+    0
+}
+enforce_private_leaks* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 {
+    table.modules.loop((h, i, entry) {
+        (i > 0).then({
+            entry.graph.symbols.loop((h2, j, sym) {
+                (sym.is_pub && (sym.imported || sym.is_type) == false).then({
+                    a.leak_scan_decl(entry.path, entry.source, sym, entry.graph.sig, report)
+                })
+            })
+        })
+    })
+    0
+}
 // ── user-name shadow rename ────────────────────────────────────────────────────────────────────
 // THE #1 newcomer bounce: a user's top-level helper (`len`/`split`/`map`/…) collides with a
 // same-named PUBLIC decl pulled in TRANSITIVELY by an import the user never named (e.g. `std.io.file`
@@ -3501,6 +3646,7 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_v
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
     a.enforce_visibility(table, vis_report_mode())
+    a.enforce_private_leaks(table, vis_report_mode())
     inpath.internal_source_path().match ({
         true  => 0,
         false => {
