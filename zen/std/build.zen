@@ -1,6 +1,8 @@
 // std.build — a build program registers targets into a runner-owned graph.
 // Target configuration remains plain borrowed data; the short-lived Build context owns only
 // the registry storage and releases it after emitting the graph.
+// Target.ffi_ (`.ffi("util, vendor.hooks")`) is the FFI grant list: the dotted module ids allowed
+// to hold foreign (bodyless) declarations — see error[ffi-ungranted]; mirrors zen.toml's `ffi = "…"`.
 { print, println } = std.text.fmt
 { Platform, Os, Arch, Abi, host } = std.platform
 { Malloc } = std.mem.alloc
@@ -54,6 +56,7 @@ Target*: {
     frameworks_: [string_view],
     libraries_: [string_view],
     platform_: Platform,
+    ffi_: string_view,
     root = (t: Target, p: string_view) Target {
         Target(
             name: t.name,
@@ -65,6 +68,7 @@ Target*: {
             frameworks_: t.frameworks_,
             libraries_: t.libraries_,
             platform_: t.platform_,
+            ffi_: t.ffi_,
         )
     }
     main = (t: Target, p: string_view) Target {
@@ -78,6 +82,7 @@ Target*: {
             frameworks_: t.frameworks_,
             libraries_: t.libraries_,
             platform_: t.platform_,
+            ffi_: t.ffi_,
         )
     }
     out = (t: Target, p: string_view) Target {
@@ -91,6 +96,7 @@ Target*: {
             frameworks_: t.frameworks_,
             libraries_: t.libraries_,
             platform_: t.platform_,
+            ffi_: t.ffi_,
         )
     }
     target = (t: Target, p: Platform) Target {
@@ -104,6 +110,7 @@ Target*: {
             frameworks_: t.frameworks_,
             libraries_: t.libraries_,
             platform_: p,
+            ffi_: t.ffi_,
         )
     }
     links = (t: Target, l: string_view) Target {
@@ -117,6 +124,7 @@ Target*: {
             frameworks_: t.frameworks_,
             libraries_: t.libraries_,
             platform_: t.platform_,
+            ffi_: t.ffi_,
         )
     }
     sources = (t: Target, xs: [string_view]) Target {
@@ -130,6 +138,7 @@ Target*: {
             frameworks_: t.frameworks_,
             libraries_: t.libraries_,
             platform_: t.platform_,
+            ffi_: t.ffi_,
         )
     }
     frameworks = (t: Target, xs: [string_view]) Target {
@@ -143,6 +152,7 @@ Target*: {
             frameworks_: xs,
             libraries_: t.libraries_,
             platform_: t.platform_,
+            ffi_: t.ffi_,
         )
     }
     libraries = (t: Target, xs: [string_view]) Target {
@@ -156,6 +166,21 @@ Target*: {
             frameworks_: t.frameworks_,
             libraries_: xs,
             platform_: t.platform_,
+            ffi_: t.ffi_,
+        )
+    }
+    ffi = (t: Target, g: string_view) Target {
+        Target(
+            name: t.name,
+            root_: t.root_,
+            main_: t.main_,
+            out_: t.out_,
+            links_: t.links_,
+            sources_: t.sources_,
+            frameworks_: t.frameworks_,
+            libraries_: t.libraries_,
+            platform_: t.platform_,
+            ffi_: g,
         )
     }
     sources_on = (t: Target, os: Os, xs: [string_view]) Target { (t.platform_.os == os).match ({
@@ -172,7 +197,7 @@ Target*: {
     }) }
     emit_target = (t: Target) void {
         // Legacy single-library setter. Prefer `.libraries(["pthread", ...])`.
-        // Six fixed lines: name, root, main, out, linker flags, compiler inputs.
+        // Ten fixed lines: name, root, main, out, linker flags, compiler inputs, os, arch, abi, ffi grants.
         println(t.name)
         println(t.root_)
         println(t.main_)
@@ -201,6 +226,7 @@ Target*: {
         println(build_os_code(t.platform_.os))
         println(build_arch_code(t.platform_.arch))
         println(build_abi_code(t.platform_.abi))
+        println(t.ffi_)
     }
 }
 build_os_code = (os: Os) i32 {
@@ -243,5 +269,6 @@ exe* = (name: string_view) Target {
         frameworks_: empty,
         libraries_: empty,
         platform_: host(),
+        ffi_: "",
     )
 }
