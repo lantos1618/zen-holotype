@@ -1005,6 +1005,18 @@ harness_verdict_run* = () i32 {
     // program type-checks (was: error pointing into fmt.zen with no attribution to the user file).
     // TPARAM-SCOPE reject-for-the-right-reason: passing that `T` VALUE where Display IS required is a
     // genuine trait-bound gap, reported at the USER call site (not leaked into stdlib) — soundness kept.
+    // UNREACHABLE-ARM: an arm after a wildcard `_` can never fire (the emitter's switch stops at
+    // default, silently DROPPING it) — rejected in value position AND in statement position (where
+    // lower_match_arms would drop it pre-check); a well-ordered `_`-last match stays green.
+    // TARG-ARITY: an explicit `<…>` list whose count ≠ the declared tparam count — too many on a call,
+    // too few on a call, and a generic-struct ctor — each "expected N type argument(s), got M";
+    // correct counts and fully-inferred calls stay green.
+    // TRAIT-BOUND widening: a bounded tparam bound to a concrete PRIMITIVE (i32) or ENUM with no
+    // impl now rejects at the call site (was a silent pass — only structs were checked); a generic
+    // PASSTHROUGH (`wrap<T: Show>` forwarding to `draw<A: Show>`) still defers and stays green.
+    // LIT-FOLD OVERFLOW: a literal `+`/`-`/`*` whose i64 fold would WRAP no longer yields a wrong
+    // range verdict — the fold defers (u64 := MAX+MAX accepted); in-range folds still verdict
+    // (i32 := 2G+2G still assign-fit).
     b := run_verdicts("verdict-kind", [VerdictCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
@@ -2033,6 +2045,54 @@ harness_verdict_run* = () i32 {
         src: "Box*<T>: { v: T }\ntake = (b: Box<RawPtr<u8>>, p: MutPtr<i32>) i32 { 0 }\ntest* = () i32 { p := null_ptr()  take(Box(v: p), p) }",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "E*: A | B | C\nf = (e: E) i32 { e.match ({ .A => 1, _ => 2, .B => 3 }) }\ntest* = () i32 { f(E.A) }",
+        should_pass: false,
+        kind: "unreachable-arm",
+    ), VerdictCase(
+        src: "E*: A | B | C\nf = (e: E) i32 {\n    e.match ({\n        .A => { return 1 },\n        _  => { return 2 },\n        .B => { return 3 },\n    })\n    0\n}\ntest* = () i32 { f(E.A) }",
+        should_pass: false,
+        kind: "unreachable-arm",
+    ), VerdictCase(
+        src: "E*: A | B\nf = (e: E) i32 { e.match ({ .A => 1, _ => 2 }) }\ntest* = () i32 { f(E.A) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "id<T> = (x: T) T { x }\ntest* = () i32 { id<i32, i32>(5) }",
+        should_pass: false,
+        kind: "targ-arity",
+    ), VerdictCase(
+        src: "pair<A, B> = (x: A, y: B) i64 { 7 }\ntest* = () i64 { pair<i32>(1, 2) }",
+        should_pass: false,
+        kind: "targ-arity",
+    ), VerdictCase(
+        src: "Box<T>: { v: T }\ntest* = () i32 { b := Box<i32, i32>(v: 5)  b.v }",
+        should_pass: false,
+        kind: "targ-arity",
+    ), VerdictCase(
+        src: "id<T> = (x: T) T { x }\npair<A, B> = (x: A, y: B) i64 { 7 }\nBox<T>: { v: T }\ntest* = () i32 { a := id<i32>(5)  n := pair<i32, i64>(1, 2)  b := Box<i32>(v: 3)  c := id(9)  a + b.v + c }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { draw(5) }",
+        should_pass: false,
+        kind: "trait-bound",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32 }\nE*: A | B\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { draw(E.A) }",
+        should_pass: false,
+        kind: "trait-bound",
+    ), VerdictCase(
+        src: "Show*: { render: (Ptr<Self>) i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\nwrap<T: Show> = (x: T) i32 { draw(x) }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\ntest* = () i32 { wrap(Circle(r: 2)) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "test* = () i32 { a: u64 := 9223372036854775807 + 9223372036854775807  (a == 0).match ({ true => 1, false => 0 }) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "test* = () i32 { x: i32 := 2000000000 + 2000000000  0 }",
+        should_pass: false,
+        kind: "assign-fit",
     )])
     // field-aware escape: a slice literal element carries a stack-local address (re-census #1 gap).
     // UFCS auto-ref: value Rng where next expects MutPtr<Rng> — rewrite to addr(r).
