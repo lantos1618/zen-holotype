@@ -470,6 +470,23 @@ ffi = "util, vendor.hooks"
 `check`/`build`/`run <project-dir>` resolve `<root>/<main>`, use `out` for
 build output when `-o` is omitted, and pass `ccflags` through to `cc`.
 
+`Target.target(platform)` in `build.zen` selects a CROSS target. A platform
+equal to the build host (std.build's default) compiles natively — the host
+`cc` command line is byte-identical to a target-less build. Anything else is
+canonicalized to a `<arch>-<os>-<abi>` triple (`aarch64-linux-gnu`,
+`riscv64-linux-musl`, …) and a cross C compiler is resolved in order:
+`$ZENC_TARGET_CC` (the verbatim compiler command — the escape hatch), the
+conventional cross gcc `<triple>-gcc` on PATH (its own sysroot supplies libc,
+so `-lm`/`link =` just work), then `zig cc -target <triple>`. No toolchain
+found is a LOUD error naming all three options — never a silent host-cc
+fallback. The triple folds into the content cache key, so flipping
+`.target(...)` is always a cache miss. v1 scope is Linux cross-ARCH only
+(aarch64 | x86_64 | riscv64, gnu | musl): cross-OS/wasm targets error as
+unsupported (`bootstrap/zenrt.c` is POSIX/glibc-shaped — sigaltstack, ucontext
+SP reads, pthread). The generated C's platform prelude reads the C compiler's
+own macros, so `std.platform.host()` inside a cross-built binary correctly
+reports the TARGET platform.
+
 FFI is a build-granted capability. A module may contain foreign (bodyless)
 declarations only when the build grants it, closing the supply-chain hole where
 a transitive dependency declares `system` and shells out without the build ever

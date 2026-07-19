@@ -38,7 +38,7 @@ not instrument lines or branches. Every reported feature area is mapped to imple
 | Feature area | Status | Primary implementation | Primary executable proof | Coverage |
 |---|---|---|---|---|
 | Bootstrap/fixpoint | Shipped | `bootstrap/Makefile`, `driver.zen`, `bootstrap/sources.txt` | `harness.zen` fixpoint suite | Strong |
-| CLI, init, manifests, `build.zen` | Shipped/partial | `driver.zen`, `std.build` | `harness_build.zen`, project fixtures | Strong |
+| CLI, init, manifests, `build.zen` | Shipped/partial; `Target.target(platform)` cross-compiles for real (Linux aarch64/x86_64/riscv64 via `<triple>-gcc`/`ZENC_TARGET_CC`/`zig cc`, target in the cache key, loud error when no toolchain; cross-OS errors as unsupported v1) | `driver.zen`, `std.build` | `harness_build.zen`, project fixtures | Strong |
 | Lexer, literals, declarations, core types | Partial at malformed char/hex validation | `compiler.lex`, `parse*` | value + verdict + fuzz suites | Strong |
 | Records, enums, exhaustive match, loops | Partial: some literal-match subjects can repeat; loop-control and statement-match lowering fixed 2026-07-18 | `parse*`, `check`, emitters | value/verdict/formatter fixtures | Strong |
 | Functions, generics, traits, closures | Partial at escaping local captures | `check.zen`, `mono.zen` | value, verdict, module closure cases | Strong |

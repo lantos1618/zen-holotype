@@ -2,6 +2,7 @@
 // (resolve -> parse -> check -> genModule) and the C backend (cc). This replaces bootstrap/driver.c:
 // once it roots --build-self, the seed carries `main` (emitted as zen_main) and driver.c is deleted.
 { arg, argc, getEnv } = std.os
+{ Os, Arch, Abi, Platform, host } = std.platform
 { Malloc } = std.mem.alloc
 { eq, view } = std.text.str
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
@@ -256,7 +257,39 @@ write_runnable_c = (tmpc: string_view, gen: String) bool {
 // emitted C relies on. Affects BUILT/RUN user programs only — the bootstrap seed compiles via
 // bootstrap/Makefile CFLAGS, untouched, so the byte-exact fixpoint is unaffected. Non-tail recursion
 // whose result feeds a branch still overflows — caught by zenrt.c's stack-overflow panic.
-cc_command = (mp: MutPtr<Malloc>, root: string_view, tmpc: string_view, out: string_view, ccflags: string_view, links: string_view) string_view { mp.gstr_string(256).gstr_append(mp, "cc -std=gnu11 -Wno-error=implicit-function-declaration -O1 -foptimize-sibling-calls -fwrapv -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ").gstr_append(mp, tmpc).gstr_append(mp, " ").gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c ").gstr_append(mp, ccflags).gstr_append(mp, " ").gstr_append(mp, links).gstr_append(mp, " -lm").gstr_append(mp, " -o ").gstr_append(mp, out).gstr_finish(mp) }    // libm: always link (sin/cos/log/exp/pow); free if unused
+cc_command = (mp: MutPtr<Malloc>, root: string_view, tmpc: string_view, out: string_view, ccflags: string_view, links: string_view, ccname: string_view) string_view { mp.gstr_string(256).gstr_append(mp, ccname).gstr_append(mp, " -std=gnu11 -Wno-error=implicit-function-declaration -O1 -foptimize-sibling-calls -fwrapv -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ").gstr_append(mp, tmpc).gstr_append(mp, " ").gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c ").gstr_append(mp, ccflags).gstr_append(mp, " ").gstr_append(mp, links).gstr_append(mp, " -lm").gstr_append(mp, " -o ").gstr_append(mp, out).gstr_finish(mp) }    // libm: always link (sin/cos/log/exp/pow); free if unused
+// ── cross-toolchain selection (`Target.target(platform)` in build.zen) ────────────────────────────
+// A native Spec (target "") compiles with host `cc` — the command line above, byte-identical to
+// before. A cross triple resolves a C compiler in this order:
+//   1. $ZENC_TARGET_CC — the verbatim compiler command (the documented escape hatch);
+//   2. the conventional cross gcc `<triple>-gcc` on PATH (aarch64-linux-gnu-gcc, …), which brings
+//      its own sysroot libc, so -lm/-lpthread and a project's `link =` just work;
+//   3. `zig cc -target <triple>` when zig is on PATH.
+// Nothing found -> a LOUD error and no build. There is NEVER a silent host-cc fallback: a wrong-
+// architecture binary that "builds fine" is strictly worse than an error.
+which_ok = (mp: MutPtr<Malloc>, name: string_view) bool { mp.gstr_string(64).gstr_append(mp, "command -v ").gstr_append(mp, name).gstr_append(mp, " >/dev/null 2>&1").gstr_finish(mp).system() == 0 }
+cross_cc = (mp: MutPtr<Malloc>, target: string_view) string_view {
+    eq(target, "").then({
+        return "cc"
+    })
+    envcc := getEnv("ZENC_TARGET_CC")
+    (eq(envcc, "") == false).then({
+        return envcc
+    })
+    gcc := mp.gstr_string(32).gstr_append(mp, target).gstr_append(mp, "-gcc").gstr_finish(mp)
+    mp.which_ok(gcc).then({
+        return gcc
+    })
+    mp.which_ok("zig").then({
+        return mp.gstr_string(48).gstr_append(mp, "zig cc -target ").gstr_append(mp, target).gstr_finish(mp)
+    })
+    derr("zenc: error: cross target ")
+    derr(target)
+    derr(" needs a toolchain — set ZENC_TARGET_CC, or install ")
+    derr(gcc)
+    derr(" or zig\n")
+    ""
+}
 // ── content-hash compile cache ────────────────────────────────────────────────────────────────────
 // check/run/build re-frontend the WHOLE flattened import closure on every invocation (~27s for a
 // program importing the compiler). The cache keys a fully-SUCCESSFUL result by CONTENT: FNV-1a 64-bit
@@ -385,7 +418,7 @@ cache_walk_edges = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view,
     cur
 }
 // the on-disk entry for one (kind, program) pair: <dir>/<kind>_<16 hex digits>.
-cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: string_view, src: string_view, ccflags: string_view, links: string_view) string_view {
+cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: string_view, src: string_view, ccflags: string_view, links: string_view, target: string_view) string_view {
     // An unreadable argv[0] means the compiler-identity stamp is unavailable; a shared degenerate
     // stamp would let a REBUILT compiler replay a stale entry. Empty key = cache disabled for this run.
     self := mp.cache_self()
@@ -399,7 +432,9 @@ cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: s
     // entry-file pragma needs no folding — it lives in `src`, already keyed.
     // The registered c_library genmod map folds in the same way (the generated files' CONTENT is
     // hashed by the walk below through module_path; the map itself covers id/path re-registration).
-    h0 := self.fnv_str(VERSION()).fnv_str(kind).fnv_str(getEnv("ZEN_VIS_REPORT")).fnv_str(ffi_grants_get()).fnv_str(genmods_get()).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(src)
+    // The cross-target triple is part of the key: flipping `Target.target(...)` MUST miss — a
+    // cached aarch64 binary must never replay as the x86_64 build (or vice versa).
+    h0 := self.fnv_str(VERSION()).fnv_str(kind).fnv_str(getEnv("ZEN_VIS_REPORT")).fnv_str(ffi_grants_get()).fnv_str(genmods_get()).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(target).fnv_str(src)
     st := mp.cache_walk_edges(root, mp.dirname(path), mp.edges_of(src), CacheWalk(
         seen: mp.gstr_string(256),
         h: h0,
@@ -423,12 +458,16 @@ cache_store_bin = (mp: MutPtr<Malloc>, cb: string_view, out: string_view) i32 {
 // type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc
 // failure. The cache wraps this whole pipeline: a hit copies the previously-built binary and skips
 // resolve-onward re-verification (the key proves the identical closure already compiled cleanly).
-compile_to = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view) i32 {
-    cb := mp.cache_probe("bin", root, path, src, ccflags, links)
+compile_to = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view, target: string_view) i32 {
+    ccname := mp.cross_cc(target)
+    eq(ccname, "").then({
+        return 1
+    })    // unresolvable cross toolchain: already reported loudly; NEVER fall back to host cc
+    cb := mp.cache_probe("bin", root, path, src, ccflags, links, target)
     (cache_on() && eq(cb, "") == false && file_exists(cb) && mp.cache_bin_cmd(cb, out).system() == 0).match ({
         true  => 0,
         false => {
-            rc := mp.compile_flat(root, path, src, out, ccflags, links)
+            rc := mp.compile_flat(root, path, src, out, ccflags, links, ccname)
             (rc == 0 && cache_on() && eq(cb, "") == false).then({
                 mp.cache_store_bin(cb, out)
             })
@@ -436,7 +475,7 @@ compile_to = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: str
         },
     })
 }
-compile_flat = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view) i32 {
+compile_flat = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view, ccname: string_view) i32 {
     rp := mp.resolve_prog(root, path, src)
     (mp.report_no_if_resolved(rp, path, src) == 0).match ({
         true  => {
@@ -447,7 +486,7 @@ compile_flat = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: s
                     gen := mp.genModuleIn(decls)
                     tmpc := mp.TMPC()
                     write_runnable_c(tmpc, gen).match ({
-                        true  => (mp.cc_command(root, tmpc, out, ccflags, links).system() == 0).match ({
+                        true  => (mp.cc_command(root, tmpc, out, ccflags, links, ccname).system() == 0).match ({
                             true  => 0,
                             false => {
                                 derr("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
@@ -607,7 +646,7 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
     contents_in(mp, spec.source).match ({
         .Ok(src) => {
             // a probe hit means this exact closure content already checked clean: replay the ok line.
-            ck := mp.cache_probe("check", root, spec.source, src, spec.ccflags, spec.links)
+            ck := mp.cache_probe("check", root, spec.source, src, spec.ccflags, spec.links, spec.target)
             (cache_on() && eq(ck, "") == false && file_exists(ck)).match ({
                 true  => check_ok_line(spec.source),
                 false => {
@@ -654,7 +693,7 @@ build_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec, flag: string_vi
             genmods_set(spec.genmods)    // registered c_library genmods: same stamp discipline
             out := eq(spec.out, "").match ({ true => build_out(flag, outarg), false => spec.out })
             contents_in(mp, spec.source).match ({
-                .Ok(src) => (mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links) == 0).match ({
+                .Ok(src) => (mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links, spec.target) == 0).match ({
                     true  => file_exists(out).match ({
                         true  => {
                             derr("zenc: wrote ")
@@ -721,7 +760,7 @@ run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
             contents_in(mp, spec.source).match ({
                 .Ok(src) => {
                     bin := mp.TMPBIN()
-                    (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links) == 0).match ({
+                    (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links, spec.target) == 0).match ({
                         true  => mp.run_command(bin).system() / 256,
                         false => 1,
                     })
@@ -1659,9 +1698,10 @@ Spec*: {
     links: string_view,
     ffi: string_view,
     genmods: string_view,
+    target: string_view,
     library: bool,
     ok: bool,
-}
+}    // target: "" = native (host cc), else a cross triple like "aarch64-linux-gnu"
 join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view { mp.gstr_string(256).gstr_append(mp, a).gstr_append(mp, "/").gstr_append(mp, b).gstr_finish(mp) }
 link_flag = (mp: MutPtr<Malloc>, lk: string_view) string_view { mp.gstr_string(8).gstr_append(mp, "-l").gstr_append(mp, lk).gstr_finish(mp) }
 // src[start .. start+n) as an owned str. (named cstr_* to avoid colliding with std.text.str's
@@ -1692,6 +1732,7 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
                     links: "",
                     ffi: "",
                     genmods: "",
+                    target: "",
                     library: false,
                     ok: false,
                 ),
@@ -1707,6 +1748,7 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
                         links: eq(lk, "").match ({ true => "", false => mp.link_flag(lk) }),
                         ffi: fg,
                         genmods: "",
+                        target: "",
                         library: eq(kind, "library"),
                         ok: true,
                     )
@@ -1720,6 +1762,7 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
             links: "",
             ffi: "",
             genmods: "",
+            target: "",
             library: false,
             ok: false,
         ),
@@ -1751,6 +1794,7 @@ resolve_spec = (mp: MutPtr<Malloc>, root: string_view, arg: string_view) Spec {
                 links: "",
                 ffi: "",
                 genmods: "",
+                target: "",
                 library: false,
                 ok: true,
             ),
@@ -1800,6 +1844,97 @@ source_words = (mp: MutPtr<Malloc>, dir: string_view, v: [u8], i: i64, out: Stri
     })
 }
 source_flags = (mp: MutPtr<Malloc>, dir: string_view, src: string_view) string_view { mp.source_words(dir, src.view(), 0, mp.gstr_string(128)).gstr_finish(mp) }
+// ── the plan's platform fields (lines 7-9 of each 10-line record: os/arch/abi as the integer
+// codes std.build's build_os_code/build_arch_code/build_abi_code print). A record whose codes
+// match the HOST (std.build defaults every Target to host()) — or a legacy short plan with the
+// lines absent — is a NATIVE build: Spec.target stays "" and the cc path is untouched. Anything
+// else is a cross target, canonicalized to the `<arch>-<os>-<abi>` GNU config triple
+// (aarch64-linux-gnu, riscv64-linux-musl, …) that names the conventional cross gcc. ─────────────
+spec_code = (s: string_view) i32 {
+    v: [u8] := s.view()
+    (v.len <= 0).match ({ true => 0 - 1, false => to_i32(v[0] - '0') })
+}    // one plan code line -> its integer (codes are single digits); absent line -> -1
+cross_os_code = (o: Os) i32 {
+    o.match ({
+        .MacOS   => 1,
+        .Linux   => 2,
+        .Windows => 3,
+        .FreeBSD => 4,
+        _        => 0,
+    })
+}    // mirrors std.build's build_os_code
+cross_arch_code = (a: Arch) i32 {
+    a.match ({
+        .Arm64   => 1,
+        .X86_64  => 2,
+        .RiscV64 => 3,
+        .Wasm32  => 4,
+        _        => 0,
+    })
+}    // mirrors std.build's build_arch_code
+cross_abi_code = (b: Abi) i32 {
+    b.match ({
+        .Darwin => 1,
+        .Gnu    => 2,
+        .Musl   => 3,
+        .Msvc   => 4,
+        .Wasi   => 5,
+        _       => 0,
+    })
+}    // mirrors std.build's build_abi_code
+cross_os_name = (n: i32) string_view {
+    (n == 1).match ({
+        true  => "macos",
+        false => (n == 2).match ({
+            true  => "linux",
+            false => (n == 3).match ({
+                true  => "windows",
+                false => (n == 4).match ({ true => "freebsd", false => "unknown" }),
+            }),
+        }),
+    })
+}
+cross_arch_name = (n: i32) string_view {
+    (n == 1).match ({
+        true  => "aarch64",
+        false => (n == 2).match ({
+            true  => "x86_64",
+            false => (n == 3).match ({
+                true  => "riscv64",
+                false => (n == 4).match ({ true => "wasm32", false => "unknown" }),
+            }),
+        }),
+    })
+}
+cross_abi_name = (n: i32) string_view {
+    (n == 1).match ({
+        true  => "darwin",
+        false => (n == 2).match ({
+            true  => "gnu",
+            false => (n == 3).match ({
+                true  => "musl",
+                false => (n == 4).match ({
+                    true  => "msvc",
+                    false => (n == 5).match ({ true => "wasi", false => "unknown" }),
+                }),
+            }),
+        }),
+    })
+}
+cross_triple = (mp: MutPtr<Malloc>, osc: i32, arc: i32, abc: i32) string_view {
+    hp := host()
+    absent := osc < 0 || arc < 0 || abc < 0
+    is_host := osc == cross_os_code(hp.os) && arc == cross_arch_code(hp.arch) && abc == cross_abi_code(hp.abi)
+    (absent || is_host).match ({
+        true  => "",
+        false => mp.gstr_string(32).gstr_append(mp, cross_arch_name(arc)).gstr_append(mp, "-").gstr_append(mp, cross_os_name(osc)).gstr_append(mp, "-").gstr_append(mp, cross_abi_name(abc)).gstr_finish(mp),
+    })
+}
+// v1 cross scope is LINUX cross-ARCH only: aarch64/x86_64/riscv64, gnu or musl. Cross-OS (macOS/
+// Windows/FreeBSD) and wasm error loudly instead of producing garbage — bootstrap/zenrt.c is
+// POSIX/glibc-shaped (sigaltstack, ucontext SP reads, pthread), and no conventional Linux-hosted
+// cross toolchain exists for those targets.
+cross_supported = (osc: i32, arc: i32, abc: i32) bool { osc == 2 && (arc == 1 || arc == 2 || arc == 3) && (abc == 2 || abc == 3) }
 parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, index: i32) Spec {
     v: [u8] := specsrc.view()
     base := 1 + index * 10
@@ -1809,7 +1944,11 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
     out := mp.spec_field(v, base + 3)
     link := mp.spec_field(v, base + 4)
     cc := mp.spec_field(v, base + 5)
+    osc := spec_code(mp.spec_field(v, base + 6))
+    arc := spec_code(mp.spec_field(v, base + 7))
+    abc := spec_code(mp.spec_field(v, base + 8))
     fg := mp.spec_field(v, base + 9)
+    tgt := mp.cross_triple(osc, arc, abc)
     (eq(root, "") || eq(main, "")).match ({
         true  => {
             derr("zenc: build.zen: target is missing root/main\n")
@@ -1820,23 +1959,33 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
                 links: "",
                 ffi: "",
                 genmods: "",
+                target: "",
                 library: false,
                 ok: false,
             )
         },
-        false => Spec(
-            source: mp.join2(mp.join2(dir, root), main),
-            out: eq(out, "").match ({
-                true  => eq(name, "").match ({ true => "", false => mp.join2(dir, name) }),
-                false => mp.join2(dir, out),
-            }),
-            ccflags: mp.source_flags(dir, cc),
-            links: link,
-            ffi: fg,
-            genmods: mp.genmods_extract(dir, specsrc, index),
-            library: false,
-            ok: true,
-        ),
+        false => (eq(tgt, "") == false && cross_supported(osc, arc, abc) == false).match ({
+            true  => {
+                derr("zenc: build.zen: cross target ")
+                derr(tgt)
+                derr(" is unsupported in v1 (Linux aarch64|x86_64|riscv64, gnu|musl only)\n")
+                empty_spec()
+            },
+            false => Spec(
+                source: mp.join2(mp.join2(dir, root), main),
+                out: eq(out, "").match ({
+                    true  => eq(name, "").match ({ true => "", false => mp.join2(dir, name) }),
+                    false => mp.join2(dir, out),
+                }),
+                ccflags: mp.source_flags(dir, cc),
+                links: link,
+                ffi: fg,
+                genmods: mp.genmods_extract(dir, specsrc, index),
+                target: tgt,
+                library: false,
+                ok: true,
+            ),
+        }),
     })
 }
 empty_spec = () Spec {
@@ -1847,6 +1996,7 @@ empty_spec = () Spec {
         links: "",
         ffi: "",
         genmods: "",
+        target: "",
         library: false,
         ok: false,
     )
@@ -1937,7 +2087,7 @@ build_zen_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) PlanS
                 .Err(e) => { },
             })
             bbin := mp.BUILDBIN()
-            rc := mp.compile_to(root, epath, entry, bbin, "", "")
+            rc := mp.compile_to(root, epath, entry, bbin, "", "", "")    // the build program always runs on the HOST
             unlink(epath)    // don't leave the entry in the project dir
             (rc == 0).match ({
                 true  => {
