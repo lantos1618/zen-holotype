@@ -308,13 +308,15 @@ fnv_flags = (h: i64, mp: MutPtr<Malloc>, s: string_view) i64 {
     v: [u8] := s.view()
     mp.fnv_flag_files(h.fnv_str(s), v, 0)
 }
-// the compiler's own identity: the hash of the running zenc binary (argv[0]). A rebuilt zenc — new
-// checker, new codegen, new zenrt.c, all compiled in — yields a new stamp, so an old binary's entries
-// can never be replayed by a new one. An unreadable argv[0] (bare PATH lookup) yields 0 and the
-// probe DISABLES the cache for the run (an empty key) — degrading to a shared stamp would replay
-// stale entries across rebuilds.
+// the compiler's own identity. Hashing the ELF binary itself is a TRAP: contents land in a
+// NUL-terminated string, so the hash stops at the header's first NUL (~byte 4) and every build
+// shares one stamp — a rebuilt compiler could replay stale entries (observed in the field).
+// Instead hash the generated seed (bootstrap/zenc.gen.c beside the binary): plain NUL-free C text
+// that zenc is ALWAYS compiled from, so it identifies the build exactly. Unreadable seed yields 0
+// and the probe DISABLES the cache for the run (empty key) — never a shared degenerate stamp.
 cache_self = (mp: MutPtr<Malloc>) i64 {
-    contents_in(mp, arg(0)).match ({
+    seedp := mp.gstr_string(96).gstr_append(mp, mp.dirname(arg(0))).gstr_append(mp, "/bootstrap/zenc.gen.c").gstr_finish(mp)
+    contents_in(mp, seedp).match ({
         .Ok(b)  => FNV_BASIS().fnv_str(b),
         .Err(e) => 0,
     })

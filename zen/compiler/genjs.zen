@@ -582,22 +582,21 @@ js_dom_d9 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
 }
 // ── match: value position -> an IIFE returning an arm value; statement position -> a real `switch` (so
 //    an arm's early `return` leaves the enclosing function, not just the IIFE). Enum tag is the variant
-//    NAME string; a payload binds `_subj.<Variant>`. The last arm (or a `_`) is `default`. ────────────
+//    NAME string; a payload binds `_subj.<Variant>`. An explicit `_` arm is `default`; without one the
+//    checker proved coverage, so every arm is its own `case` and `default` traps (mirrors genc). ───────
 js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
     is_empty(ar.bind).match ({
         true  => s.js_expr(a, ar.body),
         false => s.gstr_append(a, "(() => { const ").jname(a, ar.bind).gstr_append(a, " = _subj.").gstr_append(a, ar.variant).gstr_append(a, "; return ").js_expr(a, ar.body).gstr_append(a, "; })()"),
     })
 }
+js_switch_panic_default = (s: String, a: MutPtr<Malloc>) String { s.gstr_append(a, "default: __zr.panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ") }
 js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String {
     eq(ar.variant, "_").match ({
         true  => s.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "),
         false => {
             out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": return ").js_arm_body_expr(a, ar).gstr_append(a, "; ")
-            last.match ({
-                true  => out.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "),
-                false => out,
-            })
+            last.match ({ true => out.js_switch_panic_default(a), false => out })
         },
     })
 }
@@ -633,10 +632,7 @@ js_switch_stmt_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) St
         true  => s.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "),
         false => {
             out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": ").js_arm_stmt(a, ar).gstr_append(a, " break; ")
-            last.match ({
-                true  => out.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "),
-                false => out,
-            })
+            last.match ({ true => out.js_switch_panic_default(a), false => out })
         },
     })
 }

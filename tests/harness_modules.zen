@@ -587,6 +587,16 @@ harness_modules_run* = () i32 {
         want: 42,
     ), ModValCase(
         files: [ModFile(
+            name: "shapes.zen",
+            src: "Area*: { get = (s: Self) i32 }\nSq*: { n: i32 }\nhelper* = (x: i32) i32 { x + 41 }\nSq.impl(Area, {\n    get = (s: Sq) i32 { helper(s.n) }\n})\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ Sq, Area } = shapes\nsh = shapes\nmain = () i32 {\n    s := Sq(n: 1)\n    s.get()\n}\n",
+        )],
+        entry: "p.zen",
+        want: 42,
+    ), ModValCase(
+        files: [ModFile(
             name: "b.zen",
             src: "helper* = (x: i32) i32 { x * 2 }\n",
         ), ModFile(
@@ -1154,6 +1164,9 @@ harness_modules_run* = () i32 {
         entry: "p.zen",
         want: 5,
     )])
+    // ONE impl block reached via TWO import paths (by-name + namespace alias): the alias emission
+    // rewrites the body's module-local call to `sh__helper`, so the two flat copies are NOT
+    // byte-equal — the resolver's impl dedup must key on ORIGIN identity and stay silent here.
     // std.rt (A) ambient default, ZERO setup: rt.alloc/rt.release serve from the heap default.
     // std.rt (B) with-INJECT: rt.with(counting_rt) makes 3 ambient allocs bump the counter to 3.
     // std.rt (C) TEST-inject: rt.with(failing_rt) makes an ambient alloc return null, observed inside.
@@ -1294,6 +1307,28 @@ harness_modules_run* = () i32 {
         entry: "p.zen",
         should_pass: true,
         needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "shapes.zen",
+            src: "Area*: { get = (s: Self) i32 }\nSq*: { n: i32 }\nSq.impl(Area, {\n    get = (s: Sq) i32 { 1 }\n})\n",
+        ), ModFile(
+            name: "other.zen",
+            src: "{ Sq, Area } = shapes\nSq.impl(Area, {\n    get = (s: Sq) i32 { 2 }\n})\nmarker* = () i32 { 7 }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ Sq, Area } = shapes\n{ marker } = other\nmain = () i32 {\n    s := Sq(n: 1)\n    s.get() + marker()\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[dup-impl]",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "Area: { get = (s: Self) i32 }\nSq: { n: i32 }\nSq.impl(Area, {\n    get = (s: Sq) i32 { 1 }\n})\nSq.impl(Area, {\n    get = (s: Sq) i32 { 2 }\n})\nmain = () i32 {\n    s := Sq(n: 0)\n    s.get()\n}\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[dup-impl]",
     ), ModVerdictCase(
         files: [ModFile(
             name: "base.zen",
@@ -1922,6 +1957,9 @@ harness_modules_run* = () i32 {
         should_pass: true,
         needle: "",
     )])
+    // TWO different impl bodies for one (receiver, trait) across two modules: "first wins" would
+    // silently drop the second body — must be a loud error[dup-impl] naming both modules.
+    // the same conflict INSIDE one module (the entry program itself) — also error[dup-impl].
     // World teaching hint (Stage B3): a bare call of a name that exists ONLY behind a module
     // alias names the exporting module in the undefined-name hint …
     // … and spells out the exact import line to add.
