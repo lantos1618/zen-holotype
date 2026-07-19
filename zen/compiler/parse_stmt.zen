@@ -4,7 +4,7 @@
 // from compiler.parse_expr and the type/brace helpers from compiler.parse_type.
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
-{ Stmt, slet, slett, slet_at, slett_at, sassign, sassign_at, sidxset_at, swhile, sret, sexpr, vref, eindex, bin_at, tvoid } = compiler.genc
+{ Stmt, Expr, ArmData, slet, slett, slet_at, slett_at, sassign, sassign_at, sidxset_at, swhile, sret, sexpr, vref, eindex, bin_at, member_at, comp_tmp_name, tvoid } = compiler.genc
 { Token, scan } = compiler.lex
 { at } = std.text.bytes
 { Malloc } = std.mem.alloc
@@ -247,9 +247,100 @@ parse_set_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
     v := a.parse_or(src, eq.next)    // value
     a.scons(sassign_at(lhs.expr, v.expr, start), a.parse_stmts(src, v.next))
 }
-// `name[i] OP= rhs`  →  `name[i] = name[i] OP rhs`. The index is re-parsed for the left operand so
-// the two index expressions are independent AST (no shared node). Reuses sidxset_at, like parse_idxset_stmt.
-parse_comp_idxset_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
+// ── single-evaluation guard for compound places ─────────────────────────────────
+// The `place = place OP rhs` desugar reads the place TWICE, which is only harmless while the place
+// is PURE. An index sub-expression can call a function (`a[f()] += 1`, `s.buf[f()].n += 1`): naive
+// re-reading would run f() twice. has_call spots such places; the desugar then hoists each
+// call-bearing index into a hidden `__comptmp_<pos>_<k>` local (evaluated ONCE, before the store)
+// and reads the temp in both copies. Pure places keep the plain re-read desugar byte-identically.
+has_call = (e: Ptr<Expr>) bool {
+    e.match ({
+        .Call(c)        => true,
+        .MethodCall(mc) => true,
+        .Block(bk)      => true,    // a chained call `f(a)(b)` lowers to a block — contains a call
+        .Loop(lp)       => true,    // a loop body runs arbitrary statements — effectful
+        .MakeStruct(ms) => true,    // ctor/literal inits may call (conservative — hoisting a pure index is still correct)
+        .MakeEnum(me)   => true,
+        .SliceLit(sl)   => true,
+        .Bin(b)         => b.lhs.has_call() || b.rhs.has_call(),
+        .Cond(cd)       => cd.c.has_call() || cd.t.has_call() || cd.e.has_call(),
+        .Member(m)      => m.obj.has_call(),
+        .Arrow(ar)      => ar.obj.has_call(),
+        .Index(ix)      => ix.seq.has_call() || ix.idx.has_call(),
+        .Match(mt)      => mt.subj.has_call() || mt.arms.arms_have_call(0),
+        _               => false,
+    })
+}    // Int/Byte/FloatLit/Var/StrLit/Tag/Lambda — inert
+arms_have_call = (arms: [ArmData], i: i64) bool {
+    (i >= arms.len).match ({
+        true  => false,
+        false => arms[i].body.has_call() || arms.arms_have_call(i + 1),
+    })
+}
+// one desugared compound assignment: the hoisted-index bindings (SNil when the place is pure), the
+// store statement, and the position after the rhs — shared by the top-level and block paths.
+CompDes: {
+    lets: Ptr<SList>,
+    stmt: Stmt,
+    next: i32,
+}
+// splice the lets (accumulated newest-first) back into SOURCE order ahead of the store + tail
+comp_prefix = (a: MutPtr<Malloc>, d: CompDes, tail: Ptr<SList>) Ptr<SList> { a.lets_splice(d.lets, a.scons(d.stmt, tail)) }
+lets_splice = (a: MutPtr<Malloc>, lets: Ptr<SList>, tail: Ptr<SList>) Ptr<SList> {
+    lets.match ({
+        .SNil     => tail,
+        .SCons(c) => a.lets_splice(c.tail, a.scons(c.head, tail)),
+    })
+}
+// Rebuild a place's Member/Index spine, replacing each call-bearing index expression with a read of
+// the hidden temp `__comptmp_<start>_<k>` and accumulating its `tmp := idx` binding. Deterministic:
+// walking the same source place mints the same temp names, so the target and operand copies (parsed
+// independently — no shared nodes) read the SAME evaluated index. Non-hoisted sub-exprs are kept
+// from the copy being walked, so the two results stay node-disjoint.
+PlaceRw: {
+    e: Ptr<Expr>,
+    lets: Ptr<SList>,
+    k: i32,
+}
+place_hoist = (a: MutPtr<Malloc>, e: Ptr<Expr>, start: i32, k: i32, lets: Ptr<SList>) PlaceRw {
+    e.match ({
+        .Index(ix) => {
+            b := a.place_hoist(ix.seq, start, k, lets)
+            ix.idx.has_call().match ({
+                true  => {
+                    tmp := a.comp_tmp_name(start, b.k)
+                    PlaceRw(
+                        e: a.enode(eindex(b.e, a.enode(vref(tmp)), ix.elem)),
+                        lets: a.scons(slet(tmp, ix.idx), b.lets),
+                        k: b.k + 1,
+                    )
+                },
+                false => PlaceRw(
+                    e: a.enode(eindex(b.e, ix.idx, ix.elem)),
+                    lets: b.lets,
+                    k: b.k,
+                ),
+            })
+        },
+        .Member(m) => {
+            b := a.place_hoist(m.obj, start, k, lets)
+            PlaceRw(
+                e: a.enode(member_at(b.e, m.field, m.pos)),
+                lets: b.lets,
+                k: b.k,
+            )
+        },
+        _          => PlaceRw(
+            e: e,
+            lets: lets,
+            k: k,
+        ),
+    })
+}    // the Var root (or anything non-spine) — kept as-is
+// `name[i] OP= rhs`  →  `name[i] = name[i] OP rhs`. A pure index is re-parsed for the left operand
+// so the two index expressions are independent AST (no shared node); a call-bearing index is bound
+// to a hidden temp first so it evaluates ONCE. Reuses sidxset_at, like parse_idxset_stmt.
+comp_idxset_desugar = (a: MutPtr<Malloc>, src: string_view, pos: i32) CompDes {
     nt := src.scan(pos)    // the array name
     name := a.lexeme(src, nt.tok)
     lb := src.scan(nt.next)    // '['
@@ -258,21 +349,61 @@ parse_comp_idxset_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SLi
     op := src.scan(rb.next)    // the `OP=` token
     ops := src.at(op.tok.start).op_str()
     v := a.parse_or(src, op.next)    // rhs
-    cur := a.enode(eindex(a.enode(vref(name)), a.parse_or_nested(src, lb.next).expr, tvoid()))    // name[i] read
-    nv := a.enode(bin_at(ops, cur, v.expr, op.tok.start))
-    a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), nv, nt.tok.start), a.parse_stmts(src, v.next))
+    ie.expr.has_call().match ({
+        true  => {
+            tmp := a.comp_tmp_name(nt.tok.start, 0)
+            cur := a.enode(eindex(a.enode(vref(name)), a.enode(vref(tmp)), tvoid()))
+            CompDes(
+                lets: a.scons(slet(tmp, ie.expr), a.snil()),
+                stmt: sidxset_at(a.enode(vref(name)), a.enode(vref(tmp)), tvoid(), a.enode(bin_at(ops, cur, v.expr, op.tok.start)), nt.tok.start),
+                next: v.next,
+            )
+        },
+        false => {
+            cur := a.enode(eindex(a.enode(vref(name)), a.parse_or_nested(src, lb.next).expr, tvoid()))
+            CompDes(
+                lets: a.snil(),
+                stmt: sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), a.enode(bin_at(ops, cur, v.expr, op.tok.start)), nt.tok.start),
+                next: v.next,
+            )
+        },
+    })
+}
+parse_comp_idxset_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
+    d := a.comp_idxset_desugar(src, pos)
+    a.comp_prefix(d, a.parse_stmts(src, d.next))
 }
 // `place OP= rhs`  →  `place = place OP rhs` (non-index lvalue). parse_atom is pure, so reading the
 // place twice from the same position yields two independent copies — one the target, one the operand.
-parse_comp_set_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
+// A place whose index sub-exprs contain calls goes through place_hoist instead — twice, once per
+// copy (the second walk mints the same temp names and its duplicate lets are discarded).
+comp_set_desugar = (a: MutPtr<Malloc>, src: string_view, pos: i32) CompDes {
     start := src.scan(pos).tok.start
     lhs := a.parse_atom(src, pos)    // store target (Var or Member chain)
     cur := a.parse_atom(src, pos)    // identical copy, the left operand
     op := src.scan(lhs.next)    // the `OP=` token
     ops := src.at(op.tok.start).op_str()
     v := a.parse_or(src, op.next)    // rhs
-    nv := a.enode(bin_at(ops, cur.expr, v.expr, op.tok.start))
-    a.scons(sassign_at(lhs.expr, nv, start), a.parse_stmts(src, v.next))
+    lhs.expr.has_call().match ({
+        true  => {
+            t := a.place_hoist(lhs.expr, start, 0, a.snil())    // target copy + the hoist lets
+            o := a.place_hoist(cur.expr, start, 0, a.snil())
+            CompDes(
+                lets: t.lets,
+                stmt: sassign_at(t.e, a.enode(bin_at(ops, o.e, v.expr, op.tok.start)), start),
+                next: v.next,
+            )
+        },
+        false => CompDes(
+            lets: a.snil(),
+            stmt: sassign_at(lhs.expr, a.enode(bin_at(ops, cur.expr, v.expr, op.tok.start)), start),
+            next: v.next,
+        ),
+    })
+}
+parse_comp_set_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
+    d := a.comp_set_desugar(src, pos)
+    a.comp_prefix(d, a.parse_stmts(src, d.next))
 }
 parse_let_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
     nt := src.scan(pos)    // the bound name
@@ -479,36 +610,21 @@ block_set = (a: MutPtr<Malloc>, src: string_view, pos: i32) BlockEnd {
         next: rest.next,
     )
 }
-// compound `name[i] OP= rhs` inside a block — same desugar as parse_comp_idxset_stmt
+// compound `name[i] OP= rhs` inside a block — the same desugar as parse_comp_idxset_stmt
 block_comp_idxset = (a: MutPtr<Malloc>, src: string_view, pos: i32) BlockEnd {
-    nt := src.scan(pos)    // the array name
-    name := a.lexeme(src, nt.tok)
-    lb := src.scan(nt.next)    // '['
-    ie := a.parse_or_nested(src, lb.next)    // index (store target)
-    rb := src.scan(ie.next)    // ']'
-    op := src.scan(rb.next)    // the `OP=` token
-    ops := src.at(op.tok.start).op_str()
-    v := a.parse_or(src, op.next)    // rhs
-    cur := a.enode(eindex(a.enode(vref(name)), a.parse_or_nested(src, lb.next).expr, tvoid()))
-    nv := a.enode(bin_at(ops, cur, v.expr, op.tok.start))
-    rest := a.parse_block(src, v.next)
+    d := a.comp_idxset_desugar(src, pos)
+    rest := a.parse_block(src, d.next)
     BlockEnd(
-        list: a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), nv, nt.tok.start), rest.list),
+        list: a.comp_prefix(d, rest.list),
         next: rest.next,
     )
 }
-// compound `place OP= rhs` inside a block — same desugar as parse_comp_set_stmt
+// compound `place OP= rhs` inside a block — the same desugar as parse_comp_set_stmt
 block_comp_set = (a: MutPtr<Malloc>, src: string_view, pos: i32) BlockEnd {
-    start := src.scan(pos).tok.start
-    lhs := a.parse_atom(src, pos)    // store target
-    cur := a.parse_atom(src, pos)    // operand copy
-    op := src.scan(lhs.next)    // the `OP=` token
-    ops := src.at(op.tok.start).op_str()
-    v := a.parse_or(src, op.next)    // rhs
-    nv := a.enode(bin_at(ops, cur.expr, v.expr, op.tok.start))
-    rest := a.parse_block(src, v.next)
+    d := a.comp_set_desugar(src, pos)
+    rest := a.parse_block(src, d.next)
     BlockEnd(
-        list: a.scons(sassign_at(lhs.expr, nv, start), rest.list),
+        list: a.comp_prefix(d, rest.list),
         next: rest.next,
     )
 }
