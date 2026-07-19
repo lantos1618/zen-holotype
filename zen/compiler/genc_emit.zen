@@ -591,12 +591,18 @@ gen_switch_case = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: str
 gen_switch_default = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { s.gstr_append(alloc, "default: ").gen_switch_body(alloc, subj, sep, a) }
 gen_switch_stmt_case = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, a: ArmData) String { s.gstr_append(alloc, "case ").gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, a.variant).gstr_append(alloc, ": ").gen_switch_stmt_body(alloc, subj, sep, a) }
 gen_switch_stmt_default = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String { s.gstr_append(alloc, "default: ").gen_switch_stmt_body(alloc, subj, sep, a) }
+// A match with no explicit `_` arm was proved exhaustive by the CHECKER; the emitter must not silently
+// re-route stray tags into the last arm's body (the old last-arm-as-`default:` trick — the #377 class
+// of silent miscompiles). Every arm gets its own `case`, and `default:` traps: a tag outside the listed
+// variants at runtime means the checker and emitter disagree. zen__panic diverges (write + abort), so
+// value-position `_out` is never read on this path.
+gen_switch_panic_default = (s: String, alloc: MutPtr<Malloc>) String { s.gstr_append(alloc, "default: zen__panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ") }
 gen_switch_arm = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, a: ArmData, last: bool) String {
     eq(a.variant, "_").match ({
         true  => s.gen_switch_default(alloc, subj, sep, a),
         false => {
             out := s.gen_switch_case(alloc, subj, sep, ename, a)
-            last.match ({ true => out.gen_switch_default(alloc, subj, sep, a), false => out })
+            last.match ({ true => out.gen_switch_panic_default(alloc), false => out })
         },
     })
 }
@@ -605,7 +611,7 @@ gen_switch_stmt_arm = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep:
         true  => s.gen_switch_stmt_default(alloc, subj, sep, a),
         false => {
             out := s.gen_switch_stmt_case(alloc, subj, sep, ename, a)
-            last.match ({ true => out.gen_switch_stmt_default(alloc, subj, sep, a), false => out })
+            last.match ({ true => out.gen_switch_panic_default(alloc), false => out })
         },
     })
 }
