@@ -6457,6 +6457,189 @@ check_module_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl],
         },
     })
 }
+// ════════════════════════════════════════════════════════════════════════════════════════
+// ── UNDER-FREE (LEAK) CHECK — the DUAL of the over-free ownership pass ────────────────────
+// The ownership pass above is over-free-SOUND: it catches double-free / use-after-consume. Its blind
+// spot is UNDER-free: an owner CREATED here that is never released, moved, or returned just leaks —
+// silently. This pass closes exactly that hole, and ONLY where it can PROVE a leak with ZERO false
+// positives (over-rejection is the cardinal sin — a false leak on legit std code is worse than a miss).
+//
+// SCOPE reached (deliberately narrow, must-leak-only v1):
+//   • Candidate = a TOP-LEVEL `let o := <v>` of a function body whose value's inferred type is an
+//     owner (owner_base ∈ {Own,Rc,Arc}) AND whose value is a FRESH PRODUCTION — NOT a bare `.Var`/
+//     `.Member`/`.Arrow`/`.Index` (those ALIAS/borrow an owner held elsewhere: the field/source still
+//     owns it, so releasing through the alias would double-free — flagging them would be a false
+//     positive). A Call/Match/Block/... value that yields a fresh owner is the creation site.
+//   • A candidate LEAKS iff its name is NEVER read again anywhere in the function AFTER the binding.
+//     ANY later occurrence of the name — as a release/drop receiver, a move into a consuming call, a
+//     returned value (directly OR wrapped: `ok(o)`, `.Some(o)`, `Box(o: o)`), a send, a store through
+//     an out-param, or even a plain read — DISCHARGES it (this pass under-reports). The read scan is
+//     EXHAUSTIVE over every Expr/Stmt shape: missing an occurrence would be a false positive, so the
+//     safe direction is to find EVERY mention. Because any escape/consume necessarily NAMES the owner,
+//     "never named again" is a sound proof of leak with no escape-analysis blind spots.
+//
+// DEFERRED to v2 (all honest under-reports, never over-reports): owners bound inside a nested block/
+// branch; owners whose only later use is a pure read (`o.get()`) with no free (leaks, but exempted
+// here); leak-on-SOME-paths (freed on one branch, forgotten on another); and the ARENA caveat — an
+// `Own<T>` from an arena/scratch allocator is freed wholesale at scope exit and needs no explicit
+// release, yet is type-indistinguishable from a heap `Own`; if the whole-tree sweep shows such a
+// binding is also never-named-again, the FRESH-PRODUCTION gate would still flag it, so this pass is
+// only enabled once the sweep confirms none exists (see report). Rc/Arc share the same soundness (an
+// undropped initial count leaks) and the same never-named-again proof.
+KLEAK = () i32 { 43 }    // CUSTOM channel: a local owner created here is never released/moved/returned before the function exits. Own diagnostic (own kind/message/hint), never kv_at, never the diag_info ladder. Unique code in the 6-bit space.
+// EXHAUSTIVE `.Var(nm)` occurrence scan — true iff the name is read ANYWHERE in the expr tree. Every
+// sub-expression-bearing shape is descended; missing one would risk a false positive (a real use gone
+// unseen), so this is intentionally total. Binding-only name fields (arm.bind, loop idx/elem, lambda
+// params, let/assign target names) are NOT reads and are correctly not matched here.
+name_read_in_expr = (nm: string_view, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Var(v)         => eq(v.name, nm),
+        .Bin(b)         => nm.name_read_in_expr(b.lhs) || nm.name_read_in_expr(b.rhs),
+        .Call(c)        => nm.name_read_in_args(c.args),
+        .MethodCall(mc) => nm.name_read_in_expr(mc.recv) || nm.name_read_in_args(mc.args),
+        .Cond(d)        => nm.name_read_in_expr(d.c) || nm.name_read_in_expr(d.t) || nm.name_read_in_expr(d.e),
+        .Member(m)      => nm.name_read_in_expr(m.obj),
+        .Arrow(ar)      => nm.name_read_in_expr(ar.obj),
+        .MakeEnum(mk)   => nm.name_read_in_expr(mk.payload),
+        .MakeStruct(s)  => nm.name_read_in_inits(s.inits),
+        .Match(m)       => nm.name_read_in_expr(m.subj) || nm.name_read_in_arms(m.arms),
+        .SliceLit(sd)   => nm.name_read_in_args(sd.items),
+        .Index(ix)      => nm.name_read_in_expr(ix.seq) || nm.name_read_in_expr(ix.idx),
+        .Loop(l)        => nm.name_read_in_expr(l.seq) || nm.name_read_in_body(l.body),
+        .Lambda(lm)     => nm.name_read_in_body(lm.body),
+        .Block(b)       => nm.name_read_in_body(b.stmts),
+        _               => false,
+    })
+}
+name_read_in_args = (nm: string_view, args: [Expr]) bool {
+    f := false
+    args.loop((h, i, ar) {
+        f = nm.name_read_in_expr(ar.addr()).match ({ true => true, false => f })
+    })
+    f
+}
+name_read_in_inits = (nm: string_view, inits: [FieldInit]) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = nm.name_read_in_expr(fi.value).match ({ true => true, false => f })
+    })
+    f
+}
+name_read_in_arms = (nm: string_view, arms: [ArmData]) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        f = nm.name_read_in_expr(ar.body).match ({ true => true, false => f })
+    })
+    f
+}
+name_read_in_stmt = (nm: string_view, st: Stmt) bool {
+    st.match ({
+        .Let(l)      => nm.name_read_in_expr(l.value),
+        .Assign(x)   => nm.name_read_in_expr(x.target) || nm.name_read_in_expr(x.value),
+        .Return(r)   => nm.name_read_in_expr(r),
+        .If(f)       => nm.name_read_in_expr(f.c) || nm.name_read_in_body(f.then) || nm.name_read_in_body(f.els),
+        .While(w)    => nm.name_read_in_expr(w.c) || nm.name_read_in_body(w.body),
+        .IndexSet(x) => nm.name_read_in_expr(x.seq) || nm.name_read_in_expr(x.idx) || nm.name_read_in_expr(x.value),
+        .ExprStmt(e) => nm.name_read_in_expr(e),
+    })
+}
+name_read_in_body = (nm: string_view, body: [Stmt]) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = nm.name_read_in_stmt(st).match ({ true => true, false => f })
+    })
+    f
+}
+// is the name read in any statement strictly AFTER index k? (discharge must follow the binding).
+name_read_after = (nm: string_view, body: [Stmt], k: i32) bool {
+    f := false
+    body.loop((h, i, st) {
+        (i > k).then({
+            f = nm.name_read_in_stmt(st).match ({ true => true, false => f })
+        })
+    })
+    f
+}
+// a value that merely ALIASES an existing owner (a bare local, or a field/element read) — NOT a fresh
+// creation. Excluded from candidacy: the aliased source still owns the allocation, so a "leak" here
+// would be a false positive (and freeing through the alias would double-free).
+leak_alias_value = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Var(v)    => true,
+        .Member(m) => true,
+        .Arrow(ar) => true,
+        .Index(ix) => true,
+        _          => false,
+    })
+}
+// a top-level `let` binding a FRESH owner that is never named again → the leak position (0 = none).
+kv_leak_let = (a: MutPtr<Malloc>, env: Env, body: [Stmt], k: i32, l: LetData) i32 {
+    (is_owner_base(env.infer_expr(l.value).owner_base()) && l.value.leak_alias_value() == false).match ({
+        true  => nm_read_or_leak(env, body, k, l),
+        false => 0,
+    })
+}
+// split out so the owner-typed arm's inner match does not nest inside kv_leak_let's outer match.
+nm_read_or_leak = (env: Env, body: [Stmt], k: i32, l: LetData) i32 {
+    l.name.name_read_after(body, k).match ({
+        true  => 0,
+        false => l.pos.pos_or(load(l.value).expr_pos()),
+    })
+}
+kv_leak_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], k: i32, st: Stmt) i32 {
+    st.match ({
+        .Let(l) => a.kv_leak_let(env, body, k, l),
+        _       => 0,
+    })
+}
+kv_leak_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env(
+        vars: a.params_env(f.params),
+        decls: decls,
+        didx: idx,
+        exp: f.ret,
+        a: a,
+    )
+    acc := 0
+    e := env
+    f.body.loop((h, k, st) {
+        acc = acc.kv_kor(a.kv_leak_stmt(e, f.body, k, st))
+        e = a.extend_env(e, st)
+    })
+    acc
+}
+check_module_leak_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    acc := 0
+    idx := a.build_decl_index(decls)
+    decls.loop((h, i, d) {
+        acc = acc.kv_kor(d.match ({
+            .DFunc(f) => a.kv_leak_check_func(decls, idx, f),
+            _         => 0,
+        }))
+    })
+    acc
+}
+check_module_leak* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_leak_kind(decls) == 0).match ({
+    true  => 0,
+    false => 1,
+}) }
+check_module_leak_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
+    pos := a.check_module_leak_kind(decls)
+    (pos == 0).match ({
+        true  => check_diagnostic_none(),
+        false => {
+            CheckDiagnostic(
+                code: KLEAK(),
+                kind: "leak",
+                source_offset: pos,
+                span_width: src.diagnostic_span_width(pos),
+                count: 1,
+                message: "owner created here is never released or moved before the function returns",
+                hint: "release it (`o.release_in(a)` / `o.drop_in(a)`), move it into a consuming call, or return it",
+            )
+        },
+    })
+}
 // ── ADDR-OF-LOCAL ESCAPE ──────────────────────────────────────────────────────────────────────────
 // Returning `x.addr()` where `x` is a stack local hands the caller a pointer into the dead frame. This
 // is a SEPARATE pass from the scope-escape above: it cannot reuse that walker, because a general
