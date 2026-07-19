@@ -207,7 +207,113 @@ area = (s: Shape) i32 {
 ```
 
 Enum matches must be exhaustive unless they include `_`. Duplicate arms and
-unknown variants are type errors.
+unknown variants are type errors. The precise rules are in the
+[Semantics Contract](#semantics-contract) below.
+
+## Semantics Contract
+
+Six implemented decisions the rest of this spec assumes. Each is current
+behavior, anchored to the code that enforces it.
+
+### Integer overflow wraps
+
+Signed integer arithmetic wraps (two's complement): `2147483647 + 1` is
+`-2147483648`. This is language semantics, not a C accident — every C compile
+passes `-fwrapv`, both the user `build`/`run` command line (`cc_command` in
+[driver.zen](driver.zen)) and the bootstrap seed (`CFLAGS` in
+[bootstrap/Makefile](bootstrap/Makefile)). `u8` arithmetic wraps mod 256 as
+unsigned arithmetic always does. There is no trapping or undefined-overflow
+compiler mode, and none is planned as a mode: checked or saturating arithmetic,
+when it arrives, will be library methods on the integer types, not flags. On the
+JS backend, `i32`/`u8` results are re-wrapped to width (`| 0`, `& 255`,
+`Math.imul` — see `compiler.genjs`); full-width `i64` wrapping there is deferred
+with the rest of JS i64 (see Backends).
+
+### Implicit conversions
+
+The entire implicit-conversion surface is one function: `fits` in
+`compiler/check.zen`. A value of type `g` fills a slot of type `w` when:
+
+- **Integer widening by rank**: `u8 <= i32 <= i64` (`ty_rank`). A narrower
+  integer fits a wider slot; never the reverse — passing `i32` where `u8` is
+  expected is `error[arg-type]`.
+- **`f64` is outside the chain**: no implicit conversion between any integer
+  and `f64` in either direction; conversions are the explicit `to_f64` /
+  `to_i32` / `to_i64` / `to_u8` intrinsics.
+- **`RawPtr<u8>` is the raw floor** (`raw_floor_fits`): the byte-buffer type of
+  `null_ptr()` and allocation results fits *any* pointer slot. This is the one
+  deliberately permissive edge, confined to the allocator/FFI boundary.
+- **Pointer capability only weakens** (`mode_fits`): `MutPtr<T>` fits a
+  `Ptr<T>` or `RawPtr<T>` slot, but a read-only `Ptr<T>` never fits either
+  writable spelling.
+- **Nullability never vanishes implicitly**: a typed `RawPtr<T>` (nullable)
+  never fits a non-null `Ptr<T>`/`MutPtr<T>` slot; it must pass
+  `assert_nonnull` first.
+- **String provenance is directional**: `string_literal` fits `string_cstr`
+  and `string_view`, and `string_cstr` fits `string_view`, never the reverse
+  (`ty_eq`).
+
+None of the above happens under a constructor. Pointees, slice elements,
+function types, and generic type arguments compare with `invariant_ty_eq`:
+`[i32]` does not fit `[i64]`, `MutPtr<u8>` does not fit a `MutPtr<i32>` or
+nested `Ptr<u8>` position, and the string provenances are distinct types inside
+aggregates. Widening and capability loss are outer-value coercions only.
+
+### Evaluation order
+
+The intended order is left to right, in source order: call arguments, binary
+operands, struct literal fields, slice literal elements. This intent is not yet
+a full guarantee. The C backend emits calls and literals as plain C argument
+and initializer lists (`gen_call_default` in `compiler/genc_emit.zen`), so
+where lowering introduces no sequencing temporaries, the C compiler's
+unspecified order leaks through. Separately, the known-defects table in
+[STATUS.md](STATUS.md) tracks open evaluate-exactly-once defects: compound
+assignments can evaluate the base/index twice, literal and discarded enum match
+subjects can re-evaluate per arm, and generic substitution can duplicate or
+drop a side-effecting argument. Do not write code whose correctness depends on
+evaluation order or count of side effects within one expression until those
+rows close.
+
+### Definite initialization
+
+Every local binding form carries a value: `x := v` and `x: T := v`. A
+value-less local declaration (`x: i32` alone) is not syntax — it is rejected at
+parse. Uninitialized locals therefore do not exist by construction, and there
+is no definite-assignment analysis because there is nothing for it to check.
+
+### Shadowing
+
+`x := v` always introduces a fresh binding, even when `x` is already bound.
+Verified current behavior:
+
+- A local may shadow a parameter, and the initializer still sees the old
+  binding: in `f = (x: i32) i32 { x := x + 1; x }`, `f(41)` is `42`.
+- Rebinding in the same block is accepted — there is no redeclaration error —
+  and the later binding wins for subsequent statements. The new binding may
+  even change type: `x := 1` followed by `x := "hello"` is accepted.
+- Loop-lambda parameters (`xs.loop((h, i, x) { ... })`) and bindings inside
+  match-arm blocks shadow outer names only within their block; the outer
+  binding is unchanged afterwards.
+
+Locals and parameters also shadow same-named top-level functions and
+intrinsics; calls through such a name go to the local value
+(`shadows_toplevel` in `compiler/check_validate.zen`).
+
+### Match arm order and coverage
+
+For an enum match, the checker enforces (`compiler/check_validate.zen`,
+`kv_match_kind`):
+
+- **Coverage**: without `_`, every declared variant needs an arm —
+  `error[exhaustiveness]`, naming the first uncovered variant.
+- **No duplicates**: a repeated variant arm is `error[dup-variant]`, with or
+  without a `_` arm present.
+- **No unknown variants**: an arm naming a variant the enum does not declare
+  is `error[undefined-name]`.
+
+Arms are tried in source order and the first match wins. `_` matches any
+subject, so an arm written after `_` is unreachable; today such an arm is
+accepted silently rather than rejected — order your `_` last.
 
 ## Traits, Impls, Methods
 
