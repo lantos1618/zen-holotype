@@ -61,7 +61,10 @@ an early return statement, but early returns inside value-position block/match
 arms are rejected because they would be dropped by expression emission.
 
 Bodyless functions are foreign declarations. The backend emits C prototypes and
-the system linker supplies the body.
+the system linker supplies the body. FFI is a build-granted capability: a
+module may contain foreign declarations only when the build grants that module
+(see [Imports And Modules](#imports-and-modules)); an ungranted foreign
+declaration in a dependency is `error[ffi-ungranted]`.
 
 The program entry point is `main`, in one of two shapes:
 
@@ -461,10 +464,34 @@ root = "src"
 main = "main.zen"
 out = "hello"
 ccflags = "native.c"
+ffi = "util, vendor.hooks"
 ```
 
 `check`/`build`/`run <project-dir>` resolve `<root>/<main>`, use `out` for
 build output when `-o` is omitted, and pass `ccflags` through to `cc`.
+
+FFI is a build-granted capability. A module may contain foreign (bodyless)
+declarations only when the build grants it, closing the supply-chain hole where
+a transitive dependency declares `system` and shells out without the build ever
+saying so. The grant surfaces are:
+
+- `zen.toml`: `ffi = "util, vendor.hooks"` — comma-separated dotted user
+  module ids;
+- `build.zen`: `b.exe(…).ffi("util, vendor.hooks")` — the `Target`'s grant
+  field, threaded through the emitted plan;
+- single-file programs: an entry-file-only pragma line `//! ffi: util,
+  vendor.hooks` (the pragma is ignored in dependency files).
+
+Implicitly granted, with no declaration needed: repo-tree modules (`std.*` /
+`compiler.*` — the audited stdlib is the sanctioned FFI surface) and the entry
+module itself (an extern in the program's own file is visible to its author;
+the threat model is dependencies, not the program). A grant names the
+DECLARING module: granting `mid` does not grant `mid`'s own dependency. An
+ungranted foreign declaration rejects during resolution as
+`error[ffi-ungranted]` at the declaration's line, naming the module and the
+symbol; `ZEN_VIS_REPORT=1` downgrades it to a report-only sweep, exactly like
+`error[private-name]`. The manifest/registry grant text folds into the content
+cache key (the entry pragma lives in the keyed source already).
 
 ## Memory And Ownership
 

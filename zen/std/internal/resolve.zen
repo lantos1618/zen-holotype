@@ -2753,6 +2753,137 @@ enforce_private_leaks* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i
     })
     0
 }
+// ── error[ffi-ungranted]: FFI is a BUILD-GRANTED capability ──────────────────────────────────────
+// A bodyless (foreign) declaration binds a raw C symbol — any module holding one can reach ANY
+// linked C function (`system`, `unlink`, …). The supply-chain hole: a TRANSITIVE dependency could
+// declare an extern and shell out without the build ever saying so. So foreign declarations are
+// gated per MODULE by an explicit build grant, one of:
+//   • zen.toml:            ffi = "vendor.hooks, util"     (comma-separated dotted module ids)
+//   • build.zen:           b.exe(…).ffi("vendor.hooks")   (the Target's grant field)
+//   • entry-file pragma:   //! ffi: vendor.hooks          (single-file programs; ENTRY file only)
+// Implicitly trusted, no grant needed: repo-tree modules (non-`u/` ids — std./compiler., the audited
+// stdlib IS the sanctioned FFI surface) and the ENTRY module itself (an extern in the program's own
+// file is visible to its author; the threat model is dependencies, not the program). Only fn-shaped
+// decls (`name = (…) Ret`, no body) count as foreign here — a bare module global (`X := 5`) also
+// scans as "has `=`, no `{`" but is not an FFI surface. The driver stamps the manifest/registry
+// grants into the module-level cell below before resolving (see uregions_reset for the pattern);
+// the entry pragma is read from the entry SOURCE directly, so it folds into content-keyed caches
+// for free. ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly like error[private-name].
+ffi_no_grants = () string_view { "" }
+ffi_grants := ffi_no_grants()
+ffi_grants_set* = (g: string_view) void { ffi_grants = g }
+ffi_grants_get* = () string_view { ffi_grants }
+ffi_delim = (b: u8) bool { b == ',' || b == ' ' || b == '\t' || b == '\r' }
+// s[p..e) == w, byte-exact (w is NUL-terminated; ids are short, recursion is bounded).
+ffi_span_eq = (s: string_view, p: i32, e: i32, w: string_view, j: i32) bool {
+    (p + j == e).match ({
+        true  => w.at(j) == 0,
+        false => (w.at(j) == 0).match ({
+            true  => false,
+            false => (s.at(p + j) == w.at(j)).match ({
+                true  => s.ffi_span_eq(p, e, w, j + 1),
+                false => false,
+            }),
+        }),
+    })
+}
+ffi_token_end = (s: string_view, p: i32, e: i32) i32 { (p >= e || ffi_delim(s.at(p))).match ({
+    true  => p,
+    false => s.ffi_token_end(p + 1, e),
+}) }
+// does the grant list s[p..e) contain the token `name`? (delimiters: comma / whitespace)
+ffi_list_has = (s: string_view, p: i32, e: i32, name: string_view) bool {
+    (p >= e).match ({
+        true  => false,
+        false => ffi_delim(s.at(p)).match ({
+            true  => s.ffi_list_has(p + 1, e, name),
+            false => {
+                te := s.ffi_token_end(p, e)
+                s.ffi_span_eq(p, te, name, 0).match ({
+                    true  => true,
+                    false => s.ffi_list_has(te, e, name),
+                })
+            },
+        }),
+    })
+}
+ffi_line_end = (s: string_view, p: i32) i32 { (s.at(p) == 0 || s.at(p) == '\n').match ({
+    true  => p,
+    false => s.ffi_line_end(p + 1),
+}) }
+FFI_PRAGMA = () string_view { "//! ffi:" }
+// does the ENTRY source carry a `//! ffi: modid, modid` pragma line granting `name`?
+ffi_pragma_has = (src: string_view, name: string_view) bool {
+    found := false
+    pos := 0
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos == false).then({
+            found.match ({
+                true  => {
+                    h.break
+                },
+                false => {
+                    src.ffi_span_eq(ii, ii + 8, FFI_PRAGMA(), 0).then({
+                        found = src.ffi_list_has(ii + 8, src.ffi_line_end(ii + 8), name)
+                    })
+                    pos = src.next_line(ii)
+                },
+            })
+        })
+    })
+    found
+}
+ffi_skip_sp = (s: string_view, p: i32) i32 {
+    (s.at(p) == ' ' || s.at(p) == '\t' || s.at(p) == '\n' || s.at(p) == '\r').match ({
+        true  => s.ffi_skip_sp(p + 1),
+        false => p,
+    })
+}
+// a foreign FUNCTION decl reads `name[*] = (…` — the textual `foreign` scan flag alone also catches
+// module globals (`X := 5` has `=` and no `{`), which are NOT an FFI surface.
+ffi_foreign_fn = (src: string_view, sym: ProvidedSymbol) bool {
+    sym.foreign.match ({
+        true  => {
+            p := (src.at(sym.next) == '*').match ({ true => sym.next + 1, false => sym.next })
+            q := src.ffi_skip_sp(p)
+            (src.at(q) == '=').match ({
+                true  => src.at(src.ffi_skip_sp(q + 1)) == '(',
+                false => false,
+            })
+        },
+        false => false,
+    })
+}
+ffi_dotted_id = (a: MutPtr<Malloc>, id: string_view) string_view { a.mappend_mid_display(a.gstr_string(24), id).gstr_finish(a) }
+ffi_module_granted = (mainsrc: string_view, dotted: string_view) bool {
+    g := ffi_grants
+    g.ffi_list_has(0, to_i32(g.view().len), dotted) || mainsrc.ffi_pragma_has(dotted)
+}
+ffi_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, sym: ProvidedSymbol, dotted: string_view, report: bool) i32 {
+    line := src.res_line_of(sym.start)
+    col := src.res_col_of(sym.start)
+    msg := a.gstr_string(192).gstr_append(a, "module '").gstr_append(a, dotted).gstr_append(a, "' declares foreign function `").gstr_append(a, sym.name).gstr_append(a, "` without a build grant").gstr_finish(a)
+    hint := a.gstr_string(192).gstr_append(a, "grant it: `ffi = \"").gstr_append(a, dotted).gstr_append(a, "\"` in zen.toml, or `//! ffi: ").gstr_append(a, dotted).gstr_append(a, "` in the entry file").gstr_finish(a)
+    eprint(a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1))
+    report.match ({ true => 0, false => exit(1) })
+}
+enforce_ffi_grants* = (a: MutPtr<Malloc>, table: ModuleTable, mainsrc: string_view, report: bool) i32 {
+    table.modules.loop((h, i, entry) {
+        (i > 0 && entry.id.mid_is_user()).then({
+            dotted := a.ffi_dotted_id(entry.id)
+            (mainsrc.ffi_module_granted(dotted) == false).then({
+                entry.graph.symbols.loop((h2, j, sym) {
+                    entry.source.ffi_foreign_fn(sym).then({
+                        a.ffi_fail(entry.path, entry.source, sym, dotted, report)
+                    })
+                })
+            })
+        })
+    })
+    0
+}
 // ── user-name shadow rename ────────────────────────────────────────────────────────────────────
 // THE #1 newcomer bounce: a user's top-level helper (`len`/`split`/`map`/…) collides with a
 // same-named PUBLIC decl pulled in TRANSITIVELY by an import the user never named (e.g. `std.io.file`
@@ -3647,6 +3778,7 @@ resolve_program_data* = (a: MutPtr<Malloc>, root: string_view, progdir: string_v
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
     a.enforce_visibility(table, vis_report_mode())
     a.enforce_private_leaks(table, vis_report_mode())
+    a.enforce_ffi_grants(table, mainsrc, vis_report_mode())
     inpath.internal_source_path().match ({
         true  => 0,
         false => {

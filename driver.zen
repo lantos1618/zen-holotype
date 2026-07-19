@@ -19,7 +19,7 @@
 { genJsModuleIn } = compiler.genjs
 { pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, diag_line_span, DiagSpan, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, import_edges, seen_name, add_name, module_path, FlatRegion, fregion_find, fregion_src_line, undefined_name_hint } = std.internal.resolve
+{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, import_edges, seen_name, add_name, module_path, FlatRegion, fregion_find, fregion_src_line, undefined_name_hint, ffi_grants_set, ffi_grants_get } = std.internal.resolve
 say = (s: string_view) i64 {
     out(s).or(0)
     out("\n").or(0)
@@ -394,7 +394,10 @@ cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: s
     })
     // ZEN_VIS_REPORT is part of the key: a report-only sweep (visibility/private-leak violations
     // print but never fail) must not stamp a check-ok an ENFORCED run would replay as clean.
-    h0 := self.fnv_str(VERSION()).fnv_str(kind).fnv_str(getEnv("ZEN_VIS_REPORT")).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(src)
+    // The manifest/registry FFI grants are part of the key (stamped by the spec commands before any
+    // probe): a program cached as clean under `ffi = "dep"` must MISS once the grant is revoked. The
+    // entry-file pragma needs no folding — it lives in `src`, already keyed.
+    h0 := self.fnv_str(VERSION()).fnv_str(kind).fnv_str(getEnv("ZEN_VIS_REPORT")).fnv_str(ffi_grants_get()).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(src)
     st := mp.cache_walk_edges(root, mp.dirname(path), mp.edges_of(src), CacheWalk(
         seen: mp.gstr_string(256),
         h: h0,
@@ -597,6 +600,7 @@ check_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 { spec.ok.m
     false => 1,
 }) }    // resolve_spec already reported why
 check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
+    ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
     contents_in(mp, spec.source).match ({
         .Ok(src) => {
             // a probe hit means this exact closure content already checked clean: replay the ok line.
@@ -643,6 +647,7 @@ build_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec, flag: string_vi
                 derr("zenc: cannot build a library project yet; use `zenc check <project>`\n")
                 return 1
             })
+            ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
             out := eq(spec.out, "").match ({ true => build_out(flag, outarg), false => spec.out })
             contents_in(mp, spec.source).match ({
                 .Ok(src) => (mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links) == 0).match ({
@@ -707,6 +712,7 @@ run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
                 derr("zenc: cannot run a library project; use `zenc check <project>`\n")
                 return 1
             })
+            ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
             contents_in(mp, spec.source).match ({
                 .Ok(src) => {
                     bin := mp.TMPBIN()
@@ -1646,6 +1652,7 @@ Spec*: {
     out: string_view,
     ccflags: string_view,
     links: string_view,
+    ffi: string_view,
     library: bool,
     ok: bool,
 }
@@ -1677,6 +1684,7 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
                     out: "",
                     ccflags: "",
                     links: "",
+                    ffi: "",
                     library: false,
                     ok: false,
                 ),
@@ -1684,11 +1692,13 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
                     out := mp.manifest_value(src, "out")
                     cc := mp.manifest_value(src, "ccflags")
                     lk := mp.manifest_value(src, "link")
+                    fg := mp.manifest_value(src, "ffi")
                     Spec(
                         source: mp.join2(mp.join2(dir, root), main),
                         out: eq(out, "").match ({ true => "", false => mp.join2(dir, out) }),
                         ccflags: cc,
                         links: eq(lk, "").match ({ true => "", false => mp.link_flag(lk) }),
+                        ffi: fg,
                         library: eq(kind, "library"),
                         ok: true,
                     )
@@ -1700,6 +1710,7 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
             out: "",
             ccflags: "",
             links: "",
+            ffi: "",
             library: false,
             ok: false,
         ),
@@ -1729,6 +1740,7 @@ resolve_spec = (mp: MutPtr<Malloc>, root: string_view, arg: string_view) Spec {
                 out: "",
                 ccflags: "",
                 links: "",
+                ffi: "",
                 library: false,
                 ok: true,
             ),
@@ -1736,7 +1748,8 @@ resolve_spec = (mp: MutPtr<Malloc>, root: string_view, arg: string_view) Spec {
     })
 }    // a single .zen file
 // ── build.zen mode: the build IS a Zen program. Append a main that prints its Target's spec, compile
-// + run it (capturing stdout to a file), parse the 6 fields back. Wins over zen.toml. ─────────────
+// + run it (capturing stdout to a file), parse the 10-line records back (name/root/main/out/links/
+// sources/os/arch/abi/ffi — see std.build's emit_target). Wins over zen.toml. ─────────────────────
 BUILDBIN = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenbuild_spec_", ".bin") }
 SPECFILE = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenbuild_spec_", ".txt") }
 BUILD_TAIL = () string_view { "\nmain = () i32 { b := build_context()  build(b.addr())  b.emit_spec()  b.deinit()  0 }\n" }
@@ -1779,13 +1792,14 @@ source_words = (mp: MutPtr<Malloc>, dir: string_view, v: [u8], i: i64, out: Stri
 source_flags = (mp: MutPtr<Malloc>, dir: string_view, src: string_view) string_view { mp.source_words(dir, src.view(), 0, mp.gstr_string(128)).gstr_finish(mp) }
 parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, index: i32) Spec {
     v: [u8] := specsrc.view()
-    base := 1 + index * 9
+    base := 1 + index * 10
     name := mp.spec_field(v, base)
     root := mp.spec_field(v, base + 1)
     main := mp.spec_field(v, base + 2)
     out := mp.spec_field(v, base + 3)
     link := mp.spec_field(v, base + 4)
     cc := mp.spec_field(v, base + 5)
+    fg := mp.spec_field(v, base + 9)
     (eq(root, "") || eq(main, "")).match ({
         true  => {
             derr("zenc: build.zen: target is missing root/main\n")
@@ -1794,6 +1808,7 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
                 out: "",
                 ccflags: "",
                 links: "",
+                ffi: "",
                 library: false,
                 ok: false,
             )
@@ -1806,6 +1821,7 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
             }),
             ccflags: mp.source_flags(dir, cc),
             links: link,
+            ffi: fg,
             library: false,
             ok: true,
         ),
@@ -1817,6 +1833,7 @@ empty_spec = () Spec {
         out: "",
         ccflags: "",
         links: "",
+        ffi: "",
         library: false,
         ok: false,
     )
@@ -1887,7 +1904,7 @@ build_zen_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) PlanS
 plan_find_name = (mp: MutPtr<Malloc>, src: string_view, wanted: string_view, i: i32, n: i32) i32 {
     (i >= n).match ({
         true  => 0 - 1,
-        false => eq(mp.spec_field(src.view(), 1 + i * 9), wanted).match ({
+        false => eq(mp.spec_field(src.view(), 1 + i * 10), wanted).match ({
             true  => i,
             false => mp.plan_find_name(src, wanted, i + 1, n),
         }),
@@ -1931,7 +1948,7 @@ list_plan_from = (mp: MutPtr<Malloc>, src: string_view, i: i32, n: i32) i32 {
     (i >= n).match ({
         true  => 0,
         false => {
-            say(mp.spec_field(src.view(), 1 + i * 9))
+            say(mp.spec_field(src.view(), 1 + i * 10))
             mp.list_plan_from(src, i + 1, n)
         },
     })

@@ -2003,6 +2003,61 @@ harness_modules_run* = () i32 {
         entry: "p.zen",
         should_pass: true,
         needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "hooks.zen",
+            src: "run_shell* = (cmd: string_view) i32\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "{ run_shell } = hooks\nmain = () i32 { run_shell(\"true\") }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "error[ffi-ungranted]: module 'hooks' declares foreign function `run_shell` without a build grant",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "hooks.zen",
+            src: "run_shell* = (cmd: string_view) i32\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "//! ffi: hooks\n{ run_shell } = hooks\nmain = () i32 { run_shell(\"true\") }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "p.zen",
+            src: "c_getpid = () i32\nmain = () i32 { c_getpid() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "hooks.zen",
+            src: "run_shell* = (cmd: string_view) i32\n",
+        ), ModFile(
+            name: "mid.zen",
+            src: "{ run_shell } = hooks\nwrap* = (c: string_view) i32 { run_shell(c) }\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "//! ffi: mid\n{ wrap } = mid\nmain = () i32 { wrap(\"x\") }\n",
+        )],
+        entry: "p.zen",
+        should_pass: false,
+        needle: "module 'hooks' declares foreign function `run_shell`",
+    ), ModVerdictCase(
+        files: [ModFile(
+            name: "vendor/hooks.zen",
+            src: "sneak* = () i32\n",
+        ), ModFile(
+            name: "p.zen",
+            src: "//! ffi: vendor.hooks\nvh = vendor.hooks\nmain = () i32 { vh.sneak() }\n",
+        )],
+        entry: "p.zen",
+        should_pass: true,
+        needle: "",
     )])
     // TWO different impl bodies for one (receiver, trait) across two modules: "first wins" would
     // silently drop the second body — must be a loud error[dup-impl] naming both modules.
@@ -2045,6 +2100,13 @@ harness_modules_run* = () i32 {
     // an exported fn returning (or taking) a type its own module defines but does not export
     // rejects naming BOTH the fn and the type; exporting the type accepts; a type imported from
     // another module (transitive re-export) stays sanctioned.
+    // ── FFI is a BUILD-GRANTED capability — error[ffi-ungranted] ─────────────────────────────
+    // a DEP module declaring a foreign (bodyless) fn without a grant rejects, naming the module
+    // and the symbol; an entry-file `//! ffi: hooks` pragma grants it; the ENTRY module's own
+    // externs stay implicitly granted (the threat is transitive deps, not the program's own file);
+    // grants name the DECLARING module — granting `mid` does NOT grant its dep `hooks`; dotted
+    // subdir ids (`vendor.hooks`) grant the same way. zen.toml `ffi = "…"` and build.zen
+    // `.ffi("…")` grants are covered in harness_build's project cases.
     // ── the net is NOT hollow: cross-module calls are arity/arg-type checked (test_modules_oracle) ──
     // ── transitive / clash rejections (test_resolver_oracle) ─────────────────────────────────
     // ── namespace-bound diagnostics keep the USER source span (test_user_imports) ────────────
