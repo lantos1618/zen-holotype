@@ -101,7 +101,6 @@ but the heavyweight deep-resolver compile remains a separate memory target.
 
 | Area | Code truth | Consequence / workaround |
 |---|---|---|
-| Formatter vs trait defaults | `zenc fmt` hoists a trait's default method body to top level (`Self` out of scope) and, with a leading data field, drops the fn-typed field entirely — data loss (found 2026-07-18, fix in flight). | Do not run fmt on files declaring traits with default bodies until the fix lands. |
 | std path resolution | `zenc` resolves `zen/std` relative to the binary's own directory, not the invocation cwd. | Run the repo-built binary in place (or symlink a work root); a PATH-installed binary needs the tree beside it. |
 | Parallelism fixtures | 5 pool fixtures assert *observed* concurrency and flake under machine load. | Their run stage is skipped in `make difftest`; check/emit still compared. |
 | Ordinary `if` | Any `if` token is rejected at the lexer with `error[no-if]` and a teaching hint; match guards were removed entirely (2026-07-18). | Use `.match` (or `.then` for one-way effects); nest a boolean `.match` in an arm body where a guard was wanted. |
