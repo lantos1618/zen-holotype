@@ -1930,6 +1930,18 @@ harness_build_run* = () i32 {
         name: "project_ffi_build_zen",
         cmd: "rm -rf $ZT/zfb && mkdir -p $ZT/zfb/src && printf '{ Build } = std.build\\nbuild = (b: MutPtr<Build>) void {\\n    b.install(b.exe(\"ffidemo\").root(\"src\").main(\"main.zen\").out(\"ffi-bin\").ffi(\"sysdep\"))\\n}\\n' >$ZT/zfb/build.zen && printf 'boost* = () i32\\n' >$ZT/zfb/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfb/src/main.zen && ./zenc check $ZT/zfb 2>$ZT/zfb_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfb_ok.txt && sed -i 's/.ffi(\"sysdep\")//' $ZT/zfb/build.zen && { ./zenc check $ZT/zfb >$ZT/zfb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfb.txt",
     ), ShellCase(
+        name: "project_clib_demo",
+        cmd: "rm -rf $ZT/zcl && cp -r tests/fixtures/project/clib_demo $ZT/zcl && ./zenc build $ZT/zcl >/dev/null 2>&1 && test -x $ZT/zcl/clib-bin && { $ZT/zcl/clib-bin; test \"$?\" = 3; } && { ./zenc run $ZT/zcl; test \"$?\" = 3; } && grep -Fq 'cbrt* = (x: f64) f64' $ZT/zcl/.zen/gen/cmath.zen && grep -Fq 'handle: RawPtr<u8>' $ZT/zcl/.zen/gen/cmath.zen",
+    ), ShellCase(
+        name: "project_clib_ungranted",
+        cmd: "rm -rf $ZT/zcu && cp -r tests/fixtures/project/clib_demo $ZT/zcu && sed -i 's/    exe.use(m)//' $ZT/zcu/build.zen && { ./zenc build $ZT/zcu >$ZT/zcu.txt 2>&1; test \"$?\" = 1; } && grep -Fq \"unknown module 'cmath'\" $ZT/zcu.txt && printf 'cbrt* = (x: f64) f64\\nhypot* = (x: f64, y: f64) f64\\n' >$ZT/zcu/src/cmath.zen && { ./zenc build $ZT/zcu >$ZT/zcu2.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zcu2.txt",
+    ), ShellCase(
+        name: "project_clib_badsig",
+        cmd: "rm -rf $ZT/zcb && cp -r tests/fixtures/project/clib_demo $ZT/zcb && sed -i 's#c_fn(\"cbrt\", \"(x: f64) f64\")#c_fn(\"frob\", \"(xs: [i32]) i32\")#' $ZT/zcb/build.zen && printf 'cm = cmath\\nmain = () i32 { xs: [i32] := [1, 2]  cm.frob(xs) }\\n' >$ZT/zcb/src/main.zen && { ./zenc check $ZT/zcb >$ZT/zcb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-type]' $ZT/zcb.txt && grep -Fq '.zen/gen/cmath.zen:2:1' $ZT/zcb.txt",
+    ), ShellCase(
+        name: "project_clib_cache",
+        cmd: "rm -rf $ZT/zcc $ZT/zcc_cache && cp -r tests/fixtures/project/clib_demo $ZT/zcc && ZENC_CACHE_DIR=$ZT/zcc_cache ./zenc build $ZT/zcc >/dev/null 2>&1 && test \"$(ls $ZT/zcc_cache | grep -c '^bin_')\" = 2 && ZENC_CACHE_DIR=$ZT/zcc_cache ./zenc build $ZT/zcc >/dev/null 2>&1 && test \"$(ls $ZT/zcc_cache | grep -c '^bin_')\" = 2 && sed -i 's/c_fn(\"cbrt\", \"(x: f64) f64\")/c_fn(\"cbrt\", \"(v: f64) f64\")/' $ZT/zcc/build.zen && ZENC_CACHE_DIR=$ZT/zcc_cache ./zenc build $ZT/zcc >/dev/null 2>&1 && test \"$(ls $ZT/zcc_cache | grep -c '^bin_')\" = 4 && { $ZT/zcc/clib-bin; test \"$?\" = 3; }",
+    ), ShellCase(
         name: "help_version_zen_root",
         cmd: "{ ./zenc --help >$ZT/zh.txt 2>&1; test \"$?\" = 0; } && grep -Fq \"usage:\" $ZT/zh.txt && grep -Fq \"zenc doc\" $ZT/zh.txt && { ./zenc --version >$ZT/zv.txt 2>&1; test \"$?\" = 0; } && grep -Fq \"zenc\" $ZT/zv.txt && { printf \"test* = () i32 { 1 }\\n\" | ./zenc 2>/dev/null | grep -Fq zslice; } && cp ./zenc $ZT/zenc-moved && printf \"main = () i32 { 42 }\\n\" > $ZT/zrm.zen && { ZEN_ROOT=$(pwd) $ZT/zenc-moved run $ZT/zrm.zen; test \"$?\" = 42; }",
     ), ShellCase(
@@ -2017,6 +2029,13 @@ harness_build_run* = () i32 {
         name: "cache_source_edit_invalidates",
         cmd: "rm -rf $ZT/zcc3 && printf 'main = () i32 { 41 }\\n' > $ZT/zcc3.zen && ZENC_CACHE_DIR=$ZT/zcc3 ./zenc build $ZT/zcc3.zen -o $ZT/zcc3a 2>/dev/null && printf 'main = () i32 { 42 }\\n' > $ZT/zcc3_other.zen && ZENC_NO_CACHE=1 ./zenc build $ZT/zcc3_other.zen -o $ZT/zcc3_other_bin 2>/dev/null && for f in $ZT/zcc3/bin_*; do cp $ZT/zcc3_other_bin $f; done && printf '// comment changes content hash\\n' >> $ZT/zcc3.zen && ZENC_CACHE_DIR=$ZT/zcc3 ./zenc build $ZT/zcc3.zen -o $ZT/zcc3b 2>/dev/null && { $ZT/zcc3b; test \"$?\" = 41; } && test \"$(ls $ZT/zcc3 | grep -c '^bin_')\" = 2",
     )])
+    // c_library end-to-end: build+run the libm demo (cbrt 27 → 3, hypot 3 4 → 5 fold into exit 3)
+    // and pin the generated module's shape (foreign decls + the opaque-handle struct).
+    // use() is what grants: without it the genmod id doesn't resolve at all (even though the
+    // build ran), and a hand-written dep with the same externs is error[ffi-ungranted].
+    // a non-FFI-safe c_fn signature fails error[ffi-type], positioned AT the generated file.
+    // genmod content is cache-keyed: unchanged rebuild replays (2 bin entries = build program +
+    // target), an edited c_fn misses both and rebuilds a working binary.
     // args() owns the whole argv (len = 2 with --verbose, unwrapped from Result), has_flag/flag_str read it, set_env→getEnv→unset_env round-trips.
     // os_args_oom_result: args() under an always-fail allocator returns `.Err` as a value (prints `oom-err`, exit 0) — the OOM path never writes the argv strings through a null backbone.
     // io_file_result_paths: substitute this run's private scratch dir for the `@@T@@` placeholder, then

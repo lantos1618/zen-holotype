@@ -19,7 +19,7 @@
 { genJsModuleIn } = compiler.genjs
 { pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, diag_line_span, DiagSpan, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, import_edges, seen_name, add_name, module_path, FlatRegion, fregion_find, fregion_src_line, undefined_name_hint, ffi_grants_set, ffi_grants_get } = std.internal.resolve
+{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, import_edges, seen_name, add_name, module_path, FlatRegion, fregion_find, fregion_src_line, undefined_name_hint, ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = std.internal.resolve
 say = (s: string_view) i64 {
     out(s).or(0)
     out("\n").or(0)
@@ -397,7 +397,9 @@ cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: s
     // The manifest/registry FFI grants are part of the key (stamped by the spec commands before any
     // probe): a program cached as clean under `ffi = "dep"` must MISS once the grant is revoked. The
     // entry-file pragma needs no folding — it lives in `src`, already keyed.
-    h0 := self.fnv_str(VERSION()).fnv_str(kind).fnv_str(getEnv("ZEN_VIS_REPORT")).fnv_str(ffi_grants_get()).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(src)
+    // The registered c_library genmod map folds in the same way (the generated files' CONTENT is
+    // hashed by the walk below through module_path; the map itself covers id/path re-registration).
+    h0 := self.fnv_str(VERSION()).fnv_str(kind).fnv_str(getEnv("ZEN_VIS_REPORT")).fnv_str(ffi_grants_get()).fnv_str(genmods_get()).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(src)
     st := mp.cache_walk_edges(root, mp.dirname(path), mp.edges_of(src), CacheWalk(
         seen: mp.gstr_string(256),
         h: h0,
@@ -601,6 +603,7 @@ check_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 { spec.ok.m
 }) }    // resolve_spec already reported why
 check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
     ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
+    genmods_set(spec.genmods)    // registered c_library genmods: same stamp discipline
     contents_in(mp, spec.source).match ({
         .Ok(src) => {
             // a probe hit means this exact closure content already checked clean: replay the ok line.
@@ -648,6 +651,7 @@ build_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec, flag: string_vi
                 return 1
             })
             ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
+            genmods_set(spec.genmods)    // registered c_library genmods: same stamp discipline
             out := eq(spec.out, "").match ({ true => build_out(flag, outarg), false => spec.out })
             contents_in(mp, spec.source).match ({
                 .Ok(src) => (mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links) == 0).match ({
@@ -713,6 +717,7 @@ run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
                 return 1
             })
             ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
+            genmods_set(spec.genmods)    // registered c_library genmods: same stamp discipline
             contents_in(mp, spec.source).match ({
                 .Ok(src) => {
                     bin := mp.TMPBIN()
@@ -1653,6 +1658,7 @@ Spec*: {
     ccflags: string_view,
     links: string_view,
     ffi: string_view,
+    genmods: string_view,
     library: bool,
     ok: bool,
 }
@@ -1685,6 +1691,7 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
                     ccflags: "",
                     links: "",
                     ffi: "",
+                    genmods: "",
                     library: false,
                     ok: false,
                 ),
@@ -1699,6 +1706,7 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
                         ccflags: cc,
                         links: eq(lk, "").match ({ true => "", false => mp.link_flag(lk) }),
                         ffi: fg,
+                        genmods: "",
                         library: eq(kind, "library"),
                         ok: true,
                     )
@@ -1711,6 +1719,7 @@ proj_spec = (mp: MutPtr<Malloc>, dir: string_view) Spec {
             ccflags: "",
             links: "",
             ffi: "",
+            genmods: "",
             library: false,
             ok: false,
         ),
@@ -1741,6 +1750,7 @@ resolve_spec = (mp: MutPtr<Malloc>, root: string_view, arg: string_view) Spec {
                 ccflags: "",
                 links: "",
                 ffi: "",
+                genmods: "",
                 library: false,
                 ok: true,
             ),
@@ -1809,6 +1819,7 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
                 ccflags: "",
                 links: "",
                 ffi: "",
+                genmods: "",
                 library: false,
                 ok: false,
             )
@@ -1822,6 +1833,7 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
             ccflags: mp.source_flags(dir, cc),
             links: link,
             ffi: fg,
+            genmods: mp.genmods_extract(dir, specsrc, index),
             library: false,
             ok: true,
         ),
@@ -1834,9 +1846,68 @@ empty_spec = () Spec {
         ccflags: "",
         links: "",
         ffi: "",
+        genmods: "",
         library: false,
         ok: false,
     )
+}
+// ── c_library genmods: the plan's trailing section (see std.build's c_library block) ─────────────
+// After the N×10 target lines the plan carries the use()-records: one count line `G`, then per
+// record a header line `<target> <id> <lib> <K>` followed by exactly K lines of generated module
+// source (line-count-prefixed framing — the body is opaque to the line-based transport). For the
+// SELECTED target the driver writes each body to <projdir>/.zen/gen/<id>.zen (gitignored) and
+// returns the resolver registry text (`<id> <path>` lines) for genmods_set — stamped beside the
+// ffi grants, before probe AND resolve, so the cache walk and the module loader both see the
+// generated file through the one canonical module_path.
+GENSUB = () string_view { ".zen/gen" }
+gmx_tok_end = (v: [u8], i: i64) i64 { (i >= v.len || v[i] == ' ' || v[i] == '\n').match ({
+    true  => i,
+    false => v.gmx_tok_end(i + 1),
+}) }
+gmx_skip_lines = (v: [u8], p: i64, k: i32) i64 {
+    (k <= 0 || p >= v.len).match ({
+        true  => p,
+        false => v.gmx_skip_lines(v.bs_line_end(p, v.len) + 1, k - 1),
+    })
+}
+gmx_write = (mp: MutPtr<Malloc>, dir: string_view, id: string_view, body: string_view, blen: i64) string_view {
+    mkdir(mp.join2(dir, ".zen"), MODE_755)
+    gdir := mp.join2(dir, GENSUB())
+    mkdir(gdir, MODE_755)
+    gpath := mp.gstr_string(96).gstr_append(mp, gdir).gstr_append(mp, "/").gstr_append(mp, id).gstr_append(mp, ".zen").gstr_finish(mp)
+    save(gpath, body, blen).match ({
+        .Ok(n)  => { },
+        .Err(e) => derr("zenc: build.zen: cannot write generated module\n"),
+    })
+    gpath
+}
+genmods_from = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, tname: string_view, p: i64, left: i32, acc: String) string_view {
+    v: [u8] := specsrc.view()
+    (left <= 0 || p >= v.len).match ({
+        true  => acc.gstr_finish(mp),
+        false => {
+            te := v.gmx_tok_end(p)
+            ie := v.gmx_tok_end(te + 1)
+            le := v.gmx_tok_end(ie + 1)
+            ke := v.bs_line_end(le + 1, v.len)
+            be := v.gmx_skip_lines(ke + 1, v.plan_nat(le + 1, ke, 0))
+            nxt := eq(mp.cstr_substr(specsrc, to_i32(p), to_i32(te - p)), tname).match ({
+                true  => {
+                    id := mp.cstr_substr(specsrc, to_i32(te + 1), to_i32(ie - te - 1))
+                    body := mp.cstr_substr(specsrc, to_i32(ke + 1), to_i32(be - ke - 1))
+                    acc.gstr_append(mp, id).gstr_append(mp, " ").gstr_append(mp, mp.gmx_write(dir, id, body, be - ke - 1)).gstr_push(mp, '\n')
+                },
+                false => acc,
+            })
+            mp.genmods_from(dir, specsrc, tname, be, left - 1, nxt)
+        },
+    })
+}
+genmods_extract = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, index: i32) string_view {
+    v: [u8] := specsrc.view()
+    gs := v.line_start(1 + specsrc.plan_count() * 10, 0)
+    g := v.plan_nat(gs, v.bs_line_end(gs, v.len), 0)
+    mp.genmods_from(dir, specsrc, mp.spec_field(v, 1 + index * 10), v.bs_line_end(gs, v.len) + 1, g, mp.gstr_string(64))
 }
 plan_nat = (v: [u8], i: i64, e: i64, n: i32) i32 {
     (i >= e).match ({

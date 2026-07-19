@@ -1088,23 +1088,31 @@ fail_no_progdir = (a: MutPtr<Malloc>, inpath: string_view, id: String) i32 {
 // `u/utils/strings` → <progdir>/utils/strings.zen, where progdir is the ENTRY PROGRAM's directory.
 // A user module in a subdirectory names its own dependencies by full dotted id from that same root
 // (`utils.helpers`, never a relative/implicit sibling) — one registered source root, no ambiguity.
+// EXCEPTION, consulted first and only for user ids: the registered c_library genmod map (see
+// genmods_set below) — an id the build granted via `use()` resolves to its GENERATED file.
 module_path* = (a: MutPtr<Malloc>, root: string_view, progdir: string_view, id: String) string_view {
-    out := a.gstr_string(64)
-    id.id_is_user().match ({
+    gp := a.genmod_lookup(id)
+    (gp.at(0) == 0).match ({
         true  => {
-            p0 := out.gstr_append(a, progdir)
-            p1 := p0.gstr_append(a, "/")
-            p2 := a.mcopy_from(p1, id, 2)
-            out = p2.gstr_append(a, ".zen")
+            out := a.gstr_string(64)
+            id.id_is_user().match ({
+                true  => {
+                    p0 := out.gstr_append(a, progdir)
+                    p1 := p0.gstr_append(a, "/")
+                    p2 := a.mcopy_from(p1, id, 2)
+                    out = p2.gstr_append(a, ".zen")
+                },
+                false => {
+                    p0 := out.gstr_append(a, root)
+                    p1 := p0.gstr_append(a, "/zen/")
+                    p2 := a.mappend_string(p1, id)
+                    out = p2.gstr_append(a, ".zen")
+                },
+            })
+            out.gstr_finish(a)
         },
-        false => {
-            p0 := out.gstr_append(a, root)
-            p1 := p0.gstr_append(a, "/zen/")
-            p2 := a.mappend_string(p1, id)
-            out = p2.gstr_append(a, ".zen")
-        },
+        false => gp,
     })
-    out.gstr_finish(a)
 }
 guard_module = (a: MutPtr<Malloc>, progdir: string_view, inpath: string_view, id: String, path: string_view) i32 {
     (id.id_is_user() && progdir.at(0) == 0).match ({
@@ -2773,6 +2781,48 @@ ffi_no_grants = () string_view { "" }
 ffi_grants := ffi_no_grants()
 ffi_grants_set* = (g: string_view) void { ffi_grants = g }
 ffi_grants_get* = () string_view { ffi_grants }
+// ── registered c_library genmods: an EXPLICIT (dotted id → generated path) map ───────────────────
+// build.zen's `exe.use(c_library(b, CLib(…)))` materializes a generated FFI module under the
+// project's .zen/gen/ dir; the driver stamps the mapping here (exactly like ffi_grants above)
+// BEFORE probe and resolve. module_path consults this map FIRST for user ids, so the lookup order
+// is unambiguous: registered genmod path, then the ordinary <progdir>/<segs>.zen mapping. Format:
+// one `<dotted-id> <path>` pair per line, newline-terminated.
+genmods := ffi_no_grants()
+genmods_set* = (g: string_view) void { genmods = g }
+genmods_get* = () string_view { genmods }
+gm_word_end = (s: string_view, p: i32) i32 {
+    (s.at(p) == 0 || s.at(p) == ' ' || s.at(p) == '\n').match ({
+        true  => p,
+        false => s.gm_word_end(p + 1),
+    })
+}
+// first `<dotted> <path>` registry line whose id matches → the path (own copy); "" when unregistered.
+gm_find = (a: MutPtr<Malloc>, g: string_view, p: i32, dotted: string_view) string_view {
+    (g.at(p) == 0).match ({
+        true  => "",
+        false => {
+            we := g.gm_word_end(p)
+            le := g.ffi_line_end(we)
+            g.ffi_span_eq(p, we, dotted, 0).match ({
+                true  => a.gstr_string(64).rappend_span(a, g, we + 1, le).gstr_finish(a),
+                false => (g.at(le) == 0).match ({
+                    true  => "",
+                    false => a.gm_find(g, le + 1, dotted),
+                }),
+            })
+        },
+    })
+}
+// the registered-genmod path for a USER module id, or "" (std/compiler ids never match the map).
+genmod_lookup = (a: MutPtr<Malloc>, id: String) string_view {
+    id.id_is_user().match ({
+        true  => {
+            dotted := a.mappend_id_name(a.gstr_string(24), id).gstr_finish(a)
+            a.gm_find(genmods, 0, dotted)
+        },
+        false => "",
+    })
+}
 ffi_delim = (b: u8) bool { b == ',' || b == ' ' || b == '\t' || b == '\r' }
 // s[p..e) == w, byte-exact (w is NUL-terminated; ids are short, recursion is bounded).
 ffi_span_eq = (s: string_view, p: i32, e: i32, w: string_view, j: i32) bool {
