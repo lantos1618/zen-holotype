@@ -23,11 +23,11 @@ Labels:
 | Correct programs accepted; bad programs rejected before C/JS | Broad type, generic, trait, pointer, ownership, escape, diagnostic, and fuzz coverage exists. The exhaustive audit also found silent miscompiles, type/symbol identity collisions, malformed literals that are accepted, and backend-specific reinterpretation. | **Partial — broad, not yet trustworthy** |
 | Errors are values, panic is explicit | `Result`, `Opt`, `.or_return`, fallible allocation/IO, and runtime checks work. Some best-effort/sentinel APIs and actor-panic cleanup gaps remain. | **Partial — good core, uneven std surface** |
 | Explicit capability and memory model | `Sys`, `Writer`, `Fs`, explicit allocators, pointer kinds, owner wrappers, and actor send checks exist. Ambient `std.rt` and scope/runtime experiments still coexist. | **Partial — competing surfaces** |
-| Real modules and packages | Transitive imports, privacy, namespace binds, projects, `build.zen`, and local siblings work. Nested local paths, registered package roots, dependency metadata, library artifacts, and signature-first linking do not. | **Partial — files/modules work, packages do not** |
+| Real modules and packages | Transitive imports, privacy, namespace binds, projects, `build.zen`, local siblings, and dotted nested user modules (`{ x } = app.utils`) work; per-module signatures (`ModuleSig`) drive privacy/dup checks, diagnostics map by identity, and a differential gate (`make difftest`) pins dispatch behavior. Registered package roots, dependency metadata, library artifacts, and signature-first linking do not exist. | **Partial — modules real, packages not yet** |
 | Usable standalone toolchain | `init`, `check`, `run`, `build`, C/JS emit, AST formatting, basic docs, manifests, examples, and diagnostics ship in one binary. Installation/distribution and archive/package output are missing. | **Partial — usable for the repo, rough as a product** |
 | Portable multi-backend compiler | C is the bootstrap target. JS shares the frontend, but audited DOM wrapping, browser startup, width scoping, field-name, dispatch, and buffer paths are not equivalent to C. | **Partial — JS is experimental** |
 | Safe, comprehensible concurrency | Real OS-thread pool, typed actors, send checks, stress tests, and panic/stack-overflow isolation work. Actor APIs are split, `Sys.Spawner` is a stub, scheduler is a global queue, cleanup/supervision are incomplete. | **Partial — engine works, model is unsettled** |
-| Sub-second feedback | No-op `make` and ordinary small-program builds are below one second on the audit host. A cold compiler bootstrap is about 3.8s and self-host regeneration about 22–29s. | **Partial — common edit/run path meets it; cold/self-host path does not** |
+| Sub-second feedback | Warm `check`/`run` of an unchanged closure is 0.01–0.11s via the content-hash cache; cold `check` of the full compiler closure is ~5.7s (was 27s) and self-host regeneration ~7s (was 22–29s); the generated seed shrank 7.5→2.3 MB via shared generic instantiation. | **Met on the warm path; cold full-closure ~5.7s** |
 
 ## Feature, location, and report coverage
 
@@ -42,7 +42,7 @@ not instrument lines or branches. Every reported feature area is mapped to imple
 | Lexer, literals, declarations, core types | Partial at malformed char/hex validation | `compiler.lex`, `parse*` | value + verdict + fuzz suites | Strong |
 | Records, enums, exhaustive match, loops | Partial: some literal-match subjects can repeat; loop-control and statement-match lowering fixed 2026-07-18 | `parse*`, `check`, emitters | value/verdict/formatter fixtures | Strong |
 | Functions, generics, traits, closures | Partial at escaping local captures | `check.zen`, `mono.zen` | value, verdict, module closure cases | Strong |
-| Modules, privacy, namespace binds | Partial at nested packages/flat boundary | `std.internal.resolve` | `harness_modules.zen` | Strong |
+| Modules, privacy, namespace binds | Shipped/partial: dotted ids, ModuleSig, identity diagnostics; flat concat remains the compat layer | `std.internal.resolve` | `harness_modules.zen`, `make difftest` | Strong |
 | C backend and runtime | Shipped | `genc_emit.zen`, `zenrt.c` | build/value/examples/fixpoint | Strong |
 | JavaScript backend | Experimental target subset | `genjs.zen`, `zenrt.js` | build JS + limited differential suite | Moderate |
 | Diagnostics and source mapping | Shipped, multi-channel | `check_validate.zen`, `diagnostic.zen`, `driver.zen` | verdict-kind + diagnostic cases | Strong |
@@ -101,9 +101,12 @@ but the heavyweight deep-resolver compile remains a separate memory target.
 
 | Area | Code truth | Consequence / workaround |
 |---|---|---|
+| Formatter vs trait defaults | `zenc fmt` hoists a trait's default method body to top level (`Self` out of scope) and, with a leading data field, drops the fn-typed field entirely — data loss (found 2026-07-18, fix in flight). | Do not run fmt on files declaring traits with default bodies until the fix lands. |
+| std path resolution | `zenc` resolves `zen/std` relative to the binary's own directory, not the invocation cwd. | Run the repo-built binary in place (or symlink a work root); a PATH-installed binary needs the tree beside it. |
+| Parallelism fixtures | 5 pool fixtures assert *observed* concurrency and flake under machine load. | Their run stage is skipped in `make difftest`; check/emit still compared. |
 | Ordinary `if` | Any `if` token is rejected at the lexer with `error[no-if]` and a teaching hint; match guards were removed entirely (2026-07-18). | Use `.match` (or `.then` for one-way effects); nest a boolean `.match` in an arm body where a guard was wanted. |
 | Enum separator | `\|` separates variants and is also bitwise OR. | Comma-separated variants are the chosen cleanup direction but require a bootstrap migration. |
-| Local packages | Only one bare sibling filename resolves; dotted local imports are rejected. | Keep modules beside the entry, or wait for registered source roots/nested paths. |
+| Local packages | Dotted user modules resolve from the entry program's directory as one logical namespace (`app.utils` → `app/utils.zen`); registered roots/dependency metadata still absent. | Structure projects freely under the entry dir; package roots are the next module-system stage. |
 | External signatures | Bodyless functions type-check calls and link only when used; no later Zen definition/completeness pairing. | Use them for FFI today, not as a finished module-signature system. |
 | Closures | Arbitrary-local escaping captures/capturing fields reject. | Pass directly, lift a named function, or return a parameter-capturing closure. |
 | UFCS type args | `value.id<i32>()` does not parse. | Write `id<i32>(value)`. |
