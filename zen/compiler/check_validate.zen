@@ -1797,6 +1797,19 @@ recv_var_name = (c: CallData) string_view {
         false => "",
     })
 }
+// the consumed binding of a release/drop receiver: a bare Var, or — for a FIELD receiver like
+// `b.o.release_in(a)` — the ROOT local of the member chain (the field's owner is freed while the
+// base keeps a bit-copy naming the same allocation → the whole base binding dies; see member_move_root).
+recv_move_name = (c: CallData) string_view {
+    (c.args.len > 0).match ({
+        true  => c.args[0].match ({
+            .Var(v)    => v.name,
+            .Member(m) => m.obj.expr_root_var(),
+            _          => "",
+        }),
+        false => "",
+    })
+}
 // SENDABILITY — move-on-send. Passing an owned `Own<T>` into a `send(handle, msg)` transfers it to the
 // receiving actor, so the sender must not keep using it (otherwise both sides free it → race/double-free).
 // We mark the sent owner dead, reusing the use-after-free machinery. Catches the owner sent DIRECTLY or
@@ -1824,6 +1837,11 @@ send_own_var = (env: Env, e: Ptr<Expr>) string_view {
     load(e).match ({
         .Var(v)         => eq(env.infer_expr(e).owner_base(), "Own").match ({
             true  => v.name,
+            false => "",
+        }),
+        // an `Own<T>` sent OUT of a field (`send(h, b.o)`) moves it — whole-base kill (member_move_root).
+        .Member(m)      => eq(env.infer_expr(e).owner_base(), "Own").match ({
+            true  => e.member_move_root(),
             false => "",
         }),
         .MakeEnum(mk)   => env.send_own_var(mk.payload),
@@ -2136,6 +2154,10 @@ own_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alia
         c.args.loop((h, i, ar) {
             (eq(ps[i].ty.owner_base(), "Own") && eq(env.infer_expr(ar.addr()).owner_base(), "Own") && env.fn_consumes_param(c.fn, i, consume_depth())).then({
                 nm := c.arg_var_name(i)
+                // a `.Member` arg (`consume(b.o)`) moves the owner OUT of the field → whole-base kill.
+                nm.is_empty().then({
+                    nm = ar.addr().member_move_root()
+                })
                 (nm.is_empty() == false).then({
                     out = a.dead_kill(out, al, nm)
                 })
@@ -2184,12 +2206,36 @@ field_ty_by_name = (fields: [Field], name: string_view) Ty {
     })
     found
 }
+// ── MOVE-OUT OF A STRUCT FIELD (audit hole) ────────────────────────────────────────────────────────
+// An `Own<T>` read OUT of a field in a MOVE position (`c := b.o`, `b.o` passed to a consuming Own
+// param, `b.o` into an Own field/element, `send(h, b.o)`, `b.o.release_in(a)`) moves the owner the
+// FIELD held — the struct keeps a bit-copy naming the SAME allocation, so a later free through the
+// field (`b.o.release_in(a)`) double-frees. The dead-set unit is a BINDING NAME, so the move kills
+// the whole ROOT local of the chain (`a.b.o` kills `a`): conservative — a later use of ANOTHER field
+// of the base over-rejects — and consistent with the checker's name-keyed kill philosophy. Only a
+// top-level `.Member` in a position where a bare `.Var` counts as a move today, AND whose expr the
+// context has gated as owner-typed, counts; a value field read (`b.n: i32`) or a borrow through a
+// call (`b.o.get()`, a Call not a Member) is NOT a move source, so plain field reads are unaffected.
+member_move_root = (e: Ptr<Expr>) string_view {
+    load(e).match ({
+        .Member(m) => m.obj.expr_root_var(),
+        _          => "",
+    })
+}
 // the bare-Var name of an expr whose inferred type is `Own<T>` (else "") — the moved-owner shape shared
-// by every consume site (mirrors own_var_move / sm_own_arg_launder).
+// by every consume site (mirrors own_var_move / sm_own_arg_launder). A `.Member` source moves the owner
+// out of its field: the whole-base kill (member_move_root) names the root binding dead.
 own_moved_var = (env: Env, e: Ptr<Expr>) string_view {
     load(e).match ({
-        .Var(v) => eq(env.infer_expr(e).owner_base(), "Own").match ({ true => v.name, false => "" }),
-        _       => "",
+        .Var(v)    => eq(env.infer_expr(e).owner_base(), "Own").match ({
+            true  => v.name,
+            false => "",
+        }),
+        .Member(m) => eq(env.infer_expr(e).owner_base(), "Own").match ({
+            true  => e.member_move_root(),
+            false => "",
+        }),
+        _          => "",
     })
 }
 // the owner moved by a struct-literal field init: the field's DECLARED type is `Own<T>` AND the init is a
@@ -2272,13 +2318,19 @@ own_stmt_struct_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: P
 // refcount (only `.clone()` does), so both names free the ONE allocation → double-free. c becomes the
 // live owner; o's binding dies (later use of o → use-after-consume). `c := o.clone()` is a Call, not a
 // bare Var, so it is NOT a move (the legitimate two-owner path). Self-copy `o = o` moves nothing.
+// A `.Member` source (`c := b.o`, b.o an `Own<T>`) is the SAME affine move out of the field: the
+// struct keeps a bit-copy of the owner, so the whole base binding dies (member_move_root).
 own_var_move = (env: Env, e: Ptr<Expr>, tgt: string_view) string_view {
     load(e).match ({
-        .Var(v) => (eq(env.infer_expr(e).owner_base(), "Own") && eq(v.name, tgt) == false).match ({
+        .Var(v)    => (eq(env.infer_expr(e).owner_base(), "Own") && eq(v.name, tgt) == false).match ({
             true  => v.name,
             false => "",
         }),
-        _       => "",
+        .Member(m) => (eq(env.infer_expr(e).owner_base(), "Own") && eq(e.member_move_root(), tgt) == false).match ({
+            true  => e.member_move_root(),
+            false => "",
+        }),
+        _          => "",
     })
 }
 own_move_src = (env: Env, st: Stmt) string_view {
@@ -2497,7 +2549,7 @@ consume_name = (env: Env, st: Stmt) string_view {
     st.match ({
         .ExprStmt(e) => load(e).match ({
             .Call(c) => env.is_consume_method(c).match ({
-                true  => c.recv_var_name(),
+                true  => c.recv_move_name(),
                 false => env.send_consume(c),
             }),
             _        => "",
@@ -2583,7 +2635,7 @@ own_dead_expr = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alias
                 out = a.dead_kill(out, al, fn)
             })
             cn := env.is_consume_method(c).match ({
-                true  => c.recv_var_name(),
+                true  => c.recv_move_name(),
                 false => env.send_consume(c),
             })
             (cn.is_empty() == false).then({
@@ -2877,6 +2929,7 @@ KMETHODNOTFOUND = () i32 { 38 }    // an undefined CALL whose first argument is 
 KBOOLARM = () i32 { 39 }    // a bool `.match` omits true/false (or `_`); use an explicit arm or `.then` for a one-way effect
 KNOIF = () i32 { 40 }    // source contains the forbidden `if` token; Zen uses bool `.match` for conditional control flow
 KTARGARITY = () i32 { 41 }    // an explicit `<…>` type-arg list whose COUNT ≠ the declared type-parameter count
+KFFITYPE = () i32 { 42 }    // a FOREIGN (bodyless) declaration whose signature uses a type outside the FFI-safe set
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
@@ -3249,11 +3302,18 @@ diag_info = (code: i32) DiagInfo {
                                                                                                                                                         message: "wrong number of explicit type arguments",
                                                                                                                                                         hint: "pass exactly one type argument per declared type parameter, or omit the `<…>` list to infer them",
                                                                                                                                                     ),
-                                                                                                                                                    false => DiagInfo(
-                                                                                                                                                        kind: "type",
-                                                                                                                                                        message: "type error",
-                                                                                                                                                        hint: "",
-                                                                                                                                                    ),
+                                                                                                                                                    false => (code == 42).match ({
+                                                                                                                                                        true  => DiagInfo(
+                                                                                                                                                            kind: "ffi-type",
+                                                                                                                                                            message: "foreign declaration uses a type with no C ABI shape",
+                                                                                                                                                            hint: "a bodyless (foreign) declaration is a raw C prototype; use fixed-width integers, f32/f64, bool, string_view (const char*), RawPtr<T>/Ptr<T>/MutPtr<T>, non-capturing fn pointers, or structs of those — pass buffers through the RawPtr<T> floor (pointer + length)",
+                                                                                                                                                        ),
+                                                                                                                                                        false => DiagInfo(
+                                                                                                                                                            kind: "type",
+                                                                                                                                                            message: "type error",
+                                                                                                                                                            hint: "",
+                                                                                                                                                        ),
+                                                                                                                                                    }),
                                                                                                                                                 }),
                                                                                                                                             }),
                                                                                                                                         }),
@@ -5346,6 +5406,143 @@ check_module_unknown_type_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [
             span_width: d.span_width,
             count: d.count,
             message: a.unknown_type_message(nm),
+            hint: d.hint,
+        ),
+    })
+}
+// ── error[ffi-type]: FFI-safety of FOREIGN (bodyless) declarations ─────────────────────────────────
+// A bodyless `name = (params) Ret` decl IS a raw platform prototype (genc emits a bare C prototype;
+// genjs lowers it to a browser call), so every param/return type must have a shape the emitter's
+// platform contract actually represents. The permitted set is derived from the tree's own foreign
+// surface (std.c.libc, std.mem.alloc, std.{os,net,time,math,platform}, std.concurrent.{pool,
+// coroutine}, std.web.dom) and verified against genc's lowering (cname_write):
+//   • builtin scalars   I32/I64/U8/F64/Bool → int32_t/int64_t/uint8_t/double/bool
+//   • width primitives  Named i8/i16/u16/u32/u64/f32 → the C fixed-width types
+//   • strings           string_view/string_cstr/string_literal → const char*
+//   • pointers          RawPtr/Ptr/MutPtr<T> ALL lower to a plain C `T*` (any pointee)
+//   • fn pointers       FnT lowers to the single `void(*)(void)` typedef — a plain C function
+//                       pointer (pthread_create's start routine, dom's event callbacks); its own
+//                       signature must recurse FFI-safe
+//   • flat structs      a declared struct whose fields are ALL FFI-safe is a by-value C struct
+//                       (std.web.dom's opaque `{ handle: RawPtr<u8> }` interface handles)
+//   • generic instances a CONCRETE instantiation of a declared generic with FFI-safe args emits a
+//                       concrete monomorphized struct (std.web.dom returns Opt<Node>/Opt<string_view>)
+//   • void              the return slot
+// REJECTED: type parameters on the decl (one foreign symbol cannot have per-instantiation ABI),
+// slices `[T]` (the zslice fat pointer is Zen-internal — no hand-written C in the tree receives one;
+// buffers cross the boundary as RawPtr + length, the libc.zen convention), concrete enums (tag+union
+// layout is a Zen-internal contract), and any undeclared/unknown named type.
+ffi_ty_ok = (env: Env, t: Ty, depth: i64) bool {
+    (depth <= 0).then({
+        return false
+    })
+    t.match ({
+        .Slice(e)   => false,
+        .FnT(ft)    => env.ffi_tys_ok(ft.params, depth - 1) && env.ffi_ty_ok(load(ft.ret), depth - 1),
+        .Named(n)   => is_prim_width(n) || env.env_is_struct(n) && env.ffi_fields_ok(env.env_struct_fields(n), depth - 1),
+        .Generic(g) => (env.env_is_gen_struct(g.name) || env.env_is_gen_enum(g.name)) && env.ffi_tys_ok(g.args, depth - 1),
+        _           => true,
+    })
+}    // I32/I64/U8/F64/Bool/Void/string_*/Ptr(any kind) — direct C shapes
+ffi_tys_ok = (env: Env, ts: [Ty], depth: i64) bool {
+    ok := true
+    ts.loop((h, i, t) {
+        ok = env.ffi_ty_ok(t, depth) && ok
+    })
+    ok
+}
+ffi_fields_ok = (env: Env, fs: [Field], depth: i64) bool {
+    ok := true
+    fs.loop((h, i, f) {
+        ok = env.ffi_ty_ok(f.ty, depth) && ok
+    })
+    ok
+}
+FFI_DEPTH = () i64 { 8 }
+// 0/1 count predicates feeding kv_one, mirroring ut_unknown_ty's shape.
+ffi_bad_ty = (env: Env, t: Ty) i32 { env.ffi_ty_ok(t, FFI_DEPTH()).match ({ true => 0, false => 1 }) }
+ffi_bad_generic = (f: Func) i32 { (f.tparams.len > 0).match ({ true => 1, false => 0 }) }
+// the kind walk: first offending foreign decl, caret on the decl (a Ty carries no source position).
+ffi_func_kind = (env: Env, f: Func) i32 {
+    acc := f.ffi_bad_generic().kv_one(KFFITYPE()).kv_at(f.pos)
+    f.params.loop((h, i, p) {
+        acc = acc.kv_kor(env.ffi_bad_ty(p.ty).kv_one(KFFITYPE()).kv_at(f.pos))
+    })
+    acc.kv_kor(env.ffi_bad_ty(f.ret).kv_one(KFFITYPE()).kv_at(f.pos))
+}
+check_module_ffi_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    idx := a.build_decl_index(decls)
+    env := Env(
+        vars: a.params_env(cv_no_params()),
+        decls: decls,
+        didx: idx,
+        exp: tvoid(),
+        a: a,
+    )
+    acc := 0
+    decls.loop((h, i, d) {
+        acc = acc.kv_kor(d.match ({
+            .DForeign(f) => env.ffi_func_kind(f),
+            _            => 0,
+        }))
+    })
+    acc
+}
+// the NAME walk (same traversal order as the kind walk): the message naming the offending
+// parameter/return type, in user spelling.
+ffi_param_msg = (a: MutPtr<Malloc>, fname: string_view, pname: string_view, tname: string_view) string_view { a.gstr_string(96).gstr_append(a, "foreign declaration `").gstr_append(a, fname).gstr_append(a, "`: parameter `").gstr_append(a, pname).gstr_append(a, "` has non-FFI-safe type `").gstr_append(a, tname).gstr_append(a, "`").gstr_finish(a) }
+ffi_ret_msg = (a: MutPtr<Malloc>, fname: string_view, tname: string_view) string_view { a.gstr_string(96).gstr_append(a, "foreign declaration `").gstr_append(a, fname).gstr_append(a, "`: return type `").gstr_append(a, tname).gstr_append(a, "` is not FFI-safe").gstr_finish(a) }
+ffi_generic_msg = (a: MutPtr<Malloc>, fname: string_view) string_view { a.gstr_string(96).gstr_append(a, "foreign declaration `").gstr_append(a, fname).gstr_append(a, "` declares type parameters — a foreign symbol binds ONE concrete C signature").gstr_finish(a) }
+ffi_func_msg = (a: MutPtr<Malloc>, env: Env, f: Func) string_view {
+    (f.tparams.len > 0).then({
+        return a.ffi_generic_msg(f.name)
+    })
+    r := ""
+    f.params.loop((h, i, p) {
+        r = desc_or(r, env.ffi_ty_ok(p.ty, FFI_DEPTH()).match ({
+            true  => "",
+            false => a.ffi_param_msg(f.name, p.name, a.zty(p.ty)),
+        }))
+    })
+    desc_or(r, env.ffi_ty_ok(f.ret, FFI_DEPTH()).match ({
+        true  => "",
+        false => a.ffi_ret_msg(f.name, a.zty(f.ret)),
+    }))
+}
+check_module_ffi_name = (a: MutPtr<Malloc>, decls: [Decl]) string_view {
+    idx := a.build_decl_index(decls)
+    env := Env(
+        vars: a.params_env(cv_no_params()),
+        decls: decls,
+        didx: idx,
+        exp: tvoid(),
+        a: a,
+    )
+    r := ""
+    decls.loop((h, i, d) {
+        r = desc_or(r, d.match ({
+            .DForeign(f) => a.ffi_func_msg(env, f),
+            _            => "",
+        }))
+    })
+    r
+}
+check_module_ffi_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
+    packed := a.check_module_ffi_kind(decls)
+    (packed == 0).then({
+        return check_diagnostic_none()
+    })
+    d := src.check_diagnostic_from_source(packed, 1)
+    nm := a.check_module_ffi_name(decls)
+    is_empty(nm).match ({
+        true  => d,
+        false => CheckDiagnostic(
+            code: d.code,
+            kind: d.kind,
+            source_offset: d.source_offset,
+            span_width: d.span_width,
+            count: d.count,
+            message: nm,
             hint: d.hint,
         ),
     })

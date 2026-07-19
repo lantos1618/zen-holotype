@@ -1726,6 +1726,30 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nBox*: { o: Own<Resource> }\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    b := Box(o: o)\n    c := b.o\n    c.release_in(a)\n    b.o.release_in(a)\n    0\n}",
+        should_pass: false,
+        kind: "ownership",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nBox*: { o: Own<Resource>, n: i32 }\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    b := Box(o: o, n: 3)\n    c := b.o\n    c.release_in(a)\n    b.n\n}",
+        should_pass: false,
+        kind: "ownership",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nBox*: { o: Own<Resource> }\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    b := Box(o: o)\n    c := b.o\n    n := c.get().id\n    c.release_in(a)\n    n\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nBox*: { o: Own<Resource> }\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    b := Box(o: o)\n    b.o.release_in(a)\n    b.o.get().id\n}",
+        should_pass: false,
+        kind: "ownership",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nBox*: { o: Own<Resource> }\nkill = (o: Own<Resource>, a: MutPtr<Heap>) void { o.release_in(a) }\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    b := Box(o: o)\n    kill(b.o, a)\n    b.o.get().id\n}",
+        should_pass: false,
+        kind: "ownership",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nBox*: { o: Own<Resource>, n: i32 }\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    b := Box(o: o, n: 3)\n    k := b.n\n    m := b.o.get().id\n    b.o.release_in(a)\n    k + m\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nView*: { p: MutPtr<Resource> }\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    v := View(p: o.ptr())\n    n := v.p.id\n    o.release_in(a)\n    n\n}",
         should_pass: true,
         kind: "",
@@ -2093,6 +2117,30 @@ harness_verdict_run* = () i32 {
         src: "test* = () i32 { x: i32 := 2000000000 + 2000000000  0 }",
         should_pass: false,
         kind: "assign-fit",
+    ), VerdictCase(
+        src: "// ffi: a GENERIC foreign decl has no single C symbol/ABI — reject at declaration site.\nfrob<T> = (x: T) T\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "ffi-type",
+    ), VerdictCase(
+        src: "// ffi: a slice param is the zslice fat pointer — no C ABI contract; use RawPtr + len.\nfrob = (xs: [i32]) i64\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "ffi-type",
+    ), VerdictCase(
+        src: "// ffi: a struct param whose FIELDS are not FFI-safe is equally rejected (recursion).\nS*: { a: i32, b: [i32] }\nfrob = (s: S) i64\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "ffi-type",
+    ), VerdictCase(
+        src: "// ffi chain order: an UNDECLARED named type in a foreign sig is the unknown-type error (which\n// runs before the ffi pass), not a misleading ffi-type reject.\nfrob = (cb: (RawPtr<u8>) RawPtr<u8>) Widget\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "unknown-type",
+    ), VerdictCase(
+        src: "// ffi: the libc.zen shapes — scalars, string_view, RawPtr<T>, fn-pointer params, void return — accept.\nmy_open = (path: string_view, flags: i32, mode: i32) i32\nmy_calloc = (n: i64, size: i64) RawPtr<u8>\nmy_abort = () void\nmy_sin = (x: f64) f64\nmy_pthread_create = (thread: RawPtr<u8>, attr: RawPtr<u8>, start: (RawPtr<u8>) RawPtr<u8>, arg: RawPtr<u8>) i32\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "// ffi: the std.web.dom shapes — opaque handle structs by value, bool, width ints — accept.\nHandle*: { h: RawPtr<u8> }\nclick2 = (e: Handle) void\nvisible = (e: Handle) bool\nnarrow = (a: i8, b: u16, c: u32, d: u64, e: f32) i8\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
     )])
     // field-aware escape: a slice literal element carries a stack-local address (re-census #1 gap).
     // UFCS auto-ref: value Rng where next expects MutPtr<Rng> — rewrite to addr(r).
@@ -2243,6 +2291,18 @@ harness_verdict_run* = () i32 {
     // no over-rejection: free-then-reacquire inside the loop body revives before the iteration ends.
     // no over-rejection: the error-path idiom (free + `return` in one arm, free after) is still
     // legal — the freeing arm does not fall through.
+    // MOVE-OUT OF A FIELD (audit hole): `c := b.o` (b.o an Own) moves the owner OUT of the struct —
+    // the base keeps a bit-copy naming the SAME allocation, so `c.release_in(a)` then
+    // `b.o.release_in(a)` was an undetected double-free. The member move kills the whole BASE
+    // binding (name-keyed conservative), in every position where a bare-Var source moves today:
+    // `:=`/`=` copy, a consuming Own param, an Own field/element init, a send payload, and the
+    // release/drop receiver itself (`b.o.release_in(a)` kills `b`).
+    // conservative kill pinned: using ANOTHER field of the base after the move-out rejects.
+    // accept: move out of the field then use only the MOVED owner (`c := b.o` … `c.release_in(a)`).
+    // reject: release through the field then read through the field (`b.o.release_in` → `b.o.get()`).
+    // reject: the field passed to a consuming Own param (`kill(b.o, a)`) then read through the field.
+    // no over-rejection: value-field reads (`b.n: i32`) and owner-field BORROW reads (`b.o.get()`)
+    // are not moves — the base stays live until an actual move/consume of the field.
     // R4: a base digit out of range right after the prefix (`0o9`, `0b2`, `0b19`, `0xFFg`) used
     // to split into two tokens with the wrong value — now a positioned lexer error.
     // R5: a lone radix prefix with no digits (`0b`/`0o`/`0x`) used to be accepted as value 0.
