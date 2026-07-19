@@ -69,7 +69,7 @@ clean:
 # 8-bit process status.
 #   make -f bootstrap/Makefile harness
 harness: zenc
-	cd $(ROOT) && ZO=/tmp/zo_harness.$$$$ && $(ZENC) build tests/harness.zen -o $$ZO && $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
+	cd $(ROOT) && ZO=/tmp/zo_harness.$$$$ && ZC=/tmp/zo_hcache.$$$$ && export ZENC_CACHE_DIR=$$ZC && $(ZENC) build tests/harness.zen -o $$ZO && $$ZO; rc=$$?; rm -rf $$ZO $$ZC; exit $$rc
 
 # Fast smoke subset of the harness: runs only the quick deterministic correctness
 # suites (value + verdict) via ZEN_HARNESS_FAST and SKIPS the slow subprocess-heavy suites (modules /
@@ -77,7 +77,7 @@ harness: zenc
 # harness` above stays the merge gate. See tests/harness.zen for which suites the flag selects.
 #   make -f bootstrap/Makefile harness-fast
 harness-fast: zenc
-	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -f $$ZO; exit $$rc
+	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && ZC=/tmp/zo_hfcache.$$$$ && export ZENC_CACHE_DIR=$$ZC && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -rf $$ZO $$ZC; exit $$rc
 
 # Differential gate (module-system campaign): compare two zenc binaries over the whole fixture +
 # example + dispatch corpus — check stdout/stderr/exit, emitted C bytes, run exit/stdout. Diffs not

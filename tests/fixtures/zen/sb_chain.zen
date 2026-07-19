@@ -1,0 +1,45 @@
+// std.text.sb — the sticky-error chainable builder, end to end. The happy path pins the exact bytes
+// of a mixed chain (str / byte / int / rep) with the allocator named ONCE; the sticky path drives every
+// op through a failing allocator and asserts the ops no-op and `done` settles as .Err — six expect
+// lines collapsed to one chain, with allocation failure still a VALUE, never a crash.
+{ Malloc, Allocator } = std.mem.alloc
+{ Sb, sb } = std.text.sb
+{ to_exit } = std.core.bool
+// an allocator that always fails — every acquire/resize yields null (try_* maps null to .Err).
+LimitAlloc: {
+    _: i32,
+}
+LimitAlloc.impl(Allocator, {
+    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> { null_ptr() }
+    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { }
+})
+main = () i32 {
+    m := Malloc(_: 0)
+    a := m.addr()
+    // the review's target chain: `a.sb().s("os ").s(name).ch('(').s(abi).ch(')').done()`.
+    name := "zen"
+    abi := "x86"
+    chain_ok := a.sb().s("os ").s(name).ch('(').s(abi).ch(')').done().match ({
+        .Ok(t)  => t == "os zen(x86)",
+        .Err(e) => false,
+    })
+    // mixed ops: rep, byte, negative / zero i64 digits (std.text.num under the hood).
+    mixed_ok := a.sb().rep("ab", 3).ch(':').i(0 - 42).ch(' ').i(0).done().match ({
+        .Ok(t)  => t == "ababab:-42 0",
+        .Err(e) => false,
+    })
+    // rep edge cases: n <= 0 and an empty t both append nothing.
+    edge_ok := a.sb().s("x").rep("ab", 0 - 1).rep("", 5).s("y").done().match ({
+        .Ok(t)  => t == "xy",
+        .Err(e) => false,
+    })
+    // sticky path: the initial alloc fails, every later op is a no-op, done settles as .Err.
+    lim := LimitAlloc(_: 0)
+    l := lim.addr()
+    sticky_ok := l.sb().s("os ").i(7).rep("ab", 3).ch('!').done().match ({
+        .Ok(t)  => false,
+        .Err(e) => true,
+    })
+    (chain_ok && mixed_ok && edge_ok && sticky_ok).to_exit()
+}
