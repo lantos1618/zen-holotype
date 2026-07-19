@@ -5,7 +5,7 @@
 { Malloc } = std.mem.alloc
 { eq, view } = std.text.str
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
-{ contents_in, out, out_bytes, save, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644, MODE_755 } = std.io.file
+{ contents_in, out, out_bytes, save, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644, MODE_755 } = std.io.file
 { or, expect } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
 { then } = std.core.bool
 { open, read, write, close, system, unlink, mkdir, rmdir, opendir, closedir, getpid } = std.c.libc
@@ -273,14 +273,14 @@ cc_command = (mp: MutPtr<Malloc>, root: string_view, tmpc: string_view, out: str
 // harness's cache cases point it at scratch). i64 wraps like the spec's u64: every build has -fwrapv.
 FNV_PRIME = () i64 { 1099511628211 }
 FNV_BASIS = () i64 { 0 - 3750763034362895579 }    // 0xcbf29ce484222325, the FNV-1a-64 offset basis, as an i64
-fnv_str = (h: i64, s: string_view) i64 {
-    v: [u8] := s.view()
+fnv_bytes = (h: i64, v: [u8]) i64 {
     hh := h
     v.loop((lh, i, b) {
         hh = (hh ^ to_i64(b)) * FNV_PRIME()
     })
     (hh ^ v.len) * FNV_PRIME()
 }    // seal with the length so piece boundaries cannot slide
+fnv_str = (h: i64, s: string_view) i64 { h.fnv_bytes(s.view()) }
 flag_token_end = (v: [u8], i: i64) i64 { (i >= v.len || v[i] == ' ').match ({
     true  => i,
     false => v.flag_token_end(i + 1),
@@ -308,18 +308,26 @@ fnv_flags = (h: i64, mp: MutPtr<Malloc>, s: string_view) i64 {
     v: [u8] := s.view()
     mp.fnv_flag_files(h.fnv_str(s), v, 0)
 }
-// the compiler's own identity. Hashing the ELF binary itself is a TRAP: contents land in a
-// NUL-terminated string, so the hash stops at the header's first NUL (~byte 4) and every build
-// shares one stamp — a rebuilt compiler could replay stale entries (observed in the field).
-// Instead hash the generated seed (bootstrap/zenc.gen.c beside the binary): plain NUL-free C text
-// that zenc is ALWAYS compiled from, so it identifies the build exactly. Unreadable seed yields 0
-// and the probe DISABLES the cache for the run (empty key) — never a shared degenerate stamp.
+// the compiler's own identity: the hash of the running zenc binary (argv[0]). A rebuilt zenc — new
+// checker, new codegen, new zenrt.c, all compiled in — yields a new stamp, so an old binary's entries
+// can never be replayed by a new one. An unreadable argv[0] yields 0 and the probe DISABLES the
+// cache for the run (empty key). Read in explicit-length chunks and fold as [u8]: an ELF
+// binary has a NUL at byte 5, so any strlen-based view (contents_in -> .view()) would hash only the
+// first ~4 bytes and stamp EVERY build identically — stale replays across rebuilt compilers.
 cache_self = (mp: MutPtr<Malloc>) i64 {
-    seedp := mp.gstr_string(96).gstr_append(mp, mp.dirname(arg(0))).gstr_append(mp, "/bootstrap/zenc.gen.c").gstr_finish(mp)
-    contents_in(mp, seedp).match ({
-        .Ok(b)  => FNV_BASIS().fnv_str(b),
-        .Err(e) => 0,
+    fd := arg(0).open(O_RDONLY, 0)
+    (fd < 0).match ({
+        true  => 0,
+        false => {
+            h := fd.cache_self_fold(mp.gstr_string(65536), FNV_BASIS())
+            fd.close()
+            h
+        },
     })
+}
+cache_self_fold = (fd: i32, buf: String, h: i64) i64 {
+    n := fd.read(buf.ptr, 65536)
+    (n <= 0).match ({ true => h, false => fd.cache_self_fold(buf, h.fnv_bytes(buf.ptr.slice(n))) })
 }
 cache_hex_digit = (d: i64) u8 { load(offset("0123456789abcdef", d)) }
 push_hex = (s: String, mp: MutPtr<Malloc>, h: i64, i: i64) String {
