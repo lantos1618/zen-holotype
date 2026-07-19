@@ -261,25 +261,37 @@ has_data_field = (fields: [Field]) bool {
     })
     found
 }
-data_field_count = (fields: [Field]) i32 {
+// is `f` the SYNTHESIZED requirement field of one of the record's `=`-methods? fill_field_default
+// adds an FnT field per default, and only THOSE must be stripped from an inherent struct's data
+// fields. Match on name AND FnT type: a user-written fn-typed field (`cb: (i32) i32`) is a real
+// data field (filtering on FnT alone silently dropped it), while a data field that merely SHARES a
+// method's name (Map<T> has both a `keys` pointer field and a `keys = (…)` method) is not FnT.
+is_default_field = (defaults: [Func], f: Field) bool {
+    found := false
+    defaults.loop((h, i, df) {
+        found = found || eq(df.name, f.name) && f.field_is_method()
+    })
+    found
+}
+data_field_count = (fields: [Field], defaults: [Func]) i32 {
     n := 0
     fields.loop((h, i, f) {
-        (f.field_is_method() == false).then({
+        (defaults.is_default_field(f) == false).then({
             n = n + 1
         })
     })
     n
 }
-data_fields = (a: MutPtr<Malloc>, fields: [Field]) [Field] {
+data_fields = (a: MutPtr<Malloc>, fields: [Field], defaults: [Func]) [Field] {
     buf := a.field_buf()
     j := 0
     fields.loop((h, i, f) {
-        (f.field_is_method() == false).then({
+        (defaults.is_default_field(f) == false).then({
             buf[j] = f
             j = j + 1
         })
     })
-    buf.take_fields(fields.data_field_count())
+    buf.take_fields(fields.data_field_count(defaults))
 }
 // Enum variants end at the first token that is not `|`.
 EnumEnd*: {
@@ -914,8 +926,8 @@ fill_inherent_methods = (a: MutPtr<Malloc>, tyname: string_view, tparams: [Param
 fill_inherent_struct = (a: MutPtr<Malloc>, se: StructEnd, buf: [Decl], i: i32) i32 {
     mbuf := a.param_buf()
     buf[i] = (se.ntp > 0).match ({
-        true  => dgenstruct(gsdef_at(se.sd.name, se.tparams, a.data_fields(se.sd.fields), se.sd.pos)),
-        false => dstruct(sdef_at(se.sd.name, a.data_fields(se.sd.fields), se.sd.pos)),
+        true  => dgenstruct(gsdef_at(se.sd.name, se.tparams, a.data_fields(se.sd.fields, se.defaults), se.sd.pos)),
+        false => dstruct(sdef_at(se.sd.name, a.data_fields(se.sd.fields, se.defaults), se.sd.pos)),
     })
     next := a.fill_inherent_methods(se.sd.name, se.tparams, se.defaults, buf, i + 1, mbuf, 0)
     buf[next] = dimpl(se.sd.name, se.sd.name, mbuf.take_params(se.defaults.len))

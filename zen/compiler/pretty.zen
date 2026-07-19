@@ -942,6 +942,40 @@ ff_minus_tparams = (a: MutPtr<Malloc>, full: [Param], drop: [Param]) [Param] {
     })
     slice(buf.ptr, n)
 }
+// a trait default for (trait, method): the parser splits `m = (…) R { … }` inside a pure method
+// record into a synthesized FnT requirement field PLUS a DTraitDefault sibling carrying the body.
+// The formatter re-inlines that body at the field's own slot (and skips the sibling at top level) —
+// printing it as a standalone fn would hoist the body out of the record, where `Self` is unbound.
+ff_has_default = (decls: [Decl], trname: string_view, fname: string_view) bool {
+    found := false
+    decls.loop((h, i, d) {
+        d.match ({
+            .DTraitDefault(td) => (eq(td.trname, trname) && eq(td.fn.name, fname)).then({
+                found = true
+            }),
+            _                  => { },
+        })
+    })
+    found
+}
+ff_find_default = (a: MutPtr<Malloc>, decls: [Decl], trname: string_view, fname: string_view) Func {
+    res := Func(
+        name: "",
+        params: ff_no_params(),
+        ret: tvoid(),
+        tparams: ff_no_params(),
+        body: slice(null_ptr(), 0),
+    )
+    decls.loop((h, i, d) {
+        d.match ({
+            .DTraitDefault(td) => (eq(td.trname, trname) && eq(td.fn.name, fname)).then({
+                res = td.fn
+            }),
+            _                  => { },
+        })
+    })
+    res
+}
 // is `fname` a hoisted impl method (so it must NOT print as a standalone top-level fn)?
 ff_is_hoisted = (a: MutPtr<Malloc>, decls: [Decl], fname: string_view) bool {
     found := false
@@ -982,11 +1016,28 @@ ff_inherent_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], tyname: stri
     })
     out
 }
+// one record entry: a field whose name carries a DTraitDefault prints the default IN PLACE —
+// `name = (params) ret { … },` at one indent, body formatted like a fn body — every other field
+// prints `name: ty,`. Both spellings keep the trailing comma (fields are record entries).
+ff_record_field = (s: String, a: MutPtr<Malloc>, decls: [Decl], owner: string_view, ctp: [Param], fl: Field) String {
+    decls.ff_has_default(owner, fl.name).match ({
+        true  => {
+            f := a.ff_find_default(decls, owner, fl.name)
+            own := a.ff_minus_tparams(f.tparams, ctp)
+            // own-line comments preceding the default (fields carry no pos, so the default's name pos
+            // is the only in-record anchor) print above it at field indent — not inside its body.
+            lead := s.ff_flush_leading(a, f.pos, 1)
+            sig := lead.ff_indent(a, 1).ff_append(a, fl.name).ff_tparams(a, own).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
+            sig.ff_append(a, " ").ff_block(a, f.body, 1, true).ff_append(a, ",\n")
+        },
+        false => s.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n"),
+    })
+}
 ff_struct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], sd: StructDecl) String {
     open := s.ff_name(a, exp, sd.name).ff_append(a, ": {\n")
     body := open
     sd.fields.loop((h, i, fl) {
-        body = body.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n")
+        body = body.ff_record_field(a, decls, sd.name, ff_no_params(), fl)
     })
     body.ff_inherent_methods(a, decls, sd.name, ff_no_params(), 1).ff_append(a, "}")
 }
@@ -994,7 +1045,7 @@ ff_genstruct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: Ge
     open := s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": {\n")
     body := open
     g.fields.loop((h, i, fl) {
-        body = body.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n")
+        body = body.ff_record_field(a, decls, g.name, g.tparams, fl)
     })
     body.ff_inherent_methods(a, decls, g.name, g.tparams, 1).ff_append(a, "}")
 }
@@ -1071,13 +1122,14 @@ pretty_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
         nb := gf_next_decl_pos(decls, i + 1)    // the next EMITTED decl's pos → trailing-comment boundary
         pretty_set_block_end(nb)    // bound this decl's body last-stmt drain to the decl end
         d.match ({
-            .DFunc(f)  => (a.ff_is_hoisted(decls, f.name) == false).then({
+            .DFunc(f)          => (a.ff_is_hoisted(decls, f.name) == false).then({
                 out = a.ff_top_decl(out, exp, decls, d, nb)
             }),
-            .DImpl(im) => (eq(im.ty, im.trname) == false).then({
+            .DImpl(im)         => (eq(im.ty, im.trname) == false).then({
                 out = a.ff_top_decl(out, exp, decls, d, nb)
             }),
-            _          => {
+            .DTraitDefault(td) => { },    // body re-inlined at its record's field slot (ff_record_field)
+            _                  => {
                 out = a.ff_top_decl(out, exp, decls, d, nb)
             },
         })
@@ -1091,7 +1143,12 @@ gf_next_decl_pos = (decls: [Decl], i: i32) i32 {
     (i >= decls.len).then({
         return 0
     })
-    p := gf_decl_pos(decls[i])
+    // a DTraitDefault is never emitted at top level (its body prints inside its record), so its pos —
+    // a byte INSIDE the record's own text — must not serve as the record's trailing-comment boundary.
+    p := decls[i].match ({
+        .DTraitDefault(td) => 0,
+        _                  => gf_decl_pos(decls[i]),
+    })
     (p > 0).match ({ true => p, false => gf_next_decl_pos(decls, i + 1) })
 }
 // one top-level decl: leading comments (col 0) → the decl → its trailing comment (bounded by `nb`) → newline.
