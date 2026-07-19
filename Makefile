@@ -6,7 +6,7 @@
 
 BOOT := $(MAKE) -f bootstrap/Makefile
 
-.PHONY: all zenc regen harness harness-fast difftest docs-check clean setup-git resolve-seed
+.PHONY: all zenc regen harness harness-fast difftest docs-check ffi-verify clean setup-git resolve-seed
 
 # Default: build ./zenc.
 all: zenc
@@ -28,6 +28,9 @@ difftest:
 
 docs-check:
 	$(BOOT) docs-check
+
+ffi-verify:
+	$(BOOT) ffi-verify
 
 clean:
 	$(BOOT) clean

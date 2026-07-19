@@ -106,7 +106,7 @@ but the heavyweight deep-resolver compile remains a separate memory target.
 | Ordinary `if` | Any `if` token is rejected at the lexer with `error[no-if]` and a teaching hint; match guards were removed entirely (2026-07-18). | Use `.match` (or `.then` for one-way effects); nest a boolean `.match` in an arm body where a guard was wanted. |
 | Enum separator | `\|` separates variants and is also bitwise OR. | Comma-separated variants are the chosen cleanup direction but require a bootstrap migration. |
 | Local packages | Dotted user modules resolve from the entry program's directory as one logical namespace (`app.utils` → `app/utils.zen`); registered roots/dependency metadata still absent. | Structure projects freely under the entry dir; package roots are the next module-system stage. |
-| External signatures | Bodyless functions type-check calls and link only when used; no later Zen definition/completeness pairing. | Use them for FFI today, not as a finished module-signature system. |
+| External signatures | Bodyless functions type-check calls and link only when used; no later Zen definition/completeness pairing. std's foreign prototypes are verified against the real system headers by `make ffi-verify` (CI-gated). | Use them for FFI today, not as a finished module-signature system. |
 | Closures | Arbitrary-local escaping captures/capturing fields reject. | Pass directly, lift a named function, or return a parameter-capturing closure. |
 | UFCS type args | `value.id<i32>()` does not parse. | Write `id<i32>(value)`. |
 | Multi-return | Tuple syntax was reverted. | Return a named record. |
