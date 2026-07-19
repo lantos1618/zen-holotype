@@ -680,7 +680,14 @@ ModuleLoad: {
     entries: [ModuleEntry],
     n: i64,
 }
-exit = (code: i32) i32
+// The REAL libc prototype is `void exit(int)` — declaring it `i32` here was FFI drift (caught by
+// `make ffi-verify`, and std.io.c's AST libc table already said tvoid). `die` is the value-position
+// form: exit never returns, so the 0 only exists to give a match arm / tail expression a value.
+exit = (code: i32) void
+die = (code: i32) i32 {
+    exit(code)
+    0
+}
 eprint = (s: string_view) i64 {
     v := view(s)
     write(2, v.ptr, v.len)
@@ -2435,7 +2442,7 @@ vis_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, pos: i32, wi
     h1 := a.mappend_string(h0, name)
     hint := h1.gstr_append(a, "*` in the defining module, or use the module's public surface").gstr_finish(a)
     eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-name", msg, hint, 1))
-    report.match ({ true => 0, false => exit(1) })
+    report.match ({ true => 0, false => die(1) })
 }
 // flat import head `{ a, b } = mod` at line start `p`: every name must be exported by `mod`.
 vis_check_head = (a: MutPtr<Malloc>, path: string_view, src: string_view, p: i32, target: ModuleGraph, id: String, report: bool) i32 {
@@ -2649,7 +2656,7 @@ leak_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, pos: i32, w
     h0 := a.gstr_string(128).gstr_append(a, "export `")
     hint := a.mappend_string(h0, tname).gstr_append(a, "*` or make `").gstr_append(a, fname).gstr_append(a, "` private").gstr_finish(a)
     eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-leak", msg, hint, 1))
-    report.match ({ true => 0, false => exit(1) })
+    report.match ({ true => 0, false => die(1) })
 }
 // ONE exported value decl's signature, scanned textually (mirroring vis_scan_quals: comment/quote
 // spans are skipped). A tiny state machine tracks TYPE position: `:` opens a type expression at
@@ -2917,7 +2924,7 @@ ffi_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, sym: Provide
     msg := a.gstr_string(192).gstr_append(a, "module '").gstr_append(a, dotted).gstr_append(a, "' declares foreign function `").gstr_append(a, sym.name).gstr_append(a, "` without a build grant").gstr_finish(a)
     hint := a.gstr_string(192).gstr_append(a, "grant it: `ffi = \"").gstr_append(a, dotted).gstr_append(a, "\"` in zen.toml, or `//! ffi: ").gstr_append(a, dotted).gstr_append(a, "` in the entry file").gstr_finish(a)
     eprint(a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1))
-    report.match ({ true => 0, false => exit(1) })
+    report.match ({ true => 0, false => die(1) })
 }
 enforce_ffi_grants* = (a: MutPtr<Malloc>, table: ModuleTable, mainsrc: string_view, report: bool) i32 {
     table.modules.loop((h, i, entry) {

@@ -33,7 +33,7 @@ GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zenc regen clean harness harness-fast difftest docs-check setup-git resolve-seed
+.PHONY: zenc regen clean harness harness-fast difftest docs-check ffi-verify setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -91,6 +91,14 @@ difftest: zenc
 
 docs-check:
 	cd $(ROOT) && ./scripts/check-docs.sh
+
+# FFI drift gate: prove std's hand-written foreign prototypes (zen/std/c/libc.zen and friends)
+# match the REAL system headers. Reuses `zenc emit` (foreign decls lower to bare C prototypes),
+# then compares them against glibc's declarations — libm verbatim under gcc's conflicting-types
+# rule, the rest slot-by-slot at ABI-class level (scripts/ffi_abi_check.h, g++ static_assert).
+# Linux/glibc only; skips cleanly elsewhere. Fast (~2s).
+ffi-verify: zenc
+	cd $(ROOT) && ./scripts/ffi_verify.sh $(ZENC)
 
 # Register the local git merge driver that auto-resolves the generated seed (bootstrap/zenc.gen.c).
 # `.gitattributes` maps that path to `merge=zenseed`; this points the driver at scripts/zenseed-merge.sh.
