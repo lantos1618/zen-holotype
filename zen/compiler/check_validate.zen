@@ -158,30 +158,66 @@ LitVal*: {
     v: i64,
     neg: bool,
 }
+// ── i64 overflow guards for the literal fold ─────────────────────────────────────────────
+// A fold that would wrap i64 (`-fwrapv` makes the wrap defined but WRONG as a value) must not
+// produce a range verdict from the wrapped bit pattern — `lit_binop` returns ok=false instead, so
+// the fold degrades to "not a foldable constant" and the range check stays lenient (defers).
+lit_i64_max = () i64 { 9223372036854775807 }
+lit_i64_min = () i64 { 0 - 9223372036854775807 - 1 }
+lit_add_wraps = (l: i64, r: i64) bool { r > 0 && l > lit_i64_max() - r || r < 0 && l < lit_i64_min() - r }
+lit_sub_wraps = (l: i64, r: i64) bool { r < 0 && l > lit_i64_max() + r || r > 0 && l < lit_i64_min() + r }
+// sign-split bound checks; every division below has a nonzero divisor and never forms MIN / -1.
+lit_mul_wraps = (l: i64, r: i64) bool {
+    (l == 0 || r == 0).match ({
+        true  => false,
+        false => (l > 0).match ({
+            true  => (r > 0).match ({
+                true  => l > lit_i64_max() / r,
+                false => r < lit_i64_min() / l,
+            }),
+            false => (r > 0).match ({
+                true  => l < lit_i64_min() / r,
+                false => r < lit_i64_max() / l,
+            }),
+        }),
+    })
+}
+lit_unfoldable = () LitVal {
+    LitVal(
+        ok: false,
+        v: 0,
+        neg: false,
+    )
+}
 lit_binop = (op: string_view, l: i64, r: i64) LitVal {
     eq(op, "+").match ({
-        true  => LitVal(
-            ok: true,
-            v: l + r,
-            neg: l + r < 0,
-        ),
-        false => eq(op, "-").match ({
-            true  => LitVal(
+        true  => lit_add_wraps(l, r).match ({
+            true  => lit_unfoldable(),
+            false => LitVal(
                 ok: true,
-                v: l - r,
-                neg: l - r < 0,
+                v: l + r,
+                neg: l + r < 0,
             ),
-            false => eq(op, "*").match ({
-                true  => LitVal(
-                    ok: true,
-                    v: l * r,
-                    neg: l * r < 0,
-                ),
+        }),
+        false => eq(op, "-").match ({
+            true  => lit_sub_wraps(l, r).match ({
+                true  => lit_unfoldable(),
                 false => LitVal(
-                    ok: false,
-                    v: 0,
-                    neg: false,
+                    ok: true,
+                    v: l - r,
+                    neg: l - r < 0,
                 ),
+            }),
+            false => eq(op, "*").match ({
+                true  => lit_mul_wraps(l, r).match ({
+                    true  => lit_unfoldable(),
+                    false => LitVal(
+                        ok: true,
+                        v: l * r,
+                        neg: l * r < 0,
+                    ),
+                }),
+                false => lit_unfoldable(),
             }),
         }),
     })
@@ -574,8 +610,14 @@ type_impls_trait = (decls: [Decl], tyname: string_view, trname: string_view) boo
     found
 }
 // Enforce ONE bounded tparam at a call site: bind A to its concrete targ, then require the bound.
-// Conservative — only fires when A resolves to a known CONCRETE struct (allocators are structs);
-// an unresolved / primitive / generic-passthrough targ defers (0), so plain generics never regress.
+// Fires when A resolves to a CONCRETE nameable type — a struct, an enum, or a primitive (all live
+// in the impl table's key space, `i64.impl(Ord, …)` etc.), so `f<A: Allocator>` called with `i32`
+// no longer silently passes. Deferral remains ONLY for genuinely unresolved/abstract targs: an
+// empty/unknown name, a caller tparam passed through (`tn` names an in-scope tparam — kvb_func_kind
+// binds them, so a tparam that shadows a global type name still defers), and generic residue
+// (recv_name of a Generic is its mangled instance name, matching no decl).
+bound_prim_name = (n: string_view) bool { eq(n, "i8") || eq(n, "i16") || eq(n, "i32") || eq(n, "i64") || eq(n, "u8") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64") || eq(n, "f32") || eq(n, "f64") || eq(n, "bool") || eq(n, "string_view") }
+bound_targ_concrete = (env: Env, tn: string_view) bool { env.decls.is_struct(tn) || env.env_is_enum(tn) || tn.bound_prim_name() }
 bound_err = (env: Env, f: Func, c: CallData, tp: Param) i32 {
     tr := tp.tparam_bound()
     is_empty(tr).match ({
@@ -583,13 +625,13 @@ bound_err = (env: Env, f: Func, c: CallData, tp: Param) i32 {
         false => {
             tn := env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
             // concrete type A binds to
-            (is_empty(tn) || env.decls.is_struct(tn) == false).match ({
+            (is_empty(tn) || env.vars.tparam_declared(tn) || env.bound_targ_concrete(tn) == false).match ({
                 true  => 0,
                 false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 }),
             })
         },
     })
-}    // unresolved / not a concrete struct: defer
+}    // unresolved / abstract: defer
 bound_errs = (env: Env, f: Func, c: CallData) i32 {
     acc := 0
     f.tparams.loop((h, i, tp) {
@@ -1088,6 +1130,24 @@ dup_arm_errs = (arms: [ArmData]) i32 {
             true  => 0,
             false => arms.dup_before(a.variant, i).match ({ true => 1, false => 0 }),
         })
+    })
+    n
+}
+// An arm strictly AFTER a wildcard `_` arm can never fire — the emitter's switch stops at the
+// default case (gen_switch_arms), so such an arm is silently DROPPED. Report it instead of
+// letting code that looks reachable vanish. (A duplicate variant arm — the other never-fires
+// shape — is already KDUPVARIANT, whether or not a wildcard is present.)
+wildcard_before = (arms: [ArmData], upto: i32) bool {
+    f := false
+    arms.loop((h, i, a) {
+        f = (i < upto && eq(a.variant, "_")).match ({ true => true, false => f })
+    })
+    f
+}
+unreachable_arm_errs = (arms: [ArmData]) i32 {
+    n := 0
+    arms.loop((h, i, a) {
+        n = n + arms.wildcard_before(i).match ({ true => 1, false => 0 })
     })
     n
 }
@@ -2812,9 +2872,11 @@ KVBREAK = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase
 KMAINPARAMS = () i32 { 30 }    // `main` declared with parameters — the OS entry calls zen_main() with none, so they'd read garbage
 KARMVOID = () i32 { 31 }    // a value-consumed match/cond arm that yields no value and does not diverge
 KBADBIND = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) — a value global must use `:=` (the parser's __bad_binding sentinel)
+KUNREACHABLEARM = () i32 { 37 }    // a match arm after a wildcard `_` arm can never fire (the emitter drops it)
 KMETHODNOTFOUND = () i32 { 38 }    // an undefined CALL whose first argument is a concrete struct/enum receiver: reads as `recv.method()` UFCS with no such method (and no free function of that name) — distinct from a bare undefined name
 KBOOLARM = () i32 { 39 }    // a bool `.match` omits true/false (or `_`); use an explicit arm or `.then` for a one-way effect
 KNOIF = () i32 { 40 }    // source contains the forbidden `if` token; Zen uses bool `.match` for conditional control flow
+KTARGARITY = () i32 { 41 }    // an explicit `<…>` type-arg list whose COUNT ≠ the declared type-parameter count
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
@@ -3175,11 +3237,25 @@ diag_info = (code: i32) DiagInfo {
                                                                                                                                                 message: "boolean match does not handle both outcomes",
                                                                                                                                                 hint: "add the missing `true`, `false`, or `_` arm; for an intentional one-way effect, use `condition.then({ ... })`",
                                                                                                                                             ),
-                                                                                                                                            false => DiagInfo(
-                                                                                                                                                kind: "type",
-                                                                                                                                                message: "type error",
-                                                                                                                                                hint: "",
-                                                                                                                                            ),
+                                                                                                                                            false => (code == 37).match ({
+                                                                                                                                                true  => DiagInfo(
+                                                                                                                                                    kind: "unreachable-arm",
+                                                                                                                                                    message: "match arm after a wildcard `_` arm can never fire",
+                                                                                                                                                    hint: "move the arm before the `_` arm, or remove it — arms are tried in order and `_` matches everything",
+                                                                                                                                                ),
+                                                                                                                                                false => (code == 41).match ({
+                                                                                                                                                    true  => DiagInfo(
+                                                                                                                                                        kind: "targ-arity",
+                                                                                                                                                        message: "wrong number of explicit type arguments",
+                                                                                                                                                        hint: "pass exactly one type argument per declared type parameter, or omit the `<…>` list to infer them",
+                                                                                                                                                    ),
+                                                                                                                                                    false => DiagInfo(
+                                                                                                                                                        kind: "type",
+                                                                                                                                                        message: "type error",
+                                                                                                                                                        hint: "",
+                                                                                                                                                    ),
+                                                                                                                                                }),
+                                                                                                                                            }),
                                                                                                                                         }),
                                                                                                                                     }),
                                                                                                                                 }),
@@ -3655,6 +3731,25 @@ kv_makestruct_kind = (env: Env, m: MakeStructData) i32 {
         false => load(m.inits[0].value).expr_pos(),
     })))
 }
+// A generic-struct literal's explicit `<…>` list must pin EVERY tparam (`Box<i32,i32>(…)` on a
+// 1-param generic silently deferred to mono and misreported downstream). A plain struct takes no
+// type arguments at all. An unknown base name stays lenient (the unknown-type channel owns it).
+kv_makestruct_targ_kind = (env: Env, m: MakeStructData) i32 {
+    n := (m.targs.len == 0).match ({
+        true  => 0,
+        false => env.env_is_gen_struct(m.ty).match ({
+            true  => (m.targs.len == env.env_gstruct(m.ty).tparams.len).match ({
+                true  => 0,
+                false => 1,
+            }),
+            false => env.env_is_struct(m.ty).match ({ true => 1, false => 0 }),
+        }),
+    })
+    n.kv_one(KTARGARITY()).kv_at(m.pos.pos_or((m.inits.len == 0).match ({
+        true  => 0,
+        false => load(m.inits[0].value).expr_pos(),
+    })))
+}
 // member access caret on the receiver object (a Var/Call survives resolve).
 kv_nullable_obj_kind = (env: Env, obj: Ptr<Expr>, pos: i32) i32 {
     env.infer_expr(obj).is_nullable_ptr_ty().match ({
@@ -3680,7 +3775,7 @@ kv_match_kind = (env: Env, m: MatchData) i32 {
         true  => m.arms.dup_arm_errs().kv_one(KDUPVARIANT()).kv_at(sp),
         false => env.exhaustive_err(m).kv_one(KEXHAUST()).kv_at(sp).kv_kor(m.arms.dup_arm_errs().kv_one(KDUPVARIANT()).kv_at(sp)),
     })
-    base.kv_kor(env.unknown_arm_errs(m).kv_one(KUNDEFINED()).kv_at(sp))
+    base.kv_kor(m.arms.unreachable_arm_errs().kv_one(KUNREACHABLEARM()).kv_at(sp)).kv_kor(env.unknown_arm_errs(m).kv_one(KUNDEFINED()).kv_at(sp))
 }
 kv_index_kind = (env: Env, ix: IndexData) i32 { env.index_err(ix).kv_one(KINDEX()) }
 kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAND()).kv_at(b.pos.pos_or(load(b.lhs).expr_pos())) }
@@ -4012,6 +4107,23 @@ denrich_arity_msg = (env: Env, c: CallData) string_view {
         false => a.gstr_string(64).gstr_append(a, "wrong number of arguments: expected ").gstr_i64(a, exp).gstr_append(a, ", found ").gstr_i64(a, c.args.len).gstr_finish(a),
     })
 }
+// ── targ-arity enrichment: name the expected vs the supplied TYPE-argument count ───────────────
+denrich_targ_count_msg = (a: MutPtr<Malloc>, exp: i64, got: i64) string_view { a.gstr_string(64).gstr_append(a, "expected ").gstr_i64(a, exp).gstr_append(a, " type argument(s), got ").gstr_i64(a, got).gstr_finish(a) }
+denrich_targ_arity_msg = (env: Env, c: CallData) string_view {
+    env.env_known_fn(c.fn).match ({
+        true  => env.a.denrich_targ_count_msg(env.env_func(c.fn).tparams.len, c.targs.len),
+        false => "",
+    })
+}
+denrich_makestruct_targ_msg = (env: Env, sd: MakeStructData) string_view {
+    env.env_is_gen_struct(sd.ty).match ({
+        true  => env.a.denrich_targ_count_msg(env.env_gstruct(sd.ty).tparams.len, sd.targs.len),
+        false => env.env_is_struct(sd.ty).match ({
+            true  => env.a.denrich_targ_count_msg(0, sd.targs.len),
+            false => "",
+        }),
+    })
+}
 // ── exhaustiveness enrichment: name a variant the match fails to cover ─────────────────────────
 denrich_exhaust_msg = (env: Env, m: MatchData) string_view {
     vs := env.decls.enum_variants(m.ename)
@@ -4054,21 +4166,30 @@ denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) 
             false => load(sd.inits[0].value).expr_pos(),
         })) == off).match ({
             true  => env.denrich_makestruct_msg(sd),
-            false => a.denrich_inits(env, sd.inits, off, code),
+            false => (code == KTARGARITY() && sd.pos.pos_or((sd.inits.len == 0).match ({
+                true  => 0,
+                false => load(sd.inits[0].value).expr_pos(),
+            })) == off).match ({
+                true  => env.denrich_makestruct_targ_msg(sd),
+                false => a.denrich_inits(env, sd.inits, off, code),
+            }),
         }),
         .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({
             true  => env.denrich_notcallable_msg(c.fn),
             false => (code == KMETHODNOTFOUND() && c.pos == off).match ({
                 true  => env.denrich_undef_method_msg(c),
-                false => (code == KARITY() && c.pos == off).match ({
-                    true  => env.denrich_arity_msg(c),
-                    false => (code == KTRAITBOUND() && c.pos == off).match ({
-                        true  => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)),
-                        false => (code == KUNDEFINED() && c.pos == off).match ({
-                            true  => desc_or(env.denrich_ambiguous_msg(c), a.denrich_args(env, c.args, off, code)),
-                            false => (code == KARGTYPE()).match ({
-                                true  => desc_or(env.denrich_argfit_msg(c, off), a.denrich_args(env, c.args, off, code)),
-                                false => a.denrich_args(env, c.args, off, code),
+                false => (code == KTARGARITY() && c.pos == off).match ({
+                    true  => env.denrich_targ_arity_msg(c),
+                    false => (code == KARITY() && c.pos == off).match ({
+                        true  => env.denrich_arity_msg(c),
+                        false => (code == KTRAITBOUND() && c.pos == off).match ({
+                            true  => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)),
+                            false => (code == KUNDEFINED() && c.pos == off).match ({
+                                true  => desc_or(env.denrich_ambiguous_msg(c), a.denrich_args(env, c.args, off, code)),
+                                false => (code == KARGTYPE()).match ({
+                                    true  => desc_or(env.denrich_argfit_msg(c, off), a.denrich_args(env, c.args, off, code)),
+                                    false => a.denrich_args(env, c.args, off, code),
+                                }),
                             }),
                         }),
                     }),
@@ -4182,7 +4303,7 @@ denrich_dupfn = (a: MutPtr<Malloc>, decls: [Decl], off: i32) string_view {
 // the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound/
 // dup-fn/undefined-name error at `off`, else "".
 denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) string_view {
-    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN() && code != KUNDEFINED() && code != KARGTYPE() && code != KRETURNFIT() && code != KASSIGNFIT() && code != KARITY() && code != KEXHAUST() && code != KMETHODNOTFOUND()).then({
+    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN() && code != KUNDEFINED() && code != KARGTYPE() && code != KRETURNFIT() && code != KASSIGNFIT() && code != KARITY() && code != KEXHAUST() && code != KMETHODNOTFOUND() && code != KTARGARITY()).then({
         return ""
     })
     (code == KDUPFN()).then({
@@ -4208,13 +4329,19 @@ denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) string
 // channel's message.
 denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code: i32, kind: string_view) string_view {
     eq(kind, code.diagnostic_kind_name()).match ({
-        true  => desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND() || code == KARGTYPE()).match ({
-            true  => a.denrich_module(raw, off, code),
-            false => "",
-        })),
+        true  => (code == KTARGARITY()).match ({
+            true  => desc_or(a.denrich_module(raw, off, code), a.denrich_module(decls, off, code)),
+            false => desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND() || code == KARGTYPE()).match ({
+                true  => a.denrich_module(raw, off, code),
+                false => "",
+            })),
+        }),
         false => "",
     })
 }
+// targ-arity: the error is judged on the RAW call site (`<…>` survives only pre-inline);
+// the resolved view holds a REWRITTEN call whose targ/tparam counts are meaningless — walk
+// raw FIRST so the message states the counts the user wrote.
 // the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
 kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
@@ -4280,7 +4407,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         },
         .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload).kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED())).kv_kor(env.enum_payload_err(mk).kv_one(KARGTYPE()).kv_at(load(mk.payload).expr_pos())),
         .Tag(t)         => env.mkenum_err(t.ty, t.variant).kv_one(KUNDEFINED()),
-        .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_kind(sd)),
+        .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_targ_kind(sd)).kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
         .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()).kv_at(v.pos),
         .Loop(l)        => env.lkv_expr_kind(l.seq).kv_kor(env.a.lkv_body_kind(env.a.loop_env(env, l), l.body)),
@@ -4410,12 +4537,14 @@ kvb_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
 }
 kvb_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     env := Env(
-        vars: a.params_env(f.params),
+        vars: a.bind_tparams(a.params_env(f.params), f.tparams),
         decls: decls,
         didx: idx,
         exp: f.ret,
         a: a,
     )
+    // bind the CALLER's tparams so a bound targ that resolves to one of them (a generic
+    // passthrough — even one shadowing a same-named global type) defers in bound_err.
     a.kvb_body_kind(env, f.body)
 }
 check_module_bound_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
@@ -4630,9 +4759,14 @@ ka_call_core = (env: Env, tparams: [Param], fn: string_view, args: [Expr], etarg
                 true  => 0,
                 false => (f.tparams.len == 0).match ({
                     true  => KNOTYPEARGS().kv_at(pos),
-                    false => env.ut_unknown_tys(tparams, etargs).kv_one(KUNKNOWNTYPE()).kv_at(pos),
+                    false => (etargs.len != f.tparams.len).match ({
+                        true  => KTARGARITY().kv_at(pos),
+                        false => env.ut_unknown_tys(tparams, etargs).kv_one(KUNKNOWNTYPE()).kv_at(pos),
+                    }),
                 }),
             })
+            // an explicit `<…>` list must pin EVERY tparam: too many silently drop the extras,
+            // too few leave residue mono can only misreport — say the count mismatch here.
             // a fully-pinned turbofish (or inferred bindings) feeds the arg-mismatch + closure checks; an
             // unknown turbofish type short-circuits (the unknown-type error already fired).
             tf.kv_kor(env.ka_args_check(tparams, authoritative, f, args, etargs, pos))
@@ -4652,7 +4786,11 @@ ka_expr_kind = (env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
         .Cond(d)        => env.ka_expr_kind(tparams, d.c).kv_kor(env.ka_expr_kind(tparams, d.t)).kv_kor(env.ka_expr_kind(tparams, d.e)),
         .Member(m)      => env.ka_expr_kind(tparams, m.obj),
         .Arrow(ar)      => env.ka_expr_kind(tparams, ar.obj),
-        .Match(m)       => env.ka_expr_kind(tparams, m.subj).kv_kor(env.ka_arms_kind(tparams, env.infer_expr(m.subj), m.arms)),
+        // unreachable-arm judged HERE on the raw arms: a STATEMENT-position match lowers to an
+        // if-chain during resolve (lower_match_arms stops at `_`, silently dropping later arms),
+        // so the post-inline kv pass never sees them. Purely structural — no typing involved, so
+        // an unresolved generic body cannot false-positive.
+        .Match(m)       => env.ka_expr_kind(tparams, m.subj).kv_kor(m.arms.unreachable_arm_errs().kv_one(KUNREACHABLEARM()).kv_at(load(m.subj).expr_pos().pos_or(m.arms.arms_first_pos()))).kv_kor(env.ka_arms_kind(tparams, env.infer_expr(m.subj), m.arms)),
         .MakeEnum(mk)   => env.ka_expr_kind(tparams, mk.payload),
         .MakeStruct(sd) => env.ka_inits_kind(tparams, sd.inits),
         .SliceLit(sd)   => env.ka_args_kind(tparams, sd.items),
