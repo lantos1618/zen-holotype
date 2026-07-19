@@ -107,6 +107,16 @@ names. The owned growable buffer remains `String`. `[T]` is a fat slice with a
 pointer and length. Function types are parameter types for inline templates and
 closure arguments.
 
+Assembling text goes through `std.text.sb`'s sticky builder `Sb`: the allocator
+is named once, each op (`.s` str, `.i` i64, `.ch` byte, `.rep` iterated repeat)
+no-ops after a recorded failure, and `.done()` settles the chain as one
+`Result<string_cstr, IoError>` — so allocation failure stays a value without an
+`.expect` per append:
+
+```zen
+a.sb().s("os ").s(name).ch('(').s(abi).ch(')').done()    // .Ok("os zen(x86)")
+```
+
 Pointer kinds are enforced by the checker even though all three lower to `T*`
 in C. `Ptr<T>` is non-null/read-only, `MutPtr<T>` is non-null/writable, and
 `RawPtr<T>` is nullable. A writable pointer may flow to a read-only slot, but

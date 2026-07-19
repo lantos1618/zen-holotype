@@ -24,7 +24,7 @@
 { Allocator } = std.mem.alloc
 { Result, Opt } = std.core.result
 { eq, len, view, starts_with, trim_prefix, find, substr_in, nbuf } = std.text.str
-{ new_in } = std.text.string
+{ Sb, sb } = std.text.sb
 // ── spec records ─────────────────────────────────────────────────────────────
 // A `short` of 0 means "no short form". `name` is the long name WITHOUT the leading `--`.
 FlagSpec*: {
@@ -217,33 +217,21 @@ Parser*: {
         a.ap_parse(p, args)
     }
     usage<A> = (p: Parser, a: MutPtr<A>) string_view {
-        // a one-line-per-item usage / help string, allocator-owned.
-        s := a.new_in().expect("argparse: oom")
-        s = s.append_in(a, "usage: ").expect("argparse: oom")
-        s = s.append_in(a, p.prog).expect("argparse: oom")
-        s = s.append_in(a, " [options]").expect("argparse: oom")
+        // a one-line-per-item usage / help string, allocator-owned. Built with std.text.sb's
+        // sticky builder: the chain records the first allocation failure and every later op
+        // no-ops, so ONE `.expect` at the settle replaces an expect per append.
+        b := a.sb().s("usage: ").s(p.prog).s(" [options]")
         p.poss.loop((h, i, ps) {
-            s = s.append_in(a, " ").expect("argparse: oom")
-            s = s.append_in(a, ps.req.match ({ true => "<", false => "[" })).expect("argparse: oom")
-            s = s.append_in(a, ps.name).expect("argparse: oom")
-            s = s.append_in(a, ps.req.match ({ true => ">", false => "]" })).expect("argparse: oom")
+            b = b.s(" ").s(ps.req.match ({ true => "<", false => "[" })).s(ps.name).s(ps.req.match ({ true => ">", false => "]" }))
         })
-        s = s.append_in(a, "\n").expect("argparse: oom")
+        b = b.ch('\n')
         p.flags.loop((h, i, f) {
-            s = s.append_in(a, "  --").expect("argparse: oom")
-            s = s.append_in(a, f.name).expect("argparse: oom")
-            s = s.append_in(a, "  ").expect("argparse: oom")
-            s = s.append_in(a, f.help).expect("argparse: oom")
-            s = s.append_in(a, "\n").expect("argparse: oom")
+            b = b.s("  --").s(f.name).s("  ").s(f.help).ch('\n')
         })
         p.opts.loop((h, i, o) {
-            s = s.append_in(a, "  --").expect("argparse: oom")
-            s = s.append_in(a, o.name).expect("argparse: oom")
-            s = s.append_in(a, " VALUE  ").expect("argparse: oom")
-            s = s.append_in(a, o.help).expect("argparse: oom")
-            s = s.append_in(a, "\n").expect("argparse: oom")
+            b = b.s("  --").s(o.name).s(" VALUE  ").s(o.help).ch('\n')
         })
-        s.finish_in(a).expect("argparse: oom")
+        b.done().expect("argparse: oom")
     }
 }
 // a fresh parser with no specs. Build it up with the `.flag` / `.option` / `.positional` methods.
