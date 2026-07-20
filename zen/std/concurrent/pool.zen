@@ -50,9 +50,22 @@
 { Mutex, CondVar, new_mutex, new_cond } = std.sync
 { spawn, join, JoinHandle } = std.thread
 { is_null } = std.core.ptr
-{ expect } = std.core.result
+{ Result, expect } = std.core.result
 { Ring } = std.concurrent.ring
 QUANTUM := 64    // max messages an actor runs per turn before yielding the worker (fairness)
+// ── BACK-PRESSURE AS A VALUE (S2) ────────────────────────────────────────────────────────────────
+// A send either enqueues the message or the mailbox is full. `MailboxFull` is the ONE failure a send can
+// report today: it is DROPPED (dead-lettered), counted in `Pool.dropped` (see `pool_dropped`), so loss is
+// OBSERVABLE. Defined HERE (not std.core.result) so the widening touches no bootstrap-closure file beyond
+// std.concurrent. The caller MAY DISCARD the Result — the checker cannot force a use, so a full mailbox is
+// a value to inspect, never a silent corruption. (#519 spelled the cooperative-actor equivalent as
+// IoError.Errno(EAGAIN=11); a dedicated single-variant enum reads clearer for the parallel primitive and
+// keeps the two error channels — libc vs mailbox — from sharing a numeric code.)
+ActorError*: MailboxFull
+// success payload of a send: the number of messages enqueued (always 1 today — mirrors std.io.file's
+// `Result<i64, IoError>` convention where the Ok channel carries a "count of units that landed", since
+// Zen has no first-class unit/void value to spell `Result<void, _>`).
+SENT_ONE := 1
 STDERR_FD := 2    // fd 2 for the "actor marked dead" note (mirrors std.core.result's panic framing)
 // PER-ACTOR PANIC ISOLATION (bootstrap/zenrt.c). Run `behavior(user, msg)` under a thread-local setjmp
 // catch installed for the duration of THIS call only; returns 0 if it returned normally, 1 if it panicked
@@ -167,7 +180,9 @@ Pool*: {
     handles: RawPtr<u8>,
     args: RawPtr<u8>,
     selfraw: RawPtr<u8>,
-}    // global run queue ring (i64 slots holding PoolActor block pointers)
+    dropped: i64,
+}    // DEAD-LETTER counter: messages dropped on a full mailbox (incremented under `mu`; read via pool_dropped)
+// global run queue ring (i64 slots holding PoolActor block pointers)
 pool_view* = (raw: RawPtr<u8>) MutPtr<Pool> { raw.slice(1)[0].addr() }    // guards rq + live + stop
 pool_raw* = (p: MutPtr<Pool>) RawPtr<u8> { p.selfraw }    // idle workers park here; `send` signals it when work arrives
 rq_push = (p: MutPtr<Pool>, actor: RawPtr<u8>) void {
@@ -221,9 +236,11 @@ rq_pop = (p: MutPtr<Pool>) RawPtr<u8> {
 // ── send (race-free) — the hard part (design §3.2/§3.3) ─────────────────────────────────────────
 // Lock the mailbox, push the message, read+set `scheduled`; only if it was FALSE do we push the actor
 // to the global queue + signal a worker. The false→true winner is the SOLE pusher (no double-schedule);
-// concurrent senders see `true` and only enqueue their message. Returns false if the mailbox is full
-// (back-pressure; the message is dropped, never silently corrupting the ring).
-pool_send* = (p: MutPtr<Pool>, actor: RawPtr<u8>, msg: i64) bool {
+// concurrent senders see `true` and only enqueue their message. Returns `.Err(.MailboxFull)` if the
+// mailbox is full — back-pressure as a VALUE: the message is dropped (never silently corrupting the ring),
+// the drop is TALLIED in `p.dropped` (dead-letter counter, under `p.mu`), and the caller MAY discard the
+// Result (an ignored `.Err` is not a corruption, just an unobserved drop — the counter still records it).
+pool_send* = (p: MutPtr<Pool>, actor: RawPtr<u8>, msg: i64) Result<i64, ActorError> {
     a := actor_view(actor)
     a.mbmu.lock()
     cur := actor_mb(a)
@@ -254,8 +271,49 @@ pool_send* = (p: MutPtr<Pool>, actor: RawPtr<u8>, msg: i64) bool {
         p.work_cv.signal()
         p.mu.unlock()
     })
-    sent
+    sent.match ({
+        true  => .Ok(SENT_ONE),
+        false => {
+            p.mu.lock()    // record the dead letter under the pool lock (same lock guarding live/rq)
+            p.dropped = p.dropped + 1
+            p.mu.unlock()
+            .Err(.MailboxFull)
+        },
+    })
 }
+// dead-letter total: messages this pool dropped because a target mailbox was full (read after quiescence,
+// or racily during a run for a lower-bound estimate). Makes back-pressure LOSS observable.
+pool_dropped* = (p: MutPtr<Pool>) i64 { p.dropped }
+// ── ActorRef: a SENDABLE address that can send/reply from INSIDE `receive` (S2) ──────────────────
+// The parallel primitive `pool_send` needs `p: MutPtr<Pool>` + the actor handle — neither of which a
+// running `receive` has (a pool worker calls `behavior(user, msg)`, no Pool pointer, no peer handle). An
+// ActorRef closes that gap: it bundles the Pool BACKING BLOCK (`pool` = `pool_raw(p)` = `p.selfraw`) with
+// the target actor's Arc handle (`handle`). BOTH are `RawPtr<u8>` → the send-mut mode lattice classifies
+// this struct as `frozen` (a field-walk finds no `MutPtr`), so an ActorRef is SENDABLE: it may live in an
+// actor's state (constructed at spawn) OR ride INSIDE a message (a request carries the requester's own
+// ActorRef as its reply-address). That is the replies-are-messages mechanism — no ambient rt, no
+// synchronous ask: the handler just `reply_to.ref_send(...)`.
+//
+// Why a shared Pool pointer is SAFE to send to another worker: the Pool block OUTLIVES every actor (it is
+// freed only by `pool_close`, after `pool_quiesce_stop` has joined all workers), so a Pool pointer handed
+// across workers never dangles. The actor handle is an Arc base — cross-thread lifetime is refcounted
+// (pool_actor_ref/unref). An ActorRef holds a BORROW of both; hold a `pool_actor_ref` clone if a ref must
+// outlive the spawner (the run-queue's "scheduled" ref already keeps a live actor alive across a send).
+ActorRef*: {
+    pool: RawPtr<u8>,
+    handle: RawPtr<u8>,
+}
+// build an ActorRef addressing `handle` on pool `p` (call at spawn/setup, when `p` is in hand).
+actor_ref* = (p: MutPtr<Pool>, handle: RawPtr<u8>) ActorRef {
+    ActorRef(
+        pool: pool_raw(p),
+        handle: handle,
+    )
+}
+// send to the referenced actor: recover the Pool view from the backing block, recover the handle, do the
+// pool_send. The raw i64-payload floor (the typed boxing convenience lives in std.concurrent.pool_actor);
+// carries the same back-pressure Result as pool_send.
+ref_send* = (r: ActorRef, msg: i64) Result<i64, ActorError> { pool_view(r.pool).pool_send(r.handle, msg) }
 // drain up to QUANTUM messages, running `behavior` OUTSIDE the mailbox lock (so senders never block on
 // user work). Returns the count processed this batch.
 drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
@@ -393,6 +451,7 @@ new_pool = (nworkers: i64, rqcap: i64) RawPtr<u8> {
         handles: malloc(nworkers * 8),
         args: malloc(nworkers * 16),
         selfraw: blk,
+        dropped: 0,
     )
     blk
 }
