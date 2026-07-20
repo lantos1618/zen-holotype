@@ -19,6 +19,12 @@
 { runtime_checkpoint } = std.concurrent.runtime
 { Ring } = std.concurrent.ring
 ACTOR_STATE_SIZE := 32    // RawPtr<u8> buf + head/tail/cap i64 slots (one Ring<M>).
+// Back-pressure sentinel: a `request`/`ask` whose message could not be enqueued (mailbox FULL) surfaces
+// `.Err(.Errno(EAGAIN))` rather than reading an uninitialized reply. IoError has no dedicated "would
+// block" variant, so we reuse the POSIX code for "resource temporarily unavailable / would block" —
+// the exact meaning here: the mailbox is momentarily full; retry after draining. Read it back by
+// matching `.Errno(EAGAIN)` on the returned error.
+EAGAIN := 11
 Context*<M>: {
     msg: M,
 }
@@ -106,6 +112,13 @@ ReplyRef*<T>: {
         alloc.release(reply.ready)
         value
     }
+    discard<A> = (reply: ReplyRef<T>, alloc: MutPtr<A>) void {
+        // Free the reply cell WITHOUT reading it — for the back-pressure path where the request was
+        // never enqueued (mailbox full), so no value was ever written. Mirrors `await`'s two releases
+        // minus the (uninitialized) read, so no allocation leaks when a request bounces off a full box.
+        alloc.release(reply.value)
+        alloc.release(reply.ready)
+    }
 }
 context*<M> = (msg: M) Context<M> { Context<M>(msg: msg) }
 reply<A, T> = (alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
@@ -190,13 +203,30 @@ ActorCell*<M>: {
         cell.drain(actor)
         reply_to.await(alloc)
     }
+    await_checked<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, reply_to: ReplyRef<T>) Result<T, IoError> {
+        // Drain, then read the reply ONLY if it was actually written. Under the cooperative model the drain
+        // is synchronous, so a message that was enqueued and handled leaves `ready == 1`; a message that
+        // never got enqueued (mailbox full) leaves `ready == 0` — reading it would return uninitialized
+        // garbage, so we free the cell and surface back-pressure instead. Shared by `request` and `ask`.
+        cell.drain(actor)
+        reply_to.ready().match ({
+            true  => {
+                got: Result<T, IoError> := .Ok(reply_to.await(alloc))
+                got
+            },
+            false => {
+                reply_to.discard(alloc)
+                miss: Result<T, IoError> := .Err(.Errno(EAGAIN))
+                miss
+            },
+        })
+    }
     ask<A, ActorT, T> = (cell: ActorCell<M>, alloc: MutPtr<A>, actor: MutPtr<ActorT>, issue: (ReplyRef<T>) void) Result<T, IoError> {
         r: Result<ReplyRef<T>, IoError> := cell.reply(alloc)
         r.match ({
             .Ok(reply_to) => {
                 issue(reply_to)
-                done: Result<T, IoError> := .Ok(cell.await_reply(alloc, actor, reply_to))
-                done
+                cell.await_checked(alloc, actor, reply_to)
             },
             .Err(e)       => {
                 failed: Result<T, IoError> := .Err(e)
@@ -208,9 +238,16 @@ ActorCell*<M>: {
         r: Result<ReplyRef<T>, IoError> := cell.reply(alloc)
         r.match ({
             .Ok(reply_to) => {
-                cell.send(make(reply_to))
-                done: Result<T, IoError> := .Ok(cell.await_reply(alloc, actor, reply_to))
-                done
+                cell.send(make(reply_to)).match ({
+                    true  => cell.await_checked(alloc, actor, reply_to),
+                    false => {
+                        // mailbox FULL: nothing enqueued, the actor never runs, so the reply cell would
+                        // stay uninitialized. Free it and report back-pressure instead of Ok(garbage).
+                        reply_to.discard(alloc)
+                        full: Result<T, IoError> := .Err(.Errno(EAGAIN))
+                        full
+                    },
+                })
             },
             .Err(e)       => {
                 failed: Result<T, IoError> := .Err(e)
@@ -258,15 +295,37 @@ ActorHandle*<M, ActorT>: {
             })
         })
     }
+    await_checked<A, T> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>, reply_to: ReplyRef<T>) Result<T, IoError> {
+        // Drain the mailbox inline, then read the reply ONLY if it was written (see ActorCell.await_checked).
+        // A request that never enqueued (mailbox full) leaves `ready == 0`; we free the cell and report
+        // back-pressure rather than returning Ok over an uninitialized reply.
+        handle.run()
+        reply_to.ready().match ({
+            true  => {
+                got: Result<T, IoError> := .Ok(reply_to.await(alloc))
+                got
+            },
+            false => {
+                reply_to.discard(alloc)
+                miss: Result<T, IoError> := .Err(.Errno(EAGAIN))
+                miss
+            },
+        })
+    }
     request<A, T> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>, make: (ReplyRef<T>) M) Result<T, IoError> {
         // Cooperative RPC: enqueue + inline `run` + read reply. Blocks the caller; not pool-parallel.
         r: Result<ReplyRef<T>, IoError> := alloc.reply()
         r.match ({
             .Ok(reply_to) => {
-                handle.send(make(reply_to))
-                handle.run()
-                done: Result<T, IoError> := .Ok(reply_to.await(alloc))
-                done
+                handle.send(make(reply_to)).match ({
+                    true  => handle.await_checked(alloc, reply_to),
+                    false => {
+                        // mailbox FULL: nothing enqueued, so the reply cell stays uninitialized.
+                        reply_to.discard(alloc)
+                        full: Result<T, IoError> := .Err(.Errno(EAGAIN))
+                        full
+                    },
+                })
             },
             .Err(e)       => {
                 failed: Result<T, IoError> := .Err(e)
@@ -279,9 +338,7 @@ ActorHandle*<M, ActorT>: {
         r.match ({
             .Ok(reply_to) => {
                 issue(reply_to)
-                handle.run()
-                done: Result<T, IoError> := .Ok(reply_to.await(alloc))
-                done
+                handle.await_checked(alloc, reply_to)
             },
             .Err(e)       => {
                 failed: Result<T, IoError> := .Err(e)
