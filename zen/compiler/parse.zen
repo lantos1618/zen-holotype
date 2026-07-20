@@ -7,7 +7,7 @@
 { Malloc } = std.mem.alloc
 { parse_or, parse_bxor, enode, lexeme, is_op, is_dot, is_lparen, is_ident_tok, tyargs_end } = compiler.parse_expr
 { build_body } = compiler.parse_stmt
-{ parse_ty, parse_variant_payload, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_set_at, perr_set_bad_at, perr_reset, perr_get, perr_off_get, perr_kind_get, pdepth_reset, delim_reset, vbreak_reset, vbreak_get, anon_reset, anon_decls_get } = compiler.parse_type
+{ parse_ty, parse_variant_payload, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen, is_lbrace, is_rbrace, is_comma, is_langle, is_rangle, tok_eq, PEnd, perr_set, perr_set_at, perr_set_bad_at, perr_set_misgen_at, perr_reset, perr_get, perr_off_get, perr_kind_get, pdepth_reset, delim_reset, vbreak_reset, vbreak_get, anon_reset, anon_decls_get } = compiler.parse_type
 // `foreign` means a bodyless function declaration, emitted as DForeign.
 DeclEnd*: {
     func: Func,
@@ -428,8 +428,36 @@ decl_marker = (src: string_view, pos: i32) Scan {
     nt := src.scan(pos)
     a1 := src.scan(nt.next)
     a2 := src.is_star(a1.tok).match ({ true => src.scan(a1.next), false => a1 })
-    src.is_langle(a2.tok).match ({ true => src.scan_tyargs(a2), false => a2 })
+    a3 := src.is_langle(a2.tok).match ({ true => src.scan_tyargs(a2), false => a2 })
+    // Also step over a TRAILING `*` after the type-arg list (`Name<T>*:`, the misordered generic-decl
+    // head). This lets decl_is_struct/decl_is_enum find the real `:` marker so the decl parses and
+    // advances correctly; decl_is_misordered_generic separately flags it as the wrong `*` placement.
+    src.is_star(a3.tok).match ({ true => src.scan(a3.next), false => a3 })
 }
+// The MISORDERED generic-decl head `Name<T>*:` (type params before the `*`, e.g. a user copying the old
+// SPEC) — the canonical form is `Name*<T>:` (star glued to the name, e.g. `Result*<T, E>:`). Detected as:
+// name, `<…>` type-arg list, then `*`, then `:`. Reported at the `<` (misgen_langle_off).
+decl_is_misordered_generic = (src: string_view, pos: i32) bool {
+    a1 := src.scan(src.scan(pos).next)
+    src.is_langle(a1.tok).match ({
+        true  => {
+            te := src.tyargs_end(a1.next, 1)
+            (te < 0).match ({
+                true  => false,
+                false => {
+                    star := src.scan(te)
+                    src.is_star(star.tok).match ({
+                        true  => src.is_colon(src.scan(star.next).tok),
+                        false => false,
+                    })
+                },
+            })
+        },
+        false => false,
+    })
+}
+// the `<` offset of a misordered generic-decl head (the caret for its diagnostic).
+misgen_langle_off = (src: string_view, pos: i32) i32 { src.scan(src.scan(pos).next).tok.start }
 // Malformed `<...>` falls back to the `<` token so scan never receives a negative pos.
 scan_tyargs = (src: string_view, a2: Scan) Scan {
     te := src.tyargs_end(a2.next, 1)
@@ -716,6 +744,11 @@ decl_is_impl* = (src: string_view, pos: i32) bool {
 }
 fill_decl = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
     a.note_export_if_starred(src, pos)
+    // A misordered generic head `Name<T>*:` is a clean error (caret at the `<`): flag it, then let the
+    // normal struct/enum cascade parse-and-advance past it (the module is rejected via the sentinel).
+    src.decl_is_misordered_generic(pos).then({
+        perr_set_misgen_at(src.misgen_langle_off(pos))
+    })
     src.decl_is_impl(pos).match ({
         true  => a.fill_impl(src, pos, buf, i),
         false => (src.decl_is_global(pos) || src.decl_is_module_alias(pos)).match ({
@@ -1315,7 +1348,10 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
             // (with the `use :=` hint) instead of a generic KPARSE; its offset is always a real caret pos.
             nm := (perr_kind_get() == 1).match ({
                 true  => "__bad_binding",
-                false => "__syntax_error",
+                false => (perr_kind_get() == 2).match ({
+                    true  => "__misordered_generic",
+                    false => "__syntax_error",
+                }),
             })
             buf[0] = dglobal(nm, tvoid(), a.enode(lit(voff)))
             buf.take_decls(n + 1)
