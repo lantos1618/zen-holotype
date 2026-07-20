@@ -1854,6 +1854,14 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "scratch-escape",
     ), VerdictCase(
+        src: "halloc = std.mem.heap\nPk*: {\n    p: RawPtr<u8>,\n}\nR*: {\n    id: i32,\n}\nref_send_msg = (r: R, m: Pk) bool { true }\ntest* = () i32 {\n    heap := halloc.gpa()\n    a := heap.addr()\n    scratch := a.acquire(64)\n    r := R(id: 1)\n    r.ref_send_msg(Pk(p: scratch))\n    0\n}",
+        should_pass: false,
+        kind: "scratch-escape",
+    ), VerdictCase(
+        src: "Pk*: {\n    n: i32,\n}\nR*: {\n    id: i32,\n}\nref_send_msg = (r: R, m: Pk) bool { true }\ntest* = () i32 {\n    r := R(id: 1)\n    r.ref_send_msg(Pk(n: 5))\n    0\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "Pk*: {\n    n: i32,\n    s: str,\n}\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Pk) bool { true }\ntest* = () i32 {\n    h := H(id: 1)\n    h.send(Pk(\n        n: 5,\n        s: \"hi\",\n    ))\n    0\n}",
         should_pass: true,
         kind: "",
@@ -2263,9 +2271,12 @@ harness_verdict_run* = () i32 {
     // `a.acquire(…)` pointer; a send of a slice-literal-backed struct (stack storage); spawn state
     // embedding a local acquire pointer (the judges' `Counter(seen: <spawner-local>)` repro), bound
     // OR embedded directly; a send embedding an arena bound via the Result-unified
-    // `make_in(…).expect(…)` (the checker unwraps `.expect` over a scratch source).
-    // Accepts (no over-rejection): plain-value sends, Arc-wrapped sends
-    // (`new_in(…).expect(…)` — call results classify clean), Arc-backed spawn state, and the
+    // `make_in(…).expect(…)` (the checker unwraps `.expect` over a scratch source); AND a scratch
+    // `a.acquire(…)` pointer routed out through S2's `ref_send_msg` reply (S4-lite: the reply send is
+    // now a recognized scratch surface, so a pointer into the replier's OWN per-behavior scratch — reset
+    // when its behavior ends — cannot escape to the receiver).
+    // Accepts (no over-rejection): plain-value sends, plain-value `ref_send_msg` replies, Arc-wrapped
+    // sends (`new_in(…).expect(…)` — call results classify clean), Arc-backed spawn state, and the
     // plain-value `Room(n: 7)` spawn state.
     // M2 (rt-scoped-runtime §4): sendability is a TYPE capability. Rejects (error[sendable]): a send
     // whose payload carries a `MutPtr<T>` (Pony `ref` — mutable + aliasable → cross-actor race), both

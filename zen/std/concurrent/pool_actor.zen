@@ -39,9 +39,10 @@
 // resolves to THIS actor's own rt — Pony-style per-actor heap. For this slice actors typically pass
 // heap_rt(); a per-actor arena is a later slice.
 { malloc, free } = std.mem.alloc
-{ Pool, pool_spawn_rt, pool_send, pool_actor_free, ActorError, ActorRef, actor_ref, ref_send } = std.concurrent.pool
+{ Pool, pool_spawn_rt, pool_spawn_scratch_rt, pool_send, pool_actor_free, ActorError, ActorRef, actor_ref, ref_send } = std.concurrent.pool
 { Result } = std.core.result
 { Rt, default } = std.rt
+{ Arena } = std.mem.arena
 // Record the message box the trampoline is about to process, so that if `receive` PANICS (the worker
 // catches it via zenrt.c's __zen_actor_call), the catch path frees the box instead of leaking it — the
 // trampoline's own free_msg is skipped by the longjmp. Cleared (arg 0) after a normal free_msg so the
@@ -82,6 +83,46 @@ spawn_actor*<ActorT> = (cap: i64, actor: ActorT, tramp: (RawPtr<u8>, i64) void, 
 // A top-level `spawn` alias is intentionally NOT provided — it would flatten-collide with
 // std.thread.spawn from pool.zen. Future: Sys Spawner capability.
 spawn_actor_heap*<ActorT> = (cap: i64, actor: ActorT, tramp: (RawPtr<u8>, i64) void) PooledHandle<ActorT> { spawn_actor(cap, actor, tramp, default()) }
+// ── PER-ACTOR SCRATCH (the two-memory model, S4-lite) ─────────────────────────────────────────────
+// `new_scratch(cap)` allocates a bump arena the actor uses for its OWN per-behavior temporaries: the
+// worker RESETS it wholesale at every behavior boundary (pool.zen drain_batch), on the NORMAL stack,
+// whether the behavior returned or PANICKED — so nothing bump-allocated in `receive` can leak, ever. The
+// arena struct + its backing live in ONE malloc'd block (buf points just past the struct), so `free_scratch`
+// is a single `free`. The actor reaches it as `self.scratch` (a MutPtr<Arena> field on its OWN state), and
+// the SAME pointer is handed to the pool via `spawn_actor_scratch` so the pool can reset it — one arena,
+// two borrows. Scratch is NEVER for anything that crosses a send: a sent message outlives the sender's
+// behavior (the receiver reads it off-thread after the reset), so messages stay heap-boxed by `send`/
+// `ref_send_msg`. The scratch-escape checker rejects routing a scratch pointer out through any send.
+new_scratch* = (cap: i64) MutPtr<Arena> {
+    blk := malloc(sizeof(Arena) + cap)
+    ar: [Arena] := blk.slice(1)
+    ar[0] = Arena(
+        buf: blk.offset(sizeof(Arena)),
+        off: 0,
+        cap: cap,
+    )
+    ar[0].addr()
+}
+// free a scratch arena (call after the actor is closed and the pool has quiesced — no worker will reset
+// it again). One block backs the struct + the bump region: `sc.buf` sits sizeof(Arena) past the block
+// base, so `sc.buf - sizeof(Arena)` recovers the malloc'd block. Freeing a RawPtr<u8> (not `sc` itself)
+// also disambiguates from Arena's own `free` method — this is std.mem.alloc's `free`.
+free_scratch* = (sc: MutPtr<Arena>) void { free(sc.buf.offset(0 - sizeof(Arena))) }
+// spawn a typed actor WITH a per-behavior scratch arena `sc` (from `new_scratch`). The actor stores the
+// same `sc` in its state as `scratch: MutPtr<Arena>` (so `receive` bump-allocates via `self.scratch`), and
+// the pool holds it too (so it resets it at each behavior boundary). Everything else is `spawn_actor`.
+spawn_actor_scratch*<ActorT> = (cap: i64, actor: ActorT, tramp: (RawPtr<u8>, i64) void, art: Rt, sc: MutPtr<Arena>) PooledHandle<ActorT> {
+    state := malloc(sizeof(ActorT))
+    slot: [ActorT] := state.slice(1)
+    slot[0] = actor
+    raw := pool_spawn_scratch_rt(state, cap, tramp, art, sc)
+    PooledHandle<ActorT>(
+        raw: raw,
+        state: state,
+    )
+}
+// scratch-spawn under the process DEFAULT ambient rt (the trivial-setup path, mirrors spawn_actor_heap).
+spawn_actor_scratch_heap*<ActorT> = (cap: i64, actor: ActorT, tramp: (RawPtr<u8>, i64) void, sc: MutPtr<Arena>) PooledHandle<ActorT> { spawn_actor_scratch(cap, actor, tramp, default(), sc) }
 // send a typed message to a pooled actor. The message must OUTLIVE the send (a worker consumes it
 // later, off-thread), so it is heap-BOXED (`[M]` block) and the box POINTER rides as the pool's i64
 // payload (to_i64 → the trampoline recovers it with `msg.offset(0).slice(1)` and frees it via free_msg).
