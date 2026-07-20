@@ -164,11 +164,14 @@ static void __zen_install_sigsegv_handler(void){
  * non-existent) nested re-entry — a behavior that synchronously ran another behavior under the same
  * worker — uses its own distinct `jmp_buf` and cannot clobber the outer one.
  *
- * KNOWN v1 LIMIT: a longjmp abandons the crashed behavior's C frame, so anything it malloc'd before the
- * panic (e.g. a typed message box) LEAKS — leaking one dead actor's memory beats aborting the whole
- * process. The required fix is deterministic per-actor cleanup. The pool does not hold its
- * mailbox lock across the catch, but user code can hold another mutex when it panics; longjmp then
- * skips that unlock and may strand the mutex. See STATUS.md for the required regression gate. */
+ * The IN-FLIGHT MESSAGE BOX is now reclaimed on the catch path: the typed trampoline records the box it
+ * is about to process (__zen_actor_set_inflight), and __zen_actor_call frees it if the behavior panics
+ * before the trampoline's own free_msg runs — so a panicking actor leaks no message box. REMAINING v1
+ * limits: (a) any OTHER heap the behavior malloc'd before the panic still leaks (deterministic per-actor
+ * cleanup / a per-actor arena rt reset on death is the real fix); (b) still-QUEUED boxes in a dead
+ * actor's mailbox are drained-and-discarded WITHOUT being freed (drain_batch skips the behavior once
+ * `dead`), deferred to the supervision slice; (c) user code can hold another mutex when it panics —
+ * longjmp skips that unlock and may strand it. See STATUS.md for the required regression gate. */
 /* __zen_panic_jmp (the per-worker catch target; 0 = "no catch installed") is declared above, next to the
  * SIGSEGV handler, because BOTH the ordinary panics (via __zen_panic_unwind) AND a worker's stack-overflow
  * SIGSEGV route into it. It is a `sigjmp_buf` (not `jmp_buf`) so the SIGSEGV handler can siglongjmp out of
@@ -183,13 +186,30 @@ static void __zen_install_sigsegv_handler(void){
 /* run behavior(user, msg) under a sigsetjmp catch. Returns 0 if it returned normally, 1 if it panicked
  * (zen__panic siglongjmp'd back here, or a worker stack-overflow SIGSEGV did). Save/restore of `prev`
  * keeps re-entrancy safe. */
+/* Per-worker record of the message box currently being processed (0 = none / not a heap box). The
+ * TYPED pooled path (std.concurrent.pool_actor `dispatch`) heap-boxes each message and rides the box
+ * pointer as the i64 arg; it calls __zen_actor_set_inflight(box) before running `receive` and clears it
+ * (set 0) after freeing the box normally. On a panic, `receive` never returns, so the trampoline's own
+ * free is skipped — the catch path below frees this box instead, closing the v1 leak. Raw pool actors
+ * (plain i64 messages, no box) never set it, so it stays 0 and nothing bogus is freed. _Thread_local:
+ * each worker tracks its own in-flight box, no races. */
+static _Thread_local void* __zen_actor_inflight_box;
+void __zen_actor_set_inflight(int64_t box){ __zen_actor_inflight_box = (void*)box; }
 int64_t __zen_actor_call(void (*behavior)(uint8_t*, int64_t), uint8_t* user, int64_t msg){
     sigjmp_buf jb;
     sigjmp_buf* volatile prev = __zen_panic_jmp;   /* volatile: read after longjmp must not be a clobbered reg */
-    if(sigsetjmp(jb, 0) != 0){ __zen_panic_jmp = prev; return 1; }   /* savesigs=0: cheap (no syscall); handler unblocks SIGSEGV */
+    if(sigsetjmp(jb, 0) != 0){
+        __zen_panic_jmp = prev;
+        /* CATCH: the behavior panicked mid-message. Free the in-flight message box the trampoline
+         * recorded (its own free_msg was skipped by the longjmp) so a panicking actor leaks nothing. */
+        if(__zen_actor_inflight_box){ free(__zen_actor_inflight_box); __zen_actor_inflight_box = 0; }
+        return 1;   /* savesigs=0: cheap (no syscall); handler unblocks SIGSEGV */
+    }
+    __zen_actor_inflight_box = 0;   /* fresh run: no box recorded until the typed trampoline sets one */
     __zen_panic_jmp = &jb;
     behavior(user, msg);
     __zen_panic_jmp = prev;
+    __zen_actor_inflight_box = 0;   /* normal return: the trampoline already freed its own box */
     return 0;
 }
 /* called by genc's zen__panic AFTER it prints its line: unwind to the installed worker catch, else return

@@ -41,6 +41,11 @@
 { malloc, free } = std.mem.alloc
 { Pool, pool_spawn_rt, pool_send, pool_actor_free } = std.concurrent.pool
 { Rt, default } = std.rt
+// Record the message box the trampoline is about to process, so that if `receive` PANICS (the worker
+// catches it via zenrt.c's __zen_actor_call), the catch path frees the box instead of leaking it — the
+// trampoline's own free_msg is skipped by the longjmp. Cleared (arg 0) after a normal free_msg so the
+// catch never double-frees. Bodyless FFI decl; the symbol lives in bootstrap/zenrt.c (like __zen_actor_call).
+__zen_actor_set_inflight = (box: i64) void
 // A typed message wrapper delivered to a receiver (mirrors the actor.zen shape, independently defined).
 Context*<M>: {
     msg: M,
@@ -118,8 +123,10 @@ free_msg* = (msg: i64) void { free(msg.offset(0)) }
 dispatch*<ActorT, M> = (user: RawPtr<u8>, msg: i64) void {
     a: [ActorT] := user.slice(1)
     b: [M] := msg.offset(0).slice(1)
+    __zen_actor_set_inflight(msg)
     b.loop((h, i, m) {
         a[0].addr().receive(Context<M>(msg: m))
-    })
+    })    // record the box: a panic in `receive` below is caught in zenrt.c, which frees it
     free_msg(msg)
-}
+    __zen_actor_set_inflight(0)
+}    // box freed normally; clear so the panic catch never double-frees

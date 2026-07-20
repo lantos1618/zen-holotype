@@ -59,9 +59,12 @@ STDERR_FD := 2    // fd 2 for the "actor marked dead" note (mirrors std.core.res
 // (div0/OOB/null/explicit — genc's zen__panic longjmp'd back). A panic OUTSIDE a pool worker (main, the
 // inline sync drain) installs no catch, so zen__panic aborts as it always has: the non-actor path is
 // byte-identical. Bodyless FFI decl (like std.c.libc) — genc emits the prototype; the symbol is zenrt.c's.
-// KNOWN v1 LIMIT: a longjmp abandons the crashed frame, so memory the behavior malloc'd before the panic
-// (e.g. a typed message box) leaks — a dead actor's leak beats a dead process; the deferred real fix is a
-// per-actor arena rt reset on death. No lock is held across the call (behavior runs outside the mailbox lock).
+// KNOWN v1 LIMIT: a longjmp abandons the crashed frame. The in-flight typed message box is now reclaimed
+// on the catch path (the pool_actor trampoline records it via __zen_actor_set_inflight; zenrt.c frees it),
+// so a panicking actor no longer leaks its current box. Still deferred: other heap the behavior malloc'd
+// before the panic, and still-queued boxes in a dead actor's mailbox (drained-and-discarded, not freed) —
+// the real fix is a per-actor arena rt reset on death. No lock is held across the call (behavior runs
+// outside the mailbox lock).
 __zen_actor_call = (behavior: (RawPtr<u8>, i64) void, user: RawPtr<u8>, msg: i64) i64
 // Register THIS worker pthread's own per-thread sigaltstack (bootstrap/zenrt.c). A stack-overflow SIGSEGV
 // is delivered on the alt stack (SA_ONSTACK), but sigaltstack is a PER-THREAD setting — a worker that

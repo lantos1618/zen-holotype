@@ -1,0 +1,37 @@
+// PANIC-LEAK proof for the TYPED pooled path (std.concurrent.pool_actor + bootstrap/zenrt.c). A typed
+// message is heap-BOXED by `send`; the worker's trampoline (`dispatch`) frees the box via `free_msg`
+// AFTER `receive` returns. Bug: on a panic INSIDE `receive`, the siglongjmp back to the worker's catch
+// skips `free_msg`, so the in-flight box LEAKED. Fix: `dispatch` records the box (__zen_actor_set_inflight)
+// before running `receive`, and zenrt.c's catch path frees it when the behavior panics.
+//
+// This program sends EXACTLY ONE poison message (`.Boom(0)`) that divides by zero inside `receive`, so
+// the actor panics and is marked dead; the worker survives, the pool quiesces, and teardown is clean.
+// Exit 0 proves panic ISOLATION + clean shutdown. Run under `cc -fsanitize=address` (see the harness
+// shell case / the PR report) it proves the box is freed: ASan reports NO leak.
+{ pool_open, pool_quiesce_stop, pool_close, Pool } = std.concurrent.pool
+{ malloc, free } = std.mem.alloc
+{ dispatch } = std.concurrent.pool_actor    // destructured: the faithful formatter accepts an unqualified generic call
+pa = std.concurrent.pool_actor
+Msg*: Boom(i64)
+Bomb*: {
+    fired: i64,
+}
+Bomb.impl(pa.Receiver, {
+    receive = (b: MutPtr<Bomb>, ctx: pa.Context<Msg>) void {
+        ctx.msg.match ({
+            .Boom(n) => {
+                b.fired = 100 / n
+            },
+        })
+    }
+})    // n == 0 → integer divide by zero → PANIC (worker catches it)
+tramp = (user: RawPtr<u8>, msg: i64) void { dispatch<Bomb, Msg>(user, msg) }
+main = () i32 {
+    h := pa.spawn_actor_heap(8, Bomb(fired: 0), tramp)
+    p := pool_open(1, 8)
+    p.send(h, Msg.Boom(0))    // one poison BOXED message → receive panics; the box must still be freed
+    p.pool_quiesce_stop()
+    pa.close(h)
+    p.pool_close()
+    0
+}
