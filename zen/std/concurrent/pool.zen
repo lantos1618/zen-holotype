@@ -117,7 +117,11 @@ PoolActor: {
     art: Rt,
     dead: i64,
     scratch: MutPtr<Arena>,
-}    // user actor state (opaque to the pool); `scratch` = per-behavior bump arena (null = none)
+    boxed: i64,
+}    // user actor state (opaque to the pool); `scratch` = per-behavior bump arena (null = none);
+// `boxed` = 1 when this actor's i64 messages are malloc'd box POINTERS (the typed pool_actor path), so a
+// DEAD actor's still-queued backlog must `free` each drained box (supervision S5); 0 for raw pool actors
+// whose payload is a plain i64 value (freeing it would corrupt) — the drain-discard then only counts, no free.
 // (`art` = this actor's ambient rt; the worker sets it as the current-rt slot around each behavior run,
 // so `rt.current()` inside the behavior resolves to the actor's own rt — the M4 injection hook, §2b.
 // Untyped pool actors default `art = default()` (the process default rt; heap unless a program opts in).)
@@ -158,6 +162,7 @@ pool_spawn_scratch_rt* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i
         art: art,
         dead: 0,
         scratch: scratch,
+        boxed: 0,
     )).expect("pool: actor block allocation failed")
     arc.base
 }
@@ -188,6 +193,19 @@ pool_actor_unref* = (raw: RawPtr<u8>) void {
 pool_actor_free* = (raw: RawPtr<u8>) void { pool_actor_unref(raw) }
 // read an actor's current Arc refcount (for tests/assertions of the cross-thread lifetime).
 pool_actor_count* = (raw: RawPtr<u8>) i64 { load_i64(raw) }
+// ── SUPERVISION OBSERVABILITY (S5) ────────────────────────────────────────────────────────────────
+// is this actor DEAD? A behavior panic marks the actor dead (drain_batch, below) and the worker survives;
+// this getter makes that death OBSERVABLE so a supervisor can detect a crashed child and restart it. True
+// the instant a behavior in this actor panicked — the actor may still be draining-and-discarding its
+// backlog, but it will run no further user code (at-most-once: post-death messages are dropped, not replayed).
+pool_actor_dead* = (raw: RawPtr<u8>) bool { actor_view(raw).dead != 0 }
+// mark this actor's messages as malloc'd box POINTERS: on death, drain_batch `free`s each still-queued box
+// (backlog leak fix, #519's deferred class) instead of silently dropping it. Called by the typed pool_actor
+// spawn path right after the raw spawn; raw pool actors leave `boxed` 0 (their i64 payload is a value).
+pool_actor_set_boxed* = (raw: RawPtr<u8>) void {
+    a := actor_view(raw)
+    a.boxed = 1
+}
 // ── Pool: M workers + ONE global run queue behind ONE mutex + condvar (Cut 1) ───────────────────
 Pool*: {
     rqbuf: RawPtr<u8>,
@@ -350,7 +368,7 @@ scratch_reset = (a: MutPtr<PoolActor>) void {
 }
 // drain up to QUANTUM messages, running `behavior` OUTSIDE the mailbox lock (so senders never block on
 // user work). Returns the count processed this batch.
-drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
+drain_batch = (p: MutPtr<Pool>, a: MutPtr<PoolActor>, count: i64) i64 {
     (count >= QUANTUM).match ({
         true  => count,
         false => {
@@ -371,7 +389,19 @@ drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
                     // A dead actor (an earlier message in THIS turn panicked) drains-and-discards the rest of its
                     // mailbox WITHOUT running the behavior, so the pool reaches quiescence and the actor deschedules.
                     (a.dead != 0).match ({
-                        true  => drain_batch(a, count + 1),
+                        true  => {
+                            // BACKLOG FREE (S5, closes #519's deferred leak): a dead actor's still-queued message
+                            // boxes must be reclaimed, not silently dropped. For a typed actor (`boxed`) the i64 payload
+                            // is a malloc'd box pointer — free it; for a raw pool actor it is a plain value — only count.
+                            // Each drop is a DEAD LETTER, tallied in the shared counter so restart-time loss is observable.
+                            (a.boxed != 0).then({
+                                free(msg.offset(0))
+                            })
+                            p.mu.lock()
+                            p.dropped = p.dropped + 1
+                            p.mu.unlock()
+                            drain_batch(p, a, count + 1)
+                        },
                         false => {
                             saved := enter(a.art)    // set this actor's rt as the ambient (M4 §2b) around the behavior;
                             crashed := __zen_actor_call(a.behavior, a.user, msg)    // run under the panic catch (isolation)
@@ -383,7 +413,7 @@ drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
                                 nn := note.strlen()
                                 STDERR_FD.write(note.slice(nn).ptr, nn)
                             })
-                            drain_batch(a, count + 1)
+                            drain_batch(p, a, count + 1)
                         },
                     })
                 },
@@ -396,7 +426,7 @@ drain_batch = (a: MutPtr<PoolActor>, count: i64) i64 {
 // `pending` and clears `scheduled` IN THE SAME mailbox critical section — closing the lost-wakeup race.
 run_quantum = (p: MutPtr<Pool>, actor: RawPtr<u8>) i64 {
     a := actor_view(actor)
-    processed := drain_batch(a, 0)
+    processed := drain_batch(p, a, 0)
     a.mbmu.lock()
     remaining := a.tail - a.head
     (remaining > 0).match ({
@@ -528,6 +558,17 @@ wait_quiescent = (p: MutPtr<Pool>) void {
         p.done_cv.wait(p.mu)
         wait_quiescent(p)
     })
+}
+// block until the pool is quiescent (every scheduled actor has drained to empty) WITHOUT shutting it down —
+// the workers stay parked, ready for more work. Unlike pool_quiesce_stop this leaves the pool RUNNABLE, so a
+// supervisor can: send a batch, `pool_quiesce` to let it settle, observe a crashed child (pool_actor_dead) +
+// the dead-letter count, restart it, then send the next batch on the SAME live pool. `live` is bumped under
+// p.mu by the first `send` that schedules an actor and cleared when it deschedules, so a quiesce issued after
+// a batch of sends can never return early past still-pending work.
+pool_quiesce* = (p: MutPtr<Pool>) void {
+    p.mu.lock()
+    p.wait_quiescent()
+    p.mu.unlock()
 }
 // drain-to-quiescence shutdown: wait until all enqueued work is processed, flag stop, wake every parked
 // worker (the broadcast is under p.mu so it can't be lost), join the pthreads. After this returns the
