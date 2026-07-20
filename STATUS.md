@@ -113,7 +113,7 @@ but the heavyweight deep-resolver compile remains a separate memory target.
 | Ownership | Alias/call analysis is bounded and not a borrow proof. | Keep ownership flows simple; use explicit clone/release and narrow pointer scopes. |
 | Scratch/shared memory | Checker is a source-shape heuristic; there are no typed regions or `.share/.give` verbs. | Construct in the actor, move explicit ownership from long-lived storage, or use immutable `Arc`. |
 | Runtime API | `Sys` is preferred, but `std.rt`, `std.scope`, checkpoint/coroutine paths remain live. | Do not claim the explicit transition is complete. |
-| Actor API | Cooperative and pooled typed actor APIs differ; `Sys.Spawner.spawn` panics. | Choose the concrete surface explicitly; pooled actors need a concrete trampoline. |
+| Actor API | Cooperative and pooled typed actor APIs differ; `Sys.Spawner.spawn` returns `.Err(.Errno(38))` (ENOSYS), not implemented. | Choose the concrete surface explicitly; pooled actors need a concrete trampoline. |
 | Actor scheduler | One global mutex-protected run queue, no per-worker deques/work stealing. | Correct multicore execution, not final scalability architecture. |
 | Actor panic cleanup | Panic and stack overflow isolate the actor, but non-local recovery can leak behavior allocations and queued typed boxes. | Isolation is process-availability protection, not deterministic unwinding. |
 | `fs.read_dir` | Counts, rewinds, then fills a fixed allocation without guarding directory growth; recursive fill scales with entry count. | A changing/huge directory can write out of bounds or overflow the stack; fix before calling robust. |

@@ -85,6 +85,54 @@ ff_flush_leading = (s: String, a: MutPtr<Malloc>, before: i32, ind: i32) String 
     }
     out
 }
+// weave a trailing comment that sits on the SAME source line as `line` (the construct's opening line)
+// inline after the text just emitted, then advance the cursor. Used by the boolean-`.match` (Cond)
+// printer to keep a comment written on the `x.match ({ …` opening line ON that line, rather than letting
+// it escape past the construct's closing `})` (and, when the block inlines, past the enclosing `}`). It
+// is idempotent because the comment re-anchors to the SAME physical line every pass: after formatting the
+// comment still trails the `.match ({` line, so the next `gf_line_of` check re-matches and re-weaves it.
+ff_open_trailing = (s: String, a: MutPtr<Malloc>, line: i32) String {
+    (gf_idx < gf_cmts.len && gf_cmts[gf_idx].trailing && gf_line_of(gf_cmts[gf_idx].start) == line).match ({
+        true  => {
+            out := s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])
+            gf_idx = gf_idx + 1
+            out
+        },
+        false => s,
+    })
+}
+// rightmost known byte offset among a Cond's arm bodies (0 = both position-less, e.g. bare literals).
+gf_cond_body_max = (d: CondData) i32 {
+    tp := gf_pos_of(d.t)
+    ep := gf_pos_of(d.e)
+    (tp > ep).match ({ true => tp, false => ep })
+}
+// Does a pending comment belong ON the `x.match ({ …` OPENING line of this boolean `.match` (Cond) — i.e.
+// interior to the construct, written after `({` and BEFORE the arms — as opposed to a comment trailing
+// the whole statement (after the closing `})`)? The distinction matters because only the interior comment
+// has no home in the one-line inline form and would escape past the construct/enclosing block. It must be
+// a trailing comment on the subject's source line AND sit strictly before the arm bodies (`start < body_max`),
+// which requires the arms to carry positions. When BOTH arms are position-less (bare literals like `1`/`0`),
+// there is no reliable bound to tell an opening-line comment apart from one trailing a one-line `})`, so we
+// deliberately do NOT force expansion — see the residual noted in ff_cond, keeping already-clean one-liners
+// (and their statement-trailing comments) untouched rather than risk relocating them.
+gf_cond_open_cmt = (d: CondData) bool {
+    (gf_idx >= gf_cmts.len).then({
+        return false
+    })
+    (gf_cmts[gf_idx].trailing == false).then({
+        return false
+    })
+    rp := gf_pos_of(d.c)
+    (rp <= 0).then({
+        return false
+    })
+    (gf_line_of(gf_cmts[gf_idx].start) != gf_line_of(rp)).then({
+        return false
+    })
+    bm := d.gf_cond_body_max()
+    bm > 0 && gf_cmts[gf_idx].start < bm
+}
 // if the NEXT pending comment is TRAILING (code precedes it on its source line), emit it inline after
 // the just-printed statement (two spaces then the text). Source order + the trailing flag make this
 // unambiguous and IDEMPOTENT: a trailing comment always immediately follows its own statement, and a
@@ -420,7 +468,13 @@ ff_cond_inline = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
     })
 }
 ff_cond_multiline = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
-    open := s.ff_recv(a, d.c, ind).ff_append(a, ".match ({\n")
+    rp := gf_pos_of(d.c)
+    head := s.ff_recv(a, d.c, ind).ff_append(a, ".match ({")
+    withc := d.gf_cond_open_cmt().match ({
+        true  => head.ff_open_trailing(a, gf_line_of(rp)),
+        false => head,
+    })
+    open := withc.ff_append(a, "\n")
     body := (d.oa == 1).match ({
         true  => open.ff_indent(a, ind + 1).ff_append(a, "true => ").ff_expr(a, d.t, ind + 1).ff_append(a, ",\n"),
         false => (d.oa == 2).match ({
@@ -501,6 +555,15 @@ ff_cond = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
         return s.ff_then(a, d, ind)
     })
     d.ff_cond_nested().then({
+        return s.ff_cond_multiline(a, d, ind)
+    })
+    // A comment written on the `x.match ({ …` opening line (interior, before the arms) has no home in the
+    // one-line inline form and would escape past the construct/enclosing block — expand so the multiline
+    // printer can weave it onto that same opening line. A comment trailing the whole statement (after
+    // `})`) is NOT interior and keeps the clean inline form. RESIDUAL: when both arm bodies are
+    // position-less bare literals, gf_cond_open_cmt cannot bound the opening line, so such an interior
+    // comment on a sole-body boolean match may still migrate (never worse than the pre-fix behavior).
+    d.gf_cond_open_cmt().then({
         return s.ff_cond_multiline(a, d, ind)
     })
     saved_comment := gf_idx
@@ -1032,7 +1095,10 @@ ff_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData, ctp: [P
     im.methods.loop((h, k, mp) {
         f := a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
         own := a.ff_minus_tparams(f.tparams, ctp)
-        sig := out.ff_indent(a, ind).ff_append(a, mp.name).ff_tparams(a, own).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
+        // own-line comments written ABOVE this method flush at method indent (bounded by the method's
+        // name pos) — NOT hoisted into its body, where ff_block would otherwise pick them up.
+        lead := out.ff_flush_leading(a, f.pos, ind)
+        sig := lead.ff_indent(a, ind).ff_append(a, mp.name).ff_tparams(a, own).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
         out = sig.ff_append(a, " ").ff_block(a, f.body, ind, true).ff_append(a, "\n")
     })
     out
@@ -1211,7 +1277,7 @@ pretty_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
     s := a.ff_string(8192)
     out := s
     decls.loop((h, i, d) {
-        nb := gf_next_decl_pos(decls, i + 1)    // the next EMITTED decl's pos → trailing-comment boundary
+        nb := a.gf_next_decl_pos(decls, i + 1)    // the next EMITTED decl's pos → trailing-comment boundary
         pretty_set_block_end(nb)    // bound this decl's body last-stmt drain to the decl end
         d.match ({
             .DFunc(f)          => (a.ff_is_hoisted(decls, f.name) == false).then({
@@ -1234,17 +1300,22 @@ pretty_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
 // the source position of the next decl at or after index `i` that HAS one (skips position-less decls,
 // e.g. inherent-impl markers, so the boundary is a real source offset). 0 = none left. Used only to cap
 // which trailing comment belongs to the decl just printed — a slightly loose bound is harmless.
-gf_next_decl_pos = (decls: [Decl], i: i32) i32 {
+gf_next_decl_pos = (a: MutPtr<Malloc>, decls: [Decl], i: i32) i32 {
     (i >= decls.len).then({
         return 0
     })
     // a DTraitDefault is never emitted at top level (its body prints inside its record), so its pos —
     // a byte INSIDE the record's own text — must not serve as the record's trailing-comment boundary.
+    // A HOISTED method DFunc (inherent or trait-impl) is likewise re-inlined inside its owner, and now
+    // carries its own name offset (for ff_methods' leading-comment flush); that offset sits BEFORE the
+    // owner's closing brace, so it too must be skipped — otherwise a comment trailing the record's `}`
+    // would be truncated out of the record's trailing-comment region and leak into the next decl's body.
     p := decls[i].match ({
         .DTraitDefault(td) => 0,
+        .DFunc(f)          => a.ff_is_hoisted(decls, f.name).match ({ true => 0, false => f.pos }),
         _                  => gf_decl_pos(decls[i]),
     })
-    (p > 0).match ({ true => p, false => gf_next_decl_pos(decls, i + 1) })
+    (p > 0).match ({ true => p, false => a.gf_next_decl_pos(decls, i + 1) })
 }
 // one top-level decl: leading comments (col 0) → the decl → its trailing comment (bounded by `nb`) → newline.
 ff_top_decl = (a: MutPtr<Malloc>, s: String, exp: [Param], decls: [Decl], d: Decl, nb: i32) String {
