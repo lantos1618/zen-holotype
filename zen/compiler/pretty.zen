@@ -11,9 +11,9 @@
 //
 // Same fluent UFCS String-builder walk as genjs, allocator explicit: `s.ff_append(a, x).ff_expr(a, e)`.
 { String } = std.text.string
-{ view, is_empty, eq } = std.text.str
+{ view, is_empty, eq, starts_with } = std.text.str
 { Malloc } = std.mem.alloc
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData, ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData, impl_cname_in, is_expr_null, tvoid, ptr_kw, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData, ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData, impl_cname_in, payload_fname, is_expr_null, tvoid, ptr_kw, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Comment } = compiler.lex
 { at } = std.text.bytes
 // ── comment sidecar state ──────────────────────────────────────────────────────
@@ -521,13 +521,47 @@ ff_tyname = (s: String, a: MutPtr<Malloc>, name: string_view, targs: [Ty]) Strin
         false => s.ff_append(a, name),
     })
 }
+// a MakeStruct literal that is really a synthesized multi-field variant payload — `__anon…` name with
+// ordered positional field inits `_0, _1, …` (see the decl-side ff_anon_payload_fields). A constructor
+// `Ask(a, b, c)` desugars to `.Ask(__anon…(_0: a, _1: b, _2: c))`; recognising it lets ff_mkenum print
+// the surface argument list `(a, b, c)` back instead of leaking the internal struct literal.
+ff_is_anon_positional_inits = (a: MutPtr<Malloc>, ms: MakeStructData) bool {
+    ms.ty.starts_with("__anon").match ({
+        true  => (ms.inits.len == 0).match ({
+            true  => false,
+            false => {
+                ok := true
+                ms.inits.loop((h, i, fi) {
+                    ok = ok && eq(fi.name, a.payload_fname(to_i32(i)))
+                })
+                ok
+            },
+        }),
+        false => false,
+    })
+}
+ff_anon_ctor_args = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
+    out := s
+    inits.loop((h, i, fi) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = out.ff_expr(a, fi.value, ind)
+    })
+    out
+}
 // `.variant(payload)` (or `Ty.variant(payload)` when the enum type is explicit)
 ff_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData, ind: i32) String {
     head := is_empty(m.ty).match ({
         true  => s.ff_append(a, "."),
         false => s.ff_tyname(a, m.ty, m.targs).ff_append(a, "."),
     })
-    head.ff_append(a, m.variant).ff_append(a, "(").ff_expr(a, m.payload, ind).ff_append(a, ")")
+    open := head.ff_append(a, m.variant).ff_append(a, "(")
+    m.payload.match ({
+        .MakeStruct(ms) => a.ff_is_anon_positional_inits(ms).match ({
+            true  => open.ff_anon_ctor_args(a, ms.inits, ind).ff_append(a, ")"),
+            false => open.ff_expr(a, m.payload, ind).ff_append(a, ")"),
+        }),
+        _               => open.ff_expr(a, m.payload, ind).ff_append(a, ")"),
+    })
 }
 ff_tag = (s: String, a: MutPtr<Malloc>, t: TagData) String {
     is_empty(t.ty).match ({
@@ -1062,34 +1096,92 @@ ff_trait_impl = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) Stri
         },
     })
 }
+ff_no_fields = () [Field] { slice(null_ptr(), 0) }
+// A multi-field variant payload `Ask(t0, t1, …)` is DESUGARED at parse time into a synthesized anon
+// struct `__anon__0__1…` with positional fields `_0, _1, …` (compiler.parse_type.parse_variant_payload
+// + compiler.genc.payload_fname). The surface type list does not survive on the AST, so the formatter
+// re-derives it here: a payload struct is recognised by its `__anon` name AND ordered positional field
+// names, then re-rendered as the `(t0, t1, …)` tuple and the hoisted struct is suppressed at top level
+// (pretty_module_in) — the surface form round-trips and no `__anon…` internal name ever leaks.
+ff_is_positional_fields = (a: MutPtr<Malloc>, fields: [Field]) bool {
+    (fields.len == 0).match ({
+        true  => false,
+        false => {
+            ok := true
+            fields.loop((h, i, fl) {
+                ok = ok && eq(fl.name, a.payload_fname(to_i32(i)))
+            })
+            ok
+        },
+    })
+}
+ff_is_anon_payload_name = (a: MutPtr<Malloc>, decls: [Decl], nm: string_view) bool {
+    nm.starts_with("__anon").match ({
+        true  => a.ff_is_positional_fields(a.ff_anon_payload_fields(decls, nm)),
+        false => false,
+    })
+}
+ff_anon_payload_fields = (a: MutPtr<Malloc>, decls: [Decl], nm: string_view) [Field] {
+    res := ff_no_fields()
+    decls.loop((h, i, d) {
+        d.match ({
+            .DStruct(sd) => eq(sd.name, nm).then({
+                res = sd.fields
+            }),
+            _            => { },
+        })
+    })
+    res
+}
+// the payload rendering for a variant: the surface `(t0, t1, …)` tuple when the payload is a
+// synthesized anon struct, else the payload type verbatim.
+ff_variant_payload = (s: String, a: MutPtr<Malloc>, decls: [Decl], t: Ty) String {
+    t.match ({
+        .Named(nm) => a.ff_is_anon_payload_name(decls, nm).match ({
+            true  => s.ff_append(a, "(").ff_tys(a, a.ff_anon_payload_tys(decls, nm)).ff_append(a, ")"),
+            false => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
+        }),
+        _          => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
+    })
+}
+ff_anon_payload_tys = (a: MutPtr<Malloc>, decls: [Decl], nm: string_view) [Ty] {
+    fields := a.ff_anon_payload_fields(decls, nm)
+    buf := slice(a.acquire((fields.len + 1) * sizeof(Ty)), fields.len + 1)
+    n := 0
+    fields.loop((h, i, fl) {
+        buf[n] = fl.ty
+        n = n + 1
+    })
+    slice(buf.ptr, n)
+}
 // one variant: `Name`, `Name(Payload)`, or — for a zero-arg ctor with a default constant — `Name = expr`.
-ff_variant = (s: String, a: MutPtr<Malloc>, vd: VariantDef) String {
+ff_variant = (s: String, a: MutPtr<Malloc>, decls: [Decl], vd: VariantDef) String {
     base := vd.payload.match ({
         .Void => s.ff_append(a, vd.name),
-        _     => s.ff_append(a, vd.name).ff_append(a, "(").ff_ty(a, vd.payload).ff_append(a, ")"),
+        _     => s.ff_append(a, vd.name).ff_variant_payload(a, decls, vd.payload),
     })
     vd.dflt.is_expr_null().match ({
         true  => base,
         false => base.ff_append(a, " = ").ff_expr(a, vd.dflt, 0),
     })
 }
-ff_variants = (s: String, a: MutPtr<Malloc>, vs: [VariantDef]) String {
+ff_variants = (s: String, a: MutPtr<Malloc>, decls: [Decl], vs: [VariantDef]) String {
     body := s
     vs.loop((h, i, vd) {
         body = (i == 0).match ({ true => body, false => body.ff_append(a, " | ") })
-        body = body.ff_variant(a, vd)
+        body = body.ff_variant(a, decls, vd)
     })
     body
 }
-ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], ed: EnumDecl) String { s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, ed.variants) }
-ff_genenum = (s: String, a: MutPtr<Malloc>, exp: [Param], g: GenEnumDecl) String { s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": ").ff_variants(a, g.variants) }
+ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], ed: EnumDecl) String { s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, decls, ed.variants) }
+ff_genenum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: GenEnumDecl) String { s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": ").ff_variants(a, decls, g.variants) }
 ff_decl = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) String {
     d.match ({
         .DFunc(f)          => s.ff_func(a, exp, f),
         .DStruct(sd)       => s.ff_struct(a, exp, decls, sd),
-        .DEnum(ed)         => s.ff_enum(a, exp, ed),
+        .DEnum(ed)         => s.ff_enum(a, exp, decls, ed),
         .DGenStruct(g)     => s.ff_genstruct(a, exp, decls, g),
-        .DGenEnum(g)       => s.ff_genenum(a, exp, g),
+        .DGenEnum(g)       => s.ff_genenum(a, exp, decls, g),
         .DForeign(f)       => s.ff_foreign(a, exp, f),
         .DImpl(im)         => s.ff_trait_impl(a, decls, im),
         .DGlobal(g)        => g.tl.match ({
@@ -1129,6 +1221,9 @@ pretty_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
                 out = a.ff_top_decl(out, exp, decls, d, nb)
             }),
             .DTraitDefault(td) => { },    // body re-inlined at its record's field slot (ff_record_field)
+            .DStruct(sd)       => (a.ff_is_anon_payload_name(decls, sd.name) == false).then({
+                out = a.ff_top_decl(out, exp, decls, d, nb)
+            }),    // suppress synthesized multi-field variant-payload structs (rendered inline as `(t0, …)`)
             _                  => {
                 out = a.ff_top_decl(out, exp, decls, d, nb)
             },
