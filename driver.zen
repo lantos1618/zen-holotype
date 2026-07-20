@@ -9,7 +9,7 @@
 { contents_in, out, out_bytes, save, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644, MODE_755 } = std.io.file
 { or, expect } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
 { then } = std.core.bool
-{ open, read, write, close, system, unlink, mkdir, rmdir, opendir, closedir, getpid } = std.c.libc
+{ open, read, write, close, system, unlink, mkdir, rmdir, opendir, closedir, getpid, isatty } = std.c.libc
 { parse_module, exports_get } = compiler.parse
 { set_faithful_lexeme } = compiler.parse_expr
 { perr_get } = compiler.parse_type
@@ -853,10 +853,20 @@ build_out = (flag: string_view, out: string_view) string_view { eq(flag, "-o").m
 // build output path: `build <file> -o <out>` -> <out>, else "a.out".
 // the DEFAULT mode (no subcommand): `zenc <file>` or `cat … | zenc` -> emit C to stdout, RAW
 // (resolve_module only, NO import flatten — std imports stay as-is; the harness depends on this).
-default_emit = (mp: MutPtr<Malloc>, path: string_view) i32 { eq(path, "").match ({
-    true  => mp.stdin_emit(mp.read_stdin()),
-    false => mp.raw_emit_file(path),
-}) }
+// No subcommand and no file: bare `zenc`. An interactive terminal (isatty(0)) gets the help text
+// rather than silently blocking on a stdin read; a pipe (`cat file.zen | zenc`) still filters to C.
+default_emit = (mp: MutPtr<Malloc>, path: string_view) i32 {
+    eq(path, "").match ({
+        true  => (isatty(0) != 0).match ({
+            true  => {
+                say(HELP())
+                0
+            },
+            false => mp.stdin_emit(mp.read_stdin()),
+        }),
+        false => mp.raw_emit_file(path),
+    })
+}
 // piped stdin has no directory, so a sibling import `{ f } = b` can't resolve — error cleanly instead
 // of emitting C that references undefined names (std imports stay raw, which the harness relies on).
 stdin_emit = (mp: MutPtr<Malloc>, src: string_view) i32 {
