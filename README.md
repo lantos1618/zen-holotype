@@ -163,6 +163,7 @@ zenc check prog.zen            # resolve + type-check only, no binary (accepts l
 zenc emit prog.zen             # print the generated C
 zenc doc std.text.fmt          # render a module's doc surface
 zenc fmt prog.zen              # format a source file in place
+zenc lsp                       # diagnostics-only Language Server (JSON-RPC over stdio)
 zenc --version                 # zenc 0.2.0-dev (self-hosted; zen driver)
 cat prog.zen | zenc            # low-level filter: one already-flat module -> C on stdout
 ```

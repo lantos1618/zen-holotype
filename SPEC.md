@@ -735,6 +735,16 @@ for idempotence on fixtures and a real-source corpus.
 `zenc doc <std.mod|file.zen>` lists public declaration heads and adjacent `//`
 docs. It is a first-pass docs command, not a rich documentation generator.
 
+`zenc lsp` runs a diagnostics-only Language Server over stdio (JSON-RPC 2.0,
+`Content-Length`-framed). It handles `initialize` (advertising `textDocumentSync: 1`
+full-sync), `textDocument/didOpen`/`didChange`/`didClose`, `shutdown`, and `exit`;
+unknown methods are no-ops. On open/change it runs the same check pipeline as
+`zenc check` on the document's full text and pushes `textDocument/publishDiagnostics`
+— each `CheckDiagnostic` mapped to an LSP `Diagnostic` with a 0-based range (Zen's
+1-based line/col minus one), `severity: 1`, `code` = diagnostic kind, and
+`source: "zen"`. Stage 0 is single-file: the document directory is derived from the
+`file://` URI so sibling/std imports resolve; multi-file project awareness is later.
+
 ## Test Map
 
 | Spec area | Primary tests |
