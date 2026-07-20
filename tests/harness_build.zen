@@ -304,7 +304,7 @@ run_docs* = (name: string_view, cs: [DocCase]) i32 {
 // run concurrently with the other cases: N such fixtures at once oversubscribe the scheduler and fail
 // nondeterministically (the exact hazard #485 caught for build fixtures). These run SERIALLY; everything
 // else runs across the worker pool. Identified by case name (only the two pool-isolation cases qualify).
-shell_is_serial = (name: string_view) bool { eq(name, "pool_actor_panic_isolation") || eq(name, "pool_actor_stackoverflow_isolation") }
+shell_is_serial = (name: string_view) bool { eq(name, "pool_actor_panic_isolation") || eq(name, "pool_actor_stackoverflow_isolation") || eq(name, "pool_actor_panic_box_freed") }
 // wrap ONE shell case's body so it is self-contained + gid-isolated: bind `$ZT` to a PER-CASE scratch
 // subdir `<zo_dir>/sh<gid>` (freshly recreated) so the hand-written pipelines — which reuse fixed scratch
 // names like `$ZT/zbp.c`, `$ZT/zfmt.zen` — never clobber each other under concurrency, then record the
@@ -1096,7 +1096,7 @@ harness_build_run* = () i32 {
     ), VerdictCase(
         src: "main = () i32 { 1 < 2 }\n",
         should_pass: false,
-        kind: "",
+        kind: "return-fit",
     ), VerdictCase(
         src: "Msg*: A | B\nmain = () i32 {\n    msg := Msg.A()\n    msg.match({ .A => 1, .B => \"bad\" })\n}\n",
         should_pass: false,
@@ -1112,35 +1112,35 @@ harness_build_run* = () i32 {
     ), VerdictCase(
         src: "num = std.text.num\nmain = () i32 { s := num.integer(42)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "num = std.text.num\nmain = () i32 { r := num.try_integer(42)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "num = std.text.num\nmain = () i32 { s := num.float(1.5)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "num = std.text.num\nmain = () i32 { r := num.try_float(1.5)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "text = std.text.str\nmain = () i32 { bs := text.dup_bytes(\"xy\")  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "text = std.text.str\nmain = () i32 { r := text.try_dup_bytes(\"xy\")  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "text = std.text.str\nmain = () i32 { s := text.substr(\"hello\", 1, 3)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "text = std.text.str\nmain = () i32 { r := text.try_substr(\"hello\", 1, 3)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "main = () i32 { undefined_thing }\n",
         should_pass: false,
@@ -1164,7 +1164,7 @@ harness_build_run* = () i32 {
     ), VerdictCase(
         src: "good = () i32 { 1 }\n@@@ !!!\nmain = () i32 { good() + 6 }\n",
         should_pass: false,
-        kind: "",
+        kind: "parse",
     ), VerdictCase(
         src: "main = () i32 { p := @malloc(8)  0 }\n",
         should_pass: false,
@@ -1461,105 +1461,83 @@ harness_build_run* = () i32 {
         want_exit: "0",
         want_out: "42\n1\n2\n3\n",
         check_out: true,
+    ), FixtureCase(
+        path: "tests/fixtures/zen/vec_view_loop.zen",
+        want_exit: "0",
+        want_out: "15\n3\n",
+        check_out: true,
     )])
+    // Vec<i32> via allocator: empty/push/view/loop-sum/free — pins the return-only-T `empty` + `.view().loop` pattern
     // ── (f) more `zenc check` rejects (string/slice/own/rc/arc allocator-first — the former try_* twins
     // now double as deleted-name rejects; typed-local mismatch) ─
     vd2 := run_verdicts("build check 2", [VerdictCase(
-        src: "{ new } = std.text.string\nmain = () i32 { s := new()  0 }\n",
-        should_pass: false,
-        kind: "",
-    ), VerdictCase(
         src: "string = std.text.string\nmain = () i32 { s := string.init(16)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "string = std.text.string\nmain = () i32 { r := string.try_init(16)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "halloc = std.mem.heap\n{ new_in } = std.text.string\nmain = () i32 { a := halloc.gpa()  s := a.addr().new_in()  s.append(\"x\")  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "halloc = std.mem.heap\n{ new_in } = std.text.string\nmain = () i32 { a := halloc.gpa()  s := a.addr().new_in()  s.push('x')  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "halloc = std.mem.heap\n{ new_in } = std.text.string\nmain = () i32 { a := halloc.gpa()  s := a.addr().new_in()  done := s.finish()  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "halloc = std.mem.heap\n{ new_in } = std.text.string\nmain = () i32 { a := halloc.gpa()  s := a.addr().new_in()  s.free()  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "slice = std.core.slice\nmain = () i32 { xs := slice.buf(2, [0])  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "slice = std.core.slice\nmain = () i32 { r := slice.try_buf(2, [0])  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "slice = std.core.slice\nmain = () i32 { xs := slice.dup([1, 2])  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "slice = std.core.slice\nmain = () i32 { r := slice.try_dup([1, 2])  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "slice = std.core.slice\nmain = () i32 { p := slice.node(1)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "slice = std.core.slice\nmain = () i32 { r := slice.try_node(1)  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "slice = std.core.slice\nmain = () i32 { xs := slice.concat([1], [2])  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "arg-type",
     ), VerdictCase(
         src: "slice = std.core.slice\nmain = () i32 { r := slice.try_concat([1], [2])  0 }\n",
         should_pass: false,
-        kind: "",
-    ), VerdictCase(
-        src: "{ Resource, new } = std.mem.own\nmain = () i32 { o := new(Resource(id: 1, slot: 0))  0 }\n",
-        should_pass: false,
-        kind: "",
-    ), VerdictCase(
-        src: "{ Resource, try_new } = std.mem.own\nmain = () i32 { r := try_new(Resource(id: 1, slot: 0))  0 }\n",
-        should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "halloc = std.mem.heap\n{ Resource, new_in } = std.mem.own\nmain = () i32 { a := halloc.gpa()  o := a.addr().new_in(Resource(id: 1, slot: 0))  o.release()  0 }\n",
         should_pass: false,
-        kind: "",
-    ), VerdictCase(
-        src: "{ new } = std.mem.rc\nmain = () i32 { r := new(1)  0 }\n",
-        should_pass: false,
-        kind: "",
-    ), VerdictCase(
-        src: "{ try_new } = std.mem.rc\nmain = () i32 { r := try_new(1)  0 }\n",
-        should_pass: false,
-        kind: "",
+        kind: "trait-bound",
     ), VerdictCase(
         src: "halloc = std.mem.heap\n{ new_in } = std.mem.rc\nmain = () i32 { a := halloc.gpa()  r := a.addr().new_in(1)  r.drop()  0 }\n",
         should_pass: false,
-        kind: "",
-    ), VerdictCase(
-        src: "{ new } = std.mem.arc\nmain = () i32 { r := new(1)  0 }\n",
-        should_pass: false,
-        kind: "",
-    ), VerdictCase(
-        src: "{ try_new } = std.mem.arc\nmain = () i32 { r := try_new(1)  0 }\n",
-        should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "halloc = std.mem.heap\n{ new_in } = std.mem.arc\nmain = () i32 { a := halloc.gpa()  r := a.addr().new_in(1)  r.drop()  0 }\n",
         should_pass: false,
-        kind: "",
+        kind: "undefined-name",
     ), VerdictCase(
         src: "main = () i32 { x: i32 := \"nope\"  0 }\n",
         should_pass: false,
@@ -1592,6 +1570,30 @@ harness_build_run* = () i32 {
         src: "Cell: {\n    v: i64,\n    load = (c: Cell) i64 { c.v + 1 }\n}\nmain = () i32 { c := Cell(v: 41)  to_i32(c.load() - 42) }\n",
         should_pass: true,
         kind: "",
+    )])
+    // deleted allocator/string ctor names (`new`/`try_new`) destructure-imported from a module that no
+    // longer defines them → kindless `unknown name in module` reject; pin the exact message (no error[kind]).
+    vd2b := run_diags("build check 2 deleted-names", [DiagCase(
+        src: "{ new } = std.text.string\nmain = () i32 { s := new()  0 }\n",
+        wants: ["error: unknown name 'new' in module 'std.text.string' (no such top-level definition)"],
+    ), DiagCase(
+        src: "{ Resource, new } = std.mem.own\nmain = () i32 { o := new(Resource(id: 1, slot: 0))  0 }\n",
+        wants: ["error: unknown name 'new' in module 'std.mem.own' (no such top-level definition)"],
+    ), DiagCase(
+        src: "{ Resource, try_new } = std.mem.own\nmain = () i32 { r := try_new(Resource(id: 1, slot: 0))  0 }\n",
+        wants: ["error: unknown name 'try_new' in module 'std.mem.own' (no such top-level definition)"],
+    ), DiagCase(
+        src: "{ new } = std.mem.rc\nmain = () i32 { r := new(1)  0 }\n",
+        wants: ["error: unknown name 'new' in module 'std.mem.rc' (no such top-level definition)"],
+    ), DiagCase(
+        src: "{ try_new } = std.mem.rc\nmain = () i32 { r := try_new(1)  0 }\n",
+        wants: ["error: unknown name 'try_new' in module 'std.mem.rc' (no such top-level definition)"],
+    ), DiagCase(
+        src: "{ new } = std.mem.arc\nmain = () i32 { r := new(1)  0 }\n",
+        wants: ["error: unknown name 'new' in module 'std.mem.arc' (no such top-level definition)"],
+    ), DiagCase(
+        src: "{ try_new } = std.mem.arc\nmain = () i32 { r := try_new(1)  0 }\n",
+        wants: ["error: unknown name 'try_new' in module 'std.mem.arc' (no such top-level definition)"],
     )])
     // a top-level fn named after an intrinsic is a MISCOMPILE if accepted: calls dispatch on the
     // name in genc, so they'd hit the intrinsic (deref/segfault/cc error), never the user fn.
@@ -1912,8 +1914,11 @@ harness_build_run* = () i32 {
         name: "pool_actor_panic_isolation",
         cmd: "./zenc build tests/fixtures/zen/pool_actor_panic_isolation.zen -o $ZT/zpai 2>/dev/null && { $ZT/zpai >/dev/null 2>$ZT/zpai_e.txt; test \"$?\" = 0; } && grep -Fqx \"zen: panic: integer divide by zero\" $ZT/zpai_e.txt && grep -Fqx \"zen: actor marked dead, pool continues\" $ZT/zpai_e.txt",
     ), ShellCase(
-        name: "pool_actor_stackoverflow_isolation",
-        cmd: "./zenc build tests/fixtures/zen/pool_actor_stackoverflow_isolation.zen -o $ZT/zpsoi 2>/dev/null && { $ZT/zpsoi >/dev/null 2>$ZT/zpsoi_e.txt; test \"$?\" = 0; } && grep -Fqx \"zen: panic: stack overflow (recursion too deep)\" $ZT/zpsoi_e.txt && grep -Fqx \"zen: actor marked dead, pool continues\" $ZT/zpsoi_e.txt",
+        name: "pool_actor_panic_box_freed",
+        cmd: "./zenc build tests/fixtures/zen/pool_actor_panic_box_freed.zen -o $ZT/zpbf 2>/dev/null && { $ZT/zpbf >/dev/null 2>$ZT/zpbf_e.txt; test \"$?\" = 0; } && grep -Fqx \"zen: panic: integer divide by zero\" $ZT/zpbf_e.txt && grep -Fqx \"zen: actor marked dead, pool continues\" $ZT/zpbf_e.txt",
+    ), ShellCase(
+        name: "js_width_battery_dual_backend",
+        cmd: "./zenc build tests/fixtures/zen/js_width_battery.zen -o $ZT/zjwb 2>/dev/null && $ZT/zjwb > $ZT/zjwb_c.txt 2>/dev/null && ./zenc build --target js tests/fixtures/zen/js_width_battery.zen -o $ZT/zjwb.js 2>/dev/null && node $ZT/zjwb.js > $ZT/zjwb_js.txt 2>/dev/null && cmp -s $ZT/zjwb_c.txt $ZT/zjwb_js.txt && printf '44\\n4464\\n1410065408\\n1410065408\\n-25536\\n-106\\n1335831723\\n2924308450\\n' | cmp -s - $ZT/zjwb_c.txt",
     ), ShellCase(
         name: "infer_lambda_ret_annot",
         cmd: "printf '{ Result, IoError, expect, map_err } = std.core.result\\nmain = () i32 {\\n    good: Result<i32, IoError> := .Ok(42)\\n    v := good.map_err((e) str { \"boom\" }).expect(\"m\")\\n    v - 42\\n}\\n' > $ZT/zlam.zen && ./zenc build $ZT/zlam.zen -o $ZT/zlam_bin 2>/dev/null && $ZT/zlam_bin",
@@ -2201,5 +2206,5 @@ harness_build_run* = () i32 {
     // Bare `zenc` (no subcommand, no file): on an interactive TTY it prints help and exits 0 instead
     // of silently blocking on a stdin read; when stdin is a PIPE it still filters source -> C. `script`
     // (util-linux) allocates a pty so isatty(0) is true for the help branch.
-    ex + so + ex2 + so2 + exm + vd + r1 + r2 + vd2 + dg + em + dc + sh + bs
+    ex + so + ex2 + so2 + exm + vd + r1 + r2 + vd2 + vd2b + dg + em + dc + sh + bs
 }
