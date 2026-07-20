@@ -162,8 +162,9 @@ Concurrency also has two actor surfaces:
 
 The pool is a real multicore implementation with atomics, mutex/condition primitives, exactly-once
 stress tests, and per-actor panic/stack-overflow isolation. Its scheduler is still one global
-mutex-protected run queue, not per-worker work stealing. `Sys.Spawner` is a stub and panics if used;
-actor API convergence is roadmap work, not a shipped abstraction.
+mutex-protected run queue, not per-worker work stealing. `Sys.Spawner` is a stub: its `spawn` returns
+`.Err(.Errno(38))` (ENOSYS) rather than aborting, since the generic signature carries no actor type to
+build a trampoline from; actor API convergence is roadmap work, not a shipped abstraction.
 
 ## Tests
 
