@@ -39,7 +39,8 @@
 // resolves to THIS actor's own rt — Pony-style per-actor heap. For this slice actors typically pass
 // heap_rt(); a per-actor arena is a later slice.
 { malloc, free } = std.mem.alloc
-{ Pool, pool_spawn_rt, pool_send, pool_actor_free } = std.concurrent.pool
+{ Pool, pool_spawn_rt, pool_send, pool_actor_free, ActorError, ActorRef, actor_ref, ref_send } = std.concurrent.pool
+{ Result } = std.core.result
 { Rt, default } = std.rt
 // Record the message box the trampoline is about to process, so that if `receive` PANICS (the worker
 // catches it via zenrt.c's __zen_actor_call), the catch path frees the box instead of leaking it — the
@@ -84,17 +85,38 @@ spawn_actor_heap*<ActorT> = (cap: i64, actor: ActorT, tramp: (RawPtr<u8>, i64) v
 // send a typed message to a pooled actor. The message must OUTLIVE the send (a worker consumes it
 // later, off-thread), so it is heap-BOXED (`[M]` block) and the box POINTER rides as the pool's i64
 // payload (to_i64 → the trampoline recovers it with `msg.offset(0).slice(1)` and frees it via free_msg).
-// Returns false + reclaims the box if the mailbox is full (back-pressure; nothing is corrupted/leaked).
-send*<M, ActorT> = (p: MutPtr<Pool>, h: PooledHandle<ActorT>, msg: M) bool {
+// Returns `.Err(.MailboxFull)` + reclaims the box if the mailbox is full (back-pressure as a value; the
+// pool tallies the drop in its dead-letter counter). The caller MAY discard the Result.
+send*<M, ActorT> = (p: MutPtr<Pool>, h: PooledHandle<ActorT>, msg: M) Result<i64, ActorError> {
     box := malloc(sizeof(M))
     slot: [M] := box.slice(1)
     slot[0] = msg
-    sent := p.pool_send(h.raw, to_i64(box))
-    sent.match ({
-        true  => true,
-        false => {
+    p.pool_send(h.raw, to_i64(box)).match ({
+        .Ok(n)  => .Ok(n),
+        .Err(e) => {
             free(box)
-            false
+            .Err(e)
+        },
+    })
+}
+// an ActorRef addressing this handle on pool `p` — the SENDABLE reply-address a requester embeds in a
+// request message so the handler can reply from inside `receive` (where it has no `p`/`h`). Construct it
+// at spawn/setup, put it in the message: `p.send(server, .Req(n, client.ref_of(p)))`.
+ref_of*<ActorT> = (h: PooledHandle<ActorT>, p: MutPtr<Pool>) ActorRef { p.actor_ref(h.raw) }
+// TYPED send to an ActorRef (the reply primitive): box the message like `send`, ride the box pointer as
+// the i64 payload, hand it to the raw `ref_send`. Reclaims the box + returns `.Err` on a full mailbox.
+// This is a recognized send surface in the sendability checker (check_validate.zen), so a MutPtr-carrying
+// reply is rejected exactly like `send`/`pool_send`. Distinct name (no fn overloading) → UFCS reads
+// `reply_to.ref_send_msg(Response(...))`.
+ref_send_msg*<M> = (r: ActorRef, msg: M) Result<i64, ActorError> {
+    box := malloc(sizeof(M))
+    slot: [M] := box.slice(1)
+    slot[0] = msg
+    r.ref_send(to_i64(box)).match ({
+        .Ok(n)  => .Ok(n),
+        .Err(e) => {
+            free(box)
+            .Err(e)
         },
     })
 }

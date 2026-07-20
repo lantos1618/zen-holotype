@@ -7226,12 +7226,15 @@ sm_msg_mut = (env: Env, mty: Ty, e: Ptr<Expr>) bool {
 // MESSAGE is the LAST argument, NOT a hardcoded `args[1]`. That covers the 3-arg PARALLEL primitive
 // `send(p, h, msg)` (from `p.send(h, msg)` / std.concurrent.pool_actor.send, flattened to `…__send`) whose
 // message is `args[2]` — the path where cross-actor races ACTUALLY happen — as well as the 2-arg inline
-// `send(h, msg)`. `sx_named` accepts the bare name and the flattener's `…__send` / `…__pool_send` suffix.
+// `send(h, msg)`. It ALSO covers `ref_send_msg(r, msg)` (std.concurrent.pool_actor: the typed ActorRef
+// REPLY send, S2) whose message is `args[1]` — so a reply carrying a MutPtr is rejected exactly like a
+// send; the ActorRef `r` is not generic, so M is unresolved (tvoid) → the payload-expression descent
+// (same as the 3-arg `pool_send`) decides. `sx_named` accepts the bare name and the flattener's suffix.
 // the handle is the argument immediately BEFORE the message in every flattened send shape — `send(h,
 // msg)` and the 3-arg parallel `send(p, h, msg)` / `pool_send(p, h, msg)` — so `args[len-2]` yields the
 // handle whose type arg is the message type M, used to resolve a bare `.Variant` message against M's decl.
 sm_call_pos = (env: Env, c: CallData) i32 {
-    (c.fn.sx_named("send", "__send") && c.args.len >= 2 || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3).match ({
+    (c.fn.sx_named("send", "__send") && c.args.len >= 2 || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3 || c.fn.sx_named("ref_send_msg", "__ref_send_msg") && c.args.len == 2).match ({
         true  => env.sm_msg_mut(env.infer_expr(c.args[c.args.len - 2].addr()).first_gen_arg(), c.args[c.args.len - 1].addr()).match ({
             true  => c.pos.pos_or(1),
             false => 0,
@@ -7245,7 +7248,7 @@ sm_call_pos = (env: Env, c: CallData) i32 {
 // handle carrying M is the RECEIVER for `h.send(m)` (its first type arg is M). For `p.pool_send(h, m)`
 // the receiver is the pool (M unresolved → tvoid), which falls back to the payload-expression descent.
 sm_mcall_pos = (env: Env, mc: MethodCallData) i32 {
-    (mc.method.sx_named("send", "__send") && mc.args.len >= 1 || mc.method.sx_named("pool_send", "__pool_send") && mc.args.len == 2).match ({
+    (mc.method.sx_named("send", "__send") && mc.args.len >= 1 || mc.method.sx_named("pool_send", "__pool_send") && mc.args.len == 2 || mc.method.sx_named("ref_send_msg", "__ref_send_msg") && mc.args.len == 1).match ({
         true  => env.sm_msg_mut(env.infer_expr(mc.recv).first_gen_arg(), mc.args[mc.args.len - 1].addr()).match ({
             true  => mc.pos.pos_or(1),
             false => 0,
