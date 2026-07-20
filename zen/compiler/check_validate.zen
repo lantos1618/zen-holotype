@@ -6566,12 +6566,116 @@ name_read_in_body = (nm: string_view, body: [Stmt]) bool {
     })
     f
 }
-// is the name read in any statement strictly AFTER index k? (discharge must follow the binding).
-name_read_after = (nm: string_view, body: [Stmt], k: i32) bool {
+// ── v2: USE vs DISCHARGE (widen from never-named to used-but-never-discharged) ─────────────────────
+// v1 exempted an owner the moment its name reappeared ANYWHERE (any mention = discharge). That misses
+// the common leak `o := alloc()  n := o.get().id  n` — `o` is named (the read) yet never freed/moved/
+// returned. v2 distinguishes a pure READ from a DISCHARGE: an owner leaks if EVERY later mention is a
+// pure owner-getter READ (`o.get()/o.val()/o.ptr()/o.count()/o.clone()` — the receiver position of a
+// non-consuming accessor), and it is NEVER discharged. Soundness (ZERO false positives): ANY real
+// discharge necessarily NAMES the owner in a position OTHER than a getter-receiver — a release/drop
+// receiver (`o.release_in(a)`: `release_in`∉getters), a send/move-into-consuming-call (`o` as a
+// non-receiver arg), a return/escape (`o` bare, or wrapped `ok(o)`/`.Some(o)` with `o` as a
+// non-getter-arg), a struct-literal field / slice element (`o` in a MakeStruct/SliceLit), an affine
+// copy (`c := o`: `o` bare in a let value), a pointer-free (`o.addr()`: `addr`∉getters) — so ANY of
+// these is an IMPURE use that suppresses the flag. Passing `o` to a callee we cannot summarize is
+// likewise `o` in a non-getter-arg position → impure → not flagged (the interprocedural under-report).
+// The ONLY thing treated as a non-discharging read is `o` as the arg-0 receiver of a whitelisted getter
+// (which returns a borrow/scalar/fresh-clone and never moves `o`'s ownership out) — everything else,
+// including every shape not enumerated, defaults to impure/absent, so no discharge can be misread as a
+// pure read. DEFERRED to v3: may-leak (discharged on some exit paths, not all — v2 only flags owners
+// with NO discharge on ANY path, i.e. all-getter-reads); a per-callee "retains/returns param" summary
+// (would let non-getter reader calls count as pure without escape risk).
+is_pure_owner_getter = (fn: string_view) bool { fn.sx_named("get", "__get") || fn.sx_named("val", "__val") || fn.sx_named("ptr", "__ptr") || fn.sx_named("count", "__count") || fn.sx_named("clone", "__clone") }
+expr_is_var_named = (e: Ptr<Expr>, nm: string_view) bool {
+    load(e).match ({
+        .Var(v) => eq(v.name, nm),
+        _       => false,
+    })
+}
+// true iff `nm` appears in `e` in ANY position that is NOT the arg-0 receiver of a whitelisted getter.
+// A getter call with `nm` as its receiver contributes NOTHING (a pure read); every other occurrence —
+// including a getter's NON-receiver args — is impure. Total over var-bearing shapes; leaves → false.
+impure_use_in_expr = (nm: string_view, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Var(v)         => eq(v.name, nm),
+        .Bin(b)         => nm.impure_use_in_expr(b.lhs) || nm.impure_use_in_expr(b.rhs),
+        .Call(c)        => (is_pure_owner_getter(c.fn) && c.args.len >= 1 && c.args[0].addr().expr_is_var_named(nm)).match ({
+            true  => nm.impure_use_in_args_from1(c.args),
+            false => nm.name_read_in_args(c.args),
+        }),
+        .MethodCall(mc) => (is_pure_owner_getter(mc.method) && mc.recv.expr_is_var_named(nm)).match ({
+            true  => nm.impure_use_in_args(mc.args),
+            false => nm.name_read_in_expr(mc.recv) || nm.name_read_in_args(mc.args),
+        }),
+        .Cond(d)        => nm.impure_use_in_expr(d.c) || nm.impure_use_in_expr(d.t) || nm.impure_use_in_expr(d.e),
+        .Member(m)      => nm.impure_use_in_expr(m.obj),
+        .Arrow(ar)      => nm.impure_use_in_expr(ar.obj),
+        .MakeEnum(mk)   => nm.impure_use_in_expr(mk.payload),
+        .MakeStruct(s)  => nm.impure_use_in_inits(s.inits),
+        .Match(m)       => nm.impure_use_in_expr(m.subj) || nm.impure_use_in_arms(m.arms),
+        .SliceLit(sd)   => nm.impure_use_in_args(sd.items),
+        .Index(ix)      => nm.impure_use_in_expr(ix.seq) || nm.impure_use_in_expr(ix.idx),
+        .Loop(l)        => nm.impure_use_in_expr(l.seq) || nm.impure_use_in_body(l.body),
+        .Lambda(lm)     => nm.name_read_in_body(lm.body),
+        .Block(b)       => nm.impure_use_in_body(b.stmts),
+        _               => false,
+    })
+}
+impure_use_in_args = (nm: string_view, args: [Expr]) bool {
+    f := false
+    args.loop((h, i, ar) {
+        f = nm.impure_use_in_expr(ar.addr()).match ({ true => true, false => f })
+    })
+    f
+}
+// args EXCEPT index 0 (the getter receiver already accounted for as a pure read).
+impure_use_in_args_from1 = (nm: string_view, args: [Expr]) bool {
+    f := false
+    args.loop((h, i, ar) {
+        (i > 0).then({
+            f = nm.impure_use_in_expr(ar.addr()).match ({ true => true, false => f })
+        })
+    })
+    f
+}
+impure_use_in_inits = (nm: string_view, inits: [FieldInit]) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = nm.impure_use_in_expr(fi.value).match ({ true => true, false => f })
+    })
+    f
+}
+impure_use_in_arms = (nm: string_view, arms: [ArmData]) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        f = nm.impure_use_in_expr(ar.body).match ({ true => true, false => f })
+    })
+    f
+}
+impure_use_in_stmt = (nm: string_view, st: Stmt) bool {
+    st.match ({
+        .Let(l)      => nm.impure_use_in_expr(l.value),
+        .Assign(x)   => nm.impure_use_in_expr(x.target) || nm.impure_use_in_expr(x.value),
+        .Return(r)   => nm.impure_use_in_expr(r),
+        .If(f)       => nm.impure_use_in_expr(f.c) || nm.impure_use_in_body(f.then) || nm.impure_use_in_body(f.els),
+        .While(w)    => nm.impure_use_in_expr(w.c) || nm.impure_use_in_body(w.body),
+        .IndexSet(x) => nm.impure_use_in_expr(x.seq) || nm.impure_use_in_expr(x.idx) || nm.impure_use_in_expr(x.value),
+        .ExprStmt(e) => nm.impure_use_in_expr(e),
+    })
+}
+impure_use_in_body = (nm: string_view, body: [Stmt]) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = nm.impure_use_in_stmt(st).match ({ true => true, false => f })
+    })
+    f
+}
+// is `nm` used IMPURELY (discharged/escaped, not a pure getter read) in any statement strictly AFTER k?
+impure_use_after = (nm: string_view, body: [Stmt], k: i32) bool {
     f := false
     body.loop((h, i, st) {
         (i > k).then({
-            f = nm.name_read_in_stmt(st).match ({ true => true, false => f })
+            f = nm.impure_use_in_stmt(st).match ({ true => true, false => f })
         })
     })
     f
@@ -6596,8 +6700,10 @@ kv_leak_let = (a: MutPtr<Malloc>, env: Env, body: [Stmt], k: i32, l: LetData) i3
     })
 }
 // split out so the owner-typed arm's inner match does not nest inside kv_leak_let's outer match.
+// v2: an owner leaks unless it is DISCHARGED (impurely used) on some path — a pure getter-only read
+// (or no mention at all, the v1 never-named case) is a leak. impure_use_after == false ⇒ leak.
 nm_read_or_leak = (env: Env, body: [Stmt], k: i32, l: LetData) i32 {
-    l.name.name_read_after(body, k).match ({
+    l.name.impure_use_after(body, k).match ({
         true  => 0,
         false => l.pos.pos_or(load(l.value).expr_pos()),
     })
@@ -6650,7 +6756,7 @@ check_module_leak_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], s
                 source_offset: pos,
                 span_width: src.diagnostic_span_width(pos),
                 count: 1,
-                message: "owner created here is never released or moved before the function returns",
+                message: "owner created here is never released, moved, or returned before the function returns (a pure read like `o.get()` does not discharge it)",
                 hint: "release it (`o.release_in(a)` / `o.drop_in(a)`), move it into a consuming call, or return it",
             )
         },

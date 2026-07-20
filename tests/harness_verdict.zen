@@ -1790,6 +1790,30 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    n := o.get().id\n    n\n}",
+        should_pass: false,
+        kind: "leak",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    o.get().id\n}",
+        should_pass: false,
+        kind: "leak",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    n := o.get().id\n    o.release_in(a)\n    n\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\ntest* = () Own<Resource> {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    x := o.get().id\n    o\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nuse_it = (o: Own<Resource>) i32 { o.get().id }\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    n := use_it(o)\n    n\n}",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nuse_p = (o: Own<Resource>, a: MutPtr<Heap>) i32 {\n    n := o.get().id\n    o.release_in(a)\n    n\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nBox*: { o: Own<Resource> }\nf = (b: Box) i32 {\n    x := b.o\n    0\n}\ntest* = () i32 { 0 }",
         should_pass: true,
         kind: "",
@@ -2190,6 +2214,17 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     )])
+    // v2 leak: allocated, READ via a pure getter (`o.get()`), then forgotten — never released,
+    // moved, or returned. A pure read does NOT discharge the owner, so this LEAKS (v1 missed it,
+    // exempting any owner that was named again — even by a read).
+    // v2 leak: read via a getter in TRAILING (return) position — the returned value is the getter's
+    // scalar result, NOT the owner, so the owner still leaks.
+    // NOT a leak: read via a getter, THEN released — the release discharges it.
+    // NOT a leak: read via a getter, THEN the owner ITSELF is returned (escapes) — discharged.
+    // NOT flagged (conservative under-report): the owner is passed BY VALUE to a callee we do not
+    // prove non-retaining — `o` in a non-getter-arg position is an impure use, so v2 stays silent.
+    // NOT a leak: a PARAM owner (the caller owns it) read via a getter then released — never a
+    // candidate (only fresh top-level productions are), and released anyway.
     // field-aware escape: a slice literal element carries a stack-local address (re-census #1 gap).
     // UFCS auto-ref: value Rng where next expects MutPtr<Rng> — rewrite to addr(r).
     // no over-accept: temp receiver seed(1).next() stays rejected (not an lvalue).
