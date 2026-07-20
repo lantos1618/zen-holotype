@@ -927,6 +927,36 @@ reject_match = (a: MutPtr<Malloc>, next: i32) PExpr {
         next: next,
     )
 }
+// A best-effort source position for the match SUBJECT, so a non-enum `.match` reject can carry a
+// caret "at the match" (mirrors the enum path's subject caret). Bottoms out at the subject Var.
+match_subj_pos = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Var(v)    => v.pos,
+        .Bin(b)    => b.lhs.match_subj_pos(),
+        .Member(m) => m.obj.match_subj_pos(),
+        .Index(ix) => ix.seq.match_subj_pos(),
+        .Call(c)   => c.pos,
+        _          => 0,
+    })
+}
+// A literal-scalar `.match` with NO `_` wildcard is non-exhaustive: the value domain is unbounded, so
+// no finite set of literal labels covers every case. Distinct sentinel (`__nonexhaustive_lit`) carrying
+// the subject position — the validator maps it to a POSITIONED error[exhaustiveness], never undefined-name.
+reject_exhaust = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
+    PExpr(
+        expr: a.enode(call_at("__nonexhaustive_lit", a.no_args(), pos)),
+        next: next,
+    )
+}
+// A boolean `.match` arm labelled with a non-boolean literal (`true => 1, 0 => 2`) is a label-TYPE
+// error. Distinct sentinel (`__badmatchlabel`) carrying the offending LABEL's position — the validator
+// maps it to a POSITIONED error[match-label] with a caret on the bad label, never undefined-name.
+reject_label = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
+    PExpr(
+        expr: a.enode(call_at("__badmatchlabel", a.no_args(), pos)),
+        next: next,
+    )
+}
 // Shared `=> body` parse step for bool/literal/variant arm walkers.
 arm_rhs = (a: MutPtr<Malloc>, src: string_view, pos: i32, bare_ok: bool) PExpr {
     nx := src.scan(pos)
@@ -1013,7 +1043,10 @@ bool_close = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, a0: BoolArmEnd, 
                 next: close.next,
             ),
         }),
-        false => a.reject_match(close.next),
+        false => a1.ok.match ({
+            true  => a.reject_match(close.next),
+            false => a.reject_label(close.next, a1.lab.start),
+        }),
     })
 }
 // Literal match lowers to nested equality conditionals.
@@ -1034,7 +1067,7 @@ parse_lit_first = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32) P
     arm := a.parse_lit_arm(src, subj, pos)
     after := src.scan(arm.next)
     src.is_rbrace(after.tok).match ({
-        true  => a.reject_match(after.next),
+        true  => a.reject_exhaust(after.next, subj.expr.match_subj_pos()),
         false => a.parse_lit_after(src, subj, arm, after),
     })
 }
@@ -1055,7 +1088,7 @@ parse_lit_after = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, arm: LitArm
                     expr: arm.body,
                     next: after.next,
                 ),
-                false => a.reject_match(after.next),
+                false => a.reject_exhaust(after.next, subj.expr.match_subj_pos()),
             }),
             false => src.is_comma(after.tok).match ({
                 true  => a.lit_arm_more(src, subj, arm, after),
@@ -1076,7 +1109,7 @@ lit_arm_more = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, arm: LitArmEnd
                 expr: arm.body,
                 next: nx.next,
             ),
-            false => a.reject_match(nx.next),
+            false => a.reject_exhaust(nx.next, subj.expr.match_subj_pos()),
         }),
         false => a.cons_lit_arm(src, subj, arm, after),
     })
