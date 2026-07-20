@@ -461,6 +461,11 @@ harness_build_run* = () i32 {
         want_out: "",
         check_out: false,
     ), FixtureCase(
+        path: "tests/fixtures/zen/parser_rejects_misordered_generic.zen",
+        want_exit: "0",
+        want_out: "",
+        check_out: false,
+    ), FixtureCase(
         path: "tests/fixtures/zen/return_value_match_arm.zen",
         want_exit: "61",
         want_out: "",
@@ -2056,7 +2061,13 @@ harness_build_run* = () i32 {
     ), ShellCase(
         name: "cache_source_edit_invalidates",
         cmd: "rm -rf $ZT/zcc3 && printf 'main = () i32 { 41 }\\n' > $ZT/zcc3.zen && ZENC_CACHE_DIR=$ZT/zcc3 ./zenc build $ZT/zcc3.zen -o $ZT/zcc3a 2>/dev/null && printf 'main = () i32 { 42 }\\n' > $ZT/zcc3_other.zen && ZENC_NO_CACHE=1 ./zenc build $ZT/zcc3_other.zen -o $ZT/zcc3_other_bin 2>/dev/null && for f in $ZT/zcc3/bin_*; do cp $ZT/zcc3_other_bin $f; done && printf '// comment changes content hash\\n' >> $ZT/zcc3.zen && ZENC_CACHE_DIR=$ZT/zcc3 ./zenc build $ZT/zcc3.zen -o $ZT/zcc3b 2>/dev/null && { $ZT/zcc3b; test \"$?\" = 41; } && test \"$(ls $ZT/zcc3 | grep -c '^bin_')\" = 2",
+    ), ShellCase(
+        name: "cache_path_invocation_warms",
+        cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zenc $ZT/zpcbin/zenc && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zenc check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zenc check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
     )])
+    // A PATH-installed `zenc` (invoked bare, so argv[0] is an unopenable relative `zenc`) must STILL
+    // cache: cache_self reads /proc/self/exe for the compiler-identity stamp, so the key is non-empty
+    // and an entry is written. Before the fix the stamp was empty and no `check_` entry ever appeared.
     // c_library end-to-end: build+run the libm demo (cbrt 27 → 3, hypot 3 4 → 5 fold into exit 3)
     // and pin the generated module's shape (foreign decls + the opaque-handle struct).
     // use() is what grants: without it the genmod id doesn't resolve at all (even though the

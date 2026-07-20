@@ -2924,6 +2924,7 @@ KVBREAK = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase
 KMAINPARAMS = () i32 { 30 }    // `main` declared with parameters — the OS entry calls zen_main() with none, so they'd read garbage
 KARMVOID = () i32 { 31 }    // a value-consumed match/cond arm that yields no value and does not diverge
 KBADBIND = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) — a value global must use `:=` (the parser's __bad_binding sentinel)
+KMISGEN = () i32 { 44 }    // a misordered generic-decl head `Name<T>*:` (type params before the `*`); canonical is `Name*<T>:` (the parser's __misordered_generic sentinel)
 KUNREACHABLEARM = () i32 { 37 }    // a match arm after a wildcard `_` arm can never fire (the emitter drops it)
 KMETHODNOTFOUND = () i32 { 38 }    // an undefined CALL whose first argument is a concrete struct/enum receiver: reads as `recv.method()` UFCS with no such method (and no free function of that name) — distinct from a bare undefined name
 KBOOLARM = () i32 { 39 }    // a bool `.match` omits true/false (or `_`); use an explicit arm or `.then` for a one-way effect
@@ -3308,11 +3309,18 @@ diag_info = (code: i32) DiagInfo {
                                                                                                                                                             message: "foreign declaration uses a type with no C ABI shape",
                                                                                                                                                             hint: "a bodyless (foreign) declaration is a raw C prototype; use fixed-width integers, f32/f64, bool, string_view (const char*), RawPtr<T>/Ptr<T>/MutPtr<T>, non-capturing fn pointers, or structs of those — pass buffers through the RawPtr<T> floor (pointer + length)",
                                                                                                                                                         ),
-                                                                                                                                                        false => DiagInfo(
-                                                                                                                                                            kind: "type",
-                                                                                                                                                            message: "type error",
-                                                                                                                                                            hint: "",
-                                                                                                                                                        ),
+                                                                                                                                                        false => (code == 44).match ({
+                                                                                                                                                            true  => DiagInfo(
+                                                                                                                                                                kind: "parse",
+                                                                                                                                                                message: "generic type parameters must come before the `*` export marker",
+                                                                                                                                                                hint: "write the type parameters after the name's `*`: `Box*<T>:` (e.g. `Result*<T, E>:`)",
+                                                                                                                                                            ),
+                                                                                                                                                            false => DiagInfo(
+                                                                                                                                                                kind: "type",
+                                                                                                                                                                message: "type error",
+                                                                                                                                                                hint: "",
+                                                                                                                                                            ),
+                                                                                                                                                        }),
                                                                                                                                                     }),
                                                                                                                                                 }),
                                                                                                                                             }),
@@ -6097,11 +6105,19 @@ kparse_kind = (init: Ptr<Expr>) i32 {
 }
 // the `__bad_binding` sentinel: a malformed top-level `=` binding, caret at its RHS offset (always ≥ 0).
 kbadbind_kind = (init: Ptr<Expr>) i32 { KBADBIND().kv_at(init.kparse_off()) }
+// the `__misordered_generic` sentinel: a `Name<T>*:` head, caret at the `<` offset (always ≥ 0).
+kmisgen_kind = (init: Ptr<Expr>) i32 { KMISGEN().kv_at(init.kparse_off()) }
 // packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
 parse_sentinel_kind = (nm: string_view, init: Ptr<Expr>) i32 {
     eq(nm, "__syntax_error").match ({
         true  => init.kparse_kind(),
-        false => eq(nm, "__bad_binding").match ({ true => init.kbadbind_kind(), false => 0 }),
+        false => eq(nm, "__bad_binding").match ({
+            true  => init.kbadbind_kind(),
+            false => eq(nm, "__misordered_generic").match ({
+                true  => init.kmisgen_kind(),
+                false => 0,
+            }),
+        }),
     })
 }
 check_module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {

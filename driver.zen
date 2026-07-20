@@ -341,14 +341,20 @@ fnv_flags = (h: i64, mp: MutPtr<Malloc>, s: string_view) i64 {
     v: [u8] := s.view()
     mp.fnv_flag_files(h.fnv_str(s), v, 0)
 }
-// the compiler's own identity: the hash of the running zenc binary (argv[0]). A rebuilt zenc — new
-// checker, new codegen, new zenrt.c, all compiled in — yields a new stamp, so an old binary's entries
-// can never be replayed by a new one. An unreadable argv[0] yields 0 and the probe DISABLES the
-// cache for the run (empty key). Read in explicit-length chunks and fold as [u8]: an ELF
-// binary has a NUL at byte 5, so any strlen-based view (contents_in -> .view()) would hash only the
-// first ~4 bytes and stamp EVERY build identically — stale replays across rebuilt compilers.
+// the compiler's own identity: the hash of the running zenc binary. A rebuilt zenc — new checker, new
+// codegen, new zenrt.c, all compiled in — yields a new stamp, so an old binary's entries can never be
+// replayed by a new one. The identity SOURCE is `/proc/self/exe` (Linux): the kernel resolves it to the
+// real binary regardless of how the process was launched, so a PATH-installed `zenc` (whose argv[0] is a
+// bare, unreadable `zenc`) still stamps and thus still caches. Falls back to argv[0] when /proc is absent
+// (non-Linux), then to 0 — an unavailable stamp DISABLES the cache for the run (empty key). Read in
+// explicit-length chunks and fold as [u8]: an ELF binary has a NUL at byte 5, so any strlen-based view
+// (contents_in -> .view()) would hash only the first ~4 bytes and stamp EVERY build identically.
+self_exe_fd = () i32 {
+    fd := "/proc/self/exe".open(O_RDONLY, 0)
+    (fd < 0).match ({ true => arg(0).open(O_RDONLY, 0), false => fd })
+}
 cache_self = (mp: MutPtr<Malloc>) i64 {
-    fd := arg(0).open(O_RDONLY, 0)
+    fd := self_exe_fd()
     (fd < 0).match ({
         true  => 0,
         false => {
@@ -419,8 +425,9 @@ cache_walk_edges = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view,
 }
 // the on-disk entry for one (kind, program) pair: <dir>/<kind>_<16 hex digits>.
 cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: string_view, src: string_view, ccflags: string_view, links: string_view, target: string_view) string_view {
-    // An unreadable argv[0] means the compiler-identity stamp is unavailable; a shared degenerate
-    // stamp would let a REBUILT compiler replay a stale entry. Empty key = cache disabled for this run.
+    // An unreadable binary (neither /proc/self/exe nor argv[0] opens) means the compiler-identity stamp
+    // is unavailable; a shared degenerate stamp would let a REBUILT compiler replay a stale entry. Empty
+    // key = cache disabled for this run.
     self := mp.cache_self()
     (self == 0).then({
         return ""

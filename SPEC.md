@@ -48,8 +48,8 @@ foreign = (n: i64) RawPtr<u8>              // bodyless C extern
 counter := 0                               // mutable module global
 Point*: { x: i32, y: i32 }                 // struct
 Shape*: Circle(i32) | Square(i32) | Dot    // enum
-Box<T>*: { value: T }                      // generic struct
-Opt<T>*: Some(T) | None                    // generic enum
+Box*<T>: { value: T }                      // generic struct
+Opt*<T>: Some(T) | None                    // generic enum
 ```
 
 `*` is a glued visibility marker on the declaration name. The checked module loader rejects
@@ -351,7 +351,7 @@ string family described above.
 Data structs can also own inherent methods inside their record body:
 
 ```zen
-Box<T>*: {
+Box*<T>: {
     value: T
     get = (b: Box<T>) T { b.value }
 }
@@ -366,7 +366,7 @@ Generic structs and enums are monomorphized per concrete use. Generic functions
 infer type arguments from call arguments and expected types where available.
 
 ```zen
-Box<T>*: { value: T }
+Box*<T>: { value: T }
 wrap<T> = (x: T) Box<T> { Box<T>(value: x) }
 ```
 
