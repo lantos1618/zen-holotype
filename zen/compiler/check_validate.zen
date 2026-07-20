@@ -517,6 +517,13 @@ trait_recv_missing = (env: Env, c: CallData) bool {
     })
 }
 is_forbidden_raw_call = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }
+// The parser plants POSITIONED sentinel calls for non-enum `.match` forms it cannot lower: a
+// literal-scalar match with no `_` wildcard (`__nonexhaustive_lit`, a non-exhaustiveness error) and a
+// boolean match arm labelled with a non-boolean literal (`__badmatchlabel`, a label-type error). Both
+// carry the relevant source position in `c.pos`, so the classifier reports a POSITIONED, honestly-named
+// diagnostic instead of the old spurious position-less undefined-name.
+is_nonexhaust_lit_call = (c: CallData) bool { eq(c.fn, "__nonexhaustive_lit") }
+is_badmatchlabel_call = (c: CallData) bool { eq(c.fn, "__badmatchlabel") }
 // A fn's OWN params and locals SHADOW same-named top-level names in its body: a call through a
 // locally-bound name (e.g. a closure param `f` while a top-level `f` exists) must NEVER be judged
 // against the top-level fn / intrinsic / import — the emitted C scopes the local as the call target.
@@ -2931,6 +2938,8 @@ KBOOLARM = () i32 { 39 }    // a bool `.match` omits true/false (or `_`); use an
 KNOIF = () i32 { 40 }    // source contains the forbidden `if` token; Zen uses bool `.match` for conditional control flow
 KTARGARITY = () i32 { 41 }    // an explicit `<…>` type-arg list whose COUNT ≠ the declared type-parameter count
 KFFITYPE = () i32 { 42 }    // a FOREIGN (bodyless) declaration whose signature uses a type outside the FFI-safe set
+KLITEXHAUST = () i32 { 45 }    // a literal-scalar `.match` (i32/…) with no `_` wildcard — the value domain is unbounded, so it is non-exhaustive. Kind label is "exhaustiveness" (same family as KEXHAUST); the parser plants a positioned `__nonexhaustive_lit` sentinel the call-classifier maps here
+KMATCHLABEL = () i32 { 46 }    // a boolean `.match` arm labelled with a non-boolean literal (`true => 1, 0 => 2`) — a label-TYPE error, caret on the bad label (the parser's positioned `__badmatchlabel` sentinel)
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
@@ -3315,11 +3324,25 @@ diag_info = (code: i32) DiagInfo {
                                                                                                                                                                 message: "generic type parameters must come before the `*` export marker",
                                                                                                                                                                 hint: "write the type parameters after the name's `*`: `Box*<T>:` (e.g. `Result*<T, E>:`)",
                                                                                                                                                             ),
-                                                                                                                                                            false => DiagInfo(
-                                                                                                                                                                kind: "type",
-                                                                                                                                                                message: "type error",
-                                                                                                                                                                hint: "",
-                                                                                                                                                            ),
+                                                                                                                                                            false => (code == 45).match ({
+                                                                                                                                                                true  => DiagInfo(
+                                                                                                                                                                    kind: "exhaustiveness",
+                                                                                                                                                                    message: "match does not cover every case; add a `_` arm",
+                                                                                                                                                                    hint: "a scalar `.match` over literal labels must end with a `_` arm — its value domain is unbounded, so no finite set of literal labels is exhaustive",
+                                                                                                                                                                ),
+                                                                                                                                                                false => (code == 46).match ({
+                                                                                                                                                                    true  => DiagInfo(
+                                                                                                                                                                        kind: "match-label",
+                                                                                                                                                                        message: "match arm label is not a `bool`; a boolean `.match` takes `true`, `false`, or `_`",
+                                                                                                                                                                        hint: "replace the label with `true`, `false`, or a `_` wildcard",
+                                                                                                                                                                    ),
+                                                                                                                                                                    false => DiagInfo(
+                                                                                                                                                                        kind: "type",
+                                                                                                                                                                        message: "type error",
+                                                                                                                                                                        hint: "",
+                                                                                                                                                                    ),
+                                                                                                                                                                }),
+                                                                                                                                                            }),
                                                                                                                                                         }),
                                                                                                                                                     }),
                                                                                                                                                 }),
@@ -3672,42 +3695,48 @@ recv_typed_miss = (env: Env, c: CallData) bool {
     })
 }
 kv_check_call_kind = (env: Env, c: CallData) i32 {
-    c.is_forbidden_raw_call().match ({
-        true  => KUNDEFINED(),
-        false => env.is_unresolved_trait_call(c).match ({
-            true  => 0,
-            false => env.shadows_toplevel(c.fn).match ({
-                true  => env.var_or_global(c.fn).is_fnt().match ({
-                    true  => env.kv_fnval_call_kind(c),
-                    false => env.shadow_not_callable(c.fn).match ({
-                        true  => KNOTCALLABLE(),
-                        false => 0,
-                    }),
-                }),
-                false => env.env_known_fn(c.fn).match ({
-                    true  => env.recv_typed_miss(c).match ({
-                        true  => KMETHODNOTFOUND(),
-                        false => env.kv_call_errs_kind(c),
-                    }),
-                    false => c.fn.is_intrinsic().match ({
-                        true  => (c.args.len == c.fn.intrinsic_arity()).match ({
-                            true  => 0,
-                            false => KARITY(),
-                        }),
-                        false => (env.env_imported(c.fn) || env.env_trait_method(c.fn)).match ({
-                            true  => env.trait_recv_missing(c).match ({
-                                true  => kv_at(KTRAITBOUND(), c.pos),
+    c.is_nonexhaust_lit_call().match ({
+        true  => kv_at(KLITEXHAUST(), c.pos),
+        false => c.is_badmatchlabel_call().match ({
+            true  => kv_at(KMATCHLABEL(), c.pos),
+            false => c.is_forbidden_raw_call().match ({
+                true  => KUNDEFINED(),
+                false => env.is_unresolved_trait_call(c).match ({
+                    true  => 0,
+                    false => env.shadows_toplevel(c.fn).match ({
+                        true  => env.var_or_global(c.fn).is_fnt().match ({
+                            true  => env.kv_fnval_call_kind(c),
+                            false => env.shadow_not_callable(c.fn).match ({
+                                true  => KNOTCALLABLE(),
                                 false => 0,
                             }),
-                            false => env.var_or_global(c.fn).is_fnt().match ({
-                                true  => env.kv_fnval_call_kind(c),
-                                false => env.is_bound(c.fn).match ({
-                                    true  => KNOTCALLABLE(),
-                                    false => (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({
-                                        true  => KTRAITBOUND(),
-                                        false => env.undef_is_method(c).match ({
-                                            true  => KMETHODNOTFOUND(),
-                                            false => KUNDEFINED(),
+                        }),
+                        false => env.env_known_fn(c.fn).match ({
+                            true  => env.recv_typed_miss(c).match ({
+                                true  => KMETHODNOTFOUND(),
+                                false => env.kv_call_errs_kind(c),
+                            }),
+                            false => c.fn.is_intrinsic().match ({
+                                true  => (c.args.len == c.fn.intrinsic_arity()).match ({
+                                    true  => 0,
+                                    false => KARITY(),
+                                }),
+                                false => (env.env_imported(c.fn) || env.env_trait_method(c.fn)).match ({
+                                    true  => env.trait_recv_missing(c).match ({
+                                        true  => kv_at(KTRAITBOUND(), c.pos),
+                                        false => 0,
+                                    }),
+                                    false => env.var_or_global(c.fn).is_fnt().match ({
+                                        true  => env.kv_fnval_call_kind(c),
+                                        false => env.is_bound(c.fn).match ({
+                                            true  => KNOTCALLABLE(),
+                                            false => (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({
+                                                true  => KTRAITBOUND(),
+                                                false => env.undef_is_method(c).match ({
+                                                    true  => KMETHODNOTFOUND(),
+                                                    false => KUNDEFINED(),
+                                                }),
+                                            }),
                                         }),
                                     }),
                                 }),
