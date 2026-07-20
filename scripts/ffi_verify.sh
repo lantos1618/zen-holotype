@@ -59,6 +59,7 @@ open	abi	fcntl.h
 read	abi	unistd.h
 write	abi	unistd.h
 close	abi	unistd.h
+isatty	abi	unistd.h
 lseek	abi	unistd.h
 unlink	abi	unistd.h
 access	abi	unistd.h

@@ -2123,6 +2123,9 @@ harness_build_run* = () i32 {
         name: "bootstrap_compiles_zen",
         cmd: "printf '%s' 'sq* = (n: i32) i32 { n * n }' | ./zenc >$ZT/zbc.c 2>/dev/null && grep -Fq 'int32_t sq(int32_t n)' $ZT/zbc.c && { echo '#include <stdint.h>'; cat $ZT/zbc.c; echo 'int main(void){ return sq(7) == 49 ? 0 : 1; }'; } > $ZT/zbc_full.c && cc -std=gnu11 -w $ZT/zbc_full.c -o $ZT/zbc_bin 2>/dev/null && $ZT/zbc_bin",
     ), ShellCase(
+        name: "bare_invocation_tty_help_vs_pipe_filter",
+        cmd: "script -qec './zenc' /dev/null </dev/null >$ZT/zbare_tty.txt 2>&1 && grep -Fq 'usage: zenc' $ZT/zbare_tty.txt && printf 'main = () i32 { 0 }\\n' | ./zenc >$ZT/zbare_pipe.c 2>/dev/null && grep -Fq zslice $ZT/zbare_pipe.c",
+    ), ShellCase(
         name: "bootstrap_run_bool_true_first",
         cmd: "printf 'f* = (n: i32) i32 { (n < 5).match({ true => 1, false => 0 }) }' | ./zenc >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return f(3)==1 && f(9)==0 ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin",
     ), ShellCase(
@@ -2186,5 +2189,8 @@ harness_build_run* = () i32 {
         name: "build_self_bad_srcroot",
         cmd: "./zenc --build-self $ZT/zbs_x.c /nonexistent/zzz >$ZT/zbs2.txt 2>&1; test \"$?\" = 1 && grep -Fq 'cannot open' $ZT/zbs2.txt",
     )])
+    // Bare `zenc` (no subcommand, no file): on an interactive TTY it prints help and exits 0 instead
+    // of silently blocking on a stdin read; when stdin is a PIPE it still filters source -> C. `script`
+    // (util-linux) allocates a pty so isatty(0) is true for the help branch.
     ex + so + ex2 + so2 + exm + vd + r1 + r2 + vd2 + dg + em + dc + sh + bs
 }
