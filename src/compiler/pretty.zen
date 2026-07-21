@@ -13,7 +13,8 @@
 { String } = std.text.string
 { view, is_empty, eq, starts_with } = std.text.str
 { Malloc } = std.mem.alloc
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData, ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData, is_expr_null, tvoid, ptr_kw, sbyte, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData, ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData, is_expr_null, tvoid, ptr_kw, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ gstr_int } = compiler.astops
 { Comment } = compiler.lex
 { at } = std.text.bytes
 { ff_cond_inline, ff_cond_is_then, ff_cond_multiline, ff_cond_nested, ff_current_col, ff_expr, ff_fits_width, ff_recv, ff_then } = compiler.pretty_expr
@@ -261,39 +262,10 @@ ff_string = (a: MutPtr<Malloc>, cap: i64) String {
 }
 ff_append* = (s: String, a: MutPtr<Malloc>, t: string_view) String { s.gstr_append(a, t) }
 ff_push* = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
-// integer rendering, byte-only (mirrors genc_emit so this self-hosts)
-ffdigit = (d: i64) u8 { sbyte("0123456789", d) }
-// A `.Int` node with the top bit set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are
-// `0 - x` Bin nodes, never a negative `.Int` — so its exact bit pattern must print as UNSIGNED decimal
-// (`0xcbf29ce484222325` → `14695981039346656037`, not the wrong signed `-3750763034362895579`). The
-// i64→u64 assignment reinterprets the bits; u64 `/`,`%` render the value in its full unsigned range.
-ff_uint_nat = (s: String, a: MutPtr<Malloc>, n: u64) String {
-    (n < 10).match ({
-        true  => s.ff_push(a, ffdigit(to_i64(n))),
-        false => {
-            hs := s.ff_uint_nat(a, n / 10)
-            hs.ff_push(a, ffdigit(to_i64(n % 10)))
-        },
-    })
-}
-ff_int* = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n < 0).match ({
-        true  => {
-            u: u64 := n
-            s.ff_uint_nat(a, u)
-        },
-        false => s.ff_int_nat(a, n),
-    })
-}
-ff_int_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n < 10).match ({
-        true  => s.ff_push(a, ffdigit(n)),
-        false => {
-            hs := s.ff_int(a, n / 10)
-            hs.ff_push(a, ffdigit(n % 10))
-        },
-    })
-}
+// integer rendering is the shared gstr_int/gstr_uint (compiler.astops); a `.Int` node with the top bit
+// set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are `0 - x` Bin nodes, never a
+// negative `.Int` — so gstr_int reinterprets its exact bit pattern and prints UNSIGNED decimal
+// (`0xcbf29ce484222325` → `14695981039346656037`, not the wrong signed `-3750763034362895579`).
 // render a char-literal byte `n` back as a `'x'` literal (a `.Byte` AST node ONLY ever comes from a
 // char literal, so this round-trips `'a'` → `'a'` instead of leaking the raw byte value `97`). Common
 // escapes are re-escaped; a printable ASCII byte prints bare; anything else falls back to the integer
@@ -319,7 +291,7 @@ ff_char* = (s: String, a: MutPtr<Malloc>, n: i32) String {
     })    // single quote
     (n >= 32 && n <= 126).match ({
         true  => s.ff_append(a, "'").ff_push(a, to_u8(n)).ff_append(a, "'"),
-        false => s.ff_int(a, n),
+        false => s.gstr_int(a, n),
     })
 }
 // n levels of 4-space indentation

@@ -2,47 +2,14 @@
 // Extracted from compiler.genc_emit. Byte-only so this self-hosts (no std runtime beyond gstr append/push).
 { String } = std.text.string
 { sbyte, gstr_push, gstr_append } = compiler.genc
+{ dec_digit } = compiler.astops
 { Malloc } = std.mem.alloc
-// Integer rendering stays byte-only so this self-hosts.
-digit = (d: i64) u8 { sbyte("0123456789", d) }
-// A `.Int` node with the top bit set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are
-// `0 - x` Bin nodes, never a negative `.Int` — so its exact bit pattern renders as UNSIGNED decimal
-// (the `.Int` literal site suffixes it `ULL`). The i64→u64 assignment reinterprets the bits; u64 `/`,`%`
-// walk the value in its full unsigned range (this also renders INT64_MIN correctly, as `0 - <2^63>`).
-gen_uint_nat = (s: String, alloc: MutPtr<Malloc>, n: u64) String {
-    (n < 10).match ({
-        true  => s.gstr_push(alloc, digit(to_i64(n))),
-        false => {
-            // hoist the recursive call: a <call>.gstr_push receiver is re-evaluated by gstr_reserve (UAF)
-            hs := s.gen_uint_nat(alloc, n / 10)
-            hs.gstr_push(alloc, digit(to_i64(n % 10)))
-        },
-    })
-}
-gen_int* = (s: String, alloc: MutPtr<Malloc>, n: i64) String {
-    (n < 0).match ({
-        true  => {
-            u: u64 := n
-            s.gen_uint_nat(alloc, u)
-        },
-        false => s.gen_int_nat(alloc, n),
-    })
-}
-gen_int_nat = (s: String, alloc: MutPtr<Malloc>, n: i64) String {
-    (n < 10).match ({
-        true  => s.gstr_push(alloc, digit(n)),
-        false => {
-            hs := s.gen_int(alloc, n / 10)
-            hs.gstr_push(alloc, digit(n % 10))
-        },
-    })
-}
 // A non-printable byte as a 3-digit octal C escape `\ooo`. Octal (not `\xNN`) is used deliberately:
 // hex escapes are greedy in C and would swallow a following literal hex digit, whereas an octal escape
-// is capped at 3 digits, so any byte followed by any byte round-trips. digit() only sees 0..7 here.
+// is capped at 3 digits, so any byte followed by any byte round-trips. dec_digit() only sees 0..7 here.
 gen_oct_byte = (s: String, alloc: MutPtr<Malloc>, b: u8) String {
     n := b.to_i64()
-    s.gstr_push(alloc, '\\').gstr_push(alloc, digit(n / 64)).gstr_push(alloc, digit(n / 8 % 8)).gstr_push(alloc, digit(n % 8))
+    s.gstr_push(alloc, '\\').gstr_push(alloc, dec_digit(n / 64)).gstr_push(alloc, dec_digit(n / 8 % 8)).gstr_push(alloc, dec_digit(n % 8))
 }
 // escape one byte for a C string literal. `"`/`\` are quoted; the common control bytes get their short
 // escapes (\n \r \t); printable ASCII (0x20..0x7E) passes through; every other byte — CR was the bug

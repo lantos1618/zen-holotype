@@ -1,5 +1,6 @@
 // compiler.passes.orreturn — or_return lowering sub-pass extracted from compiler.check.
-{ cbuf, ArmData, BinData, CallData, Expr, FieldInit, MakeStructData, Stmt, arrow_at, bin_at, cond_oa, eindex, eloop, finit, gstr_append, gstr_finish, gstr_push, gstr_string, member_at, mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at, sif, slett_at, slit, sret, tvoid, vref_at } = compiler.genc
+{ cbuf, ArmData, BinData, CallData, Expr, FieldInit, MakeStructData, Stmt, arrow_at, bin_at, cond_oa, eindex, eloop, finit, gstr_append, gstr_finish, gstr_string, member_at, mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at, sif, slett_at, slit, sret, tvoid, vref_at } = compiler.genc
+{ gstr_int } = compiler.astops
 { recall } = compiler.check
 { is_or_return_call, is_orx_hoist, is_shortcircuit } = compiler.check_resolve
 { remk_match } = compiler.check_desugar
@@ -67,21 +68,12 @@ orx_recv_count = (e: Ptr<Expr>) i32 {
 // A hoist temp name: `_orx_<slot>_<pos>`. The slot (the running hoist index of the enclosing scope)
 // disambiguates same-position synthesized calls; the source pos disambiguates statements (slots
 // restart per statement, but two statements never share a user-written call position).
-orx_digits = (a: MutPtr<Malloc>, s: String, n: i64) String {
-    (n < 10).match ({
-        true  => s.gstr_push(a, ('0' + n).to_u8()),
-        false => {
-            hs := a.orx_digits(s, n / 10)    // hoist the recursive call: a <call>.gstr_push receiver is re-evaluated by gstr_reserve
-            hs.gstr_push(a, ('0' + n % 10).to_u8())
-        },
-    })
-}
 orx_name = (a: MutPtr<Malloc>, slot: i32, pos: i32) string_view {
     s := a.gstr_string(48)
     s = s.gstr_append(a, "_orx_")
-    s = a.orx_digits(s, slot.to_i64())
+    s = s.gstr_int(a, slot.to_i64())
     s = s.gstr_append(a, "_")
-    s = a.orx_digits(s, pos.to_i64())
+    s = s.gstr_int(a, pos.to_i64())
     s.gstr_finish(a)
 }
 // The rewrite walk mirrors orx_count exactly: it returns the rebuilt expression plus the running

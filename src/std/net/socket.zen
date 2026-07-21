@@ -22,8 +22,8 @@
 //   c.send_str("ping").expect("send")
 //   msg := l.accept_conn().expect("accept").recv(&a, 64).expect("recv")   // "ping"
 { Allocator, try_acquire } = std.mem.alloc
-{ Result, IoError, ok, err } = std.core.result
-{ zeroed, release } = std.mem.raw
+{ Result, IoError, ok, err, errno_or } = std.core.result
+{ with_scratch } = std.mem.raw
 { eq, view } = std.text.str
 { read, close } = std.c.libc
 { write_all } = std.io.file    // the ONE fd write-all loop (short-write retry); net maps any non-full write to .Eof
@@ -123,10 +123,11 @@ fill_sockaddr = (cell: RawPtr<u8>, host: string_view, port: i32) bool {
 // ── listener ─────────────────────────────────────────────────────────────────────────────────────────
 // set SO_REUSEADDR so a restarted server can rebind a port still lingering in TIME_WAIT.
 set_reuse = (fd: i32) void {
-    one := zeroed(4)
-    one.store(1)    // a 4-byte int with value 1 (little-endian: [1,0,0,0])
-    fd.setsockopt(SOL_SOCKET, SO_REUSEADDR, one, 4)
-    one.release()
+    with_scratch(4, (one) {
+        one.store(1)    // a 4-byte int with value 1 (little-endian: [1,0,0,0])
+        fd.setsockopt(SOL_SOCKET, SO_REUSEADDR, one, 4)
+    })
+    { }
 }
 // open a listening TCP socket bound to `host:port` (port 0 => kernel-chosen ephemeral). `host` is an
 // IPv4 dotted-quad or "localhost"; "0.0.0.0" binds every interface. Returns a ready `TcpListener` whose
@@ -137,61 +138,58 @@ serve* = (host: string_view, port: i32) Result<TcpListener, IoError> {
         true  => err(IoError.Errno(fd)),
         false => {
             fd.set_reuse()
-            cell := zeroed(SOCKADDR_LEN)
-            res: Result<TcpListener, IoError> := fill_sockaddr(cell, host, port).match ({
-                true  => {
-                    b := fd.bind(cell, to_i32(SOCKADDR_LEN))
-                    cell.release()
-                    (b < 0).match ({
-                        true  => {
-                            fd.close()
-                            err(IoError.Errno(b))
-                        },
-                        false => {
-                            lr := fd.listen(BACKLOG)
-                            (lr < 0).match ({
-                                true  => {
-                                    fd.close()
-                                    err(IoError.Errno(lr))
-                                },
-                                false => ok(TcpListener(fd: fd)),
-                            })
-                        },
-                    })
-                },
-                false => {
-                    cell.release()
-                    fd.close()
-                    err(IoError.NotFound)
-                },
+            with_scratch(SOCKADDR_LEN, (cell) {
+                fill_sockaddr(cell, host, port).match ({
+                    true  => {
+                        b := fd.bind(cell, to_i32(SOCKADDR_LEN))
+                        (b < 0).match ({
+                            true  => {
+                                fd.close()
+                                err(IoError.Errno(b))
+                            },
+                            false => {
+                                lr := fd.listen(BACKLOG)
+                                (lr < 0).match ({
+                                    true  => {
+                                        fd.close()
+                                        err(IoError.Errno(lr))
+                                    },
+                                    false => ok(TcpListener(fd: fd)),
+                                })
+                            },
+                        })
+                    },
+                    false => {
+                        fd.close()
+                        err(IoError.NotFound)
+                    },
+                })
             })
-            res
         },
     })
     out
 }
 // the ephemeral (or fixed) port the listener is bound to, read back via getsockname; 0 on failure.
 local_port* = (l: TcpListener) i32 {
-    cell := zeroed(SOCKADDR_LEN)
-    lenc := zeroed(8)
-    store_i64(lenc, SOCKADDR_LEN)    // socklen_t in/out; low 4 bytes = 16
-    r := l.fd.getsockname(cell, lenc)
-    p := (r < 0).match ({
-        true  => 0,
-        false => {
-            hi := to_i64(cell.offset(2).load())    // sin_port is network order (big-endian)
-            lo := to_i64(cell.offset(3).load())
-            to_i32(hi * 256 + lo)
-        },
+    with_scratch(8, (lenc) {
+        with_scratch(SOCKADDR_LEN, (cell) {
+            store_i64(lenc, SOCKADDR_LEN)    // socklen_t in/out; low 4 bytes = 16
+            r := l.fd.getsockname(cell, lenc)
+            (r < 0).match ({
+                true  => 0,
+                false => {
+                    hi := to_i64(cell.offset(2).load())    // sin_port is network order (big-endian)
+                    lo := to_i64(cell.offset(3).load())
+                    to_i32(hi * 256 + lo)
+                },
+            })
+        })
     })
-    cell.release()
-    lenc.release()
-    p
 }
 // block until the next client connects; returns its `TcpConn` or the accept errno.
 accept_conn* = (l: TcpListener) Result<TcpConn, IoError> {
     fd := l.fd.accept(null_ptr(), null_ptr())
-    (fd < 0).match ({ true => err(IoError.Errno(fd)), false => ok(TcpConn(fd: fd)) })
+    errno_or(fd, TcpConn(fd: fd))
 }
 // stop listening (close the passive socket).
 close_listener* = (l: TcpListener) void { l.fd.close() }
@@ -203,26 +201,24 @@ dial* = (host: string_view, port: i32) Result<TcpConn, IoError> {
     out: Result<TcpConn, IoError> := (fd < 0).match ({
         true  => err(IoError.Errno(fd)),
         false => {
-            cell := zeroed(SOCKADDR_LEN)
-            res: Result<TcpConn, IoError> := fill_sockaddr(cell, host, port).match ({
-                true  => {
-                    r := fd.connect(cell, to_i32(SOCKADDR_LEN))
-                    cell.release()
-                    (r < 0).match ({
-                        true  => {
-                            fd.close()
-                            err(IoError.Errno(r))
-                        },
-                        false => ok(TcpConn(fd: fd)),
-                    })
-                },
-                false => {
-                    cell.release()
-                    fd.close()
-                    err(IoError.NotFound)
-                },
+            with_scratch(SOCKADDR_LEN, (cell) {
+                fill_sockaddr(cell, host, port).match ({
+                    true  => {
+                        r := fd.connect(cell, to_i32(SOCKADDR_LEN))
+                        (r < 0).match ({
+                            true  => {
+                                fd.close()
+                                err(IoError.Errno(r))
+                            },
+                            false => ok(TcpConn(fd: fd)),
+                        })
+                    },
+                    false => {
+                        fd.close()
+                        err(IoError.NotFound)
+                    },
+                })
             })
-            res
         },
     })
     out
@@ -231,7 +227,7 @@ dial* = (host: string_view, port: i32) Result<TcpConn, IoError> {
 // low-level read — no allocation, the caller sizes the buffer.
 recv_into* = (c: TcpConn, buf: RawPtr<u8>, n: i64) Result<i64, IoError> {
     r := c.fd.read(buf, n)
-    (r < 0).match ({ true => err(IoError.Errno(to_i32(r))), false => ok(r) })
+    errno_or(to_i32(r), r)
 }
 // read up to `n` bytes into a fresh allocator-owned NUL-terminated buffer, returning it as a `str`
 // of the bytes actually read (a single read() — one TCP segment; loop with recv_into for a full stream).

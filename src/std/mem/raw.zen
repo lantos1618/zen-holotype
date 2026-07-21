@@ -20,6 +20,17 @@ try_zeroed* = (n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(calloc(n, 1)) }
 copy* = (dst: RawPtr<u8>, src: RawPtr<u8>, n: i64) void { memcpy(dst, src, n) }
 // hand the block back to the allocator
 release* = (p: RawPtr<u8>) void { free(p) }
+// Scoped FFI scratch cell: allocate `n` zero-filled bytes, run `f` over them, ALWAYS release the cell,
+// and return `f`'s result. Collapses the leak-prone `c := zeroed(n); …; release(c); return r` shape
+// that struct-shaped syscalls (timespec, sockaddr, struct stat) repeat — release now fires on every
+// path through `f`, not once per manual return. `f` runs and completes within this scope (the cell is
+// freed the instant it returns), so it may capture freely; it just must not stash the cell for later.
+with_scratch*<T> = (n: i64, f: (RawPtr<u8>) T) T {
+    c := zeroed(n)
+    r := f(c)
+    release(c)
+    r
+}
 // a typed heap buffer of `n` T's, seeded at [0] — the TYPED replacement for the raw
 // `slice(alloc(n * sizeof(T)), n)` incantation, whose element type is unknowable (census #9: reads
 // through it emitted an invalid `(void*)` cast). The declared `[T]` return gives every later
