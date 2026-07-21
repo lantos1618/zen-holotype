@@ -1,0 +1,88 @@
+// compiler.astops — AST-node query traits, extracted from compiler.genc.
+// These predicates were free functions on Ty/Func/Decl/StructDecl (the AST node types defined
+// in compiler.genc). Grouping each into a trait IMPL'd on its receiver type (an out-of-module
+// impl: the types live in compiler.genc) lets cross-module callers dispatch `t.is_fnt()`,
+// `f.is_generic_fn()`, `d.is_template()`, `d.is_trait()` &c. by UFCS through the GLOBAL IMPL
+// INDEX — so callers need NEITHER the method names NOR the trait imported, and the long
+// `= compiler.genc` import lists simply shrink. Each method is emitted as a distinct mangled C
+// function (`impl_<Trait>_<Ty>_<m>`), so unlike same-named free functions they never collide in
+// the flat C namespace. Sibling methods call each other by UFCS (`f.is_generic_fn()`), routed the
+// same way. This file is imported by NO ONE (dispatch is via the impl index), which keeps it out
+// of any import cycle and avoids the dup-impl-in-cycle trap — so the impl blocks live here, never
+// in compiler.genc (which is imported by nearly everything).
+//
+// Only plain-named-value receivers are method-ified: the language does not support `.impl` on
+// pointer/slice receiver types, so genc's Ptr<Expr>/[Stmt] predicates (is_expr_null, blk_diverges,
+// stmts_diverge) necessarily stay free functions in compiler.genc.
+{ Ty, Func, Decl, StructDecl, Param } = compiler.genc
+// a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
+// (compiler.check splices it), never emitted as a C function — so genModule skips it.
+TyQuery*: {
+    is_fnt: (Self) bool,
+}
+Ty.impl(TyQuery, {
+    is_fnt = (t: Ty) bool {
+        t.match ({
+            .FnT(f) => true,
+            _       => false,
+        })
+    }
+})
+// has_fnt_param lives here (not in compiler.genc) because it calls the Ty::is_fnt trait method; keeping
+// it beside the impl means compiler.genc — imported by user programs (via std.internal.ast, std.io.c) —
+// carries NO reference to a method defined outside its own closure. It stays a free function (its
+// receiver `[Param]` is a slice type, which the language cannot carry a trait impl on).
+has_fnt_param* = (ps: [Param]) bool {
+    found := false
+    ps.loop((h, i, p) {
+        found = p.ty.is_fnt().match ({ true => true, false => found })
+    })
+    found
+}
+// a TEMPLATE: a fn inlined/monomorphized per call site — has an FnT param (a lambda to splice) or
+// type params (to substitute). It must have a BODY to inline; a BODYLESS fn (an extern like
+// makecontext, with an FnT param for a real C function-pointer arg) is a normal callable, NOT a
+// template to inline away.
+FuncQuery*: {
+    is_generic_fn: (Self) bool,
+}
+Func.impl(FuncQuery, {
+    is_generic_fn = (f: Func) bool { (f.params.has_fnt_param() || f.tparams.len > 0) && f.body.len > 0 }
+})
+// a TRAIT is written as a struct whose fields are method signatures (FnT types). It has no runtime
+// representation in the monomorphic/inline model — the impl methods are plain functions — so
+// genModule skips it, exactly like a template function. NOTE: a data struct holding a function-
+// VALUE field (a closure) is ALSO all-/some-FnT-shaped and indistinguishable here by shape alone;
+// the emit pipeline (genc_emit) disambiguates by USAGE — a constructed struct is real, a trait is
+// only impl'd, never constructed — via `struct_is_trait_emit`.
+StructDeclQuery*: {
+    struct_is_trait: (Self) bool,
+}
+StructDecl.impl(StructDeclQuery, {
+    struct_is_trait = (sd: StructDecl) bool {
+        found := false
+        sd.fields.loop((h, i, f) {
+            found = f.ty.is_fnt().match ({ true => true, false => found })
+        })
+        found
+    }
+})
+// is_template / is_trait classify a top-level Decl by its kind (template function or trait struct).
+DeclQuery*: {
+    is_template: (Self) bool,
+    is_trait: (Self) bool,
+}
+Decl.impl(DeclQuery, {
+    is_template = (d: Decl) bool {
+        d.match ({
+            .DFunc(f) => f.is_generic_fn(),
+            _         => false,
+        })
+    }
+    is_trait = (d: Decl) bool {
+        d.match ({
+            .DStruct(sd) => sd.struct_is_trait(),
+            _            => false,
+        })
+    }
+})
