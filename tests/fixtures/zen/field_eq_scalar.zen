@@ -1,0 +1,56 @@
+// Compile-time struct-field reflection, Phase 1: the `field_eq` intrinsic. A generic `field_eq<T>`
+// delegates to the intrinsic `x.field_eq(y)`, which the inliner (compiler.passes.subst) EXPANDS —
+// once the receiver's concrete type is known — into a per-field `==` fold:
+//   true && x.f0 == y.f0 && x.f1 == y.f1 && …
+// Scalar fields lower to a plain `==`; STRING fields ride the resolver's `==` → __str_eq rewrite. No
+// backend change: the expansion is ordinary Bin/Member nodes. Exit 0 = every case matched expectation.
+Point: {
+    x: i64,
+    y: i64,
+}
+Name: {
+    first: string_view,
+    last: string_view,
+}
+field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }
+main = () i32 {
+    // scalar struct: identical fields → true, one differing field → false.
+    (field_eq(Point(
+        x: 1,
+        y: 2,
+    ), Point(
+        x: 1,
+        y: 2,
+    )) == false).then({
+        return 1
+    })
+    field_eq(Point(
+        x: 1,
+        y: 2,
+    ), Point(
+        x: 1,
+        y: 9,
+    )).then({
+        return 2
+    })
+    // string-field struct: proves the string `==` path (resolver lowers it to __str_eq).
+    (field_eq(Name(
+        first: "ada",
+        last: "byron",
+    ), Name(
+        first: "ada",
+        last: "byron",
+    )) == false).then({
+        return 3
+    })
+    field_eq(Name(
+        first: "ada",
+        last: "byron",
+    ), Name(
+        first: "ada",
+        last: "lovelace",
+    )).then({
+        return 4
+    })
+    0
+}

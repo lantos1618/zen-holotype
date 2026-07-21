@@ -79,6 +79,18 @@ DeclIndex*: {
             false => tvoid(),
         })
     }
+    // the full field list of a concrete struct `sname` (empty slice if `sname` is not a struct). Used by
+    // the field_eq inliner (compiler.passes.subst) to expand `x.field_eq(y)` into a per-field `==` fold.
+    idx_struct_fields = (idx: DeclIndex, decls: [Decl], sname: string_view) [Field] {
+        i := idx.struct_idx.get(sname, 0 - 1)
+        (i >= 0 && i < decls.len).match ({
+            true  => decls[i].match ({
+                .DStruct(sd) => sd.fields,
+                _            => slice(null_ptr(), 0),
+            }),
+            false => slice(null_ptr(), 0),
+        })
+    }
     idx_genstruct_field = (idx: DeclIndex, a: MutPtr<Malloc>, decls: [Decl], gname: string_view, fname: string_view, targs: [Ty]) Ty {
         g := idx.idx_genstruct(decls, gname)
         is_empty(g.name).match ({
@@ -459,39 +471,42 @@ Env*: {
         })
     }
     infer_call = (env: Env, c: CallData) Ty {
-        eq(c.fn, "sizeof").match ({
-            true  => ti64(),
-            false => eq(c.fn, "__str_eq").match ({
-                true  => tbool(),
-                false => eq(c.fn, "__str_ne").match ({
+        eq(c.fn, "field_eq").match ({
+            true  => tbool(),
+            false => eq(c.fn, "sizeof").match ({
+                true  => ti64(),
+                false => eq(c.fn, "__str_eq").match ({
                     true  => tbool(),
-                    false => eq(c.fn, "load").match ({
-                        true  => env.arg0_ty(c).pointee_of(),
-                        false => eq(c.fn, "load_i64").match ({
-                            true  => ti64(),
-                            false => eq(c.fn, "atomic_add_i64").match ({
+                    false => eq(c.fn, "__str_ne").match ({
+                        true  => tbool(),
+                        false => eq(c.fn, "load").match ({
+                            true  => env.arg0_ty(c).pointee_of(),
+                            false => eq(c.fn, "load_i64").match ({
                                 true  => ti64(),
-                                false => eq(c.fn, "atomic_load_i64").match ({
+                                false => eq(c.fn, "atomic_add_i64").match ({
                                     true  => ti64(),
-                                    false => eq(c.fn, "atomic_cas_i64").match ({
-                                        true  => tbool(),
-                                        false => eq(c.fn, "to_i32").match ({
-                                            true  => ti32(),
-                                            false => eq(c.fn, "to_i64").match ({
-                                                true  => ti64(),
-                                                false => eq(c.fn, "to_u8").match ({
-                                                    true  => tu8(),
-                                                    false => eq(c.fn, "to_f64").match ({
-                                                        true  => tf64(),
-                                                        false => eq(c.fn, "null_ptr").match ({
-                                                            true  => tptr_k(env.a.tnode(tu8()), k_raw_ptr()),
-                                                            false => eq(c.fn, "cstr").match ({
-                                                                true  => tstring_cstr(),
-                                                                false => eq(c.fn, "addr").match ({
-                                                                    true  => env.addr_ty(c),
-                                                                    false => eq(c.fn, "assert_nonnull").match ({
-                                                                        true  => env.arg0_ty(c).nonnull_ty(),
-                                                                        false => env.gen_call_ret(c),
+                                    false => eq(c.fn, "atomic_load_i64").match ({
+                                        true  => ti64(),
+                                        false => eq(c.fn, "atomic_cas_i64").match ({
+                                            true  => tbool(),
+                                            false => eq(c.fn, "to_i32").match ({
+                                                true  => ti32(),
+                                                false => eq(c.fn, "to_i64").match ({
+                                                    true  => ti64(),
+                                                    false => eq(c.fn, "to_u8").match ({
+                                                        true  => tu8(),
+                                                        false => eq(c.fn, "to_f64").match ({
+                                                            true  => tf64(),
+                                                            false => eq(c.fn, "null_ptr").match ({
+                                                                true  => tptr_k(env.a.tnode(tu8()), k_raw_ptr()),
+                                                                false => eq(c.fn, "cstr").match ({
+                                                                    true  => tstring_cstr(),
+                                                                    false => eq(c.fn, "addr").match ({
+                                                                        true  => env.addr_ty(c),
+                                                                        false => eq(c.fn, "assert_nonnull").match ({
+                                                                            true  => env.arg0_ty(c).nonnull_ty(),
+                                                                            false => env.gen_call_ret(c),
+                                                                        }),
                                                                     }),
                                                                 }),
                                                             }),
@@ -1142,7 +1157,10 @@ is_intrinsic* = (fn: string_view) bool {
                                                                                             true  => true,
                                                                                             false => eq(fn, "to_f64").match ({
                                                                                                 true  => true,
-                                                                                                false => false,
+                                                                                                false => eq(fn, "field_eq").match ({
+                                                                                                    true  => true,
+                                                                                                    false => false,
+                                                                                                }),
                                                                                             }),
                                                                                         }),
                                                                                     }),
