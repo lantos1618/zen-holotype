@@ -25,7 +25,7 @@
 // thread (in zen__init_globals). A FRESH worker thread sees a zero-initialized slot, so `ready == 0`
 // is the sentinel that means "nothing injected here" and `current()` falls back to the process default.
 // The pool uses this slot to inject the actor's runtime around each behavior call.
-{ malloc, realloc, free, DynAlloc, dyn_of } = std.mem.alloc
+{ DynAlloc, dyn_of, heap_acquire, heap_resize, heap_release } = std.mem.alloc
 { panic } = std.core.result
 // The runtime capability value. The three fn-pointer fields are the allocator vtable (Self erased
 // to RawPtr<u8> state, so any allocator plugs in without generic threading). `state` is the allocator
@@ -38,15 +38,10 @@ Rt*: {
     state: RawPtr<u8>,
     ready: i64,
 }
-// The default heap vtable: state is unused; the calls fall through to libc malloc/realloc/free.
-// rt.zen IS the runtime's default heap-allocator floor (the analog of std.mem.alloc's own Heap
-// impl), so it sits on the raw-allocation allowlist alongside std.mem.{alloc,raw} / pool / thread.
-heap_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> { (n <= 0).match ({
-    true  => null_ptr(),
-    false => malloc(n),
-}) }
-heap_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
-heap_release = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
+// The default heap vtable is the canonical malloc/realloc/free floor from std.mem.alloc
+// (heap_acquire/heap_resize/heap_release, imported above; state unused). rt.zen IS the runtime's
+// default heap-allocator floor, so it sits on the raw-allocation allowlist alongside
+// std.mem.{alloc,raw} / pool / thread — it just no longer re-inlines the three-line body.
 // The process-wide default rt: heap-backed, no state. Cheap to build (just fills a struct), so
 // `current()` reconstructs it on demand when nothing is injected rather than storing it.
 heap_rt* = () Rt {

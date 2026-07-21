@@ -19,22 +19,27 @@ Heap*: {
 Malloc*: {
     _: i32,
 }
+// ── the canonical malloc/realloc/free floor ───────────────────────────────────────────────────────
+// The ONE process-heap allocator body, in erased-vtable shape (state: RawPtr<u8> ignored, so it plugs
+// into DynAlloc / Rt vtables directly). Every heap floor in the stdlib routes here: Heap.impl,
+// Malloc.impl, dyn_heap(), and std.rt's heap vtable all call these three fns instead of re-inlining
+// the `(n<=0)?null:malloc` / realloc / free lines. acquire treats a 0-byte request as a null success.
+heap_acquire* = (state: RawPtr<u8>, n: i64) RawPtr<u8> { (n <= 0).match ({
+    true  => null_ptr(),
+    false => malloc(n),
+}) }
+heap_resize* = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
+heap_release* = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
 Heap.impl(Allocator, {
-    acquire = (s: MutPtr<Heap>, n: i64) RawPtr<u8> { (n <= 0).match ({
-        true  => null_ptr(),
-        false => malloc(n),
-    }) }
-    resize = (s: MutPtr<Heap>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
-    release = (s: MutPtr<Heap>, p: RawPtr<u8>) void { free(p) }
+    acquire = (s: MutPtr<Heap>, n: i64) RawPtr<u8> { heap_acquire(null_ptr(), n) }
+    resize = (s: MutPtr<Heap>, p: RawPtr<u8>, n: i64) RawPtr<u8> { heap_resize(null_ptr(), p, n) }
+    release = (s: MutPtr<Heap>, p: RawPtr<u8>) void { heap_release(null_ptr(), p) }
 })
 // Bootstrap compatibility: compiler entrypoints still take Ptr<Malloc>.
 Malloc.impl(Allocator, {
-    acquire = (s: MutPtr<Malloc>, n: i64) RawPtr<u8> { (n <= 0).match ({
-        true  => null_ptr(),
-        false => malloc(n),
-    }) }
-    resize = (s: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
-    release = (s: MutPtr<Malloc>, p: RawPtr<u8>) void { free(p) }
+    acquire = (s: MutPtr<Malloc>, n: i64) RawPtr<u8> { heap_acquire(null_ptr(), n) }
+    resize = (s: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { heap_resize(null_ptr(), p, n) }
+    release = (s: MutPtr<Malloc>, p: RawPtr<u8>) void { heap_release(null_ptr(), p) }
 })
 try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
     // A 0-byte request is an empty success, not OOM: acquire(0) returns null by design, and
@@ -155,11 +160,6 @@ dyn_of* = (acquire: (RawPtr<u8>, i64) RawPtr<u8>, resize: (RawPtr<u8>, RawPtr<u8
     )
 }
 // The process-heap allocator as a DynAlloc value (malloc/realloc/free floor; state unused). The
-// narrow-capability analog of rt.heap_rt() — a container built from this touches NO ambient rt.
-dyn_heap_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> { (n <= 0).match ({
-    true  => null_ptr(),
-    false => malloc(n),
-}) }
-dyn_heap_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
-dyn_heap_release = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
-dyn_heap* = () DynAlloc { dyn_of(dyn_heap_acquire, dyn_heap_resize, dyn_heap_release, null_ptr()) }
+// narrow-capability analog of rt.heap_rt() — a container built from this touches NO ambient rt. The
+// three fn-pointers are the canonical heap_* floor above, erased into the DynAlloc vtable.
+dyn_heap* = () DynAlloc { dyn_of(heap_acquire, heap_resize, heap_release, null_ptr()) }
