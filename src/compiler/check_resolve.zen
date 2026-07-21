@@ -4,7 +4,7 @@
 // compiler.check (Env/infer/inline helpers); the check↔check_* cycles resolve via `*` exports.
 { ArmData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, GenStructDecl, GenericData, GlobalData, LetData, LoopData, MakeStructData, MatchData, MemberData, Param, SliceData, Stmt, Ty, arm_at, arrow_at, bin, bin_at, block, call, call_at, cbuf, cond_oa, dfunc, dglobal, dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish, gstr_string, is_expr_null, member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret, swhile, ti32, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
-{ TyQuery, FuncQuery } = compiler.astops
+{ TyQuery, FuncQuery, map_slice, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
 { eq, is_empty } = std.text.str
 { lift_lambdas } = compiler.passes.lift
@@ -142,13 +142,7 @@ bare_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, inits: [Fi
     exp_args := env.exp.exp_targs_for(gsd.name)
     (exp_args.len == gsd.tparams.len).match ({
         true  => exp_args,
-        false => {
-            buf := cbuf<Ty>(a, gsd.tparams.len)
-            gsd.tparams.loop((h, i, tp) {
-                buf[i] = env.struct_targ_one(gsd.fields, inits, tp.name)
-            })
-            buf
-        },
+        false => map_slice(a, gsd.tparams, (tp) { env.struct_targ_one(gsd.fields, inits, tp.name) }),
     })
 }
 // A bare `Store(state: …)` literal of a GENERIC struct carries no type args; infer them so the instance
@@ -226,13 +220,7 @@ resolve_loop = (a: MutPtr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     )
     a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body), l.h))
 }
-resolve_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
-    buf := cbuf<FieldInit>(a, inits.len)
-    inits.loop((h, i, fi) {
-        buf[i] = finit(fi.name, a.resolve_expr(env, fi.value))
-    })
-    buf
-}
+resolve_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] { map_slice(a, inits, (fi) { finit(fi.name, a.resolve_expr(env, fi.value)) }) }
 enum_payload_mono_ty = (env: Env, ename: string_view, etargs: [Ty], variant: string_view) Ty {
     env.env_genenum(ename).gen_variant_payload(variant).gsubst(env, GenericData(
         name: ename,
@@ -511,12 +499,10 @@ rec_dispatch = (env: Env, dn: string_view, fn: Func, args: [Expr], etargs: [Ty])
     })
 }
 resolve_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
-    buf := cbuf<ArmData>(a, arms.len)
-    arms.loop((h, i, ar) {
+    map_slice(a, arms, (ar) {
         aenv := a.arm_env(env, t, ar)
-        buf[i] = arm_at(ar.variant, ar.bind, a.resolve_expr(aenv, ar.body), ar.pos)
+        arm_at(ar.variant, ar.bind, a.resolve_expr(aenv, ar.body), ar.pos)
     })
-    buf
 }
 // Resolve statements, preserving expected type only for value-producing tail expressions.
 store_local_ty = (t: Ty) Ty {
@@ -651,15 +637,13 @@ or_temp_name = (a: MutPtr<Malloc>, name: string_view) string_view {
 // every receiver/return pair the validator accepts with differing Ok payloads gets the rebuild.
 orret_prim_named = (n: string_view) bool { eq(n, "i8") || eq(n, "i16") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64") || eq(n, "f32") }
 orret_gen_declared = (decls: [Decl], n: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DGenStruct(g) => eq(g.name, n).match ({ true => true, false => found }),
-            .DGenEnum(g)   => eq(g.name, n).match ({ true => true, false => found }),
-            _              => found,
+    decls.slice_any((d) {
+        d.match ({
+            .DGenStruct(g) => eq(g.name, n),
+            .DGenEnum(g)   => eq(g.name, n),
+            _              => false,
         })
     })
-    found
 }
 orret_named_known = (env: Env, n: string_view) bool { env.didx.struct_idx.get(n, 0 - 1) >= 0 || env.didx.enum_idx.get(n, 0 - 1) >= 0 || env.decls.orret_gen_declared(n) || n.orret_prim_named() }
 orret_ty_known = (env: Env, t: Ty) bool {

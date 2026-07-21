@@ -19,7 +19,7 @@
 // AST-node query traits (is_fnt on Ty, is_generic_fn on Func). Importing from compiler.astops pulls
 // the WHOLE module (all its impls: Ty/Func/Decl/StructDecl) into check's import closure, so the impl
 // index resolves these UFCS methods here and in every module that imports check (validate/*, passes/*).
-{ TyQuery, FuncQuery, has_fnt_param } = compiler.astops
+{ TyQuery, FuncQuery, has_fnt_param, map_slice, slice_any } = compiler.astops
 // Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
 // resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
 { deep_targs, impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
@@ -741,24 +741,12 @@ elem_of* = (t: Ty) Ty {
         _           => tvoid(),
     })
 }
-enum_has = (ed: EnumDecl, vn: string_view) bool {
-    f := false
-    ed.variants.loop((h, i, v) {
-        f = eq(v.name, vn).match ({ true => true, false => f })
-    })
-    f
-}
+enum_has = (ed: EnumDecl, vn: string_view) bool { ed.variants.slice_any((v) { eq(v.name, vn) }) }
 pick_enum = (ed: EnumDecl, vn: string_view, found: string_view) string_view { ed.enum_has(vn).match ({
     true  => ed.name,
     false => found,
 }) }
-gen_enum_has = (g: GenEnumDecl, vn: string_view) bool {
-    f := false
-    g.variants.loop((h, i, v) {
-        f = eq(v.name, vn).match ({ true => true, false => f })
-    })
-    f
-}
+gen_enum_has = (g: GenEnumDecl, vn: string_view) bool { g.variants.slice_any((v) { eq(v.name, vn) }) }
 // Find the enum, concrete or generic, that declares variant `vn`.
 enum_of_variant = (decls: [Decl], vn: string_view) string_view {
     found := ""
@@ -894,11 +882,7 @@ gen_variant_payload* = (g: GenEnumDecl, vname: string_view) Ty {
 }
 infer_enum_targs = (env: Env, g: GenEnumDecl, variant: string_view, pty: Ty) [Ty] {
     vpt := g.gen_variant_payload(variant)
-    buf := cbuf<Ty>(env.a, g.tparams.len)
-    g.tparams.loop((h, i, tp) {
-        buf[i] = vpt.unify_ty(pty, tp.name)
-    })
-    buf
+    map_slice(env.a, g.tparams, (tp) { vpt.unify_ty(pty, tp.name) })
 }
 enum_inst_payload = (env: Env, g: GenEnumDecl, base: string_view, variant: string_view, pty: Ty) EnumInst {
     ta := env.infer_enum_targs(g, variant, pty)
@@ -1074,13 +1058,7 @@ lam_body_one_env = (env: Env, tparams: [Param], targs: [Ty], pty: Ty, arg: Ptr<E
     })
 }
 // UFCS trait dispatch: route `x.m()` to the receiver type's impl when one exists.
-method_in = (methods: [Param], fn: string_view) bool {
-    f := false
-    methods.loop((h, i, n) {
-        f = eq(n.name, fn).match ({ true => true, false => f })
-    })
-    f
-}
+method_in = (methods: [Param], fn: string_view) bool { methods.slice_any((n) { eq(n.name, fn) }) }
 dispatch_recv* = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: string_view, tyname: string_view) string_view {
     // O(1): dispatch_idx holds the LAST impl of `tyname` providing `fn` (directly or via a trait
     // default) — the same verdict the old whole-decls scan accumulated.
@@ -1214,24 +1192,12 @@ alias_cands_none = () AliasCands {
         second: "",
     )
 }
-tparam_names_have = (tps: [Param], name: string_view) bool {
-    f := false
-    tps.loop((h, i, tp) {
-        f = eq(tp.name, name).match ({ true => true, false => f })
-    })
-    f
-}
+tparam_names_have = (tps: [Param], name: string_view) bool { tps.slice_any((tp) { eq(tp.name, name) }) }
 // VISIBILITY: only `*`-exported names are UFCS-reachable through an alias. Alias-prefixed publics
 // keep their star in the FLAT source (`g__scale* = …`), and parse_module records every starred
 // top-level name (compiler.parse exports_get) — membership there means the aliased module exported
 // it. Private alias decls (`g__hidden = …`) exist for the module's own internals but never match.
-alias_name_is_pub = (name: string_view) bool {
-    f := false
-    exports_get().loop((h, i, p) {
-        f = eq(p.name, name).match ({ true => true, false => f })
-    })
-    f
-}
+alias_name_is_pub = (name: string_view) bool { exports_get().slice_any((p) { eq(p.name, name) }) }
 // is `f` an alias-prefixed candidate for method `fn` on receiver `rty`? Common gates: real alias
 // prefix (never a phantom `foo__grow`), tail == the method, `*`-exported, and first-param head is not
 // the fn's OWN tparam. `exact` selects param0-compat: exact head-string equality (pass 1) vs the same
@@ -1459,13 +1425,7 @@ gstruct_of = (decls: [Decl], name: string_view) GenStructDecl {
     })
     found
 }
-has_tparam* = (tparams: [Param], n: string_view) bool {
-    f := false
-    tparams.loop((h, i, tp) {
-        f = eq(tp.name, n).match ({ true => true, false => f })
-    })
-    f
-}
+has_tparam* = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { eq(tp.name, n) }) }
 // Slice literal element type: an expected `[T]` (declared/annotated) WINS, so a bare-int literal
 // `[1,2,3]` adopts the declared element width (`i64`/`u8`) instead of defaulting to i32 — the same
 // expected-type propagation a scalar int slot already gets. Falls back to the first item's type.
@@ -1499,10 +1459,7 @@ gsubst* = (pty: Ty, env: Env, g: GenericData) Ty {
             is_empty(gsd.name).match ({
                 true  => sub,
                 false => {
-                    tys := cbuf<Ty>(env.a, gsd.tparams.len)
-                    gsd.tparams.loop((h, i, tp) {
-                        tys[i] = env.a.subst_ty_in(ged.tparams, g.args, tnamed(tp.name))
-                    })
+                    tys := map_slice(env.a, gsd.tparams, (tp) { env.a.subst_ty_in(ged.tparams, g.args, tnamed(tp.name)) })
                     tgeneric(n, tys, env.a.mangle_str_in(n, tys))
                 },
             })
@@ -1856,13 +1813,7 @@ stmt_has_return = (st: Stmt) bool {
         _          => false,
     })
 }
-body_has_return = (stmts: [Stmt]) bool {
-    found := false
-    stmts.loop((h, i, st) {
-        found = st.stmt_has_return().match ({ true => true, false => found })
-    })
-    found
-}
+body_has_return = (stmts: [Stmt]) bool { stmts.slice_any((st) { st.stmt_has_return() }) }
 // A body needs the early-return lift when a `return` appears anywhere except as the clean TRAILING
 // top-level statement: a non-final top-level `return`, or any If whose branch contains a `return`.
 // When inlined, the body is spliced into a GCC statement-expression `({ … })`, so a real C `return`

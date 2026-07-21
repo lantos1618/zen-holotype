@@ -3,6 +3,7 @@
 { DeclIndex, Env, arm_env, enum_name, extend_env, is_lit_numeric, params_env } = compiler.check
 { fits, ty_rank } = compiler.check_fits
 { Malloc } = std.mem.alloc
+{ slice_any } = compiler.astops
 { expect } = std.core.result
 { of } = std.collections.map
 { at, is_alnum } = std.text.bytes
@@ -84,13 +85,7 @@ struct_fields* = (decls: [Decl], name: string_view) [Field] {
     })
     found
 }
-has_field = (fields: [Field], fname: string_view) bool {
-    f := false
-    fields.loop((h, i, fl) {
-        f = eq(fl.name, fname).match ({ true => true, false => f })
-    })
-    f
-}
+has_field = (fields: [Field], fname: string_view) bool { fields.slice_any((fl) { eq(fl.name, fname) }) }
 field_in = (fields: [Field], fname: string_view) Ty {
     found := tvoid()
     fields.loop((h, i, fl) {
@@ -178,13 +173,7 @@ gen_struct_init_errs = (env: Env, tps: [Param], targs: [Ty], fields: [Field], in
     })
     acc
 }
-inits_has = (inits: [FieldInit], name: string_view) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = eq(fi.name, name).match ({ true => true, false => f })
-    })
-    f
-}    // is this field named in the literal?
+inits_has = (inits: [FieldInit], name: string_view) bool { inits.slice_any((fi) { eq(fi.name, name) }) }    // is this field named in the literal?
 // A NON-NULL pointer field (`Ptr<T>`/`MutPtr<T>`) left out of the literal would be default-zeroed to a
 // null that the type promises can never happen → a deref segfault the checker currently misses. Require it.
 field_missing_nonnull_ptr = (fields: [Field], inits: [FieldInit]) i32 {
@@ -446,27 +435,9 @@ ae_block_val_escapes = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals
         }),
     })
 }
-ae_inits_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, inits: [FieldInit], hop: bool) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = a.ae_escapes(decls, idx, locals, fi.value, hop).match ({ true => true, false => f })
-    })
-    f
-}
-ae_arms_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, arms: [ArmData], hop: bool) bool {
-    f := false
-    arms.loop((h, i, ar) {
-        f = a.ae_escapes(decls, idx, locals, ar.body, hop).match ({ true => true, false => f })
-    })
-    f
-}
-ae_items_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, items: [Expr], hop: bool) bool {
-    f := false
-    items.loop((h, i, it) {
-        f = a.ae_escapes(decls, idx, locals, it.addr(), hop).match ({ true => true, false => f })
-    })
-    f
-}
+ae_inits_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, inits: [FieldInit], hop: bool) bool { inits.slice_any((fi) { a.ae_escapes(decls, idx, locals, fi.value, hop) }) }
+ae_arms_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, arms: [ArmData], hop: bool) bool { arms.slice_any((ar) { a.ae_escapes(decls, idx, locals, ar.body, hop) }) }
+ae_items_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, items: [Expr], hop: bool) bool { items.slice_any((it) { a.ae_escapes(decls, idx, locals, it.addr(), hop) }) }
 // ── ESCAPE THROUGH A FN (re-census #1: stack-escape via a wrapper) ─────────────────────────────────
 // The intra-procedural walk above flags `<local>.addr()` FORWARDED through slice/struct/match/cond/block
 // in a return/trailing. But a local's address laundered THROUGH A CALL — an identity/wrapper fn that
@@ -506,27 +477,9 @@ ae_ret_yields = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: string_
         _              => false,
     })
 }
-ae_ret_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, inits: [FieldInit], name: string_view, depth: i32) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = a.ae_ret_yields(decls, idx, name, fi.value, depth).match ({ true => true, false => f })
-    })
-    f
-}
-ae_ret_valarms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, arms: [ArmData], name: string_view, depth: i32) bool {
-    f := false
-    arms.loop((h, i, ar) {
-        f = a.ae_ret_yields(decls, idx, name, ar.body, depth).match ({ true => true, false => f })
-    })
-    f
-}
-ae_ret_items = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, items: [Expr], name: string_view, depth: i32) bool {
-    f := false
-    items.loop((h, i, it) {
-        f = a.ae_ret_yields(decls, idx, name, it.addr(), depth).match ({ true => true, false => f })
-    })
-    f
-}
+ae_ret_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, inits: [FieldInit], name: string_view, depth: i32) bool { inits.slice_any((fi) { a.ae_ret_yields(decls, idx, name, fi.value, depth) }) }
+ae_ret_valarms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, arms: [ArmData], name: string_view, depth: i32) bool { arms.slice_any((ar) { a.ae_ret_yields(decls, idx, name, ar.body, depth) }) }
+ae_ret_items = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, items: [Expr], name: string_view, depth: i32) bool { items.slice_any((it) { a.ae_ret_yields(decls, idx, name, it.addr(), depth) }) }
 ae_ret_blockval = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, stmts: [Stmt], name: string_view, depth: i32) bool {
     (stmts.len == 0).match ({
         true  => false,
@@ -557,10 +510,7 @@ ae_ret_call = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, na
 }
 // returns-only statement walker over the callee body (mirrors the escape walker; trailing handled by caller).
 ae_ret_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], name: string_view, depth: i32) bool {
-    f := false
-    body.loop((h, i, st) {
-        f = a.ae_ret_stmt(decls, idx, st, name, depth).match ({ true => true, false => f })
-    })
+    f := body.slice_any((st) { a.ae_ret_stmt(decls, idx, st, name, depth) })
     (body.len == 0).match ({
         true  => f,
         false => body[body.len - 1].match ({

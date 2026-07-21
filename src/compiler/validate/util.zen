@@ -4,6 +4,7 @@
 { resolve_module } = compiler.check_resolve
 { fits, mode_fits, ty_eq, ty_rank } = compiler.check_fits
 { Token, scan } = compiler.lex
+{ slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
 { of } = std.collections.map
 { at } = std.text.bytes
@@ -65,17 +66,15 @@ is_uninferable = (t: Ty) bool {
 }
 // Undeclared Named types are treated as uninferable template residue.
 named_declared = (decls: [Decl], n: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DStruct(sd)   => eq(sd.name, n).match ({ true => true, false => found }),
-            .DEnum(ed)     => eq(ed.name, n).match ({ true => true, false => found }),
-            .DGenStruct(g) => eq(g.name, n).match ({ true => true, false => found }),
-            .DGenEnum(g)   => eq(g.name, n).match ({ true => true, false => found }),
-            _              => found,
+    decls.slice_any((d) {
+        d.match ({
+            .DStruct(sd)   => eq(sd.name, n),
+            .DEnum(ed)     => eq(ed.name, n),
+            .DGenStruct(g) => eq(g.name, n),
+            .DGenEnum(g)   => eq(g.name, n),
+            _              => false,
         })
     })
-    found
 }
 // A type the validator can't pin down concretely, so fit-checks against it stay lenient: an
 // uninferable residue, an UNDECLARED Named (a generic type param like `T`), a Ptr/Slice WHOSE element
@@ -101,13 +100,7 @@ unknown_ty* = (env: Env, t: Ty) bool {
         }),
     })
 }
-gen_args_unknown = (env: Env, args: [Ty]) bool {
-    f := false
-    args.loop((h, i, t) {
-        f = env.unknown_ty(t).match ({ true => true, false => f })
-    })
-    f
-}
+gen_args_unknown = (env: Env, args: [Ty]) bool { args.slice_any((t) { env.unknown_ty(t) }) }
 // FnT-vs-FnT signature compatibility: same arity, each param type and the return type equal —
 // EXCEPT a position whose type is unknown (an unbound tparam like `S`, generic residue) stays lenient,
 // since its concrete type is only known after monomorphization. (Function pointers are not implicitly
@@ -309,13 +302,7 @@ lit_slot_verdict* = (e: Ptr<Expr>, t: Ty) i32 {
 // does a type MENTION an (unbound) generic type param? recurses Ptr/Slice/Generic-args. Concrete
 // params (bool/Box/i32/…) do NOT mention a tparam → they are still arg/field-checked; only slots
 // typed by the callee's own tparam are skipped (their concrete type is known only after mono).
-tys_mention_tparam = (tps: [Param], ts: [Ty]) bool {
-    f := false
-    ts.loop((h, i, t) {
-        f = tps.ty_mentions_tparam(t).match ({ true => true, false => f })
-    })
-    f
-}
+tys_mention_tparam = (tps: [Param], ts: [Ty]) bool { ts.slice_any((t) { tps.ty_mentions_tparam(t) }) }
 ty_mentions_tparam* = (tps: [Param], t: Ty) bool {
     t.match ({
         .Named(n)   => tps.names_has(n),
@@ -355,34 +342,24 @@ tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
         false => 0,
     })
 }
-names_has = (names: [Param], fn: string_view) bool {
-    found := false
-    names.loop((h, i, n) {
-        found = eq(n.name, fn).match ({ true => true, false => found })
-    })
-    found
-}
+names_has = (names: [Param], fn: string_view) bool { names.slice_any((n) { eq(n.name, fn) }) }
 is_imported = (decls: [Decl], fn: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DImport(im) => im.names.names_has(fn).match ({ true => true, false => found }),
-            _            => found,
+    decls.slice_any((d) {
+        d.match ({
+            .DImport(im) => im.names.names_has(fn),
+            _            => false,
         })
     })
-    found
 }
 // Trait methods can remain unresolved in generic bodies until monomorphization.
 is_trait_method* = (decls: [Decl], fn: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DImpl(im)         => im.methods.names_has(fn).match ({ true => true, false => found }),
-            .DTraitDefault(td) => eq(td.fn.name, fn).match ({ true => true, false => found }),    // a defaulted method an impl may OMIT
-            _                  => found,
+    decls.slice_any((d) {
+        d.match ({
+            .DImpl(im)         => im.methods.names_has(fn),
+            .DTraitDefault(td) => eq(td.fn.name, fn),    // a defaulted method an impl may OMIT
+            _                  => false,
         })
     })
-    found
 }
 trait_declaring* = (decls: [Decl], m: string_view) string_view {
     found := ""
@@ -571,26 +548,22 @@ is_struct* = (decls: [Decl], name: string_view) bool {
 // tparam stays lenient, a CONCRETE field (bool/i32/Box/…) is still fit-checked.
 cv_no_params* = () [Param] { slice(null_ptr(), 0) }
 cv_is_gen_struct = (decls: [Decl], name: string_view) bool {
-    f := false
-    decls.loop((h, i, d) {
-        f = d.match ({
-            .DGenStruct(g) => eq(g.name, name).match ({ true => true, false => f }),
-            _              => f,
+    decls.slice_any((d) {
+        d.match ({
+            .DGenStruct(g) => eq(g.name, name),
+            _              => false,
         })
     })
-    f
 }
 // A GENERIC enum (`DGenEnum`, e.g. std `Result<T,E>`) by base name — like a concrete enum it holds
 // variants, not fields, so a `.field` access on an instance is a mistake regardless of the type args.
 cv_is_gen_enum = (decls: [Decl], name: string_view) bool {
-    f := false
-    decls.loop((h, i, d) {
-        f = d.match ({
-            .DGenEnum(g) => eq(g.name, name).match ({ true => true, false => f }),
-            _            => f,
+    decls.slice_any((d) {
+        d.match ({
+            .DGenEnum(g) => eq(g.name, name),
+            _            => false,
         })
     })
-    f
 }
 // An enum lowers to a C `struct { int32_t tag; union {…} u; }` (genc_emit emit_enum), so `.tag` and `.u`
 // ARE its only real members. The match/or_return lowering resolve_module runs BEFORE this validator
@@ -745,13 +718,7 @@ is_ctx_typed_arg* = (e: Expr) bool {
 // cross-module / pre-mono "uninferable residue" the core validator deliberately tolerates. It is NOT
 // part of check_module's count/kind (the harness runs that on NON-flattened source), so the harness is
 // untouched. Pointer/slice elements and generic args recurse; FnT internals are left to later checks.
-ut_has_tparam = (tparams: [Param], n: string_view) bool {
-    f := false
-    tparams.loop((h, i, tp) {
-        f = eq(tp.name, n).match ({ true => true, false => f })
-    })
-    f
-}
+ut_has_tparam = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { eq(tp.name, n) }) }
 ut_unknown_ty* = (env: Env, tparams: [Param], t: Ty) i32 {
     t.match ({
         .Named(n)   => (eq(n, "Self") || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({
@@ -996,20 +963,8 @@ inf_gen_self = (t: Ty, name: string_view) bool {
         _           => false,
     })
 }
-inf_gen_fields* = (fields: [Field], name: string_view) bool {
-    f := false
-    fields.loop((h, i, fl) {
-        f = fl.ty.inf_gen_self(name).match ({ true => true, false => f })
-    })
-    f
-}
-inf_gen_variants* = (vs: [VariantDef], name: string_view) bool {
-    f := false
-    vs.loop((h, i, v) {
-        f = v.payload.inf_gen_self(name).match ({ true => true, false => f })
-    })
-    f
-}
+inf_gen_fields* = (fields: [Field], name: string_view) bool { fields.slice_any((fl) { fl.ty.inf_gen_self(name) }) }
+inf_gen_variants* = (vs: [VariantDef], name: string_view) bool { vs.slice_any((v) { v.payload.inf_gen_self(name) }) }
 is_scope_param_ty* = (t: Ty) bool {
     t.match ({
         .Ptr(pd) => load(pd.pointee).match ({

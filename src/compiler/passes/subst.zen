@@ -6,6 +6,7 @@
 { cs_or, maybe_template } = compiler.check_inline
 { Malloc } = std.mem.alloc
 { eq } = std.text.str
+{ map_slice } = compiler.astops
 subst_var = (a: MutPtr<Malloc>, params: [Param], args: [Expr], name: string_view, e: Ptr<Expr>) Ptr<Expr> {
     idx := params.param_index(name)
     (idx < 0).match ({ true => e, false => a.subst_keep_pos(args[idx].addr(), e.ref_pos()) })
@@ -58,13 +59,7 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename:
     })
     buf
 }
-subst_targs = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
-    buf := cbuf<Ty>(a, xs.len)
-    xs.loop((h, i, t) {
-        buf[i] = a.subst_ty_in(tparams, targs, t)
-    })
-    buf
-}
+subst_targs = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] { map_slice(a, xs, (t) { a.subst_ty_in(tparams, targs, t) }) }
 subst_genlit_g = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
     nt := a.subst_targs(tparams, targs, m.targs)
     mkstructg_at(m.ty, a.mangle_str_in(m.ty, nt), nt, a.subst_inits(cs, tparams, targs, m.inits), cs_or(cs, m.pos))
@@ -75,13 +70,7 @@ subst_genlit = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], m: Ma
         false => mkstruct_at(m.ty, a.subst_inits(cs, tparams, targs, m.inits), cs_or(cs, m.pos)),
     })
 }
-subst_inits = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], inits: [FieldInit]) [FieldInit] {
-    buf := cbuf<FieldInit>(a, inits.len)
-    inits.loop((h, i, fi) {
-        buf[i] = finit(fi.name, a.subst_expr(cs, tparams, targs, fi.value))
-    })
-    buf
-}
+subst_inits = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], inits: [FieldInit]) [FieldInit] { map_slice(a, inits, (fi) { finit(fi.name, a.subst_expr(cs, tparams, targs, fi.value)) }) }
 subst_exprs = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], xs: [Expr]) [Expr] {
     buf := a.cebuf(xs.len)
     xs.loop((h, i, x) {
@@ -89,13 +78,7 @@ subst_exprs = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], xs: [E
     })
     buf
 }
-subst_arms = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] {
-    buf := cbuf<ArmData>(a, arms.len)
-    arms.loop((h, i, ar) {
-        buf[i] = arm(ar.variant, ar.bind, a.subst_expr(cs, tparams, targs, ar.body))
-    })
-    buf
-}
+subst_arms = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] { map_slice(a, arms, (ar) { arm(ar.variant, ar.bind, a.subst_expr(cs, tparams, targs, ar.body)) }) }
 subst_match = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], m: MatchData) Ptr<Expr> {
     subj := a.subst_expr(cs, tparams, targs, m.subj)
     arms := a.subst_arms(cs, tparams, targs, m.arms)
@@ -164,13 +147,7 @@ subst_stmt = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], st: Stm
         .IndexSet(x) => sidxset_at(a.subst_expr(cs, tparams, targs, x.seq), a.subst_expr(cs, tparams, targs, x.idx), a.subst_ty_in(tparams, targs, x.elem), a.subst_expr(cs, tparams, targs, x.value), cs_or(cs, x.pos)),
     })
 }
-subst_body* = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] {
-    buf := cbuf<Stmt>(a, body.len)
-    body.loop((h, i, st) {
-        buf[i] = a.subst_stmt(cs, tparams, targs, st)
-    })
-    buf
-}
+subst_body* = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] { map_slice(a, body, (st) { a.subst_stmt(cs, tparams, targs, st) }) }
 // Empty Named marks a generic template currently being inlined.
 xform_call = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     cargs := a.xform_args(decls, idx, c.args, params, fargs, env)
@@ -195,13 +172,7 @@ xform_match = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: MatchData, p
     })
     out
 }
-xform_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, inits: [FieldInit], params: [Param], fargs: [Expr], env: Ptr<VList>) [FieldInit] {
-    buf := cbuf<FieldInit>(a, inits.len)
-    inits.loop((h, i, fi) {
-        buf[i] = finit(fi.name, a.xform_expr(decls, idx, fi.value, params, fargs, env))
-    })
-    buf
-}
+xform_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, inits: [FieldInit], params: [Param], fargs: [Expr], env: Ptr<VList>) [FieldInit] { map_slice(a, inits, (fi) { finit(fi.name, a.xform_expr(decls, idx, fi.value, params, fargs, env)) }) }
 xform_lambda = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaData, params: [Param], fargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
     ps := params
     xs := fargs

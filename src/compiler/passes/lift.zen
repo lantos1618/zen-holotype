@@ -1,6 +1,6 @@
 // compiler.passes.lift — lambda lifting sub-pass extracted from compiler.check.
 { cbuf, ArmData, Decl, Expr, FieldInit, FnTData, Func, LambdaData, Param, Stmt, Ty, arm, arrow_at, bin_at, block, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit, gstr_append, gstr_finish, gstr_string, lam_r, member_at, mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at, sif, slett_at, slit, sret, swhile, tvoid, vref } = compiler.genc
-{ gstr_int } = compiler.astops
+{ gstr_int, map_slice } = compiler.astops
 { DeclIndex, VList, empty_params, pbuf, recall, var_bound, vcons, vnil } = compiler.check
 { field_fnt } = compiler.check_inline
 { Malloc } = std.mem.alloc
@@ -144,20 +144,8 @@ lift_rw_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8
     })
     buf
 }
-lift_rw_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], sty: string_view, targs: [Ty], inits: [FieldInit]) [FieldInit] {
-    buf := cbuf<FieldInit>(a, inits.len)
-    inits.loop((h, i, fi) {
-        buf[i] = finit(fi.name, a.lift_at(decls, idx, gcp, gen, a.field_fnt(decls, idx, sty, targs, fi.name), fi.value))
-    })
-    buf
-}
-lift_rw_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], arms: [ArmData]) [ArmData] {
-    buf := cbuf<ArmData>(a, arms.len)
-    arms.loop((h, i, ar) {
-        buf[i] = arm(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body))
-    })
-    buf
-}
+lift_rw_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], sty: string_view, targs: [Ty], inits: [FieldInit]) [FieldInit] { map_slice(a, inits, (fi) { finit(fi.name, a.lift_at(decls, idx, gcp, gen, a.field_fnt(decls, idx, sty, targs, fi.name), fi.value)) }) }
+lift_rw_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], arms: [ArmData]) [ArmData] { map_slice(a, arms, (ar) { arm(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body)) }) }
 lift_rw_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .MakeStruct(s) => a.cenode(mkstructg_at(s.ty, s.mty, s.targs, a.lift_rw_inits(decls, idx, gcp, gen, s.ty, s.targs, s.inits), s.pos)),

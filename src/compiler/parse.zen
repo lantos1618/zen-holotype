@@ -2,6 +2,7 @@
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
 { Expr, BinData, Func, Stmt, Param, Ty, Decl, param, gsdef_at, genumdef_at, dfunc, dstruct, denum, dforeign, dimport_at, dgenstruct, dgenenum, dglobal, dglobal_at, dglobal_tl_at, dglobal_alias_at, lit, ti32, tvoid } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get, lerr_off_get } = compiler.lex
+{ slice_any } = compiler.astops
 { at } = std.text.bytes
 { eq } = std.text.str
 { Malloc } = std.mem.alloc
@@ -227,13 +228,7 @@ alias_prefixes_reset* = (a: MutPtr<Malloc>) void {
     alias_prefix_n = 0
 }
 alias_prefixes_get* = () [Param] { slice(alias_prefix_buf.ptr, alias_prefix_n) }
-alias_prefix_seen = (name: string_view) bool {
-    f := false
-    alias_prefixes_get().loop((h, i, p) {
-        f = eq(p.name, name).match ({ true => true, false => f })
-    })
-    f
-}
+alias_prefix_seen = (name: string_view) bool { alias_prefixes_get().slice_any((p) { eq(p.name, name) }) }
 note_alias_prefix* = (name: string_view) void {
     (alias_prefix_n < alias_prefix_buf.len && name.alias_prefix_seen() == false).then({
         alias_prefix_buf[alias_prefix_n] = param(name, tvoid())
@@ -275,13 +270,7 @@ module_sigs_get* = () [SigEntry] { slice(module_sig_buf.ptr, module_sig_n) }
 // has this (alias, origin ModuleId) pair been stamped already? A module bound twice under the SAME
 // alias appends its body once — stamping twice would invent phantom duplicate candidates. A single
 // alias name bound to two DIFFERENT modules keeps both stamps (both bodies reach the flat).
-module_sig_alias_stamped* = (alias: string_view, origin: i64) bool {
-    f := false
-    module_sigs_get().loop((h, i, e) {
-        f = (eq(e.alias, alias) && e.origin == origin).match ({ true => true, false => f })
-    })
-    f
-}
+module_sig_alias_stamped* = (alias: string_view, origin: i64) bool { module_sigs_get().slice_any((e) { eq(e.alias, alias) && e.origin == origin }) }
 note_module_sig* = (alias: string_view, name: string_view, flags: i64, origin: i64) void {
     (module_sig_n < module_sig_buf.len).then({
         module_sig_buf[module_sig_n] = SigEntry(

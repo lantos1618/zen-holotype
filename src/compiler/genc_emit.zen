@@ -7,6 +7,7 @@
 { Decl, EnumDecl, Expr, Func, StructDecl, Ty, cbuf, ty_cname_in, gstr_string, gstr_append } = compiler.genc
 { monomorphize } = compiler.mono
 { Malloc } = std.mem.alloc
+{ slice_any } = compiler.astops
 { panic } = std.core.result
 { emit_is_trait, gen_decl, gen_fnt_typedefs, gen_func, gen_fwd, gen_proto, main_is_sys } = compiler.genc_emit_decl
 { gen_expr } = compiler.genc_emit_expr
@@ -188,14 +189,12 @@ gen_global_inits = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
 // The `main = (sys: Sys) i32` capability entry, if the program has one. Its body is emitted as
 // `zen_user_main` (see gen_func); a niladic `zen_main` trampoline feeds it `root()`.
 has_sys_main = (decls: [Decl]) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DFunc(f) => f.main_is_sys().match ({ true => true, false => found }),
-            _         => found,
+    decls.slice_any((d) {
+        d.match ({
+            .DFunc(f) => f.main_is_sys(),
+            _         => false,
         })
     })
-    found
 }
 // The C name of std.sys.root's `root()` capability builder. A brace-import (`{ Sys } = std.sys.root`) keeps it
 // bare `root`; a namespace alias (`sys = std.sys.root`) renames every value decl of the module under an

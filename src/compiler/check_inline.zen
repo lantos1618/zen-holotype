@@ -8,7 +8,7 @@
 { subst_body, xform_body } = compiler.passes.subst
 { clos_lower_func, clos_lowerable } = compiler.passes.closures
 { rc_expand, rc_gbuf, rc_gen, rc_seed } = compiler.passes.refcount
-{ TyQuery, FuncQuery, has_fnt_param } = compiler.astops
+{ TyQuery, FuncQuery, has_fnt_param, slice_any } = compiler.astops
 { Env, VList, DeclIndex, bind_args, bind_fnret, blockify, build_decl_index, cat_stmts, cenode, cps_value, dispatch_recv, dispatch_recv_name, empty_args, empty_params, is_void_ty, lit_pins, no_pins, param_index, params_env, recall, vcons, vnil } = compiler.check
 { resolve_call, resolve_decl } = compiler.check_resolve
 { infer_targs } = compiler.check_infer
@@ -98,13 +98,7 @@ tmiss_tp_of* = (ps: [Param], tparams: [Param], e: Ptr<Expr>) string_view {
         _       => "",
     })
 }
-tmiss_has_tp* = (tparams: [Param], n: string_view) bool {
-    f := false
-    tparams.loop((h, i, tp) {
-        f = eq(tp.name, n).match ({ true => true, false => f })
-    })
-    f
-}
+tmiss_has_tp* = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { eq(tp.name, n) }) }
 tmiss_targ_for* = (tparams: [Param], targs: [Ty], n: string_view) Ty {
     t := tvoid()
     tparams.loop((h, i, tp) {
@@ -115,30 +109,16 @@ tmiss_targ_for* = (tparams: [Param], targs: [Ty], n: string_view) Ty {
 // is `fn` trait-flavored — provided by some impl, defaulted by a trait, or declared by a trait
 // (a struct whose same-named field is an FnT signature)? One decl scan, run only on candidates.
 tmiss_traitish* = (decls: [Decl], fn: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DImpl(im)         => im.methods.tmiss_has_tp(fn).match ({
-                true  => true,
-                false => found,
-            }),
-            .DTraitDefault(td) => eq(td.fn.name, fn).match ({ true => true, false => found }),
-            .DStruct(sd)       => found.match ({
-                true  => true,
-                false => sd.fields.tmiss_declares(fn),
-            }),
-            _                  => found,
+    decls.slice_any((d) {
+        d.match ({
+            .DImpl(im)         => im.methods.tmiss_has_tp(fn),
+            .DTraitDefault(td) => eq(td.fn.name, fn),
+            .DStruct(sd)       => sd.fields.tmiss_declares(fn),
+            _                  => false,
         })
     })
-    found
 }
-tmiss_declares* = (fields: [Field], m: string_view) bool {
-    found := false
-    fields.loop((h, i, f) {
-        found = (eq(f.name, m) && f.ty.is_fnt()).match ({ true => true, false => found })
-    })
-    found
-}
+tmiss_declares* = (fields: [Field], m: string_view) bool { fields.slice_any((f) { eq(f.name, m) && f.ty.is_fnt() }) }
 tmiss_call* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], c: CallData) bool {
     (c.args.len > 0).match ({
         true  => {
