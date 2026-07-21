@@ -11,6 +11,13 @@
 { String } = std.text.string
 { view, is_empty, eq } = std.text.str
 { Malloc, malloc, realloc } = std.mem.alloc
+// ── shared low-level helpers ────────────────────────────────────────────────
+// cbuf<T>: allocate a fresh `[T]` buffer of n elements. ONE generic replaces the ~20 per-type
+// `Xbuf = (a, n) [X] { slice(a.acquire(n * sizeof(X)), n) }` copies that used to live across the
+// compiler. T sits only in return position, so callers pass an explicit turbofish: `cbuf<Ty>(a, n)`.
+cbuf*<T> = (a: MutPtr<Malloc>, n: i64) [T] { slice(a.acquire(n * sizeof(T)), n) }
+// sbyte: the i-th byte of a string_view. ONE accessor replaces the sbyte/jbyte/dsbyte/ffbyte copies.
+sbyte* = (v: string_view, i: i64) u8 { load(offset(v, i)) }
 // ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
 // Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
 // which needs only a forward decl, so the recursion closes.
@@ -1183,16 +1190,15 @@ dtraitdef* = (trname: string_view, fn: Func) Decl {
         fn: fn,
     ))
 }
-mono_tybuf_in = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
 mono_tynode_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
-    buf := a.mono_tybuf_in(1)
+    buf := cbuf<Ty>(a, 1)
     buf[0] = t
     buf[0].addr()
 }
 // the FnT SIGNATURE of a function (its param types + ret) — used to give a default-bodied trait method
 // a Field type so conformance sees a normal method signature. Allocates a [Ty] of the param types.
 fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
-    buf := a.mono_tybuf_in(ps.len)
+    buf := cbuf<Ty>(a, ps.len)
     ps.loop((h, i, p) {
         buf[i] = p.ty
     })
@@ -1342,7 +1348,7 @@ subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
 }
 // substitute tparam→arg inside a function type `(S, i32) S` -> `(AppState, i32) AppState`.
 subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty {
-    ptys := a.mono_tybuf_in(ft.params.len)
+    ptys := cbuf<Ty>(a, ft.params.len)
     ft.params.loop((h, i, p) {
         ptys[i] = a.subst_ty_in(tparams, args, p)
     })
@@ -1352,7 +1358,7 @@ subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty
 subst_generic_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], g: GenericData) Ty {
     // `tys` (not `buf`): mangle_str_in inlines a local `buf: RawPtr<u8>`, and the inliner
     // substitutes args by name — a caller arg also named `buf` would be captured by that local.
-    tys := a.mono_tybuf_in(g.args.len)
+    tys := cbuf<Ty>(a, g.args.len)
     g.args.loop((h, i, gt) {
         tys[i] = a.subst_ty_in(tparams, args, gt)
     })

@@ -1,12 +1,11 @@
 // compiler.genc_emit — C emission over the shared genc AST. Pipeline: genc -> mono -> genc_emit.
 { String } = std.text.string
 { view, is_empty, eq, ends_with } = std.text.str
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, fnt_cname, call, lit, arm, block, blk_diverges, param, field, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, FnTData, ImplData, gen_ty, ty_cname_in, fnt_cname, call, lit, arm, block, blk_diverges, param, field, cbuf, sbyte, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { monomorphize } = compiler.mono
 { Allocator, Malloc } = std.mem.alloc
 { panic } = std.core.result
 // Integer rendering stays byte-only so this self-hosts.
-sbyte = (v: string_view, i: i64) u8 { load(offset(v, i)) }
 digit = (d: i64) u8 { sbyte("0123456789", d) }
 // A `.Int` node with the top bit set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are
 // `0 - x` Bin nodes, never a negative `.Int` — so its exact bit pattern renders as UNSIGNED decimal
@@ -1039,9 +1038,8 @@ idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
         }),
     })
 }
-dmemo_buf = (a: MutPtr<Malloc>, n: i64) [DepthMemo] { slice(a.acquire(n * sizeof(DepthMemo)), n) }
 depth_cache = (a: MutPtr<Malloc>, decls: [Decl]) [DepthMemo] {
-    c := a.dmemo_buf(decls.slen())
+    c := cbuf<DepthMemo>(a, decls.slen())
     c.loop((h, i, x) {
         c[i] = DepthMemo(d: 0 - 1)
     })

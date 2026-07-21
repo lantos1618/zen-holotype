@@ -1,5 +1,5 @@
 // compiler.validate.kinds — per-node kind checks: enums, matches, operands, indices, methods, FFI.
-{ ArmData, AssignData, BinData, CallData, Decl, EnumDecl, Expr, Field, FieldInit, FnTData, Func, GlobalData, ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData, MethodCallData, Param, Stmt, Ty, VariantDef, arm, call, dforeign, gstr_append, gstr_finish, gstr_string, impl_cname_in, is_expr_null, k_mut_ptr, no_tys, subst_ty_in, tbool, tf64, ti32, ti64, tnamed, tptr_k, tslice, tstring_view, tu8, tvoid } = compiler.genc
+{ cbuf, ArmData, AssignData, BinData, CallData, Decl, EnumDecl, Expr, Field, FieldInit, FnTData, Func, GlobalData, ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData, MethodCallData, Param, Stmt, Ty, VariantDef, arm, call, dforeign, gstr_append, gstr_finish, gstr_string, impl_cname_in, is_expr_null, k_mut_ptr, no_tys, subst_ty_in, tbool, tf64, ti32, ti64, tnamed, tptr_k, tslice, tstring_view, tu8, tvoid } = compiler.genc
 { DeclIndex, Env, alias_ufcs_candidates, arm_env, bind_tparams, call_targ, empty_params, env_func, extend_env, fits, infer_expr, is_bound, is_f64_ty, is_intrinsic, is_lit_numeric, is_local, is_str_t, is_void_ty, lvalue_writes_readonly, no_stmts, params_env, recv_name, resolve_module, subj_variant_payload, tag_const, the_func, tnode, tparam_declared, ty_eq, ty_rank, with_exp, write_thru_readonly } = compiler.check
 { rc_calls_body } = compiler.passes.refcount
 { has_fnt_param } = compiler.astops
@@ -875,13 +875,11 @@ kvb_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32
     // passthrough — even one shadowing a same-named global type) defers in bound_err.
     a.kvb_body_kind(env, f.body)
 }
-ka_tbuf = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
-ka_pbuf = (a: MutPtr<Malloc>, n: i64) [Param] { slice(a.acquire(n * sizeof(Param)), n) }
 // the call's full type-arg buffer: an explicit turbofish `<…>` PINS position i; an absent one is
 // inferred from the value args (exactly as the resolver's call_targs does) so a closure FnT param
 // substitutes to its concrete types for the arity/return check below.
 ka_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
-    buf := env.a.ka_tbuf(f.tparams.len)
+    buf := cbuf<Ty>(env.a, f.tparams.len)
     f.tparams.loop((h, i, tp) {
         buf[i] = (i < etargs.len).match ({
             true  => etargs[i],
@@ -929,7 +927,7 @@ ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i
 // FnT's concrete (substituted) param/return types are known — the lambda's body value must fit the FnT
 // return type. Bind each lambda param to the FnT's substituted param type, then infer the body's value.
 ka_lam_params = (a: MutPtr<Malloc>, lmps: [Param], fps: [Ty]) [Param] {
-    buf := a.ka_pbuf(lmps.len)
+    buf := cbuf<Param>(a, lmps.len)
     lmps.loop((h, i, p) {
         buf[i] = Param(
             name: p.name,

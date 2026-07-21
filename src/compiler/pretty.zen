@@ -13,7 +13,7 @@
 { String } = std.text.string
 { view, is_empty, eq, starts_with } = std.text.str
 { Malloc } = std.mem.alloc
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData, ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData, impl_cname_in, payload_fname, is_expr_null, tvoid, ptr_kw, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FieldInit, ArmData, TagData, BinData, CallData, MethodCallData, CondData, MatchData, MemberData, ArrowData, MakeStructData, MakeEnumData, SliceData, IndexData, IndexSetData, LoopData, LambdaData, BlockData, LetData, AssignData, IfData, WhileData, FnTData, GenericData, ImplData, GlobalData, ImportData, GenStructDecl, GenEnumDecl, TraitDefData, impl_cname_in, payload_fname, is_expr_null, tvoid, ptr_kw, sbyte, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { Comment } = compiler.lex
 { at } = std.text.bytes
 // ── comment sidecar state ──────────────────────────────────────────────────────
@@ -260,8 +260,7 @@ ff_string = (a: MutPtr<Malloc>, cap: i64) String {
 ff_append = (s: String, a: MutPtr<Malloc>, t: string_view) String { s.gstr_append(a, t) }
 ff_push = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
 // integer rendering, byte-only (mirrors genc_emit so this self-hosts)
-ffbyte = (v: string_view, i: i64) u8 { load(offset(v, i)) }
-ffdigit = (d: i64) u8 { ffbyte("0123456789", d) }
+ffdigit = (d: i64) u8 { sbyte("0123456789", d) }
 // A `.Int` node with the top bit set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are
 // `0 - x` Bin nodes, never a negative `.Int` — so its exact bit pattern must print as UNSIGNED decimal
 // (`0xcbf29ce484222325` → `14695981039346656037`, not the wrong signed `-3750763034362895579`). The
@@ -746,7 +745,7 @@ ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) S
 // ── string literal escaping ────────────────────────────────────────────────────
 // A non-printable byte as a `\xNN` hex escape — the ONLY numeric string escape the Zen lexer accepts
 // (parse_expr.unescape reads `\xNN`; there is no octal form, so genc's `\ooo` cannot be reused here).
-ffhex = (d: i64) u8 { ffbyte("0123456789abcdef", d) }
+ffhex = (d: i64) u8 { sbyte("0123456789abcdef", d) }
 ff_hex_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
     n := b.to_i64()
     s.ff_append(a, "\\x").ff_push(a, ffhex(n / 16)).ff_push(a, ffhex(n % 16))
@@ -782,8 +781,8 @@ ff_strlit = (s: String, a: MutPtr<Malloc>, v: string_view) String { s.ff_append(
 ff_escape_from = (s: String, a: MutPtr<Malloc>, v: string_view, i: i32) String {
     acc := s
     k := i
-    @while (ffbyte(v, k) != 0) {
-        acc = acc.ff_escape_byte(a, ffbyte(v, k))
+    @while (sbyte(v, k) != 0) {
+        acc = acc.ff_escape_byte(a, sbyte(v, k))
         k = k + 1
     }
     acc

@@ -8,7 +8,7 @@
 { view, is_empty, eq } = std.text.str
 { Malloc } = std.mem.alloc
 { panic } = std.core.result
-{ Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, GenStructDecl, EnumDecl, VariantDef, GenericData, FieldInit, ArmData, TagData, MakeStructData, MakeEnumData, field, param, dstruct, denum, subst_ty_in, find_genenum, tgeneric, tnamed, mangle_str_in } = compiler.genc
+{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, GenStructDecl, EnumDecl, VariantDef, GenericData, FieldInit, ArmData, TagData, MakeStructData, MakeEnumData, field, param, dstruct, denum, subst_ty_in, find_genenum, tgeneric, tnamed, mangle_str_in } = compiler.genc
 // is_generic_fn (Func) is a compiler.astops trait method; importing FuncQuery pulls astops's whole
 // impl set into this closure (and, via modules that import compiler.mono, into genc_emit/genjs too).
 { FuncQuery } = compiler.astops
@@ -18,13 +18,10 @@
 // substituted in the field types. Instances are DISCOVERED from typed positions — function params,
 // returns, and struct fields (so a generic used through a typed API is found); a generic struct
 // LITERAL already carries its monomorphized name (MakeStruct.mty), so it just references the result.
-mono_gbuf = (a: MutPtr<Malloc>, n: i64) [GenericData] { slice(a.acquire(n * sizeof(GenericData)), n) }
-mono_fbuf = (a: MutPtr<Malloc>, n: i64) [Field] { slice(a.acquire(n * sizeof(Field)), n) }
-mono_dbuf = (a: MutPtr<Malloc>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
 // the concrete StructDecl for one instance: the matching DGenStruct's fields, tparam→arg substituted.
 mono_struct = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
     gsd := decls.find_genstruct(g.name)
-    buf := a.mono_fbuf(gsd.fields.len)
+    buf := cbuf<Field>(a, gsd.fields.len)
     gsd.fields.loop((h, i, f) {
         buf[i] = field(f.name, a.subst_ty_in(gsd.tparams, g.args, f.ty))
     })
@@ -48,8 +45,6 @@ find_genstruct = (decls: [Decl], name: string_view) GenStructDecl {
     found
 }
 // the concrete EnumDecl for one instance: the matching DGenEnum's variants, tparam→arg substituted.
-mono_vbuf = (a: MutPtr<Malloc>, n: i64) [VariantDef] { slice(a.acquire(n * sizeof(VariantDef)), n) }
-mono_tbuf = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
 // A multi-field variant payload `Node(T, T)` lowers to a positional anon struct `__anon__0__1` whose
 // tparam-mentioning fields promote it to a GENERIC struct over the enum's type-vars (parse.augment).
 // Plain tparam→arg substitution can't touch it — the payload is a bare `.Named("__anon__0__1")`, not a
@@ -64,7 +59,7 @@ mono_payload = (a: MutPtr<Malloc>, decls: [Decl], tparams: [Param], args: [Ty], 
         .Named(n) => decls.is_genstruct_name(n).match ({
             true  => {
                 gsd := decls.find_genstruct(n)
-                tys := a.mono_tbuf(gsd.tparams.len)
+                tys := cbuf<Ty>(a, gsd.tparams.len)
                 gsd.tparams.loop((h, i, tp) {
                     tys[i] = a.subst_ty_in(tparams, args, tnamed(tp.name))
                 })
@@ -77,7 +72,7 @@ mono_payload = (a: MutPtr<Malloc>, decls: [Decl], tparams: [Param], args: [Ty], 
 }
 mono_enum = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
     ged := decls.find_genenum(g.name)
-    buf := a.mono_vbuf(ged.variants.len)
+    buf := cbuf<VariantDef>(a, ged.variants.len)
     ged.variants.loop((h, i, v) {
         buf[i] = VariantDef(
             name: v.name,
@@ -310,7 +305,7 @@ GBufEnd*: {
     count: i32,
 }
 collect_insts = (a: MutPtr<Malloc>, decls: [Decl]) GBufEnd {
-    buf := a.mono_gbuf(2048)
+    buf := cbuf<GenericData>(a, 2048)
     cnt := 0
     decls.loop((h, i, d) {
         cnt = buf.collect_decl(cnt, d)
@@ -348,7 +343,7 @@ expand_insts = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32
 monomorphize* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     ce := a.collect_insts(decls)
     cnt := a.expand_insts(decls, ce.buf, ce.count, 0)    // transitively close over nested generic instances
-    out := a.mono_dbuf(decls.len + cnt)
+    out := cbuf<Decl>(a, decls.len + cnt)
     k := 0
     decls.loop((h, i, d) {
         k = d.is_gen_template().match ({ true => k, false => out.put_decl(k, d) })
