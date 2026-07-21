@@ -1,0 +1,1027 @@
+// compiler.validate.args — argument, struct-field-init, and member/slice-literal checks.
+{ ArmData, CallData, Decl, Expr, Field, FieldInit, Func, MakeStructData, MethodCallData, Param, Stmt, Ty, arm, call, gstr_append, gstr_finish, gstr_push, gstr_string, subst_ty_in, tvoid } = compiler.genc
+{ DeclIndex, Env, arm_env, enum_name, env_gstruct, extend_env, fits, idx_func, infer_expr, is_lit_numeric, params_env, ty_rank } = compiler.check
+{ Malloc } = std.mem.alloc
+{ expect } = std.core.result
+{ of } = std.collections.map
+{ at, is_alnum } = std.text.bytes
+{ ends_with, eq, is_empty } = std.text.str
+{ String } = std.text.string
+{ cv_no_params, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_struct_fields, expr_pos, fit_err, is_enum_repr_field, is_trait_method, lit_slot_verdict, pos_or, tparam_shape_err, ty_mentions_tparam } = compiler.validate.util
+{ KSCRATCHSEND, KSCRATCHSTATE } = compiler.validate.diag
+{ AliasList, DeadList, consume_depth, dead_cons, dead_has, dead_kill, dead_nil, dead_remove, own_moved_var, owner_base, sd_call_pos, sm_call_pos, sm_mcall_pos } = compiler.validate.ownership
+{ kv_at, kv_kor } = compiler.validate.core
+// A slice LITERAL may be element-wise coerced into an expected slice type while stored slice types
+// remain invariant. This accepts `["a", "b"]` at a `[string_view]` call slot without allowing a
+// named `[string_literal]` variable to flow to mutable `[string_view]` storage.
+slicelit_slot_verdict = (env: Env, ar: Expr, pty: Ty) i32 {
+    ar.match ({
+        .SliceLit(sd) => pty.match ({
+            .Slice(ep) => {
+                errs := 0
+                sd.items.loop((h, i, it) {
+                    errs = errs + env.sl_elem_fit(load(ep), it)
+                })
+                (errs == 0).match ({ true => 0, false => 1 })
+            },
+            _          => 0 - 1,
+        }),
+        _             => 0 - 1,
+    })
+}
+// an argument check, given the callee's tparams: a slot typed by a tparam is shape-checked when it is a
+// pointer (else skipped); a CONCRETE slot of a generic fn is still fully checked (so `gen2(x: T, b: Box)`
+// rejects a non-Box second arg).
+arg_err_at* = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
+    (i < params.len).match ({
+        true  => tps.ty_mentions_tparam(params[i].ty).match ({
+            true  => env.tparam_shape_err(params[i].ty, ar),
+            false => {
+                sv := env.slicelit_slot_verdict(ar, params[i].ty)
+                (sv >= 0).match ({
+                    true  => sv,
+                    false => {
+                        lv := ar.addr().lit_slot_verdict(params[i].ty)
+                        (lv >= 0).match ({
+                            true  => lv,
+                            false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty),
+                        })
+                    },
+                })
+            },
+        }),
+        false => 0,
+    })
+}
+// the trait (a struct whose FnT fields are the method signatures) that DECLARES method `m`; ""
+// if none. Distinct from is_trait_method, which only sees methods some IMPL provides: with ZERO
+// impls in the module a required trait method fell through to undefined-name, hiding the real
+// story (the receiver type lacks an impl). Used only to pick the KIND and message of an already-
+// rejected call — it never flips accept/reject.
+fields_declare_method* = (fields: [Field], m: string_view) bool {
+    found := false
+    fields.loop((h, i, f) {
+        found = eq(f.name, m).match ({
+            true  => f.ty.match ({
+                .FnT(fd) => true,
+                _        => found,
+            }),
+            false => found,
+        })
+    })
+    found
+}
+// Struct literals check known fields and value fits; imported/generic literals stay lenient.
+no_fields* = () [Field] { slice(null_ptr(), 0) }
+struct_fields* = (decls: [Decl], name: string_view) [Field] {
+    found := no_fields()
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DStruct(sd) => eq(sd.name, name).match ({ true => sd.fields, false => found }),
+            _            => found,
+        })
+    })
+    found
+}
+has_field = (fields: [Field], fname: string_view) bool {
+    f := false
+    fields.loop((h, i, fl) {
+        f = eq(fl.name, fname).match ({ true => true, false => f })
+    })
+    f
+}
+field_in = (fields: [Field], fname: string_view) Ty {
+    found := tvoid()
+    fields.loop((h, i, fl) {
+        found = eq(fl.name, fname).match ({ true => fl.ty, false => found })
+    })
+    found
+}
+field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
+    fty := fields.field_in(fi.name)
+    sv := env.slicelit_slot_verdict(load(fi.value), fty)
+    (sv >= 0).match ({
+        true  => sv,
+        false => {
+            lv := fi.value.lit_slot_verdict(fty)    // a numeric literal must fit the field width
+            (lv >= 0).match ({ true => lv, false => env.fit_err(env.infer_expr(fi.value), fty) })
+        },
+    })
+}
+init_err = (env: Env, fields: [Field], fi: FieldInit) i32 { fields.has_field(fi.name).match ({
+    true  => env.field_fit_err(fields, fi),
+    false => 1,
+}) }    // unknown field -> 1
+struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc + env.init_err(fields, fi)
+    })
+    acc
+}
+gen_struct_fields = (decls: [Decl], name: string_view) [Field] {
+    found := no_fields()
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DGenStruct(g) => eq(g.name, name).match ({ true => g.fields, false => found }),
+            _              => found,
+        })
+    })
+    found
+}
+gen_struct_tparams = (decls: [Decl], name: string_view) [Param] {
+    found := cv_no_params()
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DGenStruct(g) => eq(g.name, name).match ({ true => g.tparams, false => found }),
+            _              => found,
+        })
+    })
+    found
+}
+// A generic-struct literal `Box<i32>(v: …)` binds each tparam to its explicit targ, so a field typed
+// by a tparam (`v: T`) becomes CONCRETE (`v: i32`) and IS fit-checked — closing the hole where a wrong
+// value (`Box<i32>(v: P(…))`) slipped past SEMA and broke at cc. A field whose type stays a tparam after
+// substitution (no matching targ) remains lenient, deferred to monomorphization.
+gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: FieldInit) i32 {
+    fty := fields.field_in(fi.name)
+    cty := (targs.len == tps.len).match ({
+        true  => env.a.subst_ty_in(tps, targs, fty),
+        false => fty,
+    })
+    tps.ty_mentions_tparam(cty).match ({
+        true  => 0,
+        false => {
+            sv := env.slicelit_slot_verdict(load(fi.value), cty)
+            (sv >= 0).match ({
+                true  => sv,
+                false => {
+                    lv := fi.value.lit_slot_verdict(cty)    // still a tparam -> lenient
+                    // a numeric literal must fit the field width
+                    (lv >= 0).match ({
+                        true  => lv,
+                        false => env.fit_err(env.infer_expr(fi.value), cty),
+                    })
+                },
+            })
+        },
+    })
+}    // a concrete field -> check the fit
+gen_struct_init_errs = (env: Env, tps: [Param], targs: [Ty], fields: [Field], inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc + fields.has_field(fi.name).match ({
+            true  => env.gen_field_fit_err(tps, targs, fields, fi),
+            false => 1,
+        })
+    })
+    acc
+}
+inits_has = (inits: [FieldInit], name: string_view) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = eq(fi.name, name).match ({ true => true, false => f })
+    })
+    f
+}    // is this field named in the literal?
+// A NON-NULL pointer field (`Ptr<T>`/`MutPtr<T>`) left out of the literal would be default-zeroed to a
+// null that the type promises can never happen → a deref segfault the checker currently misses. Require it.
+field_missing_nonnull_ptr = (fields: [Field], inits: [FieldInit]) i32 {
+    acc := 0
+    fields.loop((h, i, fl) {
+        acc = acc + (fl.ty.is_nonnull_ptr_ty() && inits.inits_has(fl.name) == false).match ({
+            true  => 1,
+            false => 0,
+        })
+    })
+    acc
+}
+// A repeated initializer for the same field (`Box(v: 5, v: 9)`) is almost certainly a mistake.
+dup_init_errs = (inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        earlier := false
+        inits.loop((h2, j, fj) {
+            earlier = (j < i && eq(fj.name, fi.name)).match ({ true => true, false => earlier })
+        })
+        acc = acc + earlier.match ({ true => 1, false => 0 })
+    })
+    acc
+}
+makestruct_err* = (env: Env, m: MakeStructData) i32 {
+    (m.targs.len > 0).match ({
+        true  => env.env_is_gen_struct(m.ty).match ({
+            true  => {
+                gf := env.env_gstruct(m.ty).fields
+                env.gen_struct_init_errs(env.env_gstruct(m.ty).tparams, m.targs, gf, m.inits) + gf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs()
+            },
+            false => 0,
+        }),
+        false => env.env_is_struct(m.ty).match ({
+            true  => {
+                sf := env.env_struct_fields(m.ty)
+                env.struct_init_errs(sf, m.inits) + sf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs()
+            },
+            false => 0,
+        }),
+    })
+}    // a generic literal: check concrete fields
+gen_base_of = (t: Ty) string_view {
+    t.match ({
+        .Generic(g) => g.name,    // unknown gen-struct (template residue) -> lenient
+        // the BASE name of a generic-struct receiver (`Box` of `Box<i32>`), through a Ptr receiver.
+        .Ptr(pd)    => load(pd.pointee).gen_base_of(),
+        _           => "",
+    })
+}
+// a primitive scalar has no fields, so `x.foo` on it is a hard error (C: "member in something not a struct").
+is_scalar_prim = (t: Ty) bool {
+    t.match ({
+        .I32  => true,
+        .I64  => true,
+        .U8   => true,
+        .F64  => true,
+        .Bool => true,
+        _     => false,
+    })
+}
+// FIELDLESS receivers: scalars AND the string types (`str`/`Cstr`/`text` are `const char*`/`char*` in C,
+// with NO members). `s.len` FIELD access on one ICEs in cc ("member in something not a struct or union");
+// the accessor is a UFCS METHOD (`s.len()`, a `Call`), never a field. A slice `[T]` is `.Slice` (NOT here),
+// so `slice.len` on its `{ptr,len}` struct still passes. Closes census #60 (sibling of #58).
+is_fieldless_prim = (t: Ty) bool {
+    t.match ({
+        .StringView    => true,
+        .StringCstr    => true,
+        .StringLiteral => true,
+        _              => t.is_scalar_prim(),
+    })
+}
+// Field access checks known concrete struct receivers AND generic-struct instances (field names don't
+// depend on the type args, so `Box<i32>.nope` is rejected the same as `Box.nope` would be). A KNOWN
+// enum receiver — concrete (`DEnum`) or generic (`DGenEnum` like `Result<i32,IoError>`) — has no fields
+// at all: you reach its variants via `.match`, so any `.field` on one is rejected (closes census #58/#41,
+// where `r.len` on a Result passed `check` then ICE'd in cc with only a `.c` column).
+member_err* = (env: Env, obj: Ptr<Expr>, field: string_view) i32 {
+    obj.is_lit_numeric().match ({
+        true  => 1,
+        false => {
+            rty := env.infer_expr(obj)
+            sname := rty.enum_name()
+            env.env_is_struct(sname).match ({
+                true  => env.env_struct_fields(sname).has_field(field).match ({
+                    true  => 0,
+                    false => 1,
+                }),
+                false => {
+                    base := rty.gen_base_of()
+                    (is_empty(base) == false && env.env_is_gen_struct(base)).match ({
+                        true  => env.env_gstruct(base).fields.has_field(field).match ({
+                            true  => 0,
+                            false => 1,
+                        }),
+                        false => (env.env_is_enum(sname) || is_empty(base) == false && env.env_is_gen_enum(base)).match ({
+                            true  => field.is_enum_repr_field().match ({ true => 0, false => 1 }),
+                            false => rty.is_fieldless_prim().match ({ true => 1, false => 0 }),
+                        }),
+                    })
+                },
+            })
+        },
+    })
+}    // scalars and enums have no fields; other unknowns (residue) stay lenient
+// every element of a slice literal must fit the element type (inferred from the first item). genc
+// types the emitted C array by that first element, so a CATEGORY mismatch (a str in an int slice)
+// would be silently coerced under -w — a miscompile. Numeric elements stay lenient (C widens them),
+// and unknown/generic-residue elements defer (fit_err handles both).
+sl_elem_fit* = (env: Env, ety: Ty, it: Expr) i32 {
+    ity := env.infer_expr(it.addr())
+    (ety.ty_rank() >= 0 && ity.ty_rank() >= 0).match ({ true => 0, false => env.fit_err(ity, ety) })
+}
+// ── STRUCT-FIELD / SLICE-ELEMENT CONSUME (re-census #63) ───────────────────────────────────────────
+// #56 closed owner-PARAM moves but explicitly left the IDIOMATIC case open: moving an `Own<T>` into a
+// struct-LITERAL field (`Box(o: o)`) or a slice element (`[o]`, `arr[i] = o`). A struct/slice copy does
+// NOT bump the owner's refcount, so the field and the source name the ONE allocation: freeing through the
+// field (`b.o.release_in(a)`) then using the source (`o.get()`) is a use-after-free, and the same owner
+// into two Own fields (`Two(a: o, b: o)`) is a double-move. We count the field/element init as a CONSUME
+// of the source binding, reusing the #56 kill machinery (dead_kill), so a later use of the source →
+// error[ownership]. ZERO over-reject: only an `Own<T>` bare-Var moved into an `Own<T>`-TYPED field
+// consumes — a BORROW field (`MutPtr<T>`/`Ptr<T>`, reached via `o.ptr()`, a Call not a Var), a value /
+// scalar field, and a `.clone()` init (a Call) do NOT. Only CONCRETE struct literals are analyzable; a
+// generic-struct literal has no concrete field types here, so it under-rejects (honest, safe).
+field_ty_by_name = (fields: [Field], name: string_view) Ty {
+    found := tvoid()
+    fields.loop((h, i, fl) {
+        found = eq(fl.name, name).match ({ true => fl.ty, false => found })
+    })
+    found
+}
+// the owner moved by a struct-literal field init: the field's DECLARED type is `Own<T>` AND the init is a
+// bare `Own<T>` Var. The field-type gate is exactly what keeps a borrow field (`p: MutPtr<T>`) legal.
+struct_field_move_src* = (env: Env, fields: [Field], fi: FieldInit) string_view {
+    eq(field_ty_by_name(fields, fi.name).owner_base(), "Own").match ({
+        true  => env.own_moved_var(fi.value),
+        false => "",
+    })
+}
+// kill every source owner moved into an Own field of a CONCRETE struct literal.
+mkstruct_field_kills* = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, s: MakeStructData) Ptr<DeadList> {
+    out := seen
+    env.env_is_struct(s.ty).then({
+        fields := env.env_struct_fields(s.ty)
+        s.inits.loop((h, i, fi) {
+            nm := env.struct_field_move_src(fields, fi)
+            (nm.is_empty() == false).then({
+                out = a.dead_kill(out, al, nm)
+            })
+        })
+    })
+    out
+}
+// kill every source owner moved into a slice-literal element (`[o]`): a bare `Own<T>` item is moved into
+// the slice's element slot exactly like an Own field. A borrowed `[o.ptr()]` item is a Call, not a Var.
+slicelit_elem_kills* = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, items: [Expr]) Ptr<DeadList> {
+    out := seen
+    items.loop((h, i, it) {
+        nm := env.own_moved_var(it.addr())
+        (nm.is_empty() == false).then({
+            out = a.dead_kill(out, al, nm)
+        })
+    })
+    out
+}
+// the bare-Var name of arg `i` (else ""). We only track frees/escapes of SIMPLE LOCALS — a field free
+// like `a.release(m.keys)` (vec/map grow constantly do this) is deliberately NOT tracked, so the
+// stdlib does not over-reject. Field-level liveness is out of scope for v1.
+arg_var_name* = (c: CallData, i: i32) string_view {
+    (i < c.args.len).match ({
+        true  => c.args[i].match ({
+            .Var(v) => v.name,
+            _       => "",
+        }),
+        false => "",
+    })
+}
+field_has* = (fields: [Field], name: string_view) bool {
+    found := false
+    fields.loop((h, i, f) {
+        found = found || eq(f.name, name)
+    })
+    found
+}
+// ── ADDR-OF-LOCAL ESCAPE ──────────────────────────────────────────────────────────────────────────
+// Returning `x.addr()` where `x` is a stack local hands the caller a pointer into the dead frame. This
+// is a SEPARATE pass from the scope-escape above: it cannot reuse that walker, because a general
+// allocator's `a.acquire(n)` returns HEAP that outlives the call (returning it is fine) — only the
+// ADDRESS OF A LOCAL dangles. Conservative v1: taints `<local>.addr()` and forwards it through
+// `slice(...)`, struct literals, match/cond arms, and block values; flags it in return/trailing
+// position. NOT tracked (v1): aliasing through a `let`, heap-store aliasing, inter-procedural escape.
+ae_collect_arms = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
+    out := seen
+    arms.loop((h, i, ar) {
+        out = a.ae_collect_expr(out, ar.body)
+    })
+    out
+}
+ae_collect_expr = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadList> {
+    load(e).match ({
+        .Match(m) => a.ae_collect_arms(seen, m.arms),
+        .Block(b) => a.ae_collect(seen, b.stmts),
+        .Loop(l)  => a.ae_collect(seen, l.body),
+        .Cond(d)  => a.ae_collect_expr(a.ae_collect_expr(seen, d.t), d.e),
+        _         => seen,
+    })
+}
+ae_collect_stmt = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+    st.match ({
+        .Let(l)      => a.dead_cons(l.name, seen),
+        .If(f)       => a.ae_collect(a.ae_collect(seen, f.then), f.els),
+        .While(w)    => a.ae_collect(seen, w.body),
+        .ExprStmt(e) => a.ae_collect_expr(seen, e),
+        _            => seen,
+    })
+}
+ae_collect = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
+    out := seen
+    body.loop((h, i, st) {
+        out = a.ae_collect_stmt(out, st)
+    })
+    out
+}
+// `<local>.addr()` — a UFCS `addr` call whose sole arg is a Var that is a collected stack local.
+ae_is_addr_local = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c) => (eq(c.fn, "addr") && c.args.len == 1).match ({
+            true  => c.args[0].match ({
+                .Var(v) => locals.dead_has(v.name),
+                _       => false,
+            }),
+            false => false,
+        }),
+        _        => false,
+    })
+}
+// SENDABILITY rule 3: a message may not carry a pointer into the sender's frame. `send(_, msg)` whose
+// message escapes a local (`.addr()` of a local, directly or forwarded) → the offset of the call, else 0.
+// the send-message escape (SENDABILITY rule 3) uses the NON-hopping escape check: a laundered send
+// (`send(.Poke(launder(local.addr())))`) is the sendability pass's concern (kind `sendable`), so the
+// call-following added for return-escape must NOT pre-empt it here — hop=false preserves that split.
+ae_send_pos = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c) => (c.fn.sx_named("send", "__send") && c.args.len >= 2 && a.ae_escapes(decls, idx, locals, c.args[1].addr(), false)).match ({
+            true  => c.pos.pos_or(1),
+            false => 0,
+        }),
+        _        => 0,
+    })
+}
+ae_block_val_escapes = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, stmts: [Stmt], hop: bool) bool {
+    (stmts.len == 0).match ({
+        true  => false,
+        false => stmts[stmts.len - 1].match ({
+            .ExprStmt(e) => a.ae_escapes(decls, idx, locals, e, hop),
+            .Return(r)   => a.ae_escapes(decls, idx, locals, r, hop),
+            _            => false,
+        }),
+    })
+}
+ae_inits_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, inits: [FieldInit], hop: bool) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = a.ae_escapes(decls, idx, locals, fi.value, hop).match ({ true => true, false => f })
+    })
+    f
+}
+ae_arms_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, arms: [ArmData], hop: bool) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        f = a.ae_escapes(decls, idx, locals, ar.body, hop).match ({ true => true, false => f })
+    })
+    f
+}
+ae_items_escape = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, items: [Expr], hop: bool) bool {
+    f := false
+    items.loop((h, i, it) {
+        f = a.ae_escapes(decls, idx, locals, it.addr(), hop).match ({ true => true, false => f })
+    })
+    f
+}
+// ── ESCAPE THROUGH A FN (re-census #1: stack-escape via a wrapper) ─────────────────────────────────
+// The intra-procedural walk above flags `<local>.addr()` FORWARDED through slice/struct/match/cond/block
+// in a return/trailing. But a local's address laundered THROUGH A CALL — an identity/wrapper fn that
+// returns one of its pointer params (`id(x.addr())`, or `Box(p: id(x.addr()))`) — slipped past (the
+// `.Call` arm only forwarded `slice`). We close it with a per-fn summary "does fn's return value derive
+// from its param `pi`?" (bounded, structural — pointer flow needs no type infer), and follow ANY call
+// hop whose matching arg is itself an escaping local address. Sound (reject-more) + zero over-reject: the
+// arg must be an addr-of-LOCAL (the only tainted shape) AND the callee must actually thread that param to
+// its result; a callee that reads through the pointer and returns a fresh/copied value threads nothing.
+// does local fn `fn`'s return value derive from its param at index `pi`? (bounded interprocedural)
+ae_fn_returns_param = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, fn: string_view, pi: i32, depth: i32) bool {
+    (depth <= 0).match ({
+        true  => false,
+        false => {
+            f := idx.idx_func(decls, fn)
+            (eq(f.name, "") == false && pi >= 0 && pi < f.params.len).match ({
+                true  => a.ae_ret_body(decls, idx, f.body, f.params[pi].name, depth),
+                false => false,
+            })
+        },
+    })
+}
+// value position: does expr `e` yield the tracked param `name` (directly, forwarded, or via one hop)?
+ae_ret_yields = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: string_view, e: Ptr<Expr>, depth: i32) bool {
+    load(e).match ({
+        .Var(v)        => eq(v.name, name),
+        .Call(c)       => (eq(c.fn, "slice") && c.args.len > 0).match ({
+            true  => a.ae_ret_yields(decls, idx, name, c.args[0].addr(), depth),
+            false => a.ae_ret_call(decls, idx, c, name, depth),
+        }),
+        .MakeStruct(s) => a.ae_ret_inits(decls, idx, s.inits, name, depth),
+        .MakeEnum(mk)  => a.ae_ret_yields(decls, idx, name, mk.payload, depth),
+        .Match(m)      => a.ae_ret_valarms(decls, idx, m.arms, name, depth),
+        .Cond(d)       => a.ae_ret_yields(decls, idx, name, d.t, depth) || a.ae_ret_yields(decls, idx, name, d.e, depth),
+        .Block(b)      => a.ae_ret_blockval(decls, idx, b.stmts, name, depth),
+        .SliceLit(sd)  => a.ae_ret_items(decls, idx, sd.items, name, depth),
+        _              => false,
+    })
+}
+ae_ret_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, inits: [FieldInit], name: string_view, depth: i32) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = a.ae_ret_yields(decls, idx, name, fi.value, depth).match ({ true => true, false => f })
+    })
+    f
+}
+ae_ret_valarms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, arms: [ArmData], name: string_view, depth: i32) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        f = a.ae_ret_yields(decls, idx, name, ar.body, depth).match ({ true => true, false => f })
+    })
+    f
+}
+ae_ret_items = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, items: [Expr], name: string_view, depth: i32) bool {
+    f := false
+    items.loop((h, i, it) {
+        f = a.ae_ret_yields(decls, idx, name, it.addr(), depth).match ({ true => true, false => f })
+    })
+    f
+}
+ae_ret_blockval = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, stmts: [Stmt], name: string_view, depth: i32) bool {
+    (stmts.len == 0).match ({
+        true  => false,
+        false => stmts[stmts.len - 1].match ({
+            .ExprStmt(e) => a.ae_ret_yields(decls, idx, name, e, depth),
+            .Return(r)   => a.ae_ret_yields(decls, idx, name, r, depth),
+            _            => false,
+        }),
+    })
+}
+// one interprocedural hop: a call whose arg[i] yields `name` AND whose callee returns its param `i`.
+ae_ret_call = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, name: string_view, depth: i32) bool {
+    (depth <= 1).match ({
+        true  => false,
+        false => {
+            f := idx.idx_func(decls, c.fn)
+            found := false
+            (eq(f.name, "") == false && f.params.len == c.args.len).then({
+                c.args.loop((h, i, ar) {
+                    (a.ae_ret_yields(decls, idx, name, ar.addr(), depth - 1) && a.ae_fn_returns_param(decls, idx, c.fn, i, depth - 1)).then({
+                        found = true
+                    })
+                })
+            })
+            found
+        },
+    })
+}
+// returns-only statement walker over the callee body (mirrors the escape walker; trailing handled by caller).
+ae_ret_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], name: string_view, depth: i32) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = a.ae_ret_stmt(decls, idx, st, name, depth).match ({ true => true, false => f })
+    })
+    (body.len == 0).match ({
+        true  => f,
+        false => body[body.len - 1].match ({
+            .ExprStmt(e) => a.ae_ret_yields(decls, idx, name, e, depth).match ({
+                true  => true,
+                false => f,
+            }),
+            _            => f,
+        }),
+    })
+}
+ae_ret_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, st: Stmt, name: string_view, depth: i32) bool {
+    st.match ({
+        .Return(r)   => a.ae_ret_yields(decls, idx, name, r, depth),
+        .If(f)       => a.ae_ret_body(decls, idx, f.then, name, depth) || a.ae_ret_body(decls, idx, f.els, name, depth),
+        .While(w)    => a.ae_ret_body(decls, idx, w.body, name, depth),
+        .ExprStmt(e) => a.ae_ret_estmt(decls, idx, e, name, depth),
+        _            => false,
+    })
+}
+ae_ret_estmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, e: Ptr<Expr>, name: string_view, depth: i32) bool {
+    load(e).match ({
+        .Match(m) => a.ae_ret_stmtarms(decls, idx, m.arms, name, depth),
+        .Cond(d)  => a.ae_ret_estmt(decls, idx, d.t, name, depth) || a.ae_ret_estmt(decls, idx, d.e, name, depth),
+        .Block(b) => a.ae_ret_body(decls, idx, b.stmts, name, depth),
+        .Loop(l)  => a.ae_ret_body(decls, idx, l.body, name, depth),
+        _         => false,
+    })
+}
+ae_ret_stmtarms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, arms: [ArmData], name: string_view, depth: i32) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        hit := load(ar.body).match ({
+            .Block(b) => a.ae_ret_body(decls, idx, b.stmts, name, depth),
+            _         => false,
+        })
+        f = hit.match ({ true => true, false => f })
+    })
+    f
+}
+// the call-following forward for the escape walk: a local's address escaping into a returning-param arg.
+ae_call_escapes = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, c: CallData) bool {
+    f := idx.idx_func(decls, c.fn)
+    found := false
+    (eq(f.name, "") == false && f.params.len == c.args.len).then({
+        c.args.loop((h, i, ar) {
+            (a.ae_escapes(decls, idx, locals, ar.addr(), true) && a.ae_fn_returns_param(decls, idx, c.fn, i, consume_depth())).then({
+                found = true
+            })
+        })
+    })
+    found
+}
+// value position: IS a `<local>.addr()`, or forwards one through slice()/struct/match/cond/block, or (only
+// when `hop`) through a call to a fn that returns one of its pointer params (identity/wrapper laundering).
+// `hop` is on for the return/trailing escape (the actual stack-escape-via-fn vuln) and off for the send
+// path, which the sendability pass owns (so a laundered send stays kind `sendable`, not `escape`).
+ae_escapes = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, e: Ptr<Expr>, hop: bool) bool {
+    locals.ae_is_addr_local(e).match ({
+        true  => true,
+        false => load(e).match ({
+            .Call(c)       => (eq(c.fn, "slice") && c.args.len > 0).match ({
+                true  => a.ae_escapes(decls, idx, locals, c.args[0].addr(), hop),
+                false => hop.match ({
+                    true  => a.ae_call_escapes(decls, idx, locals, c),
+                    false => false,
+                }),
+            }),
+            .MakeEnum(mk)  => a.ae_escapes(decls, idx, locals, mk.payload, hop),
+            .MakeStruct(s) => a.ae_inits_escape(decls, idx, locals, s.inits, hop),
+            .Match(m)      => a.ae_arms_escape(decls, idx, locals, m.arms, hop),
+            .Cond(d)       => a.ae_escapes(decls, idx, locals, d.t, hop) || a.ae_escapes(decls, idx, locals, d.e, hop),
+            .Block(b)      => a.ae_block_val_escapes(decls, idx, locals, b.stmts, hop),
+            .SliceLit(sd)  => a.ae_items_escape(decls, idx, locals, sd.items, hop),
+            _              => false,
+        }),
+    })
+}
+// position walk (mirrors kv_escape_*): the source offset of the first escaping return/trailing, 0 = none.
+ae_kv_arm = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, body: Ptr<Expr>) i32 {
+    load(body).match ({
+        .Block(b) => a.ae_kv_stmts(decls, idx, locals, b.stmts),
+        _         => 0,
+    })
+}
+ae_kv_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) {
+        acc = acc.kv_kor(a.ae_kv_arm(decls, idx, locals, ar.body))
+    })
+    acc
+}
+ae_kv_expr_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Match(m) => a.ae_kv_arms(decls, idx, locals, m.arms),
+        .Cond(d)  => a.ae_kv_expr_stmt(decls, idx, locals, d.t).kv_kor(a.ae_kv_expr_stmt(decls, idx, locals, d.e)),
+        .Block(b) => a.ae_kv_stmts(decls, idx, locals, b.stmts),
+        .Loop(l)  => a.ae_kv_stmts(decls, idx, locals, l.body),
+        _         => 0,
+    })
+}
+ae_kv_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({
+        .Return(r)   => a.ae_escapes(decls, idx, locals, r, true).match ({
+            true  => load(r).expr_pos().pos_or(1),
+            false => 0,
+        }),
+        .If(f)       => a.ae_kv_stmts(decls, idx, locals, f.then).kv_kor(a.ae_kv_stmts(decls, idx, locals, f.els)),
+        .While(w)    => a.ae_kv_stmts(decls, idx, locals, w.body),
+        .Let(l)      => a.ae_send_pos(decls, idx, locals, l.value),
+        .Assign(x)   => a.ae_send_pos(decls, idx, locals, x.value),
+        .ExprStmt(e) => a.ae_kv_expr_stmt(decls, idx, locals, e).kv_kor(a.ae_send_pos(decls, idx, locals, e)),
+        _            => 0,
+    })
+}
+ae_kv_stmts = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.ae_kv_stmt(decls, idx, locals, st))
+    })
+    acc
+}
+ae_kv_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, locals: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := a.ae_kv_stmts(decls, idx, locals, body)
+    acc.kv_kor((body.len == 0).match ({
+        true  => 0,
+        false => body[body.len - 1].match ({
+            .ExprStmt(e) => a.ae_escapes(decls, idx, locals, e, true).match ({
+                true  => load(e).expr_pos().pos_or(1),
+                false => 0,
+            }),
+            _            => 0,
+        }),
+    }))
+}
+ae_check_func* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    locals := a.ae_collect(a.dead_nil(), f.body)
+    a.ae_kv_body(decls, idx, locals, f.body)
+}
+// ── UNIFIED send-payload walk (replaces the near-identical sd_*/sm_* traversal skeletons). ────────
+// ONE tree-fold parameterized by `mode`: 0 = send-Rc (sd_* leaves), 1 = send-MutPtr (sm_* leaves).
+// Returns a packed kind+pos (kv_kor keeps the first nonzero); both sendability passes now share ONE
+// traversal and only the per-node CLASSIFIER (which send surfaces, which payload type) differs by mode.
+// mode 0 has NO `.MethodCall` arm — send-Rc classifies plain `send(...)` calls only — so the
+// `mode==0 => 0` branch preserves that exactly (no descent into method-call children); the walk is
+// byte-for-byte the behavior of the two hand-cloned families it replaces.
+sv_call_pos = (env: Env, c: CallData, mode: i32) i32 { (mode == 0).match ({
+    true  => env.sd_call_pos(c),
+    false => env.sm_call_pos(c),
+}) }
+sv_args = (a: MutPtr<Malloc>, env: Env, args: [Expr], mode: i32) i32 {
+    acc := 0
+    args.loop((h, i, ar) {
+        acc = acc.kv_kor(a.sv_expr(env, ar.addr(), mode))
+    })
+    acc
+}
+sv_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData], mode: i32) i32 {
+    acc := 0
+    arms.loop((h, i, ar) {
+        acc = acc.kv_kor(a.sv_expr(a.arm_env(env, subjty, ar), ar.body, mode))
+    })
+    acc
+}
+sv_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit], mode: i32) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc.kv_kor(a.sv_expr(env, fi.value, mode))
+    })
+    acc
+}
+sv_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, mode: i32) i32 {
+    load(e).match ({
+        .Call(c)        => env.sv_call_pos(c, mode).kv_kor(a.sv_args(env, c.args, mode)),
+        .MethodCall(mc) => (mode == 0).match ({
+            true  => 0,
+            false => env.sm_mcall_pos(mc).kv_kor(a.sv_expr(env, mc.recv, mode)).kv_kor(a.sv_args(env, mc.args, mode)),
+        }),
+        .Bin(b)         => a.sv_expr(env, b.lhs, mode).kv_kor(a.sv_expr(env, b.rhs, mode)),
+        .Index(ix)      => a.sv_expr(env, ix.seq, mode).kv_kor(a.sv_expr(env, ix.idx, mode)),
+        .Cond(d)        => a.sv_expr(env, d.c, mode).kv_kor(a.sv_expr(env, d.t, mode)).kv_kor(a.sv_expr(env, d.e, mode)),
+        .Member(m)      => a.sv_expr(env, m.obj, mode),
+        .Arrow(ar)      => a.sv_expr(env, ar.obj, mode),
+        .Match(m)       => a.sv_expr(env, m.subj, mode).kv_kor(a.sv_arms(env, env.infer_expr(m.subj), m.arms, mode)),
+        .MakeEnum(mk)   => a.sv_expr(env, mk.payload, mode),
+        .MakeStruct(s)  => a.sv_inits(env, s.inits, mode),
+        .SliceLit(sd)   => a.sv_args(env, sd.items, mode),
+        .Loop(l)        => a.sv_expr(env, l.seq, mode).kv_kor(a.sv_body(env, l.body, mode)),
+        .Block(b)       => a.sv_body(env, b.stmts, mode),
+        _               => 0,
+    })
+}
+sv_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, mode: i32) i32 {
+    st.match ({
+        .Let(l)      => a.sv_expr(env, l.value, mode),
+        .Assign(x)   => a.sv_expr(env, x.target, mode).kv_kor(a.sv_expr(env, x.value, mode)),
+        .Return(r)   => a.sv_expr(env, r, mode),
+        .ExprStmt(e) => a.sv_expr(env, e, mode),
+        .If(f)       => a.sv_expr(env, f.c, mode).kv_kor(a.sv_body(env, f.then, mode)).kv_kor(a.sv_body(env, f.els, mode)),
+        .While(w)    => a.sv_expr(env, w.c, mode).kv_kor(a.sv_body(env, w.body, mode)),
+        .IndexSet(x) => a.sv_expr(env, x.seq, mode).kv_kor(a.sv_expr(env, x.idx, mode)).kv_kor(a.sv_expr(env, x.value, mode)),
+    })
+}
+sv_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], mode: i32) i32 {
+    acc := 0
+    e := env
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.sv_stmt(e, st, mode))
+        e = a.extend_env(e, st)
+    })
+    acc
+}
+sv_check_func* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, mode: i32) i32 {
+    env := Env(
+        vars: a.params_env(f.params),
+        decls: decls,
+        didx: idx,
+        exp: f.ret,
+        a: a,
+    )
+    a.sv_body(env, f.body, mode)
+}
+// a scratch-SOURCE expression: memory whose lifetime is the spawner's frame/allocator, in either
+// surface form (flat `acquire(a, n)` or UFCS `a.acquire(n)` — this pass runs pre-desugar).
+sx_is_acquire = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)        => c.fn.sx_named("acquire", "__acquire") && c.args.len >= 1,
+        .MethodCall(mc) => mc.method.sx_named("acquire", "__acquire"),
+        _               => false,
+    })
+}
+// `make_in(…)` bare, or the Result-unified `make_in(…).expect(…)` — the arena constructor returns
+// Result<Arena, IoError> now, so the textbook scratch shape carries an `.expect` wrapper; unwrap it
+// (an `.expect` whose receiver is NOT a scratch source still classifies clean, e.g. Arc `new_in`).
+sx_is_make_in = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)        => c.fn.sx_named("make_in", "__make_in") && c.args.len >= 1 || c.fn.sx_named("expect", "__expect") && c.args.len >= 1 && c.args[0].match ({
+            .Call(c2)        => c2.fn.sx_named("make_in", "__make_in") && c2.args.len >= 1,
+            .MethodCall(mc2) => mc2.method.sx_named("make_in", "__make_in"),
+            _                => false,
+        }),
+        .MethodCall(mc) => mc.method.sx_named("make_in", "__make_in") || mc.method.sx_named("expect", "__expect") && mc.recv.sx_is_make_in(),
+        _               => false,
+    })
+}
+// `<var>.addr()` — the address of a stack slot in the spawner's frame.
+sx_is_addr_of_var = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)        => (eq(c.fn, "addr") && c.args.len == 1).match ({
+            true  => c.args[0].match ({
+                .Var(v) => true,
+                _       => false,
+            }),
+            false => false,
+        }),
+        .MethodCall(mc) => (eq(mc.method, "addr") && mc.args.len == 0).match ({
+            true  => load(mc.recv).match ({
+                .Var(v) => true,
+                _       => false,
+            }),
+            false => false,
+        }),
+        _               => false,
+    })
+}
+sx_is_slicelit = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .SliceLit(sd) => true,
+        _             => false,
+    })
+}
+sx_is_source = (e: Ptr<Expr>) bool { e.sx_is_acquire() || e.sx_is_make_in() || e.sx_is_addr_of_var() || e.sx_is_slicelit() }
+// does a let/assign VALUE make its binding spawner-scratch? a direct source, or an alias of a
+// tainted local (`q := p`). Anything else (calls, member reads, literals) stays clean — lenient.
+sx_taints = (taint: Ptr<DeadList>, e: Ptr<Expr>) bool {
+    e.sx_is_source().match ({
+        true  => true,
+        false => load(e).match ({
+            .Var(v) => taint.dead_has(v.name),
+            _       => false,
+        }),
+    })
+}
+// thread the taint set across one statement: a Let/Assign of a source (or an alias) taints the
+// name; a (re)bind to anything clean REVIVES it, so a reused name never over-rejects.
+sx_step = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+    st.match ({
+        .Let(l)    => taint.sx_taints(l.value).match ({
+            true  => a.dead_cons(l.name, taint),
+            false => a.dead_remove(taint, l.name),
+        }),
+        .Assign(x) => load(x.target).match ({
+            .Var(v) => taint.sx_taints(x.value).match ({
+                true  => a.dead_cons(v.name, taint),
+                false => a.dead_remove(taint, v.name),
+            }),
+            _       => taint,
+        }),
+        _          => taint,
+    })
+}
+// fresh binders (lambda params, loop idx/elem/handler, arm binds) shadow any same-named taint.
+sx_drop_params = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, ps: [Param]) Ptr<DeadList> {
+    out := taint
+    ps.loop((h, i, p) {
+        out = a.dead_remove(out, p.name)
+    })
+    out
+}
+// a positioned anchor for a source expression (expr_pos has no MethodCall arm; this pass sees the
+// pre-desugar UFCS form, so `a.acquire(n)` anchors at the method name).
+sx_pos = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .MethodCall(mc) => mc.pos.pos_or(load(mc.recv).expr_pos()),
+        _               => load(e).expr_pos(),
+    })
+}
+// the offending source offset inside a send-payload / spawn-state expression: a tainted bare local,
+// a direct source expression, or one embedded in a struct-literal field / enum payload / nested
+// literal. Everything else (calls, member reads, plain values) is 0 = clean.
+sx_payload_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    e.sx_is_source().match ({
+        true  => e.sx_pos().pos_or(1),
+        false => load(e).match ({
+            .Var(v)        => taint.dead_has(v.name).match ({ true => v.pos.pos_or(1), false => 0 }),
+            .MakeEnum(mk)  => a.sx_payload_pos(taint, mk.payload),
+            .MakeStruct(s) => a.sx_inits_pos(taint, s.inits),
+            _              => 0,
+        }),
+    })
+}
+sx_inits_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc.kv_kor(a.sx_payload_pos(taint, fi.value))
+    })
+    acc
+}
+// pack an offending position under a rule kind (0 = clean stays 0 — kv_at alone would emit a bare kind).
+sx_kv = (pos: i32, k: i32) i32 { (pos == 0).match ({ true => 0, false => kv_at(k, pos) }) }
+// actor-send / spawn surfaces (name-based, arity-guarded): the PAYLOAD/STATE is the LAST argument.
+//   send:         `send(h, m)` (2+ args) / `h.send(m)` — ActorRef/ActorHandle/ActorCell/ReplyRef
+//   pool_send:    `pool_send(p, a, m)` (3 args) / `p.pool_send(a, m)` (2 args)
+//   ref_send_msg: `ref_send_msg(r, m)` (2 args) / `r.ref_send_msg(m)` (1 arg) — S2's typed ActorRef
+//                 REPLY send (std.concurrent.pool_actor). A reply is sent from INSIDE `receive`, where the
+//                 handler's OWN per-behavior scratch (`self.scratch`, reset when the behavior ends) is in
+//                 scope — so a scratch pointer routed out through a reply would dangle before the receiver
+//                 reads it. Recognizing it here rejects that identically to a forward send (KSCRATCHSEND).
+//   spawn:        `spawn(alloc, cap, state)` (3 args) / `alloc.spawn(cap, state)` (2-arg MethodCall) /
+//              module-qualified `actor.spawn(alloc, cap, state)` — the flattener rewrites a
+//              namespace-qualified call to `alias__spawn(alloc, cap, state)`, so the flat-Call
+//              match also accepts the `…__spawn` / `…__send` / `…__pool_send` suffix forms.
+sx_named* = (fn: string_view, bare: string_view, qual: string_view) bool { eq(fn, bare) || fn.ends_with(qual) }
+sx_call_kind* = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, c: CallData) i32 {
+    sk := (c.fn.sx_named("send", "__send") && c.args.len >= 2 || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3 || c.fn.sx_named("ref_send_msg", "__ref_send_msg") && c.args.len == 2).match ({
+        true  => a.sx_payload_pos(taint, c.args[c.args.len - 1].addr()).sx_kv(KSCRATCHSEND()),
+        false => 0,
+    })
+    st := (c.fn.sx_named("spawn", "__spawn") && c.args.len == 3).match ({
+        true  => a.sx_payload_pos(taint, c.args[2].addr()).sx_kv(KSCRATCHSTATE()),
+        false => 0,
+    })
+    sk.kv_kor(st)
+}
+sx_mcall_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, mc: MethodCallData) i32 {
+    sk := (mc.method.sx_named("send", "__send") && mc.args.len >= 1 || mc.method.sx_named("pool_send", "__pool_send") && mc.args.len == 2 || mc.method.sx_named("ref_send_msg", "__ref_send_msg") && mc.args.len == 1).match ({
+        true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSEND()),
+        false => 0,
+    })
+    st := (mc.method.sx_named("spawn", "__spawn") && (mc.args.len == 2 || mc.args.len == 3)).match ({
+        true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSTATE()),
+        false => 0,
+    })
+    sk.kv_kor(st)
+}
+sx_args_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) {
+        acc = acc.kv_kor(a.sx_expr_kind(taint, ar.addr()))
+    })
+    acc
+}
+sx_arms_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) {
+        t2 := is_empty(ar.bind).match ({ true => taint, false => a.dead_remove(taint, ar.bind) })
+        acc = acc.kv_kor(a.sx_expr_kind(t2, ar.body))
+    })
+    acc
+}
+sx_inits_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc.kv_kor(a.sx_expr_kind(taint, fi.value))
+    })
+    acc
+}
+sx_expr_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)        => a.sx_call_kind(taint, c).kv_kor(a.sx_args_kind(taint, c.args)),
+        .MethodCall(mc) => a.sx_mcall_kind(taint, mc).kv_kor(a.sx_expr_kind(taint, mc.recv)).kv_kor(a.sx_args_kind(taint, mc.args)),
+        .Bin(b)         => a.sx_expr_kind(taint, b.lhs).kv_kor(a.sx_expr_kind(taint, b.rhs)),
+        .Index(ix)      => a.sx_expr_kind(taint, ix.seq).kv_kor(a.sx_expr_kind(taint, ix.idx)),
+        .Cond(d)        => a.sx_expr_kind(taint, d.c).kv_kor(a.sx_expr_kind(taint, d.t)).kv_kor(a.sx_expr_kind(taint, d.e)),
+        .Member(m)      => a.sx_expr_kind(taint, m.obj),
+        .Arrow(ar)      => a.sx_expr_kind(taint, ar.obj),
+        .Match(m)       => a.sx_expr_kind(taint, m.subj).kv_kor(a.sx_arms_kind(taint, m.arms)),
+        .MakeEnum(mk)   => a.sx_expr_kind(taint, mk.payload),
+        .MakeStruct(s)  => a.sx_inits_kind(taint, s.inits),
+        .SliceLit(sd)   => a.sx_args_kind(taint, sd.items),
+        .Loop(l)        => a.sx_expr_kind(taint, l.seq).kv_kor(a.sx_body_kind(a.dead_remove(a.dead_remove(a.dead_remove(taint, l.idx), l.elem), l.h), l.body)),
+        .Lambda(lm)     => a.sx_body_kind(a.sx_drop_params(taint, lm.params), lm.body),
+        .Block(b)       => a.sx_body_kind(taint, b.stmts),
+        _               => 0,
+    })
+}
+sx_stmt_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => a.sx_expr_kind(taint, l.value),
+        .Assign(x)   => a.sx_expr_kind(taint, x.target).kv_kor(a.sx_expr_kind(taint, x.value)),
+        .Return(r)   => a.sx_expr_kind(taint, r),
+        .ExprStmt(e) => a.sx_expr_kind(taint, e),
+        .If(f)       => a.sx_expr_kind(taint, f.c).kv_kor(a.sx_body_kind(taint, f.then)).kv_kor(a.sx_body_kind(taint, f.els)),
+        .While(w)    => a.sx_expr_kind(taint, w.c).kv_kor(a.sx_body_kind(taint, w.body)),
+        .IndexSet(x) => a.sx_expr_kind(taint, x.seq).kv_kor(a.sx_expr_kind(taint, x.idx)).kv_kor(a.sx_expr_kind(taint, x.value)),
+    })
+}
+sx_body_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, body: [Stmt]) i32 {
+    acc := 0
+    t := taint
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.sx_stmt_kind(t, st))
+        t = a.sx_step(t, st)
+    })
+    acc
+}
+sx_func_kind* = (a: MutPtr<Malloc>, f: Func) i32 { a.sx_body_kind(a.dead_nil(), f.body) }
+// name the value in the message (teach-the-fix, spec §5): copy the identifier the caret points at
+// out of the source; a non-identifier anchor (a slice literal's first item, a synthesized pos)
+// falls back to a generic subject.
+sx_push_name = (s: String, a: MutPtr<Malloc>, src: string_view, pos: i32, i: i32, w: i32) String {
+    (i >= w).match ({
+        true  => s,
+        false => sx_push_name(s.gstr_push(a, src.at(pos + i)), a, src, pos, i + 1, w),
+    })
+}
+sx_subject* = (a: MutPtr<Malloc>, src: string_view, pos: i32, w: i32) string_view {
+    src.at(pos).is_alnum().match ({
+        true  => a.gstr_string(w + 4).gstr_append(a, "`").sx_push_name(a, src, pos, 0, w).gstr_append(a, "`").gstr_finish(a),
+        false => "this value",
+    })
+}
+sx_message* = (a: MutPtr<Malloc>, code: i32, subject: string_view) string_view {
+    tail := (code == KSCRATCHSEND()).match ({
+        true  => " is spawner-local scratch memory (allocator/arena/stack storage) and crosses an actor boundary in this send; the sender frees it independently of the receiving actor (use-after-free)",
+        false => " is spawner-local scratch memory (allocator/arena/stack storage) embedded in the initial actor state; the actor outlives the spawner's scratch (use-after-free)",
+    })
+    a.gstr_string(256).gstr_append(a, subject).gstr_append(a, tail).gstr_finish(a)
+}
+sx_hint* = (code: i32) string_view {
+    (code == KSCRATCHSEND()).match ({
+        true  => "construct inside the actor, or promote with `.share(alloc)` (Arc) / `.give(alloc)` (iso move) — see docs/two-memory-design.md",
+        false => "construct inside the actor, promote with `.share(alloc)` / `.give(alloc)`, or pass state as plain values — see docs/two-memory-design.md",
+    })
+}
