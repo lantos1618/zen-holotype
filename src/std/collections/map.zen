@@ -44,6 +44,7 @@
 { Allocator, try_acquire } = std.mem.alloc    // explicit allocator trait
 { Result, IoError, Opt } = std.core.result
 { eq, view } = std.text.str    // byte-wise equality (`==` on strings compares POINTERS) + hashing view
+{ fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
 // One key slot. The named one-pointer wrapper keeps this raw backing-store layout explicit.
 MKey: {
     k: string_view,
@@ -343,13 +344,8 @@ Map*<T>: {
 }
 // FNV-1a hash of k's bytes, folded into [0, cap). cap is always >= 1 at call sites.
 mhash = (k: string_view, cap: i64) i64 {
-    bs: [u8] := k.view()
-    h := 2166136261
-    bs.loop((hh, i, b) {
-        h = (h ^ to_i64(b)) * 16777619
-    })
     // mask to non-negative then mod into the bucket range
-    (h & 4611686018427387903) % cap
+    (fnv1a32(k.view()) & 4611686018427387903) % cap
 }
 // Walk bucket chain b for key k in the index ix over key column ks (cap entries, links at [cap..]).
 mfind = (ks: [string_view], ix: [i64], cap: i64, b: i64, k: string_view) i64 { mchain(ks, ix, cap, ix[b], k) }
