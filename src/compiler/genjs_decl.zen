@@ -1,0 +1,41 @@
+// compiler.genjs_decl — function, parameter, and global declaration JS-emission over the genc AST.
+// Extracted from compiler.genjs; consumes statement emission + the width/typed-var table from
+// compiler.genjs_expr, and name mangling from compiler.genjs_lit. Module assembly stays in compiler.genjs.
+{ String } = std.text.string
+{ eq } = std.text.str
+{ Func, Param, GlobalData, gstr_append } = compiler.genc
+{ Malloc } = std.mem.alloc
+{ jname } = compiler.genjs_lit
+{ js_stmts, js_expr, int_width, js_w_open, js_w_close, vw_note, vw_reset } = compiler.genjs_expr
+// ── declarations ──────────────────────────────────────────────────────────────────────────────────
+// a function; every param is a bare JS name (types erased). `main` becomes `zen_main`.
+js_func_name = (s: String, a: MutPtr<Malloc>, name: string_view) String { eq(name, "main").match ({
+    true  => s.gstr_append(a, "zen_main"),
+    false => s.jname(a, name),
+}) }
+js_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match ({ true => out, false => out.gstr_append(a, ", ") })
+        out = out.jname(a, p.name)
+    })
+    out
+}
+js_param_norms = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        vw_note(p.name, p.ty)
+        w := int_width(p.ty)
+        out = (w == 0).match ({
+            true  => out,
+            false => out.jname(a, p.name).gstr_append(a, " = ").js_w_open(a, w).jname(a, p.name).js_w_close(a, w).gstr_append(a, "; "),
+        })
+    })
+    out
+}
+js_func* = (s: String, a: MutPtr<Malloc>, f: Func) String {
+    vw_reset(a)
+    s.gstr_append(a, "function ").js_func_name(a, f.name).gstr_append(a, "(").js_params(a, f.params).gstr_append(a, ") { ").js_param_norms(a, f.params).js_stmts(a, f.body).gstr_append(a, "}\n")
+}
+// a module-level global `name := init` -> `let name = init;` (mutable; some are scheduler/runtime state).
+js_global* = (s: String, a: MutPtr<Malloc>, g: GlobalData) String { s.gstr_append(a, "let ").jname(a, g.name).gstr_append(a, " = ").js_expr(a, g.init).gstr_append(a, ";\n") }
