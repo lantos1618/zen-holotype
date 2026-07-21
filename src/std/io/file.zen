@@ -11,17 +11,19 @@ STDOUT := 1
 // progress, so we stop with `.Err(.Eof)` rather than spin forever; a short write advances the pointer
 // and recurses until `len` hits 0, then yields `.Ok(total)`. This is the low-level sink: it SURFACES a
 // write failure (broken pipe / EPIPE, full disk / ENOSPC) as a value instead of swallowing it. Callers
-// that want best-effort (println/print in std.text.fmt) discard the Result with `.or(0)`.
-out_write_all = (ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError> {
+// that want best-effort (println/print in std.text.fmt) discard the Result with `.or(0)`. This is the
+// ONE fd write-all loop for the whole stdlib: std.sys (Writer) and std.net (send) import it from here —
+// io.file is the lowest-level file module (sys already imports it), so the flat namespace holds one def.
+write_all* = (fd: i32, ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError> {
     out: Result<i64, IoError> := (len <= 0).match ({
         true  => ok(done),
         false => {
-            w := STDOUT.write(ptr, len)
+            w := fd.write(ptr, len)
             (w < 0).match ({
                 true  => err(IoError.Errno(to_i32(w))),
                 false => (w == 0).match ({
                     true  => err(IoError.Eof),
-                    false => out_write_all(ptr.offset(w), len - w, done + w),
+                    false => write_all(fd, ptr.offset(w), len - w, done + w),
                 }),
             })
         },
@@ -32,10 +34,10 @@ out_write_all = (ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError> {
 // write failure — the root fd sink under fmt/io. println/print discard the Result to stay best-effort.
 out* = (s: string_view) Result<i64, IoError> {
     v := s.view()
-    out_write_all(v.ptr, v.len, 0)
+    write_all(STDOUT, v.ptr, v.len, 0)
 }
 // Writes length-tracked bytes to stdout without requiring a trailing NUL. Same Result contract as `out`.
-out_bytes* = (bytes: [u8]) Result<i64, IoError> { out_write_all(bytes.ptr, bytes.len, 0) }
+out_bytes* = (bytes: [u8]) Result<i64, IoError> { write_all(STDOUT, bytes.ptr, bytes.len, 0) }
 // POSIX open(2) bit flags. Export the atoms so callers can state the exact mask they need instead of
 // copying opaque decimal sums; O_WRTRUNC is the common create-or-truncate writer used by save().
 O_RDONLY* := 0

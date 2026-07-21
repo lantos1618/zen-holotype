@@ -20,33 +20,15 @@
 //
 { Heap } = std.mem.alloc
 { gpa } = std.mem.heap
-{ write } = std.c.libc
 { view } = std.text.str
 { Result, IoError, name, panic } = std.core.result
 { argc, arg, getEnv } = std.os
 { mono_ns, wall_s } = std.time
-{ contents, save } = std.io.file
+// The one fd write-all loop lives in std.io.file (the lowest-level file module, already imported here);
+// `write` / `write_bytes` below thread the raw descriptor through it. See std.io.file for the contract.
+{ contents, save, write_all } = std.io.file
 STDOUT_FD := 1
 STDERR_FD := 2
-// write-all retry loop over a raw fd: emit `[ptr, ptr+len)` in full, threading the running total in
-// `done`. write(2) returning < 0 → `.Err(.Errno(rc))`; a 0-byte return on a non-empty buffer means no
-// progress, so we stop with `.Err(.Eof)` rather than spin forever; a short write advances the pointer
-// and recurses until `len` hits 0, then yields `.Ok(total)`.
-write_all = (fd: i32, ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError> {
-    (len <= 0).match ({
-        true  => .Ok(done),
-        false => {
-            w := fd.write(ptr, len)
-            (w < 0).match ({
-                true  => .Err(.Errno(to_i32(w))),
-                false => (w == 0).match ({
-                    true  => .Err(.Eof),
-                    false => write_all(fd, ptr.offset(w), len - w, done + w),
-                }),
-            })
-        },
-    })
-}
 // Writer — a byte sink over a POSIX descriptor (fd 1 = stdout, fd 2 = stderr). The narrowest output
 // capability: hand a library a `Writer` and it can emit bytes, nothing else. `write` takes a str (no
 // trailing NUL assumed); `write_bytes` a length-tracked slice. Both do a write-all loop and surface

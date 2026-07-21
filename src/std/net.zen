@@ -25,7 +25,8 @@
 { Result, IoError, ok, err } = std.core.result
 { zeroed, release } = std.mem.raw
 { eq, view } = std.text.str
-{ read, write, close } = std.c.libc
+{ read, close } = std.c.libc
+{ write_all } = std.io.file    // the ONE fd write-all loop (short-write retry); net maps any non-full write to .Eof
 // ── foreign POSIX socket calls (C names, module-private) ──────────────────────────────────────────
 // `int socket(int domain, int type, int protocol)` — a new endpoint; returns an fd or -1.
 socket = (domain: i32, ty: i32, protocol: i32) i32
@@ -253,20 +254,13 @@ recv*<A> = (a: MutPtr<A>, c: TcpConn, n: i64) Result<string_view, IoError> {
         .Err(e)  => err(e),
     })
 }
-// write ALL of `off..n` from `buf`, following short writes; returns the offset reached (== n on success).
-write_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
-    (off >= n).match ({
-        true  => n,
-        false => {
-            w := fd.write(buf.offset(off), n - off)
-            (w <= 0).match ({ true => off, false => fd.write_all(buf, off + w, n) })
-        },
-    })
-}
-// write every byte of `bytes`; Ok(count) on a full write, .Err(.Eof) on a short/failed write.
+// write every byte of `bytes`; Ok(count) on a full write, .Err(.Eof) on a short/failed write. Rides the
+// shared std.io.file.write_all fd loop, then collapses its richer error (Errno/Eof) to net's flat .Eof.
 send* = (c: TcpConn, bytes: [u8]) Result<i64, IoError> {
-    w := c.fd.write_all(bytes.ptr, 0, bytes.len)
-    (w == bytes.len).match ({ true => ok(w), false => err(IoError.Eof) })
+    c.fd.write_all(bytes.ptr, bytes.len, 0).match ({
+        .Ok(n)  => ok(n),
+        .Err(e) => err(IoError.Eof),
+    })
 }
 // convenience: send a `str`'s bytes (no trailing NUL).
 send_str* = (c: TcpConn, s: string_view) Result<i64, IoError> { c.send(s.view()) }
