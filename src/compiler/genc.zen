@@ -584,50 +584,9 @@ blk_diverges* = (e: Ptr<Expr>) bool {
         _         => false,
     })
 }
-// a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
-// (compiler.check splices it), never emitted as a C function — so genModule skips it.
-is_fnt* = (t: Ty) bool {
-    t.match ({
-        .FnT(f) => true,
-        _       => false,
-    })
-}
-has_fnt_param* = (ps: [Param]) bool {
-    found := false
-    ps.loop((h, i, p) {
-        found = p.ty.is_fnt().match ({ true => true, false => found })
-    })
-    found
-}
-// a TEMPLATE: a fn inlined/monomorphized per call site — has an FnT param (a lambda to splice) or type
-// params (to substitute). It must have a BODY to inline; a BODYLESS fn (an extern like makecontext, with
-// an FnT param for a real C function-pointer arg) is a normal callable, NOT a template to inline away.
-is_generic_fn* = (f: Func) bool { (f.params.has_fnt_param() || f.tparams.len > 0) && f.body.len > 0 }
-is_template* = (d: Decl) bool {
-    d.match ({
-        .DFunc(f) => f.is_generic_fn(),
-        _         => false,
-    })
-}
-// a TRAIT is written as a struct whose fields are method signatures (FnT types). It has no
-// runtime representation in the monomorphic/inline model — the impl methods are plain functions —
-// so genModule skips it, exactly like a template function. NOTE: a data struct holding a function-
-// VALUE field (a closure) is ALSO all-/some-FnT-shaped and indistinguishable here by shape alone; the
-// emit pipeline (genc_emit) disambiguates by USAGE — a constructed struct is real, a trait is only
-// impl'd, never constructed — via `struct_is_trait_emit`.
-struct_is_trait = (sd: StructDecl) bool {
-    found := false
-    sd.fields.loop((h, i, f) {
-        found = f.ty.is_fnt().match ({ true => true, false => found })
-    })
-    found
-}
-is_trait* = (d: Decl) bool {
-    d.match ({
-        .DStruct(sd) => sd.struct_is_trait(),
-        _            => false,
-    })
-}
+// is_fnt (Ty), is_generic_fn (Func), is_template/is_trait (Decl), struct_is_trait (StructDecl) and
+// has_fnt_param ([Param]) moved to compiler.astops (grouped with the Ty::is_fnt trait impl they use),
+// so this base module carries no reference to a method defined outside its own import closure.
 fntype* = (params: [Ty], ret: Ptr<Ty>) Ty {
     .FnT(FnTData(
         params: params,
