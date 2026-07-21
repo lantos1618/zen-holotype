@@ -33,7 +33,7 @@ GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zen regen clean harness harness-fast difftest docs-check ffi-verify resolve-seed
+.PHONY: zen regen clean harness harness-fast difftest docs-check ffi-verify setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -100,10 +100,20 @@ docs-check:
 ffi-verify: zen
 	cd $(ROOT) && ./scripts/ffi_verify.sh $(ZENC)
 
-# Reproduce + stage the committed seed from the .zen sources after a merge/rebase touched the seed
-# (the seed is a build artifact, so a textual merge is meaningless — regen is the truth).
-# On conflict: `git checkout --theirs bootstrap/zenc.gen.c` (either side works), then run this.
-# Builds zenc from the checked-out seed, regenerates the byte-exact seed, and stages it. Commit
-# yourself (or, mid-rebase, `git rebase --continue`).
+# Register the local git merge driver that auto-resolves the generated seed (bootstrap/zenc.gen.c).
+# `.gitattributes` maps that path to `merge=zenseed`; this points the driver at scripts/zenseed-merge.sh.
+# Merge drivers live in LOCAL git config (not committed), so every clone must run this once.
+# After a merge/rebase that touched the seed, run `make resolve-seed` to reproduce it from source.
+setup-git:
+	cd $(ROOT) && git config merge.zenseed.name "zen generated-seed (regen from .zen source after merge)" \
+	  && git config merge.zenseed.driver '$(ROOT)/scripts/zenseed-merge.sh %O %A %B %P' \
+	  && echo "registered merge.zenseed driver; run 'make -f bootstrap/Makefile resolve-seed' after a seed merge"
+
+# Reproduce + stage the committed seed from the .zen sources after a merge/rebase resolved the seed
+# conflict (the seed is a build artifact, so a textual merge is meaningless — regen is the truth).
+# Use AFTER the conflict is resolved to a clean file (the zenseed driver does this automatically, or
+# `git rebase -X theirs` / `git checkout --theirs bootstrap/zenc.gen.c` by hand): builds zenc from the
+# resolved seed, regenerates the byte-exact seed, and stages it. Commit it yourself (or, mid-rebase,
+# `git add bootstrap/zenc.gen.c && git rebase --continue`).
 resolve-seed: regen
 	cd $(ROOT) && git add bootstrap/zenc.gen.c && echo "seed regenerated + staged — commit it (or 'git rebase --continue' if mid-rebase)"

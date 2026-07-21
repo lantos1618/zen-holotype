@@ -1,6 +1,6 @@
 # Zen examples
 
-Ten examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
+Eleven examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
 
 Build once, then run a C example with:
 
@@ -19,6 +19,7 @@ make
 | `stats.zen` | Numeric work over `Vec<i32>`. |
 | `str_ops_demo.zen` | Allocator-backed string operations. |
 | `json_demo.zen` | Build and print JSON. |
+| `store_demo.zen` | Redux-style state and a pure reducer. |
 
 Run any of them as `./zen run examples/<name>.zen`.
 
