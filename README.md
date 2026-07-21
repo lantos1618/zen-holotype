@@ -79,7 +79,7 @@ half_of = (n: i32) Result<i32, IoError> {
 ```
 
 See **[`examples/`](examples/)** (`hello`, `tour`, `shapes`, `stats`, `str_ops_demo`,
-`json_demo`, `store_demo`, `actor_demo`, `pool_actor_demo`, and the stdin filters `stdin_echo` / `wordfreq`) —
+`json_demo`, `actor_demo`, `pool_actor_demo`, and the stdin filters `stdin_echo` / `wordfreq`) —
 every one runs with `zenc run examples/<name>.zen`.
 
 ## The language

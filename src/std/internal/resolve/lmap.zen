@@ -1,0 +1,312 @@
+// @self-hosted-only
+// std.internal.resolve.lmap — flat-region and line-map registry for diagnostics.
+{ Malloc } = std.mem.alloc
+{ FlatRegion, res_sbyte } = std.internal.resolve.scan
+
+// ── USER-MODULE region registry ─────────────────────────────────────────────────────────────────
+// The main-body guard above only protects decls in [nsl, bodyend) — a NON-MAIN user module whose own
+// top-level decl collides with an unimported transitive std export used to lose that decl SILENTLY
+// (dedup keeps the FIRST occurrence, and dependency bodies precede the module's own). Each user
+// module's stripped body span in the append-only flat is recorded here during closure load, so
+// shadow_flat_users can run the same guarded rename per module. Reset per program (see
+// alias_prefixes_reset for the pattern); internal builds never read it (enable=false → seed unchanged).
+UserRegion*: {
+    id: string_view,
+    lo: i64,
+    hi: i64,
+}
+UREGION_CAP := 512
+no_uregions = () [UserRegion] { slice(null_ptr(), 0) }
+uregion_buf := no_uregions()
+uregion_n := 0
+uregions_reset* = (a: MutPtr<Malloc>) void {
+    uregion_buf = slice(a.acquire(UREGION_CAP * sizeof(UserRegion)), UREGION_CAP)
+    uregion_n = 0
+}
+note_uregion* = (id: string_view, lo: i64, hi: i64) void {
+    (uregion_n < uregion_buf.len).then({
+        uregion_buf[uregion_n] = UserRegion(
+            id: id,
+            lo: lo,
+            hi: hi,
+        )
+        uregion_n = uregion_n + 1
+    })
+}
+uregions_get* = () [UserRegion] { slice(uregion_buf.ptr, uregion_n) }
+// ── FLAT-REGION / LINE map (identity-based diagnostics) ─────────────────────────────────────────
+// Every module-body append into the flat records a FlatRegion, and the strip walk records — for each
+// KEPT line — its 1-based line in the module's ORIGINAL source (import/ns lines are stripped whole,
+// so kept-line numbers jump over them; ns-prefix rewrites are intra-line and never change line
+// counts). A diagnostic's flat offset then resolves to its module IDENTITY and original line
+// directly, with no text matching. Recording is on only while resolve_program_data builds a flat
+// (lmap_on), so parse_resolved_program's per-module strip never pollutes the maps. Reset per
+// program (see uregions_reset for the pattern); buffers grow geometrically via the mp allocator.
+lmap_on := false
+no_fregions = () [FlatRegion] { slice(null_ptr(), 0) }
+freg_buf := no_fregions()
+freg_n := 0
+no_lsrc = () [i32] { slice(null_ptr(), 0) }
+lsrc_buf := no_lsrc()
+lsrc_n := 0
+no_ldrops = () [i64] { slice(null_ptr(), 0) }
+ldrop_buf := no_ldrops()    // flattened (start, end) pairs, ascending, from ONE dedup pass
+ldrop_n := 0
+freg_alloc = (a: MutPtr<Malloc>, n: i64) [FlatRegion] { slice(a.acquire(n * sizeof(FlatRegion)), n) }
+lsrc_alloc = (a: MutPtr<Malloc>, n: i64) [i32] { slice(a.acquire(n * sizeof(i32)), n) }
+ldrop_alloc = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire(n * sizeof(i64)), n) }
+lmap_reset* = (a: MutPtr<Malloc>) void {
+    freg_buf = a.freg_alloc(64)
+    freg_n = 0
+    lsrc_buf = a.lsrc_alloc(1024)
+    lsrc_n = 0
+    ldrop_buf = a.ldrop_alloc(64)
+    ldrop_n = 0
+    lmap_on = true
+}
+lmap_off* = () void { lmap_on = false }
+lmap_lines* = () i64 { lsrc_n }
+fregions_get* = () [FlatRegion] { slice(freg_buf.ptr, freg_n) }
+lsrc_get* = () [i32] { slice(lsrc_buf.ptr, lsrc_n) }
+freg_grow = (a: MutPtr<Malloc>) void {
+    (freg_n >= freg_buf.len).then({
+        grown := a.freg_alloc(freg_buf.len * 2)
+        freg_buf.loop((h, i, r) {
+            grown[i] = r
+        })
+        freg_buf = grown
+    })
+}
+lsrc_grow = (a: MutPtr<Malloc>) void {
+    (lsrc_n >= lsrc_buf.len).then({
+        grown := a.lsrc_alloc(lsrc_buf.len * 2)
+        lsrc_buf.loop((h, i, v) {
+            grown[i] = v
+        })
+        lsrc_buf = grown
+    })
+}
+ldrop_grow = (a: MutPtr<Malloc>) void {
+    (ldrop_n + 1 >= ldrop_buf.len).then({
+        grown := a.ldrop_alloc(ldrop_buf.len * 2)
+        ldrop_buf.loop((h, i, v) {
+            grown[i] = v
+        })
+        ldrop_buf = grown
+    })
+}
+// newline count in s[lo, hi) — sub-slice iteration (O(hi-lo), no rescan from 0, constant stack).
+count_nl* = (s: string_view, lo: i32, hi: i32) i64 {
+    n: i64 := 0
+    (hi > lo).then({
+        span: [u8] := slice(s.offset(lo), to_i64(hi - lo))
+        span.loop((h, i, b) {
+            (b == '\n').then({
+                n = n + 1
+            })
+        })
+    })
+    n
+}
+lmap_note_line = (a: MutPtr<Malloc>, srcline: i32) void {
+    lmap_on.then({
+        a.lsrc_grow()
+        lsrc_buf[lsrc_n] = srcline
+        lsrc_n = lsrc_n + 1
+    })
+}
+// a body append starts with the '\n' separator pushed before it (unless it opens the flat); the
+// region's first LINE starts just past that separator.
+freg_lo* = (out: String, blo: i64) i64 { (out.len > blo && out.res_sbyte(blo) == 10).match ({
+    true  => blo + 1,
+    false => blo,
+}) }
+note_fregion* = (a: MutPtr<Malloc>, midx: i64, lo: i64, hi: i64, line_lo: i64) void {
+    (lmap_on && hi > lo && midx >= 0).then({
+        a.freg_grow()
+        freg_buf[freg_n] = FlatRegion(
+            midx: midx,
+            lo: lo,
+            hi: hi,
+            line_lo: line_lo,
+            line_n: lsrc_n - line_lo,
+        )
+        freg_n = freg_n + 1
+    })
+}
+// A shadow-rename splice replaced flat[slo, shi) with `newlen` bytes: renames are strictly inside
+// decls (never a newline), so only BYTE coords move — the containing region's hi stretches and every
+// later region shifts; line maps are untouched.
+fregions_splice* = (slo: i64, shi: i64, newlen: i64) void {
+    delta := newlen - (shi - slo)
+    (lmap_on && delta != 0).then({
+        regs := fregions_get()
+        regs.loop((h, i, r) {
+            (r.lo >= shi).then({
+                freg_buf[i] = FlatRegion(
+                    midx: r.midx,
+                    lo: r.lo + delta,
+                    hi: r.hi + delta,
+                    line_lo: r.line_lo,
+                    line_n: r.line_n,
+                )
+            })
+            (r.lo < shi && r.hi > slo).then({
+                freg_buf[i] = FlatRegion(
+                    midx: r.midx,
+                    lo: r.lo,
+                    hi: r.hi + delta,
+                    line_lo: r.line_lo,
+                    line_n: r.line_n,
+                )
+            })
+        })
+    })
+}
+note_ldrop = (a: MutPtr<Malloc>, ds: i64, de: i64) void {
+    (lmap_on && de > ds).then({
+        a.ldrop_grow()
+        ldrop_buf[ldrop_n] = ds
+        ldrop_buf[ldrop_n + 1] = de
+        ldrop_n = ldrop_n + 2
+    })
+}
+ldrops_get = () [i64] { slice(ldrop_buf.ptr, ldrop_n) }
+// Apply one dedup pass's DROP list to the maps. `flat` is the PRE-drop flat that pass walked — drops
+// and regions are both in its coordinates. Dropped decl spans start at a line start, so a drop kills
+// exactly the line entries [k0, k0+dead) of the region(s) it overlaps (a drop running PAST a region's
+// end takes the region's whole tail with it). Four passes, each a plain slice walk: (A) turn every
+// drop∩region overlap into a dead-line interval in GLOBAL line-array coordinates (regions and drops
+// both ascend, so intervals come out ascending and disjoint, and never cross a region's window);
+// (B) shrink region byte spans by the dropped bytes before them; (C) rebase each region's line
+// window by the dead entries before/inside it; (D) compact the line array with a cursor over the
+// dead intervals (each is non-empty, so the cursor advances at most once per index and never lags).
+lmap_apply_drops* = (a: MutPtr<Malloc>, flat: string_view) void {
+    (lmap_on && ldrop_n > 0).then({
+        regs := fregions_get()
+        drops := ldrops_get()
+        dbuf := a.ldrop_alloc(ldrop_n * 2 + 2)
+        dn := 0
+        regs.loop((h, ri, r) {
+            drops.loop((h2, j, dv) {
+                // A) dead line intervals
+                (j % 2 == 0).then({
+                    ds := dv
+                    de := drops[j + 1]
+                    x := (ds > r.lo).match ({ true => ds, false => r.lo })
+                    y := (de < r.hi).match ({ true => de, false => r.hi })
+                    (x < y).then({
+                        k0 := flat.count_nl(to_i32(r.lo), to_i32(x))
+                        dead := (de > r.hi).match ({
+                            true  => r.line_n - k0,
+                            false => flat.count_nl(to_i32(x), to_i32(y)),
+                        })
+                        capped := (k0 + dead > r.line_n).match ({
+                            true  => r.line_n - k0,
+                            false => dead,
+                        })
+                        (capped > 0).then({
+                            dbuf[dn] = r.line_lo + k0
+                            dbuf[dn + 1] = r.line_lo + k0 + capped
+                            dn = dn + 2
+                        })
+                    })
+                })
+            })
+        })
+        regs.loop((h, ri, r) {
+            // B) byte shifts: subtract every dropped byte before lo / before hi
+            dlo: i64 := 0
+            dhi: i64 := 0
+            drops.loop((h2, j, dv) {
+                (j % 2 == 0).then({
+                    ds := dv
+                    de := drops[j + 1]
+                    cl := (de < r.lo).match ({ true => de, false => r.lo })
+                    (cl > ds).then({
+                        dlo = dlo + (cl - ds)
+                    })
+                    ch := (de < r.hi).match ({ true => de, false => r.hi })
+                    (ch > ds).then({
+                        dhi = dhi + (ch - ds)
+                    })
+                })
+            })
+            freg_buf[ri] = FlatRegion(
+                midx: r.midx,
+                lo: r.lo - dlo,
+                hi: r.hi - dhi,
+                line_lo: r.line_lo,
+                line_n: r.line_n,
+            )
+        })
+        regs.loop((h, ri, r) {
+            // C) rebase line windows (byte fields already updated; line fields still pre-drop)
+            cumb: i64 := 0
+            inw: i64 := 0
+            dbuf.loop((h2, j, v) {
+                (j % 2 == 0 && j < dn).then({
+                    (v < r.line_lo).then({
+                        cumb = cumb + (dbuf[j + 1] - v)
+                    })
+                    (v >= r.line_lo && v < r.line_lo + r.line_n).then({
+                        inw = inw + (dbuf[j + 1] - v)
+                    })
+                })
+            })
+            freg_buf[ri] = FlatRegion(
+                midx: r.midx,
+                lo: r.lo,
+                hi: r.hi,
+                line_lo: r.line_lo - cumb,
+                line_n: r.line_n - inw,
+            )
+        })
+        // D) compact the line array
+        w := 0
+        di := 0
+        lsrc_get().loop((h, k, v) {
+            (di < dn && k >= dbuf[di + 1]).then({
+                di = di + 2
+            })
+            inside := di < dn && k >= dbuf[di] && k < dbuf[di + 1]
+            (inside == false).then({
+                lsrc_buf[w] = v
+                w = w + 1
+            })
+        })
+        lsrc_n = w
+        ldrop_n = 0
+    })
+}
+// binary search: the index of the region whose [lo, hi) contains `off`, else -1 (regions are in
+// append order = ascending lo; separator newlines between regions belong to no region).
+fregion_find* = (regions: [FlatRegion], off: i64) i64 { regions.fregion_bs(off, 0, regions.len) }
+fregion_bs = (regions: [FlatRegion], off: i64, lo: i64, hi: i64) i64 {
+    (lo >= hi).match ({
+        true  => 0 - 1,
+        false => {
+            mid := (lo + hi) / 2
+            r := regions[mid]
+            (off < r.lo).match ({
+                true  => regions.fregion_bs(off, lo, mid),
+                false => (off < r.hi).match ({
+                    true  => mid,
+                    false => regions.fregion_bs(off, mid + 1, hi),
+                }),
+            })
+        },
+    })
+}
+// the 1-based ORIGINAL source line for flat offset `off` inside region `ri`, else 0.
+fregion_src_line* = (regions: [FlatRegion], line_srcs: [i32], flat: string_view, ri: i64, off: i64) i32 {
+    r := regions[ri]
+    k := flat.count_nl(to_i32(r.lo), to_i32(off))
+    (k < r.line_n && r.line_lo + k < line_srcs.len).match ({
+        true  => {
+            v := line_srcs[r.line_lo + k]
+            (v > 0).match ({ true => v, false => 0 })
+        },
+        false => 0,
+    })
+}
