@@ -22,7 +22,7 @@
 // reuses its own buffer across calls. The "." and ".." pseudo-entries are skipped.
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err, ok_if } = std.core.result
-{ zeroed, release } = std.mem.raw
+{ with_scratch } = std.mem.raw
 { substr_in, len, view } = std.text.str
 { access, mkdir, rmdir, rename, unlink, stat, opendir, readdir, rewinddir, closedir } = std.c.libc
 // access(path, F_OK) tests for existence only (no permission bits).
@@ -47,23 +47,19 @@ exists* = (path: string_view) bool { (path.access(F_OK) == 0).match ({
 }) }
 // is `path` an existing directory? false if it is missing or a non-directory.
 is_dir* = (path: string_view) bool {
-    buf := zeroed(STAT_SIZE)
-    yes := (path.stat(buf) == 0).match ({
-        true  => buf.offset(ST_MODE_OFF).load_i64() & S_IFMT == S_IFDIR,
-        false => false,
+    with_scratch(STAT_SIZE, (buf) {
+        (path.stat(buf) == 0).match ({
+            true  => buf.offset(ST_MODE_OFF).load_i64() & S_IFMT == S_IFDIR,
+            false => false,
+        })
     })
-    buf.release()
-    yes
 }
 // `path`'s size in bytes, or -1 when it cannot be stat'd.
 size* = (path: string_view) i64 {
-    buf := zeroed(STAT_SIZE)
-    n := (path.stat(buf) == 0).match ({
+    with_scratch(STAT_SIZE, (buf) { (path.stat(buf) == 0).match ({
         true  => buf.offset(ST_SIZE_OFF).load_i64(),
         false => 0 - 1,
-    })
-    buf.release()
-    n
+    }) })
 }
 // ── mutating ops ───────────────────────────────────────────────────────────────
 // create directory `path` (mode 0o755). Errors if it exists or the parent is missing.

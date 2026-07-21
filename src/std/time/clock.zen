@@ -9,7 +9,7 @@
 // std.mem.raw — the explicit-alloc floor, the same justification as std.sync's pthread cells — and is
 // freed before return, so callers thread no allocator and these stay plain UFCS-friendly functions.
 { clock_gettime } = std.c.libc
-{ zeroed, release } = std.mem.raw
+{ with_scratch } = std.mem.raw
 // nanosleep(const struct timespec *req, struct timespec *rem) suspends the calling thread until at
 // least the requested interval elapses. It is a bodyless (foreign) decl — the same mechanism as
 // clock_gettime above — so it lowers to a bare C call and libc's header declares it. `req` points at a
@@ -26,20 +26,19 @@ NS_PER_MS := 1000000
 MS_PER_S := 1000
 // read `clk` into a fresh timespec cell and fold the whole-seconds + nanoseconds fields to ns.
 read_ns = (clk: i32) i64 {
-    ts := zeroed(TIMESPEC_SIZE)
-    clk.clock_gettime(ts)
-    sec := ts.load_i64()
-    nsec := ts.offset(8).load_i64()
-    ts.release()
-    sec * NS_PER_S + nsec
+    with_scratch(TIMESPEC_SIZE, (ts) {
+        clk.clock_gettime(ts)
+        sec := ts.load_i64()
+        nsec := ts.offset(8).load_i64()
+        sec * NS_PER_S + nsec
+    })
 }
 // read `clk` and return just its whole-seconds field.
 read_s = (clk: i32) i64 {
-    ts := zeroed(TIMESPEC_SIZE)
-    clk.clock_gettime(ts)
-    sec := ts.load_i64()
-    ts.release()
-    sec
+    with_scratch(TIMESPEC_SIZE, (ts) {
+        clk.clock_gettime(ts)
+        ts.load_i64()
+    })
 }
 // monotonic nanoseconds — for measuring elapsed time (no fixed epoch, never steps backward).
 mono_ns* = () i64 { CLOCK_MONOTONIC.read_ns() }
@@ -59,11 +58,12 @@ wall_ns* = () i64 { CLOCK_REALTIME.read_ns() }
 // remainder out-param is null (we don't retry on a signal). The cell is freed before return, so
 // callers thread no allocator — same short-lived FFI-scratch pattern as read_ns above.
 sleep_ms* = (ms: i64) void {
-    ts := zeroed(TIMESPEC_SIZE)
-    store_i64(ts, ms / MS_PER_S)
-    store_i64(ts.offset(8), ms % MS_PER_S * NS_PER_MS)
-    ts.nanosleep(null_ptr())
-    ts.release()
+    with_scratch(TIMESPEC_SIZE, (ts) {
+        store_i64(ts, ms / MS_PER_S)
+        store_i64(ts.offset(8), ms % MS_PER_S * NS_PER_MS)
+        ts.nanosleep(null_ptr())
+    })
+    { }
 }
 // Suspend this thread for `s` seconds (sleep_ms folded up).
 sleep_s* = (s: i64) void { sleep_ms(s * MS_PER_S) }
