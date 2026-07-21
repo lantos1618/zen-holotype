@@ -6,7 +6,7 @@
 
 BOOT := $(MAKE) -f bootstrap/Makefile
 
-.PHONY: all zen regen harness harness-fast difftest docs-check ffi-verify clean resolve-seed
+.PHONY: all zen regen harness harness-fast difftest docs-check ffi-verify clean setup-git resolve-seed
 
 # Default: build ./zen.
 all: zen
@@ -34,6 +34,9 @@ ffi-verify:
 
 clean:
 	$(BOOT) clean
+
+setup-git:
+	$(BOOT) setup-git
 
 resolve-seed:
 	$(BOOT) resolve-seed

@@ -46,8 +46,8 @@ run must be identical. The full harness also contains a fixpoint suite and verif
 `sources.txt` agrees with the resolver graph order. `make docs-check` verifies the deliberate
 seven-file documentation inventory and every local Markdown link.
 
-Generated C is an artifact, not a merge authority. After resolving `.zen` source conflicts,
-`make resolve-seed` regenerates and stages the seed (on seed-only conflicts, pick either side first).
+Generated C is an artifact, not a merge authority. Register the local merge driver with
+`make setup-git`; after resolving source changes, `make resolve-seed` regenerates and stages the seed.
 
 See [../ARCHITECTURE.md](../ARCHITECTURE.md) for the pipeline and [../STATUS.md](../STATUS.md) for
 current limits.
