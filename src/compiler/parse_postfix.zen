@@ -1,0 +1,398 @@
+// compiler.parse_postfix — postfix chains — call/member/index/method/loop suffixes, qualified ctor & struct-lit disambiguation, postfix token predicates.
+// Split out of compiler.parse_expr (god-file split); pure move, no logic changes.
+{ Expr, Field, Stmt, arm, block, call, call_at, chain_tmp_name, dotted_name_in, eindex, eloop, emcall, field, lit, mangle_str_in, member, member_at, mkenum, mkstruct, mkstructg_at, mktag, sexpr, slet, tvoid } = compiler.genc
+{ Scan, Token, scan } = compiler.lex
+{ at } = std.text.bytes
+{ Malloc } = std.mem.alloc
+{ delim_enter, delim_exit, is_langle, is_lbrace, is_lbracket, is_rparen, parse_tyargs, stmt_level, tok_eq, vbreak_note } = compiler.parse_type
+{ materialize, parse_block } = compiler.parse_stmt
+{ enode, is_op, lexeme, parse_payload_args } = compiler.parse_atom
+{ parse_match, parse_then, subj_name } = compiler.parse_match
+{ a_lex_upper, arg_buf, fill_args, fill_pinits, finish_generic_ctor, finit_buf, is_lparen, paren_is_struct, parse_ident, take_args, take_inits, tyargs_end } = compiler.parse_primary
+{ PExpr, parse_or } = compiler.parse_expr
+// a boolean `.match` lowers to genc's ternary Cond: `(subj).match { true => X, false => Y }`
+is_dot* = (src: string_view, t: Token) bool { src.is_op(t, '.') }
+is_match_kw = (src: string_view, t: Token) bool {
+    t.kind.match ({
+        .Ident => src.tok_eq(t, "match"),
+        _      => false,
+    })
+}
+is_match_at = (src: string_view, pos: i32) bool {
+    dot := src.scan(pos)    // a '.' followed by `match`?
+    src.is_dot(dot.tok).match ({ true => src.is_match_kw(src.scan(dot.next).tok), false => false })
+}
+is_then_kw = (src: string_view, t: Token) bool {
+    t.kind.match ({
+        .Ident => src.tok_eq(t, "then"),
+        _      => false,
+    })
+}
+// Reserve only the exact lazy-control shape `.then({`; a normal field named `then` (notably IfData.then)
+// and an ordinary method call with non-block arguments must continue through the regular field parser.
+is_then_at = (src: string_view, pos: i32) bool {
+    dot := src.scan(pos)
+    kw := src.scan(dot.next)
+    lp := src.scan(kw.next)
+    open := src.scan(lp.next)
+    src.is_dot(dot.tok) && src.is_then_kw(kw.tok) && src.is_lparen(lp.tok) && src.is_lbrace(open.tok)
+}
+// `.field` is field access (genc Member, chainable: `a.b.c`); `.match` is the ternary above.
+// match is checked first, so a `.match` is never mistaken for a field named `match`.
+is_ident_tok* = (t: Token) bool {
+    t.kind.match ({
+        .Ident => true,
+        _      => false,
+    })
+}
+is_field_at = (src: string_view, pos: i32) bool {
+    dot := src.scan(pos)
+    src.is_dot(dot.tok).match ({ true => is_ident_tok(src.scan(dot.next).tok), false => false })
+}
+// A postfix index `base[i]` continues the expression ONLY if the `[` is on the SAME line as
+// `base`. A `[` that opens a new line is a slice-literal STATEMENT (`[1, 2, 3]`), not an index —
+// without this guard it glues onto the previous statement (`x := 7` ⨯ `[1]` → `x := 7[1]`).
+is_index_at = (src: string_view, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_lbracket(sc.tok) && src.nl_between(pos, sc.tok.start).match ({
+        true  => false,
+        false => true,
+    })
+}
+// A postfix call suffix `base(args)` — a CHAINED call `make_adder(10)(5)` where `base` is itself a
+// call result. ADJACENCY is the gate: the `(` must touch the base's last token with NO intervening
+// whitespace (`)(`, the lexical signature of a chain). A `(` separated by a space/newline opens a NEW
+// statement — Zen separates statements by whitespace, so `… / 2.0  (ng == g).match(…)` is two
+// statements, NOT a call of `2.0`. Same-line-only (as for `[index]`) is too weak: it would glue a
+// whitespace-separated parenthesized statement onto the previous expression.
+is_call_at = (src: string_view, pos: i32) bool {
+    sc := src.scan(pos)
+    src.is_lparen(sc.tok) && sc.tok.start == pos
+}
+// Only a CALL-result (or a prior chain BLOCK, for `f(a)(b)(c)`) is a valid chained-call base: those are
+// the forms that can yield a closure VALUE. Restricting here (with adjacency above) keeps the suffix from
+// firing on a literal/binop/index base that merely abuts a `(` — which would change program semantics.
+is_chain_base = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)  => true,
+        .Block(b) => true,
+        _         => false,
+    })
+}
+// a newline in the gap before the next token? COMMENT-AWARE: a comment is whitespace, so its
+// CONTENT must never change the parse — a newline INSIDE a `/* … */` block comment is not a line
+// break (`Res /* two\nlines */ .Okv(1)` stays ONE line), while the newline that TERMINATES a `//`
+// line comment is a real break (everything after it is a new line). Both scans stay inside the
+// [lo, hi) gap between two real tokens, so any comment the lexer skipped there is complete.
+nl_between* = (src: string_view, lo: i32, hi: i32) bool {
+    (lo >= hi).then({
+        return false
+    })
+    (src.at(lo) == '\n').then({
+        return true
+    })
+    (src.at(lo) == '/' && lo + 1 < hi && src.at(lo + 1) == '/').then({
+        return src.raw_nl(lo + 2, hi)
+    })    // `//` runs to its newline; that newline counts
+    (src.at(lo) == '/' && lo + 1 < hi && src.at(lo + 1) == '*').then({
+        return src.nl_between(src.skip_gap_comment(lo + 2, hi), hi)
+    })    // `/* … */` is a single space
+    src.nl_between(lo + 1, hi)
+}
+// raw '\n' scan (the pre-comment-aware nl_between): used for the tail of a `//` comment, whose
+// terminating newline is a real line break.
+raw_nl = (src: string_view, lo: i32, hi: i32) bool { (lo >= hi).match ({
+    true  => false,
+    false => src.at(lo) == '\n' || src.raw_nl(lo + 1, hi),
+}) }
+// skip past the `*/` closing a block comment inside a token gap; an unterminated tail (only
+// possible when hi is the EOF sentinel) just ends the gap scan.
+skip_gap_comment = (src: string_view, pos: i32, hi: i32) i32 {
+    (pos + 1 >= hi).match ({
+        true  => hi,
+        false => (src.at(pos) == '*' && src.at(pos + 1) == '/').match ({
+            true  => pos + 2,
+            false => src.skip_gap_comment(pos + 1, hi),
+        }),
+    })
+}
+is_loop_kw = (src: string_view, t: Token) bool {
+    t.kind.match ({
+        .Ident => src.tok_eq(t, "loop"),
+        _      => false,
+    })
+}
+is_loop_at = (src: string_view, pos: i32) bool {
+    dot := src.scan(pos)
+    src.is_dot(dot.tok).match ({ true => src.is_loop_kw(src.scan(dot.next).tok), false => false })
+}
+// A statement-leading enum constructor `.Ok(x)` after a COMPLETED expression is a NEW statement,
+// not a `.field` chain continuation: Zen has no semicolons, so `g + 1  .Ok(g)` is two statements.
+// Methods/fields are lowercase, so a `.` followed by an UPPERCASE name is never a real field access
+// — it is either a qualified ctor `Type.Variant` (handled by parse_field/is_qual_ctor) or a
+// leading-dot ctor. The rule is TOTAL: a NEWLINE before a `.Uppercase` ALWAYS ends the previous
+// statement — a qualified ctor must keep its dot on the SAME line as the type (`Res.Okv(y)`), else
+// `x := Res` ⏎ `.Okv(y)` would silently glue into `Res.Okv(y)`. SAME-LINE GATE (mirrors
+// is_index_at): a leading-dot ctor begins a NEW statement so a NEWLINE always precedes it; a
+// `.Uppercase` on the SAME line as its base is a qualified ctor or genuine UPPERCASE FIELD access
+// (`s.Big`, `o.inner.Val`) and must NOT break.
+// STATEMENT-LEVEL ONLY (stmt_level, parse_type.zen): inside an unclosed `(`/`[`/arm value a new
+// statement cannot begin, so breaking there could only manufacture a parse error — the split
+// `true => Res` ⏎ `.Okv(1),` arm and the parenthesized `(Res` ⏎ `.Okv(2))` stay one expression.
+is_variant_break = (src: string_view, pos: i32) bool {
+    dot := src.scan(pos)
+    fld := src.scan(dot.next)
+    br := stmt_level() && src.nl_between(pos, dot.tok.start) && is_upper_byte(src.at(fld.tok.start))
+    br.then({
+        vbreak_note(dot.tok.start)
+    })    // remember the dot for the KVBREAK diagnostic
+    br
+}
+// parse a full expression INSIDE an open delimiter (call/ctor/index/slice/struct-lit element,
+// paren group, match-arm value): a new statement cannot begin there, so the newline+`.Uppercase`
+// variant break is suppressed for the sub-parse (see is_variant_break / parse_type.delim_depth).
+parse_or_nested* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    delim_enter()
+    r := a.parse_or(src, pos)
+    delim_exit()
+    r
+}
+parse_postfix* = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+    src.is_match_at(base.next).match ({
+        true  => a.parse_match(src, base),
+        false => src.is_then_at(base.next).match ({
+            true  => a.parse_then(src, base),
+            false => src.is_loop_at(base.next).match ({
+                true  => a.parse_loop(src, base),
+                false => (src.is_field_at(base.next) && src.is_variant_break(base.next).match ({
+                    true  => false,
+                    false => true,
+                })).match ({
+                    true  => a.parse_field(src, base),
+                    false => src.is_index_at(base.next).match ({
+                        true  => a.parse_index(src, base),
+                        false => (src.is_call_at(base.next) && base.expr.is_chain_base()).match ({
+                            true  => a.parse_chained_call(src, base),
+                            false => base,
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
+// Lower a chained call `base(args)` (base is a closure-valued expression, not a bare name) to a block
+// `({ __chaintmp_N := base  __chaintmp_N(args) })`: binding the callee to a LOCAL reuses the supported
+// closure-local-call path (compiler.check.clos_local_call_name rewrites `__chaintmp_N(args)` to the
+// generated `__clos_K_call(__chaintmp_N, args)`). The block's trailing call is its value.
+parse_chained_call = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+    lp := src.scan(base.next)
+    at := lp.tok.start
+    buf := a.arg_buf()
+    ae := a.fill_args(src, lp.next, buf, 0)
+    tmpname := a.chain_tmp_name(at)
+    sbuf: [Stmt] := slice(a.acquire(2 * sizeof(Stmt)), 2)
+    sbuf[0] = slet(tmpname, base.expr)
+    sbuf[1] = sexpr(a.enode(call_at(tmpname, buf.take_args(ae.count), at)))
+    a.parse_postfix(src, PExpr(
+        expr: a.enode(block(sbuf)),
+        next: ae.next,
+    ))
+}
+// Foreach over recv; compiler.check fills the element type.
+parse_loop = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+    dot := src.scan(base.next)
+    kw := src.scan(dot.next)
+    lp := src.scan(kw.next)
+    op := src.scan(lp.next)
+    ht := src.scan(op.next)
+    hname := a.lexeme(src, ht.tok)
+    c1 := src.scan(ht.next)
+    it := src.scan(c1.next)
+    iname := a.lexeme(src, it.tok)
+    c2 := src.scan(it.next)
+    xt := src.scan(c2.next)
+    xname := a.lexeme(src, xt.tok)
+    cl := src.scan(xt.next)
+    ob := src.scan(cl.next)
+    blk := a.parse_block(src, ob.next)
+    rp := src.scan(blk.next)
+    a.parse_postfix(src, PExpr(
+        expr: a.enode(eloop(base.expr, iname, xname, tvoid(), a.materialize(blk.list), hname)),
+        next: rp.next,
+    ))
+}
+parse_index = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+    lb := src.scan(base.next)
+    ie := a.parse_or_nested(src, lb.next)
+    rb := src.scan(ie.next)
+    a.parse_postfix(src, PExpr(
+        expr: a.enode(eindex(base.expr, ie.expr, tvoid())),
+        next: rb.next,
+    ))
+}
+// Field access, UFCS calls, and qualified enum constructors share the dot parser.
+is_upper_byte* = (b: u8) bool { b >= 'A' && b <= 'Z' }
+is_qual_ctor = (base: PExpr, name: string_view) bool {
+    rn := subj_name(base.expr)
+    rn.at(0).is_upper_byte() && name.at(0).is_upper_byte()
+}
+// A NAMESPACE-qualified struct literal `ns.Type(field: val, …)` (e.g. `trace.Node(has: 0)`): an Uppercase
+// type name after the dot whose `(` opens a `field:` shape. The faithful parser (fmt) sees the raw,
+// pre-flatten source where the `ns.` alias is still present (the flatten pipeline resolves `ns.Type` to
+// `Type` first, so only fmt reaches here); a method call takes POSITIONAL args (no `name:`), so the
+// `field:` shape disambiguates. Round-trips via a `MakeStruct` whose type carries the dotted `ns.Type`.
+is_qual_struct_lit = (src: string_view, base: PExpr, name: string_view, fld: Scan) bool {
+    nx := src.scan(fld.next)
+    subj_name(base.expr).at(0) != 0 && name.at(0).is_upper_byte() && src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).match ({
+        true  => false,
+        false => true,
+    }) && src.paren_is_struct(nx.next)
+}
+parse_qual_struct_lit = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
+    open := src.scan(fld.next)
+    qn := a.dotted_name_in(subj_name(base.expr), name)
+    buf := a.finit_buf()
+    fe := a.fill_pinits(src, open.next, buf, 0)
+    PExpr(
+        expr: a.enode(mkstruct(qn, buf.take_inits(fe.count))),
+        next: fe.next,
+    )
+}
+// A namespace-qualified GENERIC type head `subj.Name<TyArgs>` — returns the position just past the
+// closing `>` (or -1 if not a well-formed generic head). Like is_qual_struct_lit, only the faithful
+// (fmt) parser reaches here: the flatten pipeline strips the `subj.` alias before the compiler parse,
+// leaving the bare `Name<TyArgs>…` forms that parse_ident handles.
+qual_generic_after = (src: string_view, base: PExpr, name: string_view, fld: Scan) i32 {
+    nx := src.scan(fld.next)
+    (subj_name(base.expr).at(0) != 0 && name.at(0).is_upper_byte() && src.is_langle(nx.tok)).match ({
+        true  => src.tyargs_end(nx.next, 1),
+        false => 0 - 1,
+    })
+}
+// `subj.Name<TyArgs>(field: val, …)` — a qualified generic struct literal.
+is_qual_generic_struct_lit = (src: string_view, base: PExpr, name: string_view, fld: Scan) bool {
+    after := src.qual_generic_after(base, name, fld)
+    (after < 0).match ({
+        true  => false,
+        false => {
+            sc := src.scan(after)
+            src.is_lparen(sc.tok) && src.nl_between(after, sc.tok.start).match ({
+                true  => false,
+                false => true,
+            }) && src.paren_is_struct(sc.next)
+        },
+    })
+}
+// `subj.Name<TyArgs>.Variant(args)` (or nullary `subj.Name<TyArgs>.None`) — a qualified generic ctor.
+is_qual_generic_ctor = (src: string_view, base: PExpr, name: string_view, fld: Scan) bool {
+    after := src.qual_generic_after(base, name, fld)
+    (after < 0).match ({
+        true  => false,
+        false => {
+            dot := src.scan(after)
+            src.is_dot(dot.tok).match ({
+                true  => {
+                    vt := src.scan(dot.next)
+                    is_ident_tok(vt.tok) && a_lex_upper(src, vt.tok)
+                },
+                false => false,
+            })
+        },
+    })
+}
+parse_qual_generic_struct_lit = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
+    qn := a.dotted_name_in(subj_name(base.expr), name)
+    lt := src.scan(fld.next)    // '<'
+    ta := a.parse_tyargs(src, lt.next)
+    open := src.scan(ta.next)    // '('
+    buf := a.finit_buf()
+    fe := a.fill_pinits(src, open.next, buf, 0)
+    PExpr(
+        expr: a.enode(mkstructg_at(qn, a.mangle_str_in(qn, ta.args), ta.args, buf.take_inits(fe.count), fld.tok.start)),
+        next: fe.next,
+    )
+}
+parse_qual_generic_ctor = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
+    qn := a.dotted_name_in(subj_name(base.expr), name)
+    lt := src.scan(fld.next)    // '<'
+    ta := a.parse_tyargs(src, lt.next)
+    dot := src.scan(ta.next)    // '.'
+    vs := src.scan(dot.next)    // the variant name
+    vn := a.lexeme(src, vs.tok)
+    a.finish_generic_ctor(src, qn, a.mangle_str_in(qn, ta.args), ta.args, vn, vs)
+}
+parse_field = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+    dot := src.scan(base.next)
+    fld := src.scan(dot.next)
+    name := a.lexeme(src, fld.tok)
+    is_qual_generic_struct_lit(src, base, name, fld).match ({
+        true  => a.parse_postfix(src, a.parse_qual_generic_struct_lit(src, base, name, fld)),
+        false => is_qual_generic_ctor(src, base, name, fld).match ({
+            true  => a.parse_postfix(src, a.parse_qual_generic_ctor(src, base, name, fld)),
+            false => is_qual_struct_lit(src, base, name, fld).match ({
+                true  => a.parse_postfix(src, a.parse_qual_struct_lit(src, base, name, fld)),
+                false => is_qual_ctor(base, name).match ({
+                    true  => a.parse_postfix(src, a.parse_qual_ctor(src, subj_name(base.expr), name, fld)),
+                    false => a.parse_field_plain(src, base, name, fld),
+                }),
+            }),
+        }),
+    })
+}
+// SAME-LINE GATE (mirrors parse_qual_ctor / parse_ident): the method-call `(` must sit on the same line
+// as the `.field` — a NEWLINE before it makes `base.field` a plain member access and the `(` a new
+// statement (`nd := 10 + ed.w` ⏎ `(nd < 100).match(…)`), not `ed.w(nd < 100)`.
+parse_field_plain = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
+    nx := src.scan(fld.next)
+    (src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).match ({
+        true  => false,
+        false => true,
+    })).match ({
+        true  => a.parse_method(src, base, name, nx, fld.tok.start),
+        false => a.parse_postfix(src, PExpr(
+            expr: a.enode(member_at(base.expr, name, fld.tok.start)),
+            next: fld.next,
+        )),
+    })
+}
+// Qualified enum constructors preserve the explicit type. SAME-LINE GATE (mirrors parse_ident): the
+// payload `(` must sit on the same line as the variant — a NEWLINE before it makes `Type.Variant` a
+// nullary tag and the `(` a new statement (`a := State.Idle` ⏎ `(a).q()`), not `State.Idle(a)`.
+parse_qual_ctor* = (a: MutPtr<Malloc>, src: string_view, tyname: string_view, vn: string_view, fld: Scan) PExpr {
+    nx := src.scan(fld.next)
+    (src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).match ({
+        true  => false,
+        false => true,
+    })).match ({
+        true  => src.is_rparen(src.scan(nx.next).tok).match ({
+            true  => PExpr(
+                expr: a.enode(mktag(tyname, vn)),
+                next: src.scan(nx.next).next,
+            ),
+            false => a.parse_qual_payload(src, tyname, vn, nx),
+        }),
+        false => PExpr(
+            expr: a.enode(mktag(tyname, vn)),
+            next: fld.next,
+        ),
+    })
+}
+parse_qual_payload = (a: MutPtr<Malloc>, src: string_view, tyname: string_view, vn: string_view, lp: Scan) PExpr {
+    pl := a.parse_payload_args(src, lp)
+    PExpr(
+        expr: a.enode(mkenum(tyname, vn, pl.expr)),
+        next: pl.next,
+    )
+}    // `Type.Variant(a, b, …)` payload
+// FAITHFUL: `recv.method(args)` -> MethodCall(recv, method, args) — keeps the UFCS surface form. The
+// args here are the METHOD args only (recv is carried separately); compiler.check.desugar_method_calls
+// lowers it back to the flat `Call(fn: method, args: [recv] ++ args, pos: at)` the old parser produced.
+parse_method* = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, lp: Scan, at: i32) PExpr {
+    buf := a.arg_buf()
+    ae := a.fill_args(src, lp.next, buf, 0)
+    a.parse_postfix(src, PExpr(
+        expr: a.enode(emcall(base.expr, name, buf.take_args(ae.count), at)),
+        next: ae.next,
+    ))
+}
