@@ -9,14 +9,14 @@
 // - `new_in` / `release_in` use the caller's allocator.
 // - `new_in` returns Result so allocation failure stays in the value flow.
 // - `Resource` at the bottom is only a concrete fixture for tests/examples.
-{ Allocator, try_acquire } = std.mem.alloc
+{ Allocator, val_slot, rc_block_new_in } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 Drop*: {
     drop: (MutPtr<Self>) void,
 }
 Own*<T>: {
     base: RawPtr<u8>,
-    val = (o: Own<T>) [T] { slice(o.base.offset(8), 1) }
+    val = (o: Own<T>) [T] { val_slot<T>(o.base) }
     get = (o: Own<T>) T { o.val()[0] }
     ptr = (o: Own<T>) MutPtr<T> { o.val()[0].addr() }
     count = (o: Own<T>) i64 { load_i64(o.base) }
@@ -37,15 +37,8 @@ Own*<T>: {
     }
 }
 new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Own<T>, IoError> {
-    ox := x
-    a.try_acquire(8 + sizeof(T)).match ({
-        .Ok(base) => {
-            store_i64(base, 1)
-            o := Own<T>(base: base)
-            s := o.val()
-            s[0] = ox
-            ok(o)
-        },
+    rc_block_new_in(a, x).match ({
+        .Ok(base) => ok(Own<T>(base: base)),
         .Err(e)   => err(e),
     })
 }
