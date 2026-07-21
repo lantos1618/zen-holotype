@@ -57,6 +57,7 @@
 { Allocator, try_acquire3, DynAlloc, dyn_heap } = std.mem.alloc    // DynAlloc = the narrow Allocator stored by the AMBIENT form; try_acquire3 = all-or-nothing 3-buffer acquire
 { eq, view } = std.text.str
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
+{ hashidx_fold, hashidx_clear, hashidx_link } = std.collections.hashidx    // shared open-hash index mechanics over the 2*cap i64 buffer
 Hash*: {
     hash: (Self) i64,
     heq: (Self, Self) bool,
@@ -93,8 +94,8 @@ string_view.impl(Hash, {
     }
     heq = (x: string_view, y: string_view) bool { eq(x, y) }
 })
-// k's bucket in [0, cap): full hash, masked non-negative, folded by mod. cap >= 1 at all call sites.
-hbucket<K: Hash> = (k: K, cap: i64) i64 { (k.hash() & 4611686018427387903) % cap }
+// k's bucket in [0, cap): full hash, masked non-negative, folded by mod (hashidx_fold). cap >= 1 at all call sites.
+hbucket<K: Hash> = (k: K, cap: i64) i64 { hashidx_fold(k.hash(), cap) }
 // Walk bucket chain e for key k in index ix over key column ks (links live at ix[cap + entry]).
 hchain<K: Hash> = (ks: [K], ix: [i64], cap: i64, e: i64, k: K) i64 {
     (e < 0).match ({
@@ -213,23 +214,12 @@ HMap*<K, V>: {
         // Rebuild the hash index from the live key column. O(len).
         ix := m.index()
         cap := m.cap
-        ix.loop((h, i, v) {
-            (i < cap).match ({
-                true  => {
-                    ix[i] = 0 - 1
-                },
-                false => {
-                    h.break
-                },
-            })
-        })
+        hashidx_clear(ix, cap)
         ks := m.keys()
         ks.loop((h, i, k) {
             (i < m.len).match ({
                 true  => {
-                    b := hbucket(k, cap)
-                    ix[cap + i] = ix[b]
-                    ix[b] = i
+                    hashidx_link(ix, cap, i, hbucket(k, cap))
                 },
                 false => {
                     h.break
@@ -240,10 +230,7 @@ HMap*<K, V>: {
     }
     link = (m: HMap<K, V>, slot: i64) HMap<K, V> {
         // Append a key/val pair (caller has ensured the key is absent) and link it into its bucket.
-        ix := m.index()
-        b := hbucket(m.keys()[slot], m.cap)
-        ix[m.cap + slot] = ix[b]
-        ix[b] = slot
+        hashidx_link(m.index(), m.cap, slot, hbucket(m.keys()[slot], m.cap))
         m
     }
     append<A> = (m: HMap<K, V>, a: MutPtr<A>, k: K, v: V) Result<HMap<K, V>, IoError> {
@@ -325,9 +312,7 @@ HMap*<K, V>: {
                     hunlink(ix, m.cap, hbucket(ks[last], m.cap), last)
                     ks[e] = ks[last]
                     vs[e] = vs[last]
-                    b := hbucket(ks[e], m.cap)
-                    ix[m.cap + e] = ix[b]
-                    ix[b] = e
+                    hashidx_link(ix, m.cap, e, hbucket(ks[e], m.cap))
                 })
                 HMap<K, V>(
                     keys: m.keys,

@@ -58,6 +58,7 @@
 { Result, IoError } = std.core.result    // allocation failure is a Result value (OOM → .Err)
 { Allocator, try_acquire2, DynAlloc, dyn_heap } = std.mem.alloc    // explicit allocator trait; DynAlloc = narrow Allocator stored by the AMBIENT form; try_acquire2 = all-or-nothing 2-buffer acquire
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
+{ hashidx_fold, hashidx_clear, hashidx_link } = std.collections.hashidx    // shared open-hash index mechanics over the 2*cap i64 buffer
 Set*<T>: {
     elems: RawPtr<u8>,
     idx: RawPtr<u8>,
@@ -77,8 +78,8 @@ Set*<T>: {
         slice(s.elems.offset(slot * sizeof(T)), sizeof(T))
     }
     shash = (s: Set<T>, slot: i64) i64 {
-        // FNV-1a of slot's bytes, folded into [0, cap). cap is always >= 1 at call sites.
-        (fnv1a32(s.bytes_of(slot)) & 4611686018427387903) % s.cap
+        // FNV-1a of slot's bytes, folded into [0, cap) (hashidx_fold). cap is always >= 1 at call sites.
+        hashidx_fold(fnv1a32(s.bytes_of(slot)), s.cap)
     }
     seq = (s: Set<T>, a: i64, b: i64) bool {
         // byte-wise equality of two slots.
@@ -153,23 +154,12 @@ Set*<T>: {
         // Rebuild the hash index from the live element column. O(len).
         ix := s.index()
         cap := s.cap
-        ix.loop((h, i, v) {
-            (i < cap).match ({
-                true  => {
-                    ix[i] = 0 - 1
-                },
-                false => {
-                    h.break
-                },
-            })
-        })
+        hashidx_clear(ix, cap)
         sl := s.slots()
         sl.loop((h, i, e) {
             (i < s.len).match ({
                 true  => {
-                    b := s.shash(i)
-                    ix[cap + i] = ix[b]
-                    ix[b] = i
+                    hashidx_link(ix, cap, i, s.shash(i))
                 },
                 false => {
                     h.break
@@ -180,10 +170,7 @@ Set*<T>: {
     }
     link = (s: Set<T>, slot: i64) Set<T> {
         // Link an already-written element slot into its bucket.
-        ix := s.index()
-        b := s.shash(slot)
-        ix[s.cap + slot] = ix[b]
-        ix[b] = slot
+        hashidx_link(s.index(), s.cap, slot, s.shash(slot))
         s
     }
     append<A> = (s: Set<T>, a: MutPtr<A>, x: T) Result<Set<T>, IoError> {
