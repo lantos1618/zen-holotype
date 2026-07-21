@@ -1,0 +1,1483 @@
+// compiler.validate.kinds — per-node kind checks: enums, matches, operands, indices, methods, FFI.
+{ ArmData, AssignData, BinData, CallData, Decl, EnumDecl, Expr, Field, FieldInit, FnTData, Func, GlobalData, ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData, MethodCallData, Param, Stmt, Ty, VariantDef, arm, call, dforeign, gstr_append, gstr_finish, gstr_string, has_fnt_param, impl_cname_in, is_expr_null, is_fnt, k_mut_ptr, no_tys, subst_ty_in, tbool, tf64, ti32, ti64, tnamed, tptr_k, tslice, tstring_view, tu8, tvoid } = compiler.genc
+{ DeclIndex, Env, alias_ufcs_candidates, arm_env, bind_tparams, call_targ, empty_params, env_func, extend_env, fits, infer_expr, is_bound, is_f64_ty, is_intrinsic, is_lit_numeric, is_local, is_str_t, is_void_ty, lvalue_writes_readonly, no_stmts, params_env, rc_calls_body, recv_name, resolve_module, subj_variant_payload, tag_const, the_func, tnode, tparam_declared, ty_eq, ty_rank, with_exp, write_thru_readonly } = compiler.check
+{ scan } = compiler.lex
+{ Allocator, Malloc } = std.mem.alloc
+{ of } = std.collections.map
+{ at } = std.text.bytes
+{ ends_with, eq, is_empty, starts_with } = std.text.str
+{ String } = std.text.string
+{ env_imported, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn, env_struct_fields, env_trait_method, expr_pos, fit_err, is_ctx_typed_arg, is_prim_width, is_ptr_ty, is_struct, lit_slot_verdict, pos_or, tparam_bound, ty_mentions_tparam, unknown_ty, ut_unknown_ty, ut_unknown_tys } = compiler.validate.util
+{ KARGTYPE, KARITY, KARMVOID, KBADBIND, KDIAG_CAP, KDUPVARIANT, KFFITYPE, KMISGEN, KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KTARGARITY, KTRAITBOUND, KUNKNOWNTYPE, KUNREACHABLEARM, KVBREAK, desc_or } = compiler.validate.diag
+{ zty } = compiler.validate.ownership
+{ arg_err_at } = compiler.validate.args
+{ check_module, kv_at, kv_kor, kv_one } = compiler.validate.core
+// A trait-method call whose CONCRETE receiver type implements no matching impl (dispatch finds no
+// redirect) and that is neither a free function nor an imported name — would emit a bare `area`
+// call and fail at the C linker. Reject it as a Zen receiver/trait-bound error instead.
+trait_recv_missing* = (env: Env, c: CallData) bool {
+    (c.args.len > 0 && env.env_trait_method(c.fn) && env.env_imported(c.fn) == false && env.env_known_fn(c.fn) == false).match ({
+        true  => eq(env.dispatch_name(c), c.fn) && env.unknown_ty(env.infer_expr(c.args[0].addr())) == false,
+        false => false,
+    })
+}
+// Does some `Type.impl(Trait)` exist? i.e. a DImpl naming this type + trait.
+type_impls_trait = (decls: [Decl], tyname: string_view, trname: string_view) bool {
+    found := false
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DImpl(im) => (eq(im.ty, tyname) && eq(im.trname, trname)).match ({
+                true  => true,
+                false => found,
+            }),
+            _          => found,
+        })
+    })
+    found
+}
+// Enforce ONE bounded tparam at a call site: bind A to its concrete targ, then require the bound.
+// Fires when A resolves to a CONCRETE nameable type — a struct, an enum, or a primitive (all live
+// in the impl table's key space, `i64.impl(Ord, …)` etc.), so `f<A: Allocator>` called with `i32`
+// no longer silently passes. Deferral remains ONLY for genuinely unresolved/abstract targs: an
+// empty/unknown name, a caller tparam passed through (`tn` names an in-scope tparam — kvb_func_kind
+// binds them, so a tparam that shadows a global type name still defers), and generic residue
+// (recv_name of a Generic is its mangled instance name, matching no decl).
+bound_prim_name = (n: string_view) bool { eq(n, "i8") || eq(n, "i16") || eq(n, "i32") || eq(n, "i64") || eq(n, "u8") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64") || eq(n, "f32") || eq(n, "f64") || eq(n, "bool") || eq(n, "string_view") }
+bound_targ_concrete = (env: Env, tn: string_view) bool { env.decls.is_struct(tn) || env.env_is_enum(tn) || tn.bound_prim_name() }
+bound_err* = (env: Env, f: Func, c: CallData, tp: Param) i32 {
+    tr := tp.tparam_bound()
+    is_empty(tr).match ({
+        true  => 0,
+        false => {
+            tn := env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
+            // concrete type A binds to
+            (is_empty(tn) || env.vars.tparam_declared(tn) || env.bound_targ_concrete(tn) == false).match ({
+                true  => 0,
+                false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 }),
+            })
+        },
+    })
+}    // unresolved / abstract: defer
+bound_errs = (env: Env, f: Func, c: CallData) i32 {
+    acc := 0
+    f.tparams.loop((h, i, tp) {
+        acc = acc + env.bound_err(f, c, tp)
+    })
+    acc
+}
+match_result_ty* = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
+    out := tvoid()
+    arms.loop((h, i, ar) {
+        aenv := env.a.arm_env(env, subjty, ar)
+        got := aenv.infer_expr(ar.body)
+        out = out.is_void_ty().match ({
+            true  => (got.is_void_ty() || aenv.unknown_ty(got)).match ({
+                true  => out,
+                false => got,
+            }),
+            false => out,
+        })
+    })
+    out
+}
+result_compatible = (want: Ty, got: Ty) bool {
+    (want.is_str_t() && got.is_str_t()).match ({
+        true  => true,
+        false => (want.ty_rank() >= 0 && got.ty_rank() >= 0).match ({
+            true  => true,
+            false => want.ty_eq(got),
+        }),
+    })
+}    // string_* types are one compatible family
+cond_numlike = (t: Ty) bool { t.ty_rank() >= 0 || t.is_f64_ty() }
+// A value/bool `.match` (and `if` expression) lowers to a ternary Cond at parse time, so its two
+// value branches escape the enum-match arm checks above. Their result types must still be C-compatible
+// — `c ? A : B` on incompatible types is a hard cc error. A numeric LITERAL branch is polymorphic and
+// coerces to any numeric counterpart (mirrors cond_ty's deferral); void/unknown branches stay lenient.
+cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
+    d.t.is_lit_numeric().match ({
+        true  => et.cond_numlike(),
+        false => d.e.is_lit_numeric().match ({
+            true  => tt.cond_numlike(),
+            false => tt.result_compatible(et),
+        }),
+    })
+}
+// A one-armed bool `.match` is always non-exhaustive. Resolution deliberately leaves oa != 0 intact even
+// in statement position; `.then({ ... })` is the explicit lazy one-way construct and carries oa=0.
+cond_onearm_err* = (d: CondData) i32 { (d.oa == 0).match ({ true => 0, false => 1 }) }
+cond_result_err* = (env: Env, d: CondData) i32 {
+    tt := env.infer_expr(d.t)
+    et := env.infer_expr(d.e)
+    (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
+        true  => 0,
+        false => d.cond_compatible(tt, et).match ({ true => 0, false => 1 }),
+    })
+}
+arm_result_err* = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
+    aenv := env.a.arm_env(env, subjty, ar)
+    got := aenv.infer_expr(ar.body)
+    (want.is_void_ty() || got.is_void_ty() || aenv.unknown_ty(want) || aenv.unknown_ty(got)).match ({
+        true  => 0,
+        false => want.result_compatible(got).match ({ true => 0, false => 1 }),
+    })
+}
+// ── value-consumed match/cond arms must each yield a value ──────────────────────────────
+// A match/cond CONSUMED AS A VALUE (let/assign RHS, return operand, call argument, index-set
+// value) must get a value from every arm that doesn't diverge. The arm typing above treats a
+// void arm as contributing NO constraint — that leniency exists for DIVERGING arms (a `return`
+// tail leaves the fn, so it legitimately yields nothing) and for template residue — but the
+// emitter assigns EVERY arm into the value slot (`_out = <arm>` / `c ? a : b`), so a genuinely
+// valueless arm reaches cc as `char* _out = (done = true)` — a cc-stage error on a checked
+// program — or WORSE compiles silently wrong (`c ? "s" : bool` is only a warning under -w).
+// Reject it here (KARMVOID, positioned at the offending arm). Two deliberate scope limits:
+//   * only POSITIVE no-value shapes fire — a block ending in a non-expression statement or
+//     empty, a `.loop`, a call to a fn DECLARED void — never inference fallbacks (an
+//     unresolvable template call also infers void and must stay lenient);
+//   * only CONSUMED positions fire — a discarded match (e.g. the tail of a void fn) keeps its
+//     mixed side-effect arms, which emit fine as `(c ? f() : ({ }))`.
+known_void_call = (env: Env, c: CallData) bool {
+    f := env.env_func(c.fn)
+    eq(f.name, c.fn).match ({ true => f.tparams.len == 0 && f.ret.is_void_ty(), false => false })
+}
+novalue_arm_leaf* = (env: Env, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Block(b) => env.novalue_block_tail(b.stmts),
+        .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
+        .Match(m) => env.novalue_match_arms(m),
+        .Loop(l)  => 1,    // `.loop` never yields a value
+        .Call(c)  => env.known_void_call(c).match ({ true => 1, false => 0 }),
+        _         => 0,
+    })
+}
+novalue_block_tail = (env: Env, stmts: [Stmt]) i32 {
+    (stmts.len == 0).match ({
+        true  => 1,
+        false => stmts[stmts.len - 1].match ({
+            .Return(r)   => 0,    // diverging arm: the one legitimate valueless tail
+            .ExprStmt(e) => env.novalue_arm_leaf(e),
+            _            => 1,
+        }),
+    })
+}    // a Let/Assign/If/While/IndexSet tail is a statement, never a value
+novalue_match_arms = (env: Env, m: MatchData) i32 {
+    acc := 0
+    m.arms.loop((h, i, ar) {
+        acc = acc + env.novalue_arm_leaf(ar.body)
+    })
+    acc
+}
+value_void_arm_err* = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
+    (want.is_void_ty() || env.unknown_ty(want)).match ({
+        true  => 0,
+        false => load(e).match ({
+            .Match(m) => env.novalue_match_arms(m),
+            .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
+            _         => 0,
+        }),
+    })
+}
+// argument position: a match/cond arg flowing into a CONCRETE (non-tparam) param slot.
+call_void_arm_errs* = (env: Env, c: CallData) i32 {
+    f := env.env_func(c.fn)
+    acc := 0
+    eq(f.name, c.fn).then({
+        c.args.loop((h, i, ar) {
+            acc = acc + (i < f.params.len).match ({
+                true  => f.tparams.ty_mentions_tparam(f.params[i].ty).match ({
+                    true  => 0,
+                    false => env.value_void_arm_err(f.params[i].ty, ar.addr()),
+                }),
+                false => 0,
+            })
+        })
+    })
+    acc
+}
+// Early returns inside value-position block arms would be dropped by expression emission.
+early_returns = (stmts: [Stmt]) bool {
+    found := false
+    stmts.loop((h, i, st) {
+        found = (i < stmts.len - 1).match ({
+            true  => st.match ({
+                .Return(r) => true,
+                _          => found,
+            }),
+            false => found,
+        })
+    })
+    found
+}
+expr_drops_return* = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Block(b) => b.stmts.early_returns().match ({ true => 1, false => 0 }),
+        _         => 0,
+    })
+}
+// Enum matches must be exhaustive and have no duplicate arms.
+no_variants = () [VariantDef] { slice(null_ptr(), 0) }
+enum_variants* = (decls: [Decl], ename: string_view) [VariantDef] {
+    found := no_variants()
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DEnum(ed)   => eq(ed.name, ename).match ({ true => ed.variants, false => found }),
+            .DGenEnum(g) => eq(g.name, ename).match ({ true => g.variants, false => found }),
+            _            => found,
+        })
+    })
+    found
+}
+has_wildcard* = (arms: [ArmData]) bool {
+    f := false
+    arms.loop((h, i, a) {
+        f = eq(a.variant, "_").match ({ true => true, false => f })
+    })
+    f
+}
+arm_covers = (arms: [ArmData], vname: string_view) bool {
+    f := false
+    arms.loop((h, i, a) {
+        f = eq(a.variant, vname).match ({ true => true, false => f })
+    })
+    f
+}
+missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
+    n := 0
+    variants.loop((h, i, v) {
+        n = arms.arm_covers(v.name).match ({ true => n, false => n + 1 })
+    })
+    n
+}
+exhaustive_err* = (env: Env, m: MatchData) i32 {
+    vs := env.decls.enum_variants(m.ename)
+    (vs.len == 0).match ({
+        true  => 0,
+        false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 }),
+    })
+}
+// the NAME of the first declared variant the arms do not cover, else "" — the uncovered
+// variant an exhaustiveness diagnostic names so the fix is a copy-pasteable `.Variant => …` arm.
+first_missing_variant* = (variants: [VariantDef], arms: [ArmData]) string_view {
+    r := ""
+    variants.loop((h, i, v) {
+        r = (is_empty(r) && arms.arm_covers(v.name) == false).match ({ true => v.name, false => r })
+    })
+    r
+}
+dup_before = (arms: [ArmData], vname: string_view, upto: i32) bool {
+    f := false
+    arms.loop((h, i, a) {
+        f = (i < upto && eq(a.variant, vname)).match ({ true => true, false => f })
+    })
+    f
+}
+dup_arm_errs* = (arms: [ArmData]) i32 {
+    n := 0
+    arms.loop((h, i, a) {
+        n = n + eq(a.variant, "_").match ({
+            true  => 0,
+            false => arms.dup_before(a.variant, i).match ({ true => 1, false => 0 }),
+        })
+    })
+    n
+}
+// An arm strictly AFTER a wildcard `_` arm can never fire — the emitter's switch stops at the
+// default case (gen_switch_arms), so such an arm is silently DROPPED. Report it instead of
+// letting code that looks reachable vanish. (A duplicate variant arm — the other never-fires
+// shape — is already KDUPVARIANT, whether or not a wildcard is present.)
+wildcard_before = (arms: [ArmData], upto: i32) bool {
+    f := false
+    arms.loop((h, i, a) {
+        f = (i < upto && eq(a.variant, "_")).match ({ true => true, false => f })
+    })
+    f
+}
+unreachable_arm_errs* = (arms: [ArmData]) i32 {
+    n := 0
+    arms.loop((h, i, a) {
+        n = n + arms.wildcard_before(i).match ({ true => 1, false => 0 })
+    })
+    n
+}
+// Reject constructors whose variant is not declared in the linked decl set.
+enum_declares = (decls: [Decl], vn: string_view) bool {
+    f := false
+    decls.loop((h, i, d) {
+        f = d.match ({
+            .DEnum(ed)   => ed.variants.arm_known(vn).match ({ true => true, false => f }),
+            .DGenEnum(g) => g.variants.arm_known(vn).match ({ true => true, false => f }),
+            _            => f,
+        })
+    })
+    f
+}
+// Unknown enum ctor: bare `.Variant` (empty ty) must name SOME declared variant; qualified
+// `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
+// qualified branch always returned 0, so `Color.Purple` passed check and ICEd at cc.
+mkenum_err* = (env: Env, ty: string_view, variant: string_view) i32 {
+    is_empty(ty).match ({
+        true  => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }),
+        false => {
+            vs := env.decls.enum_variants(ty)
+            (vs.len == 0).match ({
+                true  => 0,
+                false => vs.arm_known(variant).match ({ true => 0, false => 1 }),
+            })
+        },
+    })
+}
+// A constructed enum payload must fit the variant's declared payload type (`E.A("s")` where A(i32)).
+// Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
+// Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.
+enum_payload_err* = (env: Env, mk: MakeEnumData) i32 {
+    is_empty(mk.ty).match ({
+        true  => 0,
+        false => {
+            pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
+            lv := mk.payload.lit_slot_verdict(pty)
+            (lv >= 0).match ({
+                true  => lv,
+                false => {
+                    vt := env.infer_expr(mk.payload)
+                    (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
+                        true  => 0,
+                        false => fits(vt, pty).match ({ true => 0, false => 1 }),
+                    })
+                },
+            })
+        },
+    })
+}
+// Every non-wildcard arm must name a declared variant.
+arm_known = (vs: [VariantDef], vname: string_view) bool {
+    f := false
+    vs.loop((h, i, v) {
+        f = eq(v.name, vname).match ({ true => true, false => f })
+    })
+    f
+}
+unknown_arm_errs* = (env: Env, m: MatchData) i32 {
+    vs := env.decls.enum_variants(m.ename)
+    n := 0
+    (vs.len == 0).match ({
+        true  => 0,
+        false => {
+            m.arms.loop((h, i, a) {
+                n = n + eq(a.variant, "_").match ({
+                    true  => 0,
+                    false => vs.arm_known(a.variant).match ({ true => 0, false => 1 }),
+                })
+            })
+            n
+        },
+    })
+}
+// Operand checking stays lenient for uninferable operands.
+is_arith_op = (op: string_view) bool {
+    b := op.at(0)
+    b == '+' || b == '-' || b == '*' || b == '/' || b == '%'
+}
+is_logic_op = (op: string_view) bool { eq(op, "&&") || eq(op, "||") }
+// Strict comparisons require numeric operands; shifts are separate bitwise ops.
+is_cmp_op_v = (op: string_view) bool { eq(op, "<") || eq(op, ">") || eq(op, "<=") || eq(op, ">=") }
+is_bitwise_op = (op: string_view) bool { eq(op, "&") || eq(op, "|") || eq(op, "^") || eq(op, "<<") || eq(op, ">>") }
+is_bool_ty = (t: Ty) bool {
+    t.match ({
+        .Bool => true,
+        _     => false,
+    })
+}
+non_numeric = (env: Env, e: Ptr<Expr>) bool {
+    t := env.infer_expr(e)
+    env.unknown_ty(t).match ({
+        true  => false,
+        false => (t.ty_rank() >= 0).match ({ true => false, false => true }),
+    })
+}
+non_bool = (env: Env, e: Ptr<Expr>) bool {
+    t := env.infer_expr(e)
+    env.unknown_ty(t).match ({
+        true  => false,
+        false => t.is_bool_ty().match ({ true => false, false => true }),
+    })
+}
+// f64 operators are strict: no implicit int<->float mixing.
+is_eq_op_v = (op: string_view) bool { eq(op, "==") || eq(op, "!=") }
+f64_op_ok = (op: string_view) bool { eq(op, "+") || eq(op, "-") || eq(op, "*") || eq(op, "/") || eq(op, "/.") || op.is_cmp_op_v() }
+f64_side_ok = (env: Env, t: Ty) bool { t.is_f64_ty() || env.unknown_ty(t) }
+f64_operand_err = (env: Env, op: string_view, lt: Ty, rt: Ty) i32 { (env.f64_side_ok(lt) && env.f64_side_ok(rt) && op.f64_op_ok()).match ({
+    true  => 0,
+    false => 1,
+}) }
+// Any f64 side routes to the f64 surface; otherwise use integer numeric rules.
+num_operand_err = (env: Env, b: BinData) i32 {
+    lt := env.infer_expr(b.lhs)
+    rt := env.infer_expr(b.rhs)
+    (lt.is_f64_ty() || rt.is_f64_ty()).match ({
+        true  => env.f64_operand_err(b.op, lt, rt),
+        false => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).match ({
+            true  => 1,
+            false => 0,
+        }),
+    })
+}
+same_eq_category = (a: Ty, b: Ty) bool { a.ty_rank() >= 0 && b.ty_rank() >= 0 || a.is_bool_ty() && b.is_bool_ty() || a.is_str_t() && b.is_str_t() || a.is_ptr_ty() && b.is_ptr_ty() }
+// a NOMINAL ==: only types genc can compare with C's `==` — an enum (tag compare) or a Named non-struct.
+// structs and slices CANNOT (`a == b` on two structs is a hard cc error), so they're excluded here.
+eq_nominal_ok = (env: Env, a: Ty, b: Ty) bool {
+    a.ty_eq(b) && a.match ({
+        .Named(n) => env.env_is_struct(n).match ({ true => false, false => true }),
+        _         => false,
+    })
+}
+// Equality rejects f64/non-f64 mixes and heterogeneous comparisons (`"hi" == 5`, `true == 5`).
+eq_mix_err = (env: Env, b: BinData) i32 {
+    lt := env.infer_expr(b.lhs)
+    rt := env.infer_expr(b.rhs)
+    (lt.is_f64_ty() || rt.is_f64_ty()).match ({
+        true  => (env.f64_side_ok(lt) && env.f64_side_ok(rt)).match ({ true => 0, false => 1 }),
+        false => (env.unknown_ty(lt) || env.unknown_ty(rt)).match ({
+            true  => 0,
+            false => (lt.same_eq_category(rt) || env.eq_nominal_ok(lt, rt)).match ({
+                true  => 0,
+                false => 1,
+            }),
+        }),
+    })
+}
+// A comparison between a SIGNED int and an UNSIGNED int of rank >= 8 (u16/u32/u64) silently uses C's
+// unsigned promotion — `a:i32=-1 < b:u32=1` evaluates FALSE. Reject it. NARROW by design: u8 is
+// excluded so byte/char compares (`b == 'a'`) stay fine (u8 always promotes to a signed int safely).
+is_signed_int = (t: Ty) bool {
+    t.match ({
+        .I32      => true,
+        .I64      => true,
+        .Named(n) => eq(n, "i8") || eq(n, "i16") || eq(n, "i32") || eq(n, "i64"),
+        _         => false,
+    })
+}
+is_unsigned_wide = (t: Ty) bool {
+    t.match ({
+        .Named(n) => eq(n, "u16") || eq(n, "u32") || eq(n, "u64"),
+        _         => false,
+    })
+}
+sign_mismatch = (l: Ty, r: Ty) bool { l.is_signed_int() && r.is_unsigned_wide() || l.is_unsigned_wide() && r.is_signed_int() }
+// A numeric LITERAL operand is polymorphic and coerces to the other side's type (`n: u64 < 10` is
+// fine), so only flag when BOTH sides are non-literal values of genuinely mismatched signedness.
+signcmp_err = (env: Env, b: BinData) i32 {
+    ((b.op.is_cmp_op_v() || b.op.is_eq_op_v()) && b.lhs.is_lit_numeric() == false && b.rhs.is_lit_numeric() == false).match ({
+        true  => env.infer_expr(b.lhs).sign_mismatch(env.infer_expr(b.rhs)).match ({
+            true  => 1,
+            false => 0,
+        }),
+        false => 0,
+    })
+}
+operand_err* = (env: Env, b: BinData) i32 {
+    b.op.is_logic_op().match ({
+        true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
+        false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
+            true  => env.num_operand_err(b) + env.signcmp_err(b),
+            false => b.op.is_eq_op_v().match ({
+                true  => env.eq_mix_err(b) + env.signcmp_err(b),
+                false => 0,
+            }),
+        }),
+    })
+}
+// Indexing needs a slice and numeric index; uninferable types skip.
+is_slice_ty = (t: Ty) bool {
+    t.match ({
+        .Slice(e) => true,
+        _         => false,
+    })
+}
+non_slice = (env: Env, e: Ptr<Expr>) bool {
+    t := env.infer_expr(e)
+    env.unknown_ty(t).match ({
+        true  => false,
+        false => t.is_slice_ty().match ({ true => false, false => true }),
+    })
+}
+index_err* = (env: Env, ix: IndexData) i32 { (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({
+    true  => 1,
+    false => 0,
+}) }
+// Bare identifiers in value position must resolve to a local/global/function/import/trait/intrinsic.
+var_err* = (env: Env, name: string_view) i32 {
+    (eq(name, "true") || eq(name, "false") || env.is_bound(name) || env.env_known_fn(name) || env.env_imported(name) || env.env_trait_method(name) || name.is_intrinsic() || env.decls.is_tag_const(env.a, name)).match ({
+        true  => 0,
+        false => 1,
+    })
+}
+// Lowered statement-match tag constants count as generated names.
+variant_tags_has = (vs: [VariantDef], a: MutPtr<Malloc>, ename: string_view, name: string_view) bool {
+    found := false
+    vs.loop((h, i, v) {
+        found = eq(name, a.tag_const(ename, v.name)).match ({ true => true, false => found })
+    })
+    found
+}
+// A lowered match over a GENERIC enum instance compares against `<mangled>_<variant>` — e.g.
+// `Result_i32_IoError_Err`. The concrete EnumDecl is created only at backend monomorphization, so the
+// validator recognizes such a tag by shape: it starts with the gen-enum base name and ends with one
+// of its variant names (`Result_…` + `…_Err`). Keeps lowered generic-enum guards from false-rejecting.
+variant_affix = (a: MutPtr<Malloc>, lead: string_view, vn: string_view) string_view {
+    s := a.gstr_string(64)
+    s = s.gstr_append(a, lead)
+    s = s.gstr_append(a, vn)
+    s.gstr_finish(a)
+}
+gen_tag_match = (a: MutPtr<Malloc>, vs: [VariantDef], base: string_view, name: string_view) bool {
+    found := false
+    pre := a.variant_affix(base, "_")
+    vs.loop((h, i, v) {
+        found = (name.starts_with(pre) && name.ends_with(a.variant_affix("_", v.name))).match ({
+            true  => true,
+            false => found,
+        })
+    })
+    found
+}
+is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: string_view) bool {
+    found := false
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DEnum(ed)   => ed.variants.variant_tags_has(a, ed.name, name).match ({
+                true  => true,
+                false => found,
+            }),
+            .DGenEnum(g) => a.gen_tag_match(g.variants, g.name, name).match ({
+                true  => true,
+                false => found,
+            }),
+            _            => found,
+        })
+    })
+    found
+}
+// Return/assign/index-set checks only reject concrete mismatches.
+ret_err* = (env: Env, r: Ptr<Expr>) i32 {
+    rt := env.infer_expr(r)
+    lv := r.lit_slot_verdict(env.exp)    // a numeric literal return is decided by range
+    (lv >= 0).match ({
+        true  => lv,
+        false => (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt()).match ({
+            true  => 0,
+            false => fits(rt, env.exp).match ({ true => 0, false => 1 }),
+        }),
+    })
+}
+// a function-VALUE return (declared return is a function type) is accepted structurally — ty_eq
+// treats FnT as never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
+assign_err* = (env: Env, x: AssignData) i32 {
+    vt := env.infer_expr(x.target)
+    rt := env.infer_expr(x.value)
+    lv := x.value.lit_slot_verdict(vt)
+    (lv >= 0).match ({
+        true  => lv,
+        false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
+            true  => 0,
+            false => fits(rt, vt).match ({ true => 0, false => 1 }),
+        }),
+    })
+}
+// Stage 2 mutability, the field-write half: `b.v = …` where `b: Ptr<Box>` (read-only) writes through a
+// non-writable pointer — the same hole `store()` guards, via Assign/Member. A `MutPtr<Box>` permits it
+// (k_mut_ptr), and plain local/struct mutation (no pointer base) is untouched. A NESTED write
+// (`b.inner.v = …`, `b.data[0] = …`) is the same hole one level down: it mutates `*b` just as the
+// direct field-set does, so walk the lvalue's member/index chain to its root and reject if the write
+// ultimately passes through a read-only `Ptr<T>`.
+assign_ptr_write_err* = (env: Env, x: AssignData) i32 { env.lvalue_writes_readonly(x.target).match ({
+    true  => 1,
+    false => 0,
+}) }
+// the index-set half of the read-only-pointer write guard: `b.data[0] = …` writes into `*b`.
+idxset_ptr_write_err* = (env: Env, x: IndexSetData) i32 { env.write_thru_readonly(x.seq).match ({
+    true  => 1,
+    false => 0,
+}) }
+idxset_err* = (env: Env, x: IndexSetData) i32 {
+    rt := env.infer_expr(x.value)
+    lv := x.value.lit_slot_verdict(x.elem)
+    (lv >= 0).match ({
+        true  => lv,
+        false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
+            true  => 0,
+            false => fits(rt, x.elem).match ({ true => 0, false => 1 }),
+        }),
+    })
+}
+// Annotated lets must fit their declared type; unannotated lets are inferred only.
+let_fit_err* = (env: Env, l: LetData) i32 {
+    l.ty.is_void_ty().match ({
+        true  => 0,
+        false => {
+            // infer under the DECLARED type as expected context, exactly as resolve_let resolves the
+            // value — a generic call whose tparam sits only in return position (`a.nbuf("", n)` for a
+            // `[string_view]` let) binds it from the declaration, not from the weak literal fallback.
+            vt := env.with_exp(l.ty).infer_expr(l.value)
+            lv := l.value.lit_slot_verdict(l.ty)
+            (lv >= 0).match ({
+                true  => lv,
+                false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
+                    true  => 0,
+                    false => fits(vt, l.ty).match ({ true => 0, false => 1 }),
+                }),
+            })
+        },
+    })
+}
+// A generic type with a `.Void` type-arg (recursing Ptr/Slice/nested generics) — e.g. `Box<void>`.
+// An unbound tparam survives inference as void, so the let's stored (inferred) type becomes Box<void>,
+// which only ever lowers to `Box_void`, never a usable value.
+ty_has_void_targ = (t: Ty) bool {
+    t.match ({
+        .Generic(g) => g.args.tys_mention_void(),
+        .Ptr(pd)    => load(pd.pointee).is_void_ty() || load(pd.pointee).ty_has_void_targ(),
+        // A `[void]` element type means a tparam in element/closure-return position was never
+        // inferred (e.g. an unannotated `iter.map` with an untyped lambda). It only lowers to
+        // garbage, so demand an annotation instead of silently miscompiling to a `[void]` slice.
+        .Slice(e)   => load(e).is_void_ty() || load(e).ty_has_void_targ(),
+        _           => false,
+    })
+}
+tys_mention_void = (ts: [Ty]) bool {
+    f := false
+    ts.loop((h, i, t) {
+        f = (t.is_void_ty() || t.ty_has_void_targ()).match ({ true => true, false => f })
+    })
+    f
+}
+// A let (post-resolve, ty = the inferred/declared type) whose stored type is a generic with an
+// uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m := empty(7)` → Box<void> → mono emits
+// `Box_void`). check used to pass; require an annotation so the tparam is pinned.
+let_needannot_err* = (env: Env, l: LetData) i32 { l.ty.ty_has_void_targ().match ({
+    true  => 1,
+    false => 0,
+}) }
+// trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares, with a
+// MATCHING SIGNATURE. The Trait is a struct whose FnT fields are the method signatures (using `Self`
+// for the implementing type); im.methods is the names this impl provides, and the impl's actual
+// method bodies are top-level DFuncs found by name. So per declared method: missing → 1 error;
+// present but signature-mismatched → 1 error; present and matching → 0. The check is tied to THIS
+// impl (im.methods), not a global function search, so an unrelated same-named fn never satisfies it.
+has_method* = (methods: [Param], name: string_view) bool {
+    found := false
+    methods.loop((h, i, p) {
+        found = eq(p.name, name).match ({ true => true, false => found })
+    })
+    found
+}
+// rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
+impl_ty = (tyname: string_view) Ty {
+    eq(tyname, "i32").match ({
+        true  => ti32(),
+        false => eq(tyname, "i64").match ({
+            true  => ti64(),
+            false => eq(tyname, "u8").match ({
+                true  => tu8(),
+                false => eq(tyname, "f64").match ({
+                    true  => tf64(),
+                    false => eq(tyname, "bool").match ({
+                        true  => tbool(),
+                        false => eq(tyname, "string_view").match ({
+                            true  => tstring_view(),
+                            false => eq(tyname, "str").match ({
+                                true  => tstring_view(),
+                                false => tnamed(tyname),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
+subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: string_view) Ty {
+    t.match ({
+        .Named(n) => eq(n, "Self").match ({ true => impl_ty(tyname), false => t }),
+        .Ptr(pd)  => tptr_k(a.tnode(a.subst_self(load(pd.pointee), tyname)), pd.kind),
+        .Slice(p) => tslice(a.tnode(a.subst_self(load(p), tyname))),
+        _         => t,
+    })
+}
+// each declared param type (Self→tyname) must equal the impl method's, left to right.
+params_match = (a: MutPtr<Malloc>, tps: [Ty], ips: [Param], tyname: string_view, i: i32) bool {
+    (i == tps.len).match ({
+        true  => true,
+        false => a.subst_self(tps[i], tyname).ty_eq(ips[i].ty).match ({
+            true  => a.params_match(tps, ips, tyname, i + 1),
+            false => false,
+        }),
+    })
+}
+// the impl method `f` matches the trait's FnT field `fd` (Self→tyname): same arity, param types, ret.
+sig_matches = (a: MutPtr<Malloc>, fd: FnTData, f: Func, tyname: string_view) bool {
+    (fd.params.len == f.params.len).match ({
+        true  => a.params_match(fd.params, f.params, tyname, 0).match ({
+            true  => a.subst_self(load(fd.ret), tyname).ty_eq(f.ret),
+            false => false,
+        }),
+        false => false,
+    })
+}
+// does the trait `trname` declare a DEFAULT body for method `m`? (then an impl may OMIT it.)
+trait_has_default* = (decls: [Decl], trname: string_view, m: string_view) bool {
+    found := false
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DTraitDefault(td) => (eq(td.trname, trname) && eq(td.fn.name, m)).match ({
+                true  => true,
+                false => found,
+            }),
+            _                  => found,
+        })
+    })
+    found
+}
+// one declared trait field: 0 if it's not a method, or it's provided with a matching signature, or it
+// is OMITTED but the trait supplies a default body; 1 if the method is missing (no default) or differs.
+method_err* = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
+    f.ty.match ({
+        .FnT(fd) => im.methods.has_method(f.name).match ({
+            true  => a.sig_matches(fd, decls.the_func(a.impl_cname_in(im.trname, im.ty, f.name)), im.ty).match ({
+                true  => 0,
+                false => 1,
+            }),
+            false => decls.trait_has_default(im.trname, f.name).match ({ true => 0, false => 1 }),
+        }),    // omitted: OK iff defaulted
+        _        => 0,
+    })
+}
+// an undefined call reads as a `recv.method()` UFCS call — not a bare undefined name — when it has a
+// first argument whose inferred type is a DECLARED struct/enum (a genuine concrete receiver). A
+// numeric/str/unknown first arg or a zero-arg call stays a plain undefined name. An AMBIGUOUS UFCS
+// call (2+ `alias__fn` candidates match the receiver) keeps the plain-undefined channel so its more
+// specific `ambiguous method` enrichment still fires — this is a NO-method case only.
+undef_is_method* = (env: Env, c: CallData) bool {
+    (c.args.len == 0).match ({
+        true  => false,
+        false => {
+            rty := env.infer_expr(c.args[0].addr())
+            tn := rty.recv_name()
+            (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
+                true  => false,
+                false => env.alias_ufcs_candidates(c.fn, rty).count < 2,
+            })
+        },
+    })
+}
+// a match: exhaustiveness vs duplicate-variant, split out from match_err. The caret points at the
+// matched subject (arms carry no source position); the subject bottoms at a Var, which survives resolve.
+arms_first_pos* = (arms: [ArmData]) i32 { (arms.len == 0).match ({
+    true  => 0,
+    false => arms[0].pos,
+}) }
+// ── trait-bound enrichment ─────────────────────────────────────────────────────────────────────
+// the method names an impl of (type `tn`, trait `tr`) provides; empty when no such impl exists.
+impl_methods_of* = (decls: [Decl], tn: string_view, tr: string_view) [Param] {
+    found := empty_params()
+    decls.loop((h, i, d) {
+        found = d.match ({
+            .DImpl(im) => (eq(im.ty, tn) && eq(im.trname, tr)).match ({
+                true  => im.methods,
+                false => found,
+            }),
+            _          => found,
+        })
+    })
+    found
+}
+// `/.` is the checker's internal float-division marker; a diagnostic must show the SOURCE operator `/`.
+op_display* = (op: string_view) string_view { eq(op, "/.").match ({ true => "/", false => op }) }
+// ── bounded-generics enforcement over RAW (pre-inline) decls ─────────────────────────────
+// Local generic calls are INLINED during resolve_module, so by check_module time the call site is
+// gone. This pass therefore runs on the raw, pre-inline decls (like the M5 escape check), walking
+// every function body and emitting KTRAITBOUND when a call binds a tparam `A: Trait` to a concrete
+// type that does not impl Trait. It reports ONLY this one kind, so an unresolved generic body never
+// false-positives the other validation kinds. Imported/foreign generics defer (bound_errs is 0).
+kvb_call_kind = (env: Env, c: CallData) i32 {
+    env.env_known_fn(c.fn).match ({
+        true  => env.bound_errs(env.env_func(c.fn), c).kv_one(KTRAITBOUND()).kv_at(c.pos),
+        false => 0,
+    })
+}
+kvb_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)        => env.kvb_call_kind(c).kv_kor(env.kvb_args_kind(c.args)),
+        .Index(ix)      => env.kvb_expr_kind(ix.seq).kv_kor(env.kvb_expr_kind(ix.idx)),
+        .Bin(b)         => env.kvb_expr_kind(b.lhs).kv_kor(env.kvb_expr_kind(b.rhs)),
+        .Cond(d)        => env.kvb_expr_kind(d.c).kv_kor(env.kvb_expr_kind(d.t)).kv_kor(env.kvb_expr_kind(d.e)),
+        .Member(m)      => env.kvb_expr_kind(m.obj),
+        .Arrow(ar)      => env.kvb_expr_kind(ar.obj),
+        .Match(m)       => env.kvb_expr_kind(m.subj).kv_kor(env.kvb_arms_kind(env.infer_expr(m.subj), m.arms)),
+        .MakeEnum(mk)   => env.kvb_expr_kind(mk.payload),
+        .MakeStruct(sd) => env.kvb_inits_kind(sd.inits),
+        .Block(b)       => env.a.kvb_body_kind(env, b.stmts),
+        .Loop(l)        => env.kvb_expr_kind(l.seq).kv_kor(env.a.kvb_body_kind(env, l.body)),
+        _               => 0,
+    })
+}
+kvb_args_kind = (env: Env, args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) {
+        acc = acc.kv_kor(env.kvb_expr_kind(ar.addr()))
+    })
+    acc
+}
+kvb_inits_kind = (env: Env, inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc.kv_kor(env.kvb_expr_kind(fi.value))
+    })
+    acc
+}
+kvb_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) {
+        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).kvb_expr_kind(ar.body))
+    })
+    acc
+}
+kvb_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => env.kvb_expr_kind(l.value),
+        .Assign(x)   => env.kvb_expr_kind(x.target).kv_kor(env.kvb_expr_kind(x.value)),
+        .Return(r)   => env.kvb_expr_kind(r),
+        .ExprStmt(e) => env.kvb_expr_kind(e),
+        .If(f)       => env.kvb_expr_kind(f.c).kv_kor(a.kvb_body_kind(env, f.then)).kv_kor(a.kvb_body_kind(env, f.els)),
+        .While(w)    => env.kvb_expr_kind(w.c).kv_kor(a.kvb_body_kind(env, w.body)),
+        .IndexSet(x) => env.kvb_expr_kind(x.seq).kv_kor(env.kvb_expr_kind(x.idx)).kv_kor(env.kvb_expr_kind(x.value)),
+    })
+}
+kvb_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
+    acc := 0
+    e := env
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.kvb_stmt_kind(e, st))
+        e = a.extend_env(e, st)
+    })
+    acc
+}
+kvb_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env(
+        vars: a.bind_tparams(a.params_env(f.params), f.tparams),
+        decls: decls,
+        didx: idx,
+        exp: f.ret,
+        a: a,
+    )
+    // bind the CALLER's tparams so a bound targ that resolves to one of them (a generic
+    // passthrough — even one shadowing a same-named global type) defers in bound_err.
+    a.kvb_body_kind(env, f.body)
+}
+ka_tbuf = (a: MutPtr<Malloc>, n: i64) [Ty] { slice(a.acquire(n * sizeof(Ty)), n) }
+ka_pbuf = (a: MutPtr<Malloc>, n: i64) [Param] { slice(a.acquire(n * sizeof(Param)), n) }
+// the call's full type-arg buffer: an explicit turbofish `<…>` PINS position i; an absent one is
+// inferred from the value args (exactly as the resolver's call_targs does) so a closure FnT param
+// substitutes to its concrete types for the arity/return check below.
+ka_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
+    buf := env.a.ka_tbuf(f.tparams.len)
+    f.tparams.loop((h, i, tp) {
+        buf[i] = (i < etargs.len).match ({
+            true  => etargs[i],
+            false => env.call_targ(f, args, tp.name),
+        })
+    })
+    buf
+}
+// a UFCS method call `recv.method(args)` lowers to `method(recv, …args)` — the SAME flat shape the
+// resolver's desugar produces. Rebuild the flat arg list here (without mutating the shared raw decls,
+// which a later pass still reads in surface form) so the closure/arg checks see the receiver as arg 0.
+ka_mcall_args = (a: MutPtr<Malloc>, mc: MethodCallData) [Expr] {
+    buf := slice(a.acquire((mc.args.len + 1) * sizeof(Expr)), mc.args.len + 1)
+    buf[0] = load(mc.recv)
+    mc.args.loop((h, i, ar) {
+        buf[i + 1] = mc.args[i]
+    })
+    buf
+}
+// (c) explicit-vs-inferred mismatch: with every tparam pinned by turbofish, substitute the bindings into
+// each tparam-typed param slot and require the value arg to fit the now-CONCRETE type. A literal flowing
+// into an int slot is range-decided (so `id<i32>(5)` still fits); a lambda / still-unknown slot defers.
+ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i32, ar: Expr) i32 {
+    (i < params.len).match ({
+        true  => tparams.ty_mentions_tparam(params[i].ty).match ({
+            true  => {
+                ct := env.a.subst_ty_in(tparams, targs, params[i].ty)
+                (env.unknown_ty(ct) || ar.is_ctx_typed_arg() || ct.is_fnt()).match ({
+                    true  => 0,
+                    false => {
+                        lv := ar.addr().lit_slot_verdict(ct)
+                        (lv >= 0).match ({
+                            true  => lv,
+                            false => env.fit_err(env.infer_expr(ar.addr()), ct),
+                        })
+                    },
+                })
+            },
+            false => 0,
+        }),
+        false => 0,
+    })
+}
+// (R5) a lambda bound to an FnT parameter: its declared param COUNT must match the FnT's, and — when the
+// FnT's concrete (substituted) param/return types are known — the lambda's body value must fit the FnT
+// return type. Bind each lambda param to the FnT's substituted param type, then infer the body's value.
+ka_lam_params = (a: MutPtr<Malloc>, lmps: [Param], fps: [Ty]) [Param] {
+    buf := a.ka_pbuf(lmps.len)
+    lmps.loop((h, i, p) {
+        buf[i] = Param(
+            name: p.name,
+            ty: (i < fps.len).match ({ true => fps[i], false => tvoid() }),
+            variadic: false,
+        )
+    })
+    buf
+}
+ka_lam_body_ty = (env: Env, lm: LambdaData, fps: [Ty]) Ty {
+    (lm.body.len == 0).match ({
+        true  => tvoid(),
+        false => {
+            benv := Env(
+                vars: env.a.params_env(env.a.ka_lam_params(lm.params, fps)),
+                decls: env.decls,
+                didx: env.didx,
+                exp: tvoid(),
+                a: env.a,
+            )
+            benv.ka_last_ty(lm.body[lm.body.len - 1])
+        },
+    })
+}
+ka_last_ty = (env: Env, st: Stmt) Ty {
+    st.match ({
+        .ExprStmt(e) => env.infer_expr(e),
+        .Return(r)   => env.infer_expr(r),
+        _            => tvoid(),
+    })
+}
+// the lambda's body return doesn't fit the FnT's return type — only when both are concrete-known.
+ka_lam_ret_err = (env: Env, fd: FnTData, lm: LambdaData, fps: [Ty]) i32 {
+    rty := load(fd.ret)
+    (env.unknown_ty(rty) || lm.ret.is_void_ty() == false).match ({
+        true  => env.unknown_ty(rty).match ({ true => 0, false => env.fit_err(lm.ret, rty) }),
+        false => {
+            bty := env.ka_lam_body_ty(lm, fps)
+            (bty.is_void_ty() || env.unknown_ty(bty)).match ({
+                true  => 0,
+                false => env.fit_err(bty, rty),
+            })
+        },
+    })
+}
+ka_lambda_at = (env: Env, ftparams: [Param], targs: [Ty], params: [Param], i: i32, ar: Expr, cpos: i32) i32 {
+    ar.match ({
+        .Lambda(lm) => (i < params.len).match ({
+            true  => env.a.subst_ty_in(ftparams, targs, params[i].ty).match ({
+                .FnT(fd) => (fd.params.len == lm.params.len).match ({
+                    true  => env.ka_lam_ret_err(fd, lm, fd.params).kv_one(KARGTYPE()).kv_at(cpos),
+                    false => KARITY().kv_at(cpos),
+                }),
+                _        => 0,
+            }),
+            false => 0,
+        }),
+        _           => 0,
+    })
+}
+// per-call arg checks: (c) explicit-arg mismatches + (R5) closure arity/return, against the SAME pinned
+// type-arg buffer. Run only for a KNOWN local callee whose signature is visible here.
+// The explicit-mismatch (c) check fires ONLY when the call carries turbofish `<…>` (the user PINNED the
+// bindings, so a contradicting value arg is a real error). A purely-inferred generic call leaves arg
+// typing to monomorphization (a bare `.Variant` / cross-enum residue resolves only there). The closure
+// arity/return check (R5) runs regardless, since HOF closures rarely carry turbofish.
+// A right-arity LOCAL generic call is INLINED during resolve_module, so the post-inline call check
+// The ordinary resolved-call path never sees it, so argument-type safety of its CONCRETE slots was
+// therefore off for EVERY generic callee (and the whole stdlib threads `MutPtr<A>`, so it is
+// generic). Re-arm it HERE, on the pre-inline call site, reusing the SAME arg_err_at the accepted
+// non-generic path uses: it skips tparam-mentioning slots (deferred to mono) and checks only the
+// concrete ones (`n:i32`, `sep:u8`) via lit_slot_verdict + fit_err — with fit_err's unknown-arg
+// leniency intact, so unresolved generic residue never over-rejects. Gated to `tparams.len > 0`:
+// a non-generic callee's call survives to the post-inline pass, which already checks it. Gated to
+// `authoritative` (fn is NOT also a trait/impl method): `the_func(fn)` returns THE top-level free
+// function by name, and UFCS binds its receiver to param 0 (positional), so its concrete slots check
+// soundly. But a name that ALSO has an impl method (e.g. `String.impl.append_in(s, a, t)` alongside
+// the free `append_in(a, s, t)`) may UFCS-dispatch to the impl by receiver type — then the free-fn
+// signature `the_func` returns is the WRONG yardstick, and a positional check would mis-reject a legit
+// `s.append_in(mp, t)`. Such dispatched names defer (under-catch), so the check never over-rejects.
+ka_concrete_arg_err = (env: Env, authoritative: bool, f: Func, i: i32, ar: Expr, pos: i32) i32 {
+    (authoritative && f.tparams.len > 0).match ({
+        true  => env.arg_err_at(f.tparams, f.params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos().pos_or(pos)),
+        false => 0,
+    })
+}
+ka_args_check = (env: Env, tparams: [Param], authoritative: bool, f: Func, args: [Expr], etargs: [Ty], pos: i32) i32 {
+    targs := env.ka_targs(f, args, etargs)
+    tf := etargs.len > 0
+    acc := 0
+    args.loop((h, i, ar) {
+        acc = acc.kv_kor(tf.match ({
+            true  => env.ka_mismatch_at(f.tparams, targs, f.params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos().pos_or(pos)),
+            false => 0,
+        })).kv_kor(env.ka_lambda_at(f.tparams, targs, f.params, i, ar, pos)).kv_kor(env.ka_concrete_arg_err(authoritative, f, i, ar, pos))
+    })
+    acc
+}
+// the shared call core, driven from both a flat `.Call` and a desugared `.MethodCall`: turbofish checks
+// (a/b) + the explicit-arg-mismatch (c) + closure (R5) checks, for a KNOWN local callee — UNLESS the
+// name is locally bound (a param/let SHADOWS the same-named top-level fn, so its signature is the
+// wrong yardstick here; e.g. a closure param `f` while a top-level `f` exists). Shadowed calls are
+// skipped, not re-judged: pre-inline generic bodies can't always type the local (lenient by design).
+ka_call_core* = (env: Env, tparams: [Param], fn: string_view, args: [Expr], etargs: [Ty], pos: i32) i32 {
+    (env.env_known_fn(fn) && env.is_local(fn) == false).match ({
+        true  => {
+            f := env.env_func(fn)
+            // `the_func(fn)`'s signature is the authoritative callee only when `fn` is not ALSO a trait/impl
+            // method — otherwise UFCS may dispatch to the impl by receiver type, and the free-fn signature
+            // is the wrong yardstick for the concrete-arg check (which then defers). (Zen has no free-fn
+            // overloading, so a name with no impl method resolves uniquely to this decl.)
+            authoritative := env.env_trait_method(fn) == false
+            tf := (etargs.len == 0).match ({
+                true  => 0,
+                false => (f.tparams.len == 0).match ({
+                    true  => KNOTYPEARGS().kv_at(pos),
+                    false => (etargs.len != f.tparams.len).match ({
+                        true  => KTARGARITY().kv_at(pos),
+                        false => env.ut_unknown_tys(tparams, etargs).kv_one(KUNKNOWNTYPE()).kv_at(pos),
+                    }),
+                }),
+            })
+            // an explicit `<…>` list must pin EVERY tparam: too many silently drop the extras,
+            // too few leave residue mono can only misreport — say the count mismatch here.
+            // a fully-pinned turbofish (or inferred bindings) feeds the arg-mismatch + closure checks; an
+            // unknown turbofish type short-circuits (the unknown-type error already fired).
+            tf.kv_kor(env.ka_args_check(tparams, authoritative, f, args, etargs, pos))
+        },
+        false => 0,
+    })
+}
+ka_expr_kind = (env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)        => env.ka_call_core(tparams, c.fn, c.args, c.targs, c.pos).kv_kor(env.ka_args_kind(tparams, c.args)),
+        .MethodCall(mc) => {
+            cargs := env.a.ka_mcall_args(mc)
+            env.ka_call_core(tparams, mc.method, cargs, no_tys(), mc.pos).kv_kor(env.ka_args_kind(tparams, cargs))
+        },
+        .Index(ix)      => env.ka_expr_kind(tparams, ix.seq).kv_kor(env.ka_expr_kind(tparams, ix.idx)),
+        .Bin(b)         => env.ka_expr_kind(tparams, b.lhs).kv_kor(env.ka_expr_kind(tparams, b.rhs)),
+        .Cond(d)        => env.ka_expr_kind(tparams, d.c).kv_kor(env.ka_expr_kind(tparams, d.t)).kv_kor(env.ka_expr_kind(tparams, d.e)),
+        .Member(m)      => env.ka_expr_kind(tparams, m.obj),
+        .Arrow(ar)      => env.ka_expr_kind(tparams, ar.obj),
+        // unreachable-arm judged HERE on the raw arms: a STATEMENT-position match lowers to an
+        // if-chain during resolve (lower_match_arms stops at `_`, silently dropping later arms),
+        // so the post-inline kv pass never sees them. Purely structural — no typing involved, so
+        // an unresolved generic body cannot false-positive.
+        .Match(m)       => env.ka_expr_kind(tparams, m.subj).kv_kor(m.arms.unreachable_arm_errs().kv_one(KUNREACHABLEARM()).kv_at(load(m.subj).expr_pos().pos_or(m.arms.arms_first_pos()))).kv_kor(env.ka_arms_kind(tparams, env.infer_expr(m.subj), m.arms)),
+        .MakeEnum(mk)   => env.ka_expr_kind(tparams, mk.payload),
+        .MakeStruct(sd) => env.ka_inits_kind(tparams, sd.inits),
+        .SliceLit(sd)   => env.ka_args_kind(tparams, sd.items),
+        .Lambda(lm)     => env.a.ka_body_kind(env, tparams, lm.body),
+        .Block(b)       => env.a.ka_body_kind(env, tparams, b.stmts),
+        .Loop(l)        => env.ka_expr_kind(tparams, l.seq).kv_kor(env.a.ka_body_kind(env, tparams, l.body)),
+        _               => 0,
+    })
+}
+ka_args_kind = (env: Env, tparams: [Param], args: [Expr]) i32 {
+    acc := 0
+    args.loop((h, i, ar) {
+        acc = acc.kv_kor(env.ka_expr_kind(tparams, ar.addr()))
+    })
+    acc
+}
+ka_inits_kind = (env: Env, tparams: [Param], inits: [FieldInit]) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc.kv_kor(env.ka_expr_kind(tparams, fi.value))
+    })
+    acc
+}
+ka_arms_kind = (env: Env, tparams: [Param], subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) {
+        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ka_expr_kind(tparams, ar.body))
+    })
+    acc
+}
+ka_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => env.ka_expr_kind(tparams, l.value),
+        .Assign(x)   => env.ka_expr_kind(tparams, x.target).kv_kor(env.ka_expr_kind(tparams, x.value)),
+        .Return(r)   => env.ka_expr_kind(tparams, r),
+        .ExprStmt(e) => env.ka_expr_kind(tparams, e),
+        .If(f)       => env.ka_expr_kind(tparams, f.c).kv_kor(a.ka_body_kind(env, tparams, f.then)).kv_kor(a.ka_body_kind(env, tparams, f.els)),
+        .While(w)    => env.ka_expr_kind(tparams, w.c).kv_kor(a.ka_body_kind(env, tparams, w.body)),
+        .IndexSet(x) => env.ka_expr_kind(tparams, x.seq).kv_kor(env.ka_expr_kind(tparams, x.idx)).kv_kor(env.ka_expr_kind(tparams, x.value)),
+    })
+}
+ka_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32 {
+    acc := 0
+    e := env
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.ka_stmt_kind(e, tparams, st))
+        e = a.extend_env(e, st)
+    })
+    acc
+}
+ka_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env(
+        vars: a.params_env(f.params),
+        decls: decls,
+        didx: idx,
+        exp: f.ret,
+        a: a,
+    )
+    a.ka_body_kind(env, f.tparams, f.body)
+}
+ka_param_named = (ps: [Param], nm: string_view) bool {
+    found := false
+    ps.loop((h, i, p) {
+        found = eq(p.name, nm).match ({ true => true, false => found })
+    })
+    found
+}
+ka_rec_hof_kind* = (f: Func) i32 {
+    (f.params.has_fnt_param() && f.body.len > 0 && f.params.ka_param_named(f.name) == false && f.body.rc_calls_body(f.name)).match ({
+        true  => KRECHOF().kv_at(f.pos),
+        false => 0,
+    })
+}
+ko_is_or_call = (c: CallData) bool { eq(c.fn, "or_return") && c.args.len == 1 }
+ko_is_or_mcall = (mc: MethodCallData) bool { eq(mc.method, "or_return") && mc.args.len == 0 }
+// the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree.
+// The `Ok` payloads are POSITION-dependent (`cnd` = conditionally-evaluated position):
+//   - UNCONDITIONAL positions (direct let value, call/ctor args, mid-chain receivers, match
+//     subjects, non-shortcircuit operands, …) hoist to a statement-level let whose lowering
+//     REBUILDS the Err return as the enclosing fn's Result (orret_err_value in compiler.check), so
+//     the receiver's Ok payload is unconstrained — it is consumed locally, only E must line up.
+//   - CONDITIONAL positions (`&&`/`||` right operands, cond/match branch values, while-loop
+//     conditions, lambda/loop/value-block bodies) lower in place with the receiver returned
+//     VERBATIM (their local expected type is not the fn's return type, so the rebuild can't fire):
+//     there the receiver's whole Result type must still be the enclosing fn's (a `Result<bool, E>`
+//     receiver in a `Result<i32, E>` fn emits `return <Result_bool_E>` and dies at cc in positions
+//     the return-fit scan never reaches — #377's miscompile).
+// A tparam-typed / unknown side defers (concrete only after monomorphization).
+ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32) i32 {
+    (tps.ty_mentions_tparam(want) || env.unknown_ty(want)).match ({
+        true  => 0,
+        false => {
+            fE := env.subj_variant_payload(want, "Err")
+            fE.is_void_ty().match ({
+                true  => KORRETURN().kv_at(pos),
+                false => {
+                    rt := env.infer_expr(recv)
+                    (rt.is_void_ty() || env.unknown_ty(rt) || tps.ty_mentions_tparam(rt)).match ({
+                        true  => 0,
+                        false => {
+                            rE := env.subj_variant_payload(rt, "Err")
+                            (rE.is_void_ty() || env.unknown_ty(rE) || env.unknown_ty(fE) || tps.ty_mentions_tparam(rE) || tps.ty_mentions_tparam(fE)).match ({
+                                true  => 0,
+                                false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({
+                                    true  => cnd.match ({
+                                        true  => env.ko_ok_at(tps, want, rt, pos),
+                                        false => 0,
+                                    }),
+                                    false => KORRETURN().kv_at(pos),
+                                }),
+                            })
+                        },
+                    })
+                },
+            })
+        },
+    })
+}
+// the Ok side of the same judgment (CONDITIONAL positions only), entered once both Err payloads are
+// known and agree. Same leniency: an unknown / tparam-typed / payloadless (void) Ok side defers.
+ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
+    fO := env.subj_variant_payload(want, "Ok")
+    rO := env.subj_variant_payload(rt, "Ok")
+    (fO.is_void_ty() || rO.is_void_ty() || env.unknown_ty(fO) || env.unknown_ty(rO) || tps.ty_mentions_tparam(fO) || tps.ty_mentions_tparam(rO)).match ({
+        true  => 0,
+        false => (fO.ty_eq(rO) || rO.ty_eq(fO)).match ({
+            true  => 0,
+            false => KORRETURN().kv_at(pos),
+        }),
+    })
+}
+ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData, cnd: bool) i32 {
+    own := ko_is_or_call(c).match ({
+        true  => env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos),
+        false => 0,
+    })
+    own.kv_kor(env.ko_args_kind(tps, want, c.args, cnd))
+}
+ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData, cnd: bool) i32 {
+    own := ko_is_or_mcall(mc).match ({
+        true  => env.ko_at(tps, want, mc.recv, cnd, mc.pos),
+        false => 0,
+    })
+    own.kv_kor(env.ko_expr_kind(tps, want, mc.recv, cnd)).kv_kor(env.ko_args_kind(tps, want, mc.args, cnd))
+}
+// `cnd` marks descent into a CONDITIONALLY-evaluated / value-block position (see ko_at): those
+// or_returns lower in place (verbatim receiver return), so the strict full-Result check applies.
+// It is set on entry and never cleared — a statement nested under a conditional value is still
+// conditional. `&&`/`||` LEFT operands and cond/match SUBJECTS evaluate unconditionally and hoist,
+// so they inherit.
+ko_is_sc = (op: string_view) bool { eq(op, "&&") || eq(op, "||") }
+ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
+    load(e).match ({
+        .Call(c)        => env.ko_call_kind(tps, want, c, cnd),
+        .MethodCall(mc) => env.ko_mcall_kind(tps, want, mc, cnd),
+        .Index(ix)      => env.ko_expr_kind(tps, want, ix.seq, cnd).kv_kor(env.ko_expr_kind(tps, want, ix.idx, cnd)),
+        .Bin(b)         => env.ko_expr_kind(tps, want, b.lhs, cnd).kv_kor(env.ko_expr_kind(tps, want, b.rhs, ko_is_sc(b.op) || cnd)),
+        .Cond(d)        => env.ko_expr_kind(tps, want, d.c, cnd).kv_kor(env.ko_expr_kind(tps, want, d.t, true)).kv_kor(env.ko_expr_kind(tps, want, d.e, true)),
+        .Member(m)      => env.ko_expr_kind(tps, want, m.obj, cnd),
+        .Arrow(ar)      => env.ko_expr_kind(tps, want, ar.obj, cnd),
+        .Match(m)       => env.ko_expr_kind(tps, want, m.subj, cnd).kv_kor(env.ko_arms_kind(tps, want, env.infer_expr(m.subj), m.arms)),
+        .MakeEnum(mk)   => env.ko_expr_kind(tps, want, mk.payload, cnd),
+        .MakeStruct(sd) => env.ko_inits_kind(tps, want, sd.inits, cnd),
+        .SliceLit(sd)   => env.ko_args_kind(tps, want, sd.items, cnd),
+        .Lambda(lm)     => env.a.ko_body_kind(env, tps, want, lm.body, true),
+        .Block(b)       => env.a.ko_body_kind(env, tps, want, b.stmts, true),
+        .Loop(l)        => env.ko_expr_kind(tps, want, l.seq, cnd).kv_kor(env.a.ko_body_kind(env, tps, want, l.body, true)),
+        _               => 0,
+    })
+}
+ko_args_kind = (env: Env, tps: [Param], want: Ty, args: [Expr], cnd: bool) i32 {
+    acc := 0
+    args.loop((h, i, ar) {
+        acc = acc.kv_kor(env.ko_expr_kind(tps, want, args[i].addr(), cnd))
+    })
+    acc
+}
+ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool) i32 {
+    acc := 0
+    inits.loop((h, i, fi) {
+        acc = acc.kv_kor(env.ko_expr_kind(tps, want, fi.value, cnd))
+    })
+    acc
+}
+// Arm bodies are always conditional (only the selected arm evaluates), and a statement-position
+// match resolves its arms under a cleared expected type, so the rebuild cannot fire there either.
+ko_arms_kind = (env: Env, tps: [Param], want: Ty, subjty: Ty, arms: [ArmData]) i32 {
+    acc := 0
+    arms.loop((h, i, ar) {
+        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true))
+    })
+    acc
+}
+ko_stmt_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, st: Stmt, cnd: bool) i32 {
+    st.match ({
+        .Let(l)      => env.ko_expr_kind(tps, want, l.value, cnd),
+        .Assign(x)   => env.ko_expr_kind(tps, want, x.target, cnd).kv_kor(env.ko_expr_kind(tps, want, x.value, cnd)),
+        .Return(r)   => env.ko_expr_kind(tps, want, r, cnd),
+        .ExprStmt(e) => env.ko_expr_kind(tps, want, e, cnd),
+        .If(f)       => env.ko_expr_kind(tps, want, f.c, cnd).kv_kor(a.ko_body_kind(env, tps, want, f.then, cnd)).kv_kor(a.ko_body_kind(env, tps, want, f.els, cnd)),
+        .While(w)    => env.ko_expr_kind(tps, want, w.c, true).kv_kor(a.ko_body_kind(env, tps, want, w.body, cnd)),
+        .IndexSet(x) => env.ko_expr_kind(tps, want, x.seq, cnd).kv_kor(env.ko_expr_kind(tps, want, x.idx, cnd)).kv_kor(env.ko_expr_kind(tps, want, x.value, cnd)),
+    })
+}
+ko_body_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, body: [Stmt], cnd: bool) i32 {
+    acc := 0
+    e := env
+    body.loop((h, i, st) {
+        acc = acc.kv_kor(a.ko_stmt_kind(e, tps, want, st, cnd))
+        e = a.extend_env(e, st)
+    })
+    acc
+}
+ko_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+    env := Env(
+        vars: a.params_env(f.params),
+        decls: decls,
+        didx: idx,
+        exp: f.ret,
+        a: a,
+    )
+    a.ko_body_kind(env, f.tparams, f.ret, f.body, false)
+}
+// `.or_return()` in a GLOBAL initializer has NO enclosing function to return the Err to: the lowered
+// early-return would silently abort `zen__init_globals` mid-way, leaving every later global
+// zero-initialized (no diagnostic, wrong exit values). Walk the initializer with a non-Result `want`
+// (i32) so ANY or_return inside it reports KORRETURN at its own position — the same "no matching
+// Result to propagate into" judgment the fn-body walk makes, with nothing lenient to defer to.
+ko_global_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalData) i32 {
+    env := Env(
+        vars: a.params_env(empty_params()),
+        decls: decls,
+        didx: idx,
+        exp: tvoid(),
+        a: a,
+    )
+    is_expr_null(g.init).match ({
+        true  => 0,
+        false => env.ko_expr_kind(empty_params(), ti32(), g.init, false),
+    })
+}
+// ── error[ffi-type]: FFI-safety of FOREIGN (bodyless) declarations ─────────────────────────────────
+// A bodyless `name = (params) Ret` decl IS a raw platform prototype (genc emits a bare C prototype;
+// genjs lowers it to a browser call), so every param/return type must have a shape the emitter's
+// platform contract actually represents. The permitted set is derived from the tree's own foreign
+// surface (std.c.libc, std.mem.alloc, std.{os,net,time,math,platform}, std.concurrent.{pool,
+// coroutine}, std.web.dom) and verified against genc's lowering (cname_write):
+//   • builtin scalars   I32/I64/U8/F64/Bool → int32_t/int64_t/uint8_t/double/bool
+//   • width primitives  Named i8/i16/u16/u32/u64/f32 → the C fixed-width types
+//   • strings           string_view/string_cstr/string_literal → const char*
+//   • pointers          RawPtr/Ptr/MutPtr<T> ALL lower to a plain C `T*` (any pointee)
+//   • fn pointers       FnT lowers to the single `void(*)(void)` typedef — a plain C function
+//                       pointer (pthread_create's start routine, dom's event callbacks); its own
+//                       signature must recurse FFI-safe
+//   • flat structs      a declared struct whose fields are ALL FFI-safe is a by-value C struct
+//                       (std.web.dom's opaque `{ handle: RawPtr<u8> }` interface handles)
+//   • generic instances a CONCRETE instantiation of a declared generic with FFI-safe args emits a
+//                       concrete monomorphized struct (std.web.dom returns Opt<Node>/Opt<string_view>)
+//   • void              the return slot
+// REJECTED: type parameters on the decl (one foreign symbol cannot have per-instantiation ABI),
+// slices `[T]` (the zslice fat pointer is Zen-internal — no hand-written C in the tree receives one;
+// buffers cross the boundary as RawPtr + length, the libc.zen convention), concrete enums (tag+union
+// layout is a Zen-internal contract), and any undeclared/unknown named type.
+ffi_ty_ok = (env: Env, t: Ty, depth: i64) bool {
+    (depth <= 0).then({
+        return false
+    })
+    t.match ({
+        .Slice(e)   => false,
+        .FnT(ft)    => env.ffi_tys_ok(ft.params, depth - 1) && env.ffi_ty_ok(load(ft.ret), depth - 1),
+        .Named(n)   => is_prim_width(n) || env.env_is_struct(n) && env.ffi_fields_ok(env.env_struct_fields(n), depth - 1),
+        .Generic(g) => (env.env_is_gen_struct(g.name) || env.env_is_gen_enum(g.name)) && env.ffi_tys_ok(g.args, depth - 1),
+        _           => true,
+    })
+}    // I32/I64/U8/F64/Bool/Void/string_*/Ptr(any kind) — direct C shapes
+ffi_tys_ok = (env: Env, ts: [Ty], depth: i64) bool {
+    ok := true
+    ts.loop((h, i, t) {
+        ok = env.ffi_ty_ok(t, depth) && ok
+    })
+    ok
+}
+ffi_fields_ok = (env: Env, fs: [Field], depth: i64) bool {
+    ok := true
+    fs.loop((h, i, f) {
+        ok = env.ffi_ty_ok(f.ty, depth) && ok
+    })
+    ok
+}
+FFI_DEPTH = () i64 { 8 }
+// 0/1 count predicates feeding kv_one, mirroring ut_unknown_ty's shape.
+ffi_bad_ty = (env: Env, t: Ty) i32 { env.ffi_ty_ok(t, FFI_DEPTH()).match ({ true => 0, false => 1 }) }
+ffi_bad_generic = (f: Func) i32 { (f.tparams.len > 0).match ({ true => 1, false => 0 }) }
+// the kind walk: first offending foreign decl, caret on the decl (a Ty carries no source position).
+ffi_func_kind* = (env: Env, f: Func) i32 {
+    acc := f.ffi_bad_generic().kv_one(KFFITYPE()).kv_at(f.pos)
+    f.params.loop((h, i, p) {
+        acc = acc.kv_kor(env.ffi_bad_ty(p.ty).kv_one(KFFITYPE()).kv_at(f.pos))
+    })
+    acc.kv_kor(env.ffi_bad_ty(f.ret).kv_one(KFFITYPE()).kv_at(f.pos))
+}
+// the NAME walk (same traversal order as the kind walk): the message naming the offending
+// parameter/return type, in user spelling.
+ffi_param_msg = (a: MutPtr<Malloc>, fname: string_view, pname: string_view, tname: string_view) string_view { a.gstr_string(96).gstr_append(a, "foreign declaration `").gstr_append(a, fname).gstr_append(a, "`: parameter `").gstr_append(a, pname).gstr_append(a, "` has non-FFI-safe type `").gstr_append(a, tname).gstr_append(a, "`").gstr_finish(a) }
+ffi_ret_msg = (a: MutPtr<Malloc>, fname: string_view, tname: string_view) string_view { a.gstr_string(96).gstr_append(a, "foreign declaration `").gstr_append(a, fname).gstr_append(a, "`: return type `").gstr_append(a, tname).gstr_append(a, "` is not FFI-safe").gstr_finish(a) }
+ffi_generic_msg = (a: MutPtr<Malloc>, fname: string_view) string_view { a.gstr_string(96).gstr_append(a, "foreign declaration `").gstr_append(a, fname).gstr_append(a, "` declares type parameters — a foreign symbol binds ONE concrete C signature").gstr_finish(a) }
+ffi_func_msg* = (a: MutPtr<Malloc>, env: Env, f: Func) string_view {
+    (f.tparams.len > 0).then({
+        return a.ffi_generic_msg(f.name)
+    })
+    r := ""
+    f.params.loop((h, i, p) {
+        r = desc_or(r, env.ffi_ty_ok(p.ty, FFI_DEPTH()).match ({
+            true  => "",
+            false => a.ffi_param_msg(f.name, p.name, a.zty(p.ty)),
+        }))
+    })
+    desc_or(r, env.ffi_ty_ok(f.ret, FFI_DEPTH()).match ({
+        true  => "",
+        false => a.ffi_ret_msg(f.name, a.zty(f.ret)),
+    }))
+}
+kdiag_buf* = (a: MutPtr<Malloc>) [i32] { slice(a.acquire(KDIAG_CAP() * sizeof(i32)), KDIAG_CAP()) }
+// already collected? (dedup: two channels can position the same packed kind at one site)
+kdiag_seen = (buf: [i32], cnt: i32, packed: i32) bool {
+    found := false
+    buf.loop((h, i, e) {
+        found = (i < cnt).match ({
+            true  => (e == packed).match ({ true => true, false => found }),
+            false => found,
+        })
+    })
+    found
+}
+// append `packed` unless it is 0 (no error), a duplicate, or the buffer is full; return the new count.
+kdiag_add* = (buf: [i32], cnt: i32, packed: i32) i32 {
+    (packed == 0 || cnt >= buf.len || buf.kdiag_seen(cnt, packed)).match ({
+        true  => cnt,
+        false => {
+            buf[cnt] = packed
+            cnt + 1
+        },
+    })
+}
+// the __syntax_error sentinel carries the failing token's byte offset in its Int init value (0 = none);
+// the Int passes through resolve unchanged (`_ => e`), so the offset survives to this post-resolve pass.
+kparse_off = (init: Ptr<Expr>) i32 {
+    load(init).match ({
+        .Int(n) => n.to_i32(),
+        _       => 0,
+    })
+}
+// a NEGATIVE sentinel offset (parse.fill_decls) marks the variant-break split: the failing token is
+// the `.` of a newline+`.Uppercase` statement break, so report the rule (KVBREAK) at that dot.
+kparse_kind = (init: Ptr<Expr>) i32 {
+    off := init.kparse_off()
+    (off < 0).match ({ true => KVBREAK().kv_at(0 - off), false => KPARSE().kv_at(off) })
+}
+// the `__bad_binding` sentinel: a malformed top-level `=` binding, caret at its RHS offset (always ≥ 0).
+kbadbind_kind = (init: Ptr<Expr>) i32 { KBADBIND().kv_at(init.kparse_off()) }
+// the `__misordered_generic` sentinel: a `Name<T>*:` head, caret at the `<` offset (always ≥ 0).
+kmisgen_kind = (init: Ptr<Expr>) i32 { KMISGEN().kv_at(init.kparse_off()) }
+// packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
+parse_sentinel_kind* = (nm: string_view, init: Ptr<Expr>) i32 {
+    eq(nm, "__syntax_error").match ({
+        true  => init.kparse_kind(),
+        false => eq(nm, "__bad_binding").match ({
+            true  => init.kbadbind_kind(),
+            false => eq(nm, "__misordered_generic").match ({
+                true  => init.kmisgen_kind(),
+                false => 0,
+            }),
+        }),
+    })
+}
+// ── cross-module linking (Goal Arc 1) ───────────────────────────────────────────────
+// The self-hosted "module loader". A module's HEADER is its public surface reduced to signatures:
+// every function becomes a bodyless DForeign (structs/enums pass through). Checking a file against
+// another module's header puts the imported names in `the_func`'s reach, so a cross-module call is
+// arity/arg-type-checked exactly like a local one — while the header's bodyless sigs are never
+// re-checked (check_module only descends DFunc bodies). A name imported but absent from the header
+// stays known-but-unchecked (the #204 DImport path), so partial headers never false-reject.
+as_sig* = (a: MutPtr<Malloc>, d: Decl) Decl {
+    d.match ({
+        .DFunc(f) => dforeign(Func(
+            name: f.name,
+            params: f.params,
+            ret: f.ret,
+            tparams: f.tparams,
+            body: no_stmts(),
+        )),
+        _         => d,
+    })
+}
+// the message/element type carried by an actor handle: `ActorRef<M>` / `ActorCell<M>` / `ActorHandle<M,_>`
+// / `ReplyRef<M>` (possibly behind a pointer) → M (its first type arg). tvoid when the target has no
+// concrete generic head (a pre-inline tparam handle) — the caller then falls back to the payload
+// expression's own inferred type, so nothing is over-rejected.
+first_gen_arg* = (t: Ty) Ty {
+    t.match ({
+        .Generic(g) => (g.args.len > 0).match ({ true => g.args[0], false => tvoid() }),
+        .Ptr(pd)    => load(pd.pointee).first_gen_arg(),
+        _           => tvoid(),
+    })
+}
