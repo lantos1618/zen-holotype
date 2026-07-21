@@ -11,6 +11,7 @@
 { view } = std.text.str
 { Malloc } = std.mem.alloc
 { Ty, Field, FnTData, GenericData, PtrData, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_append, gstr_finish, write_str, finish_buf, acquire } = compiler.genc
+{ dec_digit } = compiler.astops
 // the monomorphized C name of a generic instance: `Box<i32>` -> `Box_i32`, `Vec<Ptr<u8>>` ->
 // `Vec_ptr_u8`. Pointer KINDS get distinct fragments (`rawptr_`/`ptr_`/`mutptr_`) even though all
 // still lower to `T*`; the name is also the generic-instance identity used by mono/check dedup.
@@ -145,16 +146,15 @@ mangle_anon_in* = (a: MutPtr<Malloc>, fields: [Field]) string_view {
 // The positional field name `_<i>` (`_0`, `_1`, …) for a synthesized multi-field variant payload struct
 // (`B(i32, i32)` ≡ `B({_0: i32, _1: i32})`). The SAME generator feeds the enum-decl payload type and the
 // `.B(a, b)` constructor, so their anon-struct names mangle identically.
-pf_digit = (d: i32) u8 { load(offset("0123456789", d)) }
 pf_write = (dst: RawPtr<u8>, at: i64, v: i32) i64 {
     (v < 10).match ({
         true  => {
-            dst.offset(at).store(pf_digit(v))
+            dst.offset(at).store(dec_digit(v.to_i64()))
             at + 1
         },
         false => {
             np := dst.pf_write(at, v / 10)
-            dst.offset(np).store(pf_digit(v % 10))
+            dst.offset(np).store(dec_digit((v % 10).to_i64()))
             np + 1
         },
     })
