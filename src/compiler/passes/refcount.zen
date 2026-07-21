@@ -1,0 +1,325 @@
+// compiler.passes.refcount — refcount insertion sub-pass extracted from compiler.check.
+{ ArmData, CallData, Decl, Expr, FieldInit, Func, GenericData, LoopData, MatchData, Param, Stmt, Ty, dfunc, has_fnt_param, is_generic_fn, mangle_semantic_in, no_tys, subst_ty_in, ti64, tvoid } = compiler.genc
+{ Env, arm_env, bind_fnret, call_arg_exp, call_targs, clr_exp, disc_env, dispatch_name, empty_params, env_func, extend_env, fnret_of, idx_func, infer_expr, is_void_ty, let_exp, no_inline_gen_f, params_env, pbuf, sl_elem_exp, vcons, with_exp } = compiler.check
+{ subst_body } = compiler.passes.subst
+{ panic } = std.core.result
+{ Malloc } = std.mem.alloc
+{ eq } = std.text.str
+rc_calls_es = (xs: [Expr], nm: string_view) bool {
+    f := false
+    xs.loop((h, i, x) {
+        f = f.match ({ true => true, false => x.addr().rc_calls_e(nm) })
+    })
+    f
+}
+rc_calls_inits = (inits: [FieldInit], nm: string_view) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = f.match ({ true => true, false => fi.value.rc_calls_e(nm) })
+    })
+    f
+}
+rc_calls_arms = (arms: [ArmData], nm: string_view) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        f = f.match ({ true => true, false => ar.body.rc_calls_e(nm) })
+    })
+    f
+}
+rc_calls_e = (e: Ptr<Expr>, nm: string_view) bool {
+    load(e).match ({
+        .Call(c)       => eq(c.fn, nm) || c.args.rc_calls_es(nm),
+        .Bin(b)        => b.lhs.rc_calls_e(nm) || b.rhs.rc_calls_e(nm),
+        .Cond(d)       => d.c.rc_calls_e(nm) || d.t.rc_calls_e(nm) || d.e.rc_calls_e(nm),
+        .Member(m)     => m.obj.rc_calls_e(nm),
+        .Arrow(ar)     => ar.obj.rc_calls_e(nm),
+        .MakeEnum(mk)  => mk.payload.rc_calls_e(nm),
+        .MakeStruct(s) => s.inits.rc_calls_inits(nm),
+        .Match(m)      => m.subj.rc_calls_e(nm) || m.arms.rc_calls_arms(nm),
+        .Index(ix)     => ix.seq.rc_calls_e(nm) || ix.idx.rc_calls_e(nm),
+        .SliceLit(sd)  => sd.items.rc_calls_es(nm),
+        .Loop(l)       => l.seq.rc_calls_e(nm) || l.body.rc_calls_body(nm),
+        .Block(bl)     => bl.stmts.rc_calls_body(nm),
+        .Lambda(la)    => la.body.rc_calls_body(nm),
+        _              => false,
+    })
+}
+rc_calls_stmt = (st: Stmt, nm: string_view) bool {
+    st.match ({
+        .Let(l)      => l.value.rc_calls_e(nm),
+        .Assign(x)   => x.target.rc_calls_e(nm) || x.value.rc_calls_e(nm),
+        .Return(r)   => r.rc_calls_e(nm),
+        .ExprStmt(e) => e.rc_calls_e(nm),
+        .If(f)       => f.c.rc_calls_e(nm) || f.then.rc_calls_body(nm) || f.els.rc_calls_body(nm),
+        .While(w)    => w.c.rc_calls_e(nm) || w.body.rc_calls_body(nm),
+        .IndexSet(x) => x.seq.rc_calls_e(nm) || x.idx.rc_calls_e(nm) || x.value.rc_calls_e(nm),
+    })
+}
+rc_calls_body* = (body: [Stmt], nm: string_view) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = f.match ({ true => true, false => st.rc_calls_stmt(nm) })
+    })
+    f
+}
+// a recursive generic = type-param generic (NOT FnT-splice) with a body that calls itself directly.
+rc_is_rec_gen_f* = (f: Func) bool {
+    (f.tparams.len > 0 && f.params.has_fnt_param() == false).match ({
+        true  => f.body.rc_calls_body(f.name),
+        false => false,
+    })
+}
+// ── HIDDEN early returns × inlining ──────────────────────────────────────────────────────────
+// resolve_orx lowers a CONDITIONAL-position `or_return` (a match/cond arm value, a `&&`/`||` rhs, a
+// while condition) into a value block whose Err-guard is a raw `return` INSIDE an expression. The
+// inliner's early-return lift (needs_early_lift → cps_value) sees only top-level .Return statements
+// and returns in .If branches — a return buried in an expression (Block/Match/Cond/…) or anywhere in
+// a While/Loop body is invisible to it, and a return inside a loop can't be lifted to `?:` at all.
+// Splicing such a body into a caller's GCC statement-expression would leave a raw C `return` that
+// exits the CALLER — the callee's early return escapes (silent wrong control flow), or the generated
+// C fails to compile when the return types differ. A generic fn whose body holds such a HIDDEN
+// return must therefore never be inlined: no_inline_gen_f routes it through the recursive-generic
+// monomorphization path (mono_rec) instead, where it becomes a real C function and its `return` is
+// an honest function return. Statement-level returns (top level / If branches) stay inlinable — the
+// existing lift handles those (or_return_expr_generic_inline relies on it). FnT-param generics can't
+// monomorphize (their lambda args must splice), so they are out of scope here, as before.
+rc_gbuf* = (a: MutPtr<Malloc>, n: i64) [GenericData] { slice(a.acquire(n * sizeof(GenericData)), n) }
+rc_has = (buf: [GenericData], cnt: i32, m: string_view) bool {
+    found := false
+    buf.loop((h, i, e) {
+        found = (i < cnt).match ({
+            true  => eq(e.mangled, m).match ({ true => true, false => found }),
+            false => found,
+        })
+    })
+    found
+}
+rc_ty_depth = (t: Ty) i32 {
+    t.match ({
+        .Generic(g) => 1 + g.args.rc_tys_depth(),
+        .Ptr(pd)    => load(pd.pointee).rc_ty_depth(),
+        .Slice(e)   => load(e).rc_ty_depth(),
+        _           => 0,
+    })
+}
+rc_tys_depth = (ts: [Ty]) i32 {
+    d := 0
+    ts.loop((h, i, t) {
+        dd := t.rc_ty_depth()
+        d = (dd > d).match ({ true => dd, false => d })
+    })
+    d
+}
+rc_add = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
+    // a polymorphic-recursive self-call (deeper targs each step) would grow the worklist forever; drop
+    // the absurdly-deep instance (a well-formed one is shallow) and never write past the buffer.
+    (1 + g.args.rc_tys_depth() > 24).then({
+        return cnt
+    })
+    (cnt >= buf.len).then({
+        panic("zenc: too many recursive-generic fn instances (rc_gbuf cap; raise it in compiler.check)")
+    })
+    buf[cnt] = g
+    cnt + 1
+}
+// discovery: walk concrete bodies (Env-threaded for full type inference incl. addr/dispatch), recording
+// one instance per recursive-generic call site (targs inferred exactly as resolve_call will mangle them).
+rc_col_es = (env: Env, buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
+    c := cnt
+    xs.loop((h, i, x) {
+        c = env.rc_col_e(buf, c, x.addr())
+    })
+    c
+}
+rc_col_inits = (env: Env, buf: [GenericData], cnt: i32, inits: [FieldInit]) i32 {
+    c := cnt
+    inits.loop((h, i, fi) {
+        c = env.rc_col_e(buf, c, fi.value)
+    })
+    c
+}
+rc_col_match = (env: Env, buf: [GenericData], cnt: i32, m: MatchData) i32 {
+    c := env.clr_exp().rc_col_e(buf, cnt, m.subj)
+    t := env.infer_expr(m.subj)
+    m.arms.loop((h, i, ar) {
+        c = env.a.arm_env(env, t, ar).rc_col_e(buf, c, ar.body)
+    })
+    c
+}
+rc_col_loop = (env: Env, buf: [GenericData], cnt: i32, l: LoopData) i32 {
+    c := env.clr_exp().rc_col_e(buf, cnt, l.seq)
+    e := Env(
+        vars: env.a.vcons(l.elem, l.elemTy, env.a.vcons(l.idx, ti64(), env.vars)),
+        decls: env.decls,
+        didx: env.didx,
+        exp: env.exp,
+        a: env.a,
+    )
+    e.rc_col_body(buf, c, l.body)
+}
+rc_lam_env = (env: Env, ps: [Param]) Env {
+    e := env
+    ps.loop((h, i, p) {
+        // bind as Void (opaque), NOT p.ty: a lambda param's ty is only its formatter-round-trip `: Type`
+        // annotation — the rc pass must see the same opaque binding whether or not the source annotated it.
+        e = Env(
+            vars: e.a.vcons(p.name, tvoid(), e.vars),
+            decls: e.decls,
+            didx: e.didx,
+            exp: e.exp,
+            a: e.a,
+        )
+    })
+    e
+}
+rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
+    dn := env.dispatch_name(c)
+    f := env.env_func(dn)
+    known := eq(f.name, dn) && f.params.len == c.args.len
+    tmpl := known && f.is_generic_fn()
+    atargs := tmpl.match ({ true => env.call_targs(f, c.args, c.targs), false => no_tys() })
+    c2 := cnt
+    c.args.loop((h, i, ar) {
+        ax := known.match ({
+            true  => env.call_arg_exp(tmpl, f.tparams, atargs, f.params, i),
+            false => tvoid(),
+        })
+        c2 = env.with_exp(ax).rc_col_e(buf, c2, ar.addr())
+    })
+    (known && f.no_inline_gen_f()).match ({
+        true  => {
+            m := env.a.mangle_semantic_in(dn, atargs)
+            (buf.rc_has(c2, m) || env.didx.func_idx.get(m, 0 - 1) >= 0).match ({
+                true  => c2,
+                false => buf.rc_add(c2, GenericData(
+                    name: dn,
+                    args: atargs,
+                    mangled: m,
+                )),
+            })
+        },
+        false => c2,
+    })
+}
+// each position walks under the SAME expected type resolve_expr_plain threads there (cleared for
+// operands/receivers/payloads, kept for cond branches, the element type for slice items), so a
+// generic call's return-position tparam infers — and mangles — exactly as resolve will.
+rc_col_e = (env: Env, buf: [GenericData], cnt: i32, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)       => env.rc_col_call(buf, cnt, c),
+        .Bin(b)        => env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, b.lhs), b.rhs),
+        .Cond(d)       => env.rc_col_e(buf, env.rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, d.c), d.t), d.e),
+        .Member(m)     => env.clr_exp().rc_col_e(buf, cnt, m.obj),
+        .Arrow(ar)     => env.clr_exp().rc_col_e(buf, cnt, ar.obj),
+        .MakeEnum(mk)  => env.clr_exp().rc_col_e(buf, cnt, mk.payload),
+        .MakeStruct(s) => env.clr_exp().rc_col_inits(buf, cnt, s.inits),
+        .Match(m)      => env.rc_col_match(buf, cnt, m),
+        .Index(ix)     => env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, ix.seq), ix.idx),
+        .SliceLit(sd)  => env.with_exp(env.sl_elem_exp(sd.items)).rc_col_es(buf, cnt, sd.items),
+        .Loop(l)       => env.rc_col_loop(buf, cnt, l),
+        .Block(bl)     => env.rc_col_body(buf, cnt, bl.stmts),
+        .Lambda(la)    => env.rc_lam_env(la.params).rc_col_body(buf, cnt, la.body),
+        _              => cnt,
+    })
+}
+// mirror resolve_stmt's expected-type discipline: a Let's value under its declared type, a Return's
+// operand under the enclosing fn's return, a non-tail ExprStmt under disc_env, conditions cleared.
+rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt, last: bool) i32 {
+    st.match ({
+        .Let(l)      => env.let_exp(l.ty).rc_col_e(buf, cnt, l.value),
+        .Assign(x)   => env.clr_exp().rc_col_e(buf, env.rc_col_e(buf, cnt, x.target), x.value),
+        .Return(r)   => {
+            rt := env.vars.fnret_of()
+            renv := rt.is_void_ty().match ({ true => env, false => env.with_exp(rt) })
+            renv.rc_col_e(buf, cnt, r)
+        },
+        .ExprStmt(e) => (last && env.exp.is_void_ty() == false).match ({
+            true  => env.rc_col_e(buf, cnt, e),
+            false => env.disc_env(e).rc_col_e(buf, cnt, e),
+        }),
+        .If(f)       => env.rc_col_body(buf, env.rc_col_body(buf, env.clr_exp().rc_col_e(buf, cnt, f.c), f.then), f.els),
+        .While(w)    => env.rc_col_body(buf, env.clr_exp().rc_col_e(buf, cnt, w.c), w.body),
+        .IndexSet(x) => env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, x.seq), x.idx), x.value),
+    })
+}
+rc_col_body = (env: Env, buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
+    c := cnt
+    e := env
+    body.loop((h, i, st) {
+        c = e.rc_col_stmt(buf, c, st, i == body.len - 1)
+        e = e.a.extend_env(e, st)
+    })
+    c
+}
+// seed from CONCRETE functions only (a template body's self-call has a tparam targ, not a concrete one).
+rc_fn_env = (env: Env, f: Func) Env {
+    Env(
+        vars: env.a.bind_fnret(env.a.params_env(f.params), f.ret),
+        decls: env.decls,
+        didx: env.didx,
+        exp: f.ret,
+        a: env.a,
+    )
+}
+// `from` skips decls already seeded by an earlier mono_close round: only the tail appended (and
+// HOF-spliced) since the previous round can surface NEW instances — the head's bodies are unchanged.
+rc_seed* = (env: Env, buf: [GenericData], cnt: i32, from: i64) i32 {
+    c := cnt
+    env.decls.loop((h, i, d) {
+        c = (i >= from).match ({
+            true  => d.match ({
+                .DFunc(f) => f.is_generic_fn().match ({
+                    true  => c,
+                    false => env.rc_fn_env(f).rc_col_body(buf, c, f.body),
+                }),
+                _         => c,
+            }),
+            false => c,
+        })
+    })
+    c
+}
+// the substituted param list of one instance (tparam→arg in each param type).
+rc_subst_params = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], ps: [Param]) [Param] {
+    buf := a.pbuf(ps.len)
+    ps.loop((h, i, p) {
+        buf[i] = param(p.name, a.subst_ty_in(tparams, targs, p.ty))
+    })
+    buf
+}
+// transitive closure: each instance's substituted body may name further instances (its own self-call,
+// or a call to another recursive generic), so walk every instance body until no new ones appear.
+rc_expand_one = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
+    g := buf[i]
+    tf := env.didx.idx_func(env.decls, g.name)
+    iparams := env.a.rc_subst_params(tf.tparams, g.args, tf.params)
+    ibody := env.a.subst_body(0, tf.tparams, g.args, tf.body)
+    iret := env.a.subst_ty_in(tf.tparams, g.args, tf.ret)
+    ienv := Env(
+        vars: env.a.bind_fnret(env.a.params_env(iparams), iret),
+        decls: env.decls,
+        didx: env.didx,
+        exp: iret,
+        a: env.a,
+    )
+    env.rc_expand(buf, ienv.rc_col_body(buf, count, ibody), i + 1)
+}
+rc_expand* = (env: Env, buf: [GenericData], count: i32, i: i32) i32 { (i >= count).match ({
+    true  => count,
+    false => env.rc_expand_one(buf, count, i),
+}) }
+// the concrete DFunc for one instance: template params/ret/body with tparam→arg substituted, given the
+// mangled name. Its self-call stays the bare template name; the final resolve_call mangles it (the
+// instance decl now exists), which also resolves dispatch (e.g. allocator methods) on the concrete type.
+rc_gen* = (env: Env, g: GenericData) Decl {
+    tf := env.didx.idx_func(env.decls, g.name)
+    dfunc(Func(
+        name: g.mangled,
+        params: env.a.rc_subst_params(tf.tparams, g.args, tf.params),
+        ret: env.a.subst_ty_in(tf.tparams, g.args, tf.ret),
+        tparams: empty_params(),
+        body: env.a.subst_body(0, tf.tparams, g.args, tf.body),
+    ))
+}
+// append one concrete C function per discovered recursive-generic instance. The templates stay in the
+// decl list (emit skips them via is_template); resolve_call — run after this — rewrites the calls.
