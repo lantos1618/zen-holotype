@@ -54,7 +54,7 @@
 //   2. NO IMPLICIT VALUE SEMANTICS: headers copied from one HMap share one backing store; in-place
 //      upserts are visible through every copy.
 { Result, IoError, Opt } = std.core.result
-{ Allocator, try_acquire, DynAlloc, dyn_heap } = std.mem.alloc    // DynAlloc = the narrow Allocator stored by the AMBIENT form
+{ Allocator, try_acquire3, DynAlloc, dyn_heap } = std.mem.alloc    // DynAlloc = the narrow Allocator stored by the AMBIENT form; try_acquire3 = all-or-nothing 3-buffer acquire
 { eq, view } = std.text.str
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
 Hash*: {
@@ -170,56 +170,40 @@ HMap*<K, V>: {
     }
     grow<A> = (m: HMap<K, V>, a: MutPtr<A>) Result<HMap<K, V>, IoError> {
         cap := m.cap * 2 + 1
-        a.try_acquire(cap * sizeof(K)).match ({
-            .Ok(kp) => {
-                a.try_acquire(cap * sizeof(V)).match ({
-                    .Ok(vp) => {
-                        a.try_acquire(cap * 2 * sizeof(i64)).match ({
-                            .Ok(ip) => {
-                                oldks := m.keys()
-                                oldvs := m.vals()
-                                next := HMap<K, V>(
-                                    keys: kp,
-                                    vals: vp,
-                                    idx: ip,
-                                    len: m.len,
-                                    cap: cap,
-                                )
-                                keys := next.keys()
-                                vals := next.vals()
-                                oldks.loop((h, i, k) {
-                                    (i < m.len).match ({
-                                        true  => {
-                                            keys[i] = k
-                                            vals[i] = oldvs[i]
-                                        },
-                                        false => {
-                                            h.break
-                                        },
-                                    })
-                                })
-                                a.release(m.keys)
-                                a.release(m.vals)
-                                a.release(m.idx)
-                                ok: Result<HMap<K, V>, IoError> := .Ok(next.reindex())
-                                ok
-                            },
-                            .Err(e) => {
-                                a.release(kp)
-                                a.release(vp)
-                                err: Result<HMap<K, V>, IoError> := .Err(e)
-                                err
-                            },
-                        })
-                    },
-                    .Err(e) => {
-                        a.release(kp)
-                        err: Result<HMap<K, V>, IoError> := .Err(e)
-                        err
-                    },
+        a.try_acquire3(cap * sizeof(K), cap * sizeof(V), cap * 2 * sizeof(i64)).match ({
+            .Ok(bufs) => {
+                kp := bufs.b1
+                vp := bufs.b2
+                ip := bufs.b3
+                oldks := m.keys()
+                oldvs := m.vals()
+                next := HMap<K, V>(
+                    keys: kp,
+                    vals: vp,
+                    idx: ip,
+                    len: m.len,
+                    cap: cap,
+                )
+                keys := next.keys()
+                vals := next.vals()
+                oldks.loop((h, i, k) {
+                    (i < m.len).match ({
+                        true  => {
+                            keys[i] = k
+                            vals[i] = oldvs[i]
+                        },
+                        false => {
+                            h.break
+                        },
+                    })
                 })
+                a.release(m.keys)
+                a.release(m.vals)
+                a.release(m.idx)
+                ok: Result<HMap<K, V>, IoError> := .Ok(next.reindex())
+                ok
             },
-            .Err(e) => {
+            .Err(e)   => {
                 err: Result<HMap<K, V>, IoError> := .Err(e)
                 err
             },
@@ -384,38 +368,22 @@ HMap*<K, V>: {
 //   r: Result<HMap<str, i64>, IoError> := hmap.empty(a)
 //   m := r.expect("empty")
 empty*<K, V, A> = (a: MutPtr<A>) Result<HMap<K, V>, IoError> {
-    a.try_acquire(sizeof(K)).match ({
-        .Ok(kp) => {
-            a.try_acquire(sizeof(V)).match ({
-                .Ok(vp) => {
-                    a.try_acquire(2 * sizeof(i64)).match ({
-                        .Ok(ip) => {
-                            m := HMap<K, V>(
-                                keys: kp,
-                                vals: vp,
-                                idx: ip,
-                                len: 0,
-                                cap: 1,
-                            )
-                            ok: Result<HMap<K, V>, IoError> := .Ok(m.reindex())
-                            ok
-                        },
-                        .Err(e) => {
-                            a.release(kp)
-                            a.release(vp)
-                            err: Result<HMap<K, V>, IoError> := .Err(e)
-                            err
-                        },
-                    })
-                },
-                .Err(e) => {
-                    a.release(kp)
-                    err: Result<HMap<K, V>, IoError> := .Err(e)
-                    err
-                },
-            })
+    a.try_acquire3(sizeof(K), sizeof(V), 2 * sizeof(i64)).match ({
+        .Ok(bufs) => {
+            kp := bufs.b1
+            vp := bufs.b2
+            ip := bufs.b3
+            m := HMap<K, V>(
+                keys: kp,
+                vals: vp,
+                idx: ip,
+                len: 0,
+                cap: 1,
+            )
+            ok: Result<HMap<K, V>, IoError> := .Ok(m.reindex())
+            ok
         },
-        .Err(e) => {
+        .Err(e)   => {
             err: Result<HMap<K, V>, IoError> := .Err(e)
             err
         },
@@ -425,42 +393,26 @@ empty*<K, V, A> = (a: MutPtr<A>) Result<HMap<K, V>, IoError> {
 // modules are flattened: a bare `of` can otherwise bind std.mem.raw's two-argument constructor when
 // an entry imports std.sys before this module.
 hmap_seed_in<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
-    a.try_acquire(sizeof(K)).match ({
-        .Ok(kp) => {
-            a.try_acquire(sizeof(V)).match ({
-                .Ok(vp) => {
-                    a.try_acquire(2 * sizeof(i64)).match ({
-                        .Ok(ip) => {
-                            m := HMap<K, V>(
-                                keys: kp,
-                                vals: vp,
-                                idx: ip,
-                                len: 1,
-                                cap: 1,
-                            )
-                            keys := m.keys()
-                            vals := m.vals()
-                            keys[0] = seed_key
-                            vals[0] = seed_val
-                            ok: Result<HMap<K, V>, IoError> := .Ok(m.reindex())
-                            ok
-                        },
-                        .Err(e) => {
-                            a.release(kp)
-                            a.release(vp)
-                            err: Result<HMap<K, V>, IoError> := .Err(e)
-                            err
-                        },
-                    })
-                },
-                .Err(e) => {
-                    a.release(kp)
-                    err: Result<HMap<K, V>, IoError> := .Err(e)
-                    err
-                },
-            })
+    a.try_acquire3(sizeof(K), sizeof(V), 2 * sizeof(i64)).match ({
+        .Ok(bufs) => {
+            kp := bufs.b1
+            vp := bufs.b2
+            ip := bufs.b3
+            m := HMap<K, V>(
+                keys: kp,
+                vals: vp,
+                idx: ip,
+                len: 1,
+                cap: 1,
+            )
+            keys := m.keys()
+            vals := m.vals()
+            keys[0] = seed_key
+            vals[0] = seed_val
+            ok: Result<HMap<K, V>, IoError> := .Ok(m.reindex())
+            ok
         },
-        .Err(e) => {
+        .Err(e)   => {
             err: Result<HMap<K, V>, IoError> := .Err(e)
             err
         },
