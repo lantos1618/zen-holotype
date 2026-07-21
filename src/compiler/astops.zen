@@ -14,7 +14,7 @@
 // Only plain-named-value receivers are method-ified: the language does not support `.impl` on
 // pointer/slice receiver types, so genc's Ptr<Expr>/[Stmt] predicates (is_expr_null, blk_diverges,
 // stmts_diverge) necessarily stay free functions in compiler.genc.
-{ Ty, Func, Decl, StructDecl, Param, sbyte, gstr_push } = compiler.genc
+{ Ty, Func, Decl, StructDecl, Param, sbyte, gstr_push, cbuf } = compiler.genc
 { String } = std.text.string
 { Malloc } = std.mem.alloc
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
@@ -117,4 +117,24 @@ gstr_uint* = (out: String, a: MutPtr<Malloc>, n: u64) String {
 gstr_int* = (out: String, a: MutPtr<Malloc>, n: i64) String {
     u: u64 := n
     out.gstr_uint(a, u)
+}
+// map_slice: the pervasive cbuf-map idiom — allocate a fresh same-length `[U]` and fill slot i with
+// f(xs[i]). One generic replaces ~100 hand-rolled `buf := cbuf<U>(a, xs.len)  xs.loop(...)  buf`
+// blocks across the frontend. The alloc param is the concrete `MutPtr<Malloc>` cbuf itself takes.
+map_slice*<T, U> = (a: MutPtr<Malloc>, xs: [T], f: (T) U) [U] {
+    buf := cbuf<U>(a, xs.len)
+    xs.loop((h, i, x) {
+        buf[i] = f(x)
+    })
+    buf
+}
+// slice_any: the pervasive OR-fold — true iff some element satisfies p. One generic replaces ~50
+// hand-rolled `f := false  xs.loop(...)  f` blocks. Walks the whole slice (no early break), so the
+// visit order and count match the inlined form exactly.
+slice_any*<T> = (xs: [T], p: (T) bool) bool {
+    f := false
+    xs.loop((h, i, y) {
+        f = p(y).match ({ true => true, false => f })
+    })
+    f
 }

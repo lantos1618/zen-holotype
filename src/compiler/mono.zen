@@ -12,7 +12,7 @@
 { mangle_str_in } = compiler.mangle
 // is_generic_fn (Func) is a compiler.astops trait method; importing FuncQuery pulls astops's whole
 // impl set into this closure (and, via modules that import compiler.mono, into genc_emit/genjs too).
-{ FuncQuery } = compiler.astops
+{ FuncQuery, map_slice, slice_any } = compiler.astops
 { gd_has_mangled, gd_ty_depth, gd_tys_max_depth } = compiler.generics
 // ── monomorphization: instantiate generic structs/enums per concrete use ─────────
 // Backend prepass. A `Box<T>: {…}` decl (DGenStruct) emits no concrete type by itself; instead, for
@@ -23,10 +23,7 @@
 // the concrete StructDecl for one instance: the matching DGenStruct's fields, tparam→arg substituted.
 mono_struct = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
     gsd := decls.find_genstruct(g.name)
-    buf := cbuf<Field>(a, gsd.fields.len)
-    gsd.fields.loop((h, i, f) {
-        buf[i] = field(f.name, a.subst_ty_in(gsd.tparams, g.args, f.ty))
-    })
+    buf := map_slice(a, gsd.fields, (f) { field(f.name, a.subst_ty_in(gsd.tparams, g.args, f.ty)) })
     dstruct(StructDecl(
         name: g.mangled,
         fields: buf,
@@ -61,10 +58,7 @@ mono_payload = (a: MutPtr<Malloc>, decls: [Decl], tparams: [Param], args: [Ty], 
         .Named(n) => decls.is_genstruct_name(n).match ({
             true  => {
                 gsd := decls.find_genstruct(n)
-                tys := cbuf<Ty>(a, gsd.tparams.len)
-                gsd.tparams.loop((h, i, tp) {
-                    tys[i] = a.subst_ty_in(tparams, args, tnamed(tp.name))
-                })
+                tys := map_slice(a, gsd.tparams, (tp) { a.subst_ty_in(tparams, args, tnamed(tp.name)) })
                 tgeneric(n, tys, a.mangle_str_in(n, tys))
             },
             false => sub,
@@ -74,9 +68,8 @@ mono_payload = (a: MutPtr<Malloc>, decls: [Decl], tparams: [Param], args: [Ty], 
 }
 mono_enum = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
     ged := decls.find_genenum(g.name)
-    buf := cbuf<VariantDef>(a, ged.variants.len)
-    ged.variants.loop((h, i, v) {
-        buf[i] = VariantDef(
+    buf := map_slice(a, ged.variants, (v) {
+        VariantDef(
             name: v.name,
             payload: a.mono_payload(decls, ged.tparams, g.args, v.payload),
             dflt: v.dflt,
@@ -89,14 +82,12 @@ mono_enum = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
 }
 // is `name` a generic STRUCT (vs a generic enum)? — picks which monomorphizer an instance needs.
 is_genstruct_name = (decls: [Decl], name: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DGenStruct(g) => eq(g.name, name).match ({ true => true, false => found }),
-            _              => found,
+    decls.slice_any((d) {
+        d.match ({
+            .DGenStruct(g) => eq(g.name, name),
+            _              => false,
         })
     })
-    found
 }
 // An unknown generic name falls through to mono_enum, whose empty find_genenum sentinel emits a
 // HOLLOW decl. That is deliberate for the emit-only pipeline (the acid gate feeds real stdlib files

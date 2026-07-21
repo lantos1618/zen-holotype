@@ -5,6 +5,7 @@
 { Malloc } = std.mem.alloc
 { view, eq, is_empty, ends_with } = std.text.str
 { Env, VList, DeclIndex, cebuf, cenode, pbuf, vnil } = compiler.check
+{ map_slice, slice_any } = compiler.astops
 { resolve_module } = compiler.check_resolve
 { light_ty } = compiler.check_infer
 tybuf1* = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
@@ -34,26 +35,18 @@ default_for_type* = (a: MutPtr<Malloc>, td: TraitDefData, tyname: string_view) F
         body: td.fn.body,
     )
 }
-param_names_have* = (names: [Param], m: string_view) bool {
-    found := false
-    names.loop((h, i, p) {
-        found = eq(p.name, m).match ({ true => true, false => found })
-    })
-    found
-}
+param_names_have* = (names: [Param], m: string_view) bool { names.slice_any((p) { eq(p.name, m) }) }
 // Does this impl already provide method m?
 def_provided* = (decls: [Decl], tyname: string_view, trname: string_view, m: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
+    decls.slice_any((d) {
+        d.match ({
             .DImpl(im) => (eq(im.ty, tyname) && eq(im.trname, trname)).match ({
-                true  => im.methods.param_names_have(m).match ({ true => true, false => found }),
-                false => found,
+                true  => im.methods.param_names_have(m),
+                false => false,
             }),
-            _          => found,
+            _          => false,
         })
     })
-    found
 }
 default_expansion_count* = (decls: [Decl]) i64 {
     n := 0
@@ -257,20 +250,17 @@ default_payload* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, v: Variant
     })
 }
 fill_variant_defaults* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, vs: [VariantDef]) [VariantDef] {
-    buf := cbuf<VariantDef>(a, vs.len)
-    vs.loop((h, i, v) {
-        buf[i] = VariantDef(
+    map_slice(a, vs, (v) {
+        VariantDef(
             name: v.name,
             payload: a.default_payload(decls, idx, v),
             dflt: v.dflt,
         )
     })
-    buf
 }
 fill_enum_defaults* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
-    buf := cbuf<Decl>(a, decls.len)
-    decls.loop((h, i, d) {
-        buf[i] = d.match ({
+    map_slice(a, decls, (d) {
+        d.match ({
             .DEnum(ed) => .DEnum(EnumDecl(
                 name: ed.name,
                 variants: a.fill_variant_defaults(decls, idx, ed.variants),
@@ -278,5 +268,4 @@ fill_enum_defaults* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] 
             _          => d,
         })
     })
-    buf
 }

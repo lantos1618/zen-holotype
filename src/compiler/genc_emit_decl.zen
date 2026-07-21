@@ -5,6 +5,7 @@
 { Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FnTData, ty_cname_in, gstr_append } = compiler.genc
 { fnt_cname } = compiler.mangle
 { Malloc } = std.mem.alloc
+{ slice_any } = compiler.astops
 { gen_block, gen_block_void } = compiler.genc_emit_expr
 any_payload = (vs: [VariantDef]) bool {
     found := false
@@ -210,14 +211,12 @@ gen_enum* = (s: String, alloc: MutPtr<Malloc>, ed: EnumDecl) String {
 // holding function-VALUE (closure) fields is NOT — that's how the emitter tells a closure record apart
 // from a trait, since both are "structs with FnT fields" by shape.
 struct_is_impld = (decls: [Decl], name: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DImpl(im) => eq(im.trname, name).match ({ true => true, false => found }),
-            _          => found,
+    decls.slice_any((d) {
+        d.match ({
+            .DImpl(im) => eq(im.trname, name),
+            _          => false,
         })
     })
-    found
 }
 // a trait-shaped struct (FnT fields) is treated as a trait — skipped in codegen — ONLY when it is an
 // actual trait (impl'd somewhere). A never-impl'd FnT-field struct is a closure record and IS emitted.

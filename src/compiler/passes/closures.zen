@@ -2,7 +2,7 @@
 { cbuf, ArmData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, LambdaData, Param, Stmt, StructDecl, VarData, arm_at, arrow_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit, gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mkenumg, mkstruct, mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_at, slit, sret, swhile, tnamed, tvoid, vref, vref_at } = compiler.genc
 { DeclIndex, Env, VList, empty_params, no_stmts, param_index, pbuf, recall, tnode, vcons, vnil } = compiler.check
 { lift_extend, lift_is_captured, lift_lamparams, lift_liftable } = compiler.passes.lift
-{ gstr_int } = compiler.astops
+{ gstr_int, map_slice } = compiler.astops
 { Malloc } = std.mem.alloc
 { eq } = std.text.str
 clos_local_call_name* = (env: Env, name: string_view) string_view {
@@ -128,20 +128,8 @@ clos_sub_args = (a: MutPtr<Malloc>, ps: [Param], xs: [Expr]) [Expr] {
     })
     buf
 }
-clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit] {
-    buf := cbuf<FieldInit>(a, inits.len)
-    inits.loop((h, i, fi) {
-        buf[i] = finit(fi.name, a.clos_sub_expr(ps, fi.value))
-    })
-    buf
-}
-clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] {
-    buf := cbuf<ArmData>(a, arms.len)
-    arms.loop((h, i, ar) {
-        buf[i] = arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos)
-    })
-    buf
-}
+clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit] { map_slice(a, inits, (fi) { finit(fi.name, a.clos_sub_expr(ps, fi.value)) }) }
+clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] { map_slice(a, arms, (ar) { arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos) }) }
 clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Var(v)        => a.clos_sub_var(ps, v),
@@ -178,13 +166,7 @@ clos_sub_stmt = (a: MutPtr<Malloc>, ps: [Param], st: Stmt) Stmt {
         .IndexSet(x) => sidxset_at(a.clos_sub_expr(ps, x.seq), a.clos_sub_expr(ps, x.idx), x.elem, a.clos_sub_expr(ps, x.value), x.pos),
     })
 }
-clos_sub_body = (a: MutPtr<Malloc>, ps: [Param], body: [Stmt]) [Stmt] {
-    buf := cbuf<Stmt>(a, body.len)
-    body.loop((h, i, st) {
-        buf[i] = a.clos_sub_stmt(ps, st)
-    })
-    buf
-}
+clos_sub_body = (a: MutPtr<Malloc>, ps: [Param], body: [Stmt]) [Stmt] { map_slice(a, body, (st) { a.clos_sub_stmt(ps, st) }) }
 // the tail (implicit-return) lambda of a body, if any: the last statement is a bare expression that is
 // itself a lambda literal. (a `return <lambda>` tail works too.)
 clos_tail_lambda = (body: [Stmt]) bool {
@@ -243,13 +225,7 @@ clos_struct_fields = (a: MutPtr<Malloc>, fps: [Param]) [Field] {
     out
 }
 // the closure literal's field inits = each captured param bound to its own current value.
-clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
-    buf := cbuf<FieldInit>(a, fps.len)
-    fps.loop((h, i, p) {
-        buf[i] = finit(p.name, a.cenode(vref(p.name)))
-    })
-    buf
-}
+clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] { map_slice(a, fps, (p) { finit(p.name, a.cenode(vref(p.name))) }) }
 // rebuild the enclosing body with its tail lambda replaced by the closure struct literal.
 clos_replace_tail = (a: MutPtr<Malloc>, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
     buf := cbuf<Stmt>(a, body.len)

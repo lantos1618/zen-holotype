@@ -3,7 +3,7 @@
 // params into bounded generics. Runs over the whole [Decl] list after the streaming parse. Split out
 // of the compiler.parse god file. Style: UFCS.
 { cbuf, Ty, Param, Decl, StructDecl, GenStructDecl, EnumDecl, GenEnumDecl, VariantDef, Field, Func, param, tvoid, tnamed, tptr, ty_node_in, dfunc, dforeign, dstruct, dgenstruct, denum, dgenenum, gsdef_at, genumdef_at } = compiler.genc
-{ DeclQuery } = compiler.astops
+{ DeclQuery, slice_any } = compiler.astops
 { at, is_digit } = std.text.bytes
 { eq } = std.text.str
 { Malloc } = std.mem.alloc
@@ -152,14 +152,12 @@ collect_decltypes = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
 // USAGE check is what tells a closure record apart from a trait. Mirrors genc_emit.struct_is_impld; a
 // closure-record param (e.g. `b: Box` where Box holds `op: (i32)i32`) must NOT desugar to a trait bound.
 struct_impld_p = (decls: [Decl], name: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DImpl(im) => eq(im.trname, name).match ({ true => true, false => found }),
-            _          => found,
+    decls.slice_any((d) {
+        d.match ({
+            .DImpl(im) => eq(im.trname, name),
+            _          => false,
         })
     })
-    found
 }
 collect_trait = (buf: [Param], decls: [Decl], cnt: i32, d: Decl) i32 {
     d.match ({

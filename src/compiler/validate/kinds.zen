@@ -6,7 +6,7 @@
 { tag_const } = compiler.check_lower
 { fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank, write_thru_readonly } = compiler.check_fits
 { rc_calls_body } = compiler.passes.refcount
-{ has_fnt_param } = compiler.astops
+{ has_fnt_param, slice_any } = compiler.astops
 { scan } = compiler.lex
 { Allocator, Malloc } = std.mem.alloc
 { of } = std.collections.map
@@ -233,20 +233,8 @@ enum_variants* = (decls: [Decl], ename: string_view) [VariantDef] {
     })
     found
 }
-has_wildcard* = (arms: [ArmData]) bool {
-    f := false
-    arms.loop((h, i, a) {
-        f = eq(a.variant, "_").match ({ true => true, false => f })
-    })
-    f
-}
-arm_covers = (arms: [ArmData], vname: string_view) bool {
-    f := false
-    arms.loop((h, i, a) {
-        f = eq(a.variant, vname).match ({ true => true, false => f })
-    })
-    f
-}
+has_wildcard* = (arms: [ArmData]) bool { arms.slice_any((a) { eq(a.variant, "_") }) }
+arm_covers = (arms: [ArmData], vname: string_view) bool { arms.slice_any((a) { eq(a.variant, vname) }) }
 missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
     n := 0
     variants.loop((h, i, v) {
@@ -307,15 +295,13 @@ unreachable_arm_errs* = (arms: [ArmData]) i32 {
 }
 // Reject constructors whose variant is not declared in the linked decl set.
 enum_declares = (decls: [Decl], vn: string_view) bool {
-    f := false
-    decls.loop((h, i, d) {
-        f = d.match ({
-            .DEnum(ed)   => ed.variants.arm_known(vn).match ({ true => true, false => f }),
-            .DGenEnum(g) => g.variants.arm_known(vn).match ({ true => true, false => f }),
-            _            => f,
+    decls.slice_any((d) {
+        d.match ({
+            .DEnum(ed)   => ed.variants.arm_known(vn),
+            .DGenEnum(g) => g.variants.arm_known(vn),
+            _            => false,
         })
     })
-    f
 }
 // Unknown enum ctor: bare `.Variant` (empty ty) must name SOME declared variant; qualified
 // `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
@@ -355,13 +341,7 @@ enum_payload_err* = (env: Env, mk: MakeEnumData) i32 {
     })
 }
 // Every non-wildcard arm must name a declared variant.
-arm_known = (vs: [VariantDef], vname: string_view) bool {
-    f := false
-    vs.loop((h, i, v) {
-        f = eq(v.name, vname).match ({ true => true, false => f })
-    })
-    f
-}
+arm_known = (vs: [VariantDef], vname: string_view) bool { vs.slice_any((v) { eq(v.name, vname) }) }
 unknown_arm_errs* = (env: Env, m: MatchData) i32 {
     vs := env.decls.enum_variants(m.ename)
     n := 0
@@ -518,13 +498,7 @@ var_err* = (env: Env, name: string_view) i32 {
     })
 }
 // Lowered statement-match tag constants count as generated names.
-variant_tags_has = (vs: [VariantDef], a: MutPtr<Malloc>, ename: string_view, name: string_view) bool {
-    found := false
-    vs.loop((h, i, v) {
-        found = eq(name, a.tag_const(ename, v.name)).match ({ true => true, false => found })
-    })
-    found
-}
+variant_tags_has = (vs: [VariantDef], a: MutPtr<Malloc>, ename: string_view, name: string_view) bool { vs.slice_any((v) { eq(name, a.tag_const(ename, v.name)) }) }
 // A lowered match over a GENERIC enum instance compares against `<mangled>_<variant>` — e.g.
 // `Result_i32_IoError_Err`. The concrete EnumDecl is created only at backend monomorphization, so the
 // validator recognizes such a tag by shape: it starts with the gen-enum base name and ends with one
@@ -649,13 +623,7 @@ ty_has_void_targ = (t: Ty) bool {
         _           => false,
     })
 }
-tys_mention_void = (ts: [Ty]) bool {
-    f := false
-    ts.loop((h, i, t) {
-        f = (t.is_void_ty() || t.ty_has_void_targ()).match ({ true => true, false => f })
-    })
-    f
-}
+tys_mention_void = (ts: [Ty]) bool { ts.slice_any((t) { t.is_void_ty() || t.ty_has_void_targ() }) }
 // A let (post-resolve, ty = the inferred/declared type) whose stored type is a generic with an
 // uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m := empty(7)` → Box<void> → mono emits
 // `Box_void`). check used to pass; require an annotation so the tparam is pinned.
@@ -669,13 +637,7 @@ let_needannot_err* = (env: Env, l: LetData) i32 { l.ty.ty_has_void_targ().match 
 // method bodies are top-level DFuncs found by name. So per declared method: missing → 1 error;
 // present but signature-mismatched → 1 error; present and matching → 0. The check is tied to THIS
 // impl (im.methods), not a global function search, so an unrelated same-named fn never satisfies it.
-has_method* = (methods: [Param], name: string_view) bool {
-    found := false
-    methods.loop((h, i, p) {
-        found = eq(p.name, name).match ({ true => true, false => found })
-    })
-    found
-}
+has_method* = (methods: [Param], name: string_view) bool { methods.slice_any((p) { eq(p.name, name) }) }
 // rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
 impl_ty = (tyname: string_view) Ty {
     eq(tyname, "i32").match ({
@@ -1140,13 +1102,7 @@ ka_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 
     )
     a.ka_body_kind(env, f.tparams, f.body)
 }
-ka_param_named = (ps: [Param], nm: string_view) bool {
-    found := false
-    ps.loop((h, i, p) {
-        found = eq(p.name, nm).match ({ true => true, false => found })
-    })
-    found
-}
+ka_param_named = (ps: [Param], nm: string_view) bool { ps.slice_any((p) { eq(p.name, nm) }) }
 ka_rec_hof_kind* = (f: Func) i32 {
     (f.params.has_fnt_param() && f.body.len > 0 && f.params.ka_param_named(f.name) == false && f.body.rc_calls_body(f.name)).match ({
         true  => KRECHOF().kv_at(f.pos),

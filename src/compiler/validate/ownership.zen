@@ -5,6 +5,7 @@
 { resolve_module } = compiler.check_resolve
 { fits } = compiler.check_fits
 { Allocator, Malloc } = std.mem.alloc
+{ slice_any } = compiler.astops
 { expect } = std.core.result
 { Map, of } = std.collections.map
 { at } = std.text.bytes
@@ -264,13 +265,7 @@ fn_consumes_param = (env: Env, fn: string_view, pi: i32, depth: i32) bool {
     })
 }
 // does `body` consume the local named `nm` on ANY path? (branch-may rule: a conditional consume counts)
-body_consumes_name = (env: Env, body: [Stmt], nm: string_view, depth: i32) bool {
-    found := false
-    body.loop((h, i, st) {
-        found = env.stmt_consumes_name(st, nm, depth).match ({ true => true, false => found })
-    })
-    found
-}
+body_consumes_name = (env: Env, body: [Stmt], nm: string_view, depth: i32) bool { body.slice_any((st) { env.stmt_consumes_name(st, nm, depth) }) }
 stmt_consumes_name = (env: Env, st: Stmt, nm: string_view, depth: i32) bool {
     st.match ({
         .Let(l)      => env.expr_consumes_name(l.value, nm, depth),
@@ -296,13 +291,7 @@ expr_consumes_name = (env: Env, e: Ptr<Expr>, nm: string_view, depth: i32) bool 
         }),
     })
 }
-arms_consume_name = (env: Env, arms: [ArmData], nm: string_view, depth: i32) bool {
-    found := false
-    arms.loop((h, i, ar) {
-        found = env.expr_consumes_name(ar.body, nm, depth).match ({ true => true, false => found })
-    })
-    found
-}
+arms_consume_name = (env: Env, arms: [ArmData], nm: string_view, depth: i32) bool { arms.slice_any((ar) { env.expr_consumes_name(ar.body, nm, depth) }) }
 args_consume_name = (env: Env, args: [Expr], nm: string_view, depth: i32) bool {
     found := false
     args.loop((h, i, ar) {
@@ -457,20 +446,8 @@ bft_forward = (env: Env, c: CallData, pname: string_view, depth: i32) bool {
         },
     })
 }
-bft_args = (env: Env, args: [Expr], pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
-    found := false
-    args.loop((h, i, ar) {
-        found = env.bft_expr(ar.addr(), pname, dl, depth).match ({ true => true, false => found })
-    })
-    found
-}
-bft_arms = (env: Env, arms: [ArmData], pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
-    found := false
-    arms.loop((h, i, ar) {
-        found = env.bft_expr(ar.body, pname, dl, depth).match ({ true => true, false => found })
-    })
-    found
-}
+bft_args = (env: Env, args: [Expr], pname: string_view, dl: Ptr<DeadList>, depth: i32) bool { args.slice_any((ar) { env.bft_expr(ar.addr(), pname, dl, depth) }) }
+bft_arms = (env: Env, arms: [ArmData], pname: string_view, dl: Ptr<DeadList>, depth: i32) bool { arms.slice_any((ar) { env.bft_expr(ar.body, pname, dl, depth) }) }
 bft_expr = (env: Env, e: Ptr<Expr>, pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
     load(e).match ({
         .Call(c)      => env.bft_call(c, pname, dl, depth),
@@ -494,13 +471,7 @@ bft_stmt = (env: Env, st: Stmt, pname: string_view, dl: Ptr<DeadList>, depth: i3
         _            => false,
     })
 }
-bft_body = (env: Env, body: [Stmt], pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
-    found := false
-    body.loop((h, i, st) {
-        found = env.bft_stmt(st, pname, dl, depth).match ({ true => true, false => found })
-    })
-    found
-}
+bft_body = (env: Env, body: [Stmt], pname: string_view, dl: Ptr<DeadList>, depth: i32) bool { body.slice_any((st) { env.bft_stmt(st, pname, dl, depth) }) }
 body_frees_through_ptr = (env: Env, body: [Stmt], pname: string_view, depth: i32) bool {
     dl := env.cdl_body(env.a.dead_nil(), body, pname)
     env.bft_body(body, pname, dl, depth)
@@ -700,27 +671,9 @@ ty_reaches_mutptr = (decls: [Decl], t: Ty, depth: i32) bool {
 // the opaque capability generics: their type args must NOT be structurally descended (they mediate their
 // own interior aliasing — see the send-rc / owner-verb capability set: Own/Arc/Rc + the two actor caps).
 sm_is_opaque_cap = (name: string_view) bool { eq(name, "Own") || eq(name, "Arc") || eq(name, "Rc") || eq(name, "ReplyRef") || eq(name, "ActorRef") }
-fields_reach_mutptr = (decls: [Decl], fields: [Field], depth: i32) bool {
-    f := false
-    fields.loop((h, i, fl) {
-        f = decls.ty_reaches_mutptr(fl.ty, depth).match ({ true => true, false => f })
-    })
-    f
-}
-variants_reach_mutptr = (decls: [Decl], variants: [VariantDef], depth: i32) bool {
-    f := false
-    variants.loop((h, i, v) {
-        f = decls.ty_reaches_mutptr(v.payload, depth).match ({ true => true, false => f })
-    })
-    f
-}
-tys_reach_mutptr = (decls: [Decl], tys: [Ty], depth: i32) bool {
-    f := false
-    tys.loop((h, i, ty) {
-        f = decls.ty_reaches_mutptr(ty, depth).match ({ true => true, false => f })
-    })
-    f
-}
+fields_reach_mutptr = (decls: [Decl], fields: [Field], depth: i32) bool { fields.slice_any((fl) { decls.ty_reaches_mutptr(fl.ty, depth) }) }
+variants_reach_mutptr = (decls: [Decl], variants: [VariantDef], depth: i32) bool { variants.slice_any((v) { decls.ty_reaches_mutptr(v.payload, depth) }) }
+tys_reach_mutptr = (decls: [Decl], tys: [Ty], depth: i32) bool { tys.slice_any((ty) { decls.ty_reaches_mutptr(ty, depth) }) }
 // ── THE MODE (effect-family) LATTICE — the aliasing effect a type carries, DERIVED not stored ──
 // (docs/effects-as-types-design.md §2). One `mode_of(decls, t)` fact feeds every consumer of the
 // aliasing effect; no Env/Ty change (`decls` is already an Env field). Spelled as i32 consts, like
@@ -1300,20 +1253,8 @@ loop_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadLi
     })
     f
 }
-inits_escape = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, inits: [FieldInit]) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = a.expr_escapes(svars, derived, fi.value).match ({ true => true, false => f })
-    })
-    f
-}
-arms_escape = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, arms: [ArmData]) bool {
-    f := false
-    arms.loop((h, i, ar) {
-        f = a.expr_escapes(svars, derived, ar.body).match ({ true => true, false => f })
-    })
-    f
-}
+inits_escape = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, inits: [FieldInit]) bool { inits.slice_any((fi) { a.expr_escapes(svars, derived, fi.value) }) }
+arms_escape = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, arms: [ArmData]) bool { arms.slice_any((ar) { a.expr_escapes(svars, derived, ar.body) }) }
 // a block in VALUE position: its trailing value, or any `return` inside it, may escape (lets thread).
 block_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, stmts: [Stmt]) bool {
     f := false
@@ -1378,13 +1319,7 @@ impure_use_in_expr = (nm: string_view, e: Ptr<Expr>) bool {
         _               => false,
     })
 }
-impure_use_in_args = (nm: string_view, args: [Expr]) bool {
-    f := false
-    args.loop((h, i, ar) {
-        f = nm.impure_use_in_expr(ar.addr()).match ({ true => true, false => f })
-    })
-    f
-}
+impure_use_in_args = (nm: string_view, args: [Expr]) bool { args.slice_any((ar) { nm.impure_use_in_expr(ar.addr()) }) }
 // args EXCEPT index 0 (the getter receiver already accounted for as a pure read).
 impure_use_in_args_from1 = (nm: string_view, args: [Expr]) bool {
     f := false
@@ -1395,20 +1330,8 @@ impure_use_in_args_from1 = (nm: string_view, args: [Expr]) bool {
     })
     f
 }
-impure_use_in_inits = (nm: string_view, inits: [FieldInit]) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = nm.impure_use_in_expr(fi.value).match ({ true => true, false => f })
-    })
-    f
-}
-impure_use_in_arms = (nm: string_view, arms: [ArmData]) bool {
-    f := false
-    arms.loop((h, i, ar) {
-        f = nm.impure_use_in_expr(ar.body).match ({ true => true, false => f })
-    })
-    f
-}
+impure_use_in_inits = (nm: string_view, inits: [FieldInit]) bool { inits.slice_any((fi) { nm.impure_use_in_expr(fi.value) }) }
+impure_use_in_arms = (nm: string_view, arms: [ArmData]) bool { arms.slice_any((ar) { nm.impure_use_in_expr(ar.body) }) }
 impure_use_in_stmt = (nm: string_view, st: Stmt) bool {
     st.match ({
         .Let(l)      => nm.impure_use_in_expr(l.value),
@@ -1420,13 +1343,7 @@ impure_use_in_stmt = (nm: string_view, st: Stmt) bool {
         .ExprStmt(e) => nm.impure_use_in_expr(e),
     })
 }
-impure_use_in_body = (nm: string_view, body: [Stmt]) bool {
-    f := false
-    body.loop((h, i, st) {
-        f = nm.impure_use_in_stmt(st).match ({ true => true, false => f })
-    })
-    f
-}
+impure_use_in_body = (nm: string_view, body: [Stmt]) bool { body.slice_any((st) { nm.impure_use_in_stmt(st) }) }
 // is `nm` used IMPURELY (discharged/escaped, not a pure getter read) in any statement strictly AFTER k?
 impure_use_after = (nm: string_view, body: [Stmt], k: i32) bool {
     f := false
@@ -1463,13 +1380,7 @@ nm_read_or_leak* = (env: Env, body: [Stmt], k: i32, l: LetData) i32 {
 // Flag `send(handle, msg)` whose message carries an Rc (sent directly, wrapped in an enum, or in a
 // struct field). Arc<T> (atomic) and value/Own messages are fine — only Rc is rejected, so ordinary
 // message sends keep zero friction.
-sd_inits_rc = (env: Env, inits: [FieldInit]) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = env.sd_msg_rc(fi.value).match ({ true => true, false => f })
-    })
-    f
-}
+sd_inits_rc = (env: Env, inits: [FieldInit]) bool { inits.slice_any((fi) { env.sd_msg_rc(fi.value) }) }
 sd_msg_rc = (env: Env, e: Ptr<Expr>) bool {
     load(e).match ({
         .Var(v)        => eq(env.infer_expr(e).owner_base(), "Rc"),
@@ -1498,13 +1409,7 @@ sd_call_pos* = (env: Env, c: CallData) i32 {
 // pass only refuses the mutable-reference kind. Same shape as the send-Rc pass (type-aware via
 // infer_expr, walks the same surfaces); runs AFTER scratch-escape so an addr-of-local (also a MutPtr)
 // gets the more specific lifetime remedy first.
-sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = env.sm_msg_mut(tvoid(), fi.value).match ({ true => true, false => f })
-    })
-    f
-}
+sm_inits_mut = (env: Env, inits: [FieldInit]) bool { inits.slice_any((fi) { env.sm_msg_mut(tvoid(), fi.value) }) }
 // Classify a send-payload expression by the TYPE it reaches (Pony reference-capabilities), NOT its AST
 // shape. A constructor node (MakeEnum / MakeStruct) is descended into the SPECIFIC payload/fields actually
 // constructed — never inferred as a whole, so a `.Inc(3)` of an enum that ALSO has a `.Poke(MutPtr)` variant
