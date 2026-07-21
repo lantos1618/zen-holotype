@@ -1,6 +1,6 @@
 // compiler.passes.closures — closure conversion sub-pass extracted from compiler.check.
-{ ArmData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, LambdaData, Param, Stmt, StructDecl, VarData, arm_at, arrow_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit, gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mkenumg, mkstruct, mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_at, slit, sret, swhile, tnamed, tvoid, vref, vref_at } = compiler.genc
-{ DeclIndex, Env, VList, abuf, empty_params, env_func, fbuf, no_stmts, param_index, pbuf, recall, sbuf, tnode, var_ty, vcons, vnil } = compiler.check
+{ cbuf, ArmData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, LambdaData, Param, Stmt, StructDecl, VarData, arm_at, arrow_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit, gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mkenumg, mkstruct, mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_at, slit, sret, swhile, tnamed, tvoid, vref, vref_at } = compiler.genc
+{ DeclIndex, Env, VList, empty_params, env_func, no_stmts, param_index, pbuf, recall, tnode, var_ty, vcons, vnil } = compiler.check
 { lift_digits, lift_extend, lift_is_captured, lift_lamparams, lift_liftable } = compiler.passes.lift
 { Malloc } = std.mem.alloc
 { eq } = std.text.str
@@ -115,7 +115,7 @@ clos_sub_fncall = (a: MutPtr<Malloc>, ps: [Param], c: CallData) Ptr<Expr> {
     rest := a.clos_sub_args(ps, c.args)
     letst := slet("__zclos_recv", a.cenode(member(a.cenode(vref("__clenv")), c.fn)))
     callx := a.cenode(call_at("__zclos_recv", rest, c.pos))
-    sbuf2 := a.sbuf(2)
+    sbuf2 := cbuf<Stmt>(a, 2)
     sbuf2[0] = letst
     sbuf2[1] = sexpr(callx)
     a.cenode(block(sbuf2))
@@ -128,14 +128,14 @@ clos_sub_args = (a: MutPtr<Malloc>, ps: [Param], xs: [Expr]) [Expr] {
     buf
 }
 clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit] {
-    buf := a.fbuf(inits.len)
+    buf := cbuf<FieldInit>(a, inits.len)
     inits.loop((h, i, fi) {
         buf[i] = finit(fi.name, a.clos_sub_expr(ps, fi.value))
     })
     buf
 }
 clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] {
-    buf := a.abuf(arms.len)
+    buf := cbuf<ArmData>(a, arms.len)
     arms.loop((h, i, ar) {
         buf[i] = arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos)
     })
@@ -178,7 +178,7 @@ clos_sub_stmt = (a: MutPtr<Malloc>, ps: [Param], st: Stmt) Stmt {
     })
 }
 clos_sub_body = (a: MutPtr<Malloc>, ps: [Param], body: [Stmt]) [Stmt] {
-    buf := a.sbuf(body.len)
+    buf := cbuf<Stmt>(a, body.len)
     body.loop((h, i, st) {
         buf[i] = a.clos_sub_stmt(ps, st)
     })
@@ -243,7 +243,7 @@ clos_struct_fields = (a: MutPtr<Malloc>, fps: [Param]) [Field] {
 }
 // the closure literal's field inits = each captured param bound to its own current value.
 clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
-    buf := a.fbuf(fps.len)
+    buf := cbuf<FieldInit>(a, fps.len)
     fps.loop((h, i, p) {
         buf[i] = finit(p.name, a.cenode(vref(p.name)))
     })
@@ -251,7 +251,7 @@ clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
 }
 // rebuild the enclosing body with its tail lambda replaced by the closure struct literal.
 clos_replace_tail = (a: MutPtr<Malloc>, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
-    buf := a.sbuf(body.len)
+    buf := cbuf<Stmt>(a, body.len)
     body.loop((h, i, st) {
         buf[i] = (i == body.len - 1).match ({ true => sret(mk), false => st })
     })

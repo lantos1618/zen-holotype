@@ -1,6 +1,6 @@
 // compiler.passes.subst — generic substitution + xform sub-pass extracted from compiler.check.
-{ ArmData, CallData, Decl, Expr, FieldInit, LambdaData, MakeStructData, MatchData, Param, Stmt, Ty, VarData, arm, arrow_at, bin_at, block, call_full, cond_oa, eindex, eloop, ematch, ematchp, finit, lam_r, mangle_str_in, member_at, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, sassign_at, sexpr, sidxset_at, sif, slett_at, slit, sret, subst_ty_in, swhile, tvoid, ty_cname_in, vref_at } = compiler.genc
-{ DeclIndex, VList, abuf, add_fnt_param, add_lambda_arg, add_subst_arg, add_subst_param, bind_fnret, callee_subst_name, cs_or, fbuf, fnret_of, gen_variant_payload, idx_genenum, idx_variant_payload, inline_lambda, is_void_ty, let_value_lambda, light_ty, local_name_at, maybe_template, no_stmts, param_index, recall, ref_pos, sbuf, tbuf, vcons } = compiler.check
+{ cbuf, ArmData, CallData, Decl, Expr, FieldInit, LambdaData, MakeStructData, MatchData, Param, Stmt, Ty, VarData, arm, arrow_at, bin_at, block, call_full, cond_oa, eindex, eloop, ematch, ematchp, finit, lam_r, mangle_str_in, member_at, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, sassign_at, sexpr, sidxset_at, sif, slett_at, slit, sret, subst_ty_in, swhile, tvoid, ty_cname_in, vref_at } = compiler.genc
+{ DeclIndex, VList, add_fnt_param, add_lambda_arg, add_subst_arg, add_subst_param, bind_fnret, callee_subst_name, cs_or, fnret_of, gen_variant_payload, idx_genenum, idx_variant_payload, inline_lambda, is_void_ty, let_value_lambda, light_ty, local_name_at, maybe_template, no_stmts, param_index, recall, ref_pos, vcons } = compiler.check
 { Malloc } = std.mem.alloc
 { eq } = std.text.str
 subst_var = (a: MutPtr<Malloc>, params: [Param], args: [Expr], name: string_view, e: Ptr<Expr>) Ptr<Expr> {
@@ -39,7 +39,7 @@ xform_arm_env* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, en
     out
 }
 xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename: string_view, arms: [ArmData], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [ArmData] {
-    buf := a.abuf(arms.len)
+    buf := cbuf<ArmData>(a, arms.len)
     arms.loop((h, i, ar) {
         bind := ""
         ps := params
@@ -56,7 +56,7 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename:
     buf
 }
 subst_targs = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
-    buf := a.tbuf(xs.len)
+    buf := cbuf<Ty>(a, xs.len)
     xs.loop((h, i, t) {
         buf[i] = a.subst_ty_in(tparams, targs, t)
     })
@@ -73,7 +73,7 @@ subst_genlit = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], m: Ma
     })
 }
 subst_inits = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], inits: [FieldInit]) [FieldInit] {
-    buf := a.fbuf(inits.len)
+    buf := cbuf<FieldInit>(a, inits.len)
     inits.loop((h, i, fi) {
         buf[i] = finit(fi.name, a.subst_expr(cs, tparams, targs, fi.value))
     })
@@ -87,7 +87,7 @@ subst_exprs = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], xs: [E
     buf
 }
 subst_arms = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] {
-    buf := a.abuf(arms.len)
+    buf := cbuf<ArmData>(a, arms.len)
     arms.loop((h, i, ar) {
         buf[i] = arm(ar.variant, ar.bind, a.subst_expr(cs, tparams, targs, ar.body))
     })
@@ -162,7 +162,7 @@ subst_stmt = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], st: Stm
     })
 }
 subst_body* = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] {
-    buf := a.sbuf(body.len)
+    buf := cbuf<Stmt>(a, body.len)
     body.loop((h, i, st) {
         buf[i] = a.subst_stmt(cs, tparams, targs, st)
     })
@@ -193,7 +193,7 @@ xform_match = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: MatchData, p
     out
 }
 xform_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, inits: [FieldInit], params: [Param], fargs: [Expr], env: Ptr<VList>) [FieldInit] {
-    buf := a.fbuf(inits.len)
+    buf := cbuf<FieldInit>(a, inits.len)
     inits.loop((h, i, fi) {
         buf[i] = finit(fi.name, a.xform_expr(decls, idx, fi.value, params, fargs, env))
     })
@@ -344,7 +344,7 @@ xform_arg_shadow = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, args: [Exp
     out
 }
 xform_body* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, body: [Stmt], params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) [Stmt] {
-    buf := a.sbuf(body.len)
+    buf := cbuf<Stmt>(a, body.len)
     e := env
     ps := params
     xs := fargs
