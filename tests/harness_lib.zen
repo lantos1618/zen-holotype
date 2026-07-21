@@ -1,7 +1,7 @@
 // tests/harness_lib.zen — the REUSABLE harness library for the Zen-native correctness harness (the
 // self-hosted replacement for the pytest value/verdict harness). A category test file imports this,
 // declares its cases as Zen data, and calls the batch runners — NO Python anywhere; the compiler
-// tests itself, in itself, by driving the committed `zenc` binary via std.io.
+// tests itself, in itself, by driving the committed `zen` binary via std.io.
 //
 // ── HOW TO WRITE A CATEGORY FILE (tests/harness_<cat>.zen) ────────────────────────────────────────
 //
@@ -224,34 +224,40 @@ kind_needle = (mp: MutPtr<Malloc>, kind: string_view) string_view {
 }
 // VALUE: emit C for the case, compile it with tests/harness_runner.c, run it, compare the printed int
 // to `want`. /tmp/zo_out.txt is cleared first so a stale value can't masquerade as a pass when emit
-// or cc fails (the `&&` chain then never runs the program).
+// or cc fails (the `&&` chain then never runs the program). Both `zen emit` and the compiled program
+// run under `timeout`: a miscompiled infinite loop must fail the case (empty output ≠ want), never
+// hang the harness.
 run_value* = (vc: VCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_case.zen"), vc.src, len(vc.src))
     save(mp.zo_path("zo_out.txt"), "", 0)
-    shell(mp.zo_cmd("./zen emit $ZT/zo_case.zen > $ZT/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I$ZT tests/harness_runner.c -o $ZT/zo_prog 2>/dev/null && $ZT/zo_prog > $ZT/zo_out.txt 2>/dev/null"))
+    shell(mp.zo_cmd("timeout 60 ./zen emit $ZT/zo_case.zen > $ZT/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I$ZT tests/harness_runner.c -o $ZT/zo_prog 2>/dev/null && timeout 30 $ZT/zo_prog > $ZT/zo_out.txt 2>/dev/null"))
     mp.contents_in(mp.zo_path("zo_out.txt")).match ({
         .Ok(got) => eq(got, vc.want),
         .Err(e)  => false,
     })
 }
 // VERDICT: `zenc check` exits 0 on accept, non-zero on reject (it prints exactly one diagnostic, so
-// `contains("error[<kind>]")` is equivalent to matching the first-error kind).
+// `contains("error[<kind>]")` is equivalent to matching the first-error kind). Runs under `timeout 60`;
+// a timeout (rc 124) fails the case outright — a hung compiler must never satisfy a reject expectation.
 run_verdict* = (vc: VerdictCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_v.zen"), vc.src, len(vc.src))
-    rc := shell(mp.zo_cmd("./zen check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("harness: shell")
-    vc.should_pass.match ({
-        true  => rc == 0,
-        false => (rc == 0).match ({
-            true  => false,
-            false => is_empty(vc.kind).match ({
-                true  => true,
-                false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
-                    .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
-                    .Err(e)  => false,
+    rc := shell(mp.zo_cmd("timeout 60 ./zen check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("harness: shell")
+    (rc == 124).match ({
+        true  => false,
+        false => vc.should_pass.match ({
+            true  => rc == 0,
+            false => (rc == 0).match ({
+                true  => false,
+                false => is_empty(vc.kind).match ({
+                    true  => true,
+                    false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
+                        .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
+                        .Err(e)  => false,
+                    }),
                 }),
             }),
         }),
@@ -259,12 +265,13 @@ run_verdict* = (vc: VerdictCase) bool {
 }
 // DIAGNOSTIC: `zenc check` must reject (exit nonzero); capture the FULL diagnostic (stdout+stderr) and
 // require every `wants` substring to be present. /tmp/zod_out.txt is overwritten each run.
+// `timeout 60` as in run_verdict: rc 124 fails the case.
 run_diag* = (dc: DiagCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zod_v.zen"), dc.src, len(dc.src))
-    rc := shell(mp.zo_cmd("./zen check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
-    (rc == 0).match ({
+    rc := shell(mp.zo_cmd("timeout 60 ./zen check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
+    (rc == 0 || rc == 124).match ({
         true  => false,
         false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
             .Ok(txt) => {
@@ -289,17 +296,24 @@ fixpoint_ok* = () bool {
     same := shell(mp.zo_cmd("cmp -s $ZT/zo_gen_after.c bootstrap/zenc.gen.c")).expect("harness: shell")
     same == 0
 }
-// REPORTER: print `name (N)` then '.'/'F' per result, return the failing count. Use when a caller
-// already has a `[bool]` of outcomes (e.g. the fixpoint suite, or a custom category mix).
+// REPORTER: print `name (N)` then '.'/'F' per result, return the failing count. A failing mark is
+// followed by a `FAIL <name>[<idx>]` line identifying the case, so a red suite needs no bisection.
+// Use when a caller already has a `[bool]` of outcomes (e.g. the fixpoint suite, or a custom mix).
 run_suite* = (name: string_view, results: [bool]) i32 {
     out(name)
     out("\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
     fails := 0
     results.loop((h, i, ok) {
         ok.match ({
             true  => out("."),
             false => {
-                out("F")
+                out("F\n  FAIL ")
+                out(name)
+                out("[")
+                out(mp.zo_itoa(i))
+                out("]\n")
                 fails = fails + 1
             },
         })
@@ -309,26 +323,21 @@ run_suite* = (name: string_view, results: [bool]) i32 {
 }
 // VALUE per-case command (Phase A→B): emit C into a PRIVATE include dir `d<gid>/`, compile it with the
 // runner, run it, capture the printed int to `o<gid>.txt`. The private include dir is what lets the fixed
-// `#include "zo_body.c"` be reused across parallel cases without collision.
+// `#include "zo_body.c"` be reused across parallel cases without collision. `zen emit` and the compiled
+// program run under `timeout`: a compiler hang or a miscompiled infinite loop leaves `o<gid>.txt` empty,
+// which FAILS the case in Phase C instead of hanging the harness.
 zo_value_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
     z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
     src := mp.zo_idpath("c", gid, ".zen")
     dir := mp.zo_idpath("d", gid, "")
     prog := mp.zo_idpath("p", gid, "")
     outp := mp.zo_idpath("o", gid, ".txt")
-    mp.zo_join([z, "mkdir -p ", dir, "; ./zen emit ", src, " > ", dir, "/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I", dir, " tests/harness_runner.c -o ", prog, " 2>/dev/null && ", prog, " > ", outp, " 2>/dev/null; true"])
-}
-// VALUE per-case check (Phase C): the captured program output must equal `want`. A missing/empty file
-// (emit or cc failed → the `&&` chain never ran the program) can't equal `want`, so it FAILS — exactly
-// as the serial runner's cleared-then-compared `zo_out.txt` did.
-zo_value_ok = (mp: MutPtr<Malloc>, gid: i64, vc: VCase) bool {
-    mp.contents_in(mp.zo_idpath("o", gid, ".txt")).match ({
-        .Ok(got) => eq(got, vc.want),
-        .Err(e)  => false,
-    })
+    mp.zo_join([z, "mkdir -p ", dir, "; timeout 60 ./zen emit ", src, " > ", dir, "/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I", dir, " tests/harness_runner.c -o ", prog, " 2>/dev/null && timeout 30 ", prog, " > ", outp, " 2>/dev/null; true"])
 }
 // batch VALUE runner + reporter: build every case's command (serial), run them in parallel, then compare
 // outputs IN ORDER, printing '.'/'F' and returning the failing count — same verdict as the serial loop.
+// A failing case also prints `FAIL <name>[<idx>]: want … got …` (identity + expected vs actual), so a
+// red suite is actionable without bisecting the case list.
 run_values* = (name: string_view, cs: [VCase]) i32 {
     out(name)
     out("\n")
@@ -345,10 +354,20 @@ run_values* = (name: string_view, cs: [VCase]) i32 {
     zo_par_run(cmds, n)
     fails := 0
     cs.loop((h, i, c) {
-        mp.zo_value_ok(i, c).match ({
+        got := mp.contents_in(mp.zo_idpath("o", i, ".txt"))
+        ok := got.match ({ .Ok(g) => eq(g, c.want), .Err(e) => false })
+        ok.match ({
             true  => out("."),
             false => {
-                out("F")
+                out("F\n  FAIL ")
+                out(name)
+                out("[")
+                out(mp.zo_itoa(i))
+                out("]: want \"")
+                out(c.want)
+                out("\" got \"")
+                got.match ({ .Ok(g) => out(g), .Err(e) => out("<no output — emit/cc/timeout failed>") })
+                out("\"\n")
                 fails = fails + 1
             },
         })
@@ -357,38 +376,53 @@ run_values* = (name: string_view, cs: [VCase]) i32 {
     free(base)
     fails
 }
-// VERDICT per-case command (Phase A→B): `zenc check`, capturing the accept/reject outcome as a P/F
-// marker in `rc<gid>.txt` and the full diagnostic in `chk<gid>.txt`. (We can't return the shell exit
-// code through the worker, so the accept/reject bit is recorded in a file and read back in Phase C.)
+// VERDICT per-case command (Phase A→B): `zenc check` under `timeout 60`, recording the outcome as a
+// THREE-state marker in `rc<gid>.txt`: P (accept), F (reject), T (timeout, rc ≥ 124 — the crash/hang
+// threshold the fuzz category uses). The full diagnostic lands in `chk<gid>.txt`. (We can't return the
+// shell exit code through the worker, so the outcome is recorded in a file and read back in Phase C.)
 zo_verdict_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
     z: string_view := ""
     v := mp.zo_idpath("v", gid, ".zen")
     chk := mp.zo_idpath("chk", gid, ".txt")
     rc := mp.zo_idpath("rc", gid, ".txt")
-    mp.zo_join([z, "if ./zen check ", v, " > ", chk, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+    mp.zo_join([z, "timeout 60 ./zen check ", v, " > ", chk, " 2>&1; rc=$?; if [ $rc -eq 0 ]; then echo P > ", rc, "; elif [ $rc -ge 124 ]; then echo T > ", rc, "; else echo F > ", rc, "; fi"])
+}
+// decode a P/F/T marker file: 0 = accepted, 1 = rejected, 2 = TIMEOUT (or missing/unreadable marker).
+// 2 must ALWAYS fail the case — a hung or crashed compiler never satisfies an accept OR a reject
+// expectation (a naive nonzero-exit-is-reject read would let a hang pass a reject case).
+zo_rc_state = (mp: MutPtr<Malloc>, path: string_view) i64 {
+    mp.contents_in(path).match ({
+        .Ok(s)  => s.starts_with("P").match ({
+            true  => 0,
+            false => s.starts_with("F").match ({ true => 1, false => 2 }),
+        }),
+        .Err(e) => 2,
+    })
 }
 // VERDICT per-case check (Phase C): identical logic to run_verdict — accept(P) vs reject(F), and when
-// rejecting with a non-empty `kind`, the captured diagnostic must contain `error[<kind>]`.
+// rejecting with a non-empty `kind`, the captured diagnostic must contain `error[<kind>]`. T fails always.
 zo_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, vc: VerdictCase) bool {
-    accepted := mp.contents_in(mp.zo_idpath("rc", gid, ".txt")).match ({
-        .Ok(s)  => s.starts_with("P"),
-        .Err(e) => false,
-    })
-    vc.should_pass.match ({
-        true  => accepted,
-        false => accepted.match ({
-            true  => false,
-            false => is_empty(vc.kind).match ({
-                true  => true,
-                false => mp.contents_in(mp.zo_idpath("chk", gid, ".txt")).match ({
-                    .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
-                    .Err(e)  => false,
+    st := mp.zo_rc_state(mp.zo_idpath("rc", gid, ".txt"))
+    (st == 2).match ({
+        true  => false,
+        false => vc.should_pass.match ({
+            true  => st == 0,
+            false => (st == 0).match ({
+                true  => false,
+                false => is_empty(vc.kind).match ({
+                    true  => true,
+                    false => mp.contents_in(mp.zo_idpath("chk", gid, ".txt")).match ({
+                        .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
+                        .Err(e)  => false,
+                    }),
                 }),
             }),
         }),
     })
 }
 // batch VERDICT runner + reporter: build (serial), run in parallel, check IN ORDER — same verdict as serial.
+// A failing case also prints `FAIL <name>[<idx>]: want accept|reject[kind], got …` plus the captured
+// diagnostic text (one positioned error), so the failure is self-explanatory.
 run_verdicts* = (name: string_view, cs: [VerdictCase]) i32 {
     out(name)
     out("\n")
@@ -404,10 +438,32 @@ run_verdicts* = (name: string_view, cs: [VerdictCase]) i32 {
     zo_par_run(cmds, n)
     fails := 0
     cs.loop((h, i, c) {
-        mp.zo_verdict_ok(i, c).match ({
+        st := mp.zo_rc_state(mp.zo_idpath("rc", i, ".txt"))
+        ok := mp.zo_verdict_ok(i, c)
+        ok.match ({
             true  => out("."),
             false => {
-                out("F")
+                out("F\n  FAIL ")
+                out(name)
+                out("[")
+                out(mp.zo_itoa(i))
+                out("]: want ")
+                c.should_pass.match ({ true => out("accept"), false => out("reject") })
+                (is_empty(c.kind) == false).then ({
+                    out("[")
+                    out(c.kind)
+                    out("]")
+                })
+                out(", got ")
+                (st == 0).match ({
+                    true  => out("accept"),
+                    false => (st == 1).match ({ true => out("reject"), false => out("TIMEOUT") }),
+                })
+                out("\n")
+                mp.contents_in(mp.zo_idpath("chk", i, ".txt")).match ({
+                    .Ok(txt) => out(txt),
+                    .Err(e)  => {},
+                })
                 fails = fails + 1
             },
         })
@@ -416,23 +472,21 @@ run_verdicts* = (name: string_view, cs: [VerdictCase]) i32 {
     free(base)
     fails
 }
-// DIAGNOSTIC per-case command (Phase A→B): `zenc check` must REJECT; capture reject(P/F) marker + the
-// full diagnostic (stdout+stderr) so Phase C can require every `wants` substring.
+// DIAGNOSTIC per-case command (Phase A→B): `zenc check` under `timeout 60`; record the same P/F/T
+// marker as verdicts (`drc<gid>.txt`) plus the full diagnostic (`do<gid>.txt`) so Phase C can require
+// every `wants` substring. T (timeout) fails the case — a hang is not a rejection.
 zo_diag_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
     z: string_view := ""
     v := mp.zo_idpath("dv", gid, ".zen")
     outp := mp.zo_idpath("do", gid, ".txt")
     rc := mp.zo_idpath("drc", gid, ".txt")
-    mp.zo_join([z, "if ./zen check ", v, " > ", outp, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+    mp.zo_join([z, "timeout 60 ./zen check ", v, " > ", outp, " 2>&1; rc=$?; if [ $rc -eq 0 ]; then echo P > ", rc, "; elif [ $rc -ge 124 ]; then echo T > ", rc, "; else echo F > ", rc, "; fi"])
 }
 // DIAGNOSTIC per-case check (Phase C): identical logic to run_diag — must reject (F) AND the diagnostic
-// must contain every `wants` substring.
+// must contain every `wants` substring. T (timeout/missing marker) fails always.
 zo_diag_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiagCase) bool {
-    rejected := mp.contents_in(mp.zo_idpath("drc", gid, ".txt")).match ({
-        .Ok(s)  => s.starts_with("F"),
-        .Err(e) => false,
-    })
-    rejected.match ({
+    st := mp.zo_rc_state(mp.zo_idpath("drc", gid, ".txt"))
+    (st == 1).match ({
         true  => mp.contents_in(mp.zo_idpath("do", gid, ".txt")).match ({
             .Ok(txt) => {
                 all := true
@@ -448,7 +502,9 @@ zo_diag_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiagCase) bool {
         false => false,
     })
 }
-// batch DIAGNOSTIC runner + reporter: build (serial), run in parallel, check IN ORDER — same verdict as serial.
+// batch DIAGNOSTIC runner + reporter: build (serial), run in parallel, check IN ORDER — same verdict as
+// serial. A failing case also prints `FAIL <name>[<idx>]` with the missing needle(s), or why no
+// rejection happened (accept/timeout).
 run_diags* = (name: string_view, cs: [DiagCase]) i32 {
     out(name)
     out("\n")
@@ -464,10 +520,36 @@ run_diags* = (name: string_view, cs: [DiagCase]) i32 {
     zo_par_run(cmds, n)
     fails := 0
     cs.loop((h, i, c) {
-        mp.zo_diag_ok(i, c).match ({
+        st := mp.zo_rc_state(mp.zo_idpath("drc", i, ".txt"))
+        txt := mp.contents_in(mp.zo_idpath("do", i, ".txt"))
+        ok := mp.zo_diag_ok(i, c)
+        ok.match ({
             true  => out("."),
             false => {
-                out("F")
+                out("F\n  FAIL ")
+                out(name)
+                out("[")
+                out(mp.zo_itoa(i))
+                out("]")
+                (st == 1).match ({
+                    true  => {
+                        out(": missing needle(s):\n")
+                        c.wants.loop((h2, j, wnt) {
+                            txt.match ({
+                                .Ok(t) => (t.contains(wnt) == false).then ({
+                                    out("    ")
+                                    out(wnt)
+                                    out("\n")
+                                }),
+                                .Err(e)  => {},
+                            })
+                        })
+                    },
+                    false => (st == 0).match ({
+                        true  => out(": expected rejection, got accept\n"),
+                        false => out(": expected rejection, got TIMEOUT\n"),
+                    }),
+                })
                 fails = fails + 1
             },
         })
