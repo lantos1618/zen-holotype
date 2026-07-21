@@ -19,6 +19,13 @@
 // the WHOLE module (all its impls: Ty/Func/Decl/StructDecl) into check's import closure, so the impl
 // index resolves these UFCS methods here and in every module that imports check (validate/*, passes/*).
 { TyQuery, FuncQuery, has_fnt_param } = compiler.astops
+// Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
+// resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
+{ deep_targs, impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
+{ inline_decl, inline_template, is_empty_named, lower_closures, mono_close, mono_rec, no_inline_gen_f } = compiler.check_inline
+{ desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
+{ lower_match_arms, lower_stmt_expr, one_stmt, subj_payload, subj_tag, tag_const } = compiler.check_lower
+{ fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank } = compiler.check_fits
 // ── DECLARATION INDEX ───────────────────────────────────────────────────────
 // name → decl array index, an O(1) hash map (std.collections.map). Built once per
 // resolve/check pass from the (immutable, within a pass) decls slice and threaded through Env,
@@ -323,8 +330,8 @@ env_func* = (env: Env, name: string_view) Func {
     })
 }
 // Heap-node helpers. c* names avoid flat-TU collisions with parser helpers.
-cebuf<A> = (a: MutPtr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
-cenode<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
+cebuf*<A> = (a: MutPtr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
+cenode*<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
     buf := a.cebuf(1)
     buf[0] = v
     buf[0].addr()
@@ -361,7 +368,7 @@ params_env* = (a: MutPtr<Malloc>, ps: [Param]) Ptr<VList> {
     })
     e
 }
-lookup_var = (v: Ptr<VList>, name: string_view) Ty {
+lookup_var* = (v: Ptr<VList>, name: string_view) Ty {
     v.match ({
         .VNil     => tvoid(),
         .VCons(c) => eq(c.name, name).match ({ true => c.ty, false => c.tail.lookup_var(name) }),
@@ -611,7 +618,7 @@ is_cmp_op = (op: string_view) bool {
     b1 := op.at(1)
     b == '=' || b == '!' || (b == '<' || b == '>') && b1 != b || (b == '&' || b == '|') && b1 == b
 }
-bin_ty = (op: string_view, lt: Ty) Ty { op.is_cmp_op().match ({ true => tbool(), false => lt }) }
+bin_ty* = (op: string_view, lt: Ty) Ty { op.is_cmp_op().match ({ true => tbool(), false => lt }) }
 // A numeric binop's result is the WIDER operand (max integer rank), so `i32 + i64`
 // is i64 regardless of operand order — kills silent truncation + order-dependence.
 // A numeric LITERAL operand ADAPTS to the other side (it never forces widening), so
@@ -727,7 +734,7 @@ last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
 // its type from the OTHER arms. Only arm/loop blocks can look like this; fn/lambda BODIES (where the
 // parser's implicit trailing return IS the value) are typed as [Stmt] via block_ty_from directly and
 // keep last_stmt_ty's Return-as-value rule. See genc.blk_diverges.
-block_ty = (env: Env, b: BlockData) Ty { b.stmts.stmts_diverge().match ({
+block_ty* = (env: Env, b: BlockData) Ty { b.stmts.stmts_diverge().match ({
     true  => tvoid(),
     false => env.block_ty_from(b.stmts, 0),
 }) }
@@ -789,20 +796,20 @@ pointee_of = (t: Ty) Ty {
 // (receiver, annotated local) or the expected return type must not be overridden by a literal's
 // default width/provenance. `lits` selects which pass this scan is: false = typed args only,
 // true = literals only (the last resort).
-is_weak_targ_arg = (e: Ptr<Expr>) bool {
+is_weak_targ_arg* = (e: Ptr<Expr>) bool {
     e.is_lit_numeric() || load(e).match ({
         .StrLit(s) => true,
         _          => false,
     })
 }
-is_direct_tparam = (t: Ty, tp: string_view) bool {
+is_direct_tparam* = (t: Ty, tp: string_view) bool {
     t.match ({
         .Named(n) => eq(n, tp),
         _         => false,
     })
 }
 weak_targ_env = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: string_view) bool { arg.is_weak_targ_arg() || pty.is_direct_tparam(tp) && env.infer_expr(arg).is_str_t() }
-targ_of = (env: Env, params: [Param], args: [Expr], tp: string_view, lits: bool) Ty {
+targ_of* = (env: Env, params: [Param], args: [Expr], tp: string_view, lits: bool) Ty {
     found := tvoid()
     params.loop((h, i, p) {
         found = found.is_void_ty().match ({
@@ -925,7 +932,7 @@ method_in = (methods: [Param], fn: string_view) bool {
     })
     f
 }
-dispatch_recv = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: string_view, tyname: string_view) string_view {
+dispatch_recv* = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: string_view, tyname: string_view) string_view {
     // O(1): dispatch_idx holds the LAST impl of `tyname` providing `fn` (directly or via a trait
     // default) — the same verdict the old whole-decls scan accumulated.
     i := didx.dispatch_idx.get(a.tdkey(tyname, fn), 0 - 1)
@@ -959,7 +966,7 @@ dispatch_name* = (env: Env, c: CallData) string_view {
         false => c.fn,
     })
 }
-dispatch_recv_name = (t: Ty) string_view {
+dispatch_recv_name* = (t: Ty) string_view {
     t.match ({
         .Generic(g) => g.name,
         .Ptr(pd)    => load(pd.pointee).dispatch_recv_name(),
@@ -1211,7 +1218,7 @@ nonnull_ty = (t: Ty) Ty {
         _        => tvoid(),
     })
 }
-infer_call = (env: Env, c: CallData) Ty {
+infer_call* = (env: Env, c: CallData) Ty {
     eq(c.fn, "sizeof").match ({
         true  => ti64(),
         false => eq(c.fn, "__str_eq").match ({
@@ -1306,13 +1313,13 @@ gen_struct_field = (a: MutPtr<Malloc>, decls: [Decl], gname: string_view, fname:
     })
     found
 }
-ty_under_ptr = (t: Ty) Ty {
+ty_under_ptr* = (t: Ty) Ty {
     t.match ({
         .Ptr(pd) => load(pd.pointee),
         _        => t,
     })
 }
-slice_member = (a: MutPtr<Malloc>, field: string_view) Ty {
+slice_member* = (a: MutPtr<Malloc>, field: string_view) Ty {
     eq(field, "len").match ({
         true  => ti64(),
         false => eq(field, "ptr").match ({ true => tptr(a.tnode(tu8())), false => tvoid() }),
@@ -1334,7 +1341,7 @@ infer_arm_ty = (env: Env, subjty: Ty, ar: ArmData) Ty { env.a.arm_env(env, subjt
 // Least common result type. `ty_eq(got, want)` is directional: literal fits cstr/view and cstr fits
 // view, never the reverse. Therefore when `a` fits `b`, the safe join is the broader `b`; choosing
 // `a` would launder a borrowed arm into immortal `string_literal` provenance.
-common_ty = (a: Ty, b: Ty) Ty {
+common_ty* = (a: Ty, b: Ty) Ty {
     a.is_void_ty().match ({
         true  => b,
         false => b.is_void_ty().match ({
@@ -1455,7 +1462,7 @@ gstruct_of = (decls: [Decl], name: string_view) GenStructDecl {
     })
     found
 }
-has_tparam = (tparams: [Param], n: string_view) bool {
+has_tparam* = (tparams: [Param], n: string_view) bool {
     f := false
     tparams.loop((h, i, tp) {
         f = eq(tp.name, n).match ({ true => true, false => f })
@@ -1937,7 +1944,7 @@ ufcs_auto_ref_arg0 = (a: MutPtr<Malloc>, env: Env, ps: [Param], buf: [Expr], pos
 // `__clos_K` for it plus a call fn `__clos_K_call`) is an indirect closure call. Return the call-fn
 // name if `g` is such a local (its type is a Named struct with a matching `_call` fn in the index),
 // else "". The closure value is threaded as the call's first argument (its captured environment).
-resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
+resolve_call* = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     dn := env.dispatch_name(c)
     fn := env.env_func(dn)
     ps := fn.params
@@ -1997,196 +2004,6 @@ resolve_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
         buf[i] = arm_at(ar.variant, ar.bind, a.resolve_expr(aenv, ar.body), ar.pos)
     })
     buf
-}
-// Discarded matches lower to `if` so arm returns remain real returns. Value-position matches
-// stay expressions. Non-exhaustive enum matches stay Match nodes for the validator to reject.
-match_has_wild = (m: MatchData) bool {
-    f := false
-    m.arms.loop((h, i, ar) {
-        f = eq(ar.variant, "_").match ({ true => true, false => f })
-    })
-    f
-}
-arm_covers_v = (m: MatchData, vn: string_view) bool {
-    f := false
-    m.arms.loop((h, i, ar) {
-        f = eq(ar.variant, vn).match ({ true => true, false => f })
-    })
-    f
-}
-ed_covered = (ed: EnumDecl, m: MatchData) bool {
-    all := true
-    ed.variants.loop((h, i, v) {
-        all = m.arm_covers_v(v.name).match ({ true => all, false => false })
-    })
-    all
-}
-enum_exhaustive = (decls: [Decl], m: MatchData) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DEnum(ed) => eq(ed.name, m.ename).match ({ true => ed.ed_covered(m), false => found }),
-            _          => found,
-        })
-    })
-    found
-}
-match_lowerable = (decls: [Decl], m: MatchData) bool { match_has_wild(m).match ({
-    true  => true,
-    false => decls.enum_exhaustive(m),
-}) }
-one_stmt = (a: MutPtr<Malloc>, st: Stmt) [Stmt] {
-    buf := cbuf<Stmt>(a, 1)
-    buf[0] = st
-    buf
-}
-branch_stmts = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
-    out := a.one_stmt(a.lower_stmt_expr(env, e))
-    load(e).match ({
-        .Block(b) => {
-            out = a.relower_block_tail(env, b.stmts)
-        },
-        _         => { },
-    })
-    out
-}
-// Re-lower the TAIL statement of a discarded (statement-position) arm body. The arm body was resolved
-// as a VALUE (its `exp` kept so inner `return .Err(x)` infers the right enum), so a tail match/cond is
-// still a value Match/Cond node — in discarded position its arm `return`s would be flattened to value
-// exprs and silently dropped. Re-running the stmt lowering on the tail keeps those returns as real
-// control flow, and recurses through branch_stmts into arbitrarily-nested arm tails. Non-tail statements
-// keep their resolved form (already lowered with last=false); only their bindings thread into the env.
-relower_tail_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) Stmt {
-    st.match ({
-        .ExprStmt(e) => a.lower_stmt_expr(env, e),
-        _            => st,
-    })
-}
-env_over = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt], upto: i64) Env {
-    out := env
-    stmts.loop((h, i, st) {
-        out = (i < upto).match ({ true => a.extend_env(out, st), false => out })
-    })
-    out
-}
-relower_block_tail = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt]) [Stmt] {
-    n := stmts.len
-    (n == 0).match ({
-        true  => stmts,
-        false => {
-            buf := cbuf<Stmt>(a, n)
-            envT := a.env_over(env, stmts, n - 1)
-            stmts.loop((h, i, st) {
-                buf[i] = (i == n - 1).match ({ true => a.relower_tail_stmt(envT, st), false => st })
-            })
-            buf
-        },
-    })
-}
-tag_const* = (a: MutPtr<Malloc>, ename: string_view, variant: string_view) string_view {
-    s := a.gstr_string(64)
-    s = s.gstr_append(a, ename)
-    s = s.gstr_append(a, "_")
-    s = s.gstr_append(a, variant)
-    s.gstr_finish(a)
-}
-subj_tag = (a: MutPtr<Malloc>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
-    out := a.cenode(member(subj, "tag"))
-    ptr.then({
-        out = a.cenode(arrow(subj, "tag"))
-    })
-    out
-}
-subj_payload = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: string_view, ptr: bool) Ptr<Expr> {
-    u := a.cenode(member(subj, "u"))
-    ptr.then({
-        u = a.cenode(arrow(subj, "u"))
-    })
-    a.cenode(member(u, variant))
-}
-arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
-    body := a.branch_stmts(a.arm_env(env, t, ar), ar.body)
-    out := body
-    (eq(ar.bind, "") == false).then({
-        // TYPED payload let (not bare slet): without the concrete payload type, a later light/inline
-        // inference can't recover the binding's type from the enum union access (`e.u.Num`), so a
-        // generic call on it (`println(n)`) fails to monomorphize → link error. Same fix the or_return
-        // lowering already uses (slett with subj_variant_payload). Void payload type falls back to slet.
-        out = a.cons_stmt(slett(ar.bind, env.subj_variant_payload(t, ar.variant), a.subj_payload(m.subj, ar.variant, m.ptr)), body)
-    })
-    out
-}
-cons_stmt = (a: MutPtr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
-    buf := cbuf<Stmt>(a, rest.len + 1)
-    buf[0] = head
-    rest.loop((h, i, st) {
-        buf[i + 1] = st
-    })
-    buf
-}
-// Build if/else chain over enum arms.
-lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [Stmt] {
-    out := no_stmts()
-    (i >= m.arms.len == false).then({
-        ar := m.arms[i]
-        eq(ar.variant, "_").match ({
-            true  => {
-                out = a.branch_stmts(env, ar.body)
-            },
-            false => {
-                // Keep the tag as a semantic Tag node. C folds `.tag` to its enum constant, while JS
-                // emits the variant string; baking a C-only `Enum_Variant` Var breaks the JS backend.
-                tag := a.subj_tag(a.cenode(mktag(m.ename, ar.variant)), false)
-                cond := a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), tag))
-                out = a.one_stmt(sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
-            },
-        })
-    })
-    out
-}
-lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
-    t := env.infer_expr(m.subj)
-    stmts := a.lower_match_arms(env, t, m, 0)
-    out := sexpr(a.cenode(block(stmts)))
-    (stmts.len == 1).then({
-        out = stmts[0]
-    })
-    out
-}
-// Bool/literal match in statement position: Cond -> if/else, recursing for literal chains.
-lower_cond_stmt = (a: MutPtr<Malloc>, env: Env, d: CondData) Stmt { sif(d.c, a.branch_stmts(env, d.t), a.cond_else(env, d.e)) }
-cond_else = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
-    out := a.branch_stmts(env, e)
-    load(e).match ({
-        .Cond(d) => {
-            out = a.one_stmt(a.lower_cond_stmt(env, d))
-        },
-        _        => { },
-    })
-    out
-}
-// Lower resolved statement-position expressions whose values are discarded.
-lower_stmt_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
-    out := sexpr(e)
-    load(e).match ({
-        .Match(m) => env.decls.match_lowerable(m).match ({
-            true  => {
-                out = a.lower_match_stmt(env, m)
-            },
-            false => {
-                out = sexpr(e)
-            },
-        }),
-        .Cond(d)  => {
-            // A one-armed `.match` must survive into validation so it cannot silently become an if with
-            // an invented no-op branch. `.then` and explicit two-arm matches carry oa=0 and lower normally.
-            out = (d.oa == 0).match ({ true => a.lower_cond_stmt(env, d), false => sexpr(e) })
-        },
-        _         => {
-            out = sexpr(e)
-        },
-    })
-    out
 }
 // Resolve statements, preserving expected type only for value-producing tail expressions.
 store_local_ty = (t: Ty) Ty {
@@ -2589,7 +2406,7 @@ resolve_global = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalDat
         false => dglobal(g.name, env.infer_expr(g.init), a.resolve_expr(env, g.init)),
     })
 }
-resolve_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
+resolve_decl* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
     d.match ({
         .DFunc(f)   => dfunc(a.resolve_func(decls, idx, f)),
         .DGlobal(g) => a.resolve_global(decls, idx, g),
@@ -2598,7 +2415,7 @@ resolve_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl 
 }
 // Template/lambda inlining pass.
 no_stmts* = () [Stmt] { slice(null_ptr(), 0) }
-empty_args = () [Expr] { slice(null_ptr(), 0) }
+empty_args* = () [Expr] { slice(null_ptr(), 0) }
 pidx = (params: [Param], name: string_view, found: i32, i: i32) i32 {
     (i == params.len).match ({
         true  => found,
@@ -2752,7 +2569,7 @@ idx_func* = (idx: DeclIndex, decls: [Decl], name: string_view) Func {
         ),
     })
 }
-idx_template_call = (idx: DeclIndex, decls: [Decl], name: string_view) bool { idx.idx_func(decls, name).is_generic_fn() }
+idx_template_call* = (idx: DeclIndex, decls: [Decl], name: string_view) bool { idx.idx_func(decls, name).is_generic_fn() }
 ref_pos* = (e: Ptr<Expr>) i32 {
     load(e).match ({
         .Var(v) => v.pos,
@@ -2814,7 +2631,7 @@ arg_local_name = (a: MutPtr<Malloc>, name: string_view, env: Ptr<VList>, idx: i6
 // literal's default width (i32) — the outer instantiation's binding (e.g. K=i64 from the HMap
 // receiver) silently lost, wrong monos emitted (i64 keys hashed with impl_Hash_i32_hash). A pinned
 // literal is bound to a TYPED temp local instead, so in-body uses carry the instantiated type.
-bind_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], cargs: [Expr], env: Ptr<VList>, pins: [Ty]) ArgBind {
+bind_args* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], cargs: [Expr], env: Ptr<VList>, pins: [Ty]) ArgBind {
     nf := a.cebuf(cargs.len)
     nb := 0
     cargs.loop((h, i, ce) {
@@ -2849,7 +2666,7 @@ bind_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], 
     )
 }
 // pins for a NON-generic inline (and lambda inlines): none.
-no_pins = (a: MutPtr<Malloc>, n: i64) [Ty] {
+no_pins* = (a: MutPtr<Malloc>, n: i64) [Ty] {
     buf := cbuf<Ty>(a, n)
     buf.loop((h, i, t) {
         buf[i] = tvoid()
@@ -2858,7 +2675,7 @@ no_pins = (a: MutPtr<Malloc>, n: i64) [Ty] {
 }
 // The pin for each arg of a GENERIC inline: literal-typed args whose param type mentions a tparam
 // adopt the (fully concrete) targ-substituted param type; everything else is unpinned.
-lit_pins = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Param], cargs: [Expr]) [Ty] {
+lit_pins* = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Param], cargs: [Expr]) [Ty] {
     buf := cbuf<Ty>(a, params.len)
     params.loop((h, i, p) {
         buf[i] = tvoid()
@@ -2937,7 +2754,7 @@ needs_early_lift = (stmts: [Stmt]) bool {
     found
 }
 // Concatenate two statement slices into a fresh buffer.
-cat_stmts = (a: MutPtr<Malloc>, xs: [Stmt], ys: [Stmt]) [Stmt] {
+cat_stmts* = (a: MutPtr<Malloc>, xs: [Stmt], ys: [Stmt]) [Stmt] {
     buf := cbuf<Stmt>(a, xs.len + ys.len)
     xs.loop((h, i, s) {
         buf[i] = s
@@ -2969,7 +2786,7 @@ block_cons = (a: MutPtr<Malloc>, head: Stmt, value: Ptr<Expr>) Ptr<Expr> {
 // branch's value is the branch body followed by the remaining statements (the continuation) — so a
 // `return` simply stops the sequence (its tail is dead) and never lowers to a C `return`. Only ONE
 // branch runs at a time, so duplicating the continuation into both arms is sound (no double effects).
-cps_value = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+cps_value* = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
     (stmts.len == 0).match ({
         true  => a.cenode(block(no_stmts())),
         false => {
@@ -2997,7 +2814,7 @@ cps_value = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
 }
 // One value statement inlines directly; larger bodies become block expressions. A body with a
 // non-tail return is lifted into `?:` first (early-return → exits only the inlined block, not the caller).
-blockify = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+blockify* = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
     stmts.needs_early_lift().match ({
         true  => a.cps_value(stmts),
         false => (stmts.len == 1).match ({
@@ -3022,1130 +2839,8 @@ inline_lambda* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lamx: Expr, 
         _           => a.cenode(lamx),
     })
 }
-// Generic template calls infer type args at the call site before splicing.
-// Light types are enough to unify tparams, including local Var args.
-lty_node = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.tnode(t) }
-light_sl_elem = (a: MutPtr<Malloc>, items: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty { (items.len == 0).match ({
-    true  => tvoid(),
-    false => items[0].addr().light_ty(a, env, decls, idx),
-}) }
-light_slice = (a: MutPtr<Malloc>, sd: SliceData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    sd.elem.is_void_ty().match ({
-        true  => tslice(a.lty_node(a.light_sl_elem(sd.items, env, decls, idx))),
-        false => tslice(a.lty_node(sd.elem)),
-    })
-}
-// Light call type mirrors infer_call for template-splice inference.
-// `lits` mirrors targ_of: false scans only typed (non-literal) args, true only literals — the
-// weakest binding source, consulted after the expected return type (see call_targ).
-light_one = (params: [Param], a: MutPtr<Malloc>, args: [Expr], tp: string_view, env: Ptr<VList>, decls: [Decl], idx: DeclIndex, lits: bool) Ty {
-    found := tvoid()
-    params.loop((h, i, p) {
-        found = found.is_void_ty().match ({
-            true  => (i < args.len && args[i].addr().is_lit_numeric() == lits).match ({
-                true  => p.ty.unify_ty(args[i].addr().light_ty(a, env, decls, idx), tp),
-                false => found,
-            }),
-            false => found,
-        })
-    })
-    found
-}
-light_ret_one = (ret: Ty, exp: Ty, tp: string_view) Ty { exp.is_void_ty().match ({
-    true  => tvoid(),
-    false => ret.unify_ty(exp, tp),
-}) }
-light_targ = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, tp: string_view, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    arg := f.params.light_one(a, args, tp, env, decls, idx, false)
-    arg = arg.is_void_ty().match ({ true => f.ret.light_ret_one(exp, tp), false => arg })
-    arg.is_void_ty().match ({
-        true  => f.params.light_one(a, args, tp, env, decls, idx, true),
-        false => arg,
-    })
-}
-light_targs = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) [Ty] {
-    buf := cbuf<Ty>(a, f.tparams.len)
-    f.tparams.loop((h, i, tp) {
-        buf[i] = f.light_targ(a, args, exp, tp.name, env, decls, idx)
-    })
-    a.deep_targs(f.tparams, buf, f.params, args, env, decls, idx)
-}
-light_call_ty = (decls: [Decl], idx: DeclIndex, a: MutPtr<Malloc>, c: CallData, env: Ptr<VList>) Ty {
-    // conversion/size intrinsics (not in the decl index) mirror infer_call, so e.g. `to_i64(0)`
-    // as a generic-call arg PINS that tparam instead of light-typing to void (need-annotation).
-    eq(c.fn, "cstr").match ({
-        true  => tstring_cstr(),
-        false => eq(c.fn, "to_i32").match ({
-            true  => ti32(),
-            false => eq(c.fn, "to_i64").match ({
-                true  => ti64(),
-                false => eq(c.fn, "to_u8").match ({
-                    true  => tu8(),
-                    false => eq(c.fn, "to_f64").match ({
-                        true  => tf64(),
-                        false => eq(c.fn, "sizeof").match ({
-                            true  => ti64(),
-                            false => {
-                                f := idx.idx_func(decls, c.fn)
-                                (f.tparams.len > 0).match ({
-                                    true  => a.subst_ty_in(f.tparams, f.light_targs(a, c.args, tvoid(), env, decls, idx), f.ret),
-                                    false => f.ret,
-                                })
-                            },
-                        }),
-                    }),
-                }),
-            }),
-        }),
-    })
-}
-light_last_stmt_ty = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    stmts[stmts.len - 1].match ({
-        .ExprStmt(e) => e.light_ty(a, env, decls, idx),
-        .Return(r)   => r.light_ty(a, env, decls, idx),
-        _            => tvoid(),
-    })
-}
-light_extend = (a: MutPtr<Malloc>, env: Ptr<VList>, st: Stmt, decls: [Decl], idx: DeclIndex) Ptr<VList> {
-    st.match ({
-        .Let(l) => a.vcons(l.name, l.ty.is_void_ty().match ({
-            true  => l.value.light_ty(a, env, decls, idx),
-            false => l.ty,
-        }), env),
-        _       => env,
-    })
-}
-light_block_ty_from = (a: MutPtr<Malloc>, stmts: [Stmt], env: Ptr<VList>, decls: [Decl], idx: DeclIndex, i: i32) Ty {
-    (i >= stmts.len).match ({
-        true  => tvoid(),
-        false => (i == stmts.len - 1).match ({
-            true  => a.light_last_stmt_ty(stmts, env, decls, idx),
-            false => a.light_block_ty_from(stmts, a.light_extend(env, stmts[i], decls, idx), decls, idx, i + 1),
-        }),
-    })
-}
-// mirrors block_ty: a diverging value block (trailing explicit `return`) has no value type.
-light_block_ty = (a: MutPtr<Malloc>, b: BlockData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    b.stmts.stmts_diverge().match ({
-        true  => tvoid(),
-        false => a.light_block_ty_from(b.stmts, env, decls, idx, 0),
-    })
-}
-light_member_ty = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, obj: Ty, field: string_view) Ty {
-    obj.ty_under_ptr().match ({
-        .Generic(g) => idx.idx_genstruct_field(a, decls, g.name, field, g.args),
-        .Slice(e)   => a.slice_member(field),
-        _           => idx.idx_struct_field(decls, obj.enum_name(), field),
-    })
-}
-light_ty* = (e: Ptr<Expr>, a: MutPtr<Malloc>, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    load(e).match ({
-        .Int(n)        => ti32(),
-        .Block(b)      => a.light_block_ty(b, env, decls, idx),
-        .Byte(n)       => tu8(),
-        .FloatLit(ft)  => tf64(),
-        .StrLit(s)     => tstring_literal(),
-        .MakeStruct(m) => (m.targs.len > 0).match ({
-            true  => tgeneric(m.ty, m.targs, m.mty),
-            false => tnamed(m.ty),
-        }),
-        .MakeEnum(mk)  => (mk.targs.len > 0).match ({
-            true  => tgeneric(mk.ty, mk.targs, mk.mty),
-            false => tnamed(mk.ty),
-        }),
-        .Tag(t)        => (t.targs.len > 0).match ({
-            true  => tgeneric(t.ty, t.targs, t.mty),
-            false => tnamed(t.ty),
-        }),
-        .SliceLit(sd)  => a.light_slice(sd, env, decls, idx),
-        .Var(v)        => env.lookup_var(v.name),
-        .Call(c)       => light_call_ty(decls, idx, a, c, env),
-        .Member(m)     => a.light_member_ty(decls, idx, m.obj.light_ty(a, env, decls, idx), m.field),
-        .Bin(b)        => bin_ty(b.op, b.lhs.light_ty(a, env, decls, idx)),
-        .Cond(d)       => d.t.light_ty(a, env, decls, idx).common_ty(d.e.light_ty(a, env, decls, idx)),
-        .Match(m)      => a.light_match_ty(m, env, decls, idx),
-        _              => tvoid(),
-    })
-}
-// Forward inference through method chains: inlining a generic receiver leaves a Block whose tail is
-// a Match (`good.map_err(f)` → `({ … r.match({…}) })`), so the NEXT call in the chain
-// (`.expect(msg)`) must be able to light-type it or its tparams silently default to void. Fold the
-// same safe join as full inference; taking the first arm makes string provenance depend on arm order.
-light_match_ty = (a: MutPtr<Malloc>, m: MatchData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    st := m.subj.light_ty(a, env, decls, idx)
-    found := tvoid()
-    m.arms.loop((h, i, ar) {
-        found = found.common_ty(ar.body.light_ty(a, a.xform_arm_env(decls, idx, st, m.ename, ar, env), decls, idx))
-    })
-    found
-}
-// Unify a param type against an arg type to infer one tparam.
-unify_ty = (pty: Ty, aty: Ty, tp: string_view) Ty {
-    pty.match ({
-        .Named(n)   => eq(n, tp).match ({ true => aty, false => tvoid() }),
-        .Generic(g) => aty.match ({
-            .Generic(ga) => g.args.unify_args(ga.args, tp),
-            _            => tvoid(),
-        }),
-        .Ptr(pd)    => aty.match ({
-            .Ptr(pa) => load(pd.pointee).unify_ty(load(pa.pointee), tp),
-            _        => tvoid(),
-        }),
-        .Slice(e)   => aty.match ({
-            .Slice(ea) => load(e).unify_ty(load(ea), tp),
-            _          => tvoid(),
-        }),
-        _           => tvoid(),
-    })
-}
-unify_args = (pargs: [Ty], aargs: [Ty], tp: string_view) Ty {
-    found := tvoid()
-    pargs.loop((h, i, pa) {
-        found = found.is_void_ty().match ({
-            true  => (i < aargs.len).match ({ true => pa.unify_ty(aargs[i], tp), false => found }),
-            false => found,
-        })
-    })
-    found
-}
-// The declared payload type of variant `vn`, scanning every enum decl (concrete or generic).
-variant_payload_ty = (decls: [Decl], vn: string_view) Ty {
-    found := tvoid()
-    decls.loop((h, i, d) {
-        found = found.is_void_ty().match ({
-            true  => d.match ({
-                .DEnum(ed)   => ed.enum_variant_payload(vn),
-                .DGenEnum(g) => g.gen_variant_payload(vn),
-                _            => tvoid(),
-            }),
-            false => found,
-        })
-    })
-    found
-}
-enum_variant_payload = (ed: EnumDecl, vn: string_view) Ty {
-    found := tvoid()
-    ed.variants.loop((h, i, v) {
-        found = eq(v.name, vn).match ({ true => v.payload, false => found })
-    })
-    found
-}
-// Infer a lambda parameter's concrete type from a `.Variant(param)` constructor in the body: the
-// variant declares the payload type (e.g. `Get(ReplyRef<i32>)`), so the param `(reply){...}` that is
-// passed straight into `.Get(reply)` is ReplyRef<i32>. This lets a generic FnT param `(ReplyRef<T>) R`
-// recover T even with no return to flow it from — the actor ask/request inline-closure reply handler.
-lam_param_payload = (decls: [Decl], body: [Stmt], pname: string_view) Ty {
-    found := tvoid()
-    body.loop((h, i, st) {
-        found = found.is_void_ty().match ({ true => decls.lpp_stmt(st, pname), false => found })
-    })
-    found
-}
-lpp_stmt = (decls: [Decl], st: Stmt, pname: string_view) Ty {
-    st.match ({
-        .ExprStmt(e) => decls.lpp_expr(e, pname),
-        .Return(r)   => decls.lpp_expr(r, pname),
-        .Let(l)      => decls.lpp_expr(l.value, pname),
-        .Assign(x)   => decls.lpp_expr(x.value, pname),
-        _            => tvoid(),
-    })
-}
-lpp_expr = (decls: [Decl], e: Ptr<Expr>, pname: string_view) Ty {
-    load(e).match ({
-        .MakeEnum(mk)   => decls.lpp_payload(mk.variant, mk.payload, pname),
-        .Call(c)        => decls.lpp_args(c.args, pname),
-        .MethodCall(mc) => decls.lpp_mcall(mc, pname),
-        .Block(b)       => decls.lam_param_payload(b.stmts, pname),
-        _               => tvoid(),
-    })
-}
-lpp_payload = (decls: [Decl], variant: string_view, payload: Ptr<Expr>, pname: string_view) Ty {
-    load(payload).match ({
-        .Var(v) => eq(v.name, pname).match ({
-            true  => decls.variant_payload_ty(variant),
-            false => tvoid(),
-        }),
-        _       => tvoid(),
-    })
-}
-lpp_args = (decls: [Decl], args: [Expr], pname: string_view) Ty {
-    found := tvoid()
-    args.loop((h, i, ar) {
-        found = found.is_void_ty().match ({
-            true  => decls.lpp_expr(ar.addr(), pname),
-            false => found,
-        })
-    })
-    found
-}
-lpp_mcall = (decls: [Decl], mc: MethodCallData, pname: string_view) Ty {
-    r := decls.lpp_expr(mc.recv, pname)
-    r.is_void_ty().match ({ true => decls.lpp_args(mc.args, pname), false => r })
-}
-// Unify a generic FnT param `(ReplyRef<T>) R` against a lambda argument by inferring each lambda
-// param's concrete type from its body (the `.Variant(param)` site that declares it).
-lam_unify = (decls: [Decl], fpty: Ty, lm: LambdaData, tp: string_view) Ty {
-    fpty.match ({
-        .FnT(ft) => {
-            found := tvoid()
-            ft.params.loop((h, i, pt) {
-                found = found.is_void_ty().match ({
-                    true  => (i < lm.params.len).match ({
-                        true  => pt.unify_ty(decls.lam_param_payload(lm.body, lm.params[i].name), tp),
-                        false => found,
-                    }),
-                    false => found,
-                })
-            })
-            // A tparam appearing ONLY in the closure's RETURN position `(T) U` binds from the lambda's
-            // DECLARED return type (else it would default to void -> a `[void]` result, a silent miscompile).
-            found.is_void_ty().match ({
-                true  => lm.ret.is_void_ty().match ({
-                    true  => found,
-                    false => load(ft.ret).unify_ty(lm.ret, tp),
-                }),
-                false => found,
-            })
-        },
-        _        => tvoid(),
-    })
-}
-// `lits` mirrors targ_of: numeric and string literal args are the weakest binding source.
-weak_targ_light = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, pty: Ty, arg: Ptr<Expr>, tp: string_view, env: Ptr<VList>) bool { arg.is_weak_targ_arg() || pty.is_direct_tparam(tp) && arg.light_ty(a, env, decls, idx).is_str_t() }
-infer_one = (params: [Param], a: MutPtr<Malloc>, cargs: [Expr], tp: string_view, env: Ptr<VList>, decls: [Decl], idx: DeclIndex, lits: bool) Ty {
-    found := tvoid()
-    params.loop((h, i, p) {
-        found = found.is_void_ty().match ({
-            true  => (i < cargs.len && a.weak_targ_light(decls, idx, p.ty, cargs[i].addr(), tp, env) == lits).match ({
-                true  => a.unify_carg(decls, idx, p.ty, cargs[i].addr(), tp, env),
-                false => found,
-            }),
-            false => found,
-        })
-    })
-    found
-}
-// A lambda argument carries no inferrable value type (light_ty -> void); recover a tparam in its FnT
-// param position from the lambda body instead. Other args unify against their light type as before.
-unify_carg = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, pty: Ty, carg: Ptr<Expr>, tp: string_view, env: Ptr<VList>) Ty {
-    load(carg).match ({
-        .Lambda(lm) => decls.lam_unify(pty, lm, tp),
-        _           => pty.unify_ty(carg.light_ty(a, env, decls, idx), tp),
-    })
-}
-infer_one_exp = (params: [Param], ret: Ty, exp: Ty, a: MutPtr<Malloc>, cargs: [Expr], tp: string_view, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    arg := params.infer_one(a, cargs, tp, env, decls, idx, false)
-    arg = arg.is_void_ty().match ({ true => ret.light_ret_one(exp, tp), false => arg })
-    arg.is_void_ty().match ({
-        true  => params.infer_one(a, cargs, tp, env, decls, idx, true),
-        false => arg,
-    })
-}
-// ── deep tparam fallbacks: two LAST-RESORT inference sources for a tparam that neither the value
-//    args nor the expected type could bind (it would otherwise silently default to void → a
-//    `Result<T,void>` mono whose union elides the member the ctor still writes → uncompilable C).
-//    They run as a POST-pass over the full targ buffer so each can consult the tparams that DID bind.
-// does `t` mention the type-param name `n` anywhere?
-ty_mentions = (t: Ty, n: string_view) bool {
-    t.match ({
-        .Named(x)   => eq(x, n),
-        .Generic(g) => g.args.tys_mention(n),
-        .Ptr(pd)    => load(pd.pointee).ty_mentions(n),
-        .Slice(e)   => load(e).ty_mentions(n),
-        .FnT(ft)    => ft.params.tys_mention(n) || load(ft.ret).ty_mentions(n),
-        _           => false,
-    })
-}
-tys_mention = (ts: [Ty], n: string_view) bool {
-    f := false
-    ts.loop((h, i, t) {
-        f = f || t.ty_mentions(n)
-    })
-    f
-}
-ty_mentions_any = (t: Ty, tparams: [Param]) bool {
-    f := false
-    tparams.loop((h, i, tp) {
-        f = f || t.ty_mentions(tp.name)
-    })
-    f
-}
-// FALLBACK 1 — closure-return inference: a tparam that appears in an FnT param's RETURN position
-// (`on_err: (E) F`) whose argument is an UNANNOTATED lambda binds from the lambda BODY's type: bind
-// the lambda params to their (already-inferred-targ-substituted) declared types, light-type the body,
-// and unify. Bails (void) if the body's type still mentions any tparam (nothing concrete was learned).
-lam_body_targ = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Param], cargs: [Expr], tp: string_view, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    found := tvoid()
-    params.loop((h, i, p) {
-        found = found.is_void_ty().match ({
-            true  => (i < cargs.len).match ({
-                true  => a.lam_body_one(tparams, targs, p.ty, cargs[i].addr(), tp, env, decls, idx),
-                false => found,
-            }),
-            false => found,
-        })
-    })
-    found
-}
-lam_body_one = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], pty: Ty, carg: Ptr<Expr>, tp: string_view, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    pty.match ({
-        .FnT(ft) => load(carg).match ({
-            .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({
-                true  => {
-                    e2 := env
-                    lm.params.loop((h, k, lp) {
-                        e2 = a.vcons(lp.name, (k < ft.params.len).match ({
-                            true  => a.subst_ty_in(tparams, targs, ft.params[k]),
-                            false => tvoid(),
-                        }), e2)
-                    })
-                    bty := a.light_block_ty_from(lm.body, e2, decls, idx, 0)
-                    (bty.is_void_ty() || bty.ty_mentions_any(tparams)).match ({
-                        true  => tvoid(),
-                        false => load(ft.ret).unify_ty(bty, tp),
-                    })
-                },
-                false => tvoid(),
-            }),
-            _           => tvoid(),
-        }),
-        _        => tvoid(),
-    })
-}
-// FALLBACK 2 — trait-impl inference: a tparam that only names a generic TRAIT's type param
-// (`spawn<A, M, ActorT>` returning `ActorHandle<M, ActorT>`, where the Receiver<M> trait ties M to
-// the actor) binds from a CO-TARG's impl of that trait: ActorT bound Counter, and
-// `Counter.impl(Receiver<Msg>)` solves M=Msg by unifying the trait's method declarations against the
-// impl's concrete method signatures (the parser drops the written `<Msg>`, so the methods are the
-// only place the instantiation survives). Solves only traits whose tparam NAME matches `tp`.
-impl_trait_targ = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tparams: [Param], targs: [Ty], tp: string_view) Ty {
-    found := tvoid()
-    tparams.loop((h, i, x) {
-        found = found.is_void_ty().match ({
-            true  => a.impl_trait_targ_of(decls, idx, targs[i].dispatch_recv_name(), tp),
-            false => found,
-        })
-    })
-    found
-}
-impl_trait_targ_of = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tyname: string_view, tp: string_view) Ty {
-    is_empty(tyname).match ({
-        true  => tvoid(),
-        false => {
-            found := tvoid()
-            decls.loop((h, i, d) {
-                found = found.is_void_ty().match ({
-                    true  => d.match ({
-                        .DImpl(im) => eq(im.ty, tyname).match ({
-                            true  => a.impl_trait_solve(decls, idx, im, tp),
-                            false => tvoid(),
-                        }),
-                        _          => tvoid(),
-                    }),
-                    false => found,
-                })
-            })
-            found
-        },
-    })
-}
-impl_trait_solve = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, im: ImplData, tp: string_view) Ty {
-    g := idx.idx_genstruct(decls, im.trname)
-    (is_empty(g.name) || g.tparams.has_tparam(tp) == false).match ({
-        true  => tvoid(),
-        false => {
-            found := tvoid()
-            g.fields.loop((h, i, f) {
-                found = found.is_void_ty().match ({
-                    true  => a.impl_method_solve(decls, idx, im, f, tp),
-                    false => found,
-                })
-            })
-            found
-        },
-    })
-}
-impl_method_solve = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, im: ImplData, f: Field, tp: string_view) Ty {
-    f.ty.match ({
-        .FnT(ft) => {
-            mf := idx.idx_func(decls, a.impl_cname_in(im.trname, im.ty, f.name))
-            is_empty(mf.name).match ({
-                true  => tvoid(),
-                false => {
-                    found := load(ft.ret).unify_ty(mf.ret, tp)
-                    ft.params.loop((h, j, pt) {
-                        found = found.is_void_ty().match ({
-                            true  => (j < mf.params.len).match ({
-                                true  => pt.unify_ty(mf.params[j].ty, tp),
-                                false => found,
-                            }),
-                            false => found,
-                        })
-                    })
-                    found
-                },
-            })
-        },
-        _        => tvoid(),
-    })
-}
-// The post-pass driver: fill any still-void targ from fallback 1 then fallback 2, in tparam order
-// (so a later fallback sees everything earlier ones bound).
-deep_targs = (a: MutPtr<Malloc>, tparams: [Param], buf: [Ty], params: [Param], cargs: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) [Ty] {
-    tparams.loop((h, i, tp) {
-        buf[i] = buf[i].is_void_ty().match ({
-            true  => a.lam_body_targ(tparams, buf, params, cargs, tp.name, env, decls, idx),
-            false => buf[i],
-        })
-    })
-    tparams.loop((h, i, tp) {
-        buf[i] = buf[i].is_void_ty().match ({
-            true  => a.impl_trait_targ(decls, idx, tparams, buf, tp.name),
-            false => buf[i],
-        })
-    })
-    buf
-}
-// etargs = explicit turbofish type args: a present one PINS the i-th tparam (overriding inference),
-// an absent one (i past etargs) is inferred from value args / expected type as before.
-infer_targs = (a: MutPtr<Malloc>, tparams: [Param], params: [Param], ret: Ty, exp: Ty, cargs: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex, etargs: [Ty]) [Ty] {
-    buf := cbuf<Ty>(a, tparams.len)
-    tparams.loop((h, i, tp) {
-        buf[i] = (i < etargs.len).match ({
-            true  => etargs[i],
-            false => params.infer_one_exp(ret, exp, a, cargs, tp.name, env, decls, idx),
-        })
-    })
-    a.deep_targs(tparams, buf, params, cargs, env, decls, idx)
-}
-// A generic template's body is inlined INTO its call site, but its AST nodes keep the LIBRARY byte
-// offsets they were parsed at — so a type error uncovered while checking the instantiated body would
-// point deep inside std (e.g. `fmt.zen:108`), a place the user never wrote. `cs` is the call-site
-// byte offset threaded from the call being inlined; `cs_or` retargets every rebuilt template node to
-// it so the diagnostic lands on the user's call (census #59b). cs = 0 (a synthesized call, or the
-// recursive-generic mono path) means "keep the node's own position" — nothing is retargeted, so the
-// emitted C and every non-inlined diagnostic are byte-for-byte unchanged. (`cs_or`, not the count
-// layer's `pos_or`: those share a flat C name and must stay distinct.)
-cs_or* = (cs: i32, orig: i32) i32 { (cs == 0).match ({ true => orig, false => cs }) }
-// Substitute tparams in type-bearing expression/statement nodes.
-is_empty_named = (t: Ty) bool {
-    t.match ({
-        .Named(n) => eq(n, ""),
-        _         => false,
-    })
-}
-// Break recursive-generic inlining by noticing an in-progress template in the env.
-is_inlining = (v: Ptr<VList>, name: string_view) bool {
-    v.match ({
-        .VNil     => false,
-        .VCons(c) => (eq(c.name, name) && c.ty.is_empty_named()).match ({
-            true  => true,
-            false => c.tail.is_inlining(name),
-        }),
-    })
-}
-inline_template = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: string_view, cargs: [Expr], env: Ptr<VList>, exp: Ty, etargs: [Ty], cs: i32) Ptr<Expr> {
-    tf := idx.idx_func(decls, name)
-    ienv := a.vcons(name, tnamed(""), env)
-    // A function's body MUST produce its DECLARED return type, so that (targ-substituted) return is the
-    // authoritative expected type for the body's tail — NOT the call-site `exp`. This matters when an
-    // inlined fn is called WITHOUT expected context (e.g. `inner(..).match(..)`, the call as a match
-    // subject): a generic constructor in inner's tail still binds T/E from inner's own `R<str,IoError>`
-    // return. The call-site `exp` is used only to infer unconstrained tparams (infer_targs).
-    // bind_fnret: the inlined body's OWN return type shadows the caller's for any `return` inside it
-    // (a template's non-tail returns are lifted by blockify/cps_value, but their operands still infer
-    // against the template's declared return, targ-substituted).
-    (tf.tparams.len > 0).match ({
-        true  => {
-            targs := a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx, etargs)
-            rsub := a.subst_ty_in(tf.tparams, targs, tf.ret)
-            ab := a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, rsub), a.lit_pins(tf.tparams, targs, tf.params, cargs))
-            a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, a.subst_body(cs, tf.tparams, targs, tf.body), tf.params, ab.fargs, ab.env, rsub)))
-        },
-        false => {
-            ab := a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, tf.ret), a.no_pins(tf.params.len))
-            a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, a.subst_body(cs, empty_params(), no_tys(), tf.body), tf.params, ab.fargs, ab.env, tf.ret)))
-        },
-    })
-}
-// A residual no-inline generic call loses its splice context once the enclosing body is inlined
-// (the template's declared return, the let's declared type). PIN the targs inferred HERE into the
-// call as explicit turbofish targs, so the later resolve/discovery mangle the SAME instance — e.g.
-// a tail `ok(x)` spliced out of a `Result<i32, IoError>`-returning template keeps E=IoError instead
-// of re-inferring E=void once the context is gone. Pin only a FULLY-inferred list: a void slot
-// (light inference bails on tparam receivers inside template bodies) must stay open for the
-// instance-context inference, and a pinned void would win over it.
-all_concrete_targs = (ts: [Ty]) bool {
-    con := true
-    ts.loop((h, i, t) {
-        con = t.is_void_ty().match ({ true => false, false => con })
-    })
-    con
-}
-// ── DIAGNOSTICS fallback: splice a template whose instantiation would MISS a trait impl ─────────
-// A template body calling a TRAIT method on a directly tparam-typed param (`println<T>`'s
-// `x.fmt_println()`) instantiated at a targ type with NO impl would surface the miss deep inside
-// the template's own source (against abstract `T`). The OLD splice path put the trait-method call
-// at the CALL SITE with the concrete receiver — exactly what the call-site trait-bound diagnostic
-// (#409) keys on. So: detect the miss (conservatively — direct tparam param receivers, concrete
-// struct targs only) and route that call back through inline_template.
-tmiss_tp_of = (ps: [Param], tparams: [Param], e: Ptr<Expr>) string_view {
-    load(e).match ({
-        .Var(v) => {
-            i := ps.param_index(v.name)
-            (i >= 0).match ({
-                true  => ps[i].ty.match ({
-                    .Named(n) => tparams.tmiss_has_tp(n).match ({ true => n, false => "" }),
-                    _         => "",
-                }),
-                false => "",
-            })
-        },
-        _       => "",
-    })
-}
-tmiss_has_tp = (tparams: [Param], n: string_view) bool {
-    f := false
-    tparams.loop((h, i, tp) {
-        f = eq(tp.name, n).match ({ true => true, false => f })
-    })
-    f
-}
-tmiss_targ_for = (tparams: [Param], targs: [Ty], n: string_view) Ty {
-    t := tvoid()
-    tparams.loop((h, i, tp) {
-        t = (eq(tp.name, n) && i < targs.len).match ({ true => targs[i], false => t })
-    })
-    t
-}
-// is `fn` trait-flavored — provided by some impl, defaulted by a trait, or declared by a trait
-// (a struct whose same-named field is an FnT signature)? One decl scan, run only on candidates.
-tmiss_traitish = (decls: [Decl], fn: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DImpl(im)         => im.methods.tmiss_has_tp(fn).match ({
-                true  => true,
-                false => found,
-            }),
-            .DTraitDefault(td) => eq(td.fn.name, fn).match ({ true => true, false => found }),
-            .DStruct(sd)       => found.match ({
-                true  => true,
-                false => sd.fields.tmiss_declares(fn),
-            }),
-            _                  => found,
-        })
-    })
-    found
-}
-tmiss_declares = (fields: [Field], m: string_view) bool {
-    found := false
-    fields.loop((h, i, f) {
-        found = (eq(f.name, m) && f.ty.is_fnt()).match ({ true => true, false => found })
-    })
-    found
-}
-tmiss_call = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], c: CallData) bool {
-    (c.args.len > 0).match ({
-        true  => {
-            tpn := tf.params.tmiss_tp_of(tf.tparams, c.args[0].addr())
-            is_empty(tpn).match ({
-                true  => false,
-                false => {
-                    tyname := tf.tparams.tmiss_targ_for(targs, tpn).dispatch_recv_name()
-                    (is_empty(tyname) || idx.struct_idx.get(tyname, 0 - 1) < 0).match ({
-                        true  => false,
-                        false => eq(a.dispatch_recv(decls, idx, c.fn, tyname), c.fn).match ({
-                            true  => decls.tmiss_traitish(c.fn),
-                            false => false,
-                        }),
-                    })
-                },
-            })
-        },
-        false => false,
-    })
-}
-tmiss_es = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], xs: [Expr]) bool {
-    f := false
-    xs.loop((h, i, x) {
-        f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, x.addr()) })
-    })
-    f
-}
-tmiss_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], arms: [ArmData]) bool {
-    f := false
-    arms.loop((h, i, ar) {
-        f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, ar.body) })
-    })
-    f
-}
-tmiss_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], inits: [FieldInit]) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, fi.value) })
-    })
-    f
-}
-tmiss_e = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], e: Ptr<Expr>) bool {
-    load(e).match ({
-        .Call(c)       => a.tmiss_call(decls, idx, tf, targs, c) || a.tmiss_es(decls, idx, tf, targs, c.args),
-        .Bin(b)        => a.tmiss_e(decls, idx, tf, targs, b.lhs) || a.tmiss_e(decls, idx, tf, targs, b.rhs),
-        .Cond(d)       => a.tmiss_e(decls, idx, tf, targs, d.c) || a.tmiss_e(decls, idx, tf, targs, d.t) || a.tmiss_e(decls, idx, tf, targs, d.e),
-        .Member(m)     => a.tmiss_e(decls, idx, tf, targs, m.obj),
-        .Arrow(ar)     => a.tmiss_e(decls, idx, tf, targs, ar.obj),
-        .MakeEnum(mk)  => a.tmiss_e(decls, idx, tf, targs, mk.payload),
-        .MakeStruct(s) => a.tmiss_inits(decls, idx, tf, targs, s.inits),
-        .Match(m)      => a.tmiss_e(decls, idx, tf, targs, m.subj) || a.tmiss_arms(decls, idx, tf, targs, m.arms),
-        .Index(ix)     => a.tmiss_e(decls, idx, tf, targs, ix.seq) || a.tmiss_e(decls, idx, tf, targs, ix.idx),
-        .SliceLit(sd)  => a.tmiss_es(decls, idx, tf, targs, sd.items),
-        .Loop(l)       => a.tmiss_e(decls, idx, tf, targs, l.seq) || a.tmiss_body(decls, idx, tf, targs, l.body),
-        .Block(bl)     => a.tmiss_body(decls, idx, tf, targs, bl.stmts),
-        .Lambda(la)    => a.tmiss_body(decls, idx, tf, targs, la.body),
-        _              => false,
-    })
-}
-tmiss_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], st: Stmt) bool {
-    st.match ({
-        .Let(l)      => a.tmiss_e(decls, idx, tf, targs, l.value),
-        .Assign(x)   => a.tmiss_e(decls, idx, tf, targs, x.target) || a.tmiss_e(decls, idx, tf, targs, x.value),
-        .Return(r)   => a.tmiss_e(decls, idx, tf, targs, r),
-        .ExprStmt(e) => a.tmiss_e(decls, idx, tf, targs, e),
-        .If(f)       => a.tmiss_e(decls, idx, tf, targs, f.c) || a.tmiss_body(decls, idx, tf, targs, f.then) || a.tmiss_body(decls, idx, tf, targs, f.els),
-        .While(w)    => a.tmiss_e(decls, idx, tf, targs, w.c) || a.tmiss_body(decls, idx, tf, targs, w.body),
-        .IndexSet(x) => a.tmiss_e(decls, idx, tf, targs, x.seq) || a.tmiss_e(decls, idx, tf, targs, x.idx) || a.tmiss_e(decls, idx, tf, targs, x.value),
-    })
-}
-tmiss_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], body: [Stmt]) bool {
-    f := false
-    body.loop((h, i, st) {
-        f = f.match ({ true => true, false => a.tmiss_stmt(decls, idx, tf, targs, st) })
-    })
-    f
-}
-pin_targs = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty, may_splice: bool) Ptr<Expr> {
-    tf := idx.idx_func(decls, c.fn)
-    (tf.tparams.len > 0 && tf.params.len == cargs.len).match ({
-        true  => {
-            pt := a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx, c.targs)
-            (may_splice && a.tmiss_body(decls, idx, tf, pt, tf.body)).match ({
-                true  => a.inline_template(decls, idx, c.fn, cargs, env, exp, c.targs, c.pos),
-                false => pt.all_concrete_targs().match ({
-                    true  => a.cenode(call_full(c.fn, cargs, pt, c.pos, c.raw)),
-                    false => a.recall(c, c.fn, cargs),
-                }),
-            })
-        },
-        false => a.recall(c, c.fn, cargs),
-    })
-}
-maybe_template* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
-    idx.idx_template_call(decls, c.fn).match ({
-        true  => (env.is_inlining(c.fn) || idx.idx_func(decls, c.fn).no_inline_gen_f()).match ({
-            true  => a.pin_targs(decls, idx, c, cargs, env, exp, env.is_inlining(c.fn) == false),
-            false => (idx.idx_func(decls, c.fn).params.len == cargs.len).match ({
-                true  => a.inline_template(decls, idx, c.fn, cargs, env, exp, c.targs, c.pos),
-                false => a.recall(c, c.fn, cargs),
-            }),
-        }),
-        false => a.recall(c, c.fn, cargs),
-    })
-}
-// A recursive generic fn cannot be inlined (the splice never terminates); leave the call as a
-// bare call to the template name. compiler.check's mono_rec emits one concrete C instance per
-// (template, concrete-targs) and resolve_call rewrites the call to it. (is_inlining is the same
-// recursion-break, but a recursive generic must NEVER splice even on its first reach.)
-inline_decl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
-    d.match ({
-        .DFunc(f) => dfunc(Func(
-            name: f.name,
-            params: f.params,
-            ret: f.ret,
-            tparams: f.tparams,
-            body: a.xform_body(decls, idx, f.body, empty_params(), empty_args(), a.bind_fnret(a.params_env(f.params), f.ret), f.ret),
-            pos: f.pos,
-        )),
-        _         => d,
-    })
-}
 // Trait default methods are materialized for impls that omit them.
 pbuf* = (a: MutPtr<Malloc>, n: i64) [Param] { slice(a.acquire(n * sizeof(Param) + sizeof(Param)), n) }
-tybuf1 = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
-self_param = (a: MutPtr<Malloc>) [Param] {
-    buf := a.pbuf(1)
-    buf[0] = param("Self", tvoid())
-    buf
-}
-self_arg = (a: MutPtr<Malloc>, tyname: string_view) [Ty] {
-    buf := a.tybuf1()
-    buf[0] = tnamed(tyname)
-    buf
-}
-// Specialize default Func to a concrete impl type.
-default_for_type = (a: MutPtr<Malloc>, td: TraitDefData, tyname: string_view) Func {
-    sp := a.self_param()
-    ag := a.self_arg(tyname)
-    ps := a.pbuf(td.fn.params.len)
-    td.fn.params.loop((h, i, p) {
-        ps[i] = param(p.name, a.subst_ty_in(sp, ag, p.ty))
-    })
-    Func(
-        name: a.impl_cname_in(td.trname, tyname, td.fn.name),
-        params: ps,
-        ret: a.subst_ty_in(sp, ag, td.fn.ret),
-        tparams: td.fn.tparams,
-        body: td.fn.body,
-    )
-}
-param_names_have = (names: [Param], m: string_view) bool {
-    found := false
-    names.loop((h, i, p) {
-        found = eq(p.name, m).match ({ true => true, false => found })
-    })
-    found
-}
-// Does this impl already provide method m?
-def_provided = (decls: [Decl], tyname: string_view, trname: string_view, m: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DImpl(im) => (eq(im.ty, tyname) && eq(im.trname, trname)).match ({
-                true  => im.methods.param_names_have(m).match ({ true => true, false => found }),
-                false => found,
-            }),
-            _          => found,
-        })
-    })
-    found
-}
-default_expansion_count = (decls: [Decl]) i64 {
-    n := 0
-    decls.loop((h, i, d) {
-        d.match ({
-            .DTraitDefault(td) => decls.loop((h2, j, e) {
-                e.match ({
-                    .DImpl(im) => (eq(im.trname, td.trname) && decls.def_provided(im.ty, td.trname, td.fn.name) == false).then({
-                        n = n + 1
-                    }),
-                    _          => { },
-                })
-            }),
-            _                  => { },
-        })
-    })
-    n
-}
-emit_defaults_for = (a: MutPtr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
-    k := j
-    decls.loop((h, i, d) {
-        d.match ({
-            .DImpl(im) => (eq(im.trname, td.trname) && decls.def_provided(im.ty, td.trname, td.fn.name) == false).then({
-                buf[k] = dfunc(a.default_for_type(td, im.ty))
-                k = k + 1
-            }),
-            _          => { },
-        })
-    })
-    k
-}
-expand_defaults = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
-    extra := decls.default_expansion_count()
-    (extra == 0).match ({
-        true  => decls,
-        false => {
-            buf := cbuf<Decl>(a, decls.len + extra)
-            decls.loop((h, i, d) {
-                buf[i] = d
-            })
-            k := decls.len
-            decls.loop((h, i, d) {
-                d.match ({
-                    .DTraitDefault(td) => {
-                        k = a.emit_defaults_for(decls, td, buf, k)
-                    },
-                    _                  => { },
-                })
-            })
-            buf
-        },
-    })
-}
-// Resolve module: defaults, resolve, inline templates, then re-resolve concrete inline residue.
-// Lambdas splice bodies back into their caller, so that re-resolve can expose more template calls
-// such as captured generic receiver methods; run one more inline/resolve pass for that residue.
-// ── DESUGAR: faithful MethodCall -> flat Call (UFCS lowering) ───────────────────────────────
-// parse_module keeps `recv.method(args)` as a faithful MethodCall (so the formatter sees the surface
-// UFCS form). This pass — run at the very START of resolve_module, before any other pass — rewrites each
-// MethodCall back into the EXACT flat `Call(fn: method, args: [recv] ++ args, pos: method-pos, raw: false)`
-// the old flattening parser produced, so the resolve/inline/genc pipeline downstream is byte-for-byte
-// unchanged. The walk is FUNCTIONAL: `dmc_expr_val` returns the (possibly new) node, and each parent is
-// rebuilt with its lowered children. Reading an AST node through its read-only `Ptr<Expr>` slot and
-// reconstructing it (rather than storing through that slot) keeps the rewriter sound under pointer-kind
-// checking — a read-only `Ptr` is never silently treated as a writable `MutPtr` (the R1 rule). Mutable
-// SLICE storage (a [Stmt]/[Expr]/[FieldInit]/[ArmData] element, reached via `.addr()`) is updated in place.
-desugar_method_calls* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
-    decls.loop((h, i, d) {
-        store(decls[i].addr(), a.dmc_decl(d))
-    })
-    decls
-}
-dmc_decl = (a: MutPtr<Malloc>, d: Decl) Decl {
-    d.match ({
-        .DFunc(f)          => {
-            a.dmc_body(f.body)
-            d
-        },
-        .DGlobal(g)        => .DGlobal(GlobalData(
-            name: g.name,
-            ty: g.ty,
-            init: a.dmc_expr_val(g.init),
-            tl: g.tl,
-            alias: g.alias,
-            pos: g.pos,
-        )),
-        .DTraitDefault(td) => {
-            a.dmc_body(td.fn.body)
-            d
-        },
-        _                  => d,
-    })
-}
-dmc_body = (a: MutPtr<Malloc>, body: [Stmt]) void {
-    body.loop((h, i, st) {
-        a.dmc_stmt(body[i].addr())
-    })
-}
-// `sp` is a MUTABLE slot (a [Stmt] slice element), so the rebuilt statement is stored back through it.
-dmc_stmt = (a: MutPtr<Malloc>, sp: MutPtr<Stmt>) void {
-    sp.match ({
-        .Let(l)      => store(sp, slett_at(l.name, l.ty, a.dmc_expr_val(l.value), l.pos)),
-        .Assign(asn) => store(sp, sassign_at(a.dmc_expr_val(asn.target), a.dmc_expr_val(asn.value), asn.pos)),
-        .Return(e)   => store(sp, sret(a.dmc_expr_val(e))),
-        .If(f)       => {
-            a.dmc_body(f.then)
-            a.dmc_body(f.els)
-            store(sp, sif(a.dmc_expr_val(f.c), f.then, f.els))
-        },
-        .While(w)    => {
-            a.dmc_body(w.body)
-            store(sp, swhile(a.dmc_expr_val(w.c), w.body))
-        },
-        .IndexSet(x) => store(sp, sidxset_at(a.dmc_expr_val(x.seq), a.dmc_expr_val(x.idx), x.elem, a.dmc_expr_val(x.value), x.pos)),
-        .ExprStmt(e) => store(sp, sexpr(a.dmc_expr_val(e))),
-    })
-}
-// `args[i]` is a mutable [Expr] slot, so each lowered element is stored back in place.
-dmc_args = (a: MutPtr<Malloc>, args: [Expr]) void {
-    args.loop((h, i, ar) {
-        store(args[i].addr(), load(a.dmc_expr_val(args[i].addr())))
-    })
-}
-dmc_inits = (a: MutPtr<Malloc>, inits: [FieldInit]) void {
-    inits.loop((h, i, fi) {
-        store(inits[i].addr(), finit(fi.name, a.dmc_expr_val(fi.value)))
-    })
-}
-dmc_arms = (a: MutPtr<Malloc>, arms: [ArmData]) void {
-    arms.loop((h, i, ar) {
-        store(arms[i].addr(), arm_at(ar.variant, ar.bind, a.dmc_expr_val(ar.body), ar.pos))
-    })
-}
-// `recv.method(args)` -> `Call(fn: method, args: [recv, ...args], pos, raw: false)` — exactly what the
-// old parse_method built (buf[0] = recv, method args from index 1, via call_at). The recv and args are
-// lowered first (recv functionally, args in their mutable slice slots).
-dmc_lower = (a: MutPtr<Malloc>, mc: MethodCallData) Expr {
-    rv := a.dmc_expr_val(mc.recv)
-    a.dmc_args(mc.args)
-    buf := a.cebuf(mc.args.len + 1)
-    buf[0] = load(rv)
-    mc.args.loop((h, i, ar) {
-        buf[i + 1] = mc.args[i]
-    })
-    call_at(mc.method, buf, mc.pos)
-}
-remk_match* = (m: MatchData, subj: Ptr<Expr>) Expr { m.ptr.match ({
-    true  => ematchp(subj, m.ename, m.arms),
-    false => ematch(subj, m.ename, m.arms),
-}) }
-// FUNCTIONAL rewrite: returns the lowered node. A node with single `Ptr<Expr>` children is rebuilt with
-// the lowered children (preserving every field/position); a node whose children live in mutable slices is
-// mutated in place and the SAME node pointer is returned. Only a `MethodCall` actually changes shape.
-dmc_expr_val = (a: MutPtr<Malloc>, ep: Ptr<Expr>) Ptr<Expr> {
-    ep.match ({
-        .Bin(b)         => a.cenode(bin_at(b.op, a.dmc_expr_val(b.lhs), a.dmc_expr_val(b.rhs), b.pos)),
-        .Call(c)        => {
-            a.dmc_args(c.args)
-            ep
-        },
-        .MethodCall(mc) => a.cenode(a.dmc_lower(mc)),
-        .Cond(d)        => a.cenode(cond_oa(a.dmc_expr_val(d.c), a.dmc_expr_val(d.t), a.dmc_expr_val(d.e), d.oa)),
-        .Member(m)      => a.cenode(member_at(a.dmc_expr_val(m.obj), m.field, m.pos)),
-        .Arrow(ar)      => a.cenode(arrow_at(a.dmc_expr_val(ar.obj), ar.field, ar.pos)),
-        .MakeEnum(m)    => a.cenode(mkenumg(m.ty, m.mty, m.targs, m.variant, a.dmc_expr_val(m.payload))),
-        .MakeStruct(m)  => {
-            a.dmc_inits(m.inits)
-            ep
-        },
-        .Match(m)       => {
-            a.dmc_arms(m.arms)
-            a.cenode(remk_match(m, a.dmc_expr_val(m.subj)))
-        },
-        .SliceLit(sd)   => {
-            a.dmc_args(sd.items)
-            ep
-        },
-        .Index(ix)      => a.cenode(eindex(a.dmc_expr_val(ix.seq), a.dmc_expr_val(ix.idx), ix.elem)),
-        .Loop(l)        => {
-            a.dmc_body(l.body)
-            a.cenode(eloop(a.dmc_expr_val(l.seq), l.idx, l.elem, l.elemTy, l.body, l.h))
-        },
-        .Lambda(lm)     => {
-            a.dmc_body(lm.body)
-            ep
-        },
-        .Block(b)       => {
-            a.dmc_body(b.stmts)
-            ep
-        },
-        _               => ep,
-    })
-}
-// Enum-variant defaults (`Name = expr`) are parsed with a void payload + the default expr; before any
-// other pass, infer each default's type into the payload so codegen lays out the union slot and match
-// arms bind correctly.
-default_payload = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, v: VariantDef) Ty {
-    v.dflt.is_expr_null().match ({
-        true  => v.payload,
-        false => v.dflt.light_ty(a, a.vnil(), decls, idx),
-    })
-}
-fill_variant_defaults = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, vs: [VariantDef]) [VariantDef] {
-    buf := cbuf<VariantDef>(a, vs.len)
-    vs.loop((h, i, v) {
-        buf[i] = VariantDef(
-            name: v.name,
-            payload: a.default_payload(decls, idx, v),
-            dflt: v.dflt,
-        )
-    })
-    buf
-}
-fill_enum_defaults = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
-    buf := cbuf<Decl>(a, decls.len)
-    decls.loop((h, i, d) {
-        buf[i] = d.match ({
-            .DEnum(ed) => .DEnum(EnumDecl(
-                name: ed.name,
-                variants: a.fill_variant_defaults(decls, idx, ed.variants),
-            )),
-            _          => d,
-        })
-    })
-    buf
-}
-// ── RECURSIVE GENERIC FUNCTION MONOMORPHIZATION ──────────────────────────────────────────────
-// A generic FUNCTION that calls itself can't be inlined (the splice never terminates), so the inliner
-// leaves the self-call as a bare call to the template name, which links to nothing. This pass mirrors
-// compiler.mono's struct/enum monomorphization for FUNCTIONS: it discovers every distinct (template,
-// concrete-targs) the program uses and emits one concrete C function per instance (tparam→arg
-// substituted), with a deterministic mangled name (the SAME scheme as generic structs/enums, via
-// mangle_str_in). resolve_call then rewrites each recursive-generic call to its mangled instance.
-// Only DIRECT type-param recursion is handled; FnT-splice generics and mutual recursion still inline.
-// detection: does `body` contain a DIRECT call to `nm`? (the self-call test)
-no_inline_gen_f* = (f: Func) bool { f.is_generic_fn() && f.params.has_fnt_param() == false }
-// instance buffer: deduped by mangled name, bounded against polymorphic-recursion blowup (like mono).
-mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, from: i64) [Decl] {
-    base := Env(
-        vars: a.vnil(),
-        decls: decls,
-        didx: idx,
-        exp: tvoid(),
-        a: a,
-    )
-    buf := a.rc_gbuf(4096)
-    cnt := base.rc_expand(buf, base.rc_seed(buf, 0, from), 0)
-    (cnt == 0).match ({
-        true  => decls,
-        false => {
-            out := cbuf<Decl>(a, decls.len + cnt)
-            decls.loop((h, i, d) {
-                out[i] = d
-            })
-            k := decls.len
-            buf.loop((h, i, g) {
-                (i < cnt).then({
-                    out[k] = base.rc_gen(g)
-                    k = k + 1
-                })
-            })
-            slice(out.ptr, k)
-        },
-    })
-}
-// KEYSTONE closure: one mono_rec round appends concrete instances whose (substituted) bodies are
-// still un-spliced template bodies — they may call FnT-param generics (HOFs) that must inline, and
-// those splices can expose FURTHER generic calls. So per round: resolve the appended tail (dispatch
-// on its now-concrete types), inline it (splice HOFs/lambdas), rerun discovery. Terminates: rc
-// discovery dedups against the decl index (an emitted instance is never re-added), so each round
-// either strictly grows the decl list or stops; the rc depth bound caps polymorphic recursion, and
-// `guard` hard-stops pathological growth (a legitimate program nests HOF splices far shallower).
-mono_close = (a: MutPtr<Malloc>, decls: [Decl], from: i64, guard: i32) [Decl] {
-    idx := a.build_decl_index(decls)
-    exp := a.mono_rec(decls, idx, from)
-    (exp.len == decls.len || guard >= 16).match ({
-        true  => exp,
-        false => {
-            eidx := a.build_decl_index(exp)
-            buf := cbuf<Decl>(a, exp.len)
-            exp.loop((h, i, d) {
-                buf[i] = (i < decls.len).match ({
-                    true  => d,
-                    false => a.inline_decl(exp, eidx, a.resolve_decl(exp, eidx, d)),
-                })
-            })
-            a.mono_close(buf, decls.len, guard + 1)
-        },
-    })
-}
-// ── M1b: lift a NON-CAPTURING lambda LITERAL in a value position to a top-level function ──────────
-// A lambda stored in a struct field or returned can't be inline-spliced; lift its body to a generated
-// top-level fn (params typed from the expected FnT) and replace the literal with the fn name (a fn
-// value, M1). A CAPTURING lambda (one that references an enclosing local) is NOT lifted — it falls
-// through to the clean error[lambda-value] (real captures need the M2 env/lifetime design).
-// capture analysis: does this lambda body reference a FREE variable — a name that is neither one of the
-// lambda's params, a binder introduced inside the body, a top-level fn/global, nor true/false? Such a
-// name is a captured enclosing local. `bound` threads the in-scope binder names (scope-correct).
-field_fnt* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, sty: string_view, targs: [Ty], fname: string_view) Ty {
-    (targs.len > 0).match ({
-        true  => idx.idx_genstruct_field(a, decls, sty, fname, targs),
-        false => idx.idx_struct_field(decls, sty, fname),
-    })
-}
-// generate the top-level fn for a lifted lambda: params typed from the expected FnT, body = lambda body.
-lower_closures* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
-    ccp: RawPtr<u8> := a.acquire(8)
-    store_i64(ccp, 0)
-    gen := cbuf<Decl>(a, 4096)
-    out := cbuf<Decl>(a, decls.len + 4096)
-    decls.loop((h, i, d) {
-        out[i] = d.match ({
-            .DFunc(f) => a.clos_lowerable(decls, idx, f).match ({
-                true  => a.clos_lower_func(ccp, gen, f),
-                false => d,
-            }),
-            _         => d,
-        })
-    })
-    n := load_i64(ccp) * 2
-    k := decls.len
-    gen.loop((h, i, g) {
-        (i < n.to_i32()).then({
-            out[k] = g
-            k = k + 1
-        })
-    })
-    slice(out.ptr, k)
-}
 resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     decls0 := a.expand_defaults(a.desugar_method_calls(raw))
     decls := a.fill_enum_defaults(decls0, a.build_decl_index(decls0))
@@ -4189,214 +2884,6 @@ resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
         out2[i] = a.resolve_decl(lifted, eidx, d)
     })
     out2
-}
-// Type lattice: integer widening u8 <= i32 <= i64; all else exact structural equality.
-// f64 is intentionally outside the integer rank chain.
-ty_rank* = (t: Ty) i32 {
-    t.match ({
-        .U8  => 0,
-        .I32 => 1,
-        .I64 => 2,
-        _    => 0 - 1,
-    })
-}
-is_f64_ty* = (t: Ty) bool {
-    t.match ({
-        .F64 => true,
-        _    => false,
-    })
-}
-// Types stored under a mutable/aggregate constructor are invariant. In particular, the three string
-// provenance variants are only coercible as outer values; treating them as equal inside MutPtr,
-// slices, or generic storage lets a borrowed value overwrite an immortal-typed slot.
-invariant_ty_eq = (g: Ty, w: Ty) bool {
-    g.match ({
-        .I32           => w.match ({
-            .I32 => true,
-            _    => false,
-        }),
-        .I64           => w.match ({
-            .I64 => true,
-            _    => false,
-        }),
-        .U8            => w.match ({
-            .U8 => true,
-            _   => false,
-        }),
-        .F64           => w.match ({
-            .F64 => true,
-            _    => false,
-        }),
-        .Bool          => w.match ({
-            .Bool => true,
-            _     => false,
-        }),
-        .Void          => w.match ({
-            .Void => true,
-            _     => false,
-        }),
-        .StringView    => w.match ({
-            .StringView => true,
-            _           => false,
-        }),
-        .StringCstr    => w.match ({
-            .StringCstr => true,
-            _           => false,
-        }),
-        .StringLiteral => w.match ({
-            .StringLiteral => true,
-            _              => false,
-        }),
-        .Named(a)      => w.match ({
-            .Named(b)    => eq(a, b),
-            .Generic(gb) => eq(a, gb.mangled),
-            _            => false,
-        }),
-        .Ptr(pa)       => w.match ({
-            .Ptr(pb) => pa.kind == pb.kind && load(pa.pointee).invariant_ty_eq(load(pb.pointee)),
-            _        => false,
-        }),
-        .Slice(pa)     => w.match ({
-            .Slice(pb) => load(pa).invariant_ty_eq(load(pb)),
-            _          => false,
-        }),
-        .FnT(fa)       => w.match ({
-            .FnT(fb) => fa.params.invariant_tys_eq(fb.params) && load(fa.ret).invariant_ty_eq(load(fb.ret)),
-            _        => false,
-        }),
-        .Generic(ga)   => w.match ({
-            .Generic(gb) => eq(ga.name, gb.name) && ga.args.invariant_tys_eq(gb.args),
-            .Named(b)    => eq(ga.mangled, b),
-            _            => false,
-        }),
-    })
-}
-invariant_tys_eq = (gs: [Ty], ws: [Ty]) bool {
-    (gs.len != ws.len).match ({
-        true  => false,
-        false => {
-            same := true
-            gs.loop((h, i, g) {
-                same = same && g.invariant_ty_eq(ws[i])
-            })
-            same
-        },
-    })
-}
-ty_eq* = (g: Ty, w: Ty) bool {
-    g.match ({
-        .I32           => w.match ({
-            .I32 => true,
-            _    => false,
-        }),
-        .I64           => w.match ({
-            .I64 => true,
-            _    => false,
-        }),
-        .U8            => w.match ({
-            .U8 => true,
-            _   => false,
-        }),
-        .F64           => w.match ({
-            .F64 => true,
-            _    => false,
-        }),
-        .Bool          => w.match ({
-            .Bool => true,
-            _     => false,
-        }),
-        .Void          => w.match ({
-            .Void => true,
-            _     => false,
-        }),
-        .StringView    => w.match ({
-            .StringView => true,
-            _           => false,
-        }),
-        .StringCstr    => w.match ({
-            .StringCstr => true,
-            .StringView => true,
-            _           => false,
-        }),
-        .StringLiteral => w.match ({
-            .StringLiteral => true,
-            .StringView    => true,
-            .StringCstr    => true,
-            _              => false,
-        }),
-        .Named(a)      => w.match ({
-            .Named(b)    => eq(a, b),
-            .Generic(gb) => eq(a, gb.mangled),
-            _            => false,
-        }),
-        .Ptr(pa)       => w.match ({
-            .Ptr(pb) => load(pa.pointee).invariant_ty_eq(load(pb.pointee)),
-            _        => false,
-        }),
-        .Slice(pa)     => w.match ({
-            .Slice(pb) => load(pa).invariant_ty_eq(load(pb)),
-            _          => false,
-        }),
-        .FnT(fa)       => false,
-        .Generic(ga)   => w.match ({
-            .Generic(gb) => eq(ga.name, gb.name) && ga.args.invariant_tys_eq(gb.args),
-            .Named(b)    => eq(ga.mangled, b),
-            _            => false,
-        }),
-    })
-}
-// ── Ty pointer-kind inspection, as a trait ───────────────────────────────────
-is_any_ptr = (t: Ty) bool { t.ptr_kind_of() >= 0 }
-// Preserve lvalue provenance across addr(): taking the address of storage reached through Ptr<T>
-// yields Ptr<U>, never MutPtr<U>. The walk stops at the first pointer indirection, matching writes.
-write_thru_readonly* = (env: Env, obj: Ptr<Expr>) bool {
-    ot := env.infer_expr(obj)
-    ot.is_any_ptr().match ({
-        true  => ot.is_readonly_ptr_ty(),
-        false => env.lvalue_writes_readonly(obj),
-    })
-}
-lvalue_writes_readonly* = (env: Env, target: Ptr<Expr>) bool {
-    load(target).match ({
-        .Member(m) => env.write_thru_readonly(m.obj),
-        .Arrow(ar) => env.infer_expr(ar.obj).is_readonly_ptr_ty(),
-        .Index(ix) => env.write_thru_readonly(ix.seq),
-        _          => false,
-    })
-}
-// Direction-axis mode — the writable-vs-readonly subset of the mode lattice (docs/effects-as-types-
-// design.md §2). The full 4-mode `mode_of(decls, t)` (owned/frozen/mut/read) needs `decls` for the
-// frozen⁄read split and lives at the send-sites (Brick 1, check_validate.zen). Inside `fits` there is
-// no `decls`, and only the DIRECTION axis matters (writable `mut` vs readonly `read`), which
-// `ptr_kind_of()` yields WITHOUT `decls`. Returns `k_mut_ptr` = `mut` (writable), `k_ptr` = `read`
-// (readonly), else -1 (not a pointer — direction N/A; the `RawPtr` floor is coerced earlier).
-dir_mode_of* = (t: Ty) i32 {
-    (t.ptr_kind_of() == k_mut_ptr() || t.ptr_kind_of() == k_ptr()).match ({
-        true  => t.ptr_kind_of(),
-        false => 0 - 1,
-    })
-}
-// Mode-lattice cell for `fits`: a readonly Ptr must not satisfy either writable spelling
-// (MutPtr or RawPtr), while MutPtr may safely lose capability into Ptr/RawPtr.
-mode_fits* = (g: Ty, w: Ty) bool {
-    (g.ptr_kind_of() == k_ptr() && (w.ptr_kind_of() == k_mut_ptr() || w.ptr_kind_of() == k_raw_ptr())).match ({
-        true  => false,
-        false => true,
-    })
-}
-raw_floor_fits = (g: Ty, w: Ty) bool { g.is_raw_ptr_ty() && w.is_ptr_ty_g() }
-fits* = (g: Ty, w: Ty) bool {
-    numeric := g.ty_rank() >= 0 && w.ty_rank() >= 0
-    numeric.match ({
-        true  => g.ty_rank() <= w.ty_rank(),
-        false => g.raw_floor_fits(w).match ({
-            true  => true,
-            false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({
-                true  => false,
-                false => g.ty_eq(w) && g.mode_fits(w),
-            }),
-        }),
-    })
 }
 // Shared by resolve_module and check_validate.
 empty_params* = () [Param] { slice(null_ptr(), 0) }
