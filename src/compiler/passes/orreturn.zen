@@ -1,0 +1,335 @@
+// compiler.passes.orreturn — or_return lowering sub-pass extracted from compiler.check.
+{ ArmData, BinData, CallData, Expr, FieldInit, MakeStructData, Stmt, arrow_at, bin_at, cond_oa, eindex, eloop, finit, gstr_append, gstr_finish, gstr_push, gstr_string, member_at, mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at, sif, slett_at, slit, sret, tvoid, vref_at } = compiler.genc
+{ fbuf, is_or_return_call, is_orx_hoist, is_shortcircuit, recall, remk_match } = compiler.check
+{ Malloc } = std.mem.alloc
+{ String } = std.text.string
+orx_count* = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c)        => c.args.orx_count_args() + is_orx_hoist(c).match ({
+            true  => 1,
+            false => 0,
+        }),
+        .Bin(b)         => is_shortcircuit(b.op).match ({
+            true  => b.lhs.orx_count(),
+            false => b.lhs.orx_count() + b.rhs.orx_count(),
+        }),
+        .Cond(d)        => d.c.orx_count(),
+        .Match(m)       => m.subj.orx_count(),
+        .Member(mm)     => mm.obj.orx_count(),
+        .Arrow(ar)      => ar.obj.orx_count(),
+        .MakeEnum(mk)   => mk.payload.orx_count(),
+        .MakeStruct(sd) => sd.inits.orx_count_inits(),
+        .SliceLit(sd)   => sd.items.orx_count_args(),
+        .Index(ix)      => ix.seq.orx_count() + ix.idx.orx_count(),
+        .Loop(l)        => l.seq.orx_count(),
+        _               => 0,
+    })
+}
+orx_count_args = (args: [Expr]) i32 {
+    n := 0
+    args.loop((h, i, ar) {
+        n = n + args[i].addr().orx_count()
+    })
+    n
+}
+orx_count_inits = (inits: [FieldInit]) i32 {
+    n := 0
+    inits.loop((h, i, fi) {
+        n = n + fi.value.orx_count()
+    })
+    n
+}
+// hoistable or_returns of one STATEMENT: a direct `x := recv.or_return()` let keeps its top call
+// (the existing let-lowering owns it) but hoists any or_return nested in the receiver. A While
+// condition re-evaluates per iteration, so it never hoists (resolve_orx wraps it in place instead).
+orx_stmt_count* = (st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => l.value.is_or_return_call().match ({
+            true  => l.value.orx_recv_count(),
+            false => l.value.orx_count(),
+        }),
+        .Assign(x)   => x.target.orx_count() + x.value.orx_count(),
+        .Return(r)   => r.orx_count(),
+        .ExprStmt(e) => e.orx_count(),
+        .If(f)       => f.c.orx_count(),
+        .While(w)    => 0,
+        .IndexSet(x) => x.seq.orx_count() + x.idx.orx_count() + x.value.orx_count(),
+    })
+}
+orx_recv_count = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c) => c.args.orx_count_args(),
+        _        => 0,
+    })
+}
+// A hoist temp name: `_orx_<slot>_<pos>`. The slot (the running hoist index of the enclosing scope)
+// disambiguates same-position synthesized calls; the source pos disambiguates statements (slots
+// restart per statement, but two statements never share a user-written call position).
+orx_digits = (a: MutPtr<Malloc>, s: String, n: i64) String {
+    (n < 10).match ({
+        true  => s.gstr_push(a, ('0' + n).to_u8()),
+        false => {
+            hs := a.orx_digits(s, n / 10)    // hoist the recursive call: a <call>.gstr_push receiver is re-evaluated by gstr_reserve
+            hs.gstr_push(a, ('0' + n % 10).to_u8())
+        },
+    })
+}
+orx_name = (a: MutPtr<Malloc>, slot: i32, pos: i32) string_view {
+    s := a.gstr_string(48)
+    s = s.gstr_append(a, "_orx_")
+    s = a.orx_digits(s, slot.to_i64())
+    s = s.gstr_append(a, "_")
+    s = a.orx_digits(s, pos.to_i64())
+    s.gstr_finish(a)
+}
+// The rewrite walk mirrors orx_count exactly: it returns the rebuilt expression plus the running
+// hoist-slot index, writing one direct `_orx_K := recv.or_return()` let (still UNRESOLVED — the
+// caller feeds it back through the existing let-lowering) into hbuf per hoisted occurrence.
+// Rebuilds use the *_at position-preserving ctors so diagnostics keep their carets.
+OrxRw*: {
+    e: Ptr<Expr>,
+    n: i32,
+}
+OrxRwA: {
+    args: [Expr],
+    n: i32,
+}
+orx_rw_mk = (e: Ptr<Expr>, n: i32) OrxRw {
+    OrxRw(
+        e: e,
+        n: n,
+    )
+}
+orx_rw* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) OrxRw {
+    (e.orx_count() == 0).match ({
+        true  => orx_rw_mk(e, n),
+        false => load(e).match ({
+            .Call(c)        => a.orx_rw_call(hbuf, base, n, c),
+            .Bin(b)         => a.orx_rw_bin(hbuf, base, n, b),
+            .Cond(d)        => {
+                cc := a.orx_rw(hbuf, base, n, d.c)
+                orx_rw_mk(a.cenode(cond_oa(cc.e, d.t, d.e, d.oa)), cc.n)
+            },
+            .Match(m)       => {
+                s2 := a.orx_rw(hbuf, base, n, m.subj)
+                orx_rw_mk(a.cenode(remk_match(m, s2.e)), s2.n)
+            },
+            .Member(mm)     => {
+                o2 := a.orx_rw(hbuf, base, n, mm.obj)
+                orx_rw_mk(a.cenode(member_at(o2.e, mm.field, mm.pos)), o2.n)
+            },
+            .Arrow(ar)      => {
+                o2 := a.orx_rw(hbuf, base, n, ar.obj)
+                orx_rw_mk(a.cenode(arrow_at(o2.e, ar.field, ar.pos)), o2.n)
+            },
+            .MakeEnum(mk)   => {
+                p2 := a.orx_rw(hbuf, base, n, mk.payload)
+                orx_rw_mk(a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, p2.e)), p2.n)
+            },
+            .MakeStruct(sd) => a.orx_rw_mkstruct(hbuf, base, n, sd),
+            .SliceLit(sd)   => {
+                r := a.orx_rw_args(hbuf, base, n, sd.items)
+                orx_rw_mk(a.cenode(slit(sd.elem, r.args)), r.n)
+            },
+            .Index(ix)      => {
+                s2 := a.orx_rw(hbuf, base, n, ix.seq)
+                i2 := a.orx_rw(hbuf, base, s2.n, ix.idx)
+                orx_rw_mk(a.cenode(eindex(s2.e, i2.e, ix.elem)), i2.n)
+            },
+            .Loop(l)        => {
+                s2 := a.orx_rw(hbuf, base, n, l.seq)
+                orx_rw_mk(a.cenode(eloop(s2.e, l.idx, l.elem, l.elemTy, l.body, l.h)), s2.n)
+            },
+            _               => orx_rw_mk(e, n),
+        }),
+    })
+}
+orx_rw_args = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]) OrxRwA {
+    buf := a.cebuf(args.len)
+    k := n0
+    args.loop((h, i, ar) {
+        r := a.orx_rw(hbuf, base, k, args[i].addr())
+        buf[i] = load(r.e)
+        k = r.n
+    })
+    OrxRwA(
+        args: buf,
+        n: k,
+    )
+}
+// args first (innermost-first: the receiver's own hoists land before this one), then hoist the
+// or_return call itself into a fresh temp let and read the temp at the original site.
+orx_rw_call = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, c: CallData) OrxRw {
+    r := a.orx_rw_args(hbuf, base, n, c.args)
+    ncall := a.recall(c, c.fn, r.args)
+    is_orx_hoist(c).match ({
+        true  => {
+            nm := a.orx_name(base + r.n, c.pos)
+            hbuf[r.n] = slett_at(nm, tvoid(), ncall, c.pos)
+            orx_rw_mk(a.cenode(vref_at(nm, c.pos)), r.n + 1)
+        },
+        false => orx_rw_mk(ncall, r.n),
+    })
+}
+// a short-circuit rhs is conditionally evaluated: leave it for resolve_orx to wrap in place.
+orx_rw_bin = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, b: BinData) OrxRw {
+    l2 := a.orx_rw(hbuf, base, n, b.lhs)
+    is_shortcircuit(b.op).match ({
+        true  => orx_rw_mk(a.cenode(bin_at(b.op, l2.e, b.rhs, b.pos)), l2.n),
+        false => {
+            r2 := a.orx_rw(hbuf, base, l2.n, b.rhs)
+            orx_rw_mk(a.cenode(bin_at(b.op, l2.e, r2.e, b.pos)), r2.n)
+        },
+    })
+}
+orx_rw_mkstruct = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, sd: MakeStructData) OrxRw {
+    buf := a.fbuf(sd.inits.len)
+    k := n
+    sd.inits.loop((h, i, fi) {
+        r := a.orx_rw(hbuf, base, k, fi.value)
+        buf[i] = finit(fi.name, r.e)
+        k = r.n
+    })
+    orx_rw_mk(a.cenode(mkstructg_at(sd.ty, sd.mty, sd.targs, buf, sd.pos)), k)
+}
+// rewrite ONE statement's expressions, hoisting into hbuf; the statement itself is rebuilt with the
+// temps substituted. A direct or_return let keeps its top call (only its receiver is rewritten).
+orx_rw_recv = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, e: Ptr<Expr>) Ptr<Expr> {
+    out := e
+    load(e).match ({
+        .Call(c) => {
+            r := a.orx_rw_args(hbuf, base, 0, c.args)
+            out = a.recall(c, c.fn, r.args)
+        },
+        _        => { },
+    })
+    out
+}
+orx_rw_stmt* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, st: Stmt) Stmt {
+    out := st
+    st.match ({
+        .Let(l)      => {
+            out = l.value.is_or_return_call().match ({
+                true  => slett_at(l.name, l.ty, a.orx_rw_recv(hbuf, base, l.value), l.pos),
+                false => slett_at(l.name, l.ty, a.orx_rw(hbuf, base, 0, l.value).e, l.pos),
+            })
+        },
+        .Assign(x)   => {
+            t2 := a.orx_rw(hbuf, base, 0, x.target)
+            v2 := a.orx_rw(hbuf, base, t2.n, x.value)
+            out = sassign_at(t2.e, v2.e, x.pos)
+        },
+        .Return(r)   => {
+            out = sret(a.orx_rw(hbuf, base, 0, r).e)
+        },
+        .ExprStmt(e) => {
+            out = sexpr(a.orx_rw(hbuf, base, 0, e).e)
+        },
+        .If(f)       => {
+            out = sif(a.orx_rw(hbuf, base, 0, f.c).e, f.then, f.els)
+        },
+        .IndexSet(x) => {
+            s2 := a.orx_rw(hbuf, base, 0, x.seq)
+            i2 := a.orx_rw(hbuf, base, s2.n, x.idx)
+            v2 := a.orx_rw(hbuf, base, i2.n, x.value)
+            out = sidxset_at(s2.e, i2.e, x.elem, v2.e, x.pos)
+        },
+        _            => { },
+    })
+    out
+}
+// conditional-position wrap (the resolve_expr entry hook): hoist this expression's or_returns into
+// a fresh VALUE BLOCK — `({ _orx_0 := recv.or_return()  …  <expr'> })` — resolved as a value body,
+// so the direct temp lets take the existing 3-stmt lowering and the tail keeps the expected type.
+// In a statement-position match/cond the branch block is later spliced into real `if` statements
+// (branch_stmts), so the Err-guard's `return` stays visible to the inliner's early-return lift.
+orx_hidden_es = (xs: [Expr]) bool {
+    f := false
+    xs.loop((h, i, x) {
+        f = f.match ({ true => true, false => x.addr().orx_hidden_e() })
+    })
+    f
+}
+orx_hidden_inits = (inits: [FieldInit]) bool {
+    f := false
+    inits.loop((h, i, fi) {
+        f = f.match ({ true => true, false => fi.value.orx_hidden_e() })
+    })
+    f
+}
+orx_hidden_arms = (arms: [ArmData]) bool {
+    f := false
+    arms.loop((h, i, ar) {
+        f = f.match ({ true => true, false => ar.body.orx_hidden_e() })
+    })
+    f
+}
+// does this EXPRESSION contain a `return` anywhere inside it? Every return in expression position is
+// hidden: it would lower to a raw C return inside the spliced statement-expression.
+orx_hidden_e = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Call(c)       => c.args.orx_hidden_es(),
+        .Bin(b)        => b.lhs.orx_hidden_e() || b.rhs.orx_hidden_e(),
+        .Cond(d)       => d.c.orx_hidden_e() || d.t.orx_hidden_e() || d.e.orx_hidden_e(),
+        .Member(m)     => m.obj.orx_hidden_e(),
+        .Arrow(ar)     => ar.obj.orx_hidden_e(),
+        .MakeEnum(mk)  => mk.payload.orx_hidden_e(),
+        .MakeStruct(s) => s.inits.orx_hidden_inits(),
+        .Match(m)      => m.subj.orx_hidden_e() || m.arms.orx_hidden_arms(),
+        .Index(ix)     => ix.seq.orx_hidden_e() || ix.idx.orx_hidden_e(),
+        .SliceLit(sd)  => sd.items.orx_hidden_es(),
+        .Loop(l)       => l.seq.orx_hidden_e() || l.body.orx_any_ret_body(),
+        .Block(bl)     => bl.stmts.orx_any_ret_body(),
+        .Lambda(la)    => la.body.orx_any_ret_body(),
+        _              => false,
+    })
+}
+// any return at ANY depth — used inside expression blocks and While/Loop bodies, where every return
+// (even a statement-level one) is beyond the lift's reach.
+orx_any_ret_stmt = (st: Stmt) bool {
+    st.match ({
+        .Return(r)   => true,
+        .Let(l)      => l.value.orx_hidden_e(),
+        .Assign(x)   => x.target.orx_hidden_e() || x.value.orx_hidden_e(),
+        .ExprStmt(e) => e.orx_hidden_e(),
+        .If(f)       => f.c.orx_hidden_e() || f.then.orx_any_ret_body() || f.els.orx_any_ret_body(),
+        .While(w)    => w.c.orx_hidden_e() || w.body.orx_any_ret_body(),
+        .IndexSet(x) => x.seq.orx_hidden_e() || x.idx.orx_hidden_e() || x.value.orx_hidden_e(),
+    })
+}
+orx_any_ret_body = (body: [Stmt]) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = f.match ({ true => true, false => st.orx_any_ret_stmt() })
+    })
+    f
+}
+// a return the early-return lift CANNOT see: statement-level returns (top level and through If
+// branches) are liftable and excluded; anything buried in an expression or a While body is hidden.
+orx_hidden_stmt = (st: Stmt) bool {
+    st.match ({
+        .Return(r)   => r.orx_hidden_e(),
+        .Let(l)      => l.value.orx_hidden_e(),
+        .Assign(x)   => x.target.orx_hidden_e() || x.value.orx_hidden_e(),
+        .ExprStmt(e) => e.orx_hidden_e(),
+        .If(f)       => f.c.orx_hidden_e() || f.then.orx_hidden_body() || f.els.orx_hidden_body(),
+        .While(w)    => w.c.orx_hidden_e() || w.body.orx_any_ret_body(),
+        .IndexSet(x) => x.seq.orx_hidden_e() || x.idx.orx_hidden_e() || x.value.orx_hidden_e(),
+    })
+}
+orx_hidden_body = (body: [Stmt]) bool {
+    f := false
+    body.loop((h, i, st) {
+        f = f.match ({ true => true, false => st.orx_hidden_stmt() })
+    })
+    f
+}
+// the single no-inline predicate every gate shares (maybe_template, rc_col_call, rec_dispatch).
+// KEYSTONE (specialize, don't splice): EVERY type-param generic without an FnT param takes the
+// mono_rec instance path — ONE shared concrete C function per (template, targs), call sites
+// rewritten to it — instead of the body spliced at every call site (code-size blowup, superlinear
+// emit time, caller-return hoists). FnT-param generics (HOF/lambda args) MUST still splice: a
+// lambda has no first-class representation. This subsumes the two cases that always REQUIRED the
+// instance path — direct self-recursion (rc_is_rec_gen_f: the splice never terminates) and hidden
+// early returns (orx_hidden_body: a spliced raw C `return` would exit the CALLER); both detectors
+// remain above as the documentation of those invariants.

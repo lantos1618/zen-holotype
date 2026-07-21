@@ -1,0 +1,65 @@
+// compiler.passes.ptrkind — PtrKind trait + its Ty impl, extracted from compiler.check.
+{ Ty, k_ptr, k_mut_ptr, k_raw_ptr } = compiler.genc
+// These six predicates read a Ty's pointer spelling (RawPtr/Ptr/MutPtr) and the read/null
+// capabilities that follow. Grouping them into a trait IMPL'd on Ty (an out-of-module impl:
+// `Ty` is defined in compiler.genc) lets cross-module callers dispatch `t.is_raw_ptr_ty()` &c.
+// by UFCS through the impl index — so importing the one trait replaces importing six predicate
+// names. The methods are pure Ty→scalar; each is emitted as a distinct mangled C function
+// (`impl_PtrKind_Ty_<m>`), so unlike same-named free functions they never collide in the flat
+// C namespace. Sibling methods call each other by UFCS (`t.ptr_kind_of()`), routed the same way.
+PtrKind*: {
+    ptr_kind_of: (Self) i32,
+    is_ptr_ty_g: (Self) bool,
+    is_raw_ptr_ty: (Self) bool,
+    is_readonly_ptr_ty: (Self) bool,
+    is_nonnull_ptr_ty: (Self) bool,
+    is_nullable_ptr_ty: (Self) bool,
+}
+Ty.impl(PtrKind, {
+    ptr_kind_of = (t: Ty) i32 {
+        // Stage 2 mutability: which pointer KIND a value is (k_raw_ptr/k_ptr/k_mut_ptr), or -1 if not a pointer.
+        t.match ({
+            .Ptr(pd) => pd.kind,
+            _        => 0 - 1,
+        })
+    }
+    is_ptr_ty_g = (t: Ty) bool {
+        t.match ({
+            .Ptr(pd) => true,
+            _        => false,
+        })
+    }
+    is_raw_ptr_ty = (t: Ty) bool {
+        // `RawPtr<u8>` is the deliberately permissive allocator/FFI floor. It can initialize any pointer
+        // spelling; unlike typed RawPtr<T>, the checker cannot distinguish null_ptr() from malloc() here.
+        t.match ({
+            .Ptr(pd) => (pd.kind == k_raw_ptr()).match ({
+                true  => load(pd.pointee).match ({
+                    .U8 => true,
+                    _   => false,
+                }),
+                false => false,
+            }),
+            _        => false,
+        })
+    }
+    is_readonly_ptr_ty = (t: Ty) bool {
+        // A write (store) through a read-only `Ptr<T>` (kind == k_ptr) is rejected; `MutPtr`/`RawPtr` permit it.
+        t.ptr_kind_of() == k_ptr()
+    }
+    is_nonnull_ptr_ty = (t: Ty) bool {
+        // A NON-NULL pointer: `Ptr<T>` (k_ptr) or `MutPtr<T>` (k_mut_ptr). These can never be null, so a slot
+        // of this kind cannot be left default-zeroed and cannot be filled by a nullable `RawPtr<T>`.
+        t.ptr_kind_of() == k_ptr() || t.ptr_kind_of() == k_mut_ptr()
+    }
+    is_nullable_ptr_ty = (t: Ty) bool {
+        // Stage 3 nullability: a `RawPtr<T>` (kind == k_raw_ptr) is NULLABLE and must be proven non-null
+        // (via `assert_nonnull`, which narrows RawPtr<T> to MutPtr<T>) before a deref. EXCEPTION: the
+        // `RawPtr<u8>` byte-buffer floor derefs freely (so it is NOT nullable here). `Ptr<T>`/`MutPtr<T>`
+        // are non-null, so they are never nullable.
+        (t.ptr_kind_of() == k_raw_ptr()).match ({
+            true  => t.is_raw_ptr_ty().match ({ true => false, false => true }),
+            false => false,
+        })
+    }
+})
