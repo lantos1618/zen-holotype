@@ -12,12 +12,25 @@ is_alpha* = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == 
 is_alnum* = (b: u8) bool { b.is_alpha() || b.is_digit() }
 is_space* = (b: u8) bool { b == ' ' || b == '\t' || b == '\n' || b == '\r' }
 // nibble value (0..15) -> its LOWERCASE hex byte (`0`-`9`, `a`-`f`). The hex-ENCODE nibble, shared by
-// the encoders in std.encoding / std.json. (The hex-DECODE `hex_val` and `digit_val` are intentionally
-// NOT centralized here yet: the compiler's parse_expr.zen defines its own `hex_val`/`digit_val` with an
-// i32 return, and std.text.bytes is in the compiler's own import closure, so a same-named i64 helper
-// here would be dedup'd against parse_expr's copy and break the self-hosted number parser. They can
-// move here once parse_expr is repointed in a compiler-side pass.)
+// the encoders in std.encoding / std.json.
 hex_char* = (v: i64) u8 { (v < 10).match ({
     true  => ('0'.to_i64() + v).to_u8(),
     false => ('a'.to_i64() + v - 10).to_u8(),
 }) }
+// hex byte -> its nibble value (0..15), or -1 for a non-hex byte. Accepts both cases on input.
+// The hex-DECODE nibble, shared by the decoders in std.serde.{json,encoding} / std.net.http. Named
+// `hex_nibble` (NOT `hex_val`) on purpose: the compiler's parse_expr.zen defines its own `hex_val`
+// with an i32 return, and std.text.bytes is in the compiler's own import closure, so a same-named
+// helper here would be dedup'd against parse_expr's copy under the flat namespace.
+hex_nibble* = (b: u8) i64 {
+    (b >= '0' && b <= '9').match ({
+        true  => (b - '0').to_i64(),
+        false => (b >= 'a' && b <= 'f').match ({
+            true  => (b - 'a').to_i64() + 10,
+            false => (b >= 'A' && b <= 'F').match ({
+                true  => (b - 'A').to_i64() + 10,
+                false => 0 - 1,
+            }),
+        }),
+    })
+}
