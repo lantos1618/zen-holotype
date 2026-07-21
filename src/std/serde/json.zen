@@ -11,7 +11,7 @@
 //   Value*:  Null | Bool(bool) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
 //
 // Objects are an insertion-ordered slice of (key, value) Entry pairs, and growable
-// arrays/objects accumulate through the module-local `VBuf`/`EBuf` structs.
+// arrays/objects accumulate through the module-local generic `JBuf<T>` buffer.
 //
 // ── COMPILER LIMITS HIT (and the design forced by each, all verified by bisection) ──
 // This module is the proverbial "two hard things" stress test for the self-hosted compiler.
@@ -50,7 +50,7 @@
 { Result, Opt, IoError, err, expect } = std.core.result
 { String, new_in, push_in, append_in, append_slice_in, finish_in } = std.text.string
 { view, substr_in, eq } = std.text.str
-{ hex_char } = std.text.bytes    // shared hex-ENCODE nibble (centralized in std.text.bytes)
+{ hex_char, hex_nibble } = std.text.bytes    // shared hex nibble encode/decode (centralized in std.text.bytes)
 { parse_f64, float_in } = std.text.num
 // ── OOM policy ────────────────────────────────────────────────────────────────
 // The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
@@ -92,69 +92,42 @@ sstep_ok = (s: string_view, pos: i64) Result<StrStep, JsonError> {
         pos: pos,
     ))
 }
-// ── module-local growable buffers (hand-rolled Vecs; see limit #2) ─────────────
-VBuf: {
+// ── module-local growable buffer (hand-rolled Vec; see limit #2) ───────────────
+// One same-module generic `JBuf<T>` serves both array/object backbones: array elements as
+// `JBuf<Value>` and object entries as `JBuf<Entry>`. `T` is phantom in the fields, mirroring
+// std.collections.Vec; the element size flows through `sizeof(T)` at each same-module instantiation.
+// (A FOREIGN generic buffer still hits limit #2 above; a same-module one does not.)
+JBuf<T>: {
     ptr: RawPtr<u8>,
     len: i64,
     cap: i64,
-}    // a growable [Value]
-EBuf: {
-    ptr: RawPtr<u8>,
-    len: i64,
-    cap: i64,
-}    // a growable [Entry]
-vbuf_new<A> = (a: MutPtr<A>) VBuf {
-    VBuf(
-        ptr: a.acquire(sizeof(Value)),
+}
+jbuf_new<A, T> = (a: MutPtr<A>) JBuf<T> {
+    JBuf<T>(
+        ptr: a.acquire(sizeof(T)),
         len: 0,
         cap: 1,
     )
 }
-vbuf_push<A> = (a: MutPtr<A>, vb: VBuf, x: Value) VBuf {
+jbuf_push<A, T> = (a: MutPtr<A>, jb: JBuf<T>, x: T) JBuf<T> {
     x := x
-    r := (vb.len < vb.cap).match ({
-        true  => vb,
-        false => VBuf(
-            ptr: a.resize(vb.ptr, (vb.cap * 2 + 1) * sizeof(Value)),
-            len: vb.len,
-            cap: vb.cap * 2 + 1,
+    r := (jb.len < jb.cap).match ({
+        true  => jb,
+        false => JBuf<T>(
+            ptr: a.resize(jb.ptr, (jb.cap * 2 + 1) * sizeof(T)),
+            len: jb.len,
+            cap: jb.cap * 2 + 1,
         ),
     })
-    s: [Value] := slice(r.ptr, r.cap)
+    s: [T] := slice(r.ptr, r.cap)
     s[r.len] = x
-    VBuf(
+    JBuf<T>(
         ptr: r.ptr,
         len: r.len + 1,
         cap: r.cap,
     )
 }
-vbuf_slice = (vb: VBuf) [Value] { slice(vb.ptr, vb.len) }
-ebuf_new<A> = (a: MutPtr<A>) EBuf {
-    EBuf(
-        ptr: a.acquire(sizeof(Entry)),
-        len: 0,
-        cap: 1,
-    )
-}
-ebuf_push<A> = (a: MutPtr<A>, eb: EBuf, e: Entry) EBuf {
-    e := e
-    r := (eb.len < eb.cap).match ({
-        true  => eb,
-        false => EBuf(
-            ptr: a.resize(eb.ptr, (eb.cap * 2 + 1) * sizeof(Entry)),
-            len: eb.len,
-            cap: eb.cap * 2 + 1,
-        ),
-    })
-    s: [Entry] := slice(r.ptr, r.cap)
-    s[r.len] = e
-    EBuf(
-        ptr: r.ptr,
-        len: r.len + 1,
-        cap: r.cap,
-    )
-}
-ebuf_slice = (eb: EBuf) [Entry] { slice(eb.ptr, eb.len) }
+jbuf_slice<T> = (jb: JBuf<T>) [T] { slice(jb.ptr, jb.len) }
 // ── byte classes ──────────────────────────────────────────────────────────────
 json_ws = (b: u8) bool { b == ' ' || b == '\t' || b == '\n' || b == '\r' }
 is_num_start = (b: u8) bool { b == '-' || b >= '0' && b <= '9' }
@@ -177,24 +150,12 @@ skip_ws = (sv: [u8], pos: i64) i64 {
     p
 }
 // ── string decoding (allocator-owned, escapes resolved) ───────────────────────
-hex_val = (b: u8) i64 {
-    (b >= '0' && b <= '9').match ({
-        true  => (b - '0').to_i64(),
-        false => (b >= 'a' && b <= 'f').match ({
-            true  => (b - 'a').to_i64() + 10,
-            false => (b >= 'A' && b <= 'F').match ({
-                true  => (b - 'A').to_i64() + 10,
-                false => 0 - 1,
-            }),
-        }),
-    })
-}
 // the code point of the 4 hex digits at sv[at..at+4], or -1 if any byte is not hex.
 hex4 = (sv: [u8], at: i64) i64 {
-    d0 := hex_val(sv[at])
-    d1 := hex_val(sv[at + 1])
-    d2 := hex_val(sv[at + 2])
-    d3 := hex_val(sv[at + 3])
+    d0 := hex_nibble(sv[at])
+    d1 := hex_nibble(sv[at + 1])
+    d2 := hex_nibble(sv[at + 2])
+    d3 := hex_nibble(sv[at + 3])
     (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0).match ({
         true  => 0 - 1,
         false => d0 * 4096 + d1 * 256 + d2 * 16 + d3,
@@ -376,23 +337,29 @@ parse_array<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64, depth: i64
     (p >= sv.len).match ({
         true  => err(.UnexpectedEof),
         false => (sv[p] == ']').match ({
-            true  => step_ok(.Arr(a.vbuf_new().vbuf_slice()), p + 1),
-            false => a.arr_loop(src, sv, p, depth, a.vbuf_new()),
+            true  => {
+                empty: JBuf<Value> := a.jbuf_new()
+                step_ok(.Arr(empty.jbuf_slice()), p + 1)
+            },
+            false => {
+                seed: JBuf<Value> := a.jbuf_new()
+                a.arr_loop(src, sv, p, depth, seed)
+            },
         }),
     })
 }
-arr_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, vb: VBuf) Result<Step, JsonError> {
+arr_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, vb: JBuf<Value>) Result<Step, JsonError> {
     a.parse_value(src, sv, p, depth + 1).match ({
         .Err(e) => err(e),
         .Ok(st) => {
-            vb2 := a.vbuf_push(vb, st.v)
+            vb2 := a.jbuf_push(vb, st.v)
             q := sv.skip_ws(st.pos)
             (q >= sv.len).match ({
                 true  => err(.UnexpectedEof),
                 false => (sv[q] == ',').match ({
                     true  => a.arr_loop(src, sv, sv.skip_ws(q + 1), depth, vb2),
                     false => (sv[q] == ']').match ({
-                        true  => step_ok(.Arr(vb2.vbuf_slice()), q + 1),
+                        true  => step_ok(.Arr(vb2.jbuf_slice()), q + 1),
                         false => err(.Unexpected(q)),
                     }),
                 }),
@@ -405,12 +372,18 @@ parse_object<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64, depth: i6
     (p >= sv.len).match ({
         true  => err(.UnexpectedEof),
         false => (sv[p] == '}').match ({
-            true  => step_ok(.Obj(Object(entries: a.ebuf_new().ebuf_slice())), p + 1),
-            false => a.obj_loop(src, sv, p, depth, a.ebuf_new()),
+            true  => {
+                empty: JBuf<Entry> := a.jbuf_new()
+                step_ok(.Obj(Object(entries: empty.jbuf_slice())), p + 1)
+            },
+            false => {
+                seed: JBuf<Entry> := a.jbuf_new()
+                a.obj_loop(src, sv, p, depth, seed)
+            },
         }),
     })
 }
-obj_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, eb: EBuf) Result<Step, JsonError> {
+obj_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, eb: JBuf<Entry>) Result<Step, JsonError> {
     (p >= sv.len).match ({
         true  => err(.UnexpectedEof),
         false => (sv[p] == '"').match ({
@@ -426,7 +399,7 @@ obj_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, eb:
                         false => a.parse_value(src, sv, q + 1, depth + 1).match ({
                             .Err(e) => err(e),
                             .Ok(st) => {
-                                eb2 := a.ebuf_push(eb, Entry(
+                                eb2 := a.jbuf_push(eb, Entry(
                                     key: ks.s,
                                     val: st.v,
                                 ))
@@ -436,7 +409,7 @@ obj_loop<A> = (a: MutPtr<A>, src: string_view, sv: [u8], p: i64, depth: i64, eb:
                                     false => (sv[r] == ',').match ({
                                         true  => a.obj_loop(src, sv, sv.skip_ws(r + 1), depth, eb2),
                                         false => (sv[r] == '}').match ({
-                                            true  => step_ok(.Obj(Object(entries: eb2.ebuf_slice())), r + 1),
+                                            true  => step_ok(.Obj(Object(entries: eb2.jbuf_slice())), r + 1),
                                             false => err(.Unexpected(r)),
                                         }),
                                     }),

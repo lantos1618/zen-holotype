@@ -40,80 +40,43 @@
 cok = (r: Result<String, IoError>) String { r.expect("std.csv: allocation failed") }
 cfin = (r: Result<string_cstr, IoError>) string_view { r.expect("std.csv: allocation failed") }
 cnew*<A> = (a: MutPtr<A>) String { a.new_in().expect("std.csv: allocation failed") }
-// ── element sizes ─────────────────────────────────────────────────────────────
-// Canonical string tokens lower directly in sizeof. A slice type is not a bare sizeof token, so its
-// header size still routes through a generic seed value.
-sizeof_of<T> = (x: T) i64 { sizeof(T) }
-str_sz = () i64 { sizeof(string_view) }
-row_sz = () i64 {
-    r: [string_view] := slice(null_ptr(), 0)
-    sizeof_of(r)
+// ── module-local growable buffer (hand-rolled Vec) ────────────────────────────
+// The field/row backbones are built here rather than through std.collections.vec (whose foreign
+// generic struct hits the cross-module monomorphization limit). One same-module generic `CBuf<T>`
+// serves both backbones: fields as `CBuf<string_view>` (one row's fields) and rows as
+// `CBuf<[string_view]>` (the row list). `T` is phantom in the fields, mirroring std.collections.Vec;
+// the element size flows through `sizeof(T)` at each same-module instantiation.
+CBuf<T>: {
+    ptr: RawPtr<u8>,
+    len: i64,
+    cap: i64,
 }
-// ── module-local growable buffers (hand-rolled Vecs) ──────────────────────────
-// The field/row backbones are built here rather than through std.collections.vec. FBuf accumulates
-// one row's fields ([string_view]); RBuf accumulates rows ([[string_view]]).
-FBuf: {
-    ptr: RawPtr<u8>,
-    len: i64,
-    cap: i64,
-}    // a growable [string_view]
-RBuf: {
-    ptr: RawPtr<u8>,
-    len: i64,
-    cap: i64,
-}    // a growable [[string_view]]
-fbuf_new<A> = (a: MutPtr<A>) FBuf {
-    FBuf(
-        ptr: a.acquire(str_sz()),
+cbuf_new<A, T> = (a: MutPtr<A>) CBuf<T> {
+    CBuf<T>(
+        ptr: a.acquire(sizeof(T)),
         len: 0,
         cap: 1,
     )
 }
-fbuf_push<A> = (a: MutPtr<A>, fb: FBuf, x: string_view) FBuf {
+cbuf_push<A, T> = (a: MutPtr<A>, cb: CBuf<T>, x: T) CBuf<T> {
     x := x
-    r := (fb.len < fb.cap).match ({
-        true  => fb,
-        false => FBuf(
-            ptr: a.resize(fb.ptr, (fb.cap * 2 + 1) * str_sz()),
-            len: fb.len,
-            cap: fb.cap * 2 + 1,
+    r := (cb.len < cb.cap).match ({
+        true  => cb,
+        false => CBuf<T>(
+            ptr: a.resize(cb.ptr, (cb.cap * 2 + 1) * sizeof(T)),
+            len: cb.len,
+            cap: cb.cap * 2 + 1,
         ),
     })
-    s: [string_view] := slice(r.ptr, r.cap)
+    s: [T] := slice(r.ptr, r.cap)
     s[r.len] = x
-    FBuf(
+    CBuf<T>(
         ptr: r.ptr,
         len: r.len + 1,
         cap: r.cap,
     )
 }
-fbuf_slice = (fb: FBuf) [string_view] { slice(fb.ptr, fb.len) }
-rbuf_new<A> = (a: MutPtr<A>) RBuf {
-    RBuf(
-        ptr: a.acquire(row_sz()),
-        len: 0,
-        cap: 1,
-    )
-}
-rbuf_push<A> = (a: MutPtr<A>, rb: RBuf, x: [string_view]) RBuf {
-    x := x
-    r := (rb.len < rb.cap).match ({
-        true  => rb,
-        false => RBuf(
-            ptr: a.resize(rb.ptr, (rb.cap * 2 + 1) * row_sz()),
-            len: rb.len,
-            cap: rb.cap * 2 + 1,
-        ),
-    })
-    s: [[string_view]] := slice(r.ptr, r.cap)
-    s[r.len] = x
-    RBuf(
-        ptr: r.ptr,
-        len: r.len + 1,
-        cap: r.cap,
-    )
-}
-rbuf_slice = (rb: RBuf) [[string_view]] { slice(rb.ptr, rb.len) }
+cbuf_slice<T> = (cb: CBuf<T>) [T] { slice(cb.ptr, cb.len) }
 // ── parse ─────────────────────────────────────────────────────────────────────
 // Decode CSV `text` into rows of fields. A single left-to-right pass over the bytes drives a small
 // state machine: `in_quotes` tracks whether we are inside a quoted field, `active` marks an
@@ -123,8 +86,8 @@ rbuf_slice = (rb: RBuf) [[string_view]] { slice(rb.ptr, rb.len) }
 // `rows`. Returns `.Err(.Eof)` if a quoted field is never closed.
 parse*<A> = (a: MutPtr<A>, text: string_view) Result<[[string_view]], IoError> {
     sv: [u8] := text.view()
-    rows: RBuf := a.rbuf_new()
-    fields: FBuf := a.fbuf_new()
+    rows: CBuf<[string_view]> := a.cbuf_new()
+    fields: CBuf<string_view> := a.cbuf_new()
     sb: String := a.cnew()
     in_quotes := false
     active := false
@@ -156,7 +119,7 @@ parse*<A> = (a: MutPtr<A>, text: string_view) Result<[[string_view]], IoError> {
                     },
                     false => (b == ',').match ({
                         true  => {
-                            fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field
+                            fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // end field
                             sb = a.cnew()
                             active = true
                             resume = i + 1
@@ -164,9 +127,10 @@ parse*<A> = (a: MutPtr<A>, text: string_view) Result<[[string_view]], IoError> {
                         false => (b == '\n').match ({
                             true  => {
                                 active.then({
-                                    fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
-                                    rows = a.rbuf_push(rows, fields.fbuf_slice())
-                                    fields = a.fbuf_new()
+                                    fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
+                                    rows = a.cbuf_push(rows, fields.cbuf_slice())
+                                    fresh: CBuf<string_view> := a.cbuf_new()
+                                    fields = fresh
                                     sb = a.cnew()
                                     active = false
                                 })    // an inactive newline (blank line / trailing LF) adds no row
@@ -192,10 +156,10 @@ parse*<A> = (a: MutPtr<A>, text: string_view) Result<[[string_view]], IoError> {
         true  => .Err(.Eof),
         false => {
             active.then({
-                fields = a.fbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
-                rows = a.rbuf_push(rows, fields.fbuf_slice())
+                fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
+                rows = a.cbuf_push(rows, fields.cbuf_slice())
             })
-            .Ok(rows.rbuf_slice())
+            .Ok(rows.cbuf_slice())
         },
     })
     out
