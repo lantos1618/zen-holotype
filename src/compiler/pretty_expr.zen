@@ -1,0 +1,421 @@
+// compiler.pretty_expr — expression / match / pattern / string-literal formatting for the AST pretty-printer.
+// Extracted from compiler.pretty (pure move): the expression walk (ff_expr), the boolean-`.match` (Cond)
+// inline/multiline trial helpers, match-arm alignment, and string-literal escaping. Mutually recursive with
+// the statement walk / declaration formatting in compiler.pretty / compiler.pretty_decl (flat-TU cycle, `*` exports).
+{ String } = std.text.string
+{ eq, is_empty, starts_with, view } = std.text.str
+{ Malloc } = std.mem.alloc
+{ ArmData, BinData, CallData, CondData, Expr, FieldInit, LambdaData, LoopData, MakeEnumData, MakeStructData, MatchData, TagData, Ty, sbyte } = compiler.genc
+{ payload_fname } = compiler.mangle
+{ ff_append, ff_block, ff_char, ff_cond, ff_flush_leading, ff_indent, ff_int, ff_open_trailing, ff_push, ff_trailing, ff_ty, ff_tys, gf_cond_open_cmt, gf_line_of, gf_pos_of } = compiler.pretty
+{ ff_lparams } = compiler.pretty_decl
+// ── precedence (mirrors the parser chain: || < && < cmp < | < ^ < & < shift < +- < */%  < postfix) ──
+// Parens are RE-INSERTED by precedence so the formatted output reparses to the SAME AST:
+//  • a Bin used as a postfix RECEIVER (`(n > 0).match(…)`, `(a + b).field`) must be wrapped — else
+//    `.match`/`.field` would bind to the right operand;
+//  • a Bin operand of a tighter-or-equal (on the right, for left-assoc) Bin must be wrapped.
+ff_is_cmp_op = (op: string_view) bool { eq(op, "==") || eq(op, "!=") || eq(op, "<") || eq(op, ">") || eq(op, "<=") || eq(op, ">=") }
+ff_is_shift_op = (op: string_view) bool { eq(op, "<<") || eq(op, ">>") }
+ff_is_add_op = (op: string_view) bool { eq(op, "+") || eq(op, "-") }
+ff_op_prec = (op: string_view) i32 {
+    eq(op, "||").match ({
+        true  => 1,
+        false => eq(op, "&&").match ({
+            true  => 2,
+            false => ff_is_cmp_op(op).match ({
+                true  => 3,
+                false => eq(op, "|").match ({
+                    true  => 4,
+                    false => eq(op, "^").match ({
+                        true  => 5,
+                        false => eq(op, "&").match ({
+                            true  => 6,
+                            false => ff_is_shift_op(op).match ({
+                                true  => 7,
+                                false => ff_is_add_op(op).match ({ true => 8, false => 9 }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
+ff_expr_prec = (e: Expr) i32 {
+    e.match ({
+        .Bin(b) => ff_op_prec(b.op),
+        _       => 100,
+    })
+}
+ff_is_bin = (e: Expr) bool {
+    e.match ({
+        .Bin(b) => true,
+        _       => false,
+    })
+}
+// a postfix receiver: wrap iff the receiver is a (lower-precedence) Bin
+ff_recv* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
+    ff_is_bin(load(e)).match ({
+        true  => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"),
+        false => s.ff_expr(a, e, ind),
+    })
+}
+ff_bin = (s: String, a: MutPtr<Malloc>, b: BinData, ind: i32) String {
+    p := ff_op_prec(b.op)
+    l := s.ff_operand(a, b.lhs, p, false, ind)
+    m := l.ff_append(a, " ").ff_append(a, b.op).ff_append(a, " ")
+    m.ff_operand(a, b.rhs, p, true, ind)
+}
+ff_operand = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, parent: i32, right: bool, ind: i32) String {
+    cp := ff_expr_prec(load(e))
+    needp := right.match ({ true => cp <= parent, false => cp < parent })
+    needp.match ({
+        true  => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"),
+        false => s.ff_expr(a, e, ind),
+    })
+}
+// ── expressions ────────────────────────────────────────────────────────────────
+ff_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
+    e.match ({
+        .Int(n)         => s.ff_int(a, n),
+        .Byte(n)        => s.ff_char(a, n),    // a Byte is ALWAYS a char literal — re-render `'x'`
+        .FloatLit(ft)   => s.ff_append(a, ft),
+        .Var(v)         => s.ff_append(a, v.name),
+        .StrLit(sl)     => s.ff_strlit(a, sl.value),
+        .Bin(b)         => s.ff_bin(a, b, ind),
+        .MethodCall(mc) => s.ff_recv(a, mc.recv, ind).ff_append(a, ".").ff_append(a, mc.method).ff_append(a, "(").ff_args(a, mc.args, ind).ff_append(a, ")"),
+        .Call(c)        => s.ff_call(a, c, ind),
+        .Cond(d)        => s.ff_cond(a, d, ind),
+        .Member(m)      => s.ff_recv(a, m.obj, ind).ff_append(a, ".").ff_append(a, m.field),
+        .Arrow(ar)      => s.ff_recv(a, ar.obj, ind).ff_append(a, ".").ff_append(a, ar.field),
+        .MakeEnum(m)    => s.ff_mkenum(a, m, ind),
+        .MakeStruct(m)  => s.ff_mkstruct(a, m, ind),
+        .Tag(t)         => s.ff_tag(a, t),
+        .Match(m)       => s.ff_match(a, m, ind),
+        .SliceLit(sd)   => s.ff_append(a, "[").ff_args(a, sd.items, ind).ff_append(a, "]"),
+        .Index(ix)      => s.ff_recv(a, ix.seq, ind).ff_append(a, "[").ff_expr(a, ix.idx, ind).ff_append(a, "]"),
+        .Loop(l)        => s.ff_loop(a, l, ind),
+        .Lambda(lm)     => s.ff_lambda(a, lm, ind),
+        .Block(b)       => s.ff_block(a, b.stmts, ind, false),
+    })
+}
+ff_args = (s: String, a: MutPtr<Malloc>, args: [Expr], ind: i32) String {
+    out := s
+    args.loop((h, i, ar) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = out.ff_expr(a, ar.addr(), ind)
+    })
+    out
+}
+ff_call = (s: String, a: MutPtr<Malloc>, c: CallData, ind: i32) String {
+    head := c.raw.match ({ true => s.ff_append(a, "@"), false => s })
+    head.ff_tyname(a, c.fn, c.targs).ff_append(a, "(").ff_args(a, c.args, ind).ff_append(a, ")")
+}
+// Bool `.match` lowers to Cond. Keep genuinely short exhaustive forms inline, but expand a long/nested
+// result exactly like an enum match instead of letting recursive `false => cond` chains become giant lines.
+// An invalid false-only match remains visible for diagnostics; true-only effects canonicalize to `.then`.
+ff_cond_inline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
+    (d.oa == 1).match ({
+        true  => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, " })"),
+        false => (d.oa == 2).match ({
+            true  => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ false => ").ff_expr(a, d.e, ind).ff_append(a, " })"),
+            false => s.ff_recv(a, d.c, ind).ff_append(a, ".match ({ true => ").ff_expr(a, d.t, ind).ff_append(a, ", false => ").ff_expr(a, d.e, ind).ff_append(a, " })"),
+        }),
+    })
+}
+ff_cond_multiline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
+    rp := gf_pos_of(d.c)
+    head := s.ff_recv(a, d.c, ind).ff_append(a, ".match ({")
+    withc := d.gf_cond_open_cmt().match ({
+        true  => head.ff_open_trailing(a, gf_line_of(rp)),
+        false => head,
+    })
+    open := withc.ff_append(a, "\n")
+    body := (d.oa == 1).match ({
+        true  => open.ff_indent(a, ind + 1).ff_append(a, "true => ").ff_expr(a, d.t, ind + 1).ff_append(a, ",\n"),
+        false => (d.oa == 2).match ({
+            true  => open.ff_indent(a, ind + 1).ff_append(a, "false => ").ff_expr(a, d.e, ind + 1).ff_append(a, ",\n"),
+            false => open.ff_indent(a, ind + 1).ff_append(a, "true  => ").ff_expr(a, d.t, ind + 1).ff_append(a, ",\n").ff_indent(a, ind + 1).ff_append(a, "false => ").ff_expr(a, d.e, ind + 1).ff_append(a, ",\n"),
+        }),
+    })
+    body.ff_indent(a, ind).ff_append(a, "})")
+}
+ff_empty_block = (e: Expr) bool {
+    e.match ({
+        .Block(b) => b.stmts.len == 0,
+        _         => false,
+    })
+}
+// Render the lazy body accepted by `.then`: a source block keeps the normal statement-block formatter;
+// a scalar true arm is wrapped into a block so the rewrite remains lazy and stable on the next fmt pass.
+ff_then_body = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
+    load(e).match ({
+        .Block(b) => s.ff_block(a, b.stmts, ind, false),
+        _         => s.ff_append(a, "{\n").ff_indent(a, ind + 1).ff_expr(a, e, ind + 1).ff_append(a, "\n").ff_indent(a, ind).ff_append(a, "}"),
+    })
+}
+ff_cond_then_negated = (d: CondData) bool { d.oa == 2 || d.oa == 0 && ff_empty_block(load(d.t)) && ff_empty_block(load(d.e)) == false }
+ff_then* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
+    neg := d.ff_cond_then_negated()
+    recv := neg.match ({
+        true  => s.ff_append(a, "(").ff_recv(a, d.c, ind).ff_append(a, " == false)"),
+        false => s.ff_recv(a, d.c, ind),
+    })
+    body := neg.match ({ true => d.e, false => d.t })
+    recv.ff_append(a, ".then(").ff_then_body(a, body, ind).ff_append(a, ")")
+}
+// `fmt` is the mechanical fix for either illegal one-arm spelling and for exhaustive matches whose other
+// arm is explicitly empty. A false-only effect becomes `(condition == false).then({ ... })`.
+ff_cond_is_then* = (d: CondData) bool { d.oa != 0 || d.oa == 0 && (ff_empty_block(load(d.e)) || ff_empty_block(load(d.t))) }
+// Exact column measurement for the width-sensitive inline Cond trial. `first_col` includes whatever the
+// caller already emitted on the current line; rendered newlines reset the column because their indentation
+// is already present in the trial String.
+ff_fits_width* = (s: String, first_col: i32, max_col: i32) bool {
+    i := 0
+    col := first_col
+    @while (i < s.len) {
+        (load(offset(s.ptr, i)) == '\n').match ({
+            true  => {
+                col = 0
+            },
+            false => {
+                col = col + 1
+                (col > max_col).then({
+                    return false
+                })
+            },
+        })
+        i = i + 1
+    }
+    true
+}
+ff_current_col* = (s: String) i32 {
+    i := s.len
+    col := 0
+    @while (i > 0 && load(offset(s.ptr, i - 1)) != '\n') {
+        col = col + 1
+        i = i - 1
+    }
+    col
+}
+ff_nested_control = (e: Expr) bool {
+    e.match ({
+        .Cond(d)  => true,
+        .Match(m) => true,
+        _         => false,
+    })
+}
+ff_cond_nested* = (d: CondData) bool { d.oa != 2 && ff_nested_control(load(d.t)) || d.oa != 1 && ff_nested_control(load(d.e)) }
+// a type name, with explicit `<T, …>` args when this is a GENERIC literal (`Rc<Node>`, `Box<i32>`) —
+// the parser records the args in `targs`, and dropping them would lose the type info monomorphization
+// needs (the literal becomes `Rc(…)` → T uninferable → wrong/void element type).
+ff_tyname = (s: String, a: MutPtr<Malloc>, name: string_view, targs: [Ty]) String {
+    (targs.len > 0).match ({
+        true  => s.ff_append(a, name).ff_append(a, "<").ff_tys(a, targs).ff_append(a, ">"),
+        false => s.ff_append(a, name),
+    })
+}
+// a MakeStruct literal that is really a synthesized multi-field variant payload — `__anon…` name with
+// ordered positional field inits `_0, _1, …` (see the decl-side ff_anon_payload_fields). A constructor
+// `Ask(a, b, c)` desugars to `.Ask(__anon…(_0: a, _1: b, _2: c))`; recognising it lets ff_mkenum print
+// the surface argument list `(a, b, c)` back instead of leaking the internal struct literal.
+ff_is_anon_positional_inits = (a: MutPtr<Malloc>, ms: MakeStructData) bool {
+    ms.ty.starts_with("__anon").match ({
+        true  => (ms.inits.len == 0).match ({
+            true  => false,
+            false => {
+                ok := true
+                ms.inits.loop((h, i, fi) {
+                    ok = ok && eq(fi.name, a.payload_fname(to_i32(i)))
+                })
+                ok
+            },
+        }),
+        false => false,
+    })
+}
+ff_anon_ctor_args = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
+    out := s
+    inits.loop((h, i, fi) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = out.ff_expr(a, fi.value, ind)
+    })
+    out
+}
+// `.variant(payload)` (or `Ty.variant(payload)` when the enum type is explicit)
+ff_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData, ind: i32) String {
+    head := is_empty(m.ty).match ({
+        true  => s.ff_append(a, "."),
+        false => s.ff_tyname(a, m.ty, m.targs).ff_append(a, "."),
+    })
+    open := head.ff_append(a, m.variant).ff_append(a, "(")
+    m.payload.match ({
+        .MakeStruct(ms) => a.ff_is_anon_positional_inits(ms).match ({
+            true  => open.ff_anon_ctor_args(a, ms.inits, ind).ff_append(a, ")"),
+            false => open.ff_expr(a, m.payload, ind).ff_append(a, ")"),
+        }),
+        _               => open.ff_expr(a, m.payload, ind).ff_append(a, ")"),
+    })
+}
+ff_tag = (s: String, a: MutPtr<Malloc>, t: TagData) String {
+    is_empty(t.ty).match ({
+        true  => s.ff_append(a, ".").ff_append(a, t.variant),
+        false => s.ff_tyname(a, t.ty, t.targs).ff_append(a, ".").ff_append(a, t.variant),
+    })
+}
+// struct literal `Ty(f: v, …)` — split one field per line when there is more than one field.
+ff_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData, ind: i32) String {
+    (m.inits.len > 1).match ({
+        true  => {
+            open := s.ff_tyname(a, m.ty, m.targs).ff_append(a, "(\n")
+            body := open.ff_struct_fields(a, m.inits, ind + 1)
+            body.ff_indent(a, ind).ff_append(a, ")")
+        },
+        false => s.ff_tyname(a, m.ty, m.targs).ff_append(a, "(").ff_struct_inline(a, m.inits, ind).ff_append(a, ")"),
+    })
+}
+ff_struct_inline = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
+    out := s
+    inits.loop((h, i, fi) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = out.ff_append(a, fi.name).ff_append(a, ": ").ff_expr(a, fi.value, ind)
+    })
+    out
+}
+ff_struct_fields = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
+    out := s
+    inits.loop((h, i, fi) {
+        out = out.ff_indent(a, ind).ff_append(a, fi.name).ff_append(a, ": ").ff_expr(a, fi.value, ind).ff_append(a, ",\n")
+    })
+    out
+}
+// foreach: `seq.loop((h, i, x) { body })`
+ff_loop = (s: String, a: MutPtr<Malloc>, l: LoopData, ind: i32) String {
+    head := s.ff_recv(a, l.seq, ind).ff_append(a, ".loop((").ff_append(a, l.h).ff_append(a, ", ").ff_append(a, l.idx).ff_append(a, ", ").ff_append(a, l.elem).ff_append(a, ") ")
+    head.ff_block(a, l.body, ind, false).ff_append(a, ")")
+}
+// the declared return type `(x) U {…}` is printed back when the source wrote one. lm.ret is Void when
+// unannotated, so a written `(x) void {…}` formats to the equivalent bare `(x) {…}`.
+ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String {
+    sig := s.ff_append(a, "(").ff_lparams(a, lm.params).ff_append(a, ") ")
+    ret := lm.ret.match ({
+        .Void => sig,
+        _     => sig.ff_ty(a, lm.ret).ff_append(a, " "),
+    })
+    ret.ff_block(a, lm.body, ind, true)
+}
+// ── match: split each arm onto its own line, `=>` aligned, trailing comma ───────
+arm_pat_len = (a: MutPtr<Malloc>, ar: ArmData) i32 {
+    eq(ar.variant, "_").match ({
+        true  => 1,
+        false => is_empty(ar.bind).match ({
+            true  => 1 + to_i32(view(ar.variant).len),
+            false => 3 + to_i32(view(ar.variant).len) + to_i32(view(ar.bind).len),
+        }),
+    })
+}
+arms_max_pat = (a: MutPtr<Malloc>, arms: [ArmData]) i32 {
+    m := 0
+    arms.loop((h, i, ar) {
+        w := a.arm_pat_len(ar)
+        m = (w > m).match ({ true => w, false => m })
+    })
+    m
+}
+ff_arm_pat = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
+    eq(ar.variant, "_").match ({
+        true  => s.ff_append(a, "_"),
+        false => is_empty(ar.bind).match ({
+            true  => s.ff_append(a, ".").ff_append(a, ar.variant),
+            false => s.ff_append(a, ".").ff_append(a, ar.variant).ff_append(a, "(").ff_append(a, ar.bind).ff_append(a, ")"),
+        }),
+    })
+}
+ff_pad = (s: String, a: MutPtr<Malloc>, n: i32) String { (n <= 0).match ({
+    true  => s,
+    false => s.ff_append(a, " ").ff_pad(a, n - 1),
+}) }
+ff_match = (s: String, a: MutPtr<Malloc>, m: MatchData, ind: i32) String {
+    maxw := a.arms_max_pat(m.arms)
+    open := s.ff_recv(a, m.subj, ind).ff_append(a, ".match ({\n")
+    body := open.ff_arms(a, m.arms, maxw, ind + 1)
+    body.ff_indent(a, ind).ff_append(a, "})")
+}
+// an arm's representative offset = its PATTERN byte offset (the `.Variant` / `_` token), recorded by the
+// parser — used to anchor a comment written ABOVE the arm and to bound an arm's trailing comment. The
+// pattern position is always present even when the arm body is a position-less literal (`.None => 0`),
+// which a body-derived offset would miss. 0 only for a synthesized arm (no source) → defers.
+gf_arm_pos = (ar: ArmData) i32 { ar.pos }
+// the first POSITIVE body offset among arms[from..] (0 = none) — a boundary that stops strictly before
+// the match's closing `})` (which carries no position here), so an arm's woven comment can never steal a
+// comment that sits after the whole `.match (...)` (e.g. the match statement's own trailing comment).
+gf_next_arm_pos = (arms: [ArmData], from: i32) i32 {
+    (from >= arms.len).then({
+        return 0
+    })
+    p := gf_arm_pos(arms[from])
+    (p > 0).match ({ true => p, false => gf_next_arm_pos(arms, from + 1) })
+}
+// Comments are woven into the arm list the same way ff_stmts weaves them into a block: each arm flushes
+// the own-line comments written ABOVE it (bounded by its own offset), then — when a later positioned arm
+// gives a real upper bound — emits a same-line trailing comment. The next-arm bound is what keeps a
+// trailing comment from migrating out to after the enclosing decl's `})` (the reported relocation bug),
+// and makes re-formatting idempotent (a trailing comment always re-attaches to the same arm).
+ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) String {
+    out := s
+    arms.loop((h, i, ar) {
+        nb := gf_next_arm_pos(arms, i + 1)
+        lead := out.ff_flush_leading(a, gf_arm_pos(ar), ind)
+        line := lead.ff_indent(a, ind).ff_arm_pat(a, ar)
+        padded := line.ff_pad(a, maxw - a.arm_pat_len(ar))
+        bodied := padded.ff_append(a, " => ").ff_expr(a, ar.body, ind).ff_append(a, ",")
+        withc := (nb > 0).match ({ true => bodied.ff_trailing(a, nb), false => bodied })
+        out = withc.ff_append(a, "\n")
+    })
+    out
+}
+// ── string literal escaping ────────────────────────────────────────────────────
+// A non-printable byte as a `\xNN` hex escape — the ONLY numeric string escape the Zen lexer accepts
+// (parse_expr.unescape reads `\xNN`; there is no octal form, so genc's `\ooo` cannot be reused here).
+ffhex = (d: i64) u8 { sbyte("0123456789abcdef", d) }
+ff_hex_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
+    n := b.to_i64()
+    s.ff_append(a, "\\x").ff_push(a, ffhex(n / 16)).ff_push(a, ffhex(n % 16))
+}
+// escape one byte for a Zen string literal. `"`/`\` are quoted; the common control bytes get their short
+// escapes (\n \r \t); printable ASCII (0x20..0x7E) AND high UTF-8 bytes (>=0x80, valid multibyte text like
+// an em-dash) pass through verbatim; every remaining byte — the C0 controls (CR was the bug #62, plus \t
+// and the other invisibles) and DEL (0x7F) — is emitted as `\xNN`. Result: no raw invisible control byte
+// ever lands in .zen source (fmt output is stable + the CI fmt-check gate can't be silently broken by a
+// stray CR), the parsed value round-trips exactly, and readable UTF-8 text in string literals stays raw.
+ff_escape_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
+    (b == '"').match ({
+        true  => s.ff_append(a, "\\\""),
+        false => (b == '\\').match ({
+            true  => s.ff_append(a, "\\\\"),
+            false => (b == '\n').match ({
+                true  => s.ff_append(a, "\\n"),
+                false => (b == '\r').match ({
+                    true  => s.ff_append(a, "\\r"),
+                    false => (b == '\t').match ({
+                        true  => s.ff_append(a, "\\t"),
+                        false => (b >= ' ' && b <= '~' || b >= 128).match ({
+                            true  => s.ff_push(a, b),
+                            false => s.ff_hex_byte(a, b),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
+ff_strlit = (s: String, a: MutPtr<Malloc>, v: string_view) String { s.ff_append(a, "\"").ff_escape_from(a, v, 0).ff_append(a, "\"") }
+ff_escape_from = (s: String, a: MutPtr<Malloc>, v: string_view, i: i32) String {
+    acc := s
+    k := i
+    @while (sbyte(v, k) != 0) {
+        acc = acc.ff_escape_byte(a, sbyte(v, k))
+        k = k + 1
+    }
+    acc
+}    // ITERATIVE: formatting a ~50KB string literal is O(n) iteration, not O(n) C-stack recursion
