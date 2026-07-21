@@ -14,8 +14,12 @@
 { view, eq, is_empty } = std.text.str
 { render_diagnostic } = compiler.diagnostic
 { getEnv } = std.os
+// Extracted internal helper families (shared types + this pipeline stay here; see each module head).
+{ enforce_visibility, enforce_private_leaks, vis_report_mode } = std.internal.resolve_vis
+{ enforce_ffi_grants, genmod_lookup } = std.internal.resolve_ffi
+{ shadow_flat, shadow_flat_users, ShadowFlat, ShadowUsers } = std.internal.resolve_shadow
 is_ws = (b: u8) bool { b == ' ' || b == '\t' }
-lstrip = (s: string_view, p: i32) i32 { at(s, p).is_ws().match ({
+lstrip* = (s: string_view, p: i32) i32 { at(s, p).is_ws().match ({
     true  => s.lstrip(p + 1),
     false => p,
 }) }
@@ -64,7 +68,7 @@ import_end = (s: string_view, p: i32) i32 { s.next_line(s.import_marker_from(s.l
 // Position just past the next '\n' at or after `p` (end-of-string if none). Iterates a sub-slice that
 // starts at `p` — NOT a scan from 0, and NOT recursive — so walking a file line-by-line is O(n) total
 // with constant stack.
-next_line = (s: string_view, p: i32) i32 {
+next_line* = (s: string_view, p: i32) i32 {
     bs: [u8] := s.view()
     pos := p
     (p < to_i32(bs.len)).then({
@@ -132,9 +136,9 @@ RewriteSkip: {
     out: String,
     next: i32,
 }
-line_comment_at = (s: string_view, p: i32) bool { s.at(p) == '/' && s.at(p + 1) == '/' }
-block_comment_at = (s: string_view, p: i32) bool { s.at(p) == '/' && s.at(p + 1) == '*' }
-quoted_at = (s: string_view, p: i32) bool { s.at(p) == '"' || s.at(p) == '\'' }
+line_comment_at* = (s: string_view, p: i32) bool { s.at(p) == '/' && s.at(p + 1) == '/' }
+block_comment_at* = (s: string_view, p: i32) bool { s.at(p) == '/' && s.at(p + 1) == '*' }
+quoted_at* = (s: string_view, p: i32) bool { s.at(p) == '"' || s.at(p) == '\'' }
 copy_line_comment = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) RewriteSkip {
     cur := out
     pos := p
@@ -342,10 +346,10 @@ import_id = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     })
     cur
 }
-id_is_user = (id: String) bool { id.len >= 2 && id.res_sbyte(0) == 'u' && id.res_sbyte(1) == '/' }
-id_is_std_io_c = (id: String) bool { id.len == 8 && id.res_sbyte(0) == 's' && id.res_sbyte(1) == 't' && id.res_sbyte(2) == 'd' && id.res_sbyte(3) == '/' && id.res_sbyte(4) == 'i' && id.res_sbyte(5) == 'o' && id.res_sbyte(6) == '/' && id.res_sbyte(7) == 'c' }
+id_is_user* = (id: String) bool { id.len >= 2 && id.res_sbyte(0) == 'u' && id.res_sbyte(1) == '/' }
+id_is_std_io_c* = (id: String) bool { id.len == 8 && id.res_sbyte(0) == 's' && id.res_sbyte(1) == 't' && id.res_sbyte(2) == 'd' && id.res_sbyte(3) == '/' && id.res_sbyte(4) == 'i' && id.res_sbyte(5) == 'o' && id.res_sbyte(6) == '/' && id.res_sbyte(7) == 'c' }
 // String-backed line set: `name\n` entries, scanned without per-name allocation.
-res_sbyte = (s: String, i: i64) u8 { load(offset(s.ptr, i)) }
+res_sbyte* = (s: String, i: i64) u8 { load(offset(s.ptr, i)) }
 line_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
     (j == m).match ({
         true  => set.res_sbyte(i) == '\n',
@@ -364,7 +368,7 @@ seen_scan = (set: String, name: String, i: i64) bool {
         }),
     })
 }
-snext_line = (set: String, i: i64) i64 {
+snext_line* = (set: String, i: i64) i64 {
     (i >= set.len).match ({
         true  => set.len,
         false => (set.res_sbyte(i) == '\n').match ({
@@ -381,13 +385,13 @@ add_name* = (set: String, a: MutPtr<Malloc>, name: String) String { set.rappend_
 // mint, so a content-hashed Map matches the old explicit-length String comparison byte-for-byte. The
 // "" seed is a sentinel: identifiers are never empty, so it is never a real query. Val is a presence
 // marker (0); membership is by key.
-rset_new = (a: MutPtr<Malloc>) Map<i64> {
+rset_new* = (a: MutPtr<Malloc>) Map<i64> {
     seed: i64 := 0 - 1
     of(a, "", seed).expect("std.internal.resolve: rset alloc")
 }
-rset_add = (m: Map<i64>, a: MutPtr<Malloc>, key: String) Map<i64> { m.put(a, cstr(key.ptr), 0).expect("std.internal.resolve: rset alloc") }
+rset_add* = (m: Map<i64>, a: MutPtr<Malloc>, key: String) Map<i64> { m.put(a, cstr(key.ptr), 0).expect("std.internal.resolve: rset alloc") }
 rset_add_str = (m: Map<i64>, a: MutPtr<Malloc>, name: string_view) Map<i64> { m.put(a, name, 0).expect("std.internal.resolve: rset alloc") }
-rset_has = (m: Map<i64>, key: String) bool { m.has(cstr(key.ptr)) }
+rset_has* = (m: Map<i64>, key: String) bool { m.has(cstr(key.ptr)) }
 copy_from = (out: String, a: MutPtr<Malloc>, src: String, i: i64) String {
     cur := out
     (i >= src.len == false).then({
@@ -399,7 +403,7 @@ copy_from = (out: String, a: MutPtr<Malloc>, src: String, i: i64) String {
 // resolve's allocator-first String helpers now delegate to compiler.genc's canonical generic
 // gstr_* builder (one implementation for the whole compiler). The only difference is the arg
 // convention: m* take the allocator first (s.gstr_push(a, b)); gstr_* take the String first.
-mappend_string = (a: MutPtr<Malloc>, out: String, src: String) String {
+mappend_string* = (a: MutPtr<Malloc>, out: String, src: String) String {
     cur := out
     bs: [u8] := src.bytes()
     bs.loop((h, i, b) {
@@ -438,10 +442,10 @@ mappend_span = (a: MutPtr<Malloc>, out: String, s: string_view, p: i32, e: i32) 
     cur
 }
 rpush = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
-rappend = (s: String, a: MutPtr<Malloc>, t: string_view) String { s.gstr_append(a, t) }
-rappend_string = (s: String, a: MutPtr<Malloc>, src: String) String { a.mappend_string(s, src) }
+rappend* = (s: String, a: MutPtr<Malloc>, t: string_view) String { s.gstr_append(a, t) }
+rappend_string* = (s: String, a: MutPtr<Malloc>, src: String) String { a.mappend_string(s, src) }
 rcopy_from = (s: String, a: MutPtr<Malloc>, src: String, i: i64) String { a.mcopy_from(s, src, i) }
-rappend_span = (s: String, a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) String { a.mappend_span(s, src, p, e) }
+rappend_span* = (s: String, a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) String { a.mappend_span(s, src, p, e) }
 mcopy_id_dotted = (a: MutPtr<Malloc>, out: String, id: String, i: i64) String {
     cur := out
     bs: [u8] := id.bytes()
@@ -459,7 +463,7 @@ mcopy_id_dotted = (a: MutPtr<Malloc>, out: String, id: String, i: i64) String {
     })
     cur
 }
-mappend_id_name = (a: MutPtr<Malloc>, out: String, id: String) String {
+mappend_id_name* = (a: MutPtr<Malloc>, out: String, id: String) String {
     cur := out
     id.id_is_user().match ({
         true  => {
@@ -471,7 +475,7 @@ mappend_id_name = (a: MutPtr<Malloc>, out: String, id: String) String {
     })
     cur
 }
-madd_name = (a: MutPtr<Malloc>, set: String, name: String) String {
+madd_name* = (a: MutPtr<Malloc>, set: String, name: String) String {
     hs := a.mappend_string(set, name)
     hs.gstr_push(a, 10)
 }
@@ -526,9 +530,9 @@ ProvidedSymbol*: {
 // queries (visibility scans) and escaped import-head queries (check_head) hit the same entry —
 // exactly the pair `symbol_matches` accepted. Insertion is first-occurrence-wins (put-if-absent),
 // matching the old first-match array scans.
-SIG_PUB := 1
-SIG_TYPE := 2
-SIG_IMPORTED := 4
+SIG_PUB* := 1
+SIG_TYPE* := 2
+SIG_IMPORTED* := 4
 SIG_FOREIGN := 8
 ModuleSig*: {
     names: Map<i64>,
@@ -683,12 +687,12 @@ ModuleLoad: {
 // The REAL libc prototype is `void exit(int)` — declaring it `i32` here was FFI drift (caught by
 // `make ffi-verify`, and std.io.c's AST libc table already said tvoid). `die` is the value-position
 // form: exit never returns, so the 0 only exists to give a match arm / tail expression a value.
-exit = (code: i32) void
-die = (code: i32) i32 {
+exit* = (code: i32) void
+die* = (code: i32) i32 {
     exit(code)
     0
 }
-eprint = (s: string_view) i64 {
+eprint* = (s: string_view) i64 {
     v := view(s)
     write(2, v.ptr, v.len)
 }
@@ -1037,8 +1041,8 @@ import_edges*<A> = (a: MutPtr<A>, src: string_view) Result<[ImportEdge], IoError
         .Err(e)  => err(e),
     })
 }
-edge_id_in = (e: ImportEdge, a: MutPtr<Malloc>) String { a.gstr_string(24).gstr_append(a, e.module) }
-edge_alias_in = (e: ImportEdge, a: MutPtr<Malloc>) String { a.gstr_string(16).gstr_append(a, e.alias) }
+edge_id_in* = (e: ImportEdge, a: MutPtr<Malloc>) String { a.gstr_string(24).gstr_append(a, e.module) }
+edge_alias_in* = (e: ImportEdge, a: MutPtr<Malloc>) String { a.gstr_string(16).gstr_append(a, e.alias) }
 edge_id = (e: ImportEdge, a: MutPtr<Malloc>) String { e.edge_id_in(a) }
 fail_unknown_name = (a: MutPtr<Malloc>, inpath: string_view, nm: String, id: String) i32 {
     msg0 := a.gstr_string(160).gstr_append(a, "zenc: ").gstr_append(a, inpath).gstr_append(a, ": error: unknown name '")
@@ -1635,7 +1639,7 @@ value_symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [Provided
 // Map-set forms of imported_value_names / value_symbol_names_into_in — same filters, O(1)-membership
 // presence sets for shadow_rename_set (see rset_*). value_symbol_name_set keys on `sym.name` (the raw
 // clean identifier), matching the original allnames String that shadow_mangled(key) is looked up against.
-imported_value_name_set = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
+imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur := m
     symbols.loop((h, idx, sym) {
         (sym.imported && sym.is_type.match ({ true => false, false => true })).then({
@@ -1644,7 +1648,7 @@ imported_value_name_set = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSym
     })
     cur
 }
-value_symbol_name_set = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
+value_symbol_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur := m
     symbols.loop((h, idx, sym) {
         (sym.symbol_allowed(false, false) && sym.is_type.match ({ true => false, false => true })).then({
@@ -1665,8 +1669,8 @@ span_eq_lit = (s: string_view, p: i32, e: i32, lit: string_view, i: i32) bool {
 }
 span_eq_name = (s: string_view, p: i32, e: i32, lit: string_view) bool { s.span_eq_lit(p, e, lit, 0) }
 is_c_kw_name_span = (s: string_view, p: i32, e: i32) bool { s.span_eq_name(p, e, "double") || s.span_eq_name(p, e, "short") || s.span_eq_name(p, e, "long") || s.span_eq_name(p, e, "int") || s.span_eq_name(p, e, "char") || s.span_eq_name(p, e, "float") || s.span_eq_name(p, e, "unsigned") || s.span_eq_name(p, e, "signed") || s.span_eq_name(p, e, "union") || s.span_eq_name(p, e, "struct") || s.span_eq_name(p, e, "enum") || s.span_eq_name(p, e, "typedef") || s.span_eq_name(p, e, "static") || s.span_eq_name(p, e, "extern") || s.span_eq_name(p, e, "const") || s.span_eq_name(p, e, "volatile") || s.span_eq_name(p, e, "register") || s.span_eq_name(p, e, "auto") || s.span_eq_name(p, e, "inline") || s.span_eq_name(p, e, "restrict") || s.span_eq_name(p, e, "if") || s.span_eq_name(p, e, "else") || s.span_eq_name(p, e, "for") || s.span_eq_name(p, e, "while") || s.span_eq_name(p, e, "do") || s.span_eq_name(p, e, "switch") || s.span_eq_name(p, e, "case") || s.span_eq_name(p, e, "default") || s.span_eq_name(p, e, "goto") || s.span_eq_name(p, e, "void") || s.span_eq_name(p, e, "continue") || s.span_eq_name(p, e, "break") }
-mimport_name_span = (a: MutPtr<Malloc>, flat: string_view, p: i32, e: i32) String { a.mappend_span(a.gstr_string(16), flat, p, e) }
-mimport_head_name = (a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) String {
+mimport_name_span* = (a: MutPtr<Malloc>, flat: string_view, p: i32, e: i32) String { a.mappend_span(a.gstr_string(16), flat, p, e) }
+mimport_head_name* = (a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) String {
     raw := a.mimport_name_span(src, p, e)
     out := raw
     src.is_c_kw_name_span(p, e).then({
@@ -1781,7 +1785,7 @@ fui_scan = (out: String, a: MutPtr<Malloc>, src: string_view, p: i32) String {
 // Per-name dedup keeps user shadowing visible for validation. Repo-internal
 // std/compiler entry modules may own a natural export name over dependency
 // closures, because their dependencies are implementation details.
-res_ident_end = (flat: string_view, p: i32) i32 { flat.at(p).is_alnum().match ({
+res_ident_end* = (flat: string_view, p: i32) i32 { flat.at(p).is_alnum().match ({
     true  => flat.res_ident_end(p + 1),
     false => p,
 }) }
@@ -1791,7 +1795,7 @@ import_name_span = (out: String, a: MutPtr<Malloc>, flat: string_view, p: i32, e
         false => out.rpush(a, flat.at(p)).import_name_span(a, flat, p + 1, e),
     })
 }
-append_to_nul = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
+append_to_nul* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     cur := out
     bs: [u8] := s.view()
     bs.loop((h, i, b) {
@@ -2077,7 +2081,7 @@ rewrite_alias_copy = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, na
         }),
     })
 }
-rewrite_alias_names = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, names: String, alias: String) String {
+rewrite_alias_names* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, names: String, alias: String) String {
     cur := out
     pos := p
     bs: [u8] := s.str_bytes()
@@ -2154,7 +2158,7 @@ alias_module_body = (a: MutPtr<Malloc>, src: string_view, graph: ModuleGraph, al
     note_alias_prefix(a.gstr_string(16).rappend_string(a, alias).gstr_finish(a))
     a.gstr_string(4096).rewrite_alias_names(a, body, 0, names, alias)
 }
-line_name = (out: String, a: MutPtr<Malloc>, names: String, i: i64) String {
+line_name* = (out: String, a: MutPtr<Malloc>, names: String, i: i64) String {
     (i >= names.len || names.res_sbyte(i) == '\n').match ({
         true  => out,
         false => out.rpush(a, names.res_sbyte(i)).line_name(a, names, i + 1),
@@ -2415,656 +2419,6 @@ check_all_parsed_modules_kind* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
     })
     acc
 }
-// ── VISIBILITY: `*` exports are ENFORCED across modules (error[private-name]) ─────────────────────
-// A top-level name is cross-module visible only when its declaration carries the `*` export marker
-// (`name* = …`, `Type*: …`, `GLOBAL* := …`). Both consumption forms are checked per module, over the
-// ORIGINAL module sources, so the diagnostic points at the exact user line:col:
-//   • flat import heads:    `{ hidden } = mod`                    → error[private-name] at `hidden`
-//   • alias-qualified uses: `m = mod` + `m.hidden(…)`/`m.Hidden`  → error[private-name] at `hidden`
-// A name the target module itself only IMPORTS stays importable (transitive re-export is the one
-// sanctioned pass-through; visibility is decided at the DEFINING module's head). `c = std.io.c`-style
-// aliases skip the qualified scan: their qualifiers are stripped wholesale (strip_all_quals), the
-// module is a raw libc surface. ZEN_VIS_REPORT=1 downgrades the error to a report-only sweep (print
-// every violation, never exit) — the migration mode used to prove the tree clean before enforcing.
-vis_report_mode = () bool { is_empty(getEnv("ZEN_VIS_REPORT")).match ({
-    true  => false,
-    false => true,
-}) }
-vis_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, pos: i32, width: i32, name: String, id: String, report: bool) i32 {
-    line := src.res_line_of(pos)
-    col := src.res_col_of(pos)
-    m0 := a.gstr_string(192).gstr_append(a, "`")
-    m1 := a.mappend_string(m0, name)
-    m2 := m1.gstr_append(a, "` is private in module '")
-    m3 := a.mappend_id_name(m2, id)
-    msg := m3.gstr_append(a, "' (its declaration has no `*` export)").gstr_finish(a)
-    h0 := a.gstr_string(128).gstr_append(a, "export it with `")
-    h1 := a.mappend_string(h0, name)
-    hint := h1.gstr_append(a, "*` in the defining module, or use the module's public surface").gstr_finish(a)
-    eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-name", msg, hint, 1))
-    report.match ({ true => 0, false => die(1) })
-}
-// flat import head `{ a, b } = mod` at line start `p`: every name must be exported by `mod`.
-vis_check_head = (a: MutPtr<Malloc>, path: string_view, src: string_view, p: i32, target: ModuleGraph, id: String, report: bool) i32 {
-    pos := src.lstrip(p) + 1
-    bs: [u8] := src.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < pos == false).then({
-            (b == '}' || b == 0).match ({
-                true  => {
-                    h.break
-                },
-                false => b.is_alpha().match ({
-                    true  => {
-                        ie := src.res_ident_end(pos)
-                        hd := a.mimport_head_name(src, pos, ie)
-                        target.sig.private(hd.gstr_finish(a)).then({
-                            a.vis_fail(path, src, pos, ie - pos, a.mimport_name_span(src, pos, ie), id, report)
-                        })
-                        pos = ie
-                    },
-                    false => {
-                        pos = pos + 1
-                    },
-                }),
-            })
-        })
-    })
-    0
-}
-// skip past a (possibly unterminated) `/* … */` block comment without copying.
-vis_skip_block = (s: string_view, p: i32) i32 {
-    pos := p + 2
-    bs: [u8] := s.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < pos == false).then({
-            (b == 0).match ({
-                true  => {
-                    h.break
-                },
-                false => (b == '*' && s.at(ii + 1) == '/').match ({
-                    true  => {
-                        pos = ii + 2
-                        h.break
-                    },
-                    false => {
-                        pos = ii + 1
-                    },
-                }),
-            })
-        })
-    })
-    pos
-}
-// skip past a quoted literal (string or char) without copying, honoring escapes.
-vis_skip_lit = (s: string_view, p: i32) i32 {
-    q := s.at(p)
-    pos := p
-    esc := false
-    bs: [u8] := s.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < pos == false).then({
-            (b == 0).match ({
-                true  => {
-                    h.break
-                },
-                false => {
-                    pos = pos + 1
-                    esc.match ({
-                        true  => {
-                            esc = false
-                        },
-                        false => (b == '\\').match ({
-                            true  => {
-                                esc = true
-                            },
-                            false => (ii > p && b == q).then({
-                                h.break
-                            }),
-                        }),
-                    })
-                },
-            })
-        })
-    })
-    pos
-}
-// s[p..e) == w, byte-exact (idents are short; recursion is bounded).
-vis_span_eq_at = (s: string_view, p: i32, e: i32, w: String, j: i64) bool {
-    (p + to_i32(j) == e).match ({
-        true  => j == w.len,
-        false => (j < w.len && s.at(p + to_i32(j)) == w.res_sbyte(j)).match ({
-            true  => s.vis_span_eq_at(p, e, w, j + 1),
-            false => false,
-        }),
-    })
-}
-// alias-qualified uses `alias.name` in `src`: `name` must be exported by the aliased module.
-// Comment/string spans are skipped; the ident-boundary + dot shape mirrors rewrite_quals exactly,
-// so anything the rewriter WOULD have resolved is what gets visibility-checked.
-vis_scan_quals = (a: MutPtr<Malloc>, path: string_view, src: string_view, alias: String, target: ModuleGraph, id: String, report: bool) i32 {
-    pos := 0
-    bs: [u8] := src.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < pos == false).then({
-            (b == 0).match ({
-                true  => {
-                    h.break
-                },
-                false => src.line_comment_at(pos).match ({
-                    true  => {
-                        pos = src.next_line(pos)
-                    },
-                    false => src.block_comment_at(pos).match ({
-                        true  => {
-                            pos = src.vis_skip_block(pos)
-                        },
-                        false => src.quoted_at(pos).match ({
-                            true  => {
-                                pos = src.vis_skip_lit(pos)
-                            },
-                            false => (b.is_alpha() && (pos == 0 || src.at(pos - 1).is_alnum().match ({
-                                true  => false,
-                                false => true,
-                            }))).match ({
-                                true  => {
-                                    ie := src.res_ident_end(pos)
-                                    (src.vis_span_eq_at(pos, ie, alias, 0) && src.at(ie) == '.' && src.at(ie + 1).is_alpha()).match ({
-                                        true  => {
-                                            me := src.res_ident_end(ie + 1)
-                                            nm := a.mimport_name_span(src, ie + 1, me)
-                                            target.sig.private(nm.gstr_finish(a)).then({
-                                                a.vis_fail(path, src, ie + 1, me - ie - 1, a.mimport_name_span(src, ie + 1, me), id, report)
-                                            })
-                                            pos = me
-                                        },
-                                        false => {
-                                            pos = ie
-                                        },
-                                    })
-                                },
-                                false => {
-                                    pos = pos + 1
-                                },
-                            }),
-                        }),
-                    }),
-                }),
-            })
-        })
-    })
-    0
-}
-vis_enforce_edge = (a: MutPtr<Malloc>, table: ModuleTable, path: string_view, src: string_view, edge: ImportEdge, report: bool) i32 {
-    id := edge.edge_id_in(a)
-    table.has_id(id).match ({
-        true  => {
-            entry := table.module_id(id)
-            edge.namespace.match ({
-                true  => id.id_is_std_io_c().match ({
-                    true  => 0,
-                    false => a.vis_scan_quals(path, src, edge.edge_alias_in(a), entry.graph, id, report),
-                }),
-                false => a.vis_check_head(path, src, edge.start, entry.graph, id, report),
-            })
-        },
-        false => 0,
-    })
-}
-enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 {
-    table.modules.loop((h, i, entry) {
-        entry.graph.imports.loop((h2, j, edge) {
-            a.vis_enforce_edge(table, entry.path, entry.source, edge, report)
-        })
-    })
-    0
-}
-// ── error[private-leak]: an EXPORTED value decl must not EXPOSE a private type ───────────────────
-// The per-name wall above cannot see one hole: an exported (`*`) fn whose SIGNATURE names a type
-// the SAME module defines but does NOT export (`mk* = () Secret { … }` with a private `Secret:`).
-// The importer never writes the private name, so error[private-name] stays silent — yet it now
-// holds a value whose type it cannot name. Every non-entry module in the table (the modules whose
-// exports someone can actually import; the entry's exports leak to nobody) gets each exported
-// value decl's signature scanned over the ORIGINAL module source, so the diagnostic carries the
-// user's file:line:col at the offending type use. An ident in TYPE position — after `:` in the
-// param list / generic bounds, or in the return-type region between the params' closing `)` and
-// the body `{` (bodyless foreign decls run to the decl end), recursing naturally through
-// Ptr/MutPtr/RawPtr/slice/generic arguments because every ident inside a type expression is a
-// type — is looked up in the module's OWN sig: recorded as a TYPE, neither exported nor imported
-// → error[private-leak]. Types from OTHER modules never hit (absent from this sig, or
-// SIG_IMPORTED = the sanctioned transitive re-export); builtins / primitives / generic params are
-// absent the same way. `.`-qualified idents are skipped (a qualified type lives behind an alias,
-// i.e. in another module, by construction). Internal (std/compiler) sources are scanned too — the
-// tree is clean, so no internal gate. ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly
-// like error[private-name].
-sig_private_type = (s: ModuleSig, name: string_view) bool {
-    f := s.names.get(name, 0 - 1)
-    (f < 0).match ({
-        true  => false,
-        false => f / SIG_TYPE % 2 == 1 && f / SIG_PUB % 2 == 0 && f / SIG_IMPORTED % 2 == 0,
-    })
-}
-leak_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, pos: i32, width: i32, fname: string_view, tname: String, report: bool) i32 {
-    line := src.res_line_of(pos)
-    col := src.res_col_of(pos)
-    m0 := a.gstr_string(192).gstr_append(a, "exported `").gstr_append(a, fname).gstr_append(a, "` exposes private type `")
-    msg := a.mappend_string(m0, tname).gstr_append(a, "`").gstr_finish(a)
-    h0 := a.gstr_string(128).gstr_append(a, "export `")
-    hint := a.mappend_string(h0, tname).gstr_append(a, "*` or make `").gstr_append(a, fname).gstr_append(a, "` private").gstr_finish(a)
-    eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-leak", msg, hint, 1))
-    report.match ({ true => 0, false => die(1) })
-}
-// ONE exported value decl's signature, scanned textually (mirroring vis_scan_quals: comment/quote
-// spans are skipped). A tiny state machine tracks TYPE position: `:` opens a type expression at
-// the current nesting depth (`:=` is a value initializer — nothing after it is a signature type,
-// the scan stops; a bare `=` whose RHS is not a param list `(` stops the same way), `,` at the
-// opening depth or any dedent below it closes it, and the params' closing `)` back at depth 0
-// opens the return-type region, which runs to the body `{`.
-leak_scan_decl = (a: MutPtr<Malloc>, path: string_view, src: string_view, sym: ProvidedSymbol, sig: ModuleSig, report: bool) i32 {
-    pos := src.res_ident_end(sym.start) + 1    // past `name*`
-    (pos < sym.decl_next).then({
-        base := pos
-        depth := 0
-        in_type := false
-        tdepth := 0
-        span: [u8] := slice(src.offset(base), to_i64(sym.decl_next - base))
-        span.loop((h, i, b) {
-            ii := base + to_i32(i)
-            (ii < pos == false).then({
-                src.line_comment_at(ii).match ({
-                    true  => {
-                        pos = src.next_line(ii)
-                    },
-                    false => src.block_comment_at(ii).match ({
-                        true  => {
-                            pos = src.vis_skip_block(ii)
-                        },
-                        false => src.quoted_at(ii).match ({
-                            true  => {
-                                pos = src.vis_skip_lit(ii)
-                            },
-                            false => (b == 0 || b == '{').match ({
-                                true  => {
-                                    h.break
-                                },
-                                false => b.is_alpha().match ({
-                                    true  => {
-                                        ie := src.res_ident_end(ii)
-                                        (in_type && src.at(ii - 1) != '.').then({
-                                            nm := a.mimport_name_span(src, ii, ie)
-                                            sig.sig_private_type(nm.gstr_finish(a)).then({
-                                                a.leak_fail(path, src, ii, ie - ii, sym.name, a.mimport_name_span(src, ii, ie), report)
-                                            })
-                                        })
-                                        pos = ie
-                                    },
-                                    false => {
-                                        pos = ii + 1
-                                        (b == '(' || b == '[' || b == '<').then({
-                                            depth = depth + 1
-                                        })
-                                        (b == ']' || b == '>').then({
-                                            depth = depth - 1
-                                            (depth < tdepth).then({
-                                                in_type = false
-                                            })
-                                        })
-                                        (b == ')').then({
-                                            depth = depth - 1
-                                            (depth < tdepth).then({
-                                                in_type = false
-                                            })
-                                            (depth == 0).then({
-                                                in_type = true    // the params closed: the return-type region opens
-                                                tdepth = 0
-                                            })
-                                        })
-                                        (b == ',' && depth == tdepth).then({
-                                            in_type = false
-                                        })
-                                        // `:=` is a value initializer, and so is a bare `=` whose RHS
-                                        // is not a param list `(` — no signature follows either: stop.
-                                        (b == ':').then({
-                                            (src.at(ii + 1) == '=').match ({
-                                                true  => {
-                                                    h.break
-                                                },
-                                                false => {
-                                                    in_type = true
-                                                    tdepth = depth
-                                                },
-                                            })
-                                        })
-                                        (b == '=').then({
-                                            in_type = false
-                                            (src.at(src.lstrip(ii + 1)) == '(' == false).then({
-                                                h.break
-                                            })
-                                        })
-                                    },
-                                }),
-                            }),
-                        }),
-                    }),
-                })
-            })
-        })
-    })
-    0
-}
-enforce_private_leaks* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 {
-    table.modules.loop((h, i, entry) {
-        (i > 0).then({
-            entry.graph.symbols.loop((h2, j, sym) {
-                (sym.is_pub && (sym.imported || sym.is_type) == false).then({
-                    a.leak_scan_decl(entry.path, entry.source, sym, entry.graph.sig, report)
-                })
-            })
-        })
-    })
-    0
-}
-// ── error[ffi-ungranted]: FFI is a BUILD-GRANTED capability ──────────────────────────────────────
-// A bodyless (foreign) declaration binds a raw C symbol — any module holding one can reach ANY
-// linked C function (`system`, `unlink`, …). The supply-chain hole: a TRANSITIVE dependency could
-// declare an extern and shell out without the build ever saying so. So foreign declarations are
-// gated per MODULE by an explicit build grant, one of:
-//   • zen.toml:            ffi = "vendor.hooks, util"     (comma-separated dotted module ids)
-//   • build.zen:           b.exe(…).ffi("vendor.hooks")   (the Target's grant field)
-//   • entry-file pragma:   //! ffi: vendor.hooks          (single-file programs; ENTRY file only)
-// Implicitly trusted, no grant needed: repo-tree modules (non-`u/` ids — std./compiler., the audited
-// stdlib IS the sanctioned FFI surface) and the ENTRY module itself (an extern in the program's own
-// file is visible to its author; the threat model is dependencies, not the program). Only fn-shaped
-// decls (`name = (…) Ret`, no body) count as foreign here — a bare module global (`X := 5`) also
-// scans as "has `=`, no `{`" but is not an FFI surface. The driver stamps the manifest/registry
-// grants into the module-level cell below before resolving (see uregions_reset for the pattern);
-// the entry pragma is read from the entry SOURCE directly, so it folds into content-keyed caches
-// for free. ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly like error[private-name].
-ffi_no_grants = () string_view { "" }
-ffi_grants := ffi_no_grants()
-ffi_grants_set* = (g: string_view) void { ffi_grants = g }
-ffi_grants_get* = () string_view { ffi_grants }
-// ── registered c_library genmods: an EXPLICIT (dotted id → generated path) map ───────────────────
-// build.zen's `exe.use(c_library(b, CLib(…)))` materializes a generated FFI module under the
-// project's .zen/gen/ dir; the driver stamps the mapping here (exactly like ffi_grants above)
-// BEFORE probe and resolve. module_path consults this map FIRST for user ids, so the lookup order
-// is unambiguous: registered genmod path, then the ordinary <progdir>/<segs>.zen mapping. Format:
-// one `<dotted-id> <path>` pair per line, newline-terminated.
-genmods := ffi_no_grants()
-genmods_set* = (g: string_view) void { genmods = g }
-genmods_get* = () string_view { genmods }
-gm_word_end = (s: string_view, p: i32) i32 {
-    (s.at(p) == 0 || s.at(p) == ' ' || s.at(p) == '\n').match ({
-        true  => p,
-        false => s.gm_word_end(p + 1),
-    })
-}
-// first `<dotted> <path>` registry line whose id matches → the path (own copy); "" when unregistered.
-gm_find = (a: MutPtr<Malloc>, g: string_view, p: i32, dotted: string_view) string_view {
-    (g.at(p) == 0).match ({
-        true  => "",
-        false => {
-            we := g.gm_word_end(p)
-            le := g.ffi_line_end(we)
-            g.ffi_span_eq(p, we, dotted, 0).match ({
-                true  => a.gstr_string(64).rappend_span(a, g, we + 1, le).gstr_finish(a),
-                false => (g.at(le) == 0).match ({
-                    true  => "",
-                    false => a.gm_find(g, le + 1, dotted),
-                }),
-            })
-        },
-    })
-}
-// the registered-genmod path for a USER module id, or "" (std/compiler ids never match the map).
-genmod_lookup = (a: MutPtr<Malloc>, id: String) string_view {
-    id.id_is_user().match ({
-        true  => {
-            dotted := a.mappend_id_name(a.gstr_string(24), id).gstr_finish(a)
-            a.gm_find(genmods, 0, dotted)
-        },
-        false => "",
-    })
-}
-ffi_delim = (b: u8) bool { b == ',' || b == ' ' || b == '\t' || b == '\r' }
-// s[p..e) == w, byte-exact (w is NUL-terminated; ids are short, recursion is bounded).
-ffi_span_eq = (s: string_view, p: i32, e: i32, w: string_view, j: i32) bool {
-    (p + j == e).match ({
-        true  => w.at(j) == 0,
-        false => (w.at(j) == 0).match ({
-            true  => false,
-            false => (s.at(p + j) == w.at(j)).match ({
-                true  => s.ffi_span_eq(p, e, w, j + 1),
-                false => false,
-            }),
-        }),
-    })
-}
-ffi_token_end = (s: string_view, p: i32, e: i32) i32 { (p >= e || ffi_delim(s.at(p))).match ({
-    true  => p,
-    false => s.ffi_token_end(p + 1, e),
-}) }
-// does the grant list s[p..e) contain the token `name`? (delimiters: comma / whitespace)
-ffi_list_has = (s: string_view, p: i32, e: i32, name: string_view) bool {
-    (p >= e).match ({
-        true  => false,
-        false => ffi_delim(s.at(p)).match ({
-            true  => s.ffi_list_has(p + 1, e, name),
-            false => {
-                te := s.ffi_token_end(p, e)
-                s.ffi_span_eq(p, te, name, 0).match ({
-                    true  => true,
-                    false => s.ffi_list_has(te, e, name),
-                })
-            },
-        }),
-    })
-}
-ffi_line_end = (s: string_view, p: i32) i32 { (s.at(p) == 0 || s.at(p) == '\n').match ({
-    true  => p,
-    false => s.ffi_line_end(p + 1),
-}) }
-FFI_PRAGMA = () string_view { "//! ffi:" }
-// does the ENTRY source carry a `//! ffi: modid, modid` pragma line granting `name`?
-ffi_pragma_has = (src: string_view, name: string_view) bool {
-    found := false
-    pos := 0
-    bs: [u8] := src.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < pos == false).then({
-            found.match ({
-                true  => {
-                    h.break
-                },
-                false => {
-                    src.ffi_span_eq(ii, ii + 8, FFI_PRAGMA(), 0).then({
-                        found = src.ffi_list_has(ii + 8, src.ffi_line_end(ii + 8), name)
-                    })
-                    pos = src.next_line(ii)
-                },
-            })
-        })
-    })
-    found
-}
-ffi_skip_sp = (s: string_view, p: i32) i32 {
-    (s.at(p) == ' ' || s.at(p) == '\t' || s.at(p) == '\n' || s.at(p) == '\r').match ({
-        true  => s.ffi_skip_sp(p + 1),
-        false => p,
-    })
-}
-// a foreign FUNCTION decl reads `name[*] = (…` — the textual `foreign` scan flag alone also catches
-// module globals (`X := 5` has `=` and no `{`), which are NOT an FFI surface.
-ffi_foreign_fn = (src: string_view, sym: ProvidedSymbol) bool {
-    sym.foreign.match ({
-        true  => {
-            p := (src.at(sym.next) == '*').match ({ true => sym.next + 1, false => sym.next })
-            q := src.ffi_skip_sp(p)
-            (src.at(q) == '=').match ({
-                true  => src.at(src.ffi_skip_sp(q + 1)) == '(',
-                false => false,
-            })
-        },
-        false => false,
-    })
-}
-ffi_dotted_id = (a: MutPtr<Malloc>, id: string_view) string_view { a.mappend_mid_display(a.gstr_string(24), id).gstr_finish(a) }
-ffi_module_granted = (mainsrc: string_view, dotted: string_view) bool {
-    g := ffi_grants
-    g.ffi_list_has(0, to_i32(g.view().len), dotted) || mainsrc.ffi_pragma_has(dotted)
-}
-ffi_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, sym: ProvidedSymbol, dotted: string_view, report: bool) i32 {
-    line := src.res_line_of(sym.start)
-    col := src.res_col_of(sym.start)
-    msg := a.gstr_string(192).gstr_append(a, "module '").gstr_append(a, dotted).gstr_append(a, "' declares foreign function `").gstr_append(a, sym.name).gstr_append(a, "` without a build grant").gstr_finish(a)
-    hint := a.gstr_string(192).gstr_append(a, "grant it: `ffi = \"").gstr_append(a, dotted).gstr_append(a, "\"` in zen.toml, or `//! ffi: ").gstr_append(a, dotted).gstr_append(a, "` in the entry file").gstr_finish(a)
-    eprint(a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1))
-    report.match ({ true => 0, false => die(1) })
-}
-enforce_ffi_grants* = (a: MutPtr<Malloc>, table: ModuleTable, mainsrc: string_view, report: bool) i32 {
-    table.modules.loop((h, i, entry) {
-        (i > 0 && entry.id.mid_is_user()).then({
-            dotted := a.ffi_dotted_id(entry.id)
-            (mainsrc.ffi_module_granted(dotted) == false).then({
-                entry.graph.symbols.loop((h2, j, sym) {
-                    entry.source.ffi_foreign_fn(sym).then({
-                        a.ffi_fail(entry.path, entry.source, sym, dotted, report)
-                    })
-                })
-            })
-        })
-    })
-    0
-}
-// ── user-name shadow rename ────────────────────────────────────────────────────────────────────
-// THE #1 newcomer bounce: a user's top-level helper (`len`/`split`/`map`/…) collides with a
-// same-named PUBLIC decl pulled in TRANSITIVELY by an import the user never named (e.g. `std.io.file`
-// drags in `std.text.str`, which exports `len*`). In the flat single-symbol namespace both decls
-// survive → dup-fn (and a real C redefinition). Dropping the std decl is UNSAFE — std internals call
-// it (`str.trim_prefix` itself calls `prefix.len()`), so the user's `len` would hijack std's. Instead
-// we give the USER's colliding decl a distinct identity: rename it (and its in-body refs, bare + UFCS)
-// to `zshadow__name`, exactly like a namespace-qualified decl — the whole std closure stays byte-for-byte
-// untouched, the user's module simply shadows the unimported export. The `zshadow__`-prefix form is what
-// diagnostic.zen's alias-`__`-removal inverse already un-mangles, so errors still render the user's name.
-// Only fires for USER programs (never internal sources → seed unchanged) and only when it is provably
-// safe (see shadow_rename_set). check_module never sees two same-named decls, so no dup-fn fires.
-shadow_alias_of = (a: MutPtr<Malloc>) String { a.gstr_string(16).gstr_append(a, "zshadow") }
-// per-region alias for USER-MODULE renames: `zshadow0`, `zshadow1`, … — the region index keeps two
-// modules that shadow the SAME std name (each defining its own `len`) from colliding on one mangled form.
-shadow_alias_idx = (a: MutPtr<Malloc>, idx: i64) String { a.gstr_string(20).gstr_append(a, "zshadow").res_udec(a, to_i32(idx)) }
-shadow_mangled = (a: MutPtr<Malloc>, alias: String, name: String) String { a.gstr_string(alias.len + name.len + 4).rappend_string(a, alias).rappend(a, "__").rappend_string(a, name) }
-// the renameable set plus its unrenameable remainder (see shadow_name_sets).
-ShadowSets: {
-    ren: String,
-    bad: String,
-}
-// The sets of module-body value-decl names for the region [lo,hi). `ren` — the names to rename — holds
-// each name that is a value decl (not a type, not an import binding) defined EXACTLY ONCE in the region
-// (a name defined twice is a real user-vs-user dup → keep the error), whose name ALSO exists as a
-// non-imported value decl OUTSIDE the region (the transitive/std export), that the module did NOT import
-// by name, and whose mangled form is not already taken. `bad` holds the colliding names whose mangled
-// form IS taken — those cannot be renamed, and silence is never allowed, so region callers fail loudly.
-shadow_name_sets = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], modsrc: string_view, lo: i64, hi: i64, alias: String) ShadowSets {
-    imported := a.imported_value_name_set(a.rset_new(), a.module_graph(modsrc).symbols)
-    allnames := a.value_symbol_name_set(a.rset_new(), syms)
-    mainseen := a.rset_new()
-    maindup := a.rset_new()
-    nonmain := a.rset_new()
-    syms.loop((h, i, s) {
-        ((s.imported || s.foreign || s.is_type) == false).then({
-            key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
-            (s.decl_start >= lo && s.decl_start < hi).match ({
-                true  => mainseen.rset_has(key).match ({
-                    true  => {
-                        maindup = maindup.rset_add(a, key)
-                    },
-                    false => {
-                        mainseen = mainseen.rset_add(a, key)
-                    },
-                }),
-                false => (nonmain.rset_has(key) == false).then({
-                    nonmain = nonmain.rset_add(a, key)
-                }),
-            })
-        })
-    })
-    // `out` stays the newline-delimited String the rewrite consumes; `outset` is its O(1) `fresh` mirror.
-    out := a.gstr_string(64)
-    bad := a.gstr_string(16)
-    outset := a.rset_new()
-    syms.loop((h, i, s) {
-        ((s.imported || s.foreign || s.is_type) == false).then({
-            key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
-            inmain := s.decl_start >= lo && s.decl_start < hi
-            once := mainseen.rset_has(key) && maindup.rset_has(key).match ({
-                true  => false,
-                false => true,
-            })
-            unimported := imported.rset_has(key).match ({ true => false, false => true })
-            free := allnames.rset_has(a.shadow_mangled(alias, key)).match ({
-                true  => false,
-                false => true,
-            })
-            fresh := outset.rset_has(key).match ({ true => false, false => true })
-            collide := inmain && once && nonmain.rset_has(key) && unimported
-            (collide && free && fresh).then({
-                out = a.madd_name(out, key)
-                outset = outset.rset_add(a, key)
-            })
-            (collide && free == false).then({
-                bad = a.madd_name(bad, key)
-            })
-        })
-    })
-    ShadowSets(
-        ren: out,
-        bad: bad,
-    )
-}
-// main-body form: the historical entry point (alias `zshadow`, unrenameable remainder ignored — a
-// kept main-body dup still surfaces as the checker's dup-fn).
-shadow_rename_set = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], mainsrc: string_view, lo: i64, hi: i64) String { a.shadow_name_sets(syms, mainsrc, lo, hi, a.shadow_alias_of()).ren }
-ShadowFlat*: {
-    flat: string_view,
-    bodyend: i64,
-    renamed: bool,
-}
-// Given the pre-dedup flat, rename the user's colliding decls in the body region [lo,hi) and return the
-// rewritten flat plus the shifted body end. `enable` is false for internal sources (byte-identical no-op).
-shadow_flat = (a: MutPtr<Malloc>, pre: string_view, presyms: [ProvidedSymbol], mainsrc: string_view, lo: i64, hi: i64, enable: bool) ShadowFlat {
-    enable.match ({
-        true  => {
-            names := a.shadow_rename_set(presyms, mainsrc, lo, hi)
-            (names.len == 0).match ({
-                true  => ShadowFlat(
-                    flat: pre,
-                    bodyend: hi,
-                    renamed: false,
-                ),
-                false => {
-                    main := a.gstr_string(hi - lo + 1).rappend_span(a, pre, to_i32(lo), to_i32(hi)).gstr_finish(a)
-                    rewS := a.gstr_string(4096).rewrite_alias_names(a, main, 0, names, a.shadow_alias_of())
-                    nf := a.gstr_string(4096).rappend_span(a, pre, 0, to_i32(lo)).rappend_string(a, rewS).append_to_nul(a, pre, to_i32(hi)).gstr_finish(a)
-                    ShadowFlat(
-                        flat: nf,
-                        bodyend: lo + rewS.len,
-                        renamed: true,
-                    )
-                },
-            })
-        },
-        false => ShadowFlat(
-            flat: pre,
-            bodyend: hi,
-            renamed: false,
-        ),
-    })
-}
 // ── USER-MODULE region registry ─────────────────────────────────────────────────────────────────
 // The main-body guard above only protects decls in [nsl, bodyend) — a NON-MAIN user module whose own
 // top-level decl collides with an unimported transitive std export used to lose that decl SILENTLY
@@ -3072,7 +2426,7 @@ shadow_flat = (a: MutPtr<Malloc>, pre: string_view, presyms: [ProvidedSymbol], m
 // module's stripped body span in the append-only flat is recorded here during closure load, so
 // shadow_flat_users can run the same guarded rename per module. Reset per program (see
 // alias_prefixes_reset for the pattern); internal builds never read it (enable=false → seed unchanged).
-UserRegion: {
+UserRegion*: {
     id: string_view,
     lo: i64,
     hi: i64,
@@ -3095,7 +2449,7 @@ note_uregion = (id: string_view, lo: i64, hi: i64) void {
         uregion_n = uregion_n + 1
     })
 }
-uregions_get = () [UserRegion] { slice(uregion_buf.ptr, uregion_n) }
+uregions_get* = () [UserRegion] { slice(uregion_buf.ptr, uregion_n) }
 // ── FLAT-REGION / LINE map (identity-based diagnostics) ─────────────────────────────────────────
 // Every module-body append into the flat records a FlatRegion, and the strip walk records — for each
 // KEPT line — its 1-based line in the module's ORIGINAL source (import/ns lines are stripped whole,
@@ -3199,7 +2553,7 @@ note_fregion = (a: MutPtr<Malloc>, midx: i64, lo: i64, hi: i64, line_lo: i64) vo
 // A shadow-rename splice replaced flat[slo, shi) with `newlen` bytes: renames are strictly inside
 // decls (never a newline), so only BYTE coords move — the containing region's hi stretches and every
 // later region shifts; line maps are untouched.
-fregions_splice = (slo: i64, shi: i64, newlen: i64) void {
+fregions_splice* = (slo: i64, shi: i64, newlen: i64) void {
     delta := newlen - (shi - slo)
     (lmap_on && delta != 0).then({
         regs := fregions_get()
@@ -3373,7 +2727,7 @@ fregion_src_line* = (regions: [FlatRegion], line_srcs: [i32], flat: string_view,
     })
 }
 // name-decl offset of `nm` in a module's ORIGINAL source graph (for error line/col attribution).
-symbol_start_of = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: string_view) i32 {
+symbol_start_of* = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: string_view) i32 {
     posn := 0
     syms.loop((h, i, s) {
         ((s.imported || s.foreign || s.is_type) == false && posn == 0).then({
@@ -3386,7 +2740,7 @@ symbol_start_of = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: string_view) i
     posn
 }
 // does the import head `{ a, b, … }` starting at edge offset `p0` bind `nm` by name?
-edge_head_has_name = (src: string_view, p0: i32, nm: string_view) bool {
+edge_head_has_name* = (src: string_view, p0: i32, nm: string_view) bool {
     found := false
     pos := src.lstrip(p0) + 1
     bs: [u8] := src.view()
@@ -3414,133 +2768,7 @@ edge_head_has_name = (src: string_view, p0: i32, nm: string_view) bool {
     })
     found
 }
-// error[dup-fn], anchored at the USER module's own definition: the decl collides with an unimported
-// closure export AND another module imports it from here by name — renaming would silently misbind
-// the importer, and dropping either copy is silent misbinding too, so reject loudly with the fix.
-fail_shadow_import = (a: MutPtr<Malloc>, entry: ModuleEntry, importer: string_view, nm: string_view) i32 {
-    pos := a.symbol_start_of(entry.graph.symbols, nm)
-    line := entry.source.res_line_of(pos)
-    col := entry.source.res_col_of(pos)
-    m0 := a.gstr_string(320).gstr_append(a, "zenc: ").gstr_append(a, entry.path).gstr_push(a, ':').res_udec(a, line).gstr_push(a, ':').res_udec(a, col).gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `").gstr_append(a, nm).gstr_push(a, '`')
-    l1 := m0.gstr_push(a, 10)
-    d0 := l1.gstr_append(a, "  `").gstr_append(a, nm).gstr_append(a, "` also exists in this module's import closure (an export it never imported by name), and `")
-    d1 := eq(importer, "").match ({
-        true  => d0.gstr_append(a, "your program"),
-        false => a.mappend_id_str_dotted(d0, importer),
-    })
-    d2 := d1.gstr_append(a, "` imports `").gstr_append(a, nm).gstr_append(a, "` from this module — the definition cannot be shadow-renamed")
-    l2 := d2.gstr_push(a, 10)
-    h0 := l2.gstr_append(a, "hint: rename `").gstr_append(a, nm).gstr_append(a, "`, or import this module under a namespace alias and qualify the call")
-    eprint(h0.gstr_push(a, 10).gstr_finish(a))
-    exit(1)
-    0
-}
-// error[dup-fn] for a colliding decl whose mangled shadow form is already taken (never silent).
-fail_shadow_mangled = (a: MutPtr<Malloc>, entry: ModuleEntry, bad: String, alias: String) i32 {
-    nm := line_name(a.gstr_string(16), a, bad, 0).gstr_finish(a)
-    pos := a.symbol_start_of(entry.graph.symbols, nm)
-    line := entry.source.res_line_of(pos)
-    col := entry.source.res_col_of(pos)
-    m0 := a.gstr_string(320).gstr_append(a, "zenc: ").gstr_append(a, entry.path).gstr_push(a, ':').res_udec(a, line).gstr_push(a, ':').res_udec(a, col).gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `").gstr_append(a, nm).gstr_push(a, '`')
-    l1 := m0.gstr_push(a, 10)
-    d0 := l1.gstr_append(a, "  `").gstr_append(a, nm).gstr_append(a, "` collides with an unimported name from this module's import closure, and its shadow form `")
-    d1 := a.mappend_string(d0, alias).gstr_append(a, "__").gstr_append(a, nm).gstr_append(a, "` is already taken")
-    l2 := d1.gstr_push(a, 10)
-    h0 := l2.gstr_append(a, "hint: rename `").gstr_append(a, nm).gstr_push(a, '`')
-    eprint(h0.gstr_push(a, 10).gstr_finish(a))
-    exit(1)
-    0
-}
-// reject when ANY other module imports a to-be-renamed name from `entry` by name (see fail_shadow_import).
-shadow_guard_one = (a: MutPtr<Malloc>, table: ModuleTable, entry: ModuleEntry, nm: string_view) i32 {
-    table.modules.loop((h, i, m) {
-        (eq(m.id, entry.id) == false).then({
-            m.graph.imports.loop((h2, j, e) {
-                (e.namespace == false && eq(e.module, entry.id)).then({
-                    m.source.edge_head_has_name(e.start, nm).then({
-                        a.fail_shadow_import(entry, m.id, nm)
-                    })
-                })
-            })
-        })
-    })
-    0
-}
-shadow_guard_names = (a: MutPtr<Malloc>, table: ModuleTable, entry: ModuleEntry, names: String, i: i64) i32 {
-    (i >= names.len).match ({
-        true  => 0,
-        false => {
-            nm := line_name(a.gstr_string(16), a, names, i).gstr_finish(a)
-            a.shadow_guard_one(table, entry, nm)
-            a.shadow_guard_names(table, entry, names, names.snext_line(i))
-        },
-    })
-}
-ShadowUsers: {
-    flat: string_view,
-    shift: i64,
-    renamed: bool,
-}
-// Per-USER-MODULE shadow pass: every recorded region gets the same guarded rename as the main body,
-// so a module's own top-level value decl wins over an unimported transitive std/compiler export.
-// Regions are processed LAST-to-FIRST (descending offset) so earlier offsets stay valid; regions at
-// or past `prebodylen` were shifted by the main-body rewrite (`maindelta`), and rewrites BEFORE the
-// ns-prefix end `nsl` shift the main-body window by the returned `shift`. Internal sources pass
-// through untouched (enable=false — the self-host flat stays byte-identical).
-shadow_flat_users = (a: MutPtr<Malloc>, pre: string_view, table: ModuleTable, prebodylen: i64, maindelta: i64, nsl: i64, enable: bool) ShadowUsers {
-    regions := uregions_get()
-    (enable && regions.len > 0).match ({
-        true  => {
-            cur := pre
-            shift := 0
-            renamed := false
-            syms := a.module_graph(cur).symbols
-            n := regions.len
-            regions.loop((h, i, r0) {
-                idx := n - 1 - i
-                r := regions[idx]
-                adj := (r.lo < prebodylen).match ({ true => 0, false => maindelta })
-                lo := r.lo + adj
-                hi := r.hi + adj
-                entry := table.module(r.id)
-                alias := a.shadow_alias_idx(idx)
-                ss := a.shadow_name_sets(syms, entry.source, lo, hi, alias)
-                (ss.bad.len > 0).then({
-                    a.fail_shadow_mangled(entry, ss.bad, alias)
-                })
-                (ss.ren.len > 0).then({
-                    a.shadow_guard_names(table, entry, ss.ren, 0)
-                    seg := a.gstr_string(hi - lo + 1).rappend_span(a, cur, to_i32(lo), to_i32(hi)).gstr_finish(a)
-                    rew := a.gstr_string(4096).rewrite_alias_names(a, seg, 0, ss.ren, alias)
-                    cur = a.gstr_string(4096).rappend_span(a, cur, 0, to_i32(lo)).rappend_string(a, rew).append_to_nul(a, cur, to_i32(hi)).gstr_finish(a)
-                    fregions_splice(lo, hi, rew.len)
-                    (hi <= nsl).then({
-                        shift = shift + (rew.len - (hi - lo))
-                    })
-                    renamed = true
-                    syms = a.module_graph(cur).symbols
-                })
-            })
-            ShadowUsers(
-                flat: cur,
-                shift: shift,
-                renamed: renamed,
-            )
-        },
-        false => ShadowUsers(
-            flat: pre,
-            shift: 0,
-            renamed: false,
-        ),
-    })
-}
-// ── import-then-redefine attribution ────────────────────────────────────────────────────────────
-// A module that imports a name BY NAME (`{ len } = std.text.str`) and ALSO defines it locally is a
-// genuine dup — but the checker's dup-fn anchors at the LATER decl in flat order, which is the
-// LIBRARY's line (main-body decls precede their dependencies' bodies). Catch the shape at resolve
-// time instead: point at the USER's definition line and name the import. Runs for the entry module
-// and user modules only (internal builds skip the caller entirely).
-mid_is_user = (id: string_view) bool { id.at(0) == 'u' && id.at(1) == '/' }
+mid_is_user* = (id: string_view) bool { id.at(0) == 'u' && id.at(1) == '/' }
 fail_import_redef = (a: MutPtr<Malloc>, m: ModuleEntry, s: ProvidedSymbol, nm: String) i32 {
     line := m.source.res_line_of(s.start)
     col := m.source.res_col_of(s.start)
@@ -3584,7 +2812,7 @@ check_import_redefs = (a: MutPtr<Malloc>, table: ModuleTable) i32 {
 // unqualified somewhere in the closure — the exact conjunction that produces the divergent copies.
 // Programs that alias non-split modules, or split modules that are never also imported bare, are
 // unaffected (no false rejections).
-res_line_of = (src: string_view, off: i32) i32 {
+res_line_of* = (src: string_view, off: i32) i32 {
     no := 1
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
@@ -3600,7 +2828,7 @@ res_line_of = (src: string_view, off: i32) i32 {
     })
     no
 }
-res_col_of = (src: string_view, off: i32) i32 {
+res_col_of* = (src: string_view, off: i32) i32 {
     ls := 0
     bs: [u8] := src.view()
     bs.loop((h, i, b) {
@@ -3616,7 +2844,7 @@ res_col_of = (src: string_view, off: i32) i32 {
     })
     off - ls + 1
 }
-res_udec = (out: String, a: MutPtr<Malloc>, n: i32) String {
+res_udec* = (out: String, a: MutPtr<Malloc>, n: i32) String {
     (n < 10).match ({
         true  => out.gstr_push(a, ('0'.to_i64() + to_i64(n)).to_u8()),
         false => out.res_udec(a, n / 10).gstr_push(a, ('0'.to_i64() + to_i64(n % 10)).to_u8()),
@@ -3732,7 +2960,7 @@ find_split_call_site = (a: MutPtr<Malloc>, table: ModuleTable, modid: string_vie
     })
     res
 }
-mappend_id_str_dotted = (a: MutPtr<Malloc>, out: String, id: string_view) String {
+mappend_id_str_dotted* = (a: MutPtr<Malloc>, out: String, id: string_view) String {
     cur := out
     bs: [u8] := id.view()
     bs.loop((h, i, b) {
@@ -3789,7 +3017,7 @@ check_alias_collisions = (a: MutPtr<Malloc>, table: ModuleTable, graph: ModuleGr
 // in the table are searched (the import closure — exactly the modules whose exports bleed through
 // the flat under an alias prefix, the collision-adjacent confusion this hint retires). Returns ""
 // when no module exports the name (the caller keeps the generic hint).
-mappend_mid_display = (a: MutPtr<Malloc>, out: String, id: string_view) String {
+mappend_mid_display* = (a: MutPtr<Malloc>, out: String, id: string_view) String {
     id.mid_is_user().match ({
         true  => a.mappend_id_str_dotted(out, cstr(offset(id, 2))),
         false => a.mappend_id_str_dotted(out, id),
