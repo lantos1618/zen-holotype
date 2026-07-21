@@ -6,13 +6,13 @@
 
 BOOT := $(MAKE) -f bootstrap/Makefile
 
-.PHONY: all zenc regen harness harness-fast difftest docs-check ffi-verify clean setup-git resolve-seed
+.PHONY: all zen regen harness harness-fast difftest docs-check ffi-verify clean setup-git resolve-seed
 
-# Default: build ./zenc.
-all: zenc
+# Default: build ./zen.
+all: zen
 
-zenc:
-	$(BOOT) zenc
+zen:
+	$(BOOT) zen
 
 regen:
 	$(BOOT) regen

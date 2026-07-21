@@ -4,8 +4,8 @@
 # zenc.gen.c is the committed C emitted from the Zen compiler sources plus driver.zen. NO Python is
 # in this loop.
 #
-#   make -f bootstrap/Makefile zenc     # build the standalone compiler binary
-#   make -f bootstrap/Makefile regen    # rebuild zenc, then regenerate zenc.gen.c with it
+#   make -f bootstrap/Makefile zen      # build the standalone compiler binary
+#   make -f bootstrap/Makefile regen    # rebuild zen, then regenerate zenc.gen.c with it
 #
 # `regen` reproduces the committed bootstrap/zenc.gen.c byte-for-byte (the fixpoint), via the
 # binary's --build-self mode — the old generator path, but with zero Python.
@@ -28,31 +28,31 @@ endif
 # Apple Clang treats generated forward calls as errors unless this diagnostic
 # is made non-fatal. (The runtime itself defines macOS's ucontext feature macro.)
 CFLAGS  ?= -std=gnu11 -Wno-error=implicit-function-declaration -fwrapv -w
-ZENC    := $(ROOT)/zenc
+ZENC    := $(ROOT)/zen
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zenc regen clean harness harness-fast difftest docs-check ffi-verify setup-git resolve-seed
+.PHONY: zen regen clean harness harness-fast difftest docs-check ffi-verify setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
-# an unchanged `make zenc` must only check mtimes, not recompile the ~7 MB generated C seed. The
+# an unchanged `make zen` must only check mtimes, not recompile the ~7 MB generated C seed. The
 # Makefile is also a prerequisite because changing its default compiler flags must rebuild the binary.
-zenc: $(ZENC)
+zen: $(ZENC)
 
 # Build to a per-builder pid temp then atomically `mv` it into place: two concurrent `make` runs (e.g.
 # parallel `make harness`) each compile their own temp and never see a half-written `$(ZENC)`, since a
-# direct `cc -o $(ZENC)` truncates-then-writes and a racing `./zenc` exec could hit a partial binary.
+# direct `cc -o $(ZENC)` truncates-then-writes and a racing `./zen` exec could hit a partial binary.
 $(ZENC): $(SOURCES) $(HEADERS) $(HERE)Makefile
 	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC).$$$$.tmp && mv -f $(ZENC).$$$$.tmp $(ZENC)
 
 # Regenerate through a PID-specific temp and replace the seed only when its bytes changed. A fixpoint
-# regen must preserve zenc.gen.c's mtime; otherwise the following `make zenc` recompiles ~7 MB of
+# regen must preserve zenc.gen.c's mtime; otherwise the following `make zen` recompiles ~7 MB of
 # identical C for no reason. The temp also keeps a failed/interrupted emission away from the seed.
 # `--build-self` reads <srcroot>/bootstrap/sources.txt, strips imports, concatenates in graph/SCC order,
 # and emits the same C the committed file holds. This is the replacement for the old Python generator.
-regen: zenc
+regen: zen
 	@tmp=$(GEN_C).$$$$.tmp; \
 	trap 'rm -f "$$tmp"' 0 1 2 15; \
 	$(ZENC) --build-self "$$tmp" $(ROOT) || exit $$?; \
@@ -64,11 +64,11 @@ clean:
 
 # The Zen-native correctness harness (tests/harness.zen) — the self-hosted replacement for the pytest
 # value/verdict harness. Build it with the freshly-built `zenc`, then run it from the repo ROOT (the
-# harness drives `./zenc` + `tests/harness_runner.c` and reads bootstrap/zenc.gen.c via relative paths).
+# harness drives `./zen` + `tests/harness_runner.c` and reads bootstrap/zenc.gen.c via relative paths).
 # The harness exits 0 when all cases pass and 1 when any fail, so counts cannot wrap through POSIX's
 # 8-bit process status.
 #   make -f bootstrap/Makefile harness
-harness: zenc
+harness: zen
 	cd $(ROOT) && ZO=/tmp/zo_harness.$$$$ && ZC=/tmp/zo_hcache.$$$$ && export ZENC_CACHE_DIR=$$ZC && $(ZENC) build tests/harness.zen -o $$ZO && $$ZO; rc=$$?; rm -rf $$ZO $$ZC; exit $$rc
 
 # Fast smoke subset of the harness: runs only the quick deterministic correctness
@@ -76,7 +76,7 @@ harness: zenc
 # build / boundaries / misc / fuzz / fixpoint). For inner-loop iteration only — the full `make
 # harness` above stays the merge gate. See tests/harness.zen for which suites the flag selects.
 #   make -f bootstrap/Makefile harness-fast
-harness-fast: zenc
+harness-fast: zen
 	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && ZC=/tmp/zo_hfcache.$$$$ && export ZENC_CACHE_DIR=$$ZC && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -rf $$ZO $$ZC; exit $$rc
 
 # Differential gate (module-system campaign): compare two zenc binaries over the whole fixture +
@@ -86,18 +86,18 @@ harness-fast: zenc
 #   make -f bootstrap/Makefile difftest OLD=/tmp/zenc-b4-baseline
 OLD ?= $(ZENC)
 NEW ?= $(ZENC)
-difftest: zenc
+difftest: zen
 	cd $(ROOT) && ./scripts/difftest.sh $(OLD) $(NEW)
 
 docs-check:
 	cd $(ROOT) && ./scripts/check-docs.sh
 
-# FFI drift gate: prove std's hand-written foreign prototypes (zen/std/c/libc.zen and friends)
+# FFI drift gate: prove std's hand-written foreign prototypes (src/std/c/libc.zen and friends)
 # match the REAL system headers. Reuses `zenc emit` (foreign decls lower to bare C prototypes),
 # then compares them against glibc's declarations — libm verbatim under gcc's conflicting-types
 # rule, the rest slot-by-slot at ABI-class level (scripts/ffi_abi_check.h, g++ static_assert).
 # Linux/glibc only; skips cleanly elsewhere. Fast (~2s).
-ffi-verify: zenc
+ffi-verify: zen
 	cd $(ROOT) && ./scripts/ffi_verify.sh $(ZENC)
 
 # Register the local git merge driver that auto-resolves the generated seed (bootstrap/zenc.gen.c).

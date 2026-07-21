@@ -9,7 +9,7 @@
 # Runs the compiler in-tree; ZEN_ROOT points the resolver at this checkout's std/ so imports resolve.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ZENC="$ROOT/zenc"
+ZENC="$ROOT/zen"
 export ZEN_ROOT="$ROOT"
 
 if [ ! -x "$ZENC" ]; then

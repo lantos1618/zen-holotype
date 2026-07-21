@@ -24,15 +24,15 @@ make
 or directly:
 
 ```sh
-make -f bootstrap/Makefile zenc
+make -f bootstrap/Makefile zen
 ```
 
-The real output target is `./zenc`; an unchanged build is an mtime no-op. If `ccache` is available it
+The real output target is `./zen`; an unchanged build is an mtime no-op. If `ccache` is available it
 is used for the large generated translation unit, unless `CC` is explicitly set.
 
 ## Regenerate and prove the fixpoint
 
-After changing `driver.zen`, `zen/compiler/*`, or a std module in `sources.txt`:
+After changing `driver.zen`, `src/compiler/*`, or a std module in `sources.txt`:
 
 ```sh
 make regen

@@ -1,7 +1,7 @@
 // tests/harness_modules.zen — the CROSS-MODULE / import-resolution category of the Zen-native harness.
 // Where harness_value/harness_verdict drive single-file `zenc emit`/`zenc check`, this file drives the
 // REAL multi-file path: it writes a small PROJECT (several sibling .zen files) into a temp dir and runs
-// `./zenc run <entry>` / `./zenc check <entry>` / `./zenc emit <entry>` / `./zenc doc <module>`, so the
+// `./zen run <entry>` / `./zen check <entry>` / `./zen emit <entry>` / `./zen doc <module>`, so the
 // committed compiler's import loader (std.internal.resolve) + cross-module type-checker (check_linked)
 // are exercised end-to-end — the dimension the flat harness structurally cannot reach.
 //
@@ -18,7 +18,7 @@
 //                                       driver checks, all through `zenc check`/`run`/`emit`/`doc`.
 //
 // CUSTOM RUNNER: a ModValCase / ModVerdictCase / ModEmitCase carries `files: [ModFile]` (name + source).
-// The runner `mkdir`s a fresh temp dir, `save`s each file, then drives the committed `./zenc`:
+// The runner `mkdir`s a fresh temp dir, `save`s each file, then drives the committed `./zen`:
 //   * VALUE   — `zenc run <entry>` exit code must equal `want` (the program's `main` return).
 //   * VERDICT — `zenc check <entry>`: should_pass => accept (rc 0); else reject (rc != 0), and if
 //               `needle` is non-empty the captured stderr must contain it (pins the rejection REASON).
@@ -65,7 +65,7 @@ ModDocCase*: {
     module: string_view,
     present: [string_view],
 }
-// a STDIN case: pipe `src` into `./zenc` (no file, no program dir); should_succeed => exit 0 else != 0;
+// a STDIN case: pipe `src` into `./zen` (no file, no program dir); should_succeed => exit 0 else != 0;
 // the combined stdout+stderr must contain every `present` substring.
 ModStdinCase*: {
     src: string_view,
@@ -181,7 +181,7 @@ run_mod_value* = (mc: ModValCase) bool {
     mp := m.addr()
     mp.write_files(mc.files)
     entry := mp.join2(mp.mod_dir(), mc.entry)
-    cmd := mp.join3("./zenc run ", entry, " > $ZT/zo_mods_out.txt 2>&1")
+    cmd := mp.join3("./zen run ", entry, " > $ZT/zo_mods_out.txt 2>&1")
     rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
     // `shell` now returns the DECODED exit code (WEXITSTATUS, or 128 + signal). A build/loader failure
     // surfaces as rc != 0.
@@ -194,7 +194,7 @@ run_mod_verdict* = (mc: ModVerdictCase) bool {
     mp := m.addr()
     mp.write_files(mc.files)
     entry := mp.join2(mp.mod_dir(), mc.entry)
-    cmd := mp.join3("./zenc check ", entry, " > $ZT/zo_mods_chk.txt 2>&1")
+    cmd := mp.join3("./zen check ", entry, " > $ZT/zo_mods_chk.txt 2>&1")
     rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
     mc.should_pass.match ({
         true  => rc == 0,
@@ -217,7 +217,7 @@ run_mod_emit* = (mc: ModEmitCase) bool {
     mp := m.addr()
     mp.write_files(mc.files)
     entry := mp.join2(mp.mod_dir(), mc.entry)
-    cmd := mp.join3("./zenc emit ", entry, " > $ZT/zo_mods_emit.txt 2>&1")
+    cmd := mp.join3("./zen emit ", entry, " > $ZT/zo_mods_emit.txt 2>&1")
     rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
     (rc == 0).match ({
         true  => mp.contents_in(mp.zo_path("zo_mods_emit.txt")).match ({
@@ -244,7 +244,7 @@ run_mod_emit* = (mc: ModEmitCase) bool {
 run_mod_doc* = (mc: ModDocCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
-    cmd := mp.join3("./zenc doc ", mc.module, " > $ZT/zo_mods_doc.txt 2>&1")
+    cmd := mp.join3("./zen doc ", mc.module, " > $ZT/zo_mods_doc.txt 2>&1")
     rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
     (rc == 0).match ({
         true  => mp.contents_in(mp.zo_path("zo_mods_doc.txt")).match ({
@@ -262,13 +262,13 @@ run_mod_doc* = (mc: ModDocCase) bool {
         false => false,
     })
 }
-// STDIN: pipe `src` into `./zenc` (no file arg → the source→C filter / sibling-from-stdin path).
+// STDIN: pipe `src` into `./zen` (no file arg → the source→C filter / sibling-from-stdin path).
 // should_succeed => exit 0 else != 0; combined stdout+stderr must contain every `present` substring.
 run_mod_stdin* = (mc: ModStdinCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_mods_stdin.zen"), mc.src, len(mc.src))
-    rc := shell(mp.zo_cmd("./zenc < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1")).expect("harness: shell")
+    rc := shell(mp.zo_cmd("./zen < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1")).expect("harness: shell")
     ok_rc := mc.should_succeed.match ({ true => rc == 0, false => rc != 0 })
     ok_rc.match ({
         true  => mp.contents_in(mp.zo_path("zo_mods_stdin_out.txt")).match ({
@@ -289,7 +289,7 @@ run_mod_stdin* = (mc: ModStdinCase) bool {
 // ── PARALLEL module runners (dogfoods std.thread via harness_lib's zo_par_run) ─────────────────────
 // Same three-phase shape as the single-file harness_lib runners, but each case gets its OWN project dir
 // `zo_mods<gid>/` (the serial runners reused one `zo_mods/` — fatal under parallelism). Each spawned
-// `./zenc run|check` is a distinct process writing pid-unique intermediates (/tmp/zenc_zd_<pid>.*), so
+// `./zen run|check` is a distinct process writing pid-unique intermediates (/tmp/zenc_zd_<pid>.*), so
 // concurrent compiles never collide; only the project sources + captured results are gid-namespaced.
 mitoa = (mp: MutPtr<Malloc>, n: i64) string_view { mp.integer_in(n).expect("harness: oom").finish_in(mp).expect("harness: oom") }
 mod_dir_id = (mp: MutPtr<Malloc>, gid: i64) string_view { mp.zo_path(mp.join2("zo_mods", mp.mitoa(gid))) }
@@ -309,7 +309,7 @@ mod_write_files_id = (mp: MutPtr<Malloc>, gid: i64, files: [ModFile]) void {
 // exactly what shell() decoded serially) into rc<gid> with `printf %s` (no newline, so try_parse_int accepts it).
 mod_value_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: string_view) string_view {
     ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
-    mp.join2(mp.join3("./zenc run ", ent, " > /dev/null 2>&1; printf %s \"$?\" > "), mp.mod_rc_path(gid))
+    mp.join2(mp.join3("./zen run ", ent, " > /dev/null 2>&1; printf %s \"$?\" > "), mp.mod_rc_path(gid))
 }
 mod_value_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModValCase) bool {
     mp.contents_in(mp.mod_rc_path(gid)).match ({
@@ -326,7 +326,7 @@ mod_verdict_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: string_view) string_view
     ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
     chk := mp.mod_chk_path(gid)
     rc := mp.mod_rc_path(gid)
-    mp.joinv([z, "if ./zenc check ", ent, " > ", chk, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+    mp.joinv([z, "if ./zen check ", ent, " > ", chk, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
 mod_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModVerdictCase) bool {
     accepted := mp.contents_in(mp.mod_rc_path(gid)).match ({
@@ -472,7 +472,7 @@ mod_emit_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: string_view) string_view {
     ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
     outp := mp.mod_emit_path(gid)
     rc := mp.mod_rc_path(gid)
-    mp.joinv([z, "if ./zenc emit ", ent, " > ", outp, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+    mp.joinv([z, "if ./zen emit ", ent, " > ", outp, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
 mod_emit_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModEmitCase) bool {
     passed := mp.contents_in(mp.mod_rc_path(gid)).match ({
@@ -2229,7 +2229,7 @@ harness_modules_run* = () i32 {
     // These drive the loader's INTERNAL structures (the module_table, per-module ParsedProgram AST
     // boundary, and graph-linked cross-module check) directly, as `zenc run` driver programs. The
     // progdir is this run's private mod_dir (baked into the generated driver at runtime); root is "."
-    // because the harness runs `./zenc` from the repo root, so std resolves relative to the cwd.
+    // because the harness runs `./zen` from the repo root, so std resolves relative to the cwd.
     dl := run_mod_deep("modules value (deep loader API: resolve_program_data / parsed_program / check)", [DeepCase(
         base_files: [ModFile(
             name: "helper.zen",

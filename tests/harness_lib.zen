@@ -44,7 +44,7 @@ thread = std.thread    // NAMESPACED: std.thread.join collides in the flat names
 //
 //   (2) COMPILER scratch files: `zenc emit/check/build` write their intermediate C+binary to
 //       PID-NAMESPACED paths (driver.zen `/tmp/zenc_zd_<pid>.c`, `/tmp/zenc_zd_<pid>.bin`), and each
-//       `./zenc` the harness spawns is a distinct process with a distinct pid — so two concurrent
+//       `./zen` the harness spawns is a distinct process with a distinct pid — so two concurrent
 //       compiles can never share an intermediate file. (This used to require a global `flock` on
 //       `/tmp/zo_zenc.lock` serializing every zenc compile — back when the compiler used FIXED
 //       `/tmp/zenc_zd.*` paths. Now that those paths are pid-unique the lock is redundant; it was
@@ -94,7 +94,7 @@ zo_cleanup* = () i32 {
     shell(mp.finish_in(s).expect("harness: oom")).expect("harness: shell")
 }
 // ── PARALLEL CASE EXECUTION (dogfoods std.thread) ─────────────────────────────────────────────────
-// The harness's wall-time is process-spawn bound: each case forks `./zenc` (+ `cc` + a test binary),
+// The harness's wall-time is process-spawn bound: each case forks `./zen` (+ `cc` + a test binary),
 // and a single zenc build is ~0.08s, so the cost is the ~1000× SERIAL fork, not the compiler. We keep
 // every case's PASS/FAIL decision in Zen (unchanged, so the verdict is byte-identical to serial) and
 // parallelize only the expensive subprocess step, in three phases per suite:
@@ -230,7 +230,7 @@ run_value* = (vc: VCase) bool {
     mp := m.addr()
     save(mp.zo_path("zo_case.zen"), vc.src, len(vc.src))
     save(mp.zo_path("zo_out.txt"), "", 0)
-    shell(mp.zo_cmd("./zenc emit $ZT/zo_case.zen > $ZT/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I$ZT tests/harness_runner.c -o $ZT/zo_prog 2>/dev/null && $ZT/zo_prog > $ZT/zo_out.txt 2>/dev/null"))
+    shell(mp.zo_cmd("./zen emit $ZT/zo_case.zen > $ZT/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I$ZT tests/harness_runner.c -o $ZT/zo_prog 2>/dev/null && $ZT/zo_prog > $ZT/zo_out.txt 2>/dev/null"))
     mp.contents_in(mp.zo_path("zo_out.txt")).match ({
         .Ok(got) => eq(got, vc.want),
         .Err(e)  => false,
@@ -242,7 +242,7 @@ run_verdict* = (vc: VerdictCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_v.zen"), vc.src, len(vc.src))
-    rc := shell(mp.zo_cmd("./zenc check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("harness: shell")
+    rc := shell(mp.zo_cmd("./zen check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("harness: shell")
     vc.should_pass.match ({
         true  => rc == 0,
         false => (rc == 0).match ({
@@ -263,7 +263,7 @@ run_diag* = (dc: DiagCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zod_v.zen"), dc.src, len(dc.src))
-    rc := shell(mp.zo_cmd("./zenc check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
+    rc := shell(mp.zo_cmd("./zen check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
     (rc == 0).match ({
         true  => false,
         false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
@@ -285,7 +285,7 @@ run_diag* = (dc: DiagCase) bool {
 fixpoint_ok* = () bool {
     m := Malloc(_: 0)
     mp := m.addr()
-    shell(mp.zo_cmd("./zenc --build-self $ZT/zo_gen_after.c . 2>/dev/null"))
+    shell(mp.zo_cmd("./zen --build-self $ZT/zo_gen_after.c . 2>/dev/null"))
     same := shell(mp.zo_cmd("cmp -s $ZT/zo_gen_after.c bootstrap/zenc.gen.c")).expect("harness: shell")
     same == 0
 }
@@ -316,7 +316,7 @@ zo_value_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
     dir := mp.zo_idpath("d", gid, "")
     prog := mp.zo_idpath("p", gid, "")
     outp := mp.zo_idpath("o", gid, ".txt")
-    mp.zo_join([z, "mkdir -p ", dir, "; ./zenc emit ", src, " > ", dir, "/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I", dir, " tests/harness_runner.c -o ", prog, " 2>/dev/null && ", prog, " > ", outp, " 2>/dev/null; true"])
+    mp.zo_join([z, "mkdir -p ", dir, "; ./zen emit ", src, " > ", dir, "/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I", dir, " tests/harness_runner.c -o ", prog, " 2>/dev/null && ", prog, " > ", outp, " 2>/dev/null; true"])
 }
 // VALUE per-case check (Phase C): the captured program output must equal `want`. A missing/empty file
 // (emit or cc failed → the `&&` chain never ran the program) can't equal `want`, so it FAILS — exactly
@@ -365,7 +365,7 @@ zo_verdict_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
     v := mp.zo_idpath("v", gid, ".zen")
     chk := mp.zo_idpath("chk", gid, ".txt")
     rc := mp.zo_idpath("rc", gid, ".txt")
-    mp.zo_join([z, "if ./zenc check ", v, " > ", chk, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+    mp.zo_join([z, "if ./zen check ", v, " > ", chk, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
 // VERDICT per-case check (Phase C): identical logic to run_verdict — accept(P) vs reject(F), and when
 // rejecting with a non-empty `kind`, the captured diagnostic must contain `error[<kind>]`.
@@ -423,7 +423,7 @@ zo_diag_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
     v := mp.zo_idpath("dv", gid, ".zen")
     outp := mp.zo_idpath("do", gid, ".txt")
     rc := mp.zo_idpath("drc", gid, ".txt")
-    mp.zo_join([z, "if ./zenc check ", v, " > ", outp, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
+    mp.zo_join([z, "if ./zen check ", v, " > ", outp, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
 // DIAGNOSTIC per-case check (Phase C): identical logic to run_diag — must reject (F) AND the diagnostic
 // must contain every `wants` substring.

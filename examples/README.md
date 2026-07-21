@@ -6,7 +6,7 @@ Build once, then run a C example with:
 
 ```sh
 make
-./zenc run examples/hello.zen
+./zen run examples/hello.zen
 ```
 
 ## Language and data
@@ -21,14 +21,14 @@ make
 | `json_demo.zen` | Build and print JSON. |
 | `store_demo.zen` | Redux-style state and a pure reducer. |
 
-Run any of them as `./zenc run examples/<name>.zen`.
+Run any of them as `./zen run examples/<name>.zen`.
 
 ## Unix filters
 
 | Example | Run |
 |---|---|
-| `stdin_echo.zen` | `printf 'hello\nworld\n' \| ./zenc run examples/stdin_echo.zen` |
-| `wordfreq.zen` | `printf 'the cat sat on the mat the cat\n' \| ./zenc run examples/wordfreq.zen` |
+| `stdin_echo.zen` | `printf 'hello\nworld\n' \| ./zen run examples/stdin_echo.zen` |
+| `wordfreq.zen` | `printf 'the cat sat on the mat the cat\n' \| ./zen run examples/wordfreq.zen` |
 
 `wordfreq.zen` uses `HMap<string_view, i64>` to count input words.
 
@@ -36,8 +36,8 @@ Run any of them as `./zenc run examples/<name>.zen`.
 
 | Example | Model | Run |
 |---|---|---|
-| `actor_demo.zen` | Cooperative typed actor; send/request drains inline on the caller. | `./zenc run examples/actor_demo.zen` |
-| `pool_actor_demo.zen` | Parallel typed actors over OS workers with a concrete trampoline. | `./zenc run examples/pool_actor_demo.zen` |
+| `actor_demo.zen` | Cooperative typed actor; send/request drains inline on the caller. | `./zen run examples/actor_demo.zen` |
+| `pool_actor_demo.zen` | Parallel typed actors over OS workers with a concrete trampoline. | `./zen run examples/pool_actor_demo.zen` |
 
 The two actor examples intentionally expose the current split API; see
 [../STATUS.md](../STATUS.md#important-current-limits-and-defects).
@@ -47,7 +47,7 @@ The two actor examples intentionally expose the current split API; see
 `dom_demo.zen` lowers `std.web.dom` calls to browser DOM APIs. It is not a C/Node console program:
 
 ```sh
-./zenc emit-js examples/dom_demo.zen > /tmp/dom-demo.js
+./zen emit-js examples/dom_demo.zen > /tmp/dom-demo.js
 ```
 
 Load the emitted script in a browser page to exercise `document`, element creation, text content,

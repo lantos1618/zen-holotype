@@ -45,17 +45,16 @@ WORK="$(mktemp -d /tmp/zenc-difftest.XXXXXX)"
 export ZENC_NO_CACHE=1
 RUN_TIMEOUT=90
 
-# zenc resolves `zen/std` + `bootstrap/zenrt.c` relative to the BINARY's own directory, so a binary
-# parked in /tmp cannot see the std tree (every std-importing fixture would "fail" identically under
-# both). Stage both binaries in a work root whose zen/ + bootstrap/ symlink to this worktree's trees:
-# both compilers then resolve the SAME std sources, and only compiler-behavior diffs remain.
+# zen resolves `src/std` + `bootstrap/zenrt.c` relative to the project root (the binary's
+# directory). Stage both compilers in a work root whose src/ + bootstrap/ symlink to this
+# worktree's trees: both then resolve the SAME std sources, and only compiler-behavior diffs remain.
 mkdir -p "$WORK/root"
-ln -s "$ROOT/zen" "$WORK/root/zen"
+ln -s "$ROOT/src" "$WORK/root/src"
 ln -s "$ROOT/bootstrap" "$WORK/root/bootstrap"
-cp "$OLD" "$WORK/root/zenc-old"
-cp "$NEW" "$WORK/root/zenc-new"
-OLD="$WORK/root/zenc-old"
-NEW="$WORK/root/zenc-new"
+cp "$OLD" "$WORK/root/zen-old"
+cp "$NEW" "$WORK/root/zen-new"
+OLD="$WORK/root/zen-old"
+NEW="$WORK/root/zen-new"
 
 # ── corpus ───────────────────────────────────────────────────────────────────────────────────────
 # A case id is the entry path relative to the repo root (dispatch dirs: the DIRECTORY path).

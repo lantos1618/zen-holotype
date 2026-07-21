@@ -2,9 +2,9 @@
 # scripts/ffi_verify.sh — FFI drift gate: prove Zen's hand-written foreign prototypes match the
 # REAL system headers.
 #
-#   scripts/ffi_verify.sh [ZENC]        (default: ./zenc next to the repo root)
+#   scripts/ffi_verify.sh [ZENC]        (default: ./zen next to the repo root)
 #
-# Zen's std hand-transcribes libc/libm/pthread prototypes as bodyless decls (zen/std/c/libc.zen
+# Zen's std hand-transcribes libc/libm/pthread prototypes as bodyless decls (src/std/c/libc.zen
 # and friends). A transcription slip — wrong integer width, wrong arg count, pointer/integer
 # confusion — still compiles fine: genc emits a bare C prototype and C's implicit trust does the
 # rest, corrupting at runtime. This gate checks Zen's belief against the headers:
@@ -33,7 +33,7 @@
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-ZENC="${1:-$ROOT/zenc}"
+ZENC="${1:-$ROOT/zen}"
 
 case "$(uname -s)" in
     Linux) ;;

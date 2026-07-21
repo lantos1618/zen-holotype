@@ -122,7 +122,7 @@ every one runs with `zenc run examples/<name>.zen`.
 
 ## The standard library
 
-Ordinary Zen modules under `zen/std/`, imported with `{ name } = std.path`:
+Ordinary Zen modules under `src/std/`, imported with `{ name } = std.path`:
 
 | area | modules |
 |---|---|
@@ -141,10 +141,10 @@ Ordinary Zen modules under `zen/std/`, imported with `{ name } = std.path`:
 The compiler is the `zenc` binary; `cc` builds it from committed C, nothing else needed.
 
 ```sh
-make                                   # cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zenc
+make                                   # cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zen
 ```
 
-(The top-level `Makefile` forwards to `bootstrap/Makefile`; `make -f bootstrap/Makefile zenc`
+(The top-level `Makefile` forwards to `bootstrap/Makefile`; `make -f bootstrap/Makefile zen`
 works too and is what CI invokes.)
 
 CLI surface:
@@ -171,7 +171,7 @@ cat prog.zen | zenc            # low-level filter: one already-flat module -> C 
 `run`/`build`/`emit-js` require `main` (either `main = () i32` or `main = (sys: Sys) i32`);
 `check` accepts modules without `main`. The
 checked modes (`run`/`build`/`check`/`emit`) run the self-hosted module loader
-(`zen/std/internal/resolve.zen`) first, so `{ ... } = std.X` imports resolve from disk and
+(`src/std/internal/resolve.zen`) first, so `{ ... } = std.X` imports resolve from disk and
 the program is flattened before parsing. The bare-filter form (`cat file.zen | zenc`)
 expects already-flat source and does no import loading or checking — use `zenc emit` for
 real files with imports.
@@ -230,7 +230,7 @@ hint: check the callee signature and pass exactly the declared parameters
                                                     ┌─ genc_emit.zen ─► C  ─► cc   (default)
  lex.zen ─tokens─► parse_*.zen ─► genc AST ─► check.zen ─┤
                                                     └─ genjs.zen     ─► JS ─► node
- (every compiler stage is ordinary Zen, in zen/compiler/)
+ (every compiler stage is ordinary Zen, in src/compiler/)
 ```
 
 The loader inserts every declaration at its path into one namespace, then the checker
@@ -257,14 +257,14 @@ This is rough around the edges. Known limits worth flagging up front:
 
 | path | role |
 |---|---|
-| `zen/compiler/lex.zen` | the lexer — `scan(src, pos)` over a `string_view` |
-| `zen/compiler/parse*.zen` | recursive-descent parser → `compiler.genc` AST |
-| `zen/compiler/check.zen` + `check_validate.zen` + `diagnostic.zen` | resolver, `fits()` validator, positioned diagnostics |
-| `zen/compiler/genc.zen` + `mono.zen` + `genc_emit.zen` | shared AST, monomorphization, C backend |
-| `zen/compiler/genjs.zen` | the JavaScript backend — a second walk over the same checked AST |
-| `zen/compiler/pretty.zen` | the `zenc fmt` formatter over the same AST |
-| `zen/std/` | the stdlib (`core`, `collections`, `text`, `mem`, `concurrent`, `io`, ...) |
-| `zen/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
+| `src/compiler/lex.zen` | the lexer — `scan(src, pos)` over a `string_view` |
+| `src/compiler/parse*.zen` | recursive-descent parser → `compiler.genc` AST |
+| `src/compiler/check.zen` + `check_validate.zen` + `diagnostic.zen` | resolver, `fits()` validator, positioned diagnostics |
+| `src/compiler/genc.zen` + `mono.zen` + `genc_emit.zen` | shared AST, monomorphization, C backend |
+| `src/compiler/genjs.zen` | the JavaScript backend — a second walk over the same checked AST |
+| `src/compiler/pretty.zen` | the `zenc fmt` formatter over the same AST |
+| `src/std/` | the stdlib (`core`, `collections`, `text`, `mem`, `concurrent`, `io`, ...) |
+| `src/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
 | `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` (161-line C floor) + `zenrt.js` (JS floor) + `Makefile` |
 | `examples/` | runnable single-file programs |
 | `tests/` | the Zen-native harness (`harness.zen`) + fixtures |

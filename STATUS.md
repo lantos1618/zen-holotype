@@ -101,7 +101,7 @@ but the heavyweight deep-resolver compile remains a separate memory target.
 
 | Area | Code truth | Consequence / workaround |
 |---|---|---|
-| std path resolution | `zenc` resolves `zen/std` relative to the binary's own directory, not the invocation cwd. | Run the repo-built binary in place (or symlink a work root); a PATH-installed binary needs the tree beside it. |
+| std path resolution | `zen` resolves `src/std` relative to the project root (the binary's directory, or `$ZEN_ROOT`), not the invocation cwd. | Run the repo-built `./zen` in place; a relocated binary needs `$ZEN_ROOT` pointing at the checkout. |
 | Parallelism fixtures | 5 pool fixtures assert *observed* concurrency and flake under machine load. | Their run stage is skipped in `make difftest`; check/emit still compared. |
 | Ordinary `if` | Any `if` token is rejected at the lexer with `error[no-if]` and a teaching hint; match guards were removed entirely (2026-07-18). | Use `.match` (or `.then` for one-way effects); nest a boolean `.match` in an arm body where a guard was wanted. |
 | Enum separator | `\|` separates variants and is also bitwise OR. | Comma-separated variants are the chosen cleanup direction but require a bootstrap migration. |

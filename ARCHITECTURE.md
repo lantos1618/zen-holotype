@@ -10,7 +10,7 @@ source files
     │
     ▼
 module discovery / import graph / compatibility flattening
-    │                         zen/std/internal/resolve.zen
+    │                         src/std/internal/resolve.zen
     ▼
 lexer → recursive-descent parser → shared AST
     │     lex.zen + parse*.zen     genc.zen
@@ -124,7 +124,7 @@ temporary naming and single-target/single-link-library limits remain rough.
 
 The default build has two layers:
 
-1. `cc` compiles committed `bootstrap/zenc.gen.c` with `bootstrap/zenrt.c` into `./zenc`.
+1. `cc` compiles committed `bootstrap/zenc.gen.c` with `bootstrap/zenrt.c` into `./zen`.
 2. That compiler reads `bootstrap/sources.txt` plus `driver.zen` and re-emits the committed C.
 
 `bootstrap/sources.txt` is checked against the resolver graph/SCC order. A valid compiler change must
