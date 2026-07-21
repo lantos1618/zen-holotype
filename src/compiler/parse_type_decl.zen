@@ -1,0 +1,379 @@
+// compiler.parse_type_decl — TYPE-DECLARATION parsing: struct/enum/field/variant bodies plus the
+// type-parameter list (`<A, B: Trait>`). Produces StructEnd/EnumEnd/TParamEnd for the top-level
+// dispatch in compiler.parse. Distinct from compiler.parse_type, which parses type EXPRESSIONS.
+// Split out of the compiler.parse god file. Style: UFCS throughout.
+{ Field, StructDecl, EnumDecl, VariantDef, Ty, Param, Func, param, field, sdef_at, edef_at, vdef, vdef_default, tnamed, tvoid, fnt_from_func_in } = compiler.genc
+{ Token, Scan, scan } = compiler.lex
+{ at } = std.text.bytes
+{ eq } = std.text.str
+{ Malloc } = std.mem.alloc
+{ lexeme, is_op } = compiler.parse_atom
+{ is_ident_tok } = compiler.parse_postfix
+{ is_lparen } = compiler.parse_primary
+{ parse_bxor } = compiler.parse_expr
+{ parse_ty, parse_variant_payload, perr_set_at, PEnd, is_langle, is_rangle, is_rbrace, is_comma, skip_to_brace } = compiler.parse_type
+{ parse_decl_at, decl_marker, is_colon, is_star } = compiler.parse
+StructEnd*: {
+    sd: StructDecl,
+    tparams: [Param],
+    ntp: i32,
+    next: i32,
+    defaults: [Func],
+}
+no_tparams = (a: MutPtr<Malloc>) [Param] { slice(null_ptr(), 0) }
+skip_name_star* = (src: string_view, pos: i32) i32 {
+    nt := src.scan(pos)
+    a1 := src.scan(nt.next)
+    src.is_star(a1.tok).match ({ true => a1.next, false => nt.next })
+}
+TParamEnd*: {
+    names: [Param],
+    count: i32,
+    next: i32,
+}
+parse_tparams* = (a: MutPtr<Malloc>, src: string_view, pos: i32) TParamEnd {
+    sc := src.scan(pos)
+    src.is_langle(sc.tok).match ({
+        true  => a.parse_tparam_list(src, sc.next),
+        false => TParamEnd(
+            names: a.no_tparams(),
+            count: 0,
+            next: pos,
+        ),
+    })
+}
+parse_tparam_list = (a: MutPtr<Malloc>, src: string_view, pos: i32) TParamEnd {
+    buf := a.param_buf()
+    te := a.fill_tparams(src, pos, buf, 0)
+    TParamEnd(
+        names: buf.take_params(te.count),
+        count: te.count,
+        next: te.next,
+    )
+}
+// A tparam may carry a trait bound: `<A: Allocator>`. The bound is stored in the Param's `ty`
+// slot as a `Named(traitname)` (tparams otherwise leave `ty` = tvoid()); the checker enforces it
+// at call sites. No bound => tvoid(), exactly the prior behaviour, so plain `<A>` is unchanged.
+record_tparam = (a: MutPtr<Malloc>, src: string_view, sc: Scan, buf: [Param], i: i32) PEnd {
+    // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
+    (i >= buf.len).then({
+        perr_set_at(sc.tok.start)
+        return PEnd(
+            count: i,
+            next: sc.next,
+        )
+    })
+    nm := a.lexeme(src, sc.tok)
+    colon := src.scan(sc.next)    // peek: a `:` introduces a trait bound
+    src.is_colon(colon.tok).match ({
+        true  => {
+            tr := src.scan(colon.next)    // the bound trait name
+            buf[i] = param(nm, tnamed(a.lexeme(src, tr.tok)))
+            a.fill_tparams(src, tr.next, buf, i + 1)
+        },
+        false => {
+            buf[i] = param(nm, tvoid())
+            a.fill_tparams(src, sc.next, buf, i + 1)
+        },
+    })
+}
+fill_tparams = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i32) PEnd {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Eof => {
+            perr_set_at(pos)
+            PEnd(
+                count: i,
+                next: sc.next,
+            )
+        },
+        _    => src.is_rangle(sc.tok).match ({
+            true  => PEnd(
+                count: i,
+                next: sc.next,
+            ),
+            false => is_ident_tok(sc.tok).match ({
+                true  => a.record_tparam(src, sc, buf, i),
+                false => a.fill_tparams(src, sc.next, buf, i),
+            }),
+        }),
+    })
+}
+field_buf = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(1024 * sizeof(Field)), 1024) }
+take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }
+dfn_buf = (a: MutPtr<Malloc>) [Func] { slice(a.acquire(256 * sizeof(Func)), 256) }
+take_dfns = (buf: [Func], n: i32) [Func] { slice(buf.ptr, n) }
+// `m = (...) Ret {}` inside a pure method record is a trait default; inside a data record
+// it is an inherent method attached to the struct.
+is_eq_tok* = (src: string_view, t: Token) bool {
+    t.kind.match ({
+        .Sym => t.len == 1 && src.at(t.start) == '=',
+        _    => false,
+    })
+}
+FieldsEnd*: {
+    count: i32,
+    ndef: i32,
+    next: i32,
+}
+fill_fields = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Eof => {
+            perr_set_at(pos)
+            FieldsEnd(
+                count: i,
+                ndef: dn,
+                next: sc.next,
+            )
+        },
+        _    => src.is_rbrace(sc.tok).match ({
+            true  => FieldsEnd(
+                count: i,
+                ndef: dn,
+                next: sc.next,
+            ),
+            false => a.fill_field(src, pos, buf, i, dbuf, dn),
+        }),
+    })
+}
+// Default methods store both the FnT requirement and the reusable body.
+fill_field_default = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32, nm: string_view) FieldsEnd {
+    de := a.parse_decl_at(src, pos)
+    buf[i] = field(nm, a.fnt_from_func_in(de.func))
+    dbuf[dn] = de.func
+    after := src.scan(de.next)
+    nxt := src.is_comma(after.tok).match ({ true => after.next, false => de.next })
+    a.fill_fields(src, nxt, buf, i + 1, dbuf, dn + 1)
+}
+fill_field = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], i: i32, dbuf: [Func], dn: i32) FieldsEnd {
+    // Guard both field and default-method buffers.
+    (i >= buf.len || dn >= dbuf.len).then({
+        perr_set_at(pos)
+        return FieldsEnd(
+            count: i,
+            ndef: dn,
+            next: pos,
+        )
+    })
+    nt := src.scan(pos)
+    nm := a.lexeme(src, nt.tok)
+    mk := src.decl_marker(pos)
+    src.is_eq_tok(mk.tok).match ({
+        true  => a.fill_field_default(src, pos, buf, i, dbuf, dn, nm),
+        false => {
+            te := a.parse_ty(src, mk.next)
+            buf[i] = field(nm, te.ty)
+            after := src.scan(te.next)
+            src.is_comma(after.tok).match ({
+                true  => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn),
+                false => is_ident_tok(after.tok).match ({
+                    true  => a.fill_fields(src, te.next, buf, i + 1, dbuf, dn),
+                    false => {
+                        // A no-trailing-comma field list closes on `}`; anything else (a stray token, or EOF on an
+                        // unterminated `{ …`) is a positioned parse error, not a silent close (task: unclosed `{`).
+                        (src.is_rbrace(after.tok) == false).then({
+                            perr_set_at(after.tok.start)
+                        })
+                        FieldsEnd(
+                            count: i + 1,
+                            ndef: dn,
+                            next: after.next,
+                        )
+                    },
+                }),
+            })
+        },
+    })
+}
+parse_struct_at* = (a: MutPtr<Malloc>, src: string_view, pos: i32) StructEnd {
+    nt := src.scan(pos)
+    name := a.lexeme(src, nt.tok)
+    tp := a.parse_tparams(src, src.skip_name_star(pos))
+    bstart := src.skip_to_brace(nt.next)
+    buf := a.field_buf()
+    dbuf := a.dfn_buf()
+    fe := a.fill_fields(src, bstart, buf, 0, dbuf, 0)
+    StructEnd(
+        sd: sdef_at(name, buf.take_fields(fe.count), nt.tok.start),
+        tparams: tp.names,
+        ntp: tp.count,
+        next: fe.next,
+        defaults: dbuf.take_dfns(fe.ndef),
+    )
+}
+parse_struct* = (a: MutPtr<Malloc>, src: string_view) StructDecl { a.parse_struct_at(src, 0).sd }
+field_is_method* = (f: Field) bool {
+    f.ty.match ({
+        .FnT(fd) => true,
+        _        => false,
+    })
+}
+has_data_field* = (fields: [Field]) bool {
+    found := false
+    fields.loop((h, i, f) {
+        found = f.field_is_method().match ({ true => found, false => true })
+    })
+    found
+}
+// is `f` the SYNTHESIZED requirement field of one of the record's `=`-methods? fill_field_default
+// adds an FnT field per default, and only THOSE must be stripped from an inherent struct's data
+// fields. Match on name AND FnT type: a user-written fn-typed field (`cb: (i32) i32`) is a real
+// data field (filtering on FnT alone silently dropped it), while a data field that merely SHARES a
+// method's name (Map<T> has both a `keys` pointer field and a `keys = (…)` method) is not FnT.
+is_default_field = (defaults: [Func], f: Field) bool {
+    found := false
+    defaults.loop((h, i, df) {
+        found = found || eq(df.name, f.name) && f.field_is_method()
+    })
+    found
+}
+data_field_count = (fields: [Field], defaults: [Func]) i32 {
+    n := 0
+    fields.loop((h, i, f) {
+        (defaults.is_default_field(f) == false).then({
+            n = n + 1
+        })
+    })
+    n
+}
+data_fields* = (a: MutPtr<Malloc>, fields: [Field], defaults: [Func]) [Field] {
+    buf := a.field_buf()
+    j := 0
+    fields.loop((h, i, f) {
+        (defaults.is_default_field(f) == false).then({
+            buf[j] = f
+            j = j + 1
+        })
+    })
+    buf.take_fields(fields.data_field_count(defaults))
+}
+// Enum variants end at the first token that is not `|`.
+EnumEnd*: {
+    ed: EnumDecl,
+    tparams: [Param],
+    ntp: i32,
+    next: i32,
+}
+VPay*: {
+    ty: Ty,
+    next: i32,
+}
+VDf*: {
+    vdf: VariantDef,
+    next: i32,
+}
+// a single `=` (not `==`/`=>`) introduces a variant default expr: `Name = expr`.
+is_eq1 = (src: string_view, t: Token) bool { t.len == 1 && src.is_op(t, '=') }
+is_bar = (src: string_view, t: Token) bool {
+    t.kind.match ({
+        .Sym => t.len == 1 && src.at(t.start) == '|',
+        _    => false,
+    })
+}
+variant_buf = (a: MutPtr<Malloc>) [VariantDef] { slice(a.acquire(1024 * sizeof(VariantDef)), 1024) }
+take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }
+variant_payload = (a: MutPtr<Malloc>, src: string_view, pos: i32) VPay {
+    te := a.parse_variant_payload(src, pos)
+    VPay(
+        ty: te.ty,
+        next: te.next,
+    )
+}    // `(T)` single, or `(T1, T2, …)` -> anon struct
+fill_variants = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [VariantDef], i: i32) PEnd {
+    nt := src.scan(pos)
+    nt.tok.kind.match ({
+        .Eof => {
+            perr_set_at(pos)
+            PEnd(
+                count: i,
+                next: nt.next,
+            )
+        },
+        _    => a.fill_variant(src, nt, buf, i),
+    })
+}
+fill_variant = (a: MutPtr<Malloc>, src: string_view, nt: Scan, buf: [VariantDef], i: i32) PEnd {
+    // Guard the variant buffer.
+    (i >= buf.len).then({
+        perr_set_at(nt.tok.start)
+        return PEnd(
+            count: i,
+            next: nt.next,
+        )
+    })
+    // A variant NAME must be an identifier. Without this guard `lexeme` happily reads whatever
+    // token sits here (a stray `|`, a literal, a mid-list empty `| |`) as a bogus variant name,
+    // desyncing the parse and SILENTLY swallowing the following top-level decl (task #34, sibling
+    // of #411). Mirror the .Eof branch: flag a positioned parse error and stop.
+    (is_ident_tok(nt.tok) == false).then({
+        perr_set_at(nt.tok.start)
+        return PEnd(
+            count: i,
+            next: nt.next,
+        )
+    })
+    nm := a.lexeme(src, nt.tok)
+    pk := src.scan(nt.next)
+    vd := a.variant_after(src, nm, nt, pk)
+    buf[i] = vd.vdf
+    after := src.scan(vd.next)
+    src.is_bar(after.tok).match ({
+        true  => a.fill_variants(src, after.next, buf, i + 1),
+        false => PEnd(
+            count: i + 1,
+            next: vd.next,
+        ),
+    })
+}
+// After the variant name, dispatch on the next token: `(Type)` payload, `= expr` default, or bare.
+variant_after = (a: MutPtr<Malloc>, src: string_view, nm: string_view, nt: Scan, pk: Scan) VDf {
+    src.is_lparen(pk.tok).match ({
+        true  => {
+            vp := a.variant_payload(src, pk.next)
+            VDf(
+                vdf: vdef(nm, vp.ty),
+                next: vp.next,
+            )
+        },
+        false => src.is_eq1(pk.tok).match ({
+            true  => {
+                de := a.parse_bxor(src, pk.next)
+                VDf(
+                    vdf: vdef_default(nm, tvoid(), de.expr),
+                    next: de.next,
+                )
+            },
+            false => VDf(
+                vdf: vdef(nm, tvoid()),
+                next: nt.next,
+            ),
+        }),
+    })
+}
+skip_to_colon = (src: string_view, pos: i32) i32 {
+    sc := src.scan(pos)
+    src.is_colon(sc.tok).match ({ true => sc.next, false => src.skip_to_colon(sc.next) })
+}
+// A single OPTIONAL leading `|` right after the enum colon is idiomatic alignment layout
+// (`Status*: | Ok | Err`, or one-variant-per-line with a leading bar). Skip exactly one — a
+// SECOND bar is a genuine empty variant that the fill_variant identifier guard rejects.
+skip_leading_bar = (src: string_view, pos: i32) i32 {
+    sc := src.scan(pos)
+    src.is_bar(sc.tok).match ({ true => sc.next, false => pos })
+}
+parse_enum_at* = (a: MutPtr<Malloc>, src: string_view, pos: i32) EnumEnd {
+    nt := src.scan(pos)
+    name := a.lexeme(src, nt.tok)
+    tp := a.parse_tparams(src, src.skip_name_star(pos))
+    cpos := src.skip_leading_bar(src.skip_to_colon(tp.next))    // start PAST the tparam list — a `<T: Bound>` colon must not be mistaken for the enum's `:`
+    buf := a.variant_buf()
+    ve := a.fill_variants(src, cpos, buf, 0)
+    EnumEnd(
+        ed: edef_at(name, buf.take_variants(ve.count), nt.tok.start),
+        tparams: tp.names,
+        ntp: tp.count,
+        next: ve.next,
+    )
+}
+parse_enum* = (a: MutPtr<Malloc>, src: string_view) EnumDecl { a.parse_enum_at(src, 0).ed }
