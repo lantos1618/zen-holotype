@@ -1,0 +1,69 @@
+// compiler.genjs_lit — integer rendering, JS identifier-safety mangling, and JS string-literal escaping
+// leaf helpers for the JavaScript backend. Extracted from compiler.genjs. Byte-only so this self-hosts.
+// The JS escape (`jesc_byte`) is intentionally distinct from the C backend's (JS uses `\n`/`\"`, and
+// strings are interned via `__zr.str`), so this family lives here beside genjs, not in genc_emit_lit.
+{ String } = std.text.string
+{ eq } = std.text.str
+{ sbyte, gstr_append, gstr_push } = compiler.genc
+{ Malloc } = std.mem.alloc
+// ── small integer renderer (byte-only, self-hosting) ──────────────────────────────────────────────
+jdigit = (d: i64) u8 { load(offset("0123456789", d)) }
+jint_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n < 10).match ({
+        true  => s.gstr_push(a, jdigit(n)),
+        false => {
+            hs := s.jint_nat(a, n / 10)
+            hs.gstr_push(a, jdigit(n % 10))
+        },
+    })
+}
+jint* = (s: String, a: MutPtr<Malloc>, n: i64) String { (n < 0).match ({
+    true  => s.gstr_append(a, "-").jint_neg(a, n),
+    false => s.jint_nat(a, n),
+}) }
+// walk negatives directly so INT64_MIN doesn't overflow on `0 - n`
+jint_neg = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n > 0 - 10).match ({
+        true  => s.gstr_push(a, jdigit(0 - n)),
+        false => {
+            hs := s.jint_neg(a, n / 10)
+            hs.gstr_push(a, jdigit(0 - n % 10))
+        },
+    })
+}
+// ── JS identifier safety: a Zen name that is a JS reserved word gets a `$` suffix (so a Zen fn named
+//    `default`/`new`/`class`/… is a legal JS name). Field/property names are NOT mangled (any string is
+//    a valid object key). Kept small — only the words that actually collide with Zen's identifier space.
+js_is_reserved = (n: string_view) bool { eq(n, "default") || eq(n, "new") || eq(n, "class") || eq(n, "function") || eq(n, "var") || eq(n, "let") || eq(n, "const") || eq(n, "this") || eq(n, "null") || eq(n, "delete") || eq(n, "in") || eq(n, "instanceof") || eq(n, "typeof") || eq(n, "void") || eq(n, "with") || eq(n, "super") || eq(n, "enum") || eq(n, "export") || eq(n, "import") || eq(n, "extends") || eq(n, "switch") || eq(n, "case") || eq(n, "yield") || eq(n, "await") || eq(n, "debugger") || eq(n, "finally") }
+jname* = (s: String, a: MutPtr<Malloc>, n: string_view) String {
+    js_is_reserved(n).match ({
+        true  => s.gstr_append(a, n).gstr_append(a, "$"),
+        false => s.gstr_append(a, n),
+    })
+}
+// ── JS string-literal escaping (byte by byte to the NUL) ──────────────────────────────────────────
+jesc_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
+    (b == '"').match ({
+        true  => s.gstr_append(a, "\\\""),
+        false => (b == '\\').match ({
+            true  => s.gstr_append(a, "\\\\"),
+            false => (b == '\n').match ({
+                true  => s.gstr_append(a, "\\n"),
+                false => (b == '\r').match ({
+                    true  => s.gstr_append(a, "\\r"),
+                    false => (b == '\t').match ({
+                        true  => s.gstr_append(a, "\\t"),
+                        false => s.gstr_push(a, b),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
+jesc_from = (s: String, a: MutPtr<Malloc>, v: string_view, i: i32) String {
+    (sbyte(v, i) == 0).match ({
+        true  => s,
+        false => s.jesc_byte(a, sbyte(v, i)).jesc_from(a, v, i + 1),
+    })
+}
+jstrlit* = (s: String, a: MutPtr<Malloc>, v: string_view) String { s.gstr_append(a, "__zr.str(\"").jesc_from(a, v, 0).gstr_append(a, "\")") }
