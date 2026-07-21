@@ -124,8 +124,8 @@ MODULES="
 std.c.libc:getpid
 std.mem.alloc:malloc
 std.math:sin
-std.net:serve
-std.time:mono_ns
+std.net.socket:serve
+std.time.clock:mono_ns
 std.os:argc
 std.platform:platform
 std.concurrent.pool:pool_spawn
