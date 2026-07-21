@@ -38,7 +38,7 @@
 { String, new_in, append_in, push_in, finish_in } = std.text.string
 { view, find, substr, split, words, trim, starts_with, to_lower, contains, parse_int, nbuf } = std.text.str
 { integer } = std.text.num
-{ is_hex } = std.text.bytes    // shared ASCII hex-digit class (centralized in std.text.bytes)
+{ is_hex, hex_nibble } = std.text.bytes    // shared ASCII hex-digit class + hex-DECODE nibble (centralized in std.text.bytes)
 // ── error channel ────────────────────────────────────────────────────────────────────────────────────
 // Connect: the TCP handshake failed (the wrapped std.net IoError says why). Io: a send/receive failed
 // mid-exchange. Malformed: the bytes came back but are not a well-formed HTTP/1.1 response — the `str`
@@ -218,15 +218,6 @@ decide_body*<A> = (a: MutPtr<A>, headers: [Header], body_raw: string_view) strin
     })
 }
 // ── chunked transfer-encoding decode ──────────────────────────────────────────────────────────────────
-hex_digit = (b: u8) i64 {
-    (b >= '0' && b <= '9').match ({
-        true  => to_i64(b - '0'),
-        false => (b >= 'a' && b <= 'f').match ({
-            true  => to_i64(b - 'a' + 10),
-            false => to_i64(b - 'A' + 10),
-        }),
-    })
-}
 // first index at/after `i` that is not a hex digit (the end of a chunk-size field).
 hex_end = (bv: [u8], i: i64) i64 { (i < bv.len && is_hex(bv[i])).match ({
     true  => bv.hex_end(i + 1),
@@ -235,7 +226,7 @@ hex_end = (bv: [u8], i: i64) i64 { (i < bv.len && is_hex(bv[i])).match ({
 // fold the hex digits bv[i..e] into an integer size.
 hex_val = (bv: [u8], i: i64, e: i64, acc: i64) i64 { (i >= e).match ({
     true  => acc,
-    false => bv.hex_val(i + 1, e, acc * 16 + hex_digit(bv[i])),
+    false => bv.hex_val(i + 1, e, acc * 16 + hex_nibble(bv[i])),
 }) }
 // index just past the next '\n' at/after `i` (one line terminator), or `bv.len` if none remains.
 after_lf = (bv: [u8], i: i64) i64 {

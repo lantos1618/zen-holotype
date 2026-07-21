@@ -18,7 +18,7 @@
 { Allocator } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { view } = std.text.str
-{ hex_char } = std.text.bytes    // shared hex-ENCODE nibble (centralized in std.text.bytes)
+{ hex_char, hex_nibble } = std.text.bytes    // shared hex nibble encode/decode (centralized in std.text.bytes)
 ENC_BAD_LEN* := 22    // EINVAL — input length is not a valid base64/hex codeword multiple
 ENC_BAD_CHAR* := 84    // EILSEQ — a byte outside the alphabet (or a misplaced `=` pad)
 // ── base64 ────────────────────────────────────────────────────────────────────
@@ -213,19 +213,6 @@ base64_decode*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> {
 }
 base64_decode_in*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> { a.base64_decode(s) }
 // ── hex ───────────────────────────────────────────────────────────────────────
-// hex byte -> its nibble value (0..15), or -1 for a non-hex byte. Accepts both cases on input.
-hex_val = (c: u8) i64 {
-    (c >= '0' && c <= '9').match ({
-        true  => (c - '0').to_i64(),
-        false => (c >= 'a' && c <= 'f').match ({
-            true  => (c - 'a').to_i64() + 10,
-            false => (c >= 'A' && c <= 'F').match ({
-                true  => (c - 'A').to_i64() + 10,
-                false => 0 - 1,
-            }),
-        }),
-    })
-}
 // lowercase-hex-encode `data`. Output length is 2*n; empty input yields "".
 hex_encode*<A> = (a: MutPtr<A>, data: [u8]) string_view {
     n := data.len
@@ -256,8 +243,8 @@ hex_decode*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> {
                         out: [u8] := p.slice(olen)
                         bad := false
                         out.loop((h, i, b) {
-                            hi := sv[i * 2].hex_val()
-                            lo := sv[i * 2 + 1].hex_val()
+                            hi := sv[i * 2].hex_nibble()
+                            lo := sv[i * 2 + 1].hex_nibble()
                             (hi < 0 || lo < 0).match ({
                                 true  => {
                                     bad = true
