@@ -1,6 +1,6 @@
 // Explicit allocator interface. Heap, arena, and other allocators share this trait.
 // Raw malloc/free stay visible for bootstrap and FFI boundary code.
-{ Result, IoError, ok_ptr } = std.core.result
+{ Result, IoError, ok, err, ok_ptr } = std.core.result
 // malloc / realloc / free are the allocator's public C floor: callers import them as
 // `{ malloc, free } = std.mem.alloc`. The resolver doesn't re-export imported names, so
 // these stay DECLARED here (they can't live in std.c.libc without breaking that API).
@@ -47,6 +47,27 @@ try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
     (n <= 0).match ({ true => .Ok(null_ptr()), false => ok_ptr(a.acquire(n)) })
 }
 try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(a.resize(p, n)) }
+// ── refcount block: [ count:i64 | value:T ] ────────────────────────────────────────────────────────
+// The i64 count lives in the first 8 bytes; the value follows at `.offset(8)`. std.mem.{rc,arc,own}
+// all share THIS block shape and differ only in how they bump the count (plain vs atomic) and tear it
+// down (free vs Drop) — so the allocate-and-seed step is factored here, not re-inlined three times.
+// `val_slot` types the value slot as a 1-element `[T]` over the bytes after the count.
+val_slot*<T> = (base: RawPtr<u8>) [T] { slice(base.offset(8), 1) }
+// Acquire a [count|value] block from `a`, set the count to 1, and copy `x` into the value slot; return
+// the block's base pointer (allocation failure stays in the Result). rc/arc/own `new_in` wrap the
+// returned base in their own pointer type; the count-bump and teardown differences stay per-type.
+rc_block_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<RawPtr<u8>, IoError> {
+    v := x
+    a.try_acquire(8 + sizeof(T)).match ({
+        .Ok(base) => {
+            store_i64(base, 1)
+            s := val_slot<T>(base)
+            s[0] = v
+            ok(base)
+        },
+        .Err(e)   => err(e),
+    })
+}
 // ── all-or-nothing multi-buffer acquire ──────────────────────────────────────────────────────────
 // Acquire N sized buffers from one allocator with ROLLBACK: buffers are acquired in order; if a later
 // one OOMs, the ones already acquired are released and the whole thing returns .Err. This is the ONE
