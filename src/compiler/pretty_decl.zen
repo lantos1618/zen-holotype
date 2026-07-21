@@ -1,0 +1,373 @@
+// compiler.pretty_decl — declaration / type / struct / enum / impl / func / import formatting for the
+// AST pretty-printer. Extracted from compiler.pretty (pure move): the top-level decl walk's node formatters
+// (called from ff_top_decl / pretty_module_in and from nested-func statements). Mutually recursive with the
+// expression / statement walks in compiler.pretty / compiler.pretty_expr (flat-TU cycle, `*` exports).
+{ String } = std.text.string
+{ eq, starts_with } = std.text.str
+{ Malloc } = std.mem.alloc
+{ Decl, EnumDecl, Field, Func, GenEnumDecl, GenStructDecl, ImplData, ImportData, Param, StructDecl, Ty, VariantDef, impl_cname_in, is_expr_null, payload_fname, tvoid } = compiler.genc
+{ at } = std.text.bytes
+{ ff_append, ff_block, ff_flush_leading, ff_indent, ff_ty, ff_tys } = compiler.pretty
+{ ff_expr } = compiler.pretty_expr
+// ── declarations ────────────────────────────────────────────────────────────────
+// a trailing `...T` param stores its type as the collected `[T]`; recover the element T to re-print `...T`.
+ff_slice_elem = (t: Ty) Ty {
+    t.match ({
+        .Slice(p) => load(p),
+        _         => t,
+    })
+}
+ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = p.variadic.match ({
+            true  => out.ff_append(a, p.name).ff_append(a, ": ...").ff_ty(a, ff_slice_elem(p.ty)),
+            false => out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
+        })
+    })
+    out
+}
+// lambda params: a param's ty is its declared `: Type` annotation (Void when the source wrote none —
+// the FnT context supplies the real types when the lambda is spliced). Print the annotation back when
+// present; an unannotated param prints as its bare NAME — `(x)`, never `(x: void)`.
+ff_lparams* = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    out := s
+    ps.loop((h, i, p) {
+        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = p.ty.match ({
+            .Void => out.ff_append(a, p.name),
+            _     => out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
+        })
+    })
+    out
+}
+// generic type params `<A, B>` (with optional bound `<A: Bound>`)
+ff_tparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+    (ps.len == 0).match ({
+        true  => s,
+        false => {
+            open := s.ff_append(a, "<")
+            body := open
+            ps.loop((h, i, p) {
+                body = (i == 0).match ({ true => body, false => body.ff_append(a, ", ") })
+                body = p.ty.match ({
+                    .Void => body.ff_append(a, p.name),
+                    _     => body.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
+                })
+            })
+            body.ff_append(a, ">")
+        },
+    })
+}
+// the `*` export marker: appended right after a top-level decl name when it was starred in the source.
+ff_exported = (exp: [Param], name: string_view) bool {
+    found := false
+    exp.loop((h, i, p) {
+        found = found || eq(p.name, name)
+    })
+    found
+}
+ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: string_view) String {
+    exp.ff_exported(name).match ({
+        true  => s.ff_append(a, name).ff_append(a, "*"),
+        false => s.ff_append(a, name),
+    })
+}
+// The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
+// an anonymous-struct return type `{ field: T }`, changing the AST.
+ff_func = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
+    sig := s.ff_name(a, exp, f.name).ff_tparams(a, f.tparams).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
+    sig.ff_append(a, " ").ff_block(a, f.body, 0, true)
+}
+ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String { s.ff_name(a, exp, f.name).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret) }
+// ── un-hoisting inherent + trait methods ────────────────────────────────────────
+// The parser HOISTS a struct's inherent methods (and a trait impl's methods) into separate mangled
+// DFuncs (`impl_<Tr>_<Ty>_<m>`) plus a DImpl marker carrying the ORIGINAL method names. To round-trip,
+// the formatter REASSEMBLES them: inherent methods print inside the struct body, trait-impl methods
+// inside `Ty.impl(Tr, { … })`, and the hoisted DFuncs / inherent DImpl markers are SKIPPED at top level.
+ff_no_params* = () [Param] { slice(null_ptr(), 0) }
+ff_find_func = (a: MutPtr<Malloc>, decls: [Decl], name: string_view) Func {
+    res := Func(
+        name: "",
+        params: ff_no_params(),
+        ret: tvoid(),
+        tparams: ff_no_params(),
+        body: slice(null_ptr(), 0),
+    )
+    decls.loop((h, i, d) {
+        d.match ({
+            .DFunc(f) => eq(f.name, name).then({
+                res = f
+            }),
+            _         => { },
+        })
+    })
+    res
+}
+// the type's own tparams (so a method's print drops them, keeping only the method's OWN tparams)
+ff_type_tparams = (decls: [Decl], tyname: string_view) [Param] {
+    res := ff_no_params()
+    decls.loop((h, i, d) {
+        d.match ({
+            .DGenStruct(g) => eq(g.name, tyname).then({
+                res = g.tparams
+            }),
+            .DGenEnum(g)   => eq(g.name, tyname).then({
+                res = g.tparams
+            }),
+            _              => { },
+        })
+    })
+    res
+}
+ff_tparams_has = (ps: [Param], name: string_view) bool {
+    found := false
+    ps.loop((h, i, p) {
+        found = found || eq(p.name, name)
+    })
+    found
+}
+ff_minus_tparams = (a: MutPtr<Malloc>, full: [Param], drop: [Param]) [Param] {
+    buf := slice(a.acquire((full.len + 1) * sizeof(Param)), full.len + 1)
+    n := 0
+    full.loop((h, i, p) {
+        (drop.ff_tparams_has(p.name) == false).then({
+            buf[n] = p
+            n = n + 1
+        })
+    })
+    slice(buf.ptr, n)
+}
+// a trait default for (trait, method): the parser splits `m = (…) R { … }` inside a pure method
+// record into a synthesized FnT requirement field PLUS a DTraitDefault sibling carrying the body.
+// The formatter re-inlines that body at the field's own slot (and skips the sibling at top level) —
+// printing it as a standalone fn would hoist the body out of the record, where `Self` is unbound.
+ff_has_default = (decls: [Decl], trname: string_view, fname: string_view) bool {
+    found := false
+    decls.loop((h, i, d) {
+        d.match ({
+            .DTraitDefault(td) => (eq(td.trname, trname) && eq(td.fn.name, fname)).then({
+                found = true
+            }),
+            _                  => { },
+        })
+    })
+    found
+}
+ff_find_default = (a: MutPtr<Malloc>, decls: [Decl], trname: string_view, fname: string_view) Func {
+    res := Func(
+        name: "",
+        params: ff_no_params(),
+        ret: tvoid(),
+        tparams: ff_no_params(),
+        body: slice(null_ptr(), 0),
+    )
+    decls.loop((h, i, d) {
+        d.match ({
+            .DTraitDefault(td) => (eq(td.trname, trname) && eq(td.fn.name, fname)).then({
+                res = td.fn
+            }),
+            _                  => { },
+        })
+    })
+    res
+}
+// is `fname` a hoisted impl method (so it must NOT print as a standalone top-level fn)?
+ff_is_hoisted* = (a: MutPtr<Malloc>, decls: [Decl], fname: string_view) bool {
+    found := false
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => im.methods.loop((h2, k, mp) {
+                eq(a.impl_cname_in(im.trname, im.ty, mp.name), fname).then({
+                    found = true
+                })
+            }),
+            _          => { },
+        })
+    })
+    found
+}
+// print an impl's methods (each demangled to its original name; the type's tparams dropped from the
+// method's own tparam list). Reused for inherent (inside the struct) and trait impls (inside `.impl`).
+ff_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData, ctp: [Param], ind: i32) String {
+    out := s
+    im.methods.loop((h, k, mp) {
+        f := a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
+        own := a.ff_minus_tparams(f.tparams, ctp)
+        // own-line comments written ABOVE this method flush at method indent (bounded by the method's
+        // name pos) — NOT hoisted into its body, where ff_block would otherwise pick them up.
+        lead := out.ff_flush_leading(a, f.pos, ind)
+        sig := lead.ff_indent(a, ind).ff_append(a, mp.name).ff_tparams(a, own).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
+        out = sig.ff_append(a, " ").ff_block(a, f.body, ind, true).ff_append(a, "\n")
+    })
+    out
+}
+// the inherent methods of `tyname` (the DImpl where ty == trname == tyname), printed at `ind`
+ff_inherent_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], tyname: string_view, ctp: [Param], ind: i32) String {
+    out := s
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => (eq(im.ty, tyname) && eq(im.trname, tyname)).then({
+                out = out.ff_methods(a, decls, im, ctp, ind)
+            }),
+            _          => { },
+        })
+    })
+    out
+}
+// one record entry: a field whose name carries a DTraitDefault prints the default IN PLACE —
+// `name = (params) ret { … },` at one indent, body formatted like a fn body — every other field
+// prints `name: ty,`. Both spellings keep the trailing comma (fields are record entries).
+ff_record_field = (s: String, a: MutPtr<Malloc>, decls: [Decl], owner: string_view, ctp: [Param], fl: Field) String {
+    decls.ff_has_default(owner, fl.name).match ({
+        true  => {
+            f := a.ff_find_default(decls, owner, fl.name)
+            own := a.ff_minus_tparams(f.tparams, ctp)
+            // own-line comments preceding the default (fields carry no pos, so the default's name pos
+            // is the only in-record anchor) print above it at field indent — not inside its body.
+            lead := s.ff_flush_leading(a, f.pos, 1)
+            sig := lead.ff_indent(a, 1).ff_append(a, fl.name).ff_tparams(a, own).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
+            sig.ff_append(a, " ").ff_block(a, f.body, 1, true).ff_append(a, ",\n")
+        },
+        false => s.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n"),
+    })
+}
+ff_struct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], sd: StructDecl) String {
+    open := s.ff_name(a, exp, sd.name).ff_append(a, ": {\n")
+    body := open
+    sd.fields.loop((h, i, fl) {
+        body = body.ff_record_field(a, decls, sd.name, ff_no_params(), fl)
+    })
+    body.ff_inherent_methods(a, decls, sd.name, ff_no_params(), 1).ff_append(a, "}")
+}
+ff_genstruct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: GenStructDecl) String {
+    open := s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": {\n")
+    body := open
+    g.fields.loop((h, i, fl) {
+        body = body.ff_record_field(a, decls, g.name, g.tparams, fl)
+    })
+    body.ff_inherent_methods(a, decls, g.name, g.tparams, 1).ff_append(a, "}")
+}
+// the impl head prints im.trty — the trait reference AS WRITTEN (qualifier + type args, e.g.
+// `actor.Receiver<Msg>`) — never the bare im.trname mangle key, which drops the `.Receiver<Msg>` part
+// of a qualified reference and would silently change the code's meaning.
+ff_trait_impl = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
+    ctp := decls.ff_type_tparams(im.ty)
+    (im.methods.len == 0).match ({
+        true  => s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_ty(a, im.trty).ff_append(a, ", { })"),
+        false => {
+            open := s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_ty(a, im.trty).ff_append(a, ", {\n")
+            open.ff_methods(a, decls, im, ctp, 1).ff_append(a, "})")
+        },
+    })
+}
+ff_no_fields = () [Field] { slice(null_ptr(), 0) }
+// A multi-field variant payload `Ask(t0, t1, …)` is DESUGARED at parse time into a synthesized anon
+// struct `__anon__0__1…` with positional fields `_0, _1, …` (compiler.parse_type.parse_variant_payload
+// + compiler.genc.payload_fname). The surface type list does not survive on the AST, so the formatter
+// re-derives it here: a payload struct is recognised by its `__anon` name AND ordered positional field
+// names, then re-rendered as the `(t0, t1, …)` tuple and the hoisted struct is suppressed at top level
+// (pretty_module_in) — the surface form round-trips and no `__anon…` internal name ever leaks.
+ff_is_positional_fields = (a: MutPtr<Malloc>, fields: [Field]) bool {
+    (fields.len == 0).match ({
+        true  => false,
+        false => {
+            ok := true
+            fields.loop((h, i, fl) {
+                ok = ok && eq(fl.name, a.payload_fname(to_i32(i)))
+            })
+            ok
+        },
+    })
+}
+ff_is_anon_payload_name* = (a: MutPtr<Malloc>, decls: [Decl], nm: string_view) bool {
+    nm.starts_with("__anon").match ({
+        true  => a.ff_is_positional_fields(a.ff_anon_payload_fields(decls, nm)),
+        false => false,
+    })
+}
+ff_anon_payload_fields = (a: MutPtr<Malloc>, decls: [Decl], nm: string_view) [Field] {
+    res := ff_no_fields()
+    decls.loop((h, i, d) {
+        d.match ({
+            .DStruct(sd) => eq(sd.name, nm).then({
+                res = sd.fields
+            }),
+            _            => { },
+        })
+    })
+    res
+}
+// the payload rendering for a variant: the surface `(t0, t1, …)` tuple when the payload is a
+// synthesized anon struct, else the payload type verbatim.
+ff_variant_payload = (s: String, a: MutPtr<Malloc>, decls: [Decl], t: Ty) String {
+    t.match ({
+        .Named(nm) => a.ff_is_anon_payload_name(decls, nm).match ({
+            true  => s.ff_append(a, "(").ff_tys(a, a.ff_anon_payload_tys(decls, nm)).ff_append(a, ")"),
+            false => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
+        }),
+        _          => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
+    })
+}
+ff_anon_payload_tys = (a: MutPtr<Malloc>, decls: [Decl], nm: string_view) [Ty] {
+    fields := a.ff_anon_payload_fields(decls, nm)
+    buf := slice(a.acquire((fields.len + 1) * sizeof(Ty)), fields.len + 1)
+    n := 0
+    fields.loop((h, i, fl) {
+        buf[n] = fl.ty
+        n = n + 1
+    })
+    slice(buf.ptr, n)
+}
+// one variant: `Name`, `Name(Payload)`, or — for a zero-arg ctor with a default constant — `Name = expr`.
+ff_variant = (s: String, a: MutPtr<Malloc>, decls: [Decl], vd: VariantDef) String {
+    base := vd.payload.match ({
+        .Void => s.ff_append(a, vd.name),
+        _     => s.ff_append(a, vd.name).ff_variant_payload(a, decls, vd.payload),
+    })
+    vd.dflt.is_expr_null().match ({
+        true  => base,
+        false => base.ff_append(a, " = ").ff_expr(a, vd.dflt, 0),
+    })
+}
+ff_variants = (s: String, a: MutPtr<Malloc>, decls: [Decl], vs: [VariantDef]) String {
+    body := s
+    vs.loop((h, i, vd) {
+        body = (i == 0).match ({ true => body, false => body.ff_append(a, " | ") })
+        body = body.ff_variant(a, decls, vd)
+    })
+    body
+}
+ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], ed: EnumDecl) String { s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, decls, ed.variants) }
+ff_genenum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: GenEnumDecl) String { s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": ").ff_variants(a, decls, g.variants) }
+ff_decl* = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) String {
+    d.match ({
+        .DFunc(f)          => s.ff_func(a, exp, f),
+        .DStruct(sd)       => s.ff_struct(a, exp, decls, sd),
+        .DEnum(ed)         => s.ff_enum(a, exp, decls, ed),
+        .DGenStruct(g)     => s.ff_genstruct(a, exp, decls, g),
+        .DGenEnum(g)       => s.ff_genenum(a, exp, decls, g),
+        .DForeign(f)       => s.ff_foreign(a, exp, f),
+        .DImpl(im)         => s.ff_trait_impl(a, decls, im),
+        .DGlobal(g)        => g.tl.match ({
+            true  => s.ff_name(a, exp, g.name).ff_append(a, " := thread_local(").ff_expr(a, g.init, 0).ff_append(a, ")"),
+            false => g.alias.match ({
+                true  => s.ff_name(a, exp, g.name).ff_append(a, " = ").ff_expr(a, g.init, 0),
+                false => s.ff_name(a, exp, g.name).ff_append(a, " := ").ff_expr(a, g.init, 0),
+            }),
+        }),    // module alias keeps `=`
+        .DImport(im)       => s.ff_import(a, im),
+        .DTraitDefault(td) => s.ff_func(a, exp, td.fn),
+        .DRaw(c)           => s.ff_append(a, c),
+    })
+}
+ff_import = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
+    open := s.ff_append(a, "{ ")
+    body := open
+    im.names.loop((h, i, p) {
+        body = (i == 0).match ({ true => body, false => body.ff_append(a, ", ") })
+        body = body.ff_append(a, p.name)
+    })
+    body.ff_append(a, " } = ").ff_append(a, im.module)
+}
