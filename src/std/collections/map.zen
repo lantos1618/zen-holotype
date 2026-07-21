@@ -41,7 +41,7 @@
 //      explicit deep copy with `m.clone(a).expect("clone")` first (clone is fallible — it allocates),
 //      then mutate the copy.
 //
-{ Allocator, try_acquire } = std.mem.alloc    // explicit allocator trait
+{ Allocator, try_acquire3 } = std.mem.alloc    // explicit allocator trait; try_acquire3 = all-or-nothing 3-buffer acquire
 { Result, IoError, Opt } = std.core.result
 { eq, view } = std.text.str    // byte-wise equality (`==` on strings compares POINTERS) + hashing view
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
@@ -105,56 +105,40 @@ Map*<T>: {
     has = (m: Map<T>, k: string_view) bool { m.find(k) >= 0 }
     grow<A> = (m: Map<T>, a: MutPtr<A>) Result<Map<T>, IoError> {
         cap := m.cap * 2 + 1
-        a.try_acquire(cap * sizeof(MKey)).match ({
-            .Ok(kp) => {
-                a.try_acquire(cap * sizeof(T)).match ({
-                    .Ok(vp) => {
-                        a.try_acquire(cap * 2 * sizeof(MIdx)).match ({
-                            .Ok(ip) => {
-                                oldks := m.keys()
-                                oldvs := m.vals()
-                                next := Map<T>(
-                                    keys: kp,
-                                    vals: vp,
-                                    idx: ip,
-                                    len: m.len,
-                                    cap: cap,
-                                )
-                                keys := next.keys()
-                                vals := next.vals()
-                                oldks.loop((h, i, k) {
-                                    (i < m.len).match ({
-                                        true  => {
-                                            keys[i] = k
-                                            vals[i] = oldvs[i]
-                                        },
-                                        false => {
-                                            h.break
-                                        },
-                                    })
-                                })
-                                a.release(m.keys)
-                                a.release(m.vals)
-                                a.release(m.idx)
-                                ok: Result<Map<T>, IoError> := .Ok(next.reindex())
-                                ok
-                            },
-                            .Err(e) => {
-                                a.release(kp)
-                                a.release(vp)
-                                err: Result<Map<T>, IoError> := .Err(e)
-                                err
-                            },
-                        })
-                    },
-                    .Err(e) => {
-                        a.release(kp)
-                        err: Result<Map<T>, IoError> := .Err(e)
-                        err
-                    },
+        a.try_acquire3(cap * sizeof(MKey), cap * sizeof(T), cap * 2 * sizeof(MIdx)).match ({
+            .Ok(bufs) => {
+                kp := bufs.b1
+                vp := bufs.b2
+                ip := bufs.b3
+                oldks := m.keys()
+                oldvs := m.vals()
+                next := Map<T>(
+                    keys: kp,
+                    vals: vp,
+                    idx: ip,
+                    len: m.len,
+                    cap: cap,
+                )
+                keys := next.keys()
+                vals := next.vals()
+                oldks.loop((h, i, k) {
+                    (i < m.len).match ({
+                        true  => {
+                            keys[i] = k
+                            vals[i] = oldvs[i]
+                        },
+                        false => {
+                            h.break
+                        },
+                    })
                 })
+                a.release(m.keys)
+                a.release(m.vals)
+                a.release(m.idx)
+                ok: Result<Map<T>, IoError> := .Ok(next.reindex())
+                ok
             },
-            .Err(e) => {
+            .Err(e)   => {
                 err: Result<Map<T>, IoError> := .Err(e)
                 err
             },
@@ -272,53 +256,37 @@ Map*<T>: {
         // owns its buffers and must be `free`d independently. O(len). Allocation failure is a value: OOM on
         // any of the three acquires is returned as .Err (already-acquired buffers are released first).
         cap := m.cap
-        a.try_acquire(cap * sizeof(MKey)).match ({
-            .Ok(kp) => {
-                a.try_acquire(cap * sizeof(T)).match ({
-                    .Ok(vp) => {
-                        a.try_acquire(cap * 2 * sizeof(MIdx)).match ({
-                            .Ok(ip) => {
-                                next := Map<T>(
-                                    keys: kp,
-                                    vals: vp,
-                                    idx: ip,
-                                    len: m.len,
-                                    cap: cap,
-                                )
-                                srcks := m.keys()
-                                srcvs := m.vals()
-                                dstks := next.keys()
-                                dstvs := next.vals()
-                                srcks.loop((h, i, k) {
-                                    (i < m.len).match ({
-                                        true  => {
-                                            dstks[i] = k
-                                            dstvs[i] = srcvs[i]
-                                        },
-                                        false => {
-                                            h.break
-                                        },
-                                    })
-                                })
-                                ok: Result<Map<T>, IoError> := .Ok(next.reindex())
-                                ok
-                            },
-                            .Err(e) => {
-                                a.release(kp)
-                                a.release(vp)
-                                err: Result<Map<T>, IoError> := .Err(e)
-                                err
-                            },
-                        })
-                    },
-                    .Err(e) => {
-                        a.release(kp)
-                        err: Result<Map<T>, IoError> := .Err(e)
-                        err
-                    },
+        a.try_acquire3(cap * sizeof(MKey), cap * sizeof(T), cap * 2 * sizeof(MIdx)).match ({
+            .Ok(bufs) => {
+                kp := bufs.b1
+                vp := bufs.b2
+                ip := bufs.b3
+                next := Map<T>(
+                    keys: kp,
+                    vals: vp,
+                    idx: ip,
+                    len: m.len,
+                    cap: cap,
+                )
+                srcks := m.keys()
+                srcvs := m.vals()
+                dstks := next.keys()
+                dstvs := next.vals()
+                srcks.loop((h, i, k) {
+                    (i < m.len).match ({
+                        true  => {
+                            dstks[i] = k
+                            dstvs[i] = srcvs[i]
+                        },
+                        false => {
+                            h.break
+                        },
+                    })
                 })
+                ok: Result<Map<T>, IoError> := .Ok(next.reindex())
+                ok
             },
-            .Err(e) => {
+            .Err(e)   => {
                 err: Result<Map<T>, IoError> := .Err(e)
                 err
             },
@@ -364,38 +332,22 @@ mchain = (ks: [string_view], ix: [i64], cap: i64, e: i64, k: string_view) i64 {
 // A is inferred from `a`. The index is reindexed (its single bucket head cleared to -1) so `find`/`get`
 // on the empty map return absent immediately. Pair with `put`/`get`/`free` like `of`.
 empty*<T, A> = (a: MutPtr<A>) Result<Map<T>, IoError> {
-    a.try_acquire(sizeof(MKey)).match ({
-        .Ok(kp) => {
-            a.try_acquire(sizeof(T)).match ({
-                .Ok(vp) => {
-                    a.try_acquire(2 * sizeof(MIdx)).match ({
-                        .Ok(ip) => {
-                            m := Map<T>(
-                                keys: kp,
-                                vals: vp,
-                                idx: ip,
-                                len: 0,
-                                cap: 1,
-                            )
-                            ok: Result<Map<T>, IoError> := .Ok(m.reindex())
-                            ok
-                        },
-                        .Err(e) => {
-                            a.release(kp)
-                            a.release(vp)
-                            err: Result<Map<T>, IoError> := .Err(e)
-                            err
-                        },
-                    })
-                },
-                .Err(e) => {
-                    a.release(kp)
-                    err: Result<Map<T>, IoError> := .Err(e)
-                    err
-                },
-            })
+    a.try_acquire3(sizeof(MKey), sizeof(T), 2 * sizeof(MIdx)).match ({
+        .Ok(bufs) => {
+            kp := bufs.b1
+            vp := bufs.b2
+            ip := bufs.b3
+            m := Map<T>(
+                keys: kp,
+                vals: vp,
+                idx: ip,
+                len: 0,
+                cap: 1,
+            )
+            ok: Result<Map<T>, IoError> := .Ok(m.reindex())
+            ok
         },
-        .Err(e) => {
+        .Err(e)   => {
             err: Result<Map<T>, IoError> := .Err(e)
             err
         },
@@ -404,42 +356,26 @@ empty*<T, A> = (a: MutPtr<A>) Result<Map<T>, IoError> {
 // a `Map<T>` seeded with one entry, its buffers acquired from `a`. T inferred from the seed value
 // (Zen has no call-site type args). Starts at cap 1.
 of*<T, A> = (a: MutPtr<A>, seed_key: string_view, seed_val: T) Result<Map<T>, IoError> {
-    a.try_acquire(sizeof(MKey)).match ({
-        .Ok(kp) => {
-            a.try_acquire(sizeof(T)).match ({
-                .Ok(vp) => {
-                    a.try_acquire(2 * sizeof(MIdx)).match ({
-                        .Ok(ip) => {
-                            m := Map<T>(
-                                keys: kp,
-                                vals: vp,
-                                idx: ip,
-                                len: 1,
-                                cap: 1,
-                            )
-                            keys := m.keys()
-                            vals := m.vals()
-                            keys[0] = seed_key
-                            vals[0] = seed_val
-                            ok: Result<Map<T>, IoError> := .Ok(m.reindex())
-                            ok
-                        },
-                        .Err(e) => {
-                            a.release(kp)
-                            a.release(vp)
-                            err: Result<Map<T>, IoError> := .Err(e)
-                            err
-                        },
-                    })
-                },
-                .Err(e) => {
-                    a.release(kp)
-                    err: Result<Map<T>, IoError> := .Err(e)
-                    err
-                },
-            })
+    a.try_acquire3(sizeof(MKey), sizeof(T), 2 * sizeof(MIdx)).match ({
+        .Ok(bufs) => {
+            kp := bufs.b1
+            vp := bufs.b2
+            ip := bufs.b3
+            m := Map<T>(
+                keys: kp,
+                vals: vp,
+                idx: ip,
+                len: 1,
+                cap: 1,
+            )
+            keys := m.keys()
+            vals := m.vals()
+            keys[0] = seed_key
+            vals[0] = seed_val
+            ok: Result<Map<T>, IoError> := .Ok(m.reindex())
+            ok
         },
-        .Err(e) => {
+        .Err(e)   => {
             err: Result<Map<T>, IoError> := .Err(e)
             err
         },

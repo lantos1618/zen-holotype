@@ -42,6 +42,81 @@ try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
     (n <= 0).match ({ true => .Ok(null_ptr()), false => ok_ptr(a.acquire(n)) })
 }
 try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(a.resize(p, n)) }
+// ── all-or-nothing multi-buffer acquire ──────────────────────────────────────────────────────────
+// Acquire N sized buffers from one allocator with ROLLBACK: buffers are acquired in order; if a later
+// one OOMs, the ones already acquired are released and the whole thing returns .Err. This is the ONE
+// audited home for the "acquire kp → then vp → then ip, release the earlier ones on any failure" ladder
+// that map/set/hmap/btree constructors and grow paths all need — hand-rolling that nested rollback is
+// exactly where a mis-edited .Err arm silently leaks. The 0-byte rule is inherited from try_acquire
+// (n <= 0 is an empty success returning null_ptr(), not OOM). Buf2/Buf3 are the returned buffer bundles.
+Buf2*: {
+    b1: RawPtr<u8>,
+    b2: RawPtr<u8>,
+}
+Buf3*: {
+    b1: RawPtr<u8>,
+    b2: RawPtr<u8>,
+    b3: RawPtr<u8>,
+}
+try_acquire2*<A> = (a: MutPtr<A>, n1: i64, n2: i64) Result<Buf2, IoError> {
+    a.try_acquire(n1).match ({
+        .Ok(b1) => {
+            a.try_acquire(n2).match ({
+                .Ok(b2) => {
+                    ok: Result<Buf2, IoError> := .Ok(Buf2(
+                        b1: b1,
+                        b2: b2,
+                    ))
+                    ok
+                },
+                .Err(e) => {
+                    a.release(b1)
+                    err: Result<Buf2, IoError> := .Err(e)
+                    err
+                },
+            })
+        },
+        .Err(e) => {
+            err: Result<Buf2, IoError> := .Err(e)
+            err
+        },
+    })
+}
+try_acquire3*<A> = (a: MutPtr<A>, n1: i64, n2: i64, n3: i64) Result<Buf3, IoError> {
+    a.try_acquire(n1).match ({
+        .Ok(b1) => {
+            a.try_acquire(n2).match ({
+                .Ok(b2) => {
+                    a.try_acquire(n3).match ({
+                        .Ok(b3) => {
+                            ok: Result<Buf3, IoError> := .Ok(Buf3(
+                                b1: b1,
+                                b2: b2,
+                                b3: b3,
+                            ))
+                            ok
+                        },
+                        .Err(e) => {
+                            a.release(b1)
+                            a.release(b2)
+                            err: Result<Buf3, IoError> := .Err(e)
+                            err
+                        },
+                    })
+                },
+                .Err(e) => {
+                    a.release(b1)
+                    err: Result<Buf3, IoError> := .Err(e)
+                    err
+                },
+            })
+        },
+        .Err(e) => {
+            err: Result<Buf3, IoError> := .Err(e)
+            err
+        },
+    })
+}
 // DynAlloc — an `Allocator` captured as a plain VALUE: a type-erased three-method vtable + opaque
 // state. It lets a container STORE a narrow Allocator capability in one concrete field, with no
 // generic type parameter and WITHOUT depending on the wider `Rt` bundle (which also carries
