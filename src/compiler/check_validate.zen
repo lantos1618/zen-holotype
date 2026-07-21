@@ -2940,6 +2940,7 @@ KTARGARITY = () i32 { 41 }    // an explicit `<…>` type-arg list whose COUNT �
 KFFITYPE = () i32 { 42 }    // a FOREIGN (bodyless) declaration whose signature uses a type outside the FFI-safe set
 KLITEXHAUST = () i32 { 45 }    // a literal-scalar `.match` (i32/…) with no `_` wildcard — the value domain is unbounded, so it is non-exhaustive. Kind label is "exhaustiveness" (same family as KEXHAUST); the parser plants a positioned `__nonexhaustive_lit` sentinel the call-classifier maps here
 KMATCHLABEL = () i32 { 46 }    // a boolean `.match` arm labelled with a non-boolean literal (`true => 1, 0 => 2`) — a label-TYPE error, caret on the bad label (the parser's positioned `__badmatchlabel` sentinel)
+KCAPACITY = () i32 { 47 }    // a fixed-capacity compiler registry (exports / alias prefixes / module sigs) overflowed — the parser's sticky `__capacity` sentinel; the program is REJECTED rather than compiled with silently dropped registry data
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
@@ -3336,11 +3337,18 @@ diag_info = (code: i32) DiagInfo {
                                                                                                                                                                         message: "match arm label is not a `bool`; a boolean `.match` takes `true`, `false`, or `_`",
                                                                                                                                                                         hint: "replace the label with `true`, `false`, or a `_` wildcard",
                                                                                                                                                                     ),
-                                                                                                                                                                    false => DiagInfo(
-                                                                                                                                                                        kind: "type",
-                                                                                                                                                                        message: "type error",
-                                                                                                                                                                        hint: "",
-                                                                                                                                                                    ),
+                                                                                                                                                                    false => (code == 47).match ({
+                                                                                                                                                                        true  => DiagInfo(
+                                                                                                                                                                            kind: "capacity",
+                                                                                                                                                                            message: "program exceeds a fixed compiler capacity (exports, module aliases, or module-signature entries)",
+                                                                                                                                                                            hint: "this is a compiler limit, not a program error — split the module or report it; the registry sizes live in compiler/parse.zen",
+                                                                                                                                                                        ),
+                                                                                                                                                                        false => DiagInfo(
+                                                                                                                                                                            kind: "type",
+                                                                                                                                                                            message: "type error",
+                                                                                                                                                                            hint: "",
+                                                                                                                                                                        ),
+                                                                                                                                                                    }),
                                                                                                                                                                 }),
                                                                                                                                                             }),
                                                                                                                                                         }),
@@ -6136,6 +6144,9 @@ kparse_kind = (init: Ptr<Expr>) i32 {
 kbadbind_kind = (init: Ptr<Expr>) i32 { KBADBIND().kv_at(init.kparse_off()) }
 // the `__misordered_generic` sentinel: a `Name<T>*:` head, caret at the `<` offset (always ≥ 0).
 kmisgen_kind = (init: Ptr<Expr>) i32 { KMISGEN().kv_at(init.kparse_off()) }
+// the `__capacity` sentinel: a fixed-capacity compiler registry overflowed (no meaningful caret — the
+// offense is program SIZE, not a token; the sentinel's offset is 0).
+kcapacity_kind = (init: Ptr<Expr>) i32 { KCAPACITY().kv_at(init.kparse_off()) }
 // packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
 parse_sentinel_kind = (nm: string_view, init: Ptr<Expr>) i32 {
     eq(nm, "__syntax_error").match ({
@@ -6144,7 +6155,10 @@ parse_sentinel_kind = (nm: string_view, init: Ptr<Expr>) i32 {
             true  => init.kbadbind_kind(),
             false => eq(nm, "__misordered_generic").match ({
                 true  => init.kmisgen_kind(),
-                false => 0,
+                false => eq(nm, "__capacity").match ({
+                    true  => init.kcapacity_kind(),
+                    false => 0,
+                }),
             }),
         }),
     })

@@ -1,6 +1,6 @@
 # Python-free build + regen for the self-hosted Zen compiler.
 #
-# The compiler IS the `zenc` binary: cc compiles bootstrap/{zenc.gen.c,zenrt.c}.
+# The compiler IS the `zen` binary: cc compiles bootstrap/{zenc.gen.c,zenrt.c}.
 # zenc.gen.c is the committed C emitted from the Zen compiler sources plus driver.zen. NO Python is
 # in this loop.
 #
@@ -16,7 +16,7 @@
 HERE := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 ROOT := $(abspath $(HERE)..)
 
-# Use ccache transparently when it's installed (caches the ~7 MB zenc.gen.c recompile); plain `cc`
+# Use ccache transparently when it's installed (caches the ~2.4 MB zenc.gen.c recompile); plain `cc`
 # otherwise, so the build is byte-identical whether or not ccache is present. An explicit `CC=...`
 # in the environment still wins (this only sets the default).
 CCACHE  := $(shell command -v ccache 2>/dev/null)
@@ -27,7 +27,13 @@ CC      := $(if $(CCACHE),ccache cc,cc)
 endif
 # Apple Clang treats generated forward calls as errors unless this diagnostic
 # is made non-fatal. (The runtime itself defines macOS's ucontext feature macro.)
-CFLAGS  ?= -std=gnu11 -Wno-error=implicit-function-declaration -fwrapv -w
+# -Wno-builtin-declaration-mismatch: Zen's C floor models heap pointers as `uint8_t*` and sizes as
+# `int64_t` (the language has no u64/size_t or void*), so its `malloc`/`memcpy` foreign prototypes
+# deliberately differ from the C builtins. The calls are ABI-compatible on LP64 (ffi-verify checks
+# the ABI class of every foreign prototype against the real system headers); matching the builtins
+# exactly needs a size_t/void* mapping in the language — see STATUS.md's defects ledger. Every OTHER
+# warning is left enabled: no blanket -w.
+CFLAGS  ?= -std=gnu11 -Wno-error=implicit-function-declaration -fwrapv -Wno-builtin-declaration-mismatch
 ZENC    := $(ROOT)/zen
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
@@ -37,7 +43,7 @@ HEADERS := $(HERE)zenrt.h
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
-# an unchanged `make zen` must only check mtimes, not recompile the ~7 MB generated C seed. The
+# an unchanged `make zen` must only check mtimes, not recompile the ~2.4 MB generated C seed. The
 # Makefile is also a prerequisite because changing its default compiler flags must rebuild the binary.
 zen: $(ZENC)
 
@@ -48,7 +54,7 @@ $(ZENC): $(SOURCES) $(HEADERS) $(HERE)Makefile
 	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC).$$$$.tmp && mv -f $(ZENC).$$$$.tmp $(ZENC)
 
 # Regenerate through a PID-specific temp and replace the seed only when its bytes changed. A fixpoint
-# regen must preserve zenc.gen.c's mtime; otherwise the following `make zen` recompiles ~7 MB of
+# regen must preserve zenc.gen.c's mtime; otherwise the following `make zen` recompiles ~2.4 MB of
 # identical C for no reason. The temp also keeps a failed/interrupted emission away from the seed.
 # `--build-self` reads <srcroot>/bootstrap/sources.txt, strips imports, concatenates in graph/SCC order,
 # and emits the same C the committed file holds. This is the replacement for the old Python generator.
@@ -63,7 +69,7 @@ clean:
 	rm -f $(ZENC)
 
 # The Zen-native correctness harness (tests/harness.zen) — the self-hosted replacement for the pytest
-# value/verdict harness. Build it with the freshly-built `zenc`, then run it from the repo ROOT (the
+# value/verdict harness. Build it with the freshly-built `zen`, then run it from the repo ROOT (the
 # harness drives `./zen` + `tests/harness_runner.c` and reads bootstrap/zenc.gen.c via relative paths).
 # The harness exits 0 when all cases pass and 1 when any fail, so counts cannot wrap through POSIX's
 # 8-bit process status.
@@ -79,7 +85,7 @@ harness: zen
 harness-fast: zen
 	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && ZC=/tmp/zo_hfcache.$$$$ && export ZENC_CACHE_DIR=$$ZC && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -rf $$ZO $$ZC; exit $$rc
 
-# Differential gate (module-system campaign): compare two zenc binaries over the whole fixture +
+# Differential gate (module-system campaign): compare two compiler binaries over the whole fixture +
 # example + dispatch corpus — check stdout/stderr/exit, emitted C bytes, run exit/stdout. Diffs not
 # listed in scripts/difftest-allow.txt fail the target. Defaults compare the built compiler with
 # itself (a self-consistency smoke); point OLD at a saved baseline for the real gate:
@@ -93,7 +99,7 @@ docs-check:
 	cd $(ROOT) && ./scripts/check-docs.sh
 
 # FFI drift gate: prove std's hand-written foreign prototypes (src/std/c/libc.zen and friends)
-# match the REAL system headers. Reuses `zenc emit` (foreign decls lower to bare C prototypes),
+# match the REAL system headers. Reuses `zen emit` (foreign decls lower to bare C prototypes),
 # then compares them against glibc's declarations — libm verbatim under gcc's conflicting-types
 # rule, the rest slot-by-slot at ABI-class level (scripts/ffi_abi_check.h, g++ static_assert).
 # Linux/glibc only; skips cleanly elsewhere. Fast (~2s).
@@ -112,7 +118,7 @@ setup-git:
 # Reproduce + stage the committed seed from the .zen sources after a merge/rebase resolved the seed
 # conflict (the seed is a build artifact, so a textual merge is meaningless — regen is the truth).
 # Use AFTER the conflict is resolved to a clean file (the zenseed driver does this automatically, or
-# `git rebase -X theirs` / `git checkout --theirs bootstrap/zenc.gen.c` by hand): builds zenc from the
+# `git rebase -X theirs` / `git checkout --theirs bootstrap/zenc.gen.c` by hand): builds zen from the
 # resolved seed, regenerates the byte-exact seed, and stages it. Commit it yourself (or, mid-rebase,
 # `git add bootstrap/zenc.gen.c && git rebase --continue`).
 resolve-seed: regen
