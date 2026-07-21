@@ -25,7 +25,7 @@
 //
 // ALLOCATOR. parse/stringify are generic over the allocator: every allocating entry takes
 // `a: MutPtr<A>` for any `A: Allocator` (heap, arena, fixed-buffer, test), threaded exactly like
-// std.collections' vec/hmap and std.os. Pass `heap.gpa().addr()`, an arena, or any other allocator;
+// std.collections' vec/hmap and std.sys.os. Pass `heap.gpa().addr()`, an arena, or any other allocator;
 // callers who already passed a `Malloc` keep working unchanged (`Malloc` still satisfies `A`).
 //
 // MEMORY. Parsed strings and object keys are allocator-owned NUL-terminated copies. Nothing here
@@ -48,7 +48,7 @@
 // \t and emits \u00XX for the remaining control bytes (< 0x20); all other bytes (incl. UTF-8
 // continuation bytes) pass through verbatim.
 { Result, Opt, IoError, err, expect } = std.core.result
-{ String, new_in, push_in, append_in, finish_in } = std.text.string
+{ String, new_in, push_in, append_in, append_slice_in, finish_in } = std.text.string
 { view, substr_in, eq } = std.text.str
 { hex_char } = std.text.bytes    // shared hex-ENCODE nibble (centralized in std.text.bytes)
 { parse_f64, float_in } = std.text.num
@@ -534,11 +534,28 @@ write_esc_byte<A> = (a: MutPtr<A>, sb: String, b: u8) String {
         }),
     })
 }
+// The bytes write_esc_byte rewrites: the two mandatory JSON escapes ('"', '\\') plus every
+// control byte (< 0x20 — \n \t \r get short escapes, the rest \u00XX). Everything else (incl.
+// UTF-8 continuation bytes) passes through verbatim, so it belongs to a bulk-copy run.
+json_needs_esc = (b: u8) bool { b == '"' || b == '\\' || b < 32 }
+// Run-copy escaping (jsony's doCopy/copyMem): copy the run of pass-through bytes since the last
+// escape in ONE append, emit the escape via write_esc_byte, restart the run past it — instead of
+// pushing every byte one at a time. Byte-identical output; fewer grows/stores for plain text.
 write_str_lit<A> = (a: MutPtr<A>, sb: String, s: string_view) String {
     out: String := sb.push_in(a, '"').jok()
     sv := s.view()
+    run_start: i64 := 0
     sv.loop((h, i, b) {
-        out = a.write_esc_byte(out, b)
+        json_needs_esc(b).then({
+            (i > run_start).then({
+                out = a.append_slice_in(out, slice(sv.ptr.offset(run_start), i - run_start)).jok()
+            })
+            out = a.write_esc_byte(out, b)
+            run_start = i + 1
+        })
+    })
+    (sv.len > run_start).then({
+        out = a.append_slice_in(out, slice(sv.ptr.offset(run_start), sv.len - run_start)).jok()
     })
     out.push_in(a, '"').jok()
 }
