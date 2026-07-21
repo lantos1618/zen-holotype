@@ -148,9 +148,48 @@ subst_stmt = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], st: Stm
     })
 }
 subst_body* = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] { map_slice(a, body, (st) { a.subst_stmt(cs, tparams, targs, st) }) }
+// ── field_eq intrinsic expansion (Phase 1: flat structs of scalar / string / enum fields) ──────────
+// `x.field_eq(y)` is desugared (check_desugar) to Call{fn:"field_eq", args:[x,y]}; during INLINING the
+// receiver's concrete type is known, so we EXPAND it here to a per-field `==` fold:
+//   true && x.f0 == y.f0 && x.f1 == y.f1 && …
+// Scalar fields compare with a plain `Bin("==")`. STRING and ENUM fields ALSO use `Bin("==")`: the
+// resolve pass that runs AFTER this inline pass rewrites string `==` → __str_eq and enum `==` → a tag
+// compare, so no special-casing is needed here. A STRUCT-typed field would need a RECURSIVE field_eq
+// (Phase 2) and is NOT supported: it is skipped as `true` (fe_field_cmp) — a documented Phase-1 gap.
+// The result is ordinary Bin/Member nodes, so genc/genjs emit them with NO backend change.
+fe_true = (a: MutPtr<Malloc>, pos: i32) Ptr<Expr> { a.cenode(vref_at("true", pos)) }
+// is `t` a Named type that names a STRUCT in the decl index (the Phase-2 recursive case we reject)?
+fe_is_struct_ty = (decls: [Decl], idx: DeclIndex, t: Ty) bool {
+    t.match ({
+        .Named(n) => idx.idx_struct_fields(decls, n).len > 0,
+        _         => false,
+    })
+}
+fe_field_cmp = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, rx: Ptr<Expr>, ry: Ptr<Expr>, f: Field, pos: i32) Ptr<Expr> {
+    fe_is_struct_ty(decls, idx, f.ty).match ({
+        true  => a.fe_true(pos),
+        false => a.cenode(bin_at("==", a.cenode(member_at(rx, f.name, pos)), a.cenode(member_at(ry, f.name, pos)), pos)),
+    })
+}    // Phase-1 limitation: struct-typed field, recursive field_eq unsupported
+fe_fold = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, rx: Ptr<Expr>, ry: Ptr<Expr>, flds: [Field], i: i32, acc: Ptr<Expr>, pos: i32) Ptr<Expr> {
+    (i >= flds.len).match ({
+        true  => acc,
+        false => a.fe_fold(decls, idx, rx, ry, flds, i + 1, a.cenode(bin_at("&&", acc, a.fe_field_cmp(decls, idx, rx, ry, flds[i], pos), pos)), pos),
+    })
+}
+expand_field_eq = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, cargs: [Expr], env: Ptr<VList>, pos: i32) Ptr<Expr> {
+    rx := cargs[0].addr()
+    ry := cargs[1].addr()
+    st := rx.light_ty(a, env, decls, idx)
+    flds := idx.idx_struct_fields(decls, st.enum_name())
+    a.fe_fold(decls, idx, rx, ry, flds, 0, a.fe_true(pos), pos)
+}
 // Empty Named marks a generic template currently being inlined.
 xform_call = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     cargs := a.xform_args(decls, idx, c.args, params, fargs, env)
+    eq(c.fn, "field_eq").then({
+        return a.expand_field_eq(decls, idx, cargs, env, c.pos)
+    })
     fi := params.param_index(c.fn)
     (fi < 0).match ({
         true  => a.maybe_template(decls, idx, c, cargs, env, exp),

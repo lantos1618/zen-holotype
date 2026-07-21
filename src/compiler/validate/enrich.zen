@@ -501,11 +501,16 @@ denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code:
         false => "",
     })
 }
+// `field_eq` is a GENERIC-dispatched intrinsic: the sanctioned user surface is a generic wrapper
+// `field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }`, whose calls the inliner expands per-field and
+// whose template emits no C (is_template). Allow that ONE shape; a CONCRETE `field_eq` (which would
+// emit C and shadow the intrinsic) stays reserved, like every other intrinsic name.
+reserved_ok_wrapper = (f: Func) bool { eq(f.name, "field_eq") && f.is_generic_fn() }
 reserved_name_kind* = (decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => f.name.is_intrinsic().match ({
+            .DFunc(f) => (f.name.is_intrinsic() && reserved_ok_wrapper(f) == false).match ({
                 true  => KRESERVEDNAME().kv_at(f.pos),
                 false => 0,
             }),
@@ -521,7 +526,10 @@ reserved_name_of* = (decls: [Decl]) string_view {
     decls.loop((h, i, d) {
         n = is_empty(n).match ({
             true  => d.match ({
-                .DFunc(f) => f.name.is_intrinsic().match ({ true => f.name, false => "" }),
+                .DFunc(f) => (f.name.is_intrinsic() && reserved_ok_wrapper(f) == false).match ({
+                    true  => f.name,
+                    false => "",
+                }),
                 _         => "",
             }),
             false => n,
