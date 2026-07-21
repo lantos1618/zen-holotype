@@ -6,6 +6,7 @@
 { panic } = std.core.result
 { Malloc } = std.mem.alloc
 { eq } = std.text.str
+{ gd_has_mangled, gd_tys_max_depth } = compiler.generics
 rc_calls_es = (xs: [Expr], nm: string_view) bool {
     f := false
     xs.loop((h, i, x) {
@@ -85,36 +86,13 @@ rc_is_rec_gen_f* = (f: Func) bool {
 // existing lift handles those (or_return_expr_generic_inline relies on it). FnT-param generics can't
 // monomorphize (their lambda args must splice), so they are out of scope here, as before.
 rc_gbuf* = (a: MutPtr<Malloc>, n: i64) [GenericData] { slice(a.acquire(n * sizeof(GenericData)), n) }
-rc_has = (buf: [GenericData], cnt: i32, m: string_view) bool {
-    found := false
-    buf.loop((h, i, e) {
-        found = (i < cnt).match ({
-            true  => eq(e.mangled, m).match ({ true => true, false => found }),
-            false => found,
-        })
-    })
-    found
-}
-rc_ty_depth = (t: Ty) i32 {
-    t.match ({
-        .Generic(g) => 1 + g.args.rc_tys_depth(),
-        .Ptr(pd)    => load(pd.pointee).rc_ty_depth(),
-        .Slice(e)   => load(e).rc_ty_depth(),
-        _           => 0,
-    })
-}
-rc_tys_depth = (ts: [Ty]) i32 {
-    d := 0
-    ts.loop((h, i, t) {
-        dd := t.rc_ty_depth()
-        d = (dd > d).match ({ true => dd, false => d })
-    })
-    d
-}
+// dedup scan (gd_has_mangled) + type-arg nesting depth (gd_ty_depth/gd_tys_max_depth) are shared
+// leaves; they live in compiler.generics (imported above) alongside their mono twins. rc_add stays
+// local — it differs from mono's add_inst only in its panic message, so it is NOT byte-identical.
 rc_add = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
     // a polymorphic-recursive self-call (deeper targs each step) would grow the worklist forever; drop
     // the absurdly-deep instance (a well-formed one is shallow) and never write past the buffer.
-    (1 + g.args.rc_tys_depth() > 24).then({
+    (1 + g.args.gd_tys_max_depth() > 24).then({
         return cnt
     })
     (cnt >= buf.len).then({
@@ -190,7 +168,7 @@ rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
     (known && f.no_inline_gen_f()).match ({
         true  => {
             m := env.a.mangle_semantic_in(dn, atargs)
-            (buf.rc_has(c2, m) || env.didx.func_idx.get(m, 0 - 1) >= 0).match ({
+            (buf.gd_has_mangled(c2, m) || env.didx.func_idx.get(m, 0 - 1) >= 0).match ({
                 true  => c2,
                 false => buf.rc_add(c2, GenericData(
                     name: dn,
