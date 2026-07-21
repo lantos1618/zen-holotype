@@ -100,6 +100,30 @@ append_in*<A> = (a: MutPtr<A>, s: String, t: string_view) Result<String, IoError
         .Err(e) => err(e),
     })
 }
+// Bulk-copy a length-carrying [u8] slice (NOT NUL-terminated — a sub-run of a larger buffer)
+// onto the String in one grow. `append_in` above is for NUL-terminated `string_view`s; this is
+// its slice sibling, used by run-copy escapers (e.g. std.serde.json's string writer) that bulk
+// copy the run between escapes.
+copy_slice_bytes = (dst: RawPtr<u8>, at: i64, t: [u8]) void {
+    t.loop((h, i, b) {
+        dst.offset(at + i).store(b)
+    })
+}
+append_slice_in*<A> = (a: MutPtr<A>, s: String, t: [u8]) Result<String, IoError> {
+    t := t
+    n := t.len
+    a.reserve_in(s, n + 1).match ({
+        .Ok(r)  => {
+            r.ptr.copy_slice_bytes(r.len, t)
+            ok(String(
+                ptr: r.ptr,
+                len: r.len + n,
+                cap: r.cap,
+            ))
+        },
+        .Err(e) => err(e),
+    })
+}
 finish_in*<A> = (a: MutPtr<A>, s: String) Result<string_cstr, IoError> {
     // init/push/append maintain one spare byte, so this does not relocate the allocation and the
     // caller's String header remains the correct owner to pass to free_in.

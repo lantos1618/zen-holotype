@@ -16,16 +16,33 @@ num_integer_len = (n: i64) i64 { (n < 0).match ({
     true  => 1 + num_ndigit_count(n),
     false => num_udigit_count(n),
 }) }
+// Two-char decimal pairs "00".."99" (200 bytes), the lookup for the two-digits-per-step
+// integer writers below (jsony's dumpNumberFast trick): dividing by 100 and emitting a
+// zero-padded pair halves the divisions vs one digit per step. Exported so std.text.fmt's
+// streaming writers share the one table.
+num_two_digits* = () string_view { "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899" }
+// Write the zero-padded two-digit decimal of `pair` (0..99) at p[at..at+2); returns at+2.
+num_write_upair = (p: RawPtr<u8>, at: i64, pair: i64) i64 {
+    tbl := num_two_digits()
+    p.offset(at).store(tbl.offset(2 * pair).load())
+    p.offset(at + 1).store(tbl.offset(2 * pair + 1).load())
+    at + 2
+}
+// Two digits per step: recurse on n/100 for the high part (its leading pair drops the odd
+// leading '0' via the n<10 branch), then emit the zero-padded n%100 pair. Byte-identical to
+// the one-digit-per-step form for 0, single digits, and the full range up to i64 max.
 num_write_udigits = (p: RawPtr<u8>, at: i64, n: i64) i64 {
-    (n < 10).match ({
-        true  => {
-            p.offset(at).store('0' + n)
-            at + 1
-        },
+    (n < 100).match ({
+        true  => (n < 10).match ({
+            true  => {
+                p.offset(at).store('0' + n)
+                at + 1
+            },
+            false => num_write_upair(p, at, n),
+        }),
         false => {
-            next := num_write_udigits(p, at, n / 10)
-            p.offset(next).store('0' + n % 10)
-            next + 1
+            next := num_write_udigits(p, at, n / 100)
+            num_write_upair(p, next, n % 100)
         },
     })
 }
@@ -76,15 +93,17 @@ num_uudigit_count = (n: u64) i64 { (n < 10).match ({
     false => 1 + num_uudigit_count(n / 10),
 }) }
 num_uwrite_udigits = (p: RawPtr<u8>, at: i64, n: u64) i64 {
-    (n < 10).match ({
-        true  => {
-            p.offset(at).store('0' + to_i64(n))
-            at + 1
-        },
+    (n < 100).match ({
+        true  => (n < 10).match ({
+            true  => {
+                p.offset(at).store('0' + to_i64(n))
+                at + 1
+            },
+            false => num_write_upair(p, at, to_i64(n)),
+        }),
         false => {
-            next := num_uwrite_udigits(p, at, n / 10)
-            p.offset(next).store('0' + to_i64(n % 10))
-            next + 1
+            next := num_uwrite_udigits(p, at, n / 100)
+            num_write_upair(p, next, to_i64(n % 100))
         },
     })
 }

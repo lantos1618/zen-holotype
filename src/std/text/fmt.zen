@@ -10,7 +10,7 @@
 // Shared, emit-agnostic float-decomposition core (defined once in std.text.num): exponent,
 // exact power-of-ten scaling, 15-digit significand, and trailing-zero strip / digit count.
 // The streaming writers below (write_ffixed/write_fsci/write_fabs_digits) render from these.
-{ num_fexp, num_fsig, num_fstrip, num_fndig, num_fpow10i } = std.text.num
+{ num_fexp, num_fsig, num_fstrip, num_fndig, num_fpow10i, num_two_digits } = std.text.num
 { Result, IoError, ok, err, or } = std.core.result
 Display*: {
     fmt_print: (Self) i64,
@@ -38,10 +38,15 @@ write_float_in*<A> = (a: MutPtr<A>, x: f64) Result<i64, IoError> {
     })
 }
 write_digit = (d: i64) i64 { out_bytes("0123456789".offset(d).slice(1)).or(0) }
-write_uint = (n: i64) i64 { (n < 10).match ({
-    true  => write_digit(n),
-    false => write_uint(n / 10) + write_digit(n % 10),
-}) }
+// Stream the zero-padded two-digit decimal of `p` (0..99) in one out_bytes call, from the
+// shared "00".."99" table (jsony's dumpNumberFast trick); returns the 2 bytes written.
+write_upair = (p: i64) i64 { out_bytes(num_two_digits().offset(2 * p).slice(2)).or(0) }
+write_uint = (n: i64) i64 {
+    (n < 100).match ({
+        true  => (n < 10).match ({ true => write_digit(n), false => write_upair(n) }),
+        false => write_uint(n / 100) + write_upair(n % 100),
+    })
+}
 write_neg_digits = (n: i64) i64 {
     (n > 0 - 10).match ({
         true  => write_digit(0 - n),
@@ -56,9 +61,12 @@ write_int = (n: i64) i64 { (n < 0).match ({
 // UNSIGNED C ops — values above i64 max (e.g. 18446744073709551615) print correctly,
 // unlike write_int which would treat the high bit as a sign.
 write_u64 = (n: u64) i64 {
-    (n < 10).match ({
-        true  => write_digit(to_i64(n)),
-        false => write_u64(n / 10) + write_digit(to_i64(n % 10)),
+    (n < 100).match ({
+        true  => (n < 10).match ({
+            true  => write_digit(to_i64(n)),
+            false => write_upair(to_i64(n)),
+        }),
+        false => write_u64(n / 100) + write_upair(to_i64(n % 100)),
     })
 }
 write_fpad = (n: i64, w: i64) i64 {
