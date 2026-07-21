@@ -126,8 +126,8 @@ std.mem.alloc:malloc
 std.math:sin
 std.net.socket:serve
 std.time.clock:mono_ns
-std.os:argc
-std.platform:platform
+std.sys.os:argc
+std.sys.platform:platform
 std.concurrent.pool:pool_spawn
 std.concurrent.coroutine:checkpoint_current
 std.internal.resolve:is_import_line
