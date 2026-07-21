@@ -46,6 +46,103 @@ DeclIndex*: {
     genstruct_idx: Map<i64>,
     genenum_idx: Map<i64>,
     dispatch_idx: Map<i64>,
+    idx_func = (idx: DeclIndex, decls: [Decl], name: string_view) Func {
+        i := idx.func_idx.get(name, 0 - 1)
+        (i >= 0 && i < decls.len).match ({
+            true  => decls[i].match ({
+                .DFunc(f)    => f,
+                .DForeign(f) => f,
+                _            => Func(
+                    name: "",
+                    params: empty_params(),
+                    ret: tvoid(),
+                    tparams: empty_params(),
+                    body: no_stmts(),
+                ),
+            }),
+            false => Func(
+                name: "",
+                params: empty_params(),
+                ret: tvoid(),
+                tparams: empty_params(),
+                body: no_stmts(),
+            ),
+        })
+    }
+    idx_struct_field = (idx: DeclIndex, decls: [Decl], sname: string_view, fname: string_view) Ty {
+        i := idx.struct_idx.get(sname, 0 - 1)
+        (i >= 0 && i < decls.len).match ({
+            true  => decls[i].match ({
+                .DStruct(sd) => sd.field_ty(fname),
+                _            => tvoid(),
+            }),
+            false => tvoid(),
+        })
+    }
+    idx_genstruct_field = (idx: DeclIndex, a: MutPtr<Malloc>, decls: [Decl], gname: string_view, fname: string_view, targs: [Ty]) Ty {
+        g := idx.idx_genstruct(decls, gname)
+        is_empty(g.name).match ({
+            true  => tvoid(),
+            false => a.subst_ty_in(g.tparams, targs, g.fields.gen_field_at(fname)),
+        })
+    }
+    idx_variant_payload = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ty {
+        i := idx.enum_idx.get(ename, 0 - 1)
+        (i >= 0 && i < decls.len).match ({
+            true  => decls[i].match ({
+                .DEnum(ed) => ed.variants.vdef_payload(vn),
+                _          => tvoid(),
+            }),
+            false => tvoid(),
+        })
+    }
+    idx_template_call = (idx: DeclIndex, decls: [Decl], name: string_view) bool { idx.idx_func(decls, name).is_generic_fn() }
+    idx_genstruct = (idx: DeclIndex, decls: [Decl], name: string_view) GenStructDecl {
+        i := idx.genstruct_idx.get(name, 0 - 1)
+        (i >= 0 && i < decls.len).match ({
+            true  => decls[i].match ({
+                .DGenStruct(g) => g,
+                _              => GenStructDecl(
+                    name: "",
+                    tparams: slice(null_ptr(), 0),
+                    fields: slice(null_ptr(), 0),
+                ),
+            }),
+            false => GenStructDecl(
+                name: "",
+                tparams: slice(null_ptr(), 0),
+                fields: slice(null_ptr(), 0),
+            ),
+        })
+    }
+    idx_genenum = (idx: DeclIndex, decls: [Decl], name: string_view) GenEnumDecl {
+        i := idx.genenum_idx.get(name, 0 - 1)
+        (i >= 0 && i < decls.len).match ({
+            true  => decls[i].match ({
+                .DGenEnum(g) => g,
+                _            => GenEnumDecl(
+                    name: "",
+                    tparams: slice(null_ptr(), 0),
+                    variants: slice(null_ptr(), 0),
+                ),
+            }),
+            false => GenEnumDecl(
+                name: "",
+                tparams: slice(null_ptr(), 0),
+                variants: slice(null_ptr(), 0),
+            ),
+        })
+    }
+    idx_variant_default = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ptr<Expr> {
+        i := idx.enum_idx.get(ename, 0 - 1)
+        (i >= 0 && i < decls.len).match ({
+            true  => decls[i].match ({
+                .DEnum(ed) => ed.variants.vdef_default_of(vn),
+                _          => expr_null(),
+            }),
+            false => expr_null(),
+        })
+    }
 }    // DFunc.name | DForeign.name → index
 tdkey = (a: MutPtr<Malloc>, tr: string_view, m: string_view) string_view { a.gstr_string(64).gstr_append(a, tr).gstr_append(a, "\t").gstr_append(a, m).gstr_finish(a) }    // DStruct.name → index
 // ── alias-name index (UFCS through module aliases) ──────────────────────────────────────────────
@@ -223,51 +320,6 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
 }
 ibuf = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire((n + 1) * sizeof(i64)), n) }
 // O(1) indexed generic-decl lookups (same last-match sentinels as the linear gstruct_of/find_genenum).
-idx_genstruct* = (idx: DeclIndex, decls: [Decl], name: string_view) GenStructDecl {
-    i := idx.genstruct_idx.get(name, 0 - 1)
-    (i >= 0 && i < decls.len).match ({
-        true  => decls[i].match ({
-            .DGenStruct(g) => g,
-            _              => GenStructDecl(
-                name: "",
-                tparams: slice(null_ptr(), 0),
-                fields: slice(null_ptr(), 0),
-            ),
-        }),
-        false => GenStructDecl(
-            name: "",
-            tparams: slice(null_ptr(), 0),
-            fields: slice(null_ptr(), 0),
-        ),
-    })
-}
-idx_genenum* = (idx: DeclIndex, decls: [Decl], name: string_view) GenEnumDecl {
-    i := idx.genenum_idx.get(name, 0 - 1)
-    (i >= 0 && i < decls.len).match ({
-        true  => decls[i].match ({
-            .DGenEnum(g) => g,
-            _            => GenEnumDecl(
-                name: "",
-                tparams: slice(null_ptr(), 0),
-                variants: slice(null_ptr(), 0),
-            ),
-        }),
-        false => GenEnumDecl(
-            name: "",
-            tparams: slice(null_ptr(), 0),
-            variants: slice(null_ptr(), 0),
-        ),
-    })
-}
-env_genenum* = (env: Env, name: string_view) GenEnumDecl { env.didx.idx_genenum(env.decls, name) }
-env_gstruct* = (env: Env, name: string_view) GenStructDecl { env.didx.idx_genstruct(env.decls, name) }
-idx_genstruct_field* = (idx: DeclIndex, a: MutPtr<Malloc>, decls: [Decl], gname: string_view, fname: string_view, targs: [Ty]) Ty {
-    g := idx.idx_genstruct(decls, gname)
-    is_empty(g.name).match ({
-        true  => tvoid(),
-        false => a.subst_ty_in(g.tparams, targs, g.fields.gen_field_at(fname)),
-    })
-}
 // Variable environment: params plus prior lets, as a cons-list.
 VList*: VNil | VCons(VCell)
 VCell*: {
@@ -282,54 +334,236 @@ Env*: {
     didx: DeclIndex,
     exp: Ty,
     a: MutPtr<Malloc>,
-}    // a = allocator (heap-alloc in infer); didx = name→decl index
-with_exp* = (env: Env, t: Ty) Env {
-    Env(
-        vars: env.vars,
-        decls: env.decls,
-        didx: env.didx,
-        exp: t,
-        a: env.a,
-    )
-}
-clr_exp* = (env: Env) Env { env.with_exp(tvoid()) }
-let_exp* = (env: Env, t: Ty) Env {
-    t.is_void_ty().match ({
-        true  => env.clr_exp(),
-        false => Env(
-            vars: env.vars,
-            decls: env.decls,
-            didx: env.didx,
-            exp: t,
-            a: env.a,
-        ),
-    })
-}
-// O(1) indexed lookups, replacing the O(n) decls scans. `the_func`/`fn_ret`/etc. linear forms below
-// remain for the few decls-only callers (template inlining, trait conformance) that lack an Env.
-env_func* = (env: Env, name: string_view) Func {
-    i := env.didx.func_idx.get(name, 0 - 1)
-    (i >= 0 && i < env.decls.len).match ({
-        true  => env.decls[i].match ({
-            .DFunc(f)    => f,
-            .DForeign(f) => f,
-            _            => Func(
+    infer_expr = (env: Env, e: Ptr<Expr>) Ty {
+        load(e).match ({
+            .Int(n)        => (n > 2147483647 || n < 0 - 2147483648).match ({
+                true  => ti64(),
+                false => ti32(),
+            }),
+            .Block(b)      => env.block_ty(b),
+            .Byte(n)       => tu8(),
+            .FloatLit(ft)  => tf64(),
+            .Var(v)        => env.var_ty(v.name),
+            .Bin(b)        => env.bin_ty_e(b),
+            .Call(c)       => env.infer_call(c),
+            .Cond(d)       => env.cond_ty(d),
+            .Member(mm)    => env.infer_member(mm),
+            .Arrow(ar)     => env.infer_arrow(ar),
+            .MakeEnum(mk)  => env.mkenum_ty(mk),
+            .Tag(t)        => env.tag_ty(t),
+            .MakeStruct(s) => (s.targs.len > 0).match ({
+                true  => tgeneric(s.ty, s.targs, s.mty),
+                false => tnamed(s.ty),
+            }),
+            .StrLit(x)     => tstring_literal(),
+            .Match(m)      => env.infer_match_ty(m),
+            .Index(ix)     => env.index_elem(ix),
+            .Loop(l)       => tvoid(),
+            .SliceLit(sd)  => tslice(env.a.tnode(sd.elem.is_void_ty().match ({
+                true  => env.sl_elem(sd.items),
+                false => sd.elem,
+            }))),
+            _              => tvoid(),
+        })
+    }
+    env_func = (env: Env, name: string_view) Func {
+        i := env.didx.func_idx.get(name, 0 - 1)
+        (i >= 0 && i < env.decls.len).match ({
+            true  => env.decls[i].match ({
+                .DFunc(f)    => f,
+                .DForeign(f) => f,
+                _            => Func(
+                    name: "",
+                    params: empty_params(),
+                    ret: tvoid(),
+                    tparams: empty_params(),
+                    body: no_stmts(),
+                ),
+            }),
+            false => Func(
                 name: "",
                 params: empty_params(),
                 ret: tvoid(),
                 tparams: empty_params(),
                 body: no_stmts(),
             ),
-        }),
-        false => Func(
-            name: "",
-            params: empty_params(),
-            ret: tvoid(),
-            tparams: empty_params(),
-            body: no_stmts(),
-        ),
-    })
-}
+        })
+    }
+    var_or_global = (env: Env, name: string_view) Ty {
+        lv := env.vars.lookup_var(name)
+        lv.is_void_ty().match ({ true => env.global_or_fn(name), false => lv })
+    }
+    subj_variant_payload = (env: Env, t: Ty, variant: string_view) Ty {
+        t.match ({
+            .Generic(g) => env.env_genenum(g.name).gen_variant_payload(variant).gsubst(env, g),
+            _           => env.didx.idx_variant_payload(env.decls, t.enum_name(), variant),
+        })
+    }
+    env_gstruct = (env: Env, name: string_view) GenStructDecl { env.didx.idx_genstruct(env.decls, name) }
+    call_targ = (env: Env, f: Func, args: [Expr], tp: string_view) Ty {
+        arg := env.targ_of(f.params, args, tp, false)
+        arg = arg.is_void_ty().match ({ true => env.ret_targ_of(f.ret, tp), false => arg })
+        arg.is_void_ty().match ({ true => env.targ_of(f.params, args, tp, true), false => arg })
+    }
+    with_exp = (env: Env, t: Ty) Env {
+        Env(
+            vars: env.vars,
+            decls: env.decls,
+            didx: env.didx,
+            exp: t,
+            a: env.a,
+        )
+    }
+    is_local = (env: Env, name: string_view) bool { env.vars.var_bound(name) }
+    is_bound = (env: Env, name: string_view) bool { env.vars.var_bound(name) || env.didx.global_idx.get(name, 0 - 1) >= 0 }
+    alias_ufcs_candidates = (env: Env, fn: string_view, rty: Ty) AliasCands {
+        (rty.alias_recv_dispatchable() == false || fn.is_intrinsic() || env.didx.alias_idx.get(fn, 0 - 1) < 0 || env.didx.func_idx.get(fn, 0 - 1) >= 0 || env.is_local(fn) || env.global_ty(fn).is_void_ty() == false).then({
+            return alias_cands_none()
+        })
+        exact := env.alias_cands_scan(fn, rty, true)
+        (exact.count > 0).match ({ true => exact, false => env.alias_cands_scan(fn, rty, false) })
+    }
+    var_ty = (env: Env, name: string_view) Ty {
+        (eq(name, "true") || eq(name, "false")).match ({
+            true  => tbool(),
+            false => env.var_or_global(name),
+        })
+    }
+    targ_of = (env: Env, params: [Param], args: [Expr], tp: string_view, lits: bool) Ty {
+        found := tvoid()
+        params.loop((h, i, p) {
+            found = found.is_void_ty().match ({
+                true  => (i < args.len && env.weak_targ_env(p.ty, args[i].addr(), tp) == lits).match ({
+                    true  => env.unify_arg(p.ty, args[i].addr(), tp),
+                    false => found,
+                }),
+                false => found,
+            })
+        })
+        found
+    }
+    sl_elem_exp = (env: Env, items: [Expr]) Ty { env.exp.elem_of().is_void_ty().match ({
+        true  => env.sl_elem(items),
+        false => env.exp.elem_of(),
+    }) }
+    let_exp = (env: Env, t: Ty) Env {
+        t.is_void_ty().match ({
+            true  => env.clr_exp(),
+            false => Env(
+                vars: env.vars,
+                decls: env.decls,
+                didx: env.didx,
+                exp: t,
+                a: env.a,
+            ),
+        })
+    }
+    infer_call = (env: Env, c: CallData) Ty {
+        eq(c.fn, "sizeof").match ({
+            true  => ti64(),
+            false => eq(c.fn, "__str_eq").match ({
+                true  => tbool(),
+                false => eq(c.fn, "__str_ne").match ({
+                    true  => tbool(),
+                    false => eq(c.fn, "load").match ({
+                        true  => env.arg0_ty(c).pointee_of(),
+                        false => eq(c.fn, "load_i64").match ({
+                            true  => ti64(),
+                            false => eq(c.fn, "atomic_add_i64").match ({
+                                true  => ti64(),
+                                false => eq(c.fn, "atomic_load_i64").match ({
+                                    true  => ti64(),
+                                    false => eq(c.fn, "atomic_cas_i64").match ({
+                                        true  => tbool(),
+                                        false => eq(c.fn, "to_i32").match ({
+                                            true  => ti32(),
+                                            false => eq(c.fn, "to_i64").match ({
+                                                true  => ti64(),
+                                                false => eq(c.fn, "to_u8").match ({
+                                                    true  => tu8(),
+                                                    false => eq(c.fn, "to_f64").match ({
+                                                        true  => tf64(),
+                                                        false => eq(c.fn, "null_ptr").match ({
+                                                            true  => tptr_k(env.a.tnode(tu8()), k_raw_ptr()),
+                                                            false => eq(c.fn, "cstr").match ({
+                                                                true  => tstring_cstr(),
+                                                                false => eq(c.fn, "addr").match ({
+                                                                    true  => env.addr_ty(c),
+                                                                    false => eq(c.fn, "assert_nonnull").match ({
+                                                                        true  => env.arg0_ty(c).nonnull_ty(),
+                                                                        false => env.gen_call_ret(c),
+                                                                    }),
+                                                                }),
+                                                            }),
+                                                        }),
+                                                    }),
+                                                }),
+                                            }),
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        })
+    }
+    dispatch_name = (env: Env, c: CallData) string_view {
+        (c.args.len > 0).match ({
+            true  => {
+                rty := env.infer_expr(c.args[0].addr())
+                tyname := rty.dispatch_recv_name()
+                // Fast path: a receiver type with NO impl can never redirect dispatch, so skip the O(n)
+                // impl scan entirely (the common case for primitive/struct receivers).
+                dn := (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({
+                    true  => c.fn,
+                    false => env.a.dispatch_recv(env.decls, env.didx, c.fn, tyname),
+                })
+                eq(dn, c.fn).match ({
+                    true  => {
+                        cs := env.alias_ufcs_candidates(c.fn, rty)
+                        (cs.count == 1).match ({ true => cs.first, false => c.fn })
+                    },
+                    false => dn,
+                })
+            },
+            false => c.fn,
+        })
+    }
+    disc_env = (env: Env, e: Ptr<Expr>) Env { e.carries_return_e().match ({
+        true  => env,
+        false => env.clr_exp(),
+    }) }
+    clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
+    call_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
+        buf := cbuf<Ty>(env.a, f.tparams.len)
+        f.tparams.loop((h, i, tp) {
+            buf[i] = (i < etargs.len).match ({
+                true  => etargs[i],
+                false => env.call_targ(f, args, tp.name),
+            })
+        })
+        env.deep_targs_env(f.tparams, buf, f.params, args)
+    }
+    call_arg_exp = (env: Env, tmpl: bool, tparams: [Param], targs: [Ty], ps: [Param], i: i32) Ty {
+        pty := ps.arg_exp_v(i)
+        tmpl.match ({
+            true  => pty.is_fnt().match ({
+                true  => tvoid(),
+                false => env.a.subst_ty_in(tparams, targs, pty),
+            }),
+            false => pty,
+        })
+    }
+    block_ty = (env: Env, b: BlockData) Ty { b.stmts.stmts_diverge().match ({
+        true  => tvoid(),
+        false => env.block_ty_from(b.stmts, 0),
+    }) }
+    env_genenum = (env: Env, name: string_view) GenEnumDecl { env.didx.idx_genenum(env.decls, name) }
+}    // a = allocator (heap-alloc in infer); didx = name→decl index
+// O(1) indexed lookups, replacing the O(n) decls scans. `the_func`/`fn_ret`/etc. linear forms below
+// remain for the few decls-only callers (template inlining, trait conformance) that lack an Env.
 // Heap-node helpers. c* names avoid flat-TU collisions with parser helpers.
 cebuf*<A> = (a: MutPtr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
 cenode*<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
@@ -441,16 +675,6 @@ global_or_fn = (env: Env, name: string_view) Ty {
     g := env.global_ty(name)
     g.is_void_ty().match ({ true => env.fn_value_ty(name), false => g })
 }
-var_or_global* = (env: Env, name: string_view) Ty {
-    lv := env.vars.lookup_var(name)
-    lv.is_void_ty().match ({ true => env.global_or_fn(name), false => lv })
-}
-var_ty* = (env: Env, name: string_view) Ty {
-    (eq(name, "true") || eq(name, "false")).match ({
-        true  => tbool(),
-        false => env.var_or_global(name),
-    })
-}
 // Membership check, distinct from type lookup; void-typed locals still count as bound.
 var_bound* = (v: Ptr<VList>, name: string_view) bool {
     v.match ({
@@ -458,12 +682,10 @@ var_bound* = (v: Ptr<VList>, name: string_view) bool {
         .VCons(c) => eq(c.name, name).match ({ true => true, false => c.tail.var_bound(name) }),
     })
 }
-is_bound* = (env: Env, name: string_view) bool { env.vars.var_bound(name) || env.didx.global_idx.get(name, 0 - 1) >= 0 }
 // LOCAL-scope membership ONLY (params + lets + arm/loop binds), excluding globals and top-level
 // fns: the SHADOWING test. A fn's own params and locals shadow same-named top-level decls in its
 // body (the emitted C scopes them that way), so call validation must consult this before any
 // top-level name lookup.
-is_local* = (env: Env, name: string_view) bool { env.vars.var_bound(name) }
 ty_name = (t: Ty) string_view {
     t.match ({
         .Named(n) => n,
@@ -603,16 +825,6 @@ struct_field = (decls: [Decl], sname: string_view, fname: string_view) Ty {
     found
 }
 // O(1) indexed struct-field lookup for the light/inline path.
-idx_struct_field* = (idx: DeclIndex, decls: [Decl], sname: string_view, fname: string_view) Ty {
-    i := idx.struct_idx.get(sname, 0 - 1)
-    (i >= 0 && i < decls.len).match ({
-        true  => decls[i].match ({
-            .DStruct(sd) => sd.field_ty(fname),
-            _            => tvoid(),
-        }),
-        false => tvoid(),
-    })
-}
 is_cmp_op = (op: string_view) bool {
     // Bool-result ops; bitwise ops keep the lhs type.
     b := op.at(0)
@@ -735,10 +947,6 @@ last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
 // its type from the OTHER arms. Only arm/loop blocks can look like this; fn/lambda BODIES (where the
 // parser's implicit trailing return IS the value) are typed as [Stmt] via block_ty_from directly and
 // keep last_stmt_ty's Return-as-value rule. See genc.blk_diverges.
-block_ty* = (env: Env, b: BlockData) Ty { b.stmts.stmts_diverge().match ({
-    true  => tvoid(),
-    false => env.block_ty_from(b.stmts, 0),
-}) }
 block_ty_from = (env: Env, stmts: [Stmt], i: i32) Ty {
     (i >= stmts.len).match ({
         true  => tvoid(),
@@ -753,38 +961,6 @@ index_elem = (env: Env, ix: IndexData) Ty { ix.elem.is_void_ty().match ({
     true  => env.infer_expr(ix.seq).elem_of(),
     false => ix.elem,
 }) }
-infer_expr* = (env: Env, e: Ptr<Expr>) Ty {
-    load(e).match ({
-        .Int(n)        => (n > 2147483647 || n < 0 - 2147483648).match ({
-            true  => ti64(),
-            false => ti32(),
-        }),
-        .Block(b)      => env.block_ty(b),
-        .Byte(n)       => tu8(),
-        .FloatLit(ft)  => tf64(),
-        .Var(v)        => env.var_ty(v.name),
-        .Bin(b)        => env.bin_ty_e(b),
-        .Call(c)       => env.infer_call(c),
-        .Cond(d)       => env.cond_ty(d),
-        .Member(mm)    => env.infer_member(mm),
-        .Arrow(ar)     => env.infer_arrow(ar),
-        .MakeEnum(mk)  => env.mkenum_ty(mk),
-        .Tag(t)        => env.tag_ty(t),
-        .MakeStruct(s) => (s.targs.len > 0).match ({
-            true  => tgeneric(s.ty, s.targs, s.mty),
-            false => tnamed(s.ty),
-        }),
-        .StrLit(x)     => tstring_literal(),
-        .Match(m)      => env.infer_match_ty(m),
-        .Index(ix)     => env.index_elem(ix),
-        .Loop(l)       => tvoid(),
-        .SliceLit(sd)  => tslice(env.a.tnode(sd.elem.is_void_ty().match ({
-            true  => env.sl_elem(sd.items),
-            false => sd.elem,
-        }))),
-        _              => tvoid(),
-    })
-}
 pointee_of = (t: Ty) Ty {
     t.match ({
         .Ptr(pd) => load(pd.pointee),
@@ -810,19 +986,6 @@ is_direct_tparam* = (t: Ty, tp: string_view) bool {
     })
 }
 weak_targ_env = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: string_view) bool { arg.is_weak_targ_arg() || pty.is_direct_tparam(tp) && env.infer_expr(arg).is_str_t() }
-targ_of* = (env: Env, params: [Param], args: [Expr], tp: string_view, lits: bool) Ty {
-    found := tvoid()
-    params.loop((h, i, p) {
-        found = found.is_void_ty().match ({
-            true  => (i < args.len && env.weak_targ_env(p.ty, args[i].addr(), tp) == lits).match ({
-                true  => env.unify_arg(p.ty, args[i].addr(), tp),
-                false => found,
-            }),
-            false => found,
-        })
-    })
-    found
-}
 // A lambda arg has no inferrable value type (infer_expr -> void). When a tparam sits in the closure's
 // RETURN position `(T) U`, bind it from the lambda's DECLARED return type so it never defaults to void.
 unify_arg = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: string_view) Ty {
@@ -844,26 +1007,11 @@ ret_targ_of = (env: Env, ret: Ty, tp: string_view) Ty { env.exp.is_void_ty().mat
     true  => tvoid(),
     false => ret.unify_ty(env.exp, tp),
 }) }
-call_targ* = (env: Env, f: Func, args: [Expr], tp: string_view) Ty {
-    arg := env.targ_of(f.params, args, tp, false)
-    arg = arg.is_void_ty().match ({ true => env.ret_targ_of(f.ret, tp), false => arg })
-    arg.is_void_ty().match ({ true => env.targ_of(f.params, args, tp, true), false => arg })
-}
 // etargs = explicit turbofish type args (empty when none): a present one PINS the i-th tparam,
 // overriding inference; an absent one (i past etargs) falls back to inferring from the value args.
 // After the per-tparam pass, still-void targs get the two deep fallbacks (see deep_targs): a lambda
 // arg's BODY type for a closure-return tparam, and a co-targ's generic-trait impl — the env-typed
 // mirror of the inliner's post-pass, so resolve (let typing, mono_rec instances) agrees with it.
-call_targs* = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
-    buf := cbuf<Ty>(env.a, f.tparams.len)
-    f.tparams.loop((h, i, tp) {
-        buf[i] = (i < etargs.len).match ({
-            true  => etargs[i],
-            false => env.call_targ(f, args, tp.name),
-        })
-    })
-    env.deep_targs_env(f.tparams, buf, f.params, args)
-}
 // env-typed twin of deep_targs (the resolver types lambda bodies with the full Env, not light types).
 deep_targs_env = (env: Env, tparams: [Param], buf: [Ty], params: [Param], args: [Expr]) [Ty] {
     tparams.loop((h, i, tp) {
@@ -943,28 +1091,6 @@ dispatch_recv* = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: string_
             _          => fn,
         }),
         false => fn,
-    })
-}
-dispatch_name* = (env: Env, c: CallData) string_view {
-    (c.args.len > 0).match ({
-        true  => {
-            rty := env.infer_expr(c.args[0].addr())
-            tyname := rty.dispatch_recv_name()
-            // Fast path: a receiver type with NO impl can never redirect dispatch, so skip the O(n)
-            // impl scan entirely (the common case for primitive/struct receivers).
-            dn := (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({
-                true  => c.fn,
-                false => env.a.dispatch_recv(env.decls, env.didx, c.fn, tyname),
-            })
-            eq(dn, c.fn).match ({
-                true  => {
-                    cs := env.alias_ufcs_candidates(c.fn, rty)
-                    (cs.count == 1).match ({ true => cs.first, false => c.fn })
-                },
-                false => dn,
-            })
-        },
-        false => c.fn,
     })
 }
 dispatch_recv_name* = (t: Ty) string_view {
@@ -1169,13 +1295,6 @@ alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool) AliasCands 
 // Two-pass for determinism: exact head-type matches first; only when ZERO exact matches exist do we
 // fall back to coercible receivers (i32→i64, slice receivers). The count==1-else-ambiguity rule holds
 // per pass, so an exact unique winner is never masked by a coercible one.
-alias_ufcs_candidates* = (env: Env, fn: string_view, rty: Ty) AliasCands {
-    (rty.alias_recv_dispatchable() == false || fn.is_intrinsic() || env.didx.alias_idx.get(fn, 0 - 1) < 0 || env.didx.func_idx.get(fn, 0 - 1) >= 0 || env.is_local(fn) || env.global_ty(fn).is_void_ty() == false).then({
-        return alias_cands_none()
-    })
-    exact := env.alias_cands_scan(fn, rty, true)
-    (exact.count > 0).match ({ true => exact, false => env.alias_cands_scan(fn, rty, false) })
-}
 fnt_ret = (t: Ty) Ty {
     t.match ({
         .FnT(ft) => load(ft.ret),
@@ -1217,57 +1336,6 @@ nonnull_ty = (t: Ty) Ty {
             false => t,
         }),
         _        => tvoid(),
-    })
-}
-infer_call* = (env: Env, c: CallData) Ty {
-    eq(c.fn, "sizeof").match ({
-        true  => ti64(),
-        false => eq(c.fn, "__str_eq").match ({
-            true  => tbool(),
-            false => eq(c.fn, "__str_ne").match ({
-                true  => tbool(),
-                false => eq(c.fn, "load").match ({
-                    true  => env.arg0_ty(c).pointee_of(),
-                    false => eq(c.fn, "load_i64").match ({
-                        true  => ti64(),
-                        false => eq(c.fn, "atomic_add_i64").match ({
-                            true  => ti64(),
-                            false => eq(c.fn, "atomic_load_i64").match ({
-                                true  => ti64(),
-                                false => eq(c.fn, "atomic_cas_i64").match ({
-                                    true  => tbool(),
-                                    false => eq(c.fn, "to_i32").match ({
-                                        true  => ti32(),
-                                        false => eq(c.fn, "to_i64").match ({
-                                            true  => ti64(),
-                                            false => eq(c.fn, "to_u8").match ({
-                                                true  => tu8(),
-                                                false => eq(c.fn, "to_f64").match ({
-                                                    true  => tf64(),
-                                                    false => eq(c.fn, "null_ptr").match ({
-                                                        true  => tptr_k(env.a.tnode(tu8()), k_raw_ptr()),
-                                                        false => eq(c.fn, "cstr").match ({
-                                                            true  => tstring_cstr(),
-                                                            false => eq(c.fn, "addr").match ({
-                                                                true  => env.addr_ty(c),
-                                                                false => eq(c.fn, "assert_nonnull").match ({
-                                                                    true  => env.arg0_ty(c).nonnull_ty(),
-                                                                    false => env.gen_call_ret(c),
-                                                                }),
-                                                            }),
-                                                        }),
-                                                    }),
-                                                }),
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
     })
 }
 // Constructor types keep generic args so later match-arm binds recover concrete payload types.
@@ -1591,10 +1659,6 @@ sl_elem = (env: Env, items: [Expr]) Ty { (items.len == 0).match ({
     true  => tvoid(),
     false => env.infer_expr(items[0].addr()),
 }) }
-sl_elem_exp* = (env: Env, items: [Expr]) Ty { env.exp.elem_of().is_void_ty().match ({
-    true  => env.sl_elem(items),
-    false => env.exp.elem_of(),
-}) }
 resolve_slicelit = (a: MutPtr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
     et := env.sl_elem_exp(sd.items)
     a.cenode(slit(et, a.resolve_args(env.with_exp(et), sd.items)))
@@ -1634,16 +1698,6 @@ vdef_payload = (vs: [VariantDef], vn: string_view) Ty {
     found
 }
 // O(1) indexed variant-payload lookup for an enum named `ename`.
-idx_variant_payload* = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ty {
-    i := idx.enum_idx.get(ename, 0 - 1)
-    (i >= 0 && i < decls.len).match ({
-        true  => decls[i].match ({
-            .DEnum(ed) => ed.variants.vdef_payload(vn),
-            _          => tvoid(),
-        }),
-        false => tvoid(),
-    })
-}
 // The default constant expr for a `Name = expr` variant, or a null Ptr<Expr> when the variant has none.
 vdef_default_of = (vs: [VariantDef], vn: string_view) Ptr<Expr> {
     found := expr_null()
@@ -1652,23 +1706,7 @@ vdef_default_of = (vs: [VariantDef], vn: string_view) Ptr<Expr> {
     })
     found
 }
-idx_variant_default* = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ptr<Expr> {
-    i := idx.enum_idx.get(ename, 0 - 1)
-    (i >= 0 && i < decls.len).match ({
-        true  => decls[i].match ({
-            .DEnum(ed) => ed.variants.vdef_default_of(vn),
-            _          => expr_null(),
-        }),
-        false => expr_null(),
-    })
-}
 // Concrete payload type for a match arm bind, including generic enum substitution.
-subj_variant_payload* = (env: Env, t: Ty, variant: string_view) Ty {
-    t.match ({
-        .Generic(g) => env.env_genenum(g.name).gen_variant_payload(variant).gsubst(env, g),
-        _           => env.didx.idx_variant_payload(env.decls, t.enum_name(), variant),
-    })
-}
 gsubst = (pty: Ty, env: Env, g: GenericData) Ty {
     ged := env.env_genenum(g.name)
     sub := env.a.subst_ty_in(ged.tparams, g.args, pty)
@@ -1857,16 +1895,6 @@ collect_varargs = (a: MutPtr<Malloc>, ps: [Param], args: [Expr]) [Expr] {
 // instead of guessing by variant name. FnT (lambda) params keep the void expected-type they had before
 // (they are spliced/inlined later), so existing template-lambda resolution is unchanged. A variadic
 // param's collected args take element type T (via arg_exp_v) before any tparam substitution.
-call_arg_exp* = (env: Env, tmpl: bool, tparams: [Param], targs: [Ty], ps: [Param], i: i32) Ty {
-    pty := ps.arg_exp_v(i)
-    tmpl.match ({
-        true  => pty.is_fnt().match ({
-            true  => tvoid(),
-            false => env.a.subst_ty_in(tparams, targs, pty),
-        }),
-        false => pty,
-    })
-}
 // `b.op(args)` desugars to `op(b, args)`; when `op` names no function but IS a function-VALUE field of
 // b's type (FnT), this is an INDIRECT call through that field (M1 closures). Detect it: the callee is
 // not a known/dispatched function and arg0 has an FnT field of that name.
@@ -2038,10 +2066,6 @@ carries_return_e = (e: Ptr<Expr>) bool {
         _         => false,
     })
 }
-disc_env* = (env: Env, e: Ptr<Expr>) Env { e.carries_return_e().match ({
-    true  => env,
-    false => env.clr_exp(),
-}) }
 // `vtail` = this body is a VALUE block (reached via resolve_expr `.Block`), so its TAIL expression is
 // the block's value and must NOT be discard-lowered even with no expected type. Without it, an inlined
 // fn whose value is a bare match/cond — wrapped in a block once a binding Let is prepended — spliced as
@@ -2547,30 +2571,6 @@ the_func* = (decls: [Decl], name: string_view) Func {
     found
 }
 // O(1) indexed Func lookup for the inline/template path (mirrors env_func; same last-match result).
-idx_func* = (idx: DeclIndex, decls: [Decl], name: string_view) Func {
-    i := idx.func_idx.get(name, 0 - 1)
-    (i >= 0 && i < decls.len).match ({
-        true  => decls[i].match ({
-            .DFunc(f)    => f,
-            .DForeign(f) => f,
-            _            => Func(
-                name: "",
-                params: empty_params(),
-                ret: tvoid(),
-                tparams: empty_params(),
-                body: no_stmts(),
-            ),
-        }),
-        false => Func(
-            name: "",
-            params: empty_params(),
-            ret: tvoid(),
-            tparams: empty_params(),
-            body: no_stmts(),
-        ),
-    })
-}
-idx_template_call* = (idx: DeclIndex, decls: [Decl], name: string_view) bool { idx.idx_func(decls, name).is_generic_fn() }
 ref_pos* = (e: Ptr<Expr>) i32 {
     load(e).match ({
         .Var(v) => v.pos,
