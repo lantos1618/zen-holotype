@@ -8,7 +8,8 @@
 { view } = std.text.str
 { Malloc } = std.mem.alloc
 { String } = std.text.string
-{ sbyte, gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
+{ gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
+{ gstr_int } = compiler.astops
 // line:col span in the USER source; line == 0 means "could not locate".
 DiagSpan*: {
     line: i32,
@@ -339,16 +340,6 @@ manifest_value_span* = (src: string_view, len: i32, key: string_view, p: i32) Mf
 // Builds the full "zenc: path:line:col: error[kind]: message" line, the source line + ^~~~ caret,
 // and the hint, into one NUL-terminated string the driver writes to stderr. The driver keeps only
 // file I/O and the per-module span search.
-ddigit = (d: i64) u8 { sbyte("0123456789", d) }
-dnum = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n < 10).match ({
-        true  => s.gstr_push(a, ddigit(n)),
-        false => {
-            hs := s.dnum(a, n / 10)
-            hs.gstr_push(a, ddigit(n % 10))
-        },
-    })
-}
 // byte offset of the start of the `line`-th (1-based) line in `user`
 dline_off = (user: string_view, line: i32, p: i32) i32 {
     q := p
@@ -402,11 +393,11 @@ render_diagnostic* = (a: MutPtr<Malloc>, in_path: string_view, user: string_view
     s := a.gstr_string(cap)
     s = s.gstr_append(a, "zenc: ").gstr_append(a, in_path)
     (line > 0 && col > 0).then({
-        s = s.gstr_push(a, ':').dnum(a, line).gstr_push(a, ':').dnum(a, col)
+        s = s.gstr_push(a, ':').gstr_int(a, line).gstr_push(a, ':').gstr_int(a, col)
     })
     s = s.gstr_append(a, ": error[").gstr_append(a, kind).gstr_append(a, "]: ").gstr_append(a, message)
     (count > 1).then({
-        s = s.gstr_append(a, " (+").dnum(a, count - 1).gstr_append(a, " more error")
+        s = s.gstr_append(a, " (+").gstr_int(a, count - 1).gstr_append(a, " more error")
         // no method chained after a .match (parser limitation): push the closing chars inside the arms
         s = (count - 1 == 1).match ({
             true  => s.gstr_push(a, ')'),

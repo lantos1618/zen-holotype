@@ -5,29 +5,23 @@
 { String } = std.text.string
 { eq } = std.text.str
 { sbyte, gstr_append, gstr_push } = compiler.genc
+{ dec_digit, gstr_int } = compiler.astops
 { Malloc } = std.mem.alloc
-// ── small integer renderer (byte-only, self-hosting) ──────────────────────────────────────────────
-jdigit = (d: i64) u8 { load(offset("0123456789", d)) }
-jint_nat = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n < 10).match ({
-        true  => s.gstr_push(a, jdigit(n)),
-        false => {
-            hs := s.jint_nat(a, n / 10)
-            hs.gstr_push(a, jdigit(n % 10))
-        },
-    })
-}
+// ── small integer renderer ──────────────────────────────────────────────────────────────────────
+// The non-negative recursion is the shared gstr_int (compiler.astops); only the JS-specific minus-sign
+// wrapper stays here. `jint_neg` walks negatives directly so INT64_MIN doesn't overflow on `0 - n` —
+// this is why JS can NOT go through gstr_int (which reinterprets negative bits as unsigned, no sign).
 jint* = (s: String, a: MutPtr<Malloc>, n: i64) String { (n < 0).match ({
     true  => s.gstr_append(a, "-").jint_neg(a, n),
-    false => s.jint_nat(a, n),
+    false => s.gstr_int(a, n),
 }) }
 // walk negatives directly so INT64_MIN doesn't overflow on `0 - n`
 jint_neg = (s: String, a: MutPtr<Malloc>, n: i64) String {
     (n > 0 - 10).match ({
-        true  => s.gstr_push(a, jdigit(0 - n)),
+        true  => s.gstr_push(a, dec_digit(0 - n)),
         false => {
             hs := s.jint_neg(a, n / 10)
-            hs.gstr_push(a, jdigit(0 - n % 10))
+            hs.gstr_push(a, dec_digit(0 - n % 10))
         },
     })
 }

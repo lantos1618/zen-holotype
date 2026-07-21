@@ -14,7 +14,9 @@
 // Only plain-named-value receivers are method-ified: the language does not support `.impl` on
 // pointer/slice receiver types, so genc's Ptr<Expr>/[Stmt] predicates (is_expr_null, blk_diverges,
 // stmts_diverge) necessarily stay free functions in compiler.genc.
-{ Ty, Func, Decl, StructDecl, Param } = compiler.genc
+{ Ty, Func, Decl, StructDecl, Param, sbyte, gstr_push } = compiler.genc
+{ String } = std.text.string
+{ Malloc } = std.mem.alloc
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
 // (compiler.check splices it), never emitted as a C function — so genModule skips it.
 TyQuery*: {
@@ -86,3 +88,33 @@ Decl.impl(DeclQuery, {
         })
     }
 })
+// ── decimal-integer emission (consolidated from ~16 re-rolled copies across the backends) ──────────
+// One digit-char lookup and one "emit a non-negative integer's decimal digits into a String" recursion,
+// formerly copy-pasted under many names — ddigit/di_digit/ffdigit/digit/jdigit/pf_digit/lift_digit for
+// the char; dnum/gstr_i64/gen_uint_nat/ff_uint_nat/jint_nat/orx_digits/lift_digits for the String sink.
+// Byte-identical output is load-bearing: these render diagnostic line/col numbers, emitted C/JS integer
+// literals, pretty-printed numbers, or_return/lifted-lambda indices, and mangled C symbol fragments — a
+// single changed digit breaks output or the ABI. Lives here (a low, widely-imported shared module) so
+// every backend routes through the same code; no import cycle (genc/std string+alloc never import this).
+dec_digit* = (d: i64) u8 { sbyte("0123456789", d) }
+// The unsigned recursion. `n` is u64 so a `.Int` literal above i64-max (real negatives are `0 - x` Bin
+// nodes, never a negative `.Int`) renders in its full unsigned range; non-negative i64 callers pass
+// value-preservingly (u64 treated leniently by the checker; C widens int64→uint64 for a non-negative n).
+gstr_uint* = (out: String, a: MutPtr<Malloc>, n: u64) String {
+    (n < 10).match ({
+        true  => out.gstr_push(a, dec_digit(to_i64(n))),
+        false => {
+            // hoist the recursive call: a <call>.gstr_push receiver is re-evaluated by gstr_reserve (UAF)
+            hs := out.gstr_uint(a, n / 10)
+            hs.gstr_push(a, dec_digit(to_i64(n % 10)))
+        },
+    })
+}
+// The signed wrapper: reinterpret the i64 bit pattern as u64 and render unsigned — so a negative `.Int`
+// (a u64 literal above i64-max) prints its exact bits as unsigned decimal, with NO minus sign. This is
+// the genc/pretty semantics; the genjs backend's minus-sign form (jint/jint_neg) is deliberately kept
+// separate (its INT64_MIN-safe negative walk cannot go through `-n`).
+gstr_int* = (out: String, a: MutPtr<Malloc>, n: i64) String {
+    u: u64 := n
+    out.gstr_uint(a, u)
+}

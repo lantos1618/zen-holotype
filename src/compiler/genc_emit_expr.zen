@@ -5,7 +5,8 @@
 { Expr, Stmt, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, ty_cname_in, blk_diverges, field, gstr_append } = compiler.genc
 { Malloc } = std.mem.alloc
 { panic } = std.core.result
-{ gen_int, gen_strlit } = compiler.genc_emit_lit
+{ gen_strlit } = compiler.genc_emit_lit
+{ gstr_int } = compiler.astops
 gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
         // Suffix `LL` so an UNTYPED integer literal is a 64-bit C constant: bare literals are C `int`
@@ -13,11 +14,11 @@ gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
         // assignment. With `LL` the arithmetic happens at >=64-bit, then the final assign/cast truncates
         // (the C-correct widen-then-narrow). Small i32 math is unchanged: int32_t op long long promotes,
         // computes, and the i32 store/cast narrows back.
-        .Int(n)         => s.gen_int(alloc, n).gstr_append(alloc, (n < 0).match ({
+        .Int(n)         => s.gstr_int(alloc, n).gstr_append(alloc, (n < 0).match ({
             true  => "ULL",
             false => "LL",
         })),
-        .Byte(n)        => s.gen_int(alloc, n),
+        .Byte(n)        => s.gstr_int(alloc, n),
         .FloatLit(ft)   => s.gstr_append(alloc, ft),
         .Var(v)         => s.gstr_append(alloc, v.name),
         .Bin(b)         => s.gen_bin(alloc, b),
@@ -146,7 +147,7 @@ gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
         false => {
             tn := alloc.ty_cname_in(sd.elem)
             out := s.gstr_append(alloc, "({ ").gstr_append(alloc, tn).gstr_append(alloc, " _zsa[] = { ").gen_args(alloc, sd.items).gstr_append(alloc, " }; uint8_t* _zsp = malloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
-            out.gen_int(alloc, n).gstr_append(alloc, " }; })")
+            out.gstr_int(alloc, n).gstr_append(alloc, " }; })")
         },
     })
 }
@@ -382,8 +383,8 @@ gen_sargs = (s: String, alloc: MutPtr<Malloc>, args: [Expr]) String {
 // structural form, so a parser's tree can be diffed against another parser's (parity).
 gen_sexpr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
-        .Int(n)       => s.gen_int(alloc, n),
-        .Byte(n)      => s.gen_int(alloc, n),
+        .Int(n)       => s.gstr_int(alloc, n),
+        .Byte(n)      => s.gstr_int(alloc, n),
         .FloatLit(ft) => s.gstr_append(alloc, ft),
         .Var(v)       => s.gstr_append(alloc, v.name),
         .Bin(b)       => s.gstr_append(alloc, "(").gstr_append(alloc, b.op).gstr_append(alloc, " ").gen_sexpr(alloc, b.lhs).gstr_append(alloc, " ").gen_sexpr(alloc, b.rhs).gstr_append(alloc, ")"),
