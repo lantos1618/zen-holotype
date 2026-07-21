@@ -1,0 +1,215 @@
+// compiler.check_fits — type lattice: assignability (fits), ty_eq, mode/pointer-write checks.
+// Extracted from compiler.check (pure move).
+{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, mangle_str_in, mangle_semantic_in, impl_cname_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Malloc } = std.mem.alloc
+{ view, eq, is_empty, ends_with } = std.text.str
+{ PtrKind } = compiler.passes.ptrkind
+{ Env, VList, DeclIndex, infer_expr } = compiler.check
+// Type lattice: integer widening u8 <= i32 <= i64; all else exact structural equality.
+// f64 is intentionally outside the integer rank chain.
+ty_rank* = (t: Ty) i32 {
+    t.match ({
+        .U8  => 0,
+        .I32 => 1,
+        .I64 => 2,
+        _    => 0 - 1,
+    })
+}
+is_f64_ty* = (t: Ty) bool {
+    t.match ({
+        .F64 => true,
+        _    => false,
+    })
+}
+// Types stored under a mutable/aggregate constructor are invariant. In particular, the three string
+// provenance variants are only coercible as outer values; treating them as equal inside MutPtr,
+// slices, or generic storage lets a borrowed value overwrite an immortal-typed slot.
+invariant_ty_eq* = (g: Ty, w: Ty) bool {
+    g.match ({
+        .I32           => w.match ({
+            .I32 => true,
+            _    => false,
+        }),
+        .I64           => w.match ({
+            .I64 => true,
+            _    => false,
+        }),
+        .U8            => w.match ({
+            .U8 => true,
+            _   => false,
+        }),
+        .F64           => w.match ({
+            .F64 => true,
+            _    => false,
+        }),
+        .Bool          => w.match ({
+            .Bool => true,
+            _     => false,
+        }),
+        .Void          => w.match ({
+            .Void => true,
+            _     => false,
+        }),
+        .StringView    => w.match ({
+            .StringView => true,
+            _           => false,
+        }),
+        .StringCstr    => w.match ({
+            .StringCstr => true,
+            _           => false,
+        }),
+        .StringLiteral => w.match ({
+            .StringLiteral => true,
+            _              => false,
+        }),
+        .Named(a)      => w.match ({
+            .Named(b)    => eq(a, b),
+            .Generic(gb) => eq(a, gb.mangled),
+            _            => false,
+        }),
+        .Ptr(pa)       => w.match ({
+            .Ptr(pb) => pa.kind == pb.kind && load(pa.pointee).invariant_ty_eq(load(pb.pointee)),
+            _        => false,
+        }),
+        .Slice(pa)     => w.match ({
+            .Slice(pb) => load(pa).invariant_ty_eq(load(pb)),
+            _          => false,
+        }),
+        .FnT(fa)       => w.match ({
+            .FnT(fb) => fa.params.invariant_tys_eq(fb.params) && load(fa.ret).invariant_ty_eq(load(fb.ret)),
+            _        => false,
+        }),
+        .Generic(ga)   => w.match ({
+            .Generic(gb) => eq(ga.name, gb.name) && ga.args.invariant_tys_eq(gb.args),
+            .Named(b)    => eq(ga.mangled, b),
+            _            => false,
+        }),
+    })
+}
+invariant_tys_eq* = (gs: [Ty], ws: [Ty]) bool {
+    (gs.len != ws.len).match ({
+        true  => false,
+        false => {
+            same := true
+            gs.loop((h, i, g) {
+                same = same && g.invariant_ty_eq(ws[i])
+            })
+            same
+        },
+    })
+}
+ty_eq* = (g: Ty, w: Ty) bool {
+    g.match ({
+        .I32           => w.match ({
+            .I32 => true,
+            _    => false,
+        }),
+        .I64           => w.match ({
+            .I64 => true,
+            _    => false,
+        }),
+        .U8            => w.match ({
+            .U8 => true,
+            _   => false,
+        }),
+        .F64           => w.match ({
+            .F64 => true,
+            _    => false,
+        }),
+        .Bool          => w.match ({
+            .Bool => true,
+            _     => false,
+        }),
+        .Void          => w.match ({
+            .Void => true,
+            _     => false,
+        }),
+        .StringView    => w.match ({
+            .StringView => true,
+            _           => false,
+        }),
+        .StringCstr    => w.match ({
+            .StringCstr => true,
+            .StringView => true,
+            _           => false,
+        }),
+        .StringLiteral => w.match ({
+            .StringLiteral => true,
+            .StringView    => true,
+            .StringCstr    => true,
+            _              => false,
+        }),
+        .Named(a)      => w.match ({
+            .Named(b)    => eq(a, b),
+            .Generic(gb) => eq(a, gb.mangled),
+            _            => false,
+        }),
+        .Ptr(pa)       => w.match ({
+            .Ptr(pb) => load(pa.pointee).invariant_ty_eq(load(pb.pointee)),
+            _        => false,
+        }),
+        .Slice(pa)     => w.match ({
+            .Slice(pb) => load(pa).invariant_ty_eq(load(pb)),
+            _          => false,
+        }),
+        .FnT(fa)       => false,
+        .Generic(ga)   => w.match ({
+            .Generic(gb) => eq(ga.name, gb.name) && ga.args.invariant_tys_eq(gb.args),
+            .Named(b)    => eq(ga.mangled, b),
+            _            => false,
+        }),
+    })
+}
+// ── Ty pointer-kind inspection, as a trait ───────────────────────────────────
+is_any_ptr* = (t: Ty) bool { t.ptr_kind_of() >= 0 }
+// Preserve lvalue provenance across addr(): taking the address of storage reached through Ptr<T>
+// yields Ptr<U>, never MutPtr<U>. The walk stops at the first pointer indirection, matching writes.
+write_thru_readonly* = (env: Env, obj: Ptr<Expr>) bool {
+    ot := env.infer_expr(obj)
+    ot.is_any_ptr().match ({
+        true  => ot.is_readonly_ptr_ty(),
+        false => env.lvalue_writes_readonly(obj),
+    })
+}
+lvalue_writes_readonly* = (env: Env, target: Ptr<Expr>) bool {
+    load(target).match ({
+        .Member(m) => env.write_thru_readonly(m.obj),
+        .Arrow(ar) => env.infer_expr(ar.obj).is_readonly_ptr_ty(),
+        .Index(ix) => env.write_thru_readonly(ix.seq),
+        _          => false,
+    })
+}
+// Direction-axis mode — the writable-vs-readonly subset of the mode lattice (docs/effects-as-types-
+// design.md §2). The full 4-mode `mode_of(decls, t)` (owned/frozen/mut/read) needs `decls` for the
+// frozen⁄read split and lives at the send-sites (Brick 1, check_validate.zen). Inside `fits` there is
+// no `decls`, and only the DIRECTION axis matters (writable `mut` vs readonly `read`), which
+// `ptr_kind_of()` yields WITHOUT `decls`. Returns `k_mut_ptr` = `mut` (writable), `k_ptr` = `read`
+// (readonly), else -1 (not a pointer — direction N/A; the `RawPtr` floor is coerced earlier).
+dir_mode_of* = (t: Ty) i32 {
+    (t.ptr_kind_of() == k_mut_ptr() || t.ptr_kind_of() == k_ptr()).match ({
+        true  => t.ptr_kind_of(),
+        false => 0 - 1,
+    })
+}
+// Mode-lattice cell for `fits`: a readonly Ptr must not satisfy either writable spelling
+// (MutPtr or RawPtr), while MutPtr may safely lose capability into Ptr/RawPtr.
+mode_fits* = (g: Ty, w: Ty) bool {
+    (g.ptr_kind_of() == k_ptr() && (w.ptr_kind_of() == k_mut_ptr() || w.ptr_kind_of() == k_raw_ptr())).match ({
+        true  => false,
+        false => true,
+    })
+}
+raw_floor_fits* = (g: Ty, w: Ty) bool { g.is_raw_ptr_ty() && w.is_ptr_ty_g() }
+fits* = (g: Ty, w: Ty) bool {
+    numeric := g.ty_rank() >= 0 && w.ty_rank() >= 0
+    numeric.match ({
+        true  => g.ty_rank() <= w.ty_rank(),
+        false => g.raw_floor_fits(w).match ({
+            true  => true,
+            false => (g.is_nullable_ptr_ty() && w.is_nonnull_ptr_ty()).match ({
+                true  => false,
+                false => g.ty_eq(w) && g.mode_fits(w),
+            }),
+        }),
+    })
+}
