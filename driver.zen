@@ -5,6 +5,7 @@
 { Os, Arch, Abi, Platform, host } = std.platform
 { Malloc } = std.mem.alloc
 { eq, view } = std.text.str
+{ fnv1a64_fold } = std.hash    // shared FNV-1a-64 rolling byte fold (centralized in std.hash)
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
 { contents_in, out, out_bytes, save, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644, MODE_755 } = std.io.file
 { or, expect } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
@@ -306,16 +307,8 @@ cross_cc = (mp: MutPtr<Malloc>, target: string_view) string_view {
 // cached (the entry is written only after the full pipeline succeeded). ZENC_NO_CACHE=1 (any
 // non-empty value) bypasses both reads and writes; ZENC_CACHE_DIR overrides /tmp/zenc-cache (the
 // harness's cache cases point it at scratch). i64 wraps like the spec's u64: every build has -fwrapv.
-FNV_PRIME = () i64 { 1099511628211 }
 FNV_BASIS = () i64 { 0 - 3750763034362895579 }    // 0xcbf29ce484222325, the FNV-1a-64 offset basis, as an i64
-fnv_bytes = (h: i64, v: [u8]) i64 {
-    hh := h
-    v.loop((lh, i, b) {
-        hh = (hh ^ to_i64(b)) * FNV_PRIME()
-    })
-    (hh ^ v.len) * FNV_PRIME()
-}    // seal with the length so piece boundaries cannot slide
-fnv_str = (h: i64, s: string_view) i64 { h.fnv_bytes(s.view()) }
+fnv_str = (h: i64, s: string_view) i64 { h.fnv1a64_fold(s.view()) }
 flag_token_end = (v: [u8], i: i64) i64 { (i >= v.len || v[i] == ' ').match ({
     true  => i,
     false => v.flag_token_end(i + 1),
@@ -368,7 +361,10 @@ cache_self = (mp: MutPtr<Malloc>) i64 {
 }
 cache_self_fold = (fd: i32, buf: String, h: i64) i64 {
     n := fd.read(buf.ptr, 65536)
-    (n <= 0).match ({ true => h, false => fd.cache_self_fold(buf, h.fnv_bytes(buf.ptr.slice(n))) })
+    (n <= 0).match ({
+        true  => h,
+        false => fd.cache_self_fold(buf, h.fnv1a64_fold(buf.ptr.slice(n))),
+    })
 }
 cache_hex_digit = (d: i64) u8 { load(offset("0123456789abcdef", d)) }
 push_hex = (s: String, mp: MutPtr<Malloc>, h: i64, i: i64) String {
