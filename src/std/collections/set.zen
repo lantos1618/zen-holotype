@@ -56,7 +56,7 @@
 // module's `union` after flattening.
 //
 { Result, IoError } = std.core.result    // allocation failure is a Result value (OOM → .Err)
-{ Allocator, try_acquire, DynAlloc, dyn_heap } = std.mem.alloc    // explicit allocator trait; DynAlloc = narrow Allocator stored by the AMBIENT form
+{ Allocator, try_acquire2, DynAlloc, dyn_heap } = std.mem.alloc    // explicit allocator trait; DynAlloc = narrow Allocator stored by the AMBIENT form; try_acquire2 = all-or-nothing 2-buffer acquire
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
 Set*<T>: {
     elems: RawPtr<u8>,
@@ -116,41 +116,34 @@ Set*<T>: {
         // reindex. OOM at either acquire is returned as .Err (the old buffers stay valid and are NOT freed
         // on the failure path). Mirrors HMap.grow.
         cap := s.cap * 2 + 1
-        a.try_acquire((cap + 1) * sizeof(T)).match ({
-            .Ok(ep) => {
-                a.try_acquire(cap * 2 * sizeof(i64)).match ({
-                    .Ok(ip) => {
-                        olds := s.slots()
-                        next := Set<T>(
-                            elems: ep,
-                            idx: ip,
-                            len: s.len,
-                            cap: cap,
-                        )
-                        dst := next.slots()
-                        olds.loop((h, i, e) {
-                            (i < s.len).match ({
-                                true  => {
-                                    dst[i] = e
-                                },
-                                false => {
-                                    h.break
-                                },
-                            })
-                        })
-                        a.release(s.elems)
-                        a.release(s.idx)
-                        ok: Result<Set<T>, IoError> := .Ok(next.reindex())
-                        ok
-                    },
-                    .Err(e) => {
-                        a.release(ep)
-                        err: Result<Set<T>, IoError> := .Err(e)
-                        err
-                    },
+        a.try_acquire2((cap + 1) * sizeof(T), cap * 2 * sizeof(i64)).match ({
+            .Ok(bufs) => {
+                ep := bufs.b1
+                ip := bufs.b2
+                olds := s.slots()
+                next := Set<T>(
+                    elems: ep,
+                    idx: ip,
+                    len: s.len,
+                    cap: cap,
+                )
+                dst := next.slots()
+                olds.loop((h, i, e) {
+                    (i < s.len).match ({
+                        true  => {
+                            dst[i] = e
+                        },
+                        false => {
+                            h.break
+                        },
+                    })
                 })
+                a.release(s.elems)
+                a.release(s.idx)
+                ok: Result<Set<T>, IoError> := .Ok(next.reindex())
+                ok
             },
-            .Err(e) => {
+            .Err(e)   => {
                 err: Result<Set<T>, IoError> := .Err(e)
                 err
             },
@@ -277,39 +270,32 @@ Set*<T>: {
         // `free`d independently. O(len). OOM on either acquire is returned as .Err (the first buffer is
         // released before returning if the second fails).
         cap := s.cap
-        a.try_acquire((cap + 1) * sizeof(T)).match ({
-            .Ok(ep) => {
-                a.try_acquire(cap * 2 * sizeof(i64)).match ({
-                    .Ok(ip) => {
-                        next := Set<T>(
-                            elems: ep,
-                            idx: ip,
-                            len: s.len,
-                            cap: cap,
-                        )
-                        src := s.slots()
-                        dst := next.slots()
-                        src.loop((h, i, e) {
-                            (i < s.len).match ({
-                                true  => {
-                                    dst[i] = e
-                                },
-                                false => {
-                                    h.break
-                                },
-                            })
-                        })
-                        ok: Result<Set<T>, IoError> := .Ok(next.reindex())
-                        ok
-                    },
-                    .Err(e) => {
-                        a.release(ep)
-                        err: Result<Set<T>, IoError> := .Err(e)
-                        err
-                    },
+        a.try_acquire2((cap + 1) * sizeof(T), cap * 2 * sizeof(i64)).match ({
+            .Ok(bufs) => {
+                ep := bufs.b1
+                ip := bufs.b2
+                next := Set<T>(
+                    elems: ep,
+                    idx: ip,
+                    len: s.len,
+                    cap: cap,
+                )
+                src := s.slots()
+                dst := next.slots()
+                src.loop((h, i, e) {
+                    (i < s.len).match ({
+                        true  => {
+                            dst[i] = e
+                        },
+                        false => {
+                            h.break
+                        },
+                    })
                 })
+                ok: Result<Set<T>, IoError> := .Ok(next.reindex())
+                ok
             },
-            .Err(e) => {
+            .Err(e)   => {
                 err: Result<Set<T>, IoError> := .Err(e)
                 err
             },
@@ -335,27 +321,20 @@ Set*<T>: {
 // annotation: `s: Set<i64> := sets.empty(a)`. A is inferred from `a`. The index is reindexed (its single
 // bucket head cleared to -1) so `find`/`has` on the empty set return absent immediately.
 empty*<T, A> = (a: MutPtr<A>) Result<Set<T>, IoError> {
-    a.try_acquire((1 + 1) * sizeof(T)).match ({
-        .Ok(ep) => {
-            a.try_acquire(2 * sizeof(i64)).match ({
-                .Ok(ip) => {
-                    s := Set<T>(
-                        elems: ep,
-                        idx: ip,
-                        len: 0,
-                        cap: 1,
-                    )
-                    ok: Result<Set<T>, IoError> := .Ok(s.reindex())
-                    ok
-                },
-                .Err(e) => {
-                    a.release(ep)
-                    err: Result<Set<T>, IoError> := .Err(e)
-                    err
-                },
-            })
+    a.try_acquire2((1 + 1) * sizeof(T), 2 * sizeof(i64)).match ({
+        .Ok(bufs) => {
+            ep := bufs.b1
+            ip := bufs.b2
+            s := Set<T>(
+                elems: ep,
+                idx: ip,
+                len: 0,
+                cap: 1,
+            )
+            ok: Result<Set<T>, IoError> := .Ok(s.reindex())
+            ok
         },
-        .Err(e) => {
+        .Err(e)   => {
             err: Result<Set<T>, IoError> := .Err(e)
             err
         },
@@ -364,29 +343,22 @@ empty*<T, A> = (a: MutPtr<A>) Result<Set<T>, IoError> {
 // a `Set<T>` seeded with one element, its buffers acquired from `a`. T inferred from the seed value
 // (Zen has no call-site type args). Starts at cap 1.
 of*<T, A> = (a: MutPtr<A>, first: T) Result<Set<T>, IoError> {
-    a.try_acquire((1 + 1) * sizeof(T)).match ({
-        .Ok(ep) => {
-            a.try_acquire(2 * sizeof(i64)).match ({
-                .Ok(ip) => {
-                    s := Set<T>(
-                        elems: ep,
-                        idx: ip,
-                        len: 1,
-                        cap: 1,
-                    )
-                    sl := s.slots()
-                    sl[0] = first
-                    ok: Result<Set<T>, IoError> := .Ok(s.reindex())
-                    ok
-                },
-                .Err(e) => {
-                    a.release(ep)
-                    err: Result<Set<T>, IoError> := .Err(e)
-                    err
-                },
-            })
+    a.try_acquire2((1 + 1) * sizeof(T), 2 * sizeof(i64)).match ({
+        .Ok(bufs) => {
+            ep := bufs.b1
+            ip := bufs.b2
+            s := Set<T>(
+                elems: ep,
+                idx: ip,
+                len: 1,
+                cap: 1,
+            )
+            sl := s.slots()
+            sl[0] = first
+            ok: Result<Set<T>, IoError> := .Ok(s.reindex())
+            ok
         },
-        .Err(e) => {
+        .Err(e)   => {
             err: Result<Set<T>, IoError> := .Err(e)
             err
         },

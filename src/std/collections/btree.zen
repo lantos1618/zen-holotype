@@ -45,7 +45,7 @@
 //      `m = m.insert(...).expect("…")`, `m = m.remove(a, k)`.
 //   2. NO IMPLICIT VALUE SEMANTICS: headers copied from one tree share one backing store.
 { Result, IoError, Opt } = std.core.result
-{ Allocator, try_acquire } = std.mem.alloc    // explicit allocator trait
+{ Allocator, try_acquire, try_acquire2 } = std.mem.alloc    // explicit allocator trait; try_acquire2 = all-or-nothing 2-buffer acquire (BTreeSet's 1-buffer sites keep plain try_acquire)
 { strcmp } = std.c.libc    // three-way byte compare for str keys
 // `Ord` — total order on keys as a THREE-WAY compare: `cmp(a, b)` is < 0 when a < b, 0 when a == b,
 // > 0 when a > b. Everything sorted (binary search, insert position, range bounds) is expressed
@@ -161,44 +161,37 @@ BTreeMap*<K, V>: {
         // Fresh buffers (double the cap), copy the sorted entries over UNCHANGED (no reindex — the
         // array carries its own order), release the old ones. OOM at either acquire is a value.
         cap := m.cap * 2 + 1
-        a.try_acquire(cap * sizeof(K)).match ({
-            .Ok(kp) => {
-                a.try_acquire(cap * sizeof(V)).match ({
-                    .Ok(vp) => {
-                        oldks := m.keys()
-                        oldvs := m.vals()
-                        next := BTreeMap<K, V>(
-                            keys: kp,
-                            vals: vp,
-                            len: m.len,
-                            cap: cap,
-                        )
-                        keys := next.keys()
-                        vals := next.vals()
-                        oldks.loop((h, i, k) {
-                            (i < m.len).match ({
-                                true  => {
-                                    keys[i] = k
-                                    vals[i] = oldvs[i]
-                                },
-                                false => {
-                                    h.break
-                                },
-                            })
-                        })
-                        a.release(m.keys)
-                        a.release(m.vals)
-                        ok: Result<BTreeMap<K, V>, IoError> := .Ok(next)
-                        ok
-                    },
-                    .Err(e) => {
-                        a.release(kp)
-                        err: Result<BTreeMap<K, V>, IoError> := .Err(e)
-                        err
-                    },
+        a.try_acquire2(cap * sizeof(K), cap * sizeof(V)).match ({
+            .Ok(bufs) => {
+                kp := bufs.b1
+                vp := bufs.b2
+                oldks := m.keys()
+                oldvs := m.vals()
+                next := BTreeMap<K, V>(
+                    keys: kp,
+                    vals: vp,
+                    len: m.len,
+                    cap: cap,
+                )
+                keys := next.keys()
+                vals := next.vals()
+                oldks.loop((h, i, k) {
+                    (i < m.len).match ({
+                        true  => {
+                            keys[i] = k
+                            vals[i] = oldvs[i]
+                        },
+                        false => {
+                            h.break
+                        },
+                    })
                 })
+                a.release(m.keys)
+                a.release(m.vals)
+                ok: Result<BTreeMap<K, V>, IoError> := .Ok(next)
+                ok
             },
-            .Err(e) => {
+            .Err(e)   => {
                 err: Result<BTreeMap<K, V>, IoError> := .Err(e)
                 err
             },
@@ -342,27 +335,20 @@ BTreeMap*<K, V>: {
 //   r: Result<BTreeMap<i64, i64>, IoError> := btree.empty(a)
 //   m := r.expect("empty")
 empty*<K, V, A> = (a: MutPtr<A>) Result<BTreeMap<K, V>, IoError> {
-    a.try_acquire(sizeof(K)).match ({
-        .Ok(kp) => {
-            a.try_acquire(sizeof(V)).match ({
-                .Ok(vp) => {
-                    m := BTreeMap<K, V>(
-                        keys: kp,
-                        vals: vp,
-                        len: 0,
-                        cap: 1,
-                    )
-                    ok: Result<BTreeMap<K, V>, IoError> := .Ok(m)
-                    ok
-                },
-                .Err(e) => {
-                    a.release(kp)
-                    err: Result<BTreeMap<K, V>, IoError> := .Err(e)
-                    err
-                },
-            })
+    a.try_acquire2(sizeof(K), sizeof(V)).match ({
+        .Ok(bufs) => {
+            kp := bufs.b1
+            vp := bufs.b2
+            m := BTreeMap<K, V>(
+                keys: kp,
+                vals: vp,
+                len: 0,
+                cap: 1,
+            )
+            ok: Result<BTreeMap<K, V>, IoError> := .Ok(m)
+            ok
         },
-        .Err(e) => {
+        .Err(e)   => {
             err: Result<BTreeMap<K, V>, IoError> := .Err(e)
             err
         },
@@ -371,31 +357,24 @@ empty*<K, V, A> = (a: MutPtr<A>) Result<BTreeMap<K, V>, IoError> {
 // a `BTreeMap<K, V>` seeded with one entry, its buffers acquired from `a`. K and V are inferred from the
 // seed pair (Zen has no call-site type args), so this one CHAINS: `m := btree.of(a, k, v).expect("of")`.
 of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<BTreeMap<K, V>, IoError> {
-    a.try_acquire(sizeof(K)).match ({
-        .Ok(kp) => {
-            a.try_acquire(sizeof(V)).match ({
-                .Ok(vp) => {
-                    m := BTreeMap<K, V>(
-                        keys: kp,
-                        vals: vp,
-                        len: 1,
-                        cap: 1,
-                    )
-                    keys := m.keys()
-                    vals := m.vals()
-                    keys[0] = seed_key
-                    vals[0] = seed_val
-                    ok: Result<BTreeMap<K, V>, IoError> := .Ok(m)
-                    ok
-                },
-                .Err(e) => {
-                    a.release(kp)
-                    err: Result<BTreeMap<K, V>, IoError> := .Err(e)
-                    err
-                },
-            })
+    a.try_acquire2(sizeof(K), sizeof(V)).match ({
+        .Ok(bufs) => {
+            kp := bufs.b1
+            vp := bufs.b2
+            m := BTreeMap<K, V>(
+                keys: kp,
+                vals: vp,
+                len: 1,
+                cap: 1,
+            )
+            keys := m.keys()
+            vals := m.vals()
+            keys[0] = seed_key
+            vals[0] = seed_val
+            ok: Result<BTreeMap<K, V>, IoError> := .Ok(m)
+            ok
         },
-        .Err(e) => {
+        .Err(e)   => {
             err: Result<BTreeMap<K, V>, IoError> := .Err(e)
             err
         },
