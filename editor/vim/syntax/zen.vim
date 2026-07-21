@@ -1,9 +1,10 @@
 " Vim syntax for Zen (zen-lang). Install: copy editor/vim/* into ~/.vim/ (or your runtimepath).
 if exists("b:current_syntax") | finish | endif
 
-syn keyword zenKeyword return match loop impl
+syn keyword zenKeyword return match loop
 syn match   zenAtWhile "@while"
-syn keyword zenType i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool void Self Ptr MutPtr RawPtr Vec Opt Result
+" Only the types the language implements (SPEC.md): no i8/i16/u16/u32/u64/f32.
+syn keyword zenType i32 i64 u8 f64 bool void Self Ptr MutPtr RawPtr Vec Opt Result
 syn keyword zenType string_literal string_view string_cstr String
 syn keyword zenBool true false
 syn match   zenDecl "^[A-Za-z_][A-Za-z0-9_]*\*\?\ze\s*[:=]"

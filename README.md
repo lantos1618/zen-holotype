@@ -4,9 +4,9 @@
 language. The compiler is written in Zen, compiles itself, and has **two backends** over one
 shared AST: **C** (`genc`, the default and the intentional bootstrap target — not a
 host-language fallback) and **JavaScript** (`genjs`, run under `node`). There is **no Python
-and no tree-sitter** in the build path: `cc` builds the `zenc` binary from committed C — a
-161-line hand-written runtime floor (`bootstrap/zenrt.c`) is the only C not emitted by the
-compiler — and `zenc` re-emits that C byte-for-byte (a deterministic **fixpoint**).
+and no tree-sitter** in the build path: `cc` builds the `zen` binary from committed C — a
+224-line hand-written runtime floor (`bootstrap/zenrt.c`) is the only C not emitted by the
+compiler — and `zen` re-emits that C byte-for-byte (a deterministic **fixpoint**).
 
 It is a real-but-rough compiler: the core (self-hosting, FFI, generics, traits, a memory
 model, a multicore actor runtime) is well ahead of the user-facing surface and stdlib
@@ -126,19 +126,22 @@ Ordinary Zen modules under `src/std/`, imported with `{ name } = std.path`:
 
 | area | modules |
 |---|---|
-| core | `std.core.{result, ptr, slice, bool}`; `std.sys` (the root capability); `std.platform` (host/target OS, architecture, ABI) |
-| collections | `std.collections.{vec, map, hmap, set, iter}` |
-| text | `std.text.{str, string, fmt, num, bytes}` — `fmt` includes `println` and `{}`-template `format`/`formatln` |
-| memory | `std.mem.{alloc, heap, arena, rc, arc, own, raw}` |
+| core | `std.core.{result, ptr, slice, bool}`; `std.sys` (the root capability); `std.platform` (host/target OS, architecture, ABI); `std.scope`; `std.rt` |
+| ffi | `std.c.libc` (hand-written libc/pthread/libm foreign prototypes, gated by `make ffi-verify`) |
+| collections | `std.collections.{vec, map, hmap, set, iter, btree}` |
+| text | `std.text.{str, string, fmt, num, bytes, sb}` — `fmt` includes `println` and `{}`-template `format`/`formatln`; plus `std.regex` |
+| memory | `std.mem.{alloc, heap, arena, rc, arc, own, raw, trace}` |
 | concurrent | `std.concurrent.{actor, pool_actor, pool, sched, runtime, coroutine, cown, ring}` — cooperative typed actors (`actor`) vs parallel typed actors on the pool (`pool_actor` + trampoline); pool is one global run queue (work-stealing deques are roadmap) |
 | io / os | `std.io.{c, file, stdin}`, `std.fs`, `std.os` (argv/env), `std.process`, `std.sync`, `std.atomic`, `std.thread` |
-| data / encoding | `std.json`, `std.csv`, `std.encoding` (base64/hex), `std.path` |
-| net / web | `std.net` (sockets), `std.web.dom` |
-| misc | `std.math`, `std.time`, `std.rand`, `std.log`, `std.testing` |
+| data / encoding | `std.json`, `std.csv`, `std.encoding` (base64/hex), `std.path`, `std.hash` |
+| net / web | `std.net` (sockets), `std.http`, `std.web.dom` |
+| tooling | `std.argparse` (CLI args), `std.build` (`zen.toml`/`build.zen` projects), `std.state.store` |
+| misc | `std.math`, `std.time`, `std.datetime`, `std.rand`, `std.log`, `std.testing` |
+| internal | `std.internal.{resolve, ast}` — the self-hosted module loader and AST-builder (compiler support, not general-purpose API) |
 
 ## Build & run
 
-The compiler is the `zenc` binary; `cc` builds it from committed C, nothing else needed.
+The compiler is the `zen` binary; `cc` builds it from committed C, nothing else needed.
 
 ```sh
 make                                   # cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zen
@@ -265,7 +268,7 @@ This is rough around the edges. Known limits worth flagging up front:
 | `src/compiler/pretty.zen` | the `zenc fmt` formatter over the same AST |
 | `src/std/` | the stdlib (`core`, `collections`, `text`, `mem`, `concurrent`, `io`, ...) |
 | `src/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |
-| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` (161-line C floor) + `zenrt.js` (JS floor) + `Makefile` |
+| `bootstrap/` | `zenc.gen.c` (committed emitted C) + `sources.txt` (graph/SCC-checked manifest) + `zenrt.c` (224-line C floor) + `zenrt.js` (JS floor) + `Makefile` |
 | `examples/` | runnable single-file programs |
 | `tests/` | the Zen-native harness (`harness.zen`) + fixtures |
 

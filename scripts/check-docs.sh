@@ -11,7 +11,14 @@ expected='./ARCHITECTURE.md
 ./bootstrap/README.md
 ./examples/README.md'
 
-actual=$(find . -name .git -prune -o -name '*.md' -type f -print | LC_ALL=C sort)
+# Inventory TRACKED docs only: a dirty working tree (gitignored build/zen-context.md,
+# .pytest_cache/, worktrees) must not trip the gate locally — CI's clean checkout never sees
+# those files, and they are not maintained documentation. Fall back to plain find outside a repo.
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    actual=$(git ls-files -- '*.md' | sed 's|^|./|' | LC_ALL=C sort)
+else
+    actual=$(find . -name .git -prune -o -name '*.md' -type f -print | LC_ALL=C sort)
+fi
 
 if [ "$actual" != "$expected" ]; then
     echo "documentation inventory changed; consolidate it or update scripts/check-docs.sh intentionally" >&2

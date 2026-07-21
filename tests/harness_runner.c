@@ -1,8 +1,9 @@
 /* Value-case runner for tests/harness.zen (the Zen-native correctness harness).
  *
- * The harness runs `zenc emit <case.zen>` to produce the case's C body at /tmp/zo_body.c, then
+ * The harness runs `zen emit <case.zen>` to produce the case's C body at /tmp/zo_body.c, then
  * compiles THIS file (which #includes that body) and runs it: main() prints `test()`'s integer to
- * stdout, which the harness compares to the expected value. Mirrors tests/_oracle.py's _RUNNER + shim.
+ * stdout, which the harness compares to the expected value. (This file replaces the retired pytest
+ * oracle's C runner + shim.)
  *
  * Build:  cc -std=gnu11 -w -I/tmp tests/harness_runner.c -o /tmp/zo_prog   (-I/tmp finds zo_body.c)
  */

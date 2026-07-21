@@ -5,7 +5,7 @@
 # regenerates it, so parallel branches conflict on it on essentially every merge. A textual 3-way
 # merge of generated C is meaningless (and never what you want), so this driver resolves the conflict
 # trivially: it keeps the current side as-is and reports success. That leaves a clean, compilable
-# (but possibly stale) seed with NO conflict markers, so `zenc` can build and `make resolve-seed`
+# (but possibly stale) seed with NO conflict markers, so `zen` can build and `make resolve-seed`
 # (i.e. `make regen`) can reproduce the correct, byte-exact seed from the .zen sources.
 #
 # git invokes this as:  zenseed-merge.sh %O %A %B %P

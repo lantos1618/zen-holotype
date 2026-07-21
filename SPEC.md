@@ -81,7 +81,7 @@ the C boundary (`zenrt.c`) is byte-identical to the niladic case. `Sys`
 style is attenuation: a function takes the narrowest capability it needs (a
 `Writer`, an `Allocator`), never the whole `Sys`. `Writer.write` returns
 `Result<i64, IoError>`; `write_or_panic` is the fatal script sink. Ambient `println` remains
-best-effort during migration (`docs/sys-phase2-print-writer.md`).
+best-effort during migration.
 
 ## Types
 
@@ -682,8 +682,7 @@ Note: `std.concurrent.runtime`'s colorless `checkpoint` and the ambient runtime
 (`std.rt`, `std.scope`) are an experiment, not the shipped model. The current
 direction threads capabilities explicitly (allocators, and a `Sys` at the entry);
 reworking the ambient runtime toward "ambient-within-scope, explicit-at-boundary"
-is a roadmap item; the current runtime source of truth is
-`docs/runtime-design.md`.
+is a roadmap item.
 
 `ActorEngine<M>` owns the internal queue state. `ActorCell<M>` is the
 lower-level queue wrapper: it exposes `tell(message)` for fire-and-forget sends,

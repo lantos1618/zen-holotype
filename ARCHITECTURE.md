@@ -90,8 +90,8 @@ The semantic layer works, but its shape is the largest maintainability risk.
 - must-use, main-signature, infinite-type, and reserved-name checks.
 
 The CLI manually orders these channels and suppresses cascades. This preserves useful diagnostics,
-but duplicates traversal and judgments. `check.zen` is roughly 4.7k lines and
-`check_validate.zen` roughly 6.1k lines; size alone is not the problem, but the same fact being
+but duplicates traversal and judgments. `check.zen` is roughly 6.0k lines and
+`check_validate.zen` roughly 7.7k lines; size alone is not the problem, but the same fact being
 reconstructed by several walkers is.
 
 The simplification direction is:
