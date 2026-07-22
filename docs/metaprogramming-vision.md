@@ -1,112 +1,160 @@
 # Metaprogramming in Zen — reflection through generics, not `comptime`
 
-## Thesis
+## Thesis — now proven in tree
 
-Zen does **not** want a `comptime { ... }` block. Reflection should ride the mechanism
-we already have: **generic monomorphization**. A generic function `foo<T>` is already
-evaluated per concrete `T` at compile time (that's how `sizeof(T)` works). So the
-metaprogram *is* an ordinary generic function that can look at `T`'s structure and act
-on it — reflect-and-run (serialize, bind a SQL row) or reflect-and-emit (generate a
-`Decl` and hand it to `genModuleIn`).
+Zen does **not** have (and does not want) a `comptime { ... }` block. Reflection rides
+the mechanism we already had: **generic monomorphization**. A generic function `foo<T>`
+is evaluated per concrete `T` at compile time (that's how `sizeof(T)` works), so the
+metaprogram *is* an ordinary generic function whose body looks at `T`'s structure —
+reflect-and-run (serialize, compare, fill a struct from JSON) or reflect-and-emit
+(build a `Decl`, hand it to `genModuleIn`).
 
-Everything is a value of an **already-defined type** — no stringly-typed API. Kinds are
-enum variants (`.DFunc`, `.DEnum`, `.Struct`), types are the real `Ty` enum
-(`.Bool`, `.I32`, `.Ptr`, `.Slice`), not `"func"`/`"bool"`.
+Everything is a value of an **already-defined type** — no stringly-typed API, no magic
+pragma surface. This was the design bet when this doc was written; it is now **shipped
+and load-bearing**: three reflection intrinsics, derived struct equality, and a pure-
+library JSON serde all work on main.
 
-## The two primitives (the whole feature)
+## What exists today
 
-Both are monomorphization-time, like `sizeof(T)` — zero runtime cost, no reflection at
-run time (an `insert<User>` compiles to three `bind_*` calls, nothing reflective).
+### 1. Struct-reflection intrinsics (Phases 1+2) — SPEC.md "Struct Reflection"
 
-1. **`typeinfo(T)` / `a.type`** — a *matchable* type descriptor. The checker already
-   holds a `Ty` for every `T`, plus the `StructDecl.fields` / `EnumDecl.variants` behind
-   a `Named` type. The missing piece is exposing that to a generic body as a value:
-   ```zen
-   a.type.match ({ .Bool => ..., .Struct(fields) => ..., .Enum(variants) => ... })
-   ```
-2. **`fields(a)` / `fields_of<T>()`** — per-field iteration yielding `(name, typed value)`,
-   *unrolled* at mono time (Zig's `inline for`, Nim's `fieldPairs`). The field list is a
-   compile-time constant for a concrete `T`, so the loop expands to typed field accesses.
+Three intrinsics expand at inline time, once the receiver's concrete struct type is
+known, into ordinary field expressions — zero runtime cost:
 
-The AST types (`Decl`, `Ty`, `Param`, `Field`, `StructDecl`, `EnumDecl`, `VariantDef`)
-are real and already exported by `std.internal.ast`; `compiler.genc.genModuleIn` already
-emits a `[Decl]` to C. So **reflect-and-emit works today** as a build program; the two
-intrinsics above are what make **reflect-in-place** (`foo<T>` over your own types)
-ergonomic.
+- `x.field_eq(y)` — per-field `==` fold; **recursive** (struct-typed fields fold into
+  their own compare), strings by content.
+- `x.each_field(f)` — unrolls to one inlined call of `f(name, value)` per field.
+  `name` is the field's name as a string literal; `value` is statically typed as that
+  field, so each unrolled lambda copy is checked against the field's own type
+  (Zig `inline for` / Nim `fieldPairs`).
+- `x.zip_fields(y, f)` — the paired form: `f(name, x_value, y_value)` per field.
 
-## Example 1 — jsony-style serialize, auto-derived (no per-type impl)
+Real syntax (see `tests/fixtures/zen/each_field_unroll.zen` for the full exercised
+corpus — generic-struct receivers, receiver-evaluated-once, name matching):
 
 ```zen
-dump<T> = (a: T, out: MutPtr<String>) void {
-    a.type.match ({
-        .Bool        => out.s(a.match({ true => "true", false => "false" })),
-        .I32 | .I64  => out.int(a),
-        .StringView  => out.quoted(a),
-        .Struct(_)   => {
-            out.ch('{')
-            fields(a).loop((h, i, fv) {          // fv.val is statically typed as its field
-                (i > 0).then({ out.ch(',') })
-                out.quoted(fv.name)  out.ch(':')
-                dump(fv.val, out)                // recurse on the field's own type
-            })
-            out.ch('}')
-        },
-        .Enum(_)     => a.variant.match ({
-            .Unit(name)       => out.quoted(name),
-            .Payload(name, p) => { out.ch('{')  out.quoted(name)  out.ch(':')  dump(p, out)  out.ch('}') },
-        }),
-        .Slice(_)    => { out.ch('[')  a.loop((h, i, x) { (i>0).then({out.ch(',')})  dump(x, out) })  out.ch(']') },
+sum_fields<T> = (v: T) i64 {
+    acc: i64 := 0
+    v.each_field((name, fv) { acc = acc + fv })
+    acc
+}
+
+diff_count<T> = (x: T, y: T) i64 {
+    d: i64 := 0
+    x.zip_fields(y, (name, va, vb) {
+        (va == vb == false).then({ d = d + 1 })
     })
+    d
 }
 ```
 
-`parse<T>` is the inverse walk (this is jsony's `parseHook`). Same for `eq<T>`,
-`hash<T>`, `debug<T>` — all fall out of the same two primitives.
+Generic-struct receivers (`Box<i64>`) reflect with the instance's type arguments
+substituted. Ill-formed shapes are rejected with positioned diagnostics (non-struct
+receiver, wrong-shape lambda, self-recursive reflect body → `error[recursive-hof]`).
 
-## Example 2 — Drizzle-style ORM (schema *is* a struct)
+### 2. Derived struct equality (#577) — SPEC.md "Struct Equality"
+
+`==` / `!=` between two values of the same struct type compare structurally. An `eq`
+method provided by an impl on the type **wins**; otherwise the compiler derives a
+per-field `==` fold via the same reflection machinery — strings by content, enums by
+tag, struct fields recurse, pointers by identity, operands evaluated exactly once.
+This is the promised `eq<T>` "falls out of the primitives" — it fell out.
+
+```zen
+Point: { x: i64, y: i64 }
+p == q                          // derived per-field fold
+
+Tagged.impl(EqOps, {
+    eq = (a: Tagged, b: Tagged) bool { a.id == b.id }
+})
+t1 == t2                        // the impl wins over the derived fold
+```
+
+### 3. jsony-style serde as pure library code (Phase 3, #584) — `src/std/format/serde.zen`
+
+`to_json(a, v)` / `from_json(a, s, seed)` are ordinary generic library functions — no
+compiler serde support, no per-type impls for structs. Field names become JSON keys via
+`each_field`; per-field serialization dispatches through `JsonWrite` impls on the scalar
+types. The key deserialization insight: **an `each_field` lambda parameter substitutes to
+a real member PLACE**, so `fv = ...` inside the lambda assigns the struct's field — which
+is why `from_json` needed **no new intrinsic**.
+
+```zen
+{ to_json, from_json } = std.format.serde
+da := dyn_heap()
+to_json(da.addr(), Point(x: 3, y: 4))          // .Ok("{\"x\":3,\"y\":4}")
+from_json(da.addr(), s, Point(x: 0, y: 0))     // .Ok(Point(x: 3, y: 4)); seed = defaults
+```
+
+Errors are values throughout (builder OOM latches into a threaded state → `.Err`;
+malformed JSON is the parser's `.Err(JsonError)`).
+
+### 4. Reflect-and-emit — worked before, still works
+
+The AST types (`Decl`, `Ty`, `Param`, `Field`, `StructDecl`, `EnumDecl`, `VariantDef`)
+are real and exported by `std.internal.ast`; `compiler.genc.genModuleIn` emits a
+`[Decl]` to C. Building a companion decl from a reflected struct (derive-accessors,
+derive-eq style) works as a build program today.
+
+## Remaining — known limits and future intrinsics
+
+**Composition limits (issues #586, #588).** The intrinsics compose less freely than
+plain generics; today's sharp edges, all documented at the top of
+`src/std/format/serde.zen`:
+
+- **One-wrapper limit**: at most one plain generic may wrap a reflection generic
+  (`to_json` wraps `jw_obj1`); a second wrapper layer absorbs the intrinsic one
+  pipeline pass too late and its calls die at C link time (#588).
+- **Same-name ladder recursion** (impl-owned scalar dispatch + same-named free generic
+  struct fallback) poisons the two-pass resolve→inline pipeline — dead splices or bare
+  un-emitted template calls surface as C errors instead of diagnostics (#586).
+- **Syntactic `recursive-hof`**: the self-recursion check is name-based, so mixed
+  scalar/struct fields at one level can't be handled by one recursive `dump<T>` yet —
+  hence `to_json` (flat structs) vs `to_json_nested` (two homogeneous levels) as
+  separate entry points (#588).
+
+**Place-semantics soundness (in flight: #585, #587).** Spliced lambda params aliasing
+the caller's variable (#585) and non-`Var` reflection subjects being temp-bound so
+nested field writes silently vanish (#587) are open soundness holes in the
+member-place substitution that `from_json` relies on.
+
+**Still-future intrinsics.** `typeinfo(T)` / `a.type` (a *matchable* `Ty` descriptor —
+`.Bool`, `.I32`, `.Struct(fields)`, `.Enum(variants)`) and `fields_of<T>()` (field list
+without a value, for reflect-and-emit inside a generic) remain unbuilt. They are what
+would replace serde's impl-dispatch workaround with a direct type-switch, and what the
+`recursive-hof` fix needs to make one `dump<T>` handle every shape. Same rule as
+everything above: kinds and types are enum variants from the real AST types, never
+strings.
+
+**The ORM sketch — still the target application.** Drizzle-style, schema *is* a struct:
 
 ```zen
 User: { id: i32, name: string_view, active: bool }   // the table = a plain struct
 
 users := table<User>("users")   // reflect fields -> columns; SQL type from each field's Ty
 
-// type-safe fluent query; .active is a typed column ref, not "active"
 adults := db.from(users)
-    .where(users.col(.active).eq(true))    // .eq(true) type-checks true : bool
+    .where(users.col(.active).eq(true))    // typed column ref, not "active"
     .order_by(users.col(.name))
     .select()                              // -> [User], rows scanned back via reflection
 
 db.insert(users, User(id: 1, name: "ada", active: true))   // fields -> bind params
 ```
 
-One reflection mechanism powers schema derivation, column typing, `insert` binding, and
-`select` scanning — the schema, the query types, and the row mapping are one source of
-truth (the struct). The SQL type of a column comes from matching the field's real `Ty`:
+`insert`/`select` row mapping is expressible with today's `each_field`/`zip_fields`;
+the typed column selector `.col(.name)` and SQL-type-from-`Ty` derivation want
+`typeinfo(T)`/`fields_of<T>()`. One reflection mechanism powers schema derivation,
+column typing, bind params, and row scanning — one source of truth (the struct).
 
-```zen
-sql_ty := f.ty.match ({ .I32|.I64 => .Int, .Bool => .Bool, .StringView => .Text, .F64 => .Real, _ => .Blob })
-```
+## Scorecard
 
-## Example 3 — reflect-and-emit (build a `Decl`, inject a type)
-
-The `: Node`-returning form: reflect `T`, build a `Decl`/`Stmt`, emit it.
-
-```zen
-derive_table<T> = () Decl {
-    cols := fields_of<T>().map((f) { Field(name: f.name, ty: f.ty) })
-    // build a StructDecl for the companion table + typed Column per field, then:
-    .DStruct(StructDecl(name: /* T's name + "Table" */, fields: cols))
-}
-// genModuleIn([...derive_table<User>()...]) emits it — this works today via std.internal.ast.
-```
-
-## Status / what to build
-
-- ✅ Reflect-and-emit as a build program: works now (`std.internal.ast` + `genModuleIn`;
-  see the existing `derive_accessors` / `derive_eq` that already loop `StructDecl.fields`).
-- ⛔ The bounded feature: `typeinfo(T)` (matchable descriptor) + `fields(a)` (typed unrolled
-  field iteration) + a typed field-selector for `.col(.name)`. All ride monomorphization
-  like `sizeof(T)`; the checker already has the data. No `comptime` block, no runtime cost.
-
-This one lever unlocks **derive, serde, ORM, equality, hashing, debug** from ordinary
-`foo<T>` functions — the "everything is a type / metaprogramming as values" direction.
+- ✅ Reflection rides generics, mono-time, zero runtime cost — shipped, proven by serde.
+- ✅ No `comptime` block — none was needed for equality or JSON serde.
+- ✅ No stringly-typed API — field names surface as string *literals* to statically
+  typed lambdas; kinds/types stay enum variants.
+- ✅ Derive-class features as library code: `eq` (compiler-derived `==`), `to_json` /
+  `from_json` (`std.format.serde`).
+- ⛔ Free composition of reflection generics (#586/#588) and place-semantics soundness
+  (#585/#587) — the active work.
+- ⛔ `typeinfo(T)` / `fields_of<T>()` — the remaining intrinsics; unlock type-switch
+  dispatch, one-function recursive serde, and the ORM's typed columns.
