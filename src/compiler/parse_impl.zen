@@ -8,7 +8,7 @@
 { Malloc } = std.mem.alloc
 { lexeme } = compiler.parse_atom
 { parse_ty, perr_set_at, is_comma, is_rbrace, skip_to_brace, param_buf, take_params } = compiler.parse_type
-{ parse_decl_at } = compiler.parse
+{ parse_decl_at, DCont } = compiler.parse
 { StructEnd, data_fields } = compiler.parse_type_decl
 { param_names_has } = compiler.parse_implicit
 // Impl methods become mangled functions plus one DImpl conformance record.
@@ -26,7 +26,7 @@ canonical_impl_receiver = (name: string_view) string_view {
         false => name,
     })
 }
-fill_impl* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
+fill_impl* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     tnt := src.scan(pos)
     tyname := a.lexeme(src, tnt.tok).canonical_impl_receiver()
     dot := src.scan(tnt.next)
@@ -43,7 +43,10 @@ fill_impl* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32
     ie := a.fill_impl_methods(src, bstart, buf, i, mbuf, 0, tyname, trname)
     buf[ie.decls] = dimpl_at(tyname, trname, tre.ty, mbuf.take_params(ie.methods), tnt.tok.start)
     rp := src.scan(ie.next)
-    a.fill_decls(src, rp.next, buf, ie.decls + 1)
+    DCont(
+        next: rp.next,
+        i: ie.decls + 1,
+    )
 }
 fill_impl_methods* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32, mbuf: [Param], m: i32, tyname: string_view, trname: string_view) ImplEnd {
     sc := src.scan(pos)

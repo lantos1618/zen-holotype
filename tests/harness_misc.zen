@@ -9,10 +9,11 @@
 //   acid         <- tests/test_acid.py            (every real std/compiler source EMITs, output starts with HEAD)
 //   differential <- tests/test_differential.py    (large generated constructs: 80 params/fields/match-arms)
 //   faithful_ast <- tests/test_faithful_ast.py    (`fmt --ast` UFCS/round-trip/idempotency + emit-equal corpus)
+//   capacity     <- compiler review                 (16385-decl module -> error[capacity], not a crash)
 //
 // Helpers are `om_`-prefixed so they never collide on the flat-import flatten with std (std.io.file
 // already defines `read_file*`), harness_lib, or the other category files.
-{ VCase, VerdictCase, run_value, run_values, run_verdicts, run_suite, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = harness_lib
+{ VCase, VerdictCase, run_value, run_values, run_verdict, run_verdicts, run_suite, zo_path, zo_cmd, zo_itoa, zo_par_run, zo_idpath, zo_join } = harness_lib
 { Malloc } = std.mem.alloc
 { out, out_bytes, save, contents_in, shell } = std.io.file
 { eq, len, contains, starts_with, is_empty, view, substr } = std.text.str
@@ -639,6 +640,29 @@ harness_misc_ffi_verify = () i32 {
     mp := m.addr()
     run_suite("ffi-verify (foreign prototypes match system headers)", [shell(mp.zo_cmd("scripts/ffi_verify.sh ./zen > /dev/null 2>&1")).expect("harness: shell") == 0])
 }
+// ── capacity: fixed-registry overflow is a LOUD rejection, never silent data loss or a crash ────
+// A module past the 16384-decl capacity (or the exports/alias/module-sig registries) plants the
+// `__capacity` sentinel and `zen check` rejects with error[capacity] — before the fill_decls
+// de-recursion this input died with a stack-overflow panic. The source is generated (16385 one-line
+// fns), not a fixture.
+harness_misc_capacity = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    s := mp.new_in().expect("harness: oom")
+    i: i64 := 0
+    @while (i < 16385) {
+        s = s.append_in(mp, "f").expect("harness: oom")
+        s = s.append_in(mp, mp.zo_itoa(i)).expect("harness: oom")
+        s = s.append_in(mp, "* = () i32 { 0 }\n").expect("harness: oom")
+        i = i + 1
+    }
+    src := mp.finish_in(s).expect("harness: oom")
+    run_suite("capacity (oversized module rejects with error[capacity])", [run_verdict(VerdictCase(
+        src: src,
+        should_pass: false,
+        kind: "capacity",
+    ))])
+}
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 harness_misc_run* = () i32 {
     fails := 0
@@ -652,5 +676,6 @@ harness_misc_run* = () i32 {
     fails = fails + harness_misc_vbreak()
     fails = fails + harness_misc_iofile()
     fails = fails + harness_misc_ffi_verify()
+    fails = fails + harness_misc_capacity()
     fails
 }

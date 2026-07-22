@@ -359,35 +359,67 @@ fill_import_names = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param]
         }),
     })
 }
+// One parsed top-level decl's continuation: where parsing resumes and the next free decl slot.
+// The decl parsers RETURN this instead of tail-calling fill_decls, so a module's decl count costs
+// constant C stack (the loop below) rather than one frame per decl — see STATUS.md's P1 row.
+DCont*: {
+    next: i32,
+    i: i32,
+}
 fill_decls = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
-    // Leave one slot for the syntax-error sentinel.
-    (i >= buf.len - 1).then({
-        perr_set_at(pos)
-        buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(0)))
-        return i + 1
-    })
-    sc := src.scan(pos)
-    sc.tok.kind.match ({
-        .Eof => i,
-        _    => src.decl_is_import(pos).match ({
-            true  => a.fill_import(src, pos, buf, i),
-            false => sc.tok.kind.match ({
-                // Bad top-level tokens become syntax sentinels, then parsing resumes.
-                .Ident => a.fill_decl(src, pos, buf, i),
-                _      => {
-                    perr_set_at(sc.tok.start)
-                    // a failure exactly AT the last fired variant break's `.` is the split-statement
-                    // shape: a NEGATIVE offset selects the rule-naming KVBREAK diagnostic (0 - off).
-                    off := (sc.tok.start == vbreak_get() && vbreak_get() != 0).match ({
-                        true  => 0 - sc.tok.start,
-                        false => perr_off_get(),
-                    })
-                    buf[i] = dglobal("__syntax_error", tvoid(), a.enode(lit(off)))
-                    a.fill_decls(src, sc.next, buf, i + 1)
-                },
-            }),
-        }),
-    })
+    p := pos
+    n := i
+    go := true
+    @while (go) {
+        // Leave one slot for the syntax-error sentinel. A full decl_buf is a CAPACITY overflow:
+        // plant the __capacity sentinel directly (this return value IS buf.len, so parse_module's
+        // prepend path would skip its own sentinel) with the caret on the first unparseable decl.
+        (n >= buf.len - 1).match ({
+            true  => {
+                perr_set_at(p)
+                reg_overflow_note()
+                buf[n] = dglobal("__capacity", tvoid(), a.enode(lit(p)))
+                n = n + 1
+                go = false
+            },
+            false => {
+                sc := src.scan(p)
+                sc.tok.kind.match ({
+                    .Eof => {
+                        go = false
+                    },
+                    _    => src.decl_is_import(p).match ({
+                        true  => {
+                            c := a.fill_import(src, p, buf, n)
+                            p = c.next
+                            n = c.i
+                        },
+                        false => sc.tok.kind.match ({
+                            // Bad top-level tokens become syntax sentinels, then parsing resumes.
+                            .Ident => {
+                                c := a.fill_decl(src, p, buf, n)
+                                p = c.next
+                                n = c.i
+                            },
+                            _      => {
+                                perr_set_at(sc.tok.start)
+                                // a failure exactly AT the last fired variant break's `.` is the split-statement
+                                // shape: a NEGATIVE offset selects the rule-naming KVBREAK diagnostic (0 - off).
+                                off := (sc.tok.start == vbreak_get() && vbreak_get() != 0).match ({
+                                    true  => 0 - sc.tok.start,
+                                    false => perr_off_get(),
+                                })
+                                buf[n] = dglobal("__syntax_error", tvoid(), a.enode(lit(off)))
+                                p = sc.next
+                                n = n + 1
+                            },
+                        }),
+                    }),
+                })
+            },
+        })
+    }
+    n
 }
 decl_is_impl* = (src: string_view, pos: i32) bool {
     nt := src.scan(pos)
@@ -397,7 +429,7 @@ decl_is_impl* = (src: string_view, pos: i32) bool {
         false => false,
     })
 }
-fill_decl = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
+fill_decl = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     a.note_export_if_starred(src, pos)
     // A misordered generic head `Name<T>*:` is a clean error (caret at the `<`): flag it, then let the
     // normal struct/enum cascade parse-and-advance past it (the module is rejected via the sentinel).
@@ -439,28 +471,34 @@ global_decl = (a: MutPtr<Malloc>, nm: string_view, init: Ptr<Expr>, alias: bool,
         _        => dglobal_at(nm, tvoid(), init, dpos),
     })
 }
-fill_global = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
+fill_global = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
     mk := src.decl_marker(pos)
     alias := src.is_eq_tok(mk.tok)    // single `=` (a module alias) vs `:=` (a value global)
     pe := a.parse_or(src, mk.next)
     buf[i] = a.global_decl(nm, pe.expr, alias, nt.tok.start)
-    a.fill_decls(src, pe.next, buf, i + 1)
+    DCont(
+        next: pe.next,
+        i: i + 1,
+    )
 }
 // A malformed `name = <expr>` binding (see decl_is_bad_binding): flag a bad-binding parse error caret
 // at the RHS, then parse the RHS as an expression PURELY to find where it ends — so we resume at the
 // next declaration instead of letting fill_func swallow it. No decl is planted for this line (the
 // module is rejected via the sentinel parse_module plants); the next decl fills this slot.
-fill_bad_binding = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
+fill_bad_binding = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     mk := src.decl_marker(pos)
     perr_set_bad_at(src.scan(mk.next).tok.start)
     pe := a.parse_or(src, mk.next)
-    a.fill_decls(src, pe.next, buf, i)
+    DCont(
+        next: pe.next,
+        i: i,
+    )
 }
 // `name : Type := expr` — a typed value global (always a value global, never a module alias — those
 // carry no annotation — so alias = false). The type annotation is parsed then discarded (re-inferred).
-fill_typed_global = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
+fill_typed_global = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
     m := src.decl_marker(pos)    // the single ':'
@@ -468,22 +506,31 @@ fill_typed_global = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl],
     op := src.scan(te.next)
     pe := a.parse_or(src, op.next)
     buf[i] = a.global_decl(nm, pe.expr, false, nt.tok.start)
-    a.fill_decls(src, pe.next, buf, i + 1)
+    DCont(
+        next: pe.next,
+        i: i + 1,
+    )
 }
-fill_enum = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
+fill_enum = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     ee := a.parse_enum_at(src, pos)
     buf[i] = (ee.ntp > 0).match ({
         true  => dgenenum(genumdef_at(ee.ed.name, ee.tparams, ee.ed.variants, ee.ed.pos)),
         false => denum(ee.ed),
     })
-    a.fill_decls(src, ee.next, buf, i + 1)
+    DCont(
+        next: ee.next,
+        i: i + 1,
+    )
 }
-fill_func = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
+fill_func = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     de := a.parse_decl_at(src, pos)
     buf[i] = de.foreign.match ({ true => dforeign(de.func), false => dfunc(de.func) })
-    a.fill_decls(src, de.next, buf, i + 1)
+    DCont(
+        next: de.next,
+        i: i + 1,
+    )
 }
-fill_struct = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
+fill_struct = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     se := a.parse_struct_at(src, pos)
     inherent := se.defaults.len > 0 && se.sd.fields.has_data_field()
     ni := inherent.match ({
@@ -496,15 +543,21 @@ fill_struct = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i3
             a.fill_defaults(se.sd.name, se.defaults, buf, i + 1, 0)
         },
     })
-    a.fill_decls(src, se.next, buf, ni)
+    DCont(
+        next: se.next,
+        i: ni,
+    )
 }
-fill_import = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) i32 {
+fill_import = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     nbuf := a.import_buf()
     ie := a.fill_import_names(src, src.scan(pos).next, nbuf, 0)
     eq := src.scan(ie.next)
     pth := a.read_import_path(src, eq.next)    // capture `std.text.fmt` text (kept for the formatter)
     buf[i] = dimport_at(nbuf.take_params(ie.count), pth.text, src.scan(pos).tok.start)
-    a.fill_decls(src, pth.next, buf, i + 1)
+    DCont(
+        next: pth.next,
+        i: i + 1,
+    )
 }
 // Read the dotted module path `a.b.c` after an import `=`, returning its verbatim text + resume pos.
 ImportPath*: {
@@ -586,7 +639,7 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
                 true  => "__bad_binding",
                 false => (perr_kind_get() == 2).match ({
                     true  => "__misordered_generic",
-                    false => (perr_get() == false && lerr_get() == false && reg_overflow_get()).match ({
+                    false => reg_overflow_get().match ({
                         true  => "__capacity",
                         false => "__syntax_error",
                     }),
