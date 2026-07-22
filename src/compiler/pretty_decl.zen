@@ -3,13 +3,14 @@
 // (called from ff_top_decl / pretty_module_in and from nested-func statements). Mutually recursive with the
 // expression / statement walks in compiler.pretty / compiler.pretty_expr (flat-TU cycle, `*` exports).
 { String } = std.text.string
-{ starts_with } = std.text.str
+{ starts_with, view } = std.text.str
 { Malloc } = std.mem.alloc
-{ Decl, EnumDecl, Field, Func, GenEnumDecl, GenStructDecl, ImplData, ImportData, Param, StructDecl, Ty, VariantDef, is_expr_null, tvoid } = compiler.genc
+{ Decl, EnumDecl, Field, Func, GenEnumDecl, GenStructDecl, ImplData, ImportData, Param, StructDecl,
+  Ty, VariantDef, is_expr_null, tvoid } = compiler.genc
 { impl_cname_in, payload_fname } = compiler.mangle
 { at } = std.text.bytes
-{ ff_append, ff_block, ff_flush_leading, ff_indent, ff_ty, ff_tys } = compiler.pretty
-{ ff_expr } = compiler.pretty_expr
+{ ff_append, ff_block, ff_flush_leading, ff_indent, ff_string, ff_ty, ff_tys } = compiler.pretty
+{ ff_current_col, ff_expr, ff_fits_width } = compiler.pretty_expr
 // ── declarations ────────────────────────────────────────────────────────────────
 // a trailing `...T` param stores its type as the collected `[T]`; recover the element T to re-print `...T`.
 ff_slice_elem = (t: Ty) Ty {
@@ -18,16 +19,38 @@ ff_slice_elem = (t: Ty) Ty {
         _         => t,
     })
 }
+ff_param_one = (s: String, a: MutPtr<Malloc>, p: Param) String {
+    p.variadic.match ({
+        true  => s.ff_append(a, p.name).ff_append(a, ": ...").ff_ty(a, ff_slice_elem(p.ty)),
+        false => s.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
+    })
+}
 ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
         out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
-        out = p.variadic.match ({
-            true  => out.ff_append(a, p.name).ff_append(a, ": ...").ff_ty(a, ff_slice_elem(p.ty)),
-            false => out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
-        })
+        out = out.ff_param_one(a, p)
     })
     out
+}
+// A fn signature's ` = (params) ret` head that would overflow 100 columns (counting the ` {` block
+// opener still to come) breaks one param per line at ind+1, `) ret` on its own closing line at ind —
+// trailing comma on every param EXCEPT a variadic `...T` last param (the parser rejects a comma
+// there). Trial render measures the inline form at the caller's current column; params/types weave
+// no comments, so no gf_idx save is needed (the trial is naturally side-effect-free).
+ff_sig = (s: String, a: MutPtr<Malloc>, ps: [Param], ret: Ty, ind: i32) String {
+    trial := a.ff_string(256).ff_append(a, " = (").ff_params(a, ps).ff_append(a, ") ").ff_ty(a, ret)
+    (ps.len == 0 || trial.ff_fits_width(s.ff_current_col(), 98)).match ({
+        true  => s.ff_append(a, " = (").ff_params(a, ps).ff_append(a, ") ").ff_ty(a, ret),
+        false => {
+            out := s.ff_append(a, " = (\n")
+            ps.loop((h, i, p) {
+                sep := p.variadic.match ({ true => "\n", false => ",\n" })
+                out = out.ff_indent(a, ind + 1).ff_param_one(a, p).ff_append(a, sep)
+            })
+            out.ff_indent(a, ind).ff_append(a, ") ").ff_ty(a, ret)
+        },
+    })
 }
 // lambda params: a param's ty is its declared `: Type` annotation (Void when the source wrote none —
 // the FnT context supplies the real types when the lambda is spliced). Print the annotation back when
@@ -78,22 +101,11 @@ ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: string_view) String
 // The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
 // an anonymous-struct return type `{ field: T }`, changing the AST.
 ff_func = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
-    sig := s
-        .ff_name(a, exp, f.name)
-        .ff_tparams(a, f.tparams)
-        .ff_append(a, " = (")
-        .ff_params(a, f.params)
-        .ff_append(a, ") ")
-        .ff_ty(a, f.ret)
+    sig := s.ff_name(a, exp, f.name).ff_tparams(a, f.tparams).ff_sig(a, f.params, f.ret, 0)
     sig.ff_append(a, " ").ff_block(a, f.body, 0, true)
 }
 ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
-    s
-        .ff_name(a, exp, f.name)
-        .ff_append(a, " = (")
-        .ff_params(a, f.params)
-        .ff_append(a, ") ")
-        .ff_ty(a, f.ret)
+    s.ff_name(a, exp, f.name).ff_sig(a, f.params, f.ret, 0)
 }
 // ── un-hoisting inherent + trait methods ────────────────────────────────────────
 // The parser HOISTS a struct's inherent methods (and a trait impl's methods) into separate mangled
@@ -204,7 +216,14 @@ ff_is_hoisted* = (a: MutPtr<Malloc>, decls: [Decl], fname: string_view) bool {
 }
 // print an impl's methods (each demangled to its original name; the type's tparams dropped from the
 // method's own tparam list). Reused for inherent (inside the struct) and trait impls (inside `.impl`).
-ff_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData, ctp: [Param], ind: i32) String {
+ff_methods = (
+    s: String,
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    im: ImplData,
+    ctp: [Param],
+    ind: i32,
+) String {
     out := s
     im.methods.loop((h, k, mp) {
         f := a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
@@ -216,16 +235,20 @@ ff_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData, ctp: [P
             .ff_indent(a, ind)
             .ff_append(a, mp.name)
             .ff_tparams(a, own)
-            .ff_append(a, " = (")
-            .ff_params(a, f.params)
-            .ff_append(a, ") ")
-            .ff_ty(a, f.ret)
+            .ff_sig(a, f.params, f.ret, ind)
         out = sig.ff_append(a, " ").ff_block(a, f.body, ind, true).ff_append(a, "\n")
     })
     out
 }
 // the inherent methods of `tyname` (the DImpl where ty == trname == tyname), printed at `ind`
-ff_inherent_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], tyname: string_view, ctp: [Param], ind: i32) String {
+ff_inherent_methods = (
+    s: String,
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    tyname: string_view,
+    ctp: [Param],
+    ind: i32,
+) String {
     out := s
     decls.loop((h, i, d) {
         d.match ({
@@ -240,7 +263,14 @@ ff_inherent_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], tyname: stri
 // one record entry: a field whose name carries a DTraitDefault prints the default IN PLACE —
 // `name = (params) ret { … },` at one indent, body formatted like a fn body — every other field
 // prints `name: ty,`. Both spellings keep the trailing comma (fields are record entries).
-ff_record_field = (s: String, a: MutPtr<Malloc>, decls: [Decl], owner: string_view, ctp: [Param], fl: Field) String {
+ff_record_field = (
+    s: String,
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    owner: string_view,
+    ctp: [Param],
+    fl: Field,
+) String {
     decls.ff_has_default(owner, fl.name).match ({
         true  => {
             f := a.ff_find_default(decls, owner, fl.name)
@@ -252,10 +282,7 @@ ff_record_field = (s: String, a: MutPtr<Malloc>, decls: [Decl], owner: string_vi
                 .ff_indent(a, 1)
                 .ff_append(a, fl.name)
                 .ff_tparams(a, own)
-                .ff_append(a, " = (")
-                .ff_params(a, f.params)
-                .ff_append(a, ") ")
-                .ff_ty(a, f.ret)
+                .ff_sig(a, f.params, f.ret, 1)
             sig.ff_append(a, " ").ff_block(a, f.body, 1, true).ff_append(a, ",\n")
         },
         false => s
@@ -274,7 +301,13 @@ ff_struct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], sd: Stru
     })
     body.ff_inherent_methods(a, decls, sd.name, ff_no_params(), 1).ff_append(a, "}")
 }
-ff_genstruct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: GenStructDecl) String {
+ff_genstruct = (
+    s: String,
+    a: MutPtr<Malloc>,
+    exp: [Param],
+    decls: [Decl],
+    g: GenStructDecl,
+) String {
     open := s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": {\n")
     body := open
     g.fields.loop((h, i, fl) {
@@ -418,7 +451,7 @@ ff_decl* = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) 
         .DRaw(c)           => s.ff_append(a, c),
     })
 }
-ff_import = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
+ff_import_inline = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
     open := s.ff_append(a, "{ ")
     body := open
     im.names.loop((h, i, p) {
@@ -426,4 +459,38 @@ ff_import = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
         body = body.ff_append(a, p.name)
     })
     body.ff_append(a, " } = ").ff_append(a, im.module)
+}
+// An import list that would overflow 100 columns greedy-fills names per line, breaking BEFORE the
+// name that would push the line (incl. its trailing comma) past 100; continuation lines indent 2
+// spaces, aligning under the first name after `{ `, and the last line closes ` } = module.path`.
+// The parser (and the textual import scanner in std.internal.resolve_scan, which seeks the `} =`
+// marker across newlines) both accept the wrapped form — verified end-to-end before shipping.
+ff_import_wrapped = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
+    out := s.ff_append(a, "{ ")
+    col := 2
+    im.names.loop((h, i, p) {
+        w := to_i32(view(p.name).len)
+        out = (i == 0).match ({
+            true  => out.ff_append(a, p.name),
+            false => (col + 2 + w > 99).match ({
+                true  => {
+                    col = 2
+                    out.ff_append(a, ",\n  ").ff_append(a, p.name)
+                },
+                false => {
+                    col = col + 2
+                    out.ff_append(a, ", ").ff_append(a, p.name)
+                },
+            }),
+        })
+        col = col + w
+    })
+    out.ff_append(a, " } = ").ff_append(a, im.module)
+}
+ff_import = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
+    trial := a.ff_string(256).ff_import_inline(a, im)
+    trial.ff_fits_width(s.ff_current_col(), 100).match ({
+        true  => s.ff_import_inline(a, im),
+        false => s.ff_import_wrapped(a, im),
+    })
 }

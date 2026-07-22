@@ -2,7 +2,12 @@
 // Rebuilds each expr/stmt/decl with resolved enum names, constructor types, UFCS dispatch,
 // generic instances, variadic collection, and or_return lowering. One-way dependency on
 // compiler.check (Env/infer/inline helpers); the check↔check_* cycles resolve via `*` exports.
-{ ArmData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, GenStructDecl, GenericData, GlobalData, LetData, LoopData, MakeStructData, MatchData, MemberData, Param, SliceData, Stmt, Ty, arm_at, arrow_at, bin, bin_at, block, call, call_at, cbuf, cond_oa, dfunc, dglobal, dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish, gstr_string, is_expr_null, member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret, swhile, ti32, tvoid, vref } = compiler.genc
+{ ArmData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, GenStructDecl, GenericData,
+  GlobalData, LetData, LoopData, MakeStructData, MatchData, MemberData, Param, SliceData, Stmt, Ty,
+  arm_at, arrow_at, bin, bin_at, block, call, call_at, cbuf, cond_oa, dfunc, dglobal, dglobal_tl,
+  eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish, gstr_string, is_expr_null,
+  member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys, sassign_at, sexpr, sidxset_at,
+  sif, slet, slett, slett_at, slit, sret, swhile, ti32, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
 { TyQuery, FuncQuery, map_slice, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
@@ -17,9 +22,19 @@
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { lower_stmt_expr, one_stmt, subj_payload, subj_tag, tag_const } = compiler.check_lower
 { is_f64_ty, ty_eq } = compiler.check_fits
-{ DeclIndex, Env, arm_env, bind_fnret, build_decl_index, cebuf, cenode, elem_of, empty_params, enum_inst_mk, enum_inst_tag, enum_name, extend_env, fnret_of, gen_variant_payload, gsubst, has_tparam, is_str_t, is_void_ty, no_stmts, params_env, pointee_of, recall, ty_is_ptr, vcons } = compiler.check
+{ DeclIndex, Env, arm_env, bind_fnret, build_decl_index, cebuf, cenode, elem_of, empty_params,
+  enum_inst_mk, enum_inst_tag, enum_name, extend_env, fnret_of, gen_variant_payload, gsubst,
+  has_tparam, is_str_t, is_void_ty, no_stmts, params_env, pointee_of, recall, ty_is_ptr, vcons } = compiler.check
 // Stamp enum constructors with their concrete generic instance when needed.
-resolve_mkenum = (a: MutPtr<Malloc>, env: Env, ety: string_view, emty: string_view, etargs: [Ty], variant: string_view, payload: Ptr<Expr>) Ptr<Expr> {
+resolve_mkenum = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    ety: string_view,
+    emty: string_view,
+    etargs: [Ty],
+    variant: string_view,
+    payload: Ptr<Expr>,
+) Ptr<Expr> {
     p := a.resolve_expr(env.clr_exp(), payload)
     (etargs.len > 0).match ({
         true  => {
@@ -42,7 +57,14 @@ resolve_mkenum_fresh = (a: MutPtr<Malloc>, env: Env, variant: string_view, p: Pt
 // which can disagree with the enum instance (Tree<i64>, Two<i32,i64>). Re-stamp the payload
 // MakeStruct with the monomorphized payload type from the enum's tparam→arg map — same rebuild as
 // compiler.mono.mono_payload, but on the constructor side so collect_ty discovers one instance.
-restamp_enum_payload = (a: MutPtr<Malloc>, env: Env, ename: string_view, etargs: [Ty], variant: string_view, p: Ptr<Expr>) Ptr<Expr> {
+restamp_enum_payload = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    ename: string_view,
+    etargs: [Ty],
+    variant: string_view,
+    p: Ptr<Expr>,
+) Ptr<Expr> {
     load(p).match ({
         .MakeStruct(sd) => env.enum_payload_mono_ty(ename, etargs, variant).match ({
             .Generic(cg) => (cg.name == sd.ty).match ({
@@ -54,7 +76,14 @@ restamp_enum_payload = (a: MutPtr<Malloc>, env: Env, ename: string_view, etargs:
         _               => p,
     })
 }
-resolve_mktag = (a: MutPtr<Malloc>, env: Env, ety: string_view, emty: string_view, etargs: [Ty], variant: string_view) Ptr<Expr> {
+resolve_mktag = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    ety: string_view,
+    emty: string_view,
+    etargs: [Ty],
+    variant: string_view,
+) Ptr<Expr> {
     (etargs.len > 0).match ({
         true  => a.emit_tag_or_default(env, ety, emty, etargs, variant),
         false => (ety == "").match ({
@@ -69,7 +98,14 @@ resolve_mktag_fresh = (a: MutPtr<Malloc>, env: Env, variant: string_view) Ptr<Ex
 }
 // A zero-arg `.Name` / `Type.Name`: if the variant declares a default (`Name = expr`), build the
 // payload constructor with the baked-in constant; otherwise the bare tag.
-emit_tag_or_default = (a: MutPtr<Malloc>, env: Env, base: string_view, mty: string_view, targs: [Ty], variant: string_view) Ptr<Expr> {
+emit_tag_or_default = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    base: string_view,
+    mty: string_view,
+    targs: [Ty],
+    variant: string_view,
+) Ptr<Expr> {
     def := env.didx.idx_variant_default(env.decls, base, variant)
     def.is_expr_null().match ({
         true  => a.cenode(mktagg(base, mty, targs, variant)),
@@ -117,7 +153,13 @@ struct_targ_one = (env: Env, fields: [Field], inits: [FieldInit], tp: string_vie
 pick_targ = (inf: Ty, fallback: Ty) Ty {
     inf.is_void_ty().match ({ true => fallback, false => inf })
 }
-infer_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, written: [Ty], inits: [FieldInit]) [Ty] {
+infer_struct_targs = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    gsd: GenStructDecl,
+    written: [Ty],
+    inits: [FieldInit],
+) [Ty] {
     buf := cbuf<Ty>(a, written.len)
     written.loop((h, i, t) {
         buf[i] = (i < gsd.tparams.len && gsd.tparams.is_placeholder_targ(t)).match ({
@@ -151,7 +193,12 @@ bare_struct_targs = (a: MutPtr<Malloc>, env: Env, gsd: GenStructDecl, inits: [Fi
 // A bare `Store(state: …)` literal of a GENERIC struct carries no type args; infer them so the instance
 // is mangled (mty) and discovered/emitted by compiler.mono, exactly like the explicit `Store<…>(…)` form.
 // A bare literal of a plain (non-generic) struct is unchanged.
-resolve_genlit_bare = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit]) Ptr<Expr> {
+resolve_genlit_bare = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    sd: MakeStructData,
+    inits: [FieldInit],
+) Ptr<Expr> {
     gsd := env.env_gstruct(sd.ty)
     is_empty(gsd.name).match ({
         true  => a.cenode(mkstructg_at(sd.ty, sd.mty, sd.targs, inits, sd.pos)),
@@ -345,7 +392,15 @@ seq_neg = (a: MutPtr<Malloc>, op: string_view, e: Ptr<Expr>, pos: i32) Ptr<Expr>
         false => e,
     })
 }
-resolve_struct_eq = (a: MutPtr<Malloc>, env: Env, op: string_view, lty: Ty, lhs: Ptr<Expr>, rhs: Ptr<Expr>, pos: i32) Ptr<Expr> {
+resolve_struct_eq = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    op: string_view,
+    lty: Ty,
+    lhs: Ptr<Expr>,
+    rhs: Ptr<Expr>,
+    pos: i32,
+) Ptr<Expr> {
     tyname := lty.dispatch_recv_name()
     dn := (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({
         true  => "eq",
@@ -376,7 +431,15 @@ resolve_struct_eq = (a: MutPtr<Malloc>, env: Env, op: string_view, lty: Ty, lhs:
 // without this marker it would route `0.0/0.0` through the integer div-by-zero guard and spuriously
 // panic. `/.` says "IEEE division, no zero guard". Fires when either operand is f64 (a numeric literal
 // on the other side adapts to f64). All other arithmetic falls through to the `-f64` negation fixup.
-resolve_arith = (a: MutPtr<Malloc>, env: Env, op: string_view, lty: Ty, lhs: Ptr<Expr>, rhs: Ptr<Expr>, p: i32) Ptr<Expr> {
+resolve_arith = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    op: string_view,
+    lty: Ty,
+    lhs: Ptr<Expr>,
+    rhs: Ptr<Expr>,
+    p: i32,
+) Ptr<Expr> {
     (op == "/" && (lty.is_f64_ty() || env.infer_expr(rhs).is_f64_ty())).match ({
         true  => a.cenode(bin_at("/.", lhs, rhs, p)),
         false => a.resolve_f64_neg(env, op, lhs, rhs, p),
@@ -389,7 +452,14 @@ is_int_zero = (e: Ptr<Expr>) bool {
         _       => false,
     })
 }
-resolve_f64_neg = (a: MutPtr<Malloc>, env: Env, op: string_view, lhs: Ptr<Expr>, rhs: Ptr<Expr>, p: i32) Ptr<Expr> {
+resolve_f64_neg = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    op: string_view,
+    lhs: Ptr<Expr>,
+    rhs: Ptr<Expr>,
+    p: i32,
+) Ptr<Expr> {
     (op == "-" && lhs.is_int_zero() && env.infer_expr(rhs).is_f64_ty()).match ({
         true  => a.cenode(bin_at(op, a.cenode(flit("0.0")), rhs, p)),
         false => a.cenode(bin_at(op, lhs, rhs, p)),
@@ -871,10 +941,26 @@ resolve_body_ex = (a: MutPtr<Malloc>, env: Env, body: [Stmt], vtail: bool) [Stmt
     a.fill_stmts(env, body, buf, 0, 0, vtail)
     buf
 }
-fill_stmts = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
+fill_stmts = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    body: [Stmt],
+    buf: [Stmt],
+    i: i32,
+    o: i32,
+    vtail: bool,
+) void {
     (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i, o, vtail), false => noop2() })
 }
-fill_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
+fill_stmt = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    body: [Stmt],
+    buf: [Stmt],
+    i: i32,
+    o: i32,
+    vtail: bool,
+) void {
     st := body[i]
     k := st.orx_stmt_count()
     (k > 0).match ({
@@ -893,7 +979,16 @@ fill_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: 
 // (orx_rw_stmt), run every hoisted let through the SAME 3-stmt let-lowering, then emit the rewritten
 // statement itself (which may still be a direct or_return let — its own lowering unchanged). The
 // output slot count is exactly stmt_out_span's 3*k + (3|1), keeping body_out_len's buffer sizing.
-fill_orx = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool, k: i32) void {
+fill_orx = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    body: [Stmt],
+    buf: [Stmt],
+    i: i32,
+    o: i32,
+    vtail: bool,
+    k: i32,
+) void {
     hbuf := cbuf<Stmt>(a, k)
     st2 := a.orx_rw_stmt(hbuf, o, body[i])
     env2 := env
@@ -924,7 +1019,15 @@ fill_orx = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i
     })
     a.fill_stmts(env2, body, buf, i + 1, oo, vtail)
 }
-fill_or_return = (a: MutPtr<Malloc>, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
+fill_or_return = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    body: [Stmt],
+    buf: [Stmt],
+    i: i32,
+    o: i32,
+    vtail: bool,
+) void {
     stmts := a.lower_or_return(env, body[i])
     buf[o] = stmts[0]
     buf[o + 1] = stmts[1]

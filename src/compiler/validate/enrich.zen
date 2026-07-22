@@ -1,18 +1,26 @@
 // compiler.validate.enrich — decl enrichment (denrich_*) and duplicate-fn detection.
-{ ArmData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, MakeStructData, MatchData, Param, Stmt, Ty, call, gstr_append, gstr_finish, gstr_push, gstr_string } = compiler.genc
-{ DeclIndex, Env, arm_env, bind_tparams, build_decl_index, extend_env, is_intrinsic, loop_env, params_env, recv_name, the_func } = compiler.check
+{ ArmData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, MakeStructData, MatchData, Param,
+  Stmt, Ty, call, gstr_append, gstr_finish, gstr_push, gstr_string } = compiler.genc
+{ DeclIndex, Env, arm_env, bind_tparams, build_decl_index, extend_env, is_intrinsic, loop_env,
+  params_env, recv_name, the_func } = compiler.check
 { fits } = compiler.check_fits
 { Malloc } = std.mem.alloc
 { of } = std.collections.map
 { at } = std.text.bytes
 { is_empty } = std.text.str
 { String } = std.text.string
-{ env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn, env_params, env_struct_fields, expr_pos, fn_name_of, fn_pos_of, fnt_arity_of, gen_ptr_arg_fits, intrinsic_arity, is_known_fn, is_struct, lit_slot_verdict, pos_or, tparam_bound, tparam_shape_err, trait_declaring, ty_mentions_tparam, unknown_ty } = compiler.validate.util
+{ env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn, env_params,
+  env_struct_fields, expr_pos, fn_name_of, fn_pos_of, fnt_arity_of, gen_ptr_arg_fits,
+  intrinsic_arity, is_known_fn, is_struct, lit_slot_verdict, pos_or, tparam_bound, tparam_shape_err,
+  trait_declaring, ty_mentions_tparam, unknown_ty } = compiler.validate.util
 { gstr_int } = compiler.astops
-{ KARGTYPE, KARITY, KASSIGNFIT, KDUPFN, KEXHAUST, KMETHODNOTFOUND, KNOTCALLABLE, KOPERAND, KRESERVEDNAME, KRETURNFIT, KSTRUCTFIELD, KTARGARITY, KTRAITBOUND, KUNDEFINED, desc_or, diagnostic_kind_name } = compiler.validate.diag
+{ KARGTYPE, KARITY, KASSIGNFIT, KDUPFN, KEXHAUST, KMETHODNOTFOUND, KNOTCALLABLE, KOPERAND,
+  KRESERVEDNAME, KRETURNFIT, KSTRUCTFIELD, KTARGARITY, KTRAITBOUND, KUNDEFINED, desc_or,
+  diagnostic_kind_name } = compiler.validate.diag
 { zty } = compiler.validate.ownership
 { arg_err_at, field_has, struct_fields } = compiler.validate.args
-{ arms_first_pos, enum_variants, first_missing_variant, has_method, impl_methods_of, op_display, trait_has_default } = compiler.validate.kinds
+{ arms_first_pos, enum_variants, first_missing_variant, has_method, impl_methods_of, op_display,
+  trait_has_default } = compiler.validate.kinds
 { check_module, kv_at, kv_dup_name_kind, kv_kor } = compiler.validate.core
 fn_dup_before* = (decls: [Decl], name: string_view, upto: i64) bool {
     f := false
@@ -176,7 +184,12 @@ denrich_notcallable_msg = (env: Env, name: string_view) string_view {
 }
 // the comma-list of methods trait `tr` requires that (tn, tr) does not provide: every FnT field of
 // the trait struct with neither an impl method nor a trait default body covering it.
-denrich_missing_list = (a: MutPtr<Malloc>, decls: [Decl], tn: string_view, tr: string_view) string_view {
+denrich_missing_list = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    tn: string_view,
+    tr: string_view,
+) string_view {
     provided := decls.impl_methods_of(tn, tr)
     s := a.gstr_string(64)
     n := 0
@@ -197,7 +210,12 @@ denrich_missing_list = (a: MutPtr<Malloc>, decls: [Decl], tn: string_view, tr: s
     })
     s.gstr_finish(a)
 }
-denrich_missing_tail = (a: MutPtr<Malloc>, decls: [Decl], tn: string_view, tr: string_view) string_view {
+denrich_missing_tail = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    tn: string_view,
+    tr: string_view,
+) string_view {
     list := a.denrich_missing_list(decls, tn, tr)
     is_empty(list).match ({
         true  => "",
@@ -538,7 +556,14 @@ denrich_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit], off: i32, code
     })
     res
 }
-denrich_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData], off: i32, code: i32) string_view {
+denrich_arms = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    subjty: Ty,
+    arms: [ArmData],
+    off: i32,
+    code: i32,
+) string_view {
     res := ""
     arms.loop((h, i, ar) {
         res = desc_or(res, a.denrich_expr(a.arm_env(env, subjty, ar), ar.body, off, code))
@@ -586,7 +611,14 @@ denrich_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], off: i32, code: i32) 
     })
     res
 }
-denrich_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, off: i32, code: i32) string_view {
+denrich_func = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    f: Func,
+    off: i32,
+    code: i32,
+) string_view {
     env := Env(
         vars: a.bind_tparams(a.params_env(f.params), f.tparams),
         decls: decls,
@@ -659,7 +691,14 @@ denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) string
 // reserved-name) carry their own unique codes AND their own hand-built kind strings, so matching on
 // the kind name confines enrichment to ladder-rendered diagnostics and never overwrites a custom
 // channel's message.
-denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code: i32, kind: string_view) string_view {
+denrich_check* = (
+    a: MutPtr<Malloc>,
+    raw: [Decl],
+    decls: [Decl],
+    off: i32,
+    code: i32,
+    kind: string_view,
+) string_view {
     (kind == code.diagnostic_kind_name()).match ({
         true  => (code == KTARGARITY()).match ({
             true  => desc_or(a.denrich_module(raw, off, code), a.denrich_module(decls, off, code)),
