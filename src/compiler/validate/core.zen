@@ -2,8 +2,8 @@
 { cbuf, ArmData, AssignData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, ImplData,
   IndexData, IndexSetData, LetData, MakeStructData, MatchData, Param, Stmt, StructDecl, Ty, arm,
   call, gstr_append, gstr_finish, gstr_string, tvoid } = compiler.genc
-{ DeclIndex, Env, arm_env, bind_tparams, build_decl_index, extend_env, is_intrinsic, is_void_ty,
-  loop_env, params_env } = compiler.check
+{ DeclIndex, Env, UfcsVis, arm_env, bind_tparams, build_decl_index, build_decl_index_vis,
+  extend_env, is_intrinsic, is_void_ty, loop_env, params_env, ufcs_vis_off } = compiler.check
 { resolve_module } = compiler.check_resolve
 { scan } = compiler.lex
 { map_slice } = compiler.astops
@@ -29,7 +29,7 @@
 { AliasList, DeadList, alias_nil, alias_step, count_loop_freed, dead_cons, dead_has, dead_nil,
   escape_step, expr_escapes, is_default_owner_method, is_owner_base, leak_alias_value, mu_body_kind,
   mu_build_index, nm_read_or_leak, own_dead_body, own_moved_var, own_step, owner_base,
-  recv_typed_miss, scope_params } = compiler.validate.ownership
+  recv_typed_miss, scope_params, ufcs_vis_miss } = compiler.validate.ownership
 { ae_check_func, arg_err_at, makestruct_err, member_err, sl_elem_fit, struct_field_move_src,
   sv_check_func, sx_func_kind, sx_hint, sx_message, sx_subject } = compiler.validate.args
 { arms_first_pos, as_sig, dup_arm_errs, expr_drops_return, ffi_func_msg, has_wildcard, ka_func_kind,
@@ -461,7 +461,13 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
                         false => env.env_known_fn(c.fn).match ({
                             true  => env.recv_typed_miss(c).match ({
                                 true  => KMETHODNOTFOUND(),
-                                false => env.kv_call_errs_kind(c),
+                                false => env.ufcs_vis_miss(c).match ({
+                                    true  => env.undef_is_method(c).match ({
+                                        true  => KMETHODNOTFOUND(),
+                                        false => KUNDEFINED(),
+                                    }),
+                                    false => env.kv_call_errs_kind(c),
+                                }),
                             }),
                             false => c.fn.is_intrinsic().match ({
                                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({
@@ -495,17 +501,23 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
             }),
         }),
     })
-}    // a BOUND-but-non-fn target is not-callable, not undefined; a method some trait DECLARES but NO impl provides is a trait-bound gap on the receiver, not an undefined name; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
-// A reflection receiver that can NEVER be a struct — a builtin scalar/string/slice/ptr/fn type, or
-// a Named ENUM — is rejected with a positioned error instead of leaking the unexpanded intrinsic
-// call to genc (an "internal: generated C failed to compile" crash). A plain Named/Generic/void
-// receiver stays SILENT: in a template body it is the abstract tparam, and the call-site splice
-// decides. field_eq/zip_fields additionally require both subjects to be the SAME named struct
-// (the inline pass defers a concrete mismatch here instead of folding two different layouts).
-// a Ty's reflect identity: struct name for Named, mangled instance name for Generic, "" = unknown.
+}
+// #574: the flat fn exists, but the module the call lives in neither
+// defines nor imports the name — a method-shaped call bound by
+// flat-namespace luck alone. Classify like the undefined tail below:
+// a declared struct/enum receiver reads as a missing METHOD, any
+// other known receiver as an undefined NAME (whose driver hint then
+// names the exporting module and the import to write).
 kv_refl_tyname = (t: Ty) string_view {
     t.match ({
-        .Named(n)   => n,
+        .Named(n)   => n,    // a BOUND-but-non-fn target is not-callable, not undefined; a method some trait DECLARES but NO impl provides is a trait-bound gap on the receiver, not an undefined name; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
+        // A reflection receiver that can NEVER be a struct — a builtin scalar/string/slice/ptr/fn type, or
+        // a Named ENUM — is rejected with a positioned error instead of leaking the unexpanded intrinsic
+        // call to genc (an "internal: generated C failed to compile" crash). A plain Named/Generic/void
+        // receiver stays SILENT: in a template body it is the abstract tparam, and the call-site splice
+        // decides. field_eq/zip_fields additionally require both subjects to be the SAME named struct
+        // (the inline pass defers a concrete mismatch here instead of folding two different layouts).
+        // a Ty's reflect identity: struct name for Named, mangled instance name for Generic, "" = unknown.
         .Generic(g) => g.mangled,
         _           => "",
     })
@@ -1310,7 +1322,7 @@ kv_dup_name_kind* = (decls: [Decl]) i32 {
 // preserves first-error behavior without maintaining a second module/function traversal.
 check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     buf: [i32] := slice(a.acquire(sizeof(i32)), 1)
-    cnt := a.check_module_kind_all(decls, buf, 0)
+    cnt := a.check_module_kind_all(decls, a.ufcs_vis_off(), buf, 0)
     (cnt == 0).match ({ true => 0, false => buf[0] })
 }
 // One function's errors, per top-level statement. The trailing-value check is anchored on the fn name.
@@ -1339,8 +1351,9 @@ kv_check_func_kind_all = (
 }
 // every main-channel error in the module, in traversal order: dup-fn names, then each decl (per
 // statement for functions, one each for impls / parse sentinels). `cnt` seeds the running count.
-check_module_kind_all = (a: MutPtr<Malloc>, decls: [Decl], buf: [i32], cnt: i32) i32 {
-    idx := a.build_decl_index(decls)
+// `vis` = the driver's per-module UFCS visibility (#574); ufcs_vis_off() disables that check.
+check_module_kind_all = (a: MutPtr<Malloc>, decls: [Decl], vis: UfcsVis, buf: [i32], cnt: i32) i32 {
+    idx := a.build_decl_index_vis(decls, vis)
     c := buf.kdiag_add(cnt, decls.kv_dup_name_kind())
     decls.loop((h, i, d) {
         c = d.match ({
@@ -1355,8 +1368,17 @@ check_module_kind_all = (a: MutPtr<Malloc>, decls: [Decl], buf: [i32], cnt: i32)
 // the batch as source-positioned CheckDiagnostics (count 1 each — the "(+K more)" trailer is the
 // driver's, printed once after the cap). An empty slice means the main channel is clean.
 check_module_batch* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) [CheckDiagnostic] {
+    a.check_module_batch_vis(decls, src, a.ufcs_vis_off())
+}
+// the batch with a LIVE per-module UFCS visibility (#574) — the driver's checked paths use this.
+check_module_batch_vis* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    src: string_view,
+    vis: UfcsVis,
+) [CheckDiagnostic] {
     buf := a.kdiag_buf()
-    cnt := a.check_module_kind_all(decls, buf, 0)
+    cnt := a.check_module_kind_all(decls, vis, buf, 0)
     out := slice(a.acquire(to_i64(cnt) * sizeof(CheckDiagnostic)), to_i64(cnt))
     buf.loop((h, i, p) {
         (i < to_i64(cnt)).then({

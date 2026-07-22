@@ -20,7 +20,7 @@
 { panic, expect } = std.core.result
 { view, is_empty, ends_with } = std.text.str
 { String } = std.text.string
-{ at } = std.text.bytes
+{ at, is_alnum } = std.text.bytes
 { Map, of } = std.collections.map
 { lift_lambdas } = compiler.passes.lift
 { OrxRw, orx_count, orx_rw, orx_rw_stmt, orx_stmt_count } = compiler.passes.orreturn
@@ -40,13 +40,222 @@
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { lower_match_arms, lower_stmt_expr, one_stmt, subj_payload, subj_tag, tag_const } = compiler.check_lower
 { fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank } = compiler.check_fits
+{ FlatRegion, ModuleTable, fregion_find, is_import_line, lstrip, next_line, res_ident_end } = std.internal.resolve
+{ arg_exp_v } = compiler.check_resolve
 // ── DECLARATION INDEX ───────────────────────────────────────────────────────
 // name → decl array index, an O(1) hash map (std.collections.map). Built once per
 // resolve/check pass from the (immutable, within a pass) decls slice and threaded through Env,
 // replacing the O(n) linear `the_func`/sibling scans that dominated compile time. `put` overwrites,
 // so each name maps to its LAST occurrence — identical to the old last-match scans (top-level names
 // are unique post-dedup anyway). -1 means absent.
+// ── per-module UFCS visibility (#574) ────────────────────────────────────────────────────────────
+// The flat namespace makes every closure module's top-level fns name-resolvable from every OTHER
+// module, so `yn.len()` in a module that never imports `len` still binds whichever flat `len`
+// survived dedup — silently computing through an unrelated function (or dying at the C linker when
+// no definition made it into the emitted closure). UfcsVis carries what the call validator needs to
+// close that hole: the flat source (a method-shaped call site is one whose callee name is preceded
+// by `.`), the per-module flat regions, and the module table whose per-module ModuleSig answers
+// "does the module owning this position define or import this name?". The driver builds it from its
+// ResolvedProgram (ufcs_vis_of); every other caller gets the disabled default (ufcs_vis_off), so
+// single-module and harness paths keep their existing behavior.
+UfcsVis*: {
+    on: bool,
+    flat: string_view,
+    regions: [FlatRegion],
+    table: ModuleTable,
+    imports: Map<i64>,
+    // is the byte before `pos` a `.` — i.e. was this call written `recv.name(...)`, not `name(recv)`?
+    vis_method_shaped = (vis: UfcsVis, pos: i32) bool {
+        v: [u8] := vis.flat.view()
+        pos > 0 && to_i64(pos) < v.len && v[to_i64(pos) - 1] == '.'
+    }
+    // an ALIAS-APPENDED module body is text-renamed (`abs` -> `m__abs`) including its own internal
+    // references, so a self-call inside such a region carries the prefixed name while the module's
+    // ORIGINAL source (what the visibility walk scanned) declares the bare tail — accept the tail.
+    vis_alias_tail_has = (vis: UfcsVis, a: MutPtr<Malloc>, mi: i64, name: string_view) bool {
+        sep := name.alias_sep()
+        (sep > 0).match ({
+            true  => vis.imports.get(a.vis_key(mi, name.alias_tail(sep)), 0) == mi + 1,
+            false => false,
+        })
+    }
+    // does the flat source at `pos` literally spell `name` (followed by a non-identifier byte)?
+    // False for every DISPATCH-REWRITTEN call — impl/mono/alias rewrites (`gstr_append_Malloc`,
+    // `impl_Verdict_i32_or`, …) keep the surface method's pos but carry a mangled fn, and a rewrite
+    // means dispatch RESOLVED the call, so the visibility check must not judge it.
+    vis_name_at = (vis: UfcsVis, pos: i32, name: string_view) bool {
+        v: [u8] := vis.flat.view()
+        nb: [u8] := name.view()
+        (to_i64(pos) + nb.len > v.len).match ({
+            true  => false,
+            false => {
+                same := true
+                nb.loop((h, i, b) {
+                    same = same && v[to_i64(pos) + i] == b
+                })
+                e := to_i64(pos) + nb.len
+                tail: u8 := (e < v.len).match ({ true => v[e], false => 0 })
+                same && (tail.is_alnum() || tail == '_') == false
+            },
+        })
+    }
+    // does the module owning flat offset `pos` define or import `name`? Both answered by the
+    // dedicated per-module walk (vis_head_names): column-0 decl names + every import-head name.
+    // (The resolver's shared symbol scan is NOT consulted: on raw disk sources it mis-cascades over
+    // imports below a header comment / mid-file ns-alias lines, and fixing that scan would change
+    // dedup/alias behavior for every resolver consumer.) A position outside every region (a
+    // synthesized node) stays lenient — this check only ever REJECTS a call the user wrote.
+    vis_name_visible = (vis: UfcsVis, a: MutPtr<Malloc>, pos: i32, name: string_view) bool {
+        ri := vis.regions.fregion_find(to_i64(pos))
+        (ri < 0).match ({
+            true  => true,
+            false => {
+                mi := vis.regions[ri].midx
+                (mi < 0 || mi >= vis.table.modules.len).match ({
+                    true  => true,
+                    false => vis.imports.get(a.vis_key(mi, name), 0) == mi + 1
+                        || vis.vis_alias_tail_has(a, mi, name),
+                })
+            },
+        })
+    }
+}
+ufcs_vis_off* = (a: MutPtr<Malloc>) UfcsVis {
+    seed: i64 := 0 - 1
+    UfcsVis(
+        on: false,
+        flat: "",
+        regions: slice(null_ptr(), 0),
+        table: ModuleTable(modules: slice(null_ptr(), 0)),
+        imports: of(a, "", seed).expect("check: ufcs-vis alloc"),
+    )
+}
+// one module's import-HEAD names, by a dedicated line walk over its ORIGINAL source: an import line
+// contributes every identifier between its `{` and `}` (multi-line lists included — the walk resumes
+// from the line holding the `}`), any other line is skipped whole. Deliberately separate from the
+// resolver's symbol scan so shared dedup/alias behavior is untouched.
+vis_close_pos = (src: string_view, p: i32) i32 {
+    out := p
+    bs: [u8] := src.view()
+    (to_i64(p) < bs.len).then({
+        span: [u8] := slice(src.offset(p), bs.len - to_i64(p))
+        span.loop((h, i, b) {
+            out = p + to_i32(i)
+            (b == '}' || b == 0).then({
+                h.break
+            })
+        })
+    })
+    out
+}
+vis_copy_name = (a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) string_view {
+    s := a.gstr_string(to_i64(e - p) + 1)
+    span: [u8] := slice(src.offset(p), to_i64(e - p))
+    span.loop((h, i, b) {
+        s = s.gstr_push(a, b)
+    })
+    s.gstr_finish(a)
+}
+// import-head entries are keyed `<midx>\t<name>` in ONE map (a slice of per-module maps would need
+// sizeof over a generic instance); the stored value is midx+1 so the absent-sentinel 0 can never
+// collide with a real module index.
+vis_key = (a: MutPtr<Malloc>, mi: i64, name: string_view) string_view {
+    s := a.gstr_string(name.view().len + 8).vis_push_int(a, mi).gstr_push(a, '\t')
+    nb: [u8] := name.view()
+    nb.loop((h, i, b) {
+        s = s.gstr_push(a, b)
+    })
+    s.gstr_finish(a)
+}
+vis_push_int = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n < 10).match ({
+        true  => s.gstr_push(a, to_u8(to_i64('0') + n)),
+        false => {
+            hs := s.vis_push_int(a, n / 10)
+            hs.gstr_push(a, to_u8(to_i64('0') + n % 10))
+        },
+    })
+}
+vis_head_fill = (a: MutPtr<Malloc>, src: string_view, mi: i64, p: i32, m0: Map<i64>) Map<i64> {
+    m := m0
+    pos := p
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos == false).then({
+            (b == '}' || b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => (b.is_alnum() || b == '_').match ({
+                    true  => {
+                        ie := src.res_ident_end(pos)
+                        m = m
+                            .put(a, a.vis_key(mi, a.vis_copy_name(src, pos, ie)), mi + 1)
+                            .expect("check: ufcs-vis alloc")
+                        pos = ie
+                    },
+                    false => {
+                        pos = pos + 1
+                    },
+                }),
+            })
+        })
+    })
+    m
+}
+vis_head_names = (a: MutPtr<Malloc>, src: string_view, mi: i64, m0: Map<i64>) Map<i64> {
+    m := m0
+    pos: i32 := 0
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos == false).then({
+            src.is_import_line(pos).match ({
+                true  => {
+                    hp := src.lstrip(pos) + 1
+                    m = a.vis_head_fill(src, mi, hp, m)
+                    pos = src.next_line(src.vis_close_pos(hp))
+                },
+                false => {
+                    // a COLUMN-0 identifier is a top-level decl name (fmt guarantees the indent
+                    // discipline); anything else on the line is body/continuation — skip the line.
+                    b.is_alnum_head().then({
+                        ie := src.res_ident_end(pos)
+                        m = m
+                            .put(a, a.vis_key(mi, a.vis_copy_name(src, pos, ie)), mi + 1)
+                            .expect("check: ufcs-vis alloc")
+                    })
+                    pos = src.next_line(pos)
+                },
+            })
+        })
+    })
+    m
+}
+// an identifier HEAD byte (letter or underscore) — digits can't open an identifier.
+is_alnum_head = (b: u8) bool { b.is_alnum() && (b >= '0' && b <= '9') == false }
+ufcs_vis_of* = (
+    a: MutPtr<Malloc>,
+    flat: string_view,
+    regions: [FlatRegion],
+    table: ModuleTable,
+) UfcsVis {
+    seed: i64 := 0 - 1
+    m := of(a, "", seed).expect("check: ufcs-vis alloc")
+    table.modules.loop((h, i, e) {
+        m = a.vis_head_names(e.source, i, m)
+    })
+    UfcsVis(
+        on: true,
+        flat: flat,
+        regions: regions,
+        table: table,
+        imports: m,
+    )
+}
 DeclIndex*: {
+    vis: UfcsVis,
     func_idx: Map<i64>,
     struct_idx: Map<i64>,
     enum_idx: Map<i64>,
@@ -347,6 +556,7 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
         })
     })
     DeclIndex(
+        vis: a.ufcs_vis_off(),
         func_idx: fm,
         struct_idx: sm,
         enum_idx: em,
@@ -360,6 +570,13 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
         genenum_idx: gem,
         dispatch_idx: dm,
     )
+}
+// build_decl_index with a LIVE per-module visibility (driver check path); the plain builder keeps
+// the disabled default so its 20+ existing call sites are untouched.
+build_decl_index_vis* = (a: MutPtr<Malloc>, decls: [Decl], vis: UfcsVis) DeclIndex {
+    idx := a.build_decl_index(decls)
+    idx.vis = vis
+    idx
 }
 ibuf = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire((n + 1) * sizeof(i64)), n) }
 // O(1) indexed generic-decl lookups (same last-match sentinels as the linear gstruct_of/find_genenum).
