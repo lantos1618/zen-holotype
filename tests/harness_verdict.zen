@@ -1022,6 +1022,34 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "arm-value",
     ), VerdictCase(
+        src: "main = () i32 {\n    n := 5\n    n.each_field((name, fv) { })\n    0\n}\n",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "P: { x: i64 }\nW: { a: i64 }\nmain = () i32 {\n    p := P(x: 1)\n    w := W(a: 2)\n    p.field_eq(w).then({\n        return 1\n    })\n    0\n}\n",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "P: { x: i64 }\nmain = () i32 {\n    p := P(x: 1)\n    p.each_field(42)\n    0\n}\n",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "P: { x: i64 }\nmain = () i32 {\n    p := P(x: 1)\n    p.each_field((only) { })\n    0\n}\n",
+        should_pass: false,
+        kind: "arg-type",
+    ), VerdictCase(
+        src: "P: { x: i64, y: i64 }\nmain = () i32 {\n    p := P(x: 1, y: 2)\n    p.zip_fields(p)\n    0\n}\n",
+        should_pass: false,
+        kind: "arity",
+    ), VerdictCase(
+        src: "P: { x: i64 }\nbad<T> = (v: T) i64 {\n    v.each_field((name, fv) { })\n    [1, 2, 3].loop((h, i, e) {\n        (e == 2).then({\n            return 9\n        })\n    })\n    0\n}\nmain = () i32 {\n    p := P(x: 1)\n    to_i32(bad(p))\n}\n",
+        should_pass: false,
+        kind: "reflect-return",
+    ), VerdictCase(
+        src: "P: { x: i64 }\nrec<T> = (v: T, n: i64) i64 {\n    v.each_field((name, fv) { })\n    (n > 0).match ({\n        true  => rec(v, n - 1),\n        false => 0,\n    })\n}\nmain = () i32 {\n    p := P(x: 1)\n    to_i32(rec(p, 5))\n}\n",
+        should_pass: false,
+        kind: "recursive-hof",
+    ), VerdictCase(
         src: "side = () void { }\nR*: Ok(str) | Err(i32)\nmain = () i32 {\n    r: R = .Err(3)\n    s := r.match ({ .Ok(ns) => ns, .Err(e) => side() })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
@@ -2214,6 +2242,8 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     )])
+    // ── struct-reflection intrinsics: every ill-formed shape is REJECTED with a positioned kind,
+    // never a genc leak, a compiler panic, or a silent no-op ──
     // v2 leak: allocated, READ via a pure getter (`o.get()`), then forgotten — never released,
     // moved, or returned. A pure read does NOT discharge the owner, so this LEAKS (v1 missed it,
     // exempting any owner that was named again — even by a read).

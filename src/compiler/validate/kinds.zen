@@ -5,7 +5,7 @@
 { resolve_module } = compiler.check_resolve
 { tag_const } = compiler.check_lower
 { fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank, write_thru_readonly } = compiler.check_fits
-{ rc_calls_body } = compiler.passes.refcount
+{ calls_reflect, rc_calls_body } = compiler.passes.refcount
 { has_fnt_param, slice_any } = compiler.astops
 { scan } = compiler.lex
 { Allocator, Malloc } = std.mem.alloc
@@ -14,7 +14,7 @@
 { ends_with, eq, is_empty, starts_with } = std.text.str
 { String } = std.text.string
 { env_imported, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn, env_struct_fields, env_trait_method, expr_pos, fit_err, is_ctx_typed_arg, is_prim_width, is_ptr_ty, is_struct, lit_slot_verdict, pos_or, tparam_bound, ty_mentions_tparam, unknown_ty, ut_unknown_ty, ut_unknown_tys } = compiler.validate.util
-{ KARGTYPE, KARITY, KARMVOID, KBADBIND, KCAPACITY, KDIAG_CAP, KDUPVARIANT, KFFITYPE, KMISGEN, KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KTARGARITY, KTRAITBOUND, KUNKNOWNTYPE, KUNREACHABLEARM, KVBREAK, desc_or } = compiler.validate.diag
+{ KARGTYPE, KARITY, KARMVOID, KBADBIND, KCAPACITY, KDIAG_CAP, KDUPVARIANT, KFFITYPE, KMISGEN, KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KTARGARITY, KTRAITBOUND, KUNKNOWNTYPE, KUNREACHABLEARM, KVBREAK, desc_or } = compiler.validate.diag
 { zty } = compiler.validate.ownership
 { arg_err_at } = compiler.validate.args
 { check_module, kv_at, kv_kor, kv_one } = compiler.validate.core
@@ -1103,9 +1103,94 @@ ka_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 
     a.ka_body_kind(env, f.tparams, f.body)
 }
 ka_param_named = (ps: [Param], nm: string_view) bool { ps.slice_any((p) { eq(p.name, nm) }) }
+// inline-only bodies: FnT-param generics (their lambda args must splice) and reflect-using generics
+// (their intrinsic needs the call site's concrete receiver type — see check_inline.no_inline_gen_f).
+ka_inline_only = (f: Func) bool { f.params.has_fnt_param() || f.tparams.len > 0 && f.body.calls_reflect() }
+// the sanctioned reflection WRAPPER (`field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }`) is not
+// recursion: its same-named inner call targets the INTRINSIC (name-intercepted in the inliner) and
+// never the wrapper itself.
+ka_reflect_name = (nm: string_view) bool { eq(nm, "field_eq") || eq(nm, "each_field") || eq(nm, "zip_fields") }
 ka_rec_hof_kind* = (f: Func) i32 {
-    (f.params.has_fnt_param() && f.body.len > 0 && f.params.ka_param_named(f.name) == false && f.body.rc_calls_body(f.name)).match ({
+    (f.ka_inline_only() && f.body.len > 0 && f.params.ka_param_named(f.name) == false && ka_reflect_name(f.name) == false && f.body.rc_calls_body(f.name)).match ({
         true  => KRECHOF().kv_at(f.pos),
+        false => 0,
+    })
+}
+// ── reflect-return: a `return` under a loop in an inline-only REFLECT generic ─────────────────────
+// Splicing such a body leaves a raw C `return` inside the caller's loop — the inliner's early-return
+// lift (needs_early_lift) only handles statement-level returns, so the callee's return would exit
+// the CALLER (silent wrong control flow). Reject it up front. FnT-param generics share the hazard
+// but predate this check and are left as-is (their common bodies pass lambdas onward, not returns).
+krr_any_ret_e = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Bin(b)        => b.lhs.krr_any_ret_e() || b.rhs.krr_any_ret_e(),
+        .Cond(d)       => d.c.krr_any_ret_e() || d.t.krr_any_ret_e() || d.e.krr_any_ret_e(),
+        .Call(c)       => c.args.krr_any_ret_es(),
+        .Member(m)     => m.obj.krr_any_ret_e(),
+        .Arrow(ar)     => ar.obj.krr_any_ret_e(),
+        .MakeEnum(mk)  => mk.payload.krr_any_ret_e(),
+        .MakeStruct(s) => s.inits.krr_any_ret_inits(),
+        .Match(m)      => m.subj.krr_any_ret_e() || m.arms.krr_any_ret_arms(),
+        .Index(ix)     => ix.seq.krr_any_ret_e() || ix.idx.krr_any_ret_e(),
+        .SliceLit(sd)  => sd.items.krr_any_ret_es(),
+        .Loop(l)       => l.seq.krr_any_ret_e() || l.body.krr_any_ret_body(),
+        .Block(bl)     => bl.stmts.krr_any_ret_body(),
+        .Lambda(la)    => la.body.krr_any_ret_body(),
+        _              => false,
+    })
+}
+krr_any_ret_es = (xs: [Expr]) bool { xs.slice_any((x) { x.addr().krr_any_ret_e() }) }
+krr_any_ret_inits = (inits: [FieldInit]) bool { inits.slice_any((fi) { fi.value.krr_any_ret_e() }) }
+krr_any_ret_arms = (arms: [ArmData]) bool { arms.slice_any((ar) { ar.body.krr_any_ret_e() }) }
+krr_any_ret_stmt = (st: Stmt) bool {
+    st.match ({
+        .Let(l)      => l.value.krr_any_ret_e(),
+        .Assign(x)   => x.target.krr_any_ret_e() || x.value.krr_any_ret_e(),
+        .Return(r)   => true,
+        .ExprStmt(e) => e.krr_any_ret_e(),
+        .If(f)       => f.c.krr_any_ret_e() || f.then.krr_any_ret_body() || f.els.krr_any_ret_body(),
+        .While(w)    => w.c.krr_any_ret_e() || w.body.krr_any_ret_body(),
+        .IndexSet(x) => x.seq.krr_any_ret_e() || x.idx.krr_any_ret_e() || x.value.krr_any_ret_e(),
+    })
+}
+krr_any_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_any_ret_stmt() }) }
+// does the body hold a Loop/While whose body (or a lambda spliced under it) contains a return?
+krr_loop_ret_e = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Loop(l)       => l.body.krr_any_ret_body() || l.seq.krr_loop_ret_e(),
+        .Bin(b)        => b.lhs.krr_loop_ret_e() || b.rhs.krr_loop_ret_e(),
+        .Cond(d)       => d.c.krr_loop_ret_e() || d.t.krr_loop_ret_e() || d.e.krr_loop_ret_e(),
+        .Call(c)       => c.args.krr_loop_ret_es(),
+        .Member(m)     => m.obj.krr_loop_ret_e(),
+        .Arrow(ar)     => ar.obj.krr_loop_ret_e(),
+        .MakeEnum(mk)  => mk.payload.krr_loop_ret_e(),
+        .MakeStruct(s) => s.inits.krr_loop_ret_inits(),
+        .Match(m)      => m.subj.krr_loop_ret_e() || m.arms.krr_loop_ret_arms(),
+        .Index(ix)     => ix.seq.krr_loop_ret_e() || ix.idx.krr_loop_ret_e(),
+        .SliceLit(sd)  => sd.items.krr_loop_ret_es(),
+        .Block(bl)     => bl.stmts.krr_loop_ret_body(),
+        .Lambda(la)    => la.body.krr_loop_ret_body(),
+        _              => false,
+    })
+}
+krr_loop_ret_es = (xs: [Expr]) bool { xs.slice_any((x) { x.addr().krr_loop_ret_e() }) }
+krr_loop_ret_inits = (inits: [FieldInit]) bool { inits.slice_any((fi) { fi.value.krr_loop_ret_e() }) }
+krr_loop_ret_arms = (arms: [ArmData]) bool { arms.slice_any((ar) { ar.body.krr_loop_ret_e() }) }
+krr_loop_ret_stmt = (st: Stmt) bool {
+    st.match ({
+        .Let(l)      => l.value.krr_loop_ret_e(),
+        .Assign(x)   => x.target.krr_loop_ret_e() || x.value.krr_loop_ret_e(),
+        .Return(r)   => r.krr_loop_ret_e(),
+        .ExprStmt(e) => e.krr_loop_ret_e(),
+        .If(f)       => f.c.krr_loop_ret_e() || f.then.krr_loop_ret_body() || f.els.krr_loop_ret_body(),
+        .While(w)    => w.body.krr_any_ret_body() || w.c.krr_loop_ret_e(),
+        .IndexSet(x) => x.seq.krr_loop_ret_e() || x.idx.krr_loop_ret_e() || x.value.krr_loop_ret_e(),
+    })
+}
+krr_loop_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_loop_ret_stmt() }) }
+ka_reflect_ret_kind* = (f: Func) i32 {
+    (f.tparams.len > 0 && f.body.calls_reflect() && f.body.krr_loop_ret_body()).match ({
+        true  => KREFLECTRETURN().kv_at(f.pos),
         false => 0,
     })
 }

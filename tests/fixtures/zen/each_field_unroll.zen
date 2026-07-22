@@ -1,0 +1,115 @@
+// Compile-time struct-field reflection, Phase 2: `each_field` / `zip_fields` intrinsics. A generic
+// wrapper delegates to `x.each_field(f)`, which the inliner (compiler.passes.subst) UNROLLS — once
+// the receiver's concrete type is known — into one inlined lambda call per field:
+//   { f("x", p.x); f("y", p.y); }
+// The lambda body is spliced per field (Zig `inline for`), so it reads/writes enclosing locals like
+// any inlined lambda. `zip_fields` is the paired form over two values of the same struct type. Also
+// covers Phase-2 field_eq RECURSION: a struct-typed field folds into its own per-field compare.
+// Exit 0 = every case matched expectation.
+{ eq } = std.text.str
+Point: {
+    x: i64,
+    y: i64,
+}
+Rect: {
+    a: Point,
+    b: Point,
+}
+Box<T>: {
+    v: T,
+    w: T,
+}
+mk_count = (c: MutPtr<i64>) Point {
+    store(c, load(c) + 1)
+    Point(
+        x: 10,
+        y: 20,
+    )
+}
+field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }
+each_field<T, F> = (x: T, f: F) void { x.each_field(f) }
+zip_fields<T, F> = (x: T, y: T, f: F) void { x.zip_fields(y, f) }
+sum_fields<T> = (v: T) i64 {
+    acc: i64 := 0
+    each_field(v, (name, fv) { acc = acc + fv })
+    acc
+}
+// count_named / diff_count use the DIRECT UFCS surface (no wrapper needed): `v.each_field(f)`
+// desugars to the intrinsic call and expands at this generic's call-site splice.
+count_named<T> = (v: T, want: string_view) i64 {
+    n: i64 := 0
+    v.each_field((name, fv) {
+        eq(name, want).then({
+            n = n + 1
+        })
+    })
+    n
+}
+diff_count<T> = (x: T, y: T) i64 {
+    d: i64 := 0
+    x.zip_fields(y, (name, va, vb) {
+        (va == vb == false).then({
+            d = d + 1
+        })
+    })
+    d
+}
+main = () i32 {
+    p := Point(
+        x: 3,
+        y: 4,
+    )
+    q := Point(
+        x: 3,
+        y: 9,
+    )
+    // each_field: values unroll — 3 + 4.
+    (sum_fields(p) == 7 == false).then({
+        return 1
+    })
+    // each_field: field NAMES arrive as string literals.
+    (count_named(p, "y") == 1 == false).then({
+        return 2
+    })
+    (count_named(p, "z") == 0 == false).then({
+        return 3
+    })
+    // zip_fields: paired iteration — x equal, y differs.
+    (diff_count(p, q) == 1 == false).then({
+        return 4
+    })
+    // field_eq recursion: Rect's struct-typed fields compare per-field, not skipped.
+    r1 := Rect(
+        a: p,
+        b: q,
+    )
+    r2 := Rect(
+        a: p,
+        b: q,
+    )
+    r3 := Rect(
+        a: p,
+        b: p,
+    )
+    (field_eq(r1, r2) == false).then({
+        return 5
+    })
+    field_eq(r1, r3).then({
+        return 6
+    })
+    // GENERIC-struct receiver: reflect_fields substitutes the instance's targs.
+    (sum_fields(Box<i64>(
+        v: 5,
+        w: 6,
+    )) == 11 == false).then({
+        return 7
+    })
+    // a side-effecting receiver expr is bound ONCE — one mk_count call, not one per field.
+    n: i64 := 0
+    acc: i64 := 0
+    mk_count(n.addr()).each_field((name, fv) { acc = acc + fv })
+    ((n == 1 && acc == 30) == false).then({
+        return 8
+    })
+    0
+}

@@ -176,6 +176,7 @@ KTARGARITY* = () i32 { 41 }    // an explicit `<…>` type-arg list whose COUNT 
 KFFITYPE* = () i32 { 42 }    // a FOREIGN (bodyless) declaration whose signature uses a type outside the FFI-safe set
 KLITEXHAUST* = () i32 { 45 }    // a literal-scalar `.match` (i32/…) with no `_` wildcard — the value domain is unbounded, so it is non-exhaustive. Kind label is "exhaustiveness" (same family as KEXHAUST); the parser plants a positioned `__nonexhaustive_lit` sentinel the call-classifier maps here
 KMATCHLABEL* = () i32 { 46 }    // a boolean `.match` arm labelled with a non-boolean literal (`true => 1, 0 => 2`) — a label-TYPE error, caret on the bad label (the parser's positioned `__badmatchlabel` sentinel)
+KREFLECTRETURN* = () i32 { 48 }    // a reflect-using generic with a `return` inside a loop body — inline-only, so the return would escape into the caller (mirror of KRECHOF for the loop-return hazard)
 KCAPACITY* = () i32 { 47 }    // a fixed-capacity compiler registry (exports / alias prefixes / module sigs) overflowed — the parser's sticky `__capacity` sentinel; the program is REJECTED rather than compiled with silently dropped registry data
 Diagnostic*: {
     code: i32,
@@ -422,8 +423,8 @@ diag_info* = (code: i32) DiagInfo {
                                                                                                                 false => (code == 28).match ({
                                                                                                                     true  => DiagInfo(
                                                                                                                         kind: "recursive-hof",
-                                                                                                                        message: "recursive function with a function-typed parameter — its body is inlined per call site, so the recursive call has no emitted function to land on",
-                                                                                                                        hint: "rewrite the recursion as an iteration (`.loop`), or move the function-typed parameter out of the recursive function",
+                                                                                                                        message: "recursive function that must inline per call site (function-typed parameter or struct reflection) — the recursive call has no emitted function to land on",
+                                                                                                                        hint: "rewrite the recursion as an iteration (`.loop`), or move the function-typed parameter / reflection use out of the recursive function",
                                                                                                                     ),
                                                                                                                     false => (code == 29).match ({
                                                                                                                         true  => DiagInfo(
@@ -503,11 +504,18 @@ diag_info* = (code: i32) DiagInfo {
                                                                                                                                                                             message: "program exceeds a fixed compiler capacity (top-level declarations, exports, module aliases, or module-signature entries)",
                                                                                                                                                                             hint: "this is a compiler limit, not a program error — split the module or report it; the registry sizes live in compiler/parse.zen",
                                                                                                                                                                         ),
-                                                                                                                                                                        false => DiagInfo(
-                                                                                                                                                                            kind: "type",
-                                                                                                                                                                            message: "type error",
-                                                                                                                                                                            hint: "",
-                                                                                                                                                                        ),
+                                                                                                                                                                        false => (code == 48).match ({
+                                                                                                                                                                            true  => DiagInfo(
+                                                                                                                                                                                kind: "reflect-return",
+                                                                                                                                                                                message: "early `return` inside a loop in a generic that uses struct reflection — the body is inlined per call site, so the loop's return would escape into the caller",
+                                                                                                                                                                                hint: "accumulate into a flag/value and return after the loop, or lift the return to statement level",
+                                                                                                                                                                            ),
+                                                                                                                                                                            false => DiagInfo(
+                                                                                                                                                                                kind: "type",
+                                                                                                                                                                                message: "type error",
+                                                                                                                                                                                hint: "",
+                                                                                                                                                                            ),
+                                                                                                                                                                        }),
                                                                                                                                                                     }),
                                                                                                                                                                 }),
                                                                                                                                                             }),

@@ -8,11 +8,11 @@
 { of } = std.collections.map
 { at } = std.text.bytes
 { eq, is_empty } = std.text.str
-{ assert_nonnull_kind, body_pos, cv_no_params, env_imported, env_is_gen_struct, env_is_struct, env_known_fn, env_params, env_struct_fields, env_trait_method, expr_pos, first_if_offset, fn_name_of, fn_pos_of, fnt_arg_err_at, inf_gen_fields, inf_gen_variants, inf_named_reaches, intrinsic_arity, is_badmatchlabel_call, is_forbidden_raw_call, is_imported_generic, is_nonexhaust_lit_call, is_unresolved_trait_call, null_deref_kind, pos_or, positive_count, shadow_not_callable, shadows_toplevel, source_span, stmt_pos, store_mut_kind, trait_declaring, unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind, ut_payloads_kind, utn_fields, utn_func, utn_payloads } = compiler.validate.util
+{ assert_nonnull_kind, body_pos, cv_no_params, env_imported, env_is_enum, env_is_gen_struct, env_is_struct, env_known_fn, env_params, env_struct_fields, env_trait_method, expr_pos, first_if_offset, fn_name_of, fn_pos_of, fnt_arg_err_at, inf_gen_fields, inf_gen_variants, inf_named_reaches, intrinsic_arity, is_badmatchlabel_call, is_forbidden_raw_call, is_imported_generic, is_nonexhaust_lit_call, is_unresolved_trait_call, null_deref_kind, pos_or, positive_count, shadow_not_callable, shadows_toplevel, source_span, stmt_pos, store_mut_kind, trait_declaring, unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind, ut_payloads_kind, utn_fields, utn_func, utn_payloads } = compiler.validate.util
 { CheckDiagnostic, Diagnostic, KARGTYPE, KARITY, KARMVOID, KASSIGNFIT, KBOOLARM, KCONFORMANCE, KDUPFN, KDUPVARIANT, KESCAPE, KEXHAUST, KFALLTHROUGH, KINDEX, KINFINITETYPE, KLAMBDAVALUE, KLEAK, KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT, KNOIF, KNOTCALLABLE, KNULLDEREF, KOPERAND, KOWNERSHIP, KPARSE, KPTRWRITE, KRETURNFIT, KSTRUCTFIELD, KTARGARITY, KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN, KVBREAK, desc_or, diagnostic_hint, diagnostic_kind_name, diagnostic_message, diagnostic_span_width, name_errors_body, name_errors_expr } = compiler.validate.diag
 { AliasList, DeadList, alias_nil, alias_step, count_loop_freed, dead_cons, dead_has, dead_nil, escape_step, expr_escapes, is_default_owner_method, is_owner_base, leak_alias_value, mu_body_kind, mu_build_index, nm_read_or_leak, own_dead_body, own_moved_var, own_step, owner_base, recv_typed_miss, scope_params } = compiler.validate.ownership
 { ae_check_func, arg_err_at, makestruct_err, member_err, sl_elem_fit, struct_field_move_src, sv_check_func, sx_func_kind, sx_hint, sx_message, sx_subject } = compiler.validate.args
-{ arm_result_err, arms_first_pos, as_sig, assign_err, assign_ptr_write_err, call_void_arm_errs, cond_onearm_err, cond_result_err, dup_arm_errs, enum_payload_err, exhaustive_err, expr_drops_return, ffi_func_kind, ffi_func_msg, has_wildcard, idxset_err, idxset_ptr_write_err, index_err, ka_func_kind, ka_rec_hof_kind, kdiag_add, kdiag_buf, ko_func_kind, ko_global_kind, kvb_func_kind, let_fit_err, let_needannot_err, match_result_ty, method_err, mkenum_err, novalue_arm_leaf, operand_err, parse_sentinel_kind, ret_err, trait_recv_missing, undef_is_method, unknown_arm_errs, unreachable_arm_errs, value_void_arm_err, var_err } = compiler.validate.kinds
+{ arm_result_err, arms_first_pos, as_sig, assign_err, assign_ptr_write_err, call_void_arm_errs, cond_onearm_err, cond_result_err, dup_arm_errs, enum_payload_err, exhaustive_err, expr_drops_return, ffi_func_kind, ffi_func_msg, has_wildcard, idxset_err, idxset_ptr_write_err, index_err, ka_func_kind, ka_rec_hof_kind, ka_reflect_ret_kind, kdiag_add, kdiag_buf, ko_func_kind, ko_global_kind, kvb_func_kind, let_fit_err, let_needannot_err, match_result_ty, method_err, mkenum_err, novalue_arm_leaf, operand_err, parse_sentinel_kind, ret_err, trait_recv_missing, undef_is_method, unknown_arm_errs, unreachable_arm_errs, value_void_arm_err, var_err } = compiler.validate.kinds
 { fn_dup_before, reserved_name_kind, reserved_name_of } = compiler.validate.enrich
 // count an assign TARGET as a use only when it is NOT a bare local (a bare `p = …` is a rebind/revival,
 // not a read of `p`; a compound `arr[i] = …` / `m.f = …` reads the base/index, so still check those).
@@ -343,7 +343,7 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
                             }),
                             false => c.fn.is_intrinsic().match ({
                                 true  => (c.args.len == c.fn.intrinsic_arity()).match ({
-                                    true  => 0,
+                                    true  => env.kv_reflect_kind(c),
                                     false => KARITY(),
                                 }),
                                 false => (env.env_imported(c.fn) || env.env_trait_method(c.fn)).match ({
@@ -373,6 +373,67 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
         }),
     })
 }    // a BOUND-but-non-fn target is not-callable, not undefined; a method some trait DECLARES but NO impl provides is a trait-bound gap on the receiver, not an undefined name; a locally-bound name shadows any same-named top-level (see shadows_toplevel); deferred UFCS trait-method call (see check_call)
+// A reflection receiver that can NEVER be a struct — a builtin scalar/string/slice/ptr/fn type, or
+// a Named ENUM — is rejected with a positioned error instead of leaking the unexpanded intrinsic
+// call to genc (an "internal: generated C failed to compile" crash). A plain Named/Generic/void
+// receiver stays SILENT: in a template body it is the abstract tparam, and the call-site splice
+// decides. field_eq/zip_fields additionally require both subjects to be the SAME named struct
+// (the inline pass defers a concrete mismatch here instead of folding two different layouts).
+// a Ty's reflect identity: struct name for Named, mangled instance name for Generic, "" = unknown.
+kv_refl_tyname = (t: Ty) string_view {
+    t.match ({
+        .Named(n)   => n,
+        .Generic(g) => g.mangled,
+        _           => "",
+    })
+}
+kv_reflect_recv_kind = (env: Env, c: CallData) i32 {
+    rt := env.infer_expr(c.args[0].addr())
+    bad := rt.match ({
+        .Named(n)   => env.env_is_enum(n),
+        .Generic(g) => false,
+        .Void       => false,
+        _           => true,
+    })
+    bad.then({
+        return KARGTYPE().kv_at(c.args[0].expr_pos().pos_or(c.pos))
+    })
+    (c.fn == "field_eq" || c.fn == "zip_fields").match ({
+        true  => {
+            xn := rt.kv_refl_tyname()
+            yn := env.infer_expr(c.args[1].addr()).kv_refl_tyname()
+            (xn == "" || yn == "" || eq(xn, yn)).match ({
+                true  => 0,
+                false => KARGTYPE().kv_at(c.args[1].expr_pos().pos_or(c.pos)),
+            })
+        },
+        false => 0,
+    })
+}
+// the lambda arg (last) must be a 2-arg (each_field) / 3-arg (zip_fields) lambda, or a fn-valued
+// name (spliced via var_call). Anything else would silently no-op through inline_lambda's
+// pass-through fallback — reject it here instead.
+kv_reflect_fn_kind = (env: Env, c: CallData) i32 {
+    (c.fn == "field_eq").then({
+        return 0
+    })
+    want := (c.fn == "zip_fields").match ({ true => 3, false => 2 })
+    li := c.args.len - 1
+    c.args[li].match ({
+        .Lambda(lm) => (lm.params.len == want).match ({
+            true  => 0,
+            false => KARGTYPE().kv_at(c.args[li].expr_pos().pos_or(c.pos)),
+        }),
+        .Var(v)     => 0,
+        _           => KARGTYPE().kv_at(c.args[li].expr_pos().pos_or(c.pos)),
+    })
+}
+kv_reflect_kind = (env: Env, c: CallData) i32 {
+    (c.fn == "field_eq" || c.fn == "each_field" || c.fn == "zip_fields").match ({
+        true  => env.kv_reflect_recv_kind(c).kv_kor(env.kv_reflect_fn_kind(c)),
+        false => 0,
+    })
+}
 kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
@@ -550,10 +611,10 @@ lkv_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
 // Authoritative expression validation: node order defines first-error precedence.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(env.store_mut_kind(c)).kv_kor(env.null_deref_kind(c)).kv_kor(env.assert_nonnull_kind(c)).kv_kor(env.call_void_arm_errs(c).kv_one(KARMVOID()).kv_at(c.pos)).kv_kor(eq(c.fn, "sizeof").match ({
+        .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(env.store_mut_kind(c)).kv_kor(env.null_deref_kind(c)).kv_kor(env.assert_nonnull_kind(c)).kv_kor(env.call_void_arm_errs(c).kv_one(KARMVOID()).kv_at(c.pos)).kv_kor((c.fn == "sizeof" || c.fn == "field_eq" || c.fn == "each_field" || c.fn == "zip_fields").match ({
             true  => 0,
             false => env.kv_check_args_kind(c.args),
-        })),
+        })),    // reflection intrinsics: a deferred template-body call still holds its lambda arg
         .SliceLit(sd)   => env.kv_slicelit_kind(sd.items),
         .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
         .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
@@ -647,7 +708,7 @@ check_module_arg_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => f.ka_rec_hof_kind().kv_kor(a.ka_func_kind(decls, idx, f)),
+            .DFunc(f) => f.ka_rec_hof_kind().kv_kor(f.ka_reflect_ret_kind()).kv_kor(a.ka_func_kind(decls, idx, f)),
             _         => 0,
         }))
     })
