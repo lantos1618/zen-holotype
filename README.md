@@ -224,6 +224,16 @@ zenc: prog.zen:4:13: error[arity]: wrong number of arguments
 hint: check the callee signature and pass exactly the declared parameters
 ```
 
+## Editor setup
+
+`zen lsp` is a language server (JSON-RPC over stdio) that pushes the checker's full
+diagnostics — same errors as `zen check`, live, with proper LSP positions. Wiring:
+
+- **Neovim**: native `vim.lsp.start` config in [`editor/nvim/README.md`](editor/nvim/README.md)
+- **VS Code**: minimal client extension in [`editor/vscode/`](editor/vscode/README.md)
+- **Vim (syntax only)**: filetype + highlighting in [`editor/vim/`](editor/vim/)
+- **Anything else**: generic LSP client → command `zen`, args `["lsp"]`, stdio transport
+
 ## How it works
 
 ```
