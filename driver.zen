@@ -14,8 +14,8 @@
 { open, read, write, close, system, unlink, mkdir, rmdir, opendir, closedir, getpid, isatty } = std.c.libc
 { parse_module, exports_get } = compiler.parse
 { set_faithful_lexeme } = compiler.parse_atom
-{ perr_get } = compiler.parse_type
-{ lerr_get, collect_comments } = compiler.lex
+{ perr_get, perr_off_get } = compiler.parse_type
+{ lerr_get, lerr_off_get, collect_comments } = compiler.lex
 { resolve_module } = compiler.check_resolve
 { CheckDiagnostic, desc_or } = compiler.validate.diag
 { check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source,
@@ -1536,8 +1536,15 @@ fmt_render = (mp: MutPtr<Malloc>, src: string_view) FmtResult {
         },
     })
 }
-fmt_parse_err = (mp: MutPtr<Malloc>) i32 {
-    derr("zenc: fmt: cannot format (syntax error — a faithful formatter refuses a file it cannot represent)\n")
+// Positioned refusal: render the parse/lex failure as a standard `zenc: <path>:<line>:<col>:
+// error[parse]` diagnostic against the RAW source (fmt owns no ResolvedProgram — the raw source IS
+// the user source, so diag_user_span maps the offset directly). A negative offset is the vbreak
+// encoding (parse.fill_decls) — clamp to its absolute position for the caret.
+fmt_parse_err = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
+    off := (perr_off_get() == 0).match ({ true => lerr_off_get(), false => perr_off_get() })
+    o := (off < 0).match ({ true => 0 - off, false => off })
+    sp := diag_user_span(src, src, o, 1)
+    derr(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, "parse", "cannot format (syntax error — a faithful formatter refuses a file it cannot represent)", "fix the parse error first (`zenc check` reports the full diagnostic), then re-run fmt", 1))
     1
 }
 // THE single source of truth for "would apply rewrite this file?" — a file is dirty iff the formatted
@@ -1582,7 +1589,7 @@ fmt_file = (mp: MutPtr<Malloc>, path: string_view, check: bool) i32 {
                             }),
                             false => 0,
                         }),
-                        false => mp.fmt_parse_err(),
+                        false => mp.fmt_parse_err(path, src),
                     })
                 },
                 false => 1,
@@ -1606,7 +1613,7 @@ fmt_stdout = (mp: MutPtr<Malloc>, path: string_view) i32 {
                             out(r.text)
                             0
                         },
-                        false => mp.fmt_parse_err(),
+                        false => mp.fmt_parse_err(path, src),
                     })
                 },
                 false => 1,

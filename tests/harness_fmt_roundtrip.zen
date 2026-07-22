@@ -1,0 +1,191 @@
+// tests/harness_fmt_roundtrip.zen — FMT ROUND-TRIP category: mechanical proof that `zenc fmt` is
+// SAFE over a real corpus. For every corpus file that compiles standalone it verifies, per file:
+//
+//   (a) IDEMPOTENCE   — `./zen fmt <copy>` then `./zen fmt --check <copy>` must be clean: formatting
+//                       an already-formatted file is a no-op (fmt_dirty is the single dirty oracle,
+//                       so this also proves `fmt --check` agrees with `fmt`).
+//   (b) SEMANTIC      — `zen emit <orig>` vs `zen emit <formatted>` must be BYTE-IDENTICAL C.
+//       PRESERVATION    The emit oracle is the right one because comments live OUTSIDE the AST
+//                       (pretty.zen's positioned sidecar), so a faithful format is by-construction a
+//                       no-op on the lowered tree — any emitted-C drift is a REAL formatter bug.
+//                       `zen emit` embeds no paths/timestamps (verified: emitting the same bytes from
+//                       two directories is byte-identical), and `ZEN_ROOT=.` pins module resolution
+//                       so the $ZT copies resolve the repo's std/compiler imports exactly like the
+//                       originals (the same trick harness_misc's om_corpus_emit_eq uses). Both sides
+//                       must be NON-EMPTY, so a failed emit can never make the comparison vacuously
+//                       pass; a dedicated self-test hand-breaks a formatted copy to prove the oracle
+//                       has teeth.
+//
+// CORPUS: every tests/fixtures/zen/*.zen (enumerated at runtime — no hard-coded list) plus a small
+// src/ sample (full-src round-trip is covered in aggregate by CI's seed fixpoint + whole-tree fmt
+// gate; re-emitting all of src here would blow the harness budget). Fixtures that `zenc check`
+// REJECTS (deliberate error fixtures) are SKIP-marked 's' and counted aloud — zero silent skips.
+// Emit-compare runs on EVERY corpus file (16-way parallel keeps the whole suite ~30s; no sampling).
+//
+// The self-test block also locks the `fmt --check` contract on UNPARSEABLE input: nonzero exit, a
+// positioned error[parse] diagnostic, and `fmt` refusing to touch the file's bytes (the exit-0 /
+// destructive-rewrite hole this suite was built to keep closed).
+{ Malloc, malloc, free } = std.mem.alloc
+{ out, contents_in, shell } = std.io.file
+{ is_empty, starts_with, split_in } = std.text.str
+{ expect } = std.core.result
+{ zo_cmd, zo_path, zo_idpath, zo_join, zo_par_run, zo_itoa, run_suite } = harness_lib
+// ── per-file pipeline (Phase A: build one self-contained sh command per corpus file) ──────────────
+// The command writes a ONE-CHAR marker to rtm<gid>.txt:
+//   P  pass
+//   S  skip — `zenc check` rejects the file (a deliberate error fixture; round-trip needs a compiling file)
+//   C  fmt REFUSED a file `zenc check` accepts (faithful-parser gap)
+//   I  not idempotent — `fmt --check` still dirty right after `fmt`
+//   V  an emit produced no output — the byte comparison would be VACUOUS, so it fails loudly
+//   E  emit(orig) != emit(formatted) — the formatter changed program semantics
+// Every subprocess runs under `timeout` (harness_build convention): a hang leaves no P marker and
+// Phase C fails the case.
+frt_cmd = (mp: MutPtr<Malloc>, gid: i64, path: string_view) string_view {
+    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    c := mp.zo_idpath("rtc", gid, ".zen")    // the copy that gets formatted in place
+    o := mp.zo_idpath("rto", gid, ".zen")    // untouched twin of the original (same $ZT resolution for both emits)
+    e1 := mp.zo_idpath("rte1", gid, ".c")
+    e2 := mp.zo_idpath("rte2", gid, ".c")
+    mk := mp.zo_idpath("rtm", gid, ".txt")
+    mp.zo_join([z, "if ! timeout 60 ./zen check ", path, " >/dev/null 2>&1; then echo S > ", mk, "; exit 0; fi; ", "cp ", path, " ", c, "; ", "if ! timeout 60 ./zen fmt ", c, " >/dev/null 2>&1; then echo C > ", mk, "; exit 0; fi; ", "if ! timeout 60 ./zen fmt --check ", c, " >/dev/null 2>&1; then echo I > ", mk, "; exit 0; fi; ", "cp ", path, " ", o, "; ", "ZEN_ROOT=. timeout 120 ./zen emit ", o, " > ", e1, " 2>/dev/null; ", "ZEN_ROOT=. timeout 120 ./zen emit ", c, " > ", e2, " 2>/dev/null; ", "if ! test -s ", e1, "; then echo V > ", mk, "; exit 0; fi; ", "if ! test -s ", e2, "; then echo V > ", mk, "; exit 0; fi; ", "if cmp -s ", e1, " ", e2, "; then echo P > ", mk, "; else echo E > ", mk, "; fi"])
+}
+// src/ sample variant: a compiler/std module copied ALONE into $ZT would COLLIDE with its own module
+// in the flattened import closure (error[dup-fn] — path identity is what dedups the entry file against
+// the module the closure re-imports). So the formatted copy lives inside a full `cp -r src` TREE copy
+// at the SAME relative path, which preserves module identity; emit of the tree copy is byte-identical
+// to emit of the in-repo original (verified for pretty_expr + check), so the comparison stays honest.
+frt_src_cmd = (mp: MutPtr<Malloc>, gid: i64, path: string_view) string_view {
+    z: string_view := ""
+    d := mp.zo_idpath("rtd", gid, "")    // per-case tree-copy root
+    e1 := mp.zo_idpath("rte1", gid, ".c")
+    e2 := mp.zo_idpath("rte2", gid, ".c")
+    mk := mp.zo_idpath("rtm", gid, ".txt")
+    mp.zo_join([z, "if ! timeout 60 ./zen check ", path, " >/dev/null 2>&1; then echo S > ", mk, "; exit 0; fi; ", "mkdir -p ", d, " && cp -r src ", d, "/src; c=", d, "/", path, "; ", "if ! timeout 120 ./zen fmt $c >/dev/null 2>&1; then echo C > ", mk, "; exit 0; fi; ", "if ! timeout 120 ./zen fmt --check $c >/dev/null 2>&1; then echo I > ", mk, "; exit 0; fi; ", "timeout 180 ./zen emit ", path, " > ", e1, " 2>/dev/null; ", "timeout 180 ./zen emit $c > ", e2, " 2>/dev/null; ", "if ! test -s ", e1, "; then echo V > ", mk, "; exit 0; fi; ", "if ! test -s ", e2, "; then echo V > ", mk, "; exit 0; fi; ", "if cmp -s ", e1, " ", e2, "; then echo P > ", mk, "; else echo E > ", mk, "; fi; ", "rm -rf ", d])
+}
+// map a marker char to the human FAIL reason (empty => not a failure).
+frt_reason = (st: string_view) string_view {
+    st.starts_with("C").match ({
+        true  => "fmt refused a file `zenc check` accepts (faithful-parser gap)",
+        false => st.starts_with("I").match ({
+            true  => "NOT idempotent: `fmt --check` is dirty immediately after `fmt`",
+            false => st.starts_with("V").match ({
+                true  => "emit produced no output (comparison would be vacuous)",
+                false => st.starts_with("E").match ({
+                    true  => "emit(orig) != emit(formatted) — the formatter changed semantics",
+                    false => "no marker written (timeout or crashed pipeline)",
+                }),
+            }),
+        }),
+    })
+}
+// ── Phase C reporter: '.' pass / 's' skip / 'F' + a named FAIL line, returns the fail count ───────
+frt_report = (mp: MutPtr<Malloc>, name: string_view, files: [string_view]) i32 {
+    out(name)
+    out("\n")
+    fails := 0
+    skips: i64 := 0
+    files.loop((h, i, p) {
+        st := mp.contents_in(mp.zo_idpath("rtm", i, ".txt")).match ({
+            .Ok(s)  => s,
+            .Err(e) => "",
+        })
+        st.starts_with("P").match ({
+            true  => out("."),
+            false => st.starts_with("S").match ({
+                true  => {
+                    out("s")
+                    skips = skips + 1
+                },
+                false => {
+                    out("F\n  FAIL ")
+                    out(name)
+                    out(" ")
+                    out(p)
+                    out(": ")
+                    out(frt_reason(st))
+                    out("\n")
+                    fails = fails + 1
+                },
+            }),
+        })
+    })
+    out("\n")
+    (skips > 0).then({
+        out("  skipped ")
+        out(mp.zo_itoa(skips))
+        out(" known-reject fixture(s) (`zenc check` rejects them; round-trip needs a compiling file)\n")
+    })
+    fails
+}
+// ── ORACLE TEETH self-test: hand-break a formatted copy; the emit comparison MUST catch it ────────
+// Format a known-good fixture, then append a real declaration to the formatted copy. If the emit
+// oracle were vacuous (empty outputs, path-sensitive bytes, dead cmp) this would sail through — the
+// case demands the two emits are non-empty AND differ.
+frt_mutation_caught = (mp: MutPtr<Malloc>) bool {
+    rc := shell(mp.zo_cmd(mp.zo_join(["", "f=tests/fixtures/zen/http_parse.zen; ", "cp $f $ZT/rtmut.zen && timeout 60 ./zen fmt $ZT/rtmut.zen >/dev/null 2>&1 && ", "printf 'zz_frt_mutant* = () i32 { 42 }\\n' >> $ZT/rtmut.zen && ", "cp $f $ZT/rtmuto.zen && ", "ZEN_ROOT=. timeout 60 ./zen emit $ZT/rtmuto.zen > $ZT/rtmut1.c 2>/dev/null && ", "ZEN_ROOT=. timeout 60 ./zen emit $ZT/rtmut.zen > $ZT/rtmut2.c 2>/dev/null && ", "test -s $ZT/rtmut1.c && test -s $ZT/rtmut2.c && ! cmp -s $ZT/rtmut1.c $ZT/rtmut2.c"]))).expect("harness: shell")
+    rc == 0
+}
+// ── `fmt --check` on UNPARSEABLE input: MUST exit nonzero (the exit-0 hole stays closed) ──────────
+frt_unparseable_check_fails = (mp: MutPtr<Malloc>) bool {
+    rc := shell(mp.zo_cmd("printf 'this is not zen at all }{ ((( garbage\\n' > $ZT/rtbad.zen; timeout 60 ./zen fmt --check $ZT/rtbad.zen >/dev/null 2>&1")).expect("harness: shell")
+    rc != 0
+}
+// …and the refusal is a POSITIONED parse diagnostic (file:line:col + error[parse]) on stderr.
+frt_unparseable_diag_positioned = (mp: MutPtr<Malloc>) bool {
+    rc := shell(mp.zo_cmd("timeout 60 ./zen fmt --check $ZT/rtbad.zen 2>&1 | grep -q 'rtbad.zen:1:.*error\\[parse\\]'")).expect("harness: shell")
+    rc == 0
+}
+// …and in-place `fmt` on unparseable input exits nonzero AND leaves the file's bytes untouched
+// (before the fix it silently REWROTE mis-recovered garbage, destroying the file, exit 0).
+frt_unparseable_fmt_preserves = (mp: MutPtr<Malloc>) bool {
+    rc := shell(mp.zo_cmd("cp $ZT/rtbad.zen $ZT/rtbad2.zen; timeout 60 ./zen fmt $ZT/rtbad2.zen >/dev/null 2>&1; rc=$?; cmp -s $ZT/rtbad.zen $ZT/rtbad2.zen && test $rc -ne 0")).expect("harness: shell")
+    rc == 0
+}
+// ── entry: corpus round-trip (parallel) + the teeth self-tests (serial, cheap) ────────────────────
+harness_fmt_roundtrip_run* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    // enumerate the fixture corpus at RUNTIME (sorted => deterministic case order/marks).
+    shell(mp.zo_cmd("ls tests/fixtures/zen/*.zen | sort > $ZT/rt_list.txt")).expect("harness: shell")
+    listing := mp.contents_in(mp.zo_path("rt_list.txt")).match ({
+        .Ok(s)  => s,
+        .Err(e) => "",
+    })
+    lines := mp.split_in(listing, '\n')
+    // the src/ sample: the formatter's own printer, the biggest compiler module, and a std module
+    // with heavy generics/comments. Full src/ is covered in aggregate by the CI seed fixpoint.
+    srcs := ["src/compiler/pretty_expr.zen", "src/compiler/check.zen", "src/std/format/serde.zen"]
+    n: i64 := 0
+    lines.loop((h, i, ln) {
+        (is_empty(ln) == false).then({
+            n = n + 1
+        })
+    })
+    total := n + srcs.len
+    base := malloc(total * 8)
+    files: [string_view] := base.slice(total)
+    k: i64 := 0
+    lines.loop((h, i, ln) {
+        (is_empty(ln) == false).then({
+            files[k] = ln
+            k = k + 1
+        })
+    })
+    srcs.loop((h, i, s) {
+        files[k] = s
+        k = k + 1
+    })
+    cbase := malloc(total * 8)
+    cmds: [string_view] := cbase.slice(total)
+    files.loop((h, i, p) {
+        // fixtures (index < n) use the plain $ZT-copy pipeline; the src/ sample (the tail) needs the
+        // tree-copy variant so a module's copy keeps its identity inside its own import closure.
+        cmds[i] = (i < n).match ({ true => mp.frt_cmd(i, p), false => mp.frt_src_cmd(i, p) })
+    })
+    zo_par_run(cmds, total)
+    cf := mp.frt_report("fmt_roundtrip (idempotence + emit-equivalence per file)", files)
+    free(cbase)
+    free(base)
+    st := run_suite("fmt_roundtrip teeth (oracle catches a mutant; --check fails on unparseable)", [mp.frt_mutation_caught(), mp.frt_unparseable_check_fails(), mp.frt_unparseable_diag_positioned(), mp.frt_unparseable_fmt_preserves()])
+    cf + st
+}
