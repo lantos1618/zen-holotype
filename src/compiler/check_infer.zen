@@ -3,7 +3,7 @@
 { cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { mangle_str_in, mangle_semantic_in, impl_cname_in } = compiler.mangle
 { Malloc } = std.mem.alloc
-{ view, eq, is_empty, ends_with } = std.text.str
+{ view, is_empty, ends_with } = std.text.str
 { xform_arm_env } = compiler.passes.subst
 { map_slice } = compiler.astops
 { Env, VList, DeclIndex, bin_ty, common_ty, dispatch_recv_name, enum_name, gen_variant_payload, has_tparam, is_direct_tparam, is_lit_numeric, is_str_t, is_void_ty, is_weak_targ_arg, lookup_var, slice_member, tnode, ty_under_ptr, vcons } = compiler.check
@@ -56,19 +56,19 @@ light_call_ty* = (decls: [Decl], idx: DeclIndex, a: MutPtr<Malloc>, c: CallData,
     (c.fn == "each_field" || c.fn == "zip_fields").then({
         return tvoid()
     })
-    eq(c.fn, "field_eq").match ({
+    (c.fn == "field_eq").match ({
         true  => tbool(),
-        false => eq(c.fn, "cstr").match ({
+        false => (c.fn == "cstr").match ({
             true  => tstring_cstr(),
-            false => eq(c.fn, "to_i32").match ({
+            false => (c.fn == "to_i32").match ({
                 true  => ti32(),
-                false => eq(c.fn, "to_i64").match ({
+                false => (c.fn == "to_i64").match ({
                     true  => ti64(),
-                    false => eq(c.fn, "to_u8").match ({
+                    false => (c.fn == "to_u8").match ({
                         true  => tu8(),
-                        false => eq(c.fn, "to_f64").match ({
+                        false => (c.fn == "to_f64").match ({
                             true  => tf64(),
-                            false => eq(c.fn, "sizeof").match ({
+                            false => (c.fn == "sizeof").match ({
                                 true  => ti64(),
                                 false => {
                                     f := idx.idx_func(decls, c.fn)
@@ -168,7 +168,7 @@ light_match_ty* = (a: MutPtr<Malloc>, m: MatchData, env: Ptr<VList>, decls: [Dec
 // Unify a param type against an arg type to infer one tparam.
 unify_ty* = (pty: Ty, aty: Ty, tp: string_view) Ty {
     pty.match ({
-        .Named(n)   => eq(n, tp).match ({ true => aty, false => tvoid() }),
+        .Named(n)   => (n == tp).match ({ true => aty, false => tvoid() }),
         .Generic(g) => aty.match ({
             .Generic(ga) => g.args.unify_args(ga.args, tp),
             _            => tvoid(),
@@ -212,7 +212,7 @@ variant_payload_ty* = (decls: [Decl], vn: string_view) Ty {
 enum_variant_payload* = (ed: EnumDecl, vn: string_view) Ty {
     found := tvoid()
     ed.variants.loop((h, i, v) {
-        found = eq(v.name, vn).match ({ true => v.payload, false => found })
+        found = (v.name == vn).match ({ true => v.payload, false => found })
     })
     found
 }
@@ -247,7 +247,7 @@ lpp_expr* = (decls: [Decl], e: Ptr<Expr>, pname: string_view) Ty {
 }
 lpp_payload* = (decls: [Decl], variant: string_view, payload: Ptr<Expr>, pname: string_view) Ty {
     load(payload).match ({
-        .Var(v) => eq(v.name, pname).match ({
+        .Var(v) => (v.name == pname).match ({
             true  => decls.variant_payload_ty(variant),
             false => tvoid(),
         }),
@@ -334,7 +334,7 @@ infer_one_exp* = (params: [Param], ret: Ty, exp: Ty, a: MutPtr<Malloc>, cargs: [
 // does `t` mention the type-param name `n` anywhere?
 ty_mentions* = (t: Ty, n: string_view) bool {
     t.match ({
-        .Named(x)   => eq(x, n),
+        .Named(x)   => x == n,
         .Generic(g) => g.args.tys_mention(n),
         .Ptr(pd)    => load(pd.pointee).ty_mentions(n),
         .Slice(e)   => load(e).ty_mentions(n),
@@ -422,7 +422,7 @@ impl_trait_targ_of* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tyname:
             decls.loop((h, i, d) {
                 found = found.is_void_ty().match ({
                     true  => d.match ({
-                        .DImpl(im) => eq(im.ty, tyname).match ({
+                        .DImpl(im) => (im.ty == tyname).match ({
                             true  => a.impl_trait_solve(decls, idx, im, tp),
                             false => tvoid(),
                         }),

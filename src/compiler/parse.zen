@@ -4,7 +4,6 @@
 { Token, Scan, scan, lerr_reset, lerr_get, lerr_off_get } = compiler.lex
 { slice_any } = compiler.astops
 { at } = std.text.bytes
-{ eq } = std.text.str
 { Malloc } = std.mem.alloc
 { parse_or } = compiler.parse_expr
 { enode, lexeme, is_op } = compiler.parse_atom
@@ -243,7 +242,7 @@ alias_prefixes_reset* = (a: MutPtr<Malloc>) void {
     reg_overflow_reset()
 }
 alias_prefixes_get* = () [Param] { slice(alias_prefix_buf.ptr, alias_prefix_n) }
-alias_prefix_seen = (name: string_view) bool { alias_prefixes_get().slice_any((p) { eq(p.name, name) }) }
+alias_prefix_seen = (name: string_view) bool { alias_prefixes_get().slice_any((p) { p.name == name }) }
 note_alias_prefix* = (name: string_view) void {
     // Overflow is keyed on FULLNESS only (buffer full → reject); a not-full-but-already-seen name is a
     // dedup skip, NOT an overflow. Structured as capacity-outer / seen-inner so the two are distinct.
@@ -291,7 +290,7 @@ module_sigs_get* = () [SigEntry] { slice(module_sig_buf.ptr, module_sig_n) }
 // has this (alias, origin ModuleId) pair been stamped already? A module bound twice under the SAME
 // alias appends its body once — stamping twice would invent phantom duplicate candidates. A single
 // alias name bound to two DIFFERENT modules keeps both stamps (both bodies reach the flat).
-module_sig_alias_stamped* = (alias: string_view, origin: i64) bool { module_sigs_get().slice_any((e) { eq(e.alias, alias) && e.origin == origin }) }
+module_sig_alias_stamped* = (alias: string_view, origin: i64) bool { module_sigs_get().slice_any((e) { e.alias == alias && e.origin == origin }) }
 note_module_sig* = (alias: string_view, name: string_view, flags: i64, origin: i64) void {
     (module_sig_n < module_sig_buf.len).match ({
         true  => {
@@ -464,7 +463,7 @@ global_decl = (a: MutPtr<Malloc>, nm: string_view, init: Ptr<Expr>, alias: bool,
         return dglobal_alias_at(nm, tvoid(), init, dpos)
     })    // `name = mod` → keep the `=` form for round-trip
     load(init).match ({
-        .Call(c) => (eq(c.fn, "thread_local") && c.args.len == 1).match ({
+        .Call(c) => (c.fn == "thread_local" && c.args.len == 1).match ({
             true  => dglobal_tl_at(nm, tvoid(), a.enode(c.args[0]), dpos),
             false => dglobal_at(nm, tvoid(), init, dpos),
         }),

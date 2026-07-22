@@ -11,7 +11,7 @@
 { Map, of } = std.collections.map    // O(1) presence sets for the shadow-rename pass (.has/.put are UFCS methods)
 { contents_in, O_RDONLY } = std.io.file
 { open, close, write } = std.c.libc
-{ view, eq, is_empty } = std.text.str
+{ view, is_empty } = std.text.str
 { render_diagnostic } = compiler.diagnostic
 { getEnv } = std.sys.os
 // Extracted internal helper families (shared types + this pipeline stay here; see each module head).
@@ -296,7 +296,7 @@ ModuleTable*: {
     has = (t: ModuleTable, id: string_view) bool {
         found := false
         t.modules.loop((h, i, m) {
-            found = eq(m.id, id).match ({ true => true, false => found })
+            found = (m.id == id).match ({ true => true, false => found })
         })
         found
     }
@@ -310,7 +310,7 @@ ModuleTable*: {
     module = (t: ModuleTable, id: string_view) ModuleEntry {
         found := t.modules[0]
         t.modules.loop((h, i, m) {
-            found = eq(m.id, id).match ({ true => m, false => found })
+            found = (m.id == id).match ({ true => m, false => found })
         })
         found
     }
@@ -368,7 +368,7 @@ ParsedProgram*: {
     module = (p: ParsedProgram, id: string_view) ParsedModule {
         found := p.modules[0]
         p.modules.loop((h, i, m) {
-            found = eq(m.id, id).match ({ true => m, false => found })
+            found = (m.id == id).match ({ true => m, false => found })
         })
         found
     }
@@ -1786,7 +1786,7 @@ symbol_start_of* = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: string_view) 
     syms.loop((h, i, s) {
         ((s.imported || s.foreign || s.is_type) == false && posn == 0).then({
             key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
-            eq(cstr(key.ptr), nm).then({
+            (cstr(key.ptr) == nm).then({
                 posn = s.start
             })
         })
@@ -2000,7 +2000,7 @@ find_split_call_site = (a: MutPtr<Malloc>, table: ModuleTable, modid: string_vie
         found: false,
     )
     table.modules.loop((h, i, m) {
-        skip := res.found.match ({ true => true, false => eq(m.id, modid) })
+        skip := res.found.match ({ true => true, false => m.id == modid })
         (skip == false).then({
             called := a.has_method_call_of(m.source, splits)
             (called.len > 0).then({
@@ -2032,7 +2032,7 @@ fail_alias_collision = (a: MutPtr<Malloc>, inpath: string_view, mainsrc: string_
     // detail: which other module pulls the same names in unqualified, and the shared name that breaks
     d0 := l1.gstr_append(a, "  `")
     d1 := a.mappend_id_str_dotted(d0, edge.module).gstr_append(a, "` is also imported unqualified by `")
-    d2 := eq(importer, "").match ({
+    d2 := (importer == "").match ({
         true  => d1.gstr_append(a, "your program"),
         false => a.mappend_id_str_dotted(d1, importer),
     })

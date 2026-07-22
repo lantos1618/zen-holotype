@@ -3,7 +3,7 @@
 // inline/multiline trial helpers, match-arm alignment, and string-literal escaping. Mutually recursive with
 // the statement walk / declaration formatting in compiler.pretty / compiler.pretty_decl (flat-TU cycle, `*` exports).
 { String } = std.text.string
-{ eq, is_empty, starts_with, view } = std.text.str
+{ is_empty, starts_with, view } = std.text.str
 { Malloc } = std.mem.alloc
 { ArmData, BinData, CallData, CondData, Expr, FieldInit, LambdaData, LoopData, MakeEnumData, MakeStructData, MatchData, TagData, Ty, sbyte } = compiler.genc
 { payload_fname } = compiler.mangle
@@ -15,21 +15,21 @@
 //  • a Bin used as a postfix RECEIVER (`(n > 0).match(…)`, `(a + b).field`) must be wrapped — else
 //    `.match`/`.field` would bind to the right operand;
 //  • a Bin operand of a tighter-or-equal (on the right, for left-assoc) Bin must be wrapped.
-ff_is_cmp_op = (op: string_view) bool { eq(op, "==") || eq(op, "!=") || eq(op, "<") || eq(op, ">") || eq(op, "<=") || eq(op, ">=") }
-ff_is_shift_op = (op: string_view) bool { eq(op, "<<") || eq(op, ">>") }
-ff_is_add_op = (op: string_view) bool { eq(op, "+") || eq(op, "-") }
+ff_is_cmp_op = (op: string_view) bool { op == "==" || op == "!=" || op == "<" || op == ">" || op == "<=" || op == ">=" }
+ff_is_shift_op = (op: string_view) bool { op == "<<" || op == ">>" }
+ff_is_add_op = (op: string_view) bool { op == "+" || op == "-" }
 ff_op_prec = (op: string_view) i32 {
-    eq(op, "||").match ({
+    (op == "||").match ({
         true  => 1,
-        false => eq(op, "&&").match ({
+        false => (op == "&&").match ({
             true  => 2,
             false => ff_is_cmp_op(op).match ({
                 true  => 3,
-                false => eq(op, "|").match ({
+                false => (op == "|").match ({
                     true  => 4,
-                    false => eq(op, "^").match ({
+                    false => (op == "^").match ({
                         true  => 5,
-                        false => eq(op, "&").match ({
+                        false => (op == "&").match ({
                             true  => 6,
                             false => ff_is_shift_op(op).match ({
                                 true  => 7,
@@ -227,7 +227,7 @@ ff_is_anon_positional_inits = (a: MutPtr<Malloc>, ms: MakeStructData) bool {
             false => {
                 ok := true
                 ms.inits.loop((h, i, fi) {
-                    ok = ok && eq(fi.name, a.payload_fname(to_i32(i)))
+                    ok = ok && fi.name == a.payload_fname(to_i32(i))
                 })
                 ok
             },
@@ -307,7 +307,7 @@ ff_lambda = (s: String, a: MutPtr<Malloc>, lm: LambdaData, ind: i32) String {
 }
 // ── match: split each arm onto its own line, `=>` aligned, trailing comma ───────
 arm_pat_len = (a: MutPtr<Malloc>, ar: ArmData) i32 {
-    eq(ar.variant, "_").match ({
+    (ar.variant == "_").match ({
         true  => 1,
         false => is_empty(ar.bind).match ({
             true  => 1 + to_i32(view(ar.variant).len),
@@ -324,7 +324,7 @@ arms_max_pat = (a: MutPtr<Malloc>, arms: [ArmData]) i32 {
     m
 }
 ff_arm_pat = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
-    eq(ar.variant, "_").match ({
+    (ar.variant == "_").match ({
         true  => s.ff_append(a, "_"),
         false => is_empty(ar.bind).match ({
             true  => s.ff_append(a, ".").ff_append(a, ar.variant),

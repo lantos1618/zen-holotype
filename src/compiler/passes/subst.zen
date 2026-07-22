@@ -5,7 +5,6 @@
 { light_ty } = compiler.check_infer
 { cs_or, maybe_template } = compiler.check_inline
 { Malloc } = std.mem.alloc
-{ eq } = std.text.str
 { map_slice } = compiler.astops
 subst_var = (a: MutPtr<Malloc>, params: [Param], args: [Expr], name: string_view, e: Ptr<Expr>) Ptr<Expr> {
     idx := params.param_index(name)
@@ -37,7 +36,7 @@ xform_arm_payload = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty,
 }
 xform_arm_env* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename: string_view, ar: ArmData, env: Ptr<VList>) Ptr<VList> {
     out := env
-    (eq(ar.bind, "") == false).then({
+    (ar.bind == "" == false).then({
         out = a.vcons(ar.bind, a.xform_arm_payload(decls, idx, subj, ename, ar), env)
     })
     out
@@ -48,7 +47,7 @@ xform_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, subj: Ty, ename:
         bind := ""
         ps := params
         xs := fargs
-        (eq(ar.bind, "") == false).then({
+        (ar.bind == "" == false).then({
             bind = a.local_name_at(ar.bind, env, params.len)
             ps = a.add_subst_param(params, ar.bind)
             xs = a.add_subst_arg(fargs, bind)
@@ -243,10 +242,10 @@ refl_stmt1 = (a: MutPtr<Malloc>, st: Stmt) [Stmt] {
     buf
 }
 refl_dispatch = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, fn: string_view, flds: [Field], cargs: [Expr], env: Ptr<VList>, pos: i32) Ptr<Expr> {
-    eq(fn, "field_eq").then({
+    (fn == "field_eq").then({
         return a.expand_field_eq(decls, idx, flds, cargs, pos)
     })
-    eq(fn, "each_field").then({
+    (fn == "each_field").then({
         return a.expand_each_field(decls, idx, flds, cargs, env, pos)
     })
     a.expand_zip_fields(decls, idx, flds, cargs, env, pos)
@@ -256,7 +255,7 @@ refl_dispatch = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, fn: string_vi
 // concrete types, and a genuinely ill-formed call gets its positioned diagnostic from validation
 // (kv_reflect_kind: receiver class, subject-type match, lambda shape, arity).
 refl_hook = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], params: [Param], env: Ptr<VList>) Ptr<Expr> {
-    want := eq(c.fn, "zip_fields").match ({ true => 3, false => 2 })
+    want := (c.fn == "zip_fields").match ({ true => 3, false => 2 })
     (cargs.len == want == false).then({
         return a.recall(c, c.fn, cargs)
     })
@@ -265,13 +264,13 @@ refl_hook = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, carg
     (flds.len == 0).then({
         return a.recall(c, c.fn, cargs)
     })
-    (eq(c.fn, "each_field") == false).then({
+    (c.fn == "each_field" == false).then({
         yn := cargs[1].addr().light_ty(a, env, decls, idx).enum_name()
-        (eq(yn, "") == false && eq(yn, st.enum_name()) == false).then({
+        (yn == "" == false && yn == st.enum_name() == false).then({
             return a.recall(c, c.fn, cargs)
         })
     })
-    (eq(c.fn, "field_eq") == false).then({
+    (c.fn == "field_eq" == false).then({
         ok := cargs[want - 1].match ({
             .Lambda(lm) => lm.params.len == to_i64(want),
             .Var(v)     => true,
@@ -281,7 +280,7 @@ refl_hook = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, carg
             return a.recall(c, c.fn, cargs)
         })
     })
-    nsub := eq(c.fn, "each_field").match ({ true => 1, false => 2 })
+    nsub := (c.fn == "each_field").match ({ true => 1, false => 2 })
     nb := 0
     cargs.loop((h, i, ce) {
         (i < to_i64(nsub) && ce.refl_needs_bind()).then({
