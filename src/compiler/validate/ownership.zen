@@ -3,7 +3,7 @@
   MethodCallData, Param, Stmt, Ty, VariantDef, arm, call, gstr_append, gstr_finish, gstr_string,
   k_mut_ptr, ptr_kw, tnamed, tvoid } = compiler.genc
 { impl_cname_in } = compiler.mangle
-{ DeclIndex, Env, arm_env, extend_env, is_void_ty, recv_name } = compiler.check
+{ DeclIndex, Env, arm_env, extend_env, is_intrinsic, is_void_ty, pointee_of, recv_name } = compiler.check
 { resolve_module } = compiler.check_resolve
 { fits } = compiler.check_fits
 { Allocator, Malloc } = std.mem.alloc
@@ -13,7 +13,7 @@
 { at } = std.text.bytes
 { is_empty } = std.text.str
 { String } = std.text.string
-{ env_params, env_trait_method, expr_pos, is_deref_intrinsic, is_direct_scope_acquire,
+{ env_imported, env_params, env_trait_method, expr_pos, is_deref_intrinsic, is_direct_scope_acquire,
   is_pure_owner_getter, is_scope_acquire, is_scope_alloc_member, is_scope_param_ty, is_trait_method,
   pos_or, ty_is_ptr_t, ty_mentions_tparam, unknown_ty } = compiler.validate.util
 { KMUSTUSE } = compiler.validate.diag
@@ -1124,6 +1124,44 @@ recv_typed_miss* = (env: Env, c: CallData) bool {
         false => false,
     })
 }
+// ── #574: a method-shaped call bound ONLY by flat-namespace luck ─────────────────────────────────
+// `yn.len()` in a module that neither defines nor imports `len` still checked (and emitted a bare C
+// `len(...)` call) whenever ANY closure module dragged a flat `len` into the program — binding by
+// NAME ALONE to whichever definition survived first-occurrence-wins dedup. In one closure that
+// linked against an unrelated `len` and computed garbage; in another it died at the C linker. This
+// predicate fires exactly on that hole: a method-shaped call (callee preceded by `.` in the flat
+// source), receiver type KNOWN, whose name the OWNING MODULE cannot see (didx.vis — per-module
+// define-or-import, driver-supplied). Everything with a legitimate resolution path is exempt first:
+// trait/impl methods (global dispatch index — no import needed), intrinsics, imported names
+// (unflattened harness path), raw `@fn` calls, synthesized nodes (pos 0), and unknown/void
+// receivers (pre-inline tparam contexts). Dispatch that DID resolve (impl/alias rewrites, inlined
+// generics) never reaches here with the flat name at all.
+ufcs_vis_miss* = (env: Env, c: CallData) bool {
+    vis := env.didx.vis
+    (vis.on
+        && c.pos > 0
+        && c.args.len > 0
+        && c.raw == false
+        && c.fn.is_intrinsic() == false
+        && env.env_imported(c.fn) == false
+        && vis.vis_method_shaped(c.pos)
+        && vis.vis_name_at(c.pos, c.fn)).match ({
+        true  => {
+            rty := env.infer_expr(c.args[0].addr())
+            (env.unknown_ty(rty) || rty.is_void_ty()).match ({
+                true  => false,
+                false => env.dispatch_name(c) == c.fn
+                    && vis.vis_name_visible(env.a, c.pos, c.fn) == false,
+            })
+        },
+        false => false,
+    })
+}
+// dispatch_name != c.fn: THIS receiver has an impl/trait target — genc's dispatch
+// index resolves the call without any import, so it is not a flat-namespace bind.
+// (A blanket trait-method-NAME exemption would be too broad: once Vec/HMap
+// instantiate, `len` is an impl-method name in every big closure, and the original
+// #574 `string_view.len()` would sail through on the name alone.)
 // ── enriched diagnostic text: name the offending field / operator + the operand types ────────────
 // Built lazily by the driver only AFTER a check error is located, so this never affects the compile of
 // an accepted program. `denrich_module` walks the resolved decls to the node at the error's byte offset
