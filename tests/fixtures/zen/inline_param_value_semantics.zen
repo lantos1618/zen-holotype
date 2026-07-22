@@ -1,0 +1,35 @@
+// #585 — inlined generic params are VALUES. `inc_fields` is a reflect-class generic (splice-
+// inlined), and its body WRITES its param `v` (the each_field lambda assigns its value param, a
+// member place of `v`). bind_args must therefore bind `p` to a temp COPY before splicing — the
+// callee mutates its own copy and the caller's `p` stays (1, 1). Pre-fix, `p` was spliced through
+// and the writes landed on the caller's local (p == (2, 2), exit 2).
+Point: {
+    x: i64,
+    y: i64,
+}
+inc_fields<T> = (v: T) void { v.each_field((n, fv) { fv = fv + 1 }) }
+// a DIRECT param write on the same splice path: `k` is assigned in the body, so the caller's `k`
+// must be copy-bound too (the walker's `.Assign` form, not just the reflection-lambda form).
+tally<T> = (v: T, k: i64) i64 {
+    v.each_field((n, fv) { k = k + fv })
+    k
+}
+// control: the MONO path (a plain generic, emitted as a real C function) already passes by value.
+bump<T> = (v: T) i64 {
+    v = v + 1
+    v
+}
+main = () i32 {
+    p := Point(
+        x: 1,
+        y: 1,
+    )
+    inc_fields(p)
+    k: i64 := 10
+    t := tally(p, k)
+    n := 5
+    b := bump(n)
+    aliased := p.x == 2 || p.y == 2 || k == 12 || n == 6
+    out: i32 := (aliased == false && t == 12 && b == 6).match ({ true => 0, false => 2 })
+    out
+}

@@ -438,6 +438,18 @@ inside a loop (`error[reflect-return]`). The intrinsic names are reserved: the
 only definable shape is a generic delegating wrapper such as
 `field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }`.
 
+An `each_field`/`zip_fields` lambda's value parameter is an assignable PLACE:
+when the subject is a plain local variable, `fv = …` inside the lambda writes
+that field of the subject directly (this is how `std.format.serde`'s
+`from_json` fills a struct). Function parameters are still VALUES — a callee
+that writes its parameter (directly or through a reflection expansion over it)
+gets its own copy, so the caller's argument is never mutated. A subject that is
+NOT a plain local (a member expression, a call result, or an enclosing
+reflection lambda's value parameter) is evaluated once into a hidden temp;
+assigning through such a bound subject's lambda is rejected with
+`error[reflect-write]` — bind the subject to a local first, fill the local,
+and assign it back whole (`leaf := fv` … `fv = leaf`).
+
 ## Imports And Modules
 
 Imports destructure a module path:
