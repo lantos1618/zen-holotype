@@ -109,9 +109,6 @@ cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
         }),
     })
 }
-// A one-armed bool `.match` is always non-exhaustive. Resolution deliberately leaves oa != 0 intact even
-// in statement position; `.then({ ... })` is the explicit lazy one-way construct and carries oa=0.
-cond_onearm_err* = (d: CondData) i32 { (d.oa == 0).match ({ true => 0, false => 1 }) }
 cond_result_err* = (env: Env, d: CondData) i32 {
     tt := env.infer_expr(d.t)
     et := env.infer_expr(d.e)
@@ -490,53 +487,6 @@ index_err* = (env: Env, ix: IndexData) i32 { (env.non_slice(ix.seq) || env.non_n
     true  => 1,
     false => 0,
 }) }
-// Bare identifiers in value position must resolve to a local/global/function/import/trait/intrinsic.
-var_err* = (env: Env, name: string_view) i32 {
-    (name == "true" || name == "false" || env.is_bound(name) || env.env_known_fn(name) || env.env_imported(name) || env.env_trait_method(name) || name.is_intrinsic() || env.decls.is_tag_const(env.a, name)).match ({
-        true  => 0,
-        false => 1,
-    })
-}
-// Lowered statement-match tag constants count as generated names.
-variant_tags_has = (vs: [VariantDef], a: MutPtr<Malloc>, ename: string_view, name: string_view) bool { vs.slice_any((v) { name == a.tag_const(ename, v.name) }) }
-// A lowered match over a GENERIC enum instance compares against `<mangled>_<variant>` — e.g.
-// `Result_i32_IoError_Err`. The concrete EnumDecl is created only at backend monomorphization, so the
-// validator recognizes such a tag by shape: it starts with the gen-enum base name and ends with one
-// of its variant names (`Result_…` + `…_Err`). Keeps lowered generic-enum guards from false-rejecting.
-variant_affix = (a: MutPtr<Malloc>, lead: string_view, vn: string_view) string_view {
-    s := a.gstr_string(64)
-    s = s.gstr_append(a, lead)
-    s = s.gstr_append(a, vn)
-    s.gstr_finish(a)
-}
-gen_tag_match = (a: MutPtr<Malloc>, vs: [VariantDef], base: string_view, name: string_view) bool {
-    found := false
-    pre := a.variant_affix(base, "_")
-    vs.loop((h, i, v) {
-        found = (name.starts_with(pre) && name.ends_with(a.variant_affix("_", v.name))).match ({
-            true  => true,
-            false => found,
-        })
-    })
-    found
-}
-is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: string_view) bool {
-    found := false
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DEnum(ed)   => ed.variants.variant_tags_has(a, ed.name, name).match ({
-                true  => true,
-                false => found,
-            }),
-            .DGenEnum(g) => a.gen_tag_match(g.variants, g.name, name).match ({
-                true  => true,
-                false => found,
-            }),
-            _            => found,
-        })
-    })
-    found
-}
 // Return/assign/index-set checks only reject concrete mismatches.
 ret_err* = (env: Env, r: Ptr<Expr>) i32 {
     rt := env.infer_expr(r)
