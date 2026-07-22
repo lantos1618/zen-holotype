@@ -16,7 +16,7 @@
 { DeadList, dead_has, expr_root_var } = compiler.validate.ownership
 { fields_declare_method, no_fields, struct_fields, sx_named } = compiler.validate.args
 { enum_variants } = compiler.validate.kinds
-{ check_module, kv_at, kv_kor, kv_one } = compiler.validate.core
+{ check_module, kv_at, kv_one } = compiler.validate.core
 // Local fn is known iff the_func finds it by name (sentinel name is ""). The linear `is_known_fn`
 // remains for the few decls-only callers; Env-reachable sites use `env_known_fn` (O(1) via the index).
 is_known_fn* = (decls: [Decl], fn: string_view) bool { decls.the_func(fn).name == fn }
@@ -784,7 +784,7 @@ ut_unknown_ty* = (env: Env, tparams: [Param], t: Ty) i32 {
 ut_unknown_tys* = (env: Env, tparams: [Param], ts: [Ty]) i32 {
     acc := 0
     ts.loop((h, i, t) {
-        acc = acc.kv_kor(env.ut_unknown_ty(tparams, t))
+        acc = acc.or(env.ut_unknown_ty(tparams, t))
     })
     acc
 }
@@ -794,21 +794,21 @@ ut_unknown_tys* = (env: Env, tparams: [Param], ts: [Ty]) i32 {
 ut_params_kind = (env: Env, tparams: [Param], ps: [Param], pos: i32) i32 {
     acc := 0
     ps.loop((h, i, p) {
-        acc = acc.kv_kor(env.ut_unknown_ty(tparams, p.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
+        acc = acc.or(env.ut_unknown_ty(tparams, p.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
 ut_fields_kind* = (env: Env, tparams: [Param], fs: [Field], pos: i32) i32 {
     acc := 0
     fs.loop((h, i, f) {
-        acc = acc.kv_kor(env.ut_unknown_ty(tparams, f.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
+        acc = acc.or(env.ut_unknown_ty(tparams, f.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
 ut_payloads_kind* = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32 {
     acc := 0
     vs.loop((h, i, v) {
-        acc = acc.kv_kor(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE()).kv_at(pos))
+        acc = acc.or(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
@@ -818,7 +818,7 @@ ut_payloads_kind* = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32
 ut_arms_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(a.ut_expr_kind(env, tparams, ar.body))
+        acc = acc.or(a.ut_expr_kind(env, tparams, ar.body))
     })
     acc
 }
@@ -827,7 +827,7 @@ ut_expr_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) i32
         .Block(b) => a.ut_body_kind(env, tparams, b.stmts),
         .Loop(l)  => a.ut_body_kind(env, tparams, l.body),
         .Match(m) => a.ut_arms_kind(env, tparams, m.arms),
-        .Cond(d)  => a.ut_expr_kind(env, tparams, d.t).kv_kor(a.ut_expr_kind(env, tparams, d.e)),
+        .Cond(d)  => a.ut_expr_kind(env, tparams, d.t).or(a.ut_expr_kind(env, tparams, d.e)),
         _         => 0,
     })
 }
@@ -843,32 +843,30 @@ ut_let_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) i32 {
 }
 ut_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
     st.match ({
-        .Let(l)      => a.ut_let_kind(env, tparams, l).kv_kor(a.ut_expr_kind(env, tparams, l.value)),
+        .Let(l)      => a.ut_let_kind(env, tparams, l).or(a.ut_expr_kind(env, tparams, l.value)),
         .Assign(x)   => a.ut_expr_kind(env, tparams, x.value),
         .Return(r)   => a.ut_expr_kind(env, tparams, r),
         .ExprStmt(e) => a.ut_expr_kind(env, tparams, e),
         .If(f)       => a
             .ut_expr_kind(env, tparams, f.c)
-            .kv_kor(a.ut_body_kind(env, tparams, f.then))
-            .kv_kor(a.ut_body_kind(env, tparams, f.els)),
-        .While(w)    => a
-            .ut_expr_kind(env, tparams, w.c)
-            .kv_kor(a.ut_body_kind(env, tparams, w.body)),
+            .or(a.ut_body_kind(env, tparams, f.then))
+            .or(a.ut_body_kind(env, tparams, f.els)),
+        .While(w)    => a.ut_expr_kind(env, tparams, w.c).or(a.ut_body_kind(env, tparams, w.body)),
         .IndexSet(x) => a.ut_expr_kind(env, tparams, x.value),
     })
 }
 ut_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32 {
     acc := 0
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.ut_stmt_kind(env, tparams, st))
+        acc = acc.or(a.ut_stmt_kind(env, tparams, st))
     })
     acc
 }
 ut_func_kind* = (a: MutPtr<Malloc>, env: Env, f: Func) i32 {
     env
         .ut_params_kind(f.tparams, f.params, f.pos)
-        .kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE()).kv_at(f.pos))
-        .kv_kor(a.ut_body_kind(env, f.tparams, f.body))
+        .or(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE()).kv_at(f.pos))
+        .or(a.ut_body_kind(env, f.tparams, f.body))
 }
 // ── unknown-type NAME walk: the offending type's NAME, in the SAME traversal order as the kind walk ──
 // A `Ty` carries no source position, so the reported caret anchors on the enclosing declaration; this

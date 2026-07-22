@@ -20,7 +20,7 @@
 { arg_var_name, mkstruct_field_kills, slicelit_elem_kills, struct_fields, sx_call_kind, sx_named } = compiler.validate.args
 { enum_variants, first_gen_arg, ka_call_core } = compiler.validate.kinds
 { denrich_module } = compiler.validate.enrich
-{ check_module, kv_at, kv_kor, kv_leak_let, name_read_in_args, name_read_in_body, name_read_in_expr } = compiler.validate.core
+{ check_module, kv_at, kv_leak_let, name_read_in_args, name_read_in_body, name_read_in_expr } = compiler.validate.core
 DeadList*: DeadNil | DeadCons(DeadCell)    // let/assign/while/if/index-set produce no value
 // Raw ownership validation runs before resolve_module in the CLI, while source-level
 // allocator-explicit `o.release_in(a)` / `r.drop_in(a)` calls still exist. After generic inlining those calls
@@ -1320,7 +1320,7 @@ mu_call_kind = (mvm: Map<i64>, e: Ptr<Expr>) i32 {
 mu_arms_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(a.mu_expr_kind(mvm, ar.body))
+        acc = acc.or(a.mu_expr_kind(mvm, ar.body))
     })    // arm body = the arm's VALUE (tail)
     acc
 }
@@ -1330,7 +1330,7 @@ mu_expr_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>) i32 {
         .Block(b) => a.mu_body_kind(mvm, b.stmts),
         .Loop(l)  => a.mu_body_kind(mvm, l.body),
         .Match(m) => a.mu_arms_kind(mvm, m.arms),
-        .Cond(d)  => a.mu_expr_kind(mvm, d.t).kv_kor(a.mu_expr_kind(mvm, d.e)),
+        .Cond(d)  => a.mu_expr_kind(mvm, d.t).or(a.mu_expr_kind(mvm, d.e)),
         _         => 0,
     })
 }
@@ -1338,7 +1338,7 @@ mu_expr_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>) i32 {
 // discards. (Extracted so the nested `is_tail.match(...)` is a plain statement, not a chained arm body.)
 mu_exprstmt_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>, is_tail: bool) i32 {
     head := is_tail.match ({ true => 0, false => mvm.mu_call_kind(e) })
-    head.kv_kor(a.mu_expr_kind(mvm, e))
+    head.or(a.mu_expr_kind(mvm, e))
 }
 mu_stmt_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, st: Stmt, is_tail: bool) i32 {
     st.match ({
@@ -1346,7 +1346,7 @@ mu_stmt_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, st: Stmt, is_tail: bool) i32 {
         .Let(l)      => a.mu_expr_kind(mvm, l.value),
         .Assign(x)   => a.mu_expr_kind(mvm, x.value),
         .Return(r)   => a.mu_expr_kind(mvm, r),
-        .If(f)       => a.mu_body_kind(mvm, f.then).kv_kor(a.mu_body_kind(mvm, f.els)),
+        .If(f)       => a.mu_body_kind(mvm, f.then).or(a.mu_body_kind(mvm, f.els)),
         .While(w)    => a.mu_body_kind(mvm, w.body),
         .IndexSet(x) => a.mu_expr_kind(mvm, x.value),
     })
@@ -1356,7 +1356,7 @@ mu_body_kind* = (a: MutPtr<Malloc>, mvm: Map<i64>, body: [Stmt]) i32 {
     acc := 0
     n := body.len
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.mu_stmt_kind(mvm, st, i == n - 1))
+        acc = acc.or(a.mu_stmt_kind(mvm, st, i == n - 1))
     })
     acc
 }
