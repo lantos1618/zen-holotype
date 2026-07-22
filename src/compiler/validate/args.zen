@@ -16,7 +16,7 @@
 { KSCRATCHSEND, KSCRATCHSTATE } = compiler.validate.diag
 { AliasList, DeadList, consume_depth, dead_cons, dead_has, dead_kill, dead_nil, dead_remove,
   own_moved_var, owner_base, sd_call_pos, sm_call_pos, sm_mcall_pos } = compiler.validate.ownership
-{ kv_at, kv_kor } = compiler.validate.core
+{ kv_at } = compiler.validate.core
 // A slice LITERAL may be element-wise coerced into an expected slice type while stored slice types
 // remain invariant. This accepts `["a", "b"]` at a `[string_view]` call slot without allowing a
 // named `[string_literal]` variable to flow to mutable `[string_view]` storage.
@@ -769,7 +769,7 @@ ae_kv_arms = (
 ) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(a.ae_kv_arm(decls, idx, locals, ar.body))
+        acc = acc.or(a.ae_kv_arm(decls, idx, locals, ar.body))
     })
     acc
 }
@@ -784,7 +784,7 @@ ae_kv_expr_stmt = (
         .Match(m) => a.ae_kv_arms(decls, idx, locals, m.arms),
         .Cond(d)  => a
             .ae_kv_expr_stmt(decls, idx, locals, d.t)
-            .kv_kor(a.ae_kv_expr_stmt(decls, idx, locals, d.e)),
+            .or(a.ae_kv_expr_stmt(decls, idx, locals, d.e)),
         .Block(b) => a.ae_kv_stmts(decls, idx, locals, b.stmts),
         .Loop(l)  => a.ae_kv_stmts(decls, idx, locals, l.body),
         _         => 0,
@@ -804,13 +804,13 @@ ae_kv_stmt = (
         }),
         .If(f)       => a
             .ae_kv_stmts(decls, idx, locals, f.then)
-            .kv_kor(a.ae_kv_stmts(decls, idx, locals, f.els)),
+            .or(a.ae_kv_stmts(decls, idx, locals, f.els)),
         .While(w)    => a.ae_kv_stmts(decls, idx, locals, w.body),
         .Let(l)      => a.ae_send_pos(decls, idx, locals, l.value),
         .Assign(x)   => a.ae_send_pos(decls, idx, locals, x.value),
         .ExprStmt(e) => a
             .ae_kv_expr_stmt(decls, idx, locals, e)
-            .kv_kor(a.ae_send_pos(decls, idx, locals, e)),
+            .or(a.ae_send_pos(decls, idx, locals, e)),
         _            => 0,
     })
 }
@@ -823,7 +823,7 @@ ae_kv_stmts = (
 ) i32 {
     acc := 0
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.ae_kv_stmt(decls, idx, locals, st))
+        acc = acc.or(a.ae_kv_stmt(decls, idx, locals, st))
     })
     acc
 }
@@ -835,7 +835,7 @@ ae_kv_body = (
     body: [Stmt],
 ) i32 {
     acc := a.ae_kv_stmts(decls, idx, locals, body)
-    acc.kv_kor((body.len == 0).match ({
+    acc.or((body.len == 0).match ({
         true  => 0,
         false => body[body.len - 1].match ({
             .ExprStmt(e) => a.ae_escapes(decls, idx, locals, e, true).match ({
@@ -852,7 +852,7 @@ ae_check_func* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32
 }
 // ── UNIFIED send-payload walk (replaces the near-identical sd_*/sm_* traversal skeletons). ────────
 // ONE tree-fold parameterized by `mode`: 0 = send-Rc (sd_* leaves), 1 = send-MutPtr (sm_* leaves).
-// Returns a packed kind+pos (kv_kor keeps the first nonzero); both sendability passes now share ONE
+// Returns a packed kind+pos (Verdict `.or` keeps the first nonzero); both sendability passes now share ONE
 // traversal and only the per-node CLASSIFIER (which send surfaces, which payload type) differs by mode.
 // mode 0 has NO `.MethodCall` arm — send-Rc classifies plain `send(...)` calls only — so the
 // `mode==0 => 0` branch preserves that exactly (no descent into method-call children); the walk is
@@ -863,49 +863,49 @@ sv_call_pos = (env: Env, c: CallData, mode: i32) i32 {
 sv_args = (a: MutPtr<Malloc>, env: Env, args: [Expr], mode: i32) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(a.sv_expr(env, ar.addr(), mode))
+        acc = acc.or(a.sv_expr(env, ar.addr(), mode))
     })
     acc
 }
 sv_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData], mode: i32) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(a.sv_expr(a.arm_env(env, subjty, ar), ar.body, mode))
+        acc = acc.or(a.sv_expr(a.arm_env(env, subjty, ar), ar.body, mode))
     })
     acc
 }
 sv_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit], mode: i32) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc.kv_kor(a.sv_expr(env, fi.value, mode))
+        acc = acc.or(a.sv_expr(env, fi.value, mode))
     })
     acc
 }
 sv_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, mode: i32) i32 {
     load(e).match ({
-        .Call(c)        => env.sv_call_pos(c, mode).kv_kor(a.sv_args(env, c.args, mode)),
+        .Call(c)        => env.sv_call_pos(c, mode).or(a.sv_args(env, c.args, mode)),
         .MethodCall(mc) => (mode == 0).match ({
             true  => 0,
             false => env
                 .sm_mcall_pos(mc)
-                .kv_kor(a.sv_expr(env, mc.recv, mode))
-                .kv_kor(a.sv_args(env, mc.args, mode)),
+                .or(a.sv_expr(env, mc.recv, mode))
+                .or(a.sv_args(env, mc.args, mode)),
         }),
-        .Bin(b)         => a.sv_expr(env, b.lhs, mode).kv_kor(a.sv_expr(env, b.rhs, mode)),
-        .Index(ix)      => a.sv_expr(env, ix.seq, mode).kv_kor(a.sv_expr(env, ix.idx, mode)),
+        .Bin(b)         => a.sv_expr(env, b.lhs, mode).or(a.sv_expr(env, b.rhs, mode)),
+        .Index(ix)      => a.sv_expr(env, ix.seq, mode).or(a.sv_expr(env, ix.idx, mode)),
         .Cond(d)        => a
             .sv_expr(env, d.c, mode)
-            .kv_kor(a.sv_expr(env, d.t, mode))
-            .kv_kor(a.sv_expr(env, d.e, mode)),
+            .or(a.sv_expr(env, d.t, mode))
+            .or(a.sv_expr(env, d.e, mode)),
         .Member(m)      => a.sv_expr(env, m.obj, mode),
         .Arrow(ar)      => a.sv_expr(env, ar.obj, mode),
         .Match(m)       => a
             .sv_expr(env, m.subj, mode)
-            .kv_kor(a.sv_arms(env, env.infer_expr(m.subj), m.arms, mode)),
+            .or(a.sv_arms(env, env.infer_expr(m.subj), m.arms, mode)),
         .MakeEnum(mk)   => a.sv_expr(env, mk.payload, mode),
         .MakeStruct(s)  => a.sv_inits(env, s.inits, mode),
         .SliceLit(sd)   => a.sv_args(env, sd.items, mode),
-        .Loop(l)        => a.sv_expr(env, l.seq, mode).kv_kor(a.sv_body(env, l.body, mode)),
+        .Loop(l)        => a.sv_expr(env, l.seq, mode).or(a.sv_body(env, l.body, mode)),
         .Block(b)       => a.sv_body(env, b.stmts, mode),
         _               => 0,
     })
@@ -913,25 +913,25 @@ sv_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, mode: i32) i32 {
 sv_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, mode: i32) i32 {
     st.match ({
         .Let(l)      => a.sv_expr(env, l.value, mode),
-        .Assign(x)   => a.sv_expr(env, x.target, mode).kv_kor(a.sv_expr(env, x.value, mode)),
+        .Assign(x)   => a.sv_expr(env, x.target, mode).or(a.sv_expr(env, x.value, mode)),
         .Return(r)   => a.sv_expr(env, r, mode),
         .ExprStmt(e) => a.sv_expr(env, e, mode),
         .If(f)       => a
             .sv_expr(env, f.c, mode)
-            .kv_kor(a.sv_body(env, f.then, mode))
-            .kv_kor(a.sv_body(env, f.els, mode)),
-        .While(w)    => a.sv_expr(env, w.c, mode).kv_kor(a.sv_body(env, w.body, mode)),
+            .or(a.sv_body(env, f.then, mode))
+            .or(a.sv_body(env, f.els, mode)),
+        .While(w)    => a.sv_expr(env, w.c, mode).or(a.sv_body(env, w.body, mode)),
         .IndexSet(x) => a
             .sv_expr(env, x.seq, mode)
-            .kv_kor(a.sv_expr(env, x.idx, mode))
-            .kv_kor(a.sv_expr(env, x.value, mode)),
+            .or(a.sv_expr(env, x.idx, mode))
+            .or(a.sv_expr(env, x.value, mode)),
     })
 }
 sv_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], mode: i32) i32 {
     acc := 0
     e := env
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.sv_stmt(e, st, mode))
+        acc = acc.or(a.sv_stmt(e, st, mode))
         e = a.extend_env(e, st)
     })
     acc
@@ -1064,7 +1064,7 @@ sx_payload_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
 sx_inits_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc.kv_kor(a.sx_payload_pos(taint, fi.value))
+        acc = acc.or(a.sx_payload_pos(taint, fi.value))
     })
     acc
 }
@@ -1096,7 +1096,7 @@ sx_call_kind* = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, c: CallData) i32 {
         true  => a.sx_payload_pos(taint, c.args[2].addr()).sx_kv(KSCRATCHSTATE()),
         false => 0,
     })
-    sk.kv_kor(st)
+    sk.or(st)
 }
 sx_mcall_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, mc: MethodCallData) i32 {
     sk := (mc.method.sx_named("send", "__send") && mc.args.len >= 1
@@ -1109,12 +1109,12 @@ sx_mcall_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, mc: MethodCallData) i3
         true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSTATE()),
         false => 0,
     })
-    sk.kv_kor(st)
+    sk.or(st)
 }
 sx_args_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(a.sx_expr_kind(taint, ar.addr()))
+        acc = acc.or(a.sx_expr_kind(taint, ar.addr()))
     })
     acc
 }
@@ -1122,39 +1122,39 @@ sx_arms_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
         t2 := is_empty(ar.bind).match ({ true => taint, false => a.dead_remove(taint, ar.bind) })
-        acc = acc.kv_kor(a.sx_expr_kind(t2, ar.body))
+        acc = acc.or(a.sx_expr_kind(t2, ar.body))
     })
     acc
 }
 sx_inits_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc.kv_kor(a.sx_expr_kind(taint, fi.value))
+        acc = acc.or(a.sx_expr_kind(taint, fi.value))
     })
     acc
 }
 sx_expr_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => a.sx_call_kind(taint, c).kv_kor(a.sx_args_kind(taint, c.args)),
+        .Call(c)        => a.sx_call_kind(taint, c).or(a.sx_args_kind(taint, c.args)),
         .MethodCall(mc) => a
             .sx_mcall_kind(taint, mc)
-            .kv_kor(a.sx_expr_kind(taint, mc.recv))
-            .kv_kor(a.sx_args_kind(taint, mc.args)),
-        .Bin(b)         => a.sx_expr_kind(taint, b.lhs).kv_kor(a.sx_expr_kind(taint, b.rhs)),
-        .Index(ix)      => a.sx_expr_kind(taint, ix.seq).kv_kor(a.sx_expr_kind(taint, ix.idx)),
+            .or(a.sx_expr_kind(taint, mc.recv))
+            .or(a.sx_args_kind(taint, mc.args)),
+        .Bin(b)         => a.sx_expr_kind(taint, b.lhs).or(a.sx_expr_kind(taint, b.rhs)),
+        .Index(ix)      => a.sx_expr_kind(taint, ix.seq).or(a.sx_expr_kind(taint, ix.idx)),
         .Cond(d)        => a
             .sx_expr_kind(taint, d.c)
-            .kv_kor(a.sx_expr_kind(taint, d.t))
-            .kv_kor(a.sx_expr_kind(taint, d.e)),
+            .or(a.sx_expr_kind(taint, d.t))
+            .or(a.sx_expr_kind(taint, d.e)),
         .Member(m)      => a.sx_expr_kind(taint, m.obj),
         .Arrow(ar)      => a.sx_expr_kind(taint, ar.obj),
-        .Match(m)       => a.sx_expr_kind(taint, m.subj).kv_kor(a.sx_arms_kind(taint, m.arms)),
+        .Match(m)       => a.sx_expr_kind(taint, m.subj).or(a.sx_arms_kind(taint, m.arms)),
         .MakeEnum(mk)   => a.sx_expr_kind(taint, mk.payload),
         .MakeStruct(s)  => a.sx_inits_kind(taint, s.inits),
         .SliceLit(sd)   => a.sx_args_kind(taint, sd.items),
         .Loop(l)        => a
             .sx_expr_kind(taint, l.seq)
-            .kv_kor(a.sx_body_kind(a.dead_remove(a.dead_remove(a.dead_remove(taint, l.idx), l.elem), l.h), l.body)),
+            .or(a.sx_body_kind(a.dead_remove(a.dead_remove(a.dead_remove(taint, l.idx), l.elem), l.h), l.body)),
         .Lambda(lm)     => a.sx_body_kind(a.sx_drop_params(taint, lm.params), lm.body),
         .Block(b)       => a.sx_body_kind(taint, b.stmts),
         _               => 0,
@@ -1163,25 +1163,25 @@ sx_expr_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
 sx_stmt_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
         .Let(l)      => a.sx_expr_kind(taint, l.value),
-        .Assign(x)   => a.sx_expr_kind(taint, x.target).kv_kor(a.sx_expr_kind(taint, x.value)),
+        .Assign(x)   => a.sx_expr_kind(taint, x.target).or(a.sx_expr_kind(taint, x.value)),
         .Return(r)   => a.sx_expr_kind(taint, r),
         .ExprStmt(e) => a.sx_expr_kind(taint, e),
         .If(f)       => a
             .sx_expr_kind(taint, f.c)
-            .kv_kor(a.sx_body_kind(taint, f.then))
-            .kv_kor(a.sx_body_kind(taint, f.els)),
-        .While(w)    => a.sx_expr_kind(taint, w.c).kv_kor(a.sx_body_kind(taint, w.body)),
+            .or(a.sx_body_kind(taint, f.then))
+            .or(a.sx_body_kind(taint, f.els)),
+        .While(w)    => a.sx_expr_kind(taint, w.c).or(a.sx_body_kind(taint, w.body)),
         .IndexSet(x) => a
             .sx_expr_kind(taint, x.seq)
-            .kv_kor(a.sx_expr_kind(taint, x.idx))
-            .kv_kor(a.sx_expr_kind(taint, x.value)),
+            .or(a.sx_expr_kind(taint, x.idx))
+            .or(a.sx_expr_kind(taint, x.value)),
     })
 }
 sx_body_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, body: [Stmt]) i32 {
     acc := 0
     t := taint
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.sx_stmt_kind(t, st))
+        acc = acc.or(a.sx_stmt_kind(t, st))
         t = a.sx_step(t, st)
     })
     acc
