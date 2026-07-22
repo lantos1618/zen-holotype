@@ -26,10 +26,8 @@ parse_ident* = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
     // Calls/constructions only continue on the same line as the name.
-    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).match ({
-        true  => false,
-        false => true,
-    })).match ({
+    (src.is_lparen(nx.tok)
+        && src.nl_between(sc.next, nx.tok.start).match ({ true => false, false => true })).match ({
         true  => src.paren_is_struct(nx.next).match ({
             true  => a.parse_paren_struct_lit(src, name, nx, sc.tok.start),
             false => a.parse_call(src, name, nx, sc.tok.start),
@@ -89,10 +87,8 @@ parse_generic_ctor = (a: MutPtr<Malloc>, src: string_view, name: string_view, po
 // statement. Empty `()` → nullary tag; `(a, …)` → payload enum; no `(` → nullary tag.
 finish_generic_ctor* = (a: MutPtr<Malloc>, src: string_view, ty: string_view, mty: string_view, targs: [Ty], vn: string_view, vs: Scan) PExpr {
     nx := src.scan(vs.next)
-    (src.is_lparen(nx.tok) && src.nl_between(vs.next, nx.tok.start).match ({
-        true  => false,
-        false => true,
-    })).match ({
+    (src.is_lparen(nx.tok)
+        && src.nl_between(vs.next, nx.tok.start).match ({ true => false, false => true })).match ({
         true  => src.is_rparen(src.scan(nx.next).tok).match ({
             true  => PExpr(
                 expr: a.enode(mktagg(ty, mty, targs, vn)),
@@ -182,7 +178,15 @@ tyargs_end* = (src: string_view, pos: i32, depth: i32) i32 {
         }),
     })
 }
-is_tyarg_tok = (src: string_view, t: Token) bool { is_ident_tok(t) || src.is_comma(t) || src.is_lbracket(t) || src.is_rbracket(t) || src.is_lparen(t) || src.is_rparen(t) || src.is_op(t, ':') }    // fn-type args `() R` — a `(A,B) R` element inside `Name<…>`; `:` = a decl tparam bound `<T: Trait>`
+is_tyarg_tok = (src: string_view, t: Token) bool {
+    is_ident_tok(t)
+        || src.is_comma(t)
+        || src.is_lbracket(t)
+        || src.is_rbracket(t)
+        || src.is_lparen(t)
+        || src.is_rparen(t)
+        || src.is_op(t, ':')
+}    // fn-type args `() R` — a `(A,B) R` element inside `Name<…>`; `:` = a decl tparam bound `<T: Trait>`
 // Generic struct construction is `Name<...>(f: v)`.
 parse_generic_struct_lit = (a: MutPtr<Malloc>, src: string_view, name: string_view, pos: i32, tnpos: i32) PExpr {
     ta := a.parse_tyargs(src, pos)    // pos just past '<'
@@ -563,7 +567,9 @@ lam_ret_brace = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
         false => src.is_lbrace(src.scan(a.parse_ty(src, pos).next).tok),
     })
 }    // skip a return type, then '{'
-lam_open* = (a: MutPtr<Malloc>, src: string_view, open: Scan) bool { a.lam_params_ok(src, open.next) }
+lam_open* = (a: MutPtr<Malloc>, src: string_view, open: Scan) bool {
+    a.lam_params_ok(src, open.next)
+}
 lam_params_ok = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({

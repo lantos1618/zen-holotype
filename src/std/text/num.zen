@@ -4,23 +4,22 @@
 { Allocator, try_acquire } = std.mem.alloc
 { String } = std.text.string
 { ParseError, try_parse_int } = std.text.str
-num_udigit_count = (n: i64) i64 { (n < 10).match ({
-    true  => 1,
-    false => 1 + num_udigit_count(n / 10),
-}) }
-num_ndigit_count = (n: i64) i64 { (n > 0 - 10).match ({
-    true  => 1,
-    false => 1 + num_ndigit_count(n / 10),
-}) }
-num_integer_len = (n: i64) i64 { (n < 0).match ({
-    true  => 1 + num_ndigit_count(n),
-    false => num_udigit_count(n),
-}) }
+num_udigit_count = (n: i64) i64 {
+    (n < 10).match ({ true => 1, false => 1 + num_udigit_count(n / 10) })
+}
+num_ndigit_count = (n: i64) i64 {
+    (n > 0 - 10).match ({ true => 1, false => 1 + num_ndigit_count(n / 10) })
+}
+num_integer_len = (n: i64) i64 {
+    (n < 0).match ({ true => 1 + num_ndigit_count(n), false => num_udigit_count(n) })
+}
 // Two-char decimal pairs "00".."99" (200 bytes), the lookup for the two-digits-per-step
 // integer writers below (jsony's dumpNumberFast trick): dividing by 100 and emitting a
 // zero-padded pair halves the divisions vs one digit per step. Exported so std.text.fmt's
 // streaming writers share the one table.
-num_two_digits* = () string_view { "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899" }
+num_two_digits* = () string_view {
+    "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899"
+}
 // Write the zero-padded two-digit decimal of `pair` (0..99) at p[at..at+2); returns at+2.
 num_write_upair = (p: RawPtr<u8>, at: i64, pair: i64) i64 {
     tbl := num_two_digits()
@@ -88,10 +87,9 @@ integer*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError> { a.integer_in(n) }
 // integer_in above is i64-bound: a u64 magnitude above i64 max (e.g. 18446744073709551615)
 // would print as a negative. These mirror it with `n: u64`, so `/` and `%` lower to UNSIGNED
 // C ops and the full 0 .. 2^64-1 range renders correctly.
-num_uudigit_count = (n: u64) i64 { (n < 10).match ({
-    true  => 1,
-    false => 1 + num_uudigit_count(n / 10),
-}) }
+num_uudigit_count = (n: u64) i64 {
+    (n < 10).match ({ true => 1, false => 1 + num_uudigit_count(n / 10) })
+}
 num_uwrite_udigits = (p: RawPtr<u8>, at: i64, n: u64) i64 {
     (n < 100).match ({
         true  => (n < 10).match ({
@@ -132,10 +130,9 @@ num_copy_text = (p: RawPtr<u8>, at: i64, s: string_view, i: i64) i64 {
         },
     })
 }
-num_text_len_at = (s: string_view, i: i64) i64 { (s.offset(i).load() == '\0').match ({
-    true  => i,
-    false => num_text_len_at(s, i + 1),
-}) }
+num_text_len_at = (s: string_view, i: i64) i64 {
+    (s.offset(i).load() == '\0').match ({ true => i, false => num_text_len_at(s, i + 1) })
+}
 num_text_len = (s: string_view) i64 { num_text_len_at(s, 0) }
 num_write_fpad = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 {
     (w == 1).match ({
@@ -168,18 +165,15 @@ num_write_zeros = (p: RawPtr<u8>, at: i64, k: i64) i64 {
 // These pure, emit-agnostic helpers (fexp/fpow10x/fscale/fsig/fstrip/fndig/fpow10i) are the
 // SHARED numeric core: std.text.fmt imports them for its streaming f64 writer, so the digit
 // decomposition lives ONCE here and both the buffer path (below) and the stdout path consume it.
-num_fexp_up* = (x: f64, e: i64) i64 { (x < 10.0).match ({
-    true  => e,
-    false => num_fexp_up(x / 10.0, e + 1),
-}) }
-num_fexp_down* = (x: f64, e: i64) i64 { (x >= 1.0).match ({
-    true  => e,
-    false => num_fexp_down(x * 10.0, e - 1),
-}) }
-num_fexp* = (x: f64) i64 { (x >= 1.0).match ({
-    true  => num_fexp_up(x, 0),
-    false => num_fexp_down(x, 0),
-}) }
+num_fexp_up* = (x: f64, e: i64) i64 {
+    (x < 10.0).match ({ true => e, false => num_fexp_up(x / 10.0, e + 1) })
+}
+num_fexp_down* = (x: f64, e: i64) i64 {
+    (x >= 1.0).match ({ true => e, false => num_fexp_down(x * 10.0, e - 1) })
+}
+num_fexp* = (x: f64) i64 {
+    (x >= 1.0).match ({ true => num_fexp_up(x, 0), false => num_fexp_down(x, 0) })
+}
 // 10^n as an EXACT f64 for 0 <= n <= 22 (every power of ten up to 10^22 is representable, so the
 // chained ×10 is exact — beyond 22 it would start rounding).
 num_fpow10x* = (n: i64) f64 { (n <= 0).match ({ true => 1.0, false => 10.0 * num_fpow10x(n - 1) }) }
@@ -206,10 +200,9 @@ num_fsig* = (a: f64, e: i64) i64 {
         false => to_i64(num_fscale_up(a, 14 - e) + 0.5),
     })
 }
-num_fstrip* = (n: i64) i64 { (n % 10 == 0 && n >= 10).match ({
-    true  => num_fstrip(n / 10),
-    false => n,
-}) }
+num_fstrip* = (n: i64) i64 {
+    (n % 10 == 0 && n >= 10).match ({ true => num_fstrip(n / 10), false => n })
+}
 num_fndig* = (n: i64) i64 { (n < 10).match ({ true => 1, false => 1 + num_fndig(n / 10) }) }
 num_fpow10i* = (n: i64) i64 { (n <= 0).match ({ true => 1, false => 10 * num_fpow10i(n - 1) }) }
 // fixed-notation body: significand `digs` (`ndig` digits, leading digit at place e, -4<=e<15).

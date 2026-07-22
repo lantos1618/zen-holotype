@@ -70,19 +70,19 @@ loop_body_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: P
     net := a.own_dead_body(env, seen, al, body)
     a.count_loop_freed(net, seen, a.loop_lets(binds, body), a.dead_nil())
 }
-loop_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, l: LoopData) i32 { a.loop_body_outer_frees(env, seen, al, l.body, a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, a.dead_nil())))) }
+loop_outer_frees = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, l: LoopData) i32 {
+    a.loop_body_outer_frees(env, seen, al, l.body, a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, a.dead_nil()))))
+}
 // Compatibility verdict API. The positioned diagnostic visitor below is authoritative; keeping a
 // second count-only AST walk made every new rule land twice and invited count/kind drift.
-check_module_ownership* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_ownership_kind(decls) == 0).match ({
-    true  => 0,
-    false => 1,
-}) }
+check_module_ownership* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    (a.check_module_ownership_kind(decls) == 0).match ({ true => 0, false => 1 })
+}
 // Compatibility verdict API: 0 = clean, 1 = rejected. Detailed callers consume `check_module_kind`,
 // `check_module_batch`, or a structured diagnostic, so the old parallel count traversal is redundant.
-check_module* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_kind(decls) == 0).match ({
-    true  => 0,
-    false => 1,
-}) }
+check_module* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    (a.check_module_kind(decls) == 0).match ({ true => 0, false => 1 })
+}
 check_diagnostic_none* = () CheckDiagnostic {
     CheckDiagnostic(
         code: 0,
@@ -165,10 +165,9 @@ kv_one* = (n: i32, k: i32) i32 { (n == 0).match ({ true => 0, false => k }) }
 // already-packed nested result is never re-packed: values above 63 already carry an offset.
 // Capacity: i32 packing caps the flat-source byte offset at (2^31-1)/64 ≈ 33.5 MB; the whole
 // in-tree Zen source is < 1 MB today, so headroom is ~38x before i64 packing would be needed.
-kv_at* = (k: i32, p: i32) i32 { (k == 0 || k > 63 || p <= 0).match ({
-    true  => k,
-    false => k + p * 64,
-}) }
+kv_at* = (k: i32, p: i32) i32 {
+    (k == 0 || k > 63 || p <= 0).match ({ true => k, false => k + p * 64 })
+}
 // Ownership kind pass mirrors the raw ownership count pass above.
 kv_own_args_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, args: [Expr]) i32 {
     acc := 0
@@ -232,20 +231,41 @@ kv_own_expr_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Al
             true  => KOWNERSHIP().kv_at(v.pos),
             false => 0,
         }),
-        .Call(c)       => a.kv_own_args_kind(env, seen, al, c.args).kv_kor(env.is_default_owner_method(c).match ({
-            true  => KOWNERSHIP().kv_at(c.pos),
-            false => 0,
-        })),
-        .Index(ix)     => a.kv_own_expr_kind(env, seen, al, ix.seq).kv_kor(a.kv_own_expr_kind(env, seen, al, ix.idx)),
-        .Bin(b)        => a.kv_own_expr_kind(env, seen, al, b.lhs).kv_kor(a.kv_own_expr_kind(env, seen, al, b.rhs)),
-        .Cond(d)       => a.kv_own_expr_kind(env, seen, al, d.c).kv_kor(a.kv_own_expr_kind(env, seen, al, d.t)).kv_kor(a.kv_own_expr_kind(env, seen, al, d.e)),
+        .Call(c)       => a
+            .kv_own_args_kind(env, seen, al, c.args)
+            .kv_kor(env.is_default_owner_method(c).match ({
+                true  => KOWNERSHIP().kv_at(c.pos),
+                false => 0,
+            })),
+        .Index(ix)     => a
+            .kv_own_expr_kind(env, seen, al, ix.seq)
+            .kv_kor(a.kv_own_expr_kind(env, seen, al, ix.idx)),
+        .Bin(b)        => a
+            .kv_own_expr_kind(env, seen, al, b.lhs)
+            .kv_kor(a.kv_own_expr_kind(env, seen, al, b.rhs)),
+        .Cond(d)       => a
+            .kv_own_expr_kind(env, seen, al, d.c)
+            .kv_kor(a.kv_own_expr_kind(env, seen, al, d.t))
+            .kv_kor(a.kv_own_expr_kind(env, seen, al, d.e)),
         .Member(m)     => a.kv_own_expr_kind(env, seen, al, m.obj),
         .Arrow(ar)     => a.kv_own_expr_kind(env, seen, al, ar.obj),
-        .Match(m)      => a.kv_own_expr_kind(env, seen, al, m.subj).kv_kor(a.kv_own_arms_kind(env, seen, al, env.infer_expr(m.subj), m.arms)),
+        .Match(m)      => a
+            .kv_own_expr_kind(env, seen, al, m.subj)
+            .kv_kor(a.kv_own_arms_kind(env, seen, al, env.infer_expr(m.subj), m.arms)),
         .MakeEnum(mk)  => a.kv_own_expr_kind(env, seen, al, mk.payload),
-        .MakeStruct(s) => a.kv_own_inits_kind(env, seen, al, s.inits).kv_kor(a.kv_own_struct_dupmove_kind(env, s)),
-        .SliceLit(sd)  => a.kv_own_args_kind(env, seen, al, sd.items).kv_kor(a.kv_own_slice_dupmove_kind(env, sd.items)),
-        .Loop(l)       => a.kv_own_expr_kind(env, seen, al, l.seq).kv_kor(a.kv_own_body_kind(env, seen, al, l.body)).kv_kor(a.loop_outer_frees(env, seen, al, l).kv_one(KOWNERSHIP()).kv_at(load(l.seq).expr_pos().pos_or(body_pos(l.body)))),
+        .MakeStruct(s) => a
+            .kv_own_inits_kind(env, seen, al, s.inits)
+            .kv_kor(a.kv_own_struct_dupmove_kind(env, s)),
+        .SliceLit(sd)  => a
+            .kv_own_args_kind(env, seen, al, sd.items)
+            .kv_kor(a.kv_own_slice_dupmove_kind(env, sd.items)),
+        .Loop(l)       => a
+            .kv_own_expr_kind(env, seen, al, l.seq)
+            .kv_kor(a.kv_own_body_kind(env, seen, al, l.body))
+            .kv_kor(a
+                .loop_outer_frees(env, seen, al, l)
+                .kv_one(KOWNERSHIP())
+                .kv_at(load(l.seq).expr_pos().pos_or(body_pos(l.body)))),
         .Block(b)      => a.kv_own_body_kind(env, seen, al, b.stmts),
         _              => 0,
     })
@@ -253,12 +273,26 @@ kv_own_expr_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Al
 kv_own_stmt_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) i32 {
     st.match ({
         .Let(l)      => a.kv_own_expr_kind(env, seen, al, l.value),
-        .Assign(x)   => a.kv_own_assign_target_kind(env, seen, al, x.target).kv_kor(a.kv_own_expr_kind(env, seen, al, x.value)),
+        .Assign(x)   => a
+            .kv_own_assign_target_kind(env, seen, al, x.target)
+            .kv_kor(a.kv_own_expr_kind(env, seen, al, x.value)),
         .Return(r)   => a.kv_own_expr_kind(env, seen, al, r),
         .ExprStmt(e) => a.kv_own_expr_kind(env, seen, al, e),
-        .If(f)       => a.kv_own_expr_kind(env, seen, al, f.c).kv_kor(a.kv_own_body_kind(env, seen, al, f.then)).kv_kor(a.kv_own_body_kind(env, seen, al, f.els)),
-        .While(w)    => a.kv_own_expr_kind(env, seen, al, w.c).kv_kor(a.kv_own_body_kind(env, seen, al, w.body)).kv_kor(a.loop_body_outer_frees(env, seen, al, w.body, a.dead_nil()).kv_one(KOWNERSHIP()).kv_at(load(w.c).expr_pos().pos_or(body_pos(w.body)))),
-        .IndexSet(x) => a.kv_own_expr_kind(env, seen, al, x.seq).kv_kor(a.kv_own_expr_kind(env, seen, al, x.idx)).kv_kor(a.kv_own_expr_kind(env, seen, al, x.value)),
+        .If(f)       => a
+            .kv_own_expr_kind(env, seen, al, f.c)
+            .kv_kor(a.kv_own_body_kind(env, seen, al, f.then))
+            .kv_kor(a.kv_own_body_kind(env, seen, al, f.els)),
+        .While(w)    => a
+            .kv_own_expr_kind(env, seen, al, w.c)
+            .kv_kor(a.kv_own_body_kind(env, seen, al, w.body))
+            .kv_kor(a
+                .loop_body_outer_frees(env, seen, al, w.body, a.dead_nil())
+                .kv_one(KOWNERSHIP())
+                .kv_at(load(w.c).expr_pos().pos_or(body_pos(w.body)))),
+        .IndexSet(x) => a
+            .kv_own_expr_kind(env, seen, al, x.seq)
+            .kv_kor(a.kv_own_expr_kind(env, seen, al, x.idx))
+            .kv_kor(a.kv_own_expr_kind(env, seen, al, x.value)),
     })
 }
 kv_own_body_kind = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, body: [Stmt]) i32 {
@@ -355,7 +389,8 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
                                         true  => env.kv_fnval_call_kind(c),
                                         false => env.is_bound(c.fn).match ({
                                             true  => KNOTCALLABLE(),
-                                            false => (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({
+                                            false => (c.args.len > 0
+                                                && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({
                                                 true  => KTRAITBOUND(),
                                                 false => env.undef_is_method(c).match ({
                                                     true  => KMETHODNOTFOUND(),
@@ -464,7 +499,9 @@ kv_check_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     })
     acc
 }
-kv_arm_result_kind = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 { env.arm_result_err(subjty, want, ar).kv_one(KRETURNFIT()).kv_at(load(ar.body).expr_pos()) }
+kv_arm_result_kind = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
+    env.arm_result_err(subjty, want, ar).kv_one(KRETURNFIT()).kv_at(load(ar.body).expr_pos())
+}
 kv_match_arm_result_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     want := env.match_result_ty(subjty, arms)
     acc := 0
@@ -482,11 +519,18 @@ kv_value_void_arm_kind = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
             .Match(m) => {
                 acc := 0
                 m.arms.loop((h, i, ar) {
-                    acc = acc.kv_kor(env.novalue_arm_leaf(ar.body).kv_one(KARMVOID()).kv_at(ar.pos.pos_or(load(ar.body).expr_pos())))
+                    acc = acc.kv_kor(env
+                        .novalue_arm_leaf(ar.body)
+                        .kv_one(KARMVOID())
+                        .kv_at(ar.pos.pos_or(load(ar.body).expr_pos())))
                 })
                 acc
             },
-            .Cond(d)  => env.novalue_arm_leaf(d.t).kv_one(KARMVOID()).kv_at(load(d.t).expr_pos()).kv_kor(env.novalue_arm_leaf(d.e).kv_one(KARMVOID()).kv_at(load(d.e).expr_pos())),
+            .Cond(d)  => env
+                .novalue_arm_leaf(d.t)
+                .kv_one(KARMVOID())
+                .kv_at(load(d.t).expr_pos())
+                .kv_kor(env.novalue_arm_leaf(d.e).kv_one(KARMVOID()).kv_at(load(d.e).expr_pos())),
             _         => 0,
         }),
     })
@@ -509,10 +553,13 @@ kv_check_inits_kind = (env: Env, inits: [FieldInit]) i32 {
 // struct-literal init: caret on the first init value's source position when it's positioned
 // (a Var/Call/StrLit survives resolve; bare numeric literals carry none — best-effort, else file-only).
 kv_makestruct_kind = (env: Env, m: MakeStructData) i32 {
-    env.makestruct_err(m).kv_one(KSTRUCTFIELD()).kv_at(m.pos.pos_or((m.inits.len == 0).match ({
-        true  => 0,
-        false => load(m.inits[0].value).expr_pos(),
-    })))
+    env
+        .makestruct_err(m)
+        .kv_one(KSTRUCTFIELD())
+        .kv_at(m.pos.pos_or((m.inits.len == 0).match ({
+            true  => 0,
+            false => load(m.inits[0].value).expr_pos(),
+        })))
 }
 // A generic-struct literal's explicit `<…>` list must pin EVERY tparam (`Box<i32,i32>(…)` on a
 // 1-param generic silently deferred to mono and misreported downstream). A plain struct takes no
@@ -528,10 +575,12 @@ kv_makestruct_targ_kind = (env: Env, m: MakeStructData) i32 {
             false => env.env_is_struct(m.ty).match ({ true => 1, false => 0 }),
         }),
     })
-    n.kv_one(KTARGARITY()).kv_at(m.pos.pos_or((m.inits.len == 0).match ({
-        true  => 0,
-        false => load(m.inits[0].value).expr_pos(),
-    })))
+    n
+        .kv_one(KTARGARITY())
+        .kv_at(m.pos.pos_or((m.inits.len == 0).match ({
+            true  => 0,
+            false => load(m.inits[0].value).expr_pos(),
+        })))
 }
 // member access caret on the receiver object (a Var/Call survives resolve).
 kv_nullable_obj_kind = (env: Env, obj: Ptr<Expr>, pos: i32) i32 {
@@ -540,7 +589,14 @@ kv_nullable_obj_kind = (env: Env, obj: Ptr<Expr>, pos: i32) i32 {
         false => 0,
     })
 }
-kv_member_kind = (env: Env, obj: Ptr<Expr>, field: string_view, pos: i32) i32 { env.kv_nullable_obj_kind(obj, pos).kv_kor(env.member_err(obj, field).kv_one(KSTRUCTFIELD()).kv_at(pos.pos_or(load(obj).expr_pos()))) }
+kv_member_kind = (env: Env, obj: Ptr<Expr>, field: string_view, pos: i32) i32 {
+    env
+        .kv_nullable_obj_kind(obj, pos)
+        .kv_kor(env
+            .member_err(obj, field)
+            .kv_one(KSTRUCTFIELD())
+            .kv_at(pos.pos_or(load(obj).expr_pos())))
+}
 kv_match_null_kind = (env: Env, m: MatchData) i32 {
     env.infer_expr(m.subj).is_nullable_ptr_ty().match ({
         true  => KNULLDEREF().kv_at(load(m.subj).expr_pos()),
@@ -553,25 +609,49 @@ kv_match_kind = (env: Env, m: MatchData) i32 {
     sp := load(m.subj).expr_pos().pos_or(m.arms.arms_first_pos())
     base := m.arms.has_wildcard().match ({
         true  => m.arms.dup_arm_errs().kv_one(KDUPVARIANT()).kv_at(sp),
-        false => env.exhaustive_err(m).kv_one(KEXHAUST()).kv_at(sp).kv_kor(m.arms.dup_arm_errs().kv_one(KDUPVARIANT()).kv_at(sp)),
+        false => env
+            .exhaustive_err(m)
+            .kv_one(KEXHAUST())
+            .kv_at(sp)
+            .kv_kor(m.arms.dup_arm_errs().kv_one(KDUPVARIANT()).kv_at(sp)),
     })
-    base.kv_kor(m.arms.unreachable_arm_errs().kv_one(KUNREACHABLEARM()).kv_at(sp)).kv_kor(env.unknown_arm_errs(m).kv_one(KUNDEFINED()).kv_at(sp))
+    base
+        .kv_kor(m.arms.unreachable_arm_errs().kv_one(KUNREACHABLEARM()).kv_at(sp))
+        .kv_kor(env.unknown_arm_errs(m).kv_one(KUNDEFINED()).kv_at(sp))
 }
 kv_index_kind = (env: Env, ix: IndexData) i32 { env.index_err(ix).kv_one(KINDEX()) }
-kv_operand_kind = (env: Env, b: BinData) i32 { env.operand_err(b).kv_one(KOPERAND()).kv_at(b.pos.pos_or(load(b.lhs).expr_pos())) }
+kv_operand_kind = (env: Env, b: BinData) i32 {
+    env.operand_err(b).kv_one(KOPERAND()).kv_at(b.pos.pos_or(load(b.lhs).expr_pos()))
+}
 // targ-arity: the error is judged on the RAW call site (`<…>` survives only pre-inline);
 // the resolved view holds a REWRITTEN call whose targ/tparam counts are meaningless — walk
 // raw FIRST so the message states the counts the user wrote.
 // the value-position block-arm walker, kind-flavoured (mirrors check_block/check_block_stmt).
 kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)      => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)).kv_kor(env.kv_let_needannot_kind(l)).kv_kor(env.kv_value_void_arm_kind(l.ty, l.value)),
-        .Assign(x)   => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_assign_kind(x)).kv_kor(env.kv_value_void_arm_kind(env.infer_expr(x.target), x.value)),
-        .Return(r)   => env.kv_check_expr_kind(r).kv_kor(env.kv_ret_kind(r)).kv_kor(env.kv_value_void_arm_kind(env.exp, r)),
+        .Let(l)      => env
+            .kv_check_expr_kind(l.value)
+            .kv_kor(env.kv_let_fit_kind(l))
+            .kv_kor(env.kv_let_needannot_kind(l))
+            .kv_kor(env.kv_value_void_arm_kind(l.ty, l.value)),
+        .Assign(x)   => env
+            .kv_check_expr_kind(x.target)
+            .kv_kor(env.kv_check_expr_kind(x.value))
+            .kv_kor(env.kv_assign_kind(x))
+            .kv_kor(env.kv_value_void_arm_kind(env.infer_expr(x.target), x.value)),
+        .Return(r)   => env
+            .kv_check_expr_kind(r)
+            .kv_kor(env.kv_ret_kind(r))
+            .kv_kor(env.kv_value_void_arm_kind(env.exp, r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
         .If(f)       => env.kv_check_expr_kind(f.c),
         .While(w)    => env.kv_check_expr_kind(w.c),
-        .IndexSet(x) => env.kv_check_expr_kind(x.seq).kv_kor(env.kv_check_expr_kind(x.idx)).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_idxset_kind(x)).kv_kor(env.kv_value_void_arm_kind(x.elem, x.value)),
+        .IndexSet(x) => env
+            .kv_check_expr_kind(x.seq)
+            .kv_kor(env.kv_check_expr_kind(x.idx))
+            .kv_kor(env.kv_check_expr_kind(x.value))
+            .kv_kor(env.kv_idxset_kind(x))
+            .kv_kor(env.kv_value_void_arm_kind(x.elem, x.value)),
     })
 }
 kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
@@ -611,51 +691,125 @@ lkv_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
 // Authoritative expression validation: node order defines first-error precedence.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.kv_check_call_kind(c).kv_at(c.pos).kv_kor(env.store_mut_kind(c)).kv_kor(env.null_deref_kind(c)).kv_kor(env.assert_nonnull_kind(c)).kv_kor(env.call_void_arm_errs(c).kv_one(KARMVOID()).kv_at(c.pos)).kv_kor((c.fn == "sizeof" || c.fn == "field_eq" || c.fn == "each_field" || c.fn == "zip_fields").match ({
-            true  => 0,
-            false => env.kv_check_args_kind(c.args),
-        })),    // reflection intrinsics: a deferred template-body call still holds its lambda arg
+        .Call(c)        => env
+            .kv_check_call_kind(c)
+            .kv_at(c.pos)
+            .kv_kor(env.store_mut_kind(c))
+            .kv_kor(env.null_deref_kind(c))
+            .kv_kor(env.assert_nonnull_kind(c))
+            .kv_kor(env.call_void_arm_errs(c).kv_one(KARMVOID()).kv_at(c.pos))
+            .kv_kor((c.fn == "sizeof"
+                || c.fn == "field_eq"
+                || c.fn == "each_field"
+                || c.fn == "zip_fields").match ({
+                true  => 0,
+                false => env.kv_check_args_kind(c.args),
+            })),    // reflection intrinsics: a deferred template-body call still holds its lambda arg
         .SliceLit(sd)   => env.kv_slicelit_kind(sd.items),
-        .Index(ix)      => env.kv_check_expr_kind(ix.seq).kv_kor(env.kv_check_expr_kind(ix.idx)).kv_kor(env.kv_index_kind(ix)),
-        .Bin(b)         => env.kv_check_expr_kind(b.lhs).kv_kor(env.kv_check_expr_kind(b.rhs)).kv_kor(env.kv_operand_kind(b)),
-        .Cond(d)        => env.kv_check_expr_kind(d.c).kv_kor(env.kv_check_expr_kind(d.t)).kv_kor(env.kv_check_expr_kind(d.e)).kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN())).kv_kor(env.cond_result_err(d).kv_one(KRETURNFIT()).kv_at(load(d.t).expr_pos())).kv_kor(d.cond_onearm_err().kv_one(KBOOLARM()).kv_at(load(d.c).expr_pos())),
-        .Member(m)      => env.kv_check_expr_kind(m.obj).kv_kor(env.kv_member_kind(m.obj, m.field, m.pos)),
-        .Arrow(ar)      => env.kv_check_expr_kind(ar.obj).kv_kor(env.kv_member_kind(ar.obj, ar.field, ar.pos)),
+        .Index(ix)      => env
+            .kv_check_expr_kind(ix.seq)
+            .kv_kor(env.kv_check_expr_kind(ix.idx))
+            .kv_kor(env.kv_index_kind(ix)),
+        .Bin(b)         => env
+            .kv_check_expr_kind(b.lhs)
+            .kv_kor(env.kv_check_expr_kind(b.rhs))
+            .kv_kor(env.kv_operand_kind(b)),
+        .Cond(d)        => env
+            .kv_check_expr_kind(d.c)
+            .kv_kor(env.kv_check_expr_kind(d.t))
+            .kv_kor(env.kv_check_expr_kind(d.e))
+            .kv_kor(d.t.expr_drops_return().kv_one(KVALPOSRETURN()))
+            .kv_kor(d.e.expr_drops_return().kv_one(KVALPOSRETURN()))
+            .kv_kor(env.cond_result_err(d).kv_one(KRETURNFIT()).kv_at(load(d.t).expr_pos()))
+            .kv_kor(d.cond_onearm_err().kv_one(KBOOLARM()).kv_at(load(d.c).expr_pos())),
+        .Member(m)      => env
+            .kv_check_expr_kind(m.obj)
+            .kv_kor(env.kv_member_kind(m.obj, m.field, m.pos)),
+        .Arrow(ar)      => env
+            .kv_check_expr_kind(ar.obj)
+            .kv_kor(env.kv_member_kind(ar.obj, ar.field, ar.pos)),
         .Match(m)       => {
             subjty := env.infer_expr(m.subj)
-            env.kv_check_expr_kind(m.subj).kv_kor(env.kv_match_null_kind(m)).kv_kor(env.kv_check_arms_kind(subjty, m.arms)).kv_kor(env.kv_match_kind(m)).kv_kor(env.kv_match_arm_result_kind(subjty, m.arms)).kv_kor(kv_arm_return_kind(m.arms))
+            env
+                .kv_check_expr_kind(m.subj)
+                .kv_kor(env.kv_match_null_kind(m))
+                .kv_kor(env.kv_check_arms_kind(subjty, m.arms))
+                .kv_kor(env.kv_match_kind(m))
+                .kv_kor(env.kv_match_arm_result_kind(subjty, m.arms))
+                .kv_kor(kv_arm_return_kind(m.arms))
         },
-        .MakeEnum(mk)   => env.kv_check_expr_kind(mk.payload).kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED())).kv_kor(env.enum_payload_err(mk).kv_one(KARGTYPE()).kv_at(load(mk.payload).expr_pos())),
+        .MakeEnum(mk)   => env
+            .kv_check_expr_kind(mk.payload)
+            .kv_kor(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED()))
+            .kv_kor(env.enum_payload_err(mk).kv_one(KARGTYPE()).kv_at(load(mk.payload).expr_pos())),
         .Tag(t)         => env.mkenum_err(t.ty, t.variant).kv_one(KUNDEFINED()),
-        .MakeStruct(sd) => env.kv_check_inits_kind(sd.inits).kv_kor(env.kv_makestruct_targ_kind(sd)).kv_kor(env.kv_makestruct_kind(sd)),
+        .MakeStruct(sd) => env
+            .kv_check_inits_kind(sd.inits)
+            .kv_kor(env.kv_makestruct_targ_kind(sd))
+            .kv_kor(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
         .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()).kv_at(v.pos),
-        .Loop(l)        => env.lkv_expr_kind(l.seq).kv_kor(env.a.lkv_body_kind(env.a.loop_env(env, l), l.body)),
+        .Loop(l)        => env
+            .lkv_expr_kind(l.seq)
+            .kv_kor(env.a.lkv_body_kind(env.a.loop_env(env, l), l.body)),
         .Lambda(lm)     => KLAMBDAVALUE(),    // a surviving lambda = used as a value (see check_expr)
         _               => 0,
     })
 }
-kv_ret_kind = (env: Env, r: Ptr<Expr>) i32 { env.ret_err(r).kv_one(KRETURNFIT()).kv_at(load(r).expr_pos()) }
-kv_let_fit_kind = (env: Env, l: LetData) i32 { env.let_fit_err(l).kv_one(KASSIGNFIT()).kv_at(load(l.value).expr_pos()) }
-kv_let_needannot_kind = (env: Env, l: LetData) i32 { env.let_needannot_err(l).kv_one(KNEEDANNOT()).kv_at(load(l.value).expr_pos()) }
+kv_ret_kind = (env: Env, r: Ptr<Expr>) i32 {
+    env.ret_err(r).kv_one(KRETURNFIT()).kv_at(load(r).expr_pos())
+}
+kv_let_fit_kind = (env: Env, l: LetData) i32 {
+    env.let_fit_err(l).kv_one(KASSIGNFIT()).kv_at(load(l.value).expr_pos())
+}
+kv_let_needannot_kind = (env: Env, l: LetData) i32 {
+    env.let_needannot_err(l).kv_one(KNEEDANNOT()).kv_at(load(l.value).expr_pos())
+}
 kv_assign_kind = (env: Env, x: AssignData) i32 {
     ap := x.pos.pos_or(load(x.target).expr_pos()).pos_or(load(x.value).expr_pos())
-    env.assign_err(x).kv_one(KASSIGNFIT()).kv_at(ap).kv_kor(env.assign_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ap))
+    env
+        .assign_err(x)
+        .kv_one(KASSIGNFIT())
+        .kv_at(ap)
+        .kv_kor(env.assign_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ap))
 }
 kv_idxset_kind = (env: Env, x: IndexSetData) i32 {
     ip := x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos())
-    env.idxset_err(x).kv_one(KASSIGNFIT()).kv_at(ip).kv_kor(env.idxset_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ip))
+    env
+        .idxset_err(x)
+        .kv_one(KASSIGNFIT())
+        .kv_at(ip)
+        .kv_kor(env.idxset_ptr_write_err(x).kv_one(KPTRWRITE()).kv_at(ip))
 }
 // Authoritative statement validation: sub-expressions precede the statement-level fit check.
 kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
-        .Let(l)      => env.kv_check_expr_kind(l.value).kv_kor(env.kv_let_fit_kind(l)).kv_kor(env.kv_let_needannot_kind(l)).kv_kor(env.kv_value_void_arm_kind(l.ty, l.value)),
-        .Assign(x)   => env.kv_check_expr_kind(x.target).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_assign_kind(x)).kv_kor(env.kv_value_void_arm_kind(env.infer_expr(x.target), x.value)),
-        .Return(r)   => env.kv_check_expr_kind(r).kv_kor(env.kv_ret_kind(r)).kv_kor(env.kv_value_void_arm_kind(env.exp, r)),
+        .Let(l)      => env
+            .kv_check_expr_kind(l.value)
+            .kv_kor(env.kv_let_fit_kind(l))
+            .kv_kor(env.kv_let_needannot_kind(l))
+            .kv_kor(env.kv_value_void_arm_kind(l.ty, l.value)),
+        .Assign(x)   => env
+            .kv_check_expr_kind(x.target)
+            .kv_kor(env.kv_check_expr_kind(x.value))
+            .kv_kor(env.kv_assign_kind(x))
+            .kv_kor(env.kv_value_void_arm_kind(env.infer_expr(x.target), x.value)),
+        .Return(r)   => env
+            .kv_check_expr_kind(r)
+            .kv_kor(env.kv_ret_kind(r))
+            .kv_kor(env.kv_value_void_arm_kind(env.exp, r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
-        .If(f)       => env.kv_check_expr_kind(f.c).kv_kor(a.kv_check_body_kind(env, f.then)).kv_kor(a.kv_check_body_kind(env, f.els)),
+        .If(f)       => env
+            .kv_check_expr_kind(f.c)
+            .kv_kor(a.kv_check_body_kind(env, f.then))
+            .kv_kor(a.kv_check_body_kind(env, f.els)),
         .While(w)    => env.kv_check_expr_kind(w.c).kv_kor(a.kv_check_body_kind(env, w.body)),
-        .IndexSet(x) => env.kv_check_expr_kind(x.seq).kv_kor(env.kv_check_expr_kind(x.idx)).kv_kor(env.kv_check_expr_kind(x.value)).kv_kor(env.kv_idxset_kind(x)).kv_kor(env.kv_value_void_arm_kind(x.elem, x.value)),
+        .IndexSet(x) => env
+            .kv_check_expr_kind(x.seq)
+            .kv_kor(env.kv_check_expr_kind(x.idx))
+            .kv_kor(env.kv_check_expr_kind(x.value))
+            .kv_kor(env.kv_idxset_kind(x))
+            .kv_kor(env.kv_value_void_arm_kind(x.elem, x.value)),
     })
 }
 kv_check_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
@@ -708,7 +862,10 @@ check_module_arg_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DFunc(f) => f.ka_rec_hof_kind().kv_kor(f.ka_reflect_ret_kind()).kv_kor(a.ka_func_kind(decls, idx, f)),
+            .DFunc(f) => f
+                .ka_rec_hof_kind()
+                .kv_kor(f.ka_reflect_ret_kind())
+                .kv_kor(a.ka_func_kind(decls, idx, f)),
             _         => 0,
         }))
     })
@@ -945,15 +1102,29 @@ check_module_reserved_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl
         false => {
             pos := packed >> 6
             w := src.diagnostic_span_width(pos)
-            subject := a.gstr_string(32).gstr_append(a, "`").gstr_append(a, decls.reserved_name_of()).gstr_append(a, "`").gstr_finish(a)
+            subject := a
+                .gstr_string(32)
+                .gstr_append(a, "`")
+                .gstr_append(a, decls.reserved_name_of())
+                .gstr_append(a, "`")
+                .gstr_finish(a)
             CheckDiagnostic(
                 code: packed & 63,
                 kind: "reserved-name",
                 source_offset: pos,
                 span_width: w,
                 count: 1,
-                message: a.gstr_string(192).gstr_append(a, subject).gstr_append(a, " is a compiler intrinsic; a top-level function may not redefine it — calls would compile to the intrinsic, not this function").gstr_finish(a),
-                hint: a.gstr_string(64).gstr_append(a, "rename — ").gstr_append(a, subject).gstr_append(a, " is a compiler intrinsic").gstr_finish(a),
+                message: a
+                    .gstr_string(192)
+                    .gstr_append(a, subject)
+                    .gstr_append(a, " is a compiler intrinsic; a top-level function may not redefine it — calls would compile to the intrinsic, not this function")
+                    .gstr_finish(a),
+                hint: a
+                    .gstr_string(64)
+                    .gstr_append(a, "rename — ")
+                    .gstr_append(a, subject)
+                    .gstr_append(a, " is a compiler intrinsic")
+                    .gstr_finish(a),
             )
         },
     })
@@ -978,7 +1149,9 @@ check_module_mustuse_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl]
     })
 }
 // trait conformance, kind-flavoured (mirrors impl_errs/trait_conformance/method_err).
-kv_method_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 { a.method_err(decls, im, f).kv_one(KCONFORMANCE()) }
+kv_method_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
+    a.method_err(decls, im, f).kv_one(KCONFORMANCE())
+}
 kv_conformance_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
     acc := 0
     sd.fields.loop((h, i, f) {
@@ -1113,10 +1286,18 @@ check_module_ownership_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Dec
         false => src.check_diagnostic_from_source(packed, 1),
     })
 }
-module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) Diagnostic { a.check_module_diagnostic(decls).check_to_diagnostic() }
-module_ownership_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) Diagnostic { a.check_module_ownership_diagnostic(decls).check_to_diagnostic() }
-module_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) Diagnostic { a.check_module_diagnostic_from_source(decls, src).check_to_diagnostic() }
-module_ownership_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) Diagnostic { a.check_module_ownership_diagnostic_from_source(decls, src).check_to_diagnostic() }
+module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) Diagnostic {
+    a.check_module_diagnostic(decls).check_to_diagnostic()
+}
+module_ownership_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) Diagnostic {
+    a.check_module_ownership_diagnostic(decls).check_to_diagnostic()
+}
+module_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) Diagnostic {
+    a.check_module_diagnostic_from_source(decls, src).check_to_diagnostic()
+}
+module_ownership_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) Diagnostic {
+    a.check_module_ownership_diagnostic_from_source(decls, src).check_to_diagnostic()
+}
 // the kind layer over a CROSS-MODULE link (mirrors check_linked): same layered header, then
 // check_module_kind instead of check_module. Lets a cross-module reject also be pinned by KIND.
 check_linked_kind* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
@@ -1131,7 +1312,9 @@ check_linked_kind* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
     })
     a.check_module_kind(world)
 }
-module_header* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] { map_slice(a, decls, (d) { a.as_sig(d) }) }
+module_header* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
+    map_slice(a, decls, (d) { a.as_sig(d) })
+}
 // check `decls` (one file) against an imported module's `lib` decls: the file is resolved as usual,
 // then checked in a WORLD that prepends lib's header, so its imported calls resolve to real sigs.
 check_linked* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
@@ -1163,7 +1346,9 @@ kv_escape_stmt = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList
             true  => load(r).expr_pos().pos_or(1),
             false => 0,
         }),
-        .If(f)       => a.kv_escape_stmts(svars, derived, f.then).kv_kor(a.kv_escape_stmts(svars, derived, f.els)),
+        .If(f)       => a
+            .kv_escape_stmts(svars, derived, f.then)
+            .kv_kor(a.kv_escape_stmts(svars, derived, f.els)),
         .While(w)    => a.kv_escape_stmts(svars, derived, w.body),
         .ExprStmt(e) => a.kv_escape_expr_stmt(svars, derived, e),
         _            => 0,
@@ -1172,7 +1357,9 @@ kv_escape_stmt = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList
 kv_escape_expr_stmt = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Match(m) => a.kv_escape_arms(svars, derived, m.arms),
-        .Cond(d)  => a.kv_escape_expr_stmt(svars, derived, d.t).kv_kor(a.kv_escape_expr_stmt(svars, derived, d.e)),
+        .Cond(d)  => a
+            .kv_escape_expr_stmt(svars, derived, d.t)
+            .kv_kor(a.kv_escape_expr_stmt(svars, derived, d.e)),
         .Block(b) => a.kv_escape_stmts(svars, derived, b.stmts),
         .Loop(l)  => a.kv_escape_stmts(svars, derived, l.body),
         _         => 0,
@@ -1231,10 +1418,9 @@ check_module_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 }
 // Compatibility verdict. The positioned traversal above is authoritative; a parallel exact-count
 // walk duplicated every scope-escape rule and made the diagnostic traverse each function twice.
-check_module_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_escape_kind(decls) == 0).match ({
-    true  => 0,
-    false => 1,
-}) }
+check_module_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    (a.check_module_escape_kind(decls) == 0).match ({ true => 0, false => 1 })
+}
 check_module_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     pos := a.check_module_escape_kind(decls)
     (pos == 0).match ({
@@ -1262,7 +1448,9 @@ name_read_in_expr* = (nm: string_view, e: Ptr<Expr>) bool {
         .Bin(b)         => nm.name_read_in_expr(b.lhs) || nm.name_read_in_expr(b.rhs),
         .Call(c)        => nm.name_read_in_args(c.args),
         .MethodCall(mc) => nm.name_read_in_expr(mc.recv) || nm.name_read_in_args(mc.args),
-        .Cond(d)        => nm.name_read_in_expr(d.c) || nm.name_read_in_expr(d.t) || nm.name_read_in_expr(d.e),
+        .Cond(d)        => nm.name_read_in_expr(d.c)
+            || nm.name_read_in_expr(d.t)
+            || nm.name_read_in_expr(d.e),
         .Member(m)      => nm.name_read_in_expr(m.obj),
         .Arrow(ar)      => nm.name_read_in_expr(ar.obj),
         .MakeEnum(mk)   => nm.name_read_in_expr(mk.payload),
@@ -1302,9 +1490,13 @@ name_read_in_stmt = (nm: string_view, st: Stmt) bool {
         .Let(l)      => nm.name_read_in_expr(l.value),
         .Assign(x)   => nm.name_read_in_expr(x.target) || nm.name_read_in_expr(x.value),
         .Return(r)   => nm.name_read_in_expr(r),
-        .If(f)       => nm.name_read_in_expr(f.c) || nm.name_read_in_body(f.then) || nm.name_read_in_body(f.els),
+        .If(f)       => nm.name_read_in_expr(f.c)
+            || nm.name_read_in_body(f.then)
+            || nm.name_read_in_body(f.els),
         .While(w)    => nm.name_read_in_expr(w.c) || nm.name_read_in_body(w.body),
-        .IndexSet(x) => nm.name_read_in_expr(x.seq) || nm.name_read_in_expr(x.idx) || nm.name_read_in_expr(x.value),
+        .IndexSet(x) => nm.name_read_in_expr(x.seq)
+            || nm.name_read_in_expr(x.idx)
+            || nm.name_read_in_expr(x.value),
         .ExprStmt(e) => nm.name_read_in_expr(e),
     })
 }
@@ -1355,10 +1547,9 @@ check_module_leak_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     })
     acc
 }
-check_module_leak* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_leak_kind(decls) == 0).match ({
-    true  => 0,
-    false => 1,
-}) }
+check_module_leak* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    (a.check_module_leak_kind(decls) == 0).match ({ true => 0, false => 1 })
+}
 check_module_leak_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     pos := a.check_module_leak_kind(decls)
     (pos == 0).match ({
@@ -1387,10 +1578,9 @@ check_module_addr_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     })
     acc
 }
-check_module_addr_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_addr_escape_kind(decls) == 0).match ({
-    true  => 0,
-    false => 1,
-}) }
+check_module_addr_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    (a.check_module_addr_escape_kind(decls) == 0).match ({ true => 0, false => 1 })
+}
 check_module_addr_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     pos := a.check_module_addr_escape_kind(decls)
     (pos == 0).match ({
@@ -1417,11 +1607,12 @@ check_module_send_kind = (a: MutPtr<Malloc>, decls: [Decl], mode: i32) i32 {
     })
     acc
 }
-check_module_send_rc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { a.check_module_send_kind(decls, 0) }
-check_module_send_rc* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_send_rc_kind(decls) == 0).match ({
-    true  => 0,
-    false => 1,
-}) }
+check_module_send_rc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    a.check_module_send_kind(decls, 0)
+}
+check_module_send_rc* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    (a.check_module_send_rc_kind(decls) == 0).match ({ true => 0, false => 1 })
+}
 check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     pos := a.check_module_send_rc_kind(decls)
     (pos == 0).match ({
@@ -1437,11 +1628,12 @@ check_module_send_rc_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl]
         ),
     })
 }
-check_module_send_mut_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { a.check_module_send_kind(decls, 1) }
-check_module_send_mut* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_send_mut_kind(decls) == 0).match ({
-    true  => 0,
-    false => 1,
-}) }
+check_module_send_mut_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    a.check_module_send_kind(decls, 1)
+}
+check_module_send_mut* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    (a.check_module_send_mut_kind(decls) == 0).match ({ true => 0, false => 1 })
+}
 check_module_send_mut_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     pos := a.check_module_send_mut_kind(decls)
     (pos == 0).match ({
@@ -1467,10 +1659,9 @@ check_module_scratch_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     })
     acc
 }
-check_module_scratch* = (a: MutPtr<Malloc>, decls: [Decl]) i32 { (a.check_module_scratch_kind(decls) == 0).match ({
-    true  => 0,
-    false => 1,
-}) }
+check_module_scratch* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+    (a.check_module_scratch_kind(decls) == 0).match ({ true => 0, false => 1 })
+}
 check_module_scratch_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) CheckDiagnostic {
     packed := a.check_module_scratch_kind(decls)
     (packed == 0).match ({

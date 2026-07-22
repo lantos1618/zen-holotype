@@ -66,7 +66,9 @@ duser_line_at = (user: string_view, up: i32, flat: string_view, fp: i32, ln: i32
         }),
     })
 }
-duser_line* = (user: string_view, flat: string_view, fp: i32, ln: i32) i32 { user.duser_line_at(0, flat, fp, ln, 1) }
+duser_line* = (user: string_view, flat: string_view, fp: i32, ln: i32) i32 {
+    user.duser_line_at(0, flat, fp, ln, 1)
+}
 // ── alias-rewrite inverse: a flat line `…alias__name…` whose user form removed the inserted span.
 //    find the first `__` after leading whitespace; the removed span is [lead, j+2). ──
 dlead_ws = (s: string_view, p: i32, ln: i32, i: i32) i32 {
@@ -92,7 +94,8 @@ dfind_dunder = (flat: string_view, fp: i32, ln: i32, j: i32) i32 {
 dmatch_removed = (user: string_view, up: i32, ulen: i32, flat: string_view, fp: i32, flen: i32, start: i32, n: i32) bool {
     (start + n > flen || ulen != flen - n).match ({
         true  => false,
-        false => user.dseg_eq(up, flat, fp, start, 0) && user.dseg_eq(up + start, flat, fp + start + n, flen - start - n, 0),
+        false => user.dseg_eq(up, flat, fp, start, 0)
+            && user.dseg_eq(up + start, flat, fp + start + n, flen - start - n, 0),
     })
 }
 // flat byte offset within a line -> user column after removing [start,start+n)
@@ -109,7 +112,8 @@ dseg_eq_ns = (user: string_view, up: i32, ui: i32, flat: string_view, fp: i32, f
         true  => user.at(up + ui) == 0 || user.at(up + ui) == '\n',
         false => (fi + 1 < flen && flat.at(fp + fi) == '_' && flat.at(fp + fi + 1) == '_').match ({
             true  => user.at(up + ui) == '.' && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 2, flen),
-            false => user.at(up + ui) == flat.at(fp + fi) && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 1, flen),
+            false => user.at(up + ui) == flat.at(fp + fi)
+                && user.dseg_eq_ns(up, ui + 1, flat, fp, fi + 1, flen),
         }),
     })
 }
@@ -250,7 +254,9 @@ duser_line_alias_at = (user: string_view, up: i32, flat: string_view, ls: i32, l
         }),
     })
 }
-duser_line_alias = (user: string_view, flat: string_view, ls: i32, llen: i32, lead: i32, rn: i32) i32 { user.duser_line_alias_at(0, flat, ls, llen, lead, rn, 1) }
+duser_line_alias = (user: string_view, flat: string_view, ls: i32, llen: i32, lead: i32, rn: i32) i32 {
+    user.duser_line_alias_at(0, flat, ls, llen, lead, rn, 1)
+}
 // ── zen.toml manifest value lookup — moved out of the C driver (driver.c) ──────────────────────
 // Scan a manifest source for a `key = "value"` line and return the value's span (start<0 = absent);
 // the driver dup_range's src[start..start+len] into a NUL-terminated string. Pure char-scan, no alloc.
@@ -265,10 +271,9 @@ mf_none = () MfSpan {
     )
 }
 mf_ws = (b: u8) bool { b == ' ' || b == '\t' }
-mf_skip_ws = (s: string_view, p: i32, e: i32) i32 { (p < e && s.at(p).mf_ws()).match ({
-    true  => s.mf_skip_ws(p + 1, e),
-    false => p,
-}) }
+mf_skip_ws = (s: string_view, p: i32, e: i32) i32 {
+    (p < e && s.at(p).mf_ws()).match ({ true => s.mf_skip_ws(p + 1, e), false => p })
+}
 // match `key` literally at p; return pos just past it, or -1
 mf_key_at = (s: string_view, p: i32, e: i32, key: string_view, k: i32) i32 {
     (key.at(k) == 0).match ({
@@ -395,7 +400,11 @@ render_diagnostic* = (a: MutPtr<Malloc>, in_path: string_view, user: string_view
     (line > 0 && col > 0).then({
         s = s.gstr_push(a, ':').gstr_int(a, line).gstr_push(a, ':').gstr_int(a, col)
     })
-    s = s.gstr_append(a, ": error[").gstr_append(a, kind).gstr_append(a, "]: ").gstr_append(a, message)
+    s = s
+        .gstr_append(a, ": error[")
+        .gstr_append(a, kind)
+        .gstr_append(a, "]: ")
+        .gstr_append(a, message)
     (count > 1).then({
         s = s.gstr_append(a, " (+").gstr_int(a, count - 1).gstr_append(a, " more error")
         // no method chained after a .match (parser limitation): push the closing chars inside the arms
@@ -409,7 +418,11 @@ render_diagnostic* = (a: MutPtr<Malloc>, in_path: string_view, user: string_view
         ls := user.dline_off(line, 0)
         width := (end_col >= col).match ({ true => end_col - col + 1, false => 1 })
         s = s.gstr_append(a, "  ").dput_line(a, user, ls).gstr_push(a, '\n')
-        s = s.gstr_append(a, "  ").dput_blanks(a, user, ls, col, 0).dput_carets(a, width, 0).gstr_push(a, '\n')
+        s = s
+            .gstr_append(a, "  ")
+            .dput_blanks(a, user, ls, col, 0)
+            .dput_carets(a, width, 0)
+            .gstr_push(a, '\n')
     })
     (hint.at(0) == 0).match ({
         true  => s.gstr_finish(a),

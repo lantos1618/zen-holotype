@@ -78,10 +78,23 @@ ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: string_view) String
 // The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
 // an anonymous-struct return type `{ field: T }`, changing the AST.
 ff_func = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
-    sig := s.ff_name(a, exp, f.name).ff_tparams(a, f.tparams).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
+    sig := s
+        .ff_name(a, exp, f.name)
+        .ff_tparams(a, f.tparams)
+        .ff_append(a, " = (")
+        .ff_params(a, f.params)
+        .ff_append(a, ") ")
+        .ff_ty(a, f.ret)
     sig.ff_append(a, " ").ff_block(a, f.body, 0, true)
 }
-ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String { s.ff_name(a, exp, f.name).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret) }
+ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
+    s
+        .ff_name(a, exp, f.name)
+        .ff_append(a, " = (")
+        .ff_params(a, f.params)
+        .ff_append(a, ") ")
+        .ff_ty(a, f.ret)
+}
 // ── un-hoisting inherent + trait methods ────────────────────────────────────────
 // The parser HOISTS a struct's inherent methods (and a trait impl's methods) into separate mangled
 // DFuncs (`impl_<Tr>_<Ty>_<m>`) plus a DImpl marker carrying the ORIGINAL method names. To round-trip,
@@ -199,7 +212,14 @@ ff_methods = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData, ctp: [P
         // own-line comments written ABOVE this method flush at method indent (bounded by the method's
         // name pos) — NOT hoisted into its body, where ff_block would otherwise pick them up.
         lead := out.ff_flush_leading(a, f.pos, ind)
-        sig := lead.ff_indent(a, ind).ff_append(a, mp.name).ff_tparams(a, own).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
+        sig := lead
+            .ff_indent(a, ind)
+            .ff_append(a, mp.name)
+            .ff_tparams(a, own)
+            .ff_append(a, " = (")
+            .ff_params(a, f.params)
+            .ff_append(a, ") ")
+            .ff_ty(a, f.ret)
         out = sig.ff_append(a, " ").ff_block(a, f.body, ind, true).ff_append(a, "\n")
     })
     out
@@ -228,10 +248,22 @@ ff_record_field = (s: String, a: MutPtr<Malloc>, decls: [Decl], owner: string_vi
             // own-line comments preceding the default (fields carry no pos, so the default's name pos
             // is the only in-record anchor) print above it at field indent — not inside its body.
             lead := s.ff_flush_leading(a, f.pos, 1)
-            sig := lead.ff_indent(a, 1).ff_append(a, fl.name).ff_tparams(a, own).ff_append(a, " = (").ff_params(a, f.params).ff_append(a, ") ").ff_ty(a, f.ret)
+            sig := lead
+                .ff_indent(a, 1)
+                .ff_append(a, fl.name)
+                .ff_tparams(a, own)
+                .ff_append(a, " = (")
+                .ff_params(a, f.params)
+                .ff_append(a, ") ")
+                .ff_ty(a, f.ret)
             sig.ff_append(a, " ").ff_block(a, f.body, 1, true).ff_append(a, ",\n")
         },
-        false => s.ff_indent(a, 1).ff_append(a, fl.name).ff_append(a, ": ").ff_ty(a, fl.ty).ff_append(a, ",\n"),
+        false => s
+            .ff_indent(a, 1)
+            .ff_append(a, fl.name)
+            .ff_append(a, ": ")
+            .ff_ty(a, fl.ty)
+            .ff_append(a, ",\n"),
     })
 }
 ff_struct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], sd: StructDecl) String {
@@ -256,9 +288,17 @@ ff_genstruct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: Ge
 ff_trait_impl = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
     ctp := decls.ff_type_tparams(im.ty)
     (im.methods.len == 0).match ({
-        true  => s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_ty(a, im.trty).ff_append(a, ", { })"),
+        true  => s
+            .ff_append(a, im.ty)
+            .ff_append(a, ".impl(")
+            .ff_ty(a, im.trty)
+            .ff_append(a, ", { })"),
         false => {
-            open := s.ff_append(a, im.ty).ff_append(a, ".impl(").ff_ty(a, im.trty).ff_append(a, ", {\n")
+            open := s
+                .ff_append(a, im.ty)
+                .ff_append(a, ".impl(")
+                .ff_ty(a, im.trty)
+                .ff_append(a, ", {\n")
             open.ff_methods(a, decls, im, ctp, 1).ff_append(a, "})")
         },
     })
@@ -305,7 +345,10 @@ ff_anon_payload_fields = (a: MutPtr<Malloc>, decls: [Decl], nm: string_view) [Fi
 ff_variant_payload = (s: String, a: MutPtr<Malloc>, decls: [Decl], t: Ty) String {
     t.match ({
         .Named(nm) => a.ff_is_anon_payload_name(decls, nm).match ({
-            true  => s.ff_append(a, "(").ff_tys(a, a.ff_anon_payload_tys(decls, nm)).ff_append(a, ")"),
+            true  => s
+                .ff_append(a, "(")
+                .ff_tys(a, a.ff_anon_payload_tys(decls, nm))
+                .ff_append(a, ")"),
             false => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
         }),
         _          => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
@@ -340,8 +383,16 @@ ff_variants = (s: String, a: MutPtr<Malloc>, decls: [Decl], vs: [VariantDef]) St
     })
     body
 }
-ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], ed: EnumDecl) String { s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, decls, ed.variants) }
-ff_genenum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: GenEnumDecl) String { s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": ").ff_variants(a, decls, g.variants) }
+ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], ed: EnumDecl) String {
+    s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, decls, ed.variants)
+}
+ff_genenum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: GenEnumDecl) String {
+    s
+        .ff_name(a, exp, g.name)
+        .ff_tparams(a, g.tparams)
+        .ff_append(a, ": ")
+        .ff_variants(a, decls, g.variants)
+}
 ff_decl* = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) String {
     d.match ({
         .DFunc(f)          => s.ff_func(a, exp, f),
@@ -352,7 +403,11 @@ ff_decl* = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) 
         .DForeign(f)       => s.ff_foreign(a, exp, f),
         .DImpl(im)         => s.ff_trait_impl(a, decls, im),
         .DGlobal(g)        => g.tl.match ({
-            true  => s.ff_name(a, exp, g.name).ff_append(a, " := thread_local(").ff_expr(a, g.init, 0).ff_append(a, ")"),
+            true  => s
+                .ff_name(a, exp, g.name)
+                .ff_append(a, " := thread_local(")
+                .ff_expr(a, g.init, 0)
+                .ff_append(a, ")"),
             false => g.alias.match ({
                 true  => s.ff_name(a, exp, g.name).ff_append(a, " = ").ff_expr(a, g.init, 0),
                 false => s.ff_name(a, exp, g.name).ff_append(a, " := ").ff_expr(a, g.init, 0),

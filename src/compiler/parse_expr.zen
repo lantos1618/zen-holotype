@@ -12,9 +12,13 @@ PExpr*: {
     next: i32,
 }
 is_addsub = (src: string_view, t: Token) bool { src.is_op(t, '+') || src.is_op(t, '-') }
-is_muldiv = (src: string_view, t: Token) bool { src.is_op(t, '*') || src.is_op(t, '/') || src.is_op(t, '%') }
+is_muldiv = (src: string_view, t: Token) bool {
+    src.is_op(t, '*') || src.is_op(t, '/') || src.is_op(t, '%')
+}
 // Precedence ladder, left-associative unless noted.
-parse_term = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr { a.term_rest(src, a.parse_atom(src, pos)) }
+parse_term = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    a.term_rest(src, a.parse_atom(src, pos))
+}
 term_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_muldiv(sc.tok).match ({ true => a.term_more(src, lhs, sc), false => lhs })
@@ -26,7 +30,9 @@ term_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
         next: rhs.next,
     ))
 }
-parse_expr = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr { a.expr_rest(src, a.parse_term(src, pos)) }
+parse_expr = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    a.expr_rest(src, a.parse_term(src, pos))
+}
 expr_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_addsub(sc.tok).match ({ true => a.expr_more(src, lhs, sc), false => lhs })
@@ -41,15 +47,18 @@ expr_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
 // Bitwise precedence is shift > & > ^ > |, tighter than comparison.
 is_shift = (src: string_view, t: Token) bool {
     t.kind.match ({
-        .Sym => t.len == 2 && src.at(t.start) == src.at(t.start + 1) && (src.at(t.start) == '<' || src.at(t.start) == '>'),
+        .Sym => t.len == 2
+            && src.at(t.start) == src.at(t.start + 1)
+            && (src.at(t.start) == '<' || src.at(t.start) == '>'),
         _    => false,
     })
 }
-shift_op_str = (src: string_view, t: Token) string_view { (src.at(t.start) == '<').match ({
-    true  => "<<",
-    false => ">>",
-}) }
-parse_shift = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr { a.shift_rest(src, a.parse_expr(src, pos)) }
+shift_op_str = (src: string_view, t: Token) string_view {
+    (src.at(t.start) == '<').match ({ true => "<<", false => ">>" })
+}
+parse_shift = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    a.shift_rest(src, a.parse_expr(src, pos))
+}
 shift_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_shift(sc.tok).match ({ true => a.shift_more(src, lhs, sc), false => lhs })
@@ -79,7 +88,9 @@ is_bbor = (src: string_view, t: Token) bool {
         _    => false,
     })
 }
-parse_band = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr { a.band_rest(src, a.parse_shift(src, pos)) }
+parse_band = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    a.band_rest(src, a.parse_shift(src, pos))
+}
 band_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_band(sc.tok).match ({ true => a.band_more(src, lhs, sc), false => lhs })
@@ -93,7 +104,9 @@ band_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
 }
 // Exported for enum-variant default exprs (`Name = expr`): parses everything tighter than a single
 // `|`, so the variant separator is never swallowed as bitwise-or.
-parse_bxor* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr { a.bxor_rest(src, a.parse_band(src, pos)) }
+parse_bxor* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    a.bxor_rest(src, a.parse_band(src, pos))
+}
 bxor_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_bxor(sc.tok).match ({ true => a.bxor_more(src, lhs, sc), false => lhs })
@@ -105,7 +118,9 @@ bxor_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
         next: rhs.next,
     ))
 }
-parse_bor = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr { a.bor_rest(src, a.parse_bxor(src, pos)) }
+parse_bor = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    a.bor_rest(src, a.parse_bxor(src, pos))
+}
 bor_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_bbor(sc.tok).match ({ true => a.bor_more(src, lhs, sc), false => lhs })
@@ -118,13 +133,14 @@ bor_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     ))
 }
 // Comparison excludes shifts and `=>`; `=` alone is assignment.
-is_cmp_byte = (b: u8, len: i32) bool { b == '=' && len == 2 || b == '!' && len == 2 || b == '<' || b == '>' }
+is_cmp_byte = (b: u8, len: i32) bool {
+    b == '=' && len == 2 || b == '!' && len == 2 || b == '<' || b == '>'
+}
 is_cmp = (src: string_view, t: Token) bool {
     t.kind.match ({
-        .Sym => src.at(t.start).is_cmp_byte(t.len) && src.is_shift(t).match ({
-            true  => false,
-            false => true,
-        }) && src.is_fat_arrow(t).match ({ true => false, false => true }),
+        .Sym => src.at(t.start).is_cmp_byte(t.len)
+            && src.is_shift(t).match ({ true => false, false => true })
+            && src.is_fat_arrow(t).match ({ true => false, false => true }),
         _    => false,
     })
 }
@@ -141,7 +157,9 @@ cmp_op_str = (src: string_view, t: Token) string_view {
         }),
     })
 }
-parse_cmp = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr { a.cmp_rest(src, a.parse_bor(src, pos)) }
+parse_cmp = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    a.cmp_rest(src, a.parse_bor(src, pos))
+}
 cmp_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_cmp(sc.tok).match ({ true => a.cmp_more(src, lhs, sc), false => lhs })
@@ -166,7 +184,9 @@ is_or = (src: string_view, t: Token) bool {
         _    => false,
     })
 }
-parse_and = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr { a.and_rest(src, a.parse_cmp(src, pos)) }
+parse_and = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    a.and_rest(src, a.parse_cmp(src, pos))
+}
 and_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_and(sc.tok).match ({ true => a.and_more(src, lhs, sc), false => lhs })
@@ -178,7 +198,9 @@ and_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
         next: rhs.next,
     ))
 }
-parse_or* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr { a.or_rest(src, a.parse_and(src, pos)) }
+parse_or* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+    a.or_rest(src, a.parse_and(src, pos))
+}
 or_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
     src.is_or(sc.tok).match ({ true => a.or_more(src, lhs, sc), false => lhs })

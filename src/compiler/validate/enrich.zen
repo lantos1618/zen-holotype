@@ -27,13 +27,26 @@ fn_dup_before* = (decls: [Decl], name: string_view, upto: i64) bool {
 // ── fit-mismatch enrichment: name the TWO types the checker already had in hand ────────────────
 // `expected `<want>`, got `<got>``, both rendered in USER spelling via zty. Reused by arg-type /
 // assign-fit / return-fit so a mismatch says what fits and what was supplied, not just "does not fit".
-denrich_fit_msg = (a: MutPtr<Malloc>, want: Ty, got: Ty) string_view { a.gstr_string(48).gstr_append(a, "expected `").gstr_append(a, a.zty(want)).gstr_append(a, "`, got `").gstr_append(a, a.zty(got)).gstr_append(a, "`").gstr_finish(a) }
+denrich_fit_msg = (a: MutPtr<Malloc>, want: Ty, got: Ty) string_view {
+    a
+        .gstr_string(48)
+        .gstr_append(a, "expected `")
+        .gstr_append(a, a.zty(want))
+        .gstr_append(a, "`, got `")
+        .gstr_append(a, a.zty(got))
+        .gstr_append(a, "`")
+        .gstr_finish(a)
+}
 // The message for a value `v` that must fit `want`, or "" when it actually fits / is a literal-slot
 // decision / involves an unknown/fn type (mirrors the *_err detectors' skips so it only speaks up on
 // a genuine concrete type-vs-type mismatch — the exact case the generic message was hiding).
 denrich_valfit = (env: Env, want: Ty, v: Ptr<Expr>) string_view {
     vt := env.infer_expr(v)
-    (env.unknown_ty(want) || env.unknown_ty(vt) || want.is_fnt() || v.lit_slot_verdict(want) >= 0 || fits(vt, want)).match ({
+    (env.unknown_ty(want)
+        || env.unknown_ty(vt)
+        || want.is_fnt()
+        || v.lit_slot_verdict(want) >= 0
+        || fits(vt, want)).match ({
         true  => "",
         false => env.a.denrich_fit_msg(want, vt),
     })
@@ -87,11 +100,40 @@ denrich_fieldlist = (a: MutPtr<Malloc>, fields: [Field]) string_view {
     })
     s.gstr_finish(a)
 }
-denrich_member_noty = (a: MutPtr<Malloc>, field: string_view, objty: Ty) string_view { a.gstr_string(64).gstr_append(a, "type `").gstr_append(a, a.zty(objty)).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "`").gstr_finish(a) }
+denrich_member_noty = (a: MutPtr<Malloc>, field: string_view, objty: Ty) string_view {
+    a
+        .gstr_string(64)
+        .gstr_append(a, "type `")
+        .gstr_append(a, a.zty(objty))
+        .gstr_append(a, "` has no field `")
+        .gstr_append(a, field)
+        .gstr_append(a, "`")
+        .gstr_finish(a)
+}
 // An enum/Result receiver: name the type and steer to `.match` (enums have variants, not fields).
-denrich_enum_member_msg = (a: MutPtr<Malloc>, name: string_view, field: string_view) string_view { a.gstr_string(112).gstr_append(a, "enum `").gstr_append(a, name).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` (enums are accessed via `.match`, not `.field`)").gstr_finish(a) }
+denrich_enum_member_msg = (a: MutPtr<Malloc>, name: string_view, field: string_view) string_view {
+    a
+        .gstr_string(112)
+        .gstr_append(a, "enum `")
+        .gstr_append(a, name)
+        .gstr_append(a, "` has no field `")
+        .gstr_append(a, field)
+        .gstr_append(a, "` (enums are accessed via `.match`, not `.field`)")
+        .gstr_finish(a)
+}
 // A fieldless string receiver (`str`/`Cstr`/`text`): its accessors are UFCS METHODS, so steer to `.field()`.
-denrich_str_member_msg = (a: MutPtr<Malloc>, field: string_view, objty: Ty) string_view { a.gstr_string(96).gstr_append(a, "`").gstr_append(a, a.zty(objty)).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` — did you mean `.").gstr_append(a, field).gstr_append(a, "()`?").gstr_finish(a) }
+denrich_str_member_msg = (a: MutPtr<Malloc>, field: string_view, objty: Ty) string_view {
+    a
+        .gstr_string(96)
+        .gstr_append(a, "`")
+        .gstr_append(a, a.zty(objty))
+        .gstr_append(a, "` has no field `")
+        .gstr_append(a, field)
+        .gstr_append(a, "` — did you mean `.")
+        .gstr_append(a, field)
+        .gstr_append(a, "()`?")
+        .gstr_finish(a)
+}
 denrich_member_msg = (env: Env, field: string_view, objty: Ty) string_view {
     a := env.a
     objty.match ({
@@ -104,7 +146,16 @@ denrich_member_msg = (env: Env, field: string_view, objty: Ty) string_view {
         .StringCstr    => a.denrich_str_member_msg(field, objty),
         .StringLiteral => a.denrich_str_member_msg(field, objty),
         .Named(n)      => env.env_is_struct(n).match ({
-            true  => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, n).gstr_append(a, "` has no field `").gstr_append(a, field).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(env.env_struct_fields(n))).gstr_append(a, ")").gstr_finish(a),
+            true  => a
+                .gstr_string(96)
+                .gstr_append(a, "struct `")
+                .gstr_append(a, n)
+                .gstr_append(a, "` has no field `")
+                .gstr_append(a, field)
+                .gstr_append(a, "` (fields: ")
+                .gstr_append(a, a.denrich_fieldlist(env.env_struct_fields(n)))
+                .gstr_append(a, ")")
+                .gstr_finish(a),
             false => env.env_is_enum(n).match ({
                 true  => a.denrich_enum_member_msg(n, field),
                 false => a.denrich_member_noty(field, objty),
@@ -116,7 +167,12 @@ denrich_member_msg = (env: Env, field: string_view, objty: Ty) string_view {
 // the target name of a not-callable call resolves to a value (a local/global), not a function; name its type.
 denrich_notcallable_msg = (env: Env, name: string_view) string_view {
     a := env.a
-    a.gstr_string(64).gstr_append(a, "value of type `").gstr_append(a, a.zty(env.var_or_global(name))).gstr_append(a, "` is not a function").gstr_finish(a)
+    a
+        .gstr_string(64)
+        .gstr_append(a, "value of type `")
+        .gstr_append(a, a.zty(env.var_or_global(name)))
+        .gstr_append(a, "` is not a function")
+        .gstr_finish(a)
 }
 // the comma-list of methods trait `tr` requires that (tn, tr) does not provide: every FnT field of
 // the trait struct with neither an impl method nor a trait default body covering it.
@@ -126,7 +182,8 @@ denrich_missing_list = (a: MutPtr<Malloc>, decls: [Decl], tn: string_view, tr: s
     n := 0
     decls.struct_fields(tr).loop((h, i, f) {
         miss := f.ty.match ({
-            .FnT(fd) => provided.has_method(f.name) == false && decls.trait_has_default(tr, f.name) == false,
+            .FnT(fd) => provided.has_method(f.name) == false
+                && decls.trait_has_default(tr, f.name) == false,
             _        => false,
         })
         s = miss.match ({
@@ -144,7 +201,11 @@ denrich_missing_tail = (a: MutPtr<Malloc>, decls: [Decl], tn: string_view, tr: s
     list := a.denrich_missing_list(decls, tn, tr)
     is_empty(list).match ({
         true  => "",
-        false => a.gstr_string(96).gstr_append(a, " — missing method(s): ").gstr_append(a, list).gstr_finish(a),
+        false => a
+            .gstr_string(96)
+            .gstr_append(a, " — missing method(s): ")
+            .gstr_append(a, list)
+            .gstr_finish(a),
     })
 }
 // `draw(b)` where a bounded tparam `A: Show` binds to a type with no impl: name the type, the
@@ -158,8 +219,25 @@ denrich_bound_violation = (env: Env, f: Func, c: CallData, tp: Param) string_vie
     tr := tp.tparam_bound()
     tn := env.call_targ(f, c.args, tp.name).recv_name()
     env.decls.is_struct(tr).match ({
-        true  => a.gstr_string(160).gstr_append(a, "type `").gstr_append(a, tn).gstr_append(a, "` does not satisfy the bound `").gstr_append(a, tr).gstr_append(a, "` required by `").gstr_append(a, f.name).gstr_append(a, "`").gstr_append(a, a.denrich_missing_tail(env.decls, tn, tr)).gstr_finish(a),
-        false => a.gstr_string(128).gstr_append(a, "the bound `").gstr_append(a, tr).gstr_append(a, "` required by `").gstr_append(a, f.name).gstr_append(a, "` names no declared trait").gstr_finish(a),
+        true  => a
+            .gstr_string(160)
+            .gstr_append(a, "type `")
+            .gstr_append(a, tn)
+            .gstr_append(a, "` does not satisfy the bound `")
+            .gstr_append(a, tr)
+            .gstr_append(a, "` required by `")
+            .gstr_append(a, f.name)
+            .gstr_append(a, "`")
+            .gstr_append(a, a.denrich_missing_tail(env.decls, tn, tr))
+            .gstr_finish(a),
+        false => a
+            .gstr_string(128)
+            .gstr_append(a, "the bound `")
+            .gstr_append(a, tr)
+            .gstr_append(a, "` required by `")
+            .gstr_append(a, f.name)
+            .gstr_append(a, "` names no declared trait")
+            .gstr_finish(a),
     })
 }
 denrich_bound_msg = (env: Env, f: Func, c: CallData) string_view {
@@ -180,7 +258,17 @@ denrich_recv_msg = (env: Env, c: CallData) string_view {
     tr := env.decls.trait_declaring(c.fn)
     (is_empty(tn) || is_empty(tr)).match ({
         true  => "",
-        false => a.gstr_string(160).gstr_append(a, "type `").gstr_append(a, tn).gstr_append(a, "` does not implement trait `").gstr_append(a, tr).gstr_append(a, "` (which declares `").gstr_append(a, c.fn).gstr_append(a, "`)").gstr_append(a, a.denrich_missing_tail(env.decls, tn, tr)).gstr_finish(a),
+        false => a
+            .gstr_string(160)
+            .gstr_append(a, "type `")
+            .gstr_append(a, tn)
+            .gstr_append(a, "` does not implement trait `")
+            .gstr_append(a, tr)
+            .gstr_append(a, "` (which declares `")
+            .gstr_append(a, c.fn)
+            .gstr_append(a, "`)")
+            .gstr_append(a, a.denrich_missing_tail(env.decls, tn, tr))
+            .gstr_finish(a),
     })
 }
 // a trait-bound error at a call: a KNOWN local fn means a violated `A: Trait` bound at this call
@@ -196,7 +284,16 @@ denrich_operand_msg = (env: Env, b: BinData) string_view {
     a := env.a
     lt := env.infer_expr(b.lhs)
     rt := env.infer_expr(b.rhs)
-    a.gstr_string(96).gstr_append(a, "operator `").gstr_append(a, b.op.op_display()).gstr_append(a, "` cannot be applied to `").gstr_append(a, a.zty(lt)).gstr_append(a, "` and `").gstr_append(a, a.zty(rt)).gstr_append(a, "`").gstr_finish(a)
+    a
+        .gstr_string(96)
+        .gstr_append(a, "operator `")
+        .gstr_append(a, b.op.op_display())
+        .gstr_append(a, "` cannot be applied to `")
+        .gstr_append(a, a.zty(lt))
+        .gstr_append(a, "` and `")
+        .gstr_append(a, a.zty(rt))
+        .gstr_append(a, "`")
+        .gstr_finish(a)
 }
 // first init field whose name is not a declared field (the unknown field a struct-literal error names)
 denrich_bad_init = (fields: [Field], inits: [FieldInit]) string_view {
@@ -217,7 +314,16 @@ denrich_makestruct_msg = (env: Env, sd: MakeStructData) string_view {
             bad := fields.denrich_bad_init(sd.inits)
             is_empty(bad).match ({
                 true  => "",
-                false => a.gstr_string(96).gstr_append(a, "struct `").gstr_append(a, sd.ty).gstr_append(a, "` has no field `").gstr_append(a, bad).gstr_append(a, "` (fields: ").gstr_append(a, a.denrich_fieldlist(fields)).gstr_append(a, ")").gstr_finish(a),
+                false => a
+                    .gstr_string(96)
+                    .gstr_append(a, "struct `")
+                    .gstr_append(a, sd.ty)
+                    .gstr_append(a, "` has no field `")
+                    .gstr_append(a, bad)
+                    .gstr_append(a, "` (fields: ")
+                    .gstr_append(a, a.denrich_fieldlist(fields))
+                    .gstr_append(a, ")")
+                    .gstr_finish(a),
             })
         },
         false => "",
@@ -247,12 +353,25 @@ denrich_ambiguous_msg = (env: Env, c: CallData) string_view {
         return ""
     })
     a := env.a
-    s := a.gstr_string(192).gstr_append(a, "ambiguous method `").gstr_append(a, c.fn).gstr_append(a, "` on `").gstr_append(a, tyname).gstr_append(a, "`: both `")
-    s = s.denrich_dotted(a, cs.first, 0).gstr_append(a, "` and `").denrich_dotted(a, cs.second, 0).gstr_append(a, "` match the receiver")
+    s := a
+        .gstr_string(192)
+        .gstr_append(a, "ambiguous method `")
+        .gstr_append(a, c.fn)
+        .gstr_append(a, "` on `")
+        .gstr_append(a, tyname)
+        .gstr_append(a, "`: both `")
+    s = s
+        .denrich_dotted(a, cs.first, 0)
+        .gstr_append(a, "` and `")
+        .denrich_dotted(a, cs.second, 0)
+        .gstr_append(a, "` match the receiver")
     (cs.count > 2).then({
         s = s.gstr_append(a, " (and more)")
     })
-    s = s.gstr_append(a, " - call it qualified, e.g. `").denrich_dotted(a, cs.first, 0).gstr_append(a, "(recv, ...)`")
+    s = s
+        .gstr_append(a, " - call it qualified, e.g. `")
+        .denrich_dotted(a, cs.first, 0)
+        .gstr_append(a, "(recv, ...)`")
     s.gstr_finish(a)
 }
 denrich_arity_msg = (env: Env, c: CallData) string_view {
@@ -266,11 +385,25 @@ denrich_arity_msg = (env: Env, c: CallData) string_view {
     })
     (exp < 0).match ({
         true  => "",
-        false => a.gstr_string(64).gstr_append(a, "wrong number of arguments: expected ").gstr_int(a, exp).gstr_append(a, ", found ").gstr_int(a, c.args.len).gstr_finish(a),
+        false => a
+            .gstr_string(64)
+            .gstr_append(a, "wrong number of arguments: expected ")
+            .gstr_int(a, exp)
+            .gstr_append(a, ", found ")
+            .gstr_int(a, c.args.len)
+            .gstr_finish(a),
     })
 }
 // ── targ-arity enrichment: name the expected vs the supplied TYPE-argument count ───────────────
-denrich_targ_count_msg = (a: MutPtr<Malloc>, exp: i64, got: i64) string_view { a.gstr_string(64).gstr_append(a, "expected ").gstr_int(a, exp).gstr_append(a, " type argument(s), got ").gstr_int(a, got).gstr_finish(a) }
+denrich_targ_count_msg = (a: MutPtr<Malloc>, exp: i64, got: i64) string_view {
+    a
+        .gstr_string(64)
+        .gstr_append(a, "expected ")
+        .gstr_int(a, exp)
+        .gstr_append(a, " type argument(s), got ")
+        .gstr_int(a, got)
+        .gstr_finish(a)
+}
 denrich_targ_arity_msg = (env: Env, c: CallData) string_view {
     env.env_known_fn(c.fn).match ({
         true  => env.a.denrich_targ_count_msg(env.env_func(c.fn).tparams.len, c.targs.len),
@@ -292,7 +425,12 @@ denrich_exhaust_msg = (env: Env, m: MatchData) string_view {
     miss := vs.first_missing_variant(m.arms)
     is_empty(miss).match ({
         true  => "",
-        false => env.a.gstr_string(80).gstr_append(env.a, "match does not cover variant `.").gstr_append(env.a, miss).gstr_append(env.a, "`").gstr_finish(env.a),
+        false => env.a
+            .gstr_string(80)
+            .gstr_append(env.a, "match does not cover variant `.")
+            .gstr_append(env.a, miss)
+            .gstr_append(env.a, "`")
+            .gstr_finish(env.a),
     })
 }
 // ── method-not-found enrichment: an undefined call whose first argument is a concrete struct/enum ──
@@ -306,7 +444,16 @@ denrich_undef_method_msg = (env: Env, c: CallData) string_view {
     tn := env.infer_expr(c.args[0].addr()).recv_name()
     (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
         true  => "",
-        false => a.gstr_string(112).gstr_append(a, "no method `").gstr_append(a, c.fn).gstr_append(a, "` on type `").gstr_append(a, tn).gstr_append(a, "`, and no function `").gstr_append(a, c.fn).gstr_append(a, "` is in scope").gstr_finish(a),
+        false => a
+            .gstr_string(112)
+            .gstr_append(a, "no method `")
+            .gstr_append(a, c.fn)
+            .gstr_append(a, "` on type `")
+            .gstr_append(a, tn)
+            .gstr_append(a, "`, and no function `")
+            .gstr_append(a, c.fn)
+            .gstr_append(a, "` is in scope")
+            .gstr_finish(a),
     })
 }
 denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) string_view {
@@ -323,15 +470,17 @@ denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) 
             true  => env.denrich_member_msg(ar.field, env.infer_expr(ar.obj)),
             false => a.denrich_expr(env, ar.obj, off, code),
         }),
-        .MakeStruct(sd) => (code == KSTRUCTFIELD() && sd.pos.pos_or((sd.inits.len == 0).match ({
-            true  => 0,
-            false => load(sd.inits[0].value).expr_pos(),
-        })) == off).match ({
-            true  => env.denrich_makestruct_msg(sd),
-            false => (code == KTARGARITY() && sd.pos.pos_or((sd.inits.len == 0).match ({
+        .MakeStruct(sd) => (code == KSTRUCTFIELD()
+            && sd.pos.pos_or((sd.inits.len == 0).match ({
                 true  => 0,
                 false => load(sd.inits[0].value).expr_pos(),
             })) == off).match ({
+            true  => env.denrich_makestruct_msg(sd),
+            false => (code == KTARGARITY()
+                && sd.pos.pos_or((sd.inits.len == 0).match ({
+                    true  => 0,
+                    false => load(sd.inits[0].value).expr_pos(),
+                })) == off).match ({
                 true  => env.denrich_makestruct_targ_msg(sd),
                 false => a.denrich_inits(env, sd.inits, off, code),
             }),
@@ -454,9 +603,17 @@ denrich_dupfn = (a: MutPtr<Malloc>, decls: [Decl], off: i32) string_view {
     res := ""
     decls.loop((h, i, d) {
         nm := d.fn_name_of()
-        hit := is_empty(res) && is_empty(nm) == false && d.fn_pos_of() == off && decls.fn_dup_before(nm, i)
+        hit := is_empty(res)
+            && is_empty(nm) == false
+            && d.fn_pos_of() == off
+            && decls.fn_dup_before(nm, i)
         res = hit.match ({
-            true  => a.gstr_string(96).gstr_append(a, "duplicate top-level definition of `").gstr_append(a, nm).gstr_append(a, "` — an earlier definition of this name already exists in the flattened program").gstr_finish(a),
+            true  => a
+                .gstr_string(96)
+                .gstr_append(a, "duplicate top-level definition of `")
+                .gstr_append(a, nm)
+                .gstr_append(a, "` — an earlier definition of this name already exists in the flattened program")
+                .gstr_finish(a),
             false => res,
         })
     })
@@ -465,7 +622,20 @@ denrich_dupfn = (a: MutPtr<Malloc>, decls: [Decl], off: i32) string_view {
 // the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound/
 // dup-fn/undefined-name error at `off`, else "".
 denrich_module* = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) string_view {
-    (off <= 0 || code != KSTRUCTFIELD() && code != KOPERAND() && code != KNOTCALLABLE() && code != KTRAITBOUND() && code != KDUPFN() && code != KUNDEFINED() && code != KARGTYPE() && code != KRETURNFIT() && code != KASSIGNFIT() && code != KARITY() && code != KEXHAUST() && code != KMETHODNOTFOUND() && code != KTARGARITY()).then({
+    (off <= 0
+        || code != KSTRUCTFIELD()
+            && code != KOPERAND()
+            && code != KNOTCALLABLE()
+            && code != KTRAITBOUND()
+            && code != KDUPFN()
+            && code != KUNDEFINED()
+            && code != KARGTYPE()
+            && code != KRETURNFIT()
+            && code != KASSIGNFIT()
+            && code != KARITY()
+            && code != KEXHAUST()
+            && code != KMETHODNOTFOUND()
+            && code != KTARGARITY()).then({
         return ""
     })
     (code == KDUPFN()).then({
@@ -493,7 +663,8 @@ denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code:
     (kind == code.diagnostic_kind_name()).match ({
         true  => (code == KTARGARITY()).match ({
             true  => desc_or(a.denrich_module(raw, off, code), a.denrich_module(decls, off, code)),
-            false => desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND() || code == KARGTYPE()).match ({
+            false => desc_or(a.denrich_module(decls, off, code), (code == KTRAITBOUND()
+                || code == KARGTYPE()).match ({
                 true  => a.denrich_module(raw, off, code),
                 false => "",
             })),
@@ -506,7 +677,9 @@ denrich_check* = (a: MutPtr<Malloc>, raw: [Decl], decls: [Decl], off: i32, code:
 // calls the inliner expands per-field and whose template emits no C (is_template). Allow that ONE
 // shape; a CONCRETE definition (which would emit C and shadow the intrinsic) stays reserved, like
 // every other intrinsic name.
-reserved_ok_wrapper = (f: Func) bool { (f.name == "field_eq" || f.name == "each_field" || f.name == "zip_fields") && f.is_generic_fn() }
+reserved_ok_wrapper = (f: Func) bool {
+    (f.name == "field_eq" || f.name == "each_field" || f.name == "zip_fields") && f.is_generic_fn()
+}
 reserved_name_kind* = (decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) {

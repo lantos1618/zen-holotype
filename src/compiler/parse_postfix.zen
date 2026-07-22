@@ -36,7 +36,10 @@ is_then_at = (src: string_view, pos: i32) bool {
     kw := src.scan(dot.next)
     lp := src.scan(kw.next)
     open := src.scan(lp.next)
-    src.is_dot(dot.tok) && src.is_then_kw(kw.tok) && src.is_lparen(lp.tok) && src.is_lbrace(open.tok)
+    src.is_dot(dot.tok)
+        && src.is_then_kw(kw.tok)
+        && src.is_lparen(lp.tok)
+        && src.is_lbrace(open.tok)
 }
 // `.field` is field access (genc Member, chainable: `a.b.c`); `.match` is the ternary above.
 // match is checked first, so a `.match` is never mistaken for a field named `match`.
@@ -55,10 +58,8 @@ is_field_at = (src: string_view, pos: i32) bool {
 // without this guard it glues onto the previous statement (`x := 7` ⨯ `[1]` → `x := 7[1]`).
 is_index_at = (src: string_view, pos: i32) bool {
     sc := src.scan(pos)
-    src.is_lbracket(sc.tok) && src.nl_between(pos, sc.tok.start).match ({
-        true  => false,
-        false => true,
-    })
+    src.is_lbracket(sc.tok)
+        && src.nl_between(pos, sc.tok.start).match ({ true => false, false => true })
 }
 // A postfix call suffix `base(args)` — a CHAINED call `make_adder(10)(5)` where `base` is itself a
 // call result. ADJACENCY is the gate: the `(` must touch the base's last token with NO intervening
@@ -102,10 +103,9 @@ nl_between* = (src: string_view, lo: i32, hi: i32) bool {
 }
 // raw '\n' scan (the pre-comment-aware nl_between): used for the tail of a `//` comment, whose
 // terminating newline is a real line break.
-raw_nl = (src: string_view, lo: i32, hi: i32) bool { (lo >= hi).match ({
-    true  => false,
-    false => src.at(lo) == '\n' || src.raw_nl(lo + 1, hi),
-}) }
+raw_nl = (src: string_view, lo: i32, hi: i32) bool {
+    (lo >= hi).match ({ true => false, false => src.at(lo) == '\n' || src.raw_nl(lo + 1, hi) })
+}
 // skip past the `*/` closing a block comment inside a token gap; an unterminated tail (only
 // possible when hi is the EOF sentinel) just ends the gap scan.
 skip_gap_comment = (src: string_view, pos: i32, hi: i32) i32 {
@@ -165,10 +165,8 @@ parse_postfix* = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
             true  => a.parse_then(src, base),
             false => src.is_loop_at(base.next).match ({
                 true  => a.parse_loop(src, base),
-                false => (src.is_field_at(base.next) && src.is_variant_break(base.next).match ({
-                    true  => false,
-                    false => true,
-                })).match ({
+                false => (src.is_field_at(base.next)
+                    && src.is_variant_break(base.next).match ({ true => false, false => true })).match ({
                     true  => a.parse_field(src, base),
                     false => src.is_index_at(base.next).match ({
                         true  => a.parse_index(src, base),
@@ -245,10 +243,11 @@ is_qual_ctor = (base: PExpr, name: string_view) bool {
 // `field:` shape disambiguates. Round-trips via a `MakeStruct` whose type carries the dotted `ns.Type`.
 is_qual_struct_lit = (src: string_view, base: PExpr, name: string_view, fld: Scan) bool {
     nx := src.scan(fld.next)
-    subj_name(base.expr).at(0) != 0 && name.at(0).is_upper_byte() && src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).match ({
-        true  => false,
-        false => true,
-    }) && src.paren_is_struct(nx.next)
+    subj_name(base.expr).at(0) != 0
+        && name.at(0).is_upper_byte()
+        && src.is_lparen(nx.tok)
+        && src.nl_between(fld.next, nx.tok.start).match ({ true => false, false => true })
+        && src.paren_is_struct(nx.next)
 }
 parse_qual_struct_lit = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
     open := src.scan(fld.next)
@@ -278,10 +277,9 @@ is_qual_generic_struct_lit = (src: string_view, base: PExpr, name: string_view, 
         true  => false,
         false => {
             sc := src.scan(after)
-            src.is_lparen(sc.tok) && src.nl_between(after, sc.tok.start).match ({
-                true  => false,
-                false => true,
-            }) && src.paren_is_struct(sc.next)
+            src.is_lparen(sc.tok)
+                && src.nl_between(after, sc.tok.start).match ({ true => false, false => true })
+                && src.paren_is_struct(sc.next)
         },
     })
 }
@@ -346,10 +344,8 @@ parse_field = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
 // statement (`nd := 10 + ed.w` ⏎ `(nd < 100).match(…)`), not `ed.w(nd < 100)`.
 parse_field_plain = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
     nx := src.scan(fld.next)
-    (src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).match ({
-        true  => false,
-        false => true,
-    })).match ({
+    (src.is_lparen(nx.tok)
+        && src.nl_between(fld.next, nx.tok.start).match ({ true => false, false => true })).match ({
         true  => a.parse_method(src, base, name, nx, fld.tok.start),
         false => a.parse_postfix(src, PExpr(
             expr: a.enode(member_at(base.expr, name, fld.tok.start)),
@@ -362,10 +358,8 @@ parse_field_plain = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: str
 // nullary tag and the `(` a new statement (`a := State.Idle` ⏎ `(a).q()`), not `State.Idle(a)`.
 parse_qual_ctor* = (a: MutPtr<Malloc>, src: string_view, tyname: string_view, vn: string_view, fld: Scan) PExpr {
     nx := src.scan(fld.next)
-    (src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).match ({
-        true  => false,
-        false => true,
-    })).match ({
+    (src.is_lparen(nx.tok)
+        && src.nl_between(fld.next, nx.tok.start).match ({ true => false, false => true })).match ({
         true  => src.is_rparen(src.scan(nx.next).tok).match ({
             true  => PExpr(
                 expr: a.enode(mktag(tyname, vn)),

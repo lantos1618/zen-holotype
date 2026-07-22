@@ -5,7 +5,9 @@
 { field_fnt } = compiler.check_inline
 { Malloc } = std.mem.alloc
 { String } = std.text.string
-lift_toplevel = (idx: DeclIndex, decls: [Decl], n: string_view) bool { idx.func_idx.get(n, 0 - 1) >= 0 || idx.global_idx.get(n, 0 - 1) >= 0 }
+lift_toplevel = (idx: DeclIndex, decls: [Decl], n: string_view) bool {
+    idx.func_idx.get(n, 0 - 1) >= 0 || idx.global_idx.get(n, 0 - 1) >= 0
+}
 lift_is_captured* = (decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, n: string_view) bool {
     (bound.var_bound(n) || idx.lift_toplevel(decls, n) || n == "true" || n == "false").match ({
         true  => false,
@@ -67,35 +69,50 @@ lift_body_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VL
 lift_stmt_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, st: Stmt) bool {
     st.match ({
         .Let(l)      => a.lift_expr_cap(decls, idx, bound, l.value),
-        .Assign(x)   => a.lift_expr_cap(decls, idx, bound, x.target) || a.lift_expr_cap(decls, idx, bound, x.value),
+        .Assign(x)   => a.lift_expr_cap(decls, idx, bound, x.target)
+            || a.lift_expr_cap(decls, idx, bound, x.value),
         .Return(r)   => a.lift_expr_cap(decls, idx, bound, r),
         .ExprStmt(e) => a.lift_expr_cap(decls, idx, bound, e),
-        .If(f)       => a.lift_expr_cap(decls, idx, bound, f.c) || a.lift_body_cap(decls, idx, bound, f.then) || a.lift_body_cap(decls, idx, bound, f.els),
-        .While(w)    => a.lift_expr_cap(decls, idx, bound, w.c) || a.lift_body_cap(decls, idx, bound, w.body),
-        .IndexSet(x) => a.lift_expr_cap(decls, idx, bound, x.seq) || a.lift_expr_cap(decls, idx, bound, x.idx) || a.lift_expr_cap(decls, idx, bound, x.value),
+        .If(f)       => a.lift_expr_cap(decls, idx, bound, f.c)
+            || a.lift_body_cap(decls, idx, bound, f.then)
+            || a.lift_body_cap(decls, idx, bound, f.els),
+        .While(w)    => a.lift_expr_cap(decls, idx, bound, w.c)
+            || a.lift_body_cap(decls, idx, bound, w.body),
+        .IndexSet(x) => a.lift_expr_cap(decls, idx, bound, x.seq)
+            || a.lift_expr_cap(decls, idx, bound, x.idx)
+            || a.lift_expr_cap(decls, idx, bound, x.value),
     })
 }
 lift_expr_cap = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, e: Ptr<Expr>) bool {
     load(e).match ({
         .Var(v)        => lift_is_captured(decls, idx, bound, v.name),
-        .Bin(b)        => a.lift_expr_cap(decls, idx, bound, b.lhs) || a.lift_expr_cap(decls, idx, bound, b.rhs),
-        .Call(c)       => lift_is_captured(decls, idx, bound, c.fn) || a.lift_args_cap(decls, idx, bound, c.args),
-        .Cond(d)       => a.lift_expr_cap(decls, idx, bound, d.c) || a.lift_expr_cap(decls, idx, bound, d.t) || a.lift_expr_cap(decls, idx, bound, d.e),
+        .Bin(b)        => a.lift_expr_cap(decls, idx, bound, b.lhs)
+            || a.lift_expr_cap(decls, idx, bound, b.rhs),
+        .Call(c)       => lift_is_captured(decls, idx, bound, c.fn)
+            || a.lift_args_cap(decls, idx, bound, c.args),
+        .Cond(d)       => a.lift_expr_cap(decls, idx, bound, d.c)
+            || a.lift_expr_cap(decls, idx, bound, d.t)
+            || a.lift_expr_cap(decls, idx, bound, d.e),
         .Member(m)     => a.lift_expr_cap(decls, idx, bound, m.obj),
         .Arrow(ar)     => a.lift_expr_cap(decls, idx, bound, ar.obj),
         .MakeEnum(mk)  => a.lift_expr_cap(decls, idx, bound, mk.payload),
         .MakeStruct(s) => a.lift_inits_cap(decls, idx, bound, s.inits),
-        .Match(m)      => a.lift_expr_cap(decls, idx, bound, m.subj) || a.lift_arms_cap(decls, idx, bound, m.arms),
-        .Index(ix)     => a.lift_expr_cap(decls, idx, bound, ix.seq) || a.lift_expr_cap(decls, idx, bound, ix.idx),
+        .Match(m)      => a.lift_expr_cap(decls, idx, bound, m.subj)
+            || a.lift_arms_cap(decls, idx, bound, m.arms),
+        .Index(ix)     => a.lift_expr_cap(decls, idx, bound, ix.seq)
+            || a.lift_expr_cap(decls, idx, bound, ix.idx),
         .SliceLit(sd)  => a.lift_args_cap(decls, idx, bound, sd.items),
-        .Loop(l)       => a.lift_expr_cap(decls, idx, bound, l.seq) || a.lift_body_cap(decls, idx, a.vcons(l.idx, tvoid(), a.vcons(l.elem, tvoid(), bound)), l.body),
+        .Loop(l)       => a.lift_expr_cap(decls, idx, bound, l.seq)
+            || a.lift_body_cap(decls, idx, a.vcons(l.idx, tvoid(), a.vcons(l.elem, tvoid(), bound)), l.body),
         .Block(bl)     => a.lift_body_cap(decls, idx, bound, bl.stmts),
         .Lambda(la)    => a.lift_body_cap(decls, idx, a.lift_lamparams(bound, la.params), la.body),
         _              => false,
     })
 }
 // a lambda is liftable iff it does NOT capture (only its own params + body binders + top-level names).
-lift_liftable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaData) bool { a.lift_body_cap(decls, idx, a.lift_lamparams(a.vnil(), lm.params), lm.body) == false }
+lift_liftable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaData) bool {
+    a.lift_body_cap(decls, idx, a.lift_lamparams(a.vnil(), lm.params), lm.body) == false
+}
 // --- the lift transform: replace each liftable lambda (in a field-init / return value) with the name
 //     of a freshly generated top-level fn, collected (with a shared counter) for appending. ---
 lift_name = (a: MutPtr<Malloc>, k: i64) string_view {
@@ -143,8 +160,16 @@ lift_rw_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8
     })
     buf
 }
-lift_rw_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], sty: string_view, targs: [Ty], inits: [FieldInit]) [FieldInit] { map_slice(a, inits, (fi) { finit(fi.name, a.lift_at(decls, idx, gcp, gen, a.field_fnt(decls, idx, sty, targs, fi.name), fi.value)) }) }
-lift_rw_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], arms: [ArmData]) [ArmData] { map_slice(a, arms, (ar) { arm(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body)) }) }
+lift_rw_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], sty: string_view, targs: [Ty], inits: [FieldInit]) [FieldInit] {
+    map_slice(a, inits, (fi) {
+        finit(fi.name, a.lift_at(decls, idx, gcp, gen, a.field_fnt(decls, idx, sty, targs, fi.name), fi.value))
+    })
+}
+lift_rw_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], arms: [ArmData]) [ArmData] {
+    map_slice(a, arms, (ar) {
+        arm(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body))
+    })
+}
 lift_rw_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, gcp: RawPtr<u8>, gen: [Decl], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .MakeStruct(s) => a.cenode(mkstructg_at(s.ty, s.mty, s.targs, a.lift_rw_inits(decls, idx, gcp, gen, s.ty, s.targs, s.inits), s.pos)),

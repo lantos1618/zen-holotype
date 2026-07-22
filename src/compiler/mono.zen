@@ -58,7 +58,9 @@ mono_payload = (a: MutPtr<Malloc>, decls: [Decl], tparams: [Param], args: [Ty], 
         .Named(n) => decls.is_genstruct_name(n).match ({
             true  => {
                 gsd := decls.find_genstruct(n)
-                tys := map_slice(a, gsd.tparams, (tp) { a.subst_ty_in(tparams, args, tnamed(tp.name)) })
+                tys := map_slice(a, gsd.tparams, (tp) {
+                    a.subst_ty_in(tparams, args, tnamed(tp.name))
+                })
                 tgeneric(n, tys, a.mangle_str_in(n, tys))
             },
             false => sub,
@@ -172,10 +174,9 @@ collect_func = (buf: [GenericData], cnt: i32, f: Func) i32 {
 // ── body walk: discover generic instances from struct LITERALS in expressions, not just from typed
 //    signatures. A `b := Box<i32>{…}` with no typed param/return still needs Box_i32 emitted. A
 //    MakeStruct with type args carries its instance (ty + targs + mangled mty); recurse everywhere. ──
-add_gen = (buf: [GenericData], cnt: i32, g: GenericData) i32 { buf.gd_has_mangled(cnt, g.mangled).match ({
-    true  => cnt,
-    false => buf.add_inst(cnt, g),
-}) }
+add_gen = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
+    buf.gd_has_mangled(cnt, g.mangled).match ({ true => cnt, false => buf.add_inst(cnt, g) })
+}
 collect_exprs = (buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
     c := cnt
     xs.loop((h, i, x) {
@@ -302,10 +303,9 @@ expand_one = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, 
     nc := buf.collect_decl(count, a.mono_inst(decls, buf[i]))
     a.expand_insts(decls, buf, nc, i + 1)
 }
-expand_insts = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 { (i >= count).match ({
-    true  => count,
-    false => a.expand_one(decls, buf, count, i),
-}) }
+expand_insts = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
+    (i >= count).match ({ true => count, false => a.expand_one(decls, buf, count, i) })
+}
 // monomorphize: drop the generic templates, append one concrete struct/enum per discovered instance.
 monomorphize* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     ce := a.collect_insts(decls)

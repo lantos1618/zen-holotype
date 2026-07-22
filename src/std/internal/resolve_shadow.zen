@@ -25,8 +25,16 @@
 shadow_alias_of = (a: MutPtr<Malloc>) String { a.gstr_string(16).gstr_append(a, "zshadow") }
 // per-region alias for USER-MODULE renames: `zshadow0`, `zshadow1`, … — the region index keeps two
 // modules that shadow the SAME std name (each defining its own `len`) from colliding on one mangled form.
-shadow_alias_idx = (a: MutPtr<Malloc>, idx: i64) String { a.gstr_string(20).gstr_append(a, "zshadow").res_udec(a, to_i32(idx)) }
-shadow_mangled = (a: MutPtr<Malloc>, alias: String, name: String) String { a.gstr_string(alias.len + name.len + 4).rappend_string(a, alias).rappend(a, "__").rappend_string(a, name) }
+shadow_alias_idx = (a: MutPtr<Malloc>, idx: i64) String {
+    a.gstr_string(20).gstr_append(a, "zshadow").res_udec(a, to_i32(idx))
+}
+shadow_mangled = (a: MutPtr<Malloc>, alias: String, name: String) String {
+    a
+        .gstr_string(alias.len + name.len + 4)
+        .rappend_string(a, alias)
+        .rappend(a, "__")
+        .rappend_string(a, name)
+}
 // the renameable set plus its unrenameable remainder (see shadow_name_sets).
 ShadowSets: {
     ren: String,
@@ -70,10 +78,8 @@ shadow_name_sets = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], modsrc: string_vi
         ((s.imported || s.foreign || s.is_type) == false).then({
             key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
             inmain := s.decl_start >= lo && s.decl_start < hi
-            once := mainseen.rset_has(key) && maindup.rset_has(key).match ({
-                true  => false,
-                false => true,
-            })
+            once := mainseen.rset_has(key)
+                && maindup.rset_has(key).match ({ true => false, false => true })
             unimported := imported.rset_has(key).match ({ true => false, false => true })
             free := allnames.rset_has(a.shadow_mangled(alias, key)).match ({
                 true  => false,
@@ -97,7 +103,9 @@ shadow_name_sets = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], modsrc: string_vi
 }
 // main-body form: the historical entry point (alias `zshadow`, unrenameable remainder ignored — a
 // kept main-body dup still surfaces as the checker's dup-fn).
-shadow_rename_set = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], mainsrc: string_view, lo: i64, hi: i64) String { a.shadow_name_sets(syms, mainsrc, lo, hi, a.shadow_alias_of()).ren }
+shadow_rename_set = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], mainsrc: string_view, lo: i64, hi: i64) String {
+    a.shadow_name_sets(syms, mainsrc, lo, hi, a.shadow_alias_of()).ren
+}
 ShadowFlat*: {
     flat: string_view,
     bodyend: i64,
@@ -116,9 +124,19 @@ shadow_flat* = (a: MutPtr<Malloc>, pre: string_view, presyms: [ProvidedSymbol], 
                     renamed: false,
                 ),
                 false => {
-                    main := a.gstr_string(hi - lo + 1).rappend_span(a, pre, to_i32(lo), to_i32(hi)).gstr_finish(a)
-                    rewS := a.gstr_string(4096).rewrite_alias_names(a, main, 0, names, a.shadow_alias_of())
-                    nf := a.gstr_string(4096).rappend_span(a, pre, 0, to_i32(lo)).rappend_string(a, rewS).append_to_nul(a, pre, to_i32(hi)).gstr_finish(a)
+                    main := a
+                        .gstr_string(hi - lo + 1)
+                        .rappend_span(a, pre, to_i32(lo), to_i32(hi))
+                        .gstr_finish(a)
+                    rewS := a
+                        .gstr_string(4096)
+                        .rewrite_alias_names(a, main, 0, names, a.shadow_alias_of())
+                    nf := a
+                        .gstr_string(4096)
+                        .rappend_span(a, pre, 0, to_i32(lo))
+                        .rappend_string(a, rewS)
+                        .append_to_nul(a, pre, to_i32(hi))
+                        .gstr_finish(a)
                     ShadowFlat(
                         flat: nf,
                         bodyend: lo + rewS.len,
@@ -141,16 +159,35 @@ fail_shadow_import = (a: MutPtr<Malloc>, entry: ModuleEntry, importer: string_vi
     pos := a.symbol_start_of(entry.graph.symbols, nm)
     line := entry.source.res_line_of(pos)
     col := entry.source.res_col_of(pos)
-    m0 := a.gstr_string(320).gstr_append(a, "zenc: ").gstr_append(a, entry.path).gstr_push(a, ':').res_udec(a, line).gstr_push(a, ':').res_udec(a, col).gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `").gstr_append(a, nm).gstr_push(a, '`')
+    m0 := a
+        .gstr_string(320)
+        .gstr_append(a, "zenc: ")
+        .gstr_append(a, entry.path)
+        .gstr_push(a, ':')
+        .res_udec(a, line)
+        .gstr_push(a, ':')
+        .res_udec(a, col)
+        .gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `")
+        .gstr_append(a, nm)
+        .gstr_push(a, '`')
     l1 := m0.gstr_push(a, 10)
-    d0 := l1.gstr_append(a, "  `").gstr_append(a, nm).gstr_append(a, "` also exists in this module's import closure (an export it never imported by name), and `")
+    d0 := l1
+        .gstr_append(a, "  `")
+        .gstr_append(a, nm)
+        .gstr_append(a, "` also exists in this module's import closure (an export it never imported by name), and `")
     d1 := (importer == "").match ({
         true  => d0.gstr_append(a, "your program"),
         false => a.mappend_id_str_dotted(d0, importer),
     })
-    d2 := d1.gstr_append(a, "` imports `").gstr_append(a, nm).gstr_append(a, "` from this module — the definition cannot be shadow-renamed")
+    d2 := d1
+        .gstr_append(a, "` imports `")
+        .gstr_append(a, nm)
+        .gstr_append(a, "` from this module — the definition cannot be shadow-renamed")
     l2 := d2.gstr_push(a, 10)
-    h0 := l2.gstr_append(a, "hint: rename `").gstr_append(a, nm).gstr_append(a, "`, or import this module under a namespace alias and qualify the call")
+    h0 := l2
+        .gstr_append(a, "hint: rename `")
+        .gstr_append(a, nm)
+        .gstr_append(a, "`, or import this module under a namespace alias and qualify the call")
     eprint(h0.gstr_push(a, 10).gstr_finish(a))
     exit(1)
     0
@@ -161,10 +198,27 @@ fail_shadow_mangled = (a: MutPtr<Malloc>, entry: ModuleEntry, bad: String, alias
     pos := a.symbol_start_of(entry.graph.symbols, nm)
     line := entry.source.res_line_of(pos)
     col := entry.source.res_col_of(pos)
-    m0 := a.gstr_string(320).gstr_append(a, "zenc: ").gstr_append(a, entry.path).gstr_push(a, ':').res_udec(a, line).gstr_push(a, ':').res_udec(a, col).gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `").gstr_append(a, nm).gstr_push(a, '`')
+    m0 := a
+        .gstr_string(320)
+        .gstr_append(a, "zenc: ")
+        .gstr_append(a, entry.path)
+        .gstr_push(a, ':')
+        .res_udec(a, line)
+        .gstr_push(a, ':')
+        .res_udec(a, col)
+        .gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `")
+        .gstr_append(a, nm)
+        .gstr_push(a, '`')
     l1 := m0.gstr_push(a, 10)
-    d0 := l1.gstr_append(a, "  `").gstr_append(a, nm).gstr_append(a, "` collides with an unimported name from this module's import closure, and its shadow form `")
-    d1 := a.mappend_string(d0, alias).gstr_append(a, "__").gstr_append(a, nm).gstr_append(a, "` is already taken")
+    d0 := l1
+        .gstr_append(a, "  `")
+        .gstr_append(a, nm)
+        .gstr_append(a, "` collides with an unimported name from this module's import closure, and its shadow form `")
+    d1 := a
+        .mappend_string(d0, alias)
+        .gstr_append(a, "__")
+        .gstr_append(a, nm)
+        .gstr_append(a, "` is already taken")
     l2 := d1.gstr_push(a, 10)
     h0 := l2.gstr_append(a, "hint: rename `").gstr_append(a, nm).gstr_push(a, '`')
     eprint(h0.gstr_push(a, 10).gstr_finish(a))
@@ -230,9 +284,17 @@ shadow_flat_users* = (a: MutPtr<Malloc>, pre: string_view, table: ModuleTable, p
                 })
                 (ss.ren.len > 0).then({
                     a.shadow_guard_names(table, entry, ss.ren, 0)
-                    seg := a.gstr_string(hi - lo + 1).rappend_span(a, cur, to_i32(lo), to_i32(hi)).gstr_finish(a)
+                    seg := a
+                        .gstr_string(hi - lo + 1)
+                        .rappend_span(a, cur, to_i32(lo), to_i32(hi))
+                        .gstr_finish(a)
                     rew := a.gstr_string(4096).rewrite_alias_names(a, seg, 0, ss.ren, alias)
-                    cur = a.gstr_string(4096).rappend_span(a, cur, 0, to_i32(lo)).rappend_string(a, rew).append_to_nul(a, cur, to_i32(hi)).gstr_finish(a)
+                    cur = a
+                        .gstr_string(4096)
+                        .rappend_span(a, cur, 0, to_i32(lo))
+                        .rappend_string(a, rew)
+                        .append_to_nul(a, cur, to_i32(hi))
+                        .gstr_finish(a)
                     fregions_splice(lo, hi, rew.len)
                     (hi <= nsl).then({
                         shift = shift + (rew.len - (hi - lo))

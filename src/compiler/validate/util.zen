@@ -24,7 +24,9 @@ env_params* = (env: Env, fn: string_view) [Param] { env.env_func(fn).params }
 // tmethod_idx folds every DImpl.methods name + every DTraitDefault fn name; import_idx every DImport name).
 env_trait_method* = (env: Env, fn: string_view) bool { env.didx.tmethod_idx.get(fn, 0 - 1) >= 0 }
 env_imported* = (env: Env, fn: string_view) bool { env.didx.import_idx.get(fn, 0 - 1) >= 0 }
-env_is_gen_struct* = (env: Env, name: string_view) bool { env.didx.genstruct_idx.get(name, 0 - 1) >= 0 }
+env_is_gen_struct* = (env: Env, name: string_view) bool {
+    env.didx.genstruct_idx.get(name, 0 - 1) >= 0
+}
 env_is_gen_enum* = (env: Env, name: string_view) bool { env.didx.genenum_idx.get(name, 0 - 1) >= 0 }
 // O(1) indexed struct presence/field lookups (Env carries the decl index).
 env_is_struct* = (env: Env, name: string_view) bool { env.didx.struct_idx.get(name, 0 - 1) >= 0 }
@@ -82,7 +84,9 @@ named_declared = (decls: [Decl], n: string_view) bool {
 // concrete decl only exists after monomorphization.
 // the narrow int/float widths arrive as Named("u32") etc. (no Ty variant), but they ARE valid
 // primitives that genc lowers to C types — so the unknown-type pass must treat them as KNOWN.
-is_prim_width* = (n: string_view) bool { n == "i8" || n == "i16" || n == "u16" || n == "u32" || n == "u64" || n == "f32" }
+is_prim_width* = (n: string_view) bool {
+    n == "i8" || n == "i16" || n == "u16" || n == "u32" || n == "u64" || n == "f32"
+}
 unknown_ty* = (env: Env, t: Ty) bool {
     t.is_uninferable().match ({
         true  => true,
@@ -162,8 +166,12 @@ LitVal*: {
 // the fold degrades to "not a foldable constant" and the range check stays lenient (defers).
 lit_i64_max = () i64 { 9223372036854775807 }
 lit_i64_min = () i64 { 0 - 9223372036854775807 - 1 }
-lit_add_wraps = (l: i64, r: i64) bool { r > 0 && l > lit_i64_max() - r || r < 0 && l < lit_i64_min() - r }
-lit_sub_wraps = (l: i64, r: i64) bool { r < 0 && l > lit_i64_max() + r || r > 0 && l < lit_i64_min() + r }
+lit_add_wraps = (l: i64, r: i64) bool {
+    r > 0 && l > lit_i64_max() - r || r < 0 && l < lit_i64_min() - r
+}
+lit_sub_wraps = (l: i64, r: i64) bool {
+    r < 0 && l > lit_i64_max() + r || r > 0 && l < lit_i64_min() + r
+}
 // sign-split bound checks; every division below has a nonzero divisor and never forms MIN / -1.
 lit_mul_wraps = (l: i64, r: i64) bool {
     (l == 0 || r == 0).match ({
@@ -282,7 +290,9 @@ lit_fits = (e: Ptr<Expr>, t: Ty) bool {
     lv.ok.match ({ true => t.lit_range_ok(lv.v, lv.neg), false => true })
 }
 // the narrow widths are Named, so ty_rank can't see them — recognize them as int slots here.
-is_int_width = (n: string_view) bool { n == "i8" || n == "i16" || n == "u16" || n == "u32" || n == "u64" }
+is_int_width = (n: string_view) bool {
+    n == "i8" || n == "i16" || n == "u16" || n == "u32" || n == "u64"
+}
 is_int_slot = (t: Ty) bool {
     t.match ({
         .Named(n) => is_int_width(n),
@@ -302,7 +312,9 @@ lit_slot_verdict* = (e: Ptr<Expr>, t: Ty) i32 {
 // does a type MENTION an (unbound) generic type param? recurses Ptr/Slice/Generic-args. Concrete
 // params (bool/Box/i32/…) do NOT mention a tparam → they are still arg/field-checked; only slots
 // typed by the callee's own tparam are skipped (their concrete type is known only after mono).
-tys_mention_tparam = (tps: [Param], ts: [Ty]) bool { ts.slice_any((t) { tps.ty_mentions_tparam(t) }) }
+tys_mention_tparam = (tps: [Param], ts: [Ty]) bool {
+    ts.slice_any((t) { tps.ty_mentions_tparam(t) })
+}
 ty_mentions_tparam* = (tps: [Param], t: Ty) bool {
     t.match ({
         .Named(n)   => tps.names_has(n),
@@ -450,7 +462,13 @@ is_badmatchlabel_call* = (c: CallData) bool { c.fn == "__badmatchlabel" }
 // An FnT-typed shadow still gets the indirect-call arity/arg checks (fnval path); a KNOWN non-FnT
 // shadow is not-callable (see shadow_not_callable); only a not-yet-typable shadow (pre-inline
 // generic bodies) is skipped, never over-rejected.
-shadows_toplevel* = (env: Env, fn: string_view) bool { env.is_local(fn) && (env.env_known_fn(fn) || fn.is_intrinsic() || env.env_imported(fn) || env.env_trait_method(fn)) }
+shadows_toplevel* = (env: Env, fn: string_view) bool {
+    env.is_local(fn)
+        && (env.env_known_fn(fn)
+            || fn.is_intrinsic()
+            || env.env_imported(fn)
+            || env.env_trait_method(fn))
+}
 // A call THROUGH a non-FnT shadow: the local is a scalar/struct, so the call can never succeed — and
 // worse, genc's call dispatch is by NAME, so a "skipped" call to an intrinsic-named local (e.g. a
 // param `store_i64: i64`) is still emitted as the INTRINSIC expansion, silently writing wrong values.
@@ -460,7 +478,13 @@ shadow_not_callable* = (env: Env, fn: string_view) bool {
     t := env.var_or_global(fn)
     (t.is_void_ty() || env.unknown_ty(t)).match ({ true => false, false => true })
 }
-is_write_intrinsic = (fn: string_view) bool { fn == "store" || fn == "store_i64" || fn == "atomic_add_i64" || fn == "atomic_store_i64" || fn == "atomic_cas_i64" }
+is_write_intrinsic = (fn: string_view) bool {
+    fn == "store"
+        || fn == "store_i64"
+        || fn == "atomic_add_i64"
+        || fn == "atomic_store_i64"
+        || fn == "atomic_cas_i64"
+}
 // Slices are writable views, so constructing one from Ptr<T> would launder read-only memory just as
 // directly as a store. RawPtr and MutPtr retain the explicitly writable paths.
 store_writes_readonly = (env: Env, c: CallData) bool {
@@ -469,13 +493,23 @@ store_writes_readonly = (env: Env, c: CallData) bool {
         false => false,
     })
 }
-store_mut_kind* = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(c).match ({
-    true  => KPTRWRITE(),
-    false => 0,
-}), c.pos) }
+store_mut_kind* = (env: Env, c: CallData) i32 {
+    kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos)
+}
 // every intrinsic that DEREFERENCES its pointer arg0: the typed load/store/offset trio AND the raw
 // word intrinsics (load_i64/store_i64/atomic_*) — the latter crash on null exactly the same way.
-is_deref_intrinsic* = (fn: string_view) bool { fn == "load" || fn == "store" || fn == "offset" || fn == "slice" || fn == "load_i64" || fn == "store_i64" || fn == "atomic_add_i64" || fn == "atomic_load_i64" || fn == "atomic_store_i64" || fn == "atomic_cas_i64" }
+is_deref_intrinsic* = (fn: string_view) bool {
+    fn == "load"
+        || fn == "store"
+        || fn == "offset"
+        || fn == "slice"
+        || fn == "load_i64"
+        || fn == "store_i64"
+        || fn == "atomic_add_i64"
+        || fn == "atomic_load_i64"
+        || fn == "atomic_store_i64"
+        || fn == "atomic_cas_i64"
+}
 derefs_nullable = (env: Env, c: CallData) bool {
     (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({
         true  => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(),
@@ -489,10 +523,9 @@ derefs_nullable = (env: Env, c: CallData) bool {
 // (T != u8) that has NOT been proven non-null is rejected. The proof is carried by the TYPE: a
 // `q := assert_nonnull(p)` yields `q: MutPtr<T>`, so `load(q)` sees a non-nullable kind and passes.
 // `RawPtr<u8>` (the byte-buffer floor) and `Ptr`/`MutPtr` are never nullable, so they are exempt.
-null_deref_kind* = (env: Env, c: CallData) i32 { kv_at(env.derefs_nullable(c).match ({
-    true  => KNULLDEREF(),
-    false => 0,
-}), c.pos) }
+null_deref_kind* = (env: Env, c: CallData) i32 {
+    kv_at(env.derefs_nullable(c).match ({ true => KNULLDEREF(), false => 0 }), c.pos)
+}
 // `assert_nonnull(p)` narrows a nullable pointer to a non-null `MutPtr<T>`; its argument MUST be a
 // pointer. A NON-pointer arg (e.g. a scalar) makes the result's `pointee_of` collapse to void and the
 // emitted C drops a value into a void slot ("void value not ignored"). Reject only genuinely
@@ -693,7 +726,9 @@ stmt_pos* = (st: Stmt) i32 {
         .IndexSet(x) => x.pos.pos_or(load(x.seq).expr_pos()),
     })
 }
-body_pos* = (body: [Stmt]) i32 { (body.len == 0).match ({ true => 0, false => body[0].stmt_pos() }) }
+body_pos* = (body: [Stmt]) i32 {
+    (body.len == 0).match ({ true => 0, false => body[0].stmt_pos() })
+}
 // ── arity enrichment: name the expected vs the supplied argument count ─────────────────────────
 // The declared count comes from the callee (a known local fn's params, an intrinsic's fixed arity, or
 // an FnT value's parameter list); -1 = a callee whose arity we can't state here, so keep the generic
@@ -728,7 +763,10 @@ is_ctx_typed_arg* = (e: Expr) bool {
 ut_has_tparam = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { tp.name == n }) }
 ut_unknown_ty* = (env: Env, tparams: [Param], t: Ty) i32 {
     t.match ({
-        .Named(n)   => (n == "Self" || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({
+        .Named(n)   => (n == "Self"
+            || is_prim_width(n)
+            || tparams.ut_has_tparam(n)
+            || env.env_named_declared(n)).match ({
             true  => 0,
             false => 1,
         }),
@@ -795,7 +833,10 @@ ut_expr_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) i32
 ut_let_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) i32 {
     l.ty.is_void_ty().match ({
         true  => 0,
-        false => env.ut_unknown_ty(tparams, l.ty).kv_one(KUNKNOWNTYPE()).kv_at(l.pos.pos_or(load(l.value).expr_pos())),
+        false => env
+            .ut_unknown_ty(tparams, l.ty)
+            .kv_one(KUNKNOWNTYPE())
+            .kv_at(l.pos.pos_or(load(l.value).expr_pos())),
     })
 }
 ut_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
@@ -804,8 +845,13 @@ ut_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
         .Assign(x)   => a.ut_expr_kind(env, tparams, x.value),
         .Return(r)   => a.ut_expr_kind(env, tparams, r),
         .ExprStmt(e) => a.ut_expr_kind(env, tparams, e),
-        .If(f)       => a.ut_expr_kind(env, tparams, f.c).kv_kor(a.ut_body_kind(env, tparams, f.then)).kv_kor(a.ut_body_kind(env, tparams, f.els)),
-        .While(w)    => a.ut_expr_kind(env, tparams, w.c).kv_kor(a.ut_body_kind(env, tparams, w.body)),
+        .If(f)       => a
+            .ut_expr_kind(env, tparams, f.c)
+            .kv_kor(a.ut_body_kind(env, tparams, f.then))
+            .kv_kor(a.ut_body_kind(env, tparams, f.els)),
+        .While(w)    => a
+            .ut_expr_kind(env, tparams, w.c)
+            .kv_kor(a.ut_body_kind(env, tparams, w.body)),
         .IndexSet(x) => a.ut_expr_kind(env, tparams, x.value),
     })
 }
@@ -816,7 +862,12 @@ ut_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32
     })
     acc
 }
-ut_func_kind* = (a: MutPtr<Malloc>, env: Env, f: Func) i32 { env.ut_params_kind(f.tparams, f.params, f.pos).kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE()).kv_at(f.pos)).kv_kor(a.ut_body_kind(env, f.tparams, f.body)) }
+ut_func_kind* = (a: MutPtr<Malloc>, env: Env, f: Func) i32 {
+    env
+        .ut_params_kind(f.tparams, f.params, f.pos)
+        .kv_kor(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE()).kv_at(f.pos))
+        .kv_kor(a.ut_body_kind(env, f.tparams, f.body))
+}
 // ── unknown-type NAME walk: the offending type's NAME, in the SAME traversal order as the kind walk ──
 // A `Ty` carries no source position, so the reported caret anchors on the enclosing declaration; this
 // parallel walk recovers the actual bad type name for the message. It mirrors the kind walk exactly
@@ -824,7 +875,10 @@ ut_func_kind* = (a: MutPtr<Malloc>, env: Env, f: Func) i32 { env.ut_params_kind(
 // unknown type the kind walk positioned on.
 utn_ty = (env: Env, tparams: [Param], t: Ty) string_view {
     t.match ({
-        .Named(n)   => (n == "Self" || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({
+        .Named(n)   => (n == "Self"
+            || is_prim_width(n)
+            || tparams.ut_has_tparam(n)
+            || env.env_named_declared(n)).match ({
             true  => "",
             false => n,
         }),
@@ -881,10 +935,9 @@ utn_expr = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) string_
         _         => "",
     })
 }
-utn_let = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) string_view { l.ty.is_void_ty().match ({
-    true  => "",
-    false => env.utn_ty(tparams, l.ty),
-}) }
+utn_let = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) string_view {
+    l.ty.is_void_ty().match ({ true => "", false => env.utn_ty(tparams, l.ty) })
+}
 utn_stmt = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) string_view {
     st.match ({
         .Let(l)      => desc_or(a.utn_let(env, tparams, l), a.utn_expr(env, tparams, l.value)),
@@ -903,10 +956,19 @@ utn_body = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) string_
     })
     r
 }
-utn_func* = (a: MutPtr<Malloc>, env: Env, f: Func) string_view { desc_or(env.utn_params(f.tparams, f.params), desc_or(env.utn_ty(f.tparams, f.ret), a.utn_body(env, f.tparams, f.body))) }
+utn_func* = (a: MutPtr<Malloc>, env: Env, f: Func) string_view {
+    desc_or(env.utn_params(f.tparams, f.params), desc_or(env.utn_ty(f.tparams, f.ret), a.utn_body(env, f.tparams, f.body)))
+}
 // the unknown-type message NAMING the offending type (`unknown type name `Widget``), else the generic
 // ladder message when the name walk found nothing (should not happen when the kind walk fired).
-unknown_type_message* = (a: MutPtr<Malloc>, nm: string_view) string_view { a.gstr_string(48).gstr_append(a, "unknown type name `").gstr_append(a, nm).gstr_append(a, "`").gstr_finish(a) }
+unknown_type_message* = (a: MutPtr<Malloc>, nm: string_view) string_view {
+    a
+        .gstr_string(48)
+        .gstr_append(a, "unknown type name `")
+        .gstr_append(a, nm)
+        .gstr_append(a, "`")
+        .gstr_finish(a)
+}
 // ── infinite type: a struct/enum that contains ITSELF by VALUE (transitively) ──────────────────────────
 // A by-value field/payload whose type is the enclosing type — directly (`Node: { next: Node }`,
 // `E: A(E) | B`) or through a chain of other by-value structs/enums (mutual recursion `A: { b: B }`,
@@ -970,8 +1032,12 @@ inf_gen_self = (t: Ty, name: string_view) bool {
         _           => false,
     })
 }
-inf_gen_fields* = (fields: [Field], name: string_view) bool { fields.slice_any((fl) { fl.ty.inf_gen_self(name) }) }
-inf_gen_variants* = (vs: [VariantDef], name: string_view) bool { vs.slice_any((v) { v.payload.inf_gen_self(name) }) }
+inf_gen_fields* = (fields: [Field], name: string_view) bool {
+    fields.slice_any((fl) { fl.ty.inf_gen_self(name) })
+}
+inf_gen_variants* = (vs: [VariantDef], name: string_view) bool {
+    vs.slice_any((v) { v.payload.inf_gen_self(name) })
+}
 is_scope_param_ty* = (t: Ty) bool {
     t.match ({
         .Ptr(pd) => load(pd.pointee).match ({
@@ -1033,4 +1099,10 @@ is_scope_alloc_member* = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
 // pure read. DEFERRED to v3: may-leak (discharged on some exit paths, not all — v2 only flags owners
 // with NO discharge on ANY path, i.e. all-getter-reads); a per-callee "retains/returns param" summary
 // (would let non-getter reader calls count as pure without escape risk).
-is_pure_owner_getter* = (fn: string_view) bool { fn.sx_named("get", "__get") || fn.sx_named("val", "__val") || fn.sx_named("ptr", "__ptr") || fn.sx_named("count", "__count") || fn.sx_named("clone", "__clone") }
+is_pure_owner_getter* = (fn: string_view) bool {
+    fn.sx_named("get", "__get")
+        || fn.sx_named("val", "__val")
+        || fn.sx_named("ptr", "__ptr")
+        || fn.sx_named("count", "__count")
+        || fn.sx_named("clone", "__clone")
+}
