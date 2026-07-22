@@ -13,7 +13,7 @@
 { fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank, write_thru_readonly } = compiler.check_fits
 { calls_reflect, rc_calls_body } = compiler.passes.refcount
 { reflect_fields } = compiler.passes.subst
-{ has_fnt_param, slice_any } = compiler.astops
+{ has_fnt_param, slice_any, wr_lam_writes_value } = compiler.astops
 { scan } = compiler.lex
 { Allocator, Malloc } = std.mem.alloc
 { of } = std.collections.map
@@ -25,8 +25,8 @@
   is_ptr_ty, is_struct, lit_slot_verdict, pos_or, tparam_bound, ty_mentions_tparam, unknown_ty,
   ut_unknown_ty, ut_unknown_tys } = compiler.validate.util
 { KARGTYPE, KARITY, KARMVOID, KBADBIND, KCAPACITY, KDIAG_CAP, KDUPVARIANT, KFFITYPE, KMISGEN,
-  KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KTARGARITY, KTRAITBOUND, KUNKNOWNTYPE,
-  KUNREACHABLEARM, KVBREAK, desc_or } = compiler.validate.diag
+  KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND,
+  KUNKNOWNTYPE, KUNREACHABLEARM, KVBREAK, desc_or } = compiler.validate.diag
 { zty } = compiler.validate.ownership
 { arg_err_at } = compiler.validate.args
 { check_module, kv_at, kv_one } = compiler.validate.core
@@ -1026,6 +1026,112 @@ krr_loop_ret_stmt = (st: Stmt) bool {
     })
 }
 krr_loop_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_loop_ret_stmt() }) }
+// ── reflect-write: an ASSIGNMENT through a TEMP-BOUND reflection subject ──────────────────────────
+// The inliner binds a non-Var reflection subject to a hidden temp ONCE (subst.refl_needs_bind — so
+// a side-effecting receiver evaluates once); an enclosing reflection lambda's VALUE param becomes a
+// member place at expansion, hence ALSO non-Var when it is the inner subject. If the call's lambda
+// then assigns its value param, those field writes land on the discarded temp — the program
+// compiles and runs but silently drops the writes (#587). Reject it up front, pointed at the call.
+// `ps` = the innermost enclosing reflection lambda's params ([] at fn top level); a subject naming
+// one of its VALUE params (index >= 1) is bound; any non-Var subject is bound. A subject copied to
+// a genuine local first (`leaf := fv`) is a plain Var — spliced unbound, its writes stick — which
+// is the sanctioned shape (std.format.serde's jr_obj2).
+krw_refl_shape = (c: CallData) bool {
+    c.fn == "each_field" && c.args.len == 2 || c.fn == "zip_fields" && c.args.len == 3
+}
+krw_value_param = (ps: [Param], nm: string_view) bool {
+    f := false
+    ps.loop((h, i, p) {
+        f = (i >= 1 && p.name == nm).match ({ true => true, false => f })
+    })
+    f
+}
+krw_subject_bound = (e: Ptr<Expr>, ps: [Param]) bool {
+    load(e).match ({
+        .Var(v) => ps.krw_value_param(v.name),
+        _       => true,
+    })
+}
+krw_call = (c: CallData, ps: [Param]) i32 {
+    nsub := (c.fn == "each_field").match ({ true => 1, false => 2 })
+    bound := false
+    c.args.loop((h, i, x) {
+        bound = (i < to_i64(nsub) && x.addr().krw_subject_bound(ps)).match ({
+            true  => true,
+            false => bound,
+        })
+    })
+    (bound && c.args[c.args.len - 1].wr_lam_writes_value()).match ({
+        true  => KREFLECTWRITE().kv_at(c.pos),
+        false => 0,
+    })
+}
+krw_e = (e: Ptr<Expr>, ps: [Param]) i32 {
+    load(e).match ({
+        .Bin(b)        => b.lhs.krw_e(ps).or(b.rhs.krw_e(ps)),
+        .Cond(d)       => d.c.krw_e(ps).or(d.t.krw_e(ps)).or(d.e.krw_e(ps)),
+        .Call(c)       => c.krw_refl_shape().match ({
+            true  => c
+                .krw_call(ps)
+                .or(c.args[c.args.len - 1].match ({
+                    .Lambda(la) => la.body.krw_body(la.params),
+                    _           => 0,
+                }))
+                .or(c.args.krw_subj_es(c.args.len - 1, ps)),
+            false => c.args.krw_subj_es(c.args.len, ps),
+        }),
+        .Member(m)     => m.obj.krw_e(ps),
+        .Arrow(ar)     => ar.obj.krw_e(ps),
+        .MakeEnum(mk)  => mk.payload.krw_e(ps),
+        .MakeStruct(s) => {
+            acc := 0
+            s.inits.loop((h, i, fi) {
+                acc = acc.or(fi.value.krw_e(ps))
+            })
+            acc
+        },
+        .Match(m)      => {
+            acc := m.subj.krw_e(ps)
+            m.arms.loop((h, i, ar) {
+                acc = acc.or(ar.body.krw_e(ps))
+            })
+            acc
+        },
+        .Index(ix)     => ix.seq.krw_e(ps).or(ix.idx.krw_e(ps)),
+        .SliceLit(sd)  => sd.items.krw_subj_es(sd.items.len, ps),
+        .Loop(l)       => l.seq.krw_e(ps).or(l.body.krw_body(ps)),
+        .Block(bl)     => bl.stmts.krw_body(ps),
+        .Lambda(la)    => la.body.krw_body(ps),
+        _              => 0,
+    })
+}
+// walk the first n exprs of xs (a reflection call's SUBJECT args; the lambda arg is walked
+// separately with ITS params as the bound set).
+krw_subj_es = (xs: [Expr], n: i64, ps: [Param]) i32 {
+    acc := 0
+    xs.loop((h, i, x) {
+        acc = (i < n).match ({ true => acc.or(x.addr().krw_e(ps)), false => acc })
+    })
+    acc
+}
+krw_stmt = (st: Stmt, ps: [Param]) i32 {
+    st.match ({
+        .Let(l)      => l.value.krw_e(ps),
+        .Assign(x)   => x.target.krw_e(ps).or(x.value.krw_e(ps)),
+        .Return(r)   => r.krw_e(ps),
+        .ExprStmt(e) => e.krw_e(ps),
+        .If(f)       => f.c.krw_e(ps).or(f.then.krw_body(ps)).or(f.els.krw_body(ps)),
+        .While(w)    => w.c.krw_e(ps).or(w.body.krw_body(ps)),
+        .IndexSet(x) => x.seq.krw_e(ps).or(x.idx.krw_e(ps)).or(x.value.krw_e(ps)),
+    })
+}
+krw_body = (body: [Stmt], ps: [Param]) i32 {
+    acc := 0
+    body.loop((h, i, st) {
+        acc = acc.or(st.krw_stmt(ps))
+    })
+    acc
+}
 ko_is_or_call = (c: CallData) bool { c.fn == "or_return" && c.args.len == 1 }
 ko_is_or_mcall = (mc: MethodCallData) bool { mc.method == "or_return" && mc.args.len == 0 }
 // the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree.
@@ -1729,6 +1835,7 @@ Env.impl(EnvKinds, {
 FuncKinds*: {
     ka_rec_hof_kind: (Self) i32,
     ka_reflect_ret_kind: (Self) i32,
+    ka_reflect_write_kind: (Self) i32,
 }
 Func.impl(FuncKinds, {
     ka_rec_hof_kind = (f: Func) i32 {
@@ -1744,6 +1851,12 @@ Func.impl(FuncKinds, {
     ka_reflect_ret_kind = (f: Func) i32 {
         (f.tparams.len > 0 && f.body.calls_reflect() && f.body.krr_loop_ret_body()).match ({
             true  => KREFLECTRETURN().kv_at(f.pos),
+            false => 0,
+        })
+    }
+    ka_reflect_write_kind = (f: Func) i32 {
+        (f.tparams.len > 0 && f.body.calls_reflect()).match ({
+            true  => f.body.krw_body(empty_params()),
             false => 0,
         })
     }

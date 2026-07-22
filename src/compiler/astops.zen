@@ -14,7 +14,7 @@
 // Only plain-named-value receivers are method-ified: the language does not support `.impl` on
 // pointer/slice receiver types, so genc's Ptr<Expr>/[Stmt] predicates (is_expr_null, blk_diverges,
 // stmts_diverge) necessarily stay free functions in compiler.genc.
-{ Ty, Func, Decl, StructDecl, Param, sbyte, gstr_push, cbuf } = compiler.genc
+{ Ty, Func, Decl, StructDecl, Param, CallData, Expr, Stmt, sbyte, gstr_push, cbuf } = compiler.genc
 { String } = std.text.string
 { Malloc } = std.mem.alloc
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
@@ -139,4 +139,93 @@ slice_any*<T> = (xs: [T], p: (T) bool) bool {
         f = p(y).match ({ true => true, false => f })
     })
     f
+}
+// ── wr_*: "does this body WRITE variable `nm`?" (the rc_calls_body walker family shape) ──────────
+// Used by the inliner's argument binding (compiler.check.bind_args): a template param the body
+// assigns to must be bound to a TEMP COPY before splicing — otherwise the callee's writes land on
+// the caller's argument (value-semantics violation, #585). Write forms counted: a direct/place
+// assignment rooted at `nm` (`nm = …`, `nm.f = …`, `nm[i] = …`), an IndexSet rooted at `nm`, and a
+// reflection expansion whose SUBJECT roots at `nm` with a lambda that assigns its value param
+// (each_field/zip_fields substitute the subject's fields as the lambda's assignable places). A
+// `let` re-binding of `nm` is NOT tracked (shadowed writes still count) — over-binding only costs
+// a temp; under-binding is the unsound direction. Lives here (not passes.refcount, the family's
+// home) because refcount imports compiler.check — the walker must sit BELOW check in the import
+// order.
+// root variable name of a place expression (`a.b.c[i]` → "a"); "" when not rooted at a plain Var.
+wr_root_name* = (e: Ptr<Expr>) string_view {
+    load(e).match ({
+        .Var(v)    => v.name,
+        .Member(m) => m.obj.wr_root_name(),
+        .Arrow(ar) => ar.obj.wr_root_name(),
+        .Index(ix) => ix.seq.wr_root_name(),
+        _          => "",
+    })
+}
+// does a reflection lambda literal assign one of its VALUE params (index >= 1; index 0 is the
+// field-name string)? Those params substitute to member PLACES of the subject — an assignment
+// through one is a write to the subject's field.
+wr_lam_writes_value* = (e: Expr) bool {
+    e.match ({
+        .Lambda(la) => {
+            f := false
+            la.params.loop((h, i, p) {
+                f = (i >= 1 && la.body.wr_writes_name(p.name)).match ({ true => true, false => f })
+            })
+            f
+        },
+        _           => false,
+    })
+}
+// an each_field/zip_fields call whose SUBJECT roots at `nm` and whose lambda assigns its value
+// param: the expansion writes `nm`'s fields.
+wr_refl_writes = (c: CallData, nm: string_view) bool {
+    subj := (c.fn == "each_field" && c.args.len == 2).match ({
+        true  => c.args[0].addr().wr_root_name() == nm,
+        false => (c.fn == "zip_fields" && c.args.len == 3).match ({
+            true  => c.args[0].addr().wr_root_name() == nm || c.args[1].addr().wr_root_name() == nm,
+            false => false,
+        }),
+    })
+    subj && c.args[c.args.len - 1].wr_lam_writes_value()
+}
+wr_writes_e = (e: Ptr<Expr>, nm: string_view) bool {
+    load(e).match ({
+        .Bin(b)         => b.lhs.wr_writes_e(nm) || b.rhs.wr_writes_e(nm),
+        .Cond(d)        => d.c.wr_writes_e(nm) || d.t.wr_writes_e(nm) || d.e.wr_writes_e(nm),
+        .Call(c)        => c.wr_refl_writes(nm)
+            || c.args.slice_any((x) { x.addr().wr_writes_e(nm) }),
+        .MethodCall(mc) => mc.recv.wr_writes_e(nm)
+            || mc.args.slice_any((x) { x.addr().wr_writes_e(nm) }),
+        .Member(m)      => m.obj.wr_writes_e(nm),
+        .Arrow(ar)      => ar.obj.wr_writes_e(nm),
+        .MakeEnum(mk)   => mk.payload.wr_writes_e(nm),
+        .MakeStruct(s)  => s.inits.slice_any((fi) { fi.value.wr_writes_e(nm) }),
+        .Match(m)       => m.subj.wr_writes_e(nm)
+            || m.arms.slice_any((ar) { ar.body.wr_writes_e(nm) }),
+        .Index(ix)      => ix.seq.wr_writes_e(nm) || ix.idx.wr_writes_e(nm),
+        .SliceLit(sd)   => sd.items.slice_any((x) { x.addr().wr_writes_e(nm) }),
+        .Loop(l)        => l.seq.wr_writes_e(nm) || l.body.wr_writes_name(nm),
+        .Block(bl)      => bl.stmts.wr_writes_name(nm),
+        .Lambda(la)     => la.body.wr_writes_name(nm),
+        _               => false,
+    })
+}
+wr_writes_stmt = (st: Stmt, nm: string_view) bool {
+    st.match ({
+        .Let(l)      => l.value.wr_writes_e(nm),
+        .Assign(x)   => x.target.wr_root_name() == nm
+            || x.target.wr_writes_e(nm)
+            || x.value.wr_writes_e(nm),
+        .Return(r)   => r.wr_writes_e(nm),
+        .ExprStmt(e) => e.wr_writes_e(nm),
+        .If(f)       => f.c.wr_writes_e(nm) || f.then.wr_writes_name(nm) || f.els.wr_writes_name(nm),
+        .While(w)    => w.c.wr_writes_e(nm) || w.body.wr_writes_name(nm),
+        .IndexSet(x) => x.seq.wr_root_name() == nm
+            || x.seq.wr_writes_e(nm)
+            || x.idx.wr_writes_e(nm)
+            || x.value.wr_writes_e(nm),
+    })
+}
+wr_writes_name* = (body: [Stmt], nm: string_view) bool {
+    body.slice_any((st) { st.wr_writes_stmt(nm) })
 }
