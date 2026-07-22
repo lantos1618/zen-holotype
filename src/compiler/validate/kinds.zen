@@ -19,19 +19,6 @@
 { zty } = compiler.validate.ownership
 { arg_err_at } = compiler.validate.args
 { check_module, kv_at, kv_kor, kv_one } = compiler.validate.core
-// A trait-method call whose CONCRETE receiver type implements no matching impl (dispatch finds no
-// redirect) and that is neither a free function nor an imported name — would emit a bare `area`
-// call and fail at the C linker. Reject it as a Zen receiver/trait-bound error instead.
-trait_recv_missing* = (env: Env, c: CallData) bool {
-    (c.args.len > 0
-        && env.env_trait_method(c.fn)
-        && env.env_imported(c.fn) == false
-        && env.env_known_fn(c.fn) == false).match ({
-        true  => env.dispatch_name(c) == c.fn
-            && env.unknown_ty(env.infer_expr(c.args[0].addr())) == false,
-        false => false,
-    })
-}
 // Does some `Type.impl(Trait)` exist? i.e. a DImpl naming this type + trait.
 type_impls_trait = (decls: [Decl], tyname: string_view, trname: string_view) bool {
     found := false
@@ -70,41 +57,12 @@ bound_prim_name = (n: string_view) bool {
 bound_targ_concrete = (env: Env, tn: string_view) bool {
     env.decls.is_struct(tn) || env.env_is_enum(tn) || tn.bound_prim_name()
 }
-bound_err* = (env: Env, f: Func, c: CallData, tp: Param) i32 {
-    tr := tp.tparam_bound()
-    is_empty(tr).match ({
-        true  => 0,
-        false => {
-            tn := env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
-            // concrete type A binds to
-            (is_empty(tn) || env.vars.tparam_declared(tn) || env.bound_targ_concrete(tn) == false).match ({
-                true  => 0,
-                false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 }),
-            })
-        },
-    })
-}    // unresolved / abstract: defer
 bound_errs = (env: Env, f: Func, c: CallData) i32 {
     acc := 0
     f.tparams.loop((h, i, tp) {
         acc = acc + env.bound_err(f, c, tp)
     })
     acc
-}
-match_result_ty* = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
-    out := tvoid()
-    arms.loop((h, i, ar) {
-        aenv := env.a.arm_env(env, subjty, ar)
-        got := aenv.infer_expr(ar.body)
-        out = out.is_void_ty().match ({
-            true  => (got.is_void_ty() || aenv.unknown_ty(got)).match ({
-                true  => out,
-                false => got,
-            }),
-            false => out,
-        })
-    })
-    out
 }
 result_compatible = (want: Ty, got: Ty) bool {
     (want.is_str_t() && got.is_str_t()).match ({
@@ -129,22 +87,6 @@ cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
         }),
     })
 }
-cond_result_err* = (env: Env, d: CondData) i32 {
-    tt := env.infer_expr(d.t)
-    et := env.infer_expr(d.e)
-    (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
-        true  => 0,
-        false => d.cond_compatible(tt, et).match ({ true => 0, false => 1 }),
-    })
-}
-arm_result_err* = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
-    aenv := env.a.arm_env(env, subjty, ar)
-    got := aenv.infer_expr(ar.body)
-    (want.is_void_ty() || got.is_void_ty() || aenv.unknown_ty(want) || aenv.unknown_ty(got)).match ({
-        true  => 0,
-        false => want.result_compatible(got).match ({ true => 0, false => 1 }),
-    })
-}
 // ── value-consumed match/cond arms must each yield a value ──────────────────────────────
 // A match/cond CONSUMED AS A VALUE (let/assign RHS, return operand, call argument, index-set
 // value) must get a value from every arm that doesn't diverge. The arm typing above treats a
@@ -163,16 +105,6 @@ known_void_call = (env: Env, c: CallData) bool {
     f := env.env_func(c.fn)
     (f.name == c.fn).match ({ true => f.tparams.len == 0 && f.ret.is_void_ty(), false => false })
 }
-novalue_arm_leaf* = (env: Env, e: Ptr<Expr>) i32 {
-    load(e).match ({
-        .Block(b) => env.novalue_block_tail(b.stmts),
-        .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
-        .Match(m) => env.novalue_match_arms(m),
-        .Loop(l)  => 1,    // `.loop` never yields a value
-        .Call(c)  => env.known_void_call(c).match ({ true => 1, false => 0 }),
-        _         => 0,
-    })
-}
 novalue_block_tail = (env: Env, stmts: [Stmt]) i32 {
     (stmts.len == 0).match ({
         true  => 1,
@@ -187,33 +119,6 @@ novalue_match_arms = (env: Env, m: MatchData) i32 {
     acc := 0
     m.arms.loop((h, i, ar) {
         acc = acc + env.novalue_arm_leaf(ar.body)
-    })
-    acc
-}
-value_void_arm_err* = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
-    (want.is_void_ty() || env.unknown_ty(want)).match ({
-        true  => 0,
-        false => load(e).match ({
-            .Match(m) => env.novalue_match_arms(m),
-            .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
-            _         => 0,
-        }),
-    })
-}
-// argument position: a match/cond arg flowing into a CONCRETE (non-tparam) param slot.
-call_void_arm_errs* = (env: Env, c: CallData) i32 {
-    f := env.env_func(c.fn)
-    acc := 0
-    (f.name == c.fn).then({
-        c.args.loop((h, i, ar) {
-            acc = acc + (i < f.params.len).match ({
-                true  => f.tparams.ty_mentions_tparam(f.params[i].ty).match ({
-                    true  => 0,
-                    false => env.value_void_arm_err(f.params[i].ty, ar.addr()),
-                }),
-                false => 0,
-            })
-        })
     })
     acc
 }
@@ -260,13 +165,6 @@ missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
         n = arms.arm_covers(v.name).match ({ true => n, false => n + 1 })
     })
     n
-}
-exhaustive_err* = (env: Env, m: MatchData) i32 {
-    vs := env.decls.enum_variants(m.ename)
-    (vs.len == 0).match ({
-        true  => 0,
-        false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 }),
-    })
 }
 // the NAME of the first declared variant the arms do not cover, else "" — the uncovered
 // variant an exhaustiveness diagnostic names so the fix is a copy-pasteable `.Variant => …` arm.
@@ -322,61 +220,8 @@ enum_declares = (decls: [Decl], vn: string_view) bool {
         })
     })
 }
-// Unknown enum ctor: bare `.Variant` (empty ty) must name SOME declared variant; qualified
-// `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
-// qualified branch always returned 0, so `Color.Purple` passed check and ICEd at cc.
-mkenum_err* = (env: Env, ty: string_view, variant: string_view) i32 {
-    is_empty(ty).match ({
-        true  => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }),
-        false => {
-            vs := env.decls.enum_variants(ty)
-            (vs.len == 0).match ({
-                true  => 0,
-                false => vs.arm_known(variant).match ({ true => 0, false => 1 }),
-            })
-        },
-    })
-}
-// A constructed enum payload must fit the variant's declared payload type (`E.A("s")` where A(i32)).
-// Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
-// Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.
-enum_payload_err* = (env: Env, mk: MakeEnumData) i32 {
-    is_empty(mk.ty).match ({
-        true  => 0,
-        false => {
-            pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
-            lv := mk.payload.lit_slot_verdict(pty)
-            (lv >= 0).match ({
-                true  => lv,
-                false => {
-                    vt := env.infer_expr(mk.payload)
-                    (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
-                        true  => 0,
-                        false => fits(vt, pty).match ({ true => 0, false => 1 }),
-                    })
-                },
-            })
-        },
-    })
-}
 // Every non-wildcard arm must name a declared variant.
 arm_known = (vs: [VariantDef], vname: string_view) bool { vs.slice_any((v) { v.name == vname }) }
-unknown_arm_errs* = (env: Env, m: MatchData) i32 {
-    vs := env.decls.enum_variants(m.ename)
-    n := 0
-    (vs.len == 0).match ({
-        true  => 0,
-        false => {
-            m.arms.loop((h, i, a) {
-                n = n + (a.variant == "_").match ({
-                    true  => 0,
-                    false => vs.arm_known(a.variant).match ({ true => 0, false => 1 }),
-                })
-            })
-            n
-        },
-    })
-}
 // Operand checking stays lenient for uninferable operands.
 is_arith_op = (op: string_view) bool {
     b := op.at(0)
@@ -531,18 +376,6 @@ signcmp_err = (env: Env, b: BinData) i32 {
         false => 0,
     })
 }
-operand_err* = (env: Env, b: BinData) i32 {
-    b.op.is_logic_op().match ({
-        true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
-        false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
-            true  => env.num_operand_err(b) + env.signcmp_err(b),
-            false => b.op.is_eq_op_v().match ({
-                true  => env.eq_mix_err(b) + env.signcmp_err(b),
-                false => 0,
-            }),
-        }),
-    })
-}
 // Indexing needs a slice and numeric index; uninferable types skip.
 is_slice_ty = (t: Ty) bool {
     t.match ({
@@ -557,81 +390,9 @@ non_slice = (env: Env, e: Ptr<Expr>) bool {
         false => t.is_slice_ty().match ({ true => false, false => true }),
     })
 }
-index_err* = (env: Env, ix: IndexData) i32 {
-    (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({ true => 1, false => 0 })
-}
-// Return/assign/index-set checks only reject concrete mismatches.
-ret_err* = (env: Env, r: Ptr<Expr>) i32 {
-    rt := env.infer_expr(r)
-    lv := r.lit_slot_verdict(env.exp)    // a numeric literal return is decided by range
-    (lv >= 0).match ({
-        true  => lv,
-        false => (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt()).match ({
-            true  => 0,
-            false => fits(rt, env.exp).match ({ true => 0, false => 1 }),
-        }),
-    })
-}
-// a function-VALUE return (declared return is a function type) is accepted structurally — ty_eq
-// treats FnT as never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
-assign_err* = (env: Env, x: AssignData) i32 {
-    vt := env.infer_expr(x.target)
-    rt := env.infer_expr(x.value)
-    lv := x.value.lit_slot_verdict(vt)
-    (lv >= 0).match ({
-        true  => lv,
-        false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
-            true  => 0,
-            false => fits(rt, vt).match ({ true => 0, false => 1 }),
-        }),
-    })
-}
-// Stage 2 mutability, the field-write half: `b.v = …` where `b: Ptr<Box>` (read-only) writes through a
-// non-writable pointer — the same hole `store()` guards, via Assign/Member. A `MutPtr<Box>` permits it
-// (k_mut_ptr), and plain local/struct mutation (no pointer base) is untouched. A NESTED write
-// (`b.inner.v = …`, `b.data[0] = …`) is the same hole one level down: it mutates `*b` just as the
-// direct field-set does, so walk the lvalue's member/index chain to its root and reject if the write
-// ultimately passes through a read-only `Ptr<T>`.
-assign_ptr_write_err* = (env: Env, x: AssignData) i32 {
-    env.lvalue_writes_readonly(x.target).match ({ true => 1, false => 0 })
-}
-// the index-set half of the read-only-pointer write guard: `b.data[0] = …` writes into `*b`.
-idxset_ptr_write_err* = (env: Env, x: IndexSetData) i32 {
-    env.write_thru_readonly(x.seq).match ({ true => 1, false => 0 })
-}
-idxset_err* = (env: Env, x: IndexSetData) i32 {
-    rt := env.infer_expr(x.value)
-    lv := x.value.lit_slot_verdict(x.elem)
-    (lv >= 0).match ({
-        true  => lv,
-        false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
-            true  => 0,
-            false => fits(rt, x.elem).match ({ true => 0, false => 1 }),
-        }),
-    })
-}
-// Annotated lets must fit their declared type; unannotated lets are inferred only.
-let_fit_err* = (env: Env, l: LetData) i32 {
-    l.ty.is_void_ty().match ({
-        true  => 0,
-        false => {
-            // infer under the DECLARED type as expected context, exactly as resolve_let resolves the
-            // value — a generic call whose tparam sits only in return position (`a.nbuf("", n)` for a
-            // `[string_view]` let) binds it from the declaration, not from the weak literal fallback.
-            vt := env.with_exp(l.ty).infer_expr(l.value)
-            lv := l.value.lit_slot_verdict(l.ty)
-            (lv >= 0).match ({
-                true  => lv,
-                false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
-                    true  => 0,
-                    false => fits(vt, l.ty).match ({ true => 0, false => 1 }),
-                }),
-            })
-        },
-    })
-}
-// A generic type with a `.Void` type-arg (recursing Ptr/Slice/nested generics) — e.g. `Box<void>`.
-// An unbound tparam survives inference as void, so the let's stored (inferred) type becomes Box<void>,
+// A generic type with a `.Void` type-arg (recursing Ptr/Slice/nested generics) — e.g. `Box<void>`
+// (see let_needannot_err in the EnvKinds impl below). An unbound tparam survives inference as void,
+// so the let's stored (inferred) type becomes Box<void>,
 // which only ever lowers to `Box_void`, never a usable value.
 ty_has_void_targ = (t: Ty) bool {
     t.match ({
@@ -645,12 +406,6 @@ ty_has_void_targ = (t: Ty) bool {
     })
 }
 tys_mention_void = (ts: [Ty]) bool { ts.slice_any((t) { t.is_void_ty() || t.ty_has_void_targ() }) }
-// A let (post-resolve, ty = the inferred/declared type) whose stored type is a generic with an
-// uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m := empty(7)` → Box<void> → mono emits
-// `Box_void`). check used to pass; require an annotation so the tparam is pinned.
-let_needannot_err* = (env: Env, l: LetData) i32 {
-    l.ty.ty_has_void_targ().match ({ true => 1, false => 0 })
-}
 // trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares, with a
 // MATCHING SIGNATURE. The Trait is a struct whose FnT fields are the method signatures (using `Self`
 // for the implementing type); im.methods is the names this impl provides, and the impl's actual
@@ -739,24 +494,6 @@ method_err* = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
             false => decls.trait_has_default(im.trname, f.name).match ({ true => 0, false => 1 }),
         }),    // omitted: OK iff defaulted
         _        => 0,
-    })
-}
-// an undefined call reads as a `recv.method()` UFCS call — not a bare undefined name — when it has a
-// first argument whose inferred type is a DECLARED struct/enum (a genuine concrete receiver). A
-// numeric/str/unknown first arg or a zero-arg call stays a plain undefined name. An AMBIGUOUS UFCS
-// call (2+ `alias__fn` candidates match the receiver) keeps the plain-undefined channel so its more
-// specific `ambiguous method` enrichment still fires — this is a NO-method case only.
-undef_is_method* = (env: Env, c: CallData) bool {
-    (c.args.len == 0).match ({
-        true  => false,
-        false => {
-            rty := env.infer_expr(c.args[0].addr())
-            tn := rty.recv_name()
-            (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
-                true  => false,
-                false => env.alias_ufcs_candidates(c.fn, rty).count < 2,
-            })
-        },
     })
 }
 // a match: exhaustiveness vs duplicate-variant, split out from match_err. The caret points at the
@@ -1183,16 +920,6 @@ ka_inline_only = (f: Func) bool {
 ka_reflect_name = (nm: string_view) bool {
     nm == "field_eq" || nm == "each_field" || nm == "zip_fields"
 }
-ka_rec_hof_kind* = (f: Func) i32 {
-    (f.ka_inline_only()
-        && f.body.len > 0
-        && f.params.ka_param_named(f.name) == false
-        && ka_reflect_name(f.name) == false
-        && f.body.rc_calls_body(f.name)).match ({
-        true  => KRECHOF().kv_at(f.pos),
-        false => 0,
-    })
-}
 // ── reflect-return: a `return` under a loop in an inline-only REFLECT generic ─────────────────────
 // Splicing such a body leaves a raw C `return` inside the caller's loop — the inliner's early-return
 // lift (needs_early_lift) only handles statement-level returns, so the callee's return would exit
@@ -1269,12 +996,6 @@ krr_loop_ret_stmt = (st: Stmt) bool {
     })
 }
 krr_loop_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_loop_ret_stmt() }) }
-ka_reflect_ret_kind* = (f: Func) i32 {
-    (f.tparams.len > 0 && f.body.calls_reflect() && f.body.krr_loop_ret_body()).match ({
-        true  => KREFLECTRETURN().kv_at(f.pos),
-        false => 0,
-    })
-}
 ko_is_or_call = (c: CallData) bool { c.fn == "or_return" && c.args.len == 1 }
 ko_is_or_mcall = (mc: MethodCallData) bool { mc.method == "or_return" && mc.args.len == 0 }
 // the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree.
@@ -1532,14 +1253,6 @@ ffi_bad_ty = (env: Env, t: Ty) i32 {
     env.ffi_ty_ok(t, FFI_DEPTH()).match ({ true => 0, false => 1 })
 }
 ffi_bad_generic = (f: Func) i32 { (f.tparams.len > 0).match ({ true => 1, false => 0 }) }
-// the kind walk: first offending foreign decl, caret on the decl (a Ty carries no source position).
-ffi_func_kind* = (env: Env, f: Func) i32 {
-    acc := f.ffi_bad_generic().kv_one(KFFITYPE()).kv_at(f.pos)
-    f.params.loop((h, i, p) {
-        acc = acc.kv_kor(env.ffi_bad_ty(p.ty).kv_one(KFFITYPE()).kv_at(f.pos))
-    })
-    acc.kv_kor(env.ffi_bad_ty(f.ret).kv_one(KFFITYPE()).kv_at(f.pos))
-}
 // the NAME walk (same traversal order as the kind walk): the message naming the offending
 // parameter/return type, in user spelling.
 ffi_param_msg = (a: MutPtr<Malloc>, fname: string_view, pname: string_view, tname: string_view) string_view {
@@ -1674,3 +1387,331 @@ first_gen_arg* = (t: Ty) Ty {
         _           => tvoid(),
     })
 }
+// ── per-node kind checks as Env METHODS ──────────────────────────────────────────────────────────
+// The envq.zen pattern at scale: every Env-first validator here is a method on Env via an
+// out-of-module trait impl, so callers (core.zen's kv_* walk, enrich.zen, …) dispatch
+// `env.operand_err(b)` through the global impl index and import NOTHING from this module for them.
+EnvKinds*: {
+    trait_recv_missing: (Self, CallData) bool,
+    match_result_ty: (Self, Ty, [ArmData]) Ty,
+    cond_result_err: (Self, CondData) i32,
+    arm_result_err: (Self, Ty, Ty, ArmData) i32,
+    novalue_arm_leaf: (Self, Ptr<Expr>) i32,
+    value_void_arm_err: (Self, Ty, Ptr<Expr>) i32,
+    call_void_arm_errs: (Self, CallData) i32,
+    exhaustive_err: (Self, MatchData) i32,
+    mkenum_err: (Self, string_view, string_view) i32,
+    enum_payload_err: (Self, MakeEnumData) i32,
+    unknown_arm_errs: (Self, MatchData) i32,
+    operand_err: (Self, BinData) i32,
+    index_err: (Self, IndexData) i32,
+    ret_err: (Self, Ptr<Expr>) i32,
+    assign_err: (Self, AssignData) i32,
+    assign_ptr_write_err: (Self, AssignData) i32,
+    idxset_ptr_write_err: (Self, IndexSetData) i32,
+    idxset_err: (Self, IndexSetData) i32,
+    let_fit_err: (Self, LetData) i32,
+    let_needannot_err: (Self, LetData) i32,
+    undef_is_method: (Self, CallData) bool,
+    ffi_func_kind: (Self, Func) i32,
+    bound_err: (Self, Func, CallData, Param) i32,
+}
+Env.impl(EnvKinds, {
+    trait_recv_missing = (env: Env, c: CallData) bool {
+        // A trait-method call whose CONCRETE receiver type implements no matching impl (dispatch finds no
+        // redirect) and that is neither a free function nor an imported name — would emit a bare `area`
+        // call and fail at the C linker. Reject it as a Zen receiver/trait-bound error instead.
+        (c.args.len > 0
+            && env.env_trait_method(c.fn)
+            && env.env_imported(c.fn) == false
+            && env.env_known_fn(c.fn) == false).match ({
+            true  => env.dispatch_name(c) == c.fn
+                && env.unknown_ty(env.infer_expr(c.args[0].addr())) == false,
+            false => false,
+        })
+    }
+    match_result_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
+        out := tvoid()
+        arms.loop((h, i, ar) {
+            aenv := env.a.arm_env(env, subjty, ar)
+            got := aenv.infer_expr(ar.body)
+            out = out.is_void_ty().match ({
+                true  => (got.is_void_ty() || aenv.unknown_ty(got)).match ({
+                    true  => out,
+                    false => got,
+                }),
+                false => out,
+            })
+        })
+        out
+    }
+    cond_result_err = (env: Env, d: CondData) i32 {
+        tt := env.infer_expr(d.t)
+        et := env.infer_expr(d.e)
+        (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
+            true  => 0,
+            false => d.cond_compatible(tt, et).match ({ true => 0, false => 1 }),
+        })
+    }
+    arm_result_err = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
+        aenv := env.a.arm_env(env, subjty, ar)
+        got := aenv.infer_expr(ar.body)
+        (want.is_void_ty() || got.is_void_ty() || aenv.unknown_ty(want) || aenv.unknown_ty(got)).match ({
+            true  => 0,
+            false => want.result_compatible(got).match ({ true => 0, false => 1 }),
+        })
+    }
+    novalue_arm_leaf = (env: Env, e: Ptr<Expr>) i32 {
+        load(e).match ({
+            .Block(b) => env.novalue_block_tail(b.stmts),
+            .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
+            .Match(m) => env.novalue_match_arms(m),
+            .Loop(l)  => 1,    // `.loop` never yields a value
+            .Call(c)  => env.known_void_call(c).match ({ true => 1, false => 0 }),
+            _         => 0,
+        })
+    }
+    value_void_arm_err = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
+        (want.is_void_ty() || env.unknown_ty(want)).match ({
+            true  => 0,
+            false => load(e).match ({
+                .Match(m) => env.novalue_match_arms(m),
+                .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
+                _         => 0,
+            }),
+        })
+    }
+    call_void_arm_errs = (env: Env, c: CallData) i32 {
+        // argument position: a match/cond arg flowing into a CONCRETE (non-tparam) param slot.
+        f := env.env_func(c.fn)
+        acc := 0
+        (f.name == c.fn).then({
+            c.args.loop((h, i, ar) {
+                acc = acc + (i < f.params.len).match ({
+                    true  => f.tparams.ty_mentions_tparam(f.params[i].ty).match ({
+                        true  => 0,
+                        false => env.value_void_arm_err(f.params[i].ty, ar.addr()),
+                    }),
+                    false => 0,
+                })
+            })
+        })
+        acc
+    }
+    exhaustive_err = (env: Env, m: MatchData) i32 {
+        vs := env.decls.enum_variants(m.ename)
+        (vs.len == 0).match ({
+            true  => 0,
+            false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 }),
+        })
+    }
+    mkenum_err = (env: Env, ty: string_view, variant: string_view) i32 {
+        // Unknown enum ctor: bare `.Variant` (empty ty) must name SOME declared variant; qualified
+        // `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
+        // qualified branch always returned 0, so `Color.Purple` passed check and ICEd at cc.
+        is_empty(ty).match ({
+            true  => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }),
+            false => {
+                vs := env.decls.enum_variants(ty)
+                (vs.len == 0).match ({
+                    true  => 0,
+                    false => vs.arm_known(variant).match ({ true => 0, false => 1 }),
+                })
+            },
+        })
+    }
+    enum_payload_err = (env: Env, mk: MakeEnumData) i32 {
+        // A constructed enum payload must fit the variant's declared payload type (`E.A("s")` where A(i32)).
+        // Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
+        // Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.
+        is_empty(mk.ty).match ({
+            true  => 0,
+            false => {
+                pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
+                lv := mk.payload.lit_slot_verdict(pty)
+                (lv >= 0).match ({
+                    true  => lv,
+                    false => {
+                        vt := env.infer_expr(mk.payload)
+                        (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
+                            true  => 0,
+                            false => fits(vt, pty).match ({ true => 0, false => 1 }),
+                        })
+                    },
+                })
+            },
+        })
+    }
+    unknown_arm_errs = (env: Env, m: MatchData) i32 {
+        vs := env.decls.enum_variants(m.ename)
+        n := 0
+        (vs.len == 0).match ({
+            true  => 0,
+            false => {
+                m.arms.loop((h, i, a) {
+                    n = n + (a.variant == "_").match ({
+                        true  => 0,
+                        false => vs.arm_known(a.variant).match ({ true => 0, false => 1 }),
+                    })
+                })
+                n
+            },
+        })
+    }
+    operand_err = (env: Env, b: BinData) i32 {
+        b.op.is_logic_op().match ({
+            true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
+            false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
+                true  => env.num_operand_err(b) + env.signcmp_err(b),
+                false => b.op.is_eq_op_v().match ({
+                    true  => env.eq_mix_err(b) + env.signcmp_err(b),
+                    false => 0,
+                }),
+            }),
+        })
+    }
+    index_err = (env: Env, ix: IndexData) i32 {
+        (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({ true => 1, false => 0 })
+    }
+    ret_err = (env: Env, r: Ptr<Expr>) i32 {
+        // Return/assign/index-set checks only reject concrete mismatches. A function-VALUE return
+        // (declared return is a function type) is accepted structurally — ty_eq treats FnT as
+        // never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
+        rt := env.infer_expr(r)
+        lv := r.lit_slot_verdict(env.exp)    // a numeric literal return is decided by range
+        (lv >= 0).match ({
+            true  => lv,
+            false => (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt()).match ({
+                true  => 0,
+                false => fits(rt, env.exp).match ({ true => 0, false => 1 }),
+            }),
+        })
+    }
+    assign_err = (env: Env, x: AssignData) i32 {
+        vt := env.infer_expr(x.target)
+        rt := env.infer_expr(x.value)
+        lv := x.value.lit_slot_verdict(vt)
+        (lv >= 0).match ({
+            true  => lv,
+            false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
+                true  => 0,
+                false => fits(rt, vt).match ({ true => 0, false => 1 }),
+            }),
+        })
+    }
+    assign_ptr_write_err = (env: Env, x: AssignData) i32 {
+        // Stage 2 mutability, the field-write half: `b.v = …` where `b: Ptr<Box>` (read-only) writes through a
+        // non-writable pointer — the same hole `store()` guards, via Assign/Member. A `MutPtr<Box>` permits it
+        // (k_mut_ptr), and plain local/struct mutation (no pointer base) is untouched. A NESTED write
+        // (`b.inner.v = …`, `b.data[0] = …`) is the same hole one level down: it mutates `*b` just as the
+        // direct field-set does, so walk the lvalue's member/index chain to its root and reject if the write
+        // ultimately passes through a read-only `Ptr<T>`.
+        env.lvalue_writes_readonly(x.target).match ({ true => 1, false => 0 })
+    }
+    idxset_ptr_write_err = (env: Env, x: IndexSetData) i32 {
+        // the index-set half of the read-only-pointer write guard: `b.data[0] = …` writes into `*b`.
+        env.write_thru_readonly(x.seq).match ({ true => 1, false => 0 })
+    }
+    idxset_err = (env: Env, x: IndexSetData) i32 {
+        rt := env.infer_expr(x.value)
+        lv := x.value.lit_slot_verdict(x.elem)
+        (lv >= 0).match ({
+            true  => lv,
+            false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
+                true  => 0,
+                false => fits(rt, x.elem).match ({ true => 0, false => 1 }),
+            }),
+        })
+    }
+    let_fit_err = (env: Env, l: LetData) i32 {
+        // Annotated lets must fit their declared type; unannotated lets are inferred only.
+        l.ty.is_void_ty().match ({
+            true  => 0,
+            false => {
+                // infer under the DECLARED type as expected context, exactly as resolve_let resolves the
+                // value — a generic call whose tparam sits only in return position (`a.nbuf("", n)` for a
+                // `[string_view]` let) binds it from the declaration, not from the weak literal fallback.
+                vt := env.with_exp(l.ty).infer_expr(l.value)
+                lv := l.value.lit_slot_verdict(l.ty)
+                (lv >= 0).match ({
+                    true  => lv,
+                    false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
+                        true  => 0,
+                        false => fits(vt, l.ty).match ({ true => 0, false => 1 }),
+                    }),
+                })
+            },
+        })
+    }
+    let_needannot_err = (env: Env, l: LetData) i32 {
+        // A let (post-resolve, ty = the inferred/declared type) whose stored type is a generic with an
+        // uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m := empty(7)` → Box<void> → mono emits
+        // `Box_void`). check used to pass; require an annotation so the tparam is pinned.
+        l.ty.ty_has_void_targ().match ({ true => 1, false => 0 })
+    }
+    undef_is_method = (env: Env, c: CallData) bool {
+        // an undefined call reads as a `recv.method()` UFCS call — not a bare undefined name — when it has a
+        // first argument whose inferred type is a DECLARED struct/enum (a genuine concrete receiver). A
+        // numeric/str/unknown first arg or a zero-arg call stays a plain undefined name. An AMBIGUOUS UFCS
+        // call (2+ `alias__fn` candidates match the receiver) keeps the plain-undefined channel so its more
+        // specific `ambiguous method` enrichment still fires — this is a NO-method case only.
+        (c.args.len == 0).match ({
+            true  => false,
+            false => {
+                rty := env.infer_expr(c.args[0].addr())
+                tn := rty.recv_name()
+                (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
+                    true  => false,
+                    false => env.alias_ufcs_candidates(c.fn, rty).count < 2,
+                })
+            },
+        })
+    }
+    ffi_func_kind = (env: Env, f: Func) i32 {
+        // the kind walk: first offending foreign decl, caret on the decl (a Ty carries no source position).
+        acc := f.ffi_bad_generic().kv_one(KFFITYPE()).kv_at(f.pos)
+        f.params.loop((h, i, p) {
+            acc = acc.kv_kor(env.ffi_bad_ty(p.ty).kv_one(KFFITYPE()).kv_at(f.pos))
+        })
+        acc.kv_kor(env.ffi_bad_ty(f.ret).kv_one(KFFITYPE()).kv_at(f.pos))
+    }
+    bound_err = (env: Env, f: Func, c: CallData, tp: Param) i32 {
+        tr := tp.tparam_bound()
+        is_empty(tr).match ({
+            true  => 0,
+            false => {
+                tn := env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
+                // concrete type A binds to
+                (is_empty(tn)
+                    || env.vars.tparam_declared(tn)
+                    || env.bound_targ_concrete(tn) == false).match ({
+                    true  => 0,
+                    false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 }),
+                })
+            },
+        })
+    }
+})    // unresolved / abstract: defer
+// Func-receiver kind checks (`f.ka_rec_hof_kind()` call shape) get the same treatment on Func.
+FuncKinds*: {
+    ka_rec_hof_kind: (Self) i32,
+    ka_reflect_ret_kind: (Self) i32,
+}
+Func.impl(FuncKinds, {
+    ka_rec_hof_kind = (f: Func) i32 {
+        (f.ka_inline_only()
+            && f.body.len > 0
+            && f.params.ka_param_named(f.name) == false
+            && ka_reflect_name(f.name) == false
+            && f.body.rc_calls_body(f.name)).match ({
+            true  => KRECHOF().kv_at(f.pos),
+            false => 0,
+        })
+    }
+    ka_reflect_ret_kind = (f: Func) i32 {
+        (f.tparams.len > 0 && f.body.calls_reflect() && f.body.krr_loop_ret_body()).match ({
+            true  => KREFLECTRETURN().kv_at(f.pos),
+            false => 0,
+        })
+    }
+})
