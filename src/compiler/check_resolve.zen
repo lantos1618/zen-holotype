@@ -11,6 +11,8 @@
 { orx_count, orx_rw, orx_rw_stmt, orx_stmt_count } = compiler.passes.orreturn
 { clos_call_rewrite, clos_local_call_name } = compiler.passes.closures
 { unify_ty } = compiler.check_infer
+{ reflect_fields } = compiler.passes.subst
+{ eq_impl_provides, eq_struct_fields_ok } = compiler.validate.kinds
 { inline_decl, lower_closures, mono_close, no_inline_gen_f } = compiler.check_inline
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { lower_stmt_expr, one_stmt, subj_payload, subj_tag, tag_const } = compiler.check_lower
@@ -276,8 +278,86 @@ resolve_bin = (a: MutPtr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
         true  => a.cenode(call((b.op == "==").match ({ true => "__str_eq", false => "__str_ne" }), a.str_eq_args(lhs, rhs))),
         false => (cmp && env.is_enum_ty(lty)).match ({
             true  => a.cenode(bin_at(b.op, a.subj_tag(lhs, lty.ty_is_ptr()), a.subj_tag(rhs, lty.ty_is_ptr()), b.pos)),
-            false => a.resolve_arith(env, b.op, lty, lhs, rhs, b.pos),
+            false => (cmp && env.is_struct_val_ty(lty) && env.infer_expr(rhs).ty_eq(lty) && (env.eq_impl_provides(lty) || env.eq_struct_fields_ok(lty))).match ({
+                true  => a.resolve_struct_eq(env, b.op, lty, lhs, rhs, b.pos),
+                false => a.resolve_arith(env, b.op, lty, lhs, rhs, b.pos),
+            }),
         }),
+    })
+}
+// ── struct `==` / `!=`: values of the SAME struct type compare structurally ────────────────────────
+// An `eq` method provided by an impl on the type WINS (dispatch_recv — same index trait calls use);
+// otherwise DERIVE a per-field `==` fold from the fields (reflection), ONE level deep: the rebuilt
+// fold re-enters resolve_expr, so a string field lowers to __str_eq, an enum field to a tag compare,
+// and a struct field back through THIS arm — full recursion with no extra machinery. A POINTER to a
+// struct stays C pointer identity (mirrors the enum-tag rule above). Non-Var subjects are bound to
+// temps ONCE so a side-effecting operand (`mk() == mk()`) runs once, not once per field.
+is_struct_val_ty = (env: Env, t: Ty) bool {
+    t.match ({
+        .Named(n)   => env.didx.struct_idx.get(n, 0 - 1) >= 0,
+        .Generic(g) => env.didx.genstruct_idx.get(g.name, 0 - 1) >= 0,
+        _           => false,
+    })
+}
+seq_subject = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, k: i64, pos: i32) SeqBind {
+    load(e).match ({
+        .Var(v) => SeqBind(
+            bind: sexpr(a.cenode(vref_at("true", pos))),
+            subj: e,
+            bound: false,
+        ),
+        _       => {
+            nm := a.local_name_at("__seq", env.vars, k)
+            SeqBind(
+                bind: slett_at(nm, tvoid(), e, pos),
+                subj: a.cenode(vref_at(nm, pos)),
+                bound: true,
+            )
+        },
+    })
+}
+SeqBind: {
+    bind: Stmt,
+    subj: Ptr<Expr>,
+    bound: bool,
+}
+seq_fold = (a: MutPtr<Malloc>, flds: [Field], lx: Ptr<Expr>, rx: Ptr<Expr>, pos: i32) Ptr<Expr> {
+    acc := a.cenode(vref_at("true", pos))
+    flds.loop((h, i, f) {
+        acc = a.cenode(bin_at("&&", acc, a.cenode(bin_at("==", a.cenode(member_at(lx, f.name, pos)), a.cenode(member_at(rx, f.name, pos)), pos)), pos))
+    })
+    acc
+}
+seq_neg = (a: MutPtr<Malloc>, op: string_view, e: Ptr<Expr>, pos: i32) Ptr<Expr> {
+    (op == "!=").match ({
+        true  => a.cenode(bin_at("==", e, a.cenode(vref_at("false", pos)), pos)),
+        false => e,
+    })
+}
+resolve_struct_eq = (a: MutPtr<Malloc>, env: Env, op: string_view, lty: Ty, lhs: Ptr<Expr>, rhs: Ptr<Expr>, pos: i32) Ptr<Expr> {
+    tyname := lty.dispatch_recv_name()
+    dn := (env.didx.impl_idx.get(tyname, 0 - 1) < 0).match ({
+        true  => "eq",
+        false => a.dispatch_recv(env.decls, env.didx, "eq", tyname),
+    })
+    (dn == "eq").match ({
+        true  => {
+            lb := a.seq_subject(env, lhs, 91, pos)
+            rb := a.seq_subject(env, rhs, 92, pos)
+            fold := a.seq_neg(op, a.seq_fold(reflect_fields(a, env.decls, env.didx, lty), lb.subj, rb.subj, pos), pos)
+            out := (lb.bound || rb.bound).match ({
+                true  => {
+                    stmts := cbuf<Stmt>(a, 3)
+                    stmts[0] = lb.bind
+                    stmts[1] = rb.bind
+                    stmts[2] = sexpr(fold)
+                    a.cenode(block(stmts))
+                },
+                false => fold,
+            })
+            a.resolve_expr(env, out)
+        },
+        false => a.resolve_expr(env, a.seq_neg(op, a.cenode(call(dn, a.str_eq_args(lhs, rhs))), pos)),
     })
 }
 // FLOAT DIVISION is retagged `/.` so a backend can tell it from integer `/`: C already dispatches at
