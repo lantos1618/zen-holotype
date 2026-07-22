@@ -3,11 +3,11 @@
 { mangle_str_in, mangle_semantic_in, impl_cname_in } = compiler.mangle
 { Malloc } = std.mem.alloc
 { slice_any } = compiler.astops
-{ view, eq, is_empty, ends_with } = std.text.str
+{ view, is_empty, ends_with } = std.text.str
 { String } = std.text.string
 { Env, VList, DeclIndex, arm_env, cenode, extend_env, no_stmts } = compiler.check
-match_has_wild* = (m: MatchData) bool { m.arms.slice_any((ar) { eq(ar.variant, "_") }) }
-arm_covers_v* = (m: MatchData, vn: string_view) bool { m.arms.slice_any((ar) { eq(ar.variant, vn) }) }
+match_has_wild* = (m: MatchData) bool { m.arms.slice_any((ar) { ar.variant == "_" }) }
+arm_covers_v* = (m: MatchData, vn: string_view) bool { m.arms.slice_any((ar) { ar.variant == vn }) }
 ed_covered* = (ed: EnumDecl, m: MatchData) bool {
     all := true
     ed.variants.loop((h, i, v) {
@@ -19,7 +19,7 @@ enum_exhaustive* = (decls: [Decl], m: MatchData) bool {
     found := false
     decls.loop((h, i, d) {
         found = d.match ({
-            .DEnum(ed) => eq(ed.name, m.ename).match ({ true => ed.ed_covered(m), false => found }),
+            .DEnum(ed) => (ed.name == m.ename).match ({ true => ed.ed_covered(m), false => found }),
             _          => found,
         })
     })
@@ -101,7 +101,7 @@ subj_payload* = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: string_view, ptr: 
 arm_then* = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
     body := a.branch_stmts(a.arm_env(env, t, ar), ar.body)
     out := body
-    (eq(ar.bind, "") == false).then({
+    (ar.bind == "" == false).then({
         // TYPED payload let (not bare slet): without the concrete payload type, a later light/inline
         // inference can't recover the binding's type from the enum union access (`e.u.Num`), so a
         // generic call on it (`println(n)`) fails to monomorphize → link error. Same fix the or_return
@@ -123,7 +123,7 @@ lower_match_arms* = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [
     out := no_stmts()
     (i >= m.arms.len == false).then({
         ar := m.arms[i]
-        eq(ar.variant, "_").match ({
+        (ar.variant == "_").match ({
             true  => {
                 out = a.branch_stmts(env, ar.body)
             },

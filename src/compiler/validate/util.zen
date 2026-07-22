@@ -8,7 +8,7 @@
 { Malloc } = std.mem.alloc
 { of } = std.collections.map
 { at } = std.text.bytes
-{ eq, is_empty } = std.text.str
+{ is_empty } = std.text.str
 { String } = std.text.string
 { CheckDiagnostic, KARGTYPE, KESCAPE, KNULLDEREF, KPTRWRITE, KRESERVEDNAME, KSCRATCHSEND, KSCRATCHSTATE, KUNKNOWNTYPE, desc_or, diag_info } = compiler.validate.diag
 { DeadList, dead_has, expr_root_var } = compiler.validate.ownership
@@ -17,8 +17,8 @@
 { check_module, kv_at, kv_kor, kv_one } = compiler.validate.core
 // Local fn is known iff the_func finds it by name (sentinel name is ""). The linear `is_known_fn`
 // remains for the few decls-only callers; Env-reachable sites use `env_known_fn` (O(1) via the index).
-is_known_fn* = (decls: [Decl], fn: string_view) bool { eq(decls.the_func(fn).name, fn) }
-env_known_fn* = (env: Env, fn: string_view) bool { eq(env.env_func(fn).name, fn) }
+is_known_fn* = (decls: [Decl], fn: string_view) bool { decls.the_func(fn).name == fn }
+env_known_fn* = (env: Env, fn: string_view) bool { env.env_func(fn).name == fn }
 env_params* = (env: Env, fn: string_view) [Param] { env.env_func(fn).params }
 // O(1) indexed forms of the linear is_trait_method / is_imported scans below (same presence result:
 // tmethod_idx folds every DImpl.methods name + every DTraitDefault fn name; import_idx every DImport name).
@@ -68,10 +68,10 @@ is_uninferable = (t: Ty) bool {
 named_declared = (decls: [Decl], n: string_view) bool {
     decls.slice_any((d) {
         d.match ({
-            .DStruct(sd)   => eq(sd.name, n),
-            .DEnum(ed)     => eq(ed.name, n),
-            .DGenStruct(g) => eq(g.name, n),
-            .DGenEnum(g)   => eq(g.name, n),
+            .DStruct(sd)   => sd.name == n,
+            .DEnum(ed)     => ed.name == n,
+            .DGenStruct(g) => g.name == n,
+            .DGenEnum(g)   => g.name == n,
             _              => false,
         })
     })
@@ -82,7 +82,7 @@ named_declared = (decls: [Decl], n: string_view) bool {
 // concrete decl only exists after monomorphization.
 // the narrow int/float widths arrive as Named("u32") etc. (no Ty variant), but they ARE valid
 // primitives that genc lowers to C types — so the unknown-type pass must treat them as KNOWN.
-is_prim_width* = (n: string_view) bool { eq(n, "i8") || eq(n, "i16") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64") || eq(n, "f32") }
+is_prim_width* = (n: string_view) bool { n == "i8" || n == "i16" || n == "u16" || n == "u32" || n == "u64" || n == "f32" }
 unknown_ty* = (env: Env, t: Ty) bool {
     t.is_uninferable().match ({
         true  => true,
@@ -188,7 +188,7 @@ lit_unfoldable = () LitVal {
     )
 }
 lit_binop = (op: string_view, l: i64, r: i64) LitVal {
-    eq(op, "+").match ({
+    (op == "+").match ({
         true  => lit_add_wraps(l, r).match ({
             true  => lit_unfoldable(),
             false => LitVal(
@@ -197,7 +197,7 @@ lit_binop = (op: string_view, l: i64, r: i64) LitVal {
                 neg: l + r < 0,
             ),
         }),
-        false => eq(op, "-").match ({
+        false => (op == "-").match ({
             true  => lit_sub_wraps(l, r).match ({
                 true  => lit_unfoldable(),
                 false => LitVal(
@@ -206,7 +206,7 @@ lit_binop = (op: string_view, l: i64, r: i64) LitVal {
                     neg: l - r < 0,
                 ),
             }),
-            false => eq(op, "*").match ({
+            false => (op == "*").match ({
                 true  => lit_mul_wraps(l, r).match ({
                     true  => lit_unfoldable(),
                     false => LitVal(
@@ -250,15 +250,15 @@ lit_val = (e: Ptr<Expr>) LitVal {
 // u64 holds values an i64 can't represent as a positive `n`, so its upper bound cannot be checked in
 // i64; any non-negative literal fits (every i64 bit pattern is a valid u64). `neg` rejects `-1` etc.
 named_int_range_ok = (nm: string_view, n: i64, neg: bool) bool {
-    eq(nm, "i8").match ({
+    (nm == "i8").match ({
         true  => n >= 0 - 128 && n <= 127,
-        false => eq(nm, "i16").match ({
+        false => (nm == "i16").match ({
             true  => n >= 0 - 32768 && n <= 32767,
-            false => eq(nm, "u16").match ({
+            false => (nm == "u16").match ({
                 true  => n >= 0 && n <= 65535,
-                false => eq(nm, "u32").match ({
+                false => (nm == "u32").match ({
                     true  => n >= 0 && n <= 4294967295,
-                    false => eq(nm, "u64").match ({
+                    false => (nm == "u64").match ({
                         true  => neg.match ({ true => false, false => true }),
                         false => true,
                     }),
@@ -282,7 +282,7 @@ lit_fits = (e: Ptr<Expr>, t: Ty) bool {
     lv.ok.match ({ true => t.lit_range_ok(lv.v, lv.neg), false => true })
 }
 // the narrow widths are Named, so ty_rank can't see them — recognize them as int slots here.
-is_int_width = (n: string_view) bool { eq(n, "i8") || eq(n, "i16") || eq(n, "u16") || eq(n, "u32") || eq(n, "u64") }
+is_int_width = (n: string_view) bool { n == "i8" || n == "i16" || n == "u16" || n == "u32" || n == "u64" }
 is_int_slot = (t: Ty) bool {
     t.match ({
         .Named(n) => is_int_width(n),
@@ -342,7 +342,7 @@ tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
         false => 0,
     })
 }
-names_has = (names: [Param], fn: string_view) bool { names.slice_any((n) { eq(n.name, fn) }) }
+names_has = (names: [Param], fn: string_view) bool { names.slice_any((n) { n.name == fn }) }
 is_imported = (decls: [Decl], fn: string_view) bool {
     decls.slice_any((d) {
         d.match ({
@@ -356,7 +356,7 @@ is_trait_method* = (decls: [Decl], fn: string_view) bool {
     decls.slice_any((d) {
         d.match ({
             .DImpl(im)         => im.methods.names_has(fn),
-            .DTraitDefault(td) => eq(td.fn.name, fn),    // a defaulted method an impl may OMIT
+            .DTraitDefault(td) => td.fn.name == fn,    // a defaulted method an impl may OMIT
             _                  => false,
         })
     })
@@ -385,27 +385,27 @@ intrinsic_arity* = (fn: string_view) i32 {
     (fn == "zip_fields").then({
         return 3
     })
-    eq(fn, "__str_eq").match ({
+    (fn == "__str_eq").match ({
         true  => 2,
-        false => eq(fn, "__str_ne").match ({
+        false => (fn == "__str_ne").match ({
             true  => 2,
-            false => eq(fn, "store").match ({
+            false => (fn == "store").match ({
                 true  => 2,
-                false => eq(fn, "offset").match ({
+                false => (fn == "offset").match ({
                     true  => 2,
-                    false => eq(fn, "slice").match ({
+                    false => (fn == "slice").match ({
                         true  => 2,
-                        false => eq(fn, "null_ptr").match ({
+                        false => (fn == "null_ptr").match ({
                             true  => 0,
-                            false => eq(fn, "atomic_add_i64").match ({
+                            false => (fn == "atomic_add_i64").match ({
                                 true  => 2,
-                                false => eq(fn, "atomic_store_i64").match ({
+                                false => (fn == "atomic_store_i64").match ({
                                     true  => 2,
-                                    false => eq(fn, "atomic_cas_i64").match ({
+                                    false => (fn == "atomic_cas_i64").match ({
                                         true  => 3,
-                                        false => eq(fn, "atomic_fence").match ({
+                                        false => (fn == "atomic_fence").match ({
                                             true  => 0,
-                                            false => eq(fn, "store_i64").match ({
+                                            false => (fn == "store_i64").match ({
                                                 true  => 2,
                                                 false => 1,
                                             }),
@@ -427,7 +427,7 @@ intrinsic_arity* = (fn: string_view) i32 {
 is_unresolved_trait_call* = (env: Env, c: CallData) bool {
     (c.args.len > 0).match ({
         true  => env.env_trait_method(c.fn).match ({
-            true  => eq(env.dispatch_name(c), c.fn).match ({
+            true  => (env.dispatch_name(c) == c.fn).match ({
                 true  => env.unknown_ty(env.infer_expr(c.args[0].addr())),
                 false => false,
             }),
@@ -436,14 +436,14 @@ is_unresolved_trait_call* = (env: Env, c: CallData) bool {
         false => false,
     })
 }
-is_forbidden_raw_call* = (c: CallData) bool { c.raw && eq(c.fn, "malloc") }
+is_forbidden_raw_call* = (c: CallData) bool { c.raw && c.fn == "malloc" }
 // The parser plants POSITIONED sentinel calls for non-enum `.match` forms it cannot lower: a
 // literal-scalar match with no `_` wildcard (`__nonexhaustive_lit`, a non-exhaustiveness error) and a
 // boolean match arm labelled with a non-boolean literal (`__badmatchlabel`, a label-type error). Both
 // carry the relevant source position in `c.pos`, so the classifier reports a POSITIONED, honestly-named
 // diagnostic instead of the old spurious position-less undefined-name.
-is_nonexhaust_lit_call* = (c: CallData) bool { eq(c.fn, "__nonexhaustive_lit") }
-is_badmatchlabel_call* = (c: CallData) bool { eq(c.fn, "__badmatchlabel") }
+is_nonexhaust_lit_call* = (c: CallData) bool { c.fn == "__nonexhaustive_lit" }
+is_badmatchlabel_call* = (c: CallData) bool { c.fn == "__badmatchlabel" }
 // A fn's OWN params and locals SHADOW same-named top-level names in its body: a call through a
 // locally-bound name (e.g. a closure param `f` while a top-level `f` exists) must NEVER be judged
 // against the top-level fn / intrinsic / import — the emitted C scopes the local as the call target.
@@ -460,11 +460,11 @@ shadow_not_callable* = (env: Env, fn: string_view) bool {
     t := env.var_or_global(fn)
     (t.is_void_ty() || env.unknown_ty(t)).match ({ true => false, false => true })
 }
-is_write_intrinsic = (fn: string_view) bool { eq(fn, "store") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") || eq(fn, "atomic_store_i64") || eq(fn, "atomic_cas_i64") }
+is_write_intrinsic = (fn: string_view) bool { fn == "store" || fn == "store_i64" || fn == "atomic_add_i64" || fn == "atomic_store_i64" || fn == "atomic_cas_i64" }
 // Slices are writable views, so constructing one from Ptr<T> would launder read-only memory just as
 // directly as a store. RawPtr and MutPtr retain the explicitly writable paths.
 store_writes_readonly = (env: Env, c: CallData) bool {
-    ((c.fn.is_write_intrinsic() || eq(c.fn, "slice")) && c.args.len >= 1).match ({
+    ((c.fn.is_write_intrinsic() || c.fn == "slice") && c.args.len >= 1).match ({
         true  => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(),
         false => false,
     })
@@ -475,7 +475,7 @@ store_mut_kind* = (env: Env, c: CallData) i32 { kv_at(env.store_writes_readonly(
 }), c.pos) }
 // every intrinsic that DEREFERENCES its pointer arg0: the typed load/store/offset trio AND the raw
 // word intrinsics (load_i64/store_i64/atomic_*) — the latter crash on null exactly the same way.
-is_deref_intrinsic* = (fn: string_view) bool { eq(fn, "load") || eq(fn, "store") || eq(fn, "offset") || eq(fn, "slice") || eq(fn, "load_i64") || eq(fn, "store_i64") || eq(fn, "atomic_add_i64") || eq(fn, "atomic_load_i64") || eq(fn, "atomic_store_i64") || eq(fn, "atomic_cas_i64") }
+is_deref_intrinsic* = (fn: string_view) bool { fn == "load" || fn == "store" || fn == "offset" || fn == "slice" || fn == "load_i64" || fn == "store_i64" || fn == "atomic_add_i64" || fn == "atomic_load_i64" || fn == "atomic_store_i64" || fn == "atomic_cas_i64" }
 derefs_nullable = (env: Env, c: CallData) bool {
     (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({
         true  => env.infer_expr(c.args[0].addr()).is_nullable_ptr_ty(),
@@ -498,7 +498,7 @@ null_deref_kind* = (env: Env, c: CallData) i32 { kv_at(env.derefs_nullable(c).ma
 // emitted C drops a value into a void slot ("void value not ignored"). Reject only genuinely
 // non-pointer args — a redundant `assert_nonnull` on an already-non-null `Ptr`/`MutPtr` is harmless.
 assert_nonnull_badarg = (env: Env, c: CallData) bool {
-    (eq(c.fn, "assert_nonnull") && c.args.len >= 1).match ({
+    (c.fn == "assert_nonnull" && c.args.len >= 1).match ({
         true  => env.infer_expr(c.args[0].addr()).is_ptr_ty_g() == false,
         false => false,
     })
@@ -545,7 +545,7 @@ is_struct* = (decls: [Decl], name: string_view) bool {
     f := false
     decls.loop((h, i, d) {
         f = d.match ({
-            .DStruct(sd) => eq(sd.name, name).match ({ true => true, false => f }),
+            .DStruct(sd) => (sd.name == name).match ({ true => true, false => f }),
             _            => f,
         })
     })
@@ -557,7 +557,7 @@ cv_no_params* = () [Param] { slice(null_ptr(), 0) }
 cv_is_gen_struct = (decls: [Decl], name: string_view) bool {
     decls.slice_any((d) {
         d.match ({
-            .DGenStruct(g) => eq(g.name, name),
+            .DGenStruct(g) => g.name == name,
             _              => false,
         })
     })
@@ -567,7 +567,7 @@ cv_is_gen_struct = (decls: [Decl], name: string_view) bool {
 cv_is_gen_enum = (decls: [Decl], name: string_view) bool {
     decls.slice_any((d) {
         d.match ({
-            .DGenEnum(g) => eq(g.name, name),
+            .DGenEnum(g) => g.name == name,
             _            => false,
         })
     })
@@ -576,7 +576,7 @@ cv_is_gen_enum = (decls: [Decl], name: string_view) bool {
 // ARE its only real members. The match/or_return lowering resolve_module runs BEFORE this validator
 // synthesizes exactly those two accesses on enum values (`subj.tag`, `subj.u`); they compile cleanly and
 // must be accepted. Any OTHER field name has no C member — that is the codegen ICE we reject.
-is_enum_repr_field* = (field: string_view) bool { eq(field, "tag") || eq(field, "u") }
+is_enum_repr_field* = (field: string_view) bool { field == "tag" || field == "u" }
 // the two sides of an ==/!= must share a comparable category: both numeric, both bool, both str-family,
 // both pointer, or the same nominal type. (unknown sides pass — no false-reject on template residue.)
 is_ptr_ty* = (t: Ty) bool {
@@ -725,10 +725,10 @@ is_ctx_typed_arg* = (e: Expr) bool {
 // cross-module / pre-mono "uninferable residue" the core validator deliberately tolerates. It is NOT
 // part of check_module's count/kind (the harness runs that on NON-flattened source), so the harness is
 // untouched. Pointer/slice elements and generic args recurse; FnT internals are left to later checks.
-ut_has_tparam = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { eq(tp.name, n) }) }
+ut_has_tparam = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { tp.name == n }) }
 ut_unknown_ty* = (env: Env, tparams: [Param], t: Ty) i32 {
     t.match ({
-        .Named(n)   => (eq(n, "Self") || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({
+        .Named(n)   => (n == "Self" || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({
             true  => 0,
             false => 1,
         }),
@@ -824,7 +824,7 @@ ut_func_kind* = (a: MutPtr<Malloc>, env: Env, f: Func) i32 { env.ut_params_kind(
 // unknown type the kind walk positioned on.
 utn_ty = (env: Env, tparams: [Param], t: Ty) string_view {
     t.match ({
-        .Named(n)   => (eq(n, "Self") || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({
+        .Named(n)   => (n == "Self" || is_prim_width(n) || tparams.ut_has_tparam(n) || env.env_named_declared(n)).match ({
             true  => "",
             false => n,
         }),
@@ -929,7 +929,7 @@ inf_edge_reaches = (decls: [Decl], target: string_view, t: Ty, depth: i64) bool 
     en := t.inf_edge_name()
     en.is_empty().match ({
         true  => false,
-        false => eq(en, target).match ({
+        false => (en == target).match ({
             true  => true,
             false => (depth <= 0).match ({
                 true  => false,
@@ -965,8 +965,8 @@ inf_named_reaches* = (decls: [Decl], target: string_view, cur: string_view, dept
 // generic decl: a DIRECT self-instantiation by value — a field/payload typed `Self` or `Self<…>`.
 inf_gen_self = (t: Ty, name: string_view) bool {
     t.match ({
-        .Named(n)   => eq(n, name),
-        .Generic(g) => eq(g.name, name),
+        .Named(n)   => n == name,
+        .Generic(g) => g.name == name,
         _           => false,
     })
 }
@@ -975,7 +975,7 @@ inf_gen_variants* = (vs: [VariantDef], name: string_view) bool { vs.slice_any((v
 is_scope_param_ty* = (t: Ty) bool {
     t.match ({
         .Ptr(pd) => load(pd.pointee).match ({
-            .Generic(g) => eq(g.name, "Scope"),
+            .Generic(g) => g.name == "Scope",
             _           => false,
         }),
         _        => false,
@@ -1010,7 +1010,7 @@ is_direct_scope_acquire* = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
 // `s.alloc` — the raw allocator field of a scope var (also escapes the scope if returned).
 is_scope_alloc_member* = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
     load(e).match ({
-        .Member(m) => eq(m.field, "alloc") && svars.dead_has(m.obj.expr_root_var()),
+        .Member(m) => m.field == "alloc" && svars.dead_has(m.obj.expr_root_var()),
         _          => false,
     })
 }

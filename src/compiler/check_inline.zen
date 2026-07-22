@@ -3,7 +3,7 @@
 { cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { mangle_str_in, mangle_semantic_in, impl_cname_in } = compiler.mangle
 { Malloc } = std.mem.alloc
-{ view, eq, is_empty, ends_with } = std.text.str
+{ view, is_empty, ends_with } = std.text.str
 { Map, of } = std.collections.map
 { subst_body, xform_body } = compiler.passes.subst
 { clos_lower_func, clos_lowerable } = compiler.passes.closures
@@ -24,7 +24,7 @@ cs_or* = (cs: i32, orig: i32) i32 { (cs == 0).match ({ true => orig, false => cs
 // Substitute tparams in type-bearing expression/statement nodes.
 is_empty_named* = (t: Ty) bool {
     t.match ({
-        .Named(n) => eq(n, ""),
+        .Named(n) => n == "",
         _         => false,
     })
 }
@@ -32,7 +32,7 @@ is_empty_named* = (t: Ty) bool {
 is_inlining* = (v: Ptr<VList>, name: string_view) bool {
     v.match ({
         .VNil     => false,
-        .VCons(c) => (eq(c.name, name) && c.ty.is_empty_named()).match ({
+        .VCons(c) => (c.name == name && c.ty.is_empty_named()).match ({
             true  => true,
             false => c.tail.is_inlining(name),
         }),
@@ -98,11 +98,11 @@ tmiss_tp_of* = (ps: [Param], tparams: [Param], e: Ptr<Expr>) string_view {
         _       => "",
     })
 }
-tmiss_has_tp* = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { eq(tp.name, n) }) }
+tmiss_has_tp* = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { tp.name == n }) }
 tmiss_targ_for* = (tparams: [Param], targs: [Ty], n: string_view) Ty {
     t := tvoid()
     tparams.loop((h, i, tp) {
-        t = (eq(tp.name, n) && i < targs.len).match ({ true => targs[i], false => t })
+        t = (tp.name == n && i < targs.len).match ({ true => targs[i], false => t })
     })
     t
 }
@@ -112,13 +112,13 @@ tmiss_traitish* = (decls: [Decl], fn: string_view) bool {
     decls.slice_any((d) {
         d.match ({
             .DImpl(im)         => im.methods.tmiss_has_tp(fn),
-            .DTraitDefault(td) => eq(td.fn.name, fn),
+            .DTraitDefault(td) => td.fn.name == fn,
             .DStruct(sd)       => sd.fields.tmiss_declares(fn),
             _                  => false,
         })
     })
 }
-tmiss_declares* = (fields: [Field], m: string_view) bool { fields.slice_any((f) { eq(f.name, m) && f.ty.is_fnt() }) }
+tmiss_declares* = (fields: [Field], m: string_view) bool { fields.slice_any((f) { f.name == m && f.ty.is_fnt() }) }
 tmiss_call* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], c: CallData) bool {
     (c.args.len > 0).match ({
         true  => {
@@ -129,7 +129,7 @@ tmiss_call* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs
                     tyname := tf.tparams.tmiss_targ_for(targs, tpn).dispatch_recv_name()
                     (is_empty(tyname) || idx.struct_idx.get(tyname, 0 - 1) < 0).match ({
                         true  => false,
-                        false => eq(a.dispatch_recv(decls, idx, c.fn, tyname), c.fn).match ({
+                        false => (a.dispatch_recv(decls, idx, c.fn, tyname) == c.fn).match ({
                             true  => decls.tmiss_traitish(c.fn),
                             false => false,
                         }),

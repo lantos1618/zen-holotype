@@ -1,7 +1,6 @@
 // compiler.genc_emit_decl — type, signature, function, struct, enum, and top-level decl C-emission.
 // Extracted from compiler.genc_emit. Consumes statement/block emission from compiler.genc_emit_expr.
 { String } = std.text.string
-{ eq } = std.text.str
 { Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FnTData, ty_cname_in, gstr_append } = compiler.genc
 { fnt_cname } = compiler.mangle
 { Malloc } = std.mem.alloc
@@ -43,7 +42,7 @@ gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
 // emit one function, appending to `s` (so a module can stream several into one buffer)
 // The Zen entry `main` is emitted as C `zen_main`; the OS-level `main(argc,argv)` lives in zenrt.c
 // (it stashes argv and calls zen_main). Every other function keeps its source name.
-c_func_name = (name: string_view) string_view { eq(name, "main").match ({
+c_func_name = (name: string_view) string_view { (name == "main").match ({
     true  => "zen_main",
     false => name,
 }) }
@@ -51,10 +50,10 @@ c_func_name = (name: string_view) string_view { eq(name, "main").match ({
 // user's main is emitted under `zen_user_main` and a NILADIC `zen_main(void)` trampoline (below) calls
 // it with `std.sys.root()`, so the C boundary (zenrt.c) stays byte-identical to the `main = () i32` case.
 main_is_sys* = (f: Func) bool {
-    eq(f.name, "main").match ({
+    (f.name == "main").match ({
         true  => (f.params.len == 1).match ({
             true  => f.params[0].ty.match ({
-                .Named(nm) => eq(nm, "Sys"),
+                .Named(nm) => nm == "Sys",
                 _          => false,
             }),
             false => false,
@@ -112,7 +111,7 @@ gen_func* = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
             out = out.gstr_append(alloc, " ")
             out = out.gen_func_body(alloc, f)
         },
-        false => eq(f.name, "main").match ({
+        false => (f.name == "main").match ({
             true  => {
                 out = out.gstr_append(alloc, " { zen__init_globals(); ")
                 out = out.gen_func_body(alloc, f)
@@ -213,7 +212,7 @@ gen_enum* = (s: String, alloc: MutPtr<Malloc>, ed: EnumDecl) String {
 struct_is_impld = (decls: [Decl], name: string_view) bool {
     decls.slice_any((d) {
         d.match ({
-            .DImpl(im) => eq(im.trname, name),
+            .DImpl(im) => im.trname == name,
             _          => false,
         })
     })

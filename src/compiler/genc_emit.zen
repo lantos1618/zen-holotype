@@ -3,7 +3,7 @@
 // Value/statement emission lives in compiler.genc_emit_lit (integers/literals/escapes),
 // compiler.genc_emit_expr (expressions/match/statements), and compiler.genc_emit_decl (types/sigs/decls).
 { String } = std.text.string
-{ eq, ends_with } = std.text.str
+{ ends_with } = std.text.str
 { Decl, EnumDecl, Expr, Func, StructDecl, Ty, cbuf, ty_cname_in, gstr_string, gstr_append } = compiler.genc
 { monomorphize } = compiler.mono
 { Malloc } = std.mem.alloc
@@ -28,8 +28,8 @@ slen = (decls: [Decl]) i32 {
 }
 is_type_named = (d: Decl, name: string_view) bool {
     d.match ({
-        .DStruct(sd) => eq(sd.name, name),
-        .DEnum(ed)   => eq(ed.name, name),
+        .DStruct(sd) => sd.name == name,
+        .DEnum(ed)   => ed.name == name,
         _            => false,
     })
 }
@@ -148,11 +148,11 @@ is_const_init = (e: Ptr<Expr>) bool {
         .StrLit(t)    => true,
         // `/` and `%` lower to a statement-expression (the div/mod guard), which is NOT a constant
         // expression — a `static T g = ({…})` global init is invalid C. Force those to runtime init.
-        .Bin(b)       => (eq(b.op, "/") || eq(b.op, "%")).match ({
+        .Bin(b)       => (b.op == "/" || b.op == "%").match ({
             true  => false,
             false => b.lhs.is_const_init() && b.rhs.is_const_init(),
         }),
-        .Call(c)      => eq(c.fn, "null_ptr"),
+        .Call(c)      => c.fn == "null_ptr",
         _             => false,
     })
 }
@@ -206,9 +206,9 @@ sys_root_cname = (decls: [Decl]) string_view {
     decls.loop((h, i, d) {
         nm = d.match ({
             .DFunc(f) => (f.params.len == 0 && f.ret.match ({
-                .Named(t) => eq(t, "Sys"),
+                .Named(t) => t == "Sys",
                 _         => false,
-            }) && (eq(f.name, "root") || f.name.ends_with("__root"))).match ({
+            }) && (f.name == "root" || f.name.ends_with("__root"))).match ({
                 true  => f.name,
                 false => nm,
             }),

@@ -7,7 +7,7 @@
 { Malloc } = std.mem.alloc
 { of } = std.collections.map
 { at } = std.text.bytes
-{ eq, is_empty } = std.text.str
+{ is_empty } = std.text.str
 { assert_nonnull_kind, body_pos, cv_no_params, env_imported, env_is_enum, env_is_gen_struct, env_is_struct, env_known_fn, env_params, env_struct_fields, env_trait_method, expr_pos, first_if_offset, fn_name_of, fn_pos_of, fnt_arg_err_at, inf_gen_fields, inf_gen_variants, inf_named_reaches, intrinsic_arity, is_badmatchlabel_call, is_forbidden_raw_call, is_imported_generic, is_nonexhaust_lit_call, is_unresolved_trait_call, null_deref_kind, pos_or, positive_count, shadow_not_callable, shadows_toplevel, source_span, stmt_pos, store_mut_kind, trait_declaring, unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind, ut_payloads_kind, utn_fields, utn_func, utn_payloads } = compiler.validate.util
 { CheckDiagnostic, Diagnostic, KARGTYPE, KARITY, KARMVOID, KASSIGNFIT, KBOOLARM, KCONFORMANCE, KDUPFN, KDUPVARIANT, KESCAPE, KEXHAUST, KFALLTHROUGH, KINDEX, KINFINITETYPE, KLAMBDAVALUE, KLEAK, KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT, KNOIF, KNOTCALLABLE, KNULLDEREF, KOPERAND, KOWNERSHIP, KPARSE, KPTRWRITE, KRETURNFIT, KSTRUCTFIELD, KTARGARITY, KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN, KVBREAK, desc_or, diagnostic_hint, diagnostic_kind_name, diagnostic_message, diagnostic_span_width, name_errors_body, name_errors_expr } = compiler.validate.diag
 { AliasList, DeadList, alias_nil, alias_step, count_loop_freed, dead_cons, dead_has, dead_nil, escape_step, expr_escapes, is_default_owner_method, is_owner_base, leak_alias_value, mu_body_kind, mu_build_index, nm_read_or_leak, own_dead_body, own_moved_var, own_step, owner_base, recv_typed_miss, scope_params } = compiler.validate.ownership
@@ -402,7 +402,7 @@ kv_reflect_recv_kind = (env: Env, c: CallData) i32 {
         true  => {
             xn := rt.kv_refl_tyname()
             yn := env.infer_expr(c.args[1].addr()).kv_refl_tyname()
-            (xn == "" || yn == "" || eq(xn, yn)).match ({
+            (xn == "" || yn == "" || xn == yn).match ({
                 true  => 0,
                 false => KARGTYPE().kv_at(c.args[1].expr_pos().pos_or(c.pos)),
             })
@@ -906,7 +906,7 @@ check_module_infinite_type_diagnostic_from_source* = (decls: [Decl], src: string
 main_param_is_sys = (f: Func) bool {
     (f.params.len == 1).match ({
         true  => f.params[0].ty.match ({
-            .Named(nm) => eq(nm, "Sys"),
+            .Named(nm) => nm == "Sys",
             _          => false,
         }),
         false => false,
@@ -917,7 +917,7 @@ main_params_kind = (decls: [Decl]) i32 {
     decls.loop((h, i, d) {
         k = (k == 0).match ({
             true  => d.match ({
-                .DFunc(f) => (eq(f.name, "main") && f.params.len > 0).match ({
+                .DFunc(f) => (f.name == "main" && f.params.len > 0).match ({
                     true  => f.main_param_is_sys().match ({
                         true  => 0,
                         false => KMAINPARAMS().kv_at(f.pos),
@@ -990,7 +990,7 @@ kv_impl_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.kv_kor(d.match ({
-            .DStruct(sd) => eq(sd.name, im.trname).match ({
+            .DStruct(sd) => (sd.name == im.trname).match ({
                 true  => a.kv_conformance_kind(decls, im, sd),
                 false => 0,
             }),
@@ -1258,7 +1258,7 @@ check_module_escape_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl],
 // params, let/assign target names) are NOT reads and are correctly not matched here.
 name_read_in_expr* = (nm: string_view, e: Ptr<Expr>) bool {
     load(e).match ({
-        .Var(v)         => eq(v.name, nm),
+        .Var(v)         => v.name == nm,
         .Bin(b)         => nm.name_read_in_expr(b.lhs) || nm.name_read_in_expr(b.rhs),
         .Call(c)        => nm.name_read_in_args(c.args),
         .MethodCall(mc) => nm.name_read_in_expr(mc.recv) || nm.name_read_in_args(mc.args),

@@ -3,7 +3,7 @@
 // Leaf int/name/escape helpers live in compiler.genjs_lit; DOM lowering in compiler.genjs_dom; decl and
 // module assembly in compiler.genjs.
 { String } = std.text.string
-{ eq, is_empty } = std.text.str
+{ is_empty } = std.text.str
 { Expr, Stmt, Ty, Param, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, LoopData, BlockData, LetData, AssignData, param, tvoid, gstr_append } = compiler.genc
 { Malloc } = std.mem.alloc
 { jint, jname, jstrlit } = compiler.genjs_lit
@@ -54,11 +54,11 @@ js_loop_token = (s: String, a: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: string_vi
 }
 js_loop_throw = (s: String, a: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: string_view) String { s.gstr_append(a, "(() => { throw ").js_loop_token(a, obj, suffix).gstr_append(a, "; })()") }
 js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String {
-    eq(m.field, "break_zk").match ({
+    (m.field == "break_zk").match ({
         true  => s.js_loop_throw(a, m.obj, "__break"),
-        false => eq(m.field, "continue_zk").match ({
+        false => (m.field == "continue_zk").match ({
             true  => s.js_loop_throw(a, m.obj, "__continue"),
-            false => eq(m.field, "u").match ({
+            false => (m.field == "u").match ({
                 true  => s.js_expr(a, m.obj),
                 false => s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field),
             }),
@@ -70,11 +70,11 @@ js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String {
 // checker's float-division marker `/.` emits NATIVE `/` so f64 follows IEEE (`0.0/0.0` -> NaN, never a
 // panic); all else `(lhs op rhs)`.
 js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String {
-    eq(b.op, "/.").match ({
+    (b.op == "/.").match ({
         true  => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " / ").js_expr(a, b.rhs).gstr_append(a, ")"),
-        false => eq(b.op, "/").match ({
+        false => (b.op == "/").match ({
             true  => s.gstr_append(a, "__zr.div(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"),
-            false => eq(b.op, "%").match ({
+            false => (b.op == "%").match ({
                 true  => s.gstr_append(a, "__zr.mod(").js_expr(a, b.lhs).gstr_append(a, ", ").js_expr(a, b.rhs).gstr_append(a, ")"),
                 false => s.gstr_append(a, "(").js_expr(a, b.lhs).gstr_append(a, " ").gstr_append(a, js_op(b.op)).gstr_append(a, " ").js_expr(a, b.rhs).gstr_append(a, ")"),
             }),
@@ -82,9 +82,9 @@ js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String {
     })
 }
 js_op = (op: string_view) string_view {
-    eq(op, "==").match ({
+    (op == "==").match ({
         true  => "===",
-        false => eq(op, "!=").match ({ true => "!==", false => op }),
+        false => (op == "!=").match ({ true => "!==", false => op }),
     })
 }
 js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
@@ -110,25 +110,25 @@ js_arg_at* = (s: String, a: MutPtr<Malloc>, c: CallData, i: i32) String { (i < c
 }) }
 // intrinsics erase to floor calls; everything else is an ordinary JS call `name(args)`.
 js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    eq(c.fn, "__str_eq").match ({
+    (c.fn == "__str_eq").match ({
         true  => s.gstr_append(a, "__zr.eq(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
-        false => eq(c.fn, "__str_ne").match ({
+        false => (c.fn == "__str_ne").match ({
             true  => s.gstr_append(a, "(!__zr.eq(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, "))"),
-            false => eq(c.fn, "load").match ({
+            false => (c.fn == "load").match ({
                 true  => s.gstr_append(a, "__zr.load(").js_arg_at(a, c, 0).gstr_append(a, ")"),
-                false => eq(c.fn, "store").match ({
+                false => (c.fn == "store").match ({
                     true  => s.gstr_append(a, "__zr.store(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
-                    false => eq(c.fn, "offset").match ({
+                    false => (c.fn == "offset").match ({
                         true  => s.gstr_append(a, "__zr.offset(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
-                        false => eq(c.fn, "slice").match ({
+                        false => (c.fn == "slice").match ({
                             true  => s.gstr_append(a, "__zr.slice(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
-                            false => eq(c.fn, "cstr").match ({
+                            false => (c.fn == "cstr").match ({
                                 true  => s.gstr_append(a, "(").js_arg_at(a, c, 0).gstr_append(a, ")"),
-                                false => eq(c.fn, "null_ptr").match ({
+                                false => (c.fn == "null_ptr").match ({
                                     true  => s.gstr_append(a, "0"),
-                                    false => eq(c.fn, "addr").match ({
+                                    false => (c.fn == "addr").match ({
                                         true  => s.gstr_append(a, "__zr.addr(").js_arg_at(a, c, 0).gstr_append(a, ")"),
-                                        false => eq(c.fn, "assert_nonnull").match ({
+                                        false => (c.fn == "assert_nonnull").match ({
                                             true  => s.gstr_append(a, "__zr.nn(").js_arg_at(a, c, 0).gstr_append(a, ")"),
                                             false => s.js_call_intr2(a, c),
                                         }),
@@ -144,19 +144,19 @@ js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
 }
 // second tier of intrinsics (kept split so no single match nests too deep for the parser).
 js_call_intr2 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    eq(c.fn, "to_i32").match ({
+    (c.fn == "to_i32").match ({
         true  => s.gstr_append(a, "__zr.i32(").js_arg_at(a, c, 0).gstr_append(a, ")"),
-        false => eq(c.fn, "to_i64").match ({
+        false => (c.fn == "to_i64").match ({
             true  => s.gstr_append(a, "__zr.i64(").js_arg_at(a, c, 0).gstr_append(a, ")"),
-            false => eq(c.fn, "to_u8").match ({
+            false => (c.fn == "to_u8").match ({
                 true  => s.gstr_append(a, "((").js_arg_at(a, c, 0).gstr_append(a, ") & 255)"),
-                false => eq(c.fn, "to_f64").match ({
+                false => (c.fn == "to_f64").match ({
                     true  => s.gstr_append(a, "(+(").js_arg_at(a, c, 0).gstr_append(a, "))"),
-                    false => eq(c.fn, "load_i64").match ({
+                    false => (c.fn == "load_i64").match ({
                         true  => s.gstr_append(a, "__zr.load_i64(").js_arg_at(a, c, 0).gstr_append(a, ")"),
-                        false => eq(c.fn, "store_i64").match ({
+                        false => (c.fn == "store_i64").match ({
                             true  => s.gstr_append(a, "__zr.store_i64(").js_arg_at(a, c, 0).gstr_append(a, ", ").js_arg_at(a, c, 1).gstr_append(a, ")"),
-                            false => eq(c.fn, "sizeof").match ({
+                            false => (c.fn == "sizeof").match ({
                                 true  => s.js_sizeof(a, c),
                                 false => s.js_dom_dispatch(a, c),
                             }),
@@ -188,7 +188,7 @@ js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
 }
 js_switch_panic_default = (s: String, a: MutPtr<Malloc>) String { s.gstr_append(a, "default: __zr.panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ") }
 js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String {
-    eq(ar.variant, "_").match ({
+    (ar.variant == "_").match ({
         true  => s.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "),
         false => {
             out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": return ").js_arm_body_expr(a, ar).gstr_append(a, "; ")
@@ -201,7 +201,7 @@ js_switch_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String
         true  => s,
         false => {
             out := s.js_switch_case(a, arms[i], i == arms.len - 1)
-            eq(arms[i].variant, "_").match ({
+            (arms[i].variant == "_").match ({
                 true  => out,
                 false => out.js_switch_cases(a, arms, i + 1),
             })
@@ -224,7 +224,7 @@ js_arm_stmt_body = (s: String, a: MutPtr<Malloc>, body: Ptr<Expr>) String {
     })
 }
 js_switch_stmt_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String {
-    eq(ar.variant, "_").match ({
+    (ar.variant == "_").match ({
         true  => s.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "),
         false => {
             out := s.gstr_append(a, "case \"").gstr_append(a, ar.variant).gstr_append(a, "\": ").js_arm_stmt(a, ar).gstr_append(a, " break; ")
@@ -237,7 +237,7 @@ js_switch_stmt_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) S
         true  => s,
         false => {
             out := s.js_switch_stmt_case(a, arms[i], i == arms.len - 1)
-            eq(arms[i].variant, "_").match ({
+            (arms[i].variant == "_").match ({
                 true  => out,
                 false => out.js_switch_stmt_cases(a, arms, i + 1),
             })
@@ -342,15 +342,15 @@ int_width* = (t: Ty) i32 {
     })
 }
 iw_named = (n: string_view) i32 {
-    eq(n, "u16").match ({
+    (n == "u16").match ({
         true  => 2,
-        false => eq(n, "u32").match ({
+        false => (n == "u32").match ({
             true  => 3,
-            false => eq(n, "u64").match ({
+            false => (n == "u64").match ({
                 true  => 7,
-                false => eq(n, "i16").match ({
+                false => (n == "i16").match ({
                     true  => 5,
-                    false => eq(n, "i8").match ({ true => 6, false => 0 }),
+                    false => (n == "i8").match ({ true => 6, false => 0 }),
                 }),
             }),
         }),
@@ -400,7 +400,7 @@ js_expr_w = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, w: i32) String {
 js_is_mul32 = (e: Expr, w: i32) bool {
     (w == 3 || w == 4).match ({
         true  => e.match ({
-            .Bin(b) => eq(b.op, "*"),
+            .Bin(b) => b.op == "*",
             _       => false,
         }),
         false => false,
@@ -439,7 +439,7 @@ vw_note* = (name: string_view, ty: Ty) void {
 vw_lookup = (name: string_view) Ty {
     r := tvoid()
     vw_get().loop((h, i, p) {
-        r = eq(p.name, name).match ({ true => p.ty, false => r })
+        r = (p.name == name).match ({ true => p.ty, false => r })
     })
     r
 }
