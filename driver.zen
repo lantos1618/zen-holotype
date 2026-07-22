@@ -14,8 +14,8 @@
 { open, read, write, close, system, unlink, mkdir, rmdir, opendir, closedir, getpid, isatty } = std.c.libc
 { parse_module, exports_get } = compiler.parse
 { set_faithful_lexeme } = compiler.parse_atom
-{ perr_get } = compiler.parse_type
-{ lerr_get, collect_comments } = compiler.lex
+{ perr_get, perr_off_get } = compiler.parse_type
+{ lerr_get, lerr_off_get, collect_comments } = compiler.lex
 { resolve_module } = compiler.check_resolve
 { ufcs_vis_of } = compiler.check
 { CheckDiagnostic, desc_or } = compiler.validate.diag
@@ -1537,8 +1537,15 @@ fmt_render = (mp: MutPtr<Malloc>, src: string_view) FmtResult {
         },
     })
 }
-fmt_parse_err = (mp: MutPtr<Malloc>) i32 {
-    derr("zenc: fmt: cannot format (syntax error — a faithful formatter refuses a file it cannot represent)\n")
+// Positioned refusal: render the parse/lex failure as a standard `zenc: <path>:<line>:<col>:
+// error[parse]` diagnostic against the RAW source (fmt owns no ResolvedProgram — the raw source IS
+// the user source, so diag_user_span maps the offset directly). A negative offset is the vbreak
+// encoding (parse.fill_decls) — clamp to its absolute position for the caret.
+fmt_parse_err = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
+    off := (perr_off_get() == 0).match ({ true => lerr_off_get(), false => perr_off_get() })
+    o := (off < 0).match ({ true => 0 - off, false => off })
+    sp := diag_user_span(src, src, o, 1)
+    derr(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, "parse", "cannot format (syntax error — a faithful formatter refuses a file it cannot represent)", "fix the parse error first (`zenc check` reports the full diagnostic), then re-run fmt", 1))
     1
 }
 // THE single source of truth for "would apply rewrite this file?" — a file is dirty iff the formatted
@@ -1583,7 +1590,7 @@ fmt_file = (mp: MutPtr<Malloc>, path: string_view, check: bool) i32 {
                             }),
                             false => 0,
                         }),
-                        false => mp.fmt_parse_err(),
+                        false => mp.fmt_parse_err(path, src),
                     })
                 },
                 false => 1,
@@ -1607,7 +1614,7 @@ fmt_stdout = (mp: MutPtr<Malloc>, path: string_view) i32 {
                             out(r.text)
                             0
                         },
-                        false => mp.fmt_parse_err(),
+                        false => mp.fmt_parse_err(path, src),
                     })
                 },
                 false => 1,
@@ -2559,13 +2566,18 @@ list_plan_targets = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) i3
     p := mp.build_zen_plan(root, dir)
     p.ok.match ({ true => mp.list_plan_from(p.src, 0, p.src.plan_count()), false => 1 })
 }
-// ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 0) ─────────────────────────
+// ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 1) ─────────────────────────
 // A JSON-RPC 2.0 loop: read `Content-Length: N\r\n\r\n<N-byte JSON body>` frames from stdin, run the
 // EXISTING check pipeline (resolve -> parse -> the diagnostic channels) on each opened/changed
 // document, and PUSH `textDocument/publishDiagnostics`. This only ADDS a subcommand — no compiler
 // internals change; it rides check_module_batch + the specialized channels the driver already uses.
-// Single-file scope (full-sync): the document text is checked standalone; its directory is derived
-// from the `file://` URI so sibling/std imports resolve. Multi-file project awareness is later.
+// Full-sync per document: the text is checked standalone; its directory is derived from the
+// `file://` URI so sibling/std imports resolve (an error INSIDE an imported module is pinned to the
+// open file's head with the real location in the message). Stage 1 adds: didClose (clears
+// diagnostics), MethodNotFound replies for unimplemented requests, byte->UTF-16 position conversion,
+// and a Content-Length sanity ceiling. Conformance suite: tests/harness_lsp.zen. Hover needs plumbing
+// the checker doesn't expose yet (an offset->node query + an exported type-render such as ty_name);
+// until that exists the server deliberately declines it with -32601.
 // PROTOCOL WRITES GO TO STDOUT (fd 1); every diagnostic/log the pipeline emits stays on stderr, so the
 // JSON-RPC stream is never corrupted.
 lout = (s: string_view) i64 {
@@ -2916,6 +2928,35 @@ lsp_zero_span = (sp: DiagSpan) ZSpan {
         ),
     })
 }
+// ── byte columns -> UTF-16 columns (LSP `character` counts UTF-16 CODE UNITS, not bytes) ──────────
+// zenc spans are byte columns into the source line; a client fed byte columns misplaces squiggles on
+// any line with non-ASCII bytes before the error. Conversion walks the located line once: every
+// non-continuation byte counts 1 unit, and a 4-byte UTF-8 lead (>= 0xF0, a supplementary-plane char)
+// counts 2 (its UTF-16 surrogate pair).
+lsp_line_start = (v: [u8], ln: i64) i64 {
+    i: i64 := 0
+    k: i64 := 0
+    @while (k < ln && i < v.len) {
+        (v[i] == '\n').then({
+            k = k + 1
+        })
+        i = i + 1
+    }
+    i
+}
+lsp_utf16_col = (v: [u8], ls: i64, bytecol: i64) i64 {
+    u: i64 := 0
+    i := ls
+    end := ls + bytecol
+    @while (i < v.len && i < end && v[i] != '\n') {
+        bi := v[i].to_i64()
+        (bi & 192 != 128).then({
+            u = u + (bi >= 240).match ({ true => 2, false => 1 })
+        })
+        i = i + 1
+    }
+    u
+}
 // ── one diagnostic -> one LSP Diagnostic object, accumulated (comma-separated) into the array ──────
 DiagAcc: {
     sb: String,
@@ -2936,6 +2977,13 @@ lsp_push_diag = (
         false => {
             dl := rp.locate_diag(cd.source_offset, cd.span_width, path, user)
             z := lsp_zero_span(dl.sp)
+            // byte -> UTF-16 columns against the line the span actually points into (dl.src is the
+            // owning module's source; for the open document it IS the client's text).
+            sv: [u8] := dl.src.view()
+            ls := sv.lsp_line_start(z.l)
+            zc := sv.lsp_utf16_col(ls, z.c)
+            ze := sv.lsp_utf16_col(ls, z.e)
+            ze = (ze > zc).match ({ true => ze, false => zc + 1 })
             // enrich exactly like the CLI (emit_one): denriched message + world-teaching undefined-name hint.
             msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
             hint := cd.hint
@@ -2954,17 +3002,39 @@ lsp_push_diag = (
                     .gstr_append(mp, hint)
                     .gstr_finish(mp),
             })
+            // an error living in an IMPORTED module (dl.path != the open document) must not squiggle
+            // an unrelated range of the open file: pin it to the file head and name the real location
+            // in the message, so the information survives without a lying range.
+            line: i64 := z.l
+            (dl.path == path).match ({
+                true  => 0,
+                false => {
+                    line = 0
+                    zc = 0
+                    ze = 1
+                    full = mp
+                        .gstr_string(128)
+                        .gstr_append(mp, "in imported module ")
+                        .gstr_append(mp, dl.path)
+                        .gstr_append(mp, ":")
+                        .push_int(mp, to_i64(dl.sp.line))
+                        .gstr_append(mp, ": ")
+                        .gstr_append(mp, full)
+                        .gstr_finish(mp)
+                    0
+                },
+            })
             sep := (acc.n > 0).match ({ true => ",", false => "" })
             sb2 := acc.sb
                 .gstr_append(mp, sep)
                 .gstr_append(mp, "{\"range\":{\"start\":{\"line\":")
-                .push_int(mp, z.l)
+                .push_int(mp, line)
                 .gstr_append(mp, ",\"character\":")
-                .push_int(mp, z.c)
+                .push_int(mp, zc)
                 .gstr_append(mp, "},\"end\":{\"line\":")
-                .push_int(mp, z.l)
+                .push_int(mp, line)
                 .gstr_append(mp, ",\"character\":")
-                .push_int(mp, z.e)
+                .push_int(mp, ze)
                 .gstr_append(mp, "}},\"severity\":1,\"code\":")
                 .push_jstr(mp, cd.kind)
                 .gstr_append(mp, ",\"source\":\"zen\",\"message\":")
@@ -3057,13 +3127,43 @@ lsp_reply_null = (mp: MutPtr<Malloc>, body: string_view) i64 {
         .gstr_append(mp, ",\"result\":null}")
         .gstr_finish(mp))
 }
+// JSON-RPC MethodNotFound for a REQUEST we don't implement. A request left unanswered stalls the
+// client (nvim blocks a hover round-trip until its timeout); the error reply fails it instantly.
+lsp_reply_method_not_found = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    mp.lsp_send(mp
+        .gstr_string(128)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"error\":{\"code\":-32601,\"message\":\"method not found\"}}")
+        .gstr_finish(mp))
+}
+// notification families we deliberately swallow WITHOUT a reply (replying to a notification is a
+// protocol violation). `id` presence alone is not the test: e.g. workspace/didChangeConfiguration
+// params may contain an unrelated "id" key that the flat key scanner would find.
+lsp_is_notification = (method: string_view) bool {
+    method.lsp_has_prefix("$/")
+        || method.lsp_has_prefix("textDocument/did")
+        || method.lsp_has_prefix("workspace/did")
+        || method == "initialized"
+        || method == "exit"
+}
+// publish an EMPTY diagnostics array for `uri` (didClose: the client keeps stale squiggles otherwise).
+lsp_publish_clear = (mp: MutPtr<Malloc>, uri: string_view) i64 {
+    mp.lsp_send(mp
+        .gstr_string(160)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":")
+        .push_jstr(mp, uri)
+        .gstr_append(mp, ",\"diagnostics\":[]}}")
+        .gstr_finish(mp))
+}
 // didOpen/didChange (full-sync) both carry the whole document text; the first `text` key is the
 // document content (the URI's `text` in didOpen, the single contentChange's `text` in didChange).
 lsp_did_change = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
     mp.lsp_publish(root, mp.json_str_field(body, "uri"), mp.json_str_field(body, "text"))
 }
-// dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown methods
-// (initialized / didClose / anything else) are no-ops so the server never crashes on them.
+// dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown
+// NOTIFICATIONS are no-ops; an unknown REQUEST (an "id" key outside the notification families) gets
+// a MethodNotFound error so the client never waits on a reply that will not come.
 lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
     method := mp.json_str_field(body, "method")
     (method == "initialize").match ({
@@ -3083,7 +3183,19 @@ lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
                         mp.lsp_did_change(root, body)
                         0
                     },
-                    false => 0,
+                    false => (method == "textDocument/didClose").match ({
+                        true  => {
+                            mp.lsp_publish_clear(mp.json_str_field(body, "uri"))
+                            0
+                        },
+                        false => {
+                            v: [u8] := body.view()
+                            (v.json_find_key("id") >= 0 && lsp_is_notification(method) == false).then({
+                                mp.lsp_reply_method_not_found(body)
+                            })
+                            0
+                        },
+                    }),
                 }),
             }),
         }),
@@ -3091,6 +3203,10 @@ lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
 }
 // ── stdio framing: read `Content-Length: N\r\n\r\n` headers, then exactly N body bytes ─────────────
 LSP_HDR_CAP = () i64 { 1024 }
+// sanity ceiling on a claimed body size (64 MiB). A hostile/corrupt `Content-Length: 100000000000000`
+// would otherwise reach acquire(), fail, and null-deref-panic the server; over-limit frames are
+// skipped like unparseable ones and the header scan resynchronizes on the next frame.
+LSP_BODY_MAX = () i64 { 67108864 }
 // read stdin one byte at a time into `buf` until the CRLFCRLF terminator (so we never over-read into
 // the body). Returns the header length incl. terminator; 0 on clean EOF before any byte; -1 on error.
 lsp_read_headers = (mp: MutPtr<Malloc>, buf: RawPtr<u8>, off: i64) i64 {
@@ -3174,7 +3290,7 @@ lsp_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
             },
             false => {
                 n := hbuf.lsp_content_length(0, hlen)
-                (n < 0).match ({
+                (n < 0 || n > LSP_BODY_MAX()).match ({
                     true  => 0,
                     false => {
                         body := mp.acquire(n + 1)

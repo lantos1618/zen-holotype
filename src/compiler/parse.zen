@@ -33,6 +33,18 @@ parse_decl_at* = (a: MutPtr<Malloc>, src: string_view, pos: i32) DeclEnd {
     // marker): `bump<AllocT> = (…)`. It carries trait BOUNDS that can't be inferred from usage;
     // tparams without a bound are also collected implicitly from tyvar-shaped param/return types.
     tp := a.parse_tparams(src, src.skip_name_star(pos))
+    // PARSER TOTALITY: after `name [*] [<T…>]` the ONLY legal continuation of a function decl is
+    // `= (`. skip_to_lparen below would otherwise SKIM SILENTLY over any junk between the name and
+    // the first `(` — so garbage like `this is not zen }{ (((` mis-parsed as a function decl and
+    // `zenc fmt` would destructively rewrite the file. Flag the first unexpected token as a parse
+    // error (the module is rejected via the syntax sentinel); parsing still advances past the decl.
+    eqm := src.scan(tp.next)
+    src.is_eq_tok(eqm.tok).match ({
+        true  => (src.is_lparen(src.scan(eqm.next).tok) == false).then({
+            perr_set_at(src.scan(eqm.next).tok.start)
+        }),
+        false => perr_set_at(eqm.tok.start),
+    })
     buf := a.param_buf()
     pe := a.fill_params(src, src.skip_to_lparen(nt.next), buf, 0)
     rt := a.parse_ty(src, pe.next)

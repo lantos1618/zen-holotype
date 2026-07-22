@@ -31,7 +31,7 @@
 // AST-node query traits (is_fnt on Ty, is_generic_fn on Func). Importing from compiler.astops pulls
 // the WHOLE module (all its impls: Ty/Func/Decl/StructDecl) into check's import closure, so the impl
 // index resolves these UFCS methods here and in every module that imports check (validate/*, passes/*).
-{ TyQuery, FuncQuery, has_fnt_param, map_slice, slice_any } = compiler.astops
+{ TyQuery, FuncQuery, has_fnt_param, map_slice, slice_any, wr_writes_name } = compiler.astops
 // Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
 // resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
 { deep_targs, impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
@@ -2047,6 +2047,11 @@ arg_needs_bind = (e: Expr) bool {
         _               => false,
     })
 }
+// must param i be COPY-bound because the template body writes it? (value semantics for inlined
+// params, #585). FnT params never bind — their lambda arg must splice literally.
+wr_param_bind = (params: [Param], wbody: [Stmt], i: i64) bool {
+    params[i].ty.is_fnt() == false && wbody.wr_writes_name(params[i].name)
+}
 // Fresh C name for an arg-binding local: distinct "__zen_arg" prefix (never collides with body
 // "__zen_local"s), inline_marks keep it distinct across nested inline depths, the index keeps each
 // arg distinct within one inline.
@@ -2072,6 +2077,13 @@ arg_local_name = (a: MutPtr<Malloc>, name: string_view, env: Ptr<VList>, idx: i6
 // literal's default width (i32) — the outer instantiation's binding (e.g. K=i64 from the HMap
 // receiver) silently lost, wrong monos emitted (i64 keys hashed with impl_Hash_i32_hash). A pinned
 // literal is bound to a TYPED temp local instead, so in-body uses carry the instantiated type.
+// `wbody` (empty = skip) is the TEMPLATE body about to be spliced: a param the body WRITES
+// (wr_writes_name — direct assignment, a place assignment rooted at it, or a reflection expansion
+// over it whose lambda assigns its value param) is bound to a temp COPY even when the arg is a
+// plain Var — inlined params are VALUES, so a callee's `v = v + 1` must mutate its own copy, never
+// the caller's argument (#585; the mono path already behaves this way). FnT params are exempt
+// (their lambda arg must stay a literal for inline_lambda to splice), as is the lambda-inline path
+// (it passes no_stmts()): reflection lambda value params are PLACES of the subject by design.
 bind_args* = (
     a: MutPtr<Malloc>,
     decls: [Decl],
@@ -2080,11 +2092,15 @@ bind_args* = (
     cargs: [Expr],
     env: Ptr<VList>,
     pins: [Ty],
+    wbody: [Stmt],
 ) ArgBind {
     nf := a.cebuf(cargs.len)
     nb := 0
     cargs.loop((h, i, ce) {
-        (i < params.len && (ce.arg_needs_bind() || pins[i].is_void_ty() == false)).then({
+        (i < params.len
+            && (ce.arg_needs_bind()
+                || pins[i].is_void_ty() == false
+                || params.wr_param_bind(wbody, i))).then({
             nb = nb + 1
         })
     })
@@ -2092,7 +2108,10 @@ bind_args* = (
     e2 := env
     j := 0
     cargs.loop((h, i, ce) {
-        (i < params.len && (ce.arg_needs_bind() || pins[i].is_void_ty() == false)).match ({
+        (i < params.len
+            && (ce.arg_needs_bind()
+                || pins[i].is_void_ty() == false
+                || params.wr_param_bind(wbody, i))).match ({
             true  => {
                 nm := a.arg_local_name(params[i].name, env, i)
                 bb[j] = slett(nm, pins[i], cargs[i].addr())
@@ -2288,7 +2307,7 @@ inline_lambda* = (
         .Lambda(lm) => {
             // spliced lambda body: its `return`s are the LAMBDA's, so bind its own (possibly void)
             // return type over the caller's.
-            ab := a.bind_args(decls, idx, lm.params, cargs, a.bind_fnret(env, lm.ret), a.no_pins(lm.params.len))
+            ab := a.bind_args(decls, idx, lm.params, cargs, a.bind_fnret(env, lm.ret), a.no_pins(lm.params.len), no_stmts())
             a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, lm.body, lm.params, ab.fargs, ab.env, tvoid())))
         },
         .Var(v)     => a.var_call(v, cargs),
