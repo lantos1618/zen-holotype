@@ -15,7 +15,18 @@
 { view } = std.text.str
 { lstrip, is_import_line, next_line, STD_MARKER_LEN, COMPILER_MARKER_LEN, USER_MARKER_LEN, rset_add,
   rset_add_str, rpush, rappend, rappend_span, madd_str_name, ImportEdge, ProvidedSymbol, SIG_PUB,
-  SIG_TYPE, SIG_IMPORTED, SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line } = std.internal.resolve
+  SIG_TYPE, SIG_IMPORTED, SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line,
+  line_comment_at } = std.internal.resolve
+// A line holding no decl material: blank, or a `//` line comment. The SYMBOL walks must step over
+// these one line at a time instead of falling into decl_span: decl_span's lexer skips comments and
+// newlines wholesale, so calling it from inside a comment/blank line that precedes a NAMESPACED
+// import (`thread = std.concurrent.thread`) mis-parses that import as a value decl and its span
+// swallows the module's NEXT real declaration — which then silently vanishes from the export sig
+// ("unknown name … no such top-level definition" on a name that is plainly there, star and all).
+is_skippable_line* = (s: string_view, p: i32) bool {
+    c := s.lstrip(p)
+    s.line_comment_at(c) || s.at(c) == '\n' || s.at(c) == '\r'
+}
 is_ws* = (b: u8) bool { b == ' ' || b == '\t' }
 // A top-level line opening an import: `{` then a space OR a binding name directly (`{println}`).
 // `has_import_marker` then confirms a real `} = std./compiler./user` follows, so relaxing the
@@ -645,7 +656,7 @@ provided_symbol_count_from = (a: MutPtr<Malloc>, src: string_view, p: i32, n: i3
                     count = src.provided_head_count(src.lstrip(pos) + 1, count)
                     pos = src.import_end(pos)
                 },
-                false => src.is_ns_line(pos).match ({
+                false => (src.is_ns_line(pos) || src.is_skippable_line(pos)).match ({
                     true  => {
                         pos = src.next_line(pos)
                     },
@@ -812,7 +823,7 @@ fill_provided_symbols_in<A> = (
                                 },
                             })
                         },
-                        false => src.is_ns_line(pos).match ({
+                        false => (src.is_ns_line(pos) || src.is_skippable_line(pos)).match ({
                             true  => {
                                 pos = src.next_line(pos)
                             },

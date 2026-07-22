@@ -1,0 +1,176 @@
+// tests/harness_lsp.zen — LSP category: conformance tests for `zen lsp` (the diagnostics language
+// server in driver.zen). Each case is one SCRIPTED STDIO SESSION: the framed JSON-RPC bytes are built
+// here (Content-Length is computed from the exact body length, CRLF framing), piped through
+// `timeout 20 ./zen lsp`, and the captured stdout + exit code are asserted with plain substring
+// checks against the protocol shapes the server must produce. What this locks:
+//
+//   (1) initialize handshake — capabilities.textDocumentSync=1, the echoed id, framed output
+//   (2) didOpen of a broken document — publishDiagnostics with the expected kind at the expected
+//       0-based UTF-16 position (zenc spans are 1-based BYTE columns; the server must convert both)
+//   (3) didChange (full sync) fixing the error — a publish with an EMPTY diagnostics array
+//   (4) an unknown REQUEST (textDocument/hover) — a -32601 MethodNotFound reply with the echoed id,
+//       and the server keeps serving (shutdown still answered, clean exit)
+//   (5) garbage / absurdly oversized Content-Length — no hang (timeout-guarded), no crash: garbage
+//       resynchronizes on the next frame; over-limit is skipped instead of null-deref-panicking
+//   (6) didClose — a publish clearing the document's diagnostics
+//   (7) non-ASCII source — LSP `character` counts UTF-16 code units, not bytes
+//   (8) a document importing a $ZT sibling — diagnostics located in the OPEN file keep exact ranges;
+//       an error living INSIDE the imported module is pinned to 0:0 with the real location named in
+//       the message (never a lying range into the open document)
+//   (9) exit without shutdown — exit code 1 per the LSP convention
+{ Malloc } = std.mem.alloc
+{ save, contents_in, shell } = std.io.file
+{ len, contains } = std.text.str
+{ expect } = std.core.result
+{ zo_cmd, zo_dir, zo_idpath, zo_join, zo_itoa, run_suite } = harness_lib
+// ── session plumbing ──────────────────────────────────────────────────────────────────────────────
+// one framed JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`.
+lz_frame = (mp: MutPtr<Malloc>, body: string_view) string_view {
+    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    mp.zo_join([z, "Content-Length: ", mp.zo_itoa(len(body)), "\r\n\r\n", body])
+}
+// pipe `session` through the server (timeout-guarded so a hang can never wedge the harness); the
+// server's stdout is returned and its exit code lands in the per-case .rc file.
+lz_run = (mp: MutPtr<Malloc>, gid: i64, session: string_view) string_view {
+    inp := mp.zo_idpath("lzs", gid, ".in")
+    outp := mp.zo_idpath("lzs", gid, ".out")
+    rcp := mp.zo_idpath("lzs", gid, ".rc")
+    save(inp, session, len(session))
+    z: string_view := ""
+    shell(mp.zo_cmd(mp.zo_join([z, "timeout 20 ./zen lsp < ", inp, " > ", outp, " 2>/dev/null; printf %s $? > ", rcp]))).expect("harness: shell")
+    mp.contents_in(outp).match ({
+        .Ok(s)  => s,
+        .Err(e) => "",
+    })
+}
+lz_rc = (mp: MutPtr<Malloc>, gid: i64) string_view {
+    mp.contents_in(mp.zo_idpath("lzs", gid, ".rc")).match ({
+        .Ok(s)  => s,
+        .Err(e) => "",
+    })
+}
+// canonical messages (ids: initialize=1, shutdown=2, probes pick their own).
+LZ_INIT = () string_view {
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"
+}
+LZ_SHUT = () string_view { "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}" }
+LZ_EXIT = () string_view { "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}" }
+// a `file://` URI for a (virtual) document inside this run's private scratch dir — its dirname is
+// where the server resolves sibling imports, so on-disk $ZT siblings are import targets.
+lz_uri = (mp: MutPtr<Malloc>, name: string_view) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "file://", mp.zo_dir(), "/", name])
+}
+lz_open = (mp: MutPtr<Malloc>, uri: string_view, text: string_view) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"languageId\":\"zen\",\"version\":1,\"text\":\"", text, "\"}}}"])
+}
+lz_change = (mp: MutPtr<Malloc>, uri: string_view, text: string_view) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"version\":2},\"contentChanges\":[{\"text\":\"", text, "\"}]}}"])
+}
+lz_close = (mp: MutPtr<Malloc>, uri: string_view) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
+}
+// document texts as they sit INSIDE the JSON body (\n are JSON escapes the server decodes).
+LZ_BAD = () string_view { "main = () i32 {\\n    x := undefined_name\\n    0\\n}\\n" }
+LZ_GOOD = () string_view { "main = () i32 {\\n    7\\n}\\n" }
+// ── the cases ─────────────────────────────────────────────────────────────────────────────────────
+// (1) initialize: framed reply, echoed id, full-sync capability advertised, clean shutdown/exit.
+lz_init_ok = (mp: MutPtr<Malloc>) bool {
+    o := mp.lz_run(0, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("Content-Length: ")
+        && o.contains("\"id\":1")
+        && o.contains("\"textDocumentSync\":1")
+        && o.contains("\"result\":null")
+        && mp.lz_rc(0) == "0"
+}
+// (2) didOpen broken doc: undefined-name at 0-based line 1, character 9 (the byte→LSP conversion).
+lz_open_bad = (mp: MutPtr<Malloc>) bool {
+    u := mp.lz_uri("lzdoc.zen")
+    o := mp.lz_run(1, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(u, LZ_BAD())), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("textDocument/publishDiagnostics")
+        && o.contains("\"code\":\"undefined-name\"")
+        && o.contains("\"start\":{\"line\":1,\"character\":9}")
+        && o.contains("\"diagnostics\":[]") == false
+        && mp.lz_rc(1) == "0"
+}
+// (3) didChange fixes the error: the second publish must carry an EMPTY diagnostics array.
+lz_change_clears = (mp: MutPtr<Malloc>) bool {
+    u := mp.lz_uri("lzdoc.zen")
+    o := mp.lz_run(2, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(u, LZ_BAD())), mp.lz_frame(mp.lz_change(u, LZ_GOOD())), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"code\":\"undefined-name\"")
+        && o.contains("\"diagnostics\":[]")
+        && mp.lz_rc(2) == "0"
+}
+// (4) unknown REQUEST: -32601 with the echoed id; the server keeps serving afterwards.
+lz_unknown_method = (mp: MutPtr<Malloc>) bool {
+    probe := "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/hover\",\"params\":{\"position\":{\"line\":0,\"character\":0}}}"
+    o := mp.lz_run(3, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(probe), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"id\":7")
+        && o.contains("-32601")
+        && o.contains("\"result\":null")
+        && mp.lz_rc(3) == "0"
+}
+// (5a) garbage Content-Length: the frame is skipped and the scan RESYNCHRONIZES on the next real
+// frame — shutdown is still answered and the session still exits 0. `timeout` guards against a hang.
+lz_garbage_cl = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    o := mp.lz_run(4, mp.zo_join([z, "Content-Length: banana\r\n\r\n{}", mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"result\":null") && mp.lz_rc(4) == "0"
+}
+// (5b) absurd Content-Length (100 TB): must NOT null-deref-panic (pre-fix: exit 134) and must NOT
+// hang (timeout would exit 124) — the over-limit frame is skipped and EOF ends the session (code 1).
+lz_huge_cl = (mp: MutPtr<Malloc>) bool {
+    mp.lz_run(5, "Content-Length: 100000000000000\r\n\r\nx")
+    mp.lz_rc(5) == "1"
+}
+// (6) didClose: stale squiggles are cleared with an explicit empty publish.
+lz_didclose_clears = (mp: MutPtr<Malloc>) bool {
+    u := mp.lz_uri("lzdoc.zen")
+    o := mp.lz_run(6, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(u, LZ_BAD())), mp.lz_frame(mp.lz_close(u)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"code\":\"undefined-name\"")
+        && o.contains("\"diagnostics\":[]")
+        && mp.lz_rc(6) == "0"
+}
+// (7) UTF-16 positions: three é (2 UTF-8 bytes / 1 UTF-16 unit each) sit before the error, so the
+// byte column is 21 but the LSP character MUST be 18. The é are written as JSON é escapes the
+// server decodes into UTF-8 — this file stays pure ASCII.
+lz_utf16_cols = (mp: MutPtr<Malloc>) bool {
+    txt := "main = () i32 {\\n    x := \\\"\\u00e9\\u00e9\\u00e9\\\" == undefined_name\\n    0\\n}\\n"
+    o := mp.lz_run(7, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(mp.lz_uri("lzu.zen"), txt)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"code\":\"undefined-name\"")
+        && o.contains("\"start\":{\"line\":1,\"character\":18}")
+}
+// (8a) sibling import: the open document pulls a real $ZT module; an error in the OPEN file (wrong
+// arity at the callsite) keeps its exact range there.
+lz_multifile_sibling = (mp: MutPtr<Malloc>) bool {
+    lib := "helper* = (x: i32) i32 { x }\n"
+    save(mp.zo_join([mp.zo_dir(), "/lzlib.zen"]), lib, len(lib))
+    txt := "{ helper } = lzlib\\nmain = () i32 {\\n    helper(1, 2)\\n}\\n"
+    o := mp.lz_run(8, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(mp.lz_uri("lzmain.zen"), txt)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"code\":\"arity\"") && o.contains("\"start\":{\"line\":2,\"character\":4}")
+}
+// (8b) an error INSIDE the imported sibling: pinned to the file head with the real location in the
+// message — never a lying range into the open document.
+lz_foreign_module_error = (mp: MutPtr<Malloc>) bool {
+    lib := "broken* = () i32 { undefined_in_lib }\n"
+    save(mp.zo_join([mp.zo_dir(), "/lzbadlib.zen"]), lib, len(lib))
+    txt := "{ broken } = lzbadlib\\nmain = () i32 {\\n    broken()\\n}\\n"
+    o := mp.lz_run(9, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(mp.lz_uri("lzmain2.zen"), txt)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("in imported module")
+        && o.contains("lzbadlib.zen")
+        && o.contains("\"start\":{\"line\":0,\"character\":0}")
+}
+// (9) exit WITHOUT shutdown: the LSP convention demands a nonzero exit (the harness pins 1).
+lz_exit_no_shutdown = (mp: MutPtr<Malloc>) bool {
+    mp.lz_run(10, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(LZ_EXIT())]))
+    mp.lz_rc(10) == "1"
+}
+// ── entry ─────────────────────────────────────────────────────────────────────────────────────────
+harness_lsp_run* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_exit_no_shutdown()])
+}
