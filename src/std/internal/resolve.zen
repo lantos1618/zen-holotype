@@ -11,7 +11,7 @@
 { Map, of } = std.collections.map    // O(1) presence sets for the shadow-rename pass (.has/.put are UFCS methods)
 { contents_in, O_RDONLY } = std.io.file
 { open, close, write } = std.c.libc
-{ view, is_empty } = std.text.str
+{ ends_with, is_empty, starts_with, view } = std.text.str
 { render_diagnostic } = compiler.diagnostic
 { getEnv } = std.sys.os
 // Extracted internal helper families (shared types + this pipeline stay here; see each module head).
@@ -1002,6 +1002,9 @@ impl_origin_at = (flat: string_view, off: i64) ImplOrigin {
     })
 }
 impl_origin_known = (o: ImplOrigin) bool { o.midx >= 0 && o.line > 0 }
+// module identity for impl dedup: the PATH, tolerant of a leading `./` (a cycle re-entry or a
+// different invocation spelling records the same file under both spellings). Zero-alloc compare.
+impl_path_eq = (x: string_view, y: string_view) bool { x == y || x.starts_with("./") && x.ends_with(y) && x.view().len == y.view().len + 2 || y.starts_with("./") && y.ends_with(x) && y.view().len == x.view().len + 2 }
 // error[dup-impl]: two DIFFERENT `T.impl(Trait, { … })` bodies for one (receiver, trait) — "first
 // wins" would silently drop the later body, so reject loudly, naming both source modules.
 fail_dup_impl = (a: MutPtr<Malloc>, table: ModuleTable, flat: string_view, second: i64, o1: ImplOrigin, o2: ImplOrigin) i32 {
@@ -1049,7 +1052,11 @@ dedup_impls_into = (a: MutPtr<Malloc>, out: String, table: ModuleTable, flat: st
                                 true  => {
                                     o1 := flat.impl_origin_at(firstoff)
                                     o2 := flat.impl_origin_at(to_i64(sp.start))
-                                    (o1.impl_origin_known() && o2.impl_origin_known() && (o1.midx != o2.midx || o1.line != o2.line)).then({
+                                    // a module reached through an import CYCLE gets a second table
+                                    // entry with the SAME path — identity is the module's path, not
+                                    // its table index, so those copies dedup instead of dup-impl.
+                                    same_mod := o1.midx == o2.midx || table.modules[o1.midx].path.impl_path_eq(table.modules[o2.midx].path)
+                                    (o1.impl_origin_known() && o2.impl_origin_known() && (same_mod == false || o1.line != o2.line)).then({
                                         a.fail_dup_impl(table, flat, to_i64(sp.start), o1, o2)
                                     })
                                     true
