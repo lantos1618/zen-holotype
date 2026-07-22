@@ -13,7 +13,9 @@
 { String } = std.text.string
 { Map, of } = std.collections.map
 { view } = std.text.str
-{ lstrip, is_import_line, next_line, STD_MARKER_LEN, COMPILER_MARKER_LEN, USER_MARKER_LEN, rset_add, rset_add_str, rpush, rappend, rappend_span, madd_str_name, ImportEdge, ProvidedSymbol, SIG_PUB, SIG_TYPE, SIG_IMPORTED, SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line } = std.internal.resolve
+{ lstrip, is_import_line, next_line, STD_MARKER_LEN, COMPILER_MARKER_LEN, USER_MARKER_LEN, rset_add,
+  rset_add_str, rpush, rappend, rappend_span, madd_str_name, ImportEdge, ProvidedSymbol, SIG_PUB,
+  SIG_TYPE, SIG_IMPORTED, SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line } = std.internal.resolve
 is_ws* = (b: u8) bool { b == ' ' || b == '\t' }
 // A top-level line opening an import: `{` then a space OR a binding name directly (`{println}`).
 // `has_import_marker` then confirms a real `} = std./compiler./user` follows, so relaxing the
@@ -548,7 +550,13 @@ edge_from_line<A> = (a: MutPtr<A>, src: string_view, p: i32) Result<ImportEdge, 
         .Err(e)  => err(e),
     })
 }
-fill_import_edges<A> = (a: MutPtr<A>, src: string_view, p: i32, out: [ImportEdge], i: i32) Result<[ImportEdge], IoError> {
+fill_import_edges<A> = (
+    a: MutPtr<A>,
+    src: string_view,
+    p: i32,
+    out: [ImportEdge],
+    i: i32,
+) Result<[ImportEdge], IoError> {
     pos := p
     idx := i
     failed := false
@@ -696,13 +704,25 @@ finish_symbol_name = (buf: RawPtr<u8>, src: string_view, p: i32, e: i32, escape:
     buf.offset(cur).store(0)
     cstr(buf)
 }
-symbol_name_alloc<A> = (a: MutPtr<A>, src: string_view, p: i32, e: i32, escape: bool) Result<string_view, IoError> {
+symbol_name_alloc<A> = (
+    a: MutPtr<A>,
+    src: string_view,
+    p: i32,
+    e: i32,
+    escape: bool,
+) Result<string_view, IoError> {
     a.try_acquire(src.symbol_name_len(p, e, escape) + 1).match ({
         .Ok(buf) => ok(buf.finish_symbol_name(src, p, e, escape)),
         .Err(e)  => err(e),
     })
 }
-fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: string_view, p: i32, out: [ProvidedSymbol], i: i32) Result<i32, IoError> {
+fill_head_symbols_in<A> = (
+    alloc: MutPtr<A>,
+    src: string_view,
+    p: i32,
+    out: [ProvidedSymbol],
+    i: i32,
+) Result<i32, IoError> {
     pos := p
     idx := i
     failed := false
@@ -757,7 +777,14 @@ fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: string_view, p: i32, out: [Pro
     })
     failed.match ({ true => err(last_err), false => ok(idx) })
 }
-fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_view, p: i32, out: [ProvidedSymbol], i: i32) Result<[ProvidedSymbol], IoError> {
+fill_provided_symbols_in<A> = (
+    a: MutPtr<Malloc>,
+    alloc: MutPtr<A>,
+    src: string_view,
+    p: i32,
+    out: [ProvidedSymbol],
+    i: i32,
+) Result<[ProvidedSymbol], IoError> {
     pos := p
     idx := i
     failed := false
@@ -832,7 +859,11 @@ fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_
     })
     failed.match ({ true => err(last_err), false => ok(out) })
 }
-provided_symbols_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_view) Result<[ProvidedSymbol], IoError> {
+provided_symbols_in*<A> = (
+    a: MutPtr<Malloc>,
+    alloc: MutPtr<A>,
+    src: string_view,
+) Result<[ProvidedSymbol], IoError> {
     alloc.symbol_buf(a.provided_symbol_count(src)).match ({
         .Ok(buf) => a.fill_provided_symbols_in(alloc, src, 0, buf, 0),
         .Err(e)  => err(e),
@@ -921,7 +952,14 @@ symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bo
     (include_imported || s.imported.match ({ true => false, false => true }))
         && (include_foreign || s.foreign.match ({ true => false, false => true }))
 }
-symbol_names_into = (set: String, a: MutPtr<Malloc>, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
+symbol_names_into = (
+    set: String,
+    a: MutPtr<Malloc>,
+    symbols: [ProvidedSymbol],
+    i: i64,
+    include_imported: bool,
+    include_foreign: bool,
+) String {
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
@@ -932,7 +970,14 @@ symbol_names_into = (set: String, a: MutPtr<Malloc>, symbols: [ProvidedSymbol], 
     })
     cur
 }
-symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
+symbol_names_into_in = (
+    a: MutPtr<Malloc>,
+    set: String,
+    symbols: [ProvidedSymbol],
+    i: i64,
+    include_imported: bool,
+    include_foreign: bool,
+) String {
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
@@ -944,7 +989,12 @@ symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol
     cur
 }
 // Module-DEFINED value/fn decl names only: non-imported, non-foreign, and NOT a type (struct/enum).
-value_symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64) String {
+value_symbol_names_into_in = (
+    a: MutPtr<Malloc>,
+    set: String,
+    symbols: [ProvidedSymbol],
+    i: i64,
+) String {
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({

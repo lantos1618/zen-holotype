@@ -2,7 +2,9 @@
 // Extracted from compiler.genc_emit; leaf integer/literal/escape helpers live in compiler.genc_emit_lit.
 { String } = std.text.string
 { is_empty } = std.text.str
-{ Expr, Stmt, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData, MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, ty_cname_in, blk_diverges, field, gstr_append } = compiler.genc
+{ Expr, Stmt, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData,
+  MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, ty_cname_in,
+  blk_diverges, field, gstr_append } = compiler.genc
 { Malloc } = std.mem.alloc
 { panic } = std.core.result
 { gen_strlit } = compiler.genc_emit_lit
@@ -644,7 +646,13 @@ gen_mkstruct = (s: String, alloc: MutPtr<Malloc>, m: MakeStructData) String {
     out.gstr_append(alloc, " }")
 }
 // an arm's body: bind the payload (GCC __auto_type, so no payload type needed here), then the body
-gen_armbind = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
+gen_armbind = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    a: ArmData,
+) String {
     s
         .gstr_append(alloc, "({ __auto_type ")
         .gstr_append(alloc, a.bind)
@@ -657,7 +665,13 @@ gen_armbind = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_
         .gen_expr(alloc, a.body)
         .gstr_append(alloc, "; })")
 }
-gen_armbody = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
+gen_armbody = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    a: ArmData,
+) String {
     is_empty(a.bind).match ({
         true  => s.gstr_append(alloc, "(").gen_expr(alloc, a.body).gstr_append(alloc, ")"),
         false => s.gen_armbind(alloc, subj, sep, a),
@@ -665,7 +679,13 @@ gen_armbody = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_
 }
 // Statement matches must keep recursively-discarded arm bodies in statement context. Otherwise a
 // nested void match is lowered by gen_match as a value and attempts to declare an impossible `void _out`.
-gen_armbind_stmt = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
+gen_armbind_stmt = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    a: ArmData,
+) String {
     s
         .gstr_append(alloc, "{ __auto_type ")
         .gstr_append(alloc, a.bind)
@@ -678,7 +698,13 @@ gen_armbind_stmt = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: st
         .gen_expr_stmt(alloc, a.body)
         .gstr_append(alloc, " }")
 }
-gen_armbody_stmt = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
+gen_armbody_stmt = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    a: ArmData,
+) String {
     is_empty(a.bind).match ({
         true  => s.gen_expr_stmt(alloc, a.body),
         false => s.gen_armbind_stmt(alloc, subj, sep, a),
@@ -697,7 +723,14 @@ next_live_arm = (arms: [ArmData], i: i64) i64 {
         }),
     })
 }
-gen_match_type_expr = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, arms: [ArmData], i: i64) String {
+gen_match_type_expr = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    arms: [ArmData],
+    i: i64,
+) String {
     j := arms.next_live_arm(i)
     (j >= arms.len).match ({
         true  => s.gstr_append(alloc, "0"),
@@ -717,7 +750,13 @@ gen_match_type_expr = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep:
         }),
     })
 }
-gen_match_out_decl = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, arms: [ArmData]) String {
+gen_match_out_decl = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    arms: [ArmData],
+) String {
     s
         .gstr_append(alloc, "__typeof__(")
         .gen_match_type_expr(alloc, subj, sep, arms, 0)
@@ -725,7 +764,13 @@ gen_match_out_decl = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: 
 }
 // a diverging arm's body runs for CONTROL FLOW only (its trailing `return` leaves the function) —
 // no `_out` assignment (its statement-expr would be void).
-gen_switch_body = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
+gen_switch_body = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    a: ArmData,
+) String {
     a.body.blk_diverges().match ({
         true  => s.gen_switch_stmt_body(alloc, subj, sep, a),
         false => s
@@ -734,13 +779,26 @@ gen_switch_body = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: str
             .gstr_append(alloc, "; break; } "),
     })
 }
-gen_switch_stmt_body = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
+gen_switch_stmt_body = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    a: ArmData,
+) String {
     s
         .gstr_append(alloc, "{ ")
         .gen_armbody_stmt(alloc, subj, sep, a)
         .gstr_append(alloc, " break; } ")
 }
-gen_switch_case = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, a: ArmData) String {
+gen_switch_case = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    ename: string_view,
+    a: ArmData,
+) String {
     s
         .gstr_append(alloc, "case ")
         .gstr_append(alloc, ename)
@@ -749,10 +807,21 @@ gen_switch_case = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: str
         .gstr_append(alloc, ": ")
         .gen_switch_body(alloc, subj, sep, a)
 }
-gen_switch_default = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
-    s.gstr_append(alloc, "default: ").gen_switch_body(alloc, subj, sep, a)
-}
-gen_switch_stmt_case = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, a: ArmData) String {
+gen_switch_default = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    a: ArmData,
+) String { s.gstr_append(alloc, "default: ").gen_switch_body(alloc, subj, sep, a) }
+gen_switch_stmt_case = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    ename: string_view,
+    a: ArmData,
+) String {
     s
         .gstr_append(alloc, "case ")
         .gstr_append(alloc, ename)
@@ -761,9 +830,13 @@ gen_switch_stmt_case = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep
         .gstr_append(alloc, ": ")
         .gen_switch_stmt_body(alloc, subj, sep, a)
 }
-gen_switch_stmt_default = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, a: ArmData) String {
-    s.gstr_append(alloc, "default: ").gen_switch_stmt_body(alloc, subj, sep, a)
-}
+gen_switch_stmt_default = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    a: ArmData,
+) String { s.gstr_append(alloc, "default: ").gen_switch_stmt_body(alloc, subj, sep, a) }
 // A match with no explicit `_` arm was proved exhaustive by the CHECKER; the emitter must not silently
 // re-route stray tags into the last arm's body (the old last-arm-as-`default:` trick — the #377 class
 // of silent miscompiles). Every arm gets its own `case`, and `default:` traps: a tag outside the listed
@@ -772,7 +845,15 @@ gen_switch_stmt_default = (s: String, alloc: MutPtr<Malloc>, subj: string_view, 
 gen_switch_panic_default = (s: String, alloc: MutPtr<Malloc>) String {
     s.gstr_append(alloc, "default: zen__panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ")
 }
-gen_switch_arm = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, a: ArmData, last: bool) String {
+gen_switch_arm = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    ename: string_view,
+    a: ArmData,
+    last: bool,
+) String {
     (a.variant == "_").match ({
         true  => s.gen_switch_default(alloc, subj, sep, a),
         false => {
@@ -781,7 +862,15 @@ gen_switch_arm = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: stri
         },
     })
 }
-gen_switch_stmt_arm = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, a: ArmData, last: bool) String {
+gen_switch_stmt_arm = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    ename: string_view,
+    a: ArmData,
+    last: bool,
+) String {
     (a.variant == "_").match ({
         true  => s.gen_switch_stmt_default(alloc, subj, sep, a),
         false => {
@@ -790,7 +879,15 @@ gen_switch_stmt_arm = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep:
         },
     })
 }
-gen_switch_arms = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, arms: [ArmData], i: i64) String {
+gen_switch_arms = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    ename: string_view,
+    arms: [ArmData],
+    i: i64,
+) String {
     (i >= arms.len).match ({
         true  => s,
         false => {
@@ -802,7 +899,15 @@ gen_switch_arms = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: str
         },
     })
 }
-gen_switch_stmt_arms = (s: String, alloc: MutPtr<Malloc>, subj: string_view, sep: string_view, ename: string_view, arms: [ArmData], i: i64) String {
+gen_switch_stmt_arms = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    subj: string_view,
+    sep: string_view,
+    ename: string_view,
+    arms: [ArmData],
+    i: i64,
+) String {
     (i >= arms.len).match ({
         true  => s,
         false => {

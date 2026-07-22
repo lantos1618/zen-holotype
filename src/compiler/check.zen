@@ -1,7 +1,19 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData,
+  ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData,
+  ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData,
+  GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond,
+  cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch,
+  ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at,
+  sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit,
+  FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, dfunc,
+  dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys,
+  expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32,
+  ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice,
+  tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append,
+  gstr_finish } = compiler.genc
 { mangle_str_in, mangle_semantic_in, impl_cname_in } = compiler.mangle
 { Allocator, Malloc } = std.mem.alloc
 { exports_get, alias_prefixes_get, module_sigs_get, SigEntry } = compiler.parse
@@ -23,7 +35,8 @@
 // Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
 // resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
 { deep_targs, impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
-{ inline_decl, inline_template, is_empty_named, lower_closures, mono_close, mono_rec, no_inline_gen_f } = compiler.check_inline
+{ inline_decl, inline_template, is_empty_named, lower_closures, mono_close, mono_rec,
+  no_inline_gen_f } = compiler.check_inline
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { lower_match_arms, lower_stmt_expr, one_stmt, subj_payload, subj_tag, tag_const } = compiler.check_lower
 { fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank } = compiler.check_fits
@@ -91,7 +104,14 @@ DeclIndex*: {
             false => slice(null_ptr(), 0),
         })
     }
-    idx_genstruct_field = (idx: DeclIndex, a: MutPtr<Malloc>, decls: [Decl], gname: string_view, fname: string_view, targs: [Ty]) Ty {
+    idx_genstruct_field = (
+        idx: DeclIndex,
+        a: MutPtr<Malloc>,
+        decls: [Decl],
+        gname: string_view,
+        fname: string_view,
+        targs: [Ty],
+    ) Ty {
         g := idx.idx_genstruct(decls, gname)
         is_empty(g.name).match ({
             true  => tvoid(),
@@ -147,7 +167,12 @@ DeclIndex*: {
             ),
         })
     }
-    idx_variant_default = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ptr<Expr> {
+    idx_variant_default = (
+        idx: DeclIndex,
+        decls: [Decl],
+        ename: string_view,
+        vn: string_view,
+    ) Ptr<Expr> {
         i := idx.enum_idx.get(ename, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -928,7 +953,13 @@ infer_enum_targs = (env: Env, g: GenEnumDecl, variant: string_view, pty: Ty) [Ty
     vpt := g.gen_variant_payload(variant)
     map_slice(env.a, g.tparams, (tp) { vpt.unify_ty(pty, tp.name) })
 }
-enum_inst_payload = (env: Env, g: GenEnumDecl, base: string_view, variant: string_view, pty: Ty) EnumInst {
+enum_inst_payload = (
+    env: Env,
+    g: GenEnumDecl,
+    base: string_view,
+    variant: string_view,
+    pty: Ty,
+) EnumInst {
     ta := env.infer_enum_targs(g, variant, pty)
     EnumInst(
         base: base,
@@ -936,7 +967,13 @@ enum_inst_payload = (env: Env, g: GenEnumDecl, base: string_view, variant: strin
         targs: ta,
     )
 }
-enum_inst_gen = (env: Env, g: GenEnumDecl, base: string_view, variant: string_view, pty: Ty) EnumInst {
+enum_inst_gen = (
+    env: Env,
+    g: GenEnumDecl,
+    base: string_view,
+    variant: string_view,
+    pty: Ty,
+) EnumInst {
     env.exp.match ({
         .Generic(ge) => (ge.name == base).match ({
             true  => EnumInst(
@@ -1061,7 +1098,14 @@ deep_targs_env = (env: Env, tparams: [Param], buf: [Ty], params: [Param], args: 
     })
     buf
 }
-lam_body_targ_env = (env: Env, tparams: [Param], targs: [Ty], params: [Param], args: [Expr], tp: string_view) Ty {
+lam_body_targ_env = (
+    env: Env,
+    tparams: [Param],
+    targs: [Ty],
+    params: [Param],
+    args: [Expr],
+    tp: string_view,
+) Ty {
     found := tvoid()
     params.loop((h, i, p) {
         found = found.is_void_ty().match ({
@@ -1074,7 +1118,14 @@ lam_body_targ_env = (env: Env, tparams: [Param], targs: [Ty], params: [Param], a
     })
     found
 }
-lam_body_one_env = (env: Env, tparams: [Param], targs: [Ty], pty: Ty, arg: Ptr<Expr>, tp: string_view) Ty {
+lam_body_one_env = (
+    env: Env,
+    tparams: [Param],
+    targs: [Ty],
+    pty: Ty,
+    arg: Ptr<Expr>,
+    tp: string_view,
+) Ty {
     pty.match ({
         .FnT(ft) => load(arg).match ({
             .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({
@@ -1108,7 +1159,13 @@ lam_body_one_env = (env: Env, tparams: [Param], targs: [Ty], pty: Ty, arg: Ptr<E
 }
 // UFCS trait dispatch: route `x.m()` to the receiver type's impl when one exists.
 method_in = (methods: [Param], fn: string_view) bool { methods.slice_any((n) { n.name == fn }) }
-dispatch_recv* = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: string_view, tyname: string_view) string_view {
+dispatch_recv* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    didx: DeclIndex,
+    fn: string_view,
+    tyname: string_view,
+) string_view {
     // O(1): dispatch_idx holds the LAST impl of `tyname` providing `fn` (directly or via a trait
     // default) — the same verdict the old whole-decls scan accumulated.
     i := didx.dispatch_idx.get(a.tdkey(tyname, fn), 0 - 1)
@@ -1402,7 +1459,13 @@ gen_field_at = (fields: [Field], fname: string_view) Ty {
     })
     found
 }
-gen_struct_field = (a: MutPtr<Malloc>, decls: [Decl], gname: string_view, fname: string_view, targs: [Ty]) Ty {
+gen_struct_field = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    gname: string_view,
+    fname: string_view,
+    targs: [Ty],
+) Ty {
     found := tvoid()
     decls.loop((h, i, d) {
         found = d.match ({
@@ -1792,7 +1855,15 @@ arg_local_name = (a: MutPtr<Malloc>, name: string_view, env: Ptr<VList>, idx: i6
 // literal's default width (i32) — the outer instantiation's binding (e.g. K=i64 from the HMap
 // receiver) silently lost, wrong monos emitted (i64 keys hashed with impl_Hash_i32_hash). A pinned
 // literal is bound to a TYPED temp local instead, so in-body uses carry the instantiated type.
-bind_args* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], cargs: [Expr], env: Ptr<VList>, pins: [Ty]) ArgBind {
+bind_args* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    params: [Param],
+    cargs: [Expr],
+    env: Ptr<VList>,
+    pins: [Ty],
+) ArgBind {
     nf := a.cebuf(cargs.len)
     nb := 0
     cargs.loop((h, i, ce) {
@@ -1836,7 +1907,13 @@ no_pins* = (a: MutPtr<Malloc>, n: i64) [Ty] {
 }
 // The pin for each arg of a GENERIC inline: literal-typed args whose param type mentions a tparam
 // adopt the (fully concrete) targ-substituted param type; everything else is unpinned.
-lit_pins* = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Param], cargs: [Expr]) [Ty] {
+lit_pins* = (
+    a: MutPtr<Malloc>,
+    tparams: [Param],
+    targs: [Ty],
+    params: [Param],
+    cargs: [Expr],
+) [Ty] {
     buf := cbuf<Ty>(a, params.len)
     params.loop((h, i, p) {
         buf[i] = tvoid()
@@ -1982,7 +2059,14 @@ blockify* = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
         }),
     })
 }
-inline_lambda* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+inline_lambda* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    lamx: Expr,
+    cargs: [Expr],
+    env: Ptr<VList>,
+) Ptr<Expr> {
     lamx.match ({
         .Lambda(lm) => {
             // spliced lambda body: its `return`s are the LAMBDA's, so bind its own (possibly void)
