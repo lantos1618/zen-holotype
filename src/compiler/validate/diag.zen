@@ -176,6 +176,7 @@ KTARGARITY* = () i32 { 41 }    // an explicit `<…>` type-arg list whose COUNT 
 KFFITYPE* = () i32 { 42 }    // a FOREIGN (bodyless) declaration whose signature uses a type outside the FFI-safe set
 KLITEXHAUST* = () i32 { 45 }    // a literal-scalar `.match` (i32/…) with no `_` wildcard — the value domain is unbounded, so it is non-exhaustive. Kind label is "exhaustiveness" (same family as KEXHAUST); the parser plants a positioned `__nonexhaustive_lit` sentinel the call-classifier maps here
 KMATCHLABEL* = () i32 { 46 }    // a boolean `.match` arm labelled with a non-boolean literal (`true => 1, 0 => 2`) — a label-TYPE error, caret on the bad label (the parser's positioned `__badmatchlabel` sentinel)
+KCAPACITY* = () i32 { 47 }    // a fixed-capacity compiler registry (exports / alias prefixes / module sigs) overflowed — the parser's sticky `__capacity` sentinel; the program is REJECTED rather than compiled with silently dropped registry data
 Diagnostic*: {
     code: i32,
     kind: string_view,
@@ -496,11 +497,18 @@ diag_info* = (code: i32) DiagInfo {
                                                                                                                                                                         message: "match arm label is not a `bool`; a boolean `.match` takes `true`, `false`, or `_`",
                                                                                                                                                                         hint: "replace the label with `true`, `false`, or a `_` wildcard",
                                                                                                                                                                     ),
-                                                                                                                                                                    false => DiagInfo(
-                                                                                                                                                                        kind: "type",
-                                                                                                                                                                        message: "type error",
-                                                                                                                                                                        hint: "",
-                                                                                                                                                                    ),
+                                                                                                                                                                    false => (code == 47).match ({
+                                                                                                                                                                        true  => DiagInfo(
+                                                                                                                                                                            kind: "capacity",
+                                                                                                                                                                            message: "program exceeds a fixed compiler capacity (exports, module aliases, or module-signature entries)",
+                                                                                                                                                                            hint: "this is a compiler limit, not a program error — split the module or report it; the registry sizes live in compiler/parse.zen",
+                                                                                                                                                                        ),
+                                                                                                                                                                        false => DiagInfo(
+                                                                                                                                                                            kind: "type",
+                                                                                                                                                                            message: "type error",
+                                                                                                                                                                            hint: "",
+                                                                                                                                                                        ),
+                                                                                                                                                                    }),
                                                                                                                                                                 }),
                                                                                                                                                             }),
                                                                                                                                                         }),

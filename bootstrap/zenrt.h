@@ -10,6 +10,10 @@ typedef struct { int32_t _; } Malloc;
 #endif
 bool eq(const char* a, const char* b);
 bool is_empty(const char* s);
+/* prefix/suffix byte tests over a str (weak fallbacks mirroring std.text.str). Declared here so the
+ * generated compiler C — which calls them — never sees an implicit declaration. */
+bool starts_with(const char* s, const char* prefix);
+bool ends_with(const char* s, const char* suffix);
 void* heap(int64_t n);
 /* U1.3: loader primitives (mirror std.mem.raw.alloc / std.text.str.view). */
 uint8_t* alloc(int64_t n);

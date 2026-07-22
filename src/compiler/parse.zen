@@ -200,6 +200,17 @@ take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // flatten dedup). The formatter needs it, so parse_module records the starred top-level names in a
 // module-level buffer (mirroring the anon-struct state) — NOT in the AST, so the compiler pipeline is
 // untouched. The driver reads `exports_get()` after parse_module and hands it to the formatter.
+// ── registry OVERFLOW flag ───────────────────────────────────────────────────────────────────────
+// The fixed-capacity registries below (exports / alias prefixes / module sigs) must never DROP data
+// silently: a full registry sets this STICKY flag and parse_module plants a `__capacity` sentinel, so
+// an oversized program is REJECTED with `error[capacity]` instead of compiling with lost exports or
+// alias facts. Sticky because the resolve-time registries (alias prefixes, module sigs) fill BEFORE
+// parse_module runs — perr_* would be cleared by parse_module's perr_reset. Cleared per program by
+// the resolve-entry resets below (never by exports_reset, which runs after resolve).
+reg_overflow := 0
+reg_overflow_note* = () void { reg_overflow = 1 }
+reg_overflow_get* = () bool { reg_overflow == 1 }
+reg_overflow_reset* = () void { reg_overflow = 0 }
 exports_buf := no_exports()
 exports_n := 0
 no_exports = () [Param] { slice(null_ptr(), 0) }
@@ -209,9 +220,12 @@ exports_reset* = (a: MutPtr<Malloc>) void {
 }
 exports_get* = () [Param] { slice(exports_buf.ptr, exports_n) }
 note_export = (name: string_view) void {
-    (exports_n < exports_buf.len).then({
-        exports_buf[exports_n] = param(name, tvoid())
-        exports_n = exports_n + 1
+    (exports_n < exports_buf.len).match ({
+        true  => {
+            exports_buf[exports_n] = param(name, tvoid())
+            exports_n = exports_n + 1
+        },
+        false => reg_overflow_note(),
     })
 }
 // ── ALIAS-PREFIX registry (UFCS through module aliases) ──────────────────────────────────────────
@@ -226,13 +240,19 @@ alias_prefix_n := 0
 alias_prefixes_reset* = (a: MutPtr<Malloc>) void {
     alias_prefix_buf = slice(a.acquire(4096 * sizeof(Param)), 4096)
     alias_prefix_n = 0
+    reg_overflow_reset()
 }
 alias_prefixes_get* = () [Param] { slice(alias_prefix_buf.ptr, alias_prefix_n) }
 alias_prefix_seen = (name: string_view) bool { alias_prefixes_get().slice_any((p) { eq(p.name, name) }) }
 note_alias_prefix* = (name: string_view) void {
-    (alias_prefix_n < alias_prefix_buf.len && name.alias_prefix_seen() == false).then({
-        alias_prefix_buf[alias_prefix_n] = param(name, tvoid())
-        alias_prefix_n = alias_prefix_n + 1
+    // Overflow is keyed on FULLNESS only (buffer full → reject); a not-full-but-already-seen name is a
+    // dedup skip, NOT an overflow. Structured as capacity-outer / seen-inner so the two are distinct.
+    (alias_prefix_n < alias_prefix_buf.len).match ({
+        true  => (name.alias_prefix_seen() == false).then({
+            alias_prefix_buf[alias_prefix_n] = param(name, tvoid())
+            alias_prefix_n = alias_prefix_n + 1
+        }),
+        false => reg_overflow_note(),
     })
 }
 // ── MODULE-SIG registry (per-alias export signatures, Stage B4) ──────────────────────────────────
@@ -265,6 +285,7 @@ no_sigs = () [SigEntry] { slice(null_ptr(), 0) }
 module_sigs_reset* = (a: MutPtr<Malloc>) void {
     module_sig_buf = slice(a.acquire(32768 * sizeof(SigEntry)), 32768)
     module_sig_n = 0
+    reg_overflow_reset()
 }
 module_sigs_get* = () [SigEntry] { slice(module_sig_buf.ptr, module_sig_n) }
 // has this (alias, origin ModuleId) pair been stamped already? A module bound twice under the SAME
@@ -272,14 +293,17 @@ module_sigs_get* = () [SigEntry] { slice(module_sig_buf.ptr, module_sig_n) }
 // alias name bound to two DIFFERENT modules keeps both stamps (both bodies reach the flat).
 module_sig_alias_stamped* = (alias: string_view, origin: i64) bool { module_sigs_get().slice_any((e) { eq(e.alias, alias) && e.origin == origin }) }
 note_module_sig* = (alias: string_view, name: string_view, flags: i64, origin: i64) void {
-    (module_sig_n < module_sig_buf.len).then({
-        module_sig_buf[module_sig_n] = SigEntry(
-            alias: alias,
-            name: name,
-            flags: flags,
-            origin: origin,
-        )
-        module_sig_n = module_sig_n + 1
+    (module_sig_n < module_sig_buf.len).match ({
+        true  => {
+            module_sig_buf[module_sig_n] = SigEntry(
+                alias: alias,
+                name: name,
+                flags: flags,
+                origin: origin,
+            )
+            module_sig_n = module_sig_n + 1
+        },
+        false => reg_overflow_note(),
     })
 }
 // record the decl name at `pos` if the token right after it is `*` — the export marker skip_name_star drops.
@@ -521,7 +545,7 @@ parse_module* = (a: MutPtr<Malloc>, src: string_view) [Decl] {
     buf := a.decl_buf()
     n := a.fill_decls(src, 0, buf, 0)
     n2 := a.append_anon_decls(buf, n)    // hoist synthesized anon-struct decls
-    decls := (perr_get() || lerr_get()).match ({
+    decls := (perr_get() || lerr_get() || reg_overflow_get()).match ({
         true  => a.prepend_syntax_error(buf, n2),
         false => buf.take_decls(n2),
     })
@@ -562,7 +586,10 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
                 true  => "__bad_binding",
                 false => (perr_kind_get() == 2).match ({
                     true  => "__misordered_generic",
-                    false => "__syntax_error",
+                    false => (perr_get() == false && lerr_get() == false && reg_overflow_get()).match ({
+                        true  => "__capacity",
+                        false => "__syntax_error",
+                    }),
                 }),
             })
             buf[0] = dglobal(nm, tvoid(), a.enode(lit(voff)))
