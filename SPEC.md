@@ -378,6 +378,36 @@ Generic inference is still growing. The current tree proves `ReplyRef<T>.send`
 works generically in actor flows, but broader inference coverage remains a
 roadmap item.
 
+### Struct Reflection
+
+Reflection rides generics: three intrinsics expand at inline time, once the
+receiver's concrete struct type is known, into ordinary field expressions —
+zero runtime cost, no comptime block, no stringly-typed API.
+
+- `x.field_eq(y)` — per-field `==` fold over `x` and `y`'s fields; struct-typed
+  fields recurse into their own fold. Strings compare by content.
+- `x.each_field(f)` — unrolls to one inlined call of `f(name, value)` per field
+  (`name` is the field's name as a string literal, `value` is statically typed).
+- `x.zip_fields(y, f)` — the paired form: `f(name, x_value, y_value)` per field.
+
+```zen
+sum_fields<T> = (v: T) i64 {
+    acc: i64 = 0
+    v.each_field((name, fv) {
+        acc = acc + fv
+    })
+    acc
+}
+```
+
+Each unrolled copy of the lambda is checked against that field's own type, so
+heterogeneous work dispatches per field (Zig `inline for` / Nim `fieldPairs`).
+A generic function whose body uses a reflection intrinsic is always inlined at
+its call sites (like function-typed-parameter templates), so such a body must
+not be self-recursive. The intrinsic names are reserved: the only definable
+shape is a generic delegating wrapper such as
+`field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }`.
+
 ## Imports And Modules
 
 Imports destructure a module path:

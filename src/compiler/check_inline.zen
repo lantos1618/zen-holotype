@@ -7,7 +7,7 @@
 { Map, of } = std.collections.map
 { subst_body, xform_body } = compiler.passes.subst
 { clos_lower_func, clos_lowerable } = compiler.passes.closures
-{ rc_expand, rc_gbuf, rc_gen, rc_seed } = compiler.passes.refcount
+{ rc_calls_body, rc_expand, rc_gbuf, rc_gen, rc_seed } = compiler.passes.refcount
 { TyQuery, FuncQuery, has_fnt_param, slice_any } = compiler.astops
 { Env, VList, DeclIndex, bind_args, bind_fnret, blockify, build_decl_index, cat_stmts, cenode, cps_value, dispatch_recv, dispatch_recv_name, empty_args, empty_params, is_void_ty, lit_pins, no_pins, param_index, params_env, recall, vcons, vnil } = compiler.check
 { resolve_call, resolve_decl } = compiler.check_resolve
@@ -251,7 +251,14 @@ inline_decl* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl 
 // mangle_str_in). resolve_call then rewrites each recursive-generic call to its mangled instance.
 // Only DIRECT type-param recursion is handled; FnT-splice generics and mutual recursion still inline.
 // detection: does `body` contain a DIRECT call to `nm`? (the self-call test)
-no_inline_gen_f* = (f: Func) bool { f.is_generic_fn() && f.params.has_fnt_param() == false }
+// A body calling a REFLECTION intrinsic (field_eq / each_field / zip_fields) must SPLICE like an
+// FnT-param generic: the intrinsic expands in the inliner (compiler.passes.subst) and needs the
+// receiver's CONCRETE type, which only the call-site inline provides — the mono_rec path would
+// instantiate the template's already-xformed body, where the receiver was still the abstract tparam
+// and the expansion (correctly) deferred. Same known scope limits as FnT generics: such a body must
+// not be self-recursive and must keep its early returns at statement level.
+calls_reflect* = (body: [Stmt]) bool { body.rc_calls_body("field_eq") || body.rc_calls_body("each_field") || body.rc_calls_body("zip_fields") }
+no_inline_gen_f* = (f: Func) bool { f.is_generic_fn() && f.params.has_fnt_param() == false && f.body.calls_reflect() == false }
 // instance buffer: deduped by mangled name, bounded against polymorphic-recursion blowup (like mono).
 mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, from: i64) [Decl] {
     base := Env(
