@@ -80,8 +80,8 @@ harness_verdict_run* = () i32 {
         kind: "struct-field",
     ), VerdictCase(
         src: "P*: { x: i32 }\ntest* = () i32 { a: P := P( x: 1 )  c := a == P( x: 2 )  0 }",
-        should_pass: false,
-        kind: "operand-type",
+        should_pass: true,
+        kind: "",
     ), VerdictCase(
         src: "test* = () i32 { x := 5  y := x.foo  0 }",
         should_pass: false,
@@ -935,6 +935,7 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "trait-bound",
     )])
+    // struct `==` is now STRUCTURAL (derived per-field fold) — this pinned the old rejection.
     // `if` is forbidden everywhere, including the former match-arm guard position.
     // C2 (task #35): a CONCRETE param of a GENERIC callee is now arg-checked (was off since the
     // right-arity call inlines away before the post-inline check). Accept: a correctly-typed
@@ -1021,6 +1022,14 @@ harness_verdict_run* = () i32 {
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         should_pass: false,
         kind: "arm-value",
+    ), VerdictCase(
+        src: "P: { x: i64 }\nW: { a: i64 }\nmain = () i32 {\n    p := P(x: 1)\n    w := W(a: 1)\n    (p == w).then({\n        return 1\n    })\n    0\n}\n",
+        should_pass: false,
+        kind: "operand-type",
+    ), VerdictCase(
+        src: "{ view } = std.text.str\nH: { bs: [u8], n: i64 }\nmain = () i32 {\n    h1 := H(bs: \"ab\".view(), n: 1)\n    h2 := H(bs: \"ab\".view(), n: 1)\n    (h1 == h2).then({\n        return 1\n    })\n    0\n}\n",
+        should_pass: false,
+        kind: "operand-type",
     ), VerdictCase(
         src: "main = () i32 {\n    n := 5\n    n.each_field((name, fv) { })\n    0\n}\n",
         should_pass: false,
@@ -2242,6 +2251,7 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     )])
+    // struct `==`/`!=`: mismatched types and non-comparable (slice) fields reject up front.
     // ── struct-reflection intrinsics: every ill-formed shape is REJECTED with a positioned kind,
     // never a genc leak, a compiler panic, or a silent no-op ──
     // v2 leak: allocated, READ via a pure getter (`o.get()`), then forgotten — never released,

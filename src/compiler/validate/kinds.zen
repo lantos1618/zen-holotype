@@ -1,11 +1,12 @@
 // compiler.validate.kinds — per-node kind checks: enums, matches, operands, indices, methods, FFI.
 { cbuf, ArmData, AssignData, BinData, CallData, Decl, EnumDecl, Expr, Field, FieldInit, FnTData, Func, GlobalData, ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData, MethodCallData, Param, Stmt, Ty, VariantDef, arm, call, dforeign, gstr_append, gstr_finish, gstr_string, is_expr_null, k_mut_ptr, no_tys, subst_ty_in, tbool, tf64, ti32, ti64, tnamed, tptr_k, tslice, tstring_view, tu8, tvoid } = compiler.genc
 { impl_cname_in } = compiler.mangle
-{ DeclIndex, Env, arm_env, bind_tparams, empty_params, extend_env, is_intrinsic, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, recv_name, the_func, tnode, tparam_declared } = compiler.check
+{ DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params, extend_env, is_intrinsic, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, recv_name, the_func, tnode, tparam_declared } = compiler.check
 { resolve_module } = compiler.check_resolve
 { tag_const } = compiler.check_lower
 { fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank, write_thru_readonly } = compiler.check_fits
 { calls_reflect, rc_calls_body } = compiler.passes.refcount
+{ reflect_fields } = compiler.passes.subst
 { has_fnt_param, slice_any } = compiler.astops
 { scan } = compiler.lex
 { Allocator, Malloc } = std.mem.alloc
@@ -405,12 +406,49 @@ num_operand_err = (env: Env, b: BinData) i32 {
     })
 }
 same_eq_category = (a: Ty, b: Ty) bool { a.ty_rank() >= 0 && b.ty_rank() >= 0 || a.is_bool_ty() && b.is_bool_ty() || a.is_str_t() && b.is_str_t() || a.is_ptr_ty() && b.is_ptr_ty() }
-// a NOMINAL ==: only types genc can compare with C's `==` — an enum (tag compare) or a Named non-struct.
-// structs and slices CANNOT (`a == b` on two structs is a hard cc error), so they're excluded here.
+// a NOMINAL ==: an enum (tag compare), a Named non-struct, or a same-type STRUCT value — struct
+// `==`/`!=` lowers in resolve (resolve_struct_eq: an `eq` impl method wins, else a derived
+// per-field fold). A struct qualifies only when every field is TRANSITIVELY `==`-comparable:
+// scalars, strings (__str_eq), bools, ptrs (identity), enums (tag), and nested/generic structs
+// recursively. Slice- and fn-typed fields are not (no C `==`, no lowering) — reject the whole
+// compare up front with the operand diagnostic instead of leaking a garbled post-resolve error.
+// Termination is structural: a struct cannot contain itself by value.
+eq_field_ty_ok* = (env: Env, t: Ty) bool {
+    t.match ({
+        .Slice(e)   => false,
+        .FnT(f)     => false,
+        .Named(n)   => (env.didx.struct_idx.get(n, 0 - 1) < 0).match ({
+            true  => true,
+            false => env.eq_struct_fields_ok(t),
+        }),
+        .Generic(g) => (env.didx.genstruct_idx.get(g.name, 0 - 1) < 0).match ({
+            true  => true,
+            false => env.eq_struct_fields_ok(t),
+        }),
+        _           => true,
+    })
+}
+eq_struct_fields_ok* = (env: Env, t: Ty) bool {
+    ok := true
+    reflect_fields(env.a, env.decls, env.didx, t).loop((h, i, f) {
+        ok = env.eq_field_ty_ok(f.ty).match ({ true => ok, false => false })
+    })
+    ok
+}
+// a type whose impl provides an `eq` method compares via THAT (resolve dispatches to it), so its
+// field shapes are irrelevant to acceptance.
+eq_impl_provides* = (env: Env, t: Ty) bool {
+    tn := t.dispatch_recv_name()
+    env.didx.impl_idx.get(tn, 0 - 1) >= 0 && env.a.dispatch_recv(env.decls, env.didx, "eq", tn) == "eq" == false
+}
 eq_nominal_ok = (env: Env, a: Ty, b: Ty) bool {
     a.ty_eq(b) && a.match ({
-        .Named(n) => env.env_is_struct(n).match ({ true => false, false => true }),
-        _         => false,
+        .Named(n)   => (env.didx.struct_idx.get(n, 0 - 1) < 0).match ({
+            true  => true,
+            false => env.eq_impl_provides(a) || env.eq_struct_fields_ok(a),
+        }),
+        .Generic(g) => env.env_is_gen_struct(g.name) && (env.eq_impl_provides(a) || env.eq_struct_fields_ok(a)),
+        _           => false,
     })
 }
 // Equality rejects f64/non-f64 mixes and heterogeneous comparisons (`"hi" == 5`, `true == 5`).

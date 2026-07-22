@@ -378,6 +378,29 @@ Generic inference is still growing. The current tree proves `ReplyRef<T>.send`
 works generically in actor flows, but broader inference coverage remains a
 roadmap item.
 
+### Struct Equality
+
+`==` / `!=` between two values of the same struct type compare structurally.
+An `eq` method provided by an impl on the type wins; otherwise the compiler
+derives a per-field `==` fold via reflection — string fields compare by
+content, enum fields by tag, struct fields recurse, pointer fields by
+identity. Operands are evaluated exactly once.
+
+```zen
+Point: { x: i64, y: i64 }
+p == q                          // derived per-field fold
+
+Tagged.impl(EqOps, {
+    eq = (a: Tagged, b: Tagged) bool { a.id == b.id }
+})
+t1 == t2                        // the impl wins over the derived fold
+```
+
+A struct qualifies for the derived fold only when every field is transitively
+`==`-comparable; a slice- or fn-typed field rejects the compare with
+`error[operand-type]` (provide an `eq` impl instead). Mismatched struct types
+reject the same way. Pointers to structs stay C pointer identity.
+
 ### Struct Reflection
 
 Reflection rides generics: three intrinsics expand at inline time, once the
