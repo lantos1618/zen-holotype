@@ -4,9 +4,11 @@
 { arg, argc, getEnv } = std.sys.os
 { Os, Arch, Abi, Platform, host } = std.sys.platform
 { Malloc } = std.mem.alloc
-{ view } = std.text.str
+{ view, is_empty, starts_with } = std.text.str
+{ Map, of } = std.collections.map    // zen audit: name -> decl-index / seen-set maps
+{ impl_cname_in } = compiler.mangle    // zen audit: recompute hoisted impl-method names
 { fnv1a64_fold } = std.hash    // shared FNV-1a-64 rolling byte fold (centralized in std.hash)
-{ gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
+{ gstr_string, gstr_append, gstr_finish, gstr_push, is_expr_null, cbuf } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
 { contents_in, out, out_bytes, save, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644,
   MODE_755 } = std.io.file
 { or, expect } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
@@ -1024,7 +1026,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     (e == "").match ({ true => mp.dirname(arg(0)), false => e })
 }
 HELP = () string_view {
-    "usage: zenc <run|build|check|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build <project>                 build its registered default targets\n  zenc build --target <name> <project> build one registered target\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  cat file.zen | zenc   (source -> C filter)\n"
+    "usage: zenc <run|build|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build <project>                 build its registered default targets\n  zenc build --target <name> <project> build one registered target\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  cat file.zen | zenc   (source -> C filter)\n"
 }
 VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
 main = () i32 {
@@ -1070,7 +1072,10 @@ main = () i32 {
                                                     true  => mp.zi_cmd(),
                                                     false => (cmd == "lsp").match ({
                                                         true  => mp.lsp_cmd(root),
-                                                        false => mp.default_emit(cmd),
+                                                        false => (cmd == "audit").match ({
+                                                            true  => mp.audit_cmd(root, arg(2), arg(3)),
+                                                            false => mp.default_emit(cmd),
+                                                        }),
                                                     }),
                                                 }),
                                             }),
@@ -3310,4 +3315,935 @@ lsp_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
         })
     }
     code
+}
+// ── zen audit — dead-code + unused-import reporter (advisory; `--strict` exits 1 on findings) ─────
+// Dead-decl analysis runs over the SAME whole-program pipeline `check` uses (resolve imports ->
+// parse -> resolve_module), so alias qualification, UFCS dispatch and trait-default materialization
+// are all visible. It builds a conservative reachability fixpoint over top-level decl NAMES:
+//   * every name a live decl's body/types mention is live (calls, Var refs, type names, ctors/tags);
+//   * a method call `x.m(...)` marks every free fn `m`, every impl method hoisted for bare name `m`
+//     (`impl_<Trait>_<Ty>_m`, incl. trait defaults), and every alias-qualified `*__m` — receiver
+//     types are NOT tracked, so this can never miss a dispatch target (false-negative direction);
+//   * a live TYPE keeps every method of every impl block on it (trait dispatch may reach any), plus
+//     the traits those impls conform to;
+//   * impl blocks on BUILTIN receivers (string_view, u8, slices — no type decl to anchor) are roots;
+//   * BOTH the raw and the resolved forms of each decl are walked: raw carries the surface names
+//     (calls to inline templates disappear after inlining), resolved carries synthesized dispatch
+//     (materialized trait defaults, mono instances, lowered closures, `eq`->impl rewrites).
+// Reported: top-level fn/struct/enum/global decls never reached from the entry's `main`. Exempt
+// (documented, all in the false-negative direction): DForeign prototypes (FFI headers), `impl_*`
+// hoisted methods (their TYPE carries the verdict), `__`-prefixed synthesized decls, namespace-alias
+// binds (covered by unused-import), pos-less synthesized decls. When the entry has no `main` (a
+// library), every entry-module decl is a root instead.
+// Unused-import analysis is per ORIGINAL module file: an imported name (`{ a, b } = mod`) or a
+// namespace alias (`m = mod`) that never occurs in the module's own source outside the import
+// statement itself. The scan is tokenizer-disciplined — identifiers inside strings, char literals
+// and comments do NOT count as uses (so a name mentioned only in an embedded test-program string is
+// correctly unused), and matches are whole-identifier (no `or`-inside-`for` hits).
+AudPair: {
+    bare: string_view,
+    full: string_view,
+}    // method-name fanout: bare method/tail name -> hoisted/aliased decl name
+AudImplM: {
+    ty: string_view,
+    full: string_view,
+}    // type-liveness fanout: impl'd type -> hoisted method (or trait) name
+AudCtx: {
+    mp: MutPtr<Malloc>,
+    decls: [Decl],
+    rdecls: [Decl],
+    ridx: Map<i64>,
+    xidx: Map<i64>,
+    seen: Map<i64>,
+    mseen: Map<i64>,
+    pairs: [AudPair],
+    implms: [AudImplM],
+}
+aud_decl_name = (d: Decl) string_view {
+    d.match ({
+        .DFunc(f)      => f.name,
+        .DForeign(f)   => f.name,
+        .DStruct(sd)   => sd.name,
+        .DEnum(ed)     => ed.name,
+        .DGenStruct(g) => g.name,
+        .DGenEnum(g)   => g.name,
+        .DGlobal(g)    => g.name,
+        _              => "",
+    })
+}
+aud_decl_pos = (d: Decl) i32 {
+    d.match ({
+        .DFunc(f)      => f.pos,
+        .DStruct(sd)   => sd.pos,
+        .DEnum(ed)     => ed.pos,
+        .DGenStruct(g) => g.pos,
+        .DGenEnum(g)   => g.pos,
+        .DGlobal(g)    => g.pos,
+        _              => 0,
+    })
+}
+aud_decl_is_type = (d: Decl) bool {
+    d.match ({
+        .DStruct(sd)   => true,
+        .DEnum(ed)     => true,
+        .DGenStruct(g) => true,
+        .DGenEnum(g)   => true,
+        _              => false,
+    })
+}
+// the reporting kind word; "" = this decl kind is never reported (see the exemption list above).
+aud_decl_kind = (d: Decl) string_view {
+    d.match ({
+        .DFunc(f)      => "fn",
+        .DStruct(sd)   => "struct",
+        .DEnum(ed)     => "enum",
+        .DGenStruct(g) => "struct",
+        .DGenEnum(g)   => "enum",
+        .DGlobal(g)    => g.alias.match ({ true => "", false => "global" }),
+        _              => "",
+    })
+}
+aud_index = (mp: MutPtr<Malloc>, ds: [Decl]) Map<i64> {
+    seedv: i64 := 0 - 1
+    m := of(mp, "", seedv).expect("audit: oom")
+    ds.loop((h, i, d) {
+        nm := d.aud_decl_name()
+        (is_empty(nm) == false).then({
+            m = m.put(mp, nm, i).expect("audit: oom")
+        })
+    })
+    m
+}
+// byte position AFTER the last `__` separator in `name`; -1 when it has none (or it leads).
+aud_tail_at = (name: string_view) i64 {
+    v: [u8] := name.view()
+    best := 0 - 1
+    i := 1
+    @while (i + 1 < v.len) {
+        (v[i] == '_' && v[i + 1] == '_').then({
+            best = i + 2
+        })
+        i = i + 1
+    }
+    best
+}
+// mark `name` live and (once) walk both its raw and resolved decls; a live TYPE also keeps every
+// impl-block method on it (aud_implms).
+aud_ref = (ac: MutPtr<AudCtx>, name: string_view) void {
+    ((is_empty(name) || ac.seen.has(name)) == false).then({
+        one: i64 := 1
+        ac.seen = ac.seen.put(ac.mp, name, one).expect("audit: oom")
+        ri := ac.ridx.get(name, 0 - 1)
+        (ri >= 0).then({
+            d := ac.decls[ri]
+            ac.aud_walk_decl(d)
+            d.aud_decl_is_type().then({
+                ac.aud_implms(name)
+            })
+        })
+        xi := ac.xidx.get(name, 0 - 1)
+        (xi >= 0).then({
+            ac.aud_walk_decl(ac.rdecls[xi])
+        })
+    })
+}
+// a METHOD-position name: the free fn `m`, plus every hoisted impl method / alias tail for `m`.
+aud_mref = (ac: MutPtr<AudCtx>, m: string_view) void {
+    ((is_empty(m) || ac.mseen.has(m)) == false).then({
+        one: i64 := 1
+        ac.mseen = ac.mseen.put(ac.mp, m, one).expect("audit: oom")
+        ac.aud_ref(m)
+        ac.pairs.loop((h, i, p) {
+            (p.bare == m).then({
+                ac.aud_ref(p.full)
+            })
+        })
+    })
+}
+// type-liveness fanout: every impl-block method (and trait) recorded against `tyname`.
+aud_implms = (ac: MutPtr<AudCtx>, tyname: string_view) void {
+    ac.implms.loop((h, i, im) {
+        (im.ty == tyname).then({
+            ac.aud_ref(im.full)
+        })
+    })
+}
+aud_walk_decl = (ac: MutPtr<AudCtx>, d: Decl) void {
+    d.match ({
+        .DFunc(f)          => ac.aud_walk_fn(f),
+        .DForeign(f)       => ac.aud_walk_sig(f),
+        .DStruct(sd)       => ac.aud_walk_fields(sd.fields),
+        .DGenStruct(g)     => ac.aud_walk_fields(g.fields),
+        .DEnum(ed)         => ac.aud_walk_variants(ed.variants),
+        .DGenEnum(g)       => ac.aud_walk_variants(g.variants),
+        .DGlobal(g)        => {
+            ac.aud_walk_ty(g.ty)
+            (g.init.is_expr_null() == false).then({
+                ac.aud_walk_expr(g.init)
+            })
+        },
+        .DTraitDefault(td) => ac.aud_walk_fn(td.fn),
+        .DImpl(im)         => ac.aud_walk_ty(im.trty),
+        _                  => { },
+    })
+}
+aud_walk_fn = (ac: MutPtr<AudCtx>, f: Func) void {
+    ac.aud_walk_sig(f)
+    ac.aud_walk_stmts(f.body)
+}
+aud_walk_sig = (ac: MutPtr<AudCtx>, f: Func) void {
+    f.params.loop((h, i, p) {
+        ac.aud_walk_ty(p.ty)
+    })
+    f.tparams.loop((h, i, p) {
+        ac.aud_walk_ty(p.ty)
+    })    // generic BOUNDS (`f<A: Allocator>`) reference the trait
+    ac.aud_walk_ty(f.ret)
+}
+aud_walk_fields = (ac: MutPtr<AudCtx>, fs: [Field]) void {
+    fs.loop((h, i, f) {
+        ac.aud_walk_ty(f.ty)
+    })
+}
+aud_walk_variants = (ac: MutPtr<AudCtx>, vs: [VariantDef]) void {
+    vs.loop((h, i, v) {
+        ac.aud_walk_ty(v.payload)
+        (v.dflt.is_expr_null() == false).then({
+            ac.aud_walk_expr(v.dflt)
+        })
+    })
+}
+aud_walk_ty = (ac: MutPtr<AudCtx>, t: Ty) void {
+    t.match ({
+        .Named(n)   => ac.aud_ref(n),
+        .Generic(g) => {
+            ac.aud_ref(g.name)
+            g.args.loop((h, i, x) {
+                ac.aud_walk_ty(x)
+            })
+        },
+        .Ptr(pd)    => ac.aud_walk_ty(load(pd.pointee)),
+        .Slice(e)   => ac.aud_walk_ty(load(e)),
+        .FnT(ft)    => {
+            ft.params.loop((h, i, x) {
+                ac.aud_walk_ty(x)
+            })
+            ac.aud_walk_ty(load(ft.ret))
+        },
+        _           => { },
+    })
+}
+aud_walk_stmts = (ac: MutPtr<AudCtx>, body: [Stmt]) void {
+    body.loop((h, i, st) {
+        ac.aud_walk_stmt(st)
+    })
+}
+aud_walk_stmt = (ac: MutPtr<AudCtx>, st: Stmt) void {
+    st.match ({
+        .Let(l)      => {
+            ac.aud_walk_ty(l.ty)
+            ac.aud_walk_expr(l.value)
+        },
+        .Assign(x)   => {
+            ac.aud_walk_expr(x.target)
+            ac.aud_walk_expr(x.value)
+        },
+        .Return(r)   => (r.is_expr_null() == false).then({
+            ac.aud_walk_expr(r)
+        }),
+        .If(f)       => {
+            ac.aud_walk_expr(f.c)
+            ac.aud_walk_stmts(f.then)
+            ac.aud_walk_stmts(f.els)
+        },
+        .While(w)    => {
+            ac.aud_walk_expr(w.c)
+            ac.aud_walk_stmts(w.body)
+        },
+        .IndexSet(x) => {
+            ac.aud_walk_expr(x.seq)
+            ac.aud_walk_expr(x.idx)
+            ac.aud_walk_ty(x.elem)
+            ac.aud_walk_expr(x.value)
+        },
+        .ExprStmt(e) => ac.aud_walk_expr(e),
+    })
+}
+aud_walk_expr = (ac: MutPtr<AudCtx>, e: Ptr<Expr>) void {
+    load(e).match ({
+        .Var(v)         => ac.aud_ref(v.name),
+        .Bin(b)         => {
+            ac.aud_walk_expr(b.lhs)
+            ac.aud_walk_expr(b.rhs)
+        },
+        .Call(c)        => {
+            ac.aud_mref(c.fn)
+            c.targs.loop((h, i, t) {
+                ac.aud_walk_ty(t)
+            })
+            c.args.loop((h, i, x) {
+                ac.aud_walk_expr(x.addr())
+            })
+        },
+        .MethodCall(mc) => {
+            ac.aud_mref(mc.method)
+            ac.aud_walk_expr(mc.recv)
+            mc.args.loop((h, i, x) {
+                ac.aud_walk_expr(x.addr())
+            })
+        },
+        .Cond(cd)       => {
+            ac.aud_walk_expr(cd.c)
+            ac.aud_walk_expr(cd.t)
+            ac.aud_walk_expr(cd.e)
+        },
+        .Member(m)      => {
+            // `alias.NAME` reads the flat decl `alias__NAME` — credit that spelling too.
+            load(m.obj).match ({
+                .Var(v) => ac.aud_ref(ac.mp.aud_join2(v.name, m.field)),
+                _       => { },
+            })
+            ac.aud_walk_expr(m.obj)
+        },
+        .Arrow(ar)      => ac.aud_walk_expr(ar.obj),
+        .MakeEnum(mk)   => {
+            ac.aud_ref(mk.ty)
+            mk.targs.loop((h, i, t) {
+                ac.aud_walk_ty(t)
+            })
+            (mk.payload.is_expr_null() == false).then({
+                ac.aud_walk_expr(mk.payload)
+            })
+        },
+        .MakeStruct(ms) => {
+            ac.aud_ref(ms.ty)
+            ms.targs.loop((h, i, t) {
+                ac.aud_walk_ty(t)
+            })
+            ms.inits.loop((h, i, fi) {
+                ac.aud_walk_expr(fi.value)
+            })
+        },
+        .Tag(tg)        => {
+            ac.aud_ref(tg.ty)
+            tg.targs.loop((h, i, t) {
+                ac.aud_walk_ty(t)
+            })
+        },
+        .Match(md)      => {
+            ac.aud_ref(md.ename)
+            ac.aud_walk_expr(md.subj)
+            md.arms.loop((h, i, ar2) {
+                ac.aud_walk_expr(ar2.body)
+            })
+        },
+        .SliceLit(sd)   => {
+            ac.aud_walk_ty(sd.elem)
+            sd.items.loop((h, i, x) {
+                ac.aud_walk_expr(x.addr())
+            })
+        },
+        .Index(ix)      => {
+            ac.aud_walk_expr(ix.seq)
+            ac.aud_walk_expr(ix.idx)
+            ac.aud_walk_ty(ix.elem)
+        },
+        .Loop(lp)       => {
+            ac.aud_walk_expr(lp.seq)
+            ac.aud_walk_ty(lp.elemTy)
+            ac.aud_walk_stmts(lp.body)
+        },
+        .Lambda(la)     => {
+            la.params.loop((h, i, p) {
+                ac.aud_walk_ty(p.ty)
+            })
+            ac.aud_walk_ty(la.ret)
+            ac.aud_walk_stmts(la.body)
+        },
+        .Block(bl)      => ac.aud_walk_stmts(bl.stmts),
+        _               => { },
+    })
+}
+aud_join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
+    mp.gstr_string(32).gstr_append(mp, a).gstr_append(mp, "__").gstr_append(mp, b).gstr_finish(mp)
+}
+// ── audit fanout tables ───────────────────────────────────────────────────────────────────────────
+// One prepass over the raw decls builds:
+//   pairs  — (bare method/tail name -> hoisted decl name): every DImpl method, every trait-default
+//            materialization target per conforming impl, every `alias__name`-shaped decl tail.
+//   implms — (impl'd type -> hoisted method name / trait name): the type-liveness fanout.
+aud_td_idxs = (mp: MutPtr<Malloc>, decls: [Decl]) [i64] {
+    n := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DTraitDefault(td) => {
+                n = n + 1
+            },
+            _                  => { },
+        })
+    })
+    buf := cbuf<i64>(mp, n)
+    k := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DTraitDefault(td) => {
+                buf[k] = i
+                k = k + 1
+            },
+            _                  => { },
+        })
+    })
+    buf
+}
+// defaults of impl `im`'s trait: how many DTraitDefault decls share its trait name.
+aud_impl_dflts = (decls: [Decl], tds: [i64], trname: string_view) i64 {
+    n := 0
+    tds.loop((h, j, ti) {
+        decls[ti].match ({
+            .DTraitDefault(td) => {
+                (td.trname == trname).then({
+                    n = n + 1
+                })
+            },
+            _                  => { },
+        })
+    })
+    n
+}
+aud_pair_count = (decls: [Decl], tds: [i64]) i64 {
+    n := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => {
+                n = n + im.methods.len + decls.aud_impl_dflts(tds, im.trname)
+            },
+            _          => {
+                (d.aud_decl_name().aud_tail_at() > 0).then({
+                    n = n + 1
+                })
+            },
+        })
+    })
+    n
+}
+aud_implm_count = (decls: [Decl], tds: [i64]) i64 {
+    n := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => {
+                n = n + im.methods.len + decls.aud_impl_dflts(tds, im.trname) + 1
+            },
+            _          => { },
+        })
+    })
+    n
+}
+AudTables: {
+    pairs: [AudPair],
+    implms: [AudImplM],
+}
+aud_tables = (mp: MutPtr<Malloc>, decls: [Decl]) AudTables {
+    tds := mp.aud_td_idxs(decls)
+    pairs := cbuf<AudPair>(mp, decls.aud_pair_count(tds))
+    implms := cbuf<AudImplM>(mp, decls.aud_implm_count(tds))
+    pk := 0
+    mk2 := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => {
+                im.methods.loop((h2, j, p) {
+                    full := mp.impl_cname_in(im.trname, im.ty, p.name)
+                    pairs[pk] = AudPair(
+                        bare: p.name,
+                        full: full,
+                    )
+                    pk = pk + 1
+                    implms[mk2] = AudImplM(
+                        ty: im.ty,
+                        full: full,
+                    )
+                    mk2 = mk2 + 1
+                })
+                tds.loop((h2, j, ti) {
+                    // trait-default materializations this impl can dispatch to (methods it OMITS are
+                    // still reachable through its trait's defaults).
+                    decls[ti].match ({
+                        .DTraitDefault(td) => {
+                            (td.trname == im.trname).then({
+                                full := mp.impl_cname_in(im.trname, im.ty, td.fn.name)
+                                pairs[pk] = AudPair(
+                                    bare: td.fn.name,
+                                    full: full,
+                                )
+                                pk = pk + 1
+                                implms[mk2] = AudImplM(
+                                    ty: im.ty,
+                                    full: full,
+                                )
+                                mk2 = mk2 + 1
+                            })
+                        },
+                        _                  => { },
+                    })
+                })
+                // conformance names the trait struct — a live type keeps its traits.
+                implms[mk2] = AudImplM(
+                    ty: im.ty,
+                    full: im.trname,
+                )
+                mk2 = mk2 + 1
+            },
+            _          => {
+                nm := d.aud_decl_name()
+                ta := nm.aud_tail_at()
+                (ta > 0).then({
+                    pairs[pk] = AudPair(
+                        bare: cstr(offset(nm, ta)),
+                        full: nm,
+                    )
+                    pk = pk + 1
+                })
+            },
+        })
+    })
+    AudTables(
+        pairs: pairs,
+        implms: implms,
+    )
+}
+// ── audit findings ────────────────────────────────────────────────────────────────────────────────
+AudFinding: {
+    path: string_view,
+    line: i64,
+    msg: string_view,
+    dead: bool,
+}
+aud_strcmp = (a: string_view, b: string_view) i64 {
+    av: [u8] := a.view()
+    bv: [u8] := b.view()
+    i := 0
+    r := 0
+    @while (r == 0 && i < av.len && i < bv.len) {
+        (av[i] < bv[i]).then({
+            r = 0 - 1
+        })
+        (av[i] > bv[i]).then({
+            r = 1
+        })
+        i = i + 1
+    }
+    (r == 0 && av.len < bv.len).then({
+        r = 0 - 1
+    })
+    (r == 0 && av.len > bv.len).then({
+        r = 1
+    })
+    r
+}
+aud_lt = (a: AudFinding, b: AudFinding) bool {
+    c := a.path.aud_strcmp(b.path)
+    c < 0 || c == 0 && a.line < b.line
+}
+aud_sort = (fb: [AudFinding], n: i64) void {
+    i := 1
+    @while (i < n) {
+        x := fb[i]
+        j := i - 1
+        @while (j >= 0 && x.aud_lt(fb[j])) {
+            fb[j + 1] = fb[j]
+            j = j - 1
+        }
+        fb[j + 1] = x
+        i = i + 1
+    }
+}
+// is this raw decl one the report should name? (kinds/prefixes exempted per the header comment)
+aud_reportable = (d: Decl) bool {
+    nm := d.aud_decl_name()
+    is_empty(nm) == false
+        && d.aud_decl_pos() > 0
+        && is_empty(d.aud_decl_kind()) == false
+        && nm.starts_with("impl_") == false
+        && nm.starts_with("__") == false
+}
+aud_dead_msg = (mp: MutPtr<Malloc>, kind: string_view, nm: string_view) string_view {
+    mp
+        .gstr_string(64)
+        .gstr_append(mp, "warning[dead-code]: ")
+        .gstr_append(mp, kind)
+        .gstr_append(mp, " '")
+        .gstr_append(mp, nm)
+        .gstr_append(mp, "' is never reachable from main")
+        .gstr_finish(mp)
+}
+// ── unused-import scan (per original module source; tokenizer-disciplined) ────────────────────────
+AudImp: {
+    name: string_view,
+    nv: [u8],
+    mod: string_view,
+    pos: i32,
+    alias: bool,
+    used: bool,
+    lo: i64,
+    hi: i64,
+}
+aud_is_ident_start = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_' }
+aud_is_ident_char = (b: u8) bool { b.aud_is_ident_start() || b >= '0' && b <= '9' }
+// 1-based line of byte `pos` (iterative — module sources are hundreds of KB).
+aud_line_of = (v: [u8], pos: i64) i64 {
+    ln := 1
+    i := 0
+    @while (i < pos && i < v.len) {
+        (v[i] == '\n').then({
+            ln = ln + 1
+        })
+        i = i + 1
+    }
+    ln
+}
+// end of an import statement's span: from `{` past the matching `}`, the `=`, and the dotted path.
+aud_imp_span_hi = (v: [u8], pos: i64) i64 {
+    i := pos
+    @while (i < v.len && v[i] != '}') {
+        i = i + 1
+    }
+    i = i + 1
+    @while (i < v.len && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '=')) {
+        i = i + 1
+    }
+    @while (i < v.len && (v[i].aud_is_ident_char() || v[i] == '.')) {
+        i = i + 1
+    }
+    i
+}
+// end of a one-line namespace-alias bind's span (`m = std.x.y`): the end of its line.
+aud_line_end = (v: [u8], pos: i64) i64 {
+    i := pos
+    @while (i < v.len && v[i] != '\n') {
+        i = i + 1
+    }
+    i
+}
+// identifier token [s,e) equals `nv`?
+aud_tok_eq = (v: [u8], s: i64, e: i64, nv: [u8]) bool {
+    ok := nv.len == e - s
+    k := 0
+    @while (ok && k < nv.len) {
+        (v[s + k] == nv[k]).match ({
+            true  => {
+                k = k + 1
+            },
+            false => {
+                ok = false
+            },
+        })
+    }
+    ok
+}
+aud_mark_used = (ents: [AudImp], nents: i64, v: [u8], s: i64, e: i64) void {
+    k := 0
+    @while (k < nents) {
+        en := ents[k]
+        (en.used == false && (s < en.lo || s >= en.hi) && v.aud_tok_eq(s, e, en.nv)).then({
+            en.used = true
+            ents[k] = en
+        })
+        k = k + 1
+    }
+}
+// one scanner step at byte i: skip a comment/string/char literal whole, consume an identifier and
+// match it against the imported names, else advance one byte. Returns the next position.
+aud_step = (ents: [AudImp], nents: i64, v: [u8], i0: i64) i64 {
+    n := v.len
+    b := v[i0]
+    (b == '/' && i0 + 1 < n && v[i0 + 1] == '/').then({
+        i := i0 + 2
+        @while (i < n && v[i] != '\n') {
+            i = i + 1
+        }
+        return i + 1
+    })
+    (b == '/' && i0 + 1 < n && v[i0 + 1] == '*').then({
+        i := i0 + 2
+        @while (i + 1 < n && (v[i] == '*' && v[i + 1] == '/') == false) {
+            i = i + 1
+        }
+        return i + 2
+    })
+    (b == '"').then({
+        i := i0 + 1
+        @while (i < n && v[i] != '"') {
+            i = (v[i] == '\\').match ({ true => i + 2, false => i + 1 })
+        }
+        return i + 1
+    })
+    (b == '\'').then({
+        i := i0 + 1
+        @while (i < n && v[i] != '\'') {
+            i = (v[i] == '\\').match ({ true => i + 2, false => i + 1 })
+        }
+        return i + 1
+    })
+    b.aud_is_ident_start().then({
+        i := i0 + 1
+        @while (i < n && v[i].aud_is_ident_char()) {
+            i = i + 1
+        }
+        ents.aud_mark_used(nents, v, i0, i)
+        return i
+    })
+    i0 + 1
+}
+aud_imp_msg = (mp: MutPtr<Malloc>, en: AudImp) string_view {
+    en.alias.match ({
+        true  => mp
+            .gstr_string(64)
+            .gstr_append(mp, "warning[unused-import]: namespace alias '")
+            .gstr_append(mp, en.name)
+            .gstr_append(mp, "' is never used")
+            .gstr_finish(mp),
+        false => mp
+            .gstr_string(64)
+            .gstr_append(mp, "warning[unused-import]: '")
+            .gstr_append(mp, en.name)
+            .gstr_append(mp, "' imported from '")
+            .gstr_append(mp, en.mod)
+            .gstr_append(mp, "' but never used")
+            .gstr_finish(mp),
+    })
+}
+// scan ONE module file: every `{ a, b } = mod` name and every `m = mod` alias that never occurs in
+// the module's own source outside the import statement itself. Appends findings; returns the count.
+aud_mod_imports = (mp: MutPtr<Malloc>, m: ModuleEntry, fb: [AudFinding], n0: i64) i64 {
+    ds := mp.parse_module(m.source)
+    v: [u8] := m.source.view()
+    cnt := 0
+    ds.loop((h, i, d) {
+        d.match ({
+            .DImport(imp) => {
+                cnt = cnt + imp.names.len
+            },
+            .DGlobal(g)   => {
+                g.alias.then({
+                    cnt = cnt + 1
+                })
+            },
+            _             => { },
+        })
+    })
+    (cnt == 0).then({
+        return n0
+    })
+    ents := cbuf<AudImp>(mp, cnt)
+    k := 0
+    ds.loop((h, i, d) {
+        d.match ({
+            .DImport(imp) => {
+                hi := v.aud_imp_span_hi(to_i64(imp.pos))
+                imp.names.loop((h2, j, p) {
+                    ents[k] = AudImp(
+                        name: p.name,
+                        nv: p.name.view(),
+                        mod: imp.module,
+                        pos: imp.pos,
+                        alias: false,
+                        used: false,
+                        lo: to_i64(imp.pos),
+                        hi: hi,
+                    )
+                    k = k + 1
+                })
+            },
+            .DGlobal(g)   => {
+                g.alias.then({
+                    ents[k] = AudImp(
+                        name: g.name,
+                        nv: g.name.view(),
+                        mod: "",
+                        pos: g.pos,
+                        alias: true,
+                        used: false,
+                        lo: to_i64(g.pos),
+                        hi: v.aud_line_end(to_i64(g.pos)),
+                    )
+                    k = k + 1
+                })
+            },
+            _             => { },
+        })
+    })
+    i: i64 := 0
+    @while (i < v.len) {
+        i = ents.aud_step(k, v, i)
+    }
+    n := n0
+    j := 0
+    @while (j < k) {
+        en := ents[j]
+        (en.used == false && n < fb.len).then({
+            fb[n] = AudFinding(
+                path: m.path,
+                line: v.aud_line_of(to_i64(en.pos)),
+                msg: mp.aud_imp_msg(en),
+                dead: false,
+            )
+            n = n + 1
+        })
+        j = j + 1
+    }
+    n
+}
+// ── the audit driver ──────────────────────────────────────────────────────────────────────────────
+aud_run = (
+    mp: MutPtr<Malloc>,
+    rp: ResolvedProgram,
+    raw: [Decl],
+    rdecls: [Decl],
+    path: string_view,
+    src: string_view,
+    strict: bool,
+) i32 {
+    seedv: i64 := 0 - 1
+    t := mp.aud_tables(raw)
+    c := AudCtx(
+        mp: mp,
+        decls: raw,
+        rdecls: rdecls,
+        ridx: mp.aud_index(raw),
+        xidx: mp.aud_index(rdecls),
+        seen: of(mp, "", seedv).expect("audit: oom"),
+        mseen: of(mp, "", seedv).expect("audit: oom"),
+        pairs: t.pairs,
+        implms: t.implms,
+    )
+    ac := c.addr()
+    // roots: the entry `main`; a `main = (sys: Sys)` entry also reaches std.sys.root (genc emits the
+    // trampoline call); impl blocks on builtin receivers (no type decl to anchor liveness on).
+    ac.aud_ref("main")
+    mi := c.ridx.get("main", 0 - 1)
+    (mi >= 0).then({
+        raw[mi].match ({
+            .DFunc(f) => {
+                (f.params.len > 0).then({
+                    ac.aud_mref("root")
+                })
+            },
+            _         => { },
+        })
+    })
+    raw.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => {
+                (c.ridx.get(im.ty, 0 - 1) < 0).then({
+                    ac.aud_ref(im.trname)
+                    im.methods.loop((h2, j, p) {
+                        ac.aud_ref(mp.impl_cname_in(im.trname, im.ty, p.name))
+                    })
+                })
+            },
+            _          => { },
+        })
+    })
+    (mi < 0).then({
+        raw.loop((h, i, d) {
+            // no entry `main` (a library): every decl of the ENTRY module region is a root.
+            p := d.aud_decl_pos()
+            ri := rp.regions.fregion_find(to_i64(p))
+            (p > 0 && ri >= 0 && rp.regions[ri].midx == 0).then({
+                ac.aud_ref(d.aud_decl_name())
+            })
+        })
+    })
+    // A module bound BOTH bare and under a namespace alias is appended twice (once as `f`, once as
+    // `alias__f`) — both copies come from the SAME source line, so if EITHER copy is live the line
+    // is live and neither may be reported. Suppress a dead `f` when some live `*__f` twin exists,
+    // and a dead `alias__f` when its bare tail `f` is live (false-negative direction).
+    tails := of(mp, "", seedv).expect("audit: oom")
+    c.seen.keys().loop((h, i, k) {
+        ta := k.aud_tail_at()
+        (ta > 0).then({
+            one: i64 := 1
+            tails = tails.put(mp, cstr(offset(k, ta)), one).expect("audit: oom")
+        })
+    })
+    // collect findings: dead decls (flat order), then unused imports (per module file).
+    fb := cbuf<AudFinding>(mp, raw.len + 8192)
+    n := 0
+    raw.loop((h, i, d) {
+        nm := d.aud_decl_name()
+        nta := nm.aud_tail_at()
+        twin := tails.has(nm) || nta > 0 && c.seen.has(cstr(offset(nm, nta)))
+        (d.aud_reportable() && c.seen.has(nm) == false && twin == false && n < fb.len).then({
+            dl := locate_diag(rp, d.aud_decl_pos(), 1, path, src)
+            fb[n] = AudFinding(
+                path: dl.path,
+                line: to_i64(dl.sp.line),
+                msg: mp.aud_dead_msg(d.aud_decl_kind(), nm),
+                dead: true,
+            )
+            n = n + 1
+        })
+    })
+    rp.table.modules.loop((h, i, m) {
+        n = mp.aud_mod_imports(m, fb, n)
+    })
+    fb.aud_sort(n)
+    dead := 0
+    i := 0
+    @while (i < n) {
+        f := fb[i]
+        f.dead.then({
+            dead = dead + 1
+        })
+        say(mp
+            .gstr_string(96)
+            .gstr_append(mp, f.path)
+            .gstr_push(mp, ':')
+            .push_int(mp, f.line)
+            .gstr_append(mp, ": ")
+            .gstr_append(mp, f.msg)
+            .gstr_finish(mp))
+        i = i + 1
+    }
+    say(mp
+        .gstr_string(64)
+        .gstr_append(mp, "zen audit: ")
+        .push_int(mp, dead)
+        .gstr_append(mp, " dead decls, ")
+        .push_int(mp, n - dead)
+        .gstr_append(mp, " unused imports")
+        .gstr_finish(mp))
+    (strict && n > 0).match ({ true => 1, false => 0 })
+}
+// `zenc audit <file.zen> [--strict]` — check first (a broken program cannot be audited), then run
+// the dead-code + unused-import analysis. Exit 0 always (advisory); `--strict` exits 1 on findings.
+audit_cmd = (mp: MutPtr<Malloc>, root: string_view, a2: string_view, a3: string_view) i32 {
+    strict := a2 == "--strict" || a3 == "--strict"
+    path := (a2 == "--strict").match ({ true => a3, false => a2 })
+    (path == "").then({
+        derr("usage: zenc audit <file.zen> [--strict]\n")
+        return 2
+    })
+    contents_in(mp, path).match ({
+        .Ok(src) => {
+            rp := mp.resolve_prog(root, path, src)
+            (mp.report_no_if_resolved(rp, path, src) == 0).match ({
+                true  => {
+                    raw := mp.parse_module(rp.flat)
+                    decls := mp.resolve_module(raw)
+                    (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+                        true  => mp.aud_run(rp, raw, decls, path, src, strict),
+                        false => 1,
+                    })
+                },
+                false => 1,
+            })
+        },
+        .Err(e)  => {
+            derr("zenc: cannot open input: ")
+            derr(path)
+            derr("\n")
+            1
+        },
+    })
 }

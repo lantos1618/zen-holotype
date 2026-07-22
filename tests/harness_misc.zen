@@ -10,6 +10,7 @@
 //   differential <- tests/test_differential.py    (large generated constructs: 80 params/fields/match-arms)
 //   faithful_ast <- tests/test_faithful_ast.py    (`fmt --ast` UFCS/round-trip/idempotency + emit-equal corpus)
 //   capacity     <- compiler review                 (16385-decl module -> error[capacity], not a crash)
+//   audit        <- `zen audit`                      (dead-code + unused-import reporter: flag/not-flag + --strict)
 //
 // Helpers are `om_`-prefixed so they never collide on the flat-import flatten with std (std.io.file
 // already defines `read_file*`), harness_lib, or the other category files.
@@ -665,9 +666,38 @@ harness_misc_capacity = () i32 {
         kind: "capacity",
     ))])
 }
+// ════════════════════════════════════════════════════════════════════════════════
+// audit  <- `zen audit` (dead-code + unused-import reporter over the resolved program)
+// A two-file fixture: a dead fn, a dead struct, and an unused import MUST be flagged; a method
+// reached ONLY via trait dispatch (`v.addr().tickle()`), the used import, the live type and its
+// trait must NOT be. `--strict` exits 1 on findings and 0 on a clean program.
+// ════════════════════════════════════════════════════════════════════════════════
+AUD_HELP := "AudT*: { tickle: (Ptr<AudLive>) i32 }\nAudLive*: { n: i32 }\nAudLive.impl(AudT, { tickle = (p: Ptr<AudLive>) i32 { p.n + 1 } })\nAudDeadS*: { x: i32 }\naud_used* = (k: i32) i32 { k * 2 }\naud_dead* = (k: i32) i32 { k + 99 }\naud_extra* = (k: i32) i32 { k }\n"
+AUD_MAIN := "{ aud_used, aud_extra, AudLive } = zo_misc_aud_help\nmain = () i32 {\n    v := AudLive(n: 20)\n    aud_used(v.n) + v.addr().tickle()\n}\n"
+AUD_CLEAN := "main = () i32 { 0 }\n"
+harness_misc_audit = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_misc_aud_help.zen"), AUD_HELP, len(AUD_HELP))
+    save(mp.zo_path("zo_misc_aud_main.zen"), AUD_MAIN, len(AUD_MAIN))
+    save(mp.zo_path("zo_misc_aud_clean.zen"), AUD_CLEAN, len(AUD_CLEAN))
+    save(mp.zo_path("zo_misc_aud.out"), "", 0)
+    save(mp.zo_path("zo_misc_aud_clean.out"), "", 0)
+    rc0 := shell(mp.zo_cmd("./zen audit $ZT/zo_misc_aud_main.zen > $ZT/zo_misc_aud.out 2>&1")).expect("harness: shell")
+    rcs := shell(mp.zo_cmd("./zen audit --strict $ZT/zo_misc_aud_main.zen > /dev/null 2>&1")).expect("harness: shell")
+    rcc := shell(mp.zo_cmd("./zen audit --strict $ZT/zo_misc_aud_clean.zen > $ZT/zo_misc_aud_clean.out 2>&1")).expect("harness: shell")
+    txt := mp.om_read_file(mp.zo_path("zo_misc_aud.out"))
+    ctxt := mp.om_read_file(mp.zo_path("zo_misc_aud_clean.out"))
+    run_suite("audit (dead-code + unused-import)", [rc0 == 0, rcs != 0, rcc == 0, txt.contains("warning[dead-code]: fn 'aud_dead' is never reachable from main"), txt.contains("warning[dead-code]: struct 'AudDeadS' is never reachable from main"), txt.contains("warning[unused-import]: 'aud_extra' imported from 'zo_misc_aud_help' but never used"), txt.contains("zo_misc_aud_help.zen:4:"), txt
+        .contains("tickle")
+        .om_not(), txt.contains("'aud_used'").om_not(), txt.contains("'AudLive'").om_not(), txt
+        .contains("'AudT'")
+        .om_not(), ctxt.contains("zen audit: 0 dead decls, 0 unused imports")])
+}
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 harness_misc_run* = () i32 {
     fails := 0
+    fails = fails + harness_misc_audit()
     fails = fails + harness_misc_traits()
     fails = fails + harness_misc_string_types()
     fails = fails + harness_misc_num_parse()
