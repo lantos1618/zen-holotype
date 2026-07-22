@@ -1,22 +1,18 @@
 // compiler.validate.util — leaf predicates: literals, type/fnt shape, env-index wrappers, source spans.
-{ ArmData, CallData, Decl, Expr, Field, Func, LetData, Param, Stmt, Ty, VariantDef, arm, call,
-  gstr_append, gstr_finish, gstr_string, tvoid } = compiler.genc
-{ Env, bind_tparams, is_intrinsic, is_lit_numeric, is_void_ty, the_func, tparam_declared } = compiler.check
-{ resolve_module } = compiler.check_resolve
+{ ArmData, CallData, Decl, Expr, Field, Func, LetData, Param, Stmt, Ty, VariantDef, gstr_append,
+  gstr_finish, gstr_string } = compiler.genc
+{ Env, is_intrinsic, is_lit_numeric, is_void_ty, the_func, tparam_declared } = compiler.check
 { fits, mode_fits, ty_eq, ty_rank } = compiler.check_fits
 { Token, scan } = compiler.lex
 { slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
-{ of } = std.collections.map
 { at } = std.text.bytes
 { is_empty } = std.text.str
-{ String } = std.text.string
-{ CheckDiagnostic, KARGTYPE, KESCAPE, KNULLDEREF, KPTRWRITE, KRESERVEDNAME, KSCRATCHSEND,
-  KSCRATCHSTATE, KUNKNOWNTYPE, desc_or, diag_info } = compiler.validate.diag
+{ KARGTYPE, KNULLDEREF, KPTRWRITE, KUNKNOWNTYPE, desc_or } = compiler.validate.diag
 { DeadList, dead_has, expr_root_var } = compiler.validate.ownership
 { fields_declare_method, no_fields, struct_fields, sx_named } = compiler.validate.args
 { enum_variants } = compiler.validate.kinds
-{ check_module, kv_at, kv_one } = compiler.validate.core
+{ kv_at, kv_one } = compiler.validate.core
 // Local fn is known iff the_func finds it by name (sentinel name is ""). The linear `is_known_fn`
 // remains for the few decls-only callers; Env-reachable sites use `env_known_fn` (O(1) via the index).
 is_known_fn* = (decls: [Decl], fn: string_view) bool { decls.the_func(fn).name == fn }
@@ -357,24 +353,6 @@ tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
     })
 }
 names_has = (names: [Param], fn: string_view) bool { names.slice_any((n) { n.name == fn }) }
-is_imported = (decls: [Decl], fn: string_view) bool {
-    decls.slice_any((d) {
-        d.match ({
-            .DImport(im) => im.names.names_has(fn),
-            _            => false,
-        })
-    })
-}
-// Trait methods can remain unresolved in generic bodies until monomorphization.
-is_trait_method* = (decls: [Decl], fn: string_view) bool {
-    decls.slice_any((d) {
-        d.match ({
-            .DImpl(im)         => im.methods.names_has(fn),
-            .DTraitDefault(td) => td.fn.name == fn,    // a defaulted method an impl may OMIT
-            _                  => false,
-        })
-    })
-}
 trait_declaring* = (decls: [Decl], m: string_view) string_view {
     found := ""
     decls.loop((h, i, d) {
@@ -589,24 +567,6 @@ is_struct* = (decls: [Decl], name: string_view) bool {
 // generic-struct-literal support: look up the GenStructDecl by base name; a field typed by a struct
 // tparam stays lenient, a CONCRETE field (bool/i32/Box/…) is still fit-checked.
 cv_no_params* = () [Param] { slice(null_ptr(), 0) }
-cv_is_gen_struct = (decls: [Decl], name: string_view) bool {
-    decls.slice_any((d) {
-        d.match ({
-            .DGenStruct(g) => g.name == name,
-            _              => false,
-        })
-    })
-}
-// A GENERIC enum (`DGenEnum`, e.g. std `Result<T,E>`) by base name — like a concrete enum it holds
-// variants, not fields, so a `.field` access on an instance is a mistake regardless of the type args.
-cv_is_gen_enum = (decls: [Decl], name: string_view) bool {
-    decls.slice_any((d) {
-        d.match ({
-            .DGenEnum(g) => g.name == name,
-            _            => false,
-        })
-    })
-}
 // An enum lowers to a C `struct { int32_t tag; union {…} u; }` (genc_emit emit_enum), so `.tag` and `.u`
 // ARE its only real members. The match/or_return lowering resolve_module runs BEFORE this validator
 // synthesizes exactly those two accesses on enum values (`subj.tag`, `subj.u`); they compile cleanly and

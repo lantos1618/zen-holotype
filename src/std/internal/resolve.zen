@@ -1,24 +1,22 @@
 // @self-hosted-only
 // Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 { at, is_alpha, is_alnum } = std.text.bytes
-{ Decl, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ Decl, gstr_string, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset, note_module_sig,
   module_sigs_reset, module_sig_flags, module_sig_alias_stamped } = compiler.parse
-{ check_linked, check_linked_kind } = compiler.validate.core
+{ check_linked } = compiler.validate.core
 // Parser APIs still take MutPtr<Malloc>; scanner-only APIs can use any Allocator.
-{ Allocator, Malloc, try_acquire } = std.mem.alloc
-{ Result, IoError, ok, err } = std.core.result
+{ Malloc } = std.mem.alloc
+{ Result, IoError, ok } = std.core.result
 { String } = std.text.string
 { Map, of } = std.collections.map    // O(1) presence sets for the shadow-rename pass (.has/.put are UFCS methods)
 { contents_in, O_RDONLY } = std.io.file
 { open, close, write } = std.c.libc
 { ends_with, is_empty, starts_with, view } = std.text.str
-{ render_diagnostic } = compiler.diagnostic
-{ getEnv } = std.sys.os
 // Extracted internal helper families (shared types + this pipeline stay here; see each module head).
 { enforce_visibility, enforce_private_leaks, vis_report_mode } = std.internal.resolve_vis
 { enforce_ffi_grants, genmod_lookup } = std.internal.resolve_ffi
-{ shadow_flat, shadow_flat_users, ShadowFlat, ShadowUsers } = std.internal.resolve_shadow
+{ shadow_flat, shadow_flat_users } = std.internal.resolve_shadow
 { all_decl_names_in, copy_block_comment, copy_line_comment, copy_literal, edge_alias_in, edge_id_in,
   is_any_marker_at, is_c_kw_name_span, is_ws, has_import_marker, module_graph, opens_import,
   str_bytes, symbol_name_in, value_decl_names_in } = std.internal.resolve_scan
@@ -114,14 +112,6 @@ rset_add_str* = (m: Map<i64>, a: MutPtr<Malloc>, name: string_view) Map<i64> {
     m.put(a, name, 0).expect("std.internal.resolve: rset alloc")
 }
 rset_has* = (m: Map<i64>, key: String) bool { m.has(cstr(key.ptr)) }
-copy_from = (out: String, a: MutPtr<Malloc>, src: String, i: i64) String {
-    cur := out
-    (i >= src.len == false).then({
-        next := cur.rpush(a, src.res_sbyte(i))
-        cur = next.rcopy_from(a, src, i + 1)
-    })
-    cur
-}
 // resolve's allocator-first String helpers now delegate to compiler.genc's canonical generic
 // gstr_* builder (one implementation for the whole compiler). The only difference is the arg
 // convention: m* take the allocator first (s.gstr_push(a, b)); gstr_* take the String first.
@@ -166,7 +156,6 @@ mappend_span = (a: MutPtr<Malloc>, out: String, s: string_view, p: i32, e: i32) 
 rpush* = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
 rappend* = (s: String, a: MutPtr<Malloc>, t: string_view) String { s.gstr_append(a, t) }
 rappend_string* = (s: String, a: MutPtr<Malloc>, src: String) String { a.mappend_string(s, src) }
-rcopy_from = (s: String, a: MutPtr<Malloc>, src: String, i: i64) String { a.mcopy_from(s, src, i) }
 rappend_span* = (s: String, a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) String {
     a.mappend_span(s, src, p, e)
 }
@@ -446,35 +435,6 @@ file_exists* = (path: string_view) bool {
         false => false,
     })
 }
-append_id_name = (out: String, a: MutPtr<Malloc>, id: String) String {
-    cur := out
-    id.id_is_user().match ({
-        true  => {
-            cur = cur.copy_id_dotted(a, id, 2)
-        },
-        false => {
-            cur = cur.copy_id_dotted(a, id, 0)
-        },
-    })
-    cur
-}
-copy_id_dotted = (out: String, a: MutPtr<Malloc>, id: String, i: i64) String {
-    cur := out
-    bs: [u8] := id.bytes()
-    bs.loop((h, idx, b) {
-        (idx < i == false).then({
-            (b == '/').match ({
-                true  => {
-                    cur = cur.rpush(a, '.')
-                },
-                false => {
-                    cur = cur.rpush(a, b)
-                },
-            })
-        })
-    })
-    cur
-}
 fail_unknown_module = (a: MutPtr<Malloc>, inpath: string_view, id: String, path: string_view) i32 {
     msg := a.mappend_id_name(a
         .gstr_string(160)
@@ -519,7 +479,6 @@ read_module = (a: MutPtr<Malloc>, inpath: string_view, path: string_view) string
         .Err(e) => a.fail_unreadable(inpath, path),
     })
 }
-edge_id = (e: ImportEdge, a: MutPtr<Malloc>) String { e.edge_id_in(a) }
 fail_unknown_name = (a: MutPtr<Malloc>, inpath: string_view, nm: String, id: String) i32 {
     msg0 := a
         .gstr_string(160)
@@ -720,16 +679,6 @@ module_table_graph* = (
         graph: graph,
     )))
     ModuleTable(modules: slice(st.entries.ptr, st.n))
-}
-module_table* = (
-    a: MutPtr<Malloc>,
-    root: string_view,
-    progdir: string_view,
-    inpath: string_view,
-    mainsrc: string_view,
-) ModuleTable {
-    graph := a.module_graph(mainsrc)
-    a.module_table_graph(root, progdir, inpath, mainsrc, graph)
 }
 load_closure_table = (
     a: MutPtr<Malloc>,
@@ -962,11 +911,6 @@ first_user_import_in* = (a: MutPtr<Malloc>, src: string_view) string_view {
     hs := fui_scan(a.gstr_string(16), a, src, 0)
     hs.gstr_finish(a)
 }
-// Bootstrap main.c links this C ABI before it can pass allocator state.
-first_user_import* = (src: string_view) string_view {
-    a := Malloc(_: 0)
-    first_user_import_in(a.addr(), src)
-}
 fui_scan = (out: String, a: MutPtr<Malloc>, src: string_view, p: i32) String {
     cur := out
     pos := p
@@ -1009,12 +953,6 @@ fui_scan = (out: String, a: MutPtr<Malloc>, src: string_view, p: i32) String {
 // closures, because their dependencies are implementation details.
 res_ident_end* = (flat: string_view, p: i32) i32 {
     flat.at(p).is_alnum().match ({ true => flat.res_ident_end(p + 1), false => p })
-}
-import_name_span = (out: String, a: MutPtr<Malloc>, flat: string_view, p: i32, e: i32) String {
-    (p == e).match ({
-        true  => out,
-        false => out.rpush(a, flat.at(p)).import_name_span(a, flat, p + 1, e),
-    })
 }
 append_to_nul* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     cur := out
@@ -1351,10 +1289,6 @@ is_ns_line* = (s: string_view, p: i32) bool {
         false => false,
     })
 }
-ns_qualifier* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
-    ls := s.lstrip(p)
-    out.import_name_span(a, s, ls, s.res_ident_end(ls))
-}
 NsScan*: {
     quals: String,
     qnames: String,
@@ -1378,34 +1312,6 @@ alias_hit = (s: string_view, p: i32, ie: i32, names: String, nm: String) bool {
     after_dot := p > 0 && s.at(p - 1) == '.'
     rewrite_member := after_dot.match ({ true => s.at(s.lstrip(ie)) == '(', false => true })
     names.seen_name(nm) && rewrite_member
-}
-rewrite_alias_copy = (
-    out: String,
-    a: MutPtr<Malloc>,
-    s: string_view,
-    p: i32,
-    names: String,
-    alias: String,
-) String {
-    s.line_comment_at(p).match ({
-        true  => {
-            sk := out.copy_line_comment(a, s, p)
-            sk.out.rewrite_alias_names(a, s, sk.next, names, alias)
-        },
-        false => s.block_comment_at(p).match ({
-            true  => {
-                sk := out.copy_block_comment(a, s, p)
-                sk.out.rewrite_alias_names(a, s, sk.next, names, alias)
-            },
-            false => s.quoted_at(p).match ({
-                true  => {
-                    sk := out.copy_literal(a, s, p)
-                    sk.out.rewrite_alias_names(a, s, sk.next, names, alias)
-                },
-                false => out.rpush(a, s.at(p)).rewrite_alias_names(a, s, p + 1, names, alias),
-            }),
-        }),
-    })
 }
 rewrite_alias_names* = (
     out: String,
@@ -1803,19 +1709,12 @@ module_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) [Dec
     })
     slice(buf.ptr, j)
 }
-root_link_count* = (a: MutPtr<Malloc>, p: ParsedProgram) i64 {
-    a.module_link_count(p, p.module(""))
-}
 root_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram) [Decl] {
     a.module_link_decls(p, p.module(""))
 }
 check_parsed_program* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
     root := p.module("")
     a.check_linked(root.decls, a.root_link_decls(p))
-}
-check_parsed_program_kind* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
-    root := p.module("")
-    a.check_linked_kind(root.decls, a.root_link_decls(p))
 }
 // Graph-linked validation for EVERY module body: each ParsedModule is checked against the import
 // library built from its own ModuleGraph edges (not only the root). Positions stay in the module's
@@ -1824,13 +1723,6 @@ check_all_parsed_modules* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
     acc := 0
     p.modules.loop((h, i, m) {
         acc = acc + a.check_linked(m.decls, a.module_link_decls(p, m))
-    })
-    acc
-}
-check_all_parsed_modules_kind* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
-    acc := 0
-    p.modules.loop((h, i, m) {
-        acc = acc + a.check_linked_kind(m.decls, a.module_link_decls(p, m))
     })
     acc
 }
@@ -2595,10 +2487,3 @@ resolve_program_data* = (
         line_srcs: lsrc_get(),
     )
 }
-resolve_program* = (
-    a: MutPtr<Malloc>,
-    root: string_view,
-    progdir: string_view,
-    inpath: string_view,
-    mainsrc: string_view,
-) string_view { a.resolve_program_data(root, progdir, inpath, mainsrc).flat }

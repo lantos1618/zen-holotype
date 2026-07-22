@@ -1,45 +1,32 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData,
-  ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData,
-  ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData,
-  GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond,
-  cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch,
-  ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at,
-  sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit,
-  FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, dfunc,
-  dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys,
-  expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32,
-  ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice,
-  tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append,
-  gstr_finish } = compiler.genc
-{ mangle_str_in, mangle_semantic_in, impl_cname_in } = compiler.mangle
-{ Allocator, Malloc } = std.mem.alloc
-{ exports_get, alias_prefixes_get, module_sigs_get, SigEntry } = compiler.parse
-{ panic, expect } = std.core.result
+{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ArmData, MatchData,
+  VariantDef, IndexData, MemberData, ArrowData, VarData, CallData, CondData, BinData, BlockData,
+  LambdaData, GenericData, MakeEnumData, TagData, vref, cond, call_at, call_full, LoopData, slett,
+  sexpr, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, no_tys, expr_null,
+  GenEnumDecl, GenStructDecl, tgeneric, ti32, ti64, tu8, tf64, tbool, tstring_cstr, tstring_literal,
+  tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_push,
+  gstr_append, gstr_finish } = compiler.genc
+{ mangle_str_in, impl_cname_in } = compiler.mangle
+{ Malloc } = std.mem.alloc
+{ exports_get, alias_prefixes_get, module_sigs_get } = compiler.parse
+{ PtrKind } = compiler.passes.ptrkind    // trait import: enables UFCS `t.ptr_kind_of()` &c. via the impl index
+{ expect } = std.core.result
 { view, is_empty, ends_with } = std.text.str
 { String } = std.text.string
 { at, is_alnum } = std.text.bytes
 { Map, of } = std.collections.map
-{ lift_lambdas } = compiler.passes.lift
-{ OrxRw, orx_count, orx_rw, orx_rw_stmt, orx_stmt_count } = compiler.passes.orreturn
-{ subst_body, xform_arm_env, xform_body } = compiler.passes.subst
-{ clos_call_rewrite, clos_local_call_name, clos_lower_func, clos_lowerable } = compiler.passes.closures
-{ rc_expand, rc_gbuf, rc_gen, rc_seed } = compiler.passes.refcount
-{ PtrKind } = compiler.passes.ptrkind
+{ xform_body } = compiler.passes.subst
 // AST-node query traits (is_fnt on Ty, is_generic_fn on Func). Importing from compiler.astops pulls
 // the WHOLE module (all its impls: Ty/Func/Decl/StructDecl) into check's import closure, so the impl
 // index resolves these UFCS methods here and in every module that imports check (validate/*, passes/*).
-{ TyQuery, FuncQuery, has_fnt_param, map_slice, slice_any, wr_writes_name } = compiler.astops
+{ map_slice, slice_any, wr_writes_name } = compiler.astops
 // Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
 // resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
-{ deep_targs, impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
-{ inline_decl, inline_template, is_empty_named, lower_closures, mono_close, mono_rec,
-  no_inline_gen_f } = compiler.check_inline
-{ desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
-{ lower_match_arms, lower_stmt_expr, one_stmt, subj_payload, subj_tag, tag_const } = compiler.check_lower
-{ fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank } = compiler.check_fits
+{ impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
+{ is_empty_named } = compiler.check_inline
+{ fits, lvalue_writes_readonly, ty_eq, ty_rank } = compiler.check_fits
 { FlatRegion, ModuleTable, fregion_find, is_import_line, lstrip, next_line, res_ident_end } = std.internal.resolve
 { arg_exp_v } = compiler.check_resolve
 // ── DECLARATION INDEX ───────────────────────────────────────────────────────
@@ -1076,25 +1063,10 @@ ctor_enum_plain = (env: Env, vn: string_view) string_view {
         }),
     })
 }
-// Infer expression types needed by resolve and validate.
-fn_ret = (decls: [Decl], name: string_view) Ty { decls.the_func(name).ret }    // the_func's sentinel.ret is tvoid()
 field_ty = (sd: StructDecl, fname: string_view) Ty {
     found := tvoid()
     sd.fields.loop((h, i, f) {
         found = (f.name == fname).match ({ true => f.ty, false => found })
-    })
-    found
-}
-struct_field = (decls: [Decl], sname: string_view, fname: string_view) Ty {
-    found := tvoid()
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DStruct(sd) => (sd.name == sname).match ({
-                true  => sd.field_ty(fname),
-                false => found,
-            }),
-            _            => found,
-        })
     })
     found
 }
@@ -1374,8 +1346,6 @@ lam_body_one_env = (
         _        => tvoid(),
     })
 }
-// UFCS trait dispatch: route `x.m()` to the receiver type's impl when one exists.
-method_in = (methods: [Param], fn: string_view) bool { methods.slice_any((n) { n.name == fn }) }
 dispatch_recv* = (
     a: MutPtr<Malloc>,
     decls: [Decl],
@@ -1676,25 +1646,6 @@ gen_field_at = (fields: [Field], fname: string_view) Ty {
     })
     found
 }
-gen_struct_field = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    gname: string_view,
-    fname: string_view,
-    targs: [Ty],
-) Ty {
-    found := tvoid()
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DGenStruct(gsd) => (gsd.name == gname).match ({
-                true  => a.subst_ty_in(gsd.tparams, targs, gsd.fields.gen_field_at(fname)),
-                false => found,
-            }),
-            _                => found,
-        })
-    })
-    found
-}
 ty_under_ptr* = (t: Ty) Ty {
     t.match ({
         .Ptr(pd) => load(pd.pointee),
@@ -1756,23 +1707,6 @@ infer_match_common_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
 infer_match_ty = (env: Env, m: MatchData) Ty {
     subjty := env.infer_expr(m.subj)
     env.infer_match_common_ty(subjty, m.arms)
-}
-// Generic struct constructor monomorphization. A literal `Scope<A>(alloc: x)` carries the type-param
-// `A` verbatim as its targ; infer the concrete arg from the field-init types so the instance mangles
-// to `Scope_SyncArena` and field reads/dispatch (`s.alloc.acquire`) resolve to the concrete impl.
-gstruct_of = (decls: [Decl], name: string_view) GenStructDecl {
-    found := GenStructDecl(
-        name: "",
-        tparams: slice(null_ptr(), 0),
-        fields: slice(null_ptr(), 0),
-    )
-    decls.loop((h, i, d) {
-        found = d.match ({
-            .DGenStruct(g) => (g.name == name).match ({ true => g, false => found }),
-            _              => found,
-        })
-    })
-    found
 }
 has_tparam* = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { tp.name == n }) }
 // Slice literal element type: an expected `[T]` (declared/annotated) WINS, so a bare-int literal
@@ -2320,7 +2254,6 @@ pbuf* = (a: MutPtr<Malloc>, n: i64) [Param] {
 }
 // Shared by resolve_module and check_validate.
 empty_params* = () [Param] { slice(null_ptr(), 0) }
-fn_params* = (decls: [Decl], fn: string_view) [Param] { decls.the_func(fn).params }
 is_void_ty* = (t: Ty) bool {
     t.match ({
         .Void => true,

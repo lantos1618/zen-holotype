@@ -3,7 +3,6 @@
 //     out). Allocation-free and slice-free — the source is read raw (a `str` is a const
 //     char*, so load(offset(src,i)) gives byte i), and a token is just a span
 //     { kind, start, len } into it. So genc can lower this. Iterate to Eof.
-//   • tokenize(a, src) — the whole stream as one value: a cons-list of heap nodes
 //     allocated through an explicit allocator (bottom of the file). Use it when you want
 //     to hand a file's tokens around; the scan form is better when you just consume them.
 // C strings are NUL-terminated, so byte 0 ends the scan and no length is threaded.
@@ -34,7 +33,6 @@ lex_failed := 0
 // block comment, or the `0` of a malformed radix literal. parse_module folds it into the
 // __syntax_error sentinel so the KPARSE diagnostic can caret the failing site (mirrors perr_set_at).
 lex_err_off := 0
-lerr_set = () void { lex_failed = 1 }
 lerr_set_at = (off: i32) void {
     (lex_err_off == 0).then({
         lex_err_off = off
@@ -401,7 +399,7 @@ scan* = (src: string_view, pos0: i32) Scan {
 // scan iterated to Eof IS the token stream — pure and positional, so a consumer gets
 // free lookahead (peek = scan(src, pos); the one after = scan(src, scan(src, pos).next))
 // and the token layer stays allocation-free. count() traverses the whole stream this
-// way; tokenize() (below) is the alternative when you want it as a heap value.
+// way.
 // total token count, Eof excluded — a traversal of the entire stream by iteration.
 count* = (src: string_view) i32 { src.count_from(0) }
 count_from = (src: string_view, pos: i32) i32 {
@@ -412,49 +410,8 @@ count_from = (src: string_view, pos: i32) i32 {
     })
 }
 // ── a materialized token list ──────────────────────────────────────────────────
-// When you want the tokens as a value (e.g. to hand a whole file's stream around), a
-// cons-list of heap nodes, built from enums + pointers. Each node is allocated through
-// the EXPLICIT allocator (std.mem.alloc) — sizeof(TokList) bytes, reinterpreted to a typed
-// pointer. The list shape (TokList / TokCell / Ptr) is slice-free; only the one-node
-// allocator reinterprets raw memory.
+// the comment sidecar below allocates its span buffer through the explicit allocator
 { Malloc } = std.mem.alloc
-TokList*: Nil | Cons(TokCell)
-TokCell*: {
-    head: Token,
-    tail: Ptr<TokList>,
-}
-// heap-allocate one node holding `v`, returning a pointer to it
-nodebuf = (a: MutPtr<Malloc>) [TokList] { slice(a.acquire(sizeof(TokList)), 1) }
-node = (a: MutPtr<Malloc>, v: TokList) Ptr<TokList> {
-    buf := a.nodebuf()
-    buf[0] = v
-    buf[0].addr()
-}
-// ctor fns — give the leading-dot enum a return-type context (a `.Nil()` passed straight
-// into a generic call can't infer which enum it builds)
-nil_node = () TokList { .Nil }
-cons_node = (h: Token, t: Ptr<TokList>) TokList {
-    .Cons(TokCell(
-        head: h,
-        tail: t,
-    ))
-}
-// build the token list [pos .. Eof] in order; recursion builds the tail first
-build = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<TokList> {
-    sc := src.scan(pos)
-    sc.tok.kind.match ({
-        .Eof => a.node(nil_node()),
-        _    => a.node(cons_node(sc.tok, a.build(src, sc.next))),
-    })
-}
-tokenize* = (a: MutPtr<Malloc>, src: string_view) Ptr<TokList> { a.build(src, 0) }
-// walk the list: number of Cons nodes (the terminal Nil ends it)
-list_len* = (l: Ptr<TokList>) i32 {
-    l.match ({
-        .Nil     => 0,
-        .Cons(c) => 1 + c.tail.list_len(),
-    })
-}
 // ── comment sidecar: collect every `//` and `/* */` comment as a positioned span ──────────────────
 // The token scanner SKIPS comments (they carry no semantics), but the formatter must reproduce them.
 // So this is a SEPARATE pass over the raw source that records each comment as a span into it, plus

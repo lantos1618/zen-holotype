@@ -3,10 +3,9 @@
 { String } = std.text.string
 { is_empty } = std.text.str
 { Expr, Stmt, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData,
-  MakeEnumData, SliceData, IndexData, LoopData, LambdaData, BlockData, IfData, ty_cname_in,
-  blk_diverges, field, gstr_append } = compiler.genc
+  MakeEnumData, SliceData, IndexData, LoopData, BlockData, IfData, ty_cname_in, blk_diverges, field,
+  gstr_append } = compiler.genc
 { Malloc } = std.mem.alloc
-{ panic } = std.core.result
 { gen_strlit } = compiler.genc_emit_lit
 { gstr_int } = compiler.astops
 gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
@@ -518,59 +517,6 @@ gen_args = (s: String, alloc: MutPtr<Malloc>, args: [Expr]) String {
         out = out.gen_expr(alloc, arg.addr())
     })
     out
-}
-// the same args as space-separated s-expr operands: ` a b c`
-gen_sargs = (s: String, alloc: MutPtr<Malloc>, args: [Expr]) String {
-    out := s
-    args.loop((h, i, arg) {
-        out = out.gstr_append(alloc, " ").gen_sexpr(alloc, arg.addr())
-    })
-    out
-}
-// render an expression as a PREFIX s-expression — `(* (+ 1 2) 3)` — a backend-neutral,
-// structural form, so a parser's tree can be diffed against another parser's (parity).
-gen_sexpr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
-    e.match ({
-        .Int(n)       => s.gstr_int(alloc, n),
-        .Byte(n)      => s.gstr_int(alloc, n),
-        .FloatLit(ft) => s.gstr_append(alloc, ft),
-        .Var(v)       => s.gstr_append(alloc, v.name),
-        .Bin(b)       => s
-            .gstr_append(alloc, "(")
-            .gstr_append(alloc, b.op)
-            .gstr_append(alloc, " ")
-            .gen_sexpr(alloc, b.lhs)
-            .gstr_append(alloc, " ")
-            .gen_sexpr(alloc, b.rhs)
-            .gstr_append(alloc, ")"),
-        .Call(c)      => c.raw.match ({
-            true  => s
-                .gstr_append(alloc, "(@")
-                .gstr_append(alloc, c.fn)
-                .gen_sargs(alloc, c.args)
-                .gstr_append(alloc, ")"),
-            false => s
-                .gstr_append(alloc, "(")
-                .gstr_append(alloc, c.fn)
-                .gen_sargs(alloc, c.args)
-                .gstr_append(alloc, ")"),
-        }),
-        .Lambda(lm)   => s.gen_lam_sexpr(alloc, lm),
-        // NEVER emit a literal `?` placeholder — a silent drop that becomes invalid output. Fail loudly
-        // on any expression kind this renderer doesn't handle so the gap surfaces instead of slipping through.
-        _             => {
-            panic("zenc: gen_sexpr: unsupported expression kind in s-expression rendering")
-            s
-        },
-    })
-}
-// `(lambda a x)` — names only (enough to prove a lambda parsed; its body rides the run tests)
-gen_lam_sexpr = (s: String, alloc: MutPtr<Malloc>, lm: LambdaData) String {
-    out := s.gstr_append(alloc, "(lambda")
-    lm.params.loop((h, i, p) {
-        out = out.gstr_append(alloc, " ").gstr_append(alloc, p.name)
-    })
-    out.gstr_append(alloc, ")")
 }
 gen_cond = (s: String, alloc: MutPtr<Malloc>, d: CondData) String {
     (blk_diverges(d.t) || blk_diverges(d.e)).match ({
