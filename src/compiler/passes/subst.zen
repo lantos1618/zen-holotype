@@ -1,7 +1,7 @@
 // compiler.passes.subst — generic substitution + xform sub-pass extracted from compiler.check.
-{ cbuf, ArmData, CallData, Decl, Expr, FieldInit, LambdaData, MakeStructData, MatchData, Param, Stmt, Ty, VarData, arm, arrow_at, bin_at, block, call_full, cond_oa, eindex, eloop, ematch, ematchp, finit, lam_r, member_at, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, sassign_at, sexpr, sidxset_at, sif, slett_at, slit, sret, strlit_at, subst_ty_in, swhile, tvoid, ty_cname_in, vref_at } = compiler.genc
+{ cbuf, ArmData, CallData, Decl, Expr, Field, FieldInit, GenStructDecl, LambdaData, MakeStructData, MatchData, Param, Stmt, Ty, VarData, arm, arrow_at, bin_at, block, call_full, cond_oa, eindex, eloop, ematch, ematchp, finit, lam_r, member_at, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, sassign_at, sexpr, sidxset_at, sif, slett_at, slit, sret, strlit_at, subst_ty_in, swhile, tvoid, ty_cname_in, vref_at } = compiler.genc
 { mangle_str_in } = compiler.mangle
-{ DeclIndex, VList, add_fnt_param, add_lambda_arg, add_subst_arg, add_subst_param, bind_fnret, callee_subst_name, fnret_of, gen_variant_payload, inline_lambda, is_void_ty, let_value_lambda, local_name_at, no_stmts, param_index, recall, ref_pos, vcons } = compiler.check
+{ DeclIndex, VList, add_fnt_param, add_lambda_arg, add_subst_arg, add_subst_param, bind_fnret, callee_subst_name, blockify, cat_stmts, fnret_of, gen_variant_payload, inline_lambda, is_void_ty, let_value_lambda, local_name_at, no_stmts, param_index, recall, ref_pos, vcons } = compiler.check
 { light_ty } = compiler.check_infer
 { cs_or, maybe_template } = compiler.check_inline
 { Malloc } = std.mem.alloc
@@ -148,26 +148,39 @@ subst_stmt = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], st: Stm
     })
 }
 subst_body* = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] { map_slice(a, body, (st) { a.subst_stmt(cs, tparams, targs, st) }) }
-// ── field_eq intrinsic expansion (flat + nested structs of scalar / string / enum fields) ──────────
-// `x.field_eq(y)` is desugared (check_desugar) to Call{fn:"field_eq", args:[x,y]}; during INLINING the
-// receiver's concrete type is known, so we EXPAND it here to a per-field `==` fold:
+// ── struct reflection intrinsics: field_eq / each_field / zip_fields ──────────────────────────────
+// `x.field_eq(y)` is desugared (check_desugar) to Call{fn:"field_eq", args:[x,y]}; during INLINING
+// the receiver's concrete type is known, so it EXPANDS here to a per-field `==` fold:
 //   true && x.f0 == y.f0 && x.f1 == y.f1 && …
 // Scalar fields compare with a plain `Bin("==")`. STRING and ENUM fields ALSO use `Bin("==")`: the
-// resolve pass that runs AFTER this inline pass rewrites string `==` → __str_eq and enum `==` → a tag
-// compare, so no special-casing is needed here. A STRUCT-typed field RECURSES into its own per-field
-// fold (Phase 2) — termination is structural: a struct cannot contain itself by value.
-// The result is ordinary Bin/Member nodes, so genc/genjs emit them with NO backend change.
-fe_true = (a: MutPtr<Malloc>, pos: i32) Ptr<Expr> { a.cenode(vref_at("true", pos)) }
-// is `t` a Named type that names a STRUCT in the decl index (the recursive case)?
-fe_is_struct_ty = (decls: [Decl], idx: DeclIndex, t: Ty) bool {
+// resolve pass that runs AFTER this inline pass rewrites string `==` → __str_eq and enum `==` → a
+// tag compare. A STRUCT-typed field RECURSES into its own per-field fold — termination is
+// structural (a struct cannot contain itself by value). The result is ordinary Bin/Member nodes,
+// so genc/genjs emit them with NO backend change.
+// the per-field view a reflection intrinsic iterates: Named structs from the decl index, GENERIC
+// struct instances from the generic decl with tparams substituted per the instance's targs.
+reflect_fields = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, t: Ty) [Field] {
     t.match ({
-        .Named(n) => idx.idx_struct_fields(decls, n).len > 0,
-        _         => false,
+        .Named(n)   => idx.idx_struct_fields(decls, n),
+        .Generic(g) => a.rf_subst_fields(idx.idx_genstruct(decls, g.name), g.args),
+        _           => idx.idx_struct_fields(decls, ""),
     })
 }
+rf_subst_fields = (a: MutPtr<Malloc>, gs: GenStructDecl, targs: [Ty]) [Field] {
+    buf := cbuf<Field>(a, gs.fields.len)
+    gs.fields.loop((h, i, f) {
+        buf[i] = Field(
+            name: f.name,
+            ty: a.subst_ty_in(gs.tparams, targs, f.ty),
+        )
+    })
+    buf
+}
+fe_true = (a: MutPtr<Malloc>, pos: i32) Ptr<Expr> { a.cenode(vref_at("true", pos)) }
 fe_field_cmp = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, rx: Ptr<Expr>, ry: Ptr<Expr>, f: Field, pos: i32) Ptr<Expr> {
-    fe_is_struct_ty(decls, idx, f.ty).match ({
-        true  => a.fe_fold(decls, idx, a.cenode(member_at(rx, f.name, pos)), a.cenode(member_at(ry, f.name, pos)), idx.idx_struct_fields(decls, f.ty.enum_name()), 0, a.fe_true(pos), pos),
+    nested := a.reflect_fields(decls, idx, f.ty)
+    (nested.len > 0).match ({
+        true  => a.fe_fold(decls, idx, a.cenode(member_at(rx, f.name, pos)), a.cenode(member_at(ry, f.name, pos)), nested, 0, a.fe_true(pos), pos),
         false => a.cenode(bin_at("==", a.cenode(member_at(rx, f.name, pos)), a.cenode(member_at(ry, f.name, pos)), pos)),
     })
 }    // struct-typed field: recursive per-field fold on the nested struct
@@ -177,19 +190,12 @@ fe_fold = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, rx: Ptr<Expr>, ry: 
         false => a.fe_fold(decls, idx, rx, ry, flds, i + 1, a.cenode(bin_at("&&", acc, a.fe_field_cmp(decls, idx, rx, ry, flds[i], pos), pos)), pos),
     })
 }
-expand_field_eq = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, cargs: [Expr], env: Ptr<VList>, pos: i32) Ptr<Expr> {
-    rx := cargs[0].addr()
-    ry := cargs[1].addr()
-    st := rx.light_ty(a, env, decls, idx)
-    flds := idx.idx_struct_fields(decls, st.enum_name())
-    a.fe_fold(decls, idx, rx, ry, flds, 0, a.fe_true(pos), pos)
-}
-// ── each_field / zip_fields intrinsic expansion (Phase 2: typed per-field iteration) ───────────────
-// `x.each_field(f)` UNROLLS — at inline time, once x's concrete struct type is known — into one
-// inlined call of the lambda per field:  { f("f0", x.f0); f("f1", x.f1); … }  (Zig `inline for` /
-// Nim `fieldPairs`). Each unrolled copy of the lambda body is re-xformed HERE against THAT field's
-// member expr, so generic calls inside resolve per-field-type independently, and a nested
-// `each_field`/`field_eq` on a struct-typed field expands recursively through this same hook.
+expand_field_eq = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, flds: [Field], cargs: [Expr], pos: i32) Ptr<Expr> { a.fe_fold(decls, idx, cargs[0].addr(), cargs[1].addr(), flds, 0, a.fe_true(pos), pos) }
+// ── each_field / zip_fields: typed per-field iteration, unrolled at inline time ────────────────────
+// `x.each_field(f)` becomes one inlined call of the lambda per field:  { f("f0", x.f0); … }  (Zig
+// `inline for` / Nim `fieldPairs`). Each unrolled copy of the lambda body is re-xformed HERE against
+// THAT field's member expr, so generic calls inside resolve per-field-type independently, and a
+// nested `each_field`/`field_eq` on a struct-typed field expands recursively through this same hook.
 // `x.zip_fields(y, f)` is the paired form: f("f0", x.f0, y.f0); …  Both are void: the expansion is a
 // Block of ExprStmts (ordinary nodes — NO backend change). Sibling copies land in sibling C scopes,
 // so the per-copy renamed locals never collide.
@@ -206,46 +212,104 @@ ef_args_zip = (a: MutPtr<Malloc>, name: string_view, vx: Expr, vy: Expr, pos: i3
     buf[2] = vy
     buf
 }
-expand_each_field = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, cargs: [Expr], env: Ptr<VList>, pos: i32) Ptr<Expr> {
+expand_each_field = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, flds: [Field], cargs: [Expr], env: Ptr<VList>, pos: i32) Ptr<Expr> {
     rx := cargs[0].addr()
-    st := rx.light_ty(a, env, decls, idx)
-    flds := idx.idx_struct_fields(decls, st.enum_name())
     buf := cbuf<Stmt>(a, flds.len)
     flds.loop((h, i, f) {
         buf[i] = sexpr(a.inline_lambda(decls, idx, cargs[1], a.ef_args(f.name, member_at(rx, f.name, pos), pos), env))
     })
     a.cenode(block(buf))
 }
-expand_zip_fields = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, cargs: [Expr], env: Ptr<VList>, pos: i32) Ptr<Expr> {
+expand_zip_fields = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, flds: [Field], cargs: [Expr], env: Ptr<VList>, pos: i32) Ptr<Expr> {
     rx := cargs[0].addr()
     ry := cargs[1].addr()
-    st := rx.light_ty(a, env, decls, idx)
-    flds := idx.idx_struct_fields(decls, st.enum_name())
     buf := cbuf<Stmt>(a, flds.len)
     flds.loop((h, i, f) {
         buf[i] = sexpr(a.inline_lambda(decls, idx, cargs[2], a.ef_args_zip(f.name, member_at(rx, f.name, pos), member_at(ry, f.name, pos), pos), env))
     })
     a.cenode(block(buf))
 }
+// a subject expr other than a plain Var is bound to a temp ONCE — the expansion reads each field
+// from the SAME evaluation, so a side-effecting receiver (`mk().each_field(..)`) runs exactly once.
+refl_needs_bind = (e: Expr) bool {
+    e.match ({
+        .Var(v) => false,
+        _       => true,
+    })
+}
+refl_stmt1 = (a: MutPtr<Malloc>, st: Stmt) [Stmt] {
+    buf := cbuf<Stmt>(a, 1)
+    buf[0] = st
+    buf
+}
+refl_dispatch = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, fn: string_view, flds: [Field], cargs: [Expr], env: Ptr<VList>, pos: i32) Ptr<Expr> {
+    eq(fn, "field_eq").then({
+        return a.expand_field_eq(decls, idx, flds, cargs, pos)
+    })
+    eq(fn, "each_field").then({
+        return a.expand_each_field(decls, idx, flds, cargs, env, pos)
+    })
+    a.expand_zip_fields(decls, idx, flds, cargs, env, pos)
+}
+// the reflection hook: expand ONLY when the shape is fully concrete and well-formed; otherwise
+// PRESERVE the call (recall) — a template body re-reaches this hook at the call-site splice with
+// concrete types, and a genuinely ill-formed call gets its positioned diagnostic from validation
+// (kv_reflect_kind: receiver class, subject-type match, lambda shape, arity).
+refl_hook = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], params: [Param], env: Ptr<VList>) Ptr<Expr> {
+    want := eq(c.fn, "zip_fields").match ({ true => 3, false => 2 })
+    (cargs.len == want == false).then({
+        return a.recall(c, c.fn, cargs)
+    })
+    st := cargs[0].addr().light_ty(a, env, decls, idx)
+    flds := a.reflect_fields(decls, idx, st)
+    (flds.len == 0).then({
+        return a.recall(c, c.fn, cargs)
+    })
+    (eq(c.fn, "each_field") == false).then({
+        yn := cargs[1].addr().light_ty(a, env, decls, idx).enum_name()
+        (eq(yn, "") == false && eq(yn, st.enum_name()) == false).then({
+            return a.recall(c, c.fn, cargs)
+        })
+    })
+    (eq(c.fn, "field_eq") == false).then({
+        ok := cargs[want - 1].match ({
+            .Lambda(lm) => lm.params.len == to_i64(want),
+            .Var(v)     => true,
+            _           => false,
+        })
+        (ok == false).then({
+            return a.recall(c, c.fn, cargs)
+        })
+    })
+    nsub := eq(c.fn, "each_field").match ({ true => 1, false => 2 })
+    nb := 0
+    cargs.loop((h, i, ce) {
+        (i < to_i64(nsub) && ce.refl_needs_bind()).then({
+            nb = nb + 1
+        })
+    })
+    (nb == 0).then({
+        return a.refl_dispatch(decls, idx, c.fn, flds, cargs, env, c.pos)
+    })
+    bb := cbuf<Stmt>(a, nb)
+    args2 := a.cebuf(cargs.len)
+    j := 0
+    cargs.loop((h, i, ce) {
+        args2[i] = ce
+        (i < to_i64(nsub) && ce.refl_needs_bind()).then({
+            nm := a.local_name_at("__refl", env, params.len + to_i32(i))
+            bb[j] = slett_at(nm, tvoid(), a.cenode(ce), c.pos)
+            args2[i] = vref_at(nm, c.pos)
+            j = j + 1
+        })
+    })
+    a.blockify(a.cat_stmts(bb, a.refl_stmt1(sexpr(a.refl_dispatch(decls, idx, c.fn, flds, args2, env, c.pos)))))
+}
 // Empty Named marks a generic template currently being inlined.
 xform_call = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, params: [Param], fargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
     cargs := a.xform_args(decls, idx, c.args, params, fargs, env)
-    // Reflection intrinsics expand ONLY once the receiver's concrete struct type is in scope. In a
-    // TEMPLATE body (pre-instantiation xform, receiver still the abstract tparam) the receiver
-    // light-types to no known struct — keep the call intact so the call-site splice (forced by
-    // calls_reflect → no_inline_gen_f) re-reaches this hook with the concrete type.
     (c.fn == "field_eq" || c.fn == "each_field" || c.fn == "zip_fields").then({
-        st := cargs[0].addr().light_ty(a, env, decls, idx)
-        (idx.idx_struct_fields(decls, st.enum_name()).len > 0).then({
-            (c.fn == "field_eq").then({
-                return a.expand_field_eq(decls, idx, cargs, env, c.pos)
-            })
-            (c.fn == "each_field").then({
-                return a.expand_each_field(decls, idx, cargs, env, c.pos)
-            })
-            return a.expand_zip_fields(decls, idx, cargs, env, c.pos)
-        })
-        return a.recall(c, c.fn, cargs)
+        return a.refl_hook(decls, idx, c, cargs, params, env)
     })
     fi := params.param_index(c.fn)
     (fi < 0).match ({

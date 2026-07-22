@@ -402,10 +402,17 @@ sum_fields<T> = (v: T) i64 {
 
 Each unrolled copy of the lambda is checked against that field's own type, so
 heterogeneous work dispatches per field (Zig `inline for` / Nim `fieldPairs`).
+Generic-struct receivers (`Box<i64>`) reflect with the instance's type
+arguments substituted, and a side-effecting receiver expression is evaluated
+exactly once. Ill-formed shapes are rejected with positioned diagnostics: a
+non-struct receiver, mismatched pair subjects, a non-lambda function argument,
+or a wrong-shape lambda all report `error[arg-type]`/`error[arity]`.
+
 A generic function whose body uses a reflection intrinsic is always inlined at
 its call sites (like function-typed-parameter templates), so such a body must
-not be self-recursive. The intrinsic names are reserved: the only definable
-shape is a generic delegating wrapper such as
+not be self-recursive (`error[recursive-hof]`) and must not `return` from
+inside a loop (`error[reflect-return]`). The intrinsic names are reserved: the
+only definable shape is a generic delegating wrapper such as
 `field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }`.
 
 ## Imports And Modules
