@@ -353,24 +353,6 @@ tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
     })
 }
 names_has = (names: [Param], fn: string_view) bool { names.slice_any((n) { n.name == fn }) }
-is_imported = (decls: [Decl], fn: string_view) bool {
-    decls.slice_any((d) {
-        d.match ({
-            .DImport(im) => im.names.names_has(fn),
-            _            => false,
-        })
-    })
-}
-// Trait methods can remain unresolved in generic bodies until monomorphization.
-is_trait_method* = (decls: [Decl], fn: string_view) bool {
-    decls.slice_any((d) {
-        d.match ({
-            .DImpl(im)         => im.methods.names_has(fn),
-            .DTraitDefault(td) => td.fn.name == fn,    // a defaulted method an impl may OMIT
-            _                  => false,
-        })
-    })
-}
 trait_declaring* = (decls: [Decl], m: string_view) string_view {
     found := ""
     decls.loop((h, i, d) {
@@ -585,24 +567,6 @@ is_struct* = (decls: [Decl], name: string_view) bool {
 // generic-struct-literal support: look up the GenStructDecl by base name; a field typed by a struct
 // tparam stays lenient, a CONCRETE field (bool/i32/Box/…) is still fit-checked.
 cv_no_params* = () [Param] { slice(null_ptr(), 0) }
-cv_is_gen_struct = (decls: [Decl], name: string_view) bool {
-    decls.slice_any((d) {
-        d.match ({
-            .DGenStruct(g) => g.name == name,
-            _              => false,
-        })
-    })
-}
-// A GENERIC enum (`DGenEnum`, e.g. std `Result<T,E>`) by base name — like a concrete enum it holds
-// variants, not fields, so a `.field` access on an instance is a mistake regardless of the type args.
-cv_is_gen_enum = (decls: [Decl], name: string_view) bool {
-    decls.slice_any((d) {
-        d.match ({
-            .DGenEnum(g) => g.name == name,
-            _            => false,
-        })
-    })
-}
 // An enum lowers to a C `struct { int32_t tag; union {…} u; }` (genc_emit emit_enum), so `.tag` and `.u`
 // ARE its only real members. The match/or_return lowering resolve_module runs BEFORE this validator
 // synthesizes exactly those two accesses on enum values (`subj.tag`, `subj.u`); they compile cleanly and
