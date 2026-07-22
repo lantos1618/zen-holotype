@@ -27,7 +27,13 @@ CC      := $(if $(CCACHE),ccache cc,cc)
 endif
 # Apple Clang treats generated forward calls as errors unless this diagnostic
 # is made non-fatal. (The runtime itself defines macOS's ucontext feature macro.)
-CFLAGS  ?= -std=gnu11 -Wno-error=implicit-function-declaration -fwrapv -w
+# -Wno-builtin-declaration-mismatch: Zen's C floor models heap pointers as `uint8_t*` and sizes as
+# `int64_t` (the language has no u64/size_t or void*), so its `malloc`/`memcpy` foreign prototypes
+# deliberately differ from the C builtins. The calls are ABI-compatible on LP64 (ffi-verify checks
+# the ABI class of every foreign prototype against the real system headers); matching the builtins
+# exactly needs a size_t/void* mapping in the language — see STATUS.md's defects ledger. Every OTHER
+# warning is left enabled: no blanket -w.
+CFLAGS  ?= -std=gnu11 -Wno-error=implicit-function-declaration -fwrapv -Wno-builtin-declaration-mismatch
 ZENC    := $(ROOT)/zen
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
