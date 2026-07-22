@@ -75,15 +75,6 @@ is_user_marker_at = (s: string_view, p: i32) bool {
 }
 is_any_marker_at* = (s: string_view, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
 import_end = (s: string_view, p: i32) i32 { s.next_line(s.import_marker_from(s.lstrip(p))) }
-strip_count* = (s: string_view, p: i32, n: i32) i32 {
-    (s.at(p) == 0).match ({
-        true  => n,
-        false => s.is_import_line(p).match ({
-            true  => s.strip_count(s.import_end(p), n),
-            false => s.strip_count(s.next_line(p), n + 1),
-        }),
-    })
-}
 // Position of the next '\n' at or after `p` (end-of-string if none). Iterates a sub-slice that starts
 // at `p` — NOT a scan from 0, and NOT recursive — so walking a file line-by-line is O(n) total with
 // constant stack.
@@ -105,24 +96,6 @@ line_end = (s: string_view, p: i32) i32 {
         })
     })
     pos
-}
-append_span = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, e: i32) String {
-    cur := out
-    bs: [u8] := s.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < p == false).then({
-            (ii >= e || b == 0).match ({
-                true  => {
-                    h.break
-                },
-                false => {
-                    cur = cur.rpush(a, b)
-                },
-            })
-        })
-    })
-    cur
 }
 str_bytes* = (s: string_view) [u8] { s.view() }
 RewriteSkip*: {
@@ -220,50 +193,6 @@ copy_literal* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) Rewrite
         next: pos,
     )
 }
-strip_into = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, first: bool) String {
-    cur := out
-    pos := p
-    is_first := first
-    bs: [u8] := s.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < pos == false).then({
-            s.is_import_line(pos).match ({
-                true  => {
-                    pos = s.import_end(pos)
-                },
-                false => {
-                    e := s.line_end(pos)
-                    cur = is_first.match ({
-                        true  => cur.rappend_span(a, s, pos, e),
-                        false => cur.rpush(a, 10).rappend_span(a, s, pos, e),
-                    })
-                    is_first = false
-                    pos = s.next_line(pos)
-                },
-            })
-        })
-    })
-    cur
-}
-strip_imports* = (out: String, a: MutPtr<Malloc>, s: string_view) String {
-    out.strip_into(a, s, 0, true)
-}
-concat_files* = (out: String, a: MutPtr<Malloc>, left: string_view, right: string_view) String {
-    out.rappend(a, left).rpush(a, 10).rappend(a, right)
-}
-module_name_pos = (s: string_view, p: i32) i32 {
-    s.is_std_marker_at(p).match ({
-        true  => p + STD_MARKER_LEN,
-        false => s.is_compiler_marker_at(p).match ({
-            true  => p + COMPILER_MARKER_LEN,
-            false => s.is_user_marker_at(p).match ({
-                true  => p + USER_MARKER_LEN,
-                false => s.module_name_pos(p + 1),
-            }),
-        }),
-    })
-}
 // Copy a dotted module id (`utils.strings`) verbatim — alnum and interior dots (for messages).
 take_dotted = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     cur := out
@@ -282,60 +211,6 @@ take_dotted = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
                 },
             })
         })
-    })
-    cur
-}
-import_module* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
-    out.take_module_path(a, s, s.module_name_pos(p))
-}
-take_module_path = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
-    cur := out
-    pos := p
-    bs: [u8] := s.view()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < pos == false).then({
-            s.at(pos).is_alnum().match ({
-                true  => {
-                    cur = cur.rpush(a, s.at(pos))
-                    pos = pos + 1
-                },
-                false => (s.at(pos) == '.').match ({
-                    true  => {
-                        cur = cur.rpush(a, '/')
-                        pos = pos + 1
-                    },
-                    false => {
-                        h.break
-                    },
-                }),
-            })
-        })
-    })
-    cur
-}
-import_id = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
-    cur := out
-    s.is_std_marker_at(p).match ({
-        true  => {
-            base := cur.rappend(a, "std/")
-            cur = base.take_module_path(a, s, p + STD_MARKER_LEN)
-        },
-        false => s.is_compiler_marker_at(p).match ({
-            true  => {
-                base := cur.rappend(a, "compiler/")
-                cur = base.take_module_path(a, s, p + COMPILER_MARKER_LEN)
-            },
-            false => s.is_user_marker_at(p).match ({
-                true  => {
-                    base := cur.rappend(a, "u/")
-                    cur = base.take_module_path(a, s, p + USER_MARKER_LEN)
-                },
-                false => {
-                    cur = cur.import_id(a, s, p + 1)
-                },
-            }),
-        }),
     })
     cur
 }
@@ -880,9 +755,6 @@ provided_symbols_in*<A> = (
         .Err(e)  => err(e),
     })
 }
-provided_symbols* = (a: MutPtr<Malloc>, src: string_view) Result<[ProvidedSymbol], IoError> {
-    a.provided_symbols_in(a, src)
-}
 // flags word for one scanned symbol (see ModuleSig).
 sym_sig_flags = (s: ProvidedSymbol) i64 {
     f: i64 := 0
@@ -963,24 +835,6 @@ symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bo
     (include_imported || s.imported.match ({ true => false, false => true }))
         && (include_foreign || s.foreign.match ({ true => false, false => true }))
 }
-symbol_names_into = (
-    set: String,
-    a: MutPtr<Malloc>,
-    symbols: [ProvidedSymbol],
-    i: i64,
-    include_imported: bool,
-    include_foreign: bool,
-) String {
-    cur := set
-    symbols.loop((h, idx, sym) {
-        (idx < i == false).then({
-            sym.symbol_allowed(include_imported, include_foreign).then({
-                cur = cur.rappend(a, sym.name).rpush(a, 10)
-            })
-        })
-    })
-    cur
-}
 symbol_names_into_in = (
     a: MutPtr<Malloc>,
     set: String,
@@ -1039,9 +893,6 @@ value_symbol_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymb
         })
     })
     cur
-}
-alias_decl_names = (a: MutPtr<Malloc>, src: string_view) String {
-    a.module_graph(src).decl_names_in(a)
 }
 span_eq_lit = (s: string_view, p: i32, e: i32, lit: string_view, i: i32) bool {
     (p + i == e).match ({
