@@ -110,11 +110,6 @@ loop_outer_frees = (
 ) i32 {
     a.loop_body_outer_frees(env, seen, al, l.body, a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, a.dead_nil()))))
 }
-// Compatibility verdict API. The positioned diagnostic visitor below is authoritative; keeping a
-// second count-only AST walk made every new rule land twice and invited count/kind drift.
-check_module_ownership* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    (a.check_module_ownership_kind(decls) == 0).match ({ true => 0, false => 1 })
-}
 // Compatibility verdict API: 0 = clean, 1 = rejected. Detailed callers consume `check_module_kind`,
 // `check_module_batch`, or a structured diagnostic, so the old parallel count traversal is redundant.
 check_module* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
@@ -1361,11 +1356,6 @@ check_module_kind_all = (a: MutPtr<Malloc>, decls: [Decl], vis: UfcsVis, buf: [i
     })
     c
 }
-// the batch as source-positioned CheckDiagnostics (count 1 each — the "(+K more)" trailer is the
-// driver's, printed once after the cap). An empty slice means the main channel is clean.
-check_module_batch* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) [CheckDiagnostic] {
-    a.check_module_batch_vis(decls, src, a.ufcs_vis_off())
-}
 // the batch with a LIVE per-module UFCS visibility (#574) — the driver's checked paths use this.
 check_module_batch_vis* = (
     a: MutPtr<Malloc>,
@@ -1407,31 +1397,6 @@ check_module_parse_diagnostic_from_source* = (
         false => src.check_diagnostic_from_source(packed, 1),
     })
 }
-check_module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
-    packed := a.check_module_kind(decls)
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => check_diagnostic_from_packed(packed, 1),
-    })
-}
-check_module_ownership_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) CheckDiagnostic {
-    packed := a.check_module_ownership_kind(decls)
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => check_diagnostic_from_packed(packed, 1),
-    })
-}
-check_module_diagnostic_from_source* = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    src: string_view,
-) CheckDiagnostic {
-    packed := a.check_module_kind(decls)
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, 1),
-    })
-}
 check_module_ownership_diagnostic_from_source* = (
     a: MutPtr<Malloc>,
     decls: [Decl],
@@ -1442,34 +1407,6 @@ check_module_ownership_diagnostic_from_source* = (
         true  => check_diagnostic_none(),
         false => src.check_diagnostic_from_source(packed, 1),
     })
-}
-module_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) Diagnostic {
-    a.check_module_diagnostic(decls).check_to_diagnostic()
-}
-module_ownership_diagnostic* = (a: MutPtr<Malloc>, decls: [Decl]) Diagnostic {
-    a.check_module_ownership_diagnostic(decls).check_to_diagnostic()
-}
-module_diagnostic_from_source* = (a: MutPtr<Malloc>, decls: [Decl], src: string_view) Diagnostic {
-    a.check_module_diagnostic_from_source(decls, src).check_to_diagnostic()
-}
-module_ownership_diagnostic_from_source* = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    src: string_view,
-) Diagnostic { a.check_module_ownership_diagnostic_from_source(decls, src).check_to_diagnostic() }
-// the kind layer over a CROSS-MODULE link (mirrors check_linked): same layered header, then
-// check_module_kind instead of check_module. Lets a cross-module reject also be pinned by KIND.
-check_linked_kind* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
-    hdr := a.module_header(lib)
-    rfile := a.resolve_module(decls)
-    world := cbuf<Decl>(a, hdr.len + rfile.len)
-    hdr.loop((h, i, d) {
-        world[i] = d
-    })
-    rfile.loop((h, i, d) {
-        world[hdr.len + i] = d
-    })
-    a.check_module_kind(world)
 }
 module_header* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     map_slice(a, decls, (d) { a.as_sig(d) })
@@ -1605,11 +1542,6 @@ check_module_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     })
     acc
 }
-// Compatibility verdict. The positioned traversal above is authoritative; a parallel exact-count
-// walk duplicated every scope-escape rule and made the diagnostic traverse each function twice.
-check_module_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    (a.check_module_escape_kind(decls) == 0).match ({ true => 0, false => 1 })
-}
 check_module_escape_diagnostic_from_source* = (
     a: MutPtr<Malloc>,
     decls: [Decl],
@@ -1740,9 +1672,6 @@ check_module_leak_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     })
     acc
 }
-check_module_leak* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    (a.check_module_leak_kind(decls) == 0).match ({ true => 0, false => 1 })
-}
 check_module_leak_diagnostic_from_source* = (
     a: MutPtr<Malloc>,
     decls: [Decl],
@@ -1774,9 +1703,6 @@ check_module_addr_escape_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
         }))
     })
     acc
-}
-check_module_addr_escape* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    (a.check_module_addr_escape_kind(decls) == 0).match ({ true => 0, false => 1 })
 }
 check_module_addr_escape_diagnostic_from_source* = (
     a: MutPtr<Malloc>,
@@ -1811,9 +1737,6 @@ check_module_send_kind = (a: MutPtr<Malloc>, decls: [Decl], mode: i32) i32 {
 check_module_send_rc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     a.check_module_send_kind(decls, 0)
 }
-check_module_send_rc* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    (a.check_module_send_rc_kind(decls) == 0).match ({ true => 0, false => 1 })
-}
 check_module_send_rc_diagnostic_from_source* = (
     a: MutPtr<Malloc>,
     decls: [Decl],
@@ -1835,9 +1758,6 @@ check_module_send_rc_diagnostic_from_source* = (
 }
 check_module_send_mut_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     a.check_module_send_kind(decls, 1)
-}
-check_module_send_mut* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    (a.check_module_send_mut_kind(decls) == 0).match ({ true => 0, false => 1 })
 }
 check_module_send_mut_diagnostic_from_source* = (
     a: MutPtr<Malloc>,
@@ -1867,9 +1787,6 @@ check_module_scratch_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
         }))
     })
     acc
-}
-check_module_scratch* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    (a.check_module_scratch_kind(decls) == 0).match ({ true => 0, false => 1 })
 }
 check_module_scratch_diagnostic_from_source* = (
     a: MutPtr<Malloc>,
