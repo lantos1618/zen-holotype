@@ -95,9 +95,17 @@ name_errors_expr* = (env: Env, e: Ptr<Expr>) NameErrors {
             false => env.name_errors_args(c.args),
         }),    // sizeof's arg is a TYPE name, not a value (mirrors check_expr)
         .SliceLit(sd)   => env.name_errors_args(sd.items),
-        .Index(ix)      => env.name_errors_expr(ix.seq).name_errors_merge(env.name_errors_expr(ix.idx)),
-        .Bin(b)         => env.name_errors_expr(b.lhs).name_errors_merge(env.name_errors_expr(b.rhs)),
-        .Cond(d)        => env.name_errors_expr(d.c).name_errors_merge(env.name_errors_expr(d.t)).name_errors_merge(env.name_errors_expr(d.e)).name_errors_merge(d.name_errors_onearm()),
+        .Index(ix)      => env
+            .name_errors_expr(ix.seq)
+            .name_errors_merge(env.name_errors_expr(ix.idx)),
+        .Bin(b)         => env
+            .name_errors_expr(b.lhs)
+            .name_errors_merge(env.name_errors_expr(b.rhs)),
+        .Cond(d)        => env
+            .name_errors_expr(d.c)
+            .name_errors_merge(env.name_errors_expr(d.t))
+            .name_errors_merge(env.name_errors_expr(d.e))
+            .name_errors_merge(d.name_errors_onearm()),
         .Member(m)      => env.name_errors_expr(m.obj),    // field NAME deferred (h.break_zk etc.)
         .Arrow(ar)      => env.name_errors_expr(ar.obj),
         .Match(m)       => {
@@ -107,19 +115,29 @@ name_errors_expr* = (env: Env, e: Ptr<Expr>) NameErrors {
         .MakeEnum(mk)   => env.name_errors_expr(mk.payload),
         .MakeStruct(sd) => env.name_errors_inits(sd.inits),
         .Block(b)       => env.a.name_errors_body(env, b.stmts),
-        .Loop(l)        => env.name_errors_expr(l.seq).name_errors_merge(env.a.name_errors_body(env.a.loop_env(env, l), l.body)),
+        .Loop(l)        => env
+            .name_errors_expr(l.seq)
+            .name_errors_merge(env.a.name_errors_body(env.a.loop_env(env, l), l.body)),
         _               => name_errors_none(),
     })
 }
 name_errors_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) NameErrors {
     st.match ({
         .Let(l)      => env.name_errors_expr(l.value),
-        .Assign(x)   => env.name_errors_expr(x.target).name_errors_merge(env.name_errors_expr(x.value)),
+        .Assign(x)   => env
+            .name_errors_expr(x.target)
+            .name_errors_merge(env.name_errors_expr(x.value)),
         .Return(r)   => env.name_errors_expr(r),
         .ExprStmt(e) => env.name_errors_expr(e),
-        .If(f)       => env.name_errors_expr(f.c).name_errors_merge(a.name_errors_body(env, f.then)).name_errors_merge(a.name_errors_body(env, f.els)),
+        .If(f)       => env
+            .name_errors_expr(f.c)
+            .name_errors_merge(a.name_errors_body(env, f.then))
+            .name_errors_merge(a.name_errors_body(env, f.els)),
         .While(w)    => env.name_errors_expr(w.c).name_errors_merge(a.name_errors_body(env, w.body)),
-        .IndexSet(x) => env.name_errors_expr(x.seq).name_errors_merge(env.name_errors_expr(x.idx)).name_errors_merge(env.name_errors_expr(x.value)),
+        .IndexSet(x) => env
+            .name_errors_expr(x.seq)
+            .name_errors_merge(env.name_errors_expr(x.idx))
+            .name_errors_merge(env.name_errors_expr(x.value)),
     })
 }
 name_errors_body* = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) NameErrors {
@@ -572,12 +590,15 @@ diagnostic_to_check* = (d: Diagnostic) CheckDiagnostic {
         hint: d.hint,
     )
 }
-diagnostic_from_packed* = (packed: i32, count: i32) Diagnostic { check_diagnostic_from_packed(packed, count).check_to_diagnostic() }
-diagnostic_from_source* = (src: string_view, packed: i32, count: i32) Diagnostic { src.check_diagnostic_from_source(packed, count).check_to_diagnostic() }
-desc_or* = (x: string_view, y: string_view) string_view { is_empty(x).match ({
-    true  => y,
-    false => x,
-}) }
+diagnostic_from_packed* = (packed: i32, count: i32) Diagnostic {
+    check_diagnostic_from_packed(packed, count).check_to_diagnostic()
+}
+diagnostic_from_source* = (src: string_view, packed: i32, count: i32) Diagnostic {
+    src.check_diagnostic_from_source(packed, count).check_to_diagnostic()
+}
+desc_or* = (x: string_view, y: string_view) string_view {
+    is_empty(x).match ({ true => y, false => x })
+}
 // ── M5: explicit type-argument (turbofish) + closure-argument validation over RAW decls ──────────────
 // Local generic calls are INLINED during resolve_module, which ERASES the call site's explicit `<…>`
 // type args and its lambda arguments before check_module ever sees them. So an undefined turbofish type

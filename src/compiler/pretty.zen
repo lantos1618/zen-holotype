@@ -41,6 +41,44 @@ pretty_set_comments* = (src: string_view, cmts: [Comment]) void {
     gf_cmts = cmts
     gf_idx = 0
 }
+// Is `name` a NAMESPACE import alias in this module (`hm = std.collections.hmap` / `right = right`)?
+// The alias qualification pass (std.internal.resolve strip_ns) is TEXTUAL and needs `alias.member`
+// adjacent on one line, so the chain-wrapper must never split a spine off an alias base. Detection
+// scans the module source lazily for a column-0 `name = <dotted-ident-path>` line (the ns-line
+// shape): only called for overflowing spines, and over-matching merely keeps a line long — safe.
+gf_ident_ch = (b: u8) bool {
+    b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '.'
+}
+gf_is_alias* = (name: string_view) bool {
+    v: [u8] := name.view()
+    src: [u8] := gf_src.view()
+    i: i64 := 0
+    at_bol := true
+    @while (i < src.len) {
+        hit := at_bol && i + v.len + 3 <= src.len
+        j: i64 := 0
+        @while (hit && j < v.len) {
+            (src[i + j] == v[j] == false).then({
+                hit = false
+            })
+            j = j + 1
+        }
+        (hit && src[i + v.len] == ' ' && src[i + v.len + 1] == '=' && src[i + v.len + 2] == ' ').then({
+            k := i + v.len + 3
+            ok := k < src.len && gf_ident_ch(src[k])
+            @while (k < src.len && src[k] != '\n') {
+                ok = (gf_ident_ch(src[k]) || src[k] == '\r').match ({ true => ok, false => false })
+                k = k + 1
+            }
+            ok.then({
+                return true
+            })
+        })
+        at_bol = src[i] == '\n'
+        i = i + 1
+    }
+    false
+}
 // the line number (count of '\n' before `pos`) — used to decide if a trailing comment shares a stmt's line.
 gf_line_of* = (pos: i32) i32 {
     i := 0
@@ -57,7 +95,8 @@ gf_line_of* = (pos: i32) i32 {
 // trailing spaces before the newline are dropped so the formatted line has no dangling whitespace).
 gf_cmt_end = (c: Comment) i32 {
     e := c.start + c.len
-    @while (e > c.start && (at(gf_src, e - 1) == ' ' || at(gf_src, e - 1) == '\t' || at(gf_src, e - 1) == '\r')) {
+    @while (e > c.start
+        && (at(gf_src, e - 1) == ' ' || at(gf_src, e - 1) == '\t' || at(gf_src, e - 1) == '\r')) {
         e = e - 1
     }
     e
@@ -79,10 +118,9 @@ ff_flush_leading* = (s: String, a: MutPtr<Malloc>, before: i32, ind: i32) String
         return s
     })
     out := s
-    @while (gf_idx < gf_cmts.len && gf_cmts[gf_idx].start < before && gf_cmts[gf_idx].trailing.match ({
-        true  => false,
-        false => true,
-    })) {
+    @while (gf_idx < gf_cmts.len
+        && gf_cmts[gf_idx].start < before
+        && gf_cmts[gf_idx].trailing.match ({ true => false, false => true })) {
         out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx]).ff_append(a, "\n")
         gf_idx = gf_idx + 1
     }
@@ -154,10 +192,9 @@ ff_trailing* = (s: String, a: MutPtr<Malloc>, boundary: i32) String {
 }
 // is `start` before the next statement's position `boundary`? boundary 0 = "no next stmt" = unbounded
 // (the trailing comment is the last thing in the block, so it belongs to the statement just printed).
-gf_before = (start: i32, boundary: i32) bool { (boundary <= 0).match ({
-    true  => true,
-    false => start < boundary,
-}) }
+gf_before = (start: i32, boundary: i32) bool {
+    (boundary <= 0).match ({ true => true, false => start < boundary })
+}
 // DRAIN the just-printed statement's trailing-comment region [stmt, boundary): the FIRST pending comment
 // prints inline iff it is trailing (shares the statement's source line); EVERY remaining comment STRICTLY
 // before the boundary prints on its own line at `ind`. Draining the whole region is what makes the
@@ -253,7 +290,7 @@ gf_decl_pos = (d: Decl) i32 {
     })
 }
 // ── String builder shims (reuse the canonical genc String API) ───────────────
-ff_string = (a: MutPtr<Malloc>, cap: i64) String {
+ff_string* = (a: MutPtr<Malloc>, cap: i64) String {
     String(
         ptr: a.acquire(cap),
         len: 0,
@@ -295,10 +332,9 @@ ff_char* = (s: String, a: MutPtr<Malloc>, n: i32) String {
     })
 }
 // n levels of 4-space indentation
-ff_indent* = (s: String, a: MutPtr<Malloc>, n: i32) String { (n <= 0).match ({
-    true  => s,
-    false => s.ff_append(a, "    ").ff_indent(a, n - 1),
-}) }
+ff_indent* = (s: String, a: MutPtr<Malloc>, n: i32) String {
+    (n <= 0).match ({ true => s, false => s.ff_append(a, "    ").ff_indent(a, n - 1) })
+}
 // ── types ────────────────────────────────────────────────────────────────────
 ff_ty* = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
@@ -312,10 +348,22 @@ ff_ty* = (s: String, a: MutPtr<Malloc>, t: Ty) String {
         .StringCstr    => s.ff_append(a, "string_cstr"),
         .StringLiteral => s.ff_append(a, "string_literal"),
         .Named(nm)     => s.ff_append(a, nm),
-        .Ptr(pd)       => s.ff_append(a, ptr_kw(pd.kind)).ff_append(a, "<").ff_ty(a, load(pd.pointee)).ff_append(a, ">"),
+        .Ptr(pd)       => s
+            .ff_append(a, ptr_kw(pd.kind))
+            .ff_append(a, "<")
+            .ff_ty(a, load(pd.pointee))
+            .ff_append(a, ">"),
         .Slice(p)      => s.ff_append(a, "[").ff_ty(a, load(p)).ff_append(a, "]"),
-        .FnT(ft)       => s.ff_append(a, "(").ff_tys(a, ft.params).ff_append(a, ") ").ff_ty(a, load(ft.ret)),
-        .Generic(g)    => s.ff_append(a, g.name).ff_append(a, "<").ff_tys(a, g.args).ff_append(a, ">"),
+        .FnT(ft)       => s
+            .ff_append(a, "(")
+            .ff_tys(a, ft.params)
+            .ff_append(a, ") ")
+            .ff_ty(a, load(ft.ret)),
+        .Generic(g)    => s
+            .ff_append(a, g.name)
+            .ff_append(a, "<")
+            .ff_tys(a, g.args)
+            .ff_append(a, ">"),
     })
 }
 ff_tys* = (s: String, a: MutPtr<Malloc>, ts: [Ty]) String {
@@ -369,11 +417,20 @@ ff_scan_nl = (p: RawPtr<u8>, i: i64, n: i64) bool {
         }),
     })
 }
-ff_str_has_nl = (s: String) bool { ff_scan_nl(s.ptr, 0, s.len) }
+ff_str_has_nl* = (s: String) bool { ff_scan_nl(s.ptr, 0, s.len) }
 // does the single statement format to ONE physical line? Formats into a THROWAWAY String. ff_stmt_at can
 // reach ff_arms (a Match weaves comments and ADVANCES gf_idx), so the comment cursor is SNAPSHOT and
 // RESTORED — making this trial render side-effect-free (otherwise a single-statement body that holds a
 // match would have its arm comments consumed by the trial and then DROPPED by the real render).
+// WIDTH gate for the inline `{ <stmt> }` body: header column + "{ " + stmt + " }" must fit in 100.
+// An overlong one-liner expands to block form, where the statement re-renders at ind+1 and the
+// chain-wrapping in ff_bin / the MethodCall spine takes over (compiler.pretty_expr).
+ff_one_line_fits = (a: MutPtr<Malloc>, s: String, st: Stmt, drop: bool, ind: i32) bool {
+    save := gf_idx
+    trial := a.ff_string(256).ff_stmt_at(a, st, drop, ind)
+    gf_idx = save
+    trial.ff_fits_width(s.ff_current_col() + 2, 98)
+}
 ff_one_line = (a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32) bool {
     save := gf_idx
     r := ff_str_has_nl(a.ff_string(256).ff_stmt_at(a, st, drop, ind)).match ({
@@ -408,7 +465,11 @@ ff_no_lead_cmt = (sp: i32) bool {
 ff_block* = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool) String {
     (body.len == 0).match ({
         true  => s.ff_append(a, "{ }"),
-        false => (drop_ret && body.len == 1 && ff_no_lead_cmt(gf_stmt_pos(body[0])) && a.ff_one_line(body[0], drop_ret, ind)).match ({
+        false => (drop_ret
+            && body.len == 1
+            && ff_no_lead_cmt(gf_stmt_pos(body[0]))
+            && a.ff_one_line(body[0], drop_ret, ind)
+            && a.ff_one_line_fits(s, body[0], drop_ret, ind)).match ({
             true  => s.ff_append(a, "{ ").ff_stmt_at(a, body[0], drop_ret, ind).ff_append(a, " }"),
             false => {
                 open := s.ff_append(a, "{\n")
@@ -459,9 +520,25 @@ ff_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, ind: i32) String {
         .ExprStmt(e) => s.ff_expr(a, e, ind),
         // Internal branch IR is never parsed from Zen source. If a resolved tree is printed through
         // this API, preserve the language invariant by spelling it as a boolean `.match`.
-        .If(f)       => s.ff_append(a, "(").ff_expr(a, f.c, ind).ff_append(a, ").match ({ true => ").ff_block(a, f.then, ind, false).ff_append(a, ", false => ").ff_block(a, f.els, ind, false).ff_append(a, " })"),
-        .While(w)    => s.ff_append(a, "@while (").ff_expr(a, w.c, ind).ff_append(a, ") ").ff_block(a, w.body, ind, false),
-        .IndexSet(x) => s.ff_recv(a, x.seq, ind).ff_append(a, "[").ff_expr(a, x.idx, ind).ff_append(a, "] = ").ff_expr(a, x.value, ind),
+        .If(f)       => s
+            .ff_append(a, "(")
+            .ff_expr(a, f.c, ind)
+            .ff_append(a, ").match ({ true => ")
+            .ff_block(a, f.then, ind, false)
+            .ff_append(a, ", false => ")
+            .ff_block(a, f.els, ind, false)
+            .ff_append(a, " })"),
+        .While(w)    => s
+            .ff_append(a, "@while (")
+            .ff_expr(a, w.c, ind)
+            .ff_append(a, ") ")
+            .ff_block(a, w.body, ind, false),
+        .IndexSet(x) => s
+            .ff_recv(a, x.seq, ind)
+            .ff_append(a, "[")
+            .ff_expr(a, x.idx, ind)
+            .ff_append(a, "] = ")
+            .ff_expr(a, x.value, ind),
     })
 }
 // `name := value` (inferred) or `name: T := value` (annotated)

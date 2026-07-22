@@ -192,7 +192,9 @@ collect_headers*<A> = (a: MutPtr<A>, lines: [string_view]) Result<[Header], Http
                 },
                 false => {
                     nm := a.trim(a.substr(line, 0, ci).expect("http: oom"))
-                    val := a.trim(a.substr(line, ci + 1, line.view().len - (ci + 1)).expect("http: oom"))
+                    val := a.trim(a
+                        .substr(line, ci + 1, line.view().len - (ci + 1))
+                        .expect("http: oom"))
                     hs[i - 1] = Header(
                         name: nm,
                         value: val,
@@ -219,15 +221,13 @@ decide_body*<A> = (a: MutPtr<A>, headers: [Header], body_raw: string_view) strin
 }
 // ── chunked transfer-encoding decode ──────────────────────────────────────────────────────────────────
 // first index at/after `i` that is not a hex digit (the end of a chunk-size field).
-hex_end = (bv: [u8], i: i64) i64 { (i < bv.len && is_hex(bv[i])).match ({
-    true  => bv.hex_end(i + 1),
-    false => i,
-}) }
+hex_end = (bv: [u8], i: i64) i64 {
+    (i < bv.len && is_hex(bv[i])).match ({ true => bv.hex_end(i + 1), false => i })
+}
 // fold the hex digits bv[i..e] into an integer size.
-hex_val = (bv: [u8], i: i64, e: i64, acc: i64) i64 { (i >= e).match ({
-    true  => acc,
-    false => bv.hex_val(i + 1, e, acc * 16 + hex_nibble(bv[i])),
-}) }
+hex_val = (bv: [u8], i: i64, e: i64, acc: i64) i64 {
+    (i >= e).match ({ true => acc, false => bv.hex_val(i + 1, e, acc * 16 + hex_nibble(bv[i])) })
+}
 // index just past the next '\n' at/after `i` (one line terminator), or `bv.len` if none remains.
 after_lf = (bv: [u8], i: i64) i64 {
     (i >= bv.len).match ({
@@ -272,7 +272,9 @@ decode_chunked*<A> = (a: MutPtr<A>, body: string_view) string_view {
 }
 // ── request construction + the live socket path ───────────────────────────────────────────────────────
 // append a CRLF line terminator to the builder (char literals, so no CR/LF appears as a source string).
-crlf<A> = (a: MutPtr<A>, sb: String) String { a.push_in(a.push_in(sb, '\r').expect("http: oom"), '\n').expect("http: oom") }
+crlf<A> = (a: MutPtr<A>, sb: String) String {
+    a.push_in(a.push_in(sb, '\r').expect("http: oom"), '\n').expect("http: oom")
+}
 // serialise a request: `<method> <path> HTTP/1.1`, a `Host` header, `Connection: close`, any caller
 // `headers`, an auto `Content-Length` when `body` is non-empty, the blank line, then the body.
 build_request<A> = (a: MutPtr<A>, method: string_view, host: string_view, path: string_view, headers: [Header], body: string_view) string_view {
@@ -295,7 +297,13 @@ build_request<A> = (a: MutPtr<A>, method: string_view, host: string_view, path: 
     })
     (body.view().len > 0).then({
         sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
-        sb = a.append_in(sb, a.integer(to_i64(body.view().len)).expect("http: oom").finish_in(a).expect("http: oom")).expect("http: oom")
+        sb = a
+            .append_in(sb, a
+                .integer(to_i64(body.view().len))
+                .expect("http: oom")
+                .finish_in(a)
+                .expect("http: oom"))
+            .expect("http: oom")
         sb = a.crlf(sb)
     })
     sb = a.crlf(sb)    // blank line: end of headers

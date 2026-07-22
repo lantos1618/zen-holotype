@@ -131,7 +131,9 @@ jbuf_slice<T> = (jb: JBuf<T>) [T] { slice(jb.ptr, jb.len) }
 // ── byte classes ──────────────────────────────────────────────────────────────
 json_ws = (b: u8) bool { b == ' ' || b == '\t' || b == '\n' || b == '\r' }
 is_num_start = (b: u8) bool { b == '-' || b >= '0' && b <= '9' }
-is_num_byte = (b: u8) bool { b >= '0' && b <= '9' || b == '-' || b == '+' || b == '.' || b == 'e' || b == 'E' }
+is_num_byte = (b: u8) bool {
+    b >= '0' && b <= '9' || b == '-' || b == '+' || b == '.' || b == 'e' || b == 'E'
+}
 // first index >= pos that is not JSON whitespace (or sv.len when the tail is all whitespace).
 skip_ws = (sv: [u8], pos: i64) i64 {
     p: i64 := pos
@@ -166,8 +168,18 @@ push_utf8<A> = (a: MutPtr<A>, sb: String, cp: i64) String {
     (cp < 128).match ({
         true  => sb.push_in(a, cp.to_u8()).jok(),
         false => (cp < 2048).match ({
-            true  => sb.push_in(a, (192 | cp >> 6).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok(),
-            false => sb.push_in(a, (224 | cp >> 12).to_u8()).jok().push_in(a, (128 | cp >> 6 & 63).to_u8()).jok().push_in(a, (128 | cp & 63).to_u8()).jok(),
+            true  => sb
+                .push_in(a, (192 | cp >> 6).to_u8())
+                .jok()
+                .push_in(a, (128 | cp & 63).to_u8())
+                .jok(),
+            false => sb
+                .push_in(a, (224 | cp >> 12).to_u8())
+                .jok()
+                .push_in(a, (128 | cp >> 6 & 63).to_u8())
+                .jok()
+                .push_in(a, (128 | cp & 63).to_u8())
+                .jok(),
         }),
     })
 }
@@ -484,7 +496,19 @@ parse*<A> = (a: MutPtr<A>, s: string_view) Result<Value, JsonError> {
 // ── serialization ──────────────────────────────────────────────────────────────
 write_u_esc<A> = (a: MutPtr<A>, sb: String, b: u8) String {
     bi := b.to_i64()
-    sb.push_in(a, '\\').jok().push_in(a, 'u').jok().push_in(a, '0').jok().push_in(a, '0').jok().push_in(a, hex_char(bi >> 4 & 15)).jok().push_in(a, hex_char(bi & 15)).jok()
+    sb
+        .push_in(a, '\\')
+        .jok()
+        .push_in(a, 'u')
+        .jok()
+        .push_in(a, '0')
+        .jok()
+        .push_in(a, '0')
+        .jok()
+        .push_in(a, hex_char(bi >> 4 & 15))
+        .jok()
+        .push_in(a, hex_char(bi & 15))
+        .jok()
 }
 write_esc_byte<A> = (a: MutPtr<A>, sb: String, b: u8) String {
     (b == '"').match ({

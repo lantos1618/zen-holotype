@@ -8,10 +8,12 @@
 { map_slice } = compiler.astops
 { Env, VList, DeclIndex, bin_ty, common_ty, dispatch_recv_name, enum_name, gen_variant_payload, has_tparam, is_direct_tparam, is_lit_numeric, is_str_t, is_void_ty, is_weak_targ_arg, lookup_var, slice_member, tnode, ty_under_ptr, vcons } = compiler.check
 lty_node* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.tnode(t) }
-light_sl_elem* = (a: MutPtr<Malloc>, items: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty { (items.len == 0).match ({
-    true  => tvoid(),
-    false => items[0].addr().light_ty(a, env, decls, idx),
-}) }
+light_sl_elem* = (a: MutPtr<Malloc>, items: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+    (items.len == 0).match ({
+        true  => tvoid(),
+        false => items[0].addr().light_ty(a, env, decls, idx),
+    })
+}
 light_slice* = (a: MutPtr<Malloc>, sd: SliceData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     sd.elem.is_void_ty().match ({
         true  => tslice(a.lty_node(a.light_sl_elem(sd.items, env, decls, idx))),
@@ -34,10 +36,9 @@ light_one* = (params: [Param], a: MutPtr<Malloc>, args: [Expr], tp: string_view,
     })
     found
 }
-light_ret_one* = (ret: Ty, exp: Ty, tp: string_view) Ty { exp.is_void_ty().match ({
-    true  => tvoid(),
-    false => ret.unify_ty(exp, tp),
-}) }
+light_ret_one* = (ret: Ty, exp: Ty, tp: string_view) Ty {
+    exp.is_void_ty().match ({ true => tvoid(), false => ret.unify_ty(exp, tp) })
+}
 light_targ* = (f: Func, a: MutPtr<Malloc>, args: [Expr], exp: Ty, tp: string_view, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
     arg := f.params.light_one(a, args, tp, env, decls, idx, false)
     arg = arg.is_void_ty().match ({ true => f.ret.light_ret_one(exp, tp), false => arg })
@@ -148,7 +149,9 @@ light_ty* = (e: Ptr<Expr>, a: MutPtr<Malloc>, env: Ptr<VList>, decls: [Decl], id
         .Call(c)       => light_call_ty(decls, idx, a, c, env),
         .Member(m)     => a.light_member_ty(decls, idx, m.obj.light_ty(a, env, decls, idx), m.field),
         .Bin(b)        => bin_ty(b.op, b.lhs.light_ty(a, env, decls, idx)),
-        .Cond(d)       => d.t.light_ty(a, env, decls, idx).common_ty(d.e.light_ty(a, env, decls, idx)),
+        .Cond(d)       => d.t
+            .light_ty(a, env, decls, idx)
+            .common_ty(d.e.light_ty(a, env, decls, idx)),
         .Match(m)      => a.light_match_ty(m, env, decls, idx),
         _              => tvoid(),
     })
@@ -297,12 +300,16 @@ lam_unify* = (decls: [Decl], fpty: Ty, lm: LambdaData, tp: string_view) Ty {
     })
 }
 // `lits` mirrors targ_of: numeric and string literal args are the weakest binding source.
-weak_targ_light* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, pty: Ty, arg: Ptr<Expr>, tp: string_view, env: Ptr<VList>) bool { arg.is_weak_targ_arg() || pty.is_direct_tparam(tp) && arg.light_ty(a, env, decls, idx).is_str_t() }
+weak_targ_light* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, pty: Ty, arg: Ptr<Expr>, tp: string_view, env: Ptr<VList>) bool {
+    arg.is_weak_targ_arg()
+        || pty.is_direct_tparam(tp) && arg.light_ty(a, env, decls, idx).is_str_t()
+}
 infer_one* = (params: [Param], a: MutPtr<Malloc>, cargs: [Expr], tp: string_view, env: Ptr<VList>, decls: [Decl], idx: DeclIndex, lits: bool) Ty {
     found := tvoid()
     params.loop((h, i, p) {
         found = found.is_void_ty().match ({
-            true  => (i < cargs.len && a.weak_targ_light(decls, idx, p.ty, cargs[i].addr(), tp, env) == lits).match ({
+            true  => (i < cargs.len
+                && a.weak_targ_light(decls, idx, p.ty, cargs[i].addr(), tp, env) == lits).match ({
                 true  => a.unify_carg(decls, idx, p.ty, cargs[i].addr(), tp, env),
                 false => found,
             }),

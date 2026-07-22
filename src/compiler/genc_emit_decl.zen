@@ -27,14 +27,25 @@ gen_ty_list = (s: String, alloc: MutPtr<Malloc>, ts: [Ty]) String {
 // a function-pointer parameter `RET (*name)(ARG, …)`. Most FnT params are a template's lambda (inlined
 // at the call site, never emitted); but an FnT param that survives into a REAL C signature — an extern
 // callback like makecontext's `void(*func)()` — must render as an actual function pointer here.
-gen_fnptr_param = (s: String, alloc: MutPtr<Malloc>, ft: FnTData, name: string_view) String { s.gstr_append(alloc, alloc.ty_cname_in(load(ft.ret))).gstr_append(alloc, "(*").gstr_append(alloc, name).gstr_append(alloc, ")(").gen_ty_list(alloc, ft.params).gstr_append(alloc, ")") }
+gen_fnptr_param = (s: String, alloc: MutPtr<Malloc>, ft: FnTData, name: string_view) String {
+    s
+        .gstr_append(alloc, alloc.ty_cname_in(load(ft.ret)))
+        .gstr_append(alloc, "(*")
+        .gstr_append(alloc, name)
+        .gstr_append(alloc, ")(")
+        .gen_ty_list(alloc, ft.params)
+        .gstr_append(alloc, ")")
+}
 gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
         out = (i == 0).match ({ true => out, false => out.gstr_append(alloc, ", ") })    // comma between, not before
         out = p.ty.match ({
             .FnT(ft) => out.gen_fnptr_param(alloc, ft, p.name),
-            _        => out.gstr_append(alloc, alloc.ty_cname_in(p.ty)).gstr_append(alloc, " ").gstr_append(alloc, p.name),
+            _        => out
+                .gstr_append(alloc, alloc.ty_cname_in(p.ty))
+                .gstr_append(alloc, " ")
+                .gstr_append(alloc, p.name),
         })
     })
     out
@@ -42,10 +53,9 @@ gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
 // emit one function, appending to `s` (so a module can stream several into one buffer)
 // The Zen entry `main` is emitted as C `zen_main`; the OS-level `main(argc,argv)` lives in zenrt.c
 // (it stashes argv and calls zen_main). Every other function keeps its source name.
-c_func_name = (name: string_view) string_view { (name == "main").match ({
-    true  => "zen_main",
-    false => name,
-}) }
+c_func_name = (name: string_view) string_view {
+    (name == "main").match ({ true => "zen_main", false => name })
+}
 // `main = (sys: Sys) i32` — the capability entry: exactly one parameter typed `Sys`. When present, the
 // user's main is emitted under `zen_user_main` and a NILADIC `zen_main(void)` trampoline (below) calls
 // it with `std.sys.root()`, so the C boundary (zenrt.c) stays byte-identical to the `main = () i32` case.
@@ -63,10 +73,9 @@ main_is_sys* = (f: Func) bool {
 }
 // the C function name for `f`: `main` -> `zen_main`, unless it is the `(sys: Sys)` entry, whose user
 // body is emitted as `zen_user_main` (the `zen_main` trampoline is appended separately by gen_func).
-c_func_name_f = (f: Func) string_view { f.main_is_sys().match ({
-    true  => "zen_user_main",
-    false => c_func_name(f.name),
-}) }
+c_func_name_f = (f: Func) string_view {
+    f.main_is_sys().match ({ true => "zen_user_main", false => c_func_name(f.name) })
+}
 // a function signature `ret name(params)` — shared by the definition and the forward proto
 // the C name for a return type: a function-VALUE return (FnT) uses its precise typedef (M1c) so the
 // caller can call the result; everything else is the plain C type name.
@@ -76,14 +85,29 @@ ret_cname = (alloc: MutPtr<Malloc>, ret: Ty) string_view {
         _        => alloc.ty_cname_in(ret),
     })
 }
-gen_sig = (s: String, alloc: MutPtr<Malloc>, f: Func) String { s.gstr_append(alloc, alloc.ret_cname(f.ret)).gstr_append(alloc, " ").gstr_append(alloc, c_func_name_f(f)).gstr_append(alloc, "(").gen_params(alloc, f.params).gstr_append(alloc, ")") }
+gen_sig = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
+    s
+        .gstr_append(alloc, alloc.ret_cname(f.ret))
+        .gstr_append(alloc, " ")
+        .gstr_append(alloc, c_func_name_f(f))
+        .gstr_append(alloc, "(")
+        .gen_params(alloc, f.params)
+        .gstr_append(alloc, ")")
+}
 // `typedef Ret (*__fnt_…)(Args);` for every function-RETURN type that is itself a function type, so a
 // fn returning a function value has a precise, callable C return type. C11 allows an identical typedef
 // to repeat, so no dedup is needed. Emitted after the forward struct typedefs (a fn-pointer typedef may
 // reference an as-yet-incomplete struct) and before the prototypes that use it as a return type.
 gen_fnt_typedef_ret = (s: String, alloc: MutPtr<Malloc>, ret: Ty) String {
     ret.match ({
-        .FnT(ft) => s.gstr_append(alloc, "typedef ").gstr_append(alloc, alloc.ty_cname_in(load(ft.ret))).gstr_append(alloc, " (*").gstr_append(alloc, alloc.fnt_cname(ft)).gstr_append(alloc, ")(").gen_fnt_params(alloc, ft.params).gstr_append(alloc, "); "),
+        .FnT(ft) => s
+            .gstr_append(alloc, "typedef ")
+            .gstr_append(alloc, alloc.ty_cname_in(load(ft.ret)))
+            .gstr_append(alloc, " (*")
+            .gstr_append(alloc, alloc.fnt_cname(ft))
+            .gstr_append(alloc, ")(")
+            .gen_fnt_params(alloc, ft.params)
+            .gstr_append(alloc, "); "),
         _        => s,
     })
 }
@@ -166,8 +190,18 @@ gen_fnt_params = (s: String, alloc: MutPtr<Malloc>, ps: [Ty]) String {
 // lifted lambda assigns to it with no cast (M1 closures, non-capturing). All other fields are `T name`.
 gen_field_decl = (s: String, alloc: MutPtr<Malloc>, fld: Field) String {
     fld.ty.match ({
-        .FnT(ft) => s.gstr_append(alloc, alloc.ty_cname_in(load(ft.ret))).gstr_append(alloc, " (*").gstr_append(alloc, fld.name).gstr_append(alloc, ")(").gen_fnt_params(alloc, ft.params).gstr_append(alloc, "); "),
-        _        => s.gstr_append(alloc, alloc.ty_cname_in(fld.ty)).gstr_append(alloc, " ").gstr_append(alloc, fld.name).gstr_append(alloc, "; "),
+        .FnT(ft) => s
+            .gstr_append(alloc, alloc.ty_cname_in(load(ft.ret)))
+            .gstr_append(alloc, " (*")
+            .gstr_append(alloc, fld.name)
+            .gstr_append(alloc, ")(")
+            .gen_fnt_params(alloc, ft.params)
+            .gstr_append(alloc, "); "),
+        _        => s
+            .gstr_append(alloc, alloc.ty_cname_in(fld.ty))
+            .gstr_append(alloc, " ")
+            .gstr_append(alloc, fld.name)
+            .gstr_append(alloc, "; "),
     })
 }
 gen_struct* = (s: String, alloc: MutPtr<Malloc>, sd: StructDecl) String {
@@ -184,7 +218,11 @@ gen_union = (s: String, alloc: MutPtr<Malloc>, vs: [VariantDef]) String {
         v.payload.match ({
             .Void => { },
             _     => {
-                u = u.gstr_append(alloc, alloc.ty_cname_in(v.payload)).gstr_append(alloc, " ").gstr_append(alloc, v.name).gstr_append(alloc, "; ")
+                u = u
+                    .gstr_append(alloc, alloc.ty_cname_in(v.payload))
+                    .gstr_append(alloc, " ")
+                    .gstr_append(alloc, v.name)
+                    .gstr_append(alloc, "; ")
             },
         })
     })
@@ -200,7 +238,10 @@ gen_tags = (s: String, alloc: MutPtr<Malloc>, ename: string_view, vs: [VariantDe
 }
 // emit an enum (tagged union): `typedef struct { int32_t tag; union { … } u; } E; enum { E_A, … };`
 gen_enum* = (s: String, alloc: MutPtr<Malloc>, ed: EnumDecl) String {
-    out := s.gstr_append(alloc, "struct ").gstr_append(alloc, ed.name).gstr_append(alloc, " { int32_t tag;")
+    out := s
+        .gstr_append(alloc, "struct ")
+        .gstr_append(alloc, ed.name)
+        .gstr_append(alloc, " { int32_t tag;")
     any_payload(ed.variants).then({
         out = out.gen_union(alloc, ed.variants)
     })
@@ -234,10 +275,20 @@ gen_fwd* = (s: String, alloc: MutPtr<Malloc>, decls: [Decl], d: Decl) String {
     (decls.emit_is_trait(d) == false).then({
         d.match ({
             .DStruct(sd) => {
-                out = out.gstr_append(alloc, "typedef struct ").gstr_append(alloc, sd.name).gstr_append(alloc, " ").gstr_append(alloc, sd.name).gstr_append(alloc, "; ")
+                out = out
+                    .gstr_append(alloc, "typedef struct ")
+                    .gstr_append(alloc, sd.name)
+                    .gstr_append(alloc, " ")
+                    .gstr_append(alloc, sd.name)
+                    .gstr_append(alloc, "; ")
             },
             .DEnum(ed)   => {
-                out = out.gstr_append(alloc, "typedef struct ").gstr_append(alloc, ed.name).gstr_append(alloc, " ").gstr_append(alloc, ed.name).gstr_append(alloc, "; ")
+                out = out
+                    .gstr_append(alloc, "typedef struct ")
+                    .gstr_append(alloc, ed.name)
+                    .gstr_append(alloc, " ")
+                    .gstr_append(alloc, ed.name)
+                    .gstr_append(alloc, "; ")
             },
             _            => { },
         })
