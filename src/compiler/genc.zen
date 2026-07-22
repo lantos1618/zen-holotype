@@ -329,10 +329,9 @@ TraitDefData*: {
 Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(string_view) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData) | DTraitDefault(TraitDefData)    // DRaw = verbatim C escape
 // Compiler-owned allocations flow through these shims so stripped bootstrap drivers that do not
 // flatten std.mem.alloc's trait impls still have concrete UFCS targets for Malloc.
-acquire* = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> { (n <= 0).match ({
-    true  => null_ptr(),
-    false => malloc(n),
-}) }
+acquire* = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> {
+    (n <= 0).match ({ true => null_ptr(), false => malloc(n) })
+}
 resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
 write_str* = (dst: RawPtr<u8>, at: i64, t: string_view) i64 { dst.write_str_at(at, t, 0) }
 write_str_at = (dst: RawPtr<u8>, at: i64, t: string_view, i: i64) i64 {
@@ -427,9 +426,13 @@ call_full* = (fn: string_view, args: [Expr], targs: [Ty], p: i32, raw: bool) Exp
 }
 call* = (fn: string_view, args: [Expr]) Expr { call_full(fn, args, no_tys(), 0, false) }
 call_at* = (fn: string_view, args: [Expr], p: i32) Expr { call_full(fn, args, no_tys(), p, false) }
-raw_call_at* = (fn: string_view, args: [Expr], p: i32) Expr { call_full(fn, args, no_tys(), p, true) }
+raw_call_at* = (fn: string_view, args: [Expr], p: i32) Expr {
+    call_full(fn, args, no_tys(), p, true)
+}
 // explicit turbofish call `fn<T, …>(args)` — type args pinned at the call site.
-call_targs_at* = (fn: string_view, args: [Expr], targs: [Ty], p: i32) Expr { call_full(fn, args, targs, p, false) }
+call_targs_at* = (fn: string_view, args: [Expr], targs: [Ty], p: i32) Expr {
+    call_full(fn, args, targs, p, false)
+}
 emcall* = (recv: Ptr<Expr>, method: string_view, args: [Expr], p: i32) Expr {
     .MethodCall(MethodCallData(
         recv: recv,
@@ -556,7 +559,14 @@ eindex* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty) Expr {
         elem: elem,
     ))
 }
-eloop* = (seq: Ptr<Expr>, idx: string_view, elem: string_view, elemTy: Ty, body: [Stmt], h: string_view) Expr {
+eloop* = (
+    seq: Ptr<Expr>,
+    idx: string_view,
+    elem: string_view,
+    elemTy: Ty,
+    body: [Stmt],
+    h: string_view,
+) Expr {
     .Loop(LoopData(
         seq: seq,
         idx: idx,
@@ -972,7 +982,9 @@ fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
     buf
 }
 ty_node_in* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
-fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty { fntype(a.fnt_param_tys_in(f.params), a.ty_node_in(f.ret)) }
+fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty {
+    fntype(a.fnt_param_tys_in(f.params), a.ty_node_in(f.ret))
+}
 draw* = (c: string_view) Decl { .DRaw(c) }    // emit verbatim C: an attribute,
 // pragma, intrinsic decl, anything
 // map a narrow int/float type name to its C type; any other name passes through unchanged.

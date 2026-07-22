@@ -1,6 +1,18 @@
 // compiler.check_inline — generic template inlining, trait-miss diagnostics, and recursive-generic
 // monomorphization + closure lowering. Extracted from compiler.check (pure move).
-{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData,
+  ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData,
+  ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData,
+  GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond,
+  cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch,
+  ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at,
+  sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit,
+  FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, dfunc,
+  dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys,
+  expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32,
+  ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice,
+  tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append,
+  gstr_finish } = compiler.genc
 { mangle_str_in, mangle_semantic_in, impl_cname_in } = compiler.mangle
 { Malloc } = std.mem.alloc
 { view, is_empty, ends_with } = std.text.str
@@ -9,7 +21,9 @@
 { clos_lower_func, clos_lowerable } = compiler.passes.closures
 { calls_reflect, rc_expand, rc_gbuf, rc_gen, rc_seed } = compiler.passes.refcount
 { TyQuery, FuncQuery, has_fnt_param, slice_any } = compiler.astops
-{ Env, VList, DeclIndex, bind_args, bind_fnret, blockify, build_decl_index, cat_stmts, cenode, cps_value, dispatch_recv, dispatch_recv_name, empty_args, empty_params, is_void_ty, lit_pins, no_pins, param_index, params_env, recall, vcons, vnil } = compiler.check
+{ Env, VList, DeclIndex, bind_args, bind_fnret, blockify, build_decl_index, cat_stmts, cenode,
+  cps_value, dispatch_recv, dispatch_recv_name, empty_args, empty_params, is_void_ty, lit_pins,
+  no_pins, param_index, params_env, recall, vcons, vnil } = compiler.check
 { resolve_call, resolve_decl } = compiler.check_resolve
 { infer_targs } = compiler.check_infer
 // A generic template's body is inlined INTO its call site, but its AST nodes keep the LIBRARY byte
@@ -38,7 +52,17 @@ is_inlining* = (v: Ptr<VList>, name: string_view) bool {
         }),
     })
 }
-inline_template* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, name: string_view, cargs: [Expr], env: Ptr<VList>, exp: Ty, etargs: [Ty], cs: i32) Ptr<Expr> {
+inline_template* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    name: string_view,
+    cargs: [Expr],
+    env: Ptr<VList>,
+    exp: Ty,
+    etargs: [Ty],
+    cs: i32,
+) Ptr<Expr> {
     tf := idx.idx_func(decls, name)
     ienv := a.vcons(name, tnamed(""), env)
     // A function's body MUST produce its DECLARED return type, so that (targ-substituted) return is the
@@ -118,8 +142,17 @@ tmiss_traitish* = (decls: [Decl], fn: string_view) bool {
         })
     })
 }
-tmiss_declares* = (fields: [Field], m: string_view) bool { fields.slice_any((f) { f.name == m && f.ty.is_fnt() }) }
-tmiss_call* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], c: CallData) bool {
+tmiss_declares* = (fields: [Field], m: string_view) bool {
+    fields.slice_any((f) { f.name == m && f.ty.is_fnt() })
+}
+tmiss_call* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    tf: Func,
+    targs: [Ty],
+    c: CallData,
+) bool {
     (c.args.len > 0).match ({
         true  => {
             tpn := tf.params.tmiss_tp_of(tf.tparams, c.args[0].addr())
@@ -140,64 +173,128 @@ tmiss_call* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs
         false => false,
     })
 }
-tmiss_es* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], xs: [Expr]) bool {
+tmiss_es* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    tf: Func,
+    targs: [Ty],
+    xs: [Expr],
+) bool {
     f := false
     xs.loop((h, i, x) {
         f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, x.addr()) })
     })
     f
 }
-tmiss_arms* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], arms: [ArmData]) bool {
+tmiss_arms* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    tf: Func,
+    targs: [Ty],
+    arms: [ArmData],
+) bool {
     f := false
     arms.loop((h, i, ar) {
         f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, ar.body) })
     })
     f
 }
-tmiss_inits* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], inits: [FieldInit]) bool {
+tmiss_inits* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    tf: Func,
+    targs: [Ty],
+    inits: [FieldInit],
+) bool {
     f := false
     inits.loop((h, i, fi) {
         f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, fi.value) })
     })
     f
 }
-tmiss_e* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], e: Ptr<Expr>) bool {
+tmiss_e* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    tf: Func,
+    targs: [Ty],
+    e: Ptr<Expr>,
+) bool {
     load(e).match ({
-        .Call(c)       => a.tmiss_call(decls, idx, tf, targs, c) || a.tmiss_es(decls, idx, tf, targs, c.args),
-        .Bin(b)        => a.tmiss_e(decls, idx, tf, targs, b.lhs) || a.tmiss_e(decls, idx, tf, targs, b.rhs),
-        .Cond(d)       => a.tmiss_e(decls, idx, tf, targs, d.c) || a.tmiss_e(decls, idx, tf, targs, d.t) || a.tmiss_e(decls, idx, tf, targs, d.e),
+        .Call(c)       => a.tmiss_call(decls, idx, tf, targs, c)
+            || a.tmiss_es(decls, idx, tf, targs, c.args),
+        .Bin(b)        => a.tmiss_e(decls, idx, tf, targs, b.lhs)
+            || a.tmiss_e(decls, idx, tf, targs, b.rhs),
+        .Cond(d)       => a.tmiss_e(decls, idx, tf, targs, d.c)
+            || a.tmiss_e(decls, idx, tf, targs, d.t)
+            || a.tmiss_e(decls, idx, tf, targs, d.e),
         .Member(m)     => a.tmiss_e(decls, idx, tf, targs, m.obj),
         .Arrow(ar)     => a.tmiss_e(decls, idx, tf, targs, ar.obj),
         .MakeEnum(mk)  => a.tmiss_e(decls, idx, tf, targs, mk.payload),
         .MakeStruct(s) => a.tmiss_inits(decls, idx, tf, targs, s.inits),
-        .Match(m)      => a.tmiss_e(decls, idx, tf, targs, m.subj) || a.tmiss_arms(decls, idx, tf, targs, m.arms),
-        .Index(ix)     => a.tmiss_e(decls, idx, tf, targs, ix.seq) || a.tmiss_e(decls, idx, tf, targs, ix.idx),
+        .Match(m)      => a.tmiss_e(decls, idx, tf, targs, m.subj)
+            || a.tmiss_arms(decls, idx, tf, targs, m.arms),
+        .Index(ix)     => a.tmiss_e(decls, idx, tf, targs, ix.seq)
+            || a.tmiss_e(decls, idx, tf, targs, ix.idx),
         .SliceLit(sd)  => a.tmiss_es(decls, idx, tf, targs, sd.items),
-        .Loop(l)       => a.tmiss_e(decls, idx, tf, targs, l.seq) || a.tmiss_body(decls, idx, tf, targs, l.body),
+        .Loop(l)       => a.tmiss_e(decls, idx, tf, targs, l.seq)
+            || a.tmiss_body(decls, idx, tf, targs, l.body),
         .Block(bl)     => a.tmiss_body(decls, idx, tf, targs, bl.stmts),
         .Lambda(la)    => a.tmiss_body(decls, idx, tf, targs, la.body),
         _              => false,
     })
 }
-tmiss_stmt* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], st: Stmt) bool {
+tmiss_stmt* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    tf: Func,
+    targs: [Ty],
+    st: Stmt,
+) bool {
     st.match ({
         .Let(l)      => a.tmiss_e(decls, idx, tf, targs, l.value),
-        .Assign(x)   => a.tmiss_e(decls, idx, tf, targs, x.target) || a.tmiss_e(decls, idx, tf, targs, x.value),
+        .Assign(x)   => a.tmiss_e(decls, idx, tf, targs, x.target)
+            || a.tmiss_e(decls, idx, tf, targs, x.value),
         .Return(r)   => a.tmiss_e(decls, idx, tf, targs, r),
         .ExprStmt(e) => a.tmiss_e(decls, idx, tf, targs, e),
-        .If(f)       => a.tmiss_e(decls, idx, tf, targs, f.c) || a.tmiss_body(decls, idx, tf, targs, f.then) || a.tmiss_body(decls, idx, tf, targs, f.els),
-        .While(w)    => a.tmiss_e(decls, idx, tf, targs, w.c) || a.tmiss_body(decls, idx, tf, targs, w.body),
-        .IndexSet(x) => a.tmiss_e(decls, idx, tf, targs, x.seq) || a.tmiss_e(decls, idx, tf, targs, x.idx) || a.tmiss_e(decls, idx, tf, targs, x.value),
+        .If(f)       => a.tmiss_e(decls, idx, tf, targs, f.c)
+            || a.tmiss_body(decls, idx, tf, targs, f.then)
+            || a.tmiss_body(decls, idx, tf, targs, f.els),
+        .While(w)    => a.tmiss_e(decls, idx, tf, targs, w.c)
+            || a.tmiss_body(decls, idx, tf, targs, w.body),
+        .IndexSet(x) => a.tmiss_e(decls, idx, tf, targs, x.seq)
+            || a.tmiss_e(decls, idx, tf, targs, x.idx)
+            || a.tmiss_e(decls, idx, tf, targs, x.value),
     })
 }
-tmiss_body* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], body: [Stmt]) bool {
+tmiss_body* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    tf: Func,
+    targs: [Ty],
+    body: [Stmt],
+) bool {
     f := false
     body.loop((h, i, st) {
         f = f.match ({ true => true, false => a.tmiss_stmt(decls, idx, tf, targs, st) })
     })
     f
 }
-pin_targs* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty, may_splice: bool) Ptr<Expr> {
+pin_targs* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    c: CallData,
+    cargs: [Expr],
+    env: Ptr<VList>,
+    exp: Ty,
+    may_splice: bool,
+) Ptr<Expr> {
     tf := idx.idx_func(decls, c.fn)
     (tf.tparams.len > 0 && tf.params.len == cargs.len).match ({
         true  => {
@@ -213,7 +310,15 @@ pin_targs* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, car
         false => a.recall(c, c.fn, cargs),
     })
 }
-maybe_template* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, c: CallData, cargs: [Expr], env: Ptr<VList>, exp: Ty) Ptr<Expr> {
+maybe_template* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    c: CallData,
+    cargs: [Expr],
+    env: Ptr<VList>,
+    exp: Ty,
+) Ptr<Expr> {
     idx.idx_template_call(decls, c.fn).match ({
         true  => (env.is_inlining(c.fn) || idx.idx_func(decls, c.fn).no_inline_gen_f()).match ({
             true  => a.pin_targs(decls, idx, c, cargs, env, exp, env.is_inlining(c.fn) == false),
@@ -258,7 +363,9 @@ inline_decl* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl 
 // and the expansion (correctly) deferred. The inline-only scope limits are ENFORCED by the
 // validator: self-recursion → error[recursive-hof] (kinds.ka_rec_hof_kind), a `return` inside a
 // loop → error[reflect-return] (kinds.ka_reflect_ret_kind).
-no_inline_gen_f* = (f: Func) bool { f.is_generic_fn() && f.params.has_fnt_param() == false && f.body.calls_reflect() == false }
+no_inline_gen_f* = (f: Func) bool {
+    f.is_generic_fn() && f.params.has_fnt_param() == false && f.body.calls_reflect() == false
+}
 // instance buffer: deduped by mangled name, bounded against polymorphic-recursion blowup (like mono).
 mono_rec* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, from: i64) [Decl] {
     base := Env(
@@ -321,7 +428,14 @@ mono_close* = (a: MutPtr<Malloc>, decls: [Decl], from: i64, guard: i32) [Decl] {
 // capture analysis: does this lambda body reference a FREE variable — a name that is neither one of the
 // lambda's params, a binder introduced inside the body, a top-level fn/global, nor true/false? Such a
 // name is a captured enclosing local. `bound` threads the in-scope binder names (scope-correct).
-field_fnt* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, sty: string_view, targs: [Ty], fname: string_view) Ty {
+field_fnt* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    sty: string_view,
+    targs: [Ty],
+    fname: string_view,
+) Ty {
     (targs.len > 0).match ({
         true  => idx.idx_genstruct_field(a, decls, sty, fname, targs),
         false => idx.idx_struct_field(decls, sty, fname),

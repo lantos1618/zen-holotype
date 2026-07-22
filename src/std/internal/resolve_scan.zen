@@ -13,12 +13,16 @@
 { String } = std.text.string
 { Map, of } = std.collections.map
 { view } = std.text.str
-{ lstrip, is_import_line, next_line, STD_MARKER_LEN, COMPILER_MARKER_LEN, USER_MARKER_LEN, rset_add, rset_add_str, rpush, rappend, rappend_span, madd_str_name, ImportEdge, ProvidedSymbol, SIG_PUB, SIG_TYPE, SIG_IMPORTED, SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line } = std.internal.resolve
+{ lstrip, is_import_line, next_line, STD_MARKER_LEN, COMPILER_MARKER_LEN, USER_MARKER_LEN, rset_add,
+  rset_add_str, rpush, rappend, rappend_span, madd_str_name, ImportEdge, ProvidedSymbol, SIG_PUB,
+  SIG_TYPE, SIG_IMPORTED, SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line } = std.internal.resolve
 is_ws* = (b: u8) bool { b == ' ' || b == '\t' }
 // A top-level line opening an import: `{` then a space OR a binding name directly (`{println}`).
 // `has_import_marker` then confirms a real `} = std./compiler./user` follows, so relaxing the
 // space requirement here can't mis-classify a plain `{` block.
-opens_import* = (s: string_view, p: i32) bool { s.at(p) == '{' && (s.at(p + 1) == ' ' || s.at(p + 1).is_alpha() || s.at(p + 1) == '_') }
+opens_import* = (s: string_view, p: i32) bool {
+    s.at(p) == '{' && (s.at(p + 1) == ' ' || s.at(p + 1).is_alpha() || s.at(p + 1) == '_')
+}
 import_marker_from = (s: string_view, p: i32) i32 {
     b := s.at(p)
     (b == 0).match ({
@@ -50,7 +54,14 @@ is_marker_at = (s: string_view, p: i32) bool { s.is_std_marker_at(p) || s.is_com
 // a call (`= compute()`; without the `!= '('` guard a value-global `pi = compute()` is mis-read as
 // importing a module `compute` — spurious "unknown module") NOR carry a trailing bare dot (`= a.`
 // stays a plain decl, exactly as before dotted user ids existed).
-is_user_marker_at = (s: string_view, p: i32) bool { s.at(p) == '=' && s.at(p + 1) == ' ' && s.at(p + 2).is_alpha() && s.at(s.dotted_path_end(p + 2)) != '.' && s.at(s.dotted_path_end(p + 2)) != '(' && s.is_marker_at(p) == false }
+is_user_marker_at = (s: string_view, p: i32) bool {
+    s.at(p) == '='
+        && s.at(p + 1) == ' '
+        && s.at(p + 2).is_alpha()
+        && s.at(s.dotted_path_end(p + 2)) != '.'
+        && s.at(s.dotted_path_end(p + 2)) != '('
+        && s.is_marker_at(p) == false
+}
 is_any_marker_at = (s: string_view, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
 import_end = (s: string_view, p: i32) i32 { s.next_line(s.import_marker_from(s.lstrip(p))) }
 strip_count* = (s: string_view, p: i32, n: i32) i32 {
@@ -224,8 +235,12 @@ strip_into = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32, first: boo
     })
     cur
 }
-strip_imports* = (out: String, a: MutPtr<Malloc>, s: string_view) String { out.strip_into(a, s, 0, true) }
-concat_files* = (out: String, a: MutPtr<Malloc>, left: string_view, right: string_view) String { out.rappend(a, left).rpush(a, 10).rappend(a, right) }
+strip_imports* = (out: String, a: MutPtr<Malloc>, s: string_view) String {
+    out.strip_into(a, s, 0, true)
+}
+concat_files* = (out: String, a: MutPtr<Malloc>, left: string_view, right: string_view) String {
+    out.rappend(a, left).rpush(a, 10).rappend(a, right)
+}
 module_name_pos = (s: string_view, p: i32) i32 {
     s.is_std_marker_at(p).match ({
         true  => p + STD_MARKER_LEN,
@@ -259,7 +274,9 @@ take_dotted = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     })
     cur
 }
-import_module* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String { out.take_module_path(a, s, s.module_name_pos(p)) }
+import_module* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
+    out.take_module_path(a, s, s.module_name_pos(p))
+}
 take_module_path = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     cur := out
     pos := p
@@ -311,12 +328,18 @@ import_id = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     })
     cur
 }
-decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String { a.symbol_names_into_in(a.gstr_string(256), g.symbols, 0, false, false) }
+decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
+    a.symbol_names_into_in(a.gstr_string(256), g.symbols, 0, false, false)
+}
 // Like decl_names_in, but ALSO excludes TYPE (struct/enum) decls. A namespace alias prefixes only the
 // names this returns with `alias__`; TYPE names are deliberately left bare so the same type reached two
 // ways (`x = mod` vs `{ T } = mod`) keeps ONE canonical C identity (dedup_decls then collapses the copies).
-value_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String { a.value_symbol_names_into_in(a.gstr_string(256), g.symbols, 0) }
-all_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String { a.symbol_names_into_in(a.gstr_string(256), g.symbols, 0, false, true) }
+value_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
+    a.value_symbol_names_into_in(a.gstr_string(256), g.symbols, 0)
+}
+all_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
+    a.symbol_names_into_in(a.gstr_string(256), g.symbols, 0, false, true)
+}
 // end of a dotted module path (`util.helpers`) whose first identifier starts at `p`.
 dotted_path_end = (s: string_view, p: i32) i32 {
     e := s.res_ident_end(p)
@@ -346,10 +369,9 @@ import_edge_count_from = (src: string_view, p: i32, n: i32) i32 {
     count
 }
 import_edge_count* = (src: string_view) i32 { src.import_edge_count_from(0, 0) }
-edge_next = (src: string_view, p: i32) i32 { src.is_import_line(p).match ({
-    true  => src.import_end(p),
-    false => src.next_line(p),
-}) }
+edge_next = (src: string_view, p: i32) i32 {
+    src.is_import_line(p).match ({ true => src.import_end(p), false => src.next_line(p) })
+}
 edge_buf<A> = (a: MutPtr<A>, n: i64) Result<[ImportEdge], IoError> {
     a.try_acquire(n * sizeof(ImportEdge)).match ({
         .Ok(p)  => ok(slice(p, n)),
@@ -462,10 +484,12 @@ marker_pos = (s: string_view, p: i32) i32 {
     pos
 }
 // End of the module-path span starting at `p`: alnum and '.' bytes (mirrors copy_module_path_to).
-module_path_span_end = (s: string_view, p: i32) i32 { (s.at(p).is_alnum() || s.at(p) == '.').match ({
-    true  => s.module_path_span_end(p + 1),
-    false => p,
-}) }
+module_path_span_end = (s: string_view, p: i32) i32 {
+    (s.at(p).is_alnum() || s.at(p) == '.').match ({
+        true  => s.module_path_span_end(p + 1),
+        false => p,
+    })
+}
 // Exact byte length of the id written for the marker at `mk` — prefix plus module-path span. This
 // is what makes edge-id allocation exact: no cap, no silent truncation, ids of any length resolve.
 import_id_len_at = (s: string_view, mk: i32) i64 {
@@ -526,7 +550,13 @@ edge_from_line<A> = (a: MutPtr<A>, src: string_view, p: i32) Result<ImportEdge, 
         .Err(e)  => err(e),
     })
 }
-fill_import_edges<A> = (a: MutPtr<A>, src: string_view, p: i32, out: [ImportEdge], i: i32) Result<[ImportEdge], IoError> {
+fill_import_edges<A> = (
+    a: MutPtr<A>,
+    src: string_view,
+    p: i32,
+    out: [ImportEdge],
+    i: i32,
+) Result<[ImportEdge], IoError> {
     pos := p
     idx := i
     failed := false
@@ -571,8 +601,12 @@ import_edges*<A> = (a: MutPtr<A>, src: string_view) Result<[ImportEdge], IoError
         .Err(e)  => err(e),
     })
 }
-edge_id_in* = (e: ImportEdge, a: MutPtr<Malloc>) String { a.gstr_string(24).gstr_append(a, e.module) }
-edge_alias_in* = (e: ImportEdge, a: MutPtr<Malloc>) String { a.gstr_string(16).gstr_append(a, e.alias) }
+edge_id_in* = (e: ImportEdge, a: MutPtr<Malloc>) String {
+    a.gstr_string(24).gstr_append(a, e.module)
+}
+edge_alias_in* = (e: ImportEdge, a: MutPtr<Malloc>) String {
+    a.gstr_string(16).gstr_append(a, e.alias)
+}
 // Import-head validation: `{ f, g } = m` must be provided by `m`.
 provided_head_count = (src: string_view, p: i32, n: i32) i32 {
     pos := p
@@ -633,7 +667,9 @@ provided_symbol_count_from = (a: MutPtr<Malloc>, src: string_view, p: i32, n: i3
     })
     count
 }
-provided_symbol_count* = (a: MutPtr<Malloc>, src: string_view) i32 { a.provided_symbol_count_from(src, 0, 0) }
+provided_symbol_count* = (a: MutPtr<Malloc>, src: string_view) i32 {
+    a.provided_symbol_count_from(src, 0, 0)
+}
 symbol_buf<A> = (a: MutPtr<A>, n: i64) Result<[ProvidedSymbol], IoError> {
     a.try_acquire(n * sizeof(ProvidedSymbol)).match ({
         .Ok(p)  => ok(slice(p, n)),
@@ -668,13 +704,25 @@ finish_symbol_name = (buf: RawPtr<u8>, src: string_view, p: i32, e: i32, escape:
     buf.offset(cur).store(0)
     cstr(buf)
 }
-symbol_name_alloc<A> = (a: MutPtr<A>, src: string_view, p: i32, e: i32, escape: bool) Result<string_view, IoError> {
+symbol_name_alloc<A> = (
+    a: MutPtr<A>,
+    src: string_view,
+    p: i32,
+    e: i32,
+    escape: bool,
+) Result<string_view, IoError> {
     a.try_acquire(src.symbol_name_len(p, e, escape) + 1).match ({
         .Ok(buf) => ok(buf.finish_symbol_name(src, p, e, escape)),
         .Err(e)  => err(e),
     })
 }
-fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: string_view, p: i32, out: [ProvidedSymbol], i: i32) Result<i32, IoError> {
+fill_head_symbols_in<A> = (
+    alloc: MutPtr<A>,
+    src: string_view,
+    p: i32,
+    out: [ProvidedSymbol],
+    i: i32,
+) Result<i32, IoError> {
     pos := p
     idx := i
     failed := false
@@ -729,7 +777,14 @@ fill_head_symbols_in<A> = (alloc: MutPtr<A>, src: string_view, p: i32, out: [Pro
     })
     failed.match ({ true => err(last_err), false => ok(idx) })
 }
-fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_view, p: i32, out: [ProvidedSymbol], i: i32) Result<[ProvidedSymbol], IoError> {
+fill_provided_symbols_in<A> = (
+    a: MutPtr<Malloc>,
+    alloc: MutPtr<A>,
+    src: string_view,
+    p: i32,
+    out: [ProvidedSymbol],
+    i: i32,
+) Result<[ProvidedSymbol], IoError> {
     pos := p
     idx := i
     failed := false
@@ -804,13 +859,19 @@ fill_provided_symbols_in<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_
     })
     failed.match ({ true => err(last_err), false => ok(out) })
 }
-provided_symbols_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_view) Result<[ProvidedSymbol], IoError> {
+provided_symbols_in*<A> = (
+    a: MutPtr<Malloc>,
+    alloc: MutPtr<A>,
+    src: string_view,
+) Result<[ProvidedSymbol], IoError> {
     alloc.symbol_buf(a.provided_symbol_count(src)).match ({
         .Ok(buf) => a.fill_provided_symbols_in(alloc, src, 0, buf, 0),
         .Err(e)  => err(e),
     })
 }
-provided_symbols* = (a: MutPtr<Malloc>, src: string_view) Result<[ProvidedSymbol], IoError> { a.provided_symbols_in(a, src) }
+provided_symbols* = (a: MutPtr<Malloc>, src: string_view) Result<[ProvidedSymbol], IoError> {
+    a.provided_symbols_in(a, src)
+}
 // flags word for one scanned symbol (see ModuleSig).
 sym_sig_flags = (s: ProvidedSymbol) i64 {
     f: i64 := 0
@@ -880,18 +941,25 @@ span_has_byte = (s: string_view, p: i32, e: i32, b: u8) bool {
         false => (s.at(p) == b).match ({ true => true, false => s.span_has_byte(p + 1, e, b) }),
     })
 }
-is_foreign_span = (s: string_view, p: i32, e: i32) bool { s.span_has_byte(p, e, '=') && s.span_has_byte(p, e, '{').match ({
-    true  => false,
-    false => true,
-}) }
-symbol_name_in = (s: ProvidedSymbol, a: MutPtr<Malloc>) String { a.gstr_string(s.name.view().len + 1).gstr_append(a, s.name) }
-symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bool) bool {
-    (include_imported || s.imported.match ({ true => false, false => true })) && (include_foreign || s.foreign.match ({
-        true  => false,
-        false => true,
-    }))
+is_foreign_span = (s: string_view, p: i32, e: i32) bool {
+    s.span_has_byte(p, e, '=')
+        && s.span_has_byte(p, e, '{').match ({ true => false, false => true })
 }
-symbol_names_into = (set: String, a: MutPtr<Malloc>, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
+symbol_name_in = (s: ProvidedSymbol, a: MutPtr<Malloc>) String {
+    a.gstr_string(s.name.view().len + 1).gstr_append(a, s.name)
+}
+symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bool) bool {
+    (include_imported || s.imported.match ({ true => false, false => true }))
+        && (include_foreign || s.foreign.match ({ true => false, false => true }))
+}
+symbol_names_into = (
+    set: String,
+    a: MutPtr<Malloc>,
+    symbols: [ProvidedSymbol],
+    i: i64,
+    include_imported: bool,
+    include_foreign: bool,
+) String {
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
@@ -902,7 +970,14 @@ symbol_names_into = (set: String, a: MutPtr<Malloc>, symbols: [ProvidedSymbol], 
     })
     cur
 }
-symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64, include_imported: bool, include_foreign: bool) String {
+symbol_names_into_in = (
+    a: MutPtr<Malloc>,
+    set: String,
+    symbols: [ProvidedSymbol],
+    i: i64,
+    include_imported: bool,
+    include_foreign: bool,
+) String {
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
@@ -914,14 +989,17 @@ symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol
     cur
 }
 // Module-DEFINED value/fn decl names only: non-imported, non-foreign, and NOT a type (struct/enum).
-value_symbol_names_into_in = (a: MutPtr<Malloc>, set: String, symbols: [ProvidedSymbol], i: i64) String {
+value_symbol_names_into_in = (
+    a: MutPtr<Malloc>,
+    set: String,
+    symbols: [ProvidedSymbol],
+    i: i64,
+) String {
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
-            (sym.symbol_allowed(false, false) && sym.is_type.match ({
-                true  => false,
-                false => true,
-            })).then({
+            (sym.symbol_allowed(false, false)
+                && sym.is_type.match ({ true => false, false => true })).then({
                 cur = a.madd_str_name(cur, sym.name)
             })
         })
@@ -935,7 +1013,9 @@ imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSy
     cur := m
     symbols.loop((h, idx, sym) {
         (sym.imported && sym.is_type.match ({ true => false, false => true })).then({
-            cur = cur.rset_add(a, sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed"))
+            cur = cur.rset_add(a, sym
+                .symbol_key_in(a)
+                .expect("std.internal.resolve: allocation failed"))
         })
     })
     cur
@@ -949,7 +1029,9 @@ value_symbol_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymb
     })
     cur
 }
-alias_decl_names = (a: MutPtr<Malloc>, src: string_view) String { a.module_graph(src).decl_names_in(a) }
+alias_decl_names = (a: MutPtr<Malloc>, src: string_view) String {
+    a.module_graph(src).decl_names_in(a)
+}
 span_eq_lit = (s: string_view, p: i32, e: i32, lit: string_view, i: i32) bool {
     (p + i == e).match ({
         true  => lit.at(i) == 0,
@@ -959,5 +1041,40 @@ span_eq_lit = (s: string_view, p: i32, e: i32, lit: string_view, i: i32) bool {
         }),
     })
 }
-span_eq_name = (s: string_view, p: i32, e: i32, lit: string_view) bool { s.span_eq_lit(p, e, lit, 0) }
-is_c_kw_name_span = (s: string_view, p: i32, e: i32) bool { s.span_eq_name(p, e, "double") || s.span_eq_name(p, e, "short") || s.span_eq_name(p, e, "long") || s.span_eq_name(p, e, "int") || s.span_eq_name(p, e, "char") || s.span_eq_name(p, e, "float") || s.span_eq_name(p, e, "unsigned") || s.span_eq_name(p, e, "signed") || s.span_eq_name(p, e, "union") || s.span_eq_name(p, e, "struct") || s.span_eq_name(p, e, "enum") || s.span_eq_name(p, e, "typedef") || s.span_eq_name(p, e, "static") || s.span_eq_name(p, e, "extern") || s.span_eq_name(p, e, "const") || s.span_eq_name(p, e, "volatile") || s.span_eq_name(p, e, "register") || s.span_eq_name(p, e, "auto") || s.span_eq_name(p, e, "inline") || s.span_eq_name(p, e, "restrict") || s.span_eq_name(p, e, "if") || s.span_eq_name(p, e, "else") || s.span_eq_name(p, e, "for") || s.span_eq_name(p, e, "while") || s.span_eq_name(p, e, "do") || s.span_eq_name(p, e, "switch") || s.span_eq_name(p, e, "case") || s.span_eq_name(p, e, "default") || s.span_eq_name(p, e, "goto") || s.span_eq_name(p, e, "void") || s.span_eq_name(p, e, "continue") || s.span_eq_name(p, e, "break") }
+span_eq_name = (s: string_view, p: i32, e: i32, lit: string_view) bool {
+    s.span_eq_lit(p, e, lit, 0)
+}
+is_c_kw_name_span = (s: string_view, p: i32, e: i32) bool {
+    s.span_eq_name(p, e, "double")
+        || s.span_eq_name(p, e, "short")
+        || s.span_eq_name(p, e, "long")
+        || s.span_eq_name(p, e, "int")
+        || s.span_eq_name(p, e, "char")
+        || s.span_eq_name(p, e, "float")
+        || s.span_eq_name(p, e, "unsigned")
+        || s.span_eq_name(p, e, "signed")
+        || s.span_eq_name(p, e, "union")
+        || s.span_eq_name(p, e, "struct")
+        || s.span_eq_name(p, e, "enum")
+        || s.span_eq_name(p, e, "typedef")
+        || s.span_eq_name(p, e, "static")
+        || s.span_eq_name(p, e, "extern")
+        || s.span_eq_name(p, e, "const")
+        || s.span_eq_name(p, e, "volatile")
+        || s.span_eq_name(p, e, "register")
+        || s.span_eq_name(p, e, "auto")
+        || s.span_eq_name(p, e, "inline")
+        || s.span_eq_name(p, e, "restrict")
+        || s.span_eq_name(p, e, "if")
+        || s.span_eq_name(p, e, "else")
+        || s.span_eq_name(p, e, "for")
+        || s.span_eq_name(p, e, "while")
+        || s.span_eq_name(p, e, "do")
+        || s.span_eq_name(p, e, "switch")
+        || s.span_eq_name(p, e, "case")
+        || s.span_eq_name(p, e, "default")
+        || s.span_eq_name(p, e, "goto")
+        || s.span_eq_name(p, e, "void")
+        || s.span_eq_name(p, e, "continue")
+        || s.span_eq_name(p, e, "break")
+}

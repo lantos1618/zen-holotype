@@ -24,10 +24,9 @@ Malloc*: {
 // into DynAlloc / Rt vtables directly). Every heap floor in the stdlib routes here: Heap.impl,
 // Malloc.impl, dyn_heap(), and std.rt's heap vtable all call these three fns instead of re-inlining
 // the `(n<=0)?null:malloc` / realloc / free lines. acquire treats a 0-byte request as a null success.
-heap_acquire* = (state: RawPtr<u8>, n: i64) RawPtr<u8> { (n <= 0).match ({
-    true  => null_ptr(),
-    false => malloc(n),
-}) }
+heap_acquire* = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
+    (n <= 0).match ({ true => null_ptr(), false => malloc(n) })
+}
 heap_resize* = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
 heap_release* = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
 Heap.impl(Allocator, {
@@ -46,7 +45,9 @@ try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
     // ok_ptr would mis-map that null to .Err. Short-circuit before reaching ok_ptr.
     (n <= 0).match ({ true => .Ok(null_ptr()), false => ok_ptr(a.acquire(n)) })
 }
-try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(a.resize(p, n)) }
+try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> {
+    ok_ptr(a.resize(p, n))
+}
 // ── refcount block: [ count:i64 | value:T ] ────────────────────────────────────────────────────────
 // The i64 count lives in the first 8 bytes; the value follows at `.offset(8)`. std.mem.{rc,arc,own}
 // all share THIS block shape and differ only in how they bump the count (plain vs atomic) and tear it
@@ -172,7 +173,12 @@ DynAlloc.impl(Allocator, {
     }
 })
 // Erase a raw allocator vtable + state into a DynAlloc value (the erasure constructor).
-dyn_of* = (acquire: (RawPtr<u8>, i64) RawPtr<u8>, resize: (RawPtr<u8>, RawPtr<u8>, i64) RawPtr<u8>, release: (RawPtr<u8>, RawPtr<u8>) void, state: RawPtr<u8>) DynAlloc {
+dyn_of* = (
+    acquire: (RawPtr<u8>, i64) RawPtr<u8>,
+    resize: (RawPtr<u8>, RawPtr<u8>, i64) RawPtr<u8>,
+    release: (RawPtr<u8>, RawPtr<u8>) void,
+    state: RawPtr<u8>,
+) DynAlloc {
     DynAlloc(
         d_acquire: acquire,
         d_resize: resize,

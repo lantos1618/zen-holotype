@@ -7,10 +7,9 @@
 { is_space } = std.text.bytes
 len* = (s: string_view) i64 { s.strlen() }
 is_empty* = (s: string_view) bool { (s.strlen() == 0).match ({ true => true, false => false }) }
-eq* = (a: string_view, b: string_view) bool { (a.strcmp(b) == 0).match ({
-    true  => true,
-    false => false,
-}) }
+eq* = (a: string_view, b: string_view) bool {
+    (a.strcmp(b) == 0).match ({ true => true, false => false })
+}
 ne* = (a: string_view, b: string_view) bool { a.eq(b).match ({ true => false, false => true }) }
 // ── bytes: borrow or own ────────────────────────────────────────────────────
 view* = (s: string_view) [u8] { s.slice(s.strlen()) }
@@ -125,7 +124,9 @@ substr_in*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string
         .Err(e) => err(e),
     })
 }
-substr*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string_view, IoError> { a.substr_in(s, start, n) }
+substr*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string_view, IoError> {
+    a.substr_in(s, start, n)
+}
 // the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
 at* = (s: string_view, i: i64) u8 {
     sv := s.view()
@@ -186,7 +187,9 @@ trim_in*<A> = (a: MutPtr<A>, s: string_view) string_view {
     v: [u8] := s.view()
     lo := v.ws_start()
     hi := v.ws_end()
-    a.substr_in(s, lo, (hi > lo).match ({ true => hi - lo, false => 0 })).expect("std.text.str: allocation failed")
+    a
+        .substr_in(s, lo, (hi > lo).match ({ true => hi - lo, false => 0 }))
+        .expect("std.text.str: allocation failed")
 }
 trim*<A> = (a: MutPtr<A>, s: string_view) string_view { a.trim_in(s) }
 rtrim_in*<A> = (a: MutPtr<A>, s: string_view) string_view {
@@ -197,10 +200,9 @@ rtrim*<A> = (a: MutPtr<A>, s: string_view) string_view { a.rtrim_in(s) }
 // strip a leading `prefix` AS A STR — zero-copy (no allocation): like `ltrim`, dropping a prefix only
 // advances the start pointer and the original NUL still terminates the tail. Returns `s` unchanged when
 // it doesn't start with `prefix`. trim_prefix("--verbose", "--") == "verbose".
-trim_prefix* = (s: string_view, prefix: string_view) string_view { s.starts_with(prefix).match ({
-    true  => cstr(s.view().ptr.offset(prefix.len())),
-    false => s,
-}) }
+trim_prefix* = (s: string_view, prefix: string_view) string_view {
+    s.starts_with(prefix).match ({ true => cstr(s.view().ptr.offset(prefix.len())), false => s })
+}
 // strip a trailing `suffix` — allocator-owned NUL-terminated copy (a fresh trailing boundary needs its
 // own NUL, so this can't be zero-copy). Returns a COPY of `s` when it doesn't end with `suffix`.
 // trim_suffix("file.zen", ".zen") == "file".
@@ -211,7 +213,9 @@ trim_suffix_in*<A> = (a: MutPtr<A>, s: string_view, suffix: string_view) string_
         false => a.substr_in(s, 0, n).expect("std.text.str: allocation failed"),
     })
 }
-trim_suffix*<A> = (a: MutPtr<A>, s: string_view, suffix: string_view) string_view { a.trim_suffix_in(s, suffix) }
+trim_suffix*<A> = (a: MutPtr<A>, s: string_view, suffix: string_view) string_view {
+    a.trim_suffix_in(s, suffix)
+}
 // ── splitting: fields and words ───────────────────────────────────────────────
 //
 // A returned `[str]` holds NUL-terminated COPIES of each field, not zero-copy sub-views: `str` is
@@ -301,8 +305,12 @@ copy_at = (out: [u8], at: i64, t: string_view) i64 {
     at + tv.len
 }
 // the 'A'..'Z' / 'a'..'z' case shift; non-letters pass through. ASCII-ONLY (bytes 0x80+ untouched).
-to_ascii_lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').match ({ true => b + ('a' - 'A'), false => b }) }
-to_ascii_upper = (b: u8) u8 { (b >= 'a' && b <= 'z').match ({ true => b - ('a' - 'A'), false => b }) }
+to_ascii_lower = (b: u8) u8 {
+    (b >= 'A' && b <= 'Z').match ({ true => b + ('a' - 'A'), false => b })
+}
+to_ascii_upper = (b: u8) u8 {
+    (b >= 'a' && b <= 'z').match ({ true => b - ('a' - 'A'), false => b })
+}
 // ASCII lower/upper-cased COPY of `s`. Only A–Z / a–z are folded; every other byte (digits, punctuation,
 // UTF-8 continuation bytes) is copied verbatim. to_upper("hi!") == "HI!".
 to_lower_in*<A> = (a: MutPtr<A>, s: string_view) string_view {
@@ -366,7 +374,9 @@ join_in*<A> = (a: MutPtr<A>, parts: [string_view], sep: string_view) string_view
     out[total] = 0
     cstr(out.ptr)
 }
-join*<A> = (a: MutPtr<A>, parts: [string_view], sep: string_view) string_view { a.join_in(parts, sep) }
+join*<A> = (a: MutPtr<A>, parts: [string_view], sep: string_view) string_view {
+    a.join_in(parts, sep)
+}
 // ── concatenation: explicit allocator, NO hidden heap ─────────────────────────
 //
 // Zen has no `str + str` operator on purpose: `+` would hide a malloc. Concatenation is
@@ -438,7 +448,9 @@ replace_in*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_vi
         },
     })
 }
-replace*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_view) string_view { a.replace_in(s, from, to) }
+replace*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_view) string_view {
+    a.replace_in(s, from, to)
+}
 // pad `s` to at least `width` bytes by prepending / appending `fill`; a longer `s` is copied unchanged.
 // pad_left("7", 3, '0') == "007"; pad_right("hi", 4, ' ') == "hi  ".
 pad_left_in*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view {
@@ -459,7 +471,9 @@ pad_left_in*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_vi
     })
     cstr(out.ptr)
 }
-pad_left*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view { a.pad_left_in(s, width, fill) }
+pad_left*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view {
+    a.pad_left_in(s, width, fill)
+}
 pad_right_in*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view {
     sv := s.view()
     pad := (width > sv.len).match ({ true => width - sv.len, false => 0 })
@@ -478,7 +492,9 @@ pad_right_in*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_v
     })
     cstr(out.ptr)
 }
-pad_right*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view { a.pad_right_in(s, width, fill) }
+pad_right*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view {
+    a.pad_right_in(s, width, fill)
+}
 // ── numbers ─────────────────────────────────────────────────────────────────
 // the i64 value of the decimal text in `s`: an optional leading '-', then a run of
 // digits. Parsing stops at the first non-digit and never errors: no leading digits

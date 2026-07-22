@@ -1,7 +1,9 @@
 // compiler.passes.refcount — refcount insertion sub-pass extracted from compiler.check.
-{ ArmData, CallData, Decl, Expr, FieldInit, Func, GenericData, LoopData, MatchData, Param, Stmt, Ty, dfunc, no_tys, subst_ty_in, ti64, tvoid } = compiler.genc
+{ ArmData, CallData, Decl, Expr, FieldInit, Func, GenericData, LoopData, MatchData, Param, Stmt, Ty,
+  dfunc, no_tys, subst_ty_in, ti64, tvoid } = compiler.genc
 { mangle_semantic_in } = compiler.mangle
-{ Env, DeclIndex, arm_env, bind_fnret, empty_params, extend_env, fnret_of, is_void_ty, params_env, pbuf, vcons } = compiler.check
+{ Env, DeclIndex, arm_env, bind_fnret, empty_params, extend_env, fnret_of, is_void_ty, params_env,
+  pbuf, vcons } = compiler.check
 { no_inline_gen_f } = compiler.check_inline
 { subst_body } = compiler.passes.subst
 { has_fnt_param } = compiler.astops
@@ -69,7 +71,11 @@ rc_calls_body* = (body: [Stmt], nm: string_view) bool {
 // FnT-param generic: the intrinsic expands in the inliner with the receiver's CONCRETE type, which
 // only the call-site inline provides. Lives here (beside its rc_calls_body walker) so both the
 // inline router (check_inline.no_inline_gen_f) and the validator (kinds.ka_rec_hof_kind) share it.
-calls_reflect* = (body: [Stmt]) bool { body.rc_calls_body("field_eq") || body.rc_calls_body("each_field") || body.rc_calls_body("zip_fields") }
+calls_reflect* = (body: [Stmt]) bool {
+    body.rc_calls_body("field_eq")
+        || body.rc_calls_body("each_field")
+        || body.rc_calls_body("zip_fields")
+}
 // a recursive generic = type-param generic (NOT FnT-splice) with a body that calls itself directly.
 rc_is_rec_gen_f* = (f: Func) bool {
     (f.tparams.len > 0 && f.params.has_fnt_param() == false).match ({
@@ -91,7 +97,9 @@ rc_is_rec_gen_f* = (f: Func) bool {
 // an honest function return. Statement-level returns (top level / If branches) stay inlinable — the
 // existing lift handles those (or_return_expr_generic_inline relies on it). FnT-param generics can't
 // monomorphize (their lambda args must splice), so they are out of scope here, as before.
-rc_gbuf* = (a: MutPtr<Malloc>, n: i64) [GenericData] { slice(a.acquire(n * sizeof(GenericData)), n) }
+rc_gbuf* = (a: MutPtr<Malloc>, n: i64) [GenericData] {
+    slice(a.acquire(n * sizeof(GenericData)), n)
+}
 // dedup scan (gd_has_mangled) + type-arg nesting depth (gd_ty_depth/gd_tys_max_depth) are shared
 // leaves; they live in compiler.generics (imported above) alongside their mono twins. rc_add stays
 // local — it differs from mono's add_inst only in its panic message, so it is NOT byte-identical.
@@ -192,14 +200,18 @@ rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
 rc_col_e = (env: Env, buf: [GenericData], cnt: i32, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)       => env.rc_col_call(buf, cnt, c),
-        .Bin(b)        => env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, b.lhs), b.rhs),
+        .Bin(b)        => env
+            .clr_exp()
+            .rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, b.lhs), b.rhs),
         .Cond(d)       => env.rc_col_e(buf, env.rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, d.c), d.t), d.e),
         .Member(m)     => env.clr_exp().rc_col_e(buf, cnt, m.obj),
         .Arrow(ar)     => env.clr_exp().rc_col_e(buf, cnt, ar.obj),
         .MakeEnum(mk)  => env.clr_exp().rc_col_e(buf, cnt, mk.payload),
         .MakeStruct(s) => env.clr_exp().rc_col_inits(buf, cnt, s.inits),
         .Match(m)      => env.rc_col_match(buf, cnt, m),
-        .Index(ix)     => env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, ix.seq), ix.idx),
+        .Index(ix)     => env
+            .clr_exp()
+            .rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, ix.seq), ix.idx),
         .SliceLit(sd)  => env.with_exp(env.sl_elem_exp(sd.items)).rc_col_es(buf, cnt, sd.items),
         .Loop(l)       => env.rc_col_loop(buf, cnt, l),
         .Block(bl)     => env.rc_col_body(buf, cnt, bl.stmts),
@@ -222,9 +234,15 @@ rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt, last: bool) i32
             true  => env.rc_col_e(buf, cnt, e),
             false => env.disc_env(e).rc_col_e(buf, cnt, e),
         }),
-        .If(f)       => env.rc_col_body(buf, env.rc_col_body(buf, env.clr_exp().rc_col_e(buf, cnt, f.c), f.then), f.els),
+        .If(f)       => env.rc_col_body(buf, env.rc_col_body(buf, env
+            .clr_exp()
+            .rc_col_e(buf, cnt, f.c), f.then), f.els),
         .While(w)    => env.rc_col_body(buf, env.clr_exp().rc_col_e(buf, cnt, w.c), w.body),
-        .IndexSet(x) => env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, x.seq), x.idx), x.value),
+        .IndexSet(x) => env
+            .clr_exp()
+            .rc_col_e(buf, env
+                .clr_exp()
+                .rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, x.seq), x.idx), x.value),
     })
 }
 rc_col_body = (env: Env, buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
@@ -289,10 +307,9 @@ rc_expand_one = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
     )
     env.rc_expand(buf, ienv.rc_col_body(buf, count, ibody), i + 1)
 }
-rc_expand* = (env: Env, buf: [GenericData], count: i32, i: i32) i32 { (i >= count).match ({
-    true  => count,
-    false => env.rc_expand_one(buf, count, i),
-}) }
+rc_expand* = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
+    (i >= count).match ({ true => count, false => env.rc_expand_one(buf, count, i) })
+}
 // the concrete DFunc for one instance: template params/ret/body with tparam→arg substituted, given the
 // mangled name. Its self-call stays the bare template name; the final resolve_call mangles it (the
 // instance decl now exists), which also resolves dispatch (e.g. allocator methods) on the concrete type.

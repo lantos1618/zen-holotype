@@ -141,12 +141,23 @@ actor_mb = (a: MutPtr<PoolActor>) Ring<i64> {
 // value lives 8 bytes past the base (past the refcount header), matching std.mem.arc's layout. Build a
 // runnable actor (refcount = 1, owned by the caller) + a mailbox ring; NOT enqueued — the first `send`
 // makes it runnable. Returns the Arc base pointer as the opaque handle.
-pool_spawn_rt* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void, art: Rt) RawPtr<u8> { pool_spawn_scratch_rt(user, mbcap, behavior, art, null_ptr()) }
+pool_spawn_rt* = (
+    user: RawPtr<u8>,
+    mbcap: i64,
+    behavior: (RawPtr<u8>, i64) void,
+    art: Rt,
+) RawPtr<u8> { pool_spawn_scratch_rt(user, mbcap, behavior, art, null_ptr()) }
 // as pool_spawn_rt, but with a per-actor SCRATCH arena (a MutPtr<Arena> the caller owns): the worker
 // RESETS it wholesale at every behavior boundary (drain_batch), reclaiming the receiver's per-behavior
 // temporaries whether the behavior returned or panicked. `null` scratch (the pool_spawn_rt default) means
 // the actor has no scratch and the boundary reset is skipped — byte-identical to pre-scratch behaviour.
-pool_spawn_scratch_rt* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void, art: Rt, scratch: MutPtr<Arena>) RawPtr<u8> {
+pool_spawn_scratch_rt* = (
+    user: RawPtr<u8>,
+    mbcap: i64,
+    behavior: (RawPtr<u8>, i64) void,
+    art: Rt,
+    scratch: MutPtr<Arena>,
+) RawPtr<u8> {
     mark_spawned()    // latch the rt.set_default guard: the process default is now frozen (workers read it)
     ma := Malloc(_: 0)
     mbuf := malloc(mbcap * 8)
@@ -170,7 +181,9 @@ pool_spawn_scratch_rt* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i
 // `rt.set_default`). Delegates to pool_spawn_rt with `default()` — heap-when-unset is observationally
 // the unset default, so every existing pool fixture stays byte-identical. The typed pool-actor path
 // (std.concurrent.pool_actor) calls pool_spawn_rt directly to give each actor its own rt.
-pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) RawPtr<u8> { pool_spawn_rt(user, mbcap, behavior, default()) }
+pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) RawPtr<u8> {
+    pool_spawn_rt(user, mbcap, behavior, default())
+}
 // clone a handle: bump the Arc refcount (atomic +1) and return the same base. Any party that shares the
 // actor across threads — a sender that wants to outlive the spawner, the run-queue's "scheduled" ref —
 // holds a clone, so the block cannot be freed while that party still references it.
@@ -355,7 +368,9 @@ actor_ref* = (p: MutPtr<Pool>, handle: RawPtr<u8>) ActorRef {
 // send to the referenced actor: recover the Pool view from the backing block, recover the handle, do the
 // pool_send. The raw i64-payload floor (the typed boxing convenience lives in std.concurrent.pool_actor);
 // carries the same back-pressure Result as pool_send.
-ref_send* = (r: ActorRef, msg: i64) Result<i64, ActorError> { pool_view(r.pool).pool_send(r.handle, msg) }
+ref_send* = (r: ActorRef, msg: i64) Result<i64, ActorError> {
+    pool_view(r.pool).pool_send(r.handle, msg)
+}
 // reset an actor's per-behavior SCRATCH arena (bump pointer -> 0), null-guarded for actors that never
 // opted into scratch (the raw pool path). Called at the behavior boundary on the worker's NORMAL stack —
 // so rewinding/reusing the backing here is safe even after a CAUGHT panic (the signal handler already

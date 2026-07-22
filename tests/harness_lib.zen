@@ -54,7 +54,11 @@ thread = std.concurrent.thread    // NAMESPACED: thread.join collides in the fla
 zo_dir* = (mp: MutPtr<Malloc>) string_view {
     b := mp.new_in().expect("harness: oom")
     b = b.append_in(mp, "/tmp/zo.").expect("harness: oom")
-    b = b.append_in(mp, mp.finish_in(mp.integer_in(getpid().to_i64()).expect("harness: oom")).expect("harness: oom")).expect("harness: oom")
+    b = b
+        .append_in(mp, mp
+            .finish_in(mp.integer_in(getpid().to_i64()).expect("harness: oom"))
+            .expect("harness: oom"))
+        .expect("harness: oom")
     mp.finish_in(b).expect("harness: oom")
 }
 // build `<zo_dir>/<name>` — a scratch path private to this harness run (for std.io save/contents_in).
@@ -110,7 +114,9 @@ zo_cleanup* = () i32 {
 // PRIVATE include dir `<$ZT>/d<gid>/` so the runner's fixed `#include "zo_body.c"` never collides.
 NWORKERS_FALLBACK := 8    // used only if `nproc` can't be read
 // integer → allocator-owned str (decimal), for building per-case paths/commands.
-zo_itoa* = (mp: MutPtr<Malloc>, n: i64) string_view { mp.integer_in(n).expect("harness: oom").finish_in(mp).expect("harness: oom") }
+zo_itoa* = (mp: MutPtr<Malloc>, n: i64) string_view {
+    mp.integer_in(n).expect("harness: oom").finish_in(mp).expect("harness: oom")
+}
 // concat a list of pieces through an allocator-owned String.
 zo_join* = (mp: MutPtr<Malloc>, parts: [string_view]) string_view {
     s := mp.new_in().expect("harness: oom")
@@ -121,7 +127,9 @@ zo_join* = (mp: MutPtr<Malloc>, parts: [string_view]) string_view {
 }
 // an ABSOLUTE per-case scratch path `<zo_dir>/<prefix><gid><suffix>` (used by BOTH the Zen-side save and
 // the shell command, so no `$ZT` interpolation is needed — the command is fully self-contained).
-zo_idpath* = (mp: MutPtr<Malloc>, prefix: string_view, gid: i64, suffix: string_view) string_view { mp.zo_join([mp.zo_dir(), "/", prefix, mp.zo_itoa(gid), suffix]) }
+zo_idpath* = (mp: MutPtr<Malloc>, prefix: string_view, gid: i64, suffix: string_view) string_view {
+    mp.zo_join([mp.zo_dir(), "/", prefix, mp.zo_itoa(gid), suffix])
+}
 // how many worker threads to fan out over: `nproc` (subprocess pipelines are cc-bound, so ≈ #cores),
 // clamped ≥ 1, falling back to NWORKERS_FALLBACK if nproc can't be read/parsed. `tr -d` strips the
 // trailing newline so try_parse_int (which refuses a trailing non-digit) accepts it.

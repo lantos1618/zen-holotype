@@ -1,7 +1,13 @@
 // compiler.validate.kinds — per-node kind checks: enums, matches, operands, indices, methods, FFI.
-{ cbuf, ArmData, AssignData, BinData, CallData, Decl, EnumDecl, Expr, Field, FieldInit, FnTData, Func, GlobalData, ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData, MethodCallData, Param, Stmt, Ty, VariantDef, arm, call, dforeign, gstr_append, gstr_finish, gstr_string, is_expr_null, k_mut_ptr, no_tys, subst_ty_in, tbool, tf64, ti32, ti64, tnamed, tptr_k, tslice, tstring_view, tu8, tvoid } = compiler.genc
+{ cbuf, ArmData, AssignData, BinData, CallData, Decl, EnumDecl, Expr, Field, FieldInit, FnTData,
+  Func, GlobalData, ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData,
+  MethodCallData, Param, Stmt, Ty, VariantDef, arm, call, dforeign, gstr_append, gstr_finish,
+  gstr_string, is_expr_null, k_mut_ptr, no_tys, subst_ty_in, tbool, tf64, ti32, ti64, tnamed,
+  tptr_k, tslice, tstring_view, tu8, tvoid } = compiler.genc
 { impl_cname_in } = compiler.mangle
-{ DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params, extend_env, is_intrinsic, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, recv_name, the_func, tnode, tparam_declared } = compiler.check
+{ DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params,
+  extend_env, is_intrinsic, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, recv_name,
+  the_func, tnode, tparam_declared } = compiler.check
 { resolve_module } = compiler.check_resolve
 { tag_const } = compiler.check_lower
 { fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank, write_thru_readonly } = compiler.check_fits
@@ -14,20 +20,16 @@
 { at } = std.text.bytes
 { ends_with, is_empty, starts_with } = std.text.str
 { String } = std.text.string
-{ env_imported, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn, env_struct_fields, env_trait_method, expr_pos, fit_err, is_ctx_typed_arg, is_prim_width, is_ptr_ty, is_struct, lit_slot_verdict, pos_or, tparam_bound, ty_mentions_tparam, unknown_ty, ut_unknown_ty, ut_unknown_tys } = compiler.validate.util
-{ KARGTYPE, KARITY, KARMVOID, KBADBIND, KCAPACITY, KDIAG_CAP, KDUPVARIANT, KFFITYPE, KMISGEN, KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KTARGARITY, KTRAITBOUND, KUNKNOWNTYPE, KUNREACHABLEARM, KVBREAK, desc_or } = compiler.validate.diag
+{ env_imported, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn,
+  env_struct_fields, env_trait_method, expr_pos, fit_err, is_ctx_typed_arg, is_prim_width,
+  is_ptr_ty, is_struct, lit_slot_verdict, pos_or, tparam_bound, ty_mentions_tparam, unknown_ty,
+  ut_unknown_ty, ut_unknown_tys } = compiler.validate.util
+{ KARGTYPE, KARITY, KARMVOID, KBADBIND, KCAPACITY, KDIAG_CAP, KDUPVARIANT, KFFITYPE, KMISGEN,
+  KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KTARGARITY, KTRAITBOUND, KUNKNOWNTYPE,
+  KUNREACHABLEARM, KVBREAK, desc_or } = compiler.validate.diag
 { zty } = compiler.validate.ownership
 { arg_err_at } = compiler.validate.args
-{ check_module, kv_at, kv_kor, kv_one } = compiler.validate.core
-// A trait-method call whose CONCRETE receiver type implements no matching impl (dispatch finds no
-// redirect) and that is neither a free function nor an imported name — would emit a bare `area`
-// call and fail at the C linker. Reject it as a Zen receiver/trait-bound error instead.
-trait_recv_missing* = (env: Env, c: CallData) bool {
-    (c.args.len > 0 && env.env_trait_method(c.fn) && env.env_imported(c.fn) == false && env.env_known_fn(c.fn) == false).match ({
-        true  => env.dispatch_name(c) == c.fn && env.unknown_ty(env.infer_expr(c.args[0].addr())) == false,
-        false => false,
-    })
-}
+{ check_module, kv_at, kv_one } = compiler.validate.core
 // Does some `Type.impl(Trait)` exist? i.e. a DImpl naming this type + trait.
 type_impls_trait = (decls: [Decl], tyname: string_view, trname: string_view) bool {
     found := false
@@ -49,43 +51,29 @@ type_impls_trait = (decls: [Decl], tyname: string_view, trname: string_view) boo
 // empty/unknown name, a caller tparam passed through (`tn` names an in-scope tparam — kvb_func_kind
 // binds them, so a tparam that shadows a global type name still defers), and generic residue
 // (recv_name of a Generic is its mangled instance name, matching no decl).
-bound_prim_name = (n: string_view) bool { n == "i8" || n == "i16" || n == "i32" || n == "i64" || n == "u8" || n == "u16" || n == "u32" || n == "u64" || n == "f32" || n == "f64" || n == "bool" || n == "string_view" }
-bound_targ_concrete = (env: Env, tn: string_view) bool { env.decls.is_struct(tn) || env.env_is_enum(tn) || tn.bound_prim_name() }
-bound_err* = (env: Env, f: Func, c: CallData, tp: Param) i32 {
-    tr := tp.tparam_bound()
-    is_empty(tr).match ({
-        true  => 0,
-        false => {
-            tn := env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
-            // concrete type A binds to
-            (is_empty(tn) || env.vars.tparam_declared(tn) || env.bound_targ_concrete(tn) == false).match ({
-                true  => 0,
-                false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 }),
-            })
-        },
-    })
-}    // unresolved / abstract: defer
+bound_prim_name = (n: string_view) bool {
+    n == "i8"
+        || n == "i16"
+        || n == "i32"
+        || n == "i64"
+        || n == "u8"
+        || n == "u16"
+        || n == "u32"
+        || n == "u64"
+        || n == "f32"
+        || n == "f64"
+        || n == "bool"
+        || n == "string_view"
+}
+bound_targ_concrete = (env: Env, tn: string_view) bool {
+    env.decls.is_struct(tn) || env.env_is_enum(tn) || tn.bound_prim_name()
+}
 bound_errs = (env: Env, f: Func, c: CallData) i32 {
     acc := 0
     f.tparams.loop((h, i, tp) {
         acc = acc + env.bound_err(f, c, tp)
     })
     acc
-}
-match_result_ty* = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
-    out := tvoid()
-    arms.loop((h, i, ar) {
-        aenv := env.a.arm_env(env, subjty, ar)
-        got := aenv.infer_expr(ar.body)
-        out = out.is_void_ty().match ({
-            true  => (got.is_void_ty() || aenv.unknown_ty(got)).match ({
-                true  => out,
-                false => got,
-            }),
-            false => out,
-        })
-    })
-    out
 }
 result_compatible = (want: Ty, got: Ty) bool {
     (want.is_str_t() && got.is_str_t()).match ({
@@ -110,22 +98,6 @@ cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
         }),
     })
 }
-cond_result_err* = (env: Env, d: CondData) i32 {
-    tt := env.infer_expr(d.t)
-    et := env.infer_expr(d.e)
-    (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
-        true  => 0,
-        false => d.cond_compatible(tt, et).match ({ true => 0, false => 1 }),
-    })
-}
-arm_result_err* = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
-    aenv := env.a.arm_env(env, subjty, ar)
-    got := aenv.infer_expr(ar.body)
-    (want.is_void_ty() || got.is_void_ty() || aenv.unknown_ty(want) || aenv.unknown_ty(got)).match ({
-        true  => 0,
-        false => want.result_compatible(got).match ({ true => 0, false => 1 }),
-    })
-}
 // ── value-consumed match/cond arms must each yield a value ──────────────────────────────
 // A match/cond CONSUMED AS A VALUE (let/assign RHS, return operand, call argument, index-set
 // value) must get a value from every arm that doesn't diverge. The arm typing above treats a
@@ -144,16 +116,6 @@ known_void_call = (env: Env, c: CallData) bool {
     f := env.env_func(c.fn)
     (f.name == c.fn).match ({ true => f.tparams.len == 0 && f.ret.is_void_ty(), false => false })
 }
-novalue_arm_leaf* = (env: Env, e: Ptr<Expr>) i32 {
-    load(e).match ({
-        .Block(b) => env.novalue_block_tail(b.stmts),
-        .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
-        .Match(m) => env.novalue_match_arms(m),
-        .Loop(l)  => 1,    // `.loop` never yields a value
-        .Call(c)  => env.known_void_call(c).match ({ true => 1, false => 0 }),
-        _         => 0,
-    })
-}
 novalue_block_tail = (env: Env, stmts: [Stmt]) i32 {
     (stmts.len == 0).match ({
         true  => 1,
@@ -168,33 +130,6 @@ novalue_match_arms = (env: Env, m: MatchData) i32 {
     acc := 0
     m.arms.loop((h, i, ar) {
         acc = acc + env.novalue_arm_leaf(ar.body)
-    })
-    acc
-}
-value_void_arm_err* = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
-    (want.is_void_ty() || env.unknown_ty(want)).match ({
-        true  => 0,
-        false => load(e).match ({
-            .Match(m) => env.novalue_match_arms(m),
-            .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
-            _         => 0,
-        }),
-    })
-}
-// argument position: a match/cond arg flowing into a CONCRETE (non-tparam) param slot.
-call_void_arm_errs* = (env: Env, c: CallData) i32 {
-    f := env.env_func(c.fn)
-    acc := 0
-    (f.name == c.fn).then({
-        c.args.loop((h, i, ar) {
-            acc = acc + (i < f.params.len).match ({
-                true  => f.tparams.ty_mentions_tparam(f.params[i].ty).match ({
-                    true  => 0,
-                    false => env.value_void_arm_err(f.params[i].ty, ar.addr()),
-                }),
-                false => 0,
-            })
-        })
     })
     acc
 }
@@ -232,20 +167,15 @@ enum_variants* = (decls: [Decl], ename: string_view) [VariantDef] {
     found
 }
 has_wildcard* = (arms: [ArmData]) bool { arms.slice_any((a) { a.variant == "_" }) }
-arm_covers = (arms: [ArmData], vname: string_view) bool { arms.slice_any((a) { a.variant == vname }) }
+arm_covers = (arms: [ArmData], vname: string_view) bool {
+    arms.slice_any((a) { a.variant == vname })
+}
 missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
     n := 0
     variants.loop((h, i, v) {
         n = arms.arm_covers(v.name).match ({ true => n, false => n + 1 })
     })
     n
-}
-exhaustive_err* = (env: Env, m: MatchData) i32 {
-    vs := env.decls.enum_variants(m.ename)
-    (vs.len == 0).match ({
-        true  => 0,
-        false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 }),
-    })
 }
 // the NAME of the first declared variant the arms do not cover, else "" — the uncovered
 // variant an exhaustiveness diagnostic names so the fix is a copy-pasteable `.Variant => …` arm.
@@ -301,61 +231,8 @@ enum_declares = (decls: [Decl], vn: string_view) bool {
         })
     })
 }
-// Unknown enum ctor: bare `.Variant` (empty ty) must name SOME declared variant; qualified
-// `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
-// qualified branch always returned 0, so `Color.Purple` passed check and ICEd at cc.
-mkenum_err* = (env: Env, ty: string_view, variant: string_view) i32 {
-    is_empty(ty).match ({
-        true  => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }),
-        false => {
-            vs := env.decls.enum_variants(ty)
-            (vs.len == 0).match ({
-                true  => 0,
-                false => vs.arm_known(variant).match ({ true => 0, false => 1 }),
-            })
-        },
-    })
-}
-// A constructed enum payload must fit the variant's declared payload type (`E.A("s")` where A(i32)).
-// Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
-// Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.
-enum_payload_err* = (env: Env, mk: MakeEnumData) i32 {
-    is_empty(mk.ty).match ({
-        true  => 0,
-        false => {
-            pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
-            lv := mk.payload.lit_slot_verdict(pty)
-            (lv >= 0).match ({
-                true  => lv,
-                false => {
-                    vt := env.infer_expr(mk.payload)
-                    (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
-                        true  => 0,
-                        false => fits(vt, pty).match ({ true => 0, false => 1 }),
-                    })
-                },
-            })
-        },
-    })
-}
 // Every non-wildcard arm must name a declared variant.
 arm_known = (vs: [VariantDef], vname: string_view) bool { vs.slice_any((v) { v.name == vname }) }
-unknown_arm_errs* = (env: Env, m: MatchData) i32 {
-    vs := env.decls.enum_variants(m.ename)
-    n := 0
-    (vs.len == 0).match ({
-        true  => 0,
-        false => {
-            m.arms.loop((h, i, a) {
-                n = n + (a.variant == "_").match ({
-                    true  => 0,
-                    false => vs.arm_known(a.variant).match ({ true => 0, false => 1 }),
-                })
-            })
-            n
-        },
-    })
-}
 // Operand checking stays lenient for uninferable operands.
 is_arith_op = (op: string_view) bool {
     b := op.at(0)
@@ -364,7 +241,9 @@ is_arith_op = (op: string_view) bool {
 is_logic_op = (op: string_view) bool { op == "&&" || op == "||" }
 // Strict comparisons require numeric operands; shifts are separate bitwise ops.
 is_cmp_op_v = (op: string_view) bool { op == "<" || op == ">" || op == "<=" || op == ">=" }
-is_bitwise_op = (op: string_view) bool { op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>" }
+is_bitwise_op = (op: string_view) bool {
+    op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>"
+}
 is_bool_ty = (t: Ty) bool {
     t.match ({
         .Bool => true,
@@ -387,12 +266,13 @@ non_bool = (env: Env, e: Ptr<Expr>) bool {
 }
 // f64 operators are strict: no implicit int<->float mixing.
 is_eq_op_v = (op: string_view) bool { op == "==" || op == "!=" }
-f64_op_ok = (op: string_view) bool { op == "+" || op == "-" || op == "*" || op == "/" || op == "/." || op.is_cmp_op_v() }
+f64_op_ok = (op: string_view) bool {
+    op == "+" || op == "-" || op == "*" || op == "/" || op == "/." || op.is_cmp_op_v()
+}
 f64_side_ok = (env: Env, t: Ty) bool { t.is_f64_ty() || env.unknown_ty(t) }
-f64_operand_err = (env: Env, op: string_view, lt: Ty, rt: Ty) i32 { (env.f64_side_ok(lt) && env.f64_side_ok(rt) && op.f64_op_ok()).match ({
-    true  => 0,
-    false => 1,
-}) }
+f64_operand_err = (env: Env, op: string_view, lt: Ty, rt: Ty) i32 {
+    (env.f64_side_ok(lt) && env.f64_side_ok(rt) && op.f64_op_ok()).match ({ true => 0, false => 1 })
+}
 // Any f64 side routes to the f64 surface; otherwise use integer numeric rules.
 num_operand_err = (env: Env, b: BinData) i32 {
     lt := env.infer_expr(b.lhs)
@@ -405,7 +285,12 @@ num_operand_err = (env: Env, b: BinData) i32 {
         }),
     })
 }
-same_eq_category = (a: Ty, b: Ty) bool { a.ty_rank() >= 0 && b.ty_rank() >= 0 || a.is_bool_ty() && b.is_bool_ty() || a.is_str_t() && b.is_str_t() || a.is_ptr_ty() && b.is_ptr_ty() }
+same_eq_category = (a: Ty, b: Ty) bool {
+    a.ty_rank() >= 0 && b.ty_rank() >= 0
+        || a.is_bool_ty() && b.is_bool_ty()
+        || a.is_str_t() && b.is_str_t()
+        || a.is_ptr_ty() && b.is_ptr_ty()
+}
 // a NOMINAL ==: an enum (tag compare), a Named non-struct, or a same-type STRUCT value — struct
 // `==`/`!=` lowers in resolve (resolve_struct_eq: an `eq` impl method wins, else a derived
 // per-field fold). A struct qualifies only when every field is TRANSITIVELY `==`-comparable:
@@ -439,17 +324,20 @@ eq_struct_fields_ok* = (env: Env, t: Ty) bool {
 // field shapes are irrelevant to acceptance.
 eq_impl_provides* = (env: Env, t: Ty) bool {
     tn := t.dispatch_recv_name()
-    env.didx.impl_idx.get(tn, 0 - 1) >= 0 && env.a.dispatch_recv(env.decls, env.didx, "eq", tn) == "eq" == false
+    env.didx.impl_idx.get(tn, 0 - 1) >= 0
+        && env.a.dispatch_recv(env.decls, env.didx, "eq", tn) == "eq" == false
 }
 eq_nominal_ok = (env: Env, a: Ty, b: Ty) bool {
-    a.ty_eq(b) && a.match ({
-        .Named(n)   => (env.didx.struct_idx.get(n, 0 - 1) < 0).match ({
-            true  => true,
-            false => env.eq_impl_provides(a) || env.eq_struct_fields_ok(a),
-        }),
-        .Generic(g) => env.env_is_gen_struct(g.name) && (env.eq_impl_provides(a) || env.eq_struct_fields_ok(a)),
-        _           => false,
-    })
+    a.ty_eq(b)
+        && a.match ({
+            .Named(n)   => (env.didx.struct_idx.get(n, 0 - 1) < 0).match ({
+                true  => true,
+                false => env.eq_impl_provides(a) || env.eq_struct_fields_ok(a),
+            }),
+            .Generic(g) => env.env_is_gen_struct(g.name)
+                && (env.eq_impl_provides(a) || env.eq_struct_fields_ok(a)),
+            _           => false,
+        })
 }
 // Equality rejects f64/non-f64 mixes and heterogeneous comparisons (`"hi" == 5`, `true == 5`).
 eq_mix_err = (env: Env, b: BinData) i32 {
@@ -483,28 +371,20 @@ is_unsigned_wide = (t: Ty) bool {
         _         => false,
     })
 }
-sign_mismatch = (l: Ty, r: Ty) bool { l.is_signed_int() && r.is_unsigned_wide() || l.is_unsigned_wide() && r.is_signed_int() }
+sign_mismatch = (l: Ty, r: Ty) bool {
+    l.is_signed_int() && r.is_unsigned_wide() || l.is_unsigned_wide() && r.is_signed_int()
+}
 // A numeric LITERAL operand is polymorphic and coerces to the other side's type (`n: u64 < 10` is
 // fine), so only flag when BOTH sides are non-literal values of genuinely mismatched signedness.
 signcmp_err = (env: Env, b: BinData) i32 {
-    ((b.op.is_cmp_op_v() || b.op.is_eq_op_v()) && b.lhs.is_lit_numeric() == false && b.rhs.is_lit_numeric() == false).match ({
+    ((b.op.is_cmp_op_v() || b.op.is_eq_op_v())
+        && b.lhs.is_lit_numeric() == false
+        && b.rhs.is_lit_numeric() == false).match ({
         true  => env.infer_expr(b.lhs).sign_mismatch(env.infer_expr(b.rhs)).match ({
             true  => 1,
             false => 0,
         }),
         false => 0,
-    })
-}
-operand_err* = (env: Env, b: BinData) i32 {
-    b.op.is_logic_op().match ({
-        true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
-        false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
-            true  => env.num_operand_err(b) + env.signcmp_err(b),
-            false => b.op.is_eq_op_v().match ({
-                true  => env.eq_mix_err(b) + env.signcmp_err(b),
-                false => 0,
-            }),
-        }),
     })
 }
 // Indexing needs a slice and numeric index; uninferable types skip.
@@ -521,84 +401,9 @@ non_slice = (env: Env, e: Ptr<Expr>) bool {
         false => t.is_slice_ty().match ({ true => false, false => true }),
     })
 }
-index_err* = (env: Env, ix: IndexData) i32 { (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({
-    true  => 1,
-    false => 0,
-}) }
-// Return/assign/index-set checks only reject concrete mismatches.
-ret_err* = (env: Env, r: Ptr<Expr>) i32 {
-    rt := env.infer_expr(r)
-    lv := r.lit_slot_verdict(env.exp)    // a numeric literal return is decided by range
-    (lv >= 0).match ({
-        true  => lv,
-        false => (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt()).match ({
-            true  => 0,
-            false => fits(rt, env.exp).match ({ true => 0, false => 1 }),
-        }),
-    })
-}
-// a function-VALUE return (declared return is a function type) is accepted structurally — ty_eq
-// treats FnT as never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
-assign_err* = (env: Env, x: AssignData) i32 {
-    vt := env.infer_expr(x.target)
-    rt := env.infer_expr(x.value)
-    lv := x.value.lit_slot_verdict(vt)
-    (lv >= 0).match ({
-        true  => lv,
-        false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
-            true  => 0,
-            false => fits(rt, vt).match ({ true => 0, false => 1 }),
-        }),
-    })
-}
-// Stage 2 mutability, the field-write half: `b.v = …` where `b: Ptr<Box>` (read-only) writes through a
-// non-writable pointer — the same hole `store()` guards, via Assign/Member. A `MutPtr<Box>` permits it
-// (k_mut_ptr), and plain local/struct mutation (no pointer base) is untouched. A NESTED write
-// (`b.inner.v = …`, `b.data[0] = …`) is the same hole one level down: it mutates `*b` just as the
-// direct field-set does, so walk the lvalue's member/index chain to its root and reject if the write
-// ultimately passes through a read-only `Ptr<T>`.
-assign_ptr_write_err* = (env: Env, x: AssignData) i32 { env.lvalue_writes_readonly(x.target).match ({
-    true  => 1,
-    false => 0,
-}) }
-// the index-set half of the read-only-pointer write guard: `b.data[0] = …` writes into `*b`.
-idxset_ptr_write_err* = (env: Env, x: IndexSetData) i32 { env.write_thru_readonly(x.seq).match ({
-    true  => 1,
-    false => 0,
-}) }
-idxset_err* = (env: Env, x: IndexSetData) i32 {
-    rt := env.infer_expr(x.value)
-    lv := x.value.lit_slot_verdict(x.elem)
-    (lv >= 0).match ({
-        true  => lv,
-        false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
-            true  => 0,
-            false => fits(rt, x.elem).match ({ true => 0, false => 1 }),
-        }),
-    })
-}
-// Annotated lets must fit their declared type; unannotated lets are inferred only.
-let_fit_err* = (env: Env, l: LetData) i32 {
-    l.ty.is_void_ty().match ({
-        true  => 0,
-        false => {
-            // infer under the DECLARED type as expected context, exactly as resolve_let resolves the
-            // value — a generic call whose tparam sits only in return position (`a.nbuf("", n)` for a
-            // `[string_view]` let) binds it from the declaration, not from the weak literal fallback.
-            vt := env.with_exp(l.ty).infer_expr(l.value)
-            lv := l.value.lit_slot_verdict(l.ty)
-            (lv >= 0).match ({
-                true  => lv,
-                false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
-                    true  => 0,
-                    false => fits(vt, l.ty).match ({ true => 0, false => 1 }),
-                }),
-            })
-        },
-    })
-}
-// A generic type with a `.Void` type-arg (recursing Ptr/Slice/nested generics) — e.g. `Box<void>`.
-// An unbound tparam survives inference as void, so the let's stored (inferred) type becomes Box<void>,
+// A generic type with a `.Void` type-arg (recursing Ptr/Slice/nested generics) — e.g. `Box<void>`
+// (see let_needannot_err in the EnvKinds impl below). An unbound tparam survives inference as void,
+// so the let's stored (inferred) type becomes Box<void>,
 // which only ever lowers to `Box_void`, never a usable value.
 ty_has_void_targ = (t: Ty) bool {
     t.match ({
@@ -612,20 +417,15 @@ ty_has_void_targ = (t: Ty) bool {
     })
 }
 tys_mention_void = (ts: [Ty]) bool { ts.slice_any((t) { t.is_void_ty() || t.ty_has_void_targ() }) }
-// A let (post-resolve, ty = the inferred/declared type) whose stored type is a generic with an
-// uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m := empty(7)` → Box<void> → mono emits
-// `Box_void`). check used to pass; require an annotation so the tparam is pinned.
-let_needannot_err* = (env: Env, l: LetData) i32 { l.ty.ty_has_void_targ().match ({
-    true  => 1,
-    false => 0,
-}) }
 // trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares, with a
 // MATCHING SIGNATURE. The Trait is a struct whose FnT fields are the method signatures (using `Self`
 // for the implementing type); im.methods is the names this impl provides, and the impl's actual
 // method bodies are top-level DFuncs found by name. So per declared method: missing → 1 error;
 // present but signature-mismatched → 1 error; present and matching → 0. The check is tied to THIS
 // impl (im.methods), not a global function search, so an unrelated same-named fn never satisfies it.
-has_method* = (methods: [Param], name: string_view) bool { methods.slice_any((p) { p.name == name }) }
+has_method* = (methods: [Param], name: string_view) bool {
+    methods.slice_any((p) { p.name == name })
+}
 // rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
 impl_ty = (tyname: string_view) Ty {
     (tyname == "i32").match ({
@@ -707,30 +507,11 @@ method_err* = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
         _        => 0,
     })
 }
-// an undefined call reads as a `recv.method()` UFCS call — not a bare undefined name — when it has a
-// first argument whose inferred type is a DECLARED struct/enum (a genuine concrete receiver). A
-// numeric/str/unknown first arg or a zero-arg call stays a plain undefined name. An AMBIGUOUS UFCS
-// call (2+ `alias__fn` candidates match the receiver) keeps the plain-undefined channel so its more
-// specific `ambiguous method` enrichment still fires — this is a NO-method case only.
-undef_is_method* = (env: Env, c: CallData) bool {
-    (c.args.len == 0).match ({
-        true  => false,
-        false => {
-            rty := env.infer_expr(c.args[0].addr())
-            tn := rty.recv_name()
-            (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
-                true  => false,
-                false => env.alias_ufcs_candidates(c.fn, rty).count < 2,
-            })
-        },
-    })
-}
 // a match: exhaustiveness vs duplicate-variant, split out from match_err. The caret points at the
 // matched subject (arms carry no source position); the subject bottoms at a Var, which survives resolve.
-arms_first_pos* = (arms: [ArmData]) i32 { (arms.len == 0).match ({
-    true  => 0,
-    false => arms[0].pos,
-}) }
+arms_first_pos* = (arms: [ArmData]) i32 {
+    (arms.len == 0).match ({ true => 0, false => arms[0].pos })
+}
 // ── trait-bound enrichment ─────────────────────────────────────────────────────────────────────
 // the method names an impl of (type `tn`, trait `tr`) provides; empty when no such impl exists.
 impl_methods_of* = (decls: [Decl], tn: string_view, tr: string_view) [Param] {
@@ -762,57 +543,68 @@ kvb_call_kind = (env: Env, c: CallData) i32 {
 }
 kvb_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.kvb_call_kind(c).kv_kor(env.kvb_args_kind(c.args)),
-        .Index(ix)      => env.kvb_expr_kind(ix.seq).kv_kor(env.kvb_expr_kind(ix.idx)),
-        .Bin(b)         => env.kvb_expr_kind(b.lhs).kv_kor(env.kvb_expr_kind(b.rhs)),
-        .Cond(d)        => env.kvb_expr_kind(d.c).kv_kor(env.kvb_expr_kind(d.t)).kv_kor(env.kvb_expr_kind(d.e)),
+        .Call(c)        => env.kvb_call_kind(c).or(env.kvb_args_kind(c.args)),
+        .Index(ix)      => env.kvb_expr_kind(ix.seq).or(env.kvb_expr_kind(ix.idx)),
+        .Bin(b)         => env.kvb_expr_kind(b.lhs).or(env.kvb_expr_kind(b.rhs)),
+        .Cond(d)        => env
+            .kvb_expr_kind(d.c)
+            .or(env.kvb_expr_kind(d.t))
+            .or(env.kvb_expr_kind(d.e)),
         .Member(m)      => env.kvb_expr_kind(m.obj),
         .Arrow(ar)      => env.kvb_expr_kind(ar.obj),
-        .Match(m)       => env.kvb_expr_kind(m.subj).kv_kor(env.kvb_arms_kind(env.infer_expr(m.subj), m.arms)),
+        .Match(m)       => env
+            .kvb_expr_kind(m.subj)
+            .or(env.kvb_arms_kind(env.infer_expr(m.subj), m.arms)),
         .MakeEnum(mk)   => env.kvb_expr_kind(mk.payload),
         .MakeStruct(sd) => env.kvb_inits_kind(sd.inits),
         .Block(b)       => env.a.kvb_body_kind(env, b.stmts),
-        .Loop(l)        => env.kvb_expr_kind(l.seq).kv_kor(env.a.kvb_body_kind(env, l.body)),
+        .Loop(l)        => env.kvb_expr_kind(l.seq).or(env.a.kvb_body_kind(env, l.body)),
         _               => 0,
     })
 }
 kvb_args_kind = (env: Env, args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(env.kvb_expr_kind(ar.addr()))
+        acc = acc.or(env.kvb_expr_kind(ar.addr()))
     })
     acc
 }
 kvb_inits_kind = (env: Env, inits: [FieldInit]) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc.kv_kor(env.kvb_expr_kind(fi.value))
+        acc = acc.or(env.kvb_expr_kind(fi.value))
     })
     acc
 }
 kvb_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).kvb_expr_kind(ar.body))
+        acc = acc.or(env.a.arm_env(env, subjty, ar).kvb_expr_kind(ar.body))
     })
     acc
 }
 kvb_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)      => env.kvb_expr_kind(l.value),
-        .Assign(x)   => env.kvb_expr_kind(x.target).kv_kor(env.kvb_expr_kind(x.value)),
+        .Assign(x)   => env.kvb_expr_kind(x.target).or(env.kvb_expr_kind(x.value)),
         .Return(r)   => env.kvb_expr_kind(r),
         .ExprStmt(e) => env.kvb_expr_kind(e),
-        .If(f)       => env.kvb_expr_kind(f.c).kv_kor(a.kvb_body_kind(env, f.then)).kv_kor(a.kvb_body_kind(env, f.els)),
-        .While(w)    => env.kvb_expr_kind(w.c).kv_kor(a.kvb_body_kind(env, w.body)),
-        .IndexSet(x) => env.kvb_expr_kind(x.seq).kv_kor(env.kvb_expr_kind(x.idx)).kv_kor(env.kvb_expr_kind(x.value)),
+        .If(f)       => env
+            .kvb_expr_kind(f.c)
+            .or(a.kvb_body_kind(env, f.then))
+            .or(a.kvb_body_kind(env, f.els)),
+        .While(w)    => env.kvb_expr_kind(w.c).or(a.kvb_body_kind(env, w.body)),
+        .IndexSet(x) => env
+            .kvb_expr_kind(x.seq)
+            .or(env.kvb_expr_kind(x.idx))
+            .or(env.kvb_expr_kind(x.value)),
     })
 }
 kvb_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc := 0
     e := env
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.kvb_stmt_kind(e, st))
+        acc = acc.or(a.kvb_stmt_kind(e, st))
         e = a.extend_env(e, st)
     })
     acc
@@ -927,7 +719,15 @@ ka_lam_ret_err = (env: Env, fd: FnTData, lm: LambdaData, fps: [Ty]) i32 {
         },
     })
 }
-ka_lambda_at = (env: Env, ftparams: [Param], targs: [Ty], params: [Param], i: i32, ar: Expr, cpos: i32) i32 {
+ka_lambda_at = (
+    env: Env,
+    ftparams: [Param],
+    targs: [Ty],
+    params: [Param],
+    i: i32,
+    ar: Expr,
+    cpos: i32,
+) i32 {
     ar.match ({
         .Lambda(lm) => (i < params.len).match ({
             true  => env.a.subst_ty_in(ftparams, targs, params[i].ty).match ({
@@ -964,19 +764,36 @@ ka_lambda_at = (env: Env, ftparams: [Param], targs: [Ty], params: [Param], i: i3
 // `s.append_in(mp, t)`. Such dispatched names defer (under-catch), so the check never over-rejects.
 ka_concrete_arg_err = (env: Env, authoritative: bool, f: Func, i: i32, ar: Expr, pos: i32) i32 {
     (authoritative && f.tparams.len > 0).match ({
-        true  => env.arg_err_at(f.tparams, f.params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos().pos_or(pos)),
+        true  => env
+            .arg_err_at(f.tparams, f.params, i, ar)
+            .kv_one(KARGTYPE())
+            .kv_at(ar.expr_pos().pos_or(pos)),
         false => 0,
     })
 }
-ka_args_check = (env: Env, tparams: [Param], authoritative: bool, f: Func, args: [Expr], etargs: [Ty], pos: i32) i32 {
+ka_args_check = (
+    env: Env,
+    tparams: [Param],
+    authoritative: bool,
+    f: Func,
+    args: [Expr],
+    etargs: [Ty],
+    pos: i32,
+) i32 {
     targs := env.ka_targs(f, args, etargs)
     tf := etargs.len > 0
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(tf.match ({
-            true  => env.ka_mismatch_at(f.tparams, targs, f.params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos().pos_or(pos)),
-            false => 0,
-        })).kv_kor(env.ka_lambda_at(f.tparams, targs, f.params, i, ar, pos)).kv_kor(env.ka_concrete_arg_err(authoritative, f, i, ar, pos))
+        acc = acc
+            .or(tf.match ({
+                true  => env
+                    .ka_mismatch_at(f.tparams, targs, f.params, i, ar)
+                    .kv_one(KARGTYPE())
+                    .kv_at(ar.expr_pos().pos_or(pos)),
+                false => 0,
+            }))
+            .or(env.ka_lambda_at(f.tparams, targs, f.params, i, ar, pos))
+            .or(env.ka_concrete_arg_err(authoritative, f, i, ar, pos))
     })
     acc
 }
@@ -985,7 +802,14 @@ ka_args_check = (env: Env, tparams: [Param], authoritative: bool, f: Func, args:
 // name is locally bound (a param/let SHADOWS the same-named top-level fn, so its signature is the
 // wrong yardstick here; e.g. a closure param `f` while a top-level `f` exists). Shadowed calls are
 // skipped, not re-judged: pre-inline generic bodies can't always type the local (lenient by design).
-ka_call_core* = (env: Env, tparams: [Param], fn: string_view, args: [Expr], etargs: [Ty], pos: i32) i32 {
+ka_call_core* = (
+    env: Env,
+    tparams: [Param],
+    fn: string_view,
+    args: [Expr],
+    etargs: [Ty],
+    pos: i32,
+) i32 {
     (env.env_known_fn(fn) && env.is_local(fn) == false).match ({
         true  => {
             f := env.env_func(fn)
@@ -1000,7 +824,10 @@ ka_call_core* = (env: Env, tparams: [Param], fn: string_view, args: [Expr], etar
                     true  => KNOTYPEARGS().kv_at(pos),
                     false => (etargs.len != f.tparams.len).match ({
                         true  => KTARGARITY().kv_at(pos),
-                        false => env.ut_unknown_tys(tparams, etargs).kv_one(KUNKNOWNTYPE()).kv_at(pos),
+                        false => env
+                            .ut_unknown_tys(tparams, etargs)
+                            .kv_one(KUNKNOWNTYPE())
+                            .kv_at(pos),
                     }),
                 }),
             })
@@ -1008,74 +835,95 @@ ka_call_core* = (env: Env, tparams: [Param], fn: string_view, args: [Expr], etar
             // too few leave residue mono can only misreport — say the count mismatch here.
             // a fully-pinned turbofish (or inferred bindings) feeds the arg-mismatch + closure checks; an
             // unknown turbofish type short-circuits (the unknown-type error already fired).
-            tf.kv_kor(env.ka_args_check(tparams, authoritative, f, args, etargs, pos))
+            tf.or(env.ka_args_check(tparams, authoritative, f, args, etargs, pos))
         },
         false => 0,
     })
 }
 ka_expr_kind = (env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.ka_call_core(tparams, c.fn, c.args, c.targs, c.pos).kv_kor(env.ka_args_kind(tparams, c.args)),
+        .Call(c)        => env
+            .ka_call_core(tparams, c.fn, c.args, c.targs, c.pos)
+            .or(env.ka_args_kind(tparams, c.args)),
         .MethodCall(mc) => {
             cargs := env.a.ka_mcall_args(mc)
-            env.ka_call_core(tparams, mc.method, cargs, no_tys(), mc.pos).kv_kor(env.ka_args_kind(tparams, cargs))
+            env
+                .ka_call_core(tparams, mc.method, cargs, no_tys(), mc.pos)
+                .or(env.ka_args_kind(tparams, cargs))
         },
-        .Index(ix)      => env.ka_expr_kind(tparams, ix.seq).kv_kor(env.ka_expr_kind(tparams, ix.idx)),
-        .Bin(b)         => env.ka_expr_kind(tparams, b.lhs).kv_kor(env.ka_expr_kind(tparams, b.rhs)),
-        .Cond(d)        => env.ka_expr_kind(tparams, d.c).kv_kor(env.ka_expr_kind(tparams, d.t)).kv_kor(env.ka_expr_kind(tparams, d.e)),
+        .Index(ix)      => env.ka_expr_kind(tparams, ix.seq).or(env.ka_expr_kind(tparams, ix.idx)),
+        .Bin(b)         => env.ka_expr_kind(tparams, b.lhs).or(env.ka_expr_kind(tparams, b.rhs)),
+        .Cond(d)        => env
+            .ka_expr_kind(tparams, d.c)
+            .or(env.ka_expr_kind(tparams, d.t))
+            .or(env.ka_expr_kind(tparams, d.e)),
         .Member(m)      => env.ka_expr_kind(tparams, m.obj),
         .Arrow(ar)      => env.ka_expr_kind(tparams, ar.obj),
         // unreachable-arm judged HERE on the raw arms: a STATEMENT-position match lowers to an
         // if-chain during resolve (lower_match_arms stops at `_`, silently dropping later arms),
         // so the post-inline kv pass never sees them. Purely structural — no typing involved, so
         // an unresolved generic body cannot false-positive.
-        .Match(m)       => env.ka_expr_kind(tparams, m.subj).kv_kor(m.arms.unreachable_arm_errs().kv_one(KUNREACHABLEARM()).kv_at(load(m.subj).expr_pos().pos_or(m.arms.arms_first_pos()))).kv_kor(env.ka_arms_kind(tparams, env.infer_expr(m.subj), m.arms)),
+        .Match(m)       => env
+            .ka_expr_kind(tparams, m.subj)
+            .or(m.arms
+                .unreachable_arm_errs()
+                .kv_one(KUNREACHABLEARM())
+                .kv_at(load(m.subj).expr_pos().pos_or(m.arms.arms_first_pos())))
+            .or(env.ka_arms_kind(tparams, env.infer_expr(m.subj), m.arms)),
         .MakeEnum(mk)   => env.ka_expr_kind(tparams, mk.payload),
         .MakeStruct(sd) => env.ka_inits_kind(tparams, sd.inits),
         .SliceLit(sd)   => env.ka_args_kind(tparams, sd.items),
         .Lambda(lm)     => env.a.ka_body_kind(env, tparams, lm.body),
         .Block(b)       => env.a.ka_body_kind(env, tparams, b.stmts),
-        .Loop(l)        => env.ka_expr_kind(tparams, l.seq).kv_kor(env.a.ka_body_kind(env, tparams, l.body)),
+        .Loop(l)        => env
+            .ka_expr_kind(tparams, l.seq)
+            .or(env.a.ka_body_kind(env, tparams, l.body)),
         _               => 0,
     })
 }
 ka_args_kind = (env: Env, tparams: [Param], args: [Expr]) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(env.ka_expr_kind(tparams, ar.addr()))
+        acc = acc.or(env.ka_expr_kind(tparams, ar.addr()))
     })
     acc
 }
 ka_inits_kind = (env: Env, tparams: [Param], inits: [FieldInit]) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc.kv_kor(env.ka_expr_kind(tparams, fi.value))
+        acc = acc.or(env.ka_expr_kind(tparams, fi.value))
     })
     acc
 }
 ka_arms_kind = (env: Env, tparams: [Param], subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ka_expr_kind(tparams, ar.body))
+        acc = acc.or(env.a.arm_env(env, subjty, ar).ka_expr_kind(tparams, ar.body))
     })
     acc
 }
 ka_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
     st.match ({
         .Let(l)      => env.ka_expr_kind(tparams, l.value),
-        .Assign(x)   => env.ka_expr_kind(tparams, x.target).kv_kor(env.ka_expr_kind(tparams, x.value)),
+        .Assign(x)   => env.ka_expr_kind(tparams, x.target).or(env.ka_expr_kind(tparams, x.value)),
         .Return(r)   => env.ka_expr_kind(tparams, r),
         .ExprStmt(e) => env.ka_expr_kind(tparams, e),
-        .If(f)       => env.ka_expr_kind(tparams, f.c).kv_kor(a.ka_body_kind(env, tparams, f.then)).kv_kor(a.ka_body_kind(env, tparams, f.els)),
-        .While(w)    => env.ka_expr_kind(tparams, w.c).kv_kor(a.ka_body_kind(env, tparams, w.body)),
-        .IndexSet(x) => env.ka_expr_kind(tparams, x.seq).kv_kor(env.ka_expr_kind(tparams, x.idx)).kv_kor(env.ka_expr_kind(tparams, x.value)),
+        .If(f)       => env
+            .ka_expr_kind(tparams, f.c)
+            .or(a.ka_body_kind(env, tparams, f.then))
+            .or(a.ka_body_kind(env, tparams, f.els)),
+        .While(w)    => env.ka_expr_kind(tparams, w.c).or(a.ka_body_kind(env, tparams, w.body)),
+        .IndexSet(x) => env
+            .ka_expr_kind(tparams, x.seq)
+            .or(env.ka_expr_kind(tparams, x.idx))
+            .or(env.ka_expr_kind(tparams, x.value)),
     })
 }
 ka_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32 {
     acc := 0
     e := env
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.ka_stmt_kind(e, tparams, st))
+        acc = acc.or(a.ka_stmt_kind(e, tparams, st))
         e = a.extend_env(e, st)
     })
     acc
@@ -1093,16 +941,14 @@ ka_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 
 ka_param_named = (ps: [Param], nm: string_view) bool { ps.slice_any((p) { p.name == nm }) }
 // inline-only bodies: FnT-param generics (their lambda args must splice) and reflect-using generics
 // (their intrinsic needs the call site's concrete receiver type — see check_inline.no_inline_gen_f).
-ka_inline_only = (f: Func) bool { f.params.has_fnt_param() || f.tparams.len > 0 && f.body.calls_reflect() }
+ka_inline_only = (f: Func) bool {
+    f.params.has_fnt_param() || f.tparams.len > 0 && f.body.calls_reflect()
+}
 // the sanctioned reflection WRAPPER (`field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }`) is not
 // recursion: its same-named inner call targets the INTRINSIC (name-intercepted in the inliner) and
 // never the wrapper itself.
-ka_reflect_name = (nm: string_view) bool { nm == "field_eq" || nm == "each_field" || nm == "zip_fields" }
-ka_rec_hof_kind* = (f: Func) i32 {
-    (f.ka_inline_only() && f.body.len > 0 && f.params.ka_param_named(f.name) == false && ka_reflect_name(f.name) == false && f.body.rc_calls_body(f.name)).match ({
-        true  => KRECHOF().kv_at(f.pos),
-        false => 0,
-    })
+ka_reflect_name = (nm: string_view) bool {
+    nm == "field_eq" || nm == "each_field" || nm == "zip_fields"
 }
 // ── reflect-return: a `return` under a loop in an inline-only REFLECT generic ─────────────────────
 // Splicing such a body leaves a raw C `return` inside the caller's loop — the inliner's early-return
@@ -1162,7 +1008,9 @@ krr_loop_ret_e = (e: Ptr<Expr>) bool {
     })
 }
 krr_loop_ret_es = (xs: [Expr]) bool { xs.slice_any((x) { x.addr().krr_loop_ret_e() }) }
-krr_loop_ret_inits = (inits: [FieldInit]) bool { inits.slice_any((fi) { fi.value.krr_loop_ret_e() }) }
+krr_loop_ret_inits = (inits: [FieldInit]) bool {
+    inits.slice_any((fi) { fi.value.krr_loop_ret_e() })
+}
 krr_loop_ret_arms = (arms: [ArmData]) bool { arms.slice_any((ar) { ar.body.krr_loop_ret_e() }) }
 krr_loop_ret_stmt = (st: Stmt) bool {
     st.match ({
@@ -1170,18 +1018,14 @@ krr_loop_ret_stmt = (st: Stmt) bool {
         .Assign(x)   => x.target.krr_loop_ret_e() || x.value.krr_loop_ret_e(),
         .Return(r)   => r.krr_loop_ret_e(),
         .ExprStmt(e) => e.krr_loop_ret_e(),
-        .If(f)       => f.c.krr_loop_ret_e() || f.then.krr_loop_ret_body() || f.els.krr_loop_ret_body(),
+        .If(f)       => f.c.krr_loop_ret_e()
+            || f.then.krr_loop_ret_body()
+            || f.els.krr_loop_ret_body(),
         .While(w)    => w.body.krr_any_ret_body() || w.c.krr_loop_ret_e(),
         .IndexSet(x) => x.seq.krr_loop_ret_e() || x.idx.krr_loop_ret_e() || x.value.krr_loop_ret_e(),
     })
 }
 krr_loop_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_loop_ret_stmt() }) }
-ka_reflect_ret_kind* = (f: Func) i32 {
-    (f.tparams.len > 0 && f.body.calls_reflect() && f.body.krr_loop_ret_body()).match ({
-        true  => KREFLECTRETURN().kv_at(f.pos),
-        false => 0,
-    })
-}
 ko_is_or_call = (c: CallData) bool { c.fn == "or_return" && c.args.len == 1 }
 ko_is_or_mcall = (mc: MethodCallData) bool { mc.method == "or_return" && mc.args.len == 0 }
 // the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree.
@@ -1210,7 +1054,11 @@ ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32)
                         true  => 0,
                         false => {
                             rE := env.subj_variant_payload(rt, "Err")
-                            (rE.is_void_ty() || env.unknown_ty(rE) || env.unknown_ty(fE) || tps.ty_mentions_tparam(rE) || tps.ty_mentions_tparam(fE)).match ({
+                            (rE.is_void_ty()
+                                || env.unknown_ty(rE)
+                                || env.unknown_ty(fE)
+                                || tps.ty_mentions_tparam(rE)
+                                || tps.ty_mentions_tparam(fE)).match ({
                                 true  => 0,
                                 false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({
                                     true  => cnd.match ({
@@ -1232,7 +1080,12 @@ ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32)
 ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
     fO := env.subj_variant_payload(want, "Ok")
     rO := env.subj_variant_payload(rt, "Ok")
-    (fO.is_void_ty() || rO.is_void_ty() || env.unknown_ty(fO) || env.unknown_ty(rO) || tps.ty_mentions_tparam(fO) || tps.ty_mentions_tparam(rO)).match ({
+    (fO.is_void_ty()
+        || rO.is_void_ty()
+        || env.unknown_ty(fO)
+        || env.unknown_ty(rO)
+        || tps.ty_mentions_tparam(fO)
+        || tps.ty_mentions_tparam(rO)).match ({
         true  => 0,
         false => (fO.ty_eq(rO) || rO.ty_eq(fO)).match ({
             true  => 0,
@@ -1245,14 +1098,14 @@ ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData, cnd: bool) i32 {
         true  => env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos),
         false => 0,
     })
-    own.kv_kor(env.ko_args_kind(tps, want, c.args, cnd))
+    own.or(env.ko_args_kind(tps, want, c.args, cnd))
 }
 ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData, cnd: bool) i32 {
     own := ko_is_or_mcall(mc).match ({
         true  => env.ko_at(tps, want, mc.recv, cnd, mc.pos),
         false => 0,
     })
-    own.kv_kor(env.ko_expr_kind(tps, want, mc.recv, cnd)).kv_kor(env.ko_args_kind(tps, want, mc.args, cnd))
+    own.or(env.ko_expr_kind(tps, want, mc.recv, cnd)).or(env.ko_args_kind(tps, want, mc.args, cnd))
 }
 // `cnd` marks descent into a CONDITIONALLY-evaluated / value-block position (see ko_at): those
 // or_returns lower in place (verbatim receiver return), so the strict full-Result check applies.
@@ -1264,32 +1117,43 @@ ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
     load(e).match ({
         .Call(c)        => env.ko_call_kind(tps, want, c, cnd),
         .MethodCall(mc) => env.ko_mcall_kind(tps, want, mc, cnd),
-        .Index(ix)      => env.ko_expr_kind(tps, want, ix.seq, cnd).kv_kor(env.ko_expr_kind(tps, want, ix.idx, cnd)),
-        .Bin(b)         => env.ko_expr_kind(tps, want, b.lhs, cnd).kv_kor(env.ko_expr_kind(tps, want, b.rhs, ko_is_sc(b.op) || cnd)),
-        .Cond(d)        => env.ko_expr_kind(tps, want, d.c, cnd).kv_kor(env.ko_expr_kind(tps, want, d.t, true)).kv_kor(env.ko_expr_kind(tps, want, d.e, true)),
+        .Index(ix)      => env
+            .ko_expr_kind(tps, want, ix.seq, cnd)
+            .or(env.ko_expr_kind(tps, want, ix.idx, cnd)),
+        .Bin(b)         => env
+            .ko_expr_kind(tps, want, b.lhs, cnd)
+            .or(env.ko_expr_kind(tps, want, b.rhs, ko_is_sc(b.op) || cnd)),
+        .Cond(d)        => env
+            .ko_expr_kind(tps, want, d.c, cnd)
+            .or(env.ko_expr_kind(tps, want, d.t, true))
+            .or(env.ko_expr_kind(tps, want, d.e, true)),
         .Member(m)      => env.ko_expr_kind(tps, want, m.obj, cnd),
         .Arrow(ar)      => env.ko_expr_kind(tps, want, ar.obj, cnd),
-        .Match(m)       => env.ko_expr_kind(tps, want, m.subj, cnd).kv_kor(env.ko_arms_kind(tps, want, env.infer_expr(m.subj), m.arms)),
+        .Match(m)       => env
+            .ko_expr_kind(tps, want, m.subj, cnd)
+            .or(env.ko_arms_kind(tps, want, env.infer_expr(m.subj), m.arms)),
         .MakeEnum(mk)   => env.ko_expr_kind(tps, want, mk.payload, cnd),
         .MakeStruct(sd) => env.ko_inits_kind(tps, want, sd.inits, cnd),
         .SliceLit(sd)   => env.ko_args_kind(tps, want, sd.items, cnd),
         .Lambda(lm)     => env.a.ko_body_kind(env, tps, want, lm.body, true),
         .Block(b)       => env.a.ko_body_kind(env, tps, want, b.stmts, true),
-        .Loop(l)        => env.ko_expr_kind(tps, want, l.seq, cnd).kv_kor(env.a.ko_body_kind(env, tps, want, l.body, true)),
+        .Loop(l)        => env
+            .ko_expr_kind(tps, want, l.seq, cnd)
+            .or(env.a.ko_body_kind(env, tps, want, l.body, true)),
         _               => 0,
     })
 }
 ko_args_kind = (env: Env, tps: [Param], want: Ty, args: [Expr], cnd: bool) i32 {
     acc := 0
     args.loop((h, i, ar) {
-        acc = acc.kv_kor(env.ko_expr_kind(tps, want, args[i].addr(), cnd))
+        acc = acc.or(env.ko_expr_kind(tps, want, args[i].addr(), cnd))
     })
     acc
 }
 ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc.kv_kor(env.ko_expr_kind(tps, want, fi.value, cnd))
+        acc = acc.or(env.ko_expr_kind(tps, want, fi.value, cnd))
     })
     acc
 }
@@ -1298,26 +1162,36 @@ ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool
 ko_arms_kind = (env: Env, tps: [Param], want: Ty, subjty: Ty, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.kv_kor(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true))
+        acc = acc.or(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true))
     })
     acc
 }
 ko_stmt_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, st: Stmt, cnd: bool) i32 {
     st.match ({
         .Let(l)      => env.ko_expr_kind(tps, want, l.value, cnd),
-        .Assign(x)   => env.ko_expr_kind(tps, want, x.target, cnd).kv_kor(env.ko_expr_kind(tps, want, x.value, cnd)),
+        .Assign(x)   => env
+            .ko_expr_kind(tps, want, x.target, cnd)
+            .or(env.ko_expr_kind(tps, want, x.value, cnd)),
         .Return(r)   => env.ko_expr_kind(tps, want, r, cnd),
         .ExprStmt(e) => env.ko_expr_kind(tps, want, e, cnd),
-        .If(f)       => env.ko_expr_kind(tps, want, f.c, cnd).kv_kor(a.ko_body_kind(env, tps, want, f.then, cnd)).kv_kor(a.ko_body_kind(env, tps, want, f.els, cnd)),
-        .While(w)    => env.ko_expr_kind(tps, want, w.c, true).kv_kor(a.ko_body_kind(env, tps, want, w.body, cnd)),
-        .IndexSet(x) => env.ko_expr_kind(tps, want, x.seq, cnd).kv_kor(env.ko_expr_kind(tps, want, x.idx, cnd)).kv_kor(env.ko_expr_kind(tps, want, x.value, cnd)),
+        .If(f)       => env
+            .ko_expr_kind(tps, want, f.c, cnd)
+            .or(a.ko_body_kind(env, tps, want, f.then, cnd))
+            .or(a.ko_body_kind(env, tps, want, f.els, cnd)),
+        .While(w)    => env
+            .ko_expr_kind(tps, want, w.c, true)
+            .or(a.ko_body_kind(env, tps, want, w.body, cnd)),
+        .IndexSet(x) => env
+            .ko_expr_kind(tps, want, x.seq, cnd)
+            .or(env.ko_expr_kind(tps, want, x.idx, cnd))
+            .or(env.ko_expr_kind(tps, want, x.value, cnd)),
     })
 }
 ko_body_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, body: [Stmt], cnd: bool) i32 {
     acc := 0
     e := env
     body.loop((h, i, st) {
-        acc = acc.kv_kor(a.ko_stmt_kind(e, tps, want, st, cnd))
+        acc = acc.or(a.ko_stmt_kind(e, tps, want, st, cnd))
         e = a.extend_env(e, st)
     })
     acc
@@ -1378,9 +1252,12 @@ ffi_ty_ok = (env: Env, t: Ty, depth: i64) bool {
     })
     t.match ({
         .Slice(e)   => false,
-        .FnT(ft)    => env.ffi_tys_ok(ft.params, depth - 1) && env.ffi_ty_ok(load(ft.ret), depth - 1),
-        .Named(n)   => is_prim_width(n) || env.env_is_struct(n) && env.ffi_fields_ok(env.env_struct_fields(n), depth - 1),
-        .Generic(g) => (env.env_is_gen_struct(g.name) || env.env_is_gen_enum(g.name)) && env.ffi_tys_ok(g.args, depth - 1),
+        .FnT(ft)    => env.ffi_tys_ok(ft.params, depth - 1)
+            && env.ffi_ty_ok(load(ft.ret), depth - 1),
+        .Named(n)   => is_prim_width(n)
+            || env.env_is_struct(n) && env.ffi_fields_ok(env.env_struct_fields(n), depth - 1),
+        .Generic(g) => (env.env_is_gen_struct(g.name) || env.env_is_gen_enum(g.name))
+            && env.ffi_tys_ok(g.args, depth - 1),
         _           => true,
     })
 }    // I32/I64/U8/F64/Bool/Void/string_*/Ptr(any kind) — direct C shapes
@@ -1400,21 +1277,47 @@ ffi_fields_ok = (env: Env, fs: [Field], depth: i64) bool {
 }
 FFI_DEPTH = () i64 { 8 }
 // 0/1 count predicates feeding kv_one, mirroring ut_unknown_ty's shape.
-ffi_bad_ty = (env: Env, t: Ty) i32 { env.ffi_ty_ok(t, FFI_DEPTH()).match ({ true => 0, false => 1 }) }
-ffi_bad_generic = (f: Func) i32 { (f.tparams.len > 0).match ({ true => 1, false => 0 }) }
-// the kind walk: first offending foreign decl, caret on the decl (a Ty carries no source position).
-ffi_func_kind* = (env: Env, f: Func) i32 {
-    acc := f.ffi_bad_generic().kv_one(KFFITYPE()).kv_at(f.pos)
-    f.params.loop((h, i, p) {
-        acc = acc.kv_kor(env.ffi_bad_ty(p.ty).kv_one(KFFITYPE()).kv_at(f.pos))
-    })
-    acc.kv_kor(env.ffi_bad_ty(f.ret).kv_one(KFFITYPE()).kv_at(f.pos))
+ffi_bad_ty = (env: Env, t: Ty) i32 {
+    env.ffi_ty_ok(t, FFI_DEPTH()).match ({ true => 0, false => 1 })
 }
+ffi_bad_generic = (f: Func) i32 { (f.tparams.len > 0).match ({ true => 1, false => 0 }) }
 // the NAME walk (same traversal order as the kind walk): the message naming the offending
 // parameter/return type, in user spelling.
-ffi_param_msg = (a: MutPtr<Malloc>, fname: string_view, pname: string_view, tname: string_view) string_view { a.gstr_string(96).gstr_append(a, "foreign declaration `").gstr_append(a, fname).gstr_append(a, "`: parameter `").gstr_append(a, pname).gstr_append(a, "` has non-FFI-safe type `").gstr_append(a, tname).gstr_append(a, "`").gstr_finish(a) }
-ffi_ret_msg = (a: MutPtr<Malloc>, fname: string_view, tname: string_view) string_view { a.gstr_string(96).gstr_append(a, "foreign declaration `").gstr_append(a, fname).gstr_append(a, "`: return type `").gstr_append(a, tname).gstr_append(a, "` is not FFI-safe").gstr_finish(a) }
-ffi_generic_msg = (a: MutPtr<Malloc>, fname: string_view) string_view { a.gstr_string(96).gstr_append(a, "foreign declaration `").gstr_append(a, fname).gstr_append(a, "` declares type parameters — a foreign symbol binds ONE concrete C signature").gstr_finish(a) }
+ffi_param_msg = (
+    a: MutPtr<Malloc>,
+    fname: string_view,
+    pname: string_view,
+    tname: string_view,
+) string_view {
+    a
+        .gstr_string(96)
+        .gstr_append(a, "foreign declaration `")
+        .gstr_append(a, fname)
+        .gstr_append(a, "`: parameter `")
+        .gstr_append(a, pname)
+        .gstr_append(a, "` has non-FFI-safe type `")
+        .gstr_append(a, tname)
+        .gstr_append(a, "`")
+        .gstr_finish(a)
+}
+ffi_ret_msg = (a: MutPtr<Malloc>, fname: string_view, tname: string_view) string_view {
+    a
+        .gstr_string(96)
+        .gstr_append(a, "foreign declaration `")
+        .gstr_append(a, fname)
+        .gstr_append(a, "`: return type `")
+        .gstr_append(a, tname)
+        .gstr_append(a, "` is not FFI-safe")
+        .gstr_finish(a)
+}
+ffi_generic_msg = (a: MutPtr<Malloc>, fname: string_view) string_view {
+    a
+        .gstr_string(96)
+        .gstr_append(a, "foreign declaration `")
+        .gstr_append(a, fname)
+        .gstr_append(a, "` declares type parameters — a foreign symbol binds ONE concrete C signature")
+        .gstr_finish(a)
+}
 ffi_func_msg* = (a: MutPtr<Malloc>, env: Env, f: Func) string_view {
     (f.tparams.len > 0).then({
         return a.ffi_generic_msg(f.name)
@@ -1517,3 +1420,331 @@ first_gen_arg* = (t: Ty) Ty {
         _           => tvoid(),
     })
 }
+// ── per-node kind checks as Env METHODS ──────────────────────────────────────────────────────────
+// The envq.zen pattern at scale: every Env-first validator here is a method on Env via an
+// out-of-module trait impl, so callers (core.zen's kv_* walk, enrich.zen, …) dispatch
+// `env.operand_err(b)` through the global impl index and import NOTHING from this module for them.
+EnvKinds*: {
+    trait_recv_missing: (Self, CallData) bool,
+    match_result_ty: (Self, Ty, [ArmData]) Ty,
+    cond_result_err: (Self, CondData) i32,
+    arm_result_err: (Self, Ty, Ty, ArmData) i32,
+    novalue_arm_leaf: (Self, Ptr<Expr>) i32,
+    value_void_arm_err: (Self, Ty, Ptr<Expr>) i32,
+    call_void_arm_errs: (Self, CallData) i32,
+    exhaustive_err: (Self, MatchData) i32,
+    mkenum_err: (Self, string_view, string_view) i32,
+    enum_payload_err: (Self, MakeEnumData) i32,
+    unknown_arm_errs: (Self, MatchData) i32,
+    operand_err: (Self, BinData) i32,
+    index_err: (Self, IndexData) i32,
+    ret_err: (Self, Ptr<Expr>) i32,
+    assign_err: (Self, AssignData) i32,
+    assign_ptr_write_err: (Self, AssignData) i32,
+    idxset_ptr_write_err: (Self, IndexSetData) i32,
+    idxset_err: (Self, IndexSetData) i32,
+    let_fit_err: (Self, LetData) i32,
+    let_needannot_err: (Self, LetData) i32,
+    undef_is_method: (Self, CallData) bool,
+    ffi_func_kind: (Self, Func) i32,
+    bound_err: (Self, Func, CallData, Param) i32,
+}
+Env.impl(EnvKinds, {
+    trait_recv_missing = (env: Env, c: CallData) bool {
+        // A trait-method call whose CONCRETE receiver type implements no matching impl (dispatch finds no
+        // redirect) and that is neither a free function nor an imported name — would emit a bare `area`
+        // call and fail at the C linker. Reject it as a Zen receiver/trait-bound error instead.
+        (c.args.len > 0
+            && env.env_trait_method(c.fn)
+            && env.env_imported(c.fn) == false
+            && env.env_known_fn(c.fn) == false).match ({
+            true  => env.dispatch_name(c) == c.fn
+                && env.unknown_ty(env.infer_expr(c.args[0].addr())) == false,
+            false => false,
+        })
+    }
+    match_result_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
+        out := tvoid()
+        arms.loop((h, i, ar) {
+            aenv := env.a.arm_env(env, subjty, ar)
+            got := aenv.infer_expr(ar.body)
+            out = out.is_void_ty().match ({
+                true  => (got.is_void_ty() || aenv.unknown_ty(got)).match ({
+                    true  => out,
+                    false => got,
+                }),
+                false => out,
+            })
+        })
+        out
+    }
+    cond_result_err = (env: Env, d: CondData) i32 {
+        tt := env.infer_expr(d.t)
+        et := env.infer_expr(d.e)
+        (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
+            true  => 0,
+            false => d.cond_compatible(tt, et).match ({ true => 0, false => 1 }),
+        })
+    }
+    arm_result_err = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
+        aenv := env.a.arm_env(env, subjty, ar)
+        got := aenv.infer_expr(ar.body)
+        (want.is_void_ty() || got.is_void_ty() || aenv.unknown_ty(want) || aenv.unknown_ty(got)).match ({
+            true  => 0,
+            false => want.result_compatible(got).match ({ true => 0, false => 1 }),
+        })
+    }
+    novalue_arm_leaf = (env: Env, e: Ptr<Expr>) i32 {
+        load(e).match ({
+            .Block(b) => env.novalue_block_tail(b.stmts),
+            .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
+            .Match(m) => env.novalue_match_arms(m),
+            .Loop(l)  => 1,    // `.loop` never yields a value
+            .Call(c)  => env.known_void_call(c).match ({ true => 1, false => 0 }),
+            _         => 0,
+        })
+    }
+    value_void_arm_err = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
+        (want.is_void_ty() || env.unknown_ty(want)).match ({
+            true  => 0,
+            false => load(e).match ({
+                .Match(m) => env.novalue_match_arms(m),
+                .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
+                _         => 0,
+            }),
+        })
+    }
+    call_void_arm_errs = (env: Env, c: CallData) i32 {
+        // argument position: a match/cond arg flowing into a CONCRETE (non-tparam) param slot.
+        f := env.env_func(c.fn)
+        acc := 0
+        (f.name == c.fn).then({
+            c.args.loop((h, i, ar) {
+                acc = acc + (i < f.params.len).match ({
+                    true  => f.tparams.ty_mentions_tparam(f.params[i].ty).match ({
+                        true  => 0,
+                        false => env.value_void_arm_err(f.params[i].ty, ar.addr()),
+                    }),
+                    false => 0,
+                })
+            })
+        })
+        acc
+    }
+    exhaustive_err = (env: Env, m: MatchData) i32 {
+        vs := env.decls.enum_variants(m.ename)
+        (vs.len == 0).match ({
+            true  => 0,
+            false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 }),
+        })
+    }
+    mkenum_err = (env: Env, ty: string_view, variant: string_view) i32 {
+        // Unknown enum ctor: bare `.Variant` (empty ty) must name SOME declared variant; qualified
+        // `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
+        // qualified branch always returned 0, so `Color.Purple` passed check and ICEd at cc.
+        is_empty(ty).match ({
+            true  => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }),
+            false => {
+                vs := env.decls.enum_variants(ty)
+                (vs.len == 0).match ({
+                    true  => 0,
+                    false => vs.arm_known(variant).match ({ true => 0, false => 1 }),
+                })
+            },
+        })
+    }
+    enum_payload_err = (env: Env, mk: MakeEnumData) i32 {
+        // A constructed enum payload must fit the variant's declared payload type (`E.A("s")` where A(i32)).
+        // Inferred-enum form (empty ty) and tparam/unknown/void payloads stay lenient — generic variants like
+        // Result.Ok(x) resolve their payload type only after mono, so subj_variant_payload yields a tparam there.
+        is_empty(mk.ty).match ({
+            true  => 0,
+            false => {
+                pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
+                lv := mk.payload.lit_slot_verdict(pty)
+                (lv >= 0).match ({
+                    true  => lv,
+                    false => {
+                        vt := env.infer_expr(mk.payload)
+                        (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
+                            true  => 0,
+                            false => fits(vt, pty).match ({ true => 0, false => 1 }),
+                        })
+                    },
+                })
+            },
+        })
+    }
+    unknown_arm_errs = (env: Env, m: MatchData) i32 {
+        vs := env.decls.enum_variants(m.ename)
+        n := 0
+        (vs.len == 0).match ({
+            true  => 0,
+            false => {
+                m.arms.loop((h, i, a) {
+                    n = n + (a.variant == "_").match ({
+                        true  => 0,
+                        false => vs.arm_known(a.variant).match ({ true => 0, false => 1 }),
+                    })
+                })
+                n
+            },
+        })
+    }
+    operand_err = (env: Env, b: BinData) i32 {
+        b.op.is_logic_op().match ({
+            true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
+            false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
+                true  => env.num_operand_err(b) + env.signcmp_err(b),
+                false => b.op.is_eq_op_v().match ({
+                    true  => env.eq_mix_err(b) + env.signcmp_err(b),
+                    false => 0,
+                }),
+            }),
+        })
+    }
+    index_err = (env: Env, ix: IndexData) i32 {
+        (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({ true => 1, false => 0 })
+    }
+    ret_err = (env: Env, r: Ptr<Expr>) i32 {
+        // Return/assign/index-set checks only reject concrete mismatches. A function-VALUE return
+        // (declared return is a function type) is accepted structurally — ty_eq treats FnT as
+        // never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
+        rt := env.infer_expr(r)
+        lv := r.lit_slot_verdict(env.exp)    // a numeric literal return is decided by range
+        (lv >= 0).match ({
+            true  => lv,
+            false => (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt()).match ({
+                true  => 0,
+                false => fits(rt, env.exp).match ({ true => 0, false => 1 }),
+            }),
+        })
+    }
+    assign_err = (env: Env, x: AssignData) i32 {
+        vt := env.infer_expr(x.target)
+        rt := env.infer_expr(x.value)
+        lv := x.value.lit_slot_verdict(vt)
+        (lv >= 0).match ({
+            true  => lv,
+            false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
+                true  => 0,
+                false => fits(rt, vt).match ({ true => 0, false => 1 }),
+            }),
+        })
+    }
+    assign_ptr_write_err = (env: Env, x: AssignData) i32 {
+        // Stage 2 mutability, the field-write half: `b.v = …` where `b: Ptr<Box>` (read-only) writes through a
+        // non-writable pointer — the same hole `store()` guards, via Assign/Member. A `MutPtr<Box>` permits it
+        // (k_mut_ptr), and plain local/struct mutation (no pointer base) is untouched. A NESTED write
+        // (`b.inner.v = …`, `b.data[0] = …`) is the same hole one level down: it mutates `*b` just as the
+        // direct field-set does, so walk the lvalue's member/index chain to its root and reject if the write
+        // ultimately passes through a read-only `Ptr<T>`.
+        env.lvalue_writes_readonly(x.target).match ({ true => 1, false => 0 })
+    }
+    idxset_ptr_write_err = (env: Env, x: IndexSetData) i32 {
+        // the index-set half of the read-only-pointer write guard: `b.data[0] = …` writes into `*b`.
+        env.write_thru_readonly(x.seq).match ({ true => 1, false => 0 })
+    }
+    idxset_err = (env: Env, x: IndexSetData) i32 {
+        rt := env.infer_expr(x.value)
+        lv := x.value.lit_slot_verdict(x.elem)
+        (lv >= 0).match ({
+            true  => lv,
+            false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
+                true  => 0,
+                false => fits(rt, x.elem).match ({ true => 0, false => 1 }),
+            }),
+        })
+    }
+    let_fit_err = (env: Env, l: LetData) i32 {
+        // Annotated lets must fit their declared type; unannotated lets are inferred only.
+        l.ty.is_void_ty().match ({
+            true  => 0,
+            false => {
+                // infer under the DECLARED type as expected context, exactly as resolve_let resolves the
+                // value — a generic call whose tparam sits only in return position (`a.nbuf("", n)` for a
+                // `[string_view]` let) binds it from the declaration, not from the weak literal fallback.
+                vt := env.with_exp(l.ty).infer_expr(l.value)
+                lv := l.value.lit_slot_verdict(l.ty)
+                (lv >= 0).match ({
+                    true  => lv,
+                    false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
+                        true  => 0,
+                        false => fits(vt, l.ty).match ({ true => 0, false => 1 }),
+                    }),
+                })
+            },
+        })
+    }
+    let_needannot_err = (env: Env, l: LetData) i32 {
+        // A let (post-resolve, ty = the inferred/declared type) whose stored type is a generic with an
+        // uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m := empty(7)` → Box<void> → mono emits
+        // `Box_void`). check used to pass; require an annotation so the tparam is pinned.
+        l.ty.ty_has_void_targ().match ({ true => 1, false => 0 })
+    }
+    undef_is_method = (env: Env, c: CallData) bool {
+        // an undefined call reads as a `recv.method()` UFCS call — not a bare undefined name — when it has a
+        // first argument whose inferred type is a DECLARED struct/enum (a genuine concrete receiver). A
+        // numeric/str/unknown first arg or a zero-arg call stays a plain undefined name. An AMBIGUOUS UFCS
+        // call (2+ `alias__fn` candidates match the receiver) keeps the plain-undefined channel so its more
+        // specific `ambiguous method` enrichment still fires — this is a NO-method case only.
+        (c.args.len == 0).match ({
+            true  => false,
+            false => {
+                rty := env.infer_expr(c.args[0].addr())
+                tn := rty.recv_name()
+                (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
+                    true  => false,
+                    false => env.alias_ufcs_candidates(c.fn, rty).count < 2,
+                })
+            },
+        })
+    }
+    ffi_func_kind = (env: Env, f: Func) i32 {
+        // the kind walk: first offending foreign decl, caret on the decl (a Ty carries no source position).
+        acc := f.ffi_bad_generic().kv_one(KFFITYPE()).kv_at(f.pos)
+        f.params.loop((h, i, p) {
+            acc = acc.or(env.ffi_bad_ty(p.ty).kv_one(KFFITYPE()).kv_at(f.pos))
+        })
+        acc.or(env.ffi_bad_ty(f.ret).kv_one(KFFITYPE()).kv_at(f.pos))
+    }
+    bound_err = (env: Env, f: Func, c: CallData, tp: Param) i32 {
+        tr := tp.tparam_bound()
+        is_empty(tr).match ({
+            true  => 0,
+            false => {
+                tn := env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
+                // concrete type A binds to
+                (is_empty(tn)
+                    || env.vars.tparam_declared(tn)
+                    || env.bound_targ_concrete(tn) == false).match ({
+                    true  => 0,
+                    false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 }),
+                })
+            },
+        })
+    }
+})    // unresolved / abstract: defer
+// Func-receiver kind checks (`f.ka_rec_hof_kind()` call shape) get the same treatment on Func.
+FuncKinds*: {
+    ka_rec_hof_kind: (Self) i32,
+    ka_reflect_ret_kind: (Self) i32,
+}
+Func.impl(FuncKinds, {
+    ka_rec_hof_kind = (f: Func) i32 {
+        (f.ka_inline_only()
+            && f.body.len > 0
+            && f.params.ka_param_named(f.name) == false
+            && ka_reflect_name(f.name) == false
+            && f.body.rc_calls_body(f.name)).match ({
+            true  => KRECHOF().kv_at(f.pos),
+            false => 0,
+        })
+    }
+    ka_reflect_ret_kind = (f: Func) i32 {
+        (f.tparams.len > 0 && f.body.calls_reflect() && f.body.krr_loop_ret_body()).match ({
+            true  => KREFLECTRETURN().kv_at(f.pos),
+            false => 0,
+        })
+    }
+})

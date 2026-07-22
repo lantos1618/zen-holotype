@@ -1,5 +1,9 @@
 // compiler.passes.closures — closure conversion sub-pass extracted from compiler.check.
-{ cbuf, ArmData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, LambdaData, Param, Stmt, StructDecl, VarData, arm_at, arrow_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit, gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mkenumg, mkstruct, mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_at, slit, sret, swhile, tnamed, tvoid, vref, vref_at } = compiler.genc
+{ cbuf, ArmData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, LambdaData, Param, Stmt,
+  StructDecl, VarData, arm_at, arrow_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop,
+  ematch, ematchp, finit, gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mkenumg,
+  mkstruct, mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_at, slit, sret,
+  swhile, tnamed, tvoid, vref, vref_at } = compiler.genc
 { DeclIndex, Env, VList, empty_params, no_stmts, param_index, pbuf, recall, tnode, vcons, vnil } = compiler.check
 { lift_extend, lift_is_captured, lift_lamparams, lift_liftable } = compiler.passes.lift
 { gstr_int, map_slice } = compiler.astops
@@ -24,12 +28,23 @@ clos_call_rewrite* = (a: MutPtr<Malloc>, c: CallData, cn: string_view, buf: [Exp
     })
     a.cenode(call_at(cn, args, c.pos))
 }
-clos_struct_name = (a: MutPtr<Malloc>, k: i64) string_view { a.gstr_string(24).gstr_append(a, "__clos_").gstr_int(a, k).gstr_finish(a) }
-clos_call_name = (a: MutPtr<Malloc>, structn: string_view) string_view { a.gstr_string(32).gstr_append(a, structn).gstr_append(a, "_call").gstr_finish(a) }
+clos_struct_name = (a: MutPtr<Malloc>, k: i64) string_view {
+    a.gstr_string(24).gstr_append(a, "__clos_").gstr_int(a, k).gstr_finish(a)
+}
+clos_call_name = (a: MutPtr<Malloc>, structn: string_view) string_view {
+    a.gstr_string(32).gstr_append(a, structn).gstr_append(a, "_call").gstr_finish(a)
+}
 clos_params_has = (ps: [Param], n: string_view) bool { ps.param_index(n) >= 0 }
 // Does the lambda body capture a FREE name that is NOT one of the enclosing function's params (and not
 // a lambda-bound name / top-level / true|false)? Such a closure is unsupported here → leave it be.
-clos_bad_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], xs: [Expr]) bool {
+clos_bad_args = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    bound: Ptr<VList>,
+    ps: [Param],
+    xs: [Expr],
+) bool {
     found := false
     xs.loop((h, i, x) {
         found = found.match ({
@@ -39,7 +54,14 @@ clos_bad_args = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VL
     })
     found
 }
-clos_bad_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], inits: [FieldInit]) bool {
+clos_bad_inits = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    bound: Ptr<VList>,
+    ps: [Param],
+    inits: [FieldInit],
+) bool {
     found := false
     inits.loop((h, i, fi) {
         found = found.match ({
@@ -49,7 +71,14 @@ clos_bad_inits = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<V
     })
     found
 }
-clos_bad_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], arms: [ArmData]) bool {
+clos_bad_arms = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    bound: Ptr<VList>,
+    ps: [Param],
+    arms: [ArmData],
+) bool {
     found := false
     arms.loop((h, i, ar) {
         found = found.match ({
@@ -59,7 +88,14 @@ clos_bad_arms = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VL
     })
     found
 }
-clos_bad_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], body: [Stmt]) bool {
+clos_bad_body = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    bound: Ptr<VList>,
+    ps: [Param],
+    body: [Stmt],
+) bool {
     found := false
     b := bound
     body.loop((h, i, st) {
@@ -68,31 +104,60 @@ clos_bad_body = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VL
     })
     found
 }
-clos_bad_stmt = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], st: Stmt) bool {
+clos_bad_stmt = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    bound: Ptr<VList>,
+    ps: [Param],
+    st: Stmt,
+) bool {
     st.match ({
         .Let(l)      => a.clos_bad_expr(decls, idx, bound, ps, l.value),
-        .Assign(x)   => a.clos_bad_expr(decls, idx, bound, ps, x.target) || a.clos_bad_expr(decls, idx, bound, ps, x.value),
+        .Assign(x)   => a.clos_bad_expr(decls, idx, bound, ps, x.target)
+            || a.clos_bad_expr(decls, idx, bound, ps, x.value),
         .Return(r)   => a.clos_bad_expr(decls, idx, bound, ps, r),
         .ExprStmt(e) => a.clos_bad_expr(decls, idx, bound, ps, e),
-        .If(f)       => a.clos_bad_expr(decls, idx, bound, ps, f.c) || a.clos_bad_body(decls, idx, bound, ps, f.then) || a.clos_bad_body(decls, idx, bound, ps, f.els),
-        .While(w)    => a.clos_bad_expr(decls, idx, bound, ps, w.c) || a.clos_bad_body(decls, idx, bound, ps, w.body),
-        .IndexSet(x) => a.clos_bad_expr(decls, idx, bound, ps, x.seq) || a.clos_bad_expr(decls, idx, bound, ps, x.idx) || a.clos_bad_expr(decls, idx, bound, ps, x.value),
+        .If(f)       => a.clos_bad_expr(decls, idx, bound, ps, f.c)
+            || a.clos_bad_body(decls, idx, bound, ps, f.then)
+            || a.clos_bad_body(decls, idx, bound, ps, f.els),
+        .While(w)    => a.clos_bad_expr(decls, idx, bound, ps, w.c)
+            || a.clos_bad_body(decls, idx, bound, ps, w.body),
+        .IndexSet(x) => a.clos_bad_expr(decls, idx, bound, ps, x.seq)
+            || a.clos_bad_expr(decls, idx, bound, ps, x.idx)
+            || a.clos_bad_expr(decls, idx, bound, ps, x.value),
     })
 }
-clos_bad_expr = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, ps: [Param], e: Ptr<Expr>) bool {
+clos_bad_expr = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    bound: Ptr<VList>,
+    ps: [Param],
+    e: Ptr<Expr>,
+) bool {
     load(e).match ({
-        .Var(v)        => lift_is_captured(decls, idx, bound, v.name) && ps.clos_params_has(v.name) == false,
-        .Bin(b)        => a.clos_bad_expr(decls, idx, bound, ps, b.lhs) || a.clos_bad_expr(decls, idx, bound, ps, b.rhs),
-        .Call(c)       => lift_is_captured(decls, idx, bound, c.fn) && ps.clos_params_has(c.fn) == false || a.clos_bad_args(decls, idx, bound, ps, c.args),
-        .Cond(d)       => a.clos_bad_expr(decls, idx, bound, ps, d.c) || a.clos_bad_expr(decls, idx, bound, ps, d.t) || a.clos_bad_expr(decls, idx, bound, ps, d.e),
+        .Var(v)        => lift_is_captured(decls, idx, bound, v.name)
+            && ps.clos_params_has(v.name) == false,
+        .Bin(b)        => a.clos_bad_expr(decls, idx, bound, ps, b.lhs)
+            || a.clos_bad_expr(decls, idx, bound, ps, b.rhs),
+        .Call(c)       => lift_is_captured(decls, idx, bound, c.fn)
+            && ps.clos_params_has(c.fn) == false
+            || a.clos_bad_args(decls, idx, bound, ps, c.args),
+        .Cond(d)       => a.clos_bad_expr(decls, idx, bound, ps, d.c)
+            || a.clos_bad_expr(decls, idx, bound, ps, d.t)
+            || a.clos_bad_expr(decls, idx, bound, ps, d.e),
         .Member(m)     => a.clos_bad_expr(decls, idx, bound, ps, m.obj),
         .Arrow(ar)     => a.clos_bad_expr(decls, idx, bound, ps, ar.obj),
         .MakeEnum(mk)  => a.clos_bad_expr(decls, idx, bound, ps, mk.payload),
         .MakeStruct(s) => a.clos_bad_inits(decls, idx, bound, ps, s.inits),
-        .Match(m)      => a.clos_bad_expr(decls, idx, bound, ps, m.subj) || a.clos_bad_arms(decls, idx, bound, ps, m.arms),
-        .Index(ix)     => a.clos_bad_expr(decls, idx, bound, ps, ix.seq) || a.clos_bad_expr(decls, idx, bound, ps, ix.idx),
+        .Match(m)      => a.clos_bad_expr(decls, idx, bound, ps, m.subj)
+            || a.clos_bad_arms(decls, idx, bound, ps, m.arms),
+        .Index(ix)     => a.clos_bad_expr(decls, idx, bound, ps, ix.seq)
+            || a.clos_bad_expr(decls, idx, bound, ps, ix.idx),
         .SliceLit(sd)  => a.clos_bad_args(decls, idx, bound, ps, sd.items),
-        .Loop(l)       => a.clos_bad_expr(decls, idx, bound, ps, l.seq) || a.clos_bad_body(decls, idx, a.vcons(l.idx, tvoid(), a.vcons(l.elem, tvoid(), bound)), ps, l.body),
+        .Loop(l)       => a.clos_bad_expr(decls, idx, bound, ps, l.seq)
+            || a.clos_bad_body(decls, idx, a.vcons(l.idx, tvoid(), a.vcons(l.elem, tvoid(), bound)), ps, l.body),
         .Block(bl)     => a.clos_bad_body(decls, idx, bound, ps, bl.stmts),
         .Lambda(la)    => a.clos_bad_body(decls, idx, a.lift_lamparams(bound, la.params), ps, la.body),
         _              => false,
@@ -127,8 +192,12 @@ clos_sub_args = (a: MutPtr<Malloc>, ps: [Param], xs: [Expr]) [Expr] {
     })
     buf
 }
-clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit] { map_slice(a, inits, (fi) { finit(fi.name, a.clos_sub_expr(ps, fi.value)) }) }
-clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] { map_slice(a, arms, (ar) { arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos) }) }
+clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit] {
+    map_slice(a, inits, (fi) { finit(fi.name, a.clos_sub_expr(ps, fi.value)) })
+}
+clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] {
+    map_slice(a, arms, (ar) { arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos) })
+}
 clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Var(v)        => a.clos_sub_var(ps, v),
@@ -165,7 +234,9 @@ clos_sub_stmt = (a: MutPtr<Malloc>, ps: [Param], st: Stmt) Stmt {
         .IndexSet(x) => sidxset_at(a.clos_sub_expr(ps, x.seq), a.clos_sub_expr(ps, x.idx), x.elem, a.clos_sub_expr(ps, x.value), x.pos),
     })
 }
-clos_sub_body = (a: MutPtr<Malloc>, ps: [Param], body: [Stmt]) [Stmt] { map_slice(a, body, (st) { a.clos_sub_stmt(ps, st) }) }
+clos_sub_body = (a: MutPtr<Malloc>, ps: [Param], body: [Stmt]) [Stmt] {
+    map_slice(a, body, (st) { a.clos_sub_stmt(ps, st) })
+}
 // the tail (implicit-return) lambda of a body, if any: the last statement is a bare expression that is
 // itself a lambda literal. (a `return <lambda>` tail works too.)
 clos_tail_lambda = (body: [Stmt]) bool {
@@ -224,7 +295,9 @@ clos_struct_fields = (a: MutPtr<Malloc>, fps: [Param]) [Field] {
     out
 }
 // the closure literal's field inits = each captured param bound to its own current value.
-clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] { map_slice(a, fps, (p) { finit(p.name, a.cenode(vref(p.name))) }) }
+clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
+    map_slice(a, fps, (p) { finit(p.name, a.cenode(vref(p.name))) })
+}
 // rebuild the enclosing body with its tail lambda replaced by the closure struct literal.
 clos_replace_tail = (a: MutPtr<Malloc>, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
     buf := cbuf<Stmt>(a, body.len)

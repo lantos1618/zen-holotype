@@ -10,7 +10,8 @@
 { String } = std.text.string
 { view } = std.text.str
 { render_diagnostic } = compiler.diagnostic
-{ ModuleTable, ProvidedSymbol, die, eprint, id_is_user, mappend_id_name, mappend_mid_display, mid_is_user, next_line, rappend_span, res_col_of, res_line_of } = std.internal.resolve
+{ ModuleTable, ProvidedSymbol, die, eprint, id_is_user, mappend_id_name, mappend_mid_display,
+  mid_is_user, next_line, rappend_span, res_col_of, res_line_of } = std.internal.resolve
 // ── error[ffi-ungranted]: FFI is a BUILD-GRANTED capability ──────────────────────────────────────
 // A bodyless (foreign) declaration binds a raw C symbol — any module holding one can reach ANY
 // linked C function (`system`, `unlink`, …). The supply-chain hole: a TRANSITIVE dependency could
@@ -87,10 +88,9 @@ ffi_span_eq = (s: string_view, p: i32, e: i32, w: string_view, j: i32) bool {
         }),
     })
 }
-ffi_token_end = (s: string_view, p: i32, e: i32) i32 { (p >= e || ffi_delim(s.at(p))).match ({
-    true  => p,
-    false => s.ffi_token_end(p + 1, e),
-}) }
+ffi_token_end = (s: string_view, p: i32, e: i32) i32 {
+    (p >= e || ffi_delim(s.at(p))).match ({ true => p, false => s.ffi_token_end(p + 1, e) })
+}
 // does the grant list s[p..e) contain the token `name`? (delimiters: comma / whitespace)
 ffi_list_has = (s: string_view, p: i32, e: i32, name: string_view) bool {
     (p >= e).match ({
@@ -107,10 +107,9 @@ ffi_list_has = (s: string_view, p: i32, e: i32, name: string_view) bool {
         }),
     })
 }
-ffi_line_end = (s: string_view, p: i32) i32 { (s.at(p) == 0 || s.at(p) == '\n').match ({
-    true  => p,
-    false => s.ffi_line_end(p + 1),
-}) }
+ffi_line_end = (s: string_view, p: i32) i32 {
+    (s.at(p) == 0 || s.at(p) == '\n').match ({ true => p, false => s.ffi_line_end(p + 1) })
+}
 FFI_PRAGMA = () string_view { "//! ffi:" }
 // does the ENTRY source carry a `//! ffi: modid, modid` pragma line granting `name`?
 ffi_pragma_has = (src: string_view, name: string_view) bool {
@@ -156,20 +155,48 @@ ffi_foreign_fn = (src: string_view, sym: ProvidedSymbol) bool {
         false => false,
     })
 }
-ffi_dotted_id = (a: MutPtr<Malloc>, id: string_view) string_view { a.mappend_mid_display(a.gstr_string(24), id).gstr_finish(a) }
+ffi_dotted_id = (a: MutPtr<Malloc>, id: string_view) string_view {
+    a.mappend_mid_display(a.gstr_string(24), id).gstr_finish(a)
+}
 ffi_module_granted = (mainsrc: string_view, dotted: string_view) bool {
     g := ffi_grants
     g.ffi_list_has(0, to_i32(g.view().len), dotted) || mainsrc.ffi_pragma_has(dotted)
 }
-ffi_fail = (a: MutPtr<Malloc>, path: string_view, src: string_view, sym: ProvidedSymbol, dotted: string_view, report: bool) i32 {
+ffi_fail = (
+    a: MutPtr<Malloc>,
+    path: string_view,
+    src: string_view,
+    sym: ProvidedSymbol,
+    dotted: string_view,
+    report: bool,
+) i32 {
     line := src.res_line_of(sym.start)
     col := src.res_col_of(sym.start)
-    msg := a.gstr_string(192).gstr_append(a, "module '").gstr_append(a, dotted).gstr_append(a, "' declares foreign function `").gstr_append(a, sym.name).gstr_append(a, "` without a build grant").gstr_finish(a)
-    hint := a.gstr_string(192).gstr_append(a, "grant it: `ffi = \"").gstr_append(a, dotted).gstr_append(a, "\"` in zen.toml, or `//! ffi: ").gstr_append(a, dotted).gstr_append(a, "` in the entry file").gstr_finish(a)
+    msg := a
+        .gstr_string(192)
+        .gstr_append(a, "module '")
+        .gstr_append(a, dotted)
+        .gstr_append(a, "' declares foreign function `")
+        .gstr_append(a, sym.name)
+        .gstr_append(a, "` without a build grant")
+        .gstr_finish(a)
+    hint := a
+        .gstr_string(192)
+        .gstr_append(a, "grant it: `ffi = \"")
+        .gstr_append(a, dotted)
+        .gstr_append(a, "\"` in zen.toml, or `//! ffi: ")
+        .gstr_append(a, dotted)
+        .gstr_append(a, "` in the entry file")
+        .gstr_finish(a)
     eprint(a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1))
     report.match ({ true => 0, false => die(1) })
 }
-enforce_ffi_grants* = (a: MutPtr<Malloc>, table: ModuleTable, mainsrc: string_view, report: bool) i32 {
+enforce_ffi_grants* = (
+    a: MutPtr<Malloc>,
+    table: ModuleTable,
+    mainsrc: string_view,
+    report: bool,
+) i32 {
     table.modules.loop((h, i, entry) {
         (i > 0 && entry.id.mid_is_user()).then({
             dotted := a.ffi_dotted_id(entry.id)

@@ -22,7 +22,8 @@
 { out, save, contents_in, shell } = std.io.file
 { len, contains, is_empty, starts_with } = std.text.str
 { new_in, append_in, finish_in } = std.text.string
-{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd, zo_par_run, zo_idpath, zo_join } = harness_lib
+{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd, zo_par_run,
+  zo_idpath, zo_join } = harness_lib
 // a BUILD fixture: build the program, run it, assert exit code (+ optional stdout).
 FixtureCase*: {
     path: string_view,
@@ -62,7 +63,9 @@ build_cmd = (mp: MutPtr<Malloc>, path: string_view) string_view {
 // (returns rc 0 iff the program's exit code equals want_exit; stdout is left in $ZT/zob_out.txt).
 run_cmd = (mp: MutPtr<Malloc>, want_exit: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ").expect("harness: oom")
+    s = s
+        .append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ")
+        .expect("harness: oom")
     s = s.append_in(mp, want_exit).expect("harness: oom")
     mp.finish_in(s).expect("harness: oom")
 }
@@ -160,7 +163,12 @@ run_fixtures* = (name: string_view, cs: [FixtureCase]) i32 {
     fails
 }
 // helper: build a one-arg command  `./zen <verb> <path> <redirect>`
-cmd_for = (mp: MutPtr<Malloc>, verb: string_view, path: string_view, redirect: string_view) string_view {
+cmd_for = (
+    mp: MutPtr<Malloc>,
+    verb: string_view,
+    path: string_view,
+    redirect: string_view,
+) string_view {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "./zen ").expect("harness: oom")
     s = s.append_in(mp, verb).expect("harness: oom")
@@ -304,7 +312,11 @@ run_docs* = (name: string_view, cs: [DocCase]) i32 {
 // run concurrently with the other cases: N such fixtures at once oversubscribe the scheduler and fail
 // nondeterministically (the exact hazard #485 caught for build fixtures). These run SERIALLY; everything
 // else runs across the worker pool. Identified by case name (only the two pool-isolation cases qualify).
-shell_is_serial = (name: string_view) bool { name == "pool_actor_panic_isolation" || name == "pool_actor_stackoverflow_isolation" || name == "pool_actor_panic_box_freed" }
+shell_is_serial = (name: string_view) bool {
+    name == "pool_actor_panic_isolation"
+        || name == "pool_actor_stackoverflow_isolation"
+        || name == "pool_actor_panic_box_freed"
+}
 // wrap ONE shell case's body so it is self-contained + gid-isolated: bind `$ZT` to a PER-CASE scratch
 // subdir `<zo_dir>/sh<gid>` (freshly recreated) so the hand-written pipelines — which reuse fixed scratch
 // names like `$ZT/zbp.c`, `$ZT/zfmt.zen` — never clobber each other under concurrency, then record the
@@ -2053,6 +2065,12 @@ harness_build_run* = () i32 {
     ), ShellCase(
         name: "fmt_basic",
         cmd: "cp tests/fixtures/fmt/basic_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/basic_formatted.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+    ), ShellCase(
+        name: "fmt_chain_wrap",
+        cmd: "cp tests/fixtures/fmt/chain_wrap_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/chain_wrap_formatted.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+    ), ShellCase(
+        name: "fmt_wide_decls",
+        cmd: "cp tests/fixtures/fmt/wide_decls_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/wide_decls_formatted.zen && grep -q '^) i64 {' $ZT/zfmt.zen && grep -q '^  ltrim_view,' $ZT/zfmt.zen && grep -q '} = std.text.str' $ZT/zfmt.zen && grep -q '^    rest: ...i64$' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && ./zen run $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
     ), ShellCase(
         name: "fmt_long_bool_match",
         cmd: "cp tests/fixtures/fmt/long_bool_match_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/long_bool_match_formatted.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",

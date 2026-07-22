@@ -1,7 +1,19 @@
 // compiler.check — resolve and infer over the shared genc AST.
 // This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
 // type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
-{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData, ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData, ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData, GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond, cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch, ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at, sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit, FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, dfunc, dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys, expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32, ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ cbuf, Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ImplData, TraitDefData,
+  ArmData, MatchData, VariantDef, LetData, AssignData, IndexSetData, IndexData, MemberData,
+  ArrowData, VarData, CallData, MethodCallData, CondData, BinData, BlockData, LambdaData,
+  GenericData, MakeStructData, MakeEnumData, TagData, vref, vref_at, ty_cname_in, bin, bin_at, cond,
+  cond_oa, call, call_at, raw_call_at, call_full, member, member_at, arrow, arrow_at, ematch,
+  ematchp, mkenum, mktag, arm, arm_at, eindex, eloop, LoopData, lam_r, slet, slett, slett_at,
+  sassign, sassign_at, sret, sexpr, sif, swhile, sidxset_at, mkstruct, mkstruct_at, finit,
+  FieldInit, slit, SliceData, block, stmts_diverge, fnt_from_func_in, fntype, subst_ty_in, dfunc,
+  dforeign, dglobal, dglobal_tl, GlobalData, mkstructg, mkstructg_at, mkenumg, mktagg, no_tys,
+  expr_null, is_expr_null, GenEnumDecl, GenStructDecl, find_genenum, tgeneric, FnTData, flit, ti32,
+  ti64, tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tnamed, tptr, tptr_k, tslice,
+  tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string, gstr_grow, gstr_reserve, gstr_push, gstr_append,
+  gstr_finish } = compiler.genc
 { mangle_str_in, mangle_semantic_in, impl_cname_in } = compiler.mangle
 { Allocator, Malloc } = std.mem.alloc
 { exports_get, alias_prefixes_get, module_sigs_get, SigEntry } = compiler.parse
@@ -23,7 +35,8 @@
 // Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
 // resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
 { deep_targs, impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
-{ inline_decl, inline_template, is_empty_named, lower_closures, mono_close, mono_rec, no_inline_gen_f } = compiler.check_inline
+{ inline_decl, inline_template, is_empty_named, lower_closures, mono_close, mono_rec,
+  no_inline_gen_f } = compiler.check_inline
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { lower_match_arms, lower_stmt_expr, one_stmt, subj_payload, subj_tag, tag_const } = compiler.check_lower
 { fits, is_f64_ty, lvalue_writes_readonly, ty_eq, ty_rank } = compiler.check_fits
@@ -91,7 +104,14 @@ DeclIndex*: {
             false => slice(null_ptr(), 0),
         })
     }
-    idx_genstruct_field = (idx: DeclIndex, a: MutPtr<Malloc>, decls: [Decl], gname: string_view, fname: string_view, targs: [Ty]) Ty {
+    idx_genstruct_field = (
+        idx: DeclIndex,
+        a: MutPtr<Malloc>,
+        decls: [Decl],
+        gname: string_view,
+        fname: string_view,
+        targs: [Ty],
+    ) Ty {
         g := idx.idx_genstruct(decls, gname)
         is_empty(g.name).match ({
             true  => tvoid(),
@@ -108,7 +128,9 @@ DeclIndex*: {
             false => tvoid(),
         })
     }
-    idx_template_call = (idx: DeclIndex, decls: [Decl], name: string_view) bool { idx.idx_func(decls, name).is_generic_fn() }
+    idx_template_call = (idx: DeclIndex, decls: [Decl], name: string_view) bool {
+        idx.idx_func(decls, name).is_generic_fn()
+    }
     idx_genstruct = (idx: DeclIndex, decls: [Decl], name: string_view) GenStructDecl {
         i := idx.genstruct_idx.get(name, 0 - 1)
         (i >= 0 && i < decls.len).match ({
@@ -145,7 +167,12 @@ DeclIndex*: {
             ),
         })
     }
-    idx_variant_default = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ptr<Expr> {
+    idx_variant_default = (
+        idx: DeclIndex,
+        decls: [Decl],
+        ename: string_view,
+        vn: string_view,
+    ) Ptr<Expr> {
         i := idx.enum_idx.get(ename, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -156,7 +183,9 @@ DeclIndex*: {
         })
     }
 }    // DFunc.name | DForeign.name → index
-tdkey = (a: MutPtr<Malloc>, tr: string_view, m: string_view) string_view { a.gstr_string(64).gstr_append(a, tr).gstr_append(a, "\t").gstr_append(a, m).gstr_finish(a) }    // DStruct.name → index
+tdkey = (a: MutPtr<Malloc>, tr: string_view, m: string_view) string_view {
+    a.gstr_string(64).gstr_append(a, tr).gstr_append(a, "\t").gstr_append(a, m).gstr_finish(a)
+}    // DStruct.name → index
 // ── alias-name index (UFCS through module aliases) ──────────────────────────────────────────────
 // std.internal.resolve loads `m = std.collections.hmap` by prefixing hmap's top-level value decls
 // with `m__`. alias_idx maps the BARE method tail (`put` for `m__put`) to a decl index, so the
@@ -305,7 +334,9 @@ build_decl_index* = (a: MutPtr<Malloc>, decls: [Decl]) DeclIndex {
                     decls[ti].match ({
                         .DTraitDefault(td) => {
                             (td.trname == imd.trname).then({
-                                dm = dm.put(a, a.tdkey(imd.ty, td.fn.name), i).expect("check: decl-index alloc")
+                                dm = dm
+                                    .put(a, a.tdkey(imd.ty, td.fn.name), i)
+                                    .expect("check: decl-index alloc")
                             })
                         },
                         _                  => { },
@@ -411,7 +442,9 @@ Env*: {
             _           => env.didx.idx_variant_payload(env.decls, t.enum_name(), variant),
         })
     }
-    env_gstruct = (env: Env, name: string_view) GenStructDecl { env.didx.idx_genstruct(env.decls, name) }
+    env_gstruct = (env: Env, name: string_view) GenStructDecl {
+        env.didx.idx_genstruct(env.decls, name)
+    }
     call_targ = (env: Env, f: Func, args: [Expr], tp: string_view) Ty {
         arg := env.targ_of(f.params, args, tp, false)
         arg = arg.is_void_ty().match ({ true => env.ret_targ_of(f.ret, tp), false => arg })
@@ -427,18 +460,27 @@ Env*: {
         )
     }
     is_local = (env: Env, name: string_view) bool { env.vars.var_bound(name) }
-    is_bound = (env: Env, name: string_view) bool { env.vars.var_bound(name) || env.didx.global_idx.get(name, 0 - 1) >= 0 }
+    is_bound = (env: Env, name: string_view) bool {
+        env.vars.var_bound(name) || env.didx.global_idx.get(name, 0 - 1) >= 0
+    }
     alias_ufcs_candidates = (env: Env, fn: string_view, rty: Ty) AliasCands {
-        (rty.alias_recv_dispatchable() == false || fn.is_intrinsic() || env.didx.alias_idx.get(fn, 0 - 1) < 0 || env.didx.func_idx.get(fn, 0 - 1) >= 0 || env.is_local(fn) || env.global_ty(fn).is_void_ty() == false).then({
+        (rty.alias_recv_dispatchable() == false
+            || fn.is_intrinsic()
+            || env.didx.alias_idx.get(fn, 0 - 1) < 0
+            || env.didx.func_idx.get(fn, 0 - 1) >= 0
+            || env.is_local(fn)
+            || env.global_ty(fn).is_void_ty() == false).then({
             return alias_cands_none()
         })
         exact := env.alias_cands_scan(fn, rty, true)
         (exact.count > 0).match ({ true => exact, false => env.alias_cands_scan(fn, rty, false) })
     }
-    var_ty = (env: Env, name: string_view) Ty { (name == "true" || name == "false").match ({
-        true  => tbool(),
-        false => env.var_or_global(name),
-    }) }
+    var_ty = (env: Env, name: string_view) Ty {
+        (name == "true" || name == "false").match ({
+            true  => tbool(),
+            false => env.var_or_global(name),
+        })
+    }
     targ_of = (env: Env, params: [Param], args: [Expr], tp: string_view, lits: bool) Ty {
         found := tvoid()
         params.loop((h, i, p) {
@@ -452,10 +494,12 @@ Env*: {
         })
         found
     }
-    sl_elem_exp = (env: Env, items: [Expr]) Ty { env.exp.elem_of().is_void_ty().match ({
-        true  => env.sl_elem(items),
-        false => env.exp.elem_of(),
-    }) }
+    sl_elem_exp = (env: Env, items: [Expr]) Ty {
+        env.exp.elem_of().is_void_ty().match ({
+            true  => env.sl_elem(items),
+            false => env.exp.elem_of(),
+        })
+    }
     let_exp = (env: Env, t: Ty) Env {
         t.is_void_ty().match ({
             true  => env.clr_exp(),
@@ -505,7 +549,9 @@ Env*: {
                                                                     false => (c.fn == "addr").match ({
                                                                         true  => env.addr_ty(c),
                                                                         false => (c.fn == "assert_nonnull").match ({
-                                                                            true  => env.arg0_ty(c).nonnull_ty(),
+                                                                            true  => env
+                                                                                .arg0_ty(c)
+                                                                                .nonnull_ty(),
                                                                             false => env.gen_call_ret(c),
                                                                         }),
                                                                     }),
@@ -547,10 +593,9 @@ Env*: {
             false => c.fn,
         })
     }
-    disc_env = (env: Env, e: Ptr<Expr>) Env { e.carries_return_e().match ({
-        true  => env,
-        false => env.clr_exp(),
-    }) }
+    disc_env = (env: Env, e: Ptr<Expr>) Env {
+        e.carries_return_e().match ({ true => env, false => env.clr_exp() })
+    }
     clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
     call_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
         buf := cbuf<Ty>(env.a, f.tparams.len)
@@ -572,11 +617,12 @@ Env*: {
             false => pty,
         })
     }
-    block_ty = (env: Env, b: BlockData) Ty { b.stmts.stmts_diverge().match ({
-        true  => tvoid(),
-        false => env.block_ty_from(b.stmts, 0),
-    }) }
-    env_genenum = (env: Env, name: string_view) GenEnumDecl { env.didx.idx_genenum(env.decls, name) }
+    block_ty = (env: Env, b: BlockData) Ty {
+        b.stmts.stmts_diverge().match ({ true => tvoid(), false => env.block_ty_from(b.stmts, 0) })
+    }
+    env_genenum = (env: Env, name: string_view) GenEnumDecl {
+        env.didx.idx_genenum(env.decls, name)
+    }
 }    // a = allocator (heap-alloc in infer); didx = name→decl index
 // O(1) indexed lookups, replacing the O(n) decls scans. `the_func`/`fn_ret`/etc. linear forms below
 // remain for the few decls-only callers (template inlining, trait conformance) that lack an Env.
@@ -588,8 +634,12 @@ cenode*<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
     buf[0].addr()
 }
 // Pos-preserving rebuilds. Bare call()/vref() are only for synthesized nodes.
-recall* = (a: MutPtr<Malloc>, c: CallData, fn: string_view, args: [Expr]) Ptr<Expr> { a.cenode(call_full(fn, args, c.targs, c.pos, c.raw)) }
-var_call = (a: MutPtr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> { a.cenode(call_at(v.name, args, v.pos)) }
+recall* = (a: MutPtr<Malloc>, c: CallData, fn: string_view, args: [Expr]) Ptr<Expr> {
+    a.cenode(call_full(fn, args, c.targs, c.pos, c.raw))
+}
+var_call = (a: MutPtr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> {
+    a.cenode(call_at(v.name, args, v.pos))
+}
 // Heap-own a Ty so Ptr<Ty> fields do not dangle.
 tnode* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
     buf := cbuf<Ty>(a, 1)
@@ -611,7 +661,9 @@ vcons_val = (nm: string_view, t: Ty, tail: Ptr<VList>) VList {
     ))
 }
 vnil* = (a: MutPtr<Malloc>) Ptr<VList> { a.vlnode(vnil_val()) }
-vcons* = (a: MutPtr<Malloc>, nm: string_view, t: Ty, tail: Ptr<VList>) Ptr<VList> { a.vlnode(vcons_val(nm, t, tail)) }
+vcons* = (a: MutPtr<Malloc>, nm: string_view, t: Ty, tail: Ptr<VList>) Ptr<VList> {
+    a.vlnode(vcons_val(nm, t, tail))
+}
 params_env* = (a: MutPtr<Malloc>, ps: [Param]) Ptr<VList> {
     e := a.vnil()
     ps.loop((h, i, p) {
@@ -632,7 +684,9 @@ lookup_var* = (v: Ptr<VList>, name: string_view) Ty {
 // (an `.or_return()` error branch sits inside a lowered If; a value-position arm's `return`
 // sits in a block whose own value expectation is the ARM type). Lambda bodies bind their own (possibly
 // void) entry so an enclosing function's return type never leaks into a lambda's `return`.
-bind_fnret* = (a: MutPtr<Malloc>, vars: Ptr<VList>, ret: Ty) Ptr<VList> { a.vcons("0return", ret, vars) }
+bind_fnret* = (a: MutPtr<Malloc>, vars: Ptr<VList>, ret: Ty) Ptr<VList> {
+    a.vcons("0return", ret, vars)
+}
 fnret_of* = (v: Ptr<VList>) Ty { v.lookup_var("0return") }
 // Generic tparam scoping. A function's type parameters are fn-local names, but in the flat namespace
 // a user's GLOBAL type of the same name (`T: { … }`) is the same identifier as the tparam of a stdlib
@@ -758,10 +812,9 @@ elem_of* = (t: Ty) Ty {
     })
 }
 enum_has = (ed: EnumDecl, vn: string_view) bool { ed.variants.slice_any((v) { v.name == vn }) }
-pick_enum = (ed: EnumDecl, vn: string_view, found: string_view) string_view { ed.enum_has(vn).match ({
-    true  => ed.name,
-    false => found,
-}) }
+pick_enum = (ed: EnumDecl, vn: string_view, found: string_view) string_view {
+    ed.enum_has(vn).match ({ true => ed.name, false => found })
+}
 gen_enum_has = (g: GenEnumDecl, vn: string_view) bool { g.variants.slice_any((v) { v.name == vn }) }
 // Find the enum, concrete or generic, that declares variant `vn`.
 enum_of_variant = (decls: [Decl], vn: string_view) string_view {
@@ -900,7 +953,13 @@ infer_enum_targs = (env: Env, g: GenEnumDecl, variant: string_view, pty: Ty) [Ty
     vpt := g.gen_variant_payload(variant)
     map_slice(env.a, g.tparams, (tp) { vpt.unify_ty(pty, tp.name) })
 }
-enum_inst_payload = (env: Env, g: GenEnumDecl, base: string_view, variant: string_view, pty: Ty) EnumInst {
+enum_inst_payload = (
+    env: Env,
+    g: GenEnumDecl,
+    base: string_view,
+    variant: string_view,
+    pty: Ty,
+) EnumInst {
     ta := env.infer_enum_targs(g, variant, pty)
     EnumInst(
         base: base,
@@ -908,7 +967,13 @@ enum_inst_payload = (env: Env, g: GenEnumDecl, base: string_view, variant: strin
         targs: ta,
     )
 }
-enum_inst_gen = (env: Env, g: GenEnumDecl, base: string_view, variant: string_view, pty: Ty) EnumInst {
+enum_inst_gen = (
+    env: Env,
+    g: GenEnumDecl,
+    base: string_view,
+    variant: string_view,
+    pty: Ty,
+) EnumInst {
     env.exp.match ({
         .Generic(ge) => (ge.name == base).match ({
             true  => EnumInst(
@@ -932,8 +997,12 @@ enum_inst_of = (env: Env, base: string_view, variant: string_view, pty: Ty) Enum
         false => env.enum_inst_gen(g, base, variant, pty),
     })
 }    // a non-generic enum
-enum_inst_mk* = (env: Env, variant: string_view, payload: Ptr<Expr>) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload)) }
-enum_inst_tag* = (env: Env, variant: string_view) EnumInst { env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid()) }
+enum_inst_mk* = (env: Env, variant: string_view, payload: Ptr<Expr>) EnumInst {
+    env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload))
+}
+enum_inst_tag* = (env: Env, variant: string_view) EnumInst {
+    env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid())
+}
 // Block expressions take their trailing expression/return type.
 last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
     stmts[stmts.len - 1].match ({
@@ -957,10 +1026,9 @@ block_ty_from = (env: Env, stmts: [Stmt], i: i32) Ty {
     })
 }
 // Prefer a concrete stored index element type; generic inlining may make re-inference lose it.
-index_elem = (env: Env, ix: IndexData) Ty { ix.elem.is_void_ty().match ({
-    true  => env.infer_expr(ix.seq).elem_of(),
-    false => ix.elem,
-}) }
+index_elem = (env: Env, ix: IndexData) Ty {
+    ix.elem.is_void_ty().match ({ true => env.infer_expr(ix.seq).elem_of(), false => ix.elem })
+}
 pointee_of* = (t: Ty) Ty {
     t.match ({
         .Ptr(pd) => load(pd.pointee),
@@ -974,10 +1042,11 @@ pointee_of* = (t: Ty) Ty {
 // default width/provenance. `lits` selects which pass this scan is: false = typed args only,
 // true = literals only (the last resort).
 is_weak_targ_arg* = (e: Ptr<Expr>) bool {
-    e.is_lit_numeric() || load(e).match ({
-        .StrLit(s) => true,
-        _          => false,
-    })
+    e.is_lit_numeric()
+        || load(e).match ({
+            .StrLit(s) => true,
+            _          => false,
+        })
 }
 is_direct_tparam* = (t: Ty, tp: string_view) bool {
     t.match ({
@@ -985,7 +1054,9 @@ is_direct_tparam* = (t: Ty, tp: string_view) bool {
         _         => false,
     })
 }
-weak_targ_env = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: string_view) bool { arg.is_weak_targ_arg() || pty.is_direct_tparam(tp) && env.infer_expr(arg).is_str_t() }
+weak_targ_env = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: string_view) bool {
+    arg.is_weak_targ_arg() || pty.is_direct_tparam(tp) && env.infer_expr(arg).is_str_t()
+}
 // A lambda arg has no inferrable value type (infer_expr -> void). When a tparam sits in the closure's
 // RETURN position `(T) U`, bind it from the lambda's DECLARED return type so it never defaults to void.
 unify_arg = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: string_view) Ty {
@@ -1003,10 +1074,9 @@ lam_ret_unify = (pty: Ty, lm: LambdaData, tp: string_view) Ty {
         _        => tvoid(),
     })
 }
-ret_targ_of = (env: Env, ret: Ty, tp: string_view) Ty { env.exp.is_void_ty().match ({
-    true  => tvoid(),
-    false => ret.unify_ty(env.exp, tp),
-}) }
+ret_targ_of = (env: Env, ret: Ty, tp: string_view) Ty {
+    env.exp.is_void_ty().match ({ true => tvoid(), false => ret.unify_ty(env.exp, tp) })
+}
 // etargs = explicit turbofish type args (empty when none): a present one PINS the i-th tparam,
 // overriding inference; an absent one (i past etargs) falls back to inferring from the value args.
 // After the per-tparam pass, still-void targs get the two deep fallbacks (see deep_targs): a lambda
@@ -1028,7 +1098,14 @@ deep_targs_env = (env: Env, tparams: [Param], buf: [Ty], params: [Param], args: 
     })
     buf
 }
-lam_body_targ_env = (env: Env, tparams: [Param], targs: [Ty], params: [Param], args: [Expr], tp: string_view) Ty {
+lam_body_targ_env = (
+    env: Env,
+    tparams: [Param],
+    targs: [Ty],
+    params: [Param],
+    args: [Expr],
+    tp: string_view,
+) Ty {
     found := tvoid()
     params.loop((h, i, p) {
         found = found.is_void_ty().match ({
@@ -1041,7 +1118,14 @@ lam_body_targ_env = (env: Env, tparams: [Param], targs: [Ty], params: [Param], a
     })
     found
 }
-lam_body_one_env = (env: Env, tparams: [Param], targs: [Ty], pty: Ty, arg: Ptr<Expr>, tp: string_view) Ty {
+lam_body_one_env = (
+    env: Env,
+    tparams: [Param],
+    targs: [Ty],
+    pty: Ty,
+    arg: Ptr<Expr>,
+    tp: string_view,
+) Ty {
     pty.match ({
         .FnT(ft) => load(arg).match ({
             .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({
@@ -1075,7 +1159,13 @@ lam_body_one_env = (env: Env, tparams: [Param], targs: [Ty], pty: Ty, arg: Ptr<E
 }
 // UFCS trait dispatch: route `x.m()` to the receiver type's impl when one exists.
 method_in = (methods: [Param], fn: string_view) bool { methods.slice_any((n) { n.name == fn }) }
-dispatch_recv* = (a: MutPtr<Malloc>, decls: [Decl], didx: DeclIndex, fn: string_view, tyname: string_view) string_view {
+dispatch_recv* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    didx: DeclIndex,
+    fn: string_view,
+    tyname: string_view,
+) string_view {
     // O(1): dispatch_idx holds the LAST impl of `tyname` providing `fn` (directly or via a trait
     // default) — the same verdict the old whole-decls scan accumulated.
     i := didx.dispatch_idx.get(a.tdkey(tyname, fn), 0 - 1)
@@ -1105,10 +1195,9 @@ is_slice_recv = (t: Ty) bool {
 }
 // Can this receiver drive UFCS-alias dispatch? Anything with a concrete head, plus slices (whose head
 // is empty). Bails on void/unknown/pre-inline-tparam receivers, exactly as before for non-slices.
-alias_recv_dispatchable = (t: Ty) bool { is_empty(t.dispatch_recv_name()).match ({
-    true  => t.is_slice_recv(),
-    false => true,
-}) }
+alias_recv_dispatchable = (t: Ty) bool {
+    is_empty(t.dispatch_recv_name()).match ({ true => t.is_slice_recv(), false => true })
+}
 // Compiler-level call intrinsics (typed in infer_call / lowered by genc). Lives here — not in
 // check_validate, which now imports it — so the alias-UFCS fallback below can refuse to shadow them.
 is_intrinsic* = (fn: string_view) bool {
@@ -1160,7 +1249,8 @@ is_intrinsic* = (fn: string_view) bool {
                                                                                                 true  => true,
                                                                                                 false => (fn == "field_eq").match ({
                                                                                                     true  => true,
-                                                                                                    false => fn == "each_field" || fn == "zip_fields",
+                                                                                                    false => fn == "each_field"
+                                                                                                        || fn == "zip_fields",
                                                                                                 }),
                                                                                             }),
                                                                                         }),
@@ -1211,7 +1301,9 @@ alias_cands_none = () AliasCands {
         second: "",
     )
 }
-tparam_names_have = (tps: [Param], name: string_view) bool { tps.slice_any((tp) { tp.name == name }) }
+tparam_names_have = (tps: [Param], name: string_view) bool {
+    tps.slice_any((tp) { tp.name == name })
+}
 // VISIBILITY: only `*`-exported names are UFCS-reachable through an alias. Alias-prefixed publics
 // keep their star in the FLAT source (`g__scale* = …`), and parse_module records every starred
 // top-level name (compiler.parse exports_get) — membership there means the aliased module exported
@@ -1223,7 +1315,11 @@ alias_name_is_pub = (name: string_view) bool { exports_get().slice_any((p) { p.n
 // receiver→param0 coercion the normal call path uses (`fits` — i32→i64, slice→slice, …) in pass 2.
 alias_cand_matches = (f: Func, fn: string_view, rty: Ty, exact: bool) bool {
     sep := f.name.alias_sep()
-    (sep > 0 && f.params.len > 0 && f.name.alias_is_real_prefix() && f.name.alias_tail(sep) == fn && f.name.alias_name_is_pub()).match ({
+    (sep > 0
+        && f.params.len > 0
+        && f.name.alias_is_real_prefix()
+        && f.name.alias_tail(sep) == fn
+        && f.name.alias_name_is_pub()).match ({
         true  => {
             p0 := f.params[0].ty
             head := p0.dispatch_recv_name()
@@ -1261,8 +1357,16 @@ alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool) AliasCands 
     first := ""
     second := ""
     module_sigs_get().loop((h, i, e) {
-        (e.sig_imported() == false && e.sig_foreign() == false && e.sig_type() == false && e.name.ends_with(fn)).then({
-            fname := env.a.gstr_string(32).gstr_append(env.a, e.alias).gstr_append(env.a, "__").gstr_append(env.a, e.name).gstr_finish(env.a)
+        (e.sig_imported() == false
+            && e.sig_foreign() == false
+            && e.sig_type() == false
+            && e.name.ends_with(fn)).then({
+            fname := env.a
+                .gstr_string(32)
+                .gstr_append(env.a, e.alias)
+                .gstr_append(env.a, "__")
+                .gstr_append(env.a, e.name)
+                .gstr_finish(env.a)
             f := env.env_func(fname)
             (is_empty(f.name) == false && f.alias_cand_matches(fn, rty, exact)).then({
                 second = (cnt == 1).match ({ true => f.name, false => second })
@@ -1300,10 +1404,9 @@ gen_call_ret = (env: Env, c: CallData) Ty {
 // not a known function: an INDIRECT call through a function-VALUE (a fn-valued local or field
 // bound to a local) — its result type is the value's FnT return type.
 // Bounds-safe operand inference for 1-arg intrinsics.
-arg0_ty = (env: Env, c: CallData) Ty { (c.args.len > 0).match ({
-    true  => env.infer_expr(c.args[0].addr()),
-    false => tvoid(),
-}) }
+arg0_ty = (env: Env, c: CallData) Ty {
+    (c.args.len > 0).match ({ true => env.infer_expr(c.args[0].addr()), false => tvoid() })
+}
 addr_ty = (env: Env, c: CallData) Ty {
     base := env.arg0_ty(c)
     readonly := (c.args.len > 0).match ({
@@ -1324,10 +1427,12 @@ nonnull_ty = (t: Ty) Ty {
     })
 }
 // Constructor types keep generic args so later match-arm binds recover concrete payload types.
-einst_ty = (ei: EnumInst) Ty { (ei.targs.len > 0).match ({
-    true  => tgeneric(ei.base, ei.targs, ei.mty),
-    false => tnamed(ei.mty),
-}) }
+einst_ty = (ei: EnumInst) Ty {
+    (ei.targs.len > 0).match ({
+        true  => tgeneric(ei.base, ei.targs, ei.mty),
+        false => tnamed(ei.mty),
+    })
+}
 mkenum_ty = (env: Env, mk: MakeEnumData) Ty {
     (mk.mty == "").match ({
         true  => env.enum_inst_mk(mk.variant, mk.payload).einst_ty(),
@@ -1354,7 +1459,13 @@ gen_field_at = (fields: [Field], fname: string_view) Ty {
     })
     found
 }
-gen_struct_field = (a: MutPtr<Malloc>, decls: [Decl], gname: string_view, fname: string_view, targs: [Ty]) Ty {
+gen_struct_field = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    gname: string_view,
+    fname: string_view,
+    targs: [Ty],
+) Ty {
     found := tvoid()
     decls.loop((h, i, d) {
         found = d.match ({
@@ -1391,7 +1502,9 @@ infer_field = (env: Env, oty: Ty, field: string_view) Ty {
 }
 infer_member = (env: Env, m: MemberData) Ty { env.infer_field(env.infer_expr(m.obj), m.field) }
 infer_arrow = (env: Env, ar: ArrowData) Ty { env.infer_field(env.infer_expr(ar.obj), ar.field) }
-infer_arm_ty = (env: Env, subjty: Ty, ar: ArmData) Ty { env.a.arm_env(env, subjty, ar).infer_expr(ar.body) }
+infer_arm_ty = (env: Env, subjty: Ty, ar: ArmData) Ty {
+    env.a.arm_env(env, subjty, ar).infer_expr(ar.body)
+}
 // Least common result type. `ty_eq(got, want)` is directional: literal fits cstr/view and cstr fits
 // view, never the reverse. Therefore when `a` fits `b`, the safe join is the broader `b`; choosing
 // `a` would launder a borrowed arm into immortal `string_literal` provenance.
@@ -1448,10 +1561,9 @@ has_tparam* = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) {
 // Slice literal element type: an expected `[T]` (declared/annotated) WINS, so a bare-int literal
 // `[1,2,3]` adopts the declared element width (`i64`/`u8`) instead of defaulting to i32 — the same
 // expected-type propagation a scalar int slot already gets. Falls back to the first item's type.
-sl_elem = (env: Env, items: [Expr]) Ty { (items.len == 0).match ({
-    true  => tvoid(),
-    false => env.infer_expr(items[0].addr()),
-}) }
+sl_elem = (env: Env, items: [Expr]) Ty {
+    (items.len == 0).match ({ true => tvoid(), false => env.infer_expr(items[0].addr()) })
+}
 vdef_payload = (vs: [VariantDef], vn: string_view) Ty {
     found := tvoid()
     vs.loop((h, i, v) {
@@ -1478,7 +1590,9 @@ gsubst* = (pty: Ty, env: Env, g: GenericData) Ty {
             is_empty(gsd.name).match ({
                 true  => sub,
                 false => {
-                    tys := map_slice(env.a, gsd.tparams, (tp) { env.a.subst_ty_in(ged.tparams, g.args, tnamed(tp.name)) })
+                    tys := map_slice(env.a, gsd.tparams, (tp) {
+                        env.a.subst_ty_in(ged.tparams, g.args, tnamed(tp.name))
+                    })
                     tgeneric(n, tys, env.a.mangle_str_in(n, tys))
                 },
             })
@@ -1581,10 +1695,9 @@ hide_param = (a: MutPtr<Malloc>, params: [Param], name: string_view) [Param] {
         },
     })
 }
-local_marks = (a: MutPtr<Malloc>, s: String, n: i64) String { (n <= 0).match ({
-    true  => s,
-    false => a.local_marks(s.gstr_append(a, "_"), n - 1),
-}) }
+local_marks = (a: MutPtr<Malloc>, s: String, n: i64) String {
+    (n <= 0).match ({ true => s, false => a.local_marks(s.gstr_append(a, "_"), n - 1) })
+}
 // inline-expansion scope marks: the chain of functions currently being inlined (env's empty-named
 // markers, pushed by inline_template). Distinguishes locals from DIFFERENT inlined functions that
 // share a param-count depth — e.g. cenode and cebuf both at depth 2 would otherwise rename their
@@ -1742,7 +1855,15 @@ arg_local_name = (a: MutPtr<Malloc>, name: string_view, env: Ptr<VList>, idx: i6
 // literal's default width (i32) — the outer instantiation's binding (e.g. K=i64 from the HMap
 // receiver) silently lost, wrong monos emitted (i64 keys hashed with impl_Hash_i32_hash). A pinned
 // literal is bound to a TYPED temp local instead, so in-body uses carry the instantiated type.
-bind_args* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, params: [Param], cargs: [Expr], env: Ptr<VList>, pins: [Ty]) ArgBind {
+bind_args* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    params: [Param],
+    cargs: [Expr],
+    env: Ptr<VList>,
+    pins: [Ty],
+) ArgBind {
     nf := a.cebuf(cargs.len)
     nb := 0
     cargs.loop((h, i, ce) {
@@ -1786,7 +1907,13 @@ no_pins* = (a: MutPtr<Malloc>, n: i64) [Ty] {
 }
 // The pin for each arg of a GENERIC inline: literal-typed args whose param type mentions a tparam
 // adopt the (fully concrete) targ-substituted param type; everything else is unpinned.
-lit_pins* = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], params: [Param], cargs: [Expr]) [Ty] {
+lit_pins* = (
+    a: MutPtr<Malloc>,
+    tparams: [Param],
+    targs: [Ty],
+    params: [Param],
+    cargs: [Expr],
+) [Ty] {
     buf := cbuf<Ty>(a, params.len)
     params.loop((h, i, p) {
         buf[i] = tvoid()
@@ -1932,7 +2059,14 @@ blockify* = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
         }),
     })
 }
-inline_lambda* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lamx: Expr, cargs: [Expr], env: Ptr<VList>) Ptr<Expr> {
+inline_lambda* = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    lamx: Expr,
+    cargs: [Expr],
+    env: Ptr<VList>,
+) Ptr<Expr> {
     lamx.match ({
         .Lambda(lm) => {
             // spliced lambda body: its `return`s are the LAMBDA's, so bind its own (possibly void)
@@ -1945,7 +2079,9 @@ inline_lambda* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lamx: Expr, 
     })
 }
 // Trait default methods are materialized for impls that omit them.
-pbuf* = (a: MutPtr<Malloc>, n: i64) [Param] { slice(a.acquire(n * sizeof(Param) + sizeof(Param)), n) }
+pbuf* = (a: MutPtr<Malloc>, n: i64) [Param] {
+    slice(a.acquire(n * sizeof(Param) + sizeof(Param)), n)
+}
 // Shared by resolve_module and check_validate.
 empty_params* = () [Param] { slice(null_ptr(), 0) }
 fn_params* = (decls: [Decl], fn: string_view) [Param] { decls.the_func(fn).params }

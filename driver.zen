@@ -7,7 +7,8 @@
 { view } = std.text.str
 { fnv1a64_fold } = std.hash    // shared FNV-1a-64 rolling byte fold (centralized in std.hash)
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
-{ contents_in, out, out_bytes, save, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644, MODE_755 } = std.io.file
+{ contents_in, out, out_bytes, save, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644,
+  MODE_755 } = std.io.file
 { or, expect } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
 { then } = std.core.bool
 { open, read, write, close, system, unlink, mkdir, rmdir, opendir, closedir, getpid, isatty } = std.c.libc
@@ -17,13 +18,23 @@
 { lerr_get, collect_comments } = compiler.lex
 { resolve_module } = compiler.check_resolve
 { CheckDiagnostic, desc_or } = compiler.validate.diag
-{ check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source, check_module_no_if_diagnostic_from_source, check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source, check_module_leak_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source, check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source, check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source, check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source, check_module_ffi_diagnostic_from_source, check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source, check_module_main_diagnostic_from_source, check_module_batch } = compiler.validate.core
+{ check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source,
+  check_module_no_if_diagnostic_from_source, check_module_reserved_diagnostic_from_source,
+  check_module_escape_diagnostic_from_source, check_module_leak_diagnostic_from_source,
+  check_module_addr_escape_diagnostic_from_source, check_module_send_rc_diagnostic_from_source,
+  check_module_scratch_diagnostic_from_source, check_module_send_mut_diagnostic_from_source,
+  check_module_bound_diagnostic_from_source, check_module_arg_diagnostic_from_source,
+  check_module_or_return_diagnostic_from_source, check_module_unknown_type_diagnostic_from_source,
+  check_module_ffi_diagnostic_from_source, check_module_mustuse_diagnostic_from_source,
+  check_module_infinite_type_diagnostic_from_source, check_module_main_diagnostic_from_source,
+  check_module_batch } = compiler.validate.core
 { denrich_check } = compiler.validate.enrich
 { genModuleIn } = compiler.genc_emit
 { genJsModuleIn } = compiler.genjs
 { pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, diag_line_span, DiagSpan, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge, seen_name, add_name, module_path, FlatRegion, fregion_find, fregion_src_line, undefined_name_hint } = std.internal.resolve
+{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge,
+  seen_name, add_name, module_path, FlatRegion, fregion_find, fregion_src_line, undefined_name_hint } = std.internal.resolve
 { import_edges } = std.internal.resolve_scan
 { ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = std.internal.resolve_ffi
 say = (s: string_view) i64 {
@@ -37,22 +48,53 @@ derr = (s: string_view) i64 {
 // the first FAILING diagnostic, else clean. `cd_or(a, b)` = a if a failed, else b — so this is a flat
 // precedence chain of the checks in order, not a brace pyramid. Checks are independent and side-effect
 // free, so running them all is harmless; the reported diagnostic is still the first failure in order.
-cd_or = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic { (a.code == 0).match ({
-    true  => b,
-    false => a,
-}) }
+cd_or = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic {
+    (a.code == 0).match ({ true => b, false => a })
+}
 // the SPECIALIZED channels only (parse / ownership / escape / sendability / bound / … — every check
 // EXCEPT the main type channel). If one fires it is the ROOT of the rejection: reported alone, so a
 // downstream cascade of type errors from the same cause is suppressed. The main channel (names /
 // types / arity / fit / exhaustiveness / …) is batched separately — check_module_batch — so its
 // INDEPENDENT errors are all reported at once. A parse error, being here, always short-circuits the
 // batch (the flat sentinels would otherwise spray bogus type errors).
-check_diag_no_main = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], flat: string_view) CheckDiagnostic { check_module_no_if_diagnostic_from_source(flat).cd_or(mp.check_module_parse_diagnostic_from_source(decls, flat)).cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_leak_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat)).cd_or(mp.check_module_ffi_diagnostic_from_source(decls, flat)).cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat)).cd_or(check_module_main_diagnostic_from_source(raw, flat)).cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat)) }
+check_diag_no_main = (
+    mp: MutPtr<Malloc>,
+    raw: [Decl],
+    decls: [Decl],
+    flat: string_view,
+) CheckDiagnostic {
+    check_module_no_if_diagnostic_from_source(flat)
+        .cd_or(mp.check_module_parse_diagnostic_from_source(decls, flat))
+        .cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_leak_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat))
+        .cd_or(mp.check_module_ffi_diagnostic_from_source(decls, flat))
+        .cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat))
+        .cd_or(check_module_main_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat))
+}
 RenderTarget*: {
     path: string_view,
     src: string_view,
 }
-pick_module = (flat: string_view, mods: [ModuleEntry], i: i64, off: i32, w: i32, rpath: string_view, rsrc: string_view) RenderTarget {
+pick_module = (
+    flat: string_view,
+    mods: [ModuleEntry],
+    i: i64,
+    off: i32,
+    w: i32,
+    rpath: string_view,
+    rsrc: string_view,
+) RenderTarget {
     (i >= mods.len).match ({
         true  => RenderTarget(
             path: rpath,
@@ -71,7 +113,13 @@ pick_module = (flat: string_view, mods: [ModuleEntry], i: i64, off: i32, w: i32,
         },
     })
 }
-pick_render = (rp: ResolvedProgram, off: i32, w: i32, rpath: string_view, rsrc: string_view) RenderTarget {
+pick_render = (
+    rp: ResolvedProgram,
+    off: i32,
+    w: i32,
+    rpath: string_view,
+    rsrc: string_view,
+) RenderTarget {
     (diag_user_span(rp.flat, rsrc, off, w).line == 0).match ({
         true  => rp.flat.pick_module(rp.table.modules, 0, off, w, rpath, rsrc),
         false => RenderTarget(
@@ -90,7 +138,13 @@ DiagLoc: {
 // line — exact even when two modules share identical line text), then recover the column against that
 // single known line. The whole-table fuzzy scan survives ONLY as the last resort for offsets no
 // region contains (synthesized positions, separator bytes).
-locate_diag = (rp: ResolvedProgram, off: i32, w: i32, rpath: string_view, rsrc: string_view) DiagLoc {
+locate_diag = (
+    rp: ResolvedProgram,
+    off: i32,
+    w: i32,
+    rpath: string_view,
+    rsrc: string_view,
+) DiagLoc {
     ri := rp.regions.fregion_find(to_i64(off))
     (off >= 0 && ri >= 0).then({
         srcline := rp.regions.fregion_src_line(rp.line_srcs, rp.flat, ri, to_i64(off))
@@ -113,7 +167,15 @@ locate_diag = (rp: ResolvedProgram, off: i32, w: i32, rpath: string_view, rsrc: 
 // render ONE diagnostic (file:line:col + caret + hint) to stderr, mapping its flat offset to the
 // module its error actually lives in. cd.count>1 appends the legacy inline "(+K more)" suffix — used
 // only on the specialized-channel path, where a single root error stands in for a whole cascade.
-emit_one = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProgram, path: string_view, user: string_view, cd: CheckDiagnostic) i64 {
+emit_one = (
+    mp: MutPtr<Malloc>,
+    raw: [Decl],
+    decls: [Decl],
+    rp: ResolvedProgram,
+    path: string_view,
+    user: string_view,
+    cd: CheckDiagnostic,
+) i64 {
     dl := locate_diag(rp, cd.source_offset, cd.span_width, path, user)
     msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
     // World teaching hint: an undefined name that some closure module EXPORTS names that module
@@ -144,7 +206,12 @@ report_no_if_plain = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i
 // Checked commands preflight the resolved flat source before parsing or semantic lowering. This keeps
 // the obsolete guard parser/lowerer out of the execution path and still maps an `if` in an imported
 // module back to that module's real file.
-report_no_if_resolved = (mp: MutPtr<Malloc>, rp: ResolvedProgram, path: string_view, user: string_view) i32 {
+report_no_if_resolved = (
+    mp: MutPtr<Malloc>,
+    rp: ResolvedProgram,
+    path: string_view,
+    user: string_view,
+) i32 {
     cd := check_module_no_if_diagnostic_from_source(rp.flat)
     (cd.code == 0).match ({
         true  => 0,
@@ -159,7 +226,11 @@ report_no_if_resolved = (mp: MutPtr<Malloc>, rp: ResolvedProgram, path: string_v
 DIAG_CAP = () i32 { 20 }
 // after the cap, one line naming the K un-rendered errors (so the tail is never silently dropped).
 emit_more_trailer = (mp: MutPtr<Malloc>, k: i32) i64 {
-    s := mp.gstr_string(48).gstr_append(mp, "zenc: (+").push_int(mp, to_i64(k)).gstr_append(mp, " more error")
+    s := mp
+        .gstr_string(48)
+        .gstr_append(mp, "zenc: (+")
+        .push_int(mp, to_i64(k))
+        .gstr_append(mp, " more error")
     s2 := (k == 1).match ({
         true  => s.gstr_push(mp, ')'),
         false => s.gstr_push(mp, 's').gstr_push(mp, ')'),
@@ -167,7 +238,14 @@ emit_more_trailer = (mp: MutPtr<Malloc>, k: i32) i64 {
     derr(s2.gstr_push(mp, '\n').gstr_finish(mp))
 }
 // 0 if clean; else render EVERY main-channel diagnostic (capped, with a trailer) and return the count.
-report_check = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProgram, path: string_view, user: string_view) i32 {
+report_check = (
+    mp: MutPtr<Malloc>,
+    raw: [Decl],
+    decls: [Decl],
+    rp: ResolvedProgram,
+    path: string_view,
+    user: string_view,
+) i32 {
     // a specialized channel (parse / ownership / escape / bound / …) is the ROOT — report it alone.
     spec := mp.check_diag_no_main(raw, decls, rp.flat)
     (spec.code != 0).match ({
@@ -194,7 +272,9 @@ report_check = (mp: MutPtr<Malloc>, raw: [Decl], decls: [Decl], rp: ResolvedProg
 // suppresses zenrt's String (the program emits its own). --build-self uses the plain seed variant.
 // module-level str CONSTS don't emit as C globals in the seed, so these are zero-arg fns.
 HEAD = () string_view { "typedef struct { void* ptr; int64_t len; } zslice; " }
-HEAD_REPL = () string_view { "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n" }
+HEAD_REPL = () string_view {
+    "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n"
+}
 // Intermediate /tmp files are namespaced by pid so two concurrent `zenc` invocations never clobber
 // each other's temp.c / temp.bin (a fixed path made one process compile/run the OTHER's program).
 // getpid() is constant for the life of a run, so each builder yields the SAME path on every call —
@@ -209,7 +289,14 @@ push_int = (s: String, mp: MutPtr<Malloc>, n: i64) String {
         },
     })
 }    // hoist (gstr_reserve re-evals the receiver)
-pid_path = (mp: MutPtr<Malloc>, pre: string_view, suf: string_view) string_view { mp.gstr_string(64).gstr_append(mp, pre).push_int(mp, getpid()).gstr_append(mp, suf).gstr_finish(mp) }
+pid_path = (mp: MutPtr<Malloc>, pre: string_view, suf: string_view) string_view {
+    mp
+        .gstr_string(64)
+        .gstr_append(mp, pre)
+        .push_int(mp, getpid())
+        .gstr_append(mp, suf)
+        .gstr_finish(mp)
+}
 TMPC = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenc_zd_", ".c") }
 TMPBIN = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenc_zd_", ".bin") }
 // ── path helpers ────────────────────────────────────────────────────────────────────────────────
@@ -225,19 +312,29 @@ last_slash = (v: [u8], i: i64, best: i64) i64 {
     })
 }
 // the first `n` bytes of `p` as an owned str — built through the allocator (no raw malloc).
-cstr_prefix = (mp: MutPtr<Malloc>, p: string_view, n: i64) string_view { push_prefix(mp.gstr_string(n + 1), mp, p.view(), 0, n).gstr_finish(mp) }
-push_prefix = (s: String, mp: MutPtr<Malloc>, v: [u8], i: i64, n: i64) String { (i >= n).match ({
-    true  => s,
-    false => push_prefix(s.gstr_push(mp, v[i]), mp, v, i + 1, n),
-}) }
+cstr_prefix = (mp: MutPtr<Malloc>, p: string_view, n: i64) string_view {
+    push_prefix(mp.gstr_string(n + 1), mp, p.view(), 0, n).gstr_finish(mp)
+}
+push_prefix = (s: String, mp: MutPtr<Malloc>, v: [u8], i: i64, n: i64) String {
+    (i >= n).match ({ true => s, false => push_prefix(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
+}
 // ── the compile pipeline (resolve imports -> parse -> resolve_module) ─────────────────────────────
 // flatten imports from disk: root = dir of the zen binary (holds src/std + src/compiler), progdir =
 // dir of the program (holds its siblings). Import-free programs pass through unchanged.
-flatten = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view) string_view { mp.resolve_program_data(root, mp.dirname(path), path, src).flat }
+flatten = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view) string_view {
+    mp.resolve_program_data(root, mp.dirname(path), path, src).flat
+}
 // the full resolved program (flat + per-module table) — check/build keep it so a diagnostic can
 // render against the imported module its error actually lives in.
-resolve_prog = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view) ResolvedProgram { mp.resolve_program_data(root, mp.dirname(path), path, src) }
-decls_of = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view) [Decl] { mp.resolve_module(mp.parse_module(mp.flatten(root, path, src))) }
+resolve_prog = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    path: string_view,
+    src: string_view,
+) ResolvedProgram { mp.resolve_program_data(root, mp.dirname(path), path, src) }
+decls_of = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view) [Decl] {
+    mp.resolve_module(mp.parse_module(mp.flatten(root, path, src)))
+}
 // write the runnable temp.c: zenrt.h-include head, then the emitted body (after HEAD).
 write_runnable_c = (tmpc: string_view, gen: String) bool {
     hl := HEAD().view().len
@@ -262,7 +359,33 @@ write_runnable_c = (tmpc: string_view, gen: String) bool {
 // emitted C relies on. Affects BUILT/RUN user programs only — the bootstrap seed compiles via
 // bootstrap/Makefile CFLAGS, untouched, so the byte-exact fixpoint is unaffected. Non-tail recursion
 // whose result feeds a branch still overflows — caught by zenrt.c's stack-overflow panic.
-cc_command = (mp: MutPtr<Malloc>, root: string_view, tmpc: string_view, out: string_view, ccflags: string_view, links: string_view, ccname: string_view) string_view { mp.gstr_string(256).gstr_append(mp, ccname).gstr_append(mp, " -std=gnu11 -Wno-error=implicit-function-declaration -O1 -foptimize-sibling-calls -fwrapv -w -I").gstr_append(mp, root).gstr_append(mp, "/bootstrap ").gstr_append(mp, tmpc).gstr_append(mp, " ").gstr_append(mp, root).gstr_append(mp, "/bootstrap/zenrt.c ").gstr_append(mp, ccflags).gstr_append(mp, " ").gstr_append(mp, links).gstr_append(mp, " -lm").gstr_append(mp, " -o ").gstr_append(mp, out).gstr_finish(mp) }    // libm: always link (sin/cos/log/exp/pow); free if unused
+cc_command = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    tmpc: string_view,
+    out: string_view,
+    ccflags: string_view,
+    links: string_view,
+    ccname: string_view,
+) string_view {
+    mp
+        .gstr_string(256)
+        .gstr_append(mp, ccname)
+        .gstr_append(mp, " -std=gnu11 -Wno-error=implicit-function-declaration -O1 -foptimize-sibling-calls -fwrapv -w -I")
+        .gstr_append(mp, root)
+        .gstr_append(mp, "/bootstrap ")
+        .gstr_append(mp, tmpc)
+        .gstr_append(mp, " ")
+        .gstr_append(mp, root)
+        .gstr_append(mp, "/bootstrap/zenrt.c ")
+        .gstr_append(mp, ccflags)
+        .gstr_append(mp, " ")
+        .gstr_append(mp, links)
+        .gstr_append(mp, " -lm")
+        .gstr_append(mp, " -o ")
+        .gstr_append(mp, out)
+        .gstr_finish(mp)
+}    // libm: always link (sin/cos/log/exp/pow); free if unused
 // ── cross-toolchain selection (`Target.target(platform)` in build.zen) ────────────────────────────
 // A native Spec (target "") compiles with host `cc` — the command line above, byte-identical to
 // before. A cross triple resolves a C compiler in this order:
@@ -272,7 +395,15 @@ cc_command = (mp: MutPtr<Malloc>, root: string_view, tmpc: string_view, out: str
 //   3. `zig cc -target <triple>` when zig is on PATH.
 // Nothing found -> a LOUD error and no build. There is NEVER a silent host-cc fallback: a wrong-
 // architecture binary that "builds fine" is strictly worse than an error.
-which_ok = (mp: MutPtr<Malloc>, name: string_view) bool { mp.gstr_string(64).gstr_append(mp, "command -v ").gstr_append(mp, name).gstr_append(mp, " >/dev/null 2>&1").gstr_finish(mp).system() == 0 }
+which_ok = (mp: MutPtr<Malloc>, name: string_view) bool {
+    mp
+        .gstr_string(64)
+        .gstr_append(mp, "command -v ")
+        .gstr_append(mp, name)
+        .gstr_append(mp, " >/dev/null 2>&1")
+        .gstr_finish(mp)
+        .system() == 0
+}
 cross_cc = (mp: MutPtr<Malloc>, target: string_view) string_view {
     (target == "").then({
         return "cc"
@@ -286,7 +417,11 @@ cross_cc = (mp: MutPtr<Malloc>, target: string_view) string_view {
         return gcc
     })
     mp.which_ok("zig").then({
-        return mp.gstr_string(48).gstr_append(mp, "zig cc -target ").gstr_append(mp, target).gstr_finish(mp)
+        return mp
+            .gstr_string(48)
+            .gstr_append(mp, "zig cc -target ")
+            .gstr_append(mp, target)
+            .gstr_finish(mp)
     })
     derr("zenc: error: cross target ")
     derr(target)
@@ -311,10 +446,9 @@ cross_cc = (mp: MutPtr<Malloc>, target: string_view) string_view {
 // harness's cache cases point it at scratch). i64 wraps like the spec's u64: every build has -fwrapv.
 FNV_BASIS = () i64 { 0 - 3750763034362895579 }    // 0xcbf29ce484222325, the FNV-1a-64 offset basis, as an i64
 fnv_str = (h: i64, s: string_view) i64 { h.fnv1a64_fold(s.view()) }
-flag_token_end = (v: [u8], i: i64) i64 { (i >= v.len || v[i] == ' ').match ({
-    true  => i,
-    false => v.flag_token_end(i + 1),
-}) }
+flag_token_end = (v: [u8], i: i64) i64 {
+    (i >= v.len || v[i] == ' ').match ({ true => i, false => v.flag_token_end(i + 1) })
+}
 // fold a flag string: its text (order + non-file tokens like -lm), plus the CONTENT of every
 // whitespace token that names a readable file (a project's extra .c sources compiled into the binary).
 fnv_flag_files = (mp: MutPtr<Malloc>, h: i64, v: [u8], i: i64) i64 {
@@ -393,11 +527,24 @@ CacheWalk: {
     seen: String,
     h: i64,
 }
-edges_of = (mp: MutPtr<Malloc>, src: string_view) [ImportEdge] { mp.import_edges(src).expect("zenc: cache probe: allocation failed") }
+edges_of = (mp: MutPtr<Malloc>, src: string_view) [ImportEdge] {
+    mp.import_edges(src).expect("zenc: cache probe: allocation failed")
+}
 // id → file through the resolver's ONE exported module_path (the canonical ModuleId → path fn),
 // so the probe can never drift from the loader's mapping.
-cache_module_path = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, id: string_view) string_view { mp.module_path(root, progdir, mp.gstr_string(24).gstr_append(mp, id)) }
-cache_walk_one = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, id: string_view, st: CacheWalk) CacheWalk {
+cache_module_path = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    progdir: string_view,
+    id: string_view,
+) string_view { mp.module_path(root, progdir, mp.gstr_string(24).gstr_append(mp, id)) }
+cache_walk_one = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    progdir: string_view,
+    id: string_view,
+    st: CacheWalk,
+) CacheWalk {
     idn := mp.gstr_string(24).gstr_append(mp, id)
     st.seen.seen_name(idn).match ({
         true  => st,
@@ -416,7 +563,13 @@ cache_walk_one = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, i
         },
     })
 }
-cache_walk_edges = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view, edges: [ImportEdge], st: CacheWalk) CacheWalk {
+cache_walk_edges = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    progdir: string_view,
+    edges: [ImportEdge],
+    st: CacheWalk,
+) CacheWalk {
     cur := st
     edges.loop((lh, i, e) {
         cur = mp.cache_walk_one(root, progdir, e.module, cur)
@@ -424,7 +577,16 @@ cache_walk_edges = (mp: MutPtr<Malloc>, root: string_view, progdir: string_view,
     cur
 }
 // the on-disk entry for one (kind, program) pair: <dir>/<kind>_<16 hex digits>.
-cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: string_view, src: string_view, ccflags: string_view, links: string_view, target: string_view) string_view {
+cache_probe = (
+    mp: MutPtr<Malloc>,
+    kind: string_view,
+    root: string_view,
+    path: string_view,
+    src: string_view,
+    ccflags: string_view,
+    links: string_view,
+    target: string_view,
+) string_view {
     // An unreadable binary (neither /proc/self/exe nor argv[0] opens) means the compiler-identity stamp
     // is unavailable; a shared degenerate stamp would let a REBUILT compiler replay a stale entry. Empty
     // key = cache disabled for this run.
@@ -441,12 +603,28 @@ cache_probe = (mp: MutPtr<Malloc>, kind: string_view, root: string_view, path: s
     // hashed by the walk below through module_path; the map itself covers id/path re-registration).
     // The cross-target triple is part of the key: flipping `Target.target(...)` MUST miss — a
     // cached aarch64 binary must never replay as the x86_64 build (or vice versa).
-    h0 := self.fnv_str(VERSION()).fnv_str(kind).fnv_str(getEnv("ZEN_VIS_REPORT")).fnv_str(ffi_grants_get()).fnv_str(genmods_get()).fnv_flags(mp, ccflags).fnv_flags(mp, links).fnv_str(target).fnv_str(src)
+    h0 := self
+        .fnv_str(VERSION())
+        .fnv_str(kind)
+        .fnv_str(getEnv("ZEN_VIS_REPORT"))
+        .fnv_str(ffi_grants_get())
+        .fnv_str(genmods_get())
+        .fnv_flags(mp, ccflags)
+        .fnv_flags(mp, links)
+        .fnv_str(target)
+        .fnv_str(src)
     st := mp.cache_walk_edges(root, mp.dirname(path), mp.edges_of(src), CacheWalk(
         seen: mp.gstr_string(256),
         h: h0,
     ))
-    mp.gstr_string(96).gstr_append(mp, cache_dir()).gstr_push(mp, '/').gstr_append(mp, kind).gstr_push(mp, '_').push_hex(mp, st.h, 15).gstr_finish(mp)
+    mp
+        .gstr_string(96)
+        .gstr_append(mp, cache_dir())
+        .gstr_push(mp, '/')
+        .gstr_append(mp, kind)
+        .gstr_push(mp, '_')
+        .push_hex(mp, st.h, 15)
+        .gstr_finish(mp)
 }
 // mark a fully-successful `check`: the marker's EXISTENCE is the cached verdict (content is cosmetic).
 cache_put_ok = (path: string_view) i64 {
@@ -454,18 +632,53 @@ cache_put_ok = (path: string_view) i64 {
     save(path, "ok\n", 3).or(0)
 }
 // copy the cached binary into place; chmod so the exec bit survives any pre-existing destination.
-cache_bin_cmd = (mp: MutPtr<Malloc>, cb: string_view, out: string_view) string_view { mp.gstr_string(160).gstr_append(mp, "cp ").quote_arg(mp, cb).gstr_push(mp, ' ').quote_arg(mp, out).gstr_append(mp, " && chmod 755 ").quote_arg(mp, out).gstr_finish(mp) }
+cache_bin_cmd = (mp: MutPtr<Malloc>, cb: string_view, out: string_view) string_view {
+    mp
+        .gstr_string(160)
+        .gstr_append(mp, "cp ")
+        .quote_arg(mp, cb)
+        .gstr_push(mp, ' ')
+        .quote_arg(mp, out)
+        .gstr_append(mp, " && chmod 755 ")
+        .quote_arg(mp, out)
+        .gstr_finish(mp)
+}
 // publish a built binary: copy to a pid-suffixed temp inside the cache dir, then atomic `mv -f` — a
 // concurrent zenc never observes a half-written entry (and an exec'ing reader never sees ETXTBSY).
 cache_store_bin = (mp: MutPtr<Malloc>, cb: string_view, out: string_view) i32 {
     mkdir(cache_dir(), MODE_755)
-    tmp := mp.gstr_string(96).gstr_append(mp, cb).gstr_push(mp, '.').push_int(mp, getpid()).gstr_finish(mp)
-    mp.gstr_string(256).gstr_append(mp, "cp ").quote_arg(mp, out).gstr_push(mp, ' ').quote_arg(mp, tmp).gstr_append(mp, " && mv -f ").quote_arg(mp, tmp).gstr_push(mp, ' ').quote_arg(mp, cb).gstr_finish(mp).system()
+    tmp := mp
+        .gstr_string(96)
+        .gstr_append(mp, cb)
+        .gstr_push(mp, '.')
+        .push_int(mp, getpid())
+        .gstr_finish(mp)
+    mp
+        .gstr_string(256)
+        .gstr_append(mp, "cp ")
+        .quote_arg(mp, out)
+        .gstr_push(mp, ' ')
+        .quote_arg(mp, tmp)
+        .gstr_append(mp, " && mv -f ")
+        .quote_arg(mp, tmp)
+        .gstr_push(mp, ' ')
+        .quote_arg(mp, cb)
+        .gstr_finish(mp)
+        .system()
 }
 // type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc
 // failure. The cache wraps this whole pipeline: a hit copies the previously-built binary and skips
 // resolve-onward re-verification (the key proves the identical closure already compiled cleanly).
-compile_to = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view, target: string_view) i32 {
+compile_to = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    path: string_view,
+    src: string_view,
+    out: string_view,
+    ccflags: string_view,
+    links: string_view,
+    target: string_view,
+) i32 {
     ccname := mp.cross_cc(target)
     (ccname == "").then({
         return 1
@@ -482,7 +695,16 @@ compile_to = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: str
         },
     })
 }
-compile_flat = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view, out: string_view, ccflags: string_view, links: string_view, ccname: string_view) i32 {
+compile_flat = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    path: string_view,
+    src: string_view,
+    out: string_view,
+    ccflags: string_view,
+    links: string_view,
+    ccname: string_view,
+) i32 {
     rp := mp.resolve_prog(root, path, src)
     (mp.report_no_if_resolved(rp, path, src) == 0).match ({
         true  => {
@@ -520,7 +742,9 @@ emit_file = (mp: MutPtr<Malloc>, root: string_view, a2: string_view, a3: string_
     force.match ({ true => mp.emit_raw(root, path), false => mp.emit_checked(root, path) })
 }
 // emit_raw is an alias of emit_checked — kept so older call sites still resolve.
-emit_raw = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 { mp.emit_checked(root, path) }
+emit_raw = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
+    mp.emit_checked(root, path)
+}
 // checked: run the full report_check pipeline; emit only when clean, else exit 1 with the diagnostic.
 emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
     contents_in(mp, path).match ({
@@ -598,7 +822,10 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
                     decls := mp.resolve_module(raw)
                     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
                         true  => {
-                            js := mp.gstr_string(8192).gstr_append(mp, mp.js_floor(root)).gstr_append(mp, "\n")
+                            js := mp
+                                .gstr_string(8192)
+                                .gstr_append(mp, mp.js_floor(root))
+                                .gstr_append(mp, "\n")
                             mod := mp.genJsModuleIn(decls)
                             full := js.gstr_append(mp, mod.finish_cstr(mp))
                             save(out_path, full.finish_cstr(mp), full.len).match ({
@@ -643,10 +870,9 @@ build_target = (mp: MutPtr<Malloc>, root: string_view) i32 {
 }
 // check/build/run operate on a Spec (a single file, or a zen.toml project). spec.source is the
 // entry; spec.ccflags/links/out come from a project's manifest (empty for a single file).
-check_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 { spec.ok.match ({
-    true  => mp.check_spec_ok(root, spec),
-    false => 1,
-}) }    // resolve_spec already reported why
+check_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
+    spec.ok.match ({ true => mp.check_spec_ok(root, spec), false => 1 })
+}    // resolve_spec already reported why
 check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
     ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
     genmods_set(spec.genmods)    // registered c_library genmods: same stamp discipline
@@ -689,7 +915,13 @@ check_ok_line = (path: string_view) i32 {
     derr(": ok\n")
     0
 }    // <path>: ok -> stderr
-build_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec, flag: string_view, outarg: string_view) i32 {
+build_spec = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    spec: Spec,
+    flag: string_view,
+    outarg: string_view,
+) i32 {
     spec.ok.match ({
         true  => {
             spec.library.then({
@@ -754,7 +986,9 @@ append_run_args = (s: String, mp: MutPtr<Malloc>, i: i32, n: i32) String {
 }
 // `zenc run <file> a b c` — everything after the source path is forwarded to the program's argv
 // (arg(3)..; the program reads it back via std.sys.os.arg(i)/argc(), argv[0] being the temp binary).
-run_command = (mp: MutPtr<Malloc>, bin: string_view) string_view { mp.gstr_string(128).gstr_append(mp, bin).append_run_args(mp, 3, argc()).gstr_finish(mp) }
+run_command = (mp: MutPtr<Malloc>, bin: string_view) string_view {
+    mp.gstr_string(128).gstr_append(mp, bin).append_run_args(mp, 3, argc()).gstr_finish(mp)
+}
 run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
     spec.ok.match ({
         true  => {
@@ -789,7 +1023,9 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     e := getEnv("ZEN_ROOT")
     (e == "").match ({ true => mp.dirname(arg(0)), false => e })
 }
-HELP = () string_view { "usage: zenc <run|build|check|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build <project>                 build its registered default targets\n  zenc build --target <name> <project> build one registered target\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  cat file.zen | zenc   (source -> C filter)\n" }
+HELP = () string_view {
+    "usage: zenc <run|build|check|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build <project>                 build its registered default targets\n  zenc build --target <name> <project> build one registered target\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  cat file.zen | zenc   (source -> C filter)\n"
+}
 VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
 main = () i32 {
     m := Malloc(_: 0)
@@ -849,10 +1085,9 @@ main = () i32 {
         }),
     })
 }    // --build-self <out.c> <srcroot>
-build_out = (flag: string_view, out: string_view) string_view { (flag == "-o").match ({
-    true  => out,
-    false => "a.out",
-}) }    // `zenc <file>` (or stdin) -> raw C on stdout, the harness filter
+build_out = (flag: string_view, out: string_view) string_view {
+    (flag == "-o").match ({ true => out, false => "a.out" })
+}    // `zenc <file>` (or stdin) -> raw C on stdout, the harness filter
 // build output path: `build <file> -o <out>` -> <out>, else "a.out".
 // the DEFAULT mode (no subcommand): `zenc <file>` or `cat … | zenc` -> emit C to stdout, RAW
 // (resolve_module only, NO import flatten — std imports stay as-is; the harness depends on this).
@@ -877,7 +1112,12 @@ stdin_emit = (mp: MutPtr<Malloc>, src: string_view) i32 {
     (sib == "").match ({
         true  => mp.raw_emit_src("<stdin>", src),
         false => {
-            derr(mp.gstr_string(256).gstr_append(mp, "zenc: <stdin>: error: sibling import '").gstr_append(mp, sib).gstr_append(mp, "' needs a source file on disk (stdin has no directory); use `zenc build <file.zen>`\n").gstr_finish(mp))
+            derr(mp
+                .gstr_string(256)
+                .gstr_append(mp, "zenc: <stdin>: error: sibling import '")
+                .gstr_append(mp, sib)
+                .gstr_append(mp, "' needs a source file on disk (stdin has no directory); use `zenc build <file.zen>`\n")
+                .gstr_finish(mp))
             1
         },
     })
@@ -978,7 +1218,9 @@ bs_has_needle = (v: [u8], p: i64, e: i64) bool {
     })
 }
 // `{` opening an import, tolerating a binding name directly after it (`{println}`) as well as `{ p`.
-bs_brace_open = (b: u8) bool { b == ' ' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_' }
+bs_brace_open = (b: u8) bool {
+    b == ' ' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_'
+}
 bs_is_import = (v: [u8], p: i64, e: i64) bool {
     s := v.bs_skip_space(p, e)
     (s + 1 < e).match ({
@@ -992,10 +1234,12 @@ bs_is_import = (v: [u8], p: i64, e: i64) bool {
         false => false,
     })
 }
-bs_push_range = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, e: i64) String { (p >= e).match ({
-    true  => out,
-    false => mp.bs_push_range(out.gstr_push(mp, v[p]), v, p + 1, e),
-}) }
+bs_push_range = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, e: i64) String {
+    (p >= e).match ({
+        true  => out,
+        false => mp.bs_push_range(out.gstr_push(mp, v[p]), v, p + 1, e),
+    })
+}
 bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first: bool) String {
     (p >= n).match ({
         true  => out,
@@ -1014,8 +1258,17 @@ bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first
         },
     })
 }
-bs_join = (mp: MutPtr<Malloc>, root: string_view, rel: string_view) string_view { mp.gstr_string(256).gstr_append(mp, root).gstr_append(mp, "/").gstr_append(mp, rel).gstr_finish(mp) }
-bs_rel = (mp: MutPtr<Malloc>, mv: [u8], s: i64, t: i64) string_view { mp.bs_push_range(mp.gstr_string(256), mv, s, t).gstr_finish(mp) }
+bs_join = (mp: MutPtr<Malloc>, root: string_view, rel: string_view) string_view {
+    mp
+        .gstr_string(256)
+        .gstr_append(mp, root)
+        .gstr_append(mp, "/")
+        .gstr_append(mp, rel)
+        .gstr_finish(mp)
+}
+bs_rel = (mp: MutPtr<Malloc>, mv: [u8], s: i64, t: i64) string_view {
+    mp.bs_push_range(mp.gstr_string(256), mv, s, t).gstr_finish(mp)
+}
 bs_add_source = (mp: MutPtr<Malloc>, out: String, root: string_view, rel: string_view) String {
     path := mp.bs_join(root, rel)
     contents_in(mp, path).match ({
@@ -1029,7 +1282,15 @@ bs_add_source = (mp: MutPtr<Malloc>, out: String, root: string_view, rel: string
         },
     })
 }
-bs_walk_manifest = (mp: MutPtr<Malloc>, out: String, root: string_view, mv: [u8], p: i64, n: i64, count: i64) String {
+bs_walk_manifest = (
+    mp: MutPtr<Malloc>,
+    out: String,
+    root: string_view,
+    mv: [u8],
+    p: i64,
+    n: i64,
+    count: i64,
+) String {
     (p >= n).match ({
         true  => out,
         false => {
@@ -1080,7 +1341,14 @@ bs_write = (out_path: string_view, gen: String) bool {
 // so as a raw concatenation it references hundreds of "undefined" runtime names. So validation runs on
 // the IMPORT-RESOLVED `driver.zen` entry (the same path `zenc check driver.zen` uses): that pulls in
 // those std modules so the names ARE declared, dedups, and runs the full checker over the real program.
-bs_emit_checked = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view, flat: string_view, entry: string_view, esrc: string_view) i32 {
+bs_emit_checked = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    out_path: string_view,
+    flat: string_view,
+    entry: string_view,
+    esrc: string_view,
+) i32 {
     rp := mp.resolve_prog(root, entry, esrc)
     (mp.report_no_if_resolved(rp, entry, esrc) == 0).match ({
         true  => {
@@ -1127,7 +1395,11 @@ build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view) i32 
 // ── doc: a module's public decls + their leading doc comments (ported from driver.c doc_source) ───
 ends_zen = (s: string_view) bool {
     v: [u8] := s.view()
-    v.len >= 4 && v[v.len - 4] == '.' && v[v.len - 3] == 'z' && v[v.len - 2] == 'e' && v[v.len - 1] == 'n'
+    v.len >= 4
+        && v[v.len - 4] == '.'
+        && v[v.len - 3] == 'z'
+        && v[v.len - 2] == 'e'
+        && v[v.len - 1] == 'n'
 }
 is_name_start = (b: u8) bool { b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' || b == '_' }
 push_mod = (mp: MutPtr<Malloc>, s: String, v: [u8], i: i64) String {
@@ -1140,8 +1412,16 @@ mod_path = (mp: MutPtr<Malloc>, root: string_view, mod: string_view) string_view
     ends_zen(mod).match ({
         true  => mod,
         false => {
-            rel := mp.push_mod(mp.gstr_string(128).gstr_append(mp, "src/"), mod.view(), 0).gstr_append(mp, ".zen").gstr_finish(mp)
-            mp.gstr_string(256).gstr_append(mp, root).gstr_append(mp, "/").gstr_append(mp, rel).gstr_finish(mp)
+            rel := mp
+                .push_mod(mp.gstr_string(128).gstr_append(mp, "src/"), mod.view(), 0)
+                .gstr_append(mp, ".zen")
+                .gstr_finish(mp)
+            mp
+                .gstr_string(256)
+                .gstr_append(mp, root)
+                .gstr_append(mp, "/")
+                .gstr_append(mp, rel)
+                .gstr_finish(mp)
         },
     })
 }
@@ -1157,10 +1437,9 @@ doc_has_star = (v: [u8], i: i64, t: i64) bool {
         }),
     })
 }
-doc_is_pub = (v: [u8], p: i64, t: i64) bool { (p >= t).match ({
-    true  => false,
-    false => is_name_start(v[p]) && v.doc_has_star(p, t),
-}) }
+doc_is_pub = (v: [u8], p: i64, t: i64) bool {
+    (p >= t).match ({ true => false, false => is_name_start(v[p]) && v.doc_has_star(p, t) })
+}
 out_range = (v: [u8], p: i64, t: i64) i64 { out_bytes(slice(v.ptr.offset(p), t - p)).or(0) }
 doc_line = (mp: MutPtr<Malloc>, v: [u8], p: i64, t: i64, docs: String) String {
     (t - p >= 2 && v[p] == '/' && v[p + 1] == '/').match ({
@@ -1379,10 +1658,9 @@ ZiInitArgs: {
 ZI_KIND_PROMPT := 0
 ZI_KIND_EXECUTABLE := 1
 ZI_KIND_LIBRARY := 2
-zi_pick_kind = (have: i32, want: i32) i32 { (have == ZI_KIND_PROMPT || have == want).match ({
-    true  => want,
-    false => 0 - 1,
-}) }
+zi_pick_kind = (have: i32, want: i32) i32 {
+    (have == ZI_KIND_PROMPT || have == want).match ({ true => want, false => 0 - 1 })
+}
 zi_init_args = (path: string_view, kind: i32, ok: bool, help: bool) ZiInitArgs {
     ZiInitArgs(
         path: path,
@@ -1447,7 +1725,9 @@ zi_prompt_kind = (mp: MutPtr<Malloc>) i32 {
 }
 // Names are embedded in TOML, a string literal, and the executable output path. Keep them portable
 // and injection-free until the compiler's own cc command quotes arbitrary project paths.
-zi_ascii_alnum = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' }
+zi_ascii_alnum = (b: u8) bool {
+    b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
 zi_name_tail = (v: [u8], i: i64) bool {
     (i >= v.len).match ({
         true  => true,
@@ -1482,10 +1762,9 @@ zi_path_valid_at = (v: [u8], i: i64, start: i64) bool {
     })
 }
 zi_path_valid = (s: string_view) bool { s.view().zi_path_valid_at(0, 0) }
-zi_trim_end = (v: [u8], n: i64) i64 { (n > 0 && v[n - 1] == '/').match ({
-    true  => v.zi_trim_end(n - 1),
-    false => n,
-}) }
+zi_trim_end = (v: [u8], n: i64) i64 {
+    (n > 0 && v[n - 1] == '/').match ({ true => v.zi_trim_end(n - 1), false => n })
+}
 zi_normal_path = (mp: MutPtr<Malloc>, raw: string_view) string_view {
     v: [u8] := raw.view()
     n := v.zi_trim_end(v.len)
@@ -1585,14 +1864,25 @@ zi_save_new = (path: string_view, data: string_view) bool {
 zi_manifest = (mp: MutPtr<Malloc>, name: string_view, kind: i32) string_view {
     s := mp.gstr_string(160).gstr_append(mp, "package = \"").gstr_append(mp, name)
     (kind == ZI_KIND_LIBRARY).match ({
-        true  => s.gstr_append(mp, "\"\nkind = \"library\"\nroot = \"src\"\nmain = \"lib.zen\"\n").gstr_finish(mp),
-        false => s.gstr_append(mp, "\"\nkind = \"executable\"\nroot = \"src\"\nmain = \"main.zen\"\nout = \"").gstr_append(mp, name).gstr_append(mp, "\"\n").gstr_finish(mp),
+        true  => s
+            .gstr_append(mp, "\"\nkind = \"library\"\nroot = \"src\"\nmain = \"lib.zen\"\n")
+            .gstr_finish(mp),
+        false => s
+            .gstr_append(mp, "\"\nkind = \"executable\"\nroot = \"src\"\nmain = \"main.zen\"\nout = \"")
+            .gstr_append(mp, name)
+            .gstr_append(mp, "\"\n")
+            .gstr_finish(mp),
     })
 }
 zi_source = (mp: MutPtr<Malloc>, name: string_view, kind: i32) string_view {
     (kind == ZI_KIND_LIBRARY).match ({
         true  => "answer* = () i32 { 42 }\n",
-        false => mp.gstr_string(128).gstr_append(mp, "{ println } = std.text.fmt\nmain = () i32 {\n    println(\"Hello from ").gstr_append(mp, name).gstr_append(mp, "!\")\n    0\n}\n").gstr_finish(mp),
+        false => mp
+            .gstr_string(128)
+            .gstr_append(mp, "{ println } = std.text.fmt\nmain = () i32 {\n    println(\"Hello from ")
+            .gstr_append(mp, name)
+            .gstr_append(mp, "!\")\n    0\n}\n")
+            .gstr_finish(mp),
     })
 }
 zi_collision = (path: string_view) i32 {
@@ -1602,7 +1892,12 @@ zi_collision = (path: string_view) i32 {
     1
 }
 zi_remove_dir = (path: string_view) void { removed := rmdir(path) }
-zi_cleanup_dirs = (srcdir: string_view, target: string_view, made_src: bool, made_target: bool) void {
+zi_cleanup_dirs = (
+    srcdir: string_view,
+    target: string_view,
+    made_src: bool,
+    made_target: bool,
+) void {
     made_src.then(() { zi_remove_dir(srcdir) })
     made_target.then(() { zi_remove_dir(target) })
 }
@@ -1722,8 +2017,12 @@ Spec*: {
     library: bool,
     ok: bool,
 }    // target: "" = native (host cc), else a cross triple like "aarch64-linux-gnu"
-join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view { mp.gstr_string(256).gstr_append(mp, a).gstr_append(mp, "/").gstr_append(mp, b).gstr_finish(mp) }
-link_flag = (mp: MutPtr<Malloc>, lk: string_view) string_view { mp.gstr_string(8).gstr_append(mp, "-l").gstr_append(mp, lk).gstr_finish(mp) }
+join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
+    mp.gstr_string(256).gstr_append(mp, a).gstr_append(mp, "/").gstr_append(mp, b).gstr_finish(mp)
+}
+link_flag = (mp: MutPtr<Malloc>, lk: string_view) string_view {
+    mp.gstr_string(8).gstr_append(mp, "-l").gstr_append(mp, lk).gstr_finish(mp)
+}
 // src[start .. start+n) as an owned str. (named cstr_* to avoid colliding with std.text.str's
 // generic `substr` once the modules are flattened together — a plain `substr` would emit a second
 // C `substr` definition.)
@@ -1826,7 +2125,9 @@ resolve_spec = (mp: MutPtr<Malloc>, root: string_view, arg: string_view) Spec {
 // sources/os/arch/abi/ffi — see std.build's emit_target). Wins over zen.toml. ─────────────────────
 BUILDBIN = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenbuild_spec_", ".bin") }
 SPECFILE = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenbuild_spec_", ".txt") }
-BUILD_TAIL = () string_view { "\nmain = () i32 { b := build_context()  build(b.addr())  b.emit_spec()  b.deinit()  0 }\n" }
+BUILD_TAIL = () string_view {
+    "\nmain = () i32 { b := build_context()  build(b.addr())  b.emit_spec()  b.deinit()  0 }\n"
+}
 // the [start,end) of line `idx` (0-based) in v; field idx of the emitted spec.
 line_start = (v: [u8], idx: i32, p: i64) i64 {
     (idx <= 0).match ({
@@ -1842,10 +2143,9 @@ spec_field = (mp: MutPtr<Malloc>, v: [u8], idx: i32) string_view {
     e := v.bs_line_end(s, v.len)
     mp.bs_push_range(mp.gstr_string(e - s + 1), v, s, e).gstr_finish(mp)
 }
-source_word_end = (v: [u8], i: i64) i64 { (i >= v.len || v[i] == ' ').match ({
-    true  => i,
-    false => v.source_word_end(i + 1),
-}) }
+source_word_end = (v: [u8], i: i64) i64 {
+    (i >= v.len || v[i] == ' ').match ({ true => i, false => v.source_word_end(i + 1) })
+}
 source_words = (mp: MutPtr<Malloc>, dir: string_view, v: [u8], i: i64, out: String) String {
     (i >= v.len).match ({
         true  => out,
@@ -1863,7 +2163,9 @@ source_words = (mp: MutPtr<Malloc>, dir: string_view, v: [u8], i: i64, out: Stri
         }),
     })
 }
-source_flags = (mp: MutPtr<Malloc>, dir: string_view, src: string_view) string_view { mp.source_words(dir, src.view(), 0, mp.gstr_string(128)).gstr_finish(mp) }
+source_flags = (mp: MutPtr<Malloc>, dir: string_view, src: string_view) string_view {
+    mp.source_words(dir, src.view(), 0, mp.gstr_string(128)).gstr_finish(mp)
+}
 // ── the plan's platform fields (lines 7-9 of each 10-line record: os/arch/abi as the integer
 // codes std.build's build_os_code/build_arch_code/build_abi_code print). A record whose codes
 // match the HOST (std.build defaults every Target to host()) — or a legacy short plan with the
@@ -1944,17 +2246,28 @@ cross_abi_name = (n: i32) string_view {
 cross_triple = (mp: MutPtr<Malloc>, osc: i32, arc: i32, abc: i32) string_view {
     hp := host()
     absent := osc < 0 || arc < 0 || abc < 0
-    is_host := osc == cross_os_code(hp.os) && arc == cross_arch_code(hp.arch) && abc == cross_abi_code(hp.abi)
+    is_host := osc == cross_os_code(hp.os)
+        && arc == cross_arch_code(hp.arch)
+        && abc == cross_abi_code(hp.abi)
     (absent || is_host).match ({
         true  => "",
-        false => mp.gstr_string(32).gstr_append(mp, cross_arch_name(arc)).gstr_append(mp, "-").gstr_append(mp, cross_os_name(osc)).gstr_append(mp, "-").gstr_append(mp, cross_abi_name(abc)).gstr_finish(mp),
+        false => mp
+            .gstr_string(32)
+            .gstr_append(mp, cross_arch_name(arc))
+            .gstr_append(mp, "-")
+            .gstr_append(mp, cross_os_name(osc))
+            .gstr_append(mp, "-")
+            .gstr_append(mp, cross_abi_name(abc))
+            .gstr_finish(mp),
     })
 }
 // v1 cross scope is LINUX cross-ARCH only: aarch64/x86_64/riscv64, gnu or musl. Cross-OS (macOS/
 // Windows/FreeBSD) and wasm error loudly instead of producing garbage — bootstrap/zenrt.c is
 // POSIX/glibc-shaped (sigaltstack, ucontext SP reads, pthread), and no conventional Linux-hosted
 // cross toolchain exists for those targets.
-cross_supported = (osc: i32, arc: i32, abc: i32) bool { osc == 2 && (arc == 1 || arc == 2 || arc == 3) && (abc == 2 || abc == 3) }
+cross_supported = (osc: i32, arc: i32, abc: i32) bool {
+    osc == 2 && (arc == 1 || arc == 2 || arc == 3) && (abc == 2 || abc == 3)
+}
 parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, index: i32) Spec {
     v: [u8] := specsrc.view()
     base := 1 + index * 10
@@ -2030,28 +2343,47 @@ empty_spec = () Spec {
 // ffi grants, before probe AND resolve, so the cache walk and the module loader both see the
 // generated file through the one canonical module_path.
 GENSUB = () string_view { ".zen/gen" }
-gmx_tok_end = (v: [u8], i: i64) i64 { (i >= v.len || v[i] == ' ' || v[i] == '\n').match ({
-    true  => i,
-    false => v.gmx_tok_end(i + 1),
-}) }
+gmx_tok_end = (v: [u8], i: i64) i64 {
+    (i >= v.len || v[i] == ' ' || v[i] == '\n').match ({ true => i, false => v.gmx_tok_end(i + 1) })
+}
 gmx_skip_lines = (v: [u8], p: i64, k: i32) i64 {
     (k <= 0 || p >= v.len).match ({
         true  => p,
         false => v.gmx_skip_lines(v.bs_line_end(p, v.len) + 1, k - 1),
     })
 }
-gmx_write = (mp: MutPtr<Malloc>, dir: string_view, id: string_view, body: string_view, blen: i64) string_view {
+gmx_write = (
+    mp: MutPtr<Malloc>,
+    dir: string_view,
+    id: string_view,
+    body: string_view,
+    blen: i64,
+) string_view {
     mkdir(mp.join2(dir, ".zen"), MODE_755)
     gdir := mp.join2(dir, GENSUB())
     mkdir(gdir, MODE_755)
-    gpath := mp.gstr_string(96).gstr_append(mp, gdir).gstr_append(mp, "/").gstr_append(mp, id).gstr_append(mp, ".zen").gstr_finish(mp)
+    gpath := mp
+        .gstr_string(96)
+        .gstr_append(mp, gdir)
+        .gstr_append(mp, "/")
+        .gstr_append(mp, id)
+        .gstr_append(mp, ".zen")
+        .gstr_finish(mp)
     save(gpath, body, blen).match ({
         .Ok(n)  => { },
         .Err(e) => derr("zenc: build.zen: cannot write generated module\n"),
     })
     gpath
 }
-genmods_from = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, tname: string_view, p: i64, left: i32, acc: String) string_view {
+genmods_from = (
+    mp: MutPtr<Malloc>,
+    dir: string_view,
+    specsrc: string_view,
+    tname: string_view,
+    p: i64,
+    left: i32,
+    acc: String,
+) string_view {
     v: [u8] := specsrc.view()
     (left <= 0 || p >= v.len).match ({
         true  => acc.gstr_finish(mp),
@@ -2065,7 +2397,11 @@ genmods_from = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, tnam
                 true  => {
                     id := mp.cstr_substr(specsrc, to_i32(te + 1), to_i32(ie - te - 1))
                     body := mp.cstr_substr(specsrc, to_i32(ke + 1), to_i32(be - ke - 1))
-                    acc.gstr_append(mp, id).gstr_append(mp, " ").gstr_append(mp, mp.gmx_write(dir, id, body, be - ke - 1)).gstr_push(mp, '\n')
+                    acc
+                        .gstr_append(mp, id)
+                        .gstr_append(mp, " ")
+                        .gstr_append(mp, mp.gmx_write(dir, id, body, be - ke - 1))
+                        .gstr_push(mp, '\n')
                 },
                 false => acc,
             })
@@ -2073,7 +2409,12 @@ genmods_from = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, tnam
         },
     })
 }
-genmods_extract = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, index: i32) string_view {
+genmods_extract = (
+    mp: MutPtr<Malloc>,
+    dir: string_view,
+    specsrc: string_view,
+    index: i32,
+) string_view {
     v: [u8] := specsrc.view()
     gs := v.line_start(1 + specsrc.plan_count() * 10, 0)
     g := v.plan_nat(gs, v.bs_line_end(gs, v.len), 0)
@@ -2112,7 +2453,13 @@ build_zen_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) PlanS
             (rc == 0).match ({
                 true  => {
                     spf := mp.SPECFILE()
-                    mp.gstr_string(256).gstr_append(mp, bbin).gstr_append(mp, " > ").gstr_append(mp, spf).gstr_finish(mp).system()
+                    mp
+                        .gstr_string(256)
+                        .gstr_append(mp, bbin)
+                        .gstr_append(mp, " > ")
+                        .gstr_append(mp, spf)
+                        .gstr_finish(mp)
+                        .system()
                     sp := contents_in(mp, spf).match ({
                         .Ok(spec) => PlanSource(
                             src: spec,
@@ -2158,7 +2505,12 @@ build_zen_spec = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) Spec 
         false => empty_spec(),
     })
 }    // no build.zen -> try zen.toml
-build_named_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, wanted: string_view) i32 {
+build_named_plan = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    dir: string_view,
+    wanted: string_view,
+) i32 {
     p := mp.build_zen_plan(root, dir)
     n := p.src.plan_count()
     i := mp.plan_find_name(p.src, wanted, 0, n)
@@ -2172,7 +2524,15 @@ build_named_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, wan
         },
     })
 }
-build_plan_from = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, src: string_view, i: i32, n: i32, failures: i32) i32 {
+build_plan_from = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    dir: string_view,
+    src: string_view,
+    i: i32,
+    n: i32,
+    failures: i32,
+) i32 {
     (i >= n).match ({
         true  => failures,
         false => mp.build_plan_from(root, dir, src, i + 1, n, failures + mp.build_spec(root, mp.parse_spec_at(dir, src, i), "", "")),
@@ -2213,17 +2573,27 @@ lout = (s: string_view) i64 {
 }
 // frame + write one JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`.
 lsp_send = (mp: MutPtr<Malloc>, body: string_view) i64 {
-    lout(mp.gstr_string(48).gstr_append(mp, "Content-Length: ").push_int(mp, body.view().len).gstr_append(mp, "\r\n\r\n").gstr_finish(mp))
+    lout(mp
+        .gstr_string(48)
+        .gstr_append(mp, "Content-Length: ")
+        .push_int(mp, body.view().len)
+        .gstr_append(mp, "\r\n\r\n")
+        .gstr_finish(mp))
     lout(body)
 }
 // ── JSON string EMISSION (own escaper; the task sanctions building output as strings) ─────────────
-lsp_hexd = (n: i64) u8 { (n < 10).match ({
-    true  => ('0'.to_i64() + n).to_u8(),
-    false => ('a'.to_i64() + n - 10).to_u8(),
-}) }
+lsp_hexd = (n: i64) u8 {
+    (n < 10).match ({
+        true  => ('0'.to_i64() + n).to_u8(),
+        false => ('a'.to_i64() + n - 10).to_u8(),
+    })
+}
 push_uesc = (sb: String, mp: MutPtr<Malloc>, b: u8) String {
     bi := b.to_i64()
-    sb.gstr_append(mp, "\\u00").gstr_push(mp, lsp_hexd(bi >> 4 & 15)).gstr_push(mp, lsp_hexd(bi & 15))
+    sb
+        .gstr_append(mp, "\\u00")
+        .gstr_push(mp, lsp_hexd(bi >> 4 & 15))
+        .gstr_push(mp, lsp_hexd(bi & 15))
 }
 // append `s` as a JSON string LITERAL (surrounding quotes + escaped) to the builder.
 push_jstr = (sb: String, mp: MutPtr<Malloc>, s: string_view) String {
@@ -2295,10 +2665,9 @@ json_range_eq = (v: [u8], start: i64, kv: [u8], k: i64) bool {
         }),
     })
 }
-json_str_eq_range = (v: [u8], start: i64, end: i64, kv: [u8]) bool { (end - start != kv.len).match ({
-    true  => false,
-    false => v.json_range_eq(start, kv, 0),
-}) }
+json_str_eq_range = (v: [u8], start: i64, end: i64, kv: [u8]) bool {
+    (end - start != kv.len).match ({ true => false, false => v.json_range_eq(start, kv, 0) })
+}
 // the byte offset of the VALUE for the first object key named `key`, or -1. Strings are consumed whole,
 // so key matches inside a value never fire and nesting is transparent.
 json_find_key = (v: [u8], key: string_view) i64 {
@@ -2362,8 +2731,13 @@ push_utf8 = (sb: String, mp: MutPtr<Malloc>, cp: i64) String {
     (cp < 128).match ({
         true  => sb.gstr_push(mp, cp.to_u8()),
         false => (cp < 2048).match ({
-            true  => sb.gstr_push(mp, (192 | cp >> 6).to_u8()).gstr_push(mp, (128 | cp & 63).to_u8()),
-            false => sb.gstr_push(mp, (224 | cp >> 12).to_u8()).gstr_push(mp, (128 | cp >> 6 & 63).to_u8()).gstr_push(mp, (128 | cp & 63).to_u8()),
+            true  => sb
+                .gstr_push(mp, (192 | cp >> 6).to_u8())
+                .gstr_push(mp, (128 | cp & 63).to_u8()),
+            false => sb
+                .gstr_push(mp, (224 | cp >> 12).to_u8())
+                .gstr_push(mp, (128 | cp >> 6 & 63).to_u8())
+                .gstr_push(mp, (128 | cp & 63).to_u8()),
         }),
     })
 }
@@ -2451,7 +2825,13 @@ json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) string_view {
                 stop := false
                 @while (stop == false && e < v.len) {
                     b := v[e]
-                    (b == ',' || b == '}' || b == ']' || b == ' ' || b == '\t' || b == '\n' || b == '\r').match ({
+                    (b == ','
+                        || b == '}'
+                        || b == ']'
+                        || b == ' '
+                        || b == '\t'
+                        || b == '\n'
+                        || b == '\r').match ({
                         true  => {
                             stop = true
                         },
@@ -2540,7 +2920,16 @@ DiagAcc: {
     sb: String,
     n: i32,
 }
-lsp_push_diag = (mp: MutPtr<Malloc>, acc: DiagAcc, rp: ResolvedProgram, raw: [Decl], decls: [Decl], path: string_view, user: string_view, cd: CheckDiagnostic) DiagAcc {
+lsp_push_diag = (
+    mp: MutPtr<Malloc>,
+    acc: DiagAcc,
+    rp: ResolvedProgram,
+    raw: [Decl],
+    decls: [Decl],
+    path: string_view,
+    user: string_view,
+    cd: CheckDiagnostic,
+) DiagAcc {
     (cd.code == 0).match ({
         true  => acc,
         false => {
@@ -2557,10 +2946,29 @@ lsp_push_diag = (mp: MutPtr<Malloc>, acc: DiagAcc, rp: ResolvedProgram, raw: [De
             })
             full := is_empty(hint).match ({
                 true  => msg,
-                false => mp.gstr_string(128).gstr_append(mp, msg).gstr_append(mp, " — ").gstr_append(mp, hint).gstr_finish(mp),
+                false => mp
+                    .gstr_string(128)
+                    .gstr_append(mp, msg)
+                    .gstr_append(mp, " — ")
+                    .gstr_append(mp, hint)
+                    .gstr_finish(mp),
             })
             sep := (acc.n > 0).match ({ true => ",", false => "" })
-            sb2 := acc.sb.gstr_append(mp, sep).gstr_append(mp, "{\"range\":{\"start\":{\"line\":").push_int(mp, z.l).gstr_append(mp, ",\"character\":").push_int(mp, z.c).gstr_append(mp, "},\"end\":{\"line\":").push_int(mp, z.l).gstr_append(mp, ",\"character\":").push_int(mp, z.e).gstr_append(mp, "}},\"severity\":1,\"code\":").push_jstr(mp, cd.kind).gstr_append(mp, ",\"source\":\"zen\",\"message\":").push_jstr(mp, full).gstr_append(mp, "}")
+            sb2 := acc.sb
+                .gstr_append(mp, sep)
+                .gstr_append(mp, "{\"range\":{\"start\":{\"line\":")
+                .push_int(mp, z.l)
+                .gstr_append(mp, ",\"character\":")
+                .push_int(mp, z.c)
+                .gstr_append(mp, "},\"end\":{\"line\":")
+                .push_int(mp, z.l)
+                .gstr_append(mp, ",\"character\":")
+                .push_int(mp, z.e)
+                .gstr_append(mp, "}},\"severity\":1,\"code\":")
+                .push_jstr(mp, cd.kind)
+                .gstr_append(mp, ",\"source\":\"zen\",\"message\":")
+                .push_jstr(mp, full)
+                .gstr_append(mp, "}")
             DiagAcc(
                 sb: sb2,
                 n: acc.n + 1,
@@ -2573,7 +2981,12 @@ lsp_push_diag = (mp: MutPtr<Malloc>, acc: DiagAcc, rp: ResolvedProgram, raw: [De
 // channel (reserved/ownership/escape/leak/…/mustuse) contributes its diagnostic AND the whole main
 // batch (names/types/arity/exhaustiveness/…) is collected, so an ownership error shows alongside type
 // errors rather than one channel hiding the rest. Empty array => clears old squiggles.
-lsp_diags_array = (mp: MutPtr<Malloc>, root: string_view, path: string_view, text: string_view) string_view {
+lsp_diags_array = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    path: string_view,
+    text: string_view,
+) string_view {
     rp := mp.resolve_prog(root, path, text)
     raw := mp.parse_module(rp.flat)
     decls := mp.resolve_module(raw)
@@ -2617,14 +3030,37 @@ lsp_diags_array = (mp: MutPtr<Malloc>, root: string_view, path: string_view, tex
 }
 lsp_publish = (mp: MutPtr<Malloc>, root: string_view, uri: string_view, text: string_view) i64 {
     arr := mp.lsp_diags_array(root, mp.lsp_uri_path(uri), text)
-    mp.lsp_send(mp.gstr_string(512).gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":").push_jstr(mp, uri).gstr_append(mp, ",\"diagnostics\":[").gstr_append(mp, arr).gstr_append(mp, "]}}").gstr_finish(mp))
+    mp.lsp_send(mp
+        .gstr_string(512)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":")
+        .push_jstr(mp, uri)
+        .gstr_append(mp, ",\"diagnostics\":[")
+        .gstr_append(mp, arr)
+        .gstr_append(mp, "]}}")
+        .gstr_finish(mp))
 }
 // ── request/notification handlers ─────────────────────────────────────────────────────────────────
-lsp_reply_initialize = (mp: MutPtr<Malloc>, body: string_view) i64 { mp.lsp_send(mp.gstr_string(256).gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":").gstr_append(mp, mp.lsp_id(body)).gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}").gstr_finish(mp)) }
-lsp_reply_null = (mp: MutPtr<Malloc>, body: string_view) i64 { mp.lsp_send(mp.gstr_string(96).gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":").gstr_append(mp, mp.lsp_id(body)).gstr_append(mp, ",\"result\":null}").gstr_finish(mp)) }
+lsp_reply_initialize = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    mp.lsp_send(mp
+        .gstr_string(256)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
+        .gstr_finish(mp))
+}
+lsp_reply_null = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    mp.lsp_send(mp
+        .gstr_string(96)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":null}")
+        .gstr_finish(mp))
+}
 // didOpen/didChange (full-sync) both carry the whole document text; the first `text` key is the
 // document content (the URI's `text` in didOpen, the single contentChange's `text` in didChange).
-lsp_did_change = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 { mp.lsp_publish(root, mp.json_str_field(body, "uri"), mp.json_str_field(body, "text")) }
+lsp_did_change = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
+    mp.lsp_publish(root, mp.json_str_field(body, "uri"), mp.json_str_field(body, "text"))
+}
 // dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown methods
 // (initialized / didClose / anything else) are no-ops so the server never crashes on them.
 lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
@@ -2660,7 +3096,11 @@ lsp_read_headers = (mp: MutPtr<Malloc>, buf: RawPtr<u8>, off: i64) i64 {
     r := read(0, buf.offset(off), 1)
     (r <= 0).match ({
         true  => (off == 0).match ({ true => 0, false => 0 - 1 }),
-        false => (off >= 3 && load(buf.offset(off - 3)) == '\r' && load(buf.offset(off - 2)) == '\n' && load(buf.offset(off - 1)) == '\r' && load(buf.offset(off)) == '\n').match ({
+        false => (off >= 3
+            && load(buf.offset(off - 3)) == '\r'
+            && load(buf.offset(off - 2)) == '\n'
+            && load(buf.offset(off - 1)) == '\r'
+            && load(buf.offset(off)) == '\n').match ({
             true  => off + 1,
             false => (off + 1 >= LSP_HDR_CAP()).match ({
                 true  => 0 - 1,
