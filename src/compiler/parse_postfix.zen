@@ -1,15 +1,18 @@
 // compiler.parse_postfix — postfix chains — call/member/index/method/loop suffixes, qualified ctor & struct-lit disambiguation, postfix token predicates.
 // Split out of compiler.parse_expr (god-file split); pure move, no logic changes.
-{ Expr, Field, Stmt, arm, block, call, call_at, eindex, eloop, emcall, field, lit, member, member_at, mkenum, mkstruct, mkstructg_at, mktag, sexpr, slet, tvoid } = compiler.genc
+{ Expr, Field, Stmt, arm, block, call, call_at, eindex, eloop, emcall, field, lit, member,
+  member_at, mkenum, mkstruct, mkstructg_at, mktag, sexpr, slet, tvoid } = compiler.genc
 { chain_tmp_name, dotted_name_in, mangle_str_in } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
 { at } = std.text.bytes
 { Malloc } = std.mem.alloc
-{ delim_enter, delim_exit, is_langle, is_lbrace, is_lbracket, is_rparen, parse_tyargs, stmt_level, tok_eq, vbreak_note } = compiler.parse_type
+{ delim_enter, delim_exit, is_langle, is_lbrace, is_lbracket, is_rparen, parse_tyargs, stmt_level,
+  tok_eq, vbreak_note } = compiler.parse_type
 { materialize, parse_block } = compiler.parse_stmt
 { enode, is_op, lexeme, parse_payload_args } = compiler.parse_atom
 { parse_match, parse_then, subj_name } = compiler.parse_match
-{ a_lex_upper, arg_buf, fill_args, fill_pinits, finish_generic_ctor, finit_buf, is_lparen, paren_is_struct, parse_ident, take_args, take_inits, tyargs_end } = compiler.parse_primary
+{ a_lex_upper, arg_buf, fill_args, fill_pinits, finish_generic_ctor, finit_buf, is_lparen,
+  paren_is_struct, parse_ident, take_args, take_inits, tyargs_end } = compiler.parse_primary
 { PExpr, parse_or } = compiler.parse_expr
 // a boolean `.match` lowers to genc's ternary Cond: `(subj).match { true => X, false => Y }`
 is_dot* = (src: string_view, t: Token) bool { src.is_op(t, '.') }
@@ -249,7 +252,13 @@ is_qual_struct_lit = (src: string_view, base: PExpr, name: string_view, fld: Sca
         && src.nl_between(fld.next, nx.tok.start).match ({ true => false, false => true })
         && src.paren_is_struct(nx.next)
 }
-parse_qual_struct_lit = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
+parse_qual_struct_lit = (
+    a: MutPtr<Malloc>,
+    src: string_view,
+    base: PExpr,
+    name: string_view,
+    fld: Scan,
+) PExpr {
     open := src.scan(fld.next)
     qn := a.dotted_name_in(subj_name(base.expr), name)
     buf := a.finit_buf()
@@ -300,7 +309,13 @@ is_qual_generic_ctor = (src: string_view, base: PExpr, name: string_view, fld: S
         },
     })
 }
-parse_qual_generic_struct_lit = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
+parse_qual_generic_struct_lit = (
+    a: MutPtr<Malloc>,
+    src: string_view,
+    base: PExpr,
+    name: string_view,
+    fld: Scan,
+) PExpr {
     qn := a.dotted_name_in(subj_name(base.expr), name)
     lt := src.scan(fld.next)    // '<'
     ta := a.parse_tyargs(src, lt.next)
@@ -312,7 +327,13 @@ parse_qual_generic_struct_lit = (a: MutPtr<Malloc>, src: string_view, base: PExp
         next: fe.next,
     )
 }
-parse_qual_generic_ctor = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
+parse_qual_generic_ctor = (
+    a: MutPtr<Malloc>,
+    src: string_view,
+    base: PExpr,
+    name: string_view,
+    fld: Scan,
+) PExpr {
     qn := a.dotted_name_in(subj_name(base.expr), name)
     lt := src.scan(fld.next)    // '<'
     ta := a.parse_tyargs(src, lt.next)
@@ -342,7 +363,13 @@ parse_field = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
 // SAME-LINE GATE (mirrors parse_qual_ctor / parse_ident): the method-call `(` must sit on the same line
 // as the `.field` — a NEWLINE before it makes `base.field` a plain member access and the `(` a new
 // statement (`nd := 10 + ed.w` ⏎ `(nd < 100).match(…)`), not `ed.w(nd < 100)`.
-parse_field_plain = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, fld: Scan) PExpr {
+parse_field_plain = (
+    a: MutPtr<Malloc>,
+    src: string_view,
+    base: PExpr,
+    name: string_view,
+    fld: Scan,
+) PExpr {
     nx := src.scan(fld.next)
     (src.is_lparen(nx.tok)
         && src.nl_between(fld.next, nx.tok.start).match ({ true => false, false => true })).match ({
@@ -356,7 +383,13 @@ parse_field_plain = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: str
 // Qualified enum constructors preserve the explicit type. SAME-LINE GATE (mirrors parse_ident): the
 // payload `(` must sit on the same line as the variant — a NEWLINE before it makes `Type.Variant` a
 // nullary tag and the `(` a new statement (`a := State.Idle` ⏎ `(a).q()`), not `State.Idle(a)`.
-parse_qual_ctor* = (a: MutPtr<Malloc>, src: string_view, tyname: string_view, vn: string_view, fld: Scan) PExpr {
+parse_qual_ctor* = (
+    a: MutPtr<Malloc>,
+    src: string_view,
+    tyname: string_view,
+    vn: string_view,
+    fld: Scan,
+) PExpr {
     nx := src.scan(fld.next)
     (src.is_lparen(nx.tok)
         && src.nl_between(fld.next, nx.tok.start).match ({ true => false, false => true })).match ({
@@ -373,7 +406,13 @@ parse_qual_ctor* = (a: MutPtr<Malloc>, src: string_view, tyname: string_view, vn
         ),
     })
 }
-parse_qual_payload = (a: MutPtr<Malloc>, src: string_view, tyname: string_view, vn: string_view, lp: Scan) PExpr {
+parse_qual_payload = (
+    a: MutPtr<Malloc>,
+    src: string_view,
+    tyname: string_view,
+    vn: string_view,
+    lp: Scan,
+) PExpr {
     pl := a.parse_payload_args(src, lp)
     PExpr(
         expr: a.enode(mkenum(tyname, vn, pl.expr)),
@@ -383,7 +422,14 @@ parse_qual_payload = (a: MutPtr<Malloc>, src: string_view, tyname: string_view, 
 // FAITHFUL: `recv.method(args)` -> MethodCall(recv, method, args) — keeps the UFCS surface form. The
 // args here are the METHOD args only (recv is carried separately); compiler.check.desugar_method_calls
 // lowers it back to the flat `Call(fn: method, args: [recv] ++ args, pos: at)` the old parser produced.
-parse_method* = (a: MutPtr<Malloc>, src: string_view, base: PExpr, name: string_view, lp: Scan, at: i32) PExpr {
+parse_method* = (
+    a: MutPtr<Malloc>,
+    src: string_view,
+    base: PExpr,
+    name: string_view,
+    lp: Scan,
+    at: i32,
+) PExpr {
     buf := a.arg_buf()
     ae := a.fill_args(src, lp.next, buf, 0)
     a.parse_postfix(src, PExpr(

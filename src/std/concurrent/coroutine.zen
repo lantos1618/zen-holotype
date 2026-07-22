@@ -40,7 +40,13 @@ init_context = (ctx: RawPtr<u8>, stack: RawPtr<u8>, link: RawPtr<u8>) void {
     ctx.offset(UC_SS_SIZE_OFF).store_i64(CORO_STACK)
     ctx.offset(UC_LINK_OFF).store_i64(link)
 }
-spawn_cleanup<A> = (alloc: MutPtr<A>, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: RawPtr<u8>, e: IoError) Result<Coro, IoError> {
+spawn_cleanup<A> = (
+    alloc: MutPtr<A>,
+    stack: RawPtr<u8>,
+    ctx: RawPtr<u8>,
+    lnk: RawPtr<u8>,
+    e: IoError,
+) Result<Coro, IoError> {
     (stack.is_null() == false).then({
         alloc.release(stack)
     })
@@ -52,7 +58,13 @@ spawn_cleanup<A> = (alloc: MutPtr<A>, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: R
     })
     err(e)
 }
-finish_spawn = (ctx: RawPtr<u8>, stack: RawPtr<u8>, lnk: RawPtr<u8>, state: RawPtr<u8>, work: () void) Result<Coro, IoError> {
+finish_spawn = (
+    ctx: RawPtr<u8>,
+    stack: RawPtr<u8>,
+    lnk: RawPtr<u8>,
+    state: RawPtr<u8>,
+    work: () void,
+) Result<Coro, IoError> {
     getcontext(ctx)
     ctx.init_context(stack, lnk)
     makecontext(ctx, work, 0)
@@ -64,13 +76,24 @@ finish_spawn = (ctx: RawPtr<u8>, stack: RawPtr<u8>, lnk: RawPtr<u8>, state: RawP
     )
     ok(Coro(state: state))
 }
-spawn_with_link<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>, ctx: RawPtr<u8>, lnk: RawPtr<u8>) Result<Coro, IoError> {
+spawn_with_link<A> = (
+    alloc: MutPtr<A>,
+    work: () void,
+    stack: RawPtr<u8>,
+    ctx: RawPtr<u8>,
+    lnk: RawPtr<u8>,
+) Result<Coro, IoError> {
     alloc.try_acquire(sizeof(CoroState)).match ({
         .Ok(state) => finish_spawn(ctx, stack, lnk, state, work),
         .Err(e)    => alloc.spawn_cleanup(stack, ctx, lnk, e),
     })
 }
-spawn_with_ctx<A> = (alloc: MutPtr<A>, work: () void, stack: RawPtr<u8>, ctx: RawPtr<u8>) Result<Coro, IoError> {
+spawn_with_ctx<A> = (
+    alloc: MutPtr<A>,
+    work: () void,
+    stack: RawPtr<u8>,
+    ctx: RawPtr<u8>,
+) Result<Coro, IoError> {
     alloc.try_acquire(UC_CTX_SIZE).match ({
         .Ok(lnk) => alloc.spawn_with_link(work, stack, ctx, lnk),
         .Err(e)  => alloc.spawn_cleanup(stack, ctx, null_ptr(), e),

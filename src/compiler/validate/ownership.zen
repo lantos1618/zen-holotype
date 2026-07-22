@@ -1,5 +1,7 @@
 // compiler.validate.ownership — move/consume/escape/leak analysis + DeadList/AliasList worklists.
-{ ArmData, CallData, Decl, Expr, Field, FieldInit, Func, GenericData, ImplData, LetData, MethodCallData, Param, Stmt, Ty, VariantDef, arm, call, gstr_append, gstr_finish, gstr_string, k_mut_ptr, ptr_kw, tnamed, tvoid } = compiler.genc
+{ ArmData, CallData, Decl, Expr, Field, FieldInit, Func, GenericData, ImplData, LetData,
+  MethodCallData, Param, Stmt, Ty, VariantDef, arm, call, gstr_append, gstr_finish, gstr_string,
+  k_mut_ptr, ptr_kw, tnamed, tvoid } = compiler.genc
 { impl_cname_in } = compiler.mangle
 { DeclIndex, Env, arm_env, extend_env, is_void_ty, recv_name } = compiler.check
 { resolve_module } = compiler.check_resolve
@@ -11,7 +13,9 @@
 { at } = std.text.bytes
 { is_empty } = std.text.str
 { String } = std.text.string
-{ env_params, env_trait_method, expr_pos, is_deref_intrinsic, is_direct_scope_acquire, is_pure_owner_getter, is_scope_acquire, is_scope_alloc_member, is_scope_param_ty, is_trait_method, pos_or, ty_is_ptr_t, ty_mentions_tparam, unknown_ty } = compiler.validate.util
+{ env_params, env_trait_method, expr_pos, is_deref_intrinsic, is_direct_scope_acquire,
+  is_pure_owner_getter, is_scope_acquire, is_scope_alloc_member, is_scope_param_ty, is_trait_method,
+  pos_or, ty_is_ptr_t, ty_mentions_tparam, unknown_ty } = compiler.validate.util
 { KMUSTUSE } = compiler.validate.diag
 { arg_var_name, mkstruct_field_kills, slicelit_elem_kills, struct_fields, sx_call_kind, sx_named } = compiler.validate.args
 { enum_variants, first_gen_arg, ka_call_core } = compiler.validate.kinds
@@ -77,7 +81,12 @@ alias_node = (a: MutPtr<Malloc>, v: AliasList) Ptr<AliasList> {
     buf[0].addr()
 }
 alias_nil* = (a: MutPtr<Malloc>) Ptr<AliasList> { a.alias_node(.AliasNil) }
-alias_cons = (a: MutPtr<Malloc>, x: string_view, y: string_view, tail: Ptr<AliasList>) Ptr<AliasList> {
+alias_cons = (
+    a: MutPtr<Malloc>,
+    x: string_view,
+    y: string_view,
+    tail: Ptr<AliasList>,
+) Ptr<AliasList> {
     a.alias_node(.AliasCons(AliasCell(
         x: x,
         y: y,
@@ -96,7 +105,13 @@ alias_drop = (a: MutPtr<Malloc>, al: Ptr<AliasList>, name: string_view) Ptr<Alia
 }
 // grow `acc` with every name reachable from `name` through the pair list (transitive closure; `acc`
 // doubles as the visited set, so shared members are added once and cycles terminate).
-alias_reach = (a: MutPtr<Malloc>, rest: Ptr<AliasList>, full: Ptr<AliasList>, name: string_view, acc: Ptr<DeadList>) Ptr<DeadList> {
+alias_reach = (
+    a: MutPtr<Malloc>,
+    rest: Ptr<AliasList>,
+    full: Ptr<AliasList>,
+    name: string_view,
+    acc: Ptr<DeadList>,
+) Ptr<DeadList> {
     rest.match ({
         .AliasNil     => acc,
         .AliasCons(c) => {
@@ -113,9 +128,12 @@ alias_reach = (a: MutPtr<Malloc>, rest: Ptr<AliasList>, full: Ptr<AliasList>, na
 }
 // kill `name` AND its alias class: every class member joins the kill-set (its own fresh closure set,
 // so members already dead never mask the traversal).
-dead_kill* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, al: Ptr<AliasList>, name: string_view) Ptr<DeadList> {
-    a.dead_union(a.alias_reach(al, al, name, a.dead_cons(name, a.dead_nil())), seen)
-}
+dead_kill* = (
+    a: MutPtr<Malloc>,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    name: string_view,
+) Ptr<DeadList> { a.dead_union(a.alias_reach(al, al, name, a.dead_cons(name, a.dead_nil())), seen) }
 owner_base* = (t: Ty) string_view {
     t.match ({
         .Generic(g) => g.name,
@@ -531,7 +549,13 @@ fn_frees_through_ptr = (env: Env, fn: string_view, pi: i32, depth: i32) bool {
 // the CALL-SITE kill: for each bare-Var Own arg passed to an Own-typed, consuming param of a known
 // callee, mark that local dead (moved into the callee). Runs in own_step so both passes see the kill.
 // Also (re-census #1): an owner passed BY POINTER (`o.addr()`) to a borrow whose callee frees through it.
-own_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, c: CallData) Ptr<DeadList> {
+own_call_kills = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    c: CallData,
+) Ptr<DeadList> {
     out := seen
     ps := env.env_params(c.fn)
     (ps.len == c.args.len).then({
@@ -561,13 +585,25 @@ own_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alia
 }
 // dispatch own_call_kills on the top-level call of an expr (a bare call statement / a call as a
 // let/assign value). Nested-deeper calls under-reject (out of the direct-call slice's scope).
-own_expr_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) Ptr<DeadList> {
+own_expr_call_kills = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    e: Ptr<Expr>,
+) Ptr<DeadList> {
     load(e).match ({
         .Call(c) => a.own_call_kills(env, seen, al, c),
         _        => seen,
     })
 }
-own_stmt_call_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) Ptr<DeadList> {
+own_stmt_call_kills = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    st: Stmt,
+) Ptr<DeadList> {
     st.match ({
         .ExprStmt(e) => a.own_expr_call_kills(env, seen, al, e),
         .Let(l)      => a.own_expr_call_kills(env, seen, al, l.value),
@@ -608,7 +644,13 @@ own_moved_var* = (env: Env, e: Ptr<Expr>) string_view {
     })
 }
 // kill the source owner stored into a slice slot by `arr[i] = o` (the value is a bare `Own<T>` Var).
-indexset_own_kill = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, v: Ptr<Expr>) Ptr<DeadList> {
+indexset_own_kill = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    v: Ptr<Expr>,
+) Ptr<DeadList> {
     out := seen
     nm := env.own_moved_var(v)
     (nm.is_empty() == false).then({
@@ -616,7 +658,13 @@ indexset_own_kill = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<A
     })
     out
 }
-own_expr_struct_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) Ptr<DeadList> {
+own_expr_struct_kills = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    e: Ptr<Expr>,
+) Ptr<DeadList> {
     load(e).match ({
         .MakeStruct(s) => a.mkstruct_field_kills(env, seen, al, s),
         // slice element move: gated on the slice's DECLARED element type being `Own<T>`, so a non-Own
@@ -632,7 +680,13 @@ own_expr_struct_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: P
 }
 // dispatch struct/slice move-kills on the top-level value of a let/assign/expr statement (and the value
 // of `arr[i] = o`). Nested-deeper literals under-reject (same direct-value scope as own_stmt_call_kills).
-own_stmt_struct_kills = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) Ptr<DeadList> {
+own_stmt_struct_kills = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    st: Stmt,
+) Ptr<DeadList> {
     st.match ({
         .Let(l)      => a.own_expr_struct_kills(env, seen, al, l.value),
         .Assign(x)   => a.own_expr_struct_kills(env, seen, al, x.value),
@@ -890,7 +944,13 @@ expr_falls_through = (e: Ptr<Expr>) bool {
 }
 // net dead-set after a (possibly branching) statement body — threads own_step + alias_step + env
 // Follow the same environment/alias steps as the ownership diagnostic walk, but return the final kill-set.
-own_dead_body* = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, body: [Stmt]) Ptr<DeadList> {
+own_dead_body* = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    body: [Stmt],
+) Ptr<DeadList> {
     e := env
     d := seen
     al2 := al
@@ -903,7 +963,14 @@ own_dead_body* = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alia
 }
 // union of the per-arm net dead-sets, over the arms that fall through (a returning arm contributes
 // nothing to the post-match set). Each arm is evaluated from the pre-match kill-set `seen`.
-own_dead_arms = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, subjty: Ty, arms: [ArmData]) Ptr<DeadList> {
+own_dead_arms = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    subjty: Ty,
+    arms: [ArmData],
+) Ptr<DeadList> {
     out := seen
     arms.loop((h, i, ar) {
         expr_falls_through(ar.body).then({
@@ -914,7 +981,13 @@ own_dead_arms = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alias
 }
 // net dead-set after an expression in statement position (a statement-position match, a block, a ternary,
 // or a bare free/consume call as a match-arm body). Mirrors own_step's free/consume detection.
-own_dead_expr = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, e: Ptr<Expr>) Ptr<DeadList> {
+own_dead_expr = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    e: Ptr<Expr>,
+) Ptr<DeadList> {
     load(e).match ({
         .Block(b) => a.own_dead_body(env, seen, al, b.stmts),
         .Match(m) => a.own_dead_arms(env, seen, al, env.infer_expr(m.subj), m.arms),
@@ -947,7 +1020,13 @@ own_dead_expr = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<Alias
         _         => seen,
     })
 }
-own_step* = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList>, st: Stmt) Ptr<DeadList> {
+own_step* = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    seen: Ptr<DeadList>,
+    al: Ptr<AliasList>,
+    st: Stmt,
+) Ptr<DeadList> {
     out := seen
     // 1. owner consume (Own.release / Rc.drop / …) marks the receiver dead.
     nm := env.consume_name(st)
@@ -999,7 +1078,13 @@ own_step* = (a: MutPtr<Malloc>, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasList
     out
 }
 // count each net-new dead name declared OUTSIDE the body, once (`done` dedupes the cons-list walk).
-count_loop_freed* = (a: MutPtr<Malloc>, net: Ptr<DeadList>, base: Ptr<DeadList>, locals: Ptr<DeadList>, done: Ptr<DeadList>) i32 {
+count_loop_freed* = (
+    a: MutPtr<Malloc>,
+    net: Ptr<DeadList>,
+    base: Ptr<DeadList>,
+    locals: Ptr<DeadList>,
+    done: Ptr<DeadList>,
+) i32 {
     net.match ({
         .DeadNil     => 0,
         .DeadCons(c) => (base.dead_has(c.name) || locals.dead_has(c.name) || done.dead_has(c.name)).match ({
@@ -1135,7 +1220,13 @@ mu_is_value_mold = (f: Func) bool {
     })
 }
 // the hoisted inherent func `impl_<Ty>_<Ty>_<m>` (fill_inherent_methods), looked up O(1) via the index.
-mu_func_value_mold = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, ty: string_view, m: string_view) bool {
+mu_func_value_mold = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    ty: string_view,
+    m: string_view,
+) bool {
     cname := a.impl_cname_in(ty, ty, m)
     i := idx.func_idx.get(cname, 0 - 1)
     (i >= 0 && i < decls.len).match ({
@@ -1147,7 +1238,15 @@ mu_func_value_mold = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, ty: stri
     })
 }
 // fold one inherent-struct impl's methods into the name→state map (0 unseen, 1 value-mold-only, 2 tainted).
-mu_index_methods = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: Map<i64>, ty: string_view, methods: [Param], j: i32) Map<i64> {
+mu_index_methods = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    m: Map<i64>,
+    ty: string_view,
+    methods: [Param],
+    j: i32,
+) Map<i64> {
     (j >= methods.len).match ({
         true  => m,
         false => {
@@ -1167,7 +1266,13 @@ mu_index_methods = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: Map<i64
         },
     })
 }
-mu_index_impl = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, m: Map<i64>, im: ImplData) Map<i64> {
+mu_index_impl = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    m: Map<i64>,
+    im: ImplData,
+) Map<i64> {
     (im.ty == im.trname).match ({
         true  => a.mu_index_methods(decls, idx, m, im.ty, im.methods, 0),
         false => m,
@@ -1294,7 +1399,12 @@ let_taints = (svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
 // `s.acquire(…)`, the raw `s.alloc` field, a derived local, OR forwards one through a struct literal,
 // a match arm value, a cond branch, or a block's value. Call ARGS are deliberately NOT walked — passing
 // a scope pointer into a callee that returns a COPY (`to_i32(load_i64(p))`) does not escape.
-expr_escapes* = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
+expr_escapes* = (
+    a: MutPtr<Malloc>,
+    svars: Ptr<DeadList>,
+    derived: Ptr<DeadList>,
+    e: Ptr<Expr>,
+) bool {
     (svars.is_direct_scope_acquire(e) || svars.is_scope_alloc_member(e)).match ({
         true  => true,
         false => load(e).match ({
@@ -1311,7 +1421,12 @@ expr_escapes* = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>
 }
 // a loop in VALUE position: it never yields its trailing value, but a `return` inside its body
 // still escapes to the caller, so walk returns only (mirrors the statement-side .Loop handling).
-loop_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, stmts: [Stmt]) bool {
+loop_val_escapes = (
+    a: MutPtr<Malloc>,
+    svars: Ptr<DeadList>,
+    derived: Ptr<DeadList>,
+    stmts: [Stmt],
+) bool {
     f := false
     d := derived
     stmts.loop((h, i, st) {
@@ -1325,14 +1440,25 @@ loop_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadLi
     })
     f
 }
-inits_escape = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, inits: [FieldInit]) bool {
-    inits.slice_any((fi) { a.expr_escapes(svars, derived, fi.value) })
-}
-arms_escape = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, arms: [ArmData]) bool {
-    arms.slice_any((ar) { a.expr_escapes(svars, derived, ar.body) })
-}
+inits_escape = (
+    a: MutPtr<Malloc>,
+    svars: Ptr<DeadList>,
+    derived: Ptr<DeadList>,
+    inits: [FieldInit],
+) bool { inits.slice_any((fi) { a.expr_escapes(svars, derived, fi.value) }) }
+arms_escape = (
+    a: MutPtr<Malloc>,
+    svars: Ptr<DeadList>,
+    derived: Ptr<DeadList>,
+    arms: [ArmData],
+) bool { arms.slice_any((ar) { a.expr_escapes(svars, derived, ar.body) }) }
 // a block in VALUE position: its trailing value, or any `return` inside it, may escape (lets thread).
-block_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, stmts: [Stmt]) bool {
+block_val_escapes = (
+    a: MutPtr<Malloc>,
+    svars: Ptr<DeadList>,
+    derived: Ptr<DeadList>,
+    stmts: [Stmt],
+) bool {
     f := false
     d := derived
     stmts.loop((h, i, st) {
@@ -1350,7 +1476,12 @@ block_val_escapes = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadL
     f
 }
 // thread the derived-local set across a `let` (now including aliases of derived locals).
-escape_step* = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+escape_step* = (
+    a: MutPtr<Malloc>,
+    svars: Ptr<DeadList>,
+    derived: Ptr<DeadList>,
+    st: Stmt,
+) Ptr<DeadList> {
     out := derived
     st.match ({
         .Let(l) => svars.let_taints(derived, l.value).then({
