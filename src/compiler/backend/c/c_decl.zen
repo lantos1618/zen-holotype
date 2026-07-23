@@ -1,6 +1,8 @@
 // compiler.backend.c.c_decl — type, signature, function, struct, enum, and top-level decl C-emission.
 // Extracted from compiler.backend.c.c_emit. Consumes statement/block emission from compiler.backend.c.c_expr.
 { String } = std.text.string
+{ Map, of } = std.collections.map
+{ expect } = std.core.result
 { Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FnTData } = compiler.ast.ast_types
 { ty_cname_in, gstr_append } = compiler.genc
 { fnt_cname } = compiler.mangle
@@ -246,32 +248,39 @@ gen_enum = (s: String, alloc: MutPtr<Malloc>, ed: EnumDecl) String {
     })
     out.gstr_append(alloc, " };").gen_tags(alloc, ed.name, ed.variants)
 }
-// is struct `name` impl'd anywhere (appears as a DImpl.trname)? A trait IS impl'd; a data struct
-// holding function-VALUE (closure) fields is NOT — that's how the emitter tells a closure record apart
-// from a trait, since both are "structs with FnT fields" by shape.
-struct_is_impld = (decls: [Decl], name: string_view) bool {
-    decls.slice_any((d) {
+// the set of names impl'd anywhere (every DImpl.trname), built ONCE per emission. A trait IS
+// impl'd; a data struct holding function-VALUE (closure) fields is NOT — that's how the emitter
+// tells a closure record apart from a trait, since both are "structs with FnT fields" by shape.
+// The old per-query linear scan over the whole decl list ran per trait-shaped struct per depth
+// level (an O(decls^2) corner that showed up in the self-build profile).
+impld_set* = (a: MutPtr<Malloc>, decls: [Decl]) Map<i64> {
+    seedv: i64 := 0 - 1
+    m := of(a, "", seedv).expect("c_decl: impld_set alloc")
+    decls.loop((h, i, d) {
         d.match ({
-            .DImpl(im) => im.trname == name,
-            _          => false,
+            .DImpl(im) => {
+                m = m.put(a, im.trname, 0).expect("c_decl: impld_set alloc")
+            },
+            _          => { },
         })
     })
+    m
 }
 // a trait-shaped struct (FnT fields) is treated as a trait — skipped in codegen — ONLY when it is an
 // actual trait (impl'd somewhere). A never-impl'd FnT-field struct is a closure record and IS emitted.
-emit_is_trait* = (decls: [Decl], d: Decl) bool {
+emit_is_trait* = (impld: Map<i64>, d: Decl) bool {
     d.is_trait().match ({
         true  => d.match ({
-            .DStruct(sd) => decls.struct_is_impld(sd.name),
+            .DStruct(sd) => impld.has(sd.name),
             _            => false,
         }),
         false => false,
     })
 }
 // forward-declare a struct/enum tag so recursive types compile: `typedef struct N N;`
-gen_fwd* = (s: String, alloc: MutPtr<Malloc>, decls: [Decl], d: Decl) String {
+gen_fwd* = (s: String, alloc: MutPtr<Malloc>, impld: Map<i64>, d: Decl) String {
     out := s
-    (decls.emit_is_trait(d) == false).then({
+    (impld.emit_is_trait(d) == false).then({
         d.match ({
             .DStruct(sd) => {
                 out = out

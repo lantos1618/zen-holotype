@@ -838,10 +838,18 @@ params_env* = (a: MutPtr<Malloc>, ps: [Param]) Ptr<VList> {
     })
     e
 }
-lookup_var* = (v: Ptr<VList>, name: string_view) Ty {
+// First-byte prefilter before the full string compare: lookup_var walks the cons-list env once per
+// variable reference (the single hottest checker fn), and almost every node on the chain fails the
+// compare — one byte load rejects it without the strcmp call. Byte-identical answers: names are
+// NUL-terminated, so equal strings always share their first byte (both possibly NUL).
+lookup_var* = (v: Ptr<VList>, name: string_view) Ty { v.lookup_var_b(load(offset(name, 0)), name) }
+lookup_var_b = (v: Ptr<VList>, b0: u8, name: string_view) Ty {
     v.match ({
         .VNil     => tvoid(),
-        .VCons(c) => (c.name == name).then({ c.ty }, { c.tail.lookup_var(name) }),
+        .VCons(c) => (load(offset(c.name, 0)) == b0 && c.name == name).match ({
+            true  => c.ty,
+            false => c.tail.lookup_var_b(b0, name),
+        }),
     })
 }
 // The innermost enclosing function's DECLARED return type, threaded through the variable environment
@@ -1345,32 +1353,29 @@ alias_recv_dispatchable = (t: Ty) bool {
 // Compiler-level call intrinsics (typed in infer_call / lowered by genc). Lives here — not in
 // check_validate, which now imports it — so the alias-UFCS fallback below can refuse to shadow them.
 is_intrinsic* = (fn: string_view) bool {
-    fn == "load"
-        || fn == "store"
-        || fn == "addr"
-        || fn == "assert_nonnull"
-        || fn == "offset"
-        || fn == "cstr"
-        || fn == "slice"
-        || fn == "malloc"
-        || fn == "sizeof"
-        || fn == "load_i64"
-        || fn == "store_i64"
-        || fn == "atomic_add_i64"
-        || fn == "atomic_load_i64"
-        || fn == "atomic_store_i64"
-        || fn == "atomic_cas_i64"
-        || fn == "atomic_fence"
-        || fn == "null_ptr"
-        || fn == "__str_eq"
-        || fn == "__str_ne"
-        || fn == "to_i32"
-        || fn == "to_i64"
-        || fn == "to_u8"
-        || fn == "to_f64"
-        || fn == "field_eq"
-        || fn == "each_field"
-        || fn == "zip_fields"
+    // grouped under a first-byte guard: this runs for every call site (dispatch + the alias-UFCS
+    // fallback), and the 26-strcmp flat chain was a visible profile line. One byte load rejects
+    // every non-intrinsic name whose first letter matches no intrinsic; same answers.
+    b := load(offset(fn, 0))
+    b == 'l' && (fn == "load" || fn == "load_i64")
+        || b == 's' && (fn == "store" || fn == "slice" || fn == "sizeof" || fn == "store_i64")
+        || b == 'a'
+            && (fn == "addr"
+                || fn == "assert_nonnull"
+                || fn == "atomic_add_i64"
+                || fn == "atomic_load_i64"
+                || fn == "atomic_store_i64"
+                || fn == "atomic_cas_i64"
+                || fn == "atomic_fence")
+        || b == 'o' && fn == "offset"
+        || b == 'c' && fn == "cstr"
+        || b == 'm' && fn == "malloc"
+        || b == 'n' && fn == "null_ptr"
+        || b == '_' && (fn == "__str_eq" || fn == "__str_ne")
+        || b == 't' && (fn == "to_i32" || fn == "to_i64" || fn == "to_u8" || fn == "to_f64")
+        || b == 'f' && fn == "field_eq"
+        || b == 'e' && fn == "each_field"
+        || b == 'z' && fn == "zip_fields"
 }
 // ── UFCS THROUGH MODULE ALIASES ──────────────────────────────────────────────────────────────────
 // `m = std.collections.hmap` binds hmap's top-level fns as `m__put`/`m__get`/… in the flat program,

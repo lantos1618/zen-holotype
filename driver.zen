@@ -94,25 +94,37 @@ check_diag_no_main = (
     decls: [Decl],
     flat: string_view,
 ) CheckDiagnostic {
-    check_module_no_if_diagnostic_from_source(flat)
+    t0 := zt_ms()
+    c0 := check_module_no_if_diagnostic_from_source(flat)
         .cd_or(check_module_no_ternary_diagnostic_from_source(flat))
         .cd_or(mp.check_module_parse_diagnostic_from_source(decls, flat))
         .cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat))
+    t1 := mp.zt_log("    spec-syntax", t0)
+    c1 := c0.cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat))
+    t2 := mp.zt_log("    spec-ownership", t1)
+    c2 := c1
         .cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_leak_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat))
+    t3 := mp.zt_log("    spec-escape-leak", t2)
+    c3 := c2
         .cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat))
+    t4 := mp.zt_log("    spec-send", t3)
+    c4 := c3.cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat))
+    t5 := mp.zt_log("    spec-bound", t4)
+    c5 := c4.cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat))
+    t6 := mp.zt_log("    spec-arg", t5)
+    c6 := c5
         .cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat))
         .cd_or(mp.check_module_ffi_diagnostic_from_source(decls, flat))
         .cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat))
         .cd_or(check_module_main_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat))
+    mp.zt_log("    spec-rest", t6)
+    c6
 }
 RenderTarget*: {
     path: string_view,
@@ -276,14 +288,19 @@ report_check = (
     user: string_view,
 ) i32 {
     // a specialized channel (parse / ownership / escape / bound / …) is the ROOT — report it alone.
+    t0 := zt_ms()
     spec := mp.check_diag_no_main(raw, decls, rp.flat)
+    t1 := mp.zt_log("  validate-spec", t0)
     (spec.code != 0).match ({
         true  => {
             mp.emit_one(raw, decls, rp, path, user, spec)
             spec.count
         },
         false => {
-            ds := mp.check_module_batch_vis(decls, rp.flat, mp.ufcs_vis_of(rp.flat, rp.regions, rp.table))
+            uv := mp.ufcs_vis_of(rp.flat, rp.regions, rp.table)
+            t2 := mp.zt_log("  validate-ufcs-vis", t1)
+            ds := mp.check_module_batch_vis(decls, rp.flat, uv)
+            mp.zt_log("  validate-batch", t2)
             n := to_i32(ds.len)
             ds.loop((h, i, cd) {
                 (to_i32(i) < DIAG_CAP()).then({

@@ -9,7 +9,8 @@
 { monomorphize } = compiler.mono
 { Malloc } = std.mem.alloc
 { slice_any } = compiler.astops
-{ emit_is_trait, gen_decl, gen_fnt_typedefs, gen_fwd, gen_proto, main_is_sys } = compiler.backend.c.c_decl
+{ emit_is_trait, gen_decl, gen_fnt_typedefs, gen_fwd, gen_proto, impld_set, main_is_sys } = compiler.backend.c.c_decl
+{ Map } = std.collections.map
 { gen_expr } = compiler.backend.c.c_expr
 // Type dependency ordering: by-value contained types must emit before their users.
 maxi = (a: i32, b: i32) i32 { (a >= b).then({ a }, { b }) }
@@ -92,13 +93,14 @@ gen_types_at = (
     s: String,
     alloc: MutPtr<Malloc>,
     decls: [Decl],
+    impld: Map<i64>,
     cache: [DepthMemo],
     k: i32,
 ) String {
     out := s
     decls.loop((h, i, d) {
         d.match ({
-            .DStruct(sd) => (decls.emit_is_trait(d) == false).then({
+            .DStruct(sd) => (impld.emit_is_trait(d) == false).then({
                 (decls.idx_depth(cache, i) == k).then({
                     out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
                 })
@@ -115,14 +117,15 @@ gen_types_upto = (
     s: String,
     alloc: MutPtr<Malloc>,
     decls: [Decl],
+    impld: Map<i64>,
     cache: [DepthMemo],
     k: i32,
     n: i32,
 ) String {
     out := s
     (k < n).then({
-        out = out.gen_types_at(alloc, decls, cache, k)
-        out = out.gen_types_upto(alloc, decls, cache, k + 1, n)
+        out = out.gen_types_at(alloc, decls, impld, cache, k)
+        out = out.gen_types_upto(alloc, decls, impld, cache, k + 1, n)
     })
     out
 }
@@ -254,14 +257,15 @@ genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
         .gstr_string(4096)
         .gstr_append(a, "typedef struct { void* ptr; int64_t len; } zslice; typedef void (*zfn)(void); uint8_t* malloc(int64_t); uint8_t* memcpy(uint8_t*, uint8_t*, int64_t); void abort(void); int64_t write(int32_t, uint8_t*, int64_t); __attribute__((weak)) void __zen_panic_unwind(void){ } static void zen__panic(const char* m){ int64_t n=0; while(m[n]){ n=n+1; } write(2,(uint8_t*)m,n); __zen_panic_unwind(); abort(); } static int64_t zen__divz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } if(b==-1 && a==(-9223372036854775807LL-1)){ zen__panic(\"zen: panic: integer division overflow\\n\"); } return a/b; } static int64_t zen__modz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } if(b==-1){ return 0; } return a%b; } static uint64_t zen__udivz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } return a/b; } static uint64_t zen__umodz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } return a%b; } static uint8_t* zen__idx(zslice z, int64_t i, int64_t esz){ if(i<0 || i>=z.len){ zen__panic(\"zen: panic: slice index out of bounds\\n\"); } return (uint8_t*)z.ptr + i*esz; }")
         .gstr_append(a, platform_prelude())
+    impld := a.impld_set(decls)
     decls.loop((h, i, d) {
-        s = s.gen_fwd(a, decls, d)
+        s = s.gen_fwd(a, impld, d)
     })
     s = s.gen_fnt_typedefs(a, decls)
     decls.loop((h, i, d) {
         s = s.gen_proto(a, d)
     })
-    s = s.gen_types_upto(a, decls, a.depth_cache(decls), 0, slen(decls))
+    s = s.gen_types_upto(a, decls, impld, a.depth_cache(decls), 0, slen(decls))
     decls.loop((h, i, d) {
         s = s.gen_global(a, d)
     })
