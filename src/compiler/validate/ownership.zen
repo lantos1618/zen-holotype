@@ -21,7 +21,7 @@ DeadList*: DeadNil | DeadCons(DeadCell)    // let/assign/while/if/index-set prod
 // Raw ownership validation runs before resolve_module in the CLI, while source-level
 // allocator-explicit `o.release_in(a)` / `r.drop_in(a)` calls still exist. After generic inlining those calls
 // become plain pointer operations, so this rule cannot be recovered reliably later.
-DeadCell*: {
+DeadCell: {
     name: string_view,
     tail: Ptr<DeadList>,
 }
@@ -65,7 +65,7 @@ dead_remove* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, name: string_view) Ptr<D
 // field reads, call returns, `.addr()` — is deliberately untracked (under-reject, never over-reject),
 // matching the bare-locals-only scope of the rest of this pass.
 AliasList*: AliasNil | AliasCons(AliasCell)
-AliasCell*: {
+AliasCell: {
     x: string_view,
     y: string_view,
     tail: Ptr<AliasList>,
@@ -784,16 +784,16 @@ tys_reach_mutptr = (decls: [Decl], tys: [Ty], depth: i32) bool {
 //   frozen (val) — deeply immutable → sendable        (reaches no MutPtr)
 //   mut    (ref) — mutable+aliasable, NOT sendable     (a top-level MutPtr<T>)
 //   read   (box) — readonly alias that REACHES a MutPtr → local alias only, not sendable
-md_owned* = () i32 { 0 }
-md_frozen* = () i32 { 1 }
-md_mut* = () i32 { 2 }
-md_read* = () i32 { 3 }
+md_owned = () i32 { 0 }
+md_frozen = () i32 { 1 }
+md_mut = () i32 { 2 }
+md_read = () i32 { 3 }
 // Derive the mode of a type, EXACTLY per the design doc's four-arm rule. `Own<T>` short-circuits first
 // (opaque capability, stopped in ty_reaches_mutptr at sm_is_opaque_cap); a top-level MutPtr is `mut`;
 // otherwise the deep immutability walk decides frozen (reaches no MutPtr) vs read (reaches one behind a
 // readonly surface). Pure function of `(decls, Ty)` — no program point, so it classifies but does NOT
 // enforce use-once/escape (those stay flow-sensitive passes).
-mode_of* = (decls: [Decl], t: Ty) i32 {
+mode_of = (decls: [Decl], t: Ty) i32 {
     (t.owner_base() == "Own").match ({
         true  => md_owned(),
         false => (t.ptr_kind_of() == k_mut_ptr()).match ({
@@ -809,7 +809,7 @@ mode_of* = (decls: [Decl], t: Ty) i32 {
 // mode is `owned` (moved uniquely) or `frozen` (deeply immutable). `mut`/`read` (a live mutable alias, or
 // a readonly alias that still reaches a MutPtr) are rejected — a cross-actor data race. Behavior-identical
 // to the previous `ty_reaches_mutptr(...) == false` leaf (see mode_of arms).
-mode_sendable* = (m: i32) bool { m == md_owned() || m == md_frozen() }
+mode_sendable = (m: i32) bool { m == md_owned() || m == md_frozen() }
 // ALLOCATOR-CENTRIC free detection. The free surface is the `Allocator` trait, generic over every
 // allocator (built-in Heap/Malloc and user-defined) because conformance fixes the method names:
 //   a.release(p)     — frees ptr arg `p`        (receiver `a` is a MutPtr<_>, NOT an Own/Rc/Arc)

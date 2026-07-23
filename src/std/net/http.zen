@@ -43,13 +43,13 @@
 // Connect: the TCP handshake failed (the wrapped std.net IoError says why). Io: a send/receive failed
 // mid-exchange. Malformed: the bytes came back but are not a well-formed HTTP/1.1 response — the `str`
 // payload is the human reason (missing terminator, bad status line, header without a colon, …).
-HttpError*: Connect(IoError) | Io(IoError) | Malformed(string_view)
+HttpError: Connect(IoError) | Io(IoError) | Malformed(string_view)
 connect_err = (e: IoError) HttpError { .Connect(e) }
 io_err = (e: IoError) HttpError { .Io(e) }
 malformed = (m: string_view) HttpError { .Malformed(m) }
 // human-readable label, mirroring std.core.result's IoError `name` (the flat namespace has no
 // overloading, so the type rides in the fn name). `.Malformed` renders its own reason string.
-http_error_name* = (e: HttpError) string_view {
+http_error_name = (e: HttpError) string_view {
     e.match ({
         .Connect(x)   => "Connect",
         .Io(x)        => "Io",
@@ -58,14 +58,14 @@ http_error_name* = (e: HttpError) string_view {
 }
 // ── response shape ────────────────────────────────────────────────────────────────────────────────────
 // one `Name: value` header pair (values already trimmed of the leading space and trailing CR).
-Header*: {
+Header: {
     name: string_view,
     value: string_view,
 }
 // a parsed response: the numeric status, the header list, and the (decoded) body. `header` looks a name
 // up CASE-INSENSITIVELY (HTTP field names are case-insensitive) returning `.Some(value)` / `.None`;
 // `ok` is the 2xx success test.
-Response*: {
+Response: {
     status: i32,
     headers: [Header],
     body: string_view,
@@ -157,7 +157,7 @@ parse_response*<A> = (a: MutPtr<A>, raw: string_view) Result<Response, HttpError
 // status line -> the numeric code. `HTTP/1.1 200 OK` -> 200. `words` drops the trailing CR with the
 // rest of the whitespace, so token[1] is the bare code. Rejects a line that is not `HTTP/… <code> …`
 // with a code in the 100..599 range.
-parse_status*<A> = (a: MutPtr<A>, line: string_view) Result<i32, HttpError> {
+parse_status<A> = (a: MutPtr<A>, line: string_view) Result<i32, HttpError> {
     toks := a.words(line)
     (toks.len < 2).match ({
         true  => err(malformed("http: status line has fewer than two tokens")),
@@ -175,7 +175,7 @@ parse_status*<A> = (a: MutPtr<A>, line: string_view) Result<i32, HttpError> {
 }
 // every line after the status line -> a `[Header]`. Each must be `Name: value`; a colon-less line is a
 // malformed response. Name and value are both trimmed (the value of its leading space and trailing CR).
-collect_headers*<A> = (a: MutPtr<A>, lines: [string_view]) Result<[Header], HttpError> {
+collect_headers<A> = (a: MutPtr<A>, lines: [string_view]) Result<[Header], HttpError> {
     n := lines.len - 1
     hs: [Header] := a.nbuf(Header(
         name: "",
@@ -207,7 +207,7 @@ collect_headers*<A> = (a: MutPtr<A>, lines: [string_view]) Result<[Header], Http
 }
 // resolve the body from the raw remainder and the parsed headers: decode a `chunked` transfer-encoding,
 // else trim to `Content-Length` when present, else take the read-to-EOF remainder verbatim.
-decide_body*<A> = (a: MutPtr<A>, headers: [Header], body_raw: string_view) string_view {
+decide_body<A> = (a: MutPtr<A>, headers: [Header], body_raw: string_view) string_view {
     lookup_header(headers, "Transfer-Encoding").match ({
         .Some(te) => a.to_lower(te).contains("chunked").match ({
             true  => a.decode_chunked(body_raw),
@@ -265,7 +265,7 @@ chunk_loop<A> = (a: MutPtr<A>, bv: [u8], i: i64, sb: String) String {
         },
     })
 }
-decode_chunked*<A> = (a: MutPtr<A>, body: string_view) string_view {
+decode_chunked<A> = (a: MutPtr<A>, body: string_view) string_view {
     bv := body.view()
     sb := a.new_in().expect("http: oom")
     a.finish_in(a.chunk_loop(bv, 0, sb)).expect("http: oom")

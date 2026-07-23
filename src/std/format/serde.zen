@@ -48,7 +48,7 @@
 { DynAlloc } = std.mem.alloc
 { Value, JsonError, parse, get } = std.format.json
 // ── writer state: a String builder + a latched first failure ─────────────────────────────
-JwSt*: {
+JwSt: {
     sb: String,
     failed: bool,
     eno: IoError,
@@ -153,7 +153,7 @@ jw_key = (a: MutPtr<DynAlloc>, st: JwSt, name: string_view, first: bool) JwSt {
 }
 // ── scalar dispatch: `JsonWrite` impls ONLY — no free fallback generic may share this
 // name (see header). A struct field reaching `jw_scalar` is a compile error by design.
-JsonWrite*: {
+JsonWrite: {
     jw_scalar: (Self, MutPtr<DynAlloc>, JwSt) JwSt,
 }
 i64.impl(JsonWrite, {
@@ -176,7 +176,7 @@ string_view.impl(JsonWrite, {
 })
 // ── object writers (reflection generics; always inlined at call sites) ───────────────────
 // flat: every field is a scalar.
-jw_obj1*<T> = (v: T, a: MutPtr<DynAlloc>, st: JwSt) JwSt {
+jw_obj1<T> = (v: T, a: MutPtr<DynAlloc>, st: JwSt) JwSt {
     out := a.jw_byte(st, '{')
     first: bool := true
     v.each_field((name, fv) {
@@ -189,7 +189,7 @@ jw_obj1*<T> = (v: T, a: MutPtr<DynAlloc>, st: JwSt) JwSt {
 // nested: every root field is a struct whose fields are all scalars (literal 2-level
 // unroll — a CALL to jw_obj1 here would leave an unlowered lambda in the generated C;
 // nested reflection must be written as literal nested each_field).
-jw_obj2*<T> = (v: T, a: MutPtr<DynAlloc>, st: JwSt) JwSt {
+jw_obj2<T> = (v: T, a: MutPtr<DynAlloc>, st: JwSt) JwSt {
     out := a.jw_byte(st, '{')
     first: bool := true
     v.each_field((name, fv) {
@@ -234,7 +234,7 @@ to_json_nested*<T> = (a: MutPtr<DynAlloc>, v: T) Result<string_view, IoError> {
     out
 }
 // ── scalar readers: `JsonRead` impls ONLY (same no-free-fallback rule as JsonWrite) ──────
-JsonRead*: {
+JsonRead: {
     jr_scalar: (Self, Value) Self,
 }
 jv_i64 = (v: i64, jv: Value) i64 {
@@ -289,7 +289,7 @@ jv_or_null = (o: Opt<Value>) Value {
 // ── object readers: fill a copy of the seed from a parsed Value tree ─────────────────────
 // `w := v` copies the seed; the each_field lambda param `fv` substitutes to a member PLACE
 // of `w`, so `fv = fv.jr_scalar(x)` assigns the copy's field.
-jr_obj1*<T> = (v: T, jv: Value) T {
+jr_obj1<T> = (v: T, jv: Value) T {
     w := v
     w.each_field((name, fv) { fv = fv.jr_scalar(jv.get(name).jv_or_null()) })
     w
@@ -300,7 +300,7 @@ jr_obj1*<T> = (v: T, jv: Value) T {
 // unlowered lambda in the generated C. The shape that works: copy the field to a LOCAL
 // (a Var subject is spliced unbound), fill the local's fields, assign the struct back
 // whole (a level-1 member place assignment, which does stick).
-jr_obj2*<T> = (v: T, jv: Value) T {
+jr_obj2<T> = (v: T, jv: Value) T {
     w := v
     w.each_field((name, fv) {
         x := jv.get(name).jv_or_null()

@@ -118,7 +118,7 @@ free_scratch* = (sc: MutPtr<Arena>) void { free(sc.buf.offset(0 - sizeof(Arena))
 // spawn a typed actor WITH a per-behavior scratch arena `sc` (from `new_scratch`). The actor stores the
 // same `sc` in its state as `scratch: MutPtr<Arena>` (so `receive` bump-allocates via `self.scratch`), and
 // the pool holds it too (so it resets it at each behavior boundary). Everything else is `spawn_actor`.
-spawn_actor_scratch*<ActorT> = (
+spawn_actor_scratch<ActorT> = (
     cap: i64,
     actor: ActorT,
     tramp: (RawPtr<u8>, i64) void,
@@ -200,7 +200,7 @@ close*<ActorT> = (h: PooledHandle<ActorT>) void {
 // Restart POLICY (OTP-style): `Permanent` always restarts a dead child; `Temporary` never does (it stays
 // dead, observably). Transient (restart only on ABNORMAL exit) is omitted — a pool actor has no "normal
 // exit" signal (it idles, it does not return), so Transient would be indistinguishable from Permanent here.
-Policy*: Permanent | Temporary
+Policy: Permanent | Temporary
 // policy constructors — spelled as fns so a caller in ANOTHER module never has to write a module-qualified
 // enum-variant literal (`pa.Policy.Permanent`), which the faithful formatter does not round-trip.
 permanent* = () Policy { Policy.Permanent }
@@ -213,7 +213,7 @@ temporary* = () Policy { Policy.Temporary }
 // SOUNDNESS: `initial` is a sendable ActorT value copied at spec-build time; it must NOT capture a scratch
 // pointer (scratch is per-behavior, reset every turn — a retained scratch ptr would dangle across a restart).
 // A supervised actor therefore uses shared/heap state, never scratch, in its retained initial value.
-ChildSpec*<ActorT>: {
+ChildSpec<ActorT>: {
     cap: i64,
     initial: ActorT,
     tramp: (RawPtr<u8>, i64) void,
@@ -238,7 +238,7 @@ child_spec*<ActorT> = (
 // A supervised child: its CURRENT live handle, how many times it has been restarted, and the retained spec
 // used to (re)spawn it. `supervise` returns a fresh Child on restart (Zen values are immutable rebinds) —
 // the caller keeps the returned Child and sends to `child.handle`.
-Child*<ActorT>: {
+Child<ActorT>: {
     handle: PooledHandle<ActorT>,
     restarts: i64,
     spec: ChildSpec<ActorT>,
@@ -279,7 +279,7 @@ supervise*<ActorT> = (c: Child<ActorT>) Child<ActorT> {
 }    // free the dead instance's state block (same as `close`, inlined —
 // `close` unqualified would flatten-collide with libc's `close`)
 // is this supervised child's actor currently dead? (thin typed wrapper over pool_actor_dead for the handle.)
-child_dead*<ActorT> = (c: Child<ActorT>) bool { pool_actor_dead(c.handle.raw) }
+child_dead<ActorT> = (c: Child<ActorT>) bool { pool_actor_dead(c.handle.raw) }
 // reclaim a delivered message box — call from the trampoline AFTER `receive` returns. (The box was
 // malloc'd by `send`; the free happens on the worker, matching the malloc/free allocator pair, so the
 // actor's ambient rt is irrelevant to the transport box — it governs allocations inside `receive`.)
