@@ -27,18 +27,18 @@
 { Sb, sb } = std.text.sb
 // ── spec records ─────────────────────────────────────────────────────────────
 // A `short` of 0 means "no short form". `name` is the long name WITHOUT the leading `--`.
-FlagSpec*: {
+FlagSpec: {
     name: string_view,
     short: u8,
     help: string_view,
 }
-OptSpec*: {
+OptSpec: {
     name: string_view,
     short: u8,
     help: string_view,
     req: bool,
 }
-PosSpec*: {
+PosSpec: {
     name: string_view,
     help: string_view,
     req: bool,
@@ -48,10 +48,10 @@ PosSpec*: {
 //   MissingValue    — an option that takes a value was given none (last token, or nothing after it)
 //   MissingRequired — a `.option_req` / `.positional_req` argument was absent
 //   NoValueAllowed  — a boolean flag was written as `--flag=value`
-ArgError*: UnknownFlag(string_view) | MissingValue(string_view) | MissingRequired(string_view) | NoValueAllowed(string_view)
+ArgError: UnknownFlag(string_view) | MissingValue(string_view) | MissingRequired(string_view) | NoValueAllowed(string_view)
 // Human-readable variant name (mirrors std.core.result's `name`) so error paths can print which kind
 // fired without unpacking the payload: `println(e.ap_error_name())`.
-ap_error_name* = (e: ArgError) string_view {
+ap_error_name = (e: ArgError) string_view {
     e.match ({
         .UnknownFlag(n)     => "UnknownFlag",
         .MissingValue(n)    => "MissingValue",
@@ -67,7 +67,7 @@ ap_no_value = (s: string_view) ArgError { .NoValueAllowed(s) }
 ap_some = (v: string_view) Opt<string_view> { .Some(v) }
 ap_none = () Opt<string_view> { .None }
 // append one element to a slice, copied into a fresh allocator-owned buffer of length +1.
-ap_add*<T, A> = (a: MutPtr<A>, xs: [T], x: T) [T] {
+ap_add<T, A> = (a: MutPtr<A>, xs: [T], x: T) [T] {
     n := xs.len
     out: [T] := slice(a.acquire((n + 1) * sizeof(T)), n + 1)
     xs.loop((h, i, e) {
@@ -77,7 +77,7 @@ ap_add*<T, A> = (a: MutPtr<A>, xs: [T], x: T) [T] {
     out
 }
 // an all-false `[bool]` of length `n` (parallel to the flag specs).
-ap_bools*<A> = (a: MutPtr<A>, n: i64) [bool] {
+ap_bools<A> = (a: MutPtr<A>, n: i64) [bool] {
     out: [bool] := a.nbuf(false, n)
     out.loop((h, i, e) {
         out[i] = false
@@ -85,7 +85,7 @@ ap_bools*<A> = (a: MutPtr<A>, n: i64) [bool] {
     out
 }
 // an all-`.None` `[Opt<str>]` of length `n` (parallel to the option specs).
-ap_opts*<A> = (a: MutPtr<A>, n: i64) [Opt<string_view>] {
+ap_opts<A> = (a: MutPtr<A>, n: i64) [Opt<string_view>] {
     seed: Opt<string_view> := .None
     out: [Opt<string_view>] := a.nbuf(seed, n)
     out.loop((h, i, e) {
@@ -273,7 +273,7 @@ ap_new* = (prog: string_view) Parser {
 // ── the parsed result ────────────────────────────────────────────────────────
 // `flags` is parallel to `spec.flags` (true when the flag was seen), `opts` parallel to `spec.opts`
 // (`.Some(value)` when the option was given). `poss` is the collected positionals, in order.
-Parsed*: {
+Parsed: {
     spec: Parser,
     flags: [bool],
     opts: [Opt<string_view>],
@@ -305,7 +305,7 @@ Parsed*: {
 // ── the parse driver ─────────────────────────────────────────────────────────
 // Walk `args` (the arguments AFTER the program name). Returns the filled `Parsed`, or the first
 // `ArgError` encountered. `a` owns every allocation in the result.
-ap_parse*<A> = (a: MutPtr<A>, p: Parser, args: [string_view]) Result<Parsed, ArgError> {
+ap_parse<A> = (a: MutPtr<A>, p: Parser, args: [string_view]) Result<Parsed, ArgError> {
     flags: [bool] := a.ap_bools(p.flags.len)
     optvals: [Opt<string_view>] := a.ap_opts(p.opts.len)
     poss: [string_view] := a.nbuf("", args.len)    // upper bound: every arg a positional

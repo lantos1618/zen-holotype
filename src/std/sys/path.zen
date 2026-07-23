@@ -62,11 +62,11 @@ back_over_slashes = (v: [u8], j: i64) i64 {
 }
 // ── pure, zero-copy ───────────────────────────────────────────────────────────
 // does `p` start at the root? is_absolute("/a") == true, is_absolute("a") == false.
-is_absolute* = (p: string_view) bool { p.starts_with("/") }
+is_absolute = (p: string_view) bool { p.starts_with("/") }
 // the final path component (everything after the last '/'), as a zero-copy suffix view.
 // basename("/a/b/c") == "c"; basename("abc") == "abc"; basename("/a/b/") == "" (trailing-slash rule);
 // basename("/") == "".
-basename* = (p: string_view) string_view {
+basename = (p: string_view) string_view {
     v := p.view()
     i := v.last_slash()
     cstr(v.ptr.offset(i + 1))
@@ -74,7 +74,7 @@ basename* = (p: string_view) string_view {
 // the extension INCLUDING the dot, from the last '.' in the basename to the end; "" when there is none.
 // A leading dot is a dotfile marker, not an extension. Zero-copy suffix view.
 // ext("f.tar.gz") == ".gz"; ext("f.") == "."; ext(".bashrc") == ""; ext("noext") == "".
-ext* = (p: string_view) string_view {
+ext = (p: string_view) string_view {
     b := p.basename()
     bv := b.view()
     ld := bv.leading_dots()
@@ -85,7 +85,7 @@ ext* = (p: string_view) string_view {
 // the directory portion (everything before the last component), trailing slashes collapsed.
 // dirname("/a/b/c") == "/a/b"; dirname("/a") == "/"; dirname("/") == "/"; dirname("abc") == "";
 // dirname("a/b/") == "a/b".
-dirname_in*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
+dirname_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
     v := p.view()
     i := v.last_slash()
     (i < 0).match ({
@@ -98,12 +98,12 @@ dirname_in*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
 }
 dirname*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.dirname_in(p) }
 // the basename with its extension removed. stem("dir/f.tar.gz") == "f.tar"; stem(".bashrc") == ".bashrc".
-stem_in*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
+stem_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
     b := p.basename()
     n := b.len() - p.ext().len()
     a.substr_in(b, 0, n)
 }
-stem*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.stem_in(p) }
+stem<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.stem_in(p) }
 // ── join ──────────────────────────────────────────────────────────────────────
 // is the builder empty / does it currently end with a separator?
 sb_empty = (sb: String) bool { sb.len == 0 }
@@ -118,7 +118,7 @@ sb_ends_slash = (sb: String) bool {
 }
 // fold parts into `acc`, POSIX-style: an absolute part RESETS the accumulation; otherwise the part is
 // appended with exactly one '/' unless `acc` already ends with one (so no doubled separators).
-join_fold*<A> = (a: MutPtr<A>, parts: [string_view], i: i64, acc: String) Result<String, IoError> {
+join_fold<A> = (a: MutPtr<A>, parts: [string_view], i: i64, acc: String) Result<String, IoError> {
     (i >= parts.len).match ({
         true  => ok(acc),
         false => {
@@ -157,11 +157,11 @@ join_in*<A> = (a: MutPtr<A>, parts: [string_view]) Result<string_view, IoError> 
 join*<A> = (a: MutPtr<A>, parts: [string_view]) Result<string_view, IoError> { a.join_in(parts) }
 // ── normalize ─────────────────────────────────────────────────────────────────
 // append `sb` a '/' before all but the first kept component (keeps or_return out of a match-arm value).
-sep_before*<A> = (a: MutPtr<A>, sb: String, k: i64) Result<String, IoError> {
+sep_before<A> = (a: MutPtr<A>, sb: String, k: i64) Result<String, IoError> {
     (k > 0).match ({ true => sb.append_in(a, "/"), false => ok(sb) })
 }
 // emit kept components `keep[0..top]` into `sb`, '/'-separated (no leading slash — the caller seeds it).
-norm_build*<A> = (
+norm_build<A> = (
     a: MutPtr<A>,
     parts: [string_view],
     keep: [i64],
@@ -181,7 +181,7 @@ norm_build*<A> = (
 // collapse '.', '..' and runs of '/'. normalize("a/./b/../c") == "a/c"; normalize("/a/../b") == "/b";
 // normalize("") == "."; normalize("/") == "/". A leading '..' is kept on a relative path
 // (normalize("a/../../b") == "../b") but dropped at an absolute root (normalize("/..") == "/").
-normalize_in*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
+normalize_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
     abs := p.is_absolute()
     parts := a.split(p, '/')
     z: i64 := 0
@@ -218,4 +218,4 @@ normalize_in*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
         .Err(e)   => err(e),
     })
 }
-normalize*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.normalize_in(p) }
+normalize<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.normalize_in(p) }

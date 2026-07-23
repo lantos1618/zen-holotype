@@ -10,19 +10,19 @@
 { DeclIndex, cebuf, cenode, pbuf, vnil } = compiler.check
 { map_slice, slice_any } = compiler.astops
 { light_ty } = compiler.check_infer
-tybuf1* = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
-self_param* = (a: MutPtr<Malloc>) [Param] {
+tybuf1 = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
+self_param = (a: MutPtr<Malloc>) [Param] {
     buf := a.pbuf(1)
     buf[0] = param("Self", tvoid())
     buf
 }
-self_arg* = (a: MutPtr<Malloc>, tyname: string_view) [Ty] {
+self_arg = (a: MutPtr<Malloc>, tyname: string_view) [Ty] {
     buf := a.tybuf1()
     buf[0] = tnamed(tyname)
     buf
 }
 // Specialize default Func to a concrete impl type.
-default_for_type* = (a: MutPtr<Malloc>, td: TraitDefData, tyname: string_view) Func {
+default_for_type = (a: MutPtr<Malloc>, td: TraitDefData, tyname: string_view) Func {
     sp := a.self_param()
     ag := a.self_arg(tyname)
     ps := a.pbuf(td.fn.params.len)
@@ -37,9 +37,9 @@ default_for_type* = (a: MutPtr<Malloc>, td: TraitDefData, tyname: string_view) F
         body: td.fn.body,
     )
 }
-param_names_have* = (names: [Param], m: string_view) bool { names.slice_any((p) { p.name == m }) }
+param_names_have = (names: [Param], m: string_view) bool { names.slice_any((p) { p.name == m }) }
 // Does this impl already provide method m?
-def_provided* = (decls: [Decl], tyname: string_view, trname: string_view, m: string_view) bool {
+def_provided = (decls: [Decl], tyname: string_view, trname: string_view, m: string_view) bool {
     decls.slice_any((d) {
         d.match ({
             .DImpl(im) => (im.ty == tyname && im.trname == trname).match ({
@@ -50,7 +50,7 @@ def_provided* = (decls: [Decl], tyname: string_view, trname: string_view, m: str
         })
     })
 }
-default_expansion_count* = (decls: [Decl]) i64 {
+default_expansion_count = (decls: [Decl]) i64 {
     n := 0
     decls.loop((h, i, d) {
         d.match ({
@@ -68,7 +68,7 @@ default_expansion_count* = (decls: [Decl]) i64 {
     })
     n
 }
-emit_defaults_for* = (a: MutPtr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
+emit_defaults_for = (a: MutPtr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
     k := j
     decls.loop((h, i, d) {
         d.match ({
@@ -123,7 +123,7 @@ desugar_method_calls* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     })
     decls
 }
-dmc_decl* = (a: MutPtr<Malloc>, d: Decl) Decl {
+dmc_decl = (a: MutPtr<Malloc>, d: Decl) Decl {
     d.match ({
         .DFunc(f)          => {
             a.dmc_body(f.body)
@@ -144,13 +144,13 @@ dmc_decl* = (a: MutPtr<Malloc>, d: Decl) Decl {
         _                  => d,
     })
 }
-dmc_body* = (a: MutPtr<Malloc>, body: [Stmt]) void {
+dmc_body = (a: MutPtr<Malloc>, body: [Stmt]) void {
     body.loop((h, i, st) {
         a.dmc_stmt(body[i].addr())
     })
 }
 // `sp` is a MUTABLE slot (a [Stmt] slice element), so the rebuilt statement is stored back through it.
-dmc_stmt* = (a: MutPtr<Malloc>, sp: MutPtr<Stmt>) void {
+dmc_stmt = (a: MutPtr<Malloc>, sp: MutPtr<Stmt>) void {
     sp.match ({
         .Let(l)      => store(sp, slett_at(l.name, l.ty, a.dmc_expr_val(l.value), l.pos)),
         .Assign(asn) => store(sp, sassign_at(a.dmc_expr_val(asn.target), a.dmc_expr_val(asn.value), asn.pos)),
@@ -169,17 +169,17 @@ dmc_stmt* = (a: MutPtr<Malloc>, sp: MutPtr<Stmt>) void {
     })
 }
 // `args[i]` is a mutable [Expr] slot, so each lowered element is stored back in place.
-dmc_args* = (a: MutPtr<Malloc>, args: [Expr]) void {
+dmc_args = (a: MutPtr<Malloc>, args: [Expr]) void {
     args.loop((h, i, ar) {
         store(args[i].addr(), load(a.dmc_expr_val(args[i].addr())))
     })
 }
-dmc_inits* = (a: MutPtr<Malloc>, inits: [FieldInit]) void {
+dmc_inits = (a: MutPtr<Malloc>, inits: [FieldInit]) void {
     inits.loop((h, i, fi) {
         store(inits[i].addr(), finit(fi.name, a.dmc_expr_val(fi.value)))
     })
 }
-dmc_arms* = (a: MutPtr<Malloc>, arms: [ArmData]) void {
+dmc_arms = (a: MutPtr<Malloc>, arms: [ArmData]) void {
     arms.loop((h, i, ar) {
         store(arms[i].addr(), arm_at(ar.variant, ar.bind, a.dmc_expr_val(ar.body), ar.pos))
     })
@@ -187,7 +187,7 @@ dmc_arms* = (a: MutPtr<Malloc>, arms: [ArmData]) void {
 // `recv.method(args)` -> `Call(fn: method, args: [recv, ...args], pos, raw: false)` — exactly what the
 // old parse_method built (buf[0] = recv, method args from index 1, via call_at). The recv and args are
 // lowered first (recv functionally, args in their mutable slice slots).
-dmc_lower* = (a: MutPtr<Malloc>, mc: MethodCallData) Expr {
+dmc_lower = (a: MutPtr<Malloc>, mc: MethodCallData) Expr {
     rv := a.dmc_expr_val(mc.recv)
     a.dmc_args(mc.args)
     buf := a.cebuf(mc.args.len + 1)
@@ -203,7 +203,7 @@ remk_match* = (m: MatchData, subj: Ptr<Expr>) Expr {
 // FUNCTIONAL rewrite: returns the lowered node. A node with single `Ptr<Expr>` children is rebuilt with
 // the lowered children (preserving every field/position); a node whose children live in mutable slices is
 // mutated in place and the SAME node pointer is returned. Only a `MethodCall` actually changes shape.
-dmc_expr_val* = (a: MutPtr<Malloc>, ep: Ptr<Expr>) Ptr<Expr> {
+dmc_expr_val = (a: MutPtr<Malloc>, ep: Ptr<Expr>) Ptr<Expr> {
     ep.match ({
         .Bin(b)         => a.cenode(bin_at(b.op, a.dmc_expr_val(b.lhs), a.dmc_expr_val(b.rhs), b.pos)),
         .Call(c)        => {
@@ -246,13 +246,13 @@ dmc_expr_val* = (a: MutPtr<Malloc>, ep: Ptr<Expr>) Ptr<Expr> {
 // Enum-variant defaults (`Name = expr`) are parsed with a void payload + the default expr; before any
 // other pass, infer each default's type into the payload so codegen lays out the union slot and match
 // arms bind correctly.
-default_payload* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, v: VariantDef) Ty {
+default_payload = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, v: VariantDef) Ty {
     v.dflt.is_expr_null().match ({
         true  => v.payload,
         false => v.dflt.light_ty(a, a.vnil(), decls, idx),
     })
 }
-fill_variant_defaults* = (
+fill_variant_defaults = (
     a: MutPtr<Malloc>,
     decls: [Decl],
     idx: DeclIndex,
