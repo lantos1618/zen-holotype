@@ -485,28 +485,7 @@ denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) 
                 false => a.denrich_inits(env, sd.inits, off, code),
             }),
         }),
-        .Call(c)        => (code == KNOTCALLABLE() && c.pos == off).match ({
-            true  => env.denrich_notcallable_msg(c.fn),
-            false => (code == KMETHODNOTFOUND() && c.pos == off).match ({
-                true  => env.denrich_undef_method_msg(c),
-                false => (code == KTARGARITY() && c.pos == off).match ({
-                    true  => env.denrich_targ_arity_msg(c),
-                    false => (code == KARITY() && c.pos == off).match ({
-                        true  => env.denrich_arity_msg(c),
-                        false => (code == KTRAITBOUND() && c.pos == off).match ({
-                            true  => desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code)),
-                            false => (code == KUNDEFINED() && c.pos == off).match ({
-                                true  => desc_or(env.denrich_ambiguous_msg(c), a.denrich_args(env, c.args, off, code)),
-                                false => (code == KARGTYPE()).match ({
-                                    true  => desc_or(env.denrich_argfit_msg(c, off), a.denrich_args(env, c.args, off, code)),
-                                    false => a.denrich_args(env, c.args, off, code),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+        .Call(c)        => a.denrich_call(env, c, off, code),
         .SliceLit(sd)   => a.denrich_args(env, sd.items, off, code),
         .Index(ix)      => desc_or(a.denrich_expr(env, ix.seq, off, code), a.denrich_expr(env, ix.idx, off, code)),
         .Cond(d)        => desc_or(a.denrich_expr(env, d.c, off, code), desc_or(a.denrich_expr(env, d.t, off, code), a.denrich_expr(env, d.e, off, code))),
@@ -520,6 +499,32 @@ denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) 
         .Loop(l)        => desc_or(a.denrich_expr(env, l.seq, off, code), a.denrich_body(a.loop_env(env, l), l.body, off, code)),
         _               => "",
     })
+}
+// the `.Call` arm of denrich_expr: the per-kind positioned messages as a flat early-return table,
+// then (for the arg-carrying kinds and the fall-through) the recursive walk over the call's args.
+denrich_call = (a: MutPtr<Malloc>, env: Env, c: CallData, off: i32, code: i32) string_view {
+    (code == KNOTCALLABLE() && c.pos == off).then({
+        return env.denrich_notcallable_msg(c.fn)
+    })
+    (code == KMETHODNOTFOUND() && c.pos == off).then({
+        return env.denrich_undef_method_msg(c)
+    })
+    (code == KTARGARITY() && c.pos == off).then({
+        return env.denrich_targ_arity_msg(c)
+    })
+    (code == KARITY() && c.pos == off).then({
+        return env.denrich_arity_msg(c)
+    })
+    (code == KTRAITBOUND() && c.pos == off).then({
+        return desc_or(env.denrich_traitbound_msg(c), a.denrich_args(env, c.args, off, code))
+    })
+    (code == KUNDEFINED() && c.pos == off).then({
+        return desc_or(env.denrich_ambiguous_msg(c), a.denrich_args(env, c.args, off, code))
+    })
+    (code == KARGTYPE()).then({
+        return desc_or(env.denrich_argfit_msg(c, off), a.denrich_args(env, c.args, off, code))
+    })
+    a.denrich_args(env, c.args, off, code)
 }
 denrich_args = (a: MutPtr<Malloc>, env: Env, args: [Expr], off: i32, code: i32) string_view {
     res := ""

@@ -173,103 +173,91 @@ js_args* = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
 js_arg_at* = (s: String, a: MutPtr<Malloc>, c: CallData, i: i32) String {
     i < c.args.len ? s.js_expr(a, c.args[i].addr()) : s.gstr_append(a, "0")
 }
-// intrinsics erase to floor calls; everything else is an ordinary JS call `name(args)`.
+// intrinsics erase to floor calls; everything else is an ordinary JS call `name(args)` — one flat
+// early-return table (was two nested tiers, split only because the old pyramid nested too deep).
 js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "__str_eq").match ({
-        true  => s
+    (c.fn == "__str_eq").then({
+        return s
             .gstr_append(a, "__zr.eq(")
             .js_arg_at(a, c, 0)
             .gstr_append(a, ", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, ")"),
-        false => (c.fn == "__str_ne").match ({
-            true  => s
-                .gstr_append(a, "(!__zr.eq(")
-                .js_arg_at(a, c, 0)
-                .gstr_append(a, ", ")
-                .js_arg_at(a, c, 1)
-                .gstr_append(a, "))"),
-            false => (c.fn == "load").match ({
-                true  => s.gstr_append(a, "__zr.load(").js_arg_at(a, c, 0).gstr_append(a, ")"),
-                false => (c.fn == "store").match ({
-                    true  => s
-                        .gstr_append(a, "__zr.store(")
-                        .js_arg_at(a, c, 0)
-                        .gstr_append(a, ", ")
-                        .js_arg_at(a, c, 1)
-                        .gstr_append(a, ")"),
-                    false => (c.fn == "offset").match ({
-                        true  => s
-                            .gstr_append(a, "__zr.offset(")
-                            .js_arg_at(a, c, 0)
-                            .gstr_append(a, ", ")
-                            .js_arg_at(a, c, 1)
-                            .gstr_append(a, ")"),
-                        false => (c.fn == "slice").match ({
-                            true  => s
-                                .gstr_append(a, "__zr.slice(")
-                                .js_arg_at(a, c, 0)
-                                .gstr_append(a, ", ")
-                                .js_arg_at(a, c, 1)
-                                .gstr_append(a, ")"),
-                            false => (c.fn == "cstr").match ({
-                                true  => s
-                                    .gstr_append(a, "(")
-                                    .js_arg_at(a, c, 0)
-                                    .gstr_append(a, ")"),
-                                false => (c.fn == "null_ptr").match ({
-                                    true  => s.gstr_append(a, "0"),
-                                    false => (c.fn == "addr").match ({
-                                        true  => s
-                                            .gstr_append(a, "__zr.addr(")
-                                            .js_arg_at(a, c, 0)
-                                            .gstr_append(a, ")"),
-                                        false => (c.fn == "assert_nonnull").match ({
-                                            true  => s
-                                                .gstr_append(a, "__zr.nn(")
-                                                .js_arg_at(a, c, 0)
-                                                .gstr_append(a, ")"),
-                                            false => s.js_call_intr2(a, c),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+            .gstr_append(a, ")")
     })
-}
-// second tier of intrinsics (kept split so no single match nests too deep for the parser).
-js_call_intr2 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "to_i32").match ({
-        true  => s.gstr_append(a, "__zr.i32(").js_arg_at(a, c, 0).gstr_append(a, ")"),
-        false => (c.fn == "to_i64").match ({
-            true  => s.gstr_append(a, "__zr.i64(").js_arg_at(a, c, 0).gstr_append(a, ")"),
-            false => (c.fn == "to_u8").match ({
-                true  => s.gstr_append(a, "((").js_arg_at(a, c, 0).gstr_append(a, ") & 255)"),
-                false => (c.fn == "to_f64").match ({
-                    true  => s.gstr_append(a, "(+(").js_arg_at(a, c, 0).gstr_append(a, "))"),
-                    false => (c.fn == "load_i64").match ({
-                        true  => s
-                            .gstr_append(a, "__zr.load_i64(")
-                            .js_arg_at(a, c, 0)
-                            .gstr_append(a, ")"),
-                        false => (c.fn == "store_i64").match ({
-                            true  => s
-                                .gstr_append(a, "__zr.store_i64(")
-                                .js_arg_at(a, c, 0)
-                                .gstr_append(a, ", ")
-                                .js_arg_at(a, c, 1)
-                                .gstr_append(a, ")"),
-                            false => c.fn == "sizeof" ? s.js_sizeof(a, c) : s.js_dom_dispatch(a, c),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (c.fn == "__str_ne").then({
+        return s
+            .gstr_append(a, "(!__zr.eq(")
+            .js_arg_at(a, c, 0)
+            .gstr_append(a, ", ")
+            .js_arg_at(a, c, 1)
+            .gstr_append(a, "))")
     })
+    (c.fn == "load").then({
+        return s.gstr_append(a, "__zr.load(").js_arg_at(a, c, 0).gstr_append(a, ")")
+    })
+    (c.fn == "store").then({
+        return s
+            .gstr_append(a, "__zr.store(")
+            .js_arg_at(a, c, 0)
+            .gstr_append(a, ", ")
+            .js_arg_at(a, c, 1)
+            .gstr_append(a, ")")
+    })
+    (c.fn == "offset").then({
+        return s
+            .gstr_append(a, "__zr.offset(")
+            .js_arg_at(a, c, 0)
+            .gstr_append(a, ", ")
+            .js_arg_at(a, c, 1)
+            .gstr_append(a, ")")
+    })
+    (c.fn == "slice").then({
+        return s
+            .gstr_append(a, "__zr.slice(")
+            .js_arg_at(a, c, 0)
+            .gstr_append(a, ", ")
+            .js_arg_at(a, c, 1)
+            .gstr_append(a, ")")
+    })
+    (c.fn == "cstr").then({
+        return s.gstr_append(a, "(").js_arg_at(a, c, 0).gstr_append(a, ")")
+    })
+    (c.fn == "null_ptr").then({
+        return s.gstr_append(a, "0")
+    })
+    (c.fn == "addr").then({
+        return s.gstr_append(a, "__zr.addr(").js_arg_at(a, c, 0).gstr_append(a, ")")
+    })
+    (c.fn == "assert_nonnull").then({
+        return s.gstr_append(a, "__zr.nn(").js_arg_at(a, c, 0).gstr_append(a, ")")
+    })
+    (c.fn == "to_i32").then({
+        return s.gstr_append(a, "__zr.i32(").js_arg_at(a, c, 0).gstr_append(a, ")")
+    })
+    (c.fn == "to_i64").then({
+        return s.gstr_append(a, "__zr.i64(").js_arg_at(a, c, 0).gstr_append(a, ")")
+    })
+    (c.fn == "to_u8").then({
+        return s.gstr_append(a, "((").js_arg_at(a, c, 0).gstr_append(a, ") & 255)")
+    })
+    (c.fn == "to_f64").then({
+        return s.gstr_append(a, "(+(").js_arg_at(a, c, 0).gstr_append(a, "))")
+    })
+    (c.fn == "load_i64").then({
+        return s.gstr_append(a, "__zr.load_i64(").js_arg_at(a, c, 0).gstr_append(a, ")")
+    })
+    (c.fn == "store_i64").then({
+        return s
+            .gstr_append(a, "__zr.store_i64(")
+            .js_arg_at(a, c, 0)
+            .gstr_append(a, ", ")
+            .js_arg_at(a, c, 1)
+            .gstr_append(a, ")")
+    })
+    (c.fn == "sizeof").then({
+        return s.js_sizeof(a, c)
+    })
+    s.js_dom_dispatch(a, c)
 }
 js_sizeof = (s: String, a: MutPtr<Malloc>, c: CallData) String {
     (c.args.len > 0).match ({
@@ -541,19 +529,22 @@ int_width* = (t: Ty) i32 {
     })
 }
 iw_named = (n: string_view) i32 {
-    (n == "u16").match ({
-        true  => 2,
-        false => (n == "u32").match ({
-            true  => 3,
-            false => (n == "u64").match ({
-                true  => 7,
-                false => (n == "i16").match ({
-                    true  => 5,
-                    false => n == "i8" ? 6 : 0,
-                }),
-            }),
-        }),
+    (n == "u16").then({
+        return 2
     })
+    (n == "u32").then({
+        return 3
+    })
+    (n == "u64").then({
+        return 7
+    })
+    (n == "i16").then({
+        return 5
+    })
+    (n == "i8").then({
+        return 6
+    })
+    0
 }
 js_w_open* = (s: String, a: MutPtr<Malloc>, w: i32) String {
     (w == 7).match ({
@@ -562,25 +553,28 @@ js_w_open* = (s: String, a: MutPtr<Malloc>, w: i32) String {
     })
 }
 js_w_close* = (s: String, a: MutPtr<Malloc>, w: i32) String {
-    (w == 1).match ({
-        true  => s.gstr_append(a, ") & 255)"),
-        false => (w == 2).match ({
-            true  => s.gstr_append(a, ") & 0xffff)"),
-            false => (w == 3).match ({
-                true  => s.gstr_append(a, ") >>> 0)"),
-                false => (w == 4).match ({
-                    true  => s.gstr_append(a, ") | 0)"),
-                    false => (w == 5).match ({
-                        true  => s.gstr_append(a, ") << 16 >> 16)"),
-                        false => (w == 6).match ({
-                            true  => s.gstr_append(a, ") << 24 >> 24)"),
-                            false => w == 7 ? s.gstr_append(a, "))") : s,
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (w == 1).then({
+        return s.gstr_append(a, ") & 255)")
     })
+    (w == 2).then({
+        return s.gstr_append(a, ") & 0xffff)")
+    })
+    (w == 3).then({
+        return s.gstr_append(a, ") >>> 0)")
+    })
+    (w == 4).then({
+        return s.gstr_append(a, ") | 0)")
+    })
+    (w == 5).then({
+        return s.gstr_append(a, ") << 16 >> 16)")
+    })
+    (w == 6).then({
+        return s.gstr_append(a, ") << 24 >> 24)")
+    })
+    (w == 7).then({
+        return s.gstr_append(a, "))")
+    })
+    s
 }
 // emit an expression coerced to width `w` (w == 0 emits the bare expression, byte-identical to before).
 // SPECIAL CASE — a 32-bit multiply: `a * b` at u32/i32 must use `Math.imul`, NOT `(a*b) & mask`. A JS
