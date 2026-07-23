@@ -26,7 +26,7 @@ Checked user commands are:
 ```sh
 zenc check   <file.zen|project-dir>
 zenc build   <file.zen|project-dir> [-o out]        # C backend (default)
-zenc build   <file.zen> --target js [-o out.js]     # JS backend (compiler.genjs)
+zenc build   <file.zen> --target js [-o out.js]     # JS backend (compiler.backend.js.js)
 zenc run     <file.zen|project-dir>
 zenc emit    <file.zen>                              # checked C
 zenc emit-js <file.zen>                              # checked JS floor + module
@@ -239,7 +239,7 @@ unsigned arithmetic always does. There is no trapping or undefined-overflow
 compiler mode, and none is planned as a mode: checked or saturating arithmetic,
 when it arrives, will be library methods on the integer types, not flags. On the
 JS backend, `i32`/`u8` results are re-wrapped to width (`| 0`, `& 255`,
-`Math.imul` — see `compiler.genjs`); full-width `i64` wrapping there is deferred
+`Math.imul` — see `compiler.backend.js.js`); full-width `i64` wrapping there is deferred
 with the rest of JS i64 (see Backends).
 
 ### Implicit conversions
@@ -277,7 +277,7 @@ aggregates. Widening and capability loss are outer-value coercions only.
 The intended order is left to right, in source order: call arguments, binary
 operands, struct literal fields, slice literal elements. This intent is not yet
 a full guarantee. The C backend emits calls and literals as plain C argument
-and initializer lists (`gen_call_default` in `compiler/genc_emit.zen`), so
+and initializer lists (`gen_call_default` in `compiler/backend/c/c_emit.zen`), so
 where lowering introduces no sequencing temporaries, the C compiler's
 unspecified order leaks through. Separately, the known-defects table in
 [STATUS.md](STATUS.md) tracks open evaluate-exactly-once defects: compound
@@ -786,11 +786,11 @@ allocation before returning `.Err`; there are no separate `try_*` variants.
 
 ## Backends
 
-The C backend (`compiler.genc` / `genc_emit`) is the shipping/bootstrap backend. It lowers the
+The C backend (`compiler.genc` / `c_emit`) is the shipping/bootstrap backend. It lowers the
 checked, monomorphized AST to C and invokes `cc` for `build`/`run`. C is the intentional
 intermediate/bootstrap target.
 
-A second backend, `compiler.genjs`, walks the **same** post-monomorphization `[Decl]` AST and
+A second backend, `compiler.backend.js.js`, walks the **same** post-monomorphization `[Decl]` AST and
 emits JavaScript (Node/browser) over a small linear-memory floor (`bootstrap/zenrt.js`). It is
 driven by `zenc emit-js <file>` and `zenc build --target js <file> [-o out]`, and covers the
 computational subset — full i64 / 64-bit bitwise (needs BigInt) and scalar aliasing through
