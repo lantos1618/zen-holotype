@@ -24,8 +24,9 @@ behind the curtain.
 
 Every verb below was run before it was written down.
 
-- `./zen run prog.zen` — resolve imports, type-check, emit C, `cc`, run
+- `./zen run prog.zen` — resolve imports, type-check, emit C, `cc`, run; `--time` prints per-stage compile timings
 - `./zen build` — project mode via `build.zen`; `-r` for release, `--target js` writes a node program
+- `./zen profile prog.zen [-- args]` — sampling profile (perf, gprof fallback) as a `SELF% CUM% FUNCTION` table with zen-native names ([recipe](docs/profiling.md))
 - `./zen check prog.zen` — types only; the whole compiler closure checks warm in 0.05s
 - `./zen emit prog.zen` / `./zen emit-js prog.zen | node` — see exactly what lowers
 - `./zen fmt prog.zen` — formatter, proven safe (below)
