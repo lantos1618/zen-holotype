@@ -346,7 +346,9 @@ write_runnable_c = (tmpc: string_view, gen: String) bool {
     })
 }
 // cc -std=gnu11 -O1 -foptimize-sibling-calls -fwrapv -w -fno-diagnostics-show-caret -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c <ccflags> <links> -o <out>
-// ccflags/links come from a project's zen.toml (extra .c files + `-l` libs); empty for single files.
+// ccflags/links come from a project's zen.toml or build.zen (extra .c files, `-l` libs, and
+// `-`-prefixed cc flags — a Target's `.cflags("-O2 …")` lands AFTER the defaults below, so cc's
+// last-flag-wins rule lets a project override -O1); empty for single files.
 // -O1 -foptimize-sibling-calls: Zen's ONLY loop is recursion (control flow is `.match` + recursion), so
 // self-tail-recursive fns — emitted by genc as a bare `return f(...)` (proper C tail position) — MUST get
 // sibling-call elimination or a deep idiomatic loop blows the C stack (raw SIGSEGV ~250k frames at -O0).
@@ -846,6 +848,12 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
     })
 }
 finish_cstr = (s: String, mp: MutPtr<Malloc>) string_view { cstr(s.ptr) }
+// `zenc build`/`zenc targets` with no project argument default to the current directory when it
+// holds a build.zen — so `./zen build` at the repo root builds the compiler's own registered
+// targets. An explicit argument (file or dir) is never rewritten.
+proj_dir = (a: string_view) string_view {
+    (a == "" && file_exists("build.zen")).match ({ true => ".", false => a })
+}
 // `zenc build --target js <file> [-o out]` -> genjs; otherwise the ordinary C `build`. Args:
 // arg(2)=--target arg(3)=js arg(4)=<file> arg(5)=-o arg(6)=<out>.
 build_target = (mp: MutPtr<Malloc>, root: string_view) i32 {
@@ -855,11 +863,14 @@ build_target = (mp: MutPtr<Malloc>, root: string_view) i32 {
             mp.build_js(root, arg(4), out)
         },
         false => (arg(2) == "--target").match ({
-            true  => mp.build_named_plan(root, arg(4), arg(3)),
-            false => file_exists(mp.join2(arg(2), "build.zen")).match ({
-                true  => mp.build_all_plan(root, arg(2)),
-                false => mp.build_spec(root, mp.resolve_spec(root, arg(2)), arg(3), arg(4)),
-            }),
+            true  => mp.build_named_plan(root, proj_dir(arg(4)), arg(3)),
+            false => {
+                dir := proj_dir(arg(2))
+                file_exists(mp.join2(dir, "build.zen")).match ({
+                    true  => mp.build_all_plan(root, dir),
+                    false => mp.build_spec(root, mp.resolve_spec(root, dir), arg(3), arg(4)),
+                })
+            },
         }),
     })
 }
@@ -1056,7 +1067,7 @@ main = () i32 {
                                 false => (cmd == "build").match ({
                                     true  => mp.build_target(root),
                                     false => (cmd == "targets").match ({
-                                        true  => mp.list_plan_targets(root, arg(2)),
+                                        true  => mp.list_plan_targets(root, proj_dir(arg(2))),
                                         false => (cmd == "fmt").match ({
                                             true  => mp.fmt_cmd(arg(2), arg(3)),
                                             false => (cmd == "doc").match ({
@@ -2158,7 +2169,10 @@ source_words = (mp: MutPtr<Malloc>, dir: string_view, v: [u8], i: i64, out: Stri
             true  => mp.source_words(dir, v, i + 1, out),
             false => {
                 e := v.source_word_end(i)
-                prefixed := (v[i] == '/').match ({
+                // a `-`-prefixed word is a cc flag (Target.cflags / `-l` link input), passed
+                // through verbatim; anything else names a project-relative extra .c source
+                // (absolute paths also pass through).
+                prefixed := (v[i] == '/' || v[i] == '-').match ({
                     true  => out,
                     false => out.gstr_append(mp, dir).gstr_append(mp, "/"),
                 })

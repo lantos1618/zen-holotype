@@ -138,12 +138,19 @@ Ordinary Zen modules under `src/std/`, imported with `{ name } = std.path`:
 
 ## Build & run
 
-The compiler is the `zenc` binary; `cc` builds it from committed C, nothing else needed.
+Have a C compiler → `make` bootstraps once → from then on zen builds zen:
 
 ```sh
-make                                   # cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zen
+make                                   # bootstrap: cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zen
+./zen build                            # zen builds zen: the repo-root build.zen -> ./zen-next (-O2) + ./zen-debug (-g)
+mv zen-next zen                        # promote the freshly built compiler
 ```
 
+The Makefile is bootstrap-only — the one step that cannot go through `build.zen` is compiling the
+committed C seed when no `zen` binary exists yet (plus the seed-regen fixpoint below). Everything
+else, including the compiler itself, builds through the compiler's own project mode: the repo-root
+`build.zen` registers the `zen` target (entry `driver.zen`, runtime `bootstrap/zenrt.c`,
+`-O2 -fno-strict-aliasing`) and a `zen-debug` variant. `make build` is an alias for `./zen build`.
 (The top-level `Makefile` forwards to `bootstrap/Makefile`; `make -f bootstrap/Makefile zen`
 works too and is what CI invokes.)
 
@@ -158,6 +165,7 @@ zenc build --target js prog.zen -o p.js   # JS backend: write the JS floor + mod
 zenc targets project/          # list outputs registered by build.zen
 zenc build --target app project/  # build one registered output
 zenc build project/            # build every output explicitly installed by build.zen
+zenc build                     # no argument: use ./build.zen (so `./zen build` rebuilds the compiler)
 zenc emit-js prog.zen          # JS backend: print the JS to stdout (`| node` to run)
 zenc check prog.zen            # resolve + type-check only, no binary (accepts library modules)
 zenc emit prog.zen             # print the generated C

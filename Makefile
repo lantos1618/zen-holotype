@@ -6,13 +6,18 @@
 
 BOOT := $(MAKE) -f bootstrap/Makefile
 
-.PHONY: all zen regen harness harness-fast difftest docs-check ffi-verify clean setup-git resolve-seed
+.PHONY: all zen build regen harness harness-fast difftest docs-check ffi-verify clean setup-git resolve-seed
 
 # Default: build ./zen.
 all: zen
 
 zen:
 	$(BOOT) zen
+
+# zen builds zen: run the repo-root build.zen through the compiler's own project mode
+# (equivalent to `./zen build`; writes ./zen-next + ./zen-debug).
+build:
+	$(BOOT) build
 
 regen:
 	$(BOOT) regen

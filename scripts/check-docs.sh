@@ -9,6 +9,9 @@ expected='./ARCHITECTURE.md
 ./SPEC.md
 ./STATUS.md
 ./bootstrap/README.md
+./docs/metaprogramming-vision.md
+./editor/nvim/README.md
+./editor/vscode/README.md
 ./examples/README.md'
 
 actual=$(find . -name .git -prune -o -name '*.md' -type f -print | LC_ALL=C sort)

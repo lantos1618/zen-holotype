@@ -33,13 +33,17 @@ endif
 # the ABI class of every foreign prototype against the real system headers); matching the builtins
 # exactly needs a size_t/void* mapping in the language — see STATUS.md's defects ledger. Every OTHER
 # warning is left enabled: no blanket -w.
-CFLAGS  ?= -std=gnu11 -Wno-error=implicit-function-declaration -fwrapv -Wno-builtin-declaration-mismatch
+# -O2 -fno-strict-aliasing: matches the repo-root build.zen's default `zen` target. Measured on the
+# seed: ~2x faster self-compile (--build-self 5.5s vs 10.3s at -O0), 17% smaller binary, byte-
+# identical emitted C, zero new warnings. -fno-strict-aliasing is REQUIRED with -O2: the emitted C
+# is void*-punning and relies on strict aliasing being off (-O0/-O1 keep it off implicitly).
+CFLAGS  ?= -std=gnu11 -O2 -fno-strict-aliasing -Wno-error=implicit-function-declaration -fwrapv -Wno-builtin-declaration-mismatch
 ZENC    := $(ROOT)/zen
 GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zen regen clean harness harness-fast difftest docs-check ffi-verify setup-git resolve-seed
+.PHONY: zen build regen clean harness harness-fast difftest docs-check ffi-verify setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -52,6 +56,13 @@ zen: $(ZENC)
 # direct `cc -o $(ZENC)` truncates-then-writes and a racing `./zen` exec could hit a partial binary.
 $(ZENC): $(SOURCES) $(HEADERS) $(HERE)Makefile
 	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC).$$$$.tmp && mv -f $(ZENC).$$$$.tmp $(ZENC)
+
+# The self-hosted path: after bootstrap, zen builds zen through the repo-root build.zen (project
+# mode). Writes ./zen-next (-O2, the next-generation compiler) + ./zen-debug (-g); promote with
+# `mv zen-next zen`. This Makefile keeps only what CANNOT go through build.zen: the cc-seed
+# bootstrap above (no zen exists yet) and the seed-regen fixpoint below.
+build: zen
+	cd $(ROOT) && $(ZENC) build
 
 # Regenerate through a PID-specific temp and replace the seed only when its bytes changed. A fixpoint
 # regen must preserve zenc.gen.c's mtime; otherwise the following `make zen` recompiles ~7 MB of

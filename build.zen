@@ -1,0 +1,31 @@
+// build.zen — zen builds zen. `make` bootstraps once (cc compiles the committed seed
+// bootstrap/zenc.gen.c into ./zen — the only step that cannot go through this file, since no zen
+// exists yet); from then on the compiler builds itself through its own project mode:
+//
+//   ./zen build                  # every registered target: ./zen-next + ./zen-debug
+//   ./zen build --target zen     # just the -O2 compiler -> ./zen-next
+//   ./zen targets                # list registered targets
+//   mv zen-next zen              # promote the freshly built compiler
+//
+// The driver supplies the C runtime (bootstrap/zenrt.c) and -lm automatically; exe() links
+// -lpthread (zenrt's scheduler/actors need it). The output is ./zen-next, NOT ./zen: cc cannot
+// write over the very binary that is running the build (ETXTBSY on Linux).
+//
+// -O2 is the default (matches bootstrap/Makefile's CFLAGS): measured ~2x faster self-compile
+// (5.5s vs 10.3s --build-self) and a ~17% smaller binary than -O0, with byte-identical
+// --build-self output. -fno-strict-aliasing must ride along: the emitted C is void*-punning and
+// relies on strict aliasing being OFF (the driver's -O1 default keeps it off; -O2 alone would
+// turn it on).
+{ Build } = std.build
+build = (b: MutPtr<Build>) void {
+    b.install(b
+        .exe("zen")
+        .root(".")
+        .main("driver.zen")
+        .out("zen-next")
+        .cflags("-O2 -fno-strict-aliasing"))
+    // the debuggable variant: -g on top of the driver's -O1 default. Deliberately NOT -O0 — the
+    // compiler is deeply recursive and -O0 drops sibling-call elimination, so an -O0 zen blows
+    // the C stack on real inputs (see cc_command's comment in driver.zen).
+    b.install(b.exe("zen-debug").root(".").main("driver.zen").out("zen-debug").cflags("-g"))
+}
