@@ -22,7 +22,7 @@
 //
 // ALLOCATOR. `compile` is generic over any `A: Allocator`: it takes `a: MutPtr<A>` and allocates
 // the program, class tables, and the match-time scratch buffers through it. Pass `heap.gpa().addr()`,
-// an arena, or any other allocator. `Regex.free(a)` hands every buffer back to the SAME allocator.
+// an arena, or any other allocator. `re.regex_free(a)` hands every buffer back to the SAME allocator.
 // Errors are values: a malformed pattern is `.Err(RegexError)`, OOM is `.Err(.Oom)`.
 //
 //   regex = std.text.regex
@@ -664,7 +664,10 @@ compile*<A> = (a: MutPtr<A>, pattern: string_view) Result<Regex, RegexError> {
     })
 }
 // hand every buffer back to the same allocator that `compile` drew from.
-free*<A> = (re: Regex, a: MutPtr<A>) void {
+// Named `regex_free` (not `free`): std.mem.alloc's C-floor `free(p)` is always in this module's
+// closure and the flat namespace binds the bare name there first — a `free*` here could never be
+// called (every `re.free(a)` / `free(re, a)` mis-bound to the 1-arg libc free).
+regex_free*<A> = (re: Regex, a: MutPtr<A>) void {
     a.release(re.insts.ptr)
     a.release(re.classes.ptr)
     a.release(re.ranges.ptr)
@@ -857,26 +860,36 @@ search_from = (re: Regex, sv: [u8], from: i64, n: i64, gen0: i64) Found {
     re.try_at(sv, n, n, acc)
 }
 // ── public matching API ──────────────────────────────────────────────────────────
-// the leftmost-longest match anywhere in `s`, or `.None`.
-find* = (re: Regex, s: string_view) Opt<Match> {
-    sv := s.view()
-    n := sv.len
-    re.zero_seen()
-    f := re.search_from(sv, 0, n, 0)
-    f.has.match ({
-        true  => {
-            r: Opt<Match> := .Some(Match(
-                start: f.start,
-                end: f.end,
-            ))
-            r
-        },
-        false => {
-            r: Opt<Match> := .None
-            r
-        },
-    })
+// `find` is an impl method on Regex, NOT a free fn: std.text.str (always in a regex user's closure,
+// via `view`) also defines a free `find`, and the flat namespace binds the bare name there first — a
+// free `find*` here mis-dispatched every `re.find(s)` to str's (string_view, string_view) find. An
+// impl method on the receiver type wins dispatch (same mechanism as serde's JsonWrite), so
+// `re.find(s)` works without any import gymnastics. The trait stays module-private on purpose.
+RegexSearch: {
+    find: (Self, string_view) Opt<Match>,
 }
+// the leftmost-longest match anywhere in `s`, or `.None`.
+Regex.impl(RegexSearch, {
+    find = (re: Regex, s: string_view) Opt<Match> {
+        sv := s.view()
+        n := sv.len
+        re.zero_seen()
+        f := re.search_from(sv, 0, n, 0)
+        f.has.match ({
+            true  => {
+                r: Opt<Match> := .Some(Match(
+                    start: f.start,
+                    end: f.end,
+                ))
+                r
+            },
+            false => {
+                r: Opt<Match> := .None
+                r
+            },
+        })
+    }
+})
 // does the pattern occur anywhere in `s`?
 matches* = (re: Regex, s: string_view) bool {
     re.find(s).match ({

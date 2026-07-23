@@ -1,0 +1,124 @@
+// tests/harness_stdsurface.zen — the STD SURFACE import-probe category of the Zen-native harness.
+// For EVERY module under src/std it generates a one-file program that imports the module's complete
+// exported surface (every `name*` decl, straight from the resolver's own provided_symbols_in scan) and
+// runs `./zen check` on it. A module with zero exports still gets an alias-import probe, so its whole
+// closure is type-checked too.
+//
+// WHY THIS EXISTS: std modules that nothing in-tree imports can silently break — an unused-import
+// scrub deleted the Allocator import that std.hash's sha256_hex needed (#594), and std.text.regex was
+// import-broken from birth (its free-fn `find`/`free` flat-misbound to std.text.str's find / the libc
+// free) — and no gate noticed, because no test ever pulled those modules into a program. These probes
+// are the permanent teeth for that class: EVERY exported std surface must at least survive `zenc check`
+// from a user program. (Technique from #620's full-surface import audit, promoted into the harness.)
+//
+// Runner shape: the same 3-phase parallel discipline as harness_modules — (A) serially generate + save
+// each probe under a per-case path, (B) zo_par_run the `./zen check` commands, (C) serially read the
+// captured verdicts in order (identical output and fail count to a serial run). A failing case prints
+// its module name after the F mark so the broken module is named right in the harness output.
+{ Malloc, malloc, free } = std.mem.alloc
+{ out, save, contents_in, shell } = std.io.file
+{ is_empty, len, replace, split, starts_with, trim_prefix, trim_suffix } = std.text.str
+{ append_in, finish_in, new_in } = std.text.string
+{ expect } = std.core.result
+{ provided_symbols_in } = std.internal.resolve_scan
+{ zo_cmd, zo_join, zo_idpath, zo_par_run, zo_path } = harness_lib
+// every .zen file under src/std, sorted (deterministic case order across runs).
+std_mod_files = (mp: MutPtr<Malloc>) [string_view] {
+    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    listing := mp.zo_path("zo_stdsurf_list.txt")
+    shell(mp.zo_cmd(mp.zo_join([z, "find src/std -name '*.zen' | sort > ", listing]))).expect("stdsurface: find")
+    txt := mp.contents_in(listing).expect("stdsurface: mod list")
+    all := mp.split(txt, '\n')
+    n := 0
+    all.loop((h, i, line) {
+        (is_empty(line) == false).then({
+            n = n + 1
+        })
+    })
+    base: RawPtr<u8> := malloc(n * 8)
+    files: [string_view] := base.slice(n)
+    k := 0
+    all.loop((h, i, line) {
+        (is_empty(line) == false).then({
+            files[k] = line
+            k = k + 1
+        })
+    })
+    files
+}
+// "src/std/text/regex.zen" -> "std.text.regex"
+std_mod_name = (mp: MutPtr<Malloc>, path: string_view) string_view {
+    mp.replace(mp.trim_suffix(path.trim_prefix("src/"), ".zen"), "/", ".")
+}
+// the probe program for one module: import every exported name; a module with no exports is still
+// pulled in (and its closure checked) through a bare module-alias import.
+std_probe_src = (mp: MutPtr<Malloc>, modname: string_view, src: string_view) string_view {
+    syms := mp.provided_symbols_in(mp, src).expect("stdsurface: symbols")
+    s := mp.new_in().expect("stdsurface: oom")
+    count := 0
+    syms.loop((h, i, ps) {
+        (ps.is_pub && ps.imported == false).then({
+            s = (count == 0).match ({
+                true  => s.append_in(mp, "{ ").expect("stdsurface: oom"),
+                false => s.append_in(mp, ", ").expect("stdsurface: oom"),
+            })
+            s = s.append_in(mp, ps.name).expect("stdsurface: oom")
+            count = count + 1
+        })
+    })
+    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    head := (count == 0).match ({
+        true  => mp.zo_join([z, "zo_surface_alias = ", modname]),
+        false => mp.zo_join([z, mp.finish_in(s).expect("stdsurface: oom"), " } = ", modname]),
+    })
+    mp.zo_join([head, "\nmain = () i64 {\n    0\n}\n"])
+}
+// one probe's paths + command (3-phase parallel discipline; all paths are gid-unique).
+std_probe_path = (mp: MutPtr<Malloc>, gid: i64) string_view {
+    mp.zo_idpath("zo_stdsurf", gid, ".zen")
+}
+std_rc_path = (mp: MutPtr<Malloc>, gid: i64) string_view {
+    mp.zo_idpath("zo_stdsurf_rc", gid, ".txt")
+}
+std_chk_path = (mp: MutPtr<Malloc>, gid: i64) string_view {
+    mp.zo_idpath("zo_stdsurf_chk", gid, ".txt")
+}
+std_probe_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "if ./zen check ", mp.std_probe_path(gid), " > ", mp.std_chk_path(gid), " 2>&1; then echo P > ", mp.std_rc_path(gid), "; else echo F > ", mp.std_rc_path(gid), "; fi"])
+}
+harness_stdsurface_run* = () i32 {
+    out("std surface (import-probe every exported std module surface, zenc check)\n")
+    m := Malloc(_: 0)
+    mp := m.addr()
+    files := mp.std_mod_files()
+    n := files.len
+    cbase: RawPtr<u8> := malloc(n * 8)
+    cmds: [string_view] := cbase.slice(n)
+    files.loop((h, i, path) {
+        src := mp.contents_in(path).expect("stdsurface: read module")
+        probe := mp.std_probe_src(mp.std_mod_name(path), src)
+        save(mp.std_probe_path(i), probe, len(probe)).expect("stdsurface: save probe")
+        cmds[i] = mp.std_probe_cmd(i)
+    })
+    zo_par_run(cmds, n)
+    fails := 0
+    files.loop((h, i, path) {
+        ok := mp.contents_in(mp.std_rc_path(i)).match ({
+            .Ok(s)  => s.starts_with("P"),
+            .Err(e) => false,
+        })
+        ok.match ({
+            true  => out("."),
+            false => {
+                // name the broken module inline — an F alone would force a scavenger hunt.
+                out("\nF ")
+                out(mp.std_mod_name(path))
+                out(" (probe rejected — see its zo_stdsurf_chk file)\n")
+                fails = fails + 1
+            },
+        })
+    })
+    out("\n")
+    fails
+}
