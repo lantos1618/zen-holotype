@@ -6,13 +6,13 @@ not every long-term idea. [STATUS.md](STATUS.md) is the feature and roadmap ledg
 
 The strongest executable references are the Zen-native harness (no Python):
 
-- [tests/harness.zen](tests/harness.zen) — entry that sums category fail counts.
-- [tests/harness_build.zen](tests/harness_build.zen) — CLI, examples, fixtures, diagnostics.
-- [tests/harness_verdict.zen](tests/harness_verdict.zen) — accept/reject + `error[kind]` pins.
-- [tests/harness_value.zen](tests/harness_value.zen) — stdout value cases.
-- [tests/harness_modules.zen](tests/harness_modules.zen) — imports / resolver / std coverage.
-- [tests/harness_boundaries.zen](tests/harness_boundaries.zen) — raw primitive boundaries.
-- [tests/harness_fuzz.zen](tests/harness_fuzz.zen) — malformed-input crash resistance.
+- [tests/harness.zen](../tests/harness.zen) — entry that sums category fail counts.
+- [tests/harness_build.zen](../tests/harness_build.zen) — CLI, examples, fixtures, diagnostics.
+- [tests/harness_verdict.zen](../tests/harness_verdict.zen) — accept/reject + `error[kind]` pins.
+- [tests/harness_value.zen](../tests/harness_value.zen) — stdout value cases.
+- [tests/harness_modules.zen](../tests/harness_modules.zen) — imports / resolver / std coverage.
+- [tests/harness_boundaries.zen](../tests/harness_boundaries.zen) — raw primitive boundaries.
+- [tests/harness_fuzz.zen](../tests/harness_fuzz.zen) — malformed-input crash resistance.
 
 ## Source Files
 
@@ -233,8 +233,8 @@ behavior, anchored to the code that enforces it.
 Signed integer arithmetic wraps (two's complement): `2147483647 + 1` is
 `-2147483648`. This is language semantics, not a C accident — every C compile
 passes `-fwrapv`, both the user `build`/`run` command line (`cc_command` in
-[driver.zen](driver.zen)) and the bootstrap seed (`CFLAGS` in
-[bootstrap/Makefile](bootstrap/Makefile)). `u8` arithmetic wraps mod 256 as
+[driver.zen](../driver.zen)) and the bootstrap seed (`CFLAGS` in
+[bootstrap/Makefile](../bootstrap/Makefile)). `u8` arithmetic wraps mod 256 as
 unsigned arithmetic always does. There is no trapping or undefined-overflow
 compiler mode, and none is planned as a mode: checked or saturating arithmetic,
 when it arrives, will be library methods on the integer types, not flags. On the
@@ -821,13 +821,13 @@ unknown methods are no-ops. On open/change it runs the same check pipeline as
 
 | Spec area | Primary tests |
 |---|---|
-| CLI build/run/check/project manifest | [tests/harness_build.zen](tests/harness_build.zen) |
-| Examples | [tests/harness_build.zen](tests/harness_build.zen) |
-| Lexer/parser/bootstrap/fixpoint | [tests/harness.zen](tests/harness.zen) (`fixpoint` suite) |
-| Accepted/rejected core language behavior | [tests/harness_verdict.zen](tests/harness_verdict.zen), [tests/harness_value.zen](tests/harness_value.zen) |
-| Crash-resistance fuzzing (malformed input) | [tests/harness_fuzz.zen](tests/harness_fuzz.zen) |
-| Traits and impl conformance | [tests/harness_verdict.zen](tests/harness_verdict.zen) |
-| Imports and resolver behavior | [tests/harness_modules.zen](tests/harness_modules.zen) |
-| Std module import coverage | [tests/harness_modules.zen](tests/harness_modules.zen) |
-| Raw primitive boundaries | [tests/harness_boundaries.zen](tests/harness_boundaries.zen) |
-| Formatter and docs commands | [tests/harness_build.zen](tests/harness_build.zen) |
+| CLI build/run/check/project manifest | [tests/harness_build.zen](../tests/harness_build.zen) |
+| Examples | [tests/harness_build.zen](../tests/harness_build.zen) |
+| Lexer/parser/bootstrap/fixpoint | [tests/harness.zen](../tests/harness.zen) (`fixpoint` suite) |
+| Accepted/rejected core language behavior | [tests/harness_verdict.zen](../tests/harness_verdict.zen), [tests/harness_value.zen](../tests/harness_value.zen) |
+| Crash-resistance fuzzing (malformed input) | [tests/harness_fuzz.zen](../tests/harness_fuzz.zen) |
+| Traits and impl conformance | [tests/harness_verdict.zen](../tests/harness_verdict.zen) |
+| Imports and resolver behavior | [tests/harness_modules.zen](../tests/harness_modules.zen) |
+| Std module import coverage | [tests/harness_modules.zen](../tests/harness_modules.zen) |
+| Raw primitive boundaries | [tests/harness_boundaries.zen](../tests/harness_boundaries.zen) |
+| Formatter and docs commands | [tests/harness_build.zen](../tests/harness_build.zen) |
