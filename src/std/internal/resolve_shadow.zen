@@ -31,11 +31,16 @@ shadow_alias_idx = (a: MutPtr<Malloc>, idx: i64) String {
     a.gstr_string(20).gstr_append(a, "zshadow").res_udec(a, to_i32(idx))
 }
 shadow_mangled = (a: MutPtr<Malloc>, alias: String, name: String) String {
+    // NUL-terminate: the one caller feeds this to rset_has, which hashes via cstr(ptr) → strlen.
+    // Without the terminator strlen runs past the uninitialized tail of the buffer (ASAN-caught
+    // heap-buffer-overflow), so the membership answer depended on heap garbage — layout-dependent
+    // shadow renames.
     a
         .gstr_string(alias.len + name.len + 4)
         .rappend_string(a, alias)
         .rappend(a, "__")
         .rappend_string(a, name)
+        .gstr_push(a, 0)
 }
 // the renameable set plus its unrenameable remainder (see shadow_name_sets).
 ShadowSets: {
