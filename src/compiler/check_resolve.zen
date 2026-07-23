@@ -9,9 +9,10 @@
   member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys, sassign_at, sexpr, sidxset_at,
   sif, slet, slett, slett_at, slit, sret, swhile, ti32, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
-{ map_slice, slice_any } = compiler.astops
+{ gstr_int, map_slice, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
-{ is_empty } = std.text.str
+{ is_empty, view } = std.text.str
+{ clock_gettime, getenv, write } = std.c.libc
 { lift_lambdas } = compiler.passes.lift
 { orx_count, orx_rw, orx_rw_stmt, orx_stmt_count } = compiler.passes.orreturn
 { clos_call_rewrite, clos_local_call_name } = compiler.passes.closures
@@ -1052,9 +1053,33 @@ resolve_decl* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl
         _           => d,
     })
 }
+rm_ms = () i64 {
+    ts: [i64] := [0, 0]
+    clock_gettime(1, ts.ptr)
+    ts[0] * 1000 + ts[1] / 1000000
+}
+rm_log = (a: MutPtr<Malloc>, name: string_view, start_ms: i64) i64 {
+    now := rm_ms()
+    (getenv("ZENC_TIME") == null_ptr() == false).then({
+        s := a
+            .gstr_string(64)
+            .gstr_append(a, "zenc: time   ")
+            .gstr_append(a, name)
+            .gstr_append(a, " ")
+            .gstr_int(a, now - start_ms)
+            .gstr_append(a, "ms\n")
+            .gstr_finish(a)
+        v := s.view()
+        write(2, v.ptr, v.len)
+        { }
+    })
+    now
+}
 resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
+    t0 := rm_ms()
     decls0 := a.expand_defaults(a.desugar_method_calls(raw))
     decls := a.fill_enum_defaults(decls0, a.build_decl_index(decls0))
+    t1 := a.rm_log("desugar", t0)
     // Decl order/count are stable across resolve+inline passes (each rebuilds bodies in place), so a
     // name→index map is rebuilt once per pass over the current slice.
     didx := a.build_decl_index(decls)
@@ -1062,25 +1087,30 @@ resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     decls.loop((h, i, d) {
         buf[i] = a.resolve_decl(decls, didx, d)
     })
+    t2 := a.rm_log("resolve-pass1", t1)
     bidx := a.build_decl_index(buf)
     inl := cbuf<Decl>(a, buf.len)
     buf.loop((h, i, d) {
         inl[i] = a.inline_decl(buf, bidx, d)
     })
+    t3 := a.rm_log("inline-pass1", t2)
     iidx := a.build_decl_index(inl)
     out := cbuf<Decl>(a, inl.len)
     inl.loop((h, i, d) {
         out[i] = a.resolve_decl(inl, iidx, d)
     })
+    t4 := a.rm_log("resolve-pass2", t3)
     oidx := a.build_decl_index(out)
     inl2 := cbuf<Decl>(a, out.len)
     out.loop((h, i, d) {
         inl2[i] = a.inline_decl(out, oidx, d)
     })
+    t5 := a.rm_log("inline-pass2", t4)
     // emit one concrete fn per generic instance BEFORE the final resolve, so each instance body gets
     // resolved (dispatch on its concrete types) and resolve_call rewrites generic calls to it —
     // iterated to closure because instance bodies splice HOFs that can expose further instances.
     exp2 := a.mono_close(inl2, 0, 0)
+    t6 := a.rm_log("mono", t5)
     // lower ESCAPING capturing closures (a fn returning a lambda over its params) to a by-value closure
     // struct + a top-level call fn, BEFORE the non-capturing lift and the final resolve. The final
     // resolve then sees the rewritten return type (the closure struct) and rewrites indirect calls.
@@ -1089,10 +1119,12 @@ resolve_module* = (a: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     // fns BEFORE the final resolve, so the generated fns + the fn-value references they leave behind get
     // resolved. Remaining capturing lambdas are left for check_validate's error[lambda-value].
     lifted := a.lift_lambdas(clos, a.build_decl_index(clos))
+    t7 := a.rm_log("lower-lambdas", t6)
     eidx := a.build_decl_index(lifted)
     out2 := cbuf<Decl>(a, lifted.len)
     lifted.loop((h, i, d) {
         out2[i] = a.resolve_decl(lifted, eidx, d)
     })
+    a.rm_log("resolve-pass3", t7)
     out2
 }
