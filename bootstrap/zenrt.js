@@ -1,4 +1,4 @@
-// zenrt.js — the JavaScript runtime floor for the genjs backend. The JS analog of bootstrap/zenrt.c:
+// zenrt.js — the JavaScript runtime floor for the js backend. The JS analog of bootstrap/zenrt.c:
 // it provides the intrinsics (load/store/offset/slice/…) and the libc leaves (write/strlen/malloc/…)
 // that emitted Zen programs bottom out on, over a single shared linear memory (a Uint8Array). All
 // Zen pointers — str, RawPtr, MutPtr — are INTEGER offsets into `MEM`, exactly as they are addresses
@@ -55,11 +55,11 @@ const __zr = (() => {
   // a NEGATIVE i64 in the AST, and anything > 2^53 loses precision), so reinterpret the 64-bit pattern
   // as UNSIGNED and promote to BigInt only when it no longer fits exactly in a `number`. Small u64s stay
   // `number` (so ordinary arithmetic with number literals keeps working); huge ones become BigInt so
-  // they print exactly. u64 values enter through the type-driven param normalization genjs emits.
+  // they print exactly. u64 values enter through the type-driven param normalization the js backend emits.
   const U64_SAFE = 9007199254740991n;  // 2^53 - 1
   const u64 = (x) => { const b = BigInt.asUintN(64, typeof x === "bigint" ? x : BigInt(Math.trunc(x))); return b <= U64_SAFE ? Number(b) : b; };
   // div/mod stay integer-guarded (div-by-zero panics), but tolerate a BigInt operand (a wide u64): the
-  // BigInt path never truncates or guards floats — float `/` is emitted natively by genjs, not here.
+  // BigInt path never truncates or guards floats — float `/` is emitted natively by the js backend, not here.
   const div = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = BigInt(b); if (bb === 0n) panic("zen: panic: integer divide by zero\n"); return u64(BigInt(a) / bb); } if (b === 0) panic("zen: panic: integer divide by zero\n"); return Math.trunc(a / b); };
   const mod = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = BigInt(b); if (bb === 0n) panic("zen: panic: integer modulo by zero\n"); return u64(BigInt(a) % bb); } if (b === 0) panic("zen: panic: integer modulo by zero\n"); return a % b; };
   const panic = (m) => { const s = typeof m === "number" ? decode(m, strlen(m)) : String(m); process.stderr.write(s); throw new Error("zen panic"); };

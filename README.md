@@ -3,7 +3,7 @@
 **zen** is a small, **self-hosted** compiler for a [Zen](https://github.com/lantos1618/zenlang)-flavoured
 language. The compiler is written in Zen, compiles itself, and has **two backends** over one
 shared AST: **C** (`genc`, the default and the intentional bootstrap target — not a
-host-language fallback) and **JavaScript** (`genjs`, run under `node`). There is **no Python
+host-language fallback) and **JavaScript** (`js`, run under `node`). There is **no Python
 and no tree-sitter** in the build path: `cc` builds the `zenc` binary from committed C — a
 161-line hand-written runtime floor (`bootstrap/zenrt.c`) is the only C not emitted by the
 compiler — and `zenc` re-emits that C byte-for-byte (a deterministic **fixpoint**).
@@ -245,9 +245,9 @@ diagnostics — same errors as `zen check`, live, with proper LSP positions. Wir
 ## How it works
 
 ```
-                                                    ┌─ genc_emit.zen ─► C  ─► cc   (default)
+                                                    ┌─ backend/c/c_emit.zen ─► C  ─► cc   (default)
  lex.zen ─tokens─► parse_*.zen ─► genc AST ─► check.zen ─┤
-                                                    └─ genjs.zen     ─► JS ─► node
+                                                    └─ backend/js/js.zen     ─► JS ─► node
  (every compiler stage is ordinary Zen, in src/compiler/)
 ```
 
@@ -278,8 +278,8 @@ This is rough around the edges. Known limits worth flagging up front:
 | `src/compiler/lex.zen` | the lexer — `scan(src, pos)` over a `string_view` |
 | `src/compiler/parse*.zen` | recursive-descent parser → `compiler.genc` AST |
 | `src/compiler/check.zen` + `check_validate.zen` + `diagnostic.zen` | resolver, `fits()` validator, positioned diagnostics |
-| `src/compiler/genc.zen` + `mono.zen` + `genc_emit.zen` | shared AST, monomorphization, C backend |
-| `src/compiler/genjs.zen` | the JavaScript backend — a second walk over the same checked AST |
+| `src/compiler/genc.zen` + `mono.zen` + `backend/c/c_emit.zen` | shared AST, monomorphization, C backend |
+| `src/compiler/backend/js/js.zen` | the JavaScript backend — a second walk over the same checked AST |
 | `src/compiler/pretty.zen` | the `zenc fmt` formatter over the same AST |
 | `src/std/` | the stdlib (`core`, `collections`, `text`, `mem`, `concurrent`, `io`, ...) |
 | `src/std/internal/{resolve,ast}.zen` | the self-hosted module loader and AST-builder |

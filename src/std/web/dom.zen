@@ -1,9 +1,9 @@
 // std.web.dom — the WEB-platform binding surface: the browser DOM as typed Zen declarations.
 //
-// This file is to the experimental `genjs` backend what std.c.libc is to `genc`: a header of
+// This file is to the experimental `js` backend what std.c.libc is to `genc`: a header of
 // BODYLESS declarations (a `[Decl]` surface) that the code generator lowers to native platform
 // calls. genc turns a bodyless `name = (params) Ret` into a bare C prototype and libc defines the
-// symbol; genjs special-cases these names into JavaScript member access / method calls on live browser
+// symbol; js special-cases these names into JavaScript member access / method calls on live browser
 // objects (`document`, `Element`, `Event`, …). Nothing here is re-implemented in Zen — the browser is
 // the implementation. The current lowering is incomplete, especially for Opt and string_view return
 // conversion; STATUS.md records the parity gates before this surface can be called shipped.
@@ -16,21 +16,21 @@
 //   • each DOM interface = a distinct OPAQUE HANDLE struct `{ handle: RawPtr<u8> }` (the JS object ref).
 //   • each method is declared EXACTLY ONCE, on the interface that MDN says introduces it.
 //   • the inheritance edges are expressed as `as_*` UPCAST stubs (`el.as_node()`, `el.as_event_target()`).
-//     In JavaScript an Element already *is* a Node, so genjs lowers every upcast to the IDENTITY (a
+//     In JavaScript an Element already *is* a Node, so js lowers every upcast to the IDENTITY (a
 //     no-op cast) — it exists only to satisfy Zen's type checker and to route UFCS to the base method.
 // So the idiomatic call for an inherited method is `el.as_event_target().add_event_listener(...)`.
 //
 // ── DESIGN: JS globals as zero-arg accessor stubs ─────────────────────────────────────────────────
 // `document`, `window`, and `console` are ambient JS singletons, not values you thread around. We model
 // each as a bodyless zero-arg accessor returning its handle — `document()`, `window()`, `console()` —
-// which genjs lowers to the bare global identifier (`document()` → `document`). This keeps them out of
+// which js lowers to the bare global identifier (`document()` → `document`). This keeps them out of
 // every signature while staying UFCS-friendly: `document().get_element_by_id("app")`,
 // `console().log("hi")`. (An alternative — module-level handle constants — cannot express "read the
 // live global at use site", so accessor stubs are the honest choice.)
 //
 // This module imports ONLY `Opt` (for lookups that can miss); RawPtr / string_view / bool / i32 / f64 / void
 // are builtins. It declares no runtime state, so importing it pulls in nothing and affects nothing
-// until genjs consumes it.
+// until js consumes it.
 { Opt } = std.core.result
 // ── Interface handles (the DOM inheritance tree, flattened to opaque JS object refs) ───────────────
 // EventTarget ← Node ← Element ← HTMLElement ;  Node ← Text ;  Node ← Document ;  EventTarget ← Window.
@@ -86,11 +86,11 @@ Console*: {
 Location*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Promise — returned by fetch (async is future genjs work).
+// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Promise — returned by fetch (async is future js work).
 Promise*: {
     handle: RawPtr<u8>,
 }
-// ── Upcast stubs: the inheritance edges. genjs lowers each to the identity (an Element IS a Node). ─
+// ── Upcast stubs: the inheritance edges. js lowers each to the identity (an Element IS a Node). ─
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/Node — Node is an EventTarget.
 node_target* = (n: Node) EventTarget
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/Element — Element is a Node.
@@ -108,7 +108,7 @@ window_target* = (w: Window) EventTarget
 // Narrowing helper: treat a generic Element as an HTMLElement (JS: it already is one for HTML docs).
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement
 as_html* = (e: Element) HTMLElement
-// ── JS global singletons (accessor stubs; genjs lowers `document()` → `document`) ──────────────────
+// ── JS global singletons (accessor stubs; js lowers `document()` → `document`) ──────────────────
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/Window/document
 document* = () Document
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/Window
@@ -116,7 +116,7 @@ window* = () Window
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/console
 console* = () Console
 // ── EventTarget ────────────────────────────────────────────────────────────────────────────────
-// The callback is a non-capturing fn `(Event) void`; genjs binds it as the JS listener.
+// The callback is a non-capturing fn `(Event) void`; js binds it as the JS listener.
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/addEventListener
 add_event_listener* = (t: EventTarget, type: string_view, cb: (Event) void) void
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/EventTarget/removeEventListener
@@ -288,7 +288,7 @@ warn* = (c: Console, message: string_view) void
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/console/info_static
 info* = (c: Console, message: string_view) void
 // ── fetch (the Fetch API entry point) ──────────────────────────────────────────────────────────────
-// A stub returning an opaque Promise. Promise combinators (then/await) are deferred: they need genjs's
+// A stub returning an opaque Promise. Promise combinators (then/await) are deferred: they need js's
 // async lowering, which is future work — this pins only the entry-point type so callers can name it.
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/Window/fetch
 fetch* = (url: string_view) Promise
