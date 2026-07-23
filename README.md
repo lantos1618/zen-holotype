@@ -116,7 +116,7 @@ every one runs with `zenc run examples/<name>.zen`.
   so the C boundary is unchanged. There is no ambient global runtime.
 - **Memory is explicit and allocator-threaded.** Heap-backed `String`/`Vec` take an
   allocator from program setup (`m := halloc.gpa()`); there is no hidden heap. The checker
-  rejects use-after-`release`/`drop` for `Own`/`Rc`/`Arc`. See **[MEMORY_MODEL.md](MEMORY_MODEL.md)**.
+  rejects use-after-`release`/`drop` for `Own`/`Rc`/`Arc`. See **[MEMORY_MODEL.md](docs/MEMORY_MODEL.md)**.
 - **Metaprogramming as values.** Build an AST with `std.internal.ast` and emit it with
   `compiler.genc.genModule` — no `@emit` pragma.
 
@@ -295,10 +295,10 @@ This is rough around the edges. Known limits worth flagging up front:
 
 ## More docs
 
-**[SPEC.md](SPEC.md)** (language behavior) ·
-**[STATUS.md](STATUS.md)** (feature/roadmap ledger) ·
-**[MEMORY_MODEL.md](MEMORY_MODEL.md)** (ownership / allocator rules) ·
-**[ARCHITECTURE.md](ARCHITECTURE.md)** (compiler structure).
+**[SPEC.md](docs/SPEC.md)** (language behavior) ·
+**[STATUS.md](docs/STATUS.md)** (feature/roadmap ledger) ·
+**[MEMORY_MODEL.md](docs/MEMORY_MODEL.md)** (ownership / allocator rules) ·
+**[ARCHITECTURE.md](docs/ARCHITECTURE.md)** (compiler structure).
 Everything else lives in Git history; `make docs-check` keeps this set deliberate.
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight into typed

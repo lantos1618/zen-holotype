@@ -1,25 +1,9 @@
-// build.zen — zen builds zen. `make` bootstraps once (cc compiles the committed seed
-// bootstrap/zenc.gen.c into ./zen — the only step that cannot go through this file, since no zen
-// exists yet); from then on the compiler builds itself through its own project mode:
-//
-//   ./zen build                  # dev profile: -O1 -g -> ./zen-next (fast to build, debuggable)
-//   ./zen build -r               # release profile: -O2 -fno-strict-aliasing -> ./zen-next
-//   ./zen targets                # list registered targets
-//   mv zen-next zen              # promote the freshly built compiler (use -r for a keeper)
-//
-// The driver supplies the C runtime (bootstrap/zenrt.c) and -lm automatically; exe() links
-// -lpthread (zenrt's scheduler/actors need it). The output is ./zen-next, NOT ./zen: cc cannot
-// write over the very binary that is running the build (ETXTBSY on Linux).
-//
-// Optimization comes from the driver's cargo-style build PROFILES (the block above cc_command in
-// driver.zen), not from hardcoded cflags here:
-//   dev      = -O1 -g                  — never -O0: the compiler is deeply recursive and -O0 drops
-//              sibling-call elimination, so an -O0 zen blows the C stack on real inputs;
-//   release  = -O2 -fno-strict-aliasing — measured ~2x faster self-compile (5.5s vs 10.3s
-//              --build-self) and a ~17% smaller binary than -O0, byte-identical --build-self
-//              output; -fno-strict-aliasing must ride along (the emitted C is void*-punning).
-// The former `zen-debug` target is subsumed by the dev profile. The bootstrap SEED stays pinned
-// -O2 in bootstrap/Makefile CFLAGS: built once, used heavily — deliberately NOT profile-driven.
+// build.zen — zen builds zen. `make` bootstraps once (cc compiles the committed seed; nothing
+// else can — no zen exists yet); from then on: `./zen build` (dev, -O1 -g) or `./zen build -r`
+// (release, -O2) → ./zen-next, `mv zen-next zen` to promote (cc cannot overwrite the running
+// binary). Constraints worth knowing: -fno-strict-aliasing must accompany -O2 (the emitted C
+// puns pointers); never -O0 (the recursion-only compiler needs sibling-call elimination or it
+// blows the C stack) — the dev profile is -O1 for exactly that reason.
 { Build } = std.build
 build = (b: MutPtr<Build>) void {
     b.install(b.exe("zen").root(".").main("driver.zen").out("zen-next"))

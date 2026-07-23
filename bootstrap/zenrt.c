@@ -171,7 +171,7 @@ static void __zen_install_sigsegv_handler(void){
  * cleanup / a per-actor arena rt reset on death is the real fix); (b) still-QUEUED boxes in a dead
  * actor's mailbox are drained-and-discarded WITHOUT being freed (drain_batch skips the behavior once
  * `dead`), deferred to the supervision slice; (c) user code can hold another mutex when it panics —
- * longjmp skips that unlock and may strand it. See STATUS.md for the required regression gate. */
+ * longjmp skips that unlock and may strand it. See docs/STATUS.md for the required regression gate. */
 /* __zen_panic_jmp (the per-worker catch target; 0 = "no catch installed") is declared above, next to the
  * SIGSEGV handler, because BOTH the ordinary panics (via __zen_panic_unwind) AND a worker's stack-overflow
  * SIGSEGV route into it. It is a `sigjmp_buf` (not `jmp_buf`) so the SIGSEGV handler can siglongjmp out of
