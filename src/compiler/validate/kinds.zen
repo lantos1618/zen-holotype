@@ -423,28 +423,25 @@ has_method* = (methods: [Param], name: string_view) bool {
 }
 // rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
 impl_ty = (tyname: string_view) Ty {
-    (tyname == "i32").match ({
-        true  => ti32(),
-        false => (tyname == "i64").match ({
-            true  => ti64(),
-            false => (tyname == "u8").match ({
-                true  => tu8(),
-                false => (tyname == "f64").match ({
-                    true  => tf64(),
-                    false => (tyname == "bool").match ({
-                        true  => tbool(),
-                        false => (tyname == "string_view").match ({
-                            true  => tstring_view(),
-                            false => (tyname == "str").match ({
-                                true  => tstring_view(),
-                                false => tnamed(tyname),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (tyname == "i32").then({
+        return ti32()
     })
+    (tyname == "i64").then({
+        return ti64()
+    })
+    (tyname == "u8").then({
+        return tu8()
+    })
+    (tyname == "f64").then({
+        return tf64()
+    })
+    (tyname == "bool").then({
+        return tbool()
+    })
+    (tyname == "string_view" || tyname == "str").then({
+        return tstring_view()
+    })
+    tnamed(tyname)
 }
 subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: string_view) Ty {
     t.match ({
@@ -1480,16 +1477,19 @@ kmisgen_kind = (init: Ptr<Expr>) i32 { KMISGEN().kv_at(init.kparse_off()) }
 kcapacity_kind = (init: Ptr<Expr>) i32 { KCAPACITY().kv_at(init.kparse_off()) }
 // packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
 parse_sentinel_kind* = (nm: string_view, init: Ptr<Expr>) i32 {
-    (nm == "__syntax_error").match ({
-        true  => init.kparse_kind(),
-        false => (nm == "__bad_binding").match ({
-            true  => init.kbadbind_kind(),
-            false => (nm == "__misordered_generic").match ({
-                true  => init.kmisgen_kind(),
-                false => (nm == "__capacity").match ({ true => init.kcapacity_kind(), false => 0 }),
-            }),
-        }),
+    (nm == "__syntax_error").then({
+        return init.kparse_kind()
     })
+    (nm == "__bad_binding").then({
+        return init.kbadbind_kind()
+    })
+    (nm == "__misordered_generic").then({
+        return init.kmisgen_kind()
+    })
+    (nm == "__capacity").then({
+        return init.kcapacity_kind()
+    })
+    0
 }
 // ── cross-module linking (Goal Arc 1) ───────────────────────────────────────────────
 // The self-hosted "module loader". A module's HEADER is its public surface reduced to signatures:

@@ -257,22 +257,22 @@ lit_val = (e: Ptr<Expr>) LitVal {
 // u64 holds values an i64 can't represent as a positive `n`, so its upper bound cannot be checked in
 // i64; any non-negative literal fits (every i64 bit pattern is a valid u64). `neg` rejects `-1` etc.
 named_int_range_ok = (nm: string_view, n: i64, neg: bool) bool {
-    (nm == "i8").match ({
-        true  => n >= 0 - 128 && n <= 127,
-        false => (nm == "i16").match ({
-            true  => n >= 0 - 32768 && n <= 32767,
-            false => (nm == "u16").match ({
-                true  => n >= 0 && n <= 65535,
-                false => (nm == "u32").match ({
-                    true  => n >= 0 && n <= 4294967295,
-                    false => (nm == "u64").match ({
-                        true  => neg.match ({ true => false, false => true }),
-                        false => true,
-                    }),
-                }),
-            }),
-        }),
+    (nm == "i8").then({
+        return n >= 0 - 128 && n <= 127
     })
+    (nm == "i16").then({
+        return n >= 0 - 32768 && n <= 32767
+    })
+    (nm == "u16").then({
+        return n >= 0 && n <= 65535
+    })
+    (nm == "u32").then({
+        return n >= 0 && n <= 4294967295
+    })
+    (nm == "u64").then({
+        return neg == false
+    })
+    true
 }
 lit_range_ok = (t: Ty, n: i64, neg: bool) bool {
     t.match ({
@@ -375,44 +375,24 @@ intrinsic_arity* = (fn: string_view) i32 {
     (fn == "field_eq" || fn == "each_field").then({
         return 2
     })
-    (fn == "zip_fields").then({
+    (fn == "zip_fields" || fn == "atomic_cas_i64").then({
         return 3
     })
-    (fn == "__str_eq").match ({
-        true  => 2,
-        false => (fn == "__str_ne").match ({
-            true  => 2,
-            false => (fn == "store").match ({
-                true  => 2,
-                false => (fn == "offset").match ({
-                    true  => 2,
-                    false => (fn == "slice").match ({
-                        true  => 2,
-                        false => (fn == "null_ptr").match ({
-                            true  => 0,
-                            false => (fn == "atomic_add_i64").match ({
-                                true  => 2,
-                                false => (fn == "atomic_store_i64").match ({
-                                    true  => 2,
-                                    false => (fn == "atomic_cas_i64").match ({
-                                        true  => 3,
-                                        false => (fn == "atomic_fence").match ({
-                                            true  => 0,
-                                            false => (fn == "store_i64").match ({
-                                                true  => 2,
-                                                false => 1,
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (fn == "null_ptr" || fn == "atomic_fence").then({
+        return 0
     })
-}    // lowered str content equality (resolve_bin)
+    (fn == "__str_eq"
+        || fn == "__str_ne"
+        || fn == "store"
+        || fn == "offset"
+        || fn == "slice"
+        || fn == "atomic_add_i64"
+        || fn == "atomic_store_i64"
+        || fn == "store_i64").then({
+        return 2
+    })
+    1
+}
 // A trait-method UFCS call defers to monomorphization ONLY when its receiver type is still
 // unresolved (an unbound tparam / generic residue — `unknown_ty`): the concrete impl appears
 // after the tparam is pinned. A CONCRETE receiver must resolve NOW — if dispatch finds no impl
