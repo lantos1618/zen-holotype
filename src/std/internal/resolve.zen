@@ -3,6 +3,7 @@
 { at, is_alpha, is_alnum } = std.text.ascii
 { Decl } = compiler.ast.ast_types
 { gstr_string, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ gstr_int } = compiler.astops    // the compiler-side decimal writer (res_udec delegates to it)
 { decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset, note_module_sig,
   module_sigs_reset, module_sig_flags, module_sig_alias_stamped } = compiler.parse
 { check_linked } = compiler.validate.core
@@ -2177,12 +2178,9 @@ res_col_of* = (src: string_view, off: i32) i32 {
     })
     off - ls + 1
 }
-res_udec* = (out: String, a: MutPtr<Malloc>, n: i32) String {
-    (n < 10).match ({
-        true  => out.gstr_push(a, ('0'.to_i64() + to_i64(n)).to_u8()),
-        false => out.res_udec(a, n / 10).gstr_push(a, ('0'.to_i64() + to_i64(n % 10)).to_u8()),
-    })
-}
+// Thin i32 width-adapter over compiler.astops' one decimal writer (gstr_int) — callers thread
+// non-negative line/col/index i32s, so the widened i64 renders its plain decimal digits.
+res_udec* = (out: String, a: MutPtr<Malloc>, n: i32) String { out.gstr_int(a, to_i64(n)) }
 // index just past the matching `>` of a `<...>` generic list starting at `p` (the `<`). Method decl
 // headers carry only flat lists (`<A>`, `<A, B>`), so a scan to the first `>` is exact.
 skip_to_gt = (s: string_view, p: i32) i32 {

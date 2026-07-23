@@ -7,10 +7,14 @@
 { view, at } = std.text.str
 { String } = std.text.string
 { integer_in, float_in, f64_special } = std.text.num
+// std's ONE integer digit loop (see the seed-closure note in std.text.num): the streaming
+// writers below render through these buffer writers into a small stack scratch, then stream
+// the finished digits in a single out_bytes — no digit recursion is re-rolled here.
+{ num_write_integer, num_write_udigits, num_uwrite_udigits, num_write_fpad, num_write_zeros } = std.text.num
 // Shared, emit-agnostic float-decomposition core (defined once in std.text.num): exponent,
 // exact power-of-ten scaling, 15-digit significand, and trailing-zero strip / digit count.
 // The streaming writers below (write_ffixed/write_fsci/write_fabs_digits) render from these.
-{ num_fexp, num_fsig, num_fstrip, num_fndig, num_fpow10i, num_two_digits } = std.text.num
+{ num_fexp, num_fsig, num_fstrip, num_fndig, num_fpow10i } = std.text.num
 { Result, IoError, ok, err, or } = std.core.result
 Display*: {
     fmt_print: (Self) i64,
@@ -38,41 +42,33 @@ write_float_in*<A> = (a: MutPtr<A>, x: f64) Result<i64, IoError> {
     })
 }
 write_digit = (d: i64) i64 { out_bytes("0123456789".offset(d).slice(1)).or(0) }
-// Stream the zero-padded two-digit decimal of `p` (0..99) in one out_bytes call, from the
-// shared "00".."99" table (jsony's dumpNumberFast trick); returns the 2 bytes written.
-write_upair = (p: i64) i64 { out_bytes(num_two_digits().offset(2 * p).slice(2)).or(0) }
+// Stream the first `len` bytes of a stack scratch in one out_bytes call. Each writer below
+// declares its OWN 21-byte scratch (a slice literal has automatic storage, so it must live in
+// the streaming frame — a scratch-returning helper would hand back a dead frame's bytes);
+// 21 covers the widest render: "-9223372036854775808" and u64-max are both 20 bytes.
+// The digit loops themselves live ONCE in std.text.num (see the seed-closure note there);
+// output is byte-identical to the old per-digit streaming — same digits, one write call.
+write_scratch = (b: [u8], len: i64) i64 { out_bytes(slice(b.ptr, len)).or(0) }
+// Non-negative n (callers: float significand/exponent paths and the sign-split below).
 write_uint = (n: i64) i64 {
-    (n < 100).match ({
-        true  => (n < 10).match ({ true => write_digit(n), false => write_upair(n) }),
-        false => write_uint(n / 100) + write_upair(n % 100),
-    })
+    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    b.write_scratch(num_write_udigits(b.ptr, 0, n))
 }
-write_neg_digits = (n: i64) i64 {
-    (n > 0 - 10).match ({
-        true  => write_digit(0 - n),
-        false => write_neg_digits(n / 10) + write_digit(0 - n % 10),
-    })
-}
+// Signed decimal; num_write_integer's negative-domain walk renders i64 min correctly.
 write_int = (n: i64) i64 {
-    (n < 0).match ({ true => "-".write_text() + write_neg_digits(n), false => write_uint(n) })
+    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    b.write_scratch(num_write_integer(b.ptr, n))
 }
-// Unsigned decimal for the full u64 range. n is typed u64 so `/` and `%` lower to
-// UNSIGNED C ops — values above i64 max (e.g. 18446744073709551615) print correctly,
-// unlike write_int which would treat the high bit as a sign.
+// Unsigned decimal for the full u64 range: num_uwrite_udigits keeps `/` and `%` UNSIGNED,
+// so values above i64 max (e.g. 18446744073709551615) print correctly, unlike write_int
+// which would treat the high bit as a sign.
 write_u64 = (n: u64) i64 {
-    (n < 100).match ({
-        true  => (n < 10).match ({
-            true  => write_digit(to_i64(n)),
-            false => write_upair(to_i64(n)),
-        }),
-        false => write_u64(n / 100) + write_upair(to_i64(n % 100)),
-    })
+    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    b.write_scratch(num_uwrite_udigits(b.ptr, 0, n))
 }
 write_fpad = (n: i64, w: i64) i64 {
-    (w == 1).match ({
-        true  => write_digit(n % 10),
-        false => write_fpad(n / 10, w - 1) + write_digit(n % 10),
-    })
+    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    b.write_scratch(num_write_fpad(b.ptr, 0, n, w))
 }
 // ── float formatting: 15 significant digits, trailing zeros trimmed ───────────
 //
@@ -87,7 +83,10 @@ write_fpad = (n: i64, w: i64) i64 {
 // The pure numeric decomposition (num_fexp / num_fsig / num_fstrip / num_fndig / num_fpow10i,
 // plus their num_fexp_up/down, num_fpow10x, num_fscale_up/dn internals) lives ONCE in
 // std.text.num and is imported above — only the streaming render below is fmt-specific.
-fzeros = (n: i64) i64 { (n <= 0).match ({ true => 0, false => write_digit(0) + fzeros(n - 1) }) }
+fzeros = (n: i64) i64 {
+    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    b.write_scratch(num_write_zeros(b.ptr, 0, n))
+}
 // fixed-notation body for significand `digs` (`ndig` digits, leading digit at place e, -4<=e<15).
 write_ffixed = (digs: i64, ndig: i64, e: i64) i64 {
     (e < 0).match ({

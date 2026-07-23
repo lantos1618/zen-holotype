@@ -21,7 +21,7 @@
 // AST-node query traits (is_fnt on Ty, is_generic_fn on Func). Importing from compiler.astops pulls
 // the WHOLE module (all its impls: Ty/Func/Decl/StructDecl) into check's import closure, so the impl
 // index resolves these UFCS methods here and in every module that imports check (validate/*, passes/*).
-{ map_slice, slice_any, wr_writes_name } = compiler.astops
+{ gstr_int, map_slice, slice_any, wr_writes_name } = compiler.astops
 // Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
 // resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
 { impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
@@ -146,22 +146,15 @@ vis_copy_name = (a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) string_vie
 // import-head entries are keyed `<midx>\t<name>` in ONE map (a slice of per-module maps would need
 // sizeof over a generic instance); the stored value is midx+1 so the absent-sentinel 0 can never
 // collide with a real module index.
+// the module index renders through compiler.astops' one decimal writer (gstr_int; mi is a
+// non-negative index, so the bit-reinterpreting u64 path prints its plain decimal digits).
 vis_key = (a: MutPtr<Malloc>, mi: i64, name: string_view) string_view {
-    s := a.gstr_string(name.view().len + 8).vis_push_int(a, mi).gstr_push(a, '\t')
+    s := a.gstr_string(name.view().len + 8).gstr_int(a, mi).gstr_push(a, '\t')
     nb: [u8] := name.view()
     nb.loop((h, i, b) {
         s = s.gstr_push(a, b)
     })
     s.gstr_finish(a)
-}
-vis_push_int = (s: String, a: MutPtr<Malloc>, n: i64) String {
-    (n < 10).match ({
-        true  => s.gstr_push(a, to_u8(to_i64('0') + n)),
-        false => {
-            hs := s.vis_push_int(a, n / 10)
-            hs.gstr_push(a, to_u8(to_i64('0') + n % 10))
-        },
-    })
 }
 vis_head_fill = (a: MutPtr<Malloc>, src: string_view, mi: i64, p: i32, m0: Map<i64>) Map<i64> {
     m := m0
