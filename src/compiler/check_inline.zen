@@ -21,7 +21,7 @@
 // recursive-generic mono path) means "keep the node's own position" — nothing is retargeted, so the
 // emitted C and every non-inlined diagnostic are byte-for-byte unchanged. (`cs_or`, not the count
 // layer's `pos_or`: those share a flat C name and must stay distinct.)
-cs_or* = (cs: i32, orig: i32) i32 { (cs == 0).match ({ true => orig, false => cs }) }
+cs_or* = (cs: i32, orig: i32) i32 { cs == 0 ? orig : cs }
 // Substitute tparams in type-bearing expression/statement nodes.
 is_empty_named* = (t: Ty) bool {
     t.match ({
@@ -33,10 +33,7 @@ is_empty_named* = (t: Ty) bool {
 is_inlining = (v: Ptr<VList>, name: string_view) bool {
     v.match ({
         .VNil     => false,
-        .VCons(c) => (c.name == name && c.ty.is_empty_named()).match ({
-            true  => true,
-            false => c.tail.is_inlining(name),
-        }),
+        .VCons(c) => c.name == name && c.ty.is_empty_named() ? true : c.tail.is_inlining(name),
     })
 }
 inline_template = (
@@ -83,7 +80,7 @@ inline_template = (
 all_concrete_targs = (ts: [Ty]) bool {
     con := true
     ts.loop((h, i, t) {
-        con = t.is_void_ty().match ({ true => false, false => con })
+        con = t.is_void_ty() ? false : con
     })
     con
 }
@@ -100,7 +97,7 @@ tmiss_tp_of = (ps: [Param], tparams: [Param], e: Ptr<Expr>) string_view {
             i := ps.param_index(v.name)
             (i >= 0).match ({
                 true  => ps[i].ty.match ({
-                    .Named(n) => tparams.tmiss_has_tp(n).match ({ true => n, false => "" }),
+                    .Named(n) => tparams.tmiss_has_tp(n) ? n : "",
                     _         => "",
                 }),
                 false => "",
@@ -113,7 +110,7 @@ tmiss_has_tp = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) 
 tmiss_targ_for = (tparams: [Param], targs: [Ty], n: string_view) Ty {
     t := tvoid()
     tparams.loop((h, i, tp) {
-        t = (tp.name == n && i < targs.len).match ({ true => targs[i], false => t })
+        t = tp.name == n && i < targs.len ? targs[i] : t
     })
     t
 }
@@ -170,7 +167,7 @@ tmiss_es = (
 ) bool {
     f := false
     xs.loop((h, i, x) {
-        f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, x.addr()) })
+        f = f ? true : a.tmiss_e(decls, idx, tf, targs, x.addr())
     })
     f
 }
@@ -184,7 +181,7 @@ tmiss_arms = (
 ) bool {
     f := false
     arms.loop((h, i, ar) {
-        f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, ar.body) })
+        f = f ? true : a.tmiss_e(decls, idx, tf, targs, ar.body)
     })
     f
 }
@@ -198,7 +195,7 @@ tmiss_inits = (
 ) bool {
     f := false
     inits.loop((h, i, fi) {
-        f = f.match ({ true => true, false => a.tmiss_e(decls, idx, tf, targs, fi.value) })
+        f = f ? true : a.tmiss_e(decls, idx, tf, targs, fi.value)
     })
     f
 }
@@ -268,7 +265,7 @@ tmiss_body = (
 ) bool {
     f := false
     body.loop((h, i, st) {
-        f = f.match ({ true => true, false => a.tmiss_stmt(decls, idx, tf, targs, st) })
+        f = f ? true : a.tmiss_stmt(decls, idx, tf, targs, st)
     })
     f
 }
@@ -398,10 +395,7 @@ mono_close* = (a: MutPtr<Malloc>, decls: [Decl], from: i64, guard: i32) [Decl] {
             eidx := a.build_decl_index(exp)
             buf := cbuf<Decl>(a, exp.len)
             exp.loop((h, i, d) {
-                buf[i] = (i < decls.len).match ({
-                    true  => d,
-                    false => a.inline_decl(exp, eidx, a.resolve_decl(exp, eidx, d)),
-                })
+                buf[i] = i < decls.len ? d : a.inline_decl(exp, eidx, a.resolve_decl(exp, eidx, d))
             })
             a.mono_close(buf, decls.len, guard + 1)
         },
@@ -436,10 +430,7 @@ lower_closures* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     out := cbuf<Decl>(a, decls.len + 4096)
     decls.loop((h, i, d) {
         out[i] = d.match ({
-            .DFunc(f) => a.clos_lowerable(decls, idx, f).match ({
-                true  => a.clos_lower_func(ccp, gen, f),
-                false => d,
-            }),
+            .DFunc(f) => a.clos_lowerable(decls, idx, f) ? a.clos_lower_func(ccp, gen, f) : d,
             _         => d,
         })
     })

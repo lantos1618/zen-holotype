@@ -3,7 +3,7 @@
 // read-modify-write safe — drop the lock and increments are lost. join all four; the total must be
 // exactly 400000. Plus a CondVar ping-pong: a worker waits on a condvar until main signals a ready
 // flag, proving wait/signal hand off correctly. Exit 42 only when both hold; otherwise exit 1.
-{ spawn, join } = std.concurrent.thread
+{ spawn } = std.concurrent.thread
 { Mutex, CondVar, new_mutex, new_cond } = std.concurrent.sync
 { println } = std.text.fmt
 PER := 100000
@@ -59,10 +59,10 @@ main = () i32 {
     h1 := spawn(worker, shared)
     h2 := spawn(worker, shared)
     h3 := spawn(worker, shared)
-    join(h0)
-    join(h1)
-    join(h2)
-    join(h3)
+    h0.join()
+    h1.join()
+    h2.join()
+    h3.join()
     total := load_i64(shared.offset(COUNTER_OFF))
     println(total)
     // CondVar ping-pong: start a waiter, set ready under the lock, broadcast, join.
@@ -71,14 +71,14 @@ main = () i32 {
     store_i64(shared.offset(READY_OFF), 1)
     cnd.broadcast()
     mtx.unlock()
-    join(wh)
+    wh.join()
     pong := load_i64(shared.offset(READY_OFF))
     println(pong)
     mtx.destroy()
     cnd.destroy()
     expected := PER * NTHR
     (total == expected).match ({
-        true  => (pong == 1).match ({ true => 42, false => 1 }),
+        true  => pong == 1 ? 42 : 1,
         false => 1,
     })
 }

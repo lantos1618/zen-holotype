@@ -4,7 +4,6 @@
 { gstr_append, gstr_finish, gstr_string, k_mut_ptr, ptr_kw, tnamed, tvoid } = compiler.genc
 { impl_cname_in } = compiler.mangle
 { DeclIndex, Env, arm_env, extend_env, is_intrinsic, is_void_ty, pointee_of, recv_name } = compiler.check
-{ fits } = compiler.check_fits
 { Malloc } = std.mem.alloc
 { slice_any } = compiler.astops
 { expect } = std.core.result
@@ -41,7 +40,7 @@ dead_cons* = (a: MutPtr<Malloc>, name: string_view, tail: Ptr<DeadList>) Ptr<Dea
 dead_has* = (seen: Ptr<DeadList>, name: string_view) bool {
     seen.match ({
         .DeadNil     => false,
-        .DeadCons(c) => (c.name == name).match ({ true => true, false => c.tail.dead_has(name) }),
+        .DeadCons(c) => c.name == name ? true : c.tail.dead_has(name),
     })
 }
 // REVIVAL: rebuild the kill-set without `name`. Rebinding a freed/moved local to a fresh value clears
@@ -170,10 +169,7 @@ is_default_owner_method* = (env: Env, c: CallData) bool {
             base := env.infer_expr(c.args[0].addr()).owner_base()
             c.fn.sx_named("release", "__release").match ({
                 true  => base == "Own",
-                false => c.fn.sx_named("drop", "__drop").match ({
-                    true  => base == "Rc" || base == "Arc",
-                    false => false,
-                }),
+                false => c.fn.sx_named("drop", "__drop") ? base == "Rc" || base == "Arc" : false,
             })
         },
         false => false,
@@ -215,10 +211,7 @@ recv_move_name = (c: CallData) string_view {
 sm_own_arg_launder = (env: Env, args: [Expr]) string_view {
     (args.len == 1).match ({
         true  => args[0].match ({
-            .Var(v) => (env.infer_expr(args[0].addr()).owner_base() == "Own").match ({
-                true  => v.name,
-                false => "",
-            }),
+            .Var(v) => env.infer_expr(args[0].addr()).owner_base() == "Own" ? v.name : "",
             _       => "",
         }),
         false => "",
@@ -226,15 +219,9 @@ sm_own_arg_launder = (env: Env, args: [Expr]) string_view {
 }
 send_own_var = (env: Env, e: Ptr<Expr>) string_view {
     load(e).match ({
-        .Var(v)         => (env.infer_expr(e).owner_base() == "Own").match ({
-            true  => v.name,
-            false => "",
-        }),
+        .Var(v)         => env.infer_expr(e).owner_base() == "Own" ? v.name : "",
         // an `Own<T>` sent OUT of a field (`send(h, b.o)`) moves it — whole-base kill (member_move_root).
-        .Member(m)      => (env.infer_expr(e).owner_base() == "Own").match ({
-            true  => e.member_move_root(),
-            false => "",
-        }),
+        .Member(m)      => env.infer_expr(e).owner_base() == "Own" ? e.member_move_root() : "",
         .MakeEnum(mk)   => env.send_own_var(mk.payload),
         .Call(c)        => (env.infer_expr(e).owner_base() == "Own").match ({
             true  => env.sm_own_arg_launder(c.args),
@@ -325,10 +312,7 @@ arms_consume_name = (env: Env, arms: [ArmData], nm: string_view, depth: i32) boo
 args_consume_name = (env: Env, args: [Expr], nm: string_view, depth: i32) bool {
     found := false
     args.loop((h, i, ar) {
-        found = env.expr_consumes_name(ar.addr(), nm, depth).match ({
-            true  => true,
-            false => found,
-        })
+        found = env.expr_consumes_name(ar.addr(), nm, depth) ? true : found
     })
     found
 }
@@ -336,10 +320,7 @@ args_consume_name = (env: Env, args: [Expr], nm: string_view, depth: i32) bool {
 // of a send. TRANSITIVE: `nm` is a bare-Var arg at an Own-typed param position of a callee that itself
 // consumes that param (one interprocedural hop, depth-1). Also descends nested arg exprs.
 call_consumes_name = (env: Env, c: CallData, nm: string_view, depth: i32) bool {
-    consumed := env.is_consume_method(c).match ({
-        true  => c.recv_var_name(),
-        false => env.send_consume(c),
-    })
+    consumed := env.is_consume_method(c) ? c.recv_var_name() : env.send_consume(c)
     leaf := nm == "" == false && consumed == nm
     leaf.match ({
         true  => true,
@@ -463,10 +444,7 @@ bft_call = (env: Env, c: CallData, pname: string_view, dl: Ptr<DeadList>, depth:
         }),
         false => false,
     })
-    leaf.match ({
-        true  => true,
-        false => env.bft_forward(c, pname, depth) || env.bft_args(c.args, pname, dl, depth),
-    })
+    leaf ? true : env.bft_forward(c, pname, depth) || env.bft_args(c.args, pname, dl, depth)
 }
 // the transitive hop: `pname` passed as a pointer arg to a callee that itself frees through that param.
 bft_forward = (env: Env, c: CallData, pname: string_view, depth: i32) bool {
@@ -628,14 +606,8 @@ member_move_root = (e: Ptr<Expr>) string_view {
 // out of its field: the whole-base kill (member_move_root) names the root binding dead.
 own_moved_var* = (env: Env, e: Ptr<Expr>) string_view {
     load(e).match ({
-        .Var(v)    => (env.infer_expr(e).owner_base() == "Own").match ({
-            true  => v.name,
-            false => "",
-        }),
-        .Member(m) => (env.infer_expr(e).owner_base() == "Own").match ({
-            true  => e.member_move_root(),
-            false => "",
-        }),
+        .Var(v)    => env.infer_expr(e).owner_base() == "Own" ? v.name : "",
+        .Member(m) => env.infer_expr(e).owner_base() == "Own" ? e.member_move_root() : "",
         _          => "",
     })
 }
@@ -798,10 +770,7 @@ mode_of = (decls: [Decl], t: Ty) i32 {
         true  => md_owned(),
         false => (t.ptr_kind_of() == k_mut_ptr()).match ({
             true  => md_mut(),
-            false => decls.ty_reaches_mutptr(t, 16).match ({
-                true  => md_read(),
-                false => md_frozen(),
-            }),
+            false => decls.ty_reaches_mutptr(t, 16) ? md_read() : md_frozen(),
         }),
     })
 }
@@ -820,7 +789,7 @@ mode_sendable = (m: i32) bool { m == md_owned() || m == md_frozen() }
 // bare-local name, or "" when nothing simple is freed.
 alloc_free_call_name = (env: Env, c: CallData) string_view {
     c.fn.sx_named("free", "__free").match ({
-        true  => (c.args.len == 1).match ({ true => c.arg_var_name(0), false => "" }),
+        true  => c.args.len == 1 ? c.arg_var_name(0) : "",
         false => c.fn.sx_named("release", "__release").match ({
             true  => (c.args.len == 2 && env.infer_expr(c.args[0].addr()).ty_is_ptr_t()).match ({
                 true  => c.arg_var_name(1),
@@ -873,7 +842,7 @@ rebind_stmt_name = (st: Stmt) string_view {
 // pointer (any `.Ptr` kind). Non-pointer copies (ints, structs, owners) never join an alias class.
 copy_src_name = (env: Env, e: Ptr<Expr>) string_view {
     load(e).match ({
-        .Var(v) => env.infer_expr(e).ty_is_ptr_t().match ({ true => v.name, false => "" }),
+        .Var(v) => env.infer_expr(e).ty_is_ptr_t() ? v.name : "",
         _       => "",
     })
 }
@@ -889,7 +858,7 @@ alias_src_name = (env: Env, st: Stmt) string_view {
 // BEFORE a statement govern that statement's kills).
 alias_step* = (a: MutPtr<Malloc>, env: Env, al: Ptr<AliasList>, st: Stmt) Ptr<AliasList> {
     rb := rebind_stmt_name(st)
-    out := rb.is_empty().match ({ true => al, false => a.alias_drop(al, rb) })
+    out := rb.is_empty() ? al : a.alias_drop(al, rb)
     src := env.alias_src_name(st)
     (rb.is_empty() == false && src.is_empty() == false && rb == src == false).then({
         out = a.alias_cons(rb, src, out)
@@ -899,10 +868,7 @@ alias_step* = (a: MutPtr<Malloc>, env: Env, al: Ptr<AliasList>, st: Stmt) Ptr<Al
 consume_name = (env: Env, st: Stmt) string_view {
     st.match ({
         .ExprStmt(e) => load(e).match ({
-            .Call(c) => env.is_consume_method(c).match ({
-                true  => c.recv_move_name(),
-                false => env.send_consume(c),
-            }),
+            .Call(c) => env.is_consume_method(c) ? c.recv_move_name() : env.send_consume(c),
             _        => "",
         }),
         _            => "",
@@ -992,10 +958,7 @@ own_dead_expr = (
         .Cond(d)  => a.dead_union(expr_falls_through(d.t).match ({
             true  => a.own_dead_expr(env, seen, al, d.t),
             false => seen,
-        }), expr_falls_through(d.e).match ({
-            true  => a.own_dead_expr(env, seen, al, d.e),
-            false => seen,
-        })),
+        }), expr_falls_through(d.e) ? a.own_dead_expr(env, seen, al, d.e) : seen),
         // a loop body may run: its frees are conditionally dead after the loop (same may-rule as branches).
         .Loop(l)  => a.own_dead_body(env, seen, al, l.body),
         .Call(c)  => {
@@ -1004,10 +967,7 @@ own_dead_expr = (
             (fn.is_empty() == false).then({
                 out = a.dead_kill(out, al, fn)
             })
-            cn := env.is_consume_method(c).match ({
-                true  => c.recv_move_name(),
-                false => env.send_consume(c),
-            })
+            cn := env.is_consume_method(c) ? c.recv_move_name() : env.send_consume(c)
             (cn.is_empty() == false).then({
                 out = a.dead_kill(out, al, cn)
             })
@@ -1042,14 +1002,8 @@ own_step* = (
         .If(f)       => a.dead_union(body_falls_through(f.then).match ({
             true  => a.own_dead_body(env, out, al, f.then),
             false => out,
-        }), body_falls_through(f.els).match ({
-            true  => a.own_dead_body(env, out, al, f.els),
-            false => out,
-        })),
-        .While(w)    => body_falls_through(w.body).match ({
-            true  => a.own_dead_body(env, out, al, w.body),
-            false => out,
-        }),
+        }), body_falls_through(f.els) ? a.own_dead_body(env, out, al, f.els) : out),
+        .While(w)    => body_falls_through(w.body) ? a.own_dead_body(env, out, al, w.body) : out,
         .ExprStmt(e) => a.own_dead_expr(env, out, al, e),
         _            => out,
     })
@@ -1246,10 +1200,7 @@ mu_is_value_mold = (f: Func) bool {
         true  => false,
         false => {
             p0 := f.params[0].ty
-            (p0.mu_ty_is_container() && f.ret.mu_ty_is_container()).match ({
-                true  => f.ret.mu_ret_is_self(p0),
-                false => false,
-            })
+            p0.mu_ty_is_container() && f.ret.mu_ty_is_container() ? f.ret.mu_ret_is_self(p0) : false
         },
     })
 }
@@ -1290,7 +1241,7 @@ mu_index_methods = (
             next: i64 := vm.match ({
                 true  => (prev == 0).match ({
                     true  => 1,
-                    false => (prev == 1).match ({ true => 1, false => 2 }),
+                    false => prev == 1 ? 1 : 2,
                 }),
                 false => 2,
             })
@@ -1306,12 +1257,7 @@ mu_index_impl = (
     idx: DeclIndex,
     m: Map<i64>,
     im: ImplData,
-) Map<i64> {
-    (im.ty == im.trname).match ({
-        true  => a.mu_index_methods(decls, idx, m, im.ty, im.methods, 0),
-        false => m,
-    })
-}
+) Map<i64> { im.ty == im.trname ? a.mu_index_methods(decls, idx, m, im.ty, im.methods, 0) : m }
 // method name → 1 iff it is an inherent method AND value-mold on EVERY struct that declares it.
 mu_build_index* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) Map<i64> {
     seed: i64 := 0 - 1
@@ -1371,7 +1317,7 @@ mu_expr_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>) i32 {
 // an ExprStmt: flag a discarded value-mold call when NOT in tail position, and always recurse for nested
 // discards. (Extracted so the nested `is_tail.match(...)` is a plain statement, not a chained arm body.)
 mu_exprstmt_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>, is_tail: bool) i32 {
-    head := is_tail.match ({ true => 0, false => mvm.mu_call_kind(e) })
+    head := is_tail ? 0 : mvm.mu_call_kind(e)
     head.or(a.mu_expr_kind(mvm, e))
 }
 mu_stmt_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, st: Stmt, is_tail: bool) i32 {
@@ -1466,7 +1412,7 @@ loop_val_escapes = (
     stmts.loop((h, i, st) {
         st.match ({
             .Return(r) => {
-                f = a.expr_escapes(svars, d, r).match ({ true => true, false => f })
+                f = a.expr_escapes(svars, d, r) ? true : f
             },
             _          => { },
         })
@@ -1498,10 +1444,10 @@ block_val_escapes = (
     stmts.loop((h, i, st) {
         st.match ({
             .Return(r)   => {
-                f = a.expr_escapes(svars, d, r).match ({ true => true, false => f })
+                f = a.expr_escapes(svars, d, r) ? true : f
             },
             .ExprStmt(e) => (i == stmts.len - 1).then({
-                f = a.expr_escapes(svars, d, e).match ({ true => true, false => f })
+                f = a.expr_escapes(svars, d, e) ? true : f
             }),
             _            => { },
         })
@@ -1572,7 +1518,7 @@ impure_use_in_args_from1 = (nm: string_view, args: [Expr]) bool {
     f := false
     args.loop((h, i, ar) {
         (i > 0).then({
-            f = nm.impure_use_in_expr(ar.addr()).match ({ true => true, false => f })
+            f = nm.impure_use_in_expr(ar.addr()) ? true : f
         })
     })
     f
@@ -1606,7 +1552,7 @@ impure_use_after = (nm: string_view, body: [Stmt], k: i32) bool {
     f := false
     body.loop((h, i, st) {
         (i > k).then({
-            f = nm.impure_use_in_stmt(st).match ({ true => true, false => f })
+            f = nm.impure_use_in_stmt(st) ? true : f
         })
     })
     f
@@ -1627,10 +1573,7 @@ leak_alias_value* = (e: Ptr<Expr>) bool {
 // v2: an owner leaks unless it is DISCHARGED (impurely used) on some path — a pure getter-only read
 // (or no mention at all, the v1 never-named case) is a leak. impure_use_after == false ⇒ leak.
 nm_read_or_leak* = (env: Env, body: [Stmt], k: i32, l: LetData) i32 {
-    l.name.impure_use_after(body, k).match ({
-        true  => 0,
-        false => l.pos.pos_or(load(l.value).expr_pos()),
-    })
+    l.name.impure_use_after(body, k) ? 0 : l.pos.pos_or(load(l.value).expr_pos())
 }
 // ── SENDABILITY rule 2: an Rc<T> may not be sent across actors. ───────────────────────────────────
 // Rc's refcount is a plain (non-atomic) i64, so sharing one between actors on different threads races.
@@ -1692,7 +1635,7 @@ sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
 // empty, so M from the (concretely-typed) handle is what resolves the variant. Lenient when NEITHER
 // pins the enum (both void) — the payload-expression descent still applies, so nothing over-rejects.
 sm_variant_decl_mut = (env: Env, mty: Ty, mk: MakeEnumData) bool {
-    ety := is_empty(mk.ty).match ({ true => mty, false => tnamed(mk.ty) })
+    ety := is_empty(mk.ty) ? mty : tnamed(mk.ty)
     env.decls.mode_of(env.subj_variant_payload(ety, mk.variant)).mode_sendable() == false
 }
 sm_msg_mut = (env: Env, mty: Ty, e: Ptr<Expr>) bool {

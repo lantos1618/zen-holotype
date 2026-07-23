@@ -6,14 +6,12 @@
 { strlen, strcmp } = std.c.libc
 { is_space } = std.text.ascii
 len* = (s: string_view) i64 { s.strlen() }
-is_empty* = (s: string_view) bool { (s.strlen() == 0).match ({ true => true, false => false }) }
-eq* = (a: string_view, b: string_view) bool {
-    (a.strcmp(b) == 0).match ({ true => true, false => false })
-}
-ne* = (a: string_view, b: string_view) bool { a.eq(b).match ({ true => false, false => true }) }
+is_empty* = (s: string_view) bool { s.strlen() == 0 ? true : false }
+eq* = (a: string_view, b: string_view) bool { a.strcmp(b) == 0 ? true : false }
+ne* = (a: string_view, b: string_view) bool { a.eq(b) ? false : true }
 // ── bytes: borrow or own ────────────────────────────────────────────────────
 view* = (s: string_view) [u8] { s.slice(s.strlen()) }
-alloc_size = (n: i64) i64 { (n == 0).match ({ true => 1, false => n }) }
+alloc_size = (n: i64) i64 { n == 0 ? 1 : n }
 copy_bytes = (src: [u8], out: [u8]) void {
     src.loop((h, i, b) {
         out[i] = b
@@ -94,7 +92,7 @@ ends_with* = (s: string_view, suffix: string_view) bool {
 pin = (x: i64, lo: i64, hi: i64) i64 {
     (x < lo).match ({
         true  => lo,
-        false => (x > hi).match ({ true => hi, false => x }),
+        false => x > hi ? hi : x,
     })
 }
 copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
@@ -130,7 +128,7 @@ substr*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string_vi
 // the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
 at* = (s: string_view, i: i64) u8 {
     sv := s.view()
-    (i >= 0 && i < sv.len).match ({ true => sv[i], false => 0 })
+    i >= 0 && i < sv.len ? sv[i] : 0
 }
 // ── trimming: leading/trailing ASCII whitespace (' ', '\t', '\n', '\r') ───────
 //
@@ -164,7 +162,7 @@ trim_view* = (s: string_view) [u8] {
     v: [u8] := s.view()
     lo := v.ws_start()
     hi := v.ws_end()
-    (hi > lo).match ({ true => slice(v.ptr.offset(lo), hi - lo), false => slice(v.ptr, 0) })
+    hi > lo ? slice(v.ptr.offset(lo), hi - lo) : slice(v.ptr, 0)
 }
 ltrim_view* = (s: string_view) [u8] {
     v: [u8] := s.view()
@@ -180,16 +178,14 @@ trim_in<A> = (a: MutPtr<A>, s: string_view) string_view {
     v: [u8] := s.view()
     lo := v.ws_start()
     hi := v.ws_end()
-    a
-        .substr_in(s, lo, (hi > lo).match ({ true => hi - lo, false => 0 }))
-        .expect("std.text.str: allocation failed")
+    a.substr_in(s, lo, hi > lo ? hi - lo : 0).expect("std.text.str: allocation failed")
 }
 trim*<A> = (a: MutPtr<A>, s: string_view) string_view { a.trim_in(s) }
 // strip a leading `prefix` AS A STR — zero-copy (no allocation): dropping a prefix only advances
 // the start pointer and the original NUL still terminates the tail. Returns `s` unchanged when
 // it doesn't start with `prefix`. trim_prefix("--verbose", "--") == "verbose".
 trim_prefix* = (s: string_view, prefix: string_view) string_view {
-    s.starts_with(prefix).match ({ true => cstr(s.view().ptr.offset(prefix.len())), false => s })
+    s.starts_with(prefix) ? cstr(s.view().ptr.offset(prefix.len())) : s
 }
 // strip a trailing `suffix` — allocator-owned NUL-terminated copy (a fresh trailing boundary needs its
 // own NUL, so this can't be zero-copy). Returns a COPY of `s` when it doesn't end with `suffix`.
@@ -293,12 +289,8 @@ copy_at = (out: [u8], at: i64, t: string_view) i64 {
     at + tv.len
 }
 // the 'A'..'Z' / 'a'..'z' case shift; non-letters pass through. ASCII-ONLY (bytes 0x80+ untouched).
-to_ascii_lower = (b: u8) u8 {
-    (b >= 'A' && b <= 'Z').match ({ true => b + ('a' - 'A'), false => b })
-}
-to_ascii_upper = (b: u8) u8 {
-    (b >= 'a' && b <= 'z').match ({ true => b - ('a' - 'A'), false => b })
-}
+to_ascii_lower = (b: u8) u8 { b >= 'A' && b <= 'Z' ? b + ('a' - 'A') : b }
+to_ascii_upper = (b: u8) u8 { b >= 'a' && b <= 'z' ? b - ('a' - 'A') : b }
 // ASCII lower/upper-cased COPY of `s`. Only A–Z / a–z are folded; every other byte (digits, punctuation,
 // UTF-8 continuation bytes) is copied verbatim. to_upper("hi!") == "HI!".
 to_lower_in<A> = (a: MutPtr<A>, s: string_view) string_view {
@@ -324,7 +316,7 @@ to_upper*<A> = (a: MutPtr<A>, s: string_view) string_view { a.to_upper_in(s) }
 // `s` concatenated `n` times. `n <= 0` yields ""; an empty `s` also yields "". repeat("ab", 3) == "ababab".
 repeat_in<A> = (a: MutPtr<A>, s: string_view, n: i64) string_view {
     sv := s.view()
-    cnt := (n < 0).match ({ true => 0, false => n })
+    cnt := n < 0 ? 0 : n
     total := sv.len * cnt
     out: [u8] := a.acquire(total + 1).slice(total + 1)
     out.loop((h, i, b) {
@@ -349,7 +341,7 @@ join_in*<A> = (a: MutPtr<A>, parts: [string_view], sep: string_view) string_view
     parts.loop((h, i, p) {
         total = total + p.len()
     })
-    seps := (np > 0).match ({ true => np - 1, false => 0 })
+    seps := np > 0 ? np - 1 : 0
     total = total + sep.len() * seps
     out: [u8] := a.acquire(total + 1).slice(total + 1)
     pos: i64 := 0
@@ -443,13 +435,13 @@ replace*<A> = (a: MutPtr<A>, s: string_view, from: string_view, to: string_view)
 // pad_left("7", 3, '0') == "007"; pad_right("hi", 4, ' ') == "hi  ".
 pad_left_in<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view {
     sv := s.view()
-    pad := (width > sv.len).match ({ true => width - sv.len, false => 0 })
+    pad := width > sv.len ? width - sv.len : 0
     total := pad + sv.len
     out: [u8] := a.acquire(total + 1).slice(total + 1)
     out.loop((h, i, b) {
         (i < total).match ({
             true  => {
-                out[i] = (i < pad).match ({ true => fill, false => sv[i - pad] })
+                out[i] = i < pad ? fill : sv[i - pad]
             },
             false => {
                 out[i] = 0
@@ -464,13 +456,13 @@ pad_left*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view 
 }
 pad_right_in<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view {
     sv := s.view()
-    pad := (width > sv.len).match ({ true => width - sv.len, false => 0 })
+    pad := width > sv.len ? width - sv.len : 0
     total := sv.len + pad
     out: [u8] := a.acquire(total + 1).slice(total + 1)
     out.loop((h, i, b) {
         (i < total).match ({
             true  => {
-                out[i] = (i < sv.len).match ({ true => sv[i], false => fill })
+                out[i] = i < sv.len ? sv[i] : fill
             },
             false => {
                 out[i] = 0
@@ -491,7 +483,7 @@ pad_right*<A> = (a: MutPtr<A>, s: string_view, width: i64, fill: u8) string_view
 parse_int* = (s: string_view) i64 {
     sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
-    start: i64 := neg.match ({ true => 1, false => 0 })
+    start: i64 := neg ? 1 : 0
     acc: i64 := 0
     sv.loop((h, i, b) {
         (i < start == false).then({
@@ -505,7 +497,7 @@ parse_int* = (s: string_view) i64 {
             })
         })
     })
-    neg.match ({ true => 0 - acc, false => acc })
+    neg ? 0 - acc : acc
 }
 // what made try_parse_int refuse: nothing to parse, a non-digit in the tail (the byte carried),
 // or a magnitude past i64. parse_int (above) keeps its documented never-errors behavior.
@@ -529,7 +521,7 @@ e_overflow = () ParseError { .Overflow }
 try_parse_int* = (s: string_view) Result<i64, ParseError> {
     sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
-    start: i64 := neg.match ({ true => 1, false => 0 })
+    start: i64 := neg ? 1 : 0
     acc: i64 := 0
     nd: i64 := 0    // digits consumed
     bad: u8 := 0    // the first non-digit byte hit (0 = none)
@@ -564,7 +556,7 @@ try_parse_int* = (s: string_view) Result<i64, ParseError> {
             false => (bad != 0).match ({
                 true  => err(e_trailing(bad)),
                 false => {
-                    v: i64 := neg.match ({ true => 0 - acc, false => acc })
+                    v: i64 := neg ? 0 - acc : acc
                     ok(v)
                 },
             }),

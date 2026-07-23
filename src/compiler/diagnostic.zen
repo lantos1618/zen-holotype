@@ -74,10 +74,7 @@ duser_line = (user: string_view, flat: string_view, fp: i32, ln: i32) i32 {
 dlead_ws = (s: string_view, p: i32, ln: i32, i: i32) i32 {
     (i >= ln).match ({
         true  => i,
-        false => (s.at(p + i) == ' ' || s.at(p + i) == '\t').match ({
-            true  => s.dlead_ws(p, ln, i + 1),
-            false => i,
-        }),
+        false => s.at(p + i) == ' ' || s.at(p + i) == '\t' ? s.dlead_ws(p, ln, i + 1) : i,
     })
 }
 // first index >= lead+1 where flat[fp+j]=='_' && flat[fp+j+1]=='_' (j+1 < ln-1), else -1
@@ -111,7 +108,7 @@ dmatch_removed = (
 dremoved_col = (off: i32, start: i32, n: i32) i32 {
     (off < start).match ({
         true  => off + 1,
-        false => (off < start + n).match ({ true => start + 1, false => off - n + 1 }),
+        false => off < start + n ? start + 1 : off - n + 1,
     })
 }
 // ── ns-normalize inverse: compare treating each `__` in the flat line as a single `.`. ──
@@ -180,7 +177,7 @@ diag_user_span* = (flat: string_view, user: string_view, offset: i32, span_width
     llen := flat.dline_len(ls, 0)
     rel := offset - ls
     erel0 := rel + span_width - 1
-    erel := (erel0 >= llen && llen > 0).match ({ true => llen - 1, false => erel0 })
+    erel := erel0 >= llen && llen > 0 ? llen - 1 : erel0
     // 1) exact line-text match
     exact := user.duser_line(flat, ls, llen)
     (exact > 0).then({
@@ -234,7 +231,7 @@ diag_line_span* = (
     llen := flat.dline_len(ls, 0)
     rel := offset - ls
     erel0 := rel + span_width - 1
-    erel := (erel0 >= llen && llen > 0).match ({ true => llen - 1, false => erel0 })
+    erel := erel0 >= llen && llen > 0 ? llen - 1 : erel0
     up := user.dline_off(srcline, 0)
     ulen := user.dline_len(up, 0)
     // 1) exact line-text match
@@ -316,23 +313,20 @@ mf_none = () MfSpan {
 }
 mf_ws = (b: u8) bool { b == ' ' || b == '\t' }
 mf_skip_ws = (s: string_view, p: i32, e: i32) i32 {
-    (p < e && s.at(p).mf_ws()).match ({ true => s.mf_skip_ws(p + 1, e), false => p })
+    p < e && s.at(p).mf_ws() ? s.mf_skip_ws(p + 1, e) : p
 }
 // match `key` literally at p; return pos just past it, or -1
 mf_key_at = (s: string_view, p: i32, e: i32, key: string_view, k: i32) i32 {
     (key.at(k) == 0).match ({
         true  => p,
-        false => (p < e && s.at(p) == key.at(k)).match ({
-            true  => s.mf_key_at(p + 1, e, key, k + 1),
-            false => 0 - 1,
-        }),
+        false => p < e && s.at(p) == key.at(k) ? s.mf_key_at(p + 1, e, key, k + 1) : 0 - 1,
     })
 }
 // the closing-quote position from `i`, or -1
 mf_close = (s: string_view, i: i32, e: i32) i32 {
     (i >= e).match ({
         true  => 0 - 1,
-        false => (s.at(i) == '"').match ({ true => i, false => s.mf_close(i + 1, e) }),
+        false => s.at(i) == '"' ? i : s.mf_close(i + 1, e),
     })
 }
 // parse one line [p,e) for `key = "value"` -> the value span, or mf_none
@@ -364,10 +358,7 @@ mf_line = (s: string_view, p: i32, e: i32, key: string_view) MfSpan {
     })
 }
 mf_line_end = (s: string_view, p: i32, len: i32) i32 {
-    (p < len && s.at(p) != '\n' && s.at(p) != '\r').match ({
-        true  => s.mf_line_end(p + 1, len),
-        false => p,
-    })
+    p < len && s.at(p) != '\n' && s.at(p) != '\r' ? s.mf_line_end(p + 1, len) : p
 }
 // scan `src` (length `len`) for `key`'s value, starting at line `p`. The driver calls with p=0.
 manifest_value_span* = (src: string_view, len: i32, key: string_view, p: i32) MfSpan {
@@ -379,11 +370,8 @@ manifest_value_span* = (src: string_view, len: i32, key: string_view, p: i32) Mf
     (r.start >= 0).then({
         return r
     })
-    np := (e < len && src.at(e) == '\r' && e + 1 < len && src.at(e + 1) == '\n').match ({
-        true  => e + 2,
-        false => e + 1,
-    })
-    (e >= len).match ({ true => mf_none(), false => src.manifest_value_span(len, key, np) })
+    np := e < len && src.at(e) == '\r' && e + 1 < len && src.at(e + 1) == '\n' ? e + 2 : e + 1
+    e >= len ? mf_none() : src.manifest_value_span(len, key, np)
 }
 // ── error rendering (message line + source caret) — moved out of the C driver ──────────────────
 // Builds the full "zenc: path:line:col: error[kind]: message" line, the source line + ^~~~ caret,
@@ -417,7 +405,7 @@ dput_blanks = (s: String, a: MutPtr<Malloc>, user: string_view, ls: i32, col: i3
     k := i
     @while (k < col - 1) {
         c := user.at(ls + k)
-        acc = acc.gstr_push(a, (c == '\t').match ({ true => '\t', false => ' ' }))
+        acc = acc.gstr_push(a, c == '\t' ? '\t' : ' ')
         k = k + 1
     }
     acc
@@ -427,7 +415,7 @@ dput_carets = (s: String, a: MutPtr<Malloc>, n: i32, i: i32) String {
     acc := s
     k := i
     @while (k < n) {
-        acc = acc.gstr_push(a, (k == 0).match ({ true => '^', false => '~' }))
+        acc = acc.gstr_push(a, k == 0 ? '^' : '~')
         k = k + 1
     }
     acc
@@ -467,15 +455,12 @@ render_diagnostic* = (
     (count > 1).then({
         s = s.gstr_append(a, " (+").gstr_int(a, count - 1).gstr_append(a, " more error")
         // no method chained after a .match (parser limitation): push the closing chars inside the arms
-        s = (count - 1 == 1).match ({
-            true  => s.gstr_push(a, ')'),
-            false => s.gstr_push(a, 's').gstr_push(a, ')'),
-        })
+        s = count - 1 == 1 ? s.gstr_push(a, ')') : s.gstr_push(a, 's').gstr_push(a, ')')
     })
     s = s.gstr_push(a, '\n')
     (line > 0 && col > 0).then({
         ls := user.dline_off(line, 0)
-        width := (end_col >= col).match ({ true => end_col - col + 1, false => 1 })
+        width := end_col >= col ? end_col - col + 1 : 1
         s = s.gstr_append(a, "  ").dput_line(a, user, ls).gstr_push(a, '\n')
         s = s
             .gstr_append(a, "  ")

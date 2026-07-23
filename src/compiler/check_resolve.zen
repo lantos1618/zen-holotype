@@ -21,7 +21,6 @@
 { inline_decl, lower_closures, mono_close, no_inline_gen_f } = compiler.check_inline
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { lower_stmt_expr, one_stmt, subj_payload, subj_tag, tag_const } = compiler.check_lower
-{ is_f64_ty, ty_eq } = compiler.check_fits
 { DeclIndex, Env, arm_env, bind_fnret, build_decl_index, cebuf, cenode, dispatch_recv,
   dispatch_recv_name, elem_of, empty_params, enum_inst_mk, enum_inst_tag, enum_name, extend_env,
   fnret_of, gen_variant_payload, gsubst, has_tparam, is_str_t, is_void_ty, local_name_at, no_stmts,
@@ -119,12 +118,12 @@ emit_tag_or_default = (
 }
 // Keep concrete slice element types across re-resolve.
 keep_elem = (env: Env, existing: Ty, seq: Ptr<Expr>) Ty {
-    existing.is_void_ty().match ({ true => env.infer_expr(seq).elem_of(), false => existing })
+    existing.is_void_ty() ? env.infer_expr(seq).elem_of() : existing
 }
 // For index assignment, fall back to the stored value's type when the sequence elem is unknown.
 set_elem = (env: Env, existing: Ty, seq: Ptr<Expr>, value: Ptr<Expr>) Ty {
     e := env.keep_elem(existing, seq)
-    e.is_void_ty().match ({ true => env.infer_expr(value), false => e })
+    e.is_void_ty() ? env.infer_expr(value) : e
 }
 // A written targ that is just the struct's own type-param name (e.g. literal `A`) needs inference.
 is_placeholder_targ = (tparams: [Param], t: Ty) bool {
@@ -136,7 +135,7 @@ is_placeholder_targ = (tparams: [Param], t: Ty) bool {
 init_field_ty = (env: Env, inits: [FieldInit], fname: string_view) Ty {
     found := tvoid()
     inits.loop((h, i, fi) {
-        found = (fi.name == fname).match ({ true => env.infer_expr(fi.value), false => found })
+        found = fi.name == fname ? env.infer_expr(fi.value) : found
     })
     found
 }
@@ -144,16 +143,11 @@ init_field_ty = (env: Env, inits: [FieldInit], fname: string_view) Ty {
 struct_targ_one = (env: Env, fields: [Field], inits: [FieldInit], tp: string_view) Ty {
     found := tvoid()
     fields.loop((h, i, f) {
-        found = found.is_void_ty().match ({
-            true  => f.ty.unify_ty(env.init_field_ty(inits, f.name), tp),
-            false => found,
-        })
+        found = found.is_void_ty() ? f.ty.unify_ty(env.init_field_ty(inits, f.name), tp) : found
     })
     found
 }
-pick_targ = (inf: Ty, fallback: Ty) Ty {
-    inf.is_void_ty().match ({ true => fallback, false => inf })
-}
+pick_targ = (inf: Ty, fallback: Ty) Ty { inf.is_void_ty() ? fallback : inf }
 infer_struct_targs = (
     a: MutPtr<Malloc>,
     env: Env,
@@ -178,7 +172,7 @@ genlit_g = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit])
 // literal's type args under a `st: Store<AppState> := …` annotation (or any expected-type position).
 exp_targs_for = (exp: Ty, base: string_view) [Ty] {
     exp.match ({
-        .Generic(g) => (g.name == base).match ({ true => g.args, false => no_tys() }),
+        .Generic(g) => g.name == base ? g.args : no_tys(),
         _           => no_tys(),
     })
 }
@@ -211,10 +205,7 @@ resolve_genlit_bare = (
 }
 resolve_genlit = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData) Ptr<Expr> {
     inits := a.resolve_inits(env.clr_exp(), sd.inits)
-    (sd.targs.len > 0).match ({
-        true  => a.genlit_g(env, sd, inits),
-        false => a.resolve_genlit_bare(env, sd, inits),
-    })
+    sd.targs.len > 0 ? a.genlit_g(env, sd, inits) : a.resolve_genlit_bare(env, sd, inits)
 }
 // Rebuild expressions with resolved enum, constructor, member, and loop metadata.
 // Entry hook: an expression that still holds unconditional-position `.or_return()` calls (only
@@ -222,10 +213,7 @@ resolve_genlit = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData) Ptr<Expr> {
 // operands — since fill_orx already hoisted every statement-level occurrence) is wrapped into a
 // value block scoped to that branch. See the "or_return in EXPRESSION position" section below.
 resolve_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
-    (e.orx_count() > 0).match ({
-        true  => a.resolve_orx(env, e),
-        false => a.resolve_expr_plain(env, e),
-    })
+    e.orx_count() > 0 ? a.resolve_orx(env, e) : a.resolve_expr_plain(env, e)
 }
 resolve_expr_plain = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
@@ -292,10 +280,7 @@ resolve_match = (a: MutPtr<Malloc>, env: Env, m: MatchData) Ptr<Expr> {
     t := env.infer_expr(subj2)
     en := t.enum_name()
     arms := a.resolve_arms(env, t, m.arms)
-    t.ty_is_ptr().match ({
-        true  => a.cenode(ematchp(subj2, en, arms)),
-        false => a.cenode(ematch(subj2, en, arms)),
-    })
+    t.ty_is_ptr() ? a.cenode(ematchp(subj2, en, arms)) : a.cenode(ematch(subj2, en, arms))
 }
 resolve_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) [Expr] {
     buf := a.cebuf(args.len)
@@ -304,7 +289,7 @@ resolve_args = (a: MutPtr<Malloc>, env: Env, args: [Expr]) [Expr] {
     })
     buf
 }
-arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).match ({ true => ps[i].ty, false => tvoid() }) }
+arg_exp = (ps: [Param], i: i32) Ty { i < ps.len ? ps[i].ty : tvoid() }
 str_eq_args = (a: MutPtr<Malloc>, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
     buf := a.cebuf(2)
     buf[0] = load(lhs)
@@ -331,7 +316,7 @@ resolve_bin = (a: MutPtr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
     cmp := b.op == "==" || b.op == "!="
     lty := env.infer_expr(lhs)
     (cmp && lty.is_str_t() && env.infer_expr(rhs).is_str_t()).match ({
-        true  => a.cenode(call((b.op == "==").match ({ true => "__str_eq", false => "__str_ne" }), a.str_eq_args(lhs, rhs))),
+        true  => a.cenode(call(b.op == "==" ? "__str_eq" : "__str_ne", a.str_eq_args(lhs, rhs))),
         false => (cmp && env.is_enum_ty(lty)).match ({
             true  => a.cenode(bin_at(b.op, a.subj_tag(lhs, lty.ty_is_ptr()), a.subj_tag(rhs, lty.ty_is_ptr()), b.pos)),
             false => (cmp
@@ -388,10 +373,7 @@ seq_fold = (a: MutPtr<Malloc>, flds: [Field], lx: Ptr<Expr>, rx: Ptr<Expr>, pos:
     acc
 }
 seq_neg = (a: MutPtr<Malloc>, op: string_view, e: Ptr<Expr>, pos: i32) Ptr<Expr> {
-    (op == "!=").match ({
-        true  => a.cenode(bin_at("==", e, a.cenode(vref_at("false", pos)), pos)),
-        false => e,
-    })
+    op == "!=" ? a.cenode(bin_at("==", e, a.cenode(vref_at("false", pos)), pos)) : e
 }
 resolve_struct_eq = (
     a: MutPtr<Malloc>,
@@ -469,9 +451,7 @@ resolve_f64_neg = (
 // ── variadic params: a trailing `...T` param collects the surplus call args into a `[T]` ──
 // Detect the marker (set by the parser), the element type T, and the per-arg expected type
 // (T for a collected element). Lowering happens AFTER arg resolution, in resolve_call.
-last_variadic = (ps: [Param]) bool {
-    (ps.len > 0).match ({ true => ps[ps.len - 1].variadic, false => false })
-}
+last_variadic = (ps: [Param]) bool { ps.len > 0 ? ps[ps.len - 1].variadic : false }
 vararg_elem = (t: Ty) Ty {
     t.match ({
         .Slice(e) => load(e),
@@ -483,7 +463,7 @@ arg_exp_v* = (ps: [Param], i: i32) Ty {
     last_variadic(ps).match ({
         true  => {
             fixed := ps.len - 1
-            (i < fixed).match ({ true => ps.arg_exp(i), false => ps[fixed].ty.vararg_elem() })
+            i < fixed ? ps.arg_exp(i) : ps[fixed].ty.vararg_elem()
         },
         false => ps.arg_exp(i),
     })
@@ -499,10 +479,7 @@ is_slicelit_expr = (e: Expr) bool {
 }
 already_collected = (ps: [Param], args: [Expr]) bool {
     (args.len == ps.len).match ({
-        true  => (args.len > 0).match ({
-            true  => is_slicelit_expr(args[args.len - 1]),
-            false => false,
-        }),
+        true  => args.len > 0 ? is_slicelit_expr(args[args.len - 1]) : false,
         false => false,
     })
 }
@@ -626,7 +603,7 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     fn := env.env_func(dn)
     ps := fn.params
     tmpl := fn.is_generic_fn()
-    targs := tmpl.match ({ true => env.call_targs(fn, c.args, c.targs), false => no_tys() })
+    targs := tmpl ? env.call_targs(fn, c.args, c.targs) : no_tys()
     buf := a.cebuf(c.args.len)
     c.args.loop((h, i, ar) {
         ex := env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
@@ -656,7 +633,7 @@ rec_dispatch = (env: Env, dn: string_view, fn: Func, args: [Expr], etargs: [Ty])
     (fn.name == dn && fn.params.len == args.len && fn.no_inline_gen_f()).match ({
         true  => {
             m := env.a.mangle_semantic_in(dn, env.call_targs(fn, args, etargs))
-            (env.didx.func_idx.get(m, 0 - 1) >= 0).match ({ true => m, false => dn })
+            env.didx.func_idx.get(m, 0 - 1) >= 0 ? m : dn
         },
         false => dn,
     })
@@ -677,10 +654,7 @@ store_local_ty = (t: Ty) Ty {
 }
 resolve_let = (a: MutPtr<Malloc>, env: Env, l: LetData) Stmt {
     v := a.resolve_expr(env.let_exp(l.ty), l.value)
-    ty := l.ty.is_void_ty().match ({
-        true  => env.clr_exp().infer_expr(v).store_local_ty(),
-        false => l.ty,
-    })
+    ty := l.ty.is_void_ty() ? env.clr_exp().infer_expr(v).store_local_ty() : l.ty
     // Infer the stored type under the SAME cleared expected-type the value was resolved with: an
     // unannotated let has no target type, so the enclosing function's `exp` must not leak in. Else a
     // generic call whose return is a bare tparam (`with_sync … R`) unifies R against that stray exp
@@ -706,10 +680,7 @@ resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool, vtail: bool) 
             // return sits (lowered conditional branch, value-position arm block, loop body). Falls back to the
             // positional exp when no fnret is bound (globals) or the fn returns void.
             rt := env.vars.fnret_of()
-            out = sret(a.resolve_expr(rt.is_void_ty().match ({
-                true  => env,
-                false => env.with_exp(rt),
-            }), r))
+            out = sret(a.resolve_expr(rt.is_void_ty() ? env : env.with_exp(rt), r))
         },
         .ExprStmt(e) => {
             last.match ({
@@ -758,9 +729,7 @@ let_is_or_return = (st: Stmt) bool {
         _       => false,
     })
 }
-stmt_out_span = (st: Stmt) i32 {
-    st.orx_stmt_count() * 3 + st.let_is_or_return().match ({ true => 3, false => 1 })
-}    // each hoisted expression-position or_return adds a 3-stmt let-lowering
+stmt_out_span = (st: Stmt) i32 { st.orx_stmt_count() * 3 + (st.let_is_or_return() ? 3 : 1) }    // each hoisted expression-position or_return adds a 3-stmt let-lowering
 body_out_len = (body: [Stmt]) i32 {
     n := 0
     body.loop((h, i, st) {
@@ -828,7 +797,7 @@ orret_ty_known = (env: Env, t: Ty) bool {
 orret_args_known = (env: Env, args: [Ty]) bool {
     k := true
     args.loop((h, i, t) {
-        k = env.orret_ty_known(t).match ({ true => k, false => false })
+        k = env.orret_ty_known(t) ? k : false
     })
     k
 }
@@ -950,9 +919,7 @@ fill_stmts = (
     i: i32,
     o: i32,
     vtail: bool,
-) void {
-    (i < body.len).match ({ true => a.fill_stmt(env, body, buf, i, o, vtail), false => noop2() })
-}
+) void { i < body.len ? a.fill_stmt(env, body, buf, i, o, vtail) : noop2() }
 fill_stmt = (
     a: MutPtr<Malloc>,
     env: Env,

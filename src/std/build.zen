@@ -246,13 +246,13 @@ Target*: {
         cuse_records = s.finish_in(mp).cb_fin()
     }
     sources_on = (t: Target, os: Os, xs: [string_view]) Target {
-        (t.platform_.os == os).match ({ true => t.sources(xs), false => t })
+        t.platform_.os == os ? t.sources(xs) : t
     }
     frameworks_on = (t: Target, os: Os, xs: [string_view]) Target {
-        (t.platform_.os == os).match ({ true => t.frameworks(xs), false => t })
+        t.platform_.os == os ? t.frameworks(xs) : t
     }
     libraries_on = (t: Target, os: Os, xs: [string_view]) Target {
-        (t.platform_.os == os).match ({ true => t.libraries(xs), false => t })
+        t.platform_.os == os ? t.libraries(xs) : t
     }
     emit_target = (t: Target) void {
         // Legacy single-library setter. Prefer `.libraries(["pthread", ...])`.
@@ -383,10 +383,7 @@ CLibrary*: {
 cb_oom = () string_view { "std.build: c_library allocation failed" }
 cb_fin = (r: Result<string_cstr, IoError>) string_view { r.expect(cb_oom()) }
 cb_lines = (s: string_view, p: i32, n: i32) i32 {
-    (s.at(p) == 0).match ({
-        true  => n,
-        false => s.cb_lines(p + 1, (s.at(p) == '\n').match ({ true => n + 1, false => n })),
-    })
+    s.at(p) == 0 ? n : s.cb_lines(p + 1, s.at(p) == '\n' ? n + 1 : n)
 }
 c_library* = (b: MutPtr<Build>, cl: CLib) CLibrary {
     a := Malloc(_: 0)
@@ -420,13 +417,10 @@ c_library* = (b: MutPtr<Build>, cl: CLib) CLibrary {
 cuse_none = () string_view { "" }
 cuse_records := cuse_none()
 cw_word_end = (s: string_view, p: i32) i32 {
-    (s.at(p) == 0 || s.at(p) == ' ' || s.at(p) == '\n').match ({
-        true  => p,
-        false => s.cw_word_end(p + 1),
-    })
+    s.at(p) == 0 || s.at(p) == ' ' || s.at(p) == '\n' ? p : s.cw_word_end(p + 1)
 }
 cw_line_end = (s: string_view, p: i32) i32 {
-    (s.at(p) == 0 || s.at(p) == '\n').match ({ true => p, false => s.cw_line_end(p + 1) })
+    s.at(p) == 0 || s.at(p) == '\n' ? p : s.cw_line_end(p + 1)
 }
 cw_nat = (s: string_view, p: i32, e: i32, n: i32) i32 {
     (p >= e || s.at(p) < '0' || s.at(p) > '9').match ({
@@ -439,7 +433,7 @@ cw_skip_lines = (s: string_view, p: i32, k: i32) i32 {
         true  => p,
         false => {
             le := s.cw_line_end(p)
-            (s.at(le) == 0).match ({ true => le, false => s.cw_skip_lines(le + 1, k - 1) })
+            s.at(le) == 0 ? le : s.cw_skip_lines(le + 1, k - 1)
         },
     })
 }
@@ -449,10 +443,7 @@ cw_eq = (s: string_view, p: i32, e: i32, w: string_view, j: i32) bool {
         true  => w.at(j) == 0,
         false => (w.at(j) == 0).match ({
             true  => false,
-            false => (s.at(p + j) == w.at(j)).match ({
-                true  => s.cw_eq(p, e, w, j + 1),
-                false => false,
-            }),
+            false => s.at(p + j) == w.at(j) ? s.cw_eq(p, e, w, j + 1) : false,
         }),
     })
 }
@@ -504,5 +495,5 @@ cuse_emit = (tname: string_view, p: i32, mode: i32) void {
     })
 }
 cuse_count = (p: i32, n: i32) i32 {
-    (cuse_records.at(p) == 0).match ({ true => n, false => cuse_count(cuse_rec(p).rend, n + 1) })
+    cuse_records.at(p) == 0 ? n : cuse_count(cuse_rec(p).rend, n + 1)
 }

@@ -104,12 +104,12 @@ write_ffixed = (digs: i64, ndig: i64, e: i64) i64 {
 write_fsci = (digs: i64, ndig: i64, e: i64) i64 {
     msd := digs / num_fpow10i(ndig - 1)
     rest := digs % num_fpow10i(ndig - 1)
-    mant := write_digit(msd) + ".".write_text() + (ndig == 1).match ({
+    mant := write_digit(msd) + ".".write_text() + ((ndig == 1).match ({
         true  => write_digit(0),
         false => write_fpad(rest, ndig - 1),
-    })
-    sgn := (e < 0).match ({ true => "e-".write_text(), false => "e+".write_text() })
-    mant + sgn + write_uint((e < 0).match ({ true => 0 - e, false => e }))
+    }))
+    sgn := e < 0 ? "e-".write_text() : "e+".write_text()
+    mant + sgn + write_uint(e < 0 ? 0 - e : e)
 }
 // non-negative magnitude: zero prints "0.0"; otherwise 15 sig digits, trailing zeros
 // trimmed, in fixed notation for e in [-4,14] and scientific outside it.
@@ -119,13 +119,10 @@ write_fabs_digits = (x: f64) i64 {
         false => {
             e0 := num_fexp(x)
             d0 := num_fsig(x, e0)
-            e := (d0 >= 1000000000000000).match ({ true => e0 + 1, false => e0 })    // carry across 10^15
-            digs := num_fstrip((d0 >= 1000000000000000).match ({ true => d0 / 10, false => d0 }))
+            e := d0 >= 1000000000000000 ? e0 + 1 : e0    // carry across 10^15
+            digs := num_fstrip(d0 >= 1000000000000000 ? d0 / 10 : d0)
             ndig := num_fndig(digs)
-            (e >= 0 - 4 && e < 15).match ({
-                true  => write_ffixed(digs, ndig, e),
-                false => write_fsci(digs, ndig, e),
-            })
+            e >= 0 - 4 && e < 15 ? write_ffixed(digs, ndig, e) : write_fsci(digs, ndig, e)
         },
     })
 }
@@ -133,10 +130,7 @@ write_float = (x: f64) i64 {
     sp := x.f64_special()
     (sp.at(0) != '\0').match ({
         true  => sp.write_text(),
-        false => (x < 0.0).match ({
-            true  => "-".write_text() + write_fabs_digits(0.0 - x),
-            false => write_fabs_digits(x),
-        }),
+        false => x < 0.0 ? "-".write_text() + write_fabs_digits(0.0 - x) : write_fabs_digits(x),
     })
 }
 // Display is the current type-directed print surface; real overload sets can replace the typed aliases later.
@@ -184,7 +178,7 @@ Printer*: {
     i = (p: Printer, k: i64) Printer { Printer(n: p.n + k.write_int()) }
     f = (p: Printer, x: f64) Printer { Printer(n: p.n + x.write_float()) }
     b = (p: Printer, x: bool) Printer {
-        t := x.match ({ true => "true", false => "false" })
+        t := x ? "true" : "false"
         Printer(n: p.n + t.write_text())
     }
     owned = (p: Printer, g: String) Printer { Printer(n: p.n + g.write_string()) }
@@ -229,16 +223,14 @@ write_arg = (a: Arg) i64 {
         .Int(n)   => write_int(n),
         .Flt(x)   => write_float(x),
         .Str(s)   => s.write_text(),
-        .Bool(x)  => x.match ({ true => "true".write_text(), false => "false".write_text() }),
+        .Bool(x)  => x ? "true".write_text() : "false".write_text(),
         .Owned(g) => write_string(g),
     })
 }
 // write the template sub-run sv[lo..hi) verbatim (a borrowed view, no copy).
 write_run = (sv: [u8], lo: i64, hi: i64) i64 { out_bytes(slice(sv.ptr.offset(lo), hi - lo)).or(0) }
 // write the i-th arg, or nothing when the template has more `{}` than the slice has args.
-write_arg_at = (args: [Arg], i: i64) i64 {
-    (i < args.len).match ({ true => write_arg(args[i]), false => 0 })
-}
+write_arg_at = (args: [Arg], i: i64) i64 { i < args.len ? write_arg(args[i]) : 0 }
 // splice `args` into `template` at each `{}`; `{{`/`}}` emit literal braces. Returns bytes written.
 format* = (template: string_view, args: [Arg]) i64 {
     sv := template.view()
@@ -385,9 +377,7 @@ f32.impl(Display, {
     }
 })
 bool.impl(Display, {
-    fmt_print = (b: bool) i64 {
-        b.match ({ true => "true".write_text(), false => "false".write_text() })
-    }
+    fmt_print = (b: bool) i64 { b ? "true".write_text() : "false".write_text() }
     fmt_println = (b: bool) i64 {
         b.fmt_print()
         newline()

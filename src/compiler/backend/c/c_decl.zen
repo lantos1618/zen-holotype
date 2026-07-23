@@ -20,7 +20,7 @@ any_payload = (vs: [VariantDef]) bool {
 gen_ty_list = (s: String, alloc: MutPtr<Malloc>, ts: [Ty]) String {
     out := s
     ts.loop((h, i, t) {
-        out = (i == 0).match ({ true => out, false => out.gstr_append(alloc, ", ") })    // comma-separated bare types: `A, B, C`
+        out = i == 0 ? out : out.gstr_append(alloc, ", ")    // comma-separated bare types: `A, B, C`
         out = out.gstr_append(alloc, alloc.ty_cname_in(t))
     })
     out
@@ -40,7 +40,7 @@ gen_fnptr_param = (s: String, alloc: MutPtr<Malloc>, ft: FnTData, name: string_v
 gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
-        out = (i == 0).match ({ true => out, false => out.gstr_append(alloc, ", ") })    // comma between, not before
+        out = i == 0 ? out : out.gstr_append(alloc, ", ")    // comma between, not before
         out = p.ty.match ({
             .FnT(ft) => out.gen_fnptr_param(alloc, ft, p.name),
             _        => out
@@ -54,9 +54,7 @@ gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
 // emit one function, appending to `s` (so a module can stream several into one buffer)
 // The Zen entry `main` is emitted as C `zen_main`; the OS-level `main(argc,argv)` lives in zenrt.c
 // (it stashes argv and calls zen_main). Every other function keeps its source name.
-c_func_name = (name: string_view) string_view {
-    (name == "main").match ({ true => "zen_main", false => name })
-}
+c_func_name = (name: string_view) string_view { name == "main" ? "zen_main" : name }
 // `main = (sys: Sys) i32` — the capability entry: exactly one parameter typed `Sys`. When present, the
 // user's main is emitted under `zen_user_main` and a NILADIC `zen_main(void)` trampoline (below) calls
 // it with `std.sys.root()`, so the C boundary (zenrt.c) stays byte-identical to the `main = () i32` case.
@@ -74,9 +72,7 @@ main_is_sys* = (f: Func) bool {
 }
 // the C function name for `f`: `main` -> `zen_main`, unless it is the `(sys: Sys)` entry, whose user
 // body is emitted as `zen_user_main` (the `zen_main` trampoline is appended separately by gen_func).
-c_func_name_f = (f: Func) string_view {
-    f.main_is_sys().match ({ true => "zen_user_main", false => c_func_name(f.name) })
-}
+c_func_name_f = (f: Func) string_view { f.main_is_sys() ? "zen_user_main" : c_func_name(f.name) }
 // a function signature `ret name(params)` — shared by the definition and the forward proto
 // the C name for a return type: a function-VALUE return (FnT) uses its precise typedef (M1c) so the
 // caller can call the result; everything else is the plain C type name.
@@ -181,10 +177,10 @@ gen_proto* = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
 gen_fnt_params = (s: String, alloc: MutPtr<Malloc>, ps: [Ty]) String {
     out := s
     ps.loop((h, i, p) {
-        out = (i == 0).match ({ true => out, false => out.gstr_append(alloc, ", ") })
+        out = i == 0 ? out : out.gstr_append(alloc, ", ")
         out = out.gstr_append(alloc, alloc.ty_cname_in(p))
     })
-    (ps.len == 0).match ({ true => out.gstr_append(alloc, "void"), false => out })
+    ps.len == 0 ? out.gstr_append(alloc, "void") : out
 }
 // a struct field declaration. A function-VALUE field (FnT) is emitted as a precise C function-pointer
 // declarator `Ret (*name)(Args)` — so the field is natively callable and a same-signature function or
@@ -232,7 +228,7 @@ gen_union = (s: String, alloc: MutPtr<Malloc>, vs: [VariantDef]) String {
 gen_tags = (s: String, alloc: MutPtr<Malloc>, ename: string_view, vs: [VariantDef]) String {
     e := s.gstr_append(alloc, " enum { ")
     vs.loop((h, i, v) {
-        e = (i == 0).match ({ true => e, false => e.gstr_append(alloc, ", ") })
+        e = i == 0 ? e : e.gstr_append(alloc, ", ")
         e = e.gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, v.name)
     })
     e.gstr_append(alloc, " };")

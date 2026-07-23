@@ -55,9 +55,52 @@ BACKLOG := 128    // pending-connection queue depth
 // ── handles: a file descriptor is the raw floor ─────────────────────────────────────────────────────
 TcpListener*: {
     fd: i32,
+    // the ephemeral (or fixed) port the listener is bound to, read back via getsockname; 0 on failure.
+    local_port = (l: TcpListener) i32 {
+        with_scratch(8, (lenc) {
+            with_scratch(SOCKADDR_LEN, (cell) {
+                store_i64(lenc, SOCKADDR_LEN)    // socklen_t in/out; low 4 bytes = 16
+                r := l.fd.getsockname(cell, lenc)
+                (r < 0).match ({
+                    true  => 0,
+                    false => {
+                        hi := to_i64(cell.offset(2).load())    // sin_port is network order (big-endian)
+                        lo := to_i64(cell.offset(3).load())
+                        to_i32(hi * 256 + lo)
+                    },
+                })
+            })
+        })
+    }
+    // block until the next client connects; returns its `TcpConn` or the accept errno.
+    accept_conn = (l: TcpListener) Result<TcpConn, IoError> {
+        fd := l.fd.accept(null_ptr(), null_ptr())
+        errno_or(fd, TcpConn(fd: fd))
+    }
+    // stop listening (close the passive socket).
+    close_listener = (l: TcpListener) void { l.fd.close() }
 }
 TcpConn*: {
     fd: i32,
+    // read up to `n` bytes into the caller-owned `buf`; returns the count (0 = peer closed) or errno. The
+    // low-level read — no allocation, the caller sizes the buffer.
+    recv_into = (c: TcpConn, buf: RawPtr<u8>, n: i64) Result<i64, IoError> {
+        r := c.fd.read(buf, n)
+        errno_or(to_i32(r), r)
+    }
+    // write every byte of `bytes`; Ok(count) on a full write, .Err(.Eof) on a short/failed write. Rides
+    // the shared std.io.file.write_all fd loop, then collapses its richer error (Errno/Eof) to net's
+    // flat .Eof.
+    send = (c: TcpConn, bytes: [u8]) Result<i64, IoError> {
+        c.fd.write_all(bytes.ptr, bytes.len, 0).match ({
+            .Ok(n)  => ok(n),
+            .Err(e) => err(IoError.Eof),
+        })
+    }
+    // convenience: send a `str`'s bytes (no trailing NUL).
+    send_str = (c: TcpConn, s: string_view) Result<i64, IoError> { c.send(s.view()) }
+    // close the connection.
+    close_conn = (c: TcpConn) void { c.fd.close() }
 }
 // ── sockaddr_in construction (built byte-for-byte, so byte order is explicit, no htons/htonl) ─────────
 // `struct sockaddr_in` (16 bytes): sin_family (u16, HOST order) at +0, sin_port (u16, NETWORK/big-endian)
@@ -169,30 +212,6 @@ serve* = (host: string_view, port: i32) Result<TcpListener, IoError> {
     })
     out
 }
-// the ephemeral (or fixed) port the listener is bound to, read back via getsockname; 0 on failure.
-local_port* = (l: TcpListener) i32 {
-    with_scratch(8, (lenc) {
-        with_scratch(SOCKADDR_LEN, (cell) {
-            store_i64(lenc, SOCKADDR_LEN)    // socklen_t in/out; low 4 bytes = 16
-            r := l.fd.getsockname(cell, lenc)
-            (r < 0).match ({
-                true  => 0,
-                false => {
-                    hi := to_i64(cell.offset(2).load())    // sin_port is network order (big-endian)
-                    lo := to_i64(cell.offset(3).load())
-                    to_i32(hi * 256 + lo)
-                },
-            })
-        })
-    })
-}
-// block until the next client connects; returns its `TcpConn` or the accept errno.
-accept_conn* = (l: TcpListener) Result<TcpConn, IoError> {
-    fd := l.fd.accept(null_ptr(), null_ptr())
-    errno_or(fd, TcpConn(fd: fd))
-}
-// stop listening (close the passive socket).
-close_listener* = (l: TcpListener) void { l.fd.close() }
 // ── connection ─────────────────────────────────────────────────────────────────────────────────────────
 // open an active TCP connection to `host:port` ("localhost"/dotted-quad). Returns a live `TcpConn`
 // or the failing step's errno. Blocking: connect returns once the handshake completes.
@@ -223,12 +242,6 @@ dial* = (host: string_view, port: i32) Result<TcpConn, IoError> {
     })
     out
 }
-// read up to `n` bytes into the caller-owned `buf`; returns the count (0 = peer closed) or errno. The
-// low-level read — no allocation, the caller sizes the buffer.
-recv_into* = (c: TcpConn, buf: RawPtr<u8>, n: i64) Result<i64, IoError> {
-    r := c.fd.read(buf, n)
-    errno_or(to_i32(r), r)
-}
 // read up to `n` bytes into a fresh allocator-owned NUL-terminated buffer, returning it as a `str`
 // of the bytes actually read (a single read() — one TCP segment; loop with recv_into for a full stream).
 recv*<A> = (a: MutPtr<A>, c: TcpConn, n: i64) Result<string_view, IoError> {
@@ -250,15 +263,3 @@ recv*<A> = (a: MutPtr<A>, c: TcpConn, n: i64) Result<string_view, IoError> {
         .Err(e)  => err(e),
     })
 }
-// write every byte of `bytes`; Ok(count) on a full write, .Err(.Eof) on a short/failed write. Rides the
-// shared std.io.file.write_all fd loop, then collapses its richer error (Errno/Eof) to net's flat .Eof.
-send* = (c: TcpConn, bytes: [u8]) Result<i64, IoError> {
-    c.fd.write_all(bytes.ptr, bytes.len, 0).match ({
-        .Ok(n)  => ok(n),
-        .Err(e) => err(IoError.Eof),
-    })
-}
-// convenience: send a `str`'s bytes (no trailing NUL).
-send_str* = (c: TcpConn, s: string_view) Result<i64, IoError> { c.send(s.view()) }
-// close the connection.
-close_conn* = (c: TcpConn) void { c.fd.close() }

@@ -28,7 +28,7 @@ ff_param_one = (s: String, a: MutPtr<Malloc>, p: Param) String {
 ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
-        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = i == 0 ? out : out.ff_append(a, ", ")
         out = out.ff_param_one(a, p)
     })
     out
@@ -54,7 +54,7 @@ ff_sig = (s: String, a: MutPtr<Malloc>, ps: [Param], ret: Ty, ind: i32) String {
         false => {
             out := s.ff_append(a, " = (\n")
             ps.loop((h, i, p) {
-                sep := p.variadic.match ({ true => "\n", false => ",\n" })
+                sep := p.variadic ? "\n" : ",\n"
                 out = out.ff_indent(a, ind + 1).ff_param_one(a, p).ff_append(a, sep)
             })
             out.ff_indent(a, ind).ff_append(a, ") ").ff_ty(a, ret)
@@ -67,7 +67,7 @@ ff_sig = (s: String, a: MutPtr<Malloc>, ps: [Param], ret: Ty, ind: i32) String {
 ff_lparams* = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
-        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = i == 0 ? out : out.ff_append(a, ", ")
         out = p.ty.match ({
             .Void => out.ff_append(a, p.name),
             _     => out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
@@ -83,7 +83,7 @@ ff_tparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
             open := s.ff_append(a, "<")
             body := open
             ps.loop((h, i, p) {
-                body = (i == 0).match ({ true => body, false => body.ff_append(a, ", ") })
+                body = i == 0 ? body : body.ff_append(a, ", ")
                 body = p.ty.match ({
                     .Void => body.ff_append(a, p.name),
                     _     => body.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
@@ -102,10 +102,7 @@ ff_exported = (exp: [Param], name: string_view) bool {
     found
 }
 ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: string_view) String {
-    exp.ff_exported(name).match ({
-        true  => s.ff_append(a, name).ff_append(a, "*"),
-        false => s.ff_append(a, name),
-    })
+    exp.ff_exported(name) ? s.ff_append(a, name).ff_append(a, "*") : s.ff_append(a, name)
 }
 // The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
 // an anonymous-struct return type `{ field: T }`, changing the AST.
@@ -412,15 +409,12 @@ ff_variant = (s: String, a: MutPtr<Malloc>, decls: [Decl], vd: VariantDef) Strin
         .Void => s.ff_append(a, vd.name),
         _     => s.ff_append(a, vd.name).ff_variant_payload(a, decls, vd.payload),
     })
-    vd.dflt.is_expr_null().match ({
-        true  => base,
-        false => base.ff_append(a, " = ").ff_expr(a, vd.dflt, 0),
-    })
+    vd.dflt.is_expr_null() ? base : base.ff_append(a, " = ").ff_expr(a, vd.dflt, 0)
 }
 ff_variants = (s: String, a: MutPtr<Malloc>, decls: [Decl], vs: [VariantDef]) String {
     body := s
     vs.loop((h, i, vd) {
-        body = (i == 0).match ({ true => body, false => body.ff_append(a, " | ") })
+        body = i == 0 ? body : body.ff_append(a, " | ")
         body = body.ff_variant(a, decls, vd)
     })
     body
@@ -464,7 +458,7 @@ ff_import_inline = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
     open := s.ff_append(a, "{ ")
     body := open
     im.names.loop((h, i, p) {
-        body = (i == 0).match ({ true => body, false => body.ff_append(a, ", ") })
+        body = i == 0 ? body : body.ff_append(a, ", ")
         body = body.ff_append(a, p.name)
     })
     body.ff_append(a, " } = ").ff_append(a, im.module)
