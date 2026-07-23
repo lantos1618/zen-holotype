@@ -3,12 +3,15 @@
 # Keep the maintained documentation set deliberate and verify every local Markdown link.
 # Historical plans and reports belong in Git history, not as unlabelled live documents.
 
-expected='./ARCHITECTURE.md
-./MEMORY_MODEL.md
-./README.md
-./SPEC.md
-./STATUS.md
+expected='./README.md
 ./bootstrap/README.md
+./docs/ARCHITECTURE.md
+./docs/MEMORY_MODEL.md
+./docs/SPEC.md
+./docs/STATUS.md
+./docs/metaprogramming-vision.md
+./editor/nvim/README.md
+./editor/vscode/README.md
 ./examples/README.md'
 
 actual=$(find . -name .git -prune -o -name '*.md' -type f -print | LC_ALL=C sort)

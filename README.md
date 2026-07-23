@@ -116,7 +116,7 @@ every one runs with `zenc run examples/<name>.zen`.
   so the C boundary is unchanged. There is no ambient global runtime.
 - **Memory is explicit and allocator-threaded.** Heap-backed `String`/`Vec` take an
   allocator from program setup (`m := halloc.gpa()`); there is no hidden heap. The checker
-  rejects use-after-`release`/`drop` for `Own`/`Rc`/`Arc`. See **[MEMORY_MODEL.md](MEMORY_MODEL.md)**.
+  rejects use-after-`release`/`drop` for `Own`/`Rc`/`Arc`. See **[MEMORY_MODEL.md](docs/MEMORY_MODEL.md)**.
 - **Metaprogramming as values.** Build an AST with `std.internal.ast` and emit it with
   `compiler.genc.genModule` — no `@emit` pragma.
 
@@ -138,12 +138,24 @@ Ordinary Zen modules under `src/std/`, imported with `{ name } = std.path`:
 
 ## Build & run
 
-The compiler is the `zenc` binary; `cc` builds it from committed C, nothing else needed.
+Have a C compiler → `make` bootstraps once → from then on zen builds zen:
 
 ```sh
-make                                   # cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zen
+make                                   # bootstrap: cc bootstrap/{zenc.gen.c,zenrt.c} -> ./zen
+./zen build                            # zen builds zen (dev profile: -O1 -g) -> ./zen-next
+./zen build -r                         # release profile: -O2 -fno-strict-aliasing -> ./zen-next
+mv zen-next zen                        # promote the freshly built compiler
 ```
 
+The Makefile is bootstrap-only — the one step that cannot go through `build.zen` is compiling the
+committed C seed when no `zen` binary exists yet (plus the seed-regen fixpoint below). Everything
+else, including the compiler itself, builds through the compiler's own project mode: the repo-root
+`build.zen` registers the `zen` target (entry `driver.zen`, runtime `bootstrap/zenrt.c`).
+Optimization comes from cargo-style build profiles: `zen build` is the dev profile (`-O1 -g` —
+fast compile, debuggable; never -O0, which would drop the sibling-call elimination the compiler's
+recursion-only code needs), `zen build -r`/`--release` is the optimized profile
+(`-O2 -fno-strict-aliasing`). A target's `.cflags(...)` still wins over the profile (cc's
+last-flag-wins). `zen run` always uses the dev profile. `make build` is an alias for `./zen build`.
 (The top-level `Makefile` forwards to `bootstrap/Makefile`; `make -f bootstrap/Makefile zen`
 works too and is what CI invokes.)
 
@@ -158,6 +170,8 @@ zenc build --target js prog.zen -o p.js   # JS backend: write the JS floor + mod
 zenc targets project/          # list outputs registered by build.zen
 zenc build --target app project/  # build one registered output
 zenc build project/            # build every output explicitly installed by build.zen
+zenc build -r project/         # same, release profile (-O2); default is dev (-O1 -g)
+zenc build                     # no argument: use ./build.zen (so `./zen build` rebuilds the compiler)
 zenc emit-js prog.zen          # JS backend: print the JS to stdout (`| node` to run)
 zenc check prog.zen            # resolve + type-check only, no binary (accepts library modules)
 zenc emit prog.zen             # print the generated C
@@ -281,10 +295,10 @@ This is rough around the edges. Known limits worth flagging up front:
 
 ## More docs
 
-**[SPEC.md](SPEC.md)** (language behavior) ·
-**[STATUS.md](STATUS.md)** (feature/roadmap ledger) ·
-**[MEMORY_MODEL.md](MEMORY_MODEL.md)** (ownership / allocator rules) ·
-**[ARCHITECTURE.md](ARCHITECTURE.md)** (compiler structure).
+**[SPEC.md](docs/SPEC.md)** (language behavior) ·
+**[STATUS.md](docs/STATUS.md)** (feature/roadmap ledger) ·
+**[MEMORY_MODEL.md](docs/MEMORY_MODEL.md)** (ownership / allocator rules) ·
+**[ARCHITECTURE.md](docs/ARCHITECTURE.md)** (compiler structure).
 Everything else lives in Git history; `make docs-check` keeps this set deliberate.
 
 Inspired by treeform's [jsony](https://github.com/treeform/jsony) (parse straight into typed

@@ -49,5 +49,5 @@ seven-file documentation inventory and every local Markdown link.
 Generated C is an artifact, not a merge authority. Register the local merge driver with
 `make setup-git`; after resolving source changes, `make resolve-seed` regenerates and stages the seed.
 
-See [../ARCHITECTURE.md](../ARCHITECTURE.md) for the pipeline and [../STATUS.md](../STATUS.md) for
+See [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for the pipeline and [../docs/STATUS.md](../docs/STATUS.md) for
 current limits.

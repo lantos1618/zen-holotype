@@ -40,7 +40,7 @@ Run any of them as `./zen run examples/<name>.zen`.
 | `pool_actor_demo.zen` | Parallel typed actors over OS workers with a concrete trampoline. | `./zen run examples/pool_actor_demo.zen` |
 
 The two actor examples intentionally expose the current split API; see
-[../STATUS.md](../STATUS.md#important-current-limits-and-defects).
+[../docs/STATUS.md](../docs/STATUS.md#important-current-limits-and-defects).
 
 ## Browser JavaScript
 

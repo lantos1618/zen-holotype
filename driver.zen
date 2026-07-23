@@ -345,15 +345,31 @@ write_runnable_c = (tmpc: string_view, gen: String) bool {
         },
     })
 }
-// cc -std=gnu11 -O1 -foptimize-sibling-calls -fwrapv -w -fno-diagnostics-show-caret -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c <ccflags> <links> -o <out>
-// ccflags/links come from a project's zen.toml (extra .c files + `-l` libs); empty for single files.
-// -O1 -foptimize-sibling-calls: Zen's ONLY loop is recursion (control flow is `.match` + recursion), so
-// self-tail-recursive fns — emitted by genc as a bare `return f(...)` (proper C tail position) — MUST get
-// sibling-call elimination or a deep idiomatic loop blows the C stack (raw SIGSEGV ~250k frames at -O0).
-// The opt fires only at >= -O1; -O1 (not -O2) keeps -fstrict-aliasing OFF, which this void*-punning
-// emitted C relies on. Affects BUILT/RUN user programs only — the bootstrap seed compiles via
-// bootstrap/Makefile CFLAGS, untouched, so the byte-exact fixpoint is unaffected. Non-tail recursion
-// whose result feeds a branch still overflows — caught by zenrt.c's stack-overflow panic.
+// cc -std=gnu11 -O1 -foptimize-sibling-calls -fwrapv -w -fno-diagnostics-show-caret -I<root>/bootstrap TMPC <root>/bootstrap/zenrt.c <profile> <ccflags> <links> -o <out>
+// ── build profiles (cargo-style) ── `zen build` = dev, `zen build -r|--release` = release. The
+// profile's flags land after the base defaults and BEFORE ccflags, so cc's last-flag-wins rule
+// keeps the precedence: base defaults < profile < Target.cflags/zen.toml ccflags.
+//   dev (default):     base -O1 plus -g       — fast compile, debuggable. NOT -O0: Zen's ONLY loop
+//     is recursion (control flow is `.match` + recursion), so self-tail-recursive fns — emitted by
+//     genc as a bare `return f(...)` (proper C tail position) — MUST get sibling-call elimination
+//     or a deep idiomatic loop blows the C stack (raw SIGSEGV ~250k frames at -O0). The opt fires
+//     only at >= -O1; -O1 also keeps -fstrict-aliasing OFF, which this void*-punning emitted C
+//     relies on.
+//   release (-r):      -O2 -fno-strict-aliasing — the optimized profile. -fno-strict-aliasing is
+//     MANDATORY alongside -O2 (the emitted C puns pointers; -O2 alone would turn strict aliasing
+//     back on and miscompile).
+// `zen run` and single-file builds share this path and stay on the dev profile (only `zen build`
+// parses -r): a run's temp binary wants the fastest cc turnaround. Profiles affect BUILT/RUN user
+// programs only — the bootstrap seed compiles via bootstrap/Makefile CFLAGS (pinned -O2: built
+// once, used heavily), so the byte-exact fixpoint is unaffected. Non-tail recursion whose result
+// feeds a branch still overflows — caught by zenrt.c's stack-overflow panic.
+// ccflags/links come from a project's zen.toml or build.zen (extra .c files, `-l` libs, and
+// `-`-prefixed cc flags); empty for single files.
+PROFILE_DEV = () string_view { "-g" }    // on top of the base -O1: effective `-O1 -g`
+PROFILE_RELEASE = () string_view { "-O2 -fno-strict-aliasing" }    // overrides the base -O1
+profile_flags := PROFILE_DEV()
+profile_release_set = () void { profile_flags = PROFILE_RELEASE() }
+profile_get = () string_view { profile_flags }
 cc_command = (
     mp: MutPtr<Malloc>,
     root: string_view,
@@ -363,7 +379,7 @@ cc_command = (
     links: string_view,
     ccname: string_view,
 ) string_view {
-    mp
+    line := mp
         .gstr_string(256)
         .gstr_append(mp, ccname)
         .gstr_append(mp, " -std=gnu11 -Wno-error=implicit-function-declaration -O1 -foptimize-sibling-calls -fwrapv -w -I")
@@ -373,6 +389,8 @@ cc_command = (
         .gstr_append(mp, " ")
         .gstr_append(mp, root)
         .gstr_append(mp, "/bootstrap/zenrt.c ")
+        .gstr_append(mp, profile_get())
+        .gstr_append(mp, " ")
         .gstr_append(mp, ccflags)
         .gstr_append(mp, " ")
         .gstr_append(mp, links)
@@ -380,6 +398,14 @@ cc_command = (
         .gstr_append(mp, " -o ")
         .gstr_append(mp, out)
         .gstr_finish(mp)
+    // ZENC_SHOW_CC (any non-empty value): echo the full cc line to stderr — the observable record
+    // of which profile/flags a compile actually used (the harness's profile cases assert on it).
+    // A cache HIT never reaches cc, so pair it with ZENC_NO_CACHE=1/a fresh ZENC_CACHE_DIR.
+    (getEnv("ZENC_SHOW_CC") == "" == false).then({
+        derr(line)
+        derr("\n")
+    })
+    line
 }    // libm: always link (sin/cos/log/exp/pow); free if unused
 // ── cross-toolchain selection (`Target.target(platform)` in build.zen) ────────────────────────────
 // A native Spec (target "") compiles with host `cc` — the command line above, byte-identical to
@@ -407,7 +433,11 @@ cross_cc = (mp: MutPtr<Malloc>, target: string_view) string_view {
     (envcc == "" == false).then({
         return envcc
     })
-    gcc := mp.gstr_string(32).gstr_append(mp, target).gstr_append(mp, "-gcc").gstr_finish(mp)
+    gcc := mp
+        .gstr_string(32)
+        .gstr_append(mp, target)
+        .gstr_append(mp, "-gcc")
+        .gstr_finish(mp)
     mp.which_ok(gcc).then({
         return gcc
     })
@@ -598,12 +628,15 @@ cache_probe = (
     // hashed by the walk below through module_path; the map itself covers id/path re-registration).
     // The cross-target triple is part of the key: flipping `Target.target(...)` MUST miss — a
     // cached aarch64 binary must never replay as the x86_64 build (or vice versa).
+    // The build profile (dev vs release, see cc_command) is part of the key the same way: a dev
+    // `-O1 -g` binary must never replay as the `-r` release build (or vice versa).
     h0 := self
         .fnv_str(VERSION())
         .fnv_str(kind)
         .fnv_str(getEnv("ZEN_VIS_REPORT"))
         .fnv_str(ffi_grants_get())
         .fnv_str(genmods_get())
+        .fnv_str(profile_get())
         .fnv_flags(mp, ccflags)
         .fnv_flags(mp, links)
         .fnv_str(target)
@@ -846,20 +879,37 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
     })
 }
 finish_cstr = (s: String, mp: MutPtr<Malloc>) string_view { cstr(s.ptr) }
-// `zenc build --target js <file> [-o out]` -> genjs; otherwise the ordinary C `build`. Args:
-// arg(2)=--target arg(3)=js arg(4)=<file> arg(5)=-o arg(6)=<out>.
+// `zenc build`/`zenc targets` with no project argument default to the current directory when it
+// holds a build.zen — so `./zen build` at the repo root builds the compiler's own registered
+// targets. An explicit argument (file or dir) is never rewritten.
+proj_dir = (a: string_view) string_view {
+    (a == "" && file_exists("build.zen")).match ({ true => ".", false => a })
+}
+// `zenc build [-r|--release] [--target <name>] [project]` — `-r`/`--release` directly after
+// `build` selects the RELEASE profile (see the profile block above cc_command); every later
+// positional shifts by one (`s`). `zenc build --target js <file> [-o out]` -> genjs; otherwise
+// the ordinary C `build`. Unshifted args: arg(2)=--target arg(3)=js arg(4)=<file> arg(5)=-o
+// arg(6)=<out>.
 build_target = (mp: MutPtr<Malloc>, root: string_view) i32 {
-    (arg(2) == "--target" && arg(3) == "js").match ({
+    rel := arg(2) == "-r" || arg(2) == "--release"
+    rel.then({
+        profile_release_set()
+    })
+    s := rel.match ({ true => 1, false => 0 })
+    (arg(2 + s) == "--target" && arg(3 + s) == "js").match ({
         true  => {
-            out := (arg(5) == "-o").match ({ true => arg(6), false => "a.js" })
-            mp.build_js(root, arg(4), out)
+            out := (arg(5 + s) == "-o").match ({ true => arg(6 + s), false => "a.js" })
+            mp.build_js(root, arg(4 + s), out)
         },
-        false => (arg(2) == "--target").match ({
-            true  => mp.build_named_plan(root, arg(4), arg(3)),
-            false => file_exists(mp.join2(arg(2), "build.zen")).match ({
-                true  => mp.build_all_plan(root, arg(2)),
-                false => mp.build_spec(root, mp.resolve_spec(root, arg(2)), arg(3), arg(4)),
-            }),
+        false => (arg(2 + s) == "--target").match ({
+            true  => mp.build_named_plan(root, proj_dir(arg(4 + s)), arg(3 + s)),
+            false => {
+                dir := proj_dir(arg(2 + s))
+                file_exists(mp.join2(dir, "build.zen")).match ({
+                    true  => mp.build_all_plan(root, dir),
+                    false => mp.build_spec(root, mp.resolve_spec(root, dir), arg(3 + s), arg(4 + s)),
+                })
+            },
         }),
     })
 }
@@ -982,7 +1032,11 @@ append_run_args = (s: String, mp: MutPtr<Malloc>, i: i32, n: i32) String {
 // `zenc run <file> a b c` — everything after the source path is forwarded to the program's argv
 // (arg(3)..; the program reads it back via std.sys.os.arg(i)/argc(), argv[0] being the temp binary).
 run_command = (mp: MutPtr<Malloc>, bin: string_view) string_view {
-    mp.gstr_string(128).gstr_append(mp, bin).append_run_args(mp, 3, argc()).gstr_finish(mp)
+    mp
+        .gstr_string(128)
+        .gstr_append(mp, bin)
+        .append_run_args(mp, 3, argc())
+        .gstr_finish(mp)
 }
 run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
     spec.ok.match ({
@@ -1019,7 +1073,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     (e == "").match ({ true => mp.dirname(arg(0)), false => e })
 }
 HELP = () string_view {
-    "usage: zenc <run|build|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build <project>                 build its registered default targets\n  zenc build --target <name> <project> build one registered target\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  cat file.zen | zenc   (source -> C filter)\n"
+    "usage: zenc <run|build|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
 }
 VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
 main = () i32 {
@@ -1037,13 +1091,13 @@ main = () i32 {
                 say(VERSION())
                 0
             },
-            false => (cmd == "--build-self").match ({
+            false => (cmd == "--build-self" || cmd == "--build-self-full").match ({
                 true  => (arg(2) == "").match ({
                     true  => {
-                        derr("usage: zenc --build-self <out.c> <srcroot>\n")
+                        derr("usage: zenc --build-self[-full] <out.c> <srcroot>\n")
                         2
                     },
-                    false => mp.build_self(arg(3), arg(2)),
+                    false => mp.build_self(arg(3), arg(2), cmd == "--build-self"),
                 }),
                 false => (cmd == "emit").match ({
                     true  => mp.emit_file(root, arg(2), arg(3)),
@@ -1056,7 +1110,7 @@ main = () i32 {
                                 false => (cmd == "build").match ({
                                     true  => mp.build_target(root),
                                     false => (cmd == "targets").match ({
-                                        true  => mp.list_plan_targets(root, arg(2)),
+                                        true  => mp.list_plan_targets(root, proj_dir(arg(2))),
                                         false => (cmd == "fmt").match ({
                                             true  => mp.fmt_cmd(arg(2), arg(3)),
                                             false => (cmd == "doc").match ({
@@ -1346,6 +1400,7 @@ bs_emit_checked = (
     flat: string_view,
     entry: string_view,
     esrc: string_view,
+    shake: bool,
 ) i32 {
     rp := mp.resolve_prog(root, entry, esrc)
     (mp.report_no_if_resolved(rp, entry, esrc) == 0).match ({
@@ -1354,7 +1409,9 @@ bs_emit_checked = (
             decls := mp.resolve_module(raw)
             (mp.report_check(raw, decls, rp, entry, esrc) == 0).match ({
                 true  => {
-                    gen := mp.genModuleIn(mp.resolve_module(mp.parse_module(flat)))    // type error in compiler source — fail, don't regenerate a miscompiled seed
+                    rawf := mp.parse_module(flat)
+                    kept := shake.match ({ true => mp.bs_shake(rawf), false => rawf })
+                    gen := mp.genModuleIn(mp.resolve_module(kept))    // type error in compiler source — fail, don't regenerate a miscompiled seed
                     gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
                         true  => bs_write(out_path, gen).match ({ true => 0, false => 1 }),
                         false => {
@@ -1369,7 +1426,149 @@ bs_emit_checked = (
         false => 1,
     })
 }
-build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view) i32 {
+// ── --build-self tree-shake: emit only decls reachable from `main` ────────────────────────────────
+// Reuses the `zen audit` reachability fixpoint (AudCtx + the aud_* walkers) over the manifest flat:
+// the dual raw+resolved walk, the bare-method-name fanout (aud_mref) and the live-type -> impl-method
+// fanout (aud_implms). Kept regardless of reachability (the audit's documented exemption classes, all
+// in the keep direction): DRaw escapes, DImport records, DForeign prototypes, module-alias binds,
+// `__`-prefixed decls, DImpl conformance records whose type is live (or a builtin receiver with no
+// type decl to anchor), trait defaults of live traits, and the bare/alias twin of any live name (both
+// copies come from the same source line). bs_close then re-walks every KEPT decl until the seen set
+// stops growing, so the kept set is reference-closed: no emitted decl can reference a dropped one.
+// `--build-self-full` bypasses the shake (the fat seed, every manifest decl).
+bs_trait_live = (ac: MutPtr<AudCtx>, trname: string_view) bool {
+    neg1: i64 := 0 - 1
+    ac.ridx.get(trname, neg1) < 0 || ac.seen.has(trname)
+}
+// mark a kept-for-a-reason name live when the fixpoint alone did not reach it: `__`-synthesized
+// decls, and the bare/alias twin of a live name (same source line, so it is emitted either way).
+bs_root_twin = (ac: MutPtr<AudCtx>, tails: Map<i64>, nm: string_view) void {
+    nta := nm.aud_tail_at()
+    twin := tails.has(nm) || nta > 0 && ac.seen.has(cstr(offset(nm, nta)))
+    (is_empty(nm) == false && (nm.starts_with("__") || twin)).then({
+        ac.aud_ref(nm)
+    })
+}
+// one closure sweep: walk every decl the emission filter keeps unconditionally, so their references
+// join the live set (DForeign signature types, live-trait default bodies, alias binds, twins).
+bs_root_kept = (ac: MutPtr<AudCtx>, tails: Map<i64>, d: Decl) void {
+    d.match ({
+        .DForeign(f)       => ac.aud_walk_sig(f),
+        .DTraitDefault(td) => ac.bs_trait_live(td.trname).then({
+            ac.aud_walk_fn(td.fn)
+        }),
+        .DImpl(im)         => { },
+        .DGlobal(g)        => {
+            g.alias.then({
+                ac.aud_ref(g.name)
+            })
+            ac.bs_root_twin(tails, g.name)
+        },
+        _                  => ac.bs_root_twin(tails, d.aud_decl_name()),
+    })
+}
+// `__`-tail set of the live names, rebuilt per sweep (aud_run's twin-suppression set, keep direction).
+bs_tails = (ac: MutPtr<AudCtx>) Map<i64> {
+    seedv: i64 := 0 - 1
+    tails := of(ac.mp, "", seedv).expect("build-self: oom")
+    ac.seen.keys().loop((h, i, k) {
+        ta := k.aud_tail_at()
+        (ta > 0).then({
+            one: i64 := 1
+            tails = tails.put(ac.mp, cstr(offset(k, ta)), one).expect("build-self: oom")
+        })
+    })
+    tails
+}
+// iterate bs_root_kept sweeps to a fixpoint: newly-live names can make more types live, which keeps
+// more impl blocks, whose methods reference more names — stop when the seen set stops growing.
+bs_close = (ac: MutPtr<AudCtx>, raw: [Decl]) void {
+    prev: i64 := 0 - 1
+    @while (ac.seen.keys().len != prev) {
+        prev = ac.seen.keys().len
+        tails := ac.bs_tails()
+        raw.loop((h, i, d) {
+            ac.bs_root_kept(tails, d)
+        })
+    }
+}
+// the emission filter over the closed live set: which raw manifest decls reach the seed.
+bs_keep = (ac: MutPtr<AudCtx>, d: Decl) bool {
+    neg1: i64 := 0 - 1
+    d.match ({
+        .DImpl(im)         => ac.ridx.get(im.ty, neg1) < 0 || ac.seen.has(im.ty),
+        .DTraitDefault(td) => ac.bs_trait_live(td.trname),
+        .DForeign(f)       => true,
+        _                  => {
+            nm := d.aud_decl_name()
+            is_empty(nm) || ac.seen.has(nm)
+        },
+    })
+}
+// reachability-filter the parsed manifest flat: root `main` (plus the `main(sys)` trampoline's `root`
+// and every impl on a builtin receiver, exactly as `zen audit` roots), run the aud_* fixpoint over
+// the raw AND resolved decls, close over the always-kept classes, then keep only what bs_keep passes.
+// The kept subset is re-resolved by the caller, so mono instances, lowered closures and materialized
+// trait defaults are re-synthesized for the surviving decls only.
+bs_shake = (mp: MutPtr<Malloc>, raw: [Decl]) [Decl] {
+    rdecls := mp.resolve_module(raw)
+    t := mp.aud_tables(raw)
+    seedv: i64 := 0 - 1
+    c := AudCtx(
+        mp: mp,
+        decls: raw,
+        rdecls: rdecls,
+        ridx: mp.aud_index(raw),
+        xidx: mp.aud_index(rdecls),
+        seen: of(mp, "", seedv).expect("build-self: oom"),
+        mseen: of(mp, "", seedv).expect("build-self: oom"),
+        pairs: t.pairs,
+        implms: t.implms,
+    )
+    ac := c.addr()
+    ac.aud_ref("main")
+    mi := c.ridx.get("main", 0 - 1)
+    (mi >= 0).then({
+        raw[mi].match ({
+            .DFunc(f) => {
+                (f.params.len > 0).then({
+                    ac.aud_mref("root")
+                })
+            },
+            _         => { },
+        })
+    })
+    raw.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => {
+                (c.ridx.get(im.ty, 0 - 1) < 0).then({
+                    ac.aud_ref(im.trname)
+                    im.methods.loop((h2, j, p) {
+                        ac.aud_ref(mp.impl_cname_in(im.trname, im.ty, p.name))
+                    })
+                })
+            },
+            _          => { },
+        })
+    })
+    ac.bs_close(raw)
+    n := 0
+    raw.loop((h, i, d) {
+        ac.bs_keep(d).then({
+            n = n + 1
+        })
+    })
+    kept := cbuf<Decl>(mp, n)
+    k := 0
+    raw.loop((h, i, d) {
+        ac.bs_keep(d).then({
+            kept[k] = d
+            k = k + 1
+        })
+    })
+    kept
+}
+build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view, shake: bool) i32 {
     mpath := mp.bs_join(root, "bootstrap/sources.txt")
     contents_in(mp, mpath).match ({
         .Ok(man) => {
@@ -1377,7 +1576,7 @@ build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view) i32 
             flat := mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
             entry := mp.bs_join(root, "driver.zen")
             contents_in(mp, entry).match ({
-                .Ok(esrc) => mp.bs_emit_checked(root, out_path, flat, entry, esrc),
+                .Ok(esrc) => mp.bs_emit_checked(root, out_path, flat, entry, esrc, shake),
                 .Err(e)   => {
                     derr("zenc: --build-self: cannot open driver.zen for validation\n")
                     1
@@ -2023,10 +2222,19 @@ Spec*: {
     ok: bool,
 }    // target: "" = native (host cc), else a cross triple like "aarch64-linux-gnu"
 join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
-    mp.gstr_string(256).gstr_append(mp, a).gstr_append(mp, "/").gstr_append(mp, b).gstr_finish(mp)
+    mp
+        .gstr_string(256)
+        .gstr_append(mp, a)
+        .gstr_append(mp, "/")
+        .gstr_append(mp, b)
+        .gstr_finish(mp)
 }
 link_flag = (mp: MutPtr<Malloc>, lk: string_view) string_view {
-    mp.gstr_string(8).gstr_append(mp, "-l").gstr_append(mp, lk).gstr_finish(mp)
+    mp
+        .gstr_string(8)
+        .gstr_append(mp, "-l")
+        .gstr_append(mp, lk)
+        .gstr_finish(mp)
 }
 // src[start .. start+n) as an owned str. (named cstr_* to avoid colliding with std.text.str's
 // generic `substr` once the modules are flattened together — a plain `substr` would emit a second
@@ -2158,7 +2366,10 @@ source_words = (mp: MutPtr<Malloc>, dir: string_view, v: [u8], i: i64, out: Stri
             true  => mp.source_words(dir, v, i + 1, out),
             false => {
                 e := v.source_word_end(i)
-                prefixed := (v[i] == '/').match ({
+                // a `-`-prefixed word is a cc flag (Target.cflags / `-l` link input), passed
+                // through verbatim; anything else names a project-relative extra .c source
+                // (absolute paths also pass through).
+                prefixed := (v[i] == '/' || v[i] == '-').match ({
                     true  => out,
                     false => out.gstr_append(mp, dir).gstr_append(mp, "/"),
                 })
@@ -3658,7 +3869,12 @@ aud_walk_expr = (ac: MutPtr<AudCtx>, e: Ptr<Expr>) void {
     })
 }
 aud_join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
-    mp.gstr_string(32).gstr_append(mp, a).gstr_append(mp, "__").gstr_append(mp, b).gstr_finish(mp)
+    mp
+        .gstr_string(32)
+        .gstr_append(mp, a)
+        .gstr_append(mp, "__")
+        .gstr_append(mp, b)
+        .gstr_finish(mp)
 }
 // ── audit fanout tables ───────────────────────────────────────────────────────────────────────────
 // One prepass over the raw decls builds:
