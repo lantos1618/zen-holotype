@@ -1709,9 +1709,6 @@ hide_param = (a: MutPtr<Malloc>, params: [Param], name: string_view) [Param] {
         },
     })
 }
-local_marks = (a: MutPtr<Malloc>, s: String, n: i64) String {
-    n <= 0 ? s : a.local_marks(s.gstr_append(a, "_"), n - 1)
-}
 // inline-expansion scope marks: the chain of functions currently being inlined (env's empty-named
 // markers, pushed by inline_template). Distinguishes locals from DIFFERENT inlined functions that
 // share a param-count depth — e.g. cenode and cebuf both at depth 2 would otherwise rename their
@@ -1726,14 +1723,29 @@ inline_marks = (a: MutPtr<Malloc>, s: String, env: Ptr<VList>) String {
         }),
     })
 }
+// COMPACT rename encoding: `_z<depth><markers>_<name>` (arg binds `_za<idx><markers>_<name>`).
+// Exactly the same uniqueness inputs as the old `__zen_local…` accumulation — the inline-marker
+// chain, a per-rename depth/index, and the original name — but ~5 bytes per rename level instead
+// of 12+depth: the magic prefix is 2 bytes ("__zen_local" was 11), and the depth renders as
+// decimal digits (omitted when 0; the old scheme spent one `_` per depth level). Re-renaming an
+// already-compact name at the next inline level wraps it (`x` → `_z_x` → `_z__z_x`), exactly as
+// the old scheme wrapped, so capture-avoidance across levels is unchanged. Accumulated renamed
+// identifiers were 38% of the emitted seed's bytes (avg 31 chars, worst 83) before this encoding.
+name_marks = (
+    a: MutPtr<Malloc>,
+    s: String,
+    name: string_view,
+    env: Ptr<VList>,
+    depth: i64,
+) string_view {
+    out := depth > 0 ? s.gstr_int(a, depth) : s
+    out = a.inline_marks(out, env)
+    out = out.gstr_append(a, "_")
+    out = out.gstr_append(a, name)
+    out.gstr_finish(a)
+}
 local_name_at* = (a: MutPtr<Malloc>, name: string_view, env: Ptr<VList>, depth: i64) string_view {
-    s := a.gstr_string(128)
-    s = s.gstr_append(a, "__zen_local")
-    s = a.inline_marks(s, env)
-    s = a.local_marks(s, depth)
-    s = s.gstr_append(a, "_")
-    s = s.gstr_append(a, name)
-    s.gstr_finish(a)
+    a.name_marks(a.gstr_string(32).gstr_append(a, "_z"), name, env, depth)
 }
 add_subst_param* = (a: MutPtr<Malloc>, params: [Param], name: string_view) [Param] {
     base := a.hide_param(params, name)
@@ -1849,17 +1861,11 @@ arg_needs_bind = (e: Expr) bool {
 wr_param_bind = (params: [Param], wbody: [Stmt], i: i64) bool {
     params[i].ty.is_fnt() == false && wbody.wr_writes_name(params[i].name)
 }
-// Fresh C name for an arg-binding local: distinct "__zen_arg" prefix (never collides with body
-// "__zen_local"s), inline_marks keep it distinct across nested inline depths, the index keeps each
-// arg distinct within one inline.
+// Fresh C name for an arg-binding local: distinct "_za" prefix (never a valid "_z<digits>_…" body
+// local, since 'a' is neither a digit nor the marker separator), inline_marks keep it distinct
+// across nested inline depths, the index keeps each arg distinct within one inline.
 arg_local_name = (a: MutPtr<Malloc>, name: string_view, env: Ptr<VList>, idx: i64) string_view {
-    s := a.gstr_string(128)
-    s = s.gstr_append(a, "__zen_arg")
-    s = a.inline_marks(s, env)
-    s = a.local_marks(s, idx)
-    s = s.gstr_append(a, "_")
-    s = s.gstr_append(a, name)
-    s.gstr_finish(a)
+    a.name_marks(a.gstr_string(32).gstr_append(a, "_za"), name, env, idx)
 }
 // Bind every non-trivial arg to a generated local; return the rewritten fargs (the param-use
 // substitution targets), the binding Let statements to prepend to the body, and the env extended with
