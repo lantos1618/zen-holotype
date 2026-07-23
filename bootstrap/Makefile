@@ -33,7 +33,7 @@ endif
 # the ABI class of every foreign prototype against the real system headers); matching the builtins
 # exactly needs a size_t/void* mapping in the language — see STATUS.md's defects ledger. Every OTHER
 # warning is left enabled: no blanket -w.
-# -O2 -fno-strict-aliasing: matches the repo-root build.zen's default `zen` target. Measured on the
+# -O2 -fno-strict-aliasing: matches the driver's RELEASE build profile (`zen build -r`). Measured on the
 # seed: ~2x faster self-compile (--build-self 5.5s vs 10.3s at -O0), 17% smaller binary, byte-
 # identical emitted C, zero new warnings. -fno-strict-aliasing is REQUIRED with -O2: the emitted C
 # is void*-punning and relies on strict aliasing being off (-O0/-O1 keep it off implicitly).
@@ -58,9 +58,11 @@ $(ZENC): $(SOURCES) $(HEADERS) $(HERE)Makefile
 	$(CC) $(CFLAGS) $(SOURCES) -o $(ZENC).$$$$.tmp && mv -f $(ZENC).$$$$.tmp $(ZENC)
 
 # The self-hosted path: after bootstrap, zen builds zen through the repo-root build.zen (project
-# mode). Writes ./zen-next (-O2, the next-generation compiler) + ./zen-debug (-g); promote with
-# `mv zen-next zen`. This Makefile keeps only what CANNOT go through build.zen: the cc-seed
-# bootstrap above (no zen exists yet) and the seed-regen fixpoint below.
+# mode). Writes ./zen-next — the DEV profile (-O1 -g); `./zen build -r` builds the optimized
+# release (-O2 -fno-strict-aliasing). Promote with `mv zen-next zen`. This Makefile keeps only
+# what CANNOT go through build.zen: the cc-seed bootstrap above (no zen exists yet, and the seed
+# stays pinned -O2 regardless of profile — built once, used heavily) and the seed-regen fixpoint
+# below.
 build: zen
 	cd $(ROOT) && $(ZENC) build
 

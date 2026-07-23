@@ -15,7 +15,8 @@ zen:
 	$(BOOT) zen
 
 # zen builds zen: run the repo-root build.zen through the compiler's own project mode
-# (equivalent to `./zen build`; writes ./zen-next + ./zen-debug).
+# (equivalent to `./zen build`; writes a dev-profile ./zen-next — use `./zen build -r` for the
+# optimized release build).
 build:
 	$(BOOT) build
 
