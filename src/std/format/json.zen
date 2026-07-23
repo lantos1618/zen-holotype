@@ -162,10 +162,7 @@ hex4 = (sv: [u8], at: i64) i64 {
     d1 := hex_nibble(sv[at + 1])
     d2 := hex_nibble(sv[at + 2])
     d3 := hex_nibble(sv[at + 3])
-    (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0).match ({
-        true  => 0 - 1,
-        false => d0 * 4096 + d1 * 256 + d2 * 16 + d3,
-    })
+    d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0 ? 0 - 1 : d0 * 4096 + d1 * 256 + d2 * 16 + d3
 }
 // UTF-8 encode a BMP code point into the builder (1, 2, or 3 bytes).
 push_utf8<A> = (a: MutPtr<A>, sb: String, cp: i64) String {
@@ -295,10 +292,7 @@ parse_string_raw<A> = (
         })
     })
     (endpos < 0).match ({
-        true  => (errpos >= 0).match ({
-            true  => err(.BadString(errpos)),
-            false => err(.UnexpectedEof),
-        }),
+        true  => errpos >= 0 ? err(.BadString(errpos)) : err(.UnexpectedEof),
         false => sstep_ok(sb.finish_in(a).jfin(), endpos),
     })
 }
@@ -318,7 +312,7 @@ parse_lit = (sv: [u8], pos: i64, word: string_view, v: Value) Result<Step, JsonE
             },
         })
     })
-    ok.match ({ true => step_ok(v, pos + wv.len), false => err(.BadLiteral(pos)) })
+    ok ? step_ok(v, pos + wv.len) : err(.BadLiteral(pos))
 }
 parse_number<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
     endp: i64 := pos
@@ -439,10 +433,7 @@ obj_loop<A> = (
                 .Ok(ks) => {
                     q := sv.skip_ws(ks.pos)
                     (q >= sv.len || sv[q] != ':').match ({
-                        true  => (q >= sv.len).match ({
-                            true  => err(.UnexpectedEof),
-                            false => err(.Unexpected(q)),
-                        }),
+                        true  => q >= sv.len ? err(.UnexpectedEof) : err(.Unexpected(q)),
                         false => a.parse_value(src, sv, q + 1, depth + 1).match ({
                             .Err(e) => err(e),
                             .Ok(st) => {
@@ -525,10 +516,7 @@ parse*<A> = (a: MutPtr<A>, s: string_view) Result<Value, JsonError> {
         },
         .Ok(st) => {
             p := sv.skip_ws(st.pos)
-            r: Result<Value, JsonError> := (p < sv.len).match ({
-                true  => .Err(.TrailingGarbage(p)),
-                false => .Ok(st.v),
-            })
+            r: Result<Value, JsonError> := p < sv.len ? .Err(.TrailingGarbage(p)) : .Ok(st.v)
             r
         },
     })
@@ -582,10 +570,7 @@ write_esc_byte<A> = (a: MutPtr<A>, sb: String, b: u8) String {
                             .jok()
                             .push_in(a, 'r')
                             .jok(),
-                        false => (b < 32).match ({
-                            true  => a.write_u_esc(sb, b),
-                            false => sb.push_in(a, b).jok(),
-                        }),
+                        false => b < 32 ? a.write_u_esc(sb, b) : sb.push_in(a, b).jok(),
                     }),
                 }),
             }),
@@ -645,10 +630,7 @@ write_obj<A> = (a: MutPtr<A>, sb: String, o: Object) String {
 write_value<A> = (a: MutPtr<A>, sb: String, v: Value) String {
     v.match ({
         .Null    => sb.append_in(a, "null").jok(),
-        .Bool(b) => b.match ({
-            true  => sb.append_in(a, "true").jok(),
-            false => sb.append_in(a, "false").jok(),
-        }),
+        .Bool(b) => b ? sb.append_in(a, "true").jok() : sb.append_in(a, "false").jok(),
         .Num(n)  => sb
             .append_in(a, a
                 .float_in(n)
@@ -687,7 +669,7 @@ obj_find = (o: Object, key: string_view) i64 {
 // Object member lookup: .Some(value) if `key` is present, else .None.
 obj_get = (o: Object, key: string_view) Opt<Value> {
     i := o.obj_find(key)
-    out: Opt<Value> := (i < 0).match ({ true => .None, false => .Some(o.entries[i].val) })
+    out: Opt<Value> := i < 0 ? .None : .Some(o.entries[i].val)
     out
 }
 // Member lookup on a Value: .Some(value) if it is an Obj containing `key`, else .None.

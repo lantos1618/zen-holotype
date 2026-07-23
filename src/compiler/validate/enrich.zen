@@ -26,7 +26,7 @@ fn_dup_before* = (decls: [Decl], name: string_view, upto: i64) bool {
     f := false
     decls.loop((h, i, d) {
         f = (i < upto).match ({
-            true  => (d.fn_name_of() == name).match ({ true => true, false => f }),
+            true  => d.fn_name_of() == name ? true : f,
             false => f,
         })
     })
@@ -66,10 +66,7 @@ denrich_tparam_shape = (env: Env, pty: Ty, v: Ptr<Expr>) string_view {
     pty.is_ptr_ty_g().match ({
         true  => {
             vt := env.infer_expr(v)
-            (env.unknown_ty(vt) || gen_ptr_arg_fits(vt, pty)).match ({
-                true  => "",
-                false => env.a.denrich_fit_msg(pty, vt),
-            })
+            env.unknown_ty(vt) || gen_ptr_arg_fits(vt, pty) ? "" : env.a.denrich_fit_msg(pty, vt)
         },
         false => "",
     })
@@ -101,10 +98,7 @@ denrich_argfit_msg = (env: Env, c: CallData, off: i32) string_view {
 // one comma-list step: the first name bare, every later one prefixed with ", ". Shared by the
 // field-list and missing-method-list renderers so the list shape cannot drift between them.
 denrich_comma_name = (s: String, a: MutPtr<Malloc>, first: bool, name: string_view) String {
-    first.match ({
-        true  => s.gstr_append(a, name),
-        false => s.gstr_append(a, ", ").gstr_append(a, name),
-    })
+    first ? s.gstr_append(a, name) : s.gstr_append(a, ", ").gstr_append(a, name)
 }
 denrich_fieldlist = (a: MutPtr<Malloc>, fields: [Field]) string_view {
     s := a.gstr_string(64)
@@ -214,8 +208,8 @@ denrich_missing_list = (
                 && decls.trait_has_default(tr, f.name) == false,
             _        => false,
         })
-        s = miss.match ({ true => s.denrich_comma_name(a, n == 0, f.name), false => s })
-        n = miss.match ({ true => n + 1, false => n })
+        s = miss ? s.denrich_comma_name(a, n == 0, f.name) : s
+        n = miss ? n + 1 : n
     })
     s.gstr_finish(a)
 }
@@ -270,7 +264,7 @@ denrich_bound_violation = (env: Env, f: Func, c: CallData, tp: Param) string_vie
 denrich_bound_msg = (env: Env, f: Func, c: CallData) string_view {
     res := ""
     f.tparams.loop((h, i, tp) {
-        res = is_empty(res).match ({ true => env.denrich_bound_violation(f, c, tp), false => res })
+        res = is_empty(res) ? env.denrich_bound_violation(f, c, tp) : res
     })
     res
 }
@@ -327,7 +321,7 @@ denrich_bad_init = (fields: [Field], inits: [FieldInit]) string_view {
     bad := ""
     inits.loop((h, i, fi) {
         bad = is_empty(bad).match ({
-            true  => fields.has_field(fi.name).match ({ true => "", false => fi.name }),
+            true  => fields.has_field(fi.name) ? "" : fi.name,
             false => bad,
         })
     })
@@ -339,10 +333,7 @@ denrich_makestruct_msg = (env: Env, sd: MakeStructData) string_view {
         true  => {
             fields := env.env_struct_fields(sd.ty)
             bad := fields.denrich_bad_init(sd.inits)
-            is_empty(bad).match ({
-                true  => "",
-                false => a.denrich_struct_nofield(sd.ty, bad, fields),
-            })
+            is_empty(bad) ? "" : a.denrich_struct_nofield(sd.ty, bad, fields)
         },
         false => "",
     })
@@ -431,10 +422,7 @@ denrich_targ_arity_msg = (env: Env, c: CallData) string_view {
 denrich_makestruct_targ_msg = (env: Env, sd: MakeStructData) string_view {
     env.env_is_gen_struct(sd.ty).match ({
         true  => env.a.denrich_targ_count_msg(env.env_gstruct(sd.ty).tparams.len, sd.targs.len),
-        false => env.env_is_struct(sd.ty).match ({
-            true  => env.a.denrich_targ_count_msg(0, sd.targs.len),
-            false => "",
-        }),
+        false => env.env_is_struct(sd.ty) ? env.a.denrich_targ_count_msg(0, sd.targs.len) : "",
     })
 }
 // ── exhaustiveness enrichment: name a variant the match fails to cover ─────────────────────────
@@ -489,16 +477,10 @@ denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) 
             false => a.denrich_expr(env, ar.obj, off, code),
         }),
         .MakeStruct(sd) => (code == KSTRUCTFIELD()
-            && sd.pos.pos_or((sd.inits.len == 0).match ({
-                true  => 0,
-                false => load(sd.inits[0].value).expr_pos(),
-            })) == off).match ({
+            && sd.pos.pos_or(sd.inits.len == 0 ? 0 : load(sd.inits[0].value).expr_pos()) == off).match ({
             true  => env.denrich_makestruct_msg(sd),
             false => (code == KTARGARITY()
-                && sd.pos.pos_or((sd.inits.len == 0).match ({
-                    true  => 0,
-                    false => load(sd.inits[0].value).expr_pos(),
-                })) == off).match ({
+                && sd.pos.pos_or(sd.inits.len == 0 ? 0 : load(sd.inits[0].value).expr_pos()) == off).match ({
                 true  => env.denrich_makestruct_targ_msg(sd),
                 false => a.denrich_inits(env, sd.inits, off, code),
             }),
@@ -511,10 +493,7 @@ denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) 
         .Match(m)       => {
             subjty := env.infer_expr(m.subj)
             sp := load(m.subj).expr_pos().pos_or(m.arms.arms_first_pos())
-            desc_or((code == KEXHAUST() && sp == off).match ({
-                true  => env.denrich_exhaust_msg(m),
-                false => "",
-            }), desc_or(a.denrich_expr(env, m.subj, off, code), a.denrich_arms(env, subjty, m.arms, off, code)))
+            desc_or(code == KEXHAUST() && sp == off ? env.denrich_exhaust_msg(m) : "", desc_or(a.denrich_expr(env, m.subj, off, code), a.denrich_arms(env, subjty, m.arms, off, code)))
         },
         .Block(b)       => a.denrich_body(env, b.stmts, off, code),
         .Loop(l)        => desc_or(a.denrich_expr(env, l.seq, off, code), a.denrich_body(a.loop_env(env, l), l.body, off, code)),
@@ -600,10 +579,7 @@ denrich_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, off: i32, code: i32) stri
         .While(w)    => desc_or(a.denrich_expr(env, w.c, off, code), a.denrich_body(env, w.body, off, code)),
         .IndexSet(x) => {
             ip := x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos())
-            desc_or((code == KASSIGNFIT() && ip == off).match ({
-                true  => env.denrich_valfit(x.elem, x.value),
-                false => "",
-            }), desc_or(a.denrich_expr(env, x.seq, off, code), desc_or(a.denrich_expr(env, x.idx, off, code), a.denrich_expr(env, x.value, off, code))))
+            desc_or(code == KASSIGNFIT() && ip == off ? env.denrich_valfit(x.elem, x.value) : "", desc_or(a.denrich_expr(env, x.seq, off, code), desc_or(a.denrich_expr(env, x.idx, off, code), a.denrich_expr(env, x.value, off, code))))
         },
     })
 }
@@ -744,10 +720,7 @@ reserved_name_of* = (decls: [Decl]) string_view {
     decls.loop((h, i, d) {
         n = is_empty(n).match ({
             true  => d.match ({
-                .DFunc(f) => (f.name.is_intrinsic() && reserved_ok_wrapper(f) == false).match ({
-                    true  => f.name,
-                    false => "",
-                }),
+                .DFunc(f) => f.name.is_intrinsic() && reserved_ok_wrapper(f) == false ? f.name : "",
                 _         => "",
             }),
             false => n,

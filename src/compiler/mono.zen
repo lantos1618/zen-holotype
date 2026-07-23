@@ -38,7 +38,7 @@ find_genstruct = (decls: [Decl], name: string_view) GenStructDecl {
     )
     decls.loop((h, i, d) {
         found = d.match ({
-            .DGenStruct(g) => (g.name == name).match ({ true => g, false => found }),
+            .DGenStruct(g) => g.name == name ? g : found,
             _              => found,
         })
     })
@@ -97,10 +97,7 @@ is_genstruct_name = (decls: [Decl], name: string_view) bool {
 // whose imported generics aren't loaded); the CHECKED pipeline rejects an undefined generic ctor
 // up front (check_validate's mkenum_err/KUNDEFINED), so a hollow decl never reaches a user build.
 mono_inst = (a: MutPtr<Malloc>, decls: [Decl], g: GenericData) Decl {
-    decls.is_genstruct_name(g.name).match ({
-        true  => a.mono_struct(decls, g),
-        false => a.mono_enum(decls, g),
-    })
+    decls.is_genstruct_name(g.name) ? a.mono_struct(decls, g) : a.mono_enum(decls, g)
 }
 // discovery: scan all typed positions for generic instances, deduped by mangled name.
 // gd_has_mangled (dedup scan) + gd_ty_depth/gd_tys_max_depth (type-arg nesting depth) are
@@ -127,10 +124,7 @@ add_inst = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
 }
 collect_ty = (buf: [GenericData], cnt: i32, t: Ty) i32 {
     t.match ({
-        .Generic(g) => buf.gd_has_mangled(cnt, g.mangled).match ({
-            true  => cnt,
-            false => buf.add_inst(cnt, g),
-        }),
+        .Generic(g) => buf.gd_has_mangled(cnt, g.mangled) ? cnt : buf.add_inst(cnt, g),
         .Ptr(pd)    => buf.collect_ty(cnt, load(pd.pointee)),
         .Slice(e)   => buf.collect_ty(cnt, load(e)),
         _           => cnt,
@@ -147,7 +141,7 @@ collect_decl = (buf: [GenericData], cnt: i32, d: Decl) i32 {
     d.match ({
         .DStruct(sd) => buf.collect_flds(cnt, sd.fields),
         .DEnum(ed)   => buf.collect_pays(cnt, ed.variants),    // a generic instance can hide in a variant payload
-        .DFunc(f)    => f.is_generic_fn().match ({ true => cnt, false => buf.collect_func(cnt, f) }),    // a generic fn is inlined; skip its T-params
+        .DFunc(f)    => f.is_generic_fn() ? cnt : buf.collect_func(cnt, f),    // a generic fn is inlined; skip its T-params
         _            => cnt,
     })
 }
@@ -176,7 +170,7 @@ collect_func = (buf: [GenericData], cnt: i32, f: Func) i32 {
 //    signatures. A `b := Box<i32>{…}` with no typed param/return still needs Box_i32 emitted. A
 //    MakeStruct with type args carries its instance (ty + targs + mangled mty); recurse everywhere. ──
 add_gen = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
-    buf.gd_has_mangled(cnt, g.mangled).match ({ true => cnt, false => buf.add_inst(cnt, g) })
+    buf.gd_has_mangled(cnt, g.mangled) ? cnt : buf.add_inst(cnt, g)
 }
 collect_exprs = (buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
     c := cnt
@@ -305,7 +299,7 @@ expand_one = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, 
     a.expand_insts(decls, buf, nc, i + 1)
 }
 expand_insts = (a: MutPtr<Malloc>, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
-    (i >= count).match ({ true => count, false => a.expand_one(decls, buf, count, i) })
+    i >= count ? count : a.expand_one(decls, buf, count, i)
 }
 // monomorphize: drop the generic templates, append one concrete struct/enum per discovered instance.
 monomorphize* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
@@ -314,10 +308,10 @@ monomorphize* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     out := cbuf<Decl>(a, decls.len + cnt)
     k := 0
     decls.loop((h, i, d) {
-        k = d.is_gen_template().match ({ true => k, false => out.put_decl(k, d) })
+        k = d.is_gen_template() ? k : out.put_decl(k, d)
     })
     ce.buf.loop((h, i, g) {
-        k = (i < cnt).match ({ true => out.put_decl(k, a.mono_inst(decls, g)), false => k })
+        k = i < cnt ? out.put_decl(k, a.mono_inst(decls, g)) : k
     })
     slice(out.ptr, k)
 }

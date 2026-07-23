@@ -112,7 +112,7 @@ jw_owned = (a: MutPtr<DynAlloc>, st: JwSt, r: Result<String, IoError>) JwSt {
 jw_int = (a: MutPtr<DynAlloc>, st: JwSt, n: i64) JwSt { a.jw_owned(st, a.integer_in(n)) }
 jw_f64 = (a: MutPtr<DynAlloc>, st: JwSt, x: f64) JwSt { a.jw_owned(st, a.float_in(x)) }
 jw_bool = (a: MutPtr<DynAlloc>, st: JwSt, b: bool) JwSt {
-    b.match ({ true => a.jw_txt(st, "true"), false => a.jw_txt(st, "false") })
+    b ? a.jw_txt(st, "true") : a.jw_txt(st, "false")
 }
 // ── minimal string escaping: backslash, quote, newline, tab ──────────────────────────────
 // Deliberately NOT std.text.ascii.escape_into (the per-byte scan the backends/formatter share):
@@ -124,10 +124,7 @@ jw_esc = (a: MutPtr<DynAlloc>, st: JwSt, b: u8) JwSt {
         true  => a.jw_byte(out, '"'),
         false => (b == '\\').match ({
             true  => a.jw_byte(out, '\\'),
-            false => (b == '\n').match ({
-                true  => a.jw_byte(out, 'n'),
-                false => a.jw_byte(out, 't'),
-            }),
+            false => b == '\n' ? a.jw_byte(out, 'n') : a.jw_byte(out, 't'),
         }),
     })
 }
@@ -148,7 +145,7 @@ jw_str = (a: MutPtr<DynAlloc>, st: JwSt, s: string_view) JwSt {
 }
 // one "key": prefix (comma-separated), shared by both writers.
 jw_key = (a: MutPtr<DynAlloc>, st: JwSt, name: string_view, first: bool) JwSt {
-    out := first.match ({ true => st, false => a.jw_byte(st, ',') })
+    out := first ? st : a.jw_byte(st, ',')
     a.jw_byte(a.jw_str(out, name), ':')
 }
 // ── scalar dispatch: `JsonWrite` impls ONLY — no free fallback generic may share this
@@ -346,6 +343,6 @@ from_json_nested*<T> = (a: MutPtr<DynAlloc>, s: string_view, seed: T) Result<T, 
         leaf.each_field((n2, fv2) { fv2 = fv2.jr_scalar(x.get(n2).jv_or_null()) })
         fv = leaf
     })
-    out: Result<T, JsonError> := got.match ({ true => .Ok(w), false => .Err(perr) })
+    out: Result<T, JsonError> := got ? .Ok(w) : .Err(perr)
     out
 }

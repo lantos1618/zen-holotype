@@ -25,45 +25,46 @@ ff_is_cmp_op = (op: string_view) bool {
 ff_is_shift_op = (op: string_view) bool { op == "<<" || op == ">>" }
 ff_is_add_op = (op: string_view) bool { op == "+" || op == "-" }
 ff_op_prec = (op: string_view) i32 {
-    (op == "||").then({
-        return 1
+    (op == "||").match ({
+        true  => 1,
+        false => (op == "&&").match ({
+            true  => 2,
+            false => ff_is_cmp_op(op).match ({
+                true  => 3,
+                false => (op == "|").match ({
+                    true  => 4,
+                    false => (op == "^").match ({
+                        true  => 5,
+                        false => (op == "&").match ({
+                            true  => 6,
+                            false => ff_is_shift_op(op).match ({
+                                true  => 7,
+                                false => ff_is_add_op(op) ? 8 : 9,
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
     })
-    (op == "&&").then({
-        return 2
-    })
-    ff_is_cmp_op(op).then({
-        return 3
-    })
-    (op == "|").then({
-        return 4
-    })
-    (op == "^").then({
-        return 5
-    })
-    (op == "&").then({
-        return 6
-    })
-    ff_is_shift_op(op).then({
-        return 7
-    })
-    ff_is_add_op(op).then({
-        return 8
-    })
-    9
 }
 ff_expr_prec = (e: Expr) i32 {
     e.match ({
-        .Bin(b) => ff_op_prec(b.op),
-        _       => 100,
+        .Bin(b)  => ff_op_prec(b.op),
+        .Cond(d) => 0,    // `c ? t : e` binds loosest of all — as ANY Bin operand it needs parens
+        _        => 100,
     })
 }
 ff_is_bin = (e: Expr) bool {
     e.match ({
-        .Bin(b) => true,
-        _       => false,
+        .Bin(b)  => true,
+        .Cond(d) => true,    // a Cond may print as a ternary, which binds looser than any postfix
+        _        => false,
     })
 }
-// a postfix receiver: wrap iff the receiver is a (lower-precedence) Bin
+// a postfix receiver: wrap iff the receiver is a (lower-precedence) Bin or a Cond — a Cond may
+// render as `c ? a : b`, so `(c ? a : b).method()` needs the parens to keep `.method` off the
+// else-arm (the match-form rendering tolerates the parens; the ternary rendering requires them).
 ff_recv* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
     ff_is_bin(load(e)).match ({
         true  => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"),
@@ -123,11 +124,8 @@ ff_operand = (
     ind: i32,
 ) String {
     cp := ff_expr_prec(load(e))
-    needp := right.match ({ true => cp <= parent, false => cp < parent })
-    needp.match ({
-        true  => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"),
-        false => s.ff_expr(a, e, ind),
-    })
+    needp := right ? cp <= parent : cp < parent
+    needp ? s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")") : s.ff_expr(a, e, ind)
 }
 // ── expressions ────────────────────────────────────────────────────────────────
 ff_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
@@ -161,7 +159,7 @@ ff_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
 ff_args = (s: String, a: MutPtr<Malloc>, args: [Expr], ind: i32) String {
     out := s
     args.loop((h, i, ar) {
-        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = i == 0 ? out : out.ff_append(a, ", ")
         out = out.ff_expr(a, ar.addr(), ind)
     })
     out
@@ -238,17 +236,39 @@ ff_mcall = (s: String, a: MutPtr<Malloc>, mc: MethodCallData, ind: i32) String {
     s.ff_mcall_inline(a, mc, ind)
 }
 ff_call = (s: String, a: MutPtr<Malloc>, c: CallData, ind: i32) String {
-    head := c.raw.match ({ true => s.ff_append(a, "@"), false => s })
+    head := c.raw ? s.ff_append(a, "@") : s
     head
         .ff_tyname(a, c.fn, c.targs)
         .ff_append(a, "(")
         .ff_args(a, c.args, ind)
         .ff_append(a, ")")
 }
-// Bool `.match` lowers to Cond. Keep genuinely short exhaustive forms inline, but expand a long/nested
-// result exactly like an enum match instead of letting recursive `false => cond` chains become giant lines.
-// An invalid false-only match remains visible for diagnostics; true-only effects canonicalize to `.then`.
+// Bool `.match` lowers to Cond. A short exhaustive two-arm form CANONICALIZES to the ternary
+// expression `c ? t : e` (the parse-level sugar for the same node) when both arms are plain
+// expressions; long/nested bodies keep the multiline `.match` form for readability, and a
+// block-bodied arm keeps the `.match` spelling (a brace block cannot be a ternary operand).
+// An invalid one-armed match remains visible for diagnostics; one-way effects canonicalize to `.then`.
+// The ternary CONDITION prints bare: it sits below `||`, so any Bin condition reparses unwrapped;
+// a Cond condition never reaches here (ff_cond_nested forces the multiline form, whose ff_recv
+// re-parenthesizes it).
+ff_tern_arm_ok = (e: Expr) bool {
+    e.match ({
+        .Block(b) => false,
+        _         => true,
+    })
+}
+ff_cond_ternary_ok* = (d: CondData) bool {
+    d.oa == 0 && ff_tern_arm_ok(load(d.t)) && ff_tern_arm_ok(load(d.e))
+}
 ff_cond_inline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
+    d.ff_cond_ternary_ok().then({
+        return s
+            .ff_expr(a, d.c, ind)
+            .ff_append(a, " ? ")
+            .ff_expr(a, d.t, ind)
+            .ff_append(a, " : ")
+            .ff_expr(a, d.e, ind)
+    })
     (d.oa == 1).match ({
         true  => s
             .ff_recv(a, d.c, ind)
@@ -274,10 +294,7 @@ ff_cond_inline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
 ff_cond_multiline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
     rp := left_pos_of(d.c)
     head := s.ff_recv(a, d.c, ind).ff_append(a, ".match ({")
-    withc := d.gf_cond_open_cmt().match ({
-        true  => head.ff_open_trailing(a, gf_line_of(rp)),
-        false => head,
-    })
+    withc := d.gf_cond_open_cmt() ? head.ff_open_trailing(a, gf_line_of(rp)) : head
     open := withc.ff_append(a, "\n")
     body := (d.oa == 1).match ({
         true  => open
@@ -341,7 +358,7 @@ ff_then* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
             .ff_append(a, " == false)"),
         false => s.ff_recv(a, d.c, ind),
     })
-    body := neg.match ({ true => d.e, false => d.t })
+    body := neg ? d.e : d.t
     recv.ff_append(a, ".then(").ff_then_body(a, body, ind).ff_append(a, ")")
 }
 // `fmt` is the mechanical fix for either illegal one-arm spelling and for exhaustive matches whose other
@@ -387,8 +404,19 @@ ff_nested_control = (e: Expr) bool {
         _         => false,
     })
 }
+ff_is_cond = (e: Expr) bool {
+    e.match ({
+        .Cond(d) => true,
+        _        => false,
+    })
+}
+// A Cond CONDITION that is itself a Cond also counts as nested: an inline ternary condition must
+// not render `a ? x : y ? t : e` (right-assoc would re-group it); the multiline `.match` form's
+// ff_recv re-parenthesizes it instead.
 ff_cond_nested* = (d: CondData) bool {
-    d.oa != 2 && ff_nested_control(load(d.t)) || d.oa != 1 && ff_nested_control(load(d.e))
+    ff_is_cond(load(d.c))
+        || d.oa != 2 && ff_nested_control(load(d.t))
+        || d.oa != 1 && ff_nested_control(load(d.e))
 }
 // a type name, with explicit `<T, …>` args when this is a GENERIC literal (`Rc<Node>`, `Box<i32>`) —
 // the parser records the args in `targs`, and dropping them would lose the type info monomorphization
@@ -425,17 +453,14 @@ ff_is_anon_positional_inits = (a: MutPtr<Malloc>, ms: MakeStructData) bool {
 ff_anon_ctor_args = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
     out := s
     inits.loop((h, i, fi) {
-        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = i == 0 ? out : out.ff_append(a, ", ")
         out = out.ff_expr(a, fi.value, ind)
     })
     out
 }
 // `.variant(payload)` (or `Ty.variant(payload)` when the enum type is explicit)
 ff_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData, ind: i32) String {
-    head := is_empty(m.ty).match ({
-        true  => s.ff_append(a, "."),
-        false => s.ff_tyname(a, m.ty, m.targs).ff_append(a, "."),
-    })
+    head := is_empty(m.ty) ? s.ff_append(a, ".") : s.ff_tyname(a, m.ty, m.targs).ff_append(a, ".")
     open := head.ff_append(a, m.variant).ff_append(a, "(")
     m.payload.match ({
         .MakeStruct(ms) => a.ff_is_anon_positional_inits(ms).match ({
@@ -469,7 +494,7 @@ ff_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData, ind: i32) String
 ff_struct_inline = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
     out := s
     inits.loop((h, i, fi) {
-        out = (i == 0).match ({ true => out, false => out.ff_append(a, ", ") })
+        out = i == 0 ? out : out.ff_append(a, ", ")
         out = out.ff_append(a, fi.name).ff_append(a, ": ").ff_expr(a, fi.value, ind)
     })
     out
@@ -523,7 +548,7 @@ arms_max_pat = (a: MutPtr<Malloc>, arms: [ArmData]) i32 {
     m := 0
     arms.loop((h, i, ar) {
         w := a.arm_pat_len(ar)
-        m = (w > m).match ({ true => w, false => m })
+        m = w > m ? w : m
     })
     m
 }
@@ -542,7 +567,7 @@ ff_arm_pat = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
     })
 }
 ff_pad = (s: String, a: MutPtr<Malloc>, n: i32) String {
-    (n <= 0).match ({ true => s, false => s.ff_append(a, " ").ff_pad(a, n - 1) })
+    n <= 0 ? s : s.ff_append(a, " ").ff_pad(a, n - 1)
 }
 ff_match = (s: String, a: MutPtr<Malloc>, m: MatchData, ind: i32) String {
     maxw := a.arms_max_pat(m.arms)
@@ -563,7 +588,7 @@ gf_next_arm_pos = (arms: [ArmData], from: i32) i32 {
         return 0
     })
     p := gf_arm_pos(arms[from])
-    (p > 0).match ({ true => p, false => gf_next_arm_pos(arms, from + 1) })
+    p > 0 ? p : gf_next_arm_pos(arms, from + 1)
 }
 // Comments are woven into the arm list the same way ff_stmts weaves them into a block: each arm flushes
 // the own-line comments written ABOVE it (bounded by its own offset), then — when a later positioned arm
@@ -578,7 +603,7 @@ ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) S
         line := lead.ff_indent(a, ind).ff_arm_pat(a, ar)
         padded := line.ff_pad(a, maxw - a.arm_pat_len(ar))
         bodied := padded.ff_append(a, " => ").ff_expr(a, ar.body, ind).ff_append(a, ",")
-        withc := (nb > 0).match ({ true => bodied.ff_trailing(a, nb), false => bodied })
+        withc := nb > 0 ? bodied.ff_trailing(a, nb) : bodied
         out = withc.ff_append(a, "\n")
     })
     out

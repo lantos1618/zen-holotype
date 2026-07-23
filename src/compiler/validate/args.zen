@@ -26,7 +26,7 @@ slicelit_slot_verdict = (env: Env, ar: Expr, pty: Ty) i32 {
                 sd.items.loop((h, i, it) {
                     errs = errs + env.sl_elem_fit(load(ep), it)
                 })
-                (errs == 0).match ({ true => 0, false => 1 })
+                errs == 0 ? 0 : 1
             },
             _          => 0 - 1,
         }),
@@ -46,10 +46,7 @@ arg_err_at* = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
                     true  => sv,
                     false => {
                         lv := ar.addr().lit_slot_verdict(params[i].ty)
-                        (lv >= 0).match ({
-                            true  => lv,
-                            false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty),
-                        })
+                        lv >= 0 ? lv : env.fit_err(env.infer_expr(ar.addr()), params[i].ty)
                     },
                 })
             },
@@ -81,7 +78,7 @@ struct_fields* = (decls: [Decl], name: string_view) [Field] {
     found := no_fields()
     decls.loop((h, i, d) {
         found = d.match ({
-            .DStruct(sd) => (sd.name == name).match ({ true => sd.fields, false => found }),
+            .DStruct(sd) => sd.name == name ? sd.fields : found,
             _            => found,
         })
     })
@@ -93,7 +90,7 @@ has_field* = (fields: [Field], fname: string_view) bool {
 field_in = (fields: [Field], fname: string_view) Ty {
     found := tvoid()
     fields.loop((h, i, fl) {
-        found = (fl.name == fname).match ({ true => fl.ty, false => found })
+        found = fl.name == fname ? fl.ty : found
     })
     found
 }
@@ -104,12 +101,12 @@ field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
         true  => sv,
         false => {
             lv := fi.value.lit_slot_verdict(fty)    // a numeric literal must fit the field width
-            (lv >= 0).match ({ true => lv, false => env.fit_err(env.infer_expr(fi.value), fty) })
+            lv >= 0 ? lv : env.fit_err(env.infer_expr(fi.value), fty)
         },
     })
 }
 init_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
-    fields.has_field(fi.name).match ({ true => env.field_fit_err(fields, fi), false => 1 })
+    fields.has_field(fi.name) ? env.field_fit_err(fields, fi) : 1
 }    // unknown field -> 1
 struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
     acc := 0
@@ -124,10 +121,7 @@ struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
 // substitution (no matching targ) remains lenient, deferred to monomorphization.
 gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: FieldInit) i32 {
     fty := fields.field_in(fi.name)
-    cty := (targs.len == tps.len).match ({
-        true  => env.a.subst_ty_in(tps, targs, fty),
-        false => fty,
-    })
+    cty := targs.len == tps.len ? env.a.subst_ty_in(tps, targs, fty) : fty
     tps.ty_mentions_tparam(cty).match ({
         true  => 0,
         false => {
@@ -137,10 +131,7 @@ gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: F
                 false => {
                     lv := fi.value.lit_slot_verdict(cty)    // still a tparam -> lenient
                     // a numeric literal must fit the field width
-                    (lv >= 0).match ({
-                        true  => lv,
-                        false => env.fit_err(env.infer_expr(fi.value), cty),
-                    })
+                    lv >= 0 ? lv : env.fit_err(env.infer_expr(fi.value), cty)
                 },
             })
         },
@@ -155,10 +146,7 @@ gen_struct_init_errs = (
 ) i32 {
     acc := 0
     inits.loop((h, i, fi) {
-        acc = acc + fields.has_field(fi.name).match ({
-            true  => env.gen_field_fit_err(tps, targs, fields, fi),
-            false => 1,
-        })
+        acc = acc + (fields.has_field(fi.name) ? env.gen_field_fit_err(tps, targs, fields, fi) : 1)
     })
     acc
 }
@@ -170,10 +158,7 @@ inits_has = (inits: [FieldInit], name: string_view) bool {
 field_missing_nonnull_ptr = (fields: [Field], inits: [FieldInit]) i32 {
     acc := 0
     fields.loop((h, i, fl) {
-        acc = acc + (fl.ty.is_nonnull_ptr_ty() && inits.inits_has(fl.name) == false).match ({
-            true  => 1,
-            false => 0,
-        })
+        acc = acc + (fl.ty.is_nonnull_ptr_ty() && inits.inits_has(fl.name) == false ? 1 : 0)
     })
     acc
 }
@@ -183,9 +168,9 @@ dup_init_errs = (inits: [FieldInit]) i32 {
     inits.loop((h, i, fi) {
         earlier := false
         inits.loop((h2, j, fj) {
-            earlier = (j < i && fj.name == fi.name).match ({ true => true, false => earlier })
+            earlier = j < i && fj.name == fi.name ? true : earlier
         })
-        acc = acc + earlier.match ({ true => 1, false => 0 })
+        acc = acc + (earlier ? 1 : 0)
     })
     acc
 }
@@ -250,21 +235,15 @@ member_err* = (env: Env, obj: Ptr<Expr>, field: string_view) i32 {
             rty := env.infer_expr(obj)
             sname := rty.enum_name()
             env.env_is_struct(sname).match ({
-                true  => env.env_struct_fields(sname).has_field(field).match ({
-                    true  => 0,
-                    false => 1,
-                }),
+                true  => env.env_struct_fields(sname).has_field(field) ? 0 : 1,
                 false => {
                     base := rty.gen_base_of()
                     (is_empty(base) == false && env.env_is_gen_struct(base)).match ({
-                        true  => env.env_gstruct(base).fields.has_field(field).match ({
-                            true  => 0,
-                            false => 1,
-                        }),
+                        true  => env.env_gstruct(base).fields.has_field(field) ? 0 : 1,
                         false => (env.env_is_enum(sname)
                             || is_empty(base) == false && env.env_is_gen_enum(base)).match ({
-                            true  => field.is_enum_repr_field().match ({ true => 0, false => 1 }),
-                            false => rty.is_fieldless_prim().match ({ true => 1, false => 0 }),
+                            true  => field.is_enum_repr_field() ? 0 : 1,
+                            false => rty.is_fieldless_prim() ? 1 : 0,
                         }),
                     })
                 },
@@ -278,7 +257,7 @@ member_err* = (env: Env, obj: Ptr<Expr>, field: string_view) i32 {
 // and unknown/generic-residue elements defer (fit_err handles both).
 sl_elem_fit* = (env: Env, ety: Ty, it: Expr) i32 {
     ity := env.infer_expr(it.addr())
-    (ety.ty_rank() >= 0 && ity.ty_rank() >= 0).match ({ true => 0, false => env.fit_err(ity, ety) })
+    ety.ty_rank() >= 0 && ity.ty_rank() >= 0 ? 0 : env.fit_err(ity, ety)
 }
 // ── STRUCT-FIELD / SLICE-ELEMENT CONSUME (re-census #63) ───────────────────────────────────────────
 // #56 closed owner-PARAM moves but explicitly left the IDIOMATIC case open: moving an `Own<T>` into a
@@ -294,17 +273,14 @@ sl_elem_fit* = (env: Env, ety: Ty, it: Expr) i32 {
 field_ty_by_name = (fields: [Field], name: string_view) Ty {
     found := tvoid()
     fields.loop((h, i, fl) {
-        found = (fl.name == name).match ({ true => fl.ty, false => found })
+        found = fl.name == name ? fl.ty : found
     })
     found
 }
 // the owner moved by a struct-literal field init: the field's DECLARED type is `Own<T>` AND the init is a
 // bare `Own<T>` Var. The field-type gate is exactly what keeps a borrow field (`p: MutPtr<T>`) legal.
 struct_field_move_src* = (env: Env, fields: [Field], fi: FieldInit) string_view {
-    (field_ty_by_name(fields, fi.name).owner_base() == "Own").match ({
-        true  => env.own_moved_var(fi.value),
-        false => "",
-    })
+    field_ty_by_name(fields, fi.name).owner_base() == "Own" ? env.own_moved_var(fi.value) : ""
 }
 // kill every source owner moved into an Own field of a CONCRETE struct literal.
 mkstruct_field_kills* = (
@@ -605,10 +581,7 @@ ae_ret_body = (
     (body.len == 0).match ({
         true  => f,
         false => body[body.len - 1].match ({
-            .ExprStmt(e) => a.ae_ret_yields(decls, idx, name, e, depth).match ({
-                true  => true,
-                false => f,
-            }),
+            .ExprStmt(e) => a.ae_ret_yields(decls, idx, name, e, depth) ? true : f,
             _            => f,
         }),
     })
@@ -661,7 +634,7 @@ ae_ret_stmtarms = (
             .Block(b) => a.ae_ret_body(decls, idx, b.stmts, name, depth),
             _         => false,
         })
-        f = hit.match ({ true => true, false => f })
+        f = hit ? true : f
     })
     f
 }
@@ -702,10 +675,7 @@ ae_escapes = (
         false => load(e).match ({
             .Call(c)       => (c.fn == "slice" && c.args.len > 0).match ({
                 true  => a.ae_escapes(decls, idx, locals, c.args[0].addr(), hop),
-                false => hop.match ({
-                    true  => a.ae_call_escapes(decls, idx, locals, c),
-                    false => false,
-                }),
+                false => hop ? a.ae_call_escapes(decls, idx, locals, c) : false,
             }),
             .MakeEnum(mk)  => a.ae_escapes(decls, idx, locals, mk.payload, hop),
             .MakeStruct(s) => a.ae_inits_escape(decls, idx, locals, s.inits, hop),
@@ -769,10 +739,7 @@ ae_kv_stmt = (
     st: Stmt,
 ) i32 {
     st.match ({
-        .Return(r)   => a.ae_escapes(decls, idx, locals, r, true).match ({
-            true  => load(r).expr_pos().pos_or(1),
-            false => 0,
-        }),
+        .Return(r)   => a.ae_escapes(decls, idx, locals, r, true) ? load(r).expr_pos().pos_or(1) : 0,
         .If(f)       => a
             .ae_kv_stmts(decls, idx, locals, f.then)
             .or(a.ae_kv_stmts(decls, idx, locals, f.els)),
@@ -829,7 +796,7 @@ ae_check_func* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32
 // `mode==0 => 0` branch preserves that exactly (no descent into method-call children); the walk is
 // byte-for-byte the behavior of the two hand-cloned families it replaces.
 sv_call_pos = (env: Env, c: CallData, mode: i32) i32 {
-    (mode == 0).match ({ true => env.sd_call_pos(c), false => env.sm_call_pos(c) })
+    mode == 0 ? env.sd_call_pos(c) : env.sm_call_pos(c)
 }
 sv_args = (a: MutPtr<Malloc>, env: Env, args: [Expr], mode: i32) i32 {
     acc := 0
@@ -1025,7 +992,7 @@ sx_payload_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     e.sx_is_source().match ({
         true  => e.sx_pos().pos_or(1),
         false => load(e).match ({
-            .Var(v)        => taint.dead_has(v.name).match ({ true => v.pos.pos_or(1), false => 0 }),
+            .Var(v)        => taint.dead_has(v.name) ? v.pos.pos_or(1) : 0,
             .MakeEnum(mk)  => a.sx_payload_pos(taint, mk.payload),
             .MakeStruct(s) => a.sx_inits_pos(taint, s.inits),
             _              => 0,
@@ -1040,7 +1007,7 @@ sx_inits_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32
     acc
 }
 // pack an offending position under a rule kind (0 = clean stays 0 — kv_at alone would emit a bare kind).
-sx_kv = (pos: i32, k: i32) i32 { (pos == 0).match ({ true => 0, false => kv_at(k, pos) }) }
+sx_kv = (pos: i32, k: i32) i32 { pos == 0 ? 0 : kv_at(k, pos) }
 // actor-send / spawn surfaces (name-based, arity-guarded): the PAYLOAD/STATE is the LAST argument.
 //   send:         `send(h, m)` (2+ args) / `h.send(m)` — CellRef/ActorHandle/ActorCell/ReplyRef
 //   pool_send:    `pool_send(p, a, m)` (3 args) / `p.pool_send(a, m)` (2 args)
@@ -1098,7 +1065,7 @@ sx_args_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, args: [Expr]) i32 {
 sx_arms_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        t2 := is_empty(ar.bind).match ({ true => taint, false => a.dead_remove(taint, ar.bind) })
+        t2 := is_empty(ar.bind) ? taint : a.dead_remove(taint, ar.bind)
         acc = acc.or(a.sx_expr_kind(t2, ar.body))
     })
     acc
@@ -1168,10 +1135,7 @@ sx_func_kind* = (a: MutPtr<Malloc>, f: Func) i32 { a.sx_body_kind(a.dead_nil(), 
 // out of the source; a non-identifier anchor (a slice literal's first item, a synthesized pos)
 // falls back to a generic subject.
 sx_push_name = (s: String, a: MutPtr<Malloc>, src: string_view, pos: i32, i: i32, w: i32) String {
-    (i >= w).match ({
-        true  => s,
-        false => sx_push_name(s.gstr_push(a, src.at(pos + i)), a, src, pos, i + 1, w),
-    })
+    i >= w ? s : sx_push_name(s.gstr_push(a, src.at(pos + i)), a, src, pos, i + 1, w)
 }
 sx_subject* = (a: MutPtr<Malloc>, src: string_view, pos: i32, w: i32) string_view {
     src.at(pos).is_alnum().match ({

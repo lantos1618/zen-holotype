@@ -112,9 +112,7 @@ loop_outer_frees = (
 }
 // Compatibility verdict API: 0 = clean, 1 = rejected. Detailed callers consume `check_module_kind`,
 // `check_module_batch`, or a structured diagnostic, so the old parallel count traversal is redundant.
-check_module = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    (a.check_module_kind(decls) == 0).match ({ true => 0, false => 1 })
-}
+check_module = (a: MutPtr<Malloc>, decls: [Decl]) i32 { a.check_module_kind(decls) == 0 ? 0 : 1 }
 check_diagnostic_none = () CheckDiagnostic {
     CheckDiagnostic(
         code: 0,
@@ -137,7 +135,7 @@ check_module_no_if_diagnostic_from_source* = (src: string_view) CheckDiagnostic 
             span_width: 2,
             count: 1,
             message: "`if` is not part of Zen; conditional control flow uses `.match`",
-            hint: "replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`; inside an enum arm, nest a boolean `.match` in the arm body",
+            hint: "in expression position write `cond ? yes : no`; for statement-position control flow replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`; inside an enum arm, nest a boolean `.match` in the arm body",
         ),
     })
 }
@@ -150,8 +148,8 @@ check_diagnostic_from_packed = (packed: i32, count: i32) CheckDiagnostic {
             CheckDiagnostic(
                 code: code,
                 kind: code.diagnostic_kind_name(),
-                source_offset: has_pos.match ({ true => packed >> 6, false => 0 - 1 }),
-                span_width: has_pos.match ({ true => 1, false => 0 }),
+                source_offset: has_pos ? packed >> 6 : 0 - 1,
+                span_width: has_pos ? 1 : 0,
                 count: count.positive_count(),
                 message: code.diagnostic_message(),
                 hint: code.diagnostic_hint(),
@@ -167,10 +165,7 @@ check_diagnostic_from_source* = (src: string_view, packed: i32, count: i32) Chec
             code: d.code,
             kind: d.kind,
             source_offset: d.source_offset,
-            span_width: (d.source_offset < 0).match ({
-                true  => 0,
-                false => src.diagnostic_span_width(d.source_offset),
-            }),
+            span_width: d.source_offset < 0 ? 0 : src.diagnostic_span_width(d.source_offset),
             count: d.count,
             message: d.message,
             hint: d.hint,
@@ -197,19 +192,17 @@ Verdict: {
     or: (Self, i32) i32,
 }
 i32.impl(Verdict, {
-    or = (a: i32, b: i32) i32 { (a == 0).match ({ true => b, false => a }) }
+    or = (a: i32, b: i32) i32 { a == 0 ? b : a }
 })
 // a 0/1 count predicate → a kind code: emit `k` iff the predicate found an error.
-kv_one* = (n: i32, k: i32) i32 { (n == 0).match ({ true => 0, false => k }) }
+kv_one* = (n: i32, k: i32) i32 { n == 0 ? 0 : k }
 // pack a SOURCE POSITION into a kind code: kinds are 1..63 (6 bits), so `kind + pos*64` carries the
 // error's byte offset alongside it (pos 0 = unknown/synthesized — the bare kind, the old encoding).
 // Consumers unpack with `& 63` / `>> 6`. Applied only at leaves that HAVE a pos (Call/Var); an
 // already-packed nested result is never re-packed: values above 63 already carry an offset.
 // Capacity: i32 packing caps the flat-source byte offset at (2^31-1)/64 ≈ 33.5 MB; the whole
 // in-tree Zen source is < 1 MB today, so headroom is ~38x before i64 packing would be needed.
-kv_at* = (k: i32, p: i32) i32 {
-    (k == 0 || k > 63 || p <= 0).match ({ true => k, false => k + p * 64 })
-}
+kv_at* = (k: i32, p: i32) i32 { k == 0 || k > 63 || p <= 0 ? k : k + p * 64 }
 // Ownership kind pass mirrors the raw ownership count pass above.
 kv_own_args_kind = (
     a: MutPtr<Malloc>,
@@ -261,10 +254,7 @@ kv_own_struct_dupmove_kind = (a: MutPtr<Malloc>, env: Env, s: MakeStructData) i3
         s.inits.loop((h, i, fi) {
             nm := env.struct_field_move_src(fields, fi)
             (nm.is_empty() == false).then({
-                acc = acc.or(d.dead_has(nm).match ({
-                    true  => KOWNERSHIP().kv_at(load(fi.value).expr_pos()),
-                    false => 0,
-                }))
+                acc = acc.or(d.dead_has(nm) ? KOWNERSHIP().kv_at(load(fi.value).expr_pos()) : 0)
                 d = a.dead_cons(nm, d)
             })
         })
@@ -277,10 +267,7 @@ kv_own_slice_dupmove_kind = (a: MutPtr<Malloc>, env: Env, items: [Expr]) i32 {
     items.loop((h, i, it) {
         nm := env.own_moved_var(it.addr())
         (nm.is_empty() == false).then({
-            acc = acc.or(d.dead_has(nm).match ({
-                true  => KOWNERSHIP().kv_at(it.expr_pos()),
-                false => 0,
-            }))
+            acc = acc.or(d.dead_has(nm) ? KOWNERSHIP().kv_at(it.expr_pos()) : 0)
             d = a.dead_cons(nm, d)
         })
     })
@@ -294,16 +281,10 @@ kv_own_expr_kind = (
     e: Ptr<Expr>,
 ) i32 {
     load(e).match ({
-        .Var(v)        => seen.dead_has(v.name).match ({
-            true  => KOWNERSHIP().kv_at(v.pos),
-            false => 0,
-        }),
+        .Var(v)        => seen.dead_has(v.name) ? KOWNERSHIP().kv_at(v.pos) : 0,
         .Call(c)       => a
             .kv_own_args_kind(env, seen, al, c.args)
-            .or(env.is_default_owner_method(c).match ({
-                true  => KOWNERSHIP().kv_at(c.pos),
-                false => 0,
-            })),
+            .or(env.is_default_owner_method(c) ? KOWNERSHIP().kv_at(c.pos) : 0),
         .Index(ix)     => a
             .kv_own_expr_kind(env, seen, al, ix.seq)
             .or(a.kv_own_expr_kind(env, seen, al, ix.idx)),
@@ -425,10 +406,7 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
     f := env.env_func(c.fn)
     ps := env.env_params(c.fn)
     (ps.len == c.args.len).match ({
-        true  => f.is_imported_generic().match ({
-            true  => 0,
-            false => env.kv_arg_type_kind(f.tparams, ps, c.args),
-        }),
+        true  => f.is_imported_generic() ? 0 : env.kv_arg_type_kind(f.tparams, ps, c.args),
         false => KARITY(),
     })
 }
@@ -444,10 +422,7 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
                     false => env.shadows_toplevel(c.fn).match ({
                         true  => env.var_or_global(c.fn).is_fnt().match ({
                             true  => env.kv_fnval_call_kind(c),
-                            false => env.shadow_not_callable(c.fn).match ({
-                                true  => KNOTCALLABLE(),
-                                false => 0,
-                            }),
+                            false => env.shadow_not_callable(c.fn) ? KNOTCALLABLE() : 0,
                         }),
                         false => env.env_known_fn(c.fn).match ({
                             true  => env.recv_typed_miss(c).match ({
@@ -543,7 +518,7 @@ kv_reflect_fn_kind = (env: Env, c: CallData) i32 {
     (c.fn == "field_eq").then({
         return 0
     })
-    want := (c.fn == "zip_fields").match ({ true => 3, false => 2 })
+    want := c.fn == "zip_fields" ? 3 : 2
     li := c.args.len - 1
     c.args[li].match ({
         .Lambda(lm) => (lm.params.len == want).match ({
@@ -569,10 +544,7 @@ kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
 }
 kv_fnval_call_kind = (env: Env, c: CallData) i32 {
     env.var_or_global(c.fn).match ({
-        .FnT(ft) => (ft.params.len == c.args.len).match ({
-            true  => env.kv_fnt_arg_kind(ft.params, c.args),
-            false => KARITY(),
-        }),
+        .FnT(ft) => ft.params.len == c.args.len ? env.kv_fnt_arg_kind(ft.params, c.args) : KARITY(),
         _        => KUNDEFINED(),
     })
 }
@@ -647,10 +619,7 @@ kv_makestruct_kind = (env: Env, m: MakeStructData) i32 {
     env
         .makestruct_err(m)
         .kv_one(KSTRUCTFIELD())
-        .kv_at(m.pos.pos_or((m.inits.len == 0).match ({
-            true  => 0,
-            false => load(m.inits[0].value).expr_pos(),
-        })))
+        .kv_at(m.pos.pos_or(m.inits.len == 0 ? 0 : load(m.inits[0].value).expr_pos()))
 }
 // A generic-struct literal's explicit `<…>` list must pin EVERY tparam (`Box<i32,i32>(…)` on a
 // 1-param generic silently deferred to mono and misreported downstream). A plain struct takes no
@@ -659,19 +628,13 @@ kv_makestruct_targ_kind = (env: Env, m: MakeStructData) i32 {
     n := (m.targs.len == 0).match ({
         true  => 0,
         false => env.env_is_gen_struct(m.ty).match ({
-            true  => (m.targs.len == env.env_gstruct(m.ty).tparams.len).match ({
-                true  => 0,
-                false => 1,
-            }),
-            false => env.env_is_struct(m.ty).match ({ true => 1, false => 0 }),
+            true  => m.targs.len == env.env_gstruct(m.ty).tparams.len ? 0 : 1,
+            false => env.env_is_struct(m.ty) ? 1 : 0,
         }),
     })
     n
         .kv_one(KTARGARITY())
-        .kv_at(m.pos.pos_or((m.inits.len == 0).match ({
-            true  => 0,
-            false => load(m.inits[0].value).expr_pos(),
-        })))
+        .kv_at(m.pos.pos_or(m.inits.len == 0 ? 0 : load(m.inits[0].value).expr_pos()))
 }
 // member access caret on the receiver object (a Var/Call survives resolve).
 kv_nullable_obj_kind = (env: Env, obj: Ptr<Expr>, pos: i32) i32 {
@@ -689,10 +652,7 @@ kv_member_kind = (env: Env, obj: Ptr<Expr>, field: string_view, pos: i32) i32 {
             .kv_at(pos.pos_or(load(obj).expr_pos())))
 }
 kv_match_null_kind = (env: Env, m: MatchData) i32 {
-    env.infer_expr(m.subj).is_nullable_ptr_ty().match ({
-        true  => KNULLDEREF().kv_at(load(m.subj).expr_pos()),
-        false => 0,
-    })
+    env.infer_expr(m.subj).is_nullable_ptr_ty() ? KNULLDEREF().kv_at(load(m.subj).expr_pos()) : 0
 }
 kv_match_kind = (env: Env, m: MatchData) i32 {
     // a local-binding subject (`e := …; e.match {…}`) resolves to a Var rebuilt without a source pos
@@ -773,11 +733,11 @@ kv_slicelit_kind = (env: Env, items: [Expr]) i32 {
 // recursive walkers that can silently drift when a new expression form is added.
 lkv_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     r := env.name_errors_expr(e)
-    (r.first_pos > 0).match ({ true => r.first_kind.kv_at(r.first_pos), false => 0 })
+    r.first_pos > 0 ? r.first_kind.kv_at(r.first_pos) : 0
 }
 lkv_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     r := a.name_errors_body(env, body)
-    (r.first_pos > 0).match ({ true => r.first_kind.kv_at(r.first_pos), false => 0 })
+    r.first_pos > 0 ? r.first_kind.kv_at(r.first_pos) : 0
 }
 // Authoritative expression validation: node order defines first-error precedence.
 kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
@@ -812,7 +772,8 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
             .or(d.t.expr_drops_return().kv_one(KVALPOSRETURN()))
             .or(d.e.expr_drops_return().kv_one(KVALPOSRETURN()))
             .or(env.cond_result_err(d).kv_one(KRETURNFIT()).kv_at(load(d.t).expr_pos()))
-            .or(d.cond_onearm_err().kv_one(KBOOLARM()).kv_at(load(d.c).expr_pos())),
+            .or(d.cond_onearm_err().kv_one(KBOOLARM()).kv_at(load(d.c).expr_pos()))
+            .or(env.cond_bool_err(d).kv_one(KOPERAND()).kv_at(load(d.c).expr_pos())),
         .Member(m)      => env
             .kv_check_expr_kind(m.obj)
             .or(env.kv_member_kind(m.obj, m.field, m.pos)),
@@ -924,10 +885,7 @@ kv_last_stmt_kind = (env: Env, st: Stmt) i32 {
 kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
     env.exp.is_void_ty().match ({
         true  => 0,
-        false => (body.len == 0).match ({
-            true  => KFALLTHROUGH(),
-            false => env.kv_last_stmt_kind(body[body.len - 1]),
-        }),
+        false => body.len == 0 ? KFALLTHROUGH() : env.kv_last_stmt_kind(body[body.len - 1]),
     })
 }
 check_module_bound_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
@@ -947,10 +905,7 @@ check_module_bound_diagnostic_from_source* = (
     src: string_view,
 ) CheckDiagnostic {
     packed := a.check_module_bound_kind(decls)
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, 1),
-    })
+    packed == 0 ? check_diagnostic_none() : src.check_diagnostic_from_source(packed, 1)
 }
 check_module_arg_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)
@@ -973,10 +928,7 @@ check_module_arg_diagnostic_from_source* = (
     src: string_view,
 ) CheckDiagnostic {
     packed := a.check_module_arg_kind(decls)
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, 1),
-    })
+    packed == 0 ? check_diagnostic_none() : src.check_diagnostic_from_source(packed, 1)
 }
 check_module_or_return_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)
@@ -996,10 +948,7 @@ check_module_or_return_diagnostic_from_source* = (
     src: string_view,
 ) CheckDiagnostic {
     packed := a.check_module_or_return_kind(decls)
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, 1),
-    })
+    packed == 0 ? check_diagnostic_none() : src.check_diagnostic_from_source(packed, 1)
 }
 check_module_unknown_type_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx := a.build_decl_index(decls)
@@ -1143,14 +1092,8 @@ check_module_infinite_type_kind = (decls: [Decl]) i32 {
                 true  => KINFINITETYPE().kv_at(ed.pos),
                 false => 0,
             }),
-            .DGenStruct(g) => g.fields.inf_gen_fields(g.name).match ({
-                true  => KINFINITETYPE().kv_at(g.pos),
-                false => 0,
-            }),
-            .DGenEnum(g)   => g.variants.inf_gen_variants(g.name).match ({
-                true  => KINFINITETYPE().kv_at(g.pos),
-                false => 0,
-            }),
+            .DGenStruct(g) => g.fields.inf_gen_fields(g.name) ? KINFINITETYPE().kv_at(g.pos) : 0,
+            .DGenEnum(g)   => g.variants.inf_gen_variants(g.name) ? KINFINITETYPE().kv_at(g.pos) : 0,
             _              => 0,
         }))
     })
@@ -1161,10 +1104,7 @@ check_module_infinite_type_diagnostic_from_source* = (
     src: string_view,
 ) CheckDiagnostic {
     packed := decls.check_module_infinite_type_kind()
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, 1),
-    })
+    packed == 0 ? check_diagnostic_none() : src.check_diagnostic_from_source(packed, 1)
 }
 // ── main signature: `main` is `() i32` OR `(sys: Sys) i32` (KMAINPARAMS) ──────────────────────────
 // The OS entry (zenrt.c) calls the emitted `zen_main()` with NO arguments. Two legal shapes:
@@ -1190,10 +1130,7 @@ main_params_kind = (decls: [Decl]) i32 {
         k = (k == 0).match ({
             true  => d.match ({
                 .DFunc(f) => (f.name == "main" && f.params.len > 0).match ({
-                    true  => f.main_param_is_sys().match ({
-                        true  => 0,
-                        false => KMAINPARAMS().kv_at(f.pos),
-                    }),
+                    true  => f.main_param_is_sys() ? 0 : KMAINPARAMS().kv_at(f.pos),
                     false => 0,
                 }),
                 _         => 0,
@@ -1205,10 +1142,7 @@ main_params_kind = (decls: [Decl]) i32 {
 }
 check_module_main_diagnostic_from_source* = (decls: [Decl], src: string_view) CheckDiagnostic {
     packed := decls.main_params_kind()
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, 1),
-    })
+    packed == 0 ? check_diagnostic_none() : src.check_diagnostic_from_source(packed, 1)
 }
 check_module_reserved_diagnostic_from_source* = (
     a: MutPtr<Malloc>,
@@ -1266,10 +1200,7 @@ check_module_mustuse_diagnostic_from_source* = (
     src: string_view,
 ) CheckDiagnostic {
     packed := a.check_module_mustuse_kind(decls)
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, 1),
-    })
+    packed == 0 ? check_diagnostic_none() : src.check_diagnostic_from_source(packed, 1)
 }
 // trait conformance, kind-flavoured (mirrors impl_errs/trait_conformance/method_err).
 kv_method_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
@@ -1286,10 +1217,7 @@ kv_impl_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
     acc := 0
     decls.loop((h, i, d) {
         acc = acc.or(d.match ({
-            .DStruct(sd) => (sd.name == im.trname).match ({
-                true  => a.kv_conformance_kind(decls, im, sd),
-                false => 0,
-            }),
+            .DStruct(sd) => sd.name == im.trname ? a.kv_conformance_kind(decls, im, sd) : 0,
             _            => 0,
         }))
     })
@@ -1304,8 +1232,8 @@ kv_dup_name_kind = (decls: [Decl]) i32 {
     acc := 0
     decls.loop((h, i, d) {
         nm := d.fn_name_of()
-        dup := is_empty(nm).match ({ true => false, false => decls.fn_dup_before(nm, i) })
-        acc = acc.or(dup.match ({ true => KDUPFN().kv_at(d.fn_pos_of()), false => 0 }))
+        dup := is_empty(nm) ? false : decls.fn_dup_before(nm, i)
+        acc = acc.or(dup ? KDUPFN().kv_at(d.fn_pos_of()) : 0)
     })
     acc
 }
@@ -1314,7 +1242,7 @@ kv_dup_name_kind = (decls: [Decl]) i32 {
 check_module_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     buf: [i32] := slice(a.acquire(sizeof(i32)), 1)
     cnt := a.check_module_kind_all(decls, a.ufcs_vis_off(), buf, 0)
-    (cnt == 0).match ({ true => 0, false => buf[0] })
+    cnt == 0 ? 0 : buf[0]
 }
 // One function's errors, per top-level statement. The trailing-value check is anchored on the fn name.
 kv_check_func_kind_all = (
@@ -1392,10 +1320,7 @@ check_module_parse_diagnostic_from_source* = (
     src: string_view,
 ) CheckDiagnostic {
     packed := decls.check_module_parse_kind()
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, 1),
-    })
+    packed == 0 ? check_diagnostic_none() : src.check_diagnostic_from_source(packed, 1)
 }
 check_module_ownership_diagnostic_from_source* = (
     a: MutPtr<Malloc>,
@@ -1403,10 +1328,7 @@ check_module_ownership_diagnostic_from_source* = (
     src: string_view,
 ) CheckDiagnostic {
     packed := a.check_module_ownership_kind(decls)
-    (packed == 0).match ({
-        true  => check_diagnostic_none(),
-        false => src.check_diagnostic_from_source(packed, 1),
-    })
+    packed == 0 ? check_diagnostic_none() : src.check_diagnostic_from_source(packed, 1)
 }
 module_header = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     map_slice(a, decls, (d) { a.as_sig(d) })
@@ -1443,10 +1365,7 @@ kv_escape_stmts = (
 }
 kv_escape_stmt = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
     st.match ({
-        .Return(r)   => a.expr_escapes(svars, derived, r).match ({
-            true  => load(r).expr_pos().pos_or(1),
-            false => 0,
-        }),
+        .Return(r)   => a.expr_escapes(svars, derived, r) ? load(r).expr_pos().pos_or(1) : 0,
         .If(f)       => a
             .kv_escape_stmts(svars, derived, f.then)
             .or(a.kv_escape_stmts(svars, derived, f.els)),
@@ -1501,10 +1420,7 @@ kv_escape_trailing = (
     st: Stmt,
 ) i32 {
     st.match ({
-        .ExprStmt(e) => a.expr_escapes(svars, derived, e).match ({
-            true  => load(e).expr_pos().pos_or(1),
-            false => 0,
-        }),
+        .ExprStmt(e) => a.expr_escapes(svars, derived, e) ? load(e).expr_pos().pos_or(1) : 0,
         _            => 0,
     })
 }
@@ -1520,10 +1436,7 @@ kv_escape_body = (
         acc = acc.or(a.kv_escape_stmt(svars, d, st))
         d = a.escape_step(svars, d, st)
     })
-    acc.or((body.len == 0).match ({
-        true  => 0,
-        false => a.kv_escape_trailing(svars, d, body[body.len - 1]),
-    }))
+    acc.or(body.len == 0 ? 0 : a.kv_escape_trailing(svars, d, body[body.len - 1]))
 }
 kv_escape_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
     svars := a.scope_params(f.params)
@@ -1592,21 +1505,21 @@ name_read_in_expr* = (nm: string_view, e: Ptr<Expr>) bool {
 name_read_in_args* = (nm: string_view, args: [Expr]) bool {
     f := false
     args.loop((h, i, ar) {
-        f = nm.name_read_in_expr(ar.addr()).match ({ true => true, false => f })
+        f = nm.name_read_in_expr(ar.addr()) ? true : f
     })
     f
 }
 name_read_in_inits = (nm: string_view, inits: [FieldInit]) bool {
     f := false
     inits.loop((h, i, fi) {
-        f = nm.name_read_in_expr(fi.value).match ({ true => true, false => f })
+        f = nm.name_read_in_expr(fi.value) ? true : f
     })
     f
 }
 name_read_in_arms = (nm: string_view, arms: [ArmData]) bool {
     f := false
     arms.loop((h, i, ar) {
-        f = nm.name_read_in_expr(ar.body).match ({ true => true, false => f })
+        f = nm.name_read_in_expr(ar.body) ? true : f
     })
     f
 }
@@ -1628,7 +1541,7 @@ name_read_in_stmt = (nm: string_view, st: Stmt) bool {
 name_read_in_body* = (nm: string_view, body: [Stmt]) bool {
     f := false
     body.loop((h, i, st) {
-        f = nm.name_read_in_stmt(st).match ({ true => true, false => f })
+        f = nm.name_read_in_stmt(st) ? true : f
     })
     f
 }

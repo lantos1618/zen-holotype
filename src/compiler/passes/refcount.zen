@@ -11,21 +11,21 @@
 rc_calls_es = (xs: [Expr], nm: string_view) bool {
     f := false
     xs.loop((h, i, x) {
-        f = f.match ({ true => true, false => x.addr().rc_calls_e(nm) })
+        f = f ? true : x.addr().rc_calls_e(nm)
     })
     f
 }
 rc_calls_inits = (inits: [FieldInit], nm: string_view) bool {
     f := false
     inits.loop((h, i, fi) {
-        f = f.match ({ true => true, false => fi.value.rc_calls_e(nm) })
+        f = f ? true : fi.value.rc_calls_e(nm)
     })
     f
 }
 rc_calls_arms = (arms: [ArmData], nm: string_view) bool {
     f := false
     arms.loop((h, i, ar) {
-        f = f.match ({ true => true, false => ar.body.rc_calls_e(nm) })
+        f = f ? true : ar.body.rc_calls_e(nm)
     })
     f
 }
@@ -61,7 +61,7 @@ rc_calls_stmt = (st: Stmt, nm: string_view) bool {
 rc_calls_body* = (body: [Stmt], nm: string_view) bool {
     f := false
     body.loop((h, i, st) {
-        f = f.match ({ true => true, false => st.rc_calls_stmt(nm) })
+        f = f ? true : st.rc_calls_stmt(nm)
     })
     f
 }
@@ -161,13 +161,10 @@ rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
     f := env.env_func(dn)
     known := f.name == dn && f.params.len == c.args.len
     tmpl := known && f.is_generic_fn()
-    atargs := tmpl.match ({ true => env.call_targs(f, c.args, c.targs), false => no_tys() })
+    atargs := tmpl ? env.call_targs(f, c.args, c.targs) : no_tys()
     c2 := cnt
     c.args.loop((h, i, ar) {
-        ax := known.match ({
-            true  => env.call_arg_exp(tmpl, f.tparams, atargs, f.params, i),
-            false => tvoid(),
-        })
+        ax := known ? env.call_arg_exp(tmpl, f.tparams, atargs, f.params, i) : tvoid()
         c2 = env.with_exp(ax).rc_col_e(buf, c2, ar.addr())
     })
     (known && f.no_inline_gen_f()).match ({
@@ -218,7 +215,7 @@ rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt, last: bool) i32
         .Assign(x)   => env.clr_exp().rc_col_e(buf, env.rc_col_e(buf, cnt, x.target), x.value),
         .Return(r)   => {
             rt := env.vars.fnret_of()
-            renv := rt.is_void_ty().match ({ true => env, false => env.with_exp(rt) })
+            renv := rt.is_void_ty() ? env : env.with_exp(rt)
             renv.rc_col_e(buf, cnt, r)
         },
         .ExprStmt(e) => (last && env.exp.is_void_ty() == false).match ({
@@ -262,10 +259,7 @@ rc_seed* = (env: Env, buf: [GenericData], cnt: i32, from: i64) i32 {
     env.decls.loop((h, i, d) {
         c = (i >= from).match ({
             true  => d.match ({
-                .DFunc(f) => f.is_generic_fn().match ({
-                    true  => c,
-                    false => env.rc_fn_env(f).rc_col_body(buf, c, f.body),
-                }),
+                .DFunc(f) => f.is_generic_fn() ? c : env.rc_fn_env(f).rc_col_body(buf, c, f.body),
                 _         => c,
             }),
             false => c,
@@ -299,7 +293,7 @@ rc_expand_one = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
     env.rc_expand(buf, ienv.rc_col_body(buf, count, ibody), i + 1)
 }
 rc_expand* = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
-    (i >= count).match ({ true => count, false => env.rc_expand_one(buf, count, i) })
+    i >= count ? count : env.rc_expand_one(buf, count, i)
 }
 // the concrete DFunc for one instance: template params/ret/body with tparam→arg substituted, given the
 // mangled name. Its self-call stays the bare template name; the final resolve_call mangles it (the

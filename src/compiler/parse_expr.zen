@@ -2,12 +2,13 @@
 // Atoms/literals live in compiler.parse_atom, postfix chains in compiler.parse_postfix,
 // match forms in compiler.parse_match, identifier-led primaries in compiler.parse_primary.
 { Expr } = compiler.ast.ast_types
-{ bin_at } = compiler.genc
+{ bin_at, cond } = compiler.genc
 { Scan, Token, scan } = compiler.lex
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
 { enode, is_op, op_str, parse_atom } = compiler.parse_atom
 { is_fat_arrow } = compiler.parse_match
+{ perr_set_at } = compiler.parse_type
 PExpr*: {
     expr: Ptr<Expr>,
     next: i32,
@@ -22,7 +23,7 @@ parse_term = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
 }
 term_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
-    src.is_muldiv(sc.tok).match ({ true => a.term_more(src, lhs, sc), false => lhs })
+    src.is_muldiv(sc.tok) ? a.term_more(src, lhs, sc) : lhs
 }
 term_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_atom(src, sc.next)
@@ -36,7 +37,7 @@ parse_expr = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
 }
 expr_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
-    src.is_addsub(sc.tok).match ({ true => a.expr_more(src, lhs, sc), false => lhs })
+    src.is_addsub(sc.tok) ? a.expr_more(src, lhs, sc) : lhs
 }
 expr_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_term(src, sc.next)
@@ -54,15 +55,13 @@ is_shift = (src: string_view, t: Token) bool {
         _    => false,
     })
 }
-shift_op_str = (src: string_view, t: Token) string_view {
-    (src.at(t.start) == '<').match ({ true => "<<", false => ">>" })
-}
+shift_op_str = (src: string_view, t: Token) string_view { src.at(t.start) == '<' ? "<<" : ">>" }
 parse_shift = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
     a.shift_rest(src, a.parse_expr(src, pos))
 }
 shift_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
-    src.is_shift(sc.tok).match ({ true => a.shift_more(src, lhs, sc), false => lhs })
+    src.is_shift(sc.tok) ? a.shift_more(src, lhs, sc) : lhs
 }
 shift_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_expr(src, sc.next)
@@ -94,7 +93,7 @@ parse_band = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
 }
 band_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
-    src.is_band(sc.tok).match ({ true => a.band_more(src, lhs, sc), false => lhs })
+    src.is_band(sc.tok) ? a.band_more(src, lhs, sc) : lhs
 }
 band_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_shift(src, sc.next)
@@ -110,7 +109,7 @@ parse_bxor* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
 }
 bxor_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
-    src.is_bxor(sc.tok).match ({ true => a.bxor_more(src, lhs, sc), false => lhs })
+    src.is_bxor(sc.tok) ? a.bxor_more(src, lhs, sc) : lhs
 }
 bxor_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_band(src, sc.next)
@@ -124,7 +123,7 @@ parse_bor = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
 }
 bor_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
-    src.is_bbor(sc.tok).match ({ true => a.bor_more(src, lhs, sc), false => lhs })
+    src.is_bbor(sc.tok) ? a.bor_more(src, lhs, sc) : lhs
 }
 bor_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_bxor(src, sc.next)
@@ -140,30 +139,30 @@ is_cmp_byte = (b: u8, len: i32) bool {
 is_cmp = (src: string_view, t: Token) bool {
     t.kind.match ({
         .Sym => src.at(t.start).is_cmp_byte(t.len)
-            && src.is_shift(t).match ({ true => false, false => true })
-            && src.is_fat_arrow(t).match ({ true => false, false => true }),
+            && (src.is_shift(t) ? false : true)
+            && (src.is_fat_arrow(t) ? false : true),
         _    => false,
     })
 }
 cmp_op_str = (src: string_view, t: Token) string_view {
     b0 := src.at(t.start)
-    (b0 == '=').then({
-        return "=="
+    (b0 == '=').match ({
+        true  => "==",
+        false => (b0 == '!').match ({
+            true  => "!=",
+            false => (b0 == '<').match ({
+                true  => t.len == 2 ? "<=" : "<",
+                false => t.len == 2 ? ">=" : ">",
+            }),
+        }),
     })
-    (b0 == '!').then({
-        return "!="
-    })
-    (b0 == '<').then({
-        return (t.len == 2).match ({ true => "<=", false => "<" })
-    })
-    (t.len == 2).match ({ true => ">=", false => ">" })
 }
 parse_cmp = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
     a.cmp_rest(src, a.parse_bor(src, pos))
 }
 cmp_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
-    src.is_cmp(sc.tok).match ({ true => a.cmp_more(src, lhs, sc), false => lhs })
+    src.is_cmp(sc.tok) ? a.cmp_more(src, lhs, sc) : lhs
 }
 cmp_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_bor(src, sc.next)
@@ -190,7 +189,7 @@ parse_and = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
 }
 and_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
-    src.is_and(sc.tok).match ({ true => a.and_more(src, lhs, sc), false => lhs })
+    src.is_and(sc.tok) ? a.and_more(src, lhs, sc) : lhs
 }
 and_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_cmp(src, sc.next)
@@ -200,11 +199,11 @@ and_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     ))
 }
 parse_or* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
-    a.or_rest(src, a.parse_and(src, pos))
+    a.tern_rest(src, a.or_rest(src, a.parse_and(src, pos)))
 }
 or_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
-    src.is_or(sc.tok).match ({ true => a.or_more(src, lhs, sc), false => lhs })
+    src.is_or(sc.tok) ? a.or_more(src, lhs, sc) : lhs
 }
 or_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     rhs := a.parse_and(src, sc.next)
@@ -213,3 +212,48 @@ or_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
         next: rhs.next,
     ))
 }
+// ── ternary conditional `c ? t : e` — parse-level sugar for the boolean two-arm match ──────────
+// Builds EXACTLY the two-armed Cond node the `c.match ({ true => t, false => e })` path builds
+// (same ctor, oa = 0), so both arms stay LAZY and every downstream check/lowering is shared.
+// Precedence sits BELOW `||` (the condition may be a bare `a || b` without parens) and the form is
+// right-associative: `a ? b : c ? d : e` groups as `a ? b : (c ? d : e)`. Both arms are required —
+// the one-armed lazy effect stays `.then`. The then-arm recurses at full conditional level, so a
+// nested ternary there closes at ITS OWN `:` first (`a ? b ? x : y : c` groups the inner first).
+is_qmark = (src: string_view, t: Token) bool {
+    t.kind.match ({
+        .Sym => t.len == 1 && src.at(t.start) == '?',
+        _    => false,
+    })
+}
+is_tern_colon = (src: string_view, t: Token) bool {
+    t.kind.match ({
+        .Sym => t.len == 1 && src.at(t.start) == ':',
+        _    => false,
+    })
+}
+tern_rest = (a: MutPtr<Malloc>, src: string_view, c: PExpr) PExpr {
+    sc := src.scan(c.next)
+    src.is_qmark(sc.tok) ? a.tern_arms(src, c, sc.next) : c
+}
+tern_arms = (a: MutPtr<Malloc>, src: string_view, c: PExpr, pos: i32) PExpr {
+    t := a.parse_or(src, pos)    // then-arm
+    co := src.scan(t.next)
+    src.is_tern_colon(co.tok).match ({
+        true  => {
+            e := a.parse_or(src, co.next)
+            PExpr(
+                expr: a.enode(cond(c.expr, t.expr, e.expr)),
+                next: e.next,
+            )
+        },
+        false => {
+            perr_set_at(co.tok.start)
+            PExpr(
+                expr: c.expr,
+                next: t.next,
+            )
+        },
+    })
+}    // else-arm: full conditional → right-assoc
+// `c ? t` with no `:` — both arms are required; record the parse error at the
+// offending token and yield the condition so recovery continues.

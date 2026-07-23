@@ -12,7 +12,7 @@
 { emit_is_trait, gen_decl, gen_fnt_typedefs, gen_fwd, gen_proto, main_is_sys } = compiler.backend.c.c_decl
 { gen_expr } = compiler.backend.c.c_expr
 // Type dependency ordering: by-value contained types must emit before their users.
-maxi = (a: i32, b: i32) i32 { (a >= b).match ({ true => a, false => b }) }
+maxi = (a: i32, b: i32) i32 { a >= b ? a : b }
 slen = (decls: [Decl]) i32 {
     n := 0
     decls.loop((h, i, d) {
@@ -34,7 +34,7 @@ DepthMemo: {
 ty_idx = (decls: [Decl], name: string_view) i32 {
     found := 0 - 1
     decls.loop((h, i, d) {
-        found = is_type_named(d, name).match ({ true => i, false => found })
+        found = is_type_named(d, name) ? i : found
     })
     found
 }
@@ -77,10 +77,7 @@ idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
         true  => 0,
         false => (cache[idx].d >= 0).match ({
             true  => cache[idx].d,
-            false => (cache[idx].d == 0 - 2).match ({
-                true  => 0,
-                false => decls.compute_idx_depth(cache, idx),
-            }),
+            false => cache[idx].d == 0 - 2 ? 0 : decls.compute_idx_depth(cache, idx),
         }),
     })
 }
@@ -167,7 +164,7 @@ gen_global = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
     out := s
     d.match ({
         .DGlobal(g) => {
-            stor := g.tl.match ({ true => "static _Thread_local ", false => "static " })
+            stor := g.tl ? "static _Thread_local " : "static "
             g.init.is_const_init().match ({
                 true  => {
                     out = out

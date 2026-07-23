@@ -60,10 +60,7 @@ UfcsVis*: {
     // ORIGINAL source (what the visibility walk scanned) declares the bare tail — accept the tail.
     vis_alias_tail_has = (vis: UfcsVis, a: MutPtr<Malloc>, mi: i64, name: string_view) bool {
         sep := name.alias_sep()
-        (sep > 0).match ({
-            true  => vis.imports.get(a.vis_key(mi, name.alias_tail(sep)), 0) == mi + 1,
-            false => false,
-        })
+        sep > 0 ? vis.imports.get(a.vis_key(mi, name.alias_tail(sep)), 0) == mi + 1 : false
     }
     // does the flat source at `pos` literally spell `name` (followed by a non-identifier byte)?
     // False for every DISPATCH-REWRITTEN call — impl/mono/alias rewrites (`gstr_append_Malloc`,
@@ -80,7 +77,7 @@ UfcsVis*: {
                     same = same && v[to_i64(pos) + i] == b
                 })
                 e := to_i64(pos) + nb.len
-                tail: u8 := (e < v.len).match ({ true => v[e], false => 0 })
+                tail: u8 := e < v.len ? v[e] : 0
                 same && (tail.is_alnum() || tail == '_') == false
             },
         })
@@ -301,10 +298,7 @@ DeclIndex*: {
         targs: [Ty],
     ) Ty {
         g := idx.idx_genstruct(decls, gname)
-        is_empty(g.name).match ({
-            true  => tvoid(),
-            false => a.subst_ty_in(g.tparams, targs, g.fields.gen_field_at(fname)),
-        })
+        is_empty(g.name) ? tvoid() : a.subst_ty_in(g.tparams, targs, g.fields.gen_field_at(fname))
     }
     idx_variant_payload = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ty {
         i := idx.enum_idx.get(ename, 0 - 1)
@@ -401,10 +395,7 @@ alias_tail = (name: string_view, sep: i32) string_view { cstr(offset(name, to_i6
 alias_prefix_match_at = (name: string_view, pre: string_view, i: i32) bool {
     (pre.at(i) == 0).match ({
         true  => name.at(i) == '_' && name.at(i + 1) == '_',
-        false => (name.at(i) == pre.at(i)).match ({
-            true  => name.alias_prefix_match_at(pre, i + 1),
-            false => false,
-        }),
+        false => name.at(i) == pre.at(i) ? name.alias_prefix_match_at(pre, i + 1) : false,
     })
 }
 // is `name`'s prefix an ACTUAL module-alias binding (from `m = std.x.y` / `m = sibling`)? Only then is
@@ -413,7 +404,7 @@ alias_prefix_match_at = (name: string_view, pre: string_view, i: i32) bool {
 alias_is_real_prefix = (name: string_view) bool {
     f := false
     alias_prefixes_get().loop((h, i, p) {
-        f = name.alias_prefix_match_at(p.name, 0).match ({ true => true, false => f })
+        f = name.alias_prefix_match_at(p.name, 0) ? true : f
     })
     f
 }
@@ -580,10 +571,7 @@ Env*: {
     a: MutPtr<Malloc>,
     infer_expr = (env: Env, e: Ptr<Expr>) Ty {
         load(e).match ({
-            .Int(n)        => (n > 2147483647 || n < 0 - 2147483648).match ({
-                true  => ti64(),
-                false => ti32(),
-            }),
+            .Int(n)        => n > 2147483647 || n < 0 - 2147483648 ? ti64() : ti32(),
             .Block(b)      => env.block_ty(b),
             .Byte(n)       => tu8(),
             .FloatLit(ft)  => tf64(),
@@ -595,10 +583,7 @@ Env*: {
             .Arrow(ar)     => env.infer_arrow(ar),
             .MakeEnum(mk)  => env.mkenum_ty(mk),
             .Tag(t)        => env.tag_ty(t),
-            .MakeStruct(s) => (s.targs.len > 0).match ({
-                true  => tgeneric(s.ty, s.targs, s.mty),
-                false => tnamed(s.ty),
-            }),
+            .MakeStruct(s) => s.targs.len > 0 ? tgeneric(s.ty, s.targs, s.mty) : tnamed(s.ty),
             .StrLit(x)     => tstring_literal(),
             .Match(m)      => env.infer_match_ty(m),
             .Index(ix)     => env.index_elem(ix),
@@ -635,7 +620,7 @@ Env*: {
     }
     var_or_global = (env: Env, name: string_view) Ty {
         lv := env.vars.lookup_var(name)
-        lv.is_void_ty().match ({ true => env.global_or_fn(name), false => lv })
+        lv.is_void_ty() ? env.global_or_fn(name) : lv
     }
     subj_variant_payload = (env: Env, t: Ty, variant: string_view) Ty {
         t.match ({
@@ -648,8 +633,8 @@ Env*: {
     }
     call_targ = (env: Env, f: Func, args: [Expr], tp: string_view) Ty {
         arg := env.targ_of(f.params, args, tp, false)
-        arg = arg.is_void_ty().match ({ true => env.ret_targ_of(f.ret, tp), false => arg })
-        arg.is_void_ty().match ({ true => env.targ_of(f.params, args, tp, true), false => arg })
+        arg = arg.is_void_ty() ? env.ret_targ_of(f.ret, tp) : arg
+        arg.is_void_ty() ? env.targ_of(f.params, args, tp, true) : arg
     }
     with_exp = (env: Env, t: Ty) Env {
         Env(
@@ -674,13 +659,10 @@ Env*: {
             return alias_cands_none()
         })
         exact := env.alias_cands_scan(fn, rty, true)
-        (exact.count > 0).match ({ true => exact, false => env.alias_cands_scan(fn, rty, false) })
+        exact.count > 0 ? exact : env.alias_cands_scan(fn, rty, false)
     }
     var_ty = (env: Env, name: string_view) Ty {
-        (name == "true" || name == "false").match ({
-            true  => tbool(),
-            false => env.var_or_global(name),
-        })
+        name == "true" || name == "false" ? tbool() : env.var_or_global(name)
     }
     targ_of = (env: Env, params: [Param], args: [Expr], tp: string_view, lits: bool) Ty {
         found := tvoid()
@@ -696,10 +678,7 @@ Env*: {
         found
     }
     sl_elem_exp = (env: Env, items: [Expr]) Ty {
-        env.exp.elem_of().is_void_ty().match ({
-            true  => env.sl_elem(items),
-            false => env.exp.elem_of(),
-        })
+        env.exp.elem_of().is_void_ty() ? env.sl_elem(items) : env.exp.elem_of()
     }
     let_exp = (env: Env, t: Ty) Env {
         t.is_void_ty().match ({
@@ -767,7 +746,7 @@ Env*: {
                 (dn == c.fn).match ({
                     true  => {
                         cs := env.alias_ufcs_candidates(c.fn, rty)
-                        (cs.count == 1).match ({ true => cs.first, false => c.fn })
+                        cs.count == 1 ? cs.first : c.fn
                     },
                     false => dn,
                 })
@@ -775,32 +754,24 @@ Env*: {
             false => c.fn,
         })
     }
-    disc_env = (env: Env, e: Ptr<Expr>) Env {
-        e.carries_return_e().match ({ true => env, false => env.clr_exp() })
-    }
+    disc_env = (env: Env, e: Ptr<Expr>) Env { e.carries_return_e() ? env : env.clr_exp() }
     clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
     call_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
         buf := cbuf<Ty>(env.a, f.tparams.len)
         f.tparams.loop((h, i, tp) {
-            buf[i] = (i < etargs.len).match ({
-                true  => etargs[i],
-                false => env.call_targ(f, args, tp.name),
-            })
+            buf[i] = i < etargs.len ? etargs[i] : env.call_targ(f, args, tp.name)
         })
         env.deep_targs_env(f.tparams, buf, f.params, args)
     }
     call_arg_exp = (env: Env, tmpl: bool, tparams: [Param], targs: [Ty], ps: [Param], i: i32) Ty {
         pty := ps.arg_exp_v(i)
         tmpl.match ({
-            true  => pty.is_fnt().match ({
-                true  => tvoid(),
-                false => env.a.subst_ty_in(tparams, targs, pty),
-            }),
+            true  => pty.is_fnt() ? tvoid() : env.a.subst_ty_in(tparams, targs, pty),
             false => pty,
         })
     }
     block_ty = (env: Env, b: BlockData) Ty {
-        b.stmts.stmts_diverge().match ({ true => tvoid(), false => env.block_ty_from(b.stmts, 0) })
+        b.stmts.stmts_diverge() ? tvoid() : env.block_ty_from(b.stmts, 0)
     }
     env_genenum = (env: Env, name: string_view) GenEnumDecl {
         env.didx.idx_genenum(env.decls, name)
@@ -856,7 +827,7 @@ params_env* = (a: MutPtr<Malloc>, ps: [Param]) Ptr<VList> {
 lookup_var* = (v: Ptr<VList>, name: string_view) Ty {
     v.match ({
         .VNil     => tvoid(),
-        .VCons(c) => (c.name == name).match ({ true => c.ty, false => c.tail.lookup_var(name) }),
+        .VCons(c) => c.name == name ? c.ty : c.tail.lookup_var(name),
     })
 }
 // The innermost enclosing function's DECLARED return type, threaded through the variable environment
@@ -921,17 +892,17 @@ global_ty = (env: Env, name: string_view) Ty {
 // `f()` call through it (an indirect call). Falls back after locals + globals so a same-named local wins.
 fn_value_ty = (env: Env, name: string_view) Ty {
     f := env.env_func(name)
-    (f.name == name).match ({ true => env.a.fnt_from_func_in(f), false => tvoid() })
+    f.name == name ? env.a.fnt_from_func_in(f) : tvoid()
 }
 global_or_fn = (env: Env, name: string_view) Ty {
     g := env.global_ty(name)
-    g.is_void_ty().match ({ true => env.fn_value_ty(name), false => g })
+    g.is_void_ty() ? env.fn_value_ty(name) : g
 }
 // Membership check, distinct from type lookup; void-typed locals still count as bound.
 var_bound* = (v: Ptr<VList>, name: string_view) bool {
     v.match ({
         .VNil     => false,
-        .VCons(c) => (c.name == name).match ({ true => true, false => c.tail.var_bound(name) }),
+        .VCons(c) => c.name == name ? true : c.tail.var_bound(name),
     })
 }
 // LOCAL-scope membership ONLY (params + lets + arm/loop binds), excluding globals and top-level
@@ -986,16 +957,13 @@ ty_is_vec = (g: GenericData) bool { g.name == "Vec" || g.name.ends_with("__Vec")
 elem_of* = (t: Ty) Ty {
     t.match ({
         .Slice(e)   => load(e),
-        .Generic(g) => (g.ty_is_vec() && g.args.len > 0).match ({
-            true  => g.args[0],
-            false => tvoid(),
-        }),
+        .Generic(g) => g.ty_is_vec() && g.args.len > 0 ? g.args[0] : tvoid(),
         _           => tvoid(),
     })
 }
 enum_has = (ed: EnumDecl, vn: string_view) bool { ed.variants.slice_any((v) { v.name == vn }) }
 pick_enum = (ed: EnumDecl, vn: string_view, found: string_view) string_view {
-    ed.enum_has(vn).match ({ true => ed.name, false => found })
+    ed.enum_has(vn) ? ed.name : found
 }
 gen_enum_has = (g: GenEnumDecl, vn: string_view) bool { g.variants.slice_any((v) { v.name == vn }) }
 // Find the enum, concrete or generic, that declares variant `vn`.
@@ -1004,7 +972,7 @@ enum_of_variant = (decls: [Decl], vn: string_view) string_view {
     decls.loop((h, i, d) {
         found = d.match ({
             .DEnum(ed)   => ed.pick_enum(vn, found),
-            .DGenEnum(g) => g.gen_enum_has(vn).match ({ true => g.name, false => found }),
+            .DGenEnum(g) => g.gen_enum_has(vn) ? g.name : found,
             _            => found,
         })
     })
@@ -1014,7 +982,7 @@ named_has = (decls: [Decl], ename: string_view, vn: string_view) bool {
     found := false
     decls.loop((h, i, d) {
         found = d.match ({
-            .DEnum(ed) => (ed.name == ename).match ({ true => ed.enum_has(vn), false => found }),
+            .DEnum(ed) => ed.name == ename ? ed.enum_has(vn) : found,
             _          => found,
         })
     })
@@ -1035,16 +1003,13 @@ ctor_enum_plain = (env: Env, vn: string_view) string_view {
     base := env.exp.exp_enum_base()
     env.decls.named_has(base, vn).match ({
         true  => base,
-        false => env.env_genenum(base).gen_enum_has(vn).match ({
-            true  => base,
-            false => env.decls.enum_of_variant(vn),
-        }),
+        false => env.env_genenum(base).gen_enum_has(vn) ? base : env.decls.enum_of_variant(vn),
     })
 }
 field_ty = (sd: StructDecl, fname: string_view) Ty {
     found := tvoid()
     sd.fields.loop((h, i, f) {
-        found = (f.name == fname).match ({ true => f.ty, false => found })
+        found = f.name == fname ? f.ty : found
     })
     found
 }
@@ -1055,7 +1020,7 @@ is_cmp_op = (op: string_view) bool {
     b1 := op.at(1)
     b == '=' || b == '!' || (b == '<' || b == '>') && b1 != b || (b == '&' || b == '|') && b1 == b
 }
-bin_ty* = (op: string_view, lt: Ty) Ty { op.is_cmp_op().match ({ true => tbool(), false => lt }) }
+bin_ty* = (op: string_view, lt: Ty) Ty { op.is_cmp_op() ? tbool() : lt }
 // A numeric binop's result is the WIDER operand (max integer rank), so `i32 + i64`
 // is i64 regardless of operand order — kills silent truncation + order-dependence.
 // A numeric LITERAL operand ADAPTS to the other side (it never forces widening), so
@@ -1063,14 +1028,14 @@ bin_ty* = (op: string_view, lt: Ty) Ty { op.is_cmp_op().match ({ true => tbool()
 // When a non-literal side lacks a rank (narrow Named widths, non-numeric) we keep lhs.
 num_wider = (lt: Ty, rt: Ty) Ty {
     (lt.ty_rank() >= 0 && rt.ty_rank() >= 0).match ({
-        true  => (rt.ty_rank() > lt.ty_rank()).match ({ true => rt, false => lt }),
+        true  => rt.ty_rank() > lt.ty_rank() ? rt : lt,
         false => lt,
     })
 }
 num_result = (llit: bool, lt: Ty, rlit: bool, rt: Ty) Ty {
     llit.match ({
-        true  => rlit.match ({ true => lt, false => rt }),
-        false => rlit.match ({ true => lt, false => num_wider(lt, rt) }),
+        true  => rlit ? lt : rt,
+        false => rlit ? lt : num_wider(lt, rt),
     })
 }
 bin_ty_e = (env: Env, b: BinData) Ty {
@@ -1084,10 +1049,7 @@ is_lit_numeric* = (e: Ptr<Expr>) bool {
     load(e).match ({
         .Int(n)  => true,
         .Byte(n) => true,
-        .Bin(b)  => b.op.is_cmp_op().match ({
-            true  => false,
-            false => b.lhs.is_lit_numeric() && b.rhs.is_lit_numeric(),
-        }),
+        .Bin(b)  => b.op.is_cmp_op() ? false : b.lhs.is_lit_numeric() && b.rhs.is_lit_numeric(),
         .Cond(c) => c.t.is_lit_numeric() && c.e.is_lit_numeric(),
         _        => false,
     })
@@ -1112,7 +1074,7 @@ EnumInst*: {
 gen_variant_payload* = (g: GenEnumDecl, vname: string_view) Ty {
     found := tvoid()
     g.variants.loop((h, i, v) {
-        found = (v.name == vname).match ({ true => v.payload, false => found })
+        found = v.name == vname ? v.payload : found
     })
     found
 }
@@ -1194,7 +1156,7 @@ block_ty_from = (env: Env, stmts: [Stmt], i: i32) Ty {
 }
 // Prefer a concrete stored index element type; generic inlining may make re-inference lose it.
 index_elem = (env: Env, ix: IndexData) Ty {
-    ix.elem.is_void_ty().match ({ true => env.infer_expr(ix.seq).elem_of(), false => ix.elem })
+    ix.elem.is_void_ty() ? env.infer_expr(ix.seq).elem_of() : ix.elem
 }
 pointee_of* = (t: Ty) Ty {
     t.match ({
@@ -1234,15 +1196,12 @@ unify_arg = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: string_view) Ty {
 }
 lam_ret_unify = (pty: Ty, lm: LambdaData, tp: string_view) Ty {
     pty.match ({
-        .FnT(ft) => lm.ret.is_void_ty().match ({
-            true  => tvoid(),
-            false => load(ft.ret).unify_ty(lm.ret, tp),
-        }),
+        .FnT(ft) => lm.ret.is_void_ty() ? tvoid() : load(ft.ret).unify_ty(lm.ret, tp),
         _        => tvoid(),
     })
 }
 ret_targ_of = (env: Env, ret: Ty, tp: string_view) Ty {
-    env.exp.is_void_ty().match ({ true => tvoid(), false => ret.unify_ty(env.exp, tp) })
+    env.exp.is_void_ty() ? tvoid() : ret.unify_ty(env.exp, tp)
 }
 // etargs = explicit turbofish type args (empty when none): a present one PINS the i-th tparam,
 // overriding inference; an absent one (i past etargs) falls back to inferring from the value args.
@@ -1361,7 +1320,7 @@ is_slice_recv = (t: Ty) bool {
 // Can this receiver drive UFCS-alias dispatch? Anything with a concrete head, plus slices (whose head
 // is empty). Bails on void/unknown/pre-inline-tparam receivers, exactly as before for non-slices.
 alias_recv_dispatchable = (t: Ty) bool {
-    is_empty(t.dispatch_recv_name()).match ({ true => t.is_slice_recv(), false => true })
+    is_empty(t.dispatch_recv_name()) ? t.is_slice_recv() : true
 }
 // Compiler-level call intrinsics (typed in infer_call / lowered by genc). Lives here — not in
 // check_validate, which now imports it — so the alias-UFCS fallback below can refuse to shadow them.
@@ -1442,10 +1401,7 @@ alias_cand_matches = (f: Func, fn: string_view, rty: Ty, exact: bool) bool {
             head := p0.dispatch_recv_name()
             (f.tparams.tparam_names_have(head) == false).match ({
                 true  => exact.match ({
-                    true  => is_empty(head).match ({
-                        true  => false,
-                        false => head == rty.dispatch_recv_name(),
-                    }),
+                    true  => is_empty(head) ? false : head == rty.dispatch_recv_name(),
                     false => rty.fits(p0),
                 }),
                 false => false,
@@ -1486,8 +1442,8 @@ alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool) AliasCands 
                 .gstr_finish(env.a)
             f := env.env_func(fname)
             (is_empty(f.name) == false && f.alias_cand_matches(fn, rty, exact)).then({
-                second = (cnt == 1).match ({ true => f.name, false => second })
-                first = (cnt == 0).match ({ true => f.name, false => first })
+                second = cnt == 1 ? f.name : second
+                first = cnt == 0 ? f.name : first
                 cnt = cnt + 1
             })
         })
@@ -1521,58 +1477,41 @@ gen_call_ret = (env: Env, c: CallData) Ty {
 // not a known function: an INDIRECT call through a function-VALUE (a fn-valued local or field
 // bound to a local) — its result type is the value's FnT return type.
 // Bounds-safe operand inference for 1-arg intrinsics.
-arg0_ty = (env: Env, c: CallData) Ty {
-    (c.args.len > 0).match ({ true => env.infer_expr(c.args[0].addr()), false => tvoid() })
-}
+arg0_ty = (env: Env, c: CallData) Ty { c.args.len > 0 ? env.infer_expr(c.args[0].addr()) : tvoid() }
 addr_ty = (env: Env, c: CallData) Ty {
     base := env.arg0_ty(c)
-    readonly := (c.args.len > 0).match ({
-        true  => env.lvalue_writes_readonly(c.args[0].addr()),
-        false => false,
-    })
-    tptr_k(env.a.tnode(base), readonly.match ({ true => k_ptr(), false => k_mut_ptr() }))
+    readonly := c.args.len > 0 ? env.lvalue_writes_readonly(c.args[0].addr()) : false
+    tptr_k(env.a.tnode(base), readonly ? k_ptr() : k_mut_ptr())
 }
 // `assert_nonnull` proves nullability, not writability: RawPtr<T> narrows to MutPtr<T>, while an
 // already-non-null Ptr<T>/MutPtr<T> keeps its direction capability unchanged.
 nonnull_ty = (t: Ty) Ty {
     t.match ({
-        .Ptr(pd) => (pd.kind == k_raw_ptr()).match ({
-            true  => tptr_k(pd.pointee, k_mut_ptr()),
-            false => t,
-        }),
+        .Ptr(pd) => pd.kind == k_raw_ptr() ? tptr_k(pd.pointee, k_mut_ptr()) : t,
         _        => tvoid(),
     })
 }
 // Constructor types keep generic args so later match-arm binds recover concrete payload types.
 einst_ty = (ei: EnumInst) Ty {
-    (ei.targs.len > 0).match ({
-        true  => tgeneric(ei.base, ei.targs, ei.mty),
-        false => tnamed(ei.mty),
-    })
+    ei.targs.len > 0 ? tgeneric(ei.base, ei.targs, ei.mty) : tnamed(ei.mty)
 }
 mkenum_ty = (env: Env, mk: MakeEnumData) Ty {
     (mk.mty == "").match ({
         true  => env.enum_inst_mk(mk.variant, mk.payload).einst_ty(),
-        false => (mk.targs.len > 0).match ({
-            true  => tgeneric(mk.ty, mk.targs, mk.mty),
-            false => tnamed(mk.mty),
-        }),
+        false => mk.targs.len > 0 ? tgeneric(mk.ty, mk.targs, mk.mty) : tnamed(mk.mty),
     })
 }
 tag_ty = (env: Env, t: TagData) Ty {
     (t.mty == "").match ({
         true  => env.enum_inst_tag(t.variant).einst_ty(),
-        false => (t.targs.len > 0).match ({
-            true  => tgeneric(t.ty, t.targs, t.mty),
-            false => tnamed(t.mty),
-        }),
+        false => t.targs.len > 0 ? tgeneric(t.ty, t.targs, t.mty) : tnamed(t.mty),
     })
 }
 // Generic struct field reads substitute the receiver's concrete type args.
 gen_field_at = (fields: [Field], fname: string_view) Ty {
     found := tvoid()
     fields.loop((h, i, f) {
-        found = (f.name == fname).match ({ true => f.ty, false => found })
+        found = f.name == fname ? f.ty : found
     })
     found
 }
@@ -1585,7 +1524,7 @@ ty_under_ptr* = (t: Ty) Ty {
 slice_member* = (a: MutPtr<Malloc>, field: string_view) Ty {
     (field == "len").match ({
         true  => ti64(),
-        false => (field == "ptr").match ({ true => tptr(a.tnode(tu8())), false => tvoid() }),
+        false => field == "ptr" ? tptr(a.tnode(tu8())) : tvoid(),
     })
 }
 // Field-type inference, auto-deref'd. Shared by `obj.field` (Member) and `obj->field` (Arrow); the
@@ -1615,13 +1554,13 @@ common_ty* = (a: Ty, b: Ty) Ty {
                 true  => (a.ty_rank() == 0).match ({
                     true  => b,
                     false => (a.ty_rank() == 1).match ({
-                        true  => (b.ty_rank() > 1).match ({ true => b, false => a }),
+                        true  => b.ty_rank() > 1 ? b : a,
                         false => a,
                     }),
                 }),
                 false => a.ty_eq(b).match ({
                     true  => b,
-                    false => b.ty_eq(a).match ({ true => a, false => tvoid() }),
+                    false => b.ty_eq(a) ? a : tvoid(),
                 }),
             }),
         }),
@@ -1643,12 +1582,12 @@ has_tparam* = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) {
 // `[1,2,3]` adopts the declared element width (`i64`/`u8`) instead of defaulting to i32 — the same
 // expected-type propagation a scalar int slot already gets. Falls back to the first item's type.
 sl_elem = (env: Env, items: [Expr]) Ty {
-    (items.len == 0).match ({ true => tvoid(), false => env.infer_expr(items[0].addr()) })
+    items.len == 0 ? tvoid() : env.infer_expr(items[0].addr())
 }
 vdef_payload = (vs: [VariantDef], vn: string_view) Ty {
     found := tvoid()
     vs.loop((h, i, v) {
-        found = (v.name == vn).match ({ true => v.payload, false => found })
+        found = v.name == vn ? v.payload : found
     })
     found
 }
@@ -1657,7 +1596,7 @@ vdef_payload = (vs: [VariantDef], vn: string_view) Ty {
 vdef_default_of = (vs: [VariantDef], vn: string_view) Ptr<Expr> {
     found := expr_null()
     vs.loop((h, i, v) {
-        found = (v.name == vn).match ({ true => v.dflt, false => found })
+        found = v.name == vn ? v.dflt : found
     })
     found
 }
@@ -1718,10 +1657,7 @@ carries_return_e = (e: Ptr<Expr>) bool {
 extend_env* = (a: MutPtr<Malloc>, env: Env, st: Stmt) Env {
     st.match ({
         .Let(l) => Env(
-            vars: a.vcons(l.name, l.ty.is_void_ty().match ({
-                true  => env.infer_expr(l.value),
-                false => l.ty,
-            }), env.vars),
+            vars: a.vcons(l.name, l.ty.is_void_ty() ? env.infer_expr(l.value) : l.ty, env.vars),
             decls: env.decls,
             didx: env.didx,
             exp: env.exp,
@@ -1749,10 +1685,7 @@ empty_args* = () [Expr] { slice(null_ptr(), 0) }
 pidx = (params: [Param], name: string_view, found: i32, i: i32) i32 {
     (i == params.len).match ({
         true  => found,
-        false => (params[i].name == name).match ({
-            true  => i,
-            false => params.pidx(name, found, i + 1),
-        }),
+        false => params[i].name == name ? i : params.pidx(name, found, i + 1),
     })
 }
 param_index* = (params: [Param], name: string_view) i32 { params.pidx(name, 0 - 1, 0) }
@@ -1805,7 +1738,7 @@ name_marks = (
     env: Ptr<VList>,
     depth: i64,
 ) string_view {
-    out := (depth > 0).match ({ true => s.gstr_int(a, depth), false => s })
+    out := depth > 0 ? s.gstr_int(a, depth) : s
     out = a.inline_marks(out, env)
     out = out.gstr_append(a, "_")
     out = out.gstr_append(a, name)
@@ -1879,8 +1812,8 @@ the_func* = (decls: [Decl], name: string_view) Func {
     )
     decls.loop((h, i, d) {
         found = d.match ({
-            .DFunc(f)    => (f.name == name).match ({ true => f, false => found }),
-            .DForeign(f) => (f.name == name).match ({ true => f, false => found }),
+            .DFunc(f)    => f.name == name ? f : found,
+            .DForeign(f) => f.name == name ? f : found,
             _            => found,
         })
     })
@@ -2051,7 +1984,7 @@ ret_to_expr = (st: Stmt) Stmt {
 block_of = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
     buf: [Stmt] := cbuf<Stmt>(a, stmts.len)
     stmts.loop((h, i, st) {
-        buf[i] = (i == stmts.len - 1).match ({ true => ret_to_expr(st), false => st })
+        buf[i] = i == stmts.len - 1 ? ret_to_expr(st) : st
     })
     a.cenode(block(buf))
 }

@@ -12,7 +12,7 @@ RQCAP := 4    // deliberately tiny initial run-queue capacity
 WORKERS := 1    // one consumer, so pushes outpace pops
 ITERS := 20
 processed := malloc(8)
-spin = (n: i64, s: i64) i64 { (n <= 0).match ({ true => s, false => spin(n - 1, s + n) }) }
+spin = (n: i64, s: i64) i64 { n <= 0 ? s : spin(n - 1, s + n) }
 // each message costs a little work, keeping the lone worker busy while the queue fills.
 behave = (user: RawPtr<u8>, msg: i64) void {
     junk := spin(400, 0)
@@ -59,16 +59,16 @@ iteration = () i64 {
     p.pool_close()
     free(acts)
     (got == sent).match ({
-        true  => (sent == NACT).match ({ true => 1, false => 0 }),
+        true  => sent == NACT ? 1 : 0,
         false => 0,
     })
 }
 run_iters = (i: i64, passes: i64) i64 {
-    (i >= ITERS).match ({ true => passes, false => run_iters(i + 1, passes + iteration()) })
+    i >= ITERS ? passes : run_iters(i + 1, passes + iteration())
 }
 main = () i32 {
     passes := run_iters(0, 0)
     println(passes)
     free(processed)
-    (passes == ITERS).match ({ true => 42, false => 1 })
+    passes == ITERS ? 42 : 1
 }

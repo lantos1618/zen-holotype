@@ -15,9 +15,7 @@ gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
         // assignment. With `LL` the arithmetic happens at >=64-bit, then the final assign/cast truncates
         // (the C-correct widen-then-narrow). Small i32 math is unchanged: int32_t op long long promotes,
         // computes, and the i32 store/cast narrows back.
-        .Int(n)         => s
-            .gstr_int(alloc, n)
-            .gstr_append(alloc, (n < 0).match ({ true => "ULL", false => "LL" })),
+        .Int(n)         => s.gstr_int(alloc, n).gstr_append(alloc, n < 0 ? "ULL" : "LL"),
         .Byte(n)        => s.gstr_int(alloc, n),
         .FloatLit(ft)   => s.gstr_append(alloc, ft),
         .Var(v)         => s.gstr_append(alloc, v.name),
@@ -245,10 +243,7 @@ gen_bin = (s: String, alloc: MutPtr<Malloc>, b: BinData) String {
 }
 // Intrinsics erase to C pointer/cast ops; missing intrinsic args degrade to literal 0.
 gen_arg_at = (s: String, alloc: MutPtr<Malloc>, c: CallData, i: i32) String {
-    (i < c.args.len).match ({
-        true  => s.gen_expr(alloc, c.args[i].addr()),
-        false => s.gstr_append(alloc, "0"),
-    })
+    i < c.args.len ? s.gen_expr(alloc, c.args[i].addr()) : s.gstr_append(alloc, "0")
 }
 EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI64 | AtomicAddI64 | AtomicLoadI64 | AtomicStoreI64 | AtomicCasI64 | AtomicFence | Addr | AssertNonnull | CStr | Slice | NullPtr | ToI32 | ToI64 | ToU8 | ToF64 | Sizeof
 // map a sizeof type-arg name to its C type name. Primitives (i64→int64_t, bool→…) must NOT leak the
@@ -282,7 +277,7 @@ sizeof_base_cname = (n: string_view) string_view {
     n
 }
 sizeof_cname = (n: string_view) string_view {
-    n.sizeof_is_canonical_string().match ({ true => "const char*", false => n.sizeof_base_cname() })
+    n.sizeof_is_canonical_string() ? "const char*" : n.sizeof_base_cname()
 }
 // `sizeof(<type>)`: route a bare type-name Var through sizeof_cname; any other arg form emits as-is.
 gen_sizeof = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
@@ -510,7 +505,7 @@ gen_call = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
 gen_args = (s: String, alloc: MutPtr<Malloc>, args: [Expr]) String {
     out := s
     args.loop((h, i, arg) {
-        out = (i == 0).match ({ true => out, false => out.gstr_append(alloc, ", ") })    // comma between, not before
+        out = i == 0 ? out : out.gstr_append(alloc, ", ")    // comma between, not before
         out = out.gen_expr(alloc, arg.addr())
     })
     out
@@ -540,10 +535,7 @@ gen_cond_branch_div = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
 }
 gen_cond_div_ty = (s: String, alloc: MutPtr<Malloc>, d: CondData) String {
     blk_diverges(d.t).match ({
-        true  => blk_diverges(d.e).match ({
-            true  => s.gstr_append(alloc, "0"),
-            false => s.gen_expr(alloc, d.e),
-        }),
+        true  => blk_diverges(d.e) ? s.gstr_append(alloc, "0") : s.gen_expr(alloc, d.e),
         false => s.gen_expr(alloc, d.t),
     })
 }
@@ -578,7 +570,7 @@ gen_mkenum = (s: String, alloc: MutPtr<Malloc>, m: MakeEnumData) String {
 gen_mkstruct = (s: String, alloc: MutPtr<Malloc>, m: MakeStructData) String {
     out := s.gstr_append(alloc, "(").gstr_append(alloc, m.mty).gstr_append(alloc, "){ ")
     m.inits.loop((h, i, fi) {
-        out = (i == 0).match ({ true => out, false => out.gstr_append(alloc, ", ") })    // mty = the monomorphized name for a generic literal
+        out = i == 0 ? out : out.gstr_append(alloc, ", ")    // mty = the monomorphized name for a generic literal
         // comma between, not before
         out = out
             .gstr_append(alloc, ".")
@@ -648,10 +640,7 @@ gen_armbody_stmt = (
     sep: string_view,
     a: ArmData,
 ) String {
-    is_empty(a.bind).match ({
-        true  => s.gen_expr_stmt(alloc, a.body),
-        false => s.gen_armbind_stmt(alloc, subj, sep, a),
-    })
+    is_empty(a.bind) ? s.gen_expr_stmt(alloc, a.body) : s.gen_armbind_stmt(alloc, subj, sep, a)
 }
 // Type every arm through C's conditional operator so array arms decay, numeric arms widen, and exact
 // struct/scalar arms keep their type. __typeof__ evaluates none of these arm expressions. DIVERGING
@@ -660,10 +649,7 @@ gen_armbody_stmt = (
 next_live_arm = (arms: [ArmData], i: i64) i64 {
     (i >= arms.len).match ({
         true  => arms.len,
-        false => arms[i].body.blk_diverges().match ({
-            true  => arms.next_live_arm(i + 1),
-            false => i,
-        }),
+        false => arms[i].body.blk_diverges() ? arms.next_live_arm(i + 1) : i,
     })
 }
 gen_match_type_expr = (
@@ -801,7 +787,7 @@ gen_switch_arm = (
         true  => s.gen_switch_default(alloc, subj, sep, a),
         false => {
             out := s.gen_switch_case(alloc, subj, sep, ename, a)
-            last.match ({ true => out.gen_switch_panic_default(alloc), false => out })
+            last ? out.gen_switch_panic_default(alloc) : out
         },
     })
 }
@@ -818,7 +804,7 @@ gen_switch_stmt_arm = (
         true  => s.gen_switch_stmt_default(alloc, subj, sep, a),
         false => {
             out := s.gen_switch_stmt_case(alloc, subj, sep, ename, a)
-            last.match ({ true => out.gen_switch_panic_default(alloc), false => out })
+            last ? out.gen_switch_panic_default(alloc) : out
         },
     })
 }
@@ -835,10 +821,7 @@ gen_switch_arms = (
         true  => s,
         false => {
             out := s.gen_switch_arm(alloc, subj, sep, ename, arms[i], i == arms.len - 1)
-            (arms[i].variant == "_").match ({
-                true  => out,
-                false => out.gen_switch_arms(alloc, subj, sep, ename, arms, i + 1),
-            })
+            arms[i].variant == "_" ? out : out.gen_switch_arms(alloc, subj, sep, ename, arms, i + 1)
         },
     })
 }
@@ -865,7 +848,7 @@ gen_switch_stmt_arms = (
 // the subject can be any expression, so bind it once to a temp. Enum matches emit as a switch inside a
 // GCC statement-expression; `__typeof__(first_arm)` gives us the result type without evaluating an arm.
 gen_match = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
-    sep := m.ptr.match ({ true => "->", false => "." })
+    sep := m.ptr ? "->" : "."
     s
         .gstr_append(alloc, "({ __auto_type _subj = ")
         .gen_expr(alloc, m.subj)
@@ -878,7 +861,7 @@ gen_match = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
         .gstr_append(alloc, "} _out; })")
 }
 gen_match_stmt = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
-    sep := m.ptr.match ({ true => "->", false => "." })
+    sep := m.ptr ? "->" : "."
     s
         .gstr_append(alloc, "{ __auto_type _subj = ")
         .gen_expr(alloc, m.subj)

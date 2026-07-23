@@ -30,10 +30,7 @@ type_impls_trait = (decls: [Decl], tyname: string_view, trname: string_view) boo
     found := false
     decls.loop((h, i, d) {
         found = d.match ({
-            .DImpl(im) => (im.ty == tyname && im.trname == trname).match ({
-                true  => true,
-                false => found,
-            }),
+            .DImpl(im) => im.ty == tyname && im.trname == trname ? true : found,
             _          => found,
         })
     })
@@ -73,10 +70,7 @@ bound_errs = (env: Env, f: Func, c: CallData) i32 {
 result_compatible = (want: Ty, got: Ty) bool {
     (want.is_str_t() && got.is_str_t()).match ({
         true  => true,
-        false => (want.ty_rank() >= 0 && got.ty_rank() >= 0).match ({
-            true  => true,
-            false => want.ty_eq(got),
-        }),
+        false => want.ty_rank() >= 0 && got.ty_rank() >= 0 ? true : want.ty_eq(got),
     })
 }    // string_* types are one compatible family
 cond_numlike = (t: Ty) bool { t.ty_rank() >= 0 || t.is_f64_ty() }
@@ -87,10 +81,7 @@ cond_numlike = (t: Ty) bool { t.ty_rank() >= 0 || t.is_f64_ty() }
 cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
     d.t.is_lit_numeric().match ({
         true  => et.cond_numlike(),
-        false => d.e.is_lit_numeric().match ({
-            true  => tt.cond_numlike(),
-            false => tt.result_compatible(et),
-        }),
+        false => d.e.is_lit_numeric() ? tt.cond_numlike() : tt.result_compatible(et),
     })
 }
 // ── value-consumed match/cond arms must each yield a value ──────────────────────────────
@@ -109,7 +100,7 @@ cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
 //     mixed side-effect arms, which emit fine as `(c ? f() : ({ }))`.
 known_void_call = (env: Env, c: CallData) bool {
     f := env.env_func(c.fn)
-    (f.name == c.fn).match ({ true => f.tparams.len == 0 && f.ret.is_void_ty(), false => false })
+    f.name == c.fn ? f.tparams.len == 0 && f.ret.is_void_ty() : false
 }
 novalue_block_tail = (env: Env, stmts: [Stmt]) i32 {
     (stmts.len == 0).match ({
@@ -144,7 +135,7 @@ early_returns = (stmts: [Stmt]) bool {
 }
 expr_drops_return* = (e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Block(b) => b.stmts.early_returns().match ({ true => 1, false => 0 }),
+        .Block(b) => b.stmts.early_returns() ? 1 : 0,
         _         => 0,
     })
 }
@@ -154,8 +145,8 @@ enum_variants* = (decls: [Decl], ename: string_view) [VariantDef] {
     found := no_variants()
     decls.loop((h, i, d) {
         found = d.match ({
-            .DEnum(ed)   => (ed.name == ename).match ({ true => ed.variants, false => found }),
-            .DGenEnum(g) => (g.name == ename).match ({ true => g.variants, false => found }),
+            .DEnum(ed)   => ed.name == ename ? ed.variants : found,
+            .DGenEnum(g) => g.name == ename ? g.variants : found,
             _            => found,
         })
     })
@@ -168,7 +159,7 @@ arm_covers = (arms: [ArmData], vname: string_view) bool {
 missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
     n := 0
     variants.loop((h, i, v) {
-        n = arms.arm_covers(v.name).match ({ true => n, false => n + 1 })
+        n = arms.arm_covers(v.name) ? n : n + 1
     })
     n
 }
@@ -177,24 +168,24 @@ missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
 first_missing_variant* = (variants: [VariantDef], arms: [ArmData]) string_view {
     r := ""
     variants.loop((h, i, v) {
-        r = (is_empty(r) && arms.arm_covers(v.name) == false).match ({ true => v.name, false => r })
+        r = is_empty(r) && arms.arm_covers(v.name) == false ? v.name : r
     })
     r
 }
 dup_before = (arms: [ArmData], vname: string_view, upto: i32) bool {
     f := false
     arms.loop((h, i, a) {
-        f = (i < upto && a.variant == vname).match ({ true => true, false => f })
+        f = i < upto && a.variant == vname ? true : f
     })
     f
 }
 dup_arm_errs* = (arms: [ArmData]) i32 {
     n := 0
     arms.loop((h, i, a) {
-        n = n + (a.variant == "_").match ({
+        n = n + ((a.variant == "_").match ({
             true  => 0,
-            false => arms.dup_before(a.variant, i).match ({ true => 1, false => 0 }),
-        })
+            false => arms.dup_before(a.variant, i) ? 1 : 0,
+        }))
     })
     n
 }
@@ -205,14 +196,14 @@ dup_arm_errs* = (arms: [ArmData]) i32 {
 wildcard_before = (arms: [ArmData], upto: i32) bool {
     f := false
     arms.loop((h, i, a) {
-        f = (i < upto && a.variant == "_").match ({ true => true, false => f })
+        f = i < upto && a.variant == "_" ? true : f
     })
     f
 }
 unreachable_arm_errs* = (arms: [ArmData]) i32 {
     n := 0
     arms.loop((h, i, a) {
-        n = n + arms.wildcard_before(i).match ({ true => 1, false => 0 })
+        n = n + (arms.wildcard_before(i) ? 1 : 0)
     })
     n
 }
@@ -249,14 +240,14 @@ non_numeric = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
     env.unknown_ty(t).match ({
         true  => false,
-        false => (t.ty_rank() >= 0).match ({ true => false, false => true }),
+        false => t.ty_rank() >= 0 ? false : true,
     })
 }
 non_bool = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
     env.unknown_ty(t).match ({
         true  => false,
-        false => t.is_bool_ty().match ({ true => false, false => true }),
+        false => t.is_bool_ty() ? false : true,
     })
 }
 // f64 operators are strict: no implicit int<->float mixing.
@@ -266,7 +257,7 @@ f64_op_ok = (op: string_view) bool {
 }
 f64_side_ok = (env: Env, t: Ty) bool { t.is_f64_ty() || env.unknown_ty(t) }
 f64_operand_err = (env: Env, op: string_view, lt: Ty, rt: Ty) i32 {
-    (env.f64_side_ok(lt) && env.f64_side_ok(rt) && op.f64_op_ok()).match ({ true => 0, false => 1 })
+    env.f64_side_ok(lt) && env.f64_side_ok(rt) && op.f64_op_ok() ? 0 : 1
 }
 // Any f64 side routes to the f64 surface; otherwise use integer numeric rules.
 num_operand_err = (env: Env, b: BinData) i32 {
@@ -274,10 +265,7 @@ num_operand_err = (env: Env, b: BinData) i32 {
     rt := env.infer_expr(b.rhs)
     (lt.is_f64_ty() || rt.is_f64_ty()).match ({
         true  => env.f64_operand_err(b.op, lt, rt),
-        false => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).match ({
-            true  => 1,
-            false => 0,
-        }),
+        false => env.non_numeric(b.lhs) || env.non_numeric(b.rhs) ? 1 : 0,
     })
 }
 same_eq_category = (a: Ty, b: Ty) bool {
@@ -297,10 +285,7 @@ eq_field_ty_ok = (env: Env, t: Ty) bool {
     t.match ({
         .Slice(e)   => false,
         .FnT(f)     => false,
-        .Named(n)   => (env.didx.struct_idx.get(n, 0 - 1) < 0).match ({
-            true  => true,
-            false => env.eq_struct_fields_ok(t),
-        }),
+        .Named(n)   => env.didx.struct_idx.get(n, 0 - 1) < 0 ? true : env.eq_struct_fields_ok(t),
         .Generic(g) => (env.didx.genstruct_idx.get(g.name, 0 - 1) < 0).match ({
             true  => true,
             false => env.eq_struct_fields_ok(t),
@@ -311,7 +296,7 @@ eq_field_ty_ok = (env: Env, t: Ty) bool {
 eq_struct_fields_ok* = (env: Env, t: Ty) bool {
     ok := true
     reflect_fields(env.a, env.decls, env.didx, t).loop((h, i, f) {
-        ok = env.eq_field_ty_ok(f.ty).match ({ true => ok, false => false })
+        ok = env.eq_field_ty_ok(f.ty) ? ok : false
     })
     ok
 }
@@ -339,13 +324,10 @@ eq_mix_err = (env: Env, b: BinData) i32 {
     lt := env.infer_expr(b.lhs)
     rt := env.infer_expr(b.rhs)
     (lt.is_f64_ty() || rt.is_f64_ty()).match ({
-        true  => (env.f64_side_ok(lt) && env.f64_side_ok(rt)).match ({ true => 0, false => 1 }),
+        true  => env.f64_side_ok(lt) && env.f64_side_ok(rt) ? 0 : 1,
         false => (env.unknown_ty(lt) || env.unknown_ty(rt)).match ({
             true  => 0,
-            false => (lt.same_eq_category(rt) || env.eq_nominal_ok(lt, rt)).match ({
-                true  => 0,
-                false => 1,
-            }),
+            false => lt.same_eq_category(rt) || env.eq_nominal_ok(lt, rt) ? 0 : 1,
         }),
     })
 }
@@ -375,10 +357,7 @@ signcmp_err = (env: Env, b: BinData) i32 {
     ((b.op.is_cmp_op_v() || b.op.is_eq_op_v())
         && b.lhs.is_lit_numeric() == false
         && b.rhs.is_lit_numeric() == false).match ({
-        true  => env.infer_expr(b.lhs).sign_mismatch(env.infer_expr(b.rhs)).match ({
-            true  => 1,
-            false => 0,
-        }),
+        true  => env.infer_expr(b.lhs).sign_mismatch(env.infer_expr(b.rhs)) ? 1 : 0,
         false => 0,
     })
 }
@@ -393,7 +372,7 @@ non_slice = (env: Env, e: Ptr<Expr>) bool {
     t := env.infer_expr(e)
     env.unknown_ty(t).match ({
         true  => false,
-        false => t.is_slice_ty().match ({ true => false, false => true }),
+        false => t.is_slice_ty() ? false : true,
     })
 }
 // A generic type with a `.Void` type-arg (recursing Ptr/Slice/nested generics) — e.g. `Box<void>`
@@ -423,29 +402,29 @@ has_method* = (methods: [Param], name: string_view) bool {
 }
 // rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
 impl_ty = (tyname: string_view) Ty {
-    (tyname == "i32").then({
-        return ti32()
+    (tyname == "i32").match ({
+        true  => ti32(),
+        false => (tyname == "i64").match ({
+            true  => ti64(),
+            false => (tyname == "u8").match ({
+                true  => tu8(),
+                false => (tyname == "f64").match ({
+                    true  => tf64(),
+                    false => (tyname == "bool").match ({
+                        true  => tbool(),
+                        false => (tyname == "string_view").match ({
+                            true  => tstring_view(),
+                            false => tyname == "str" ? tstring_view() : tnamed(tyname),
+                        }),
+                    }),
+                }),
+            }),
+        }),
     })
-    (tyname == "i64").then({
-        return ti64()
-    })
-    (tyname == "u8").then({
-        return tu8()
-    })
-    (tyname == "f64").then({
-        return tf64()
-    })
-    (tyname == "bool").then({
-        return tbool()
-    })
-    (tyname == "string_view" || tyname == "str").then({
-        return tstring_view()
-    })
-    tnamed(tyname)
 }
 subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: string_view) Ty {
     t.match ({
-        .Named(n) => (n == "Self").match ({ true => impl_ty(tyname), false => t }),
+        .Named(n) => n == "Self" ? impl_ty(tyname) : t,
         .Ptr(pd)  => tptr_k(a.tnode(a.subst_self(load(pd.pointee), tyname)), pd.kind),
         .Slice(p) => tslice(a.tnode(a.subst_self(load(p), tyname))),
         _         => t,
@@ -476,10 +455,7 @@ trait_has_default* = (decls: [Decl], trname: string_view, m: string_view) bool {
     found := false
     decls.loop((h, i, d) {
         found = d.match ({
-            .DTraitDefault(td) => (td.trname == trname && td.fn.name == m).match ({
-                true  => true,
-                false => found,
-            }),
+            .DTraitDefault(td) => td.trname == trname && td.fn.name == m ? true : found,
             _                  => found,
         })
     })
@@ -494,33 +470,28 @@ method_err* = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
                 true  => 0,
                 false => 1,
             }),
-            false => decls.trait_has_default(im.trname, f.name).match ({ true => 0, false => 1 }),
+            false => decls.trait_has_default(im.trname, f.name) ? 0 : 1,
         }),    // omitted: OK iff defaulted
         _        => 0,
     })
 }
 // a match: exhaustiveness vs duplicate-variant, split out from match_err. The caret points at the
 // matched subject (arms carry no source position); the subject bottoms at a Var, which survives resolve.
-arms_first_pos* = (arms: [ArmData]) i32 {
-    (arms.len == 0).match ({ true => 0, false => arms[0].pos })
-}
+arms_first_pos* = (arms: [ArmData]) i32 { arms.len == 0 ? 0 : arms[0].pos }
 // ── trait-bound enrichment ─────────────────────────────────────────────────────────────────────
 // the method names an impl of (type `tn`, trait `tr`) provides; empty when no such impl exists.
 impl_methods_of* = (decls: [Decl], tn: string_view, tr: string_view) [Param] {
     found := empty_params()
     decls.loop((h, i, d) {
         found = d.match ({
-            .DImpl(im) => (im.ty == tn && im.trname == tr).match ({
-                true  => im.methods,
-                false => found,
-            }),
+            .DImpl(im) => im.ty == tn && im.trname == tr ? im.methods : found,
             _          => found,
         })
     })
     found
 }
 // `/.` is the checker's internal float-division marker; a diagnostic must show the SOURCE operator `/`.
-op_display* = (op: string_view) string_view { (op == "/.").match ({ true => "/", false => op }) }
+op_display* = (op: string_view) string_view { op == "/." ? "/" : op }
 // ── bounded-generics enforcement over RAW (pre-inline) decls ─────────────────────────────
 // Local generic calls are INLINED during resolve_module, so by check_module time the call site is
 // gone. This pass therefore runs on the raw, pre-inline decls (like the M5 escape check), walking
@@ -619,10 +590,7 @@ kvb_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32
 ka_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
     buf := cbuf<Ty>(env.a, f.tparams.len)
     f.tparams.loop((h, i, tp) {
-        buf[i] = (i < etargs.len).match ({
-            true  => etargs[i],
-            false => env.call_targ(f, args, tp.name),
-        })
+        buf[i] = i < etargs.len ? etargs[i] : env.call_targ(f, args, tp.name)
     })
     buf
 }
@@ -649,10 +617,7 @@ ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i
                     true  => 0,
                     false => {
                         lv := ar.addr().lit_slot_verdict(ct)
-                        (lv >= 0).match ({
-                            true  => lv,
-                            false => env.fit_err(env.infer_expr(ar.addr()), ct),
-                        })
+                        lv >= 0 ? lv : env.fit_err(env.infer_expr(ar.addr()), ct)
                     },
                 })
             },
@@ -669,7 +634,7 @@ ka_lam_params = (a: MutPtr<Malloc>, lmps: [Param], fps: [Ty]) [Param] {
     lmps.loop((h, i, p) {
         buf[i] = Param(
             name: p.name,
-            ty: (i < fps.len).match ({ true => fps[i], false => tvoid() }),
+            ty: i < fps.len ? fps[i] : tvoid(),
             variadic: false,
         )
     })
@@ -701,13 +666,10 @@ ka_last_ty = (env: Env, st: Stmt) Ty {
 ka_lam_ret_err = (env: Env, fd: FnTData, lm: LambdaData, fps: [Ty]) i32 {
     rty := load(fd.ret)
     (env.unknown_ty(rty) || lm.ret.is_void_ty() == false).match ({
-        true  => env.unknown_ty(rty).match ({ true => 0, false => env.fit_err(lm.ret, rty) }),
+        true  => env.unknown_ty(rty) ? 0 : env.fit_err(lm.ret, rty),
         false => {
             bty := env.ka_lam_body_ty(lm, fps)
-            (bty.is_void_ty() || env.unknown_ty(bty)).match ({
-                true  => 0,
-                false => env.fit_err(bty, rty),
-            })
+            bty.is_void_ty() || env.unknown_ty(bty) ? 0 : env.fit_err(bty, rty)
         },
     })
 }
@@ -1034,7 +996,7 @@ krw_refl_shape = (c: CallData) bool {
 krw_value_param = (ps: [Param], nm: string_view) bool {
     f := false
     ps.loop((h, i, p) {
-        f = (i >= 1 && p.name == nm).match ({ true => true, false => f })
+        f = i >= 1 && p.name == nm ? true : f
     })
     f
 }
@@ -1045,18 +1007,12 @@ krw_subject_bound = (e: Ptr<Expr>, ps: [Param]) bool {
     })
 }
 krw_call = (c: CallData, ps: [Param]) i32 {
-    nsub := (c.fn == "each_field").match ({ true => 1, false => 2 })
+    nsub := c.fn == "each_field" ? 1 : 2
     bound := false
     c.args.loop((h, i, x) {
-        bound = (i < to_i64(nsub) && x.addr().krw_subject_bound(ps)).match ({
-            true  => true,
-            false => bound,
-        })
+        bound = i < to_i64(nsub) && x.addr().krw_subject_bound(ps) ? true : bound
     })
-    (bound && c.args[c.args.len - 1].wr_lam_writes_value()).match ({
-        true  => KREFLECTWRITE().kv_at(c.pos),
-        false => 0,
-    })
+    bound && c.args[c.args.len - 1].wr_lam_writes_value() ? KREFLECTWRITE().kv_at(c.pos) : 0
 }
 krw_e = (e: Ptr<Expr>, ps: [Param]) i32 {
     load(e).match ({
@@ -1102,7 +1058,7 @@ krw_e = (e: Ptr<Expr>, ps: [Param]) i32 {
 krw_subj_es = (xs: [Expr], n: i64, ps: [Param]) i32 {
     acc := 0
     xs.loop((h, i, x) {
-        acc = (i < n).match ({ true => acc.or(x.addr().krw_e(ps)), false => acc })
+        acc = i < n ? acc.or(x.addr().krw_e(ps)) : acc
     })
     acc
 }
@@ -1159,10 +1115,7 @@ ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32)
                                 || tps.ty_mentions_tparam(fE)).match ({
                                 true  => 0,
                                 false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({
-                                    true  => cnd.match ({
-                                        true  => env.ko_ok_at(tps, want, rt, pos),
-                                        false => 0,
-                                    }),
+                                    true  => cnd ? env.ko_ok_at(tps, want, rt, pos) : 0,
                                     false => KORRETURN().kv_at(pos),
                                 }),
                             })
@@ -1185,24 +1138,15 @@ ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
         || tps.ty_mentions_tparam(fO)
         || tps.ty_mentions_tparam(rO)).match ({
         true  => 0,
-        false => (fO.ty_eq(rO) || rO.ty_eq(fO)).match ({
-            true  => 0,
-            false => KORRETURN().kv_at(pos),
-        }),
+        false => fO.ty_eq(rO) || rO.ty_eq(fO) ? 0 : KORRETURN().kv_at(pos),
     })
 }
 ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData, cnd: bool) i32 {
-    own := ko_is_or_call(c).match ({
-        true  => env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos),
-        false => 0,
-    })
+    own := ko_is_or_call(c) ? env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos) : 0
     own.or(env.ko_args_kind(tps, want, c.args, cnd))
 }
 ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData, cnd: bool) i32 {
-    own := ko_is_or_mcall(mc).match ({
-        true  => env.ko_at(tps, want, mc.recv, cnd, mc.pos),
-        false => 0,
-    })
+    own := ko_is_or_mcall(mc) ? env.ko_at(tps, want, mc.recv, cnd, mc.pos) : 0
     own.or(env.ko_expr_kind(tps, want, mc.recv, cnd)).or(env.ko_args_kind(tps, want, mc.args, cnd))
 }
 // `cnd` marks descent into a CONDITIONALLY-evaluated / value-block position (see ko_at): those
@@ -1317,10 +1261,7 @@ ko_global_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalDa
         exp: tvoid(),
         a: a,
     )
-    is_expr_null(g.init).match ({
-        true  => 0,
-        false => env.ko_expr_kind(empty_params(), ti32(), g.init, false),
-    })
+    is_expr_null(g.init) ? 0 : env.ko_expr_kind(empty_params(), ti32(), g.init, false)
 }
 // ── error[ffi-type]: FFI-safety of FOREIGN (bodyless) declarations ─────────────────────────────────
 // A bodyless `name = (params) Ret` decl IS a raw platform prototype (genc emits a bare C prototype;
@@ -1375,10 +1316,8 @@ ffi_fields_ok = (env: Env, fs: [Field], depth: i64) bool {
 }
 FFI_DEPTH = () i64 { 8 }
 // 0/1 count predicates feeding kv_one, mirroring ut_unknown_ty's shape.
-ffi_bad_ty = (env: Env, t: Ty) i32 {
-    env.ffi_ty_ok(t, FFI_DEPTH()).match ({ true => 0, false => 1 })
-}
-ffi_bad_generic = (f: Func) i32 { (f.tparams.len > 0).match ({ true => 1, false => 0 }) }
+ffi_bad_ty = (env: Env, t: Ty) i32 { env.ffi_ty_ok(t, FFI_DEPTH()) ? 0 : 1 }
+ffi_bad_generic = (f: Func) i32 { f.tparams.len > 0 ? 1 : 0 }
 // the NAME walk (same traversal order as the kind walk): the message naming the offending
 // parameter/return type, in user spelling.
 ffi_param_msg = (
@@ -1427,10 +1366,7 @@ ffi_func_msg* = (a: MutPtr<Malloc>, env: Env, f: Func) string_view {
             false => a.ffi_param_msg(f.name, p.name, a.zty(p.ty)),
         }))
     })
-    desc_or(r, env.ffi_ty_ok(f.ret, FFI_DEPTH()).match ({
-        true  => "",
-        false => a.ffi_ret_msg(f.name, a.zty(f.ret)),
-    }))
+    desc_or(r, env.ffi_ty_ok(f.ret, FFI_DEPTH()) ? "" : a.ffi_ret_msg(f.name, a.zty(f.ret)))
 }
 kdiag_buf* = (a: MutPtr<Malloc>) [i32] { slice(a.acquire(KDIAG_CAP() * sizeof(i32)), KDIAG_CAP()) }
 // already collected? (dedup: two channels can position the same packed kind at one site)
@@ -1438,7 +1374,7 @@ kdiag_seen = (buf: [i32], cnt: i32, packed: i32) bool {
     found := false
     buf.loop((h, i, e) {
         found = (i < cnt).match ({
-            true  => (e == packed).match ({ true => true, false => found }),
+            true  => e == packed ? true : found,
             false => found,
         })
     })
@@ -1466,7 +1402,7 @@ kparse_off = (init: Ptr<Expr>) i32 {
 // the `.` of a newline+`.Uppercase` statement break, so report the rule (KVBREAK) at that dot.
 kparse_kind = (init: Ptr<Expr>) i32 {
     off := init.kparse_off()
-    (off < 0).match ({ true => KVBREAK().kv_at(0 - off), false => KPARSE().kv_at(off) })
+    off < 0 ? KVBREAK().kv_at(0 - off) : KPARSE().kv_at(off)
 }
 // the `__bad_binding` sentinel: a malformed top-level `=` binding, caret at its RHS offset (always ≥ 0).
 kbadbind_kind = (init: Ptr<Expr>) i32 { KBADBIND().kv_at(init.kparse_off()) }
@@ -1477,19 +1413,16 @@ kmisgen_kind = (init: Ptr<Expr>) i32 { KMISGEN().kv_at(init.kparse_off()) }
 kcapacity_kind = (init: Ptr<Expr>) i32 { KCAPACITY().kv_at(init.kparse_off()) }
 // packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
 parse_sentinel_kind* = (nm: string_view, init: Ptr<Expr>) i32 {
-    (nm == "__syntax_error").then({
-        return init.kparse_kind()
+    (nm == "__syntax_error").match ({
+        true  => init.kparse_kind(),
+        false => (nm == "__bad_binding").match ({
+            true  => init.kbadbind_kind(),
+            false => (nm == "__misordered_generic").match ({
+                true  => init.kmisgen_kind(),
+                false => nm == "__capacity" ? init.kcapacity_kind() : 0,
+            }),
+        }),
     })
-    (nm == "__bad_binding").then({
-        return init.kbadbind_kind()
-    })
-    (nm == "__misordered_generic").then({
-        return init.kmisgen_kind()
-    })
-    (nm == "__capacity").then({
-        return init.kcapacity_kind()
-    })
-    0
 }
 // ── cross-module linking (Goal Arc 1) ───────────────────────────────────────────────
 // The self-hosted "module loader". A module's HEADER is its public surface reduced to signatures:
@@ -1516,7 +1449,7 @@ as_sig* = (a: MutPtr<Malloc>, d: Decl) Decl {
 // expression's own inferred type, so nothing is over-rejected.
 first_gen_arg* = (t: Ty) Ty {
     t.match ({
-        .Generic(g) => (g.args.len > 0).match ({ true => g.args[0], false => tvoid() }),
+        .Generic(g) => g.args.len > 0 ? g.args[0] : tvoid(),
         .Ptr(pd)    => load(pd.pointee).first_gen_arg(),
         _           => tvoid(),
     })
@@ -1529,6 +1462,7 @@ EnvKinds: {
     trait_recv_missing: (Self, CallData) bool,
     match_result_ty: (Self, Ty, [ArmData]) Ty,
     cond_result_err: (Self, CondData) i32,
+    cond_bool_err: (Self, CondData) i32,
     arm_result_err: (Self, Ty, Ty, ArmData) i32,
     novalue_arm_leaf: (Self, Ptr<Expr>) i32,
     value_void_arm_err: (Self, Ty, Ptr<Expr>) i32,
@@ -1570,10 +1504,7 @@ Env.impl(EnvKinds, {
             aenv := env.a.arm_env(env, subjty, ar)
             got := aenv.infer_expr(ar.body)
             out = out.is_void_ty().match ({
-                true  => (got.is_void_ty() || aenv.unknown_ty(got)).match ({
-                    true  => out,
-                    false => got,
-                }),
+                true  => got.is_void_ty() || aenv.unknown_ty(got) ? out : got,
                 false => out,
             })
         })
@@ -1584,7 +1515,16 @@ Env.impl(EnvKinds, {
         et := env.infer_expr(d.e)
         (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
             true  => 0,
-            false => d.cond_compatible(tt, et).match ({ true => 0, false => 1 }),
+            false => d.cond_compatible(tt, et) ? 0 : 1,
+        })
+    }
+    cond_bool_err = (env: Env, d: CondData) i32 {
+        // The condition of a `?:` / boolean `.match` must be bool. One deliberate exemption: a bare
+        // `Int(1)` condition is the parser's own always-true test for a non-terminal `_` wildcard arm
+        // in a lowered literal match, so it stays accepted.
+        load(d.c).match ({
+            .Int(n) => n == 1 ? 0 : 1,
+            _       => env.non_bool(d.c) ? 1 : 0,
         })
     }
     arm_result_err = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
@@ -1592,7 +1532,7 @@ Env.impl(EnvKinds, {
         got := aenv.infer_expr(ar.body)
         (want.is_void_ty() || got.is_void_ty() || aenv.unknown_ty(want) || aenv.unknown_ty(got)).match ({
             true  => 0,
-            false => want.result_compatible(got).match ({ true => 0, false => 1 }),
+            false => want.result_compatible(got) ? 0 : 1,
         })
     }
     novalue_arm_leaf = (env: Env, e: Ptr<Expr>) i32 {
@@ -1601,7 +1541,7 @@ Env.impl(EnvKinds, {
             .Cond(d)  => env.novalue_arm_leaf(d.t) + env.novalue_arm_leaf(d.e),
             .Match(m) => env.novalue_match_arms(m),
             .Loop(l)  => 1,    // `.loop` never yields a value
-            .Call(c)  => env.known_void_call(c).match ({ true => 1, false => 0 }),
+            .Call(c)  => env.known_void_call(c) ? 1 : 0,
             _         => 0,
         })
     }
@@ -1621,13 +1561,13 @@ Env.impl(EnvKinds, {
         acc := 0
         (f.name == c.fn).then({
             c.args.loop((h, i, ar) {
-                acc = acc + (i < f.params.len).match ({
+                acc = acc + ((i < f.params.len).match ({
                     true  => f.tparams.ty_mentions_tparam(f.params[i].ty).match ({
                         true  => 0,
                         false => env.value_void_arm_err(f.params[i].ty, ar.addr()),
                     }),
                     false => 0,
-                })
+                }))
             })
         })
         acc
@@ -1636,7 +1576,7 @@ Env.impl(EnvKinds, {
         vs := env.decls.enum_variants(m.ename)
         (vs.len == 0).match ({
             true  => 0,
-            false => (vs.missing_count(m.arms) > 0).match ({ true => 1, false => 0 }),
+            false => vs.missing_count(m.arms) > 0 ? 1 : 0,
         })
     }
     mkenum_err = (env: Env, ty: string_view, variant: string_view) i32 {
@@ -1644,12 +1584,12 @@ Env.impl(EnvKinds, {
         // `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
         // qualified branch always returned 0, so `Color.Purple` passed check and ICEd at cc.
         is_empty(ty).match ({
-            true  => env.decls.enum_declares(variant).match ({ true => 0, false => 1 }),
+            true  => env.decls.enum_declares(variant) ? 0 : 1,
             false => {
                 vs := env.decls.enum_variants(ty)
                 (vs.len == 0).match ({
                     true  => 0,
-                    false => vs.arm_known(variant).match ({ true => 0, false => 1 }),
+                    false => vs.arm_known(variant) ? 0 : 1,
                 })
             },
         })
@@ -1669,7 +1609,7 @@ Env.impl(EnvKinds, {
                         vt := env.infer_expr(mk.payload)
                         (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
                             true  => 0,
-                            false => fits(vt, pty).match ({ true => 0, false => 1 }),
+                            false => fits(vt, pty) ? 0 : 1,
                         })
                     },
                 })
@@ -1683,10 +1623,10 @@ Env.impl(EnvKinds, {
             true  => 0,
             false => {
                 m.arms.loop((h, i, a) {
-                    n = n + (a.variant == "_").match ({
+                    n = n + ((a.variant == "_").match ({
                         true  => 0,
-                        false => vs.arm_known(a.variant).match ({ true => 0, false => 1 }),
-                    })
+                        false => vs.arm_known(a.variant) ? 0 : 1,
+                    }))
                 })
                 n
             },
@@ -1694,18 +1634,15 @@ Env.impl(EnvKinds, {
     }
     operand_err = (env: Env, b: BinData) i32 {
         b.op.is_logic_op().match ({
-            true  => (env.non_bool(b.lhs) || env.non_bool(b.rhs)).match ({ true => 1, false => 0 }),
+            true  => env.non_bool(b.lhs) || env.non_bool(b.rhs) ? 1 : 0,
             false => (b.op.is_arith_op() || b.op.is_bitwise_op() || b.op.is_cmp_op_v()).match ({
                 true  => env.num_operand_err(b) + env.signcmp_err(b),
-                false => b.op.is_eq_op_v().match ({
-                    true  => env.eq_mix_err(b) + env.signcmp_err(b),
-                    false => 0,
-                }),
+                false => b.op.is_eq_op_v() ? env.eq_mix_err(b) + env.signcmp_err(b) : 0,
             }),
         })
     }
     index_err = (env: Env, ix: IndexData) i32 {
-        (env.non_slice(ix.seq) || env.non_numeric(ix.idx)).match ({ true => 1, false => 0 })
+        env.non_slice(ix.seq) || env.non_numeric(ix.idx) ? 1 : 0
     }
     ret_err = (env: Env, r: Ptr<Expr>) i32 {
         // Return/assign/index-set checks only reject concrete mismatches. A function-VALUE return
@@ -1717,7 +1654,7 @@ Env.impl(EnvKinds, {
             true  => lv,
             false => (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt()).match ({
                 true  => 0,
-                false => fits(rt, env.exp).match ({ true => 0, false => 1 }),
+                false => fits(rt, env.exp) ? 0 : 1,
             }),
         })
     }
@@ -1729,7 +1666,7 @@ Env.impl(EnvKinds, {
             true  => lv,
             false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
                 true  => 0,
-                false => fits(rt, vt).match ({ true => 0, false => 1 }),
+                false => fits(rt, vt) ? 0 : 1,
             }),
         })
     }
@@ -1740,11 +1677,11 @@ Env.impl(EnvKinds, {
         // (`b.inner.v = …`, `b.data[0] = …`) is the same hole one level down: it mutates `*b` just as the
         // direct field-set does, so walk the lvalue's member/index chain to its root and reject if the write
         // ultimately passes through a read-only `Ptr<T>`.
-        env.lvalue_writes_readonly(x.target).match ({ true => 1, false => 0 })
+        env.lvalue_writes_readonly(x.target) ? 1 : 0
     }
     idxset_ptr_write_err = (env: Env, x: IndexSetData) i32 {
         // the index-set half of the read-only-pointer write guard: `b.data[0] = …` writes into `*b`.
-        env.write_thru_readonly(x.seq).match ({ true => 1, false => 0 })
+        env.write_thru_readonly(x.seq) ? 1 : 0
     }
     idxset_err = (env: Env, x: IndexSetData) i32 {
         rt := env.infer_expr(x.value)
@@ -1753,7 +1690,7 @@ Env.impl(EnvKinds, {
             true  => lv,
             false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
                 true  => 0,
-                false => fits(rt, x.elem).match ({ true => 0, false => 1 }),
+                false => fits(rt, x.elem) ? 0 : 1,
             }),
         })
     }
@@ -1771,7 +1708,7 @@ Env.impl(EnvKinds, {
                     true  => lv,
                     false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
                         true  => 0,
-                        false => fits(vt, l.ty).match ({ true => 0, false => 1 }),
+                        false => fits(vt, l.ty) ? 0 : 1,
                     }),
                 })
             },
@@ -1781,7 +1718,7 @@ Env.impl(EnvKinds, {
         // A let (post-resolve, ty = the inferred/declared type) whose stored type is a generic with an
         // uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m := empty(7)` → Box<void> → mono emits
         // `Box_void`). check used to pass; require an annotation so the tparam is pinned.
-        l.ty.ty_has_void_targ().match ({ true => 1, false => 0 })
+        l.ty.ty_has_void_targ() ? 1 : 0
     }
     undef_is_method = (env: Env, c: CallData) bool {
         // an undefined call reads as a `recv.method()` UFCS call — not a bare undefined name — when it has a
@@ -1820,7 +1757,7 @@ Env.impl(EnvKinds, {
                     || env.vars.tparam_declared(tn)
                     || env.bound_targ_concrete(tn) == false).match ({
                     true  => 0,
-                    false => env.decls.type_impls_trait(tn, tr).match ({ true => 0, false => 1 }),
+                    false => env.decls.type_impls_trait(tn, tr) ? 0 : 1,
                 })
             },
         })
@@ -1850,9 +1787,6 @@ Func.impl(FuncKinds, {
         })
     }
     ka_reflect_write_kind = (f: Func) i32 {
-        (f.tparams.len > 0 && f.body.calls_reflect()).match ({
-            true  => f.body.krw_body(empty_params()),
-            false => 0,
-        })
+        f.tparams.len > 0 && f.body.calls_reflect() ? f.body.krw_body(empty_params()) : 0
     }
 })

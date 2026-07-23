@@ -52,7 +52,7 @@ is_c_kw = (src: string_view, t: Token) bool {
 gf_faithful_lexeme := false
 set_faithful_lexeme* = (b: bool) void { gf_faithful_lexeme = b }
 lexeme* = (a: MutPtr<Malloc>, src: string_view, t: Token) string_cstr {
-    (src.is_c_kw(t) && gf_faithful_lexeme.match ({ true => false, false => true })).match ({
+    (src.is_c_kw(t) && (gf_faithful_lexeme ? false : true)).match ({
         true  => {
             p := a.acquire(t.len + 4)
             src.copy_span(t.start, p, t.len)
@@ -120,7 +120,7 @@ digit_val = (b: u8) i32 { b - '0' }
 hex_val = (b: u8) i32 {
     b.is_digit().match ({
         true  => b - '0',
-        false => (b >= 'a' && b <= 'f').match ({ true => b - 'a' + 10, false => b - 'A' + 10 }),
+        false => b >= 'a' && b <= 'f' ? b - 'a' + 10 : b - 'A' + 10,
     })
 }
 // The largest accumulator / remaining digit for which `acc * base + digit` still fits 2^64-1 on the
@@ -130,10 +130,7 @@ u64max_div = (base: i32) u64 {
         true  => 1152921504606846975,
         false => (base == 2).match ({
             true  => 9223372036854775807,
-            false => (base == 8).match ({
-                true  => 2305843009213693951,
-                false => 1844674407370955161,
-            }),
+            false => base == 8 ? 2305843009213693951 : 1844674407370955161,
         }),
     })
 }
@@ -142,7 +139,7 @@ u64max_mod = (base: i32) u64 {
         true  => 15,
         false => (base == 2).match ({
             true  => 1,
-            false => (base == 8).match ({ true => 7, false => 5 }),
+            false => base == 8 ? 7 : 5,
         }),
     })
 }
@@ -167,7 +164,7 @@ int_acc = (src: string_view, pos: i32, end: i32, base: i32, off: i32) i64 {
                 p = p + 1
             },
             false => {
-                d: u64 := (base == 16).match ({ true => b.hex_val(), false => b.digit_val() })
+                d: u64 := base == 16 ? b.hex_val() : b.digit_val()
                 (acc > lim || acc == lim && d > rem).then({
                     over = true
                 })
@@ -240,10 +237,7 @@ parse_base = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
                 next: sc.next,
             )
         },
-        _      => src.is_raw_at(sc.tok).match ({
-            true  => a.parse_raw_call(src, sc),
-            false => a.parse_other(src, sc),
-        }),
+        _      => src.is_raw_at(sc.tok) ? a.parse_raw_call(src, sc) : a.parse_other(src, sc),
     })
 }
 // Unterminated string tokens run to end-of-file.
@@ -279,7 +273,7 @@ parse_other = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
     (src.is_lparen(sc.tok) == false).then({
         return a.parse_garbage(src, sc)
     })
-    a.lam_open(src, sc).match ({ true => a.parse_lambda(src, sc), false => a.parse_paren(src, sc) })
+    a.lam_open(src, sc) ? a.parse_lambda(src, sc) : a.parse_paren(src, sc)
 }
 // Backslash escape byte value. `\\ \" \'` fall through `_ => e` (the char itself).
 esc_byte = (e: u8) u8 {
@@ -303,10 +297,7 @@ hex2 = (src: string_view, pos: i32) i32 { src.at(pos).hex_val() * 16 + src.at(po
 char_val = (src: string_view, start: i32) i32 {
     b := src.at(start + 1)
     (b == '\\').match ({
-        true  => (src.at(start + 2) == 'x').match ({
-            true  => src.hex2(start + 3),
-            false => esc_byte(src.at(start + 2)),
-        }),
+        true  => src.at(start + 2) == 'x' ? src.hex2(start + 3) : esc_byte(src.at(start + 2)),
         false => b,
     })
 }    // '\xNN'
@@ -363,8 +354,7 @@ parse_ctor = (a: MutPtr<Malloc>, src: string_view, dot: Scan) PExpr {
 parse_ctor_named = (a: MutPtr<Malloc>, src: string_view, vt: Scan) PExpr {
     vn := a.lexeme(src, vt.tok)
     nx := src.scan(vt.next)
-    (src.is_lparen(nx.tok)
-        && src.nl_between(vt.next, nx.tok.start).match ({ true => false, false => true })).match ({
+    (src.is_lparen(nx.tok) && (src.nl_between(vt.next, nx.tok.start) ? false : true)).match ({
         true  => src.is_rparen(src.scan(nx.next).tok).match ({
             true  => a.parse_ctor_empty(src, vn, nx),
             false => a.parse_ctor_payload(src, vn, nx),

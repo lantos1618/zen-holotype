@@ -22,12 +22,10 @@
 { all_decl_names_in, copy_block_comment, copy_line_comment, copy_literal, edge_alias_in, edge_id_in,
   is_any_marker_at, is_c_kw_name_span, is_ws, has_import_marker, module_graph, opens_import,
   str_bytes, symbol_name_in, value_decl_names_in } = std.internal.resolve_scan
-lstrip* = (s: string_view, p: i32) i32 {
-    at(s, p).is_ws().match ({ true => s.lstrip(p + 1), false => p })
-}
+lstrip* = (s: string_view, p: i32) i32 { at(s, p).is_ws() ? s.lstrip(p + 1) : p }
 is_import_line* = (s: string_view, p: i32) bool {
     ls := s.lstrip(p)
-    s.opens_import(ls).match ({ true => s.has_import_marker(ls), false => false })
+    s.opens_import(ls) ? s.has_import_marker(ls) : false
 }
 // Position just past the next '\n' at or after `p` (end-of-string if none). Iterates a sub-slice that
 // starts at `p` — NOT a scan from 0, and NOT recursive — so walking a file line-by-line is O(n) total
@@ -69,28 +67,19 @@ res_sbyte* = (s: String, i: i64) u8 { load(offset(s.ptr, i)) }
 line_eq = (set: String, i: i64, name: String, j: i64, m: i64) bool {
     (j == m).match ({
         true  => set.res_sbyte(i) == '\n',
-        false => (set.res_sbyte(i) == name.res_sbyte(j)).match ({
-            true  => set.line_eq(i + 1, name, j + 1, m),
-            false => false,
-        }),
+        false => set.res_sbyte(i) == name.res_sbyte(j) ? set.line_eq(i + 1, name, j + 1, m) : false,
     })
 }
 seen_scan = (set: String, name: String, i: i64) bool {
     (i >= set.len).match ({
         true  => false,
-        false => set.line_eq(i, name, 0, name.len).match ({
-            true  => true,
-            false => set.seen_scan(name, set.snext_line(i)),
-        }),
+        false => set.line_eq(i, name, 0, name.len) ? true : set.seen_scan(name, set.snext_line(i)),
     })
 }
 snext_line* = (set: String, i: i64) i64 {
     (i >= set.len).match ({
         true  => set.len,
-        false => (set.res_sbyte(i) == '\n').match ({
-            true  => i + 1,
-            false => set.snext_line(i + 1),
-        }),
+        false => set.res_sbyte(i) == '\n' ? i + 1 : set.snext_line(i + 1),
     })
 }
 seen_name* = (set: String, name: String) bool { set.seen_scan(name, 0) }
@@ -257,18 +246,12 @@ ModuleSig*: {
         // defined here but NOT exported? (imported pass-through = sanctioned re-export, stays visible;
         // an unknown name is NOT private — it is left to the unknown-name validation.)
         f := s.names.get(name, 0 - 1)
-        (f < 0).match ({
-            true  => false,
-            false => f / SIG_IMPORTED % 2 == 0 && f / SIG_PUB % 2 == 0,
-        })
+        f < 0 ? false : f / SIG_IMPORTED % 2 == 0 && f / SIG_PUB % 2 == 0
     }
     exports_value = (s: ModuleSig, name: string_view) bool {
         // a value export: public, defined here (not imported), and not a type.
         f := s.names.get(name, 0 - 1)
-        (f < 0).match ({
-            true  => false,
-            false => f / SIG_PUB % 2 == 1 && f / SIG_IMPORTED % 2 == 0 && f / SIG_TYPE % 2 == 0,
-        })
+        f < 0 ? false : f / SIG_PUB % 2 == 1 && f / SIG_IMPORTED % 2 == 0 && f / SIG_TYPE % 2 == 0
     }
 }
 ModuleGraph*: {
@@ -307,28 +290,28 @@ ModuleTable*: {
     has = (t: ModuleTable, id: string_view) bool {
         found := false
         t.modules.loop((h, i, m) {
-            found = (m.id == id).match ({ true => true, false => found })
+            found = m.id == id ? true : found
         })
         found
     }
     has_id = (t: ModuleTable, id: String) bool {
         found := false
         t.modules.loop((h, i, m) {
-            found = id.string_eq_str(m.id).match ({ true => true, false => found })
+            found = id.string_eq_str(m.id) ? true : found
         })
         found
     }
     module = (t: ModuleTable, id: string_view) ModuleEntry {
         found := t.modules[0]
         t.modules.loop((h, i, m) {
-            found = (m.id == id).match ({ true => m, false => found })
+            found = m.id == id ? m : found
         })
         found
     }
     module_id = (t: ModuleTable, id: String) ModuleEntry {
         found := t.modules[0]
         t.modules.loop((h, i, m) {
-            found = id.string_eq_str(m.id).match ({ true => m, false => found })
+            found = id.string_eq_str(m.id) ? m : found
         })
         found
     }
@@ -379,7 +362,7 @@ ParsedProgram*: {
     module = (p: ParsedProgram, id: string_view) ParsedModule {
         found := p.modules[0]
         p.modules.loop((h, i, m) {
-            found = (m.id == id).match ({ true => m, false => found })
+            found = m.id == id ? m : found
         })
         found
     }
@@ -592,11 +575,8 @@ guard_module = (
     id: String,
     path: string_view,
 ) i32 {
-    (id.id_is_user() && progdir.at(0) == 0).match ({
-        true  => a.fail_no_progdir(inpath, id),
-        false => 0,
-    })
-    file_exists(path).match ({ true => 0, false => a.fail_unknown_module(inpath, id, path) })
+    id.id_is_user() && progdir.at(0) == 0 ? a.fail_no_progdir(inpath, id) : 0
+    file_exists(path) ? 0 : a.fail_unknown_module(inpath, id, path)
 }
 module_entry_buf = (a: MutPtr<Malloc>, n: i64) [ModuleEntry] {
     slice(a.acquire(n * sizeof(ModuleEntry)), n)
@@ -736,10 +716,7 @@ load_import_edges_table = (
             (edge.namespace == false).then({
                 id := edge.edge_id_in(a)
                 cur = a.load_closure_table(table, inpath, id, cur)
-                validate.match ({
-                    true  => table.check_import_names_table(a, src, edge.start, id, inpath),
-                    false => 0,
-                })
+                validate ? table.check_import_names_table(a, src, edge.start, id, inpath) : 0
             })
         })
     })
@@ -772,10 +749,7 @@ load_ns_edge_table = (
     q2 := a.madd_name(st.quals, alias)
     qn2 := st.qnames.add_qual_names(a, alias, names, 0)
     sqn2 := st.strip_qnames.add_qual_names(a, alias, all, 0)
-    saq2 := modid.id_is_std_io_c().match ({
-        true  => a.madd_name(st.strip_all_quals, alias),
-        false => st.strip_all_quals,
-    })
+    saq2 := modid.id_is_std_io_c() ? a.madd_name(st.strip_all_quals, alias) : st.strip_all_quals
     NsScan(
         quals: q2,
         qnames: qn2,
@@ -856,10 +830,7 @@ check_head = (
                         raw := a.mimport_name_span(src, pos, ie)
                         hd := a.mimport_head_name(src, pos, ie)
                         nm := hd.gstr_finish(a)
-                        provided.has(nm).match ({
-                            true  => 0,
-                            false => a.fail_unknown_name(inpath, raw, id),
-                        })
+                        provided.has(nm) ? 0 : a.fail_unknown_name(inpath, raw, id)
                         pos = ie
                     },
                     false => {
@@ -954,7 +925,7 @@ fui_scan = (out: String, a: MutPtr<Malloc>, src: string_view, p: i32) String {
 // std/compiler entry modules may own a natural export name over dependency
 // closures, because their dependencies are implementation details.
 res_ident_end* = (flat: string_view, p: i32) i32 {
-    flat.at(p).is_alnum().match ({ true => flat.res_ident_end(p + 1), false => p })
+    flat.at(p).is_alnum() ? flat.res_ident_end(p + 1) : p
 }
 append_to_nul* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String {
     cur := out
@@ -969,19 +940,13 @@ append_to_nul* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) String
 path_has_at = (s: string_view, p: i32, lit: string_view, i: i32) bool {
     (lit.at(i) == 0).match ({
         true  => true,
-        false => (s.at(p + i) == 0).match ({
-            true  => false,
-            false => s.at(p + i) == lit.at(i) && s.path_has_at(p, lit, i + 1),
-        }),
+        false => s.at(p + i) == 0 ? false : s.at(p + i) == lit.at(i) && s.path_has_at(p, lit, i + 1),
     })
 }
 path_contains_from = (s: string_view, p: i32, lit: string_view) bool {
     (s.at(p) == 0).match ({
         true  => lit.at(0) == 0,
-        false => s.path_has_at(p, lit, 0).match ({
-            true  => true,
-            false => s.path_contains_from(p + 1, lit),
-        }),
+        false => s.path_has_at(p, lit, 0) ? true : s.path_contains_from(p + 1, lit),
     })
 }
 path_contains = (s: string_view, lit: string_view) bool { s.path_contains_from(0, lit) }
@@ -1005,10 +970,7 @@ main_symbol_names = (
             (sym.imported == false).then({
                 key := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
                 inmain := sym.start >= bodystart && sym.start < bodyend
-                cur = (inmain && cur.seen_name(key).match ({ true => false, false => true })).match ({
-                    true  => a.madd_name(cur, key),
-                    false => cur,
-                })
+                cur = inmain && (cur.seen_name(key) ? false : true) ? a.madd_name(cur, key) : cur
             })
         })
     })
@@ -1066,17 +1028,12 @@ dedup_symbols = (
             (sym.imported == false).then({
                 nm := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
                 inmain := sym.start >= bodystart && sym.start < bodyend
-                shadow := allow_main_shadow
-                    && inmain.match ({ true => false, false => true })
-                    && main_names.seen_name(nm)
+                shadow := allow_main_shadow && (inmain ? false : true) && main_names.seen_name(nm)
                 keep := shadow.match ({
                     true  => false,
                     false => inmain.match ({
                         true  => true,
-                        false => seen.seen_name(nm).match ({
-                            true  => main_seen.seen_name(nm),
-                            false => true,
-                        }),
+                        false => seen.seen_name(nm) ? main_seen.seen_name(nm) : true,
                     }),
                 })
                 cur = cur.rappend_span(a, flat, pos, sym.decl_start)
@@ -1088,15 +1045,9 @@ dedup_symbols = (
                 })
                 seen = shadow.match ({
                     true  => seen,
-                    false => seen.seen_name(nm).match ({
-                        true  => seen,
-                        false => a.madd_name(seen, nm),
-                    }),
+                    false => seen.seen_name(nm) ? seen : a.madd_name(seen, nm),
                 })
-                main_seen = inmain.match ({
-                    true  => a.madd_name(main_seen, nm),
-                    false => main_seen,
-                })
+                main_seen = inmain ? a.madd_name(main_seen, nm) : main_seen
                 pos = sym.decl_next
             })
         })
@@ -1119,7 +1070,7 @@ dedup_symbols = (
 impl_lparen = (s: string_view, p: i32) i32 {
     (s.at(p) == 0).match ({
         true  => p,
-        false => (s.at(p) == '(').match ({ true => p + 1, false => s.impl_lparen(p + 1) }),
+        false => s.at(p) == '(' ? p + 1 : s.impl_lparen(p + 1),
     })
 }
 impl_key_in = (a: MutPtr<Malloc>, s: string_view, p: i32) String {
@@ -1198,10 +1149,7 @@ fail_dup_impl = (
         .gstr_append(a, ".impl(")
         .rappend_span(a, flat, ts, te)
         .gstr_append(a, ", { ... })` already exists in ")
-    d1 := is_empty(m1.id).match ({
-        true  => d0.gstr_append(a, "your program"),
-        false => a.mappend_mid_display(d0, m1.id),
-    })
+    d1 := is_empty(m1.id) ? d0.gstr_append(a, "your program") : a.mappend_mid_display(d0, m1.id)
     d2 := d1
         .gstr_append(a, " (")
         .gstr_append(a, m1.path)
@@ -1288,10 +1236,7 @@ dedup_impls_into = (
 is_ns_line* = (s: string_view, p: i32) bool {
     ls := s.lstrip(p)
     (p == ls).match ({
-        true  => s.at(ls).is_alnum().match ({
-            true  => s.is_any_marker_at(s.lstrip(s.res_ident_end(ls))),
-            false => false,
-        }),
+        true  => s.at(ls).is_alnum() ? s.is_any_marker_at(s.lstrip(s.res_ident_end(ls))) : false,
         false => false,
     })
 }
@@ -1316,7 +1261,7 @@ alias_name = (out: String, a: MutPtr<Malloc>, alias: String, name: String) Strin
 }
 alias_hit = (s: string_view, p: i32, ie: i32, names: String, nm: String) bool {
     after_dot := p > 0 && s.at(p - 1) == '.'
-    rewrite_member := after_dot.match ({ true => s.at(s.lstrip(ie)) == '(', false => true })
+    rewrite_member := after_dot ? s.at(s.lstrip(ie)) == '(' : true
     names.seen_name(nm) && rewrite_member
 }
 rewrite_alias_names* = (
@@ -1356,11 +1301,7 @@ rewrite_alias_names* = (
                                 pos = sk.next
                             },
                             false => (b.is_alpha()
-                                && (pos == 0
-                                    || s.at(pos - 1).is_alnum().match ({
-                                        true  => false,
-                                        false => true,
-                                    }))).match ({
+                                && (pos == 0 || (s.at(pos - 1).is_alnum() ? false : true))).match ({
                                 true  => {
                                     ie := s.res_ident_end(pos)
                                     nm := a.mimport_name_span(s, pos, ie)
@@ -1515,11 +1456,7 @@ rewrite_quals = (
                                 pos = sk.next
                             },
                             false => (b.is_alpha()
-                                && (pos == 0
-                                    || s.at(pos - 1).is_alnum().match ({
-                                        true  => false,
-                                        false => true,
-                                    }))).match ({
+                                && (pos == 0 || (s.at(pos - 1).is_alnum() ? false : true))).match ({
                                 true  => {
                                     ie := s.res_ident_end(pos)
                                     s.is_qual_access(a, pos, ie, quals).match ({
@@ -1619,7 +1556,7 @@ strip_ns_into* = (
     (raw.at(0) == 0).match ({
         true  => out,
         false => {
-            base := first.match ({ true => out, false => out.rpush(a, 10) })
+            base := first ? out : out.rpush(a, 10)
             (quals.len == 0).match ({
                 true  => base.rappend(a, raw),
                 false => base.rewrite_quals(a, raw, 0, quals, qnames, strip_qnames, strip_all_quals),
@@ -1699,10 +1636,7 @@ alias_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl
     a.parse_module(body)
 }
 root_link_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] {
-    edge.namespace.match ({
-        true  => a.alias_edge_decls(p, edge),
-        false => p.module(edge.module).decls,
-    })
+    edge.namespace ? a.alias_edge_decls(p, edge) : p.module(edge.module).decls
 }
 module_link_count = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) i64 {
     n := 0
@@ -1852,9 +1786,7 @@ lmap_note_line = (a: MutPtr<Malloc>, srcline: i32) void {
 }
 // a body append starts with the '\n' separator pushed before it (unless it opens the flat); the
 // region's first LINE starts just past that separator.
-freg_lo = (out: String, blo: i64) i64 {
-    (out.len > blo && out.res_sbyte(blo) == 10).match ({ true => blo + 1, false => blo })
-}
+freg_lo = (out: String, blo: i64) i64 { out.len > blo && out.res_sbyte(blo) == 10 ? blo + 1 : blo }
 note_fregion = (a: MutPtr<Malloc>, midx: i64, lo: i64, hi: i64, line_lo: i64) void {
     (lmap_on && hi > lo && midx >= 0).then({
         a.freg_grow()
@@ -1927,18 +1859,12 @@ lmap_apply_drops = (a: MutPtr<Malloc>, flat: string_view) void {
                 (j % 2 == 0).then({
                     ds := dv
                     de := drops[j + 1]
-                    x := (ds > r.lo).match ({ true => ds, false => r.lo })
-                    y := (de < r.hi).match ({ true => de, false => r.hi })
+                    x := ds > r.lo ? ds : r.lo
+                    y := de < r.hi ? de : r.hi
                     (x < y).then({
                         k0 := flat.count_nl(to_i32(r.lo), to_i32(x))
-                        dead := (de > r.hi).match ({
-                            true  => r.line_n - k0,
-                            false => flat.count_nl(to_i32(x), to_i32(y)),
-                        })
-                        capped := (k0 + dead > r.line_n).match ({
-                            true  => r.line_n - k0,
-                            false => dead,
-                        })
+                        dead := de > r.hi ? r.line_n - k0 : flat.count_nl(to_i32(x), to_i32(y))
+                        capped := k0 + dead > r.line_n ? r.line_n - k0 : dead
                         (capped > 0).then({
                             dbuf[dn] = r.line_lo + k0
                             dbuf[dn + 1] = r.line_lo + k0 + capped
@@ -1956,11 +1882,11 @@ lmap_apply_drops = (a: MutPtr<Malloc>, flat: string_view) void {
                 (j % 2 == 0).then({
                     ds := dv
                     de := drops[j + 1]
-                    cl := (de < r.lo).match ({ true => de, false => r.lo })
+                    cl := de < r.lo ? de : r.lo
                     (cl > ds).then({
                         dlo = dlo + (cl - ds)
                     })
-                    ch := (de < r.hi).match ({ true => de, false => r.hi })
+                    ch := de < r.hi ? de : r.hi
                     (ch > ds).then({
                         dhi = dhi + (ch - ds)
                     })
@@ -2024,10 +1950,7 @@ fregion_bs = (regions: [FlatRegion], off: i64, lo: i64, hi: i64) i64 {
             r := regions[mid]
             (off < r.lo).match ({
                 true  => regions.fregion_bs(off, lo, mid),
-                false => (off < r.hi).match ({
-                    true  => mid,
-                    false => regions.fregion_bs(off, mid + 1, hi),
-                }),
+                false => off < r.hi ? mid : regions.fregion_bs(off, mid + 1, hi),
             })
         },
     })
@@ -2045,7 +1968,7 @@ fregion_src_line* = (
     (k < r.line_n && r.line_lo + k < line_srcs.len).match ({
         true  => {
             v := line_srcs[r.line_lo + k]
-            (v > 0).match ({ true => v, false => 0 })
+            v > 0 ? v : 0
         },
         false => 0,
     })
@@ -2184,15 +2107,13 @@ res_udec* = (out: String, a: MutPtr<Malloc>, n: i32) String { out.gstr_int(a, to
 // index just past the matching `>` of a `<...>` generic list starting at `p` (the `<`). Method decl
 // headers carry only flat lists (`<A>`, `<A, B>`), so a scan to the first `>` is exact.
 skip_to_gt = (s: string_view, p: i32) i32 {
-    (s.at(p) == 0 || s.at(p) == '>').match ({ true => p + 1, false => s.skip_to_gt(p + 1) })
+    s.at(p) == 0 || s.at(p) == '>' ? p + 1 : s.skip_to_gt(p + 1)
 }
-after_generics = (s: string_view, j: i32) i32 {
-    (s.at(j) == '<').match ({ true => s.skip_to_gt(j + 1), false => j })
-}
+after_generics = (s: string_view, j: i32) i32 { s.at(j) == '<' ? s.skip_to_gt(j + 1) : j }
 // is the text at name-end `ie` the head of a fn decl — `<...>? *? = (` ?
 is_fn_decl_after = (s: string_view, ie: i32) bool {
     j0 := s.after_generics(ie)
-    j := (s.at(j0) == '*').match ({ true => j0 + 1, false => j0 })
+    j := s.at(j0) == '*' ? j0 + 1 : j0
     (s.at(j) == ' ').match ({
         true  => s.at(j + 1) == '=' && s.at(j + 2) == ' ' && s.at(j + 3) == '(',
         false => s.at(j) == '=' && s.at(j + 1) == ' ' && s.at(j + 2) == '(',
@@ -2280,7 +2201,7 @@ find_split_call_site = (
         found: false,
     )
     table.modules.loop((h, i, m) {
-        skip := res.found.match ({ true => true, false => m.id == modid })
+        skip := res.found ? true : m.id == modid
         (skip == false).then({
             called := a.has_method_call_of(m.source, splits)
             (called.len > 0).then({
@@ -2298,7 +2219,7 @@ mappend_id_str_dotted* = (a: MutPtr<Malloc>, out: String, id: string_view) Strin
     cur := out
     bs: [u8] := id.view()
     bs.loop((h, i, b) {
-        cur = (b == '/').match ({ true => cur.gstr_push(a, '.'), false => cur.gstr_push(a, b) })
+        cur = b == '/' ? cur.gstr_push(a, '.') : cur.gstr_push(a, b)
     })
     cur
 }
@@ -2331,10 +2252,7 @@ fail_alias_collision = (
     d1 := a
         .mappend_id_str_dotted(d0, edge.module)
         .gstr_append(a, "` is also imported unqualified by `")
-    d2 := (importer == "").match ({
-        true  => d1.gstr_append(a, "your program"),
-        false => a.mappend_id_str_dotted(d1, importer),
-    })
+    d2 := importer == "" ? d1.gstr_append(a, "your program") : a.mappend_id_str_dotted(d1, importer)
     d3 := d2.gstr_append(a, "`, and its method `")
     d4 := a
         .mappend_string(d3, split)
@@ -2467,19 +2385,13 @@ resolve_program_data* = (
     // the common case) the dedup pass — the graph is recomputed only over a REWRITTEN flat.
     pre := cN.out.gstr_finish(a)
     fsyms := a.module_graph(pre).symbols
-    sf := a.shadow_flat(pre, fsyms, mainsrc, nsl, body.len, internal.match ({
-        true  => false,
-        false => true,
-    }))
+    sf := a.shadow_flat(pre, fsyms, mainsrc, nsl, body.len, internal ? false : true)
     fregions_splice(nsl, body.len, sf.bodyend - nsl)    // main-body rename shifts every later region
     su := a.shadow_flat_users(sf.flat, table, body.len, sf.bodyend - body.len, nsl, internal.match ({
         true  => false,
         false => true,
     }))
-    dsyms := (sf.renamed || su.renamed).match ({
-        true  => a.module_graph(su.flat).symbols,
-        false => fsyms,
-    })
+    dsyms := sf.renamed || su.renamed ? a.module_graph(su.flat).symbols : fsyms
     d1 := a.dedup_decls_syms(su.flat, dsyms, nsl + su.shift, sf.bodyend + su.shift, internal)
     a.lmap_apply_drops(su.flat)
     flat := a.dedup_impls(table, d1)
