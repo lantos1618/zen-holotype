@@ -26,7 +26,7 @@
 // aliases skip the qualified scan: their qualifiers are stripped wholesale (strip_all_quals), the
 // module is a raw libc surface. ZEN_VIS_REPORT=1 downgrades the error to a report-only sweep (print
 // every violation, never exit) — the migration mode used to prove the tree clean before enforcing.
-vis_report_mode* = () bool { is_empty(getEnv("ZEN_VIS_REPORT")) ? false : true }
+vis_report_mode* = () bool { is_empty(getEnv("ZEN_VIS_REPORT")).then({ false }, { true }) }
 vis_fail = (
     a: MutPtr<Malloc>,
     path: string_view,
@@ -50,7 +50,7 @@ vis_fail = (
         .gstr_append(a, "*` in the defining module, or use the module's public surface")
         .gstr_finish(a)
     eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-name", msg, hint, 1))
-    report ? 0 : die(1)
+    report.then({ 0 }, { die(1) })
 }
 // flat import head `{ a, b } = mod` at line start `p`: every name must be exported by `mod`.
 vis_check_head = (
@@ -192,7 +192,7 @@ vis_scan_quals = (
                                 pos = src.vis_skip_lit(pos)
                             },
                             false => (b.is_alpha()
-                                && (pos == 0 || (src.at(pos - 1).is_alnum() ? false : true))).match ({
+                                && (pos == 0 || src.at(pos - 1).is_alnum().then({ false }, { true }))).match ({
                                 true  => {
                                     ie := src.res_ident_end(pos)
                                     (src.vis_span_eq_at(pos, ie, alias, 0)
@@ -274,7 +274,10 @@ enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 
 // like error[private-name].
 sig_private_type = (s: ModuleSig, name: string_view) bool {
     f := s.names.get(name, 0 - 1)
-    f < 0 ? false : f / SIG_TYPE % 2 == 1 && f / SIG_PUB % 2 == 0 && f / SIG_IMPORTED % 2 == 0
+    (f < 0).match ({
+        true  => false,
+        false => f / SIG_TYPE % 2 == 1 && f / SIG_PUB % 2 == 0 && f / SIG_IMPORTED % 2 == 0,
+    })
 }
 leak_fail = (
     a: MutPtr<Malloc>,
@@ -302,7 +305,7 @@ leak_fail = (
         .gstr_append(a, "` private")
         .gstr_finish(a)
     eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-leak", msg, hint, 1))
-    report ? 0 : die(1)
+    report.then({ 0 }, { die(1) })
 }
 // ONE exported value decl's signature, scanned textually (mirroring vis_scan_quals: comment/quote
 // spans are skipped). A tiny state machine tracks TYPE position: `:` opens a type expression at

@@ -57,7 +57,7 @@ i64.impl(Ord, {
     cmp = (a: i64, b: i64) i64 {
         (a < b).match ({
             true  => 0 - 1,
-            false => a > b ? 1 : 0,
+            false => (a > b).then({ 1 }, { 0 }),
         })
     }
 })
@@ -65,7 +65,7 @@ i32.impl(Ord, {
     cmp = (a: i32, b: i32) i64 {
         (a < b).match ({
             true  => 0 - 1,
-            false => a > b ? 1 : 0,
+            false => (a > b).then({ 1 }, { 0 }),
         })
     }
 })
@@ -73,7 +73,7 @@ u8.impl(Ord, {
     cmp = (a: u8, b: u8) i64 {
         (a < b).match ({
             true  => 0 - 1,
-            false => a > b ? 1 : 0,
+            false => (a > b).then({ 1 }, { 0 }),
         })
     }
 })
@@ -91,7 +91,10 @@ bt_lower_bound<K: Ord> = (ks: [K], lo: i64, hi: i64, k: K) i64 {
         true  => lo,
         false => {
             mid := lo + (hi - lo) / 2
-            ks[mid].cmp(k) < 0 ? bt_lower_bound(ks, mid + 1, hi, k) : bt_lower_bound(ks, lo, mid, k)
+            (ks[mid].cmp(k) < 0).match ({
+                true  => bt_lower_bound(ks, mid + 1, hi, k),
+                false => bt_lower_bound(ks, lo, mid, k),
+            })
         },
     })
 }
@@ -132,26 +135,26 @@ BTreeMap*<K, V>: {
     found_at = (m: BTreeMap<K, V>, pos: i64, k: K) bool {
         // true iff slot `pos` holds exactly k (pos is a lower_bound result, so it may be == len or
         // point at the first key > k).
-        pos < m.len ? m.keys()[pos].cmp(k) == 0 : false
+        (pos < m.len).then({ m.keys()[pos].cmp(k) == 0 }, { false })
     }
     contains = (m: BTreeMap<K, V>, k: K) bool { m.found_at(m.pos_of(k), k) }
     get = (m: BTreeMap<K, V>, k: K) Opt<V> {
         // The value under k as an option: .Some(v) if present, .None if absent.
         pos := m.pos_of(k)
-        out: Opt<V> := m.found_at(pos, k) ? .Some(m.vals()[pos]) : .None
+        out: Opt<V> := m.found_at(pos, k).then({ .Some(m.vals()[pos]) }, { .None })
         out
     }
     get_or = (m: BTreeMap<K, V>, k: K, dflt: V) V {
         pos := m.pos_of(k)
-        m.found_at(pos, k) ? m.vals()[pos] : dflt
+        m.found_at(pos, k).then({ m.vals()[pos] }, { dflt })
     }
     min = (m: BTreeMap<K, V>) Opt<K> {
         // The smallest key (slot 0) as an option; .None on an empty map.
-        out: Opt<K> := m.len == 0 ? .None : .Some(m.keys()[0])
+        out: Opt<K> := (m.len == 0).then({ .None }, { .Some(m.keys()[0]) })
         out
     }
     max = (m: BTreeMap<K, V>) Opt<K> {
-        out: Opt<K> := m.len == 0 ? .None : .Some(m.keys()[m.len - 1])
+        out: Opt<K> := (m.len == 0).then({ .None }, { .Some(m.keys()[m.len - 1]) })
         out
     }
     grow<A> = (m: BTreeMap<K, V>, a: MutPtr<A>) Result<BTreeMap<K, V>, IoError> {
@@ -401,16 +404,16 @@ BTreeSet*<K>: {
     len = (s: BTreeSet<K>) i64 { s.len }
     pos_of = (s: BTreeSet<K>, k: K) i64 { bt_lower_bound(s.keys(), 0, s.len, k) }
     found_at = (s: BTreeSet<K>, pos: i64, k: K) bool {
-        pos < s.len ? s.keys()[pos].cmp(k) == 0 : false
+        (pos < s.len).then({ s.keys()[pos].cmp(k) == 0 }, { false })
     }
     has = (s: BTreeSet<K>, k: K) bool { s.found_at(s.pos_of(k), k) }
     contains = (s: BTreeSet<K>, k: K) bool { s.found_at(s.pos_of(k), k) }
     min = (s: BTreeSet<K>) Opt<K> {
-        out: Opt<K> := s.len == 0 ? .None : .Some(s.keys()[0])
+        out: Opt<K> := (s.len == 0).then({ .None }, { .Some(s.keys()[0]) })
         out
     }
     max = (s: BTreeSet<K>) Opt<K> {
-        out: Opt<K> := s.len == 0 ? .None : .Some(s.keys()[s.len - 1])
+        out: Opt<K> := (s.len == 0).then({ .None }, { .Some(s.keys()[s.len - 1]) })
         out
     }
     grow<A> = (s: BTreeSet<K>, a: MutPtr<A>) Result<BTreeSet<K>, IoError> {

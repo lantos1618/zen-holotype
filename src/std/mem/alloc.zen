@@ -24,7 +24,9 @@ Malloc*: {
 // into DynAlloc / Rt vtables directly). Every heap floor in the stdlib routes here: Heap.impl,
 // Malloc.impl, dyn_heap(), and std.rt's heap vtable all call these three fns instead of re-inlining
 // the `(n<=0)?null:malloc` / realloc / free lines. acquire treats a 0-byte request as a null success.
-heap_acquire* = (state: RawPtr<u8>, n: i64) RawPtr<u8> { n <= 0 ? null_ptr() : malloc(n) }
+heap_acquire* = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
+    (n <= 0).then({ null_ptr() }, { malloc(n) })
+}
 heap_resize* = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
 heap_release* = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
 Heap.impl(Allocator, {
@@ -41,7 +43,7 @@ Malloc.impl(Allocator, {
 try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
     // A 0-byte request is an empty success, not OOM: acquire(0) returns null by design, and
     // ok_ptr would mis-map that null to .Err. Short-circuit before reaching ok_ptr.
-    n <= 0 ? .Ok(null_ptr()) : ok_ptr(a.acquire(n))
+    (n <= 0).then({ .Ok(null_ptr()) }, { ok_ptr(a.acquire(n)) })
 }
 try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> {
     ok_ptr(a.resize(p, n))

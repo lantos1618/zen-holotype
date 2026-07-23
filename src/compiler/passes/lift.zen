@@ -11,7 +11,10 @@ lift_toplevel = (idx: DeclIndex, decls: [Decl], n: string_view) bool {
     idx.func_idx.get(n, 0 - 1) >= 0 || idx.global_idx.get(n, 0 - 1) >= 0
 }
 lift_is_captured* = (decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, n: string_view) bool {
-    bound.var_bound(n) || idx.lift_toplevel(decls, n) || n == "true" || n == "false" ? false : true
+    (bound.var_bound(n) || idx.lift_toplevel(decls, n) || n == "true" || n == "false").match ({
+        true  => false,
+        false => true,
+    })
 }
 lift_extend* = (a: MutPtr<Malloc>, bound: Ptr<VList>, st: Stmt) Ptr<VList> {
     st.match ({
@@ -35,7 +38,7 @@ lift_args_cap = (
 ) bool {
     found := false
     xs.loop((h, i, x) {
-        found = found ? true : a.lift_expr_cap(decls, idx, bound, x.addr())
+        found = found.then({ true }, { a.lift_expr_cap(decls, idx, bound, x.addr()) })
     })
     found
 }
@@ -48,7 +51,7 @@ lift_inits_cap = (
 ) bool {
     found := false
     inits.loop((h, i, fi) {
-        found = found ? true : a.lift_expr_cap(decls, idx, bound, fi.value)
+        found = found.then({ true }, { a.lift_expr_cap(decls, idx, bound, fi.value) })
     })
     found
 }
@@ -78,7 +81,7 @@ lift_body_cap = (
     found := false
     b := bound
     body.loop((h, i, st) {
-        found = found ? true : a.lift_stmt_cap(decls, idx, b, st)
+        found = found.then({ true }, { a.lift_stmt_cap(decls, idx, b, st) })
         b = a.lift_extend(b, st)
     })
     found
@@ -152,7 +155,7 @@ lift_name = (a: MutPtr<Malloc>, k: i64) string_view {
 lift_func_of = (a: MutPtr<Malloc>, lm: LambdaData, ft: FnTData, name: string_view) Decl {
     ps := a.pbuf(lm.params.len)
     lm.params.loop((h, i, p) {
-        ps[i] = param(p.name, i < ft.params.len ? ft.params[i] : tvoid())
+        ps[i] = param(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }))
     })
     dfunc(Func(
         name: name,

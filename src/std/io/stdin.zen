@@ -37,8 +37,8 @@ read_line*<A> = (a: MutPtr<A>) Result<Opt<string_view>, IoError> {
             @while (done == false) {
                 r := STDIN.read(cell.ptr, 1)
                 failed = r < 0
-                ev = failed ? read_failed() : ev
-                consumed = consumed + (r > 0 ? 1 : 0)
+                ev = failed.then({ read_failed() }, { ev })
+                consumed = consumed + (r > 0).then({ 1 }, { 0 })
                 done = r <= 0 || cell[0] == '\n'
                 // builder-threaded push: every arm yields the String, so failure stays a value
                 s = (r > 0 && cell[0] != '\n').match ({
@@ -97,7 +97,7 @@ append_chunk<A> = (a: MutPtr<A>, s: String, chunk: RawPtr<u8>, n: i64) Result<St
             h.break
         })
     })
-    out: Result<String, IoError> := failed ? err(ev) : ok(cur)
+    out: Result<String, IoError> := failed.then({ err(ev) }, { ok(cur) })
     out
 }
 // Reads stdin to EOF into one allocator-owned NUL-terminated view (the stdin twin of
@@ -118,7 +118,7 @@ read_all*<A> = (a: MutPtr<A>) Result<string_view, IoError> {
                 @while (done == false) {
                     r := STDIN.read(chunk, READ_CHUNK)
                     failed = r < 0
-                    ev = failed ? read_failed() : ev
+                    ev = failed.then({ read_failed() }, { ev })
                     done = r <= 0
                     s = (r > 0).match ({
                         true  => a.append_chunk(s, chunk, r).match ({
@@ -182,6 +182,6 @@ lines*<A> = (a: MutPtr<A>, on_line: (string_view) void) Result<i64, IoError> {
             }),
         })
     }
-    out: Result<i64, IoError> := failed ? err(ev) : ok(n)
+    out: Result<i64, IoError> := failed.then({ err(ev) }, { ok(n) })
     out
 }

@@ -30,7 +30,7 @@ main* = () i32 {
     // deterministic correctness suites (value + verdict) and skip the slow subprocess-heavy
     // ones (modules ~90s of multi-file builds, build/boundaries/misc/fuzz, + the full self-host
     // fixpoint). For inner-loop iteration; the full `make harness` stays the merge gate.
-    fast := is_empty(getEnv("ZEN_HARNESS_FAST")) ? false : true
+    fast := is_empty(getEnv("ZEN_HARNESS_FAST")).then({ false }, { true })
     // create this run's private scratch dir BEFORE any case writes into it (see harness_lib zo_*).
     zo_ensure()
     fails := 0
@@ -39,10 +39,10 @@ main* = () i32 {
     fails = fails + harness_verdict_run()
     // slow subprocess-heavy suites — only when NOT in fast mode. `match` is control flow, so in fast
     // mode the false arm (every slow suite call) is never evaluated.
-    fails = fails + (fast.match ({
+    fails = fails + fast.match ({
         true  => 0,
         false => harness_modules_run() + harness_build_run() + harness_boundaries_run() + harness_misc_run() + harness_fuzz_run() + harness_argparse_run() + harness_datetime_run() + harness_fmt_roundtrip_run() + harness_lsp_run() + harness_stdsurface_run() + run_suite("fixpoint", [fixpoint_ok()]),
-    }))
+    })
     // remove this run's private scratch dir (unique per pid, so cleanup is best-effort housekeeping).
     zo_cleanup()
     (fails == 0).match ({

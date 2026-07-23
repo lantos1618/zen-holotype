@@ -254,8 +254,11 @@ radix_end = (src: string_view, ds: i32, e: i32) i32 {
 exp_end = (src: string_view, pos: i32) i32 {
     (at(src, pos) == 'e' || at(src, pos) == 'E').match ({
         true  => {
-            p2 := at(src, pos + 1) == '+' || at(src, pos + 1) == '-' ? pos + 2 : pos + 1
-            is_digit(at(src, p2)) ? src.int_end(p2) : pos
+            p2 := (at(src, pos + 1) == '+' || at(src, pos + 1) == '-').match ({
+                true  => pos + 2,
+                false => pos + 1,
+            })
+            is_digit(at(src, p2)).then({ src.int_end(p2) }, { pos })
         },
         false => pos,
     })
@@ -294,7 +297,7 @@ char_end = (src: string_view, pos: i32) i32 {
     // pos = first byte inside the quotes
     (b == '\'').match ({
         true  => pos + 1,
-        false => b == '\\' ? src.scan_quote_end(pos + 2) : src.scan_quote_end(pos + 1),
+        false => (b == '\\').then({ src.scan_quote_end(pos + 2) }, { src.scan_quote_end(pos + 1) }),
     })
 }    // empty ''  → consume just the two quotes
 scan_quote_end = (src: string_view, pos: i32) i32 {
@@ -324,7 +327,7 @@ two_op = (b0: u8, b1: u8) bool {
         || b1 == '=' && (b0 == '+' || b0 == '-' || b0 == '*' || b0 == '/' || b0 == '%')
 }    // := ; the last clause adds the compound-assign ops `+= -= *= /= %=`
 sym_end = (src: string_view, pos: i32) i32 {
-    two_op(at(src, pos), at(src, pos + 1)) ? pos + 2 : pos + 1
+    two_op(at(src, pos), at(src, pos + 1)).then({ pos + 2 }, { pos + 1 })
 }    // ==
 mk = (k: TokKind, start: i32, end: i32) Scan {
     Scan(
@@ -351,10 +354,10 @@ num_tok = (src: string_view, pos: i32) Scan {
     // `xs[0].addr()` still scan as an Int + a `.` postfix; the exponent only fuses when a digit
     // follows `e`, so `x.e` / a var `e1` are untouched. Hex (`0x…`) never floats.
     nofloat := src.is_hex_prefix(pos) || src.is_bin_prefix(pos) || src.is_oct_prefix(pos)
-    has_frac := nofloat ? false : at(src, e) == '.' && is_digit(at(src, e + 1))
-    me := has_frac ? src.int_end(e + 1) : e
-    end := nofloat ? me : src.exp_end(me)
-    has_frac || end > me ? mk(.Float, pos, end) : mk(.Int, pos, e)
+    has_frac := nofloat.then({ false }, { at(src, e) == '.' && is_digit(at(src, e + 1)) })
+    me := has_frac.then({ src.int_end(e + 1) }, { e })
+    end := nofloat.then({ me }, { src.exp_end(me) })
+    (has_frac || end > me).then({ mk(.Float, pos, end) }, { mk(.Int, pos, e) })
 }
 scan_one = (src: string_view, pos: i32, b: u8) Scan {
     is_alpha(b).match ({
@@ -580,7 +583,7 @@ fill_comments = (src: string_view, buf: [Comment], k0: i32) void {
                         buf[k] = Comment(
                             start: i,
                             len: e - i,
-                            trailing: src.line_is_blank_before(i) ? false : true,
+                            trailing: src.line_is_blank_before(i).then({ false }, { true }),
                         )
                         k = k + 1
                         i = e
@@ -591,7 +594,7 @@ fill_comments = (src: string_view, buf: [Comment], k0: i32) void {
                             buf[k] = Comment(
                                 start: i,
                                 len: e - i,
-                                trailing: src.line_is_blank_before(i) ? false : true,
+                                trailing: src.line_is_blank_before(i).then({ false }, { true }),
                             )
                             k = k + 1
                             i = e

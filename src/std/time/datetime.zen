@@ -66,18 +66,18 @@ is_leap* = (year: i64) bool { year % 4 == 0 && year % 100 != 0 || year % 400 == 
 // of the next — so it inherits leap-year correctness from days_from_civil with no lookup table and no
 // magic constants. December rolls the year over.
 days_in_month* = (year: i64, month: i64) i64 {
-    ny := month == 12 ? year + 1 : year
-    nm := month == 12 ? 1 : month + 1
+    ny := (month == 12).then({ year + 1 }, { year })
+    nm := (month == 12).then({ 1 }, { month + 1 })
     days_from_civil(ny, nm, 1) - days_from_civil(year, month, 1)
 }
 // ── the epoch bridge (Howard Hinnant) ─────────────────────────────────────────
 // Days since 1970-01-01 for a civil (year, month, day). Shifts to the 0000-03-01 era so leap years
 // fall out of integer division; the March-based month `mp` puts Jan/Feb at the tail of the prior year.
 days_from_civil = (y: i64, m: i64, d: i64) i64 {
-    y2 := m <= 2 ? y - 1 : y    // Jan/Feb belong to the previous civil year
-    era := (y2 >= 0 ? y2 : y2 - 399) / 400    // floored, so negatives are exact
+    y2 := (m <= 2).then({ y - 1 }, { y })    // Jan/Feb belong to the previous civil year
+    era := (y2 >= 0).then({ y2 }, { y2 - 399 }) / 400    // floored, so negatives are exact
     yoe := y2 - era * 400    // year-of-era [0, 399]
-    mp := m > 2 ? m - 3 : m + 9    // March-based month [0, 11]
+    mp := (m > 2).then({ m - 3 }, { m + 9 })    // March-based month [0, 11]
     doy := (153 * mp + 2) / 5 + d - 1    // day-of-year, March-based [0, 365]
     doe := yoe * 365 + yoe / 4 - yoe / 100 + doy    // day-of-era [0, 146096]
     era * DAYS_PER_ERA + doe - EPOCH_SHIFT
@@ -93,22 +93,22 @@ weekday* = (dt: DateTime) i64 { weekday_of_days(days_from_civil(dt.year, dt.mont
 // fields. Time-of-day uses floored day arithmetic so a negative `secs` still yields a 0..86399
 // remainder; the date uses civil_from_days (the inverse of days_from_civil above).
 from_unix* = (secs: i64) DateTime {
-    days := secs >= 0 ? secs / SEC_PER_DAY : (secs - (SEC_PER_DAY - 1)) / SEC_PER_DAY
+    days := (secs >= 0).then({ secs / SEC_PER_DAY }, { (secs - (SEC_PER_DAY - 1)) / SEC_PER_DAY })
     rem := secs - days * SEC_PER_DAY    // 0 .. 86399 regardless of sign
     hh := rem / SEC_PER_HOUR
     mm := rem % SEC_PER_HOUR / SEC_PER_MIN
     ss := rem % SEC_PER_MIN
     z := days + EPOCH_SHIFT    // shift to the 0000-03-01 era origin
-    era := (z >= 0 ? z : z - (DAYS_PER_ERA - 1)) / DAYS_PER_ERA    // floored
+    era := (z >= 0).then({ z }, { z - (DAYS_PER_ERA - 1) }) / DAYS_PER_ERA    // floored
     doe := z - era * DAYS_PER_ERA    // day-of-era [0, 146096]
     yoe := (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365    // year-of-era [0, 399]
     y := yoe + era * 400
     doy := doe - (365 * yoe + yoe / 4 - yoe / 100)    // day-of-year, March-based [0, 365]
     mp := (5 * doy + 2) / 153    // March-based month [0, 11]
     d := doy - (153 * mp + 2) / 5 + 1    // day-of-month [1, 31]
-    m := mp < 10 ? mp + 3 : mp - 9    // civil month [1, 12]
+    m := (mp < 10).then({ mp + 3 }, { mp - 9 })    // civil month [1, 12]
     // roll March-based Jan/Feb into the next civil year
-    yr := m <= 2 ? y + 1 : y
+    yr := (m <= 2).then({ y + 1 }, { y })
     DateTime(
         year: yr,
         month: m,
@@ -133,14 +133,14 @@ now = () DateTime { from_unix(wall_s()) }
 // going through `view` (a unique name) sidesteps that.
 byte_at = (s: string_view, i: i64) u8 {
     sv := view(s)
-    i >= 0 && i < sv.len ? sv[i] : 0
+    (i >= 0 && i < sv.len).then({ sv[i] }, { 0 })
 }
 // Scan s[i..end); return the first non-digit byte, or 0 when every byte in the range is a digit
 // (a digit byte is never 0, so 0 is an unambiguous "all clear").
 first_nondigit = (s: string_view, i: i64, end: i64) u8 {
     (i >= end).match ({
         true  => 0,
-        false => is_digit(byte_at(s, i)) ? first_nondigit(s, i + 1, end) : byte_at(s, i),
+        false => is_digit(byte_at(s, i)).then({ first_nondigit(s, i + 1, end) }, { byte_at(s, i) }),
     })
 }
 // Decode the 2-digit decimal at s[i..i+2] (positions already validated to be digits).

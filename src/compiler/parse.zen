@@ -94,12 +94,12 @@ is_colon* = (src: string_view, t: Token) bool { src.is_op(t, ':') }
 decl_marker* = (src: string_view, pos: i32) Scan {
     nt := src.scan(pos)
     a1 := src.scan(nt.next)
-    a2 := src.is_star(a1.tok) ? src.scan(a1.next) : a1
-    a3 := src.is_langle(a2.tok) ? src.scan_tyargs(a2) : a2
+    a2 := src.is_star(a1.tok).then({ src.scan(a1.next) }, { a1 })
+    a3 := src.is_langle(a2.tok).then({ src.scan_tyargs(a2) }, { a2 })
     // Also step over a TRAILING `*` after the type-arg list (`Name<T>*:`, the misordered generic-decl
     // head). This lets decl_is_struct/decl_is_enum find the real `:` marker so the decl parses and
     // advances correctly; decl_is_misordered_generic separately flags it as the wrong `*` placement.
-    src.is_star(a3.tok) ? src.scan(a3.next) : a3
+    src.is_star(a3.tok).then({ src.scan(a3.next) }, { a3 })
 }
 // The MISORDERED generic-decl head `Name<T>*:` (type params before the `*`, e.g. a user copying the old
 // SPEC) — the canonical form is `Name*<T>:` (star glued to the name, e.g. `Result*<T, E>:`). Detected as:
@@ -113,7 +113,7 @@ decl_is_misordered_generic = (src: string_view, pos: i32) bool {
                 true  => false,
                 false => {
                     star := src.scan(te)
-                    src.is_star(star.tok) ? src.is_colon(src.scan(star.next).tok) : false
+                    src.is_star(star.tok).then({ src.is_colon(src.scan(star.next).tok) }, { false })
                 },
             })
         },
@@ -125,16 +125,16 @@ misgen_langle_off = (src: string_view, pos: i32) i32 { src.scan(src.scan(pos).ne
 // Malformed `<...>` falls back to the `<` token so scan never receives a negative pos.
 scan_tyargs = (src: string_view, a2: Scan) Scan {
     te := src.tyargs_end(a2.next, 1)
-    te < 0 ? a2 : src.scan(te)
+    (te < 0).then({ a2 }, { src.scan(te) })
 }
 decl_is_struct = (src: string_view, pos: i32) bool {
     m := src.decl_marker(pos)
-    src.is_colon(m.tok) ? src.is_lbrace(src.scan(m.next).tok) : false
+    src.is_colon(m.tok).then({ src.is_lbrace(src.scan(m.next).tok) }, { false })
 }
 decl_is_enum = (src: string_view, pos: i32) bool {
     m := src.decl_marker(pos)
     src.is_colon(m.tok).match ({
-        true  => src.is_lbrace(src.scan(m.next).tok) ? false : true,
+        true  => src.is_lbrace(src.scan(m.next).tok).then({ false }, { true }),
         false => false,
     })
 }
@@ -210,7 +210,7 @@ decl_path_at_boundary = (src: string_view, t: Token) bool {
 decl_is_bad_binding = (src: string_view, pos: i32) bool {
     m := src.decl_marker(pos)
     src.is_eq_tok(m.tok).match ({
-        true  => src.is_lparen(src.scan(m.next).tok) ? false : true,
+        true  => src.is_lparen(src.scan(m.next).tok).then({ false }, { true }),
         false => false,
     })
 }
@@ -297,7 +297,10 @@ SigEntry*: {
     sig_foreign = (e: SigEntry) bool { e.flags / 8 % 2 == 1 }
 }
 module_sig_flags* = (is_pub: bool, is_type: bool, imported: bool, foreign: bool) i64 {
-    (is_pub ? 1 : 0) + (is_type ? 2 : 0) + (imported ? 4 : 0) + (foreign ? 8 : 0)
+    is_pub.then({ 1 }, { 0 }) + is_type.then({ 2 }, { 0 }) + imported.then({ 4 }, { 0 }) + foreign.match ({
+        true  => 8,
+        false => 0,
+    })
 }
 module_sig_buf := no_sigs()
 module_sig_n := 0
@@ -340,7 +343,7 @@ decl_is_import = (src: string_view, pos: i32) bool { src.is_lbrace(src.scan(pos)
 skip_path = (src: string_view, pos: i32) i32 {
     id := src.scan(pos)
     dot := src.scan(id.next)
-    src.is_dot(dot.tok) ? src.skip_path(dot.next) : id.next
+    src.is_dot(dot.tok).then({ src.skip_path(dot.next) }, { id.next })
 }
 import_buf = (a: MutPtr<Malloc>) [Param] { slice(a.acquire(256 * sizeof(Param)), 256) }
 ImportEnd: {
@@ -452,7 +455,7 @@ fill_decls = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32
 decl_is_impl* = (src: string_view, pos: i32) bool {
     nt := src.scan(pos)
     dot := src.scan(nt.next)
-    src.is_dot(dot.tok) ? src.tok_eq(src.scan(dot.next).tok, "impl") : false
+    src.is_dot(dot.tok).then({ src.tok_eq(src.scan(dot.next).tok, "impl") }, { false })
 }
 fill_decl = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     a.note_export_if_starred(src, pos)
@@ -549,7 +552,7 @@ fill_enum = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32)
 }
 fill_func = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32) DCont {
     de := a.parse_decl_at(src, pos)
-    buf[i] = de.foreign ? dforeign(de.func) : dfunc(de.func)
+    buf[i] = de.foreign.then({ dforeign(de.func) }, { dfunc(de.func) })
     DCont(
         next: de.next,
         i: i + 1,
@@ -592,7 +595,7 @@ ImportPath: {
 path_end_tok = (src: string_view, pos: i32) Token {
     id := src.scan(pos)
     dot := src.scan(id.next)
-    src.is_dot(dot.tok) ? src.path_end_tok(dot.next) : id.tok
+    src.is_dot(dot.tok).then({ src.path_end_tok(dot.next) }, { id.tok })
 }
 read_import_path = (a: MutPtr<Malloc>, src: string_view, pos: i32) ImportPath {
     first := src.scan(pos)
@@ -656,15 +659,15 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
                 buf[i] = buf[i - 1]
                 i = i - 1
             }
-            off := perr_off_get() == 0 ? lerr_off_get() : perr_off_get()
-            voff := off == vbreak_get() && off != 0 ? 0 - off : off    // vbreak dot → KVBREAK
+            off := (perr_off_get() == 0).then({ lerr_off_get() }, { perr_off_get() })
+            voff := (off == vbreak_get() && off != 0).then({ 0 - off }, { off })    // vbreak dot → KVBREAK
             // a bad-binding error plants its OWN sentinel name so the checker reports `error[bad-binding]`
             // (with the `use :=` hint) instead of a generic KPARSE; its offset is always a real caret pos.
             nm := (perr_kind_get() == 1).match ({
                 true  => "__bad_binding",
                 false => (perr_kind_get() == 2).match ({
                     true  => "__misordered_generic",
-                    false => reg_overflow_get() ? "__capacity" : "__syntax_error",
+                    false => reg_overflow_get().then({ "__capacity" }, { "__syntax_error" }),
                 }),
             })
             buf[0] = dglobal(nm, tvoid(), a.enode(lit(voff)))
@@ -789,7 +792,7 @@ import_close = (src: string_view, pos: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => sc.next,
-        _    => src.is_rbrace(sc.tok) ? sc.next : src.import_close(sc.next),
+        _    => src.is_rbrace(sc.tok).then({ sc.next }, { src.import_close(sc.next) }),
     })
 }
 import_span_end = (src: string_view, pos: i32) i32 {

@@ -73,7 +73,7 @@ Response*: {
     ok = (r: Response) bool { r.status >= 200 && r.status < 300 }
 }
 // ── case-insensitive helpers ──────────────────────────────────────────────────────────────────────────
-lower = (b: u8) u8 { b >= 'A' && b <= 'Z' ? b + 32 : b }
+lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').then({ b + 32 }, { b }) }
 // ASCII-case-insensitive equality of two strs.
 ieq = (x: string_view, y: string_view) bool {
     xv := x.view()
@@ -203,13 +203,16 @@ collect_headers<A> = (a: MutPtr<A>, lines: [string_view]) Result<[Header], HttpE
             })
         })
     })
-    bad ? err(malformed("http: header line missing ':'")) : ok(hs)
+    bad.then({ err(malformed("http: header line missing ':'")) }, { ok(hs) })
 }
 // resolve the body from the raw remainder and the parsed headers: decode a `chunked` transfer-encoding,
 // else trim to `Content-Length` when present, else take the read-to-EOF remainder verbatim.
 decide_body<A> = (a: MutPtr<A>, headers: [Header], body_raw: string_view) string_view {
     lookup_header(headers, "Transfer-Encoding").match ({
-        .Some(te) => a.to_lower(te).contains("chunked") ? a.decode_chunked(body_raw) : body_raw,
+        .Some(te) => a.to_lower(te).contains("chunked").match ({
+            true  => a.decode_chunked(body_raw),
+            false => body_raw,
+        }),
         .None     => lookup_header(headers, "Content-Length").match ({
             .Some(cl) => a.substr(body_raw, 0, cl.parse_int()).expect("http: oom"),
             .None     => body_raw,
@@ -218,22 +221,24 @@ decide_body<A> = (a: MutPtr<A>, headers: [Header], body_raw: string_view) string
 }
 // ── chunked transfer-encoding decode ──────────────────────────────────────────────────────────────────
 // first index at/after `i` that is not a hex digit (the end of a chunk-size field).
-hex_end = (bv: [u8], i: i64) i64 { i < bv.len && is_hex(bv[i]) ? bv.hex_end(i + 1) : i }
+hex_end = (bv: [u8], i: i64) i64 {
+    (i < bv.len && is_hex(bv[i])).then({ bv.hex_end(i + 1) }, { i })
+}
 // fold the hex digits bv[i..e] into an integer size.
 hex_val = (bv: [u8], i: i64, e: i64, acc: i64) i64 {
-    i >= e ? acc : bv.hex_val(i + 1, e, acc * 16 + hex_nibble(bv[i]))
+    (i >= e).then({ acc }, { bv.hex_val(i + 1, e, acc * 16 + hex_nibble(bv[i])) })
 }
 // index just past the next '\n' at/after `i` (one line terminator), or `bv.len` if none remains.
 after_lf = (bv: [u8], i: i64) i64 {
     (i >= bv.len).match ({
         true  => bv.len,
-        false => bv[i] == '\n' ? i + 1 : bv.after_lf(i + 1),
+        false => (bv[i] == '\n').then({ i + 1 }, { bv.after_lf(i + 1) }),
     })
 }
 // append bv[start .. start+n] (clamped to the view) onto the builder `sb`.
 append_range<A> = (a: MutPtr<A>, bv: [u8], start: i64, n: i64, sb: String) String {
     avail := bv.len - start
-    m := n < avail ? n : avail
+    m := (n < avail).then({ n }, { avail })
     sub: [u8] := bv.ptr.offset(start).slice(m)
     acc := sb
     sub.loop((h, i, b) {
@@ -317,7 +322,10 @@ READ_CHUNK := 4096    // per-recv buffer size for draining the response
 // `Connection: close` guarantees EOF once the full response has arrived. Recursive (no imperative loop).
 read_loop<A> = (a: MutPtr<A>, c: TcpConn, buf: RawPtr<u8>, sb: String) String {
     c.recv_into(buf, READ_CHUNK).match ({
-        .Ok(nr) => nr <= 0 ? sb : a.read_loop(c, buf, a.append_range(buf.slice(nr), 0, nr, sb)),
+        .Ok(nr) => (nr <= 0).match ({
+            true  => sb,
+            false => a.read_loop(c, buf, a.append_range(buf.slice(nr), 0, nr, sb)),
+        }),
         .Err(e) => sb,
     })
 }

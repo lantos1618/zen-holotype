@@ -761,7 +761,7 @@ harness_build_run* = () i32 {
         want_out: "name=Zen n=42\ns=hi i=7 f=3.14 b=true\nbraces {} and 9 done\nmissing 1  extra\nowned=world\n",
         check_out: true,
     ), FixtureCase(
-        path: "tests/fixtures/zen/ternary_lazy.zen",
+        path: "tests/fixtures/zen/then_lazy.zen",
         want_exit: "0",
         want_out: "then\nelse\nor-cond\nlow\nmid\nhigh\n14\n",
         check_out: true,
@@ -1653,16 +1653,19 @@ harness_build_run* = () i32 {
     // ── (g) POSITIONED diagnostics: kind + file:line:col + caret + message + hint ─────────────────
     dg := run_diags("build diagnostics", [DiagCase(
         src: "if (true) { 1 }\n",
-        wants: [":1:1: error[no-if]", "  if (true) { 1 }", "  ^~", "hint: in expression position write `cond ? yes : no`"],
+        wants: [":1:1: error[no-if]", "  if (true) { 1 }", "  ^~", "hint: in expression position write `cond.then({ yes }, { no })`"],
     ), DiagCase(
         src: "// a foreign decl with a slice param has no C ABI shape — the diagnostic names the offending\n// parameter and its type, positioned on the declaration, with the RawPtr-floor hint.\nfrob = (xs: [i32]) i64\nmain = () i32 { 0 }\n",
         wants: [":3:1: error[ffi-type]: foreign declaration `frob`: parameter `xs` has non-FFI-safe type `[i32]`", "  frob = (xs: [i32]) i64", "  ^~~~", "hint: a bodyless (foreign) declaration is a raw C prototype", "pass buffers through the RawPtr<T> floor (pointer + length)"],
     ), DiagCase(
         src: "main = () i32 {\n    if (1 < 2) { 1 } else { 0 }\n}\n",
-        wants: [":2:5: error[no-if]: `if` is not part of Zen; conditional control flow uses `.match`", "      if (1 < 2) { 1 } else { 0 }", "      ^~", "hint: in expression position write `cond ? yes : no`; for statement-position control flow replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`; inside an enum arm, nest a boolean `.match` in the arm body"],
+        wants: [":2:5: error[no-if]: `if` is not part of Zen; conditional control flow uses `.match`", "      if (1 < 2) { 1 } else { 0 }", "      ^~", "hint: in expression position write `cond.then({ yes }, { no })`; for statement-position control flow replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`; inside an enum arm, nest a boolean `.match` in the arm body"],
     ), DiagCase(
         src: "Box: Val(i32) | Empty\nmain = () i32 {\n    b: Box := .Val(1)\n    b.match ({\n        .Val(v) if v > 0 => 1,\n        .Val(v) => 2,\n        .Empty => 0,\n    })\n}\n",
-        wants: [":5:17: error[no-if]", "          .Val(v) if v > 0 => 1,", "hint: in expression position write `cond ? yes : no`"],
+        wants: [":5:17: error[no-if]", "          .Val(v) if v > 0 => 1,", "hint: in expression position write `cond.then({ yes }, { no })`"],
+    ), DiagCase(
+        src: "main = () i32 {\n    x := 1 > 0 ? 2 : 3\n    x\n}\n",
+        wants: [":2:16: error[no-ternary]: ternary `?:` (and any `?`) is not part of Zen; conditional control flow is a visible postfix method, never punctuation", "      x := 1 > 0 ? 2 : 3", "      ^", "hint: use `cond.then({ yes }, { no })` for a conditional expression, or `.match` for statement-position control flow"],
     ), DiagCase(
         src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
         wants: [":7:22: error[arm-value]: match arm yields no value, but the match result is used as a value", "  .Err(e) => { done = true },", "^~~~", "hint: end every arm with an expression of the match's result type (or a diverging `return`); or stop consuming the match as a value and assign within each arm"],
@@ -2113,10 +2116,10 @@ harness_build_run* = () i32 {
         cmd: "cp tests/fixtures/fmt/none_before_paren_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/none_before_paren_formatted.zen && ! grep -Fq \".None(\" $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
     ), ShellCase(
         name: "fmt_nested_matches",
-        cmd: "cp tests/fixtures/fmt/nested_matches_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/nested_matches_formatted.zen && grep -Fq '.Val(v) => v > 10 ? \"big\" : \"small\",' $ZT/zfmt.zen && ! grep -Fq \" if \" $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+        cmd: "cp tests/fixtures/fmt/nested_matches_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/nested_matches_formatted.zen && grep -Fq '.Val(v) => (v > 10).then({ \"big\" }, { \"small\" }),' $ZT/zfmt.zen && ! grep -Fq \" if \" $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
     ), ShellCase(
-        name: "fmt_ternary_canonicalize",
-        cmd: "cp tests/fixtures/fmt/ternary_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/ternary_formatted.zen && grep -Fq 'a := n > 3 ? 10 : 20' $ZT/zfmt.zen && grep -Fq 'false => n < 10 ? 2 : 3,' $ZT/zfmt.zen && grep -Fq 'd := (n > 3 ? 1 : 2) + 5' $ZT/zfmt.zen && grep -Fq 'e := (n > 3 ? 1 : 2).helper(1, 2, 3)' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+        name: "fmt_then_two_arm_canonicalize",
+        cmd: "cp tests/fixtures/fmt/then_two_arm_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/then_two_arm_formatted.zen && grep -Fq 'a := (n > 3).then({ 10 }, { 20 })' $ZT/zfmt.zen && grep -Fq 'false => (n < 10).then({ 2 }, { 3 }),' $ZT/zfmt.zen && grep -Fq 'd := (n > 3).then({ 1 }, { 2 }) + 5' $ZT/zfmt.zen && grep -Fq 'e := ((n > 3).then({ 1 }, { 2 })).helper(1, 2, 3)' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
     ), ShellCase(
         name: "fmt_trait_defaults",
         cmd: "cp tests/fixtures/fmt/trait_defaults_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/trait_defaults_formatted.zen && grep -Fq '    area: (Ptr<Self>) i32,' $ZT/zfmt.zen && grep -Fq '    twice = (p: Ptr<Self>) i32 { p.area() * 2 },' $ZT/zfmt.zen && grep -Fq '    quad = (p: Ptr<Self>) i32 {' $ZT/zfmt.zen && grep -Fq '    n: i32,' $ZT/zfmt.zen && grep -Fq '    pick: (i32, i32) i32,' $ZT/zfmt.zen && grep -Fq '    bump = (m: Ptr<Mixed>) i32 { m.n + 1 }' $ZT/zfmt.zen && ! grep -q '^twice' $ZT/zfmt.zen && ! grep -q '^quad' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",

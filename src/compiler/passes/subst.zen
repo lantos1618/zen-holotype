@@ -21,7 +21,7 @@ subst_var = (
     e: Ptr<Expr>,
 ) Ptr<Expr> {
     idx := params.param_index(name)
-    idx < 0 ? e : a.subst_keep_pos(args[idx].addr(), e.ref_pos())
+    (idx < 0).then({ e }, { a.subst_keep_pos(args[idx].addr(), e.ref_pos()) })
 }
 // A substituted reference is a renamed local's `vref` (built pos-less) or a spliced source arg. When
 // the substitution target is a bare Var, carry the ORIGINAL reference's source position onto a fresh
@@ -29,7 +29,7 @@ subst_var = (
 // a non-Var arg keeps its own node (and its own positions) unchanged.
 subst_keep_pos = (a: MutPtr<Malloc>, arg: Ptr<Expr>, p: i32) Ptr<Expr> {
     load(arg).match ({
-        .Var(v) => a.cenode(vref_at(v.name, v.pos <= 0 ? p : v.pos)),
+        .Var(v) => a.cenode(vref_at(v.name, (v.pos <= 0).then({ p }, { v.pos }))),
         _       => arg,
     })
 }
@@ -154,7 +154,10 @@ subst_arms = (
 subst_match = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], m: MatchData) Ptr<Expr> {
     subj := a.subst_expr(cs, tparams, targs, m.subj)
     arms := a.subst_arms(cs, tparams, targs, m.arms)
-    m.ptr ? a.cenode(ematchp(subj, m.ename, arms)) : a.cenode(ematch(subj, m.ename, arms))
+    m.ptr.match ({
+        true  => a.cenode(ematchp(subj, m.ename, arms)),
+        false => a.cenode(ematch(subj, m.ename, arms)),
+    })
 }
 // Substitute and remangle generic-enum ctors/tags inside template bodies.
 subst_mkenum = (
@@ -219,7 +222,7 @@ subst_tparam_var = (
 ) Ptr<Expr> {
     i := tparams.param_index(v.name)
     (i < 0).match ({
-        true  => cs == 0 ? e : a.cenode(vref_at(v.name, cs)),
+        true  => (cs == 0).then({ e }, { a.cenode(vref_at(v.name, cs)) }),
         false => a.cenode(vref_at(a.ty_cname_in(targs[i]), cs_or(cs, v.pos))),
     })
 }
@@ -424,7 +427,7 @@ refl_hook = (
     params: [Param],
     env: Ptr<VList>,
 ) Ptr<Expr> {
-    want := c.fn == "zip_fields" ? 3 : 2
+    want := (c.fn == "zip_fields").then({ 3 }, { 2 })
     (cargs.len == want == false).then({
         return a.recall(c, c.fn, cargs)
     })
@@ -449,7 +452,7 @@ refl_hook = (
             return a.recall(c, c.fn, cargs)
         })
     })
-    nsub := c.fn == "each_field" ? 1 : 2
+    nsub := (c.fn == "each_field").then({ 1 }, { 2 })
     nb := 0
     cargs.loop((h, i, ce) {
         (i < to_i64(nsub) && ce.refl_needs_bind()).then({

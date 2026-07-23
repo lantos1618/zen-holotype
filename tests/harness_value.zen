@@ -5,17 +5,20 @@
 { VCase, run_values } = harness_lib
 harness_value_run* = () i32 {
     run_values("value", [VCase(
-        src: "test* = () i32 {\n  n := 7\n  n < 3 ? 1 : n < 10 ? 2 : 3\n}",
+        src: "test* = () i32 {\n  n := 7\n  (n < 3).then({ 1 }, { (n < 10).then({ 2 }, { 3 }) })\n}",
         want: "2",
     ), VCase(
-        src: "test* = () i32 {\n  n := 7\n  a := n > 5 || n < 0 ? 10 : 20\n  a + (n > 5 ? 1 : 2) * 100\n}",
+        src: "test* = () i32 {\n  n := 7\n  a := (n > 5 || n < 0).then({ 10 }, { 20 })\n  a + (n > 5).then({ 1 }, { 2 }) * 100\n}",
         want: "110",
     ), VCase(
-        src: "test* = () i32 {\n  a := true\n  b := false\n  a ? b ? 1 : 2 : 3\n}",
+        src: "test* = () i32 {\n  a := true\n  b := false\n  a.then({ b.then({ 1 }, { 2 }) }, { 3 })\n}",
         want: "2",
     ), VCase(
-        src: "hits := 0\neff = (v: i32) i32 {\n  hits = hits + v\n  v\n}\ntest* = () i32 {\n  x := false ? eff(100) : eff(3)\n  x + hits\n}",
+        src: "hits := 0\neff = (v: i32) i32 {\n  hits = hits + v\n  v\n}\ntest* = () i32 {\n  x := false.then({ eff(100) }, { eff(3) })\n  x + hits\n}",
         want: "6",
+    ), VCase(
+        src: "test* = () i32 {\n  c := true\n  c.then({ 1 }, {\n    v := 40\n    v + 2\n  })\n}",
+        want: "1",
     ), VCase(
         src: "test* = () i64 { sizeof(i64) }",
         want: "8",
@@ -1035,10 +1038,11 @@ harness_value_run* = () i32 {
         want: "8",
     )])
 }
-// ternary conditional: right-assoc nesting (`a ? b : c ? d : e` = `a ? b : (c ? d : e)`)
-// ternary condition binds below `||`; a ternary as Bin operand / receiver reparses via parens
-// nested-in-then: the then-arm closes at ITS own `:` first
-// `?:` is the SAME lazy Cond node the bool match builds: only the taken arm evaluates
+// two-arm `.then` conditional: nesting composes as blocks (`a.then({ b.then({…},{…}) }, {…})`)
+// an `||` condition is a parenthesized receiver; `.then(...)` as a Bin operand reparses bare
+// nested-in-then-arm: the inner conditional closes at its OWN `}` — no dangling-else ambiguity
+// `.then({ a }, { b })` is the SAME lazy Cond node the bool match builds: only the taken arm evaluates
+// a multi-statement else BLOCK arm: the untaken block never runs and the taken arm is the value
 // multi-char char literal `'ab'` yields its FIRST byte only ('a' = 97), not a C-style packed value; observe the subject directly
 // bound-generic enum: instantiate `Opt<P>.Some(P(x:42))` (P satisfies `Sz`), match it, return the payload — exercises the bound, not just the parse
 // #61: the FNV-1a-64 offset basis (0xcbf29ce484222325 = 14695981039346656037) is above i64 max;

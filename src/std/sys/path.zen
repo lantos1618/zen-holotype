@@ -58,7 +58,7 @@ leading_dots = (v: [u8]) i64 {
 // walk left from `j` over a run of '/', returning the index of the run's first slash.
 // collapses trailing separators before the last path component (used by dirname).
 back_over_slashes = (v: [u8], j: i64) i64 {
-    j > 0 && v[j - 1] == '/' ? v.back_over_slashes(j - 1) : j
+    (j > 0 && v[j - 1] == '/').then({ v.back_over_slashes(j - 1) }, { j })
 }
 // ── pure, zero-copy ───────────────────────────────────────────────────────────
 // does `p` start at the root? is_absolute("/a") == true, is_absolute("a") == false.
@@ -79,7 +79,7 @@ ext = (p: string_view) string_view {
     bv := b.view()
     ld := bv.leading_dots()
     k := bv.last_dot()
-    k > ld ? cstr(bv.ptr.offset(k)) : ""
+    (k > ld).then({ cstr(bv.ptr.offset(k)) }, { "" })
 }
 // ── allocating (Result<string_view, IoError>) ─────────────────────────────────
 // the directory portion (everything before the last component), trailing slashes collapsed.
@@ -92,7 +92,7 @@ dirname_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
         true  => a.substr_in(p, 0, 0),
         false => {
             j := v.back_over_slashes(i)
-            j == 0 ? a.substr_in(p, 0, 1) : a.substr_in(p, 0, j)
+            (j == 0).then({ a.substr_in(p, 0, 1) }, { a.substr_in(p, 0, j) })
         },
     })
 }
@@ -158,7 +158,7 @@ join*<A> = (a: MutPtr<A>, parts: [string_view]) Result<string_view, IoError> { a
 // ── normalize ─────────────────────────────────────────────────────────────────
 // append `sb` a '/' before all but the first kept component (keeps or_return out of a match-arm value).
 sep_before<A> = (a: MutPtr<A>, sb: String, k: i64) Result<String, IoError> {
-    k > 0 ? sb.append_in(a, "/") : ok(sb)
+    (k > 0).then({ sb.append_in(a, "/") }, { ok(sb) })
 }
 // emit kept components `keep[0..top]` into `sb`, '/'-separated (no leading slash — the caller seeds it).
 norm_build<A> = (
@@ -189,7 +189,7 @@ normalize_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
     top: i64 := 0
     parts.loop((h, i, comp) {
         ((comp.len() == 0 || comp == ".") == false).then({
-            comp == ("..".match ({
+            comp == "..".match ({
                 true  => (top > 0 && parts[keep[top - 1]] != "..").match ({
                     true  => {
                         top = top - 1
@@ -203,15 +203,15 @@ normalize_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
                     keep[top] = i
                     top = top + 1
                 },
-            }))
+            })
         })
     })
     sb0 := a.new_in().or_return()
-    seeded_r := abs ? sb0.append_in(a, "/") : ok(sb0)
+    seeded_r := abs.then({ sb0.append_in(a, "/") }, { ok(sb0) })
     seeded := seeded_r.or_return()
     full := a.norm_build(parts, keep, 0, top, seeded).or_return()
-    need_dot := top == 0 && (abs ? false : true)
-    ended_r := need_dot ? full.append_in(a, ".") : ok(full)
+    need_dot := top == 0 && abs.then({ false }, { true })
+    ended_r := need_dot.then({ full.append_in(a, ".") }, { ok(full) })
     ended := ended_r.or_return()
     ended.finish_in(a).match ({
         .Ok(done) => ok(done),

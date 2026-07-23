@@ -19,7 +19,7 @@ light_sl_elem = (
     env: Ptr<VList>,
     decls: [Decl],
     idx: DeclIndex,
-) Ty { items.len == 0 ? tvoid() : items[0].addr().light_ty(a, env, decls, idx) }
+) Ty { (items.len == 0).then({ tvoid() }, { items[0].addr().light_ty(a, env, decls, idx) }) }
 light_slice = (
     a: MutPtr<Malloc>,
     sd: SliceData,
@@ -58,7 +58,7 @@ light_one = (
     found
 }
 light_ret_one = (ret: Ty, exp: Ty, tp: string_view) Ty {
-    exp.is_void_ty() ? tvoid() : ret.unify_ty(exp, tp)
+    exp.is_void_ty().then({ tvoid() }, { ret.unify_ty(exp, tp) })
 }
 light_targ = (
     f: Func,
@@ -71,8 +71,8 @@ light_targ = (
     idx: DeclIndex,
 ) Ty {
     arg := f.params.light_one(a, args, tp, env, decls, idx, false)
-    arg = arg.is_void_ty() ? f.ret.light_ret_one(exp, tp) : arg
-    arg.is_void_ty() ? f.params.light_one(a, args, tp, env, decls, idx, true) : arg
+    arg = arg.is_void_ty().then({ f.ret.light_ret_one(exp, tp) }, { arg })
+    arg.is_void_ty().then({ f.params.light_one(a, args, tp, env, decls, idx, true) }, { arg })
 }
 light_targs = (
     f: Func,
@@ -143,7 +143,10 @@ light_extend = (
     idx: DeclIndex,
 ) Ptr<VList> {
     st.match ({
-        .Let(l) => a.vcons(l.name, l.ty.is_void_ty() ? l.value.light_ty(a, env, decls, idx) : l.ty, env),
+        .Let(l) => a.vcons(l.name, l.ty.is_void_ty().match ({
+            true  => l.value.light_ty(a, env, decls, idx),
+            false => l.ty,
+        }), env),
         _       => env,
     })
 }
@@ -170,7 +173,12 @@ light_block_ty = (
     env: Ptr<VList>,
     decls: [Decl],
     idx: DeclIndex,
-) Ty { b.stmts.stmts_diverge() ? tvoid() : a.light_block_ty_from(b.stmts, env, decls, idx, 0) }
+) Ty {
+    b.stmts.stmts_diverge().match ({
+        true  => tvoid(),
+        false => a.light_block_ty_from(b.stmts, env, decls, idx, 0),
+    })
+}
 light_member_ty = (
     a: MutPtr<Malloc>,
     decls: [Decl],
@@ -191,9 +199,18 @@ light_ty* = (e: Ptr<Expr>, a: MutPtr<Malloc>, env: Ptr<VList>, decls: [Decl], id
         .Byte(n)       => tu8(),
         .FloatLit(ft)  => tf64(),
         .StrLit(s)     => tstring_literal(),
-        .MakeStruct(m) => m.targs.len > 0 ? tgeneric(m.ty, m.targs, m.mty) : tnamed(m.ty),
-        .MakeEnum(mk)  => mk.targs.len > 0 ? tgeneric(mk.ty, mk.targs, mk.mty) : tnamed(mk.ty),
-        .Tag(t)        => t.targs.len > 0 ? tgeneric(t.ty, t.targs, t.mty) : tnamed(t.ty),
+        .MakeStruct(m) => (m.targs.len > 0).match ({
+            true  => tgeneric(m.ty, m.targs, m.mty),
+            false => tnamed(m.ty),
+        }),
+        .MakeEnum(mk)  => (mk.targs.len > 0).match ({
+            true  => tgeneric(mk.ty, mk.targs, mk.mty),
+            false => tnamed(mk.ty),
+        }),
+        .Tag(t)        => (t.targs.len > 0).match ({
+            true  => tgeneric(t.ty, t.targs, t.mty),
+            false => tnamed(t.ty),
+        }),
         .SliceLit(sd)  => a.light_slice(sd, env, decls, idx),
         .Var(v)        => env.lookup_var(v.name),
         .Call(c)       => light_call_ty(decls, idx, a, c, env),
@@ -227,7 +244,7 @@ light_match_ty = (
 // Unify a param type against an arg type to infer one tparam.
 unify_ty* = (pty: Ty, aty: Ty, tp: string_view) Ty {
     pty.match ({
-        .Named(n)   => n == tp ? aty : tvoid(),
+        .Named(n)   => (n == tp).then({ aty }, { tvoid() }),
         .Generic(g) => aty.match ({
             .Generic(ga) => g.args.unify_args(ga.args, tp),
             _            => tvoid(),
@@ -247,7 +264,7 @@ unify_args = (pargs: [Ty], aargs: [Ty], tp: string_view) Ty {
     found := tvoid()
     pargs.loop((h, i, pa) {
         found = found.is_void_ty().match ({
-            true  => i < aargs.len ? pa.unify_ty(aargs[i], tp) : found,
+            true  => (i < aargs.len).then({ pa.unify_ty(aargs[i], tp) }, { found }),
             false => found,
         })
     })
@@ -271,7 +288,7 @@ variant_payload_ty = (decls: [Decl], vn: string_view) Ty {
 enum_variant_payload = (ed: EnumDecl, vn: string_view) Ty {
     found := tvoid()
     ed.variants.loop((h, i, v) {
-        found = v.name == vn ? v.payload : found
+        found = (v.name == vn).then({ v.payload }, { found })
     })
     found
 }
@@ -282,7 +299,7 @@ enum_variant_payload = (ed: EnumDecl, vn: string_view) Ty {
 lam_param_payload = (decls: [Decl], body: [Stmt], pname: string_view) Ty {
     found := tvoid()
     body.loop((h, i, st) {
-        found = found.is_void_ty() ? decls.lpp_stmt(st, pname) : found
+        found = found.is_void_ty().then({ decls.lpp_stmt(st, pname) }, { found })
     })
     found
 }
@@ -306,20 +323,20 @@ lpp_expr = (decls: [Decl], e: Ptr<Expr>, pname: string_view) Ty {
 }
 lpp_payload = (decls: [Decl], variant: string_view, payload: Ptr<Expr>, pname: string_view) Ty {
     load(payload).match ({
-        .Var(v) => v.name == pname ? decls.variant_payload_ty(variant) : tvoid(),
+        .Var(v) => (v.name == pname).then({ decls.variant_payload_ty(variant) }, { tvoid() }),
         _       => tvoid(),
     })
 }
 lpp_args = (decls: [Decl], args: [Expr], pname: string_view) Ty {
     found := tvoid()
     args.loop((h, i, ar) {
-        found = found.is_void_ty() ? decls.lpp_expr(ar.addr(), pname) : found
+        found = found.is_void_ty().then({ decls.lpp_expr(ar.addr(), pname) }, { found })
     })
     found
 }
 lpp_mcall = (decls: [Decl], mc: MethodCallData, pname: string_view) Ty {
     r := decls.lpp_expr(mc.recv, pname)
-    r.is_void_ty() ? decls.lpp_args(mc.args, pname) : r
+    r.is_void_ty().then({ decls.lpp_args(mc.args, pname) }, { r })
 }
 // Unify a generic FnT param `(ReplyRef<T>) R` against a lambda argument by inferring each lambda
 // param's concrete type from its body (the `.Variant(param)` site that declares it).
@@ -339,7 +356,7 @@ lam_unify = (decls: [Decl], fpty: Ty, lm: LambdaData, tp: string_view) Ty {
             // A tparam appearing ONLY in the closure's RETURN position `(T) U` binds from the lambda's
             // DECLARED return type (else it would default to void -> a `[void]` result, a silent miscompile).
             found.is_void_ty().match ({
-                true  => lm.ret.is_void_ty() ? found : load(ft.ret).unify_ty(lm.ret, tp),
+                true  => lm.ret.is_void_ty().then({ found }, { load(ft.ret).unify_ty(lm.ret, tp) }),
                 false => found,
             })
         },
@@ -410,8 +427,8 @@ infer_one_exp = (
     idx: DeclIndex,
 ) Ty {
     arg := params.infer_one(a, cargs, tp, env, decls, idx, false)
-    arg = arg.is_void_ty() ? ret.light_ret_one(exp, tp) : arg
-    arg.is_void_ty() ? params.infer_one(a, cargs, tp, env, decls, idx, true) : arg
+    arg = arg.is_void_ty().then({ ret.light_ret_one(exp, tp) }, { arg })
+    arg.is_void_ty().then({ params.infer_one(a, cargs, tp, env, decls, idx, true) }, { arg })
 }
 // ── deep tparam fallbacks: two LAST-RESORT inference sources for a tparam that neither the value
 //    args nor the expected type could bind (it would otherwise silently default to void → a
@@ -567,7 +584,10 @@ impl_trait_solve = (
         false => {
             found := tvoid()
             g.fields.loop((h, i, f) {
-                found = found.is_void_ty() ? a.impl_method_solve(decls, idx, im, f, tp) : found
+                found = found.is_void_ty().match ({
+                    true  => a.impl_method_solve(decls, idx, im, f, tp),
+                    false => found,
+                })
             })
             found
         },
@@ -590,7 +610,10 @@ impl_method_solve = (
                     found := load(ft.ret).unify_ty(mf.ret, tp)
                     ft.params.loop((h, j, pt) {
                         found = found.is_void_ty().match ({
-                            true  => j < mf.params.len ? pt.unify_ty(mf.params[j].ty, tp) : found,
+                            true  => (j < mf.params.len).match ({
+                                true  => pt.unify_ty(mf.params[j].ty, tp),
+                                false => found,
+                            }),
                             false => found,
                         })
                     })
@@ -620,7 +643,10 @@ deep_targs = (
         })
     })
     tparams.loop((h, i, tp) {
-        buf[i] = buf[i].is_void_ty() ? a.impl_trait_targ(decls, idx, tparams, buf, tp.name) : buf[i]
+        buf[i] = buf[i].is_void_ty().match ({
+            true  => a.impl_trait_targ(decls, idx, tparams, buf, tp.name),
+            false => buf[i],
+        })
     })
     buf
 }

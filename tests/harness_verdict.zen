@@ -11,17 +11,29 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        src: "main = () i32 {\n    n := 4\n    n > 3 ? 0 : 1\n}\n",
+        src: "main = () i32 {\n    n := 4\n    (n > 3).then({ 0 }, { 1 })\n}\n",
         should_pass: true,
         kind: "",
     ), VerdictCase(
-        src: "main = () i32 {\n    s := \"x\"\n    s ? 1 : 2\n}\n",
+        src: "main = () i32 {\n    s := \"x\"\n    s.then({ 1 }, { 2 })\n}\n",
         should_pass: false,
         kind: "operand-type",
     ), VerdictCase(
-        src: "main = () i32 {\n    v := true ? 1\n    v\n}\n",
+        src: "main = () i32 {\n    v := true.then({ 1 }, { 2 }, { 3 })\n    v\n}\n",
         should_pass: false,
         kind: "parse",
+    ), VerdictCase(
+        src: "main = () i32 {\n    v := true.then({ 1 }, 2)\n    v\n}\n",
+        should_pass: false,
+        kind: "parse",
+    ), VerdictCase(
+        src: "main = () i32 {\n    x := 1 > 0 ? 2 : 3\n    x\n}\n",
+        should_pass: false,
+        kind: "no-ternary",
+    ), VerdictCase(
+        src: "main = () i32 {\n    v := true ? 1\n    v\n}\n",
+        should_pass: false,
+        kind: "no-ternary",
     ), VerdictCase(
         src: "f = (c: bool) i32 {\n    v := c.match ({ true => 7, false => {\n        return 0\n    } })\n    v\n}\nmain = () i32 { f(true) - 7 }\n",
         should_pass: true,
@@ -717,7 +729,7 @@ harness_verdict_run* = () i32 {
     ), VerdictCase(
         src: "test* = () i32 { x := 1  $ ?  x }",
         should_pass: false,
-        kind: "parse",
+        kind: "no-ternary",
     ), VerdictCase(
         src: "f = () i32 { 0 .match ({ 1 => 2",
         should_pass: false,
@@ -947,9 +959,12 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "trait-bound",
     )])
-    // the ternary conditional is the boolean two-arm match: bool condition accepted …
+    // the two-arm `.then({ a }, { b })` is the boolean two-arm match: bool condition accepted …
     // … a non-bool condition is a positioned operand-type error (same Cond checker as the match form)
-    // both ternary arms are required — `c ? t` with no `: e` is a parse error (one-way effects are `.then`)
+    // `.then` takes at most two block arguments — a THIRD argument is a positioned parse error
+    // … and each argument must be a BLOCK — a non-block second argument is a positioned parse error
+    // the ternary `c ? t : e` is NOT Zen (error[no-ternary], permanent law beside no-if) …
+    // … and ANY stray `?` — even a partial `c ? t` — trips the same positioned guard
     // struct `==` is now STRUCTURAL (derived per-field fold) — this pinned the old rejection.
     // `if` is forbidden everywhere, including the former match-arm guard position.
     // C2 (task #35): a CONCRETE param of a GENERIC callee is now arg-checked (was off since the
@@ -1480,7 +1495,7 @@ harness_verdict_run* = () i32 {
     ), VerdictCase(
         src: "test* = () i32 { x := 1  $ ?  x }",
         should_pass: false,
-        kind: "parse",
+        kind: "no-ternary",
     ), VerdictCase(
         src: "f = () i32 { 0 .match ({ 1 => 2",
         should_pass: false,
@@ -2375,10 +2390,10 @@ harness_verdict_run* = () i32 {
     //   stray `|`/literal in name position is a clean caretted parse error, not a silent decl-swallow.
     // #392 rejects: a value-CONSUMED match/cond arm that yields no value and does not diverge
     // is error[arm-value] — it used to reach cc as `char* _out = (done = true)` (broken C) or,
-    // for the bool-subject ternary, compile SILENTLY WRONG (`c ? "x" : bool` under -w).
+    // for the bool-subject Cond, compile SILENTLY WRONG (C `c ? "x" : bool` under -w).
     // let-RHS, enum subject, arm tail is an assignment statement.
     // let-RHS, arm is a bare call to a fn DECLARED void.
-    // bool subject (Cond-lowered ternary): the SILENT-WRONG twin.
+    // bool subject (Cond, C-ternary-lowered): the SILENT-WRONG twin.
     // argument position: the match flows into a CONCRETE str param slot.
     // Ok-payload mismatch in LET position (the Ok value is consumed locally, not returned):
     // ACCEPTED — only the error type must match; the lowering rebuilds the Err return as the

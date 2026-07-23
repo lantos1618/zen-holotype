@@ -30,7 +30,7 @@
 is_word_char = (b: u8) bool {
     b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_'
 }
-not_word = (b: u8) bool { b.is_word_char() ? false : true }
+not_word = (b: u8) bool { b.is_word_char().then({ false }, { true }) }
 // `(?<!\.)\b` boundary before sv[i]: prev byte is NOT a word char AND NOT `.` (keeps UFCS `.free(`
 // method calls from matching). Written as a pure boolean for the `||`/`&&` chains below.
 is_boundary_before = (b: u8) bool {
@@ -46,7 +46,7 @@ skip_ws = (sv: [u8], j: i64) i64 {
         true  => j,
         false => {
             b := sv[j]
-            b == ' ' || b == '\t' || b == '\n' || b == '\r' ? sv.skip_ws(j + 1) : j
+            (b == ' ' || b == '\t' || b == '\n' || b == '\r').then({ sv.skip_ws(j + 1) }, { j })
         },
     })
 }
@@ -116,7 +116,10 @@ matches_kind_at = (sv: [u8], i: i64, name: string_view, kind: i64) bool {
         true  => sv.bb_plain(i) && sv.name_matches(i, name),
         false => (kind == 1).match ({
             true  => sv.bb_dot(i) && sv.name_matches(i, name),
-            false => kind == 2 ? sv.bb_plain(i) && sv.word_matches(i, name) : sv.atwhile_at(i),
+            false => (kind == 2).match ({
+                true  => sv.bb_plain(i) && sv.word_matches(i, name),
+                false => sv.atwhile_at(i),
+            }),
         }),
     })
 }
@@ -190,13 +193,15 @@ after_marker = (mp: MutPtr<Malloc>, src: string_view, m: string_view) string_vie
 // `m` is absent (python returns the whole string as the sole split field).
 before_marker = (mp: MutPtr<Malloc>, s: string_view, m: string_view) string_view {
     j := s.find(m)
-    j < 0 ? s : mp.substr(s, 0, j).expect("harness: oom")
+    (j < 0).then({ s }, { mp.substr(s, 0, j).expect("harness: oom") })
 }
 // the region between the first `m1` and the first following `m2` — python `split(m1,1)[1].split(m2,1)[0]`.
 region = (mp: MutPtr<Malloc>, src: string_view, m1: string_view, m2: string_view) string_view {
     mp.before_marker(mp.after_marker(src, m1), m2)
 }
-not_contains = (s: string_view, needle: string_view) bool { s.contains(needle) ? false : true }
+not_contains = (s: string_view, needle: string_view) bool {
+    s.contains(needle).then({ false }, { true })
+}
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 4: raw malloc/calloc/realloc/free stay behind the allocator floor (the original port).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -272,7 +277,7 @@ example_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
     path.is_empty().match ({
         true  => true,
         false => mp.contents_in(path).match ({
-            .Ok(raw) => raw.view().example_violation() ? false : true,
+            .Ok(raw) => raw.view().example_violation().then({ false }, { true }),
             .Err(e)  => true,
         }),
     })
@@ -333,7 +338,7 @@ checkpoint_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
                         true  => mp.has_checkpoint_import(mp.strip_comments_in(raw)),
                         false => false,
                     })
-                    has_call || has_imp ? false : true
+                    (has_call || has_imp).then({ false }, { true })
                 },
                 .Err(e)  => true,
             }),
@@ -389,7 +394,7 @@ atwhile_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
         false => path.atwhile_allowed().match ({
             true  => true,
             false => mp.contents_in(path).match ({
-                .Ok(raw) => raw.view().file_has("@while", 3) ? false : true,
+                .Ok(raw) => raw.view().file_has("@while", 3).then({ false }, { true }),
                 .Err(e)  => true,
             }),
         }),

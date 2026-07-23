@@ -22,13 +22,13 @@ is_field_colon* = (src: string_view, t: Token) bool { src.is_op(t, ':') && t.len
 // `Name(` is a struct construction iff the first item is `ident:`.
 paren_is_struct* = (src: string_view, pos: i32) bool {
     id := src.scan(pos)
-    is_ident_tok(id.tok) ? src.is_field_colon(src.scan(id.next).tok) : false
+    is_ident_tok(id.tok).then({ src.is_field_colon(src.scan(id.next).tok) }, { false })
 }
 parse_ident* = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
     // Calls/constructions only continue on the same line as the name.
-    (src.is_lparen(nx.tok) && (src.nl_between(sc.next, nx.tok.start) ? false : true)).match ({
+    (src.is_lparen(nx.tok) && src.nl_between(sc.next, nx.tok.start).then({ false }, { true })).match ({
         true  => src.paren_is_struct(nx.next).match ({
             true  => a.parse_paren_struct_lit(src, name, nx, sc.tok.start),
             false => a.parse_call(src, name, nx, sc.tok.start),
@@ -96,7 +96,7 @@ finish_generic_ctor* = (
     vs: Scan,
 ) PExpr {
     nx := src.scan(vs.next)
-    (src.is_lparen(nx.tok) && (src.nl_between(vs.next, nx.tok.start) ? false : true)).match ({
+    (src.is_lparen(nx.tok) && src.nl_between(vs.next, nx.tok.start).then({ false }, { true })).match ({
         true  => src.is_rparen(src.scan(nx.next).tok).match ({
             true  => PExpr(
                 expr: a.enode(mktagg(ty, mty, targs, vn)),
@@ -127,7 +127,7 @@ looks_turbofish = (src: string_view, pos: i32) bool {
         false => {
             sc := src.scan(after)
             src.is_lparen(sc.tok).match ({
-                true  => src.paren_is_struct(sc.next) ? false : true,
+                true  => src.paren_is_struct(sc.next).then({ false }, { true }),
                 false => false,
             })
         },
@@ -152,11 +152,11 @@ parse_turbofish_call = (
 // Decide whether `<...>` starts generic struct construction, not a comparison.
 looks_generic_lit = (src: string_view, pos: i32) bool {
     after := src.tyargs_end(pos, 1)
-    after < 0 ? false : src.generic_open(after)
+    (after < 0).then({ false }, { src.generic_open(after) })
 }
 generic_open = (src: string_view, after: i32) bool {
     sc := src.scan(after)
-    src.is_lparen(sc.tok) ? src.paren_is_struct(sc.next) : false
+    src.is_lparen(sc.tok).then({ src.paren_is_struct(sc.next) }, { false })
 }
 tyargs_end* = (src: string_view, pos: i32, depth: i32) i32 {
     // DEPTH CAP: bound recursion so pathologically-nested `Ptr<Ptr<…>>` annotations
@@ -174,11 +174,14 @@ tyargs_end* = (src: string_view, pos: i32, depth: i32) i32 {
         false => src.is_shr_close(sc.tok).match ({
             true  => (depth == 1).match ({
                 true  => sc.tok.start + 1,
-                false => depth == 2 ? sc.next : src.tyargs_end(sc.next, depth - 2),
+                false => (depth == 2).then({ sc.next }, { src.tyargs_end(sc.next, depth - 2) }),
             }),
             false => src.is_rangle(sc.tok).match ({
-                true  => depth == 1 ? sc.next : src.tyargs_end(sc.next, depth - 1),
-                false => src.is_tyarg_tok(sc.tok) ? src.tyargs_end(sc.next, depth) : 0 - 1,
+                true  => (depth == 1).then({ sc.next }, { src.tyargs_end(sc.next, depth - 1) }),
+                false => src.is_tyarg_tok(sc.tok).match ({
+                    true  => src.tyargs_end(sc.next, depth),
+                    false => 0 - 1,
+                }),
             }),
         }),
     })
@@ -227,7 +230,7 @@ looks_anon_struct* = (src: string_view, pos: i32) bool {
     is_ident_tok(id.tok).match ({
         true  => {
             c := src.scan(id.next)
-            src.is_field_colon(c.tok) ? src.anon_scan_kind(c.next, 0) == 1 : false
+            src.is_field_colon(c.tok).then({ src.anon_scan_kind(c.next, 0) == 1 }, { false })
         },
         false => false,
     })
@@ -240,7 +243,7 @@ anon_scan_kind = (src: string_view, pos: i32, depth: i32) i32 {
         _    => src.is_lbrace(sc.tok).match ({
             true  => src.anon_scan_kind(sc.next, depth + 1),
             false => src.is_rbrace(sc.tok).match ({
-                true  => depth == 0 ? 1 : src.anon_scan_kind(sc.next, depth - 1),
+                true  => (depth == 0).then({ 1 }, { src.anon_scan_kind(sc.next, depth - 1) }),
                 false => src.anon_scan_open(sc, depth),
             }),
         }),
@@ -254,7 +257,10 @@ anon_scan_open = (src: string_view, sc: Scan, depth: i32) i32 {
             false => (depth == 0).match ({
                 true  => src.is_walrus_tok(sc.tok).match ({
                     true  => 0,
-                    false => src.is_comma(sc.tok) ? 1 : src.anon_scan_kind(sc.next, depth),
+                    false => src.is_comma(sc.tok).match ({
+                        true  => 1,
+                        false => src.anon_scan_kind(sc.next, depth),
+                    }),
                 }),
                 false => src.anon_scan_kind(sc.next, depth),
             }),
@@ -268,7 +274,7 @@ afield_lit_buf = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(256 * sizeof(Fiel
 // parser can't read (a var/call result) falls back to i32 (the un-annotated default).
 infer_lit_ty = (value: Ptr<Expr>) Ty {
     load(value).match ({
-        .Int(n)        => n > 2147483647 || n < 0 - 2147483648 ? ti64() : ti32(),
+        .Int(n)        => (n > 2147483647 || n < 0 - 2147483648).then({ ti64() }, { ti32() }),
         .Byte(b)       => tu8(),
         .FloatLit(ft)  => tf64(),
         .StrLit(s)     => tstring_literal(),
@@ -567,7 +573,10 @@ parse_slicelit* = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
 // hit a `:`/return-type, so parse_ty is not invoked for them (the seed is unaffected).
 // `)` followed by `{`, or by a return TYPE then `{`.
 lam_ret_brace = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
-    src.is_lbrace(src.scan(pos).tok) ? true : src.is_lbrace(src.scan(a.parse_ty(src, pos).next).tok)
+    src.is_lbrace(src.scan(pos).tok).match ({
+        true  => true,
+        false => src.is_lbrace(src.scan(a.parse_ty(src, pos).next).tok),
+    })
 }    // skip a return type, then '{'
 lam_open* = (a: MutPtr<Malloc>, src: string_view, open: Scan) bool {
     a.lam_params_ok(src, open.next)
@@ -593,7 +602,7 @@ lam_after_name = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
 lam_after_sep = (a: MutPtr<Malloc>, src: string_view, sep: Scan) bool {
     src.is_comma(sep.tok).match ({
         true  => a.lam_params_ok(src, sep.next),
-        false => src.is_rparen(sep.tok) ? a.lam_ret_brace(src, sep.next) : false,
+        false => src.is_rparen(sep.tok).then({ a.lam_ret_brace(src, sep.next) }, { false }),
     })
 }
 // Lambda params accept an optional `: Type` each; the type is KEPT on the Param so the formatter

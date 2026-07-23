@@ -35,7 +35,7 @@ Output*: {
 // normal exit, or 128 + signal number when the child was terminated by a signal (the low 7 bits).
 decode_exit = (status: i64) i64 {
     sig := status & 127
-    sig == 0 ? status >> 8 & 255 : 128 + sig
+    (sig == 0).then({ status >> 8 & 255 }, { 128 + sig })
 }
 // Drain the pipe `f` into builder `s`, one fgets chunk at a time (recursive — no `@while`). fgets
 // returns NULL at end-of-stream; each non-NULL chunk is a NUL-terminated str appended onto `s`.
@@ -101,13 +101,13 @@ capture<A> = (a: MutPtr<A>, f: RawPtr<u8>) Result<Output, IoError> {
 // inspect (use `run_ok` when a nonzero exit should be an error).
 run*<A> = (a: MutPtr<A>, cmd: string_view) Result<Output, IoError> {
     f := cmd.popen("r")
-    f == null_ptr() ? err(IoError.NotFound) : a.capture(f)
+    (f == null_ptr()).then({ err(IoError.NotFound) }, { a.capture(f) })
 }
 // Convenience: run `cmd` and return its stdout, treating a nonzero exit as `.Err(.Errno(code))`. For
 // commands run purely for their output, where a failure should short-circuit the Result chain.
 run_ok*<A> = (a: MutPtr<A>, cmd: string_view) Result<string_view, IoError> {
     a.run(cmd).match ({
         .Err(e) => err(e),
-        .Ok(o)  => o.exit == 0 ? ok(o.stdout) : err(IoError.Errno(to_i32(o.exit))),
+        .Ok(o)  => (o.exit == 0).then({ ok(o.stdout) }, { err(IoError.Errno(to_i32(o.exit))) }),
     })
 }

@@ -38,7 +38,7 @@ Ty.impl(TyQuery, {
 has_fnt_param* = (ps: [Param]) bool {
     found := false
     ps.loop((h, i, p) {
-        found = p.ty.is_fnt() ? true : found
+        found = p.ty.is_fnt().then({ true }, { found })
     })
     found
 }
@@ -67,7 +67,7 @@ StructDecl.impl(StructDeclQuery, {
     struct_is_trait = (sd: StructDecl) bool {
         found := false
         sd.fields.loop((h, i, f) {
-            found = f.ty.is_fnt() ? true : found
+            found = f.ty.is_fnt().then({ true }, { found })
         })
         found
     }
@@ -144,7 +144,7 @@ map_slice*<T, U> = (a: MutPtr<Malloc>, xs: [T], f: (T) U) [U] {
 slice_any*<T> = (xs: [T], p: (T) bool) bool {
     f := false
     xs.loop((h, i, y) {
-        f = p(y) ? true : f
+        f = p(y).then({ true }, { f })
     })
     f
 }
@@ -175,16 +175,16 @@ expr_left_pos* = (e: Expr) i32 {
 }
 bin_left_pos = (b: BinData) i32 {
     lp := left_pos_of(b.lhs)
-    lp > 0 ? lp : b.pos
+    (lp > 0).then({ lp }, { b.pos })
 }
 recv_left_pos = (recv: Ptr<Expr>, fallback: i32) i32 {
     rp := left_pos_of(recv)
-    rp > 0 ? rp : fallback
+    (rp > 0).then({ rp }, { fallback })
 }
 left_pos_of* = (e: Ptr<Expr>) i32 { expr_left_pos(load(e)) }
 stmt_left_pos* = (st: Stmt) i32 {
     st.match ({
-        .Let(l)      => l.pos > 0 ? l.pos : left_pos_of(l.value),
+        .Let(l)      => (l.pos > 0).then({ l.pos }, { left_pos_of(l.value) }),
         .Assign(asn) => asn.pos,
         .Return(e)   => left_pos_of(e),
         .ExprStmt(e) => left_pos_of(e),
@@ -221,7 +221,7 @@ wr_lam_writes_value* = (e: Expr) bool {
         .Lambda(la) => {
             f := false
             la.params.loop((h, i, p) {
-                f = i >= 1 && la.body.wr_writes_name(p.name) ? true : f
+                f = (i >= 1 && la.body.wr_writes_name(p.name)).then({ true }, { f })
             })
             f
         },
