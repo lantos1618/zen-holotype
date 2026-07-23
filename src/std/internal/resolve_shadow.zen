@@ -87,10 +87,10 @@ shadow_name_sets = (
         ((s.imported || s.foreign || s.is_type) == false).then({
             key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
             inmain := s.decl_start >= lo && s.decl_start < hi
-            once := mainseen.rset_has(key) && (maindup.rset_has(key) ? false : true)
-            unimported := imported.rset_has(key) ? false : true
-            free := allnames.rset_has(a.shadow_mangled(alias, key)) ? false : true
-            fresh := outset.rset_has(key) ? false : true
+            once := mainseen.rset_has(key) && maindup.rset_has(key).then({ false }, { true })
+            unimported := imported.rset_has(key).then({ false }, { true })
+            free := allnames.rset_has(a.shadow_mangled(alias, key)).then({ false }, { true })
+            fresh := outset.rset_has(key).then({ false }, { true })
             collide := inmain && once && nonmain.rset_has(key) && unimported
             (collide && free && fresh).then({
                 out = a.madd_name(out, key)
@@ -197,7 +197,10 @@ fail_shadow_import = (
         .gstr_append(a, "  `")
         .gstr_append(a, nm)
         .gstr_append(a, "` also exists in this module's import closure (an export it never imported by name), and `")
-    d1 := importer == "" ? d0.gstr_append(a, "your program") : a.mappend_id_str_dotted(d0, importer)
+    d1 := (importer == "").match ({
+        true  => d0.gstr_append(a, "your program"),
+        false => a.mappend_id_str_dotted(d0, importer),
+    })
     d2 := d1
         .gstr_append(a, "` imports `")
         .gstr_append(a, nm)
@@ -311,7 +314,7 @@ shadow_flat_users* = (
             regions.loop((h, i, r0) {
                 idx := n - 1 - i
                 r := regions[idx]
-                adj := r.lo < prebodylen ? 0 : maindelta
+                adj := (r.lo < prebodylen).then({ 0 }, { maindelta })
                 lo := r.lo + adj
                 hi := r.hi + adj
                 entry := table.module(r.id)

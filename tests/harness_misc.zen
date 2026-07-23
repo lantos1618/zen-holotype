@@ -31,7 +31,7 @@ om_read_file = (mp: MutPtr<Malloc>, path: string_view) string_view {
         .Err(e) => "",
     })
 }
-om_not = (b: bool) bool { b ? false : true }
+om_not = (b: bool) bool { b.then({ false }, { true }) }
 // occurrences of `needle` in `s` (non-overlapping) — for exactly-once (dup-free) assertions.
 om_count = (s: string_view, needle: string_view) i64 {
     n: i64 := 0
@@ -323,7 +323,7 @@ om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: string_view) bool {
         true  => {
             txt := mp.om_read_file(mp.zo_idpath("zo_acid", gid, ".c"))
             src := mp.om_read_file(path)
-            txt.starts_with(HEAD) ? mp.om_decls_survive(src, txt) : false
+            txt.starts_with(HEAD).then({ mp.om_decls_survive(src, txt) }, { false })
         },
         false => false,
     })
@@ -383,7 +383,7 @@ om_app_int = (mp: MutPtr<Malloc>, s: String, n: i32) String {
     })
 }
 om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String {
-    i == 0 ? s : s.append_in(mp, ", ").expect("harness: oom")
+    (i == 0).then({ s }, { s.append_in(mp, ", ").expect("harness: oom") })
 }
 // "p00: i32, p01: i32, ..." — param declarations
 om_decl_params = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
@@ -569,12 +569,12 @@ harness_misc_faithful = () i32 {
     // normalized value (0xcbf29ce484222325 → 14695981039346656037, NOT -3750763034362895579).
     o_u64 := mp.om_do_fmt("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n")
     o_emit := mp.om_do_emit("len = (s: str) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
-    f1 := run_suite("faithful_ast (fmt/run)", [o_emit.contains("len("), o_ufcs.contains("x.len()"), om_not(o_ufcs.contains("len(x)")), o_chain.contains("1.add(2).add(3)"), o_arms.contains(".Some(n) => n.add(1),"), o_arms.contains(".None    => 0,"), o_bin.contains("n > 0 ? 1 : 0"), om_not(o_bin.contains(".match")), o_tail.contains("s.len()"), om_not(o_tail.contains("return s.len()")), o_ret.contains("return 9"), o_imp.contains("{ println } = std.text.fmt"), o_imp.contains("helper* = (n: i32) i32"), o_lam.contains("(x: i32) i32 {"), om_not(o_lam.contains("x: void")), o_var.contains("xs: ...i32"), o_vdef.contains("Blank = RGB(255)"), o_simpl.contains("string_view.impl(Label"), om_not(o_simpl.contains("str.impl(Label")), o_u64.contains("14695981039346656037"), om_not(o_u64.contains("3750763034362895579")), om_fmt_idem("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n"), om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21, mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8, om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n")])
+    f1 := run_suite("faithful_ast (fmt/run)", [o_emit.contains("len("), o_ufcs.contains("x.len()"), om_not(o_ufcs.contains("len(x)")), o_chain.contains("1.add(2).add(3)"), o_arms.contains(".Some(n) => n.add(1),"), o_arms.contains(".None    => 0,"), o_bin.contains("(n > 0).then({ 1 }, { 0 })"), om_not(o_bin.contains(".match")), o_tail.contains("s.len()"), om_not(o_tail.contains("return s.len()")), o_ret.contains("return 9"), o_imp.contains("{ println } = std.text.fmt"), o_imp.contains("helper* = (n: i32) i32"), o_lam.contains("(x: i32) i32 {"), om_not(o_lam.contains("x: void")), o_var.contains("xs: ...i32"), o_vdef.contains("Blank = RGB(255)"), o_simpl.contains("string_view.impl(Label"), om_not(o_simpl.contains("str.impl(Label")), o_u64.contains("14695981039346656037"), om_not(o_u64.contains("3750763034362895579")), om_fmt_idem("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n"), om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21, mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8, om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n")])
     // PHASE 1: emit of `s.len()` still lowers to the flat `len(...)`
     // PHASE 2: fmt --ast keeps UFCS — `x.len()`, NOT `len(x)`
     // a multi-arg method chain round-trips with method args inside the parens
     // match arms split one-per-line, `=>` aligned, trailing comma, UFCS body kept
-    // a short two-arm bool match canonicalizes to a bare-condition ternary (no `.match` left)
+    // a short two-arm bool match canonicalizes to the two-arm `.then` (no `.match` left)
     // an implicit tail expr prints bare (no spurious `return`)
     // an EXPLICIT early return keeps the keyword
     // imports print their `= <module>` tail; exported decls keep `*`

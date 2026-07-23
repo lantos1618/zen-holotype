@@ -91,7 +91,10 @@ skip_place = (src: string_view, pos: i32) i32 {
     sc := src.scan(pos)
     src.is_dot(sc.tok).match ({
         true  => src.skip_place(src.scan(sc.next).next),
-        false => src.is_lbracket(sc.tok) ? src.skip_place(src.skip_brackets(sc.next)) : pos,
+        false => src.is_lbracket(sc.tok).match ({
+            true  => src.skip_place(src.skip_brackets(sc.next)),
+            false => pos,
+        }),
     })
 }    // `.field` -> skip the dot and the field name
 is_set_here = (src: string_view, pos: i32) bool {
@@ -109,7 +112,7 @@ skip_brackets = (src: string_view, pos: i32) i32 {
             perr_set_at(pos)
             sc.next
         },    // unterminated '[': flag AT the end of the last real token, stop at EOF, don't recurse forever
-        _    => src.is_rbracket(sc.tok) ? sc.next : src.skip_brackets(sc.next),
+        _    => src.is_rbracket(sc.tok).then({ sc.next }, { src.skip_brackets(sc.next) }),
     })
 }
 is_idxset_here = (src: string_view, pos: i32) bool {
@@ -171,7 +174,7 @@ is_return_here = (src: string_view, pos: i32) bool {
     src.is_return_kw(sc.tok).match ({
         true  => src.is_assign(src.scan(sc.next).tok).match ({
             true  => false,
-            false => src.is_eq(src.scan(sc.next).tok) ? false : true,
+            false => src.is_eq(src.scan(sc.next).tok).then({ false }, { true }),
         }),
         false => false,
     })
@@ -194,7 +197,7 @@ stmt_kind = (a: MutPtr<Malloc>, src: string_view, pos: i32) SKind {
                             true  => .SCSet,
                             false => src.is_while_here(pos).match ({
                                 true  => .SWhile,
-                                false => src.is_return_here(pos) ? .SRet : .SExpr,
+                                false => src.is_return_here(pos).then({ .SRet }, { .SExpr }),
                             }),
                         }),
                     }),
@@ -212,7 +215,7 @@ parse_stmts = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
     // (perr already set) — the same effect as reaching the body's end.
     pdepth_enter()
     d := delim_save()    // a body is STATEMENT level even inside an open delimiter (a lambda/block arg)
-    r := pdepth_over() ? a.snil() : a.parse_stmts_inner(src, pos)
+    r := pdepth_over().then({ a.snil() }, { a.parse_stmts_inner(src, pos) })
     delim_restore(d)
     pdepth_exit()
     r
@@ -276,7 +279,7 @@ has_call = (e: Ptr<Expr>) bool {
     })
 }    // Int/Byte/FloatLit/Var/StrLit/Tag/Lambda — inert
 arms_have_call = (arms: [ArmData], i: i64) bool {
-    i >= arms.len ? false : arms[i].body.has_call() || arms.arms_have_call(i + 1)
+    (i >= arms.len).then({ false }, { arms[i].body.has_call() || arms.arms_have_call(i + 1) })
 }
 // one desugared compound assignment: the hoisted-index bindings (SNil when the place is pure), the
 // store statement, and the position after the rhs — shared by the top-level and block paths.
@@ -465,7 +468,7 @@ is_while_kw = (src: string_view, t: Token) bool {
 }
 is_while_here = (src: string_view, pos: i32) bool {
     sc := src.scan(pos)
-    src.is_at(sc.tok) ? src.is_while_kw(src.scan(sc.next).tok) : false
+    src.is_at(sc.tok).then({ src.is_while_kw(src.scan(sc.next).tok) }, { false })
 }
 // a parsed `@while`: the While statement + where it ends (just past the closing `}`)
 WhileEnd: {

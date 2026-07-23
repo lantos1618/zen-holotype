@@ -69,7 +69,7 @@ gf_is_alias* = (name: string_view) bool {
             k := i + v.len + 3
             ok := k < src.len && gf_ident_ch(src[k])
             @while (k < src.len && src[k] != '\n') {
-                ok = gf_ident_ch(src[k]) || src[k] == '\r' ? ok : false
+                ok = (gf_ident_ch(src[k]) || src[k] == '\r').then({ ok }, { false })
                 k = k + 1
             }
             ok.then({
@@ -122,7 +122,7 @@ ff_flush_leading* = (s: String, a: MutPtr<Malloc>, before: i32, ind: i32) String
     out := s
     @while (gf_idx < gf_cmts.len
         && gf_cmts[gf_idx].start < before
-        && (gf_cmts[gf_idx].trailing ? false : true)) {
+        && gf_cmts[gf_idx].trailing.then({ false }, { true })) {
         out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx]).ff_append(a, "\n")
         gf_idx = gf_idx + 1
     }
@@ -148,7 +148,7 @@ ff_open_trailing* = (s: String, a: MutPtr<Malloc>, line: i32) String {
 gf_cond_body_max = (d: CondData) i32 {
     tp := left_pos_of(d.t)
     ep := left_pos_of(d.e)
-    tp > ep ? tp : ep
+    (tp > ep).then({ tp }, { ep })
 }
 // Does a pending comment belong ON the `x.match ({ …` OPENING line of this boolean `.match` (Cond) — i.e.
 // interior to the construct, written after `({` and BEFORE the arms — as opposed to a comment trailing
@@ -194,7 +194,9 @@ ff_trailing* = (s: String, a: MutPtr<Malloc>, boundary: i32) String {
 }
 // is `start` before the next statement's position `boundary`? boundary 0 = "no next stmt" = unbounded
 // (the trailing comment is the last thing in the block, so it belongs to the statement just printed).
-gf_before = (start: i32, boundary: i32) bool { boundary <= 0 ? true : start < boundary }
+gf_before = (start: i32, boundary: i32) bool {
+    (boundary <= 0).then({ true }, { start < boundary })
+}
 // DRAIN the just-printed statement's trailing-comment region [stmt, boundary): the FIRST pending comment
 // prints inline iff it is trailing (shares the statement's source line); EVERY remaining comment STRICTLY
 // before the boundary prints on its own line at `ind`. Draining the whole region is what makes the
@@ -209,7 +211,7 @@ ff_drain = (s: String, a: MutPtr<Malloc>, db: i32, ib: i32, ind: i32) String {
     // ib <= 0 ⇒ this is the block's LAST statement: emit NO inline trailing comment here (a comment after
     // the block's closing `}` is a DECL-level trailing, handled by ff_top_decl) — otherwise the unbounded
     // ff_trailing would steal a much-later decl's comment. ib > 0 ⇒ a real next-stmt bound.
-    out := ib > 0 ? s.ff_trailing(a, ib) : s
+    out := (ib > 0).then({ s.ff_trailing(a, ib) }, { s })
     (db <= 0).then({
         return out
     })
@@ -298,7 +300,7 @@ ff_char* = (s: String, a: MutPtr<Malloc>, n: i32) String {
 }
 // n levels of 4-space indentation
 ff_indent* = (s: String, a: MutPtr<Malloc>, n: i32) String {
-    n <= 0 ? s : s.ff_append(a, "    ").ff_indent(a, n - 1)
+    (n <= 0).then({ s }, { s.ff_append(a, "    ").ff_indent(a, n - 1) })
 }
 // ── types ────────────────────────────────────────────────────────────────────
 ff_ty* = (s: String, a: MutPtr<Malloc>, t: Ty) String {
@@ -334,7 +336,7 @@ ff_ty* = (s: String, a: MutPtr<Malloc>, t: Ty) String {
 ff_tys* = (s: String, a: MutPtr<Malloc>, ts: [Ty]) String {
     out := s
     ts.loop((h, i, t) {
-        out = i == 0 ? out : out.ff_append(a, ", ")
+        out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
         out = out.ff_ty(a, t)
     })
     out
@@ -358,7 +360,7 @@ ff_cond* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
     saved_comment := gf_idx
     trial := a.ff_string(256).ff_cond_inline(a, d, ind)
     gf_idx = saved_comment
-    single_line := trial.ff_str_has_nl() ? false : true
+    single_line := trial.ff_str_has_nl().then({ false }, { true })
     (single_line && trial.ff_fits_width(s.ff_current_col(), 100)).match ({
         true  => s.ff_cond_inline(a, d, ind),
         false => s.ff_cond_multiline(a, d, ind),
@@ -376,7 +378,7 @@ ff_cond* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
 ff_scan_nl = (p: RawPtr<u8>, i: i64, n: i64) bool {
     (i >= n).match ({
         true  => false,
-        false => load(offset(p, i)) == '\n' ? true : ff_scan_nl(p, i + 1, n),
+        false => (load(offset(p, i)) == '\n').then({ true }, { ff_scan_nl(p, i + 1, n) }),
     })
 }
 ff_str_has_nl* = (s: String) bool { ff_scan_nl(s.ptr, 0, s.len) }
@@ -395,7 +397,7 @@ ff_one_line_fits = (a: MutPtr<Malloc>, s: String, st: Stmt, drop: bool, ind: i32
 }
 ff_one_line = (a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32) bool {
     save := gf_idx
-    r := ff_str_has_nl(a.ff_string(256).ff_stmt_at(a, st, drop, ind)) ? false : true
+    r := ff_str_has_nl(a.ff_string(256).ff_stmt_at(a, st, drop, ind)).then({ false }, { true })
     gf_idx = save
     r
 }
@@ -447,7 +449,7 @@ ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool
         // emits no trailing comment itself; a comment trailing the block's closing `}` is a DECL-level
         // trailing comment, emitted by ff_top_decl (bounded by the next decl), which keeps it from being
         // stolen by a sibling one-liner and keeps re-formatting idempotent.
-        nb := i < last ? stmt_left_pos(body[i + 1]) : 0
+        nb := (i < last).then({ stmt_left_pos(body[i + 1]) }, { 0 })
         out = out.ff_one_stmt(a, st, drop_ret && i == last, ind, nb, nb)
     })
     out
@@ -557,10 +559,10 @@ gf_next_decl_pos = (a: MutPtr<Malloc>, decls: [Decl], i: i32) i32 {
     // would be truncated out of the record's trailing-comment region and leak into the next decl's body.
     p := decls[i].match ({
         .DTraitDefault(td) => 0,
-        .DFunc(f)          => a.ff_is_hoisted(decls, f.name) ? 0 : f.pos,
+        .DFunc(f)          => a.ff_is_hoisted(decls, f.name).then({ 0 }, { f.pos }),
         _                  => gf_decl_pos(decls[i]),
     })
-    p > 0 ? p : a.gf_next_decl_pos(decls, i + 1)
+    (p > 0).then({ p }, { a.gf_next_decl_pos(decls, i + 1) })
 }
 // one top-level decl: leading comments (col 0) → the decl → its trailing comment (bounded by `nb`) → newline.
 ff_top_decl = (a: MutPtr<Malloc>, s: String, exp: [Param], decls: [Decl], d: Decl, nb: i32) String {

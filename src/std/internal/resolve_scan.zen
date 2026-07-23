@@ -37,18 +37,21 @@ import_marker_from = (s: string_view, p: i32) i32 {
     b := s.at(p)
     (b == 0).match ({
         true  => 0 - 1,
-        false => b == '}' ? s.marker_after_close(p + 1) : s.import_marker_from(p + 1),
+        false => (b == '}').then({ s.marker_after_close(p + 1) }, { s.import_marker_from(p + 1) }),
     })
 }
 marker_after_close = (s: string_view, p: i32) i32 {
     (s.at(p) == ' ').match ({
         true  => s.marker_after_close(p + 1),
-        false => s.is_any_marker_at(p) ? p : 0 - 1,
+        false => s.is_any_marker_at(p).then({ p }, { 0 - 1 }),
     })
 }
 has_import_marker* = (s: string_view, p: i32) bool { s.import_marker_from(p) >= 0 }
 resolve_span_eq = (s: string_view, p: i32, lit: string_view, i: i32) bool {
-    lit.at(i) == 0 ? true : s.at(p + i) == lit.at(i) && s.resolve_span_eq(p, lit, i + 1)
+    (lit.at(i) == 0).match ({
+        true  => true,
+        false => s.at(p + i) == lit.at(i) && s.resolve_span_eq(p, lit, i + 1),
+    })
 }
 is_std_marker_at = (s: string_view, p: i32) bool { s.resolve_span_eq(p, "= std.", 0) }
 is_compiler_marker_at = (s: string_view, p: i32) bool { s.resolve_span_eq(p, "= compiler.", 0) }
@@ -222,7 +225,7 @@ all_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
 // end of a dotted module path (`util.helpers`) whose first identifier starts at `p`.
 dotted_path_end = (s: string_view, p: i32) i32 {
     e := s.res_ident_end(p)
-    s.at(e) == '.' && s.at(e + 1).is_alpha() ? s.dotted_path_end(e + 1) : e
+    (s.at(e) == '.' && s.at(e + 1).is_alpha()).then({ s.dotted_path_end(e + 1) }, { e })
 }
 import_edge_count_from = (src: string_view, p: i32, n: i32) i32 {
     pos := p
@@ -246,7 +249,7 @@ import_edge_count_from = (src: string_view, p: i32, n: i32) i32 {
 }
 import_edge_count = (src: string_view) i32 { src.import_edge_count_from(0, 0) }
 edge_next = (src: string_view, p: i32) i32 {
-    src.is_import_line(p) ? src.import_end(p) : src.next_line(p)
+    src.is_import_line(p).then({ src.import_end(p) }, { src.next_line(p) })
 }
 edge_buf<A> = (a: MutPtr<A>, n: i64) Result<[ImportEdge], IoError> {
     a.try_acquire(n * sizeof(ImportEdge)).match ({
@@ -279,7 +282,7 @@ copy_name_to = (buf: RawPtr<u8>, start: i64, s: string_view, p: i32, cap: i64) i
     bs.loop((h, i, b) {
         ii := to_i32(i)
         (ii < pos == false).then({
-            (cur >= cap - 1 || (s.at(pos).is_alnum() ? false : true)).match ({
+            (cur >= cap - 1 || s.at(pos).is_alnum().then({ false }, { true })).match ({
                 true  => {
                     h.break
                 },
@@ -361,7 +364,7 @@ marker_pos = (s: string_view, p: i32) i32 {
 }
 // End of the module-path span starting at `p`: alnum and '.' bytes (mirrors copy_module_path_to).
 module_path_span_end = (s: string_view, p: i32) i32 {
-    s.at(p).is_alnum() || s.at(p) == '.' ? s.module_path_span_end(p + 1) : p
+    (s.at(p).is_alnum() || s.at(p) == '.').then({ s.module_path_span_end(p + 1) }, { p })
 }
 // Exact byte length of the id written for the marker at `mk` — prefix plus module-path span. This
 // is what makes edge-id allocation exact: no cap, no silent truncation, ids of any length resolve.
@@ -466,7 +469,7 @@ fill_import_edges<A> = (
             },
         })
     })
-    failed ? err(last_err) : ok(out)
+    failed.then({ err(last_err) }, { ok(out) })
 }
 import_edges*<A> = (a: MutPtr<A>, src: string_view) Result<[ImportEdge], IoError> {
     a.edge_buf(src.import_edge_count()).match ({
@@ -529,7 +532,7 @@ provided_symbol_count_from = (a: MutPtr<Malloc>, src: string_view, p: i32, n: i3
                                 h.break
                             },
                             false => {
-                                count = sp.named ? count + 1 : count
+                                count = sp.named.then({ count + 1 }, { count })
                                 pos = sp.next
                             },
                         })
@@ -551,7 +554,7 @@ symbol_buf<A> = (a: MutPtr<A>, n: i64) Result<[ProvidedSymbol], IoError> {
 }
 symbol_name_len = (src: string_view, p: i32, e: i32, escape: bool) i64 {
     base := to_i64(e - p)
-    escape && src.is_c_kw_name_span(p, e) ? base + 3 : base
+    (escape && src.is_c_kw_name_span(p, e)).then({ base + 3 }, { base })
 }
 // Copy src[p..e) into buf[0..), returning the count written. Iterates a sub-slice that starts at `p`
 // — NOT a scan from 0, and NOT recursive — so it is O(e-p) with constant stack.
@@ -648,7 +651,7 @@ fill_head_symbols_in<A> = (
             },
         })
     })
-    failed ? err(last_err) : ok(idx)
+    failed.then({ err(last_err) }, { ok(idx) })
 }
 fill_provided_symbols_in<A> = (
     a: MutPtr<Malloc>,
@@ -730,7 +733,7 @@ fill_provided_symbols_in<A> = (
             },
         })
     })
-    failed ? err(last_err) : ok(out)
+    failed.then({ err(last_err) }, { ok(out) })
 }
 provided_symbols_in*<A> = (
     a: MutPtr<Malloc>,
@@ -808,18 +811,18 @@ symbol_key_in*<A> = (s: ProvidedSymbol, a: MutPtr<A>) Result<String, IoError> {
 span_has_byte = (s: string_view, p: i32, e: i32, b: u8) bool {
     (p >= e).match ({
         true  => false,
-        false => s.at(p) == b ? true : s.span_has_byte(p + 1, e, b),
+        false => (s.at(p) == b).then({ true }, { s.span_has_byte(p + 1, e, b) }),
     })
 }
 is_foreign_span = (s: string_view, p: i32, e: i32) bool {
-    s.span_has_byte(p, e, '=') && (s.span_has_byte(p, e, '{') ? false : true)
+    s.span_has_byte(p, e, '=') && s.span_has_byte(p, e, '{').then({ false }, { true })
 }
 symbol_name_in* = (s: ProvidedSymbol, a: MutPtr<Malloc>) String {
     a.gstr_string(s.name.view().len + 1).gstr_append(a, s.name)
 }
 symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bool) bool {
-    (include_imported || (s.imported ? false : true))
-        && (include_foreign || (s.foreign ? false : true))
+    (include_imported || s.imported.then({ false }, { true }))
+        && (include_foreign || s.foreign.then({ false }, { true }))
 }
 symbol_names_into_in = (
     a: MutPtr<Malloc>,
@@ -849,7 +852,7 @@ value_symbol_names_into_in = (
     cur := set
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
-            (sym.symbol_allowed(false, false) && (sym.is_type ? false : true)).then({
+            (sym.symbol_allowed(false, false) && sym.is_type.then({ false }, { true })).then({
                 cur = a.madd_str_name(cur, sym.name)
             })
         })
@@ -862,7 +865,7 @@ value_symbol_names_into_in = (
 imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur := m
     symbols.loop((h, idx, sym) {
-        (sym.imported && (sym.is_type ? false : true)).then({
+        (sym.imported && sym.is_type.then({ false }, { true })).then({
             cur = cur.rset_add(a, sym
                 .symbol_key_in(a)
                 .expect("std.internal.resolve: allocation failed"))
@@ -873,7 +876,7 @@ imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSy
 value_symbol_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur := m
     symbols.loop((h, idx, sym) {
-        (sym.symbol_allowed(false, false) && (sym.is_type ? false : true)).then({
+        (sym.symbol_allowed(false, false) && sym.is_type.then({ false }, { true })).then({
             cur = cur.rset_add_str(a, sym.name)
         })
     })

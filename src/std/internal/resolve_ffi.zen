@@ -42,7 +42,7 @@ genmods := ffi_no_grants()
 genmods_set* = (g: string_view) void { genmods = g }
 genmods_get* = () string_view { genmods }
 gm_word_end = (s: string_view, p: i32) i32 {
-    s.at(p) == 0 || s.at(p) == ' ' || s.at(p) == '\n' ? p : s.gm_word_end(p + 1)
+    (s.at(p) == 0 || s.at(p) == ' ' || s.at(p) == '\n').then({ p }, { s.gm_word_end(p + 1) })
 }
 // first `<dotted> <path>` registry line whose id matches → the path (own copy); "" when unregistered.
 gm_find = (a: MutPtr<Malloc>, g: string_view, p: i32, dotted: string_view) string_view {
@@ -53,7 +53,7 @@ gm_find = (a: MutPtr<Malloc>, g: string_view, p: i32, dotted: string_view) strin
             le := g.ffi_line_end(we)
             g.ffi_span_eq(p, we, dotted, 0).match ({
                 true  => a.gstr_string(64).rappend_span(a, g, we + 1, le).gstr_finish(a),
-                false => g.at(le) == 0 ? "" : a.gm_find(g, le + 1, dotted),
+                false => (g.at(le) == 0).then({ "" }, { a.gm_find(g, le + 1, dotted) }),
             })
         },
     })
@@ -75,12 +75,12 @@ ffi_span_eq = (s: string_view, p: i32, e: i32, w: string_view, j: i32) bool {
         true  => w.at(j) == 0,
         false => (w.at(j) == 0).match ({
             true  => false,
-            false => s.at(p + j) == w.at(j) ? s.ffi_span_eq(p, e, w, j + 1) : false,
+            false => (s.at(p + j) == w.at(j)).then({ s.ffi_span_eq(p, e, w, j + 1) }, { false }),
         }),
     })
 }
 ffi_token_end = (s: string_view, p: i32, e: i32) i32 {
-    p >= e || ffi_delim(s.at(p)) ? p : s.ffi_token_end(p + 1, e)
+    (p >= e || ffi_delim(s.at(p))).then({ p }, { s.ffi_token_end(p + 1, e) })
 }
 // does the grant list s[p..e) contain the token `name`? (delimiters: comma / whitespace)
 ffi_list_has = (s: string_view, p: i32, e: i32, name: string_view) bool {
@@ -90,13 +90,13 @@ ffi_list_has = (s: string_view, p: i32, e: i32, name: string_view) bool {
             true  => s.ffi_list_has(p + 1, e, name),
             false => {
                 te := s.ffi_token_end(p, e)
-                s.ffi_span_eq(p, te, name, 0) ? true : s.ffi_list_has(te, e, name)
+                s.ffi_span_eq(p, te, name, 0).then({ true }, { s.ffi_list_has(te, e, name) })
             },
         }),
     })
 }
 ffi_line_end = (s: string_view, p: i32) i32 {
-    s.at(p) == 0 || s.at(p) == '\n' ? p : s.ffi_line_end(p + 1)
+    (s.at(p) == 0 || s.at(p) == '\n').then({ p }, { s.ffi_line_end(p + 1) })
 }
 FFI_PRAGMA = () string_view { "//! ffi:" }
 // does the ENTRY source carry a `//! ffi: modid, modid` pragma line granting `name`?
@@ -133,9 +133,9 @@ ffi_skip_sp = (s: string_view, p: i32) i32 {
 ffi_foreign_fn = (src: string_view, sym: ProvidedSymbol) bool {
     sym.foreign.match ({
         true  => {
-            p := src.at(sym.next) == '*' ? sym.next + 1 : sym.next
+            p := (src.at(sym.next) == '*').then({ sym.next + 1 }, { sym.next })
             q := src.ffi_skip_sp(p)
-            src.at(q) == '=' ? src.at(src.ffi_skip_sp(q + 1)) == '(' : false
+            (src.at(q) == '=').then({ src.at(src.ffi_skip_sp(q + 1)) == '(' }, { false })
         },
         false => false,
     })
@@ -174,7 +174,7 @@ ffi_fail = (
         .gstr_append(a, "` in the entry file")
         .gstr_finish(a)
     eprint(a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1))
-    report ? 0 : die(1)
+    report.then({ 0 }, { die(1) })
 }
 enforce_ffi_grants* = (
     a: MutPtr<Malloc>,

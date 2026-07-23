@@ -132,7 +132,7 @@ anon_decls_get* = () [StructDecl] { slice(anon_decls.ptr, anon_n) }
 anon_has = (name: string_view) bool {
     found := false
     anon_decls.loop((h, i, sd) {
-        found = i < anon_n ? found || sd.name == name : found
+        found = (i < anon_n).then({ found || sd.name == name }, { found })
     })
     found
 }
@@ -150,21 +150,24 @@ skip_to_brace* = (src: string_view, pos: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => sc.next,    // stop at EOF (scan returns next==pos there)
-        _    => src.is_lbrace(sc.tok) ? sc.next : src.skip_to_brace(sc.next),
+        _    => src.is_lbrace(sc.tok).then({ sc.next }, { src.skip_to_brace(sc.next) }),
     })
 }    // no `{` before EOF: terminate, don't recurse forever
 // map a type token to genc's Ty: a primitive keyword, else a Named type (the lexeme
 // materialized — a `Pt` becomes Named("Pt"), lowering to a `struct Pt`). Composite types
 // (`Ptr<T>`, `[T]`, `(A) R`) are parsed by parse_ty below.
 span_eq = (src: string_view, start: i32, len: i32, kw: string_view, i: i32) bool {
-    i == len ? kw.at(i) == 0 : src.at(start + i) == kw.at(i) && src.span_eq(start, len, kw, i + 1)
+    (i == len).match ({
+        true  => kw.at(i) == 0,
+        false => src.at(start + i) == kw.at(i) && src.span_eq(start, len, kw, i + 1),
+    })
 }    // kw is exactly `len` bytes
 tok_eq* = (src: string_view, t: Token, kw: string_view) bool { src.span_eq(t.start, t.len, kw, 0) }
 tok_word_end = (words: string_view, p: i32) bool { words.at(p) == 0 || words.at(p) == '|' }
 tok_word_next = (words: string_view, p: i32) i32 {
     (words.at(p) == 0).match ({
         true  => p,
-        false => words.at(p) == '|' ? p + 1 : words.tok_word_next(p + 1),
+        false => (words.at(p) == '|').then({ p + 1 }, { words.tok_word_next(p + 1) }),
     })
 }
 tok_word_eq = (src: string_view, t: Token, words: string_view, p: i32, i: i32) bool {
@@ -406,7 +409,7 @@ qual_end = (src: string_view, after_name: i32) Scan {
 // is the head name followed by `.ident` (a qualified type like `io.Writer`)?
 is_qual_name = (src: string_view, after_name: i32) bool {
     dot := src.scan(after_name)
-    src.is_dot(dot.tok) ? is_ident_tok(src.scan(dot.next).tok) : false
+    src.is_dot(dot.tok).then({ is_ident_tok(src.scan(dot.next).tok) }, { false })
 }
 // a leaf type: a primitive/named type, OR a generic instance `Box<i32>` when a `<` follows the name,
 // OR a QUALIFIED name `ns.Type` (with optional `<…>`) — the `ns.` prefix is kept verbatim in the Named
@@ -551,7 +554,7 @@ is_ptr_kw = (src: string_view, t: Token) bool { src.tok_in(t, "Ptr|MutPtr|RawPtr
 ptr_kw_kind = (src: string_view, t: Token) i32 {
     src.tok_in(t, "MutPtr").match ({
         true  => k_mut_ptr(),
-        false => src.tok_in(t, "RawPtr") ? k_raw_ptr() : k_ptr(),
+        false => src.tok_in(t, "RawPtr").then({ k_raw_ptr() }, { k_ptr() }),
     })
 }
 parse_slice_ty = (a: MutPtr<Malloc>, src: string_view, pos: i32) TyEnd {
@@ -588,7 +591,7 @@ skip_to_lparen* = (src: string_view, pos: i32) i32 {
             perr_set_at(pos)    // stop at EOF (scan returns next==pos there)
             sc.next
         },    // no `(` before EOF: a truncated decl — flag, don't recurse forever
-        _    => src.is_lparen(sc.tok) ? sc.next : src.skip_to_lparen(sc.next),
+        _    => src.is_lparen(sc.tok).then({ sc.next }, { src.skip_to_lparen(sc.next) }),
     })
 }
 param_buf* = (a: MutPtr<Malloc>) [Param] { slice(a.acquire(1024 * sizeof(Param)), 1024) }    // cap 1024
@@ -619,7 +622,7 @@ is_ellipsis = (src: string_view, pos: i32) bool {
     src.is_op(d1.tok, '.').match ({
         true  => {
             d2 := src.scan(d1.next)
-            src.is_op(d2.tok, '.') ? src.is_op(src.scan(d2.next).tok, '.') : false
+            src.is_op(d2.tok, '.').then({ src.is_op(src.scan(d2.next).tok, '.') }, { false })
         },
         false => false,
     })
@@ -707,7 +710,7 @@ skip_block_d = (src: string_view, pos: i32, depth: i32) i32 {
         _    => src.is_lbrace(sc.tok).match ({
             true  => src.skip_block_d(sc.next, depth + 1),
             false => src.is_rbrace(sc.tok).match ({
-                true  => depth == 1 ? sc.next : src.skip_block_d(sc.next, depth - 1),
+                true  => (depth == 1).then({ sc.next }, { src.skip_block_d(sc.next, depth - 1) }),
                 false => src.skip_block_d(sc.next, depth),
             }),
         }),
@@ -723,5 +726,5 @@ is_shr_close* = (src: string_view, t: Token) bool {
     src.at(t.start) == '>' && src.at(t.start + 1) == '>'
 }
 gt_resume = (src: string_view, sc: Scan) i32 {
-    src.is_shr_close(sc.tok) ? sc.tok.start + 1 : sc.next
+    src.is_shr_close(sc.tok).then({ sc.tok.start + 1 }, { sc.next })
 }

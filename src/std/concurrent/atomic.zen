@@ -35,7 +35,7 @@ AtomicI64*: {
     fetch_add_cas = (a: AtomicI64, delta: i64) i64 {
         cur := a.load()    // -> i64 cell
         // increment by `delta` with a CAS spin loop, returning the prior value (lock-free, race-safe).
-        a.cas(cur, cur + delta) ? cur : a.fetch_add_cas(delta)
+        a.cas(cur, cur + delta).then({ cur }, { a.fetch_add_cas(delta) })
     }
 }
 // wrap an existing i64 cell (caller owns its lifetime).
@@ -53,10 +53,10 @@ drop_in*<A> = (r: AtomicI64, a: MutPtr<A>) void { a.release(r.base) }
 AtomicBool*: {
     base: RawPtr<u8>,
     load = (b: AtomicBool) bool { atomic_load_i64(b.base) != 0 }
-    store = (b: AtomicBool, v: bool) void { atomic_store_i64(b.base, v ? 1 : 0) }
+    store = (b: AtomicBool, v: bool) void { atomic_store_i64(b.base, v.then({ 1 }, { 0 })) }
     cas = (b: AtomicBool, expected: bool, desired: bool) bool {
         // CAS over booleans.
-        atomic_cas_i64(b.base, expected ? 1 : 0, desired ? 1 : 0)
+        atomic_cas_i64(b.base, expected.then({ 1 }, { 0 }), desired.then({ 1 }, { 0 }))
     }
 }
 bool_at* = (cell: RawPtr<u8>) AtomicBool { AtomicBool(base: cell) }

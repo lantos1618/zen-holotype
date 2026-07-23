@@ -14,7 +14,7 @@ clos_local_call_name* = (env: Env, name: string_view) string_view {
         true  => env.var_ty(name).match ({
             .Named(sn) => {
                 cn := env.a.clos_call_name(sn)
-                env.didx.func_idx.get(cn, 0 - 1) >= 0 ? cn : ""
+                (env.didx.func_idx.get(cn, 0 - 1) >= 0).then({ cn }, { "" })
             },
             _          => "",
         }),
@@ -56,7 +56,7 @@ clos_bad_args = (
 ) bool {
     found := false
     xs.loop((h, i, x) {
-        found = found ? true : a.clos_bad_expr(decls, idx, bound, ps, x.addr())
+        found = found.then({ true }, { a.clos_bad_expr(decls, idx, bound, ps, x.addr()) })
     })
     found
 }
@@ -70,7 +70,7 @@ clos_bad_inits = (
 ) bool {
     found := false
     inits.loop((h, i, fi) {
-        found = found ? true : a.clos_bad_expr(decls, idx, bound, ps, fi.value)
+        found = found.then({ true }, { a.clos_bad_expr(decls, idx, bound, ps, fi.value) })
     })
     found
 }
@@ -102,7 +102,7 @@ clos_bad_body = (
     found := false
     b := bound
     body.loop((h, i, st) {
-        found = found ? true : a.clos_bad_stmt(decls, idx, b, ps, st)
+        found = found.then({ true }, { a.clos_bad_stmt(decls, idx, b, ps, st) })
         b = a.lift_extend(b, st)
     })
     found
@@ -281,7 +281,7 @@ clos_call_params = (a: MutPtr<Malloc>, structn: string_view, lm: LambdaData, ft:
     ps := a.pbuf(lm.params.len + 1)
     ps[0] = param("__clenv", tnamed(structn))
     lm.params.loop((h, i, p) {
-        ps[i + 1] = param(p.name, i < ft.params.len ? ft.params[i] : tvoid())
+        ps[i + 1] = param(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }))
     })
     ps
 }
@@ -302,7 +302,7 @@ clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
 clos_replace_tail = (a: MutPtr<Malloc>, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
     buf := cbuf<Stmt>(a, body.len)
     body.loop((h, i, st) {
-        buf[i] = i == body.len - 1 ? sret(mk) : st
+        buf[i] = (i == body.len - 1).then({ sret(mk) }, { st })
     })
     buf
 }

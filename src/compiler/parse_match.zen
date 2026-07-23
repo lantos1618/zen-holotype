@@ -85,6 +85,11 @@ parse_match* = (a: MutPtr<Malloc>, src: string_view, subj: PExpr) PExpr {
 // A lazy one-way boolean effect. Unlike a one-armed `.match`, `.then({ ... })` states explicitly that
 // false is a no-op. It lowers through the ordinary two-branch Cond path with an explicit empty false
 // block, so statement-position control flow stays lazy and value-position use is rejected as valueless.
+// The TWO-ARM form `c.then({ a }, { b })` is Zen's conditional EXPRESSION: both arms stay LAZY,
+// exactly one block evaluates, and the whole form yields that block's value. It builds the SAME
+// two-branch Cond node (oa = 0) the boolean `.match` builds — a single-expression arm block unwraps
+// to its bare expression (then_arm), so `c.then({ a }, { b })` is node-for-node identical to
+// `c.match ({ true => a, false => b })` and every downstream check/lowering is shared.
 parse_then* = (a: MutPtr<Malloc>, src: string_view, subj: PExpr) PExpr {
     dot := src.scan(subj.next)
     kw := src.scan(dot.next)
@@ -99,6 +104,41 @@ parse_then* = (a: MutPtr<Malloc>, src: string_view, subj: PExpr) PExpr {
                     expr: a.enode(cond(subj.expr, a.enode(block(a.materialize(body.list))), a.empty_arm())),
                     next: rp.next,
                 )),
+                false => src.is_comma(rp.tok).match ({
+                    true  => a.parse_then_else(src, subj, a.materialize(body.list), rp.next),
+                    false => {
+                        perr_set_at(rp.tok.start)
+                        a.reject_match(rp.next)
+                    },
+                }),
+            })
+        },
+        false => {
+            perr_set_at(lp.tok.start)
+            a.reject_match(open.next)
+        },
+    })
+}
+// the else arm of the two-arm form, after the `,`: exactly `{ b })`. Anything else — a non-block
+// second argument, or a THIRD argument after the else block — is a positioned parse error at the
+// offending token (`.then` takes one or two block arguments, never more).
+parse_then_else = (
+    a: MutPtr<Malloc>,
+    src: string_view,
+    subj: PExpr,
+    tstmts: [Stmt],
+    pos: i32,
+) PExpr {
+    ob := src.scan(pos)
+    src.is_lbrace(ob.tok).match ({
+        true  => {
+            els := a.parse_block(src, ob.next)
+            rp := src.scan(els.next)
+            src.is_rparen(rp.tok).match ({
+                true  => a.parse_postfix(src, PExpr(
+                    expr: a.enode(cond(subj.expr, a.then_arm(tstmts), a.then_arm(a.materialize(els.list)))),
+                    next: rp.next,
+                )),
                 false => {
                     perr_set_at(rp.tok.start)
                     a.reject_match(rp.next)
@@ -106,9 +146,22 @@ parse_then* = (a: MutPtr<Malloc>, src: string_view, subj: PExpr) PExpr {
             })
         },
         false => {
-            perr_set_at(lp.tok.start)
-            a.reject_match(open.next)
+            perr_set_at(ob.tok.start)
+            a.reject_match(ob.next)
         },
+    })
+}
+// a two-arm `.then` arm: a single-EXPRESSION block unwraps to the expression itself — the exact
+// node a bool `.match` arm carries, so value-position semantics and the formatter's inline
+// `{ e }` re-print round-trip. Any other block (multi-statement, early return, empty) stays a
+// Block arm, exactly like a block-bodied match arm.
+then_arm = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+    (stmts.len == 1).match ({
+        true  => stmts[0].match ({
+            .ExprStmt(e) => e,
+            _            => a.enode(block(stmts)),
+        }),
+        false => a.enode(block(stmts)),
     })
 }
 parse_match_arms = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, open: Scan) PExpr {
@@ -243,7 +296,7 @@ bool_close = (
     a1: BoolArmEnd,
 ) PExpr {
     c0 := src.scan(a1.next)
-    close := src.is_comma(c0.tok) ? src.scan(c0.next) : c0
+    close := src.is_comma(c0.tok).then({ src.scan(c0.next) }, { c0 })
     (a0.ok && a1.ok && src.is_rbrace(close.tok)).match ({
         true  => src.tok_eq(a0.lab, "true").match ({
             true  => PExpr(
@@ -255,7 +308,10 @@ bool_close = (
                 next: close.next,
             ),
         }),
-        false => a1.ok ? a.reject_match(close.next) : a.reject_label(close.next, a1.lab.start),
+        false => a1.ok.match ({
+            true  => a.reject_match(close.next),
+            false => a.reject_label(close.next, a1.lab.start),
+        }),
     })
 }
 // Literal match lowers to nested equality conditionals.
@@ -350,7 +406,10 @@ cons_lit_arm = (
 }
 parse_lit_arm = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32) LitArmEnd {
     sc := src.scan(pos)
-    src.is_wild_label(sc.tok) ? a.parse_lit_arm_wild(src, sc) : a.parse_lit_arm_val(src, subj, pos)
+    src.is_wild_label(sc.tok).match ({
+        true  => a.parse_lit_arm_wild(src, sc),
+        false => a.parse_lit_arm_val(src, subj, pos),
+    })
 }
 // Wildcard literal arm is an always-true default.
 parse_lit_arm_wild = (a: MutPtr<Malloc>, src: string_view, us: Scan) LitArmEnd {
@@ -475,7 +534,10 @@ fill_marm = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [ArmData], i: i
             next: pos,
         )
     })
-    src.is_dot(src.scan(pos).tok) ? a.fill_varm(src, pos, buf, i) : a.fill_wild(src, pos, buf, i)
+    src.is_dot(src.scan(pos).tok).match ({
+        true  => a.fill_varm(src, pos, buf, i),
+        false => a.fill_wild(src, pos, buf, i),
+    })
 }
 fill_varm = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [ArmData], i: i32) PEnd {
     dot := src.scan(pos)
