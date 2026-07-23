@@ -70,7 +70,7 @@ remove_file* = (path: string_view) Result<i32, IoError> { ok_if(path.unlink()) }
 rename_path* = (from: string_view, to: string_view) Result<i32, IoError> { ok_if(from.rename(to)) }
 // ── directory listing ──────────────────────────────────────────────────────────
 // the "." / ".." pseudo-entries every directory carries — skipped by read_dir.
-is_dot = (name: string_view) bool {
+is_dot_entry = (name: string_view) bool {
     v := name.view()
     v.len == 1 && v[0] == '.' || v.len == 2 && v[0] == '.' && v[1] == '.'
 }
@@ -79,7 +79,7 @@ count_entries = (d: RawPtr<u8>) i64 {
     n := 0
     e := d.readdir()
     @while (e != null_ptr()) {
-        n = n + cstr(e.offset(D_NAME_OFF)).is_dot().match ({ true => 0, false => 1 })    // iterative: a directory with many entries must not recurse per entry
+        n = n + cstr(e.offset(D_NAME_OFF)).is_dot_entry().match ({ true => 0, false => 1 })    // iterative: a directory with many entries must not recurse per entry
         e = d.readdir()
     }
     n
@@ -92,7 +92,7 @@ fill_entries<A> = (a: MutPtr<A>, d: RawPtr<u8>, out: [string_view], i: i64) Resu
         return ok(i)
     })
     name := cstr(e.offset(D_NAME_OFF))
-    name.is_dot().then({
+    name.is_dot_entry().then({
         return a.fill_entries(d, out, i)
     })
     copy := a.substr_in(name, 0, name.len()).or_return()    // statement-level: OOM threads out, not `.expect`-abort
