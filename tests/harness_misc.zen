@@ -34,13 +34,13 @@ om_read_file = (mp: MutPtr<Malloc>, path: string_view) string_view {
 om_not = (b: bool) bool { b.match ({ true => false, false => true }) }
 // occurrences of `needle` in `s` (non-overlapping) — for exactly-once (dup-free) assertions.
 om_count = (s: string_view, needle: string_view) i64 {
-    n := 0
-    i := 0
+    n: i64 := 0
+    i: i64 := 0
     v := s.view()
     nv := needle.view()
     @while (i + nv.len <= v.len) {
         hit := true
-        k := 0
+        k: i64 := 0
         @while (hit && k < nv.len) {
             (v[i + k] == nv[k]).match ({
                 true  => {
@@ -727,10 +727,40 @@ harness_misc_audit = () i32 {
         .contains("'AudT'")
         .om_not(), txt.om_count("'aud_dead' is never reachable") == 1, txt.om_count("'aud_extra' imported") == 1, ctxt.contains("zen audit: 0 dead decls, 0 unused imports")])
 }
+// ════════════════════════════════════════════════════════════════════════════════
+// audit --workspace  <- `zen audit --workspace` (#595): cross-entry union + embedded-source roots.
+// Two entries share a helper: ws_f is live only from entry A, ws_g only from entry B — NEITHER may
+// be flagged (dead means dead from EVERY entry whose closure contains the decl). ws_h is dead from
+// both and MUST be flagged (exactly once — dedupe). ws_k is named only inside a string literal
+// (`{ ws_k } = zo_ws_help`) and ws_n's module only via an embedded alias line (`m2 = sub.mod2`) —
+// the embedded-source heuristic keeps both. The header states the entry count.
+// ════════════════════════════════════════════════════════════════════════════════
+WS_HELP := "ws_f* = (x: i32) i32 { x + 1 }\nws_g* = (x: i32) i32 { x + 2 }\nws_h* = (x: i32) i32 { x + 3 }\nws_k* = (x: i32) i32 { x + 4 }\n"
+WS_MOD2 := "ws_m* = (x: i32) i32 { x + 5 }\nws_n* = (x: i32) i32 { x + 6 }\n"
+WS_A := "{ ws_f } = zo_ws_help\n{ ws_m } = sub.mod2\nEMB2 := \"m2 = sub.mod2\\n\"\nuse_sa = (s: string_view) i32 { 0 }\nmain = () i32 { ws_f(1) + ws_m(2) + EMB2.use_sa() }\n"
+WS_B := "{ ws_g } = zo_ws_help\nEMBED := \"{ ws_k } = zo_ws_help\\n\"\nuse_sb = (s: string_view) i32 { 0 }\nmain = () i32 { ws_g(2) + EMBED.use_sb() }\n"
+harness_misc_audit_ws = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    shell(mp.zo_cmd("mkdir -p $ZT/zo_ws/sub")).expect("harness: shell")
+    save(mp.zo_path("zo_ws/zo_ws_help.zen"), WS_HELP, len(WS_HELP))
+    save(mp.zo_path("zo_ws/sub/mod2.zen"), WS_MOD2, len(WS_MOD2))
+    save(mp.zo_path("zo_ws/a.zen"), WS_A, len(WS_A))
+    save(mp.zo_path("zo_ws/b.zen"), WS_B, len(WS_B))
+    save(mp.zo_path("zo_ws.out"), "", 0)
+    rcw := shell(mp.zo_cmd("./zen audit --workspace $ZT/zo_ws > $ZT/zo_ws.out 2>&1")).expect("harness: shell")
+    wtxt := mp.om_read_file(mp.zo_path("zo_ws.out"))
+    run_suite("audit --workspace (cross-entry union + embedded roots)", [rcw == 0, wtxt.contains("2 entries analyzed"), wtxt.contains("'ws_h' is never reachable"), wtxt.om_count("'ws_h' is never reachable") == 1, wtxt
+        .contains("'ws_f'")
+        .om_not(), wtxt.contains("'ws_g'").om_not(), wtxt.contains("'ws_k'").om_not(), wtxt
+        .contains("'ws_m'")
+        .om_not(), wtxt.contains("'ws_n'").om_not()])
+}
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 harness_misc_run* = () i32 {
     fails := 0
     fails = fails + harness_misc_audit()
+    fails = fails + harness_misc_audit_ws()
     fails = fails + harness_misc_traits()
     fails = fails + harness_misc_string_types()
     fails = fails + harness_misc_num_parse()
