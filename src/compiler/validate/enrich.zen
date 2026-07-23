@@ -18,7 +18,7 @@
   KRESERVEDNAME, KRETURNFIT, KSTRUCTFIELD, KTARGARITY, KTRAITBOUND, KUNDEFINED, desc_or,
   diagnostic_kind_name } = compiler.validate.diag
 { zty } = compiler.validate.ownership
-{ field_has, struct_fields } = compiler.validate.args
+{ has_field, struct_fields } = compiler.validate.args
 { arms_first_pos, enum_variants, first_missing_variant, has_method, impl_methods_of, op_display,
   trait_has_default } = compiler.validate.kinds
 { kv_at } = compiler.validate.core
@@ -98,15 +98,39 @@ denrich_argfit_msg = (env: Env, c: CallData, off: i32) string_view {
     })
     res
 }
+// one comma-list step: the first name bare, every later one prefixed with ", ". Shared by the
+// field-list and missing-method-list renderers so the list shape cannot drift between them.
+denrich_comma_name = (s: String, a: MutPtr<Malloc>, first: bool, name: string_view) String {
+    first.match ({
+        true  => s.gstr_append(a, name),
+        false => s.gstr_append(a, ", ").gstr_append(a, name),
+    })
+}
 denrich_fieldlist = (a: MutPtr<Malloc>, fields: [Field]) string_view {
     s := a.gstr_string(64)
     fields.loop((h, i, f) {
-        s = (i == 0).match ({
-            true  => s.gstr_append(a, f.name),
-            false => s.gstr_append(a, ", ").gstr_append(a, f.name),
-        })
+        s = s.denrich_comma_name(a, i == 0, f.name)
     })
     s.gstr_finish(a)
+}
+// `struct `S` has no field `f` (fields: …)` — ONE builder for the two sites that name a bad field
+// against a struct's real field list (member access and struct-literal init).
+denrich_struct_nofield = (
+    a: MutPtr<Malloc>,
+    sname: string_view,
+    field: string_view,
+    fields: [Field],
+) string_view {
+    a
+        .gstr_string(96)
+        .gstr_append(a, "struct `")
+        .gstr_append(a, sname)
+        .gstr_append(a, "` has no field `")
+        .gstr_append(a, field)
+        .gstr_append(a, "` (fields: ")
+        .gstr_append(a, a.denrich_fieldlist(fields))
+        .gstr_append(a, ")")
+        .gstr_finish(a)
 }
 denrich_member_noty = (a: MutPtr<Malloc>, field: string_view, objty: Ty) string_view {
     a
@@ -154,16 +178,7 @@ denrich_member_msg = (env: Env, field: string_view, objty: Ty) string_view {
         .StringCstr    => a.denrich_str_member_msg(field, objty),
         .StringLiteral => a.denrich_str_member_msg(field, objty),
         .Named(n)      => env.env_is_struct(n).match ({
-            true  => a
-                .gstr_string(96)
-                .gstr_append(a, "struct `")
-                .gstr_append(a, n)
-                .gstr_append(a, "` has no field `")
-                .gstr_append(a, field)
-                .gstr_append(a, "` (fields: ")
-                .gstr_append(a, a.denrich_fieldlist(env.env_struct_fields(n)))
-                .gstr_append(a, ")")
-                .gstr_finish(a),
+            true  => a.denrich_struct_nofield(n, field, env.env_struct_fields(n)),
             false => env.env_is_enum(n).match ({
                 true  => a.denrich_enum_member_msg(n, field),
                 false => a.denrich_member_noty(field, objty),
@@ -199,13 +214,7 @@ denrich_missing_list = (
                 && decls.trait_has_default(tr, f.name) == false,
             _        => false,
         })
-        s = miss.match ({
-            true  => (n == 0).match ({
-                true  => s.gstr_append(a, f.name),
-                false => s.gstr_append(a, ", ").gstr_append(a, f.name),
-            }),
-            false => s,
-        })
+        s = miss.match ({ true => s.denrich_comma_name(a, n == 0, f.name), false => s })
         n = miss.match ({ true => n + 1, false => n })
     })
     s.gstr_finish(a)
@@ -318,7 +327,7 @@ denrich_bad_init = (fields: [Field], inits: [FieldInit]) string_view {
     bad := ""
     inits.loop((h, i, fi) {
         bad = is_empty(bad).match ({
-            true  => fields.field_has(fi.name).match ({ true => "", false => fi.name }),
+            true  => fields.has_field(fi.name).match ({ true => "", false => fi.name }),
             false => bad,
         })
     })
@@ -332,16 +341,7 @@ denrich_makestruct_msg = (env: Env, sd: MakeStructData) string_view {
             bad := fields.denrich_bad_init(sd.inits)
             is_empty(bad).match ({
                 true  => "",
-                false => a
-                    .gstr_string(96)
-                    .gstr_append(a, "struct `")
-                    .gstr_append(a, sd.ty)
-                    .gstr_append(a, "` has no field `")
-                    .gstr_append(a, bad)
-                    .gstr_append(a, "` (fields: ")
-                    .gstr_append(a, a.denrich_fieldlist(fields))
-                    .gstr_append(a, ")")
-                    .gstr_finish(a),
+                false => a.denrich_struct_nofield(sd.ty, bad, fields),
             })
         },
         false => "",
