@@ -201,7 +201,7 @@ and_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
     ))
 }
 parse_or* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
-    a.tern_rest(src, a.or_rest(src, a.parse_and(src, pos)))
+    a.or_rest(src, a.parse_and(src, pos))
 }
 or_rest = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr) PExpr {
     sc := src.scan(lhs.next)
@@ -214,48 +214,7 @@ or_more = (a: MutPtr<Malloc>, src: string_view, lhs: PExpr, sc: Scan) PExpr {
         next: rhs.next,
     ))
 }
-// ── ternary conditional `c ? t : e` — parse-level sugar for the boolean two-arm match ──────────
-// Builds EXACTLY the two-armed Cond node the `c.match ({ true => t, false => e })` path builds
-// (same ctor, oa = 0), so both arms stay LAZY and every downstream check/lowering is shared.
-// Precedence sits BELOW `||` (the condition may be a bare `a || b` without parens) and the form is
-// right-associative: `a ? b : c ? d : e` groups as `a ? b : (c ? d : e)`. Both arms are required —
-// the one-armed lazy effect stays `.then`. The then-arm recurses at full conditional level, so a
-// nested ternary there closes at ITS OWN `:` first (`a ? b ? x : y : c` groups the inner first).
-is_qmark = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Sym => t.len == 1 && src.at(t.start) == '?',
-        _    => false,
-    })
-}
-is_tern_colon = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Sym => t.len == 1 && src.at(t.start) == ':',
-        _    => false,
-    })
-}
-tern_rest = (a: MutPtr<Malloc>, src: string_view, c: PExpr) PExpr {
-    sc := src.scan(c.next)
-    src.is_qmark(sc.tok).then({ a.tern_arms(src, c, sc.next) }, { c })
-}
-tern_arms = (a: MutPtr<Malloc>, src: string_view, c: PExpr, pos: i32) PExpr {
-    t := a.parse_or(src, pos)    // then-arm
-    co := src.scan(t.next)
-    src.is_tern_colon(co.tok).match ({
-        true  => {
-            e := a.parse_or(src, co.next)
-            PExpr(
-                expr: a.enode(cond(c.expr, t.expr, e.expr)),
-                next: e.next,
-            )
-        },
-        false => {
-            perr_set_at(co.tok.start)
-            PExpr(
-                expr: c.expr,
-                next: t.next,
-            )
-        },
-    })
-}    // else-arm: full conditional → right-assoc
-// `c ? t` with no `:` — both arms are required; record the parse error at the
-// offending token and yield the condition so recovery continues.
+// Zen has NO ternary `c ? t : e` — every conditional is a visible postfix method on a value
+// (`.match` / two-arm `.then({ a }, { b })` / `.loop`), never punctuation. The ternary layer that
+// briefly sat here was removed on purpose; a `?` anywhere in source is rejected by the permanent
+// error[no-ternary] preflight (compiler.validate.core), the same law as error[no-if].

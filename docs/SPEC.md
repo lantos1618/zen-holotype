@@ -150,22 +150,26 @@ Point(x: 1, y: 2)
 xs[i]
 [1, 2, 3]
 value.match({ pattern => expr, _ => fallback })
-cond ? a : b
+cond.then({ a }, { b })
 ```
 
-`cond ? a : b` is the conditional expression — pure parse-level sugar for the
-boolean two-arm match: it parses to exactly the node
+`cond.then({ a }, { b })` is the conditional expression — pure parse-level
+sugar for the boolean two-arm match: it parses to exactly the node
 `cond.match ({ true => a, false => b })` produces, so both arms are lazy (only
-the taken arm evaluates) and both arms are required (the one-armed lazy effect
-is `.then`). The condition must be `bool`. Its precedence sits below `||`, so
-`a || b ? x : y` conditions on `a || b`, and `c ? x : a || b` groups `a || b`
-as the else arm; as an operand or receiver a ternary must be parenthesized
-(`(c ? a : b) + 1`, `(c ? a : b).method()`). The form is right-associative:
-`a ? b : c ? d : e` is `a ? b : (c ? d : e)`. Rule of thumb: value-position
-conditionals read best as `?:`; statement-position control flow stays
-`.match`/`.then`. The formatter canonicalizes accordingly — a short exhaustive
-two-arm boolean match prints as a ternary when it fits on one line, while
-long, nested, or block-bodied forms keep the multiline `.match` spelling.
+the taken arm evaluates) and exactly one block yields the value. The condition
+must be `bool`. A single-expression arm block is that expression; a
+multi-statement arm block yields its trailing expression, like any block-bodied
+match arm. The one-armed `cond.then({ a })` stays the effect-only form (false
+is a no-op, no value). `.then` takes one or two block arguments — a non-block
+argument or a third argument is a positioned parse error. As a postfix method
+the form chains and composes bare (`(n > 3).then({ 1 }, { 2 }) + 5`); nesting
+is ordinary block nesting (`a.then({ b.then({ x }, { y }) }, { z })`), with no
+dangling-else ambiguity. Zen deliberately has NO `c ? t : e` ternary — all
+control flow is a visible postfix method on a value, never punctuation (see
+the `?` guard below). The formatter canonicalizes accordingly — a short
+exhaustive two-arm boolean match prints as `cond.then({ a }, { b })` when it
+fits on one line, while long, nested, or block-bodied forms keep the multiline
+`.match` spelling.
 
 Statements:
 
@@ -180,17 +184,25 @@ return expr      // early return
 @while(cond) { } // compiler/substrate primitive, not public style
 ```
 
-Source-level branching is `.match` (with `?:` as its expression spelling).
-`if`, `for`, and ordinary `while` are not source syntax. The C backend may
-lower checked matches to C `switch`, `if`, or ternary expressions as target
-details.
+Source-level branching is `.match` (with two-arm `.then({ a }, { b })` as its
+expression spelling). `if`, `for`, and ordinary `while` are not source syntax.
+The C backend may lower checked matches to C `switch`, `if`, or ternary
+expressions as target details.
 
 An exact source token `if` is rejected as `error[no-if]`. The diagnostic shows
-the equivalent forms: `cond ? yes : no` in expression position, and
+the equivalent forms: `cond.then({ yes }, { no })` in expression position, and
 `cond.match ({ true => yes, false => no })` for statement-position control
 flow.
 Conditional logic inside an enum arm is another nested boolean `.match`; Zen has
 no match-guard exception to the no-`if` rule.
+
+Beside the no-`if` law sits the permanent `?` guard: a `?` symbol token
+anywhere in source is rejected as `error[no-ternary]` — the C-style ternary
+`c ? t : e` (briefly accepted, then removed) is hidden-punctuation control
+flow and is not Zen. `?` appears in no other Zen syntax; `?` inside comments,
+string literals, and char literals is of course fine. The diagnostic teaches
+`cond.then({ yes }, { no })` / `.match`. Both guards carry the same law
+status: they are language identity, not style.
 
 `loop` is the public slice iteration form:
 

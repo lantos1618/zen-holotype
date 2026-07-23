@@ -621,6 +621,40 @@ first_if_offset* = (src: string_view) i32 {
     }
     found
 }
+// The same PERMANENT law for the C-style ternary: Zen has NO `c ? t : e` — every conditional is a
+// visible postfix method on a value (`.match`, the two-arm `.then({ a }, { b })`, `.loop`), never
+// punctuation. `?` appears in no other Zen syntax, so the FIRST `?` symbol token in the lexical
+// stream anchors error[no-ternary]; comments, string literals, and char literals are their own
+// token kinds and never trip the scan (same token-level rationale as first_if_offset above).
+is_qmark_token = (src: string_view, t: Token) bool {
+    t.kind.match ({
+        .Sym => t.len == 1 && src.at(t.start) == '?',
+        _    => false,
+    })
+}
+first_qmark_offset* = (src: string_view) i32 {
+    pos := 0
+    found := 0 - 1
+    done := false
+    @while (done.then({ false }, { true })) {
+        sc := src.scan(pos)
+        sc.tok.kind.match ({
+            .Eof => {
+                done = true
+            },
+            _    => src.is_qmark_token(sc.tok).match ({
+                true  => {
+                    found = sc.tok.start
+                    done = true
+                },
+                false => {
+                    pos = sc.next
+                },
+            }),
+        })
+    }
+    found
+}
 positive_count* = (n: i32) i32 { (n < 1).then({ 1 }, { n }) }
 expr_pos* = (e: Expr) i32 {
     e.match ({

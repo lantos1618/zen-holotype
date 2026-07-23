@@ -10,18 +10,19 @@
 { is_empty } = std.text.str
 { assert_nonnull_kind, body_pos, cv_no_params, env_imported, env_is_enum, env_is_gen_struct,
   env_is_struct, env_known_fn, env_params, env_struct_fields, env_trait_method, expr_pos,
-  first_if_offset, fn_name_of, fn_pos_of, fnt_arg_err_at, inf_gen_fields, inf_gen_variants,
-  inf_named_reaches, intrinsic_arity, is_badmatchlabel_call, is_forbidden_raw_call,
-  is_imported_generic, is_nonexhaust_lit_call, is_unresolved_trait_call, null_deref_kind, pos_or,
-  positive_count, shadow_not_callable, shadows_toplevel, source_span, stmt_pos, store_mut_kind,
-  trait_declaring, unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind, ut_payloads_kind,
-  utn_fields, utn_func, utn_payloads } = compiler.validate.util
+  first_if_offset, first_qmark_offset, fn_name_of, fn_pos_of, fnt_arg_err_at, inf_gen_fields,
+  inf_gen_variants, inf_named_reaches, intrinsic_arity, is_badmatchlabel_call,
+  is_forbidden_raw_call, is_imported_generic, is_nonexhaust_lit_call, is_unresolved_trait_call,
+  null_deref_kind, pos_or, positive_count, shadow_not_callable, shadows_toplevel, source_span,
+  stmt_pos, store_mut_kind, trait_declaring, unknown_ty, unknown_type_message, ut_fields_kind,
+  ut_func_kind, ut_payloads_kind, utn_fields, utn_func, utn_payloads } = compiler.validate.util
 { CheckDiagnostic, Diagnostic, KARGTYPE, KARITY, KARMVOID, KASSIGNFIT, KBOOLARM, KCONFORMANCE,
   KDUPFN, KDUPVARIANT, KESCAPE, KEXHAUST, KFALLTHROUGH, KINDEX, KINFINITETYPE, KLAMBDAVALUE, KLEAK,
   KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT, KNOIF, KNOTCALLABLE,
-  KNULLDEREF, KOPERAND, KOWNERSHIP, KPTRWRITE, KRETURNFIT, KSTRUCTFIELD, KTARGARITY, KTRAITBOUND,
-  KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN, desc_or, diagnostic_hint, diagnostic_kind_name,
-  diagnostic_message, diagnostic_span_width, name_errors_body, name_errors_expr } = compiler.validate.diag
+  KNOTERNARY, KNULLDEREF, KOPERAND, KOWNERSHIP, KPTRWRITE, KRETURNFIT, KSTRUCTFIELD, KTARGARITY,
+  KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN, desc_or, diagnostic_hint,
+  diagnostic_kind_name, diagnostic_message, diagnostic_span_width, name_errors_body,
+  name_errors_expr } = compiler.validate.diag
 { AliasList, DeadList, alias_nil, alias_step, count_loop_freed, dead_cons, dead_has, dead_nil,
   escape_step, expr_escapes, is_default_owner_method, is_owner_base, leak_alias_value, mu_body_kind,
   mu_build_index, nm_read_or_leak, own_dead_body, own_moved_var, own_step, owner_base,
@@ -137,7 +138,25 @@ check_module_no_if_diagnostic_from_source* = (src: string_view) CheckDiagnostic 
             span_width: 2,
             count: 1,
             message: "`if` is not part of Zen; conditional control flow uses `.match`",
-            hint: "in expression position write `cond ? yes : no`; for statement-position control flow replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`; inside an enum arm, nest a boolean `.match` in the arm body",
+            hint: "in expression position write `cond.then({ yes }, { no })`; for statement-position control flow replace `if (cond) { yes } else { no }` with `cond.match ({ true => yes, false => no })`; inside an enum arm, nest a boolean `.match` in the arm body",
+        ),
+    })
+}
+// The ternary law, PERMANENT and beside no-if: a `?` symbol token anywhere in source is rejected —
+// hidden punctuation control flow is not Zen; every conditional is a visible postfix method on a
+// value. Same preflight channel, same law-status as the `if`/`while` rejection above.
+check_module_no_ternary_diagnostic_from_source* = (src: string_view) CheckDiagnostic {
+    pos := src.first_qmark_offset()
+    (pos < 0).match ({
+        true  => check_diagnostic_none(),
+        false => CheckDiagnostic(
+            code: KNOTERNARY(),
+            kind: "no-ternary",
+            source_offset: pos,
+            span_width: 1,
+            count: 1,
+            message: "ternary `?:` (and any `?`) is not part of Zen; conditional control flow is a visible postfix method, never punctuation",
+            hint: "use `cond.then({ yes }, { no })` for a conditional expression, or `.match` for statement-position control flow",
         ),
     })
 }
