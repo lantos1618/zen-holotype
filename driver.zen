@@ -3543,7 +3543,10 @@ lsp_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
 // namespace alias (`m = mod`) that never occurs in the module's own source outside the import
 // statement itself. The scan is tokenizer-disciplined — identifiers inside strings, char literals
 // and comments do NOT count as uses (so a name mentioned only in an embedded test-program string is
-// correctly unused), and matches are whole-identifier (no `or`-inside-`for` hits).
+// correctly unused), and matches are whole-identifier (no `or`-inside-`for` hits). An imported
+// TRAIT name is also credited when any METHOD of that trait occurs in the module: `{ PtrKind } =
+// compiler.passes.ptrkind` exists to pull the trait's impl module into the closure, and the module
+// then spells only `t.ptr_kind_of()`, never `PtrKind` itself (see AudTM below).
 AudPair: {
     bare: string_view,
     full: string_view,
@@ -4020,6 +4023,118 @@ aud_tables = (mp: MutPtr<Malloc>, decls: [Decl]) AudTables {
         implms: implms,
     )
 }
+// ── trait-method table (unused-import crediting) ──────────────────────────────────────────────────
+// A `{ Trait } = mod` import often exists ONLY to pull the trait's impl module into the program
+// closure: the importing module never spells the trait's NAME again, it dispatches the trait's
+// METHODS (`t.ptr_kind_of()`). The unused-import scan therefore credits a trait-name import as used
+// when any method of that trait occurs as an identifier in the module. Receiver types are not
+// tracked — false-negative direction: a genuinely unused trait import whose method name happens to
+// occur stays unreported, but a closure-pulling import is never flagged. The method surface of
+// trait `tr` is: every DImpl method under `tr`, every DTraitDefault of `tr`, and `tr`'s own
+// fn-typed struct fields.
+AudTM: {
+    tr: string_view,
+    mv: [u8],
+}
+aud_fnt_fields = (fs: [Field]) i64 {
+    n := 0
+    fs.loop((h, i, f) {
+        f.ty.match ({
+            .FnT(ft) => {
+                n = n + 1
+            },
+            _        => { },
+        })
+    })
+    n
+}
+aud_tm_count = (decls: [Decl]) i64 {
+    n := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im)         => {
+                n = n + im.methods.len
+            },
+            .DTraitDefault(td) => {
+                n = n + 1
+            },
+            .DStruct(sd)       => {
+                n = n + sd.fields.aud_fnt_fields()
+            },
+            .DGenStruct(g)     => {
+                n = n + g.fields.aud_fnt_fields()
+            },
+            _                  => { },
+        })
+    })
+    n
+}
+aud_tm_push_fields = (tms: [AudTM], k: i64, tr: string_view, fs: [Field]) i64 {
+    j := k
+    fs.loop((h, i, f) {
+        f.ty.match ({
+            .FnT(ft) => {
+                tms[j] = AudTM(
+                    tr: tr,
+                    mv: f.name.view(),
+                )
+                j = j + 1
+            },
+            _        => { },
+        })
+    })
+    j
+}
+aud_tms = (mp: MutPtr<Malloc>, decls: [Decl]) [AudTM] {
+    tms := cbuf<AudTM>(mp, decls.aud_tm_count())
+    k := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im)         => {
+                im.methods.loop((h2, j, p) {
+                    tms[k] = AudTM(
+                        tr: im.trname,
+                        mv: p.name.view(),
+                    )
+                    k = k + 1
+                })
+            },
+            .DTraitDefault(td) => {
+                tms[k] = AudTM(
+                    tr: td.trname,
+                    mv: td.fn.name.view(),
+                )
+                k = k + 1
+            },
+            .DStruct(sd)       => {
+                k = tms.aud_tm_push_fields(k, sd.name, sd.fields)
+            },
+            .DGenStruct(g)     => {
+                k = tms.aud_tm_push_fields(k, g.name, g.fields)
+            },
+            _                  => { },
+        })
+    })
+    tms
+}
+// the trait-method subset credited to imported name `name` (empty when `name` is not a trait).
+aud_tm_for = (mp: MutPtr<Malloc>, tms: [AudTM], name: string_view) [AudTM] {
+    n := 0
+    tms.loop((h, i, t) {
+        (t.tr == name).then({
+            n = n + 1
+        })
+    })
+    sub := cbuf<AudTM>(mp, n)
+    k := 0
+    tms.loop((h, i, t) {
+        (t.tr == name).then({
+            sub[k] = t
+            k = k + 1
+        })
+    })
+    sub
+}
 // ── audit findings ────────────────────────────────────────────────────────────────────────────────
 AudFinding: {
     path: string_view,
@@ -4089,6 +4204,7 @@ aud_dead_msg = (mp: MutPtr<Malloc>, kind: string_view, nm: string_view) string_v
 AudImp: {
     name: string_view,
     nv: [u8],
+    ms: [AudTM],
     mod: string_view,
     pos: i32,
     alias: bool,
@@ -4149,11 +4265,22 @@ aud_tok_eq = (v: [u8], s: i64, e: i64, nv: [u8]) bool {
     }
     ok
 }
+// does token [s,e) equal any credited trait-method name?
+aud_ms_eq = (v: [u8], s: i64, e: i64, ms: [AudTM]) bool {
+    hit := false
+    ms.loop((h, i, t) {
+        v.aud_tok_eq(s, e, t.mv).then({
+            hit = true
+            h.break
+        })
+    })
+    hit
+}
 aud_mark_used = (ents: [AudImp], nents: i64, v: [u8], s: i64, e: i64) void {
     k := 0
     @while (k < nents) {
         en := ents[k]
-        (en.used == false && (s < en.lo || s >= en.hi) && v.aud_tok_eq(s, e, en.nv)).then({
+        (en.used == false && (s < en.lo || s >= en.hi) && (v.aud_tok_eq(s, e, en.nv) || v.aud_ms_eq(s, e, en.ms))).then({
             en.used = true
             ents[k] = en
         })
@@ -4222,8 +4349,9 @@ aud_imp_msg = (mp: MutPtr<Malloc>, en: AudImp) string_view {
     })
 }
 // scan ONE module file: every `{ a, b } = mod` name and every `m = mod` alias that never occurs in
-// the module's own source outside the import statement itself. Appends findings; returns the count.
-aud_mod_imports = (mp: MutPtr<Malloc>, m: ModuleEntry, fb: [AudFinding], n0: i64) i64 {
+// the module's own source outside the import statement itself (a trait name's methods count — see
+// AudTM). Appends findings; returns the count.
+aud_mod_imports = (mp: MutPtr<Malloc>, m: ModuleEntry, tms: [AudTM], fb: [AudFinding], n0: i64) i64 {
     ds := mp.parse_module(m.source)
     v: [u8] := m.source.view()
     cnt := 0
@@ -4253,6 +4381,7 @@ aud_mod_imports = (mp: MutPtr<Malloc>, m: ModuleEntry, fb: [AudFinding], n0: i64
                     ents[k] = AudImp(
                         name: p.name,
                         nv: p.name.view(),
+                        ms: mp.aud_tm_for(tms, p.name),
                         mod: imp.module,
                         pos: imp.pos,
                         alias: false,
@@ -4268,6 +4397,7 @@ aud_mod_imports = (mp: MutPtr<Malloc>, m: ModuleEntry, fb: [AudFinding], n0: i64
                     ents[k] = AudImp(
                         name: g.name,
                         nv: g.name.view(),
+                        ms: cbuf<AudTM>(mp, 0),
                         mod: "",
                         pos: g.pos,
                         alias: true,
@@ -4393,8 +4523,9 @@ aud_run = (
             n = n + 1
         })
     })
+    tms := mp.aud_tms(raw)
     rp.table.modules.loop((h, i, m) {
-        n = mp.aud_mod_imports(m, fb, n)
+        n = mp.aud_mod_imports(m, tms, fb, n)
     })
     fb.aud_sort(n)
     dead := 0
