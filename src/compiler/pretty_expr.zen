@@ -327,8 +327,16 @@ ff_cond_then_negated = (d: CondData) bool {
 }
 ff_then* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
     neg := d.ff_cond_then_negated()
+    // The negated receiver already gets ONE wrapping paren pair here, so the condition inside is
+    // printed as the LEFT OPERAND of the synthesized `== false` (ff_operand at cmp precedence),
+    // NOT via ff_recv — ff_recv would paren-wrap any Bin condition a second time, and the doubled
+    // `((a == b) == false)` only collapses to `(a == b == false)` on the NEXT fmt pass (one-shot
+    // idempotence bug, #607 finding 2).
     recv := neg.match ({
-        true  => s.ff_append(a, "(").ff_recv(a, d.c, ind).ff_append(a, " == false)"),
+        true  => s
+            .ff_append(a, "(")
+            .ff_operand(a, d.c, ff_op_prec("=="), false, ind)
+            .ff_append(a, " == false)"),
         false => s.ff_recv(a, d.c, ind),
     })
     body := neg.match ({ true => d.e, false => d.t })
