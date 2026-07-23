@@ -90,7 +90,7 @@ unknown_ty* = (env: Env, t: Ty) bool {
     t.is_uninferable().match ({
         true  => true,
         false => t.match ({
-            .Named(n)   => env.env_named_declared(n).match ({ true => false, false => true }),
+            .Named(n)   => env.env_named_declared(n) ? false : true,
             .Ptr(pd)    => env.unknown_ty(load(pd.pointee)),
             .Slice(e)   => env.unknown_ty(load(e)),
             // A generic instance is unknown ONLY while a type-arg is still unresolved (an unbound
@@ -112,10 +112,7 @@ fnt_pos_eq = (env: Env, g: Ty, w: Ty) bool { env.unknown_ty(g) || env.unknown_ty
 fnt_tys_eq = (env: Env, ga: [Ty], wa: [Ty], i: i64) bool {
     (i >= ga.len).match ({
         true  => true,
-        false => env.fnt_pos_eq(ga[i], wa[i]).match ({
-            true  => env.fnt_tys_eq(ga, wa, i + 1),
-            false => false,
-        }),
+        false => env.fnt_pos_eq(ga[i], wa[i]) ? env.fnt_tys_eq(ga, wa, i + 1) : false,
     })
 }
 fnt_sig_fits = (env: Env, g: Ty, w: Ty) bool {
@@ -140,8 +137,8 @@ fit_err* = (env: Env, argty: Ty, pty: Ty) i32 {
     env.unknown_ty(argty).match ({
         true  => 0,
         false => pty.is_fnt().match ({
-            true  => env.fnt_sig_fits(argty, pty).match ({ true => 0, false => 1 }),
-            false => fits(argty, pty).match ({ true => 0, false => 1 }),
+            true  => env.fnt_sig_fits(argty, pty) ? 0 : 1,
+            false => fits(argty, pty) ? 0 : 1,
         }),
     })
 }
@@ -176,14 +173,8 @@ lit_mul_wraps = (l: i64, r: i64) bool {
     (l == 0 || r == 0).match ({
         true  => false,
         false => (l > 0).match ({
-            true  => (r > 0).match ({
-                true  => l > lit_i64_max() / r,
-                false => r < lit_i64_min() / l,
-            }),
-            false => (r > 0).match ({
-                true  => l < lit_i64_min() / r,
-                false => r < lit_i64_max() / l,
-            }),
+            true  => r > 0 ? l > lit_i64_max() / r : r < lit_i64_min() / l,
+            false => r > 0 ? l < lit_i64_min() / r : r < lit_i64_max() / l,
         }),
     })
 }
@@ -266,7 +257,7 @@ named_int_range_ok = (nm: string_view, n: i64, neg: bool) bool {
                 false => (nm == "u32").match ({
                     true  => n >= 0 && n <= 4294967295,
                     false => (nm == "u64").match ({
-                        true  => neg.match ({ true => false, false => true }),
+                        true  => neg ? false : true,
                         false => true,
                     }),
                 }),
@@ -286,7 +277,7 @@ lit_range_ok = (t: Ty, n: i64, neg: bool) bool {
 // Numeric literals fit numeric slots only when in range (constant-folded; lenient on non-constants).
 lit_fits = (e: Ptr<Expr>, t: Ty) bool {
     lv := e.lit_val()
-    lv.ok.match ({ true => t.lit_range_ok(lv.v, lv.neg), false => true })
+    lv.ok ? t.lit_range_ok(lv.v, lv.neg) : true
 }
 // the narrow widths are Named, so ty_rank can't see them — recognize them as int slots here.
 is_int_width = (n: string_view) bool {
@@ -304,7 +295,7 @@ is_int_slot = (t: Ty) bool {
 // would silently pass and truncate at cc.
 lit_slot_verdict* = (e: Ptr<Expr>, t: Ty) i32 {
     (e.is_lit_numeric() && t.is_int_slot()).match ({
-        true  => e.lit_fits(t).match ({ true => 0, false => 1 }),
+        true  => e.lit_fits(t) ? 0 : 1,
         false => 0 - 1,
     })
 }
@@ -347,7 +338,7 @@ tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
             argty := env.infer_expr(ar.addr())
             env.unknown_ty(argty).match ({
                 true  => 0,
-                false => gen_ptr_arg_fits(argty, pty).match ({ true => 0, false => 1 }),
+                false => gen_ptr_arg_fits(argty, pty) ? 0 : 1,
             })
         },
         false => 0,
@@ -358,10 +349,7 @@ trait_declaring* = (decls: [Decl], m: string_view) string_view {
     found := ""
     decls.loop((h, i, d) {
         found = d.match ({
-            .DStruct(sd) => (is_empty(found) && sd.fields.fields_declare_method(m)).match ({
-                true  => sd.name,
-                false => found,
-            }),
+            .DStruct(sd) => is_empty(found) && sd.fields.fields_declare_method(m) ? sd.name : found,
             _            => found,
         })
     })
@@ -398,10 +386,7 @@ intrinsic_arity* = (fn: string_view) i32 {
                                         true  => 3,
                                         false => (fn == "atomic_fence").match ({
                                             true  => 0,
-                                            false => (fn == "store_i64").match ({
-                                                true  => 2,
-                                                false => 1,
-                                            }),
+                                            false => fn == "store_i64" ? 2 : 1,
                                         }),
                                     }),
                                 }),
@@ -457,7 +442,7 @@ shadows_toplevel* = (env: Env, fn: string_view) bool {
 // for an unknown/untypable shadow (pre-inline generic bodies), preserving #370's no-over-rejection.
 shadow_not_callable* = (env: Env, fn: string_view) bool {
     t := env.var_or_global(fn)
-    (t.is_void_ty() || env.unknown_ty(t)).match ({ true => false, false => true })
+    t.is_void_ty() || env.unknown_ty(t) ? false : true
 }
 is_write_intrinsic = (fn: string_view) bool {
     fn == "store"
@@ -475,7 +460,7 @@ store_writes_readonly = (env: Env, c: CallData) bool {
     })
 }
 store_mut_kind* = (env: Env, c: CallData) i32 {
-    kv_at(env.store_writes_readonly(c).match ({ true => KPTRWRITE(), false => 0 }), c.pos)
+    kv_at(env.store_writes_readonly(c) ? KPTRWRITE() : 0, c.pos)
 }
 // every intrinsic that DEREFERENCES its pointer arg0: the typed load/store/offset trio AND the raw
 // word intrinsics (load_i64/store_i64/atomic_*) — the latter crash on null exactly the same way.
@@ -505,7 +490,7 @@ derefs_nullable = (env: Env, c: CallData) bool {
 // `q := assert_nonnull(p)` yields `q: MutPtr<T>`, so `load(q)` sees a non-nullable kind and passes.
 // `RawPtr<u8>` (the byte-buffer floor) and `Ptr`/`MutPtr` are never nullable, so they are exempt.
 null_deref_kind* = (env: Env, c: CallData) i32 {
-    kv_at(env.derefs_nullable(c).match ({ true => KNULLDEREF(), false => 0 }), c.pos)
+    kv_at(env.derefs_nullable(c) ? KNULLDEREF() : 0, c.pos)
 }
 // `assert_nonnull(p)` narrows a nullable pointer to a non-null `MutPtr<T>`; its argument MUST be a
 // pointer. A NON-pointer arg (e.g. a scalar) makes the result's `pointee_of` collapse to void and the
@@ -518,7 +503,7 @@ assert_nonnull_badarg = (env: Env, c: CallData) bool {
     })
 }
 assert_nonnull_kind* = (env: Env, c: CallData) i32 {
-    kv_at(env.assert_nonnull_badarg(c).match ({ true => KARGTYPE(), false => 0 }), (c.args.len >= 1).match ({
+    kv_at(env.assert_nonnull_badarg(c) ? KARGTYPE() : 0, (c.args.len >= 1).match ({
         true  => c.args[0].expr_pos().pos_or(c.pos),
         false => c.pos,
     }))
@@ -559,7 +544,7 @@ is_struct* = (decls: [Decl], name: string_view) bool {
     f := false
     decls.loop((h, i, d) {
         f = d.match ({
-            .DStruct(sd) => (sd.name == name).match ({ true => true, false => f }),
+            .DStruct(sd) => sd.name == name ? true : f,
             _            => f,
         })
     })
@@ -632,7 +617,7 @@ first_if_offset* = (src: string_view) i32 {
     pos := 0
     found := 0 - 1
     done := false
-    @while (done.match ({ true => false, false => true })) {
+    @while (done ? false : true) {
         sc := src.scan(pos)
         sc.tok.kind.match ({
             .Eof => {
@@ -651,7 +636,7 @@ first_if_offset* = (src: string_view) i32 {
     }
     found
 }
-positive_count* = (n: i32) i32 { (n < 1).match ({ true => 1, false => n }) }
+positive_count* = (n: i32) i32 { n < 1 ? 1 : n }
 expr_pos* = (e: Expr) i32 {
     e.match ({
         .Var(v)         => v.pos,
@@ -664,15 +649,9 @@ expr_pos* = (e: Expr) i32 {
         .Match(m)       => load(m.subj).expr_pos(),
         .MakeEnum(mk)   => load(mk.payload).expr_pos(),
         .StrLit(s)      => s.pos,
-        .MakeStruct(sd) => sd.pos.pos_or((sd.inits.len == 0).match ({
-            true  => 0,
-            false => load(sd.inits[0].value).expr_pos(),
-        })),
-        .SliceLit(sd)   => (sd.items.len == 0).match ({
-            true  => 0,
-            false => sd.items[0].expr_pos(),
-        }),
-        .Block(b)       => (b.stmts.len == 0).match ({ true => 0, false => b.stmts[0].stmt_pos() }),
+        .MakeStruct(sd) => sd.pos.pos_or(sd.inits.len == 0 ? 0 : load(sd.inits[0].value).expr_pos()),
+        .SliceLit(sd)   => sd.items.len == 0 ? 0 : sd.items[0].expr_pos(),
+        .Block(b)       => b.stmts.len == 0 ? 0 : b.stmts[0].stmt_pos(),
         .Loop(l)        => load(l.seq).expr_pos(),
         _               => 0,
     })
@@ -688,9 +667,7 @@ stmt_pos* = (st: Stmt) i32 {
         .IndexSet(x) => x.pos.pos_or(load(x.seq).expr_pos()),
     })
 }
-body_pos* = (body: [Stmt]) i32 {
-    (body.len == 0).match ({ true => 0, false => body[0].stmt_pos() })
-}
+body_pos* = (body: [Stmt]) i32 { body.len == 0 ? 0 : body[0].stmt_pos() }
 // ── arity enrichment: name the expected vs the supplied argument count ─────────────────────────
 // The declared count comes from the callee (a known local fn's params, an intrinsic's fixed arity, or
 // an FnT value's parameter list); -1 = a callee whose arity we can't state here, so keep the generic
@@ -701,7 +678,7 @@ fnt_arity_of* = (t: Ty) i64 {
         _        => 0 - 1,
     })
 }
-pos_or* = (p: i32, fallback: i32) i32 { (p <= 0).match ({ true => fallback, false => p }) }
+pos_or* = (p: i32, fallback: i32) i32 { p <= 0 ? fallback : p }
 // args whose CONCRETE type is fixed by context, not by standalone inference: a lambda (FnT, checked
 // separately), and a BARE enum constructor / tag `.Variant(…)` — its enum is chosen by the expected
 // param type during mono (e.g. `.Num(7)` may be `Tok` or `Expr`), so inferring it here mis-rejects.
@@ -732,10 +709,7 @@ ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
             true  => 0,
             false => 1,
         }),
-        .Generic(g) => env.env_named_declared(g.name).match ({
-            true  => env.ut_unknown_tys(tparams, g.args),
-            false => 1,
-        }),
+        .Generic(g) => env.env_named_declared(g.name) ? env.ut_unknown_tys(tparams, g.args) : 1,
         .Ptr(pd)    => env.ut_unknown_ty(tparams, load(pd.pointee)),
         .Slice(e)   => env.ut_unknown_ty(tparams, load(e)),
         _           => 0,
@@ -842,10 +816,7 @@ utn_ty = (env: Env, tparams: [Param], t: Ty) string_view {
             true  => "",
             false => n,
         }),
-        .Generic(g) => env.env_named_declared(g.name).match ({
-            true  => env.utn_tys(tparams, g.args),
-            false => g.name,
-        }),
+        .Generic(g) => env.env_named_declared(g.name) ? env.utn_tys(tparams, g.args) : g.name,
         .Ptr(pd)    => env.utn_ty(tparams, load(pd.pointee)),
         .Slice(e)   => env.utn_ty(tparams, load(e)),
         _           => "",
@@ -896,7 +867,7 @@ utn_expr = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) string_
     })
 }
 utn_let = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) string_view {
-    l.ty.is_void_ty().match ({ true => "", false => env.utn_ty(tparams, l.ty) })
+    l.ty.is_void_ty() ? "" : env.utn_ty(tparams, l.ty)
 }
 utn_stmt = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) string_view {
     st.match ({
@@ -953,27 +924,21 @@ inf_edge_reaches = (decls: [Decl], target: string_view, t: Ty, depth: i64) bool 
         true  => false,
         false => (en == target).match ({
             true  => true,
-            false => (depth <= 0).match ({
-                true  => false,
-                false => decls.inf_named_reaches(target, en, depth - 1),
-            }),
+            false => depth <= 0 ? false : decls.inf_named_reaches(target, en, depth - 1),
         }),
     })
 }
 inf_fields_reach = (decls: [Decl], target: string_view, fields: [Field], depth: i64) bool {
     hit := false
     fields.loop((h, i, fl) {
-        hit = hit.match ({ true => true, false => decls.inf_edge_reaches(target, fl.ty, depth) })
+        hit = hit ? true : decls.inf_edge_reaches(target, fl.ty, depth)
     })
     hit
 }
 inf_variants_reach = (decls: [Decl], target: string_view, vs: [VariantDef], depth: i64) bool {
     hit := false
     vs.loop((h, i, v) {
-        hit = hit.match ({
-            true  => true,
-            false => decls.inf_edge_reaches(target, v.payload, depth),
-        })
+        hit = hit ? true : decls.inf_edge_reaches(target, v.payload, depth)
     })
     hit
 }
@@ -1093,10 +1058,7 @@ gen_tag_match = (a: MutPtr<Malloc>, vs: [VariantDef], base: string_view, name: s
     found := false
     pre := a.variant_affix(base, "_")
     vs.loop((h, i, v) {
-        found = (name.starts_with(pre) && name.ends_with(a.variant_affix("_", v.name))).match ({
-            true  => true,
-            false => found,
-        })
+        found = name.starts_with(pre) && name.ends_with(a.variant_affix("_", v.name)) ? true : found
     })
     found
 }
@@ -1104,14 +1066,8 @@ is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: string_view) bool {
     found := false
     decls.loop((h, i, d) {
         found = d.match ({
-            .DEnum(ed)   => ed.variants.variant_tags_has(a, ed.name, name).match ({
-                true  => true,
-                false => found,
-            }),
-            .DGenEnum(g) => a.gen_tag_match(g.variants, g.name, name).match ({
-                true  => true,
-                false => found,
-            }),
+            .DEnum(ed)   => ed.variants.variant_tags_has(a, ed.name, name) ? true : found,
+            .DGenEnum(g) => a.gen_tag_match(g.variants, g.name, name) ? true : found,
             _            => found,
         })
     })
@@ -1142,5 +1098,5 @@ CondQuery*: {
     cond_onearm_err: (Self) i32,
 }
 CondData.impl(CondQuery, {
-    cond_onearm_err = (d: CondData) i32 { (d.oa == 0).match ({ true => 0, false => 1 }) }
+    cond_onearm_err = (d: CondData) i32 { d.oa == 0 ? 0 : 1 }
 })

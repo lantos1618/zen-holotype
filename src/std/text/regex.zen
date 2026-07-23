@@ -130,10 +130,8 @@ Cx: {
     errpos: i64,
 }
 // ── tiny scanner helpers over the pattern ───────────────────────────────────────
-peek = (cx: MutPtr<Cx>) u8 { (cx.pos < cx.plen).match ({ true => cx.pat[cx.pos], false => 0 }) }
-peek2 = (cx: MutPtr<Cx>) u8 {
-    (cx.pos + 1 < cx.plen).match ({ true => cx.pat[cx.pos + 1], false => 0 })
-}
+peek = (cx: MutPtr<Cx>) u8 { cx.pos < cx.plen ? cx.pat[cx.pos] : 0 }
+peek2 = (cx: MutPtr<Cx>) u8 { cx.pos + 1 < cx.plen ? cx.pat[cx.pos + 1] : 0 }
 adv = (cx: MutPtr<Cx>) void { cx.pos = cx.pos + 1 }
 set_err = (cx: MutPtr<Cx>, code: i64) void {
     (cx.err == E_NONE).then({
@@ -179,7 +177,7 @@ esc_byte = (e: u8) u8 {
         true  => '\n',
         false => (e == 't').match ({
             true  => '\t',
-            false => (e == 'r').match ({ true => '\r', false => e }),
+            false => e == 'r' ? '\r' : e,
         }),
     })
 }
@@ -221,14 +219,14 @@ parse_alt_rest = (cx: MutPtr<Cx>, left: i64) i64 {
 // concat := repeat*   (stops at '|', ')', or end)
 concat_more = (cx: MutPtr<Cx>) bool {
     b := cx.peek()
-    (b == 0 || b == '|' || b == ')').match ({ true => false, false => true })
+    b == 0 || b == '|' || b == ')' ? false : true
 }
 parse_concat = (cx: MutPtr<Cx>) i64 { cx.parse_concat_rest(cx.mk_node(N_EMPTY, 0, 0, 0, 0), false) }
 parse_concat_rest = (cx: MutPtr<Cx>, acc: i64, has: bool) i64 {
     (cx.err == E_NONE && cx.concat_more()).match ({
         true  => {
             r := cx.parse_repeat()
-            cx.parse_concat_rest(has.match ({ true => cx.mk_node(N_CAT, 0, 0, acc, r), false => r }), true)
+            cx.parse_concat_rest(has ? cx.mk_node(N_CAT, 0, 0, acc, r) : r, true)
         },
         false => acc,
     })
@@ -365,7 +363,7 @@ parse_class_items = (cx: MutPtr<Cx>, first: bool) void {
             true  => {
                 cx.set_err(E_UNTERMINATED_CLASS)
             },
-            false => (b == ']' && first.match ({ true => false, false => true })).match ({
+            false => (b == ']' && (first ? false : true)).match ({
                 true  => {
                     cx.adv()
                 },
@@ -544,10 +542,7 @@ map_err_code = (code: i64) RegexError {
                     true  => .UnterminatedClass,
                     false => (code == E_BAD_RANGE).match ({
                         true  => .BadRange,
-                        false => (code == E_NOTHING_TO_REPEAT).match ({
-                            true  => .NothingToRepeat,
-                            false => .Oom,
-                        }),
+                        false => code == E_NOTHING_TO_REPEAT ? .NothingToRepeat : .Oom,
                     }),
                 }),
             }),
@@ -686,7 +681,7 @@ class_match = (re: Regex, cls: i64, b: u8) bool {
         })
     })
     cr.neg.match ({
-        true  => found.match ({ true => false, false => true }),
+        true  => found ? false : true,
         false => found,
     })
 }
@@ -708,15 +703,9 @@ add_thread = (re: Regex, list: [i64], len: i64, pc: i64, sp: i64, n: i64, gen: i
                         re.add_thread(list, l2, inst.y, sp, n, gen)
                     },
                     false => (inst.op == OP_BOL).match ({
-                        true  => (sp == 0).match ({
-                            true  => re.add_thread(list, len, pc + 1, sp, n, gen),
-                            false => len,
-                        }),
+                        true  => sp == 0 ? re.add_thread(list, len, pc + 1, sp, n, gen) : len,
                         false => (inst.op == OP_EOL).match ({
-                            true  => (sp == n).match ({
-                                true  => re.add_thread(list, len, pc + 1, sp, n, gen),
-                                false => len,
-                            }),
+                            true  => sp == n ? re.add_thread(list, len, pc + 1, sp, n, gen) : len,
                             false => {
                                 list[len] = pc
                                 len + 1
@@ -914,7 +903,7 @@ count_matches = (re: Regex, sv: [u8], n: i64) i64 {
                 f.has.match ({
                     true  => {
                         c = c + 1
-                        pos = (f.end > f.start).match ({ true => f.end, false => f.start + 1 })
+                        pos = f.end > f.start ? f.end : f.start + 1
                     },
                     false => {
                         done = true
@@ -927,7 +916,7 @@ count_matches = (re: Regex, sv: [u8], n: i64) i64 {
         true  => c,
         false => {
             f := re.search_from(sv, pos, n, g)
-            f.has.match ({ true => c + 1, false => c })
+            f.has ? c + 1 : c
         },
     })
 }
@@ -952,7 +941,7 @@ fill_matches = (re: Regex, sv: [u8], n: i64, out: [Match]) void {
                             end: f.end,
                         )
                         idx = idx + 1
-                        pos = (f.end > f.start).match ({ true => f.end, false => f.start + 1 })
+                        pos = f.end > f.start ? f.end : f.start + 1
                     },
                     false => {
                         done = true

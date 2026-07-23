@@ -150,13 +150,13 @@ js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String {
 js_op = (op: string_view) string_view {
     (op == "==").match ({
         true  => "===",
-        false => (op == "!=").match ({ true => "!==", false => op }),
+        false => op == "!=" ? "!==" : op,
     })
 }
 js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
     out := s.gstr_append(a, "({ ")
     m.inits.loop((h, i, fi) {
-        out = (i == 0).match ({ true => out, false => out.gstr_append(a, ", ") })
+        out = i == 0 ? out : out.gstr_append(a, ", ")
         out = out.gstr_append(a, fi.name).gstr_append(a, ": ").js_expr(a, fi.value)
     })
     out.gstr_append(a, " })")
@@ -165,16 +165,13 @@ js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
 js_args* = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
     out := s
     args.loop((h, i, arg) {
-        out = (i == 0).match ({ true => out, false => out.gstr_append(a, ", ") })
+        out = i == 0 ? out : out.gstr_append(a, ", ")
         out = out.js_expr(a, arg.addr())
     })
     out
 }
 js_arg_at* = (s: String, a: MutPtr<Malloc>, c: CallData, i: i32) String {
-    (i < c.args.len).match ({
-        true  => s.js_expr(a, c.args[i].addr()),
-        false => s.gstr_append(a, "0"),
-    })
+    i < c.args.len ? s.js_expr(a, c.args[i].addr()) : s.gstr_append(a, "0")
 }
 // intrinsics erase to floor calls; everything else is an ordinary JS call `name(args)`.
 js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
@@ -266,10 +263,7 @@ js_call_intr2 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
                                 .gstr_append(a, ", ")
                                 .js_arg_at(a, c, 1)
                                 .gstr_append(a, ")"),
-                            false => (c.fn == "sizeof").match ({
-                                true  => s.js_sizeof(a, c),
-                                false => s.js_dom_dispatch(a, c),
-                            }),
+                            false => c.fn == "sizeof" ? s.js_sizeof(a, c) : s.js_dom_dispatch(a, c),
                         }),
                     }),
                 }),
@@ -319,7 +313,7 @@ js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String 
                 .gstr_append(a, "\": return ")
                 .js_arm_body_expr(a, ar)
                 .gstr_append(a, "; ")
-            last.match ({ true => out.js_switch_panic_default(a), false => out })
+            last ? out.js_switch_panic_default(a) : out
         },
     })
 }
@@ -328,10 +322,7 @@ js_switch_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String
         true  => s,
         false => {
             out := s.js_switch_case(a, arms[i], i == arms.len - 1)
-            (arms[i].variant == "_").match ({
-                true  => out,
-                false => out.js_switch_cases(a, arms, i + 1),
-            })
+            arms[i].variant == "_" ? out : out.js_switch_cases(a, arms, i + 1)
         },
     })
 }
@@ -374,7 +365,7 @@ js_switch_stmt_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) St
                 .gstr_append(a, "\": ")
                 .js_arm_stmt(a, ar)
                 .gstr_append(a, " break; ")
-            last.match ({ true => out.js_switch_panic_default(a), false => out })
+            last ? out.js_switch_panic_default(a) : out
         },
     })
 }
@@ -383,10 +374,7 @@ js_switch_stmt_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) S
         true  => s,
         false => {
             out := s.js_switch_stmt_case(a, arms[i], i == arms.len - 1)
-            (arms[i].variant == "_").match ({
-                true  => out,
-                false => out.js_switch_stmt_cases(a, arms, i + 1),
-            })
+            arms[i].variant == "_" ? out : out.js_switch_stmt_cases(a, arms, i + 1)
         },
     })
 }
@@ -432,10 +420,7 @@ js_loop = (s: String, a: MutPtr<Malloc>, l: LoopData) String {
 js_block_expr = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
     out := s.gstr_append(a, "(() => { ")
     b.stmts.loop((h, i, st) {
-        one := (i == b.stmts.len - 1).match ({
-            true  => out.js_block_last(a, st),
-            false => out.js_stmt(a, st),
-        })
+        one := i == b.stmts.len - 1 ? out.js_block_last(a, st) : out.js_stmt(a, st)
         out = one.gstr_append(a, " ")
     })
     out.gstr_append(a, "})()")
@@ -564,7 +549,7 @@ iw_named = (n: string_view) i32 {
                 true  => 7,
                 false => (n == "i16").match ({
                     true  => 5,
-                    false => (n == "i8").match ({ true => 6, false => 0 }),
+                    false => n == "i8" ? 6 : 0,
                 }),
             }),
         }),
@@ -573,7 +558,7 @@ iw_named = (n: string_view) i32 {
 js_w_open* = (s: String, a: MutPtr<Malloc>, w: i32) String {
     (w == 7).match ({
         true  => s.gstr_append(a, "__zr.u64(("),
-        false => (w == 0).match ({ true => s, false => s.gstr_append(a, "((") }),
+        false => w == 0 ? s : s.gstr_append(a, "(("),
     })
 }
 js_w_close* = (s: String, a: MutPtr<Malloc>, w: i32) String {
@@ -589,7 +574,7 @@ js_w_close* = (s: String, a: MutPtr<Malloc>, w: i32) String {
                         true  => s.gstr_append(a, ") << 16 >> 16)"),
                         false => (w == 6).match ({
                             true  => s.gstr_append(a, ") << 24 >> 24)"),
-                            false => (w == 7).match ({ true => s.gstr_append(a, "))"), false => s }),
+                            false => w == 7 ? s.gstr_append(a, "))") : s,
                         }),
                     }),
                 }),
@@ -663,7 +648,7 @@ vw_note* = (name: string_view, ty: Ty) void {
 vw_lookup = (name: string_view) Ty {
     r := tvoid()
     vw_get().loop((h, i, p) {
-        r = (p.name == name).match ({ true => p.ty, false => r })
+        r = p.name == name ? p.ty : r
     })
     r
 }

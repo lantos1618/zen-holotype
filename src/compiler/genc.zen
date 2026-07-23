@@ -37,14 +37,12 @@ k_mut_ptr* = () i32 { 2 }
 ptr_kw* = (kind: i32) string_view {
     (kind == k_raw_ptr()).match ({
         true  => "RawPtr",
-        false => (kind == k_mut_ptr()).match ({ true => "MutPtr", false => "Ptr" }),
+        false => kind == k_mut_ptr() ? "MutPtr" : "Ptr",
     })
 }
 // Compiler-owned allocations flow through these shims so stripped bootstrap drivers that do not
 // flatten std.mem.alloc's trait impls still have concrete UFCS targets for Malloc.
-acquire* = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> {
-    (n <= 0).match ({ true => null_ptr(), false => malloc(n) })
-}
+acquire* = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> { n <= 0 ? null_ptr() : malloc(n) }
 resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
 write_str* = (dst: RawPtr<u8>, at: i64, t: string_view) i64 { dst.write_str_at(at, t, 0) }
 write_str_at = (dst: RawPtr<u8>, at: i64, t: string_view, i: i64) i64 {
@@ -666,7 +664,7 @@ width_cname = (n: string_view) string_view {
                     true  => "uint32_t",
                     false => (n == "u64").match ({
                         true  => "uint64_t",
-                        false => (n == "f32").match ({ true => "float", false => n }),
+                        false => n == "f32" ? "float" : n,
                     }),
                 }),
             }),
@@ -726,7 +724,7 @@ tparam_arg = (tparams: [Param], args: [Ty], n: string_view, dflt: Ty) Ty {
         // Guard `i < args.len`: a WRONG-ARITY explicit targ list (too few `<…>` args for the declared
         // tparams) would otherwise index past `args` and panic. Leave an un-pinned tparam lenient here;
         // the targ-arity diagnostic (kv_makestruct_targ_kind) owns the real error report.
-        found = (tp.name == n && i < args.len).match ({ true => args[i], false => found })
+        found = tp.name == n && i < args.len ? args[i] : found
     })
     found
 }
@@ -766,7 +764,7 @@ find_genenum* = (decls: [Decl], name: string_view) GenEnumDecl {
     )
     decls.loop((h, i, d) {
         found = d.match ({
-            .DGenEnum(g) => (g.name == name).match ({ true => g, false => found }),
+            .DGenEnum(g) => g.name == name ? g : found,
             _            => found,
         })
     })

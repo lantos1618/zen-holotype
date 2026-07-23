@@ -33,17 +33,14 @@ is_upper_b = (b: u8) bool { b >= 'A' && b <= 'Z' }
 // an upper letter followed by exactly one digit (`T1`), and nothing more.
 is_tyvar_name = (s: string_view) bool {
     s.at(0).is_upper_b().match ({
-        true  => (s.at(1) == 0).match ({
-            true  => true,
-            false => s.at(1).is_digit() && s.at(2) == 0,
-        }),
+        true  => s.at(1) == 0 ? true : s.at(1).is_digit() && s.at(2) == 0,
         false => false,
     })
 }
 tv_seen = (buf: [Param], cnt: i32, name: string_view) bool {
     found := false
     buf.loop((h, i, p) {
-        found = (i < cnt).match ({ true => found || p.name == name, false => found })
+        found = i < cnt ? found || p.name == name : found
     })
     found
 }
@@ -51,8 +48,8 @@ tv_seen = (buf: [Param], cnt: i32, name: string_view) bool {
 // it looks like a tyvar AND names no declared/imported type AND is not already in the tparam buffer.
 add_tv = (buf: [Param], types: [Param], cnt: i32, name: string_view) i32 {
     (name.is_tyvar_name()
-        && types.param_names_has(name).match ({ true => false, false => true })
-        && buf.tv_seen(cnt, name).match ({ true => false, false => true })
+        && (types.param_names_has(name) ? false : true)
+        && (buf.tv_seen(cnt, name) ? false : true)
         && cnt < buf.len).match ({
         true  => {
             buf[cnt] = param(name, tvoid())
@@ -88,7 +85,7 @@ collect_tv_params = (buf: [Param], types: [Param], cnt: i32, ps: [Param]) i32 {
 collect_tv_fields = (buf: [Param], types: [Param], cnt: i32, fields: [Field]) i32 {
     c := cnt
     fields.loop((h, i, f) {
-        c = f.field_is_method().match ({ true => c, false => buf.collect_tv_ty(types, c, f.ty) })
+        c = f.field_is_method() ? c : buf.collect_tv_ty(types, c, f.ty)
     })
     c
 }
@@ -167,10 +164,7 @@ collect_trait = (buf: [Param], decls: [Decl], cnt: i32, d: Decl) i32 {
             true  => buf.tv_add_name(cnt, sd.name),
             false => cnt,
         }),
-        .DImpl(im)         => (im.ty == im.trname).match ({
-            true  => cnt,
-            false => buf.tv_add_name(cnt, im.trname),
-        }),
+        .DImpl(im)         => im.ty == im.trname ? cnt : buf.tv_add_name(cnt, im.trname),
         .DTraitDefault(td) => buf.tv_add_name(cnt, td.trname),
         _                  => cnt,
     })
@@ -195,10 +189,7 @@ make_letter = (a: MutPtr<Malloc>, c: u8) string_view {
 // the next single-letter name (from `c`) not already used as a tparam in buf[0..cnt].
 fresh_tparam_name = (a: MutPtr<Malloc>, buf: [Param], cnt: i32, c: u8) string_view {
     nm := a.make_letter(c)
-    (buf.tv_seen(cnt, nm) && c < 'Z').match ({
-        true  => a.fresh_tparam_name(buf, cnt, c + 1),
-        false => nm,
-    })
+    buf.tv_seen(cnt, nm) && c < 'Z' ? a.fresh_tparam_name(buf, cnt, c + 1) : nm
 }
 is_trait_param = (traits: [Param], p: Param) bool {
     p.ty.match ({
@@ -257,10 +248,7 @@ augment_func = (a: MutPtr<Malloc>, types: [Param], traits: [Param], f: Func) Fun
 augment_dstruct = (a: MutPtr<Malloc>, types: [Param], sd: StructDecl) Decl {
     buf := a.param_buf()
     n := buf.collect_tv_fields(types, 0, sd.fields)
-    (n > 0).match ({
-        true  => dgenstruct(gsdef_at(sd.name, buf.take_params(n), sd.fields, sd.pos)),
-        false => dstruct(sd),
-    })
+    n > 0 ? dgenstruct(gsdef_at(sd.name, buf.take_params(n), sd.fields, sd.pos)) : dstruct(sd)
 }
 augment_dgenstruct = (a: MutPtr<Malloc>, types: [Param], g: GenStructDecl) Decl {
     buf := a.param_buf()
@@ -271,10 +259,7 @@ augment_dgenstruct = (a: MutPtr<Malloc>, types: [Param], g: GenStructDecl) Decl 
 augment_denum = (a: MutPtr<Malloc>, types: [Param], ed: EnumDecl) Decl {
     buf := a.param_buf()
     n := buf.collect_tv_variants(types, 0, ed.variants)
-    (n > 0).match ({
-        true  => dgenenum(genumdef_at(ed.name, buf.take_params(n), ed.variants, ed.pos)),
-        false => denum(ed),
-    })
+    n > 0 ? dgenenum(genumdef_at(ed.name, buf.take_params(n), ed.variants, ed.pos)) : denum(ed)
 }
 augment_dgenenum = (a: MutPtr<Malloc>, types: [Param], g: GenEnumDecl) Decl {
     buf := a.param_buf()

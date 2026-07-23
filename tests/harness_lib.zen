@@ -141,7 +141,7 @@ zo_nproc = (mp: MutPtr<Malloc>) i64 {
     shell(mp.zo_cmd("nproc | tr -d '\\n' > $ZT/zo_nproc.txt 2>/dev/null"))
     mp.contents_in(mp.zo_path("zo_nproc.txt")).match ({
         .Ok(s)  => try_parse_int(s).match ({
-            .Ok(v)  => (v < 1).match ({ true => 1, false => v }),
+            .Ok(v)  => v < 1 ? 1 : v,
             .Err(e) => NWORKERS_FALLBACK,
         }),
         .Err(e) => NWORKERS_FALLBACK,
@@ -182,7 +182,7 @@ zo_par_run* = (cmds: [string_view], n: i64) void {
         m := Malloc(_: 0)
         mp := m.addr()
         w0 := mp.zo_nproc()
-        w := (w0 > n).match ({ true => n, false => w0 })    // never spawn more workers than cases
+        w := w0 > n ? n : w0    // never spawn more workers than cases
         counter := malloc(8)
         counter.store_i64(0)
         arg := malloc(24)
@@ -412,7 +412,7 @@ zo_rc_state = (mp: MutPtr<Malloc>, path: string_view) i64 {
     mp.contents_in(path).match ({
         .Ok(s)  => s.starts_with("P").match ({
             true  => 0,
-            false => s.starts_with("F").match ({ true => 1, false => 2 }),
+            false => s.starts_with("F") ? 1 : 2,
         }),
         .Err(e) => 2,
     })
@@ -466,7 +466,7 @@ run_verdicts* = (name: string_view, cs: [VerdictCase]) i32 {
                 out("[")
                 out(mp.zo_itoa(i))
                 out("]: want ")
-                c.should_pass.match ({ true => out("accept"), false => out("reject") })
+                c.should_pass ? out("accept") : out("reject")
                 (is_empty(c.kind) == false).then({
                     out("[")
                     out(c.kind)
@@ -475,7 +475,7 @@ run_verdicts* = (name: string_view, cs: [VerdictCase]) i32 {
                 out(", got ")
                 (st == 0).match ({
                     true  => out("accept"),
-                    false => (st == 1).match ({ true => out("reject"), false => out("TIMEOUT") }),
+                    false => st == 1 ? out("reject") : out("TIMEOUT"),
                 })
                 out("\n")
                 mp.contents_in(mp.zo_idpath("chk", i, ".txt")).match ({

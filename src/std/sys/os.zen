@@ -24,17 +24,15 @@ argc* = () i32 { zen_argc() }    // os.argc()  — number of CLI args (incl. arg
 arg* = (i: i32) string_view { zen_argv_at(i) }    // os.arg(i)  — the i-th arg ("" if out of range)
 getEnv* = (name: string_view) string_view {
     p := getenv(name)
-    (p == null_ptr()).match ({ true => "", false => cstr(p) })
+    p == null_ptr() ? "" : cstr(p)
 }    // "" if unset
 // set_env(name, value): create/overwrite the variable. unset_env(name): remove it. Both return
 // true on success (a clean bool over libc's 0/-1, the getEnv-style wrapping). The env owns the copy,
 // so `value` need not outlive the call.
 set_env* = (name: string_view, value: string_view) bool {
-    (setenv(name, value, 1) == 0).match ({ true => true, false => false })
+    setenv(name, value, 1) == 0 ? true : false
 }
-unset_env* = (name: string_view) bool {
-    (unsetenv(name) == 0).match ({ true => true, false => false })
-}
+unset_env* = (name: string_view) bool { unsetenv(name) == 0 ? true : false }
 // copy each argv slot into `out[i..]` (the strings are argv-backed, stable for the process lifetime,
 // so this borrows them — no per-string copy, only the backbone is owned).
 fill_argv = (out: [string_view], i: i32, n: i32) void {
@@ -64,7 +62,7 @@ args*<A> = (a: MutPtr<A>) Result<[string_view], IoError> {
 flag_at = (tok: string_view, i: i32) bool {
     (i >= zen_argc()).match ({
         true  => false,
-        false => (zen_argv_at(i) == tok).match ({ true => true, false => flag_at(tok, i + 1) }),
+        false => zen_argv_at(i) == tok ? true : flag_at(tok, i + 1),
     })
 }
 has_flag* = (tok: string_view) bool { flag_at(tok, 0) }
@@ -73,10 +71,7 @@ has_flag* = (tok: string_view) bool { flag_at(tok, 0) }
 flag_str_at = (key: string_view, i: i32) string_view {
     (i + 1 >= zen_argc()).match ({
         true  => "",
-        false => (zen_argv_at(i) == key).match ({
-            true  => zen_argv_at(i + 1),
-            false => flag_str_at(key, i + 1),
-        }),
+        false => zen_argv_at(i) == key ? zen_argv_at(i + 1) : flag_str_at(key, i + 1),
     })
 }
 flag_str* = (key: string_view) string_view { flag_str_at(key, 0) }
