@@ -21,8 +21,8 @@ resolution / inference / inlining / monomorphization / closure lowering
 type, diagnostic, ownership, escape, send, and boundary validation
     │                         check_validate.zen + diagnostic.zen
     ├──────────────► faithful source formatter       pretty.zen
-    ├──────────────► C emitter → cc → executable     genc_emit.zen
-    └──────────────► JavaScript emitter              genjs.zen
+    ├──────────────► C emitter → cc → executable     backend/c/c_emit.zen
+    └──────────────► JavaScript emitter              backend/js/js.zen
 ```
 
 The backends walk the same resolved/monomorphized AST. C is the complete bootstrap path. JavaScript
