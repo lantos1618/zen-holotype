@@ -10,6 +10,7 @@
 { malloc, free, realloc } = std.mem.alloc
 { mem_rt, alloc, release } = std.rt
 pa = std.concurrent.pool_actor
+{ Context, Receiver } = std.concurrent.pool_actor
 N := 40
 allocs := malloc(8)    // the counting rt's counter: # of ambient allocs observed inside behaviors
 Msg*: Ping
@@ -24,8 +25,8 @@ count_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
 }
 count_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
 count_release = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
-Probe.impl(pa.Receiver, {
-    receive = (pr: MutPtr<Probe>, ctx: pa.Context<Msg>) void {
+Probe.impl(Receiver, {
+    receive = (pr: MutPtr<Probe>, ctx: Context<Msg>) void {
         ctx.msg.match ({
             .Ping => {
                 q := alloc(16)    // AMBIENT alloc — resolves to the actor's counting rt (the proof)
@@ -38,7 +39,7 @@ Probe.impl(pa.Receiver, {
 tramp = (user: RawPtr<u8>, msg: i64) void {
     a: [Probe] := user.slice(1)
     b: [Msg] := msg.offset(0).slice(1)
-    a[0].addr().receive(pa.Context(msg: b[0]))
+    a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
 send_pings = (p: MutPtr<Pool>, h: pa.PooledHandle<Probe>, k: i64) void {

@@ -8,6 +8,7 @@
 { pool_open, pool_quiesce_stop, pool_close, workers_busy, Pool } = std.concurrent.pool
 { malloc, free } = std.mem.alloc
 pa = std.concurrent.pool_actor
+{ Context, Receiver } = std.concurrent.pool_actor
 NACT := 8
 PERMSG := 5000
 WORKERS := 4
@@ -18,8 +19,8 @@ Msg*: Inc(i64)
 Worker*: {
     acc: RawPtr<u8>,
 }
-Worker.impl(pa.Receiver, {
-    receive = (w: MutPtr<Worker>, ctx: pa.Context<Msg>) void {
+Worker.impl(Receiver, {
+    receive = (w: MutPtr<Worker>, ctx: Context<Msg>) void {
         ctx.msg.match ({
             .Inc(n) => {
                 atomic_add_i64(w.acc, n)
@@ -29,11 +30,12 @@ Worker.impl(pa.Receiver, {
 })
 // the concrete per-(Msg, Worker) trampoline: decode the actor state + the boxed message, dispatch to the
 // typed receiver, reclaim the box. Concrete (Zen has no address for a generic fn), one per actor type.
-// `pa.Context(msg: b[0])` infers M from the field (the formatter rejects an explicit `pa.Context<Msg>(…)`).
+// `Context(msg: b[0])` infers M from the field (Context is the canonical std.concurrent.actor type,
+// imported through pool_actor's destructured re-export).
 tramp = (user: RawPtr<u8>, msg: i64) void {
     a: [Worker] := user.slice(1)
     b: [Msg] := msg.offset(0).slice(1)
-    a[0].addr().receive(pa.Context(msg: b[0]))
+    a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
 hslot = () [pa.PooledHandle<Worker>] { handles.slice(NACT) }

@@ -19,6 +19,7 @@
 { pool_open, pool_quiesce_stop, pool_close, pool_dropped, workers_busy, ActorRef, Pool } = std.concurrent.pool
 { malloc, free } = std.mem.alloc
 pa = std.concurrent.pool_actor
+{ Context, Receiver } = std.concurrent.pool_actor
 NSERV := 8
 NREQ := 8000
 WORKERS := 4
@@ -43,8 +44,8 @@ ReplyMsg*: Ans(Reply)
 Server*: {
     tag: i64,
 }
-Server.impl(pa.Receiver, {
-    receive = (s: MutPtr<Server>, ctx: pa.Context<ReqMsg>) void {
+Server.impl(Receiver, {
+    receive = (s: MutPtr<Server>, ctx: Context<ReqMsg>) void {
         ctx.msg.match ({
             .Ask(req) => {
                 result := req.n * 2 + 1
@@ -61,8 +62,8 @@ Client*: {
     count: i64,
     id_sum: i64,
 }
-Client.impl(pa.Receiver, {
-    receive = (c: MutPtr<Client>, ctx: pa.Context<ReplyMsg>) void {
+Client.impl(Receiver, {
+    receive = (c: MutPtr<Client>, ctx: Context<ReplyMsg>) void {
         ctx.msg.match ({
             .Ans(ans) => {
                 c.sum = c.sum + ans.result
@@ -76,13 +77,13 @@ Client.impl(pa.Receiver, {
 serv_tramp = (user: RawPtr<u8>, msg: i64) void {
     a: [Server] := user.slice(1)
     b: [ReqMsg] := msg.offset(0).slice(1)
-    a[0].addr().receive(pa.Context(msg: b[0]))
+    a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
 cli_tramp = (user: RawPtr<u8>, msg: i64) void {
     a: [Client] := user.slice(1)
     b: [ReplyMsg] := msg.offset(0).slice(1)
-    a[0].addr().receive(pa.Context(msg: b[0]))
+    a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
 sslot = () [pa.PooledHandle<Server>] { shandles.slice(NSERV) }

@@ -5,8 +5,10 @@
 // runs only UNTYPED `(RawPtr<u8>, i64) void` behaviors in parallel. pool_actor adapts typed→untyped at
 // the boundary so a typed actor's `receive` runs on a pool worker, in parallel, exactly-once.
 //
-// It is the KEEP path: built purely on pool.zen + rt.zen, it carries no coroutine/inline-drain baggage
-// (std.concurrent.actor is on the retire list). Own lightweight Receiver/Context — no actor.zen dep.
+// It is the KEEP path: built on pool.zen + rt.zen, with no inline-drain baggage (std.concurrent.actor's
+// cooperative machinery is on the retire list). `Context<M>` / `Receiver<M>` are the CANONICAL types
+// imported from std.concurrent.actor — ONE definition serves both actor surfaces (a second same-name
+// copy here would survive only via fragile first-occurrence-wins dedup in the flat namespace).
 //
 // ── THE TRAMPOLINE (why the user writes a tiny concrete stub) ────────────────────────────────────
 // The pool stores a type-ERASED `behavior: (RawPtr<u8>, i64) void` fn-ptr. Bridging to a typed
@@ -16,14 +18,15 @@
 // emits an undeclared-symbol C error). So per (M, ActorT) the user writes one short concrete stub —
 // the same shape they already write a concrete `behave` for the raw pool. Import this module under an
 // ALIAS (`pa = std.concurrent.pool_actor`) — that avoids flattening common names like `send`/`close`
-// into collisions — and build the Context with INFERRED type args (`pa.Context(msg: b[0])`, M inferred
-// from the field): the formatter cannot parse a qualified generic ctor with EXPLICIT args
-// (`pa.Context<Msg>(…)`), but the inferred form parses fine.
+// into collisions — plus a DESTRUCTURED `{ Context, Receiver } = std.concurrent.pool_actor` for the two
+// canonical types (they are imported here from std.concurrent.actor, and alias-qualified lookup only
+// resolves names DEFINED in the module, so `pa.Context` does not resolve). Build the Context with
+// INFERRED type args (`Context(msg: b[0])`, M inferred from the field).
 //
 //   room_tramp = (user: RawPtr<u8>, msg: i64) void {
 //       a: [Room] := user.slice(1)                 // actor state = the pool user block
 //       b: [Msg]  := msg.offset(0).slice(1)        // msg (i64) is a POINTER to a heap-boxed M
-//       a[0].addr().receive(pa.Context(msg: b[0])) // typed trait dispatch (M inferred)
+//       a[0].addr().receive(Context(msg: b[0]))    // typed trait dispatch (M inferred)
 //       pa.free_msg(msg)                           // reclaim the message box
 //   }
 //
@@ -44,19 +47,12 @@
 { Result } = std.core.result
 { Rt, default } = std.rt
 { Arena } = std.mem.arena
+{ Context, Receiver } = std.concurrent.actor
 // Record the message box the trampoline is about to process, so that if `receive` PANICS (the worker
 // catches it via zenrt.c's __zen_actor_call), the catch path frees the box instead of leaking it — the
 // trampoline's own free_msg is skipped by the longjmp. Cleared (arg 0) after a normal free_msg so the
 // catch never double-frees. Bodyless FFI decl; the symbol lives in bootstrap/zenrt.c (like __zen_actor_call).
 __zen_actor_set_inflight = (box: i64) void
-// A typed message wrapper delivered to a receiver (mirrors the actor.zen shape, independently defined).
-Context*<M>: {
-    msg: M,
-}
-// The receiver trait: a concrete actor type impls `receive` over its message type M.
-Receiver*<M>: {
-    receive: (MutPtr<Self>, Context<M>) void,
-}
 // A typed pool-actor handle: `raw` is the pool actor (Arc base) opaque handle; `state` is the malloc'd
 // actor-state block (`[ActorT]`). Parameterised by the actor's state type `ActorT` so `actor_state`
 // / `close` / `send` recover it by inference from the handle (a non-generic handle would lose ActorT
