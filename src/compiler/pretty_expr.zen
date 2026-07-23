@@ -215,9 +215,15 @@ ff_spine_base_is_alias = (e: Expr) bool {
         _               => false,
     })
 }
+// A spine wraps when it OVERFLOWS 100 columns, or — builder-pattern readability — when it is
+// LONG (>= 4 links total), even if it would fit: `b.exe(x).root(y).main(z).out(w)` reads as a
+// construction recipe, one step per line.
 ff_mcall = (s: String, a: MutPtr<Malloc>, mc: MethodCallData, ind: i32) String {
     n := load(mc.recv).ff_spine_wrappable(0)
     (n >= 1 && ff_lower_start(mc.method) && load(mc.recv).ff_spine_base_is_alias() == false).then({
+        (n >= 3).then({
+            return s.ff_mcall_chain(a, mc, ind)
+        })
         save := gf_idx
         trial := a.ff_string(256).ff_mcall_inline(a, mc, ind)
         gf_idx = save
@@ -229,7 +235,11 @@ ff_mcall = (s: String, a: MutPtr<Malloc>, mc: MethodCallData, ind: i32) String {
 }
 ff_call = (s: String, a: MutPtr<Malloc>, c: CallData, ind: i32) String {
     head := c.raw.match ({ true => s.ff_append(a, "@"), false => s })
-    head.ff_tyname(a, c.fn, c.targs).ff_append(a, "(").ff_args(a, c.args, ind).ff_append(a, ")")
+    head
+        .ff_tyname(a, c.fn, c.targs)
+        .ff_append(a, "(")
+        .ff_args(a, c.args, ind)
+        .ff_append(a, ")")
 }
 // Bool `.match` lowers to Cond. Keep genuinely short exhaustive forms inline, but expand a long/nested
 // result exactly like an enum match instead of letting recursive `false => cond` chains become giant lines.
@@ -373,7 +383,11 @@ ff_cond_nested* = (d: CondData) bool {
 // needs (the literal becomes `Rc(…)` → T uninferable → wrong/void element type).
 ff_tyname = (s: String, a: MutPtr<Malloc>, name: string_view, targs: [Ty]) String {
     (targs.len > 0).match ({
-        true  => s.ff_append(a, name).ff_append(a, "<").ff_tys(a, targs).ff_append(a, ">"),
+        true  => s
+            .ff_append(a, name)
+            .ff_append(a, "<")
+            .ff_tys(a, targs)
+            .ff_append(a, ">"),
         false => s.ff_append(a, name),
     })
 }
