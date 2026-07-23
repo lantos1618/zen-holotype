@@ -4164,9 +4164,11 @@ aud_strcmp = (a: string_view, b: string_view) i64 {
     })
     r
 }
+// order findings by (path, line, msg) — the msg tiebreak makes duplicates ADJACENT (msg carries
+// kind + name), so the emit loop can drop repeats with a previous-line compare.
 aud_lt = (a: AudFinding, b: AudFinding) bool {
     c := a.path.aud_strcmp(b.path)
-    c < 0 || c == 0 && a.line < b.line
+    c < 0 || c == 0 && (a.line < b.line || a.line == b.line && a.msg.aud_strcmp(b.msg) < 0)
 }
 aud_sort = (fb: [AudFinding], n: i64) void {
     i := 1
@@ -4527,22 +4529,33 @@ aud_run = (
     rp.table.modules.loop((h, i, m) {
         n = mp.aud_mod_imports(m, tms, fb, n)
     })
+    mp.aud_emit(fb, n, strict)
+}
+// sort, dedupe on (path, line, msg), print, summarize; returns the `--strict` exit code. The same
+// finding can be collected more than once (a module reached under several ids/regions), so equal
+// (path, line, msg) rows — adjacent after aud_sort — are emitted ONCE and counted once.
+aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
     fb.aud_sort(n)
     dead := 0
+    shown := 0
     i := 0
     @while (i < n) {
         f := fb[i]
-        f.dead.then({
-            dead = dead + 1
+        dup := i > 0 && f.path == fb[i - 1].path && f.line == fb[i - 1].line && f.msg == fb[i - 1].msg
+        (dup == false).then({
+            f.dead.then({
+                dead = dead + 1
+            })
+            shown = shown + 1
+            say(mp
+                .gstr_string(96)
+                .gstr_append(mp, f.path)
+                .gstr_push(mp, ':')
+                .push_int(mp, f.line)
+                .gstr_append(mp, ": ")
+                .gstr_append(mp, f.msg)
+                .gstr_finish(mp))
         })
-        say(mp
-            .gstr_string(96)
-            .gstr_append(mp, f.path)
-            .gstr_push(mp, ':')
-            .push_int(mp, f.line)
-            .gstr_append(mp, ": ")
-            .gstr_append(mp, f.msg)
-            .gstr_finish(mp))
         i = i + 1
     }
     say(mp
@@ -4550,10 +4563,10 @@ aud_run = (
         .gstr_append(mp, "zen audit: ")
         .push_int(mp, dead)
         .gstr_append(mp, " dead decls, ")
-        .push_int(mp, n - dead)
+        .push_int(mp, shown - dead)
         .gstr_append(mp, " unused imports")
         .gstr_finish(mp))
-    (strict && n > 0).match ({ true => 1, false => 0 })
+    (strict && shown > 0).match ({ true => 1, false => 0 })
 }
 // `zenc audit <file.zen> [--strict]` — check first (a broken program cannot be audited), then run
 // the dead-code + unused-import analysis. Exit 0 always (advisory); `--strict` exits 1 on findings.

@@ -32,6 +32,37 @@ om_read_file = (mp: MutPtr<Malloc>, path: string_view) string_view {
     })
 }
 om_not = (b: bool) bool { b.match ({ true => false, false => true }) }
+// occurrences of `needle` in `s` (non-overlapping) — for exactly-once (dup-free) assertions.
+om_count = (s: string_view, needle: string_view) i64 {
+    n := 0
+    i := 0
+    v := s.view()
+    nv := needle.view()
+    @while (i + nv.len <= v.len) {
+        hit := true
+        k := 0
+        @while (hit && k < nv.len) {
+            (v[i + k] == nv[k]).match ({
+                true  => {
+                    k = k + 1
+                },
+                false => {
+                    hit = false
+                },
+            })
+        }
+        hit.match ({
+            true  => {
+                n = n + 1
+                i = i + nv.len
+            },
+            false => {
+                i = i + 1
+            },
+        })
+    }
+    n
+}
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
 om_cat2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
     s := mp.new_in().expect("harness: oom")
@@ -694,7 +725,7 @@ harness_misc_audit = () i32 {
         .contains("tickle")
         .om_not(), txt.contains("'aud_used'").om_not(), txt.contains("'AudLive'").om_not(), txt
         .contains("'AudT'")
-        .om_not(), ctxt.contains("zen audit: 0 dead decls, 0 unused imports")])
+        .om_not(), txt.om_count("'aud_dead' is never reachable") == 1, txt.om_count("'aud_extra' imported") == 1, ctxt.contains("zen audit: 0 dead decls, 0 unused imports")])
 }
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 harness_misc_run* = () i32 {
