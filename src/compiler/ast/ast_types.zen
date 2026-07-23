@@ -1,0 +1,296 @@
+// compiler.ast.ast_types — THE shared AST type definitions (moved verbatim out of compiler.genc,
+// which keeps the constructors/helpers and now imports these types back).
+//
+// Every stage of the compiler — parse, check, mono, the backends, the formatter — shares these
+// runtime values: Expr/Stmt/Ty/Decl plus their *Data payload structs. This module imports
+// nothing: the types are the base of the whole compiler graph.
+// ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
+// Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
+// which needs only a forward decl, so the recursion closes.
+VarData*: {
+    name: string_view,
+    pos: i32,
+}    // pos = byte offset of the name in the source (0 = synthesized)
+BinData*: {
+    op: string_view,
+    lhs: Ptr<Expr>,
+    rhs: Ptr<Expr>,
+    pos: i32,
+}    // lhs op rhs; pos = operator byte offset when source-backed
+CallData*: {
+    fn: string_view,
+    args: [Expr],
+    targs: [Ty],
+    pos: i32,
+    raw: bool,
+}    // fn(a, b, …) or @fn(a, b, …); targs = explicit turbofish type args `fn<T,…>(…)` (empty = inferred); pos = fn byte offset (0 = synthesized)
+// a FAITHFUL method call `recv.method(args)` — preserves the UFCS surface syntax that the parser would
+// otherwise FLATTEN into a `Call(fn: method, args: [recv] ++ args)`. parse_module keeps MethodCall (so the
+// formatter sees the surface form); compiler.check.desugar_method_calls lowers it to the flat Call before
+// resolve/genc, so the C backend never sees it. pos = method-name byte offset (matches the old Call's pos).
+MethodCallData*: {
+    recv: Ptr<Expr>,
+    method: string_view,
+    args: [Expr],
+    pos: i32,
+}
+// oa = invalid one-arm marker for a bool `.match`: 0 = an explicit two-branch cond (including `.then`,
+// whose false no-op is explicit in that syntax), 1 = only `true =>` was written, 2 = only `false =>` was
+// written. oa != 0 is retained until validation so every position gets a targeted exhaustiveness error.
+CondData*: {
+    c: Ptr<Expr>,
+    t: Ptr<Expr>,
+    e: Ptr<Expr>,
+    oa: i32,
+}    // c ? t : e
+MemberData*: {
+    obj: Ptr<Expr>,
+    field: string_view,
+    pos: i32,
+}    // obj.field   (value)  /  obj->field (pointer); pos = field-name byte offset (0 = synthesized)
+ArrowData*: {
+    obj: Ptr<Expr>,
+    field: string_view,
+    pos: i32,
+}    // obj->field; pos = field-name byte offset (0 = synthesized)
+MakeEnumData*: {
+    ty: string_view,
+    mty: string_view,
+    variant: string_view,
+    targs: [Ty],
+    payload: Ptr<Expr>,
+}    // (mty){ .tag=mty_V, .u.V=payload }; mty = monomorphized name (= ty unless generic)
+TagData*: {
+    ty: string_view,
+    mty: string_view,
+    variant: string_view,
+    targs: [Ty],
+}    // (mty){ .tag=mty_V }  (no payload)
+ArmData*: {
+    variant: string_view,
+    bind: string_view,
+    body: Ptr<Expr>,
+    pos: i32,
+}    // .Variant(bind) => body  (bind "" = none); pos = pattern byte offset (0 = synthesized), so the formatter can anchor comments above/after an arm even when its body is a position-less literal.
+MatchData*: {
+    subj: Ptr<Expr>,
+    ename: string_view,
+    arms: [ArmData],
+    ptr: bool,
+}    // subj a variable; ptr -> use ->; last arm = default
+StrData*: {
+    value: string_view,
+    pos: i32,
+}    // a C string literal "…" (escaped on emit); pos = byte offset (0 = synthesized)
+FieldInit*: {
+    name: string_view,
+    value: Ptr<Expr>,
+}    // .name = value  (one struct-literal initializer)
+// `ty` is the base type name, `mty` the C name to emit (= ty for a plain struct, or the monomorphized
+// name `Box_i32` for a generic literal), and `targs` the type args of a generic literal (empty otherwise
+// — they let the monomorphize pass discover `Box<i32>` from a literal that has no typed signature).
+MakeStructData*: {
+    ty: string_view,
+    mty: string_view,
+    targs: [Ty],
+    inits: [FieldInit],
+    pos: i32,
+}    // (mty){ .a = …, .b = … }; pos = type-name byte offset (0 = synthesized)
+// a slice [T] is a fat pointer { void* ptr; int64_t len; } (the `zslice` typedef). The element
+// type T is recovered at the literal (array type) and at indexing (the cast) — carried in the AST.
+SliceData*: {
+    elem: Ty,
+    items: [Expr],
+}    // [a, b, c]  ->  (zslice){ .ptr = (T[]){…}, .len = N }
+IndexData*: {
+    seq: Ptr<Expr>,
+    idx: Ptr<Expr>,
+    elem: Ty,
+}    // seq[idx]  ->  ((T*)(seq).ptr)[idx]
+// a foreach loop `xs.loop((h, i, x) { body })` — i is the index, x the element. Lowers to a C
+// for-loop (the body runs for effect, capturing outer locals), as a void statement-expression.
+LoopData*: {
+    seq: Ptr<Expr>,
+    idx: string_view,
+    elem: string_view,
+    elemTy: Ty,
+    body: [Stmt],
+    h: string_view,
+}    // h = the handler name; `h.break`/`h.continue` in the body are the loop controls
+// a lambda value `(a, x) { body }` — a param's ty is its DECLARED `: Type` annotation when the source
+// wrote one, Void otherwise. The annotation is kept ONLY so the formatter round-trips it: type checking
+// still takes the real param types from the FnT the lambda is passed to. Lambda values are only ever
+// arguments to a template's FnT parameter, and are inlined at the call site so their bodies read
+// captured locals.
+LambdaData*: {
+    params: [Param],
+    body: [Stmt],
+    ret: Ty,
+}    // `ret` = the lambda's DECLARED return type `(x) U {…}` (void when unannotated). Kept so a generic
+// call can infer a tparam that appears ONLY in a closure-param's return position `(T) U`.
+// a statement-expression `({ s1; s2; … sN; })` — its value is the last statement's. Produced by
+// inlining a (multi-statement) template body at a call site; the trailing return becomes a bare expr.
+BlockData*: {
+    stmts: [Stmt],
+}
+// `Byte` is an integer literal that came from a CHAR literal `'a'` — emitted exactly like Int
+// (its byte value), but typed `u8` by the checker (a char is a byte, so `is_op(t, '+')` passing
+// it to a u8 param doesn't read as an i32->u8 narrowing).
+// `FloatLit` is a FLOAT literal carried as its SOURCE TEXT, verbatim (the compiler is written in
+// Zen, which had no floats — so it never holds a float VALUE; the text "1.5" IS a C double
+// literal and a JS number as-is). Typed f64 by the checker.
+Expr*: Int(i64) | Byte(i32) | FloatLit(string_view) | Var(VarData) | Bin(BinData) | Call(CallData) | MethodCall(MethodCallData) | Cond(CondData) | Member(MemberData) | Arrow(ArrowData) | MakeEnum(MakeEnumData) | MakeStruct(MakeStructData) | Tag(TagData) | Match(MatchData) | StrLit(StrData) | SliceLit(SliceData) | Index(IndexData) | Loop(LoopData) | Lambda(LambdaData) | Block(BlockData)
+// statements: `int32_t name = expr;`  and  `return expr;`
+LetData*: {
+    name: string_view,
+    ty: Ty,
+    value: Ptr<Expr>,
+    pos: i32,
+}    // ty = the declared annotation (`x: T := e`), tvoid when unannotated; pos = bound-name byte offset (0 = synthesized)
+AssignData*: {
+    target: Ptr<Expr>,
+    value: Ptr<Expr>,
+    pos: i32,
+}    // <lvalue> = expr; pos = lvalue byte offset (0 = synthesized)
+IfData*: {
+    c: Ptr<Expr>,
+    then: [Stmt],
+    els: [Stmt],
+}    // if (c) { then } else { els }
+WhileData*: {
+    c: Ptr<Expr>,
+    body: [Stmt],
+}    // while (c) { body }   (Stmt is recursive)
+IndexSetData*: {
+    seq: Ptr<Expr>,
+    idx: Ptr<Expr>,
+    elem: Ty,
+    value: Ptr<Expr>,
+    pos: i32,
+}    // seq[idx] = value; pos = seq byte offset
+Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | While(WhileData) | IndexSet(IndexSetData) | ExprStmt(Ptr<Expr>)
+// types + typed parameters
+// a function type `(A, T) R` — ONLY a parameter type. A function that takes one is an inline
+// template (spliced per call site), never a C function pointer, so FnT has no standalone C type.
+FnTData*: {
+    params: [Ty],
+    ret: Ptr<Ty>,
+}
+// a GENERIC INSTANCE type `Box<i32>` — a named type applied to concrete type args. `name` is the
+// generic's base ("Box"), `args` the concrete type arguments (for field substitution), and `mangled`
+// the monomorphized C name ("Box_i32"), precomputed by the parser so gen_ty emits it with no runtime
+// string-building. The monomorphize pass turns each instance into a concrete StructDecl named `mangled`.
+GenericData*: {
+    name: string_view,
+    args: [Ty],
+    mangled: string_view,
+}
+PtrData*: {
+    pointee: Ptr<Ty>,
+    kind: i32,
+}    // a `Ptr`/`MutPtr`/`RawPtr` node: the pointee + which kind was spelled
+Ty*: I32 | I64 | U8 | F64 | Bool | Named(string_view) | Void | StringView | StringCstr | StringLiteral | Ptr(PtrData) | Slice(Ptr<Ty>) | FnT(FnTData) | Generic(GenericData)    // scalar/f64/struct/void/string_*, T*, [T], (A)R, or N<T>
+Param*: {
+    name: string_view,
+    ty: Ty,
+    variadic: bool,
+}    // variadic = a trailing `...T` param (ty is the collected `[T]`); false otherwise
+// a function is a name, typed parameters, a return type, and a sequence of statements
+Func*: {
+    name: string_view,
+    params: [Param],
+    ret: Ty,
+    tparams: [Param],
+    body: [Stmt],
+    pos: i32,
+}    // ret name(params) { body }; tparams = generic type params (name-only), [] = monomorphic; pos = name byte offset (0 = synthesized), used by the formatter to anchor leading comments
+// a struct declaration, and a top-level Decl (a translation unit is a list of these)
+Field*: {
+    name: string_view,
+    ty: Ty,
+}
+StructDecl*: {
+    name: string_view,
+    fields: [Field],
+    pos: i32,
+}    // typedef struct { fields } name; pos = name byte offset (0 = synthesized), for the formatter's leading-comment anchor
+// a GENERIC struct declaration `Box<T>: { v: T }` — a template over type params `tparams` (["T"]).
+// It emits no C of its own; the monomorphize pass instantiates one concrete StructDecl per distinct
+// `Box<concrete>` used, substituting tparam→arg in the field types. genModule drops the DGenStruct.
+GenStructDecl*: {
+    name: string_view,
+    tparams: [Param],
+    fields: [Field],
+    pos: i32,
+}    // tparams = name-only Params; pos = name byte offset (formatter leading-comment anchor)
+// an enum (tagged union): each variant has a name and a payload Ty (Void = no data)
+VariantDef*: {
+    name: string_view,
+    payload: Ty,
+    dflt: Ptr<Expr>,
+}    // dflt = constant for the zero-arg ctor (`Name = expr`); null_ptr() = no default. NOT named `default` — that's a C keyword and collides with the `default()` allocator ctor under keyword-mangling.
+EnumDecl*: {
+    name: string_view,
+    variants: [VariantDef],
+    pos: i32,
+}    // pos = name byte offset (0 = synthesized), formatter leading-comment anchor
+// a GENERIC enum declaration `Opt<T>: Some(T) | None` — like DGenStruct but over variant payloads.
+// The monomorphize pass emits one concrete EnumDecl per `Opt<concrete>` used (tparam→arg in payloads).
+GenEnumDecl*: {
+    name: string_view,
+    tparams: [Param],
+    variants: [VariantDef],
+    pos: i32,
+}    // pos = name byte offset (formatter leading-comment anchor)
+// records a `Type.impl(Trait, { … })` block: the type, the trait, and the method names THIS impl
+// actually defines (params are name-only placeholders). The methods are ALSO emitted as plain
+// functions (DFunc) for dispatch, so DImpl carries no code — it exists only so the checker can
+// verify conformance (every method the Trait declares is one this impl provides). genModule skips it.
+ImplData*: {
+    ty: string_view,
+    trname: string_view,
+    trty: Ty,
+    methods: [Param],
+    pos: i32,
+}    // trty = the trait reference AS WRITTEN (qualifier + type args, e.g. `actor.Receiver<Msg>`) so the
+// formatter round-trips it; trname stays the single-token mangle key (`actor`/`Receiver`) the impl's
+// hoisted DFunc names were built from — checker/codegen lookups key on trname, never trty.
+// DForeign is a function DECLARATION with no body — a foreign binding like `malloc = (n: i64) …`.
+// It's emitted as a C prototype `ret name(params);` (the definition comes from libc / another TU),
+// so genModule emits its signature but no body, and the checker knows its full signature.
+// DImport records a destructuring import `{ a, b } = std.x`: just the imported NAMES (carried as
+// name-only Params, the same idiom DImpl uses for method names — a Param is a real C struct, so a
+// `[Param]` buffer needs no special string-size workaround). It carries no code (modules link
+// separately, so
+// genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
+// flagged undefined) — its signature is unknown, so it's unchecked.
+ImportData*: {
+    names: [Param],
+    module: string_view,
+    pos: i32,
+}    // module = the imported module path text ("std.text.fmt"), kept for the formatter; pos = the `{` byte offset (0 = synthesized)
+// DGlobal is a module-level MUTABLE global `name := init` (Goal Z E1 — scheduler/runtime state).
+// It emits a C `static <ty> name = <init>;` (init must be a C-constant), and the checker registers
+// `name` as a value of `ty` so a function body can read/assign it. `ty` is filled by resolve from
+// the init's inferred type.
+// `tl` = thread-local: emit `static _Thread_local` so each OS thread gets its own copy (coroutine
+// swap state, scheduler per-worker state). Source marks it by wrapping the init in `thread_local(x)`,
+// which the parser unwraps into the bare init + tl=true.
+GlobalData*: {
+    name: string_view,
+    ty: Ty,
+    init: Ptr<Expr>,
+    tl: bool,
+    alias: bool,
+    pos: i32,
+}    // alias = a module-alias bind `name = mod` (single `=`, formatter prints `=` not `:=`); pos = name byte offset (0 = synthesized), formatter leading-comment anchor
+// DTraitDefault records a trait method declared WITH a default body — `Trait*: { m = (params) ret { … } }`.
+// `fn` is the default Func (its name is the BARE method name; its param/ret types use `Self`). It emits
+// no C of its own: compiler.check.resolve_module, for each `Type.impl(Trait, {…})` that OMITS this method,
+// instantiates `impl_<Trait>_<Type>_<m>` from this body with `Self` → the concrete type, as an ordinary
+// DFunc. The checker treats a method with a default as satisfied even when an impl doesn't provide it.
+TraitDefData*: {
+    trname: string_view,
+    fn: Func,
+}
+Decl*: DFunc(Func) | DStruct(StructDecl) | DEnum(EnumDecl) | DRaw(string_view) | DImpl(ImplData) | DForeign(Func) | DImport(ImportData) | DGenStruct(GenStructDecl) | DGenEnum(GenEnumDecl) | DGlobal(GlobalData) | DTraitDefault(TraitDefData)    // DRaw = verbatim C escape

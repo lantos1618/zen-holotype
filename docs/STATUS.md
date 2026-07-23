@@ -247,7 +247,7 @@ until build metadata can name provided symbols.
 needs a move system or an effect annotation. Full exported record definitions already provide layout
 signatures; opaque/incomplete by-value records are a separate feature and should be deferred.
 
-PR 2 touches the declaration variant/model in `genc.zen`/`parse.zen`, separate signature and body
+PR 2 touches the declaration variant/model in `ast/ast_types.zen`/`parse.zen`, separate signature and body
 lookup in `check.zen`, pairing diagnostics in `check_validate.zen`, prototype/body emission in
 `backend/c/c_emit.zen`, source-preserving formatting in `pretty.zen`, and signature-aware symbol retention in
 `std.internal.resolve`. It is complete when tests prove:

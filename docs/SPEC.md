@@ -788,7 +788,7 @@ allocation before returning `.Err`; there are no separate `try_*` variants.
 
 ## Backends
 
-The C backend (`compiler.genc` / `c_emit`) is the shipping/bootstrap backend. It lowers the
+The C backend (`compiler.backend.c` / `c_emit`) is the shipping/bootstrap backend. It lowers the
 checked, monomorphized AST to C and invokes `cc` for `build`/`run`. C is the intentional
 intermediate/bootstrap target.
 

@@ -13,7 +13,7 @@ module discovery / import graph / compatibility flattening
     │                         src/std/internal/resolve.zen
     ▼
 lexer → recursive-descent parser → shared AST
-    │     lex.zen + parse*.zen     genc.zen
+    │     lex.zen + parse*.zen     ast/ast_types.zen
     ▼
 resolution / inference / inlining / monomorphization / closure lowering
     │                         check.zen + mono.zen
@@ -31,8 +31,9 @@ separate frontend or type system.
 
 ## Source and AST ownership
 
-`compiler.genc` defines the shared declaration, statement, expression, and type data. Its name is
-historical: parser, checker, C emitter, JS emitter, formatter, and AST-building APIs all use it.
+`compiler.ast.ast_types` defines the shared declaration, statement, expression, and type data;
+parser, checker, C emitter, JS emitter, formatter, and AST-building APIs all use it. `compiler.genc`
+(name historical) keeps the value constructors and shared base helpers over those types.
 
 The parser is split by concern:
 
