@@ -1945,6 +1945,9 @@ harness_build_run* = () i32 {
         name: "run_no_args_still_works",
         cmd: "./zen run tests/fixtures/zen/echo_args.zen > $ZT/zargs0.txt 2>/dev/null && printf '0\\n' | cmp -s - $ZT/zargs0.txt",
     ), ShellCase(
+        name: "tools_sigs_signature_map",
+        cmd: "./zen run tools/sigs.zen tests/fixtures/sigs > $ZT/sigs.txt 2>/dev/null && cmp -s tests/fixtures/sigs/expected.txt $ZT/sigs.txt",
+    ), ShellCase(
         name: "os_args_env_helpers",
         cmd: "./zen run tests/fixtures/zen/os_args_env.zen --verbose > $ZT/zoae.txt 2>/dev/null && printf '2\\nverbose-on\\nout-empty\\nhi\\nunset-ok\\n' | cmp -s - $ZT/zoae.txt",
     ), ShellCase(
@@ -2022,6 +2025,9 @@ harness_build_run* = () i32 {
     ), ShellCase(
         name: "project_build_zen",
         cmd: "rm -rf $ZT/zbz && cp -r tests/fixtures/project/build_zen_demo $ZT/zbz && rm -f $ZT/zbz/fixture-bin $ZT/zbz/fixture-bin-alt && test \"$(./zen targets $ZT/zbz)\" = \"build-zen-demo\nbuild-zen-alt\" && ./zen build --target build-zen-alt $ZT/zbz >/dev/null 2>&1 && test -x $ZT/zbz/fixture-bin-alt && rm -f $ZT/zbz/fixture-bin $ZT/zbz/fixture-bin-alt && ./zen build $ZT/zbz >/dev/null 2>&1 && test -x $ZT/zbz/fixture-bin && test -x $ZT/zbz/fixture-bin-alt && { b=$($ZT/zbz/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"built from build.zen\" && { o=$(./zen run $ZT/zbz); test \"$?\" = 42; } && test \"$o\" = \"built from build.zen\"",
+    ), ShellCase(
+        name: "build_profiles_dev_release",
+        cmd: "rm -rf $ZT/zpf && cp -r tests/fixtures/project/build_zen_demo $ZT/zpf && rm -f $ZT/zpf/fixture-bin $ZT/zpf/fixture-bin-alt && ZENC_NO_CACHE=1 ZENC_SHOW_CC=1 ./zen build $ZT/zpf >/dev/null 2>$ZT/zpf_dev.txt && test -x $ZT/zpf/fixture-bin && { b=$($ZT/zpf/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"built from build.zen\" && l=$(grep -E -- '-o .*/fixture-bin$' $ZT/zpf_dev.txt) && case \"$l\" in *' -O1 '*) true;; *) false;; esac && case \"$l\" in *' -g '*) true;; *) false;; esac && case \"$l\" in *-O2*) false;; *) true;; esac && rm -f $ZT/zpf/fixture-bin && ZENC_NO_CACHE=1 ZENC_SHOW_CC=1 ./zen build -r --target build-zen-demo $ZT/zpf >/dev/null 2>$ZT/zpf_rel.txt && test -x $ZT/zpf/fixture-bin && { b=$($ZT/zpf/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"built from build.zen\" && r=$(grep -E -- '-o .*/fixture-bin$' $ZT/zpf_rel.txt) && case \"$r\" in *' -O2 -fno-strict-aliasing '*) true;; *) false;; esac && case \"$r\" in *' -g '*) false;; *) true;; esac",
     ), ShellCase(
         name: "cross_native_target_host_unaffected",
         cmd: "rm -rf $ZT/zxn && mkdir -p $ZT/zxn/src && printf '{ Build } = std.build\\nbuild = (b: MutPtr<Build>) void {\\n    b.install(b.exe(\"zxn\").root(\"src\").main(\"main.zen\").out(\"zxn-bin\").target(b.host()))\\n}\\n' >$ZT/zxn/build.zen && printf 'main = () i32 { 42 }\\n' >$ZT/zxn/src/main.zen && ZENC_NO_CACHE=1 ./zen build $ZT/zxn >/dev/null 2>&1 && test -x $ZT/zxn/zxn-bin && { $ZT/zxn/zxn-bin; test \"$?\" = 42; }",
@@ -2173,6 +2179,10 @@ harness_build_run* = () i32 {
         name: "cache_path_invocation_warms",
         cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
     )])
+    // cargo-style profiles: `zen build` = dev (-O1 -g), `zen build -r` = release
+    // (-O2 -fno-strict-aliasing). ZENC_SHOW_CC echoes each cc line to stderr (with the cache
+    // bypassed — a hit never reaches cc); assert the fixture's compile line carries the dev
+    // flags without -r and the release flags with it, and that BOTH binaries actually run.
     // A PATH-installed `zen` (invoked bare, so argv[0] is an unopenable relative `zen`) must STILL
     // cache: cache_self reads /proc/self/exe for the compiler-identity stamp, so the key is non-empty
     // and an entry is written. Before the fix the stamp was empty and no `check_` entry ever appeared.
