@@ -13,9 +13,9 @@
 { String } = std.text.string
 { view } = std.text.str
 { Malloc } = std.mem.alloc
-{ Expr, Stmt, Decl, Param, Ty, BinData, CondData, LetData } = compiler.ast.ast_types
+{ Expr, Stmt, Decl, Param, Ty, CondData, LetData } = compiler.ast.ast_types
 { ptr_kw, gstr_push, gstr_append } = compiler.genc
-{ gstr_int } = compiler.astops
+{ gstr_int, left_pos_of, stmt_left_pos } = compiler.astops
 { Comment } = compiler.lex
 { at } = std.text.ascii
 { ff_cond_inline, ff_cond_is_then, ff_cond_multiline, ff_cond_nested, ff_current_col, ff_expr,
@@ -146,8 +146,8 @@ ff_open_trailing* = (s: String, a: MutPtr<Malloc>, line: i32) String {
 }
 // rightmost known byte offset among a Cond's arm bodies (0 = both position-less, e.g. bare literals).
 gf_cond_body_max = (d: CondData) i32 {
-    tp := gf_pos_of(d.t)
-    ep := gf_pos_of(d.e)
+    tp := left_pos_of(d.t)
+    ep := left_pos_of(d.e)
     (tp > ep).match ({ true => tp, false => ep })
 }
 // Does a pending comment belong ON the `x.match ({ …` OPENING line of this boolean `.match` (Cond) — i.e.
@@ -166,7 +166,7 @@ gf_cond_open_cmt* = (d: CondData) bool {
     (gf_cmts[gf_idx].trailing == false).then({
         return false
     })
-    rp := gf_pos_of(d.c)
+    rp := left_pos_of(d.c)
     (rp <= 0).then({
         return false
     })
@@ -229,41 +229,6 @@ ff_flush_rest = (s: String, a: MutPtr<Malloc>, ind: i32) String {
         gf_idx = gf_idx + 1
     }
     out
-}
-// ── representative source position of an expr / statement (leftmost known byte offset; 0 = unknown) ──
-gf_expr_pos = (e: Expr) i32 {
-    e.match ({
-        .Var(v)         => v.pos,
-        .Bin(b)         => gf_bin_pos(b),
-        .Call(c)        => c.pos,
-        .MethodCall(mc) => gf_recv_pos(mc.recv, mc.pos),
-        .StrLit(sl)     => sl.pos,
-        .Member(m)      => gf_pos_of(m.obj),
-        .Arrow(ar)      => gf_pos_of(ar.obj),
-        .Match(m)       => gf_pos_of(m.subj),
-        .Cond(d)        => gf_pos_of(d.c),    // a bool `.match` lowers to Cond — its subject is `c`
-        .Index(ix)      => gf_pos_of(ix.seq),
-        _               => 0,
-    })
-}
-gf_bin_pos = (b: BinData) i32 {
-    lp := gf_pos_of(b.lhs)
-    (lp > 0).match ({ true => lp, false => b.pos })
-}
-gf_recv_pos = (recv: Ptr<Expr>, fallback: i32) i32 {
-    rp := gf_pos_of(recv)
-    (rp > 0).match ({ true => rp, false => fallback })
-}
-gf_pos_of* = (e: Ptr<Expr>) i32 { gf_expr_pos(load(e)) }
-gf_stmt_pos = (st: Stmt) i32 {
-    st.match ({
-        .Let(l)      => (l.pos > 0).match ({ true => l.pos, false => gf_pos_of(l.value) }),
-        .Assign(asn) => asn.pos,
-        .Return(e)   => gf_pos_of(e),
-        .ExprStmt(e) => gf_pos_of(e),
-        .IndexSet(x) => x.pos,
-        _            => 0,
-    })
 }
 // a top-level decl's representative source offset = its OWN start byte (the name/keyword position), so a
 // leading comment ABOVE the decl flushes at that decl and a comment INSIDE a body (e.g. before the first
@@ -469,7 +434,7 @@ ff_block* = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: boo
         true  => s.ff_append(a, "{ }"),
         false => (drop_ret
             && body.len == 1
-            && ff_no_lead_cmt(gf_stmt_pos(body[0]))
+            && ff_no_lead_cmt(stmt_left_pos(body[0]))
             && a.ff_one_line(body[0], drop_ret, ind)
             && a.ff_one_line_fits(s, body[0], drop_ret, ind)).match ({
             true  => s.ff_append(a, "{ ").ff_stmt_at(a, body[0], drop_ret, ind).ff_append(a, " }"),
@@ -490,7 +455,7 @@ ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool
         // emits no trailing comment itself; a comment trailing the block's closing `}` is a DECL-level
         // trailing comment, emitted by ff_top_decl (bounded by the next decl), which keeps it from being
         // stolen by a sibling one-liner and keeps re-formatting idempotent.
-        nb := (i < last).match ({ true => gf_stmt_pos(body[i + 1]), false => 0 })
+        nb := (i < last).match ({ true => stmt_left_pos(body[i + 1]), false => 0 })
         out = out.ff_one_stmt(a, st, drop_ret && i == last, ind, nb, nb)
     })
     out
@@ -507,7 +472,7 @@ ff_one_stmt = (
     db: i32,
     ib: i32,
 ) String {
-    sp := gf_stmt_pos(st)
+    sp := stmt_left_pos(st)
     lead := s.ff_flush_leading(a, sp, ind)
     body := lead.ff_indent(a, ind).ff_stmt_at(a, st, drop, ind)
     withc := body.ff_drain(a, db, ib, ind)
