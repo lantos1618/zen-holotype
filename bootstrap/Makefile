@@ -86,17 +86,23 @@ clean:
 # harness drives `./zen` + `tests/harness_runner.c` and reads bootstrap/zenc.gen.c via relative paths).
 # The harness exits 0 when all cases pass and 1 when any fail, so counts cannot wrap through POSIX's
 # 8-bit process status.
+# ZENC_CACHE_DIR is the harness's PERSISTENT warm cache (/tmp/zo-harness-cache, the same dir the
+# harness hands its suite children — see tests/harness.zen hp_run_parallel): entries are content-keyed
+# by the running compiler binary's hash + the full source closure, so a rebuilt zenc or any edited
+# source always misses, while a repeat run with an identical compiler skips both this harness build
+# and every previously-verified case compile. The harness itself size-guards the dir (~2GB → wipe).
 #   make -f bootstrap/Makefile harness
 harness: zen
-	cd $(ROOT) && ZO=/tmp/zo_harness.$$$$ && ZC=/tmp/zo_hcache.$$$$ && export ZENC_CACHE_DIR=$$ZC && $(ZENC) build tests/harness.zen -o $$ZO && $$ZO; rc=$$?; rm -rf $$ZO $$ZC; exit $$rc
+	cd $(ROOT) && ZO=/tmp/zo_harness.$$$$ && export ZENC_CACHE_DIR=/tmp/zo-harness-cache && $(ZENC) build tests/harness.zen -o $$ZO && $$ZO; rc=$$?; rm -rf $$ZO; exit $$rc
 
 # Fast smoke subset of the harness: runs only the quick deterministic correctness
 # suites (value + verdict) via ZEN_HARNESS_FAST and SKIPS the slow subprocess-heavy suites (modules /
 # build / boundaries / misc / fuzz / fixpoint). For inner-loop iteration only — the full `make
 # harness` above stays the merge gate. See tests/harness.zen for which suites the flag selects.
+# Shares the persistent warm cache with `harness` (same content-keyed safety).
 #   make -f bootstrap/Makefile harness-fast
 harness-fast: zen
-	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && ZC=/tmp/zo_hfcache.$$$$ && export ZENC_CACHE_DIR=$$ZC && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -rf $$ZO $$ZC; exit $$rc
+	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && export ZENC_CACHE_DIR=/tmp/zo-harness-cache && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -rf $$ZO; exit $$rc
 
 # Differential gate (module-system campaign): compare two zenc binaries over the whole fixture +
 # example + dispatch corpus — check stdout/stderr/exit, emitted C bytes, run exit/stdout. Diffs not

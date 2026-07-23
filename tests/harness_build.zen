@@ -2065,7 +2065,7 @@ harness_build_run* = () i32 {
         cmd: "rm -rf $ZT/zfg && mkdir -p $ZT/zfg/src && printf 'root = \"src\"\\nmain = \"main.zen\"\\n' >$ZT/zfg/zen.toml && printf 'boost* = () i32\\n' >$ZT/zfg/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfg/src/main.zen && { ./zen check $ZT/zfg >$ZT/zfg.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfg.txt && grep -Fq \"module 'sysdep' declares foreign function\" $ZT/zfg.txt && grep -Fq 'ffi = \"sysdep\"' $ZT/zfg.txt && printf 'ffi = \"sysdep\"\\n' >>$ZT/zfg/zen.toml && ./zen check $ZT/zfg 2>$ZT/zfg_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfg_ok.txt",
     ), ShellCase(
         name: "project_ffi_report_mode",
-        cmd: "rm -rf $ZT/zfr && mkdir -p $ZT/zfr/src && printf 'root = \"src\"\\nmain = \"main.zen\"\\n' >$ZT/zfr/zen.toml && printf 'boost* = () i32\\n' >$ZT/zfr/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfr/src/main.zen && ZEN_VIS_REPORT=1 ./zen check $ZT/zfr >$ZT/zfr.txt 2>&1 && grep -Fq 'error[ffi-ungranted]' $ZT/zfr.txt && grep -Fq 'src/main.zen: ok' $ZT/zfr.txt",
+        cmd: "rm -rf $ZT/zfr && mkdir -p $ZT/zfr/src && printf 'root = \"src\"\\nmain = \"main.zen\"\\n' >$ZT/zfr/zen.toml && printf 'boost* = () i32\\n' >$ZT/zfr/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfr/src/main.zen && ZEN_VIS_REPORT=1 ZENC_NO_CACHE=1 ./zen check $ZT/zfr >$ZT/zfr.txt 2>&1 && grep -Fq 'error[ffi-ungranted]' $ZT/zfr.txt && grep -Fq 'src/main.zen: ok' $ZT/zfr.txt",
     ), ShellCase(
         name: "project_ffi_build_zen",
         cmd: "rm -rf $ZT/zfb && mkdir -p $ZT/zfb/src && printf '{ Build } = std.build\\nbuild = (b: MutPtr<Build>) void {\\n    b.install(b.exe(\"ffidemo\").root(\"src\").main(\"main.zen\").out(\"ffi-bin\").ffi(\"sysdep\"))\\n}\\n' >$ZT/zfb/build.zen && printf 'boost* = () i32\\n' >$ZT/zfb/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfb/src/main.zen && ./zen check $ZT/zfb 2>$ZT/zfb_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfb_ok.txt && sed -i 's/.ffi(\"sysdep\")//' $ZT/zfb/build.zen && { ./zen check $ZT/zfb >$ZT/zfb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfb.txt",
@@ -2199,6 +2199,10 @@ harness_build_run* = () i32 {
         name: "cache_path_invocation_warms",
         cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
     )])
+    // ZENC_NO_CACHE: report mode's OUTPUT is the product, but a check cache hit replays only the
+    // `ok` line (the report diagnostics are not stored in the entry) — so under the harness's warm
+    // shared ZENC_CACHE_DIR a second run would lose the error[ffi-ungranted] report and fail here.
+    // This case must observe a real (cold) check; every other case is content-keyed-safe.
     // cargo-style profiles: `zen build` = dev (-O1 -g), `zen build -r` = release
     // (-O2 -fno-strict-aliasing). ZENC_SHOW_CC echoes each cc line to stderr (with the cache
     // bypassed — a hit never reaches cc); assert the fixture's compile line carries the dev
