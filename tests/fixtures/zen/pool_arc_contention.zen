@@ -20,9 +20,9 @@
 // scheduler's "scheduled" reference — so the actor is freed on a WORKER thread when it finally
 // deschedules (the last drop happens under contention, not on the main thread). Run under ASan this
 // proves the cross-thread free path has no UAF/double-free/leak.
-{ pool_open, pool_spawn, pool_send, pool_actor_ref, pool_actor_unref, pool_actor_free,
-  pool_actor_count, pool_quiesce_stop, pool_close, pool_view, pool_raw, Pool } = std.concurrent.pool
-{ spawn, join, JoinHandle } = std.concurrent.thread
+{ pool_open, pool_spawn, pool_actor_ref, pool_actor_unref, pool_actor_free, pool_actor_count,
+  pool_view, Pool } = std.concurrent.pool
+{ spawn, JoinHandle } = std.concurrent.thread
 { println } = std.text.fmt
 NPROD := 8    // producer threads
 MSGS := 1500    // messages per producer (each does a ref+send+unref → heavy atomic churn)
@@ -108,7 +108,7 @@ start_prods = (
 join_prods = (hs: RawPtr<u8>, ar: RawPtr<u8>, i: i64, acc: i64) i64 {
     (i < NPROD).match ({
         true  => {
-            join(JoinHandle(tid: hs.offset(i * 8).load_i64().offset(0)))
+            JoinHandle(tid: hs.offset(i * 8).load_i64().offset(0)).join()
             join_prods(hs, ar, i + 1, acc + ar.offset(i * 32).offset(PA_OK).load_i64())
         },
         false => acc,
