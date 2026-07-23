@@ -105,283 +105,247 @@ js_did = (s: String, a: MutPtr<Malloc>, c: CallData) String { s.js_dom_recv(a, c
 js_dfetch = (s: String, a: MutPtr<Malloc>, c: CallData) String {
     s.gstr_append(a, "fetch(").js_dom_str(a, c, 0).gstr_append(a, ")")
 }
-// tier 1 — JS global singletons (`document()`→`document`), the receiver-less `fetch`, and the inheritance
-// upcasts (each an identity: in JS an Element already IS a Node/EventTarget).
+// the DOM-name dispatch: one flat early-return table (was 9 nested tiers, split only because the
+// old `.match` pyramids nested too deep — string `==` + early return need no tiers).
 js_dom_dispatch* = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "document").match ({
-        true  => s.js_dg(a, "document"),
-        false => (c.fn == "window").match ({
-            true  => s.js_dg(a, "window"),
-            false => (c.fn == "console").match ({
-                true  => s.js_dg(a, "console"),
-                false => (c.fn == "fetch").match ({
-                    true  => s.js_dfetch(a, c),
-                    false => (c.fn == "node_target").match ({
-                        true  => s.js_did(a, c),
-                        false => (c.fn == "as_node").match ({
-                            true  => s.js_did(a, c),
-                            false => (c.fn == "as_event_target").match ({
-                                true  => s.js_did(a, c),
-                                false => (c.fn == "as_element").match ({
-                                    true  => s.js_did(a, c),
-                                    false => (c.fn == "text_node").match ({
-                                        true  => s.js_did(a, c),
-                                        false => (c.fn == "document_node").match ({
-                                            true  => s.js_did(a, c),
-                                            false => (c.fn == "window_target").match ({
-                                                true  => s.js_did(a, c),
-                                                false => (c.fn == "as_html").match ({
-                                                    true  => s.js_did(a, c),
-                                                    false => s.js_dom_d2(a, c),
-                                                }),
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    // JS global singletons (`document()`→`document`), the receiver-less `fetch`, and the inheritance
+    // upcasts (each an identity: in JS an Element already IS a Node/EventTarget).
+    (c.fn == "document").then({
+        return s.js_dg(a, "document")
     })
-}
-// tier 2 — EventTarget + Event.
-js_dom_d2 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "add_event_listener").match ({
-        true  => s.js_dm_sp(a, c, "addEventListener"),
-        false => (c.fn == "remove_event_listener").match ({
-            true  => s.js_dm_sp(a, c, "removeEventListener"),
-            false => (c.fn == "dispatch_event").match ({
-                true  => s.js_dm_p(a, c, "dispatchEvent"),
-                false => (c.fn == "event_type").match ({
-                    true  => s.js_dp(a, c, "type"),
-                    false => (c.fn == "event_target").match ({
-                        true  => s.js_dp(a, c, "target"),
-                        false => (c.fn == "current_target").match ({
-                            true  => s.js_dp(a, c, "currentTarget"),
-                            false => (c.fn == "prevent_default").match ({
-                                true  => s.js_dm0(a, c, "preventDefault"),
-                                false => (c.fn == "stop_propagation").match ({
-                                    true  => s.js_dm0(a, c, "stopPropagation"),
-                                    false => s.js_dom_d3(a, c),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (c.fn == "window").then({
+        return s.js_dg(a, "window")
     })
-}
-// tier 3 — Node.
-js_dom_d3 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "append_child").match ({
-        true  => s.js_dm_p(a, c, "appendChild"),
-        false => (c.fn == "remove_child").match ({
-            true  => s.js_dm_p(a, c, "removeChild"),
-            false => (c.fn == "insert_before").match ({
-                true  => s.js_dm_pp(a, c, "insertBefore"),
-                false => (c.fn == "replace_child").match ({
-                    true  => s.js_dm_pp(a, c, "replaceChild"),
-                    false => (c.fn == "clone_node").match ({
-                        true  => s.js_dm_p(a, c, "cloneNode"),
-                        false => (c.fn == "parent_node").match ({
-                            true  => s.js_dp(a, c, "parentNode"),
-                            false => (c.fn == "first_child").match ({
-                                true  => s.js_dp(a, c, "firstChild"),
-                                false => (c.fn == "next_sibling").match ({
-                                    true  => s.js_dp(a, c, "nextSibling"),
-                                    false => (c.fn == "child_nodes").match ({
-                                        true  => s.js_dp(a, c, "childNodes"),
-                                        false => (c.fn == "text_content").match ({
-                                            true  => s.js_dp(a, c, "textContent"),
-                                            false => (c.fn == "set_text_content").match ({
-                                                true  => s.js_dw_s(a, c, "textContent"),
-                                                false => s.js_dom_d4(a, c),
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (c.fn == "console").then({
+        return s.js_dg(a, "console")
     })
-}
-// tier 4 — Element (part 1).
-js_dom_d4 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "element_id").match ({
-        true  => s.js_dp(a, c, "id"),
-        false => (c.fn == "set_id").match ({
-            true  => s.js_dw_s(a, c, "id"),
-            false => (c.fn == "tag_name").match ({
-                true  => s.js_dp(a, c, "tagName"),
-                false => (c.fn == "class_name").match ({
-                    true  => s.js_dp(a, c, "className"),
-                    false => (c.fn == "set_class_name").match ({
-                        true  => s.js_dw_s(a, c, "className"),
-                        false => (c.fn == "inner_html").match ({
-                            true  => s.js_dp(a, c, "innerHTML"),
-                            false => (c.fn == "set_inner_html").match ({
-                                true  => s.js_dw_s(a, c, "innerHTML"),
-                                false => (c.fn == "get_attribute").match ({
-                                    true  => s.js_dm_s(a, c, "getAttribute"),
-                                    false => (c.fn == "set_attribute").match ({
-                                        true  => s.js_dm_ss(a, c, "setAttribute"),
-                                        false => (c.fn == "remove_attribute").match ({
-                                            true  => s.js_dm_s(a, c, "removeAttribute"),
-                                            false => s.js_dom_d5(a, c),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (c.fn == "fetch").then({
+        return s.js_dfetch(a, c)
     })
-}
-// tier 5 — Element (part 2) + HTMLElement.
-js_dom_d5 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "has_attribute").match ({
-        true  => s.js_dm_s(a, c, "hasAttribute"),
-        false => (c.fn == "class_list").match ({
-            true  => s.js_dp(a, c, "classList"),
-            false => (c.fn == "query_selector").match ({
-                true  => s.js_dm_s(a, c, "querySelector"),
-                false => (c.fn == "query_selector_all").match ({
-                    true  => s.js_dm_s(a, c, "querySelectorAll"),
-                    false => (c.fn == "remove").match ({
-                        true  => s.js_dm0(a, c, "remove"),
-                        false => (c.fn == "style").match ({
-                            true  => s.js_dp(a, c, "style"),
-                            false => (c.fn == "hidden").match ({
-                                true  => s.js_dp(a, c, "hidden"),
-                                false => (c.fn == "set_hidden").match ({
-                                    true  => s.js_dw_p(a, c, "hidden"),
-                                    false => (c.fn == "click").match ({
-                                        true  => s.js_dm0(a, c, "click"),
-                                        false => (c.fn == "focus").match ({
-                                            true  => s.js_dm0(a, c, "focus"),
-                                            false => (c.fn == "blur").match ({
-                                                true  => s.js_dm0(a, c, "blur"),
-                                                false => s.js_dom_d6(a, c),
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (c.fn == "node_target"
+        || c.fn == "as_node"
+        || c.fn == "as_event_target"
+        || c.fn == "as_element"
+        || c.fn == "text_node"
+        || c.fn == "document_node"
+        || c.fn == "window_target"
+        || c.fn == "as_html").then({
+        return s.js_did(a, c)
     })
-}
-// tier 6 — DOMTokenList + CSSStyleDeclaration + NodeList.
-js_dom_d6 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "class_add").match ({
-        true  => s.js_dm_s(a, c, "add"),
-        false => (c.fn == "class_remove").match ({
-            true  => s.js_dm_s(a, c, "remove"),
-            false => (c.fn == "class_toggle").match ({
-                true  => s.js_dm_s(a, c, "toggle"),
-                false => (c.fn == "class_contains").match ({
-                    true  => s.js_dm_s(a, c, "contains"),
-                    false => (c.fn == "set_property").match ({
-                        true  => s.js_dm_ss(a, c, "setProperty"),
-                        false => (c.fn == "get_property").match ({
-                            true  => s.js_dm_s(a, c, "getPropertyValue"),
-                            false => (c.fn == "remove_property").match ({
-                                true  => s.js_dm_s(a, c, "removeProperty"),
-                                false => (c.fn == "node_list_length").match ({
-                                    true  => s.js_dp(a, c, "length"),
-                                    false => (c.fn == "node_list_item").match ({
-                                        true  => s.js_dm_p(a, c, "item"),
-                                        false => s.js_dom_d7(a, c),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    // EventTarget + Event.
+    (c.fn == "add_event_listener").then({
+        return s.js_dm_sp(a, c, "addEventListener")
     })
-}
-// tier 7 — Document.
-js_dom_d7 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "get_element_by_id").match ({
-        true  => s.js_dm_s(a, c, "getElementById"),
-        false => (c.fn == "document_query_selector").match ({
-            true  => s.js_dm_s(a, c, "querySelector"),
-            false => (c.fn == "document_query_selector_all").match ({
-                true  => s.js_dm_s(a, c, "querySelectorAll"),
-                false => (c.fn == "create_element").match ({
-                    true  => s.js_dm_s(a, c, "createElement"),
-                    false => (c.fn == "create_text_node").match ({
-                        true  => s.js_dm_s(a, c, "createTextNode"),
-                        false => (c.fn == "body").match ({
-                            true  => s.js_dp(a, c, "body"),
-                            false => (c.fn == "head").match ({
-                                true  => s.js_dp(a, c, "head"),
-                                false => s.js_dom_d8(a, c),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (c.fn == "remove_event_listener").then({
+        return s.js_dm_sp(a, c, "removeEventListener")
     })
-}
-// tier 8 — Window.
-js_dom_d8 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "alert").match ({
-        true  => s.js_dm_s(a, c, "alert"),
-        false => (c.fn == "window_document").match ({
-            true  => s.js_dp(a, c, "document"),
-            false => (c.fn == "location").match ({
-                true  => s.js_dp(a, c, "location"),
-                false => (c.fn == "set_timeout").match ({
-                    true  => s.js_dm_pp(a, c, "setTimeout"),
-                    false => (c.fn == "clear_timeout").match ({
-                        true  => s.js_dm_p(a, c, "clearTimeout"),
-                        false => (c.fn == "request_animation_frame").match ({
-                            true  => s.js_dm_p(a, c, "requestAnimationFrame"),
-                            false => s.js_dom_d9(a, c),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (c.fn == "dispatch_event").then({
+        return s.js_dm_p(a, c, "dispatchEvent")
     })
-}
-// tier 9 — Location + Console. Final fall-through: an ordinary JS call (non-DOM name → unchanged emission).
-js_dom_d9 = (s: String, a: MutPtr<Malloc>, c: CallData) String {
-    (c.fn == "href").match ({
-        true  => s.js_dp(a, c, "href"),
-        false => (c.fn == "set_href").match ({
-            true  => s.js_dw_s(a, c, "href"),
-            false => (c.fn == "reload").match ({
-                true  => s.js_dm0(a, c, "reload"),
-                false => (c.fn == "log").match ({
-                    true  => s.js_dm_s(a, c, "log"),
-                    false => (c.fn == "error").match ({
-                        true  => s.js_dm_s(a, c, "error"),
-                        false => (c.fn == "warn").match ({
-                            true  => s.js_dm_s(a, c, "warn"),
-                            false => (c.fn == "info").match ({
-                                true  => s.js_dm_s(a, c, "info"),
-                                false => s.js_call_default(a, c),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (c.fn == "event_type").then({
+        return s.js_dp(a, c, "type")
     })
+    (c.fn == "event_target").then({
+        return s.js_dp(a, c, "target")
+    })
+    (c.fn == "current_target").then({
+        return s.js_dp(a, c, "currentTarget")
+    })
+    (c.fn == "prevent_default").then({
+        return s.js_dm0(a, c, "preventDefault")
+    })
+    (c.fn == "stop_propagation").then({
+        return s.js_dm0(a, c, "stopPropagation")
+    })
+    // Node.
+    (c.fn == "append_child").then({
+        return s.js_dm_p(a, c, "appendChild")
+    })
+    (c.fn == "remove_child").then({
+        return s.js_dm_p(a, c, "removeChild")
+    })
+    (c.fn == "insert_before").then({
+        return s.js_dm_pp(a, c, "insertBefore")
+    })
+    (c.fn == "replace_child").then({
+        return s.js_dm_pp(a, c, "replaceChild")
+    })
+    (c.fn == "clone_node").then({
+        return s.js_dm_p(a, c, "cloneNode")
+    })
+    (c.fn == "parent_node").then({
+        return s.js_dp(a, c, "parentNode")
+    })
+    (c.fn == "first_child").then({
+        return s.js_dp(a, c, "firstChild")
+    })
+    (c.fn == "next_sibling").then({
+        return s.js_dp(a, c, "nextSibling")
+    })
+    (c.fn == "child_nodes").then({
+        return s.js_dp(a, c, "childNodes")
+    })
+    (c.fn == "text_content").then({
+        return s.js_dp(a, c, "textContent")
+    })
+    (c.fn == "set_text_content").then({
+        return s.js_dw_s(a, c, "textContent")
+    })
+    // Element (part 1).
+    (c.fn == "element_id").then({
+        return s.js_dp(a, c, "id")
+    })
+    (c.fn == "set_id").then({
+        return s.js_dw_s(a, c, "id")
+    })
+    (c.fn == "tag_name").then({
+        return s.js_dp(a, c, "tagName")
+    })
+    (c.fn == "class_name").then({
+        return s.js_dp(a, c, "className")
+    })
+    (c.fn == "set_class_name").then({
+        return s.js_dw_s(a, c, "className")
+    })
+    (c.fn == "inner_html").then({
+        return s.js_dp(a, c, "innerHTML")
+    })
+    (c.fn == "set_inner_html").then({
+        return s.js_dw_s(a, c, "innerHTML")
+    })
+    (c.fn == "get_attribute").then({
+        return s.js_dm_s(a, c, "getAttribute")
+    })
+    (c.fn == "set_attribute").then({
+        return s.js_dm_ss(a, c, "setAttribute")
+    })
+    (c.fn == "remove_attribute").then({
+        return s.js_dm_s(a, c, "removeAttribute")
+    })
+    // Element (part 2) + HTMLElement.
+    (c.fn == "has_attribute").then({
+        return s.js_dm_s(a, c, "hasAttribute")
+    })
+    (c.fn == "class_list").then({
+        return s.js_dp(a, c, "classList")
+    })
+    (c.fn == "query_selector").then({
+        return s.js_dm_s(a, c, "querySelector")
+    })
+    (c.fn == "query_selector_all").then({
+        return s.js_dm_s(a, c, "querySelectorAll")
+    })
+    (c.fn == "remove").then({
+        return s.js_dm0(a, c, "remove")
+    })
+    (c.fn == "style").then({
+        return s.js_dp(a, c, "style")
+    })
+    (c.fn == "hidden").then({
+        return s.js_dp(a, c, "hidden")
+    })
+    (c.fn == "set_hidden").then({
+        return s.js_dw_p(a, c, "hidden")
+    })
+    (c.fn == "click").then({
+        return s.js_dm0(a, c, "click")
+    })
+    (c.fn == "focus").then({
+        return s.js_dm0(a, c, "focus")
+    })
+    (c.fn == "blur").then({
+        return s.js_dm0(a, c, "blur")
+    })
+    // DOMTokenList + CSSStyleDeclaration + NodeList.
+    (c.fn == "class_add").then({
+        return s.js_dm_s(a, c, "add")
+    })
+    (c.fn == "class_remove").then({
+        return s.js_dm_s(a, c, "remove")
+    })
+    (c.fn == "class_toggle").then({
+        return s.js_dm_s(a, c, "toggle")
+    })
+    (c.fn == "class_contains").then({
+        return s.js_dm_s(a, c, "contains")
+    })
+    (c.fn == "set_property").then({
+        return s.js_dm_ss(a, c, "setProperty")
+    })
+    (c.fn == "get_property").then({
+        return s.js_dm_s(a, c, "getPropertyValue")
+    })
+    (c.fn == "remove_property").then({
+        return s.js_dm_s(a, c, "removeProperty")
+    })
+    (c.fn == "node_list_length").then({
+        return s.js_dp(a, c, "length")
+    })
+    (c.fn == "node_list_item").then({
+        return s.js_dm_p(a, c, "item")
+    })
+    // Document.
+    (c.fn == "get_element_by_id").then({
+        return s.js_dm_s(a, c, "getElementById")
+    })
+    (c.fn == "document_query_selector").then({
+        return s.js_dm_s(a, c, "querySelector")
+    })
+    (c.fn == "document_query_selector_all").then({
+        return s.js_dm_s(a, c, "querySelectorAll")
+    })
+    (c.fn == "create_element").then({
+        return s.js_dm_s(a, c, "createElement")
+    })
+    (c.fn == "create_text_node").then({
+        return s.js_dm_s(a, c, "createTextNode")
+    })
+    (c.fn == "body").then({
+        return s.js_dp(a, c, "body")
+    })
+    (c.fn == "head").then({
+        return s.js_dp(a, c, "head")
+    })
+    // Window.
+    (c.fn == "alert").then({
+        return s.js_dm_s(a, c, "alert")
+    })
+    (c.fn == "window_document").then({
+        return s.js_dp(a, c, "document")
+    })
+    (c.fn == "location").then({
+        return s.js_dp(a, c, "location")
+    })
+    (c.fn == "set_timeout").then({
+        return s.js_dm_pp(a, c, "setTimeout")
+    })
+    (c.fn == "clear_timeout").then({
+        return s.js_dm_p(a, c, "clearTimeout")
+    })
+    (c.fn == "request_animation_frame").then({
+        return s.js_dm_p(a, c, "requestAnimationFrame")
+    })
+    // Location + Console. Final fall-through: an ordinary JS call (non-DOM name → unchanged emission).
+    (c.fn == "href").then({
+        return s.js_dp(a, c, "href")
+    })
+    (c.fn == "set_href").then({
+        return s.js_dw_s(a, c, "href")
+    })
+    (c.fn == "reload").then({
+        return s.js_dm0(a, c, "reload")
+    })
+    (c.fn == "log").then({
+        return s.js_dm_s(a, c, "log")
+    })
+    (c.fn == "error").then({
+        return s.js_dm_s(a, c, "error")
+    })
+    (c.fn == "warn").then({
+        return s.js_dm_s(a, c, "warn")
+    })
+    (c.fn == "info").then({
+        return s.js_dm_s(a, c, "info")
+    })
+    s.js_call_default(a, c)
 }
