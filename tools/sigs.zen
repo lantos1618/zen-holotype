@@ -1,0 +1,373 @@
+// tools/sigs.zen — signature-map generator, written in Zen (dogfooding the compiler-as-library).
+//
+//   ./zen run tools/sigs.zen src          # or any directory; default is `src`
+//
+// Walks the directory recursively (entries sorted, so the output is deterministic), parses every
+// `.zen` file with the REAL parser (compiler.parse.parse_module — no regex), and prints one section
+// per module:
+//
+//   ## src/std/text/str.zen
+//     len* = (s: string_view) i64
+//     dup_bytes_in*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError>
+//     Param*: { name: string_view, ty: Ty, variadic: bool }
+//     Expr*: Int(i64) | Byte(i32) | ...
+//
+// What is included (and the calls made):
+//   • every top-level fn (and foreign decl) as `name[*][<tparams>] = (params) ret` — no body;
+//     trailing `*` = exported (recovered via compiler.parse.exports_get after the parse)
+//   • every struct with its FULL field list on one line; every enum with its full variant chain
+//     (multi-payload variants are re-inlined from their synthesized `__anon…` tuple structs, which
+//     are themselves suppressed at top level — no internal name leaks)
+//   • impl methods (the parser hoists them to mangled top-level DFuncs) print DEMANGLED as
+//     `Ty.m = (params) ret` under a `Ty.impl(Trait)` head; the hoisted mangled fns are skipped
+//   • globals as `name[*] := <init>` (their declared ty is only filled in by resolve, so the init
+//     expression — rendered by the compiler's own ff_expr — is the honest parse-time signature);
+//     module aliases (`m = std.x`) and imports are skipped: they declare nothing
+// Types are rendered by the compiler's own pretty-printer (compiler.pretty.ff_ty), so every type
+// spelling here is byte-identical to `zen fmt` output. A trailing `-- sigs:` summary line reports
+// file/fn/type counts.
+{ arg, argc } = std.sys.os
+{ Malloc } = std.mem.alloc
+{ contents_in, out } = std.io.file
+{ is_dir, read_dir } = std.sys.fs
+{ cat_in, ends_with, starts_with, view } = std.text.str
+{ expect, or } = std.core.result
+{ then } = std.core.bool
+{ arg_int, arg_str, format } = std.text.fmt
+{ String } = std.text.string
+{ exports_get, parse_module } = compiler.parse
+{ perr_get } = compiler.parse_type
+{ lerr_get } = compiler.lex
+{ Decl, Field, Func, GlobalData, ImplData, Param, Ty, VariantDef, gstr_finish, is_expr_null, tvoid } = compiler.genc
+{ ff_append, ff_string, ff_ty } = compiler.pretty
+{ ff_expr } = compiler.pretty_expr
+{ ff_is_hoisted } = compiler.pretty_decl
+{ impl_cname_in } = compiler.mangle
+// running totals for the trailing summary line (module-level mutable globals — Goal Z E1)
+g_files := 0
+g_fns := 0
+g_types := 0
+// ── small local helpers over the compiler AST ─────────────────────────────────
+no_params = () [Param] { slice(null_ptr(), 0) }
+// the fn named `name` among `decls` (name == "" when absent) — pretty_decl keeps its finder private,
+// so the lookup is re-stated here (~10 lines)
+find_fn = (decls: [Decl], name: string_view) Func {
+    res := Func(
+        name: "",
+        params: no_params(),
+        ret: tvoid(),
+        tparams: no_params(),
+        body: slice(null_ptr(), 0),
+    )
+    decls.loop((h, i, d) {
+        d.match ({
+            .DFunc(f) => (f.name == name).then({
+                res = f
+            }),
+            _         => { },
+        })
+    })
+    res
+}
+is_exported = (exp: [Param], name: string_view) bool {
+    found := false
+    exp.loop((h, i, p) {
+        found = found || p.name == name
+    })
+    found
+}
+// `name` plus the trailing `*` export marker when the parse recorded it
+sig_name = (s: String, mp: MutPtr<Malloc>, exp: [Param], name: string_view) String {
+    is_exported(exp, name).match ({
+        true  => s.ff_append(mp, name).ff_append(mp, "*"),
+        false => s.ff_append(mp, name),
+    })
+}
+// `<A, B: Bound>` (empty tparams print nothing; a bound is carried as the tparam's Named ty)
+sig_tparams = (s: String, mp: MutPtr<Malloc>, tps: [Param]) String {
+    (tps.len == 0).match ({
+        true  => s,
+        false => {
+            body := s.ff_append(mp, "<")
+            tps.loop((h, i, p) {
+                body = (i == 0).match ({ true => body, false => body.ff_append(mp, ", ") })
+                body = p.ty.match ({
+                    .Void => body.ff_append(mp, p.name),
+                    _     => body.ff_append(mp, p.name).ff_append(mp, ": ").ff_ty(mp, p.ty),
+                })
+            })
+            body.ff_append(mp, ">")
+        },
+    })
+}
+// a trailing `...T` param stores its type as the collected `[T]`; recover T to re-print `...T`
+variadic_elem = (t: Ty) Ty {
+    t.match ({
+        .Slice(p) => load(p),
+        _         => t,
+    })
+}
+sig_params = (s: String, mp: MutPtr<Malloc>, ps: [Param]) String {
+    body := s
+    ps.loop((h, i, p) {
+        body = (i == 0).match ({ true => body, false => body.ff_append(mp, ", ") })
+        body = p.variadic.match ({
+            true  => body
+                .ff_append(mp, p.name)
+                .ff_append(mp, ": ...")
+                .ff_ty(mp, variadic_elem(p.ty)),
+            false => body.ff_append(mp, p.name).ff_append(mp, ": ").ff_ty(mp, p.ty),
+        })
+    })
+    body
+}
+// the shared ` = (params) ret` tail of a fn/method signature line
+sig_tail = (s: String, mp: MutPtr<Malloc>, f: Func) String {
+    g_fns = g_fns + 1
+    s
+        .sig_tparams(mp, f.tparams)
+        .ff_append(mp, " = (")
+        .sig_params(mp, f.params)
+        .ff_append(mp, ") ")
+        .ff_ty(mp, f.ret)
+        .ff_append(mp, "\n")
+}
+sig_fn = (s: String, mp: MutPtr<Malloc>, exp: [Param], f: Func) String {
+    s.ff_append(mp, "  ").sig_name(mp, exp, f.name).sig_tail(mp, f)
+}
+// ── structs / enums ───────────────────────────────────────────────────────────
+sig_struct = (
+    s: String,
+    mp: MutPtr<Malloc>,
+    exp: [Param],
+    name: string_view,
+    tps: [Param],
+    fields: [Field],
+) String {
+    g_types = g_types + 1
+    body := s.ff_append(mp, "  ").sig_name(mp, exp, name).sig_tparams(mp, tps).ff_append(mp, ": {")
+    fields.loop((h, i, fl) {
+        body = (i == 0).match ({
+            true  => body.ff_append(mp, " "),
+            false => body.ff_append(mp, ", "),
+        })
+        body = body.ff_append(mp, fl.name).ff_append(mp, ": ").ff_ty(mp, fl.ty)
+    })
+    body.ff_append(mp, " }\n")
+}
+// a multi-payload variant `V(t0, t1)` is desugared at parse time into a synthesized `__anon…` struct;
+// re-inline its field types as the surface tuple (the struct itself is suppressed at top level)
+sig_tuple = (s: String, mp: MutPtr<Malloc>, decls: [Decl], nm: string_view, t: Ty) String {
+    found := false
+    body := s
+    decls.loop((h, i, d) {
+        d.match ({
+            .DStruct(sd) => (sd.name == nm && found == false).then({
+                found = true
+                body = body.ff_append(mp, "(")
+                sd.fields.loop((h2, k, fl) {
+                    body = (k == 0).match ({ true => body, false => body.ff_append(mp, ", ") })
+                    body = body.ff_ty(mp, fl.ty)
+                })
+                body = body.ff_append(mp, ")")
+            }),
+            _            => { },
+        })
+    })
+    found.match ({ true => body, false => body.ff_append(mp, "(").ff_ty(mp, t).ff_append(mp, ")") })
+}
+sig_payload = (s: String, mp: MutPtr<Malloc>, decls: [Decl], t: Ty) String {
+    t.match ({
+        .Named(nm) => nm.starts_with("__anon").match ({
+            true  => s.sig_tuple(mp, decls, nm, t),
+            false => s.ff_append(mp, "(").ff_ty(mp, t).ff_append(mp, ")"),
+        }),
+        _          => s.ff_append(mp, "(").ff_ty(mp, t).ff_append(mp, ")"),
+    })
+}
+// one variant: `Name`, `Name(Payload)`, or — zero-arg ctor with a default constant — `Name = expr`
+sig_variant = (s: String, mp: MutPtr<Malloc>, decls: [Decl], vd: VariantDef) String {
+    base := vd.payload.match ({
+        .Void => s.ff_append(mp, vd.name),
+        _     => s.ff_append(mp, vd.name).sig_payload(mp, decls, vd.payload),
+    })
+    vd.dflt.is_expr_null().match ({
+        true  => base,
+        false => base.ff_append(mp, " = ").ff_expr(mp, vd.dflt, 0),
+    })
+}
+sig_enum = (
+    s: String,
+    mp: MutPtr<Malloc>,
+    exp: [Param],
+    decls: [Decl],
+    name: string_view,
+    tps: [Param],
+    vs: [VariantDef],
+) String {
+    g_types = g_types + 1
+    body := s.ff_append(mp, "  ").sig_name(mp, exp, name).sig_tparams(mp, tps).ff_append(mp, ": ")
+    vs.loop((h, i, vd) {
+        body = (i == 0).match ({ true => body, false => body.ff_append(mp, " | ") })
+        body = body.sig_variant(mp, decls, vd)
+    })
+    body.ff_append(mp, "\n")
+}
+// ── impls / globals ───────────────────────────────────────────────────────────
+// an impl marker: a `Ty.impl(Trait)` head (trait impls only — inherent impls have ty == trname),
+// then each method DEMANGLED back from its hoisted `impl_<Tr>_<Ty>_<m>` fn as `Ty.m = (params) ret`.
+// A method absent among the decls (satisfied by a trait default) prints nothing here.
+sig_impl = (s: String, mp: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
+    body := (im.ty == im.trname).match ({
+        true  => s,
+        false => s
+            .ff_append(mp, "  ")
+            .ff_append(mp, im.ty)
+            .ff_append(mp, ".impl(")
+            .ff_ty(mp, im.trty)
+            .ff_append(mp, ")\n"),
+    })
+    im.methods.loop((h, k, p) {
+        f := find_fn(decls, mp.impl_cname_in(im.trname, im.ty, p.name))
+        (f.name == "" == false).then({
+            body = body
+                .ff_append(mp, "  ")
+                .ff_append(mp, im.ty)
+                .ff_append(mp, ".")
+                .ff_append(mp, p.name)
+                .sig_tail(mp, f)
+        })
+    })
+    body
+}
+// a global `name := <init>` (its ty is only filled in by resolve, so the init IS the parse-time
+// signature); `thread_local(...)` wrapping is restored; module aliases (`m = std.x`) are skipped
+sig_global = (s: String, mp: MutPtr<Malloc>, exp: [Param], g: GlobalData) String {
+    g.alias.match ({
+        true  => s,
+        false => {
+            head := s.ff_append(mp, "  ").sig_name(mp, exp, g.name).ff_append(mp, " := ")
+            body := g.tl.match ({
+                true  => head
+                    .ff_append(mp, "thread_local(")
+                    .ff_expr(mp, g.init, 0)
+                    .ff_append(mp, ")"),
+                false => head.ff_expr(mp, g.init, 0),
+            })
+            body.ff_append(mp, "\n")
+        },
+    })
+}
+// ── the per-decl dispatch ─────────────────────────────────────────────────────
+sig_decl = (s: String, mp: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) String {
+    d.match ({
+        .DFunc(f)      => mp.ff_is_hoisted(decls, f.name).match ({
+            true  => s,
+            false => s.sig_fn(mp, exp, f),
+        }),    // a hoisted impl method — printed demangled via its DImpl marker
+        .DForeign(f)   => s.sig_fn(mp, exp, f),
+        .DStruct(sd)   => sd.name.starts_with("__anon").match ({
+            true  => s,
+            false => s.sig_struct(mp, exp, sd.name, no_params(), sd.fields),
+        }),    // synthesized tuple-payload struct — re-inlined at its variant
+        .DGenStruct(g) => s.sig_struct(mp, exp, g.name, g.tparams, g.fields),
+        .DEnum(ed)     => s.sig_enum(mp, exp, decls, ed.name, no_params(), ed.variants),
+        .DGenEnum(g)   => s.sig_enum(mp, exp, decls, g.name, g.tparams, g.variants),
+        .DImpl(im)     => s.sig_impl(mp, decls, im),
+        .DGlobal(g)    => s.sig_global(mp, exp, g),
+        _              => s,
+    })
+}    // DImport / DRaw / DTraitDefault declare no printable signature
+// ── the walk ──────────────────────────────────────────────────────────────────
+// parse one module and print its section (`## path` + one line per decl)
+emit_file = (mp: MutPtr<Malloc>, path: string_view) void {
+    g_files = g_files + 1
+    src := mp.contents_in(path).expect("sigs: cannot read file")
+    decls := mp.parse_module(src)
+    exp := exports_get()
+    s := mp.ff_string(4096).ff_append(mp, "## ").ff_append(mp, path).ff_append(mp, "\n")
+    (perr_get() || lerr_get()).match ({
+        true  => {
+            s = s.ff_append(mp, "  !! parse error, module skipped\n")
+        },
+        false => decls.loop((h, i, d) {
+            s = s.sig_decl(mp, exp, decls, d)
+        }),
+    })
+    out(s.gstr_finish(mp)).or(0)
+}
+// byte-lexicographic `x < y` from index `i` (recursion depth = common prefix — entry names are short)
+sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
+    (i >= xv.len || i >= yv.len).match ({
+        true  => xv.len < yv.len,
+        false => (xv[i] == yv[i]).match ({ true => xv.sv_lt_at(yv, i + 1), false => xv[i] < yv[i] }),
+    })
+}
+// byte-lexicographic `x < y` over the raw names — the sort order that makes the walk deterministic
+sv_lt = (x: string_view, y: string_view) bool { x.view().sv_lt_at(y.view(), 0) }
+// bubble xs[j] left to its sorted slot (one insertion-sort inner pass)
+sift_left = (xs: [string_view], j: i64) void {
+    (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
+        t := xs[j]
+        xs[j] = xs[j - 1]
+        xs[j - 1] = t
+        xs.sift_left(j - 1)
+    })
+}
+sort_from = (xs: [string_view], i: i64) void {
+    (i < xs.len).then({
+        xs.sift_left(i)
+        xs.sort_from(i + 1)
+    })
+}
+// in-place insertion sort (directory listings are unsorted; sections must be stable); recursion
+// depth = one directory's entry count — bounded and small
+sort_names = (xs: [string_view]) void { xs.sort_from(1) }
+// recurse into subdirectories, emit every `.zen` file, sorted at each level
+walk = (mp: MutPtr<Malloc>, dir: string_view) void {
+    entries := mp.read_dir(dir).expect("sigs: cannot read directory")
+    entries.sort_names()
+    entries.loop((h, i, entry) {
+        full := mp.cat_in(mp.cat_in(dir, "/"), entry)
+        full.is_dir().match ({
+            true  => {
+                mp.walk(full)
+            },
+            false => {
+                full.ends_with(".zen").then({
+                    mp.emit_file(full)
+                })
+            },
+        })
+    })
+}
+// the target directory: the last non-`--` CLI arg (scanned recursively), defaulting to `src`
+pick_root_from = (i: i32, acc: string_view) string_view {
+    (i >= argc()).match ({
+        true  => acc,
+        false => {
+            a := arg(i)
+            (a == "--").match ({
+                true  => pick_root_from(i + 1, acc),
+                false => pick_root_from(i + 1, a),
+            })
+        },
+    })
+}
+pick_root = () string_view { pick_root_from(1, "src") }
+main = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    root := pick_root()
+    root.is_dir().match ({
+        true  => {
+            mp.walk(root)
+            format("-- sigs: {} files, {} fns, {} types\n", [arg_int(g_files), arg_int(g_fns), arg_int(g_types)])
+            0
+        },
+        false => {
+            format("sigs: not a directory: {}\n", [arg_str(root)])
+            1
+        },
+    })
+}
