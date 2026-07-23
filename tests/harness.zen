@@ -5,11 +5,26 @@
 //
 //   make -f bootstrap/Makefile harness   # build this with zenc, run it; exit 0 only when all pass
 //
+// ── SUITE-LEVEL PARALLELISM ──────────────────────────────────────────────────────────────────────
+// The full run fans the categories out as CONCURRENT CHILD PROCESSES of this same binary: the parent
+// re-execs itself (via /proc/<pid>/exe) once per category with ZEN_HARNESS_SUITE=<cat>, capturing each
+// child's stdout+stderr to a per-suite file, through a bounded pool (ZO_SUITE_POOL, default sized for
+// a ~16-core box — see hp_pool). Each child is a fresh process, so per-suite isolation is free:
+//   - scratch:   zo_dir() is /tmp/zo.<pid> and every child has its own pid → its own scratch root;
+//   - compiler:  each child gets a PRIVATE ZENC_CACHE_DIR under the parent's scratch dir;
+//   - output:    a suite's block (header + P/F marks) is buffered to a file and printed ATOMICALLY,
+//                in the ORIGINAL serial order, once every suite has finished — no interleaving.
+// The failure contract is unchanged: a child exits 0 iff its category fully passed; the parent counts
+// nonzero children (a missing/garbled exit marker counts as a failure, never a silent pass) and prints
+// "zen harness: ALL PASS" only when every suite passed — the exact string integrate.sh greps for.
+//
 // ── ADDING A CATEGORY ────────────────────────────────────────────────────────────────────────────
 // A category agent writes tests/harness_<cat>.zen exporting `harness_<cat>_run*() i32` (see harness_lib.zen
-// for the contract). Wire it in here with two edits: import its run fn, and add it to the sum below.
-// The `harness_<cat>_run` names are unique, so the flat imports never collide.
-{ fixpoint_ok, run_suite, zo_ensure, zo_cleanup } = harness_lib
+// for the contract). Wire it in here with THREE edits: import its run fn, add a dispatch line in
+// hp_run_cat, and add its name to BOTH lists in hp_run_parallel (sched = scheduling order, longest
+// first; order = printing order). hp_run_cat fails loudly on an unknown name, so a missed edit can
+// never silently skip a suite.
+{ fixpoint_ok, run_suite, zo_ensure, zo_cleanup, zo_dir, zo_join, zo_itoa, zo_par_run_n } = harness_lib
 { harness_value_run } = harness_value
 { harness_verdict_run } = harness_verdict
 { harness_build_run } = harness_build
@@ -22,27 +37,192 @@
 { harness_fmt_roundtrip_run } = harness_fmt_roundtrip
 { harness_lsp_run } = harness_lsp
 { harness_stdsurface_run } = harness_stdsurface
-{ out } = std.io.file
+{ out, contents_in, shell } = std.io.file
 { getEnv } = std.sys.os
-{ is_empty } = std.text.str
+{ is_empty, starts_with, try_parse_int } = std.text.str
+{ Malloc, malloc, free } = std.mem.alloc
+{ getpid } = std.c.libc
+// dispatch ONE category by name (child mode). Unknown names FAIL loudly — a typo in the parent's
+// suite list must never become a silently-green suite.
+hp_run_cat = (name: string_view) i32 {
+    ran := false
+    fails := 0
+    (name == "value").then({
+        ran = true
+        fails = harness_value_run()
+    })
+    (name == "verdict").then({
+        ran = true
+        fails = harness_verdict_run()
+    })
+    (name == "modules").then({
+        ran = true
+        fails = harness_modules_run()
+    })
+    (name == "build").then({
+        ran = true
+        fails = harness_build_run()
+    })
+    (name == "boundaries").then({
+        ran = true
+        fails = harness_boundaries_run()
+    })
+    (name == "misc").then({
+        ran = true
+        fails = harness_misc_run()
+    })
+    (name == "fuzz").then({
+        ran = true
+        fails = harness_fuzz_run()
+    })
+    (name == "argparse").then({
+        ran = true
+        fails = harness_argparse_run()
+    })
+    (name == "datetime").then({
+        ran = true
+        fails = harness_datetime_run()
+    })
+    (name == "fmt_roundtrip").then({
+        ran = true
+        fails = harness_fmt_roundtrip_run()
+    })
+    (name == "lsp").then({
+        ran = true
+        fails = harness_lsp_run()
+    })
+    (name == "stdsurface").then({
+        ran = true
+        fails = harness_stdsurface_run()
+    })
+    (name == "fixpoint").then({
+        ran = true
+        fails = run_suite("fixpoint", [fixpoint_ok()])
+    })
+    (ran == false).then({
+        out("harness: unknown suite '")
+        out(name)
+        out("'\n")
+        fails = 1
+    })
+    fails
+}
+// the SUITE pool size: how many category children run concurrently. Default 6 (measured sweet spot on
+// the 16-core dev box — each child fans its own case pipelines out over ZO_NWORKERS workers, so the
+// pool must stay well under nproc or the box thrashes on fork pressure). Env ZO_SUITE_POOL overrides.
+hp_pool = () i64 {
+    e := getEnv("ZO_SUITE_POOL")
+    is_empty(e).match ({
+        true  => 6,
+        false => try_parse_int(e).match ({
+            .Ok(v)  => (v < 1).then({ 1 }, { v }),
+            .Err(x) => 6,
+        }),
+    })
+}
+// per-child INNER case-worker width (ZO_NWORKERS handed to each suite child). Default 8 (measured:
+// pool×inner beyond ~3×nproc buys nothing and piles up fork memory; 4 starves the build/modules
+// suites whose case pipelines block on cc). Env ZO_SUITE_INNER overrides for tuning.
+hp_inner = () i64 {
+    e := getEnv("ZO_SUITE_INNER")
+    is_empty(e).match ({
+        true  => 8,
+        false => try_parse_int(e).match ({
+            .Ok(v)  => (v < 1).then({ 1 }, { v }),
+            .Err(x) => 8,
+        }),
+    })
+}
+// build the shell command that runs ONE suite child: private ZENC_CACHE_DIR, output captured to
+// <zo_dir>/s_<cat>.out, exit status recorded in <zo_dir>/s_<cat>.rc (workers can't return an exit
+// code, so it round-trips through a file — same convention as harness_lib's rc<gid> markers).
+// ZO_NWORKERS bounds the child's INNER case fan-out so pool×inner stays ≈ nproc-ish.
+hp_suite_cmd = (
+    mp: MutPtr<Malloc>,
+    self: string_view,
+    name: string_view,
+    inner: string_view,
+    cache: string_view,
+) string_view {
+    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    d := mp.zo_dir()
+    mp.zo_join([z, "mkdir -p ", cache, "; ZENC_CACHE_DIR=", cache, " ZO_NWORKERS=", inner, " ZEN_HARNESS_SUITE=", name, " ", self, " > ", d, "/s_", name, ".out 2>&1; echo $? > ", d, "/s_", name, ".rc"])
+}
+// FULL run, parallel at the suite level: fan the categories out as child processes through a bounded
+// pool, then print each suite's captured block in the ORIGINAL serial order and count failed suites.
+hp_run_parallel = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    // SCHEDULING order — longest poles first so the pool never idles into a tail (measured on the
+    // 16-core dev box: build ~32s, modules ~30s, misc ~15s, fmt_roundtrip/fixpoint ~12s, rest ≤3s).
+    sched := ["build", "modules", "misc", "fmt_roundtrip", "fixpoint", "stdsurface", "value", "argparse", "verdict", "datetime", "boundaries", "fuzz", "lsp"]
+    n := sched.len
+    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    self := mp.zo_join([z, "/proc/", mp.zo_itoa(getpid().to_i64()), "/exe"])
+    inner := mp.zo_itoa(hp_inner())    // per-child case workers (see hp_inner)
+    // ONE warm ZENC_CACHE_DIR shared by every suite child, PERSISTENT across runs (env
+    // ZO_HARNESS_CACHE_DIR overrides — point it into the run's scratch dir to force a cold run).
+    // Sharing/persisting is safe: entries are CONTENT-keyed (running-compiler binary hash + full
+    // source closure), so a rebuilt compiler or an edited fixture always MISSES — a warm hit is by
+    // construction the memoized verdict of this exact compiler on this exact input. Binary publishes
+    // are atomic pid-temp + `mv -f`, so concurrent same-key writers (suite children, or two whole
+    // harness runs) can never tear an entry. The suites that TEST cache behavior pin their own
+    // ZENC_CACHE_DIR=$ZT/… / ZENC_NO_CACHE=1 inline in their commands, which overrides this ambient
+    // dir — those cases stay exactly as cold as they demand (see harness_build's
+    // project_ffi_report_mode for the one output-mode case that NEEDS a cold check).
+    // Stale-compiler entries accumulate across rebuilds, so a size guard wipes the dir past ~2GB.
+    warm0 := getEnv("ZO_HARNESS_CACHE_DIR")
+    warm := is_empty(warm0).then({ "/tmp/zo-harness-cache" }, { warm0 })
+    shell(mp.zo_join([z, "mkdir -p ", warm, "; test \"$(du -sm ", warm, " 2>/dev/null | cut -f1)\" -gt 2048 2>/dev/null && rm -rf ", warm, "; true"]))
+    base := malloc(n * 8)
+    cmds: [string_view] := base.slice(n)
+    sched.loop((h, i, s) {
+        cmds[i] = mp.hp_suite_cmd(self, s, inner, warm)
+    })
+    zo_par_run_n(cmds, n, hp_pool())
+    free(base)
+    // PRINTING order — the exact order the old serial harness ran, so the report reads identically.
+    order := ["value", "verdict", "modules", "build", "boundaries", "misc", "fuzz", "argparse", "datetime", "fmt_roundtrip", "lsp", "stdsurface", "fixpoint"]
+    fails := 0
+    order.loop((h, i, s) {
+        mp.contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".out"])).match ({
+            .Ok(txt) => out(txt),
+            .Err(e)  => {
+                out("suite '")
+                out(s)
+                out("': no captured output (child crashed before writing?)\n")
+            },
+        })
+        ok := mp.contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".rc"])).match ({
+            .Ok(t)  => t.starts_with("0"),
+            .Err(e) => false,
+        })    // missing exit marker = the child never finished — a failure, never a silent pass
+        (ok == false).then({
+            out("  SUITE FAIL: ")
+            out(s)
+            out("\n")
+            fails = fails + 1
+        })
+    })
+    fails
+}
 main* = () i32 {
+    // create this run's private scratch dir BEFORE any case writes into it (see harness_lib zo_*).
+    zo_ensure()
+    // CHILD mode (env ZEN_HARNESS_SUITE=<cat>): run exactly that category and exit 0/1. The parent
+    // captures this process's whole output; it must NOT print the final ALL PASS/FAILURES verdict.
+    suite := getEnv("ZEN_HARNESS_SUITE")
+    (is_empty(suite) == false).then({
+        f := hp_run_cat(suite)
+        zo_cleanup()
+        return (f == 0).then({ 0 }, { 1 })
+    })
     // FAST mode (env ZEN_HARNESS_FAST set non-empty, e.g. `make harness-fast`): run ONLY the quick
-    // deterministic correctness suites (value + verdict) and skip the slow subprocess-heavy
+    // deterministic correctness suites (value + verdict) in-process and skip the slow subprocess-heavy
     // ones (modules ~90s of multi-file builds, build/boundaries/misc/fuzz, + the full self-host
     // fixpoint). For inner-loop iteration; the full `make harness` stays the merge gate.
     fast := is_empty(getEnv("ZEN_HARNESS_FAST")).then({ false }, { true })
-    // create this run's private scratch dir BEFORE any case writes into it (see harness_lib zo_*).
-    zo_ensure()
-    fails := 0
-    // fast subset — always run (deterministic, a few seconds).
-    fails = fails + harness_value_run()
-    fails = fails + harness_verdict_run()
-    // slow subprocess-heavy suites — only when NOT in fast mode. `match` is control flow, so in fast
-    // mode the false arm (every slow suite call) is never evaluated.
-    fails = fails + fast.match ({
-        true  => 0,
-        false => harness_modules_run() + harness_build_run() + harness_boundaries_run() + harness_misc_run() + harness_fuzz_run() + harness_argparse_run() + harness_datetime_run() + harness_fmt_roundtrip_run() + harness_lsp_run() + harness_stdsurface_run() + run_suite("fixpoint", [fixpoint_ok()]),
-    })
+    fails := fast.then({ harness_value_run() + harness_verdict_run() }, { hp_run_parallel() })
     // remove this run's private scratch dir (unique per pid, so cleanup is best-effort housekeeping).
     zo_cleanup()
     (fails == 0).match ({

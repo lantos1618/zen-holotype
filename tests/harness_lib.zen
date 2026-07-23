@@ -31,6 +31,7 @@
 { expect } = std.core.result
 { integer_in } = std.text.num
 { getpid } = std.c.libc
+{ getEnv } = std.sys.os
 thread = std.concurrent.thread    // NAMESPACED: thread.join collides in the flat namespace with std.text.str.join / std.sys.path.join
 // ── PER-RUN UNIQUE TEMP NAMESPACE (concurrency safety) ────────────────────────────────────────────
 // `make harness` is run concurrently all the time (parallel agents). The hazard is shared `/tmp`
@@ -137,14 +138,30 @@ zo_idpath* = (mp: MutPtr<Malloc>, prefix: string_view, gid: i64, suffix: string_
 // how many worker threads to fan out over: `nproc` (subprocess pipelines are cc-bound, so ≈ #cores),
 // clamped ≥ 1, falling back to NWORKERS_FALLBACK if nproc can't be read/parsed. `tr -d` strips the
 // trailing newline so try_parse_int (which refuses a trailing non-digit) accepts it.
+// Env ZO_NWORKERS (a positive integer) OVERRIDES nproc: the suite-parallel parent (tests/harness.zen)
+// sets it on each suite child so pool×inner-workers stays bounded instead of pool×nproc oversubscribing
+// (and over-forking memory) on a box already running the suite pool.
 zo_nproc = (mp: MutPtr<Malloc>) i64 {
-    shell(mp.zo_cmd("nproc | tr -d '\\n' > $ZT/zo_nproc.txt 2>/dev/null"))
-    mp.contents_in(mp.zo_path("zo_nproc.txt")).match ({
-        .Ok(s)  => try_parse_int(s).match ({
-            .Ok(v)  => (v < 1).then({ 1 }, { v }),
-            .Err(e) => NWORKERS_FALLBACK,
+    envw := getEnv("ZO_NWORKERS")
+    ov := is_empty(envw).match ({
+        true  => 0,
+        false => try_parse_int(envw).match ({
+            .Ok(v)  => v,
+            .Err(e) => 0,
         }),
-        .Err(e) => NWORKERS_FALLBACK,
+    })
+    (ov > 0).match ({
+        true  => ov,
+        false => {
+            shell(mp.zo_cmd("nproc | tr -d '\\n' > $ZT/zo_nproc.txt 2>/dev/null"))
+            mp.contents_in(mp.zo_path("zo_nproc.txt")).match ({
+                .Ok(s)  => try_parse_int(s).match ({
+                    .Ok(v)  => (v < 1).then({ 1 }, { v }),
+                    .Err(e) => NWORKERS_FALLBACK,
+                }),
+                .Err(e) => NWORKERS_FALLBACK,
+            })
+        },
     })
 }
 // worker's inner loop: claim the next index with a fetch-add (atomic_add returns the NEW value, so the
@@ -178,10 +195,17 @@ zo_par_worker = (arg: RawPtr<u8>) RawPtr<u8> {
 // commands are independent and write disjoint per-case files, so this is a pure fan-out/join — the only
 // shared state is the atomic work counter. Blocks until all cases have run.
 zo_par_run* = (cmds: [string_view], n: i64) void {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    zo_par_run_n(cmds, n, mp.zo_nproc())
+}
+// zo_par_run with an EXPLICIT worker count (still never more than #cases, clamped ≥ 1). The suite-level
+// parallel runner (tests/harness.zen) uses this to bound its pool independently of nproc: each suite
+// child is itself a process fanning out case pipelines, so the SUITE pool must stay small (memory) while
+// the per-case pools inside each child keep their own sizing.
+zo_par_run_n* = (cmds: [string_view], n: i64, workers: i64) void {
     (n <= 0 == false).then({
-        m := Malloc(_: 0)
-        mp := m.addr()
-        w0 := mp.zo_nproc()
+        w0 := (workers < 1).then({ 1 }, { workers })
         w := (w0 > n).then({ n }, { w0 })    // never spawn more workers than cases
         counter := malloc(8)
         counter.store_i64(0)
