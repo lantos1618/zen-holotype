@@ -150,7 +150,22 @@ Point(x: 1, y: 2)
 xs[i]
 [1, 2, 3]
 value.match({ pattern => expr, _ => fallback })
+cond ? a : b
 ```
+
+`cond ? a : b` is the conditional expression — pure parse-level sugar for the
+boolean two-arm match: it parses to exactly the node
+`cond.match ({ true => a, false => b })` produces, so both arms are lazy (only
+the taken arm evaluates) and both arms are required (the one-armed lazy effect
+is `.then`). The condition must be `bool`. Its precedence sits below `||`, so
+`a || b ? x : y` conditions on `a || b`, and `c ? x : a || b` groups `a || b`
+as the else arm; as an operand or receiver a ternary must be parenthesized
+(`(c ? a : b) + 1`, `(c ? a : b).method()`). The form is right-associative:
+`a ? b : c ? d : e` is `a ? b : (c ? d : e)`. Rule of thumb: value-position
+conditionals read best as `?:`; statement-position control flow stays
+`.match`/`.then`. The formatter canonicalizes accordingly — a short exhaustive
+two-arm boolean match prints as a ternary when it fits on one line, while
+long, nested, or block-bodied forms keep the multiline `.match` spelling.
 
 Statements:
 
@@ -165,12 +180,15 @@ return expr      // early return
 @while(cond) { } // compiler/substrate primitive, not public style
 ```
 
-Source-level branching is `.match`. `if`, `for`, and ordinary `while` are not
-source syntax. The C backend may lower checked matches to C `switch`, `if`, or
-ternary expressions as target details.
+Source-level branching is `.match` (with `?:` as its expression spelling).
+`if`, `for`, and ordinary `while` are not source syntax. The C backend may
+lower checked matches to C `switch`, `if`, or ternary expressions as target
+details.
 
 An exact source token `if` is rejected as `error[no-if]`. The diagnostic shows
-the equivalent boolean form: `cond.match ({ true => yes, false => no })`.
+the equivalent forms: `cond ? yes : no` in expression position, and
+`cond.match ({ true => yes, false => no })` for statement-position control
+flow.
 Conditional logic inside an enum arm is another nested boolean `.match`; Zen has
 no match-guard exception to the no-`if` rule.
 

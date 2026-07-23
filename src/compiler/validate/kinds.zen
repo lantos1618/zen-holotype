@@ -1529,6 +1529,7 @@ EnvKinds: {
     trait_recv_missing: (Self, CallData) bool,
     match_result_ty: (Self, Ty, [ArmData]) Ty,
     cond_result_err: (Self, CondData) i32,
+    cond_bool_err: (Self, CondData) i32,
     arm_result_err: (Self, Ty, Ty, ArmData) i32,
     novalue_arm_leaf: (Self, Ptr<Expr>) i32,
     value_void_arm_err: (Self, Ty, Ptr<Expr>) i32,
@@ -1585,6 +1586,18 @@ Env.impl(EnvKinds, {
         (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
             true  => 0,
             false => d.cond_compatible(tt, et).match ({ true => 0, false => 1 }),
+        })
+    }
+    cond_bool_err = (env: Env, d: CondData) i32 {
+        // The condition of a `?:` / boolean `.match` must be bool. One deliberate exemption: a bare
+        // `Int(1)` condition is the parser's own always-true test for a non-terminal `_` wildcard arm
+        // in a lowered literal match, so it stays accepted.
+        load(d.c).match ({
+            .Int(n) => (n == 1).match ({
+                true  => 0,
+                false => 1,
+            }),
+            _       => env.non_bool(d.c).match ({ true => 1, false => 0 }),
         })
     }
     arm_result_err = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {

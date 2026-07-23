@@ -50,17 +50,21 @@ ff_op_prec = (op: string_view) i32 {
 }
 ff_expr_prec = (e: Expr) i32 {
     e.match ({
-        .Bin(b) => ff_op_prec(b.op),
-        _       => 100,
+        .Bin(b)  => ff_op_prec(b.op),
+        .Cond(d) => 0,    // `c ? t : e` binds loosest of all — as ANY Bin operand it needs parens
+        _        => 100,
     })
 }
 ff_is_bin = (e: Expr) bool {
     e.match ({
-        .Bin(b) => true,
-        _       => false,
+        .Bin(b)  => true,
+        .Cond(d) => true,    // a Cond may print as a ternary, which binds looser than any postfix
+        _        => false,
     })
 }
-// a postfix receiver: wrap iff the receiver is a (lower-precedence) Bin
+// a postfix receiver: wrap iff the receiver is a (lower-precedence) Bin or a Cond — a Cond may
+// render as `c ? a : b`, so `(c ? a : b).method()` needs the parens to keep `.method` off the
+// else-arm (the match-form rendering tolerates the parens; the ternary rendering requires them).
 ff_recv* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
     ff_is_bin(load(e)).match ({
         true  => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"),
@@ -242,10 +246,32 @@ ff_call = (s: String, a: MutPtr<Malloc>, c: CallData, ind: i32) String {
         .ff_args(a, c.args, ind)
         .ff_append(a, ")")
 }
-// Bool `.match` lowers to Cond. Keep genuinely short exhaustive forms inline, but expand a long/nested
-// result exactly like an enum match instead of letting recursive `false => cond` chains become giant lines.
-// An invalid false-only match remains visible for diagnostics; true-only effects canonicalize to `.then`.
+// Bool `.match` lowers to Cond. A short exhaustive two-arm form CANONICALIZES to the ternary
+// expression `c ? t : e` (the parse-level sugar for the same node) when both arms are plain
+// expressions; long/nested bodies keep the multiline `.match` form for readability, and a
+// block-bodied arm keeps the `.match` spelling (a brace block cannot be a ternary operand).
+// An invalid one-armed match remains visible for diagnostics; one-way effects canonicalize to `.then`.
+// The ternary CONDITION prints bare: it sits below `||`, so any Bin condition reparses unwrapped;
+// a Cond condition never reaches here (ff_cond_nested forces the multiline form, whose ff_recv
+// re-parenthesizes it).
+ff_tern_arm_ok = (e: Expr) bool {
+    e.match ({
+        .Block(b) => false,
+        _         => true,
+    })
+}
+ff_cond_ternary_ok* = (d: CondData) bool {
+    d.oa == 0 && ff_tern_arm_ok(load(d.t)) && ff_tern_arm_ok(load(d.e))
+}
 ff_cond_inline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
+    d.ff_cond_ternary_ok().then({
+        return s
+            .ff_expr(a, d.c, ind)
+            .ff_append(a, " ? ")
+            .ff_expr(a, d.t, ind)
+            .ff_append(a, " : ")
+            .ff_expr(a, d.e, ind)
+    })
     (d.oa == 1).match ({
         true  => s
             .ff_recv(a, d.c, ind)
@@ -384,8 +410,19 @@ ff_nested_control = (e: Expr) bool {
         _         => false,
     })
 }
+ff_is_cond = (e: Expr) bool {
+    e.match ({
+        .Cond(d) => true,
+        _        => false,
+    })
+}
+// A Cond CONDITION that is itself a Cond also counts as nested: an inline ternary condition must
+// not render `a ? x : y ? t : e` (right-assoc would re-group it); the multiline `.match` form's
+// ff_recv re-parenthesizes it instead.
 ff_cond_nested* = (d: CondData) bool {
-    d.oa != 2 && ff_nested_control(load(d.t)) || d.oa != 1 && ff_nested_control(load(d.e))
+    ff_is_cond(load(d.c))
+        || d.oa != 2 && ff_nested_control(load(d.t))
+        || d.oa != 1 && ff_nested_control(load(d.e))
 }
 // a type name, with explicit `<T, …>` args when this is a GENERIC literal (`Rc<Node>`, `Box<i32>`) —
 // the parser records the args in `targs`, and dropping them would lose the type info monomorphization
