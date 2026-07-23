@@ -59,7 +59,8 @@ Owned values are library types:
   when the last owner is released.
 - `Rc<T>` is single-threaded shared ownership.
 - `Arc<T>` is atomically reference-counted shared ownership.
-- `std.mem.trace.Rc<T>` is the cycle-tracing experiment. Its public allocation,
+- `std.mem.trace.Traced<T>` is the cycle-tracing experiment (its block carries an
+  extra trial-deletion color word, so it is deliberately NOT `Rc<T>` under another name). Its public allocation,
   root-registration, and collection entrypoints have allocator-first forms
   (`tracked_in`, `root_in`, `collect_in`) plus default-heap wrappers. Tracked
   block allocation also has `try_tracked_in` / `try_tracked` so allocation

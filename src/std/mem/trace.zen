@@ -1,6 +1,13 @@
 // @self-hosted-only
-// Cycle tracing for Rc<T> blocks using synchronous trial deletion.
-// Trace exposes child Rc references; Drop finalizes payloads selected for reclaim.
+// Cycle tracing for Traced<T> blocks using synchronous trial deletion.
+//
+// `Traced<T>` is NOT std.mem.rc's `Rc<T>` under another name — the layouts diverge: Rc is
+// `[count:i64 | value:T]` (value at offset 8, clone/drop_in lifecycle), Traced is
+// `[count:i64 | color:i64 | value:T]` (value at offset 16; the extra word is the trial-deletion
+// color the collector marks). It used to be spelled `Rc` here too, surviving next to the real Rc
+// only via first-occurrence-wins dedup in the flat namespace — importing both modules into one
+// program would silently pick ONE layout and corrupt the other's blocks. Distinct name = no shadow.
+// Trace exposes child Traced references; Drop finalizes payloads selected for reclaim.
 // The collector keeps a root registry plus a per-collection white-set scratch list.
 // Fallible ops (tracked/root/collect + the list internals) return Result<_, IoError> —
 // allocation failure is a value (`.expect("…")` at fail-fast roots).
@@ -12,7 +19,7 @@ GRAY := 1
 WHITE := 2
 store_ptr = (b: RawPtr<u8>, p: RawPtr<u8>) void { store_i64(b, p) }
 load_ptr = (b: RawPtr<u8>) RawPtr<u8> { load_i64(b).offset(0) }
-// Rc<T> block layout: [count:i64 | color:i64 | value:T].
+// Traced<T> block layout: [count:i64 | color:i64 | value:T].
 hcount = (b: RawPtr<u8>) i64 { load_i64(b.offset(0)) }
 hset_count = (b: RawPtr<u8>, v: i64) void { store_i64(b.offset(0), v) }
 hcolor = (b: RawPtr<u8>) i64 { load_i64(b.offset(8)) }
@@ -68,7 +75,7 @@ list_push_static = (l: RawPtr<u8>, p: RawPtr<u8>) RawPtr<u8> {
         false => l,
     })
 }
-// Candidate cycle roots. A real Rc would register on decrement-not-to-zero.
+// Candidate cycle roots. A real refcount would register on decrement-not-to-zero.
 roots := null_ptr()
 roots_list_in<A> = (alloc: MutPtr<A>) Result<RawPtr<u8>, IoError> {
     out: Result<RawPtr<u8>, IoError> := (roots == null_ptr()).match ({
@@ -125,44 +132,46 @@ OP_MARK := 0
 OP_SCAN := 1
 OP_SCAN_BLACK := 2
 OP_GATHER := 3
-Rc*<T>: {
+Traced*<T>: {
     base: RawPtr<u8>,
-    val = (r: Rc<T>) [T] { slice(r.base.offset(16), 1) }
-    get = (r: Rc<T>) T { r.val()[0] }
-    inc = (r: Rc<T>) void { store_i64(r.base.offset(0), load_i64(r.base.offset(0)) + 1) }
+    val = (r: Traced<T>) [T] { slice(r.base.offset(16), 1) }
+    get = (r: Traced<T>) T { r.val()[0] }
+    inc = (r: Traced<T>) void { store_i64(r.base.offset(0), load_i64(r.base.offset(0)) + 1) }
 }
-tracked_in*<A, T> = (alloc: MutPtr<A>, x: T) Result<Rc<T>, IoError> {
+tracked_in*<A, T> = (alloc: MutPtr<A>, x: T) Result<Traced<T>, IoError> {
     tx := x
     alloc.try_acquire(16 + sizeof(T)).match ({
         .Ok(base) => {
             tracked_blocks = tracked_blocks + 1
             store_i64(base.offset(0), 0)
             store_i64(base.offset(8), 0)
-            r := Rc<T>(base: base)
+            r := Traced<T>(base: base)
             s := r.val()
             s[0] = tx
-            ok: Result<Rc<T>, IoError> := .Ok(r)
+            ok: Result<Traced<T>, IoError> := .Ok(r)
             ok
         },
         .Err(e)   => {
-            err: Result<Rc<T>, IoError> := .Err(e)
+            err: Result<Traced<T>, IoError> := .Err(e)
             err
         },
     })
 }
-tracked*<A, T> = (alloc: MutPtr<A>, x: T) Result<Rc<T>, IoError> { alloc.tracked_in(x) }
-root_in*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError> { alloc.roots_add_in(r.base) }
-root*<A, T> = (alloc: MutPtr<A>, r: Rc<T>) Result<i32, IoError> { alloc.root_in(r) }
-// Generic shims re-dispatch Trace/Drop after Rc<T> is monomorphized.
-do_trace<T> = (r: Rc<T>, t: MutPtr<Tracer>) void {
+tracked*<A, T> = (alloc: MutPtr<A>, x: T) Result<Traced<T>, IoError> { alloc.tracked_in(x) }
+root_in*<A, T> = (alloc: MutPtr<A>, r: Traced<T>) Result<i32, IoError> {
+    alloc.roots_add_in(r.base)
+}
+root*<A, T> = (alloc: MutPtr<A>, r: Traced<T>) Result<i32, IoError> { alloc.root_in(r) }
+// Generic shims re-dispatch Trace/Drop after Traced<T> is monomorphized.
+do_trace<T> = (r: Traced<T>, t: MutPtr<Tracer>) void {
     s := r.val()
     s[0].addr().trace(t)
 }
-do_drop<T> = (r: Rc<T>) void {
+do_drop<T> = (r: Traced<T>) void {
     s := r.val()
     s[0].addr().drop()
 }
-child*<T> = (child: Rc<T>, t: MutPtr<Tracer>) void { visit_child(child.base, t) }
+child*<T> = (child: Traced<T>, t: MutPtr<Tracer>) void { visit_child(child.base, t) }
 // Collector passes operate on erased blocks; payload work goes through blk_trace/blk_drop.
 visit_child = (cb: RawPtr<u8>, t: MutPtr<Tracer>) void {
     (t.op == OP_MARK).match ({
@@ -235,9 +244,9 @@ Node.impl(Trace, {
         })
     }
 })
-blk_trace = (b: RawPtr<u8>, t: MutPtr<Tracer>) void { do_trace(Rc<Node>(base: b), t) }
-blk_drop = (b: RawPtr<u8>) void { do_drop(Rc<Node>(base: b)) }
-set_kid* = (parent: Rc<Node>, child: Rc<Node>) void {
+blk_trace = (b: RawPtr<u8>, t: MutPtr<Tracer>) void { do_trace(Traced<Node>(base: b), t) }
+blk_drop = (b: RawPtr<u8>) void { do_drop(Traced<Node>(base: b)) }
+set_kid* = (parent: Traced<Node>, child: Traced<Node>) void {
     p := parent.val()
     p[0] = Node(
         has: 1,

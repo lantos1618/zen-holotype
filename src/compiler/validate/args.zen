@@ -1048,7 +1048,7 @@ sx_inits_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32
 // pack an offending position under a rule kind (0 = clean stays 0 — kv_at alone would emit a bare kind).
 sx_kv = (pos: i32, k: i32) i32 { (pos == 0).match ({ true => 0, false => kv_at(k, pos) }) }
 // actor-send / spawn surfaces (name-based, arity-guarded): the PAYLOAD/STATE is the LAST argument.
-//   send:         `send(h, m)` (2+ args) / `h.send(m)` — ActorRef/ActorHandle/ActorCell/ReplyRef
+//   send:         `send(h, m)` (2+ args) / `h.send(m)` — CellRef/ActorHandle/ActorCell/ReplyRef
 //   pool_send:    `pool_send(p, a, m)` (3 args) / `p.pool_send(a, m)` (2 args)
 //   ref_send_msg: `ref_send_msg(r, m)` (2 args) / `r.ref_send_msg(m)` (1 arg) — S2's typed ActorRef
 //                 REPLY send (std.concurrent.pool_actor). A reply is sent from INSIDE `receive`, where the
@@ -1056,9 +1056,12 @@ sx_kv = (pos: i32, k: i32) i32 { (pos == 0).match ({ true => 0, false => kv_at(k
 //                 scope — so a scratch pointer routed out through a reply would dangle before the receiver
 //                 reads it. Recognizing it here rejects that identically to a forward send (KSCRATCHSEND).
 //   spawn:        `spawn(alloc, cap, state)` (3 args) / `alloc.spawn(cap, state)` (2-arg MethodCall) /
-//              module-qualified `actor.spawn(alloc, cap, state)` — the flattener rewrites a
-//              namespace-qualified call to `alias__spawn(alloc, cap, state)`, so the flat-Call
+//              module-qualified `actor.spawn_handle(alloc, cap, state)` — the flattener rewrites a
+//              namespace-qualified call to `alias__spawn_handle(alloc, cap, state)`, so the flat-Call
 //              match also accepts the `…__spawn` / `…__send` / `…__pool_send` suffix forms.
+//              `spawn_handle` is std.concurrent.actor's cooperative constructor (renamed from `spawn`
+//              so it never flatten-collides with std.concurrent.thread's `spawn`); both spellings are
+//              recognized here so user fns simply NAMED `spawn` keep their guard.
 sx_named* = (fn: string_view, bare: string_view, qual: string_view) bool {
     fn == bare || fn.ends_with(qual)
 }
@@ -1069,7 +1072,8 @@ sx_call_kind* = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, c: CallData) i32 {
         true  => a.sx_payload_pos(taint, c.args[c.args.len - 1].addr()).sx_kv(KSCRATCHSEND()),
         false => 0,
     })
-    st := (c.fn.sx_named("spawn", "__spawn") && c.args.len == 3).match ({
+    st := ((c.fn.sx_named("spawn", "__spawn") || c.fn.sx_named("spawn_handle", "__spawn_handle"))
+        && c.args.len == 3).match ({
         true  => a.sx_payload_pos(taint, c.args[2].addr()).sx_kv(KSCRATCHSTATE()),
         false => 0,
     })
@@ -1082,7 +1086,9 @@ sx_mcall_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, mc: MethodCallData) i3
         true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSEND()),
         false => 0,
     })
-    st := (mc.method.sx_named("spawn", "__spawn") && (mc.args.len == 2 || mc.args.len == 3)).match ({
+    st := ((mc.method.sx_named("spawn", "__spawn")
+        || mc.method.sx_named("spawn_handle", "__spawn_handle"))
+        && (mc.args.len == 2 || mc.args.len == 3)).match ({
         true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSTATE()),
         false => 0,
     })

@@ -12,6 +12,13 @@
 // Merging these two surfaces (auto-trampoline / typed spawn→pool) is tracked; until then treat
 // them as two APIs with different scheduling semantics.
 //
+// This module OWNS the canonical `Context<M>` / `Receiver<M>` types; pool_actor imports them, so both
+// actor surfaces share ONE message-wrapper/trait definition (no same-name shadow in the flat namespace).
+// Because pool_actor's closure also flattens in std.concurrent.pool + std.concurrent.thread, this
+// module's names must stay DISTINCT from theirs: the cooperative mailbox ref is `CellRef<M>` (pool.zen
+// owns `ActorRef` — the sendable cross-thread reply address) and the cooperative constructor is
+// `spawn_handle` (std.concurrent.thread owns `spawn`).
+//
 // User code defines a message enum and a receiver, then tells typed messages through an ActorCell<M>
 // or an ActorHandle<M, ActorT>. ActorHandle owns allocator-backed actor state for demo-facing code.
 { Allocator, try_acquire } = std.mem.alloc
@@ -32,12 +39,12 @@ Receiver*<M>: {
     receive: (MutPtr<Self>, Context<M>) void,
 }
 // Internal system state owns one allocator-backed Ring<M> block plus one allocator-backed message
-// buffer. ActorRef shares the state; it never allocates or frees. The mailbox is a Ring<M> (the single
+// buffer. CellRef shares the state; it never allocates or frees. The mailbox is a Ring<M> (the single
 // shared ring abstraction, std.concurrent.ring) held behind the RawPtr state slot.
 ActorSystem<M>: {
     state: RawPtr<u8>,
     state_slot = (sys: ActorSystem<M>) [Ring<M>] { sys.state.slice(1) }
-    ref = (sys: ActorSystem<M>) ActorRef<M> { ActorRef<M>(state: sys.state) }
+    ref = (sys: ActorSystem<M>) CellRef<M> { CellRef<M>(state: sys.state) }
     messages = (sys: ActorSystem<M>) [M] {
         state := sys.state_slot()
         state[0].buf.slice(state[0].cap)
@@ -73,10 +80,12 @@ ActorSystem<M>: {
         alloc.release(sys.state)
     }
 }
-ActorRef*<M>: {
+// The cooperative mailbox reference (`cell.ref()` / `engine.ref()`): same-thread enqueue only.
+// Named CellRef, NOT ActorRef — std.concurrent.pool owns `ActorRef` (the sendable pool reply address).
+CellRef*<M>: {
     state: RawPtr<u8>,
-    ref_state = (ref: ActorRef<M>) [Ring<M>] { ref.state.slice(1) }
-    send = (ref: ActorRef<M>, message: M) bool {
+    ref_state = (ref: CellRef<M>) [Ring<M>] { ref.state.slice(1) }
+    send = (ref: CellRef<M>, message: M) bool {
         state := ref.ref_state()
         cur := state[0]
         cur.is_full().match ({
@@ -176,7 +185,7 @@ make_system<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorSystem<M>, IoError>
 }
 ActorEngine*<M>: {
     sys: ActorSystem<M>,
-    ref = (engine: ActorEngine<M>) ActorRef<M> { engine.sys.ref() }
+    ref = (engine: ActorEngine<M>) CellRef<M> { engine.sys.ref() }
     drain<ActorT> = (engine: ActorEngine<M>, actor: MutPtr<ActorT>) void { engine.sys.run(actor) }
     free<A> = (engine: ActorEngine<M>, alloc: MutPtr<A>) void { engine.sys.free(alloc) }
 }
@@ -195,7 +204,7 @@ engine*<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorEngine<M>, IoError> {
 }
 ActorCell*<M>: {
     inner: ActorEngine<M>,
-    ref = (cell: ActorCell<M>) ActorRef<M> { cell.inner.ref() }
+    ref = (cell: ActorCell<M>) CellRef<M> { cell.inner.ref() }
     send = (cell: ActorCell<M>, message: M) bool { cell.ref().send(message) }
     reply<A, T> = (cell: ActorCell<M>, alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
         alloc.reply()
@@ -387,7 +396,9 @@ ActorHandle*<M, ActorT>: {
         alloc.release(handle.state)
     }
 }
-spawn*<A, M, ActorT> = (
+// Allocate actor state + mailbox and return an ActorHandle. Named spawn_handle, NOT spawn —
+// std.concurrent.thread owns `spawn`, and both flatten into any pool_actor program's closure.
+spawn_handle*<A, M, ActorT> = (
     alloc: MutPtr<A>,
     cap: i64,
     actor: ActorT,

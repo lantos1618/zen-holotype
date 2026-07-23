@@ -719,11 +719,13 @@ Concurrency support is stdlib-level today:
 - `std.concurrent.sched`: small scheduler, with `try_run` / `try_run_in`
   for fallible scheduler flag allocation;
 - `std.concurrent.actor`: cooperative typed actors (inline drain on the caller
-  thread) — `Receiver<M>`, `ActorRef<M>`, `ReplyRef<T>`, `ActorEngine<M>`,
+  thread) — `Receiver<M>`, `CellRef<M>`, `ReplyRef<T>`, `ActorEngine<M>`,
   `ActorCell<M>`, and `ActorHandle<M, ActorT>`. `run` / `request` / `ask` are
   same-thread; not scheduled on the pool.
 - `std.concurrent.pool_actor`: parallel typed actors on `std.concurrent.pool`
-  (`PooledHandle`, `spawn_actor`, typed `send`). Requires a concrete trampoline
+  (`PooledHandle`, `spawn_actor`, typed `send`). `Context<M>` / `Receiver<M>` are
+  imported from `std.concurrent.actor` — one canonical definition serves both
+  actor surfaces. Requires a concrete trampoline
   stub per `(Msg, ActorT)` until the compiler can address generic instantiations.
 - `std.concurrent.cown`: owned FFI-handle examples, with namespace-bound
   `cown.buf` / `cown.try_buf` / `cown.file` / `cown.file_in` spellings;
@@ -769,7 +771,7 @@ for `std.concurrent.actor` and `heap` may come from namespace-bound
 `alloc.gpa()` (`alloc = std.mem.heap`).
 `ActorHandle<M, ActorT>` is the higher-level stateful actor wrapper for the
 **cooperative** path. A program creates one with
-`actor.spawn(heap.addr(), 16, ActorState(...))`, which returns
+`actor.spawn_handle(heap.addr(), 16, ActorState(...))`, which returns
 `Result<ActorHandle<M, ActorT>, IoError>`.
 It sends typed messages with `handle.tell(message)`, drains its owned state with
 `handle.run()` (inline on the caller), wraps request/reply flows through
@@ -780,7 +782,7 @@ For parallel typed actors on the pool, use `std.concurrent.pool_actor` instead
 typed message, for example `(reply) { .GetStats(reply) }`, enqueues it, drains
 the receiver, awaits the reply, and releases the reply storage. The lower-level
 `ask` method remains available for callbacks that need side effects before
-draining. The allocating entry points — `actor.spawn`, `actor.cell`,
+draining. The allocating entry points — `actor.spawn_handle`, `actor.cell`,
 `actor.engine`, and `cell.reply` — all return `Result` and clean up partial
 allocation before returning `.Err`; there are no separate `try_*` variants.
 
