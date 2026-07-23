@@ -1030,7 +1030,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     (e == "").match ({ true => mp.dirname(arg(0)), false => e })
 }
 HELP = () string_view {
-    "usage: zenc <run|build|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build <project>                 build its registered default targets\n  zenc build --target <name> <project> build one registered target\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  cat file.zen | zenc   (source -> C filter)\n"
+    "usage: zenc <run|build|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build <project>                 build its registered default targets\n  zenc build --target <name> <project> build one registered target\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
 }
 VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
 main = () i32 {
@@ -1048,13 +1048,13 @@ main = () i32 {
                 say(VERSION())
                 0
             },
-            false => (cmd == "--build-self").match ({
+            false => (cmd == "--build-self" || cmd == "--build-self-full").match ({
                 true  => (arg(2) == "").match ({
                     true  => {
-                        derr("usage: zenc --build-self <out.c> <srcroot>\n")
+                        derr("usage: zenc --build-self[-full] <out.c> <srcroot>\n")
                         2
                     },
-                    false => mp.build_self(arg(3), arg(2)),
+                    false => mp.build_self(arg(3), arg(2), cmd == "--build-self"),
                 }),
                 false => (cmd == "emit").match ({
                     true  => mp.emit_file(root, arg(2), arg(3)),
@@ -1357,6 +1357,7 @@ bs_emit_checked = (
     flat: string_view,
     entry: string_view,
     esrc: string_view,
+    shake: bool,
 ) i32 {
     rp := mp.resolve_prog(root, entry, esrc)
     (mp.report_no_if_resolved(rp, entry, esrc) == 0).match ({
@@ -1365,7 +1366,9 @@ bs_emit_checked = (
             decls := mp.resolve_module(raw)
             (mp.report_check(raw, decls, rp, entry, esrc) == 0).match ({
                 true  => {
-                    gen := mp.genModuleIn(mp.resolve_module(mp.parse_module(flat)))    // type error in compiler source — fail, don't regenerate a miscompiled seed
+                    rawf := mp.parse_module(flat)
+                    kept := shake.match ({ true => mp.bs_shake(rawf), false => rawf })
+                    gen := mp.genModuleIn(mp.resolve_module(kept))    // type error in compiler source — fail, don't regenerate a miscompiled seed
                     gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
                         true  => bs_write(out_path, gen).match ({ true => 0, false => 1 }),
                         false => {
@@ -1380,7 +1383,149 @@ bs_emit_checked = (
         false => 1,
     })
 }
-build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view) i32 {
+// ── --build-self tree-shake: emit only decls reachable from `main` ────────────────────────────────
+// Reuses the `zen audit` reachability fixpoint (AudCtx + the aud_* walkers) over the manifest flat:
+// the dual raw+resolved walk, the bare-method-name fanout (aud_mref) and the live-type -> impl-method
+// fanout (aud_implms). Kept regardless of reachability (the audit's documented exemption classes, all
+// in the keep direction): DRaw escapes, DImport records, DForeign prototypes, module-alias binds,
+// `__`-prefixed decls, DImpl conformance records whose type is live (or a builtin receiver with no
+// type decl to anchor), trait defaults of live traits, and the bare/alias twin of any live name (both
+// copies come from the same source line). bs_close then re-walks every KEPT decl until the seen set
+// stops growing, so the kept set is reference-closed: no emitted decl can reference a dropped one.
+// `--build-self-full` bypasses the shake (the fat seed, every manifest decl).
+bs_trait_live = (ac: MutPtr<AudCtx>, trname: string_view) bool {
+    neg1: i64 := 0 - 1
+    ac.ridx.get(trname, neg1) < 0 || ac.seen.has(trname)
+}
+// mark a kept-for-a-reason name live when the fixpoint alone did not reach it: `__`-synthesized
+// decls, and the bare/alias twin of a live name (same source line, so it is emitted either way).
+bs_root_twin = (ac: MutPtr<AudCtx>, tails: Map<i64>, nm: string_view) void {
+    nta := nm.aud_tail_at()
+    twin := tails.has(nm) || nta > 0 && ac.seen.has(cstr(offset(nm, nta)))
+    (is_empty(nm) == false && (nm.starts_with("__") || twin)).then({
+        ac.aud_ref(nm)
+    })
+}
+// one closure sweep: walk every decl the emission filter keeps unconditionally, so their references
+// join the live set (DForeign signature types, live-trait default bodies, alias binds, twins).
+bs_root_kept = (ac: MutPtr<AudCtx>, tails: Map<i64>, d: Decl) void {
+    d.match ({
+        .DForeign(f)       => ac.aud_walk_sig(f),
+        .DTraitDefault(td) => ac.bs_trait_live(td.trname).then({
+            ac.aud_walk_fn(td.fn)
+        }),
+        .DImpl(im)         => { },
+        .DGlobal(g)        => {
+            g.alias.then({
+                ac.aud_ref(g.name)
+            })
+            ac.bs_root_twin(tails, g.name)
+        },
+        _                  => ac.bs_root_twin(tails, d.aud_decl_name()),
+    })
+}
+// `__`-tail set of the live names, rebuilt per sweep (aud_run's twin-suppression set, keep direction).
+bs_tails = (ac: MutPtr<AudCtx>) Map<i64> {
+    seedv: i64 := 0 - 1
+    tails := of(ac.mp, "", seedv).expect("build-self: oom")
+    ac.seen.keys().loop((h, i, k) {
+        ta := k.aud_tail_at()
+        (ta > 0).then({
+            one: i64 := 1
+            tails = tails.put(ac.mp, cstr(offset(k, ta)), one).expect("build-self: oom")
+        })
+    })
+    tails
+}
+// iterate bs_root_kept sweeps to a fixpoint: newly-live names can make more types live, which keeps
+// more impl blocks, whose methods reference more names — stop when the seen set stops growing.
+bs_close = (ac: MutPtr<AudCtx>, raw: [Decl]) void {
+    prev: i64 := 0 - 1
+    @while (ac.seen.keys().len != prev) {
+        prev = ac.seen.keys().len
+        tails := ac.bs_tails()
+        raw.loop((h, i, d) {
+            ac.bs_root_kept(tails, d)
+        })
+    }
+}
+// the emission filter over the closed live set: which raw manifest decls reach the seed.
+bs_keep = (ac: MutPtr<AudCtx>, d: Decl) bool {
+    neg1: i64 := 0 - 1
+    d.match ({
+        .DImpl(im)         => ac.ridx.get(im.ty, neg1) < 0 || ac.seen.has(im.ty),
+        .DTraitDefault(td) => ac.bs_trait_live(td.trname),
+        .DForeign(f)       => true,
+        _                  => {
+            nm := d.aud_decl_name()
+            is_empty(nm) || ac.seen.has(nm)
+        },
+    })
+}
+// reachability-filter the parsed manifest flat: root `main` (plus the `main(sys)` trampoline's `root`
+// and every impl on a builtin receiver, exactly as `zen audit` roots), run the aud_* fixpoint over
+// the raw AND resolved decls, close over the always-kept classes, then keep only what bs_keep passes.
+// The kept subset is re-resolved by the caller, so mono instances, lowered closures and materialized
+// trait defaults are re-synthesized for the surviving decls only.
+bs_shake = (mp: MutPtr<Malloc>, raw: [Decl]) [Decl] {
+    rdecls := mp.resolve_module(raw)
+    t := mp.aud_tables(raw)
+    seedv: i64 := 0 - 1
+    c := AudCtx(
+        mp: mp,
+        decls: raw,
+        rdecls: rdecls,
+        ridx: mp.aud_index(raw),
+        xidx: mp.aud_index(rdecls),
+        seen: of(mp, "", seedv).expect("build-self: oom"),
+        mseen: of(mp, "", seedv).expect("build-self: oom"),
+        pairs: t.pairs,
+        implms: t.implms,
+    )
+    ac := c.addr()
+    ac.aud_ref("main")
+    mi := c.ridx.get("main", 0 - 1)
+    (mi >= 0).then({
+        raw[mi].match ({
+            .DFunc(f) => {
+                (f.params.len > 0).then({
+                    ac.aud_mref("root")
+                })
+            },
+            _         => { },
+        })
+    })
+    raw.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => {
+                (c.ridx.get(im.ty, 0 - 1) < 0).then({
+                    ac.aud_ref(im.trname)
+                    im.methods.loop((h2, j, p) {
+                        ac.aud_ref(mp.impl_cname_in(im.trname, im.ty, p.name))
+                    })
+                })
+            },
+            _          => { },
+        })
+    })
+    ac.bs_close(raw)
+    n := 0
+    raw.loop((h, i, d) {
+        ac.bs_keep(d).then({
+            n = n + 1
+        })
+    })
+    kept := cbuf<Decl>(mp, n)
+    k := 0
+    raw.loop((h, i, d) {
+        ac.bs_keep(d).then({
+            kept[k] = d
+            k = k + 1
+        })
+    })
+    kept
+}
+build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view, shake: bool) i32 {
     mpath := mp.bs_join(root, "bootstrap/sources.txt")
     contents_in(mp, mpath).match ({
         .Ok(man) => {
@@ -1388,7 +1533,7 @@ build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view) i32 
             flat := mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
             entry := mp.bs_join(root, "driver.zen")
             contents_in(mp, entry).match ({
-                .Ok(esrc) => mp.bs_emit_checked(root, out_path, flat, entry, esrc),
+                .Ok(esrc) => mp.bs_emit_checked(root, out_path, flat, entry, esrc, shake),
                 .Err(e)   => {
                     derr("zenc: --build-self: cannot open driver.zen for validation\n")
                     1
