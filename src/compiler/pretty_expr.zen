@@ -11,9 +11,8 @@
 { escape_into } = std.text.ascii    // the shared scan-and-emit loop; the Zen-source escape TABLE stays here
 { payload_fname } = compiler.mangle
 { ff_append, ff_block, ff_char, ff_cond, ff_flush_leading, ff_indent, ff_open_trailing, ff_push,
-  ff_str_has_nl, ff_string, ff_trailing, ff_ty, ff_tys, gf_is_alias, gf_cond_open_cmt, gf_line_of,
-  gf_pos_of } = compiler.pretty
-{ gstr_int } = compiler.astops
+  ff_str_has_nl, ff_string, ff_trailing, ff_ty, ff_tys, gf_is_alias, gf_cond_open_cmt, gf_line_of } = compiler.pretty
+{ gstr_int, left_pos_of } = compiler.astops
 { ff_lparams } = compiler.pretty_decl
 // ── precedence (mirrors the parser chain: || < && < cmp < | < ^ < & < shift < +- < */%  < postfix) ──
 // Parens are RE-INSERTED by precedence so the formatted output reparses to the SAME AST:
@@ -270,7 +269,7 @@ ff_cond_inline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
     })
 }
 ff_cond_multiline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
-    rp := gf_pos_of(d.c)
+    rp := left_pos_of(d.c)
     head := s.ff_recv(a, d.c, ind).ff_append(a, ".match ({")
     withc := d.gf_cond_open_cmt().match ({
         true  => head.ff_open_trailing(a, gf_line_of(rp)),
@@ -327,8 +326,16 @@ ff_cond_then_negated = (d: CondData) bool {
 }
 ff_then* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
     neg := d.ff_cond_then_negated()
+    // The negated receiver already gets ONE wrapping paren pair here, so the condition inside is
+    // printed as the LEFT OPERAND of the synthesized `== false` (ff_operand at cmp precedence),
+    // NOT via ff_recv — ff_recv would paren-wrap any Bin condition a second time, and the doubled
+    // `((a == b) == false)` only collapses to `(a == b == false)` on the NEXT fmt pass (one-shot
+    // idempotence bug, #607 finding 2).
     recv := neg.match ({
-        true  => s.ff_append(a, "(").ff_recv(a, d.c, ind).ff_append(a, " == false)"),
+        true  => s
+            .ff_append(a, "(")
+            .ff_operand(a, d.c, ff_op_prec("=="), false, ind)
+            .ff_append(a, " == false)"),
         false => s.ff_recv(a, d.c, ind),
     })
     body := neg.match ({ true => d.e, false => d.t })

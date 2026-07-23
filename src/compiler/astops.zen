@@ -14,7 +14,7 @@
 // Only plain-named-value receivers are method-ified: the language does not support `.impl` on
 // pointer/slice receiver types, so genc's Ptr<Expr>/[Stmt] predicates (is_expr_null, blk_diverges,
 // stmts_diverge) necessarily stay free functions in compiler.genc.
-{ Ty, Func, Decl, StructDecl, Param, CallData, Expr, Stmt } = compiler.ast.ast_types
+{ Ty, Func, Decl, StructDecl, Param, BinData, CallData, Expr, Stmt } = compiler.ast.ast_types
 { sbyte, gstr_push, cbuf } = compiler.genc
 { String } = std.text.string
 { Malloc } = std.mem.alloc
@@ -140,6 +140,50 @@ slice_any*<T> = (xs: [T], p: (T) bool) bool {
         f = p(y).match ({ true => true, false => f })
     })
     f
+}
+// ── leftmost source position of an Expr / Stmt (leftmost known byte offset; 0 = unknown) ─────────
+// THE formatter's position concept, moved here from compiler.pretty (a pure AST query belongs at
+// this low floor, not in the printer). It anchors comment interleaving, so it wants the LEFTMOST
+// byte of the construct: a Bin reports its lhs (falling back to the op position), a MethodCall its
+// receiver — and arms the printer deliberately treats as position-less (MakeStruct/SliceLit/Block/
+// bare literals …) return 0, which means "defer" to the comment-flush logic (see the residual
+// documented at compiler.pretty's gf_cond_open_cmt: a 0 keeps already-clean one-liners untouched).
+// DISTINCT from compiler.validate.util's expr_pos/stmt_pos, the diagnostic CARET anchor — that one
+// is op-position-first on Bin and has no MethodCall arm; the two families differ deliberately, so
+// do NOT "unify" them into one function: a caret wants the operator, a comment wants the left edge.
+expr_left_pos* = (e: Expr) i32 {
+    e.match ({
+        .Var(v)         => v.pos,
+        .Bin(b)         => bin_left_pos(b),
+        .Call(c)        => c.pos,
+        .MethodCall(mc) => recv_left_pos(mc.recv, mc.pos),
+        .StrLit(sl)     => sl.pos,
+        .Member(m)      => left_pos_of(m.obj),
+        .Arrow(ar)      => left_pos_of(ar.obj),
+        .Match(m)       => left_pos_of(m.subj),
+        .Cond(d)        => left_pos_of(d.c),    // a bool `.match` lowers to Cond — its subject is `c`
+        .Index(ix)      => left_pos_of(ix.seq),
+        _               => 0,
+    })
+}
+bin_left_pos = (b: BinData) i32 {
+    lp := left_pos_of(b.lhs)
+    (lp > 0).match ({ true => lp, false => b.pos })
+}
+recv_left_pos = (recv: Ptr<Expr>, fallback: i32) i32 {
+    rp := left_pos_of(recv)
+    (rp > 0).match ({ true => rp, false => fallback })
+}
+left_pos_of* = (e: Ptr<Expr>) i32 { expr_left_pos(load(e)) }
+stmt_left_pos* = (st: Stmt) i32 {
+    st.match ({
+        .Let(l)      => (l.pos > 0).match ({ true => l.pos, false => left_pos_of(l.value) }),
+        .Assign(asn) => asn.pos,
+        .Return(e)   => left_pos_of(e),
+        .ExprStmt(e) => left_pos_of(e),
+        .IndexSet(x) => x.pos,
+        _            => 0,
+    })
 }
 // ── wr_*: "does this body WRITE variable `nm`?" (the rc_calls_body walker family shape) ──────────
 // Used by the inliner's argument binding (compiler.check.bind_args): a template param the body
