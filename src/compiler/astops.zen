@@ -99,6 +99,13 @@ Decl.impl(DeclQuery, {
 // literals, pretty-printed numbers, or_return/lifted-lambda indices, and mangled C symbol fragments — a
 // single changed digit breaks output or the ABI. Lives here (a low, widely-imported shared module) so
 // every backend routes through the same code; no import cycle (genc/std string+alloc never import this).
+//
+// This trio is the COMPILER-side digit loop — one of exactly TWO tree-wide. The other lives in
+// std.text.num (RawPtr buffer writers backing std.text.fmt's streaming output). Two, not one, is the
+// SEED-CLOSURE boundary: compiler passes rendering line/col digits (check, std.internal.resolve,
+// diagnostics) must not pull std.text.num's module closure (Result/IoError/alloc/parse) into the
+// self-hosting seed, and user-facing std must not import compiler internals. Everything else
+// (check's vis_key, resolve's res_udec, fmt's write_int family) delegates to one of the two.
 dec_digit* = (d: i64) u8 { sbyte("0123456789", d) }
 // The unsigned recursion. `n` is u64 so a `.Int` literal above i64-max (real negatives are `0 - x` Bin
 // nodes, never a negative `.Int`) renders in its full unsigned range; non-negative i64 callers pass

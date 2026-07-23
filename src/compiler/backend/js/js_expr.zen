@@ -45,12 +45,25 @@ js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
             .gstr_append(a, "\" })"),
         .Match(m)       => s.js_match_expr(a, m),
         .StrLit(sl)     => s.jstrlit(a, sl.value),
-        .SliceLit(sd)   => s
-            .gstr_append(a, "({ ptr: [")
-            .js_args(a, sd.items)
-            .gstr_append(a, "], len: ")
-            .jint(a, js_slice_count(sd.items))
-            .gstr_append(a, " })"),
+        // A [u8] literal is a BYTE BUFFER: back it with linear memory (__zr.u8lit copies the items
+        // into MEM and returns the offset), so `.ptr` supports the full RawPtr surface — offset/
+        // store/load/slice/write — exactly as C's stack compound literal does (std.text.fmt's digit
+        // scratch depends on this). Non-byte element types keep the JS-array fat pointer (typed MEM
+        // element reads are DEFERRED; __zr.idx/setidx dispatch on the backing either way).
+        .SliceLit(sd)   => sd.elem.match ({
+            .U8 => s
+                .gstr_append(a, "({ ptr: __zr.u8lit([")
+                .js_args(a, sd.items)
+                .gstr_append(a, "]), len: ")
+                .jint(a, js_slice_count(sd.items))
+                .gstr_append(a, " })"),
+            _   => s
+                .gstr_append(a, "({ ptr: [")
+                .js_args(a, sd.items)
+                .gstr_append(a, "], len: ")
+                .jint(a, js_slice_count(sd.items))
+                .gstr_append(a, " })"),
+        }),
         .Index(ix)      => s
             .gstr_append(a, "__zr.idx(")
             .js_expr(a, ix.seq)

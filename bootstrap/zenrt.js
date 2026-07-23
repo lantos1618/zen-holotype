@@ -38,6 +38,11 @@ const __zr = (() => {
   const load_i64 = (p) => Number(dv.getBigInt64(p, true));
   const store_i64 = (p, v) => { dv.setBigInt64(p, BigInt(v), true); return v; };
   const slice = (ptr, len) => ({ ptr, len: Number(len) });
+  // a [u8] SLICE LITERAL: copy the element values into linear memory and hand back the offset, so
+  // the resulting `.ptr` is a real RawPtr (offset/store/load/write all work over MEM, as in C).
+  // Fresh per evaluation — mirrors C's automatic-storage compound literal. Bump-allocated (never
+  // freed), like every malloc on this minimal floor.
+  const u8lit = (xs) => { const p = malloc(xs.length || 1); MEM.set(xs, p); return p; };
   const view = (s) => ({ ptr: s, len: strlen(s) });    // a str's byte view (matches std.text.str.view)
   // element read/write over a fat pointer, dispatching on how `.ptr` is backed: a SliceLit `[a,b,c]`
   // carries a JS ARRAY (index it directly), while a str/byte view carries a MEM OFFSET (an integer —
@@ -72,7 +77,7 @@ const __zr = (() => {
   };
 
   return { MEM, str, strlen, decode, jstr, malloc, load, store, offset, load_i64, store_i64,
-           slice, view, idx, setidx, eq, nn, addr, i32, i64, u64, sizeof, div, mod, panic, write };
+           slice, u8lit, view, idx, setidx, eq, nn, addr, i32, i64, u64, sizeof, div, mod, panic, write };
 })();
 
 // ── libc leaves referenced by name from emitted code. The print path needs only write/strlen; the
