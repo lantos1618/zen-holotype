@@ -1797,6 +1797,20 @@ fmt_stdout = (mp: MutPtr<Malloc>, path: string_view) i32 {
         },
     })
 }
+// `zenc fmt [--check] <a.zen> <b.zen> …` processes EVERY file argument (argv[i]..argv[n-1]) — a
+// trailing argument is never silently skipped (the old handler formatted only the first file and
+// exited 0, so `fmt --check a.zen b.zen` could bless an unformatted b.zen). Each file goes through
+// fmt_file, which names its own offender on stderr; the fold keeps the last nonzero per-file status,
+// so the exit code is 0 iff EVERY file is clean (--check) / formatted successfully (apply).
+fmt_files = (mp: MutPtr<Malloc>, i: i32, n: i32, check: bool, rc: i32) i32 {
+    (i >= n).match ({
+        true  => rc,
+        false => {
+            r := mp.fmt_file(arg(i), check)
+            mp.fmt_files(i + 1, n, check, (r == 0).then({ rc }, { r }))
+        },
+    })
+}
 fmt_cmd = (mp: MutPtr<Malloc>, a2: string_view, a3: string_view) i32 {
     (a2 == "--ast" || a2 == "--stdout").match ({
         true  => (a3 == "").match ({
@@ -1809,17 +1823,17 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: string_view, a3: string_view) i32 {
         false => (a2 == "--check").match ({
             true  => (a3 == "").match ({
                 true  => {
-                    derr("usage: zenc fmt [--check] <in.zen>\n")
+                    derr("usage: zenc fmt [--check] <in.zen>...\n")
                     2
                 },
-                false => mp.fmt_file(a3, true),
+                false => mp.fmt_files(3, argc(), true, 0),
             }),
             false => (a2 == "").match ({
                 true  => {
-                    derr("usage: zenc fmt [--check] <in.zen>\n")
+                    derr("usage: zenc fmt [--check] <in.zen>...\n")
                     2
                 },
-                false => mp.fmt_file(a2, false),
+                false => mp.fmt_files(2, argc(), false, 0),
             }),
         }),
     })
