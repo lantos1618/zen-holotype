@@ -141,7 +141,7 @@ The hand-written C floor supplies process entry, allocation/IO boundaries, threa
 pooled-actor panic isolation. The JavaScript floor supplies its target runtime. Everything above
 those floors is intended to remain ordinary Zen.
 
-See [bootstrap/README.md](bootstrap/README.md) for the exact local workflow.
+See [bootstrap/README.md](../bootstrap/README.md) for the exact local workflow.
 
 ## Runtime surfaces
 

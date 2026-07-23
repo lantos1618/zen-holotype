@@ -31,7 +31,7 @@ endif
 # `int64_t` (the language has no u64/size_t or void*), so its `malloc`/`memcpy` foreign prototypes
 # deliberately differ from the C builtins. The calls are ABI-compatible on LP64 (ffi-verify checks
 # the ABI class of every foreign prototype against the real system headers); matching the builtins
-# exactly needs a size_t/void* mapping in the language — see STATUS.md's defects ledger. Every OTHER
+# exactly needs a size_t/void* mapping in the language — see docs/STATUS.md's defects ledger. Every OTHER
 # warning is left enabled: no blanket -w.
 # -O2 -fno-strict-aliasing: matches the repo-root build.zen's default `zen` target. Measured on the
 # seed: ~2x faster self-compile (--build-self 5.5s vs 10.3s at -O0), 17% smaller binary, byte-
