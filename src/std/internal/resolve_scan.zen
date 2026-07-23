@@ -71,26 +71,14 @@ is_user_marker_at = (s: string_view, p: i32) bool {
 }
 is_any_marker_at* = (s: string_view, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
 import_end = (s: string_view, p: i32) i32 { s.next_line(s.import_marker_from(s.lstrip(p))) }
-// Position of the next '\n' at or after `p` (end-of-string if none). Iterates a sub-slice that starts
-// at `p` — NOT a scan from 0, and NOT recursive — so walking a file line-by-line is O(n) total with
-// constant stack.
+// Position of the next '\n' at or after `p` (end-of-string if none). Walks bytes directly and stops
+// at the NUL terminator — the old body called `s.view()` (a strlen over the WHOLE source) on every
+// call, quadratic for per-line callers. Reads only [p, first NUL], never past the terminator.
 line_end = (s: string_view, p: i32) i32 {
-    bs: [u8] := s.view()
     pos := p
-    (p < to_i32(bs.len)).then({
-        span: [u8] := slice(s.offset(p), bs.len - to_i64(p))
-        span.loop((h, i, b) {
-            (b == '\n').match ({
-                true  => {
-                    pos = p + to_i32(i)
-                    h.break
-                },
-                false => {
-                    pos = p + to_i32(i) + 1
-                },
-            })
-        })
-    })
+    @while (load(offset(s, pos)) != 0 && load(offset(s, pos)) != '\n') {
+        pos = pos + 1
+    }
     pos
 }
 str_bytes* = (s: string_view) [u8] { s.view() }
