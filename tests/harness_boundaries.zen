@@ -380,6 +380,8 @@ atwhile_allowed = (path: string_view) bool {
         || path == "src/std/sys/fs.zen"
         || path == "src/std/io/stdin.zen"
         || path == "src/std/hash.zen"
+        || path == "src/std/internal/resolve.zen"
+        || path == "src/std/internal/resolve_scan.zen"
 }
 // low-level numeric/filesystem/stdin substrate: these primitives MUST iterate, not recurse — an
 // unbounded recursion depth (huge exponent / directory entry count / stdin byte or line count /
@@ -388,6 +390,10 @@ atwhile_allowed = (path: string_view) bool {
 // literal, or a long source line must lex/emit/caret by iteration, not per-byte recursion (#66c).
 // std.text.ascii joins as the shared escape-loop substrate: escape_into is THE per-byte scan the
 // C/JS backends and the formatter splice their escape tables into (c_lit's own @while moved there).
+// std.internal.resolve/resolve_scan join for their line scanners (next_line/line_end): the resolver
+// walks whole flattened sources byte-by-byte to the next newline, and both per-byte recursion
+// (stack) and a per-call strlen (quadratic — the old shape, the top resolve-imports hotspot) are
+// exactly what this substrate class exists to avoid.
 atwhile_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
     path.is_empty().match ({
         true  => true,

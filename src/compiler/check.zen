@@ -52,8 +52,10 @@ UfcsVis*: {
     imports: Map<i64>,
     // is the byte before `pos` a `.` — i.e. was this call written `recv.name(...)`, not `name(recv)`?
     vis_method_shaped = (vis: UfcsVis, pos: i32) bool {
-        v: [u8] := vis.flat.view()
-        pos > 0 && to_i64(pos) < v.len && v[to_i64(pos) - 1] == '.'
+        // direct byte load — the old flat.view() strlen'd the WHOLE flat per query (this runs for
+        // every method-shaped call the kv validators inspect). pos is a real flat offset of a call
+        // the user wrote (caller-guarded pos > 0), so pos-1 is in bounds.
+        pos > 0 && load(offset(vis.flat, to_i64(pos) - 1)) == '.'
     }
     // an ALIAS-APPENDED module body is text-renamed (`abs` -> `m__abs`) including its own internal
     // references, so a self-call inside such a region carries the prefixed name while the module's
@@ -70,20 +72,19 @@ UfcsVis*: {
     // `impl_Verdict_i32_or`, …) keep the surface method's pos but carry a mangled fn, and a rewrite
     // means dispatch RESOLVED the call, so the visibility check must not judge it.
     vis_name_at = (vis: UfcsVis, pos: i32, name: string_view) bool {
-        v: [u8] := vis.flat.view()
+        // Byte-compare `name` against flat[pos..] directly. The old body called flat.view() — a
+        // strlen over the WHOLE flattened program — on every query. The && chain short-circuits at
+        // the first mismatch, and name's bytes are never NUL, so the walk stops at (never crosses)
+        // the flat's terminator; a flat shorter than pos+len mismatches on the NUL exactly where
+        // the old length guard said false. The tail probe only runs when every name byte matched,
+        // so its offset is at most the terminator.
         nb: [u8] := name.view()
-        (to_i64(pos) + nb.len > v.len).match ({
-            true  => false,
-            false => {
-                same := true
-                nb.loop((h, i, b) {
-                    same = same && v[to_i64(pos) + i] == b
-                })
-                e := to_i64(pos) + nb.len
-                tail: u8 := (e < v.len).then({ v[e] }, { 0 })
-                same && (tail.is_alnum() || tail == '_') == false
-            },
+        same := true
+        nb.loop((h, i, b) {
+            same = same && load(offset(vis.flat, to_i64(pos) + i)) == b
         })
+        tail: u8 := same.then({ load(offset(vis.flat, to_i64(pos) + nb.len)) }, { 0 })
+        same && (tail.is_alnum() || tail == '_') == false
     }
     // does the module owning flat offset `pos` define or import `name`? Both answered by the
     // dedicated per-module walk (vis_head_names): column-0 decl names + every import-head name.
