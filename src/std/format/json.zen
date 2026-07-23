@@ -50,7 +50,7 @@
 { Result, Opt, IoError, err, expect } = std.core.result
 { String, new_in, push_in, append_in, append_slice_in, finish_in } = std.text.string
 { view, substr_in } = std.text.str
-{ hex_char, hex_nibble } = std.text.bytes    // shared hex nibble encode/decode (centralized in std.text.bytes)
+{ hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode (centralized in std.text.ascii)
 { parse_f64, float_in } = std.text.num
 // ── OOM policy ────────────────────────────────────────────────────────────────
 // The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
@@ -97,6 +97,10 @@ sstep_ok = (s: string_view, pos: i64) Result<StrStep, JsonError> {
 // `JBuf<Value>` and object entries as `JBuf<Entry>`. `T` is phantom in the fields, mirroring
 // std.collections.Vec; the element size flows through `sizeof(T)` at each same-module instantiation.
 // (A FOREIGN generic buffer still hits limit #2 above; a same-module one does not.)
+// KEEP verdict (re-verified 2026-07-23): instantiating std.collections.vec's `Vec<T>` against a
+// type defined in the importing module still fails to monomorphize (`need-annotation` inside
+// vec.zen's own body), so this local buffer is load-bearing, not redundant. Mirrors csv.zen's CBuf
+// — the duplication is forced by the same-module requirement and cannot be hoisted to a shared file.
 JBuf<T>: {
     ptr: RawPtr<u8>,
     len: i64,
@@ -595,6 +599,8 @@ json_needs_esc = (b: u8) bool { b == '"' || b == '\\' || b < 32 }
 // Run-copy escaping (jsony's doCopy/copyMem): copy the run of pass-through bytes since the last
 // escape in ONE append, emit the escape via write_esc_byte, restart the run past it — instead of
 // pushing every byte one at a time. Byte-identical output; fewer grows/stores for plain text.
+// Deliberately NOT std.text.ascii.escape_into (the per-byte scan the backends/formatter share):
+// the run-copy bulk append is a different loop shape, kept for throughput on plain text.
 write_str_lit<A> = (a: MutPtr<A>, sb: String, s: string_view) String {
     out: String := sb.push_in(a, '"').jok()
     sv := s.view()

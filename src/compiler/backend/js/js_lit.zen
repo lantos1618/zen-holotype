@@ -3,9 +3,10 @@
 // The JS escape (`jesc_byte`) is intentionally distinct from the C backend's (JS uses `\n`/`\"`, and
 // strings are interned via `__zr.str`), so this family lives here beside js, not in c_lit.
 { String } = std.text.string
-{ sbyte, gstr_append, gstr_push } = compiler.genc
+{ gstr_append, gstr_push } = compiler.genc
 { dec_digit, gstr_int } = compiler.astops
 { Malloc } = std.mem.alloc
+{ escape_into } = std.text.ascii    // the shared scan-and-emit loop; the JS escape TABLE stays here
 // ── small integer renderer ──────────────────────────────────────────────────────────────────────
 // The non-negative recursion is the shared gstr_int (compiler.astops); only the JS-specific minus-sign
 // wrapper stays here. `jint_neg` walks negatives directly so INT64_MIN doesn't overflow on `0 - n` —
@@ -79,12 +80,6 @@ jesc_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
         }),
     })
 }
-jesc_from = (s: String, a: MutPtr<Malloc>, v: string_view, i: i32) String {
-    (sbyte(v, i) == 0).match ({
-        true  => s,
-        false => s.jesc_byte(a, sbyte(v, i)).jesc_from(a, v, i + 1),
-    })
-}
 jstrlit* = (s: String, a: MutPtr<Malloc>, v: string_view) String {
-    s.gstr_append(a, "__zr.str(\"").jesc_from(a, v, 0).gstr_append(a, "\")")
+    s.gstr_append(a, "__zr.str(\"").escape_into(a, v, jesc_byte).gstr_append(a, "\")")
 }
