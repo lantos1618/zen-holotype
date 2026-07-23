@@ -27,22 +27,17 @@ is_import_line* = (s: string_view, p: i32) bool {
     ls := s.lstrip(p)
     s.opens_import(ls).then({ s.has_import_marker(ls) }, { false })
 }
-// Position just past the next '\n' at or after `p` (end-of-string if none). Iterates a sub-slice that
-// starts at `p` — NOT a scan from 0, and NOT recursive — so walking a file line-by-line is O(n) total
-// with constant stack.
+// Position just past the next '\n' at or after `p` (end-of-string if none). Walks bytes directly and
+// stops at the NUL terminator — the old body called `s.view()` (a strlen over the WHOLE remaining
+// source) on every call, which made every per-line caller quadratic in file size (the top
+// resolve-imports hotspot). Reads only bytes in [p, first NUL], never past the terminator; `p` at or
+// past the NUL returns `p` unchanged, exactly like the old length-guarded body.
 next_line* = (s: string_view, p: i32) i32 {
-    bs: [u8] := s.view()
     pos := p
-    (p < to_i32(bs.len)).then({
-        span: [u8] := slice(s.offset(p), bs.len - to_i64(p))
-        span.loop((h, i, b) {
-            pos = p + to_i32(i) + 1
-            (b == '\n').then({
-                h.break
-            })
-        })
-    })
-    pos
+    @while (load(offset(s, pos)) != 0 && load(offset(s, pos)) != '\n') {
+        pos = pos + 1
+    }
+    (load(offset(s, pos)) == '\n').then({ pos + 1 }, { pos })
 }
 line_comment_at* = (s: string_view, p: i32) bool { s.at(p) == '/' && s.at(p + 1) == '/' }
 block_comment_at* = (s: string_view, p: i32) bool { s.at(p) == '/' && s.at(p + 1) == '*' }
@@ -623,12 +618,18 @@ fill_module_one = (
             a.guard_module(progdir, inpath, id, path)
             src := a.read_module(inpath, path)
             graph := a.module_graph(src)
+            // finish the id BEFORE appending it to the seen set: gstr_finish pushes the NUL, which
+            // can grow (realloc) the id's buffer when its length lands exactly on the capacity —
+            // the old in-argument order evaluated the finish first and then add_name read the id
+            // through the FREED pre-grow block (ASAN-caught UAF; the garbage bytes corrupted the
+            // seen set and flipped downstream verdicts with code layout).
+            fid := id.gstr_finish(a)
             next := a.mload_push(ModuleLoad(
-                seen: st.seen.add_name(a, id),
+                seen: a.madd_str_name(st.seen, fid),
                 entries: st.entries,
                 n: st.n,
             ), ModuleEntry(
-                id: id.gstr_finish(a),
+                id: fid,
                 path: path,
                 source: src,
                 graph: graph,

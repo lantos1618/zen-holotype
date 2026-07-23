@@ -49,6 +49,33 @@ derr = (s: string_view) i64 {
     v := s.view()
     write(2, v.ptr, v.len)
 }    // diagnostics go to stderr
+// ── ZENC_TIME=1: coarse wall-clock per pipeline stage (stderr) ───────────────────────────────────
+// Reads CLOCK_MONOTONIC straight through libc (std.time isn't in the seed manifest). The timespec
+// cell is a STACK slice literal, deliberately not an allocator cell: a heap alloc+free here would
+// perturb the allocation sequence mid-pipeline, and the reading must observe the compiler, not move
+// it. `zt_log` prints "zenc: time <stage> <ms>ms" when ZENC_TIME is set and returns the new reading,
+// so stages chain: `t1 := mp.zt_log("parse", t0)`.
+zt_ms = () i64 {
+    ts: [i64] := [0, 0]
+    clock_gettime(1, ts.ptr)
+    ts[0] * 1000 + ts[1] / 1000000
+}
+zt_on = () bool { is_empty(getEnv("ZENC_TIME")) == false }
+zt_log = (mp: MutPtr<Malloc>, name: string_view, start_ms: i64) i64 {
+    now := zt_ms()
+    zt_on().then({
+        derr(mp
+            .gstr_string(64)
+            .gstr_append(mp, "zenc: time ")
+            .gstr_append(mp, name)
+            .gstr_append(mp, " ")
+            .push_int(mp, now - start_ms)
+            .gstr_append(mp, "ms\n")
+            .gstr_finish(mp))
+        { }
+    })
+    now
+}
 // the first FAILING diagnostic, else clean. `cd_or(a, b)` = a if a failed, else b — so this is a flat
 // precedence chain of the checks in order, not a brace pyramid. Checks are independent and side-effect
 // free, so running them all is harmless; the reported diagnostic is still the first failure in order.
@@ -67,25 +94,37 @@ check_diag_no_main = (
     decls: [Decl],
     flat: string_view,
 ) CheckDiagnostic {
-    check_module_no_if_diagnostic_from_source(flat)
+    t0 := zt_ms()
+    c0 := check_module_no_if_diagnostic_from_source(flat)
         .cd_or(check_module_no_ternary_diagnostic_from_source(flat))
         .cd_or(mp.check_module_parse_diagnostic_from_source(decls, flat))
         .cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat))
+    t1 := mp.zt_log("    spec-syntax", t0)
+    c1 := c0.cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat))
+    t2 := mp.zt_log("    spec-ownership", t1)
+    c2 := c1
         .cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_leak_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat))
+    t3 := mp.zt_log("    spec-escape-leak", t2)
+    c3 := c2
         .cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat))
+    t4 := mp.zt_log("    spec-send", t3)
+    c4 := c3.cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat))
+    t5 := mp.zt_log("    spec-bound", t4)
+    c5 := c4.cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat))
+    t6 := mp.zt_log("    spec-arg", t5)
+    c6 := c5
         .cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat))
         .cd_or(mp.check_module_ffi_diagnostic_from_source(decls, flat))
         .cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat))
         .cd_or(check_module_main_diagnostic_from_source(raw, flat))
         .cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat))
+    mp.zt_log("    spec-rest", t6)
+    c6
 }
 RenderTarget*: {
     path: string_view,
@@ -249,14 +288,19 @@ report_check = (
     user: string_view,
 ) i32 {
     // a specialized channel (parse / ownership / escape / bound / …) is the ROOT — report it alone.
+    t0 := zt_ms()
     spec := mp.check_diag_no_main(raw, decls, rp.flat)
+    t1 := mp.zt_log("  validate-spec", t0)
     (spec.code != 0).match ({
         true  => {
             mp.emit_one(raw, decls, rp, path, user, spec)
             spec.count
         },
         false => {
-            ds := mp.check_module_batch_vis(decls, rp.flat, mp.ufcs_vis_of(rp.flat, rp.regions, rp.table))
+            uv := mp.ufcs_vis_of(rp.flat, rp.regions, rp.table)
+            t2 := mp.zt_log("  validate-ufcs-vis", t1)
+            ds := mp.check_module_batch_vis(decls, rp.flat, uv)
+            mp.zt_log("  validate-batch", t2)
             n := to_i32(ds.len)
             ds.loop((h, i, cd) {
                 (to_i32(i) < DIAG_CAP()).then({
@@ -2059,16 +2103,27 @@ bs_emit_checked = (
     esrc: string_view,
     shake: bool,
 ) i32 {
+    t0 := zt_ms()
     rp := mp.resolve_prog(root, entry, esrc)
+    t1 := mp.zt_log("resolve-imports", t0)
     (mp.report_no_if_resolved(rp, entry, esrc) == 0).match ({
         true  => {
             raw := mp.parse_module(rp.flat)
+            t2 := mp.zt_log("parse", t1)
             decls := mp.resolve_module(raw)
+            t3 := mp.zt_log("resolve", t2)
             (mp.report_check(raw, decls, rp, entry, esrc) == 0).match ({
                 true  => {
+                    t4 := mp.zt_log("validate", t3)
                     rawf := mp.parse_module(flat)
+                    t5 := mp.zt_log("parse-manifest", t4)
                     kept := shake.then({ mp.bs_shake(rawf) }, { rawf })
-                    gen := mp.genModuleIn(mp.resolve_module(kept))    // type error in compiler source — fail, don't regenerate a miscompiled seed
+                    t6 := mp.zt_log("shake", t5)
+                    rd := mp.resolve_module(kept)    // type error in compiler source — fail, don't regenerate a miscompiled seed
+                    t7 := mp.zt_log("resolve-manifest", t6)
+                    gen := mp.genModuleIn(rd)
+                    mp.zt_log("emit", t7)
+                    mp.zt_log("total", t0)
                     gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
                         true  => bs_write(out_path, gen).then({ 0 }, { 1 }),
                         false => {
