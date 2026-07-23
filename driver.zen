@@ -407,8 +407,16 @@ write_runnable_c = (tmpc: string_view, gen: String) bool {
 // `-`-prefixed cc flags); empty for single files.
 PROFILE_DEV = () string_view { "-g" }    // on top of the base -O1: effective `-O1 -g`
 PROFILE_RELEASE = () string_view { "-O2 -fno-strict-aliasing" }    // overrides the base -O1
+// `zen profile` compiles dev-profile PLUS frame pointers (perf's `--call-graph fp` walks them; -O1
+// stays — profiling unoptimized code lies about where time goes). The gprof fallback adds -pg
+// instrumentation. Both fold into the compile-cache key via profile_get, so a profiling binary
+// never replays as (or from) a plain dev build.
+PROFILE_PERF = () string_view { "-g -fno-omit-frame-pointer" }
+PROFILE_GPROF = () string_view { "-g -pg -fno-omit-frame-pointer" }
 profile_flags := PROFILE_DEV()
 profile_release_set = () void { profile_flags = PROFILE_RELEASE() }
+profile_perf_set = () void { profile_flags = PROFILE_PERF() }
+profile_gprof_set = () void { profile_flags = PROFILE_GPROF() }
 profile_get = () string_view { profile_flags }
 cc_command = (
     mp: MutPtr<Malloc>,
@@ -731,6 +739,68 @@ cache_store_bin = (mp: MutPtr<Malloc>, cb: string_view, out: string_view) i32 {
         .gstr_finish(mp)
         .system()
 }
+// ── `--time` stage clocks (`zen run --time` / `zen build --time`) ─────────────────────────────────
+// Wall-clock per driver-visible pipeline stage, printed as a compact table on stderr after the verb
+// finishes. Off by default: tm_mark/tm_lap return 0 without reading the clock, so the stamps woven
+// through compile_flat cost nothing when the flag is absent. Finer in-compiler splits (desugar/
+// inline/mono inside check+emit) are a follow-up — these are the honest driver-level boundaries.
+time_on := false
+time_enable = () void { time_on = true }
+tm_flatten := to_i64(0)
+tm_parse := to_i64(0)
+tm_resolve := to_i64(0)
+tm_check := to_i64(0)
+tm_emit := to_i64(0)
+tm_cc := to_i64(0)
+tm_cache_hit := false
+// CLOCK_MONOTONIC via the libc clock_gettime FFI (std.time.clock is not in the seed manifest, so
+// the driver reads the two timespec i64 fields itself — same layout contract as std.time.clock).
+TM_CLOCK_MONOTONIC = () i32 { 1 }
+TM_NS_PER_S = () i64 { 1000000000 }
+tm_now = (mp: MutPtr<Malloc>) i64 {
+    cell := mp.acquire(16)
+    clock_gettime(TM_CLOCK_MONOTONIC(), cell)
+    load_i64(cell) * TM_NS_PER_S() + load_i64(cell.offset(8))
+}
+tm_mark = (mp: MutPtr<Malloc>) i64 { time_on.then({ mp.tm_now() }, { 0 }) }
+tm_lap = (mp: MutPtr<Malloc>, t0: i64) i64 { time_on.then({ mp.tm_now() - t0 }, { 0 }) }
+pad_sp = (s: String, mp: MutPtr<Malloc>, n: i64) String {
+    (n <= 0).then({ s }, { s.gstr_push(mp, ' ').pad_sp(mp, n - 1) })
+}
+// nanoseconds -> "12.3" (milliseconds, one decimal).
+push_ms = (s: String, mp: MutPtr<Malloc>, ns: i64) String {
+    t := ns / 100000
+    s.push_int(mp, t / 10).gstr_push(mp, '.').push_int(mp, t % 10)
+}
+tm_row = (mp: MutPtr<Malloc>, name: string_view, ns: i64) void {
+    derr(mp
+        .gstr_string(64)
+        .gstr_append(mp, "  ")
+        .gstr_append(mp, name)
+        .pad_sp(mp, 22 - name.view().len)
+        .push_ms(mp, ns)
+        .gstr_append(mp, " ms\n")
+        .gstr_finish(mp))
+    { }
+}
+tm_report = (mp: MutPtr<Malloc>, wall: i64, other_label: string_view) void {
+    time_on.then({
+        sum := tm_flatten + tm_parse + tm_resolve + tm_check + tm_emit + tm_cc
+        derr("zenc --time: pipeline stages\n")
+        tm_cache_hit.then({
+            derr("  (binary cache hit — compile stages skipped; ZENC_NO_CACHE=1 forces a full compile)\n")
+            { }
+        })
+        mp.tm_row("flatten", tm_flatten)
+        mp.tm_row("parse", tm_parse)
+        mp.tm_row("resolve", tm_resolve)
+        mp.tm_row("check", tm_check)
+        mp.tm_row("mono+emit", tm_emit)
+        mp.tm_row("cc", tm_cc)
+        mp.tm_row(other_label, wall - sum)
+        mp.tm_row("total", wall)
+    })
+}
 // type-check, then (if clean) emit + cc to `out`. returns 0 on success, 1 on a check error or cc
 // failure. The cache wraps this whole pipeline: a hit copies the previously-built binary and skips
 // resolve-onward re-verification (the key proves the identical closure already compiled cleanly).
@@ -750,7 +820,10 @@ compile_to = (
     })    // unresolvable cross toolchain: already reported loudly; NEVER fall back to host cc
     cb := mp.cache_probe("bin", root, path, src, ccflags, links, target)
     (cache_on() && cb == "" == false && file_exists(cb) && mp.cache_bin_cmd(cb, out).system() == 0).match ({
-        true  => 0,
+        true  => {
+            tm_cache_hit = true
+            0
+        },
         false => {
             rc := mp.compile_flat(root, path, src, out, ccflags, links, ccname)
             (rc == 0 && cache_on() && cb == "" == false).then({
@@ -770,23 +843,39 @@ compile_flat = (
     links: string_view,
     ccname: string_view,
 ) i32 {
+    t0 := mp.tm_mark()
     rp := mp.resolve_prog(root, path, src)
+    tm_flatten = mp.tm_lap(t0)
     (mp.report_no_if_resolved(rp, path, src) == 0).match ({
         true  => {
+            t1 := mp.tm_mark()
             raw := mp.parse_module(rp.flat)
+            tm_parse = mp.tm_lap(t1)
+            t2 := mp.tm_mark()
             decls := mp.resolve_module(raw)
-            (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+            tm_resolve = mp.tm_lap(t2)
+            t3 := mp.tm_mark()
+            crc := mp.report_check(raw, decls, rp, path, src)
+            tm_check = mp.tm_lap(t3)
+            (crc == 0).match ({
                 true  => {
+                    t4 := mp.tm_mark()
                     gen := mp.genModuleIn(decls)
+                    tm_emit = mp.tm_lap(t4)
                     tmpc := mp.TMPC()
                     write_runnable_c(tmpc, gen).match ({
-                        true  => (mp.cc_command(root, tmpc, out, ccflags, links, ccname).system() == 0).match ({
-                            true  => 0,
-                            false => {
-                                derr("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
-                                1
-                            },
-                        }),
+                        true  => {
+                            t5 := mp.tm_mark()
+                            ccrc := mp.cc_command(root, tmpc, out, ccflags, links, ccname).system()
+                            tm_cc = mp.tm_lap(t5)
+                            (ccrc == 0).match ({
+                                true  => 0,
+                                false => {
+                                    derr("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
+                                    1
+                                },
+                            })
+                        },
                         false => 1,
                     })
                 },
@@ -922,17 +1011,25 @@ finish_cstr = (s: String, mp: MutPtr<Malloc>) string_view { cstr(s.ptr) }
 proj_dir = (a: string_view) string_view {
     (a == "" && file_exists("build.zen")).then({ "." }, { a })
 }
-// `zenc build [-r|--release] [--target <name>] [project]` — `-r`/`--release` directly after
-// `build` selects the RELEASE profile (see the profile block above cc_command); every later
-// positional shifts by one (`s`). `zenc build --target js <file> [-o out]` -> the js backend;
-// otherwise the ordinary C `build`. Unshifted args: arg(2)=--target arg(3)=js arg(4)=<file>
-// arg(5)=-o arg(6)=<out>.
-build_target = (mp: MutPtr<Malloc>, root: string_view) i32 {
-    rel := arg(2) == "-r" || arg(2) == "--release"
-    rel.then({
-        profile_release_set()
+// `zenc build [-r|--release] [--time] [--target <name>] [project]` — leading flags directly after
+// `build` are consumed by build_flags (in any order): `-r`/`--release` selects the RELEASE profile
+// (see the profile block above cc_command), `--time` turns on the stage table; every later
+// positional shifts by their count (`s`). `zenc build --target js <file> [-o out]` -> the js
+// backend; otherwise the ordinary C `build`. Unshifted args: arg(2)=--target arg(3)=js
+// arg(4)=<file> arg(5)=-o arg(6)=<out>.
+build_flags = (s: i32) i32 {
+    a := arg(2 + s)
+    (a == "--time").then({
+        time_enable()
+        return build_flags(s + 1)
     })
-    s := rel.then({ 1 }, { 0 })
+    (a == "-r" || a == "--release").then({
+        profile_release_set()
+        return build_flags(s + 1)
+    })
+    s
+}
+build_target = (mp: MutPtr<Malloc>, root: string_view, s: i32) i32 {
     (arg(2 + s) == "--target" && arg(3 + s) == "js").match ({
         true  => {
             out := (arg(5 + s) == "-o").then({ arg(6 + s) }, { "a.js" })
@@ -1064,12 +1161,14 @@ append_run_args = (s: String, mp: MutPtr<Malloc>, i: i32, n: i32) String {
     })
 }
 // `zenc run <file> a b c` — everything after the source path is forwarded to the program's argv
-// (arg(3)..; the program reads it back via std.sys.os.arg(i)/argc(), argv[0] being the temp binary).
+// (arg(3).., or arg(4).. when `--time` shifted the path; the program reads it back via
+// std.sys.os.arg(i)/argc(), argv[0] being the temp binary).
+run_fwd_from := 3
 run_command = (mp: MutPtr<Malloc>, bin: string_view) string_view {
     mp
         .gstr_string(128)
         .gstr_append(mp, bin)
-        .append_run_args(mp, 3, argc())
+        .append_run_args(mp, to_i32(run_fwd_from), argc())
         .gstr_finish(mp)
 }
 run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
@@ -1100,6 +1199,583 @@ run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
         false => 1,
     })
 }
+// ── `zenc run`/`zenc build` verb wrappers: peel `--time`, run, then print the stage table ─────────
+run_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
+    tt := arg(2) == "--time"
+    tt.then({
+        time_enable()
+        run_fwd_from = 4
+    })
+    t0 := mp.tm_mark()
+    rc := mp.run_spec(root, mp.resolve_spec(root, tt.then({ arg(3) }, { arg(2) })))
+    mp.tm_report(mp.tm_lap(t0), "other (io/cache/run)")
+    rc
+}
+build_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
+    s := build_flags(0)
+    t0 := mp.tm_mark()
+    rc := mp.build_target(root, s)
+    mp.tm_report(mp.tm_lap(t0), "other (io/cache)")
+    rc
+}
+// ── `zenc profile` — sampling profiler with zen-native names ──────────────────────────────────────
+// Compiles the program dev-profile plus frame pointers (PROFILE_PERF above), records with
+// `perf record -g --call-graph fp`, and renders `perf report --no-children` as a top-20
+// `SELF% CUM% FUNCTION` table — hoisted impl methods (`impl_<Trait>_<Ty>_<m>` in the emitted C)
+// are demangled back to `Ty.m` via the same parse-level DImpl walk the audit/sigs tools use.
+// No perf on PATH (or perf denied by perf_event_paranoid, observable as zero samples) falls back
+// to gprof `-pg` instrumentation; neither present is an honest error naming both. `--raw` dumps
+// the untouched perf/gprof report instead of the table.
+PROF_TOP = () i64 { 20 }
+PROF_USAGE = () string_view { "usage: zenc profile [--raw] <file.zen|project> [-- prog args]\n" }
+ProfArgs: {
+    path: string_view,
+    raw: bool,
+    fwd: i32,
+}
+// one parsed report row: pct in hundredths of a percent (-1 = not a data row), the raw C symbol,
+// and the DSO it lives in ("" for gprof, whose flat profile is single-binary by construction).
+ProfRow: {
+    pct: i64,
+    sym: string_view,
+    dso: string_view,
+}
+ProfPct: {
+    val: i64,
+    end: i64,
+}
+ProfParse: {
+    n: i64,
+    samples: string_view,
+}
+ProfNames: {
+    idx: Map<i64>,
+    disp: [string_view],
+}
+prof_args = (i: i32, n: i32, acc: ProfArgs) ProfArgs {
+    (i >= n).then({
+        return acc
+    })
+    a := arg(i)
+    (a == "--").then({
+        return ProfArgs(
+            path: acc.path,
+            raw: acc.raw,
+            fwd: i + 1,
+        )
+    })
+    (a == "--raw").then({
+        return prof_args(i + 1, n, ProfArgs(
+            path: acc.path,
+            raw: true,
+            fwd: acc.fwd,
+        ))
+    })
+    (acc.path == "").match ({
+        true  => prof_args(i + 1, n, ProfArgs(
+            path: a,
+            raw: acc.raw,
+            fwd: acc.fwd,
+        )),
+        false => prof_args(i + 1, n, acc),
+    })
+}
+// ── report parsing: byte-level line scan (bounds are the line's [ls, le), never the whole file) ──
+prof_skip_sp = (v: [u8], i: i64, e: i64) i64 {
+    (i < e && (v[i] == ' ' || v[i] == '\t')).then({ v.prof_skip_sp(i + 1, e) }, { i })
+}
+prof_skip_tok = (v: [u8], i: i64, e: i64) i64 {
+    (i < e && v[i] == ' ' == false && v[i] == '\t' == false).match ({
+        true  => v.prof_skip_tok(i + 1, e),
+        false => i,
+    })
+}
+prof_rtrim = (v: [u8], ls: i64, e: i64) i64 {
+    (e > ls && (v[e - 1] == ' ' || v[e - 1] == '\t' || v[e - 1] == '\r')).match ({
+        true  => v.prof_rtrim(ls, e - 1),
+        false => e,
+    })
+}
+prof_digits = (v: [u8], i: i64, e: i64, acc: i64) ProfPct {
+    (i < e && v[i] >= '0' && v[i] <= '9').match ({
+        true  => v.prof_digits(i + 1, e, acc * 10 + to_i64(v[i]) - to_i64('0')),
+        false => ProfPct(
+            val: acc,
+            end: i,
+        ),
+    })
+}
+// "12.34" at i -> 1234 hundredths (perf and gprof both print percentages as %.2f; anything else,
+// including a bare integer or a "7208/7208" calls token, is rejected with val -1).
+prof_pct = (v: [u8], i: i64, e: i64) ProfPct {
+    d1 := v.prof_digits(i, e, 0)
+    (d1.end == i).then({
+        return ProfPct(
+            val: 0 - 1,
+            end: i,
+        )
+    })
+    (d1.end < e && v[d1.end] == '.').match ({
+        true  => {
+            d2 := v.prof_digits(d1.end + 1, e, 0)
+            (d2.end == d1.end + 3).match ({
+                true  => ProfPct(
+                    val: d1.val * 100 + d2.val,
+                    end: d2.end,
+                ),
+                false => ProfPct(
+                    val: 0 - 1,
+                    end: d2.end,
+                ),
+            })
+        },
+        false => ProfPct(
+            val: 0 - 1,
+            end: d1.end,
+        ),
+    })
+}
+// bytes [a, b) as an owned str (through the allocator, like cstr_prefix).
+push_span = (s: String, mp: MutPtr<Malloc>, v: [u8], i: i64, n: i64) String {
+    (i >= n).then({ s }, { push_span(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
+}
+prof_span = (mp: MutPtr<Malloc>, v: [u8], a: i64, b: i64) string_view {
+    push_span(mp.gstr_string(b - a + 1), mp, v, a, b).gstr_finish(mp)
+}
+prof_starts = (v: [u8], ls: i64, le: i64, lit: string_view) bool {
+    w: [u8] := lit.view()
+    (le - ls < w.len).then({
+        return false
+    })
+    ok := true
+    w.loop((h, i, b) {
+        ok = ok && v[ls + i] == b
+    })
+    ok
+}
+prof_token = (mp: MutPtr<Malloc>, v: [u8], i: i64, e: i64) string_view {
+    a := v.prof_skip_sp(i, e)
+    mp.prof_span(v, a, v.prof_skip_tok(a, e))
+}
+// a perf data row: `   12.34%  cmd  dso  [.] symbol` (the `#` header/comment lines, callchain
+// residue, and anything not opening with a %.2f percent are all rejected).
+prof_perf_row = (mp: MutPtr<Malloc>, v: [u8], ls: i64, le: i64) ProfRow {
+    none := ProfRow(
+        pct: 0 - 1,
+        sym: "",
+        dso: "",
+    )
+    e := v.prof_rtrim(ls, le)
+    i := v.prof_skip_sp(ls, e)
+    (i >= e || v[i] < '0' || v[i] > '9').then({
+        return none
+    })
+    p := v.prof_pct(i, e)
+    (p.val < 0 || p.end >= e || v[p.end] == '%' == false).then({
+        return none
+    })
+    j := v.prof_skip_sp(p.end + 1, e)
+    j = v.prof_skip_tok(j, e)    // command (the process name)
+    j = v.prof_skip_sp(j, e)
+    d0 := j
+    j = v.prof_skip_tok(j, e)    // shared object
+    dso := mp.prof_span(v, d0, j)
+    j = v.prof_skip_sp(j, e)
+    (j < e && v[j] == '[').then({
+        j = v.prof_skip_tok(j, e)    // the "[.]"/"[k]" privilege marker
+        j = v.prof_skip_sp(j, e)
+    })
+    (j >= e).then({
+        return none
+    })
+    // an unresolved plain address (restricted kallsyms / stripped dso) tells the user nothing —
+    // drop the row so the top-20 stays meaningful zen/libc names.
+    (j + 1 < e && v[j] == '0' && v[j + 1] == 'x').then({
+        return none
+    })
+    ProfRow(
+        pct: p.val,
+        sym: mp.prof_span(v, j, e),
+        dso: dso,
+    )
+}
+prof_parse_perf = (mp: MutPtr<Malloc>, body: string_view, rows: [ProfRow]) ProfParse {
+    v: [u8] := body.view()
+    n := 0
+    samples := ""
+    ls := 0
+    v.loop((h, i, b) {
+        (b == '\n').then({
+            (n < rows.len).then({
+                v.prof_starts(ls, i, "# Samples: ").then({
+                    samples = mp.prof_token(v, ls + 11, i)
+                })
+                r := mp.prof_perf_row(v, ls, i)
+                (r.pct >= 0).then({
+                    rows[n] = r
+                    n = n + 1
+                })
+            })
+            ls = i + 1
+        })
+    })
+    ProfParse(
+        n: n,
+        samples: samples,
+    )
+}
+// first char of the last space-separated token in [lo, e); lo if the span is one token.
+prof_tok_back = (v: [u8], lo: i64, i: i64) i64 {
+    (i <= lo).then({
+        return lo
+    })
+    (v[i - 1] == ' ' || v[i - 1] == '\t').then({ i }, { v.prof_tok_back(lo, i - 1) })
+}
+// a gprof flat-profile data row: ` 33.34   0.02   0.02   7208  0.00  0.00  name` (numeric middle
+// columns vary — uncounted rows leave calls/ms blank — so the NAME is the last token, guarded to
+// not itself start with a digit).
+prof_gprof_row = (mp: MutPtr<Malloc>, v: [u8], ls: i64, le: i64) ProfRow {
+    none := ProfRow(
+        pct: 0 - 1,
+        sym: "",
+        dso: "",
+    )
+    e := v.prof_rtrim(ls, le)
+    i := v.prof_skip_sp(ls, e)
+    (i >= e || v[i] < '0' || v[i] > '9').then({
+        return none
+    })
+    p := v.prof_pct(i, e)
+    (p.val < 0 || p.end >= e || v[p.end] == ' ' == false).then({
+        return none
+    })
+    t := v.prof_tok_back(p.end + 1, e)
+    (t <= p.end + 1 || v[t] >= '0' && v[t] <= '9').then({
+        return none
+    })
+    ProfRow(
+        pct: p.val,
+        sym: mp.prof_span(v, t, e),
+        dso: "",
+    )
+}
+prof_parse_gprof = (mp: MutPtr<Malloc>, body: string_view, rows: [ProfRow]) i64 {
+    v: [u8] := body.view()
+    n := 0
+    ls := 0
+    v.loop((h, i, b) {
+        (b == '\n').then({
+            (n < rows.len).then({
+                r := mp.prof_gprof_row(v, ls, i)
+                (r.pct >= 0).then({
+                    rows[n] = r
+                    n = n + 1
+                })
+            })
+            ls = i + 1
+        })
+    })
+    n
+}
+// ── demangling: hoisted impl-method C names back to `Ty.m` (mirrors tools/sigs.zen + audit) ──────
+prof_disp = (mp: MutPtr<Malloc>, ty: string_view, mname: string_view) string_view {
+    mp
+        .gstr_string(48)
+        .gstr_append(mp, ty)
+        .gstr_push(mp, '.')
+        .gstr_append(mp, mname)
+        .gstr_finish(mp)
+}
+prof_names = (mp: MutPtr<Malloc>, decls: [Decl]) ProfNames {
+    tds := mp.aud_td_idxs(decls)
+    n := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => {
+                n = n + im.methods.len + decls.aud_impl_dflts(tds, im.trname)
+            },
+            _          => { },
+        })
+    })
+    disp := cbuf<string_view>(mp, n + 1)
+    seedv: i64 := 0 - 1
+    m := of(mp, "", seedv).expect("profile: oom")
+    k := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => {
+                im.methods.loop((h2, j, p) {
+                    m = m
+                        .put(mp, mp.impl_cname_in(im.trname, im.ty, p.name), k)
+                        .expect("profile: oom")
+                    disp[k] = mp.prof_disp(im.ty, p.name)
+                    k = k + 1
+                })
+                tds.loop((h2, j, ti) {
+                    decls[ti].match ({
+                        .DTraitDefault(td) => {
+                            (td.trname == im.trname).then({
+                                m = m
+                                    .put(mp, mp.impl_cname_in(im.trname, im.ty, td.fn.name), k)
+                                    .expect("profile: oom")
+                                disp[k] = mp.prof_disp(im.ty, td.fn.name)
+                                k = k + 1
+                            })
+                        },
+                        _                  => { },
+                    })
+                })
+            },
+            _          => { },
+        })
+    })
+    ProfNames(
+        idx: m,
+        disp: disp,
+    )
+}
+// the compiled program's parse-level decls carry every DImpl — a light frontend pass (resolve
+// imports + parse, no check) is enough to rebuild the impl-method name table for display.
+prof_names_of = (mp: MutPtr<Malloc>, root: string_view, spec: Spec, src: string_view) ProfNames {
+    rp := mp.resolve_prog(root, spec.source, src)
+    mp.prof_names(mp.parse_module(rp.flat))
+}
+prof_binname = (mp: MutPtr<Malloc>, p: string_view) string_view {
+    v: [u8] := p.view()
+    cut := last_slash(v, 0, 0 - 1)
+    (cut < 0).then({ p }, { cstr(offset(p, cut + 1)) })
+}
+// %.2f right-aligned to 6 columns (from hundredths).
+push_pct = (s: String, mp: MutPtr<Malloc>, h: i64) String {
+    ip := h / 100
+    pad := (ip < 10).match ({
+        true  => 3,
+        false => (ip < 100).match ({
+            true  => 2,
+            false => (ip < 1000).then({ 1 }, { 0 }),
+        }),
+    })
+    s2 := s.pad_sp(mp, pad).push_int(mp, ip).gstr_push(mp, '.')
+    f := h % 100
+    (f < 10).then({ s2.gstr_push(mp, '0').push_int(mp, f) }, { s2.push_int(mp, f) })
+}
+prof_table = (
+    mp: MutPtr<Malloc>,
+    source: string_view,
+    engine: string_view,
+    samples: string_view,
+    rows: [ProfRow],
+    n: i64,
+    names: ProfNames,
+    binname: string_view,
+) void {
+    hdr := mp
+        .gstr_string(128)
+        .gstr_append(mp, "zen profile: ")
+        .gstr_append(mp, source)
+        .gstr_append(mp, " — ")
+        .gstr_append(mp, engine)
+    hdr = (samples == "").match ({
+        true  => hdr,
+        false => hdr.gstr_append(mp, ", ").gstr_append(mp, samples).gstr_append(mp, " samples"),
+    })
+    say(hdr.gstr_finish(mp))
+    say("  SELF%     CUM%  FUNCTION")
+    cum := to_i64(0)
+    rows.loop((h, i, r) {
+        (i < n).then({
+            cum = cum + r.pct
+            di := names.idx.get(r.sym, 0 - 1)
+            disp := (di < 0).then({ r.sym }, { names.disp[di] })
+            line := mp
+                .gstr_string(96)
+                .push_pct(mp, r.pct)
+                .gstr_append(mp, "  ")
+                .push_pct(mp, cum)
+                .gstr_append(mp, "  ")
+                .gstr_append(mp, disp)
+            line = (r.dso == binname || r.dso == "" || r.dso.starts_with("[")).match ({
+                true  => line,
+                false => line.gstr_append(mp, "  [").gstr_append(mp, r.dso).gstr_append(mp, "]"),
+            })
+            say(line.gstr_finish(mp))
+        })
+    })
+}
+// perf lane. Returns the program's exit code on success, or -1 meaning "perf yielded no samples —
+// try gprof" (perf on PATH but perf_event_paranoid too strict is exactly this shape).
+prof_perf = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    spec: Spec,
+    src: string_view,
+    pa: ProfArgs,
+) i32 {
+    profile_perf_set()
+    bin := mp.pid_path("/tmp/zenprof_", ".bin")
+    (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links, spec.target) == 0 == false).then({
+        return 1
+    })
+    data := mp.pid_path("/tmp/zenprof_", ".data")
+    prc := mp
+        .gstr_string(256)
+        .gstr_append(mp, "perf record -q -g --call-graph fp -o ")
+        .gstr_append(mp, data)
+        .gstr_append(mp, " -- ")
+        .gstr_append(mp, bin)
+        .append_run_args(mp, pa.fwd, argc())
+        .gstr_finish(mp)
+        .system()
+    txt := mp.pid_path("/tmp/zenprof_", ".txt")
+    mp
+        .gstr_string(256)
+        .gstr_append(mp, "perf report --stdio --no-children ")
+        .gstr_append(mp, pa.raw.then({ "" }, { "-g none " }))
+        .gstr_append(mp, "-i ")
+        .gstr_append(mp, data)
+        .gstr_append(mp, " > ")
+        .gstr_append(mp, txt)
+        .gstr_append(mp, " 2>/dev/null")
+        .gstr_finish(mp)
+        .system()
+    body := contents_in(mp, txt).or("")
+    pa.raw.then({
+        (body == "").then({
+            return 0 - 1
+        })
+        out(body).or(0)
+        return 0
+    })
+    rows := cbuf<ProfRow>(mp, PROF_TOP())
+    pp := mp.prof_parse_perf(body, rows)
+    (pp.n == 0).then({
+        return 0 - 1
+    })
+    mp.prof_table(spec.source, "perf", pp.samples, rows, pp.n, mp.prof_names_of(root, spec, src), mp.prof_binname(bin))
+    prc / 256
+}
+// gprof lane: recompile with -pg, run inside a scratch dir (gmon.out lands in the program's cwd),
+// then `gprof -b -p` for the flat profile (-b alone, with the call graph, for --raw).
+prof_gprof = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    spec: Spec,
+    src: string_view,
+    pa: ProfArgs,
+) i32 {
+    profile_gprof_set()
+    bin := mp.pid_path("/tmp/zenprof_", ".bin")
+    (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links, spec.target) == 0 == false).then({
+        return 1
+    })
+    dir := mp.pid_path("/tmp/zenprof_gm_", "")
+    rrc := mp
+        .gstr_string(256)
+        .gstr_append(mp, "mkdir -p ")
+        .gstr_append(mp, dir)
+        .gstr_append(mp, " && cd ")
+        .gstr_append(mp, dir)
+        .gstr_append(mp, " && ")
+        .gstr_append(mp, bin)
+        .append_run_args(mp, pa.fwd, argc())
+        .gstr_finish(mp)
+        .system()
+    txt := mp.pid_path("/tmp/zenprof_", ".txt")
+    mp
+        .gstr_string(256)
+        .gstr_append(mp, "gprof -b ")
+        .gstr_append(mp, pa.raw.then({ "" }, { "-p " }))
+        .gstr_append(mp, bin)
+        .gstr_push(mp, ' ')
+        .gstr_append(mp, dir)
+        .gstr_append(mp, "/gmon.out > ")
+        .gstr_append(mp, txt)
+        .gstr_append(mp, " 2>/dev/null")
+        .gstr_finish(mp)
+        .system()
+    body := contents_in(mp, txt).or("")
+    (body == "").then({
+        derr("zenc: profile: gprof produced no output (did the program run? did it exit through panic?)\n")
+        return 1
+    })
+    pa.raw.then({
+        out(body).or(0)
+        return 0
+    })
+    rows := cbuf<ProfRow>(mp, PROF_TOP())
+    n := mp.prof_parse_gprof(body, rows)
+    (n == 0).then({
+        derr("zenc: profile: no samples — the program finished too fast to profile; give it more work\n")
+        return 1
+    })
+    mp.prof_table(spec.source, "gprof", "", rows, n, mp.prof_names_of(root, spec, src), "")
+    rrc / 256
+}
+prof_run = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    spec: Spec,
+    src: string_view,
+    pa: ProfArgs,
+    have_perf: bool,
+) i32 {
+    have_perf.match ({
+        true  => {
+            rc := mp.prof_perf(root, spec, src, pa)
+            (rc >= 0).then({
+                return rc
+            })
+            mp.which_ok("gprof").match ({
+                true  => {
+                    derr("zenc: perf recorded no samples (perf_event_paranoid too strict?); falling back to gprof\n")
+                    mp.prof_gprof(root, spec, src, pa)
+                },
+                false => {
+                    derr("zenc: perf recorded no samples (check /proc/sys/kernel/perf_event_paranoid) and gprof is not installed\n")
+                    1
+                },
+            })
+        },
+        false => mp.prof_gprof(root, spec, src, pa),
+    })
+}
+profile_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
+    pa := prof_args(2, argc(), ProfArgs(
+        path: "",
+        raw: false,
+        fwd: argc(),
+    ))
+    (pa.path == "").then({
+        derr(PROF_USAGE())
+        return 2
+    })
+    have_perf := mp.which_ok("perf")
+    (have_perf == false && mp.which_ok("gprof") == false).then({
+        derr("zenc: profile needs a profiler on PATH: install `perf` (linux-tools) or `gprof` (binutils)\n")
+        return 1
+    })
+    spec := mp.resolve_spec(root, pa.path)
+    spec.ok.match ({
+        true  => {
+            spec.library.then({
+                derr("zenc: cannot profile a library project; profile a program with a main\n")
+                return 1
+            })
+            ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
+            genmods_set(spec.genmods)    // registered c_library genmods: same stamp discipline
+            contents_in(mp, spec.source).match ({
+                .Ok(src) => mp.prof_run(root, spec, src, pa, have_perf),
+                .Err(e)  => {
+                    derr("zenc: cannot open input: ")
+                    derr(spec.source)
+                    derr("\n")
+                    1
+                },
+            })
+        },
+        false => 1,
+    })
+}
 // the project ROOT (holds src/std + src/compiler + bootstrap): $ZEN_ROOT if set (a relocated binary
 // points it at a checkout), else the directory of the binary (argv[0]).
 root_of = (mp: MutPtr<Malloc>) string_view {
@@ -1107,7 +1783,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     (e == "").then({ mp.dirname(arg(0)) }, { e })
 }
 HELP = () string_view {
-    "usage: zenc <run|build|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
+    "usage: zenc <run|build|profile|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--time] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc run [--time] <file|project> [args]  compile + run; --time prints per-stage compile timings\n  zenc profile [--raw] <file.zen|project> [-- args]\n                                       sampling profile (perf; gprof fallback) with zen-native names\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
 }
 VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
 main = () i32 {
@@ -1140,22 +1816,25 @@ main = () i32 {
                         false => (cmd == "check").match ({
                             true  => mp.check_spec(root, mp.resolve_spec(root, arg(2))),
                             false => (cmd == "run").match ({
-                                true  => mp.run_spec(root, mp.resolve_spec(root, arg(2))),
-                                false => (cmd == "build").match ({
-                                    true  => mp.build_target(root),
-                                    false => (cmd == "targets").match ({
-                                        true  => mp.list_plan_targets(root, proj_dir(arg(2))),
-                                        false => (cmd == "fmt").match ({
-                                            true  => mp.fmt_cmd(arg(2), arg(3)),
-                                            false => (cmd == "doc").match ({
-                                                true  => mp.doc_cmd(root, arg(2)),
-                                                false => (cmd == "init").match ({
-                                                    true  => mp.zi_cmd(),
-                                                    false => (cmd == "lsp").match ({
-                                                        true  => mp.lsp_cmd(root),
-                                                        false => (cmd == "audit").match ({
-                                                            true  => mp.audit_cmd(root, arg(2), arg(3), arg(4)),
-                                                            false => mp.default_emit(cmd),
+                                true  => mp.run_cmd(root),
+                                false => (cmd == "profile").match ({
+                                    true  => mp.profile_cmd(root),
+                                    false => (cmd == "build").match ({
+                                        true  => mp.build_cmd(root),
+                                        false => (cmd == "targets").match ({
+                                            true  => mp.list_plan_targets(root, proj_dir(arg(2))),
+                                            false => (cmd == "fmt").match ({
+                                                true  => mp.fmt_cmd(arg(2), arg(3)),
+                                                false => (cmd == "doc").match ({
+                                                    true  => mp.doc_cmd(root, arg(2)),
+                                                    false => (cmd == "init").match ({
+                                                        true  => mp.zi_cmd(),
+                                                        false => (cmd == "lsp").match ({
+                                                            true  => mp.lsp_cmd(root),
+                                                            false => (cmd == "audit").match ({
+                                                                true  => mp.audit_cmd(root, arg(2), arg(3), arg(4)),
+                                                                false => mp.default_emit(cmd),
+                                                            }),
                                                         }),
                                                     }),
                                                 }),
