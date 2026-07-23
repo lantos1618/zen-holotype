@@ -1,9 +1,10 @@
 // compiler.backend.c.c_lit — integer/literal rendering + C string-escape leaf helpers for the C emitter.
 // Extracted from compiler.backend.c.c_emit. Byte-only so this self-hosts (no std runtime beyond gstr append/push).
 { String } = std.text.string
-{ sbyte, gstr_push, gstr_append } = compiler.genc
+{ gstr_push, gstr_append } = compiler.genc
 { dec_digit } = compiler.astops
 { Malloc } = std.mem.alloc
+{ escape_into } = std.text.ascii    // the shared scan-and-emit loop; the C escape TABLE stays here
 // A non-printable byte as a 3-digit octal C escape `\ooo`. Octal (not `\xNN`) is used deliberately:
 // hex escapes are greedy in C and would swallow a following literal hex digit, whereas an octal escape
 // is capped at 3 digits, so any byte followed by any byte round-trips. dec_digit() only sees 0..7 here.
@@ -40,18 +41,7 @@ gen_escape_byte = (s: String, alloc: MutPtr<Malloc>, b: u8) String {
         }),
     })
 }
-// a C string literal: `"` + each byte escaped + `"`
+// a C string literal: `"` + each byte escaped (via the shared std.text.ascii scan loop) + `"`
 gen_strlit* = (s: String, alloc: MutPtr<Malloc>, v: string_view) String {
-    s.gstr_append(alloc, "\"").gen_escape_from(alloc, v, 0).gstr_append(alloc, "\"")
+    s.gstr_append(alloc, "\"").escape_into(alloc, v, gen_escape_byte).gstr_append(alloc, "\"")
 }
-// escape the str's bytes one by one (recursion to the NUL terminator). Avoiding view/slice keeps this
-// helper independent of extra std runtime plumbing in the bootstrap source set.
-gen_escape_from = (s: String, alloc: MutPtr<Malloc>, v: string_view, i: i32) String {
-    acc := s
-    k := i
-    @while (sbyte(v, k) != 0) {
-        acc = acc.gen_escape_byte(alloc, sbyte(v, k))
-        k = k + 1
-    }
-    acc
-}    // ITERATIVE: a ~50KB string literal escapes O(n) by iteration, not O(n) C-stack recursion

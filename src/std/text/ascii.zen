@@ -37,3 +37,22 @@ hex_nibble* = (b: u8) i64 {
         }),
     })
 }
+// ── shared escape mechanism ───────────────────────────────────────────────────
+// The scan-and-emit loop every string-literal escaper shares: walk the NUL-terminated bytes of `v`
+// and fold each through `esc`. The per-target escape TABLES (C's `\ooo` octal, JS's short escapes,
+// the formatter's `\xNN`) differ by design and stay at their call sites — only the loop shape lives
+// here. `esc` is an FnT param, so each call site splices its own table at monomorphization time
+// (zero runtime dispatch); `S` is the accumulator (a string builder — kept generic so this file
+// stays import-free) and `A` the allocator threaded through it. Used by the C backend (gen_strlit),
+// the JS backend (jstrlit), and the formatter (ff_strlit). std.format.{json,serde} do NOT use it,
+// deliberately: json's write_str_lit is run-copy (bulk-appends runs of pass-through bytes, a
+// different loop shape), and serde's jw_str folds an error-carrying JwSt state, not a builder.
+escape_into*<S, A> = (s: S, a: MutPtr<A>, v: string_view, esc: (S, MutPtr<A>, u8) S) S {
+    acc := s
+    k: i32 := 0
+    @while (at(v, k) != 0) {
+        acc = esc(acc, a, at(v, k))
+        k = k + 1
+    }
+    acc
+}    // ITERATIVE: a ~50KB string literal escapes O(n) by iteration, not O(n) C-stack recursion
