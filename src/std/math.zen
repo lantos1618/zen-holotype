@@ -1,44 +1,54 @@
 // std.math — integer and float math. No allocator, no hidden heap.
 //
-// LIBM NOTE: the transcendentals at the bottom (sin/cos/tan/atan/atan2/log/log2/log10/exp/pow)
-// are bodyless bindings to the C math library. The current driver links `-lm` for every C build, so
-// callers do not need project link metadata for them. The rest of this module is pure (Newton sqrt,
-// integer fpow). The compiler never imports std.math, so the bootstrap seed is unaffected.
+// LIBM NOTE: the float roots/powers, trig, and rounding functions here are bodyless bindings to the C
+// math library (the decl NAME is the C symbol name, so no wrapper can re-name them). The current driver
+// links `-lm` for every C build (and on this glibc the libm symbols resolve even without an explicit
+// `-lm`), so callers need no project link metadata for them. The integer helpers and the classification
+// predicates are pure Zen. The compiler never imports std.math, so the bootstrap seed is unaffected.
 //
-// NAMING / FLAT-NAMESPACE NOTE: this module is only flattened into a program that imports it,
-// so its names never reach the compiler or an unrelated std module. Even so, several exports use
-// conventional math names that a user program might also define — importing both halves would
-// collide at flatten time. The ones to watch: `abs`, `min`, `max`, `clamp`, `sign`, `pow_i`,
-// `gcd`, `sqrt`, `floor`, `ceil`, `round`. The float helpers (`fabs`/`fmin`/`fmax`/`fpow`) are
-// deliberately f-prefixed to stay clear of common identifiers.
+// NO OVERLOADING: Zen has no function overloading, so the transcendentals stay f64-only — an integer
+// caller converts with `.to_f64()`, which is expected, not a gap. Where a helper's body type-checks for
+// BOTH i64 and f64 with no bare integer literal (min/max/clamp/lerp), it is generic `<T>`. `abs`/`sign`
+// cannot be generic: their bodies compare against the literal `0` (an i32), which will not unify with a
+// generic `T` (`operator < cannot be applied to T and i32`), so the integer forms stay i64 and the float
+// forms are the f-prefixed `fabs`/`fsign`.
+//
+// NAMING / FLAT-NAMESPACE NOTE: this module is only flattened into a program that imports it, so its
+// names never reach the compiler or an unrelated std module. Even so, several exports use conventional
+// math names a user program might also define — importing both halves would collide at flatten time.
+// The float f-prefixed helpers (`fabs`/`fmin`/`fmax`/`fpow`/`fsign`) deliberately dodge common identifiers.
 //
 // These integer helpers deliberately use i64; the language/backend also support the other widths.
-// ── integer math ──────────────────────────────────────────────────────────────────────────
+// ── constants ───────────────────────────────────────────────────────────────────────────────────────
+PI* := 3.141592653589793    // π
+E* := 2.718281828459045    // Euler's number e
+TAU* := 6.283185307179586    // τ = 2π
+SQRT2* := 1.4142135623730951    // √2
+LN2* := 0.6931471805599453    // ln 2
+LN10* := 2.302585092994046    // ln 10
+// IEEE-754 special values, derived (Zen has no infinity/NaN literals). `1.0 / 0.0` is a DEFINED float
+// operation (→ +∞, not the integer div-by-zero panic); `0.0 / 0.0` → NaN. NaN compares unequal to
+// everything including itself — that self-inequality is exactly how `isnan` below detects it.
+INF* := 1.0 / 0.0
+NAN* := 0.0 / 0.0
+// ── integer math ──────────────────────────────────────────────────────────────────────────────────
 // |x|. NOTE: abs(min-i64) overflows (two's-complement has no positive counterpart); caller's domain.
+// NOT generic: the `0` literal is i32 and will not unify with a generic `T` — use `fabs` for f64.
 abs* = (x: i64) i64 { (x < 0).then({ 0 - x }, { x }) }
-// sign of x: -1, 0, or 1.
-sign = (x: i64) i64 {
+// sign of x: -1, 0, or 1. NOT generic (same `0`/`1` literal reason as `abs`); use `fsign` for f64.
+sign* = (x: i64) i64 {
     (x > 0).match ({
         true  => 1,
         false => (x < 0).then({ 0 - 1 }, { 0 }),
     })
 }
-// generic min/max/clamp — monomorphized per use; work for any type whose values support `<`
-// (verified for i64 and f64). `clamp` assumes lo <= hi.
-min*<T> = (a: T, b: T) T { (a < b).then({ a }, { b }) }
-max*<T> = (a: T, b: T) T { (a > b).then({ a }, { b }) }
-clamp<T> = (x: T, lo: T, hi: T) T {
-    (x < lo).match ({
-        true  => lo,
-        false => (x > hi).then({ hi }, { x }),
-    })
-}
 // greatest common divisor (Euclid), always >= 0. gcd(0,0) = 0.
-gcd = (a: i64, b: i64) i64 { (b == 0).then({ a.abs() }, { gcd(b, a % b) }) }
+gcd* = (a: i64, b: i64) i64 { (b == 0).then({ a.abs() }, { gcd(b, a % b) }) }
 // least common multiple, always >= 0. lcm(0, n) = 0.
-lcm = (a: i64, b: i64) i64 { (a == 0 || b == 0).then({ 0 }, { (a / gcd(a, b) * b).abs() }) }
+lcm* = (a: i64, b: i64) i64 { (a == 0 || b == 0).then({ 0 }, { (a / gcd(a, b) * b).abs() }) }
 // integer power: base ** exp for exp >= 0. exp < 0 returns 0 (no integer result). pow_i(_, 0) = 1.
-pow_i = (base: i64, exp: i64) i64 {
+// Simple linear iteration; for large exponents prefer `ipow` (exponentiation by squaring).
+pow_i* = (base: i64, exp: i64) i64 {
     (exp < 0).match ({
         true  => 0,
         false => {
@@ -52,42 +62,72 @@ pow_i = (base: i64, exp: i64) i64 {
         },
     })
 }
-// ── float math ────────────────────────────────────────────────────────────────────────────
-// |x| for f64.
-fabs = (x: f64) f64 { (x < 0.0).then({ 0.0 - x }, { x }) }
-// float min/max. (the generic min/max above also work on f64; these are explicit f64 aliases.)
-fmin = (a: f64, b: f64) f64 { (a < b).then({ a }, { b }) }
-fmax = (a: f64, b: f64) f64 { (a > b).then({ a }, { b }) }
-// floor/ceil/round return f64. to_i64 truncates toward zero, so we correct for sign.
-// DOMAIN: |x| must fit in i64 (~9.2e18); beyond that to_i64 overflows.
-floor = (x: f64) f64 {
-    t := to_f64(to_i64(x))
-    (t > x).then({ t - 1.0 }, { t })
-}
-ceil = (x: f64) f64 {
-    t := to_f64(to_i64(x))
-    (t < x).then({ t + 1.0 }, { t })
-}
-// round half up toward +inf: round(2.5)=3, round(-2.5)=-2.
-round = (x: f64) f64 { floor(x + 0.5) }
-// trunc toward zero, as f64.
-trunc = (x: f64) f64 { to_f64(to_i64(x)) }
-// sqrt via Newton's method (no libm). x < 0 returns 0.0 (no real root); sqrt(0)=0.
-// Iterates until the estimate stops changing (quadratic convergence), capped at 100 steps.
-sqrt_iter = (x: f64, g: f64, n: i64) f64 {
-    (n == 0).match ({
-        true  => g,
+// integer exponentiation by squaring: base ** exp for exp >= 0 in O(log exp) multiplies. exp < 0 → 0.
+// ipow(_, 0) = 1. BOUNDED loop (no recursion), so a huge exponent stays flat-stack.
+ipow* = (base: i64, exp: i64) i64 {
+    (exp < 0).match ({
+        true  => 0,
         false => {
-            ng := (g + x / g) / 2.0
-            (ng == g).then({ g }, { sqrt_iter(x, ng, n - 1) })
+            r := 1
+            b := base
+            e := exp
+            @while (e > 0) {
+                (e % 2 == 1).then({
+                    r = r * b
+                })
+                b = b * b
+                e = e / 2
+            }
+            r
         },
     })
 }
-sqrt = (x: f64) f64 {
-    (x <= 0.0).then({ 0.0 }, { sqrt_iter(x, (x < 1.0).then({ 1.0 }, { x }), 100) })
+// integer square root: the largest r with r*r <= n. n <= 0 returns 0. Newton's method, BOUNDED loop
+// (monotone decreasing until it stops improving — no recursion), exact for all non-negative i64.
+isqrt* = (n: i64) i64 {
+    (n <= 0).match ({
+        true  => 0,
+        false => {
+            x := n
+            y := (x + 1) / 2
+            @while (y < x) {
+                x = y
+                y = (x + n / x) / 2
+            }
+            x
+        },
+    })
 }
-// float raised to an integer power. fpow(b, 0) = 1.0; negative exp via reciprocal.
-fpow_pos = (base: f64, exp: i64) f64 {
+// ── generic algebraic helpers (int AND float) ───────────────────────────────────────────────────────
+// min/max/clamp/lerp are monomorphized per use and type-check for any `T` whose values support the
+// operators used with no bare integer literal — verified for both i64 and f64. `clamp` assumes lo <= hi.
+min*<T> = (a: T, b: T) T { (a < b).then({ a }, { b }) }
+max*<T> = (a: T, b: T) T { (a > b).then({ a }, { b }) }
+clamp*<T> = (x: T, lo: T, hi: T) T {
+    (x < lo).match ({
+        true  => lo,
+        false => (x > hi).then({ hi }, { x }),
+    })
+}
+// linear interpolation a + (b - a) * t. Generic: with t a fraction this is the usual f64 lerp, but the
+// body has no literal so it also monomorphizes for i64 (integer blend). t is NOT clamped to [0, 1].
+lerp*<T> = (a: T, b: T, t: T) T { a + (b - a) * t }
+// ── float algebraic helpers ─────────────────────────────────────────────────────────────────────────
+// |x| for f64. libm (correct for -0.0 and NaN); the f-prefix keeps it clear of a user `abs`.
+fabs* = (x: f64) f64
+// sign of an f64: -1.0, 0.0, or 1.0. Pure Zen (the f64 counterpart to `sign`). NaN → 0.0.
+fsign* = (x: f64) f64 {
+    (x > 0.0).match ({
+        true  => 1.0,
+        false => (x < 0.0).then({ 0.0 - 1.0 }, { 0.0 }),
+    })
+}
+// float min/max. (the generic min/max above also work on f64; these are explicit f64 aliases.)
+fmin* = (a: f64, b: f64) f64 { (a < b).then({ a }, { b }) }
+fmax* = (a: f64, b: f64) f64 { (a > b).then({ a }, { b }) }
+// float raised to an INTEGER power, in Zen (distinct from libm `pow`, which takes a float exponent).
+// fpow(b, 0) = 1.0; negative exp via reciprocal.
+fpow_pos* = (base: f64, exp: i64) f64 {
     r := 1.0
     e := exp
     @while (e > 0) {
@@ -96,25 +136,54 @@ fpow_pos = (base: f64, exp: i64) f64 {
     }    // iterative: a huge exp must not recurse
     r
 }
-fpow = (base: f64, exp: i64) f64 {
+fpow* = (base: f64, exp: i64) f64 {
     (exp < 0).then({ 1.0 / fpow_pos(base, 0 - exp) }, { fpow_pos(base, exp) })
 }
-// ── transcendentals (libm) ──────────────────────────────────────────────────────────────────
-// Bodyless decls bind the C math-library symbols directly (the decl name IS the C name, so no
-// wrapper can re-name them). Each is its own public export. The driver currently always links libm.
-// Angles are radians.
-// trigonometry
-sin* = (x: f64) f64
-cos = (x: f64) f64
-tan = (x: f64) f64
-// inverse tangent; atan2(y, x) is the full-quadrant angle of the point (x, y), in (-pi, pi].
-atan = (x: f64) f64
-atan2 = (y: f64, x: f64) f64
-// logarithms: log is natural (base e); log2 / log10 are the named bases.
-log* = (x: f64) f64
-log2 = (x: f64) f64
-log10 = (x: f64) f64
-// exponential e**x.
-exp* = (x: f64) f64
+// angle unit conversions.
+degrees* = (rad: f64) f64 { rad * (180.0 / PI) }
+radians* = (deg: f64) f64 { deg * (PI / 180.0) }
+// ── float classification (pure Zen — isnan/isinf are C macros, not linkable symbols) ─────────────────
+// NaN is the only value unequal to itself.
+isnan* = (x: f64) bool { x != x }
+// ±∞: equal to +INF or -INF exactly.
+isinf* = (x: f64) bool { x == INF || x == 0.0 - INF }
+// finite = neither NaN nor infinite.
+isfinite* = (x: f64) bool { isnan(x) == false && isinf(x) == false }
+// ── float roots / powers (libm) ─────────────────────────────────────────────────────────────────────
+// Bodyless decls bind the C math-library symbols directly. Each is its own public export.
+sqrt* = (x: f64) f64
+cbrt* = (x: f64) f64
 // base ** exp with a FLOAT exponent (distinct from the integer-exponent `fpow` above).
-pow = (base: f64, exp: f64) f64
+pow* = (base: f64, exp: f64) f64
+hypot* = (x: f64, y: f64) f64    // sqrt(x*x + y*y) without intermediate overflow
+// exponentials: exp is e**x; exp2 is 2**x; expm1 is e**x - 1 (accurate near 0).
+exp* = (x: f64) f64
+exp2* = (x: f64) f64
+expm1* = (x: f64) f64
+// logarithms: log is natural (base e); log2 / log10 are the named bases; log1p is log(1 + x) (accurate near 0).
+log* = (x: f64) f64
+log2* = (x: f64) f64
+log10* = (x: f64) f64
+log1p* = (x: f64) f64
+// ── trigonometry (libm) — angles are radians ────────────────────────────────────────────────────────
+sin* = (x: f64) f64
+cos* = (x: f64) f64
+tan* = (x: f64) f64
+asin* = (x: f64) f64
+acos* = (x: f64) f64
+atan* = (x: f64) f64
+// atan2(y, x) is the full-quadrant angle of the point (x, y), in (-pi, pi].
+atan2* = (y: f64, x: f64) f64
+// hyperbolic
+sinh* = (x: f64) f64
+cosh* = (x: f64) f64
+tanh* = (x: f64) f64
+// ── rounding (libm) ─────────────────────────────────────────────────────────────────────────────────
+// floor: largest integer <= x; ceil: smallest integer >= x; round: nearest, halves away from zero
+// (round(2.5) = 3, round(-2.5) = -3); trunc: toward zero. All return f64. fmod(x, y) = x - n*y (n toward
+// zero), the float remainder with the sign of x.
+floor* = (x: f64) f64
+ceil* = (x: f64) f64
+round* = (x: f64) f64
+trunc* = (x: f64) f64
+fmod* = (x: f64, y: f64) f64

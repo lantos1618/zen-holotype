@@ -117,6 +117,23 @@ log2	exact	math.h
 log10	exact	math.h
 exp	exact	math.h
 pow	exact	math.h
+sqrt	exact	math.h
+cbrt	exact	math.h
+hypot	exact	math.h
+exp2	exact	math.h
+expm1	exact	math.h
+log1p	exact	math.h
+asin	exact	math.h
+acos	exact	math.h
+sinh	exact	math.h
+cosh	exact	math.h
+tanh	exact	math.h
+fabs	exact	math.h
+floor	exact	math.h
+ceil	exact	math.h
+round	exact	math.h
+trunc	exact	math.h
+fmod	exact	math.h
 EOF
 
 # ── 1. emit each foreign-bearing std module (one public symbol imported per driver) ──────────────
