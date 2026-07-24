@@ -182,6 +182,7 @@ KTARGARITY* = () i32 { 41 }    // an explicit `<…>` type-arg list whose COUNT 
 KFFITYPE* = () i32 { 42 }    // a FOREIGN (bodyless) declaration whose signature uses a type outside the FFI-safe set
 KLITEXHAUST* = () i32 { 45 }    // a literal-scalar `.match` (i32/…) with no `_` wildcard — the value domain is unbounded, so it is non-exhaustive. Kind label is "exhaustiveness" (same family as KEXHAUST); the parser plants a positioned `__nonexhaustive_lit` sentinel the call-classifier maps here
 KMATCHLABEL* = () i32 { 46 }    // a boolean `.match` arm labelled with a non-boolean literal (`true => 1, 0 => 2`) — a label-TYPE error, caret on the bad label (the parser's positioned `__badmatchlabel` sentinel)
+KDUPMATCHARM* = () i32 { 51 }    // a boolean `.match` whose two arms repeat a label (`true => …, true => …`) — covers only one case, caret on the duplicate label (the parser's positioned `__dupmatcharm` sentinel)
 KREFLECTRETURN* = () i32 { 48 }    // a reflect-using generic with a `return` inside a loop body — inline-only, so the return would escape into the caller (mirror of KRECHOF for the loop-return hazard)
 KREFLECTWRITE* = () i32 { 49 }    // an each_field/zip_fields whose SUBJECT is temp-bound (a non-Var expr, or an enclosing reflection lambda's value param — a member place) while its lambda ASSIGNS a value param: the writes would land on the discarded temp (silent no-op, #587)
 KCAPACITY* = () i32 { 47 }    // a fixed-capacity compiler registry (exports / alias prefixes / module sigs) overflowed — the parser's sticky `__capacity` sentinel; the program is REJECTED rather than compiled with silently dropped registry data
@@ -533,6 +534,13 @@ diag_info = (code: i32) DiagInfo {
             kind: "match-label",
             message: "match arm label is not a `bool`; a boolean `.match` takes `true`, `false`, or `_`",
             hint: "replace the label with `true`, `false`, or a `_` wildcard",
+        )
+    })
+    (code == 51).then({
+        return DiagInfo(
+            kind: "match-arm",
+            message: "boolean `.match` repeats an arm label; it must cover `true` and `false` exactly once",
+            hint: "give one `true` arm and one `false` arm (either order), or a single bool arm plus a `_` wildcard",
         )
     })
     (code == 47).then({
