@@ -144,12 +144,8 @@ ff_open_trailing* = (s: String, a: MutPtr<Malloc>, line: i32) String {
         false => s,
     })
 }
-// rightmost known byte offset among a Cond's arm bodies (0 = both position-less, e.g. bare literals).
-gf_cond_body_max = (d: CondData) i32 {
-    tp := left_pos_of(d.t)
-    ep := left_pos_of(d.e)
-    (tp > ep).then({ tp }, { ep })
-}
+// rightmost arm-LABEL offset of a Cond (`true`/`false` token, recorded by the parser; 0 = synthesized).
+gf_cond_arm_max = (d: CondData) i32 { (d.tpos > d.epos).then({ d.tpos }, { d.epos }) }
 // Does a pending comment belong ON the `x.match ({ …` OPENING line of this boolean `.match` (Cond) — i.e.
 // interior to the construct, written after `({` and BEFORE the arms — as opposed to a comment trailing
 // the whole statement (after the closing `})`)? The distinction matters because only the interior comment
@@ -173,8 +169,20 @@ gf_cond_open_cmt* = (d: CondData) bool {
     (gf_line_of(gf_cmts[gf_idx].start) != gf_line_of(rp)).then({
         return false
     })
-    bm := d.gf_cond_body_max()
+    bm := d.gf_cond_arm_max()
     bm > 0 && gf_cmts[gf_idx].start < bm
+}
+// Is the next pending comment INTERIOR to this Cond — sitting after the receiver and before the arm
+// bodies (own-line OR trailing)? Such a comment has no home in the one-line inline form, so its presence
+// forces the multiline printer, which weaves it beside its arm. Position-less bare-literal arms (bm == 0)
+// give no bound, so an interior comment there is left inline (the acknowledged residual in ff_cond).
+gf_cond_interior_cmt* = (d: CondData) bool {
+    (gf_idx >= gf_cmts.len).then({
+        return false
+    })
+    rp := left_pos_of(d.c)
+    bm := d.gf_cond_arm_max()
+    bm > 0 && gf_cmts[gf_idx].start > rp && gf_cmts[gf_idx].start < bm
 }
 // if the NEXT pending comment is TRAILING (code precedes it on its source line), emit it inline after
 // the just-printed statement (two spaces then the text). Source order + the trailing flag make this
@@ -354,7 +362,7 @@ ff_cond* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
     // `})`) is NOT interior and keeps the clean inline form. RESIDUAL: when both arm bodies are
     // position-less bare literals, gf_cond_open_cmt cannot bound the opening line, so such an interior
     // comment on a sole-body boolean match may still migrate (never worse than the pre-fix behavior).
-    d.gf_cond_open_cmt().then({
+    d.gf_cond_interior_cmt().then({
         return s.ff_cond_multiline(a, d, ind)
     })
     saved_comment := gf_idx
