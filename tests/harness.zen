@@ -148,6 +148,50 @@ hp_suite_cmd = (
     d := mp.zo_dir()
     mp.zo_join([z, "mkdir -p ", cache, "; ZENC_CACHE_DIR=", cache, " ZO_NWORKERS=", inner, " ZEN_HARNESS_SUITE=", name, " ", self, " > ", d, "/s_", name, ".out 2>&1; echo $? > ", d, "/s_", name, ".rc"])
 }
+// membership test: is `needle` present in `hay`? (match-only, no early break — the lists are tiny).
+hp_list_has = (hay: [string_literal], needle: string_literal) bool {
+    found := false
+    hay.loop((h, i, s) {
+        (s == needle).then({
+            found = true
+        })
+    })
+    found
+}
+// GUARD (Fix B): `sched` (scheduling list) and `order` (print/tally list) MUST hold the same set of
+// suites. hp_run_parallel SCHEDULES children from `sched` but TALLIES failures by walking `order`; a
+// suite in `sched` but missing from `order` would RUN yet never be counted (fails OPEN — its failures
+// silently vanish), and one in `order` but not `sched` would be tallied though never run. This asserts
+// set-equality (same length AND mutual membership), names the offending suite, and returns the count
+// of discrepancies (0 == the two lists agree).
+hp_assert_sched_order = (mp: MutPtr<Malloc>, sched: [string_literal], order: [string_literal]) i32 {
+    bad := 0
+    sched.loop((h, i, s) {
+        (hp_list_has(order, s) == false).then({
+            out("harness: SCHED/ORDER MISMATCH — suite '")
+            out(s)
+            out("' is SCHEDULED but absent from the print/tally list — its failures would be dropped\n")
+            bad = bad + 1
+        })
+    })
+    order.loop((h, i, s) {
+        (hp_list_has(sched, s) == false).then({
+            out("harness: SCHED/ORDER MISMATCH — suite '")
+            out(s)
+            out("' is in the print/tally list but never SCHEDULED to run\n")
+            bad = bad + 1
+        })
+    })
+    (sched.len == order.len == false).then({
+        out("harness: SCHED/ORDER MISMATCH — sched holds ")
+        out(mp.zo_itoa(sched.len))
+        out(" suites, order holds ")
+        out(mp.zo_itoa(order.len))
+        out(" (duplicate entry?)\n")
+        bad = bad + 1
+    })
+    bad
+}
 // FULL run, parallel at the suite level: fan the categories out as child processes through a bounded
 // pool, then print each suite's captured block in the ORIGINAL serial order and count failed suites.
 hp_run_parallel = () i32 {
@@ -156,6 +200,15 @@ hp_run_parallel = () i32 {
     // SCHEDULING order — longest poles first so the pool never idles into a tail (measured on the
     // 16-core dev box: build ~32s, modules ~30s, misc ~15s, fmt_roundtrip/fixpoint ~12s, rest ≤3s).
     sched := ["build", "modules", "misc", "fmt_roundtrip", "fixpoint", "stdsurface", "value", "argparse", "verdict", "datetime", "boundaries", "fuzz", "lsp"]
+    // PRINTING order — the exact order the old serial harness ran, so the report reads identically.
+    // Declared up here (not just before the tally loop) so the sched≡order guard can run at startup,
+    // BEFORE any suite is scheduled: a mismatch is a wiring bug, so fail loudly and run nothing.
+    order := ["value", "verdict", "modules", "build", "boundaries", "misc", "fuzz", "argparse", "datetime", "fmt_roundtrip", "lsp", "stdsurface", "fixpoint"]
+    mismatch := mp.hp_assert_sched_order(sched, order)
+    (mismatch == 0 == false).then({
+        out("harness: refusing to run — sched/order lists disagree (see above)\n")
+        return mismatch
+    })
     n := sched.len
     z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
     self := mp.zo_join([z, "/proc/", mp.zo_itoa(getpid().to_i64()), "/exe"])
@@ -181,8 +234,6 @@ hp_run_parallel = () i32 {
     })
     zo_par_run_n(cmds, n, hp_pool())
     free(base)
-    // PRINTING order — the exact order the old serial harness ran, so the report reads identically.
-    order := ["value", "verdict", "modules", "build", "boundaries", "misc", "fuzz", "argparse", "datetime", "fmt_roundtrip", "lsp", "stdsurface", "fixpoint"]
     fails := 0
     order.loop((h, i, s) {
         mp.contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".out"])).match ({
