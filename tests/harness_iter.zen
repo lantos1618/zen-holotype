@@ -1,0 +1,32 @@
+// tests/harness_iter.zen — the ITER category of the Zen-native correctness harness: exercises the
+// std.collections.iter combinator toolkit (sum/product/count_if/any/all/none/min_of/max_of/reduce/
+// position/fold_to and the allocator-threaded producers range_in/take_in/zip_in) end to end.
+//
+// The value-case runner (harness_value) has no module resolver, so — like harness_misc's num_parse /
+// hashing suites — this drives ONE real program through `./zen run` (which resolves std.collections.iter's
+// full closure) and asserts its labelled stdout lines contain the expected results. Each assertion is a
+// self-contained fact (e.g. an empty slice's min_of is `.None`), so a miscompiled combinator flips its
+// line and fails the case. See harness_lib.zen for the run_suite contract.
+{ run_suite } = harness_lib
+{ Malloc, malloc, free } = std.mem.alloc
+{ out, save, contents_in, shell } = std.io.file
+{ len } = std.text.str
+{ zo_path, zo_cmd } = harness_lib
+// read a scratch file's whole contents, or "" if it could not be read.
+hi_read = (mp: MutPtr<Malloc>, path: string_view) string_view {
+    mp.contents_in(path).match ({
+        .Ok(t)  => t,
+        .Err(e) => "",
+    })
+}
+// The one program under test: imports the iter surface, prints one labelled line per fact.
+ITER_PROG := "{ Malloc } = std.mem.alloc\n{ put } = std.text.fmt\n{ sum, product, count_if, any, all, none, min_of, max_of, reduce, position, fold_to, range_in, take_in, zip_in } = std.collections.iter\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    xs: [i64] := [1, 2, 3]\n    d: i64 := 0 - 1\n    put(\"sum=\").i(sum(xs)).nl()\n    ps: [i64] := [1, 2, 3, 4]\n    put(\"prod=\").i(product(ps)).nl()\n    put(\"cif=\").i(ps.count_if((x){ x % 2 == 0 })).nl()\n    put(\"any=\").b(xs.any((x){ x == 2 })).nl()\n    put(\"all=\").b(xs.all((x){ x > 0 })).nl()\n    put(\"none=\").b(xs.none((x){ x > 9 })).nl()\n    put(\"min=\").i(xs.min_of().match ({ .Some(v) => v, .None => d })).nl()\n    put(\"max=\").i(xs.max_of().match ({ .Some(v) => v, .None => d })).nl()\n    empty: [i64] := []\n    put(\"emin=\").b(empty.min_of().match ({ .Some(v) => false, .None => true })).nl()\n    put(\"red=\").i(xs.reduce((a, b){ a + b }).match ({ .Some(v) => v, .None => d })).nl()\n    put(\"ered=\").b(empty.reduce((a, b){ a + b }).match ({ .Some(v) => false, .None => true })).nl()\n    put(\"pos=\").i(xs.position((x){ x == 3 }).match ({ .Some(v) => v, .None => d })).nl()\n    put(\"epos=\").b(xs.position((x){ x == 9 }).match ({ .Some(v) => false, .None => true })).nl()\n    put(\"fto=\").b(ps.fold_to(false, (acc: bool, x: i64) bool { acc || x > 3 })).nl()\n    r := mp.range_in(5).expect(\"range\")\n    put(\"rlen=\").i(r.len).s(\" r0=\").i(r[0]).s(\" r4=\").i(r[4]).s(\" rsum=\").i(sum(r)).nl()\n    tk := mp.take_in(ps, 2).expect(\"take\")\n    put(\"tklen=\").i(tk.len).s(\" tksum=\").i(sum(tk)).nl()\n    ys: [i64] := [10, 20]\n    z := mp.zip_in(xs, ys).expect(\"zip\")\n    put(\"zlen=\").i(z.len).s(\" za0=\").i(z[0].a).s(\" zb0=\").i(z[0].b).s(\" za1=\").i(z[1].a).s(\" zb1=\").i(z[1].b).nl()\n    0\n}\n"
+harness_iter_run* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_iter.zen"), ITER_PROG, len(ITER_PROG))
+    save(mp.zo_path("zo_iter.out"), "", 0)
+    shell(mp.zo_cmd("./zen run $ZT/zo_iter.zen > $ZT/zo_iter.out 2>/dev/null"))
+    txt := mp.hi_read(mp.zo_path("zo_iter.out"))
+    run_suite("iter (run)", [txt.contains("sum=6\n"), txt.contains("prod=24\n"), txt.contains("cif=2\n"), txt.contains("any=true\n"), txt.contains("all=true\n"), txt.contains("none=true\n"), txt.contains("min=1\n"), txt.contains("max=3\n"), txt.contains("emin=true\n"), txt.contains("red=6\n"), txt.contains("ered=true\n"), txt.contains("pos=2\n"), txt.contains("epos=true\n"), txt.contains("fto=true\n"), txt.contains("rlen=5 r0=0 r4=4 rsum=10\n"), txt.contains("tklen=2 tksum=3\n"), txt.contains("zlen=2 za0=1 zb0=10 za1=2 zb1=20\n")])
+}
