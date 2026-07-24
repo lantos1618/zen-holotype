@@ -1,0 +1,40 @@
+// tests/harness_sort.zen — the SORT category for the Zen-native correctness harness. It drives a real
+// program through `./zen run` (so std.sort's generic surface resolves and is monomorphized on actual
+// element types) and asserts its stdout against KNOWN vectors — the same custom-runner shape as
+// harness_datetime (the value-case harness can't drive a std-module program: it has no module resolver).
+//
+// The gate is CORRECTNESS + the no-segfault guarantee that motivated the heapsort choice:
+//   empty/single  — trivially-sorted degenerate slices.
+//   ascending     — the headline `sort()` on scrambled i64, checked element-by-element + is_sorted.
+//   presorted     — an already-sorted input stays sorted (idempotent, no accidental scramble).
+//   reverse       — worst-case-for-naive input fully reversed.
+//   duplicates    — all-equal + mixed-duplicate keys land contiguous and non-decreasing.
+//   descending    — a `>` comparator via sort_by (comparator path exercised distinctly from `<`).
+//   f64           — bare-`<` default comparator instantiates for a non-integer scalar.
+//   binary_search — hit (present element) yields the right index; miss (absent) yields .None.
+//   BIG (500)     — pseudo-random fill sorted in place: proves the ITERATIVE heapsort never recurses
+//                   into a segfault under the harness's un-optimized `cc` (the whole reason for heapsort).
+//                   Every element is then re-found via binary_search — an end-to-end sorted-invariant check.
+//
+// Wired into tests/harness.zen by importing `harness_sort_run` + a hp_run_cat dispatch line + adding
+// "sort" to BOTH the sched and order lists (the sched≡order startup guard halts if only one is updated).
+{ run_suite, zo_path, zo_cmd } = harness_lib
+{ Malloc } = std.mem.alloc
+{ save, contents_in, shell } = std.io.file
+{ contains, len } = std.text.str
+// The program under test. Prints one labelled line per vector; the runner asserts each as a substring.
+// The BIG case uses a deterministic LCG so the expected outcome ("sorted + every element found") is
+// stable across runs without pinning 500 exact values.
+SORT_PROG := "{ put } = std.text.fmt\n{ sort, sort_by, is_sorted, binary_search } = std.sort\n{ Malloc, malloc } = std.mem.alloc\nbs = (xs: [i64], t: i64) i64 { xs.binary_search(t).match ({ .Some(i) => i, .None => 0 - 1 }) }\nmain = () i32 {\n    e: [i64] := []\n    e.sort()\n    put(\"empty=\").b(e.is_sorted()).nl()\n    o: [i64] := [42]\n    o.sort()\n    put(\"single=\").i(o[0]).b(o.is_sorted()).nl()\n    a: [i64] := [3, 1, 2, 5, 4]\n    a.sort()\n    put(\"asc=\").i(a[0]).i(a[1]).i(a[2]).i(a[3]).i(a[4]).b(a.is_sorted()).nl()\n    p: [i64] := [1, 2, 3, 4, 5]\n    p.sort()\n    put(\"presorted=\").i(p[0]).i(p[4]).b(p.is_sorted()).nl()\n    r: [i64] := [5, 4, 3, 2, 1]\n    r.sort()\n    put(\"reverse=\").i(r[0]).i(r[4]).b(r.is_sorted()).nl()\n    dd: [i64] := [7, 7, 7, 7]\n    dd.sort()\n    put(\"alldup=\").i(dd[0]).i(dd[3]).b(dd.is_sorted()).nl()\n    du: [i64] := [2, 1, 2, 1, 2, 1]\n    du.sort()\n    put(\"dup=\").i(du[0]).i(du[1]).i(du[2]).i(du[3]).i(du[4]).i(du[5]).b(du.is_sorted()).nl()\n    ds: [i64] := [3, 1, 2, 5, 4]\n    ds.sort_by((x: i64, y: i64) bool { x > y })\n    put(\"desc=\").i(ds[0]).i(ds[4]).b(ds.is_sorted_by((x: i64, y: i64) bool { x > y })).nl()\n    f: [f64] := [3.5, 1.5, 2.5]\n    f.sort()\n    put(\"f64=\").b(f.is_sorted()).nl()\n    put(\"bs_hit=\").i(a.bs(2)).i(a.bs(5)).nl()\n    put(\"bs_miss=\").i(a.bs(9)).i(a.bs(0)).nl()\n    m := Malloc(_: 0)\n    base: RawPtr<u8> := malloc(500 * 8)\n    big: [i64] := base.slice(500)\n    seed := 12345\n    big.loop((h, i, _) {\n        seed = (seed * 1103515245 + 12345) % 2147483647\n        big[i] = seed % 1000\n    })\n    big.sort()\n    allfound := true\n    big.loop((h, i, x) {\n        big.binary_search(x).match ({ .Some(k) => {}, .None => { allfound = false } })\n    })\n    put(\"big=\").b(big.is_sorted()).b(allfound).i(big.len).nl()\n    0\n}\n"
+harness_sort_run* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_sort.zen"), SORT_PROG, len(SORT_PROG))
+    save(mp.zo_path("zo_sort.out"), "", 0)
+    shell(mp.zo_cmd("./zen run $ZT/zo_sort.zen > $ZT/zo_sort.out 2>/dev/null"))
+    txt := mp.contents_in(mp.zo_path("zo_sort.out")).match ({
+        .Ok(t)  => t,
+        .Err(e) => "",
+    })
+    run_suite("sort (run)", [txt.contains("empty=true\n"), txt.contains("single=42true\n"), txt.contains("asc=12345true\n"), txt.contains("presorted=15true\n"), txt.contains("reverse=15true\n"), txt.contains("alldup=77true\n"), txt.contains("dup=111222true\n"), txt.contains("desc=51true\n"), txt.contains("f64=true\n"), txt.contains("bs_hit=14\n"), txt.contains("bs_miss=-1-1\n"), txt.contains("big=truetrue500\n")])
+}
