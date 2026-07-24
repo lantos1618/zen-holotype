@@ -644,10 +644,35 @@ Env*: {
     env_gstruct = (env: Env, name: string_view) GenStructDecl {
         env.didx.idx_genstruct(env.decls, name)
     }
+    // ── lazy arg-type memo for generic-call inference ── each argument's type is inferred at most
+    // ONCE per gen_call_ret and reused by dispatch AND every (tparam × typed/literal pass) scan.
+    // Previously dispatch_name inferred the receiver, then each tparam ran targ_of twice, every scan
+    // re-running infer_expr on each arg it visited — on nested UFCS call chains each level multiplied
+    // the levels below it, so chain inference was exponential in chain depth. Seeding the receiver
+    // type once (gen_call_ret) and memoizing the rest (done[i] flags, lazily — a scan still infers
+    // only the args it visits) makes it linear. infer_expr is pure for a fixed Env, so the memoized
+    // types are exactly what re-inference would produce: same targs, byte-identical emitted C.
+    // atys+done live in ONE allocation (n Ty slots, then n done bytes).
+    arg_ty_memo = (env: Env, args: [Expr], atys: [Ty], done: [u8], i: i64) Ty {
+        (done[i] == 0).then({
+            atys[i] = env.infer_expr(args[i].addr())
+            done[i] = 1
+        })
+        atys[i]
+    }
     call_targ = (env: Env, f: Func, args: [Expr], tp: string_view) Ty {
-        arg := env.targ_of(f.params, args, tp, false)
+        raw := env.a.acquire(args.len * sizeof(Ty) + args.len)
+        atys: [Ty] := slice(raw, args.len)
+        done: [u8] := slice(raw.offset(args.len * sizeof(Ty)), args.len)
+        args.loop((h, i, x) {
+            done[i] = 0
+        })
+        env.call_targ_a(f, args, atys, done, tp)
+    }
+    call_targ_a = (env: Env, f: Func, args: [Expr], atys: [Ty], done: [u8], tp: string_view) Ty {
+        arg := env.targ_of(f.params, args, atys, done, tp, false)
         arg = arg.is_void_ty().then({ env.ret_targ_of(f.ret, tp) }, { arg })
-        arg.is_void_ty().then({ env.targ_of(f.params, args, tp, true) }, { arg })
+        arg.is_void_ty().then({ env.targ_of(f.params, args, atys, done, tp, true) }, { arg })
     }
     with_exp = (env: Env, t: Ty) Env {
         Env(
@@ -677,12 +702,20 @@ Env*: {
     var_ty = (env: Env, name: string_view) Ty {
         (name == "true" || name == "false").then({ tbool() }, { env.var_or_global(name) })
     }
-    targ_of = (env: Env, params: [Param], args: [Expr], tp: string_view, lits: bool) Ty {
+    targ_of = (
+        env: Env,
+        params: [Param],
+        args: [Expr],
+        atys: [Ty],
+        done: [u8],
+        tp: string_view,
+        lits: bool,
+    ) Ty {
         found := tvoid()
         params.loop((h, i, p) {
             found = found.is_void_ty().match ({
-                true  => (i < args.len && env.weak_targ_env(p.ty, args[i].addr(), tp) == lits).match ({
-                    true  => env.unify_arg(p.ty, args[i].addr(), tp),
+                true  => (i < args.len && env.weak_targ_env(p.ty, args, atys, done, i, tp) == lits).match ({
+                    true  => env.unify_arg(p.ty, args, atys, done, i, tp),
                     false => found,
                 }),
                 false => found,
@@ -747,8 +780,15 @@ Env*: {
     }
     dispatch_name = (env: Env, c: CallData) string_view {
         (c.args.len > 0).match ({
+            true  => env.dispatch_name_r(c, env.infer_expr(c.args[0].addr())),
+            false => c.fn,
+        })
+    }
+    // rty = the receiver's already-inferred type — gen_call_ret infers it ONCE and shares it with
+    // the targ scans (see arg_ty_memo); the public dispatch_name wrapper infers it for other callers.
+    dispatch_name_r = (env: Env, c: CallData, rty: Ty) string_view {
+        (c.args.len > 0).match ({
             true  => {
-                rty := env.infer_expr(c.args[0].addr())
                 tyname := rty.dispatch_recv_name()
                 // Fast path: a receiver type with NO impl can never redirect dispatch, so skip the O(n)
                 // impl scan entirely (the common case for primitive/struct receivers).
@@ -772,9 +812,28 @@ Env*: {
     }
     clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
     call_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
+        env.call_targs_r(f, args, etargs, tvoid(), false)
+    }
+    // rty0/has0: the already-inferred receiver type from gen_call_ret (see arg_ty_memo above) —
+    // seeds the memo so the dispatch infer and the targ scans share ONE arg0 inference.
+    call_targs_r = (env: Env, f: Func, args: [Expr], etargs: [Ty], rty0: Ty, has0: bool) [Ty] {
         buf := cbuf<Ty>(env.a, f.tparams.len)
+        // one lazy arg-type memo shared by every tparam's scans, in a single allocation.
+        raw := env.a.acquire(args.len * sizeof(Ty) + args.len)
+        atys: [Ty] := slice(raw, args.len)
+        done: [u8] := slice(raw.offset(args.len * sizeof(Ty)), args.len)
+        args.loop((h, i, x) {
+            done[i] = 0
+        })
+        (has0 && args.len > 0).then({
+            atys[0] = rty0
+            done[0] = 1
+        })
         f.tparams.loop((h, i, tp) {
-            buf[i] = (i < etargs.len).then({ etargs[i] }, { env.call_targ(f, args, tp.name) })
+            buf[i] = (i < etargs.len).match ({
+                true  => etargs[i],
+                false => env.call_targ_a(f, args, atys, done, tp.name),
+            })
         })
         env.deep_targs_env(f.tparams, buf, f.params, args)
     }
@@ -1212,15 +1271,25 @@ is_direct_tparam* = (t: Ty, tp: string_view) bool {
         _         => false,
     })
 }
-weak_targ_env = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: string_view) bool {
-    arg.is_weak_targ_arg() || pty.is_direct_tparam(tp) && env.infer_expr(arg).is_str_t()
+weak_targ_env = (
+    env: Env,
+    pty: Ty,
+    args: [Expr],
+    atys: [Ty],
+    done: [u8],
+    i: i64,
+    tp: string_view,
+) bool {
+    args[i].addr().is_weak_targ_arg()
+        || pty.is_direct_tparam(tp) && env.arg_ty_memo(args, atys, done, i).is_str_t()
 }
-// A lambda arg has no inferrable value type (infer_expr -> void). When a tparam sits in the closure's
-// RETURN position `(T) U`, bind it from the lambda's DECLARED return type so it never defaults to void.
-unify_arg = (env: Env, pty: Ty, arg: Ptr<Expr>, tp: string_view) Ty {
-    load(arg).match ({
+// A lambda arg has no inferrable value type (infer_expr -> void — what the memo holds for one).
+// When a tparam sits in the closure's RETURN position `(T) U`, bind it from the lambda's DECLARED
+// return type so it never defaults to void.
+unify_arg = (env: Env, pty: Ty, args: [Expr], atys: [Ty], done: [u8], i: i64, tp: string_view) Ty {
+    load(args[i].addr()).match ({
         .Lambda(lm) => pty.lam_ret_unify(lm, tp),
-        _           => pty.unify_ty(env.infer_expr(arg), tp),
+        _           => pty.unify_ty(env.arg_ty_memo(args, atys, done, i), tp),
     })
 }
 lam_ret_unify = (pty: Ty, lm: LambdaData, tp: string_view) Ty {
@@ -1490,12 +1559,15 @@ fnt_ret = (t: Ty) Ty {
     })
 }
 gen_call_ret = (env: Env, c: CallData) Ty {
-    dn := env.dispatch_name(c)
+    // Infer the receiver ONCE, shared by dispatch and the targ scans (see arg_ty_memo): the two
+    // separate arg0 inferences compounded per nesting level on UFCS chains.
+    rty0 := (c.args.len > 0).then({ env.infer_expr(c.args[0].addr()) }, { tvoid() })
+    dn := env.dispatch_name_r(c, rty0)
     f := env.env_func(dn)
     (f.name == "").match ({
         true  => env.var_or_global(c.fn).fnt_ret(),
         false => (f.tparams.len > 0).match ({
-            true  => env.a.subst_ty_in(f.tparams, env.call_targs(f, c.args, c.targs), f.ret),
+            true  => env.a.subst_ty_in(f.tparams, env.call_targs_r(f, c.args, c.targs, rty0, c.args.len > 0), f.ret),
             false => f.ret,
         }),
     })

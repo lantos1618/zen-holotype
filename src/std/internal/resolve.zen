@@ -2,7 +2,7 @@
 // Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 { at, is_alpha, is_alnum } = std.text.ascii
 { Decl } = compiler.ast.ast_types
-{ gstr_string, gstr_push, gstr_append, gstr_finish } = compiler.genc
+{ gstr_string, gstr_push, gstr_append, gstr_append_bytes, gstr_finish } = compiler.genc
 { gstr_int } = compiler.astops    // the compiler-side decimal writer (res_udec delegates to it)
 { decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset, note_module_sig,
   module_sigs_reset, module_sig_flags, module_sig_alias_stamped } = compiler.parse
@@ -108,12 +108,8 @@ rset_has* = (m: Map<i64>, key: String) bool { m.has(cstr(key.ptr)) }
 // gstr_* builder (one implementation for the whole compiler). The only difference is the arg
 // convention: m* take the allocator first (s.gstr_push(a, b)); gstr_* take the String first.
 mappend_string* = (a: MutPtr<Malloc>, out: String, src: String) String {
-    cur := out
-    bs: [u8] := src.bytes()
-    bs.loop((h, i, b) {
-        cur = cur.gstr_push(a, b)
-    })
-    cur
+    // src carries its length — bulk append (one reserve, straight copy), no per-byte push.
+    out.gstr_append_bytes(a, src.bytes())
 }
 mcopy_from = (a: MutPtr<Malloc>, out: String, src: String, i: i64) String {
     cur := out
@@ -131,17 +127,17 @@ mcopy_from = (a: MutPtr<Malloc>, out: String, src: String, i: i64) String {
 mappend_span = (a: MutPtr<Malloc>, out: String, s: string_view, p: i32, e: i32) String {
     cur := out
     (p < e).then({
+        // Find the copy length first (the span, clipped at an embedded NUL), then bulk append —
+        // one reserve + straight copy instead of a capacity-checked gstr_push per byte.
         span: [u8] := slice(s.offset(p), to_i64(e - p))
+        n := span.len
         span.loop((h, i, b) {
-            (b == 0).match ({
-                true  => {
-                    h.break
-                },
-                false => {
-                    cur = cur.gstr_push(a, b)
-                },
+            (b == 0).then({
+                n = i
+                h.break
             })
         })
+        cur = cur.gstr_append_bytes(a, slice(s.offset(p), n))
     })
     cur
 }
