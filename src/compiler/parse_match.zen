@@ -216,6 +216,16 @@ reject_label = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
         next: next,
     )
 }
+// Two boolean arms that repeat a label (`true => …, true => …`) cover only one case; the identity of the
+// labels is discarded once the Cond is built, so no later pass can see it. Distinct sentinel
+// (`__dupmatcharm`) carrying the offending second LABEL's position — the validator maps it to a POSITIONED
+// error[match-arm], never a silent `x ? a : b`.
+reject_dupmatch = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
+    PExpr(
+        expr: a.enode(call_at("__dupmatcharm", a.no_args(), pos)),
+        next: next,
+    )
+}
 // Shared `=> body` parse step for bool/literal/variant arm walkers.
 arm_rhs = (a: MutPtr<Malloc>, src: string_view, pos: i32, bare_ok: bool) PExpr {
     nx := src.scan(pos)
@@ -288,6 +298,13 @@ bool_one = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, a0: BoolArmEnd, ne
         false => a.reject_match(next),
     })
 }
+// Two arms cover both booleans when the second is a `_` wildcard or the opposite bool of the first;
+// `{true, true}` / `{false, false}` cover only one case and are rejected as duplicate arms.
+bool_arms_cover = (src: string_view, a0: BoolArmEnd, a1: BoolArmEnd) bool {
+    src.is_wild_label(a1.lab)
+        || src.tok_eq(a0.lab, "true") && src.tok_eq(a1.lab, "false")
+        || src.tok_eq(a0.lab, "false") && src.tok_eq(a1.lab, "true")
+}
 bool_close = (
     a: MutPtr<Malloc>,
     src: string_view,
@@ -298,15 +315,18 @@ bool_close = (
     c0 := src.scan(a1.next)
     close := src.is_comma(c0.tok).then({ src.scan(c0.next) }, { c0 })
     (a0.ok && a1.ok && src.is_rbrace(close.tok)).match ({
-        true  => src.tok_eq(a0.lab, "true").match ({
-            true  => PExpr(
-                expr: a.enode(cond(subj.expr, a0.body, a1.body)),
-                next: close.next,
-            ),
-            false => PExpr(
-                expr: a.enode(cond(subj.expr, a1.body, a0.body)),
-                next: close.next,
-            ),
+        true  => src.bool_arms_cover(a0, a1).match ({
+            true  => src.tok_eq(a0.lab, "true").match ({
+                true  => PExpr(
+                    expr: a.enode(cond(subj.expr, a0.body, a1.body)),
+                    next: close.next,
+                ),
+                false => PExpr(
+                    expr: a.enode(cond(subj.expr, a1.body, a0.body)),
+                    next: close.next,
+                ),
+            }),
+            false => a.reject_dupmatch(close.next, a1.lab.start),
         }),
         false => a1.ok.match ({
             true  => a.reject_match(close.next),
