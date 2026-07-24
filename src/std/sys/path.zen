@@ -62,11 +62,11 @@ back_over_slashes = (v: [u8], j: i64) i64 {
 }
 // ── pure, zero-copy ───────────────────────────────────────────────────────────
 // does `p` start at the root? is_absolute("/a") == true, is_absolute("a") == false.
-is_absolute = (p: string_view) bool { p.starts_with("/") }
+is_absolute* = (p: string_view) bool { p.starts_with("/") }
 // the final path component (everything after the last '/'), as a zero-copy suffix view.
 // basename("/a/b/c") == "c"; basename("abc") == "abc"; basename("/a/b/") == "" (trailing-slash rule);
 // basename("/") == "".
-basename = (p: string_view) string_view {
+basename* = (p: string_view) string_view {
     v := p.view()
     i := v.last_slash()
     cstr(v.ptr.offset(i + 1))
@@ -74,7 +74,7 @@ basename = (p: string_view) string_view {
 // the extension INCLUDING the dot, from the last '.' in the basename to the end; "" when there is none.
 // A leading dot is a dotfile marker, not an extension. Zero-copy suffix view.
 // ext("f.tar.gz") == ".gz"; ext("f.") == "."; ext(".bashrc") == ""; ext("noext") == "".
-ext = (p: string_view) string_view {
+ext* = (p: string_view) string_view {
     b := p.basename()
     bv := b.view()
     ld := bv.leading_dots()
@@ -103,7 +103,7 @@ stem_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
     n := b.len() - p.ext().len()
     a.substr_in(b, 0, n)
 }
-stem<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.stem_in(p) }
+stem*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.stem_in(p) }
 // ── join ──────────────────────────────────────────────────────────────────────
 // is the builder empty / does it currently end with a separator?
 sb_empty = (sb: String) bool { sb.len == 0 }
@@ -189,7 +189,7 @@ normalize_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
     top: i64 := 0
     parts.loop((h, i, comp) {
         ((comp.len() == 0 || comp == ".") == false).then({
-            comp == "..".match ({
+            (comp == "..").match ({
                 true  => (top > 0 && parts[keep[top - 1]] != "..").match ({
                     true  => {
                         top = top - 1
@@ -207,15 +207,15 @@ normalize_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
         })
     })
     sb0 := a.new_in().or_return()
-    seeded_r := abs.then({ sb0.append_in(a, "/") }, { ok(sb0) })
+    seeded_r: Result<String, IoError> := abs.then({ sb0.append_in(a, "/") }, { ok(sb0) })
     seeded := seeded_r.or_return()
     full := a.norm_build(parts, keep, 0, top, seeded).or_return()
     need_dot := top == 0 && abs.then({ false }, { true })
-    ended_r := need_dot.then({ full.append_in(a, ".") }, { ok(full) })
+    ended_r: Result<String, IoError> := need_dot.then({ full.append_in(a, ".") }, { ok(full) })
     ended := ended_r.or_return()
     ended.finish_in(a).match ({
         .Ok(done) => ok(done),
         .Err(e)   => err(e),
     })
 }
-normalize<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.normalize_in(p) }
+normalize*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.normalize_in(p) }
