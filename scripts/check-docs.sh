@@ -10,6 +10,8 @@ expected='./README.md
 ./docs/SPEC.md
 ./docs/STATUS.md
 ./docs/metaprogramming-vision.md
+./docs/name-interning-design.md
+./docs/profiling.md
 ./editor/nvim/README.md
 ./editor/vscode/README.md
 ./examples/README.md'
