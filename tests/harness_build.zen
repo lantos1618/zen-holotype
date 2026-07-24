@@ -1772,6 +1772,9 @@ harness_build_run* = () i32 {
         src: "halloc = std.mem.heap\n{ new_in } = std.mem.arc\n{ expect } = std.core.result\nmain = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr().new_in(41).expect(\"arc\")\n    a.drop_in(alloc.addr())\n    a.get()\n}\n",
         wants: [":8:5: error[ownership]: use of an owner after it was consumed (moved, released, or dropped)", "      a.get()", "      ^"],
     ), DiagCase(
+        src: "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\nHolder: { ptr: RawPtr<u8> }\nmain = () i32 {\n    a := halloc.gpa()\n    p := a.addr().acquire(64)\n    h := Holder(ptr: null_ptr())\n    h.ptr = p\n    a.addr().release(p)\n    v := load(h.ptr)\n    v.to_i32()\n}\n",
+        wants: [":10:17: error[ownership]: use of an owner after it was consumed (moved, released, or dropped)", "      v := load(h.ptr)", "                  ^~~"],
+    ), DiagCase(
         src: "{ Scope, with_sync } = std.scope\nhalloc = std.mem.heap\nleak = (s: MutPtr<Scope<A>>) RawPtr<u8> {\n    p := s.acquire(8)\n    p\n}\nmain = () i32 { h := halloc.gpa()  h.addr().with_sync(4096, leak)  0 }\n",
         wants: [":5:5: error[scope-escape]: value from scope `s` escapes its scope", "      p", "      ^", "hint: do not return a pointer from `s.acquire(...)`"],
     ), DiagCase(
@@ -1811,6 +1814,8 @@ harness_build_run* = () i32 {
         src: "{ print } = std.text.fmt\nQ*: { a: i32, b: i32 }\nmain = () i32 {\n    q := Q(a: 1, b: 2)\n    print(q)\n    0\n}\n",
         wants: [":5:5: error[trait-bound]: type `Q` does not implement trait `Display` (which declares `fmt_print`) — missing method(s): fmt_print, fmt_println", "      print(q)", "      ^~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
     )])
+    // a pointer stored into a struct FIELD aliases the same allocation; freeing the source local
+    // kills the field alias, so a later read of the field is a use-after-free (positioned at the field).
     // Multi-return uses named anonymous structs `{ x: T, y: U }`, not parenthesized type lists.
     // census #59b: a type error raised while checking a GENERIC stdlib body (here `println*<T>`'s
     // `x.fmt_println()`, instantiated for a type with no Display impl) must be attributed to the
