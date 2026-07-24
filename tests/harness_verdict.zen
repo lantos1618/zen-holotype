@@ -7,6 +7,10 @@
 { VerdictCase, run_verdicts } = harness_lib
 harness_verdict_run* = () i32 {
     a := run_verdicts("verdict", [VerdictCase(
+        src: "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\nHolder: { ptr: RawPtr<u8> }\nmain = () i32 {\n    a := halloc.gpa()\n    p := a.addr().acquire(64)\n    h := Holder(ptr: p)\n    a.addr().release(p)\n    q := a.addr().acquire(64)\n    h.ptr = q\n    v := load(h.ptr)\n    a.addr().release(q)\n    v.to_i32()\n}\n",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "count := 0\nbump = () i32 {\n    count = count + 1\n    count\n}\nmaybe = (c: bool) void {\n    c.match ({ true => bump(), false => { } })\n}\nmain = () i32 {\n    maybe(true)\n    0\n}\n",
         should_pass: true,
         kind: "",
@@ -971,6 +975,8 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "trait-bound",
     )])
+    // field-alias revival: a field freed through its source local is REBOUND to a fresh allocation
+    // before being read — the reassignment revives the field alias, so this is NOT a use-after-free.
     // the two-arm `.then({ a }, { b })` is the boolean two-arm match: bool condition accepted …
     // … a non-bool condition is a positioned operand-type error (same Cond checker as the match form)
     // `.then` takes at most two block arguments — a THIRD argument is a positioned parse error
