@@ -293,32 +293,39 @@ ff_cond_inline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
         }),
     })
 }
+// render one boolean-match arm, mirroring ff_arms: flush the own-line comments written ABOVE it (bounded
+// by its label offset `apos`), emit `label => body,`, then weave a trailing comment bounded by the next
+// arm (`nb`; 0 = last arm → its trailing comment defers to the enclosing statement, keeping re-fmt stable).
+ff_cond_arm = (
+    s: String,
+    a: MutPtr<Malloc>,
+    label: string_view,
+    body: Ptr<Expr>,
+    apos: i32,
+    nb: i32,
+    ind: i32,
+) String {
+    lead := s.ff_flush_leading(a, apos, ind)
+    line := lead
+        .ff_indent(a, ind)
+        .ff_append(a, label)
+        .ff_expr(a, body, ind)
+        .ff_append(a, ",")
+    withc := (nb > 0).then({ line.ff_trailing(a, nb) }, { line })
+    withc.ff_append(a, "\n")
+}
 ff_cond_multiline* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
     rp := left_pos_of(d.c)
     head := s.ff_recv(a, d.c, ind).ff_append(a, ".match ({")
     withc := d.gf_cond_open_cmt().then({ head.ff_open_trailing(a, gf_line_of(rp)) }, { head })
     open := withc.ff_append(a, "\n")
     body := (d.oa == 1).match ({
-        true  => open
-            .ff_indent(a, ind + 1)
-            .ff_append(a, "true => ")
-            .ff_expr(a, d.t, ind + 1)
-            .ff_append(a, ",\n"),
+        true  => open.ff_cond_arm(a, "true => ", d.t, d.tpos, 0, ind + 1),
         false => (d.oa == 2).match ({
-            true  => open
-                .ff_indent(a, ind + 1)
-                .ff_append(a, "false => ")
-                .ff_expr(a, d.e, ind + 1)
-                .ff_append(a, ",\n"),
+            true  => open.ff_cond_arm(a, "false => ", d.e, d.epos, 0, ind + 1),
             false => open
-                .ff_indent(a, ind + 1)
-                .ff_append(a, "true  => ")
-                .ff_expr(a, d.t, ind + 1)
-                .ff_append(a, ",\n")
-                .ff_indent(a, ind + 1)
-                .ff_append(a, "false => ")
-                .ff_expr(a, d.e, ind + 1)
-                .ff_append(a, ",\n"),
+                .ff_cond_arm(a, "true  => ", d.t, d.tpos, d.epos, ind + 1)
+                .ff_cond_arm(a, "false => ", d.e, d.epos, 0, ind + 1),
         }),
     })
     body.ff_indent(a, ind).ff_append(a, "})")
