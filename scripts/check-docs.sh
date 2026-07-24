@@ -16,7 +16,7 @@ expected='./README.md
 ./editor/vscode/README.md
 ./examples/README.md'
 
-actual=$(find . -name .git -prune -o -name '*.md' -type f -print | LC_ALL=C sort)
+actual=$(find . -name .git -prune -o -path './.claude' -prune -o -name '*.md' -type f -print | LC_ALL=C sort)
 
 if [ "$actual" != "$expected" ]; then
     echo "documentation inventory changed; consolidate it or update scripts/check-docs.sh intentionally" >&2
