@@ -11,16 +11,16 @@
 { assert_nonnull_kind, body_pos, cv_no_params, env_imported, env_is_enum, env_is_gen_struct,
   env_is_struct, env_known_fn, env_params, env_struct_fields, env_trait_method, expr_pos,
   first_if_offset, first_qmark_offset, fn_name_of, fn_pos_of, fnt_arg_err_at, inf_gen_fields,
-  inf_gen_variants, inf_named_reaches, intrinsic_arity, is_badmatchlabel_call,
+  inf_gen_variants, inf_named_reaches, intrinsic_arity, is_badmatchlabel_call, is_dupmatcharm_call,
   is_forbidden_raw_call, is_imported_generic, is_nonexhaust_lit_call, is_unresolved_trait_call,
   null_deref_kind, pos_or, positive_count, shadow_not_callable, shadows_toplevel, source_span,
   stmt_pos, store_mut_kind, trait_declaring, unknown_ty, unknown_type_message, ut_fields_kind,
   ut_func_kind, ut_payloads_kind, utn_fields, utn_func, utn_payloads } = compiler.validate.util
 { CheckDiagnostic, Diagnostic, KARGTYPE, KARITY, KARMVOID, KASSIGNFIT, KBOOLARM, KCONFORMANCE,
   KDUPFN, KDUPVARIANT, KESCAPE, KEXHAUST, KFALLTHROUGH, KINDEX, KINFINITETYPE, KLAMBDAVALUE, KLEAK,
-  KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT, KNOIF, KNOTCALLABLE,
-  KNOTERNARY, KNULLDEREF, KOPERAND, KOWNERSHIP, KPTRWRITE, KRETURNFIT, KSTRUCTFIELD, KTARGARITY,
-  KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN, desc_or, diagnostic_hint,
+  KDUPMATCHARM, KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT, KNOIF,
+  KNOTCALLABLE, KNOTERNARY, KNULLDEREF, KOPERAND, KOWNERSHIP, KPTRWRITE, KRETURNFIT, KSTRUCTFIELD,
+  KTARGARITY, KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN, desc_or, diagnostic_hint,
   diagnostic_kind_name, diagnostic_message, diagnostic_span_width, name_errors_body,
   name_errors_expr } = compiler.validate.diag
 { AliasList, DeadList, alias_nil, alias_step, count_loop_freed, dead_cons, dead_has, dead_nil,
@@ -445,46 +445,52 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
         true  => kv_at(KLITEXHAUST(), c.pos),
         false => c.is_badmatchlabel_call().match ({
             true  => kv_at(KMATCHLABEL(), c.pos),
-            false => c.is_forbidden_raw_call().match ({
-                true  => KUNDEFINED(),
-                false => env.is_unresolved_trait_call(c).match ({
-                    true  => 0,
-                    false => env.shadows_toplevel(c.fn).match ({
-                        true  => env.var_or_global(c.fn).is_fnt().match ({
-                            true  => env.kv_fnval_call_kind(c),
-                            false => env.shadow_not_callable(c.fn).then({ KNOTCALLABLE() }, { 0 }),
-                        }),
-                        false => env.env_known_fn(c.fn).match ({
-                            true  => env.recv_typed_miss(c).match ({
-                                true  => KMETHODNOTFOUND(),
-                                false => env.ufcs_vis_miss(c).match ({
-                                    true  => env.undef_is_method(c).match ({
-                                        true  => KMETHODNOTFOUND(),
-                                        false => KUNDEFINED(),
-                                    }),
-                                    false => env.kv_call_errs_kind(c),
+            false => c.is_dupmatcharm_call().match ({
+                true  => kv_at(KDUPMATCHARM(), c.pos),
+                false => c.is_forbidden_raw_call().match ({
+                    true  => KUNDEFINED(),
+                    false => env.is_unresolved_trait_call(c).match ({
+                        true  => 0,
+                        false => env.shadows_toplevel(c.fn).match ({
+                            true  => env.var_or_global(c.fn).is_fnt().match ({
+                                true  => env.kv_fnval_call_kind(c),
+                                false => env.shadow_not_callable(c.fn).match ({
+                                    true  => KNOTCALLABLE(),
+                                    false => 0,
                                 }),
                             }),
-                            false => c.fn.is_intrinsic().match ({
-                                true  => (c.args.len == c.fn.intrinsic_arity()).match ({
-                                    true  => env.kv_reflect_kind(c),
-                                    false => KARITY(),
-                                }),
-                                false => (env.env_imported(c.fn) || env.env_trait_method(c.fn)).match ({
-                                    true  => env.trait_recv_missing(c).match ({
-                                        true  => kv_at(KTRAITBOUND(), c.pos),
-                                        false => 0,
+                            false => env.env_known_fn(c.fn).match ({
+                                true  => env.recv_typed_miss(c).match ({
+                                    true  => KMETHODNOTFOUND(),
+                                    false => env.ufcs_vis_miss(c).match ({
+                                        true  => env.undef_is_method(c).match ({
+                                            true  => KMETHODNOTFOUND(),
+                                            false => KUNDEFINED(),
+                                        }),
+                                        false => env.kv_call_errs_kind(c),
                                     }),
-                                    false => env.var_or_global(c.fn).is_fnt().match ({
-                                        true  => env.kv_fnval_call_kind(c),
-                                        false => env.is_bound(c.fn).match ({
-                                            true  => KNOTCALLABLE(),
-                                            false => (c.args.len > 0
-                                                && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({
-                                                true  => KTRAITBOUND(),
-                                                false => env.undef_is_method(c).match ({
-                                                    true  => KMETHODNOTFOUND(),
-                                                    false => KUNDEFINED(),
+                                }),
+                                false => c.fn.is_intrinsic().match ({
+                                    true  => (c.args.len == c.fn.intrinsic_arity()).match ({
+                                        true  => env.kv_reflect_kind(c),
+                                        false => KARITY(),
+                                    }),
+                                    false => (env.env_imported(c.fn) || env.env_trait_method(c.fn)).match ({
+                                        true  => env.trait_recv_missing(c).match ({
+                                            true  => kv_at(KTRAITBOUND(), c.pos),
+                                            false => 0,
+                                        }),
+                                        false => env.var_or_global(c.fn).is_fnt().match ({
+                                            true  => env.kv_fnval_call_kind(c),
+                                            false => env.is_bound(c.fn).match ({
+                                                true  => KNOTCALLABLE(),
+                                                false => (c.args.len > 0
+                                                    && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({
+                                                    true  => KTRAITBOUND(),
+                                                    false => env.undef_is_method(c).match ({
+                                                        true  => KMETHODNOTFOUND(),
+                                                        false => KUNDEFINED(),
+                                                    }),
                                                 }),
                                             }),
                                         }),
@@ -1287,7 +1293,7 @@ kv_dup_name_kind = (decls: [Decl]) i32 {
 }
 // Return the first packed diagnostic from the same collector used by batch mode. A one-slot sink
 // preserves first-error behavior without maintaining a second module/function traversal.
-check_module_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     buf: [i32] := slice(a.acquire(sizeof(i32)), 1)
     cnt := a.check_module_kind_all(decls, a.ufcs_vis_off(), buf, 0)
     (cnt == 0).then({ 0 }, { buf[0] })
