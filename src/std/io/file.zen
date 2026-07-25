@@ -67,18 +67,17 @@ fd_read_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
     })
 }
 ENOMEM := 12
-read_file_finish<A> = (
-    a: MutPtr<A>,
-    fd: i32,
-    buf: RawPtr<u8>,
-    n: i64,
-) Result<string_view, IoError> {
+// Finish a byte read: `got == n` bytes into `buf`, close the fd, and hand back a length-carrying `[u8]`.
+// A trailing NUL is written at `buf[n]` (the buffer was sized `n + 1`), so the SAME allocation is also a
+// valid NUL-terminated `string_view` via `cstr(buf)` — the text path below reuses it. The slice length
+// carries the TRUE byte count, so an embedded NUL does NOT truncate (unlike a strlen-based view).
+read_bytes_finish<A> = (a: MutPtr<A>, fd: i32, buf: RawPtr<u8>, n: i64) Result<[u8], IoError> {
     got := fd.fd_read_all(buf, 0, n)
     fd.close()
-    out: Result<string_view, IoError> := (got == n).match ({
+    out: Result<[u8], IoError> := (got == n).match ({
         true  => {
             buf.offset(n).store(0)
-            ok(cstr(buf))
+            ok(buf.slice(n))
         },
         false => {
             a.release(buf)
@@ -87,34 +86,48 @@ read_file_finish<A> = (
     })
     out
 }
-read_file_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<string_view, IoError> {
+read_bytes_alloc<A> = (a: MutPtr<A>, fd: i32, n: i64) Result<[u8], IoError> {
     a.try_acquire(n + 1).match ({
-        .Ok(buf) => a.read_file_finish(fd, buf, n),
+        .Ok(buf) => a.read_bytes_finish(fd, buf, n),
         .Err(e)  => {
             fd.close()
             err(IoError.Errno(ENOMEM))
         },
     })
 }
-read_file_open<A> = (a: MutPtr<A>, fd: i32) Result<string_view, IoError> {
+read_bytes_open<A> = (a: MutPtr<A>, fd: i32) Result<[u8], IoError> {
     n := fd.file_size()
-    out: Result<string_view, IoError> := (n < 0).match ({
+    out: Result<[u8], IoError> := (n < 0).match ({
         true  => {
             fd.close()
             err(IoError.Errno(0 - 1))
         },
-        false => a.read_file_alloc(fd, n),
+        false => a.read_bytes_alloc(fd, n),
     })
     out
 }
-// Reads a whole file into an allocator-owned NUL-terminated buffer.
-contents_in*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError> {
+// Reads a whole file into an allocator-owned length-carrying `[u8]` — BINARY-SAFE: an embedded NUL is
+// preserved (the true byte count rides in the slice length, not strlen). Reach for this for `wc`, images,
+// gzip, or any data not guaranteed NUL-free; `contents_in` below is the NUL-terminated TEXT twin.
+contents_bytes_in*<A> = (a: MutPtr<A>, path: string_view) Result<[u8], IoError> {
     fd := path.open(O_RDONLY, 0)
-    out: Result<string_view, IoError> := (fd < 0).match ({
+    out: Result<[u8], IoError> := (fd < 0).match ({
         true  => err(IoError.NotFound),
-        false => a.read_file_open(fd),
+        false => a.read_bytes_open(fd),
     })
     out
+}
+contents_bytes*<A> = (a: MutPtr<A>, path: string_view) Result<[u8], IoError> {
+    a.contents_bytes_in(path)
+}
+// Reads a whole file into an allocator-owned NUL-terminated `string_view` (for TEXT). An embedded NUL
+// truncates the view at the first NUL — use `contents_bytes_in` for binary-safe reads. Delegates to the
+// byte reader (which leaves a trailing NUL) and re-views the same one allocation as a cstr.
+contents_in*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError> {
+    a.contents_bytes_in(path).match ({
+        .Ok(bytes) => ok(cstr(bytes.ptr)),
+        .Err(e)    => err(e),
+    })
 }
 contents*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError> {
     a.contents_in(path)

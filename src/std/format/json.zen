@@ -41,7 +41,7 @@
 // NUMBERS. Parsed via std.text.num.parse_f64 (sign, fraction, e/E exponents) — hand-rolled,
 // ~15 significant digits, NOT correctly-rounded. Serialized via std.text.num.float: integral
 // values print without a decimal point ("1", "-7"), fractional values to at most 6 decimal places
-// with trailing zeros trimmed ("3.14"). No pretty-printing — output is compact.
+// with trailing zeros trimmed ("3.14"). `stringify` is compact; `pretty` is the 2-space-indented form.
 //
 // STRINGS. Decode handles the standard escapes \" \\ \/ \b \f \n \r \t and \uXXXX (a single BMP
 // code point, UTF-8 encoded; surrogate PAIRS are not recombined). Encode re-escapes \" \\ \n \r
@@ -59,11 +59,13 @@
 jok = (r: Result<String, IoError>) String { r.expect("std.json: allocation failed") }
 jfin = (r: Result<string_cstr, IoError>) string_view { r.expect("std.json: allocation failed") }
 // ── the value type ───────────────────────────────────────────────────────────
-Entry: {
+// One object member. Public so a tool can iterate an object's (key, value) pairs by name
+// (`as_obj`/`members` hand these out) instead of reaching through the porous enum payload.
+Entry*: {
     key: string_view,
     val: Value,
 }
-Object: {
+Object*: {
     entries: [Entry],
 }
 Value*: Null | Bool(bool) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
@@ -655,6 +657,83 @@ stringify*<A> = (a: MutPtr<A>, v: Value) string_view {
     sb = a.write_value(sb, v)
     sb.finish_in(a).jfin()
 }
+// ── pretty serialization (2-space indent) ────────────────────────────────────────
+// push `n` spaces (one indentation run) onto the builder — recursion, not an imperative loop.
+push_indent<A> = (a: MutPtr<A>, sb: String, n: i64) String {
+    (n <= 0).then({ sb }, { a.push_indent(sb.push_in(a, ' ').jok(), n - 1) })
+}
+// one array element / object member per line, children indented `depth+1` levels (2 spaces each);
+// an empty array/object stays on one line ("[]" / "{}").
+pwrite_arr<A> = (a: MutPtr<A>, sb: String, xs: [Value], depth: i64) String {
+    (xs.len == 0).match ({
+        true  => sb.append_in(a, "[]").jok(),
+        false => {
+            out: String := sb
+                .push_in(a, '[')
+                .jok()
+                .push_in(a, '\n')
+                .jok()
+            xs.loop((h, i, x) {
+                (i > 0).then({
+                    out = out
+                        .push_in(a, ',')
+                        .jok()
+                        .push_in(a, '\n')
+                        .jok()
+                })
+                out = a.push_indent(out, (depth + 1) * 2)
+                out = a.pwrite_value(out, x, depth + 1)
+            })
+            a.push_indent(out.push_in(a, '\n').jok(), depth * 2).push_in(a, ']').jok()
+        },
+    })
+}
+pwrite_obj<A> = (a: MutPtr<A>, sb: String, o: Object, depth: i64) String {
+    es := o.entries
+    (es.len == 0).match ({
+        true  => sb.append_in(a, "{}").jok(),
+        false => {
+            out: String := sb
+                .push_in(a, '{')
+                .jok()
+                .push_in(a, '\n')
+                .jok()
+            es.loop((h, i, e) {
+                (i > 0).then({
+                    out = out
+                        .push_in(a, ',')
+                        .jok()
+                        .push_in(a, '\n')
+                        .jok()
+                })
+                out = a.push_indent(out, (depth + 1) * 2)
+                out = a.write_str_lit(out, e.key)
+                out = out
+                    .push_in(a, ':')
+                    .jok()
+                    .push_in(a, ' ')
+                    .jok()
+                out = a.pwrite_value(out, e.val, depth + 1)
+            })
+            a.push_indent(out.push_in(a, '\n').jok(), depth * 2).push_in(a, '}').jok()
+        },
+    })
+}
+// scalars serialize exactly as compact; only arrays/objects gain the indented multi-line layout.
+pwrite_value<A> = (a: MutPtr<A>, sb: String, v: Value, depth: i64) String {
+    v.match ({
+        .Arr(xs) => a.pwrite_arr(sb, xs, depth),
+        .Obj(o)  => a.pwrite_obj(sb, o, depth),
+        _        => a.write_value(sb, v),
+    })
+}
+// Serialize a Value to indented JSON text (2-space indent, one element/member per line) — the
+// human-readable counterpart to `stringify`. Allocator-owned, NUL-terminated view.
+pretty*<A> = (a: MutPtr<A>, v: Value) string_view {
+    sb: String := a.new_in().jok()
+    sb = a.pwrite_value(sb, v, 0)
+    sb.finish_in(a).jfin()
+}
 // ── accessors ──────────────────────────────────────────────────────────────────
 // index of `key` in the object's entry list, or -1 (O(n) linear scan).
 obj_find = (o: Object, key: string_view) i64 {
@@ -686,7 +765,7 @@ get* = (obj: Value, key: string_view) Opt<Value> {
     })
     out
 }
-as_obj = (v: Value) Opt<Object> {
+as_obj* = (v: Value) Opt<Object> {
     out: Opt<Object> := v.match ({
         .Obj(o) => .Some(o),
         _       => .None,
@@ -707,7 +786,7 @@ as_str* = (v: Value) Opt<string_view> {
     })
     out
 }
-as_bool = (v: Value) Opt<bool> {
+as_bool* = (v: Value) Opt<bool> {
     out: Opt<bool> := v.match ({
         .Bool(b) => .Some(b),
         _        => .None,
@@ -718,6 +797,17 @@ as_arr* = (v: Value) Opt<[Value]> {
     out: Opt<[Value]> := v.match ({
         .Arr(xs) => .Some(xs),
         _        => .None,
+    })
+    out
+}
+// The object's (key, value) members in insertion order, or an empty slice when `v` is not an object.
+// The one-call way to enumerate an object's keys/values (named `members`, not `entries`, so the
+// public fn does not collide with `Object`'s public `entries` field in the flat namespace):
+//   json.members(v).loop((h, i, e) { …e.key… json.stringify(a, e.val)… })
+members* = (v: Value) [Entry] {
+    out: [Entry] := v.match ({
+        .Obj(o) => o.entries,
+        _       => slice(null_ptr(), 0),
     })
     out
 }

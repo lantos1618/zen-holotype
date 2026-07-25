@@ -2,15 +2,17 @@
 //
 // Three surfaces, all allocator-explicit (no hidden heap):
 //
-//   { read_line, read_all, lines } = std.io.stdin
+//   { read_line, read_all, read_all_bytes, lines } = std.io.stdin
 //   a.read_line()          // Result<Opt<string_view>, IoError> — Some(line) per line, None at EOF
 //   a.read_all()           // Result<string_view, IoError>      — everything until EOF, one owned buffer
+//   a.read_all_bytes()     // Result<[u8], IoError>             — same, BINARY-SAFE (length-carrying)
 //   a.lines((line) { … })  // Result<i64, IoError>      — run a closure per line, count returned
 //
 // Lines are returned WITHOUT the trailing '\n'. A final unterminated line ("abc" then EOF)
-// still comes back as Some("abc"); the next call reports None. Every returned view is an
-// allocator-owned NUL-terminated buffer (same contract as std.io.file.contents_in), so a
-// stdin byte stream containing NULs truncates at the first NUL — the Phase-1 pointer floor, not a bug.
+// still comes back as Some("abc"); the next call reports None. The `string_view` surfaces are
+// allocator-owned NUL-terminated buffers (same contract as std.io.file.contents_in), so a stdin
+// stream containing NULs truncates the TEXT view at the first NUL — pipe binary through
+// `read_all_bytes`, whose `[u8]` carries the true byte count and preserves embedded NULs.
 { read } = std.c.libc
 { Result, IoError, Opt, ok, err } = std.core.result
 { Allocator, try_acquire } = std.mem.alloc
@@ -100,9 +102,10 @@ append_chunk<A> = (a: MutPtr<A>, s: String, chunk: RawPtr<u8>, n: i64) Result<St
     out: Result<String, IoError> := failed.then({ err(ev) }, { ok(cur) })
     out
 }
-// Reads stdin to EOF into one allocator-owned NUL-terminated view (the stdin twin of
-// std.io.file.contents_in — `a.contents_in("/dev/stdin")` needs a seekable fd; this doesn't).
-read_all*<A> = (a: MutPtr<A>) Result<string_view, IoError> {
+// Drains stdin to EOF into one allocator-owned String builder — the shared core of read_all /
+// read_all_bytes. The builder carries the true byte count, so binary data (embedded NULs) is intact;
+// the caller decides whether to re-view it as NUL-terminated text (finish_in) or raw bytes (.bytes()).
+drain_stdin<A> = (a: MutPtr<A>) Result<String, IoError> {
     a.try_acquire(READ_CHUNK).match ({
         .Err(e)    => err(e),
         .Ok(chunk) => a.init(READ_CHUNK).match ({
@@ -134,19 +137,37 @@ read_all*<A> = (a: MutPtr<A>) Result<string_view, IoError> {
                     })
                 }
                 a.release(chunk)
-                out: Result<string_view, IoError> := failed.match ({
+                out: Result<String, IoError> := failed.match ({
                     true  => {
                         s.free_in(a)
                         err(ev)
                     },
-                    false => s.finish_in(a).match ({
-                        .Ok(done) => ok(done),
-                        .Err(e)   => err(e),
-                    }),
+                    false => ok(s),
                 })
                 out
             },
         }),
+    })
+}
+// Reads stdin to EOF into one allocator-owned NUL-terminated view (the stdin twin of
+// std.io.file.contents_in — `a.contents_in("/dev/stdin")` needs a seekable fd; this doesn't).
+// TEXT surface: an embedded NUL truncates the view — use read_all_bytes for binary-safe reads.
+read_all*<A> = (a: MutPtr<A>) Result<string_view, IoError> {
+    a.drain_stdin().match ({
+        .Ok(s)  => s.finish_in(a).match ({
+            .Ok(done) => ok(done),
+            .Err(e)   => err(e),
+        }),
+        .Err(e) => err(e),
+    })
+}
+// Reads stdin to EOF into one allocator-owned length-carrying `[u8]` — BINARY-SAFE: embedded NULs are
+// preserved (the true byte count rides in the slice length). Pipe images / gzip / any non-text stream
+// through a Zen filter without truncation.
+read_all_bytes*<A> = (a: MutPtr<A>) Result<[u8], IoError> {
+    a.drain_stdin().match ({
+        .Ok(s)  => ok(s.bytes()),
+        .Err(e) => err(e),
     })
 }
 // Runs `on_line` once per stdin line (line passed WITHOUT its '\n') until EOF; returns how
