@@ -687,7 +687,8 @@ Env*: {
     is_bound = (env: Env, name: string_view) bool {
         env.vars.var_bound(name) || env.didx.global_idx.get(name, 0 - 1) >= 0
     }
-    alias_ufcs_candidates = (env: Env, fn: string_view, rty: Ty) AliasCands {
+    alias_ufcs_candidates = (env: Env, c: CallData, rty: Ty) AliasCands {
+        fn := c.fn
         (rty.alias_recv_dispatchable() == false
             || fn.is_intrinsic()
             || env.didx.alias_idx.get(fn, 0 - 1) < 0
@@ -696,8 +697,18 @@ Env*: {
             || env.global_ty(fn).is_void_ty() == false).then({
             return alias_cands_none()
         })
-        exact := env.alias_cands_scan(fn, rty, true)
-        (exact.count > 0).then({ exact }, { env.alias_cands_scan(fn, rty, false) })
+        atys := env.alias_arg_tys(c.args)
+        exact := env.alias_cands_scan(fn, rty, true, atys)
+        (exact.count > 0).then({ exact }, { env.alias_cands_scan(fn, rty, false, atys) })
+    }
+    // the inferred types of a call's arguments (arg0 = receiver included), for arg-typed narrowing
+    // among same-receiver alias candidates. Inferred ONCE here, not per candidate.
+    alias_arg_tys = (env: Env, args: [Expr]) [Ty] {
+        buf := cbuf<Ty>(env.a, args.len)
+        args.loop((h, i, x) {
+            buf[i] = env.infer_expr(args[i].addr())
+        })
+        buf
     }
     var_ty = (env: Env, name: string_view) Ty {
         (name == "true" || name == "false").then({ tbool() }, { env.var_or_global(name) })
@@ -798,7 +809,7 @@ Env*: {
                 })
                 (dn == c.fn).match ({
                     true  => {
-                        cs := env.alias_ufcs_candidates(c.fn, rty)
+                        cs := env.alias_ufcs_candidates(c, rty)
                         (cs.count == 1).then({ cs.first }, { c.fn })
                     },
                     false => dn,
@@ -1520,10 +1531,32 @@ alias_cand_matches = (f: Func, fn: string_view, rty: Ty, exact: bool) bool {
 // Intentional divergence from the shape scan: a USER-written `alias__method` decl that the aliased
 // module does not export (main-body or brace-imported, merely SHAPED like an alias decl) is no
 // longer a candidate — the alias's method namespace is closed to the module's real exports.
-alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool) AliasCands {
-    cnt := 0
-    first := ""
-    second := ""
+// all NON-receiver args fit the candidate's params (arity-exact; param0 is the already-matched
+// receiver). The receiver+arg-typed tiebreak: among candidates sharing the receiver head, the one
+// whose whole parameter row fits the actual arguments is the intended overload (i64-index str.at vs
+// i32-index ascii.at). A candidate that fails arg-fit stays a receiver-match only — so a lone
+// receiver-match still resolves (its arg-type error is then reported the normal way), but two
+// receiver-matches disambiguate by args before falling back to the positioned ambiguity error.
+alias_args_fit = (f: Func, atys: [Ty]) bool {
+    (f.params.len == atys.len).match ({
+        true  => {
+            ok := true
+            atys.loop((h, i, at) {
+                (i > 0).then({
+                    ok = ok && at.fits(f.params[i].ty)
+                })
+            })
+            ok
+        },
+        false => false,
+    })
+}
+alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool, atys: [Ty]) AliasCands {
+    rcnt := 0
+    rfirst := ""
+    rsecond := ""
+    acnt := 0
+    afirst := ""
     module_sigs_get().loop((h, i, e) {
         (e.sig_imported() == false
             && e.sig_foreign() == false
@@ -1537,17 +1570,30 @@ alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool) AliasCands 
                 .gstr_finish(env.a)
             f := env.env_func(fname)
             (is_empty(f.name) == false && f.alias_cand_matches(fn, rty, exact)).then({
-                second = (cnt == 1).then({ f.name }, { second })
-                first = (cnt == 0).then({ f.name }, { first })
-                cnt = cnt + 1
+                rsecond = (rcnt == 1).then({ f.name }, { rsecond })
+                rfirst = (rcnt == 0).then({ f.name }, { rfirst })
+                rcnt = rcnt + 1
+                f.alias_args_fit(atys).then({
+                    afirst = (acnt == 0).then({ f.name }, { afirst })
+                    acnt = acnt + 1
+                })
             })
         })
     })
-    AliasCands(
-        count: cnt,
-        first: first,
-        second: second,
-    )
+    // exactly one candidate fits the arguments → that is the overload; otherwise keep the
+    // receiver-only verdict (unique → resolves; 2+ → positioned ambiguity; 0 → undefined).
+    (acnt == 1).match ({
+        true  => AliasCands(
+            count: 1,
+            first: afirst,
+            second: "",
+        ),
+        false => AliasCands(
+            count: rcnt,
+            first: rfirst,
+            second: rsecond,
+        ),
+    })
 }
 // Two-pass for determinism: exact head-type matches first; only when ZERO exact matches exist do we
 // fall back to coercible receivers (i32→i64, slice receivers). The count==1-else-ambiguity rule holds
