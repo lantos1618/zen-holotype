@@ -13,8 +13,13 @@
 //   7. test_map_try_paths_use_result_allocator_helpers  → "map try paths use result helpers"
 //   8. test_fmt_try_numeric_writes_use_fallible_…       → "fmt try writes use fallible num helpers"
 //
-// HOW: enumerate the python file set (rglob *.zen under examples/tools/src/std/src/compiler) via
-// `find ... > $ZT/ob_files.txt`, then read+scan each file in Zen. The byte scanner mirrors the
+// NOT ported (added here):
+//   9. scan set covers every non-test .zen                → "scan set covers every non-test .zen"
+//
+// HOW: enumerate the file set via `find ... > $ZT/ob_files.txt`, then read+scan each file in Zen.
+// The set is NO LONGER the python rglob: it also names the repo-root driver.zen and build.zen, which
+// the prefix-only glob never matched (see SUITE 9 — that omission hid the whole CLI). The scanner
+// mirrors the
 // python regexes over `//`-comment-stripped text; the single-file region tests mirror python's
 // `_code(...).split(marker,1)[…]` substring slicing on comment-stripped source.
 { Malloc } = std.mem.alloc
@@ -373,6 +378,7 @@ atwhile_allowed = (path: string_view) bool {
         || path == "src/compiler/genc.zen"
         || path == "src/compiler/backend/c/c_emit.zen"
         || path == "src/compiler/diagnostic.zen"
+        || path == "driver.zen"
         || path == "src/compiler/validate/util.zen"
         || path == "src/compiler/validate/diag.zen"
         || path == "src/std/math.zen"
@@ -394,6 +400,10 @@ atwhile_allowed = (path: string_view) bool {
 // literal, or a long source line must lex/emit/caret by iteration, not per-byte recursion (#66c).
 // std.text.ascii joins as the shared escape-loop substrate: escape_into is THE per-byte scan the
 // C/JS backends and the formatter splice their escape tables into (c_lit's own @while moved there).
+// driver.zen joins for the LSP's hand-rolled JSON reader and `zen audit`'s import/identifier
+// scanners: both walk unbounded input (a didChange request carries an entire document; audit walks
+// whole source files), so per-byte recursion is the stack-overflow risk this class exists to avoid.
+// These loops are not new — driver.zen was simply never scanned until the file set was corrected.
 // std.internal.resolve/resolve_scan join for their line scanners (next_line/line_end): the resolver
 // walks whole flattened sources byte-by-byte to the next newline, and both per-byte recursion
 // (stack) and a per-call strlen (quadratic — the old shape, the top resolve-imports hotspot) are
@@ -498,12 +508,44 @@ bigstr_suite = (mp: MutPtr<Malloc>) i32 {
     run_suite("boundaries: 200KB string literal lexes + runs (no stack overflow, #66c)", [rc == 0])
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 9: the scan's own file set cannot drift.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Every suite above is only as good as ob_files.txt. That list was a direct port of the python
+// rglob, and it went stale silently: self-hosting moved the CLI into a 6000-line driver.zen at the
+// repo ROOT, which no directory prefix in the list matched, so the whole CLI stopped being linted
+// and nothing said a word. The fmt gate names driver.zen and build.zen explicitly, so the two file
+// sets had been disagreeing — with no test comparing them.
+//
+// So: derive the set the OTHER way (everything in the tree minus an EXPLICIT exclusion list) and
+// require the two to be identical. A new .zen file in a new directory now fails here instead of
+// quietly opting itself out of every boundary rule.
+//
+// Exclusions are deliberate, not incidental: tests/ and scripts/ are test tooling (harness code
+// legitimately calls raw malloc), and .claude/ MUST be pruned because sibling worktrees are full
+// copies of the tree — the same trap that made check-docs.sh false-fail locally.
+scanset_suite = (mp: MutPtr<Malloc>) i32 {
+    shell(mp.zo_cmd("find . -name '*.zen' -not -path './.git/*' -not -path './.claude/*' -not -path './tests/*' -not -path './scripts/*' 2>/dev/null | sed 's|^./||' | LC_ALL=C sort > $ZT/ob_expect.txt"))
+    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
+        .Ok(scanned) => mp.contents_in(mp.zo_path("ob_expect.txt")).match ({
+            .Ok(expect) => run_suite("boundaries: scan set covers every non-test .zen", [scanned == expect]),
+            .Err(e)     => run_suite("boundaries: scan set (cannot enumerate tree)", [false]),
+        }),
+        .Err(e)      => run_suite("boundaries: scan set (cannot read file list)", [false]),
+    })
+}
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 harness_boundaries_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    // enumerate exactly the python full file set: rglob *.zen under examples, tools, src/std, src/compiler.
-    shell(mp.zo_cmd("find examples tools src/std src/compiler -name '*.zen' 2>/dev/null | LC_ALL=C sort > $ZT/ob_files.txt"))
+    // Every .zen file that ships as part of the compiler or the library. The repo-ROOT entries are
+    // named explicitly because they have no directory prefix for `find` to match — and they are the
+    // reason this list drifted: the python original globbed examples/tools/src/std/src/compiler back
+    // when the driver was bootstrap/driver.c, so when self-hosting turned it into a 6000-line
+    // driver.zen at the root, the whole CLI silently left the scan. The set is asserted against the
+    // fmt gate's set below, so the two can never disagree again.
+    shell(mp.zo_cmd("find examples tools src/std src/compiler driver.zen build.zen -name '*.zen' 2>/dev/null | LC_ALL=C sort > $ZT/ob_files.txt"))
     fails := 0
+    fails = fails + mp.scanset_suite()
     fails = fails + mp.example_suite()
     fails = fails + mp.checkpoint_suite()
     fails = fails + mp.atwhile_suite()
