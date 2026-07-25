@@ -69,13 +69,15 @@ perr_kind_get* = () i32 { parse_err_kind }
 // ── RECURSION-DEPTH CAP: bound recursive descent so pathological nesting becomes a clean parse
 // error instead of a C-stack overflow (SIGSEGV). The recursive-descent parsers funnel every nested
 // construct through a small set of entry points — parse_atom (parens/neg/not/slice/match/lambda),
-// parse_while (loop nesting), parse_ty (Ptr/slice/fn/anon type nesting) — each of which calls
+// parse_while (loop nesting), parse_ty (Ptr/slice/fn/anon type nesting), the operator-precedence
+// ladder (parse_expr's `*_more` steps — flat `1+1+…` / `1==1==…` chains) and postfix chains
+// (parse_postfix — `.f.f.f…` members, `f(f(f(…)))` call-arg nesting) — each of which calls
 // pdepth_enter on entry, pdepth_exit before returning, and bails (with perr_set) once pdepth_over.
-// The cap (800) sits far below the measured overflow point of the tightest path (~1450 nested
-// `@while`s) yet orders of magnitude above any real program's nesting, so it never over-rejects.
-// Reset (with the parse-failure flags) at every parse_module entry. Mirrors `tyargs_end`'s 256 cap.
+// The cap (400) sits far below the measured overflow point of the tightest path (~1000 nested
+// binary/postfix frames) yet orders of magnitude above any real program's nesting, so it never
+// over-rejects. Reset (with the parse-failure flags) at every parse_module entry. Mirrors `tyargs_end`'s 256 cap.
 parse_depth := 0
-PARSE_DEPTH_CAP := 800
+PARSE_DEPTH_CAP := 400
 pdepth_enter* = () void { parse_depth = parse_depth + 1 }
 pdepth_exit* = () void { parse_depth = parse_depth - 1 }
 // flag + report once we are nested too deep; the caller returns a placeholder instead of recursing.

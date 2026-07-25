@@ -7,8 +7,8 @@
 { Scan, Token, scan } = compiler.lex
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
-{ delim_enter, delim_exit, is_langle, is_lbrace, is_lbracket, is_rparen, parse_tyargs, stmt_level,
-  tok_eq, vbreak_note } = compiler.parse_type
+{ delim_enter, delim_exit, is_langle, is_lbrace, is_lbracket, is_rparen, parse_tyargs, pdepth_enter,
+  pdepth_exit, pdepth_over, stmt_level, tok_eq, vbreak_note } = compiler.parse_type
 { materialize, parse_block } = compiler.parse_stmt
 { enode, is_op, lexeme, parse_payload_args } = compiler.parse_atom
 { parse_match, parse_then, subj_name } = compiler.parse_match
@@ -162,6 +162,15 @@ parse_or_nested* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
     r
 }
 parse_postfix* = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+    // DEPTH CAP (see parse_type.zen): a postfix chain `.f.f.f…` / `f(f(f(…)))` recurses through
+    // parse_postfix per suffix WITHOUT re-entering the guarded parse_atom, so it needs its own bound.
+    // Past the cap, stop consuming suffixes and return `base` (perr already set) — the frames unwind.
+    pdepth_enter()
+    r := pdepth_over().then({ base }, { a.parse_postfix_chain(src, base) })
+    pdepth_exit()
+    r
+}
+parse_postfix_chain = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
     src.is_match_at(base.next).match ({
         true  => a.parse_match(src, base),
         false => src.is_then_at(base.next).match ({
