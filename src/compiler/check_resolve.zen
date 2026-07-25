@@ -4,10 +4,10 @@
 // compiler.check (Env/infer/inline helpers); the check↔check_* cycles resolve via `*` exports.
 { ArmData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, GenStructDecl, GenericData,
   GlobalData, LetData, LoopData, MakeStructData, MatchData, MemberData, Param, SliceData, Stmt, Ty } = compiler.ast.ast_types
-{ arm_at, arrow_at, bin, bin_at, block, call, call_at, cbuf, cond_oa, dfunc, dglobal, dglobal_tl,
-  eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish, gstr_string, is_expr_null,
-  member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys, sassign_at, sexpr, sidxset_at,
-  sif, slet, slett, slett_at, slit, sret, swhile, ti32, tvoid, vref } = compiler.genc
+{ arith_rty, arm_at, arrow_at, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc,
+  dglobal, dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish,
+  gstr_string, is_expr_null, member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys,
+  sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret, swhile, ti32, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
 { gstr_int, map_slice, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
@@ -435,7 +435,7 @@ resolve_arith = (
 ) Ptr<Expr> {
     (op == "/" && (lty.is_f64_ty() || env.infer_expr(rhs).is_f64_ty())).match ({
         true  => a.cenode(bin_at("/.", lhs, rhs, p)),
-        false => a.resolve_f64_neg(env, op, lhs, rhs, p),
+        false => a.resolve_f64_neg(env, op, lty, lhs, rhs, p),
     })
 }
 // Prefix `-f64` parses as `0 - x`; rewrite that zero to `0.0`.
@@ -449,13 +449,14 @@ resolve_f64_neg = (
     a: MutPtr<Malloc>,
     env: Env,
     op: string_view,
+    lty: Ty,
     lhs: Ptr<Expr>,
     rhs: Ptr<Expr>,
     p: i32,
 ) Ptr<Expr> {
     (op == "-" && lhs.is_int_zero() && env.infer_expr(rhs).is_f64_ty()).match ({
         true  => a.cenode(bin_at(op, a.cenode(flit("0.0")), rhs, p)),
-        false => a.cenode(bin_at(op, lhs, rhs, p)),
+        false => a.cenode(bin_rty(op, lhs, rhs, p, arith_rty(op, lty))),
     })
 }
 // ── variadic params: a trailing `...T` param collects the surplus call args into a `[T]` ──

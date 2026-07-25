@@ -183,6 +183,7 @@ KFFITYPE* = () i32 { 42 }    // a FOREIGN (bodyless) declaration whose signature
 KLITEXHAUST* = () i32 { 45 }    // a literal-scalar `.match` (i32/…) with no `_` wildcard — the value domain is unbounded, so it is non-exhaustive. Kind label is "exhaustiveness" (same family as KEXHAUST); the parser plants a positioned `__nonexhaustive_lit` sentinel the call-classifier maps here
 KMATCHLABEL* = () i32 { 46 }    // a boolean `.match` arm labelled with a non-boolean literal (`true => 1, 0 => 2`) — a label-TYPE error, caret on the bad label (the parser's positioned `__badmatchlabel` sentinel)
 KDUPMATCHARM* = () i32 { 51 }    // a boolean `.match` whose two arms repeat a label (`true => …, true => …`) — covers only one case, caret on the duplicate label (the parser's positioned `__dupmatcharm` sentinel)
+KDUPLITARM* = () i32 { 52 }    // a literal `.match` that repeats a label (`1 => …, 1 => …`) — the later arm is dead (first wins), caret on the duplicate label (the parser's positioned `__duplitarm` sentinel)
 KREFLECTRETURN* = () i32 { 48 }    // a reflect-using generic with a `return` inside a loop body — inline-only, so the return would escape into the caller (mirror of KRECHOF for the loop-return hazard)
 KREFLECTWRITE* = () i32 { 49 }    // an each_field/zip_fields whose SUBJECT is temp-bound (a non-Var expr, or an enclosing reflection lambda's value param — a member place) while its lambda ASSIGNS a value param: the writes would land on the discarded temp (silent no-op, #587)
 KCAPACITY* = () i32 { 47 }    // a fixed-capacity compiler registry (exports / alias prefixes / module sigs) overflowed — the parser's sticky `__capacity` sentinel; the program is REJECTED rather than compiled with silently dropped registry data
@@ -541,6 +542,13 @@ diag_info = (code: i32) DiagInfo {
             kind: "match-arm",
             message: "boolean `.match` repeats an arm label; it must cover `true` and `false` exactly once",
             hint: "give one `true` arm and one `false` arm (either order), or a single bool arm plus a `_` wildcard",
+        )
+    })
+    (code == 52).then({
+        return DiagInfo(
+            kind: "match-arm",
+            message: "literal `.match` repeats an arm label; the later arm can never fire",
+            hint: "each literal label must be distinct — arms are tried in order, so a repeated label is dead; remove or renumber it",
         )
     })
     (code == 47).then({
