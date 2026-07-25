@@ -267,6 +267,30 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "match-arm",
     ), VerdictCase(
+        src: "f* = (n: i32) i32 {\n n.match({ 1 => 10, 2 => 20, 1 => 30, _ => 0 })\n}\ntest* = () i32 { f(1) }",
+        should_pass: false,
+        kind: "match-arm",
+    ), VerdictCase(
+        src: "f* = (c: u8) i32 {\n c.match({ 'a' => 1, 'b' => 2, 'a' => 3, _ => 0 })\n}\ntest* = () i32 { f('a') }",
+        should_pass: false,
+        kind: "match-arm",
+    ), VerdictCase(
+        src: "f* = (s: string_view) i32 {\n s.match({ \"x\" => 1, \"y\" => 2, \"x\" => 3, _ => 0 })\n}\ntest* = () i32 { f(\"x\") }",
+        should_pass: false,
+        kind: "match-arm",
+    ), VerdictCase(
+        src: "f* = (n: i32) i32 {\n n.match({ 1 => 10, 2 => 20, 3 => 30, _ => 0 })\n}\ntest* = () i32 { f(2) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "S*: A | B\nf* = (s: S) i32 {\n s.match({ _ => 3, .B => 1 })\n}\ntest* = () i32 { f(.A) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "f* = (n: i32) i32 {\n n.match({ _ => 5, 2 => 20 })\n}\ntest* = () i32 { f(9) }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "f* = (b: bool) i32 {\n b.match({ false => 0, true => 1 })\n}\ntest* = () i32 { f(false) }",
         should_pass: true,
         kind: "",
@@ -1599,6 +1623,22 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
+        src: "Leaf*: { n: i32 }\nMid*: { p: Ptr<Leaf> }\nOuter*: { x: i32, m: Mid }\ntest* = () i32 { o := Outer(x: 5)  o.x }",
+        should_pass: false,
+        kind: "struct-field",
+    ), VerdictCase(
+        src: "Leaf*: { n: i32 }\nE*: First(Ptr<Leaf>) | Second\nBox*: { x: i32, e: E }\ntest* = () i32 { b := Box(x: 5)  b.x }",
+        should_pass: false,
+        kind: "struct-field",
+    ), VerdictCase(
+        src: "Leaf*: { n: i32 }\nMid*: { p: MutPtr<Leaf> }\nOuter*: { x: i32, m: Mid }\ntest* = () i32 { l := Leaf(n: 7)  o := Outer(x: 5, m: Mid(p: l.addr()))  o.m.p.n }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Inner*: { a: i32, b: i32 }\nWrap*: { n: i32, inner: Inner }\ntest* = () i32 { w := Wrap(n: 1)  w.inner.a }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "Box*: { v: i32 }\ngetv* = (p: MutPtr<Box>) i32 { p.v }\ntest* = () i32 { r: RawPtr<Box> := null_ptr()  q := assert_nonnull(r)  getv(q) }",
         should_pass: true,
         kind: "",
@@ -2323,6 +2363,12 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     )])
+    // Omitting a field whose type TRANSITIVELY holds a non-null Ptr (nested struct) zero-fills it to a
+    // null the type forbids → reject, same as a direct Ptr field.
+    // Enum analog: omitting an enum-typed field reads tag 0 = the first variant, whose Ptr payload is
+    // zeroed to null → reject.
+    // Companion: fully constructing the transitive-Ptr field is fine — the pointer is provably non-null.
+    // Companion: a nested struct that only zero-fills scalars stays legal to omit (no pointer nulled).
     // #574: `.len()` on a string_view when `len` is NOT imported — the closure CONTAINS a flat
     // `len` (std.text.str rides in via the `contains` import), so this used to check clean and
     // emit a bare C `len(...)` bound by flat-namespace luck. Must be a positioned error now.
