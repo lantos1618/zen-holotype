@@ -1945,7 +1945,7 @@ harness_build_run* = () i32 {
         absent: ["try_integer", "try_uinteger", "try_float", "int_string", "float_string", "int_to_str", "float_to_str"],
     ), DocCase(
         target: "std.io.file",
-        present: ["out* = (s: string_view) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_in*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "contents*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "save* = (path: string_view, data: string_view, n: i64) Result<i64, IoError>", "O_WRTRUNC* := O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: string_view) Result<i32, IoError>", "Reads a whole file into an allocator-owned NUL-terminated buffer."],
+        present: ["out* = (s: string_view) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_bytes_in*<A> = (a: MutPtr<A>, path: string_view) Result<[u8], IoError>", "contents_bytes*<A> = (a: MutPtr<A>, path: string_view) Result<[u8], IoError>", "contents_in*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "contents*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "save* = (path: string_view, data: string_view, n: i64) Result<i64, IoError>", "O_WRTRUNC* := O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: string_view) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
         absent: ["contents* = (path: string_view) Result<string_view, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"],
     ), DocCase(
         target: "src/compiler/genc.zen",
@@ -2216,6 +2216,12 @@ harness_build_run* = () i32 {
         name: "stdin_read_all_cat",
         cmd: "printf 'halloc = std.mem.heap\\n{ read_all } = std.io.stdin\\n{ print } = std.text.fmt\\nmain = () i32 {\\n    heap := halloc.gpa()\\n    a := heap.addr()\\n    a.read_all().match ({\\n        .Ok(s)  => {\\n            print(s)\\n            0\\n        },\\n        .Err(e) => 1,\\n    })\\n}\\n' > $ZT/zo_cat.zen && ./zen build $ZT/zo_cat.zen -o $ZT/zo_cat_bin 2>/dev/null && printf 'alpha\\nbeta 42\\n' > $ZT/zo_cat_in.txt && $ZT/zo_cat_bin < $ZT/zo_cat_in.txt > $ZT/zo_cat_out.txt && cmp -s $ZT/zo_cat_in.txt $ZT/zo_cat_out.txt && { printf '' | $ZT/zo_cat_bin > $ZT/zo_cat_empty.txt; test \"$?\" -eq 0; } && ! test -s $ZT/zo_cat_empty.txt",
     ), ShellCase(
+        name: "io_file_nul_bytes",
+        cmd: "cp tests/fixtures/zen/io_file_nul_bytes.zen $ZT/iofnul.zen && sed -i \"s#@@T@@#$ZT#g\" $ZT/iofnul.zen && printf 'abc\\000def' > $ZT/zo_nul.bin && test \"$(wc -c < $ZT/zo_nul.bin)\" = 7 && ./zen build $ZT/iofnul.zen -o $ZT/iofnul_bin 2>/dev/null && { $ZT/iofnul_bin; test \"$?\" = 0; }",
+    ), ShellCase(
+        name: "stdin_read_all_bytes_nul_cat",
+        cmd: "printf 'halloc = std.mem.heap\\n{ read_all_bytes } = std.io.stdin\\n{ out_bytes } = std.io.file\\nmain = () i32 {\\n    heap := halloc.gpa()\\n    a := heap.addr()\\n    a.read_all_bytes().match ({\\n        .Ok(b)  => out_bytes(b).match ({ .Ok(n) => 0, .Err(e) => 1 }),\\n        .Err(e) => 1,\\n    })\\n}\\n' > $ZT/zo_bcat.zen && ./zen build $ZT/zo_bcat.zen -o $ZT/zo_bcat_bin 2>/dev/null && printf 'ab\\000cd' > $ZT/zo_bcat_in.bin && test \"$(wc -c < $ZT/zo_bcat_in.bin)\" = 5 && $ZT/zo_bcat_bin < $ZT/zo_bcat_in.bin > $ZT/zo_bcat_out.bin && cmp -s $ZT/zo_bcat_in.bin $ZT/zo_bcat_out.bin && test \"$(wc -c < $ZT/zo_bcat_out.bin)\" = 5",
+    ), ShellCase(
         name: "parse_error_stray_semicolon_positioned",
         cmd: "printf 'main = () i32 {\\n    x := 5;\\n    x\\n}\\n' > $ZT/zpe_semi.zen && ./zen check $ZT/zpe_semi.zen > $ZT/zpe_semi.txt 2>&1; grep -Fq ':2:11: error[parse]: syntax error: unparseable top-level input' $ZT/zpe_semi.txt && grep -Fq '      x := 5;' $ZT/zpe_semi.txt && grep -Fq '            ^' $ZT/zpe_semi.txt",
     ), ShellCase(
@@ -2262,6 +2268,10 @@ harness_build_run* = () i32 {
     // exit code = line count (3, incl. the unterminated final line), stdout cmp'd byte-exact.
     // stdin_read_all_cat: std.io.stdin.read_all is `cat` — redirected-file stdin round-trips
     // byte-exact, and empty stdin is Ok("") (exit 0, empty output), not an error.
+    // io_file_nul_bytes: binary-safe file read — a file with an embedded NUL ("abc\0def", 7 bytes) read
+    // via contents_bytes_in yields the FULL 7 bytes (NUL preserved); the text contents_in view stops at 3.
+    // stdin_read_all_bytes_nul_cat: read_all_bytes + out_bytes is a binary `cat` — a piped stream with an
+    // embedded NUL round-trips byte-exact (5 in, 5 out), where the strlen-based read_all would truncate.
     // ── (k) bootstrap-binary battery (ported from test_bootstrap.py + test_build_self.py): the committed
     // `./zen` IS the cc-built bootstrap binary, so drive it directly — emit-compile-run real programs,
     // survive malformed input (no signal death), report missing files, and `--build-self` usage errors.
