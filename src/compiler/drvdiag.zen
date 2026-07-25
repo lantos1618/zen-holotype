@@ -1,0 +1,261 @@
+// drvdiag.zen — how the driver turns a compiled module into user-facing diagnostics: run the
+// validation specs, pick the module and source text an error should render against, and print it.
+// Split out of driver.zen so `zenc lsp` can publish the same diagnostics the CLI prints.
+{ Malloc } = std.mem.alloc
+{ then } = std.core.bool
+{ Map } = std.collections.map
+{ gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ CheckDiagnostic, desc_or } = compiler.validate.diag
+{ check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source,
+  check_module_no_if_diagnostic_from_source, check_module_no_ternary_diagnostic_from_source,
+  check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source,
+  check_module_leak_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source,
+  check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source,
+  check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source,
+  check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source,
+  check_module_unknown_type_diagnostic_from_source, check_module_ffi_diagnostic_from_source,
+  check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
+  check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
+{ diag_user_span, diag_line_span, DiagSpan, render_diagnostic } = compiler.diagnostic
+{ ResolvedProgram, ModuleEntry, fregion_find, fregion_src_line, undefined_name_hint } = std.internal.resolve
+{ denrich_check } = compiler.validate.enrich
+{ ufcs_vis_of } = compiler.check
+{ derr, push_int, zt_ms, zt_log } = compiler.drvutil
+// the first FAILING diagnostic, else clean. `cd_or(a, b)` = a if a failed, else b — so this is a flat
+// precedence chain of the checks in order, not a brace pyramid. Checks are independent and side-effect
+// free, so running them all is harmless; the reported diagnostic is still the first failure in order.
+cd_or* = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic {
+    (a.code == 0).then({ b }, { a })
+}
+// the SPECIALIZED channels only (parse / ownership / escape / sendability / bound / … — every check
+// EXCEPT the main type channel). If one fires it is the ROOT of the rejection: reported alone, so a
+// downstream cascade of type errors from the same cause is suppressed. The main channel (names /
+// types / arity / fit / exhaustiveness / …) is batched separately — check_module_batch — so its
+// INDEPENDENT errors are all reported at once. A parse error, being here, always short-circuits the
+// batch (the flat sentinels would otherwise spray bogus type errors).
+check_diag_no_main = (
+    mp: MutPtr<Malloc>,
+    raw: [Decl],
+    decls: [Decl],
+    flat: string_view,
+) CheckDiagnostic {
+    t0 := zt_ms()
+    c0 := check_module_no_if_diagnostic_from_source(flat)
+        .cd_or(check_module_no_ternary_diagnostic_from_source(flat))
+        .cd_or(mp.check_module_parse_diagnostic_from_source(decls, flat))
+        .cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat))
+    t1 := mp.zt_log("    spec-syntax", t0)
+    c1 := c0.cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat))
+    t2 := mp.zt_log("    spec-ownership", t1)
+    c2 := c1
+        .cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_leak_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat))
+    t3 := mp.zt_log("    spec-escape-leak", t2)
+    c3 := c2
+        .cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat))
+    t4 := mp.zt_log("    spec-send", t3)
+    c4 := c3.cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat))
+    t5 := mp.zt_log("    spec-bound", t4)
+    c5 := c4.cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat))
+    t6 := mp.zt_log("    spec-arg", t5)
+    c6 := c5
+        .cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat))
+        .cd_or(mp.check_module_ffi_diagnostic_from_source(decls, flat))
+        .cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat))
+        .cd_or(check_module_main_diagnostic_from_source(raw, flat))
+        .cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat))
+    mp.zt_log("    spec-rest", t6)
+    c6
+}
+RenderTarget*: {
+    path: string_view,
+    src: string_view,
+}
+pick_module = (
+    flat: string_view,
+    mods: [ModuleEntry],
+    i: i64,
+    off: i32,
+    w: i32,
+    rpath: string_view,
+    rsrc: string_view,
+) RenderTarget {
+    (i >= mods.len).match ({
+        true  => RenderTarget(
+            path: rpath,
+            src: rsrc,
+        ),
+        false => {
+            m := mods[i]
+            sp := diag_user_span(flat, m.source, off, w)
+            (sp.line > 0).match ({
+                true  => RenderTarget(
+                    path: m.path,
+                    src: m.source,
+                ),
+                false => flat.pick_module(mods, i + 1, off, w, rpath, rsrc),
+            })
+        },
+    })
+}
+pick_render = (
+    rp: ResolvedProgram,
+    off: i32,
+    w: i32,
+    rpath: string_view,
+    rsrc: string_view,
+) RenderTarget {
+    (diag_user_span(rp.flat, rsrc, off, w).line == 0).match ({
+        true  => rp.flat.pick_module(rp.table.modules, 0, off, w, rpath, rsrc),
+        false => RenderTarget(
+            path: rpath,
+            src: rsrc,
+        ),
+    })
+}
+// a fully located diagnostic: the module file it lives in plus its line:col span there.
+DiagLoc*: {
+    path: string_view,
+    src: string_view,
+    sp: DiagSpan,
+}
+// IDENTITY-FIRST location: binary-search the resolver's region map (flat offset → module + original
+// line — exact even when two modules share identical line text), then recover the column against that
+// single known line. The whole-table fuzzy scan survives ONLY as the last resort for offsets no
+// region contains (synthesized positions, separator bytes).
+locate_diag* = (
+    rp: ResolvedProgram,
+    off: i32,
+    w: i32,
+    rpath: string_view,
+    rsrc: string_view,
+) DiagLoc {
+    ri := rp.regions.fregion_find(to_i64(off))
+    (off >= 0 && ri >= 0).then({
+        srcline := rp.regions.fregion_src_line(rp.line_srcs, rp.flat, ri, to_i64(off))
+        (srcline > 0).then({
+            m := rp.table.modules[rp.regions[ri].midx]
+            return DiagLoc(
+                path: m.path,
+                src: m.source,
+                sp: diag_line_span(rp.flat, m.source, off, w, srcline),
+            )
+        })
+    })
+    rt := pick_render(rp, off, w, rpath, rsrc)
+    DiagLoc(
+        path: rt.path,
+        src: rt.src,
+        sp: diag_user_span(rp.flat, rt.src, off, w),
+    )
+}
+// render ONE diagnostic (file:line:col + caret + hint) to stderr, mapping its flat offset to the
+// module its error actually lives in. cd.count>1 appends the legacy inline "(+K more)" suffix — used
+// only on the specialized-channel path, where a single root error stands in for a whole cascade.
+emit_one* = (
+    mp: MutPtr<Malloc>,
+    raw: [Decl],
+    decls: [Decl],
+    rp: ResolvedProgram,
+    path: string_view,
+    user: string_view,
+    cd: CheckDiagnostic,
+) i64 {
+    dl := locate_diag(rp, cd.source_offset, cd.span_width, path, user)
+    msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
+    // World teaching hint: an undefined name that some closure module EXPORTS names that module
+    // (with the import to write) instead of the generic advice — see undefined_name_hint.
+    hint := cd.hint
+    (cd.kind == "undefined-name").then({
+        wh := mp.undefined_name_hint(rp.table, rp.flat, cd.source_offset)
+        (is_empty(wh) == false).then({
+            hint = wh
+        })
+    })
+    derr(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, msg, hint, cd.count))
+}
+// Source-only commands (`fmt` and the deliberately-untyped raw emitter) do not own a ResolvedProgram,
+// but the no-if and no-ternary language laws still apply. Render the same structured diagnostic
+// directly against their input so every user-facing command teaches the canonical postfix forms.
+report_no_if_plain* = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
+    cd := check_module_no_if_diagnostic_from_source(src).cd_or(check_module_no_ternary_diagnostic_from_source(src))
+    (cd.code == 0).match ({
+        true  => 0,
+        false => {
+            sp := diag_user_span(src, src, cd.source_offset, cd.span_width)
+            derr(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
+            1
+        },
+    })
+}
+// Checked commands preflight the resolved flat source before parsing or semantic lowering. This keeps
+// the obsolete guard parser/lowerer out of the execution path and still maps an `if` (or a ternary
+// `?`) in an imported module back to that module's real file.
+report_no_if_resolved* = (
+    mp: MutPtr<Malloc>,
+    rp: ResolvedProgram,
+    path: string_view,
+    user: string_view,
+) i32 {
+    cd := check_module_no_if_diagnostic_from_source(rp.flat).cd_or(check_module_no_ternary_diagnostic_from_source(rp.flat))
+    (cd.code == 0).match ({
+        true  => 0,
+        false => {
+            dl := locate_diag(rp, cd.source_offset, cd.span_width, path, user)
+            derr(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
+            1
+        },
+    })
+}
+// how many main-channel diagnostics we print before collapsing the rest into a single trailer line.
+DIAG_CAP = () i32 { 20 }
+// after the cap, one line naming the K un-rendered errors (so the tail is never silently dropped).
+emit_more_trailer = (mp: MutPtr<Malloc>, k: i32) i64 {
+    s := mp
+        .gstr_string(48)
+        .gstr_append(mp, "zenc: (+")
+        .push_int(mp, to_i64(k))
+        .gstr_append(mp, " more error")
+    s2 := (k == 1).then({ s.gstr_push(mp, ')') }, { s.gstr_push(mp, 's').gstr_push(mp, ')') })
+    derr(s2.gstr_push(mp, '\n').gstr_finish(mp))
+}
+// 0 if clean; else render EVERY main-channel diagnostic (capped, with a trailer) and return the count.
+report_check* = (
+    mp: MutPtr<Malloc>,
+    raw: [Decl],
+    decls: [Decl],
+    rp: ResolvedProgram,
+    path: string_view,
+    user: string_view,
+) i32 {
+    // a specialized channel (parse / ownership / escape / bound / …) is the ROOT — report it alone.
+    t0 := zt_ms()
+    spec := mp.check_diag_no_main(raw, decls, rp.flat)
+    t1 := mp.zt_log("  validate-spec", t0)
+    (spec.code != 0).match ({
+        true  => {
+            mp.emit_one(raw, decls, rp, path, user, spec)
+            spec.count
+        },
+        false => {
+            uv := mp.ufcs_vis_of(rp.flat, rp.regions, rp.table)
+            t2 := mp.zt_log("  validate-ufcs-vis", t1)
+            ds := mp.check_module_batch_vis(decls, rp.flat, uv)
+            mp.zt_log("  validate-batch", t2)
+            n := to_i32(ds.len)
+            ds.loop((h, i, cd) {
+                (to_i32(i) < DIAG_CAP()).then({
+                    mp.emit_one(raw, decls, rp, path, user, cd)
+                })
+            })
+            (n > DIAG_CAP()).then({
+                mp.emit_more_trailer(n - DIAG_CAP())
+            })
+            n
+        },
+    })
+}

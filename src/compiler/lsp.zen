@@ -1,0 +1,936 @@
+// lsp.zen — `zenc lsp`: a Language Server Protocol server over stdio. Speaks the framed
+// Content-Length wire format, publishes diagnostics on open/change, and answers go-to-definition.
+// The JSON here is hand-rolled (std.format.json isn't in the seed manifest) and deliberately
+// minimal: enough of a reader to pull the fields the protocol needs out of a request body.
+{ Malloc } = std.mem.alloc
+{ view, is_empty } = std.text.str
+{ then } = std.core.bool
+{ contents_in } = std.io.file
+{ read, write } = std.c.libc
+{ CheckDiagnostic, desc_or } = compiler.validate.diag
+{ denrich_check } = compiler.validate.enrich
+{ parse_module } = compiler.parse
+{ resolve_module } = compiler.check_resolve
+{ ufcs_vis_of } = compiler.check
+{ check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source,
+  check_module_no_if_diagnostic_from_source, check_module_no_ternary_diagnostic_from_source,
+  check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source,
+  check_module_leak_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source,
+  check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source,
+  check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source,
+  check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source,
+  check_module_unknown_type_diagnostic_from_source, check_module_ffi_diagnostic_from_source,
+  check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
+  check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
+{ DiagSpan } = compiler.diagnostic
+{ ResolvedProgram } = std.internal.resolve
+{ gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
+{ push_int, resolve_prog, cstr_substr } = compiler.drvutil
+{ cd_or, locate_diag } = compiler.drvdiag
+// ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 1) ─────────────────────────
+// A JSON-RPC 2.0 loop: read `Content-Length: N\r\n\r\n<N-byte JSON body>` frames from stdin, run the
+// EXISTING check pipeline (resolve -> parse -> the diagnostic channels) on each opened/changed
+// document, and PUSH `textDocument/publishDiagnostics`. This only ADDS a subcommand — no compiler
+// internals change; it rides check_module_batch + the specialized channels the driver already uses.
+// Full-sync per document: the text is checked standalone; its directory is derived from the
+// `file://` URI so sibling/std imports resolve (an error INSIDE an imported module is pinned to the
+// open file's head with the real location in the message). Stage 1 adds: didClose (clears
+// diagnostics), MethodNotFound replies for unimplemented requests, byte->UTF-16 position conversion,
+// and a Content-Length sanity ceiling. Conformance suite: tests/harness_lsp.zen. Hover needs plumbing
+// the checker doesn't expose yet (an offset->node query + an exported type-render such as ty_name);
+// until that exists the server deliberately declines it with -32601.
+// PROTOCOL WRITES GO TO STDOUT (fd 1); every diagnostic/log the pipeline emits stays on stderr, so the
+// JSON-RPC stream is never corrupted.
+lout = (s: string_view) i64 {
+    v := s.view()
+    write(1, v.ptr, v.len)
+}
+// frame + write one JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`.
+lsp_send = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    lout(mp
+        .gstr_string(48)
+        .gstr_append(mp, "Content-Length: ")
+        .push_int(mp, body.view().len)
+        .gstr_append(mp, "\r\n\r\n")
+        .gstr_finish(mp))
+    lout(body)
+}
+// ── JSON string EMISSION (own escaper; the task sanctions building output as strings) ─────────────
+lsp_hexd = (n: i64) u8 {
+    (n < 10).then({ ('0'.to_i64() + n).to_u8() }, { ('a'.to_i64() + n - 10).to_u8() })
+}
+push_uesc = (sb: String, mp: MutPtr<Malloc>, b: u8) String {
+    bi := b.to_i64()
+    sb
+        .gstr_append(mp, "\\u00")
+        .gstr_push(mp, lsp_hexd(bi >> 4 & 15))
+        .gstr_push(mp, lsp_hexd(bi & 15))
+}
+// append `s` as a JSON string LITERAL (surrounding quotes + escaped) to the builder.
+push_jstr = (sb: String, mp: MutPtr<Malloc>, s: string_view) String {
+    cur := sb.gstr_push(mp, '"')
+    v: [u8] := s.view()
+    v.loop((h, i, b) {
+        cur = (b == '"').match ({
+            true  => cur.gstr_append(mp, "\\\""),
+            false => (b == '\\').match ({
+                true  => cur.gstr_append(mp, "\\\\"),
+                false => (b == '\n').match ({
+                    true  => cur.gstr_append(mp, "\\n"),
+                    false => (b == '\r').match ({
+                        true  => cur.gstr_append(mp, "\\r"),
+                        false => (b == '\t').match ({
+                            true  => cur.gstr_append(mp, "\\t"),
+                            false => (b < 32).match ({
+                                true  => cur.push_uesc(mp, b),
+                                false => cur.gstr_push(mp, b),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        })
+    })
+    cur.gstr_push(mp, '"')
+}
+// ── incoming JSON extraction (hand-rolled; std.json's `parse`/`get` collide with the compiler's own
+// flat `parse`/`get` names once this closure imports compiler.parse, so a targeted scanner is used).
+// The scanner walks left-to-right skipping over complete JSON strings, so a `"key":` byte-pattern that
+// happens to sit INSIDE a string value (e.g. the document source text) is never mistaken for a key.
+// String scanning/decoding is ITERATIVE (`@while`) so a megabyte document never recurses the C stack.
+// index just past the closing quote of the string opening at v[i]=='"' (respecting `\` escapes).
+json_str_end = (v: [u8], i: i64) i64 {
+    j := i + 1
+    done: i64 := 0 - 1
+    @while (done < 0 && j < v.len) {
+        b := v[j]
+        (b == '\\').match ({
+            true  => {
+                j = j + 2
+            },
+            false => (b == '"').match ({
+                true  => {
+                    done = j + 1
+                },
+                false => {
+                    j = j + 1
+                },
+            }),
+        })
+    }
+    (done < 0).then({ v.len }, { done })
+}
+json_skip_ws = (v: [u8], p: i64) i64 {
+    q := p
+    @while (q < v.len && (v[q] == ' ' || v[q] == '\t' || v[q] == '\n' || v[q] == '\r')) {
+        q = q + 1
+    }
+    q
+}
+json_range_eq = (v: [u8], start: i64, kv: [u8], k: i64) bool {
+    (k >= kv.len).match ({
+        true  => true,
+        false => (v[start + k] == kv[k]).then({ v.json_range_eq(start, kv, k + 1) }, { false }),
+    })
+}
+json_str_eq_range = (v: [u8], start: i64, end: i64, kv: [u8]) bool {
+    (end - start != kv.len).then({ false }, { v.json_range_eq(start, kv, 0) })
+}
+// the byte offset of the VALUE for the first object key named `key`, or -1. Strings are consumed whole,
+// so key matches inside a value never fire and nesting is transparent.
+json_find_key = (v: [u8], key: string_view) i64 {
+    kv: [u8] := key.view()
+    i: i64 := 0
+    result: i64 := 0 - 1
+    stop := false
+    @while (stop == false && i < v.len) {
+        (v[i] == '"').match ({
+            true  => {
+                se := v.json_str_end(i)
+                cs := v.json_skip_ws(se)
+                (cs < v.len && v[cs] == ':').match ({
+                    true  => v.json_str_eq_range(i + 1, se - 1, kv).match ({
+                        true  => {
+                            result = v.json_skip_ws(cs + 1)
+                            stop = true
+                        },
+                        false => {
+                            i = se
+                        },
+                    }),
+                    false => {
+                        i = se
+                    },
+                })
+            },
+            false => {
+                i = i + 1
+            },
+        })
+    }
+    result
+}
+json_hexq = (v: [u8], at: i64) i64 {
+    (at + 3 >= v.len).match ({
+        true  => 0 - 1,
+        false => {
+            h0 := hexval(v[at])
+            h1 := hexval(v[at + 1])
+            h2 := hexval(v[at + 2])
+            h3 := hexval(v[at + 3])
+            (h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0).match ({
+                true  => 0 - 1,
+                false => h0 * 4096 + h1 * 256 + h2 * 16 + h3,
+            })
+        },
+    })
+}
+hexval = (b: u8) i64 {
+    (b >= '0' && b <= '9').match ({
+        true  => to_i64(b - '0'),
+        false => (b >= 'a' && b <= 'f').match ({
+            true  => to_i64(b - 'a') + 10,
+            false => (b >= 'A' && b <= 'F').then({ to_i64(b - 'A') + 10 }, { 0 - 1 }),
+        }),
+    })
+}
+// UTF-8 encode a BMP code point into the builder (1–3 bytes).
+push_utf8 = (sb: String, mp: MutPtr<Malloc>, cp: i64) String {
+    (cp < 128).match ({
+        true  => sb.gstr_push(mp, cp.to_u8()),
+        false => (cp < 2048).match ({
+            true  => sb
+                .gstr_push(mp, (192 | cp >> 6).to_u8())
+                .gstr_push(mp, (128 | cp & 63).to_u8()),
+            false => sb
+                .gstr_push(mp, (224 | cp >> 12).to_u8())
+                .gstr_push(mp, (128 | cp >> 6 & 63).to_u8())
+                .gstr_push(mp, (128 | cp & 63).to_u8()),
+        }),
+    })
+}
+// decode the JSON string opening at v[i]=='"' into an allocator-owned view (escapes resolved).
+json_decode_str = (mp: MutPtr<Malloc>, v: [u8], i: i64) string_view {
+    sb := mp.gstr_string(v.len - i + 1)
+    j := i + 1
+    stop := false
+    @while (stop == false && j < v.len) {
+        b := v[j]
+        (b == '"').match ({
+            true  => {
+                stop = true
+            },
+            false => (b == '\\' && j + 1 < v.len).match ({
+                true  => {
+                    e := v[j + 1]
+                    (e == 'n').match ({
+                        true  => {
+                            sb = sb.gstr_push(mp, '\n')
+                            j = j + 2
+                        },
+                        false => (e == 't').match ({
+                            true  => {
+                                sb = sb.gstr_push(mp, '\t')
+                                j = j + 2
+                            },
+                            false => (e == 'r').match ({
+                                true  => {
+                                    sb = sb.gstr_push(mp, '\r')
+                                    j = j + 2
+                                },
+                                false => (e == 'b').match ({
+                                    true  => {
+                                        sb = sb.gstr_push(mp, 8.to_u8())
+                                        j = j + 2
+                                    },
+                                    false => (e == 'f').match ({
+                                        true  => {
+                                            sb = sb.gstr_push(mp, 12.to_u8())
+                                            j = j + 2
+                                        },
+                                        false => (e == 'u').match ({
+                                            true  => {
+                                                cp := v.json_hexq(j + 2)
+                                                (cp < 0).match ({
+                                                    true  => {
+                                                        sb = sb.gstr_push(mp, e)
+                                                        j = j + 2
+                                                    },
+                                                    false => {
+                                                        sb = sb.push_utf8(mp, cp)
+                                                        j = j + 6
+                                                    },
+                                                })
+                                            },
+                                            false => {
+                                                sb = sb.gstr_push(mp, e)
+                                                j = j + 2
+                                            },
+                                        }),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    })
+                },
+                false => {
+                    sb = sb.gstr_push(mp, b)
+                    j = j + 1
+                },
+            }),
+        })
+    }
+    sb.gstr_finish(mp)
+}
+// raw bytes of the value at v[i]: a quoted string (incl. quotes) or a bare token up to `,`/`}`/`]`/ws.
+json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) string_view {
+    (i >= v.len).match ({
+        true  => "null",
+        false => (v[i] == '"').match ({
+            true  => mp.json_slice(v, i, v.json_str_end(i)),
+            false => {
+                e := i
+                stop := false
+                @while (stop == false && e < v.len) {
+                    b := v[e]
+                    (b == ','
+                        || b == '}'
+                        || b == ']'
+                        || b == ' '
+                        || b == '\t'
+                        || b == '\n'
+                        || b == '\r').match ({
+                        true  => {
+                            stop = true
+                        },
+                        false => {
+                            e = e + 1
+                        },
+                    })
+                }
+                mp.json_slice(v, i, e)
+            },
+        }),
+    })
+}
+json_slice = (mp: MutPtr<Malloc>, v: [u8], start: i64, end: i64) string_view {
+    sb := mp.gstr_string(end - start + 1)
+    j := start
+    @while (j < end) {
+        sb = sb.gstr_push(mp, v[j])
+        j = j + 1
+    }
+    sb.gstr_finish(mp)
+}
+// the decoded string value of the first key `key`, or "" if absent / non-string.
+json_str_field = (mp: MutPtr<Malloc>, body: string_view, key: string_view) string_view {
+    v: [u8] := body.view()
+    p := v.json_find_key(key)
+    (p < 0 || p >= v.len).match ({
+        true  => "",
+        false => (v[p] == '"').then({ mp.json_decode_str(v, p) }, { "" }),
+    })
+}
+// the request id as a raw JSON fragment (number or quoted string), echoed verbatim into the reply.
+lsp_id = (mp: MutPtr<Malloc>, body: string_view) string_view {
+    v: [u8] := body.view()
+    p := v.json_find_key("id")
+    (p < 0).then({ "null" }, { mp.json_raw_at(v, p) })
+}
+// ── URI -> filesystem path (strip a leading `file://`; percent-decoding is a later refinement) ─────
+lsp_has_prefix = (s: string_view, pre: string_view) bool {
+    sv: [u8] := s.view()
+    pv: [u8] := pre.view()
+    (sv.len < pv.len).then({ false }, { lsp_prefix_bytes(sv, pv, 0) })
+}
+lsp_prefix_bytes = (sv: [u8], pv: [u8], i: i64) bool {
+    (i >= pv.len).match ({
+        true  => true,
+        false => (sv[i] == pv[i]).then({ sv.lsp_prefix_bytes(pv, i + 1) }, { false }),
+    })
+}
+lsp_uri_path = (mp: MutPtr<Malloc>, uri: string_view) string_view {
+    uri.lsp_has_prefix("file://").match ({
+        true  => mp.cstr_substr(uri, 7, to_i32(uri.view().len - 7)),
+        false => uri,
+    })
+}
+// ── DiagSpan (1-based line/col, 1-based-inclusive end_col) -> LSP 0-based range ────────────────────
+// LSP is 0-based: line -> line-1, start.character -> col-1. end_col is the 1-based inclusive last
+// column, numerically the 0-based EXCLUSIVE end — so end.character = end_col (never a further -1). An
+// unlocated span (line 0) is pinned to the file start with a 1-char range so the squiggle is visible.
+ZSpan: {
+    l: i64,
+    c: i64,
+    e: i64,
+}
+lsp_end_char = (sp: DiagSpan) i64 {
+    ec := to_i64(sp.end_col)
+    cc := to_i64(sp.col - 1)
+    (ec > cc).then({ ec }, { cc + 1 })
+}
+lsp_zero_span = (sp: DiagSpan) ZSpan {
+    (sp.line > 0).match ({
+        true  => ZSpan(
+            l: to_i64(sp.line - 1),
+            c: (sp.col > 0).then({ to_i64(sp.col - 1) }, { 0 }),
+            e: sp.lsp_end_char(),
+        ),
+        false => ZSpan(
+            l: 0,
+            c: 0,
+            e: 1,
+        ),
+    })
+}
+// ── byte columns -> UTF-16 columns (LSP `character` counts UTF-16 CODE UNITS, not bytes) ──────────
+// zenc spans are byte columns into the source line; a client fed byte columns misplaces squiggles on
+// any line with non-ASCII bytes before the error. Conversion walks the located line once: every
+// non-continuation byte counts 1 unit, and a 4-byte UTF-8 lead (>= 0xF0, a supplementary-plane char)
+// counts 2 (its UTF-16 surrogate pair).
+lsp_line_start = (v: [u8], ln: i64) i64 {
+    i: i64 := 0
+    k: i64 := 0
+    @while (k < ln && i < v.len) {
+        (v[i] == '\n').then({
+            k = k + 1
+        })
+        i = i + 1
+    }
+    i
+}
+lsp_utf16_col = (v: [u8], ls: i64, bytecol: i64) i64 {
+    u: i64 := 0
+    i := ls
+    end := ls + bytecol
+    @while (i < v.len && i < end && v[i] != '\n') {
+        bi := v[i].to_i64()
+        (bi & 192 != 128).then({
+            u = u + (bi >= 240).then({ 2 }, { 1 })
+        })
+        i = i + 1
+    }
+    u
+}
+// ── one diagnostic -> one LSP Diagnostic object, accumulated (comma-separated) into the array ──────
+DiagAcc: {
+    sb: String,
+    n: i32,
+}
+lsp_push_diag = (
+    mp: MutPtr<Malloc>,
+    acc: DiagAcc,
+    rp: ResolvedProgram,
+    raw: [Decl],
+    decls: [Decl],
+    path: string_view,
+    user: string_view,
+    cd: CheckDiagnostic,
+) DiagAcc {
+    (cd.code == 0).match ({
+        true  => acc,
+        false => {
+            dl := rp.locate_diag(cd.source_offset, cd.span_width, path, user)
+            z := lsp_zero_span(dl.sp)
+            // byte -> UTF-16 columns against the line the span actually points into (dl.src is the
+            // owning module's source; for the open document it IS the client's text).
+            sv: [u8] := dl.src.view()
+            ls := sv.lsp_line_start(z.l)
+            zc := sv.lsp_utf16_col(ls, z.c)
+            ze := sv.lsp_utf16_col(ls, z.e)
+            ze = (ze > zc).then({ ze }, { zc + 1 })
+            // enrich exactly like the CLI (emit_one): denriched message + world-teaching undefined-name hint.
+            msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
+            hint := cd.hint
+            (cd.kind == "undefined-name").then({
+                wh := mp.undefined_name_hint(rp.table, rp.flat, cd.source_offset)
+                (is_empty(wh) == false).then({
+                    hint = wh
+                })
+            })
+            full := is_empty(hint).match ({
+                true  => msg,
+                false => mp
+                    .gstr_string(128)
+                    .gstr_append(mp, msg)
+                    .gstr_append(mp, " — ")
+                    .gstr_append(mp, hint)
+                    .gstr_finish(mp),
+            })
+            // an error living in an IMPORTED module (dl.path != the open document) must not squiggle
+            // an unrelated range of the open file: pin it to the file head and name the real location
+            // in the message, so the information survives without a lying range.
+            line: i64 := z.l
+            (dl.path == path).match ({
+                true  => 0,
+                false => {
+                    line = 0
+                    zc = 0
+                    ze = 1
+                    full = mp
+                        .gstr_string(128)
+                        .gstr_append(mp, "in imported module ")
+                        .gstr_append(mp, dl.path)
+                        .gstr_append(mp, ":")
+                        .push_int(mp, to_i64(dl.sp.line))
+                        .gstr_append(mp, ": ")
+                        .gstr_append(mp, full)
+                        .gstr_finish(mp)
+                    0
+                },
+            })
+            sep := (acc.n > 0).then({ "," }, { "" })
+            sb2 := acc.sb
+                .gstr_append(mp, sep)
+                .gstr_append(mp, "{\"range\":{\"start\":{\"line\":")
+                .push_int(mp, line)
+                .gstr_append(mp, ",\"character\":")
+                .push_int(mp, zc)
+                .gstr_append(mp, "},\"end\":{\"line\":")
+                .push_int(mp, line)
+                .gstr_append(mp, ",\"character\":")
+                .push_int(mp, ze)
+                .gstr_append(mp, "}},\"severity\":1,\"code\":")
+                .push_jstr(mp, cd.kind)
+                .gstr_append(mp, ",\"source\":\"zen\",\"message\":")
+                .push_jstr(mp, full)
+                .gstr_append(mp, "}")
+            DiagAcc(
+                sb: sb2,
+                n: acc.n + 1,
+            )
+        },
+    })
+}
+// run the pipeline on `text` and PUBLISH. Structural blockers (no-if, parse) are reported ALONE —
+// their flat sentinels would otherwise spray bogus type errors. Otherwise every specialized semantic
+// channel (reserved/ownership/escape/leak/…/mustuse) contributes its diagnostic AND the whole main
+// batch (names/types/arity/exhaustiveness/…) is collected, so an ownership error shows alongside type
+// errors rather than one channel hiding the rest. Empty array => clears old squiggles.
+lsp_diags_array = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    path: string_view,
+    text: string_view,
+) string_view {
+    rp := mp.resolve_prog(root, path, text)
+    raw := mp.parse_module(rp.flat)
+    decls := mp.resolve_module(raw)
+    nif := check_module_no_if_diagnostic_from_source(rp.flat).cd_or(check_module_no_ternary_diagnostic_from_source(rp.flat))
+    pars := mp.check_module_parse_diagnostic_from_source(decls, rp.flat)
+    acc := DiagAcc(
+        sb: mp.gstr_string(256),
+        n: 0,
+    )
+    done := (nif.code != 0).match ({
+        true  => mp.lsp_push_diag(acc, rp, raw, decls, path, text, nif),
+        false => (pars.code != 0).match ({
+            true  => mp.lsp_push_diag(acc, rp, raw, decls, path, text, pars),
+            false => {
+                a := acc
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_reserved_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_ownership_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_escape_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_leak_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_addr_escape_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_send_rc_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_scratch_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_send_mut_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_bound_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_arg_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_or_return_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_unknown_type_diagnostic_from_source(decls, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_ffi_diagnostic_from_source(decls, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, check_module_infinite_type_diagnostic_from_source(decls, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, check_module_main_diagnostic_from_source(raw, rp.flat))
+                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_mustuse_diagnostic_from_source(raw, rp.flat))
+                ds := mp.check_module_batch_vis(decls, rp.flat, mp.ufcs_vis_of(rp.flat, rp.regions, rp.table))
+                ds.loop((h, i, cd) {
+                    a = mp.lsp_push_diag(a, rp, raw, decls, path, text, cd)
+                })
+                a
+            },
+        }),
+    })
+    done.sb.gstr_finish(mp)
+}
+lsp_publish = (mp: MutPtr<Malloc>, root: string_view, uri: string_view, text: string_view) i64 {
+    arr := mp.lsp_diags_array(root, mp.lsp_uri_path(uri), text)
+    mp.lsp_send(mp
+        .gstr_string(512)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":")
+        .push_jstr(mp, uri)
+        .gstr_append(mp, ",\"diagnostics\":[")
+        .gstr_append(mp, arr)
+        .gstr_append(mp, "]}}")
+        .gstr_finish(mp))
+}
+// ── request/notification handlers ─────────────────────────────────────────────────────────────────
+lsp_reply_initialize = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    mp.lsp_send(mp
+        .gstr_string(256)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"definitionProvider\":true},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
+        .gstr_finish(mp))
+}
+// ── go-to-definition (LSP Stage 2a) — a textual top-level definition finder ──────────────────────
+// Cursor position (LSP is 0-based line/character) → the identifier under it → the FILE's top-level
+// declaration of that name → its Location. Textual (ctags-style) rather than resolver-backed: it
+// resolves same-file top-level decls (fn/type/const), which is the common jump; cross-file (imports),
+// locals, and overload-precise resolution are the documented next slices.
+lsp_is_ident_byte = (b: u8) bool {
+    b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
+// byte offset of (line, char): walk `line` newlines from 0, then advance `char` bytes (ASCII columns;
+// UTF-16 wide columns are a refinement).
+lsp_byte_of_pos = (v: [u8], line: i64, ch: i64, i: i64, ln: i64) i64 {
+    (ln >= line).match ({
+        true  => (i + ch < v.len).then({ i + ch }, { v.len }),
+        false => (i >= v.len).match ({
+            true  => v.len,
+            false => (v[i] == '\n').match ({
+                true  => v.lsp_byte_of_pos(line, ch, i + 1, ln + 1),
+                false => v.lsp_byte_of_pos(line, ch, i + 1, ln),
+            }),
+        }),
+    })
+}
+// start byte of the identifier surrounding `off` (scan left over identifier bytes).
+lsp_ident_start = (v: [u8], off: i64) i64 {
+    (off <= 0).match ({
+        true  => 0,
+        false => v[off - 1].lsp_is_ident_byte().then({ v.lsp_ident_start(off - 1) }, { off }),
+    })
+}
+// end byte (exclusive) of the identifier surrounding `off`.
+lsp_ident_end = (v: [u8], off: i64) i64 {
+    (off >= v.len).match ({
+        true  => off,
+        false => v[off].lsp_is_ident_byte().then({ v.lsp_ident_end(off + 1) }, { off }),
+    })
+}
+// does `v[i..]` begin with `name` as a WHOLE token that is a top-level decl head: `name` [ws]* `*`? [ws]*
+// followed by `=`, `:`, `<` (generic decl), or `(` — the shapes `foo = `, `Foo:`, `foo* = `, `f<T> = `.
+lsp_def_head_at = (v: [u8], i: i64, name: [u8]) bool {
+    (i + name.len > v.len).match ({
+        true  => false,
+        false => lsp_bytes_eq(v, i, name, 0).match ({
+            true  => {
+                j := i + name.len
+                k := (j < v.len && v[j] == '*').then({ j + 1 }, { j })
+                k2 := lsp_skip_sp(v, k)
+                (k2 < v.len).match ({
+                    true  => {
+                        b := v[k2]
+                        b == '=' || b == ':' || b == '<' || b == '('
+                    },
+                    false => false,
+                })
+            },
+            false => false,
+        }),
+    })
+}
+lsp_bytes_eq = (v: [u8], i: i64, name: [u8], k: i64) bool {
+    (k >= name.len).match ({
+        true  => true,
+        false => (v[i + k] == name[k]).then({ v.lsp_bytes_eq(i, name, k + 1) }, { false }),
+    })
+}
+lsp_skip_sp = (v: [u8], i: i64) i64 {
+    (i < v.len && (v[i] == ' ' || v[i] == '\t')).then({ v.lsp_skip_sp(i + 1) }, { i })
+}
+// scan for a top-level (column-0) def head of `name`; return its byte offset or -1. Only column-0 heads
+// count (Zen top-level decls start at column 0), which cheaply excludes call sites and locals.
+lsp_find_def = (v: [u8], name: [u8], i: i64, atcol0: bool) i64 {
+    (i >= v.len).match ({
+        true  => 0 - 1,
+        false => (atcol0 && v.lsp_def_head_at(i, name)).match ({
+            true  => i,
+            false => v.lsp_find_def(name, i + 1, v[i] == '\n'),
+        }),
+    })
+}
+// (line, col) of byte offset `off`.
+lsp_line_of = (v: [u8], off: i64, i: i64, ln: i64, col: i64) i64 {
+    (i >= off || i >= v.len).match ({
+        true  => ln,
+        false => (v[i] == '\n').match ({
+            true  => v.lsp_line_of(off, i + 1, ln + 1, 0),
+            false => v.lsp_line_of(off, i + 1, ln, col + 1),
+        }),
+    })
+}
+lsp_col_of = (v: [u8], off: i64, i: i64, col: i64) i64 {
+    (i >= off || i >= v.len).match ({
+        true  => col,
+        false => (v[i] == '\n').match ({
+            true  => v.lsp_col_of(off, i + 1, 0),
+            false => v.lsp_col_of(off, i + 1, col + 1),
+        }),
+    })
+}
+// reply to a definition request with a Location for def at (line, col) spanning `nlen` bytes, or null.
+lsp_reply_location = (
+    mp: MutPtr<Malloc>,
+    body: string_view,
+    uri: string_view,
+    line: i64,
+    col: i64,
+    nlen: i64,
+) i64 {
+    mp.lsp_send(mp
+        .gstr_string(256)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":{\"uri\":")
+        .push_jstr(mp, uri)
+        .gstr_append(mp, ",\"range\":{\"start\":{\"line\":")
+        .push_int(mp, line)
+        .gstr_append(mp, ",\"character\":")
+        .push_int(mp, col)
+        .gstr_append(mp, "},\"end\":{\"line\":")
+        .push_int(mp, line)
+        .gstr_append(mp, ",\"character\":")
+        .push_int(mp, col + nlen)
+        .gstr_append(mp, "}}}}")
+        .gstr_finish(mp))
+}
+// read a non-negative integer JSON field by key (e.g. position.line / .character).
+lsp_json_int = (body: string_view, key: string_view) i64 {
+    v: [u8] := body.view()
+    p := v.json_find_key(key)
+    (p < 0).then({ 0 }, { v.lsp_parse_dec(p, 0) })
+}
+lsp_parse_dec = (v: [u8], i: i64, acc: i64) i64 {
+    (i < v.len && v[i] >= '0' && v[i] <= '9').match ({
+        true  => v.lsp_parse_dec(i + 1, acc * 10 + (v[i] - '0').to_i64()),
+        false => acc,
+    })
+}
+lsp_definition = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
+    uri := mp.json_str_field(body, "uri")
+    line := body.lsp_json_int("line")
+    ch := body.lsp_json_int("character")
+    path := mp.lsp_uri_path(uri)
+    contents_in(mp, path).match ({
+        .Ok(txt) => {
+            v: [u8] := txt.view()
+            off := v.lsp_byte_of_pos(line, ch, 0, 0)
+            s := v.lsp_ident_start(off)
+            e := v.lsp_ident_end(off)
+            (e <= s).match ({
+                true  => mp.lsp_reply_null(body),
+                false => {
+                    name: [u8] := v.ptr.offset(s).slice(e - s)
+                    d := v.lsp_find_def(name, 0, true)
+                    (d < 0).match ({
+                        true  => mp.lsp_reply_null(body),
+                        false => mp.lsp_reply_location(body, uri, v.lsp_line_of(d, 0, 0, 0), v.lsp_col_of(d, 0, 0), e - s),
+                    })
+                },
+            })
+        },
+        .Err(er) => mp.lsp_reply_null(body),
+    })
+}
+lsp_reply_null = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    mp.lsp_send(mp
+        .gstr_string(96)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":null}")
+        .gstr_finish(mp))
+}
+// JSON-RPC MethodNotFound for a REQUEST we don't implement. A request left unanswered stalls the
+// client (nvim blocks a hover round-trip until its timeout); the error reply fails it instantly.
+lsp_reply_method_not_found = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    mp.lsp_send(mp
+        .gstr_string(128)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"error\":{\"code\":-32601,\"message\":\"method not found\"}}")
+        .gstr_finish(mp))
+}
+// notification families we deliberately swallow WITHOUT a reply (replying to a notification is a
+// protocol violation). `id` presence alone is not the test: e.g. workspace/didChangeConfiguration
+// params may contain an unrelated "id" key that the flat key scanner would find.
+lsp_is_notification = (method: string_view) bool {
+    method.lsp_has_prefix("$/")
+        || method.lsp_has_prefix("textDocument/did")
+        || method.lsp_has_prefix("workspace/did")
+        || method == "initialized"
+        || method == "exit"
+}
+// publish an EMPTY diagnostics array for `uri` (didClose: the client keeps stale squiggles otherwise).
+lsp_publish_clear = (mp: MutPtr<Malloc>, uri: string_view) i64 {
+    mp.lsp_send(mp
+        .gstr_string(160)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":")
+        .push_jstr(mp, uri)
+        .gstr_append(mp, ",\"diagnostics\":[]}}")
+        .gstr_finish(mp))
+}
+// didOpen/didChange (full-sync) both carry the whole document text; the first `text` key is the
+// document content (the URI's `text` in didOpen, the single contentChange's `text` in didChange).
+lsp_did_change = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
+    mp.lsp_publish(root, mp.json_str_field(body, "uri"), mp.json_str_field(body, "text"))
+}
+// dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown
+// NOTIFICATIONS are no-ops; an unknown REQUEST (an "id" key outside the notification families) gets
+// a MethodNotFound error so the client never waits on a reply that will not come.
+lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
+    method := mp.json_str_field(body, "method")
+    (method == "initialize").match ({
+        true  => {
+            mp.lsp_reply_initialize(body)
+            0
+        },
+        false => (method == "shutdown").match ({
+            true  => {
+                mp.lsp_reply_null(body)
+                1
+            },
+            false => (method == "exit").match ({
+                true  => 2,
+                false => (method == "textDocument/didOpen" || method == "textDocument/didChange").match ({
+                    true  => {
+                        mp.lsp_did_change(root, body)
+                        0
+                    },
+                    false => (method == "textDocument/didClose").match ({
+                        true  => {
+                            mp.lsp_publish_clear(mp.json_str_field(body, "uri"))
+                            0
+                        },
+                        false => (method == "textDocument/definition").match ({
+                            true  => {
+                                mp.lsp_definition(root, body)
+                                0
+                            },
+                            false => {
+                                v: [u8] := body.view()
+                                (v.json_find_key("id") >= 0 && lsp_is_notification(method) == false).then({
+                                    mp.lsp_reply_method_not_found(body)
+                                })
+                                0
+                            },
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
+// ── stdio framing: read `Content-Length: N\r\n\r\n` headers, then exactly N body bytes ─────────────
+LSP_HDR_CAP = () i64 { 1024 }
+// sanity ceiling on a claimed body size (64 MiB). A hostile/corrupt `Content-Length: 100000000000000`
+// would otherwise reach acquire(), fail, and null-deref-panic the server; over-limit frames are
+// skipped like unparseable ones and the header scan resynchronizes on the next frame.
+LSP_BODY_MAX = () i64 { 67108864 }
+// read stdin one byte at a time into `buf` until the CRLFCRLF terminator (so we never over-read into
+// the body). Returns the header length incl. terminator; 0 on clean EOF before any byte; -1 on error.
+lsp_read_headers = (mp: MutPtr<Malloc>, buf: RawPtr<u8>, off: i64) i64 {
+    r := read(0, buf.offset(off), 1)
+    (r <= 0).match ({
+        true  => (off == 0).then({ 0 }, { 0 - 1 }),
+        false => (off >= 3
+            && load(buf.offset(off - 3)) == '\r'
+            && load(buf.offset(off - 2)) == '\n'
+            && load(buf.offset(off - 1)) == '\r'
+            && load(buf.offset(off)) == '\n').match ({
+            true  => off + 1,
+            false => (off + 1 >= LSP_HDR_CAP()).match ({
+                true  => 0 - 1,
+                false => mp.lsp_read_headers(buf, off + 1),
+            }),
+        }),
+    })
+}
+lsp_match_bytes = (buf: RawPtr<u8>, i: i64, wv: [u8], k: i64) bool {
+    (k >= wv.len).match ({
+        true  => true,
+        false => (load(buf.offset(i + k)) == wv[k]).match ({
+            true  => buf.lsp_match_bytes(i, wv, k + 1),
+            false => false,
+        }),
+    })
+}
+lsp_match_at = (buf: RawPtr<u8>, i: i64, len: i64, word: string_view) bool {
+    wv: [u8] := word.view()
+    (i + wv.len > len).then({ false }, { buf.lsp_match_bytes(i, wv, 0) })
+}
+// read a decimal starting at `i` (skipping leading spaces); -1 if no digit before end/non-space.
+lsp_read_dec = (buf: RawPtr<u8>, i: i64, len: i64, acc: i64, started: bool) i64 {
+    (i >= len).match ({
+        true  => started.then({ acc }, { 0 - 1 }),
+        false => {
+            b := load(buf.offset(i))
+            (b >= '0' && b <= '9').match ({
+                true  => buf.lsp_read_dec(i + 1, len, acc * 10 + (b - '0').to_i64(), true),
+                false => (b == ' ' && started == false).match ({
+                    true  => buf.lsp_read_dec(i + 1, len, acc, false),
+                    false => started.then({ acc }, { 0 - 1 }),
+                }),
+            })
+        },
+    })
+}
+lsp_content_length = (buf: RawPtr<u8>, i: i64, len: i64) i64 {
+    (i >= len).match ({
+        true  => 0 - 1,
+        false => buf.lsp_match_at(i, len, "Content-Length:").match ({
+            true  => buf.lsp_read_dec(i + 15, len, 0, false),
+            false => buf.lsp_content_length(i + 1, len),
+        }),
+    })
+}
+// read exactly `n` body bytes into `buf` (read() may return short; loop until filled or EOF).
+lsp_read_body = (buf: RawPtr<u8>, off: i64, n: i64) i64 {
+    (off >= n).match ({
+        true  => off,
+        false => {
+            r := read(0, buf.offset(off), n - off)
+            (r <= 0).then({ off }, { buf.lsp_read_body(off + r, n) })
+        },
+    })
+}
+// the JSON-RPC stdio loop: frame -> dispatch, until `exit`. Exit code follows the LSP convention:
+// 0 if `exit` arrived after `shutdown`, else 1 (also 1 if the stream closes without a clean shutdown).
+lsp_cmd* = (mp: MutPtr<Malloc>, root: string_view) i32 {
+    hbuf := mp.acquire(LSP_HDR_CAP())
+    running := true
+    shut := false
+    code := 1
+    @while (running) {
+        hlen := mp.lsp_read_headers(hbuf, 0)
+        (hlen <= 0).match ({
+            true  => {
+                running = false
+                code = shut.then({ 0 }, { 1 })
+            },
+            false => {
+                n := hbuf.lsp_content_length(0, hlen)
+                (n < 0 || n > LSP_BODY_MAX()).match ({
+                    true  => 0,
+                    false => {
+                        body := mp.acquire(n + 1)
+                        got := body.lsp_read_body(0, n)
+                        body.offset(got).store(0)
+                        act := mp.lsp_handle(root, cstr(body))
+                        (act == 1).then({
+                            shut = true
+                        })
+                        (act == 2).then({
+                            running = false
+                            code = shut.then({ 0 }, { 1 })
+                        })
+                        0
+                    },
+                })
+            },
+        })
+    }
+    code
+}

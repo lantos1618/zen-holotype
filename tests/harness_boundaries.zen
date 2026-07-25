@@ -379,6 +379,8 @@ atwhile_allowed = (path: string_view) bool {
         || path == "src/compiler/backend/c/c_emit.zen"
         || path == "src/compiler/diagnostic.zen"
         || path == "driver.zen"
+        || path == "src/compiler/lsp.zen"
+        || path == "src/compiler/audit.zen"
         || path == "src/compiler/validate/util.zen"
         || path == "src/compiler/validate/diag.zen"
         || path == "src/std/math.zen"
@@ -400,10 +402,13 @@ atwhile_allowed = (path: string_view) bool {
 // literal, or a long source line must lex/emit/caret by iteration, not per-byte recursion (#66c).
 // std.text.ascii joins as the shared escape-loop substrate: escape_into is THE per-byte scan the
 // C/JS backends and the formatter splice their escape tables into (c_lit's own @while moved there).
-// driver.zen joins for the LSP's hand-rolled JSON reader and `zen audit`'s import/identifier
-// scanners: both walk unbounded input (a didChange request carries an entire document; audit walks
-// whole source files), so per-byte recursion is the stack-overflow risk this class exists to avoid.
-// These loops are not new — driver.zen was simply never scanned until the file set was corrected.
+// driver.zen, compiler.lsp and compiler.audit join as scanners over unbounded input: the LSP's
+// hand-rolled JSON reader walks a whole request body (a `didChange` carries the entire document),
+// and audit's per-byte import/identifier scanners plus its insertion sort walk whole source files
+// and the full finding list. Per-byte recursion there is the stack overflow this class exists to
+// avoid. None of these loops are new: all 60 lived in the repo-root driver.zen and were exempt only
+// because the scan never reached it. They are now split 4 / 10 / 46 across the three files, and the
+// scan does reach it — the exemption is finally deliberate rather than accidental.
 // std.internal.resolve/resolve_scan join for their line scanners (next_line/line_end): the resolver
 // walks whole flattened sources byte-by-byte to the next newline, and both per-byte recursion
 // (stack) and a per-call strlen (quadratic — the old shape, the top resolve-imports hotspot) are
