@@ -1,8 +1,8 @@
 // compiler.parse_match — match/then expressions — arm parsing, boolean/literal/variant matches, pattern binds & destructuring.
 // Split out of compiler.parse_expr (god-file split); pure move, no logic changes.
 { ArmData, Expr, Stmt } = compiler.ast.ast_types
-{ arm, arm_at, bin, block, call, call_at, cond, cond_at, cond_oa, ematch, lit, member, sexpr, slet,
-  sret, vref } = compiler.genc
+{ arm, arm_at, bin, bin_at, block, call, call_at, cond, cond_at, cond_oa, ematch, lit, member,
+  sexpr, slet, sret, vref } = compiler.genc
 { payload_fname } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
 { at } = std.text.ascii
@@ -170,7 +170,7 @@ parse_match_arms = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, open: Scan
         true  => a.parse_variant_match(src, subj, open),
         false => src.is_bool_label(first.tok).match ({
             true  => a.parse_bool_match(src, subj, open),
-            false => a.parse_lit_match(src, subj, open),
+            false => a.reject_lit_dup(a.parse_lit_match(src, subj, open)),
         }),
     })
 }
@@ -225,6 +225,65 @@ reject_dupmatch = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
         expr: a.enode(call_at("__dupmatcharm", a.no_args(), pos)),
         next: next,
     )
+}
+// A literal `.match` that repeats a label (`1 => …, 1 => …`) hides a dead arm — first wins, the later one
+// never fires. The lowered `subj == LIT` chain discards label identity, so a post-lowering walk recovers
+// the duplicate; `__duplitarm` carries the SECOND label's position for a positioned error[match-arm].
+reject_duplit = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
+    PExpr(
+        expr: a.enode(call_at("__duplitarm", a.no_args(), pos)),
+        next: next,
+    )
+}
+// Value equality of two literal labels — int, char (`Byte`), or string_view; distinct Expr shapes differ.
+lit_val_eq = (x: Ptr<Expr>, y: Ptr<Expr>) bool {
+    load(x).match ({
+        .Int(a)    => load(y).match ({
+            .Int(b) => a == b,
+            _       => false,
+        }),
+        .Byte(a)   => load(y).match ({
+            .Byte(b) => a == b,
+            _        => false,
+        }),
+        .StrLit(a) => load(y).match ({
+            .StrLit(b) => a.value == b.value,
+            _          => false,
+        }),
+        _          => false,
+    })
+}
+// Scan the rest of a lowered literal-match cond chain for a `subj == needle` test; the LATER match is the
+// dead duplicate arm, so return its label caret, else 0. A `_` arm's always-true `lit(1)` test is skipped.
+lit_dup_after = (needle: Ptr<Expr>, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Cond(cd) => load(cd.c).match ({
+            .Bin(b) => (b.op == "==" && needle.lit_val_eq(b.rhs)).match ({
+                true  => b.pos,
+                false => needle.lit_dup_after(cd.e),
+            }),
+            _       => needle.lit_dup_after(cd.e),
+        }),
+        _         => 0,
+    })
+}
+// The caret of the first duplicated literal label in a lowered literal `.match`, or 0 for none.
+lit_dup_pos = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Cond(cd) => {
+            d := load(cd.c).match ({
+                .Bin(b) => (b.op == "==").then({ b.rhs.lit_dup_after(cd.e) }, { 0 }),
+                _       => 0,
+            })
+            (d != 0).then({ d }, { cd.e.lit_dup_pos() })
+        },
+        _         => 0,
+    })
+}
+// Reject a literal `.match` with a repeated label; passes any other lowering (incl. reject sentinels) through.
+reject_lit_dup = (a: MutPtr<Malloc>, pe: PExpr) PExpr {
+    d := pe.expr.lit_dup_pos()
+    (d != 0).then({ a.reject_duplit(pe.next, d) }, { pe })
 }
 // Shared `=> body` parse step for bool/literal/variant arm walkers.
 arm_rhs = (a: MutPtr<Malloc>, src: string_view, pos: i32, bare_ok: bool) PExpr {
@@ -344,7 +403,7 @@ LitArmEnd: {
 parse_lit_match = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, open: Scan) PExpr {
     first := src.scan(open.next)
     src.is_wild_label(first.tok).match ({
-        true  => a.parse_lit_arms(src, subj, open.next),
+        true  => a.parse_lit_arms(src, subj, open.next, false),
         false => a.parse_lit_first(src, subj, open.next),
     })
 }
@@ -353,13 +412,15 @@ parse_lit_first = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32) P
     after := src.scan(arm.next)
     src.is_rbrace(after.tok).match ({
         true  => a.reject_exhaust(after.next, subj.expr.match_subj_pos()),
-        false => a.parse_lit_after(src, subj, arm, after),
+        false => a.parse_lit_after(src, subj, arm, after, false),
     })
 }
-parse_lit_arms = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32) PExpr {
+// `wild` = a `_` arm was already seen earlier in this match; once true the match is exhaustive, so a
+// non-wild terminal arm no longer needs a trailing `_` (a leading `_` covers every remaining case).
+parse_lit_arms = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32, wild: bool) PExpr {
     arm := a.parse_lit_arm(src, subj, pos)
     after := src.scan(arm.next)
-    a.parse_lit_after(src, subj, arm, after)
+    a.parse_lit_after(src, subj, arm, after, wild)
 }
 parse_lit_after = (
     a: MutPtr<Malloc>,
@@ -367,6 +428,7 @@ parse_lit_after = (
     subj: PExpr,
     arm: LitArmEnd,
     after: Scan,
+    wild: bool,
 ) PExpr {
     after.tok.kind.match ({
         .Eof => {
@@ -374,7 +436,7 @@ parse_lit_after = (
             a.reject_match(after.next)
         },
         _    => src.is_rbrace(after.tok).match ({
-            true  => arm.wild.match ({
+            true  => (arm.wild || wild).match ({
                 true  => PExpr(
                     expr: arm.body,
                     next: after.next,
@@ -382,7 +444,7 @@ parse_lit_after = (
                 false => a.reject_exhaust(after.next, subj.expr.match_subj_pos()),
             }),
             false => src.is_comma(after.tok).match ({
-                true  => a.lit_arm_more(src, subj, arm, after),
+                true  => a.lit_arm_more(src, subj, arm, after, wild),
                 false => {
                     perr_set_at(after.tok.start)
                     a.reject_match(after.next)
@@ -398,17 +460,18 @@ lit_arm_more = (
     subj: PExpr,
     arm: LitArmEnd,
     after: Scan,
+    wild: bool,
 ) PExpr {
     nx := src.scan(after.next)
     src.is_rbrace(nx.tok).match ({
-        true  => arm.wild.match ({
+        true  => (arm.wild || wild).match ({
             true  => PExpr(
                 expr: arm.body,
                 next: nx.next,
             ),
             false => a.reject_exhaust(nx.next, subj.expr.match_subj_pos()),
         }),
-        false => a.cons_lit_arm(src, subj, arm, after),
+        false => a.cons_lit_arm(src, subj, arm, after, wild),
     })
 }
 cons_lit_arm = (
@@ -417,8 +480,9 @@ cons_lit_arm = (
     subj: PExpr,
     arm: LitArmEnd,
     after: Scan,
+    wild: bool,
 ) PExpr {
-    rest := a.parse_lit_arms(src, subj, after.next)
+    rest := a.parse_lit_arms(src, subj, after.next, wild || arm.wild)
     PExpr(
         expr: a.enode(cond(arm.test, arm.body, rest.expr)),
         next: rest.next,
@@ -449,7 +513,7 @@ parse_lit_arm_lit = (a: MutPtr<Malloc>, src: string_view, subj: PExpr, pos: i32)
     le := a.parse_atom(src, pos)    // the literal label (0, 'a', -5, …)
     rhs := a.arm_rhs(src, le.next, false)
     LitArmEnd(
-        test: a.enode(bin("==", subj.expr, le.expr)),
+        test: a.enode(bin_at("==", subj.expr, le.expr, src.scan(pos).tok.start)),
         body: rhs.expr,
         wild: false,
         next: rhs.next,

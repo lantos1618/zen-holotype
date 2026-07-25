@@ -33,9 +33,10 @@ const __zr = (() => {
   const jstr = (p) => decode(p, strlen(p));  // a Zen `str` (MEM offset) -> a real JS string, for DOM/API boundaries
 
   const load = (p) => MEM[p];
-  const store = (p, b) => { MEM[p] = b & 255; return b & 255; };
+  // a stored byte may arrive as a BigInt (a digit derived from a 64-bit value), so mask through `u8`.
+  const store = (p, b) => { const v = u8(b); MEM[p] = v; return v; };
   const offset = (p, n) => p + Number(n);
-  const load_i64 = (p) => Number(dv.getBigInt64(p, true));
+  const load_i64 = (p) => norm(dv.getBigInt64(p, true));
   const store_i64 = (p, v) => { dv.setBigInt64(p, BigInt(v), true); return v; };
   const slice = (ptr, len) => ({ ptr, len: Number(len) });
   // a [u8] SLICE LITERAL: copy the element values into linear memory and hand back the offset, so
@@ -49,24 +50,32 @@ const __zr = (() => {
   // read the byte out of linear memory). Without this split, `sv.ptr[i]` on a byte view indexes an
   // integer and yields `undefined`, which silently broke every byte-scan (e.g. format's `{}` finder).
   const idx = (seq, i) => { const p = seq.ptr; return Array.isArray(p) ? p[i] : MEM[p + Number(i)]; };
-  const setidx = (seq, i, v) => { const p = seq.ptr; if (Array.isArray(p)) { p[i] = v; } else { MEM[p + Number(i)] = v & 255; } return v; };
+  const setidx = (seq, i, v) => { const p = seq.ptr; if (Array.isArray(p)) { p[i] = v; } else { MEM[p + Number(i)] = u8(v); } return v; };
   const eq = (a, b) => a === b || decode(a, strlen(a)) === decode(b, strlen(b));
   const nn = (p) => { if (p === 0) panic("zen: panic: null pointer deref\n"); return p; };
   const addr = (x) => x;               // JS objects are references; scalar aliasing is DEFERRED (boxed refs)
-  const i32 = (x) => typeof x === "bigint" ? Number(BigInt.asIntN(32, x)) : x | 0;
-  const i64 = (x) => typeof x === "bigint" ? Number(BigInt.asIntN(64, x)) : Math.trunc(x);
   const sizeof = (_name) => 8;         // element sizes unused on the print path; DEFERRED for typed slices
-  // u64 reinterpretation: a JS `number` can't hold the top of the u64 range (values >= 2^63 wrapped to
-  // a NEGATIVE i64 in the AST, and anything > 2^53 loses precision), so reinterpret the 64-bit pattern
-  // as UNSIGNED and promote to BigInt only when it no longer fits exactly in a `number`. Small u64s stay
-  // `number` (so ordinary arithmetic with number literals keeps working); huge ones become BigInt so
-  // they print exactly. u64 values enter through the type-driven param normalization the js backend emits.
-  const U64_SAFE = 9007199254740991n;  // 2^53 - 1
-  const u64 = (x) => { const b = BigInt.asUintN(64, typeof x === "bigint" ? x : BigInt(Math.trunc(x))); return b <= U64_SAFE ? Number(b) : b; };
-  // div/mod stay integer-guarded (div-by-zero panics), but tolerate a BigInt operand (a wide u64): the
-  // BigInt path never truncates or guards floats — float `/` is emitted natively by the js backend, not here.
-  const div = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = BigInt(b); if (bb === 0n) panic("zen: panic: integer divide by zero\n"); return u64(BigInt(a) / bb); } if (b === 0) panic("zen: panic: integer divide by zero\n"); return Math.trunc(a / b); };
-  const mod = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = BigInt(b); if (bb === 0n) panic("zen: panic: integer modulo by zero\n"); return u64(BigInt(a) % bb); } if (b === 0) panic("zen: panic: integer modulo by zero\n"); return a % b; };
+  // ── 64-bit integer model ───────────────────────────────────────────────────────────────────────
+  // A JS `number` is a 32-bit-op / 53-bit-mantissa view, so i64/u64 are modeled as BigInt (arbitrary-
+  // precision, EXACT). To keep ordinary/narrow arithmetic cheap, a 64-bit value is kept as a `number`
+  // while it fits +/- 2^53 exactly and promoted to BigInt only past that (`norm`). The js backend coerces
+  // both operands of a 64-bit operator to BigInt (`big`), so nothing mixes BigInt with number; the type's
+  // boundary (let/param/assign/return) then wraps to width with `wi64`/`wu64` and norms the result back.
+  const S53 = 9007199254740991n;                 // 2^53 - 1 — a BigInt within +/- this round-trips exactly
+  const tobig = (x) => typeof x === "bigint" ? x : BigInt(Math.trunc(x));
+  const norm = (b) => (b >= -S53 && b <= S53) ? Number(b) : b;
+  const big = (x) => tobig(x);                    // operand coercion: force a value to BigInt for a 64-bit op
+  const wi64 = (x) => norm(BigInt.asIntN(64, tobig(x)));   // wrap-to-i64 at a boundary
+  const wu64 = (x) => norm(BigInt.asUintN(64, tobig(x)));  // wrap-to-u64 at a boundary
+  const u64 = wu64;                               // (retained floor name)
+  const u8 = (x) => typeof x === "bigint" ? Number(x & 255n) : x & 255;
+  const i32 = (x) => typeof x === "bigint" ? Number(BigInt.asIntN(32, x)) : x | 0;
+  const i64 = (x) => wi64(x);                     // to_i64: widen to a (norm) i64
+  // div/mod stay integer-guarded (div-by-zero panics). A BigInt operand takes the BigInt path (signed,
+  // truncating-toward-zero — matches C for i64; two non-negative u64 BigInts give unsigned division). The
+  // float `/` is emitted natively by the js backend, never here.
+  const div = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = tobig(b); if (bb === 0n) panic("zen: panic: integer divide by zero\n"); return norm(tobig(a) / bb); } if (b === 0) panic("zen: panic: integer divide by zero\n"); return Math.trunc(a / b); };
+  const mod = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = tobig(b); if (bb === 0n) panic("zen: panic: integer modulo by zero\n"); return norm(tobig(a) % bb); } if (b === 0) panic("zen: panic: integer modulo by zero\n"); return a % b; };
   const panic = (m) => { const s = typeof m === "number" ? decode(m, strlen(m)) : String(m); process.stderr.write(s); throw new Error("zen panic"); };
 
   // fd 1 = stdout, 2 = stderr; ptr is a MEM offset (or, for a JS-array slice, ignored).
@@ -77,7 +86,8 @@ const __zr = (() => {
   };
 
   return { MEM, str, strlen, decode, jstr, malloc, load, store, offset, load_i64, store_i64,
-           slice, u8lit, view, idx, setidx, eq, nn, addr, i32, i64, u64, sizeof, div, mod, panic, write };
+           slice, u8lit, view, idx, setidx, eq, nn, addr, i32, i64, u8, big, wi64, wu64, u64,
+           sizeof, div, mod, panic, write };
 })();
 
 // ── libc leaves referenced by name from emitted code. The print path needs only write/strlen; the
