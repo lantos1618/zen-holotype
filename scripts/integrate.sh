@@ -10,16 +10,8 @@ exec 9>/tmp/zenc-integrate.lock
 flock 9 || { echo "another integrate.sh holds the lock"; exit 1; }
 
 echo "== gate 0: no conflict markers in tracked files"
-# Catch BOTH the outer markers (<<<<<<< / >>>>>>>) AND the middle dividers a botched resolution can
-# leave behind after deleting the outer ones: the merge separator `=======` (exactly seven '=' on its
-# own line — the `$` anchor avoids matching markdown h1 rules / `====…` comment banners of other
-# widths) and the diff3 base divider `||||||| ` (seven pipes + a space). A stray middle line has
-# shipped to main before; it is just as corrupt as an outer marker.
-MARKERS='^(<<<<<<< |>>>>>>> |\|\|\|\|\|\|\| |=======$)'
-if git grep -nE "$MARKERS" >/dev/null 2>&1; then
-  git grep -nE "$MARKERS" | head -5
-  echo "FAIL: conflict markers present"; exit 1
-fi
+# shared with .github/workflows/ci.yml — one definition of "conflict marker"
+bash scripts/no-conflict-markers.sh
 
 echo "== gate 1: bootstrap + regen from merged sources"
 export ZENC_CACHE_DIR="$(mktemp -d /tmp/zenc-integrate.XXXXXX)"
@@ -50,8 +42,9 @@ make harness 2>&1 | tee /tmp/integrate_h.$$ | tail -3
 grep -q "zen harness: ALL PASS" /tmp/integrate_h.$$ || { rm -f /tmp/integrate_h.$$; echo "FAIL: no ALL PASS"; exit 1; }
 rm -f /tmp/integrate_h.$$
 
-echo "== gate 5: whole-tree fmt clean (single multi-arg invocation)"
-./zen fmt --check $(find src tests examples tools driver.zen build.zen -name '*.zen' ! -path 'tests/fixtures/fmt/*_unformatted.zen' 2>/dev/null) || { echo "FAIL: fmt drift (files named above)"; exit 1; }
+echo "== gate 5: whole-tree fmt clean (shared file set, per-file)"
+# shared with .github/workflows/ci.yml — one definition of the fmt file set
+bash scripts/fmt-check.sh || { echo "FAIL: fmt drift (files named above)"; exit 1; }
 
 # gates 6+7: the Makefile gates CI's `gate` runs but the local ritual historically did NOT — the exact
 # gap that let PR #633 report MERGE-READY locally while CI went red on docs-check. Run them here so a
