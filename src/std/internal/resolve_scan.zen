@@ -15,7 +15,8 @@
 { view } = std.text.str
 { lstrip, is_import_line, next_line, STD_MARKER_LEN, COMPILER_MARKER_LEN, USER_MARKER_LEN, rset_add,
   rset_add_str, rpush, madd_str_name, ImportEdge, ProvidedSymbol, SIG_PUB, SIG_TYPE, SIG_IMPORTED,
-  SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line, line_comment_at } = std.internal.resolve
+  SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line, line_comment_at, raw_lit_end,
+  rawstr_at } = std.internal.resolve
 // A line holding no decl material: blank, or a `//` line comment. The SYMBOL walks must step over
 // these one line at a time instead of falling into decl_span: decl_span's lexer skips comments and
 // newlines wholesale, so calling it from inside a comment/blank line that precedes a NAMESPACED
@@ -139,7 +140,25 @@ copy_block_comment* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) R
         next: pos,
     )
 }
+// A raw `"""…"""` literal is copied through verbatim, delimiters and all — the flattener's output
+// is still zen source, so the literal must survive the pass unchanged.
+copy_rawstr = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) RewriteSkip {
+    e := s.raw_lit_end(p)
+    cur := out
+    i := p
+    @while (i < e) {
+        cur = cur.rpush(a, s.at(i))
+        i = i + 1
+    }
+    RewriteSkip(
+        out: cur,
+        next: e,
+    )
+}
 copy_literal* = (out: String, a: MutPtr<Malloc>, s: string_view, p: i32) RewriteSkip {
+    s.rawstr_at(p).then({
+        return out.copy_rawstr(a, s, p)
+    })
     q := s.at(p)
     cur := out
     pos := p
