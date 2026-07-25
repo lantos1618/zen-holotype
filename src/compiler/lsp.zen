@@ -26,6 +26,7 @@
 { ResolvedProgram } = std.internal.resolve
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
 { push_int, resolve_prog, cstr_substr } = compiler.drvutil
+{ lspt_legend, lspt_tokens } = compiler.lsp_tokens
 { cd_or, locate_diag } = compiler.drvdiag
 // ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 1) ─────────────────────────
 // A JSON-RPC 2.0 loop: read `Content-Length: N\r\n\r\n<N-byte JSON body>` frames from stdin, run the
@@ -571,7 +572,9 @@ lsp_reply_initialize = (mp: MutPtr<Malloc>, body: string_view) i64 {
         .gstr_string(256)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
         .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"definitionProvider\":true},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
+        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"definitionProvider\":true,\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":")
+        .gstr_append(mp, lspt_legend())
+        .gstr_append(mp, ",\"tokenModifiers\":[]},\"full\":true}},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
         .gstr_finish(mp))
 }
 // ── go-to-definition (LSP Stage 2a) — a textual top-level definition finder ──────────────────────
@@ -735,6 +738,23 @@ lsp_definition = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 
         .Err(er) => mp.lsp_reply_null(body),
     })
 }
+// Semantic tokens are served from the file on disk, like go-to-definition. The editor writes before
+// it asks, so this matches the buffer in practice; a proper in-memory document store (tracking
+// didChange text) is the same slice of work for both handlers and is the documented next step.
+lsp_semantic_tokens = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    path := mp.lsp_uri_path(mp.json_str_field(body, "uri"))
+    contents_in(mp, path).match ({
+        .Ok(txt) => mp.lsp_send(mp
+            .gstr_string(8192)
+            .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+            .gstr_append(mp, mp.lsp_id(body))
+            .gstr_append(mp, ",\"result\":{\"data\":")
+            .gstr_append(mp, mp.lspt_tokens(txt))
+            .gstr_append(mp, "}}")
+            .gstr_finish(mp)),
+        .Err(er) => mp.lsp_reply_null(body),
+    })
+}
 lsp_reply_null = (mp: MutPtr<Malloc>, body: string_view) i64 {
     mp.lsp_send(mp
         .gstr_string(96)
@@ -809,13 +829,20 @@ lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
                                 mp.lsp_definition(root, body)
                                 0
                             },
-                            false => {
-                                v: [u8] := body.view()
-                                (v.json_find_key("id") >= 0 && lsp_is_notification(method) == false).then({
-                                    mp.lsp_reply_method_not_found(body)
-                                })
-                                0
-                            },
+                            false => (method == "textDocument/semanticTokens/full").match ({
+                                true  => {
+                                    mp.lsp_semantic_tokens(body)
+                                    0
+                                },
+                                false => {
+                                    v: [u8] := body.view()
+                                    (v.json_find_key("id") >= 0
+                                        && lsp_is_notification(method) == false).then({
+                                        mp.lsp_reply_method_not_found(body)
+                                    })
+                                    0
+                                },
+                            }),
                         }),
                     }),
                 }),
