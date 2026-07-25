@@ -237,10 +237,10 @@ alloc_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
                 true  => false,
                 false => true,
             }),
-            .Err(e)  => true,
+            .Err(e)  => false,
         }),
     })
-}
+}    // unreadable = FAIL, never a silent pass
 alloc_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
@@ -283,10 +283,10 @@ example_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
         true  => true,
         false => mp.contents_in(path).match ({
             .Ok(raw) => raw.view().example_violation().then({ false }, { true }),
-            .Err(e)  => true,
+            .Err(e)  => false,
         }),
     })
-}
+}    // unreadable = FAIL, never a silent pass
 example_suite = (mp: MutPtr<Malloc>) i32 {
     shell(mp.zo_cmd("find examples -name '*.zen' 2>/dev/null | LC_ALL=C sort > $ZT/ob_examples.txt"))
     mp.contents_in(mp.zo_path("ob_examples.txt")).match ({
@@ -345,11 +345,11 @@ checkpoint_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
                     })
                     (has_call || has_imp).then({ false }, { true })
                 },
-                .Err(e)  => true,
+                .Err(e)  => false,
             }),
         }),
     })
-}
+}    // unreadable = FAIL, never a silent pass
 checkpoint_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
@@ -415,11 +415,11 @@ atwhile_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
             true  => true,
             false => mp.contents_in(path).match ({
                 .Ok(raw) => raw.view().file_has("@while", 3).then({ false }, { true }),
-                .Err(e)  => true,
+                .Err(e)  => false,
             }),
         }),
     })
-}
+}    // unreadable = FAIL, never a silent pass
 atwhile_suite = (mp: MutPtr<Malloc>) i32 {
     mp.contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
@@ -519,6 +519,11 @@ bigstr_suite = (mp: MutPtr<Malloc>) i32 {
 // So: derive the set the OTHER way (everything in the tree minus an EXPLICIT exclusion list) and
 // require the two to be identical. A new .zen file in a new directory now fails here instead of
 // quietly opting itself out of every boundary rule.
+//
+// Related fail-open fix in the same spirit: every per-file scanner used to treat an UNREADABLE file
+// as a pass (`.Err(e) => true`). A file that `find` just enumerated and that then cannot be read is
+// itself a problem; silently passing it means a rule can be evaded by a file the harness cannot
+// open. The blank trailing line from `find` is still handled separately by the `is_empty` guard.
 //
 // Exclusions are deliberate, not incidental: tests/ and scripts/ are test tooling (harness code
 // legitimately calls raw malloc), and .claude/ MUST be pruned because sibling worktrees are full
