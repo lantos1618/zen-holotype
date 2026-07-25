@@ -3,7 +3,7 @@
 { Expr, FieldInit } = compiler.ast.ast_types
 { byte_lit, finit, flit, lit, mkenum, mkstruct, mktag, strlit_at } = compiler.genc
 { mangle_anon_in, payload_fname } = compiler.mangle
-{ Scan, Token, is_bin_prefix, is_hex_prefix, is_oct_prefix, scan } = compiler.lex
+{ Scan, Token, is_bin_prefix, is_hex_prefix, is_oct_prefix, is_rawstr_open, scan } = compiler.lex
 { at, is_digit } = std.text.ascii
 { Malloc } = std.mem.alloc
 { PEnd, is_comma, is_lbrace, is_lbracket, is_rparen, pdepth_enter, pdepth_exit, pdepth_over,
@@ -243,8 +243,14 @@ parse_base = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
         }),
     })
 }
-// Unterminated string tokens run to end-of-file.
-str_open = (src: string_view, t: Token) bool { t.len < 2 || src.at(t.start + t.len - 1) != '"' }
+// Unterminated string tokens run to end-of-file. A raw `"""…"""` literal needs both delimiters, so
+// the shortest terminated one is `""""""` (six quotes, empty content).
+str_open = (src: string_view, t: Token) bool {
+    src.is_rawstr_open(t.start).match ({
+        true  => t.len < 6 || src.is_rawstr_open(t.start + t.len - 3) == false,
+        false => t.len < 2 || src.at(t.start + t.len - 1) != '"',
+    })
+}
 // Bad atom: flag (with the offending token's offset), consume one token for progress, placeholder.
 parse_garbage = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
     perr_set_at(sc.tok.start)
@@ -310,9 +316,36 @@ char_val = (src: string_view, start: i32) i32 {
 // String literal value: copy content and resolve escapes.
 str_val = (a: MutPtr<Malloc>, src: string_view, t: Token) string_view {
     p := a.acquire(t.len)
-    n := src.unescape(t.start + 1, t.start + t.len - 1, p, 0)
+    n := src.is_rawstr_open(t.start).match ({
+        true  => src.copy_raw(src.rawstr_body(t), t.start + t.len - 3, p, 0),
+        false => src.unescape(t.start + 1, t.start + t.len - 1, p, 0),
+    })
     store(offset(p, n), 0)
     cstr(p)
+}
+// Where a raw literal's VALUE starts: just past the opening `"""`, and past one immediately
+// following newline. That strip is what lets the block form
+//     blob := """
+//     line one
+//     """
+// mean "line one\n" rather than "\nline one\n" — the newline that only exists to get off the
+// opening delimiter is not content. Nothing else is trimmed: indentation inside a raw literal is
+// part of the text, because the whole point of the form is that what you see is what you get.
+rawstr_body = (src: string_view, t: Token) i32 {
+    open := t.start + 3
+    (src.at(open) == '\n').then({ open + 1 }, { open })
+}
+// Copy [pos, end) verbatim — no escape resolution, so `\n` inside a raw literal stays two bytes.
+// Iterative for the same reason as unescape: a block literal can be large.
+copy_raw = (src: string_view, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+    p := pos
+    d := di
+    @while (p < end) {
+        store(offset(dst, d), src.at(p))
+        p = p + 1
+        d = d + 1
+    }
+    d
 }
 // Copy [pos, end) into `dst`, resolving `\`-escapes, returning the byte count written. ITERATIVE (a
 // 50KB string literal is O(n) heap iteration, not O(n) C-stack — per-char recursion overflowed the

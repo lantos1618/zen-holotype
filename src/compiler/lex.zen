@@ -289,6 +289,36 @@ str_end = (src: string_view, pos: i32) i32 {
     }
     r
 }    // unterminated — stop at NUL; ITERATIVE so a ~50KB string literal is O(n) iteration, not O(n) C-stack
+// A raw literal opens with THREE quotes. Checked before the single-quote form so maximal munch wins:
+// `""` keeps meaning the empty string (it is two quotes followed by something that is not a quote),
+// which is why the delimiter is `"""` and not `""` — the doubled form would make every existing `""`
+// ambiguous.
+is_rawstr_open* = (src: string_view, pos: i32) bool {
+    at(src, pos) == '"' && at(src, pos + 1) == '"' && at(src, pos + 2) == '"'
+}
+// pos just past the opening `"""`; returns the position just past the closing `"""`. No escape
+// handling — a backslash is an ordinary byte, so only the delimiter can end the scan. Iterative for
+// the same reason as str_end: a multi-kilobyte block literal must not recurse the C stack.
+rawstr_end* = (src: string_view, pos: i32) i32 {
+    p := pos
+    r := 0 - 1
+    @while (r < 0) {
+        (at(src, p) == '\0').match ({
+            true  => {
+                r = p
+            },
+            false => src.is_rawstr_open(p).match ({
+                true  => {
+                    r = p + 3
+                },
+                false => {
+                    p = p + 1
+                },
+            }),
+        })
+    }
+    r
+}
 char_end = (src: string_view, pos: i32) i32 {
     b := at(src, pos)    // first byte inside the quotes
     // a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
@@ -371,7 +401,10 @@ scan_one = (src: string_view, pos: i32, b: u8) Scan {
         false => is_digit(b).match ({
             true  => src.num_tok(pos),
             false => (b == '"').match ({
-                true  => mk(.Str, pos, src.str_end(pos + 1)),
+                true  => src.is_rawstr_open(pos).match ({
+                    true  => mk(.Str, pos, src.rawstr_end(pos + 3)),
+                    false => mk(.Str, pos, src.str_end(pos + 1)),
+                }),
                 false => (b == '\'').match ({
                     true  => mk(.Char, pos, src.char_end(pos + 1)),
                     false => mk(.Sym, pos, src.sym_end(pos)),
