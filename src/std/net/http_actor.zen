@@ -1,0 +1,80 @@
+// std.net.http_actor — the HTTP client packaged as a ready-made POOL ACTOR.
+//
+// std.net.http is a blocking client; this module is how an application actually uses it
+// concurrently: a fetcher actor runs the blocking `http_get` on its pool worker (parking the
+// worker, not the app) and replies to the requester with an ordinary message. The message type,
+// the reply type, the receiver, AND the concrete trampoline all live here — an app spawns a
+// fetcher and sends it a URL, nothing more:
+//
+//   fetcher := spawn_http_fetcher(8)
+//   p.send(fetcher, http_fetch("http://127.0.0.1:8080/", me.ref_of(p)))
+//   // ... the reply arrives at `me` as HttpReplyMsg.Done(HttpReply(status, body))
+//
+// The reply body is heap-owned (gpa) and lives for the program — a per-actor arena is the
+// tracked upgrade. Streaming is not offered yet: `http_get` buffers the whole response; a
+// chunk-per-message stream would hand the fetcher the TcpConn and ride recv_into (future slice).
+{ ActorRef } = std.concurrent.pool
+{ Context, Receiver, dispatch, ref_send_msg } = std.concurrent.pool_actor
+pa = std.concurrent.pool_actor
+{ http_get, http_error_name } = std.net.http
+{ gpa } = std.mem.heap
+// an order: fetch this URL, reply to this address (both fields are sendable).
+HttpFetch*: {
+    url: string_view,
+    reply_to: ActorRef,
+}
+HttpFetchMsg*: Fetch(HttpFetch)
+// the outcome: status + body text. A request that failed outright is status 0 with the
+// HttpError's name as the body.
+HttpReply*: {
+    status: i64,
+    body: string_view,
+}
+HttpReplyMsg*: Done(HttpReply)
+// message constructor — callers never write a module-qualified enum-variant literal.
+http_fetch* = (url: string_view, reply_to: ActorRef) HttpFetchMsg {
+    .Fetch(HttpFetch(
+        url: url,
+        reply_to: reply_to,
+    ))
+}
+// The fetcher: `receive` runs on a pool worker, so the blocking dial/send/recv inside `http_get`
+// blocks that worker only. The reply is an ordinary send to the ActorRef carried by the request
+// (inside `receive` there is no Pool pointer — the ref is the whole reply capability).
+HttpFetcher*: {
+    fetches: i64,
+}
+HttpFetcher.impl(Receiver, {
+    receive = (f: MutPtr<HttpFetcher>, ctx: Context<HttpFetchMsg>) void {
+        ctx.msg.match ({
+            .Fetch(req) => {
+                f.fetches = f.fetches + 1
+                h := gpa()
+                a := h.addr()
+                a.http_get(req.url).match ({
+                    .Ok(r)  => {
+                        req.reply_to.ref_send_msg(HttpReplyMsg.Done(HttpReply(
+                            status: to_i64(r.status),
+                            body: r.body,
+                        )))
+                    },
+                    .Err(e) => {
+                        req.reply_to.ref_send_msg(HttpReplyMsg.Done(HttpReply(
+                            status: 0,
+                            body: http_error_name(e),
+                        )))
+                    },
+                })
+            },
+        })
+    }
+})
+// the concrete trampoline lives HERE (both its types are this module's), so apps never write one.
+http_fetch_tramp* = (user: RawPtr<u8>, msg: i64) void {
+    dispatch<HttpFetcher, HttpFetchMsg>(user, msg)
+}
+// spawn a ready-to-use fetcher on the pool (process-default rt; not yet runnable — the first
+// send schedules it).
+spawn_http_fetcher* = (cap: i64) pa.PooledHandle<HttpFetcher> {
+    pa.spawn_actor_heap(cap, HttpFetcher(fetches: 0), http_fetch_tramp)
+}
