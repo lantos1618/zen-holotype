@@ -182,8 +182,25 @@ lz_goto_def = (mp: MutPtr<Malloc>) bool {
         && o.contains("\"line\":0,\"character\":0")
         && mp.lz_rc(11) == "0"
 }
+// (13) semantic tokens: the delta-encoded array classifies the file's tokens. `Point` is a type
+// (uppercase), `main` is a function (a top-level `name = (` head), `42` is a number, and the leading
+// comment is a comment — the four classification rules that carry the highlighting.
+lz_semantic_tokens = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    src := "// c\nPoint*: { x: i32 }\nmain = () i32 { 42 }\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/lztok.zen"]), src, len(src))
+    uri := mp.lz_uri("lztok.zen")
+    req := mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
+    o := mp.lz_run(12, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"semanticTokensProvider\"")
+        && o.contains("\"result\":{\"data\":[")
+        && o.contains("0,0,4,7,0")
+        && o.contains("1,0,5,2,0")
+        && o.contains("1,0,4,1,0")
+        && mp.lz_rc(12) == "0"
+}
 harness_lsp_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_exit_no_shutdown()])
+    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_exit_no_shutdown()])
 }
