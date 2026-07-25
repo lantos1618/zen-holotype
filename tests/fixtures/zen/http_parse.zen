@@ -12,11 +12,13 @@
 // `\r` escape into a raw CR byte in the file).
 { to_exit } = std.core.bool
 { some_or, expect } = std.core.result
-{ new_in, push_in, finish_in } = std.text.string
+{ new_in, push_in } = std.text.string
+{ view } = std.text.str
 { gpa } = std.mem.heap
 { parse_response, get, http_error_name, HttpError } = std.net.http
 // turn every '\n' into a CRLF, so a readable `\n`-delimited canned response becomes wire-format HTTP.
-crlfify<A> = (a: MutPtr<A>, s: string_view) string_view {
+// Returns a length-carrying `[u8]` (parse_response's binary-safe input) via the String builder's `.bytes()`.
+crlfify<A> = (a: MutPtr<A>, s: string_view) [u8] {
     sb := a.new_in().expect("http_parse: oom")
     s.view().loop((h, i, b) {
         (b == '\n').match ({
@@ -29,7 +31,28 @@ crlfify<A> = (a: MutPtr<A>, s: string_view) string_view {
             },
         })
     })
-    a.finish_in(sb).expect("http_parse: oom")
+    sb.bytes()
+}
+// A canned 200 response whose 7-byte body carries an EMBEDDED NUL ("ab\0cdef", NUL at index 2) — a
+// string literal can't hold a NUL, so the body bytes are pushed explicitly onto the CRLF'd head.
+nul_body<A> = (a: MutPtr<A>) [u8] {
+    sb := a.new_in().expect("http_parse: oom")
+    "HTTP/1.1 200 OK\nContent-Length: 7\n\n".view().loop((h, i, b) {
+        (b == '\n').match ({
+            true  => {
+                sb = a.push_in(sb, '\r').expect("http_parse: oom")
+                sb = a.push_in(sb, '\n').expect("http_parse: oom")
+            },
+            false => {
+                sb = a.push_in(sb, b).expect("http_parse: oom")
+            },
+        })
+    })
+    body: [u8] := ['a', 'b', 0, 'c', 'd', 'e', 'f']
+    body.loop((h, i, b) {
+        sb = a.push_in(sb, b).expect("http_parse: oom")
+    })
+    sb.bytes()
 }
 main = () i32 {
     h := gpa()
@@ -58,19 +81,29 @@ main = () i32 {
         .Err(e) => false,
     })
     // (4) malformed: no CRLFCRLF terminator -> Err.
-    c4 := a.parse_response("this is not http").match ({
+    c4 := a.parse_response("this is not http".view()).match ({
         .Ok(r)  => false,
         .Err(e) => true,
     })
-    // (5) chunked transfer-encoding decode -> assembled payload.
+    // (5) chunked transfer-encoding decode -> assembled payload; body_bytes carries its true length.
     c5 := a.parse_response(a.crlfify("HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n5\nhello\n6\n world\n0\n\n")).match ({
-        .Ok(r)  => r.status == 200 && r.body == "hello world",
+        .Ok(r)  => r.status == 200 && r.body == "hello world" && r.body_bytes.len == 11,
         .Err(e) => false,
     })
     // (6) malformed: a colon-less header line -> Err.
     c6 := a.parse_response(a.crlfify("HTTP/1.1 200 OK\nbadheader\n\n")).match ({
         .Ok(r)  => false,
         .Err(e) => true,
+    })
+    // (7) BINARY-SAFE body: an embedded NUL no longer truncates. body_bytes carries the FULL 7 bytes
+    // (the NUL survives at index 2), while the TEXT view `body` truncates at the NUL to "ab".
+    c7 := a.parse_response(a.nul_body()).match ({
+        .Ok(r)  => r.status == 200
+            && r.body_bytes.len == 7
+            && r.body_bytes[2] == 0
+            && r.body_bytes[6] == 'f'
+            && r.body == "ab",
+        .Err(e) => false,
     })
     // force-compile the live socket path without touching the network (guard is statically false).
     probe := false.match ({
@@ -80,9 +113,9 @@ main = () i32 {
         }),
         false => 0,
     })
-    // (7) the public HttpError renderer names each variant (`.Malformed` renders its own reason).
+    // (8) the public HttpError renderer names each variant (`.Malformed` renders its own reason).
     e_conn: HttpError := .Connect(.NotFound)
     e_bad: HttpError := .Malformed("boom")
-    c7 := http_error_name(e_conn) == "Connect" && http_error_name(e_bad) == "boom"
-    (c1 && c2 && c3 && c4 && c5 && c6 && c7 && probe == 0).to_exit()
+    c8 := http_error_name(e_conn) == "Connect" && http_error_name(e_bad) == "boom"
+    (c1 && c2 && c3 && c4 && c5 && c6 && c7 && c8 && probe == 0).to_exit()
 }
