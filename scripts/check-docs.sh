@@ -14,7 +14,8 @@ expected='./README.md
 ./docs/profiling.md
 ./editor/nvim/README.md
 ./editor/vscode/README.md
-./examples/README.md'
+./examples/README.md
+./scripts/alloc-fuzz/README.md'
 
 actual=$(find . -name .git -prune -o -path './.claude' -prune -o -name '*.md' -type f -print | LC_ALL=C sort)
 

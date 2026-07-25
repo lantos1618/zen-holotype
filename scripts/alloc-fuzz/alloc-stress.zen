@@ -1,0 +1,171 @@
+// Allocator API stress harness (Angle 2). Dogfoods std.mem under a seeded RNG so AddressSanitizer can
+// catch use-after-free / double-free / overflow / leak / refcount bugs in the allocator IMPLEMENTATIONS.
+//
+// Each seed drives a randomized-but-VALID op sequence over the process heap (acquire/resize/release),
+// the bump Arena (bump/reset/free), and the Rc / Arc refcounted pointers (new/clone/drop, balanced to
+// zero). Sequences are valid by construction — every acquired byte is released, every clone is dropped —
+// so any sanitizer hit is a bug in the allocator, not in the harness. The RNG (xoshiro256**, std.rand)
+// makes each seed reproducible; on a failing seed the number prints before exit so it can be replayed.
+//
+//   scripts/alloc-fuzz/run-stress.sh              # ASan-compile + run seeds 1..SEEDS
+// Zen has no nested/closure functions, so every helper is top-level and state is threaded explicitly
+// (the `slots` table is a slice — element writes go through its backing store even when passed by value).
+halloc = std.mem.heap
+arena = std.mem.arena
+rand = std.rand
+{ new_in, Rc } = std.mem.rc
+arc = std.mem.arc
+{ Allocator } = std.mem.alloc
+{ is_null } = std.core.ptr
+{ println } = std.text.fmt
+
+// ── process-heap churn: a chain of acquire → (maybe resize) → release, one live buffer at a time ─────
+// Each buffer stamps its size in the first 8 bytes and re-reads it before release — an allocator
+// overwrite or a stale pointer trips the sentinel (→ `false`), a double-free/UAF trips ASan. A single
+// live allocation per step keeps the sequence valid by construction with no auxiliary table (a heap-
+// promoted `[...]` table literal is itself never freed — see the OOM report — which would mask real
+// allocator leaks). `resize` consumes its input (realloc), so the result is what gets released.
+heap_step = (r: MutPtr<rand.Rng>, k: i64, ok: bool) bool {
+    (k <= 0 || ok == false).match ({
+        true  => ok,
+        false => {
+            n := r.range(8, 256)
+            p := halloc.gpa().addr().acquire(n)
+            keep := p.is_null().match ({
+                true  => true,                          // heap OOM is acceptable — nothing to free
+                false => {
+                    p.store_i64(n)
+                    r.bool_p(0.5).match ({
+                        true  => {
+                            m := r.range(264, 512)      // grow so realloc may move the block
+                            np := halloc.gpa().addr().resize(p, m)
+                            np.is_null().match ({
+                                true  => true,
+                                false => {
+                                    good := np.load_i64() == n   // data preserved across the move?
+                                    halloc.gpa().addr().release(np)
+                                    good
+                                },
+                            })
+                        },
+                        false => {
+                            good := p.load_i64() == n
+                            halloc.gpa().addr().release(p)
+                            good
+                        },
+                    })
+                },
+            })
+            r.heap_step(k - 1, keep && ok)
+        },
+    })
+}
+heap_churn = (r: MutPtr<rand.Rng>, iters: i64) bool { r.heap_step(iters, true) }
+
+// ── bump arena: fill with random-sized bumps until it refuses, then reset and reuse, then free ──────
+arena_fill = (r: MutPtr<rand.Rng>, ar: MutPtr<arena.Arena>, budget: i64) void {
+    (budget <= 0).match ({
+        true  => {},
+        false => {
+            n := r.range(1, 64)
+            p := ar.acquire(n)
+            p.is_null().match ({           // a refusal (null) just means "arena full" — expected
+                true  => {},
+                false => { p.store_i64(0 - 1) },
+            })
+            r.arena_fill(ar, budget - 1)
+        },
+    })
+}
+arena_churn = (r: MutPtr<rand.Rng>) bool {
+    backing := halloc.gpa()
+    cap := r.range(64, 4096)
+    ar := arena.make_in(backing.addr(), cap).match ({
+        .Ok(x)  => x,
+        .Err(e) => { return false },
+    })
+    r.arena_fill(ar.addr(), 200)
+    ar.addr().reset()             // reuse the same block
+    r.arena_fill(ar.addr(), 200)
+    ar.addr().free_in(backing.addr())
+    ar.buf == null_ptr()
+}
+
+// ── Rc / Arc: clone/drop balanced so the block frees exactly once ───────────────────────────────────
+// Ownership is linear (each Rc is consumed by exactly one drop or move), so N clones can't be dropped
+// in a loop off one binding. Instead recurse: each level clones a fresh owner, hands it to the deeper
+// level, and drops its own — count climbs to depth+1 and unwinds to 0. A refcount-arithmetic bug frees
+// early (UAF) or never (leak); either is a hard ASan error. `count()` borrows (does not consume root).
+rc_spin = (root: Rc<i64>, n: i64) void {
+    (n <= 0).match ({
+        true  => { root.drop_in(halloc.gpa().addr()) },
+        false => {
+            c := root.clone()
+            c.rc_spin(n - 1)
+            root.drop_in(halloc.gpa().addr())
+        },
+    })
+}
+rc_churn = (r: MutPtr<rand.Rng>) bool {
+    root := halloc.gpa().addr().new_in(r.next()).match ({
+        .Ok(x)  => x,
+        .Err(e) => { return false },
+    })
+    c := root.clone()
+    count_ok := root.count() == 2
+    c.drop_in(halloc.gpa().addr())
+    root.rc_spin(r.range(0, 8))     // spins clone/drop, then frees root at the bottom
+    count_ok
+}
+arc_spin = (root: arc.Arc<i64>, n: i64) void {
+    (n <= 0).match ({
+        true  => { root.drop_in(halloc.gpa().addr()) },
+        false => {
+            c := root.clone()
+            c.arc_spin(n - 1)
+            root.drop_in(halloc.gpa().addr())
+        },
+    })
+}
+arc_churn = (r: MutPtr<rand.Rng>) bool {
+    root := arc.new_in(halloc.gpa().addr(), r.next()).match ({
+        .Ok(x)  => x,
+        .Err(e) => { return false },
+    })
+    c := root.clone()
+    count_ok := root.count() == 2
+    c.drop_in(halloc.gpa().addr())
+    root.arc_spin(r.range(0, 8))
+    count_ok
+}
+
+one_seed = (s: i64) bool {
+    r := rand.seed(s)
+    a := r.addr()
+    a.heap_churn(120) && a.arena_churn() && a.rc_churn() && a.arc_churn()
+}
+run = (s: i64, hi: i64, fails: i64) i64 {
+    (s > hi).match ({
+        true  => fails,
+        false => {
+            nf := one_seed(s).match ({
+                true  => fails,
+                false => {
+                    println("alloc-stress: FAILED seed:")
+                    println(s)
+                    fails + 1
+                },
+            })
+            run(s + 1, hi, nf)
+        },
+    })
+}
+main = () i32 {
+    (run(1, 256, 0) == 0).match ({
+        true  => {
+            println("alloc-stress: all seeds ok")
+            0
+        },
+        false => 1,
+    })
+}
