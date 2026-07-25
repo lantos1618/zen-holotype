@@ -32,6 +32,11 @@ Run any of them as `./zen run examples/<name>.zen`.
 
 `wordfreq.zen` uses `HMap<string_view, i64>` to count input words.
 
+| `jq.zen` | `./zen run examples/jq.zen '.a.b[0]' file.json` (or pipe JSON on stdin) |
+
+`jq.zen` is a mini-`jq`: parse JSON, select with a `.a.b[0]` path, pretty-print the result;
+all failures (missing file, bad JSON, bad path) are clean messages, never a crash.
+
 ## Concurrency
 
 | Example | Model | Run |
