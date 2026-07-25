@@ -134,9 +134,37 @@ bin_at* = (op: string_view, l: Ptr<Expr>, r: Ptr<Expr>, p: i32) Expr {
         lhs: l,
         rhs: r,
         pos: p,
+        rty: tvoid(),
+    ))
+}
+// like bin_at but records a sub-width int RESULT type so genc re-truncates the promoted value.
+bin_rty* = (op: string_view, l: Ptr<Expr>, r: Ptr<Expr>, p: i32, rt: Ty) Expr {
+    .Bin(BinData(
+        op: op,
+        lhs: l,
+        rhs: r,
+        pos: p,
+        rty: rt,
     ))
 }
 bin* = (op: string_view, l: Ptr<Expr>, r: Ptr<Expr>) Expr { bin_at(op, l, r, 0) }
+// C integer promotion widens a sub-32-bit operand (u8/i8/i16/u16) to `int` for any operator, and Zen
+// only narrows at a store — so a used operator RESULT leaks the un-truncated value. These name the
+// types + width-preserving ops that must re-truncate; i32/u32/i64/u64 are native C widths, left alone.
+subword_ty* = (t: Ty) bool {
+    t.match ({
+        .U8       => true,
+        .Named(n) => n == "i8" || n == "i16" || n == "u16",
+        _         => false,
+    })
+}
+narrow_op* = (op: string_view) bool {
+    op == "+" || op == "-" || op == "*" || op == "<<" || op == "&" || op == "|" || op == "^"
+}
+// result type to record on a Bin so genc re-truncates a sub-width arithmetic result; Void = no cast.
+arith_rty* = (op: string_view, lty: Ty) Ty {
+    (narrow_op(op) && subword_ty(lty)).then({ lty }, { tvoid() })
+}
 call_full* = (fn: string_view, args: [Expr], targs: [Ty], p: i32, raw: bool) Expr {
     .Call(CallData(
         fn: fn,
