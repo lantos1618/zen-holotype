@@ -324,6 +324,15 @@ ModuleTable*: {
         })
         found
     }
+    index_of_sv = (t: ModuleTable, id: string_view) i64 {
+        found := 0 - 1
+        t.modules.loop((h, i, m) {
+            (found < 0 && m.id == id).then({
+                found = i
+            })
+        })
+        found
+    }
 }
 // One appended module body in the flat: `midx` indexes ResolvedProgram.table.modules (0 = the entry
 // module), [lo, hi) is the body's byte span in the FINAL flat (kept exact through the shadow-rename
@@ -994,6 +1003,90 @@ main_symbol_names = (
     })
     cur
 }
+// ── explicit by-name-import precedence (UFCS dispatch) ───────────────────────────────────────────
+// A binding `{ nm } = M` names M as the authoritative provider of `nm`. Under the flat namespace two
+// modules may define the same top-level `nm` (e.g. std.text.str's `at(_, i64)` vs std.text.ascii's
+// `at(_, i32)`); the per-name dedup otherwise keeps whichever module the DFS appended first — a
+// load-order verdict that silently shadows the copy the user explicitly imported. `import_claims`
+// records `nm -> table index of its UNIQUE by-name-import target` (only when that module really
+// EXPORTS `nm` as a value, never a re-export pass-through), so dedup keeps that module's decl and
+// drops the colliding others. A name bound by name from two DIFFERENT modules is contested (value 0):
+// no precedence, dedup falls back to first-seen. Value encoding: target index + 1 (>=1); 0 = contested.
+import_claims = (a: MutPtr<Malloc>, table: ModuleTable) Map<i64> {
+    seed: i64 := 0 - 1
+    m := of(a, "", seed).expect("std.internal.resolve: import-claim alloc")
+    table.modules.loop((h, i, mod) {
+        mod.graph.imports.loop((h2, j, e) {
+            (e.namespace == false).then({
+                tgt := table.index_of_sv(e.module)
+                (tgt >= 0).then({
+                    m = a.import_claim_head_exported(mod.source, e.start, table, tgt, m)
+                })
+            })
+        })
+    })
+    m
+}
+// like import_claim_head but only records names the target module REALLY exports as a value (guards
+// against a re-export `{ X } = M` where M merely passes X through — the real decl lives elsewhere, so
+// claiming M would drop the genuine copy and leave the name undefined).
+import_claim_head_exported = (
+    a: MutPtr<Malloc>,
+    src: string_view,
+    p0: i32,
+    table: ModuleTable,
+    tgt: i64,
+    m0: Map<i64>,
+) Map<i64> {
+    tsig := table.modules[tgt].graph.sig
+    m := m0
+    pos := src.lstrip(p0) + 1
+    bs: [u8] := src.view()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos == false).then({
+            (b == '}' || b == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => b.is_alpha().match ({
+                    true  => {
+                        ie := src.res_ident_end(pos)
+                        nm := a.mimport_name_span(src, pos, ie).gstr_finish(a)
+                        tsig.exports_value(nm).then({
+                            prev := m.get(nm, 0 - 1)
+                            enc := tgt + 1
+                            val := (prev < 0).match ({
+                                true  => enc,
+                                false => (prev == enc).then({ enc }, { 0 }),
+                            })
+                            (val == prev == false).then({
+                                m = m
+                                    .put(a, nm, val)
+                                    .expect("std.internal.resolve: import-claim alloc")
+                            })
+                        })
+                        pos = ie
+                    },
+                    false => {
+                        pos = pos + 1
+                    },
+                }),
+            })
+        })
+    })
+    m
+}
+// owning module index of the flat offset `off` (the table index its FlatRegion records), or -1.
+claim_owner_midx = (off: i64) i64 {
+    regions := fregions_get()
+    ri := regions.fregion_find(off)
+    (ri < 0).then({ 0 - 1 }, { regions[ri].midx })
+}
+empty_claims = (a: MutPtr<Malloc>) Map<i64> {
+    seed: i64 := 0 - 1
+    of(a, "", seed).expect("std.internal.resolve: import-claim alloc")
+}
 dedup_decls* = (a: MutPtr<Malloc>, flat: string_view, bodystart: i64, bodyend: i64) string_view {
     a.dedup_decls_mode(flat, bodystart, bodyend, false)
 }
@@ -1004,10 +1097,11 @@ dedup_decls_mode = (
     bodyend: i64,
     allow_main_shadow: bool,
 ) string_view {
-    a.dedup_decls_syms(flat, a.module_graph(flat).symbols, bodystart, bodyend, allow_main_shadow)
+    a.dedup_decls_syms(flat, a.module_graph(flat).symbols, bodystart, bodyend, allow_main_shadow, a.empty_claims())
 }
 // symbols-taking core: resolve_program_data reuses the pre-shadow graph when no rename fired, so the
-// expensive whole-flat module_graph scan runs once, not twice.
+// expensive whole-flat module_graph scan runs once, not twice. `claim` is the by-name-import
+// precedence map (empty for the raw-source callers that carry no module table / flat regions).
 dedup_decls_syms = (
     a: MutPtr<Malloc>,
     flat: string_view,
@@ -1015,12 +1109,13 @@ dedup_decls_syms = (
     bodystart: i64,
     bodyend: i64,
     allow_main_shadow: bool,
+    claim: Map<i64>,
 ) string_view {
     main_names := allow_main_shadow.match ({
         true  => a.main_symbol_names(a.gstr_string(256), symbols, 0, bodystart, bodyend),
         false => a.gstr_string(64),
     })
-    hs := a.dedup_symbols(a.gstr_string(4096), flat, symbols, 0, 0, a.gstr_string(256), a.gstr_string(64), main_names, bodystart, bodyend, allow_main_shadow)
+    hs := a.dedup_symbols(a.gstr_string(4096), flat, symbols, 0, 0, a.gstr_string(256), a.gstr_string(64), main_names, bodystart, bodyend, allow_main_shadow, claim)
     hs.gstr_finish(a)
 }
 dedup_symbols = (
@@ -1036,6 +1131,7 @@ dedup_symbols = (
     bodystart: i64,
     bodyend: i64,
     allow_main_shadow: bool,
+    claim: Map<i64>,
 ) String {
     cur := out
     pos := p
@@ -1049,11 +1145,20 @@ dedup_symbols = (
                 shadow := allow_main_shadow
                     && inmain.then({ false }, { true })
                     && main_names.seen_name(nm)
+                // by-name-import precedence: a claimed (uncontested) name keeps ONLY the target
+                // module's copy — the first one whose owning flat region is that module — and drops
+                // every colliding other regardless of DFS append order.
+                cl := claim.get(cstr(nm.ptr), 0 - 1)
+                claimed := cl > 0
+                winner := claimed && claim_owner_midx(to_i64(sym.start)) == cl - 1
                 keep := shadow.match ({
                     true  => false,
                     false => inmain.match ({
                         true  => true,
-                        false => seen.seen_name(nm).then({ main_seen.seen_name(nm) }, { true }),
+                        false => claimed.match ({
+                            true  => winner && seen.seen_name(nm) == false,
+                            false => seen.seen_name(nm).then({ main_seen.seen_name(nm) }, { true }),
+                        }),
                     }),
                 })
                 cur = cur.rappend_span(a, flat, pos, sym.decl_start)
@@ -1063,9 +1168,14 @@ dedup_symbols = (
                 (keep == false).then({
                     a.note_ldrop(to_i64(sym.decl_start), to_i64(sym.decl_next))
                 })
+                // a claimed name enters `seen` only when its winner is KEPT, so a losing copy that
+                // precedes the winner never blocks it; otherwise first-occurrence-wins, as before.
                 seen = shadow.match ({
                     true  => seen,
-                    false => seen.seen_name(nm).then({ seen }, { a.madd_name(seen, nm) }),
+                    false => claimed.match ({
+                        true  => keep.then({ a.madd_name(seen, nm) }, { seen }),
+                        false => seen.seen_name(nm).then({ seen }, { a.madd_name(seen, nm) }),
+                    }),
                 })
                 main_seen = inmain.then({ a.madd_name(main_seen, nm) }, { main_seen })
                 pos = sym.decl_next
@@ -2439,7 +2549,7 @@ resolve_program_data* = (
         false => true,
     }))
     dsyms := (sf.renamed || su.renamed).then({ a.module_graph(su.flat).symbols }, { fsyms })
-    d1 := a.dedup_decls_syms(su.flat, dsyms, nsl + su.shift, sf.bodyend + su.shift, internal)
+    d1 := a.dedup_decls_syms(su.flat, dsyms, nsl + su.shift, sf.bodyend + su.shift, internal, a.import_claims(table))
     a.lmap_apply_drops(su.flat)
     flat := a.dedup_impls(table, d1)
     a.lmap_apply_drops(d1)
