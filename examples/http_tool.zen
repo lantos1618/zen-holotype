@@ -1,0 +1,109 @@
+// http_tool — a curl-lite over std.net.http.
+//
+// Fetch a URL and print the response. Usage (build then run, since `zen run` does not
+// forward argv to the program):
+//
+//   zen build examples/http_tool.zen && ./a.out http://127.0.0.1:8099/path
+//   ./a.out -i http://localhost:8099/        # -i also prints status line + headers
+//
+// NOTE: std.net.socket has no DNS resolver, so the host must be a dotted-quad
+// ("127.0.0.1") or the literal "localhost". A hostname like "example.com" cannot be
+// dialed — that is a documented stdlib gap, not a bug in this tool.
+{ println, print } = std.text.fmt
+{ expect } = std.core.result
+{ gpa } = std.mem.heap
+{ get, Response } = std.net.http
+{ find, substr, starts_with, parse_int, view } = std.text.str
+{ arg } = std.sys.os
+// A parsed URL: host + port + path, plus whether parsing succeeded.
+Url: {
+    host: string_view,
+    port: i32,
+    path: string_view,
+    ok: bool,
+}
+// Parse "http://host[:port][/path]" into a Url. An unparseable URL returns ok:false.
+parse_url<A> = (a: MutPtr<A>, u: string_view) Url {
+    starts_with(u, "http://").match ({
+        true  => {
+            // strip the 7-char "http://" scheme
+            rest := a.substr(u, 7, u.view().len - 7).expect("oom")
+            slash := rest.find("/")
+            hostport := (slash < 0).then({ rest }, { a.substr(rest, 0, slash).expect("oom") })
+            path := (slash < 0).match ({
+                true  => "/",
+                false => a.substr(rest, slash, rest.view().len - slash).expect("oom"),
+            })
+            colon := hostport.find(":")
+            host := (colon < 0).then({ hostport }, { a.substr(hostport, 0, colon).expect("oom") })
+            port := (colon < 0).match ({
+                true  => 80,
+                false => to_i32(a
+                    .substr(hostport, colon + 1, hostport.view().len - (colon + 1))
+                    .expect("oom")
+                    .parse_int()),
+            })
+            Url(
+                host: host,
+                port: port,
+                path: path,
+                ok: true,
+            )
+        },
+        false => Url(
+            host: "",
+            port: 0,
+            path: "",
+            ok: false,
+        ),
+    })
+}
+// Print the response: with `show_headers`, emit the status line + each header, then the body.
+show = (r: Response, show_headers: bool) void {
+    show_headers.then({
+        print("HTTP ")
+        println(r.status)
+        r.headers.loop((h, i, hd) {
+            print(hd.name)
+            print(": ")
+            println(hd.value)
+        })
+        println("")
+    })
+    print(r.body)
+}
+main = () i32 {
+    h := gpa()
+    a := h.addr()
+    // argv: [0]=prog, then optional -i, then the URL.
+    show_headers := arg(1) == "-i"
+    url_arg := show_headers.then({ arg(2) }, { arg(1) })
+    (url_arg == "").then({
+        println("usage: http_tool [-i] http://host[:port][/path]")
+        return 2
+    })
+    u := a.parse_url(url_arg)
+    u.ok.match ({
+        true  => a.get(u.host, u.port, u.path).match ({
+            .Ok(r)  => {
+                show(r, show_headers)
+                r.ok().then({ 0 }, { 1 })
+            },
+            .Err(e) => {
+                // std.net.http.http_error_name is private, so render the variant by hand.
+                print("error: ")
+                e.match ({
+                    .Connect(x)   => println("connect failed (host unreachable / refused)"),
+                    .Io(x)        => println("i/o error mid-exchange"),
+                    .Malformed(m) => println(m),
+                })
+                1
+            },
+        }),
+        false => {
+            print("error: not an http:// URL: ")
+            println(url_arg)
+            2
+        },
+    })
+}
