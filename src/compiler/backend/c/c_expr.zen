@@ -161,8 +161,19 @@ gen_loop_body = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
 // Slice literal -> heap-promoted zslice. A bare C compound literal `(T[]){…}` has AUTOMATIC storage,
 // so a slice literal that ESCAPES its frame (returned, or stored into a longer-lived aggregate) leaves
 // `.ptr` dangling into the dead frame. Copy the backing into a malloc'd block inside a statement-
-// expression so `.ptr` outlives the frame. The compiler itself emits no slice literals (its slices go
-// through `slice`/`acquire`), so this only affects user/test programs. Empty `[]` needs no backing.
+// expression so `.ptr` outlives the frame. `zen__salloc` NULL-checks the malloc and panics cleanly on
+// OOM (mirrors the div/idx preamble guards) so an exhausted heap can never `memcpy` into NULL. Empty
+// `[]` needs no backing.
+//
+// KNOWN LEAK (scoped, not fixed here): this heap block is never freed. A NON-escaping literal — e.g.
+// `std.text.fmt.write_int`'s `b: [u8] := [0, …]` scratch, so every `println(<int>)` leaks ~21 bytes —
+// is heap-promoted all the same because this site classifies EVERY literal as escaping. The sound cure
+// (stack storage for the non-escaping ones) needs interprocedural escape info: write_int passes its
+// scratch BY VALUE to helpers (`b.write_scratch(…)`, `num_write_integer(b.ptr, …)`), which no local or
+// syntactic rule can distinguish from a real escape without over-rejecting valid stdlib — and pure
+// stack storage reintroduces a verified use-after-return for `f() [i32] { [1,2,3] }`. Fixing it means
+// wiring the checker's escape analysis into a per-literal `escapes` classification (heap-by-default, so
+// a miss is a leak, never a UAF); tracked as follow-up.
 gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
     n := slice_count(sd.items)
     (n == 0).match ({
@@ -174,7 +185,7 @@ gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
                 .gstr_append(alloc, tn)
                 .gstr_append(alloc, " _zsa[] = { ")
                 .gen_args(alloc, sd.items)
-                .gstr_append(alloc, " }; uint8_t* _zsp = malloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
+                .gstr_append(alloc, " }; uint8_t* _zsp = zen__salloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
             out.gstr_int(alloc, n).gstr_append(alloc, " }; })")
         },
     })
