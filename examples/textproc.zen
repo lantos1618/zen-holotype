@@ -1,0 +1,138 @@
+// textproc.zen — a small `wc` + `grep`-lite text tool, built as a first real
+// program on the PUBLIC stdlib. Reads a file (path arg) or stdin.
+//
+//   ./zen run examples/textproc.zen FILE            # wc: lines words bytes
+//   ./zen run examples/textproc.zen                 # wc over stdin
+//   ./zen run examples/textproc.zen grep PAT  FILE  # print lines containing PAT (substring)
+//   ./zen run examples/textproc.zen re   PAT  FILE  # print lines matching regex PAT
+//
+// grep/re with no FILE read stdin. Errors are values: a missing file, an empty
+// file, or a bad regex all print a clean message and exit non-zero — no crash.
+halloc = std.mem.heap
+{ contents } = std.io.file
+{ read_all } = std.io.stdin
+{ argc, arg } = std.sys.os
+{ len, view, split, contains } = std.text.str
+{ compile, matches, Regex, RegexError } = std.text.regex
+{ Result, IoError, name } = std.core.result
+{ formatln, arg_int, arg_str } = std.text.fmt
+// Count '\n' bytes — wc's line count (a final unterminated line is not counted,
+// matching `wc -l`).
+count_lines = (text: string_view) i64 {
+    v: [u8] := text.view()
+    n: i64 := 0
+    v.loop((h, i, b) {
+        (b == '\n').then({
+            n = n + 1
+        })
+    })
+    n
+}
+// Count whitespace-separated words — a run of non-space chars is one word.
+count_words = (text: string_view) i64 {
+    v: [u8] := text.view()
+    n: i64 := 0
+    in_word := false
+    v.loop((h, i, b) {
+        sp := b == ' ' || b == '\n' || b == '\t' || b == '\r'
+        sp.match ({
+            true  => {
+                in_word = false
+            },
+            false => {
+                (in_word == false).then({
+                    n = n + 1
+                })
+                in_word = true
+            },
+        })
+    })
+    n
+}
+// wc mode: print "<lines> <words> <bytes>".
+run_wc = (text: string_view) i32 {
+    formatln("{} {} {}", [arg_int(text.count_lines()), arg_int(text.count_words()), arg_int(text.len())])
+    0
+}
+// grep (substring) mode: print every line of `text` that contains `pat`.
+run_grep<A> = (a: MutPtr<A>, text: string_view, pat: string_view) i32 {
+    lines: [string_view] := a.split(text, '\n')
+    hits: i64 := 0
+    lines.loop((h, i, line) {
+        line.contains(pat).then({
+            formatln("{}", [arg_str(line)])
+            hits = hits + 1
+        })
+    })
+    // exit 1 when nothing matched, like grep.
+    (hits > 0).then({ 0 }, { 1 })
+}
+// error-name a regex compile failure — the module's `error_name` is private, so
+// match the (public) RegexError variants by hand. [rough edge: MISSING namer]
+re_error_name = (e: RegexError) string_view {
+    e.match ({
+        .UnbalancedParen   => "unbalanced parenthesis",
+        .UnexpectedParen   => "unexpected ')'",
+        .TrailingBackslash => "trailing backslash",
+        .UnterminatedClass => "unterminated '[' class",
+        .BadRange          => "bad character range",
+        .NothingToRepeat   => "nothing to repeat",
+        .Oom               => "out of memory",
+    })
+}
+// regex mode: compile `pat`, then print every line it matches anywhere.
+run_re<A> = (a: MutPtr<A>, text: string_view, pat: string_view) i32 {
+    a.compile(pat).match ({
+        .Err(e) => {
+            formatln("textproc: bad regex: {}", [arg_str(re_error_name(e))])
+            2
+        },
+        .Ok(re) => {
+            lines: [string_view] := a.split(text, '\n')
+            hits: i64 := 0
+            lines.loop((h, i, line) {
+                re.matches(line).then({
+                    formatln("{}", [arg_str(line)])
+                    hits = hits + 1
+                })
+            })
+            (hits > 0).then({ 0 }, { 1 })
+        },
+    })
+}
+// Load the input for a mode: the arg at `file_idx` names a file, else read stdin.
+// Returns the whole text as one owned view, or an IoError.
+read_input<A> = (a: MutPtr<A>, file_idx: i32) Result<string_view, IoError> {
+    n := argc()
+    path := (n > file_idx).then({ arg(file_idx) }, { "" })
+    (path == "").then({ a.read_all() }, { a.contents(path) })
+}
+// name the input source for error messages: the file path, or "<stdin>".
+src_name = (file_idx: i32) string_view {
+    n := argc()
+    (n > file_idx).then({ arg(file_idx) }, { "<stdin>" })
+}
+main = () i32 {
+    heap := halloc.gpa()
+    a := heap.addr()
+    // argv[0] is the program; the first user arg is at index 1.
+    mode := (argc() > 1).then({ arg(1) }, { "" })
+    // grep/re take a PATTERN at index 2 and an optional FILE at index 3;
+    // wc takes an optional FILE at index 1.
+    is_grep := mode == "grep"
+    is_re := mode == "re"
+    file_idx := (is_grep || is_re).then({ 3 }, { 1 })
+    a.read_input(file_idx).match ({
+        .Ok(t)  => (is_grep || is_re).match ({
+            true  => {
+                pat := (argc() > 2).then({ arg(2) }, { "" })
+                is_grep.then({ a.run_grep(t, pat) }, { a.run_re(t, pat) })
+            },
+            false => run_wc(t),
+        }),
+        .Err(e) => {
+            formatln("textproc: {}: {}", [arg_str(src_name(file_idx)), arg_str(name(e))])
+            1
+        },
+    })
+}
