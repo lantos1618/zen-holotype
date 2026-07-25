@@ -13,7 +13,7 @@
 // ── expressions ───────────────────────────────────────────────────────────────────────────────────
 js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
-        .Int(n)         => s.jint(a, n),
+        .Int(n)         => s.js_int_lit(a, n),
         .Byte(n)        => s.jint(a, n),
         .FloatLit(ft)   => s.gstr_append(a, ft),
         .Var(v)         => s.jname(a, v.name),
@@ -109,49 +109,145 @@ js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String {
         }),
     })
 }
-// `==`/`!=` -> strict; `/` and `%` route through the guarded floor helpers; all else `(lhs op rhs)`.
 // `==`/`!=` -> strict; INTEGER `/` and `%` route through the guarded floor (div-by-zero panics); the
 // checker's float-division marker `/.` emits NATIVE `/` so f64 follows IEEE (`0.0/0.0` -> NaN, never a
 // panic); all else `(lhs op rhs)`.
+//
+// WIDTH-CORRECTNESS: a JS `number` is a 32-bit-op / 2^53-mantissa view, so a 64-bit (i64/u64) operator
+// must run in BigInt — exact and arbitrary-precision. When EITHER operand is statically 64-bit (`iw_of`),
+// both operands are coerced to BigInt (`js_bexpr(.., big)`) so nothing mixes BigInt with number, and the
+// boundary (let/param/assign/return) wraps back to the type's width. A 32-bit-or-narrower UNSIGNED `>>`
+// becomes the logical `>>>` (a signed `>>` sign-fills a high-bit-set u32). See bootstrap/zenrt.js.
 js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String {
-    (b.op == "/.").match ({
-        true  => s
+    big := is_w64(iw_of(load(b.lhs))) || is_w64(iw_of(load(b.rhs)))
+    (b.op == "/.").then({
+        return s
             .gstr_append(a, "(")
             .js_expr(a, b.lhs)
             .gstr_append(a, " / ")
             .js_expr(a, b.rhs)
-            .gstr_append(a, ")"),
-        false => (b.op == "/").match ({
-            true  => s
-                .gstr_append(a, "__zr.div(")
-                .js_expr(a, b.lhs)
-                .gstr_append(a, ", ")
-                .js_expr(a, b.rhs)
-                .gstr_append(a, ")"),
-            false => (b.op == "%").match ({
-                true  => s
-                    .gstr_append(a, "__zr.mod(")
-                    .js_expr(a, b.lhs)
-                    .gstr_append(a, ", ")
-                    .js_expr(a, b.rhs)
-                    .gstr_append(a, ")"),
-                false => s
-                    .gstr_append(a, "(")
-                    .js_expr(a, b.lhs)
-                    .gstr_append(a, " ")
-                    .gstr_append(a, js_op(b.op))
-                    .gstr_append(a, " ")
-                    .js_expr(a, b.rhs)
-                    .gstr_append(a, ")"),
-            }),
-        }),
+            .gstr_append(a, ")")
     })
+    (b.op == "/").then({
+        return s
+            .gstr_append(a, "__zr.div(")
+            .js_bexpr(a, b.lhs, big)
+            .gstr_append(a, ", ")
+            .js_bexpr(a, b.rhs, big)
+            .gstr_append(a, ")")
+    })
+    (b.op == "%").then({
+        return s
+            .gstr_append(a, "__zr.mod(")
+            .js_bexpr(a, b.lhs, big)
+            .gstr_append(a, ", ")
+            .js_bexpr(a, b.rhs, big)
+            .gstr_append(a, ")")
+    })
+    s
+        .gstr_append(a, "(")
+        .js_bexpr(a, b.lhs, big)
+        .gstr_append(a, " ")
+        .gstr_append(a, js_bin_op(b, big))
+        .gstr_append(a, " ")
+        .js_bexpr(a, b.rhs, big)
+        .gstr_append(a, ")")
+}
+// one operand of a binary op. In a 64-bit op, force BigInt: an integer literal renders as a BigInt literal
+// `Nn`; everything else is normalized by `__zr.big` (number -> BigInt; a BigInt passes through). Wrapping
+// unconditionally is what makes it robust — a boundary norms a small 64-bit value back to a `number`, so
+// even a detected i64 var must be re-promoted here. Non-64-bit ops emit the bare expression (unchanged).
+js_bexpr = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, big: bool) String {
+    big.match ({
+        true  => load(e).match ({
+            .Int(n)  => s.jint(a, n).gstr_append(a, "n"),
+            .Byte(n) => s.jint(a, n).gstr_append(a, "n"),
+            _        => s.gstr_append(a, "__zr.big(").js_expr(a, e).gstr_append(a, ")"),
+        }),
+        false => s.js_expr(a, e),
+    })
+}
+// the emitted operator: a 64-bit op keeps its BigInt spelling (`>>` on a BigInt is width-exact — logical
+// for a non-negative u64, arithmetic for i64); a ≤32-bit UNSIGNED `>>` becomes logical `>>>`; else as-is.
+js_bin_op = (b: BinData, big: bool) string_view {
+    big.then({
+        return js_op(b.op)
+    })
+    (b.op == ">>" && is_uns_narrow(iw_of(load(b.lhs)))).then({
+        return ">>>"
+    })
+    js_op(b.op)
 }
 js_op = (op: string_view) string_view {
     (op == "==").match ({
         true  => "===",
         false => (op == "!=").then({ "!==" }, { op }),
     })
+}
+// an integer literal: values outside +/- 2^53 can NOT be an exact JS `number`, so render them as a BigInt
+// literal `Nn` (they only ever occur in an i64/u64 context, whose boundary keeps them BigInt).
+js_int_lit = (s: String, a: MutPtr<Malloc>, n: i64) String {
+    (n > 9007199254740992 || n < 0 - 9007199254740992).then({
+        return s.jint(a, n).gstr_append(a, "n")
+    })
+    s.jint(a, n)
+}
+// ── static width reconstruction (the type C carries on each value, rebuilt for the erased JS one) ────
+// The js value model keeps i32-and-narrower as a JS `number`, i64/u64 as a (norm) BigInt. An operator
+// needs its operands' static width to pick the BigInt vs number path; widths come from the per-function
+// typed-var table (vars), the cast intrinsics, and structurally through bin/cond. A struct field or slice
+// element is width 0 (unknown) — a rare inline i64-field-mixed-with-i32 is a documented gap (bind it to a
+// typed local first); it is still recovered whenever the sibling operand is a detected 64-bit value.
+iw_of = (e: Expr) i32 {
+    e.match ({
+        .Var(v)  => int_width(vw_lookup(v.name)),
+        .Bin(b)  => iw_bin(b),
+        .Cond(d) => iw_join(iw_of(load(d.t)), iw_of(load(d.e))),
+        .Call(c) => iw_call(c),
+        _        => 0,
+    })
+}
+// the cast intrinsics are the only width-changing calls the js backend cares about; a user call's width
+// is unknown here (0) — an unbound i64 call result mixed inline with a literal is the documented gap.
+iw_call = (c: CallData) i32 {
+    (c.fn == "to_i64" || c.fn == "load_i64").then({
+        return 8
+    })
+    (c.fn == "to_i32").then({
+        return 4
+    })
+    (c.fn == "to_u8").then({
+        return 1
+    })
+    0
+}
+// a bin's result width: a comparison/logical op is a bool (0); a shift keeps the LHS width; else the wider.
+iw_bin = (b: BinData) i32 {
+    js_is_cmp(b.op).then({
+        return 0
+    })
+    (b.op == "<<" || b.op == ">>").then({
+        return iw_of(load(b.lhs))
+    })
+    iw_join(iw_of(load(b.lhs)), iw_of(load(b.rhs)))
+}
+iw_join = (l: i32, r: i32) i32 {
+    (is_w64(l) || is_w64(r)).then({
+        return is_w64(l).then({ l }, { r })
+    })
+    (l >= r).then({ l }, { r })
+}
+is_w64 = (w: i32) bool { w == 7 || w == 8 }
+is_uns_narrow = (w: i32) bool { w == 1 || w == 2 || w == 3 }
+js_is_cmp = (op: string_view) bool {
+    op == "=="
+        || op == "!="
+        || op == "<"
+        || op == ">"
+        || op == "<="
+        || op == ">="
+        || op == "&&"
+        || op == "||"
 }
 js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
     out := s.gstr_append(a, "({ ")
@@ -238,10 +334,10 @@ js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
         return s.gstr_append(a, "__zr.i64(").js_arg_at(a, c, 0).gstr_append(a, ")")
     })
     (c.fn == "to_u8").then({
-        return s.gstr_append(a, "((").js_arg_at(a, c, 0).gstr_append(a, ") & 255)")
+        return s.gstr_append(a, "__zr.u8(").js_arg_at(a, c, 0).gstr_append(a, ")")
     })
     (c.fn == "to_f64").then({
-        return s.gstr_append(a, "(+(").js_arg_at(a, c, 0).gstr_append(a, "))")
+        return s.gstr_append(a, "Number(").js_arg_at(a, c, 0).gstr_append(a, ")")
     })
     (c.fn == "load_i64").then({
         return s.gstr_append(a, "__zr.load_i64(").js_arg_at(a, c, 0).gstr_append(a, ")")
@@ -458,7 +554,10 @@ js_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
     st.match ({
         .Let(l)      => s.js_let(a, l),
         .Assign(x)   => s.js_assign(a, x),
-        .Return(e)   => s.gstr_append(a, "return ").js_expr(a, e).gstr_append(a, ";"),
+        .Return(e)   => s
+            .gstr_append(a, "return ")
+            .js_expr_w(a, e, ret_coerce_w())
+            .gstr_append(a, ";"),
         .ExprStmt(e) => s.js_expr_stmt(a, e),
         .If(f)       => s
             .gstr_append(a, "if (")
@@ -516,14 +615,17 @@ js_stmts* = (s: String, a: MutPtr<Malloc>, body: [Stmt]) String {
 // in a C `uint32_t`, an FNV-1a hash returns garbage, etc. We reproduce C's truncation-at-the-boundary by
 // COERCING a value to its declared width at the three points C's type system does it: a function PARAMETER
 // (entry), a typed LET's initializer, and an ASSIGN to a typed variable. `int_width` maps a Ty to a width
-// code (0 = not a fixed-width int → no coercion; i64/int stay a native `number`, precise to 2^53); the
-// open/close pair wraps an emitted expression with the matching JS idiom:
-//   u8 `& 255`   u16 `& 0xffff`   u32 `>>> 0`   i32 `| 0`   i16 `<<16>>16`   i8 `<<24>>24`   u64 `__zr.u64`
-// (`<<n>>n` sign-extends the low n bits; `>>>0`/`__zr.u64` reinterpret unsigned; `|0` wraps to signed i32.)
+// code (0 = not a fixed-width int → no coercion); the open/close pair wraps an emitted expression with
+// the matching JS idiom:
+//   u8 `& 255`   u16 `& 0xffff`   u32 `>>> 0`   i32 `| 0`   i16 `<<16>>16`   i8 `<<24>>24`
+//   i64 `__zr.wi64`   u64 `__zr.wu64`   (the 64-bit pair asIntN/asUintN-wrap a BigInt, then norm to a
+// number when it fits exactly). `<<n>>n` sign-extends the low n bits; `>>>0` reinterprets unsigned; `|0`
+// wraps to signed i32.
 int_width* = (t: Ty) i32 {
     t.match ({
         .U8       => 1,
         .I32      => 4,
+        .I64      => 8,
         .Named(n) => iw_named(n),
         _         => 0,
     })
@@ -547,10 +649,13 @@ iw_named = (n: string_view) i32 {
     0
 }
 js_w_open* = (s: String, a: MutPtr<Malloc>, w: i32) String {
-    (w == 7).match ({
-        true  => s.gstr_append(a, "__zr.u64(("),
-        false => (w == 0).then({ s }, { s.gstr_append(a, "((") }),
+    (w == 7).then({
+        return s.gstr_append(a, "__zr.wu64((")
     })
+    (w == 8).then({
+        return s.gstr_append(a, "__zr.wi64((")
+    })
+    (w == 0).then({ s }, { s.gstr_append(a, "((") })
 }
 js_w_close* = (s: String, a: MutPtr<Malloc>, w: i32) String {
     (w == 1).then({
@@ -571,7 +676,7 @@ js_w_close* = (s: String, a: MutPtr<Malloc>, w: i32) String {
     (w == 6).then({
         return s.gstr_append(a, ") << 24 >> 24)")
     })
-    (w == 7).then({
+    (w == 7 || w == 8).then({
         return s.gstr_append(a, "))")
     })
     s
@@ -646,3 +751,9 @@ vw_lookup = (name: string_view) Ty {
     })
     r
 }
+// current function's return width — set at function entry (js_decl.js_func). A `return` COERCES its value
+// to this width ONLY for the 64-bit types (an i64/u64 return must be a BigInt, else an inline `return a*b`
+// would lose precision or mix); narrower returns are already truncated at the CALLER's binding boundary.
+cur_ret_w := 0
+set_ret_w* = (w: i32) void { cur_ret_w = w }
+ret_coerce_w = () i32 { is_w64(cur_ret_w).then({ cur_ret_w }, { 0 }) }

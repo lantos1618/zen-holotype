@@ -1,6 +1,6 @@
 // compiler.validate.args — argument, struct-field-init, and member/slice-literal checks.
 { ArmData, CallData, Decl, Expr, Field, FieldInit, Func, MakeStructData, MethodCallData, Param,
-  Stmt, Ty } = compiler.ast.ast_types
+  Stmt, Ty, VariantDef } = compiler.ast.ast_types
 { gstr_append, gstr_finish, gstr_push, gstr_string, subst_ty_in, tvoid } = compiler.genc
 { DeclIndex, Env, arm_env, enum_name, extend_env, is_lit_numeric, params_env } = compiler.check
 { Malloc } = std.mem.alloc
@@ -8,6 +8,7 @@
 { at, is_alnum } = std.text.ascii
 { ends_with, is_empty } = std.text.str
 { String } = std.text.string
+{ enum_variants } = compiler.validate.kinds
 { env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_struct_fields, expr_pos,
   fit_err, is_enum_repr_field, is_ptr_ty, lit_slot_verdict, pos_or, tparam_shape_err,
   ty_mentions_tparam } = compiler.validate.util
@@ -159,12 +160,43 @@ gen_struct_init_errs = (
 inits_has = (inits: [FieldInit], name: string_view) bool {
     inits.slice_any((fi) { fi.name == name })
 }    // is this field named in the literal?
+// Would zero-filling a value of type `t` produce a NULL non-null `Ptr` — directly, or TRANSITIVELY
+// through a nested struct's field or the tag-0 variant's payload of an enum? A struct zero-fills every
+// field; an omitted enum reads tag 0 = its first variant, whose payload is zeroed. Structs cannot embed
+// themselves by value (infinite size), but malformed residue could cycle, so `fuel` bounds the descent
+// and exhausting it answers `false` (lenient — never a false reject). A direct non-null `Ptr` short-
+// circuits before recursion, so a self-referential `Ptr<Node>` field terminates at the pointer.
+ty_zerofills_null_ptr = (env: Env, t: Ty, fuel: i32) bool {
+    t.is_nonnull_ptr_ty().match ({
+        true  => true,
+        false => (fuel <= 0).match ({
+            true  => false,
+            false => t.match ({
+                .Named(n) => env.env_is_struct(n).match ({
+                    true  => env
+                        .env_struct_fields(n)
+                        .slice_any((f) { env.ty_zerofills_null_ptr(f.ty, fuel - 1) }),
+                    false => env.env_is_enum(n).match ({
+                        true  => env.decls.enum_variants(n).tag0_zerofills_null_ptr(env, fuel - 1),
+                        false => false,
+                    }),
+                }),
+                _         => false,
+            }),
+        }),
+    })
+}    // an omitted enum field reads tag 0 = variants[0]; its payload is the zeroed slot we must vet
+tag0_zerofills_null_ptr = (vs: [VariantDef], env: Env, fuel: i32) bool {
+    (vs.len > 0).then({ env.ty_zerofills_null_ptr(vs[0].payload, fuel) }, { false })
+}
 // A NON-NULL pointer field (`Ptr<T>`/`MutPtr<T>`) left out of the literal would be default-zeroed to a
-// null that the type promises can never happen → a deref segfault the checker currently misses. Require it.
-field_missing_nonnull_ptr = (fields: [Field], inits: [FieldInit]) i32 {
+// null that the type promises can never happen → a deref segfault the checker currently misses. Require
+// it — and likewise reject a field whose type only TRANSITIVELY reaches such a pointer (nested struct,
+// enum tag-0 payload), since zero-filling it nulls that pointer just the same.
+field_missing_nonnull_ptr = (fields: [Field], env: Env, inits: [FieldInit]) i32 {
     acc := 0
     fields.loop((h, i, fl) {
-        acc = acc + (fl.ty.is_nonnull_ptr_ty() && inits.inits_has(fl.name) == false).match ({
+        acc = acc + (env.ty_zerofills_null_ptr(fl.ty, 64) && inits.inits_has(fl.name) == false).match ({
             true  => 1,
             false => 0,
         })
@@ -188,14 +220,14 @@ makestruct_err* = (env: Env, m: MakeStructData) i32 {
         true  => env.env_is_gen_struct(m.ty).match ({
             true  => {
                 gf := env.env_gstruct(m.ty).fields
-                env.gen_struct_init_errs(env.env_gstruct(m.ty).tparams, m.targs, gf, m.inits) + gf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs()
+                env.gen_struct_init_errs(env.env_gstruct(m.ty).tparams, m.targs, gf, m.inits) + gf.field_missing_nonnull_ptr(env, m.inits) + m.inits.dup_init_errs()
             },
             false => 0,
         }),
         false => env.env_is_struct(m.ty).match ({
             true  => {
                 sf := env.env_struct_fields(m.ty)
-                env.struct_init_errs(sf, m.inits) + sf.field_missing_nonnull_ptr(m.inits) + m.inits.dup_init_errs()
+                env.struct_init_errs(sf, m.inits) + sf.field_missing_nonnull_ptr(env, m.inits) + m.inits.dup_init_errs()
             },
             false => 0,
         }),
