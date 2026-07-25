@@ -4017,8 +4017,169 @@ lsp_reply_initialize = (mp: MutPtr<Malloc>, body: string_view) i64 {
         .gstr_string(256)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
         .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
+        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"definitionProvider\":true},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
         .gstr_finish(mp))
+}
+// ── go-to-definition (LSP Stage 2a) — a textual top-level definition finder ──────────────────────
+// Cursor position (LSP is 0-based line/character) → the identifier under it → the FILE's top-level
+// declaration of that name → its Location. Textual (ctags-style) rather than resolver-backed: it
+// resolves same-file top-level decls (fn/type/const), which is the common jump; cross-file (imports),
+// locals, and overload-precise resolution are the documented next slices.
+lsp_is_ident_byte = (b: u8) bool {
+    b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
+// byte offset of (line, char): walk `line` newlines from 0, then advance `char` bytes (ASCII columns;
+// UTF-16 wide columns are a refinement).
+lsp_byte_of_pos = (v: [u8], line: i64, ch: i64, i: i64, ln: i64) i64 {
+    (ln >= line).match ({
+        true  => (i + ch < v.len).then({ i + ch }, { v.len }),
+        false => (i >= v.len).match ({
+            true  => v.len,
+            false => (v[i] == '\n').match ({
+                true  => v.lsp_byte_of_pos(line, ch, i + 1, ln + 1),
+                false => v.lsp_byte_of_pos(line, ch, i + 1, ln),
+            }),
+        }),
+    })
+}
+// start byte of the identifier surrounding `off` (scan left over identifier bytes).
+lsp_ident_start = (v: [u8], off: i64) i64 {
+    (off <= 0).match ({
+        true  => 0,
+        false => v[off - 1].lsp_is_ident_byte().then({ v.lsp_ident_start(off - 1) }, { off }),
+    })
+}
+// end byte (exclusive) of the identifier surrounding `off`.
+lsp_ident_end = (v: [u8], off: i64) i64 {
+    (off >= v.len).match ({
+        true  => off,
+        false => v[off].lsp_is_ident_byte().then({ v.lsp_ident_end(off + 1) }, { off }),
+    })
+}
+// does `v[i..]` begin with `name` as a WHOLE token that is a top-level decl head: `name` [ws]* `*`? [ws]*
+// followed by `=`, `:`, `<` (generic decl), or `(` — the shapes `foo = `, `Foo:`, `foo* = `, `f<T> = `.
+lsp_def_head_at = (v: [u8], i: i64, name: [u8]) bool {
+    (i + name.len > v.len).match ({
+        true  => false,
+        false => lsp_bytes_eq(v, i, name, 0).match ({
+            true  => {
+                j := i + name.len
+                k := (j < v.len && v[j] == '*').then({ j + 1 }, { j })
+                k2 := lsp_skip_sp(v, k)
+                (k2 < v.len).match ({
+                    true  => {
+                        b := v[k2]
+                        b == '=' || b == ':' || b == '<' || b == '('
+                    },
+                    false => false,
+                })
+            },
+            false => false,
+        }),
+    })
+}
+lsp_bytes_eq = (v: [u8], i: i64, name: [u8], k: i64) bool {
+    (k >= name.len).match ({
+        true  => true,
+        false => (v[i + k] == name[k]).then({ v.lsp_bytes_eq(i, name, k + 1) }, { false }),
+    })
+}
+lsp_skip_sp = (v: [u8], i: i64) i64 {
+    (i < v.len && (v[i] == ' ' || v[i] == '\t')).then({ v.lsp_skip_sp(i + 1) }, { i })
+}
+// scan for a top-level (column-0) def head of `name`; return its byte offset or -1. Only column-0 heads
+// count (Zen top-level decls start at column 0), which cheaply excludes call sites and locals.
+lsp_find_def = (v: [u8], name: [u8], i: i64, atcol0: bool) i64 {
+    (i >= v.len).match ({
+        true  => 0 - 1,
+        false => (atcol0 && v.lsp_def_head_at(i, name)).match ({
+            true  => i,
+            false => v.lsp_find_def(name, i + 1, v[i] == '\n'),
+        }),
+    })
+}
+// (line, col) of byte offset `off`.
+lsp_line_of = (v: [u8], off: i64, i: i64, ln: i64, col: i64) i64 {
+    (i >= off || i >= v.len).match ({
+        true  => ln,
+        false => (v[i] == '\n').match ({
+            true  => v.lsp_line_of(off, i + 1, ln + 1, 0),
+            false => v.lsp_line_of(off, i + 1, ln, col + 1),
+        }),
+    })
+}
+lsp_col_of = (v: [u8], off: i64, i: i64, col: i64) i64 {
+    (i >= off || i >= v.len).match ({
+        true  => col,
+        false => (v[i] == '\n').match ({
+            true  => v.lsp_col_of(off, i + 1, 0),
+            false => v.lsp_col_of(off, i + 1, col + 1),
+        }),
+    })
+}
+// reply to a definition request with a Location for def at (line, col) spanning `nlen` bytes, or null.
+lsp_reply_location = (
+    mp: MutPtr<Malloc>,
+    body: string_view,
+    uri: string_view,
+    line: i64,
+    col: i64,
+    nlen: i64,
+) i64 {
+    mp.lsp_send(mp
+        .gstr_string(256)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":{\"uri\":")
+        .push_jstr(mp, uri)
+        .gstr_append(mp, ",\"range\":{\"start\":{\"line\":")
+        .push_int(mp, line)
+        .gstr_append(mp, ",\"character\":")
+        .push_int(mp, col)
+        .gstr_append(mp, "},\"end\":{\"line\":")
+        .push_int(mp, line)
+        .gstr_append(mp, ",\"character\":")
+        .push_int(mp, col + nlen)
+        .gstr_append(mp, "}}}}")
+        .gstr_finish(mp))
+}
+// read a non-negative integer JSON field by key (e.g. position.line / .character).
+lsp_json_int = (body: string_view, key: string_view) i64 {
+    v: [u8] := body.view()
+    p := v.json_find_key(key)
+    (p < 0).then({ 0 }, { v.lsp_parse_dec(p, 0) })
+}
+lsp_parse_dec = (v: [u8], i: i64, acc: i64) i64 {
+    (i < v.len && v[i] >= '0' && v[i] <= '9').match ({
+        true  => v.lsp_parse_dec(i + 1, acc * 10 + (v[i] - '0').to_i64()),
+        false => acc,
+    })
+}
+lsp_definition = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
+    uri := mp.json_str_field(body, "uri")
+    line := body.lsp_json_int("line")
+    ch := body.lsp_json_int("character")
+    path := mp.lsp_uri_path(uri)
+    contents_in(mp, path).match ({
+        .Ok(txt) => {
+            v: [u8] := txt.view()
+            off := v.lsp_byte_of_pos(line, ch, 0, 0)
+            s := v.lsp_ident_start(off)
+            e := v.lsp_ident_end(off)
+            (e <= s).match ({
+                true  => mp.lsp_reply_null(body),
+                false => {
+                    name: [u8] := v.ptr.offset(s).slice(e - s)
+                    d := v.lsp_find_def(name, 0, true)
+                    (d < 0).match ({
+                        true  => mp.lsp_reply_null(body),
+                        false => mp.lsp_reply_location(body, uri, v.lsp_line_of(d, 0, 0, 0), v.lsp_col_of(d, 0, 0), e - s),
+                    })
+                },
+            })
+        },
+        .Err(er) => mp.lsp_reply_null(body),
+    })
 }
 lsp_reply_null = (mp: MutPtr<Malloc>, body: string_view) i64 {
     mp.lsp_send(mp
@@ -4089,13 +4250,19 @@ lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
                             mp.lsp_publish_clear(mp.json_str_field(body, "uri"))
                             0
                         },
-                        false => {
-                            v: [u8] := body.view()
-                            (v.json_find_key("id") >= 0 && lsp_is_notification(method) == false).then({
-                                mp.lsp_reply_method_not_found(body)
-                            })
-                            0
-                        },
+                        false => (method == "textDocument/definition").match ({
+                            true  => {
+                                mp.lsp_definition(root, body)
+                                0
+                            },
+                            false => {
+                                v: [u8] := body.view()
+                                (v.json_find_key("id") >= 0 && lsp_is_notification(method) == false).then({
+                                    mp.lsp_reply_method_not_found(body)
+                                })
+                                0
+                            },
+                        }),
                     }),
                 }),
             }),
