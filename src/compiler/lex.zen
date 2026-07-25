@@ -290,16 +290,22 @@ str_end = (src: string_view, pos: i32) i32 {
     r
 }    // unterminated — stop at NUL; ITERATIVE so a ~50KB string literal is O(n) iteration, not O(n) C-stack
 char_end = (src: string_view, pos: i32) i32 {
-    b := at(src, pos)    // closing quote
-    // backslash: skip the escaped char
+    b := at(src, pos)    // first byte inside the quotes
     // a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
     // position just past the closing quote. One char, or a `\.` escape.
-    // pos = first byte inside the quotes
-    (b == '\'').match ({
-        true  => pos + 1,
-        false => (b == '\\').then({ src.scan_quote_end(pos + 2) }, { src.scan_quote_end(pos + 1) }),
+    // NUL first ⇒ unterminated at EOF: stop like str_end, never step past the terminator.
+    (b == '\0').match ({
+        true  => pos,
+        false => (b == '\'').match ({
+            true  => pos + 1,    // empty '' → consume just the two quotes
+            // a `\.` escape skips the escaped byte, unless that byte is the EOF NUL
+            false => (b == '\\' && at(src, pos + 1) != '\0').match ({
+                true  => src.scan_quote_end(pos + 2),
+                false => src.scan_quote_end(pos + 1),
+            }),
+        }),
     })
-}    // empty ''  → consume just the two quotes
+}
 scan_quote_end = (src: string_view, pos: i32) i32 {
     // Scan to (and past) the closing `'`. Keeps a malformed multi-char literal like 'ab' from
     // DESYNCING the token stream — it consumes the whole literal instead of leaving a stray quote.
@@ -308,8 +314,8 @@ scan_quote_end = (src: string_view, pos: i32) i32 {
     @while (at(src, p) != '\'' && at(src, p) != '\0') {
         p = p + 1
     }
-    p + 1
-}
+    (at(src, p) == '\0').then({ p }, { p + 1 })
+}    // unterminated ⇒ stop AT the NUL, don't overshoot the buffer
 // ── symbols ──────────────────────────────────────────────────────────────────
 // zen's two-char operators: `:=  ==  <=  >=  &&  ||  =>`. A symbol token spans two
 // bytes when the pair forms one of these, else one — so the parser never re-glues.
