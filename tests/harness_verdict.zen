@@ -1975,6 +1975,14 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "escape",
     ), VerdictCase(
+        src: "Leaf*: { v: i32 }\nBox*: { p: Ptr<Leaf> }\nstash = (b: MutPtr<Box>, l: Ptr<Leaf>) void { b.p = l }\nfill = (b: MutPtr<Box>) void {\n    x := Leaf(v: 99)\n    b.stash(x.addr())\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "Box*: { p: MutPtr<i32> }\nstash = (b: MutPtr<Box>, l: MutPtr<i32>) void { b.p = l }\nuse = () i32 {\n    y := 7\n    lb := Box(p: y.addr())\n    x := 5\n    lb.addr().stash(x.addr())\n    0\n}\ntest* = () i32 { use() }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "raw = std.mem.raw\nBox*: { p: MutPtr<i32> }\nid = (q: MutPtr<i32>) MutPtr<i32> { q }\nmake_box = () Box {\n    s := raw.of(0, 1)\n    q := s[0].addr()\n    Box(p: id(q))\n}\ntest* = () i32 { 0 }",
         should_pass: true,
         kind: "",
@@ -2363,6 +2371,10 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     )])
+    // out-param store escape: `stash` plants `x.addr()` through its `b` pointer param, so the local
+    // leaves fill's frame via a caller-reachable location (not via the call's return value).
+    // NOT an escape: the same store, but the destination (`lb`) is a LOCAL that dies with `x` — the
+    // planted address never outlives the frame, so the out-param-store rule must not flag it.
     // Omitting a field whose type TRANSITIVELY holds a non-null Ptr (nested struct) zero-fills it to a
     // null the type forbids → reject, same as a direct Ptr field.
     // Enum analog: omitting an enum-typed field reads tag 0 = the first variant, whose Ptr payload is
