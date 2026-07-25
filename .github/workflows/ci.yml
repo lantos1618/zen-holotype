@@ -20,10 +20,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: no conflict markers (tree must never carry <<<<<<< / >>>>>>>)
-        run: |
-          ! git grep -nE '^(<<<<<<< |>>>>>>> )' || { echo 'conflict markers in tree'; exit 1; }
       - uses: actions/checkout@v4
+
+      # MUST come after checkout: this step used to run BEFORE it, where `git grep` exits 128
+      # ("not a git repository") and the leading `!` turned that into a pass — the gate could not
+      # fail. Shares its pattern with integrate.sh gate 0 rather than keeping a second copy.
+      - name: no conflict markers (tree must never carry <<<<<<< / ======= / >>>>>>>)
+        run: bash scripts/no-conflict-markers.sh
 
       # 1. Build the compiler: cc (gnu11, -fwrapv) on bootstrap/{zenc.gen.c,zenrt.c}.
       #    No deps beyond a C compiler + make.
@@ -40,18 +43,10 @@ jobs:
         run: make -f bootstrap/Makefile harness
 
       # 3. Formatting gate: every .zen in the tree must be zenc-fmt clean.
-      #    tests/fixtures/fmt/*_unformatted.zen are excluded — they are the fmt
-      #    oracle's INPUT fixtures and are intentionally unformatted.
+      #    The file set lives in scripts/fmt-check.sh, shared with integrate.sh gate 5 — CI's
+      #    copy had drifted (it omitted tools/), so a misformatted tools/*.zen passed here.
       - name: fmt --check (tree is zenc-fmt clean)
-        run: |
-          bad=0
-          for f in $(find src tests examples driver.zen build.zen -name '*.zen' ! -path 'tests/fixtures/fmt/*_unformatted.zen' | sort); do
-            if ! ./zen fmt --check "$f"; then
-              echo "::error file=$f::$f is not zenc-fmt clean — run './zen fmt $f' and commit the result"
-              bad=1
-            fi
-          done
-          exit $bad
+        run: bash scripts/fmt-check.sh
 
       - name: Documentation inventory and links
         run: make docs-check

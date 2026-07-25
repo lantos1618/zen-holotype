@@ -15,7 +15,7 @@
 { new_in, push_in } = std.text.string
 { view } = std.text.str
 { gpa } = std.mem.heap
-{ parse_response, get, http_error_name, HttpError } = std.net.http
+{ parse_response, parse_url, http_get, get, http_error_name, HttpError } = std.net.http
 // turn every '\n' into a CRLF, so a readable `\n`-delimited canned response becomes wire-format HTTP.
 // Returns a length-carrying `[u8]` (parse_response's binary-safe input) via the String builder's `.bytes()`.
 crlfify<A> = (a: MutPtr<A>, s: string_view) [u8] {
@@ -105,9 +105,34 @@ main = () i32 {
             && r.body == "ab",
         .Err(e) => false,
     })
-    // force-compile the live socket path without touching the network (guard is statically false).
+    // (9) URL parsing (pure, no network): explicit port + path, the defaults, and the rejections.
+    u1 := a.parse_url("http://127.0.0.1:8080/x").match ({
+        .Ok(u)  => u.host == "127.0.0.1" && u.port == 8080 && u.path == "/x",
+        .Err(e) => false,
+    })
+    u2 := a.parse_url("example.com").match ({
+        .Ok(u)  => u.host == "example.com" && u.port == 80 && u.path == "/",
+        .Err(e) => false,
+    })
+    u3 := a.parse_url("https://example.com/").match ({
+        .Ok(u)  => false,
+        .Err(e) => true,
+    })
+    u4 := a.parse_url("http://:80/").match ({
+        .Ok(u)  => false,
+        .Err(e) => true,
+    })
+    c9 := u1 && u2 && u3 && u4
+    // force-compile the live socket paths without touching the network (guard is statically false).
     probe := false.match ({
         true  => a.get("127.0.0.1", 80, "/").match ({
+            .Ok(r)  => r.status,
+            .Err(e) => 0,
+        }),
+        false => 0,
+    })
+    probe2 := false.match ({
+        true  => a.http_get("http://127.0.0.1/").match ({
             .Ok(r)  => r.status,
             .Err(e) => 0,
         }),
@@ -117,5 +142,5 @@ main = () i32 {
     e_conn: HttpError := .Connect(.NotFound)
     e_bad: HttpError := .Malformed("boom")
     c8 := http_error_name(e_conn) == "Connect" && http_error_name(e_bad) == "boom"
-    (c1 && c2 && c3 && c4 && c5 && c6 && c7 && c8 && probe == 0).to_exit()
+    (c1 && c2 && c3 && c4 && c5 && c6 && c7 && c8 && c9 && probe == 0 && probe2 == 0).to_exit()
 }
