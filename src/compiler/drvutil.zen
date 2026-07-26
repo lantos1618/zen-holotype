@@ -7,18 +7,14 @@
 { then } = std.core.bool
 { or } = std.core.result    // discard `out` write Results — the driver's stdout is best-effort
 { out } = std.io.file
-{ getEnv } = std.sys.os
-{ write, getpid, clock_gettime, opendir, closedir } = std.c.libc
+{ clock_ms, getEnv } = std.sys.os
+{ getpid, opendir, closedir } = std.c.libc
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API
-{ resolve_program_data, ResolvedProgram } = compiler.resolve
+{ eprint, resolve_program_data, ResolvedProgram } = compiler.resolve    // eprint = the shared stderr write
 say* = (s: string_view) i64 {
     out(s).or(0)
     out("\n").or(0)
 }
-derr* = (s: string_view) i64 {
-    v := s.view()
-    write(2, v.ptr, v.len)
-}    // diagnostics go to stderr
 // Intermediate /tmp files are namespaced by pid so two concurrent `zenc` invocations never clobber
 // each other's temp.c / temp.bin (a fixed path made one process compile/run the OTHER's program).
 // getpid() is constant for the life of a run, so each builder yields the SAME path on every call —
@@ -82,6 +78,17 @@ join2* = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
         .gstr_append(mp, b)
         .gstr_finish(mp)
 }
+// the bytes [s,e) of `v` as a fresh owned cstr — the loader/LSP/audit substring verb. ITERATIVE:
+// a JSON body or module region is arbitrarily long, so it must not recurse the C stack per byte.
+cstr_range* = (mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) string_view {
+    o := mp.gstr_string(e - s + 1)
+    i := s
+    @while (i < e) {
+        o = o.gstr_push(mp, v[i])
+        i = i + 1
+    }
+    o.gstr_finish(mp)
+}
 // src[start .. start+n) as an owned str. (named cstr_* to avoid colliding with std.text.str's
 // generic `substr` once the modules are flattened together — a plain `substr` would emit a second
 // C `substr` definition.)
@@ -95,16 +102,11 @@ cstr_substr* = (mp: MutPtr<Malloc>, s: string_view, start: i32, n: i32) string_v
 // perturb the allocation sequence mid-pipeline, and the reading must observe the compiler, not move
 // it. `zt_log` prints "zenc: time <stage> <ms>ms" when ZENC_TIME is set and returns the new reading,
 // so stages chain: `t1 := mp.zt_log("parse", t0)`.
-zt_ms* = () i64 {
-    ts: [i64] := [0, 0]
-    clock_gettime(1, ts.ptr)
-    ts[0] * 1000 + ts[1] / 1000000
-}
 zt_on* = () bool { is_empty(getEnv("ZENC_TIME")) == false }
 zt_log* = (mp: MutPtr<Malloc>, name: string_view, start_ms: i64) i64 {
-    now := zt_ms()
+    now := clock_ms()
     zt_on().then({
-        derr(mp
+        eprint(mp
             .gstr_string(64)
             .gstr_append(mp, "zenc: time ")
             .gstr_append(mp, name)
