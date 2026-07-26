@@ -4,6 +4,7 @@
 // why the walk, the roots, and the finding types are all exported rather than private here.
 { Malloc } = std.mem.alloc
 { view, is_empty, starts_with, ends_with } = std.text.str
+{ is_alnum, is_alpha } = std.text.ascii    // ident-byte classes (the audit scanner's own copies were dups)
 { then } = std.core.bool
 { expect } = std.core.result
 { Map, of } = std.collections.map    // name -> decl-index / seen-set maps
@@ -11,12 +12,13 @@
 { impl_cname_in } = compiler.mangle    // recompute hoisted impl-method names
 { gstr_string, gstr_append, gstr_finish, gstr_push, is_expr_null } = compiler.genc
 { parse_module } = compiler.parse
+{ clone_fn } = compiler.clones
 { resolve_module } = compiler.check_resolve
 { report_no_if_resolved, report_check } = compiler.drvdiag
-{ ResolvedProgram, ModuleEntry, seen_name, add_name } = std.internal.resolve
+{ ResolvedProgram, ModuleEntry, seen_name, add_name } = compiler.resolve
 { edges_of, cache_module_path } = compiler.modgraph
-{ say, derr, push_int, dir_exists, resolve_prog, dirname } = compiler.drvutil
-// ── zen audit — dead-code + unused-import reporter (advisory; `--strict` exits 1 on findings) ─────
+{ say, cstr_range, derr, push_int, dir_exists, resolve_prog, dirname } = compiler.drvutil
+// ── zen audit — dead-code + unused-import + clone reporter (`--strict` exits 1; clones advisory) ──
 // Dead-decl analysis runs over the SAME whole-program pipeline `check` uses (resolve imports ->
 // parse -> resolve_module), so alias qualification, UFCS dispatch and trait-default materialization
 // are all visible. It builds a conservative reachability fixpoint over top-level decl NAMES:
@@ -637,7 +639,8 @@ AudFinding: {
     line: i64,
     msg: string_view,
     dead: bool,
-}
+    clone: bool,
+}    // clone = a `warning[clone]` row: counted on its own line and EXEMPT from --strict (see aud_emit)
 aud_strcmp = (a: string_view, b: string_view) i64 {
     av: [u8] := a.view()
     bv: [u8] := b.view()
@@ -710,8 +713,6 @@ AudImp: {
     lo: i64,
     hi: i64,
 }
-aud_is_ident_start = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_' }
-aud_is_ident_char = (b: u8) bool { b.aud_is_ident_start() || b >= '0' && b <= '9' }
 // 1-based line of byte `pos` (iterative — module sources are hundreds of KB).
 aud_line_of = (v: [u8], pos: i64) i64 {
     ln := 1
@@ -734,7 +735,7 @@ aud_imp_span_hi = (v: [u8], pos: i64) i64 {
     @while (i < v.len && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '=')) {
         i = i + 1
     }
-    @while (i < v.len && (v[i].aud_is_ident_char() || v[i] == '.')) {
+    @while (i < v.len && (v[i].is_alnum() || v[i] == '.')) {
         i = i + 1
     }
     i
@@ -820,9 +821,9 @@ aud_step = (ents: [AudImp], nents: i64, v: [u8], i0: i64) i64 {
         }
         return i + 1
     })
-    b.aud_is_ident_start().then({
+    b.is_alpha().then({
         i := i0 + 1
-        @while (i < n && v[i].aud_is_ident_char()) {
+        @while (i < n && v[i].is_alnum()) {
             i = i + 1
         }
         ents.aud_mark_used(nents, v, i0, i)
@@ -856,8 +857,8 @@ aud_mod_imports = (
     m: ModuleEntry,
     tms: [AudTM],
     fb: [AudFinding],
-    n0: i64,
-) i64 {
+    n0: i32,
+) i32 {
     ds := mp.parse_module(m.source)
     v: [u8] := m.source.view()
     cnt := 0
@@ -1018,6 +1019,77 @@ aud_unreached = (c: AudCtx, tails: Map<i64>, nm: string_view) bool {
     twin := tails.has(nm) || nta > 0 && c.seen.has(cstr(offset(nm, nta)))
     c.seen.has(nm) == false && twin == false
 }
+// ── structural clone detection ────────────────────────────────────────────────────────────────────
+// Fingerprint every function over the AST (compiler.clones) and report any two that canonicalise to
+// the same tree. This is a hash bucket, not a comparison of every pair: O(n) over the program, so it
+// can run on every audit rather than as an occasional sweep.
+aud_clone_msg = (mp: MutPtr<Malloc>, nm: string_view, other: string_view) string_view {
+    mp
+        .gstr_string(96)
+        .gstr_append(mp, "warning[clone]: fn '")
+        .gstr_append(mp, nm)
+        .gstr_append(mp, "' is structurally identical to '")
+        .gstr_append(mp, other)
+        .gstr_append(mp, "' — keep one and import it")
+        .gstr_finish(mp)
+}
+// hash -> the name that claimed it first. A second claimant is the finding.
+// hex of the fingerprint, because Map is string-keyed. 16 nibbles, no allocation beyond the key.
+aud_hash_key = (mp: MutPtr<Malloc>, h: i64) string_view {
+    s := mp.gstr_string(17)
+    i := 0
+    @while (i < 16) {
+        s = s.gstr_push(mp, aud_hexd(h >> 60 - i * 4 & 15))
+        i = i + 1
+    }
+    s.gstr_finish(mp)
+}
+aud_hexd = (v: i64) u8 { load(offset("0123456789abcdef", v)) }
+// hash -> index of the function that claimed it first. A second claimant is the finding.
+aud_clones = (
+    mp: MutPtr<Malloc>,
+    rp: ResolvedProgram,
+    raw: [Decl],
+    path: string_view,
+    src: string_view,
+    fb: [AudFinding],
+    n0: i32,
+) i32 {
+    seedv: i64 := 0 - 1
+    seen := of(mp, "", seedv).expect("audit: oom")
+    names := cbuf<string_view>(mp, raw.len + 8)
+    n := n0
+    k: i64 := 0
+    raw.loop((h, i, d) {
+        d.match ({
+            .DFunc(f) => {
+                fp := mp.clone_fn(f)    // 0 = tree too small to be worth reporting
+                key := (fp == 0).then({ "" }, { mp.aud_hash_key(fp) })
+                prev := (fp == 0).then({ 0 - 1 }, { seen.get(key, 0 - 1) })
+                (prev >= 0).match ({
+                    true  => (n < fb.len).then({
+                        dl := locate_diag(rp, d.aud_decl_pos(), 1, path, src)
+                        fb[n] = AudFinding(
+                            path: dl.path,
+                            line: to_i64(dl.sp.line),
+                            msg: mp.aud_clone_msg(f.name, names[prev]),
+                            dead: false,
+                            clone: true,
+                        )
+                        n = n + 1
+                    }),
+                    false => (fp == 0 == false).then({
+                        names[k] = f.name
+                        seen = seen.put(mp, key, k).expect("audit: oom")
+                        k = k + 1
+                    }),
+                })
+            },
+            _         => { },
+        })
+    })
+    n
+}
 aud_run* = (
     mp: MutPtr<Malloc>,
     rp: ResolvedProgram,
@@ -1044,6 +1116,7 @@ aud_run* = (
             n = n + 1
         })
     })
+    n = mp.aud_clones(rp, raw, path, src, fb, n)
     tms := mp.aud_tms(raw)
     rp.table.modules.loop((h, i, m) {
         n = mp.aud_mod_imports(m, tms, fb, n)
@@ -1056,6 +1129,7 @@ aud_run* = (
 aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
     fb.aud_sort(n)
     dead := 0
+    clones := 0
     shown := 0
     i := 0
     @while (i < n) {
@@ -1067,6 +1141,9 @@ aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
         (dup == false).then({
             f.dead.then({
                 dead = dead + 1
+            })
+            f.clone.then({
+                clones = clones + 1
             })
             shown = shown + 1
             say(mp
@@ -1085,10 +1162,19 @@ aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
         .gstr_append(mp, "zen audit: ")
         .push_int(mp, dead)
         .gstr_append(mp, " dead decls, ")
-        .push_int(mp, shown - dead)
-        .gstr_append(mp, " unused imports")
+        .push_int(mp, shown - dead - clones)
+        .gstr_append(mp, " unused imports, ")
+        .push_int(mp, clones)
+        .gstr_append(mp, " clones")
         .gstr_finish(mp))
-    (strict && shown > 0).then({ 1 }, { 0 })
+    // SEVERITY: dead code and unused imports are DEFECTS — a name that cannot be reached is a lie
+    // about the program, and `--strict` has always failed on them. A clone is a JUDGEMENT: the two
+    // functions both work, and whether they should become one is a design call a human makes. So
+    // clones are advisory — they print, they are counted, and they never move the exit code. That is
+    // also the only honest default while the tree still holds 22 of them: a gate that is red on the
+    // day it lands trains people to pass --no-verify. Fold `clones` into this sum once the standing
+    // findings are down to zero, and the gate then keeps it there.
+    (strict && shown - clones > 0).then({ 1 }, { 0 })
 }
 // ── zen audit --workspace ─────────────────────────────────────────────────────────────────────────
 // `zenc audit --workspace <dir> [--strict]` — union dead-code reachability across EVERY entry point
@@ -1176,7 +1262,7 @@ aud_has_main = (src: string_view) bool {
             && v[i + 1] == 'a'
             && v[i + 2] == 'i'
             && v[i + 3] == 'n'
-            && v[i + 4].aud_is_ident_char() == false).then({
+            && v[i + 4].is_alnum() == false).then({
             j := i + 4
             (j < v.len && v[j] == '*').then({
                 j = j + 1
@@ -1192,17 +1278,6 @@ aud_has_main = (src: string_view) bool {
         i = i + 1
     }
     found
-}
-// the bytes [s,e) of `v` as a fresh cstr (embedded names are substrings of a literal, never
-// NUL-terminated in place).
-aud_bytes = (mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) string_view {
-    o := mp.gstr_string(e - s + 1)
-    i := s
-    @while (i < e) {
-        o = o.gstr_push(mp, v[i])
-        i = i + 1
-    }
-    o.gstr_finish(mp)
 }
 // one string-literal body [a,b): find import-shaped fragments. `{ x, y } = mod` aud_refs each name
 // as a root; `alias = dotted.mod` (a dot is required — plain `x = y` assignments are everywhere in
@@ -1236,13 +1311,13 @@ aud_embed_lit = (
                 q = q + 1
             }
             s0 := q
-            @while (q < b && (v[q].aud_is_ident_char() || v[q] == '.')) {
+            @while (q < b && (v[q].is_alnum() || v[q] == '.')) {
                 q = q + 1
             }
             @while (q > s0 && v[q - 1] == '.') {
                 q = q - 1
             }
-            rhs_ok := q > s0 && v[s0].aud_is_ident_start()
+            rhs_ok := q > s0 && v[s0].is_alpha()
             (rhs_ok && v[k] == '}').then({
                 // `{ names } = mod` — each imported name becomes a root.
                 p := k - 1
@@ -1252,13 +1327,13 @@ aud_embed_lit = (
                 (v[p] == '{').then({
                     x := p + 1
                     @while (x < k) {
-                        v[x].aud_is_ident_start().match ({
+                        v[x].is_alpha().match ({
                             true  => {
                                 x0 := x
-                                @while (x < k && v[x].aud_is_ident_char()) {
+                                @while (x < k && v[x].is_alnum()) {
                                     x = x + 1
                                 }
-                                ac.aud_ref(mp.aud_bytes(v, x0, x))
+                                ac.aud_ref(mp.cstr_range(v, x0, x))
                             },
                             false => {
                                 x = x + 1
@@ -1267,10 +1342,10 @@ aud_embed_lit = (
                     }
                 })
             })
-            (rhs_ok && v[k].aud_is_ident_char()).then({
+            (rhs_ok && v[k].is_alnum()).then({
                 // `alias = dotted.mod` — require a dotted RHS at (embedded) line start.
                 is := k
-                @while (is > a && v[is - 1].aud_is_ident_char()) {
+                @while (is > a && v[is - 1].is_alnum()) {
                     is = is - 1
                 }
                 w := is - 1
@@ -1286,9 +1361,9 @@ aud_embed_lit = (
                     })
                     y = y + 1
                 }
-                (atbol && dotted && v[is].aud_is_ident_start()).then({
+                (atbol && dotted && v[is].is_alpha()).then({
                     one: i64 := 1
-                    m = m.put(mp, mp.aud_bytes(v, s0, q), one).expect("audit: oom")
+                    m = m.put(mp, mp.cstr_range(v, s0, q), one).expect("audit: oom")
                 })
             })
         })

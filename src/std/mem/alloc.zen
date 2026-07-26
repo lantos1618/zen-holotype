@@ -1,6 +1,7 @@
 // Explicit allocator interface. Heap, arena, and other allocators share this trait.
 // Raw malloc/free stay visible for bootstrap and FFI boundary code.
 { Result, IoError, ok, err, ok_ptr } = std.core.result
+{ memcpy } = std.c.libc
 // malloc / realloc / free are the allocator's public C floor: callers import them as
 // `{ malloc, free } = std.mem.alloc`. The resolver doesn't re-export imported names, so
 // these stay DECLARED here (they can't live in std.c.libc without breaking that API).
@@ -24,11 +25,169 @@ Malloc*: {
 // into DynAlloc / Rt vtables directly). Every heap floor in the stdlib routes here: Heap.impl,
 // Malloc.impl, dyn_heap(), and std.rt's heap vtable all call these three fns instead of re-inlining
 // the `(n<=0)?null:malloc` / realloc / free lines. acquire treats a 0-byte request as a null success.
+// heap_acquire is DURABLE by definition: it is the process heap, and what it returns lives until it
+// is released. `Malloc` — the allocator the compiler pipeline threads — is the one that answers out
+// of the open request scope (see below); state a server keeps ACROSS requests asks the floor here.
 heap_acquire* = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
     (n <= 0).then({ null_ptr() }, { malloc(n) })
 }
-heap_resize* = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
-heap_release* = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
+// the REQUEST floor: `Malloc.acquire`. With a scope open every allocation is a bump out of its chunk
+// chain; with none open this IS heap_acquire, one bool test earlier.
+heap_request_acquire = (n: i64) RawPtr<u8> {
+    (n <= 0).match ({
+        true  => null_ptr(),
+        false => hs_on.then({ hs_alloc(n) }, { malloc(n) }),
+    })
+}
+// A block the open scope handed out is grown INSIDE the scope (bump a fresh one, copy the recorded
+// old size forward); anything else — including every durable malloc block — keeps plain realloc.
+heap_resize* = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+    hs_owns(p).match ({
+        true  => {
+            keep := hs_size(p)
+            q := hs_alloc(n)
+            (q == null_ptr()).match ({
+                true  => q,
+                false => {
+                    memcpy(q, p, (keep < n).then({ keep }, { n }))
+                    q
+                },
+            })
+        },
+        // realloc(NULL, n) IS an allocation, so inside a scope it belongs to the scope — routing it
+        // to libc would hand a request a block nothing ever reclaims.
+        false => (hs_on && p == null_ptr()).then({ hs_alloc(n) }, { realloc(p, n) }),
+    })
+}
+// Releasing INTO an open scope is a no-op — the chunk it lives in is recycled whole at scope end.
+// A durable block (malloc'd outside every chunk) is freed immediately, exactly as before.
+heap_release* = (state: RawPtr<u8>, p: RawPtr<u8>) void {
+    (hs_owns(p) == false).then({
+        free(p)
+    })
+}
+// ── request scope: a recycled bump region under the heap floor ────────────────────────────────────
+// A batch compile is ALLOWED to leak: `zen check` builds an AST, prints, and exits — freeing it would
+// be work the OS is about to do anyway. `zen lsp` runs that same pipeline once per keystroke, and the
+// identical non-free is then unbounded growth (measured: ~58 MB resident per didChange).
+//
+// A request scope bounds it without touching the pipeline. While the scope is open, acquire bump-
+// allocates from a chunk chain instead of calling malloc, release defers, and `heap_scope_end` hands
+// every byte the request touched to the next request. The chunks are KEPT rather than freed, so a
+// long session settles at one request's high-water mark and never re-faults those pages back in.
+//
+// The rule this imposes on callers: NOTHING allocated inside a scope may be read after it — state a
+// server keeps ACROSS requests (compiler.lsp_docs) is acquired from the durable floor instead, and
+// those pointers sit outside every chunk, so release/resize route them straight back to libc.
+//
+// With the scope closed — the CLI, every test, every zen program — `hs_on` is false and `hs_head` is
+// null: acquire is one bool test then malloc, release is one null test then free. Same behaviour.
+//
+// chunk block: [ next:i64 | cap:i64 | off:i64 | pad:i64 | payload… ]. The payload starts 32 bytes in
+// and every bump is a multiple of 16, so results keep malloc's 16-byte alignment. Each block carries
+// a 16-byte header holding its requested size, which is what lets resize copy the right byte count.
+HS_HDR = () i64 { 32 }
+HS_BLK = () i64 { 16 }
+HS_CHUNK0 = () i64 { 4194304 }
+hs_on := false
+hs_head := null_ptr()
+hs_cur := null_ptr()
+hs_next = (c: RawPtr<u8>) RawPtr<u8> { load_i64(c).offset(0) }
+hs_set_next = (c: RawPtr<u8>, nx: RawPtr<u8>) void { store_i64(c, to_i64(nx)) }
+hs_cap = (c: RawPtr<u8>) i64 { load_i64(c.offset(8)) }
+hs_off = (c: RawPtr<u8>) i64 { load_i64(c.offset(16)) }
+hs_set_off = (c: RawPtr<u8>, v: i64) void { store_i64(c.offset(16), v) }
+hs_size = (p: RawPtr<u8>) i64 { load_i64(p.offset(0 - HS_BLK())) }
+hs_chunk = (cap: i64) RawPtr<u8> {
+    c := malloc(HS_HDR() + cap)
+    (c == null_ptr()).match ({
+        true  => c,
+        false => {
+            hs_set_next(c, null_ptr())
+            store_i64(c.offset(8), cap)
+            hs_set_off(c, 0)
+            c
+        },
+    })
+}
+// the chunk that can serve `need` bytes: the current one while it has room, else the next link.
+hs_fit = (need: i64) RawPtr<u8> {
+    c := hs_cur
+    (c != null_ptr() && hs_cap(c) - hs_off(c) >= need).then({ c }, { hs_extend(need) })
+}
+// Walk to the next chunk the chain ALREADY holds (a request recycling the previous request's memory)
+// and re-arm it; when there is none, or it is too small for a single outsized block, splice a fresh
+// chunk of at least double the last in front of it — splicing rather than appending so no existing
+// chunk is ever orphaned.
+hs_extend = (need: i64) RawPtr<u8> {
+    nxt := (hs_cur == null_ptr()).then({ hs_head }, { hs_next(hs_cur) })
+    (nxt != null_ptr() && hs_cap(nxt) >= need).match ({
+        true  => {
+            hs_set_off(nxt, 0)
+            hs_cur = nxt
+            nxt
+        },
+        false => {
+            grow := (hs_cur == null_ptr()).then({ HS_CHUNK0() }, { hs_cap(hs_cur) * 2 })
+            fresh := hs_chunk((grow < need).then({ need }, { grow }))
+            (fresh == null_ptr()).match ({
+                true  => fresh,
+                false => {
+                    hs_set_next(fresh, nxt)
+                    (hs_cur == null_ptr()).match ({
+                        true  => {
+                            hs_head = fresh
+                            0
+                        },
+                        false => {
+                            hs_set_next(hs_cur, fresh)
+                            0
+                        },
+                    })
+                    hs_cur = fresh
+                    fresh
+                },
+            })
+        },
+    })
+}
+// bump `n` bytes out of the open scope; null when the chain cannot grow (the OOM contract of malloc).
+hs_alloc = (n: i64) RawPtr<u8> {
+    need := HS_BLK() + (n + 15) / 16 * 16
+    c := (need < 0).then({ null_ptr() }, { hs_fit(need) })
+    (c == null_ptr()).match ({
+        true  => c,
+        false => {
+            p := c.offset(HS_HDR() + hs_off(c))
+            hs_set_off(c, hs_off(c) + need)
+            store_i64(p, n)
+            p.offset(HS_BLK())
+        },
+    })
+}
+// is `p` a block this scope's chunks handed out? The chain is a handful of links, so this is a few
+// range compares — and exactly one null test in a process that never opens a scope.
+hs_in_chunk = (c: RawPtr<u8>, a: i64) bool {
+    base := to_i64(c) + HS_HDR()
+    a >= base && a < base + hs_cap(c)
+}
+hs_owns_from = (c: RawPtr<u8>, a: i64) bool {
+    (c == null_ptr()).match ({
+        true  => false,
+        false => hs_in_chunk(c, a).then({ true }, { hs_owns_from(hs_next(c), a) }),
+    })
+}
+hs_owns = (p: RawPtr<u8>) bool { hs_owns_from(hs_head, to_i64(p)) }
+// Open a request scope: from here every acquire comes out of the chunk chain. Not nestable — one
+// served request, one scope.
+heap_scope_begin* = () void { hs_on = true }
+// Close it and reclaim the whole request in one step: the chunks stay mapped for the next request,
+// and `hs_cur = null` re-arms the chain from its head. Every pointer the request handed out is dead
+// after this call.
+heap_scope_end* = () void {
+    hs_on = false
+    hs_cur = null_ptr()
+}
 Heap.impl(Allocator, {
     acquire = (s: MutPtr<Heap>, n: i64) RawPtr<u8> { heap_acquire(null_ptr(), n) }
     resize = (s: MutPtr<Heap>, p: RawPtr<u8>, n: i64) RawPtr<u8> { heap_resize(null_ptr(), p, n) }
@@ -36,7 +195,7 @@ Heap.impl(Allocator, {
 })
 // Bootstrap compatibility: compiler entrypoints still take Ptr<Malloc>.
 Malloc.impl(Allocator, {
-    acquire = (s: MutPtr<Malloc>, n: i64) RawPtr<u8> { heap_acquire(null_ptr(), n) }
+    acquire = (s: MutPtr<Malloc>, n: i64) RawPtr<u8> { heap_request_acquire(n) }
     resize = (s: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { heap_resize(null_ptr(), p, n) }
     release = (s: MutPtr<Malloc>, p: RawPtr<u8>) void { heap_release(null_ptr(), p) }
 })

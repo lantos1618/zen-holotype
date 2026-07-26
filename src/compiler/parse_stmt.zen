@@ -11,7 +11,7 @@
 { Token, scan } = compiler.lex
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
-{ enode, lexeme, is_op, op_str, parse_atom } = compiler.parse_atom
+{ enode, is_op, is_op1, is_walrus, lexeme, op_str, parse_atom } = compiler.parse_atom
 { is_dot, parse_or_nested } = compiler.parse_postfix
 { is_field_colon } = compiler.parse_primary
 { parse_or } = compiler.parse_expr
@@ -42,17 +42,10 @@ slnode = (a: MutPtr<Malloc>, v: SList) Ptr<SList> {
 }
 snil = (a: MutPtr<Malloc>) Ptr<SList> { a.slnode(snil_val()) }
 scons = (a: MutPtr<Malloc>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
-// is there a `name :=` at `pos`? (an Ident, then the two-byte ':=' symbol)
-is_assign = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == '=',
-        _    => false,
-    })
-}
 is_let_here = (src: string_view, pos: i32) bool {
     sc := src.scan(pos)
     sc.tok.kind.match ({
-        .Ident => src.is_assign(src.scan(sc.next).tok),
+        .Ident => src.is_walrus(src.scan(sc.next).tok),
         _      => false,
     })
 }
@@ -68,19 +61,12 @@ is_typed_let_here = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
                 true  => {
                     te := a.parse_ty(src, colon.next)    // consume the type; te.next lands at ':=' or '='
                     op := src.scan(te.next)
-                    src.is_assign(op.tok) || src.is_eq(op.tok)
+                    src.is_walrus(op.tok) || src.is_op1(op.tok, '=')
                 },
                 false => false,
             })
         },
         _      => false,
-    })
-}
-// is there a `name =` at `pos`? (an Ident, then a single-byte `=` — not `:=`, not `==`)
-is_eq = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Sym => t.len == 1 && src.at(t.start) == '=',
-        _    => false,
     })
 }
 // Skip a place-expression suffix: a chain of `.field` and `[index]` postfixes after the head ident, so
@@ -100,7 +86,7 @@ skip_place = (src: string_view, pos: i32) i32 {
 is_set_here = (src: string_view, pos: i32) bool {
     sc := src.scan(pos)    // `[ … ]` -> skip past the matching ']'
     sc.tok.kind.match ({
-        .Ident => src.is_eq(src.scan(src.skip_place(sc.next)).tok),
+        .Ident => src.is_op1(src.scan(src.skip_place(sc.next)).tok, '='),
         _      => false,
     })
 }    // ident (.field | [i])* '='
@@ -119,7 +105,7 @@ is_idxset_here = (src: string_view, pos: i32) bool {
     nt := src.scan(pos)
     nt.tok.kind.match ({
         .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({
-            true  => src.is_eq(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok),
+            true  => src.is_op1(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok, '='),
             false => false,
         }),
         _      => false,
@@ -172,9 +158,9 @@ is_return_kw = (src: string_view, t: Token) bool {
 is_return_here = (src: string_view, pos: i32) bool {
     sc := src.scan(pos)
     src.is_return_kw(sc.tok).match ({
-        true  => src.is_assign(src.scan(sc.next).tok).match ({
+        true  => src.is_walrus(src.scan(sc.next).tok).match ({
             true  => false,
-            false => src.is_eq(src.scan(sc.next).tok).then({ false }, { true }),
+            false => src.is_op1(src.scan(sc.next).tok, '=').then({ false }, { true }),
         }),
         false => false,
     })

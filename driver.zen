@@ -23,8 +23,8 @@
 { genJsModuleIn } = compiler.backend.js.js
 { pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ first_user_import_in, file_exists } = std.internal.resolve
-{ ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = std.internal.resolve_ffi
+{ first_user_import_in, file_exists } = compiler.resolve
+{ ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = compiler.resolve_ffi
 { say, derr, push_int, pid_path, dirname, last_slash, push_prefix, push_span, pad_sp, finish_cstr,
   join2, cstr_substr, bs_push_range, zt_ms, zt_log, resolve_prog, dir_exists } = compiler.drvutil
 { report_no_if_plain, report_no_if_resolved, report_check } = compiler.drvdiag
@@ -522,7 +522,7 @@ emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
 // (bootstrap/zenrt.js) + the module JS; `build --target js` writes the same to a .js file. Additive:
 // it reuses the exact resolve/parse/check pipeline, only swapping genModuleIn for genJsModuleIn. ──
 js_floor = (mp: MutPtr<Malloc>, root: string_view) string_view {
-    contents_in(mp, mp.bs_join(root, "bootstrap/zenrt.js")).match ({
+    contents_in(mp, mp.join2(root, "bootstrap/zenrt.js")).match ({
         .Ok(src) => src,
         .Err(e)  => {
             derr("zenc: emit-js: cannot open bootstrap/zenrt.js floor\n")
@@ -1371,7 +1371,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     (e == "").then({ mp.dirname(arg(0)) }, { e })
 }
 HELP = () string_view {
-    "usage: zenc <run|build|profile|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--time] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc run [--time] <file|project> [args]  compile + run; --time prints per-stage compile timings\n  zenc profile [--raw] <file.zen|project> [-- args]\n                                       sampling profile (perf; gprof fallback) with zen-native names\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
+    "usage: zenc <run|build|profile|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--time] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc run [--time] <file|project> [args]  compile + run; --time prints per-stage compile timings\n  zenc profile [--raw] <file.zen|project> [-- args]\n                                       sampling profile (perf; gprof fallback) with zen-native names\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code, unused-import + clone report (--strict exits 1;\n                                       clones are advisory and never affect the exit code)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
 }
 VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
 main = () i32 {
@@ -1599,19 +1599,11 @@ bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first
         },
     })
 }
-bs_join = (mp: MutPtr<Malloc>, root: string_view, rel: string_view) string_view {
-    mp
-        .gstr_string(256)
-        .gstr_append(mp, root)
-        .gstr_append(mp, "/")
-        .gstr_append(mp, rel)
-        .gstr_finish(mp)
-}
 bs_rel = (mp: MutPtr<Malloc>, mv: [u8], s: i64, t: i64) string_view {
     mp.bs_push_range(mp.gstr_string(256), mv, s, t).gstr_finish(mp)
 }
 bs_add_source = (mp: MutPtr<Malloc>, out: String, root: string_view, rel: string_view) String {
-    path := mp.bs_join(root, rel)
+    path := mp.join2(root, rel)
     contents_in(mp, path).match ({
         .Ok(src) => {
             sv := src.view()
@@ -1866,12 +1858,12 @@ bs_shake = (mp: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     kept
 }
 build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view, shake: bool) i32 {
-    mpath := mp.bs_join(root, "bootstrap/sources.txt")
+    mpath := mp.join2(root, "bootstrap/sources.txt")
     contents_in(mp, mpath).match ({
         .Ok(man) => {
             mv := man.view()
             flat := mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
-            entry := mp.bs_join(root, "driver.zen")
+            entry := mp.join2(root, "driver.zen")
             contents_in(mp, entry).match ({
                 .Ok(esrc) => mp.bs_emit_checked(root, out_path, flat, entry, esrc, shake),
                 .Err(e)   => {

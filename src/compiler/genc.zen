@@ -666,7 +666,9 @@ dtraitdef* = (trname: string_view, fn: Func) Decl {
         fn: fn,
     ))
 }
-mono_tynode_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
+// `t` boxed into a fresh 1-element heap cell — THE way a Ty child (Ptr pointee, Slice elem,
+// FnT ret) is attached to its parent, since the AST recurses through Ptr<Ty>.
+tnode* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
     buf := cbuf<Ty>(a, 1)
     buf[0] = t
     buf[0].addr()
@@ -680,9 +682,8 @@ fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
     })
     buf
 }
-ty_node_in* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
 fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty {
-    fntype(a.fnt_param_tys_in(f.params), a.ty_node_in(f.ret))
+    fntype(a.fnt_param_tys_in(f.params), a.tnode(f.ret))
 }
 // pragma, intrinsic decl, anything
 // map a narrow int/float type name to its C type; any other name passes through unchanged.
@@ -767,8 +768,8 @@ tparam_arg = (tparams: [Param], args: [Ty], n: string_view, dflt: Ty) Ty {
 subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
     t.match ({
         .Named(n)   => tparams.tparam_arg(args, n, t),
-        .Ptr(pd)    => tptr_k(a.mono_tynode_in(a.subst_ty_in(tparams, args, load(pd.pointee))), pd.kind),
-        .Slice(e)   => tslice(a.mono_tynode_in(a.subst_ty_in(tparams, args, load(e)))),
+        .Ptr(pd)    => tptr_k(a.tnode(a.subst_ty_in(tparams, args, load(pd.pointee))), pd.kind),
+        .Slice(e)   => tslice(a.tnode(a.subst_ty_in(tparams, args, load(e)))),
         .Generic(g) => a.subst_generic_in(tparams, args, g),    // a nested generic field: substitute its args, re-mangle
         .FnT(ft)    => a.subst_fnt_in(tparams, args, ft),    // a function-VALUE field `(S, i32) S`: substitute inside the signature
         _           => t,
@@ -780,7 +781,7 @@ subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty
     ft.params.loop((h, i, p) {
         ptys[i] = a.subst_ty_in(tparams, args, p)
     })
-    fntype(ptys, a.mono_tynode_in(a.subst_ty_in(tparams, args, load(ft.ret))))
+    fntype(ptys, a.tnode(a.subst_ty_in(tparams, args, load(ft.ret))))
 }
 // substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
 subst_generic_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], g: GenericData) Ty {
