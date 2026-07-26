@@ -710,44 +710,42 @@ width_cname = (n: string_view) string_view {
     })
     n
 }
-// the C type name of a Ty as a plain string — used to substitute `sizeof(T)` in a generic body
-// (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
+// THE C spelling of a type's HEAD — the single source of truth for the two passes below. They must
+// agree byte for byte, because cname_len sizes the buffer that cname_write then fills: the lengths
+// used to be spelled here as literals (7, 6, 4, 11, …), so re-spelling a type in the write ladder
+// and forgetting its count in the length ladder under-sized the buffer and wrote past it.
+cname_head = (t: Ty) string_view {
+    t.match ({
+        .I32           => "int32_t",
+        .I64           => "int64_t",
+        .U8            => "uint8_t",
+        .F64           => "double",
+        .Bool          => "bool",
+        .Void          => "void",
+        .StringView    => "const char*",
+        .StringCstr    => "const char*",
+        .StringLiteral => "const char*",
+        .Named(n)      => width_cname(n),
+        .Generic(g)    => g.mangled,
+        .Ptr(pd)       => "",    // recursive: a pointer's spelling is its pointee's plus `*` — see below
+        .Slice(e)      => "zslice",
+        .FnT(ft)       => "zfn",
+    })
+}
 cname_len = (t: Ty) i64 {
     t.match ({
-        .I32           => 7,
-        .I64           => 7,
-        .U8            => 7,
-        .F64           => 6,
-        .Bool          => 4,
-        .Void          => 4,
-        .StringView    => 11,
-        .StringCstr    => 11,
-        .StringLiteral => 11,
-        .Named(n)      => width_cname(n).view().len,
-        .Generic(g)    => g.mangled.view().len,
-        .Ptr(pd)       => load(pd.pointee).cname_len() + 1,
-        .Slice(e)      => 6,
-        .FnT(ft)       => 3,
+        .Ptr(pd) => load(pd.pointee).cname_len() + 1,
+        _        => t.cname_head().view().len,
     })
 }
 cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
     t.match ({
-        .I32           => dst.write_str(at, "int32_t"),
-        .I64           => dst.write_str(at, "int64_t"),
-        .U8            => dst.write_str(at, "uint8_t"),
-        .F64           => dst.write_str(at, "double"),
-        .Bool          => dst.write_str(at, "bool"),
-        .Void          => dst.write_str(at, "void"),
-        .StringView    => dst.write_str(at, "const char*"),
-        .StringCstr    => dst.write_str(at, "const char*"),
-        .StringLiteral => dst.write_str(at, "const char*"),
-        .Named(n)      => dst.write_str(at, width_cname(n)),
-        .Generic(g)    => dst.write_str(at, g.mangled),
-        .Ptr(pd)       => dst.write_str(dst.cname_write(at, load(pd.pointee)), "*"),
-        .Slice(e)      => dst.write_str(at, "zslice"),
-        .FnT(ft)       => dst.write_str(at, "zfn"),
+        .Ptr(pd) => dst.write_str(dst.cname_write(at, load(pd.pointee)), "*"),
+        _        => dst.write_str(at, t.cname_head()),
     })
 }
+// the C type name of a Ty as a plain string — used to substitute `sizeof(T)` in a generic body
+// (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
 ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) string_view {
     n := t.cname_len()
     buf: RawPtr<u8> := a.acquire(n + 1)
