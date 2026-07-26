@@ -9,6 +9,7 @@ expected='./README.md
 ./docs/MEMORY_MODEL.md
 ./docs/SPEC.md
 ./docs/STATUS.md
+./docs/memory-usage-map.md
 ./docs/metaprogramming-vision.md
 ./docs/name-interning-design.md
 ./docs/profiling.md
