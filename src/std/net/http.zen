@@ -1,4 +1,4 @@
-// std.net.http — a minimal blocking HTTP/1.1 client over std.net.socket.
+// std.net.http — minimal blocking HTTP/1.1, both ends, over std.net.socket.
 //
 // Scope: one request per connection (`Connection: close`, read to EOF), no TLS, no keep-alive,
 // no redirects, no cookies. Chunked transfer-encoding is decoded; otherwise the body is trimmed
@@ -16,6 +16,18 @@
 //   r.body_bytes                                // body as length-carrying [u8] (binary-safe)
 //   r.body                                      // same buffer as NUL-terminated text
 //
+// The SERVER half answers requests. It is here and not in a sibling module because a request is a
+// response with a different first line: `parse_parts` — the CRLFCRLF split, the header list, the
+// chunked/Content-Length body — is one parser serving both, and `crlf`/`decimal`/`append_range`/
+// `own_bytes` are shared line by line. Splitting the file would not shrink what a client links (the
+// bare C names are emitted either way); it would only promote eight internals to public API to reach
+// across the boundary.
+//
+//   l := http_listen("127.0.0.1", 0).expect("listen")   // 0 = kernel-chosen ephemeral port
+//   hi = (a: MutPtr<Heap>, q: Request) Response { respond(200, a.no_headers(), "hi") }
+//   a.serve_once(l, hi)                        // accept one, answer it, close
+//   a.serve_n(l, 0 - 1, hi)                    // ... or every connection until the listener dies
+//
 // Network/parse failures are `Result<_, HttpError>` values; internal allocation failures panic
 // via `.expect` (the std.text.str convention). `parse_response` is independently testable: it
 // takes the raw response as a length-carrying `[u8]` and needs no socket, so canned responses
@@ -24,7 +36,7 @@
 // CRLF is written with '\r'/'\n' char literals — the formatter canonicalises a "\r" string
 // escape into a raw CR byte in source, so CR never appears inside a string literal here.
 { Result, Opt, IoError, ok, err, expect } = std.core.result
-{ TcpConn, dial } = std.net.socket
+{ TcpConn, TcpListener, serve, dial } = std.net.socket
 // `init`, NOT `new_in`: std.mem.arc also exports `new_in`, and a program combining this module
 // with the actor pool (std.concurrent.pool imports arc) would collide in the flat namespace.
 { String, init, append_in, push_in, finish_in } = std.text.string
@@ -32,18 +44,28 @@
 { integer } = std.text.num
 { is_hex, hex_nibble } = std.text.ascii
 // ── error channel ────────────────────────────────────────────────────────────────────────────────────
-// Connect: the TCP handshake failed. Io: a send/receive failed mid-exchange. Malformed: the bytes
-// came back but are not a well-formed HTTP/1.1 response (the payload is the human reason).
-HttpError*: Connect(IoError) | Io(IoError) | Malformed(string_view)
+// Connect: the client's TCP handshake failed. Listen: the server's bind/listen/accept failed — a
+// listener-level fault, not one connection's. Io: a send/receive failed mid-exchange. Malformed: the
+// bytes arrived but are not a well-formed HTTP/1.1 message (the payload is the human reason).
+HttpError*: Connect(IoError) | Listen(IoError) | Io(IoError) | Malformed(string_view)
 connect_err = (e: IoError) HttpError { .Connect(e) }
+listen_err = (e: IoError) HttpError { .Listen(e) }
 io_err = (e: IoError) HttpError { .Io(e) }
 malformed = (m: string_view) HttpError { .Malformed(m) }
 // human-readable label; `.Malformed` renders its own reason string.
 http_error_name* = (e: HttpError) string_view {
     e.match ({
         .Connect(x)   => "Connect",
+        .Listen(x)    => "Listen",
         .Io(x)        => "Io",
         .Malformed(m) => m,
+    })
+}
+// a listener-level failure ends a serve loop; any other error was just one bad connection.
+fatal* = (e: HttpError) bool {
+    e.match ({
+        .Listen(x) => true,
+        _          => false,
     })
 }
 // ── response shape ────────────────────────────────────────────────────────────────────────────────────
@@ -139,34 +161,56 @@ own_bytes<A> = (a: MutPtr<A>, b: [u8]) [u8] {
     p.offset(b.len).store(0)
     out
 }
-// parse a raw HTTP/1.1 response (status line, CRLF headers, blank line, body) into a `Response`.
-// The head region is ASCII text, so it is copied to a NUL-terminated str for the line scan; the
-// body keeps its true length end-to-end so binary payloads are not truncated.
-parse_response*<A> = (a: MutPtr<A>, raw: [u8]) Result<Response, HttpError> {
+// Everything an HTTP/1.1 request and response have in common: a first line whose MEANING differs
+// (status line vs request line) but whose position does not, the header list, and the resolved body.
+// Requests and responses share one parser because they share one grammar below the first line.
+MsgParts: {
+    first: string_view,
+    headers: [Header],
+    body: [u8],
+}
+// split a raw message at its CRLFCRLF boundary. The head region is ASCII text, so it is copied to a
+// NUL-terminated str for the line scan; the body keeps its true length end-to-end so binary payloads
+// are not truncated.
+parse_parts<A> = (a: MutPtr<A>, raw: [u8]) Result<MsgParts, HttpError> {
     sep := raw.crlfcrlf()
-    out: Result<Response, HttpError> := (sep < 0).match ({
+    out: Result<MsgParts, HttpError> := (sep < 0).match ({
         true  => err(malformed("http: no CRLFCRLF header terminator")),
         false => {
             head := cstr(a.own_bytes(raw.head_bytes(sep)).ptr)
             body_raw: [u8] := raw.tail_bytes(sep + 4)
             lines := a.split(head, '\n')    // each line still carries a trailing '\r'
-            res: Result<Response, HttpError> := a.parse_status(lines[0]).match ({
+            res: Result<MsgParts, HttpError> := a.collect_headers(lines).match ({
+                .Err(e)      => .Err(e),
+                .Ok(headers) => {
+                    ok_res: Result<MsgParts, HttpError> := .Ok(MsgParts(
+                        first: lines[0],
+                        headers: headers,
+                        body: a.decide_body(headers, body_raw),
+                    ))
+                    ok_res
+                },
+            })
+            res
+        },
+    })
+    out
+}
+// parse a raw HTTP/1.1 response (status line, CRLF headers, blank line, body) into a `Response`.
+parse_response*<A> = (a: MutPtr<A>, raw: [u8]) Result<Response, HttpError> {
+    out: Result<Response, HttpError> := a.parse_parts(raw).match ({
+        .Err(e) => .Err(e),
+        .Ok(p)  => {
+            res: Result<Response, HttpError> := a.parse_status(p.first).match ({
                 .Err(e)     => .Err(e),
                 .Ok(status) => {
-                    hres: Result<Response, HttpError> := a.collect_headers(lines).match ({
-                        .Err(e)      => .Err(e),
-                        .Ok(headers) => {
-                            bb := a.decide_body(headers, body_raw)
-                            ok_res: Result<Response, HttpError> := .Ok(Response(
-                                status: status,
-                                headers: headers,
-                                body: cstr(bb.ptr),
-                                body_bytes: bb,
-                            ))
-                            ok_res
-                        },
-                    })
-                    hres
+                    ok_res: Result<Response, HttpError> := .Ok(Response(
+                        status: status,
+                        headers: p.headers,
+                        body: cstr(p.body.ptr),
+                        body_bytes: p.body,
+                    ))
+                    ok_res
                 },
             })
             res
@@ -289,6 +333,14 @@ decode_chunked<A> = (a: MutPtr<A>, bv: [u8]) [u8] {
     a.chunk_loop(bv, 0, sb).bytes()
 }
 // ── request construction + the live socket path ───────────────────────────────────────────────────────
+// `n` as decimal text — the header values that are numbers (Content-Length, a port, a status code).
+decimal<A> = (a: MutPtr<A>, n: i64) string_view {
+    a
+        .integer(n)
+        .expect("http: oom")
+        .finish_in(a)
+        .expect("http: oom")
+}
 // append a CRLF line terminator to the builder (char literals — see the header note).
 crlf<A> = (a: MutPtr<A>, sb: String) String {
     a.push_in(a.push_in(sb, '\r').expect("http: oom"), '\n').expect("http: oom")
@@ -322,13 +374,7 @@ build_request<A> = (
     })
     (body.view().len > 0).then({
         sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
-        sb = a
-            .append_in(sb, a
-                .integer(to_i64(body.view().len))
-                .expect("http: oom")
-                .finish_in(a)
-                .expect("http: oom"))
-            .expect("http: oom")
+        sb = a.append_in(sb, a.decimal(to_i64(body.view().len))).expect("http: oom")
         sb = a.crlf(sb)
     })
     sb = a.crlf(sb)    // blank line: end of headers
@@ -389,6 +435,19 @@ no_headers*<A> = (a: MutPtr<A>) [Header] {
         name: "",
         value: "",
     ), 0)
+}
+// a one-element header list — the common case for a server that sets a Content-Type. `nbuf` hands
+// back UNINITIALISED slots (its seed is only a type witness), so the slot is written here.
+one_header*<A> = (a: MutPtr<A>, name: string_view, value: string_view) [Header] {
+    hs := a.nbuf(Header(
+        name: "",
+        value: "",
+    ), 1)
+    hs[0] = Header(
+        name: name,
+        value: value,
+    )
+    hs
 }
 // the common case: a GET with no extra headers and no body.
 get*<A> = (
@@ -459,13 +518,7 @@ url_of*<A> = (a: MutPtr<A>, host: string_view, port: i32, path: string_view) str
     sb = a.append_in(sb, "http://").expect("http: oom")
     sb = a.append_in(sb, host).expect("http: oom")
     sb = a.append_in(sb, ":").expect("http: oom")
-    sb = a
-        .append_in(sb, a
-            .integer(to_i64(port))
-            .expect("http: oom")
-            .finish_in(a)
-            .expect("http: oom"))
-        .expect("http: oom")
+    sb = a.append_in(sb, a.decimal(to_i64(port))).expect("http: oom")
     sb = a.append_in(sb, path).expect("http: oom")
     a.finish_in(sb).expect("http: oom")
 }
@@ -486,4 +539,197 @@ http_request*<A> = (
         .Err(e) => err(e),
         .Ok(u)  => a.request(method, u.host, u.port, u.path, headers, body),
     })
+}
+// ── server side: answering a request ──────────────────────────────────────────────────────────────────
+// A parsed request — `Response`'s mirror image. Same headers, same two-faced body storage
+// (`body_bytes` is the binary-safe truth, `body` the NUL-terminated text view); only the first line
+// differs, carrying `method`/`path` where a response carries `status`.
+Request*: {
+    method: string_view,
+    path: string_view,
+    headers: [Header],
+    body: string_view,
+    body_bytes: [u8],
+    header = (r: Request, name: string_view) Opt<string_view> { lookup_header(r.headers, name) }
+}
+// parse a raw HTTP/1.1 request (`<method> <target> HTTP/1.1`, CRLF headers, blank line, body). Only
+// the first line is parsed here — every other byte goes through the same `parse_parts` the client's
+// `parse_response` uses, so there is exactly one header parser in this module.
+parse_request*<A> = (a: MutPtr<A>, raw: [u8]) Result<Request, HttpError> {
+    out: Result<Request, HttpError> := a.parse_parts(raw).match ({
+        .Err(e) => .Err(e),
+        .Ok(p)  => {
+            toks := a.words(p.first)
+            res: Result<Request, HttpError> := (toks.len < 2).match ({
+                true  => err(malformed("http: request line has fewer than two tokens")),
+                false => {
+                    ok_res: Result<Request, HttpError> := .Ok(Request(
+                        method: toks[0],
+                        path: toks[1],
+                        headers: p.headers,
+                        body: cstr(p.body.ptr),
+                        body_bytes: p.body,
+                    ))
+                    ok_res
+                },
+            })
+            res
+        },
+    })
+    out
+}
+// the reason phrase for the codes a minimal server actually emits. HTTP/1.1 lets a client ignore the
+// phrase entirely, so an unlisted code borrows "OK" rather than growing a table nobody reads.
+status_reason* = (code: i32) string_view {
+    (code == 201).match ({
+        true  => "Created",
+        false => (code == 204).match ({
+            true  => "No Content",
+            false => (code == 400).match ({
+                true  => "Bad Request",
+                false => (code == 404).match ({
+                    true  => "Not Found",
+                    false => (code == 405).match ({
+                        true  => "Method Not Allowed",
+                        false => (code == 500).then({ "Internal Server Error" }, { "OK" }),
+                    }),
+                }),
+            }),
+        }),
+    })
+}
+// the answer a handler hands back. It is the same `Response` the client PARSES — one struct describes
+// a response on both sides of the wire. `body_bytes` mirrors `body`, so a body containing NULs must
+// build the struct directly instead of going through here.
+respond* = (status: i32, headers: [Header], body: string_view) Response {
+    Response(
+        status: status,
+        headers: headers,
+        body: body,
+        body_bytes: body.view(),
+    )
+}
+// serialise a response onto the wire: status line, the caller's headers, an auto `Content-Length` taken
+// from `body_bytes`, `Connection: close`, the blank line, then the body. Returns `[u8]` and not a str
+// (the mirror of `build_request`) because a body may be binary — a str would stop at the first NUL.
+build_response*<A> = (a: MutPtr<A>, r: Response) [u8] {
+    sb := a.init(16).expect("http: oom")
+    sb = a.append_in(sb, "HTTP/1.1 ").expect("http: oom")
+    sb = a.append_in(sb, a.decimal(to_i64(r.status))).expect("http: oom")
+    sb = a.append_in(sb, " ").expect("http: oom")
+    sb = a.append_in(sb, status_reason(r.status)).expect("http: oom")
+    sb = a.crlf(sb)
+    r.headers.loop((h, i, hd) {
+        sb = a.append_in(sb, hd.name).expect("http: oom")
+        sb = a.append_in(sb, ": ").expect("http: oom")
+        sb = a.append_in(sb, hd.value).expect("http: oom")
+        sb = a.crlf(sb)
+    })
+    sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
+    sb = a.append_in(sb, a.decimal(r.body_bytes.len)).expect("http: oom")
+    sb = a.crlf(sb)
+    sb = a.append_in(sb, "Connection: close").expect("http: oom")
+    sb = a.crlf(sb)
+    sb = a.crlf(sb)    // blank line: end of headers
+    a.append_range(r.body_bytes, 0, r.body_bytes.len, sb).bytes()
+}
+// how many bytes the message in `raw` occupies on the wire: head + CRLFCRLF + any `Content-Length`
+// body. -1 means the head has not fully arrived yet (keep reading). This is what a SERVER needs and a
+// client does not: the peer holds the connection open waiting to be answered, so there is no EOF to
+// read to — the message must be self-delimiting. A request body must therefore carry Content-Length;
+// a `Transfer-Encoding: chunked` request reads as body-less and is answered on its headers alone.
+wire_len<A> = (a: MutPtr<A>, raw: [u8]) i64 {
+    sep := raw.crlfcrlf()
+    (sep < 0).match ({
+        true  => 0 - 1,
+        false => {
+            head := cstr(a.own_bytes(raw.head_bytes(sep)).ptr)
+            body: i64 := a.collect_headers(a.split(head, '\n')).match ({
+                .Ok(hs) => lookup_header(hs, "Content-Length").match ({
+                    .Some(cl) => cl.parse_int(),
+                    .None     => 0,
+                }),
+                .Err(e) => 0,
+            })
+            sep + 4 + body
+        },
+    })
+}
+// drain one whole request off `c`: recv until `wire_len` says the message is complete, or the peer
+// hangs up. The client's `read_loop` reads to EOF; a server must stop at the message boundary.
+read_msg_loop<A> = (a: MutPtr<A>, c: TcpConn, buf: RawPtr<u8>, sb: String) String {
+    raw := sb.bytes()
+    want := a.wire_len(raw)
+    (want >= 0 && raw.len >= want).match ({
+        true  => sb,
+        false => c.recv_into(buf, READ_CHUNK).match ({
+            .Ok(nr) => (nr <= 0).match ({
+                true  => sb,
+                false => a.read_msg_loop(c, buf, a.append_range(buf.slice(nr), 0, nr, sb)),
+            }),
+            .Err(e) => sb,
+        }),
+    })
+}
+read_request<A> = (a: MutPtr<A>, c: TcpConn) [u8] {
+    buf := a.acquire(READ_CHUNK)
+    full := a.read_msg_loop(c, buf, a.init(16).expect("http: oom"))
+    a.release(buf)
+    full.bytes()
+}
+// bind an HTTP listener on `host:port` (port 0 = kernel-chosen ephemeral, read back with
+// `l.local_port()`). The one call that opens a socket, so an HTTP app never imports std.net.socket.
+http_listen* = (host: string_view, port: i32) Result<TcpListener, HttpError> {
+    serve(host, port).match ({
+        .Ok(l)  => ok(l),
+        .Err(e) => err(listen_err(e)),
+    })
+}
+// answer exactly ONE connection on `l`: accept, read the request, hand it to `handler`, write what the
+// handler returned, close. The listener stays open, so the caller decides whether to serve again —
+// that is what makes this composable (a demo serves one; an actor behaviour serves one per message).
+// A request that will not parse is still answered, with `400`, before its error is returned: an
+// accepted connection always gets a reply.
+serve_once*<A> = (
+    a: MutPtr<A>,
+    l: TcpListener,
+    handler: (MutPtr<A>, Request) Response,
+) Result<Request, HttpError> {
+    out: Result<Request, HttpError> := l.accept_conn().match ({
+        .Err(e) => err(listen_err(e)),
+        .Ok(c)  => {
+            res: Result<Request, HttpError> := a.parse_request(a.read_request(c)).match ({
+                .Err(e)  => {
+                    c.send(a.build_response(respond(400, a.no_headers(), "")))
+                    err(e)
+                },
+                .Ok(req) => {
+                    sent: Result<Request, HttpError> := c.send(a.build_response(handler(a, req))).match ({
+                        .Ok(n)  => ok(req),
+                        .Err(e) => err(io_err(e)),
+                    })
+                    sent
+                },
+            })
+            c.close_conn()
+            res
+        },
+    })
+    out
+}
+// serve `n` connections in sequence, or every connection until the listener dies when `n < 0` (the
+// forever server). One bad connection does not end the loop — it was answered and closed, and the
+// next accept carries on; only a `fatal` listener-level error stops it. Returns the count answered.
+// ITERATIVE, not recursive: a long-lived server must not grow the C stack once per request.
+serve_n*<A> = (a: MutPtr<A>, l: TcpListener, n: i64, handler: (MutPtr<A>, Request) Response) i64 {
+    served: i64 := 0
+    live := true
+    @while (live && (n < 0 || served < n)) {
+        live = a.serve_once(l, handler).match ({
+            .Ok(r)  => true,
+            .Err(e) => fatal(e).then({ false }, { true }),
+        })
+        served = live.then({ served + 1 }, { served })
+    }
+    served
 }
