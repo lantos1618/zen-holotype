@@ -1,10 +1,10 @@
 // compiler.validate.args — argument, struct-field-init, and member/slice-literal checks.
-{ ArmData, CallData, Decl, Expr, Field, FieldInit, Func, MakeStructData, MethodCallData, Param,
-  Stmt, Ty, VariantDef } = compiler.ast.ast_types
+{ ArmData, CallData, Decl, Expr, Field, FieldInit, Func, LoopData, MakeStructData, MethodCallData,
+  Param, Stmt, Ty, VariantDef } = compiler.ast.ast_types
 { gstr_append, gstr_finish, gstr_push, gstr_string, subst_ty_in, tvoid } = compiler.genc
 { DeclIndex, Env, arm_env, enum_name, extend_env, is_lit_numeric, params_env } = compiler.check
 { Malloc } = std.mem.alloc
-{ field_in, slice_any, wr_root_name } = compiler.astops
+{ field_in, lam_stmt_body, slice_any, wr_root_name } = compiler.astops
 { at, is_alnum } = std.text.ascii
 { ends_with, is_empty } = std.text.str
 { String } = std.text.string
@@ -16,6 +16,7 @@
 { AliasList, DeadList, consume_depth, dead_cons, dead_has, dead_kill, dead_nil, dead_remove,
   own_moved_var, owner_base, sd_call_pos, sm_call_pos, sm_mcall_pos } = compiler.validate.ownership
 { kv_at } = compiler.validate.core
+{ expr_fold_children } = compiler.ast.expr_children
 // A slice LITERAL may be element-wise coerced into an expected slice type while stored slice types
 // remain invariant. This accepts `["a", "b"]` at a `[string_view]` call slot without allowing a
 // named `[string_literal]` variable to flow to mutable `[string_view]` storage.
@@ -380,7 +381,11 @@ ae_collect_expr = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, e: Ptr<Expr>) Ptr<Dea
         .Block(b) => a.ae_collect(seen, b.stmts),
         .Loop(l)  => a.ae_collect(seen, l.body),
         .Cond(d)  => a.ae_collect_expr(a.ae_collect_expr(seen, d.t), d.e),
-        _         => seen,
+        // a lambda is INLINED at its call site, so its `let`s are storage in THIS frame; the rest of
+        // the descent is structural, which is what the exhaustive child listing gives.
+        _         => seen.expr_fold_children(e, (acc, ch) { a.ae_collect_expr(acc, ch) }, (acc, body) {
+            a.ae_collect(acc, body)
+        }),
     })
 }
 ae_collect_stmt = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
@@ -459,7 +464,39 @@ ae_taint_step = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) Ptr<DeadList> {
         }),
         .Assign(x)   => a.ae_taint_store(cx, x.target, x.value),
         .IndexSet(x) => a.ae_taint_store(cx, x.seq, x.value),
+        .ExprStmt(e) => a.ae_taint_expr(cx, e),
         _            => cx.tainted,
+    })
+}
+// A store into a local is not confined to the top level: `[1].loop((h, i, e) { acc = x.addr() })` taints
+// `acc` for everything after the loop. The taint set only GROWS, so walking a body once is a sound
+// over-approximation of running it any number of times, and the walk is otherwise pure structural
+// descent — every statement list an expression carries gets the same threading as the top level.
+ae_taint_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) Ptr<DeadList> {
+    cur := cx
+    body.loop((h, i, st) {
+        cur = cur.ae_taint(a.ae_taint_step(cur, st))
+    })
+    cur.tainted
+}
+// a loop BINDS its element name, so iterating a sequence that carries a frame address makes the element
+// carry it too (`[x.addr()].loop((h, i, e) { acc = e })`). The binding is dropped again on the way out
+// (unless the name was already tainted outside), so the loop's private name cannot taint an unrelated
+// later local that happens to share it.
+ae_taint_loop = (a: MutPtr<Malloc>, cx: AeCtx, l: LoopData) Ptr<DeadList> {
+    esc := a.ae_escapes(cx, l.seq, true)
+    inner := a.ae_taint_stmts(cx.ae_taint(esc.match ({
+        true  => a.dead_cons(l.elem, cx.tainted),
+        false => cx.tainted,
+    })), l.body)
+    (esc && cx.tainted.dead_has(l.elem) == false).then({ a.dead_remove(inner, l.elem) }, { inner })
+}
+ae_taint_expr = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) Ptr<DeadList> {
+    load(e).match ({
+        .Loop(l) => a.ae_taint_loop(cx, l),
+        _        => cx.tainted.expr_fold_children(e, (acc, ch) {
+            a.ae_taint_expr(cx.ae_taint(acc), ch)
+        }, (acc, body) { a.ae_taint_stmts(cx.ae_taint(acc), body) }),
     })
 }
 // a store INTO a local place (`s.p = x.addr()`, `ps[0] = x.addr()`) taints the place's root local. A
@@ -493,8 +530,15 @@ ae_stmts_val_escapes = (a: MutPtr<Malloc>, cx: AeCtx, stmts: [Stmt], hop: bool, 
 ae_inits_escape = (a: MutPtr<Malloc>, cx: AeCtx, inits: [FieldInit], hop: bool) bool {
     inits.slice_any((fi) { a.ae_escapes(cx, fi.value, hop) })
 }
-ae_arms_escape = (a: MutPtr<Malloc>, cx: AeCtx, arms: [ArmData], hop: bool) bool {
-    arms.slice_any((ar) { a.ae_escapes(cx, ar.body, hop) })
+// a match EXTRACTS: when the subject carries a frame address, the payload an arm binds carries it too,
+// so `ev := Cell.S(x.addr())` … `ev.match ({ .S(w) => w, … })` hands the address back out through `w`.
+ae_arms_escape = (a: MutPtr<Malloc>, cx: AeCtx, arms: [ArmData], hop: bool, subj: bool) bool {
+    arms.slice_any((ar) {
+        a.ae_escapes(cx.ae_taint((subj && ar.bind == "" == false).match ({
+            true  => a.dead_cons(ar.bind, cx.tainted),
+            false => cx.tainted,
+        })), ar.body, hop)
+    })
 }
 ae_items_escape = (a: MutPtr<Malloc>, cx: AeCtx, items: [Expr], hop: bool) bool {
     items.slice_any((it) { a.ae_escapes(cx, it.addr(), hop) })
@@ -539,9 +583,14 @@ ae_ret_yields = (
 ) bool {
     load(e).match ({
         .Var(v)        => v.name == name,
-        .Call(c)       => (c.fn == "slice" && c.args.len > 0).match ({
-            true  => a.ae_ret_yields(decls, idx, name, c.args[0].addr(), depth),
-            false => a.ae_ret_call(decls, idx, c, name, depth),
+        // `name` INVOKED: an FnT param (`apply = (f: () T) T { f() }`) hands its lambda's value
+        // straight back out, so a lambda whose body yields a frame address escapes through the call.
+        .Call(c)       => (c.fn == name).match ({
+            true  => true,
+            false => (c.fn == "slice" && c.args.len > 0).match ({
+                true  => a.ae_ret_yields(decls, idx, name, c.args[0].addr(), depth),
+                false => a.ae_ret_call(decls, idx, c, name, depth),
+            }),
         }),
         .MakeStruct(s) => a.ae_ret_inits(decls, idx, s.inits, name, depth),
         .MakeEnum(mk)  => a.ae_ret_yields(decls, idx, name, mk.payload, depth),
@@ -846,7 +895,7 @@ ae_escapes = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>, hop: bool) bool {
             // before validation reads a body — unreachable, listed to keep the match total
             .MakeEnum(mk)   => a.ae_escapes(cx, mk.payload, hop),
             .MakeStruct(s)  => a.ae_inits_escape(cx, s.inits, hop),
-            .Match(m)       => a.ae_arms_escape(cx, m.arms, hop),
+            .Match(m)       => a.ae_arms_escape(cx, m.arms, hop, a.ae_escapes(cx, m.subj, hop)),
             .Cond(d)        => a.ae_escapes(cx, d.t, hop) || a.ae_escapes(cx, d.e, hop),
             .Block(b)       => a.ae_stmts_val_escapes(cx, b.stmts, hop, true),
             .SliceLit(sd)   => a.ae_items_escape(cx, sd.items, hop),
@@ -871,11 +920,19 @@ ae_kv_arms = (a: MutPtr<Malloc>, cx: AeCtx, arms: [ArmData]) i32 {
 }
 ae_kv_expr_stmt = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Match(m) => a.ae_kv_arms(cx, m.arms),
-        .Cond(d)  => a.ae_kv_expr_stmt(cx, d.t).or(a.ae_kv_expr_stmt(cx, d.e)),
-        .Block(b) => a.ae_kv_stmts(cx, b.stmts),
-        .Loop(l)  => a.ae_kv_stmts(cx, l.body),
-        _         => 0,
+        .Match(m)   => a.ae_kv_arms(cx, m.arms),
+        .Cond(d)    => a.ae_kv_expr_stmt(cx, d.t).or(a.ae_kv_expr_stmt(cx, d.e)),
+        .Block(b)   => a.ae_kv_stmts(cx, b.stmts),
+        .Loop(l)    => a.ae_kv_stmts(cx, l.body),
+        // a lambda body is checked WITHOUT its implicit trailing return: that value is the lambda's
+        // result, which this discarded call throws away — reading it as a function return would
+        // reject `apply(() { x.addr() })`, where nothing leaves the frame.
+        .Lambda(lm) => a.ae_kv_stmts(cx, lm.body.lam_stmt_body()),
+        // a send / out-param store / escaping return can sit in ANY nested statement list, and a
+        // `.Lambda` body reached only through a call argument was in none of the arms above.
+        _           => 0.expr_fold_children(e, (acc, ch) { acc.or(a.ae_kv_expr_stmt(cx, ch)) }, (acc, body) {
+            acc.or(a.ae_kv_stmts(cx, body))
+        }),
     })
 }
 ae_kv_stmt = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) i32 {
@@ -985,7 +1042,11 @@ sv_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, mode: i32) i32 {
         .SliceLit(sd)   => a.sv_args(env, sd.items, mode),
         .Loop(l)        => a.sv_expr(env, l.seq, mode).or(a.sv_body(env, l.body, mode)),
         .Block(b)       => a.sv_body(env, b.stmts, mode),
-        _               => 0,
+        // the rest is a plain structural descent. `.Lambda` was missing from the hand-written list, so
+        // a send inside a lambda body — the shape actor code is written in — was never classified.
+        _               => 0.expr_fold_children(e, (acc, ch) { acc.or(a.sv_expr(env, ch, mode)) }, (acc, body) {
+            acc.or(a.sv_body(env, body, mode))
+        }),
     })
 }
 sv_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, mode: i32) i32 {
