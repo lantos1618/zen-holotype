@@ -12,7 +12,7 @@
   is_rparen, is_shr_close, param_buf, parse_ty, parse_tyargs, perr_set_at, register_anon,
   skip_block, take_params } = compiler.parse_type
 { build_body } = compiler.parse_stmt
-{ enode, is_op, lexeme, parse_atom, parse_payload_args } = compiler.parse_atom
+{ enode, is_op, is_walrus, lexeme, parse_atom, parse_payload_args } = compiler.parse_atom
 { is_dot, is_ident_tok, is_upper_byte, nl_between, parse_or_nested, parse_postfix } = compiler.parse_postfix
 { PExpr } = compiler.parse_expr
 is_lparen* = (src: string_view, t: Token) bool { src.is_op(t, '(') }
@@ -219,12 +219,6 @@ parse_generic_struct_lit = (
 // first top-level separator is a `,` or the closing `}` — NOT a `:=` (which would make it a typed-let
 // block `{ x: T := … }`). The literal's structural name (mangle_anon_in over the field names) matches
 // the one parse_type synthesizes for the corresponding `{ q: T, r: T }` TYPE, so they share a C struct.
-is_walrus_tok = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == '=',
-        _    => false,
-    })
-}
 looks_anon_struct* = (src: string_view, pos: i32) bool {
     id := src.scan(pos)    // pos just past '{'
     is_ident_tok(id.tok).match ({
@@ -255,7 +249,7 @@ anon_scan_open = (src: string_view, sc: Scan, depth: i32) i32 {
         false => (src.is_rparen(sc.tok) || src.is_rbracket(sc.tok)).match ({
             true  => src.anon_scan_kind(sc.next, depth - 1),
             false => (depth == 0).match ({
-                true  => src.is_walrus_tok(sc.tok).match ({
+                true  => src.is_walrus(sc.tok).match ({
                     true  => 0,
                     false => src.is_comma(sc.tok).match ({
                         true  => 1,

@@ -4,6 +4,7 @@
 // why the walk, the roots, and the finding types are all exported rather than private here.
 { Malloc } = std.mem.alloc
 { view, is_empty, starts_with, ends_with } = std.text.str
+{ is_alnum, is_alpha } = std.text.ascii    // ident-byte classes (the audit scanner's own copies were dups)
 { then } = std.core.bool
 { expect } = std.core.result
 { Map, of } = std.collections.map    // name -> decl-index / seen-set maps
@@ -16,7 +17,7 @@
 { report_no_if_resolved, report_check } = compiler.drvdiag
 { ResolvedProgram, ModuleEntry, seen_name, add_name } = std.internal.resolve
 { edges_of, cache_module_path } = compiler.modgraph
-{ say, derr, push_int, dir_exists, resolve_prog, dirname } = compiler.drvutil
+{ say, cstr_range, derr, push_int, dir_exists, resolve_prog, dirname } = compiler.drvutil
 // ── zen audit — dead-code + unused-import + clone reporter (`--strict` exits 1; clones advisory) ──
 // Dead-decl analysis runs over the SAME whole-program pipeline `check` uses (resolve imports ->
 // parse -> resolve_module), so alias qualification, UFCS dispatch and trait-default materialization
@@ -712,8 +713,6 @@ AudImp: {
     lo: i64,
     hi: i64,
 }
-aud_is_ident_start = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_' }
-aud_is_ident_char = (b: u8) bool { b.aud_is_ident_start() || b >= '0' && b <= '9' }
 // 1-based line of byte `pos` (iterative — module sources are hundreds of KB).
 aud_line_of = (v: [u8], pos: i64) i64 {
     ln := 1
@@ -736,7 +735,7 @@ aud_imp_span_hi = (v: [u8], pos: i64) i64 {
     @while (i < v.len && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '=')) {
         i = i + 1
     }
-    @while (i < v.len && (v[i].aud_is_ident_char() || v[i] == '.')) {
+    @while (i < v.len && (v[i].is_alnum() || v[i] == '.')) {
         i = i + 1
     }
     i
@@ -822,9 +821,9 @@ aud_step = (ents: [AudImp], nents: i64, v: [u8], i0: i64) i64 {
         }
         return i + 1
     })
-    b.aud_is_ident_start().then({
+    b.is_alpha().then({
         i := i0 + 1
-        @while (i < n && v[i].aud_is_ident_char()) {
+        @while (i < n && v[i].is_alnum()) {
             i = i + 1
         }
         ents.aud_mark_used(nents, v, i0, i)
@@ -1263,7 +1262,7 @@ aud_has_main = (src: string_view) bool {
             && v[i + 1] == 'a'
             && v[i + 2] == 'i'
             && v[i + 3] == 'n'
-            && v[i + 4].aud_is_ident_char() == false).then({
+            && v[i + 4].is_alnum() == false).then({
             j := i + 4
             (j < v.len && v[j] == '*').then({
                 j = j + 1
@@ -1279,17 +1278,6 @@ aud_has_main = (src: string_view) bool {
         i = i + 1
     }
     found
-}
-// the bytes [s,e) of `v` as a fresh cstr (embedded names are substrings of a literal, never
-// NUL-terminated in place).
-aud_bytes = (mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) string_view {
-    o := mp.gstr_string(e - s + 1)
-    i := s
-    @while (i < e) {
-        o = o.gstr_push(mp, v[i])
-        i = i + 1
-    }
-    o.gstr_finish(mp)
 }
 // one string-literal body [a,b): find import-shaped fragments. `{ x, y } = mod` aud_refs each name
 // as a root; `alias = dotted.mod` (a dot is required — plain `x = y` assignments are everywhere in
@@ -1323,13 +1311,13 @@ aud_embed_lit = (
                 q = q + 1
             }
             s0 := q
-            @while (q < b && (v[q].aud_is_ident_char() || v[q] == '.')) {
+            @while (q < b && (v[q].is_alnum() || v[q] == '.')) {
                 q = q + 1
             }
             @while (q > s0 && v[q - 1] == '.') {
                 q = q - 1
             }
-            rhs_ok := q > s0 && v[s0].aud_is_ident_start()
+            rhs_ok := q > s0 && v[s0].is_alpha()
             (rhs_ok && v[k] == '}').then({
                 // `{ names } = mod` — each imported name becomes a root.
                 p := k - 1
@@ -1339,13 +1327,13 @@ aud_embed_lit = (
                 (v[p] == '{').then({
                     x := p + 1
                     @while (x < k) {
-                        v[x].aud_is_ident_start().match ({
+                        v[x].is_alpha().match ({
                             true  => {
                                 x0 := x
-                                @while (x < k && v[x].aud_is_ident_char()) {
+                                @while (x < k && v[x].is_alnum()) {
                                     x = x + 1
                                 }
-                                ac.aud_ref(mp.aud_bytes(v, x0, x))
+                                ac.aud_ref(mp.cstr_range(v, x0, x))
                             },
                             false => {
                                 x = x + 1
@@ -1354,10 +1342,10 @@ aud_embed_lit = (
                     }
                 })
             })
-            (rhs_ok && v[k].aud_is_ident_char()).then({
+            (rhs_ok && v[k].is_alnum()).then({
                 // `alias = dotted.mod` — require a dotted RHS at (embedded) line start.
                 is := k
-                @while (is > a && v[is - 1].aud_is_ident_char()) {
+                @while (is > a && v[is - 1].is_alnum()) {
                     is = is - 1
                 }
                 w := is - 1
@@ -1373,9 +1361,9 @@ aud_embed_lit = (
                     })
                     y = y + 1
                 }
-                (atbol && dotted && v[is].aud_is_ident_start()).then({
+                (atbol && dotted && v[is].is_alpha()).then({
                     one: i64 := 1
-                    m = m.put(mp, mp.aud_bytes(v, s0, q), one).expect("audit: oom")
+                    m = m.put(mp, mp.cstr_range(v, s0, q), one).expect("audit: oom")
                 })
             })
         })
