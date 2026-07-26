@@ -84,7 +84,12 @@ loop_lets_expr = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadL
         .Match(m) => a.loop_lets_arms(acc, m.arms),
         .Cond(d)  => a.loop_lets_expr(a.loop_lets_expr(acc, d.t), d.e),
         .Loop(l)  => a.loop_lets(a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, acc))), l.body),
-        _         => acc,
+        // the rest is structural: a `let` inside a `.Lambda` body (inlined into the loop) is just as
+        // fresh-per-iteration as one written directly in the body, and missing it made the
+        // free-in-loop rule read that name as declared OUTSIDE the loop.
+        _         => acc.expr_fold_children(e, (acc2, ch) { a.loop_lets_expr(acc2, ch) }, (acc2, body) {
+            a.loop_lets(acc2, body)
+        }),
     })
 }
 loop_lets_arms = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
