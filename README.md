@@ -31,7 +31,8 @@ Every verb below was run before it was written down.
 - `./zen emit prog.zen` / `./zen emit-js prog.zen | node` — see exactly what lowers
 - `./zen fmt prog.zen` — formatter, proven safe (below)
 - `./zen init hello --bin` — new project; the generated project runs as-is
-- `./zen lsp` — language server, live checker diagnostics over stdio
+- `./zen lsp` — language server: diagnostics, highlighting, go-to-definition, hover,
+  completion — over stdio
 - `./zen audit driver.zen` — dead-code + unused-import report
 - `./zen doc std.text.fmt` — a module's exported surface
 - `./zen targets .` — outputs registered by `build.zen`
@@ -136,7 +137,8 @@ zenc: bad.zen:4:13: error[arity]: wrong number of arguments: expected 2, found 1
 hint: check the callee signature and pass exactly the declared parameters
 ```
 
-The same diagnostics stream through `./zen lsp`:
+The same diagnostics stream through `./zen lsp`, alongside semantic highlighting,
+go-to-definition, hover and completion:
 
 - **Neovim** — [`editor/nvim/README.md`](editor/nvim/README.md)
 - **VS Code** — [`editor/vscode/`](editor/vscode/README.md)
