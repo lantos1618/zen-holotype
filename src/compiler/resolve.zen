@@ -16,12 +16,12 @@
 { open, close, write } = std.c.libc
 { ends_with, is_empty, starts_with, view } = std.text.str
 // Extracted internal helper families (shared types + this pipeline stay here; see each module head).
-{ enforce_visibility, enforce_private_leaks, vis_report_mode } = std.internal.resolve_vis
-{ enforce_ffi_grants, genmod_lookup } = std.internal.resolve_ffi
-{ shadow_flat, shadow_flat_users } = std.internal.resolve_shadow
+{ enforce_visibility, enforce_private_leaks, vis_report_mode } = compiler.resolve_vis
+{ enforce_ffi_grants, genmod_lookup } = compiler.resolve_ffi
+{ shadow_flat, shadow_flat_users } = compiler.resolve_shadow
 { all_decl_names_in, copy_block_comment, copy_line_comment, copy_literal, edge_alias_in, edge_id_in,
   is_any_marker_at, is_c_kw_name_span, has_import_marker, module_graph, opens_import, str_bytes,
-  symbol_name_in, value_decl_names_in } = std.internal.resolve_scan
+  symbol_name_in, value_decl_names_in } = compiler.resolve_scan
 lstrip* = (s: string_view, p: i32) i32 { at(s, p).is_blank().then({ s.lstrip(p + 1) }, { p }) }
 is_import_line* = (s: string_view, p: i32) bool {
     ls := s.lstrip(p)
@@ -105,13 +105,13 @@ add_name* = (set: String, a: MutPtr<Malloc>, name: String) String {
 // marker (0); membership is by key.
 rset_new* = (a: MutPtr<Malloc>) Map<i64> {
     seed: i64 := 0 - 1
-    of(a, "", seed).expect("std.internal.resolve: rset alloc")
+    of(a, "", seed).expect("compiler.resolve: rset alloc")
 }
 rset_add* = (m: Map<i64>, a: MutPtr<Malloc>, key: String) Map<i64> {
-    m.put(a, cstr(key.ptr), 0).expect("std.internal.resolve: rset alloc")
+    m.put(a, cstr(key.ptr), 0).expect("compiler.resolve: rset alloc")
 }
 rset_add_str* = (m: Map<i64>, a: MutPtr<Malloc>, name: string_view) Map<i64> {
-    m.put(a, name, 0).expect("std.internal.resolve: rset alloc")
+    m.put(a, name, 0).expect("compiler.resolve: rset alloc")
 }
 rset_has* = (m: Map<i64>, key: String) bool { m.has(cstr(key.ptr)) }
 // resolve's allocator-first String helpers now delegate to compiler.genc's canonical generic
@@ -207,7 +207,7 @@ empty_closure = (a: MutPtr<Malloc>) Closure {
     Closure(
         seen: a.gstr_string(256),
         out: a.gstr_string(4096),
-        useen: of(a, "", seed).expect("std.internal.resolve: useen alloc"),
+        useen: of(a, "", seed).expect("compiler.resolve: useen alloc"),
     )
 }
 ImportEdge*: {
@@ -883,14 +883,14 @@ user_symbol_seen = (
     id: String,
     inpath: string_view,
 ) Map<i64> {
-    key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+    key := s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
     kv := cstr(key.ptr)
     prev := useen.get(kv, 0 - 1)
     (prev >= 0).then({
         origin := a.gstr_string(24).gstr_append(a, table.modules[prev].id)
         a.fail_dup_user(inpath, id, s.symbol_name_in(a), origin)
     })
-    useen.put(a, kv, table.index_of_id(id)).expect("std.internal.resolve: useen alloc")
+    useen.put(a, kv, table.index_of_id(id)).expect("compiler.resolve: useen alloc")
 }
 user_decls_from_symbols = (
     a: MutPtr<Malloc>,
@@ -1002,7 +1002,7 @@ main_symbol_names = (
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
-                key := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+                key := sym.symbol_key_in(a).expect("compiler.resolve: allocation failed")
                 inmain := sym.start >= bodystart && sym.start < bodyend
                 cur = (inmain && cur.seen_name(key).then({ false }, { true })).match ({
                     true  => a.madd_name(cur, key),
@@ -1024,7 +1024,7 @@ main_symbol_names = (
 // no precedence, dedup falls back to first-seen. Value encoding: target index + 1 (>=1); 0 = contested.
 import_claims = (a: MutPtr<Malloc>, table: ModuleTable) Map<i64> {
     seed: i64 := 0 - 1
-    m := of(a, "", seed).expect("std.internal.resolve: import-claim alloc")
+    m := of(a, "", seed).expect("compiler.resolve: import-claim alloc")
     table.modules.loop((h, i, mod) {
         mod.graph.imports.loop((h2, j, e) {
             (e.namespace == false).then({
@@ -1071,9 +1071,7 @@ import_claim_head_exported = (
                                 false => (prev == enc).then({ enc }, { 0 }),
                             })
                             (val == prev == false).then({
-                                m = m
-                                    .put(a, nm, val)
-                                    .expect("std.internal.resolve: import-claim alloc")
+                                m = m.put(a, nm, val).expect("compiler.resolve: import-claim alloc")
                             })
                         })
                         pos = ie
@@ -1095,7 +1093,7 @@ claim_owner_midx = (off: i64) i64 {
 }
 empty_claims = (a: MutPtr<Malloc>) Map<i64> {
     seed: i64 := 0 - 1
-    of(a, "", seed).expect("std.internal.resolve: import-claim alloc")
+    of(a, "", seed).expect("compiler.resolve: import-claim alloc")
 }
 dedup_decls* = (a: MutPtr<Malloc>, flat: string_view, bodystart: i64, bodyend: i64) string_view {
     a.dedup_decls_mode(flat, bodystart, bodyend, false)
@@ -1150,7 +1148,7 @@ dedup_symbols = (
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
-                nm := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+                nm := sym.symbol_key_in(a).expect("compiler.resolve: allocation failed")
                 inmain := sym.start >= bodystart && sym.start < bodyend
                 shadow := allow_main_shadow
                     && inmain.then({ false }, { true })
@@ -1353,7 +1351,7 @@ dedup_impls_into = (
                                 false => {
                                     seen2 = seen2
                                         .put(a, key, to_i64(sp.start))
-                                        .expect("std.internal.resolve: impl-seen alloc")
+                                        .expect("compiler.resolve: impl-seen alloc")
                                     false
                                 },
                             })
@@ -1472,7 +1470,7 @@ rewrite_alias_names* = (
 }
 // Stage B4/R2: stamp one ns-alias bind's per-module export sig into the compiler.parse registry —
 // one SigEntry per provided symbol (name + pub/type/imported/foreign flags + origin ModuleId), so
-// the checker can enumerate an alias's exports without a std.internal.resolve import. Stamped at the
+// the checker can enumerate an alias's exports without a compiler.resolve import. Stamped at the
 // same point the module's body joins the flat (append order = flat decl order). A rebind of the SAME
 // module under the SAME alias appends no new body, so it stamps nothing (see module_sig_alias_stamped).
 note_module_sigs = (a: MutPtr<Malloc>, alias: String, graph: ModuleGraph, origin: i64) void {
@@ -2129,7 +2127,7 @@ symbol_start_of* = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: string_view) 
     posn := 0
     syms.loop((h, i, s) {
         ((s.imported || s.foreign || s.is_type) == false && posn == 0).then({
-            key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+            key := s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
             (cstr(key.ptr) == nm).then({
                 posn = s.start
             })
@@ -2196,7 +2194,7 @@ check_import_redefs = (a: MutPtr<Malloc>, table: ModuleTable) i32 {
             imported := a.imported_value_name_set(a.rset_new(), m.graph.symbols)
             m.graph.symbols.loop((h2, j, s) {
                 ((s.imported || s.foreign || s.is_type) == false).then({
-                    key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+                    key := s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
                     imported.rset_has(key).then({
                         a.fail_import_redef(m, s, key)
                     })

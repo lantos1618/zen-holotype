@@ -231,6 +231,12 @@ lspt_advance = (src: string_view, st: LsptScanLine, to: i32) LsptScanLine {
 // ── the merge walk ───────────────────────────────────────────────────────────────────────────────
 // Two position-sorted streams (lexer tokens, comments) merged into one ordered emission. The lexer
 // skips comments entirely, so without this pass every `//` line would be left unhighlighted.
+//
+// `emitted` enforces the protocol's one hard invariant: tokens arrive sorted, each encoded as a DELTA
+// from the previous one, so a span that starts before the last one ended encodes a negative delta and
+// silently corrupts every token after it — the client stops highlighting the buffer entirely. The two
+// streams come from two different scanners, so their agreement is an assumption, not a guarantee;
+// anything that would move the cursor backwards is dropped instead of trusted.
 lspt_tokens* = (mp: MutPtr<Malloc>, src: string_view) string_view {
     cmts := mp.collect_comments(src)
     cur := LsptCur(
@@ -245,6 +251,7 @@ lspt_tokens* = (mp: MutPtr<Malloc>, src: string_view) string_view {
     )
     ci: i64 := 0
     pos := 0
+    emitted := 0
     running := true
     @while (running) {
         sc := src.scan(pos)
@@ -255,8 +262,11 @@ lspt_tokens* = (mp: MutPtr<Malloc>, src: string_view) string_view {
         @while (ci < cmts.len && (tstart < 0 || cmts[ci].start < tstart)) {
             // drain every comment that opens before the next token (or all of them at Eof)
             c := cmts[ci]
-            st = src.lspt_advance(st, c.start)
-            cur = cur.lspt_emit_span(mp, src, st, c.start, c.start + c.len, LSPT_COMMENT())
+            (c.start >= emitted).then({
+                st = src.lspt_advance(st, c.start)
+                cur = cur.lspt_emit_span(mp, src, st, c.start, c.start + c.len, LSPT_COMMENT())
+                emitted = c.start + c.len
+            })
             ci = ci + 1
         }
         (tstart < 0).match ({
@@ -264,8 +274,11 @@ lspt_tokens* = (mp: MutPtr<Malloc>, src: string_view) string_view {
                 running = false
             },
             false => {
-                st = src.lspt_advance(st, tstart)
-                cur = cur.lspt_emit_span(mp, src, st, tstart, tstart + sc.tok.len, src.lspt_tok_type(sc.tok))
+                (tstart >= emitted).then({
+                    st = src.lspt_advance(st, tstart)
+                    cur = cur.lspt_emit_span(mp, src, st, tstart, tstart + sc.tok.len, src.lspt_tok_type(sc.tok))
+                    emitted = tstart + sc.tok.len
+                })
                 pos = sc.next
             },
         })

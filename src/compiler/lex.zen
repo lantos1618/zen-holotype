@@ -446,7 +446,10 @@ count_from = (src: string_view, pos: i32) i32 {
 // So this is a SEPARATE pass over the raw source that records each comment as a span into it, plus
 // whether it is TRAILING — i.e. non-whitespace appears before it on the same line (`x := 1  // note`)
 // vs. a LEADING comment that owns its own line. Strings/chars are honored so a `//` inside `"…"`
-// or a `}` inside a comment never desyncs (mirrors the lexer's own string/char/escape handling).
+// or a `}` inside a comment never desyncs (mirrors the lexer's own string/char/escape handling) — and a
+// `"""` raw literal is skipped WHOLE, because its quotes are content: tracking them as open/close
+// parity mistakes a `//` inside one for a comment, which then overlaps the string token the real
+// lexer reports (see compiler.lsp_tokens) and injects a phantom comment into formatter output.
 // The result is a flat, position-SORTED [Comment] the formatter consults by byte offset — comments
 // stay sidecar data, never entering the AST, so the lowered tree (and emitted C) is unchanged.
 Comment*: {
@@ -525,19 +528,24 @@ count_comments = (src: string_view) i32 {
                             n = n + 1
                             i = src.skip_block_comment(i + 2)
                         },
-                        false => (b == '"').match ({
+                        false => src.rawstr_at(i).match ({
                             true  => {
-                                in_str = true
-                                i = i + 1
+                                i = src.rawstr_end(i + 3)
                             },
-                            false => (b == '\'').match ({
+                            false => (b == '"').match ({
                                 true  => {
-                                    in_char = true
+                                    in_str = true
                                     i = i + 1
                                 },
-                                false => {
-                                    i = i + 1
-                                },
+                                false => (b == '\'').match ({
+                                    true  => {
+                                        in_char = true
+                                        i = i + 1
+                                    },
+                                    false => {
+                                        i = i + 1
+                                    },
+                                }),
                             }),
                         }),
                     }),
@@ -634,19 +642,24 @@ fill_comments = (src: string_view, buf: [Comment], k0: i32) void {
                             k = k + 1
                             i = e
                         },
-                        false => (b == '"').match ({
+                        false => src.rawstr_at(i).match ({
                             true  => {
-                                in_str = true
-                                i = i + 1
+                                i = src.rawstr_end(i + 3)
                             },
-                            false => (b == '\'').match ({
+                            false => (b == '"').match ({
                                 true  => {
-                                    in_char = true
+                                    in_str = true
                                     i = i + 1
                                 },
-                                false => {
-                                    i = i + 1
-                                },
+                                false => (b == '\'').match ({
+                                    true  => {
+                                        in_char = true
+                                        i = i + 1
+                                    },
+                                    false => {
+                                        i = i + 1
+                                    },
+                                }),
                             }),
                         }),
                     }),
