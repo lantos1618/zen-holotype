@@ -6,6 +6,7 @@
   extend_env, is_intrinsic, is_void_ty, loop_env, params_env, ufcs_vis_off } = compiler.check
 { resolve_module } = compiler.check_resolve
 { map_slice } = compiler.astops
+{ expr_fold_children } = compiler.ast.expr_children
 { Malloc } = std.mem.alloc
 { is_empty } = std.text.str
 { assert_nonnull_kind, body_pos, cv_no_params, env_imported, env_is_enum, env_is_gen_struct,
@@ -1557,24 +1558,10 @@ check_module_escape_diagnostic_from_source* = (
 // params, let/assign target names) are NOT reads and are correctly not matched here.
 name_read_in_expr* = (nm: string_view, e: Ptr<Expr>) bool {
     load(e).match ({
-        .Var(v)         => v.name == nm,
-        .Bin(b)         => nm.name_read_in_expr(b.lhs) || nm.name_read_in_expr(b.rhs),
-        .Call(c)        => nm.name_read_in_args(c.args),
-        .MethodCall(mc) => nm.name_read_in_expr(mc.recv) || nm.name_read_in_args(mc.args),
-        .Cond(d)        => nm.name_read_in_expr(d.c)
-            || nm.name_read_in_expr(d.t)
-            || nm.name_read_in_expr(d.e),
-        .Member(m)      => nm.name_read_in_expr(m.obj),
-        .Arrow(ar)      => nm.name_read_in_expr(ar.obj),
-        .MakeEnum(mk)   => nm.name_read_in_expr(mk.payload),
-        .MakeStruct(s)  => nm.name_read_in_inits(s.inits),
-        .Match(m)       => nm.name_read_in_expr(m.subj) || nm.name_read_in_arms(m.arms),
-        .SliceLit(sd)   => nm.name_read_in_args(sd.items),
-        .Index(ix)      => nm.name_read_in_expr(ix.seq) || nm.name_read_in_expr(ix.idx),
-        .Loop(l)        => nm.name_read_in_expr(l.seq) || nm.name_read_in_body(l.body),
-        .Lambda(lm)     => nm.name_read_in_body(lm.body),
-        .Block(b)       => nm.name_read_in_body(b.stmts),
-        _               => false,
+        .Var(v) => v.name == nm,
+        _       => false.expr_fold_children(e, (acc, ch) { acc || nm.name_read_in_expr(ch) }, (acc, body) {
+            acc || nm.name_read_in_body(body)
+        }),
     })
 }
 name_read_in_args* = (nm: string_view, args: [Expr]) bool {
