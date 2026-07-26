@@ -2,6 +2,7 @@
 // Allocating helpers take the caller allocator explicitly and return Result so allocation
 // failure stays in the value flow (`.expect("…")` at fail-fast roots).
 { try_acquire } = std.mem.alloc
+{ copy } = std.mem.raw
 { Result, IoError, expect, ok, err } = std.core.result
 { strlen, strcmp } = std.c.libc
 { is_space } = std.text.ascii
@@ -12,11 +13,8 @@ ne* = (a: string_view, b: string_view) bool { a.eq(b).then({ false }, { true }) 
 // ── bytes: borrow or own ────────────────────────────────────────────────────
 view* = (s: string_view) [u8] { s.slice(s.strlen()) }
 alloc_size = (n: i64) i64 { (n == 0).then({ 1 }, { n }) }
-copy_bytes = (src: [u8], out: [u8]) void {
-    src.loop((h, i, b) {
-        out[i] = b
-    })
-}
+// `out` is always a FRESH allocation here, so it never overlaps `src` — `copy`, not `move`.
+copy_bytes = (src: [u8], out: [u8]) void { out.ptr.copy(src.ptr, src.len) }
 dup_bytes_in*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError> {
     src := s.view()
     a.try_acquire(src.len.alloc_size()).match ({
@@ -96,16 +94,7 @@ pin = (x: i64, lo: i64, hi: i64) i64 {
     })
 }
 copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
-    out.loop((h, i, b) {
-        (i < m).match ({
-            true  => {
-                out[i] = sv[lo + i]
-            },
-            false => {
-                h.break
-            },
-        })
-    })
+    out.ptr.copy(sv.ptr.offset(lo), m)
     out[m] = 0
 }
 // Out-of-range is clamped: a.substr("hi", 1, 99) == "i"; a.substr("hi", 5, 2) == "".
@@ -283,9 +272,7 @@ words*<A> = (a: MutPtr<A>, s: string_view) [string_view] { a.words_in(s) }
 // copy `t`'s bytes into `out` starting at `at`; return the offset just past them.
 copy_at = (out: [u8], at: i64, t: string_view) i64 {
     tv := t.view()
-    tv.loop((h, i, b) {
-        out[at + i] = b
-    })
+    out.ptr.offset(at).copy(tv.ptr, tv.len)
     at + tv.len
 }
 // the 'A'..'Z' / 'a'..'z' case shift; non-letters pass through. ASCII-ONLY (bytes 0x80+ untouched).
