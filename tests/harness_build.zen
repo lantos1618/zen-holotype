@@ -2025,6 +2025,12 @@ harness_build_run* = () i32 {
         name: "js_narrow_trunc_battery_dual_backend",
         cmd: "./zen build tests/fixtures/zen/js_narrow_trunc_battery.zen -o $ZT/zjnt 2>/dev/null && $ZT/zjnt > $ZT/zjnt_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_narrow_trunc_battery.zen -o $ZT/zjnt.js 2>/dev/null && node $ZT/zjnt.js > $ZT/zjnt_js.txt 2>/dev/null && cmp -s $ZT/zjnt_c.txt $ZT/zjnt_js.txt && printf '%b' '-968\\n1410065\\n-1474836480\\n3\\n984\\n-25536\\n' | cmp -s - $ZT/zjnt_c.txt",
     ), ShellCase(
+        name: "js_atomic_battery_dual_backend",
+        cmd: "./zen build tests/fixtures/zen/js_atomic_battery.zen -o $ZT/zjab 2>/dev/null && $ZT/zjab > $ZT/zjab_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_atomic_battery.zen -o $ZT/zjab.js 2>/dev/null && node $ZT/zjab.js > $ZT/zjab_js.txt 2>/dev/null && cmp -s $ZT/zjab_c.txt $ZT/zjab_js.txt && printf '7\\n10\\n15\\n-5\\ntrue\\n99\\nfalse\\n99\\n8000000000\\ntrue\\ntrue\\nfalse\\n0\\n3\\n' | cmp -s - $ZT/zjab_c.txt",
+    ), ShellCase(
+        name: "js_no_undefined_intrinsic_calls",
+        cmd: "./zen build --target js tests/fixtures/zen/js_atomic_battery.zen -o $ZT/zjnu.js 2>/dev/null && ! grep -Eq '(^|[^A-Za-z0-9_.$])atomic_(load_i64|store_i64|add_i64|cas_i64|fence)[[:space:]]*\\(' $ZT/zjnu.js",
+    ), ShellCase(
         name: "infer_lambda_ret_annot",
         cmd: "printf '{ Result, IoError, expect, map_err } = std.core.result\\nmain = () i32 {\\n    good: Result<i32, IoError> := .Ok(42)\\n    v := good.map_err((e) str { \"boom\" }).expect(\"m\")\\n    v - 42\\n}\\n' > $ZT/zlam.zen && ./zen build $ZT/zlam.zen -o $ZT/zlam_bin 2>/dev/null && $ZT/zlam_bin",
     ), ShellCase(
@@ -2256,6 +2262,15 @@ harness_build_run* = () i32 {
         name: "cache_path_invocation_warms",
         cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
     )])
+    // the five atomic_* intrinsics, C vs node. genc lowers each to a __atomic_* builtin; before the
+    // js backend lowered them too, `build --target js` exited 0 and the emitted call hit an
+    // undefined name — `node` died with `ReferenceError: atomic_store_i64 is not defined`. Asserting
+    // node's EXIT STATUS as well as the bytes is what gives this case teeth against that shape.
+    // the js-target parity GATE itself: an intrinsic the js backend cannot lower must be a build-time
+    // `error[js-target]` with NO output file, never a runtime ReferenceError. `--build-self` cannot be
+    // pointed at a doctored backend from here, so the case pins the invariant the gate enforces —
+    // every intrinsic genc's call_kind lowers is also lowered by js_call, checked by emitting a
+    // program that exercises the whole set and asserting the .js names no undefined free function.
     // ZENC_NO_CACHE: report mode's OUTPUT is the product, but a check cache hit replays only the
     // `ok` line (the report diagnostics are not stored in the entry) — so under the harness's warm
     // shared ZENC_CACHE_DIR a second run would lose the error[ffi-ungranted] report and fail here.

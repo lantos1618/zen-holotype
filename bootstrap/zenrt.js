@@ -77,6 +77,20 @@ const __zr = (() => {
   const div = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = tobig(b); if (bb === 0n) panic("zen: panic: integer divide by zero\n"); return norm(tobig(a) / bb); } if (b === 0) panic("zen: panic: integer divide by zero\n"); return Math.trunc(a / b); };
   const mod = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = tobig(b); if (bb === 0n) panic("zen: panic: integer modulo by zero\n"); return norm(tobig(a) % bb); } if (b === 0) panic("zen: panic: integer modulo by zero\n"); return a % b; };
   const panic = (m) => { const s = typeof m === "number" ? decode(m, strlen(m)) : String(m); process.stderr.write(s); throw new Error("zen panic"); };
+  // ── seq-cst atomics over an i64 cell (the atomic_* intrinsics) ─────────────────────────
+  // These are NOT stubs. Emitted JS runs on ONE thread with run-to-completion semantics: no other
+  // agent can observe an intermediate state of a synchronous read-modify-write, and a fence has no
+  // second thread to order against. So on this target the seq-cst contract is discharged EXACTLY by
+  // plain cell ops — the same answers C's __atomic_* give, on a machine with one thread.
+  // Real parallelism here would need Workers + SharedArrayBuffer, which nothing emits; a program that
+  // tries to spawn a thread fails loudly on `pthread_create`, which no JS floor defines. So there is
+  // no reachable state in which one of these is silently weaker than its C counterpart.
+  const atomic_load = (p) => load_i64(p);
+  const atomic_store = (p, v) => store_i64(p, v);
+  // fetch-add returning the NEW value, wrapping at 64 bits — matches C's __atomic_add_fetch.
+  const atomic_add = (p, d) => { const n = norm(BigInt.asIntN(64, tobig(load_i64(p)) + tobig(d))); store_i64(p, n); return n; };
+  const atomic_cas = (p, exp, des) => { if (tobig(load_i64(p)) !== tobig(exp)) return false; store_i64(p, des); return true; };
+  const atomic_fence = () => {};
 
   // fd 1 = stdout, 2 = stderr; ptr is a MEM offset (or, for a JS-array slice, ignored).
   const write = (fd, ptr, len) => {
@@ -87,7 +101,8 @@ const __zr = (() => {
 
   return { MEM, str, strlen, decode, jstr, malloc, load, store, offset, load_i64, store_i64,
            slice, u8lit, view, idx, setidx, eq, nn, addr, i32, i64, u8, big, wi64, wu64, u64,
-           sizeof, div, mod, panic, write };
+           sizeof, div, mod, panic, write,
+           atomic_load, atomic_store, atomic_add, atomic_cas, atomic_fence };
 })();
 
 // ── libc leaves referenced by name from emitted code. The print path needs only write/strlen; the
