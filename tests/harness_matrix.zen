@@ -1,0 +1,445 @@
+// tests/harness_matrix.zen — the POSITIONAL COVERAGE MATRIX for the semantic rules.
+//
+// WHY THIS EXISTS. Every semantic hole found by hand so far was a POSITION nobody enumerated, not an
+// exotic rule: an escaping `.addr()` laundered through a local binding, a struct field, a slice
+// element, an enum payload; a trait bound violated inside a slice literal or a lambda body; an
+// untyped literal in a `...i64` variadic slot. The other suites are CORPORA — they accumulate the
+// examples someone already thought of. This one is coverage BY CONSTRUCTION: a cross-product of
+//
+//   POSITIONS x RULES
+//
+// where POSITIONS is every syntactic slot an expression (or a statement) can sit in, derived from the
+// `Expr`/`Stmt` variants in compiler.ast.ast_types + compiler.ast.expr_children, and RULES is the set
+// of semantic checks in compiler.validate.* that are supposed to hold REGARDLESS of position.
+//
+// Each (rule, position) cell yields TWO programs: a minimal one that SHOULD be rejected, and the
+// near-miss that must still compile (over-rejection is as bad as under-rejection). The verdicts are
+// not computed here — they are read from the checked-in table
+//
+//   tests/fixtures/matrix/expected.tsv     `<cell-name> TAB <error[kind]> TAB <note>`
+//
+// so the whole matrix is one reviewable, diffable artifact. Column 3 is the human judgement for every
+// cell whose verdict is NOT "the rule fired": `ok` = the rule fired as intended, `noflow` = the bad
+// program is genuinely sound in this position (correctly accepted), `design-*` = a documented
+// narrowing, `bug-*` = a real hole, filed in the PR that introduced this file. Only columns 1-2 are
+// compared; column 3 is documentation the diff carries along.
+//
+// Adding a position or a rule is one row in mx_positions()/mx_rules() plus regenerated table rows —
+// the cross-product stays complete for free. That is the whole point: a hole in a NEW rule shows up
+// in every position at once instead of waiting for someone to imagine the right example.
+{ Malloc } = std.mem.alloc
+{ contents_in, out, save, shell } = std.io.file
+{ expect } = std.core.result
+{ len, replace } = std.text.str
+{ run_suite, zo_cmd, zo_join, zo_path } = harness_lib
+// one syntactic slot. `body` is the function body with three placeholders: `@E@` the expression under
+// test, `@T@` its type, `@Z@` a well-typed zero of that type (used to fill the OTHER slots so the
+// program stays type-correct with the carrier removed).
+MxPos*: {
+    name: string_view,
+    body: string_view,
+}
+// one semantic rule, as a pair of interchangeable expressions of the SAME type: `bad` carries the
+// defect, `good` is the near-miss. Splicing either into any MxPos gives a well-typed program, so the
+// only variable across a row is the position. `hzero` fills the shared helper decls (which sit at
+// top level, where a probe parameter like `g` is not in scope, so it may differ from `zero`).
+MxRule*: {
+    name: string_view,
+    ty: string_view,
+    zero: string_view,
+    hzero: string_view,
+    prelude: string_view,
+    setup_bad: string_view,
+    bad: string_view,
+    setup_good: string_view,
+    good: string_view,
+    params: string_view,
+}
+// the STATEMENT family: rules whose defect is statement-shaped (a leaked `let`, a discarded
+// self-mutation, a write through a read-only pointer) and therefore cannot be spliced into an
+// expression slot. `body` carries one placeholder, `@S@`.
+MxStmtPos*: {
+    name: string_view,
+    body: string_view,
+}
+MxStmtRule*: {
+    name: string_view,
+    prelude: string_view,
+    setup: string_view,
+    bad: string_view,
+    good: string_view,
+    params: string_view,
+}
+// ── AXIS 1: POSITIONS ─────────────────────────────────────────────────────────
+// Derived from the `Expr` variants (Int/Byte/FloatLit/Var/Bin/Call/MethodCall/Cond/Member/Arrow/
+// MakeEnum/MakeStruct/Tag/Match/StrLit/SliceLit/Index/Loop/Lambda/Block) and the `Stmt` variants
+// (Let/Assign/Return/If/While/IndexSet/ExprStmt). `If`/`While` are vestigial — no Zen surface syntax
+// produces them — so they have no row. Leaf variants (Int/Byte/FloatLit/StrLit/Tag) hold no
+// sub-expression and likewise have none. Every remaining child slot of every remaining variant has a
+// row, plus nesting variants (`*_nested`, `deep_block`) that probe whether a walker recurses or only
+// peeks one level.
+mx_positions* = () [MxPos] {
+    [MxPos(
+        name: "return",
+        body: "    return @E@",
+    ), MxPos(
+        name: "block_tail",
+        body: "    @E@",
+    ), MxPos(
+        name: "block_expr",
+        body: "    return { @E@ }",
+    ), MxPos(
+        name: "deep_block",
+        body: "    return { { { @E@ } } }",
+    ), MxPos(
+        name: "let_init",
+        body: "    v: @T@ := @E@\n    return v",
+    ), MxPos(
+        name: "reassign",
+        body: "    v: @T@ := @Z@\n    v = @E@\n    return v",
+    ), MxPos(
+        name: "call_arg",
+        body: "    return sink(@E@)",
+    ), MxPos(
+        name: "call_arg2",
+        body: "    return sink2(@Z@, @E@)",
+    ), MxPos(
+        name: "call_arg_nested",
+        body: "    return sink(sink(@E@))",
+    ), MxPos(
+        name: "method_recv",
+        body: "    return @E@.sink()",
+    ), MxPos(
+        name: "struct_field",
+        body: "    bx := Box(v: @E@)\n    return bx.v",
+    ), MxPos(
+        name: "enum_payload",
+        body: "    ev := Cell.S(@E@)\n    return ev.match ({\n        .S(w) => w,\n        .N    => @Z@,\n    })",
+    ), MxPos(
+        name: "slice_elem",
+        body: "    xs: [@T@] := [@E@]\n    return xs[0]",
+    ), MxPos(
+        name: "index_base",
+        body: "    return [@E@][0]",
+    ), MxPos(
+        name: "match_arm",
+        body: "    return true.match ({\n        true  => @E@,\n        false => @Z@,\n    })",
+    ), MxPos(
+        name: "match_arm_nested",
+        body: "    return true.match ({\n        true  => false.match ({\n            true  => @Z@,\n            false => @E@,\n        }),\n        false => @Z@,\n    })",
+    ), MxPos(
+        name: "cond_then",
+        body: "    return true.then({ @E@ }, { @Z@ })",
+    ), MxPos(
+        name: "cond_else",
+        body: "    return false.then({ @Z@ }, { @E@ })",
+    ), MxPos(
+        name: "cond_nested",
+        body: "    return true.then({ false.then({ @Z@ }, { @E@ }) }, { @Z@ })",
+    ), MxPos(
+        name: "lambda_body",
+        body: "    return apply(() { @E@ })",
+    ), MxPos(
+        name: "lambda_nested",
+        body: "    return apply(() { apply(() { @E@ }) })",
+    ), MxPos(
+        name: "loop_body",
+        body: "    acc: @T@ := @Z@\n    [1].loop((h, i, e) {\n        acc = @E@\n    })\n    return acc",
+    ), MxPos(
+        name: "loop_seq",
+        body: "    acc: @T@ := @Z@\n    [@E@].loop((h, i, e) {\n        acc = e\n    })\n    return acc",
+    ), MxPos(
+        name: "member_store",
+        body: "    bx := Box(v: @Z@)\n    bx.v = @E@\n    return bx.v",
+    ), MxPos(
+        name: "index_store",
+        body: "    xs: [@T@] := [@Z@]\n    xs[0] = @E@\n    return xs[0]",
+    ), MxPos(
+        name: "index_store_seq",
+        body: "    xs: [@T@] := [@Z@]\n    ys: [[@T@]] := [xs]\n    ys[0][0] = @Z@\n    return @E@",
+    ), MxPos(
+        name: "stmt_expr",
+        body: "    @E@\n    return @Z@",
+    ), MxPos(
+        name: "variadic_arg",
+        body: "    return vsum(@E@)",
+    ), MxPos(
+        name: "return_in_arm",
+        body: "    true.match ({\n        true  => {\n            return @E@\n        },\n        false => { },\n    })\n    return @Z@",
+    ), MxPos(
+        name: "return_in_nested_arm",
+        body: "    true.match ({\n        true  => {\n            false.match ({\n                true  => { },\n                false => {\n                    return @E@\n                },\n            })\n        },\n        false => { },\n    })\n    return @Z@",
+    ), MxPos(
+        name: "let_in_arm",
+        body: "    true.match ({\n        true  => {\n            w: @T@ := @E@\n            sink(w)\n        },\n        false => { },\n    })\n    return @Z@",
+    ), MxPos(
+        name: "let_in_lambda",
+        body: "    apply(() {\n        w: @T@ := @E@\n        w\n    })\n    return @Z@",
+    )]
+}
+// the shared per-type helper decls every generated program carries: a one-arg sink (also the UFCS
+// receiver probe), a two-arg sink (second-argument position), a zero-arg FnT taker (lambda body), a
+// variadic taker, a one-field struct and a one-payload enum.
+mx_helpers = () string_view {
+    "sink = (v: @T@) @T@ { v }\nsink2 = (a: @T@, b: @T@) @T@ { b }\napply = (f: () @T@) @T@ { f() }\nvsum = (xs: ...@T@) @T@ {\n    n: @T@ := @H@\n    xs.loop((h, i, e) {\n        n = e\n    })\n    n\n}\nBox: { v: @T@ }\nCell: N | S(@T@)\n"
+}
+// ── AXIS 2: RULES ─────────────────────────────────────────────────────────────
+// The position-independent checks in compiler.validate.*, one row each. The memory/ownership family
+// (escape, uaf, leak, sendable, scratch, ptrwrite) is covered completely — that is where confidence is
+// lowest. The rest are traversal probes: they answer "does the checker LOOK here at all", which is the
+// same question the memory rules ask, asked more cheaply.
+mx_rules* = () [MxRule] {
+    [MxRule(
+        name: "escape",
+        ty: "MutPtr<i64>",
+        zero: "g",
+        hzero: "null_ptr()",
+        prelude: "",
+        setup_bad: "    x: i64 := 42\n",
+        bad: "x.addr()",
+        setup_good: "",
+        good: "g",
+        params: "g: MutPtr<i64>",
+    ), MxRule(
+        name: "uaf",
+        ty: "i64",
+        zero: "0",
+        hzero: "0",
+        prelude: "halloc = std.mem.heap\n{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\n",
+        setup_bad: "    al := halloc.gpa()\n    o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n    o.release_in(al.addr())\n",
+        bad: "o.get().id",
+        setup_good: "    al := halloc.gpa()\n    o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n    n := o.get().id\n    o.release_in(al.addr())\n",
+        good: "n",
+        params: "",
+    ), MxRule(
+        name: "sendable",
+        ty: "bool",
+        zero: "false",
+        hzero: "false",
+        prelude: "Data*: {\n    n: i32,\n}\nMsg*: Ref(MutPtr<Data>) | View(Ptr<Data>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\n",
+        setup_bad: "    h := H(id: 1)\n",
+        bad: "h.send(.Ref(p))",
+        setup_good: "    h := H(id: 1)\n",
+        good: "h.send(.View(q))",
+        params: "p: MutPtr<Data>, q: Ptr<Data>",
+    ), MxRule(
+        name: "scratch",
+        ty: "bool",
+        zero: "false",
+        hzero: "false",
+        prelude: "halloc = std.mem.heap\nPk*: {\n    p: RawPtr<u8>,\n}\nR*: {\n    id: i32,\n}\nref_send_msg = (r: R, m: Pk) bool { true }\n",
+        setup_bad: "    hp := halloc.gpa()\n    al := hp.addr()\n    scr := al.acquire(64)\n    r := R(id: 1)\n",
+        bad: "r.ref_send_msg(Pk(p: scr))",
+        setup_good: "    r := R(id: 1)\n",
+        good: "r.ref_send_msg(Pk(p: q))",
+        params: "q: RawPtr<u8>",
+    ), MxRule(
+        name: "ptrwrite",
+        ty: "i64",
+        zero: "0",
+        hzero: "0",
+        prelude: "",
+        setup_bad: "",
+        bad: "slice(p, 1).len",
+        setup_good: "",
+        good: "load(p)",
+        params: "p: Ptr<i64>",
+    ), MxRule(
+        name: "undefined",
+        ty: "i64",
+        zero: "0",
+        hzero: "0",
+        prelude: "",
+        setup_bad: "    ok_local: i64 := 3\n",
+        bad: "zz_no_such_name",
+        setup_good: "    ok_local: i64 := 3\n",
+        good: "ok_local",
+        params: "",
+    ), MxRule(
+        name: "arity",
+        ty: "i64",
+        zero: "0",
+        hzero: "0",
+        prelude: "two = (a: i64, b: i64) i64 { a + b }\n",
+        setup_bad: "",
+        bad: "two(1)",
+        setup_good: "",
+        good: "two(1, 2)",
+        params: "",
+    ), MxRule(
+        name: "argtype",
+        ty: "i64",
+        zero: "0",
+        hzero: "0",
+        prelude: "Good: { v: i64 }\ntakes = (a: i64) i64 { a }\n",
+        setup_bad: "",
+        bad: "takes(Good(v: 1))",
+        setup_good: "",
+        good: "takes(1)",
+        params: "",
+    ), MxRule(
+        name: "traitbound",
+        ty: "i64",
+        zero: "0",
+        hzero: "0",
+        prelude: "Show: {\n    show: (Self) i64,\n}\nYes: { v: i64 }\nNo: { v: i64 }\nYes.impl(Show, {\n    show = (s: Yes) i64 { s.v },\n})\nneeds<A: Show> = (a: A) i64 { a.show() }\n",
+        setup_bad: "",
+        bad: "needs(No(v: 1))",
+        setup_good: "",
+        good: "needs(Yes(v: 1))",
+        params: "",
+    ), MxRule(
+        name: "exhaustiveness",
+        ty: "i64",
+        zero: "0",
+        hzero: "0",
+        prelude: "Col: R | G | B\n",
+        setup_bad: "    c := Col.R\n",
+        bad: "c.match ({\n        .R => 1,\n        .G => 2,\n    })",
+        setup_good: "    c := Col.R\n",
+        good: "c.match ({\n        .R => 1,\n        .G => 2,\n        .B => 3,\n    })",
+        params: "",
+    ), MxRule(
+        name: "method_not_found",
+        ty: "i64",
+        zero: "0",
+        hzero: "0",
+        prelude: "Good: { v: i64 }\n",
+        setup_bad: "    gg := Good(v: 1)\n",
+        bad: "gg.no_such_method()",
+        setup_good: "    gg := Good(v: 1)\n",
+        good: "gg.v",
+        params: "",
+    ), MxRule(
+        name: "struct_field_name",
+        ty: "i64",
+        zero: "0",
+        hzero: "0",
+        prelude: "Good: { v: i64 }\n",
+        setup_bad: "    gg := Good(v: 1)\n",
+        bad: "gg.nofield",
+        setup_good: "    gg := Good(v: 1)\n",
+        good: "gg.v",
+        params: "",
+    )]
+}
+// ── the STATEMENT sub-matrix ──────────────────────────────────────────────────
+// Statement slots, from the `Stmt` variants plus every construct whose body is a `[Stmt]`
+// (Block/Loop/Lambda, and a match/cond arm whose body is a block). A statement carrier always sits
+// in NON-tail position (a `sink(2)` follows it), so a rule that only fires on discarded statements
+// still fires.
+mx_stmt_positions* = () [MxStmtPos] {
+    [MxStmtPos(
+        name: "fn_top",
+        body: "@S@",
+    ), MxStmtPos(
+        name: "block_expr",
+        body: "    {@S@\n    }",
+    ), MxStmtPos(
+        name: "nested_block",
+        body: "    { {@S@\n        } }",
+    ), MxStmtPos(
+        name: "match_arm_block",
+        body: "    true.match ({\n        true  => {@S@\n        },\n        false => { },\n    })",
+    ), MxStmtPos(
+        name: "nested_match_arm",
+        body: "    true.match ({\n        true  => {\n            false.match ({\n                true  => { },\n                false => {@S@\n                },\n            })\n        },\n        false => { },\n    })",
+    ), MxStmtPos(
+        name: "cond_block",
+        body: "    true.then({@S@\n    }, { })",
+    ), MxStmtPos(
+        name: "lambda_body",
+        body: "    apply(() {@S@\n        0\n    })",
+    ), MxStmtPos(
+        name: "loop_body",
+        body: "    [1].loop((h, i, e) {@S@\n    })",
+    )]
+}
+mx_stmt_rules* = () [MxStmtRule] {
+    [MxStmtRule(
+        name: "leak",
+        prelude: "halloc = std.mem.heap\n{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\napply = (f: () i64) i64 { f() }\n",
+        setup: "    al := halloc.gpa()\n",
+        bad: "        o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n        sink(1)",
+        good: "        o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n        sink(1)\n        o.release_in(al.addr())",
+        params: "",
+    ), MxStmtRule(
+        name: "mustuse",
+        prelude: "apply = (f: () i64) i64 { f() }\nBx*: {\n    v: i32,\n    bump = (b: Bx, n: i32) Bx { Bx(v: b.v + n) },\n    get = (b: Bx) i32 { b.v },\n}\n",
+        setup: "    b := Bx(v: 1)\n",
+        bad: "        b.bump(5)",
+        good: "        b = b.bump(5)",
+        params: "",
+    ), MxStmtRule(
+        name: "ptrwrite_store",
+        prelude: "apply = (f: () i64) i64 { f() }\n",
+        setup: "",
+        bad: "        store(p, 9)",
+        good: "        store(mp, 9)",
+        params: "p: Ptr<i64>, mp: MutPtr<i64>",
+    ), MxStmtRule(
+        name: "unknown_type",
+        prelude: "apply = (f: () i64) i64 { f() }\n",
+        setup: "",
+        bad: "        w: Bogus := 1",
+        good: "        w: i64 := 1",
+        params: "",
+    )]
+}
+// ── generation ────────────────────────────────────────────────────────────────
+// a string_view of a literal: zo_join infers its slice-literal element type from element 0, so a
+// list that starts with a literal and continues with views needs the head widened explicitly.
+mx_sv = (s: string_view) string_view { s }
+mx_cell_name = (mp: MutPtr<Malloc>, rule: string_view, pos: string_view, is_bad: bool) string_view {
+    mp.zo_join([rule, "__", pos, is_bad.then({ "__bad" }, { "__good" })])
+}
+mx_expr_src = (mp: MutPtr<Malloc>, r: MxRule, p: MxPos, is_bad: bool) string_view {
+    withe := mp.replace(p.body, "@E@", is_bad.then({ r.bad }, { r.good }))
+    body := mp.replace(mp.replace(withe, "@T@", r.ty), "@Z@", r.zero)
+    helpers := mp.replace(mp.replace(mx_helpers(), "@T@", r.ty), "@H@", r.hzero)
+    mp.zo_join([r.prelude, helpers, "probe = (", r.params, ") ", r.ty, " {\n", is_bad.match ({
+        true  => r.setup_bad,
+        false => r.setup_good,
+    }), body, "\n}\nmain = () i32 {\n    return 0\n}\n"])
+}
+mx_stmt_src = (mp: MutPtr<Malloc>, r: MxStmtRule, p: MxStmtPos, is_bad: bool) string_view {
+    stmt := mp.zo_join([mx_sv("\n"), is_bad.then({ r.bad }, { r.good }), "\n        sink(2)"])
+    mp.zo_join([r.prelude, "sink = (v: i64) i64 { v }\nprobe = (", r.params, ") i64 {\n", r.setup, mp.replace(p.body, "@S@", stmt), "\n    0\n}\nmain = () i32 {\n    return 0\n}\n"])
+}
+mx_write = (mp: MutPtr<Malloc>, name: string_view, src: string_view) void {
+    save(mp.zo_path(mp.zo_join([mx_sv("mx/"), name, ".zen"])), src, len(src)).expect("harness: save")
+}
+// the per-run shell driver: check every generated case, record `<name> TAB <error[kind]>` (empty kind =
+// accepted), and diff the sorted result against columns 1-2 of the checked-in table. Batched 16-wide
+// because `zen check` is a subprocess per case and the matrix is ~900 of them. Exit status is diff's,
+// so `shell` returning 0 IS the assertion.
+mx_runner = () string_view {
+    "set -u\nZT=\"$1\"\nrm -rf \"$ZT/mxr\"\nmkdir -p \"$ZT/mxr\"\ni=0\nfor f in \"$ZT\"/mx/*.zen; do\n  n=$(basename \"$f\" .zen)\n  { k=$(./zen check \"$f\" 2>&1 | grep -o 'error\\[[a-z-]*\\]' | head -1); printf '%s\\t%s\\n' \"$n\" \"$k\" > \"$ZT/mxr/$n.txt\"; } &\n  i=$((i + 1))\n  [ $((i % 16)) -eq 0 ] && wait\ndone\nwait\ncat \"$ZT\"/mxr/*.txt | LC_ALL=C sort > \"$ZT/mx_actual.tsv\"\ncut -f1,2 tests/fixtures/matrix/expected.tsv | LC_ALL=C sort > \"$ZT/mx_expected.tsv\"\ndiff -u \"$ZT/mx_expected.tsv\" \"$ZT/mx_actual.tsv\" > \"$ZT/mx_diff.txt\" 2>&1\n"
+}
+harness_matrix_run* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    shell(mp.zo_cmd("rm -rf \"$ZT/mx\"; mkdir -p \"$ZT/mx\"")).expect("harness: shell")
+    mx_rules().loop((h, ri, r) {
+        mx_positions().loop((h2, pi, p) {
+            mp.mx_write(mp.mx_cell_name(r.name, p.name, true), mp.mx_expr_src(r, p, true))
+            mp.mx_write(mp.mx_cell_name(r.name, p.name, false), mp.mx_expr_src(r, p, false))
+        })
+    })
+    mx_stmt_rules().loop((h, ri, r) {
+        mx_stmt_positions().loop((h2, pi, p) {
+            mp.mx_write(mp.mx_cell_name(r.name, p.name, true), mp.mx_stmt_src(r, p, true))
+            mp.mx_write(mp.mx_cell_name(r.name, p.name, false), mp.mx_stmt_src(r, p, false))
+        })
+    })
+    save(mp.zo_path("mxrun.sh"), mx_runner(), len(mx_runner())).expect("harness: save")
+    rc := shell(mp.zo_cmd("sh \"$ZT/mxrun.sh\" \"$ZT\"")).expect("harness: shell")
+    (rc == 0 == false).then({
+        out("matrix: verdict table drift (- expected, + actual):\n")
+        out(mp.contents_in(mp.zo_path("mx_diff.txt")).match ({
+            .Ok(t)  => t,
+            .Err(e) => "  (diff unavailable)\n",
+        }))
+    })
+    run_suite("matrix: position x rule verdicts match tests/fixtures/matrix/expected.tsv", [rc == 0])
+}

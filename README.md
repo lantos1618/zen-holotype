@@ -17,7 +17,7 @@ make regen && git diff --quiet bootstrap/zenc.gen.c && echo fixpoint
 ```
 
 That last line is the trust story: the compiler, fed its own sources, reproduces
-the committed 2,359,007-byte C seed **exactly**. Deterministic. Diffable. No
+the committed 2,378,142-byte C seed **exactly**. Deterministic. Diffable. No
 pipeline behind the curtain.
 
 ## One binary
@@ -37,7 +37,8 @@ Every verb below was run against this commit before it was written down.
 - `./zen fmt prog.zen` — rewrite in place; `--check` exits nonzero on drift,
   `--stdout` previews
 - `./zen init hello --bin` — new project (`zen.toml` + `src/main.zen`) that runs as-is
-- `./zen lsp` — language server over stdio (see below)
+- `./zen lsp` — language server over stdio: diagnostics, semantic highlighting,
+  go-to-definition, hover, completion (see below)
 - `./zen audit prog.zen` — dead-code, unused-import and clone report;
   `--workspace <dir>` unions across every entry point, `--strict` exits 1
 - `./zen doc std.sort` — a module's exported surface
@@ -112,7 +113,8 @@ What you just read, and where it is specified ([docs/SPEC.md](docs/SPEC.md)):
   `d == 0` prints `zen: panic: integer divide by zero` and aborts; an
   out-of-range index prints `zen: panic: slice index out of bounds`. Not UB.
 - **Reflection at compile time.** `each_field` / `zip_fields` / `field_eq` unroll
-  per-field at monomorphization — derived equality and JSON serde are ordinary
+  per-field at monomorphization, and `e.variant_name()` expands to a literal switch
+  over an enum's variants — derived equality and JSON serde are ordinary
   library code, no macros. `./zen run examples/json_demo.zen` round-trips typed
   structs and prints `ROUNDTRIP_EQUAL`.
 - **Generics, traits, UFCS.** Monomorphized generics; a trait is a record of
@@ -193,17 +195,18 @@ hint: check the callee signature and pass exactly the declared parameters
 
 ```
 $ printf 'Content-Length: 58\r\n\r\n{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | ./zen lsp
-Content-Length: 341
+Content-Length: 409
 
-{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"textDocumentSync":1,"definitionProvider":true,"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","function","type","variable","property","string","number","comment","operator","enumMember"],"tokenModifiers":[]},"full":true}},"serverInfo":{"name":"zenc-lsp","version":"0.2.0-dev"}}}
+{"jsonrpc":"2.0","id":1,"result":{"capabilities":{"textDocumentSync":1,"definitionProvider":true,"hoverProvider":true,"completionProvider":{"resolveProvider":false},"semanticTokensProvider":{"legend":{"tokenTypes":["keyword","function","type","variable","property","string","number","comment","operator","enumMember"],"tokenModifiers":[]},"full":true}},"serverInfo":{"name":"zenc-lsp","version":"0.2.0-dev"}}}
 ```
 
 Diagnostics — the same errors `zen check` prints, including ones surfaced from
-imported sibling modules — plus go-to-definition and full-document semantic
-tokens. Positions are 0-based UTF-16, so non-ASCII lines squiggle in the right
-place. The server checks the buffer the client sent, not the file on disk: open a
-file that has never been saved and it still gets diagnostics and `gd`. Anything
-else, hover and completion included, gets a clean `MethodNotFound`.
+imported sibling modules — plus go-to-definition, hover, completion and
+full-document semantic tokens. Positions are 0-based UTF-16, so non-ASCII lines
+squiggle in the right place. The server checks the buffer the client sent, not
+the file on disk: open a file that has never been saved and it still gets
+diagnostics and `gd`. Anything else — `textDocument/references` and the rest —
+gets a clean `method not found` (`-32601`).
 
 - **Neovim** — [`editor/nvim/README.md`](editor/nvim/README.md). Three symlinks,
   `ftplugin/` included, or `gc` and the indent width silently do nothing.

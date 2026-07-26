@@ -30,6 +30,8 @@
 { lspt_legend, lspt_tokens } = compiler.lsp_tokens
 { lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at, lspd_tokens_at } = compiler.lsp_docs
 { cd_or, locate_diag } = compiler.drvdiag
+{ lsp_byte_of_pos, lsp_col_of, lsp_find_def, lsp_ident_end, lsp_ident_start, lsp_line_of,
+  lspq_hover, lspq_items } = compiler.lsp_query
 // ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 1) ─────────────────────────
 // A JSON-RPC 2.0 loop: read `Content-Length: N\r\n\r\n<N-byte JSON body>` frames from stdin, run the
 // EXISTING check pipeline (resolve -> parse -> the diagnostic channels) on each opened/changed
@@ -41,9 +43,9 @@
 // diagnostics), MethodNotFound replies for unimplemented requests, byte->UTF-16 position conversion,
 // and a Content-Length sanity ceiling. Every feature reads the OPEN document out of the document
 // store (compiler.lsp_docs) that didOpen/didChange fill, never off disk — while the client holds a
-// buffer open, that buffer IS the document. Conformance suite: tests/harness_lsp.zen. Hover needs plumbing
-// the checker doesn't expose yet (an offset->node query + an exported type-render such as ty_name);
-// until that exists the server deliberately declines it with -32601.
+// buffer open, that buffer IS the document. Conformance suite: tests/harness_lsp.zen. Stage 2b adds
+// hover and completion, both answered TEXTUALLY by compiler.lsp_query (which states exactly what
+// they cover) so they survive the unparseable buffer an editor holds between keystrokes.
 // PROTOCOL WRITES GO TO STDOUT (fd 1); every diagnostic/log the pipeline emits stays on stderr, so the
 // JSON-RPC stream is never corrupted.
 lout = (s: string_view) i64 {
@@ -576,108 +578,17 @@ lsp_reply_initialize = (mp: MutPtr<Malloc>, body: string_view) i64 {
         .gstr_string(256)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
         .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"definitionProvider\":true,\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":")
+        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"definitionProvider\":true,\"hoverProvider\":true,\"completionProvider\":{\"resolveProvider\":false},\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":")
         .gstr_append(mp, lspt_legend())
         .gstr_append(mp, ",\"tokenModifiers\":[]},\"full\":true}},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
         .gstr_finish(mp))
 }
-// ── go-to-definition (LSP Stage 2a) — a textual top-level definition finder ──────────────────────
-// Cursor position (LSP is 0-based line/character) → the identifier under it → the FILE's top-level
-// declaration of that name → its Location. Textual (ctags-style) rather than resolver-backed: it
-// resolves same-file top-level decls (fn/type/const), which is the common jump; cross-file (imports),
-// locals, and overload-precise resolution are the documented next slices.
-lsp_is_ident_byte = (b: u8) bool {
-    b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
-}
-// byte offset of (line, char): walk `line` newlines from 0, then advance `char` bytes (ASCII columns;
-// UTF-16 wide columns are a refinement).
-lsp_byte_of_pos = (v: [u8], line: i64, ch: i64, i: i64, ln: i64) i64 {
-    (ln >= line).match ({
-        true  => (i + ch < v.len).then({ i + ch }, { v.len }),
-        false => (i >= v.len).match ({
-            true  => v.len,
-            false => (v[i] == '\n').match ({
-                true  => v.lsp_byte_of_pos(line, ch, i + 1, ln + 1),
-                false => v.lsp_byte_of_pos(line, ch, i + 1, ln),
-            }),
-        }),
-    })
-}
-// start byte of the identifier surrounding `off` (scan left over identifier bytes).
-lsp_ident_start = (v: [u8], off: i64) i64 {
-    (off <= 0).match ({
-        true  => 0,
-        false => v[off - 1].lsp_is_ident_byte().then({ v.lsp_ident_start(off - 1) }, { off }),
-    })
-}
-// end byte (exclusive) of the identifier surrounding `off`.
-lsp_ident_end = (v: [u8], off: i64) i64 {
-    (off >= v.len).match ({
-        true  => off,
-        false => v[off].lsp_is_ident_byte().then({ v.lsp_ident_end(off + 1) }, { off }),
-    })
-}
-// does `v[i..]` begin with `name` as a WHOLE token that is a top-level decl head: `name` [ws]* `*`? [ws]*
-// followed by `=`, `:`, `<` (generic decl), or `(` — the shapes `foo = `, `Foo:`, `foo* = `, `f<T> = `.
-lsp_def_head_at = (v: [u8], i: i64, name: [u8]) bool {
-    (i + name.len > v.len).match ({
-        true  => false,
-        false => lsp_bytes_eq(v, i, name, 0).match ({
-            true  => {
-                j := i + name.len
-                k := (j < v.len && v[j] == '*').then({ j + 1 }, { j })
-                k2 := lsp_skip_sp(v, k)
-                (k2 < v.len).match ({
-                    true  => {
-                        b := v[k2]
-                        b == '=' || b == ':' || b == '<' || b == '('
-                    },
-                    false => false,
-                })
-            },
-            false => false,
-        }),
-    })
-}
-lsp_bytes_eq = (v: [u8], i: i64, name: [u8], k: i64) bool {
-    (k >= name.len).match ({
-        true  => true,
-        false => (v[i + k] == name[k]).then({ v.lsp_bytes_eq(i, name, k + 1) }, { false }),
-    })
-}
-lsp_skip_sp = (v: [u8], i: i64) i64 {
-    (i < v.len && (v[i] == ' ' || v[i] == '\t')).then({ v.lsp_skip_sp(i + 1) }, { i })
-}
-// scan for a top-level (column-0) def head of `name`; return its byte offset or -1. Only column-0 heads
-// count (Zen top-level decls start at column 0), which cheaply excludes call sites and locals.
-lsp_find_def = (v: [u8], name: [u8], i: i64, atcol0: bool) i64 {
-    (i >= v.len).match ({
-        true  => 0 - 1,
-        false => (atcol0 && v.lsp_def_head_at(i, name)).match ({
-            true  => i,
-            false => v.lsp_find_def(name, i + 1, v[i] == '\n'),
-        }),
-    })
-}
-// (line, col) of byte offset `off`.
-lsp_line_of = (v: [u8], off: i64, i: i64, ln: i64, col: i64) i64 {
-    (i >= off || i >= v.len).match ({
-        true  => ln,
-        false => (v[i] == '\n').match ({
-            true  => v.lsp_line_of(off, i + 1, ln + 1, 0),
-            false => v.lsp_line_of(off, i + 1, ln, col + 1),
-        }),
-    })
-}
-lsp_col_of = (v: [u8], off: i64, i: i64, col: i64) i64 {
-    (i >= off || i >= v.len).match ({
-        true  => col,
-        false => (v[i] == '\n').match ({
-            true  => v.lsp_col_of(off, i + 1, 0),
-            false => v.lsp_col_of(off, i + 1, col + 1),
-        }),
-    })
-}
+// ── go-to-definition / hover / completion (the textual query features) ──────────────────────────
+// The scanning these share — cursor position → the identifier under it → the FILE's top-level
+// declaration of that name — lives in compiler.lsp_query, so all three ask one scanner. Textual
+// (ctags-style) rather than resolver-backed: it resolves same-file top-level decls (fn/type/const),
+// which is the common jump, and it keeps working on the half-typed buffer an editor actually holds.
+// Cross-file targets, locals and overload-precise resolution are the documented next slices.
 // reply to a definition request with a Location for def at (line, col) spanning `nlen` bytes, or null.
 lsp_reply_location = (
     mp: MutPtr<Malloc>,
@@ -753,6 +664,48 @@ lsp_definition = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 
             })
         },
     })
+}
+// HOVER: the declaration under the cursor as markdown — a fenced signature plus the doc comment
+// above it. compiler.lsp_query decides what that covers; "nothing to say" comes back as "" and is
+// answered with a null result, the protocol's own spelling of "no hover here" (never an empty popup).
+lsp_hover = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    txt := mp.lsp_doc_text(mp.json_str_field(body, "uri"))
+    md := mp.lspq_hover(txt, body.lsp_json_int("line"), body.lsp_json_int("character"))
+    is_empty(md).then({
+        return mp.lsp_reply_null(body)
+    })
+    mp.lsp_send(mp
+        .gstr_string(512)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":")
+        .push_jstr(mp, md)
+        .gstr_append(mp, "}}}")
+        .gstr_finish(mp))
+}
+// COMPLETION: the names compiler.lsp_query can see from the buffer alone. `isIncomplete:false` is a
+// promise that this IS the whole list for the position, so the client may filter it locally instead
+// of asking again on the next keystroke — true here precisely because the list does not depend on
+// the prefix being typed.
+lsp_completion = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    items := mp.lspq_items(mp.lsp_doc_text(mp.json_str_field(body, "uri")))
+    sb := mp
+        .gstr_string(2048)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":{\"isIncomplete\":false,\"items\":[")
+    items.loop((h, i, it) {
+        sb = sb
+            .gstr_append(mp, (i > 0).then({ "," }, { "" }))
+            .gstr_append(mp, "{\"label\":")
+            .push_jstr(mp, it.label)
+            .gstr_append(mp, ",\"kind\":")
+            .push_int(mp, it.kind)
+            .gstr_append(mp, ",\"detail\":")
+            .push_jstr(mp, it.detail)
+            .gstr_append(mp, "}")
+    })
+    mp.lsp_send(sb.gstr_append(mp, "]}}").gstr_finish(mp))
 }
 lsp_send_tokens = (mp: MutPtr<Malloc>, body: string_view, data: string_view) i64 {
     mp.lsp_send(mp
@@ -843,55 +796,48 @@ lsp_did_change = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 
 // a MethodNotFound error so the client never waits on a reply that will not come.
 lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
     method := mp.json_str_field(body, "method")
-    (method == "initialize").match ({
-        true  => {
-            mp.lsp_reply_initialize(body)
-            0
-        },
-        false => (method == "shutdown").match ({
-            true  => {
-                mp.lsp_reply_null(body)
-                1
-            },
-            false => (method == "exit").match ({
-                true  => 2,
-                false => (method == "textDocument/didOpen" || method == "textDocument/didChange").match ({
-                    true  => {
-                        mp.lsp_did_change(root, body)
-                        0
-                    },
-                    false => (method == "textDocument/didClose").match ({
-                        true  => {
-                            closed := mp.json_str_field(body, "uri")
-                            lspd_close(closed)
-                            mp.lsp_publish_clear(closed)
-                            0
-                        },
-                        false => (method == "textDocument/definition").match ({
-                            true  => {
-                                mp.lsp_definition(root, body)
-                                0
-                            },
-                            false => (method == "textDocument/semanticTokens/full").match ({
-                                true  => {
-                                    mp.lsp_semantic_tokens(body)
-                                    0
-                                },
-                                false => {
-                                    v: [u8] := body.view()
-                                    (v.json_find_key("id") >= 0
-                                        && lsp_is_notification(method) == false).then({
-                                        mp.lsp_reply_method_not_found(body)
-                                    })
-                                    0
-                                },
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (method == "initialize").then({
+        mp.lsp_reply_initialize(body)
+        return 0
     })
+    (method == "shutdown").then({
+        mp.lsp_reply_null(body)
+        return 1
+    })
+    (method == "exit").then({
+        return 2
+    })
+    (method == "textDocument/didOpen" || method == "textDocument/didChange").then({
+        mp.lsp_did_change(root, body)
+        return 0
+    })
+    (method == "textDocument/didClose").then({
+        closed := mp.json_str_field(body, "uri")
+        lspd_close(closed)
+        mp.lsp_publish_clear(closed)
+        return 0
+    })
+    (method == "textDocument/definition").then({
+        mp.lsp_definition(root, body)
+        return 0
+    })
+    (method == "textDocument/hover").then({
+        mp.lsp_hover(body)
+        return 0
+    })
+    (method == "textDocument/completion").then({
+        mp.lsp_completion(body)
+        return 0
+    })
+    (method == "textDocument/semanticTokens/full").then({
+        mp.lsp_semantic_tokens(body)
+        return 0
+    })
+    v: [u8] := body.view()
+    (v.json_find_key("id") >= 0 && lsp_is_notification(method) == false).then({
+        mp.lsp_reply_method_not_found(body)
+    })
+    0
 }
 // ── stdio framing: read `Content-Length: N\r\n\r\n` headers, then exactly N body bytes ─────────────
 LSP_HDR_CAP = () i64 { 1024 }

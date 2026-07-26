@@ -1,19 +1,18 @@
 // http_actor_demo.zen — fetching over HTTP with the stdlib's ready-made client actor.
 //
 // std.net.http_actor ships the fetcher (message, reply, receiver, trampoline); the app brings
-// only its OWN receiver for the reply. Here `main` also plays a one-shot HTTP server on the
-// loopback listener while the fetch blocks on a pool worker, then quiesces and reads the result.
+// only its OWN receiver for the reply. Here `main` also plays the SERVER — `serve_once` answers the
+// one loopback connection while the fetch blocks on a pool worker — then quiesces and reads the
+// result. Client and server are both std.net.http; the app never opens a socket.
 //
 //   $ zen run examples/http_actor_demo.zen
 //   status=200 body=hello zen actors
 //   ok
 { println, formatln, arg_int, arg_str } = std.text.fmt
 { expect } = std.core.result
-{ view } = std.text.str
-{ String, init, push_in, finish_in } = std.text.string
+{ Heap } = std.mem.alloc
 { gpa } = std.mem.heap
-{ serve, recv } = std.net.socket
-{ url_of } = std.net.http
+{ url_of, http_listen, serve_once, respond, no_headers, Request, Response } = std.net.http
 { spawn_http_fetcher, http_fetch, HttpReplyMsg } = std.net.http_actor
 { pool_open } = std.concurrent.pool
 { Context, Receiver, dispatch } = std.concurrent.pool_actor
@@ -35,29 +34,13 @@ App.impl(Receiver, {
     }
 })
 app_tramp = (user: RawPtr<u8>, msg: i64) void { dispatch<App, HttpReplyMsg>(user, msg) }
-// the canned server response, CRLF'd at runtime ('\r' never appears in a source string literal).
-response<A> = (a: MutPtr<A>) string_view {
-    sb := a.init(16).expect("demo: oom")
-    "HTTP/1.1 200 OK\nContent-Length: 16\n\n".view().loop((h, i, b) {
-        (b == '\n').match ({
-            true  => {
-                sb = a.push_in(sb, '\r').expect("demo: oom")
-                sb = a.push_in(sb, '\n').expect("demo: oom")
-            },
-            false => {
-                sb = a.push_in(sb, b).expect("demo: oom")
-            },
-        })
-    })
-    BODY.view().loop((h, i, b) {
-        sb = a.push_in(sb, b).expect("demo: oom")
-    })
-    a.finish_in(sb).expect("demo: oom")
-}
+// the whole server: every request gets the same 200. A handler is an ordinary function value, so it
+// names a CONCRETE allocator (`Heap`) — it is spliced into `serve_once` at monomorphization.
+hello = (a: MutPtr<Heap>, req: Request) Response { respond(200, a.no_headers(), BODY) }
 main = () i32 {
     h := gpa()
     a := h.addr()
-    l := serve("127.0.0.1", 0).expect("demo: listen failed")
+    l := http_listen("127.0.0.1", 0).expect("demo: listen failed")
     fetcher := spawn_http_fetcher(8)
     app := pa.spawn_actor_heap(8, App(
         status: 0,
@@ -65,12 +48,8 @@ main = () i32 {
     ), app_tramp)
     p := pool_open(2, 8)
     p.send(fetcher, http_fetch(a.url_of("127.0.0.1", l.local_port(), "/"), app.ref_of(p)))
-    // main is the server while the fetcher blocks on its worker: accept the one connection,
-    // read the request, send the canned response, close (EOF ends the client's read).
-    conn := l.accept_conn().expect("demo: accept failed")
-    a.recv(conn, 512).expect("demo: recv failed")
-    conn.send_str(a.response()).expect("demo: send failed")
-    conn.close_conn()
+    // main is the server while the fetcher blocks on its worker: one connection, answered and closed.
+    a.serve_once(l, hello).expect("demo: serve failed")
     l.close_listener()
     p.pool_quiesce_stop()
     st := pa.actor_state(app)
