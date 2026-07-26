@@ -2490,7 +2490,65 @@ harness_verdict_run* = () i32 {
         src: "{ at } = std.text.ascii\nmain = () i32 {\n    s := \"ABCDE\"\n    i: i32 := 2\n    s.at(i).to_i32()\n}\n",
         should_pass: true,
         kind: "",
+    ), VerdictCase(
+        src: "{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\napply = (f: () i32) i32 { f() }\nmk = () i32 {\n    al := halloc.gpa()\n    o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n    o.release_in(al.addr())\n    apply(() { o.get().id })\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "ownership",
+    ), VerdictCase(
+        src: "{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\napply = (f: () i32) i32 { f() }\nmk = () i32 {\n    al := halloc.gpa()\n    o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n    apply(() {\n        o.release_in(al.addr())\n        0\n    })\n    o.get().id\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "ownership",
+    ), VerdictCase(
+        src: "Data*: { n: i32 }\nMsg*: Ref(MutPtr<Data>) | View(Ptr<Data>)\nH*: { id: i32 }\nsend = (h: H, m: Msg) bool { true }\napply = (f: () bool) bool { f() }\nmk = (p: MutPtr<Data>) bool {\n    h := H(id: 1)\n    apply(() { h.send(.Ref(p)) })\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "sendable",
+    ), VerdictCase(
+        src: "Bx*: {\n    v: i32,\n    bump = (b: Bx, n: i32) Bx { Bx(v: b.v + n) },\n}\napply = (f: () i32) i32 { f() }\nmk = () i32 {\n    b := Bx(v: 1)\n    apply(() {\n        b.bump(5)\n        b.v\n    })\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "must-use",
+    ), VerdictCase(
+        src: "{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nsink = (v: i32) i32 { v }\nmk = () i32 {\n    al := halloc.gpa()\n    true.match ({\n        true  => {\n            o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n            sink(1)\n        },\n        false => { },\n    })\n    0\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "leak",
+    ), VerdictCase(
+        src: "{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\napply = (f: () i32) i32 { f() }\nmk = () i32 {\n    al := halloc.gpa()\n    apply(() {\n        o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n        0\n    })\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "leak",
+    ), VerdictCase(
+        src: "apply = (f: () MutPtr<i32>) MutPtr<i32> { f() }\nmk = () MutPtr<i32> {\n    x := 5\n    return apply(() { x.addr() })\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "mk = (seed: MutPtr<i32>) MutPtr<i32> {\n    x := 5\n    acc: MutPtr<i32> := seed\n    [1].loop((h, i, e) {\n        acc = x.addr()\n    })\n    acc\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "mk = (seed: MutPtr<i32>) MutPtr<i32> {\n    x := 5\n    acc: MutPtr<i32> := seed\n    [x.addr()].loop((h, i, e) {\n        acc = e\n    })\n    acc\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "Cell*: N | S(MutPtr<i32>)\nmk = (seed: MutPtr<i32>) MutPtr<i32> {\n    x := 5\n    ev := Cell.S(x.addr())\n    ev.match ({\n        .S(w) => w,\n        .N    => seed,\n    })\n}\ntest* = () i32 { 0 }\n",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "apply = (f: () MutPtr<i32>) MutPtr<i32> { f() }\nmk = (seed: MutPtr<i32>) MutPtr<i32> {\n    x := 5\n    apply(() { x.addr() })\n    seed\n}\ntest* = () i32 { 0 }\n",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\napply = (f: () i32) i32 { f() }\nmk = () i32 {\n    al := halloc.gpa()\n    apply(() {\n        o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n        o.release_in(al.addr())\n        0\n    })\n}\ntest* = () i32 { 0 }\n",
+        should_pass: true,
+        kind: "",
     )])
+    // WALKER DELEGATION (this PR): every rule below was blind to a POSITION, not to a shape. The four
+    // lambda-body cases (ownership use-after-consume, consume INSIDE the lambda, sendable, must-use)
+    // are one defect — a `_` arm that omitted `.Lambda` — and the leak cases are the same defect on
+    // statement lists: an owner bound in a nested block/arm/lambda leaked silently. The escape cases
+    // close the laundering paths AROUND the (already exhaustive) predicate: out through an invoked
+    // FnT param, in through a loop-body store, in through a loop's element binding, and out through a
+    // match that extracts an enum payload. The two accepted cases pin the near-misses: a DISCARDED
+    // `apply(() { x.addr() })` yields its value to a call site that throws it away (the lambda's
+    // implicit trailing return is not a return from the enclosing function), and an owner released
+    // inside the same lambda that created it is discharged.
     // explicit by-name import wins: `{ at } = std.text.str` designates str's at(_, i64) as the
     // authoritative `at`, so `s.at(i64)` type-checks even though ascii's at(_, i32) is pulled into
     // the flat program (str imports ascii for is_space). Regression pin for UFCS dispatch precedence.

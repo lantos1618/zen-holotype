@@ -5,7 +5,7 @@
 { DeclIndex, Env, UfcsVis, arm_env, bind_tparams, build_decl_index, build_decl_index_vis,
   extend_env, is_intrinsic, is_void_ty, loop_env, params_env, ufcs_vis_off } = compiler.check
 { resolve_module } = compiler.check_resolve
-{ map_slice } = compiler.astops
+{ lam_stmt_body, map_slice } = compiler.astops
 { expr_fold_children } = compiler.ast.expr_children
 { Malloc } = std.mem.alloc
 { is_empty } = std.text.str
@@ -84,7 +84,12 @@ loop_lets_expr = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadL
         .Match(m) => a.loop_lets_arms(acc, m.arms),
         .Cond(d)  => a.loop_lets_expr(a.loop_lets_expr(acc, d.t), d.e),
         .Loop(l)  => a.loop_lets(a.dead_cons(l.h, a.dead_cons(l.elem, a.dead_cons(l.idx, acc))), l.body),
-        _         => acc,
+        // the rest is structural: a `let` inside a `.Lambda` body (inlined into the loop) is just as
+        // fresh-per-iteration as one written directly in the body, and missing it made the
+        // free-in-loop rule read that name as declared OUTSIDE the loop.
+        _         => acc.expr_fold_children(e, (acc2, ch) { a.loop_lets_expr(acc2, ch) }, (acc2, body) {
+            a.loop_lets(acc2, body)
+        }),
     })
 }
 loop_lets_arms = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
@@ -348,7 +353,12 @@ kv_own_expr_kind = (
                 .kv_one(KOWNERSHIP())
                 .kv_at(load(l.seq).expr_pos().pos_or(body_pos(l.body)))),
         .Block(b)      => a.kv_own_body_kind(env, seen, al, b.stmts),
-        _              => 0,
+        // every other shape is a plain structural descent, so it delegates to the one exhaustive child
+        // listing. The hand-written list omitted `.Lambda`, so an owner used after release INSIDE a
+        // lambda body (`apply(() { o.get() })`) was invisible to the use-after-consume rule.
+        _              => 0.expr_fold_children(e, (acc, ch) {
+            acc.or(a.kv_own_expr_kind(env, seen, al, ch))
+        }, (acc, body) { acc.or(a.kv_own_body_kind(env, seen, al, body)) }),
     })
 }
 kv_own_stmt_kind = (
@@ -1460,13 +1470,21 @@ kv_escape_expr_stmt = (
     e: Ptr<Expr>,
 ) i32 {
     load(e).match ({
-        .Match(m) => a.kv_escape_arms(svars, derived, m.arms),
-        .Cond(d)  => a
+        .Match(m)   => a.kv_escape_arms(svars, derived, m.arms),
+        .Cond(d)    => a
             .kv_escape_expr_stmt(svars, derived, d.t)
             .or(a.kv_escape_expr_stmt(svars, derived, d.e)),
-        .Block(b) => a.kv_escape_stmts(svars, derived, b.stmts),
-        .Loop(l)  => a.kv_escape_stmts(svars, derived, l.body),
-        _         => 0,
+        .Block(b)   => a.kv_escape_stmts(svars, derived, b.stmts),
+        .Loop(l)    => a.kv_escape_stmts(svars, derived, l.body),
+        // a lambda body is walked WITHOUT its implicit trailing return: that value is the lambda's
+        // result (this statement discards it), not a return from the enclosing function.
+        .Lambda(lm) => a.kv_escape_stmts(svars, derived, lm.body.lam_stmt_body()),
+        // a `return` can sit in ANY nested statement list — including a `.Lambda` body handed to a
+        // template call, which the hand-written list never reached. Statement position all the way
+        // down: only returns are inspected, trailing values stay discarded.
+        _           => 0.expr_fold_children(e, (acc, ch) {
+            acc.or(a.kv_escape_expr_stmt(svars, derived, ch))
+        }, (acc, body) { acc.or(a.kv_escape_stmts(svars, derived, body)) }),
     })
 }
 kv_escape_arms = (
@@ -1628,25 +1646,42 @@ kv_leak_let = (a: MutPtr<Malloc>, env: Env, body: [Stmt], k: i32, l: LetData) i3
 }
 kv_leak_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], k: i32, st: Stmt) i32 {
     st.match ({
-        .Let(l) => a.kv_leak_let(env, body, k, l),
-        _       => 0,
+        .Let(l)      => a.kv_leak_let(env, body, k, l).or(a.kv_leak_expr(env, l.value)),
+        .Assign(x)   => a.kv_leak_expr(env, x.value),
+        .Return(r)   => a.kv_leak_expr(env, r),
+        .ExprStmt(e) => a.kv_leak_expr(env, e),
+        .If(f)       => a.kv_leak_body(env, f.then).or(a.kv_leak_body(env, f.els)),
+        .While(w)    => a.kv_leak_body(env, w.body),
+        .IndexSet(x) => a.kv_leak_expr(env, x.value),
     })
 }
+// An owner is bound by a `let` in SOME statement list — a nested block, a match/cond arm, a lambda or
+// a loop body, not only the function's top level — and it dies with the list that binds it, so the
+// never-discharged rule applies verbatim there. This walk is therefore pure structural descent: every
+// child expression is searched for the statement lists it carries, and each list is scanned with its
+// own index (the discharge test `impure_use_after` is relative to the binding's OWN list).
+kv_leak_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) i32 {
+    0.expr_fold_children(e, (acc, ch) { acc.or(a.kv_leak_expr(env, ch)) }, (acc, body) {
+        acc.or(a.kv_leak_body(env, body))
+    })
+}
+kv_leak_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
+    acc := 0
+    e := env
+    body.loop((h, k, st) {
+        acc = acc.or(a.kv_leak_stmt(e, body, k, st))
+        e = a.extend_env(e, st)
+    })
+    acc
+}
 kv_leak_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
-    env := Env(
+    a.kv_leak_body(Env(
         vars: a.params_env(f.params),
         decls: decls,
         didx: idx,
         exp: f.ret,
         a: a,
-    )
-    acc := 0
-    e := env
-    f.body.loop((h, k, st) {
-        acc = acc.or(a.kv_leak_stmt(e, f.body, k, st))
-        e = a.extend_env(e, st)
-    })
-    acc
+    ), f.body)
 }
 check_module_leak_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc := 0

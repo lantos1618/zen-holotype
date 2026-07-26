@@ -6,6 +6,7 @@
 { DeclIndex, Env, arm_env, extend_env, is_intrinsic, is_void_ty, pointee_of, recv_name } = compiler.check
 { Malloc } = std.mem.alloc
 { slice_any } = compiler.astops
+{ expr_fold_children } = compiler.ast.expr_children
 { expect } = std.core.result
 { Map, of } = std.collections.map
 { is_empty } = std.text.str
@@ -311,7 +312,11 @@ expr_consumes_name = (env: Env, e: Ptr<Expr>, nm: string_view, depth: i32) bool 
             .Loop(l)      => env.expr_consumes_name(l.seq, nm, depth)
                 || env.body_consumes_name(l.body, nm, depth),
             .MakeEnum(mk) => env.expr_consumes_name(mk.payload, nm, depth),
-            _             => false,
+            // the callee-body summary descends structurally for everything else — a consume inside a
+            // `.Lambda` body (or a struct/slice literal element) is still a consume by this callee.
+            _             => false.expr_fold_children(e, (acc, ch) {
+                acc || env.expr_consumes_name(ch, nm, depth)
+            }, (acc, body) { acc || env.body_consumes_name(body, nm, depth) }),
         }),
     })
 }
@@ -413,7 +418,10 @@ cdl_expr = (env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>, pname: string_view) Ptr
         .Block(b) => env.cdl_body(seen, b.stmts, pname),
         .Loop(l)  => env.cdl_body(seen, l.body, pname),
         .Cond(d)  => env.cdl_expr(env.cdl_expr(seen, d.t, pname), d.e, pname),
-        _         => seen,
+        // the deref-alias collector walks the same shapes as the two summaries above it.
+        _         => seen.expr_fold_children(e, (acc, ch) { env.cdl_expr(acc, ch, pname) }, (acc, body) {
+            env.cdl_body(acc, body, pname)
+        }),
     })
 }
 cdl_arms = (env: Env, seen: Ptr<DeadList>, arms: [ArmData], pname: string_view) Ptr<DeadList> {
@@ -494,7 +502,11 @@ bft_expr = (env: Env, e: Ptr<Expr>, pname: string_view, dl: Ptr<DeadList>, depth
         .Loop(l)      => env.bft_expr(l.seq, pname, dl, depth)
             || env.bft_body(l.body, pname, dl, depth),
         .MakeEnum(mk) => env.bft_expr(mk.payload, pname, dl, depth),
-        _             => false,
+        // same structural descent as the consume summary: a free through the pointer can sit in any
+        // child expression or nested statement list, `.Lambda` bodies included.
+        _             => false.expr_fold_children(e, (acc, ch) {
+            acc || env.bft_expr(ch, pname, dl, depth)
+        }, (acc, body) { acc || env.bft_body(body, pname, dl, depth) }),
     })
 }
 bft_stmt = (env: Env, st: Stmt, pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
@@ -1016,9 +1028,19 @@ own_dead_expr = (
             (cn.is_empty() == false).then({
                 out = a.dead_kill(out, al, cn)
             })
+            c.args.loop((h, i, ar) {
+                // a consume can also sit INSIDE an argument — most of all the `.Lambda` a template call
+                // carries (`apply(() { o.release_in(al) })` consumes `o` at THIS statement).
+                out = a.own_dead_expr(env, out, al, ar.addr())
+            })
             out
         },
-        _         => seen,
+        // every other shape descends structurally: a consume can sit in ANY statement list an
+        // expression carries, and the hand-written list reached none through a `.Lambda` — so
+        // `apply(() { o.release_in(al) })` left `o` LIVE and the use after it unflagged.
+        _         => seen.expr_fold_children(e, (acc, ch) { a.own_dead_expr(env, acc, al, ch) }, (acc, body) {
+            a.own_dead_body(env, acc, al, body)
+        }),
     })
 }
 own_step* = (
@@ -1364,7 +1386,12 @@ mu_expr_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>) i32 {
         .Loop(l)  => a.mu_body_kind(mvm, l.body),
         .Match(m) => a.mu_arms_kind(mvm, m.arms),
         .Cond(d)  => a.mu_expr_kind(mvm, d.t).or(a.mu_expr_kind(mvm, d.e)),
-        _         => 0,
+        // the rest descends structurally: a discarded self-mutation can sit in ANY statement list, and
+        // the hand-written list reached none through a call argument — including the `.Lambda` a
+        // template call carries (`apply(() { b.bump(5) … })`).
+        _         => 0.expr_fold_children(e, (acc, ch) { acc.or(a.mu_expr_kind(mvm, ch)) }, (acc, body) {
+            acc.or(a.mu_body_kind(mvm, body))
+        }),
     })
 }
 // an ExprStmt: flag a discarded value-mold call when NOT in tail position, and always recurse for nested
