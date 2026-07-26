@@ -1,6 +1,6 @@
 // compiler.passes.subst — generic substitution + xform sub-pass extracted from compiler.check.
 { ArmData, CallData, Decl, Expr, Field, FieldInit, GenStructDecl, LambdaData, MakeStructData,
-  MatchData, Param, Stmt, Ty, VarData } = compiler.ast.ast_types
+  MatchData, Param, Stmt, Ty, VarData, VariantDef } = compiler.ast.ast_types
 { cbuf, arm, arrow_at, bin_at, block, call_full, cond_oa, eindex, eloop, ematch, ematchp, finit,
   lam_r, member_at, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, sassign_at, sexpr,
   sidxset_at, sif, slett_at, slit, sret, strlit_at, subst_ty_in, swhile, tvoid, ty_cname_in,
@@ -471,6 +471,60 @@ refl_hook = (
     })
     a.blockify(a.cat_stmts(bb, a.one_stmt(sexpr(a.refl_dispatch(decls, idx, c.fn, flds, args2, env, c.pos)))))
 }
+// ── variant_name: the ENUM half of reflection, unrolled at inline time ────────────────────────────
+// `e.variant_name()` becomes an ordinary match yielding one string LITERAL per variant:
+//   e.match({ .Debug => "Debug", .Info => "Info", … })
+// so the name costs a switch and a `const char*` — no allocation, no runtime table, no string data
+// beyond the literals the program would have written by hand. The name is returned EXACTLY as
+// declared: case folding is a runtime string operation (it allocates), so a caller who wants
+// `"DEBUG"` writes that transform itself.
+// Variant names come from the decl index; a GENERIC enum reads its GENERIC decl, since variant names
+// never depend on the type args. Payload variants bind nothing — the name is the payload-free fact.
+// gen_match already binds the subject to `_subj` once, so a side-effecting receiver evaluates exactly
+// once with no temp of our own (unlike each_field, which reads the subject once per field). The
+// result is ordinary Match/StrLit nodes, so genc and genjs emit it exactly as they emit a
+// hand-written match — NO backend change.
+reflect_variants* = (idx: DeclIndex, decls: [Decl], t: Ty) [VariantDef] {
+    t.match ({
+        .Named(n)   => idx.idx_enum_variants(decls, n),
+        .Generic(g) => idx.idx_genenum(decls, g.name).variants,
+        _           => idx.idx_enum_variants(decls, ""),
+    })
+}
+expand_variant_name = (
+    a: MutPtr<Malloc>,
+    vs: [VariantDef],
+    subj: Ptr<Expr>,
+    ename: string_view,
+    pos: i32,
+) Ptr<Expr> {
+    arms := cbuf<ArmData>(a, vs.len)
+    vs.loop((h, i, v) {
+        arms[i] = arm(v.name, "", a.cenode(strlit_at(v.name, pos)))
+    })
+    a.cenode(ematch(subj, ename, arms))
+}
+// Expand ONLY when the receiver is a concrete enum; otherwise PRESERVE the call (recall) so a
+// template body re-reaches this hook at the call-site splice with the concrete type, and an
+// ill-formed receiver gets its positioned diagnostic from validation (kv_variant_name_kind).
+vn_hook = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    idx: DeclIndex,
+    c: CallData,
+    cargs: [Expr],
+    env: Ptr<VList>,
+) Ptr<Expr> {
+    (cargs.len == 1 == false).then({
+        return a.recall(c, c.fn, cargs)
+    })
+    st := cargs[0].addr().light_ty(a, env, decls, idx)
+    vs := idx.reflect_variants(decls, st)
+    (vs.len == 0).then({
+        return a.recall(c, c.fn, cargs)
+    })
+    a.expand_variant_name(vs, cargs[0].addr(), st.enum_name(), c.pos)
+}
 // Empty Named marks a generic template currently being inlined.
 xform_call = (
     a: MutPtr<Malloc>,
@@ -485,6 +539,9 @@ xform_call = (
     cargs := a.xform_args(decls, idx, c.args, params, fargs, env)
     (c.fn == "field_eq" || c.fn == "each_field" || c.fn == "zip_fields").then({
         return a.refl_hook(decls, idx, c, cargs, params, env)
+    })
+    (c.fn == "variant_name").then({
+        return a.vn_hook(decls, idx, c, cargs, env)
     })
     fi := params.param_index(c.fn)
     (fi < 0).match ({

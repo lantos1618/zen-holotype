@@ -515,6 +515,41 @@ assigning through such a bound subject's lambda is rejected with
 `error[reflect-write]` — bind the subject to a local first, fill the local,
 and assign it back whole (`leaf := fv` … `fv = leaf`).
 
+### Enum Reflection
+
+The enum half of the same mechanism, one intrinsic:
+
+- `e.variant_name()` — the name of `e`'s variant, exactly as spelled in the
+  enum declaration, as a string literal.
+
+It expands at inline time — once the receiver's concrete enum type is known —
+into an ordinary match yielding one literal per variant:
+
+```zen
+Level: Debug | Info | Warn | Error
+
+tag = (l: Level) string_view { l.variant_name() }
+// expands to: l.match ({ .Debug => "Debug", .Info => "Info", … })
+```
+
+so it costs a switch and a `const char*`: no allocation, no runtime name table,
+and the emitted code is identical to the hand-written match it replaces. Payload
+variants yield their bare name (`Errno(i32)` → `"Errno"`); generic-enum instances
+reflect off the generic declaration, since variant names never depend on the type
+arguments; a side-effecting receiver is evaluated exactly once.
+
+The name is returned VERBATIM. There is no case-folding option: changing case is
+a runtime string operation that must allocate, which would put a hidden heap
+allocation behind a reflection intrinsic. A caller who wants a different spelling
+either declares the variants that way or transforms the name explicitly.
+
+Like the struct intrinsics, `variant_name` is a reserved name whose only
+definable shape is a generic delegating wrapper
+(`vname<E> = (e: E) string_view { e.variant_name() }`), a generic body using it
+is always inlined at its call sites, and a receiver that can never be an enum —
+a scalar, a string, a slice, a pointer, or a struct — is rejected with
+`error[arg-type]`.
+
 ## Imports And Modules
 
 Imports destructure a module path:

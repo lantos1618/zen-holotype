@@ -89,7 +89,29 @@ from_json(da.addr(), s, Point(x: 0, y: 0))     // .Ok(Point(x: 3, y: 4)); seed =
 Errors are values throughout (builder OOM latches into a threaded state → `.Err`;
 malformed JSON is the parser's `.Err(JsonError)`).
 
-### 4. Reflect-and-emit — worked before, still works
+### 4. Enum-reflection intrinsic — SPEC.md "Enum Reflection"
+
+`e.variant_name()` is the enum mirror of `each_field`: the inliner expands it, once the
+receiver's concrete enum type is known, into an ordinary match yielding one string literal
+per variant. Zero runtime cost, no allocation, no name table — the emitted C is identical
+to the hand-written match it replaces.
+
+```zen
+Level: Debug | Info | Warn | Error
+tag = (l: Level) string_view { l.variant_name() }   // .Debug => "Debug", .Info => "Info", …
+```
+
+The name is VERBATIM by design. Case folding was deliberately left out: it is a runtime
+string operation that allocates, and hiding a heap allocation behind a reflection intrinsic
+would contradict the no-hidden-heap rule. The declaration is the single source of truth for
+the spelling; a caller who wants another one transforms it explicitly.
+
+Five stdlib converters now delegate to it (`std.core.result.name`, `std.text.str
+.parse_error_name`, `std.text.regex.error_name`, `std.time.datetime.error_name`,
+`std.argparse.ap_error_name`) — the `error_name` boilerplate that every new error enum
+was reproducing by hand.
+
+### 5. Reflect-and-emit — worked before, still works
 
 The AST types (`Decl`, `Ty`, `Param`, `Field`, `StructDecl`, `EnumDecl`, `VariantDef`)
 are real and exported by `std.internal.ast`; `compiler.genc.genModuleIn` emits a
@@ -118,7 +140,12 @@ the caller's variable (#585) and non-`Var` reflection subjects being temp-bound 
 nested field writes silently vanish (#587) are open soundness holes in the
 member-place substitution that `from_json` relies on.
 
-**Still-future intrinsics.** `typeinfo(T)` / `a.type` (a *matchable* `Ty` descriptor —
+**Still-future intrinsics.** `each_variant<E>(f)` — the enum mirror of `each_field`, for
+building a name→variant table or a derived parser — is NOT built: nothing in tree wants it
+yet (every hand-written enum→text converter is one-directional), and a per-variant unroll
+with no value to bind needs a shape decision (`f(name)` alone? a constructed variant, which
+payload-carrying variants cannot supply?). It falls out of the same hook when a caller
+needs it. `typeinfo(T)` / `a.type` (a *matchable* `Ty` descriptor —
 `.Bool`, `.I32`, `.Struct(fields)`, `.Enum(variants)`) and `fields_of<T>()` (field list
 without a value, for reflect-and-emit inside a generic) remain unbuilt. They are what
 would replace serde's impl-dispatch workaround with a direct type-switch, and what the
@@ -153,7 +180,7 @@ column typing, bind params, and row scanning — one source of truth (the struct
 - ✅ No stringly-typed API — field names surface as string *literals* to statically
   typed lambdas; kinds/types stay enum variants.
 - ✅ Derive-class features as library code: `eq` (compiler-derived `==`), `to_json` /
-  `from_json` (`std.format.serde`).
+  `from_json` (`std.format.serde`), enum `variant_name` (five stdlib converters deleted).
 - ⛔ Free composition of reflection generics (#586/#588) and place-semantics soundness
   (#585/#587) — the active work.
 - ⛔ `typeinfo(T)` / `fields_of<T>()` — the remaining intrinsics; unlock type-switch
