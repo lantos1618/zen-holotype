@@ -1,6 +1,6 @@
 # Zen examples
 
-Thirteen examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
+Fourteen examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
 
 Build once, then run a C example with:
 
@@ -28,8 +28,13 @@ Run any of them as `./zen run examples/<name>.zen`.
 |---|---|
 | `stdin_echo.zen` | `printf 'hello\nworld\n' \| ./zen run examples/stdin_echo.zen` |
 | `wordfreq.zen` | `printf 'the cat sat on the mat the cat\n' \| ./zen run examples/wordfreq.zen` |
+| `jq.zen` | `./zen run examples/jq.zen '.a.b[0]' file.json` (or pipe JSON on stdin) |
 
 `wordfreq.zen` uses `HMap<string_view, i64>` to count input words.
+
+`jq.zen` is a mini-`jq`: `std.format.json` parses the document, a `.a.b[0]` path selects a node, and
+`json.pretty` renders it; all failures (missing file, bad JSON, bad path) are clean messages with a
+non-zero exit, never a crash.
 
 ## Network
 
