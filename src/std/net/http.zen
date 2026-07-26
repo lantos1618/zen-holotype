@@ -32,17 +32,16 @@
 // via `.expect` (the std.text.str convention). `parse_response` is independently testable: it
 // takes the raw response as a length-carrying `[u8]` and needs no socket, so canned responses
 // (including bodies with embedded NULs) are the deterministic test gate.
-//
-// CRLF is written with '\r'/'\n' char literals — the formatter canonicalises a "\r" string
-// escape into a raw CR byte in source, so CR never appears inside a string literal here.
 { Result, Opt, IoError, ok, err, expect } = std.core.result
 { TcpConn, TcpListener, serve, dial } = std.net.socket
 // `init`, NOT `new_in`: std.mem.arc also exports `new_in`, and a program combining this module
 // with the actor pool (std.concurrent.pool imports arc) would collide in the flat namespace.
 { String, init, append_in, push_in, finish_in } = std.text.string
-{ view, find, substr, split, words, trim, starts_with, to_lower, contains, parse_int, nbuf } = std.text.str
-{ integer } = std.text.num
-{ is_hex, hex_nibble } = std.text.ascii
+{ view, find, substr, split, words, trim, starts_with, to_lower, contains, parse_int, nbuf,
+  eq_ignore_case } = std.text.str
+{ integer, hex_value } = std.text.num
+{ is_hex } = std.text.ascii
+{ take, drop, sub } = std.core.slice
 // ── error channel ────────────────────────────────────────────────────────────────────────────────────
 // Connect: the client's TCP handshake failed. Listen: the server's bind/listen/accept failed — a
 // listener-level fault, not one connection's. Io: a send/receive failed mid-exchange. Malformed: the
@@ -86,31 +85,11 @@ Response*: {
     header = (r: Response, name: string_view) Opt<string_view> { lookup_header(r.headers, name) }
     ok     = (r: Response) bool { r.status >= 200 && r.status < 300 }
 }
-// ── case-insensitive helpers ──────────────────────────────────────────────────────────────────────────
-lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').then({ b + 32 }, { b }) }
-// ASCII-case-insensitive equality of two strs.
-ieq = (x: string_view, y: string_view) bool {
-    xv := x.view()
-    yv := y.view()
-    (xv.len == yv.len).match ({
-        true  => {
-            same := true
-            xv.loop((h, i, b) {
-                (lower(b) == lower(yv[i]) == false).then({
-                    same = false
-                    h.break
-                })
-            })
-            same
-        },
-        false => false,
-    })
-}
 // first header whose name case-insensitively equals `name`, or `.None`.
 lookup_header = (headers: [Header], name: string_view) Opt<string_view> {
     res: Opt<string_view> := .None
     headers.loop((h, i, hd) {
-        ieq(hd.name, name).then({
+        hd.name.eq_ignore_case(name).then({
             res = .Some(hd.value)
             h.break
         })
@@ -133,22 +112,6 @@ crlfcrlf = (v: [u8]) i64 {
         })
     })
     at
-}
-// zero-copy length-carrying `[u8]` sub-views, clamped. (No std.core.slice import — its exported
-// `buf` would collide with the local `buf` in the flat namespace.)
-head_bytes = (b: [u8], n: i64) [u8] {
-    m := (n < 0).match ({
-        true  => 0,
-        false => (n > b.len).then({ b.len }, { n }),
-    })
-    slice(b.ptr, m)
-}
-tail_bytes = (b: [u8], off: i64) [u8] {
-    o := (off < 0).match ({
-        true  => 0,
-        false => (off > b.len).then({ b.len }, { off }),
-    })
-    slice(b.ptr.offset(o), b.len - o)
 }
 // copy `b` into a fresh allocator-owned `[u8]` carrying its exact length plus one trailing NUL —
 // binary-safe (the length lives in the slice) and still viewable as text via `cstr(out.ptr)`.
@@ -177,8 +140,8 @@ parse_parts<A> = (a: MutPtr<A>, raw: [u8]) Result<MsgParts, HttpError> {
     out: Result<MsgParts, HttpError> := (sep < 0).match ({
         true  => err(malformed("http: no CRLFCRLF header terminator")),
         false => {
-            head := cstr(a.own_bytes(raw.head_bytes(sep)).ptr)
-            body_raw: [u8] := raw.tail_bytes(sep + 4)
+            head := cstr(a.own_bytes(raw.take(sep)).ptr)
+            body_raw: [u8] := raw.drop(sep + 4)
             lines := a.split(head, '\n')    // each line still carries a trailing '\r'
             res: Result<MsgParts, HttpError> := a.collect_headers(lines).match ({
                 .Err(e)      => .Err(e),
@@ -276,20 +239,20 @@ decide_body<A> = (a: MutPtr<A>, headers: [Header], body_raw: [u8]) [u8] {
             false => body_raw,
         }),
         .None     => lookup_header(headers, "Content-Length").match ({
-            .Some(cl) => body_raw.head_bytes(cl.parse_int()),
+            .Some(cl) => body_raw.take(cl.parse_int()),
             .None     => body_raw,
         }),
     })
     a.own_bytes(logical)
 }
 // ── chunked transfer-encoding decode ──────────────────────────────────────────────────────────────────
+// The three `[u8]` SCANS still here (`crlfcrlf` above, `hex_end`, `after_lf`) are not HTTP either —
+// they are "find this needle / scan while this class" over bytes, and they stay only because no byte-
+// search module exists yet. When one lands they move together; the things they FIND are already home
+// (std.text.num's `hex_value` decodes the run `hex_end` delimits).
 // first index at/after `i` that is not a hex digit (the end of a chunk-size field).
 hex_end = (bv: [u8], i: i64) i64 {
     (i < bv.len && is_hex(bv[i])).then({ bv.hex_end(i + 1) }, { i })
-}
-// fold the hex digits bv[i..e] into an integer size.
-hex_val = (bv: [u8], i: i64, e: i64, acc: i64) i64 {
-    (i >= e).then({ acc }, { bv.hex_val(i + 1, e, acc * 16 + hex_nibble(bv[i])) })
 }
 // index just past the next '\n' at/after `i`, or `bv.len` if none remains.
 after_lf = (bv: [u8], i: i64) i64 {
@@ -302,9 +265,9 @@ after_lf = (bv: [u8], i: i64) i64 {
 append_range<A> = (a: MutPtr<A>, bv: [u8], start: i64, n: i64, sb: String) String {
     avail := bv.len - start
     m := (n < avail).then({ n }, { avail })
-    sub: [u8] := bv.ptr.offset(start).slice(m)
+    part: [u8] := bv.sub(start, start + m)
     acc := sb
-    sub.loop((h, i, b) {
+    part.loop((h, i, b) {
         acc = a.push_in(acc, b).expect("http: oom")
     })
     acc
@@ -316,7 +279,7 @@ chunk_loop<A> = (a: MutPtr<A>, bv: [u8], i: i64, sb: String) String {
         true  => sb,
         false => {
             he := bv.hex_end(i)
-            size := bv.hex_val(i, he, 0)
+            size := bv.sub(i, he).hex_value()
             data := bv.after_lf(he)    // past the size line's '\n'
             (size == 0).match ({
                 true  => sb,
@@ -341,10 +304,8 @@ decimal<A> = (a: MutPtr<A>, n: i64) string_view {
         .finish_in(a)
         .expect("http: oom")
 }
-// append a CRLF line terminator to the builder (char literals — see the header note).
-crlf<A> = (a: MutPtr<A>, sb: String) String {
-    a.push_in(a.push_in(sb, '\r').expect("http: oom"), '\n').expect("http: oom")
-}
+// append a CRLF line terminator to the builder.
+crlf<A> = (a: MutPtr<A>, sb: String) String { a.append_in(sb, "\r\n").expect("http: oom") }
 // serialise a request: `<method> <path> HTTP/1.1`, a `Host` header, `Connection: close`, any caller
 // `headers`, an auto `Content-Length` when `body` is non-empty, the blank line, then the body.
 build_request<A> = (
@@ -643,7 +604,7 @@ wire_len<A> = (a: MutPtr<A>, raw: [u8]) i64 {
     (sep < 0).match ({
         true  => 0 - 1,
         false => {
-            head := cstr(a.own_bytes(raw.head_bytes(sep)).ptr)
+            head := cstr(a.own_bytes(raw.take(sep)).ptr)
             body: i64 := a.collect_headers(a.split(head, '\n')).match ({
                 .Ok(hs) => lookup_header(hs, "Content-Length").match ({
                     .Some(cl) => cl.parse_int(),
