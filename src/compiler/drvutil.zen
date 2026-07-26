@@ -10,7 +10,7 @@
 { getEnv } = std.sys.os
 { write, getpid, clock_gettime, opendir, closedir } = std.c.libc
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API
-{ resolve_program_data, ResolvedProgram } = std.internal.resolve
+{ resolve_program_data, ResolvedProgram } = compiler.resolve
 say* = (s: string_view) i64 {
     out(s).or(0)
     out("\n").or(0)
@@ -24,7 +24,13 @@ derr* = (s: string_view) i64 {
 // getpid() is constant for the life of a run, so each builder yields the SAME path on every call —
 // the write + the cc command (TMPC), and the build output + the run (TMPBIN), stay consistent.
 pid_digit = (d: i64) u8 { load(offset("0123456789", d)) }
+// `pid_digit` INDEXES a literal, so a negative `n` reads before it — undefined, and in practice a NUL
+// that truncates the whole built string at `cstr()`. A caller that slips a negative in deserves `-12`,
+// not a silently half-written JSON frame.
 push_int* = (s: String, mp: MutPtr<Malloc>, n: i64) String {
+    (n < 0).then({
+        return s.gstr_push(mp, '-').push_int(mp, 0 - n)
+    })
     (n < 10).match ({
         true  => s.gstr_push(mp, pid_digit(n)),
         false => {
