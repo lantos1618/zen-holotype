@@ -11,9 +11,9 @@
 { render_diagnostic } = compiler.diagnostic
 { getEnv } = std.sys.os
 { ImportEdge, ModuleGraph, ModuleSig, ModuleTable, ProvidedSymbol, SIG_IMPORTED, SIG_PUB, SIG_TYPE,
-  block_comment_at, die, eprint, id_is_std_io_c, line_comment_at, lstrip, mappend_id_name,
-  mappend_string, mimport_head_name, mimport_name_span, next_line, quoted_at, res_col_of,
-  raw_lit_end, rawstr_at, res_ident_end, res_line_of, res_sbyte } = std.internal.resolve
+  block_comment_at, eprint, id_is_std_io_c, line_comment_at, lstrip, mappend_id_name,
+  res_reject_text, mappend_string, mimport_head_name, mimport_name_span, next_line, quoted_at,
+  res_col_of, raw_lit_end, rawstr_at, res_ident_end, res_line_of, res_sbyte } = std.internal.resolve
 { edge_alias_in, edge_id_in } = std.internal.resolve_scan
 // ── VISIBILITY: `*` exports are ENFORCED across modules (error[private-name]) ─────────────────────
 // A top-level name is cross-module visible only when its declaration carries the `*` export marker
@@ -49,8 +49,14 @@ vis_fail = (
     hint := h1
         .gstr_append(a, "*` in the defining module, or use the module's public surface")
         .gstr_finish(a)
-    eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-name", msg, hint, 1))
-    report.then({ 0 }, { die(1) })
+    d := a.render_diagnostic(path, src, line, col, col + width - 1, "private-name", msg, hint, 1)
+    report.match ({
+        true  => {
+            eprint(d)
+            0
+        },
+        false => res_reject_text(d),
+    })
 }
 // flat import head `{ a, b } = mod` at line start `p`: every name must be exported by `mod`.
 vis_check_head = (
@@ -307,8 +313,14 @@ leak_fail = (
         .gstr_append(a, fname)
         .gstr_append(a, "` private")
         .gstr_finish(a)
-    eprint(a.render_diagnostic(path, src, line, col, col + width - 1, "private-leak", msg, hint, 1))
-    report.then({ 0 }, { die(1) })
+    d := a.render_diagnostic(path, src, line, col, col + width - 1, "private-leak", msg, hint, 1)
+    report.match ({
+        true  => {
+            eprint(d)
+            0
+        },
+        false => res_reject_text(d),
+    })
 }
 // ONE exported value decl's signature, scanned textually (mirroring vis_scan_quals: comment/quote
 // spans are skipped). A tiny state machine tracks TYPE position: `:` opens a type expression at

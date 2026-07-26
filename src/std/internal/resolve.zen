@@ -412,6 +412,38 @@ eprint* = (s: string_view) i64 {
     v := view(s)
     write(2, v.ptr, v.len)
 }
+// ── RESOLUTION FAILURE IS A VALUE, NOT PROCESS DEATH ──────────────────────────────────────────────
+// Every rejection below used to `exit(1)` from inside this library. That is survivable for `zen
+// check`, which was about to exit anyway, and FATAL for the language server: every intermediate
+// keystroke of an import line (`{ f } = std.te`) is an unknown module, so the server died
+// mid-session — no diagnostic published, in-flight requests abandoned. Rejections now PRINT AND
+// LATCH and the caller decides. `resolve_prog_or_exit` (the CLI path) exits the instant the latch is
+// set, so the driver's stderr and exit code are byte-identical: the first rejection is still the only
+// one printed, and no later pass gets to add output the old `exit(1)` pre-empted.
+res_failed := false
+res_no_msg = () string_view { "" }    // a module global takes its type from its initializer
+res_msg := res_no_msg()
+resolve_failed* = () bool { res_failed }
+resolve_message* = () string_view { res_msg }
+res_fail_reset = () void {
+    res_failed = false
+    res_msg = res_no_msg()
+}
+res_reject_text* = (text: string_view) i32 {
+    res_failed.match ({
+        true  => 0,
+        false => {
+            eprint(text)
+            res_msg = text
+            0
+        },
+    })
+    res_failed = true
+    0
+}    // first rejection wins — the one the exiting process used to print is still the one printed
+res_reject = (a: MutPtr<Malloc>, msg: String) i32 {
+    res_reject_text(msg.gstr_push(a, 10).gstr_finish(a))
+}
 // ── NAMESPACE-IMPORT CYCLE GUARD ───────────────────────────────────────────────────────────────
 // The namespace-closure loader (load_ns_closure_graph_table ↔ collect_ns_*_table) follows `m = pkg.mod`
 // alias edges with no seen-set, so a self-referential or cyclic alias (`a = a`, or a→b→a) recurses
@@ -428,10 +460,7 @@ fail_import_cycle = (a: MutPtr<Malloc>, inpath: string_view, id: String) i32 {
         .gstr_append(a, ": error: import cycle through namespace alias '")
     msg1 := a.mappend_id_name(msg0, id)
     tail := msg1.gstr_append(a, "' (a module cannot namespace-import itself, directly or transitively)")
-    line := tail.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(tail)
 }
 // Probe first so missing modules get a distinct error from unreadable modules.
 file_exists* = (path: string_view) bool {
@@ -462,10 +491,7 @@ fail_unknown_module = (a: MutPtr<Malloc>, inpath: string_view, id: String, path:
         },
     })
     close_msg := m2.gstr_append(a, ")")
-    line := close_msg.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(close_msg)
 }
 fail_unreadable = (a: MutPtr<Malloc>, inpath: string_view, path: string_view) string_view {
     msg := a
@@ -474,9 +500,7 @@ fail_unreadable = (a: MutPtr<Malloc>, inpath: string_view, path: string_view) st
         .gstr_append(a, inpath)
         .gstr_append(a, ": error: cannot read module file ")
     with_path := msg.gstr_append(a, path)
-    line := with_path.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
+    a.res_reject(with_path)
     ""
 }
 read_module_file = (a: MutPtr<Malloc>, path: string_view) Result<string_view, IoError> {
@@ -498,10 +522,7 @@ fail_unknown_name = (a: MutPtr<Malloc>, inpath: string_view, nm: String, id: Str
     in_mod := msg1.gstr_append(a, "' in module '")
     msg2 := a.mappend_id_name(in_mod, id)
     tail := msg2.gstr_append(a, "' (no such top-level definition)")
-    line := tail.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(tail)
 }
 fail_dup_user = (
     a: MutPtr<Malloc>,
@@ -534,10 +555,7 @@ fail_dup_user = (
     h6 := h5.gstr_append(a, "` then `m.")
     h7 := a.mappend_string(h6, nm)
     h8 := h7.gstr_append(a, "(...)`")
-    line := h8.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(h8)
 }
 fail_no_progdir = (a: MutPtr<Malloc>, inpath: string_view, id: String) i32 {
     msg0 := a
@@ -547,10 +565,7 @@ fail_no_progdir = (a: MutPtr<Malloc>, inpath: string_view, id: String) i32 {
         .gstr_append(a, ": error: sibling import '")
     msg1 := a.mappend_id_name(msg0, id)
     tail := msg1.gstr_append(a, "' needs a source file on disk (stdin has no directory to load it from)")
-    line := tail.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(tail)
 }
 // ── CANONICAL ModuleId → path ────────────────────────────────────────────────────────────────
 // THE one id→file mapping — every id→path decision (table build, closure load, the driver's cache
@@ -1306,9 +1321,7 @@ fail_dup_impl = (
         .gstr_push(a, ')')
     l2 := d2.gstr_push(a, 10)
     h0 := l2.gstr_append(a, "hint: a type has one impl per trait — merge the two bodies or delete one block")
-    eprint(h0.gstr_push(a, 10).gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(h0)
 }
 dedup_impls = (a: MutPtr<Malloc>, table: ModuleTable, flat: string_view) string_view {
     a.dedup_impls_into(a.gstr_string(4096), table, flat, 0, a.rset_new()).gstr_finish(a)
@@ -1542,7 +1555,8 @@ load_ns_closure_graph_table = (
 ) Closure {
     (ns_depth > NS_DEPTH_CAP).then({
         a.fail_import_cycle(inpath, id)
-    })    // cyclic alias — exit cleanly, never recurse to overflow
+        return c
+    })    // cyclic alias — reject and STOP: the cap only bounds the recursion if we also unwind here
     ns_depth = ns_depth + 1
     c2 := a.load_import_graph_table(table, inpath, src, graph, id.id_is_user(), c)
     ns := a.collect_ns_graph_table(table, inpath, src, graph, a.ns_scan(c2))
@@ -2191,9 +2205,7 @@ fail_import_redef = (a: MutPtr<Malloc>, m: ModuleEntry, s: ProvidedSymbol, nm: S
     h1 := a
         .mappend_string(h0, nm)
         .gstr_append(a, "` from the import list, or rename the local definition")
-    eprint(h1.gstr_push(a, 10).gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(h1)
 }
 check_import_redefs = (a: MutPtr<Malloc>, table: ModuleTable) i32 {
     table.modules.loop((h, i, m) {
@@ -2427,9 +2439,7 @@ fail_alias_collision = (
     h1 := a
         .mappend_id_str_dotted(h0, edge.module)
         .gstr_append(a, "` — or qualify the conflicting usage")
-    eprint(h1.gstr_push(a, 10).gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(h1)
 }
 check_alias_collisions = (
     a: MutPtr<Malloc>,
@@ -2526,6 +2536,7 @@ resolve_program_data* = (
     inpath: string_view,
     mainsrc: string_view,
 ) ResolvedProgram {
+    res_fail_reset()    // fresh per program: a keystroke that fixes the import must clear the last one's rejection
     a.alias_prefixes_reset()    // fresh per program: the checker's UFCS-alias set is exactly the aliases stamped below
     a.module_sigs_reset()    // fresh per program: the checker's per-alias export sigs (B4/R2), stamped per ns bind below
     a.uregions_reset()    // fresh per program: user-module body spans recorded during closure load

@@ -10,7 +10,7 @@
 { getEnv } = std.sys.os
 { write, getpid, clock_gettime, opendir, closedir } = std.c.libc
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API
-{ resolve_program_data, ResolvedProgram } = std.internal.resolve
+{ exit, resolve_failed, resolve_program_data, ResolvedProgram } = std.internal.resolve
 say* = (s: string_view) i64 {
     out(s).or(0)
     out("\n").or(0)
@@ -119,12 +119,23 @@ zt_log* = (mp: MutPtr<Malloc>, name: string_view, start_ms: i64) i64 {
 // ── the compile pipeline (resolve imports -> parse -> resolve_module) ─────────────────────────────
 // the full resolved program (flat + per-module table) — check/build keep it so a diagnostic can
 // render against the imported module its error actually lives in.
-resolve_prog* = (
+// THE CLI's resolve step. `std.internal.resolve` reports a rejection and latches rather than killing
+// the process (the language server has to survive a half-typed import), so the CLI reinstates its own
+// contract here: the message is already on stderr, and exiting NOW — before parse/check can add
+// output — reproduces the old in-library `exit(1)` byte for byte. The server calls
+// `resolve_program_data` + `resolve_failed()` directly instead, and keeps serving.
+resolve_prog_or_exit* = (
     mp: MutPtr<Malloc>,
     root: string_view,
     path: string_view,
     src: string_view,
-) ResolvedProgram { mp.resolve_program_data(root, mp.dirname(path), path, src) }
+) ResolvedProgram {
+    rp := mp.resolve_program_data(root, mp.dirname(path), path, src)
+    resolve_failed().then({
+        exit(1)
+    })
+    rp
+}
 dir_exists* = (path: string_view) bool {
     d := opendir(path)
     (d == null_ptr()).match ({
