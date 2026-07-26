@@ -23,10 +23,22 @@ mkdir -p "$IN"
 # Small, distinct seeds keep AFL's queue lean; take a spread of the fixtures.
 i=0; for f in $(find "$ROOT/tests/fixtures/zen" -name '*.zen' | sort | awk 'NR%4==1'); do
   cp "$f" "$IN/seed_$i.zen"; i=$((i+1)); done
+# Zero seeds means the fixture path moved; afl-fuzz would abort and the `|| true` below would hide it.
+[ "$i" -gt 0 ] || { echo "fuzz-afl: FAIL — no seeds found under tests/fixtures/zen"; exit 2; }
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 export ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:symbolize=0"
 export AFL_SKIP_CPUFREQ=1 AFL_I_DONT_CARE_ABOUT_MISSING_CRASHES=1 AFL_BENCH_UNTIL_CRASH=0
 echo "AFL campaign: ${SECS}s -> $OUT"
 timeout "$SECS" afl-fuzz -i "$IN" -o "$OUT" -m none -t 5000 -- "$AFLBIN" check @@ || true
-echo "=== crashes ==="; ls -1 "$OUT/default/crashes" 2>/dev/null | grep -v README || echo "(none)"
+# The old last line was `ls … | grep -v README || echo "(none)"`: grep's no-match exit 1 was converted
+# to 0 by the `||`, and a successful grep is 0 too — both branches exited 0, so the campaign could
+# never report that it had found crashes. Count them and make that the status.
+echo "=== crashes ==="
+ncrash=$(ls -1 "$OUT/default/crashes" 2>/dev/null | grep -cv README || true)
+if [ "${ncrash:-0}" -gt 0 ]; then
+  ls -1 "$OUT/default/crashes" | grep -v README
+  echo "FAIL: $ncrash AFL crash input(s) in $OUT/default/crashes"
+  exit 1
+fi
+echo "(none)"

@@ -14,10 +14,21 @@
 set -uo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
+# The `find` roots are asserted, not assumed. `2>/dev/null` used to hide a missing root, so renaming
+# `tools/` would have silently shrunk the checked set — the exact drift this file exists to prevent,
+# just centralised. A missing root now fails, and a corpus that collapses below FLOOR fails too (a
+# zero-iteration loop would otherwise `exit 0` having checked nothing).
 ZEN=${ZEN:-./zen}
+FLOOR=${FMT_CHECK_FLOOR:-300}
+for root in src tests examples tools driver.zen build.zen; do
+  [ -e "$root" ] || { echo "::error::fmt-check: missing root '$root' — the checked file set has drifted"; exit 2; }
+done
+files=$(find src tests examples tools driver.zen build.zen -name '*.zen' \
+          ! -path 'tests/fixtures/fmt/*_unformatted.zen' | LC_ALL=C sort)
+count=$(printf '%s\n' "$files" | grep -c '\.zen$')
+[ "$count" -ge "$FLOOR" ] || { echo "::error::fmt-check: only $count .zen files found (floor $FLOOR) — the file set collapsed"; exit 2; }
 bad=0
-for f in $(find src tests examples tools driver.zen build.zen -name '*.zen' \
-             ! -path 'tests/fixtures/fmt/*_unformatted.zen' 2>/dev/null | LC_ALL=C sort); do
+for f in $files; do
   if ! "$ZEN" fmt --check "$f"; then
     echo "::error file=$f::$f is not zenc-fmt clean — run '$ZEN fmt $f' and commit the result"
     bad=1

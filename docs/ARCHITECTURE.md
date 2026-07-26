@@ -10,7 +10,7 @@ source files
     │
     ▼
 module discovery / import graph / compatibility flattening
-    │                         src/std/internal/resolve.zen
+    │                         src/compiler/resolve.zen
     ▼
 lexer → recursive-descent parser → shared AST
     │     lex.zen + parse*.zen     ast/ast_types.zen
@@ -35,6 +35,37 @@ separate frontend or type system.
 parser, checker, C emitter, JS emitter, formatter, and AST-building APIs all use it. `compiler.genc`
 (name historical) keeps the value constructors and shared base helpers over those types.
 
+`compiler.ast.expr_children` sits beside it and holds `expr_fold_children` — the single exhaustive
+statement of which sub-expressions and statement bodies hang below each `Expr` variant. Broad
+recursive walkers delegate their `_` arm to it instead of hand-listing every composite shape, so a
+new `Expr` variant fails to compile at that one match rather than being silently skipped by whichever
+walkers forgot it. Narrow shape probes (`is_lvalue`, `expr_pos`, …) keep their own `_`: there it
+means "not the shape I am asking about", which stays correct.
+
+## Layering: `src/std` sits below `src/compiler`
+
+The prefixes are documentary. The resolver treats `std.` and `compiler.` as the same kind of trusted
+repo-tree module id, so nothing in the language enforces the split — `tests/harness_boundaries.zen`
+SUITE 10 does: no module under `src/std` may import `compiler.*`, with exactly two exemptions,
+`std.internal.ast` and `std.io.c`.
+
+Those two are the metaprogramming surface: build an AST with `std.internal.ast`, emit it with
+`compiler.genc`'s `genModule`. Handing out AST values requires naming the AST's types, so the edge is
+intrinsic. It is also bounded — both reach only `ast_types`, `genc`, `astops`, and `mangle` (~3k LOC),
+never the checker, parser, or driver. Boundedness is the whole point: Zen pulls whole modules, so an
+import drags that module's entire transitive closure into the consumer with no tree-shaking.
+
+The rule exists because it drifted once. The module resolver began as a 40-line import-line
+classifier that genuinely belonged in `std`, grew into the compiler's real resolver, and stayed at
+`std.internal.resolve` until its closure was the entire compiler — 58 modules, ~32k LOC, identical to
+`compiler.check`'s. It now lives in `src/compiler/resolve*.zen`.
+
+`std.internal.ast` and `compiler.ast.ast_types` are neither duplicates nor a facade pair. `ast_types`
+owns the type definitions, `genc` owns the stack-returning constructors, and `std.internal.ast` owns
+the allocator-explicit builders that copy pointer and slice children onto the heap so a returned AST
+does not dangle. A re-export facade is impossible under the flat namespace regardless: a same-named
+wrapper is a C redefinition of the symbol it wraps.
+
 The parser is split by concern:
 
 | Source | Responsibility |
@@ -50,7 +81,7 @@ the in-place formatter compare/render the same canonical result; fixtures enforc
 
 ## Modules
 
-`std.internal.resolve` scans each file into import edges and provided symbols, constructs a module
+`compiler.resolve` scans each file into import edges and provided symbols, constructs a module
 table, validates public/private imports, and has parsed-module/check-link APIs. The shipping CLI still
 uses `ResolvedProgram.flat` at its parser/checker boundary:
 

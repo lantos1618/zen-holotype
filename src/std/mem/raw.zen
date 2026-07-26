@@ -9,15 +9,30 @@
 //   release(p)
 { Result, IoError, ok_ptr, ok, err } = std.core.result
 { malloc, free } = std.mem.alloc
-{ calloc, memcpy } = std.c.libc
+{ calloc, memcpy, memmove, memset, memcmp } = std.c.libc
 // allocate `n` bytes (uninitialised)
 alloc* = (n: i64) RawPtr<u8> { malloc(n) }
 try_alloc* = (n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(malloc(n)) }
 // allocate `n` bytes, zero-filled
 zeroed* = (n: i64) RawPtr<u8> { calloc(n, 1) }
 try_zeroed* = (n: i64) Result<RawPtr<u8>, IoError> { ok_ptr(calloc(n, 1)) }
-// copy `n` bytes from src to dst
-copy = (dst: RawPtr<u8>, src: RawPtr<u8>, n: i64) void { memcpy(dst, src, n) }
+// ── bulk byte ops ────────────────────────────────────────────────────────────
+// Storage moves over memory the caller already owns: they allocate nothing, and they are
+// indifferent to what the bytes MEAN (that is what makes them mem's, not text's). Written
+// destination-first so UFCS reads as the write it is — `dst.copy(src, n)`. `n == 0` is a
+// well-defined no-op for all four (`compare` reports equal).
+// `n` bytes src -> dst. The two ranges MUST NOT OVERLAP: an overlapping memcpy is C undefined
+// behaviour — it may copy in any order or word-at-a-time, not just produce surprising bytes.
+// Use `move` whenever dst and src can be windows on the same buffer.
+copy* = (dst: RawPtr<u8>, src: RawPtr<u8>, n: i64) void { memcpy(dst, src, n) }
+// `n` bytes src -> dst, DEFINED WHEN THE RANGES OVERLAP: the result is as if src were read
+// through a scratch copy first. The shift-a-buffer-in-place op (insert/remove/compact).
+move* = (dst: RawPtr<u8>, src: RawPtr<u8>, n: i64) void { memmove(dst, src, n) }
+// fill the `n` bytes at dst with the byte `b`
+set* = (dst: RawPtr<u8>, b: u8, n: i64) void { memset(dst, to_i32(b), n) }
+// order the first `n` bytes of a and b as UNSIGNED bytes: negative / 0 / positive when a sorts
+// before / equal to / after b. Equality is `a.compare(b, n) == 0`.
+compare* = (a: RawPtr<u8>, b: RawPtr<u8>, n: i64) i32 { memcmp(a, b, n) }
 // hand the block back to the allocator
 release* = (p: RawPtr<u8>) void { free(p) }
 // Scoped FFI scratch cell: allocate `n` zero-filled bytes, run `f` over them, ALWAYS release the cell,

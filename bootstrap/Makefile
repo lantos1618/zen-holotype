@@ -112,6 +112,7 @@ harness-fast: zen
 OLD ?= $(ZENC)
 NEW ?= $(ZENC)
 difftest: zen
+	@[ "$(OLD)" != "$(NEW)" ] || echo "NOTE: OLD == NEW ($(OLD)) — this run compares the compiler with ITSELF and cannot detect a behaviour change. Pass OLD=<saved baseline> for the real gate."
 	cd $(ROOT) && ./scripts/difftest.sh $(OLD) $(NEW)
 
 docs-check:

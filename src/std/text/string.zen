@@ -14,6 +14,7 @@
 //   s = s.append_in(m.addr(), "hello").expect("oom")    // or .or_return() in a Result fn
 //   s.free_in(m.addr())
 { len, view } = std.text.str
+{ copy } = std.mem.raw
 { try_acquire, try_resize } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 String*: {
@@ -30,13 +31,13 @@ String*: {
         a.append_in(s, t)
     }
     finish_in<A> = (s: String, a: MutPtr<A>) Result<string_cstr, IoError> { a.finish_in(s) }
-    free_in<A> = (s: String, a: MutPtr<A>) void { a.free_in(s) }
+    free_in<A>   = (s: String, a: MutPtr<A>) void { a.free_in(s) }
 }
+// `copy` (not `move`): the destination run starts at `at` == the String's live length, so it lies
+// entirely in the spare capacity past every byte a source view could name — the ranges cannot overlap.
 copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: string_view) void {
     src := t.view()
-    src.loop((h, i, b) {
-        dst.offset(at + i).store(b)
-    })
+    dst.offset(at).copy(src.ptr, src.len)
 }
 // ── explicit allocator variants (all fallible ops return Result) ─────────────
 init*<A> = (a: MutPtr<A>, cap: i64) Result<String, IoError> {
@@ -106,11 +107,7 @@ append_in*<A> = (a: MutPtr<A>, s: String, t: string_view) Result<String, IoError
 // onto the String in one grow. `append_in` above is for NUL-terminated `string_view`s; this is
 // its slice sibling, used by run-copy escapers (e.g. std.format.json's string writer) that bulk
 // copy the run between escapes.
-copy_slice_bytes = (dst: RawPtr<u8>, at: i64, t: [u8]) void {
-    t.loop((h, i, b) {
-        dst.offset(at + i).store(b)
-    })
-}
+copy_slice_bytes = (dst: RawPtr<u8>, at: i64, t: [u8]) void { dst.offset(at).copy(t.ptr, t.len) }
 append_slice_in*<A> = (a: MutPtr<A>, s: String, t: [u8]) Result<String, IoError> {
     t := t
     n := t.len

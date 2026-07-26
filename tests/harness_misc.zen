@@ -11,12 +11,15 @@
 //   faithful_ast <- tests/test_faithful_ast.py    (`fmt --ast` UFCS/round-trip/idempotency + emit-equal corpus)
 //   capacity     <- compiler review                 (16385-decl module -> error[capacity], not a crash)
 //   audit        <- `zen audit`                      (dead-code + unused-import reporter: flag/not-flag + --strict)
+//   matrix       <- tests/harness_matrix.zen         (the positional POSITION x RULE coverage matrix)
 //
 // Helpers are `om_`-prefixed so they never collide on the flat-import flatten with std (std.io.file
 // already defines `read_file*`), harness_lib, or the other category files.
 { VCase, VerdictCase, run_value, run_values, run_verdict, run_verdicts, run_suite, zo_path, zo_cmd,
-  zo_itoa, zo_par_run, zo_idpath, zo_join } = harness_lib
+  zo_cat2, zo_itoa, zo_par_run, zo_idpath, zo_join } = harness_lib
+{ harness_matrix_run } = harness_matrix
 { Malloc } = std.mem.alloc
+{ is_alpha } = std.text.ascii
 { out, out_bytes, save, contents_in, shell } = std.io.file
 { len, contains, starts_with, is_empty, view, substr } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
@@ -64,14 +67,8 @@ om_count = (s: string_view, needle: string_view) i64 {
     n
 }
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
-om_cat2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
-    s := mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, a).expect("harness: oom")
-    s = s.append_in(mp, b).expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
-}
 om_cat3 = (mp: MutPtr<Malloc>, a: string_view, b: string_view, c: string_view) string_view {
-    mp.om_cat2(a, mp.om_cat2(b, c))
+    mp.zo_cat2(a, mp.zo_cat2(b, c))
 }
 // ════════════════════════════════════════════════════════════════════════════════
 // traits  <- tests/test_traits.py
@@ -242,7 +239,7 @@ harness_misc_num_parse = () i32 {
 // The value-case harness can't drive this (no module resolver + it clashes with libc redecls), so this
 // mirrors num_parse's custom `zenc run` + stdout-substring runner. These are the crypto correctness gate.
 // ════════════════════════════════════════════════════════════════════════════════
-HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    put(\"empty=\").s(mp.sha256_hex(\"\".view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(\"abc\".view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(\"The quick brown fox jumps over the lazy dog\".view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(\"abc\".view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(\"hello\".view()) == fnv1a(\"hello\".view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(\"abc\".view()) != fnv1a(\"abd\".view())).nl()\n    0\n}\n"
+HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ is_alpha } = std.text.ascii\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    put(\"empty=\").s(mp.sha256_hex(\"\".view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(\"abc\".view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(\"The quick brown fox jumps over the lazy dog\".view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(\"abc\".view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(\"hello\".view()) == fnv1a(\"hello\".view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(\"abc\".view()) != fnv1a(\"abd\".view())).nl()\n    0\n}\n"
 harness_misc_hash = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -261,8 +258,7 @@ harness_misc_hash = () i32 {
 // every top-level non-generic, non-exported declaration name must survive into the emitted C — the
 // Zen equivalent of pytest's `for name in _DECL_RE.findall(src): assert name in out`.
 // ════════════════════════════════════════════════════════════════════════════════
-om_is_alpha = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_' }
-om_is_alnum = (b: u8) bool { om_is_alpha(b) || b >= '0' && b <= '9' }
+om_is_alnum = (b: u8) bool { is_alpha(b) || b >= '0' && b <= '9' }
 // Mirror of `_DECL_RE = ^([a-zA-Z_]\w*)\s*=\s*\(` (re.M): scan `src` for each line-initial
 // `name = (` declaration (col-0 only; `name*`/`name = <T>(` are excluded since the char after the
 // name is not `=`, and a generic's `<` is not `(`), and require every such `name` to appear in `c`.
@@ -277,7 +273,7 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: string_view, c: string_view) bool {
     ok := true
     @while (i < n) {
         b := sv[i]
-        (ls && om_is_alpha(b)).then({
+        (ls && is_alpha(b)).then({
             // identifier [i, e)
             e := i
             @while (e < n && om_is_alnum(sv[e])) {
@@ -527,28 +523,25 @@ om_fmt_then_run = (mp: MutPtr<Malloc>, src: string_view) i32 {
     shell(mp.zo_cmd("./zen run $ZT/zo_misc_ftr_f.zen > /dev/null 2>&1")).expect("harness: shell")
 }
 // fmt(fmt src) == fmt(src) on a source string.
+// The `&&` chain and the `test -s` guards are load-bearing: a `>` redirect creates the target whether
+// or not the command succeeded, so an unchained `cmp -s` of two failed runs compares two EMPTY files
+// and returns 0. Proven on the corpus variant below — pointing it at a nonexistent path left the
+// idempotency assertion green. Every producer must now succeed and produce bytes.
 om_fmt_idem = (src: string_view) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_misc_id.zen"), src, len(src))
-    shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_id.zen > $ZT/zo_misc_id1.zen 2>/dev/null"))
-    shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_id1.zen > $ZT/zo_misc_id2.zen 2>/dev/null"))
-    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")).expect("harness: shell") == 0
+    shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_id.zen > $ZT/zo_misc_id1.zen 2>/dev/null && test -s $ZT/zo_misc_id1.zen && ./zen fmt --ast $ZT/zo_misc_id1.zen > $ZT/zo_misc_id2.zen 2>/dev/null && test -s $ZT/zo_misc_id2.zen && cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")).expect("harness: shell") == 0
 }
 // fmt(fmt F) == fmt(F) on a real corpus file at repo path `rel`.
 om_corpus_idem = (mp: MutPtr<Malloc>, rel: string_view) bool {
-    shell(mp.zo_cmd(mp.om_cat3("./zen fmt --ast ", rel, " > $ZT/zo_misc_c1.zen 2>/dev/null")))
-    shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_c1.zen > $ZT/zo_misc_c2.zen 2>/dev/null"))
-    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen")).expect("harness: shell") == 0
+    shell(mp.zo_cmd(mp.om_cat3("./zen fmt --ast ", rel, " > $ZT/zo_misc_c1.zen 2>/dev/null && test -s $ZT/zo_misc_c1.zen && ./zen fmt --ast $ZT/zo_misc_c1.zen > $ZT/zo_misc_c2.zen 2>/dev/null && test -s $ZT/zo_misc_c2.zen && cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen"))).expect("harness: shell") == 0
 }
 // emit(fmt F) == emit(F): the formatted AST resolves to byte-identical C (ZEN_ROOT=. resolves the
 // repo's std/compiler imports for both the original copy and the formatted copy identically).
 om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: string_view) bool {
-    shell(mp.zo_cmd(mp.om_cat3("./zen fmt --ast ", rel, " > $ZT/zo_misc_cf.zen 2>/dev/null")))
-    shell(mp.zo_cmd(mp.om_cat3("cp ", rel, " $ZT/zo_misc_co.zen")))
-    shell(mp.zo_cmd("ZEN_ROOT=. ./zen emit --force $ZT/zo_misc_co.zen > $ZT/zo_misc_eo.c 2>/dev/null"))
-    shell(mp.zo_cmd("ZEN_ROOT=. ./zen emit --force $ZT/zo_misc_cf.zen > $ZT/zo_misc_ef.c 2>/dev/null"))
-    shell(mp.zo_cmd("cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c")).expect("harness: shell") == 0
+    z: string_view := ""
+    shell(mp.zo_cmd(mp.zo_join([z, "./zen fmt --ast ", rel, " > $ZT/zo_misc_cf.zen 2>/dev/null && test -s $ZT/zo_misc_cf.zen && cp ", rel, " $ZT/zo_misc_co.zen && ZEN_ROOT=. ./zen emit --force $ZT/zo_misc_co.zen > $ZT/zo_misc_eo.c 2>/dev/null && test -s $ZT/zo_misc_eo.c && ZEN_ROOT=. ./zen emit --force $ZT/zo_misc_cf.zen > $ZT/zo_misc_ef.c 2>/dev/null && test -s $ZT/zo_misc_ef.c && cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c"]))).expect("harness: shell") == 0
 }
 harness_misc_faithful = () i32 {
     m := Malloc(_: 0)
@@ -721,7 +714,7 @@ harness_misc_audit = () i32 {
     rcc := shell(mp.zo_cmd("./zen audit --strict $ZT/zo_misc_aud_clean.zen > $ZT/zo_misc_aud_clean.out 2>&1")).expect("harness: shell")
     txt := mp.om_read_file(mp.zo_path("zo_misc_aud.out"))
     ctxt := mp.om_read_file(mp.zo_path("zo_misc_aud_clean.out"))
-    run_suite("audit (dead-code + unused-import)", [rc0 == 0, rcs != 0, rcc == 0, txt.contains("warning[dead-code]: fn 'aud_dead' is never reachable from main"), txt.contains("warning[dead-code]: struct 'AudDeadS' is never reachable from main"), txt.contains("warning[unused-import]: 'aud_extra' imported from 'zo_misc_aud_help' but never used"), txt.contains("zo_misc_aud_help.zen:4:"), txt
+    run_suite("audit (dead-code + unused-import)", [rc0 == 0, rcs == 1, rcc == 0, txt.contains("warning[dead-code]: fn 'aud_dead' is never reachable from main"), txt.contains("warning[dead-code]: struct 'AudDeadS' is never reachable from main"), txt.contains("warning[unused-import]: 'aud_extra' imported from 'zo_misc_aud_help' but never used"), txt.contains("zo_misc_aud_help.zen:4:"), txt
         .contains("tickle")
         .om_not(), txt.contains("'aud_used'").om_not(), txt.contains("'AudLive'").om_not(), txt
         .contains("'AudT'")
@@ -756,11 +749,119 @@ harness_misc_audit_ws = () i32 {
         .contains("'ws_m'")
         .om_not(), wtxt.contains("'ws_n'").om_not()])
 }
+// ════════════════════════════════════════════════════════════════════════════════
+// audit clones <- `warning[clone]` (compiler.clones structural fingerprint)
+// A detector that cannot fail is worthless, so this fixture plants BOTH answers and demands both.
+// Three families, each a base + an exact clone + a ONE-LEAF near-miss, all the same size:
+//
+//   scale  — clone renames the params AND the loop element; near-miss changes ONE operator (* -> +)
+//   pt     — clone renames the locals;   near-miss SWAPS the two struct-literal field values, so the
+//            two trees hold an identical multiset of leaves and differ only in placement
+//   mk     — clone renames the locals;   near-miss changes ONE enum variant (.A -> .B)
+//
+// The near-miss assertion is only meaningful because its own family's clone IS reported: that proves
+// the family clears the size gate, so a silent near-miss is discrimination and not suppression. The
+// `cl_tiny` pair (4 nodes) must stay silent for the opposite reason — it IS the gate. Exactly three
+// findings, no more: a fourth would mean two families collided with each other.
+// ════════════════════════════════════════════════════════════════════════════════
+CLONE_SRC := """
+CL_S*: { a: i32, b: i32 }
+CL_E*: A(i32) | B(i32)
+cl_scale_a = (xs: [i32], k: i32) i32 {
+    t := k
+    xs.loop((h, i, x) {
+        t = t + x * 2
+        t = t - x / 3
+    })
+    t + k * 5
+}
+cl_scale_b = (ys: [i32], n: i32) i32 {
+    t := n
+    ys.loop((h, j, y) {
+        t = t + y * 2
+        t = t - y / 3
+    })
+    t + n * 5
+}
+cl_near_op = (zs: [i32], q: i32) i32 {
+    t := q
+    zs.loop((h, i, z) {
+        t = t + z + 2
+        t = t - z / 3
+    })
+    t + q * 5
+}
+cl_pt_a = (k: i32) CL_S {
+    t := k * 3 + 1
+    u := t - 5
+    w := u * t + k
+    CL_S(a: t + w, b: u - w)
+}
+cl_pt_b = (m: i32) CL_S {
+    p := m * 3 + 1
+    q := p - 5
+    r := q * p + m
+    CL_S(a: p + r, b: q - r)
+}
+cl_near_fld = (k: i32) CL_S {
+    t := k * 3 + 1
+    u := t - 5
+    w := u * t + k
+    CL_S(a: u - w, b: t + w)
+}
+cl_mk_a = (k: i32) CL_E {
+    t := k * 3 + 1
+    u := t - 5
+    w := u * t + k
+    CL_E.A(t + w - u)
+}
+cl_mk_b = (m: i32) CL_E {
+    p := m * 3 + 1
+    q := p - 5
+    r := q * p + m
+    CL_E.A(p + r - q)
+}
+cl_near_var = (k: i32) CL_E {
+    t := k * 3 + 1
+    u := t - 5
+    w := u * t + k
+    CL_E.B(t + w - u)
+}
+cl_tiny_a = (x: i32) i32 { x + 1 }
+cl_tiny_b = (y: i32) i32 { y + 1 }
+cl_val = (e: CL_E) i32 {
+    e.match ({
+        .A(v) => v,
+        .B(v) => v,
+    })
+}
+main = () i32 {
+    v: [i32] := [1, 2, 3]
+    s := v.cl_scale_a(1) + v.cl_scale_b(2) + v.cl_near_op(3)
+    p := cl_pt_a(1).a + cl_pt_b(2).b + cl_near_fld(3).a
+    e := cl_mk_a(1).cl_val() + cl_mk_b(2).cl_val() + cl_near_var(3).cl_val()
+    s + p + e + cl_tiny_a(1) + cl_tiny_b(2)
+}
+"""
+harness_misc_clones = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_misc_clone.zen"), CLONE_SRC, len(CLONE_SRC))
+    save(mp.zo_path("zo_misc_clone.out"), "", 0)
+    rc := shell(mp.zo_cmd("./zen audit $ZT/zo_misc_clone.zen > $ZT/zo_misc_clone.out 2>&1")).expect("harness: shell")
+    txt := mp.om_read_file(mp.zo_path("zo_misc_clone.out"))
+    run_suite("audit clones (structural fingerprint)", [rc == 0, txt.contains("warning[clone]: fn 'cl_scale_b' is structurally identical to 'cl_scale_a'"), txt.contains("warning[clone]: fn 'cl_pt_b' is structurally identical to 'cl_pt_a'"), txt.contains("warning[clone]: fn 'cl_mk_b' is structurally identical to 'cl_mk_a'"), txt
+        .contains("cl_near_op")
+        .om_not(), txt.contains("cl_near_fld").om_not(), txt.contains("cl_near_var").om_not(), txt
+        .contains("cl_tiny")
+        .om_not(), txt.om_count("structurally identical") == 3])
+}
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 harness_misc_run* = () i32 {
     fails := 0
     fails = fails + harness_misc_audit()
     fails = fails + harness_misc_audit_ws()
+    fails = fails + harness_misc_clones()
     fails = fails + harness_misc_traits()
     fails = fails + harness_misc_string_types()
     fails = fails + harness_misc_num_parse()
@@ -772,5 +873,6 @@ harness_misc_run* = () i32 {
     fails = fails + harness_misc_iofile()
     fails = fails + harness_misc_ffi_verify()
     fails = fails + harness_misc_capacity()
+    fails = fails + harness_matrix_run()
     fails
 }

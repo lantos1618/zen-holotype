@@ -9,7 +9,7 @@
 // helpers are the minimal flag reader: exact-token match on argv, no allocation, no parser state —
 // the caller passes the full token (`os.has_flag("--verbose")`, `os.flag_str("--out")`). A typed
 // `parse(a, T)` / positional collector is a later wave (see the tail of this file).
-{ getenv } = std.c.libc
+{ clock_gettime, getenv } = std.c.libc
 { try_acquire } = std.mem.alloc
 { Result, IoError } = std.core.result
 // bound to zenrt.c (bodyless = foreign).
@@ -20,6 +20,17 @@ zen_argv_at = (i: i32) string_view
 // `int setenv(const char *name, const char *value, int overwrite)`, `int unsetenv(const char *name)`.
 setenv = (name: string_view, value: string_view, overwrite: i32) i32
 unsetenv = (name: string_view) i32
+// clock id 1 = CLOCK_MONOTONIC, in milliseconds — the one clock reading available inside the
+// bootstrap closure (std.time.clock, which names the id, is not in the seed manifest and cannot be:
+// its cell comes from std.mem.raw, whose `of*` collides with std.collections.map's under the flat
+// namespace). The id stays a literal here for exactly that reason. The timespec cell is a STACK
+// slice literal, deliberately not an allocator cell: a heap alloc+free would perturb the allocation
+// sequence of whatever is being timed, and a reading must observe its subject, not move it.
+clock_ms* = () i64 {
+    ts: [i64] := [0, 0]
+    clock_gettime(1, ts.ptr)
+    ts[0] * 1000 + ts[1] / 1000000
+}
 argc* = () i32 { zen_argc() }    // os.argc()  — number of CLI args (incl. argv[0])
 arg* = (i: i32) string_view { zen_argv_at(i) }    // os.arg(i)  — the i-th arg ("" if out of range)
 getEnv* = (name: string_view) string_view {

@@ -61,7 +61,11 @@ for N in "${Ns[@]}"; do
   line=$(printf '%s\n' "$out" | grep -iE 'panic|corrupt|double free|malloc\(\)|free\(\)|sanitizer' | head -1)
   if printf '%s' "$line" | grep -qi 'null pointer'; then cls=BUG:NULL
   elif printf '%s' "$line" | grep -qiE 'double free|corrupt|malloc\(\)|free\(\)'; then cls=BUG:HEAP
-  elif [ $rc -ge 128 ] && [ -z "$line" ]; then cls=BUG:SIG; line="signal rc=$rc"
+  # `sanitizer` was in the EXTRACTION alternation above but in no classification branch: its only
+  # effect was to make $line non-empty, which disqualified BUG:SIG and dropped an ASan abort into
+  # HANDLED — i.e. "OOM-as-value working". A sanitizer report is a bug, and so is any signal exit.
+  elif printf '%s' "$line" | grep -qi 'sanitizer'; then cls=BUG:SAN
+  elif [ $rc -ge 128 ]; then cls=BUG:SIG; line="signal rc=$rc${line:+ :: $line}"
   elif [ $rc -eq $base ]; then cls=OK
   else cls=HANDLED
   fi
@@ -77,3 +81,8 @@ done
 echo "---"
 echo "swept ${#Ns[@]} injection points: OK=$ok HANDLED=$handled BUG=$bug  (unique bug signatures: $nsig)"
 echo "findings -> $findings"
+# A sweep that injected nowhere proves nothing: LD_PRELOAD is ignored under an ASan build (see
+# README), and `total` then defaults to 0, every loop runs zero times, and the script used to print
+# a clean bill of health. And BUG findings — the whole point of the sweep — used to exit 0.
+[ ${#Ns[@]} -gt 0 ] || { echo "FAIL: 0 injection points (LD_PRELOAD ignored? ASan build?) — nothing was swept"; exit 2; }
+[ "$bug" -eq 0 ] || { echo "FAIL: $bug allocation failure(s) crashed instead of surfacing as a value"; exit 1; }

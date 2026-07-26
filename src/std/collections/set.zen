@@ -58,6 +58,7 @@
 { Result, IoError } = std.core.result    // allocation failure is a Result value (OOM → .Err)
 { Allocator, try_acquire2, DynAlloc, dyn_heap } = std.mem.alloc    // explicit allocator trait; DynAlloc = narrow Allocator stored by the AMBIENT form; try_acquire2 = all-or-nothing 2-buffer acquire
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
+{ compare } = std.mem.raw    // byte-wise slot equality (see `seq`)
 { hashidx_fold, hashidx_clear, hashidx_link } = std.collections.hashidx    // shared open-hash index mechanics over the 2*cap i64 buffer
 Set*<T>: {
     elems: RawPtr<u8>,
@@ -85,14 +86,7 @@ Set*<T>: {
         // byte-wise equality of two slots.
         ab: [u8] := s.bytes_of(a)
         bb: [u8] := s.bytes_of(b)
-        eqf := true
-        ab.loop((hh, i, x) {
-            (x == bb[i] == false).then({
-                eqf = false
-                hh.break
-            })
-        })
-        eqf
+        ab.ptr.compare(bb.ptr, ab.len) == 0
     }
     find = (s: Set<T>, x: T) i64 {
         // O(1) average: write the query into the scratch slot, hash to a bucket, walk the chain comparing bytes.
@@ -454,8 +448,8 @@ difference*<T, A> = (a: MutPtr<A>, x: Set<T>, y: Set<T>) Result<Set<T>, IoError>
 ASet*<T>: {
     inner: Set<T>,
     alloc: DynAlloc,
-    len = (w: ASet<T>) i64 { w.inner.len() }
-    has = (w: ASet<T>, x: T) bool { w.inner.has(x) }
+    len  = (w: ASet<T>) i64 { w.inner.len() }
+    has  = (w: ASet<T>, x: T) bool { w.inner.has(x) }
     each = (w: ASet<T>, f: (T) void) void { w.inner.each(f) }
     add = (w: ASet<T>, x: T) ASet<T> {
         // In a chain (`s.add(x).add(y)`) the receiver `w` is the previous op's side-effecting

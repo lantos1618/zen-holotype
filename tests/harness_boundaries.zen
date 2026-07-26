@@ -15,6 +15,7 @@
 //
 // NOT ported (added here):
 //   9. scan set covers every non-test .zen                → "scan set covers every non-test .zen"
+//  10. src/std imports no compiler module                 → "std imports no compiler module"
 //
 // HOW: enumerate the file set via `find ... > $ZT/ob_files.txt`, then read+scan each file in Zen.
 // The set is NO LONGER the python rglob: it also names the repo-root driver.zen and build.zen, which
@@ -23,7 +24,7 @@
 // `_code(...).split(marker,1)[…]` substring slicing on comment-stripped source.
 { Malloc } = std.mem.alloc
 { out, contents_in, shell } = std.io.file
-{ ne, view, is_empty, split_in, nbuf, find, contains, substr } = std.text.str
+{ ne, view, is_empty, split_in, nbuf, find, contains, starts_with, substr } = std.text.str
 { new_in, push_in, finish_in } = std.text.string
 { expect } = std.core.result
 { run_suite, zo_path, zo_cmd } = harness_lib
@@ -206,6 +207,12 @@ region = (mp: MutPtr<Malloc>, src: string_view, m1: string_view, m2: string_view
 not_contains = (s: string_view, needle: string_view) bool {
     s.contains(needle).then({ false }, { true })
 }
+// A region whose START marker no longer occurs is the EMPTY string, and every `not_contains` over the
+// empty string is trivially true — so a rename in the file under audit silently retires the rule
+// instead of failing it. Proven: renaming `write_int` to `write_i64` in src/std/text/fmt.zen while
+// ALSO introducing the forbidden `.integer_in(` call left the fmt sub-suite green (7 dots, exit 0).
+// Every sliced region therefore carries this presence assertion beside its content assertions.
+found = (region: string_view) bool { region.is_empty().then({ false }, { true }) }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 4: raw malloc/calloc/realloc/free stay behind the allocator floor (the original port).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -378,8 +385,10 @@ atwhile_allowed = (path: string_view) bool {
         || path == "src/compiler/backend/c/c_emit.zen"
         || path == "src/compiler/diagnostic.zen"
         || path == "driver.zen"
+        || path == "src/compiler/drvutil.zen"
         || path == "src/compiler/lsp.zen"
         || path == "src/compiler/lsp_tokens.zen"
+        || path == "src/compiler/lsp_query.zen"
         || path == "src/compiler/audit.zen"
         || path == "src/compiler/validate/util.zen"
         || path == "src/compiler/validate/diag.zen"
@@ -389,8 +398,9 @@ atwhile_allowed = (path: string_view) bool {
         || path == "src/std/sys/fs.zen"
         || path == "src/std/io/stdin.zen"
         || path == "src/std/hash.zen"
-        || path == "src/std/internal/resolve.zen"
-        || path == "src/std/internal/resolve_scan.zen"
+        || path == "src/compiler/resolve.zen"
+        || path == "src/compiler/resolve_scan.zen"
+        || path == "src/std/net/http.zen"
 }
 // low-level numeric/filesystem/stdin substrate: these primitives MUST iterate, not recurse — an
 // unbounded recursion depth (huge exponent / directory entry count / stdin byte or line count /
@@ -402,17 +412,25 @@ atwhile_allowed = (path: string_view) bool {
 // literal, or a long source line must lex/emit/caret by iteration, not per-byte recursion (#66c).
 // std.text.ascii joins as the shared escape-loop substrate: escape_into is THE per-byte scan the
 // C/JS backends and the formatter splice their escape tables into (c_lit's own @while moved there).
-// driver.zen, compiler.lsp and compiler.audit join as scanners over unbounded input: the LSP's
-// hand-rolled JSON reader walks a whole request body (a `didChange` carries the entire document),
+// compiler.drvutil joins as the OWNER of that scan: cstr_range (the shared [s,e) byte-range copy the
+// LSP's JSON reader and audit's identifier scanner both call) must iterate for exactly the reason
+// those two callers do — the range is a whole JSON body or module region, not a bounded token.
+// driver.zen, compiler.lsp, compiler.lsp_query and compiler.audit join as scanners over unbounded
+// input: the LSP's hand-rolled JSON reader walks a whole request body (a `didChange` carries the
+// entire document), lsp_query's hover/completion scans walk a whole open BUFFER line by line,
 // and audit's per-byte import/identifier scanners plus its insertion sort walk whole source files
 // and the full finding list. Per-byte recursion there is the stack overflow this class exists to
-// avoid. None of these loops are new: all 60 lived in the repo-root driver.zen and were exempt only
-// because the scan never reached it. They are now split 4 / 10 / 46 across the three files, and the
-// scan does reach it — the exemption is finally deliberate rather than accidental.
-// std.internal.resolve/resolve_scan join for their line scanners (next_line/line_end): the resolver
+// avoid. Most of these loops are not new: 60 once lived in the repo-root driver.zen and were exempt
+// only because the scan never reached it. They now sit 4 / 9 / 8 / 46 across the four files, and the
+// scan does reach them — the exemption is finally deliberate rather than accidental.
+// compiler.resolve/resolve_scan join for their line scanners (next_line/line_end): the resolver
 // walks whole flattened sources byte-by-byte to the next newline, and both per-byte recursion
 // (stack) and a per-call strlen (quadratic — the old shape, the top resolve-imports hotspot) are
 // exactly what this substrate class exists to avoid.
+// std.net.http joins for ONE loop, `serve_n`'s accept loop — the archetype of this class. A server
+// asked to run forever (`n < 0`) accepts an unbounded number of connections; recursing once per
+// request is a stack overflow with a wall-clock fuse on it. Every other loop in the module (the
+// chunk decoder, the two read drains) is bounded by one message and stays recursive.
 atwhile_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
     path.is_empty().match ({
         true  => true,
@@ -446,7 +464,7 @@ trace_suite = (mp: MutPtr<Malloc>) i32 {
         .Ok(raw) => {
             src := mp.strip_comments_in(raw)
             gather := mp.region(src, "cc_gather = ", "Node*: ")
-            run_suite("boundaries: trace gather uses owned scratch", [gather.not_contains(".list_push("), gather.contains(".list_push_static(")])
+            run_suite("boundaries: trace gather uses owned scratch", [gather.found(), gather.not_contains(".list_push("), gather.contains(".list_push_static(")])
         },
         .Err(e)  => run_suite("boundaries: trace gather (unreadable)", [false]),
     })
@@ -459,7 +477,7 @@ io_suite = (mp: MutPtr<Malloc>) i32 {
         .Ok(raw) => {
             src := mp.strip_comments_in(raw)
             body := mp.region(src, "read_bytes_alloc", "read_bytes_open")
-            run_suite("boundaries: io contents_in uses try_acquire", [body.contains(".try_acquire("), body.not_contains(".acquire("), src.not_contains("default()")])
+            run_suite("boundaries: io contents_in uses try_acquire", [body.found(), body.contains(".try_acquire("), body.not_contains(".acquire("), src.not_contains("default()")])
         },
         .Err(e)  => run_suite("boundaries: io file (unreadable)", [false]),
     })
@@ -477,7 +495,7 @@ map_suite = (mp: MutPtr<Malloc>) i32 {
             appnd := mp.region(src, "append<A>", "put<A>")
             // `of` is the last fn in map.zen, so its region runs to EOF (no following marker).
             of := mp.after_marker(src, "of*<T, A>")
-            run_suite("boundaries: map fallible paths use result helpers", [grow.contains(".try_acquire3("), grow.not_contains(".acquire("), appnd.contains(".grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire3("), of.not_contains(".acquire(")])
+            run_suite("boundaries: map fallible paths use result helpers", [grow.found(), appnd.found(), of.found(), grow.contains(".try_acquire3("), grow.not_contains(".acquire("), appnd.contains(".grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire3("), of.not_contains(".acquire(")])
         },
         .Err(e)  => run_suite("boundaries: map (unreadable)", [false]),
     })
@@ -496,7 +514,7 @@ fmt_suite = (mp: MutPtr<Malloc>) i32 {
             // "// Display" is a comment marker — stripped by `_code`, so (faithfully) absent here, which
             // makes `wf` run from `write_float = ` to EOF (python's split returns the whole remainder).
             wf := mp.region(src, "write_float = ", "// Display")
-            run_suite("boundaries: fmt allocator writes use fallible num helpers", [ti.contains(".integer_in("), ti.not_contains(".acquire("), tf.contains(".float_in("), tf.not_contains(".acquire("), wi.not_contains(".integer_in(")
+            run_suite("boundaries: fmt allocator writes use fallible num helpers", [ti.found(), tf.found(), wi.found(), wf.found(), ti.contains(".integer_in("), ti.not_contains(".acquire("), tf.contains(".float_in("), tf.not_contains(".acquire("), wi.not_contains(".integer_in(")
                 && wi.not_contains(".write_int_in("), wf.not_contains(".float_in(")
                 && wf.not_contains(".write_float_in("), src.not_contains("default()")])
         },
@@ -544,6 +562,52 @@ scanset_suite = (mp: MutPtr<Malloc>) i32 {
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 10: src/std stays BELOW src/compiler — no std module imports the compiler, bar two.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Zen pulls WHOLE modules (no tree-shaking), so one `= compiler.x` line in a std module puts x's
+// entire transitive closure into every user program that touches that module. Nothing stopped it:
+// the resolver treats `std.` and `compiler.` as the same kind of trusted repo-tree id, so the layer
+// split is documentary — which is exactly why it needs a gate. It drifted once already. The module
+// resolver was born as a 40-line import-line classifier that genuinely belonged in std, grew into
+// the compiler's real resolver, and ended up a src/std module whose transitive closure was the
+// ENTIRE compiler (58 modules, ~32k LOC — identical to compiler.check's). It now lives in
+// src/compiler/resolve*.zen; the flat namespace means that move renamed no emitted symbol.
+//
+// The two exemptions are the metaprogramming surface (docs/metaprogramming-vision.md): build an AST
+// with std.internal.ast, emit it with compiler.genc's genModule. A std module that hands out AST
+// values MUST name the AST's types, so that edge is intrinsic, not accidental — and it is bounded:
+// those two reach ast_types + genc + astops + mangle (~3k LOC), the AST/emitter subsystem and
+// nothing of the checker, parser or driver. Widening the set, or adding a third exemption, is a
+// design decision — make it here, in the open, rather than by adding an import line.
+layering_allowed = (path: string_view) bool {
+    path == "src/std/internal/ast.zen" || path == "src/std/io/c.zen"
+}
+layering_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
+    path.starts_with("src/std/").match ({
+        true  => path.layering_allowed().match ({
+            true  => true,
+            false => mp.contents_in(path).match ({
+                .Ok(raw) => mp.strip_comments_in(raw).not_contains("= compiler."),
+                .Err(e)  => false,
+            }),
+        }),
+        false => true,
+    })
+}    // unreadable = FAIL, never a silent pass
+layering_suite = (mp: MutPtr<Malloc>) i32 {
+    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
+        .Ok(listing) => {
+            files := mp.split_in(listing, '\n')
+            results: [bool] := mp.nbuf(true, files.len)
+            files.loop((h, i, path) {
+                results[i] = mp.layering_passes(path)
+            })
+            run_suite("boundaries: std imports no compiler module (bar the metaprogramming pair)", results)
+        },
+        .Err(e)      => run_suite("boundaries: layering (cannot enumerate files)", [false]),
+    })
+}
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 harness_boundaries_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -564,6 +628,7 @@ harness_boundaries_run* = () i32 {
     fails = fails + mp.io_suite()
     fails = fails + mp.map_suite()
     fails = fails + mp.fmt_suite()
+    fails = fails + mp.layering_suite()
     fails = fails + mp.bigstr_suite()
     fails
 }

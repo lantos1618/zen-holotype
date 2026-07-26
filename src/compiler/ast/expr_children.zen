@@ -1,0 +1,88 @@
+// compiler.ast.expr_children — THE one exhaustive statement of "what hangs below an Expr node".
+//
+// Background. `Expr` has 20 variants and ~200 `.match` blocks over it live in compiler.**; only
+// three of them (gen_expr, js_expr, ff_expr) list every variant. The rest close with `_`, and that
+// `_` carries two DIFFERENT meanings that read identically in source:
+//
+//   * a narrow SHAPE PROBE — `is_lvalue`, `match_subj_pos`, `expr_consumes_name`, … — where `_`
+//     means "not the shape I am asking about", and `false`/`0` stays correct forever; and
+//   * a broad TRAVERSAL — a recursive walk over the whole tree — where `_` is claimed to mean
+//     "a leaf, nothing below" but ACTUALLY means "a variant I did not think about".
+//
+// The second kind is a silent-miss trap, and it has already fired: 89cf8a6 ("fix(check): walk
+// loop/lambda bodies for undefined names") records `.Loop` dropping through `_ => 0` in two name
+// walkers, so undefined names inside Zen's primary iteration construct passed `check` and only
+// exploded at `cc`. 59bbb76 records the same shape in the escape checker.
+//
+// expr_fold_children is the fix: ONE total, per-variant listing of an Expr's structural children,
+// which the broad traversals delegate their `_` arm to. Adding a 21st `Expr` variant then fails to
+// compile at exactly THIS match — one site, naming the variant — instead of being silently ignored
+// wherever a walker guessed. That is the whole point; keep this match exhaustive (no `_` arm).
+//
+// Shape: a FOLD over an FnT accumulator, not a `[Ptr<Expr>]`-returning function. Zen splices an
+// FnT-parameter template at its call site, so the callbacks cost nothing and no per-node buffer is
+// allocated — the check pipeline runs on every LSP keystroke and cannot afford the allocation.
+//
+//   fe(acc, child)  — one sub-EXPRESSION child (Bin operands, Call args, an arm body, …)
+//   fs(acc, body)   — one child STATEMENT LIST (a Loop/Lambda body, a Block's stmts)
+//
+// A walker that must extend an environment for the bindings a variant introduces (`Loop`'s
+// idx/elem/handler, `Lambda`'s params) keeps its own explicit `.Loop`/`.Lambda` arm and delegates
+// only the rest — the arms it names shrink to "variants I treat SPECIALLY", and the default stops
+// being a guess.
+//
+// Import floor: this module imports compiler.ast.ast_types and nothing else, so it adds no closure
+// to any of the ~50 files that already import the AST types.
+//
+// KNOWN SUBTLETY — `MethodCall`. It is a composite (recv + args) that most post-desugar walkers
+// treat as a LEAF, on the unenforced assumption that compiler.check.desugar_method_calls already
+// flattened it into a `Call`. This fold reports its real children, because which stage a walker
+// runs at is encoded only in prose comments. A walker that genuinely runs post-desugar sees no
+// MethodCall nodes, so descending costs it nothing; one that runs PRE-desugar was silently
+// skipping a whole subtree.
+{ Expr, Stmt, ArmData, FieldInit } = compiler.ast.ast_types
+expr_fold_children*<A> = (acc: A, e: Ptr<Expr>, fe: (A, Ptr<Expr>) A, fs: (A, [Stmt]) A) A {
+    load(e).match ({
+        .Int(n)         => acc,
+        .Byte(n)        => acc,
+        .FloatLit(ft)   => acc,
+        .Var(v)         => acc,
+        .StrLit(sl)     => acc,
+        .Tag(t)         => acc,
+        .Bin(b)         => fe(fe(acc, b.lhs), b.rhs),
+        .Cond(d)        => fe(fe(fe(acc, d.c), d.t), d.e),
+        .Member(m)      => fe(acc, m.obj),
+        .Arrow(ar)      => fe(acc, ar.obj),
+        .MakeEnum(mk)   => fe(acc, mk.payload),
+        .Index(ix)      => fe(fe(acc, ix.seq), ix.idx),
+        .Call(c)        => acc.fold_child_exprs(c.args, fe),
+        .MethodCall(mc) => fe(acc, mc.recv).fold_child_exprs(mc.args, fe),
+        .SliceLit(sd)   => acc.fold_child_exprs(sd.items, fe),
+        .MakeStruct(s)  => acc.fold_child_inits(s.inits, fe),
+        .Match(m)       => fe(acc, m.subj).fold_child_arms(m.arms, fe),
+        .Loop(l)        => fs(fe(acc, l.seq), l.body),
+        .Lambda(lm)     => fs(acc, lm.body),
+        .Block(bk)      => fs(acc, bk.stmts),
+    })
+}
+fold_child_exprs*<A> = (acc: A, xs: [Expr], fe: (A, Ptr<Expr>) A) A {
+    out := acc
+    xs.loop((h, i, x) {
+        out = fe(out, x.addr())
+    })
+    out
+}
+fold_child_inits*<A> = (acc: A, inits: [FieldInit], fe: (A, Ptr<Expr>) A) A {
+    out := acc
+    inits.loop((h, i, fi) {
+        out = fe(out, fi.value)
+    })
+    out
+}
+fold_child_arms*<A> = (acc: A, arms: [ArmData], fe: (A, Ptr<Expr>) A) A {
+    out := acc
+    arms.loop((h, i, ar) {
+        out = fe(out, ar.body)
+    })
+    out
+}

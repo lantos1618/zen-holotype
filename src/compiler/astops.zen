@@ -7,17 +7,21 @@
 // `= compiler.genc` import lists simply shrink. Each method is emitted as a distinct mangled C
 // function (`impl_<Trait>_<Ty>_<m>`), so unlike same-named free functions they never collide in
 // the flat C namespace. Sibling methods call each other by UFCS (`f.is_generic_fn()`), routed the
-// same way. This file is imported by NO ONE (dispatch is via the impl index), which keeps it out
-// of any import cycle and avoids the dup-impl-in-cycle trap — so the impl blocks live here, never
-// in compiler.genc (which is imported by nearly everything).
+// same way. The impl blocks live here, never in compiler.genc (which is imported by nearly
+// everything). This file imports ONLY compiler.ast.ast_types, compiler.genc, std.text.string and
+// std.mem.alloc, and none of those reach back here — so it can never sit inside an import cycle no
+// matter how many modules import it, which is what keeps it clear of the dup-impl-in-cycle trap.
+// That also makes it the natural OWNER for the small AST predicates/builders individual passes
+// would otherwise each define for themselves (field_in, param_names_has, is_logic_op, one_stmt, …).
 //
 // Only plain-named-value receivers are method-ified: the language does not support `.impl` on
 // pointer/slice receiver types, so genc's Ptr<Expr>/[Stmt] predicates (is_expr_null, blk_diverges,
 // stmts_diverge) necessarily stay free functions in compiler.genc.
-{ Ty, Func, Decl, StructDecl, Param, BinData, CallData, Expr, Stmt } = compiler.ast.ast_types
-{ sbyte, gstr_push, cbuf } = compiler.genc
+{ Ty, Func, Decl, Field, StructDecl, Param, BinData, CallData, Expr, Stmt } = compiler.ast.ast_types
+{ sbyte, gstr_push, cbuf, tvoid } = compiler.genc
 { String } = std.text.string
 { Malloc } = std.mem.alloc
+{ expr_fold_children } = compiler.ast.expr_children
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
 // (compiler.check splices it), never emitted as a C function — so genModule skips it.
 TyQuery*: {
@@ -35,6 +39,53 @@ Ty.impl(TyQuery, {
 // it beside the impl means compiler.genc — imported by user programs (via std.internal.ast, std.io.c) —
 // carries NO reference to a method defined outside its own closure. It stays a free function (its
 // receiver `[Param]` is a slice type, which the language cannot carry a trait impl on).
+// the declared type of field `fname`, or Void when the struct has no such field — the shared
+// struct-field lookup behind generic field reads, ownership's struct-literal gate and arg fitting.
+field_in* = (fields: [Field], fname: string_view) Ty {
+    found := tvoid()
+    fields.loop((h, i, fl) {
+        found = (fl.name == fname).then({ fl.ty }, { found })
+    })
+    found
+}
+// the number of elements in an AST slice — the C and JS backends both size a slice literal with it.
+slice_count* = (items: [Expr]) i32 {
+    n := 0
+    items.loop((h, i, it) {
+        n = n + 1
+    })
+    n
+}
+// is `name` one of `ps`? the shared param/field-name membership test — every "does this fn/impl
+// declare X?" question in the pipeline is this one predicate: tparam membership (check, check_infer,
+// check_inline, validate.util), impl-method presence (check_desugar, validate.kinds/enrich), the
+// parser's implicit-tparam pass, and the formatter's export/tparam markers.
+param_names_has* = (ps: [Param], name: string_view) bool {
+    found := false
+    ps.loop((h, i, p) {
+        found = found || p.name == name
+    })
+    found
+}
+// the narrow int/float widths arrive as Named("u32") etc. (no Ty variant), but they ARE valid
+// primitives that genc lowers to C types — so every "is this type name known?" gate must treat them
+// as KNOWN: the unknown-type validator and check_resolve's or-return concreteness gate alike.
+is_prim_width* = (n: string_view) bool {
+    n == "i8" || n == "i16" || n == "u16" || n == "u32" || n == "u64" || n == "f32"
+}
+// `&&`/`||` — the operators whose RIGHT operand is CONDITIONALLY evaluated. The or-return hoist
+// (check_resolve, passes.orreturn) and the kind checker both branch on exactly this set.
+is_logic_op* = (op: string_view) bool { op == "&&" || op == "||" }
+// the FREE-FUNCTION `or_return(x)` form (the method form is `x.or_return()`, a MethodCall): the
+// hoist counter/rewriter and the kind checker each ask whether a Call node is one.
+is_or_return_fn* = (c: CallData) bool { c.fn == "or_return" && c.args.len == 1 }
+// a one-statement body — `[Stmt]` of length 1. Statement lowering (check_lower), the or-return
+// rebuild (check_resolve) and reflection dispatch (passes.subst) all wrap a single Stmt this way.
+one_stmt* = (a: MutPtr<Malloc>, st: Stmt) [Stmt] {
+    buf := cbuf<Stmt>(a, 1)
+    buf[0] = st
+    buf
+}
 has_fnt_param* = (ps: [Param]) bool {
     found := false
     ps.loop((h, i, p) {
@@ -102,7 +153,7 @@ Decl.impl(DeclQuery, {
 //
 // This trio is the COMPILER-side digit loop — one of exactly TWO tree-wide. The other lives in
 // std.text.num (RawPtr buffer writers backing std.text.fmt's streaming output). Two, not one, is the
-// SEED-CLOSURE boundary: compiler passes rendering line/col digits (check, std.internal.resolve,
+// SEED-CLOSURE boundary: compiler passes rendering line/col digits (check, compiler.resolve,
 // diagnostics) must not pull std.text.num's module closure (Result/IoError/alloc/parse) into the
 // self-hosting seed, and user-facing std must not import compiler internals. Everything else
 // (check's vis_key, resolve's res_udec, fmt's write_int family) delegates to one of the two.
@@ -242,24 +293,12 @@ wr_refl_writes = (c: CallData, nm: string_view) bool {
 }
 wr_writes_e = (e: Ptr<Expr>, nm: string_view) bool {
     load(e).match ({
-        .Bin(b)         => b.lhs.wr_writes_e(nm) || b.rhs.wr_writes_e(nm),
-        .Cond(d)        => d.c.wr_writes_e(nm) || d.t.wr_writes_e(nm) || d.e.wr_writes_e(nm),
-        .Call(c)        => c.wr_refl_writes(nm)
-            || c.args.slice_any((x) { x.addr().wr_writes_e(nm) }),
-        .MethodCall(mc) => mc.recv.wr_writes_e(nm)
-            || mc.args.slice_any((x) { x.addr().wr_writes_e(nm) }),
-        .Member(m)      => m.obj.wr_writes_e(nm),
-        .Arrow(ar)      => ar.obj.wr_writes_e(nm),
-        .MakeEnum(mk)   => mk.payload.wr_writes_e(nm),
-        .MakeStruct(s)  => s.inits.slice_any((fi) { fi.value.wr_writes_e(nm) }),
-        .Match(m)       => m.subj.wr_writes_e(nm)
-            || m.arms.slice_any((ar) { ar.body.wr_writes_e(nm) }),
-        .Index(ix)      => ix.seq.wr_writes_e(nm) || ix.idx.wr_writes_e(nm),
-        .SliceLit(sd)   => sd.items.slice_any((x) { x.addr().wr_writes_e(nm) }),
-        .Loop(l)        => l.seq.wr_writes_e(nm) || l.body.wr_writes_name(nm),
-        .Block(bl)      => bl.stmts.wr_writes_name(nm),
-        .Lambda(la)     => la.body.wr_writes_name(nm),
-        _               => false,
+        // only `.Call` is special (a reflection intrinsic writes through its lambda arg); every other
+        // shape is a plain structural descent, so it delegates to the one exhaustive child listing.
+        .Call(c) => c.wr_refl_writes(nm) || c.args.slice_any((x) { x.addr().wr_writes_e(nm) }),
+        _        => false.expr_fold_children(e, (acc, ch) { acc || ch.wr_writes_e(nm) }, (acc, body) {
+            acc || body.wr_writes_name(nm)
+        }),
     })
 }
 wr_writes_stmt = (st: Stmt, nm: string_view) bool {
