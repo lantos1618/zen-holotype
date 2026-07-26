@@ -10,8 +10,8 @@
 { param_names_has } = compiler.astops
 { is_expr_null, tvoid } = compiler.genc
 { impl_cname_in, payload_fname } = compiler.mangle
-{ ff_append, ff_block, ff_flush_leading, ff_indent, ff_string, ff_ty, ff_tys } = compiler.pretty
-{ ff_current_col, ff_expr, ff_fits_width } = compiler.pretty_expr
+{ ff_append, ff_block, ff_flush_leading, ff_indent, ff_str_has_nl, ff_string, ff_ty, ff_tys } = compiler.pretty
+{ ff_current_col, ff_expr, ff_fits_width, ff_pad } = compiler.pretty_expr
 // ── declarations ────────────────────────────────────────────────────────────────
 // a trailing `...T` param stores its type as the collected `[T]`; recover the element T to re-print `...T`.
 ff_slice_elem = (t: Ty) Ty {
@@ -211,6 +211,101 @@ ff_is_hoisted* = (a: MutPtr<Malloc>, decls: [Decl], fname: string_view) bool {
     })
     found
 }
+// ── `=` alignment across a run of one-line methods ──────────────────────────────
+// House style aligns a multi-arm match's `=>` (compiler.pretty_expr.ff_arms); a run of consecutive
+// one-line methods gets the same treatment on its `=`. What each method contributes to that decision is
+// measured by a DRY render of the method exactly as it would print UNPADDED:
+//   w    — the column the ` = ` would start at (indent + name + tparams), i.e. what the pad extends
+//   tail — the rest of the line, so the PADDED line width is exactly `tail + the run's widest w`
+//   one  — the whole method rendered on one physical line
+//   lead — own-line comments print above it, so it opens a new visual group
+MethodFact: {
+    w: i32,
+    tail: i32,
+    one: bool,
+    lead: bool,
+}
+// The dry pass ADVANCES the comment cursor exactly as the real pass will, so every method's trial sees
+// the comments it will really see; ff_methods snapshots gf_idx around it and rewinds.
+ff_method_facts = (
+    a: MutPtr<Malloc>,
+    decls: [Decl],
+    im: ImplData,
+    ctp: [Param],
+    ind: i32,
+) [MethodFact] {
+    buf := slice(a.acquire((im.methods.len + 1) * sizeof(MethodFact)), im.methods.len + 1)
+    im.methods.loop((h, k, mp) {
+        f := a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
+        own := a.ff_minus_tparams(f.tparams, ctp)
+        above := a.ff_string(64).ff_flush_leading(a, f.pos, ind)
+        head := a
+            .ff_string(256)
+            .ff_indent(a, ind)
+            .ff_append(a, mp.name)
+            .ff_tparams(a, own)
+        line := head
+            .ff_sig(a, f.params, f.ret, ind)
+            .ff_append(a, " ")
+            .ff_block(a, f.body, ind, true)
+        buf[k] = MethodFact(
+            w: to_i32(head.len),
+            tail: to_i32(line.len) - to_i32(head.len),
+            one: line.ff_str_has_nl() == false,
+            lead: above.len > 0,
+        )
+    })
+    buf
+}
+// A method joins the run above it while the gutter stays readable — name widths within 20 columns of
+// each other, five indent steps — and no member's padded line reaches past column 100. The width bound
+// is not cosmetic: it is exactly the gate ff_sig / ff_block re-check when they render at the PADDED
+// column (both keep a further 4 columns of `{ … }` in hand), so a run that fits it renders as the dry
+// pass measured it, and the padding cannot cascade into a reflow.
+ff_run_admits = (lo: i32, hi: i32, tail: i32) bool { hi - lo <= 20 && hi + tail <= 100 }
+// extend the run at `e` while the next method still fits it; `lo`/`hi`/`tl` carry the run so far
+ff_run_grow = (fs: [MethodFact], e: i64, lo: i32, hi: i32, tl: i32) i64 {
+    (e >= fs.len || fs[e].one == false || fs[e].lead).then({
+        return e
+    })
+    nlo := (fs[e].w < lo).then({ fs[e].w }, { lo })
+    nhi := (fs[e].w > hi).then({ fs[e].w }, { hi })
+    ntl := (fs[e].tail > tl).then({ fs[e].tail }, { tl })
+    nlo.ff_run_admits(nhi, ntl).then({ fs.ff_run_grow(e + 1, nlo, nhi, ntl) }, { e })
+}
+// index one past the last method aligned with `start` — a method that is not one-line is its own run
+ff_run_end = (fs: [MethodFact], start: i64) i64 {
+    fs[start].one.match ({
+        true  => fs.ff_run_grow(start + 1, fs[start].w, fs[start].w, fs[start].tail),
+        false => start + 1,
+    })
+}
+ff_run_maxw = (fs: [MethodFact], from: i64, end: i64) i32 {
+    (from + 1 >= end).then({
+        return fs[from].w
+    })
+    rest := fs.ff_run_maxw(from + 1, end)
+    (fs[from].w > rest).then({ fs[from].w }, { rest })
+}
+ff_fill_pads = (fs: [MethodFact], pads: [i32], k: i64, end: i64, mx: i32) void {
+    (k < end).then({
+        pads[k] = mx - fs[k].w
+        fs.ff_fill_pads(pads, k + 1, end, mx)
+    })
+}
+ff_pad_runs = (fs: [MethodFact], pads: [i32], i: i64) void {
+    (i < fs.len).then({
+        e := fs.ff_run_end(i)
+        fs.ff_fill_pads(pads, i, e, fs.ff_run_maxw(i, e))
+        fs.ff_pad_runs(pads, e)
+    })
+}
+// spaces to insert after each method's name so a run's `=` line up (0 for a run of one)
+ff_method_pads = (a: MutPtr<Malloc>, fs: [MethodFact]) [i32] {
+    pads := slice(a.acquire((fs.len + 1) * sizeof(i32)), fs.len + 1)
+    fs.ff_pad_runs(pads, 0)
+    pads
+}
 // print an impl's methods (each demangled to its original name; the type's tparams dropped from the
 // method's own tparam list). Reused for inherent (inside the struct) and trait impls (inside `.impl`).
 ff_methods = (
@@ -221,6 +316,10 @@ ff_methods = (
     ctp: [Param],
     ind: i32,
 ) String {
+    save := gf_idx
+    facts := a.ff_method_facts(decls, im, ctp, ind)
+    gf_idx = save
+    pads := a.ff_method_pads(facts)
     out := s
     im.methods.loop((h, k, mp) {
         f := a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
@@ -232,6 +331,7 @@ ff_methods = (
             .ff_indent(a, ind)
             .ff_append(a, mp.name)
             .ff_tparams(a, own)
+            .ff_pad(a, pads[k])
             .ff_sig(a, f.params, f.ret, ind)
         out = sig.ff_append(a, " ").ff_block(a, f.body, ind, true).ff_append(a, "\n")
     })
