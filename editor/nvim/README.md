@@ -58,14 +58,31 @@ Notes:
   `std.*` imports resolve: `cmd = { "zen", "lsp" }, cmd_env = { ZEN_ROOT = "/path/to/zen" }`.
 - The server implements: `initialize`, `shutdown`, `exit`, `textDocument/didOpen`,
   `textDocument/didChange` (full sync), `textDocument/didClose` (clears diagnostics),
-  `textDocument/definition` (go-to-definition) and `textDocument/semanticTokens/full`
-  (semantic highlighting, which overrides the `syntax/` file where it has an opinion).
-  Anything else gets a clean JSON-RPC `MethodNotFound` — hover and completion are not
-  implemented yet, so leave those to other tooling.
-- Semantic tokens and go-to-definition are recent; a `zen` binary older than they are
-  simply will not advertise them. If highlighting looks flat or `gd` does nothing,
-  rebuild (`make`) and confirm with the sanity check below — the reply must contain
-  `semanticTokensProvider` and `definitionProvider`.
+  `textDocument/definition` (go-to-definition), `textDocument/hover`,
+  `textDocument/completion` and `textDocument/semanticTokens/full` (semantic
+  highlighting, which overrides the `syntax/` file where it has an opinion). Anything
+  else gets a clean JSON-RPC `MethodNotFound`.
+- **Hover** (`K`) shows the declaration under the cursor: its signature in a fenced
+  `zen` block — a type shows its whole field block — followed by the `//` comment
+  written above it. It covers the file's own top-level declarations; over a name the
+  file IMPORTS it names the origin module instead. Over a local, a field, or a name
+  declared in another file there is nothing it can honestly say, and it returns no
+  hover rather than a guess.
+- **Completion** (`<C-x><C-o>` with `omnifunc=v:lua.vim.lsp.omnifunc`, or any
+  completion plugin) offers the buffer's top-level declarations (with their signature
+  as the detail), the names its `{ … } = module` import records bind (with the origin
+  module), and the language's keywords and builtin type names. It does NOT offer
+  locals, struct fields, or members after a `.` — which is why the server advertises no
+  trigger characters: typing `.` will not pop a member list, because there is no
+  member list to serve.
+- Both are answered TEXTUALLY, from the buffer the client has open. That is why they
+  still work in a half-typed file that does not parse — the moment you most want them —
+  and it is also the reason for the limits above.
+- Semantic tokens, go-to-definition, hover and completion are recent; a `zen` binary
+  older than they are simply will not advertise them. If highlighting looks flat, `gd`
+  does nothing or `K` says "No information available", rebuild (`make`) and confirm
+  with the sanity check below — the reply must contain `semanticTokensProvider`,
+  `definitionProvider`, `hoverProvider` and `completionProvider`.
 - Positions are proper 0-based UTF-16 LSP positions (non-ASCII lines squiggle correctly).
 
 Quick sanity check from a shell (expect a `capabilities` reply):

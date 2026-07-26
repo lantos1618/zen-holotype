@@ -382,6 +382,7 @@ atwhile_allowed = (path: string_view) bool {
         || path == "src/compiler/drvutil.zen"
         || path == "src/compiler/lsp.zen"
         || path == "src/compiler/lsp_tokens.zen"
+        || path == "src/compiler/lsp_query.zen"
         || path == "src/compiler/audit.zen"
         || path == "src/compiler/validate/util.zen"
         || path == "src/compiler/validate/diag.zen"
@@ -393,6 +394,7 @@ atwhile_allowed = (path: string_view) bool {
         || path == "src/std/hash.zen"
         || path == "src/compiler/resolve.zen"
         || path == "src/compiler/resolve_scan.zen"
+        || path == "src/std/net/http.zen"
 }
 // low-level numeric/filesystem/stdin substrate: these primitives MUST iterate, not recurse — an
 // unbounded recursion depth (huge exponent / directory entry count / stdin byte or line count /
@@ -407,17 +409,22 @@ atwhile_allowed = (path: string_view) bool {
 // compiler.drvutil joins as the OWNER of that scan: cstr_range (the shared [s,e) byte-range copy the
 // LSP's JSON reader and audit's identifier scanner both call) must iterate for exactly the reason
 // those two callers do — the range is a whole JSON body or module region, not a bounded token.
-// driver.zen, compiler.lsp and compiler.audit join as scanners over unbounded input: the LSP's
-// hand-rolled JSON reader walks a whole request body (a `didChange` carries the entire document),
+// driver.zen, compiler.lsp, compiler.lsp_query and compiler.audit join as scanners over unbounded
+// input: the LSP's hand-rolled JSON reader walks a whole request body (a `didChange` carries the
+// entire document), lsp_query's hover/completion scans walk a whole open BUFFER line by line,
 // and audit's per-byte import/identifier scanners plus its insertion sort walk whole source files
 // and the full finding list. Per-byte recursion there is the stack overflow this class exists to
-// avoid. None of these loops are new: all 60 lived in the repo-root driver.zen and were exempt only
-// because the scan never reached it. They are now split 4 / 10 / 46 across the three files, and the
-// scan does reach it — the exemption is finally deliberate rather than accidental.
+// avoid. Most of these loops are not new: 60 once lived in the repo-root driver.zen and were exempt
+// only because the scan never reached it. They now sit 4 / 9 / 8 / 46 across the four files, and the
+// scan does reach them — the exemption is finally deliberate rather than accidental.
 // compiler.resolve/resolve_scan join for their line scanners (next_line/line_end): the resolver
 // walks whole flattened sources byte-by-byte to the next newline, and both per-byte recursion
 // (stack) and a per-call strlen (quadratic — the old shape, the top resolve-imports hotspot) are
 // exactly what this substrate class exists to avoid.
+// std.net.http joins for ONE loop, `serve_n`'s accept loop — the archetype of this class. A server
+// asked to run forever (`n < 0`) accepts an unbounded number of connections; recursing once per
+// request is a stack overflow with a wall-clock fuse on it. Every other loop in the module (the
+// chunk decoder, the two read drains) is bounded by one message and stays recursive.
 atwhile_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
     path.is_empty().match ({
         true  => true,

@@ -9,7 +9,7 @@
 //       0-based UTF-16 position (zenc spans are 1-based BYTE columns; the server must convert both)
 //   (3) didChange (full sync) fixing the error — a publish with an EMPTY diagnostics array
 //   (4) an unknown REQUEST (textDocument/hover) — a -32601 MethodNotFound reply with the echoed id,
-//       and the server keeps serving (shutdown still answered, clean exit)
+//       id, and the server keeps serving (shutdown still answered, clean exit)
 //   (5) garbage / absurdly oversized Content-Length — no hang (timeout-guarded), no crash: garbage
 //       resynchronizes on the next frame; over-limit is skipped instead of null-deref-panicking
 //   (6) didClose — a publish clearing the document's diagnostics
@@ -22,6 +22,8 @@
 //       from the file on disk (the disk copy is deliberately made to disagree), and a version bump
 //       re-derives them instead of serving the version-keyed cache
 //  (11) after didClose the document is no longer open, so disk is the source of truth again
+//  (13) hover and completion answered from the UNSAVED buffer: the declaration under the cursor
+//       (signature + doc comment) and the name list, both describing text that is not on disk
 //  (12) a `"""` raw literal holding `"` then `//` — the token stream stays position-SORTED and the
 //       array stays `]`-terminated (an out-of-order token encodes a negative delta and kills the
 //       client's highlighting for the whole buffer)
@@ -82,6 +84,18 @@ lz_change_v = (mp: MutPtr<Malloc>, uri: string_view, text: string_view, ver: i64
 lz_change = (mp: MutPtr<Malloc>, uri: string_view, text: string_view) string_view {
     mp.lz_change_v(uri, text, 2)
 }
+// a request carrying a cursor POSITION — hover, definition and completion share this shape.
+lz_posreq = (
+    mp: MutPtr<Malloc>,
+    uri: string_view,
+    method: string_view,
+    id: i64,
+    line: i64,
+    ch: i64,
+) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":", mp.zo_itoa(id), ",\"method\":\"textDocument/", method, "\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":", mp.zo_itoa(line), ",\"character\":", mp.zo_itoa(ch), "}}}"])
+}
 // a `textDocument/semanticTokens/full` request for `uri` with request id `id`.
 lz_tokreq = (mp: MutPtr<Malloc>, uri: string_view, id: i64) string_view {
     z: string_view := ""
@@ -124,7 +138,7 @@ lz_change_clears = (mp: MutPtr<Malloc>) bool {
 }
 // (4) unknown REQUEST: -32601 with the echoed id; the server keeps serving afterwards.
 lz_unknown_method = (mp: MutPtr<Malloc>) bool {
-    probe := "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/hover\",\"params\":{\"position\":{\"line\":0,\"character\":0}}}"
+    probe := "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/references\",\"params\":{\"position\":{\"line\":0,\"character\":0}}}"
     o := mp.lz_run(3, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(probe), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"id\":7")
         && o.contains("-32601")
@@ -225,7 +239,7 @@ lz_goto_def = (mp: MutPtr<Malloc>) bool {
     src := "foo* = (x: i32) i32 { x }\nmain = () i32 {\n    foo(0)\n}\n"
     save(mp.zo_join([mp.zo_dir(), z, "/lzdef.zen"]), src, len(src))
     uri := mp.lz_uri("lzdef.zen")
-    req := mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":2,\"character\":4}}}"])
+    req := mp.lz_posreq(uri, "definition", 2, 2, 4)
     o := mp.lz_run(11, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"definitionProvider\":true")
         && o.contains("\"result\":{\"uri\":")
@@ -263,7 +277,47 @@ lz_rawstring_token_order = (mp: MutPtr<Malloc>) bool {
         && o.contains("0,3,14,5,0,1,0,7,5,0,1,4,1,3,0,0,2,2,8,0,0,3,1,6,0,1,0,1,8,0]")
         && mp.lz_rc(15) == "0"
 }
-// (17) KEYSTROKE SURVIVAL. Typing an import line is a run of UNKNOWN MODULES: `std.te` is not a
+// (17) HOVER, and the open-buffer contract for it. `lzhov.zen` on disk declares `alpha` under a disk
+// doc comment; the client then changes its buffer to declare `beta` under a different one, and that
+// buffer is NEVER saved. Hovering the `beta` call must answer with the BUFFER's declaration, doc
+// comment included — a server reading disk answers about `alpha`, or finds nothing at all. The
+// second probe (id 6) sits on indentation, where there is no identifier: the protocol's "no hover
+// here" is a null result, not an empty popup.
+lz_hover_buffer = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    disk := "// disk doc\nalpha* = (x: i32) i32 { x }\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/lzhov.zen"]), disk, len(disk))
+    uri := mp.lz_uri("lzhov.zen")
+    buf := "// buffer doc\\nbeta* = (s: i32) i32 {\\n    s\\n}\\nmain = () i32 {\\n    beta(1)\\n}\\n"
+    o := mp.lz_run(16, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, "main = () i32 { 0 }\\n")), mp.lz_frame(mp.lz_change_v(uri, buf, 2)), mp.lz_frame(mp.lz_posreq(uri, "hover", 5, 5, 4)), mp.lz_frame(mp.lz_posreq(uri, "hover", 6, 5, 1)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"hoverProvider\":true")
+        && o.contains("\"kind\":\"markdown\"")
+        && o.contains("beta* = (s: i32) i32")
+        && o.contains("buffer doc")
+        && o.contains("disk doc") == false
+        && o.contains("\"id\":6,\"result\":null")
+        && mp.lz_rc(16) == "0"
+}
+// (18) COMPLETION over an UNSAVED buffer: the buffer's own top-level declarations (signature as
+// detail), the names its import record binds (origin module as detail), and the keyword list. The
+// disk copy declares `gamma`, which the reply must not contain — the same stale-disk class again,
+// this time on the name list.
+lz_completion_items = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    disk := "gamma* = () i32 { 0 }\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/lzcomp.zen"]), disk, len(disk))
+    uri := mp.lz_uri("lzcomp.zen")
+    buf := "{ view } = std.text.str\\nWidget*: { w: i32 }\\nmain = () i32 { 0 }\\n"
+    o := mp.lz_run(17, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, buf)), mp.lz_frame(mp.lz_posreq(uri, "completion", 2, 2, 0)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"completionProvider\":{\"resolveProvider\":false}")
+        && o.contains("{\"label\":\"view\",\"kind\":3,\"detail\":\"std.text.str\"}")
+        && o.contains("{\"label\":\"Widget\",\"kind\":22,\"detail\":\"Widget*: { w: i32 }\"}")
+        && o.contains("{\"label\":\"main\",\"kind\":3,\"detail\":\"main = () i32 { 0 }\"}")
+        && o.contains("\"label\":\"match\",\"kind\":14")
+        && o.contains("gamma") == false
+        && mp.lz_rc(17) == "0"
+}
+// (19) KEYSTROKE SURVIVAL. Typing an import line is a run of UNKNOWN MODULES: `std.te` is not a
 // module, and neither is any other proper prefix of `std.text.str`. Module resolution used to
 // `exit(1)` from inside the library on the first one, so the server DIED mid-session — the keystroke
 // got no diagnostic and a request already in flight was never answered (the reported "highlighting
@@ -287,7 +341,7 @@ lz_import_keystrokes = (mp: MutPtr<Malloc>) bool {
         })
         ver = ver + 1
     })
-    o := mp.lz_run(16, mp.zo_join([z, sess, mp.lz_frame(mp.lz_change_v(uri, mp.zo_join([z, "{ len } = std.text.str", tail]), ver)), mp.lz_frame(mp.lz_tokreq(uri, 77)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o := mp.lz_run(18, mp.zo_join([z, sess, mp.lz_frame(mp.lz_change_v(uri, mp.zo_join([z, "{ len } = std.text.str", tail]), ver)), mp.lz_frame(mp.lz_tokreq(uri, 77)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"code\":\"unresolved-import\"")
         && o.contains("unknown module 's'")
         && o.contains("unknown module 'std.te'")
@@ -295,10 +349,10 @@ lz_import_keystrokes = (mp: MutPtr<Malloc>) bool {
         && o.contains("\"id\":76")
         && o.contains("\"id\":77")
         && o.contains("\"diagnostics\":[]")
-        && mp.lz_rc(16) == "0"
+        && mp.lz_rc(18) == "0"
 }
 harness_lsp_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown()])
+    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown()])
 }

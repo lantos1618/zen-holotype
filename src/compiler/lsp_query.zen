@@ -1,0 +1,458 @@
+// lsp_query.zen — the server's TEXTUAL queries over a buffer: what identifier is under the cursor,
+// where is it declared, what does that declaration say, and what names can be typed here.
+//
+// Everything in this file is a pure function of (text, position) — no parse, no resolve, no disk.
+// That is a deliberate design choice, the same one compiler.lsp_tokens makes: the editor asks these
+// questions on a buffer that is usually MID-EDIT and does not parse, and an answer that requires a
+// successful parse is exactly the answer that disappears the moment you start typing. A textual
+// (ctags-shaped) query degrades to "I don't know" on the broken half of the file while still
+// answering about the intact half.
+//
+// What that buys and what it costs is stated plainly at each entry point: `lspq_hover` and
+// `lspq_items` see TOP-LEVEL declarations of the file they are given plus the names its import
+// records bind. Locals, fields, and declarations in other files are outside what a same-file
+// textual scan can honestly claim — the callers advertise exactly this and no more.
+//
+// compiler.lsp owns the protocol (framing, JSON, replies); this file owns the answers, returned as
+// plain values so escaping lives in one place. The positional/definition scanners the go-to-
+// definition handler already used live here too, so hover and completion reuse ONE identifier
+// scanner rather than growing a second one that drifts.
+{ Malloc } = std.mem.alloc
+{ view, is_empty } = std.text.str
+{ then } = std.core.bool
+{ is_upper } = std.text.ascii
+{ String } = std.text.string
+{ gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
+{ cstr_range } = compiler.drvutil
+// ── position / identifier scanning (shared by definition, hover and completion) ───────────────────
+lsp_is_ident_byte* = (b: u8) bool {
+    b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
+// byte offset of (line, char): walk `line` newlines from 0, then advance `char` bytes (ASCII columns;
+// UTF-16 wide columns are a refinement).
+lsp_byte_of_pos* = (v: [u8], line: i64, ch: i64, i: i64, ln: i64) i64 {
+    (ln >= line).match ({
+        true  => (i + ch < v.len).then({ i + ch }, { v.len }),
+        false => (i >= v.len).match ({
+            true  => v.len,
+            false => (v[i] == '\n').match ({
+                true  => v.lsp_byte_of_pos(line, ch, i + 1, ln + 1),
+                false => v.lsp_byte_of_pos(line, ch, i + 1, ln),
+            }),
+        }),
+    })
+}
+// start byte of the identifier surrounding `off` (scan left over identifier bytes).
+lsp_ident_start* = (v: [u8], off: i64) i64 {
+    (off <= 0).match ({
+        true  => 0,
+        false => v[off - 1].lsp_is_ident_byte().then({ v.lsp_ident_start(off - 1) }, { off }),
+    })
+}
+// end byte (exclusive) of the identifier surrounding `off`.
+lsp_ident_end* = (v: [u8], off: i64) i64 {
+    (off >= v.len).match ({
+        true  => off,
+        false => v[off].lsp_is_ident_byte().then({ v.lsp_ident_end(off + 1) }, { off }),
+    })
+}
+lsp_bytes_eq* = (v: [u8], i: i64, name: [u8], k: i64) bool {
+    (k >= name.len).match ({
+        true  => true,
+        false => (v[i + k] == name[k]).then({ v.lsp_bytes_eq(i, name, k + 1) }, { false }),
+    })
+}
+lsp_skip_sp* = (v: [u8], i: i64) i64 {
+    (i < v.len && (v[i] == ' ' || v[i] == '\t')).then({ v.lsp_skip_sp(i + 1) }, { i })
+}
+// the byte that FOLLOWS the declared name ending at `e` — `=`, `:`, `<` or `(` (skipping a `*` export
+// marker and spaces), or -1 when this is not a declaration head. ONE definition of "top-level decl
+// head shape", shared by the by-name search and the enumerate-everything scan.
+lspq_head_sigil = (v: [u8], e: i64) i64 {
+    k := (e < v.len && v[e] == '*').then({ e + 1 }, { e })
+    p := v.lsp_skip_sp(k)
+    (p >= v.len).then({
+        return 0 - 1
+    })
+    b := v[p]
+    (b == '=' || b == ':' || b == '<' || b == '(').then({ p }, { 0 - 1 })
+}
+// does `v[i..]` begin with `name` as a WHOLE token that is a top-level decl head — the shapes
+// `foo = `, `Foo:`, `foo* = `, `f<T> = `.
+lsp_def_head_at* = (v: [u8], i: i64, name: [u8]) bool {
+    (i + name.len > v.len).match ({
+        true  => false,
+        false => lsp_bytes_eq(v, i, name, 0).match ({
+            true  => v.lspq_head_sigil(i + name.len) >= 0,
+            false => false,
+        }),
+    })
+}
+// scan for a top-level (column-0) def head of `name`; return its byte offset or -1. Only column-0 heads
+// count (Zen top-level decls start at column 0), which cheaply excludes call sites and locals.
+lsp_find_def* = (v: [u8], name: [u8], i: i64, atcol0: bool) i64 {
+    (i >= v.len).match ({
+        true  => 0 - 1,
+        false => (atcol0 && v.lsp_def_head_at(i, name)).match ({
+            true  => i,
+            false => v.lsp_find_def(name, i + 1, v[i] == '\n'),
+        }),
+    })
+}
+// (line, col) of byte offset `off`.
+lsp_line_of* = (v: [u8], off: i64, i: i64, ln: i64, col: i64) i64 {
+    (i >= off || i >= v.len).match ({
+        true  => ln,
+        false => (v[i] == '\n').match ({
+            true  => v.lsp_line_of(off, i + 1, ln + 1, 0),
+            false => v.lsp_line_of(off, i + 1, ln, col + 1),
+        }),
+    })
+}
+lsp_col_of* = (v: [u8], off: i64, i: i64, col: i64) i64 {
+    (i >= off || i >= v.len).match ({
+        true  => col,
+        false => (v[i] == '\n').match ({
+            true  => v.lsp_col_of(off, i + 1, 0),
+            false => v.lsp_col_of(off, i + 1, col + 1),
+        }),
+    })
+}
+// ── line geometry ────────────────────────────────────────────────────────────────────────────────
+lspq_bol = (v: [u8], off: i64) i64 {
+    (off <= 0 || v[off - 1] == '\n').then({ off }, { v.lspq_bol(off - 1) })
+}
+// end of the line `off` sits on. Exported: compiler.audit's alias-span scan is the same walk.
+lspq_eol* = (v: [u8], off: i64) i64 {
+    p := off
+    @while (p < v.len && v[p] != '\n') {
+        p = p + 1
+    }
+    p
+}
+lspq_rtrim = (v: [u8], e: i64, s: i64) i64 {
+    (e <= s).then({
+        return e
+    })
+    b := v[e - 1]
+    (b == ' ' || b == '\t' || b == '\r').then({ v.lspq_rtrim(e - 1, s) }, { e })
+}
+// the SIGNATURE of the declaration at `d`: its first line, minus trailing space and the `{` that
+// opens a body — `foo* = (x: i32) i32 {` reads back as `foo* = (x: i32) i32`.
+lspq_sig_end = (v: [u8], d: i64) i64 {
+    e := v.lspq_rtrim(v.lspq_eol(d), d)
+    (e > d && v[e - 1] == '{').then({ v.lspq_rtrim(e - 1, d) }, { e })
+}
+// ── hover ────────────────────────────────────────────────────────────────────────────────────────
+// A type declaration (`Point: { … }`) — the one decl whose BODY is what you hover it for.
+lspq_is_type_head = (v: [u8], d: i64) bool {
+    p := v.lspq_head_sigil(v.lsp_ident_end(d))
+    p >= 0 && v[p] == ':'
+}
+LSPQ_BODY_LINES = () i64 { 24 }
+// end of the brace body opened on the declaration's first line. Braces are counted literally — a `{`
+// inside a string default would over-extend — so the line cap bounds how wrong that can get.
+lspq_brace_end = (v: [u8], d: i64) i64 {
+    depth := 0
+    lines: i64 := 0
+    i := d
+    stop: i64 := 0 - 1
+    @while (stop < 0 && i < v.len && lines < LSPQ_BODY_LINES()) {
+        b := v[i]
+        (b == '{').then({
+            depth = depth + 1
+        })
+        (b == '\n').then({
+            lines = lines + 1
+        })
+        (b == '}').then({
+            depth = depth - 1
+            (depth == 0).then({
+                stop = i + 1
+            })
+        })
+        i = i + 1
+    }
+    (stop < 0).then({ i }, { stop })
+}
+// what hover renders inside the fence: the signature, or a type's whole brace body when it opens one.
+lspq_head_end = (v: [u8], d: i64) i64 {
+    lend := v.lspq_rtrim(v.lspq_eol(d), d)
+    (v.lspq_is_type_head(d) && lend > d && v[lend - 1] == '{').then({
+        return v.lspq_brace_end(d)
+    })
+    v.lspq_sig_end(d)
+}
+// start of the contiguous run of `//` lines immediately above the declaration at `d` — the doc
+// comment, which is most of what a hover is worth. `d` itself means there is no run.
+lspq_doc_start = (v: [u8], d: i64) i64 {
+    (d <= 0).then({
+        return d
+    })
+    p := v.lspq_bol(d - 1)
+    (p + 1 < d && v[p] == '/' && v[p + 1] == '/').then({ v.lspq_doc_start(p) }, { d })
+}
+// the doc run as markdown prose: each line's `//` marker (and the space after it) removed.
+lspq_push_doc = (sb: String, mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) String {
+    o := sb
+    i := s
+    bol := true
+    @while (i < e) {
+        b := v[i]
+        (bol && b == '/' && i + 1 < e && v[i + 1] == '/').match ({
+            true  => {
+                i = i + 2
+                (i < e && v[i] == ' ').then({
+                    i = i + 1
+                })
+                bol = false
+            },
+            false => {
+                o = o.gstr_push(mp, b)
+                bol = b == '\n'
+                i = i + 1
+            },
+        })
+    }
+    o
+}
+lspq_close_brace = (v: [u8], i: i64) i64 {
+    p := i
+    @while (p < v.len && v[p] != '}') {
+        p = p + 1
+    }
+    p
+}
+lspq_word_at = (v: [u8], i: i64, name: [u8]) bool {
+    (i + name.len > v.len || i > 0 && v[i - 1].lsp_is_ident_byte()).then({
+        return false
+    })
+    v.lsp_bytes_eq(i, name, 0)
+        && (i + name.len >= v.len || v[i + name.len].lsp_is_ident_byte() == false)
+}
+lspq_names_has = (v: [u8], s: i64, e: i64, name: [u8]) bool {
+    hit := false
+    i := s
+    @while (i < e && hit == false) {
+        v.lspq_word_at(i, name).then({
+            hit = true
+        })
+        i = i + 1
+    }
+    hit
+}
+// the `= std.text.str` tail of an import record whose `}` sits at `c`.
+lspq_module_after = (mp: MutPtr<Malloc>, v: [u8], c: i64) string_view {
+    p := v.lsp_skip_sp(c + 1)
+    (p >= v.len || v[p] != '=').then({
+        return ""
+    })
+    s := v.lsp_skip_sp(p + 1)
+    mp.cstr_range(v, s, v.lspq_rtrim(v.lspq_eol(s), s))
+}
+// the module path an import record binds `name` from, or "" — `{ a, b } = std.text.str` (the record
+// may wrap across lines). This is how hover says something true about an imported name that has no
+// declaration in this file.
+lspq_import_of = (mp: MutPtr<Malloc>, v: [u8], name: [u8]) string_view {
+    found: string_view := ""
+    atcol0 := true
+    i: i64 := 0
+    @while (i < v.len && is_empty(found)) {
+        (atcol0 && v[i] == '{').then({
+            c := v.lspq_close_brace(i)
+            v.lspq_names_has(i + 1, c, name).then({
+                found = mp.lspq_module_after(v, c)
+            })
+        })
+        atcol0 = v[i] == '\n'
+        i = i + 1
+    }
+    found
+}
+lspq_fence = (mp: MutPtr<Malloc>, cap: i64) String {
+    mp.gstr_string(cap).gstr_append(mp, "```zen\n")
+}
+lspq_push_docblock = (sb: String, mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) String {
+    (s >= e).then({
+        return sb
+    })
+    sb.gstr_append(mp, "\n\n").lspq_push_doc(mp, v, s, e)
+}
+lspq_import_hover = (mp: MutPtr<Malloc>, v: [u8], name: [u8]) string_view {
+    m := mp.lspq_import_of(v, name)
+    is_empty(m).then({
+        return ""
+    })
+    mp
+        .lspq_fence(128)
+        .gstr_append(mp, mp.cstr_range(name, 0, name.len))
+        .gstr_append(mp, "\n```\n\nimported from `")
+        .gstr_append(mp, m)
+        .gstr_append(mp, "`")
+        .gstr_finish(mp)
+}
+// HOVER over (line, ch) of `text`, as markdown: a fenced `zen` block holding the declaration's
+// signature (a type's field block in full) followed by its doc comment. COVERS the file's own
+// top-level declarations, plus a name bound by one of its import records (rendered as its origin
+// module). Anything else — a local, a field, a declaration in another file — answers "" and the
+// caller replies null rather than guessing.
+lspq_hover* = (mp: MutPtr<Malloc>, text: string_view, line: i64, ch: i64) string_view {
+    v: [u8] := text.view()
+    off := v.lsp_byte_of_pos(line, ch, 0, 0)
+    s := v.lsp_ident_start(off)
+    e := v.lsp_ident_end(off)
+    (e <= s).then({
+        return ""
+    })
+    name: [u8] := v.ptr.offset(s).slice(e - s)
+    d := v.lsp_find_def(name, 0, true)
+    (d < 0).then({
+        return mp.lspq_import_hover(v, name)
+    })
+    mp
+        .lspq_fence(256)
+        .gstr_append(mp, mp.cstr_range(v, d, v.lspq_head_end(d)))
+        .gstr_append(mp, "\n```")
+        .lspq_push_docblock(mp, v, v.lspq_doc_start(d), d)
+        .gstr_finish(mp)
+}
+// ── completion ───────────────────────────────────────────────────────────────────────────────────
+// LSP CompletionItemKind values, spelled once.
+LSPQ_FUNCTION = () i64 { 3 }
+LSPQ_VARIABLE = () i64 { 6 }
+LSPQ_KEYWORD = () i64 { 14 }
+LSPQ_STRUCT = () i64 { 22 }
+LSPQ_BY_CASE = () i64 { 0 }
+LspqItem*: {
+    label: string_view,
+    detail: string_view,
+    kind: i64,
+}
+lspq_no_items = () [LspqItem] { slice(null_ptr(), 0) }
+lspq_alloc = (mp: MutPtr<Malloc>, n: i64) [LspqItem] { slice(mp.acquire(n * sizeof(LspqItem)), n) }
+// A sink that COUNTS when it has no room and FILLS when it does — so one collector body runs twice
+// (measure, then write) instead of a growable array or a guessed ceiling.
+LspqSink: {
+    items: [LspqItem],
+    n: i64,
+}
+lspq_put = (sk: LspqSink, label: string_view, detail: string_view, kind: i64) LspqSink {
+    (sk.n < sk.items.len).then({
+        sk.items[sk.n] = LspqItem(
+            label: label,
+            detail: detail,
+            kind: kind,
+        )
+    })
+    LspqSink(
+        items: sk.items,
+        n: sk.n + 1,
+    )
+}
+// every identifier in `v[s, e)` as an item. `kind` LSPQ_BY_CASE guesses from the initial letter —
+// the same lexical rule the highlighter uses, and all a textual scan of an import list can know.
+lspq_add_words = (
+    mp: MutPtr<Malloc>,
+    v: [u8],
+    s: i64,
+    e: i64,
+    detail: string_view,
+    kind: i64,
+    sk: LspqSink,
+) LspqSink {
+    acc := sk
+    i := s
+    @while (i < e) {
+        v[i].lsp_is_ident_byte().match ({
+            true  => {
+                j := v.lsp_ident_end(i)
+                k := (kind == LSPQ_BY_CASE()).match ({
+                    true  => is_upper(v[i]).then({ LSPQ_STRUCT() }, { LSPQ_FUNCTION() }),
+                    false => kind,
+                })
+                acc = acc.lspq_put(mp.cstr_range(v, i, j), detail, k)
+                i = j
+            },
+            false => {
+                i = i + 1
+            },
+        })
+    }
+    acc
+}
+// `Foo: {` is a type; `f = (` / `f<T> = (` / `f(` is a function; anything else bound with `=` is a value.
+lspq_decl_kind = (v: [u8], p: i64) i64 {
+    b := v[p]
+    (b == ':').then({
+        return LSPQ_STRUCT()
+    })
+    (b == '(' || b == '<').then({
+        return LSPQ_FUNCTION()
+    })
+    q := v.lsp_skip_sp(p + 1)
+    (q < v.len && (v[q] == '(' || v[q] == '<')).then({ LSPQ_FUNCTION() }, { LSPQ_VARIABLE() })
+}
+lspq_add_decl = (mp: MutPtr<Malloc>, v: [u8], i: i64, sk: LspqSink) LspqSink {
+    e := v.lsp_ident_end(i)
+    p := v.lspq_head_sigil(e)
+    (p < 0).then({
+        return sk
+    })
+    sk.lspq_put(mp.cstr_range(v, i, e), mp.cstr_range(v, i, v.lspq_sig_end(i)), v.lspq_decl_kind(p))
+}
+LSPQ_KEYWORDS = () string_view {
+    "return match loop impl then or_return break continue true false Self"
+}
+LSPQ_TYPES = () string_view {
+    "i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool void str text string_view string_literal"
+}
+lspq_add_fixed = (
+    mp: MutPtr<Malloc>,
+    words: string_view,
+    detail: string_view,
+    kind: i64,
+    sk: LspqSink,
+) LspqSink {
+    wv: [u8] := words.view()
+    mp.lspq_add_words(wv, 0, wv.len, detail, kind, sk)
+}
+// One pass over the buffer: every column-0 declaration head, every name an import record binds, then
+// the fixed word lists. Column 0 is what makes this cheap and honest — it is exactly the set of names
+// that are in scope everywhere in the file.
+lspq_collect = (mp: MutPtr<Malloc>, v: [u8], sk: LspqSink) LspqSink {
+    acc := sk
+    atcol0 := true
+    i: i64 := 0
+    @while (i < v.len) {
+        (atcol0 && v[i] == '{').then({
+            c := v.lspq_close_brace(i)
+            acc = mp.lspq_add_words(v, i + 1, c, mp.lspq_module_after(v, c), LSPQ_BY_CASE(), acc)
+            i = c
+        })
+        (atcol0 && v[i].lsp_is_ident_byte()).then({
+            acc = mp.lspq_add_decl(v, i, acc)
+        })
+        atcol0 = v[i] == '\n'
+        i = i + 1
+    }
+    acc = mp.lspq_add_fixed(LSPQ_KEYWORDS(), "keyword", LSPQ_KEYWORD(), acc)
+    mp.lspq_add_fixed(LSPQ_TYPES(), "builtin type", LSPQ_STRUCT(), acc)
+}
+// COMPLETION for `text`: the file's top-level declarations (with their signature as detail), the
+// names its import records bind (with the origin module as detail), and the language's keywords and
+// builtin type names. Locals, fields and members are NOT here — which is why the server advertises
+// no trigger characters: `.` would produce nothing this scan could honestly fill in.
+lspq_items* = (mp: MutPtr<Malloc>, text: string_view) [LspqItem] {
+    v: [u8] := text.view()
+    n := mp.lspq_collect(v, LspqSink(
+        items: lspq_no_items(),
+        n: 0,
+    )).n
+    (n <= 0).then({
+        return lspq_no_items()
+    })
+    mp.lspq_collect(v, LspqSink(
+        items: mp.lspq_alloc(n),
+        n: 0,
+    )).items
+}

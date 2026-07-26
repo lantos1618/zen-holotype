@@ -20,8 +20,15 @@ lives outside its checkout, also export `ZEN_ROOT=/path/to/zen` so `std.*` impor
 - live squiggles from the real compiler pipeline on open/change (full sync), cleared on
   close; errors inside imported sibling modules are surfaced on the importing file
 
-No hover/completion/goto yet — the server answers anything unimplemented with a clean
-JSON-RPC `MethodNotFound`, so the client degrades gracefully.
+- go-to-definition, hover and completion, all served from the OPEN BUFFER (never the
+  saved file) and all resolved textually, so they keep working while the file is
+  mid-edit and does not parse. Their exact reach — same-file top-level declarations,
+  plus names bound by the file's import records — is spelled out in
+  [`editor/nvim/README.md`](../nvim/README.md#2-language-server-zen-lsp)
+- semantic highlighting from the compiler's own lexer
+
+Anything else the server answers with a clean JSON-RPC `MethodNotFound`, so the client
+degrades gracefully.
 
 ## No-npm alternative
 
