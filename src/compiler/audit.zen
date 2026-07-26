@@ -11,6 +11,7 @@
 { impl_cname_in } = compiler.mangle    // recompute hoisted impl-method names
 { gstr_string, gstr_append, gstr_finish, gstr_push, is_expr_null } = compiler.genc
 { parse_module } = compiler.parse
+{ clone_fn } = compiler.clones
 { resolve_module } = compiler.check_resolve
 { report_no_if_resolved, report_check } = compiler.drvdiag
 { ResolvedProgram, ModuleEntry, seen_name, add_name } = std.internal.resolve
@@ -856,8 +857,8 @@ aud_mod_imports = (
     m: ModuleEntry,
     tms: [AudTM],
     fb: [AudFinding],
-    n0: i64,
-) i64 {
+    n0: i32,
+) i32 {
     ds := mp.parse_module(m.source)
     v: [u8] := m.source.view()
     cnt := 0
@@ -1018,6 +1019,76 @@ aud_unreached = (c: AudCtx, tails: Map<i64>, nm: string_view) bool {
     twin := tails.has(nm) || nta > 0 && c.seen.has(cstr(offset(nm, nta)))
     c.seen.has(nm) == false && twin == false
 }
+// ── structural clone detection ────────────────────────────────────────────────────────────────────
+// Fingerprint every function over the AST (compiler.clones) and report any two that canonicalise to
+// the same tree. This is a hash bucket, not a comparison of every pair: O(n) over the program, so it
+// can run on every audit rather than as an occasional sweep.
+aud_clone_msg = (mp: MutPtr<Malloc>, nm: string_view, other: string_view) string_view {
+    mp
+        .gstr_string(96)
+        .gstr_append(mp, "warning[clone]: fn '")
+        .gstr_append(mp, nm)
+        .gstr_append(mp, "' is structurally identical to '")
+        .gstr_append(mp, other)
+        .gstr_append(mp, "' — keep one and import it")
+        .gstr_finish(mp)
+}
+// hash -> the name that claimed it first. A second claimant is the finding.
+// hex of the fingerprint, because Map is string-keyed. 16 nibbles, no allocation beyond the key.
+aud_hash_key = (mp: MutPtr<Malloc>, h: i64) string_view {
+    s := mp.gstr_string(17)
+    i := 0
+    @while (i < 16) {
+        s = s.gstr_push(mp, aud_hexd(h >> (60 - i * 4) & 15))
+        i = i + 1
+    }
+    s.gstr_finish(mp)
+}
+aud_hexd = (v: i64) u8 { load(offset("0123456789abcdef", v)) }
+// hash -> index of the function that claimed it first. A second claimant is the finding.
+aud_clones = (
+    mp: MutPtr<Malloc>,
+    rp: ResolvedProgram,
+    raw: [Decl],
+    path: string_view,
+    src: string_view,
+    fb: [AudFinding],
+    n0: i32,
+) i32 {
+    seedv: i64 := 0 - 1
+    seen := of(mp, "", seedv).expect("audit: oom")
+    names := cbuf<string_view>(mp, raw.len + 8)
+    n := n0
+    k: i64 := 0
+    raw.loop((h, i, d) {
+        d.match ({
+            .DFunc(f) => {
+                fp := mp.clone_fn(f)    // 0 = tree too small to be worth reporting
+                key := (fp == 0).then({ "" }, { mp.aud_hash_key(fp) })
+                prev := (fp == 0).then({ 0 - 1 }, { seen.get(key, 0 - 1) })
+                (prev >= 0).match ({
+                    true  => (n < fb.len).then({
+                        dl := locate_diag(rp, d.aud_decl_pos(), 1, path, src)
+                        fb[n] = AudFinding(
+                            path: dl.path,
+                            line: to_i64(dl.sp.line),
+                            msg: mp.aud_clone_msg(f.name, names[prev]),
+                            dead: false,
+                        )
+                        n = n + 1
+                    }),
+                    false => (fp == 0).then({ }, {
+                        names[k] = f.name
+                        seen = seen.put(mp, key, k).expect("audit: oom")
+                        k = k + 1
+                    }),
+                })
+            },
+            _         => { },
+        })
+    })
+    n
+}
 aud_run* = (
     mp: MutPtr<Malloc>,
     rp: ResolvedProgram,
@@ -1044,6 +1115,7 @@ aud_run* = (
             n = n + 1
         })
     })
+    n = mp.aud_clones(rp, raw, path, src, fb, n)
     tms := mp.aud_tms(raw)
     rp.table.modules.loop((h, i, m) {
         n = mp.aud_mod_imports(m, tms, fb, n)
