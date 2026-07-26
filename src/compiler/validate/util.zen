@@ -4,7 +4,7 @@
 { Env, is_intrinsic, is_lit_numeric, is_void_ty, the_func, tparam_declared } = compiler.check
 { tag_const } = compiler.check_lower
 { Token, scan } = compiler.lex
-{ is_prim_width, slice_any } = compiler.astops
+{ is_prim_width, param_names_has, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
 { at } = std.text.ascii
 { ends_with, is_empty, starts_with } = std.text.str
@@ -301,7 +301,7 @@ tys_mention_tparam = (tps: [Param], ts: [Ty]) bool {
 }
 ty_mentions_tparam* = (tps: [Param], t: Ty) bool {
     t.match ({
-        .Named(n)   => tps.names_has(n),
+        .Named(n)   => tps.param_names_has(n),
         .Ptr(pd)    => tps.ty_mentions_tparam(load(pd.pointee)),
         .Slice(e)   => tps.ty_mentions_tparam(load(e)),
         .Generic(g) => tps.tys_mention_tparam(g.args),
@@ -338,7 +338,6 @@ tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
         false => 0,
     })
 }
-names_has = (names: [Param], fn: string_view) bool { names.slice_any((n) { n.name == fn }) }
 trait_declaring* = (decls: [Decl], m: string_view) string_view {
     found := ""
     decls.loop((h, i, d) {
@@ -718,12 +717,11 @@ is_ctx_typed_arg* = (e: Expr) bool {
 // cross-module / pre-mono "uninferable residue" the core validator deliberately tolerates. It is NOT
 // part of check_module's count/kind (the harness runs that on NON-flattened source), so the harness is
 // untouched. Pointer/slice elements and generic args recurse; FnT internals are left to later checks.
-ut_has_tparam = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { tp.name == n }) }
 ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
     t.match ({
         .Named(n)   => (n == "Self"
             || is_prim_width(n)
-            || tparams.ut_has_tparam(n)
+            || tparams.param_names_has(n)
             || env.env_named_declared(n)).match ({
             true  => 0,
             false => 1,
@@ -833,7 +831,7 @@ utn_ty = (env: Env, tparams: [Param], t: Ty) string_view {
     t.match ({
         .Named(n)   => (n == "Self"
             || is_prim_width(n)
-            || tparams.ut_has_tparam(n)
+            || tparams.param_names_has(n)
             || env.env_named_declared(n)).match ({
             true  => "",
             false => n,

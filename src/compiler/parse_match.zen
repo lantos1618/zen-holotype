@@ -8,18 +8,11 @@
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
 { PEnd, is_comma, is_lbrace, is_rbrace, is_rparen, perr_set_at, tok_eq } = compiler.parse_type
-{ materialize, parse_block } = compiler.parse_stmt
+{ is_return_kw, materialize, parse_block } = compiler.parse_stmt
 { enode, lexeme, parse_atom } = compiler.parse_atom
 { is_dot, is_ident_tok, parse_or_nested, parse_postfix } = compiler.parse_postfix
 { is_lparen } = compiler.parse_primary
 { PExpr } = compiler.parse_expr
-// A bare `return` keyword (not braced) in arm-body position.
-is_return_arm = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Ident => src.tok_eq(t, "return"),
-        _      => false,
-    })
-}
 // A one-statement `[Stmt]` holding `return v` — so `=> return v` lowers exactly like `=> { return v }`.
 ret_arm_stmts = (a: MutPtr<Malloc>, v: Ptr<Expr>) [Stmt] {
     buf := slice(a.acquire(sizeof(Stmt)), 1)
@@ -38,7 +31,7 @@ parse_arm_body = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
     sc := src.scan(pos)
     src.is_lbrace(sc.tok).match ({
         true  => a.parse_arm_block(src, sc),
-        false => src.is_return_arm(sc.tok).match ({
+        false => src.is_return_kw(sc.tok).match ({
             true  => a.parse_arm_return(src, sc),
             false => a.parse_or_nested(src, pos),
         }),

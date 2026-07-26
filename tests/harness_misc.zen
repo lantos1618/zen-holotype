@@ -15,8 +15,9 @@
 // Helpers are `om_`-prefixed so they never collide on the flat-import flatten with std (std.io.file
 // already defines `read_file*`), harness_lib, or the other category files.
 { VCase, VerdictCase, run_value, run_values, run_verdict, run_verdicts, run_suite, zo_path, zo_cmd,
-  zo_itoa, zo_par_run, zo_idpath, zo_join } = harness_lib
+  zo_cat2, zo_itoa, zo_par_run, zo_idpath, zo_join } = harness_lib
 { Malloc } = std.mem.alloc
+{ is_alpha } = std.text.ascii
 { out, out_bytes, save, contents_in, shell } = std.io.file
 { len, contains, starts_with, is_empty, view, substr } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
@@ -64,14 +65,8 @@ om_count = (s: string_view, needle: string_view) i64 {
     n
 }
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
-om_cat2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
-    s := mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, a).expect("harness: oom")
-    s = s.append_in(mp, b).expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
-}
 om_cat3 = (mp: MutPtr<Malloc>, a: string_view, b: string_view, c: string_view) string_view {
-    mp.om_cat2(a, mp.om_cat2(b, c))
+    mp.zo_cat2(a, mp.zo_cat2(b, c))
 }
 // ════════════════════════════════════════════════════════════════════════════════
 // traits  <- tests/test_traits.py
@@ -242,7 +237,7 @@ harness_misc_num_parse = () i32 {
 // The value-case harness can't drive this (no module resolver + it clashes with libc redecls), so this
 // mirrors num_parse's custom `zenc run` + stdout-substring runner. These are the crypto correctness gate.
 // ════════════════════════════════════════════════════════════════════════════════
-HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    put(\"empty=\").s(mp.sha256_hex(\"\".view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(\"abc\".view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(\"The quick brown fox jumps over the lazy dog\".view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(\"abc\".view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(\"hello\".view()) == fnv1a(\"hello\".view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(\"abc\".view()) != fnv1a(\"abd\".view())).nl()\n    0\n}\n"
+HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ is_alpha } = std.text.ascii\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    put(\"empty=\").s(mp.sha256_hex(\"\".view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(\"abc\".view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(\"The quick brown fox jumps over the lazy dog\".view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(\"abc\".view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(\"hello\".view()) == fnv1a(\"hello\".view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(\"abc\".view()) != fnv1a(\"abd\".view())).nl()\n    0\n}\n"
 harness_misc_hash = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -261,8 +256,7 @@ harness_misc_hash = () i32 {
 // every top-level non-generic, non-exported declaration name must survive into the emitted C — the
 // Zen equivalent of pytest's `for name in _DECL_RE.findall(src): assert name in out`.
 // ════════════════════════════════════════════════════════════════════════════════
-om_is_alpha = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_' }
-om_is_alnum = (b: u8) bool { om_is_alpha(b) || b >= '0' && b <= '9' }
+om_is_alnum = (b: u8) bool { is_alpha(b) || b >= '0' && b <= '9' }
 // Mirror of `_DECL_RE = ^([a-zA-Z_]\w*)\s*=\s*\(` (re.M): scan `src` for each line-initial
 // `name = (` declaration (col-0 only; `name*`/`name = <T>(` are excluded since the char after the
 // name is not `=`, and a generic's `<` is not `(`), and require every such `name` to appear in `c`.
@@ -277,7 +271,7 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: string_view, c: string_view) bool {
     ok := true
     @while (i < n) {
         b := sv[i]
-        (ls && om_is_alpha(b)).then({
+        (ls && is_alpha(b)).then({
             // identifier [i, e)
             e := i
             @while (e < n && om_is_alnum(sv[e])) {
