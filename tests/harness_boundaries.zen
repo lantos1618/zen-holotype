@@ -207,6 +207,12 @@ region = (mp: MutPtr<Malloc>, src: string_view, m1: string_view, m2: string_view
 not_contains = (s: string_view, needle: string_view) bool {
     s.contains(needle).then({ false }, { true })
 }
+// A region whose START marker no longer occurs is the EMPTY string, and every `not_contains` over the
+// empty string is trivially true — so a rename in the file under audit silently retires the rule
+// instead of failing it. Proven: renaming `write_int` to `write_i64` in src/std/text/fmt.zen while
+// ALSO introducing the forbidden `.integer_in(` call left the fmt sub-suite green (7 dots, exit 0).
+// Every sliced region therefore carries this presence assertion beside its content assertions.
+found = (region: string_view) bool { region.is_empty().then({ false }, { true }) }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 4: raw malloc/calloc/realloc/free stay behind the allocator floor (the original port).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -458,7 +464,7 @@ trace_suite = (mp: MutPtr<Malloc>) i32 {
         .Ok(raw) => {
             src := mp.strip_comments_in(raw)
             gather := mp.region(src, "cc_gather = ", "Node*: ")
-            run_suite("boundaries: trace gather uses owned scratch", [gather.not_contains(".list_push("), gather.contains(".list_push_static(")])
+            run_suite("boundaries: trace gather uses owned scratch", [gather.found(), gather.not_contains(".list_push("), gather.contains(".list_push_static(")])
         },
         .Err(e)  => run_suite("boundaries: trace gather (unreadable)", [false]),
     })
@@ -471,7 +477,7 @@ io_suite = (mp: MutPtr<Malloc>) i32 {
         .Ok(raw) => {
             src := mp.strip_comments_in(raw)
             body := mp.region(src, "read_bytes_alloc", "read_bytes_open")
-            run_suite("boundaries: io contents_in uses try_acquire", [body.contains(".try_acquire("), body.not_contains(".acquire("), src.not_contains("default()")])
+            run_suite("boundaries: io contents_in uses try_acquire", [body.found(), body.contains(".try_acquire("), body.not_contains(".acquire("), src.not_contains("default()")])
         },
         .Err(e)  => run_suite("boundaries: io file (unreadable)", [false]),
     })
@@ -489,7 +495,7 @@ map_suite = (mp: MutPtr<Malloc>) i32 {
             appnd := mp.region(src, "append<A>", "put<A>")
             // `of` is the last fn in map.zen, so its region runs to EOF (no following marker).
             of := mp.after_marker(src, "of*<T, A>")
-            run_suite("boundaries: map fallible paths use result helpers", [grow.contains(".try_acquire3("), grow.not_contains(".acquire("), appnd.contains(".grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire3("), of.not_contains(".acquire(")])
+            run_suite("boundaries: map fallible paths use result helpers", [grow.found(), appnd.found(), of.found(), grow.contains(".try_acquire3("), grow.not_contains(".acquire("), appnd.contains(".grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire3("), of.not_contains(".acquire(")])
         },
         .Err(e)  => run_suite("boundaries: map (unreadable)", [false]),
     })
@@ -508,7 +514,7 @@ fmt_suite = (mp: MutPtr<Malloc>) i32 {
             // "// Display" is a comment marker — stripped by `_code`, so (faithfully) absent here, which
             // makes `wf` run from `write_float = ` to EOF (python's split returns the whole remainder).
             wf := mp.region(src, "write_float = ", "// Display")
-            run_suite("boundaries: fmt allocator writes use fallible num helpers", [ti.contains(".integer_in("), ti.not_contains(".acquire("), tf.contains(".float_in("), tf.not_contains(".acquire("), wi.not_contains(".integer_in(")
+            run_suite("boundaries: fmt allocator writes use fallible num helpers", [ti.found(), tf.found(), wi.found(), wf.found(), ti.contains(".integer_in("), ti.not_contains(".acquire("), tf.contains(".float_in("), tf.not_contains(".acquire("), wi.not_contains(".integer_in(")
                 && wi.not_contains(".write_int_in("), wf.not_contains(".float_in(")
                 && wf.not_contains(".write_float_in("), src.not_contains("default()")])
         },

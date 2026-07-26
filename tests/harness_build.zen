@@ -1345,6 +1345,11 @@ harness_build_run* = () i32 {
         want_out: "",
         check_out: false,
     ), FixtureCase(
+        path: "tests/fixtures/zen/mem_raw_bytes.zen",
+        want_exit: "0",
+        want_out: "",
+        check_out: false,
+    ), FixtureCase(
         path: "tests/fixtures/zen/typed_local_i64.zen",
         want_exit: "4",
         want_out: "",
@@ -2044,7 +2049,7 @@ harness_build_run* = () i32 {
         cmd: "./zen build /no/such/file.zen -o $ZT/zbf_x 2>$ZT/zbf.txt; test \"$?\" = 1 && grep -Fq \"cannot open\" $ZT/zbf.txt && test ! -e $ZT/zbf_x",
     ), ShellCase(
         name: "build_rejects_illtyped",
-        cmd: "printf \"main = () i32 { 1 < 2 }\\n\" > $ZT/zit.zen && { ./zen build $ZT/zit.zen -o $ZT/zit_bin 2>/dev/null; test \"$?\" != 0; } && test ! -e $ZT/zit_bin",
+        cmd: "printf \"main = () i32 { 1 < 2 }\\n\" > $ZT/zit.zen && { ./zen build $ZT/zit.zen -o $ZT/zit_bin 2>$ZT/zit.err; test \"$?\" = 1; } && grep -Fq 'error[return-fit]' $ZT/zit.err && test ! -e $ZT/zit_bin",
     ), ShellCase(
         name: "init_executable_build_run",
         cmd: "rm -rf $ZT/hello-z && ./zen init $ZT/hello-z --bin </dev/null >$ZT/init.txt 2>&1 && test -f $ZT/hello-z/zen.toml && test -f $ZT/hello-z/src/main.zen && grep -Fqx 'package = \"hello-z\"' $ZT/hello-z/zen.toml && grep -Fqx 'kind = \"executable\"' $ZT/hello-z/zen.toml && grep -Fqx 'root = \"src\"' $ZT/hello-z/zen.toml && grep -Fqx 'main = \"main.zen\"' $ZT/hello-z/zen.toml && grep -Fqx 'out = \"hello-z\"' $ZT/hello-z/zen.toml && ./zen fmt --check $ZT/hello-z/src/main.zen && ./zen check $ZT/hello-z && ./zen run $ZT/hello-z >$ZT/run.txt && grep -Fqx 'Hello from hello-z!' $ZT/run.txt && ./zen build $ZT/hello-z >/dev/null 2>&1 && test -x $ZT/hello-z/hello-z && $ZT/hello-z/hello-z >$ZT/bin.txt && cmp -s $ZT/run.txt $ZT/bin.txt",
@@ -2113,7 +2118,7 @@ harness_build_run* = () i32 {
         cmd: "if ! command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || ! command -v file >/dev/null 2>&1; then exit 0; fi; rm -rf $ZT/zxa && mkdir -p $ZT/zxa/src && printf '{ Build } = std.build\\n{ platform_linux, Arch, Abi } = std.sys.platform\\nbuild = (b: MutPtr<Build>) void {\\n    b.install(b.exe(\"zxa\").root(\"src\").main(\"main.zen\").out(\"zxa-bin\").target(platform_linux(.Arm64, .Gnu)))\\n}\\n' >$ZT/zxa/build.zen && printf 'main = () i32 { 7 }\\n' >$ZT/zxa/src/main.zen && ZENC_NO_CACHE=1 ./zen build $ZT/zxa >/dev/null 2>&1 && file $ZT/zxa/zxa-bin | grep -q 'ARM aarch64' && { if command -v qemu-aarch64 >/dev/null 2>&1 && test -e /usr/aarch64-linux-gnu/lib/ld-linux-aarch64.so.1; then qemu-aarch64 -L /usr/aarch64-linux-gnu $ZT/zxa/zxa-bin; test \"$?\" = 7; else true; fi; }",
     ), ShellCase(
         name: "platform_host_generated",
-        cmd: "./zen build tests/fixtures/zen/platform_host_generated.zen -o $ZT/platform_host && $ZT/platform_host && ./zen emit-js tests/fixtures/zen/platform_host_generated.zen | node",
+        cmd: "./zen build tests/fixtures/zen/platform_host_generated.zen -o $ZT/platform_host && $ZT/platform_host && ./zen emit-js tests/fixtures/zen/platform_host_generated.zen > $ZT/platform_host.js && test -s $ZT/platform_host.js && node $ZT/platform_host.js",
     ), ShellCase(
         name: "project_link_directive",
         cmd: "rm -rf $ZT/zll && cp -r tests/fixtures/project/linklib_demo $ZT/zll && sed -i \"s#@@NATIVE@@#$ZT/zll/native.c#\" $ZT/zll/zen.toml && ./zen build $ZT/zll >/dev/null 2>&1 && test -x $ZT/zll/linklib-bin && { b=$($ZT/zll/linklib-bin); test \"$?\" = 51; } && test \"$b\" = \"link libm\" && { o=$(./zen run $ZT/zll); test \"$?\" = 51; } && test \"$o\" = \"link libm\" && sed -i \"/^link = /d;s/linklib-bin/linklib-bin-nolink/\" $ZT/zll/zen.toml && ./zen build $ZT/zll >/dev/null 2>&1 && test -x $ZT/zll/linklib-bin-nolink && { $ZT/zll/linklib-bin-nolink; test \"$?\" = 51; }",
@@ -2348,31 +2353,31 @@ harness_build_run* = () i32 {
         cmd: "printf 'c* = (a: i32, b: i32) bool { (a < b) && (b < 10) }' | ./zen >$ZT/zbp.c 2>/dev/null && { echo '#include <stdint.h>'; echo '#include <stdbool.h>'; cat $ZT/zbp.c; echo 'int main(void){ return c(3,7) && !c(3,12) ? 0 : 1; }'; } > $ZT/zbp_full.c && cc -std=gnu11 -w $ZT/zbp_full.c -o $ZT/zbp_bin 2>/dev/null && $ZT/zbp_bin",
     ), ShellCase(
         name: "bootstrap_malformed_no_colon_param",
-        cmd: "printf 'f* = (p i32) i32 { 1 }' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128",
+        cmd: "printf 'f* = (p i32) i32 { 1 }' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 124",
     ), ShellCase(
         name: "bootstrap_malformed_colon_payload_enum",
-        cmd: "printf 'E: A | Some: T' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128",
+        cmd: "printf 'E: A | Some: T' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 124",
     ), ShellCase(
         name: "bootstrap_malformed_truncated_binop",
-        cmd: "printf 'g* = () i32 { 6 *' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128",
+        cmd: "printf 'g* = () i32 { 6 *' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 124",
     ), ShellCase(
         name: "bootstrap_malformed_unterminated_block",
-        cmd: "printf 'h* = () i32 { 1' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128",
+        cmd: "printf 'h* = () i32 { 1' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 124",
     ), ShellCase(
         name: "bootstrap_malformed_unterminated_import",
-        cmd: "printf '{ a, b' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128",
+        cmd: "printf '{ a, b' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 124",
     ), ShellCase(
         name: "bootstrap_malformed_unterminated_tparams",
-        cmd: "printf 'f<T' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128",
+        cmd: "printf 'f<T' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 124",
     ), ShellCase(
         name: "bootstrap_malformed_empty",
-        cmd: "printf '' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128",
+        cmd: "printf '' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 124",
     ), ShellCase(
         name: "bootstrap_malformed_lone_brace",
-        cmd: "printf '{' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128",
+        cmd: "printf '{' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 124",
     ), ShellCase(
         name: "bootstrap_malformed_lone_ident",
-        cmd: "printf 'x' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 128",
+        cmd: "printf 'x' | timeout 15 ./zen >/dev/null 2>&1; rc=$?; test \"$rc\" -lt 124",
     ), ShellCase(
         name: "bootstrap_missing_file",
         cmd: "./zen /nonexistent/zzz.zen >$ZT/zmf.txt 2>&1; test \"$?\" = 1 && grep -Fq 'cannot open' $ZT/zmf.txt",
@@ -2383,6 +2388,13 @@ harness_build_run* = () i32 {
         name: "build_self_bad_srcroot",
         cmd: "./zen --build-self $ZT/zbs_x.c /nonexistent/zzz >$ZT/zbs2.txt 2>&1; test \"$?\" = 1 && grep -Fq 'cannot open' $ZT/zbs2.txt",
     )])
+    // MALFORMED-INPUT cases. The bound is `< 124` (not `< 128`): 124 is `timeout`'s own exit, so the
+    // old bound let a HUNG compiler pass a case whose whole point is that malformed input is handled
+    // — the exact "a naive nonzero-exit read lets a hang pass" trap harness_lib documents.
+    // STILL UNPINNED, deliberately: the bound also admits rc 0. All nine inputs below are currently
+    // ACCEPTED by the bare-stdin path (`printf 'f* = (p i32) i32 { 1 }' | ./zen` exits 0 and emits C
+    // carrying a `__syntax_error` sentinel), so pinning `= 1` here turns all nine red against a live
+    // compiler defect rather than a test defect. Pin it in the same change that makes stdin reject.
     // Bare `zenc` (no subcommand, no file): on an interactive TTY it prints help and exits 0 instead
     // of silently blocking on a stdin read; when stdin is a PIPE it still filters source -> C. `script`
     // (util-linux) allocates a pty so isatty(0) is true for the help branch.

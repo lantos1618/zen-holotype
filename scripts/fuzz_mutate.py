@@ -86,3 +86,7 @@ for n in range(1, ITERS + 1):
         print(f"...{n}/{ITERS} ({hits} unique hits, {hangs} hangs)", flush=True)
 
 print(f"done: {n} iters, {hits} unique sanitizer hits, {hangs} hangs -> {CR}", flush=True)
+# Findings FAIL the run. Without this the script exits 0 with 50 crashes on disk, and its sibling
+# fuzz-corpus.sh (which does `exit 1` on hits) disagreed with it about whether finding bugs is a
+# failure. `fuzz-run.sh` ends on this call, so its status is this status.
+sys.exit(1 if (hits or hangs) else 0)

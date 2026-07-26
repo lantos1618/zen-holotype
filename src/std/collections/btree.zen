@@ -47,6 +47,7 @@
 { Result, IoError, Opt } = std.core.result
 { Allocator, try_acquire, try_acquire2 } = std.mem.alloc    // explicit allocator trait; try_acquire2 = all-or-nothing 2-buffer acquire (BTreeSet's 1-buffer sites keep plain try_acquire)
 { strcmp } = std.c.libc    // three-way byte compare for str keys
+{ move } = std.mem.raw    // the OVERLAP-safe bulk shift behind bt_shift_up / bt_shift_down
 // `Ord` — total order on keys as a THREE-WAY compare: `cmp(a, b)` is < 0 when a < b, 0 when a == b,
 // > 0 when a > b. Everything sorted (binary search, insert position, range bounds) is expressed
 // through this one method. Impls for the scalar/str keys ship below.
@@ -98,19 +99,20 @@ bt_lower_bound<K: Ord> = (ks: [K], lo: i64, hi: i64, k: K) i64 {
         },
     })
 }
-// shift xs[pos .. i) up by one slot to open a hole at `pos` — writes xs[i] first, walking DOWN so no
-// live slot is clobbered before it is copied. Call with i == len (slot `len` must be in the cap view).
+// shift xs[pos .. i) up by one slot to open a hole at `pos`. Source and destination are windows on
+// ONE buffer one slot apart — always overlapping — so this is `move`, never `copy`.
+// Call with i == len (slot `len` must be in the cap view).
 bt_shift_up<T> = (xs: [T], pos: i64, i: i64) void {
-    (i <= pos == false).then({
-        xs[i] = xs[i - 1]
-        bt_shift_up(xs, pos, i - 1)
+    (i > pos).then({
+        e := sizeof(T)
+        xs.ptr.offset((pos + 1) * e).move(xs.ptr.offset(pos * e), (i - pos) * e)
     })
 }
-// shift xs[pos+1 .. len) down by one slot, closing the hole at `pos` — walks UP. Call with i == pos.
+// shift xs[i+1 .. len) down by one slot, closing the hole at `i`. Overlapping, same as above.
 bt_shift_down<T> = (xs: [T], len: i64, i: i64) void {
-    (i >= len - 1 == false).then({
-        xs[i] = xs[i + 1]
-        bt_shift_down(xs, len, i + 1)
+    (i < len - 1).then({
+        e := sizeof(T)
+        xs.ptr.offset(i * e).move(xs.ptr.offset((i + 1) * e), (len - 1 - i) * e)
     })
 }
 BTreeMap*<K, V>: {
