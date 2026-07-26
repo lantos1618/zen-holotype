@@ -272,52 +272,47 @@ ff_method_facts = (
 // column (both keep a further 4 columns of `{ … }` in hand), so a run that fits it renders as the dry
 // pass measured it, and the padding cannot cascade into a reflow.
 ff_run_admits = (lo: i32, hi: i32, tail: i32) bool { hi - lo <= 20 && hi + tail <= 100 }
-// index one past the last method aligned with `start` — a method that is not one-line is its own run
-ff_run_end = (fs: [MethodFact], start: i64) i64 {
-    e := start + 1
-    (fs[start].one == false).then({
+// extend the run at `e` while the next method still fits it; `lo`/`hi`/`tl` carry the run so far
+ff_run_grow = (fs: [MethodFact], e: i64, lo: i32, hi: i32, tl: i32) i64 {
+    (e >= fs.len || fs[e].one == false || fs[e].lead).then({
         return e
     })
-    lo := fs[start].w
-    hi := fs[start].w
-    tl := fs[start].tail
-    @while (e < fs.len && fs[e].one && fs[e].lead == false) {
-        nlo := (fs[e].w < lo).then({ fs[e].w }, { lo })
-        nhi := (fs[e].w > hi).then({ fs[e].w }, { hi })
-        ntl := (fs[e].tail > tl).then({ fs[e].tail }, { tl })
-        (nlo.ff_run_admits(nhi, ntl) == false).then({
-            return e
-        })
-        lo = nlo
-        hi = nhi
-        tl = ntl
-        e = e + 1
-    }
-    e
+    nlo := (fs[e].w < lo).then({ fs[e].w }, { lo })
+    nhi := (fs[e].w > hi).then({ fs[e].w }, { hi })
+    ntl := (fs[e].tail > tl).then({ fs[e].tail }, { tl })
+    nlo.ff_run_admits(nhi, ntl).then({ fs.ff_run_grow(e + 1, nlo, nhi, ntl) }, { e })
+}
+// index one past the last method aligned with `start` — a method that is not one-line is its own run
+ff_run_end = (fs: [MethodFact], start: i64) i64 {
+    fs[start].one.match ({
+        true  => fs.ff_run_grow(start + 1, fs[start].w, fs[start].w, fs[start].tail),
+        false => start + 1,
+    })
 }
 ff_run_maxw = (fs: [MethodFact], from: i64, end: i64) i32 {
-    m: i32 := 0
-    k := from
-    @while (k < end) {
-        m = (fs[k].w > m).then({ fs[k].w }, { m })
-        k = k + 1
-    }
-    m
+    (from + 1 >= end).then({
+        return fs[from].w
+    })
+    rest := fs.ff_run_maxw(from + 1, end)
+    (fs[from].w > rest).then({ fs[from].w }, { rest })
+}
+ff_fill_pads = (fs: [MethodFact], pads: [i32], k: i64, end: i64, mx: i32) void {
+    (k < end).then({
+        pads[k] = mx - fs[k].w
+        fs.ff_fill_pads(pads, k + 1, end, mx)
+    })
+}
+ff_pad_runs = (fs: [MethodFact], pads: [i32], i: i64) void {
+    (i < fs.len).then({
+        e := fs.ff_run_end(i)
+        fs.ff_fill_pads(pads, i, e, fs.ff_run_maxw(i, e))
+        fs.ff_pad_runs(pads, e)
+    })
 }
 // spaces to insert after each method's name so a run's `=` line up (0 for a run of one)
 ff_method_pads = (a: MutPtr<Malloc>, fs: [MethodFact]) [i32] {
     pads := slice(a.acquire((fs.len + 1) * sizeof(i32)), fs.len + 1)
-    i: i64 := 0
-    @while (i < fs.len) {
-        e := fs.ff_run_end(i)
-        mx := fs.ff_run_maxw(i, e)
-        k := i
-        @while (k < e) {
-            pads[k] = mx - fs[k].w
-            k = k + 1
-        }
-        i = e
-    }
+    fs.ff_pad_runs(pads, 0)
     pads
 }
 // print an impl's methods (each demangled to its original name; the type's tparams dropped from the
