@@ -8,7 +8,7 @@
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
 { parse_or } = compiler.parse_expr
-{ enode, lexeme, is_op } = compiler.parse_atom
+{ enode, is_op, is_op1, is_walrus, lexeme } = compiler.parse_atom
 { is_dot, is_ident_tok } = compiler.parse_postfix
 { is_lparen, tyargs_end } = compiler.parse_primary
 { build_body } = compiler.parse_stmt
@@ -16,7 +16,7 @@
   is_lbrace, is_rbrace, is_langle, tok_eq, perr_set, perr_set_at, perr_set_bad_at,
   perr_set_misgen_at, perr_reset, perr_get, perr_off_get, perr_kind_get, pdepth_reset, delim_reset,
   vbreak_reset, vbreak_get, anon_reset, anon_decls_get } = compiler.parse_type
-{ parse_tparams, skip_name_star, parse_struct_at, parse_enum_at, has_data_field, is_eq_tok } = compiler.parse_type_decl
+{ parse_tparams, skip_name_star, parse_struct_at, parse_enum_at, has_data_field } = compiler.parse_type_decl
 { fill_impl, fill_impl_methods, fill_defaults, fill_inherent_struct } = compiler.parse_impl
 { implicit_tparams } = compiler.parse_implicit
 // `foreign` means a bodyless function declaration, emitted as DForeign.
@@ -39,7 +39,7 @@ parse_decl_at* = (a: MutPtr<Malloc>, src: string_view, pos: i32) DeclEnd {
     // `zenc fmt` would destructively rewrite the file. Flag the first unexpected token as a parse
     // error (the module is rejected via the syntax sentinel); parsing still advances past the decl.
     eqm := src.scan(tp.next)
-    src.is_eq_tok(eqm.tok).match ({
+    src.is_op1(eqm.tok, '=').match ({
         true  => (src.is_lparen(src.scan(eqm.next).tok) == false).then({
             perr_set_at(src.scan(eqm.next).tok.start)
         }),
@@ -138,13 +138,6 @@ decl_is_enum = (src: string_view, pos: i32) bool {
         false => false,
     })
 }
-// Check `:=` before struct/enum because `is_colon` matches its leading ':'.
-is_walrus = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == '=',
-        _    => false,
-    })
-}
 decl_is_global = (src: string_view, pos: i32) bool { src.is_walrus(src.decl_marker(pos).tok) }
 // a TYPED top-level global `name : Type := expr` — matches the in-function typed-let form. The marker is
 // a single ':' (not ':=', a plain global; not ': {', a struct); after the annotation the operator must be
@@ -181,7 +174,7 @@ typed_global_end = (a: MutPtr<Malloc>, src: string_view, pos: i32) i32 {
 // that ICEs codegen (void ORIGIN) or silently tolerates `=` as a second spelling of `:=`.
 decl_is_module_alias = (src: string_view, pos: i32) bool {
     m := src.decl_marker(pos)
-    src.is_eq_tok(m.tok).match ({
+    src.is_op1(m.tok, '=').match ({
         true  => is_ident_tok(src.scan(m.next).tok).match ({
             true  => {
                 end := src.skip_path(m.next)    // walk the bare/dotted path; land past its last ident
@@ -209,7 +202,7 @@ decl_path_at_boundary = (src: string_view, t: Token) bool {
 // export marker); this predicate routes it to a clean `error[bad-binding]` instead.
 decl_is_bad_binding = (src: string_view, pos: i32) bool {
     m := src.decl_marker(pos)
-    src.is_eq_tok(m.tok).match ({
+    src.is_op1(m.tok, '=').match ({
         true  => src.is_lparen(src.scan(m.next).tok).then({ false }, { true }),
         false => false,
     })
@@ -250,7 +243,7 @@ note_export = (name: string_view) void {
     })
 }
 // ── ALIAS-PREFIX registry (UFCS through module aliases) ──────────────────────────────────────────
-// std.internal.resolve flattens `m = sibling` by prefixing sibling's decls with `m__`. The checker's
+// compiler.resolve flattens `m = sibling` by prefixing sibling's decls with `m__`. The checker's
 // alias-UFCS fallback must distinguish a REAL alias prefix (`m`) from a plain user fn that merely has
 // `__` in its name (`foo__grow`) — otherwise it invents phantom methods. resolve records each alias it
 // stamps here (reset at every resolve_program_data entry); check reads `alias_prefixes_get()` and only
@@ -280,7 +273,7 @@ note_alias_prefix* = (name: string_view) void {
 }
 // ── MODULE-SIG registry (per-alias export signatures, Stage B4) ──────────────────────────────────
 // The resolver's ModuleSig knowledge (which names a module provides, with what flags, from which
-// ModuleId), threaded to the checker WITHOUT a std.internal.resolve import (resolve → check_validate
+// ModuleId), threaded to the checker WITHOUT a compiler.resolve import (resolve → check_validate
 // → check is a layering cycle — the alias_prefixes_* precedent above). resolve stamps one SigEntry
 // per (ns-alias bind, provided symbol) while resolve_program_data appends module bodies, in APPEND
 // order — the same order the alias-prefixed decls occupy in the flat, so enumeration preserves the
@@ -291,10 +284,10 @@ SigEntry*: {
     name: string_view,
     flags: i64,
     origin: i64,
-    sig_pub = (e: SigEntry) bool { e.flags / 1 % 2 == 1 }
-    sig_type = (e: SigEntry) bool { e.flags / 2 % 2 == 1 }
+    sig_pub      = (e: SigEntry) bool { e.flags / 1 % 2 == 1 }
+    sig_type     = (e: SigEntry) bool { e.flags / 2 % 2 == 1 }
     sig_imported = (e: SigEntry) bool { e.flags / 4 % 2 == 1 }
-    sig_foreign = (e: SigEntry) bool { e.flags / 8 % 2 == 1 }
+    sig_foreign  = (e: SigEntry) bool { e.flags / 8 % 2 == 1 }
 }
 module_sig_flags* = (is_pub: bool, is_type: bool, imported: bool, foreign: bool) i64 {
     is_pub.then({ 1 }, { 0 }) + is_type.then({ 2 }, { 0 }) + imported.then({ 4 }, { 0 }) + foreign.match ({
@@ -503,7 +496,7 @@ fill_global = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i3
     nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
     mk := src.decl_marker(pos)
-    alias := src.is_eq_tok(mk.tok)    // single `=` (a module alias) vs `:=` (a value global)
+    alias := src.is_op1(mk.tok, '=')    // single `=` (a module alias) vs `:=` (a value global)
     pe := a.parse_or(src, mk.next)
     buf[i] = a.global_decl(nm, pe.expr, alias, nt.tok.start)
     DCont(
@@ -675,9 +668,9 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
         },
     })
 }
-// decl_span is std.internal.resolve's boundary oracle; it reuses the real decl parsers.
+// decl_span is compiler.resolve's boundary oracle; it reuses the real decl parsers.
 // `is_type` marks a struct/enum/trait declaration (a `Name: …` head, NOT a `name :=`/`name =` value).
-// std.internal.resolve uses it so a namespace alias canonicalizes TYPE names to their bare spelling
+// compiler.resolve uses it so a namespace alias canonicalizes TYPE names to their bare spelling
 // (one C identity, deduped) instead of alias-prefixing them — only value/fn decls get the `alias__` prefix.
 DeclSpan*: {
     name: string_view,

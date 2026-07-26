@@ -1,0 +1,76 @@
+// std_api_gaps — proves the public API packaging fixed in this change actually works from a USER
+// program (no reaching into module-private internals). Real dogfood calls that used to fail:
+//   • regex.error_name(e)  — render a RegexError                 (was module-private)
+//   • json pretty-print + key enumeration + as_bool/as_obj/get   (was unexported / porous)
+// (http.http_error_name is proven in http_parse.zen — http and regex hit a PRE-EXISTING flat-namespace
+// clash if imported together, so the http check rides with the http-only fixture.)
+// `main` returns exit 0 iff every check held (`.to_exit()`), so the build harness asserts exit == 0.
+{ to_exit } = std.core.bool
+{ expect } = std.core.result
+{ contains, view } = std.text.str
+{ Heap } = std.mem.alloc
+regex = std.text.regex
+json = std.format.json
+heap = std.mem.heap
+// ── regex: a compile error renders to its public name ─────────────────────────────
+regex_name_ok = (a: MutPtr<Heap>) bool {
+    regex.compile(a, "(abc").match ({
+        .Ok(re) => false,    // "(abc" is unbalanced — must not compile
+        .Err(e) => regex.error_name(e) == "UnbalancedParen",
+    })
+}
+// ── json: parse an object, enumerate keys, pretty-print, read bool + nested value ──
+json_ok = (a: MutPtr<Heap>) bool {
+    doc := "{\"name\":\"zen\",\"ok\":true,\"nums\":[1,2,3],\"nested\":{\"x\":42}}"
+    json.parse(a, doc).match ({
+        .Err(e) => false,
+        .Ok(v)  => {
+            // (a) enumerate keys+values without touching internals: first key is "name".
+            ents := json.members(v)
+            keys_ok := ents.len == 4 && ents[0].key == "name" && ents[3].key == "nested"
+            // (b) as_obj hands back a nameable Object whose entries iterate the same pairs.
+            obj_ok := json.as_obj(v).match ({
+                .Some(o) => o.entries.len == 4,
+                .None    => false,
+            })
+            // (c) as_bool reads the boolean member.
+            bool_ok := json.get(v, "ok").match ({
+                .Some(bv) => json.as_bool(bv).some_or_false(),
+                .None     => false,
+            })
+            // (d) nested object + number: nested.x == 42.
+            nested_ok := json.get(v, "nested").match ({
+                .Some(nv) => json.get(nv, "x").match ({
+                    .Some(xv) => json.as_num(xv).match ({
+                        .Some(n) => n == 42.0,
+                        .None    => false,
+                    }),
+                    .None     => false,
+                }),
+                .None     => false,
+            })
+            // (e) pretty-print: multi-line, longer than compact, and round-trips to an equal Value.
+            p := json.pretty(a, v)
+            c := json.stringify(a, v)
+            pretty_ok := p.view().len > c.view().len
+                && p.contains("\n")
+                && json.parse(a, p).match ({
+                    .Ok(rv) => json.equals(rv, v),
+                    .Err(e) => false,
+                })
+            keys_ok && obj_ok && bool_ok && nested_ok && pretty_ok
+        },
+    })
+}
+// Opt<bool> -> bool, defaulting a missing/None to false.
+some_or_false = (o: Opt<bool>) bool {
+    o.match ({
+        .Some(b) => b,
+        .None    => false,
+    })
+}
+main = () i32 {
+    h := heap.gpa()
+    a := h.addr()
+    (regex_name_ok(a) && json_ok(a)).to_exit()
+}

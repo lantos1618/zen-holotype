@@ -4,7 +4,7 @@
 { gstr_append, gstr_finish, gstr_push, gstr_string, subst_ty_in, tvoid } = compiler.genc
 { DeclIndex, Env, arm_env, enum_name, extend_env, is_lit_numeric, params_env } = compiler.check
 { Malloc } = std.mem.alloc
-{ slice_any, wr_root_name } = compiler.astops
+{ field_in, slice_any, wr_root_name } = compiler.astops
 { at, is_alnum } = std.text.ascii
 { ends_with, is_empty } = std.text.str
 { String } = std.text.string
@@ -90,13 +90,6 @@ struct_fields* = (decls: [Decl], name: string_view) [Field] {
 }
 has_field* = (fields: [Field], fname: string_view) bool {
     fields.slice_any((fl) { fl.name == fname })
-}
-field_in = (fields: [Field], fname: string_view) Ty {
-    found := tvoid()
-    fields.loop((h, i, fl) {
-        found = (fl.name == fname).then({ fl.ty }, { found })
-    })
-    found
 }
 field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
     fty := fields.field_in(fi.name)
@@ -311,20 +304,10 @@ sl_elem_fit* = (env: Env, ety: Ty, it: Expr) i32 {
 // consumes — a BORROW field (`MutPtr<T>`/`Ptr<T>`, reached via `o.ptr()`, a Call not a Var), a value /
 // scalar field, and a `.clone()` init (a Call) do NOT. Only CONCRETE struct literals are analyzable; a
 // generic-struct literal has no concrete field types here, so it under-rejects (honest, safe).
-field_ty_by_name = (fields: [Field], name: string_view) Ty {
-    found := tvoid()
-    fields.loop((h, i, fl) {
-        found = (fl.name == name).then({ fl.ty }, { found })
-    })
-    found
-}
 // the owner moved by a struct-literal field init: the field's DECLARED type is `Own<T>` AND the init is a
 // bare `Own<T>` Var. The field-type gate is exactly what keeps a borrow field (`p: MutPtr<T>`) legal.
 struct_field_move_src* = (env: Env, fields: [Field], fi: FieldInit) string_view {
-    (field_ty_by_name(fields, fi.name).owner_base() == "Own").match ({
-        true  => env.own_moved_var(fi.value),
-        false => "",
-    })
+    (field_in(fields, fi.name).owner_base() == "Own").then({ env.own_moved_var(fi.value) }, { "" })
 }
 // kill every source owner moved into an Own field of a CONCRETE struct literal.
 mkstruct_field_kills* = (

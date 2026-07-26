@@ -7,7 +7,7 @@
 { ty_cname_in, blk_diverges, field, gstr_append, subword_ty } = compiler.genc
 { Malloc } = std.mem.alloc
 { gen_strlit } = compiler.backend.c.c_lit
-{ gstr_int } = compiler.astops
+{ gstr_int, slice_count } = compiler.astops
 gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
         // Suffix `LL` so an UNTYPED integer literal is a 64-bit C constant: bare literals are C `int`
@@ -161,8 +161,19 @@ gen_loop_body = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
 // Slice literal -> heap-promoted zslice. A bare C compound literal `(T[]){…}` has AUTOMATIC storage,
 // so a slice literal that ESCAPES its frame (returned, or stored into a longer-lived aggregate) leaves
 // `.ptr` dangling into the dead frame. Copy the backing into a malloc'd block inside a statement-
-// expression so `.ptr` outlives the frame. The compiler itself emits no slice literals (its slices go
-// through `slice`/`acquire`), so this only affects user/test programs. Empty `[]` needs no backing.
+// expression so `.ptr` outlives the frame. `zen__salloc` NULL-checks the malloc and panics cleanly on
+// OOM (mirrors the div/idx preamble guards) so an exhausted heap can never `memcpy` into NULL. Empty
+// `[]` needs no backing.
+//
+// KNOWN LEAK (scoped, not fixed here): this heap block is never freed. A NON-escaping literal — e.g.
+// `std.text.fmt.write_int`'s `b: [u8] := [0, …]` scratch, so every `println(<int>)` leaks ~21 bytes —
+// is heap-promoted all the same because this site classifies EVERY literal as escaping. The sound cure
+// (stack storage for the non-escaping ones) needs interprocedural escape info: write_int passes its
+// scratch BY VALUE to helpers (`b.write_scratch(…)`, `num_write_integer(b.ptr, …)`), which no local or
+// syntactic rule can distinguish from a real escape without over-rejecting valid stdlib — and pure
+// stack storage reintroduces a verified use-after-return for `f() [i32] { [1,2,3] }`. Fixing it means
+// wiring the checker's escape analysis into a per-literal `escapes` classification (heap-by-default, so
+// a miss is a leak, never a UAF); tracked as follow-up.
 gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
     n := slice_count(sd.items)
     (n == 0).match ({
@@ -174,17 +185,10 @@ gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
                 .gstr_append(alloc, tn)
                 .gstr_append(alloc, " _zsa[] = { ")
                 .gen_args(alloc, sd.items)
-                .gstr_append(alloc, " }; uint8_t* _zsp = malloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
+                .gstr_append(alloc, " }; uint8_t* _zsp = zen__salloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
             out.gstr_int(alloc, n).gstr_append(alloc, " }; })")
         },
     })
-}
-slice_count = (items: [Expr]) i32 {
-    n := 0
-    items.loop((h, i, it) {
-        n = n + 1
-    })
-    n
 }
 // Bounds-checked slice read: `zen__idx` (preamble) panics on a negative or >= len index and returns
 // the element byte-pointer, which `*(ELEM*)…` derefs back to an lvalue (so `seq[i]` keeps working as a
@@ -409,106 +413,64 @@ gen_call_default = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
         .gen_args(alloc, c.args)
         .gstr_append(alloc, ")")
 }
+// Every intrinsic expansion below is the SAME shape — fixed C text with the call's arguments spliced
+// between it — so one helper per argument count spells that shape once and each arm keeps only the
+// delimiters that actually distinguish it. The `gstr_append`/`gen_arg_at` chains these replace were
+// byte-for-byte identical apart from those string constants.
+gen_intr1 = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    c: CallData,
+    pre: string_view,
+    post: string_view,
+) String { s.gstr_append(alloc, pre).gen_arg_at(alloc, c, 0).gstr_append(alloc, post) }
+gen_intr2 = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    c: CallData,
+    pre: string_view,
+    mid: string_view,
+    post: string_view,
+) String { s.gen_intr1(alloc, c, pre, mid).gen_arg_at(alloc, c, 1).gstr_append(alloc, post) }
+gen_intr3 = (
+    s: String,
+    alloc: MutPtr<Malloc>,
+    c: CallData,
+    pre: string_view,
+    mid1: string_view,
+    mid2: string_view,
+    post: string_view,
+) String { s.gen_intr2(alloc, c, pre, mid1, mid2).gen_arg_at(alloc, c, 2).gstr_append(alloc, post) }
 gen_call = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
     c.fn.call_kind().match ({
-        .StrEq          => s
-            .gstr_append(alloc, "eq(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, ", ")
-            .gen_arg_at(alloc, c, 1)
-            .gstr_append(alloc, ")"),
-        .StrNe          => s
-            .gstr_append(alloc, "(!eq(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, ", ")
-            .gen_arg_at(alloc, c, 1)
-            .gstr_append(alloc, "))"),
-        .Load           => s
-            .gstr_append(alloc, "(*(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "))"),
-        .Offset         => s
-            .gstr_append(alloc, "((uint8_t*)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, ") + (")
-            .gen_arg_at(alloc, c, 1)
-            .gstr_append(alloc, "))"),
-        .Store          => s
-            .gstr_append(alloc, "(*(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, ") = ")
-            .gen_arg_at(alloc, c, 1)
-            .gstr_append(alloc, ")"),
-        .LoadI64        => s
-            .gstr_append(alloc, "(*(int64_t*)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "))"),
-        .StoreI64       => s
-            .gstr_append(alloc, "(*(int64_t*)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, ") = ")
-            .gen_arg_at(alloc, c, 1)
-            .gstr_append(alloc, ")"),
-        .AtomicAddI64   => s
-            .gstr_append(alloc, "__atomic_add_fetch((int64_t*)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "), (")
-            .gen_arg_at(alloc, c, 1)
-            .gstr_append(alloc, "), 5)"),
-        .AtomicLoadI64  => s
-            .gstr_append(alloc, "__atomic_load_n((int64_t*)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "), 5)"),
-        .AtomicStoreI64 => s
-            .gstr_append(alloc, "__atomic_store_n((int64_t*)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "), (")
-            .gen_arg_at(alloc, c, 1)
-            .gstr_append(alloc, "), 5)"),
-        .AtomicCasI64   => s
-            .gstr_append(alloc, "__atomic_compare_exchange_n((int64_t*)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "), &(int64_t){ ")
-            .gen_arg_at(alloc, c, 1)
-            .gstr_append(alloc, " }, (")
-            .gen_arg_at(alloc, c, 2)
-            .gstr_append(alloc, "), 0, 5, 5)"),
+        .StrEq          => s.gen_intr2(alloc, c, "eq(", ", ", ")"),
+        .StrNe          => s.gen_intr2(alloc, c, "(!eq(", ", ", "))"),
+        .Load           => s.gen_intr1(alloc, c, "(*(", "))"),
+        .Offset         => s.gen_intr2(alloc, c, "((uint8_t*)(", ") + (", "))"),
+        .Store          => s.gen_intr2(alloc, c, "(*(", ") = ", ")"),
+        .LoadI64        => s.gen_intr1(alloc, c, "(*(int64_t*)(", "))"),
+        .StoreI64       => s.gen_intr2(alloc, c, "(*(int64_t*)(", ") = ", ")"),
+        .AtomicAddI64   => s.gen_intr2(alloc, c, "__atomic_add_fetch((int64_t*)(", "), (", "), 5)"),
+        .AtomicLoadI64  => s.gen_intr1(alloc, c, "__atomic_load_n((int64_t*)(", "), 5)"),
+        .AtomicStoreI64 => s.gen_intr2(alloc, c, "__atomic_store_n((int64_t*)(", "), (", "), 5)"),
+        .AtomicCasI64   => s.gen_intr3(alloc, c, "__atomic_compare_exchange_n((int64_t*)(", "), &(int64_t){ ", " }, (", "), 0, 5, 5)"),
         .AtomicFence    => s.gstr_append(alloc, "__atomic_thread_fence(5)"),
         .Addr           => s.gen_addr(alloc, c),
-        // Stage 3 null guard: panics if the RawPtr is null, else yields it unchanged (preserving its T*).
+        // Stage 3 null guard: panics if the RawPtr is null, else yields it unchanged (preserving its
+        // T*). The one arm that repeats arg0, so it spells its own chain.
         .AssertNonnull  => s
             .gstr_append(alloc, "({ __typeof__(")
             .gen_arg_at(alloc, c, 0)
             .gstr_append(alloc, ") _znn = (")
             .gen_arg_at(alloc, c, 0)
             .gstr_append(alloc, "); if(!_znn){ zen__panic(\"zen: panic: null pointer deref\\n\"); } _znn; })"),
-        .CStr           => s
-            .gstr_append(alloc, "((const char*)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "))"),
-        .Slice          => s
-            .gstr_append(alloc, "(zslice){ .ptr = (void*)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "), .len = (")
-            .gen_arg_at(alloc, c, 1)
-            .gstr_append(alloc, ") }"),
+        .CStr           => s.gen_intr1(alloc, c, "((const char*)(", "))"),
+        .Slice          => s.gen_intr2(alloc, c, "(zslice){ .ptr = (void*)(", "), .len = (", ") }"),
         .NullPtr        => s.gstr_append(alloc, "0"),
-        .ToI32          => s
-            .gstr_append(alloc, "((int32_t)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "))"),
-        .ToI64          => s
-            .gstr_append(alloc, "((int64_t)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "))"),
-        .ToU8           => s
-            .gstr_append(alloc, "((uint8_t)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "))"),
-        .ToF64          => s
-            .gstr_append(alloc, "((double)(")
-            .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "))"),
+        .ToI32          => s.gen_intr1(alloc, c, "((int32_t)(", "))"),
+        .ToI64          => s.gen_intr1(alloc, c, "((int64_t)(", "))"),
+        .ToU8           => s.gen_intr1(alloc, c, "((uint8_t)(", "))"),
+        .ToF64          => s.gen_intr1(alloc, c, "((double)(", "))"),
         .Sizeof         => s.gen_sizeof(alloc, c),
         .Normal         => s.gen_call_default(alloc, c),
     })
