@@ -27,7 +27,13 @@ fi
 
 failed=0
 for file in $actual; do
-    links=$(grep -Eo '\]\([^)]*\)' "$file" 2>/dev/null || true)
+    # grep exit 1 = "no links in this file" (fine); anything else (2 = unreadable/permission) means
+    # the link scan did not run, and `|| true` used to turn that into zero link checks and a pass.
+    links=$(grep -Eo '\]\([^)]*\)' "$file") || {
+        rc=$?
+        [ "$rc" -eq 1 ] || { echo "$file: cannot scan for links (grep exit $rc)" >&2; exit 2; }
+        links=''
+    }
     old_ifs=$IFS
     IFS='
 '

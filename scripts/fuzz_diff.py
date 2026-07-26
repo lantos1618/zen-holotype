@@ -21,7 +21,10 @@
 # Classification per program:
 #   AGREE          both exit 0, outputs identical
 #   DIVERGENCE     both exit 0, outputs DIFFER   -> saved, this is the signal
-#   JS-UNSUPPORTED C ok but JS emit/run failed   -> feature gap, not a miscompile
+#   JS-UNSUPPORTED  C ok, `emit-js` DIAGNOSED a refusal (rc 1) -> feature gap, not a miscompile
+#   JS-EMIT-CRASH   C ok, `emit-js` died some other way        -> compiler defect, FAILS the run
+#   JS-RUNTIME-FAIL C ok, emit-js ok, but node exited nonzero  -> emitter defect, FAILS the run
+#                   (rc 124 = the JS never terminated where C did: a control-flow miscompile)
 #   C-FAIL         C backend rejected/failed     -> generator produced bad code, skipped
 #
 # Known-excluded cluster (JS 64-bit ints): the generator never emits i64/u64 nor
@@ -213,12 +216,18 @@ def test_one(zen, src, workdir):
     jf = os.path.join(workdir, "prog.js")
     jerc, jsrc, _ = run([zen, "emit-js", zf])
     if jerc != 0:
-        return ("JS-UNSUPPORTED", cout, b"", crc, jerc)
+        # A clean "this construct is not lowered yet" diagnostic AND a compiler crash both land here;
+        # only a diagnosed refusal (rc 1) is a feature gap, anything else is the compiler failing.
+        return ("JS-UNSUPPORTED" if jerc == 1 else "JS-EMIT-CRASH", cout, b"", crc, jerc)
     with open(jf, "wb") as f:
         f.write(jsrc)
-    nrc, jout, _ = run(["node", jf])
+    nrc, jout, jerr = run(["node", jf])
     if nrc != 0:
-        return ("JS-UNSUPPORTED", cout, jout, crc, nrc)
+        # NOT "unsupported": emit-js already returned 0, i.e. the backend believed it lowered this
+        # program. JS that then fails to parse, throws, or (rc 124) never terminates is an emitter
+        # defect, and filing it as a feature gap is how real miscompiles were being swallowed —
+        # a JS `@while` that does not terminate where C does is a control-flow miscompile, not a gap.
+        return ("JS-RUNTIME-FAIL", cout, jout + jerr, crc, nrc)
     if cout == jout:
         return ("AGREE", cout, jout, crc, nrc)
     return ("DIVERGENCE", cout, jout, crc, nrc)
@@ -244,11 +253,12 @@ def main():
         print(f"# seed={args.seed} only={args.only} verdict={verdict}\n{src}")
         print(f"--- C  [rc={crc}] ---\n{cout.decode(errors='replace')}")
         print(f"--- JS [rc={jrc}] ---\n{jout.decode(errors='replace')}")
-        return
+        sys.exit(0 if verdict in ("AGREE", "C-FAIL", "JS-UNSUPPORTED") else 1)
 
     outdir = args.out or tempfile.mkdtemp(prefix="zen-fuzzdiff-")
     os.makedirs(outdir, exist_ok=True)
-    counts = {"AGREE": 0, "DIVERGENCE": 0, "JS-UNSUPPORTED": 0, "C-FAIL": 0}
+    counts = {"AGREE": 0, "DIVERGENCE": 0, "JS-RUNTIME-FAIL": 0, "JS-EMIT-CRASH": 0,
+              "JS-UNSUPPORTED": 0, "C-FAIL": 0}
     diverged = []
     with tempfile.TemporaryDirectory() as wd:
         for i in range(args.count):
@@ -256,8 +266,8 @@ def main():
             src = gen_program(rng)
             verdict, cout, jout, crc, jrc = test_one(zen, src, wd)
             counts[verdict] += 1
-            if verdict == "DIVERGENCE":
-                base = os.path.join(outdir, f"diverge_s{args.seed}_i{i}")
+            if verdict in ("DIVERGENCE", "JS-RUNTIME-FAIL", "JS-EMIT-CRASH"):
+                base = os.path.join(outdir, f"{verdict.lower()}_s{args.seed}_i{i}")
                 with open(base + ".zen", "w") as f:
                     f.write(src)
                 with open(base + ".c.out", "wb") as f:
@@ -265,16 +275,19 @@ def main():
                 with open(base + ".js.out", "wb") as f:
                     f.write(jout)
                 diverged.append(i)
-                print(f"[DIVERGENCE] seed={args.seed} i={i}  -> {base}.zen")
+                print(f"[{verdict}] seed={args.seed} i={i}  -> {base}.zen")
             if (i + 1) % 100 == 0:
                 print(f"  ...{i+1}/{args.count}  {counts}", file=sys.stderr)
 
     print("\n=== differential fuzz summary ===")
     print(f"seed={args.seed}  count={args.count}  zen={zen}")
-    for k in ("AGREE", "DIVERGENCE", "JS-UNSUPPORTED", "C-FAIL"):
+    for k in ("AGREE", "DIVERGENCE", "JS-RUNTIME-FAIL", "JS-EMIT-CRASH", "JS-UNSUPPORTED", "C-FAIL"):
         print(f"  {k:16} {counts[k]}")
+    if counts["AGREE"] == 0:
+        print("\nFAIL: not one program was compared on both backends — this run proves nothing.")
+        sys.exit(2)
     if diverged:
-        print(f"\nDIVERGENCES ({len(diverged)}): repros in {outdir}")
+        print(f"\nFINDINGS ({len(diverged)}): repros in {outdir}")
         print("  reproduce one:  scripts/fuzz_diff.py --seed "
               f"{args.seed} --only <i>   (i in {diverged})")
         sys.exit(1)
