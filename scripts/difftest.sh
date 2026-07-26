@@ -67,6 +67,17 @@ CASES="$WORK/cases"
     done
 } | sort > "$CASES"
 
+# The globs above are NOT nullglob-guarded: an unmatched pattern expands to itself, so a renamed
+# fixture directory yields the literal case id `tests/fixtures/zen/*.zen`, both binaries fail on it
+# IDENTICALLY, no diff is recorded, and the gate prints "ZERO diffs" having compiled nothing. Assert
+# the corpus instead: every case id must exist, and there must be a plausible number of them.
+FLOOR=${DIFFTEST_FLOOR:-100}
+ncases=$(wc -l < "$CASES")
+[ "$ncases" -ge "$FLOOR" ] || { echo "difftest: FAIL — only $ncases cases (floor $FLOOR); the corpus globs did not match"; exit 2; }
+while IFS= read -r c; do
+    [ -e "$ROOT/$c" ] || { echo "difftest: FAIL — case path does not exist: $c"; exit 2; }
+done < "$CASES"
+
 # ── run-stage skips ──────────────────────────────────────────────────────────────────────────────
 # These programs assert OBSERVED parallelism (workers_busy: "did >1 worker actually run?"), so their
 # exit code depends on machine load — under the differ's own parallel execution they flake between
