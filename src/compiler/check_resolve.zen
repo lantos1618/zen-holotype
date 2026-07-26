@@ -245,8 +245,15 @@ resolve_expr_plain = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         _               => e,
     })
 }
+// Element type precedence: expected > already-set > inferred-from-items. The parser writes every
+// source literal as `slit(tvoid(), …)`, so a non-void `sd.elem` was put there by a lowering pass
+// (collect_varargs, subst, lift) and must survive re-resolution. resolve_module resolves several
+// times, and the expected type for an already-collected variadic slot is the ELEMENT type T — whose
+// `elem_of()` is void — so re-inferring narrows `...i64` built from bare int literals back to `[i32]`
+// on the second pass, and the callee then reads i64s out of i32 slots.
 resolve_slicelit = (a: MutPtr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
-    et := env.sl_elem_exp(sd.items)
+    keep := env.exp.elem_of().is_void_ty() && sd.elem.is_void_ty() == false
+    et := keep.then({ sd.elem }, { env.sl_elem_exp(sd.items) })
     a.cenode(slit(et, a.resolve_args(env.with_exp(et), sd.items)))
 }
 // Field access auto-derefs pointer receivers.
