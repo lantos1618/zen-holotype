@@ -27,7 +27,8 @@
 { ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = compiler.resolve_ffi
 { say, eprint, push_int, pid_path, dirname, last_slash, push_prefix, push_span, pad_sp, finish_cstr,
   join2, cstr_substr, bs_push_range, zt_log, resolve_prog, dir_exists } = compiler.drvutil
-{ report_no_if_plain, report_no_if_resolved, report_check } = compiler.drvdiag
+{ report_no_if_plain, report_no_if_resolved, report_check, report_js_unsupported } = compiler.drvdiag
+{ js_unsupported_reset } = compiler.backend.js.js_expr
 { lsp_cmd } = compiler.lsp
 { FNV_BASIS, fnv_str, CacheWalk, edges_of, cache_walk_edges } = compiler.modgraph
 { AudCtx, aud_decl_name, aud_index, aud_tail_at, aud_ref, aud_mref, aud_walk_fn, aud_walk_sig,
@@ -541,10 +542,17 @@ emit_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
                     decls := mp.resolve_module(raw)
                     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
                         true  => {
-                            out(mp.js_floor(root))
-                            out("\n")
-                            out_bytes(mp.genJsModuleIn(decls).bytes())
-                            0
+                            js_unsupported_reset()
+                            mod := mp.genJsModuleIn(decls)
+                            (mp.report_js_unsupported(rp, path, src) == 0).match ({
+                                true  => {
+                                    out(mp.js_floor(root))
+                                    out("\n")
+                                    out_bytes(mod.bytes())
+                                    0
+                                },
+                                false => 1,
+                            })
                         },
                         false => 1,
                     })
@@ -573,16 +581,24 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
                                 .gstr_string(8192)
                                 .gstr_append(mp, mp.js_floor(root))
                                 .gstr_append(mp, "\n")
+                            js_unsupported_reset()
                             mod := mp.genJsModuleIn(decls)
-                            full := js.gstr_append(mp, mod.finish_cstr(mp))
-                            save(out_path, full.finish_cstr(mp), full.len).match ({
-                                .Ok(n)  => {
-                                    eprint("zenc: wrote ")
-                                    eprint(out_path)
-                                    eprint("\n")
-                                    0
+                            // gate BEFORE save: a .js holding a call to an undefined function must
+                            // never reach disk, or `node` reports the compiler's bug as the user's.
+                            (mp.report_js_unsupported(rp, path, src) == 0).match ({
+                                true  => {
+                                    full := js.gstr_append(mp, mod.finish_cstr(mp))
+                                    save(out_path, full.finish_cstr(mp), full.len).match ({
+                                        .Ok(n)  => {
+                                            eprint("zenc: wrote ")
+                                            eprint(out_path)
+                                            eprint("\n")
+                                            0
+                                        },
+                                        .Err(e) => 1,
+                                    })
                                 },
-                                .Err(e) => 1,
+                                false => 1,
                             })
                         },
                         false => 1,
