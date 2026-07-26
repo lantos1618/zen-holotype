@@ -18,6 +18,13 @@
 //       an error living INSIDE the imported module is pinned to 0:0 with the real location named in
 //       the message (never a lying range into the open document)
 //   (9) exit without shutdown — exit code 1 per the LSP convention
+//  (10) UNSAVED EDITS: semantic tokens for an OPEN document come from the client's buffer, never
+//       from the file on disk (the disk copy is deliberately made to disagree), and a version bump
+//       re-derives them instead of serving the version-keyed cache
+//  (11) after didClose the document is no longer open, so disk is the source of truth again
+//  (12) a `"""` raw literal holding `"` then `//` — the token stream stays position-SORTED and the
+//       array stays `]`-terminated (an out-of-order token encodes a negative delta and kills the
+//       client's highlighting for the whole buffer)
 { Malloc } = std.mem.alloc
 { save, contents_in, shell } = std.io.file
 { len, contains } = std.text.str
@@ -65,9 +72,17 @@ lz_open = (mp: MutPtr<Malloc>, uri: string_view, text: string_view) string_view 
     z: string_view := ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"languageId\":\"zen\",\"version\":1,\"text\":\"", text, "\"}}}"])
 }
-lz_change = (mp: MutPtr<Malloc>, uri: string_view, text: string_view) string_view {
+lz_change_v = (mp: MutPtr<Malloc>, uri: string_view, text: string_view, ver: i64) string_view {
     z: string_view := ""
-    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"version\":2},\"contentChanges\":[{\"text\":\"", text, "\"}]}}"])
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"version\":", mp.zo_itoa(ver), "},\"contentChanges\":[{\"text\":\"", text, "\"}]}}"])
+}
+lz_change = (mp: MutPtr<Malloc>, uri: string_view, text: string_view) string_view {
+    mp.lz_change_v(uri, text, 2)
+}
+// a `textDocument/semanticTokens/full` request for `uri` with request id `id`.
+lz_tokreq = (mp: MutPtr<Malloc>, uri: string_view, id: i64) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":", mp.zo_itoa(id), ",\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
 }
 lz_close = (mp: MutPtr<Malloc>, uri: string_view) string_view {
     z: string_view := ""
@@ -168,9 +183,85 @@ lz_exit_no_shutdown = (mp: MutPtr<Malloc>) bool {
     mp.lz_run(10, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(LZ_EXIT())]))
     mp.lz_rc(10) == "1"
 }
+// (14) THE OPEN-BUFFER CONTRACT. `lztok2.zen` on disk starts with a COMMENT (first token `0,0,4,7,0`)
+// while the client's buffer starts with a TYPE (`0,0,5,2,0`), and the buffer is NEVER written to disk.
+// A server that reads disk answers with the comment token — that is the bug this locks out. The
+// second didChange bumps the version to 3 and swaps in a 3-letter type (`0,0,3,2,0`): serving that
+// proves the version-keyed token cache re-derives on a new version instead of replaying the old array.
+lz_unsaved_buffer_tokens = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    disk := "// c\nmain = () i32 { 0 }\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/lztok2.zen"]), disk, len(disk))
+    uri := mp.lz_uri("lztok2.zen")
+    bufa := "// c\\nmain = () i32 { 0 }\\n"    // the didOpen text: identical to the saved file
+    bufb := "Point*: { x: i32 }\\nmain = () i32 { 42 }\\n"
+    bufc := "Zed*: { y: i32 }\\nmain = () i32 { 1 }\\n"
+    o := mp.lz_run(13, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, bufa)), mp.lz_frame(mp.lz_change_v(uri, bufb, 2)), mp.lz_frame(mp.lz_tokreq(uri, 3)), mp.lz_frame(mp.lz_change_v(uri, bufc, 3)), mp.lz_frame(mp.lz_tokreq(uri, 4)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"result\":{\"data\":[0,0,5,2,0")
+        && o.contains("\"result\":{\"data\":[0,0,3,2,0")
+        && o.contains("\"result\":{\"data\":[0,0,4,7,0") == false
+        && mp.lz_rc(13) == "0"
+}
+// (15) the other half of the lifecycle: didClose DROPS the entry, so the next request falls back to
+// disk — the same file whose comment-first token the open-buffer case above must never see.
+lz_close_reverts_to_disk = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    disk := "// c\nmain = () i32 { 0 }\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/lztok3.zen"]), disk, len(disk))
+    uri := mp.lz_uri("lztok3.zen")
+    bufb := "Point*: { x: i32 }\\nmain = () i32 { 42 }\\n"
+    o := mp.lz_run(14, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, bufb)), mp.lz_frame(mp.lz_close(uri)), mp.lz_frame(mp.lz_tokreq(uri, 3)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"result\":{\"data\":[0,0,4,7,0")
+        && o.contains("\"result\":{\"data\":[0,0,5,2,0") == false
+        && mp.lz_rc(14) == "0"
+}
 // ── entry ─────────────────────────────────────────────────────────────────────────────────────────
+// (12) go-to-definition: cursor on the `foo` call resolves to the top-level `foo*` decl at line 0.
+lz_goto_def = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    src := "foo* = (x: i32) i32 { x }\nmain = () i32 {\n    foo(0)\n}\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/lzdef.zen"]), src, len(src))
+    uri := mp.lz_uri("lzdef.zen")
+    req := mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":2,\"character\":4}}}"])
+    o := mp.lz_run(11, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"definitionProvider\":true")
+        && o.contains("\"result\":{\"uri\":")
+        && o.contains("\"line\":0,\"character\":0")
+        && mp.lz_rc(11) == "0"
+}
+// (13) semantic tokens: the delta-encoded array classifies the file's tokens. `Point` is a type
+// (uppercase), `main` is a function (a top-level `name = (` head), `42` is a number, and the leading
+// comment is a comment — the four classification rules that carry the highlighting.
+lz_semantic_tokens = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    src := "// c\nPoint*: { x: i32 }\nmain = () i32 { 42 }\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/lztok.zen"]), src, len(src))
+    uri := mp.lz_uri("lztok.zen")
+    req := mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
+    o := mp.lz_run(12, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"semanticTokensProvider\"")
+        && o.contains("\"result\":{\"data\":[")
+        && o.contains("0,0,4,7,0")
+        && o.contains("1,0,5,2,0")
+        && o.contains("1,0,4,1,0")
+        && mp.lz_rc(12) == "0"
+}
+// (16) THE ORDERING INVARIANT. A `"""` raw literal whose CONTENT holds an odd number of `"` before
+// a `//`: quote-parity string tracking calls that `//` a comment, which lands INSIDE the string token
+// the lexer reports. Emitted, it encodes a negative delta and the client discards the whole buffer's
+// highlighting (nvim: "INVALID_SERVER_JSON") — the array was truncated mid-number. The `//` bytes are
+// string content, so the reply must be one unbroken string token across both lines, `]`-terminated.
+lz_rawstring_token_order = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    src := "g = () void {\n    s := \"\"\"abc \"d // e\n    \"\"\"\n    y := 1\n}\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/lzraw.zen"]), src, len(src))
+    o := mp.lz_run(15, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_tokreq(mp.lz_uri("lzraw.zen"), 2)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"result\":{\"data\":[0,0,1,1,0,")
+        && o.contains("0,3,14,5,0,1,0,7,5,0,1,4,1,3,0,0,2,2,8,0,0,3,1,6,0,1,0,1,8,0]")
+        && mp.lz_rc(15) == "0"
+}
 harness_lsp_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_exit_no_shutdown()])
+    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_exit_no_shutdown()])
 }

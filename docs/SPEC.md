@@ -132,6 +132,41 @@ default to `i32` unless the value requires `i64`. `u8 <= i32 <= i64` widening is
 accepted. Explicit casts exist as intrinsics such as `to_i32`, `to_i64`,
 `to_u8`, and `to_f64`.
 
+### String literals
+
+A `"…"` literal resolves `\`-escapes (`\n`, `\t`, `\"`, `\\`, `\xNN`).
+
+A `"""…"""` literal is **raw** and may span lines:
+
+```zen
+src := """{"name":"zen","ok":true,"nums":[1,2,3]}"""
+
+blob := """
+line one
+line two with "quotes" and \n that stays two characters
+"""
+```
+
+Inside a raw literal:
+
+- **No escape processing.** A backslash is an ordinary byte, so `\n` is the two
+  characters `\` and `n`. A `"` is just a quote. Only the closing `"""` ends it.
+- **Newlines are literal.** The text spans lines as written.
+- **A newline immediately after the opening `"""` is dropped**, so the block form
+  above is `"line one\n…"` rather than starting with a stray newline.
+- **Indentation is content.** Nothing is de-indented — what you see is what you
+  get. Indent a block literal and those spaces are in the string.
+
+The delimiter is three quotes rather than two because `""` already means the
+empty string; a doubled delimiter would make every existing `""` ambiguous.
+Maximal munch takes three quotes when present, so `""` is unaffected. A raw
+literal therefore cannot contain `"""`; use an escaped `"…"` literal for that.
+
+Both forms produce the same value type — rawness is a property of the source
+text, not of the resulting string — so backends and comparisons see no
+difference. `zen fmt` reproduces a raw literal byte for byte and never
+re-escapes its contents.
+
 ## Expressions And Statements
 
 Core expressions:
@@ -505,7 +540,7 @@ exports and rewrites qualified uses, so two sibling modules can both export
 `thing` or `Box` and a program can call `left.thing()` and `right.thing()` in
 the same file.
 
-`std.internal.resolve` also exposes structured import-edge values for resolver
+`compiler.resolve` also exposes structured import-edge values for resolver
 work:
 
 ```zen

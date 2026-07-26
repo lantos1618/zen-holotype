@@ -1,9 +1,9 @@
 // @self-hosted-only
-// Checked-mode resolver — VISIBILITY enforcement (extracted from std.internal.resolve). Enforces `*`
+// Checked-mode resolver — VISIBILITY enforcement (extracted from compiler.resolve). Enforces `*`
 // cross-module exports (error[private-name]) over the ORIGINAL module sources, and the private-type
 // leak scan. Shared types + the resolve pipeline that calls enforce_visibility/enforce_private_leaks
-// live in std.internal.resolve.
-{ at, is_alpha, is_alnum } = std.text.ascii
+// live in compiler.resolve.
+{ at, block_comment_at, is_alpha, is_alnum, line_comment_at, rawstr_at } = std.text.ascii
 { gstr_string, gstr_append, gstr_finish } = compiler.genc
 { Malloc } = std.mem.alloc
 { String } = std.text.string
@@ -11,10 +11,10 @@
 { render_diagnostic } = compiler.diagnostic
 { getEnv } = std.sys.os
 { ImportEdge, ModuleGraph, ModuleSig, ModuleTable, ProvidedSymbol, SIG_IMPORTED, SIG_PUB, SIG_TYPE,
-  block_comment_at, die, eprint, id_is_std_io_c, line_comment_at, lstrip, mappend_id_name,
-  mappend_string, mimport_head_name, mimport_name_span, next_line, quoted_at, res_col_of,
-  res_ident_end, res_line_of, res_sbyte } = std.internal.resolve
-{ edge_alias_in, edge_id_in } = std.internal.resolve_scan
+  die, eprint, id_is_std_io_c, lstrip, mappend_id_name, mappend_string, mimport_head_name,
+  mimport_name_span, next_line, quoted_at, res_col_of, raw_lit_end, res_ident_end, res_line_of,
+  res_sbyte } = compiler.resolve
+{ edge_alias_in, edge_id_in } = compiler.resolve_scan
 // ── VISIBILITY: `*` exports are ENFORCED across modules (error[private-name]) ─────────────────────
 // A top-level name is cross-module visible only when its declaration carries the `*` export marker
 // (`name* = …`, `Type*: …`, `GLOBAL* := …`). Both consumption forms are checked per module, over the
@@ -116,6 +116,9 @@ vis_skip_block = (s: string_view, p: i32) i32 {
 }
 // skip past a quoted literal (string or char) without copying, honoring escapes.
 vis_skip_lit = (s: string_view, p: i32) i32 {
+    s.rawstr_at(p).then({
+        return s.raw_lit_end(p)
+    })
     q := s.at(p)
     pos := p
     esc := false

@@ -1987,6 +1987,74 @@ harness_verdict_run* = () i32 {
         should_pass: true,
         kind: "",
     ), VerdictCase(
+        src: "mk = () MutPtr<i32> {\n    x := 5\n    q := x.addr()\n    q\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "mk = () MutPtr<i32> {\n    x := 5\n    q := x.addr()\n    return q\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "id = (q: MutPtr<i32>) MutPtr<i32> { q }\nmk = () MutPtr<i32> {\n    x := 5\n    q := id(x.addr())\n    q\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "E*: P(MutPtr<i32>)\nmk = () E {\n    x := 5\n    q := x.addr()\n    .P(q)\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "P*: {\n    p: MutPtr<i32>,\n}\nmk = () MutPtr<i32> {\n    x := 5\n    s := P(p: x.addr())\n    s.p\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "P*: {\n    p: MutPtr<i32>,\n}\nmk = (seed: MutPtr<i32>) MutPtr<i32> {\n    s := P(p: seed)\n    x := 5\n    s.p = x.addr()\n    s.p\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "mk = () MutPtr<i32> {\n    x := 5\n    ps := [x.addr()]\n    ps[0]\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "mk = (seed: MutPtr<i32>) MutPtr<i32> {\n    ps := [seed]\n    x := 5\n    ps[0] = x.addr()\n    ps[0]\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "escape",
+    ), VerdictCase(
+        src: "P*: {\n    p: MutPtr<i32>,\n}\nmk = (seed: MutPtr<i32>) MutPtr<i32> {\n    s := P(p: seed)\n    s.p\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "mk = () i32 {\n    x := 5\n    q := x.addr()\n    y := 7\n    y\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "halloc = std.mem.heap\nmk = (a: MutPtr<Heap>) RawPtr<u8> {\n    p := a.acquire(16)\n    p\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "raw = std.mem.raw\nmk = () MutPtr<i32> {\n    s := raw.of(0, 1)\n    q := s[0].addr()\n    q\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ Scope } = std.scope\n{ SyncArena } = std.concurrent.runtime\nE*: P(RawPtr<u8>)\nf = (s: MutPtr<Scope<SyncArena>>) E {\n    p := s.acquire(16)\n    .P(p)\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "scope-escape",
+    ), VerdictCase(
+        src: "{ Scope } = std.scope\n{ SyncArena } = std.concurrent.runtime\nf = (s: MutPtr<Scope<SyncArena>>) [RawPtr<u8>] {\n    p := s.acquire(16)\n    [p]\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "scope-escape",
+    ), VerdictCase(
+        src: "{ Scope } = std.scope\n{ SyncArena } = std.concurrent.runtime\nf = (s: MutPtr<Scope<SyncArena>>) RawPtr<u8> {\n    p := s.acquire(16)\n    ps := [p]\n    ps[0]\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "scope-escape",
+    ), VerdictCase(
+        src: "{ Scope } = std.scope\n{ SyncArena } = std.concurrent.runtime\nf = (s: MutPtr<Scope<SyncArena>>) i64 {\n    p := s.acquire(16)\n    n := 7\n    n\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "Leaf*: {\n    n: i32,\n}\nP*: {\n    p: MutPtr<Leaf>,\n}\nmk = () i32 {\n    l := Leaf(n: 7)\n    s := P(p: l.addr())\n    s.p.n\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "test* = () i32 {\n    p: RawPtr<i64> := null_ptr()\n    to_i32(load_i64(p))\n}",
         should_pass: false,
         kind: "null-deref",
@@ -2378,7 +2446,20 @@ harness_verdict_run* = () i32 {
         src: "R: A | B\nmain = () i32 { r: R := .Zzz(3) }",
         should_pass: false,
         kind: "undefined-name",
+    ), VerdictCase(
+        src: "{ at } = std.text.str\nmain = () i32 {\n    s := \"ABCDE\"\n    i: i64 := 2\n    s.at(i).to_i32()\n}\n",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
+        src: "{ at } = std.text.ascii\nmain = () i32 {\n    s := \"ABCDE\"\n    i: i32 := 2\n    s.at(i).to_i32()\n}\n",
+        should_pass: true,
+        kind: "",
     )])
+    // explicit by-name import wins: `{ at } = std.text.str` designates str's at(_, i64) as the
+    // authoritative `at`, so `s.at(i64)` type-checks even though ascii's at(_, i32) is pulled into
+    // the flat program (str imports ascii for is_space). Regression pin for UFCS dispatch precedence.
+    // the mirror: importing ascii's at(_, i32) BY NAME keeps its i32 overload — correct
+    // single-provider dispatch is not regressed by the precedence rule.
     // A source ending mid-char-literal (`'` at EOF) must produce a clean positioned parse error,
     // not an OOB read past the NUL terminator (ASan heap-buffer-overflow via char_end/scan_quote_end).
     // A `.Variant` reference to an undefined name must reject cleanly; the undefined-name hint used

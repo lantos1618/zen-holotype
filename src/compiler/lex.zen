@@ -10,7 +10,8 @@
 //   sc := scan(src, 0)        // one token + where to resume
 //   sc.tok.kind               // Ident | Int | Float | Str | Sym | Eof
 //   sc.next                   // feed back into scan for the next token
-{ at, is_digit, is_hex, is_bin, is_oct, is_alpha, is_alnum, is_space } = std.text.ascii
+{ at, block_comment_at, is_digit, is_hex, is_bin, is_oct, is_alpha, is_alnum, is_space,
+  line_comment_at, rawstr_at } = std.text.ascii
 // ── tokens ───────────────────────────────────────────────────────────────────
 TokKind: Ident | Int | Float | Str | Char | Sym | Eof
 Token*: {
@@ -46,8 +47,6 @@ lerr_reset* = () void {
 lerr_get* = () bool { lex_failed == 1 }
 lerr_off_get* = () i32 { lex_err_off }
 // ── skip whitespace, `//` line comments, and `/* */` block comments → next significant pos ──
-is_comment = (src: string_view, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '/' }
-is_block_open = (src: string_view, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '*' }
 skip_line = (src: string_view, pos: i32) i32 {
     p := pos
     @while (at(src, p) != '\0' && at(src, p) != '\n') {
@@ -101,11 +100,11 @@ skip = (src: string_view, pos: i32) i32 {
             true  => {
                 p = p + 1
             },
-            false => src.is_comment(p).match ({
+            false => src.line_comment_at(p).match ({
                 true  => {
                     p = src.skip_line(p + 2)
                 },
-                false => src.is_block_open(p).match ({
+                false => src.block_comment_at(p).match ({
                     true  => {
                         p = src.skip_block_comment(p + 2)
                     },
@@ -289,6 +288,33 @@ str_end = (src: string_view, pos: i32) i32 {
     }
     r
 }    // unterminated — stop at NUL; ITERATIVE so a ~50KB string literal is O(n) iteration, not O(n) C-stack
+// A raw literal opens with THREE quotes. Checked before the single-quote form so maximal munch wins:
+// `""` keeps meaning the empty string (it is two quotes followed by something that is not a quote),
+// which is why the delimiter is `"""` and not `""` — the doubled form would make every existing `""`
+// ambiguous.
+// pos just past the opening `"""`; returns the position just past the closing `"""`. No escape
+// handling — a backslash is an ordinary byte, so only the delimiter can end the scan. Iterative for
+// the same reason as str_end: a multi-kilobyte block literal must not recurse the C stack.
+rawstr_end* = (src: string_view, pos: i32) i32 {
+    p := pos
+    r := 0 - 1
+    @while (r < 0) {
+        (at(src, p) == '\0').match ({
+            true  => {
+                r = p
+            },
+            false => src.rawstr_at(p).match ({
+                true  => {
+                    r = p + 3
+                },
+                false => {
+                    p = p + 1
+                },
+            }),
+        })
+    }
+    r
+}
 char_end = (src: string_view, pos: i32) i32 {
     b := at(src, pos)    // first byte inside the quotes
     // a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
@@ -371,7 +397,10 @@ scan_one = (src: string_view, pos: i32, b: u8) Scan {
         false => is_digit(b).match ({
             true  => src.num_tok(pos),
             false => (b == '"').match ({
-                true  => mk(.Str, pos, src.str_end(pos + 1)),
+                true  => src.rawstr_at(pos).match ({
+                    true  => mk(.Str, pos, src.rawstr_end(pos + 3)),
+                    false => mk(.Str, pos, src.str_end(pos + 1)),
+                }),
                 false => (b == '\'').match ({
                     true  => mk(.Char, pos, src.char_end(pos + 1)),
                     false => mk(.Sym, pos, src.sym_end(pos)),
@@ -417,7 +446,10 @@ count_from = (src: string_view, pos: i32) i32 {
 // So this is a SEPARATE pass over the raw source that records each comment as a span into it, plus
 // whether it is TRAILING — i.e. non-whitespace appears before it on the same line (`x := 1  // note`)
 // vs. a LEADING comment that owns its own line. Strings/chars are honored so a `//` inside `"…"`
-// or a `}` inside a comment never desyncs (mirrors the lexer's own string/char/escape handling).
+// or a `}` inside a comment never desyncs (mirrors the lexer's own string/char/escape handling) — and a
+// `"""` raw literal is skipped WHOLE, because its quotes are content: tracking them as open/close
+// parity mistakes a `//` inside one for a comment, which then overlaps the string token the real
+// lexer reports (see compiler.lsp_tokens) and injects a phantom comment into formatter output.
 // The result is a flat, position-SORTED [Comment] the formatter consults by byte offset — comments
 // stay sidecar data, never entering the AST, so the lowered tree (and emitted C) is unchanged.
 Comment*: {
@@ -496,19 +528,24 @@ count_comments = (src: string_view) i32 {
                             n = n + 1
                             i = src.skip_block_comment(i + 2)
                         },
-                        false => (b == '"').match ({
+                        false => src.rawstr_at(i).match ({
                             true  => {
-                                in_str = true
-                                i = i + 1
+                                i = src.rawstr_end(i + 3)
                             },
-                            false => (b == '\'').match ({
+                            false => (b == '"').match ({
                                 true  => {
-                                    in_char = true
+                                    in_str = true
                                     i = i + 1
                                 },
-                                false => {
-                                    i = i + 1
-                                },
+                                false => (b == '\'').match ({
+                                    true  => {
+                                        in_char = true
+                                        i = i + 1
+                                    },
+                                    false => {
+                                        i = i + 1
+                                    },
+                                }),
                             }),
                         }),
                     }),
@@ -605,19 +642,24 @@ fill_comments = (src: string_view, buf: [Comment], k0: i32) void {
                             k = k + 1
                             i = e
                         },
-                        false => (b == '"').match ({
+                        false => src.rawstr_at(i).match ({
                             true  => {
-                                in_str = true
-                                i = i + 1
+                                i = src.rawstr_end(i + 3)
                             },
-                            false => (b == '\'').match ({
+                            false => (b == '"').match ({
                                 true  => {
-                                    in_char = true
+                                    in_str = true
                                     i = i + 1
                                 },
-                                false => {
-                                    i = i + 1
-                                },
+                                false => (b == '\'').match ({
+                                    true  => {
+                                        in_char = true
+                                        i = i + 1
+                                    },
+                                    false => {
+                                        i = i + 1
+                                    },
+                                }),
                             }),
                         }),
                     }),
