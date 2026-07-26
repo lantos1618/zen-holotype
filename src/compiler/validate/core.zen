@@ -15,9 +15,9 @@
   inf_gen_variants, inf_named_reaches, intrinsic_arity, is_badmatchlabel_call, is_dupmatcharm_call,
   is_duplitarm_call, is_forbidden_raw_call, is_imported_generic, is_nonexhaust_lit_call,
   is_unresolved_trait_call, null_deref_kind, pos_or, positive_count, shadow_not_callable,
-  shadows_toplevel, source_span, stmt_pos, store_mut_kind, trait_declaring, unknown_ty,
-  unknown_type_message, ut_fields_kind, ut_func_kind, ut_payloads_kind, utn_fields, utn_func,
-  utn_payloads } = compiler.validate.util
+  shadows_toplevel, source_span, stmt_pos, store_mut_kind, trait_declaring, ty_carries_ptr,
+  unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind, ut_payloads_kind, utn_fields,
+  utn_func, utn_payloads } = compiler.validate.util
 { CheckDiagnostic, Diagnostic, KARGTYPE, KARITY, KARMVOID, KASSIGNFIT, KBOOLARM, KCONFORMANCE,
   KDUPFN, KDUPVARIANT, KESCAPE, KEXHAUST, KFALLTHROUGH, KINDEX, KINFINITETYPE, KLAMBDAVALUE, KLEAK,
   KDUPLITARM, KDUPMATCHARM, KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT,
@@ -1508,11 +1508,17 @@ kv_escape_body = (
     })
     acc.or((body.len == 0).then({ 0 }, { a.kv_escape_trailing(svars, d, body[body.len - 1]) }))
 }
+// A scope value can only leave through the RETURN value here (this walk reports return/trailing
+// positions only), so a function whose return type cannot hold a pointer has nothing to check — the
+// guard is what keeps the field-insensitive walk from flagging a scalar read THROUGH a derived pointer.
 kv_escape_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
     svars := a.scope_params(f.params)
-    svars.match ({
-        .DeadNil     => 0,
-        .DeadCons(c) => a.kv_escape_body(svars, a.dead_nil(), f.body),
+    (f.ret.ty_carries_ptr() == false).match ({
+        true  => 0,
+        false => svars.match ({
+            .DeadNil     => 0,
+            .DeadCons(c) => a.kv_escape_body(svars, a.dead_nil(), f.body),
+        }),
     })
 }
 check_module_escape_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {

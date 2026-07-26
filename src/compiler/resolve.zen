@@ -1,6 +1,6 @@
 // @self-hosted-only
 // Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
-{ at, is_alpha, is_alnum } = std.text.ascii
+{ at, block_comment_at, is_alpha, is_alnum, is_blank, line_comment_at, rawstr_at } = std.text.ascii
 { Decl } = compiler.ast.ast_types
 { gstr_string, gstr_push, gstr_append, gstr_append_bytes, gstr_finish } = compiler.genc
 { gstr_int } = compiler.astops    // the compiler-side decimal writer (res_udec delegates to it)
@@ -16,13 +16,13 @@
 { open, close, write } = std.c.libc
 { ends_with, is_empty, starts_with, view } = std.text.str
 // Extracted internal helper families (shared types + this pipeline stay here; see each module head).
-{ enforce_visibility, enforce_private_leaks, vis_report_mode } = std.internal.resolve_vis
-{ enforce_ffi_grants, genmod_lookup } = std.internal.resolve_ffi
-{ shadow_flat, shadow_flat_users } = std.internal.resolve_shadow
+{ enforce_visibility, enforce_private_leaks, vis_report_mode } = compiler.resolve_vis
+{ enforce_ffi_grants, genmod_lookup } = compiler.resolve_ffi
+{ shadow_flat, shadow_flat_users } = compiler.resolve_shadow
 { all_decl_names_in, copy_block_comment, copy_line_comment, copy_literal, edge_alias_in, edge_id_in,
-  is_any_marker_at, is_c_kw_name_span, is_ws, has_import_marker, module_graph, opens_import,
-  str_bytes, symbol_name_in, value_decl_names_in } = std.internal.resolve_scan
-lstrip* = (s: string_view, p: i32) i32 { at(s, p).is_ws().then({ s.lstrip(p + 1) }, { p }) }
+  is_any_marker_at, is_c_kw_name_span, has_import_marker, module_graph, opens_import, str_bytes,
+  symbol_name_in, value_decl_names_in } = compiler.resolve_scan
+lstrip* = (s: string_view, p: i32) i32 { at(s, p).is_blank().then({ s.lstrip(p + 1) }, { p }) }
 is_import_line* = (s: string_view, p: i32) bool {
     ls := s.lstrip(p)
     s.opens_import(ls).then({ s.has_import_marker(ls) }, { false })
@@ -39,16 +39,11 @@ next_line* = (s: string_view, p: i32) i32 {
     }
     (load(offset(s, pos)) == '\n').then({ pos + 1 }, { pos })
 }
-line_comment_at* = (s: string_view, p: i32) bool { s.at(p) == '/' && s.at(p + 1) == '/' }
-block_comment_at* = (s: string_view, p: i32) bool { s.at(p) == '/' && s.at(p + 1) == '*' }
 quoted_at* = (s: string_view, p: i32) bool { s.at(p) == '"' || s.at(p) == '\'' }
-// `"""…"""` — a RAW literal. Every TEXTUAL pass over source (flatten's copy_literal, the visibility
-// scan's vis_skip_lit) has to skip the whole thing in one step: the contents are text, not code, and
-// the ordinary literal skipper would stop at the second quote, reading a JSON body's braces and keys
-// as source. Escapes do not apply inside, so only the closing delimiter ends it.
-rawstr_at* = (s: string_view, p: i32) bool {
-    s.at(p) == '"' && s.at(p + 1) == '"' && s.at(p + 2) == '"'
-}
+// A RAW literal (`"""…"""`, opener from std.text.ascii) has to be skipped in ONE step by every
+// TEXTUAL pass over source (flatten's copy_literal, the visibility scan's vis_skip_lit): the contents
+// are text, not code, and the ordinary literal skipper would stop at the second quote, reading a JSON
+// body's braces and keys as source. Escapes do not apply inside, so only the delimiter ends it.
 // position just past the closing `"""`, or at the NUL when unterminated (the parser reports that).
 raw_lit_end* = (s: string_view, p: i32) i32 {
     q := p + 3
@@ -110,13 +105,13 @@ add_name* = (set: String, a: MutPtr<Malloc>, name: String) String {
 // marker (0); membership is by key.
 rset_new* = (a: MutPtr<Malloc>) Map<i64> {
     seed: i64 := 0 - 1
-    of(a, "", seed).expect("std.internal.resolve: rset alloc")
+    of(a, "", seed).expect("compiler.resolve: rset alloc")
 }
 rset_add* = (m: Map<i64>, a: MutPtr<Malloc>, key: String) Map<i64> {
-    m.put(a, cstr(key.ptr), 0).expect("std.internal.resolve: rset alloc")
+    m.put(a, cstr(key.ptr), 0).expect("compiler.resolve: rset alloc")
 }
 rset_add_str* = (m: Map<i64>, a: MutPtr<Malloc>, name: string_view) Map<i64> {
-    m.put(a, name, 0).expect("std.internal.resolve: rset alloc")
+    m.put(a, name, 0).expect("compiler.resolve: rset alloc")
 }
 rset_has* = (m: Map<i64>, key: String) bool { m.has(cstr(key.ptr)) }
 // resolve's allocator-first String helpers now delegate to compiler.genc's canonical generic
@@ -212,7 +207,7 @@ empty_closure = (a: MutPtr<Malloc>) Closure {
     Closure(
         seen: a.gstr_string(256),
         out: a.gstr_string(4096),
-        useen: of(a, "", seed).expect("std.internal.resolve: useen alloc"),
+        useen: of(a, "", seed).expect("compiler.resolve: useen alloc"),
     )
 }
 ImportEdge*: {
@@ -252,7 +247,7 @@ SIG_IMPORTED* := 4
 SIG_FOREIGN* := 8
 ModuleSig*: {
     names: Map<i64>,
-    has = (s: ModuleSig, name: string_view) bool { s.names.has(name) }
+    has   = (s: ModuleSig, name: string_view) bool { s.names.has(name) }
     flags = (s: ModuleSig, name: string_view) i64 { s.names.get(name, 0 - 1) }
     private = (s: ModuleSig, name: string_view) bool {
         // defined here but NOT exported? (imported pass-through = sanctioned re-export, stays visible;
@@ -275,7 +270,7 @@ ModuleGraph*: {
     sig: ModuleSig,
     import_count = (g: ModuleGraph) i64 { g.imports.len }
     symbol_count = (g: ModuleGraph) i64 { g.symbols.len }
-    has = (g: ModuleGraph, name: string_view) bool { g.sig.has(name) }
+    has          = (g: ModuleGraph, name: string_view) bool { g.sig.has(name) }
 }
 ModuleEntry*: {
     id: string_view,
@@ -412,6 +407,38 @@ eprint* = (s: string_view) i64 {
     v := view(s)
     write(2, v.ptr, v.len)
 }
+// ── RESOLUTION FAILURE IS A VALUE, NOT PROCESS DEATH ──────────────────────────────────────────────
+// Every rejection below used to `exit(1)` from inside this library. That is survivable for `zen
+// check`, which was about to exit anyway, and FATAL for the language server: every intermediate
+// keystroke of an import line (`{ f } = std.te`) is an unknown module, so the server died
+// mid-session — no diagnostic published, in-flight requests abandoned. Rejections now PRINT AND
+// LATCH and the caller decides. `resolve_prog_or_exit` (the CLI path) exits the instant the latch is
+// set, so the driver's stderr and exit code are byte-identical: the first rejection is still the only
+// one printed, and no later pass gets to add output the old `exit(1)` pre-empted.
+res_failed := false
+res_no_msg = () string_view { "" }    // a module global takes its type from its initializer
+res_msg := res_no_msg()
+resolve_failed* = () bool { res_failed }
+resolve_message* = () string_view { res_msg }
+res_fail_reset = () void {
+    res_failed = false
+    res_msg = res_no_msg()
+}
+res_reject_text* = (text: string_view) i32 {
+    res_failed.match ({
+        true  => 0,
+        false => {
+            eprint(text)
+            res_msg = text
+            0
+        },
+    })
+    res_failed = true
+    0
+}    // first rejection wins — the one the exiting process used to print is still the one printed
+res_reject = (a: MutPtr<Malloc>, msg: String) i32 {
+    res_reject_text(msg.gstr_push(a, 10).gstr_finish(a))
+}
 // ── NAMESPACE-IMPORT CYCLE GUARD ───────────────────────────────────────────────────────────────
 // The namespace-closure loader (load_ns_closure_graph_table ↔ collect_ns_*_table) follows `m = pkg.mod`
 // alias edges with no seen-set, so a self-referential or cyclic alias (`a = a`, or a→b→a) recurses
@@ -428,10 +455,7 @@ fail_import_cycle = (a: MutPtr<Malloc>, inpath: string_view, id: String) i32 {
         .gstr_append(a, ": error: import cycle through namespace alias '")
     msg1 := a.mappend_id_name(msg0, id)
     tail := msg1.gstr_append(a, "' (a module cannot namespace-import itself, directly or transitively)")
-    line := tail.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(tail)
 }
 // Probe first so missing modules get a distinct error from unreadable modules.
 file_exists* = (path: string_view) bool {
@@ -462,10 +486,7 @@ fail_unknown_module = (a: MutPtr<Malloc>, inpath: string_view, id: String, path:
         },
     })
     close_msg := m2.gstr_append(a, ")")
-    line := close_msg.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(close_msg)
 }
 fail_unreadable = (a: MutPtr<Malloc>, inpath: string_view, path: string_view) string_view {
     msg := a
@@ -474,9 +495,7 @@ fail_unreadable = (a: MutPtr<Malloc>, inpath: string_view, path: string_view) st
         .gstr_append(a, inpath)
         .gstr_append(a, ": error: cannot read module file ")
     with_path := msg.gstr_append(a, path)
-    line := with_path.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
+    a.res_reject(with_path)
     ""
 }
 read_module_file = (a: MutPtr<Malloc>, path: string_view) Result<string_view, IoError> {
@@ -498,10 +517,7 @@ fail_unknown_name = (a: MutPtr<Malloc>, inpath: string_view, nm: String, id: Str
     in_mod := msg1.gstr_append(a, "' in module '")
     msg2 := a.mappend_id_name(in_mod, id)
     tail := msg2.gstr_append(a, "' (no such top-level definition)")
-    line := tail.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(tail)
 }
 fail_dup_user = (
     a: MutPtr<Malloc>,
@@ -534,10 +550,7 @@ fail_dup_user = (
     h6 := h5.gstr_append(a, "` then `m.")
     h7 := a.mappend_string(h6, nm)
     h8 := h7.gstr_append(a, "(...)`")
-    line := h8.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(h8)
 }
 fail_no_progdir = (a: MutPtr<Malloc>, inpath: string_view, id: String) i32 {
     msg0 := a
@@ -547,10 +560,7 @@ fail_no_progdir = (a: MutPtr<Malloc>, inpath: string_view, id: String) i32 {
         .gstr_append(a, ": error: sibling import '")
     msg1 := a.mappend_id_name(msg0, id)
     tail := msg1.gstr_append(a, "' needs a source file on disk (stdin has no directory to load it from)")
-    line := tail.gstr_push(a, 10)
-    eprint(line.gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(tail)
 }
 // ── CANONICAL ModuleId → path ────────────────────────────────────────────────────────────────
 // THE one id→file mapping — every id→path decision (table build, closure load, the driver's cache
@@ -888,14 +898,14 @@ user_symbol_seen = (
     id: String,
     inpath: string_view,
 ) Map<i64> {
-    key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+    key := s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
     kv := cstr(key.ptr)
     prev := useen.get(kv, 0 - 1)
     (prev >= 0).then({
         origin := a.gstr_string(24).gstr_append(a, table.modules[prev].id)
         a.fail_dup_user(inpath, id, s.symbol_name_in(a), origin)
     })
-    useen.put(a, kv, table.index_of_id(id)).expect("std.internal.resolve: useen alloc")
+    useen.put(a, kv, table.index_of_id(id)).expect("compiler.resolve: useen alloc")
 }
 user_decls_from_symbols = (
     a: MutPtr<Malloc>,
@@ -1007,7 +1017,7 @@ main_symbol_names = (
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
-                key := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+                key := sym.symbol_key_in(a).expect("compiler.resolve: allocation failed")
                 inmain := sym.start >= bodystart && sym.start < bodyend
                 cur = (inmain && cur.seen_name(key).then({ false }, { true })).match ({
                     true  => a.madd_name(cur, key),
@@ -1029,7 +1039,7 @@ main_symbol_names = (
 // no precedence, dedup falls back to first-seen. Value encoding: target index + 1 (>=1); 0 = contested.
 import_claims = (a: MutPtr<Malloc>, table: ModuleTable) Map<i64> {
     seed: i64 := 0 - 1
-    m := of(a, "", seed).expect("std.internal.resolve: import-claim alloc")
+    m := of(a, "", seed).expect("compiler.resolve: import-claim alloc")
     table.modules.loop((h, i, mod) {
         mod.graph.imports.loop((h2, j, e) {
             (e.namespace == false).then({
@@ -1076,9 +1086,7 @@ import_claim_head_exported = (
                                 false => (prev == enc).then({ enc }, { 0 }),
                             })
                             (val == prev == false).then({
-                                m = m
-                                    .put(a, nm, val)
-                                    .expect("std.internal.resolve: import-claim alloc")
+                                m = m.put(a, nm, val).expect("compiler.resolve: import-claim alloc")
                             })
                         })
                         pos = ie
@@ -1100,7 +1108,7 @@ claim_owner_midx = (off: i64) i64 {
 }
 empty_claims = (a: MutPtr<Malloc>) Map<i64> {
     seed: i64 := 0 - 1
-    of(a, "", seed).expect("std.internal.resolve: import-claim alloc")
+    of(a, "", seed).expect("compiler.resolve: import-claim alloc")
 }
 dedup_decls* = (a: MutPtr<Malloc>, flat: string_view, bodystart: i64, bodyend: i64) string_view {
     a.dedup_decls_mode(flat, bodystart, bodyend, false)
@@ -1155,7 +1163,7 @@ dedup_symbols = (
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
-                nm := sym.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+                nm := sym.symbol_key_in(a).expect("compiler.resolve: allocation failed")
                 inmain := sym.start >= bodystart && sym.start < bodyend
                 shadow := allow_main_shadow
                     && inmain.then({ false }, { true })
@@ -1306,9 +1314,7 @@ fail_dup_impl = (
         .gstr_push(a, ')')
     l2 := d2.gstr_push(a, 10)
     h0 := l2.gstr_append(a, "hint: a type has one impl per trait — merge the two bodies or delete one block")
-    eprint(h0.gstr_push(a, 10).gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(h0)
 }
 dedup_impls = (a: MutPtr<Malloc>, table: ModuleTable, flat: string_view) string_view {
     a.dedup_impls_into(a.gstr_string(4096), table, flat, 0, a.rset_new()).gstr_finish(a)
@@ -1358,7 +1364,7 @@ dedup_impls_into = (
                                 false => {
                                     seen2 = seen2
                                         .put(a, key, to_i64(sp.start))
-                                        .expect("std.internal.resolve: impl-seen alloc")
+                                        .expect("compiler.resolve: impl-seen alloc")
                                     false
                                 },
                             })
@@ -1477,7 +1483,7 @@ rewrite_alias_names* = (
 }
 // Stage B4/R2: stamp one ns-alias bind's per-module export sig into the compiler.parse registry —
 // one SigEntry per provided symbol (name + pub/type/imported/foreign flags + origin ModuleId), so
-// the checker can enumerate an alias's exports without a std.internal.resolve import. Stamped at the
+// the checker can enumerate an alias's exports without a compiler.resolve import. Stamped at the
 // same point the module's body joins the flat (append order = flat decl order). A rebind of the SAME
 // module under the SAME alias appends no new body, so it stamps nothing (see module_sig_alias_stamped).
 note_module_sigs = (a: MutPtr<Malloc>, alias: String, graph: ModuleGraph, origin: i64) void {
@@ -1542,7 +1548,8 @@ load_ns_closure_graph_table = (
 ) Closure {
     (ns_depth > NS_DEPTH_CAP).then({
         a.fail_import_cycle(inpath, id)
-    })    // cyclic alias — exit cleanly, never recurse to overflow
+        return c
+    })    // cyclic alias — reject and STOP: the cap only bounds the recursion if we also unwind here
     ns_depth = ns_depth + 1
     c2 := a.load_import_graph_table(table, inpath, src, graph, id.id_is_user(), c)
     ns := a.collect_ns_graph_table(table, inpath, src, graph, a.ns_scan(c2))
@@ -2134,7 +2141,7 @@ symbol_start_of* = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: string_view) 
     posn := 0
     syms.loop((h, i, s) {
         ((s.imported || s.foreign || s.is_type) == false && posn == 0).then({
-            key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+            key := s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
             (cstr(key.ptr) == nm).then({
                 posn = s.start
             })
@@ -2191,9 +2198,7 @@ fail_import_redef = (a: MutPtr<Malloc>, m: ModuleEntry, s: ProvidedSymbol, nm: S
     h1 := a
         .mappend_string(h0, nm)
         .gstr_append(a, "` from the import list, or rename the local definition")
-    eprint(h1.gstr_push(a, 10).gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(h1)
 }
 check_import_redefs = (a: MutPtr<Malloc>, table: ModuleTable) i32 {
     table.modules.loop((h, i, m) {
@@ -2201,7 +2206,7 @@ check_import_redefs = (a: MutPtr<Malloc>, table: ModuleTable) i32 {
             imported := a.imported_value_name_set(a.rset_new(), m.graph.symbols)
             m.graph.symbols.loop((h2, j, s) {
                 ((s.imported || s.foreign || s.is_type) == false).then({
-                    key := s.symbol_key_in(a).expect("std.internal.resolve: allocation failed")
+                    key := s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
                     imported.rset_has(key).then({
                         a.fail_import_redef(m, s, key)
                     })
@@ -2268,14 +2273,13 @@ skip_to_gt = (s: string_view, p: i32) i32 {
 after_generics = (s: string_view, j: i32) i32 {
     (s.at(j) == '<').then({ s.skip_to_gt(j + 1) }, { j })
 }
-// is the text at name-end `ie` the head of a fn decl — `<...>? *? = (` ?
+// is the text at name-end `ie` the head of a fn decl — `<...>? *? = (` ? The gap before `=` is a RUN
+// of spaces, not exactly one: fmt aligns the `=` of consecutive one-line methods, and reading only the
+// one-space spelling silently dropped an aligned method from the split set (missed import-collision).
 is_fn_decl_after = (s: string_view, ie: i32) bool {
     j0 := s.after_generics(ie)
-    j := (s.at(j0) == '*').then({ j0 + 1 }, { j0 })
-    (s.at(j) == ' ').match ({
-        true  => s.at(j + 1) == '=' && s.at(j + 2) == ' ' && s.at(j + 3) == '(',
-        false => s.at(j) == '=' && s.at(j + 1) == ' ' && s.at(j + 2) == '(',
-    })
+    j := s.lstrip((s.at(j0) == '*').then({ j0 + 1 }, { j0 }))
+    s.at(j) == '=' && s.at(j + 1) == ' ' && s.at(j + 2) == '('
 }
 // Newline-separated set of INDENTED fn-decl names in `src` that also appear in `topnames` (the
 // module's top-level value decls) — i.e. every type method whose name shadows a top-level fn. Empty
@@ -2427,9 +2431,7 @@ fail_alias_collision = (
     h1 := a
         .mappend_id_str_dotted(h0, edge.module)
         .gstr_append(a, "` — or qualify the conflicting usage")
-    eprint(h1.gstr_push(a, 10).gstr_finish(a))
-    exit(1)
-    0
+    a.res_reject(h1)
 }
 check_alias_collisions = (
     a: MutPtr<Malloc>,
@@ -2526,6 +2528,7 @@ resolve_program_data* = (
     inpath: string_view,
     mainsrc: string_view,
 ) ResolvedProgram {
+    res_fail_reset()    // fresh per program: a keystroke that fixes the import must clear the last one's rejection
     a.alias_prefixes_reset()    // fresh per program: the checker's UFCS-alias set is exactly the aliases stamped below
     a.module_sigs_reset()    // fresh per program: the checker's per-alias export sigs (B4/R2), stamped per ns bind below
     a.uregions_reset()    // fresh per program: user-module body spans recorded during closure load

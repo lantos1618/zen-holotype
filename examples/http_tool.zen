@@ -1,0 +1,61 @@
+// http_tool — a curl-lite over std.net.http.
+//
+// Fetch a URL and print the response body on stdout:
+//
+//   ./zen run examples/http_tool.zen http://127.0.0.1:8099/path
+//   ./zen run examples/http_tool.zen -i http://localhost:8099/    # also print status + headers
+//
+// Exit code: 0 on a 2xx, 1 on any other status or a network failure, 2 on a bad/absent URL.
+//
+// NOTE: std.net.socket has no DNS resolver, so the host must be a dotted-quad ("127.0.0.1")
+// or the literal "localhost". A hostname like "example.com" cannot be dialed — that is a
+// documented stdlib gap, not a bug in this tool.
+{ println, formatln, arg_str, arg_int } = std.text.fmt
+{ gpa } = std.mem.heap
+{ http_get, http_error_name, Response } = std.net.http
+{ out_bytes } = std.io.file
+{ arg } = std.sys.os
+// `-i`: print the status line and every response header, then a blank separator line.
+show_head = (r: Response) void {
+    formatln("HTTP {}", [arg_int(to_i64(r.status))])
+    r.headers.loop((h, i, hd) {
+        formatln("{}: {}", [arg_str(hd.name), arg_str(hd.value)])
+    })
+    println("")
+}
+main = () i32 {
+    h := gpa()
+    a := h.addr()
+    // argv: [0]=prog, then an optional -i, then the URL.
+    show_headers := arg(1) == "-i"
+    url := show_headers.then({ arg(2) }, { arg(1) })
+    (url == "").then({
+        println("usage: http_tool [-i] http://host[:port][/path]")
+        return 2
+    })
+    // http_get parses the URL, dials, sends and parses the response — one call, errors as values.
+    a.http_get(url).match ({
+        .Ok(r)  => {
+            show_headers.then({
+                show_head(r)
+            })
+            // body_bytes is the length-carrying truth: binary payloads (embedded NULs) survive,
+            // where the NUL-terminated `body` view would stop at the first zero byte.
+            out_bytes(r.body_bytes).match ({
+                .Ok(n)  => r.ok().then({ 0 }, { 1 }),
+                .Err(e) => {
+                    println("http_tool: cannot write body")
+                    1
+                },
+            })
+        },
+        .Err(e) => {
+            formatln("http_tool: {}", [arg_str(http_error_name(e))])
+            // a URL we could not even parse is a usage error; anything else is a transport failure.
+            e.match ({
+                .Malformed(m) => 2,
+                _             => 1,
+            })
+        },
+    })
+}

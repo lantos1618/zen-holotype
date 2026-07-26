@@ -666,7 +666,9 @@ dtraitdef* = (trname: string_view, fn: Func) Decl {
         fn: fn,
     ))
 }
-mono_tynode_in = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
+// `t` boxed into a fresh 1-element heap cell — THE way a Ty child (Ptr pointee, Slice elem,
+// FnT ret) is attached to its parent, since the AST recurses through Ptr<Ty>.
+tnode* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
     buf := cbuf<Ty>(a, 1)
     buf[0] = t
     buf[0].addr()
@@ -680,9 +682,8 @@ fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
     })
     buf
 }
-ty_node_in* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> { a.mono_tynode_in(t) }
 fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty {
-    fntype(a.fnt_param_tys_in(f.params), a.ty_node_in(f.ret))
+    fntype(a.fnt_param_tys_in(f.params), a.tnode(f.ret))
 }
 // pragma, intrinsic decl, anything
 // map a narrow int/float type name to its C type; any other name passes through unchanged.
@@ -709,44 +710,42 @@ width_cname = (n: string_view) string_view {
     })
     n
 }
-// the C type name of a Ty as a plain string — used to substitute `sizeof(T)` in a generic body
-// (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
+// THE C spelling of a type's HEAD — the single source of truth for the two passes below. They must
+// agree byte for byte, because cname_len sizes the buffer that cname_write then fills: the lengths
+// used to be spelled here as literals (7, 6, 4, 11, …), so re-spelling a type in the write ladder
+// and forgetting its count in the length ladder under-sized the buffer and wrote past it.
+cname_head = (t: Ty) string_view {
+    t.match ({
+        .I32           => "int32_t",
+        .I64           => "int64_t",
+        .U8            => "uint8_t",
+        .F64           => "double",
+        .Bool          => "bool",
+        .Void          => "void",
+        .StringView    => "const char*",
+        .StringCstr    => "const char*",
+        .StringLiteral => "const char*",
+        .Named(n)      => width_cname(n),
+        .Generic(g)    => g.mangled,
+        .Ptr(pd)       => "",    // recursive: a pointer's spelling is its pointee's plus `*` — see below
+        .Slice(e)      => "zslice",
+        .FnT(ft)       => "zfn",
+    })
+}
 cname_len = (t: Ty) i64 {
     t.match ({
-        .I32           => 7,
-        .I64           => 7,
-        .U8            => 7,
-        .F64           => 6,
-        .Bool          => 4,
-        .Void          => 4,
-        .StringView    => 11,
-        .StringCstr    => 11,
-        .StringLiteral => 11,
-        .Named(n)      => width_cname(n).view().len,
-        .Generic(g)    => g.mangled.view().len,
-        .Ptr(pd)       => load(pd.pointee).cname_len() + 1,
-        .Slice(e)      => 6,
-        .FnT(ft)       => 3,
+        .Ptr(pd) => load(pd.pointee).cname_len() + 1,
+        _        => t.cname_head().view().len,
     })
 }
 cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
     t.match ({
-        .I32           => dst.write_str(at, "int32_t"),
-        .I64           => dst.write_str(at, "int64_t"),
-        .U8            => dst.write_str(at, "uint8_t"),
-        .F64           => dst.write_str(at, "double"),
-        .Bool          => dst.write_str(at, "bool"),
-        .Void          => dst.write_str(at, "void"),
-        .StringView    => dst.write_str(at, "const char*"),
-        .StringCstr    => dst.write_str(at, "const char*"),
-        .StringLiteral => dst.write_str(at, "const char*"),
-        .Named(n)      => dst.write_str(at, width_cname(n)),
-        .Generic(g)    => dst.write_str(at, g.mangled),
-        .Ptr(pd)       => dst.write_str(dst.cname_write(at, load(pd.pointee)), "*"),
-        .Slice(e)      => dst.write_str(at, "zslice"),
-        .FnT(ft)       => dst.write_str(at, "zfn"),
+        .Ptr(pd) => dst.write_str(dst.cname_write(at, load(pd.pointee)), "*"),
+        _        => dst.write_str(at, t.cname_head()),
     })
 }
+// the C type name of a Ty as a plain string — used to substitute `sizeof(T)` in a generic body
+// (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
 ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) string_view {
     n := t.cname_len()
     buf: RawPtr<u8> := a.acquire(n + 1)
@@ -769,8 +768,8 @@ tparam_arg = (tparams: [Param], args: [Ty], n: string_view, dflt: Ty) Ty {
 subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
     t.match ({
         .Named(n)   => tparams.tparam_arg(args, n, t),
-        .Ptr(pd)    => tptr_k(a.mono_tynode_in(a.subst_ty_in(tparams, args, load(pd.pointee))), pd.kind),
-        .Slice(e)   => tslice(a.mono_tynode_in(a.subst_ty_in(tparams, args, load(e)))),
+        .Ptr(pd)    => tptr_k(a.tnode(a.subst_ty_in(tparams, args, load(pd.pointee))), pd.kind),
+        .Slice(e)   => tslice(a.tnode(a.subst_ty_in(tparams, args, load(e)))),
         .Generic(g) => a.subst_generic_in(tparams, args, g),    // a nested generic field: substitute its args, re-mangle
         .FnT(ft)    => a.subst_fnt_in(tparams, args, ft),    // a function-VALUE field `(S, i32) S`: substitute inside the signature
         _           => t,
@@ -782,7 +781,7 @@ subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty
     ft.params.loop((h, i, p) {
         ptys[i] = a.subst_ty_in(tparams, args, p)
     })
-    fntype(ptys, a.mono_tynode_in(a.subst_ty_in(tparams, args, load(ft.ret))))
+    fntype(ptys, a.tnode(a.subst_ty_in(tparams, args, load(ft.ret))))
 }
 // substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
 subst_generic_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], g: GenericData) Ty {

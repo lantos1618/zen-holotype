@@ -2,11 +2,12 @@
 // Content-Length wire format, publishes diagnostics on open/change, and answers go-to-definition.
 // The JSON here is hand-rolled (std.format.json isn't in the seed manifest) and deliberately
 // minimal: enough of a reader to pull the fields the protocol needs out of a request body.
-{ Malloc } = std.mem.alloc
+{ Malloc, heap_scope_begin, heap_scope_end } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
 { contents_in } = std.io.file
 { read, write } = std.c.libc
+{ hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode
 { CheckDiagnostic, desc_or } = compiler.validate.diag
 { denrich_check } = compiler.validate.enrich
 { parse_module } = compiler.parse
@@ -23,9 +24,9 @@
   check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
   check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
 { DiagSpan } = compiler.diagnostic
-{ ResolvedProgram } = std.internal.resolve
+{ resolve_failed, resolve_message, resolve_program_data, ResolvedProgram } = compiler.resolve
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ push_int, resolve_prog, cstr_substr } = compiler.drvutil
+{ push_int, dirname, cstr_range, cstr_substr } = compiler.drvutil
 { lspt_legend, lspt_tokens } = compiler.lsp_tokens
 { lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at, lspd_tokens_at } = compiler.lsp_docs
 { cd_or, locate_diag } = compiler.drvdiag
@@ -60,15 +61,12 @@ lsp_send = (mp: MutPtr<Malloc>, body: string_view) i64 {
     lout(body)
 }
 // ── JSON string EMISSION (own escaper; the task sanctions building output as strings) ─────────────
-lsp_hexd = (n: i64) u8 {
-    (n < 10).then({ ('0'.to_i64() + n).to_u8() }, { ('a'.to_i64() + n - 10).to_u8() })
-}
 push_uesc = (sb: String, mp: MutPtr<Malloc>, b: u8) String {
     bi := b.to_i64()
     sb
         .gstr_append(mp, "\\u00")
-        .gstr_push(mp, lsp_hexd(bi >> 4 & 15))
-        .gstr_push(mp, lsp_hexd(bi & 15))
+        .gstr_push(mp, hex_char(bi >> 4 & 15))
+        .gstr_push(mp, hex_char(bi & 15))
 }
 // append `s` as a JSON string LITERAL (surrounding quotes + escaped) to the builder.
 push_jstr = (sb: String, mp: MutPtr<Malloc>, s: string_view) String {
@@ -178,24 +176,15 @@ json_hexq = (v: [u8], at: i64) i64 {
     (at + 3 >= v.len).match ({
         true  => 0 - 1,
         false => {
-            h0 := hexval(v[at])
-            h1 := hexval(v[at + 1])
-            h2 := hexval(v[at + 2])
-            h3 := hexval(v[at + 3])
+            h0 := hex_nibble(v[at])
+            h1 := hex_nibble(v[at + 1])
+            h2 := hex_nibble(v[at + 2])
+            h3 := hex_nibble(v[at + 3])
             (h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0).match ({
                 true  => 0 - 1,
                 false => h0 * 4096 + h1 * 256 + h2 * 16 + h3,
             })
         },
-    })
-}
-hexval = (b: u8) i64 {
-    (b >= '0' && b <= '9').match ({
-        true  => to_i64(b - '0'),
-        false => (b >= 'a' && b <= 'f').match ({
-            true  => to_i64(b - 'a') + 10,
-            false => (b >= 'A' && b <= 'F').then({ to_i64(b - 'A') + 10 }, { 0 - 1 }),
-        }),
     })
 }
 // UTF-8 encode a BMP code point into the builder (1–3 bytes).
@@ -291,7 +280,7 @@ json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) string_view {
     (i >= v.len).match ({
         true  => "null",
         false => (v[i] == '"').match ({
-            true  => mp.json_slice(v, i, v.json_str_end(i)),
+            true  => mp.cstr_range(v, i, v.json_str_end(i)),
             false => {
                 e := i
                 stop := false
@@ -312,19 +301,10 @@ json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) string_view {
                         },
                     })
                 }
-                mp.json_slice(v, i, e)
+                mp.cstr_range(v, i, e)
             },
         }),
     })
-}
-json_slice = (mp: MutPtr<Malloc>, v: [u8], start: i64, end: i64) string_view {
-    sb := mp.gstr_string(end - start + 1)
-    j := start
-    @while (j < end) {
-        sb = sb.gstr_push(mp, v[j])
-        j = j + 1
-    }
-    sb.gstr_finish(mp)
 }
 // the decoded string value of the first key `key`, or "" if absent / non-string.
 json_str_field = (mp: MutPtr<Malloc>, body: string_view, key: string_view) string_view {
@@ -511,13 +491,34 @@ lsp_push_diag = (
 // channel (reserved/ownership/escape/leak/…/mustuse) contributes its diagnostic AND the whole main
 // batch (names/types/arity/exhaustiveness/…) is collected, so an ownership error shows alongside type
 // errors rather than one channel hiding the rest. Empty array => clears old squiggles.
+// one whole-file diagnostic carrying `msg` verbatim — the shape a REJECTED resolve reports through.
+lsp_head_diag = (mp: MutPtr<Malloc>, msg: string_view) string_view {
+    mp
+        .gstr_string(256)
+        .gstr_append(mp, "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":1,\"code\":\"unresolved-import\",\"source\":\"zen\",\"message\":")
+        .push_jstr(mp, mp.lsp_trim_nl(msg))
+        .gstr_append(mp, "}")
+        .gstr_finish(mp)
+}
+// the latched rejection text is newline-terminated (it was written straight to stderr); an LSP
+// message keeps its internal newlines (hint lines) but never a trailing one.
+lsp_trim_nl = (mp: MutPtr<Malloc>, s: string_view) string_view {
+    v: [u8] := s.view()
+    (v.len > 0 && v[v.len - 1] == '\n').then({ mp.cstr_substr(s, 0, to_i32(v.len - 1)) }, { s })
+}
 lsp_diags_array = (
     mp: MutPtr<Malloc>,
     root: string_view,
     path: string_view,
     text: string_view,
 ) string_view {
-    rp := mp.resolve_prog(root, path, text)
+    rp := mp.resolve_program_data(root, mp.dirname(path), path, text)
+    // A REJECTED resolve (unknown module / unknown name / dup-fn …) is reported ALONE and the server
+    // stays up: half of every import line a user types names a module that does not exist yet, and the
+    // flat built from a missing module would otherwise spray bogus undefined-name errors over the file.
+    resolve_failed().then({
+        return mp.lsp_head_diag(resolve_message())
+    })
     raw := mp.parse_module(rp.flat)
     decls := mp.resolve_module(raw)
     nif := check_module_no_if_diagnostic_from_source(rp.flat).cd_or(check_module_no_ternary_diagnostic_from_source(rp.flat))
@@ -777,7 +778,7 @@ lsp_semantic_tokens = (mp: MutPtr<Malloc>, body: string_view) i64 {
             data := is_empty(cached).match ({
                 true  => {
                     fresh := mp.lspt_tokens(lspd_text_at(i))
-                    mp.lspd_cache_tokens(i, fresh)
+                    lspd_cache_tokens(i, fresh)
                     fresh
                 },
                 false => cached,
@@ -834,7 +835,7 @@ lsp_publish_clear = (mp: MutPtr<Malloc>, uri: string_view) i64 {
 // OUT of the store, so diagnostics and highlighting are provably answering about the same bytes.
 lsp_did_change = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
     uri := mp.json_str_field(body, "uri")
-    i := mp.lspd_set(uri, mp.json_str_field(body, "text"), body.lsp_json_int("version"))
+    i := lspd_set(uri, mp.json_str_field(body, "text"), body.lsp_json_int("version"))
     mp.lsp_publish(root, uri, lspd_text_at(i))
 }
 // dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown
@@ -862,7 +863,7 @@ lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
                     false => (method == "textDocument/didClose").match ({
                         true  => {
                             closed := mp.json_str_field(body, "uri")
-                            mp.lspd_close(closed)
+                            lspd_close(closed)
                             mp.lsp_publish_clear(closed)
                             0
                         },
@@ -984,10 +985,19 @@ lsp_cmd* = (mp: MutPtr<Malloc>, root: string_view) i32 {
                 (n < 0 || n > LSP_BODY_MAX()).match ({
                     true  => 0,
                     false => {
+                        // ONE REQUEST, ONE SCOPE: the frame buffer, the JSON decode, and the whole
+                        // check pipeline the handler runs all allocate inside the scope and are
+                        // reclaimed together here. A batch compile may leak — it exits — but this
+                        // loop runs that pipeline once per keystroke, where the same non-free is
+                        // ~58 MB of growth per edit. Only the document store outlives the scope,
+                        // and it owns durable copies (compiler.lsp_docs). `act` is a scalar, so it
+                        // survives the reclaim by value.
+                        heap_scope_begin()
                         body := mp.acquire(n + 1)
                         got := body.lsp_read_body(0, n)
                         body.offset(got).store(0)
                         act := mp.lsp_handle(root, cstr(body))
+                        heap_scope_end()
                         (act == 1).then({
                             shut = true
                         })

@@ -1,7 +1,7 @@
 // driver.zen — the zenc CLI, in Zen. Dispatches on the command line and drives the compiler
 // (resolve -> parse -> check -> genModule) and the C backend (cc). This replaces bootstrap/driver.c:
 // once it roots --build-self, the seed carries `main` (emitted as zen_main) and driver.c is deleted.
-{ arg, argc, getEnv } = std.sys.os
+{ arg, argc, clock_ms, getEnv } = std.sys.os
 { Os, Arch, Abi, host } = std.sys.platform
 { Malloc } = std.mem.alloc
 { view, is_empty, starts_with } = std.text.str
@@ -23,11 +23,12 @@
 { genJsModuleIn } = compiler.backend.js.js
 { pretty_module_in, pretty_set_comments } = compiler.pretty
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ first_user_import_in, file_exists } = std.internal.resolve
-{ ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = std.internal.resolve_ffi
-{ say, derr, push_int, pid_path, dirname, last_slash, push_prefix, push_span, pad_sp, finish_cstr,
-  join2, cstr_substr, bs_push_range, zt_ms, zt_log, resolve_prog, dir_exists } = compiler.drvutil
-{ report_no_if_plain, report_no_if_resolved, report_check } = compiler.drvdiag
+{ eprint, first_user_import_in, file_exists } = compiler.resolve
+{ ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = compiler.resolve_ffi
+{ say, eprint, push_int, pid_path, dirname, last_slash, push_prefix, push_span, pad_sp, finish_cstr,
+  join2, cstr_substr, bs_push_range, zt_log, resolve_prog_or_exit, dir_exists } = compiler.drvutil
+{ report_no_if_plain, report_no_if_resolved, report_check, report_js_unsupported } = compiler.drvdiag
+{ js_unsupported_reset } = compiler.backend.js.js_expr
 { lsp_cmd } = compiler.lsp
 { FNV_BASIS, fnv_str, CacheWalk, edges_of, cache_walk_edges } = compiler.modgraph
 { AudCtx, aud_decl_name, aud_index, aud_tail_at, aud_ref, aud_mref, aud_walk_fn, aud_walk_sig,
@@ -121,8 +122,8 @@ cc_command = (
     // of which profile/flags a compile actually used (the harness's profile cases assert on it).
     // A cache HIT never reaches cc, so pair it with ZENC_NO_CACHE=1/a fresh ZENC_CACHE_DIR.
     (getEnv("ZENC_SHOW_CC") == "" == false).then({
-        derr(line)
-        derr("\n")
+        eprint(line)
+        eprint("\n")
     })
     line
 }    // libm: always link (sin/cos/log/exp/pow); free if unused
@@ -167,11 +168,11 @@ cross_cc = (mp: MutPtr<Malloc>, target: string_view) string_view {
             .gstr_append(mp, target)
             .gstr_finish(mp)
     })
-    derr("zenc: error: cross target ")
-    derr(target)
-    derr(" needs a toolchain — set ZENC_TARGET_CC, or install ")
-    derr(gcc)
-    derr(" or zig\n")
+    eprint("zenc: error: cross target ")
+    eprint(target)
+    eprint(" needs a toolchain — set ZENC_TARGET_CC, or install ")
+    eprint(gcc)
+    eprint(" or zig\n")
     ""
 }
 flag_token_end = (v: [u8], i: i64) i64 {
@@ -366,7 +367,7 @@ push_ms = (s: String, mp: MutPtr<Malloc>, ns: i64) String {
     s.push_int(mp, t / 10).gstr_push(mp, '.').push_int(mp, t % 10)
 }
 tm_row = (mp: MutPtr<Malloc>, name: string_view, ns: i64) void {
-    derr(mp
+    eprint(mp
         .gstr_string(64)
         .gstr_append(mp, "  ")
         .gstr_append(mp, name)
@@ -379,9 +380,9 @@ tm_row = (mp: MutPtr<Malloc>, name: string_view, ns: i64) void {
 tm_report = (mp: MutPtr<Malloc>, wall: i64, other_label: string_view) void {
     time_on.then({
         sum := tm_flatten + tm_parse + tm_resolve + tm_check + tm_emit + tm_cc
-        derr("zenc --time: pipeline stages\n")
+        eprint("zenc --time: pipeline stages\n")
         tm_cache_hit.then({
-            derr("  (binary cache hit — compile stages skipped; ZENC_NO_CACHE=1 forces a full compile)\n")
+            eprint("  (binary cache hit — compile stages skipped; ZENC_NO_CACHE=1 forces a full compile)\n")
             { }
         })
         mp.tm_row("flatten", tm_flatten)
@@ -437,7 +438,7 @@ compile_flat = (
     ccname: string_view,
 ) i32 {
     t0 := mp.tm_mark()
-    rp := mp.resolve_prog(root, path, src)
+    rp := mp.resolve_prog_or_exit(root, path, src)
     tm_flatten = mp.tm_lap(t0)
     (mp.report_no_if_resolved(rp, path, src) == 0).match ({
         true  => {
@@ -464,7 +465,7 @@ compile_flat = (
                             (ccrc == 0).match ({
                                 true  => 0,
                                 false => {
-                                    derr("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
+                                    eprint("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
                                     1
                                 },
                             })
@@ -496,7 +497,7 @@ emit_raw = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
 emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog(root, path, src)
+            rp := mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
                     raw := mp.parse_module(rp.flat)
@@ -513,7 +514,7 @@ emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: cannot read input\n")
+            eprint("zenc: cannot read input\n")
             1
         },
     })
@@ -522,10 +523,10 @@ emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
 // (bootstrap/zenrt.js) + the module JS; `build --target js` writes the same to a .js file. Additive:
 // it reuses the exact resolve/parse/check pipeline, only swapping genModuleIn for genJsModuleIn. ──
 js_floor = (mp: MutPtr<Malloc>, root: string_view) string_view {
-    contents_in(mp, mp.bs_join(root, "bootstrap/zenrt.js")).match ({
+    contents_in(mp, mp.join2(root, "bootstrap/zenrt.js")).match ({
         .Ok(src) => src,
         .Err(e)  => {
-            derr("zenc: emit-js: cannot open bootstrap/zenrt.js floor\n")
+            eprint("zenc: emit-js: cannot open bootstrap/zenrt.js floor\n")
             ""
         },
     })
@@ -534,17 +535,24 @@ js_floor = (mp: MutPtr<Malloc>, root: string_view) string_view {
 emit_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog(root, path, src)
+            rp := mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
                     raw := mp.parse_module(rp.flat)
                     decls := mp.resolve_module(raw)
                     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
                         true  => {
-                            out(mp.js_floor(root))
-                            out("\n")
-                            out_bytes(mp.genJsModuleIn(decls).bytes())
-                            0
+                            js_unsupported_reset()
+                            mod := mp.genJsModuleIn(decls)
+                            (mp.report_js_unsupported(rp, path, src) == 0).match ({
+                                true  => {
+                                    out(mp.js_floor(root))
+                                    out("\n")
+                                    out_bytes(mod.bytes())
+                                    0
+                                },
+                                false => 1,
+                            })
                         },
                         false => 1,
                     })
@@ -553,7 +561,7 @@ emit_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: emit-js: cannot read input\n")
+            eprint("zenc: emit-js: cannot read input\n")
             1
         },
     })
@@ -562,7 +570,7 @@ emit_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
 build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog(root, path, src)
+            rp := mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
                     raw := mp.parse_module(rp.flat)
@@ -573,16 +581,24 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
                                 .gstr_string(8192)
                                 .gstr_append(mp, mp.js_floor(root))
                                 .gstr_append(mp, "\n")
+                            js_unsupported_reset()
                             mod := mp.genJsModuleIn(decls)
-                            full := js.gstr_append(mp, mod.finish_cstr(mp))
-                            save(out_path, full.finish_cstr(mp), full.len).match ({
-                                .Ok(n)  => {
-                                    derr("zenc: wrote ")
-                                    derr(out_path)
-                                    derr("\n")
-                                    0
+                            // gate BEFORE save: a .js holding a call to an undefined function must
+                            // never reach disk, or `node` reports the compiler's bug as the user's.
+                            (mp.report_js_unsupported(rp, path, src) == 0).match ({
+                                true  => {
+                                    full := js.gstr_append(mp, mod.finish_cstr(mp))
+                                    save(out_path, full.finish_cstr(mp), full.len).match ({
+                                        .Ok(n)  => {
+                                            eprint("zenc: wrote ")
+                                            eprint(out_path)
+                                            eprint("\n")
+                                            0
+                                        },
+                                        .Err(e) => 1,
+                                    })
                                 },
-                                .Err(e) => 1,
+                                false => 1,
                             })
                         },
                         false => 1,
@@ -592,7 +608,7 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
             })
         },
         .Err(e)  => {
-            derr("zenc: build --target js: cannot read input\n")
+            eprint("zenc: build --target js: cannot read input\n")
             1
         },
     })
@@ -654,7 +670,7 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
             (cache_on() && ck == "" == false && file_exists(ck)).match ({
                 true  => check_ok_line(spec.source),
                 false => {
-                    rp := mp.resolve_prog(root, spec.source, src)
+                    rp := mp.resolve_prog_or_exit(root, spec.source, src)
                     (mp.report_no_if_resolved(rp, spec.source, src) == 0).match ({
                         true  => {
                             raw := mp.parse_module(rp.flat)
@@ -675,15 +691,15 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: cannot open input\n")
+            eprint("zenc: cannot open input\n")
             1
         },
     })
 }
 check_ok_line = (path: string_view) i32 {
-    derr("zenc: ")
-    derr(path)
-    derr(": ok\n")
+    eprint("zenc: ")
+    eprint(path)
+    eprint(": ok\n")
     0
 }    // <path>: ok -> stderr
 build_spec = (
@@ -696,7 +712,7 @@ build_spec = (
     spec.ok.match ({
         true  => {
             spec.library.then({
-                derr("zenc: cannot build a library project yet; use `zenc check <project>`\n")
+                eprint("zenc: cannot build a library project yet; use `zenc check <project>`\n")
                 return 1
             })
             ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
@@ -706,29 +722,29 @@ build_spec = (
                 .Ok(src) => (mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links, spec.target) == 0).match ({
                     true  => file_exists(out).match ({
                         true  => {
-                            derr("zenc: wrote ")
-                            derr(out)
-                            derr("\n")
+                            eprint("zenc: wrote ")
+                            eprint(out)
+                            eprint("\n")
                             0
                         },
                         false => {
-                            derr("zenc: build produced no binary: ")
-                            derr(out)
-                            derr(" (compiler reported success but the file is missing)\n")
+                            eprint("zenc: build produced no binary: ")
+                            eprint(out)
+                            eprint(" (compiler reported success but the file is missing)\n")
                             1
                         },
                     }),
                     false => {
-                        derr("zenc: build failed: ")
-                        derr(spec.source)
-                        derr("\n")
+                        eprint("zenc: build failed: ")
+                        eprint(spec.source)
+                        eprint("\n")
                         1
                     },
                 }),
                 .Err(e)  => {
-                    derr("zenc: cannot open input: ")
-                    derr(spec.source)
-                    derr("\n")
+                    eprint("zenc: cannot open input: ")
+                    eprint(spec.source)
+                    eprint("\n")
                     1
                 },
             })
@@ -767,7 +783,7 @@ run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
     spec.ok.match ({
         true  => {
             spec.library.then({
-                derr("zenc: cannot run a library project; use `zenc check <project>`\n")
+                eprint("zenc: cannot run a library project; use `zenc check <project>`\n")
                 return 1
             })
             ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
@@ -781,9 +797,9 @@ run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
                     })
                 },
                 .Err(e)  => {
-                    derr("zenc: cannot open input: ")
-                    derr(spec.source)
-                    derr("\n")
+                    eprint("zenc: cannot open input: ")
+                    eprint(spec.source)
+                    eprint("\n")
                     1
                 },
             })
@@ -1125,7 +1141,7 @@ prof_names = (mp: MutPtr<Malloc>, decls: [Decl]) ProfNames {
 // the compiled program's parse-level decls carry every DImpl — a light frontend pass (resolve
 // imports + parse, no check) is enough to rebuild the impl-method name table for display.
 prof_names_of = (mp: MutPtr<Malloc>, root: string_view, spec: Spec, src: string_view) ProfNames {
-    rp := mp.resolve_prog(root, spec.source, src)
+    rp := mp.resolve_prog_or_exit(root, spec.source, src)
     mp.prof_names(mp.parse_module(rp.flat))
 }
 prof_binname = (mp: MutPtr<Malloc>, p: string_view) string_view {
@@ -1283,7 +1299,7 @@ prof_gprof = (
         .system()
     body := contents_in(mp, txt).or("")
     (body == "").then({
-        derr("zenc: profile: gprof produced no output (did the program run? did it exit through panic?)\n")
+        eprint("zenc: profile: gprof produced no output (did the program run? did it exit through panic?)\n")
         return 1
     })
     pa.raw.then({
@@ -1293,7 +1309,7 @@ prof_gprof = (
     rows := cbuf<ProfRow>(mp, PROF_TOP())
     n := mp.prof_parse_gprof(body, rows)
     (n == 0).then({
-        derr("zenc: profile: no samples — the program finished too fast to profile; give it more work\n")
+        eprint("zenc: profile: no samples — the program finished too fast to profile; give it more work\n")
         return 1
     })
     mp.prof_table(spec.source, "gprof", "", rows, n, mp.prof_names_of(root, spec, src), "")
@@ -1315,11 +1331,11 @@ prof_run = (
             })
             mp.which_ok("gprof").match ({
                 true  => {
-                    derr("zenc: perf recorded no samples (perf_event_paranoid too strict?); falling back to gprof\n")
+                    eprint("zenc: perf recorded no samples (perf_event_paranoid too strict?); falling back to gprof\n")
                     mp.prof_gprof(root, spec, src, pa)
                 },
                 false => {
-                    derr("zenc: perf recorded no samples (check /proc/sys/kernel/perf_event_paranoid) and gprof is not installed\n")
+                    eprint("zenc: perf recorded no samples (check /proc/sys/kernel/perf_event_paranoid) and gprof is not installed\n")
                     1
                 },
             })
@@ -1334,19 +1350,19 @@ profile_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
         fwd: argc(),
     ))
     (pa.path == "").then({
-        derr(PROF_USAGE())
+        eprint(PROF_USAGE())
         return 2
     })
     have_perf := mp.which_ok("perf")
     (have_perf == false && mp.which_ok("gprof") == false).then({
-        derr("zenc: profile needs a profiler on PATH: install `perf` (linux-tools) or `gprof` (binutils)\n")
+        eprint("zenc: profile needs a profiler on PATH: install `perf` (linux-tools) or `gprof` (binutils)\n")
         return 1
     })
     spec := mp.resolve_spec(root, pa.path)
     spec.ok.match ({
         true  => {
             spec.library.then({
-                derr("zenc: cannot profile a library project; profile a program with a main\n")
+                eprint("zenc: cannot profile a library project; profile a program with a main\n")
                 return 1
             })
             ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
@@ -1354,9 +1370,9 @@ profile_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
             contents_in(mp, spec.source).match ({
                 .Ok(src) => mp.prof_run(root, spec, src, pa, have_perf),
                 .Err(e)  => {
-                    derr("zenc: cannot open input: ")
-                    derr(spec.source)
-                    derr("\n")
+                    eprint("zenc: cannot open input: ")
+                    eprint(spec.source)
+                    eprint("\n")
                     1
                 },
             })
@@ -1371,7 +1387,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     (e == "").then({ mp.dirname(arg(0)) }, { e })
 }
 HELP = () string_view {
-    "usage: zenc <run|build|profile|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--time] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc run [--time] <file|project> [args]  compile + run; --time prints per-stage compile timings\n  zenc profile [--raw] <file.zen|project> [-- args]\n                                       sampling profile (perf; gprof fallback) with zen-native names\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
+    "usage: zenc <run|build|profile|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--time] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc run [--time] <file|project> [args]  compile + run; --time prints per-stage compile timings\n  zenc profile [--raw] <file.zen|project> [-- args]\n                                       sampling profile (perf; gprof fallback) with zen-native names\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code, unused-import + clone report (--strict exits 1;\n                                       clones are advisory and never affect the exit code)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
 }
 VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
 main = () i32 {
@@ -1392,7 +1408,7 @@ main = () i32 {
             false => (cmd == "--build-self" || cmd == "--build-self-full").match ({
                 true  => (arg(2) == "").match ({
                     true  => {
-                        derr("usage: zenc --build-self[-full] <out.c> <srcroot>\n")
+                        eprint("usage: zenc --build-self[-full] <out.c> <srcroot>\n")
                         2
                     },
                     false => mp.build_self(arg(3), arg(2), cmd == "--build-self"),
@@ -1465,7 +1481,7 @@ stdin_emit = (mp: MutPtr<Malloc>, src: string_view) i32 {
     (sib == "").match ({
         true  => mp.raw_emit_src("<stdin>", src),
         false => {
-            derr(mp
+            eprint(mp
                 .gstr_string(256)
                 .gstr_append(mp, "zenc: <stdin>: error: sibling import '")
                 .gstr_append(mp, sib)
@@ -1479,7 +1495,7 @@ raw_emit_file = (mp: MutPtr<Malloc>, path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => mp.raw_emit_src(path, src),
         .Err(e)  => {
-            derr("zenc: cannot open input\n")
+            eprint("zenc: cannot open input\n")
             1
         },
     })
@@ -1599,26 +1615,18 @@ bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first
         },
     })
 }
-bs_join = (mp: MutPtr<Malloc>, root: string_view, rel: string_view) string_view {
-    mp
-        .gstr_string(256)
-        .gstr_append(mp, root)
-        .gstr_append(mp, "/")
-        .gstr_append(mp, rel)
-        .gstr_finish(mp)
-}
 bs_rel = (mp: MutPtr<Malloc>, mv: [u8], s: i64, t: i64) string_view {
     mp.bs_push_range(mp.gstr_string(256), mv, s, t).gstr_finish(mp)
 }
 bs_add_source = (mp: MutPtr<Malloc>, out: String, root: string_view, rel: string_view) String {
-    path := mp.bs_join(root, rel)
+    path := mp.join2(root, rel)
     contents_in(mp, path).match ({
         .Ok(src) => {
             sv := src.view()
             mp.bs_strip_file(out, sv, 0, sv.len, true)
         },
         .Err(e)  => {
-            derr("zenc: --build-self: cannot open a source file\n")
+            eprint("zenc: --build-self: cannot open a source file\n")
             out
         },
     })
@@ -1688,8 +1696,8 @@ bs_emit_checked = (
     esrc: string_view,
     shake: bool,
 ) i32 {
-    t0 := zt_ms()
-    rp := mp.resolve_prog(root, entry, esrc)
+    t0 := clock_ms()
+    rp := mp.resolve_prog_or_exit(root, entry, esrc)
     t1 := mp.zt_log("resolve-imports", t0)
     (mp.report_no_if_resolved(rp, entry, esrc) == 0).match ({
         true  => {
@@ -1712,7 +1720,7 @@ bs_emit_checked = (
                     gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
                         true  => bs_write(out_path, gen).then({ 0 }, { 1 }),
                         false => {
-                            derr("zenc: --build-self: emitted C did not start with the expected head\n")
+                            eprint("zenc: --build-self: emitted C did not start with the expected head\n")
                             1
                         },
                     })
@@ -1866,22 +1874,22 @@ bs_shake = (mp: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     kept
 }
 build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view, shake: bool) i32 {
-    mpath := mp.bs_join(root, "bootstrap/sources.txt")
+    mpath := mp.join2(root, "bootstrap/sources.txt")
     contents_in(mp, mpath).match ({
         .Ok(man) => {
             mv := man.view()
             flat := mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
-            entry := mp.bs_join(root, "driver.zen")
+            entry := mp.join2(root, "driver.zen")
             contents_in(mp, entry).match ({
                 .Ok(esrc) => mp.bs_emit_checked(root, out_path, flat, entry, esrc, shake),
                 .Err(e)   => {
-                    derr("zenc: --build-self: cannot open driver.zen for validation\n")
+                    eprint("zenc: --build-self: cannot open driver.zen for validation\n")
                     1
                 },
             })
         },
         .Err(e)  => {
-            derr("zenc: --build-self: cannot open bootstrap/sources.txt\n")
+            eprint("zenc: --build-self: cannot open bootstrap/sources.txt\n")
             1
         },
     })
@@ -1967,7 +1975,7 @@ doc_lines = (mp: MutPtr<Malloc>, v: [u8], p: i64, docs: String) i64 {
 doc_cmd = (mp: MutPtr<Malloc>, root: string_view, modarg: string_view) i32 {
     (modarg == "").match ({
         true  => {
-            derr("usage: zenc doc <std.mod|file.zen>\n")
+            eprint("usage: zenc doc <std.mod|file.zen>\n")
             2
         },
         false => contents_in(mp, mp.mod_path(root, modarg)).match ({
@@ -1979,7 +1987,7 @@ doc_cmd = (mp: MutPtr<Malloc>, root: string_view, modarg: string_view) i32 {
                 0
             },
             .Err(e)  => {
-                derr("zenc: doc: cannot open module\n")
+                eprint("zenc: doc: cannot open module\n")
                 1
             },
         }),
@@ -2035,7 +2043,7 @@ fmt_parse_err = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
     off := (perr_off_get() == 0).then({ lerr_off_get() }, { perr_off_get() })
     o := (off < 0).then({ 0 - off }, { off })
     sp := diag_user_span(src, src, o, 1)
-    derr(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, "parse", "cannot format (syntax error — a faithful formatter refuses a file it cannot represent)", "fix the parse error first (`zenc check` reports the full diagnostic), then re-run fmt", 1))
+    eprint(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, "parse", "cannot format (syntax error — a faithful formatter refuses a file it cannot represent)", "fix the parse error first (`zenc check` reports the full diagnostic), then re-run fmt", 1))
     1
 }
 // THE single source of truth for "would apply rewrite this file?" — a file is dirty iff the formatted
@@ -2068,9 +2076,9 @@ fmt_file = (mp: MutPtr<Malloc>, path: string_view, check: bool) i32 {
                         true  => fmt_dirty(src, r).match ({
                             true  => check.match ({
                                 true  => {
-                                    derr("zenc: ")
-                                    derr(path)
-                                    derr(": needs formatting\n")
+                                    eprint("zenc: ")
+                                    eprint(path)
+                                    eprint(": needs formatting\n")
                                     1
                                 },
                                 false => save(path, r.text, r.len).match ({
@@ -2087,7 +2095,7 @@ fmt_file = (mp: MutPtr<Malloc>, path: string_view, check: bool) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: fmt: cannot open input\n")
+            eprint("zenc: fmt: cannot open input\n")
             1
         },
     })
@@ -2111,7 +2119,7 @@ fmt_stdout = (mp: MutPtr<Malloc>, path: string_view) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: fmt: cannot open input\n")
+            eprint("zenc: fmt: cannot open input\n")
             1
         },
     })
@@ -2134,7 +2142,7 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: string_view, a3: string_view) i32 {
     (a2 == "--ast" || a2 == "--stdout").match ({
         true  => (a3 == "").match ({
             true  => {
-                derr("usage: zenc fmt --stdout <in.zen>\n")
+                eprint("usage: zenc fmt --stdout <in.zen>\n")
                 2
             },
             false => mp.fmt_stdout(a3),
@@ -2142,14 +2150,14 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: string_view, a3: string_view) i32 {
         false => (a2 == "--check").match ({
             true  => (a3 == "").match ({
                 true  => {
-                    derr("usage: zenc fmt [--check] <in.zen>...\n")
+                    eprint("usage: zenc fmt [--check] <in.zen>...\n")
                     2
                 },
                 false => mp.fmt_files(3, argc(), true, 0),
             }),
             false => (a2 == "").match ({
                 true  => {
-                    derr("usage: zenc fmt [--check] <in.zen>...\n")
+                    eprint("usage: zenc fmt [--check] <in.zen>...\n")
                     2
                 },
                 false => mp.fmt_files(2, argc(), false, 0),
@@ -2208,7 +2216,7 @@ zi_scan_args = (i: i32, n: i32, path: string_view, kind: i32, valid: bool) ZiIni
 }
 // One prompt line, without consuming the next prompt's input (read_stdin intentionally reads to EOF).
 zi_read_line = (mp: MutPtr<Malloc>, prompt: string_view) string_view {
-    derr(prompt)
+    eprint(prompt)
     s := mp.gstr_string(64)
     cell: [u8] := [0]
     done := false
@@ -2226,7 +2234,7 @@ zi_kind_choice = (s: string_view) i32 {
     })
 }
 zi_prompt_kind = (mp: MutPtr<Malloc>) i32 {
-    derr("Project type:\n  1) Executable\n  2) Library\n")
+    eprint("Project type:\n  1) Executable\n  2) Library\n")
     zi_kind_choice(mp.zi_read_line("Select [1]: "))
 }
 // Names are embedded in TOML, a string literal, and the executable output path. Keep them portable
@@ -2379,9 +2387,9 @@ zi_source = (mp: MutPtr<Malloc>, name: string_view, kind: i32) string_view {
     })
 }
 zi_collision = (path: string_view) i32 {
-    derr("zenc init: ")
-    derr(path)
-    derr(" already exists; nothing was changed\n")
+    eprint("zenc init: ")
+    eprint(path)
+    eprint(" already exists; nothing was changed\n")
     1
 }
 zi_remove_dir = (path: string_view) void { removed := rmdir(path) }
@@ -2402,9 +2410,9 @@ zi_create = (mp: MutPtr<Malloc>, target: string_view, name: string_view, kind: i
     source := mp.join2(srcdir, entry)
     target_exists := file_exists(target)
     (target_exists && dir_exists(target) == false).then({
-        derr("zenc init: target exists and is not a directory: ")
-        derr(target)
-        derr("\n")
+        eprint("zenc init: target exists and is not a directory: ")
+        eprint(target)
+        eprint("\n")
         return 1
     })
     file_exists(buildfile).then({
@@ -2421,47 +2429,47 @@ zi_create = (mp: MutPtr<Malloc>, target: string_view, name: string_view, kind: i
     })
     target_dir := mp.zi_make_tree(target)
     (target_dir.ok == false).then({
-        derr("zenc init: could not create project directory: ")
-        derr(target)
-        derr("\n")
+        eprint("zenc init: could not create project directory: ")
+        eprint(target)
+        eprint("\n")
         return 1
     })
     src_dir := zi_ensure_dir(srcdir)
     (src_dir.ok == false).then({
-        derr("zenc init: could not create source directory: ")
-        derr(srcdir)
-        derr("\n")
+        eprint("zenc init: could not create source directory: ")
+        eprint(srcdir)
+        eprint("\n")
         zi_cleanup_dirs(srcdir, target, false, target_dir.created)
         return 1
     })
     (zi_save_new(source, mp.zi_source(name, kind)) == false).then({
-        derr("zenc init: could not create source file: ")
-        derr(source)
-        derr("\n")
+        eprint("zenc init: could not create source file: ")
+        eprint(source)
+        eprint("\n")
         zi_cleanup_dirs(srcdir, target, src_dir.created, target_dir.created)
         return 1
     })
     (zi_save_new(manifest, mp.zi_manifest(name, kind)) == false).then({
         unlink(source)
-        derr("zenc init: could not create manifest: ")
-        derr(manifest)
-        derr("\n")
+        eprint("zenc init: could not create manifest: ")
+        eprint(manifest)
+        eprint("\n")
         zi_cleanup_dirs(srcdir, target, src_dir.created, target_dir.created)
         return 1
     })
-    derr("Created ")
-    derr((kind == ZI_KIND_LIBRARY).then({ "library" }, { "executable" }))
-    derr(" project `")
-    derr(name)
-    derr("` at ")
-    derr(target)
-    derr("\n")
-    derr((kind == ZI_KIND_LIBRARY).match ({
+    eprint("Created ")
+    eprint((kind == ZI_KIND_LIBRARY).then({ "library" }, { "executable" }))
+    eprint(" project `")
+    eprint(name)
+    eprint("` at ")
+    eprint(target)
+    eprint("\n")
+    eprint((kind == ZI_KIND_LIBRARY).match ({
         true  => "Check it with: zenc check ",
         false => "Run it with: zenc run ",
     }))
-    derr(target)
-    derr("\n")
+    eprint(target)
+    eprint("\n")
     0
 }
 zi_cmd = (mp: MutPtr<Malloc>) i32 {
@@ -2471,7 +2479,7 @@ zi_cmd = (mp: MutPtr<Malloc>) i32 {
         return 0
     })
     (parsed.ok == false).then({
-        derr(ZI_USAGE())
+        eprint(ZI_USAGE())
         return 2
     })
     rawpath := (parsed.path == "").match ({
@@ -2480,17 +2488,17 @@ zi_cmd = (mp: MutPtr<Malloc>) i32 {
     })
     path := mp.zi_normal_path(rawpath)
     (path == "" || zi_path_valid(path) == false).then({
-        derr("zenc init: project path uses unsafe characters or a '.'/'..' component\n")
+        eprint("zenc init: project path uses unsafe characters or a '.'/'..' component\n")
         return 2
     })
     name := mp.zi_project_name(path)
     (zi_name_valid(name) == false).then({
-        derr("zenc init: project name must match [A-Za-z0-9][A-Za-z0-9_-]*\n")
+        eprint("zenc init: project name must match [A-Za-z0-9][A-Za-z0-9_-]*\n")
         return 2
     })
     kind := (parsed.kind == ZI_KIND_PROMPT).then({ mp.zi_prompt_kind() }, { parsed.kind })
     (kind != ZI_KIND_EXECUTABLE && kind != ZI_KIND_LIBRARY).then({
-        derr("zenc init: choose 1/executable or 2/library\n")
+        eprint("zenc init: choose 1/executable or 2/library\n")
         return 2
     })
     mp.zi_create(path, name, kind)
@@ -2583,9 +2591,9 @@ resolve_spec = (mp: MutPtr<Malloc>, root: string_view, arg: string_view) Spec {
                 s.ok.match ({
                     true  => s,
                     false => {
-                        derr("zenc: ")
-                        derr(mp.join2(arg, "zen.toml"))
-                        derr(": invalid manifest (need `root`/`main`; optional `kind` is executable or library)\n")
+                        eprint("zenc: ")
+                        eprint(mp.join2(arg, "zen.toml"))
+                        eprint(": invalid manifest (need `root`/`main`; optional `kind` is executable or library)\n")
                         s
                     },
                 })
@@ -2768,7 +2776,7 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
     tgt := mp.cross_triple(osc, arc, abc)
     (root == "" || main == "").match ({
         true  => {
-            derr("zenc: build.zen: target is missing root/main\n")
+            eprint("zenc: build.zen: target is missing root/main\n")
             Spec(
                 source: "",
                 out: "",
@@ -2783,9 +2791,9 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
         },
         false => (tgt == "" == false && cross_supported(osc, arc, abc) == false).match ({
             true  => {
-                derr("zenc: build.zen: cross target ")
-                derr(tgt)
-                derr(" is unsupported in v1 (Linux aarch64|x86_64|riscv64, gnu|musl only)\n")
+                eprint("zenc: build.zen: cross target ")
+                eprint(tgt)
+                eprint(" is unsupported in v1 (Linux aarch64|x86_64|riscv64, gnu|musl only)\n")
                 empty_spec()
             },
             false => Spec(
@@ -2852,7 +2860,7 @@ gmx_write = (
         .gstr_finish(mp)
     save(gpath, body, blen).match ({
         .Ok(n)  => { },
-        .Err(e) => derr("zenc: build.zen: cannot write generated module\n"),
+        .Err(e) => eprint("zenc: build.zen: cannot write generated module\n"),
     })
     gpath
 }
@@ -2956,7 +2964,7 @@ build_zen_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) PlanS
                     sp
                 },
                 false => {
-                    derr("zenc: build.zen: the build program did not compile\n")
+                    eprint("zenc: build.zen: the build program did not compile\n")
                     PlanSource(
                         src: "",
                         ok: false,
@@ -2995,9 +3003,9 @@ build_named_plan = (
     (p.ok && i >= 0).match ({
         true  => mp.build_spec(root, mp.parse_spec_at(dir, p.src, i), "", ""),
         false => {
-            derr("zenc: build.zen: no target named `")
-            derr(wanted)
-            derr("`\n")
+            eprint("zenc: build.zen: no target named `")
+            eprint(wanted)
+            eprint("`\n")
             1
         },
     })
