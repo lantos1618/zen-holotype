@@ -21,11 +21,17 @@
 // The fingerprint is an FNV-1a fold over node tags plus those canonical leaves, so equal hash means
 // equal canonical tree. Collisions are astronomically unlikely at this scale and would surface as a
 // reviewable finding, never as a silent rewrite.
+//
+// EVERY child must be folded in. A node whose children are skipped is not an abstraction, it is a
+// lie: the first cut hashed a struct literal as its type name alone and duly reported `parse_not`
+// (which builds a `cond`) as identical to `parse_neg` (which builds a `bin_at("-")`) — the entire
+// difference sat in the unhashed fields. tests/harness_misc.zen plants that exact near-miss.
 { Malloc } = std.mem.alloc
 { then } = std.core.bool
 { view } = std.text.str
 { fnv1a64_fold } = std.hash
-{ Expr, Func, LambdaData, MatchData, Stmt, Ty } = compiler.ast.ast_types
+{ is_expr_null } = compiler.genc
+{ Expr, FieldInit, Func, LambdaData, LoopData, MatchData, Stmt, Ty } = compiler.ast.ast_types
 // Binding scope: names bound by this function, in binding order. Small and linear — a function with
 // enough locals for the scan to matter is already a problem this tool wants to report.
 CloneCtx*: {
@@ -85,9 +91,16 @@ clone_ty = (h: i64, t: Ty) i64 {
         .Named(nm)     => h.clone_tag(29).clone_text(nm),
         .Ptr(pd)       => h.clone_tag(30).clone_tag(pd.kind).clone_ty(load(pd.pointee)),
         .Slice(el)     => h.clone_tag(31).clone_ty(load(el)),
-        .FnT(f)        => h.clone_tag(32),
-        .Generic(g)    => h.clone_tag(33).clone_text(g.name),
+        .FnT(f)        => f.params.clone_tys(h.clone_tag(32)).clone_ty(load(f.ret)),
+        .Generic(g)    => g.args.clone_tys(h.clone_tag(33).clone_text(g.name)),
     })
+}
+clone_tys = (ts: [Ty], h: i64) i64 {
+    acc := h
+    ts.loop((hh, i, t) {
+        acc = acc.clone_ty(t)
+    })
+    acc
 }
 clone_exprs = (cx: MutPtr<CloneCtx>, h: i64, xs: [Expr]) i64 {
     acc := h
@@ -110,23 +123,51 @@ clone_expr = (cx: MutPtr<CloneCtx>, h0: i64, e: Ptr<Expr>) i64 {
         .Cond(d)        => cx.clone_expr(cx.clone_expr(cx.clone_expr(h.clone_tag(48), d.c), d.t), d.e),
         .Member(m)      => cx.clone_expr(h.clone_tag(49).clone_text(m.field), m.obj),
         .Arrow(a)       => cx.clone_expr(h.clone_tag(50).clone_text(a.field), a.obj),
-        .MakeEnum(mk)   => h.clone_tag(51).clone_text(mk.variant),
-        .MakeStruct(s)  => h.clone_tag(52).clone_text(s.ty),
-        .Tag(t)         => h.clone_tag(53).clone_text(t.variant),
+        .MakeEnum(mk)   => cx.clone_opt(h.clone_tag(51).clone_text(mk.ty).clone_text(mk.variant), mk.payload),
+        .MakeStruct(s)  => cx.clone_inits(h.clone_tag(52).clone_text(s.ty), s.inits),
+        .Tag(t)         => h.clone_tag(53).clone_text(t.ty).clone_text(t.variant),
         .Index(ix)      => cx.clone_expr(cx.clone_expr(h.clone_tag(54), ix.seq), ix.idx),
         .SliceLit(sl)   => cx.clone_exprs(h.clone_tag(55).clone_ty(sl.elem), sl.items),
         .Match(m)       => cx.clone_arms(cx.clone_expr(h.clone_tag(56), m.subj), m),
         .Block(b)       => cx.clone_stmts(h.clone_tag(57), b.stmts),
-        .Loop(l)        => cx.clone_stmts(cx.clone_expr(h.clone_tag(58), l.seq), l.body),
+        .Loop(l)        => cx.clone_loop(h.clone_tag(58), l),
         .Lambda(l)      => cx.clone_lambda(h.clone_tag(59), l),
     })
 }
 clone_arms = (cx: MutPtr<CloneCtx>, h: i64, m: MatchData) i64 {
     acc := h
     m.arms.loop((hh, i, a) {
+        cx.clone_bind(a.bind)    // `.Some(v) =>` binds v — rule 1, or the arm's spelling of v splits the group
         acc = cx.clone_expr(acc.clone_tag(60).clone_text(a.variant), a.body)
     })
     acc
+}
+// A struct literal's field VALUES are real children. Hashing only the type name — as the first cut
+// did — makes every literal of one type identical, which merged `parse_not` with `parse_neg`: both
+// build a `PExpr(expr: …, next: …)` and everything that distinguishes them lives in the fields.
+// Field names follow rule 2 (free, verbatim), so `S(a: t, b: u)` and `S(a: u, b: t)` differ.
+clone_inits = (cx: MutPtr<CloneCtx>, h: i64, inits: [FieldInit]) i64 {
+    acc := h
+    inits.loop((hh, i, f) {
+        acc = cx.clone_expr(acc.clone_tag(61).clone_text(f.name), f.value)
+    })
+    acc
+}
+// An optional child — an enum payload (`.None` has none) or a synthesized valueless return. Absent is
+// TAGGED, so it can never hash equal to a present child.
+clone_opt = (cx: MutPtr<CloneCtx>, h: i64, e: Ptr<Expr>) i64 {
+    e.is_expr_null().then({ h.clone_tag(62) }, { cx.clone_expr(h, e) })
+}
+// The loop header BINDS its index / element / handler names, so rule 1 covers them: without this
+// `xs.loop((h, i, x) { … })` and `ys.loop((h, i, y) { … })` hash differently and the group splits on
+// the spelling of a loop variable. All three bind unconditionally (a name the source omitted is ""),
+// so the binding indices stay aligned between any two loops.
+clone_loop = (cx: MutPtr<CloneCtx>, h: i64, l: LoopData) i64 {
+    acc := cx.clone_expr(h, l.seq).clone_ty(l.elemTy)
+    cx.clone_bind(l.idx)
+    cx.clone_bind(l.elem)
+    cx.clone_bind(l.h)
+    cx.clone_stmts(acc, l.body)
 }
 clone_lambda = (cx: MutPtr<CloneCtx>, h: i64, l: LambdaData) i64 {
     acc := h
@@ -152,7 +193,7 @@ clone_stmt = (cx: MutPtr<CloneCtx>, h0: i64, st: Stmt) i64 {
             v
         },
         .Assign(a)   => cx.clone_expr(cx.clone_expr(h.clone_tag(71), a.target), a.value),
-        .Return(r)   => cx.clone_expr(h.clone_tag(72), r),
+        .Return(r)   => cx.clone_opt(h.clone_tag(72), r),
         .ExprStmt(x) => cx.clone_expr(h.clone_tag(73), x),
         .IndexSet(s) => cx.clone_expr(cx.clone_expr(cx.clone_expr(h.clone_tag(74), s.seq), s.idx), s.value),
         .If(f)       => cx.clone_stmts(cx.clone_stmts(cx.clone_expr(h.clone_tag(75), f.c), f.then), f.els),
@@ -178,10 +219,40 @@ clone_fn* = (mp: MutPtr<Malloc>, f: Func) i64 {
     r := cx.clone_stmts(h, f.body)
     small := cx.nodes < CLONE_MIN_NODES()
     mp.release(buf.ptr)
-    // 0 = "too small to be worth reporting". Every trivial accessor is a clone of every other
-    // trivial accessor; true, and useless. Calibrated on this tree: below 12 nodes the findings are
-    // all one-line wrappers, above it they are duplicated logic.
     small.then({ 0 }, { r })
-}
-CLONE_MIN_NODES* = () i64 { 12 }
-
+}    // 0 = below the size gate, not worth reporting — see CLONE_MIN_NODES
+// THE SIZE GATE — a function whose canonical tree has fewer than this many nodes is never reported.
+//
+// It is NOT a precision filter. Structural identity is exact: every child is folded in, so a reported
+// pair really does have the same tree and there is nothing here to be wrong about. The gate is a
+// VOLUME dial, and the question it answers is "is this pair worth a human opening two files?".
+//
+// The line drawn at 8: eight nodes is the smallest body holding TWO operations over TWO leaves —
+// `b == ' ' || b == '\t'` is exactly 8 — and two operations is the smallest body in which two copies
+// can silently DIVERGE. Teach one `is_ws` about '\r' and its twin quietly disagrees; that is the
+// hazard this tool exists to surface. Below 8 the body is one operation or one constant
+// (`slice(null_ptr(), 0)`, `x + 1`, a call forwarding its arguments): duplicated, but with no logic
+// in it to drift, so merging buys an import and nothing else.
+//
+// Measured on this tree (`zen audit driver.zen`, converged seed, findings at each gate):
+//
+//     gate    4    6    8   10   12   14   16   20   24
+//     found  60   42   39   25   22   20   15    9    5
+//
+// and, hand-checked, what each tier ADMITS:
+//
+//   8  (+14)  is_ws == mf_ws, lspt_upper == is_upper_byte == is_upper_b, is_logic_op == ko_is_sc ==
+//             is_shortcircuit, and a SEVEN-strong `xs.slice_any((p) { p.name == n })` family
+//             (tmiss_has_tp, has_tparam, has_method, names_has, ka_param_named, …). Byte-identical
+//             bodies, every one mergeable — the highest-value tier in the sweep, and precisely the
+//             char-class/predicate de-duplication already on the roadmap.
+//   6  (+3)   tybuf == tybuf1, ff_slice_elem == vararg_elem. Real, marginal: single expressions.
+//   4  (+18)  the noise floor arrives — no_exports == empty_params == vw_none, all three
+//             `slice(null_ptr(), 0)`, and CLONE_BASIS == FNV_BASIS, two i64 CONSTANTS. "Structurally
+//             identical" has stopped meaning "duplicated logic" by here.
+//
+// 6 is defensible (it admits 3 real pairs and no junk) and 4 is not (a majority of its tier is junk).
+// 8 is the shipped default because it is the last gate whose entire admitted tier is code that can
+// rot out of sync. Raising it hides real duplication rather than false findings: 12 — the first cut's
+// number — drops all 14 of the 8-tier pairs, which is 17 genuine clones traded for a shorter report.
+CLONE_MIN_NODES* = () i64 { 8 }

@@ -17,7 +17,7 @@
 { ResolvedProgram, ModuleEntry, seen_name, add_name } = std.internal.resolve
 { edges_of, cache_module_path } = compiler.modgraph
 { say, derr, push_int, dir_exists, resolve_prog, dirname } = compiler.drvutil
-// ── zen audit — dead-code + unused-import reporter (advisory; `--strict` exits 1 on findings) ─────
+// ── zen audit — dead-code + unused-import + clone reporter (`--strict` exits 1; clones advisory) ──
 // Dead-decl analysis runs over the SAME whole-program pipeline `check` uses (resolve imports ->
 // parse -> resolve_module), so alias qualification, UFCS dispatch and trait-default materialization
 // are all visible. It builds a conservative reachability fixpoint over top-level decl NAMES:
@@ -638,7 +638,8 @@ AudFinding: {
     line: i64,
     msg: string_view,
     dead: bool,
-}
+    clone: bool,
+}    // clone = a `warning[clone]` row: counted on its own line and EXEMPT from --strict (see aud_emit)
 aud_strcmp = (a: string_view, b: string_view) i64 {
     av: [u8] := a.view()
     bv: [u8] := b.view()
@@ -1039,7 +1040,7 @@ aud_hash_key = (mp: MutPtr<Malloc>, h: i64) string_view {
     s := mp.gstr_string(17)
     i := 0
     @while (i < 16) {
-        s = s.gstr_push(mp, aud_hexd(h >> (60 - i * 4) & 15))
+        s = s.gstr_push(mp, aud_hexd(h >> 60 - i * 4 & 15))
         i = i + 1
     }
     s.gstr_finish(mp)
@@ -1074,10 +1075,11 @@ aud_clones = (
                             line: to_i64(dl.sp.line),
                             msg: mp.aud_clone_msg(f.name, names[prev]),
                             dead: false,
+                            clone: true,
                         )
                         n = n + 1
                     }),
-                    false => (fp == 0).then({ }, {
+                    false => (fp == 0 == false).then({
                         names[k] = f.name
                         seen = seen.put(mp, key, k).expect("audit: oom")
                         k = k + 1
@@ -1128,6 +1130,7 @@ aud_run* = (
 aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
     fb.aud_sort(n)
     dead := 0
+    clones := 0
     shown := 0
     i := 0
     @while (i < n) {
@@ -1139,6 +1142,9 @@ aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
         (dup == false).then({
             f.dead.then({
                 dead = dead + 1
+            })
+            f.clone.then({
+                clones = clones + 1
             })
             shown = shown + 1
             say(mp
@@ -1157,10 +1163,19 @@ aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
         .gstr_append(mp, "zen audit: ")
         .push_int(mp, dead)
         .gstr_append(mp, " dead decls, ")
-        .push_int(mp, shown - dead)
-        .gstr_append(mp, " unused imports")
+        .push_int(mp, shown - dead - clones)
+        .gstr_append(mp, " unused imports, ")
+        .push_int(mp, clones)
+        .gstr_append(mp, " clones")
         .gstr_finish(mp))
-    (strict && shown > 0).then({ 1 }, { 0 })
+    // SEVERITY: dead code and unused imports are DEFECTS — a name that cannot be reached is a lie
+    // about the program, and `--strict` has always failed on them. A clone is a JUDGEMENT: the two
+    // functions both work, and whether they should become one is a design call a human makes. So
+    // clones are advisory — they print, they are counted, and they never move the exit code. That is
+    // also the only honest default while the tree still holds 22 of them: a gate that is red on the
+    // day it lands trains people to pass --no-verify. Fold `clones` into this sum once the standing
+    // findings are down to zero, and the gate then keeps it there.
+    (strict && shown - clones > 0).then({ 1 }, { 0 })
 }
 // ── zen audit --workspace ─────────────────────────────────────────────────────────────────────────
 // `zenc audit --workspace <dir> [--strict]` — union dead-code reachability across EVERY entry point
