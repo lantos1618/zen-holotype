@@ -756,11 +756,119 @@ harness_misc_audit_ws = () i32 {
         .contains("'ws_m'")
         .om_not(), wtxt.contains("'ws_n'").om_not()])
 }
+// ════════════════════════════════════════════════════════════════════════════════
+// audit clones <- `warning[clone]` (compiler.clones structural fingerprint)
+// A detector that cannot fail is worthless, so this fixture plants BOTH answers and demands both.
+// Three families, each a base + an exact clone + a ONE-LEAF near-miss, all the same size:
+//
+//   scale  — clone renames the params AND the loop element; near-miss changes ONE operator (* -> +)
+//   pt     — clone renames the locals;   near-miss SWAPS the two struct-literal field values, so the
+//            two trees hold an identical multiset of leaves and differ only in placement
+//   mk     — clone renames the locals;   near-miss changes ONE enum variant (.A -> .B)
+//
+// The near-miss assertion is only meaningful because its own family's clone IS reported: that proves
+// the family clears the size gate, so a silent near-miss is discrimination and not suppression. The
+// `cl_tiny` pair (4 nodes) must stay silent for the opposite reason — it IS the gate. Exactly three
+// findings, no more: a fourth would mean two families collided with each other.
+// ════════════════════════════════════════════════════════════════════════════════
+CLONE_SRC := """
+CL_S*: { a: i32, b: i32 }
+CL_E*: A(i32) | B(i32)
+cl_scale_a = (xs: [i32], k: i32) i32 {
+    t := k
+    xs.loop((h, i, x) {
+        t = t + x * 2
+        t = t - x / 3
+    })
+    t + k * 5
+}
+cl_scale_b = (ys: [i32], n: i32) i32 {
+    t := n
+    ys.loop((h, j, y) {
+        t = t + y * 2
+        t = t - y / 3
+    })
+    t + n * 5
+}
+cl_near_op = (zs: [i32], q: i32) i32 {
+    t := q
+    zs.loop((h, i, z) {
+        t = t + z + 2
+        t = t - z / 3
+    })
+    t + q * 5
+}
+cl_pt_a = (k: i32) CL_S {
+    t := k * 3 + 1
+    u := t - 5
+    w := u * t + k
+    CL_S(a: t + w, b: u - w)
+}
+cl_pt_b = (m: i32) CL_S {
+    p := m * 3 + 1
+    q := p - 5
+    r := q * p + m
+    CL_S(a: p + r, b: q - r)
+}
+cl_near_fld = (k: i32) CL_S {
+    t := k * 3 + 1
+    u := t - 5
+    w := u * t + k
+    CL_S(a: u - w, b: t + w)
+}
+cl_mk_a = (k: i32) CL_E {
+    t := k * 3 + 1
+    u := t - 5
+    w := u * t + k
+    CL_E.A(t + w - u)
+}
+cl_mk_b = (m: i32) CL_E {
+    p := m * 3 + 1
+    q := p - 5
+    r := q * p + m
+    CL_E.A(p + r - q)
+}
+cl_near_var = (k: i32) CL_E {
+    t := k * 3 + 1
+    u := t - 5
+    w := u * t + k
+    CL_E.B(t + w - u)
+}
+cl_tiny_a = (x: i32) i32 { x + 1 }
+cl_tiny_b = (y: i32) i32 { y + 1 }
+cl_val = (e: CL_E) i32 {
+    e.match ({
+        .A(v) => v,
+        .B(v) => v,
+    })
+}
+main = () i32 {
+    v: [i32] := [1, 2, 3]
+    s := v.cl_scale_a(1) + v.cl_scale_b(2) + v.cl_near_op(3)
+    p := cl_pt_a(1).a + cl_pt_b(2).b + cl_near_fld(3).a
+    e := cl_mk_a(1).cl_val() + cl_mk_b(2).cl_val() + cl_near_var(3).cl_val()
+    s + p + e + cl_tiny_a(1) + cl_tiny_b(2)
+}
+"""
+harness_misc_clones = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_misc_clone.zen"), CLONE_SRC, len(CLONE_SRC))
+    save(mp.zo_path("zo_misc_clone.out"), "", 0)
+    rc := shell(mp.zo_cmd("./zen audit $ZT/zo_misc_clone.zen > $ZT/zo_misc_clone.out 2>&1")).expect("harness: shell")
+    txt := mp.om_read_file(mp.zo_path("zo_misc_clone.out"))
+    run_suite("audit clones (structural fingerprint)", [rc == 0, txt.contains("warning[clone]: fn 'cl_scale_b' is structurally identical to 'cl_scale_a'"), txt.contains("warning[clone]: fn 'cl_pt_b' is structurally identical to 'cl_pt_a'"), txt.contains("warning[clone]: fn 'cl_mk_b' is structurally identical to 'cl_mk_a'"), txt
+        .contains("cl_near_op")
+        .om_not(), txt.contains("cl_near_fld").om_not(), txt.contains("cl_near_var").om_not(), txt
+        .contains("cl_tiny")
+        .om_not(), txt.om_count("structurally identical") == 3])
+}
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 harness_misc_run* = () i32 {
     fails := 0
     fails = fails + harness_misc_audit()
     fails = fails + harness_misc_audit_ws()
+    fails = fails + harness_misc_clones()
     fails = fails + harness_misc_traits()
     fails = fails + harness_misc_string_types()
     fails = fails + harness_misc_num_parse()
