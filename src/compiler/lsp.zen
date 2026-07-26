@@ -2,7 +2,7 @@
 // Content-Length wire format, publishes diagnostics on open/change, and answers go-to-definition.
 // The JSON here is hand-rolled (std.format.json isn't in the seed manifest) and deliberately
 // minimal: enough of a reader to pull the fields the protocol needs out of a request body.
-{ Malloc } = std.mem.alloc
+{ Malloc, heap_scope_begin, heap_scope_end } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
 { contents_in } = std.io.file
@@ -777,7 +777,7 @@ lsp_semantic_tokens = (mp: MutPtr<Malloc>, body: string_view) i64 {
             data := is_empty(cached).match ({
                 true  => {
                     fresh := mp.lspt_tokens(lspd_text_at(i))
-                    mp.lspd_cache_tokens(i, fresh)
+                    lspd_cache_tokens(i, fresh)
                     fresh
                 },
                 false => cached,
@@ -834,7 +834,7 @@ lsp_publish_clear = (mp: MutPtr<Malloc>, uri: string_view) i64 {
 // OUT of the store, so diagnostics and highlighting are provably answering about the same bytes.
 lsp_did_change = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
     uri := mp.json_str_field(body, "uri")
-    i := mp.lspd_set(uri, mp.json_str_field(body, "text"), body.lsp_json_int("version"))
+    i := lspd_set(uri, mp.json_str_field(body, "text"), body.lsp_json_int("version"))
     mp.lsp_publish(root, uri, lspd_text_at(i))
 }
 // dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown
@@ -862,7 +862,7 @@ lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
                     false => (method == "textDocument/didClose").match ({
                         true  => {
                             closed := mp.json_str_field(body, "uri")
-                            mp.lspd_close(closed)
+                            lspd_close(closed)
                             mp.lsp_publish_clear(closed)
                             0
                         },
@@ -984,10 +984,19 @@ lsp_cmd* = (mp: MutPtr<Malloc>, root: string_view) i32 {
                 (n < 0 || n > LSP_BODY_MAX()).match ({
                     true  => 0,
                     false => {
+                        // ONE REQUEST, ONE SCOPE: the frame buffer, the JSON decode, and the whole
+                        // check pipeline the handler runs all allocate inside the scope and are
+                        // reclaimed together here. A batch compile may leak — it exits — but this
+                        // loop runs that pipeline once per keystroke, where the same non-free is
+                        // ~58 MB of growth per edit. Only the document store outlives the scope,
+                        // and it owns durable copies (compiler.lsp_docs). `act` is a scalar, so it
+                        // survives the reclaim by value.
+                        heap_scope_begin()
                         body := mp.acquire(n + 1)
                         got := body.lsp_read_body(0, n)
                         body.offset(got).store(0)
                         act := mp.lsp_handle(root, cstr(body))
+                        heap_scope_end()
                         (act == 1).then({
                             shut = true
                         })
