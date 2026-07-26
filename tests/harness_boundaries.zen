@@ -15,6 +15,7 @@
 //
 // NOT ported (added here):
 //   9. scan set covers every non-test .zen                → "scan set covers every non-test .zen"
+//  10. src/std imports no compiler module                 → "std imports no compiler module"
 //
 // HOW: enumerate the file set via `find ... > $ZT/ob_files.txt`, then read+scan each file in Zen.
 // The set is NO LONGER the python rglob: it also names the repo-root driver.zen and build.zen, which
@@ -23,7 +24,7 @@
 // `_code(...).split(marker,1)[…]` substring slicing on comment-stripped source.
 { Malloc } = std.mem.alloc
 { out, contents_in, shell } = std.io.file
-{ ne, view, is_empty, split_in, nbuf, find, contains, substr } = std.text.str
+{ ne, view, is_empty, split_in, nbuf, find, contains, starts_with, substr } = std.text.str
 { new_in, push_in, finish_in } = std.text.string
 { expect } = std.core.result
 { run_suite, zo_path, zo_cmd } = harness_lib
@@ -389,8 +390,8 @@ atwhile_allowed = (path: string_view) bool {
         || path == "src/std/sys/fs.zen"
         || path == "src/std/io/stdin.zen"
         || path == "src/std/hash.zen"
-        || path == "src/std/internal/resolve.zen"
-        || path == "src/std/internal/resolve_scan.zen"
+        || path == "src/compiler/resolve.zen"
+        || path == "src/compiler/resolve_scan.zen"
 }
 // low-level numeric/filesystem/stdin substrate: these primitives MUST iterate, not recurse — an
 // unbounded recursion depth (huge exponent / directory entry count / stdin byte or line count /
@@ -409,7 +410,7 @@ atwhile_allowed = (path: string_view) bool {
 // avoid. None of these loops are new: all 60 lived in the repo-root driver.zen and were exempt only
 // because the scan never reached it. They are now split 4 / 10 / 46 across the three files, and the
 // scan does reach it — the exemption is finally deliberate rather than accidental.
-// std.internal.resolve/resolve_scan join for their line scanners (next_line/line_end): the resolver
+// compiler.resolve/resolve_scan join for their line scanners (next_line/line_end): the resolver
 // walks whole flattened sources byte-by-byte to the next newline, and both per-byte recursion
 // (stack) and a per-call strlen (quadratic — the old shape, the top resolve-imports hotspot) are
 // exactly what this substrate class exists to avoid.
@@ -544,6 +545,52 @@ scanset_suite = (mp: MutPtr<Malloc>) i32 {
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 10: src/std stays BELOW src/compiler — no std module imports the compiler, bar two.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Zen pulls WHOLE modules (no tree-shaking), so one `= compiler.x` line in a std module puts x's
+// entire transitive closure into every user program that touches that module. Nothing stopped it:
+// the resolver treats `std.` and `compiler.` as the same kind of trusted repo-tree id, so the layer
+// split is documentary — which is exactly why it needs a gate. It drifted once already. The module
+// resolver was born as a 40-line import-line classifier that genuinely belonged in std, grew into
+// the compiler's real resolver, and ended up a src/std module whose transitive closure was the
+// ENTIRE compiler (58 modules, ~32k LOC — identical to compiler.check's). It now lives in
+// src/compiler/resolve*.zen; the flat namespace means that move renamed no emitted symbol.
+//
+// The two exemptions are the metaprogramming surface (docs/metaprogramming-vision.md): build an AST
+// with std.internal.ast, emit it with compiler.genc's genModule. A std module that hands out AST
+// values MUST name the AST's types, so that edge is intrinsic, not accidental — and it is bounded:
+// those two reach ast_types + genc + astops + mangle (~3k LOC), the AST/emitter subsystem and
+// nothing of the checker, parser or driver. Widening the set, or adding a third exemption, is a
+// design decision — make it here, in the open, rather than by adding an import line.
+layering_allowed = (path: string_view) bool {
+    path == "src/std/internal/ast.zen" || path == "src/std/io/c.zen"
+}
+layering_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
+    path.starts_with("src/std/").match ({
+        true  => path.layering_allowed().match ({
+            true  => true,
+            false => mp.contents_in(path).match ({
+                .Ok(raw) => mp.strip_comments_in(raw).not_contains("= compiler."),
+                .Err(e)  => false,
+            }),
+        }),
+        false => true,
+    })
+}    // unreadable = FAIL, never a silent pass
+layering_suite = (mp: MutPtr<Malloc>) i32 {
+    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
+        .Ok(listing) => {
+            files := mp.split_in(listing, '\n')
+            results: [bool] := mp.nbuf(true, files.len)
+            files.loop((h, i, path) {
+                results[i] = mp.layering_passes(path)
+            })
+            run_suite("boundaries: std imports no compiler module (bar the metaprogramming pair)", results)
+        },
+        .Err(e)      => run_suite("boundaries: layering (cannot enumerate files)", [false]),
+    })
+}
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 harness_boundaries_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -564,6 +611,7 @@ harness_boundaries_run* = () i32 {
     fails = fails + mp.io_suite()
     fails = fails + mp.map_suite()
     fails = fails + mp.fmt_suite()
+    fails = fails + mp.layering_suite()
     fails = fails + mp.bigstr_suite()
     fails
 }

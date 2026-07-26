@@ -540,7 +540,7 @@ exports and rewrites qualified uses, so two sibling modules can both export
 `thing` or `Box` and a program can call `left.thing()` and `right.thing()` in
 the same file.
 
-`std.internal.resolve` also exposes structured import-edge values for resolver
+`compiler.resolve` also exposes structured import-edge values for resolver
 work:
 
 ```zen
