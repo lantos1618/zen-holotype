@@ -6,14 +6,14 @@
   tvoid, vref, vref_at } = compiler.genc
 { mangle_anon_in, mangle_str_in } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
-{ at } = std.text.ascii
+{ at, is_upper } = std.text.ascii
 { Malloc } = std.mem.alloc
 { PEnd, TyEnd, is_comma, is_langle, is_lbrace, is_lbracket, is_rangle, is_rbrace, is_rbracket,
   is_rparen, is_shr_close, param_buf, parse_ty, parse_tyargs, perr_set_at, register_anon,
   skip_block, take_params } = compiler.parse_type
 { build_body } = compiler.parse_stmt
-{ enode, is_op, lexeme, parse_atom, parse_payload_args } = compiler.parse_atom
-{ is_dot, is_ident_tok, is_upper_byte, nl_between, parse_or_nested, parse_postfix } = compiler.parse_postfix
+{ enode, is_op, is_walrus, lexeme, parse_atom, parse_payload_args } = compiler.parse_atom
+{ is_dot, is_ident_tok, nl_between, parse_or_nested, parse_postfix } = compiler.parse_postfix
 { PExpr } = compiler.parse_expr
 is_lparen* = (src: string_view, t: Token) bool { src.is_op(t, '(') }
 is_raw_at* = (src: string_view, t: Token) bool { src.is_op(t, '@') }
@@ -75,7 +75,7 @@ looks_generic_ctor = (src: string_view, pos: i32) bool {
     })
 }
 // First byte of a token span is Uppercase (a variant/type name, not a lowercase field/method).
-a_lex_upper* = (src: string_view, t: Token) bool { src.at(t.start).is_upper_byte() }
+a_lex_upper* = (src: string_view, t: Token) bool { src.at(t.start).is_upper() }
 parse_generic_ctor = (a: MutPtr<Malloc>, src: string_view, name: string_view, pos: i32) PExpr {
     ta := a.parse_tyargs(src, pos)    // pos just past '<'
     dot := src.scan(ta.next)    // the '.'
@@ -219,12 +219,6 @@ parse_generic_struct_lit = (
 // first top-level separator is a `,` or the closing `}` — NOT a `:=` (which would make it a typed-let
 // block `{ x: T := … }`). The literal's structural name (mangle_anon_in over the field names) matches
 // the one parse_type synthesizes for the corresponding `{ q: T, r: T }` TYPE, so they share a C struct.
-is_walrus_tok = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == '=',
-        _    => false,
-    })
-}
 looks_anon_struct* = (src: string_view, pos: i32) bool {
     id := src.scan(pos)    // pos just past '{'
     is_ident_tok(id.tok).match ({
@@ -255,7 +249,7 @@ anon_scan_open = (src: string_view, sc: Scan, depth: i32) i32 {
         false => (src.is_rparen(sc.tok) || src.is_rbracket(sc.tok)).match ({
             true  => src.anon_scan_kind(sc.next, depth - 1),
             false => (depth == 0).match ({
-                true  => src.is_walrus_tok(sc.tok).match ({
+                true  => src.is_walrus(sc.tok).match ({
                     true  => 0,
                     false => src.is_comma(sc.tok).match ({
                         true  => 1,
@@ -267,7 +261,7 @@ anon_scan_open = (src: string_view, sc: Scan, depth: i32) i32 {
         }),
     })
 }
-afield_lit_buf = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(256 * sizeof(Field)), 256) }
+afield_buf* = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(256 * sizeof(Field)), 256) }
 // Syntactically infer a literal field VALUE's type, mirroring the checker's infer_expr for the forms a
 // struct-literal field can take directly (int/byte/float/string literals and nested struct literals). The
 // structural NAME is names-only, so this only feeds the synthesized StructDecl's C field types; a value the
@@ -283,7 +277,7 @@ infer_lit_ty = (value: Ptr<Expr>) Ty {
     })
 }
 inits_as_fields* = (a: MutPtr<Malloc>, inits: [FieldInit]) [Field] {
-    buf := a.afield_lit_buf()
+    buf := a.afield_buf()
     inits.loop((h, i, fi) {
         buf[i] = field(fi.name, infer_lit_ty(fi.value))
     })    // names-only mangle; types feed the hoisted StructDecl

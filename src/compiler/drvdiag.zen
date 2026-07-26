@@ -2,6 +2,7 @@
 // validation specs, pick the module and source text an error should render against, and print it.
 // Split out of driver.zen so `zenc lsp` can publish the same diagnostics the CLI prints.
 { Malloc } = std.mem.alloc
+{ clock_ms } = std.sys.os
 { then } = std.core.bool
 { Map } = std.collections.map
 { gstr_string, gstr_append, gstr_finish } = compiler.genc
@@ -17,10 +18,10 @@
   check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
   check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
 { diag_user_span, diag_line_span, DiagSpan, render_diagnostic } = compiler.diagnostic
-{ ResolvedProgram, ModuleEntry, fregion_find, fregion_src_line, undefined_name_hint } = std.internal.resolve
+{ ResolvedProgram, ModuleEntry, eprint, fregion_find, fregion_src_line, undefined_name_hint } = compiler.resolve
 { denrich_check } = compiler.validate.enrich
 { ufcs_vis_of } = compiler.check
-{ derr, push_int, zt_ms, zt_log } = compiler.drvutil
+{ eprint, push_int, zt_log } = compiler.drvutil
 // the first FAILING diagnostic, else clean. `cd_or(a, b)` = a if a failed, else b — so this is a flat
 // precedence chain of the checks in order, not a brace pyramid. Checks are independent and side-effect
 // free, so running them all is harmless; the reported diagnostic is still the first failure in order.
@@ -39,7 +40,7 @@ check_diag_no_main = (
     decls: [Decl],
     flat: string_view,
 ) CheckDiagnostic {
-    t0 := zt_ms()
+    t0 := clock_ms()
     c0 := check_module_no_if_diagnostic_from_source(flat)
         .cd_or(check_module_no_ternary_diagnostic_from_source(flat))
         .cd_or(mp.check_module_parse_diagnostic_from_source(decls, flat))
@@ -176,7 +177,7 @@ emit_one* = (
             hint = wh
         })
     })
-    derr(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, msg, hint, cd.count))
+    eprint(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, msg, hint, cd.count))
 }
 // Source-only commands (`fmt` and the deliberately-untyped raw emitter) do not own a ResolvedProgram,
 // but the no-if and no-ternary language laws still apply. Render the same structured diagnostic
@@ -187,7 +188,7 @@ report_no_if_plain* = (mp: MutPtr<Malloc>, path: string_view, src: string_view) 
         true  => 0,
         false => {
             sp := diag_user_span(src, src, cd.source_offset, cd.span_width)
-            derr(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
+            eprint(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
             1
         },
     })
@@ -206,7 +207,7 @@ report_no_if_resolved* = (
         true  => 0,
         false => {
             dl := locate_diag(rp, cd.source_offset, cd.span_width, path, user)
-            derr(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
+            eprint(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
             1
         },
     })
@@ -221,7 +222,7 @@ emit_more_trailer = (mp: MutPtr<Malloc>, k: i32) i64 {
         .push_int(mp, to_i64(k))
         .gstr_append(mp, " more error")
     s2 := (k == 1).then({ s.gstr_push(mp, ')') }, { s.gstr_push(mp, 's').gstr_push(mp, ')') })
-    derr(s2.gstr_push(mp, '\n').gstr_finish(mp))
+    eprint(s2.gstr_push(mp, '\n').gstr_finish(mp))
 }
 // 0 if clean; else render EVERY main-channel diagnostic (capped, with a trailer) and return the count.
 report_check* = (
@@ -233,7 +234,7 @@ report_check* = (
     user: string_view,
 ) i32 {
     // a specialized channel (parse / ownership / escape / bound / …) is the ROOT — report it alone.
-    t0 := zt_ms()
+    t0 := clock_ms()
     spec := mp.check_diag_no_main(raw, decls, rp.flat)
     t1 := mp.zt_log("  validate-spec", t0)
     (spec.code != 0).match ({
