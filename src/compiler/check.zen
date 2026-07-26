@@ -20,7 +20,7 @@
 // AST-node query traits (is_fnt on Ty, is_generic_fn on Func). Importing from compiler.astops pulls
 // the WHOLE module (all its impls: Ty/Func/Decl/StructDecl) into check's import closure, so the impl
 // index resolves these UFCS methods here and in every module that imports check (validate/*, passes/*).
-{ field_in, gstr_int, map_slice, slice_any, wr_writes_name } = compiler.astops
+{ field_in, gstr_int, map_slice, param_names_has, slice_any, wr_writes_name } = compiler.astops
 // Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
 // resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
 { impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
@@ -1481,9 +1481,6 @@ alias_cands_none = () AliasCands {
         second: "",
     )
 }
-tparam_names_have = (tps: [Param], name: string_view) bool {
-    tps.slice_any((tp) { tp.name == name })
-}
 // VISIBILITY: only `*`-exported names are UFCS-reachable through an alias. Alias-prefixed publics
 // keep their star in the FLAT source (`g__scale* = …`), and parse_module records every starred
 // top-level name (compiler.parse exports_get) — membership there means the aliased module exported
@@ -1503,7 +1500,7 @@ alias_cand_matches = (f: Func, fn: string_view, rty: Ty, exact: bool) bool {
         true  => {
             p0 := f.params[0].ty
             head := p0.dispatch_recv_name()
-            (f.tparams.tparam_names_have(head) == false).match ({
+            (f.tparams.param_names_has(head) == false).match ({
                 true  => exact.match ({
                     true  => is_empty(head).then({ false }, { head == rty.dispatch_recv_name() }),
                     false => rty.fits(p0),
@@ -1713,7 +1710,6 @@ infer_match_ty = (env: Env, m: MatchData) Ty {
     subjty := env.infer_expr(m.subj)
     env.infer_match_common_ty(subjty, m.arms)
 }
-has_tparam* = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { tp.name == n }) }
 // Slice literal element type: an expected `[T]` (declared/annotated) WINS, so a bare-int literal
 // `[1,2,3]` adopts the declared element width (`i64`/`u8`) instead of defaulting to i32 — the same
 // expected-type propagation a scalar int slot already gets. Falls back to the first item's type.

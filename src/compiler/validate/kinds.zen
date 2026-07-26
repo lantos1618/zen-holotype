@@ -10,7 +10,8 @@
   tparam_declared } = compiler.check
 { calls_reflect, rc_calls_body } = compiler.passes.refcount
 { reflect_fields } = compiler.passes.subst
-{ has_fnt_param, is_prim_width, slice_any, wr_lam_writes_value } = compiler.astops
+{ has_fnt_param, is_logic_op, is_or_return_fn, is_prim_width, param_names_has, slice_any,
+  wr_lam_writes_value } = compiler.astops
 { Malloc } = std.mem.alloc
 { at } = std.text.ascii
 { is_empty } = std.text.str
@@ -222,7 +223,6 @@ is_arith_op = (op: string_view) bool {
     b := op.at(0)
     b == '+' || b == '-' || b == '*' || b == '/' || b == '%'
 }
-is_logic_op = (op: string_view) bool { op == "&&" || op == "||" }
 // Strict comparisons require numeric operands; shifts are separate bitwise ops.
 is_cmp_op_v = (op: string_view) bool { op == "<" || op == ">" || op == "<=" || op == ">=" }
 is_bitwise_op = (op: string_view) bool {
@@ -392,15 +392,6 @@ ty_has_void_targ = (t: Ty) bool {
     })
 }
 tys_mention_void = (ts: [Ty]) bool { ts.slice_any((t) { t.is_void_ty() || t.ty_has_void_targ() }) }
-// trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares, with a
-// MATCHING SIGNATURE. The Trait is a struct whose FnT fields are the method signatures (using `Self`
-// for the implementing type); im.methods is the names this impl provides, and the impl's actual
-// method bodies are top-level DFuncs found by name. So per declared method: missing → 1 error;
-// present but signature-mismatched → 1 error; present and matching → 0. The check is tied to THIS
-// impl (im.methods), not a global function search, so an unrelated same-named fn never satisfies it.
-has_method* = (methods: [Param], name: string_view) bool {
-    methods.slice_any((p) { p.name == name })
-}
 // rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
 impl_ty = (tyname: string_view) Ty {
     (tyname == "i32").match ({
@@ -464,9 +455,15 @@ trait_has_default* = (decls: [Decl], trname: string_view, m: string_view) bool {
 }
 // one declared trait field: 0 if it's not a method, or it's provided with a matching signature, or it
 // is OMITTED but the trait supplies a default body; 1 if the method is missing (no default) or differs.
+// trait conformance: a `Type.impl(Trait)` must DEFINE every method the Trait declares, with a
+// MATCHING SIGNATURE. The Trait is a struct whose FnT fields are the method signatures (using `Self`
+// for the implementing type); im.methods is the names this impl provides, and the impl's actual
+// method bodies are top-level DFuncs found by name. So per declared method: missing → 1 error;
+// present but signature-mismatched → 1 error; present and matching → 0. The check is tied to THIS
+// impl (im.methods), not a global function search, so an unrelated same-named fn never satisfies it.
 method_err* = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
     f.ty.match ({
-        .FnT(fd) => im.methods.has_method(f.name).match ({
+        .FnT(fd) => im.methods.param_names_has(f.name).match ({
             true  => a.sig_matches(fd, decls.the_func(a.impl_cname_in(im.trname, im.ty, f.name)), im.ty).match ({
                 true  => 0,
                 false => 1,
@@ -893,7 +890,6 @@ ka_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 
     )
     a.ka_body_kind(env, f.tparams, f.body)
 }
-ka_param_named = (ps: [Param], nm: string_view) bool { ps.slice_any((p) { p.name == nm }) }
 // inline-only bodies: FnT-param generics (their lambda args must splice) and reflect-using generics
 // (their intrinsic needs the call site's concrete receiver type — see check_inline.no_inline_gen_f).
 ka_inline_only = (f: Func) bool {
@@ -1084,7 +1080,6 @@ krw_body = (body: [Stmt], ps: [Param]) i32 {
     })
     acc
 }
-ko_is_or_call = (c: CallData) bool { c.fn == "or_return" && c.args.len == 1 }
 ko_is_or_mcall = (mc: MethodCallData) bool { mc.method == "or_return" && mc.args.len == 0 }
 // the enclosing fn's ret and the receiver both need an `Err` payload, and the two must agree.
 // The `Ok` payloads are POSITION-dependent (`cnd` = conditionally-evaluated position):
@@ -1146,7 +1141,7 @@ ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
     })
 }
 ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData, cnd: bool) i32 {
-    own := ko_is_or_call(c).then({ env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos) }, { 0 })
+    own := is_or_return_fn(c).then({ env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos) }, { 0 })
     own.or(env.ko_args_kind(tps, want, c.args, cnd))
 }
 ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData, cnd: bool) i32 {
@@ -1158,7 +1153,6 @@ ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData, cnd: bool
 // It is set on entry and never cleared — a statement nested under a conditional value is still
 // conditional. `&&`/`||` LEFT operands and cond/match SUBJECTS evaluate unconditionally and hoist,
 // so they inherit.
-ko_is_sc = (op: string_view) bool { op == "&&" || op == "||" }
 ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
     load(e).match ({
         .Call(c)        => env.ko_call_kind(tps, want, c, cnd),
@@ -1168,7 +1162,7 @@ ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
             .or(env.ko_expr_kind(tps, want, ix.idx, cnd)),
         .Bin(b)         => env
             .ko_expr_kind(tps, want, b.lhs, cnd)
-            .or(env.ko_expr_kind(tps, want, b.rhs, ko_is_sc(b.op) || cnd)),
+            .or(env.ko_expr_kind(tps, want, b.rhs, is_logic_op(b.op) || cnd)),
         .Cond(d)        => env
             .ko_expr_kind(tps, want, d.c, cnd)
             .or(env.ko_expr_kind(tps, want, d.t, true))
@@ -1780,7 +1774,7 @@ Func.impl(FuncKinds, {
     ka_rec_hof_kind = (f: Func) i32 {
         (f.ka_inline_only()
             && f.body.len > 0
-            && f.params.ka_param_named(f.name) == false
+            && f.params.param_names_has(f.name) == false
             && ka_reflect_name(f.name) == false
             && f.body.rc_calls_body(f.name)).match ({
             true  => KRECHOF().kv_at(f.pos),

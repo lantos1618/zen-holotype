@@ -5,7 +5,7 @@
   slet, tvoid } = compiler.genc
 { chain_tmp_name, dotted_name_in, mangle_str_in } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
-{ at } = std.text.ascii
+{ at, is_upper } = std.text.ascii
 { Malloc } = std.mem.alloc
 { delim_enter, delim_exit, is_langle, is_lbrace, is_lbracket, is_rparen, parse_tyargs, pdepth_enter,
   pdepth_exit, pdepth_over, stmt_level, tok_eq, vbreak_note } = compiler.parse_type
@@ -148,7 +148,7 @@ is_loop_at = (src: string_view, pos: i32) bool {
 is_variant_break = (src: string_view, pos: i32) bool {
     dot := src.scan(pos)
     fld := src.scan(dot.next)
-    br := stmt_level() && src.nl_between(pos, dot.tok.start) && is_upper_byte(src.at(fld.tok.start))
+    br := stmt_level() && src.nl_between(pos, dot.tok.start) && is_upper(src.at(fld.tok.start))
     br.then({
         vbreak_note(dot.tok.start)
     })    // remember the dot for the KVBREAK diagnostic
@@ -245,10 +245,9 @@ parse_index = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
     ))
 }
 // Field access, UFCS calls, and qualified enum constructors share the dot parser.
-is_upper_byte* = (b: u8) bool { b >= 'A' && b <= 'Z' }
 is_qual_ctor = (base: PExpr, name: string_view) bool {
     rn := subj_name(base.expr)
-    rn.at(0).is_upper_byte() && name.at(0).is_upper_byte()
+    rn.at(0).is_upper() && name.at(0).is_upper()
 }
 // A NAMESPACE-qualified struct literal `ns.Type(field: val, …)` (e.g. `trace.Node(has: 0)`): an Uppercase
 // type name after the dot whose `(` opens a `field:` shape. The faithful parser (fmt) sees the raw,
@@ -258,7 +257,7 @@ is_qual_ctor = (base: PExpr, name: string_view) bool {
 is_qual_struct_lit = (src: string_view, base: PExpr, name: string_view, fld: Scan) bool {
     nx := src.scan(fld.next)
     subj_name(base.expr).at(0) != 0
-        && name.at(0).is_upper_byte()
+        && name.at(0).is_upper()
         && src.is_lparen(nx.tok)
         && src.nl_between(fld.next, nx.tok.start).then({ false }, { true })
         && src.paren_is_struct(nx.next)
@@ -285,7 +284,7 @@ parse_qual_struct_lit = (
 // leaving the bare `Name<TyArgs>…` forms that parse_ident handles.
 qual_generic_after = (src: string_view, base: PExpr, name: string_view, fld: Scan) i32 {
     nx := src.scan(fld.next)
-    (subj_name(base.expr).at(0) != 0 && name.at(0).is_upper_byte() && src.is_langle(nx.tok)).match ({
+    (subj_name(base.expr).at(0) != 0 && name.at(0).is_upper() && src.is_langle(nx.tok)).match ({
         true  => src.tyargs_end(nx.next, 1),
         false => 0 - 1,
     })
