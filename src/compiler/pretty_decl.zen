@@ -7,6 +7,7 @@
 { Malloc } = std.mem.alloc
 { Decl, EnumDecl, Field, Func, GenEnumDecl, GenStructDecl, ImplData, ImportData, Param, StructDecl,
   Ty, VariantDef } = compiler.ast.ast_types
+{ param_names_has } = compiler.astops
 { is_expr_null, tvoid } = compiler.genc
 { impl_cname_in, payload_fname } = compiler.mangle
 { ff_append, ff_block, ff_flush_leading, ff_indent, ff_string, ff_ty, ff_tys } = compiler.pretty
@@ -93,16 +94,13 @@ ff_tparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
         },
     })
 }
-// the `*` export marker: appended right after a top-level decl name when it was starred in the source.
-ff_exported = (exp: [Param], name: string_view) bool {
-    found := false
-    exp.loop((h, i, p) {
-        found = found || p.name == name
-    })
-    found
-}
+// the `*` export marker: appended right after a top-level decl name when it was starred in the
+// source — a param_names_has membership test over the export list.
 ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: string_view) String {
-    exp.ff_exported(name).then({ s.ff_append(a, name).ff_append(a, "*") }, { s.ff_append(a, name) })
+    exp.param_names_has(name).match ({
+        true  => s.ff_append(a, name).ff_append(a, "*"),
+        false => s.ff_append(a, name),
+    })
 }
 // The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
 // an anonymous-struct return type `{ field: T }`, changing the AST.
@@ -153,18 +151,11 @@ ff_type_tparams = (decls: [Decl], tyname: string_view) [Param] {
     })
     res
 }
-ff_tparams_has = (ps: [Param], name: string_view) bool {
-    found := false
-    ps.loop((h, i, p) {
-        found = found || p.name == name
-    })
-    found
-}
 ff_minus_tparams = (a: MutPtr<Malloc>, full: [Param], drop: [Param]) [Param] {
     buf := slice(a.acquire((full.len + 1) * sizeof(Param)), full.len + 1)
     n := 0
     full.loop((h, i, p) {
-        (drop.ff_tparams_has(p.name) == false).then({
+        (drop.param_names_has(p.name) == false).then({
             buf[n] = p
             n = n + 1
         })
