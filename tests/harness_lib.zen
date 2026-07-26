@@ -17,7 +17,9 @@
 //           VerdictCase(src: "test* = () i32 { 5 }",      should_pass: true,  kind: ""),
 //           VerdictCase(src: "test* = () i32 { nope() }", should_pass: false, kind: "undefined-name"),
 //           // should_pass=true => `zenc check` must accept. false => must reject; if `kind` is
-//           // non-empty the diagnostic must be `error[<kind>]` (a reject pinned by REASON).
+//           // non-empty the diagnostic must be `error[<kind>]` (a reject pinned by REASON). Even with
+//           // an EMPTY kind the diagnostic must still contain `error[` — a nonzero exit alone is not a
+//           // diagnosis (a usage error or an internal failure that exits 1..123 would satisfy it).
 //       ])
 //       v + d
 //   }
@@ -243,7 +245,8 @@ VCase*: {
     want: string_view,
 }
 // a VERDICT case: `zenc check src` must accept (should_pass=true) or reject (false). When rejecting
-// and `kind` is non-empty, the diagnostic must contain `error[<kind>]` (e.g. kind: "arity").
+// and `kind` is non-empty, the diagnostic must contain `error[<kind>]` (e.g. kind: "arity"); with an
+// empty kind it must still contain `error[`, so a bare nonzero exit can never stand in for a diagnosis.
 VerdictCase*: {
     src: string_view,
     should_pass: bool,
@@ -284,6 +287,8 @@ run_value* = (vc: VCase) bool {
 // VERDICT: `zenc check` exits 0 on accept, non-zero on reject (it prints exactly one diagnostic, so
 // `contains("error[<kind>]")` is equivalent to matching the first-error kind). Runs under `timeout 60`;
 // a timeout (rc 124) fails the case outright — a hung compiler must never satisfy a reject expectation.
+// A reject ALWAYS has to produce an `error[` diagnostic: exit codes 1..123 also cover usage errors and
+// internal failures, so "nonzero" on its own is not evidence that the checker diagnosed anything.
 run_verdict* = (vc: VerdictCase) bool {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -295,12 +300,12 @@ run_verdict* = (vc: VerdictCase) bool {
             true  => rc == 0,
             false => (rc == 0).match ({
                 true  => false,
-                false => is_empty(vc.kind).match ({
-                    true  => true,
-                    false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
-                        .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
-                        .Err(e)  => false,
-                    }),
+                false => mp.contents_in(mp.zo_path("zo_chk.txt")).match ({
+                    .Ok(txt) => txt.contains(is_empty(vc.kind).match ({
+                        true  => "error[",
+                        false => mp.kind_needle(vc.kind),
+                    })),
+                    .Err(e)  => false,
                 }),
             }),
         }),
@@ -458,12 +463,12 @@ zo_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, vc: VerdictCase) bool {
             true  => st == 0,
             false => (st == 0).match ({
                 true  => false,
-                false => is_empty(vc.kind).match ({
-                    true  => true,
-                    false => mp.contents_in(mp.zo_idpath("chk", gid, ".txt")).match ({
-                        .Ok(txt) => txt.contains(mp.kind_needle(vc.kind)),
-                        .Err(e)  => false,
-                    }),
+                false => mp.contents_in(mp.zo_idpath("chk", gid, ".txt")).match ({
+                    .Ok(txt) => txt.contains(is_empty(vc.kind).match ({
+                        true  => "error[",
+                        false => mp.kind_needle(vc.kind),
+                    })),
+                    .Err(e)  => false,
                 }),
             }),
         }),

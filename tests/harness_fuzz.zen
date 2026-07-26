@@ -176,11 +176,17 @@ fz_targeted = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, pick: i64) string_view {
 // (timeout=124 / 128+signal) is a crash/hang. The shell command computes the 0..2 crash count itself and
 // writes it to a per-input marker file, so the whole batch runs across the worker pool; Phase C reads the
 // markers IN ORDER, printing '.'/crash-report exactly as the serial runner did (byte-identical output).
+//
+// The `[ -s ]` guard makes INPUT PRESENCE part of the assertion. Every generated source is at least one
+// byte, so a missing/empty `fz<gid>.zen` means the case fed the compiler nothing — and `./zen check
+// <missing>` exits 1 (< 124), which the crash-only scoring below would read as "no crash" and print a
+// green dot. Deleting the `save` in fz_batch left all 237 fuzz cases green; the guard turns that into
+// marker 3 (a hard failure) instead of a silent pass.
 fz_cmd = (mp: MutPtr<Malloc>, gid: i64) string_view {
     z: string_view := ""
     f := mp.zo_idpath("fz", gid, ".zen")
     rc := mp.zo_idpath("fzrc", gid, ".txt")
-    mp.zo_join([z, "timeout 60 ./zen check ", f, " >/dev/null 2>&1; a=$?; timeout 60 ./zen emit ", f, " >/dev/null 2>&1; b=$?; c=0; [ $a -ge 124 ] && c=$((c+1)); [ $b -ge 124 ] && c=$((c+1)); printf %s $c > ", rc])
+    mp.zo_join([z, "if [ ! -s ", f, " ]; then printf 3 > ", rc, "; exit 0; fi; timeout 60 ./zen check ", f, " >/dev/null 2>&1; a=$?; timeout 60 ./zen emit ", f, " >/dev/null 2>&1; b=$?; c=0; [ $a -ge 124 ] && c=$((c+1)); [ $b -ge 124 ] && c=$((c+1)); printf %s $c > ", rc])
 }
 // crash count for input gid (0..2). An unreadable marker counts as a crash (fail loud, never silently pass).
 fz_crash_count = (mp: MutPtr<Malloc>, gid: i64) i32 {
