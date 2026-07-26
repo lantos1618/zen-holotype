@@ -1,6 +1,6 @@
 # Zen examples
 
-Thirteen examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
+Fourteen examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
 
 Build once, then run a C example with:
 
@@ -35,6 +35,16 @@ Run any of them as `./zen run examples/<name>.zen`.
 `jq.zen` is a mini-`jq`: `std.format.json` parses the document, a `.a.b[0]` path selects a node, and
 `json.pretty` renders it; all failures (missing file, bad JSON, bad path) are clean messages with a
 non-zero exit, never a crash.
+
+## Network
+
+| Example | Run |
+|---|---|
+| `http_tool.zen` | `./zen run examples/http_tool.zen -i http://127.0.0.1:8099/` |
+
+`http_tool.zen` is a curl-lite: `std.net.http.http_get` fetches a URL in one call, and the body is
+written from `body_bytes` so binary payloads survive. The host must be a dotted-quad or `localhost`
+(there is no DNS resolver), and `https://` is rejected (there is no TLS).
 
 ## Concurrency
 

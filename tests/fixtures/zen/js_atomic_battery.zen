@@ -1,0 +1,34 @@
+// js_atomic_battery.zen — dual-backend cross-check of the five atomic_* intrinsics. Every line
+// exercises one of them through std.concurrent.atomic; C lowers each to a __atomic_* builtin and the
+// js backend to the single-threaded __zr.atomic_* floor, so the two targets must print the same
+// bytes. Before the js lowering existed, `build --target js` exited 0 and node died with
+// `ReferenceError: atomic_store_i64 is not defined` — this file is that regression's teeth.
+//   C:  zen run   tests/fixtures/zen/js_atomic_battery.zen
+//   JS: zen build --target js tests/fixtures/zen/js_atomic_battery.zen -o /tmp/b.js && node /tmp/b.js
+{ println } = std.text.fmt
+{ Malloc } = std.mem.alloc
+atomic = std.concurrent.atomic
+main = () i32 {
+    m := Malloc(_: 0)
+    a := atomic.new_in(m.addr(), 7)
+    println(a.load())    // 7            — atomic_load_i64
+    a.store(10)    // atomic_store_i64
+    println(a.load())    // 10
+    println(a.add(5))    // 15           — atomic_add_i64, returns the NEW value
+    println(a.add(0 - 20))    // -5      — negative delta
+    println(a.cas(0 - 5, 99))    // true — atomic_cas_i64 hit
+    println(a.load())    // 99
+    println(a.cas(0 - 5, 1))    // false — CAS miss leaves the cell alone
+    println(a.load())    // 99
+    a.store(4000000000)    // past 2^32: the js floor must keep i64 width
+    println(a.add(4000000000))    // 8000000000
+    atomic.afence()    // atomic_fence — nothing to order on a one-thread target
+    b := atomic.bool_at(a.base)
+    b.store(true)
+    println(b.load())    // true
+    println(b.cas(true, false))    // true
+    println(b.load())    // false
+    println(a.fetch_add_cas(3))    // 0  — CAS spin loop, returns the PRIOR value
+    println(a.load())
+    0
+}    // 3
