@@ -1,6 +1,6 @@
 # Zen examples
 
-Twelve examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
+Thirteen examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
 
 Build once, then run a C example with:
 
@@ -28,8 +28,13 @@ Run any of them as `./zen run examples/<name>.zen`.
 |---|---|
 | `stdin_echo.zen` | `printf 'hello\nworld\n' \| ./zen run examples/stdin_echo.zen` |
 | `wordfreq.zen` | `printf 'the cat sat on the mat the cat\n' \| ./zen run examples/wordfreq.zen` |
+| `textproc.zen` | `./zen run examples/textproc.zen grep cat FILE` (also `re PAT FILE`, or bare for `wc`) |
 
 `wordfreq.zen` uses `HMap<string_view, i64>` to count input words.
+
+`textproc.zen` is `wc` + `grep`-lite: `wc` counts the raw bytes from `contents_bytes`/`read_all_bytes`
+(so an embedded NUL is counted, not treated as end-of-input), `grep`/`re` search with `std.text.str`
+and `std.text.regex`, and matching lines go out through a `std.io.bufwriter` sink.
 
 ## Concurrency
 
