@@ -1132,6 +1132,11 @@ harness_build_run* = () i32 {
         want_exit: "0",
         want_out: "",
         check_out: false,
+    ), FixtureCase(
+        path: "examples/http_tool.zen",
+        want_exit: "2",
+        want_out: "usage: http_tool [-i] http://host[:port][/path]\n",
+        check_out: true,
     )])
     // ── (c) `zenc check` accept/reject fixtures (reuse harness_lib.run_verdict on inline SOURCE) ───
     vd := run_verdicts("build check", [VerdictCase(
@@ -1972,6 +1977,15 @@ harness_build_run* = () i32 {
         name: "run_no_args_still_works",
         cmd: "./zen run tests/fixtures/zen/echo_args.zen > $ZT/zargs0.txt 2>/dev/null && printf '0\\n' | cmp -s - $ZT/zargs0.txt",
     ), ShellCase(
+        name: "example_http_tool_url_errors",
+        cmd: "{ timeout 30 ./zen run examples/http_tool.zen https://example.com/ > $ZT/zhtu.txt 2>/dev/null; test \"$?\" = 2; } && grep -Fq 'https is not supported' $ZT/zhtu.txt && { timeout 30 ./zen run examples/http_tool.zen http://127.0.0.1:1/ > $ZT/zhtc.txt 2>/dev/null; test \"$?\" = 1; } && grep -Fq Connect $ZT/zhtc.txt",
+    ), ShellCase(
+        name: "example_jq_query_pretty_and_errors",
+        cmd: "printf '{\"a\":{\"b\":[\"x\",\"deep\"]}}' > $ZT/zjq.json && ./zen run examples/jq.zen '.a.b[1]' $ZT/zjq.json > $ZT/zjq1.txt 2>/dev/null && printf '\"deep\"\\n' | cmp -s - $ZT/zjq1.txt && ./zen run examples/jq.zen '.a' < $ZT/zjq.json > $ZT/zjq2.txt 2>/dev/null && printf '{\\n  \"b\": [\\n    \"x\",\\n    \"deep\"\\n  ]\\n}\\n' | cmp -s - $ZT/zjq2.txt && { ./zen run examples/jq.zen '.nope' $ZT/zjq.json > $ZT/zjq3.txt 2>/dev/null; test \"$?\" = 1; } && grep -Fqx 'jq: no such field: nope' $ZT/zjq3.txt && { printf '{' | ./zen run examples/jq.zen . > $ZT/zjq4.txt 2>/dev/null; test \"$?\" = 1; } && grep -Fq 'invalid JSON' $ZT/zjq4.txt",
+    ), ShellCase(
+        name: "example_textproc_wc_grep_re",
+        cmd: "printf 'the cat sat\\non the mat\\nthe cat ran\\n' > $ZT/ztp.txt && ./zen run examples/textproc.zen $ZT/ztp.txt > $ZT/ztp1.txt 2>/dev/null && printf '3 9 35\\n' | cmp -s - $ZT/ztp1.txt && printf 'a\\000b\\nc\\n' > $ZT/ztp.bin && ./zen run examples/textproc.zen $ZT/ztp.bin > $ZT/ztp2.txt 2>/dev/null && printf '2 2 6\\n' | cmp -s - $ZT/ztp2.txt && ./zen run examples/textproc.zen grep cat $ZT/ztp.txt > $ZT/ztp3.txt 2>/dev/null && printf 'the cat sat\\nthe cat ran\\n' | cmp -s - $ZT/ztp3.txt && ./zen run examples/textproc.zen re '^the .*t$' < $ZT/ztp.txt > $ZT/ztp4.txt 2>/dev/null && printf 'the cat sat\\n' | cmp -s - $ZT/ztp4.txt && { ./zen run examples/textproc.zen grep zzz $ZT/ztp.txt > /dev/null 2>&1; test \"$?\" = 1; } && { ./zen run examples/textproc.zen re '(' $ZT/ztp.txt > $ZT/ztp5.txt 2>/dev/null; test \"$?\" = 2; } && grep -Fq 'bad regex' $ZT/ztp5.txt",
+    ), ShellCase(
         name: "tools_sigs_signature_map",
         cmd: "./zen run tools/sigs.zen tests/fixtures/sigs > $ZT/sigs.txt 2>/dev/null && cmp -s tests/fixtures/sigs/expected.txt $ZT/sigs.txt",
     ), ShellCase(
@@ -2016,6 +2030,12 @@ harness_build_run* = () i32 {
     ), ShellCase(
         name: "js_narrow_trunc_battery_dual_backend",
         cmd: "./zen build tests/fixtures/zen/js_narrow_trunc_battery.zen -o $ZT/zjnt 2>/dev/null && $ZT/zjnt > $ZT/zjnt_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_narrow_trunc_battery.zen -o $ZT/zjnt.js 2>/dev/null && node $ZT/zjnt.js > $ZT/zjnt_js.txt 2>/dev/null && cmp -s $ZT/zjnt_c.txt $ZT/zjnt_js.txt && printf '%b' '-968\\n1410065\\n-1474836480\\n3\\n984\\n-25536\\n' | cmp -s - $ZT/zjnt_c.txt",
+    ), ShellCase(
+        name: "js_atomic_battery_dual_backend",
+        cmd: "./zen build tests/fixtures/zen/js_atomic_battery.zen -o $ZT/zjab 2>/dev/null && $ZT/zjab > $ZT/zjab_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_atomic_battery.zen -o $ZT/zjab.js 2>/dev/null && node $ZT/zjab.js > $ZT/zjab_js.txt 2>/dev/null && cmp -s $ZT/zjab_c.txt $ZT/zjab_js.txt && printf '7\\n10\\n15\\n-5\\ntrue\\n99\\nfalse\\n99\\n8000000000\\ntrue\\ntrue\\nfalse\\n0\\n3\\n' | cmp -s - $ZT/zjab_c.txt",
+    ), ShellCase(
+        name: "js_no_undefined_intrinsic_calls",
+        cmd: "./zen build --target js tests/fixtures/zen/js_atomic_battery.zen -o $ZT/zjnu.js 2>/dev/null && ! grep -Eq '(^|[^A-Za-z0-9_.$])atomic_(load_i64|store_i64|add_i64|cas_i64|fence)[[:space:]]*\\(' $ZT/zjnu.js",
     ), ShellCase(
         name: "infer_lambda_ret_annot",
         cmd: "printf '{ Result, IoError, expect, map_err } = std.core.result\\nmain = () i32 {\\n    good: Result<i32, IoError> := .Ok(42)\\n    v := good.map_err((e) str { \"boom\" }).expect(\"m\")\\n    v - 42\\n}\\n' > $ZT/zlam.zen && ./zen build $ZT/zlam.zen -o $ZT/zlam_bin 2>/dev/null && $ZT/zlam_bin",
@@ -2248,6 +2268,15 @@ harness_build_run* = () i32 {
         name: "cache_path_invocation_warms",
         cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
     )])
+    // the five atomic_* intrinsics, C vs node. genc lowers each to a __atomic_* builtin; before the
+    // js backend lowered them too, `build --target js` exited 0 and the emitted call hit an
+    // undefined name — `node` died with `ReferenceError: atomic_store_i64 is not defined`. Asserting
+    // node's EXIT STATUS as well as the bytes is what gives this case teeth against that shape.
+    // the js-target parity GATE itself: an intrinsic the js backend cannot lower must be a build-time
+    // `error[js-target]` with NO output file, never a runtime ReferenceError. `--build-self` cannot be
+    // pointed at a doctored backend from here, so the case pins the invariant the gate enforces —
+    // every intrinsic genc's call_kind lowers is also lowered by js_call, checked by emitting a
+    // program that exercises the whole set and asserting the .js names no undefined free function.
     // ZENC_NO_CACHE: report mode's OUTPUT is the product, but a check cache hit replays only the
     // `ok` line (the report diagnostics are not stored in the entry) — so under the harness's warm
     // shared ZENC_CACHE_DIR a second run would lose the error[ffi-ungranted] report and fail here.

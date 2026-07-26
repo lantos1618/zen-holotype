@@ -27,6 +27,9 @@
 //  (12) a `"""` raw literal holding `"` then `//` — the token stream stays position-SORTED and the
 //       array stays `]`-terminated (an out-of-order token encodes a negative delta and kills the
 //       client's highlighting for the whole buffer)
+//  (13) TYPING AN IMPORT: every prefix of `std.text.str` is an unknown module, and each one must get
+//       its own diagnostic while the server keeps answering requests — resolution reports and returns
+//       instead of killing the process
 { Malloc } = std.mem.alloc
 { save, contents_in, shell } = std.io.file
 { len, contains } = std.text.str
@@ -314,8 +317,42 @@ lz_completion_items = (mp: MutPtr<Malloc>) bool {
         && o.contains("gamma") == false
         && mp.lz_rc(17) == "0"
 }
+// (19) KEYSTROKE SURVIVAL. Typing an import line is a run of UNKNOWN MODULES: `std.te` is not a
+// module, and neither is any other proper prefix of `std.text.str`. Module resolution used to
+// `exit(1)` from inside the library on the first one, so the server DIED mid-session — the keystroke
+// got no diagnostic and a request already in flight was never answered (the reported "highlighting
+// just stops"). Every keystroke must now get its own diagnostic, a request issued MID-typing must
+// still come back, and the session must reach a clean shutdown with the squiggles cleared once the
+// import finally names a real module.
+LZ_TYPED = () [string_view] {
+    ["s", "st", "std", "std.", "std.t", "std.te", "std.tex", "std.text", "std.text.", "std.text.s", "std.text.st"]
+}
+lz_import_keystrokes = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    uri := mp.lz_uri("lzkeys.zen")
+    tail := "\\nmain = () i32 { 0 }\\n"
+    sess := mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_BAD()))])
+    ver := 2
+    LZ_TYPED().loop((h, i, p) {
+        sess = mp.zo_join([z, sess, mp.lz_frame(mp.lz_change_v(uri, mp.zo_join([z, "{ len } = ", p, tail]), ver))])
+        // mid-typing, on a buffer that names no real module: the old server was already dead here
+        (p == "std.te").then({
+            sess = mp.zo_join([z, sess, mp.lz_frame(mp.lz_tokreq(uri, 76))])
+        })
+        ver = ver + 1
+    })
+    o := mp.lz_run(18, mp.zo_join([z, sess, mp.lz_frame(mp.lz_change_v(uri, mp.zo_join([z, "{ len } = std.text.str", tail]), ver)), mp.lz_frame(mp.lz_tokreq(uri, 77)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"code\":\"unresolved-import\"")
+        && o.contains("unknown module 's'")
+        && o.contains("unknown module 'std.te'")
+        && o.contains("unknown module 'std.text.st'")
+        && o.contains("\"id\":76")
+        && o.contains("\"id\":77")
+        && o.contains("\"diagnostics\":[]")
+        && mp.lz_rc(18) == "0"
+}
 harness_lsp_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_exit_no_shutdown()])
+    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown()])
 }

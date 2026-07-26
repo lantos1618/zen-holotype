@@ -24,9 +24,9 @@
   check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
   check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
 { DiagSpan } = compiler.diagnostic
-{ ResolvedProgram } = compiler.resolve
+{ resolve_failed, resolve_message, resolve_program_data, ResolvedProgram } = compiler.resolve
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ push_int, resolve_prog, cstr_range, cstr_substr } = compiler.drvutil
+{ push_int, dirname, cstr_range, cstr_substr } = compiler.drvutil
 { lspt_legend, lspt_tokens } = compiler.lsp_tokens
 { lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at, lspd_tokens_at } = compiler.lsp_docs
 { cd_or, locate_diag } = compiler.drvdiag
@@ -493,13 +493,34 @@ lsp_push_diag = (
 // channel (reserved/ownership/escape/leak/…/mustuse) contributes its diagnostic AND the whole main
 // batch (names/types/arity/exhaustiveness/…) is collected, so an ownership error shows alongside type
 // errors rather than one channel hiding the rest. Empty array => clears old squiggles.
+// one whole-file diagnostic carrying `msg` verbatim — the shape a REJECTED resolve reports through.
+lsp_head_diag = (mp: MutPtr<Malloc>, msg: string_view) string_view {
+    mp
+        .gstr_string(256)
+        .gstr_append(mp, "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":1,\"code\":\"unresolved-import\",\"source\":\"zen\",\"message\":")
+        .push_jstr(mp, mp.lsp_trim_nl(msg))
+        .gstr_append(mp, "}")
+        .gstr_finish(mp)
+}
+// the latched rejection text is newline-terminated (it was written straight to stderr); an LSP
+// message keeps its internal newlines (hint lines) but never a trailing one.
+lsp_trim_nl = (mp: MutPtr<Malloc>, s: string_view) string_view {
+    v: [u8] := s.view()
+    (v.len > 0 && v[v.len - 1] == '\n').then({ mp.cstr_substr(s, 0, to_i32(v.len - 1)) }, { s })
+}
 lsp_diags_array = (
     mp: MutPtr<Malloc>,
     root: string_view,
     path: string_view,
     text: string_view,
 ) string_view {
-    rp := mp.resolve_prog(root, path, text)
+    rp := mp.resolve_program_data(root, mp.dirname(path), path, text)
+    // A REJECTED resolve (unknown module / unknown name / dup-fn …) is reported ALONE and the server
+    // stays up: half of every import line a user types names a module that does not exist yet, and the
+    // flat built from a missing module would otherwise spray bogus undefined-name errors over the file.
+    resolve_failed().then({
+        return mp.lsp_head_diag(resolve_message())
+    })
     raw := mp.parse_module(rp.flat)
     decls := mp.resolve_module(raw)
     nif := check_module_no_if_diagnostic_from_source(rp.flat).cd_or(check_module_no_ternary_diagnostic_from_source(rp.flat))

@@ -13,6 +13,7 @@
 { has_fnt_param, is_logic_op, is_or_return_fn, is_prim_width, param_names_has, slice_any,
   wr_lam_writes_value } = compiler.astops
 { Malloc } = std.mem.alloc
+{ expr_fold_children } = compiler.ast.expr_children
 { at } = std.text.ascii
 { is_empty } = std.text.str
 { env_imported, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn,
@@ -504,23 +505,15 @@ kvb_call_kind = (env: Env, c: CallData) i32 {
 }
 kvb_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => env.kvb_call_kind(c).or(env.kvb_args_kind(c.args)),
-        .Index(ix)      => env.kvb_expr_kind(ix.seq).or(env.kvb_expr_kind(ix.idx)),
-        .Bin(b)         => env.kvb_expr_kind(b.lhs).or(env.kvb_expr_kind(b.rhs)),
-        .Cond(d)        => env
-            .kvb_expr_kind(d.c)
-            .or(env.kvb_expr_kind(d.t))
-            .or(env.kvb_expr_kind(d.e)),
-        .Member(m)      => env.kvb_expr_kind(m.obj),
-        .Arrow(ar)      => env.kvb_expr_kind(ar.obj),
-        .Match(m)       => env
-            .kvb_expr_kind(m.subj)
-            .or(env.kvb_arms_kind(env.infer_expr(m.subj), m.arms)),
-        .MakeEnum(mk)   => env.kvb_expr_kind(mk.payload),
-        .MakeStruct(sd) => env.kvb_inits_kind(sd.inits),
-        .Block(b)       => env.a.kvb_body_kind(env, b.stmts),
-        .Loop(l)        => env.kvb_expr_kind(l.seq).or(env.a.kvb_body_kind(env, l.body)),
-        _               => 0,
+        // `.Call` is where a bound is JUDGED and `.Match` binds an arm pattern into the env; every
+        // other shape is a plain structural descent, so it delegates to the one exhaustive child
+        // listing. The old hand-written arm list silently omitted `.SliceLit`, `.Lambda` and
+        // `.MethodCall`, so `[render(Bad())]` — a bound violation inside a slice literal — passed.
+        .Call(c)  => env.kvb_call_kind(c).or(env.kvb_args_kind(c.args)),
+        .Match(m) => env.kvb_expr_kind(m.subj).or(env.kvb_arms_kind(env.infer_expr(m.subj), m.arms)),
+        _         => 0.expr_fold_children(e, (acc, ch) { acc.or(env.kvb_expr_kind(ch)) }, (acc, body) {
+            acc.or(env.a.kvb_body_kind(env, body))
+        }),
     })
 }
 kvb_args_kind = (env: Env, args: [Expr]) i32 {

@@ -10,8 +10,8 @@
 { String } = std.text.string
 { view } = std.text.str
 { render_diagnostic } = compiler.diagnostic
-{ ModuleTable, ProvidedSymbol, die, eprint, id_is_user, mappend_id_name, mappend_mid_display,
-  mid_is_user, next_line, rappend_span, res_col_of, res_line_of } = compiler.resolve
+{ ModuleTable, ProvidedSymbol, eprint, id_is_user, mappend_id_name, mappend_mid_display,
+  res_reject_text, mid_is_user, next_line, rappend_span, res_col_of, res_line_of } = compiler.resolve
 // ── error[ffi-ungranted]: FFI is a BUILD-GRANTED capability ──────────────────────────────────────
 // A bodyless (foreign) declaration binds a raw C symbol — any module holding one can reach ANY
 // linked C function (`system`, `unlink`, …). The supply-chain hole: a TRANSITIVE dependency could
@@ -173,8 +173,14 @@ ffi_fail = (
         .gstr_append(a, dotted)
         .gstr_append(a, "` in the entry file")
         .gstr_finish(a)
-    eprint(a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1))
-    report.then({ 0 }, { die(1) })
+    d := a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1)
+    report.match ({
+        true  => {
+            eprint(d)
+            0
+        },
+        false => res_reject_text(d),
+    })
 }
 enforce_ffi_grants* = (
     a: MutPtr<Malloc>,

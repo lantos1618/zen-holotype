@@ -7,6 +7,7 @@
 { DeclIndex, VList, empty_params, pbuf, recall, var_bound, vcons, vnil } = compiler.check
 { field_fnt } = compiler.check_inline
 { Malloc } = std.mem.alloc
+{ expr_fold_children } = compiler.ast.expr_children
 lift_toplevel = (idx: DeclIndex, decls: [Decl], n: string_view) bool {
     idx.func_idx.get(n, 0 - 1) >= 0 || idx.global_idx.get(n, 0 - 1) >= 0
 }
@@ -39,19 +40,6 @@ lift_args_cap = (
     found := false
     xs.loop((h, i, x) {
         found = found.then({ true }, { a.lift_expr_cap(decls, idx, bound, x.addr()) })
-    })
-    found
-}
-lift_inits_cap = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    bound: Ptr<VList>,
-    inits: [FieldInit],
-) bool {
-    found := false
-    inits.loop((h, i, fi) {
-        found = found.then({ true }, { a.lift_expr_cap(decls, idx, bound, fi.value) })
     })
     found
 }
@@ -117,28 +105,20 @@ lift_expr_cap = (
     e: Ptr<Expr>,
 ) bool {
     load(e).match ({
-        .Var(v)        => lift_is_captured(decls, idx, bound, v.name),
-        .Bin(b)        => a.lift_expr_cap(decls, idx, bound, b.lhs)
-            || a.lift_expr_cap(decls, idx, bound, b.rhs),
-        .Call(c)       => lift_is_captured(decls, idx, bound, c.fn)
+        // the shapes that are NOT a plain descent: `.Var`/`.Call` NAME a binding, and
+        // `.Match`/`.Loop`/`.Lambda` EXTEND the bound set for their bodies (arm binder, loop
+        // idx/elem, lambda params). Everything else delegates to the one exhaustive child listing.
+        .Var(v)     => lift_is_captured(decls, idx, bound, v.name),
+        .Call(c)    => lift_is_captured(decls, idx, bound, c.fn)
             || a.lift_args_cap(decls, idx, bound, c.args),
-        .Cond(d)       => a.lift_expr_cap(decls, idx, bound, d.c)
-            || a.lift_expr_cap(decls, idx, bound, d.t)
-            || a.lift_expr_cap(decls, idx, bound, d.e),
-        .Member(m)     => a.lift_expr_cap(decls, idx, bound, m.obj),
-        .Arrow(ar)     => a.lift_expr_cap(decls, idx, bound, ar.obj),
-        .MakeEnum(mk)  => a.lift_expr_cap(decls, idx, bound, mk.payload),
-        .MakeStruct(s) => a.lift_inits_cap(decls, idx, bound, s.inits),
-        .Match(m)      => a.lift_expr_cap(decls, idx, bound, m.subj)
+        .Match(m)   => a.lift_expr_cap(decls, idx, bound, m.subj)
             || a.lift_arms_cap(decls, idx, bound, m.arms),
-        .Index(ix)     => a.lift_expr_cap(decls, idx, bound, ix.seq)
-            || a.lift_expr_cap(decls, idx, bound, ix.idx),
-        .SliceLit(sd)  => a.lift_args_cap(decls, idx, bound, sd.items),
-        .Loop(l)       => a.lift_expr_cap(decls, idx, bound, l.seq)
+        .Loop(l)    => a.lift_expr_cap(decls, idx, bound, l.seq)
             || a.lift_body_cap(decls, idx, a.vcons(l.idx, tvoid(), a.vcons(l.elem, tvoid(), bound)), l.body),
-        .Block(bl)     => a.lift_body_cap(decls, idx, bound, bl.stmts),
-        .Lambda(la)    => a.lift_body_cap(decls, idx, a.lift_lamparams(bound, la.params), la.body),
-        _              => false,
+        .Lambda(la) => a.lift_body_cap(decls, idx, a.lift_lamparams(bound, la.params), la.body),
+        _           => false.expr_fold_children(e, (acc, ch) {
+            acc || a.lift_expr_cap(decls, idx, bound, ch)
+        }, (acc, body) { acc || a.lift_body_cap(decls, idx, bound, body) }),
     })
 }
 // a lambda is liftable iff it does NOT capture (only its own params + body binders + top-level names).

@@ -26,8 +26,9 @@
 { eprint, first_user_import_in, file_exists } = compiler.resolve
 { ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = compiler.resolve_ffi
 { say, eprint, push_int, pid_path, dirname, last_slash, push_prefix, push_span, pad_sp, finish_cstr,
-  join2, cstr_substr, bs_push_range, zt_log, resolve_prog, dir_exists } = compiler.drvutil
-{ report_no_if_plain, report_no_if_resolved, report_check } = compiler.drvdiag
+  join2, cstr_substr, bs_push_range, zt_log, resolve_prog_or_exit, dir_exists } = compiler.drvutil
+{ report_no_if_plain, report_no_if_resolved, report_check, report_js_unsupported } = compiler.drvdiag
+{ js_unsupported_reset } = compiler.backend.js.js_expr
 { lsp_cmd } = compiler.lsp
 { FNV_BASIS, fnv_str, CacheWalk, edges_of, cache_walk_edges } = compiler.modgraph
 { AudCtx, aud_decl_name, aud_index, aud_tail_at, aud_ref, aud_mref, aud_walk_fn, aud_walk_sig,
@@ -437,7 +438,7 @@ compile_flat = (
     ccname: string_view,
 ) i32 {
     t0 := mp.tm_mark()
-    rp := mp.resolve_prog(root, path, src)
+    rp := mp.resolve_prog_or_exit(root, path, src)
     tm_flatten = mp.tm_lap(t0)
     (mp.report_no_if_resolved(rp, path, src) == 0).match ({
         true  => {
@@ -496,7 +497,7 @@ emit_raw = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
 emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog(root, path, src)
+            rp := mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
                     raw := mp.parse_module(rp.flat)
@@ -534,17 +535,24 @@ js_floor = (mp: MutPtr<Malloc>, root: string_view) string_view {
 emit_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog(root, path, src)
+            rp := mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
                     raw := mp.parse_module(rp.flat)
                     decls := mp.resolve_module(raw)
                     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
                         true  => {
-                            out(mp.js_floor(root))
-                            out("\n")
-                            out_bytes(mp.genJsModuleIn(decls).bytes())
-                            0
+                            js_unsupported_reset()
+                            mod := mp.genJsModuleIn(decls)
+                            (mp.report_js_unsupported(rp, path, src) == 0).match ({
+                                true  => {
+                                    out(mp.js_floor(root))
+                                    out("\n")
+                                    out_bytes(mod.bytes())
+                                    0
+                                },
+                                false => 1,
+                            })
                         },
                         false => 1,
                     })
@@ -562,7 +570,7 @@ emit_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
 build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog(root, path, src)
+            rp := mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
                     raw := mp.parse_module(rp.flat)
@@ -573,16 +581,24 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
                                 .gstr_string(8192)
                                 .gstr_append(mp, mp.js_floor(root))
                                 .gstr_append(mp, "\n")
+                            js_unsupported_reset()
                             mod := mp.genJsModuleIn(decls)
-                            full := js.gstr_append(mp, mod.finish_cstr(mp))
-                            save(out_path, full.finish_cstr(mp), full.len).match ({
-                                .Ok(n)  => {
-                                    eprint("zenc: wrote ")
-                                    eprint(out_path)
-                                    eprint("\n")
-                                    0
+                            // gate BEFORE save: a .js holding a call to an undefined function must
+                            // never reach disk, or `node` reports the compiler's bug as the user's.
+                            (mp.report_js_unsupported(rp, path, src) == 0).match ({
+                                true  => {
+                                    full := js.gstr_append(mp, mod.finish_cstr(mp))
+                                    save(out_path, full.finish_cstr(mp), full.len).match ({
+                                        .Ok(n)  => {
+                                            eprint("zenc: wrote ")
+                                            eprint(out_path)
+                                            eprint("\n")
+                                            0
+                                        },
+                                        .Err(e) => 1,
+                                    })
                                 },
-                                .Err(e) => 1,
+                                false => 1,
                             })
                         },
                         false => 1,
@@ -654,7 +670,7 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
             (cache_on() && ck == "" == false && file_exists(ck)).match ({
                 true  => check_ok_line(spec.source),
                 false => {
-                    rp := mp.resolve_prog(root, spec.source, src)
+                    rp := mp.resolve_prog_or_exit(root, spec.source, src)
                     (mp.report_no_if_resolved(rp, spec.source, src) == 0).match ({
                         true  => {
                             raw := mp.parse_module(rp.flat)
@@ -1125,7 +1141,7 @@ prof_names = (mp: MutPtr<Malloc>, decls: [Decl]) ProfNames {
 // the compiled program's parse-level decls carry every DImpl — a light frontend pass (resolve
 // imports + parse, no check) is enough to rebuild the impl-method name table for display.
 prof_names_of = (mp: MutPtr<Malloc>, root: string_view, spec: Spec, src: string_view) ProfNames {
-    rp := mp.resolve_prog(root, spec.source, src)
+    rp := mp.resolve_prog_or_exit(root, spec.source, src)
     mp.prof_names(mp.parse_module(rp.flat))
 }
 prof_binname = (mp: MutPtr<Malloc>, p: string_view) string_view {
@@ -1681,7 +1697,7 @@ bs_emit_checked = (
     shake: bool,
 ) i32 {
     t0 := clock_ms()
-    rp := mp.resolve_prog(root, entry, esrc)
+    rp := mp.resolve_prog_or_exit(root, entry, esrc)
     t1 := mp.zt_log("resolve-imports", t0)
     (mp.report_no_if_resolved(rp, entry, esrc) == 0).match ({
         true  => {

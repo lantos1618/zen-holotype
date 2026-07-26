@@ -11,7 +11,7 @@
 { enum_variants } = compiler.validate.kinds
 { env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_struct_fields, expr_pos,
   fit_err, is_enum_repr_field, is_ptr_ty, lit_slot_verdict, pos_or, tparam_shape_err,
-  ty_mentions_tparam } = compiler.validate.util
+  ty_carries_ptr, ty_mentions_tparam } = compiler.validate.util
 { KSCRATCHSEND, KSCRATCHSTATE } = compiler.validate.diag
 { AliasList, DeadList, consume_depth, dead_cons, dead_has, dead_kill, dead_nil, dead_remove,
   own_moved_var, owner_base, sd_call_pos, sm_call_pos, sm_mcall_pos } = compiler.validate.ownership
@@ -363,9 +363,10 @@ arg_var_name* = (c: CallData, i: i32) string_view {
 // Returning `x.addr()` where `x` is a stack local hands the caller a pointer into the dead frame. This
 // is a SEPARATE pass from the scope-escape above: it cannot reuse that walker, because a general
 // allocator's `a.acquire(n)` returns HEAP that outlives the call (returning it is fine) — only the
-// ADDRESS OF A LOCAL dangles. Conservative v1: taints `<local>.addr()` and forwards it through
-// `slice(...)`, struct literals, match/cond arms, and block values; flags it in return/trailing
-// position. NOT tracked (v1): aliasing through a `let`, heap-store aliasing, inter-procedural escape.
+// ADDRESS OF A LOCAL dangles. It taints `<local>.addr()`, forwards it through every value-carrying
+// expression shape, threads that taint across `let`/assignment ALIASES (`q := x.addr()` taints `q`, and
+// naming `q`, `s.p` or `ps[0]` then launders the address back out), and flags it in return/trailing
+// position. NOT tracked: heap-store aliasing, escape through a global.
 ae_collect_arms = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
     out := seen
     arms.loop((h, i, ar) {
@@ -398,6 +399,26 @@ ae_collect = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList
     })
     out
 }
+// the addr-of-local walk's context: the module (for the bounded interprocedural summaries) plus the two
+// name sets it threads — `locals`, every `let` in the function (the storage that dies with the frame),
+// and `tainted`, the subset whose VALUE derives from a `<local>.addr()` (so naming one, or a place
+// rooted at one, hands the address out). `tainted` grows statement by statement; the rest is fixed.
+AeCtx: {
+    decls: [Decl],
+    idx: DeclIndex,
+    locals: Ptr<DeadList>,
+    tainted: Ptr<DeadList>,
+    ptr_ret: bool,
+}
+ae_taint = (cx: AeCtx, tainted: Ptr<DeadList>) AeCtx {
+    AeCtx(
+        decls: cx.decls,
+        idx: cx.idx,
+        locals: cx.locals,
+        tainted: tainted,
+        ptr_ret: cx.ptr_ret,
+    )
+}
 // `<local>.addr()` — a UFCS `addr` call whose sole arg is a Var that is a collected stack local.
 ae_is_addr_local = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
     load(e).match ({
@@ -416,64 +437,68 @@ ae_is_addr_local = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
 // the send-message escape (SENDABILITY rule 3) uses the NON-hopping escape check: a laundered send
 // (`send(.Poke(launder(local.addr())))`) is the sendability pass's concern (kind `sendable`), so the
 // call-following added for return-escape must NOT pre-empt it here — hop=false preserves that split.
-ae_send_pos = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    e: Ptr<Expr>,
-) i32 {
+ae_send_pos = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c) => (c.fn.sx_named("send", "__send")
             && c.args.len >= 2
-            && a.ae_escapes(decls, idx, locals, c.args[1].addr(), false)).match ({
+            && a.ae_escapes(cx, c.args[1].addr(), false)).match ({
             true  => c.pos.pos_or(1),
             false => 0,
         }),
         _        => 0,
     })
 }
-ae_block_val_escapes = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    stmts: [Stmt],
-    hop: bool,
-) bool {
-    (stmts.len == 0).match ({
-        true  => false,
-        false => stmts[stmts.len - 1].match ({
-            .ExprStmt(e) => a.ae_escapes(decls, idx, locals, e, hop),
-            .Return(r)   => a.ae_escapes(decls, idx, locals, r, hop),
-            _            => false,
+// grow the taint set across ONE statement: a binding or store whose VALUE yields a pointer into this
+// frame makes the destination local an alias of it. Monotone (never un-taints) — a later re-assignment
+// to something safe does not retire the alias that was already handed out.
+ae_taint_step = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) Ptr<DeadList> {
+    st.match ({
+        .Let(l)      => a.ae_escapes(cx, l.value, true).match ({
+            true  => a.dead_cons(l.name, cx.tainted),
+            false => cx.tainted,
         }),
+        .Assign(x)   => a.ae_taint_store(cx, x.target, x.value),
+        .IndexSet(x) => a.ae_taint_store(cx, x.seq, x.value),
+        _            => cx.tainted,
     })
 }
-ae_inits_escape = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    inits: [FieldInit],
-    hop: bool,
-) bool { inits.slice_any((fi) { a.ae_escapes(decls, idx, locals, fi.value, hop) }) }
-ae_arms_escape = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    arms: [ArmData],
-    hop: bool,
-) bool { arms.slice_any((ar) { a.ae_escapes(decls, idx, locals, ar.body, hop) }) }
-ae_items_escape = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    items: [Expr],
-    hop: bool,
-) bool { items.slice_any((it) { a.ae_escapes(decls, idx, locals, it.addr(), hop) }) }
+// a store INTO a local place (`s.p = x.addr()`, `ps[0] = x.addr()`) taints the place's root local. A
+// store rooted at a param/global is a different escape (the out-param store, `ae_store_pos`), not a
+// local alias, so it adds nothing here.
+ae_taint_store = (a: MutPtr<Malloc>, cx: AeCtx, target: Ptr<Expr>, value: Ptr<Expr>) Ptr<DeadList> {
+    rn := target.wr_root_name()
+    (cx.locals.dead_has(rn) && a.ae_escapes(cx, value, true)).match ({
+        true  => a.dead_cons(rn, cx.tainted),
+        false => cx.tainted,
+    })
+}
+// a statement list in VALUE position: any `return` inside it escapes, and — when `tail` — so does its
+// trailing value. `let`s thread the taint set exactly as at the top level, so a block that aliases first
+// (`{ q := x.addr() ⏎ q }`) is caught. `tail` is false for a `.Loop` body, whose trailing value is
+// discarded — only its returns reach the caller.
+ae_stmts_val_escapes = (a: MutPtr<Malloc>, cx: AeCtx, stmts: [Stmt], hop: bool, tail: bool) bool {
+    f := false
+    cur := cx
+    stmts.loop((h, i, st) {
+        hit := st.match ({
+            .Return(r)   => a.ae_escapes(cur, r, hop),
+            .ExprStmt(e) => tail && i == stmts.len - 1 && a.ae_escapes(cur, e, hop),
+            _            => false,
+        })
+        f = hit.then({ true }, { f })
+        cur = cur.ae_taint(a.ae_taint_step(cur, st))
+    })
+    f
+}
+ae_inits_escape = (a: MutPtr<Malloc>, cx: AeCtx, inits: [FieldInit], hop: bool) bool {
+    inits.slice_any((fi) { a.ae_escapes(cx, fi.value, hop) })
+}
+ae_arms_escape = (a: MutPtr<Malloc>, cx: AeCtx, arms: [ArmData], hop: bool) bool {
+    arms.slice_any((ar) { a.ae_escapes(cx, ar.body, hop) })
+}
+ae_items_escape = (a: MutPtr<Malloc>, cx: AeCtx, items: [Expr], hop: bool) bool {
+    items.slice_any((it) { a.ae_escapes(cx, it.addr(), hop) })
+}
 // ── ESCAPE THROUGH A FN (re-census #1: stack-escape via a wrapper) ─────────────────────────────────
 // The intra-procedural walk above flags `<local>.addr()` FORWARDED through slice/struct/match/cond/block
 // in a return/trailing. But a local's address laundered THROUGH A CALL — an identity/wrapper fn that
@@ -666,19 +691,13 @@ ae_ret_stmtarms = (
     f
 }
 // the call-following forward for the escape walk: a local's address escaping into a returning-param arg.
-ae_call_escapes = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    c: CallData,
-) bool {
-    f := idx.idx_func(decls, c.fn)
+ae_call_escapes = (a: MutPtr<Malloc>, cx: AeCtx, c: CallData) bool {
+    f := cx.idx.idx_func(cx.decls, c.fn)
     found := false
     (f.name == "" == false && f.params.len == c.args.len).then({
         c.args.loop((h, i, ar) {
-            (a.ae_escapes(decls, idx, locals, ar.addr(), true)
-                && a.ae_fn_returns_param(decls, idx, c.fn, i, consume_depth())).then({
+            (a.ae_escapes(cx, ar.addr(), true)
+                && a.ae_fn_returns_param(cx.decls, cx.idx, c.fn, i, consume_depth())).then({
                 found = true
             })
         })
@@ -772,22 +791,16 @@ ae_arg_outlives = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
     rn := e.wr_root_name()
     rn == "" == false && locals.dead_has(rn) == false
 }
-// statement-position store escape: the source offset of a call that plants a `<local>.addr()` through an
-// out-param whose destination arg outlives this frame, else 0.
-ae_store_pos = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    e: Ptr<Expr>,
-) i32 {
+// statement-position store escape: the source offset of a call that plants a pointer into this frame
+// through an out-param whose destination arg outlives this frame, else 0.
+ae_store_pos = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c) => {
             acc := 0
             c.args.loop((h, si, ar) {
-                locals.ae_is_addr_local(ar.addr()).then({
-                    di := a.ae_fn_store_dest(decls, idx, c.fn, si, consume_depth())
-                    (di >= 0 && di < c.args.len && locals.ae_arg_outlives(c.args[di].addr())).then({
+                a.ae_escapes(cx, ar.addr(), true).then({
+                    di := a.ae_fn_store_dest(cx.decls, cx.idx, c.fn, si, consume_depth())
+                    (di >= 0 && di < c.args.len && cx.locals.ae_arg_outlives(c.args[di].addr())).then({
                         acc = acc.or(c.pos.pos_or(1))
                     })
                 })
@@ -797,133 +810,108 @@ ae_store_pos = (
         _        => 0,
     })
 }
-// value position: IS a `<local>.addr()`, or forwards one through slice()/struct/match/cond/block, or (only
-// when `hop`) through a call to a fn that returns one of its pointer params (identity/wrapper laundering).
-// `hop` is on for the return/trailing escape (the actual stack-escape-via-fn vuln) and off for the send
-// path, which the sendability pass owns (so a laundered send stays kind `sendable`, not `escape`).
-ae_escapes = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    e: Ptr<Expr>,
-    hop: bool,
-) bool {
-    locals.ae_is_addr_local(e).match ({
+// value position: does this expression yield a pointer into THIS frame? It does when it IS a
+// `<local>.addr()`, when it names a local TAINTED by one (`q := x.addr()` … `q`), when it reads a place
+// rooted at such a local (`s.p`, `ps[0]`), when it forwards one through slice()/enum/struct/slice-literal/
+// match/cond/block/loop, or — only when `hop` — through a call to a fn that returns one of its pointer
+// params (identity/wrapper laundering). `hop` is on for the return/trailing escape (the actual
+// stack-escape-via-fn vuln) and off for the send path, which the sendability pass owns (so a laundered
+// send stays kind `sendable`, not `escape`).
+// EXHAUSTIVE over `Expr` BY DESIGN — there is no `_` arm. A default arm in an escape checker reads "a
+// shape I have not thought about is safe", and that default is exactly how the alias, struct-member and
+// slice-element laundering above shipped as accepted code. Spelling every variant out makes a new `Expr`
+// variant an exhaustiveness ERROR here instead of a silent hole; the `false` arms below are each a claim
+// that the shape cannot carry an address, not an absence of thought.
+ae_escapes = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>, hop: bool) bool {
+    cx.locals.ae_is_addr_local(e).match ({
         true  => true,
         false => load(e).match ({
-            .Call(c)       => (c.fn == "slice" && c.args.len > 0).match ({
-                true  => a.ae_escapes(decls, idx, locals, c.args[0].addr(), hop),
-                false => hop.then({ a.ae_call_escapes(decls, idx, locals, c) }, { false }),
+            .Int(n)         => false,
+            .Byte(b)        => false,
+            .FloatLit(t)    => false,
+            .StrLit(s)      => false,    // static storage — outlives every frame
+            .Tag(t)         => false,    // a payload-less enum tag carries nothing
+            .Bin(b)         => false,    // Zen has no pointer arithmetic (`+` rejects pointer operands),
+            // so every `Bin` yields a number or a bool
+            .Lambda(lm)     => a.ae_stmts_val_escapes(cx, lm.body, hop, true),
+            .Var(v)         => cx.tainted.dead_has(v.name),
+            .Member(m)      => a.ae_escapes(cx, m.obj, hop),
+            .Arrow(ar)      => a.ae_escapes(cx, ar.obj, hop),
+            .Index(ix)      => a.ae_escapes(cx, ix.seq, hop),
+            .Call(c)        => (c.fn == "slice" && c.args.len > 0).match ({
+                true  => a.ae_escapes(cx, c.args[0].addr(), hop),
+                false => hop.then({ a.ae_call_escapes(cx, c) }, { false }),
             }),
-            .MakeEnum(mk)  => a.ae_escapes(decls, idx, locals, mk.payload, hop),
-            .MakeStruct(s) => a.ae_inits_escape(decls, idx, locals, s.inits, hop),
-            .Match(m)      => a.ae_arms_escape(decls, idx, locals, m.arms, hop),
-            .Cond(d)       => a.ae_escapes(decls, idx, locals, d.t, hop)
-                || a.ae_escapes(decls, idx, locals, d.e, hop),
-            .Block(b)      => a.ae_block_val_escapes(decls, idx, locals, b.stmts, hop),
-            .SliceLit(sd)  => a.ae_items_escape(decls, idx, locals, sd.items, hop),
-            _              => false,
+            .MethodCall(mc) => false,    // desugar_method_calls lowers every MethodCall to a flat Call
+            // before validation reads a body — unreachable, listed to keep the match total
+            .MakeEnum(mk)   => a.ae_escapes(cx, mk.payload, hop),
+            .MakeStruct(s)  => a.ae_inits_escape(cx, s.inits, hop),
+            .Match(m)       => a.ae_arms_escape(cx, m.arms, hop),
+            .Cond(d)        => a.ae_escapes(cx, d.t, hop) || a.ae_escapes(cx, d.e, hop),
+            .Block(b)       => a.ae_stmts_val_escapes(cx, b.stmts, hop, true),
+            .SliceLit(sd)   => a.ae_items_escape(cx, sd.items, hop),
+            .Loop(l)        => a.ae_stmts_val_escapes(cx, l.body, hop, false),
         }),
     })
 }
-// position walk (mirrors kv_escape_*): the source offset of the first escaping return/trailing, 0 = none.
-ae_kv_arm = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    body: Ptr<Expr>,
-) i32 {
+// position walk: the source offset of the first escaping return/trailing, 0 = none. Mirrors kv_escape_*
+// in compiler.validate.core, and threads the taint set across each statement exactly as it does.
+ae_kv_arm = (a: MutPtr<Malloc>, cx: AeCtx, body: Ptr<Expr>) i32 {
     load(body).match ({
-        .Block(b) => a.ae_kv_stmts(decls, idx, locals, b.stmts),
+        .Block(b) => a.ae_kv_stmts(cx, b.stmts),
         _         => 0,
     })
 }
-ae_kv_arms = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    arms: [ArmData],
-) i32 {
+ae_kv_arms = (a: MutPtr<Malloc>, cx: AeCtx, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.or(a.ae_kv_arm(decls, idx, locals, ar.body))
+        acc = acc.or(a.ae_kv_arm(cx, ar.body))
     })
     acc
 }
-ae_kv_expr_stmt = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    e: Ptr<Expr>,
-) i32 {
+ae_kv_expr_stmt = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Match(m) => a.ae_kv_arms(decls, idx, locals, m.arms),
-        .Cond(d)  => a
-            .ae_kv_expr_stmt(decls, idx, locals, d.t)
-            .or(a.ae_kv_expr_stmt(decls, idx, locals, d.e)),
-        .Block(b) => a.ae_kv_stmts(decls, idx, locals, b.stmts),
-        .Loop(l)  => a.ae_kv_stmts(decls, idx, locals, l.body),
+        .Match(m) => a.ae_kv_arms(cx, m.arms),
+        .Cond(d)  => a.ae_kv_expr_stmt(cx, d.t).or(a.ae_kv_expr_stmt(cx, d.e)),
+        .Block(b) => a.ae_kv_stmts(cx, b.stmts),
+        .Loop(l)  => a.ae_kv_stmts(cx, l.body),
         _         => 0,
     })
 }
-ae_kv_stmt = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    st: Stmt,
-) i32 {
+ae_kv_stmt = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) i32 {
     st.match ({
-        .Return(r)   => a.ae_escapes(decls, idx, locals, r, true).match ({
+        .Return(r)   => (cx.ptr_ret && a.ae_escapes(cx, r, true)).match ({
             true  => load(r).expr_pos().pos_or(1),
-            false => a.ae_store_pos(decls, idx, locals, r),
+            false => a.ae_store_pos(cx, r),
         }),
-        .If(f)       => a
-            .ae_kv_stmts(decls, idx, locals, f.then)
-            .or(a.ae_kv_stmts(decls, idx, locals, f.els)),
-        .While(w)    => a.ae_kv_stmts(decls, idx, locals, w.body),
-        .Let(l)      => a
-            .ae_send_pos(decls, idx, locals, l.value)
-            .or(a.ae_store_pos(decls, idx, locals, l.value)),
-        .Assign(x)   => a
-            .ae_send_pos(decls, idx, locals, x.value)
-            .or(a.ae_store_pos(decls, idx, locals, x.value)),
-        .ExprStmt(e) => a
-            .ae_kv_expr_stmt(decls, idx, locals, e)
-            .or(a.ae_send_pos(decls, idx, locals, e))
-            .or(a.ae_store_pos(decls, idx, locals, e)),
+        .If(f)       => a.ae_kv_stmts(cx, f.then).or(a.ae_kv_stmts(cx, f.els)),
+        .While(w)    => a.ae_kv_stmts(cx, w.body),
+        .Let(l)      => a.ae_send_pos(cx, l.value).or(a.ae_store_pos(cx, l.value)),
+        .Assign(x)   => a.ae_send_pos(cx, x.value).or(a.ae_store_pos(cx, x.value)),
+        .ExprStmt(e) => a.ae_kv_expr_stmt(cx, e).or(a.ae_send_pos(cx, e)).or(a.ae_store_pos(cx, e)),
         _            => 0,
     })
 }
-ae_kv_stmts = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    body: [Stmt],
-) i32 {
+ae_kv_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
     acc := 0
+    cur := cx
     body.loop((h, i, st) {
-        acc = acc.or(a.ae_kv_stmt(decls, idx, locals, st))
+        acc = acc.or(a.ae_kv_stmt(cur, st))
+        cur = cur.ae_taint(a.ae_taint_step(cur, st))
     })
     acc
 }
-ae_kv_body = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    locals: Ptr<DeadList>,
-    body: [Stmt],
-) i32 {
-    acc := a.ae_kv_stmts(decls, idx, locals, body)
+ae_kv_body = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
+    acc := 0
+    cur := cx
+    body.loop((h, i, st) {
+        acc = acc.or(a.ae_kv_stmt(cur, st))
+        cur = cur.ae_taint(a.ae_taint_step(cur, st))
+    })
     acc.or((body.len == 0).match ({
         true  => 0,
         false => body[body.len - 1].match ({
-            .ExprStmt(e) => a.ae_escapes(decls, idx, locals, e, true).match ({
+            .ExprStmt(e) => (cx.ptr_ret && a.ae_escapes(cur, e, true)).match ({
                 true  => load(e).expr_pos().pos_or(1),
                 false => 0,
             }),
@@ -932,8 +920,13 @@ ae_kv_body = (
     }))
 }
 ae_check_func* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
-    locals := a.ae_collect(a.dead_nil(), f.body)
-    a.ae_kv_body(decls, idx, locals, f.body)
+    a.ae_kv_body(AeCtx(
+        decls: decls,
+        idx: idx,
+        locals: a.ae_collect(a.dead_nil(), f.body),
+        tainted: a.dead_nil(),
+        ptr_ret: f.ret.ty_carries_ptr(),
+    ), f.body)
 }
 // ── UNIFIED send-payload walk (replaces the near-identical sd_*/sm_* traversal skeletons). ────────
 // ONE tree-fold parameterized by `mode`: 0 = send-Rc (sd_* leaves), 1 = send-MutPtr (sm_* leaves).
