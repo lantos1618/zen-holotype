@@ -14,8 +14,8 @@
 // Only plain-named-value receivers are method-ified: the language does not support `.impl` on
 // pointer/slice receiver types, so genc's Ptr<Expr>/[Stmt] predicates (is_expr_null, blk_diverges,
 // stmts_diverge) necessarily stay free functions in compiler.genc.
-{ Ty, Func, Decl, StructDecl, Param, BinData, CallData, Expr, Stmt } = compiler.ast.ast_types
-{ sbyte, gstr_push, cbuf } = compiler.genc
+{ Ty, Func, Decl, Field, StructDecl, Param, BinData, CallData, Expr, Stmt } = compiler.ast.ast_types
+{ sbyte, gstr_push, cbuf, tvoid } = compiler.genc
 { String } = std.text.string
 { Malloc } = std.mem.alloc
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
@@ -35,6 +35,15 @@ Ty.impl(TyQuery, {
 // it beside the impl means compiler.genc — imported by user programs (via std.internal.ast, std.io.c) —
 // carries NO reference to a method defined outside its own closure. It stays a free function (its
 // receiver `[Param]` is a slice type, which the language cannot carry a trait impl on).
+// the declared type of field `fname`, or Void when the struct has no such field — the shared
+// struct-field lookup behind generic field reads, ownership's struct-literal gate and arg fitting.
+field_in* = (fields: [Field], fname: string_view) Ty {
+    found := tvoid()
+    fields.loop((h, i, fl) {
+        found = (fl.name == fname).then({ fl.ty }, { found })
+    })
+    found
+}
 // the number of elements in an AST slice — the C and JS backends both size a slice literal with it.
 slice_count* = (items: [Expr]) i32 {
     n := 0

@@ -20,7 +20,7 @@
 // AST-node query traits (is_fnt on Ty, is_generic_fn on Func). Importing from compiler.astops pulls
 // the WHOLE module (all its impls: Ty/Func/Decl/StructDecl) into check's import closure, so the impl
 // index resolves these UFCS methods here and in every module that imports check (validate/*, passes/*).
-{ gstr_int, map_slice, slice_any, wr_writes_name } = compiler.astops
+{ field_in, gstr_int, map_slice, slice_any, wr_writes_name } = compiler.astops
 // Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
 // resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
 { impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
@@ -304,7 +304,7 @@ DeclIndex*: {
         g := idx.idx_genstruct(decls, gname)
         is_empty(g.name).match ({
             true  => tvoid(),
-            false => a.subst_ty_in(g.tparams, targs, g.fields.gen_field_at(fname)),
+            false => a.subst_ty_in(g.tparams, targs, g.fields.field_in(fname)),
         })
     }
     idx_variant_payload = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ty {
@@ -1650,14 +1650,6 @@ tag_ty = (env: Env, t: TagData) Ty {
         true  => env.enum_inst_tag(t.variant).einst_ty(),
         false => (t.targs.len > 0).then({ tgeneric(t.ty, t.targs, t.mty) }, { tnamed(t.mty) }),
     })
-}
-// Generic struct field reads substitute the receiver's concrete type args.
-gen_field_at = (fields: [Field], fname: string_view) Ty {
-    found := tvoid()
-    fields.loop((h, i, f) {
-        found = (f.name == fname).then({ f.ty }, { found })
-    })
-    found
 }
 ty_under_ptr* = (t: Ty) Ty {
     t.match ({
