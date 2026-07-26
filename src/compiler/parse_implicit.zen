@@ -3,20 +3,13 @@
 // params into bounded generics. Runs over the whole [Decl] list after the streaming parse. Split out
 // of the compiler.parse god file. Style: UFCS.
 { Ty, Param, Decl, StructDecl, GenStructDecl, EnumDecl, GenEnumDecl, VariantDef, Field, Func } = compiler.ast.ast_types
-{ cbuf, param, tvoid, tnamed, tptr, ty_node_in, dfunc, dforeign, dstruct, dgenstruct, denum,
-  dgenenum, gsdef_at, genumdef_at } = compiler.genc
-{ slice_any } = compiler.astops
-{ at, is_digit } = std.text.ascii
+{ cbuf, param, tvoid, tnamed, tptr, tnode, dfunc, dforeign, dstruct, dgenstruct, denum, dgenenum,
+  gsdef_at, genumdef_at } = compiler.genc
+{ param_names_has, slice_any } = compiler.astops
+{ at, is_digit, is_upper } = std.text.ascii
 { Malloc } = std.mem.alloc
 { field_is_method } = compiler.parse_type_decl
 { param_buf, take_params } = compiler.parse_type
-param_names_has* = (ps: [Param], name: string_view) bool {
-    found := false
-    ps.loop((h, i, p) {
-        found = found || p.name == name
-    })
-    found
-}
 // ── implicit type parameters (M2): a free, short ALL-CAPS name (A, T, E, R, K, V, T1, …) used in a
 //    param / field / payload TYPE position introduces the type parameter, so the `<A>` declaration list
 //    becomes OPTIONAL (the existing explicit lists keep working untouched). Two gates make this safe:
@@ -28,11 +21,10 @@ param_names_has* = (ps: [Param], name: string_view) bool {
 //    the streaming parser). A collected param lands in the SAME tparams set an explicit `<A>` feeds, so
 //    is_generic_fn / mono / check treat implicit and explicit params identically. Collection is purely
 //    additive for explicit sites (their vars are already declared → found present → nothing added).
-is_upper_b = (b: u8) bool { b >= 'A' && b <= 'Z' }
 // A `str` is NUL-terminated, so we read bytes directly: a tyvar name is a single upper letter (`A`) or
 // an upper letter followed by exactly one digit (`T1`), and nothing more.
 is_tyvar_name = (s: string_view) bool {
-    s.at(0).is_upper_b().match ({
+    s.at(0).is_upper().match ({
         true  => (s.at(1) == 0).then({ true }, { s.at(1).is_digit() && s.at(2) == 0 }),
         false => false,
     })
@@ -181,7 +173,7 @@ collect_traits = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
     buf.take_params(n)
 }
 // MutPtr<T> lowers to T* — the same Ty an explicit `MutPtr<A>` produces.
-mutptr_of = (a: MutPtr<Malloc>, t: Ty) Ty { tptr(a.ty_node_in(t)) }
+mutptr_of = (a: MutPtr<Malloc>, t: Ty) Ty { tptr(a.tnode(t)) }
 // a one-character, NUL-terminated tparam name (`A`, `B`, …).
 make_letter = (a: MutPtr<Malloc>, c: u8) string_view {
     p: RawPtr<u8> := a.acquire(2)

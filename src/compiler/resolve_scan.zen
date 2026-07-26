@@ -1,11 +1,11 @@
 // @self-hosted-only
-// Checked-mode resolver — source-text SCANNING (extracted from std.internal.resolve): the pure
+// Checked-mode resolver — source-text SCANNING (extracted from compiler.resolve): the pure
 // lexers that turn raw module source into stripped text, import edges, and provided symbols.
 // strip_into/strip_imports (comment/literal-aware import stripping), import_edges + edge_* parsing,
 // provided_symbols_in + symbol_* scanning, sig_of_symbols and the ModuleGraph builder/name-sets.
-// No disk I/O, no ModuleTable, no mutable globals — those stay in std.internal.resolve, which also
+// No disk I/O, no ModuleTable, no mutable globals — those stay in compiler.resolve, which also
 // owns the shared types these signatures reference (imported back below).
-{ at, is_alpha, is_alnum } = std.text.ascii
+{ at, is_alpha, is_alnum, line_comment_at, rawstr_at } = std.text.ascii
 { gstr_string, gstr_append } = compiler.genc
 { decl_span } = compiler.parse
 { Malloc, try_acquire } = std.mem.alloc
@@ -15,8 +15,7 @@
 { view } = std.text.str
 { lstrip, is_import_line, next_line, STD_MARKER_LEN, COMPILER_MARKER_LEN, USER_MARKER_LEN, rset_add,
   rset_add_str, rpush, madd_str_name, ImportEdge, ProvidedSymbol, SIG_PUB, SIG_TYPE, SIG_IMPORTED,
-  SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line, line_comment_at, raw_lit_end,
-  rawstr_at } = std.internal.resolve
+  SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line, raw_lit_end } = compiler.resolve
 // A line holding no decl material: blank, or a `//` line comment. The SYMBOL walks must step over
 // these one line at a time instead of falling into decl_span: decl_span's lexer skips comments and
 // newlines wholesale, so calling it from inside a comment/blank line that precedes a NAMESPACED
@@ -27,7 +26,6 @@ is_skippable_line = (s: string_view, p: i32) bool {
     c := s.lstrip(p)
     s.line_comment_at(c) || s.at(c) == '\n' || s.at(c) == '\r'
 }
-is_ws* = (b: u8) bool { b == ' ' || b == '\t' }
 // A top-level line opening an import: `{` then a space OR a binding name directly (`{println}`).
 // `has_import_marker` then confirms a real `} = std./compiler./user` follows, so relaxing the
 // space requirement here can't mis-classify a plain `{` block.
@@ -773,18 +771,18 @@ sym_sig_flags = (s: ProvidedSymbol) i64 {
 // additionally registered under its `_zk`-escaped key (see ModuleSig).
 sig_of_symbols = (a: MutPtr<Malloc>, symbols: [ProvidedSymbol]) ModuleSig {
     seed: i64 := 0 - 1
-    m := of(a, "", seed).expect("std.internal.resolve: sig alloc")
+    m := of(a, "", seed).expect("compiler.resolve: sig alloc")
     symbols.loop((h, i, s) {
         f := s.sym_sig_flags()
         (m.has(s.name) == false).then({
-            m = m.put(a, s.name, f).expect("std.internal.resolve: sig alloc")
+            m = m.put(a, s.name, f).expect("compiler.resolve: sig alloc")
         })
         e := s.name.res_ident_end(0)
         s.name.is_c_kw_name_span(0, e).then({
-            key := s.symbol_key_in(a).expect("std.internal.resolve: sig alloc")
+            key := s.symbol_key_in(a).expect("compiler.resolve: sig alloc")
             ke := cstr(key.ptr)
             (m.has(ke) == false).then({
-                m = m.put(a, ke, f).expect("std.internal.resolve: sig alloc")
+                m = m.put(a, ke, f).expect("compiler.resolve: sig alloc")
             })
         })
     })
@@ -792,8 +790,8 @@ sig_of_symbols = (a: MutPtr<Malloc>, symbols: [ProvidedSymbol]) ModuleSig {
 }
 module_graph* = (a: MutPtr<Malloc>, src: string_view) ModuleGraph { a.module_graph_in(a, src) }
 module_graph_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: string_view) ModuleGraph {
-    imports := alloc.import_edges(src).expect("std.internal.resolve: allocation failed")
-    symbols := a.provided_symbols_in(alloc, src).expect("std.internal.resolve: allocation failed")
+    imports := alloc.import_edges(src).expect("compiler.resolve: allocation failed")
+    symbols := a.provided_symbols_in(alloc, src).expect("compiler.resolve: allocation failed")
     ModuleGraph(
         imports: imports,
         symbols: symbols,
@@ -873,9 +871,7 @@ imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSy
     cur := m
     symbols.loop((h, idx, sym) {
         (sym.imported && sym.is_type.then({ false }, { true })).then({
-            cur = cur.rset_add(a, sym
-                .symbol_key_in(a)
-                .expect("std.internal.resolve: allocation failed"))
+            cur = cur.rset_add(a, sym.symbol_key_in(a).expect("compiler.resolve: allocation failed"))
         })
     })
     cur

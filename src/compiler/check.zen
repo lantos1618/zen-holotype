@@ -6,8 +6,8 @@
   GenericData, MakeEnumData, TagData, LoopData, GenEnumDecl, GenStructDecl } = compiler.ast.ast_types
 { cbuf, vref, cond, call_at, call_full, slett, sexpr, block, stmts_diverge, fnt_from_func_in,
   fntype, subst_ty_in, no_tys, expr_null, tgeneric, ti32, ti64, tu8, tf64, tbool, tstring_cstr,
-  tstring_literal, tnamed, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr, gstr_string,
-  gstr_push, gstr_append, gstr_finish } = compiler.genc
+  tstring_literal, tnamed, tnode, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr,
+  gstr_string, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { mangle_str_in, impl_cname_in } = compiler.mangle
 { Malloc } = std.mem.alloc
 { exports_get, alias_prefixes_get, module_sigs_get } = compiler.parse
@@ -20,13 +20,13 @@
 // AST-node query traits (is_fnt on Ty, is_generic_fn on Func). Importing from compiler.astops pulls
 // the WHOLE module (all its impls: Ty/Func/Decl/StructDecl) into check's import closure, so the impl
 // index resolves these UFCS methods here and in every module that imports check (validate/*, passes/*).
-{ gstr_int, map_slice, slice_any, wr_writes_name } = compiler.astops
+{ field_in, gstr_int, map_slice, param_names_has, slice_any, wr_writes_name } = compiler.astops
 // Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
 // resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
 { impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
 { is_empty_named } = compiler.check_inline
 { TyFits } = compiler.check_fits    // trait import: project-mode closure pull (dispatch itself needs no names)
-{ FlatRegion, ModuleTable, fregion_find, is_import_line, lstrip, next_line, res_ident_end } = std.internal.resolve
+{ FlatRegion, ModuleTable, fregion_find, is_import_line, lstrip, next_line, res_ident_end } = compiler.resolve
 { arg_exp_v } = compiler.check_resolve
 // ── DECLARATION INDEX ───────────────────────────────────────────────────────
 // name → decl array index, an O(1) hash map (std.collections.map). Built once per
@@ -304,7 +304,7 @@ DeclIndex*: {
         g := idx.idx_genstruct(decls, gname)
         is_empty(g.name).match ({
             true  => tvoid(),
-            false => a.subst_ty_in(g.tparams, targs, g.fields.gen_field_at(fname)),
+            false => a.subst_ty_in(g.tparams, targs, g.fields.field_in(fname)),
         })
     }
     idx_variant_payload = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ty {
@@ -381,7 +381,7 @@ tdkey = (a: MutPtr<Malloc>, tr: string_view, m: string_view) string_view {
         .gstr_finish(a)
 }    // DStruct.name → index
 // ── alias-name index (UFCS through module aliases) ──────────────────────────────────────────────
-// std.internal.resolve loads `m = std.collections.hmap` by prefixing hmap's top-level value decls
+// compiler.resolve loads `m = std.collections.hmap` by prefixing hmap's top-level value decls
 // with `m__`. alias_idx maps the BARE method tail (`put` for `m__put`) to a decl index, so the
 // UFCS fallback in dispatch_name can O(1)-reject names that no alias provides (the common case for
 // intrinsics like `store`/`offset` and deferred trait methods) before scanning for candidates.
@@ -882,11 +882,6 @@ var_call = (a: MutPtr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> {
     a.cenode(call_at(v.name, args, v.pos))
 }
 // Heap-own a Ty so Ptr<Ty> fields do not dangle.
-tnode* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
-    buf := cbuf<Ty>(a, 1)
-    buf[0] = t
-    buf[0].addr()
-}
 vlbuf = (a: MutPtr<Malloc>) [VList] { slice(a.acquire(sizeof(VList)), 1) }
 vlnode = (a: MutPtr<Malloc>, v: VList) Ptr<VList> {
     buf := a.vlbuf()
@@ -1486,9 +1481,6 @@ alias_cands_none = () AliasCands {
         second: "",
     )
 }
-tparam_names_have = (tps: [Param], name: string_view) bool {
-    tps.slice_any((tp) { tp.name == name })
-}
 // VISIBILITY: only `*`-exported names are UFCS-reachable through an alias. Alias-prefixed publics
 // keep their star in the FLAT source (`g__scale* = …`), and parse_module records every starred
 // top-level name (compiler.parse exports_get) — membership there means the aliased module exported
@@ -1508,7 +1500,7 @@ alias_cand_matches = (f: Func, fn: string_view, rty: Ty, exact: bool) bool {
         true  => {
             p0 := f.params[0].ty
             head := p0.dispatch_recv_name()
-            (f.tparams.tparam_names_have(head) == false).match ({
+            (f.tparams.param_names_has(head) == false).match ({
                 true  => exact.match ({
                     true  => is_empty(head).then({ false }, { head == rty.dispatch_recv_name() }),
                     false => rty.fits(p0),
@@ -1656,14 +1648,6 @@ tag_ty = (env: Env, t: TagData) Ty {
         false => (t.targs.len > 0).then({ tgeneric(t.ty, t.targs, t.mty) }, { tnamed(t.mty) }),
     })
 }
-// Generic struct field reads substitute the receiver's concrete type args.
-gen_field_at = (fields: [Field], fname: string_view) Ty {
-    found := tvoid()
-    fields.loop((h, i, f) {
-        found = (f.name == fname).then({ f.ty }, { found })
-    })
-    found
-}
 ty_under_ptr* = (t: Ty) Ty {
     t.match ({
         .Ptr(pd) => load(pd.pointee),
@@ -1726,7 +1710,6 @@ infer_match_ty = (env: Env, m: MatchData) Ty {
     subjty := env.infer_expr(m.subj)
     env.infer_match_common_ty(subjty, m.arms)
 }
-has_tparam* = (tparams: [Param], n: string_view) bool { tparams.slice_any((tp) { tp.name == n }) }
 // Slice literal element type: an expected `[T]` (declared/annotated) WINS, so a bare-int literal
 // `[1,2,3]` adopts the declared element width (`i64`/`u8`) instead of defaulting to i32 — the same
 // expected-type propagation a scalar int slot already gets. Falls back to the first item's type.
