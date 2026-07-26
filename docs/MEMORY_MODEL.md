@@ -44,9 +44,12 @@ Raw allocation calls are guarded by `tests/harness_boundaries.zen`:
 thread an allocator and call `acquire`/`resize`/`release` or a higher-level
 allocator-aware API.
 
-Arena backing storage follows the same rule. `arena.new_in(backing, cap)` and
-`Arena.free_in(backing)` acquire and release the arena's backing block through a
-caller allocator. `Arena.free` is the default-heap convenience path.
+Arena backing storage follows the same convention. `arena.make_in(backing, cap)`
+and `Arena.free_in(backing)` acquire and release the arena's backing block through
+a caller allocator; `Arena.free(backing)` is a plain alias for `free_in` and also
+requires a backing allocator — it is not a default-heap path. Note this is an API
+convention, not a checked rule: arena lifetimes are **not** enforced, and a pointer
+read after `Arena.reset` or `Arena.free_in` is not diagnosed.
 
 Compiler-adjacent AST builders follow the same convention where they return
 owned slices: `std.internal.ast.dbuf_in` and `derive_accessors_in` place
@@ -136,6 +139,11 @@ o.release_in(heap.addr())
 n := c.get().id
 c.release_in(heap.addr())
 ```
+
+## Known Defects
+
+[docs/STATUS.md](STATUS.md) tracks memory-corruption defects that are known and
+unfixed. Read it before relying on any guarantee below.
 
 ## Partly Enforced; Remaining Work
 

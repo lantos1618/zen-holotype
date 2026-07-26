@@ -112,6 +112,8 @@ What you just read, and where it is specified ([docs/SPEC.md](docs/SPEC.md)):
   `panic` only when you write it. The emitted C guards the rest: `10 / d` with
   `d == 0` prints `zen: panic: integer divide by zero` and aborts; an
   out-of-range index prints `zen: panic: slice index out of bounds`. Not UB.
+  (The check compares against the slice's length; `slice(p, n)` takes `n` on
+  trust, so a hand-built slice can claim to be longer than its allocation.)
 - **Reflection at compile time.** `each_field` / `zip_fields` / `field_eq` unroll
   per-field at monomorphization, and `e.variant_name()` expands to a literal switch
   over an enum's variants — derived equality and JSON serde are ordinary
@@ -122,14 +124,22 @@ What you just read, and where it is specified ([docs/SPEC.md](docs/SPEC.md)):
   (`examples/shapes.zen`).
 - **Three pointer types, checker-enforced.** `Ptr<T>` read-only, `MutPtr<T>`
   writable, `RawPtr<T>` the nullable raw floor. A write through `Ptr<T>` is
-  `error[ptr-write]` at compile time.
+  `error[ptr-write]` at compile time — including via `slice()`. It does not yet
+  catch a write through `p.offset(n)`, which currently erases the pointer kind.
 - **Raw strings.** `"""…"""` spans lines and takes bytes literally — a `\n`
   inside one stays two characters.
-- **Memory is explicit.** Allocators are values you thread; no hidden heap;
-  touching a pointer after `free` is `error[ownership]` at compile time.
-  ([docs/MEMORY_MODEL.md](docs/MEMORY_MODEL.md))
-- **Actors on real threads.** Typed actors on a pthread pool; a send moves
-  ownership (checker-enforced), a panic kills one actor, not the pool.
+- **Memory is explicit by convention.** Allocators are values you thread. A
+  pointer that stays a bare local is tracked: using it after `release` is
+  `error[ownership]` at compile time. It is a cheap local check, not a borrow
+  checker — copy the pointer into a struct field, slice element, or enum payload
+  and tracking stops, so the checker will accept a double free. Nothing forces a
+  function to take an allocator either: `std.mem.heap.gpa()` is reachable from a
+  zero-parameter function. ([docs/MEMORY_MODEL.md](docs/MEMORY_MODEL.md) has the
+  exact scope, and [docs/STATUS.md](docs/STATUS.md) lists the known defects.)
+- **Actors on real threads.** Typed actors on a pthread pool; a send of an
+  `Own<T>` moves ownership (`error[ownership]`), a panic kills one actor, not the
+  pool. The send checks are triggered by the method names `send` / `pool_send` /
+  `ref_send_msg`; a differently-named send verb is not analyzed.
   `./zen run examples/pool_actor_demo.zen` fans 1000 messages across OS cores
   and prints `total=1000`.
 

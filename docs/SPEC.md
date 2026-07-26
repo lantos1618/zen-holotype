@@ -739,7 +739,8 @@ ownership types:
   `sizeof`, `load_i64`, `store_i64`, `atomic_add_i64`, `null_ptr`;
 - `std.mem.alloc`: `Allocator`, `Heap`, `Malloc`, namespace-bound
   `default`, `try_acquire`, `try_resize`;
-- `std.mem.arena`: `Arena`, namespace-bound `new_in` and `try_new_in`;
+- `std.mem.arena`: `Arena`, constructed with `make_in` (fallible, returns
+  `Result<Arena, IoError>`);
 - `std.core.slice`: allocator-first `alloc_buf`, `dup`, `node`, `concat`, their `_in`
   aliases, and fallible `try_*` variants for allocator-backed slice storage;
 - `std.mem.own`: `Own<T>` plus `Drop`, with `new_in` and `try_new_in`;
@@ -750,7 +751,7 @@ ownership types:
 Allocator-threaded std APIs make allocation visible in signatures. Examples:
 `vec.of(a, [1, 2])`, `v.push(a, x)`, `vec.try_of(a, [1, 2])`, `v.try_push(a, x)`,
 `maps.of(a, "k", 1)`, `m.try_put(a, "k", 2)`, `maps.try_of(a, "k", 1)`,
-`a.try_map_in([1, 2], (x) { x + 1 })`, `arena.new_in(a, 1024)`,
+`a.try_map_in([1, 2], (x) { x + 1 })`, `arena.make_in(a, 1024)`,
 `slice.dup(a, [1, 2])`, `a.try_dup_in([1, 2])`, `own.new_in(a, value)`, `rc.try_new_in(a, value)`,
 `actor.cell(a, 16)`, and `cell.reply(a)` — the actor constructors return `Result`
 directly; there is no separate `try_*` doubling.
