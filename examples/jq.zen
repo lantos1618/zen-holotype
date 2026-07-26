@@ -1,6 +1,7 @@
 // mini-jq — a tiny JSON query CLI, built on the public std API as a dogfooding exercise.
 //
-//   ./zen run examples/jq.zen <filter> [file]
+//   ./zen run examples/jq.zen '.a.b[0]' file.json
+//   cat file.json | ./zen run examples/jq.zen '.a.b[0]'
 //
 // filter grammar (a subset of jq):
 //   .              identity (the whole document)
@@ -8,80 +9,39 @@
 //   .arr[0]        array indexing
 //   .a.b[2].c      the two combined
 //
-// With no [file], JSON is read from stdin. Output is pretty-printed with 2-space indent.
-// All failures (missing file, bad JSON, bad path) are reported as clean messages, never a crash.
+// With no [file], JSON is read from stdin. Output is std.format.json's 2-space `pretty`.
+// All failures (missing file, bad JSON, bad path) are values: a clean message, a non-zero exit.
 json = std.format.json
-os = std.sys.os
-str = std.text.str
-{ Malloc } = std.mem.alloc
-{ print, println } = std.text.fmt
-{ Value } = std.format.json
-// UFCS method calls (recv.name(...)) need the free function's name in scope — a module
-// alias alone is not enough, so bring the ones we call as methods into scope by name.
+{ Value, JsonError } = std.format.json
+{ Result, expect, name } = std.core.result
+{ gpa } = std.mem.heap
+{ println, formatln, arg_str, arg_int } = std.text.fmt
 { len, at, substr, cat, parse_int } = std.text.str
 { read_all } = std.io.stdin
 { contents } = std.io.file
-// ── pretty printer ────────────────────────────────────────────────────────────
-// Leaves (null/bool/number/string) are rendered by json.stringify so escaping and
-// number formatting match the canonical encoder. Only arrays/objects are laid out here.
-emit = (s: string_view) i64 { print(s) }
-indent = (depth: i64) i64 {
-    (depth <= 0).match ({
-        true  => 0,
-        false => {
-            emit("  ")
-            indent(depth - 1)
-        },
-    })
-}
-pretty<A> = (a: MutPtr<A>, v: Value, depth: i64) i64 {
-    v.match ({
-        .Arr(xs) => {
-            (xs.len == 0).match ({
-                true  => emit("[]"),
-                false => {
-                    emit("[\n")
-                    xs.loop((h, i, x) {
-                        indent(depth + 1)
-                        a.pretty(x, depth + 1)
-                        (i + 1 < xs.len).then({ emit(",") }, { 0 })
-                        emit("\n")
-                    })
-                    indent(depth)
-                    emit("]")
-                },
-            })
-        },
-        .Obj(o)  => {
-            (o.entries.len == 0).match ({
-                true  => emit("{}"),
-                false => {
-                    emit("{\n")
-                    o.entries.loop((h, i, e) {
-                        indent(depth + 1)
-                        key: Value := .Str(e.key)
-                        emit(json.stringify(a, key))
-                        emit(": ")
-                        a.pretty(e.val, depth + 1)
-                        (i + 1 < o.entries.len).then({ emit(",") }, { 0 })
-                        emit("\n")
-                    })
-                    indent(depth)
-                    emit("}")
-                },
-            })
-        },
-        _        => emit(json.stringify(a, v)),
+{ argc, arg } = std.sys.os
+// std.format.json exposes `JsonError` (with the byte offset that makes a parse failure
+// actionable) but no namer for it — std.text.regex and std.net.http both ship an `error_name`.
+// Rendering the variants by hand is the gap, not a design choice.
+report_bad_json = (e: JsonError) i64 {
+    e.match ({
+        .Unexpected(p)      => formatln("jq: invalid JSON: unexpected character at byte {}", [arg_int(p)]),
+        .BadString(p)       => formatln("jq: invalid JSON: bad string at byte {}", [arg_int(p)]),
+        .BadNumber(p)       => formatln("jq: invalid JSON: bad number at byte {}", [arg_int(p)]),
+        .BadLiteral(p)      => formatln("jq: invalid JSON: bad literal at byte {}", [arg_int(p)]),
+        .TrailingGarbage(p) => formatln("jq: invalid JSON: trailing garbage at byte {}", [arg_int(p)]),
+        .UnexpectedEof      => println("jq: invalid JSON: unexpected end of input"),
+        .TooDeep            => println("jq: invalid JSON: nesting too deep"),
     })
 }
 // ── filter engine ─────────────────────────────────────────────────────────────
-// Scan a field name starting at i (letters/digits/_/-), stopping at '.' or '['.
+// Scan a field name starting at i, stopping at the next '.' or '['.
 scan_key = (s: string_view, i: i64) i64 {
     (i >= s.len()).match ({
         true  => i,
         false => {
-            b := str.at(s, i)
-            (b == '.' || b == '[').then({ i }, { scan_key(s, i + 1) })
+            b := s.at(i)
+            (b == '.' || b == '[').then({ i }, { s.scan_key(i + 1) })
         },
     })
 }
@@ -90,35 +50,30 @@ scan_idx = (s: string_view, i: i64) i64 {
     (i >= s.len()).match ({
         true  => i,
         false => {
-            b := str.at(s, i)
-            (b >= '0' && b <= '9').then({ scan_idx(s, i + 1) }, { i })
+            b := s.at(i)
+            (b >= '0' && b <= '9').then({ s.scan_idx(i + 1) }, { i })
         },
     })
 }
-// Apply the filter starting at byte i to the current value. Returns .Ok(selected)
-// or .Err(message). Recurses down the path one segment at a time.
+// Apply the filter starting at byte i to the current value: .Ok(selected) or .Err(message).
+// One path segment per call, recursing into the tail.
 apply<A> = (a: MutPtr<A>, cur: Value, s: string_view, i: i64) Result<Value, string_view> {
     (i >= s.len()).match ({
         true  => {
-            ok: Result<Value, string_view> := .Ok(cur)
-            return ok
+            done: Result<Value, string_view> := .Ok(cur)
+            return done
         },
         false => 0,
     })
-    b := str.at(s, i)
+    b := s.at(i)
     (b == '.').match ({
         true  => {
-            j := scan_key(s, i + 1)
-            (j == i + 1).match ({
-                // bare "." with nothing after: identity if at end, else stray dot
+            j := s.scan_key(i + 1)
+            // a bare trailing "." is the identity filter
+            (j == i + 1 && j >= s.len()).match ({
                 true  => {
-                    (j >= s.len()).match ({
-                        true  => {
-                            ok: Result<Value, string_view> := .Ok(cur)
-                            return ok
-                        },
-                        false => 0,
-                    })
+                    id: Result<Value, string_view> := .Ok(cur)
+                    return id
                 },
                 false => 0,
             })
@@ -126,9 +81,8 @@ apply<A> = (a: MutPtr<A>, cur: Value, s: string_view, i: i64) Result<Value, stri
             return json.get(cur, key).match ({
                 .Some(nv) => a.apply(nv, s, j),
                 .None     => {
-                    msg := a.cat("jq: no such field: ", key)
-                    e: Result<Value, string_view> := .Err(msg)
-                    e
+                    miss: Result<Value, string_view> := .Err(a.cat("jq: no such field: ", key))
+                    miss
                 },
             })
         },
@@ -136,53 +90,51 @@ apply<A> = (a: MutPtr<A>, cur: Value, s: string_view, i: i64) Result<Value, stri
     })
     (b == '[').match ({
         true  => {
-            j := scan_idx(s, i + 1)
-            idxstr := a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed")
-            (j < s.len() && str.at(s, j) == ']').match ({
-                true  => 0,
-                false => {
-                    e: Result<Value, string_view> := .Err("jq: malformed index (expected ']')")
-                    return e
+            j := s.scan_idx(i + 1)
+            (j == i + 1 || j >= s.len() || s.at(j) != ']').match ({
+                true  => {
+                    bad: Result<Value, string_view> := .Err("jq: malformed index (expected [N])")
+                    return bad
                 },
+                false => 0,
             })
-            idx := str.parse_int(idxstr)
+            idx := a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed").parse_int()
             return json.as_arr(cur).match ({
-                .Some(xs) => (idx >= 0 && idx < xs.len).match ({
+                .Some(xs) => (idx < xs.len).match ({
                     true  => a.apply(xs[idx], s, j + 1),
                     false => {
-                        e: Result<Value, string_view> := .Err("jq: index out of range")
-                        e
+                        oob: Result<Value, string_view> := .Err("jq: index out of range")
+                        oob
                     },
                 }),
                 .None     => {
-                    e: Result<Value, string_view> := .Err("jq: not an array")
-                    e
+                    nota: Result<Value, string_view> := .Err("jq: not an array")
+                    nota
                 },
             })
         },
         false => 0,
     })
-    bad: Result<Value, string_view> := .Err("jq: bad filter syntax (expected '.' or '[')")
-    bad
+    syn: Result<Value, string_view> := .Err("jq: bad filter syntax (expected '.' or '[')")
+    syn
 }
 main = () i32 {
-    mm: Malloc := Malloc(_: 0)
-    a := mm.addr()
-    n := os.argc()
-    // arg(0) is the script path; user args start at arg(1).
-    filter := (n >= 2).then({ os.arg(1) }, { "." })
-    // Source: a file path in arg(2), else stdin.
+    h := gpa()
+    a := h.addr()
+    n := argc()
+    // arg(0) is the program; the filter is arg(1), an optional source file arg(2).
+    filter := (n >= 2).then({ arg(1) }, { "." })
     src := (n >= 3).match ({
-        true  => a.contents(os.arg(2)).match ({
+        true  => a.contents(arg(2)).match ({
             .Err(e) => {
-                println("jq: cannot read file")
+                formatln("jq: {}: {}", [arg_str(arg(2)), arg_str(name(e))])
                 return 1
             },
             .Ok(s)  => s,
         }),
         false => a.read_all().match ({
             .Err(e) => {
-                println("jq: cannot read stdin")
+                formatln("jq: <stdin>: {}", [arg_str(name(e))])
                 return 1
             },
             .Ok(s)  => s,
@@ -190,7 +142,7 @@ main = () i32 {
     })
     doc := json.parse(a, src).match ({
         .Err(e) => {
-            println("jq: invalid JSON")
+            report_bad_json(e)
             return 1
         },
         .Ok(v)  => v,
@@ -201,8 +153,9 @@ main = () i32 {
             1
         },
         .Ok(sel)  => {
-            a.pretty(sel, 0)
-            println("")
+            // json.pretty is the 2-space indented encoder — the whole hand-rolled printer this
+            // example used to carry is one library call now.
+            println(json.pretty(a, sel))
             0
         },
     })
