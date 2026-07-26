@@ -2143,6 +2143,14 @@ harness_verdict_run* = () i32 {
         should_pass: false,
         kind: "sendable",
     ), VerdictCase(
+        src: "{ Rc } = std.mem.rc\nData*: {\n    n: i32,\n}\nMsg*: Ref(Rc<Data>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, p: Rc<Data>) i32 {\n    h.send(.Ref(p))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: false,
+        kind: "sendable",
+    ), VerdictCase(
+        src: "{ Arc } = std.mem.arc\nData*: {\n    n: i32,\n}\nMsg*: Ref(Arc<Data>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, p: Arc<Data>) i32 {\n    h.send(.Ref(p))\n    0\n}\ntest* = () i32 { 0 }",
+        should_pass: true,
+        kind: "",
+    ), VerdictCase(
         src: "Inner*: {\n    p: MutPtr<i32>,\n}\nOuter*: {\n    inner: Inner,\n}\nMsg*: View(Ptr<Outer>)\nH*: {\n    id: i32,\n}\nsend = (h: H, m: Msg) bool { true }\nfwd = (h: H, o: Ptr<Outer>) i32 {\n    h.send(.View(o))\n    0\n}\ntest* = () i32 { 0 }",
         should_pass: false,
         kind: "sendable",
@@ -2594,6 +2602,10 @@ harness_verdict_run* = () i32 {
     // Accepts (no over-rejection): plain-value sends, plain-value `ref_send_msg` replies, Arc-wrapped
     // sends (`new_in(…).expect(…)` — call results classify clean), Arc-backed spawn state, and the
     // plain-value `Room(n: 7)` spawn state.
+    // SENDABILITY rule 2 (Rc): an `Rc<T>` payload is rejected — its refcount is a plain i64, so two
+    // actors on two threads race it — while the `Arc<T>` twin beside it is accepted. Until these two
+    // cases existed, stubbing check_module_send_rc_kind to `return 0` left the ENTIRE harness green:
+    // every other error[sendable] case carries a MutPtr payload, which the separate send-mut pass owns.
     // M2 (rt-scoped-runtime §4): sendability is a TYPE capability. Rejects (error[sendable]): a send
     // whose payload carries a `MutPtr<T>` (Pony `ref` — mutable + aliasable → cross-actor race), both
     // DIRECTLY and DEEP (a readonly `Ptr<Outer>` whose Outer struct reachably holds a `MutPtr` field —
