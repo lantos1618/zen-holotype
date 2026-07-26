@@ -574,7 +574,19 @@ kv_reflect_fn_kind = (env: Env, c: CallData) i32 {
         _           => KARGTYPE().kv_at(c.args[li].expr_pos().pos_or(c.pos)),
     })
 }
+kv_variant_name_kind = (env: Env, c: CallData) i32 {
+    bad := env.infer_expr(c.args[0].addr()).match ({
+        .Named(n)   => env.env_is_struct(n),
+        .Generic(g) => env.env_is_gen_struct(g.name),
+        .Void       => false,
+        _           => true,
+    })
+    bad.then({ KARGTYPE().kv_at(c.args[0].expr_pos().pos_or(c.pos)) }, { 0 })
+}
 kv_reflect_kind = (env: Env, c: CallData) i32 {
+    (c.fn == "variant_name" && c.args.len == 1).then({
+        return env.kv_variant_name_kind(c)
+    })
     (c.fn == "field_eq" || c.fn == "each_field" || c.fn == "zip_fields").match ({
         true  => env.kv_reflect_recv_kind(c).or(env.kv_reflect_fn_kind(c)),
         false => 0,

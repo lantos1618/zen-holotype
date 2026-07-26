@@ -84,7 +84,8 @@ What you just read, and where it's specified ([docs/SPEC.md](docs/SPEC.md)):
   `panic` only when you write it — and the emitted C guards div-by-zero,
   index-out-of-bounds, and null deref with a clean panic, not UB. (§ Errors And Results)
 - **Reflection at compile time.** `each_field` / `zip_fields` / `field_eq` unroll
-  per-field at monomorphization — derived equality and JSON serde are ordinary
+  per-field at monomorphization, and `e.variant_name()` expands to a literal switch
+  over an enum's variants — derived equality and JSON serde are ordinary
   library code, no macros. `./zen run examples/json_demo.zen` round-trips typed
   structs through JSON and prints `ROUNDTRIP_EQUAL`. (§ Generics)
 - **Generics, traits, UFCS.** Monomorphized generics; a trait is a record of

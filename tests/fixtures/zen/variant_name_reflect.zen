@@ -1,0 +1,73 @@
+// Compile-time ENUM reflection: the `variant_name` intrinsic. The enum mirror of `each_field` —
+// once the receiver's concrete enum type is known, the inliner (compiler.passes.subst) expands
+// `e.variant_name()` into an ordinary match yielding one string LITERAL per variant:
+//   e.match ({ .Debug => "Debug", .Info => "Info", … })
+// so it costs a switch and a `const char*`: no allocation, no runtime table, and the emitted C is
+// byte-identical to the hand-written match it replaces. The name is returned EXACTLY as declared —
+// case folding is a runtime string operation (it allocates), so it is deliberately not offered.
+// Exit 0 = every case matched expectation.
+Level: Debug | Info | Warn | Error
+Shape: Circle(i64) | Rect | Tri(i64)
+Opt<T>: Some(T) | None
+// The sanctioned GENERIC wrapper: its body calls the intrinsic, so it splices at every call site
+// with the caller's concrete enum (routed by compiler.passes.refcount.calls_reflect).
+vname<E> = (e: E) string_view { e.variant_name() }
+// A hand-written converter, kept to assert the reflected name is EXACTLY the source spelling.
+hand = (l: Level) string_view {
+    l.match ({
+        .Debug => "Debug",
+        .Info  => "Info",
+        .Warn  => "Warn",
+        .Error => "Error",
+    })
+}
+// A side-effecting receiver must evaluate exactly ONCE (the match binds `_subj` before switching).
+bump = (c: MutPtr<i64>) Level {
+    store(c, load(c) + 1)
+    .Warn
+}
+main = () i64 {
+    // payload-free variants, on a directly-constructed value
+    (Level.Debug.variant_name() == "Debug" == false).then({
+        return 1
+    })
+    (Level.Error.variant_name() == "Error" == false).then({
+        return 2
+    })
+    // a PAYLOAD variant still yields its bare name (the payload is not rendered)
+    (Shape.Circle(3).variant_name() == "Circle" == false).then({
+        return 3
+    })
+    (Shape.Rect.variant_name() == "Rect" == false).then({
+        return 4
+    })
+    // through the generic wrapper, for two different enums out of ONE template
+    (vname(Level.Info) == "Info" == false).then({
+        return 5
+    })
+    (vname(Shape.Tri(1)) == "Tri" == false).then({
+        return 6
+    })
+    // a GENERIC enum instance reflects off its generic decl (variant names ignore the type args)
+    o: Opt<i64> := .Some(5)
+    (o.variant_name() == "Some" == false).then({
+        return 7
+    })
+    n: Opt<i64> := .None
+    (n.variant_name() == "None" == false).then({
+        return 8
+    })
+    // the reflected name is the SOURCE spelling, arm for arm
+    (hand(.Warn) == Level.Warn.variant_name() == false).then({
+        return 9
+    })
+    // a side-effecting receiver runs once, not once per variant
+    c: i64 := 0
+    (c.addr().bump().variant_name() == "Warn" == false).then({
+        return 10
+    })
+    (c == 1 == false).then({
+        return 11
+    })
+    0
+}

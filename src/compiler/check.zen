@@ -307,6 +307,19 @@ DeclIndex*: {
             false => a.subst_ty_in(g.tparams, targs, g.fields.gen_field_at(fname)),
         })
     }
+    // the full variant list of a concrete enum `ename` (empty slice if `ename` is not an enum) — the
+    // enum mirror of idx_struct_fields. The variant_name inliner (compiler.passes.subst) expands
+    // `e.variant_name()` into one match arm per variant.
+    idx_enum_variants = (idx: DeclIndex, decls: [Decl], ename: string_view) [VariantDef] {
+        i := idx.enum_idx.get(ename, 0 - 1)
+        (i >= 0 && i < decls.len).match ({
+            true  => decls[i].match ({
+                .DEnum(ed) => ed.variants,
+                _          => slice(null_ptr(), 0),
+            }),
+            false => slice(null_ptr(), 0),
+        })
+    }
     idx_variant_payload = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ty {
         i := idx.enum_idx.get(ename, 0 - 1)
         (i >= 0 && i < decls.len).match ({
@@ -755,6 +768,9 @@ Env*: {
         })
         (c.fn == "field_eq" || c.fn == "__str_eq" || c.fn == "__str_ne" || c.fn == "atomic_cas_i64").then({
             return tbool()
+        })
+        (c.fn == "variant_name").then({
+            return tstring_literal()
         })
         // Conversion intrinsics erase to C casts (backend/c/c_expr.zen) and accept ANY numeric
         // receiver — including f64. `(3.9).to_i64()` yields the truncating `(int64_t)` cast, i.e.
@@ -1460,6 +1476,7 @@ is_intrinsic* = (fn: string_view) bool {
         || b == 'f' && fn == "field_eq"
         || b == 'e' && fn == "each_field"
         || b == 'z' && fn == "zip_fields"
+        || b == 'v' && fn == "variant_name"
 }
 // ── UFCS THROUGH MODULE ALIASES ──────────────────────────────────────────────────────────────────
 // `m = std.collections.hmap` binds hmap's top-level fns as `m__put`/`m__get`/… in the flat program,

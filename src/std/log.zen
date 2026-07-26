@@ -6,12 +6,12 @@
 // the `Logger` you want, exactly like you pass an Allocator.
 //
 //   lg := stderr_logger(.Info)        // log Info and above to fd 2 (stderr)
-//   lg.info("server started")         // [INFO] server started
+//   lg.info("server started")         // [Info] server started
 //   lg.debug("verbose trace")         // dropped — Debug < Info, nothing written
-//   lg.warn("disk almost full")       // [WARN] disk almost full
-//   lg.error("connection refused")    // [ERROR] connection refused
+//   lg.warn("disk almost full")       // [Warn] disk almost full
+//   lg.error("connection refused")    // [Error] connection refused
 //
-// A record is written as `[LEVEL] msg\n` in one best-effort pass of raw `write(2)` calls —
+// A record is written as `[Level] msg\n` in one best-effort pass of raw `write(2)` calls —
 // no allocation, no owned temporary. The write is BEST-EFFORT (returns the byte count,
 // matching std.io.file.out / std.text.fmt); a partial or failed write is not raised as a
 // value, exactly as the streaming stdout writers don't. Callers who need durable delivery
@@ -30,21 +30,17 @@ rank = (l: Level) i64 {
         .Error => 3,
     })
 }
-// The bracketed tag printed for each level: `[DEBUG]`, `[INFO]`, `[WARN]`, `[ERROR]`.
-tag = (l: Level) string_view {
-    l.match ({
-        .Debug => "DEBUG",
-        .Info  => "INFO",
-        .Warn  => "WARN",
-        .Error => "ERROR",
-    })
-}
+// The bracketed tag printed for each level: `[Debug]`, `[Info]`, `[Warn]`, `[Error]` — the variant
+// name EXACTLY as declared, reflected off `Level` instead of restated as four literals. Case folding
+// is deliberately not done: it is a runtime string operation that would allocate, so a caller who
+// wants `[INFO]` uppercases the name itself (or the variants are spelled that way).
+tag = (l: Level) string_view { l.variant_name() }
 // Write a str's bytes to a descriptor (no trailing NUL); returns the count actually written.
 wr = (fd: i32, s: string_view) i64 {
     v := s.view()
     fd.write(v.ptr, v.len)
 }
-// Emit one `[LEVEL] msg\n` record to the descriptor as a run of best-effort writes; returns
+// Emit one `[Level] msg\n` record to the descriptor as a run of best-effort writes; returns
 // the total bytes written across the pieces.
 emit = (fd: i32, l: Level, msg: string_view) i64 {
     n := fd.wr("[")
