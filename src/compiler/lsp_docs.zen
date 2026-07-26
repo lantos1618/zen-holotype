@@ -1,0 +1,124 @@
+// lsp_docs.zen — the LSP DOCUMENT STORE: what the client has open, as the client last sent it.
+//
+// THE PROTOCOL CONTRACT this exists to honour: while a document is OPEN, the client's buffer — not
+// the file on disk — is the source of truth, and the server must not read disk for it. The client
+// pays for that guarantee by sending the whole text on every change (`textDocumentSync: 1`, Full
+// sync); a server that then re-reads disk is answering questions about the last SAVED state, which
+// is exactly the bug where diagnostics track your typing but highlighting does not. Disk stays the
+// right answer for a file that is NOT open (a cross-file go-to-definition target, say) — hence the
+// callers' `lspd_find(uri) < 0` fallback, and hence didClose really dropping the entry.
+//
+// LIFECYCLE: didOpen inserts (uri, version, text); didChange REPLACES text + version for the same
+// uri; didClose frees the entry and swap-removes it (order is irrelevant, lookups are by uri).
+//
+// TOKEN CACHE: semantic tokens are otherwise recomputed over the whole file on every keystroke. The
+// rendered token array is memoized against the document's LSP VERSION — the protocol's own
+// invalidation signal — so repeated requests at one version are answered from memory. Belt and
+// braces: every text write resets `tok_version` to -1, so a client that reuses (or omits) a version
+// number still can never be served a token array computed from different text.
+//
+// MEMORY: the store OWNS the uri/text/token buffers handed to it and releases the previous ones on
+// every replacement, so a long editing session holds one text and one token array per open document
+// — not one per keystroke. `lspd_release` frees only a NON-EMPTY view: every owned buffer here comes
+// from a builder (`gstr_finish`) and is non-empty, while the miss/absent cases are the "" literal,
+// which must never reach free(). The entry array itself doubles geometrically and releases the
+// buffer it outgrew; it is sized by the number of SIMULTANEOUSLY OPEN documents, not by edits.
+{ Malloc } = std.mem.alloc
+{ view } = std.text.str
+{ then } = std.core.bool
+LspDoc: {
+    uri: string_view,
+    text: string_view,
+    tokens: string_view,
+    version: i64,
+    tok_version: i64,
+}    // -1 = no token array cached for `version`
+lspd_none = () [LspDoc] { slice(null_ptr(), 0) }
+lspd_buf := lspd_none()
+lspd_n := 0
+lspd_alloc = (mp: MutPtr<Malloc>, n: i64) [LspDoc] { slice(mp.acquire(n * sizeof(LspDoc)), n) }
+lspd_grow = (mp: MutPtr<Malloc>) void {
+    (lspd_n >= lspd_buf.len).then({
+        grown := mp.lspd_alloc((lspd_buf.len < 4).then({ 4 }, { lspd_buf.len * 2 }))
+        old := lspd_buf.ptr
+        lspd_buf.loop((h, i, d) {
+            grown[i] = d
+        })
+        lspd_buf = grown
+        mp.release(old)
+    })
+}
+// release an OWNED buffer. "" is the literal miss/absent marker and is never heap — see MEMORY above.
+lspd_release = (mp: MutPtr<Malloc>, s: string_view) void {
+    v: [u8] := s.view()
+    (v.len > 0).then({
+        mp.release(v.ptr)
+    })
+}
+lspd_free_entry = (mp: MutPtr<Malloc>, i: i64) void {
+    d := lspd_buf[i]
+    mp.lspd_release(d.uri)
+    mp.lspd_release(d.text)
+    mp.lspd_release(d.tokens)
+}
+lspd_scan = (i: i64, uri: string_view) i64 {
+    (i >= lspd_n).match ({
+        true  => 0 - 1,
+        false => (lspd_buf[i].uri == uri).then({ i }, { lspd_scan(i + 1, uri) }),
+    })
+}
+// index of the OPEN document `uri`, or -1 — the callers' "is the client's buffer authoritative?" test.
+lspd_find* = (uri: string_view) i64 { lspd_scan(0, uri) }
+lspd_text_at* = (i: i64) string_view { lspd_buf[i].text }
+// the memoized token array for the document's CURRENT version, or "" when nothing is cached for it.
+lspd_tokens_at* = (i: i64) string_view {
+    d := lspd_buf[i]
+    (d.tok_version == d.version).then({ d.tokens }, { "" })
+}
+// didOpen / didChange: take ownership of `uri` + `text`, free what they replace, drop the token
+// cache, and return the entry's index.
+lspd_set* = (mp: MutPtr<Malloc>, uri: string_view, text: string_view, version: i64) i64 {
+    fresh := LspDoc(
+        uri: uri,
+        text: text,
+        tokens: "",
+        version: version,
+        tok_version: 0 - 1,
+    )
+    i := lspd_find(uri)
+    (i < 0).match ({
+        true  => {
+            mp.lspd_grow()
+            lspd_buf[lspd_n] = fresh
+            lspd_n = lspd_n + 1
+            lspd_n - 1
+        },
+        false => {
+            mp.lspd_free_entry(i)
+            lspd_buf[i] = fresh
+            i
+        },
+    })
+}
+// memoize `toks` (owned) against the document's current version.
+lspd_cache_tokens* = (mp: MutPtr<Malloc>, i: i64, toks: string_view) void {
+    d := lspd_buf[i]
+    mp.lspd_release(d.tokens)
+    lspd_buf[i] = LspDoc(
+        uri: d.uri,
+        text: d.text,
+        tokens: toks,
+        version: d.version,
+        tok_version: d.version,
+    )
+}
+// didClose: free the entry's buffers and swap the last entry into its slot. After this the document
+// is no longer open, so disk is once again the source of truth for it.
+lspd_close* = (mp: MutPtr<Malloc>, uri: string_view) void {
+    i := lspd_find(uri)
+    (i >= 0).then({
+        mp.lspd_free_entry(i)
+        lspd_buf[i] = lspd_buf[lspd_n - 1]
+        lspd_n = lspd_n - 1
+    })
+}
