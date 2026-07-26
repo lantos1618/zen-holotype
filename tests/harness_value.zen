@@ -641,6 +641,21 @@ harness_value_run* = () i32 {
         src: "test* = () i64 { to_i64(1e3) }",
         want: "1000",
     ), VCase(
+        src: "test* = () i64 { f: f64 := 3.9  f.to_i64() }",
+        want: "3",
+    ), VCase(
+        src: "test* = () i64 { f: f64 := -3.9  f.to_i64() }",
+        want: "-3",
+    ), VCase(
+        src: "test* = () i32 { (3.9).to_i32() }",
+        want: "3",
+    ), VCase(
+        src: "test* = () i64 { (7).to_f64().to_i64() }",
+        want: "7",
+    ), VCase(
+        src: "Value*: Null | Num(f64)\ntest* = () i64 { v := Value.Num(42.9)  v.match({ .Num(x) => x.to_i64(), _ => 0 }) }",
+        want: "42",
+    ), VCase(
         src: "test* = () i32 { to_i32(1.0E5) }",
         want: "100000",
     ), VCase(
@@ -1063,8 +1078,28 @@ harness_value_run* = () i32 {
     ), VCase(
         src: "test* = () i32 {\n  y: u32 := 4000000000\n  (y + y == 3705032704).match ({ true => 1, false => 0 })\n}",
         want: "1",
+    ), VCase(
+        src: "eqs = (a: str, b: str) bool { a == b }\ntest* = () i32 { eqs(\"\"\"{\"name\":\"zen\",\"ok\":true}\"\"\", \"{\\\"name\\\":\\\"zen\\\",\\\"ok\\\":true}\").match ({ true => 1, false => 0 }) }",
+        want: "1",
+    ), VCase(
+        src: "eqs = (a: str, b: str) bool { a == b }\ntest* = () i32 { eqs(\"\"\"a\\nb\"\"\", \"a\\\\nb\").match ({ true => 1, false => 0 }) }",
+        want: "1",
+    ), VCase(
+        src: "eqs = (a: str, b: str) bool { a == b }\ntest* = () i32 { eqs(\"\"\"\nab\n\"\"\", \"ab\\n\").match ({ true => 1, false => 0 }) }",
+        want: "1",
+    ), VCase(
+        src: "eqs = (a: str, b: str) bool { a == b }\ntest* = () i32 { eqs(\"\"\"\n  in\n\"\"\", \"  in\\n\").match ({ true => 1, false => 0 }) }",
+        want: "1",
+    ), VCase(
+        src: "eqs = (a: str, b: str) bool { a == b }\ntest* = () i32 { eqs(\"\", \"\"\"\"\"\").match ({ true => 1, false => 0 }) }",
+        want: "1",
     )])
 }
+// a raw literal is byte-identical to its escaped twin — the JSON case the form exists for
+// RAW: a backslash is an ordinary byte, so `\n` inside is two chars, not a newline
+// a newline immediately after the opening delimiter is dropped: the block form starts at line 1
+// interior indentation is CONTENT — nothing is de-indented
+// `""` still means the empty string: maximal munch takes three quotes, never two
 // Sub-32-bit arithmetic RESULT must truncate to its declared width, not leak the C
 // integer-promotion 32-bit value. u16 `a + a` is 131070 promoted; narrowed it is 65534.
 // control: native-width i32/u32 stay unchanged — their operator result WRAPS at 32 bits, so no

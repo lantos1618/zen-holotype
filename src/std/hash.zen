@@ -19,6 +19,7 @@
 // one of these names (or imports another module that does) collides at flatten time; import the names
 // you use (`{ sha256_hex, fnv1a } = std.hash`) and rename on your side if needed.
 { then } = std.core.bool
+{ hex_char } = std.text.ascii    // the shared hex-ENCODE nibble
 { Allocator } = std.mem.alloc    // sha256_hex's `a.acquire` needs the trait's method name in scope
 // ── FNV-1a, 64-bit ────────────────────────────────────────────────────────────
 // The FNV-1a-64 prime, 0x100000001b3, and offset basis 0xcbf29ce484222325. The basis is above i64 max
@@ -170,10 +171,6 @@ sha256_into* = (bytes: [u8], dst: [u8]) i64 {
     })
     0
 }
-// nibble value (0..15) -> its LOWERCASE hex byte.
-sha_hex_char = (v: i64) u8 {
-    (v < 10).then({ ('0'.to_i64() + v).to_u8() }, { ('a'.to_i64() + v - 10).to_u8() })
-}
 // SHA-256 of `bytes` as a fresh 64-char lowercase-hex NUL-terminated `str` owned by `a`.
 sha256_hex*<A> = (a: MutPtr<A>, bytes: [u8]) string_view {
     d: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
@@ -181,8 +178,8 @@ sha256_hex*<A> = (a: MutPtr<A>, bytes: [u8]) string_view {
     out: [u8] := a.acquire(65).slice(65)
     d.loop((h, i, b) {
         v := to_i64(b)
-        out[i * 2] = sha_hex_char(v >> 4)
-        out[i * 2 + 1] = sha_hex_char(v & 15)
+        out[i * 2] = hex_char(v >> 4)
+        out[i * 2 + 1] = hex_char(v & 15)
     })
     out[64] = 0
     cstr(out.ptr)

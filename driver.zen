@@ -1,319 +1,37 @@
 // driver.zen — the zenc CLI, in Zen. Dispatches on the command line and drives the compiler
 // (resolve -> parse -> check -> genModule) and the C backend (cc). This replaces bootstrap/driver.c:
 // once it roots --build-self, the seed carries `main` (emitted as zen_main) and driver.c is deleted.
-{ arg, argc, getEnv } = std.sys.os
+{ arg, argc, clock_ms, getEnv } = std.sys.os
 { Os, Arch, Abi, host } = std.sys.platform
 { Malloc } = std.mem.alloc
-{ view, is_empty, starts_with, ends_with } = std.text.str
-{ Map, of } = std.collections.map    // zen audit: name -> decl-index / seen-set maps
-{ impl_cname_in } = compiler.mangle    // zen audit: recompute hoisted impl-method names
+{ view, is_empty, starts_with } = std.text.str
+{ Map, of } = std.collections.map    // bs_shake: name -> decl-index / seen-set maps
+{ impl_cname_in } = compiler.mangle    // bs_shake: recompute hoisted impl-method names
 { fnv1a64_fold } = std.hash    // shared FNV-1a-64 rolling byte fold (centralized in std.hash)
-{ gstr_string, gstr_append, gstr_finish, gstr_push, is_expr_null, cbuf } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
+{ gstr_string, gstr_append, gstr_finish, gstr_push, cbuf } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
 { contents_in, out, out_bytes, save, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644,
   MODE_755 } = std.io.file
 { or, expect } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
 { then } = std.core.bool
-{ open, read, write, close, system, unlink, mkdir, rmdir, opendir, readdir, closedir, getpid,
-  isatty, clock_gettime } = std.c.libc
+{ open, read, write, close, system, unlink, mkdir, rmdir, getpid, isatty, clock_gettime } = std.c.libc
 { parse_module, exports_get } = compiler.parse
 { set_faithful_lexeme } = compiler.parse_atom
 { perr_get, perr_off_get } = compiler.parse_type
 { lerr_get, lerr_off_get, collect_comments } = compiler.lex
 { resolve_module } = compiler.check_resolve
-{ ufcs_vis_of } = compiler.check
-{ CheckDiagnostic, desc_or } = compiler.validate.diag
-{ check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source,
-  check_module_no_if_diagnostic_from_source, check_module_no_ternary_diagnostic_from_source,
-  check_module_reserved_diagnostic_from_source, check_module_escape_diagnostic_from_source,
-  check_module_leak_diagnostic_from_source, check_module_addr_escape_diagnostic_from_source,
-  check_module_send_rc_diagnostic_from_source, check_module_scratch_diagnostic_from_source,
-  check_module_send_mut_diagnostic_from_source, check_module_bound_diagnostic_from_source,
-  check_module_arg_diagnostic_from_source, check_module_or_return_diagnostic_from_source,
-  check_module_unknown_type_diagnostic_from_source, check_module_ffi_diagnostic_from_source,
-  check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
-  check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
-{ denrich_check } = compiler.validate.enrich
 { genModuleIn } = compiler.backend.c.c_emit
 { genJsModuleIn } = compiler.backend.js.js
 { pretty_module_in, pretty_set_comments } = compiler.pretty
-{ diag_user_span, diag_line_span, DiagSpan, render_diagnostic, manifest_value_span } = compiler.diagnostic
-{ resolve_program_data, first_user_import_in, ResolvedProgram, ModuleEntry, file_exists, ImportEdge,
-  seen_name, add_name, module_path, fregion_find, fregion_src_line, undefined_name_hint } = std.internal.resolve
-{ import_edges } = std.internal.resolve_scan
-{ ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = std.internal.resolve_ffi
-say = (s: string_view) i64 {
-    out(s).or(0)
-    out("\n").or(0)
-}
-derr = (s: string_view) i64 {
-    v := s.view()
-    write(2, v.ptr, v.len)
-}    // diagnostics go to stderr
-// ── ZENC_TIME=1: coarse wall-clock per pipeline stage (stderr) ───────────────────────────────────
-// Reads CLOCK_MONOTONIC straight through libc (std.time isn't in the seed manifest). The timespec
-// cell is a STACK slice literal, deliberately not an allocator cell: a heap alloc+free here would
-// perturb the allocation sequence mid-pipeline, and the reading must observe the compiler, not move
-// it. `zt_log` prints "zenc: time <stage> <ms>ms" when ZENC_TIME is set and returns the new reading,
-// so stages chain: `t1 := mp.zt_log("parse", t0)`.
-zt_ms = () i64 {
-    ts: [i64] := [0, 0]
-    clock_gettime(1, ts.ptr)
-    ts[0] * 1000 + ts[1] / 1000000
-}
-zt_on = () bool { is_empty(getEnv("ZENC_TIME")) == false }
-zt_log = (mp: MutPtr<Malloc>, name: string_view, start_ms: i64) i64 {
-    now := zt_ms()
-    zt_on().then({
-        derr(mp
-            .gstr_string(64)
-            .gstr_append(mp, "zenc: time ")
-            .gstr_append(mp, name)
-            .gstr_append(mp, " ")
-            .push_int(mp, now - start_ms)
-            .gstr_append(mp, "ms\n")
-            .gstr_finish(mp))
-        { }
-    })
-    now
-}
-// the first FAILING diagnostic, else clean. `cd_or(a, b)` = a if a failed, else b — so this is a flat
-// precedence chain of the checks in order, not a brace pyramid. Checks are independent and side-effect
-// free, so running them all is harmless; the reported diagnostic is still the first failure in order.
-cd_or = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic {
-    (a.code == 0).then({ b }, { a })
-}
-// the SPECIALIZED channels only (parse / ownership / escape / sendability / bound / … — every check
-// EXCEPT the main type channel). If one fires it is the ROOT of the rejection: reported alone, so a
-// downstream cascade of type errors from the same cause is suppressed. The main channel (names /
-// types / arity / fit / exhaustiveness / …) is batched separately — check_module_batch — so its
-// INDEPENDENT errors are all reported at once. A parse error, being here, always short-circuits the
-// batch (the flat sentinels would otherwise spray bogus type errors).
-check_diag_no_main = (
-    mp: MutPtr<Malloc>,
-    raw: [Decl],
-    decls: [Decl],
-    flat: string_view,
-) CheckDiagnostic {
-    t0 := zt_ms()
-    c0 := check_module_no_if_diagnostic_from_source(flat)
-        .cd_or(check_module_no_ternary_diagnostic_from_source(flat))
-        .cd_or(mp.check_module_parse_diagnostic_from_source(decls, flat))
-        .cd_or(mp.check_module_reserved_diagnostic_from_source(raw, flat))
-    t1 := mp.zt_log("    spec-syntax", t0)
-    c1 := c0.cd_or(mp.check_module_ownership_diagnostic_from_source(raw, flat))
-    t2 := mp.zt_log("    spec-ownership", t1)
-    c2 := c1
-        .cd_or(mp.check_module_escape_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_leak_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_addr_escape_diagnostic_from_source(raw, flat))
-    t3 := mp.zt_log("    spec-escape-leak", t2)
-    c3 := c2
-        .cd_or(mp.check_module_send_rc_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_scratch_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_send_mut_diagnostic_from_source(raw, flat))
-    t4 := mp.zt_log("    spec-send", t3)
-    c4 := c3.cd_or(mp.check_module_bound_diagnostic_from_source(raw, flat))
-    t5 := mp.zt_log("    spec-bound", t4)
-    c5 := c4.cd_or(mp.check_module_arg_diagnostic_from_source(raw, flat))
-    t6 := mp.zt_log("    spec-arg", t5)
-    c6 := c5
-        .cd_or(mp.check_module_or_return_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_unknown_type_diagnostic_from_source(decls, flat))
-        .cd_or(mp.check_module_ffi_diagnostic_from_source(decls, flat))
-        .cd_or(check_module_infinite_type_diagnostic_from_source(decls, flat))
-        .cd_or(check_module_main_diagnostic_from_source(raw, flat))
-        .cd_or(mp.check_module_mustuse_diagnostic_from_source(raw, flat))
-    mp.zt_log("    spec-rest", t6)
-    c6
-}
-RenderTarget*: {
-    path: string_view,
-    src: string_view,
-}
-pick_module = (
-    flat: string_view,
-    mods: [ModuleEntry],
-    i: i64,
-    off: i32,
-    w: i32,
-    rpath: string_view,
-    rsrc: string_view,
-) RenderTarget {
-    (i >= mods.len).match ({
-        true  => RenderTarget(
-            path: rpath,
-            src: rsrc,
-        ),
-        false => {
-            m := mods[i]
-            sp := diag_user_span(flat, m.source, off, w)
-            (sp.line > 0).match ({
-                true  => RenderTarget(
-                    path: m.path,
-                    src: m.source,
-                ),
-                false => flat.pick_module(mods, i + 1, off, w, rpath, rsrc),
-            })
-        },
-    })
-}
-pick_render = (
-    rp: ResolvedProgram,
-    off: i32,
-    w: i32,
-    rpath: string_view,
-    rsrc: string_view,
-) RenderTarget {
-    (diag_user_span(rp.flat, rsrc, off, w).line == 0).match ({
-        true  => rp.flat.pick_module(rp.table.modules, 0, off, w, rpath, rsrc),
-        false => RenderTarget(
-            path: rpath,
-            src: rsrc,
-        ),
-    })
-}
-// a fully located diagnostic: the module file it lives in plus its line:col span there.
-DiagLoc: {
-    path: string_view,
-    src: string_view,
-    sp: DiagSpan,
-}
-// IDENTITY-FIRST location: binary-search the resolver's region map (flat offset → module + original
-// line — exact even when two modules share identical line text), then recover the column against that
-// single known line. The whole-table fuzzy scan survives ONLY as the last resort for offsets no
-// region contains (synthesized positions, separator bytes).
-locate_diag = (
-    rp: ResolvedProgram,
-    off: i32,
-    w: i32,
-    rpath: string_view,
-    rsrc: string_view,
-) DiagLoc {
-    ri := rp.regions.fregion_find(to_i64(off))
-    (off >= 0 && ri >= 0).then({
-        srcline := rp.regions.fregion_src_line(rp.line_srcs, rp.flat, ri, to_i64(off))
-        (srcline > 0).then({
-            m := rp.table.modules[rp.regions[ri].midx]
-            return DiagLoc(
-                path: m.path,
-                src: m.source,
-                sp: diag_line_span(rp.flat, m.source, off, w, srcline),
-            )
-        })
-    })
-    rt := pick_render(rp, off, w, rpath, rsrc)
-    DiagLoc(
-        path: rt.path,
-        src: rt.src,
-        sp: diag_user_span(rp.flat, rt.src, off, w),
-    )
-}
-// render ONE diagnostic (file:line:col + caret + hint) to stderr, mapping its flat offset to the
-// module its error actually lives in. cd.count>1 appends the legacy inline "(+K more)" suffix — used
-// only on the specialized-channel path, where a single root error stands in for a whole cascade.
-emit_one = (
-    mp: MutPtr<Malloc>,
-    raw: [Decl],
-    decls: [Decl],
-    rp: ResolvedProgram,
-    path: string_view,
-    user: string_view,
-    cd: CheckDiagnostic,
-) i64 {
-    dl := locate_diag(rp, cd.source_offset, cd.span_width, path, user)
-    msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
-    // World teaching hint: an undefined name that some closure module EXPORTS names that module
-    // (with the import to write) instead of the generic advice — see undefined_name_hint.
-    hint := cd.hint
-    (cd.kind == "undefined-name").then({
-        wh := mp.undefined_name_hint(rp.table, rp.flat, cd.source_offset)
-        (is_empty(wh) == false).then({
-            hint = wh
-        })
-    })
-    derr(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, msg, hint, cd.count))
-}
-// Source-only commands (`fmt` and the deliberately-untyped raw emitter) do not own a ResolvedProgram,
-// but the no-if and no-ternary language laws still apply. Render the same structured diagnostic
-// directly against their input so every user-facing command teaches the canonical postfix forms.
-report_no_if_plain = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
-    cd := check_module_no_if_diagnostic_from_source(src).cd_or(check_module_no_ternary_diagnostic_from_source(src))
-    (cd.code == 0).match ({
-        true  => 0,
-        false => {
-            sp := diag_user_span(src, src, cd.source_offset, cd.span_width)
-            derr(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
-            1
-        },
-    })
-}
-// Checked commands preflight the resolved flat source before parsing or semantic lowering. This keeps
-// the obsolete guard parser/lowerer out of the execution path and still maps an `if` (or a ternary
-// `?`) in an imported module back to that module's real file.
-report_no_if_resolved = (
-    mp: MutPtr<Malloc>,
-    rp: ResolvedProgram,
-    path: string_view,
-    user: string_view,
-) i32 {
-    cd := check_module_no_if_diagnostic_from_source(rp.flat).cd_or(check_module_no_ternary_diagnostic_from_source(rp.flat))
-    (cd.code == 0).match ({
-        true  => 0,
-        false => {
-            dl := locate_diag(rp, cd.source_offset, cd.span_width, path, user)
-            derr(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
-            1
-        },
-    })
-}
-// how many main-channel diagnostics we print before collapsing the rest into a single trailer line.
-DIAG_CAP = () i32 { 20 }
-// after the cap, one line naming the K un-rendered errors (so the tail is never silently dropped).
-emit_more_trailer = (mp: MutPtr<Malloc>, k: i32) i64 {
-    s := mp
-        .gstr_string(48)
-        .gstr_append(mp, "zenc: (+")
-        .push_int(mp, to_i64(k))
-        .gstr_append(mp, " more error")
-    s2 := (k == 1).then({ s.gstr_push(mp, ')') }, { s.gstr_push(mp, 's').gstr_push(mp, ')') })
-    derr(s2.gstr_push(mp, '\n').gstr_finish(mp))
-}
-// 0 if clean; else render EVERY main-channel diagnostic (capped, with a trailer) and return the count.
-report_check = (
-    mp: MutPtr<Malloc>,
-    raw: [Decl],
-    decls: [Decl],
-    rp: ResolvedProgram,
-    path: string_view,
-    user: string_view,
-) i32 {
-    // a specialized channel (parse / ownership / escape / bound / …) is the ROOT — report it alone.
-    t0 := zt_ms()
-    spec := mp.check_diag_no_main(raw, decls, rp.flat)
-    t1 := mp.zt_log("  validate-spec", t0)
-    (spec.code != 0).match ({
-        true  => {
-            mp.emit_one(raw, decls, rp, path, user, spec)
-            spec.count
-        },
-        false => {
-            uv := mp.ufcs_vis_of(rp.flat, rp.regions, rp.table)
-            t2 := mp.zt_log("  validate-ufcs-vis", t1)
-            ds := mp.check_module_batch_vis(decls, rp.flat, uv)
-            mp.zt_log("  validate-batch", t2)
-            n := to_i32(ds.len)
-            ds.loop((h, i, cd) {
-                (to_i32(i) < DIAG_CAP()).then({
-                    mp.emit_one(raw, decls, rp, path, user, cd)
-                })
-            })
-            (n > DIAG_CAP()).then({
-                mp.emit_more_trailer(n - DIAG_CAP())
-            })
-            n
-        },
-    })
-}
+{ diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
+{ eprint, first_user_import_in, file_exists } = compiler.resolve
+{ ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = compiler.resolve_ffi
+{ say, eprint, push_int, pid_path, dirname, last_slash, push_prefix, push_span, pad_sp, finish_cstr,
+  join2, cstr_substr, bs_push_range, zt_log, resolve_prog, dir_exists } = compiler.drvutil
+{ report_no_if_plain, report_no_if_resolved, report_check } = compiler.drvdiag
+{ lsp_cmd } = compiler.lsp
+{ FNV_BASIS, fnv_str, CacheWalk, edges_of, cache_walk_edges } = compiler.modgraph
+{ AudCtx, aud_decl_name, aud_index, aud_tail_at, aud_ref, aud_mref, aud_walk_fn, aud_walk_sig,
+  aud_td_idxs, aud_impl_dflts, aud_tables, audit_cmd } = compiler.audit
 // run/build temp.c swaps the emitted HEAD typedef for the zenrt.h include; the PROG variant also
 // suppresses zenrt's String (the program emits its own). --build-self uses the plain seed variant.
 // module-level str CONSTS don't emit as C globals in the seed, so these are zero-arg fns.
@@ -321,55 +39,8 @@ HEAD = () string_view { "typedef struct { void* ptr; int64_t len; } zslice; " }
 HEAD_REPL = () string_view {
     "#define ZEN_NO_STRING 1\n#define ZEN_NO_MALLOC 1\n#include \"zenrt.h\"\n"
 }
-// Intermediate /tmp files are namespaced by pid so two concurrent `zenc` invocations never clobber
-// each other's temp.c / temp.bin (a fixed path made one process compile/run the OTHER's program).
-// getpid() is constant for the life of a run, so each builder yields the SAME path on every call —
-// the write + the cc command (TMPC), and the build output + the run (TMPBIN), stay consistent.
-pid_digit = (d: i64) u8 { load(offset("0123456789", d)) }
-push_int = (s: String, mp: MutPtr<Malloc>, n: i64) String {
-    (n < 10).match ({
-        true  => s.gstr_push(mp, pid_digit(n)),
-        false => {
-            hs := s.push_int(mp, n / 10)
-            hs.gstr_push(mp, pid_digit(n % 10))
-        },
-    })
-}    // hoist (gstr_reserve re-evals the receiver)
-pid_path = (mp: MutPtr<Malloc>, pre: string_view, suf: string_view) string_view {
-    mp
-        .gstr_string(64)
-        .gstr_append(mp, pre)
-        .push_int(mp, getpid())
-        .gstr_append(mp, suf)
-        .gstr_finish(mp)
-}
 TMPC = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenc_zd_", ".c") }
 TMPBIN = (mp: MutPtr<Malloc>) string_view { mp.pid_path("/tmp/zenc_zd_", ".bin") }
-// ── path helpers ────────────────────────────────────────────────────────────────────────────────
-dirname = (mp: MutPtr<Malloc>, p: string_view) string_view {
-    v := p.view()
-    cut := last_slash(v, 0, 0 - 1)
-    (cut < 0).then({ "." }, { mp.cstr_prefix(p, cut) })
-}
-last_slash = (v: [u8], i: i64, best: i64) i64 {
-    (i >= v.len).then({ best }, { v.last_slash(i + 1, (v[i] == '/').then({ i }, { best })) })
-}
-// the first `n` bytes of `p` as an owned str — built through the allocator (no raw malloc).
-cstr_prefix = (mp: MutPtr<Malloc>, p: string_view, n: i64) string_view {
-    push_prefix(mp.gstr_string(n + 1), mp, p.view(), 0, n).gstr_finish(mp)
-}
-push_prefix = (s: String, mp: MutPtr<Malloc>, v: [u8], i: i64, n: i64) String {
-    (i >= n).then({ s }, { push_prefix(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
-}
-// ── the compile pipeline (resolve imports -> parse -> resolve_module) ─────────────────────────────
-// the full resolved program (flat + per-module table) — check/build keep it so a diagnostic can
-// render against the imported module its error actually lives in.
-resolve_prog = (
-    mp: MutPtr<Malloc>,
-    root: string_view,
-    path: string_view,
-    src: string_view,
-) ResolvedProgram { mp.resolve_program_data(root, mp.dirname(path), path, src) }
 // write the runnable temp.c: zenrt.h-include head, then the emitted body (after HEAD).
 write_runnable_c = (tmpc: string_view, gen: String) bool {
     hl := HEAD().view().len
@@ -450,8 +121,8 @@ cc_command = (
     // of which profile/flags a compile actually used (the harness's profile cases assert on it).
     // A cache HIT never reaches cc, so pair it with ZENC_NO_CACHE=1/a fresh ZENC_CACHE_DIR.
     (getEnv("ZENC_SHOW_CC") == "" == false).then({
-        derr(line)
-        derr("\n")
+        eprint(line)
+        eprint("\n")
     })
     line
 }    // libm: always link (sin/cos/log/exp/pow); free if unused
@@ -496,29 +167,13 @@ cross_cc = (mp: MutPtr<Malloc>, target: string_view) string_view {
             .gstr_append(mp, target)
             .gstr_finish(mp)
     })
-    derr("zenc: error: cross target ")
-    derr(target)
-    derr(" needs a toolchain — set ZENC_TARGET_CC, or install ")
-    derr(gcc)
-    derr(" or zig\n")
+    eprint("zenc: error: cross target ")
+    eprint(target)
+    eprint(" needs a toolchain — set ZENC_TARGET_CC, or install ")
+    eprint(gcc)
+    eprint(" or zig\n")
     ""
 }
-// ── content-hash compile cache ────────────────────────────────────────────────────────────────────
-// check/run/build re-frontend the WHOLE flattened import closure on every invocation (~27s for a
-// program importing the compiler). The cache keys a fully-SUCCESSFUL result by CONTENT: FNV-1a 64-bit
-// over the running zenc binary's own bytes (a rebuilt compiler invalidates everything it ever cached),
-// the version string, the command kind, ccflags/links (a token naming a readable file — a project's
-// extra native .c — folds in its bytes, so editing it misses), and the SOURCE of every module in the
-// import closure (the probe loads the transitive module table only — the flattened text it would
-// produce is a deterministic function of those sources plus the stamped compiler, so hashing the
-// inputs covers it while skipping the expensive namespace-strip/dedup flatten on a hit). No mtimes,
-// no filesystem paths: an identical program is an identical key. A `check` hit replays the ok line
-// from a marker file; a `run`/`build` hit copies the cached binary into place. Failures are NEVER
-// cached (the entry is written only after the full pipeline succeeded). ZENC_NO_CACHE=1 (any
-// non-empty value) bypasses both reads and writes; ZENC_CACHE_DIR overrides /tmp/zenc-cache (the
-// harness's cache cases point it at scratch). i64 wraps like the spec's u64: every build has -fwrapv.
-FNV_BASIS = () i64 { 0 - 3750763034362895579 }    // 0xcbf29ce484222325, the FNV-1a-64 offset basis, as an i64
-fnv_str = (h: i64, s: string_view) i64 { h.fnv1a64_fold(s.view()) }
 flag_token_end = (v: [u8], i: i64) i64 {
     (i >= v.len || v[i] == ' ').then({ i }, { v.flag_token_end(i + 1) })
 }
@@ -587,65 +242,6 @@ cache_dir = () string_view {
     (e == "").then({ "/tmp/zenc-cache" }, { e })
 }
 cache_on = () bool { getEnv("ZENC_NO_CACHE") == "" }
-// ── the probe's light closure walk ── the resolver's own module walk (module_table) builds a full
-// per-module symbol graph twice over; the probe only needs BYTES, so it walks the same import edges
-// (the resolver's exported edge scanner — the one source of truth for what an import line is) and
-// folds each module's logical id + entire source into the key. Any edit to any imported file, however
-// deep, changes the key. An unreadable/unknown module folds its id only — the miss path then reports
-// it with the resolver's real diagnostic (and a failed pipeline never populates the cache).
-CacheWalk: {
-    seen: String,
-    h: i64,
-}
-edges_of = (mp: MutPtr<Malloc>, src: string_view) [ImportEdge] {
-    mp.import_edges(src).expect("zenc: cache probe: allocation failed")
-}
-// id → file through the resolver's ONE exported module_path (the canonical ModuleId → path fn),
-// so the probe can never drift from the loader's mapping.
-cache_module_path = (
-    mp: MutPtr<Malloc>,
-    root: string_view,
-    progdir: string_view,
-    id: string_view,
-) string_view { mp.module_path(root, progdir, mp.gstr_string(24).gstr_append(mp, id)) }
-cache_walk_one = (
-    mp: MutPtr<Malloc>,
-    root: string_view,
-    progdir: string_view,
-    id: string_view,
-    st: CacheWalk,
-) CacheWalk {
-    idn := mp.gstr_string(24).gstr_append(mp, id)
-    st.seen.seen_name(idn).match ({
-        true  => st,
-        false => {
-            next := CacheWalk(
-                seen: st.seen.add_name(mp, idn),
-                h: st.h.fnv_str(id),
-            )
-            contents_in(mp, mp.cache_module_path(root, progdir, id)).match ({
-                .Ok(msrc) => mp.cache_walk_edges(root, progdir, mp.edges_of(msrc), CacheWalk(
-                    seen: next.seen,
-                    h: next.h.fnv_str(msrc),
-                )),
-                .Err(e)   => next,
-            })
-        },
-    })
-}
-cache_walk_edges = (
-    mp: MutPtr<Malloc>,
-    root: string_view,
-    progdir: string_view,
-    edges: [ImportEdge],
-    st: CacheWalk,
-) CacheWalk {
-    cur := st
-    edges.loop((lh, i, e) {
-        cur = mp.cache_walk_one(root, progdir, e.module, cur)
-    })
-    cur
-}
 // the on-disk entry for one (kind, program) pair: <dir>/<kind>_<16 hex digits>.
 cache_probe = (
     mp: MutPtr<Malloc>,
@@ -764,16 +360,13 @@ tm_now = (mp: MutPtr<Malloc>) i64 {
 }
 tm_mark = (mp: MutPtr<Malloc>) i64 { time_on.then({ mp.tm_now() }, { 0 }) }
 tm_lap = (mp: MutPtr<Malloc>, t0: i64) i64 { time_on.then({ mp.tm_now() - t0 }, { 0 }) }
-pad_sp = (s: String, mp: MutPtr<Malloc>, n: i64) String {
-    (n <= 0).then({ s }, { s.gstr_push(mp, ' ').pad_sp(mp, n - 1) })
-}
 // nanoseconds -> "12.3" (milliseconds, one decimal).
 push_ms = (s: String, mp: MutPtr<Malloc>, ns: i64) String {
     t := ns / 100000
     s.push_int(mp, t / 10).gstr_push(mp, '.').push_int(mp, t % 10)
 }
 tm_row = (mp: MutPtr<Malloc>, name: string_view, ns: i64) void {
-    derr(mp
+    eprint(mp
         .gstr_string(64)
         .gstr_append(mp, "  ")
         .gstr_append(mp, name)
@@ -786,9 +379,9 @@ tm_row = (mp: MutPtr<Malloc>, name: string_view, ns: i64) void {
 tm_report = (mp: MutPtr<Malloc>, wall: i64, other_label: string_view) void {
     time_on.then({
         sum := tm_flatten + tm_parse + tm_resolve + tm_check + tm_emit + tm_cc
-        derr("zenc --time: pipeline stages\n")
+        eprint("zenc --time: pipeline stages\n")
         tm_cache_hit.then({
-            derr("  (binary cache hit — compile stages skipped; ZENC_NO_CACHE=1 forces a full compile)\n")
+            eprint("  (binary cache hit — compile stages skipped; ZENC_NO_CACHE=1 forces a full compile)\n")
             { }
         })
         mp.tm_row("flatten", tm_flatten)
@@ -871,7 +464,7 @@ compile_flat = (
                             (ccrc == 0).match ({
                                 true  => 0,
                                 false => {
-                                    derr("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
+                                    eprint("zenc: internal: generated C failed to compile (this is a compiler bug — please report)\n")
                                     1
                                 },
                             })
@@ -920,7 +513,7 @@ emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: cannot read input\n")
+            eprint("zenc: cannot read input\n")
             1
         },
     })
@@ -929,10 +522,10 @@ emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
 // (bootstrap/zenrt.js) + the module JS; `build --target js` writes the same to a .js file. Additive:
 // it reuses the exact resolve/parse/check pipeline, only swapping genModuleIn for genJsModuleIn. ──
 js_floor = (mp: MutPtr<Malloc>, root: string_view) string_view {
-    contents_in(mp, mp.bs_join(root, "bootstrap/zenrt.js")).match ({
+    contents_in(mp, mp.join2(root, "bootstrap/zenrt.js")).match ({
         .Ok(src) => src,
         .Err(e)  => {
-            derr("zenc: emit-js: cannot open bootstrap/zenrt.js floor\n")
+            eprint("zenc: emit-js: cannot open bootstrap/zenrt.js floor\n")
             ""
         },
     })
@@ -960,7 +553,7 @@ emit_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: emit-js: cannot read input\n")
+            eprint("zenc: emit-js: cannot read input\n")
             1
         },
     })
@@ -984,9 +577,9 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
                             full := js.gstr_append(mp, mod.finish_cstr(mp))
                             save(out_path, full.finish_cstr(mp), full.len).match ({
                                 .Ok(n)  => {
-                                    derr("zenc: wrote ")
-                                    derr(out_path)
-                                    derr("\n")
+                                    eprint("zenc: wrote ")
+                                    eprint(out_path)
+                                    eprint("\n")
                                     0
                                 },
                                 .Err(e) => 1,
@@ -999,12 +592,11 @@ build_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view, out_path: 
             })
         },
         .Err(e)  => {
-            derr("zenc: build --target js: cannot read input\n")
+            eprint("zenc: build --target js: cannot read input\n")
             1
         },
     })
 }
-finish_cstr = (s: String, mp: MutPtr<Malloc>) string_view { cstr(s.ptr) }
 // `zenc build`/`zenc targets` with no project argument default to the current directory when it
 // holds a build.zen — so `./zen build` at the repo root builds the compiler's own registered
 // targets. An explicit argument (file or dir) is never rewritten.
@@ -1083,15 +675,15 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: cannot open input\n")
+            eprint("zenc: cannot open input\n")
             1
         },
     })
 }
 check_ok_line = (path: string_view) i32 {
-    derr("zenc: ")
-    derr(path)
-    derr(": ok\n")
+    eprint("zenc: ")
+    eprint(path)
+    eprint(": ok\n")
     0
 }    // <path>: ok -> stderr
 build_spec = (
@@ -1104,7 +696,7 @@ build_spec = (
     spec.ok.match ({
         true  => {
             spec.library.then({
-                derr("zenc: cannot build a library project yet; use `zenc check <project>`\n")
+                eprint("zenc: cannot build a library project yet; use `zenc check <project>`\n")
                 return 1
             })
             ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
@@ -1114,29 +706,29 @@ build_spec = (
                 .Ok(src) => (mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links, spec.target) == 0).match ({
                     true  => file_exists(out).match ({
                         true  => {
-                            derr("zenc: wrote ")
-                            derr(out)
-                            derr("\n")
+                            eprint("zenc: wrote ")
+                            eprint(out)
+                            eprint("\n")
                             0
                         },
                         false => {
-                            derr("zenc: build produced no binary: ")
-                            derr(out)
-                            derr(" (compiler reported success but the file is missing)\n")
+                            eprint("zenc: build produced no binary: ")
+                            eprint(out)
+                            eprint(" (compiler reported success but the file is missing)\n")
                             1
                         },
                     }),
                     false => {
-                        derr("zenc: build failed: ")
-                        derr(spec.source)
-                        derr("\n")
+                        eprint("zenc: build failed: ")
+                        eprint(spec.source)
+                        eprint("\n")
                         1
                     },
                 }),
                 .Err(e)  => {
-                    derr("zenc: cannot open input: ")
-                    derr(spec.source)
-                    derr("\n")
+                    eprint("zenc: cannot open input: ")
+                    eprint(spec.source)
+                    eprint("\n")
                     1
                 },
             })
@@ -1175,7 +767,7 @@ run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
     spec.ok.match ({
         true  => {
             spec.library.then({
-                derr("zenc: cannot run a library project; use `zenc check <project>`\n")
+                eprint("zenc: cannot run a library project; use `zenc check <project>`\n")
                 return 1
             })
             ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
@@ -1189,9 +781,9 @@ run_spec = (mp: MutPtr<Malloc>, root: string_view, spec: Spec) i32 {
                     })
                 },
                 .Err(e)  => {
-                    derr("zenc: cannot open input: ")
-                    derr(spec.source)
-                    derr("\n")
+                    eprint("zenc: cannot open input: ")
+                    eprint(spec.source)
+                    eprint("\n")
                     1
                 },
             })
@@ -1334,10 +926,6 @@ prof_pct = (v: [u8], i: i64, e: i64) ProfPct {
             end: d1.end,
         ),
     })
-}
-// bytes [a, b) as an owned str (through the allocator, like cstr_prefix).
-push_span = (s: String, mp: MutPtr<Malloc>, v: [u8], i: i64, n: i64) String {
-    (i >= n).then({ s }, { push_span(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
 }
 prof_span = (mp: MutPtr<Malloc>, v: [u8], a: i64, b: i64) string_view {
     push_span(mp.gstr_string(b - a + 1), mp, v, a, b).gstr_finish(mp)
@@ -1695,7 +1283,7 @@ prof_gprof = (
         .system()
     body := contents_in(mp, txt).or("")
     (body == "").then({
-        derr("zenc: profile: gprof produced no output (did the program run? did it exit through panic?)\n")
+        eprint("zenc: profile: gprof produced no output (did the program run? did it exit through panic?)\n")
         return 1
     })
     pa.raw.then({
@@ -1705,7 +1293,7 @@ prof_gprof = (
     rows := cbuf<ProfRow>(mp, PROF_TOP())
     n := mp.prof_parse_gprof(body, rows)
     (n == 0).then({
-        derr("zenc: profile: no samples — the program finished too fast to profile; give it more work\n")
+        eprint("zenc: profile: no samples — the program finished too fast to profile; give it more work\n")
         return 1
     })
     mp.prof_table(spec.source, "gprof", "", rows, n, mp.prof_names_of(root, spec, src), "")
@@ -1727,11 +1315,11 @@ prof_run = (
             })
             mp.which_ok("gprof").match ({
                 true  => {
-                    derr("zenc: perf recorded no samples (perf_event_paranoid too strict?); falling back to gprof\n")
+                    eprint("zenc: perf recorded no samples (perf_event_paranoid too strict?); falling back to gprof\n")
                     mp.prof_gprof(root, spec, src, pa)
                 },
                 false => {
-                    derr("zenc: perf recorded no samples (check /proc/sys/kernel/perf_event_paranoid) and gprof is not installed\n")
+                    eprint("zenc: perf recorded no samples (check /proc/sys/kernel/perf_event_paranoid) and gprof is not installed\n")
                     1
                 },
             })
@@ -1746,19 +1334,19 @@ profile_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
         fwd: argc(),
     ))
     (pa.path == "").then({
-        derr(PROF_USAGE())
+        eprint(PROF_USAGE())
         return 2
     })
     have_perf := mp.which_ok("perf")
     (have_perf == false && mp.which_ok("gprof") == false).then({
-        derr("zenc: profile needs a profiler on PATH: install `perf` (linux-tools) or `gprof` (binutils)\n")
+        eprint("zenc: profile needs a profiler on PATH: install `perf` (linux-tools) or `gprof` (binutils)\n")
         return 1
     })
     spec := mp.resolve_spec(root, pa.path)
     spec.ok.match ({
         true  => {
             spec.library.then({
-                derr("zenc: cannot profile a library project; profile a program with a main\n")
+                eprint("zenc: cannot profile a library project; profile a program with a main\n")
                 return 1
             })
             ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
@@ -1766,9 +1354,9 @@ profile_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
             contents_in(mp, spec.source).match ({
                 .Ok(src) => mp.prof_run(root, spec, src, pa, have_perf),
                 .Err(e)  => {
-                    derr("zenc: cannot open input: ")
-                    derr(spec.source)
-                    derr("\n")
+                    eprint("zenc: cannot open input: ")
+                    eprint(spec.source)
+                    eprint("\n")
                     1
                 },
             })
@@ -1783,7 +1371,7 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     (e == "").then({ mp.dirname(arg(0)) }, { e })
 }
 HELP = () string_view {
-    "usage: zenc <run|build|profile|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--time] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc run [--time] <file|project> [args]  compile + run; --time prints per-stage compile timings\n  zenc profile [--raw] <file.zen|project> [-- args]\n                                       sampling profile (perf; gprof fallback) with zen-native names\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code + unused-import report (advisory; --strict exits 1)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
+    "usage: zenc <run|build|profile|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--time] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc run [--time] <file|project> [args]  compile + run; --time prints per-stage compile timings\n  zenc profile [--raw] <file.zen|project> [-- args]\n                                       sampling profile (perf; gprof fallback) with zen-native names\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code, unused-import + clone report (--strict exits 1;\n                                       clones are advisory and never affect the exit code)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
 }
 VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
 main = () i32 {
@@ -1804,7 +1392,7 @@ main = () i32 {
             false => (cmd == "--build-self" || cmd == "--build-self-full").match ({
                 true  => (arg(2) == "").match ({
                     true  => {
-                        derr("usage: zenc --build-self[-full] <out.c> <srcroot>\n")
+                        eprint("usage: zenc --build-self[-full] <out.c> <srcroot>\n")
                         2
                     },
                     false => mp.build_self(arg(3), arg(2), cmd == "--build-self"),
@@ -1877,7 +1465,7 @@ stdin_emit = (mp: MutPtr<Malloc>, src: string_view) i32 {
     (sib == "").match ({
         true  => mp.raw_emit_src("<stdin>", src),
         false => {
-            derr(mp
+            eprint(mp
                 .gstr_string(256)
                 .gstr_append(mp, "zenc: <stdin>: error: sibling import '")
                 .gstr_append(mp, sib)
@@ -1891,7 +1479,7 @@ raw_emit_file = (mp: MutPtr<Malloc>, path: string_view) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => mp.raw_emit_src(path, src),
         .Err(e)  => {
-            derr("zenc: cannot open input\n")
+            eprint("zenc: cannot open input\n")
             1
         },
     })
@@ -1993,9 +1581,6 @@ bs_is_import = (v: [u8], p: i64, e: i64) bool {
         false => false,
     })
 }
-bs_push_range = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, e: i64) String {
-    (p >= e).then({ out }, { mp.bs_push_range(out.gstr_push(mp, v[p]), v, p + 1, e) })
-}
 bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first: bool) String {
     (p >= n).match ({
         true  => out,
@@ -2014,26 +1599,18 @@ bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first
         },
     })
 }
-bs_join = (mp: MutPtr<Malloc>, root: string_view, rel: string_view) string_view {
-    mp
-        .gstr_string(256)
-        .gstr_append(mp, root)
-        .gstr_append(mp, "/")
-        .gstr_append(mp, rel)
-        .gstr_finish(mp)
-}
 bs_rel = (mp: MutPtr<Malloc>, mv: [u8], s: i64, t: i64) string_view {
     mp.bs_push_range(mp.gstr_string(256), mv, s, t).gstr_finish(mp)
 }
 bs_add_source = (mp: MutPtr<Malloc>, out: String, root: string_view, rel: string_view) String {
-    path := mp.bs_join(root, rel)
+    path := mp.join2(root, rel)
     contents_in(mp, path).match ({
         .Ok(src) => {
             sv := src.view()
             mp.bs_strip_file(out, sv, 0, sv.len, true)
         },
         .Err(e)  => {
-            derr("zenc: --build-self: cannot open a source file\n")
+            eprint("zenc: --build-self: cannot open a source file\n")
             out
         },
     })
@@ -2103,7 +1680,7 @@ bs_emit_checked = (
     esrc: string_view,
     shake: bool,
 ) i32 {
-    t0 := zt_ms()
+    t0 := clock_ms()
     rp := mp.resolve_prog(root, entry, esrc)
     t1 := mp.zt_log("resolve-imports", t0)
     (mp.report_no_if_resolved(rp, entry, esrc) == 0).match ({
@@ -2127,7 +1704,7 @@ bs_emit_checked = (
                     gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
                         true  => bs_write(out_path, gen).then({ 0 }, { 1 }),
                         false => {
-                            derr("zenc: --build-self: emitted C did not start with the expected head\n")
+                            eprint("zenc: --build-self: emitted C did not start with the expected head\n")
                             1
                         },
                     })
@@ -2281,22 +1858,22 @@ bs_shake = (mp: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     kept
 }
 build_self = (mp: MutPtr<Malloc>, root: string_view, out_path: string_view, shake: bool) i32 {
-    mpath := mp.bs_join(root, "bootstrap/sources.txt")
+    mpath := mp.join2(root, "bootstrap/sources.txt")
     contents_in(mp, mpath).match ({
         .Ok(man) => {
             mv := man.view()
             flat := mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
-            entry := mp.bs_join(root, "driver.zen")
+            entry := mp.join2(root, "driver.zen")
             contents_in(mp, entry).match ({
                 .Ok(esrc) => mp.bs_emit_checked(root, out_path, flat, entry, esrc, shake),
                 .Err(e)   => {
-                    derr("zenc: --build-self: cannot open driver.zen for validation\n")
+                    eprint("zenc: --build-self: cannot open driver.zen for validation\n")
                     1
                 },
             })
         },
         .Err(e)  => {
-            derr("zenc: --build-self: cannot open bootstrap/sources.txt\n")
+            eprint("zenc: --build-self: cannot open bootstrap/sources.txt\n")
             1
         },
     })
@@ -2382,7 +1959,7 @@ doc_lines = (mp: MutPtr<Malloc>, v: [u8], p: i64, docs: String) i64 {
 doc_cmd = (mp: MutPtr<Malloc>, root: string_view, modarg: string_view) i32 {
     (modarg == "").match ({
         true  => {
-            derr("usage: zenc doc <std.mod|file.zen>\n")
+            eprint("usage: zenc doc <std.mod|file.zen>\n")
             2
         },
         false => contents_in(mp, mp.mod_path(root, modarg)).match ({
@@ -2394,7 +1971,7 @@ doc_cmd = (mp: MutPtr<Malloc>, root: string_view, modarg: string_view) i32 {
                 0
             },
             .Err(e)  => {
-                derr("zenc: doc: cannot open module\n")
+                eprint("zenc: doc: cannot open module\n")
                 1
             },
         }),
@@ -2450,7 +2027,7 @@ fmt_parse_err = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
     off := (perr_off_get() == 0).then({ lerr_off_get() }, { perr_off_get() })
     o := (off < 0).then({ 0 - off }, { off })
     sp := diag_user_span(src, src, o, 1)
-    derr(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, "parse", "cannot format (syntax error — a faithful formatter refuses a file it cannot represent)", "fix the parse error first (`zenc check` reports the full diagnostic), then re-run fmt", 1))
+    eprint(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, "parse", "cannot format (syntax error — a faithful formatter refuses a file it cannot represent)", "fix the parse error first (`zenc check` reports the full diagnostic), then re-run fmt", 1))
     1
 }
 // THE single source of truth for "would apply rewrite this file?" — a file is dirty iff the formatted
@@ -2483,9 +2060,9 @@ fmt_file = (mp: MutPtr<Malloc>, path: string_view, check: bool) i32 {
                         true  => fmt_dirty(src, r).match ({
                             true  => check.match ({
                                 true  => {
-                                    derr("zenc: ")
-                                    derr(path)
-                                    derr(": needs formatting\n")
+                                    eprint("zenc: ")
+                                    eprint(path)
+                                    eprint(": needs formatting\n")
                                     1
                                 },
                                 false => save(path, r.text, r.len).match ({
@@ -2502,7 +2079,7 @@ fmt_file = (mp: MutPtr<Malloc>, path: string_view, check: bool) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: fmt: cannot open input\n")
+            eprint("zenc: fmt: cannot open input\n")
             1
         },
     })
@@ -2526,7 +2103,7 @@ fmt_stdout = (mp: MutPtr<Malloc>, path: string_view) i32 {
             })
         },
         .Err(e)  => {
-            derr("zenc: fmt: cannot open input\n")
+            eprint("zenc: fmt: cannot open input\n")
             1
         },
     })
@@ -2549,7 +2126,7 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: string_view, a3: string_view) i32 {
     (a2 == "--ast" || a2 == "--stdout").match ({
         true  => (a3 == "").match ({
             true  => {
-                derr("usage: zenc fmt --stdout <in.zen>\n")
+                eprint("usage: zenc fmt --stdout <in.zen>\n")
                 2
             },
             false => mp.fmt_stdout(a3),
@@ -2557,14 +2134,14 @@ fmt_cmd = (mp: MutPtr<Malloc>, a2: string_view, a3: string_view) i32 {
         false => (a2 == "--check").match ({
             true  => (a3 == "").match ({
                 true  => {
-                    derr("usage: zenc fmt [--check] <in.zen>...\n")
+                    eprint("usage: zenc fmt [--check] <in.zen>...\n")
                     2
                 },
                 false => mp.fmt_files(3, argc(), true, 0),
             }),
             false => (a2 == "").match ({
                 true  => {
-                    derr("usage: zenc fmt [--check] <in.zen>...\n")
+                    eprint("usage: zenc fmt [--check] <in.zen>...\n")
                     2
                 },
                 false => mp.fmt_files(2, argc(), false, 0),
@@ -2623,7 +2200,7 @@ zi_scan_args = (i: i32, n: i32, path: string_view, kind: i32, valid: bool) ZiIni
 }
 // One prompt line, without consuming the next prompt's input (read_stdin intentionally reads to EOF).
 zi_read_line = (mp: MutPtr<Malloc>, prompt: string_view) string_view {
-    derr(prompt)
+    eprint(prompt)
     s := mp.gstr_string(64)
     cell: [u8] := [0]
     done := false
@@ -2641,7 +2218,7 @@ zi_kind_choice = (s: string_view) i32 {
     })
 }
 zi_prompt_kind = (mp: MutPtr<Malloc>) i32 {
-    derr("Project type:\n  1) Executable\n  2) Library\n")
+    eprint("Project type:\n  1) Executable\n  2) Library\n")
     zi_kind_choice(mp.zi_read_line("Select [1]: "))
 }
 // Names are embedded in TOML, a string literal, and the executable output path. Keep them portable
@@ -2697,16 +2274,6 @@ zi_project_name = (mp: MutPtr<Malloc>, path: string_view) string_view {
     start := slash + 1
     mp.cstr_substr(path, to_i32(start), to_i32(v.len - start))
 }
-zi_is_dir = (path: string_view) bool {
-    d := opendir(path)
-    (d == null_ptr()).match ({
-        true  => false,
-        false => {
-            closedir(d)
-            true
-        },
-    })
-}
 ZI_OPEN_NEW := O_WRONLY | O_CREAT | O_EXCL
 ZiDirCreate: {
     ok: bool,
@@ -2717,7 +2284,7 @@ ZiDirCreate: {
 zi_ensure_dir = (path: string_view) ZiDirCreate {
     file_exists(path).match ({
         true  => ZiDirCreate(
-            ok: zi_is_dir(path),
+            ok: dir_exists(path),
             created: false,
         ),
         false => (mkdir(path, MODE_755) == 0).match ({
@@ -2726,7 +2293,7 @@ zi_ensure_dir = (path: string_view) ZiDirCreate {
                 created: true,
             ),
             false => ZiDirCreate(
-                ok: zi_is_dir(path),
+                ok: dir_exists(path),
                 created: false,
             ),
         }),
@@ -2804,9 +2371,9 @@ zi_source = (mp: MutPtr<Malloc>, name: string_view, kind: i32) string_view {
     })
 }
 zi_collision = (path: string_view) i32 {
-    derr("zenc init: ")
-    derr(path)
-    derr(" already exists; nothing was changed\n")
+    eprint("zenc init: ")
+    eprint(path)
+    eprint(" already exists; nothing was changed\n")
     1
 }
 zi_remove_dir = (path: string_view) void { removed := rmdir(path) }
@@ -2826,10 +2393,10 @@ zi_create = (mp: MutPtr<Malloc>, target: string_view, name: string_view, kind: i
     entry := (kind == ZI_KIND_LIBRARY).then({ "lib.zen" }, { "main.zen" })
     source := mp.join2(srcdir, entry)
     target_exists := file_exists(target)
-    (target_exists && zi_is_dir(target) == false).then({
-        derr("zenc init: target exists and is not a directory: ")
-        derr(target)
-        derr("\n")
+    (target_exists && dir_exists(target) == false).then({
+        eprint("zenc init: target exists and is not a directory: ")
+        eprint(target)
+        eprint("\n")
         return 1
     })
     file_exists(buildfile).then({
@@ -2838,7 +2405,7 @@ zi_create = (mp: MutPtr<Malloc>, target: string_view, name: string_view, kind: i
     file_exists(manifest).then({
         return zi_collision(manifest)
     })
-    (file_exists(srcdir) && zi_is_dir(srcdir) == false).then({
+    (file_exists(srcdir) && dir_exists(srcdir) == false).then({
         return zi_collision(srcdir)
     })
     file_exists(source).then({
@@ -2846,47 +2413,47 @@ zi_create = (mp: MutPtr<Malloc>, target: string_view, name: string_view, kind: i
     })
     target_dir := mp.zi_make_tree(target)
     (target_dir.ok == false).then({
-        derr("zenc init: could not create project directory: ")
-        derr(target)
-        derr("\n")
+        eprint("zenc init: could not create project directory: ")
+        eprint(target)
+        eprint("\n")
         return 1
     })
     src_dir := zi_ensure_dir(srcdir)
     (src_dir.ok == false).then({
-        derr("zenc init: could not create source directory: ")
-        derr(srcdir)
-        derr("\n")
+        eprint("zenc init: could not create source directory: ")
+        eprint(srcdir)
+        eprint("\n")
         zi_cleanup_dirs(srcdir, target, false, target_dir.created)
         return 1
     })
     (zi_save_new(source, mp.zi_source(name, kind)) == false).then({
-        derr("zenc init: could not create source file: ")
-        derr(source)
-        derr("\n")
+        eprint("zenc init: could not create source file: ")
+        eprint(source)
+        eprint("\n")
         zi_cleanup_dirs(srcdir, target, src_dir.created, target_dir.created)
         return 1
     })
     (zi_save_new(manifest, mp.zi_manifest(name, kind)) == false).then({
         unlink(source)
-        derr("zenc init: could not create manifest: ")
-        derr(manifest)
-        derr("\n")
+        eprint("zenc init: could not create manifest: ")
+        eprint(manifest)
+        eprint("\n")
         zi_cleanup_dirs(srcdir, target, src_dir.created, target_dir.created)
         return 1
     })
-    derr("Created ")
-    derr((kind == ZI_KIND_LIBRARY).then({ "library" }, { "executable" }))
-    derr(" project `")
-    derr(name)
-    derr("` at ")
-    derr(target)
-    derr("\n")
-    derr((kind == ZI_KIND_LIBRARY).match ({
+    eprint("Created ")
+    eprint((kind == ZI_KIND_LIBRARY).then({ "library" }, { "executable" }))
+    eprint(" project `")
+    eprint(name)
+    eprint("` at ")
+    eprint(target)
+    eprint("\n")
+    eprint((kind == ZI_KIND_LIBRARY).match ({
         true  => "Check it with: zenc check ",
         false => "Run it with: zenc run ",
     }))
-    derr(target)
-    derr("\n")
+    eprint(target)
+    eprint("\n")
     0
 }
 zi_cmd = (mp: MutPtr<Malloc>) i32 {
@@ -2896,7 +2463,7 @@ zi_cmd = (mp: MutPtr<Malloc>) i32 {
         return 0
     })
     (parsed.ok == false).then({
-        derr(ZI_USAGE())
+        eprint(ZI_USAGE())
         return 2
     })
     rawpath := (parsed.path == "").match ({
@@ -2905,17 +2472,17 @@ zi_cmd = (mp: MutPtr<Malloc>) i32 {
     })
     path := mp.zi_normal_path(rawpath)
     (path == "" || zi_path_valid(path) == false).then({
-        derr("zenc init: project path uses unsafe characters or a '.'/'..' component\n")
+        eprint("zenc init: project path uses unsafe characters or a '.'/'..' component\n")
         return 2
     })
     name := mp.zi_project_name(path)
     (zi_name_valid(name) == false).then({
-        derr("zenc init: project name must match [A-Za-z0-9][A-Za-z0-9_-]*\n")
+        eprint("zenc init: project name must match [A-Za-z0-9][A-Za-z0-9_-]*\n")
         return 2
     })
     kind := (parsed.kind == ZI_KIND_PROMPT).then({ mp.zi_prompt_kind() }, { parsed.kind })
     (kind != ZI_KIND_EXECUTABLE && kind != ZI_KIND_LIBRARY).then({
-        derr("zenc init: choose 1/executable or 2/library\n")
+        eprint("zenc init: choose 1/executable or 2/library\n")
         return 2
     })
     mp.zi_create(path, name, kind)
@@ -2932,27 +2499,12 @@ Spec*: {
     library: bool,
     ok: bool,
 }    // target: "" = native (host cc), else a cross triple like "aarch64-linux-gnu"
-join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
-    mp
-        .gstr_string(256)
-        .gstr_append(mp, a)
-        .gstr_append(mp, "/")
-        .gstr_append(mp, b)
-        .gstr_finish(mp)
-}
 link_flag = (mp: MutPtr<Malloc>, lk: string_view) string_view {
     mp
         .gstr_string(8)
         .gstr_append(mp, "-l")
         .gstr_append(mp, lk)
         .gstr_finish(mp)
-}
-// src[start .. start+n) as an owned str. (named cstr_* to avoid colliding with std.text.str's
-// generic `substr` once the modules are flattened together — a plain `substr` would emit a second
-// C `substr` definition.)
-cstr_substr = (mp: MutPtr<Malloc>, s: string_view, start: i32, n: i32) string_view {
-    v: [u8] := s.view()
-    mp.bs_push_range(mp.gstr_string(n + 1), v, start, start + n).gstr_finish(mp)
 }
 // a zen.toml `key = "value"` -> the value (or "" if absent), via the Zen manifest parser.
 manifest_value = (mp: MutPtr<Malloc>, src: string_view, key: string_view) string_view {
@@ -3023,9 +2575,9 @@ resolve_spec = (mp: MutPtr<Malloc>, root: string_view, arg: string_view) Spec {
                 s.ok.match ({
                     true  => s,
                     false => {
-                        derr("zenc: ")
-                        derr(mp.join2(arg, "zen.toml"))
-                        derr(": invalid manifest (need `root`/`main`; optional `kind` is executable or library)\n")
+                        eprint("zenc: ")
+                        eprint(mp.join2(arg, "zen.toml"))
+                        eprint(": invalid manifest (need `root`/`main`; optional `kind` is executable or library)\n")
                         s
                     },
                 })
@@ -3208,7 +2760,7 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
     tgt := mp.cross_triple(osc, arc, abc)
     (root == "" || main == "").match ({
         true  => {
-            derr("zenc: build.zen: target is missing root/main\n")
+            eprint("zenc: build.zen: target is missing root/main\n")
             Spec(
                 source: "",
                 out: "",
@@ -3223,9 +2775,9 @@ parse_spec_at = (mp: MutPtr<Malloc>, dir: string_view, specsrc: string_view, ind
         },
         false => (tgt == "" == false && cross_supported(osc, arc, abc) == false).match ({
             true  => {
-                derr("zenc: build.zen: cross target ")
-                derr(tgt)
-                derr(" is unsupported in v1 (Linux aarch64|x86_64|riscv64, gnu|musl only)\n")
+                eprint("zenc: build.zen: cross target ")
+                eprint(tgt)
+                eprint(" is unsupported in v1 (Linux aarch64|x86_64|riscv64, gnu|musl only)\n")
                 empty_spec()
             },
             false => Spec(
@@ -3292,7 +2844,7 @@ gmx_write = (
         .gstr_finish(mp)
     save(gpath, body, blen).match ({
         .Ok(n)  => { },
-        .Err(e) => derr("zenc: build.zen: cannot write generated module\n"),
+        .Err(e) => eprint("zenc: build.zen: cannot write generated module\n"),
     })
     gpath
 }
@@ -3396,7 +2948,7 @@ build_zen_plan = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) PlanS
                     sp
                 },
                 false => {
-                    derr("zenc: build.zen: the build program did not compile\n")
+                    eprint("zenc: build.zen: the build program did not compile\n")
                     PlanSource(
                         src: "",
                         ok: false,
@@ -3435,9 +2987,9 @@ build_named_plan = (
     (p.ok && i >= 0).match ({
         true  => mp.build_spec(root, mp.parse_spec_at(dir, p.src, i), "", ""),
         false => {
-            derr("zenc: build.zen: no target named `")
-            derr(wanted)
-            derr("`\n")
+            eprint("zenc: build.zen: no target named `")
+            eprint(wanted)
+            eprint("`\n")
             1
         },
     })
@@ -3472,2408 +3024,4 @@ list_plan_from = (mp: MutPtr<Malloc>, src: string_view, i: i32, n: i32) i32 {
 list_plan_targets = (mp: MutPtr<Malloc>, root: string_view, dir: string_view) i32 {
     p := mp.build_zen_plan(root, dir)
     p.ok.then({ mp.list_plan_from(p.src, 0, p.src.plan_count()) }, { 1 })
-}
-// ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 1) ─────────────────────────
-// A JSON-RPC 2.0 loop: read `Content-Length: N\r\n\r\n<N-byte JSON body>` frames from stdin, run the
-// EXISTING check pipeline (resolve -> parse -> the diagnostic channels) on each opened/changed
-// document, and PUSH `textDocument/publishDiagnostics`. This only ADDS a subcommand — no compiler
-// internals change; it rides check_module_batch + the specialized channels the driver already uses.
-// Full-sync per document: the text is checked standalone; its directory is derived from the
-// `file://` URI so sibling/std imports resolve (an error INSIDE an imported module is pinned to the
-// open file's head with the real location in the message). Stage 1 adds: didClose (clears
-// diagnostics), MethodNotFound replies for unimplemented requests, byte->UTF-16 position conversion,
-// and a Content-Length sanity ceiling. Conformance suite: tests/harness_lsp.zen. Hover needs plumbing
-// the checker doesn't expose yet (an offset->node query + an exported type-render such as ty_name);
-// until that exists the server deliberately declines it with -32601.
-// PROTOCOL WRITES GO TO STDOUT (fd 1); every diagnostic/log the pipeline emits stays on stderr, so the
-// JSON-RPC stream is never corrupted.
-lout = (s: string_view) i64 {
-    v := s.view()
-    write(1, v.ptr, v.len)
-}
-// frame + write one JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`.
-lsp_send = (mp: MutPtr<Malloc>, body: string_view) i64 {
-    lout(mp
-        .gstr_string(48)
-        .gstr_append(mp, "Content-Length: ")
-        .push_int(mp, body.view().len)
-        .gstr_append(mp, "\r\n\r\n")
-        .gstr_finish(mp))
-    lout(body)
-}
-// ── JSON string EMISSION (own escaper; the task sanctions building output as strings) ─────────────
-lsp_hexd = (n: i64) u8 {
-    (n < 10).then({ ('0'.to_i64() + n).to_u8() }, { ('a'.to_i64() + n - 10).to_u8() })
-}
-push_uesc = (sb: String, mp: MutPtr<Malloc>, b: u8) String {
-    bi := b.to_i64()
-    sb
-        .gstr_append(mp, "\\u00")
-        .gstr_push(mp, lsp_hexd(bi >> 4 & 15))
-        .gstr_push(mp, lsp_hexd(bi & 15))
-}
-// append `s` as a JSON string LITERAL (surrounding quotes + escaped) to the builder.
-push_jstr = (sb: String, mp: MutPtr<Malloc>, s: string_view) String {
-    cur := sb.gstr_push(mp, '"')
-    v: [u8] := s.view()
-    v.loop((h, i, b) {
-        cur = (b == '"').match ({
-            true  => cur.gstr_append(mp, "\\\""),
-            false => (b == '\\').match ({
-                true  => cur.gstr_append(mp, "\\\\"),
-                false => (b == '\n').match ({
-                    true  => cur.gstr_append(mp, "\\n"),
-                    false => (b == '\r').match ({
-                        true  => cur.gstr_append(mp, "\\r"),
-                        false => (b == '\t').match ({
-                            true  => cur.gstr_append(mp, "\\t"),
-                            false => (b < 32).match ({
-                                true  => cur.push_uesc(mp, b),
-                                false => cur.gstr_push(mp, b),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        })
-    })
-    cur.gstr_push(mp, '"')
-}
-// ── incoming JSON extraction (hand-rolled; std.json's `parse`/`get` collide with the compiler's own
-// flat `parse`/`get` names once this closure imports compiler.parse, so a targeted scanner is used).
-// The scanner walks left-to-right skipping over complete JSON strings, so a `"key":` byte-pattern that
-// happens to sit INSIDE a string value (e.g. the document source text) is never mistaken for a key.
-// String scanning/decoding is ITERATIVE (`@while`) so a megabyte document never recurses the C stack.
-// index just past the closing quote of the string opening at v[i]=='"' (respecting `\` escapes).
-json_str_end = (v: [u8], i: i64) i64 {
-    j := i + 1
-    done: i64 := 0 - 1
-    @while (done < 0 && j < v.len) {
-        b := v[j]
-        (b == '\\').match ({
-            true  => {
-                j = j + 2
-            },
-            false => (b == '"').match ({
-                true  => {
-                    done = j + 1
-                },
-                false => {
-                    j = j + 1
-                },
-            }),
-        })
-    }
-    (done < 0).then({ v.len }, { done })
-}
-json_skip_ws = (v: [u8], p: i64) i64 {
-    q := p
-    @while (q < v.len && (v[q] == ' ' || v[q] == '\t' || v[q] == '\n' || v[q] == '\r')) {
-        q = q + 1
-    }
-    q
-}
-json_range_eq = (v: [u8], start: i64, kv: [u8], k: i64) bool {
-    (k >= kv.len).match ({
-        true  => true,
-        false => (v[start + k] == kv[k]).then({ v.json_range_eq(start, kv, k + 1) }, { false }),
-    })
-}
-json_str_eq_range = (v: [u8], start: i64, end: i64, kv: [u8]) bool {
-    (end - start != kv.len).then({ false }, { v.json_range_eq(start, kv, 0) })
-}
-// the byte offset of the VALUE for the first object key named `key`, or -1. Strings are consumed whole,
-// so key matches inside a value never fire and nesting is transparent.
-json_find_key = (v: [u8], key: string_view) i64 {
-    kv: [u8] := key.view()
-    i: i64 := 0
-    result: i64 := 0 - 1
-    stop := false
-    @while (stop == false && i < v.len) {
-        (v[i] == '"').match ({
-            true  => {
-                se := v.json_str_end(i)
-                cs := v.json_skip_ws(se)
-                (cs < v.len && v[cs] == ':').match ({
-                    true  => v.json_str_eq_range(i + 1, se - 1, kv).match ({
-                        true  => {
-                            result = v.json_skip_ws(cs + 1)
-                            stop = true
-                        },
-                        false => {
-                            i = se
-                        },
-                    }),
-                    false => {
-                        i = se
-                    },
-                })
-            },
-            false => {
-                i = i + 1
-            },
-        })
-    }
-    result
-}
-json_hexq = (v: [u8], at: i64) i64 {
-    (at + 3 >= v.len).match ({
-        true  => 0 - 1,
-        false => {
-            h0 := hexval(v[at])
-            h1 := hexval(v[at + 1])
-            h2 := hexval(v[at + 2])
-            h3 := hexval(v[at + 3])
-            (h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0).match ({
-                true  => 0 - 1,
-                false => h0 * 4096 + h1 * 256 + h2 * 16 + h3,
-            })
-        },
-    })
-}
-hexval = (b: u8) i64 {
-    (b >= '0' && b <= '9').match ({
-        true  => to_i64(b - '0'),
-        false => (b >= 'a' && b <= 'f').match ({
-            true  => to_i64(b - 'a') + 10,
-            false => (b >= 'A' && b <= 'F').then({ to_i64(b - 'A') + 10 }, { 0 - 1 }),
-        }),
-    })
-}
-// UTF-8 encode a BMP code point into the builder (1–3 bytes).
-push_utf8 = (sb: String, mp: MutPtr<Malloc>, cp: i64) String {
-    (cp < 128).match ({
-        true  => sb.gstr_push(mp, cp.to_u8()),
-        false => (cp < 2048).match ({
-            true  => sb
-                .gstr_push(mp, (192 | cp >> 6).to_u8())
-                .gstr_push(mp, (128 | cp & 63).to_u8()),
-            false => sb
-                .gstr_push(mp, (224 | cp >> 12).to_u8())
-                .gstr_push(mp, (128 | cp >> 6 & 63).to_u8())
-                .gstr_push(mp, (128 | cp & 63).to_u8()),
-        }),
-    })
-}
-// decode the JSON string opening at v[i]=='"' into an allocator-owned view (escapes resolved).
-json_decode_str = (mp: MutPtr<Malloc>, v: [u8], i: i64) string_view {
-    sb := mp.gstr_string(v.len - i + 1)
-    j := i + 1
-    stop := false
-    @while (stop == false && j < v.len) {
-        b := v[j]
-        (b == '"').match ({
-            true  => {
-                stop = true
-            },
-            false => (b == '\\' && j + 1 < v.len).match ({
-                true  => {
-                    e := v[j + 1]
-                    (e == 'n').match ({
-                        true  => {
-                            sb = sb.gstr_push(mp, '\n')
-                            j = j + 2
-                        },
-                        false => (e == 't').match ({
-                            true  => {
-                                sb = sb.gstr_push(mp, '\t')
-                                j = j + 2
-                            },
-                            false => (e == 'r').match ({
-                                true  => {
-                                    sb = sb.gstr_push(mp, '\r')
-                                    j = j + 2
-                                },
-                                false => (e == 'b').match ({
-                                    true  => {
-                                        sb = sb.gstr_push(mp, 8.to_u8())
-                                        j = j + 2
-                                    },
-                                    false => (e == 'f').match ({
-                                        true  => {
-                                            sb = sb.gstr_push(mp, 12.to_u8())
-                                            j = j + 2
-                                        },
-                                        false => (e == 'u').match ({
-                                            true  => {
-                                                cp := v.json_hexq(j + 2)
-                                                (cp < 0).match ({
-                                                    true  => {
-                                                        sb = sb.gstr_push(mp, e)
-                                                        j = j + 2
-                                                    },
-                                                    false => {
-                                                        sb = sb.push_utf8(mp, cp)
-                                                        j = j + 6
-                                                    },
-                                                })
-                                            },
-                                            false => {
-                                                sb = sb.gstr_push(mp, e)
-                                                j = j + 2
-                                            },
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    })
-                },
-                false => {
-                    sb = sb.gstr_push(mp, b)
-                    j = j + 1
-                },
-            }),
-        })
-    }
-    sb.gstr_finish(mp)
-}
-// raw bytes of the value at v[i]: a quoted string (incl. quotes) or a bare token up to `,`/`}`/`]`/ws.
-json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) string_view {
-    (i >= v.len).match ({
-        true  => "null",
-        false => (v[i] == '"').match ({
-            true  => mp.json_slice(v, i, v.json_str_end(i)),
-            false => {
-                e := i
-                stop := false
-                @while (stop == false && e < v.len) {
-                    b := v[e]
-                    (b == ','
-                        || b == '}'
-                        || b == ']'
-                        || b == ' '
-                        || b == '\t'
-                        || b == '\n'
-                        || b == '\r').match ({
-                        true  => {
-                            stop = true
-                        },
-                        false => {
-                            e = e + 1
-                        },
-                    })
-                }
-                mp.json_slice(v, i, e)
-            },
-        }),
-    })
-}
-json_slice = (mp: MutPtr<Malloc>, v: [u8], start: i64, end: i64) string_view {
-    sb := mp.gstr_string(end - start + 1)
-    j := start
-    @while (j < end) {
-        sb = sb.gstr_push(mp, v[j])
-        j = j + 1
-    }
-    sb.gstr_finish(mp)
-}
-// the decoded string value of the first key `key`, or "" if absent / non-string.
-json_str_field = (mp: MutPtr<Malloc>, body: string_view, key: string_view) string_view {
-    v: [u8] := body.view()
-    p := v.json_find_key(key)
-    (p < 0 || p >= v.len).match ({
-        true  => "",
-        false => (v[p] == '"').then({ mp.json_decode_str(v, p) }, { "" }),
-    })
-}
-// the request id as a raw JSON fragment (number or quoted string), echoed verbatim into the reply.
-lsp_id = (mp: MutPtr<Malloc>, body: string_view) string_view {
-    v: [u8] := body.view()
-    p := v.json_find_key("id")
-    (p < 0).then({ "null" }, { mp.json_raw_at(v, p) })
-}
-// ── URI -> filesystem path (strip a leading `file://`; percent-decoding is a later refinement) ─────
-lsp_has_prefix = (s: string_view, pre: string_view) bool {
-    sv: [u8] := s.view()
-    pv: [u8] := pre.view()
-    (sv.len < pv.len).then({ false }, { lsp_prefix_bytes(sv, pv, 0) })
-}
-lsp_prefix_bytes = (sv: [u8], pv: [u8], i: i64) bool {
-    (i >= pv.len).match ({
-        true  => true,
-        false => (sv[i] == pv[i]).then({ sv.lsp_prefix_bytes(pv, i + 1) }, { false }),
-    })
-}
-lsp_uri_path = (mp: MutPtr<Malloc>, uri: string_view) string_view {
-    uri.lsp_has_prefix("file://").match ({
-        true  => mp.cstr_substr(uri, 7, to_i32(uri.view().len - 7)),
-        false => uri,
-    })
-}
-// ── DiagSpan (1-based line/col, 1-based-inclusive end_col) -> LSP 0-based range ────────────────────
-// LSP is 0-based: line -> line-1, start.character -> col-1. end_col is the 1-based inclusive last
-// column, numerically the 0-based EXCLUSIVE end — so end.character = end_col (never a further -1). An
-// unlocated span (line 0) is pinned to the file start with a 1-char range so the squiggle is visible.
-ZSpan: {
-    l: i64,
-    c: i64,
-    e: i64,
-}
-lsp_end_char = (sp: DiagSpan) i64 {
-    ec := to_i64(sp.end_col)
-    cc := to_i64(sp.col - 1)
-    (ec > cc).then({ ec }, { cc + 1 })
-}
-lsp_zero_span = (sp: DiagSpan) ZSpan {
-    (sp.line > 0).match ({
-        true  => ZSpan(
-            l: to_i64(sp.line - 1),
-            c: (sp.col > 0).then({ to_i64(sp.col - 1) }, { 0 }),
-            e: sp.lsp_end_char(),
-        ),
-        false => ZSpan(
-            l: 0,
-            c: 0,
-            e: 1,
-        ),
-    })
-}
-// ── byte columns -> UTF-16 columns (LSP `character` counts UTF-16 CODE UNITS, not bytes) ──────────
-// zenc spans are byte columns into the source line; a client fed byte columns misplaces squiggles on
-// any line with non-ASCII bytes before the error. Conversion walks the located line once: every
-// non-continuation byte counts 1 unit, and a 4-byte UTF-8 lead (>= 0xF0, a supplementary-plane char)
-// counts 2 (its UTF-16 surrogate pair).
-lsp_line_start = (v: [u8], ln: i64) i64 {
-    i: i64 := 0
-    k: i64 := 0
-    @while (k < ln && i < v.len) {
-        (v[i] == '\n').then({
-            k = k + 1
-        })
-        i = i + 1
-    }
-    i
-}
-lsp_utf16_col = (v: [u8], ls: i64, bytecol: i64) i64 {
-    u: i64 := 0
-    i := ls
-    end := ls + bytecol
-    @while (i < v.len && i < end && v[i] != '\n') {
-        bi := v[i].to_i64()
-        (bi & 192 != 128).then({
-            u = u + (bi >= 240).then({ 2 }, { 1 })
-        })
-        i = i + 1
-    }
-    u
-}
-// ── one diagnostic -> one LSP Diagnostic object, accumulated (comma-separated) into the array ──────
-DiagAcc: {
-    sb: String,
-    n: i32,
-}
-lsp_push_diag = (
-    mp: MutPtr<Malloc>,
-    acc: DiagAcc,
-    rp: ResolvedProgram,
-    raw: [Decl],
-    decls: [Decl],
-    path: string_view,
-    user: string_view,
-    cd: CheckDiagnostic,
-) DiagAcc {
-    (cd.code == 0).match ({
-        true  => acc,
-        false => {
-            dl := rp.locate_diag(cd.source_offset, cd.span_width, path, user)
-            z := lsp_zero_span(dl.sp)
-            // byte -> UTF-16 columns against the line the span actually points into (dl.src is the
-            // owning module's source; for the open document it IS the client's text).
-            sv: [u8] := dl.src.view()
-            ls := sv.lsp_line_start(z.l)
-            zc := sv.lsp_utf16_col(ls, z.c)
-            ze := sv.lsp_utf16_col(ls, z.e)
-            ze = (ze > zc).then({ ze }, { zc + 1 })
-            // enrich exactly like the CLI (emit_one): denriched message + world-teaching undefined-name hint.
-            msg := desc_or(mp.denrich_check(raw, decls, cd.source_offset, cd.code, cd.kind), cd.message)
-            hint := cd.hint
-            (cd.kind == "undefined-name").then({
-                wh := mp.undefined_name_hint(rp.table, rp.flat, cd.source_offset)
-                (is_empty(wh) == false).then({
-                    hint = wh
-                })
-            })
-            full := is_empty(hint).match ({
-                true  => msg,
-                false => mp
-                    .gstr_string(128)
-                    .gstr_append(mp, msg)
-                    .gstr_append(mp, " — ")
-                    .gstr_append(mp, hint)
-                    .gstr_finish(mp),
-            })
-            // an error living in an IMPORTED module (dl.path != the open document) must not squiggle
-            // an unrelated range of the open file: pin it to the file head and name the real location
-            // in the message, so the information survives without a lying range.
-            line: i64 := z.l
-            (dl.path == path).match ({
-                true  => 0,
-                false => {
-                    line = 0
-                    zc = 0
-                    ze = 1
-                    full = mp
-                        .gstr_string(128)
-                        .gstr_append(mp, "in imported module ")
-                        .gstr_append(mp, dl.path)
-                        .gstr_append(mp, ":")
-                        .push_int(mp, to_i64(dl.sp.line))
-                        .gstr_append(mp, ": ")
-                        .gstr_append(mp, full)
-                        .gstr_finish(mp)
-                    0
-                },
-            })
-            sep := (acc.n > 0).then({ "," }, { "" })
-            sb2 := acc.sb
-                .gstr_append(mp, sep)
-                .gstr_append(mp, "{\"range\":{\"start\":{\"line\":")
-                .push_int(mp, line)
-                .gstr_append(mp, ",\"character\":")
-                .push_int(mp, zc)
-                .gstr_append(mp, "},\"end\":{\"line\":")
-                .push_int(mp, line)
-                .gstr_append(mp, ",\"character\":")
-                .push_int(mp, ze)
-                .gstr_append(mp, "}},\"severity\":1,\"code\":")
-                .push_jstr(mp, cd.kind)
-                .gstr_append(mp, ",\"source\":\"zen\",\"message\":")
-                .push_jstr(mp, full)
-                .gstr_append(mp, "}")
-            DiagAcc(
-                sb: sb2,
-                n: acc.n + 1,
-            )
-        },
-    })
-}
-// run the pipeline on `text` and PUBLISH. Structural blockers (no-if, parse) are reported ALONE —
-// their flat sentinels would otherwise spray bogus type errors. Otherwise every specialized semantic
-// channel (reserved/ownership/escape/leak/…/mustuse) contributes its diagnostic AND the whole main
-// batch (names/types/arity/exhaustiveness/…) is collected, so an ownership error shows alongside type
-// errors rather than one channel hiding the rest. Empty array => clears old squiggles.
-lsp_diags_array = (
-    mp: MutPtr<Malloc>,
-    root: string_view,
-    path: string_view,
-    text: string_view,
-) string_view {
-    rp := mp.resolve_prog(root, path, text)
-    raw := mp.parse_module(rp.flat)
-    decls := mp.resolve_module(raw)
-    nif := check_module_no_if_diagnostic_from_source(rp.flat).cd_or(check_module_no_ternary_diagnostic_from_source(rp.flat))
-    pars := mp.check_module_parse_diagnostic_from_source(decls, rp.flat)
-    acc := DiagAcc(
-        sb: mp.gstr_string(256),
-        n: 0,
-    )
-    done := (nif.code != 0).match ({
-        true  => mp.lsp_push_diag(acc, rp, raw, decls, path, text, nif),
-        false => (pars.code != 0).match ({
-            true  => mp.lsp_push_diag(acc, rp, raw, decls, path, text, pars),
-            false => {
-                a := acc
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_reserved_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_ownership_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_escape_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_leak_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_addr_escape_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_send_rc_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_scratch_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_send_mut_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_bound_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_arg_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_or_return_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_unknown_type_diagnostic_from_source(decls, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_ffi_diagnostic_from_source(decls, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, check_module_infinite_type_diagnostic_from_source(decls, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, check_module_main_diagnostic_from_source(raw, rp.flat))
-                a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_mustuse_diagnostic_from_source(raw, rp.flat))
-                ds := mp.check_module_batch_vis(decls, rp.flat, mp.ufcs_vis_of(rp.flat, rp.regions, rp.table))
-                ds.loop((h, i, cd) {
-                    a = mp.lsp_push_diag(a, rp, raw, decls, path, text, cd)
-                })
-                a
-            },
-        }),
-    })
-    done.sb.gstr_finish(mp)
-}
-lsp_publish = (mp: MutPtr<Malloc>, root: string_view, uri: string_view, text: string_view) i64 {
-    arr := mp.lsp_diags_array(root, mp.lsp_uri_path(uri), text)
-    mp.lsp_send(mp
-        .gstr_string(512)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":")
-        .push_jstr(mp, uri)
-        .gstr_append(mp, ",\"diagnostics\":[")
-        .gstr_append(mp, arr)
-        .gstr_append(mp, "]}}")
-        .gstr_finish(mp))
-}
-// ── request/notification handlers ─────────────────────────────────────────────────────────────────
-lsp_reply_initialize = (mp: MutPtr<Malloc>, body: string_view) i64 {
-    mp.lsp_send(mp
-        .gstr_string(256)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
-        .gstr_finish(mp))
-}
-lsp_reply_null = (mp: MutPtr<Malloc>, body: string_view) i64 {
-    mp.lsp_send(mp
-        .gstr_string(96)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":null}")
-        .gstr_finish(mp))
-}
-// JSON-RPC MethodNotFound for a REQUEST we don't implement. A request left unanswered stalls the
-// client (nvim blocks a hover round-trip until its timeout); the error reply fails it instantly.
-lsp_reply_method_not_found = (mp: MutPtr<Malloc>, body: string_view) i64 {
-    mp.lsp_send(mp
-        .gstr_string(128)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"error\":{\"code\":-32601,\"message\":\"method not found\"}}")
-        .gstr_finish(mp))
-}
-// notification families we deliberately swallow WITHOUT a reply (replying to a notification is a
-// protocol violation). `id` presence alone is not the test: e.g. workspace/didChangeConfiguration
-// params may contain an unrelated "id" key that the flat key scanner would find.
-lsp_is_notification = (method: string_view) bool {
-    method.lsp_has_prefix("$/")
-        || method.lsp_has_prefix("textDocument/did")
-        || method.lsp_has_prefix("workspace/did")
-        || method == "initialized"
-        || method == "exit"
-}
-// publish an EMPTY diagnostics array for `uri` (didClose: the client keeps stale squiggles otherwise).
-lsp_publish_clear = (mp: MutPtr<Malloc>, uri: string_view) i64 {
-    mp.lsp_send(mp
-        .gstr_string(160)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":")
-        .push_jstr(mp, uri)
-        .gstr_append(mp, ",\"diagnostics\":[]}}")
-        .gstr_finish(mp))
-}
-// didOpen/didChange (full-sync) both carry the whole document text; the first `text` key is the
-// document content (the URI's `text` in didOpen, the single contentChange's `text` in didChange).
-lsp_did_change = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
-    mp.lsp_publish(root, mp.json_str_field(body, "uri"), mp.json_str_field(body, "text"))
-}
-// dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown
-// NOTIFICATIONS are no-ops; an unknown REQUEST (an "id" key outside the notification families) gets
-// a MethodNotFound error so the client never waits on a reply that will not come.
-lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
-    method := mp.json_str_field(body, "method")
-    (method == "initialize").match ({
-        true  => {
-            mp.lsp_reply_initialize(body)
-            0
-        },
-        false => (method == "shutdown").match ({
-            true  => {
-                mp.lsp_reply_null(body)
-                1
-            },
-            false => (method == "exit").match ({
-                true  => 2,
-                false => (method == "textDocument/didOpen" || method == "textDocument/didChange").match ({
-                    true  => {
-                        mp.lsp_did_change(root, body)
-                        0
-                    },
-                    false => (method == "textDocument/didClose").match ({
-                        true  => {
-                            mp.lsp_publish_clear(mp.json_str_field(body, "uri"))
-                            0
-                        },
-                        false => {
-                            v: [u8] := body.view()
-                            (v.json_find_key("id") >= 0 && lsp_is_notification(method) == false).then({
-                                mp.lsp_reply_method_not_found(body)
-                            })
-                            0
-                        },
-                    }),
-                }),
-            }),
-        }),
-    })
-}
-// ── stdio framing: read `Content-Length: N\r\n\r\n` headers, then exactly N body bytes ─────────────
-LSP_HDR_CAP = () i64 { 1024 }
-// sanity ceiling on a claimed body size (64 MiB). A hostile/corrupt `Content-Length: 100000000000000`
-// would otherwise reach acquire(), fail, and null-deref-panic the server; over-limit frames are
-// skipped like unparseable ones and the header scan resynchronizes on the next frame.
-LSP_BODY_MAX = () i64 { 67108864 }
-// read stdin one byte at a time into `buf` until the CRLFCRLF terminator (so we never over-read into
-// the body). Returns the header length incl. terminator; 0 on clean EOF before any byte; -1 on error.
-lsp_read_headers = (mp: MutPtr<Malloc>, buf: RawPtr<u8>, off: i64) i64 {
-    r := read(0, buf.offset(off), 1)
-    (r <= 0).match ({
-        true  => (off == 0).then({ 0 }, { 0 - 1 }),
-        false => (off >= 3
-            && load(buf.offset(off - 3)) == '\r'
-            && load(buf.offset(off - 2)) == '\n'
-            && load(buf.offset(off - 1)) == '\r'
-            && load(buf.offset(off)) == '\n').match ({
-            true  => off + 1,
-            false => (off + 1 >= LSP_HDR_CAP()).match ({
-                true  => 0 - 1,
-                false => mp.lsp_read_headers(buf, off + 1),
-            }),
-        }),
-    })
-}
-lsp_match_bytes = (buf: RawPtr<u8>, i: i64, wv: [u8], k: i64) bool {
-    (k >= wv.len).match ({
-        true  => true,
-        false => (load(buf.offset(i + k)) == wv[k]).match ({
-            true  => buf.lsp_match_bytes(i, wv, k + 1),
-            false => false,
-        }),
-    })
-}
-lsp_match_at = (buf: RawPtr<u8>, i: i64, len: i64, word: string_view) bool {
-    wv: [u8] := word.view()
-    (i + wv.len > len).then({ false }, { buf.lsp_match_bytes(i, wv, 0) })
-}
-// read a decimal starting at `i` (skipping leading spaces); -1 if no digit before end/non-space.
-lsp_read_dec = (buf: RawPtr<u8>, i: i64, len: i64, acc: i64, started: bool) i64 {
-    (i >= len).match ({
-        true  => started.then({ acc }, { 0 - 1 }),
-        false => {
-            b := load(buf.offset(i))
-            (b >= '0' && b <= '9').match ({
-                true  => buf.lsp_read_dec(i + 1, len, acc * 10 + (b - '0').to_i64(), true),
-                false => (b == ' ' && started == false).match ({
-                    true  => buf.lsp_read_dec(i + 1, len, acc, false),
-                    false => started.then({ acc }, { 0 - 1 }),
-                }),
-            })
-        },
-    })
-}
-lsp_content_length = (buf: RawPtr<u8>, i: i64, len: i64) i64 {
-    (i >= len).match ({
-        true  => 0 - 1,
-        false => buf.lsp_match_at(i, len, "Content-Length:").match ({
-            true  => buf.lsp_read_dec(i + 15, len, 0, false),
-            false => buf.lsp_content_length(i + 1, len),
-        }),
-    })
-}
-// read exactly `n` body bytes into `buf` (read() may return short; loop until filled or EOF).
-lsp_read_body = (buf: RawPtr<u8>, off: i64, n: i64) i64 {
-    (off >= n).match ({
-        true  => off,
-        false => {
-            r := read(0, buf.offset(off), n - off)
-            (r <= 0).then({ off }, { buf.lsp_read_body(off + r, n) })
-        },
-    })
-}
-// the JSON-RPC stdio loop: frame -> dispatch, until `exit`. Exit code follows the LSP convention:
-// 0 if `exit` arrived after `shutdown`, else 1 (also 1 if the stream closes without a clean shutdown).
-lsp_cmd = (mp: MutPtr<Malloc>, root: string_view) i32 {
-    hbuf := mp.acquire(LSP_HDR_CAP())
-    running := true
-    shut := false
-    code := 1
-    @while (running) {
-        hlen := mp.lsp_read_headers(hbuf, 0)
-        (hlen <= 0).match ({
-            true  => {
-                running = false
-                code = shut.then({ 0 }, { 1 })
-            },
-            false => {
-                n := hbuf.lsp_content_length(0, hlen)
-                (n < 0 || n > LSP_BODY_MAX()).match ({
-                    true  => 0,
-                    false => {
-                        body := mp.acquire(n + 1)
-                        got := body.lsp_read_body(0, n)
-                        body.offset(got).store(0)
-                        act := mp.lsp_handle(root, cstr(body))
-                        (act == 1).then({
-                            shut = true
-                        })
-                        (act == 2).then({
-                            running = false
-                            code = shut.then({ 0 }, { 1 })
-                        })
-                        0
-                    },
-                })
-            },
-        })
-    }
-    code
-}
-// ── zen audit — dead-code + unused-import reporter (advisory; `--strict` exits 1 on findings) ─────
-// Dead-decl analysis runs over the SAME whole-program pipeline `check` uses (resolve imports ->
-// parse -> resolve_module), so alias qualification, UFCS dispatch and trait-default materialization
-// are all visible. It builds a conservative reachability fixpoint over top-level decl NAMES:
-//   * every name a live decl's body/types mention is live (calls, Var refs, type names, ctors/tags);
-//   * a method call `x.m(...)` marks every free fn `m`, every impl method hoisted for bare name `m`
-//     (`impl_<Trait>_<Ty>_m`, incl. trait defaults), and every alias-qualified `*__m` — receiver
-//     types are NOT tracked, so this can never miss a dispatch target (false-negative direction);
-//   * a live TYPE keeps every method of every impl block on it (trait dispatch may reach any), plus
-//     the traits those impls conform to;
-//   * impl blocks on BUILTIN receivers (string_view, u8, slices — no type decl to anchor) are roots;
-//   * BOTH the raw and the resolved forms of each decl are walked: raw carries the surface names
-//     (calls to inline templates disappear after inlining), resolved carries synthesized dispatch
-//     (materialized trait defaults, mono instances, lowered closures, `eq`->impl rewrites).
-// Reported: top-level fn/struct/enum/global decls never reached from the entry's `main`. Exempt
-// (documented, all in the false-negative direction): DForeign prototypes (FFI headers), `impl_*`
-// hoisted methods (their TYPE carries the verdict), `__`-prefixed synthesized decls, namespace-alias
-// binds (covered by unused-import), pos-less synthesized decls. When the entry has no `main` (a
-// library), every entry-module decl is a root instead.
-// Unused-import analysis is per ORIGINAL module file: an imported name (`{ a, b } = mod`) or a
-// namespace alias (`m = mod`) that never occurs in the module's own source outside the import
-// statement itself. The scan is tokenizer-disciplined — identifiers inside strings, char literals
-// and comments do NOT count as uses (so a name mentioned only in an embedded test-program string is
-// correctly unused), and matches are whole-identifier (no `or`-inside-`for` hits). An imported
-// TRAIT name is also credited when any METHOD of that trait occurs in the module: `{ PtrKind } =
-// compiler.passes.ptrkind` exists to pull the trait's impl module into the closure, and the module
-// then spells only `t.ptr_kind_of()`, never `PtrKind` itself (see AudTM below).
-AudPair: {
-    bare: string_view,
-    full: string_view,
-}    // method-name fanout: bare method/tail name -> hoisted/aliased decl name
-AudImplM: {
-    ty: string_view,
-    full: string_view,
-}    // type-liveness fanout: impl'd type -> hoisted method (or trait) name
-AudCtx: {
-    mp: MutPtr<Malloc>,
-    decls: [Decl],
-    rdecls: [Decl],
-    ridx: Map<i64>,
-    xidx: Map<i64>,
-    seen: Map<i64>,
-    mseen: Map<i64>,
-    pairs: [AudPair],
-    implms: [AudImplM],
-}
-aud_decl_name = (d: Decl) string_view {
-    d.match ({
-        .DFunc(f)      => f.name,
-        .DForeign(f)   => f.name,
-        .DStruct(sd)   => sd.name,
-        .DEnum(ed)     => ed.name,
-        .DGenStruct(g) => g.name,
-        .DGenEnum(g)   => g.name,
-        .DGlobal(g)    => g.name,
-        _              => "",
-    })
-}
-aud_decl_pos = (d: Decl) i32 {
-    d.match ({
-        .DFunc(f)      => f.pos,
-        .DStruct(sd)   => sd.pos,
-        .DEnum(ed)     => ed.pos,
-        .DGenStruct(g) => g.pos,
-        .DGenEnum(g)   => g.pos,
-        .DGlobal(g)    => g.pos,
-        _              => 0,
-    })
-}
-aud_decl_is_type = (d: Decl) bool {
-    d.match ({
-        .DStruct(sd)   => true,
-        .DEnum(ed)     => true,
-        .DGenStruct(g) => true,
-        .DGenEnum(g)   => true,
-        _              => false,
-    })
-}
-// the reporting kind word; "" = this decl kind is never reported (see the exemption list above).
-aud_decl_kind = (d: Decl) string_view {
-    d.match ({
-        .DFunc(f)      => "fn",
-        .DStruct(sd)   => "struct",
-        .DEnum(ed)     => "enum",
-        .DGenStruct(g) => "struct",
-        .DGenEnum(g)   => "enum",
-        .DGlobal(g)    => g.alias.then({ "" }, { "global" }),
-        _              => "",
-    })
-}
-aud_index = (mp: MutPtr<Malloc>, ds: [Decl]) Map<i64> {
-    seedv: i64 := 0 - 1
-    m := of(mp, "", seedv).expect("audit: oom")
-    ds.loop((h, i, d) {
-        nm := d.aud_decl_name()
-        (is_empty(nm) == false).then({
-            m = m.put(mp, nm, i).expect("audit: oom")
-        })
-    })
-    m
-}
-// byte position AFTER the last `__` separator in `name`; -1 when it has none (or it leads).
-aud_tail_at = (name: string_view) i64 {
-    v: [u8] := name.view()
-    best := 0 - 1
-    i := 1
-    @while (i + 1 < v.len) {
-        (v[i] == '_' && v[i + 1] == '_').then({
-            best = i + 2
-        })
-        i = i + 1
-    }
-    best
-}
-// mark `name` live and (once) walk both its raw and resolved decls; a live TYPE also keeps every
-// impl-block method on it (aud_implms).
-aud_ref = (ac: MutPtr<AudCtx>, name: string_view) void {
-    ((is_empty(name) || ac.seen.has(name)) == false).then({
-        one: i64 := 1
-        ac.seen = ac.seen.put(ac.mp, name, one).expect("audit: oom")
-        ri := ac.ridx.get(name, 0 - 1)
-        (ri >= 0).then({
-            d := ac.decls[ri]
-            ac.aud_walk_decl(d)
-            d.aud_decl_is_type().then({
-                ac.aud_implms(name)
-            })
-        })
-        xi := ac.xidx.get(name, 0 - 1)
-        (xi >= 0).then({
-            ac.aud_walk_decl(ac.rdecls[xi])
-        })
-    })
-}
-// a METHOD-position name: the free fn `m`, plus every hoisted impl method / alias tail for `m`.
-aud_mref = (ac: MutPtr<AudCtx>, m: string_view) void {
-    ((is_empty(m) || ac.mseen.has(m)) == false).then({
-        one: i64 := 1
-        ac.mseen = ac.mseen.put(ac.mp, m, one).expect("audit: oom")
-        ac.aud_ref(m)
-        ac.pairs.loop((h, i, p) {
-            (p.bare == m).then({
-                ac.aud_ref(p.full)
-            })
-        })
-    })
-}
-// type-liveness fanout: every impl-block method (and trait) recorded against `tyname`.
-aud_implms = (ac: MutPtr<AudCtx>, tyname: string_view) void {
-    ac.implms.loop((h, i, im) {
-        (im.ty == tyname).then({
-            ac.aud_ref(im.full)
-        })
-    })
-}
-aud_walk_decl = (ac: MutPtr<AudCtx>, d: Decl) void {
-    d.match ({
-        .DFunc(f)          => ac.aud_walk_fn(f),
-        .DForeign(f)       => ac.aud_walk_sig(f),
-        .DStruct(sd)       => ac.aud_walk_fields(sd.fields),
-        .DGenStruct(g)     => ac.aud_walk_fields(g.fields),
-        .DEnum(ed)         => ac.aud_walk_variants(ed.variants),
-        .DGenEnum(g)       => ac.aud_walk_variants(g.variants),
-        .DGlobal(g)        => {
-            ac.aud_walk_ty(g.ty)
-            (g.init.is_expr_null() == false).then({
-                ac.aud_walk_expr(g.init)
-            })
-        },
-        .DTraitDefault(td) => ac.aud_walk_fn(td.fn),
-        .DImpl(im)         => ac.aud_walk_ty(im.trty),
-        _                  => { },
-    })
-}
-aud_walk_fn = (ac: MutPtr<AudCtx>, f: Func) void {
-    ac.aud_walk_sig(f)
-    ac.aud_walk_stmts(f.body)
-}
-aud_walk_sig = (ac: MutPtr<AudCtx>, f: Func) void {
-    f.params.loop((h, i, p) {
-        ac.aud_walk_ty(p.ty)
-    })
-    f.tparams.loop((h, i, p) {
-        ac.aud_walk_ty(p.ty)
-    })    // generic BOUNDS (`f<A: Allocator>`) reference the trait
-    ac.aud_walk_ty(f.ret)
-}
-aud_walk_fields = (ac: MutPtr<AudCtx>, fs: [Field]) void {
-    fs.loop((h, i, f) {
-        ac.aud_walk_ty(f.ty)
-    })
-}
-aud_walk_variants = (ac: MutPtr<AudCtx>, vs: [VariantDef]) void {
-    vs.loop((h, i, v) {
-        ac.aud_walk_ty(v.payload)
-        (v.dflt.is_expr_null() == false).then({
-            ac.aud_walk_expr(v.dflt)
-        })
-    })
-}
-aud_walk_ty = (ac: MutPtr<AudCtx>, t: Ty) void {
-    t.match ({
-        .Named(n)   => ac.aud_ref(n),
-        .Generic(g) => {
-            ac.aud_ref(g.name)
-            g.args.loop((h, i, x) {
-                ac.aud_walk_ty(x)
-            })
-        },
-        .Ptr(pd)    => ac.aud_walk_ty(load(pd.pointee)),
-        .Slice(e)   => ac.aud_walk_ty(load(e)),
-        .FnT(ft)    => {
-            ft.params.loop((h, i, x) {
-                ac.aud_walk_ty(x)
-            })
-            ac.aud_walk_ty(load(ft.ret))
-        },
-        _           => { },
-    })
-}
-aud_walk_stmts = (ac: MutPtr<AudCtx>, body: [Stmt]) void {
-    body.loop((h, i, st) {
-        ac.aud_walk_stmt(st)
-    })
-}
-aud_walk_stmt = (ac: MutPtr<AudCtx>, st: Stmt) void {
-    st.match ({
-        .Let(l)      => {
-            ac.aud_walk_ty(l.ty)
-            ac.aud_walk_expr(l.value)
-        },
-        .Assign(x)   => {
-            ac.aud_walk_expr(x.target)
-            ac.aud_walk_expr(x.value)
-        },
-        .Return(r)   => (r.is_expr_null() == false).then({
-            ac.aud_walk_expr(r)
-        }),
-        .If(f)       => {
-            ac.aud_walk_expr(f.c)
-            ac.aud_walk_stmts(f.then)
-            ac.aud_walk_stmts(f.els)
-        },
-        .While(w)    => {
-            ac.aud_walk_expr(w.c)
-            ac.aud_walk_stmts(w.body)
-        },
-        .IndexSet(x) => {
-            ac.aud_walk_expr(x.seq)
-            ac.aud_walk_expr(x.idx)
-            ac.aud_walk_ty(x.elem)
-            ac.aud_walk_expr(x.value)
-        },
-        .ExprStmt(e) => ac.aud_walk_expr(e),
-    })
-}
-aud_walk_expr = (ac: MutPtr<AudCtx>, e: Ptr<Expr>) void {
-    load(e).match ({
-        .Var(v)         => ac.aud_ref(v.name),
-        .Bin(b)         => {
-            ac.aud_walk_expr(b.lhs)
-            ac.aud_walk_expr(b.rhs)
-        },
-        .Call(c)        => {
-            ac.aud_mref(c.fn)
-            c.targs.loop((h, i, t) {
-                ac.aud_walk_ty(t)
-            })
-            c.args.loop((h, i, x) {
-                ac.aud_walk_expr(x.addr())
-            })
-        },
-        .MethodCall(mc) => {
-            ac.aud_mref(mc.method)
-            ac.aud_walk_expr(mc.recv)
-            mc.args.loop((h, i, x) {
-                ac.aud_walk_expr(x.addr())
-            })
-        },
-        .Cond(cd)       => {
-            ac.aud_walk_expr(cd.c)
-            ac.aud_walk_expr(cd.t)
-            ac.aud_walk_expr(cd.e)
-        },
-        .Member(m)      => {
-            // `alias.NAME` reads the flat decl `alias__NAME` — credit that spelling too.
-            load(m.obj).match ({
-                .Var(v) => ac.aud_ref(ac.mp.aud_join2(v.name, m.field)),
-                _       => { },
-            })
-            ac.aud_walk_expr(m.obj)
-        },
-        .Arrow(ar)      => ac.aud_walk_expr(ar.obj),
-        .MakeEnum(mk)   => {
-            ac.aud_ref(mk.ty)
-            mk.targs.loop((h, i, t) {
-                ac.aud_walk_ty(t)
-            })
-            (mk.payload.is_expr_null() == false).then({
-                ac.aud_walk_expr(mk.payload)
-            })
-        },
-        .MakeStruct(ms) => {
-            ac.aud_ref(ms.ty)
-            ms.targs.loop((h, i, t) {
-                ac.aud_walk_ty(t)
-            })
-            ms.inits.loop((h, i, fi) {
-                ac.aud_walk_expr(fi.value)
-            })
-        },
-        .Tag(tg)        => {
-            ac.aud_ref(tg.ty)
-            tg.targs.loop((h, i, t) {
-                ac.aud_walk_ty(t)
-            })
-        },
-        .Match(md)      => {
-            ac.aud_ref(md.ename)
-            ac.aud_walk_expr(md.subj)
-            md.arms.loop((h, i, ar2) {
-                ac.aud_walk_expr(ar2.body)
-            })
-        },
-        .SliceLit(sd)   => {
-            ac.aud_walk_ty(sd.elem)
-            sd.items.loop((h, i, x) {
-                ac.aud_walk_expr(x.addr())
-            })
-        },
-        .Index(ix)      => {
-            ac.aud_walk_expr(ix.seq)
-            ac.aud_walk_expr(ix.idx)
-            ac.aud_walk_ty(ix.elem)
-        },
-        .Loop(lp)       => {
-            ac.aud_walk_expr(lp.seq)
-            ac.aud_walk_ty(lp.elemTy)
-            ac.aud_walk_stmts(lp.body)
-        },
-        .Lambda(la)     => {
-            la.params.loop((h, i, p) {
-                ac.aud_walk_ty(p.ty)
-            })
-            ac.aud_walk_ty(la.ret)
-            ac.aud_walk_stmts(la.body)
-        },
-        .Block(bl)      => ac.aud_walk_stmts(bl.stmts),
-        _               => { },
-    })
-}
-aud_join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
-    mp
-        .gstr_string(32)
-        .gstr_append(mp, a)
-        .gstr_append(mp, "__")
-        .gstr_append(mp, b)
-        .gstr_finish(mp)
-}
-// ── audit fanout tables ───────────────────────────────────────────────────────────────────────────
-// One prepass over the raw decls builds:
-//   pairs  — (bare method/tail name -> hoisted decl name): every DImpl method, every trait-default
-//            materialization target per conforming impl, every `alias__name`-shaped decl tail.
-//   implms — (impl'd type -> hoisted method name / trait name): the type-liveness fanout.
-aud_td_idxs = (mp: MutPtr<Malloc>, decls: [Decl]) [i64] {
-    n := 0
-    decls.loop((h, i, d) {
-        d.match ({
-            .DTraitDefault(td) => {
-                n = n + 1
-            },
-            _                  => { },
-        })
-    })
-    buf := cbuf<i64>(mp, n)
-    k := 0
-    decls.loop((h, i, d) {
-        d.match ({
-            .DTraitDefault(td) => {
-                buf[k] = i
-                k = k + 1
-            },
-            _                  => { },
-        })
-    })
-    buf
-}
-// defaults of impl `im`'s trait: how many DTraitDefault decls share its trait name.
-aud_impl_dflts = (decls: [Decl], tds: [i64], trname: string_view) i64 {
-    n := 0
-    tds.loop((h, j, ti) {
-        decls[ti].match ({
-            .DTraitDefault(td) => {
-                (td.trname == trname).then({
-                    n = n + 1
-                })
-            },
-            _                  => { },
-        })
-    })
-    n
-}
-aud_pair_count = (decls: [Decl], tds: [i64]) i64 {
-    n := 0
-    decls.loop((h, i, d) {
-        d.match ({
-            .DImpl(im) => {
-                n = n + im.methods.len + decls.aud_impl_dflts(tds, im.trname)
-            },
-            _          => {
-                (d.aud_decl_name().aud_tail_at() > 0).then({
-                    n = n + 1
-                })
-            },
-        })
-    })
-    n
-}
-aud_implm_count = (decls: [Decl], tds: [i64]) i64 {
-    n := 0
-    decls.loop((h, i, d) {
-        d.match ({
-            .DImpl(im) => {
-                n = n + im.methods.len + decls.aud_impl_dflts(tds, im.trname) + 1
-            },
-            _          => { },
-        })
-    })
-    n
-}
-AudTables: {
-    pairs: [AudPair],
-    implms: [AudImplM],
-}
-aud_tables = (mp: MutPtr<Malloc>, decls: [Decl]) AudTables {
-    tds := mp.aud_td_idxs(decls)
-    pairs := cbuf<AudPair>(mp, decls.aud_pair_count(tds))
-    implms := cbuf<AudImplM>(mp, decls.aud_implm_count(tds))
-    pk := 0
-    mk2 := 0
-    decls.loop((h, i, d) {
-        d.match ({
-            .DImpl(im) => {
-                im.methods.loop((h2, j, p) {
-                    full := mp.impl_cname_in(im.trname, im.ty, p.name)
-                    pairs[pk] = AudPair(
-                        bare: p.name,
-                        full: full,
-                    )
-                    pk = pk + 1
-                    implms[mk2] = AudImplM(
-                        ty: im.ty,
-                        full: full,
-                    )
-                    mk2 = mk2 + 1
-                })
-                tds.loop((h2, j, ti) {
-                    // trait-default materializations this impl can dispatch to (methods it OMITS are
-                    // still reachable through its trait's defaults).
-                    decls[ti].match ({
-                        .DTraitDefault(td) => {
-                            (td.trname == im.trname).then({
-                                full := mp.impl_cname_in(im.trname, im.ty, td.fn.name)
-                                pairs[pk] = AudPair(
-                                    bare: td.fn.name,
-                                    full: full,
-                                )
-                                pk = pk + 1
-                                implms[mk2] = AudImplM(
-                                    ty: im.ty,
-                                    full: full,
-                                )
-                                mk2 = mk2 + 1
-                            })
-                        },
-                        _                  => { },
-                    })
-                })
-                // conformance names the trait struct — a live type keeps its traits.
-                implms[mk2] = AudImplM(
-                    ty: im.ty,
-                    full: im.trname,
-                )
-                mk2 = mk2 + 1
-            },
-            _          => {
-                nm := d.aud_decl_name()
-                ta := nm.aud_tail_at()
-                (ta > 0).then({
-                    pairs[pk] = AudPair(
-                        bare: cstr(offset(nm, ta)),
-                        full: nm,
-                    )
-                    pk = pk + 1
-                })
-            },
-        })
-    })
-    AudTables(
-        pairs: pairs,
-        implms: implms,
-    )
-}
-// ── trait-method table (unused-import crediting) ──────────────────────────────────────────────────
-// A `{ Trait } = mod` import often exists ONLY to pull the trait's impl module into the program
-// closure: the importing module never spells the trait's NAME again, it dispatches the trait's
-// METHODS (`t.ptr_kind_of()`). The unused-import scan therefore credits a trait-name import as used
-// when any method of that trait occurs as an identifier in the module. Receiver types are not
-// tracked — false-negative direction: a genuinely unused trait import whose method name happens to
-// occur stays unreported, but a closure-pulling import is never flagged. The method surface of
-// trait `tr` is: every DImpl method under `tr`, every DTraitDefault of `tr`, and `tr`'s own
-// fn-typed struct fields.
-AudTM: {
-    tr: string_view,
-    mv: [u8],
-}
-aud_fnt_fields = (fs: [Field]) i64 {
-    n := 0
-    fs.loop((h, i, f) {
-        f.ty.match ({
-            .FnT(ft) => {
-                n = n + 1
-            },
-            _        => { },
-        })
-    })
-    n
-}
-aud_tm_count = (decls: [Decl]) i64 {
-    n := 0
-    decls.loop((h, i, d) {
-        d.match ({
-            .DImpl(im)         => {
-                n = n + im.methods.len
-            },
-            .DTraitDefault(td) => {
-                n = n + 1
-            },
-            .DStruct(sd)       => {
-                n = n + sd.fields.aud_fnt_fields()
-            },
-            .DGenStruct(g)     => {
-                n = n + g.fields.aud_fnt_fields()
-            },
-            _                  => { },
-        })
-    })
-    n
-}
-aud_tm_push_fields = (tms: [AudTM], k: i64, tr: string_view, fs: [Field]) i64 {
-    j := k
-    fs.loop((h, i, f) {
-        f.ty.match ({
-            .FnT(ft) => {
-                tms[j] = AudTM(
-                    tr: tr,
-                    mv: f.name.view(),
-                )
-                j = j + 1
-            },
-            _        => { },
-        })
-    })
-    j
-}
-aud_tms = (mp: MutPtr<Malloc>, decls: [Decl]) [AudTM] {
-    tms := cbuf<AudTM>(mp, decls.aud_tm_count())
-    k := 0
-    decls.loop((h, i, d) {
-        d.match ({
-            .DImpl(im)         => {
-                im.methods.loop((h2, j, p) {
-                    tms[k] = AudTM(
-                        tr: im.trname,
-                        mv: p.name.view(),
-                    )
-                    k = k + 1
-                })
-            },
-            .DTraitDefault(td) => {
-                tms[k] = AudTM(
-                    tr: td.trname,
-                    mv: td.fn.name.view(),
-                )
-                k = k + 1
-            },
-            .DStruct(sd)       => {
-                k = tms.aud_tm_push_fields(k, sd.name, sd.fields)
-            },
-            .DGenStruct(g)     => {
-                k = tms.aud_tm_push_fields(k, g.name, g.fields)
-            },
-            _                  => { },
-        })
-    })
-    tms
-}
-// the trait-method subset credited to imported name `name` (empty when `name` is not a trait).
-aud_tm_for = (mp: MutPtr<Malloc>, tms: [AudTM], name: string_view) [AudTM] {
-    n := 0
-    tms.loop((h, i, t) {
-        (t.tr == name).then({
-            n = n + 1
-        })
-    })
-    sub := cbuf<AudTM>(mp, n)
-    k := 0
-    tms.loop((h, i, t) {
-        (t.tr == name).then({
-            sub[k] = t
-            k = k + 1
-        })
-    })
-    sub
-}
-// ── audit findings ────────────────────────────────────────────────────────────────────────────────
-AudFinding: {
-    path: string_view,
-    line: i64,
-    msg: string_view,
-    dead: bool,
-}
-aud_strcmp = (a: string_view, b: string_view) i64 {
-    av: [u8] := a.view()
-    bv: [u8] := b.view()
-    i := 0
-    r := 0
-    @while (r == 0 && i < av.len && i < bv.len) {
-        (av[i] < bv[i]).then({
-            r = 0 - 1
-        })
-        (av[i] > bv[i]).then({
-            r = 1
-        })
-        i = i + 1
-    }
-    (r == 0 && av.len < bv.len).then({
-        r = 0 - 1
-    })
-    (r == 0 && av.len > bv.len).then({
-        r = 1
-    })
-    r
-}
-// order findings by (path, line, msg) — the msg tiebreak makes duplicates ADJACENT (msg carries
-// kind + name), so the emit loop can drop repeats with a previous-line compare.
-aud_lt = (a: AudFinding, b: AudFinding) bool {
-    c := a.path.aud_strcmp(b.path)
-    c < 0 || c == 0 && (a.line < b.line || a.line == b.line && a.msg.aud_strcmp(b.msg) < 0)
-}
-aud_sort = (fb: [AudFinding], n: i64) void {
-    i := 1
-    @while (i < n) {
-        x := fb[i]
-        j := i - 1
-        @while (j >= 0 && x.aud_lt(fb[j])) {
-            fb[j + 1] = fb[j]
-            j = j - 1
-        }
-        fb[j + 1] = x
-        i = i + 1
-    }
-}
-// is this raw decl one the report should name? (kinds/prefixes exempted per the header comment)
-aud_reportable = (d: Decl) bool {
-    nm := d.aud_decl_name()
-    is_empty(nm) == false
-        && d.aud_decl_pos() > 0
-        && is_empty(d.aud_decl_kind()) == false
-        && nm.starts_with("impl_") == false
-        && nm.starts_with("__") == false
-}
-aud_dead_msg = (mp: MutPtr<Malloc>, kind: string_view, nm: string_view) string_view {
-    mp
-        .gstr_string(64)
-        .gstr_append(mp, "warning[dead-code]: ")
-        .gstr_append(mp, kind)
-        .gstr_append(mp, " '")
-        .gstr_append(mp, nm)
-        .gstr_append(mp, "' is never reachable from main")
-        .gstr_finish(mp)
-}
-// ── unused-import scan (per original module source; tokenizer-disciplined) ────────────────────────
-AudImp: {
-    name: string_view,
-    nv: [u8],
-    ms: [AudTM],
-    mod: string_view,
-    pos: i32,
-    alias: bool,
-    used: bool,
-    lo: i64,
-    hi: i64,
-}
-aud_is_ident_start = (b: u8) bool { b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_' }
-aud_is_ident_char = (b: u8) bool { b.aud_is_ident_start() || b >= '0' && b <= '9' }
-// 1-based line of byte `pos` (iterative — module sources are hundreds of KB).
-aud_line_of = (v: [u8], pos: i64) i64 {
-    ln := 1
-    i := 0
-    @while (i < pos && i < v.len) {
-        (v[i] == '\n').then({
-            ln = ln + 1
-        })
-        i = i + 1
-    }
-    ln
-}
-// end of an import statement's span: from `{` past the matching `}`, the `=`, and the dotted path.
-aud_imp_span_hi = (v: [u8], pos: i64) i64 {
-    i := pos
-    @while (i < v.len && v[i] != '}') {
-        i = i + 1
-    }
-    i = i + 1
-    @while (i < v.len && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '=')) {
-        i = i + 1
-    }
-    @while (i < v.len && (v[i].aud_is_ident_char() || v[i] == '.')) {
-        i = i + 1
-    }
-    i
-}
-// end of a one-line namespace-alias bind's span (`m = std.x.y`): the end of its line.
-aud_line_end = (v: [u8], pos: i64) i64 {
-    i := pos
-    @while (i < v.len && v[i] != '\n') {
-        i = i + 1
-    }
-    i
-}
-// identifier token [s,e) equals `nv`?
-aud_tok_eq = (v: [u8], s: i64, e: i64, nv: [u8]) bool {
-    ok := nv.len == e - s
-    k := 0
-    @while (ok && k < nv.len) {
-        (v[s + k] == nv[k]).match ({
-            true  => {
-                k = k + 1
-            },
-            false => {
-                ok = false
-            },
-        })
-    }
-    ok
-}
-// does token [s,e) equal any credited trait-method name?
-aud_ms_eq = (v: [u8], s: i64, e: i64, ms: [AudTM]) bool {
-    hit := false
-    ms.loop((h, i, t) {
-        v.aud_tok_eq(s, e, t.mv).then({
-            hit = true
-            h.break
-        })
-    })
-    hit
-}
-aud_mark_used = (ents: [AudImp], nents: i64, v: [u8], s: i64, e: i64) void {
-    k := 0
-    @while (k < nents) {
-        en := ents[k]
-        (en.used == false
-            && (s < en.lo || s >= en.hi)
-            && (v.aud_tok_eq(s, e, en.nv) || v.aud_ms_eq(s, e, en.ms))).then({
-            en.used = true
-            ents[k] = en
-        })
-        k = k + 1
-    }
-}
-// one scanner step at byte i: skip a comment/string/char literal whole, consume an identifier and
-// match it against the imported names, else advance one byte. Returns the next position.
-aud_step = (ents: [AudImp], nents: i64, v: [u8], i0: i64) i64 {
-    n := v.len
-    b := v[i0]
-    (b == '/' && i0 + 1 < n && v[i0 + 1] == '/').then({
-        i := i0 + 2
-        @while (i < n && v[i] != '\n') {
-            i = i + 1
-        }
-        return i + 1
-    })
-    (b == '/' && i0 + 1 < n && v[i0 + 1] == '*').then({
-        i := i0 + 2
-        @while (i + 1 < n && (v[i] == '*' && v[i + 1] == '/') == false) {
-            i = i + 1
-        }
-        return i + 2
-    })
-    (b == '"').then({
-        i := i0 + 1
-        @while (i < n && v[i] != '"') {
-            i = (v[i] == '\\').then({ i + 2 }, { i + 1 })
-        }
-        return i + 1
-    })
-    (b == '\'').then({
-        i := i0 + 1
-        @while (i < n && v[i] != '\'') {
-            i = (v[i] == '\\').then({ i + 2 }, { i + 1 })
-        }
-        return i + 1
-    })
-    b.aud_is_ident_start().then({
-        i := i0 + 1
-        @while (i < n && v[i].aud_is_ident_char()) {
-            i = i + 1
-        }
-        ents.aud_mark_used(nents, v, i0, i)
-        return i
-    })
-    i0 + 1
-}
-aud_imp_msg = (mp: MutPtr<Malloc>, en: AudImp) string_view {
-    en.alias.match ({
-        true  => mp
-            .gstr_string(64)
-            .gstr_append(mp, "warning[unused-import]: namespace alias '")
-            .gstr_append(mp, en.name)
-            .gstr_append(mp, "' is never used")
-            .gstr_finish(mp),
-        false => mp
-            .gstr_string(64)
-            .gstr_append(mp, "warning[unused-import]: '")
-            .gstr_append(mp, en.name)
-            .gstr_append(mp, "' imported from '")
-            .gstr_append(mp, en.mod)
-            .gstr_append(mp, "' but never used")
-            .gstr_finish(mp),
-    })
-}
-// scan ONE module file: every `{ a, b } = mod` name and every `m = mod` alias that never occurs in
-// the module's own source outside the import statement itself (a trait name's methods count — see
-// AudTM). Appends findings; returns the count.
-aud_mod_imports = (
-    mp: MutPtr<Malloc>,
-    m: ModuleEntry,
-    tms: [AudTM],
-    fb: [AudFinding],
-    n0: i64,
-) i64 {
-    ds := mp.parse_module(m.source)
-    v: [u8] := m.source.view()
-    cnt := 0
-    ds.loop((h, i, d) {
-        d.match ({
-            .DImport(imp) => {
-                cnt = cnt + imp.names.len
-            },
-            .DGlobal(g)   => {
-                g.alias.then({
-                    cnt = cnt + 1
-                })
-            },
-            _             => { },
-        })
-    })
-    (cnt == 0).then({
-        return n0
-    })
-    ents := cbuf<AudImp>(mp, cnt)
-    k := 0
-    ds.loop((h, i, d) {
-        d.match ({
-            .DImport(imp) => {
-                hi := v.aud_imp_span_hi(to_i64(imp.pos))
-                imp.names.loop((h2, j, p) {
-                    ents[k] = AudImp(
-                        name: p.name,
-                        nv: p.name.view(),
-                        ms: mp.aud_tm_for(tms, p.name),
-                        mod: imp.module,
-                        pos: imp.pos,
-                        alias: false,
-                        used: false,
-                        lo: to_i64(imp.pos),
-                        hi: hi,
-                    )
-                    k = k + 1
-                })
-            },
-            .DGlobal(g)   => {
-                g.alias.then({
-                    ents[k] = AudImp(
-                        name: g.name,
-                        nv: g.name.view(),
-                        ms: cbuf<AudTM>(mp, 0),
-                        mod: "",
-                        pos: g.pos,
-                        alias: true,
-                        used: false,
-                        lo: to_i64(g.pos),
-                        hi: v.aud_line_end(to_i64(g.pos)),
-                    )
-                    k = k + 1
-                })
-            },
-            _             => { },
-        })
-    })
-    i: i64 := 0
-    @while (i < v.len) {
-        i = ents.aud_step(k, v, i)
-    }
-    n := n0
-    j := 0
-    @while (j < k) {
-        en := ents[j]
-        (en.used == false && n < fb.len).then({
-            fb[n] = AudFinding(
-                path: m.path,
-                line: v.aud_line_of(to_i64(en.pos)),
-                msg: mp.aud_imp_msg(en),
-                dead: false,
-            )
-            n = n + 1
-        })
-        j = j + 1
-    }
-    n
-}
-// ── the audit driver ──────────────────────────────────────────────────────────────────────────────
-// build the ctx and run the reachability fixpoint. Roots: the entry `main` (a `main = (sys: Sys)`
-// entry also reaches std.sys.root — genc emits the trampoline call); impl blocks on builtin
-// receivers (no type decl to anchor liveness on); when the entry has no `main` (a library), every
-// entry-module decl is a root instead.
-aud_analyze = (mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl], rdecls: [Decl]) AudCtx {
-    seedv: i64 := 0 - 1
-    t := mp.aud_tables(raw)
-    c := AudCtx(
-        mp: mp,
-        decls: raw,
-        rdecls: rdecls,
-        ridx: mp.aud_index(raw),
-        xidx: mp.aud_index(rdecls),
-        seen: of(mp, "", seedv).expect("audit: oom"),
-        mseen: of(mp, "", seedv).expect("audit: oom"),
-        pairs: t.pairs,
-        implms: t.implms,
-    )
-    ac := c.addr()
-    ac.aud_ref("main")
-    mi := c.ridx.get("main", 0 - 1)
-    (mi >= 0).then({
-        raw[mi].match ({
-            .DFunc(f) => {
-                (f.params.len > 0).then({
-                    ac.aud_mref("root")
-                })
-            },
-            _         => { },
-        })
-    })
-    raw.loop((h, i, d) {
-        d.match ({
-            .DImpl(im) => {
-                (c.ridx.get(im.ty, 0 - 1) < 0).then({
-                    ac.aud_ref(im.trname)
-                    im.methods.loop((h2, j, p) {
-                        ac.aud_ref(mp.impl_cname_in(im.trname, im.ty, p.name))
-                    })
-                })
-            },
-            _          => { },
-        })
-    })
-    (mi < 0).then({
-        raw.loop((h, i, d) {
-            // no entry `main` (a library): every decl of the ENTRY module region is a root.
-            p := d.aud_decl_pos()
-            ri := rp.regions.fregion_find(to_i64(p))
-            (p > 0 && ri >= 0 && rp.regions[ri].midx == 0).then({
-                ac.aud_ref(d.aud_decl_name())
-            })
-        })
-    })
-    c
-}
-// A module bound BOTH bare and under a namespace alias is appended twice (once as `f`, once as
-// `alias__f`) — both copies come from the SAME source line, so if EITHER copy is live the line
-// is live and neither may be reported. The suppression set: bare `__`-tails of the live names.
-aud_live_tails = (mp: MutPtr<Malloc>, c: AudCtx) Map<i64> {
-    seedv: i64 := 0 - 1
-    tails := of(mp, "", seedv).expect("audit: oom")
-    c.seen.keys().loop((h, i, k) {
-        ta := k.aud_tail_at()
-        (ta > 0).then({
-            one: i64 := 1
-            tails = tails.put(mp, cstr(offset(k, ta)), one).expect("audit: oom")
-        })
-    })
-    tails
-}
-// is decl name `nm` unreached? — not live, with no live `__`-twin in either direction (suppress a
-// dead `f` when some live `*__f` twin exists, and a dead `alias__f` when its bare tail `f` is live;
-// false-negative direction).
-aud_unreached = (c: AudCtx, tails: Map<i64>, nm: string_view) bool {
-    nta := nm.aud_tail_at()
-    twin := tails.has(nm) || nta > 0 && c.seen.has(cstr(offset(nm, nta)))
-    c.seen.has(nm) == false && twin == false
-}
-aud_run = (
-    mp: MutPtr<Malloc>,
-    rp: ResolvedProgram,
-    raw: [Decl],
-    rdecls: [Decl],
-    path: string_view,
-    src: string_view,
-    strict: bool,
-) i32 {
-    c := mp.aud_analyze(rp, raw, rdecls)
-    tails := mp.aud_live_tails(c)
-    // collect findings: dead decls (flat order), then unused imports (per module file).
-    fb := cbuf<AudFinding>(mp, raw.len + 8192)
-    n := 0
-    raw.loop((h, i, d) {
-        (d.aud_reportable() && c.aud_unreached(tails, d.aud_decl_name()) && n < fb.len).then({
-            dl := locate_diag(rp, d.aud_decl_pos(), 1, path, src)
-            fb[n] = AudFinding(
-                path: dl.path,
-                line: to_i64(dl.sp.line),
-                msg: mp.aud_dead_msg(d.aud_decl_kind(), d.aud_decl_name()),
-                dead: true,
-            )
-            n = n + 1
-        })
-    })
-    tms := mp.aud_tms(raw)
-    rp.table.modules.loop((h, i, m) {
-        n = mp.aud_mod_imports(m, tms, fb, n)
-    })
-    mp.aud_emit(fb, n, strict)
-}
-// sort, dedupe on (path, line, msg), print, summarize; returns the `--strict` exit code. The same
-// finding can be collected more than once (a module reached under several ids/regions), so equal
-// (path, line, msg) rows — adjacent after aud_sort — are emitted ONCE and counted once.
-aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
-    fb.aud_sort(n)
-    dead := 0
-    shown := 0
-    i := 0
-    @while (i < n) {
-        f := fb[i]
-        dup := i > 0
-            && f.path == fb[i - 1].path
-            && f.line == fb[i - 1].line
-            && f.msg == fb[i - 1].msg
-        (dup == false).then({
-            f.dead.then({
-                dead = dead + 1
-            })
-            shown = shown + 1
-            say(mp
-                .gstr_string(96)
-                .gstr_append(mp, f.path)
-                .gstr_push(mp, ':')
-                .push_int(mp, f.line)
-                .gstr_append(mp, ": ")
-                .gstr_append(mp, f.msg)
-                .gstr_finish(mp))
-        })
-        i = i + 1
-    }
-    say(mp
-        .gstr_string(64)
-        .gstr_append(mp, "zen audit: ")
-        .push_int(mp, dead)
-        .gstr_append(mp, " dead decls, ")
-        .push_int(mp, shown - dead)
-        .gstr_append(mp, " unused imports")
-        .gstr_finish(mp))
-    (strict && shown > 0).then({ 1 }, { 0 })
-}
-// ── zen audit --workspace ─────────────────────────────────────────────────────────────────────────
-// `zenc audit --workspace <dir> [--strict]` — union dead-code reachability across EVERY entry point
-// (file with a top-level `main`) found under <dir>. A decl is reported dead only when NO analyzed
-// entry reaches it, i.e. it is dead from every entry whose closure contains it (#595: per-entry
-// kill-lists were misread as "safe to delete" — helpers live only from tests/examples were
-// invisible). String literals count too: import-shaped lines inside them (embedded test programs)
-// root the named decls/modules — coarse, keep-direction. Unused-import findings are per FILE
-// (entry-independent), so each module file is scanned once. Entries that fail resolve/check are
-// skipped (their diagnostics print) and counted in the header. Dot-directories and `fixtures/`
-// trees are excluded from the sweep — fixture corpora are test INPUTS (often deliberately broken),
-// not workspace programs.
-AudWsFiles: {
-    mp: MutPtr<Malloc>,
-    fs: [string_view],
-    n: i64,
-}
-aud_ws_addf = (wf: MutPtr<AudWsFiles>, p: string_view) void {
-    (wf.n >= wf.fs.len).then({
-        grown := cbuf<string_view>(wf.mp, wf.fs.len * 2)
-        wf.fs.loop((h, i, x) {
-            grown[i] = x
-        })
-        wf.fs = grown
-    })
-    wf.fs[wf.n] = p
-    wf.n = wf.n + 1
-}
-aud_join_path = (mp: MutPtr<Malloc>, dir: string_view, nm: string_view) string_view {
-    mp
-        .gstr_string(64)
-        .gstr_append(mp, dir)
-        .gstr_push(mp, '/')
-        .gstr_append(mp, nm)
-        .gstr_finish(mp)
-}
-// deterministic entry order regardless of readdir order.
-aud_sortp = (fs: [string_view], n: i64) void {
-    i := 1
-    @while (i < n) {
-        x := fs[i]
-        j := i - 1
-        @while (j >= 0 && x.aud_strcmp(fs[j]) < 0) {
-            fs[j + 1] = fs[j]
-            j = j - 1
-        }
-        fs[j + 1] = x
-        i = i + 1
-    }
-}
-// `struct dirent`: the NUL-terminated entry name (d_name) at +19 on this ABI (matches std.sys.fs).
-AUD_DNAME := 19
-// recursively collect the `*.zen` files under `dir` (skipping dot-entries and `fixtures/` corpora).
-aud_walk_tree = (mp: MutPtr<Malloc>, dir: string_view, wf: MutPtr<AudWsFiles>) void {
-    d := opendir(dir)
-    (d == null_ptr() == false).then({
-        e := readdir(d)
-        @while (e != null_ptr()) {
-            nm := cstr(e.offset(AUD_DNAME))
-            ((nm.starts_with(".") || nm == "fixtures") == false).then({
-                full := mp.aud_join_path(dir, nm)
-                zi_is_dir(full).match ({
-                    true  => mp.aud_walk_tree(full, wf),
-                    false => full.ends_with(".zen").then({
-                        wf.aud_ws_addf(full)
-                    }),
-                })
-            })
-            e = readdir(d)
-        }
-        closedir(d)
-    })
-}
-// cheap textual entry test: some line starts `main` then (spaces) `=` — no parse, so a broken
-// candidate costs nothing here (resolve/check vet the survivors).
-aud_has_main = (src: string_view) bool {
-    v: [u8] := src.view()
-    found := false
-    bol := true
-    i := 0
-    @while (found == false && i < v.len) {
-        (bol
-            && i + 4 < v.len
-            && v[i] == 'm'
-            && v[i + 1] == 'a'
-            && v[i + 2] == 'i'
-            && v[i + 3] == 'n'
-            && v[i + 4].aud_is_ident_char() == false).then({
-            j := i + 4
-            (j < v.len && v[j] == '*').then({
-                j = j + 1
-            })
-            @while (j < v.len && (v[j] == ' ' || v[j] == '\t')) {
-                j = j + 1
-            }    // exported entry: `main* = (...)`
-            (j + 1 < v.len && v[j] == '=' && v[j + 1] != '=').then({
-                found = true
-            })
-        })
-        bol = v[i] == '\n'
-        i = i + 1
-    }
-    found
-}
-// the bytes [s,e) of `v` as a fresh cstr (embedded names are substrings of a literal, never
-// NUL-terminated in place).
-aud_bytes = (mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) string_view {
-    o := mp.gstr_string(e - s + 1)
-    i := s
-    @while (i < e) {
-        o = o.gstr_push(mp, v[i])
-        i = i + 1
-    }
-    o.gstr_finish(mp)
-}
-// one string-literal body [a,b): find import-shaped fragments. `{ x, y } = mod` aud_refs each name
-// as a root; `alias = dotted.mod` (a dot is required — plain `x = y` assignments are everywhere in
-// embedded programs) folds the module id into `mods` so the caller can root that module's decls.
-aud_embed_lit = (
-    ac: MutPtr<AudCtx>,
-    mp: MutPtr<Malloc>,
-    mods: Map<i64>,
-    v: [u8],
-    a: i64,
-    b: i64,
-) Map<i64> {
-    m := mods
-    j := a
-    @while (j < b) {
-        hit := v[j] == '='
-            && (j + 1 >= b || v[j + 1] != '=')
-            && j > a
-            && v[j - 1] != ':'
-            && v[j - 1] != '='
-            && v[j - 1] != '!'
-            && v[j - 1] != '<'
-            && v[j - 1] != '>'
-        hit.then({
-            k := j - 1
-            @while (k > a && (v[k] == ' ' || v[k] == '\t')) {
-                k = k - 1
-            }
-            q := j + 1
-            @while (q < b && (v[q] == ' ' || v[q] == '\t')) {
-                q = q + 1
-            }
-            s0 := q
-            @while (q < b && (v[q].aud_is_ident_char() || v[q] == '.')) {
-                q = q + 1
-            }
-            @while (q > s0 && v[q - 1] == '.') {
-                q = q - 1
-            }
-            rhs_ok := q > s0 && v[s0].aud_is_ident_start()
-            (rhs_ok && v[k] == '}').then({
-                // `{ names } = mod` — each imported name becomes a root.
-                p := k - 1
-                @while (p > a && v[p] != '{') {
-                    p = p - 1
-                }
-                (v[p] == '{').then({
-                    x := p + 1
-                    @while (x < k) {
-                        v[x].aud_is_ident_start().match ({
-                            true  => {
-                                x0 := x
-                                @while (x < k && v[x].aud_is_ident_char()) {
-                                    x = x + 1
-                                }
-                                ac.aud_ref(mp.aud_bytes(v, x0, x))
-                            },
-                            false => {
-                                x = x + 1
-                            },
-                        })
-                    }
-                })
-            })
-            (rhs_ok && v[k].aud_is_ident_char()).then({
-                // `alias = dotted.mod` — require a dotted RHS at (embedded) line start.
-                is := k
-                @while (is > a && v[is - 1].aud_is_ident_char()) {
-                    is = is - 1
-                }
-                w := is - 1
-                @while (w > a && (v[w] == ' ' || v[w] == '\t')) {
-                    w = w - 1
-                }
-                atbol := w < a || v[w] == '\n' || v[w] == 'n' && w > a && v[w - 1] == '\\'
-                dotted := false
-                y := s0
-                @while (y < q) {
-                    (v[y] == '.').then({
-                        dotted = true
-                    })
-                    y = y + 1
-                }
-                (atbol && dotted && v[is].aud_is_ident_start()).then({
-                    one: i64 := 1
-                    m = m.put(mp, mp.aud_bytes(v, s0, q), one).expect("audit: oom")
-                })
-            })
-        })
-        j = j + 1
-    }
-    m
-}
-// scan one module source for string literals, folding their import-shaped fragments into roots.
-aud_embed_src = (
-    ac: MutPtr<AudCtx>,
-    mp: MutPtr<Malloc>,
-    mods: Map<i64>,
-    src: string_view,
-) Map<i64> {
-    v: [u8] := src.view()
-    m := mods
-    n := v.len
-    i := 0
-    @while (i < n) {
-        b := v[i]
-        nx := i + 1
-        (b == '/' && i + 1 < n && v[i + 1] == '/').then({
-            j := i + 2
-            @while (j < n && v[j] != '\n') {
-                j = j + 1
-            }
-            nx = j + 1
-        })
-        (b == '/' && i + 1 < n && v[i + 1] == '*').then({
-            j := i + 2
-            @while (j + 1 < n && (v[j] == '*' && v[j + 1] == '/') == false) {
-                j = j + 1
-            }
-            nx = j + 2
-        })
-        (b == '\'').then({
-            j := i + 1
-            @while (j < n && v[j] != '\'') {
-                j = (v[j] == '\\').then({ j + 2 }, { j + 1 })
-            }
-            nx = j + 1
-        })
-        (b == '"').then({
-            j := i + 1
-            @while (j < n && v[j] != '"') {
-                j = (v[j] == '\\').then({ j + 2 }, { j + 1 })
-            }
-            m = ac.aud_embed_lit(mp, m, v, i + 1, j)
-            nx = j + 1
-        })
-        i = nx
-    }
-    m
-}
-// does table module id `id` (loader-normalized: `u/sub/mod2`, `std/io/file`) spell the embedded
-// dotted id (`sub.mod2`, `std.io.file`)?
-aud_id_matches = (id: string_view, dotted: string_view) bool {
-    iv: [u8] := id.view()
-    dv: [u8] := dotted.view()
-    off := id.starts_with("u/").then({ 2 }, { 0 })
-    ok := iv.len - off == dv.len
-    k := 0
-    @while (ok && k < dv.len) {
-        x := iv[off + k]
-        y := dv[k]
-        (x == y || x == '/' && y == '.').match ({
-            true  => {
-                k = k + 1
-            },
-            false => {
-                ok = false
-            },
-        })
-    }
-    ok
-}
-// the --workspace embedded-source heuristic (#595): harness files BUILD test programs as string
-// literals whose import lines the plain fixpoint cannot see. Root them: brace-form names aud_ref
-// directly; alias-form module ids root every decl the module owns (per its flat regions).
-aud_embed_roots = (ac: MutPtr<AudCtx>, mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl]) void {
-    seedv: i64 := 0 - 1
-    mods := of(mp, "", seedv).expect("audit: oom")
-    rp.table.modules.loop((h, i, m) {
-        mods = ac.aud_embed_src(mp, mods, m.source)
-    })
-    // per-module rooted flags: some embedded dotted id names this module.
-    rooted := cbuf<i64>(mp, rp.table.modules.len)
-    rp.table.modules.loop((h, i, m) {
-        r: i64 := 0
-        mods.keys().loop((h2, j, k) {
-            m.id.aud_id_matches(k).then({
-                r = 1
-            })
-        })
-        rooted[i] = r
-    })
-    raw.loop((h, i, d) {
-        p := to_i64(d.aud_decl_pos())
-        ri := rp.regions.fregion_find(p)
-        (p > 0 && ri >= 0 && rooted[rp.regions[ri].midx] > 0).then({
-            ac.aud_ref(d.aud_decl_name())
-        })
-    })
-}
-// the cross-entry union state. A finding is keyed `path:line:msg` (msg carries kind + name):
-// `live` holds keys some entry reached, `idx` the keys already recorded as dead candidates, `mods`
-// the module paths whose import scan already ran.
-AudWsF: {
-    key: string_view,
-    f: AudFinding,
-}
-AudWs: {
-    mp: MutPtr<Malloc>,
-    live: Map<i64>,
-    idx: Map<i64>,
-    mods: Map<i64>,
-    dfs: [AudWsF],
-    nd: i64,
-    ifs: [AudFinding],
-    ni: i64,
-    entries: i64,
-    skipped: i64,
-}
-aud_ws_key = (mp: MutPtr<Malloc>, path: string_view, line: i64, msg: string_view) string_view {
-    mp
-        .gstr_string(96)
-        .gstr_append(mp, path)
-        .gstr_push(mp, ':')
-        .push_int(mp, line)
-        .gstr_push(mp, ':')
-        .gstr_append(mp, msg)
-        .gstr_finish(mp)
-}
-aud_ws_push = (ws: MutPtr<AudWs>, key: string_view, f: AudFinding) void {
-    (ws.nd >= ws.dfs.len).then({
-        grown := cbuf<AudWsF>(ws.mp, ws.dfs.len * 2)
-        ws.dfs.loop((h, i, x) {
-            grown[i] = x
-        })
-        ws.dfs = grown
-    })
-    ws.dfs[ws.nd] = AudWsF(
-        key: key,
-        f: f,
-    )
-    ws.nd = ws.nd + 1
-}
-aud_ws_pushi = (ws: MutPtr<AudWs>, f: AudFinding) void {
-    (ws.ni >= ws.ifs.len).then({
-        grown := cbuf<AudFinding>(ws.mp, ws.ifs.len * 2)
-        ws.ifs.loop((h, i, x) {
-            grown[i] = x
-        })
-        ws.ifs = grown
-    })
-    ws.ifs[ws.ni] = f
-    ws.ni = ws.ni + 1
-}
-// pre-flight an entry candidate: the real loader exit(1)s on an unknown module, and ONE broken
-// candidate must not kill the whole workspace sweep — probe the import closure with the same
-// module_path mapping (mirrors cache_walk_one) and skip the entry when any module file is missing.
-AudPre: {
-    seen: String,
-    ok: bool,
-}
-aud_pre_one = (
-    mp: MutPtr<Malloc>,
-    root: string_view,
-    progdir: string_view,
-    id: string_view,
-    st: AudPre,
-) AudPre {
-    idn := mp.gstr_string(24).gstr_append(mp, id)
-    st.seen.seen_name(idn).match ({
-        true  => st,
-        false => {
-            next := AudPre(
-                seen: st.seen.add_name(mp, idn),
-                ok: st.ok,
-            )
-            contents_in(mp, mp.cache_module_path(root, progdir, id)).match ({
-                .Ok(msrc) => mp.aud_pre_edges(root, progdir, mp.edges_of(msrc), next),
-                .Err(e)   => AudPre(
-                    seen: next.seen,
-                    ok: false,
-                ),
-            })
-        },
-    })
-}
-aud_pre_edges = (
-    mp: MutPtr<Malloc>,
-    root: string_view,
-    progdir: string_view,
-    edges: [ImportEdge],
-    st: AudPre,
-) AudPre {
-    cur := st
-    edges.loop((lh, i, e) {
-        cur = mp.aud_pre_one(root, progdir, e.module, cur)
-    })
-    cur
-}
-aud_pre_ok = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view) bool {
-    st := mp.aud_pre_edges(root, mp.dirname(path), mp.edges_of(src), AudPre(
-        seen: mp.gstr_string(64),
-        ok: true,
-    ))
-    st.ok
-}
-// analyze ONE workspace entry: fixpoint + embedded roots, then fold every reportable decl into the
-// cross-entry union (live-anywhere wins) and scan each not-yet-seen module file's imports.
-aud_ws_entry = (
-    mp: MutPtr<Malloc>,
-    root: string_view,
-    path: string_view,
-    src: string_view,
-    ws: MutPtr<AudWs>,
-) void {
-    one: i64 := 1
-    rp := mp.resolve_prog(root, path, src)
-    (mp.report_no_if_resolved(rp, path, src) == 0).match ({
-        true  => {
-            raw := mp.parse_module(rp.flat)
-            decls := mp.resolve_module(raw)
-            (mp.report_check(raw, decls, rp, path, src) == 0).match ({
-                true  => {
-                    ws.entries = ws.entries + 1
-                    c := mp.aud_analyze(rp, raw, decls)
-                    ac := c.addr()
-                    ac.aud_embed_roots(mp, rp, raw)
-                    tails := mp.aud_live_tails(c)
-                    raw.loop((h, i, d) {
-                        d.aud_reportable().then({
-                            nm := d.aud_decl_name()
-                            dl := locate_diag(rp, d.aud_decl_pos(), 1, path, src)
-                            msg := mp.aud_dead_msg(d.aud_decl_kind(), nm)
-                            key := mp.aud_ws_key(dl.path, to_i64(dl.sp.line), msg)
-                            c.aud_unreached(tails, nm).match ({
-                                true  => (ws.idx.has(key) == false).then({
-                                    ws.idx = ws.idx.put(mp, key, one).expect("audit: oom")
-                                    ws.aud_ws_push(key, AudFinding(
-                                        path: dl.path,
-                                        line: to_i64(dl.sp.line),
-                                        msg: msg,
-                                        dead: true,
-                                    ))
-                                }),
-                                false => {
-                                    ws.live = ws.live.put(mp, key, one).expect("audit: oom")
-                                },
-                            })
-                        })
-                    })
-                    tms := mp.aud_tms(raw)
-                    rp.table.modules.loop((h, i, m) {
-                        (ws.mods.has(m.path) == false).then({
-                            ws.mods = ws.mods.put(mp, m.path, one).expect("audit: oom")
-                            scratch := cbuf<AudFinding>(mp, 4096)
-                            k := mp.aud_mod_imports(m, tms, scratch, 0)
-                            j := 0
-                            @while (j < k) {
-                                ws.aud_ws_pushi(scratch[j])
-                                j = j + 1
-                            }
-                        })
-                    })
-                },
-                false => {
-                    ws.skipped = ws.skipped + 1
-                },
-            })
-        },
-        false => {
-            ws.skipped = ws.skipped + 1
-        },
-    })
-}
-audit_ws_cmd = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, strict: bool) i32 {
-    seedv: i64 := 0 - 1
-    wfc := AudWsFiles(
-        mp: mp,
-        fs: cbuf<string_view>(mp, 64),
-        n: 0,
-    )
-    wf := wfc.addr()
-    mp.aud_walk_tree(dir, wf)
-    wfc.fs.aud_sortp(wfc.n)
-    wsc := AudWs(
-        mp: mp,
-        live: of(mp, "", seedv).expect("audit: oom"),
-        idx: of(mp, "", seedv).expect("audit: oom"),
-        mods: of(mp, "", seedv).expect("audit: oom"),
-        dfs: cbuf<AudWsF>(mp, 256),
-        nd: 0,
-        ifs: cbuf<AudFinding>(mp, 64),
-        ni: 0,
-        entries: 0,
-        skipped: 0,
-    )
-    ws := wsc.addr()
-    k := 0
-    @while (k < wfc.n) {
-        p := wfc.fs[k]
-        contents_in(mp, p).match ({
-            .Ok(s)  => s.aud_has_main().then({
-                mp.aud_pre_ok(root, p, s).match ({
-                    true  => mp.aud_ws_entry(root, p, s, ws),
-                    false => {
-                        ws.skipped = ws.skipped + 1
-                    },
-                })
-            }),
-            .Err(e) => { },
-        })
-        k = k + 1
-    }
-    say(mp
-        .gstr_string(64)
-        .gstr_append(mp, "zen audit --workspace: ")
-        .push_int(mp, wsc.entries)
-        .gstr_append(mp, " entries analyzed, ")
-        .push_int(mp, wsc.skipped)
-        .gstr_append(mp, " skipped")
-        .gstr_finish(mp))
-    // survivors: dead candidates no entry proved live, then the per-file import findings.
-    fb := cbuf<AudFinding>(mp, wsc.nd + wsc.ni)
-    n := 0
-    i := 0
-    @while (i < wsc.nd) {
-        x := wsc.dfs[i]
-        (wsc.live.has(x.key) == false).then({
-            fb[n] = x.f
-            n = n + 1
-        })
-        i = i + 1
-    }
-    i = 0
-    @while (i < wsc.ni) {
-        fb[n] = wsc.ifs[i]
-        n = n + 1
-        i = i + 1
-    }
-    mp.aud_emit(fb, n, strict)
-}
-// `zenc audit <file.zen> [--strict]` — check first (a broken program cannot be audited), then run
-// the dead-code + unused-import analysis. Exit 0 always (advisory); `--strict` exits 1 on findings.
-// `zenc audit --workspace <dir> [--strict]` unions dead-code across every entry under <dir>.
-audit_cmd = (
-    mp: MutPtr<Malloc>,
-    root: string_view,
-    a2: string_view,
-    a3: string_view,
-    a4: string_view,
-) i32 {
-    (a2 == "--workspace").then({
-        (a3 == "").then({
-            derr("usage: zenc audit --workspace <dir> [--strict]\n")
-            return 2
-        })
-        return mp.audit_ws_cmd(root, a3, a4 == "--strict")
-    })
-    strict := a2 == "--strict" || a3 == "--strict"
-    path := (a2 == "--strict").then({ a3 }, { a2 })
-    (path == "").then({
-        derr("usage: zenc audit <file.zen> [--strict]\n")
-        return 2
-    })
-    contents_in(mp, path).match ({
-        .Ok(src) => {
-            rp := mp.resolve_prog(root, path, src)
-            (mp.report_no_if_resolved(rp, path, src) == 0).match ({
-                true  => {
-                    raw := mp.parse_module(rp.flat)
-                    decls := mp.resolve_module(raw)
-                    (mp.report_check(raw, decls, rp, path, src) == 0).match ({
-                        true  => mp.aud_run(rp, raw, decls, path, src, strict),
-                        false => 1,
-                    })
-                },
-                false => 1,
-            })
-        },
-        .Err(e)  => {
-            derr("zenc: cannot open input: ")
-            derr(path)
-            derr("\n")
-            1
-        },
-    })
 }
