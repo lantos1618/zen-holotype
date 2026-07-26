@@ -1,6 +1,9 @@
 // Allocator-backed slice helpers for values that must outlive stack literals.
 // Every allocating helper returns allocation failure as Result<_, IoError>.
 // Public constructors take an allocator first; `_in` aliases support UFCS on the allocator.
+// The allocating constructor is `alloc_buf`, NOT `buf`: this module is imported wholesale, and a
+// top-level `buf` OUTRANKS a local `buf := …` at every call site in the importing module (std.net.http
+// duplicated `head_bytes`/`tail_bytes` rather than take that import). Keep new globals here specific.
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> {
@@ -48,7 +51,7 @@ concat_in*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> {
         .Err(e)  => err(e),
     })
 }
-buf*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> { a.buf_in(n, like) }
+alloc_buf*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> { a.buf_in(n, like) }
 dup*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.dup_in(xs) }
 dupx*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.dupx_in(xs) }
 node*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> { a.node_in(v) }

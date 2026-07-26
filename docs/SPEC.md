@@ -705,7 +705,7 @@ ownership types:
 - `std.mem.alloc`: `Allocator`, `Heap`, `Malloc`, namespace-bound
   `default`, `try_acquire`, `try_resize`;
 - `std.mem.arena`: `Arena`, namespace-bound `new_in` and `try_new_in`;
-- `std.core.slice`: allocator-first `buf`, `dup`, `node`, `concat`, their `_in`
+- `std.core.slice`: allocator-first `alloc_buf`, `dup`, `node`, `concat`, their `_in`
   aliases, and fallible `try_*` variants for allocator-backed slice storage;
 - `std.mem.own`: `Own<T>` plus `Drop`, with `new_in` and `try_new_in`;
 - `std.mem.rc`: `Rc<T>`, with `new_in` and `try_new_in`;

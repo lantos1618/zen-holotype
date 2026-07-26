@@ -4,11 +4,30 @@
 { try_acquire } = std.mem.alloc
 { Result, IoError, expect, ok, err } = std.core.result
 { strlen, strcmp } = std.c.libc
-{ is_space } = std.text.ascii
+{ is_space, to_ascii_lower, to_ascii_upper } = std.text.ascii
 len* = (s: string_view) i64 { s.strlen() }
 is_empty* = (s: string_view) bool { (s.strlen() == 0).then({ true }, { false }) }
 eq* = (a: string_view, b: string_view) bool { (a.strcmp(b) == 0).then({ true }, { false }) }
 ne* = (a: string_view, b: string_view) bool { a.eq(b).then({ false }, { true }) }
+// `eq` with A-Z folded on both sides: HTTP header names, `Content-Type` vs `content-type`. Bytes
+// 0x80+ compare verbatim, so it is an ASCII fold, not a Unicode one.
+eq_ignore_case* = (a: string_view, b: string_view) bool {
+    av := a.view()
+    bv := b.view()
+    (av.len == bv.len).match ({
+        true  => {
+            same := true
+            av.loop((h, i, x) {
+                (x.to_ascii_lower() != bv[i].to_ascii_lower()).then({
+                    same = false
+                    h.break
+                })
+            })
+            same
+        },
+        false => false,
+    })
+}
 // ── bytes: borrow or own ────────────────────────────────────────────────────
 view* = (s: string_view) [u8] { s.slice(s.strlen()) }
 alloc_size = (n: i64) i64 { (n == 0).then({ 1 }, { n }) }
@@ -288,9 +307,6 @@ copy_at = (out: [u8], at: i64, t: string_view) i64 {
     })
     at + tv.len
 }
-// the 'A'..'Z' / 'a'..'z' case shift; non-letters pass through. ASCII-ONLY (bytes 0x80+ untouched).
-to_ascii_lower = (b: u8) u8 { (b >= 'A' && b <= 'Z').then({ b + ('a' - 'A') }, { b }) }
-to_ascii_upper = (b: u8) u8 { (b >= 'a' && b <= 'z').then({ b - ('a' - 'A') }, { b }) }
 // ASCII lower/upper-cased COPY of `s`. Only A–Z / a–z are folded; every other byte (digits, punctuation,
 // UTF-8 continuation bytes) is copied verbatim. to_upper("hi!") == "HI!".
 to_lower_in<A> = (a: MutPtr<A>, s: string_view) string_view {
