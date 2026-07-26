@@ -1,6 +1,6 @@
 # Zen examples
 
-Twelve examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
+Thirteen examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
 
 Build once, then run a C example with:
 
@@ -30,6 +30,16 @@ Run any of them as `./zen run examples/<name>.zen`.
 | `wordfreq.zen` | `printf 'the cat sat on the mat the cat\n' \| ./zen run examples/wordfreq.zen` |
 
 `wordfreq.zen` uses `HMap<string_view, i64>` to count input words.
+
+## Network
+
+| Example | Run |
+|---|---|
+| `http_tool.zen` | `./zen run examples/http_tool.zen -i http://127.0.0.1:8099/` |
+
+`http_tool.zen` is a curl-lite: `std.net.http.http_get` fetches a URL in one call, and the body is
+written from `body_bytes` so binary payloads survive. The host must be a dotted-quad or `localhost`
+(there is no DNS resolver), and `https://` is rejected (there is no TLS).
 
 ## Concurrency
 
