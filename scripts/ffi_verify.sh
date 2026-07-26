@@ -53,6 +53,9 @@ MAP="$WORK/map.tsv"
 cat > "$MAP" <<'EOF'
 calloc	abi	stdlib.h
 memcpy	abi	string.h
+memmove	abi	string.h
+memset	abi	string.h
+memcmp	abi	string.h
 strlen	abi	string.h
 strcmp	abi	string.h
 open	abi	fcntl.h
