@@ -14,7 +14,7 @@
 { Malloc } = std.mem.alloc
 { then } = std.core.bool
 { view } = std.text.str
-{ at, is_alpha, is_alnum } = std.text.ascii
+{ at, is_alpha, is_alnum, is_upper } = std.text.ascii
 { String } = std.text.string
 { gstr_string, gstr_append, gstr_finish } = compiler.genc
 { Comment, Token, collect_comments, scan, tok_in } = compiler.lex
@@ -55,7 +55,6 @@ lspt_is_builtin_ty = (src: string_view, t: Token) bool {
     })
     false
 }
-lspt_upper = (b: u8) bool { b >= 'A' && b <= 'Z' }
 // The byte before `start`, skipping nothing — a leading `.` is what distinguishes `.Variant` (enum
 // member) and `x.field` (property) from a bare name.
 lspt_after_dot = (src: string_view, start: i32) bool { start > 0 && at(src, start - 1) == '.' }
@@ -94,12 +93,12 @@ lspt_ident_type = (src: string_view, t: Token) i64 {
         return LSPT_KEYWORD()
     })
     src.lspt_after_dot(t.start).then({
-        return lspt_upper(at(src, t.start)).then({ LSPT_ENUM_MEMBER() }, { LSPT_PROPERTY() })
+        return is_upper(at(src, t.start)).then({ LSPT_ENUM_MEMBER() }, { LSPT_PROPERTY() })
     })
     src.lspt_is_builtin_ty(t).then({
         return LSPT_TYPE()
     })
-    lspt_upper(at(src, t.start)).then({
+    is_upper(at(src, t.start)).then({
         return LSPT_TYPE()
     })
     src.lspt_decl_fn(t).then({
@@ -232,6 +231,12 @@ lspt_advance = (src: string_view, st: LsptScanLine, to: i32) LsptScanLine {
 // ── the merge walk ───────────────────────────────────────────────────────────────────────────────
 // Two position-sorted streams (lexer tokens, comments) merged into one ordered emission. The lexer
 // skips comments entirely, so without this pass every `//` line would be left unhighlighted.
+//
+// `emitted` enforces the protocol's one hard invariant: tokens arrive sorted, each encoded as a DELTA
+// from the previous one, so a span that starts before the last one ended encodes a negative delta and
+// silently corrupts every token after it — the client stops highlighting the buffer entirely. The two
+// streams come from two different scanners, so their agreement is an assumption, not a guarantee;
+// anything that would move the cursor backwards is dropped instead of trusted.
 lspt_tokens* = (mp: MutPtr<Malloc>, src: string_view) string_view {
     cmts := mp.collect_comments(src)
     cur := LsptCur(
@@ -246,6 +251,7 @@ lspt_tokens* = (mp: MutPtr<Malloc>, src: string_view) string_view {
     )
     ci: i64 := 0
     pos := 0
+    emitted := 0
     running := true
     @while (running) {
         sc := src.scan(pos)
@@ -256,8 +262,11 @@ lspt_tokens* = (mp: MutPtr<Malloc>, src: string_view) string_view {
         @while (ci < cmts.len && (tstart < 0 || cmts[ci].start < tstart)) {
             // drain every comment that opens before the next token (or all of them at Eof)
             c := cmts[ci]
-            st = src.lspt_advance(st, c.start)
-            cur = cur.lspt_emit_span(mp, src, st, c.start, c.start + c.len, LSPT_COMMENT())
+            (c.start >= emitted).then({
+                st = src.lspt_advance(st, c.start)
+                cur = cur.lspt_emit_span(mp, src, st, c.start, c.start + c.len, LSPT_COMMENT())
+                emitted = c.start + c.len
+            })
             ci = ci + 1
         }
         (tstart < 0).match ({
@@ -265,8 +274,11 @@ lspt_tokens* = (mp: MutPtr<Malloc>, src: string_view) string_view {
                 running = false
             },
             false => {
-                st = src.lspt_advance(st, tstart)
-                cur = cur.lspt_emit_span(mp, src, st, tstart, tstart + sc.tok.len, src.lspt_tok_type(sc.tok))
+                (tstart >= emitted).then({
+                    st = src.lspt_advance(st, tstart)
+                    cur = cur.lspt_emit_span(mp, src, st, tstart, tstart + sc.tok.len, src.lspt_tok_type(sc.tok))
+                    emitted = tstart + sc.tok.len
+                })
                 pos = sc.next
             },
         })

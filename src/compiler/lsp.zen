@@ -2,11 +2,12 @@
 // Content-Length wire format, publishes diagnostics on open/change, and answers go-to-definition.
 // The JSON here is hand-rolled (std.format.json isn't in the seed manifest) and deliberately
 // minimal: enough of a reader to pull the fields the protocol needs out of a request body.
-{ Malloc } = std.mem.alloc
+{ Malloc, heap_scope_begin, heap_scope_end } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
 { contents_in } = std.io.file
 { read, write } = std.c.libc
+{ hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode
 { CheckDiagnostic, desc_or } = compiler.validate.diag
 { denrich_check } = compiler.validate.enrich
 { parse_module } = compiler.parse
@@ -23,10 +24,11 @@
   check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
   check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
 { DiagSpan } = compiler.diagnostic
-{ ResolvedProgram } = std.internal.resolve
+{ ResolvedProgram } = compiler.resolve
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ push_int, resolve_prog, cstr_substr } = compiler.drvutil
+{ push_int, resolve_prog, cstr_range, cstr_substr } = compiler.drvutil
 { lspt_legend, lspt_tokens } = compiler.lsp_tokens
+{ lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at, lspd_tokens_at } = compiler.lsp_docs
 { cd_or, locate_diag } = compiler.drvdiag
 // ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 1) ─────────────────────────
 // A JSON-RPC 2.0 loop: read `Content-Length: N\r\n\r\n<N-byte JSON body>` frames from stdin, run the
@@ -37,7 +39,9 @@
 // `file://` URI so sibling/std imports resolve (an error INSIDE an imported module is pinned to the
 // open file's head with the real location in the message). Stage 1 adds: didClose (clears
 // diagnostics), MethodNotFound replies for unimplemented requests, byte->UTF-16 position conversion,
-// and a Content-Length sanity ceiling. Conformance suite: tests/harness_lsp.zen. Hover needs plumbing
+// and a Content-Length sanity ceiling. Every feature reads the OPEN document out of the document
+// store (compiler.lsp_docs) that didOpen/didChange fill, never off disk — while the client holds a
+// buffer open, that buffer IS the document. Conformance suite: tests/harness_lsp.zen. Hover needs plumbing
 // the checker doesn't expose yet (an offset->node query + an exported type-render such as ty_name);
 // until that exists the server deliberately declines it with -32601.
 // PROTOCOL WRITES GO TO STDOUT (fd 1); every diagnostic/log the pipeline emits stays on stderr, so the
@@ -57,15 +61,12 @@ lsp_send = (mp: MutPtr<Malloc>, body: string_view) i64 {
     lout(body)
 }
 // ── JSON string EMISSION (own escaper; the task sanctions building output as strings) ─────────────
-lsp_hexd = (n: i64) u8 {
-    (n < 10).then({ ('0'.to_i64() + n).to_u8() }, { ('a'.to_i64() + n - 10).to_u8() })
-}
 push_uesc = (sb: String, mp: MutPtr<Malloc>, b: u8) String {
     bi := b.to_i64()
     sb
         .gstr_append(mp, "\\u00")
-        .gstr_push(mp, lsp_hexd(bi >> 4 & 15))
-        .gstr_push(mp, lsp_hexd(bi & 15))
+        .gstr_push(mp, hex_char(bi >> 4 & 15))
+        .gstr_push(mp, hex_char(bi & 15))
 }
 // append `s` as a JSON string LITERAL (surrounding quotes + escaped) to the builder.
 push_jstr = (sb: String, mp: MutPtr<Malloc>, s: string_view) String {
@@ -175,24 +176,15 @@ json_hexq = (v: [u8], at: i64) i64 {
     (at + 3 >= v.len).match ({
         true  => 0 - 1,
         false => {
-            h0 := hexval(v[at])
-            h1 := hexval(v[at + 1])
-            h2 := hexval(v[at + 2])
-            h3 := hexval(v[at + 3])
+            h0 := hex_nibble(v[at])
+            h1 := hex_nibble(v[at + 1])
+            h2 := hex_nibble(v[at + 2])
+            h3 := hex_nibble(v[at + 3])
             (h0 < 0 || h1 < 0 || h2 < 0 || h3 < 0).match ({
                 true  => 0 - 1,
                 false => h0 * 4096 + h1 * 256 + h2 * 16 + h3,
             })
         },
-    })
-}
-hexval = (b: u8) i64 {
-    (b >= '0' && b <= '9').match ({
-        true  => to_i64(b - '0'),
-        false => (b >= 'a' && b <= 'f').match ({
-            true  => to_i64(b - 'a') + 10,
-            false => (b >= 'A' && b <= 'F').then({ to_i64(b - 'A') + 10 }, { 0 - 1 }),
-        }),
     })
 }
 // UTF-8 encode a BMP code point into the builder (1–3 bytes).
@@ -288,7 +280,7 @@ json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) string_view {
     (i >= v.len).match ({
         true  => "null",
         false => (v[i] == '"').match ({
-            true  => mp.json_slice(v, i, v.json_str_end(i)),
+            true  => mp.cstr_range(v, i, v.json_str_end(i)),
             false => {
                 e := i
                 stop := false
@@ -309,19 +301,10 @@ json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) string_view {
                         },
                     })
                 }
-                mp.json_slice(v, i, e)
+                mp.cstr_range(v, i, e)
             },
         }),
     })
-}
-json_slice = (mp: MutPtr<Malloc>, v: [u8], start: i64, end: i64) string_view {
-    sb := mp.gstr_string(end - start + 1)
-    j := start
-    @while (j < end) {
-        sb = sb.gstr_push(mp, v[j])
-        j = j + 1
-    }
-    sb.gstr_finish(mp)
 }
 // the decoded string value of the first key `key`, or "" if absent / non-string.
 json_str_field = (mp: MutPtr<Malloc>, body: string_view, key: string_view) string_view {
@@ -712,13 +695,26 @@ lsp_parse_dec = (v: [u8], i: i64, acc: i64) i64 {
         false => acc,
     })
 }
+// the text of `uri` AS THE CLIENT SEES IT: the open buffer when the document is in the store, the
+// file on disk otherwise (a jump target the editor never opened). "" = neither, i.e. unreadable.
+lsp_doc_text = (mp: MutPtr<Malloc>, uri: string_view) string_view {
+    i := lspd_find(uri)
+    (i >= 0).match ({
+        true  => lspd_text_at(i),
+        false => contents_in(mp, mp.lsp_uri_path(uri)).match ({
+            .Ok(txt) => txt,
+            .Err(er) => "",
+        }),
+    })
+}
 lsp_definition = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
     uri := mp.json_str_field(body, "uri")
     line := body.lsp_json_int("line")
     ch := body.lsp_json_int("character")
-    path := mp.lsp_uri_path(uri)
-    contents_in(mp, path).match ({
-        .Ok(txt) => {
+    txt := mp.lsp_doc_text(uri)
+    is_empty(txt).match ({
+        true  => mp.lsp_reply_null(body),
+        false => {
             v: [u8] := txt.view()
             off := v.lsp_byte_of_pos(line, ch, 0, 0)
             s := v.lsp_ident_start(off)
@@ -735,24 +731,43 @@ lsp_definition = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 
                 },
             })
         },
-        .Err(er) => mp.lsp_reply_null(body),
     })
 }
-// Semantic tokens are served from the file on disk, like go-to-definition. The editor writes before
-// it asks, so this matches the buffer in practice; a proper in-memory document store (tracking
-// didChange text) is the same slice of work for both handlers and is the documented next step.
+lsp_send_tokens = (mp: MutPtr<Malloc>, body: string_view, data: string_view) i64 {
+    mp.lsp_send(mp
+        .gstr_string(8192)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":{\"data\":")
+        .gstr_append(mp, data)
+        .gstr_append(mp, "}}")
+        .gstr_finish(mp))
+}
+// Semantic tokens for an OPEN document come from the client's buffer and are memoized against its
+// LSP version, so the keystroke that does not change the version (a repeat request, a client that
+// re-asks after a scroll) costs a lookup instead of a full lex of the file. A document the client
+// has NOT opened is still read from disk — and not cached, since nothing then tells us when it
+// changed. `lspd_set` drops the cache on every text write, so a hit can only ever be this text.
 lsp_semantic_tokens = (mp: MutPtr<Malloc>, body: string_view) i64 {
-    path := mp.lsp_uri_path(mp.json_str_field(body, "uri"))
-    contents_in(mp, path).match ({
-        .Ok(txt) => mp.lsp_send(mp
-            .gstr_string(8192)
-            .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-            .gstr_append(mp, mp.lsp_id(body))
-            .gstr_append(mp, ",\"result\":{\"data\":")
-            .gstr_append(mp, mp.lspt_tokens(txt))
-            .gstr_append(mp, "}}")
-            .gstr_finish(mp)),
-        .Err(er) => mp.lsp_reply_null(body),
+    uri := mp.json_str_field(body, "uri")
+    i := lspd_find(uri)
+    (i >= 0).match ({
+        true  => {
+            cached := lspd_tokens_at(i)
+            data := is_empty(cached).match ({
+                true  => {
+                    fresh := mp.lspt_tokens(lspd_text_at(i))
+                    lspd_cache_tokens(i, fresh)
+                    fresh
+                },
+                false => cached,
+            })
+            mp.lsp_send_tokens(body, data)
+        },
+        false => contents_in(mp, mp.lsp_uri_path(uri)).match ({
+            .Ok(txt) => mp.lsp_send_tokens(body, mp.lspt_tokens(txt)),
+            .Err(er) => mp.lsp_reply_null(body),
+        }),
     })
 }
 lsp_reply_null = (mp: MutPtr<Malloc>, body: string_view) i64 {
@@ -793,9 +808,14 @@ lsp_publish_clear = (mp: MutPtr<Malloc>, uri: string_view) i64 {
         .gstr_finish(mp))
 }
 // didOpen/didChange (full-sync) both carry the whole document text; the first `text` key is the
-// document content (the URI's `text` in didOpen, the single contentChange's `text` in didChange).
+// document content (the URI's `text` in didOpen, the single contentChange's `text` in didChange) and
+// `version` is the client's monotonic edit counter. Both land in the store — which takes ownership of
+// the decoded uri/text and frees the pair they replace — and the publish then reads the text back
+// OUT of the store, so diagnostics and highlighting are provably answering about the same bytes.
 lsp_did_change = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
-    mp.lsp_publish(root, mp.json_str_field(body, "uri"), mp.json_str_field(body, "text"))
+    uri := mp.json_str_field(body, "uri")
+    i := lspd_set(uri, mp.json_str_field(body, "text"), body.lsp_json_int("version"))
+    mp.lsp_publish(root, uri, lspd_text_at(i))
 }
 // dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown
 // NOTIFICATIONS are no-ops; an unknown REQUEST (an "id" key outside the notification families) gets
@@ -821,7 +841,9 @@ lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
                     },
                     false => (method == "textDocument/didClose").match ({
                         true  => {
-                            mp.lsp_publish_clear(mp.json_str_field(body, "uri"))
+                            closed := mp.json_str_field(body, "uri")
+                            lspd_close(closed)
+                            mp.lsp_publish_clear(closed)
                             0
                         },
                         false => (method == "textDocument/definition").match ({
@@ -942,10 +964,19 @@ lsp_cmd* = (mp: MutPtr<Malloc>, root: string_view) i32 {
                 (n < 0 || n > LSP_BODY_MAX()).match ({
                     true  => 0,
                     false => {
+                        // ONE REQUEST, ONE SCOPE: the frame buffer, the JSON decode, and the whole
+                        // check pipeline the handler runs all allocate inside the scope and are
+                        // reclaimed together here. A batch compile may leak — it exits — but this
+                        // loop runs that pipeline once per keystroke, where the same non-free is
+                        // ~58 MB of growth per edit. Only the document store outlives the scope,
+                        // and it owns durable copies (compiler.lsp_docs). `act` is a scalar, so it
+                        // survives the reclaim by value.
+                        heap_scope_begin()
                         body := mp.acquire(n + 1)
                         got := body.lsp_read_body(0, n)
                         body.offset(got).store(0)
                         act := mp.lsp_handle(root, cstr(body))
+                        heap_scope_end()
                         (act == 1).then({
                             shut = true
                         })

@@ -42,7 +42,7 @@ not instrument lines or branches. Every reported feature area is mapped to imple
 | Lexer, literals, declarations, core types | Partial at malformed char/hex validation | `compiler.lex`, `parse*` | value + verdict + fuzz suites | Strong |
 | Records, enums, exhaustive match, loops | Partial: some literal-match subjects can repeat; loop-control and statement-match lowering fixed 2026-07-18 | `parse*`, `check`, emitters | value/verdict/formatter fixtures | Strong |
 | Functions, generics, traits, closures | Partial at escaping local captures | `check.zen`, `mono.zen` | value, verdict, module closure cases | Strong |
-| Modules, privacy, namespace binds | Shipped/partial: dotted ids, ModuleSig, identity diagnostics; flat concat remains the compat layer | `std.internal.resolve` | `harness_modules.zen`, `make difftest` | Strong |
+| Modules, privacy, namespace binds | Shipped/partial: dotted ids, ModuleSig, identity diagnostics; flat concat remains the compat layer | `compiler.resolve` | `harness_modules.zen`, `make difftest` | Strong |
 | C backend and runtime | Shipped | `backend/c/c_emit.zen`, `zenrt.c` | build/value/examples/fixpoint | Strong |
 | JavaScript backend | Experimental target subset | `backend/js/js.zen`, `zenrt.js` | build JS + limited differential suite | Moderate |
 | Diagnostics and source mapping | Shipped, multi-channel | `check_validate.zen`, `diagnostic.zen`, `driver.zen` | verdict-kind + diagnostic cases | Strong |
@@ -150,7 +150,7 @@ coherent row or tightly related group at a time.
 | P1 | Formatter can remove generic parameters from bodyless signatures, change nonprintable `u8` chars into `i32` literals, and lose multi-payload enum syntax. | `compiler.pretty::ff_foreign`, `ff_char`, `ff_mkenum`, `ff_arm_pat` | Format, reparse, and compare typed meaning for all three forms; require idempotence. |
 | P1 | Duplicate boolean labels are accepted and reinterpreted; empty/multibyte chars and invalid hex escapes fabricate values; nested-bracket assignment places are misparsed. | `compiler.parse_expr::bool_close`, char/unescape paths; `compiler.lex::char_end`; `compiler.parse_stmt::skip_brackets` | Reject duplicate/non-exhaustive bool arms and malformed escapes; accept `a[b[0]] = 3`. |
 | P1 | Generic nesting beyond 24 is silently dropped; large enum default literals get contradictory `i32`/`i64` inference; JS fixed-width binding facts leak out of inner scopes. | `compiler.mono::add_inst`, `check::rc_add` / `light_ty`; `compiler.backend.js.js::vw_note` / `vw_lookup` | Deep finite generic gets output or a deliberate diagnostic; large enum and shadowed-width cases match C/JS. |
-| P1 | Resolver deletes every second `(receiver, trait)` implementation before SEMA, truncates module IDs/aliases into fixed buffers, and reads/scans dependencies twice while leaking the count graph. | `std.internal.resolve::dedup_impls`, import buffers, `module_count_one`, `fill_module_one` | Conflicting impls reject; long legal IDs resolve or diagnose; one graph/read pass under a counting allocator and `strace`. |
+| P1 | Resolver deletes every second `(receiver, trait)` implementation before SEMA, truncates module IDs/aliases into fixed buffers, and reads/scans dependencies twice while leaking the count graph. | `compiler.resolve::dedup_impls`, import buffers, `module_count_one`, `fill_module_one` | Conflicting impls reject; long legal IDs resolve or diagnose; one graph/read pass under a counting allocator and `strace`. |
 | P1 | Cooperative actor request ignores mailbox-full send, then awaits an uninitialized reply. | `std.concurrent.actor::request`, `ask` | Fill a capacity-one mailbox; request returns back-pressure, never `Ok(uninitialized)`. |
 | P1 | Actor panic/stack-overflow recovery can leak queued typed boxes and behavior allocations; `siglongjmp` can also skip a held `Mutex.with` unlock and deadlock the runtime. | `std.concurrent.pool_actor`, `std.sync::Mutex.with`; actor recovery in `bootstrap/zenrt.c` | Counting allocator cleanup plus a second actor acquiring a mutex after the first panics inside it. |
 | P1 | Thread/atomic constructors do not handle allocator, `pthread_create`, or join failure safely. | `std.thread`; `std.atomic` constructors | Inject each failure and require a `Result` without null stores or fabricated handles. |
@@ -208,7 +208,7 @@ Land this as two reviewable changes, in order.
 
 **PR 1 — canonical project modules.** In `driver.zen`, retain `source_root` in `Spec`; today both
 `zen.toml` and `build.zen` reduce the project to an entry path and the resolver receives only that
-file's directory. In `std.internal.resolve`, replace the bare-sibling special case with one
+file's directory. In `compiler.resolve`, replace the bare-sibling special case with one
 `ModuleId -> canonical path` function, allow dotted user IDs, and key the graph by logical identity.
 Do not crawl the filesystem or silently prefer one ambiguous path. Direct-file mode keeps its legacy
 sibling behavior. Add end-to-end coverage in `harness_modules.zen`, `harness_build.zen`, and nested
@@ -250,7 +250,7 @@ signatures; opaque/incomplete by-value records are a separate feature and should
 PR 2 touches the declaration variant/model in `ast/ast_types.zen`/`parse.zen`, separate signature and body
 lookup in `check.zen`, pairing diagnostics in `check_validate.zen`, prototype/body emission in
 `backend/c/c_emit.zen`, source-preserving formatting in `pretty.zen`, and signature-aware symbol retention in
-`std.internal.resolve`. It is complete when tests prove:
+`compiler.resolve`. It is complete when tests prove:
 
 - an unreferenced bodyless signature builds;
 - a matching signature plus body runs, including across modules;
@@ -267,7 +267,7 @@ the stable work; flow analysis should cover only facts that genuinely depend on 
 
 | Current responsibility | Current shape | Target owner | Retire after parity |
 |---|---|---|---|
-| Module identity/imports | `std.internal.resolve` builds a graph, then flattens and rewrites names as text. | `World` of `ModuleId`, public `ModuleSig`, and canonical paths. | Alias text rewriting, flat concatenation, shadow/dedup compatibility passes. |
+| Module identity/imports | `compiler.resolve` builds a graph, then flattens and rewrites names as text. | `World` of `ModuleId`, public `ModuleSig`, and canonical paths. | Alias text rewriting, flat concatenation, shadow/dedup compatibility passes. |
 | Types and calls | `check.zen` overlaps `infer_expr`, `light_ty`, `infer_targs`, `fits`, and repeated resolve/inline rounds. | One typed-body pass, one `resolve_call`, one `coerce`, stable `SymbolId`/`TypeId`. | Mangled-name semantic lookup and pseudo-local context keys. |
 | Diagnostics | `check_validate.zen` repeats count, kind, batch, enrichment, and specialized safety walkers; the driver manually orders about 15 channels. | One diagnostic sink emitted during signature/body checking with module-aware spans. | Packed kind/count values, enrichment re-walks, flat-source inverse mapping. |
 | Rewriting/lowering | Source AST is rewritten before all source judgments are complete. | A separate lowering pass after successful SEMA. | Diagnostic archaeology over inlined/mangled source. |

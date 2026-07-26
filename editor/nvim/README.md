@@ -3,14 +3,27 @@
 Two pieces: the vim filetype/syntax files (shared with vim, in `editor/vim/`) and the
 `zen lsp` language server for live diagnostics.
 
-## 1. Filetype + syntax
+## 1. Filetype + syntax + buffer options
 
-Link (or copy) the vim runtime files into your config:
+Link (or copy) the vim runtime files into your config — all three, including
+`ftplugin/`, which carries `commentstring` (`gc`/`gcc` do nothing without it) and the
+4-space indent `zen fmt` emits:
 
 ```sh
-mkdir -p ~/.config/nvim/ftdetect ~/.config/nvim/syntax
+mkdir -p ~/.config/nvim/ftdetect ~/.config/nvim/syntax ~/.config/nvim/ftplugin
 ln -s /path/to/zen/editor/vim/ftdetect/zen.vim ~/.config/nvim/ftdetect/zen.vim
 ln -s /path/to/zen/editor/vim/syntax/zen.vim   ~/.config/nvim/syntax/zen.vim
+ln -s /path/to/zen/editor/vim/ftplugin/zen.vim ~/.config/nvim/ftplugin/zen.vim
+```
+
+These must land under `~/.config/nvim` itself: lazy.nvim (and so LazyVim) resets
+`runtimepath` at startup, which drops any other directory you appended.
+
+Check it took — empty `commentstring` or `shiftwidth=2` means the `ftplugin` link is
+missing:
+
+```sh
+nvim path/to/file.zen -c 'echo &filetype &commentstring &shiftwidth' -c 'sleep 2' -c qa
 ```
 
 ## 2. Language server (`zen lsp`)
@@ -44,9 +57,15 @@ Notes:
 - If the `zen` binary lives outside its checkout, point `ZEN_ROOT` at the checkout so
   `std.*` imports resolve: `cmd = { "zen", "lsp" }, cmd_env = { ZEN_ROOT = "/path/to/zen" }`.
 - The server implements: `initialize`, `shutdown`, `exit`, `textDocument/didOpen`,
-  `textDocument/didChange` (full sync), `textDocument/didClose` (clears diagnostics).
-  Anything else gets a clean JSON-RPC `MethodNotFound` — hover/completion/goto are not
+  `textDocument/didChange` (full sync), `textDocument/didClose` (clears diagnostics),
+  `textDocument/definition` (go-to-definition) and `textDocument/semanticTokens/full`
+  (semantic highlighting, which overrides the `syntax/` file where it has an opinion).
+  Anything else gets a clean JSON-RPC `MethodNotFound` — hover and completion are not
   implemented yet, so leave those to other tooling.
+- Semantic tokens and go-to-definition are recent; a `zen` binary older than they are
+  simply will not advertise them. If highlighting looks flat or `gd` does nothing,
+  rebuild (`make`) and confirm with the sanity check below — the reply must contain
+  `semanticTokensProvider` and `definitionProvider`.
 - Positions are proper 0-based UTF-16 LSP positions (non-ASCII lines squiggle correctly).
 
 Quick sanity check from a shell (expect a `capabilities` reply):
