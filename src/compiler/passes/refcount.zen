@@ -7,6 +7,7 @@
 { subst_body } = compiler.passes.subst
 { panic } = std.core.result
 { Malloc } = std.mem.alloc
+{ expr_fold_children } = compiler.ast.expr_children
 { gd_has_mangled, gd_tys_max_depth } = compiler.generics
 rc_calls_es = (xs: [Expr], nm: string_view) bool {
     f := false
@@ -15,36 +16,14 @@ rc_calls_es = (xs: [Expr], nm: string_view) bool {
     })
     f
 }
-rc_calls_inits = (inits: [FieldInit], nm: string_view) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = f.then({ true }, { fi.value.rc_calls_e(nm) })
-    })
-    f
-}
-rc_calls_arms = (arms: [ArmData], nm: string_view) bool {
-    f := false
-    arms.loop((h, i, ar) {
-        f = f.then({ true }, { ar.body.rc_calls_e(nm) })
-    })
-    f
-}
 rc_calls_e = (e: Ptr<Expr>, nm: string_view) bool {
     load(e).match ({
-        .Call(c)       => c.fn == nm || c.args.rc_calls_es(nm),
-        .Bin(b)        => b.lhs.rc_calls_e(nm) || b.rhs.rc_calls_e(nm),
-        .Cond(d)       => d.c.rc_calls_e(nm) || d.t.rc_calls_e(nm) || d.e.rc_calls_e(nm),
-        .Member(m)     => m.obj.rc_calls_e(nm),
-        .Arrow(ar)     => ar.obj.rc_calls_e(nm),
-        .MakeEnum(mk)  => mk.payload.rc_calls_e(nm),
-        .MakeStruct(s) => s.inits.rc_calls_inits(nm),
-        .Match(m)      => m.subj.rc_calls_e(nm) || m.arms.rc_calls_arms(nm),
-        .Index(ix)     => ix.seq.rc_calls_e(nm) || ix.idx.rc_calls_e(nm),
-        .SliceLit(sd)  => sd.items.rc_calls_es(nm),
-        .Loop(l)       => l.seq.rc_calls_e(nm) || l.body.rc_calls_body(nm),
-        .Block(bl)     => bl.stmts.rc_calls_body(nm),
-        .Lambda(la)    => la.body.rc_calls_body(nm),
-        _              => false,
+        // `.Call` is the only shape that can NAME nm; every other shape is a plain structural
+        // descent, so it delegates to the one exhaustive child listing.
+        .Call(c) => c.fn == nm || c.args.rc_calls_es(nm),
+        _        => false.expr_fold_children(e, (acc, ch) { acc || ch.rc_calls_e(nm) }, (acc, body) {
+            acc || body.rc_calls_body(nm)
+        }),
     })
 }
 rc_calls_stmt = (st: Stmt, nm: string_view) bool {

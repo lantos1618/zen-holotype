@@ -3,6 +3,7 @@
 { Expr, Stmt, Decl, Func, Param, Ty, Field, ArmData, CallData, FieldInit } = compiler.ast.ast_types
 { cbuf, call_full, subst_ty_in, dfunc, no_tys, tnamed, tvoid } = compiler.genc
 { Malloc } = std.mem.alloc
+{ expr_fold_children } = compiler.ast.expr_children
 { is_empty } = std.text.str
 { subst_body, xform_body } = compiler.passes.subst
 { clos_lower_func, clos_lowerable } = compiler.passes.closures
@@ -174,34 +175,6 @@ tmiss_es = (
     })
     f
 }
-tmiss_arms = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    tf: Func,
-    targs: [Ty],
-    arms: [ArmData],
-) bool {
-    f := false
-    arms.loop((h, i, ar) {
-        f = f.then({ true }, { a.tmiss_e(decls, idx, tf, targs, ar.body) })
-    })
-    f
-}
-tmiss_inits = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    tf: Func,
-    targs: [Ty],
-    inits: [FieldInit],
-) bool {
-    f := false
-    inits.loop((h, i, fi) {
-        f = f.then({ true }, { a.tmiss_e(decls, idx, tf, targs, fi.value) })
-    })
-    f
-}
 tmiss_e = (
     a: MutPtr<Malloc>,
     decls: [Decl],
@@ -211,27 +184,13 @@ tmiss_e = (
     e: Ptr<Expr>,
 ) bool {
     load(e).match ({
-        .Call(c)       => a.tmiss_call(decls, idx, tf, targs, c)
+        // `.Call` is the only shape a missing trait method is DIAGNOSED at; every other shape is a
+        // plain structural descent, so it delegates to the one exhaustive child listing.
+        .Call(c) => a.tmiss_call(decls, idx, tf, targs, c)
             || a.tmiss_es(decls, idx, tf, targs, c.args),
-        .Bin(b)        => a.tmiss_e(decls, idx, tf, targs, b.lhs)
-            || a.tmiss_e(decls, idx, tf, targs, b.rhs),
-        .Cond(d)       => a.tmiss_e(decls, idx, tf, targs, d.c)
-            || a.tmiss_e(decls, idx, tf, targs, d.t)
-            || a.tmiss_e(decls, idx, tf, targs, d.e),
-        .Member(m)     => a.tmiss_e(decls, idx, tf, targs, m.obj),
-        .Arrow(ar)     => a.tmiss_e(decls, idx, tf, targs, ar.obj),
-        .MakeEnum(mk)  => a.tmiss_e(decls, idx, tf, targs, mk.payload),
-        .MakeStruct(s) => a.tmiss_inits(decls, idx, tf, targs, s.inits),
-        .Match(m)      => a.tmiss_e(decls, idx, tf, targs, m.subj)
-            || a.tmiss_arms(decls, idx, tf, targs, m.arms),
-        .Index(ix)     => a.tmiss_e(decls, idx, tf, targs, ix.seq)
-            || a.tmiss_e(decls, idx, tf, targs, ix.idx),
-        .SliceLit(sd)  => a.tmiss_es(decls, idx, tf, targs, sd.items),
-        .Loop(l)       => a.tmiss_e(decls, idx, tf, targs, l.seq)
-            || a.tmiss_body(decls, idx, tf, targs, l.body),
-        .Block(bl)     => a.tmiss_body(decls, idx, tf, targs, bl.stmts),
-        .Lambda(la)    => a.tmiss_body(decls, idx, tf, targs, la.body),
-        _              => false,
+        _        => false.expr_fold_children(e, (acc, ch) {
+            acc || a.tmiss_e(decls, idx, tf, targs, ch)
+        }, (acc, body) { acc || a.tmiss_body(decls, idx, tf, targs, body) }),
     })
 }
 tmiss_stmt = (

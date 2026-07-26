@@ -35,6 +35,13 @@ separate frontend or type system.
 parser, checker, C emitter, JS emitter, formatter, and AST-building APIs all use it. `compiler.genc`
 (name historical) keeps the value constructors and shared base helpers over those types.
 
+`compiler.ast.expr_children` sits beside it and holds `expr_fold_children` — the single exhaustive
+statement of which sub-expressions and statement bodies hang below each `Expr` variant. Broad
+recursive walkers delegate their `_` arm to it instead of hand-listing every composite shape, so a
+new `Expr` variant fails to compile at that one match rather than being silently skipped by whichever
+walkers forgot it. Narrow shape probes (`is_lvalue`, `expr_pos`, …) keep their own `_`: there it
+means "not the shape I am asking about", which stays correct.
+
 The parser is split by concern:
 
 | Source | Responsibility |

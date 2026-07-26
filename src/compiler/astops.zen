@@ -18,6 +18,7 @@
 { sbyte, gstr_push, cbuf } = compiler.genc
 { String } = std.text.string
 { Malloc } = std.mem.alloc
+{ expr_fold_children } = compiler.ast.expr_children
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
 // (compiler.check splices it), never emitted as a C function — so genModule skips it.
 TyQuery*: {
@@ -242,24 +243,12 @@ wr_refl_writes = (c: CallData, nm: string_view) bool {
 }
 wr_writes_e = (e: Ptr<Expr>, nm: string_view) bool {
     load(e).match ({
-        .Bin(b)         => b.lhs.wr_writes_e(nm) || b.rhs.wr_writes_e(nm),
-        .Cond(d)        => d.c.wr_writes_e(nm) || d.t.wr_writes_e(nm) || d.e.wr_writes_e(nm),
-        .Call(c)        => c.wr_refl_writes(nm)
-            || c.args.slice_any((x) { x.addr().wr_writes_e(nm) }),
-        .MethodCall(mc) => mc.recv.wr_writes_e(nm)
-            || mc.args.slice_any((x) { x.addr().wr_writes_e(nm) }),
-        .Member(m)      => m.obj.wr_writes_e(nm),
-        .Arrow(ar)      => ar.obj.wr_writes_e(nm),
-        .MakeEnum(mk)   => mk.payload.wr_writes_e(nm),
-        .MakeStruct(s)  => s.inits.slice_any((fi) { fi.value.wr_writes_e(nm) }),
-        .Match(m)       => m.subj.wr_writes_e(nm)
-            || m.arms.slice_any((ar) { ar.body.wr_writes_e(nm) }),
-        .Index(ix)      => ix.seq.wr_writes_e(nm) || ix.idx.wr_writes_e(nm),
-        .SliceLit(sd)   => sd.items.slice_any((x) { x.addr().wr_writes_e(nm) }),
-        .Loop(l)        => l.seq.wr_writes_e(nm) || l.body.wr_writes_name(nm),
-        .Block(bl)      => bl.stmts.wr_writes_name(nm),
-        .Lambda(la)     => la.body.wr_writes_name(nm),
-        _               => false,
+        // only `.Call` is special (a reflection intrinsic writes through its lambda arg); every other
+        // shape is a plain structural descent, so it delegates to the one exhaustive child listing.
+        .Call(c) => c.wr_refl_writes(nm) || c.args.slice_any((x) { x.addr().wr_writes_e(nm) }),
+        _        => false.expr_fold_children(e, (acc, ch) { acc || ch.wr_writes_e(nm) }, (acc, body) {
+            acc || body.wr_writes_name(nm)
+        }),
     })
 }
 wr_writes_stmt = (st: Stmt, nm: string_view) bool {
