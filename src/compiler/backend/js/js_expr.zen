@@ -10,6 +10,7 @@
 { Malloc } = std.mem.alloc
 { jint, jname, jstrlit } = compiler.backend.js.js_lit
 { js_dom_dispatch } = compiler.backend.js.js_dom
+{ is_intrinsic } = compiler.check    // the ONE intrinsic roster; the parity gate below reads it, never a copy
 // ── expressions ───────────────────────────────────────────────────────────────────────────────────
 js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
@@ -374,7 +375,88 @@ js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
     (c.fn == "sizeof").then({
         return s.js_sizeof(a, c)
     })
+    // seq-cst atomics over an i64 cell. Emitted JS has ONE thread (run-to-completion), so the floor
+    // discharges the seq-cst contract exactly with plain cell ops — see the atomic_* block in
+    // bootstrap/zenrt.js for why that is an implementation, not a stub.
+    (c.fn == "atomic_load_i64").then({
+        return s.gstr_append(a, "__zr.atomic_load(").js_arg_at(a, c, 0).gstr_append(a, ")")
+    })
+    (c.fn == "atomic_store_i64").then({
+        return s
+            .gstr_append(a, "__zr.atomic_store(")
+            .js_arg_at(a, c, 0)
+            .gstr_append(a, ", ")
+            .js_arg_at(a, c, 1)
+            .gstr_append(a, ")")
+    })
+    (c.fn == "atomic_add_i64").then({
+        return s
+            .gstr_append(a, "__zr.atomic_add(")
+            .js_arg_at(a, c, 0)
+            .gstr_append(a, ", ")
+            .js_arg_at(a, c, 1)
+            .gstr_append(a, ")")
+    })
+    (c.fn == "atomic_cas_i64").then({
+        return s
+            .gstr_append(a, "__zr.atomic_cas(")
+            .js_arg_at(a, c, 0)
+            .gstr_append(a, ", ")
+            .js_arg_at(a, c, 1)
+            .gstr_append(a, ", ")
+            .js_arg_at(a, c, 2)
+            .gstr_append(a, ")")
+    })
+    (c.fn == "atomic_fence").then({
+        return s.gstr_append(a, "__zr.atomic_fence()")
+    })
+    c.fn.js_unlowered_intrinsic().then({
+        js_unsupported_note(c.fn, c.pos)
+    })
     s.js_dom_dispatch(a, c)
+}
+// ── C/JS intrinsic PARITY GATE ────────────────────────────────────────────────────────────────────
+// Everything above this point is a compiler intrinsic the js backend LOWERS. Anything reaching the
+// fall-through is emitted as a verbatim `name(args)` call, so an intrinsic that gets here names a
+// function no JS floor defines: `node prog.js` dies with `ReferenceError: <name> is not defined`,
+// after `zen build --target js` exited 0. That silent-wrong-output shape is what this gate closes —
+// the escape becomes `error[js-target]` at build time, positioned on the call.
+//
+// `malloc` and the reflection trio are intrinsics NEITHER backend lowers, so they are not escapes:
+//   • malloc is a runtime LEAF — genc's call_kind has no case for it either; both backends emit the
+//     raw call and both floors define it (libc / zenrt.js).
+//   • field_eq / each_field / zip_fields are expanded during INLINING (compiler.passes.subst), so
+//     they never reach any backend; one that DID reach here would be equally broken in C, and the
+//     gate correctly rejects it.
+// The remaining membership is exactly genc call_kind's, so this predicate states the invariant
+// "the js backend lowers every intrinsic the C backend lowers" — checked on every emitted call
+// rather than by two hand-synced lists. is_intrinsic keeps its first-byte guard; this adds nothing
+// to the C path and only runs on names that already failed every js lowering above.
+js_unlowered_intrinsic = (fn: string_view) bool {
+    fn.is_intrinsic()
+        && fn != "malloc"
+        && fn != "field_eq"
+        && fn != "each_field"
+        && fn != "zip_fields"
+}
+// STICKY first-escape record: genJsModule returns a String with no diagnostic channel, so the
+// emitter parks the offending name + call position here and the driver reports it (drvdiag
+// report_js_unsupported) BEFORE writing any .js. First escape wins — one root diagnostic, not one
+// per call site of the same unlowered intrinsic.
+js_no_unsupported = () string_view { "" }
+js_unsupported_name := js_no_unsupported()
+js_unsupported_pos := 0
+js_unsupported_note = (fn: string_view, pos: i32) void {
+    is_empty(js_unsupported_name).then({
+        js_unsupported_name = fn
+        js_unsupported_pos = pos
+    })
+}
+js_unsupported_get* = () string_view { js_unsupported_name }
+js_unsupported_pos_get* = () i32 { js_unsupported_pos }
+js_unsupported_reset* = () void {
+    js_unsupported_name = js_no_unsupported()
+    js_unsupported_pos = 0
 }
 js_sizeof = (s: String, a: MutPtr<Malloc>, c: CallData) String {
     (c.args.len > 0).match ({

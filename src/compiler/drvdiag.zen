@@ -16,7 +16,8 @@
   check_module_unknown_type_diagnostic_from_source, check_module_ffi_diagnostic_from_source,
   check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
   check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
-{ diag_user_span, diag_line_span, DiagSpan, render_diagnostic } = compiler.diagnostic
+{ diag_user_span, diag_line_span, DiagSpan, diagnostic_span_width, render_diagnostic } = compiler.diagnostic
+{ js_unsupported_get, js_unsupported_pos_get } = compiler.backend.js.js_expr
 { ResolvedProgram, ModuleEntry, fregion_find, fregion_src_line, undefined_name_hint } = std.internal.resolve
 { denrich_check } = compiler.validate.enrich
 { ufcs_vis_of } = compiler.check
@@ -210,6 +211,33 @@ report_no_if_resolved* = (
             1
         },
     })
+}
+// ── js-target gate: an intrinsic the js backend could not lower ──────────────────────────────────
+// genJsModule emits a verbatim `name(args)` for any call it does not recognise, so an intrinsic that
+// reaches that fall-through puts a call to an UNDEFINED function in the .js: `zen build --target js`
+// exits 0 and `node prog.js` dies with `ReferenceError`. The emitter parks the first such escape;
+// this turns it into a positioned `error[js-target]` and the js commands refuse to write output.
+// Call AFTER genJsModuleIn (the record is written during emission) and reset BEFORE it.
+report_js_unsupported* = (
+    mp: MutPtr<Malloc>,
+    rp: ResolvedProgram,
+    path: string_view,
+    user: string_view,
+) i32 {
+    nm := js_unsupported_get()
+    is_empty(nm).then({
+        return 0
+    })
+    pos := js_unsupported_pos_get()
+    dl := locate_diag(rp, pos, rp.flat.diagnostic_span_width(pos), path, user)
+    msg := mp
+        .gstr_string(192)
+        .gstr_append(mp, "`")
+        .gstr_append(mp, nm)
+        .gstr_append(mp, "` is a compiler intrinsic the js backend cannot lower; the emitted JavaScript would call an undefined function")
+        .gstr_finish(mp)
+    derr(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, "js-target", msg, "build this program for the default C target, or keep the js-target path clear of it", 1))
+    1
 }
 // how many main-channel diagnostics we print before collapsing the rest into a single trailer line.
 DIAG_CAP = () i32 { 20 }
