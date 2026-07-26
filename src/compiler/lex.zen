@@ -10,7 +10,8 @@
 //   sc := scan(src, 0)        // one token + where to resume
 //   sc.tok.kind               // Ident | Int | Float | Str | Sym | Eof
 //   sc.next                   // feed back into scan for the next token
-{ at, is_digit, is_hex, is_bin, is_oct, is_alpha, is_alnum, is_space } = std.text.ascii
+{ at, block_comment_at, is_digit, is_hex, is_bin, is_oct, is_alpha, is_alnum, is_space,
+  line_comment_at, rawstr_at } = std.text.ascii
 // ── tokens ───────────────────────────────────────────────────────────────────
 TokKind: Ident | Int | Float | Str | Char | Sym | Eof
 Token*: {
@@ -46,8 +47,6 @@ lerr_reset* = () void {
 lerr_get* = () bool { lex_failed == 1 }
 lerr_off_get* = () i32 { lex_err_off }
 // ── skip whitespace, `//` line comments, and `/* */` block comments → next significant pos ──
-is_comment = (src: string_view, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '/' }
-is_block_open = (src: string_view, pos: i32) bool { at(src, pos) == '/' && at(src, pos + 1) == '*' }
 skip_line = (src: string_view, pos: i32) i32 {
     p := pos
     @while (at(src, p) != '\0' && at(src, p) != '\n') {
@@ -101,11 +100,11 @@ skip = (src: string_view, pos: i32) i32 {
             true  => {
                 p = p + 1
             },
-            false => src.is_comment(p).match ({
+            false => src.line_comment_at(p).match ({
                 true  => {
                     p = src.skip_line(p + 2)
                 },
-                false => src.is_block_open(p).match ({
+                false => src.block_comment_at(p).match ({
                     true  => {
                         p = src.skip_block_comment(p + 2)
                     },
@@ -293,9 +292,6 @@ str_end = (src: string_view, pos: i32) i32 {
 // `""` keeps meaning the empty string (it is two quotes followed by something that is not a quote),
 // which is why the delimiter is `"""` and not `""` — the doubled form would make every existing `""`
 // ambiguous.
-is_rawstr_open* = (src: string_view, pos: i32) bool {
-    at(src, pos) == '"' && at(src, pos + 1) == '"' && at(src, pos + 2) == '"'
-}
 // pos just past the opening `"""`; returns the position just past the closing `"""`. No escape
 // handling — a backslash is an ordinary byte, so only the delimiter can end the scan. Iterative for
 // the same reason as str_end: a multi-kilobyte block literal must not recurse the C stack.
@@ -307,7 +303,7 @@ rawstr_end* = (src: string_view, pos: i32) i32 {
             true  => {
                 r = p
             },
-            false => src.is_rawstr_open(p).match ({
+            false => src.rawstr_at(p).match ({
                 true  => {
                     r = p + 3
                 },
@@ -401,7 +397,7 @@ scan_one = (src: string_view, pos: i32, b: u8) Scan {
         false => is_digit(b).match ({
             true  => src.num_tok(pos),
             false => (b == '"').match ({
-                true  => src.is_rawstr_open(pos).match ({
+                true  => src.rawstr_at(pos).match ({
                     true  => mk(.Str, pos, src.rawstr_end(pos + 3)),
                     false => mk(.Str, pos, src.str_end(pos + 1)),
                 }),

@@ -7,7 +7,7 @@
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
-{ lexeme, is_op } = compiler.parse_atom
+{ is_op, is_op1, lexeme } = compiler.parse_atom
 { is_ident_tok } = compiler.parse_postfix
 { is_lparen } = compiler.parse_primary
 { parse_bxor } = compiler.parse_expr
@@ -106,12 +106,6 @@ dfn_buf = (a: MutPtr<Malloc>) [Func] { slice(a.acquire(256 * sizeof(Func)), 256)
 take_dfns = (buf: [Func], n: i32) [Func] { slice(buf.ptr, n) }
 // `m = (...) Ret {}` inside a pure method record is a trait default; inside a data record
 // it is an inherent method attached to the struct.
-is_eq_tok* = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Sym => t.len == 1 && src.at(t.start) == '=',
-        _    => false,
-    })
-}
 FieldsEnd: {
     count: i32,
     ndef: i32,
@@ -185,7 +179,7 @@ fill_field = (
     nt := src.scan(pos)
     nm := a.lexeme(src, nt.tok)
     mk := src.decl_marker(pos)
-    src.is_eq_tok(mk.tok).match ({
+    src.is_op1(mk.tok, '=').match ({
         true  => a.fill_field_default(src, pos, buf, i, dbuf, dn, nm),
         false => {
             te := a.parse_ty(src, mk.next)
@@ -288,14 +282,6 @@ VDf: {
     vdf: VariantDef,
     next: i32,
 }
-// a single `=` (not `==`/`=>`) introduces a variant default expr: `Name = expr`.
-is_eq1 = (src: string_view, t: Token) bool { t.len == 1 && src.is_op(t, '=') }
-is_bar = (src: string_view, t: Token) bool {
-    t.kind.match ({
-        .Sym => t.len == 1 && src.at(t.start) == '|',
-        _    => false,
-    })
-}
 variant_buf = (a: MutPtr<Malloc>) [VariantDef] { slice(a.acquire(1024 * sizeof(VariantDef)), 1024) }
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }
 variant_payload = (a: MutPtr<Malloc>, src: string_view, pos: i32) VPay {
@@ -343,7 +329,7 @@ fill_variant = (a: MutPtr<Malloc>, src: string_view, nt: Scan, buf: [VariantDef]
     vd := a.variant_after(src, nm, nt, pk)
     buf[i] = vd.vdf
     after := src.scan(vd.next)
-    src.is_bar(after.tok).match ({
+    src.is_op1(after.tok, '|').match ({
         true  => a.fill_variants(src, after.next, buf, i + 1),
         false => PEnd(
             count: i + 1,
@@ -361,7 +347,7 @@ variant_after = (a: MutPtr<Malloc>, src: string_view, nm: string_view, nt: Scan,
                 next: vp.next,
             )
         },
-        false => src.is_eq1(pk.tok).match ({
+        false => src.is_op1(pk.tok, '=').match ({
             true  => {
                 de := a.parse_bxor(src, pk.next)
                 VDf(
@@ -385,7 +371,7 @@ skip_to_colon = (src: string_view, pos: i32) i32 {
 // SECOND bar is a genuine empty variant that the fill_variant identifier guard rejects.
 skip_leading_bar = (src: string_view, pos: i32) i32 {
     sc := src.scan(pos)
-    src.is_bar(sc.tok).then({ sc.next }, { pos })
+    src.is_op1(sc.tok, '|').then({ sc.next }, { pos })
 }
 parse_enum_at* = (a: MutPtr<Malloc>, src: string_view, pos: i32) EnumEnd {
     nt := src.scan(pos)

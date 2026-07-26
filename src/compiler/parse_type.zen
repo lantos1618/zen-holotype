@@ -12,7 +12,7 @@
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
 { is_op, lexeme } = compiler.parse_atom
-{ is_ident_tok, is_dot } = compiler.parse_postfix
+{ is_dot, is_field_at, is_ident_tok } = compiler.parse_postfix
 { is_lparen } = compiler.parse_primary
 // ── PARSER TOTALITY: the module-wide parse-failure flag ──────────────────────────
 // The recursive-descent parsers have no error channel (every result is a plain value), so a parse
@@ -408,16 +408,11 @@ qual_end = (src: string_view, after_name: i32) Scan {
     }
     last
 }
-// is the head name followed by `.ident` (a qualified type like `io.Writer`)?
-is_qual_name = (src: string_view, after_name: i32) bool {
-    dot := src.scan(after_name)
-    src.is_dot(dot.tok).then({ is_ident_tok(src.scan(dot.next).tok) }, { false })
-}
 // a leaf type: a primitive/named type, OR a generic instance `Box<i32>` when a `<` follows the name,
 // OR a QUALIFIED name `ns.Type` (with optional `<…>`) — the `ns.` prefix is kept verbatim in the Named
 // string so the formatter round-trips it and the resolver can namespace-resolve it.
 parse_leaf_ty = (a: MutPtr<Malloc>, src: string_view, tt: Scan) TyEnd {
-    src.is_qual_name(tt.next).match ({
+    src.is_field_at(tt.next).match ({
         true  => {
             qe := src.qual_end(tt.next)    // qe.tok = the final qualifier segment ident
             name := a.lexeme_range(src, tt.tok.start, qe.tok.start + qe.tok.len)    // [start .. end of last ident)

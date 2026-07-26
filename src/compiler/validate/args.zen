@@ -311,20 +311,10 @@ sl_elem_fit* = (env: Env, ety: Ty, it: Expr) i32 {
 // consumes — a BORROW field (`MutPtr<T>`/`Ptr<T>`, reached via `o.ptr()`, a Call not a Var), a value /
 // scalar field, and a `.clone()` init (a Call) do NOT. Only CONCRETE struct literals are analyzable; a
 // generic-struct literal has no concrete field types here, so it under-rejects (honest, safe).
-field_ty_by_name = (fields: [Field], name: string_view) Ty {
-    found := tvoid()
-    fields.loop((h, i, fl) {
-        found = (fl.name == name).then({ fl.ty }, { found })
-    })
-    found
-}
 // the owner moved by a struct-literal field init: the field's DECLARED type is `Own<T>` AND the init is a
 // bare `Own<T>` Var. The field-type gate is exactly what keeps a borrow field (`p: MutPtr<T>`) legal.
 struct_field_move_src* = (env: Env, fields: [Field], fi: FieldInit) string_view {
-    (field_ty_by_name(fields, fi.name).owner_base() == "Own").match ({
-        true  => env.own_moved_var(fi.value),
-        false => "",
-    })
+    (field_in(fields, fi.name).owner_base() == "Own").then({ env.own_moved_var(fi.value) }, { "" })
 }
 // kill every source owner moved into an Own field of a CONCRETE struct literal.
 mkstruct_field_kills* = (
