@@ -22,6 +22,9 @@
 //       from the file on disk (the disk copy is deliberately made to disagree), and a version bump
 //       re-derives them instead of serving the version-keyed cache
 //  (11) after didClose the document is no longer open, so disk is the source of truth again
+//  (12) a `"""` raw literal holding `"` then `//` — the token stream stays position-SORTED and the
+//       array stays `]`-terminated (an out-of-order token encodes a negative delta and kills the
+//       client's highlighting for the whole buffer)
 { Malloc } = std.mem.alloc
 { save, contents_in, shell } = std.io.file
 { len, contains } = std.text.str
@@ -243,8 +246,22 @@ lz_semantic_tokens = (mp: MutPtr<Malloc>) bool {
         && o.contains("1,0,4,1,0")
         && mp.lz_rc(12) == "0"
 }
+// (16) THE ORDERING INVARIANT. A `"""` raw literal whose CONTENT holds an odd number of `"` before
+// a `//`: quote-parity string tracking calls that `//` a comment, which lands INSIDE the string token
+// the lexer reports. Emitted, it encodes a negative delta and the client discards the whole buffer's
+// highlighting (nvim: "INVALID_SERVER_JSON") — the array was truncated mid-number. The `//` bytes are
+// string content, so the reply must be one unbroken string token across both lines, `]`-terminated.
+lz_rawstring_token_order = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    src := "g = () void {\n    s := \"\"\"abc \"d // e\n    \"\"\"\n    y := 1\n}\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/lzraw.zen"]), src, len(src))
+    o := mp.lz_run(15, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_tokreq(mp.lz_uri("lzraw.zen"), 2)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"result\":{\"data\":[0,0,1,1,0,")
+        && o.contains("0,3,14,5,0,1,0,7,5,0,1,4,1,3,0,0,2,2,8,0,0,3,1,6,0,1,0,1,8,0]")
+        && mp.lz_rc(15) == "0"
+}
 harness_lsp_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_exit_no_shutdown()])
+    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_exit_no_shutdown()])
 }
