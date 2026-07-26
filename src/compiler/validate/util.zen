@@ -553,6 +553,31 @@ is_ptr_ty* = (t: Ty) bool {
         _        => false,
     })
 }
+// can a value of this type hold a POINTER at all? Used to gate the two escape walks, which are both
+// field-INSENSITIVE: a local tainted by one field's address makes every read rooted at it look tainted,
+// so `o.m.p.n` (an i32 read THROUGH the planted pointer) is indistinguishable by shape from `o.m.p` (the
+// pointer itself). The function's declared return type settles it — a function returning a scalar cannot
+// hand a pointer out through its return value, whatever the returned expression is rooted at. Every
+// aggregate stays suspect (a struct / slice / enum FIELD may be the pointer), so this exempts only what
+// is provably pointer-free.
+ty_carries_ptr* = (t: Ty) bool {
+    t.match ({
+        .I32           => false,
+        .I64           => false,
+        .U8            => false,
+        .F64           => false,
+        .Bool          => false,
+        .Void          => false,
+        .StringLiteral => false,    // a literal lives in static storage
+        .Named(n)      => true,    // a struct/enum field may BE the pointer
+        .StringView    => true,    // a fat pointer — may view a local buffer
+        .StringCstr    => true,
+        .Ptr(pd)       => true,
+        .Slice(ep)     => true,
+        .FnT(ft)       => true,
+        .Generic(g)    => true,
+    })
+}
 ty_is_ptr_t* = (t: Ty) bool {
     t.match ({
         .Ptr(pd) => true,
