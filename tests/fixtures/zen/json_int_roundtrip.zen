@@ -1,0 +1,96 @@
+// std.format.json acceptance: INTEGERS ROUND-TRIP EXACTLY.
+//
+// Regression for the bug where every JSON number was parsed into an f64, so `[1,2,3]` came back out
+// as `[1.0,2.0,3.0]` and `9007199254740993` (the smallest integer with no exact f64) came back as
+// `9.00719925474099e+15` — silently wrong, not merely ugly. `Value` now splits `.Int(i64)` from
+// `.Num(f64)` at parse time, which is what makes the large-integer case exact; a "print an f64 with
+// no fractional part as an integer" hack could never have fixed it, and would ALSO have destroyed
+// the `2.0` case below (a value the document genuinely wrote as a float).
+//
+// Exit 0 = every case matched expectation.
+{ to_exit } = std.core.bool
+{ Heap } = std.mem.alloc
+heap = std.mem.heap
+json = std.format.json
+// parse `src`, re-serialize it compactly, and compare byte-for-byte with `src` itself.
+round_trips = (a: MutPtr<Heap>, src: string_view) bool {
+    json.parse(a, src).match ({
+        .Ok(v)  => json.stringify(a, v) == src,
+        .Err(_) => false,
+    })
+}
+// the exact i64 behind `src`, or `miss` when it did not parse as an integer value.
+int_of = (a: MutPtr<Heap>, src: string_view, miss: i64) i64 {
+    json.parse(a, src).match ({
+        .Ok(v)  => json.as_int(v).match ({
+            .Some(i) => i,
+            .None    => miss,
+        }),
+        .Err(_) => miss,
+    })
+}
+// the f64 behind `src`, or `miss` when it is not a number at all.
+num_of = (a: MutPtr<Heap>, src: string_view, miss: f64) f64 {
+    json.parse(a, src).match ({
+        .Ok(v)  => json.as_num(v).match ({
+            .Some(x) => x,
+            .None    => miss,
+        }),
+        .Err(_) => miss,
+    })
+}
+// TEXT: what went in comes back out, byte for byte.
+//   "9007199254740993" is the acid test — 2^53 + 1 has no exact f64.
+//   "-9223372036854775807" is i64 min + 1 (min itself is covered under `huge_ok`).
+//   "2.0" pins that a genuine float keeps its point and is NOT collapsed to `2`.
+text_ok = (a: MutPtr<Heap>) bool {
+    a.round_trips("[1,2,3]")
+        && a.round_trips("{\"n\":42}")
+        && a.round_trips("[0,-7,1000000]")
+        && a.round_trips("9007199254740993")
+        && a.round_trips("9223372036854775807")
+        && a.round_trips("-9223372036854775807")
+        && a.round_trips("2.0")
+        && a.round_trips("3.14")
+}
+// OUT OF i64 RANGE: degrade to the f64 approximation rather than failing or wrapping. i64 MIN is in
+// this bucket too — std.text.str.try_parse_int documents |INT64_MIN| as an overflow — so the boundary
+// is pinned here and cannot shift unnoticed.
+huge_ok = (a: MutPtr<Heap>) bool {
+    a.int_of("99999999999999999999", 0 - 1) == 0 - 1
+        && a.int_of("-9223372036854775808", 0 - 1) == 0 - 1
+        && a.num_of("99999999999999999999", 0.0) > 1.0e19
+        && a.num_of("-9223372036854775808", 0.0) < 0.0 - 9.0e18
+}
+// ACCESSORS: as_int is exact and INT-only (a float, even a whole-valued one, is not an exact
+// integer); as_num widens an `.Int` so every existing number-reading caller keeps working.
+acc_ok = (a: MutPtr<Heap>) bool {
+    a.int_of("9007199254740993", 0) == 9007199254740993
+        && a.int_of("-7", 0) == 0 - 7
+        && a.int_of("2.0", 0 - 1) == 0 - 1
+        && a.int_of("1e3", 0 - 1) == 0 - 1
+        && a.num_of("42", 0.0) == 42.0
+        && a.num_of("1e3", 0.0) == 1000.0
+}
+// EQUALITY is numeric across the split (JSON has one number type) and structural through containers.
+eq_ok = (a: MutPtr<Heap>) bool {
+    json.parse(a, "[1,2.5]").match ({
+        .Ok(v)  => json.parse(a, "[1.0,2.5]").match ({
+            .Ok(w)  => json.equals(v, w) && json.equals(v, v),
+            .Err(_) => false,
+        }),
+        .Err(_) => false,
+    })
+}
+// PRETTY printing shares the scalar writer, so integers stay integers there too.
+pretty_ok = (a: MutPtr<Heap>) bool {
+    json.parse(a, "{\"a\":[1,2]}").match ({
+        .Ok(v)  => json.pretty(a, v) == "{\n  \"a\": [\n    1,\n    2\n  ]\n}",
+        .Err(_) => false,
+    })
+}
+main = () i32 {
+    h := heap.gpa()
+    a := h.addr()
+    (a.text_ok() && a.huge_ok() && a.acc_ok() && a.eq_ok() && a.pretty_ok()).to_exit()
+}

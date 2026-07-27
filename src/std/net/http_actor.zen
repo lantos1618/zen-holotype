@@ -41,8 +41,25 @@ http_fetch* = (url: string_view, reply_to: ActorRef) HttpFetchMsg {
 // The fetcher: `receive` runs on a pool worker, so the blocking dial/send/recv inside `http_get`
 // blocks that worker only. The reply is an ordinary send to the ActorRef carried by the request
 // (inside `receive` there is no Pool pointer — the ref is the whole reply capability).
+// `dropped` is this actor's own dead-letter counter: replies it could not deliver (see `reply_or_drop`).
 HttpFetcher*: {
     fetches: i64,
+    dropped: i64,
+}
+// Deliver one reply, or TALLY the loss. A reply send is a real send: it returns `.Err(.MailboxFull)`
+// when the requester's mailbox is full, and dropping that Result silently leaves the requester waiting
+// for a reply that will never come. A behaviour has no caller to propagate to (`receive` returns void)
+// and panicking inside a behaviour kills the fetcher for every OTHER requester — so the failure is
+// recorded as state instead: `f.dropped` mirrors the pool's own `pool_dropped` dead-letter counter, one
+// scope down, and is readable through `pa.actor_state(h).dropped`. The pool tallies the same drop, so
+// the loss is observable per-fetcher AND per-pool, never invisible.
+reply_or_drop = (f: MutPtr<HttpFetcher>, req: HttpFetch, rep: HttpReply) void {
+    req.reply_to.ref_send_msg(HttpReplyMsg.Done(rep)).match ({
+        .Ok(_)  => { },
+        .Err(_) => {
+            f.dropped = f.dropped + 1
+        },
+    })
 }
 HttpFetcher.impl(Receiver, {
     receive = (f: MutPtr<HttpFetcher>, ctx: Context<HttpFetchMsg>) void {
@@ -52,18 +69,14 @@ HttpFetcher.impl(Receiver, {
                 h := gpa()
                 a := h.addr()
                 a.http_get(req.url).match ({
-                    .Ok(r)  => {
-                        req.reply_to.ref_send_msg(HttpReplyMsg.Done(HttpReply(
-                            status: to_i64(r.status),
-                            body: r.body,
-                        )))
-                    },
-                    .Err(e) => {
-                        req.reply_to.ref_send_msg(HttpReplyMsg.Done(HttpReply(
-                            status: 0,
-                            body: http_error_name(e),
-                        )))
-                    },
+                    .Ok(r)  => f.reply_or_drop(req, HttpReply(
+                        status: to_i64(r.status),
+                        body: r.body,
+                    )),
+                    .Err(e) => f.reply_or_drop(req, HttpReply(
+                        status: 0,
+                        body: http_error_name(e),
+                    )),
                 })
             },
         })
@@ -74,7 +87,10 @@ http_fetch_tramp* = (user: RawPtr<u8>, msg: i64) void {
     dispatch<HttpFetcher, HttpFetchMsg>(user, msg)
 }
 // spawn a ready-to-use fetcher on the pool (process-default rt; not yet runnable — the first
-// send schedules it).
+// send schedules it). Read `pa.actor_state(h).dropped` after quiescence for undeliverable replies.
 spawn_http_fetcher* = (cap: i64) pa.PooledHandle<HttpFetcher> {
-    pa.spawn_actor_heap(cap, HttpFetcher(fetches: 0), http_fetch_tramp)
+    pa.spawn_actor_heap(cap, HttpFetcher(
+        fetches: 0,
+        dropped: 0,
+    ), http_fetch_tramp)
 }

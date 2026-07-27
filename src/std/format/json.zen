@@ -8,7 +8,7 @@
 //
 //   Entry*:  { key: string_view, val: Value }
 //   Object*: { entries: [Entry] }
-//   Value*:  Null | Bool(bool) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
+//   Value*:  Null | Bool(bool) | Int(i64) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
 //
 // Objects are an insertion-ordered slice of (key, value) Entry pairs, and growable
 // arrays/objects accumulate through the module-local generic `JBuf<T>` buffer.
@@ -38,10 +38,16 @@
 //       .Err(e) => ...
 //   })
 //
-// NUMBERS. Parsed via std.text.num.parse_f64 (sign, fraction, e/E exponents) — hand-rolled,
-// ~15 significant digits, NOT correctly-rounded. Serialized via std.text.num.float: integral
-// values print without a decimal point ("1", "-7"), fractional values to at most 6 decimal places
-// with trailing zeros trimmed ("3.14"). `stringify` is compact; `pretty` is the 2-space-indented form.
+// NUMBERS. JSON has ONE number type, but f64 alone cannot round-trip it: `9007199254740993` has no
+// exact f64, and even `2` would come back as `2.0`. So `Value` keeps the two apart at the point of
+// parse — a token with no `.`/`e`/`E` whose magnitude fits i64 becomes `.Int(i64)` and re-serializes
+// byte-identically; everything else (fractions, exponents, i64-overflowing integers) becomes
+// `.Num(f64)` via std.text.num.parse_f64 (sign, fraction, e/E exponents — hand-rolled, ~15
+// significant digits, NOT correctly-rounded). `.Int` serializes through std.text.num.integer, `.Num`
+// through std.text.num.float ("1.0", "3.14", "1.0e+20"); `as_num` widens an `.Int` to f64 for callers
+// that just want a number, `as_int` reads the exact integer. `stringify` is compact; `pretty` is the
+// 2-space-indented form. (One boundary: std.text.str.try_parse_int documents |INT64_MIN| as an
+// overflow, so `-9223372036854775808` is the one in-range i64 that lands in `.Num`.)
 //
 // STRINGS. Decode handles the standard escapes \" \\ \/ \b \f \n \r \t and \uXXXX (a single BMP
 // code point, UTF-8 encoded; surrogate PAIRS are not recombined). Encode re-escapes \" \\ \n \r
@@ -51,7 +57,7 @@
 { String, new_in, push_in, append_in, append_slice_in, finish_in } = std.text.string
 { view, substr_in } = std.text.str
 { hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode (centralized in std.text.ascii)
-{ parse_f64, float_in } = std.text.num
+{ parse_f64, parse_i64_checked, float_in, integer_in } = std.text.num
 // ── OOM policy ────────────────────────────────────────────────────────────────
 // The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
 // threads the caller's allocator whose exhaustion is fatal by policy, so builder Results are unwrapped
@@ -68,7 +74,7 @@ Entry*: {
 Object*: {
     entries: [Entry],
 }
-Value*: Null | Bool(bool) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
+Value*: Null | Bool(bool) | Int(i64) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
 // A parse error, carrying the byte offset where it was detected (UnexpectedEof carries none).
 JsonError*: Unexpected(i64) | BadString(i64) | BadNumber(i64) | BadLiteral(i64) | TrailingGarbage(i64) | UnexpectedEof | TooDeep
 // nesting cap so a pathological "[[[[…" can't blow the native stack.
@@ -335,11 +341,34 @@ parse_number<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<St
         true  => err(.BadNumber(pos)),
         false => {
             txt := a.substr_in(src, pos, n).expect("std.json: allocation failed")
-            parse_f64(txt).match ({
-                .Ok(f)  => step_ok(.Num(f), endp),
-                .Err(_) => err(.BadNumber(pos)),
+            // an integer token becomes `.Int` (exact round-trip); a magnitude past i64 falls back to
+            // the f64 approximation, as does anything with a fraction or an exponent.
+            txt.num_is_integral().match ({
+                true  => parse_i64_checked(txt).match ({
+                    .Ok(i)  => step_ok(.Int(i), endp),
+                    .Err(_) => parse_num_f64(txt, pos, endp),
+                }),
+                false => parse_num_f64(txt, pos, endp),
             })
         },
+    })
+}
+// an INTEGER token: no '.', no exponent. Those are the only two number bytes that make a JSON number
+// non-integral, so their absence is exactly "this round-trips through i64" (modulo magnitude).
+num_is_integral = (txt: string_view) bool {
+    intish := true
+    txt.view().loop((h, i, b) {
+        (b == '.' || b == 'e' || b == 'E').then({
+            intish = false
+            h.break
+        })
+    })
+    intish
+}
+parse_num_f64 = (txt: string_view, pos: i64, endp: i64) Result<Step, JsonError> {
+    parse_f64(txt).match ({
+        .Ok(f)  => step_ok(.Num(f), endp),
+        .Err(_) => err(.BadNumber(pos)),
     })
 }
 parse_str_value<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
@@ -639,6 +668,13 @@ write_value<A> = (a: MutPtr<A>, sb: String, v: Value) String {
     v.match ({
         .Null    => sb.append_in(a, "null").jok(),
         .Bool(b) => b.then({ sb.append_in(a, "true").jok() }, { sb.append_in(a, "false").jok() }),
+        .Int(i)  => sb
+            .append_in(a, a
+                .integer_in(i)
+                .jok()
+                .finish_in(a)
+                .jfin())
+            .jok(),
         .Num(n)  => sb
             .append_in(a, a
                 .float_in(n)
@@ -772,9 +808,22 @@ as_obj* = (v: Value) Opt<Object> {
     })
     out
 }
+// The value as an f64 — `.Int` widens (exact below 2^53, rounded above), `.Num` passes through. Use
+// `as_int` when the exactness of a large integer matters.
 as_num* = (v: Value) Opt<f64> {
     out: Opt<f64> := v.match ({
+        .Int(i) => .Some(to_f64(i)),
         .Num(n) => .Some(n),
+        _       => .None,
+    })
+    out
+}
+// The value as an EXACT i64 — `.Some` only for a number written without a fraction or exponent that
+// fit i64. A `.Num` (2.0, 1e3, or an integer too big for i64) is deliberately `.None`: the whole point
+// of the `.Int`/`.Num` split is that "was this an exact integer?" has an honest answer.
+as_int* = (v: Value) Opt<i64> {
+    out: Opt<i64> := v.match ({
+        .Int(i) => .Some(i),
         _       => .None,
     })
     out
@@ -849,8 +898,9 @@ obj_eq = (a: Object, b: Object) bool {
         },
     })
 }
-// Deep structural equality. Numbers compare by f64 ==, strings byte-wise, objects key-by-key
-// regardless of key order.
+// Deep structural equality. Numbers compare NUMERICALLY across the `.Int`/`.Num` split (JSON has one
+// number type, so `1` equals `1.0`; an i64 past 2^53 compared against an f64 inherits that widening's
+// rounding), strings byte-wise, objects key-by-key regardless of key order.
 equals* = (x: Value, y: Value) bool {
     x.match ({
         .Null    => y.match ({
@@ -861,7 +911,13 @@ equals* = (x: Value, y: Value) bool {
             .Bool(b) => a == b,
             _        => false,
         }),
+        .Int(a)  => y.match ({
+            .Int(b) => a == b,
+            .Num(b) => to_f64(a) == b,
+            _       => false,
+        }),
         .Num(a)  => y.match ({
+            .Int(b) => a == to_f64(b),
             .Num(b) => a == b,
             _       => false,
         }),
