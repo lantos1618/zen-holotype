@@ -131,21 +131,45 @@ matches_kind_at = (sv: [u8], i: i64, name: string_view, kind: i64) bool {
 // does this file (a `[u8]` view of raw source) contain `pattern` of `kind` OUTSIDE a `//` line
 // comment? We track an in-comment flag (set at `//`, cleared at newline) — the same comment-stripping
 // python's `_code` does. Block comments and string literals are NOT special-cased (matching python).
+// STRING LITERALS ARE SKIPPED, like comments. A file that QUOTES a primitive is not USING one:
+// tools/memory_map.zen documents the raw floor with `example: "p := malloc(n)"`, and scanning the
+// quoted bytes reported it as a raw-alloc violation. Quote parity also handles `"""` raw strings —
+// three toggles is one net toggle — so `"""…"""` opens and closes correctly. A raw string whose
+// CONTENT holds an odd number of `"` would desync; none of the scanned files does that today.
 file_has = (sv: [u8], name: string_view, kind: i64) bool {
     found := false
     in_comment := false
+    in_string := false
+    escaped := false
     sv.loop((h, i, b) {
         (b == '\n').then({
             in_comment = false
         })
         (in_comment == false).then({
-            (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({
+            escaped.match ({
                 true  => {
-                    in_comment = true
+                    escaped = false
                 },
-                false => sv.matches_kind_at(i, name, kind).then({
-                    found = true
-                    h.break
+                false => (b == '\\' && in_string).match ({
+                    true  => {
+                        escaped = true
+                    },
+                    false => (b == '"').match ({
+                        true  => {
+                            in_string = in_string == false
+                        },
+                        false => (in_string == false).then({
+                            (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({
+                                true  => {
+                                    in_comment = true
+                                },
+                                false => sv.matches_kind_at(i, name, kind).then({
+                                    found = true
+                                    h.break
+                                }),
+                            })
+                        }),
+                    }),
                 }),
             })
         })
