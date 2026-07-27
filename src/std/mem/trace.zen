@@ -216,10 +216,19 @@ cc_scan = (b: RawPtr<u8>) void {
         })
     })
 }
+// Bacon-Rajan's ScanBlack is guarded on the colour: re-blackening an already-BLACK block must NOT
+// re-trace it. Without the guard a block on a CYCLE re-enters through its own back edge forever —
+// the OP_SCAN_BLACK arm of visit_child bumps the count and recurses per edge — so restoring a cycle
+// that SURVIVES collection diverges into a stack overflow. That is the case trial deletion exists
+// for; every all-garbage graph reaches gather instead and never runs this path, which is why the
+// three fixtures never caught it. The count increment stays per-edge in visit_child (correct);
+// only the traversal is guarded.
 cc_scan_black = (b: RawPtr<u8>) void {
-    hset_color(b, BLACK)
-    bt := Tracer(op: 2)
-    blk_trace(b, bt.addr())
+    (hcolor(b) == BLACK == false).then({
+        hset_color(b, BLACK)
+        bt := Tracer(op: 2)
+        blk_trace(b, bt.addr())
+    })
 }
 cc_gather = (b: RawPtr<u8>) void {
     (hcolor(b) == WHITE).then({

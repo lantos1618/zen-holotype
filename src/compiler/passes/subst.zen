@@ -662,7 +662,12 @@ xform_expr_exp = (
             hnd := a.local_name_at(l.h, env, params.len + 2)
             ps1 := a.add_subst_param(a.add_subst_param(a.add_subst_param(params, l.idx), l.elem), l.h)
             xs1 := a.add_subst_arg(a.add_subst_arg(a.add_subst_arg(fargs, lidx), elem), hnd)
-            out = a.cenode(eloop(a.xform_expr(decls, idx, l.seq, params, fargs, env), lidx, elem, l.elemTy, a.xform_body(decls, idx, l.body, ps1, xs1, env, tvoid()), hnd))
+            // The element binding's TYPE has to enter the lookup env, not just its renamed name:
+            // a body that light-types the element (`x.variant_name()`) otherwise sees void, so
+            // vn_hook finds no variants and preserves the call for a template splice that never
+            // comes — `zen check` passes and the link fails on an undefined `variant_name`.
+            env1 := a.vcons(elem, l.elemTy, env)
+            out = a.cenode(eloop(a.xform_expr(decls, idx, l.seq, params, fargs, env), lidx, elem, l.elemTy, a.xform_body(decls, idx, l.body, ps1, xs1, env1, tvoid()), hnd))
         },
         .Lambda(lm)     => {
             out = a.xform_lambda(decls, idx, lm, params, fargs, env)
