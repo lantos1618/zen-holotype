@@ -148,7 +148,7 @@ ff_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
         .MakeStruct(m)  => s.ff_mkstruct(a, m, ind),
         .Tag(t)         => s.ff_tag(a, t),
         .Match(m)       => s.ff_match(a, m, ind),
-        .SliceLit(sd)   => s.ff_append(a, "[").ff_args(a, sd.items, ind).ff_append(a, "]"),
+        .SliceLit(sd)   => s.ff_slicelit(a, sd.items, ind),
         .Index(ix)      => s
             .ff_recv(a, ix.seq, ind)
             .ff_append(a, "[")
@@ -166,6 +166,47 @@ ff_args = (s: String, a: MutPtr<Malloc>, args: [Expr], ind: i32) String {
         out = out.ff_expr(a, ar.addr(), ind)
     })
     out
+}
+// A slice literal keeps its elements on ONE line — `[1, 2, 3]`, `[arg_int(n)]`. But a TABLE of
+// multi-field struct literals renders each element across several lines, and comma-joining those
+// buries the element boundaries in `), Op(` while the opening `[` swallows the first row. So: when
+// an element itself formats to more than one line, the literal breaks — one element per line at one
+// extra indent, trailing comma, `]` on its own line. The choice is made from a throwaway render at
+// the FINAL indent (comment cursor snapshotted/restored, as in ff_one_line), so it depends only on
+// the AST and is therefore stable across passes. Reparse safety: slice items are parsed by
+// parse_or_nested (delim_depth > 0), so the newline+`.Uppercase` statement break is suppressed and a
+// leading-dot element like `.Some(…)` still glues to its literal.
+ff_slice_rows = (s: String, a: MutPtr<Malloc>, items: [Expr], ind: i32) String {
+    out := s
+    items.loop((h, i, it) {
+        out = out.ff_indent(a, ind).ff_expr(a, it.addr(), ind).ff_append(a, ",\n")
+    })
+    out
+}
+ff_slicelit = (s: String, a: MutPtr<Malloc>, items: [Expr], ind: i32) String {
+    save := gf_idx
+    multi := a.ff_string(256).ff_slice_rows(a, items, ind + 1).ff_slice_row_split(items.len)
+    gf_idx = save
+    multi.then({
+        return s
+            .ff_append(a, "[\n")
+            .ff_slice_rows(a, items, ind + 1)
+            .ff_indent(a, ind)
+            .ff_append(a, "]")
+    })
+    s.ff_append(a, "[").ff_args(a, items, ind).ff_append(a, "]")
+}
+// The trial above emits one `\n` per element by construction, so "an element spans lines" is exactly
+// "the trial holds MORE newlines than there are elements".
+ff_slice_row_split = (trial: String, n: i64) bool { trial.ff_count_nl() > n }
+ff_count_nl = (s: String) i64 {
+    i := 0
+    c := 0
+    @while (i < s.len) {
+        c = (load(offset(s.ptr, i)) == '\n').then({ c + 1 }, { c })
+        i = i + 1
+    }
+    c
 }
 ff_mcall_inline = (s: String, a: MutPtr<Malloc>, mc: MethodCallData, ind: i32) String {
     s
