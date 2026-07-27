@@ -9,9 +9,9 @@
 { impl_cname_in } = compiler.mangle    // bs_shake: recompute hoisted impl-method names
 { fnv1a64_fold } = std.hash    // shared FNV-1a-64 rolling byte fold (centralized in std.hash)
 { gstr_string, gstr_append, gstr_finish, gstr_push, cbuf } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
-{ contents_in, out, out_bytes, save, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644,
+{ contents_in, save, write_all, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644,
   MODE_755 } = std.io.file
-{ or, expect } = std.core.result    // discard `out`/`out_bytes` write Results — the driver's stdout is best-effort
+{ or, expect } = std.core.result
 { then } = std.core.bool
 { open, read, write, close, system, unlink, mkdir, rmdir, getpid, isatty, clock_gettime } = std.c.libc
 { parse_module, exports_get } = compiler.parse
@@ -25,8 +25,9 @@
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
 { eprint, first_user_import_in, file_exists } = compiler.resolve
 { ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = compiler.resolve_ffi
-{ say, eprint, push_int, pid_path, dirname, last_slash, push_prefix, push_span, pad_sp, finish_cstr,
-  join2, cstr_substr, bs_push_range, zt_log, resolve_prog_or_exit, dir_exists } = compiler.drvutil
+{ say, stdout_put, stdout_put_bytes, out_status, eprint, push_int, pid_path, dirname, last_slash,
+  push_prefix, push_span, pad_sp, finish_cstr, join2, cstr_substr, bs_push_range, zt_log,
+  resolve_prog_or_exit, dir_exists } = compiler.drvutil
 { report_no_if_plain, report_no_if_resolved, report_check, report_js_unsupported } = compiler.drvdiag
 { js_unsupported_reset } = compiler.backend.js.js_expr
 { lsp_cmd } = compiler.lsp
@@ -50,10 +51,14 @@ write_runnable_c = (tmpc: string_view, gen: String) bool {
         true  => false,
         false => {
             hv := HEAD_REPL().view()
-            fd.write(hv.ptr, hv.len)
-            fd.write(gen.ptr.offset(hl), gen.len - hl)
-            fd.close()
-            true
+            // A short write (ENOSPC/EIO), or a deferred error that only surfaces at close, leaves a
+            // TRUNCATED temp.c that `cc` would then compile. `write_all` retries short writes and
+            // reports the rest as a value; close is still run on the failure path (the fd must not
+            // leak), and its own nonzero return counts as a failed write.
+            wh := write_all(fd, hv.ptr, hv.len, 0).or(0 - 1)
+            wb := write_all(fd, gen.ptr.offset(hl), gen.len - hl, 0).or(0 - 1)
+            closed := fd.close()
+            wh >= 0 && wb >= 0 && closed == 0
         },
     })
 }
@@ -504,7 +509,7 @@ emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
                     decls := mp.resolve_module(raw)
                     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
                         true  => {
-                            out_bytes(mp.genModuleIn(decls).bytes())
+                            stdout_put_bytes(mp.genModuleIn(decls).bytes())
                             0
                         },
                         false => 1,
@@ -546,9 +551,9 @@ emit_js = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
                             mod := mp.genJsModuleIn(decls)
                             (mp.report_js_unsupported(rp, path, src) == 0).match ({
                                 true  => {
-                                    out(mp.js_floor(root))
-                                    out("\n")
-                                    out_bytes(mod.bytes())
+                                    stdout_put(mp.js_floor(root))
+                                    stdout_put("\n")
+                                    stdout_put_bytes(mod.bytes())
                                     0
                                 },
                                 false => 1,
@@ -1247,7 +1252,7 @@ prof_perf = (
         (body == "").then({
             return 0 - 1
         })
-        out(body).or(0)
+        stdout_put(body)
         return 0
     })
     rows := cbuf<ProfRow>(mp, PROF_TOP())
@@ -1303,7 +1308,7 @@ prof_gprof = (
         return 1
     })
     pa.raw.then({
-        out(body).or(0)
+        stdout_put(body)
         return 0
     })
     rows := cbuf<ProfRow>(mp, PROF_TOP())
@@ -1395,7 +1400,9 @@ main = () i32 {
     mp := m.addr()
     root := mp.root_of()
     cmd := arg(1)
-    (cmd == "--help").match ({
+    // out_status: a stdout write that was LOST (full disk, closed pipe) outranks the command's own
+    // exit code — `zenc emit x.zen > file` must not report success having written nothing.
+    rc := (cmd == "--help").match ({
         true  => {
             say(HELP())
             0
@@ -1453,6 +1460,7 @@ main = () i32 {
             }),
         }),
     })
+    out_status(rc)
 }    // --build-self <out.c> <srcroot>
 build_out = (flag: string_view, out: string_view) string_view {
     (flag == "-o").then({ out }, { "a.out" })
@@ -1503,7 +1511,7 @@ raw_emit_file = (mp: MutPtr<Malloc>, path: string_view) i32 {
 raw_emit_src = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
     (mp.report_no_if_plain(path, src) == 0).match ({
         true  => {
-            out_bytes(mp.genModuleIn(mp.resolve_module(mp.parse_module(src))).bytes())
+            stdout_put_bytes(mp.genModuleIn(mp.resolve_module(mp.parse_module(src))).bytes())
             0
         },
         false => 1,
@@ -1674,10 +1682,12 @@ bs_write = (out_path: string_view, gen: String) bool {
         true  => false,
         false => {
             hv := BS_HEAD_REPL().view()
-            fd.write(hv.ptr, hv.len)
-            fd.write(gen.ptr.offset(hl), end - hl)
-            fd.close()
-            true
+            // Same hazard as write_runnable_c, on a file that OUTLIVES the run: a truncated seed
+            // reported as written is a corrupt bootstrap that only explodes on the next build.
+            wh := write_all(fd, hv.ptr, hv.len, 0).or(0 - 1)
+            wb := write_all(fd, gen.ptr.offset(hl), end - hl, 0).or(0 - 1)
+            closed := fd.close()
+            wh >= 0 && wb >= 0 && closed == 0
         },
     })
 }
@@ -1939,7 +1949,10 @@ doc_has_star = (v: [u8], i: i64, t: i64) bool {
 doc_is_pub = (v: [u8], p: i64, t: i64) bool {
     (p >= t).then({ false }, { is_name_start(v[p]) && v.doc_has_star(p, t) })
 }
-out_range = (v: [u8], p: i64, t: i64) i64 { out_bytes(slice(v.ptr.offset(p), t - p)).or(0) }
+out_range = (v: [u8], p: i64, t: i64) i64 {
+    stdout_put_bytes(slice(v.ptr.offset(p), t - p))
+    0
+}
 doc_line = (mp: MutPtr<Malloc>, v: [u8], p: i64, t: i64, docs: String) String {
     (t - p >= 2 && v[p] == '/' && v[p + 1] == '/').match ({
         true  => {
@@ -1951,9 +1964,9 @@ doc_line = (mp: MutPtr<Malloc>, v: [u8], p: i64, t: i64, docs: String) String {
             true  => mp.gstr_string(256),
             false => doc_is_pub(v, p, t).match ({
                 true  => {
-                    out_bytes(docs.bytes())
+                    stdout_put_bytes(docs.bytes())
                     v.out_range(p, t)
-                    out("\n")
+                    stdout_put("\n")
                     mp.gstr_string(256)
                 },
                 false => mp.gstr_string(256),
@@ -1980,9 +1993,9 @@ doc_cmd = (mp: MutPtr<Malloc>, root: string_view, modarg: string_view) i32 {
         },
         false => contents_in(mp, mp.mod_path(root, modarg)).match ({
             .Ok(src) => {
-                out("# ")
-                out(modarg)
-                out("\n")
+                stdout_put("# ")
+                stdout_put(modarg)
+                stdout_put("\n")
                 mp.doc_lines(src.view(), 0, mp.gstr_string(256))
                 0
             },
@@ -2109,7 +2122,7 @@ fmt_stdout = (mp: MutPtr<Malloc>, path: string_view) i32 {
                     r := mp.fmt_render(src)
                     r.ok.match ({
                         true  => {
-                            out(r.text)
+                            stdout_put(r.text)
                             0
                         },
                         false => mp.fmt_parse_err(path, src),
