@@ -20,7 +20,8 @@
 { access } = std.c.libc
 { run } = std.sys.process
 { arg, argc, set_env } = std.sys.os
-{ cat_in, contains, ends_with, len, split_in, view } = std.text.str
+{ cat_in, contains, ends_with, len, split_in, sv_lt, view } = std.text.str
+{ sort_by } = std.sort
 { String, init, append_in, finish_in } = std.text.string
 { arg_int, arg_str, format } = std.text.fmt
 { expect } = std.core.result
@@ -41,28 +42,9 @@ is_exec = (path: string_view) bool { path.access(ACCESS_X_OK) == 0 }
 // ── byte-lexicographic ordering, so the sweep visits the corpus in a stable order ──
 // (`find` emits directory order, which varies between checkouts; the set of files is the same and the
 // summary counts are identical, but a sorted walk makes a HIT list reproducible run to run)
-sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
-    (i >= xv.len || i >= yv.len).match ({
-        true  => xv.len < yv.len,
-        false => (xv[i] == yv[i]).then({ xv.sv_lt_at(yv, i + 1) }, { xv[i] < yv[i] }),
-    })
+sort_paths = (xs: [string_view]) void {
+    xs.sort_by((x: string_view, y: string_view) bool { x.sv_lt(y) })
 }
-sv_lt = (x: string_view, y: string_view) bool { x.view().sv_lt_at(y.view(), 0) }
-sift_left = (xs: [string_view], j: i64) void {
-    (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
-        t := xs[j]
-        xs[j] = xs[j - 1]
-        xs[j - 1] = t
-        xs.sift_left(j - 1)
-    })
-}
-sort_from = (xs: [string_view], i: i64) void {
-    (i < xs.len).then({
-        xs.sift_left(i)
-        xs.sort_from(i + 1)
-    })
-}
-sort_paths = (xs: [string_view]) void { xs.sort_from(1) }
 // ── the corpus walk (`find <dir> -name '*.zen'`, a missing dir contributing nothing) ──
 walk = (mp: MutPtr<Malloc>, dir: string_view, acc: String) String {
     entries := mp.read_dir(dir).expect("fuzz-corpus: cannot read directory")
