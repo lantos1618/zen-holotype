@@ -1,6 +1,6 @@
 # Zen examples
 
-Fifteen examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
+Sixteen examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
 
 Build once, then run a C example with:
 
@@ -19,8 +19,14 @@ make
 | `stats.zen` | Numeric work over `Vec<i32>`. |
 | `str_ops_demo.zen` | Allocator-backed string operations. |
 | `json_demo.zen` | Build and print JSON. |
+| `strings_demo.zen` | Where the bytes live: literal / `str` / `[u8]` / `String`, borrow vs copy, and every free. |
 
 Run any of them as `./zen run examples/<name>.zen`.
+
+`strings_demo.zen` is a log-line reformatter used as a memory walkthrough: it puts every string-ish
+type side by side with what it owns, contrasts a zero-copy view against an allocating copy, moves a
+buffer into a callee / out of a callee / into a struct, and names the freer of every block it
+allocates — including the two it cannot free, and why.
 
 ## Unix filters
 
