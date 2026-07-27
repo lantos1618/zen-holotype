@@ -44,7 +44,7 @@ cmp /tmp/zenc.fixpoint.c bootstrap/zenc.gen.c
 `regen` writes a PID-specific temporary and replaces `zenc.gen.c` only when bytes changed. A second
 run must be identical. The full harness also contains a fixpoint suite and verifies that
 `sources.txt` agrees with the resolver graph order. `make docs-check` verifies the deliberate
-seven-file documentation inventory and every local Markdown link.
+thirteen-file documentation inventory and every local Markdown link.
 
 Generated C is an artifact, not a merge authority. Register the local merge driver with
 `make setup-git`; after resolving source changes, `make resolve-seed` regenerates and stages the seed.

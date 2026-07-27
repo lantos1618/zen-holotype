@@ -115,8 +115,10 @@ difftest: zen
 	@[ "$(OLD)" != "$(NEW)" ] || echo "NOTE: OLD == NEW ($(OLD)) — this run compares the compiler with ITSELF and cannot detect a behaviour change. Pass OLD=<saved baseline> for the real gate."
 	cd $(ROOT) && ./scripts/difftest.sh $(OLD) $(NEW)
 
-docs-check:
-	cd $(ROOT) && ./scripts/check-docs.sh
+# Documentation gate, written in Zen (tools/check-docs.zen): the tracked `*.md` inventory must match
+# the deliberate list exactly, and every local Markdown link target must exist.
+docs-check: zen
+	cd $(ROOT) && $(ZENC) run tools/check-docs.zen
 
 # FFI drift gate: prove std's hand-written foreign prototypes (src/std/c/libc.zen and friends)
 # match the REAL system headers. Reuses `zenc emit` (foreign decls lower to bare C prototypes),
