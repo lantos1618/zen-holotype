@@ -115,11 +115,11 @@ What you just read, and where it is specified ([docs/SPEC.md](docs/SPEC.md)):
 - **Reflection at compile time.** `each_field` / `zip_fields` / `field_eq` unroll
   per-field at monomorphization, and `e.variant_name()` expands to a literal switch
   over an enum's variants — derived equality and JSON serde are ordinary
-  library code, no macros. `./zen run examples/json_demo.zen` round-trips typed
-  structs and prints `ROUNDTRIP_EQUAL`.
+  library code, no macros. `./zen run examples/jq.zen '.a.b[0]' file.json`
+  parses, selects, and pretty-prints with `std.format.json`.
 - **Generics, traits, UFCS.** Monomorphized generics; a trait is a record of
   signatures, an impl is `Type.impl(Trait, { ... })`, dispatched by receiver
-  (`examples/shapes.zen`).
+  (`examples/tour.zen`).
 - **Three pointer types, checker-enforced.** `Ptr<T>` read-only, `MutPtr<T>`
   writable, `RawPtr<T>` the nullable raw floor. A write through `Ptr<T>` is
   `error[ptr-write]` at compile time.
@@ -133,7 +133,7 @@ What you just read, and where it is specified ([docs/SPEC.md](docs/SPEC.md)):
   `./zen run examples/pool_actor_demo.zen` fans 1000 messages across OS cores
   and prints `total=1000`.
 
-15 [`examples/`](examples/): 14 compile and run natively, `dom_demo` is
+12 [`examples/`](examples/): 11 compile and run natively, `dom_demo` is
 browser-only and reaches `node` through `emit-js`. Several are Unix filters that
 want stdin or an argument — [`examples/README.md`](examples/README.md) gives the
 invocation for each.
