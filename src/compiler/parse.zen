@@ -13,9 +13,10 @@
 { is_lparen, tyargs_end } = compiler.parse_primary
 { build_body } = compiler.parse_stmt
 { parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen,
-  is_lbrace, is_rbrace, is_langle, tok_eq, perr_set, perr_set_at, perr_set_bad_at,
-  perr_set_misgen_at, perr_reset, perr_get, perr_off_get, perr_kind_get, pdepth_reset, delim_reset,
-  vbreak_reset, vbreak_get, anon_reset, anon_decls_get } = compiler.parse_type
+  lbrace_off, bopen_enter, bopen_exit, is_lbrace, is_rbrace, is_langle, tok_eq, perr_set,
+  perr_set_at, perr_set_bad_at, perr_set_kind_at, perr_set_misgen_at, perr_reset, perr_get,
+  perr_off_get, perr_kind_get, pdepth_reset, delim_reset, PE_BADBIND, PE_MISGEN, PE_UNCLOSED,
+  PE_ARROW, PE_EXPR, PE_DECL, PE_INIT, PE_EOF, vbreak_reset, vbreak_get, anon_reset, anon_decls_get } = compiler.parse_type
 { parse_tparams, skip_name_star, parse_struct_at, parse_enum_at, has_data_field } = compiler.parse_type_decl
 { fill_impl, fill_impl_methods, fill_defaults, fill_inherent_struct } = compiler.parse_impl
 { implicit_tparams } = compiler.parse_implicit
@@ -50,7 +51,7 @@ parse_decl_at* = (a: MutPtr<Malloc>, src: string_view, pos: i32) DeclEnd {
     rt := a.parse_ty(src, pe.next)
     params := buf.take_params(pe.count)
     src.is_lbrace(src.scan(rt.next).tok).match ({
-        true  => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next), nt.tok.start),
+        true  => a.parse_fn_body(src, name, params, tp.names, rt.ty, src.skip_to_brace(rt.next), nt.tok.start, src.lbrace_off(rt.next)),
         false => DeclEnd(
             func: Func(
                 name: name,
@@ -74,7 +75,10 @@ parse_fn_body = (
     ret: Ty,
     bstart: i32,
     dpos: i32,
+    bopen: i32,
 ) DeclEnd {
+    // anchor the body's `{` so an end-of-input inside it carets the OPENING brace (see bopen_enter)
+    prev := bopen_enter(bopen)
     func := Func(
         name: name,
         params: params,
@@ -83,9 +87,11 @@ parse_fn_body = (
         body: a.build_body(src, bstart),
         pos: dpos,
     )
+    end := src.skip_block(bstart)
+    bopen_exit(prev)
     DeclEnd(
         func: func,
-        next: src.skip_block(bstart),
+        next: end,
         foreign: false,
     )
 }
@@ -426,13 +432,15 @@ fill_decls = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Decl], i: i32
                                 n = c.i
                             },
                             _      => {
-                                perr_set_at(sc.tok.start)
                                 // a failure exactly AT the last fired variant break's `.` is the split-statement
                                 // shape: a NEGATIVE offset selects the rule-naming KVBREAK diagnostic (0 - off).
-                                off := (sc.tok.start == vbreak_get() && vbreak_get() != 0).match ({
-                                    true  => 0 - sc.tok.start,
-                                    false => perr_off_get(),
+                                // Anything else here is a token that cannot BEGIN a declaration — say so.
+                                vb := sc.tok.start == vbreak_get() && vbreak_get() != 0
+                                vb.match ({
+                                    true  => perr_set_at(sc.tok.start),
+                                    false => perr_set_kind_at(sc.tok.start, PE_DECL()),
                                 })
+                                off := vb.then({ 0 - sc.tok.start }, { perr_off_get() })
                                 buf[n] = dglobal("__syntax_error", tvoid(), a.enode(lit(off)))
                                 p = sc.next
                                 n = n + 1
@@ -642,6 +650,36 @@ append_anon_decls = (a: MutPtr<Malloc>, buf: [Decl], n: i32) i32 {
     })
     i
 }
+// The taxonomy kind → the sentinel decl name compiler.validate.kinds maps to a diagnostic. Each
+// named sentinel says WHAT THE PARSER EXPECTED; `__syntax_error` stays the catch-all for the sites
+// that have no better answer yet (and, with a NEGATIVE offset, for the variant-break split shape).
+sentinel_name = (kind: i32) string_view {
+    (kind == PE_BADBIND()).then({
+        return "__bad_binding"
+    })
+    (kind == PE_MISGEN()).then({
+        return "__misordered_generic"
+    })
+    (kind == PE_UNCLOSED()).then({
+        return "__unclosed_block"
+    })
+    (kind == PE_ARROW()).then({
+        return "__expected_arrow"
+    })
+    (kind == PE_EXPR()).then({
+        return "__expected_expr"
+    })
+    (kind == PE_DECL()).then({
+        return "__expected_decl"
+    })
+    (kind == PE_INIT()).then({
+        return "__expected_init"
+    })
+    (kind == PE_EOF()).then({
+        return "__unexpected_eof"
+    })
+    reg_overflow_get().then({ "__capacity" }, { "__syntax_error" })
+}
 // Parser totality: any parse/lex failure plants a leading syntax sentinel.
 prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
     (n >= buf.len).match ({
@@ -654,16 +692,7 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
             }
             off := (perr_off_get() == 0).then({ lerr_off_get() }, { perr_off_get() })
             voff := (off == vbreak_get() && off != 0).then({ 0 - off }, { off })    // vbreak dot → KVBREAK
-            // a bad-binding error plants its OWN sentinel name so the checker reports `error[bad-binding]`
-            // (with the `use :=` hint) instead of a generic KPARSE; its offset is always a real caret pos.
-            nm := (perr_kind_get() == 1).match ({
-                true  => "__bad_binding",
-                false => (perr_kind_get() == 2).match ({
-                    true  => "__misordered_generic",
-                    false => reg_overflow_get().then({ "__capacity" }, { "__syntax_error" }),
-                }),
-            })
-            buf[0] = dglobal(nm, tvoid(), a.enode(lit(voff)))
+            buf[0] = dglobal(sentinel_name(perr_kind_get()), tvoid(), a.enode(lit(voff)))
             buf.take_decls(n + 1)
         },
     })

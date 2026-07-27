@@ -19,9 +19,10 @@
 { env_imported, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn,
   env_struct_fields, env_trait_method, expr_pos, fit_err, is_ctx_typed_arg, is_ptr_ty, is_struct,
   lit_slot_verdict, pos_or, tparam_bound, ty_mentions_tparam, unknown_ty, ut_unknown_tys } = compiler.validate.util
-{ KARGTYPE, KARITY, KBADBIND, KCAPACITY, KDIAG_CAP, KFFITYPE, KMISGEN, KNOTYPEARGS, KORRETURN,
-  KPARSE, KRECHOF, KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND, KUNKNOWNTYPE,
-  KUNREACHABLEARM, KVBREAK, desc_or } = compiler.validate.diag
+{ KARGTYPE, KARITY, KBADBIND, KCAPACITY, KDIAG_CAP, KEOFINPUT, KEXPECTARROW, KEXPECTDECL,
+  KEXPECTEXPR, KEXPECTINIT, KFFITYPE, KMISGEN, KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF,
+  KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND, KUNCLOSED, KUNKNOWNTYPE, KUNREACHABLEARM,
+  KVBREAK, desc_or } = compiler.validate.diag
 { zty } = compiler.validate.ownership
 { arg_err_at } = compiler.validate.args
 { kv_at, kv_one } = compiler.validate.core
@@ -1396,15 +1397,41 @@ kparse_off = (init: Ptr<Expr>) i32 {
 // the `.` of a newline+`.Uppercase` statement break, so report the rule (KVBREAK) at that dot.
 kparse_kind = (init: Ptr<Expr>) i32 {
     off := init.kparse_off()
-    (off < 0).then({ KVBREAK().kv_at(0 - off) }, { KPARSE().kv_at(off) })
+    (off < 0).then({ KVBREAK().kv_at(0 - off) }, { KPARSE().ksent_at(off) })
 }
+// A sentinel's Int init uses 0 for "no offset was recorded" (compiler.parse_type's parse_err_off),
+// so — unlike an AST pos, where byte 0 is real (kv_at) — a 0 here means the diagnostic has NO caret.
+ksent_at = (k: i32, off: i32) i32 { (off == 0).then({ k }, { k.kv_at(off) }) }
 // the `__bad_binding` sentinel: a malformed top-level `=` binding, caret at its RHS offset (always ≥ 0).
-kbadbind_kind = (init: Ptr<Expr>) i32 { KBADBIND().kv_at(init.kparse_off()) }
+kbadbind_kind = (init: Ptr<Expr>) i32 { KBADBIND().ksent_at(init.kparse_off()) }
 // the `__misordered_generic` sentinel: a `Name<T>*:` head, caret at the `<` offset (always ≥ 0).
-kmisgen_kind = (init: Ptr<Expr>) i32 { KMISGEN().kv_at(init.kparse_off()) }
+kmisgen_kind = (init: Ptr<Expr>) i32 { KMISGEN().ksent_at(init.kparse_off()) }
 // the `__capacity` sentinel: a fixed-capacity compiler registry overflowed (no meaningful caret — the
 // offense is program SIZE, not a token; the sentinel's offset is 0).
-kcapacity_kind = (init: Ptr<Expr>) i32 { KCAPACITY().kv_at(init.kparse_off()) }
+kcapacity_kind = (init: Ptr<Expr>) i32 { KCAPACITY().ksent_at(init.kparse_off()) }
+// the PARSE TAXONOMY sentinels (compiler.parse.sentinel_name): each names what the parser EXPECTED
+// where it failed, so the diagnostic says WHAT is wrong, not only where. All carry a real caret pos.
+taxonomy_kind = (nm: string_view, init: Ptr<Expr>) i32 {
+    (nm == "__unclosed_block").then({
+        return KUNCLOSED().ksent_at(init.kparse_off())
+    })
+    (nm == "__expected_arrow").then({
+        return KEXPECTARROW().ksent_at(init.kparse_off())
+    })
+    (nm == "__expected_expr").then({
+        return KEXPECTEXPR().ksent_at(init.kparse_off())
+    })
+    (nm == "__expected_decl").then({
+        return KEXPECTDECL().ksent_at(init.kparse_off())
+    })
+    (nm == "__expected_init").then({
+        return KEXPECTINIT().ksent_at(init.kparse_off())
+    })
+    (nm == "__unexpected_eof").then({
+        return KEOFINPUT().ksent_at(init.kparse_off())
+    })
+    0
+}
 // packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
 parse_sentinel_kind* = (nm: string_view, init: Ptr<Expr>) i32 {
     (nm == "__syntax_error").match ({
@@ -1413,7 +1440,10 @@ parse_sentinel_kind* = (nm: string_view, init: Ptr<Expr>) i32 {
             true  => init.kbadbind_kind(),
             false => (nm == "__misordered_generic").match ({
                 true  => init.kmisgen_kind(),
-                false => (nm == "__capacity").then({ init.kcapacity_kind() }, { 0 }),
+                false => (nm == "__capacity").match ({
+                    true  => init.kcapacity_kind(),
+                    false => nm.taxonomy_kind(init),
+                }),
             }),
         }),
     })

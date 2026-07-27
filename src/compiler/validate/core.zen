@@ -177,7 +177,7 @@ check_diagnostic_from_packed = (packed: i32, count: i32) CheckDiagnostic {
             CheckDiagnostic(
                 code: code,
                 kind: code.diagnostic_kind_name(),
-                source_offset: has_pos.then({ packed >> 6 }, { 0 - 1 }),
+                source_offset: has_pos.then({ packed.kv_pos() }, { 0 - 1 }),
                 span_width: has_pos.then({ 1 }, { 0 }),
                 count: count.positive_count(),
                 message: code.diagnostic_message(),
@@ -228,13 +228,20 @@ i32.impl(Verdict, {
 })
 // a 0/1 count predicate → a kind code: emit `k` iff the predicate found an error.
 kv_one* = (n: i32, k: i32) i32 { (n == 0).then({ 0 }, { k }) }
-// pack a SOURCE POSITION into a kind code: kinds are 1..63 (6 bits), so `kind + pos*64` carries the
-// error's byte offset alongside it (pos 0 = unknown/synthesized — the bare kind, the old encoding).
-// Consumers unpack with `& 63` / `>> 6`. Applied only at leaves that HAVE a pos (Call/Var); an
-// already-packed nested result is never re-packed: values above 63 already carry an offset.
-// Capacity: i32 packing caps the flat-source byte offset at (2^31-1)/64 ≈ 33.5 MB; the whole
+// pack a SOURCE POSITION into a kind code: kinds are 1..63 (6 bits), so `kind + (pos+1)*64` carries
+// the error's byte offset alongside it. Consumers unpack with `& 63` / `(>> 6) - 1`. Applied only at
+// leaves that HAVE a pos (Call/Var); an already-packed nested result is never re-packed: values
+// above 63 already carry an offset.
+// The +1 BIAS is load-bearing: byte 0 is a REAL source position (line 1, column 1 — see
+// compiler.diagnostic's own law that only a NEGATIVE offset means "synthesized"), so the old
+// `p <= 0 → drop the position` guard silently threw away the caret for anything anchored on the
+// FIRST declaration of a file. That is what left `error[unknown-type]` with no line:col at all on
+// `f = (x: Flarb) i64 { 0 }` — the decl anchor was byte 0. Negative alone now means "no position".
+// Capacity: i32 packing caps the flat-source byte offset at (2^31-1)/64 - 1 ≈ 33.5 MB; the whole
 // in-tree Zen source is < 1 MB today, so headroom is ~38x before i64 packing would be needed.
-kv_at* = (k: i32, p: i32) i32 { (k == 0 || k > 63 || p <= 0).then({ k }, { k + p * 64 }) }
+kv_at* = (k: i32, p: i32) i32 { (k == 0 || k > 63 || p < 0).then({ k }, { k + (p + 1) * 64 }) }
+// the byte offset carried by a packed kind (the +1 bias removed); only valid when packed > 63.
+kv_pos* = (packed: i32) i32 { (packed >> 6) - 1 }
 // Ownership kind pass mirrors the raw ownership count pass above.
 kv_own_args_kind = (
     a: MutPtr<Malloc>,
@@ -1236,7 +1243,7 @@ check_module_reserved_diagnostic_from_source* = (
     (packed == 0).match ({
         true  => check_diagnostic_none(),
         false => {
-            pos := packed >> 6
+            pos := packed.kv_pos()
             w := src.diagnostic_span_width(pos)
             subject := a
                 .gstr_string(32)
@@ -1820,7 +1827,7 @@ check_module_scratch_diagnostic_from_source* = (
         true  => check_diagnostic_none(),
         false => {
             code := packed & 63
-            pos := packed >> 6
+            pos := packed.kv_pos()
             w := src.diagnostic_span_width(pos)
             CheckDiagnostic(
                 code: code,

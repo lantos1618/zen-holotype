@@ -7,7 +7,8 @@
 { Scan, Token, scan } = compiler.lex
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
-{ PEnd, is_comma, is_lbrace, is_rbrace, is_rparen, perr_set_at, tok_eq } = compiler.parse_type
+{ PEnd, bopen_enter, bopen_exit, is_comma, is_lbrace, is_rbrace, is_rparen, perr_set_at,
+  perr_set_kind_at, PE_ARROW, tok_eq } = compiler.parse_type
 { is_return_kw, materialize, parse_block } = compiler.parse_stmt
 { enode, lexeme, parse_atom } = compiler.parse_atom
 { is_dot, is_ident_tok, parse_or_nested, parse_postfix } = compiler.parse_postfix
@@ -39,7 +40,9 @@ parse_arm_body = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
 }
 parse_arm_block* = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
     // Use parse_block so statement-position match arms do not turn trailing expressions into real returns.
+    prev := bopen_enter(open.tok.start)    // anchor this `{` for the unclosed-block diagnostic
     blk := a.parse_block(src, open.next)
+    bopen_exit(prev)
     PExpr(
         expr: a.enode(block(a.materialize(blk.list))),
         next: blk.next,
@@ -90,7 +93,9 @@ parse_then* = (a: MutPtr<Malloc>, src: string_view, subj: PExpr) PExpr {
     open := src.scan(lp.next)
     (src.is_lparen(lp.tok) && src.is_lbrace(open.tok)).match ({
         true  => {
+            prev := bopen_enter(open.tok.start)
             body := a.parse_block(src, open.next)
+            bopen_exit(prev)
             rp := src.scan(body.next)
             src.is_rparen(rp.tok).match ({
                 true  => a.parse_postfix(src, PExpr(
@@ -125,7 +130,9 @@ parse_then_else = (
     ob := src.scan(pos)
     src.is_lbrace(ob.tok).match ({
         true  => {
+            prev := bopen_enter(ob.tok.start)
             els := a.parse_block(src, ob.next)
+            bopen_exit(prev)
             rp := src.scan(els.next)
             src.is_rparen(rp.tok).match ({
                 true  => a.parse_postfix(src, PExpr(
@@ -285,7 +292,7 @@ arm_rhs = (a: MutPtr<Malloc>, src: string_view, pos: i32, bare_ok: bool) PExpr {
         true  => a.parse_arm_body(src, nx.next),
         false => {
             (bare_ok == false).then({
-                perr_set_at(nx.tok.start)
+                perr_set_kind_at(nx.tok.start, PE_ARROW())
             })
             PExpr(
                 expr: a.enode(block(a.no_arm_stmts())),

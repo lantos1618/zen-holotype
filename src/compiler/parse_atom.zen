@@ -7,7 +7,7 @@
 { at, is_digit, rawstr_at } = std.text.ascii
 { Malloc } = std.mem.alloc
 { PEnd, is_comma, is_lbrace, is_lbracket, is_rparen, pdepth_enter, pdepth_exit, pdepth_over,
-  perr_set_at, tok_in } = compiler.parse_type
+  perr_set_at, perr_set_kind_at, PE_EOF, PE_EXPR, tok_in } = compiler.parse_type
 { is_dot, nl_between, parse_or_nested, parse_postfix } = compiler.parse_postfix
 { parse_arm_block, reject_match } = compiler.parse_match
 { finit_buf, inits_as_fields, is_lparen, is_minus, is_not, is_raw_at, lam_open, looks_anon_struct,
@@ -241,7 +241,7 @@ parse_base = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
         }),
         .Ident => a.parse_ident(src, sc),
         .Eof   => {
-            perr_set_at(sc.tok.start)
+            perr_set_kind_at(sc.tok.start, PE_EOF())
             PExpr(
                 expr: a.enode(lit(0)),
                 next: sc.next,
@@ -261,9 +261,10 @@ str_open = (src: string_view, t: Token) bool {
         false => t.len < 2 || src.at(t.start + t.len - 1) != '"',
     })
 }
-// Bad atom: flag (with the offending token's offset), consume one token for progress, placeholder.
+// Bad atom: no rule can start an expression at this token. Flag it as EXPECTED-AN-EXPRESSION (with
+// the offending token's offset), consume one token for progress, placeholder.
 parse_garbage = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
-    perr_set_at(sc.tok.start)
+    perr_set_kind_at(sc.tok.start, PE_EXPR())
     PExpr(
         expr: a.enode(lit(0)),
         next: sc.next,

@@ -31,37 +31,62 @@ parse_err_off := 0
 // RHS) or a function (`(` RHS); anything else (`k = 5`) is a malformed value global (use `:=`), which
 // must be a CLEAN error, not silently mis-parsed as a function that swallows the next decl.
 parse_err_kind := 0
+// ── the PARSE-ERROR TAXONOMY ─────────────────────────────────────────────────────
+// Every value below is a `parse_err_kind`; parse.sentinel_name maps it to the sentinel decl
+// parse_module plants, and compiler.validate.kinds maps that name to the diagnostic that NAMES WHAT
+// THE PARSER WANTED (`expected `=>` …`, `unclosed `{` …`) instead of one generic sentence for every
+// syntax mistake. The kind LABEL stays `parse` for the expectation-shaped ones — the class is the
+// label, the expectation is the message, exactly as the checker's `arg-type` carries `expected …,
+// got …` in its message (compiler.validate.enrich.denrich_fit_msg).
+PE_BADBIND* = () i32 { 1 }    // a top-level `name = <value>` that is neither a module alias nor a function
+PE_MISGEN* = () i32 { 2 }    // a misordered generic head `Name<T>*:`
+PE_UNCLOSED* = () i32 { 3 }    // a `{` that end-of-input reached still open — offset = the OPENING brace
+PE_ARROW* = () i32 { 4 }    // a match arm whose label is not followed by `=>`
+PE_EXPR* = () i32 { 5 }    // a token that cannot begin an expression
+PE_DECL* = () i32 { 6 }    // a token that cannot begin a top-level declaration
+PE_INIT* = () i32 { 7 }    // a `:=` with no expression after it — offset = the `:=`
+PE_EOF* = () i32 { 8 }    // end of input in the middle of an expression
 perr_set* = () void { parse_failed = 1 }
-// flag + record the failing token's source offset (first offset-bearing site wins).
-perr_set_at* = (off: i32) void {
+// flag + record the failing token's source offset AND its taxonomy kind (first offset-bearing site
+// wins, so the kind and the offset it carets always describe the SAME failure).
+perr_set_kind_at* = (off: i32, kind: i32) void {
     (parse_err_off == 0).then({
         parse_err_off = off
+        parse_err_kind = kind
     })
     parse_failed = 1
 }
+// flag + record the failing token's source offset (first offset-bearing site wins).
+perr_set_at* = (off: i32) void { perr_set_kind_at(off, 0) }
 // like perr_set_at, but tags the error kind as bad-binding (1) so parse_module plants the
 // `__bad_binding` sentinel and the checker reports `error[bad-binding]` instead of a generic KPARSE.
-perr_set_bad_at* = (off: i32) void {
-    (parse_err_off == 0).then({
-        parse_err_off = off
-        parse_err_kind = 1
-    })
-    parse_failed = 1
-}
+perr_set_bad_at* = (off: i32) void { perr_set_kind_at(off, PE_BADBIND()) }
 // like perr_set_at, but tags the error kind as misordered-generic (2): a generic type decl written
 // `Name<T>*:` (type params BEFORE the `*` export marker) instead of the canonical `Name*<T>:`. The
 // sentinel NAME parse_module plants (`__misordered_generic`) selects the targeted `<`-caret diagnostic.
-perr_set_misgen_at* = (off: i32) void {
-    (parse_err_off == 0).then({
-        parse_err_off = off
-        parse_err_kind = 2
-    })
-    parse_failed = 1
+perr_set_misgen_at* = (off: i32) void { perr_set_kind_at(off, PE_MISGEN()) }
+// ── OPEN-BRACE ANCHOR: the byte offset of the innermost `{` currently being parsed ──────────────
+// An unterminated block is detected at END OF INPUT, which is the wrong place to point: the caret
+// landed on the last token of the body and the hint talked about "this top-level declaration" — a
+// line the user never mistyped. The block-opening sites save/restore this anchor (exactly like
+// delim_save/delim_restore), so the EOF sites can caret the `{` that was never closed and the
+// diagnostic NAMES THE LINE THE BLOCK OPENED ON. 0 = no block open (fall back to the EOF position).
+brace_open := 0
+bopen_enter* = (off: i32) i32 {
+    prev := brace_open
+    brace_open = off
+    prev
+}
+bopen_exit* = (prev: i32) void { brace_open = prev }
+// report the innermost unclosed `{` (caret on the brace); with no open block, the EOF position.
+perr_set_unclosed_at* = (eof_off: i32) void {
+    (brace_open > 0).then({ perr_set_kind_at(brace_open, PE_UNCLOSED()) }, { perr_set_at(eof_off) })
 }
 perr_reset* = () void {
     parse_failed = 0
     parse_err_off = 0
     parse_err_kind = 0
+    brace_open = 0
 }
 perr_get* = () bool { parse_failed == 1 }
 perr_off_get* = () i32 { parse_err_off }
@@ -155,6 +180,15 @@ skip_to_brace* = (src: string_view, pos: i32) i32 {
         _    => src.is_lbrace(sc.tok).then({ sc.next }, { src.skip_to_brace(sc.next) }),
     })
 }    // no `{` before EOF: terminate, don't recurse forever
+// the byte offset of the `{` that skip_to_brace stops just past (0 = none before EOF) — the anchor
+// an unclosed-block diagnostic carets, so it names the line the block OPENED on.
+lbrace_off* = (src: string_view, pos: i32) i32 {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Eof => 0,
+        _    => src.is_lbrace(sc.tok).then({ sc.tok.start }, { src.lbrace_off(sc.next) }),
+    })
+}
 // map a type token to genc's Ty: a primitive keyword, else a Named type (the lexeme
 // materialized — a `Pt` becomes Named("Pt"), lowering to a `struct Pt`). Composite types
 // (`Ptr<T>`, `[T]`, `(A) R`) are parsed by parse_ty below.
@@ -700,9 +734,9 @@ skip_block_d = (src: string_view, pos: i32, depth: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set_at(pos)
+            perr_set_unclosed_at(pos)
             pos
-        },    // an opened `{` never closed: flag, terminate
+        },    // an opened `{` never closed: caret the opening brace, terminate
         _    => src.is_lbrace(sc.tok).match ({
             true  => src.skip_block_d(sc.next, depth + 1),
             false => src.is_rbrace(sc.tok).match ({
