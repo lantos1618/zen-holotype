@@ -115,8 +115,7 @@ What you just read, and where it is specified ([docs/SPEC.md](docs/SPEC.md)):
 - **Reflection at compile time.** `each_field` / `zip_fields` / `field_eq` unroll
   per-field at monomorphization, and `e.variant_name()` expands to a literal switch
   over an enum's variants — derived equality and JSON serde are ordinary
-  library code, no macros. `./zen run examples/jq.zen '.a.b[0]' file.json`
-  parses, selects, and pretty-prints with `std.format.json`.
+  library code, no macros — see `std.format.serde`.
 - **Generics, traits, UFCS.** Monomorphized generics; a trait is a record of
   signatures, an impl is `Type.impl(Trait, { ... })`, dispatched by receiver
   (`examples/tour.zen`).
@@ -134,7 +133,8 @@ What you just read, and where it is specified ([docs/SPEC.md](docs/SPEC.md)):
   and prints `total=1000`.
 
 12 [`examples/`](examples/): 11 compile and run natively, `dom_demo` is
-browser-only and reaches `node` through `emit-js`. Several are Unix filters that
+browser-only — `emit-js` lowers it to real DOM calls, but it needs a browser
+page, not `node` (there is no `document` there). Several are Unix filters that
 want stdin or an argument — [`examples/README.md`](examples/README.md) gives the
 invocation for each.
 
