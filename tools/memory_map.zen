@@ -1,0 +1,252 @@
+// tools/memory_map.zen — how Zen actually uses memory, as a WORKING FILE you edit.
+//
+//   ./zen run tools/memory_map.zen           // print the map + a tally of what is still undecided
+//   ./zen run tools/memory_map.zen open      // print only the entries with no verdict yet
+//
+// This replaces docs/memory-usage-map.md. It is Zen rather than markdown for the same reason
+// bindings are values here: a review artifact you can COMPILE is one the compiler can check, and
+// `verdict` is a field rather than a bullet you might forget to fill in — `main` counts the blanks
+// for you.
+//
+// TO REVIEW: edit the `verdict:` field of each Entry. Anything left "" is reported as open.
+// Suggested vocabulary — "keep" / "kill" / "merge into X" / "change: …" — but it is free text.
+//
+// Counts are from origin/main (6b60d5b), comments and declaring modules excluded.
+{ println, formatln, arg_str, arg_int } = std.text.fmt
+{ is_empty } = std.text.str
+// One memory surface. `status` is what the evidence says; `verdict` is what YOU say.
+Entry*: {
+    id: string_view,
+    name: string_view,
+    // one real call site, verbatim
+    example: string_view,
+    // real users, excluding the declaring module and its own tests
+    users: i64,
+    // load-bearing | niche | dead | invisible
+    status: string_view,
+    // what is known to be wrong with it, or "" when nothing is
+    issue: string_view,
+    // ← YOU EDIT THIS. "" means undecided.
+    verdict: string_view,
+}
+// ── PART 1 — GETTING memory ──────────────────────────────────────────────────────────────────────
+getting = () [Entry] {
+    [Entry(
+        id: "1.1",
+        name: "threaded allocator param",
+        example: "read_bytes_alloc<A> = (a: MutPtr<A>, …)",
+        users: 184,
+        status: "load-bearing",
+        issue: "284 sites use a BARE <A>; only 4 write <A: Allocator>, so the bound is convention. Passing a non-allocator blames the library's line, not the call site.",
+        verdict: "",
+    ), Entry(
+        id: "1.2",
+        name: "fallible acquire",
+        example: "a.try_acquire(n * sizeof(T)).match ({ .Ok(p) => …, .Err(e) => … })",
+        users: 92,
+        status: "load-bearing",
+        issue: "",
+        verdict: "",
+    ), Entry(
+        id: "1.3",
+        name: "infallible acquire (nullable)",
+        example: "out: [u8] := a.acquire(n).slice(n)",
+        users: 120,
+        status: "load-bearing",
+        issue: "returns null on failure with no error; exactly ONE of ~32 std sites is null-checked",
+        verdict: "",
+    ), Entry(
+        id: "1.4",
+        name: "cbuf<T> typed buffer",
+        example: "cbuf*<T> = (a, n) [T] { slice(a.acquire(n * sizeof(T)), n) }",
+        users: 78,
+        status: "load-bearing",
+        issue: "safest shape in the tree (size/type cannot disagree) — but has two twins: str.nbuf, raw.of",
+        verdict: "",
+    ), Entry(
+        id: "1.5",
+        name: "stored allocator (AVec/ASet/AHMap)",
+        example: "AVec*<T>: { …, alloc: DynAlloc }   //  vec.new() then v.push(x)",
+        users: 4,
+        status: "load-bearing",
+        issue: "no dyn_of_alloc<A>, so these are PERMANENTLY process-heap-backed; vec.zen:286 advertises a path with zero callers",
+        verdict: "",
+    ), Entry(
+        id: "1.6",
+        name: "arena / bump",
+        example: "make_in*<A> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError>",
+        users: 3,
+        status: "niche",
+        issue: "the ONLY allocator that checks size overflow; zero uses in the compiler or examples",
+        verdict: "",
+    ), Entry(
+        id: "1.7",
+        name: "direct libc",
+        example: "p := malloc(n)",
+        users: 49,
+        status: "load-bearing",
+        issue: "31 of the 49 are the concurrency layer; pool_actor.zen:104 hand-builds an Arena over raw malloc instead of make_in",
+        verdict: "",
+    ), Entry(
+        id: "1.8",
+        name: "scoped scratch (RAII by closure)",
+        example: "with_scratch*<T> = (n, f) T { c := zeroed(n)  r := f(c)  release(c)  r }",
+        users: 14,
+        status: "niche",
+        issue: "does NOT survive or_return — the emitted C returns past release(c). Same for Mutex.with (15) and with_pool, where the skipped cleanup is pthread teardown.",
+        verdict: "",
+    ), Entry(
+        id: "1.9",
+        name: "compiler-inserted (zen__salloc)",
+        example: "emitted for every escaping slice literal — no allocator, no owner, no free",
+        users: 0,
+        status: "invisible",
+        issue: "10.6 MB / 300k allocations per 100k formatln; scales with loop count; error[leak] never fires",
+        verdict: "",
+    ), Entry(
+        id: "1.10",
+        name: "ambient rt",
+        example: "rt.alloc(n) / rt.with(custom, body)",
+        users: 0,
+        status: "dead",
+        issue: "zero production call sites; the pool's enter/leave writes a thread-local nothing reads. Tried in #420, reverted in 794828b.",
+        verdict: "",
+    ), Entry(
+        id: "1.11",
+        name: "LSP request scope (hidden ambient)",
+        example: "hs_on := false    // process-global mutable bool; Malloc.acquire routes on it",
+        users: 2,
+        status: "load-bearing",
+        issue: "1,343 MutPtr<Malloc> occurrences serve TWO call sites (lsp.zen:974,979). Heap/Malloc differ in one line and the names are backwards.",
+        verdict: "",
+    )]
+}
+// ── PART 2 — REPRESENTING memory ─────────────────────────────────────────────────────────────────
+representing = () [Entry] {
+    [Entry(
+        id: "2.1",
+        name: "slice(p, n) fat pointer",
+        example: "s: [i64] := slice(p, n)",
+        users: 217,
+        status: "load-bearing",
+        issue: "NO validation; zen__idx bounds-checks against the number you typed. slice(p,1000) over 16 bytes writes 4 KB past. 100 of 217 sites are trust-me.",
+        verdict: "",
+    ), Entry(
+        id: "2.2",
+        name: "RawPtr<u8> universal floor",
+        example: "raw_floor_fits — satisfies ANY pointer type",
+        users: 485,
+        status: "load-bearing",
+        issue: "the escape hatch everything leaks through; also why the send-check cannot be tightened (32 __good cells rejected, 0 bugs caught)",
+        verdict: "",
+    ), Entry(
+        id: "2.3",
+        name: "Ptr<T> read-only",
+        example: "p.store(99) → error[ptr-write]",
+        users: 817,
+        status: "load-bearing",
+        issue: "genuinely enforced, incl. via slice() — but p.offset(0).store(99) writes anyway",
+        verdict: "",
+    ), Entry(
+        id: "2.4",
+        name: "offset() untyped cast",
+        example: "p.offset(0).store(99)",
+        users: 238,
+        status: "load-bearing",
+        issue: "erases pointer kind AND pointee; doubles as the int→pointer cast since Zen has no `as`",
+        verdict: "",
+    ), Entry(
+        id: "2.5",
+        name: "ownership wrappers",
+        example: "Own<T> / Rc<T> / Arc<T> / Traced<T>",
+        users: 1,
+        status: "niche",
+        issue: "Arc is production (every actor). Own has ONE user and is affine in the binding, not the object — o.ptr() extracts a MutPtr freely. Rc and Traced have zero.",
+        verdict: "",
+    ), Entry(
+        id: "2.6",
+        name: "hand-rolled block headers",
+        example: "hcount = (b) i64 { load_i64(b.offset(0)) }    // [count|color|value]",
+        users: 51,
+        status: "load-bearing",
+        issue: "51 literal offsets, 8 files, ≥11 unchecked ABIs; trace.zen duplicates the rc block instead of reusing val_slot",
+        verdict: "",
+    )]
+}
+// ── PART 3 — RELEASING memory ────────────────────────────────────────────────────────────────────
+releasing = () [Entry] {
+    [Entry(
+        id: "3.1",
+        name: "explicit release",
+        example: "a.release(p) / o.release_in(a)",
+        users: 113,
+        status: "load-bearing",
+        issue: "Allocator.release takes a pointer and NO SIZE — which is why a debug allocator cannot poison or report bytes-leaked, and why slice() lengths must be trusted",
+        verdict: "",
+    ), Entry(
+        id: "3.2",
+        name: "never releasing (arena culture)",
+        example: "alloc.zen:70 — a batch compile is ALLOWED to leak",
+        users: 167,
+        status: "load-bearing",
+        issue: "deliberate and documented; the whole compiler has 7 .release( calls",
+        verdict: "",
+    ), Entry(
+        id: "3.3",
+        name: "per-behavior scratch reset",
+        example: "a.scratch_reset()    // pool.zen:393, on normal return AND caught panic",
+        users: 2,
+        status: "load-bearing",
+        issue: "a real region discipline with a static escape check — the closest thing to a per-actor heap, but scoped to ONE behavior",
+        verdict: "",
+    )]
+}
+// ── PART 4 — PASSING memory across threads ───────────────────────────────────────────────────────
+passing = () [Entry] {
+    [Entry(
+        id: "4.1",
+        name: "the send check",
+        example: "mode_of(decls, t) — a pure function of the TYPE'S SHAPE, no program point",
+        users: 3,
+        status: "load-bearing",
+        issue: "unsound 6 ways incl. the shape the compiler's own hint recommends; keyed on the method NAMES send/pool_send/ref_send_msg; runs pre-monomorphization",
+        verdict: "",
+    ), Entry(
+        id: "4.2",
+        name: "what messages actually carry",
+        example: "ChatMsg*: Join(string_view) | Say(SayArgs) | GetStats(ReplyRef<ChatStats>)",
+        users: 0,
+        status: "load-bearing",
+        issue: "NOT ONE message in the repo carries a Ptr/MutPtr/Own — every payload is a scalar, plain struct, string_view, or opaque cap. This is what makes copy-on-send viable without capabilities.",
+        verdict: "",
+    )]
+}
+all_entries = () [[Entry]] { [getting(), representing(), releasing(), passing()] }
+show = (e: Entry) void {
+    formatln("  {}  {}", [arg_str(e.id), arg_str(e.name)])
+    formatln("      {}", [arg_str(e.example)])
+    formatln("      users={}  status={}", [arg_int(e.users), arg_str(e.status)])
+    (e.issue.is_empty() == false).then({
+        formatln("      issue: {}", [arg_str(e.issue)])
+    })
+    formatln("      VERDICT: {}", [arg_str(verdict_or_open(e))])
+    println("")
+}
+verdict_or_open = (e: Entry) string_view {
+    e.verdict.is_empty().then({ "*** OPEN — needs your call ***" }, { e.verdict })
+}
+main = () i32 {
+    total := 0
+    open := 0
+    println("How Zen uses memory — edit the `verdict:` fields in tools/memory_map.zen")
+    println("")
+    all_entries().loop((h, i, group) {
+        group.loop((h2, j, e) {
+            show(e)
+            total = total + 1
+            open = open + e.verdict.is_empty().then({ 1 }, { 0 })
+        })
+    })
+    formatln("{} surfaces, {} still undecided", [arg_int(total), arg_int(open)])
+    0
+}
