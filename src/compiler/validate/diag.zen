@@ -187,6 +187,17 @@ KDUPLITARM* = () i32 { 52 }    // a literal `.match` that repeats a label (`1 =>
 KREFLECTRETURN* = () i32 { 48 }    // a reflect-using generic with a `return` inside a loop body — inline-only, so the return would escape into the caller (mirror of KRECHOF for the loop-return hazard)
 KREFLECTWRITE* = () i32 { 49 }    // an each_field/zip_fields whose SUBJECT is temp-bound (a non-Var expr, or an enclosing reflection lambda's value param — a member place) while its lambda ASSIGNS a value param: the writes would land on the discarded temp (silent no-op, #587)
 KCAPACITY* = () i32 { 47 }    // a fixed-capacity compiler registry (exports / alias prefixes / module sigs) overflowed — the parser's sticky `__capacity` sentinel; the program is REJECTED rather than compiled with silently dropped registry data
+// ── the PARSE-ERROR TAXONOMY (compiler.parse_type's PE_* kinds) ─────────────────────────────────
+// One `error[parse]` sentence for every syntax mistake told the user WHERE but never WHAT. These
+// codes carry what the parser EXPECTED at that token. The kind LABEL stays `parse` — the class is
+// the label and the expectation is the message, the same split the checker uses for `arg-type`
+// (`expected `str`, got `[i32]``). Each is planted by a distinct parser sentinel (parse.sentinel_name).
+KUNCLOSED* = () i32 { 53 }    // end of input with a `{` still open; the caret is the OPENING brace, so the diagnostic names the line the block opened on (the parser's `__unclosed_block` sentinel)
+KEXPECTARROW* = () i32 { 54 }    // a match-arm label not followed by `=>` (the parser's `__expected_arrow` sentinel)
+KEXPECTEXPR* = () i32 { 55 }    // a token that can begin no expression (the parser's `__expected_expr` sentinel)
+KEXPECTDECL* = () i32 { 56 }    // a token that can begin no top-level declaration (the parser's `__expected_decl` sentinel)
+KEXPECTINIT* = () i32 { 57 }    // a `:=` with no expression after it; caret on the `:=` (the parser's `__expected_init` sentinel)
+KEOFINPUT* = () i32 { 58 }    // end of input in the middle of an expression (the parser's `__unexpected_eof` sentinel)
 Diagnostic*: {
     code: i32,
     kind: string_view,
@@ -551,6 +562,49 @@ diag_info = (code: i32) DiagInfo {
             hint: "each literal label must be distinct — arms are tried in order, so a repeated label is dead; remove or renumber it",
         )
     })
+    // ── the parse taxonomy: kind stays `parse`, the message names what was EXPECTED ──
+    (code == 53).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "unclosed `{`: expected a matching `}`, found end of input",
+            hint: "close the block that opens on this line with a `}`",
+        )
+    })
+    (code == 54).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "expected `=>` after this match-arm label",
+            hint: "a match arm is `label => value`; separate the label from its body with `=>`",
+        )
+    })
+    (code == 55).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "expected an expression, found a token that cannot start one",
+            hint: "an expression starts with a literal, a name, a `.Variant`, a `(group)`, a `[a, b]` slice literal, or a `-`/`!` prefix",
+        )
+    })
+    (code == 56).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "expected a top-level declaration, found a token that cannot start one",
+            hint: "a top-level item is `name = (params) Ret { … }`, `name := value`, `Name: { … }`, `Name.impl(Trait, { … })`, or `{ names } = module.path`",
+        )
+    })
+    (code == 57).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "expected an expression after `:=`, found the end of the binding",
+            hint: "give the binding a value (`name := <expr>`), or delete the binding",
+        )
+    })
+    (code == 58).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "unexpected end of input while parsing an expression",
+            hint: "the file ends mid-expression — finish it, or close the delimiter it left open",
+        )
+    })
     (code == 47).then({
         return DiagInfo(
             kind: "capacity",
@@ -630,7 +684,7 @@ KRESERVEDNAME* = () i32 { 36 }    // a top-level fn named after a compiler intri
 // top-level statement inside a function, then per decl across the module. The inner recursion is
 // unchanged (still first-error within a statement / expression), so a single root cause never
 // cascades: after a statement errs we resume at the next statement, after a decl at the next decl.
-// Consumers unpack each entry with the same `& 63` / `>> 6` scheme (check_diagnostic_from_source).
+// Consumers unpack each entry with the same `& 63` / `(>> 6) - 1` scheme (check_diagnostic_from_source).
 KDIAG_CAP* = () i32 { 512 }
 // ════════════════════════════════════════════════════════════════════════════════════════
 // ── M5: LEXICAL SCOPE-ESCAPE CHECK ──────────────────────────────────────────────────────

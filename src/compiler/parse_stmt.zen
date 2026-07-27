@@ -15,7 +15,8 @@
 { is_dot, parse_or_nested } = compiler.parse_postfix
 { is_field_colon } = compiler.parse_primary
 { parse_or } = compiler.parse_expr
-{ is_lbracket, is_rbracket, is_rbrace, skip_to_brace, skip_to_lparen, tok_eq, parse_ty, perr_set_at,
+{ is_lbracket, is_rbracket, is_rbrace, lbrace_off, skip_to_brace, skip_to_lparen, tok_eq, parse_ty,
+  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, PE_INIT, bopen_enter, bopen_exit,
   pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
@@ -397,10 +398,26 @@ parse_comp_set_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList>
     d := a.comp_set_desugar(src, pos)
     a.comp_prefix(d, a.parse_stmts(src, d.next))
 }
+// a `:=` with nothing left to bind: the very next token CLOSES the enclosing construct (`}` `)` `]`
+// `,`) or the file ends. Zen has no statement terminator, so `x :=` followed by a value on the NEXT
+// LINE is a legal binding — only these closers prove the initializer is genuinely absent.
+init_missing = (src: string_view, pos: i32) bool {
+    sc := src.scan(pos)
+    sc.tok.kind.match ({
+        .Eof => true,
+        _    => src.is_rbrace(sc.tok)
+            || src.is_rbracket(sc.tok)
+            || src.is_op1(sc.tok, ',')
+            || src.is_op1(sc.tok, ')'),
+    })
+}
 parse_let_stmt = (a: MutPtr<Malloc>, src: string_view, pos: i32) Ptr<SList> {
     nt := src.scan(pos)    // the bound name
     name := a.lexeme(src, nt.tok)
     at := src.scan(nt.next)    // ':='
+    src.init_missing(at.next).then({
+        perr_set_kind_at(at.tok.start, PE_INIT())
+    })    // caret the `:=` that binds nothing
     v := a.parse_or(src, at.next)    // value (full expression, incl. comparison)
     a.scons(slet_at(name, v.expr, nt.tok.start), a.parse_stmts(src, v.next))
 }    // … then the rest of the body
@@ -468,7 +485,9 @@ parse_while = (a: MutPtr<Malloc>, src: string_view, pos: i32) WhileEnd {
     c := a.parse_or_nested(src, lp)    // condition (stops at ')') — inside the open '('
     rp := src.scan(c.next)    // ')'
     bstart := src.skip_to_brace(rp.next)    // pos just past '{'
+    prev := bopen_enter(src.lbrace_off(rp.next))    // anchor this `{` for the unclosed-block diagnostic
     blk := a.parse_block(src, bstart)
+    bopen_exit(prev)
     WhileEnd(
         stmt: swhile(c.expr, a.materialize(blk.list)),
         next: blk.next,
@@ -506,12 +525,12 @@ parse_block_inner = (a: MutPtr<Malloc>, src: string_view, pos: i32) BlockEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
-            perr_set_at(pos)
+            perr_set_unclosed_at(pos)
             BlockEnd(
                 list: a.snil(),
                 next: sc.next,
             )
-        },    // unterminated `{ …`: flag AT the end of the last real token (where `}` was expected), don't recurse forever
+        },    // unterminated `{ …`: caret the OPENING brace (bopen_enter), so the diagnostic names the line the block opened on
         _    => src.is_rbrace(sc.tok).match ({
             true  => BlockEnd(
                 list: a.snil(),

@@ -1764,10 +1764,28 @@ harness_build_run* = () i32 {
         wants: [":2:27: error[match-label]: match arm label is not a `bool`; a boolean `.match` takes `true`, `false`, or `_`", "      b.match ({ true => 1, 0 => 2 })", "                            ^", "hint: replace the label with `true`, `false`, or a `_` wildcard"],
     ), DiagCase(
         src: "f* = () (i32, i32) { (1, 2) }\nmain = () i32 { 0 }\n",
-        wants: ["error[parse]: syntax error"],
+        wants: ["error[parse]: expected a top-level declaration, found a token that cannot start one"],
     ), DiagCase(
         src: "main = () i32 {\n    x := = 5\n    0\n}\n",
-        wants: [":2:10: error[parse]: syntax error: unparseable top-level input", "      x := = 5", "           ^", "hint: check the syntax around this top-level declaration"],
+        wants: [":2:10: error[parse]: expected an expression, found a token that cannot start one", "      x := = 5", "           ^", "hint: an expression starts with a literal, a name, a `.Variant`, a `(group)`, a `[a, b]` slice literal, or a `-`/`!` prefix"],
+    ), DiagCase(
+        src: "main = () i32 {\n    r := 1\n    r.match ({ 1 = 0, _ => 1 })\n}\n",
+        wants: [":3:18: error[parse]: expected `=>` after this match-arm label", "      r.match ({ 1 = 0, _ => 1 })", "                   ^", "hint: a match arm is `label => value`; separate the label from its body with `=>`"],
+    ), DiagCase(
+        src: "main = () i32 {\n    0\n",
+        wants: [":1:15: error[parse]: unclosed `{`: expected a matching `}`, found end of input", "  main = () i32 {", "                ^", "hint: close the block that opens on this line with a `}`"],
+    ), DiagCase(
+        src: "main = () i32 {\n    n := 1\n    (n > 0).then({\n        n\n",
+        wants: [":3:18: error[parse]: unclosed `{`: expected a matching `}`, found end of input", "      (n > 0).then({", "                   ^", "hint: close the block that opens on this line with a `}`"],
+    ), DiagCase(
+        src: "main = () i32 {\n    y :=\n}\n",
+        wants: [":2:7: error[parse]: expected an expression after `:=`, found the end of the binding", "      y :=", "        ^", "hint: give the binding a value (`name := <expr>`), or delete the binding"],
+    ), DiagCase(
+        src: "main = () i32 {\n    x := (1 +\n",
+        wants: [":2:14: error[parse]: unexpected end of input while parsing an expression", "      x := (1 +", "               ^", "hint: the file ends mid-expression — finish it, or close the delimiter it left open"],
+    ), DiagCase(
+        src: "f = (x: Flarb) i64 { 0 }\nmain = () i32 { 0 }\n",
+        wants: [":1:1: error[unknown-type]: unknown type name `Flarb`", "  f = (x: Flarb) i64 { 0 }", "  ^", "hint: declare the type, import it, or qualify it with its module (e.g. `mod.Type`)"],
     ), DiagCase(
         src: "main = () i32 { undefined_fn(1, 2) }\n",
         wants: [":1:17: error[undefined-name]: undefined name", "  main = () i32 { undefined_fn(1, 2) }", "                  ^~~~~~~~~~~~", "hint: declare the name, import it, or qualify the intended module binding"],
@@ -1785,7 +1803,7 @@ harness_build_run* = () i32 {
         wants: [":4:5: error[undefined-name]: undefined name", "      nope(r)", "      ^~~~", "hint: declare the name, import it, or qualify the intended module binding"],
     ), DiagCase(
         src: "good = () i32 { 1 }\n@@@ !!!\nmain = () i32 { good() + 6 }\n",
-        wants: ["syntax error"],
+        wants: ["expected a top-level declaration, found a token that cannot start one"],
     ), DiagCase(
         src: "halloc = std.mem.heap\n{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\nmain = () i32 {\n    alloc := halloc.gpa()\n    o := alloc.addr().new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    o.release_in(alloc.addr())\n    o.get().id\n}\n",
         wants: [":8:5: error[ownership]: use of an owner after it was consumed (moved, released, or dropped)", "      o.get().id", "      ^", "hint: an owner is consumed by release/drop, an actor send, a move into an owner-typed parameter, or a bare `c := o` copy; bind a fresh owner (`o.clone()`) instead of reusing the consumed local"],
@@ -1838,6 +1856,14 @@ harness_build_run* = () i32 {
         src: "{ print } = std.text.fmt\nQ*: { a: i32, b: i32 }\nmain = () i32 {\n    q := Q(a: 1, b: 2)\n    print(q)\n    0\n}\n",
         wants: [":5:5: error[trait-bound]: type `Q` does not implement trait `Display` (which declares `fmt_print`) — missing method(s): fmt_print, fmt_println", "      print(q)", "      ^~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
     )])
+    // PARSE TAXONOMY: an arm label with no `=>` names the arrow, not "unparseable top-level input".
+    // PARSE TAXONOMY: end of input with a block still open carets the OPENING `{` — the hint names
+    // the line the block opened on instead of pointing inside the body at "this top-level declaration".
+    // …and a NESTED block reports the INNER `{` (the brace anchor is lexically scoped).
+    // PARSE TAXONOMY: a `:=` that binds nothing carets the `:=`.
+    // PARSE TAXONOMY: the file ends mid-expression.
+    // BUG FIX: an unknown type anchored on the FIRST declaration of a file (decl pos = byte 0) used
+    // to print with NO line:col at all — the packed-kind encoding dropped position 0. Now it carets.
     // a pointer stored into a struct FIELD aliases the same allocation; freeing the source local
     // kills the field alias, so a later read of the field is a use-after-free (positioned at the field).
     // Multi-return uses named anonymous structs `{ x: T, y: U }`, not parenthesized type lists.
@@ -2266,10 +2292,10 @@ harness_build_run* = () i32 {
         cmd: "printf 'halloc = std.mem.heap\\n{ read_all_bytes } = std.io.stdin\\n{ out_bytes } = std.io.file\\nmain = () i32 {\\n    heap := halloc.gpa()\\n    a := heap.addr()\\n    a.read_all_bytes().match ({\\n        .Ok(b)  => out_bytes(b).match ({ .Ok(n) => 0, .Err(e) => 1 }),\\n        .Err(e) => 1,\\n    })\\n}\\n' > $ZT/zo_bcat.zen && ./zen build $ZT/zo_bcat.zen -o $ZT/zo_bcat_bin 2>/dev/null && printf 'ab\\000cd' > $ZT/zo_bcat_in.bin && test \"$(wc -c < $ZT/zo_bcat_in.bin)\" = 5 && $ZT/zo_bcat_bin < $ZT/zo_bcat_in.bin > $ZT/zo_bcat_out.bin && cmp -s $ZT/zo_bcat_in.bin $ZT/zo_bcat_out.bin && test \"$(wc -c < $ZT/zo_bcat_out.bin)\" = 5",
     ), ShellCase(
         name: "parse_error_stray_semicolon_positioned",
-        cmd: "printf 'main = () i32 {\\n    x := 5;\\n    x\\n}\\n' > $ZT/zpe_semi.zen && ./zen check $ZT/zpe_semi.zen > $ZT/zpe_semi.txt 2>&1; grep -Fq ':2:11: error[parse]: syntax error: unparseable top-level input' $ZT/zpe_semi.txt && grep -Fq '      x := 5;' $ZT/zpe_semi.txt && grep -Fq '            ^' $ZT/zpe_semi.txt",
+        cmd: "printf 'main = () i32 {\\n    x := 5;\\n    x\\n}\\n' > $ZT/zpe_semi.zen && ./zen check $ZT/zpe_semi.zen > $ZT/zpe_semi.txt 2>&1; grep -Fq ':2:11: error[parse]: expected an expression, found a token that cannot start one' $ZT/zpe_semi.txt && grep -Fq '      x := 5;' $ZT/zpe_semi.txt && grep -Fq '            ^' $ZT/zpe_semi.txt",
     ), ShellCase(
-        name: "parse_error_unclosed_brace_positioned",
-        cmd: "printf 'main = () i32 {\\n    x := 5\\n' > $ZT/zpe_brace.zen && ./zen check $ZT/zpe_brace.zen > $ZT/zpe_brace.txt 2>&1; grep -Fq ':2:11: error[parse]: syntax error: unparseable top-level input' $ZT/zpe_brace.txt && grep -Fq '      x := 5' $ZT/zpe_brace.txt && grep -Fq '            ^' $ZT/zpe_brace.txt",
+        name: "parse_error_unclosed_brace_names_opening_line",
+        cmd: "printf 'main = () i32 {\\n    x := 5\\n' > $ZT/zpe_brace.zen && ./zen check $ZT/zpe_brace.zen > $ZT/zpe_brace.txt 2>&1; grep -Fq ':1:15: error[parse]: unclosed `{`: expected a matching `}`, found end of input' $ZT/zpe_brace.txt && grep -Fq '  main = () i32 {' $ZT/zpe_brace.txt && grep -Fq '                ^' $ZT/zpe_brace.txt && grep -Fq 'hint: close the block that opens on this line with a `}`' $ZT/zpe_brace.txt",
     ), ShellCase(
         name: "cache_bin_hit_reuses_cached_binary",
         cmd: "rm -rf $ZT/zcc1 && printf 'main = () i32 { 41 }\\n' > $ZT/zcc1.zen && ZENC_CACHE_DIR=$ZT/zcc1 ./zen build $ZT/zcc1.zen -o $ZT/zcc1a 2>/dev/null && { $ZT/zcc1a; test \"$?\" = 41; } && test -n \"$(ls $ZT/zcc1 2>/dev/null)\" && ZENC_CACHE_DIR=$ZT/zcc1 ./zen check $ZT/zcc1.zen 2>$ZT/zcc1_c1.txt && ZENC_CACHE_DIR=$ZT/zcc1 ./zen check $ZT/zcc1.zen 2>$ZT/zcc1_c2.txt && cmp -s $ZT/zcc1_c1.txt $ZT/zcc1_c2.txt && ls $ZT/zcc1 | grep -q '^check_' && printf 'main = () i32 { 42 }\\n' > $ZT/zcc1_other.zen && ZENC_NO_CACHE=1 ./zen build $ZT/zcc1_other.zen -o $ZT/zcc1_other_bin 2>/dev/null && cp $ZT/zcc1_other_bin $ZT/zcc1/bin_* && ZENC_CACHE_DIR=$ZT/zcc1 ./zen build $ZT/zcc1.zen -o $ZT/zcc1b 2>/dev/null && { $ZT/zcc1b; test \"$?\" = 42; }",

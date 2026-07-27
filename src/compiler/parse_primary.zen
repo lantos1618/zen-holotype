@@ -9,8 +9,8 @@
 { at, is_upper } = std.text.ascii
 { Malloc } = std.mem.alloc
 { PEnd, TyEnd, is_comma, is_langle, is_lbrace, is_lbracket, is_rangle, is_rbrace, is_rbracket,
-  is_rparen, is_shr_close, param_buf, parse_ty, parse_tyargs, perr_set_at, register_anon,
-  skip_block, take_params } = compiler.parse_type
+  is_rparen, is_shr_close, bopen_enter, bopen_exit, param_buf, parse_ty, parse_tyargs, perr_set_at,
+  register_anon, skip_block, take_params } = compiler.parse_type
 { build_body } = compiler.parse_stmt
 { enode, is_op, is_walrus, lexeme, parse_atom, parse_payload_args } = compiler.parse_atom
 { is_dot, is_ident_tok, nl_between, parse_or_nested, parse_postfix } = compiler.parse_postfix
@@ -653,8 +653,10 @@ parse_lambda* = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
         false => a.parse_ty(src, pe.next),
     })
     ob := src.scan(rt.next)
+    prev := bopen_enter(ob.tok.start)    // anchor this `{` for the unclosed-block diagnostic
     body := a.build_body(src, ob.next)
     endp := src.skip_block(ob.next)
+    bopen_exit(prev)
     a.parse_postfix(src, PExpr(
         expr: a.enode(lam_r(buf.take_params(pe.count), body, rt.ty)),
         next: endp,
