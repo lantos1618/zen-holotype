@@ -13,6 +13,9 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ASAN="$ROOT/zen-asan"
 [ -x "$ASAN" ] || "$ROOT/scripts/fuzz-build.sh" "$ASAN"
+# The mutation engine is tools/fuzz-mutate.zen, run by the compiler itself — so a missing ./zen is a
+# hard stop, not a silent 127 that would report "0 iters" and pass.
+[ -x "$ROOT/zen" ] || { echo "fuzz-run: FAIL — $ROOT/zen is missing (run make)"; exit 2; }
 
 ITERS="${1:-${ITERS:-5000}}"
 PER="${2:-${PER:-5}}"
@@ -20,9 +23,8 @@ OUT="$ROOT/fuzz-out"; CR="$OUT/crashes"
 mkdir -p "$CR"
 export ASAN_OPTIONS="detect_leaks=0:abort_on_error=1:halt_on_error=1:detect_stack_use_after_return=1"
 export UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=1"
-export PYTHONUNBUFFERED=1    # so progress lines land in a redirected log live, not at exit
 
 mapfile -t SEEDS < <(find "$ROOT/tests/fixtures/zen" "$ROOT/examples" -name '*.zen' 2>/dev/null)
 [ ${#SEEDS[@]} -gt 0 ] || { echo "no seeds"; exit 1; }
 
-python3 "$ROOT/scripts/fuzz_mutate.py" "$ITERS" "$PER" "$CR" "$ASAN" "${SEEDS[@]}"
+"$ROOT/zen" run "$ROOT/tools/fuzz-mutate.zen" "$ITERS" "$PER" "$CR" "$ASAN" "${SEEDS[@]}"
