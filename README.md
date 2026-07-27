@@ -46,8 +46,8 @@ Every verb below was run against this commit before it was written down.
 - `./zen profile prog.zen [-- args]` — sampling profile (perf, gprof fallback) as
   a `SELF% CUM% FUNCTION` table with zen-native names ([recipe](docs/profiling.md))
 
-`zen --help` lists all of these except `emit-js`, which is real but undocumented
-there.
+`zen --help` lists all of these: its command list and the dispatcher are generated
+from the same table in `driver.zen`, so the two cannot drift apart.
 
 Two backends, one checked AST. The same program, both targets:
 

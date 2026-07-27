@@ -1391,10 +1391,140 @@ root_of = (mp: MutPtr<Malloc>) string_view {
     e := getEnv("ZEN_ROOT")
     (e == "").then({ mp.dirname(arg(0)) }, { e })
 }
-HELP = () string_view {
-    "usage: zenc <run|build|profile|check|audit|emit|doc|fmt|init|lsp|targets|--build-self|--version|--help> <file>\n  zenc init [path] [--bin|--lib]\n  zenc build [-r|--release] [--time] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)\n  zenc run [--time] <file|project> [args]  compile + run; --time prints per-stage compile timings\n  zenc profile [--raw] <file.zen|project> [-- args]\n                                       sampling profile (perf; gprof fallback) with zen-native names\n  zenc targets <project>               list registered targets\n  zenc doc <std.mod|file.zen>\n  zenc audit <file.zen> [--strict]     dead-code, unused-import + clone report (--strict exits 1;\n                                       clones are advisory and never affect the exit code)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>\n  zenc lsp                             diagnostics-only Language Server (JSON-RPC over stdio)\n  zenc --build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)\n  zenc --build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)\n  cat file.zen | zenc   (source -> C filter)\n"
+// ONE command list drives BOTH dispatch and `--help`, so the two can never drift (they did: `emit-js`
+// was dispatched and documented in the README but missing from the hardcoded usage string).
+// `run` takes the whole context — every handler reads its own `arg(n)`, and the `--build-self` pair
+// shares one handler that tells the two apart by `cmd`. An empty `help` gets no usage line (the
+// command still shows up in the `<…>` name list).
+Cmd: {
+    name: string_view,
+    help: string_view,
+    run: (MutPtr<Malloc>, string_view, string_view) i32,
+}
+cmd_init = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 { mp.zi_cmd() }
+cmd_build = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 { mp.build_cmd(root) }
+cmd_run = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 { mp.run_cmd(root) }
+cmd_profile = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 { mp.profile_cmd(root) }
+cmd_targets = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 {
+    mp.list_plan_targets(root, proj_dir(arg(2)))
+}
+cmd_doc = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 { mp.doc_cmd(root, arg(2)) }
+cmd_audit = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 {
+    mp.audit_cmd(root, arg(2), arg(3), arg(4))
+}
+cmd_lsp = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 { mp.lsp_cmd(root) }
+cmd_check = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 {
+    mp.check_spec(root, mp.resolve_spec(root, arg(2)))
+}
+cmd_emit = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 {
+    mp.emit_file(root, arg(2), arg(3))
+}
+cmd_emit_js = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 {
+    mp.emit_js(root, arg(2))
+}
+cmd_fmt = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 {
+    mp.fmt_cmd(arg(2), arg(3))
+}
+cmd_build_self = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 {
+    (arg(2) == "").match ({
+        true  => {
+            eprint("usage: zenc --build-self[-full] <out.c> <srcroot>\n")
+            2
+        },
+        false => mp.build_self(arg(3), arg(2), cmd == "--build-self"),
+    })
+}
+COMMANDS = () [Cmd] {
+    [Cmd(
+        name: "init",
+        help: "init [path] [--bin|--lib]",
+        run: cmd_init,
+    ), Cmd(
+        name: "build",
+        help: "build [-r|--release] [--time] [--target <name>] [project]\n                                       build registered targets — dev profile (-O1 -g) by default,\n                                       -r/--release = optimized (-O2 -fno-strict-aliasing)",
+        run: cmd_build,
+    ), Cmd(
+        name: "run",
+        help: "run [--time] <file|project> [args]  compile + run; --time prints per-stage compile timings",
+        run: cmd_run,
+    ), Cmd(
+        name: "profile",
+        help: "profile [--raw] <file.zen|project> [-- args]\n                                       sampling profile (perf; gprof fallback) with zen-native names",
+        run: cmd_profile,
+    ), Cmd(
+        name: "targets",
+        help: "targets <project>               list registered targets",
+        run: cmd_targets,
+    ), Cmd(
+        name: "doc",
+        help: "doc <std.mod|file.zen>",
+        run: cmd_doc,
+    ), Cmd(
+        name: "audit",
+        help: "audit <file.zen> [--strict]     dead-code, unused-import + clone report (--strict exits 1;\n                                       clones are advisory and never affect the exit code)\n  zenc audit --workspace <dir> [--strict]  union dead-code across every main-bearing entry under <dir>",
+        run: cmd_audit,
+    ), Cmd(
+        name: "lsp",
+        help: "lsp                             diagnostics-only Language Server (JSON-RPC over stdio)",
+        run: cmd_lsp,
+    ), Cmd(
+        name: "check",
+        help: "",
+        run: cmd_check,
+    ), Cmd(
+        name: "emit",
+        help: "",
+        run: cmd_emit,
+    ), Cmd(
+        name: "emit-js",
+        help: "",
+        run: cmd_emit_js,
+    ), Cmd(
+        name: "fmt",
+        help: "",
+        run: cmd_fmt,
+    ), Cmd(
+        name: "--build-self",
+        help: "--build-self <out.c> <root>     regenerate the seed, tree-shaken (only decls reachable from main)",
+        run: cmd_build_self,
+    ), Cmd(
+        name: "--build-self-full",
+        help: "--build-self-full <out.c> <root>  regenerate the full seed (no tree-shake; every manifest decl)",
+        run: cmd_build_self,
+    )]
+}
+HELP = (mp: MutPtr<Malloc>) string_view {
+    cs: [Cmd] := COMMANDS()
+    s := mp.gstr_string(2048).gstr_append(mp, "usage: zenc <")
+    cs.loop((h, i, c) {
+        s = (i > 0).then({ s.gstr_append(mp, "|") }, { s })
+        s = s.gstr_append(mp, c.name)
+    })
+    s = s.gstr_append(mp, "|--version|--help> <file>\n")
+    cs.loop((h, i, c) {
+        s = (c.help == "").match ({
+            true  => s,
+            false => s.gstr_append(mp, "  zenc ").gstr_append(mp, c.help).gstr_append(mp, "\n"),
+        })
+    })
+    s.gstr_append(mp, "  cat file.zen | zenc   (source -> C filter)\n").gstr_finish(mp)
 }
 VERSION = () string_view { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // also folded into every cache key
+// one flat pass over COMMANDS() — `hit` (not the return code) decides "found", so a command that
+// legitimately exits nonzero is never mistaken for an unknown one and re-run as `default_emit`.
+dispatch_cmd = (mp: MutPtr<Malloc>, root: string_view, cmd: string_view) i32 {
+    rc := 0
+    hit := false
+    cs: [Cmd] := COMMANDS()
+    cs.loop((h, i, c) {
+        (c.name == cmd).then({
+            rc = c.run(mp, root, cmd)
+            hit = true
+            h.break
+        })
+    })
+    hit.then({ rc }, { mp.default_emit(cmd) })
+}
 main = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -1404,7 +1534,7 @@ main = () i32 {
     // exit code — `zenc emit x.zen > file` must not report success having written nothing.
     rc := (cmd == "--help").match ({
         true  => {
-            say(HELP())
+            say(mp.HELP())
             0
         },
         false => (cmd == "--version").match ({
@@ -1412,52 +1542,7 @@ main = () i32 {
                 say(VERSION())
                 0
             },
-            false => (cmd == "--build-self" || cmd == "--build-self-full").match ({
-                true  => (arg(2) == "").match ({
-                    true  => {
-                        eprint("usage: zenc --build-self[-full] <out.c> <srcroot>\n")
-                        2
-                    },
-                    false => mp.build_self(arg(3), arg(2), cmd == "--build-self"),
-                }),
-                false => (cmd == "emit").match ({
-                    true  => mp.emit_file(root, arg(2), arg(3)),
-                    false => (cmd == "emit-js").match ({
-                        true  => mp.emit_js(root, arg(2)),
-                        false => (cmd == "check").match ({
-                            true  => mp.check_spec(root, mp.resolve_spec(root, arg(2))),
-                            false => (cmd == "run").match ({
-                                true  => mp.run_cmd(root),
-                                false => (cmd == "profile").match ({
-                                    true  => mp.profile_cmd(root),
-                                    false => (cmd == "build").match ({
-                                        true  => mp.build_cmd(root),
-                                        false => (cmd == "targets").match ({
-                                            true  => mp.list_plan_targets(root, proj_dir(arg(2))),
-                                            false => (cmd == "fmt").match ({
-                                                true  => mp.fmt_cmd(arg(2), arg(3)),
-                                                false => (cmd == "doc").match ({
-                                                    true  => mp.doc_cmd(root, arg(2)),
-                                                    false => (cmd == "init").match ({
-                                                        true  => mp.zi_cmd(),
-                                                        false => (cmd == "lsp").match ({
-                                                            true  => mp.lsp_cmd(root),
-                                                            false => (cmd == "audit").match ({
-                                                                true  => mp.audit_cmd(root, arg(2), arg(3), arg(4)),
-                                                                false => mp.default_emit(cmd),
-                                                            }),
-                                                        }),
-                                                    }),
-                                                }),
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
+            false => mp.dispatch_cmd(root, cmd),
         }),
     })
     out_status(rc)
@@ -1474,7 +1559,7 @@ default_emit = (mp: MutPtr<Malloc>, path: string_view) i32 {
     (path == "").match ({
         true  => (isatty(0) != 0).match ({
             true  => {
-                say(HELP())
+                say(mp.HELP())
                 0
             },
             false => mp.stdin_emit(mp.read_stdin()),
