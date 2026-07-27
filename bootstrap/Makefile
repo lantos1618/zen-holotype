@@ -43,7 +43,7 @@ GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zen build regen clean harness harness-fast difftest docs-check ffi-verify setup-git resolve-seed
+.PHONY: zen build regen clean harness harness-fast difftest docs-check ffi-verify asan setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -119,6 +119,14 @@ difftest: zen
 # the deliberate list exactly, and every local Markdown link target must exist.
 docs-check: zen
 	cd $(ROOT) && $(ZENC) run tools/check-docs.zen
+
+# Sanitizer gate: rebuild the compiler under ASan+UBSan (-fno-sanitize-recover=all) and sweep the
+# fixture corpus with it. Both scripts predate this target — they were written for the fuzz work and
+# then nothing ever ran them, so a sanitizer regression in the front end could land on a green CI.
+# A normal `check` rejection is NOT a finding (see tools/fuzz-corpus.zen); only a sanitizer report or a
+# signal counts. Slow (a full ASan rebuild), so it is its own target and its own CI job.
+asan: zen
+	cd $(ROOT) && ./scripts/fuzz-build.sh && $(ZENC) run tools/fuzz-corpus.zen $(ROOT)
 
 # FFI drift gate: prove std's hand-written foreign prototypes (src/std/c/libc.zen and friends)
 # match the REAL system headers. Reuses `zenc emit` (foreign decls lower to bare C prototypes),
