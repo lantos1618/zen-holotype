@@ -7,7 +7,8 @@
 { arith_rty, arm_at, arrow_at, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc,
   dglobal, dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish,
   gstr_string, is_expr_null, member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys,
-  sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret, swhile, ti32, tvoid, vref } = compiler.genc
+  sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret, subst_ty_in, swhile, ti32,
+  tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
 { gstr_int, is_prim_width, map_slice, one_stmt, param_names_has, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
@@ -209,7 +210,7 @@ resolve_genlit_bare = (
     })
 }
 resolve_genlit = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData) Ptr<Expr> {
-    inits := a.resolve_inits(env.clr_exp(), sd.inits)
+    inits := a.resolve_inits(env.clr_exp(), sd, sd.inits)
     (sd.targs.len > 0).match ({
         true  => a.genlit_g(env, sd, inits),
         false => a.resolve_genlit_bare(env, sd, inits),
@@ -245,8 +246,15 @@ resolve_expr_plain = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         _               => e,
     })
 }
+// Element type precedence: expected > already-set > inferred-from-items. The parser writes every
+// source literal as `slit(tvoid(), …)`, so a non-void `sd.elem` was put there by a lowering pass
+// (collect_varargs, subst, lift) and must survive re-resolution. resolve_module resolves several
+// times, and the expected type for an already-collected variadic slot is the ELEMENT type T — whose
+// `elem_of()` is void — so re-inferring narrows `...i64` built from bare int literals back to `[i32]`
+// on the second pass, and the callee then reads i64s out of i32 slots.
 resolve_slicelit = (a: MutPtr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
-    et := env.sl_elem_exp(sd.items)
+    keep := env.exp.elem_of().is_void_ty() && sd.elem.is_void_ty() == false
+    et := keep.then({ sd.elem }, { env.sl_elem_exp(sd.items) })
     a.cenode(slit(et, a.resolve_args(env.with_exp(et), sd.items)))
 }
 // Field access auto-derefs pointer receivers.
@@ -269,8 +277,37 @@ resolve_loop = (a: MutPtr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
     )
     a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body), l.h))
 }
-resolve_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit]) [FieldInit] {
-    map_slice(a, inits, (fi) { finit(fi.name, a.resolve_expr(env, fi.value)) })
+fields_ty_of = (fields: [Field], fname: string_view) Ty {
+    found := tvoid()
+    fields.loop((h, i, f) {
+        found = (f.name == fname).then({ f.ty }, { found })
+    })
+    found
+}
+// The declared type of the field being initialized is the expected type for its value. Without it a
+// bare slice literal in a field slot keeps the i32 literal default: `Holder(xs: [1, 2, 3])` against a
+// declared `xs: [i64]` emits a 12-byte `int32_t` backing array with `.len = 3`, while every reader
+// indexes it with `sizeof(int64_t)` — so the bounds check passes (the length IS 3) and index 2 reads
+// past the end of the block. A generic struct's field type may name a tparam: substitute the WRITTEN
+// type args when the literal has any, and otherwise leave it void, because a BARE generic literal
+// infers its targs from these very inits and pinning an expected type here would be circular.
+init_exp_ty = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, fname: string_view) Ty {
+    plain := env.didx.idx_struct_field(env.decls, sd.ty, fname)
+    plain.is_void_ty().match ({
+        true  => (sd.targs.len > 0).match ({
+            true  => {
+                gsd := env.env_gstruct(sd.ty)
+                a.subst_ty_in(gsd.tparams, sd.targs, gsd.fields.fields_ty_of(fname))
+            },
+            false => tvoid(),
+        }),
+        false => plain,
+    })
+}
+resolve_inits = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit]) [FieldInit] {
+    map_slice(a, inits, (fi) {
+        finit(fi.name, a.resolve_expr(env.with_exp(a.init_exp_ty(env, sd, fi.name)), fi.value))
+    })
 }
 enum_payload_mono_ty = (env: Env, ename: string_view, etargs: [Ty], variant: string_view) Ty {
     env
