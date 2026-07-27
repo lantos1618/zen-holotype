@@ -448,14 +448,14 @@ lz_hover_motion = (mp: MutPtr<Malloc>) bool {
 //   gD          textDocument/declaration     (in Zen a decl IS the definition — one handler could serve both)
 //   gi          textDocument/implementation  (should list the `Type.impl(Trait, …)` sites of a trait)
 //   gr          textDocument/references
-//   gO          textDocument/documentSymbol  — also the Zen-native replacement for the `]f [f ]c [c`
-//               motions, which are tree-sitter textobjects and have had no grammar to bind to since
-//               the Python purge deleted it. Nothing binds them today.
 //   <leader>rn  textDocument/rename
 //               textDocument/typeDefinition, textDocument/signatureHelp
+// `gO` (textDocument/documentSymbol) LEFT this list when it was implemented — the outline suite below
+// is what replaced its line here, and it is also what `]m`/`[m` are bound to (Zen has no tree-sitter
+// grammar since the Python purge, so the `]f [f ]c [c` textobject motions have nothing to bind to).
 // Each probe carries its own request id, so one method becoming real reddens exactly one line here.
 LZ_UNIMPL = () [string_view] {
-    ["declaration", "implementation", "references", "documentSymbol", "rename", "typeDefinition", "signatureHelp"]
+    ["declaration", "implementation", "references", "rename", "typeDefinition", "signatureHelp"]
 }
 lz_unimplemented_motions = (mp: MutPtr<Malloc>) bool {
     z: string_view := ""
@@ -479,9 +479,81 @@ lz_unimplemented_motions = (mp: MutPtr<Malloc>) bool {
         && o.contains("declarationProvider") == false
         && o.contains("implementationProvider") == false
         && o.contains("referencesProvider") == false
-        && o.contains("documentSymbolProvider") == false
         && o.contains("renameProvider") == false
         && mp.lz_rc(28) == "0"
+}
+// ── gO: the DOCUMENT SYMBOL OUTLINE ───────────────────────────────────────────────────────────────
+// One fixture holding one of every declaration kind that becomes a symbol. It is NEVER written to
+// disk, so every assertion below is also proof the reply came from the client's buffer.
+//
+//    0  { len } = std.text.str            an import record — names another file, not a symbol here
+//    1  Color*: Red | Green               an enum (its VARIANTS carry no position: not listed)
+//    2  Shape*: { w: i32,                 a struct (its FIELDS carry no position: not listed)
+//    3      area = (s: Shape) i32 { s.w }   an INHERENT METHOD — a `children` Method of Shape
+//    4  }
+//    5  counter := 0                      a mutable global
+//    6  top* = (n: i32) i32 { n }         a top-level fn
+//    7  main = () i32 { top(counter) }    another one
+LZ_SYM_DOC = () string_view {
+    "{ len } = std.text.str\\nColor*: Red | Green\\nShape*: { w: i32,\\n    area = (s: Shape) i32 { s.w }\\n}\\ncounter := 0\\ntop* = (n: i32) i32 { n }\\nmain = () i32 { top(counter) }\\n"
+}
+// one `textDocument/documentSymbol` against that fixture, as request id 4.
+lz_sym_probe = (mp: MutPtr<Malloc>, gid: i64) string_view {
+    z: string_view := ""
+    uri := mp.lz_uri("lzsym.zen")
+    req := mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
+    mp.lz_run(gid, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_SYM_DOC())), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+}
+// a symbol's name, kind and 0-based start, matched as ONE contiguous substring — a name can never be
+// paired with a different symbol's kind or position.
+lz_sym_is = (
+    mp: MutPtr<Malloc>,
+    o: string_view,
+    name: string_view,
+    kind: i64,
+    line: i64,
+    col: i64,
+) bool {
+    z: string_view := ""
+    o.contains(mp.zo_join([z, "{\"name\":\"", name, "\",\"kind\":", mp.zo_itoa(kind), ",\"range\":{\"start\":{\"line\":", mp.zo_itoa(line), ",\"character\":", mp.zo_itoa(col), "}"]))
+}
+// gO (a) THE TOP-LEVEL LIST: every declaration kind at its own line, under the LSP SymbolKind the
+// protocol names for it — Function=12, Struct=23, Enum=10, Variable=13.
+lz_docsym_top_level = (mp: MutPtr<Malloc>) bool {
+    o := mp.lz_sym_probe(34)
+    o.contains("\"documentSymbolProvider\":true")
+        && mp.lz_sym_is(o, "Color", 10, 1, 0)
+        && mp.lz_sym_is(o, "Shape", 23, 2, 0)
+        && mp.lz_sym_is(o, "counter", 13, 5, 0)
+        && mp.lz_sym_is(o, "top", 12, 6, 0)
+        && mp.lz_sym_is(o, "main", 12, 7, 0)
+        && mp.lz_rc(34) == "0"
+}
+// gO (b) THE METHOD, NESTED — and under the name the SOURCE writes. The parser hoists `area` into a
+// mangled top-level `impl_Shape_Shape_area` function; leaking that name is the failure this locks out
+// (an outline listing it would also list it TWICE, once mangled and once as a child). `area` must
+// appear exactly once, as Shape's first child, at its real position inside the type body.
+lz_docsym_nests_methods = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    o := mp.lz_sym_probe(35)
+    mp.lz_sym_is(o, "area", 6, 3, 4)
+        && o.contains(mp.zo_join([z, "\"children\":[{\"name\":\"area\",\"kind\":6"]))
+        && o.contains("impl_") == false
+        && mp.lz_rc(35) == "0"
+}
+// gO (c) WHAT IS NOT LISTED, pinned so the gaps are visible and cannot grow silently: the import
+// record (`len` is declared in std.text.str, not here), the struct FIELD `w` and the enum VARIANT
+// `Red` — neither a Field nor a VariantDef carries a source position in the AST, which is the same
+// gap that keeps go-to-definition off a field.
+lz_docsym_omits = (mp: MutPtr<Malloc>) bool {
+    o := mp.lz_sym_probe(36)
+    // the positive anchor first: a reply of `[]` would satisfy every absence below vacuously. The
+    // list starts at the file's FIRST declaration, which is the enum on line 1 — not the import.
+    o.contains("\"id\":4,\"result\":[{\"name\":\"Color\"")
+        && o.contains("\"name\":\"len\"") == false
+        && o.contains("\"name\":\"w\"") == false
+        && o.contains("\"name\":\"Red\"") == false
+        && mp.lz_rc(36) == "0"
 }
 // ── completion, as an editor drives it ────────────────────────────────────────────────────────────
 // one completion probe on an UNSAVED buffer at (line, ch).
@@ -544,5 +616,5 @@ lz_comp_auto_import = (mp: MutPtr<Malloc>) bool {
 harness_lsp_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
-    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown(), mp.lz_gd_same_file_fn(), mp.lz_gd_same_file_type(), mp.lz_gd_inherent_method(), mp.lz_gd_struct_field(), mp.lz_gd_cross_module(), mp.lz_gd_imported_std(), mp.lz_gd_qualified(), mp.lz_hover_motion(), mp.lz_unimplemented_motions(), mp.lz_comp_empty_buffer(), mp.lz_comp_top_level(), mp.lz_comp_after_std_dot(), mp.lz_comp_receiver_members(), mp.lz_comp_auto_import()])
+    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown(), mp.lz_gd_same_file_fn(), mp.lz_gd_same_file_type(), mp.lz_gd_inherent_method(), mp.lz_gd_struct_field(), mp.lz_gd_cross_module(), mp.lz_gd_imported_std(), mp.lz_gd_qualified(), mp.lz_hover_motion(), mp.lz_unimplemented_motions(), mp.lz_docsym_top_level(), mp.lz_docsym_nests_methods(), mp.lz_docsym_omits(), mp.lz_comp_empty_buffer(), mp.lz_comp_top_level(), mp.lz_comp_after_std_dot(), mp.lz_comp_receiver_members(), mp.lz_comp_auto_import()])
 }
