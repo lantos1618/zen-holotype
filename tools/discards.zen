@@ -134,16 +134,10 @@ is_result_call = (cx: Ctx, e: Ptr<Expr>) bool {
     nm := callee_of(e)
     l := (nm == "").then({ 0 }, { cx.loc.get(nm, 0) })
     v := (nm == "" || l != 0).then({ l }, { cx.m.get(nm, 0) })
-    v == 1 || (g_loose == 1 && v == 2)
+    v == 1 || g_loose == 1 && v == 2
 }
 report = (cx: Ctx, e: Ptr<Expr>, tag: string_view) void {
-    format("{}:{}: {} in {} [{}]\n", [
-        arg_str(cx.path),
-        arg_int(cx.src.line_of(callee_pos(e))),
-        arg_str(callee_of(e)),
-        arg_str(cx.fname),
-        arg_str(tag),
-    ])
+    format("{}:{}: {} in {} [{}]\n", [arg_str(cx.path), arg_int(cx.src.line_of(callee_pos(e))), arg_str(callee_of(e)), arg_str(cx.fname), arg_str(tag)])
 }
 scan_arms = (cx: Ctx, arms: [ArmData], mode: i32) void {
     arms.loop((h, i, ar) {
@@ -210,7 +204,10 @@ scan_body = (cx: Ctx, stmts: [Stmt], mode: i32) void {
                 cx.scan_expr(asg.target, 0)
                 cx.scan_expr(asg.value, 0)
             },
-            .Return(e)   => cx.scan_expr(e, tail.then({ mode }, { cx.voidfn })),
+            // A `return` always leaves the ENCLOSING FN, never the lambda it is written inside, so its
+            // value is used unless that fn is void. Taking the surrounding `mode` here reported every
+            // guard-shaped `.then({ return err(…) })` as a discarded Result — 18 of the first 21 hits.
+            .Return(e)   => cx.scan_expr(e, cx.voidfn),
             .If(f)       => {
                 cx.scan_expr(f.c, 0)
                 cx.scan_body(f.then, 1)
@@ -289,7 +286,7 @@ scan_file = (m: Map<i64>, a: MutPtr<Malloc>, path: string_view) void {
     g_files = g_files + 1
     src := a.contents_in(path).expect("discards: cannot read file")
     decls := a.parse_module(src)
-    (perr_get() || lerr_get()).then({ }, {
+    ((perr_get() || lerr_get()) == false).then({
         seed: i64 := 0
         loc := of(a, "", seed).expect("discards: local index alloc").idx_module(a, decls)
         cx := Ctx(
@@ -327,6 +324,21 @@ walk = (m: Map<i64>, a: MutPtr<Malloc>, root: string_view, phase: i32) Map<i64> 
     })
     out
 }
+// The roots named on the command line. argv is a handful of entries, so recursion carries the cursor:
+// `@while` is for the scanners over unbounded input, not for a bounded argv walk.
+scan_roots = (m: Map<i64>, a: MutPtr<Malloc>, i: i32) void {
+    (i < argc()).then({
+        (arg(i) == "--loose").match ({
+            true  => {
+                g_loose = 1
+            },
+            false => {
+                m.walk(a, arg(i), 1)
+            },
+        })
+        m.scan_roots(a, i + 1)
+    })
+}
 main = () i32 {
     mm := Malloc(_: 0)
     a := mm.addr()
@@ -345,25 +357,7 @@ main = () i32 {
         })
     })
     // phase 1: scan the roots named on the command line
-    i := 1
-    @while(i < argc()) {
-        (arg(i) == "--loose").match ({
-            true  => {
-                g_loose = 1
-            },
-            false => {
-                m.walk(a, arg(i), 1)
-            },
-        })
-        i = i + 1
-    }
-    format("-- discards: {} files, {} fns, {} Result-calls, {} stmt, {} lambda-tail, {} unread\n", [
-        arg_int(g_files),
-        arg_int(g_fns),
-        arg_int(g_calls),
-        arg_int(g_stmt),
-        arg_int(g_lambda),
-        arg_int(g_unread),
-    ])
+    m.scan_roots(a, 1)
+    format("-- discards: {} files, {} fns, {} Result-calls, {} stmt, {} lambda-tail, {} unread\n", [arg_int(g_files), arg_int(g_fns), arg_int(g_calls), arg_int(g_stmt), arg_int(g_lambda), arg_int(g_unread)])
     0
 }
