@@ -404,34 +404,39 @@ lz_gd_same_file_fn = (mp: MutPtr<Malloc>) bool {
 lz_gd_same_file_type = (mp: MutPtr<Malloc>) bool {
     mp.lz_def_is(mp.lz_def_probe(21, 8, 9), "lzmot.zen", 3, 0) && mp.lz_rc(21) == "0"
 }
-// gd (c) INHERENT METHOD: `s.area()` on line 9. NOT IMPLEMENTED — `area` is declared at column 4
-// INSIDE the type body and the resolver is a column-0 textual scan, so it is invisible. Same walker
-// gap `zen doc` has; reading the parser's hoisted impl methods would close both at once.
+// gd (c) INHERENT METHOD: `s.area()` on line 9 -> the `area` head at line 4 column 4, INSIDE the type
+// body. A column-0 textual scan cannot see it; `lsp_def_via_ast` reaches it by un-mangling the
+// parser's hoisted `impl_<Tr>_<Ty>_<m>` function back to the name the call site actually writes.
 lz_gd_inherent_method = (mp: MutPtr<Malloc>) bool {
-    lz_def_none(mp.lz_def_probe(22, 9, 11)) && mp.lz_rc(22) == "0"
+    mp.lz_def_is(mp.lz_def_probe(22, 9, 11), "lzmot.zen", 4, 4) && mp.lz_rc(22) == "0"
 }
-// gd (d) STRUCT FIELD: `w` in `Shape(w: 1)` on line 8. NOT IMPLEMENTED — a field is not a column-0 head.
+// gd (d) STRUCT FIELD: `w` in `Shape(w: 1)` on line 8. STILL NOT IMPLEMENTED, and the one gap the AST
+// path does not close: `lsp_decl_pos` scans TOP-LEVEL declarations, and a field is positioned inside a
+// struct body, not among them. This case is the marker for that remaining work.
 lz_gd_struct_field = (mp: MutPtr<Malloc>) bool {
     lz_def_none(mp.lz_def_probe(23, 8, 15)) && mp.lz_rc(23) == "0"
 }
-// gd (e) CROSS-MODULE FN: `lzfix_fn(r)` on line 11, declared in the sibling module `lzfix`. NOT
-// IMPLEMENTED — and this is THE reported bug. Every Zen file opens with import records, so the great
-// majority of names under a cursor are imported and `gd` answers null for nearly all of them.
+// gd (e) CROSS-MODULE FN: `lzfix_fn(r)` on line 11 -> the sibling module `lzfix`, line 0 column 0.
+// This was THE reported bug: every Zen file opens with import records, so the great majority of names
+// under a cursor are imported, and a same-file scan answered null for nearly all of them. Resolving
+// through the compiler's flattened program is what crosses the file boundary.
 lz_gd_cross_module = (mp: MutPtr<Malloc>) bool {
-    lz_def_none(mp.lz_def_probe(24, 11, 9)) && mp.lz_rc(24) == "0"
+    mp.lz_def_is(mp.lz_def_probe(24, 11, 9), "lzfix.zen", 0, 0) && mp.lz_rc(24) == "0"
 }
-// gd (f) IMPORTED STD NAME: `len("x")` on line 12, bound by `{ len } = std.text.str`. NOT IMPLEMENTED.
+// gd (f) IMPORTED STD NAME: `len("x")` on line 12, bound by `{ len } = std.text.str` -> the `len*`
+// head in std/text/str.zen. `file` is matched as a URI SUFFIX, so the answer's absolute path (which
+// varies with the source root) does not enter the assertion.
 lz_gd_imported_std = (mp: MutPtr<Malloc>) bool {
-    lz_def_none(mp.lz_def_probe(25, 12, 9)) && mp.lz_rc(25) == "0"
+    mp.lz_def_is(mp.lz_def_probe(25, 12, 9), "str.zen", 8, 0) && mp.lz_rc(25) == "0"
 }
-// gd (g) QUALIFIED `mod.name`: `ms.len("x")` on line 13. NOT IMPLEMENTED — and the qualifier is not
-// even consulted: the scan takes the identifier under the cursor (`len`) and never sees `ms`, so a
-// qualified name and a bare one are literally the same query today.
+// gd (g) QUALIFIED `mod.name`: `ms.len("x")` on line 13 resolves to the same `len*` head as (f) —
+// `ms = std.text.str` is the same module under another name, so both spellings must land together.
 lz_gd_qualified = (mp: MutPtr<Malloc>) bool {
-    lz_def_none(mp.lz_def_probe(26, 13, 12)) && mp.lz_rc(26) == "0"
+    mp.lz_def_is(mp.lz_def_probe(26, 13, 12), "str.zen", 8, 0) && mp.lz_rc(26) == "0"
 }
-// K (hover) over the same fixture: hovering the `top` call reports its declaration. Hover shares the
-// definition scanner, so it covers the same same-file-only set and no more.
+// K (hover) over the same fixture: hovering the `top` call reports its declaration. Hover does NOT
+// share the definition path — it answers from `lspq_hover`, a scan of the open buffer — so it stays
+// same-file-only even now that `gd` resolves across modules. That divergence is the next thing to close.
 lz_hover_motion = (mp: MutPtr<Malloc>) bool {
     z: string_view := ""
     uri := mp.lz_uri("lzmot.zen")
