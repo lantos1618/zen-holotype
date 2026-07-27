@@ -43,7 +43,7 @@ GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zen build regen clean harness harness-fast difftest docs-check ffi-verify asan setup-git resolve-seed
+.PHONY: zen build regen clean harness harness-fast bench bench-valgrind difftest docs-check ffi-verify asan setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -103,6 +103,26 @@ harness: zen
 #   make -f bootstrap/Makefile harness-fast
 harness-fast: zen
 	cd $(ROOT) && ZO=/tmp/zo_harness_fast.$$$$ && export ZENC_CACHE_DIR=/tmp/zo-harness-cache && $(ZENC) build tests/harness.zen -o $$ZO && ZEN_HARNESS_FAST=1 $$ZO; rc=$$?; rm -rf $$ZO; exit $$rc
+
+# The benchmark suite (tests/harness_bench.zen): time AND live-heap-bytes per named operation.
+# DELIBERATELY NOT part of `make harness` and NOT a gate — benchmark numbers are noisy and must
+# never decide a merge. It records numbers; humans compare them. There is no baseline file.
+#   make -f bootstrap/Makefile bench > before.txt   # …change something, rerun, then diff
+#   ZEN_BENCH_REPS=7 make -f bootstrap/Makefile bench   # measure this box's noise floor first
+#   ZEN_BENCH_SCALE=4 make -f bootstrap/Makefile bench  # longer loops (or =1 under valgrind)
+# Built with the DEFAULT dev profile (-O1 -g), the same thing `zen run` gives a user; see the
+# suite's header for what each case measures and how to read liveB/op.
+bench: zen
+	cd $(ROOT) && ZB=/tmp/zbench.$$$$ && $(ZENC) build tests/harness_bench.zen -o $$ZB && $$ZB; rc=$$?; rm -f $$ZB; exit $$rc
+
+# The same suite as a LEAK-REGRESSION check: valgrind reports exact allocation/free COUNTS and
+# backtraces, which the in-process liveB/op column cannot (it measures live bytes, not calls).
+# Under valgrind glibc's malloc is replaced, so liveB/op reads 0 in every row — read valgrind's
+# "total heap usage" and LEAK SUMMARY instead, and divide by the iters column for allocs/op.
+# ZEN_BENCH_SCALE is pinned small because valgrind is ~30x slower.
+#   make -f bootstrap/Makefile bench-valgrind
+bench-valgrind: zen
+	cd $(ROOT) && ZB=/tmp/zbench.$$$$ && $(ZENC) build tests/harness_bench.zen -o $$ZB && ZEN_BENCH_SCALE=1 valgrind --leak-check=full --num-callers=12 $$ZB; rc=$$?; rm -f $$ZB; exit $$rc
 
 # Differential gate (module-system campaign): compare two zenc binaries over the whole fixture +
 # example + dispatch corpus — check stdout/stderr/exit, emitted C bytes, run exit/stdout. Diffs not
