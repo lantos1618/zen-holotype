@@ -115,16 +115,18 @@ difftest: zen
 	@[ "$(OLD)" != "$(NEW)" ] || echo "NOTE: OLD == NEW ($(OLD)) — this run compares the compiler with ITSELF and cannot detect a behaviour change. Pass OLD=<saved baseline> for the real gate."
 	cd $(ROOT) && ./scripts/difftest.sh $(OLD) $(NEW)
 
-docs-check:
-	cd $(ROOT) && ./scripts/check-docs.sh
+# Documentation gate, written in Zen (tools/check-docs.zen): the tracked `*.md` inventory must match
+# the deliberate list exactly, and every local Markdown link target must exist.
+docs-check: zen
+	cd $(ROOT) && $(ZENC) run tools/check-docs.zen
 
 # Sanitizer gate: rebuild the compiler under ASan+UBSan (-fno-sanitize-recover=all) and sweep the
 # fixture corpus with it. Both scripts predate this target — they were written for the fuzz work and
 # then nothing ever ran them, so a sanitizer regression in the front end could land on a green CI.
-# A normal `check` rejection is NOT a finding (see fuzz-corpus.sh); only a sanitizer report or a
+# A normal `check` rejection is NOT a finding (see tools/fuzz-corpus.zen); only a sanitizer report or a
 # signal counts. Slow (a full ASan rebuild), so it is its own target and its own CI job.
-asan:
-	cd $(ROOT) && ./scripts/fuzz-build.sh && ./scripts/fuzz-corpus.sh
+asan: zen
+	cd $(ROOT) && ./scripts/fuzz-build.sh && $(ZENC) run tools/fuzz-corpus.zen $(ROOT)
 
 # FFI drift gate: prove std's hand-written foreign prototypes (src/std/c/libc.zen and friends)
 # match the REAL system headers. Reuses `zenc emit` (foreign decls lower to bare C prototypes),

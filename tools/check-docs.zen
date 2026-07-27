@@ -1,0 +1,195 @@
+// tools/check-docs.zen — documentation inventory + local-link checker, written in Zen.
+//
+//   ./zen run tools/check-docs.zen          # run from the repository root
+//
+// Two gates, in order:
+//   1. INVENTORY — the set of tracked `*.md` files must be exactly EXPECTED (byte-lexicographic /
+//      C-locale order, the order `LC_ALL=C sort` produces: `.` < uppercase < lowercase). Historical
+//      plans and reports belong in git history, not as unlabelled live documents, so a new Markdown
+//      file is a deliberate decision that has to be recorded here. Mismatch => exit 1.
+//   2. LINKS — every local Markdown link target `](path)` in those files must exist. Absolute URLs
+//      (http/https/mailto) and pure fragments (`#anchor`) are skipped; a `path#anchor` is checked
+//      without its fragment, and an angle-bracketed `<path>` is unwrapped. Missing target => exit 1.
+//
+// A file listed in the inventory that cannot be READ is exit 2, not a pass: a link scan that never
+// ran is not a link scan that found nothing (the exact fail-open hole the shell version had to guard).
+{ Malloc } = std.mem.alloc
+{ contents_in, write_all } = std.io.file
+{ is_dir, read_dir } = std.sys.fs
+{ access } = std.c.libc
+{ cat_in, ends_with, find, join_in, len, split_in, starts_with, substr_in, view } = std.text.str
+{ String, init, append_in, finish_in } = std.text.string
+{ expect } = std.core.result
+{ then } = std.core.bool
+// The deliberate documentation set. Keep C-locale sorted (`LC_ALL=C sort`): `.` before letters,
+// UPPERCASE before lowercase — `docs/SPEC.md` precedes `docs/metaprogramming-vision.md`.
+EXPECTED := "./README.md\n./bootstrap/README.md\n./docs/ARCHITECTURE.md\n./docs/MEMORY_MODEL.md\n./docs/SPEC.md\n./docs/STATUS.md\n./docs/metaprogramming-vision.md\n./docs/name-interning-design.md\n./docs/profiling.md\n./editor/nvim/README.md\n./editor/vscode/README.md\n./examples/README.md\n./scripts/alloc-fuzz/README.md"
+// access(path, F_OK) tests existence only. Named ACCESS_F_OK, not F_OK: a top-level Zen global lowers
+// to a C global of the same name, and `F_OK` is already a <unistd.h> macro — the collision is a raw C
+// redefinition error, not a Zen diagnostic.
+ACCESS_F_OK := 0
+STDERR := 2
+// running counters: how many `*.md` files the walk joined into the buffer, and the exit status the
+// link pass settles on (module-level mutable globals, the same shape tools/sigs.zen uses)
+g_found := 0
+g_failed := 0
+eout = (s: string_view) void {
+    v := s.view()
+    write_all(STDERR, v.ptr, v.len, 0).expect("check-docs: stderr write failed")
+}
+exists = (path: string_view) bool { path.access(ACCESS_F_OK) == 0 }
+// ── byte-lexicographic ordering (the C locale: compare raw bytes, shorter-is-less on a prefix) ──
+// recursion depth = the common prefix of two paths — short and bounded
+sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
+    (i >= xv.len || i >= yv.len).match ({
+        true  => xv.len < yv.len,
+        false => (xv[i] == yv[i]).then({ xv.sv_lt_at(yv, i + 1) }, { xv[i] < yv[i] }),
+    })
+}
+sv_lt = (x: string_view, y: string_view) bool { x.view().sv_lt_at(y.view(), 0) }
+sift_left = (xs: [string_view], j: i64) void {
+    (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
+        t := xs[j]
+        xs[j] = xs[j - 1]
+        xs[j - 1] = t
+        xs.sift_left(j - 1)
+    })
+}
+sort_from = (xs: [string_view], i: i64) void {
+    (i < xs.len).then({
+        xs.sift_left(i)
+        xs.sort_from(i + 1)
+    })
+}
+sort_paths = (xs: [string_view]) void { xs.sort_from(1) }
+// ── the walk ──────────────────────────────────────────────────────────────────
+// `find . -name .git -prune -o -path './.claude' -prune -o -name '*.md' -type f -print`:
+// a directory named `.git` at any depth is pruned, the single path `./.claude` is pruned, and every
+// remaining regular file whose name ends in `.md` is reported as `./dir/name.md`.
+is_pruned = (name: string_view, full: string_view) bool { name == ".git" || full == "./.claude" }
+walk = (mp: MutPtr<Malloc>, dir: string_view, acc: String) String {
+    entries := mp.read_dir(dir).expect("check-docs: cannot read directory")
+    acc2 := acc
+    entries.loop((h, i, entry) {
+        full := mp.cat_in(mp.cat_in(dir, "/"), entry)
+        (is_pruned(entry, full) == false).then({
+            acc2 = full.is_dir().match ({
+                true  => mp.walk(full, acc2),
+                false => entry.ends_with(".md").match ({
+                    true  => {
+                        g_found = g_found + 1
+                        line := (g_found == 1).then({ full }, { mp.cat_in("\n", full) })
+                        mp.append_in(acc2, line).expect("check-docs: oom")
+                    },
+                    false => acc2,
+                }),
+            })
+        })
+    })
+    acc2
+}
+// ── link extraction ───────────────────────────────────────────────────────────
+// `grep -Eo '\]\([^)]*\)'` is LINE-oriented: `[^)]*` never crosses a newline, so an unclosed `](`
+// simply yields no match. Mirror that exactly — scan forward for `)`, giving up at `\n` or EOF.
+close_at = (v: [u8], j: i64) i64 {
+    (j >= v.len || v[j] == '\n').match ({
+        true  => 0 - 1,
+        false => (v[j] == ')').then({ j }, { v.close_at(j + 1) }),
+    })
+}
+is_remote = (t: string_view) bool {
+    t.starts_with("http://") || t.starts_with("https://") || t.starts_with("mailto:")
+}
+// the target's own prefix tests run BEFORE the fragment is stripped (`case` then `%%#*` in the shell)
+is_skipped = (t: string_view) bool { t.len() == 0 || t.starts_with("#") || is_remote(t) }
+// `${target%%#*}`
+strip_fragment = (mp: MutPtr<Malloc>, t: string_view) string_view {
+    cut := t.find("#")
+    (cut < 0).then({ t }, { mp.substr_in(t, 0, cut).expect("check-docs: oom") })
+}
+// `${target#'<'}` then `${target%>}`
+strip_angles = (mp: MutPtr<Malloc>, t: string_view) string_view {
+    lo := t.starts_with("<").then({ 1 }, { 0 })
+    hi := t.ends_with(">").then({ t.len() - 1 }, { t.len() })
+    (hi <= lo).then({ "" }, { mp.substr_in(t, lo, hi - lo).expect("check-docs: oom") })
+}
+// `dir=${file%/*}` — every path here starts `./`, so the slash always exists
+dir_of = (mp: MutPtr<Malloc>, file: string_view) string_view {
+    v := file.view()
+    cut := 0 - 1
+    v.loop((h, i, b) {
+        cut = (b == '/').then({ i }, { cut })
+    })
+    (cut <= 0).then({ "." }, { mp.substr_in(file, 0, cut).expect("check-docs: oom") })
+}
+check_link = (mp: MutPtr<Malloc>, file: string_view, raw: string_view) void {
+    (is_skipped(raw) == false).then({
+        target := mp.strip_angles(mp.strip_fragment(raw))
+        full := mp.cat_in(mp.cat_in(mp.dir_of(file), "/"), target)
+        (full.exists() == false).then({
+            eout(file)
+            eout(": missing local link target: ")
+            eout(target)
+            eout("\n")
+            g_failed = 1
+        })
+    })
+}
+scan_links = (mp: MutPtr<Malloc>, file: string_view, src: string_view) void {
+    v := src.view()
+    v.loop((h, i, b) {
+        (b == '(' && i > 0 && v[i - 1] == ']').then({
+            end := v.close_at(i + 1)
+            (end < 0 == false).then({
+                mp.check_link(file, mp.substr_in(src, i + 1, end - i - 1).expect("check-docs: oom"))
+            })
+        })
+    })
+}
+// An unreadable file is a HARD stop (status 2): the scan did not run, so it proves nothing. std has no
+// libc `exit` binding, so the stop is recorded in g_failed and every later file is skipped — the same
+// output and the same status the shell's `exit 2` produced.
+read_and_scan = (mp: MutPtr<Malloc>, file: string_view) void {
+    mp.contents_in(file).match ({
+        .Ok(src) => mp.scan_links(file, src),
+        .Err(e)  => {
+            eout(file)
+            eout(": cannot scan for links (unreadable)\n")
+            g_failed = 2
+        },
+    })
+}
+check_file = (mp: MutPtr<Malloc>, file: string_view) void {
+    (g_failed == 2 == false).then({
+        mp.read_and_scan(file)
+    })
+}
+report_mismatch = (actual: string_view) void {
+    eout("documentation inventory changed; consolidate it or update tools/check-docs.zen intentionally\n")
+    eout("expected:\n")
+    eout(EXPECTED)
+    eout("\nactual:\n")
+    eout(actual)
+    eout("\n")
+}
+main = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    empty := mp.init(4096).expect("check-docs: oom")
+    joined := mp.walk(".", empty).finish_in(mp).expect("check-docs: oom")
+    files := mp.split_in(joined, '\n')
+    files.sort_paths()
+    actual := mp.join_in(files, "\n")
+    (actual == EXPECTED).match ({
+        true  => {
+            files.loop((h, i, f) {
+                mp.check_file(f)
+            })
+            g_failed
+        },
+        false => {
+            report_mismatch(actual)
+            1
+        },
+    })
+}
