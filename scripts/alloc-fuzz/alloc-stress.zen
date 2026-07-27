@@ -18,7 +18,6 @@ arc = std.mem.arc
 { Allocator } = std.mem.alloc
 { is_null } = std.core.ptr
 { println } = std.text.fmt
-
 // ── process-heap churn: a chain of acquire → (maybe resize) → release, one live buffer at a time ─────
 // Each buffer stamps its size in the first 8 bytes and re-reads it before release — an allocator
 // overwrite or a stale pointer trips the sentinel (→ `false`), a double-free/UAF trips ASan. A single
@@ -32,17 +31,17 @@ heap_step = (r: MutPtr<rand.Rng>, k: i64, ok: bool) bool {
             n := r.range(8, 256)
             p := halloc.gpa().addr().acquire(n)
             keep := p.is_null().match ({
-                true  => true,                          // heap OOM is acceptable — nothing to free
+                true  => true,    // heap OOM is acceptable — nothing to free
                 false => {
                     p.store_i64(n)
                     r.bool_p(0.5).match ({
                         true  => {
-                            m := r.range(264, 512)      // grow so realloc may move the block
+                            m := r.range(264, 512)    // grow so realloc may move the block
                             np := halloc.gpa().addr().resize(p, m)
                             np.is_null().match ({
                                 true  => true,
                                 false => {
-                                    good := np.load_i64() == n   // data preserved across the move?
+                                    good := np.load_i64() == n    // data preserved across the move?
                                     halloc.gpa().addr().release(np)
                                     good
                                 },
@@ -61,20 +60,15 @@ heap_step = (r: MutPtr<rand.Rng>, k: i64, ok: bool) bool {
     })
 }
 heap_churn = (r: MutPtr<rand.Rng>, iters: i64) bool { r.heap_step(iters, true) }
-
 // ── bump arena: fill with random-sized bumps until it refuses, then reset and reuse, then free ──────
 arena_fill = (r: MutPtr<rand.Rng>, ar: MutPtr<arena.Arena>, budget: i64) void {
-    (budget <= 0).match ({
-        true  => {},
-        false => {
-            n := r.range(1, 64)
-            p := ar.acquire(n)
-            p.is_null().match ({           // a refusal (null) just means "arena full" — expected
-                true  => {},
-                false => { p.store_i64(0 - 1) },
-            })
-            r.arena_fill(ar, budget - 1)
-        },
+    (budget <= 0 == false).then({
+        n := r.range(1, 64)
+        p := ar.acquire(n)
+        (p.is_null() == false).then({
+            p.store_i64(0 - 1)
+        })    // a refusal (null) just means "arena full" — expected
+        r.arena_fill(ar, budget - 1)
     })
 }
 arena_churn = (r: MutPtr<rand.Rng>) bool {
@@ -82,15 +76,16 @@ arena_churn = (r: MutPtr<rand.Rng>) bool {
     cap := r.range(64, 4096)
     ar := arena.make_in(backing.addr(), cap).match ({
         .Ok(x)  => x,
-        .Err(e) => { return false },
+        .Err(e) => {
+            return false
+        },
     })
     r.arena_fill(ar.addr(), 200)
-    ar.addr().reset()             // reuse the same block
+    ar.addr().reset()    // reuse the same block
     r.arena_fill(ar.addr(), 200)
     ar.addr().free_in(backing.addr())
     ar.buf == null_ptr()
 }
-
 // ── Rc / Arc: clone/drop balanced so the block frees exactly once ───────────────────────────────────
 // Ownership is linear (each Rc is consumed by exactly one drop or move), so N clones can't be dropped
 // in a loop off one binding. Instead recurse: each level clones a fresh owner, hands it to the deeper
@@ -98,7 +93,9 @@ arena_churn = (r: MutPtr<rand.Rng>) bool {
 // early (UAF) or never (leak); either is a hard ASan error. `count()` borrows (does not consume root).
 rc_spin = (root: Rc<i64>, n: i64) void {
     (n <= 0).match ({
-        true  => { root.drop_in(halloc.gpa().addr()) },
+        true  => {
+            root.drop_in(halloc.gpa().addr())
+        },
         false => {
             c := root.clone()
             c.rc_spin(n - 1)
@@ -109,17 +106,21 @@ rc_spin = (root: Rc<i64>, n: i64) void {
 rc_churn = (r: MutPtr<rand.Rng>) bool {
     root := halloc.gpa().addr().new_in(r.next()).match ({
         .Ok(x)  => x,
-        .Err(e) => { return false },
+        .Err(e) => {
+            return false
+        },
     })
     c := root.clone()
     count_ok := root.count() == 2
     c.drop_in(halloc.gpa().addr())
-    root.rc_spin(r.range(0, 8))     // spins clone/drop, then frees root at the bottom
+    root.rc_spin(r.range(0, 8))    // spins clone/drop, then frees root at the bottom
     count_ok
 }
 arc_spin = (root: arc.Arc<i64>, n: i64) void {
     (n <= 0).match ({
-        true  => { root.drop_in(halloc.gpa().addr()) },
+        true  => {
+            root.drop_in(halloc.gpa().addr())
+        },
         false => {
             c := root.clone()
             c.arc_spin(n - 1)
@@ -130,7 +131,9 @@ arc_spin = (root: arc.Arc<i64>, n: i64) void {
 arc_churn = (r: MutPtr<rand.Rng>) bool {
     root := arc.new_in(halloc.gpa().addr(), r.next()).match ({
         .Ok(x)  => x,
-        .Err(e) => { return false },
+        .Err(e) => {
+            return false
+        },
     })
     c := root.clone()
     count_ok := root.count() == 2
@@ -138,7 +141,6 @@ arc_churn = (r: MutPtr<rand.Rng>) bool {
     root.arc_spin(r.range(0, 8))
     count_ok
 }
-
 one_seed = (s: i64) bool {
     r := rand.seed(s)
     a := r.addr()
