@@ -25,6 +25,7 @@
   check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
 { DiagSpan } = compiler.diagnostic
 { resolve_failed, resolve_message, resolve_program_data, ResolvedProgram } = compiler.resolve
+{ impl_cname_in } = compiler.mangle
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
 { push_int, dirname, cstr_range, cstr_substr } = compiler.drvutil
 { lspt_legend, lspt_tokens } = compiler.lsp_tokens
@@ -639,30 +640,120 @@ lsp_doc_text = (mp: MutPtr<Malloc>, uri: string_view) string_view {
         }),
     })
 }
+// `file://` URI for a filesystem path — the inverse of lsp_uri_path, needed for a jump target the
+// client never named (the file of an imported module).
+lsp_path_uri = (mp: MutPtr<Malloc>, path: string_view) string_view {
+    mp.gstr_string(128).gstr_append(mp, "file://").gstr_append(mp, path).gstr_finish(mp)
+}
+// byte offset of the NAME of the top-level declaration called `name`, or 0. Every decl kind spells
+// pos 0 as "synthesized", so 0 doubles as this scan's miss.
+lsp_decl_pos = (decls: [Decl], name: string_view) i32 {
+    found: i32 := 0
+    decls.loop((h, i, d) {
+        p := d.match ({
+            .DFunc(f)      => (f.name == name).then({ f.pos }, { 0 }),
+            .DForeign(f)   => (f.name == name).then({ f.pos }, { 0 }),
+            .DStruct(sd)   => (sd.name == name).then({ sd.pos }, { 0 }),
+            .DGenStruct(g) => (g.name == name).then({ g.pos }, { 0 }),
+            .DEnum(ed)     => (ed.name == name).then({ ed.pos }, { 0 }),
+            .DGenEnum(g)   => (g.name == name).then({ g.pos }, { 0 }),
+            .DGlobal(g)    => (g.name == name).then({ g.pos }, { 0 }),
+            _              => 0,
+        })
+        (found == 0).then({
+            found = p
+        })
+    })
+    found
+}
+// a METHOD's declaration, reached through the DImpl record that still carries its ORIGINAL name. The
+// parser HOISTS both a trait impl's methods and a type body's INHERENT methods into mangled
+// `impl_<Tr>_<Ty>_<m>` functions, so a bare `area` matches no decl name until it is un-mangled — the
+// same un-hoisting compiler.pretty_decl does to round-trip a type body.
+lsp_method_pos = (mp: MutPtr<Malloc>, decls: [Decl], name: string_view) i32 {
+    found: i32 := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => im.methods.loop((h2, k, m) {
+                (found == 0 && m.name == name).then({
+                    found = decls.lsp_decl_pos(mp.impl_cname_in(im.trname, im.ty, m.name))
+                })
+            }),
+            _          => { },
+        })
+    })
+    found
+}
+// resolve `name` THROUGH THE COMPILER and answer with its real file:line:col. The pipeline is the one
+// the diagnostics already run: resolve_program_data flattens every imported module into a single
+// program, parse_module + resolve_module hand back declarations that each carry the byte offset of
+// their own name, and `locate_diag` maps such an offset back to the module it actually came from —
+// the identical machinery that puts a cross-module diagnostic in the right file. So "where is this
+// declared" is exactly "find the decl, locate its pos", and an imported name, a sibling module's fn
+// and a type's inherent method all become reachable; none of them is a column-0 head of the open file.
+// false = could not answer (the program does not resolve, or the name is not a positioned
+// declaration), and the caller falls back to the textual scan.
+lsp_def_via_ast = (
+    mp: MutPtr<Malloc>,
+    root: string_view,
+    body: string_view,
+    path: string_view,
+    text: string_view,
+    name: string_view,
+) bool {
+    rp := mp.resolve_program_data(root, mp.dirname(path), path, text)
+    resolve_failed().then({
+        return false
+    })
+    decls := mp.resolve_module(mp.parse_module(rp.flat))
+    off := decls.lsp_decl_pos(name)
+    (off == 0).then({
+        off = mp.lsp_method_pos(decls, name)
+    })
+    (off == 0).then({
+        return false
+    })
+    dl := rp.locate_diag(off, to_i32(name.view().len), path, text)
+    (dl.sp.line <= 0).then({
+        return false
+    })
+    z := lsp_zero_span(dl.sp)
+    sv: [u8] := dl.src.view()
+    ls := sv.lsp_line_start(z.l)
+    zc := sv.lsp_utf16_col(ls, z.c)
+    ze := sv.lsp_utf16_col(ls, z.e)
+    mp.lsp_reply_location(body, mp.lsp_path_uri(dl.path), z.l, zc, (ze > zc).then({ ze - zc }, { 1 }))
+    true
+}
+// GO-TO-DEFINITION. Two resolvers, in this order:
+//
+//   1. THROUGH THE COMPILER (lsp_def_via_ast) — the authoritative answer, and the only one that can
+//      leave the open file.
+//   2. THE TEXTUAL SCAN, when the buffer does not RESOLVE: a half-typed import names no module, so
+//      resolution reports and returns instead of producing a program. compiler.lsp_query keeps
+//      answering about the intact half of the file, which is what it was written for.
+//
+// Still answered null, deliberately: struct FIELDS and local bindings. A Field carries no source
+// position in compiler.ast.ast_types, so there is nothing to point at — closing that is an AST
+// change, not an LSP one.
 lsp_definition = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i64 {
     uri := mp.json_str_field(body, "uri")
-    line := body.lsp_json_int("line")
-    ch := body.lsp_json_int("character")
     txt := mp.lsp_doc_text(uri)
-    is_empty(txt).match ({
+    v: [u8] := txt.view()
+    off := v.lsp_byte_of_pos(body.lsp_json_int("line"), body.lsp_json_int("character"), 0, 0)
+    s := v.lsp_ident_start(off)
+    e := v.lsp_ident_end(off)
+    (e <= s).then({
+        return mp.lsp_reply_null(body)
+    })
+    mp.lsp_def_via_ast(root, body, mp.lsp_uri_path(uri), txt, mp.cstr_range(v, s, e)).then({
+        return 0
+    })
+    name: [u8] := v.ptr.offset(s).slice(e - s)
+    d := v.lsp_find_def(name, 0, true)
+    (d < 0).match ({
         true  => mp.lsp_reply_null(body),
-        false => {
-            v: [u8] := txt.view()
-            off := v.lsp_byte_of_pos(line, ch, 0, 0)
-            s := v.lsp_ident_start(off)
-            e := v.lsp_ident_end(off)
-            (e <= s).match ({
-                true  => mp.lsp_reply_null(body),
-                false => {
-                    name: [u8] := v.ptr.offset(s).slice(e - s)
-                    d := v.lsp_find_def(name, 0, true)
-                    (d < 0).match ({
-                        true  => mp.lsp_reply_null(body),
-                        false => mp.lsp_reply_location(body, uri, v.lsp_line_of(d, 0, 0, 0), v.lsp_col_of(d, 0, 0), e - s),
-                    })
-                },
-            })
-        },
+        false => mp.lsp_reply_location(body, uri, v.lsp_line_of(d, 0, 0, 0), v.lsp_col_of(d, 0, 0), e - s),
     })
 }
 // HOVER: the declaration under the cursor as markdown — a fenced signature plus the doc comment
