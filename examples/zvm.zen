@@ -1,0 +1,726 @@
+// zvm.zen — a stack virtual machine and the two-pass text assembler that feeds it.
+//
+//   ./zen run zvm.zen prog.asm       assemble, then execute
+//   ./zen run zvm.zen -d prog.asm    assemble, then disassemble
+//   ./zen run zvm.zen -t             built-in self test (no file needed)
+//
+// The machine: an operand stack, a frame-relative locals array, and a call stack.
+// `call`/`enter`/`ret` are a real calling convention, so assembly programs recurse.
+// Every failure — a bad mnemonic, an undefined label, a divide by zero, a stack
+// underflow — is a value carried back to `main`, never a panic.
+halloc = std.mem.heap
+vec = std.collections.vec
+maps = std.collections.map
+{ Vec } = std.collections.vec
+{ Map } = std.collections.map
+{ Result, IoError, expect, name } = std.core.result
+{ println, formatln, arg_int, arg_str } = std.text.fmt
+{ split, words, trim, substr, find, len, at, to_lower, try_parse_int } = std.text.str
+{ alloc_buf, sub } = std.core.slice
+{ out_bytes, contents } = std.io.file
+{ argc, arg } = std.sys.os
+// ── instruction set ───────────────────────────────────────────────────────────────────
+// Payload-free so `variant_name()` can spell each one back out for the disassembler.
+Op*: Push | Pop | Dup | Swap | Over
+   | Add | Sub | Mul | Div | Mod | Neg
+   | Eq | Ne | Lt | Le | Gt | Ge | Not
+   | Jmp | Jz | Jnz
+   | Load | Store | Enter
+   | Call | Ret
+   | Print | Emit | Halt
+// One row per mnemonic: `takes` says whether an operand is required, `jumps` says the
+// operand names a code label rather than a plain number.
+OpDef*: {
+    nm: string_view,
+    op: Op,
+    takes: bool,
+    jumps: bool,
+}
+OPS := [
+    OpDef(nm: "push", op: .Push, takes: true, jumps: false),
+    OpDef(nm: "pop", op: .Pop, takes: false, jumps: false),
+    OpDef(nm: "dup", op: .Dup, takes: false, jumps: false),
+    OpDef(nm: "swap", op: .Swap, takes: false, jumps: false),
+    OpDef(nm: "over", op: .Over, takes: false, jumps: false),
+    OpDef(nm: "add", op: .Add, takes: false, jumps: false),
+    OpDef(nm: "sub", op: .Sub, takes: false, jumps: false),
+    OpDef(nm: "mul", op: .Mul, takes: false, jumps: false),
+    OpDef(nm: "div", op: .Div, takes: false, jumps: false),
+    OpDef(nm: "mod", op: .Mod, takes: false, jumps: false),
+    OpDef(nm: "neg", op: .Neg, takes: false, jumps: false),
+    OpDef(nm: "eq", op: .Eq, takes: false, jumps: false),
+    OpDef(nm: "ne", op: .Ne, takes: false, jumps: false),
+    OpDef(nm: "lt", op: .Lt, takes: false, jumps: false),
+    OpDef(nm: "le", op: .Le, takes: false, jumps: false),
+    OpDef(nm: "gt", op: .Gt, takes: false, jumps: false),
+    OpDef(nm: "ge", op: .Ge, takes: false, jumps: false),
+    OpDef(nm: "not", op: .Not, takes: false, jumps: false),
+    OpDef(nm: "jmp", op: .Jmp, takes: true, jumps: true),
+    OpDef(nm: "jz", op: .Jz, takes: true, jumps: true),
+    OpDef(nm: "jnz", op: .Jnz, takes: true, jumps: true),
+    OpDef(nm: "load", op: .Load, takes: true, jumps: false),
+    OpDef(nm: "store", op: .Store, takes: true, jumps: false),
+    OpDef(nm: "enter", op: .Enter, takes: true, jumps: false),
+    OpDef(nm: "call", op: .Call, takes: true, jumps: true),
+    OpDef(nm: "ret", op: .Ret, takes: false, jumps: false),
+    OpDef(nm: "print", op: .Print, takes: false, jumps: false),
+    OpDef(nm: "emit", op: .Emit, takes: false, jumps: false),
+    OpDef(nm: "halt", op: .Halt, takes: false, jumps: false),
+]
+// index of `t` in OPS, or -1
+op_find = (t: string_view) i64 {
+    hit: i64 := 0 - 1
+    OPS.loop((h, i, d) {
+        (hit < 0 && d.nm == t).then({
+            hit = i
+        })
+    })
+    hit
+}
+Instr*: {
+    op: Op,
+    val: i64,
+    line: i64,
+}
+// `o.variant_name()` written directly inside a `.loop` lambda emits an unresolved
+// `variant_name` symbol and the link fails, so the intrinsic is wrapped here and the
+// disassembler calls the wrapper instead.
+op_name = (o: Op) string_view { o.variant_name() }
+// ── assembler diagnostics ─────────────────────────────────────────────────────────────
+AsmFault*: UnknownMnemonic | MissingOperand | UnexpectedOperand | BadNumber
+         | UnknownLabel | DuplicateLabel | JunkAfterOperand | EmptyLabel
+AsmError*: {
+    fault: AsmFault,
+    line: i64,
+    tok: string_view,
+}
+asm_fault_text = (f: AsmFault) string_view {
+    f.match ({
+        .UnknownMnemonic   => "unknown instruction",
+        .MissingOperand    => "instruction needs an operand",
+        .UnexpectedOperand => "instruction takes no operand",
+        .BadNumber         => "operand is not a number",
+        .UnknownLabel      => "undefined label",
+        .DuplicateLabel    => "label defined twice",
+        .JunkAfterOperand  => "trailing junk after the operand",
+        .EmptyLabel        => "empty label name",
+    })
+}
+asm_error_print = (e: AsmError) i64 {
+    formatln("zvm: line {}: {}: '{}'",
+        [arg_int(e.line), arg_str(e.fault.asm_fault_text()), arg_str(e.tok)])
+}
+// ── pass 1: text → raw rows + a label table ───────────────────────────────────────────
+Raw*: {
+    nm: string_view,
+    operand: string_view,
+    has_operand: bool,
+    line: i64,
+}
+Asm*: {
+    rows: Vec<Raw>,
+    labels: Map<i64>,
+    pc: i64,
+}
+// drop a `;` or `#` comment, then the surrounding blanks
+clean_line<A> = (a: MutPtr<A>, s: string_view) string_view {
+    semi := s.find(";")
+    hash := s.find("#")
+    cut := (semi < 0).then({ hash }, { (hash < 0).then({ semi }, { (semi < hash).then({ semi }, { hash }) }) })
+    body := (cut < 0).then({ s }, { a.substr(s, 0, cut).expect("zvm: oom") })
+    a.trim(body)
+}
+ends_colon = (t: string_view) bool { t.len() > 0 && t.at(t.len() - 1) == ':' }
+// A leading `name:` token defines a label at the current instruction index.
+take_label<A> = (a: MutPtr<A>, st: Asm, t: string_view, ln: i64) Result<Asm, AsmError> {
+    nm := a.substr(t, 0, t.len() - 1).expect("zvm: oom")
+    (nm.len() == 0).then({ return .Err(AsmError(fault: .EmptyLabel, line: ln, tok: t)) })
+    st.labels.has(nm).then({ return .Err(AsmError(fault: .DuplicateLabel, line: ln, tok: nm)) })
+    out := st
+    out.labels = st.labels.put(a, nm, st.pc).expect("zvm: oom")
+    .Ok(out)
+}
+// One source line: an optional label, then an optional `mnemonic [operand]`.
+scan_line<A> = (a: MutPtr<A>, st: Asm, raw_line: string_view, ln: i64) Result<Asm, AsmError> {
+    text := a.clean_line(raw_line)
+    (text.len() == 0).then({ return .Ok(st) })
+    toks := a.words(text)
+    labelled := toks.len > 0 && toks[0].ends_colon()
+    cur := labelled.then({ a.take_label(st, toks[0], ln).or_return() }, { st })
+    rest := labelled.then({ toks.sub(1, toks.len) }, { toks })
+    (rest.len == 0).then({ return .Ok(cur) })
+    (rest.len > 2).then({ return .Err(AsmError(fault: .JunkAfterOperand, line: ln, tok: rest[2])) })
+    nm := rest[0]
+    di := nm.op_find()
+    (di < 0).then({ return .Err(AsmError(fault: .UnknownMnemonic, line: ln, tok: nm)) })
+    def := OPS[di]
+    has_op := rest.len == 2
+    (def.takes && has_op == false).then({ return .Err(AsmError(fault: .MissingOperand, line: ln, tok: nm)) })
+    (def.takes == false && has_op).then({ return .Err(AsmError(fault: .UnexpectedOperand, line: ln, tok: rest[1])) })
+    row := Raw(nm: nm, operand: has_op.then({ rest[1] }, { "" }), has_operand: has_op, line: ln)
+    out := cur
+    out.rows = cur.rows.push(a, row).expect("zvm: oom")
+    out.pc = cur.pc + 1
+    .Ok(out)
+}
+scan_all<A> = (a: MutPtr<A>, lines: [string_view], i: i64, st: Asm) Result<Asm, AsmError> {
+    (i >= lines.len).then({ return .Ok(st) })
+    next := a.scan_line(st, lines[i], i + 1).or_return()
+    a.scan_all(lines, i + 1, next)
+}
+// ── pass 2: raw rows → instructions, with labels resolved ─────────────────────────────
+// `'x'` is a one-byte character operand; anything else is decimal.
+char_operand = (t: string_view) i64 {
+    (t.len() == 3 && t.at(0) == '\'' && t.at(2) == '\'').then({ t.at(1).to_i64() }, { 0 - 1 })
+}
+number_operand = (r: Raw) Result<i64, AsmError> {
+    c := r.operand.char_operand()
+    (c >= 0).then({ return .Ok(c) })
+    r.operand.try_parse_int().match ({
+        .Ok(v)  => .Ok(v),
+        .Err(p) => .Err(AsmError(fault: .BadNumber, line: r.line, tok: r.operand)),
+    })
+}
+// A jump operand is a label when one is defined, otherwise a literal address.
+label_operand = (r: Raw, labels: Map<i64>) Result<i64, AsmError> {
+    slot := labels.find(r.operand)
+    (slot >= 0).then({ return .Ok(labels.vals()[slot]) })
+    r.operand.try_parse_int().match ({
+        .Ok(v)  => .Ok(v),
+        .Err(p) => .Err(AsmError(fault: .UnknownLabel, line: r.line, tok: r.operand)),
+    })
+}
+resolve_row = (r: Raw, labels: Map<i64>) Result<Instr, AsmError> {
+    def := OPS[r.nm.op_find()]
+    (def.takes == false).then({ return .Ok(Instr(op: def.op, val: 0, line: r.line)) })
+    // `cond.then({a}, {b}).or_return()` is rejected outright: an `.or_return()` whose
+    // receiver is a conditional has to be bound to its own name first.
+    vr := def.jumps.then({ r.label_operand(labels) }, { r.number_operand() })
+    v := vr.or_return()
+    .Ok(Instr(op: def.op, val: v, line: r.line))
+}
+resolve_all<A> = (a: MutPtr<A>, rows: [Raw], labels: Map<i64>, i: i64, code: Vec<Instr>) Result<Vec<Instr>, AsmError> {
+    (i >= rows.len).then({ return .Ok(code) })
+    ins := rows[i].resolve_row(labels).or_return()
+    a.resolve_all(rows, labels, i + 1, code.push(a, ins).expect("zvm: oom"))
+}
+Program*: {
+    code: [Instr],
+    labels: Map<i64>,
+}
+assemble<A> = (a: MutPtr<A>, src: string_view) Result<Program, AsmError> {
+    rr: Result<Vec<Raw>, IoError> := vec.empty(a)
+    lr: Result<Map<i64>, IoError> := maps.empty(a)
+    cr: Result<Vec<Instr>, IoError> := vec.empty(a)
+    st0 := Asm(rows: rr.expect("zvm: oom"), labels: lr.expect("zvm: oom"), pc: 0)
+    st: Asm := a.scan_all(a.split(src, '\n'), 0, st0).or_return()
+    rows: [Raw] := st.rows.view()
+    code := a.resolve_all(rows, st.labels, 0, cr.expect("zvm: oom")).or_return()
+    .Ok(Program(code: code.view(), labels: st.labels))
+}
+// ── disassembler ──────────────────────────────────────────────────────────────────────
+// The label whose address is `pc`, or "" — a reverse lookup over the label table.
+label_at = (labels: Map<i64>, pc: i64) string_view {
+    hit: string_view := ""
+    ks := labels.keys()
+    vs := labels.vals()
+    ks.loop((h, i, k) {
+        (vs[i] == pc && hit.len() == 0).then({
+            hit = k
+        })
+    })
+    hit
+}
+disassemble<A> = (a: MutPtr<A>, p: Program) i64 {
+    n: i64 := 0
+    p.code.loop((h, i, ins) {
+        lbl := p.labels.label_at(i)
+        (lbl.len() > 0).then({
+            formatln("{}:", [arg_str(lbl)])
+        })
+        mn := a.to_lower(op_name(ins.op))
+        d := OPS[mn.op_find()]
+        d.takes.match ({
+            true  => formatln("  {}  {} {}", [arg_int(i), arg_str(mn), arg_int(ins.val)]),
+            false => formatln("  {}  {}", [arg_int(i), arg_str(mn)]),
+        })
+        n = n + 1
+    })
+    n
+}
+// ── the machine ───────────────────────────────────────────────────────────────────────
+VmFault*: StackUnderflow | StackOverflow | DivideByZero | BadJump | BadSlot
+        | CallOverflow | ReturnWithoutCall | OutOfFuel
+VmError*: {
+    fault: VmFault,
+    pc: i64,
+}
+vm_fault_text = (f: VmFault) string_view {
+    f.match ({
+        .StackUnderflow    => "operand stack underflow",
+        .StackOverflow     => "operand stack overflow",
+        .DivideByZero      => "divide by zero",
+        .BadJump           => "jump outside the program",
+        .BadSlot           => "local slot outside the frame",
+        .CallOverflow      => "call stack overflow",
+        .ReturnWithoutCall => "ret with no matching call",
+        .OutOfFuel         => "step budget exhausted",
+    })
+}
+Vm*: {
+    stack: [i64],
+    sp: i64,
+    locals: [i64],
+    fp: i64,
+    lp: i64,
+    calls: [i64],
+    csp: i64,
+    pc: i64,
+    at: i64,
+    steps: i64,
+    halted: bool,
+}
+vm_new = (stack: [i64], locals: [i64], calls: [i64]) Vm {
+    Vm(
+        stack: stack,
+        sp: 0,
+        locals: locals,
+        fp: 0,
+        lp: 0,
+        calls: calls,
+        csp: 0,
+        pc: 0,
+        at: 0,
+        steps: 0,
+        halted: false,
+    )
+}
+// `pc` has already been advanced past the current instruction when a handler runs, so
+// faults are reported against `at`, the address the instruction was fetched from.
+vm_err = (v: Vm, f: VmFault) VmError { VmError(fault: f, pc: v.at) }
+i_of_bool = (b: bool) i64 { b.then({ 1 }, { 0 }) }
+vm_push = (v: Vm, x: i64) Result<Vm, VmError> {
+    (v.sp >= v.stack.len).then({ return .Err(v.vm_err(.StackOverflow)) })
+    out := v
+    out.stack[v.sp] = x
+    out.sp = v.sp + 1
+    .Ok(out)
+}
+// Two-operand fetch. Zen has no tuples, so the popped pair rides home in a struct.
+Pair*: {
+    vm: Vm,
+    x: i64,
+    y: i64,
+}
+vm_take2 = (v: Vm) Result<Pair, VmError> {
+    (v.sp < 2).then({ return .Err(v.vm_err(.StackUnderflow)) })
+    out := v
+    out.sp = v.sp - 2
+    .Ok(Pair(vm: out, x: v.stack[v.sp - 2], y: v.stack[v.sp - 1]))
+}
+One*: {
+    vm: Vm,
+    x: i64,
+}
+vm_take1 = (v: Vm) Result<One, VmError> {
+    (v.sp < 1).then({ return .Err(v.vm_err(.StackUnderflow)) })
+    out := v
+    out.sp = v.sp - 1
+    .Ok(One(vm: out, x: v.stack[v.sp - 1]))
+}
+binary_value = (v: Vm, op: Op, x: i64, y: i64) Result<i64, VmError> {
+    op.match ({
+        .Add => .Ok(x + y),
+        .Sub => .Ok(x - y),
+        .Mul => .Ok(x * y),
+        .Div => (y == 0).then({ .Err(v.vm_err(.DivideByZero)) }, { .Ok(x / y) }),
+        .Mod => (y == 0).then({ .Err(v.vm_err(.DivideByZero)) }, { .Ok(x % y) }),
+        .Eq  => .Ok((x == y).i_of_bool()),
+        .Ne  => .Ok((x != y).i_of_bool()),
+        .Lt  => .Ok((x < y).i_of_bool()),
+        .Le  => .Ok((x <= y).i_of_bool()),
+        .Gt  => .Ok((x > y).i_of_bool()),
+        .Ge  => .Ok((x >= y).i_of_bool()),
+        _    => .Err(v.vm_err(.BadJump)),
+    })
+}
+vm_binary = (v: Vm, op: Op) Result<Vm, VmError> {
+    p := v.vm_take2().or_return()
+    r := p.vm.binary_value(op, p.x, p.y).or_return()
+    p.vm.vm_push(r)
+}
+vm_jump = (v: Vm, target: i64, code_len: i64) Result<Vm, VmError> {
+    (target < 0 || target > code_len).then({ return .Err(v.vm_err(.BadJump)) })
+    out := v
+    out.pc = target
+    .Ok(out)
+}
+vm_branch = (v: Vm, target: i64, want_zero: bool, code_len: i64) Result<Vm, VmError> {
+    o := v.vm_take1().or_return()
+    fire := want_zero.then({ o.x == 0 }, { o.x != 0 })
+    fire.then({ o.vm.vm_jump(target, code_len) }, { .Ok(o.vm) })
+}
+vm_load = (v: Vm, slot: i64) Result<Vm, VmError> {
+    at := v.fp + slot
+    (slot < 0 || at >= v.lp).then({ return .Err(v.vm_err(.BadSlot)) })
+    v.vm_push(v.locals[at])
+}
+vm_store = (v: Vm, slot: i64) Result<Vm, VmError> {
+    at := v.fp + slot
+    (slot < 0 || at >= v.lp).then({ return .Err(v.vm_err(.BadSlot)) })
+    o := v.vm_take1().or_return()
+    out := o.vm
+    out.locals[at] = o.x
+    .Ok(out)
+}
+// `enter n` opens the current frame's n local slots.
+vm_enter = (v: Vm, n: i64) Result<Vm, VmError> {
+    (n < 0 || v.fp + n > v.locals.len).then({ return .Err(v.vm_err(.BadSlot)) })
+    out := v
+    out.lp = v.fp + n
+    .Ok(out)
+}
+// `call` saves (return pc, caller frame base) and opens a new frame at the locals top.
+vm_call = (v: Vm, target: i64, code_len: i64) Result<Vm, VmError> {
+    (v.csp + 2 > v.calls.len).then({ return .Err(v.vm_err(.CallOverflow)) })
+    (target < 0 || target >= code_len).then({ return .Err(v.vm_err(.BadJump)) })
+    out := v
+    out.calls[v.csp] = v.pc
+    out.calls[v.csp + 1] = v.fp
+    out.csp = v.csp + 2
+    out.fp = v.lp
+    out.pc = target
+    .Ok(out)
+}
+vm_ret = (v: Vm) Result<Vm, VmError> {
+    (v.csp < 2).then({ return .Err(v.vm_err(.ReturnWithoutCall)) })
+    out := v
+    out.lp = v.fp
+    out.pc = v.calls[v.csp - 2]
+    out.fp = v.calls[v.csp - 1]
+    out.csp = v.csp - 2
+    .Ok(out)
+}
+vm_print = (v: Vm) Result<Vm, VmError> {
+    o := v.vm_take1().or_return()
+    println(o.x)
+    .Ok(o.vm)
+}
+vm_emit = (v: Vm) Result<Vm, VmError> {
+    o := v.vm_take1().or_return()
+    b: [u8] := [o.x.to_u8()]
+    out_bytes(b).or(0)
+    .Ok(o.vm)
+}
+vm_dup = (v: Vm) Result<Vm, VmError> {
+    o := v.vm_take1().or_return()
+    d := o.vm.vm_push(o.x).or_return()
+    d.vm_push(o.x)
+}
+vm_swap = (v: Vm) Result<Vm, VmError> {
+    p := v.vm_take2().or_return()
+    s := p.vm.vm_push(p.y).or_return()
+    s.vm_push(p.x)
+}
+vm_over = (v: Vm) Result<Vm, VmError> {
+    p := v.vm_take2().or_return()
+    s := p.vm.vm_push(p.x).or_return()
+    t := s.vm_push(p.y).or_return()
+    t.vm_push(p.x)
+}
+vm_unary = (v: Vm, op: Op) Result<Vm, VmError> {
+    o := v.vm_take1().or_return()
+    r := op.match ({
+        .Neg => 0 - o.x,
+        _    => (o.x == 0).i_of_bool(),
+    })
+    o.vm.vm_push(r)
+}
+vm_halt = (v: Vm) Result<Vm, VmError> {
+    out := v
+    out.halted = true
+    .Ok(out)
+}
+vm_drop = (v: Vm) Result<Vm, VmError> {
+    o := v.vm_take1().or_return()
+    .Ok(o.vm)
+}
+// Fetch, advance, execute. `pc` already points past the instruction when an arm runs, so
+// a jump arm simply overwrites it.
+exec_one = (v: Vm, code: [Instr]) Result<Vm, VmError> {
+    (v.pc < 0 || v.pc >= code.len).then({ return .Err(v.vm_err(.BadJump)) })
+    ins := code[v.pc]
+    n := v
+    n.at = v.pc
+    n.pc = v.pc + 1
+    n.steps = v.steps + 1
+    ins.op.match ({
+        .Push  => n.vm_push(ins.val),
+        .Pop   => n.vm_drop(),
+        .Dup   => n.vm_dup(),
+        .Swap  => n.vm_swap(),
+        .Over  => n.vm_over(),
+        .Neg   => n.vm_unary(.Neg),
+        .Not   => n.vm_unary(.Not),
+        .Jmp   => n.vm_jump(ins.val, code.len),
+        .Jz    => n.vm_branch(ins.val, true, code.len),
+        .Jnz   => n.vm_branch(ins.val, false, code.len),
+        .Load  => n.vm_load(ins.val),
+        .Store => n.vm_store(ins.val),
+        .Enter => n.vm_enter(ins.val),
+        .Call  => n.vm_call(ins.val, code.len),
+        .Ret   => n.vm_ret(),
+        .Print => n.vm_print(),
+        .Emit  => n.vm_emit(),
+        .Halt  => n.vm_halt(),
+        _      => n.vm_binary(ins.op),
+    })
+}
+// Zen's only iteration form is `xs.loop`, so the fetch-execute loop runs a fixed quantum
+// of steps per slice pass and the driver below recurses once per quantum. Straight
+// recursion per instruction blows the C stack somewhere past 100k frames.
+run_quantum = (v: Vm, code: [Instr], ticks: [i64]) Result<Vm, VmError> {
+    res: Result<Vm, VmError> := .Ok(v)
+    ticks.loop((h, i, t) {
+        res.match ({
+            .Ok(cur) => cur.halted.match ({
+                true  => {
+                    h.break
+                },
+                false => {
+                    res = cur.exec_one(code)
+                },
+            }),
+            .Err(e)  => {
+                h.break
+            },
+        })
+    })
+    res
+}
+vm_run = (v: Vm, code: [Instr], ticks: [i64], budget: i64) Result<Vm, VmError> {
+    (v.steps > budget).then({ return .Err(v.vm_err(.OutOfFuel)) })
+    done := v.run_quantum(code, ticks).or_return()
+    done.halted.then({ return .Ok(done) })
+    done.vm_run(code, ticks, budget)
+}
+// ── wiring ────────────────────────────────────────────────────────────────────────────
+Machine*: {
+    stack: [i64],
+    locals: [i64],
+    calls: [i64],
+    ticks: [i64],
+}
+machine_new<A> = (a: MutPtr<A>) Machine {
+    z: [i64] := [0]
+    Machine(
+        stack: a.alloc_buf(256, z).expect("zvm: oom"),
+        locals: a.alloc_buf(1024, z).expect("zvm: oom"),
+        calls: a.alloc_buf(512, z).expect("zvm: oom"),
+        ticks: a.alloc_buf(4096, z).expect("zvm: oom"),
+    )
+}
+vm_error_print = (e: VmError, code: [Instr]) i64 {
+    src := (e.pc >= 0 && e.pc < code.len).then({ code[e.pc].line }, { 0 })
+    formatln("zvm: runtime error at pc {} (source line {}): {}",
+        [arg_int(e.pc), arg_int(src), arg_str(e.fault.vm_fault_text())])
+}
+// Assemble and run one program; yields a process exit code.
+execute<A> = (a: MutPtr<A>, m: Machine, src: string_view) i32 {
+    a.assemble(src).match ({
+        .Err(e) => {
+            e.asm_error_print()
+            2
+        },
+        .Ok(p)  => vm_new(m.stack, m.locals, m.calls).vm_run(p.code, m.ticks, 20000000).match ({
+            .Ok(v)  => 0,
+            .Err(e) => {
+                e.vm_error_print(p.code)
+                3
+            },
+        }),
+    })
+}
+// ── self test ─────────────────────────────────────────────────────────────────────────
+T_FACT := """
+        push 10
+        call fact       ; 10!
+        print
+        halt
+fact:   enter 1
+        store 0
+        load 0
+        push 1
+        le
+        jz rec
+        push 1
+        ret
+rec:    load 0
+        load 0
+        push 1
+        sub
+        call fact
+        mul
+        ret
+"""
+T_SUM := """
+; sum 1..10 with a back edge
+        push 0
+        enter 2
+        store 0         ; acc
+        push 1
+        store 1         ; i
+top:    load 1
+        push 10
+        gt
+        jnz done
+        load 0
+        load 1
+        add
+        store 0
+        load 1
+        push 1
+        add
+        store 1
+        jmp top
+done:   load 0
+        print
+        halt
+"""
+T_GCD := """
+        push 1071
+        push 462
+        call gcd
+        print
+        halt
+gcd:    enter 2
+        store 1
+        store 0
+g0:     load 1
+        push 0
+        eq
+        jnz gdone
+        load 1
+        load 0
+        load 1
+        mod
+        store 1
+        store 0
+        jmp g0
+gdone:  load 0
+        ret
+"""
+T_TEXT := """
+        push 'z'
+        emit
+        push 'e'
+        emit
+        push 'n'
+        emit
+        push 10
+        emit
+        halt
+"""
+T_STACKOPS := """
+        push 3
+        push 4
+        over            ; 3 4 3
+        add             ; 3 7
+        swap            ; 7 3
+        sub             ; 4
+        dup
+        mul             ; 16
+        print
+        push 5
+        neg
+        print
+        push 0
+        not
+        print
+        halt
+"""
+T_BADOP := """
+        push 1
+        frobnicate
+        halt
+"""
+T_BADLABEL := """
+        jmp nowhere
+        halt
+"""
+T_DUPLABEL := """
+one:    push 1
+one:    push 2
+        halt
+"""
+T_NOOPERAND := """
+        push
+        halt
+"""
+T_DIVZERO := """
+        push 7
+        push 0
+        div
+        print
+        halt
+"""
+T_UNDERFLOW := """
+        push 1
+        add
+        halt
+"""
+run_case<A> = (a: MutPtr<A>, m: Machine, title: string_view, src: string_view) i32 {
+    formatln("--- {} ---", [arg_str(title)])
+    a.execute(m, src)
+}
+self_test<A> = (a: MutPtr<A>, m: Machine) i32 {
+    a.run_case(m, "factorial 10 -> 3628800", T_FACT)
+    a.run_case(m, "sum 1..10 -> 55", T_SUM)
+    a.run_case(m, "gcd 1071 462 -> 21", T_GCD)
+    a.run_case(m, "emit zen", T_TEXT)
+    a.run_case(m, "stack ops -> 16 -5 1", T_STACKOPS)
+    a.run_case(m, "bad mnemonic", T_BADOP)
+    a.run_case(m, "undefined label", T_BADLABEL)
+    a.run_case(m, "duplicate label", T_DUPLABEL)
+    a.run_case(m, "missing operand", T_NOOPERAND)
+    a.run_case(m, "divide by zero", T_DIVZERO)
+    a.run_case(m, "stack underflow", T_UNDERFLOW)
+    formatln("--- disassembly of gcd ---", [])
+    a.assemble(T_GCD).match ({
+        .Ok(p)  => a.disassemble(p),
+        .Err(e) => e.asm_error_print(),
+    })
+    0
+}
+main = () i32 {
+    heap := halloc.gpa()
+    a := heap.addr()
+    m := a.machine_new()
+    mode := (argc() > 1).then({ arg(1) }, { "" })
+    (mode == "").then({
+        formatln("usage: zvm [-d] FILE.asm | zvm -t", [])
+        return 1
+    })
+    (mode == "-t").then({ return a.self_test(m) })
+    dis := mode == "-d"
+    path := dis.then({ (argc() > 2).then({ arg(2) }, { "" }) }, { mode })
+    a.contents(path).match ({
+        .Err(e) => {
+            formatln("zvm: {}: {}", [arg_str(path), arg_str(name(e))])
+            1
+        },
+        .Ok(src) => dis.match ({
+            true  => a.assemble(src).match ({
+                .Ok(p)  => {
+                    a.disassemble(p)
+                    0
+                },
+                .Err(e) => {
+                    e.asm_error_print()
+                    2
+                },
+            }),
+            false => a.execute(m, src),
+        }),
+    })
+}
