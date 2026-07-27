@@ -6,7 +6,7 @@
 
 BOOT := $(MAKE) -f bootstrap/Makefile
 
-.PHONY: all zen build regen harness harness-fast difftest docs-check ffi-verify clean setup-git resolve-seed
+.PHONY: all zen build regen harness harness-fast bench bench-valgrind difftest docs-check ffi-verify clean setup-git resolve-seed
 
 # Default: build ./zen.
 all: zen
@@ -28,6 +28,13 @@ harness:
 
 harness-fast:
 	$(BOOT) harness-fast
+
+# Benchmarks: NOT a gate (noisy by nature) — records ns/op and live-heap bytes/op per operation.
+bench:
+	$(BOOT) bench
+
+bench-valgrind:
+	$(BOOT) bench-valgrind
 
 difftest:
 	$(BOOT) difftest
