@@ -15,7 +15,9 @@
 // exact power-of-ten scaling, 15-digit significand, and trailing-zero strip / digit count.
 // The streaming writers below (write_ffixed/write_fsci/write_fabs_digits) render from these.
 { num_fexp, num_fsig, num_fstrip, num_fndig, num_fpow10i } = std.text.num
-{ Result, IoError, ok, err, or } = std.core.result
+{ Result, IoError, ok, err, or, panic } = std.core.result
+{ alloc } = std.mem.raw
+{ is_null } = std.core.ptr
 Display*: {
     fmt_print: (Self) i64,
     fmt_println: (Self) i64,
@@ -42,33 +44,53 @@ write_float_in*<A> = (a: MutPtr<A>, x: f64) Result<i64, IoError> {
     })
 }
 write_digit = (d: i64) i64 { out_bytes("0123456789".offset(d).slice(1)).or(0) }
-// Stream the first `len` bytes of a stack scratch in one out_bytes call. Each writer below
-// declares its OWN 21-byte scratch (a slice literal has automatic storage, so it must live in
-// the streaming frame — a scratch-returning helper would hand back a dead frame's bytes);
-// 21 covers the widest render: "-9223372036854775808" and u64-max are both 20 bytes.
+// Stream the first `len` bytes of the digit scratch in one out_bytes call.
 // The digit loops themselves live ONCE in std.text.num (see the seed-closure note there);
 // output is byte-identical to the old per-digit streaming — same digits, one write call.
-write_scratch = (b: [u8], len: i64) i64 { out_bytes(slice(b.ptr, len)).or(0) }
+write_scratch = (p: RawPtr<u8>, len: i64) i64 { out_bytes(slice(p, len)).or(0) }
+// ONE digit scratch per OS thread, allocated on first use and reused by every writer below.
+// 21 bytes covers the widest render: "-9223372036854775808" and u64-max are both 20 bytes.
+//
+// It is NOT a `b: [u8] := [0, …]` local: a slice literal is heap-promoted (the C backend cannot yet
+// tell a non-escaping literal from an escaping one — see gen_slicelit's KNOWN LEAK) and the block is
+// never freed, so the old shape leaked 21 bytes per integer printed, linearly. One cell per thread
+// for the process lifetime costs a null test per call instead of a malloc.
+//
+// `thread_local`, so actors printing on different pool workers never interleave digits — and the
+// const `null_ptr()` init means a freshly spawned worker starts unset rather than sharing the main
+// thread's cell. Sharing ONE cell across the writers is safe because none of them holds the scratch
+// across a call to another: each fills it and streams it before the next writer runs.
+SCRATCH_LEN := 21
+scratch := thread_local(null_ptr())
+digits = () RawPtr<u8> {
+    scratch.is_null().then({
+        scratch = alloc(SCRATCH_LEN)
+    })
+    scratch.is_null().then({
+        panic("zen: panic: out of memory\n")
+    })
+    scratch
+}
 // Non-negative n (callers: float significand/exponent paths and the sign-split below).
 write_uint = (n: i64) i64 {
-    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    b.write_scratch(num_write_udigits(b.ptr, 0, n))
+    b := digits()
+    b.write_scratch(num_write_udigits(b, 0, n))
 }
 // Signed decimal; num_write_integer's negative-domain walk renders i64 min correctly.
 write_int = (n: i64) i64 {
-    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    b.write_scratch(num_write_integer(b.ptr, n))
+    b := digits()
+    b.write_scratch(num_write_integer(b, n))
 }
 // Unsigned decimal for the full u64 range: num_uwrite_udigits keeps `/` and `%` UNSIGNED,
 // so values above i64 max (e.g. 18446744073709551615) print correctly, unlike write_int
 // which would treat the high bit as a sign.
 write_u64 = (n: u64) i64 {
-    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    b.write_scratch(num_uwrite_udigits(b.ptr, 0, n))
+    b := digits()
+    b.write_scratch(num_uwrite_udigits(b, 0, n))
 }
 write_fpad = (n: i64, w: i64) i64 {
-    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    b.write_scratch(num_write_fpad(b.ptr, 0, n, w))
+    b := digits()
+    b.write_scratch(num_write_fpad(b, 0, n, w))
 }
 // ── float formatting: 15 significant digits, trailing zeros trimmed ───────────
 //
@@ -84,8 +106,8 @@ write_fpad = (n: i64, w: i64) i64 {
 // plus their num_fexp_up/down, num_fpow10x, num_fscale_up/dn internals) lives ONCE in
 // std.text.num and is imported above — only the streaming render below is fmt-specific.
 fzeros = (n: i64) i64 {
-    b: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    b.write_scratch(num_write_zeros(b.ptr, 0, n))
+    b := digits()
+    b.write_scratch(num_write_zeros(b, 0, n))
 }
 // fixed-notation body for significand `digs` (`ndig` digits, leading digit at place e, -4<=e<15).
 write_ffixed = (digs: i64, ndig: i64, e: i64) i64 {
