@@ -5,15 +5,44 @@
 { Malloc } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
-{ or } = std.core.result    // discard `out` write Results — the driver's stdout is best-effort
-{ out } = std.io.file
+{ out, out_bytes } = std.io.file
 { clock_ms, getEnv } = std.sys.os
 { getpid, opendir, closedir } = std.c.libc
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API
 { eprint, exit, resolve_failed, resolve_program_data, ResolvedProgram } = compiler.resolve    // eprint = the shared stderr write
+// stdout is a REAL sink, not a void. `zenc emit|doc|fmt|targets > file` on a full disk (or into a
+// closed pipe) used to exit 0 having written nothing: every write Result was discarded at the call
+// site. Route every driver stdout write through `stdout_put`/`stdout_put_bytes`, which record a lost
+// write in ONE sticky flag (the shape std.text.sb uses for its builder chain, so no caller has to
+// thread a Result back through the emit/doc/fmt printers), and settle it once in `main` with
+// `out_status` — a lost write becomes a diagnostic plus exit 1 instead of a silent success.
+g_out_err := false
+stdout_put* = (s: string_view) void {
+    g_out_err = out(s).match ({
+        .Ok(n)  => g_out_err,
+        .Err(e) => true,
+    })
+}
+stdout_put_bytes* = (b: [u8]) void {
+    g_out_err = out_bytes(b).match ({
+        .Ok(n)  => g_out_err,
+        .Err(e) => true,
+    })
+}
+// settle the sticky flag against a command's exit code: a lost stdout write outranks a 0.
+out_status* = (rc: i32) i32 {
+    g_out_err.match ({
+        true  => {
+            eprint("zenc: cannot write to stdout\n")
+            1
+        },
+        false => rc,
+    })
+}
 say* = (s: string_view) i64 {
-    out(s).or(0)
-    out("\n").or(0)
+    stdout_put(s)
+    stdout_put("\n")
+    0
 }
 // Intermediate /tmp files are namespaced by pid so two concurrent `zenc` invocations never clobber
 // each other's temp.c / temp.bin (a fixed path made one process compile/run the OTHER's program).
