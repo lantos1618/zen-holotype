@@ -33,7 +33,20 @@ On every open/change it runs the real check pipeline and pushes `publishDiagnost
 the same errors `zen check` prints, as squiggles, including errors surfaced from imported
 sibling modules.
 
-Native LSP config — no plugins needed (nvim 0.10+). Paste into your `init.lua`:
+Native LSP config — no plugins needed (nvim 0.10+). `editor/nvim/zen.lua` in this repo IS
+that config: source it from your `init.lua` and it starts the server and installs the
+buffer-local motions (`gd`, `K`, `gO`, `]m`, `[m`).
+
+```lua
+vim.g.zen_lsp = { cmd = { "/path/to/zen/zen", "lsp" } }   -- absolute path to the built `zen`
+dofile("/path/to/zen/editor/nvim/zen.lua")
+```
+
+It returns a table, so `require("zen")` works too when `editor/nvim/` is on the
+runtimepath, and `require("zen").setup{ cmd = …, root_markers = …, keymaps = false }`
+re-installs with different options.
+
+Or wire it by hand, if you want only the server:
 
 ```lua
 vim.api.nvim_create_autocmd("FileType", {
@@ -51,6 +64,20 @@ vim.api.nvim_create_autocmd("FileType", {
 })
 ```
 
+### The motions
+
+| key | request | what it does |
+| --- | --- | --- |
+| `gd` | `textDocument/definition` | jump to the declaration, across modules |
+| `K` | `textDocument/hover` | signature + doc comment |
+| `gO` | `textDocument/documentSymbol` | the buffer's outline, in the location list |
+| `]m` / `[m` | `textDocument/documentSymbol` | next / previous function-or-method |
+
+`]m`/`[m` are Vim's method motions. Normally they are tree-sitter textobjects, and Zen has
+had no grammar to bind them to since the Python purge deleted it; `zen.lua` drives them
+from the same symbol list `gO` shows instead, so they land on a method declared INSIDE a
+type body — where a brace heuristic cannot reach.
+
 Notes:
 
 - Build the server first: `make` at the repo root produces `./zen`.
@@ -59,9 +86,17 @@ Notes:
 - The server implements: `initialize`, `shutdown`, `exit`, `textDocument/didOpen`,
   `textDocument/didChange` (full sync), `textDocument/didClose` (clears diagnostics),
   `textDocument/definition` (go-to-definition), `textDocument/hover`,
-  `textDocument/completion` and `textDocument/semanticTokens/full` (semantic
-  highlighting, which overrides the `syntax/` file where it has an opinion). Anything
-  else gets a clean JSON-RPC `MethodNotFound`.
+  `textDocument/completion`, `textDocument/documentSymbol` (the outline) and
+  `textDocument/semanticTokens/full` (semantic highlighting, which overrides the `syntax/`
+  file where it has an opinion). Anything else — `references`, `rename`,
+  `implementation`, `signatureHelp` — gets a clean JSON-RPC `MethodNotFound`.
+- **Outline** (`gO`, `]m`, `[m`) lists the buffer's top-level declarations — functions,
+  types, globals — with a type's METHODS nested under it, inherent methods included, under
+  the name the source writes (the parser hoists them into mangled `impl_*` functions, which
+  never reach the client). Two things it does not list, both because the AST gives them no
+  source position: struct FIELDS and enum VARIANTS. And a symbol's `range` covers its name
+  (stretched over its methods), not its full source extent — no declaration carries an end
+  offset, so folding by symbol will not do anything useful.
 - **Hover** (`K`) shows the declaration under the cursor: its signature in a fenced
   `zen` block — a type shows its whole field block — followed by the `//` comment
   written above it. It covers the file's own top-level declarations; over a name the
@@ -78,11 +113,11 @@ Notes:
 - Both are answered TEXTUALLY, from the buffer the client has open. That is why they
   still work in a half-typed file that does not parse — the moment you most want them —
   and it is also the reason for the limits above.
-- Semantic tokens, go-to-definition, hover and completion are recent; a `zen` binary
-  older than they are simply will not advertise them. If highlighting looks flat, `gd`
-  does nothing or `K` says "No information available", rebuild (`make`) and confirm
-  with the sanity check below — the reply must contain `semanticTokensProvider`,
-  `definitionProvider`, `hoverProvider` and `completionProvider`.
+- Semantic tokens, go-to-definition, hover, completion and the outline are recent; a `zen`
+  binary older than they are simply will not advertise them. If highlighting looks flat,
+  `gd` does nothing, `K` says "No information available" or `gO` is empty, rebuild (`make`)
+  and confirm with the sanity check below — the reply must contain `semanticTokensProvider`,
+  `definitionProvider`, `hoverProvider`, `completionProvider` and `documentSymbolProvider`.
 - Positions are proper 0-based UTF-16 LSP positions (non-ASCII lines squiggle correctly).
 
 Quick sanity check from a shell (expect a `capabilities` reply):

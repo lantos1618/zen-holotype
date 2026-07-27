@@ -31,6 +31,7 @@
 { lspt_legend, lspt_tokens } = compiler.lsp_tokens
 { lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at, lspd_tokens_at } = compiler.lsp_docs
 { cd_or, locate_diag } = compiler.drvdiag
+{ ff_is_hoisted } = compiler.pretty_decl
 { lsp_byte_of_pos, lsp_col_of, lsp_find_def, lsp_ident_end, lsp_ident_start, lsp_line_of,
   lspq_hover, lspq_items } = compiler.lsp_query
 // ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 1) ─────────────────────────
@@ -46,7 +47,8 @@
 // store (compiler.lsp_docs) that didOpen/didChange fill, never off disk — while the client holds a
 // buffer open, that buffer IS the document. Conformance suite: tests/harness_lsp.zen. Stage 2b adds
 // hover and completion, both answered TEXTUALLY by compiler.lsp_query (which states exactly what
-// they cover) so they survive the unparseable buffer an editor holds between keystrokes.
+// they cover) so they survive the unparseable buffer an editor holds between keystrokes; and
+// documentSymbol, the outline `gO` and the `]m`/`[m` method motions are driven by.
 // PROTOCOL WRITES GO TO STDOUT (fd 1); every diagnostic/log the pipeline emits stays on stderr, so the
 // JSON-RPC stream is never corrupted.
 lout = (s: string_view) i64 {
@@ -579,7 +581,7 @@ lsp_reply_initialize = (mp: MutPtr<Malloc>, body: string_view) i64 {
         .gstr_string(256)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
         .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"definitionProvider\":true,\"hoverProvider\":true,\"completionProvider\":{\"resolveProvider\":false},\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":")
+        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"definitionProvider\":true,\"hoverProvider\":true,\"documentSymbolProvider\":true,\"completionProvider\":{\"resolveProvider\":false},\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":")
         .gstr_append(mp, lspt_legend())
         .gstr_append(mp, ",\"tokenModifiers\":[]},\"full\":true}},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
         .gstr_finish(mp))
@@ -643,7 +645,11 @@ lsp_doc_text = (mp: MutPtr<Malloc>, uri: string_view) string_view {
 // `file://` URI for a filesystem path — the inverse of lsp_uri_path, needed for a jump target the
 // client never named (the file of an imported module).
 lsp_path_uri = (mp: MutPtr<Malloc>, path: string_view) string_view {
-    mp.gstr_string(128).gstr_append(mp, "file://").gstr_append(mp, path).gstr_finish(mp)
+    mp
+        .gstr_string(128)
+        .gstr_append(mp, "file://")
+        .gstr_append(mp, path)
+        .gstr_finish(mp)
 }
 // byte offset of the NAME of the top-level declaration called `name`, or 0. Every decl kind spells
 // pos 0 as "synthesized", so 0 doubles as this scan's miss.
@@ -722,7 +728,10 @@ lsp_def_via_ast = (
     ls := sv.lsp_line_start(z.l)
     zc := sv.lsp_utf16_col(ls, z.c)
     ze := sv.lsp_utf16_col(ls, z.e)
-    mp.lsp_reply_location(body, mp.lsp_path_uri(dl.path), z.l, zc, (ze > zc).then({ ze - zc }, { 1 }))
+    mp.lsp_reply_location(body, mp.lsp_path_uri(dl.path), z.l, zc, (ze > zc).match ({
+        true  => ze - zc,
+        false => 1,
+    }))
     true
 }
 // GO-TO-DEFINITION. Two resolvers, in this order:
@@ -797,6 +806,255 @@ lsp_completion = (mp: MutPtr<Malloc>, body: string_view) i64 {
             .gstr_append(mp, "}")
     })
     mp.lsp_send(sb.gstr_append(mp, "]}}").gstr_finish(mp))
+}
+// ── documentSymbol: the OUTLINE of the open buffer ────────────────────────────────────────────────
+// LSP SymbolKind numbers (protocol §DocumentSymbol), spelled once so no call site carries a bare
+// integer. Field=8 and EnumMember=22 are absent on purpose: neither a Field nor a VariantDef carries
+// a source position in compiler.ast.ast_types, so there is nothing honest to point a range at.
+LSP_SK_METHOD = () i64 { 6 }
+LSP_SK_ENUM = () i64 { 10 }
+LSP_SK_FUNCTION = () i64 { 12 }
+LSP_SK_VARIABLE = () i64 { 13 }
+LSP_SK_STRUCT = () i64 { 23 }
+// 0-based line of byte `off`, walked ITERATIVELY — lsp_line_of recurses once per byte, which a
+// definition can afford (one conversion per request) and an outline cannot (four per symbol).
+lsp_line_at = (v: [u8], off: i64) i64 {
+    ln: i64 := 0
+    i: i64 := 0
+    @while (i < off && i < v.len) {
+        (v[i] == '\n').then({
+            ln = ln + 1
+        })
+        i = i + 1
+    }
+    ln
+}
+// byte offset of the start of the line `off` sits on.
+lsp_bol_at = (v: [u8], off: i64) i64 {
+    i := off
+    @while (i > 0 && v[i - 1] != '\n') {
+        i = i - 1
+    }
+    i
+}
+// one LSP Position for a byte offset. `character` is a UTF-16 code-unit column, not a byte column.
+lsp_push_pos = (sb: String, mp: MutPtr<Malloc>, v: [u8], off: i64) String {
+    o := (off < v.len).then({ off }, { v.len })
+    ls := v.lsp_bol_at(o)
+    sb
+        .gstr_append(mp, "{\"line\":")
+        .push_int(mp, v.lsp_line_at(o))
+        .gstr_append(mp, ",\"character\":")
+        .push_int(mp, v.lsp_utf16_col(ls, o - ls))
+        .gstr_append(mp, "}")
+}
+lsp_push_range = (sb: String, mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) String {
+    sb
+        .gstr_append(mp, "{\"start\":")
+        .lsp_push_pos(mp, v, s)
+        .gstr_append(mp, ",\"end\":")
+        .lsp_push_pos(mp, v, e)
+        .gstr_append(mp, "}")
+}
+// one DocumentSymbol, up to but NOT including its `children` key — the caller closes the object.
+// `selectionRange` is exactly the name (what the editor jumps to); `range` runs to `last`, which the
+// caller widens to cover nested children. It is NOT the declaration's full source extent: no Decl in
+// compiler.ast.ast_types carries an end offset, and inventing one by brace-matching would be a guess.
+lsp_push_sym = (
+    sb: String,
+    mp: MutPtr<Malloc>,
+    v: [u8],
+    name: string_view,
+    kind: i64,
+    off: i64,
+    last: i64,
+) String {
+    sb
+        .gstr_append(mp, "{\"name\":")
+        .push_jstr(mp, name)
+        .gstr_append(mp, ",\"kind\":")
+        .push_int(mp, kind)
+        .gstr_append(mp, ",\"range\":")
+        .lsp_push_range(mp, v, off, last)
+        .gstr_append(mp, ",\"selectionRange\":")
+        .lsp_push_range(mp, v, off, off + name.view().len)
+}
+// a childless DocumentSymbol.
+lsp_leaf_sym = (mp: MutPtr<Malloc>, v: [u8], name: string_view, kind: i64, off: i64) string_view {
+    mp
+        .gstr_string(192)
+        .lsp_push_sym(mp, v, name, kind, off, off + name.view().len)
+        .gstr_append(mp, "}")
+        .gstr_finish(mp)
+}
+// the methods of ONE impl record, comma-joined ("" when it declares none that is positioned). The
+// name emitted is the one the SOURCE writes: the parser HOISTS both a trait impl's methods and a type
+// body's INHERENT methods into mangled `impl_<Tr>_<Ty>_<m>` top-level functions, and that mangled name
+// must never reach the client — it supplies the position, the DImpl record supplies the name.
+lsp_impl_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], im: ImplData) string_view {
+    sb := mp.gstr_string(256)
+    n := 0
+    im.methods.loop((h, k, m) {
+        off := to_i64(decls.lsp_decl_pos(mp.impl_cname_in(im.trname, im.ty, m.name)))
+        (off > 0).then({
+            sb = sb
+                .gstr_append(mp, (n > 0).then({ "," }, { "" }))
+                .gstr_append(mp, mp.lsp_leaf_sym(v, m.name, LSP_SK_METHOD(), off))
+            n = n + 1
+        })
+    })
+    sb.gstr_finish(mp)
+}
+// every method the file declares FOR type `ty`. A `Type.impl(Trait, { … })` block and a type body's
+// inherent methods are both recorded as a DImpl (the inherent one names the type as its own trait),
+// so one walk over the impls covers both spellings.
+lsp_method_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], ty: string_view) string_view {
+    sb := mp.gstr_string(384)
+    n := 0
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => (im.ty == ty).then({
+                one := mp.lsp_impl_syms(decls, v, im)
+                (is_empty(one) == false).then({
+                    sb = sb.gstr_append(mp, (n > 0).then({ "," }, { "" })).gstr_append(mp, one)
+                    n = n + 1
+                })
+            }),
+            _          => { },
+        })
+    })
+    sb.gstr_finish(mp)
+}
+// the byte the method run of `ty` ends at, or `from` when it has none. A parent's `range` must ENCLOSE
+// its children's, so the type symbol's range is stretched to its last method's name.
+lsp_methods_end = (mp: MutPtr<Malloc>, decls: [Decl], ty: string_view, from: i64) i64 {
+    last := from
+    decls.loop((h, i, d) {
+        d.match ({
+            .DImpl(im) => (im.ty == ty).then({
+                im.methods.loop((h2, k, m) {
+                    off := to_i64(decls.lsp_decl_pos(mp.impl_cname_in(im.trname, im.ty, m.name)))
+                    e := off + m.name.view().len
+                    (off > 0 && e > last).then({
+                        last = e
+                    })
+                })
+            }),
+            _          => { },
+        })
+    })
+    last
+}
+// a TYPE symbol with its methods NESTED as `children` — what makes an outline an outline instead of a
+// name list. Its FIELDS are not listed: a Field carries no position (the same AST gap that keeps
+// go-to-definition off a field).
+lsp_type_sym = (
+    mp: MutPtr<Malloc>,
+    decls: [Decl],
+    v: [u8],
+    name: string_view,
+    kind: i64,
+    off: i64,
+) string_view {
+    mp
+        .gstr_string(384)
+        .lsp_push_sym(mp, v, name, kind, off, mp.lsp_methods_end(decls, name, off + name.view().len))
+        .gstr_append(mp, ",\"children\":[")
+        .gstr_append(mp, mp.lsp_method_syms(decls, v, name))
+        .gstr_append(mp, "]}")
+        .gstr_finish(mp)
+}
+// does THIS file declare the type `name`? An impl whose type lives in another file has no parent
+// symbol here, so its methods are emitted at top level rather than dropped.
+lsp_has_type = (decls: [Decl], name: string_view) bool {
+    found := false
+    decls.loop((h, i, d) {
+        d.match ({
+            .DStruct(sd)   => (sd.name == name).then({
+                found = true
+            }),
+            .DGenStruct(g) => (g.name == name).then({
+                found = true
+            }),
+            .DEnum(ed)     => (ed.name == name).then({
+                found = true
+            }),
+            .DGenEnum(g)   => (g.name == name).then({
+                found = true
+            }),
+            _              => { },
+        })
+    })
+    found
+}
+// the DocumentSymbol JSON for one top-level declaration, "" when it is not one. Skipped: import
+// records and module aliases (they name another file), trait defaults, raw C escapes, every
+// SYNTHESIZED decl (pos 0 — the parser's anonymous-struct shapes and its syntax-error sentinel), and
+// every hoisted method function, which is re-emitted under its type instead.
+lsp_decl_sym = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], d: Decl) string_view {
+    d.match ({
+        .DFunc(f)      => (f.pos == 0 || mp.ff_is_hoisted(decls, f.name)).match ({
+            true  => "",
+            false => mp.lsp_leaf_sym(v, f.name, LSP_SK_FUNCTION(), to_i64(f.pos)),
+        }),
+        .DForeign(f)   => (f.pos == 0).match ({
+            true  => "",
+            false => mp.lsp_leaf_sym(v, f.name, LSP_SK_FUNCTION(), to_i64(f.pos)),
+        }),
+        .DStruct(sd)   => (sd.pos == 0).match ({
+            true  => "",
+            false => mp.lsp_type_sym(decls, v, sd.name, LSP_SK_STRUCT(), to_i64(sd.pos)),
+        }),
+        .DGenStruct(g) => (g.pos == 0).match ({
+            true  => "",
+            false => mp.lsp_type_sym(decls, v, g.name, LSP_SK_STRUCT(), to_i64(g.pos)),
+        }),
+        .DEnum(ed)     => (ed.pos == 0).match ({
+            true  => "",
+            false => mp.lsp_type_sym(decls, v, ed.name, LSP_SK_ENUM(), to_i64(ed.pos)),
+        }),
+        .DGenEnum(g)   => (g.pos == 0).match ({
+            true  => "",
+            false => mp.lsp_type_sym(decls, v, g.name, LSP_SK_ENUM(), to_i64(g.pos)),
+        }),
+        .DGlobal(g)    => (g.pos == 0 || g.alias).match ({
+            true  => "",
+            false => mp.lsp_leaf_sym(v, g.name, LSP_SK_VARIABLE(), to_i64(g.pos)),
+        }),
+        .DImpl(im)     => decls.lsp_has_type(im.ty).then({ "" }, { mp.lsp_impl_syms(decls, v, im) }),
+        _              => "",
+    })
+}
+// the whole `DocumentSymbol[]` body for `text` — the PARSE of the open buffer, and nothing else. Not
+// the resolved program go-to-definition walks: that one flattens every imported module into a single
+// decl list, and an outline that listed std's declarations as this document's would be a lie. Parsing
+// alone also keeps the outline answering while an import line is half-typed.
+lsp_symbols_json = (mp: MutPtr<Malloc>, text: string_view) string_view {
+    decls := mp.parse_module(text)
+    v: [u8] := text.view()
+    sb := mp.gstr_string(1024)
+    n := 0
+    decls.loop((h, i, d) {
+        one := mp.lsp_decl_sym(decls, v, d)
+        (is_empty(one) == false).then({
+            sb = sb.gstr_append(mp, (n > 0).then({ "," }, { "" })).gstr_append(mp, one)
+            n = n + 1
+        })
+    })
+    sb.gstr_finish(mp)
+}
+// DOCUMENT SYMBOL (`gO`, and the `]m`/`[m` method motions built on it). Answered from the OPEN
+// BUFFER via lsp_doc_text, so an unsaved edit is in the outline the moment it is typed.
+lsp_document_symbol = (mp: MutPtr<Malloc>, body: string_view) i64 {
+    syms := mp.lsp_symbols_json(mp.lsp_doc_text(mp.json_str_field(body, "uri")))
+    mp.lsp_send(mp
+        .gstr_string(1024)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":[")
+        .gstr_append(mp, syms)
+        .gstr_append(mp, "]}")
+        .gstr_finish(mp))
 }
 lsp_send_tokens = (mp: MutPtr<Malloc>, body: string_view, data: string_view) i64 {
     mp.lsp_send(mp
@@ -918,6 +1176,10 @@ lsp_handle = (mp: MutPtr<Malloc>, root: string_view, body: string_view) i32 {
     })
     (method == "textDocument/completion").then({
         mp.lsp_completion(body)
+        return 0
+    })
+    (method == "textDocument/documentSymbol").then({
+        mp.lsp_document_symbol(body)
         return 0
     })
     (method == "textDocument/semanticTokens/full").then({
