@@ -221,10 +221,6 @@ Each of these was reproduced on this commit.
   (`http: https is not supported (no TLS)`), and `std.net.socket` parses hosts as
   IPv4 dotted-quads or `localhost` — nothing resolves a name, so
   `http_get("http://example.com/")` fails with a `Connect` error.
-- **JSON numbers are `f64`, full stop.** `std.format.json`'s `Value` has one
-  numeric arm, `Num(f64)`. `{"small":42}` stringifies back as `{"small":42.0}`,
-  and `9007199254740993` returns as `9.00719925474099e+15`. The module header
-  claims integral values print without a decimal point; they do not.
 - **Text search has no byte-slice side.** `std.io.file.contents_bytes` gives you a
   binary-safe `[u8]`, but `find` / `contains` / `starts_with` / `split` in
   `std.text.str` all take a NUL-terminated `string_view`. Searching what you just
