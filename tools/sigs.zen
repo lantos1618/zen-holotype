@@ -30,7 +30,8 @@
 { Malloc } = std.mem.alloc
 { contents_in, out } = std.io.file
 { is_dir, read_dir } = std.sys.fs
-{ cat_in, ends_with, starts_with, view } = std.text.str
+{ cat_in, ends_with, starts_with, sv_lt, view } = std.text.str
+{ sort_by } = std.sort
 { expect, or } = std.core.result
 { then } = std.core.bool
 { arg_int, arg_str, format } = std.text.fmt
@@ -300,33 +301,10 @@ emit_file = (mp: MutPtr<Malloc>, path: string_view) void {
     })
     out(s.gstr_finish(mp)).or(0)
 }
-// byte-lexicographic `x < y` from index `i` (recursion depth = common prefix — entry names are short)
-sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
-    (i >= xv.len || i >= yv.len).match ({
-        true  => xv.len < yv.len,
-        false => (xv[i] == yv[i]).then({ xv.sv_lt_at(yv, i + 1) }, { xv[i] < yv[i] }),
-    })
+// directory listings are unsorted; sections must be stable
+sort_names = (xs: [string_view]) void {
+    xs.sort_by((x: string_view, y: string_view) bool { x.sv_lt(y) })
 }
-// byte-lexicographic `x < y` over the raw names — the sort order that makes the walk deterministic
-sv_lt = (x: string_view, y: string_view) bool { x.view().sv_lt_at(y.view(), 0) }
-// bubble xs[j] left to its sorted slot (one insertion-sort inner pass)
-sift_left = (xs: [string_view], j: i64) void {
-    (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
-        t := xs[j]
-        xs[j] = xs[j - 1]
-        xs[j - 1] = t
-        xs.sift_left(j - 1)
-    })
-}
-sort_from = (xs: [string_view], i: i64) void {
-    (i < xs.len).then({
-        xs.sift_left(i)
-        xs.sort_from(i + 1)
-    })
-}
-// in-place insertion sort (directory listings are unsorted; sections must be stable); recursion
-// depth = one directory's entry count — bounded and small
-sort_names = (xs: [string_view]) void { xs.sort_from(1) }
 // recurse into subdirectories, emit every `.zen` file, sorted at each level
 walk = (mp: MutPtr<Malloc>, dir: string_view) void {
     entries := mp.read_dir(dir).expect("sigs: cannot read directory")
