@@ -1991,7 +1991,7 @@ harness_build_run* = () i32 {
             wants: [":2:16: error[no-ternary]: ternary `?:` (and any `?`) is not part of Zen; conditional control flow is a visible postfix method, never punctuation", "      x := 1 > 0 ? 2 : 3", "      ^", "hint: use `cond.then({ yes }, { no })` for a conditional expression, or `.match` for statement-position control flow"],
         ),
         DiagCase(
-            src: "R*: Ok(str) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
+            src: "R*: Ok(string_view) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
             wants: [":7:22: error[arm-value]: match arm yields no value, but the match result is used as a value", "  .Err(e) => { done = true },", "^~~~", "hint: end every arm with an expression of the match's result type (or a diverging `return`); or stop consuming the match as a value and assign within each arm"],
         ),
         DiagCase(
@@ -2033,6 +2033,18 @@ harness_build_run* = () i32 {
         DiagCase(
             src: "{ repeat } = std.text.str\nCat*: { lives: i32 }\nmain = () i32 {\n    c := Cat(lives: 9)\n    s := c.addr().repeat(\"ab\", 2)\n    0\n}\n",
             wants: [":5:19: error[trait-bound]: type `Cat` does not satisfy the bound `Allocator` required by `repeat` — missing method(s): acquire, resize, release", "      s := c.addr().repeat(\"ab\", 2)", "                    ^~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
+        ),
+        DiagCase(
+            src: "main = () i32 {\n    x: str := \"a\"\n    0\n}\n",
+            wants: [":2:5: error[unknown-type]: unknown type name `str` — that spelling was retired; write `string_view`"],
+        ),
+        DiagCase(
+            src: "Show*: { render: (Self) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Circle) i32 { c.r } })\ndraw<A: Show> = (a: A) i32 { 0 }\nmain = () i32 { c: string_cstr := cstr(null_ptr())  draw(c) }\n",
+            wants: [":5:53: error[trait-bound]: type `string_cstr` does not satisfy the bound `Show` required by `draw` — missing method(s): render"],
+        ),
+        DiagCase(
+            src: "Show*: { render: (Self) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Circle) i32 { c.r } })\ndraw<A: Show> = (a: A) i32 { 0 }\nmain = () i32 { c: string_literal := \"x\"  draw(c) }\n",
+            wants: [":5:43: error[trait-bound]: type `string_literal` does not satisfy the bound `Show` required by `draw` — missing method(s): render"],
         ),
         DiagCase(
             src: "Show*: { render: (Ptr<Self>) i32 }\nBlob*: { v: i32 }\nmain = () i32 { b := Blob(v: 3)  b.render() }\n",
@@ -2215,6 +2227,11 @@ harness_build_run* = () i32 {
             wants: [":5:5: error[trait-bound]: type `Q` does not implement trait `Display` (which declares `fmt_print`) — missing method(s): fmt_print, fmt_println", "      print(q)", "      ^~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
     ])
+    // A retired alias must not just fail — it must say what replaced it.
+    // The three string types share ONE impl table, so the bound check keys on `string_view` for
+    // all of them — but the MESSAGE must name the type the user actually wrote. These two cases
+    // are deliberately identical except for the receiver's provenance: if the printer ever folds
+    // them back together (it printed `string_view` for both before), one of them goes red.
     // The STDLIB's own allocator generics carry the bound (`(a: Allocator)`, the implicit-generic
     // sugar), so handing a non-allocator to `std.text.str.repeat` is diagnosed HERE, at the call
     // site, naming the caller's own type — not 300 lines into src/std at the `a.acquire` that
@@ -2498,7 +2515,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "infer_lambda_ret_annot",
-            cmd: "printf '{ Result, IoError, expect, map_err } = std.core.result\\nmain = () i32 {\\n    good: Result<i32, IoError> := .Ok(42)\\n    v := good.map_err((e) str { \"boom\" }).expect(\"m\")\\n    v - 42\\n}\\n' > $ZT/zlam.zen && ./zen build $ZT/zlam.zen -o $ZT/zlam_bin 2>/dev/null && $ZT/zlam_bin",
+            cmd: "printf '{ Result, IoError, expect, map_err } = std.core.result\\nmain = () i32 {\\n    good: Result<i32, IoError> := .Ok(42)\\n    v := good.map_err((e) string_view { \"boom\" }).expect(\"m\")\\n    v - 42\\n}\\n' > $ZT/zlam.zen && ./zen build $ZT/zlam.zen -o $ZT/zlam_bin 2>/dev/null && $ZT/zlam_bin",
         ),
         ShellCase(
             name: "build_bad_file",

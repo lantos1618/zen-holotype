@@ -45,11 +45,12 @@ and ownership APIs.
 
 String bytes carry their own provenance discipline — static `string_literal`,
 borrowed NUL-terminated `string_cstr`, general borrowed `string_view`, and the
-heap-owned `String` (freed through the allocator that owns its buffer). The old
-`text`/`Cstr`/`str` spellings are parser aliases; see the string types section of [SPEC.md](SPEC.md).
+heap-owned `String` (freed through the allocator that owns its buffer). Those are
+the only spellings — the old `text`/`Cstr`/`str` aliases have been removed; see the
+string types section of [SPEC.md](SPEC.md).
 
-That list describes what the compiler does TODAY, and it is drift, not design: six surface
-spellings collapse to three internal types and print as one name. The target — five roles
+That list describes what the compiler does TODAY: three names for three types, each printed as
+itself. It is still short of the target — five roles
 (`Literal`/`Const`/`Fixed`/growable/`View`) over an element type, with `String` as the `u8` case
 of `Vec` — is written down in [string-vec-model.md](string-vec-model.md), together with the two
 language changes it needs. Read that first; this section records the interim.

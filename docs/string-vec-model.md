@@ -119,9 +119,10 @@ being `Vec<u8>`.
 **Real now:** `String`, `Vec<T>`, views (as `[T]`), the `(a: Allocator)` sugar, `or_return`,
 sticky-error chaining (as `std.text.sb`).
 
-**Exists but misnamed:** `StringLiteral` is a real internal type spelled `string_view` on the
-surface. Six spellings — `str`, `text`, `string_literal`, `string_view`, `string_cstr`, `Cstr` —
-collapse to three internal types and print as one name. That is drift, not design.
+**Exists but misnamed:** three internal types, now with exactly three surface spellings —
+`string_literal`, `string_view`, `string_cstr` — each of which a diagnostic prints as itself.
+(The `str`, `text` and `Cstr` aliases are gone.) The names are still the old ones, so the
+CamelCase rename to `StringLiteral`/`StringView` remains ahead.
 
 **Does not exist:** `StringConst`, `StringFixed`, `VecConst`, `VecFixed`, `freeze()`.
 

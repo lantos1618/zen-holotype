@@ -662,7 +662,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "h.zen",
-                    src: "{ println } = std.text.fmt\nshout* = (s: str) i64 { println(s) }\n",
+                    src: "{ println } = std.text.fmt\nshout* = (s: string_view) i64 { println(s) }\n",
                 ),
                 ModFile(
                     name: "p.zen",
@@ -970,7 +970,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "{ Result } = std.core.result\nstr = std.text.str\nnum = std.text.num\npick = (s: str, b: bool) Result<i64, str.ParseError> {\n  b.match ({ true => str.try_parse_int(s), false => num.parse_i64_checked(s) })\n}\nmain = () i32 { pick(\"42\", true).match ({ .Ok(v) => to_i32(v), .Err(e) => 0 }) }\n",
+                    src: "{ Result } = std.core.result\nstr = std.text.str\nnum = std.text.num\npick = (s: string_view, b: bool) Result<i64, str.ParseError> {\n  b.match ({ true => str.try_parse_int(s), false => num.parse_i64_checked(s) })\n}\nmain = () i32 { pick(\"42\", true).match ({ .Ok(v) => to_i32(v), .Err(e) => 0 }) }\n",
                 ),
             ],
             entry: "p.zen",
@@ -1246,7 +1246,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "{ strip_ns_into, add_name } = compiler.resolve\n{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\n{ String, init } = std.text.string\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nsname = (s: str) String { a := Malloc(_: 0)  a.addr().init(32).expect(\"init\").append_in(a.addr(), s).expect(\"oom\") }\nmain = () i32 {\n    a := Malloc(_: 0)\n    ap := a.addr()\n    quals := ap.init(32).expect(\"init\").add_name(ap, sname(\"right\"))\n    qnames := ap.init(64).expect(\"init\").add_name(ap, sname(\"right.thing\"))\n    empty := ap.init(1).expect(\"init\")\n    src := \"main = () i32 {\\n/*\\nright.thing\\n*/\\nright.thing()\\n}\\n\"\n    out := ap.init(256).expect(\"init\").strip_ns_into(ap, src, 0, quals, qnames, qnames, empty, true).finish_in(ap).expect(\"oom\")\n    want := \"main = () i32 {\\n/*\\nright.thing\\n*/\\nright__thing()\\n}\"\n    eq(out, want).to_exit()\n}\n",
+                    src: "{ strip_ns_into, add_name } = compiler.resolve\n{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\n{ String, init } = std.text.string\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nsname = (s: string_view) String { a := Malloc(_: 0)  a.addr().init(32).expect(\"init\").append_in(a.addr(), s).expect(\"oom\") }\nmain = () i32 {\n    a := Malloc(_: 0)\n    ap := a.addr()\n    quals := ap.init(32).expect(\"init\").add_name(ap, sname(\"right\"))\n    qnames := ap.init(64).expect(\"init\").add_name(ap, sname(\"right.thing\"))\n    empty := ap.init(1).expect(\"init\")\n    src := \"main = () i32 {\\n/*\\nright.thing\\n*/\\nright.thing()\\n}\\n\"\n    out := ap.init(256).expect(\"init\").strip_ns_into(ap, src, 0, quals, qnames, qnames, empty, true).finish_in(ap).expect(\"oom\")\n    want := \"main = () i32 {\\n/*\\nright.thing\\n*/\\nright__thing()\\n}\"\n    eq(out, want).to_exit()\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1294,7 +1294,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\nhalloc = std.mem.heap\n{ provided_symbols_in, module_graph_in, decl_names_in, all_decl_names_in } = compiler.resolve_scan\n{ finish_in, new_in, append_in } = std.text.string\n{ eq, contains } = std.text.str\n{ integer_in } = std.text.num\n{ to_exit } = std.core.bool\narena = std.mem.arena\ngenimps = (mp: MutPtr<Malloc>) str {\n    s := mp.new_in().expect(\"oom\")\n    s = s.append_in(mp, \"{ \").expect(\"oom\")\n    i := 0\n    @while (i < 40) {\n        (i > 0).match ({ true => { s = s.append_in(mp, \", \").expect(\"oom\") }, false => {} })\n        s = s.append_in(mp, \"imp\").expect(\"oom\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect(\"oom\").finish_in(mp).expect(\"oom\")).expect(\"oom\")\n        i = i + 1\n    }\n    s = s.append_in(mp, \" } = dep\\nforeign = (n: i64) i32\\n\").expect(\"oom\")\n    mp.finish_in(s).expect(\"oom\")\n}\ngensyms = (mp: MutPtr<Malloc>) str {\n    s := mp.new_in().expect(\"oom\")\n    i := 0\n    @while (i < 220) {\n        s = s.append_in(mp, \"sym\").expect(\"oom\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect(\"oom\").finish_in(mp).expect(\"oom\")).expect(\"oom\")\n        s = s.append_in(mp, \"* = () i32 { \").expect(\"oom\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i % 10)).expect(\"oom\").finish_in(mp).expect(\"oom\")).expect(\"oom\")\n        s = s.append_in(mp, \" }\\n\").expect(\"oom\")\n        i = i + 1\n    }\n    mp.finish_in(s).expect(\"oom\")\n}\nmain = () i32 {\n    scratch := Malloc(_: 0)\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 65536).expect(\"arena\")\n    src := scratch.addr().new_in().expect(\"oom\").append_in(scratch.addr(), scratch.addr().genimps()).expect(\"oom\").append_in(scratch.addr(), scratch.addr().gensyms()).expect(\"oom\").finish_in(scratch.addr()).expect(\"oom\")\n    symbols := scratch.addr().provided_symbols_in(a.addr(), src).expect(\"syms\")\n    g := scratch.addr().module_graph_in(a.addr(), src)\n    names := g.decl_names_in(scratch.addr()).finish_in(scratch.addr()).expect(\"oom\")\n    all := g.all_decl_names_in(scratch.addr()).finish_in(scratch.addr()).expect(\"oom\")\n    last := symbols.len - 1\n    ok := (symbols.len == 261)\n        && symbols[0].imported && eq(symbols[0].name, \"imp0\")\n        && symbols[last].imported.match({ true => false, false => true }) && eq(symbols[last].name, \"sym219\")\n        && (g.symbol_count() == 261) && g.has(\"imp39\") && g.has(\"sym219\")\n        && names.contains(\"sym219\") && (!names.contains(\"foreign\")) && (!names.contains(\"imp39\"))\n        && all.contains(\"sym219\") && all.contains(\"foreign\") && (!all.contains(\"imp39\"))\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
+                    src: "{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\nhalloc = std.mem.heap\n{ provided_symbols_in, module_graph_in, decl_names_in, all_decl_names_in } = compiler.resolve_scan\n{ finish_in, new_in, append_in } = std.text.string\n{ eq, contains } = std.text.str\n{ integer_in } = std.text.num\n{ to_exit } = std.core.bool\narena = std.mem.arena\ngenimps = (mp: MutPtr<Malloc>) string_view {\n    s := mp.new_in().expect(\"oom\")\n    s = s.append_in(mp, \"{ \").expect(\"oom\")\n    i := 0\n    @while (i < 40) {\n        (i > 0).match ({ true => { s = s.append_in(mp, \", \").expect(\"oom\") }, false => {} })\n        s = s.append_in(mp, \"imp\").expect(\"oom\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect(\"oom\").finish_in(mp).expect(\"oom\")).expect(\"oom\")\n        i = i + 1\n    }\n    s = s.append_in(mp, \" } = dep\\nforeign = (n: i64) i32\\n\").expect(\"oom\")\n    mp.finish_in(s).expect(\"oom\")\n}\ngensyms = (mp: MutPtr<Malloc>) string_view {\n    s := mp.new_in().expect(\"oom\")\n    i := 0\n    @while (i < 220) {\n        s = s.append_in(mp, \"sym\").expect(\"oom\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i)).expect(\"oom\").finish_in(mp).expect(\"oom\")).expect(\"oom\")\n        s = s.append_in(mp, \"* = () i32 { \").expect(\"oom\")\n        s = s.append_in(mp, mp.integer_in(to_i64(i % 10)).expect(\"oom\").finish_in(mp).expect(\"oom\")).expect(\"oom\")\n        s = s.append_in(mp, \" }\\n\").expect(\"oom\")\n        i = i + 1\n    }\n    mp.finish_in(s).expect(\"oom\")\n}\nmain = () i32 {\n    scratch := Malloc(_: 0)\n    heap := halloc.gpa()\n    a := arena.make_in(heap.addr(), 65536).expect(\"arena\")\n    src := scratch.addr().new_in().expect(\"oom\").append_in(scratch.addr(), scratch.addr().genimps()).expect(\"oom\").append_in(scratch.addr(), scratch.addr().gensyms()).expect(\"oom\").finish_in(scratch.addr()).expect(\"oom\")\n    symbols := scratch.addr().provided_symbols_in(a.addr(), src).expect(\"syms\")\n    g := scratch.addr().module_graph_in(a.addr(), src)\n    names := g.decl_names_in(scratch.addr()).finish_in(scratch.addr()).expect(\"oom\")\n    all := g.all_decl_names_in(scratch.addr()).finish_in(scratch.addr()).expect(\"oom\")\n    last := symbols.len - 1\n    ok := (symbols.len == 261)\n        && symbols[0].imported && eq(symbols[0].name, \"imp0\")\n        && symbols[last].imported.match({ true => false, false => true }) && eq(symbols[last].name, \"sym219\")\n        && (g.symbol_count() == 261) && g.has(\"imp39\") && g.has(\"sym219\")\n        && names.contains(\"sym219\") && (!names.contains(\"foreign\")) && (!names.contains(\"imp39\"))\n        && all.contains(\"sym219\") && all.contains(\"foreign\") && (!all.contains(\"imp39\"))\n    a.addr().free_in(heap.addr())\n    ok.to_exit()\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1304,7 +1304,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "{ strip_ns_into, add_name } = compiler.resolve\n{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\n{ String, init } = std.text.string\n{ contains, len, view } = std.text.str\n{ new_in, append_in, finish_in } = std.text.string\n{ to_exit } = std.core.bool\nsname = (s: str) String { a := Malloc(_: 0)  a.addr().init(32).expect(\"init\").append_in(a.addr(), s).expect(\"oom\") }\ngenrep = (mp: MutPtr<Malloc>, chunk: str, n: i32) str { s := mp.new_in().expect(\"oom\")  i := 0  @while (i < n) { s = s.append_in(mp, chunk).expect(\"oom\")  i = i + 1 }  mp.finish_in(s).expect(\"oom\") }\nmain = () i32 {\n    a := Malloc(_: 0)\n    ap := a.addr()\n    body := ap.genrep(\"right.thing()\\n\", 3500)\n    src := ap.new_in().expect(\"oom\").append_in(ap, \"main = () i32 {\\n\").expect(\"oom\").append_in(ap, body).expect(\"oom\").append_in(ap, \"}\\n\").expect(\"oom\").finish_in(ap).expect(\"oom\")\n    quals := ap.init(32).expect(\"init\").add_name(ap, sname(\"right\"))\n    qnames := ap.init(64).expect(\"init\").add_name(ap, sname(\"right.thing\"))\n    empty := ap.init(1).expect(\"init\")\n    out := ap.init(65536).expect(\"init\").strip_ns_into(ap, src, 0, quals, qnames, qnames, empty, true).finish_in(ap).expect(\"oom\")\n    ok := out.contains(\"right__thing()\") && (!out.contains(\"right.thing()\"))\n    ok.to_exit()\n}\n",
+                    src: "{ strip_ns_into, add_name } = compiler.resolve\n{ Malloc } = std.mem.alloc\n{ expect } = std.core.result\n{ String, init } = std.text.string\n{ contains, len, view } = std.text.str\n{ new_in, append_in, finish_in } = std.text.string\n{ to_exit } = std.core.bool\nsname = (s: string_view) String { a := Malloc(_: 0)  a.addr().init(32).expect(\"init\").append_in(a.addr(), s).expect(\"oom\") }\ngenrep = (mp: MutPtr<Malloc>, chunk: string_view, n: i32) string_view { s := mp.new_in().expect(\"oom\")  i := 0  @while (i < n) { s = s.append_in(mp, chunk).expect(\"oom\")  i = i + 1 }  mp.finish_in(s).expect(\"oom\") }\nmain = () i32 {\n    a := Malloc(_: 0)\n    ap := a.addr()\n    body := ap.genrep(\"right.thing()\\n\", 3500)\n    src := ap.new_in().expect(\"oom\").append_in(ap, \"main = () i32 {\\n\").expect(\"oom\").append_in(ap, body).expect(\"oom\").append_in(ap, \"}\\n\").expect(\"oom\").finish_in(ap).expect(\"oom\")\n    quals := ap.init(32).expect(\"init\").add_name(ap, sname(\"right\"))\n    qnames := ap.init(64).expect(\"init\").add_name(ap, sname(\"right.thing\"))\n    empty := ap.init(1).expect(\"init\")\n    out := ap.init(65536).expect(\"init\").strip_ns_into(ap, src, 0, quals, qnames, qnames, empty, true).finish_in(ap).expect(\"oom\")\n    ok := out.contains(\"right__thing()\") && (!out.contains(\"right.thing()\"))\n    ok.to_exit()\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1628,11 +1628,11 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "x.zen",
-                    src: "len* = (s: str) i64 { 0 }\n",
+                    src: "len* = (s: string_view) i64 { 0 }\n",
                 ),
                 ModFile(
                     name: "p.zen",
-                    src: "{ len } = x\nmain = () i32 {\n  ws: [str] := [\"a\", \"b\"]\n  ws.len().to_i32()\n}\n",
+                    src: "{ len } = x\nmain = () i32 {\n  ws: [string_view] := [\"a\", \"b\"]\n  ws.len().to_i32()\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -2757,7 +2757,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "right.zen",
-                    src: "thing* = () i32 { 5 }\ntext* = () str { \"thing\" } // thing in a comment should stay inert\n",
+                    src: "thing* = () i32 { 5 }\ntext* = () string_view { \"thing\" } // thing in a comment should stay inert\n",
                 ),
                 ModFile(
                     name: "p.zen",

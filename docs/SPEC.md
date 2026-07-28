@@ -101,9 +101,11 @@ The three canonical non-owning string types express provenance:
 `string_literal` is static literal storage, `string_cstr` is a borrowed
 NUL-terminated pointer, and `string_view` is the general readable borrow. They
 currently lower to `const char*`; a true `(ptr, len)` view is a later phase
-(tracked in [STATUS.md](STATUS.md)). The parser still accepts `text`, `Cstr`, and
-`str` as migration aliases, while formatting and diagnostics use the canonical
-names. The owned growable buffer remains `String`. `[T]` is a fat slice with a
+(tracked in [STATUS.md](STATUS.md)). Each type has exactly ONE spelling: the
+former `text`, `Cstr` and `str` aliases are gone, and a diagnostic names the
+type you wrote rather than folding all three onto `string_view`. (`str` remains
+the name of the `std.text.str` module, which is not a type.) The owned growable
+buffer remains `String`. `[T]` is a fat slice with a
 pointer and length. Function types are parameter types for inline templates and
 closure arguments.
 
