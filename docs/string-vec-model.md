@@ -3,9 +3,12 @@
 `String` is `Vec<u8>`. Not "like" it — the structs are byte-for-byte identical today:
 
 ```zen
-Vec*<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }
-String*: { ptr: RawPtr<u8>, len: i64, cap: i64 }
+Vec*<T>: { ptr: RawPtr<u8>, len: i64, cap: i64, carried: bool, oom: bool, alloc: DynAlloc }
+String*: { ptr: RawPtr<u8>, len: i64, cap: i64, carried: bool, oom: bool, alloc: DynAlloc }
 ```
+
+The last three fields are the allocator the value was born under and its sticky failure flag —
+"The allocator decision" below says what each one carries and why.
 
 So there is one model, over an element type, and text is the `u8` case of it. Five roles, five
 names, no special cases.
@@ -15,9 +18,9 @@ names, no special cases.
 | name | representation | mutable | grows | size known | allocator | freed by |
 |---|---|---|---|---|---|---|
 | `VecLiteral<T>` / `StringLiteral` | `{ptr}` → `.rodata` | no | no | **compile time** | no | never |
-| `VecConst<T>` / `StringConst` | `{ptr, len}` | no | no | runtime | to create | **you** |
-| `VecFixed<T>` / `StringFixed` | `{ptr, len}` | **yes** | no | runtime, fixed at creation | to create | **you** |
-| `Vec<T>` / `String` | `{ptr, len, cap}` | yes | **yes** | runtime, changes | **yes** | **you** |
+| `VecConst<T>` / `StringConst` | `{ptr, len}` + allocator | no | no | runtime | **yes** | **you** |
+| `VecFixed<T>` / `StringFixed` | `{ptr, len}` + allocator | **yes** | no | runtime, fixed at creation | **yes** | **you** |
+| `Vec<T>` / `String` | `{ptr, len, cap}` + allocator | yes | **yes** | runtime, changes | **yes** | **you** |
 | `VecView<T>` / `StringView` | `{ptr, len}` | no | no | runtime | no | **not yours** |
 
 Three axes decide the row, and every combination that makes sense has a name:
@@ -30,9 +33,14 @@ Three axes decide the row, and every combination that makes sense has a name:
 recorded; without it there is nowhere to put the answer to "how much space is left", so growth
 is impossible by construction rather than by convention.
 
-`VecConst`, `VecFixed` and `VecView` are all `{ptr, len}` — the same two machine words. They
+`VecConst`, `VecFixed` and `VecView` are all `{ptr, len}` in the part that describes the bytes. They
 differ only in what the checker will let you do. That is the good kind of type: it changes what
 compiles and changes nothing about what runs.
+
+The two OWNED ones carry one more thing the borrowed one does not: the allocator. `drop()` takes no
+argument, so the value itself has to be the only thing that decides where the bytes go back to —
+otherwise freeing through the wrong allocator stays a live mistake. `VecView` frees nothing and so
+carries nothing.
 
 ### `StringCstr` is not one of the five
 
@@ -53,7 +61,7 @@ Naming it honestly as an outsider is better than a forced fit.
 ## Creating them
 
 ```zen
-gpa = mem.gpa()
+gpa := alloc.dyn_heap()                         // the process heap, as a value the row can carry
 
 // StringLiteral — no allocator, no ceremony; it is already in the binary.
 name := "zen"
@@ -62,29 +70,38 @@ name := "zen"
 v    := name.view()
 part := name.slice(0, 2)                        // a sub-view: still zero allocation
 
-// StringFixed — state the size once. Writable, never grows.
+// StringFixed — state the size once. Writable, never grows. One allocation, so it settles here.
 buf := gpa.string_fixed(64).or_return()
 buf.set(0, 'h')
 
-// String — the only one whose length is not decided at creation.
-s := gpa.string(16).or_return()
-s.add("hello").add(" world")
+// String — the only one whose length is not decided at creation. Construction is INFALLIBLE:
+// a failed birth allocation is recorded, and the whole chain settles once, at freeze().
+s := gpa.string(16)
+s = s.add("hello").add(" world")
 
 // StringConst — owned but frozen. Not built directly: build a String, then give up
 // the right to change it.
-frozen := s.freeze()
+frozen := s.freeze().or_return()
+frozen.drop()                                   // no allocator argument — it carries its own
 ```
 
-`Vec<T>` is the same five, with an element type:
+`Vec<T>` is the same five, with an element type. It has no element to infer `T` from at
+construction, and a UFCS receiver cannot carry an explicit type argument, so `T` comes from the
+binding's annotation:
 
 ```zen
 xs      := [1, 2, 3]                            // VecLiteral<i64>
 view    := xs.view()                            // VecView<i64>
-scratch := gpa.vec_fixed<i64>(64).or_return()   // VecFixed<i64>
-v       := gpa.vec<i64>(16).or_return()         // Vec<i64>
-v.add_one(1)
-locked  := v.freeze()                           // VecConst<i64>
+scratch: Result<VecFixed<i64>, IoError> := gpa.vec_fixed(64)
+v: Vec<i64> := gpa.vec(16)                      // infallible, like `string`
+v       = v.add_one(1)
+locked  := v.freeze().or_return()               // VecConst<i64>
 ```
+
+**Every op returns the updated value.** `s.add(…)` does not mutate `s` in place — the header moves
+when the buffer is realloc'd, so a chain has to be bound back (`s = s.add(…).add(…)`), exactly as
+`std.text.sb` and `Vec.push` already do. Only the settle points (`freeze`) and the readers
+(`view`, `get`, `drop`) can be left un-bound.
 
 ## Conversions
 
@@ -104,6 +121,12 @@ allocate or free.
 **`freeze()` shrinks to fit and gives up growth.** A `String` carries `cap >= len`; freezing
 returns the slack to the allocator and yields a type with no `cap`. One realloc buys memory back
 and an immutability guarantee.
+
+**`freeze()` is also the ONE settle point.** Construction cannot fail into your hands and neither
+can any `add`: a failed allocation trips a sticky flag, every later `add` is a no-op, and the whole
+chain becomes a single `Result` here — `.Ok(StringConst)` or the first failure, with the partial
+buffer freed on the way out. That is `std.text.sb`'s policy, moved onto the type it was a builder
+for. It is why there is no `or_return` per step, and why there is exactly one per chain.
 
 **There is deliberately no `thaw()`.** Going back means copying, so it is spelled
 `gpa.string_from(frozen)` — the allocation is visible because the allocator is named.
@@ -140,7 +163,16 @@ sticky-error chaining (as `std.text.sb`).
 (The `str`, `text` and `Cstr` aliases are gone, as are the old snake_case spellings; a
 `tests/harness_boundaries.zen` rule fails the build if any of the three comes back.)
 
-**Does not exist:** `StringConst`, `StringFixed`, `VecConst`, `VecFixed`, `freeze()`.
+**Real now, as of the carrying rebuild:** `StringConst`, `StringFixed`, `VecConst`, `VecFixed`,
+`freeze()`, `drop()`, `add`/`add_one`, and the carrying constructors `string` / `string_fixed` /
+`string_from` / `vec` / `vec_fixed` / `vec_from`.
+
+**Not done:** the threaded API (`init`/`push_in`/`append_in`/`finish_in`/`free_in`) and
+`std.text.sb` are still present and still work, and every consumer still uses them. Until they are
+deleted a `String` can arrive from either surface, which is what the `carried` field records: false
+means "built by the threaded API, no allocator inside", and the carrying ops refuse rather than
+call through an empty vtable. That field exists only to make the transition safe and goes away with
+the threaded API.
 
 ### Two language changes gate the missing rows
 
@@ -165,11 +197,21 @@ Immutability now has somewhere to live once you take a view, which is what `Stri
 `StringCstr` today covers BOTH `.rodata` literals and heap blocks from `sb().done()`, so a view of
 one is conservatively read-only while a view of a plain `StringView` stays writable.
 
-**2. The allocator decision.** `s.freeze()` and `s.drop()` taking no argument require the
-container to carry its allocator. Today the rule is: **carry the allocator and you give up
-errors-as-values** (`AVec`/`ASet`/`AHMap` store a `DynAlloc` and panic); **thread it and you keep
-them** (`Vec`/`String` return `Result`). `std.text.sb` is the single type that does both, via a
-sticky error flag settled once at `done()` — which is the shape this model assumes.
+**2. The allocator decision.** DECIDED: the container carries it. The old rule was **carry the
+allocator and you give up errors-as-values** (`AVec`/`ASet`/`AHMap` store a `DynAlloc` and panic)
+versus **thread it and you keep them** (`Vec`/`String` return `Result`), with `std.text.sb` the one
+type that did both. Sb's shape won: the row carries a `DynAlloc` AND keeps errors as values,
+because the sticky flag defers them all to one settle point.
+
+Three fields do it, in this order, identically on `Vec<T>` and `String`:
+
+- `carried: bool` — this header owns an allocator. Transitional; see above.
+- `oom: bool` — the sticky flag. Set by the first failed allocation, never cleared.
+- `alloc: DynAlloc` — the Allocator trait as a VALUE (three fn-pointers + state), which is what
+  lets the field exist at all: a `MutPtr<A>` allocator cannot be erased into a value, because a
+  generic function cannot be taken as a fn-pointer and an impl method cannot be named as one. So
+  the carrying constructors take a `DynAlloc` (`alloc.dyn_heap()`, `rt.dyn_of_rt(...)`, or any
+  `dyn_of(...)` vtable) rather than the `a: Allocator` the threaded API takes.
 
 Deciding that for `String` also decides `AVec`: it either becomes the default or disappears.
 
