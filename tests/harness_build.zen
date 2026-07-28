@@ -311,11 +311,13 @@ run_docs* = (name: string_view, cs: [DocCase]) i32 {
 // A ShellCase pipeline whose body spawns its OWN app pthreads (a pool/actor acceptance fixture) must NOT
 // run concurrently with the other cases: N such fixtures at once oversubscribe the scheduler and fail
 // nondeterministically (the exact hazard #485 caught for build fixtures). These run SERIALLY; everything
-// else runs across the worker pool. Identified by case name (only the two pool-isolation cases qualify).
+// else runs across the worker pool. Identified by case name (the pool-isolation cases and the live-pool
+// abort case are the ones that qualify).
 shell_is_serial = (name: string_view) bool {
     name == "pool_actor_panic_isolation"
         || name == "pool_actor_stackoverflow_isolation"
         || name == "pool_actor_panic_box_freed"
+        || name == "main_oom_panic_with_live_pool_aborts"
 }
 // wrap ONE shell case's body so it is self-contained + gid-isolated: bind `$ZT` to a PER-CASE scratch
 // subdir `<zo_dir>/sh<gid>` (freshly recreated) so the hand-written pipelines — which reuse fixed scratch
@@ -752,6 +754,12 @@ harness_build_run* = () i32 {
         FixtureCase(
             path: "tests/fixtures/zen/pool_supervisor_temporary.zen",
             want_exit: "33",
+            want_out: "",
+            check_out: false,
+        ),
+        FixtureCase(
+            path: "tests/fixtures/zen/pool_supervisor_oom_restart.zen",
+            want_exit: "42",
             want_out: "",
             check_out: false,
         ),
@@ -2400,7 +2408,15 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "result_expect_panics",
-            cmd: "./zen build tests/fixtures/zen/result_expect_panics.zen -o $ZT/zrep 2>/dev/null && { $ZT/zrep >/dev/null 2>$ZT/zrep_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: config must load\" $ZT/zrep_e.txt",
+            cmd: "./zen build tests/fixtures/zen/result_expect_panics.zen -o $ZT/zrep 2>/dev/null && { $ZT/zrep >/dev/null 2>$ZT/zrep_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: config must load\" $ZT/zrep_e.txt && test \"$(grep -c 'zen: panic:' $ZT/zrep_e.txt)\" = 1",
+        ),
+        ShellCase(
+            name: "inline_actor_oom_panic_aborts",
+            cmd: "./zen build tests/fixtures/zen/inline_actor_oom_panic_aborts.zen -o $ZT/ziop 2>/dev/null && { $ZT/ziop >/dev/null 2>$ZT/ziop_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: vec.new: out of memory\" $ZT/ziop_e.txt && test \"$(grep -c 'zen: panic:' $ZT/ziop_e.txt)\" = 1",
+        ),
+        ShellCase(
+            name: "main_oom_panic_with_live_pool_aborts",
+            cmd: "./zen build tests/fixtures/zen/main_oom_panic_with_live_pool_aborts.zen -o $ZT/zmop 2>/dev/null && { $ZT/zmop >/dev/null 2>$ZT/zmop_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: vec.new: out of memory\" $ZT/zmop_e.txt && test \"$(grep -c 'zen: panic:' $ZT/zmop_e.txt)\" = 1",
         ),
         ShellCase(
             name: "deep_nontail_recursion_panics",

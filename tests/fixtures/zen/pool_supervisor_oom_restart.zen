@@ -1,0 +1,104 @@
+// OOM IS SUPERVISABLE (std.core.result.panic + std.concurrent.pool + pool_actor). The sibling of
+// pool_supervisor_restart.zen: there the agent dies on a DIVIDE BY ZERO (the compiler's `zen__panic`),
+// here it dies on an ALLOCATION FAILURE (`.expect` → `std.core.result.panic`). Both must behave the same.
+//
+// They did NOT. `zen__panic` calls `__zen_panic_unwind()` before `abort()`, so a div-by-zero inside a
+// behavior siglongjmps into the pool worker's catch: the actor is marked dead, the pool keeps running, the
+// supervisor restarts it. `std.core.result.panic` called `abort()` DIRECTLY — so an out-of-memory inside a
+// behavior killed the WHOLE PROCESS (exit 134), un-restartable, even under a Permanent supervisor. Since
+// 122 of the 123 `.expect` sites in src/std are allocation failures, that made OOM the one unsupervisable
+// failure in the language. `panic` now calls `__zen_panic_unwind()` first, exactly like `zen__panic`.
+//
+// The failure is a REAL allocator failure, not a simulated panic: the agent builds an `AVec` from an
+// injected DynAlloc whose `acquire` returns null (a deterministic OOM — no attempt to exhaust the box),
+// so `vec.new_in` hits `.expect("vec.new: out of memory")` on the genuine `Err` from `empty`.
+//
+// TIMELINE (single agent, FIFO mailbox, Permanent policy):
+//   Phase 1: Work(10), Work(10), Oom(0), Work(10), Work(10)
+//     → the two pre-poison Works run (acc == 20); Oom exhausts its allocator and `.expect`s → PANIC inside
+//       `receive` → unwound into the worker's catch → actor DEAD, pool alive; the two queued post-poison
+//       Works are dead-lettered (dropped == 2).
+//   Supervise: Permanent → free the dead instance, re-run the retained spec → fresh actor.
+//   Phase 2: Work(5), Work(5) → handled by the RESTARTED instance (acc == 30, its own seen == 2).
+//
+// PROOF (exit 42 iff ALL hold) — identical shape to the div-by-zero capstone:
+//   crashed / acc_after_crash == 20 / dropped == 2 / restarted / acc_after_restart == 30 /
+//   fresh_seen == 2 / still_alive.
+// Exit 42 (not 134) is itself the headline: the process SURVIVED an out-of-memory inside an actor.
+{ pool_open, pool_actor_dead, Pool } = std.concurrent.pool
+{ malloc, free, DynAlloc, dyn_of } = std.mem.alloc
+{ dispatch } = std.concurrent.pool_actor    // destructured: the faithful formatter accepts an unqualified generic call
+pa = std.concurrent.pool_actor
+{ Context, Receiver } = std.concurrent.pool_actor
+vec = std.collections.vec
+WORKERS := 2
+CAP := 64
+// An allocator that ALWAYS fails — the deterministic stand-in for a box that is genuinely out of memory.
+// `acquire`/`resize` hand back null (the allocator protocol's failure value, which `empty` turns into
+// `.Err(.NotFound)`); `release` of a null pointer is a no-op.
+oom_acquire = (s: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+oom_resize = (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+oom_release = (s: RawPtr<u8>, p: RawPtr<u8>) void { }
+oom_alloc = () DynAlloc { dyn_of(oom_acquire, oom_resize, oom_release, null_ptr()) }
+Msg*: Work(i64) | Oom(i64)
+Agent*: {
+    acc: RawPtr<u8>,
+    seen: i64,
+}
+Agent.impl(Receiver, {
+    receive = (a: MutPtr<Agent>, ctx: Context<Msg>) void {
+        ctx.msg.match ({
+            .Work(n) => {
+                atomic_add_i64(a.acc, n)
+                a.seen = a.seen + 1
+            },
+            .Oom(d)  => {
+                v: vec.AVec<i64> := vec.new_in(oom_alloc())    // allocator returns null → `.expect` → PANIC
+                atomic_add_i64(a.acc, v.len() + 100)
+            },
+        })
+    }
+})    // Oom's body is unreached past the failed allocation
+tramp = (user: RawPtr<u8>, msg: i64) void { dispatch<Agent, Msg>(user, msg) }
+main = () i32 {
+    acc := malloc(8)
+    store_i64(acc, 0)
+    spec := pa.child_spec(CAP, Agent(
+        acc: acc,
+        seen: 0,
+    ), tramp, pa.permanent())
+    child0 := pa.start_child(spec)
+    p := pool_open(WORKERS, 16)
+    // Phase 1: work, out-of-memory crash, then work that queues behind the dead actor.
+    p.send(child0.handle, Msg.Work(10))
+    p.send(child0.handle, Msg.Work(10))
+    p.send(child0.handle, Msg.Oom(0))
+    p.send(child0.handle, Msg.Work(10))
+    p.send(child0.handle, Msg.Work(10))
+    p.pool_quiesce()    // let the batch settle WITHOUT stopping the pool
+    crashed := pool_actor_dead(child0.handle.raw)
+    acc_after_crash := load_i64(acc)
+    dropped := p.pool_dropped()
+    // Supervisor detects the dead child and RESTARTS it (Permanent) with fresh state.
+    child1 := child0.supervise()
+    restarted := child1.restarts > child0.restarts
+    // Phase 2: the restarted instance handles subsequent work.
+    p.send(child1.handle, Msg.Work(5))
+    p.send(child1.handle, Msg.Work(5))
+    p.pool_quiesce()
+    acc_after_restart := load_i64(acc)
+    fresh_seen := pa.actor_state(child1.handle).seen
+    still_alive := pool_actor_dead(child1.handle.raw) == false
+    p.pool_quiesce_stop()
+    pa.close(child1.handle)
+    p.pool_close()
+    free(acc)
+    ok := crashed
+        && acc_after_crash == 20
+        && dropped == 2
+        && restarted
+        && acc_after_restart == 30
+        && fresh_seen == 2
+        && still_alive
+    ok.then({ 42 }, { 1 })
+}

@@ -1,0 +1,44 @@
+// NEGATIVE proof #1 for supervisable OOM: the COOPERATIVE actor model (std.concurrent.actor) drains its
+// mailbox INLINE on the calling thread — `cell.drain(actor)` calls `receive` directly, with no
+// `__zen_actor_call` wrapper and therefore no sigsetjmp catch installed. So an allocation failure inside a
+// cooperative `receive` on the main thread must STILL abort the whole process (exit 134), exactly as before
+// `panic` learned to unwind. `__zen_panic_jmp` is `_Thread_local` and only ever set around a POOL worker's
+// behavior call, so on this path `__zen_panic_unwind()` finds no target, returns, and `abort()` runs.
+//
+// This is what stops the fix from silently swallowing panics in the non-pool actor model. Asserted by the
+// `inline_actor_oom_panic_aborts` shell case: exit 134 and exactly ONE `zen: panic: vec.new: out of memory`.
+alloc = std.mem.heap
+{ Result, IoError, expect } = std.core.result
+{ Context, Receiver, ActorCell } = std.concurrent.actor
+{ DynAlloc, dyn_of } = std.mem.alloc
+vec = std.collections.vec
+Msg*: Grow
+Room*: {
+    n: i32,
+}
+// An allocator that always fails — a deterministic out-of-memory (see pool_supervisor_oom_restart.zen).
+oom_acquire = (s: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+oom_resize = (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+oom_release = (s: RawPtr<u8>, p: RawPtr<u8>) void { }
+oom_alloc = () DynAlloc { dyn_of(oom_acquire, oom_resize, oom_release, null_ptr()) }
+Room.impl(Receiver, {
+    receive = (room: MutPtr<Room>, ctx: Context<Msg>) void {
+        ctx.msg.match ({
+            .Grow => {
+                v: vec.AVec<i64> := vec.new_in(oom_alloc())    // allocator returns null → `.expect` → PANIC
+                room.n = v.len().to_i32()
+            },
+        })
+    }
+})    // unreached past the failed allocation
+main = () i32 {
+    heap := alloc.gpa()
+    cell_r: Result<ActorCell<Msg>, IoError> := heap.addr().cell(4)
+    cell := cell_r.expect("gpa cell allocation")
+    ref: CellRef<Msg> := cell.ref()
+    ref.send(.Grow)
+    room := Room(n: 0)
+    cell.drain(room.addr())    // INLINE drain on the main thread: no catch installed → panic must abort
+    cell.free(heap.addr())
+    room.n
+}
