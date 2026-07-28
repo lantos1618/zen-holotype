@@ -1,0 +1,92 @@
+// C/JS MEMORY-MODEL PARITY. Every line here printed a different number under `node` than under the C
+// binary while both exited 0 — the silent-miscompile class, caught by a corpus differential rather than
+// by any gate. Run under BOTH backends and compared byte for byte (harness_build's
+// js_memory_battery_dual_backend), so a regression in either one reddens the build.
+//
+// The three defects it pins:
+//   1. `sizeof` answered 8 for every type on the js backend (a hard-coded runtime stub), so every
+//      `n * sizeof(T)` stride and allocation was wrong for any T that is not 8 bytes wide. It is now
+//      resolved to a literal at emit time from the real C layout (compiler.backend.js.js_size).
+//   2. `addr()` was the identity, so `store` through a taken address wrote to a COPY and the variable
+//      never changed. An address-taken scalar is now boxed into a real linear-memory cell.
+//   3. slice ELEMENTS were read one byte at a time whatever the element type, so any `[i64]` or
+//      `[string_view]` that came from an allocator decoded to garbage.
+{ println } = std.text.fmt
+{ nbuf, split, view } = std.text.str
+{ Allocator } = std.mem.alloc
+halloc = std.mem.heap
+Pair: {
+    a: i32,
+    b: i64,
+}
+Small: {
+    x: u8,
+    y: u8,
+}
+Tagged: Num(i64) | Nothing
+// sizeof reached through a TYPE PARAMETER — the monomorphized path, where the type name arrives as its
+// C spelling rather than its Zen one.
+sz<T> = (x: T) i64 { sizeof(T) }
+// `addr` on a PARAMETER, not just a local: the callee bumps the caller's variable through the pointer.
+bump = (p: MutPtr<i32>) void { store(p, load(p) + 1) }
+// `load` through a pointer to a STRUCT: the object model's identity deref.
+pair_b = (p: MutPtr<Pair>) i64 { load(p).b }
+main = () i32 {
+    // 1 — sizeof, direct and through a tparam.
+    println(sizeof(u8))
+    println(sizeof(i32))
+    println(sizeof(i64))
+    println(sizeof(f64))
+    println(sizeof(bool))
+    a8: u8 := 3
+    a32: i32 := 3
+    a64: i64 := 3
+    println(sz(a8))
+    println(sz(a32))
+    println(sz(a64))
+    // aggregates: padding and tail alignment are part of the answer
+    println(sizeof(Pair))
+    println(sizeof(Small))
+    println(sizeof(Tagged))
+    // 2 — a taken address is real storage: a BYTE store lands in the low byte of an i32.
+    c: i32 := 0
+    p := c.addr()
+    store(p, 7)
+    println(c)
+    println(load(p))
+    // whole-word writes through the same cell, and a plain assignment seen through the pointer
+    c = 300
+    println(load_i64(p) % 65536)
+    store_i64(p, 42)
+    println(c)
+    // an address-taken i64 local, and an address-taken parameter one call deep
+    n: i64 := 1000000
+    q := n.addr()
+    store_i64(q, load_i64(q) * 3)
+    println(n)
+    c.addr().bump()
+    println(c)
+    // 3 — typed slice elements over allocator-backed memory
+    m := halloc.gpa()
+    al := m.addr()
+    ns: [i64] := al.nbuf(0, 4)
+    ns[0] = 1000000000000
+    ns[3] = 0 - 5
+    println(ns[0])
+    println(ns[3])
+    println(ns[1])
+    parts: [string_view] := al.split("x,yy,zzz", ',')
+    println(parts.len)
+    total: i64 := 0
+    parts.loop((h, i, s) {
+        total = total + s.view().len
+    })
+    println(total)
+    // a struct behind a pointer still derefs to the struct
+    pr := Pair(
+        a: 1,
+        b: 99,
+    )
+    println(pr.addr().pair_b())
+    0
+}

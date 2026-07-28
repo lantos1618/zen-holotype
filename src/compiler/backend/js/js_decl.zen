@@ -5,8 +5,9 @@
 { Func, Param, GlobalData } = compiler.ast.ast_types
 { gstr_append } = compiler.genc
 { Malloc } = std.mem.alloc
-{ jname } = compiler.backend.js.js_lit
-{ js_stmts, js_expr, int_width, js_w_open, js_w_close, vw_note, vw_reset, set_ret_w } = compiler.backend.js.js_expr
+{ jint, jname } = compiler.backend.js.js_lit
+{ js_stmts, js_expr, int_width, js_w_open, js_w_close, vw_note, vw_reset, set_ret_w, js_boxed_w } = compiler.backend.js.js_expr
+{ js_box_reset, js_box_scan } = compiler.backend.js.js_box
 // ── declarations ──────────────────────────────────────────────────────────────────────────────────
 // a function; every param is a bare JS name (types erased). `main` becomes `zen_main`.
 js_func_name = (s: String, a: MutPtr<Malloc>, name: string_view) String {
@@ -24,22 +25,41 @@ js_param_norms = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out := s
     ps.loop((h, i, p) {
         vw_note(p.name, p.ty)
-        w := int_width(p.ty)
-        out = (w == 0).match ({
-            true  => out,
-            false => out
-                .jname(a, p.name)
-                .gstr_append(a, " = ")
-                .js_w_open(a, w)
-                .jname(a, p.name)
-                .js_w_close(a, w)
-                .gstr_append(a, "; "),
-        })
+        out = out.js_param_norm(a, p)
     })
     out
 }
+// A param is coerced to its declared width at entry (C truncates there), and then — if the body takes
+// its address — moved into a linear-memory cell, so `addr(p)` yields a real offset. Order matters: the
+// value is width-correct BEFORE it is written into the cell.
+js_param_norm = (s: String, a: MutPtr<Malloc>, p: Param) String {
+    w := int_width(p.ty)
+    normed := (w == 0).match ({
+        true  => s,
+        false => s
+            .jname(a, p.name)
+            .gstr_append(a, " = ")
+            .js_w_open(a, w)
+            .jname(a, p.name)
+            .js_w_close(a, w)
+            .gstr_append(a, "; "),
+    })
+    bw := js_boxed_w(p.name)
+    (bw == 0).match ({
+        true  => normed,
+        false => normed
+            .jname(a, p.name)
+            .gstr_append(a, " = __zr.box(")
+            .jname(a, p.name)
+            .gstr_append(a, ", ")
+            .jint(a, bw)
+            .gstr_append(a, "); "),
+    })
+}
 js_func* = (s: String, a: MutPtr<Malloc>, f: Func) String {
     vw_reset(a)
+    js_box_reset(a)
+    js_box_scan(f.body)    // BEFORE emission: `addr(x)` may appear textually after x's `let`
     set_ret_w(int_width(f.ret))
     s
         .gstr_append(a, "function ")

@@ -2526,6 +2526,26 @@ harness_build_run* = () i32 {
             cmd: "./zen build tests/fixtures/zen/js_atomic_battery.zen -o $ZT/zjab 2>/dev/null && $ZT/zjab > $ZT/zjab_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_atomic_battery.zen -o $ZT/zjab.js 2>/dev/null && node $ZT/zjab.js > $ZT/zjab_js.txt 2>/dev/null && cmp -s $ZT/zjab_c.txt $ZT/zjab_js.txt && printf '7\\n10\\n15\\n-5\\ntrue\\n99\\nfalse\\n99\\n8000000000\\ntrue\\ntrue\\nfalse\\n0\\n3\\n' | cmp -s - $ZT/zjab_c.txt",
         ),
         ShellCase(
+            name: "js_memory_battery_dual_backend",
+            cmd: "./zen build tests/fixtures/zen/js_memory_battery.zen -o $ZT/zjmb 2>/dev/null && $ZT/zjmb > $ZT/zjmb_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_memory_battery.zen -o $ZT/zjmb.js 2>/dev/null && node $ZT/zjmb.js > $ZT/zjmb_js.txt 2>/dev/null && cmp -s $ZT/zjmb_c.txt $ZT/zjmb_js.txt && printf '1\\n4\\n8\\n8\\n1\\n1\\n4\\n8\\n16\\n2\\n16\\n7\\n7\\n300\\n42\\n3000000\\n43\\n1000000000000\\n-5\\n0\\n3\\n6\\n99\\n' | cmp -s - $ZT/zjmb_c.txt",
+        ),
+        ShellCase(
+            name: "js_sizeof_never_reaches_the_floor",
+            cmd: "./zen build --target js tests/fixtures/zen/js_memory_battery.zen -o $ZT/zjsz.js 2>/dev/null && ! grep -Eq '__zr[.]sizeof[[:space:]]*\\(' $ZT/zjsz.js && ! grep -Eq 'const sizeof' bootstrap/zenrt.js",
+        ),
+        ShellCase(
+            name: "js_panic_parity_dual_backend",
+            cmd: "printf '{ println } = std.text.fmt\\nmain = () i32 {\\n    println(1)\\n    panic(\"boom\")\\n    0\\n}\\n' > $ZT/zjpp.zen && ./zen build $ZT/zjpp.zen -o $ZT/zjpp_c 2>/dev/null && { $ZT/zjpp_c >$ZT/zjpp_c.out 2>$ZT/zjpp_c.err; test \"$?\" = 134; } && ./zen build --target js $ZT/zjpp.zen -o $ZT/zjpp.js 2>/dev/null && { node $ZT/zjpp.js >$ZT/zjpp_j.out 2>$ZT/zjpp_j.err; test \"$?\" = 134; } && cmp -s $ZT/zjpp_c.out $ZT/zjpp_j.out && head -1 $ZT/zjpp_c.err > $ZT/zjpp_c1.err && cmp -s $ZT/zjpp_c1.err $ZT/zjpp_j.err && grep -Fqx \"zen: panic: boom\" $ZT/zjpp_j.err",
+        ),
+        ShellCase(
+            name: "js_oob_index_panics",
+            cmd: "./zen build --target js tests/fixtures/zen/oob_index_panics.zen -o $ZT/zjoo.js 2>/dev/null && { node $ZT/zjoo.js >/dev/null 2>$ZT/zjoo_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: slice index out of bounds\" $ZT/zjoo_e.txt",
+        ),
+        ShellCase(
+            name: "js_main_exit_status",
+            cmd: "printf 'main = () i32 {\\n    3\\n}\\n' > $ZT/zjes.zen && ./zen build --target js $ZT/zjes.zen -o $ZT/zjes.js 2>/dev/null && { node $ZT/zjes.js >/dev/null 2>&1; test \"$?\" = 3; }",
+        ),
+        ShellCase(
             name: "js_no_undefined_intrinsic_calls",
             cmd: "./zen build --target js tests/fixtures/zen/js_atomic_battery.zen -o $ZT/zjnu.js 2>/dev/null && ! grep -Eq '(^|[^A-Za-z0-9_.$])atomic_(load_i64|store_i64|add_i64|cas_i64|fence)[[:space:]]*\\(' $ZT/zjnu.js",
         ),
@@ -2853,7 +2873,16 @@ harness_build_run* = () i32 {
             name: "cache_path_invocation_warms",
             cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
         ),
-    ])    // TERMINATION is the assertion: `timeout` makes the pre-fix deadlock (rc 124) a FAILING case
+    ])
+    // `sizeof` must never reach the js floor: a runtime `sizeof(name)` can only guess, and the
+    // guess it used to make (8, for every type) is the miscompile js_memory_battery pins. The
+    // emitter resolves it to a literal, so the emitted JS names no such helper.
+    // Panic parity: same message on stderr, same 134 exit status, same stdout up to the panic.
+    // `__zen_panic_unwind` had no JS definition, so every panic died with a ReferenceError instead.
+    // An out-of-bounds slice index PANICS on the js target too — the same language guarantee the
+    // C-side oob_index_panics case pins. JS used to yield 0 and exit 0.
+    // `main`'s value is the process exit status on BOTH targets; the js module used to drop it.
+    // TERMINATION is the assertion: `timeout` makes the pre-fix deadlock (rc 124) a FAILING case
     // a failed RESTART is a value: exit 42 means the supervisor saw `.Err(.Oom)` and RETRIED back to health
     // the five atomic_* intrinsics, C vs node. genc lowers each to a __atomic_* builtin; before the
     // js backend lowered them too, `build --target js` exited 0 and the emitted call hit an
