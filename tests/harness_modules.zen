@@ -1466,7 +1466,74 @@ harness_modules_run* = () i32 {
             entry: "p.zen",
             want: 67,
         ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "box.zen",
+                    src: "Box*: { ptr: RawPtr<u8>, len: i64 }\n",
+                ),
+                ModFile(
+                    name: "maker.zen",
+                    src: "{ Box } = box\nlen* = (b: Box) i64 { b.len }\nmake* = (n: i64) Box { Box(ptr: null_ptr(), len: n) }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "m = maker\nmain = () i32 { to_i32(m.make(3).len) }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 3,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "boxmod.zen",
+                    src: "S*: { len: i64 }\nlen* = (s: S) i64 { s.len }\ng*: i64 := 1\nmake* = (len: i64) S { n: i64 := len + g\n                       S(len: n) }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "m = boxmod\nmain = () i32 { to_i32(m.make(41).len()) }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 42,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "p.zen",
+                    src: "{ contents_in } = std.io.file\nB: { len: i64 }\nlen = (b: B) i64 { b.len }\nmain = () i32 { b := B(len: 7)\n                to_i32(b.len()) }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 7,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "blkmod.zen",
+                    src: "S*: { v: i64 }\nn* = () i64 { 2 }\nmk* = () S { S(v: { n: i64 := 5\n                    n }) }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "m = blkmod\nmain = () i32 { to_i32(m.mk().v) }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 5,
+        ),
     ])
+    // …and the guard must not over-reach: a `{` after a FIELD LABEL is a block VALUE, so the typed
+    // local inside it is a binder and still gets prefixed (`S: {` type bodies are the other way round).
+    // FIELD LABELS ARE NOT NAMES. The alias rewrite renames a module's exported value names to
+    // `alias__name`; a `len:` inside a struct literal / type body is the STRUCT's field, so renaming
+    // it broke a module that merely happened to also export a `len` fn — and the error pointed INTO
+    // the innocent module, which checks clean on its own.
+    // The other half of the rule: field DECL (`{ len: i64 }`) and label (`S(len: n)`) keep their bare
+    // names, while the BINDERS that share the name — the `len` param, the typed local `n`, the typed
+    // global `g` — must still be prefixed exactly like the uses that follow them.
+    // Same rewrite, shadow-rename path: a user's top-level `len` collides with an UNIMPORTED
+    // transitive std export and is renamed `zshadow__len` — which used to rename the struct field too.
     // ONE impl block reached via TWO import paths (by-name + namespace alias): the alias emission
     // rewrites the body's module-local call to `sh__helper`, so the two flat copies are NOT
     // byte-equal — the resolver's impl dedup must key on ORIGIN identity and stay silent here.

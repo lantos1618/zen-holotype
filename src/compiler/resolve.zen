@@ -1412,10 +1412,31 @@ ns_scan = (a: MutPtr<Malloc>, c: Closure) NsScan {
 alias_name = (out: String, a: MutPtr<Malloc>, alias: String, name: String) String {
     out.rappend_string(a, alias).rappend(a, "__").rappend_string(a, name)
 }
-alias_hit = (s: StringView, p: i32, ie: i32, names: String, nm: String) bool {
+// A FIELD-LABEL context is a ctor/call paren (`Box(`) or a type body (`S: {`) — the only two brackets
+// whose direct children can be `name:` field labels. A fn/lambda param list (`= (n: i64)`) and a block
+// (`{ n: i64 := … }`) are NOT: those `name:` are BINDERS, and a binder must be prefixed exactly like the
+// uses that follow it. Bit `d - 1` of a mask records the bracket opened at depth `d`; past 64 the mask
+// runs out and the answer falls back to "not a label" (the pre-existing behaviour).
+opens_call_ctx = (b: u8, last: u8) bool { b == '(' && (last.is_alnum() || last == '>') }
+// `{` right after a `:` is a type body — UNLESS that `:` was itself a field label, in which case the
+// brace is a labelled block VALUE (`S(v: { n: i64 := 5 … })`) whose contents are statements, not fields.
+opens_type_ctx = (b: u8, last: u8, in_call: bool) bool {
+    b == '{' && last == ':' && in_call == false
+}
+label_mask_put = (m: i64, d: i32, on: bool) i64 {
+    (d > 64).then({
+        return m
+    })
+    bit := 1 << to_i64(d) - 1
+    (m | bit) ^ on.then({ 0 }, { bit })
+}
+label_mask_top = (m: i64, d: i32) bool { d > 0 && d <= 64 && m >> to_i64(d) - 1 & 1 == 1 }
+alias_hit = (s: StringView, p: i32, ie: i32, names: String, nm: String, label: bool) bool {
     after_dot := p > 0 && s.at(p - 1) == '.'
     rewrite_member := after_dot.then({ s.at(s.lstrip(ie)) == '(' }, { true })
-    names.seen_name(nm) && rewrite_member
+    // `len:` inside `Box(…)` names Box's FIELD, not this module's `len` fn — never prefix it.
+    field_label := label && s.at(s.lstrip(ie)) == ':'
+    names.seen_name(nm) && rewrite_member && field_label == false
 }
 rewrite_alias_names* = (
     out: String,
@@ -1427,6 +1448,10 @@ rewrite_alias_names* = (
 ) String {
     cur := out
     pos := p
+    depth: i32 := 0
+    cmask: i64 := 0    // per-depth: the bracket is a ctor/call paren
+    tmask: i64 := 0    // per-depth: the bracket is a type body
+    last: u8 := 0    // last significant byte, for classifying the next `(` / `{`
     bs: [u8] := s.str_bytes()
     bs.loop((h, i, b) {
         ii := to_i32(i)
@@ -1458,13 +1483,28 @@ rewrite_alias_names* = (
                                 true  => {
                                     ie := s.res_ident_end(pos)
                                     nm := a.mimport_name_span(s, pos, ie)
-                                    cur = s.alias_hit(pos, ie, names, nm).match ({
+                                    in_lbl := cmask.label_mask_top(depth)
+                                        || tmask.label_mask_top(depth)
+                                    cur = s.alias_hit(pos, ie, names, nm, in_lbl).match ({
                                         true  => cur.alias_name(a, alias, nm),
                                         false => cur.rappend_span(a, s, pos, ie),
                                     })
+                                    last = s.at(ie - 1)
                                     pos = ie
                                 },
                                 false => {
+                                    (b == '(' || b == '{' || b == '[').then({
+                                        in_call := cmask.label_mask_top(depth)
+                                        depth = depth + 1
+                                        cmask = cmask.label_mask_put(depth, b.opens_call_ctx(last))
+                                        tmask = tmask.label_mask_put(depth, b.opens_type_ctx(last, in_call))
+                                    })
+                                    (b == ')' || b == '}' || b == ']').then({
+                                        depth = (depth > 0).then({ depth - 1 }, { 0 })
+                                    })
+                                    (b.is_blank() == false && b != '\n' && b != '\r').then({
+                                        last = b
+                                    })
                                     cur = cur.rpush(a, b)
                                     pos = pos + 1
                                 },
