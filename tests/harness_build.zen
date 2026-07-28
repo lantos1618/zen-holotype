@@ -2865,6 +2865,10 @@ harness_build_run* = () i32 {
             cmd: "printf 'main = () i32 {\\n    x := 5\\n' > $ZT/zpe_brace.zen && ./zen check $ZT/zpe_brace.zen > $ZT/zpe_brace.txt 2>&1; grep -Fq ':1:15: error[parse]: unclosed `{`: expected a matching `}`, found end of input' $ZT/zpe_brace.txt && grep -Fq '  main = () i32 {' $ZT/zpe_brace.txt && grep -Fq '                ^' $ZT/zpe_brace.txt && grep -Fq 'hint: close the block that opens on this line with a `}`' $ZT/zpe_brace.txt",
         ),
         ShellCase(
+            name: "readonly_ptr_no_launder",
+            cmd: "{ ./zen check tests/fixtures/zen/readonly_ptr_launder.zen > $ZT/zrpl.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[ptr-write\\]: cannot write through a read-only' $ZT/zrpl.txt)\" = 5 && grep -Fq ':12:22:' $ZT/zrpl.txt && grep -Fq ':19:22:' $ZT/zrpl.txt && grep -Fq ':26:22:' $ZT/zrpl.txt && grep -Fq ':33:11:' $ZT/zrpl.txt && grep -Fq ':39:32:' $ZT/zrpl.txt && grep -Fq '  w: [u8] := v.ptr.slice(v.len)' $ZT/zrpl.txt && grep -Fq '  w: [u8] := v.ptr.offset(0).slice(v.len)' $ZT/zrpl.txt && grep -Fq \"  v.ptr.store('H')\" $ZT/zrpl.txt && printf '{ view } = std.text.str\\n{ copy } = std.mem.raw\\nfrom_ro = (s: StringCstr, d: [u8]) void {\\n    v := s.view()\\n    d.ptr.copy(v.ptr, v.len)\\n}\\nstill_writable = (s: StringView) [u8] {\\n    v := s.view()\\n    v.ptr.slice(v.len)\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zrpok.zen && ./zen check $ZT/zrpok.zen",
+        ),
+        ShellCase(
             name: "c_target_rejects_js_platform_module",
             cmd: "{ ./zen build examples/dom_demo.zen -o $ZT/zdom >/dev/null 2>$ZT/zdom_e.txt; test \"$?\" = 1; } && ! test -e $ZT/zdom && grep -Fq 'error[c-target]: `std.web.dom` is a JavaScript-platform binding' $ZT/zdom_e.txt && grep -Fq '^~~~~~~~~~~' $ZT/zdom_e.txt && grep -Fq 'hint: build this program for the js target instead' $ZT/zdom_e.txt && ! grep -Fq 'undefined reference' $ZT/zdom_e.txt && ! grep -Fq 'unknown type name' $ZT/zdom_e.txt && { ./zen emit examples/dom_demo.zen >$ZT/zdom.c 2>$ZT/zdom_ce.txt; test \"$?\" = 1; } && ! test -s $ZT/zdom.c && grep -Fq 'error[c-target]' $ZT/zdom_ce.txt && ./zen check examples/dom_demo.zen >/dev/null && ./zen emit-js examples/dom_demo.zen >$ZT/zdom.js 2>/dev/null && grep -Fq 'document.createElement' $ZT/zdom.js",
         ),
@@ -2940,6 +2944,12 @@ harness_build_run* = () i32 {
     // via contents_bytes_in yields the FULL 7 bytes (NUL preserved); the text contents_in view stops at 3.
     // stdin_read_all_bytes_nul_cat: read_all_bytes + out_bytes is a binary `cat` — a piped stream with an
     // embedded NUL round-trips byte-exact (5 in, 5 out), where the strlen-based read_all would truncate.
+    // readonly_ptr_no_launder: `.ptr` of a read-only window is a read-only `Ptr<u8>`, so the pointer
+    // cannot re-widen the window into a writable `[u8]` — nor can byte `offset` arithmetic launder it one
+    // hop further. All five laundering shapes in the fixture are
+    // rejected with a POSITIONED error[ptr-write] (count pinned at 5 — a fix that silences one is a
+    // failure), while the two legal uses — the pointer as a memcpy SOURCE, and a writable window's
+    // `.ptr` — still check. Before the fix `v.ptr.slice(v.len)` checked clean and aborted writing .rodata.
     // c_target_rejects_js_platform_module: std.web.dom's stubs ARE the browser, so a C build could only
     // hand `ld` symbols no C host defines. The C entry points (build/emit) refuse with a POSITIONED
     // error[c-target] at the import and never reach cc — no `undefined reference` / `unknown type name`

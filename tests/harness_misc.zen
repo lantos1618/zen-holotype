@@ -324,6 +324,21 @@ harness_misc_slice_mut = () i32 {
             should_pass: true,
             kind: "",
         ),
+        VerdictCase(
+            src: "{ view } = std.text.str\nbad = (s: StringCstr) i64 { v := s.view()  w: [u8] := v.ptr.slice(v.len)  w.len }\nmain = () i32 { 0 }",
+            should_pass: false,
+            kind: "ptr-write",
+        ),
+        VerdictCase(
+            src: "{ view } = std.text.str\n{ copy } = std.mem.raw\nfine = (s: StringCstr, d: [u8]) void { v := s.view()  d.ptr.copy(v.ptr, v.len) }\nmain = () i32 { 0 }",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "{ view } = std.text.str\nfine = (s: StringView) [u8] { v := s.view()  v.ptr.slice(v.len) }\nmain = () i32 { 0 }",
+            should_pass: true,
+            kind: "",
+        ),
     ])
 }
 // a store through a view of a `StringCstr` -> rejected (this is the `.rodata` write)
@@ -334,6 +349,10 @@ harness_misc_slice_mut = () i32 {
 // a writable `[u8]` passed to a `Slice<u8>` param -> accepted (capability may be dropped)
 // slice kinds are INVARIANT under a constructor: `Box<Slice<u8>>` does not fit `Box<[u8]>`
 // a store through a view of a plain `StringView` -> still accepted (strings_demo's shape)
+// the `.ptr` LAUNDRY: a read-only window's pointer re-widened into `[u8]` -> rejected, because
+// `.ptr` carries the window's own kind (tests/fixtures/zen/readonly_ptr_launder.zen pins all four
+// shapes). The two accepts that must survive it: the read-only pointer is still a legal memcpy
+// SOURCE, and a writable window's `.ptr` still builds a writable slice.
 // TEETH for the one-spelling-per-type rule: `str`, `text` and `Cstr` were aliases for
 // StringView/StringLiteral/StringCstr. They are gone, so each must now be an UNKNOWN
 // TYPE — silently accepting them is what let six spellings mean three things.
