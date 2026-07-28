@@ -405,8 +405,7 @@ checkpoint_suite = (mp: MutPtr<Malloc>) i32 {
 // SUITE 3: @while stays in the compiler / named low-level substrate.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 atwhile_allowed = (path: StringView) bool {
-    path == "src/compiler/lex.zen"
-        || path == "src/compiler/parse.zen"
+    path == "src/compiler/parse.zen"
         || path == "src/compiler/parse_expr.zen"
         || path == "src/compiler/parse_atom.zen"
         || path == "src/compiler/parse_stmt.zen"
@@ -429,24 +428,28 @@ atwhile_allowed = (path: StringView) bool {
         || path == "src/std/math.zen"
         || path == "src/std/rand.zen"
         || path == "src/std/text/ascii.zen"
-        || path == "src/std/sys/fs.zen"
         || path == "src/std/io/stdin.zen"
         || path == "src/std/hash.zen"
         || path == "src/compiler/resolve.zen"
         || path == "src/compiler/resolve_scan.zen"
         || path == "src/std/net/http.zen"
 }
-// std.core.count is the ONE place `@while` is supposed to live: it exists so that a count loop
-// has a `.loop`-shaped surface and callers never reach for the imperative form. Its four
-// functions ARE the primitive.
-// low-level numeric/filesystem/stdin substrate: these primitives MUST iterate, not recurse — an
-// unbounded recursion depth (huge exponent / directory entry count / stdin byte or line count /
+// std.core.count is the ONE place `@while` is supposed to live, and the ENDGAME for this list is that
+// it is the only entry left: `step_while` (carry a cursor, advance it with `next`, while `keep` holds)
+// covers every shape below, `advance_while`/`repeat_while` are the two shorthands over it, and
+// `upto`/`times` are calls, not loops. compiler.lex and std.sys.fs are already off this list — their
+// scanners went through `step_while` and the emitted C did not change. Each conversion lane deletes
+// its own entry here; when only `src/std/core/count.zen` remains, replace this allowlist with an
+// equality test on that one path — `file_has` already ignores comments and strings, so count.zen's
+// doc comment naming `@while` a dozen times cannot trip it.
+// low-level numeric/stdin substrate: these primitives MUST iterate, not recurse — an unbounded
+// recursion depth (huge exponent / stdin byte or line count /
 // SHA-256 512-bit block count over a large message) is a stack-overflow segfault. std.rand joins for
 // the same reason: its range() uses REJECTION SAMPLING (redraw until the value clears the bias cutoff),
 // a loop with no fixed iteration bound — recursing it would risk exactly the stack overflow this class
 // guards against — plus the xoshiro fill_bytes/shuffle counting loops. The compiler's
-// lexer/codegen/diagnostic scanners join for the same reason: a ~50KB string literal, a long numeric
-// literal, or a long source line must lex/emit/caret by iteration, not per-byte recursion (#66c).
+// codegen/diagnostic scanners join for the same reason: a ~50KB string literal, a long numeric
+// literal, or a long source line must emit/caret by iteration, not per-byte recursion (#66c).
 // std.text.ascii joins as the shared escape-loop substrate: escape_into is THE per-byte scan the
 // C/JS backends and the formatter splice their escape tables into (c_lit's own @while moved there).
 // compiler.drvutil joins as the OWNER of that scan: cstr_range (the shared [s,e) byte-range copy the
@@ -464,10 +467,9 @@ atwhile_allowed = (path: StringView) bool {
 // walks whole flattened sources byte-by-byte to the next newline, and both per-byte recursion
 // (stack) and a per-call strlen (quadratic — the old shape, the top resolve-imports hotspot) are
 // exactly what this substrate class exists to avoid.
-// std.collections.iter joins as the COUNT-ITERATION primitive, and is the one entry on this list that
-// exists to shorten the list: `upto`/`times` are the `.loop` a count has no memory for, so the two
-// `@while`s inside them are the ones every count-bounded caller no longer has to write. A `@while`
-// anywhere else in this module would be a bug — nothing here scans unbounded input.
+// Five entries below are already STALE — c_emit, drvutil, parse_expr, std.collections.iter and
+// std.hash hold no `@while` at all. They are left in place only so this change stays reviewable as
+// one thing; drop them with the next lane.
 // std.net.http joins for ONE loop, `serve_n`'s accept loop — the archetype of this class. A server
 // asked to run forever (`n < 0`) accepts an unbounded number of connections; recursing once per
 // request is a stack overflow with a wall-clock fuse on it. Every other loop in the module (the
