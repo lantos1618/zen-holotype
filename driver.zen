@@ -27,7 +27,8 @@
 { say, stdout_put, stdout_put_bytes, out_status, eprint, push_int, pid_path, dirname, last_slash,
   push_prefix, push_span, pad_sp, finish_cstr, join2, cstr_substr, bs_push_range, zt_log,
   resolve_prog_or_exit, dir_exists } = compiler.drvutil
-{ report_no_if_plain, report_no_if_resolved, report_check, report_js_unsupported } = compiler.drvdiag
+{ report_no_if_plain, report_no_if_resolved, report_check, report_js_unsupported,
+  report_c_unsupported } = compiler.drvdiag
 { js_unsupported_reset } = compiler.backend.js.js_expr
 { lsp_cmd } = compiler.lsp
 { FNV_BASIS, fnv_str, CacheWalk, edges_of, cache_walk_edges } = compiler.modgraph
@@ -455,7 +456,9 @@ compile_flat = (
             t3 := mp.tm_mark()
             crc := mp.report_check(raw, decls, rp, path, src)
             tm_check = mp.tm_lap(t3)
-            (crc == 0).match ({
+            // gate BEFORE emission: a js-platform import has no C implementation to link against,
+            // and `ld`'s undefined-reference dump is not a diagnostic a user can act on.
+            (crc == 0 && mp.report_c_unsupported(rp, path, src) == 0).match ({
                 true  => {
                     t4 := mp.tm_mark()
                     gen := mp.genModuleIn(decls)
@@ -506,7 +509,8 @@ emit_checked = (mp: MutPtr<Malloc>, root: string_view, path: string_view) i32 {
                 true  => {
                     raw := mp.parse_module(rp.flat)
                     decls := mp.resolve_module(raw)
-                    (mp.report_check(raw, decls, rp, path, src) == 0).match ({
+                    (mp.report_check(raw, decls, rp, path, src) == 0
+                        && mp.report_c_unsupported(rp, path, src) == 0).match ({
                         true  => {
                             stdout_put_bytes(mp.genModuleIn(decls).bytes())
                             0

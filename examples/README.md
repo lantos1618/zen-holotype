@@ -68,4 +68,6 @@ The two actor examples intentionally expose the current split API; see
 ```
 
 Load the emitted script in a browser page to exercise `document`, element creation, text content,
-append, and event-listener lowering.
+append, and event-listener lowering. Running it under `node` fails with `ReferenceError: document is
+not defined` — the lowering is right, the host is not a browser. `./zen build` and `./zen run` refuse
+it up front with `error[c-target]`: no C host defines `document`, so there is nothing to link.
