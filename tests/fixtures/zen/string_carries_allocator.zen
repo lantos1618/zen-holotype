@@ -1,0 +1,260 @@
+// String/Vec CARRY their allocator (docs/string-vec-model.md), end to end. Four things are proved,
+// and each one fails loudly if the semantics regress:
+//
+//   sticky   — an allocation fails MID-CHAIN; every later `add` is a no-op and `freeze` settles as
+//              .Err with the partial buffer handed back (one release, no leak).
+//   shrink   — `freeze` returns the slack: the allocator SEES a resize down to exactly `len`, which
+//              is recorded here rather than inferred from the header.
+//   through  — `drop()` takes no argument and frees through the allocator the value was BORN under:
+//              two independent counting allocators, and only the owner's counter moves.
+//   frozen   — a `StringConst`/`VecConst` view is read-only; that half is a check-time verdict
+//              (harness_misc slice_mut), because a rejected program cannot also be run here.
+{ DynAlloc, dyn_of, malloc, realloc, free, Malloc } = std.mem.alloc
+{ string, string_fixed, string_from, String, StringConst, StringFixed, init, append_in, free_in } = std.text.string
+{ vec, vec_fixed, vec_from, Vec, VecConst, VecFixed } = std.collections.vec
+{ to_exit } = std.core.bool
+{ Result, IoError, expect } = std.core.result
+{ formatln, arg_int } = std.text.fmt
+// ── allocator A: a budgeted malloc floor that records what it was last asked to resize to ─────────
+a_budget := to_i64(0)
+a_releases := to_i64(0)
+a_last_resize := to_i64(0)
+a_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
+    (a_budget <= 0).match ({
+        true  => null_ptr(),
+        false => {
+            a_budget = a_budget - 1
+            malloc(n)
+        },
+    })
+}
+a_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+    (a_budget <= 0).match ({
+        true  => null_ptr(),
+        false => {
+            a_budget = a_budget - 1
+            a_last_resize = n
+            realloc(p, n)
+        },
+    })
+}
+a_release = (state: RawPtr<u8>, p: RawPtr<u8>) void {
+    a_releases = a_releases + 1
+    free(p)
+}
+alloc_a = () DynAlloc { dyn_of(a_acquire, a_resize, a_release, null_ptr()) }
+// ── allocator B: the same floor with its own counters, so a cross-allocator free is VISIBLE ───────
+b_releases := to_i64(0)
+b_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> { malloc(n) }
+b_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
+b_release = (state: RawPtr<u8>, p: RawPtr<u8>) void {
+    b_releases = b_releases + 1
+    free(p)
+}
+alloc_b = () DynAlloc { dyn_of(b_acquire, b_resize, b_release, null_ptr()) }
+// A source run of n ascending i64s for the bulk `add`, owned by B so it never moves A's counters.
+// Spelled as a VecFixed rather than a `[1, 2, …]` literal on purpose: a slice literal bound to a
+// local is heap-promoted and never freed (a documented compiler leak, c_expr.gen_slicelit), which
+// would put noise in this fixture's valgrind run — the one place it must be silent.
+run_of = (n: i64) VecFixed<i64> {
+    f: Result<VecFixed<i64>, IoError> := alloc_b().vec_fixed(n)
+    v := f.match ({
+        .Ok(x)  => x,
+        .Err(e) => VecFixed<i64>(
+            ptr: null_ptr(),
+            len: 0,
+            alloc: alloc_b(),
+        ),
+    })
+    w: [i64] := v.view()
+    w.loop((h, k, x) {
+        w[k] = k + 1
+    })
+    v
+}
+// STICKY: one acquire of budget, so the first grow fails; the budget is then RESTORED, so a builder
+// that merely retried would recover. Staying at len 0 and settling as .Err is what proves stickiness.
+sticky_string = () bool {
+    a_budget = 1
+    a_releases = 0
+    s := alloc_a().string(4)
+    born_ok := s.oom == false && s.cap == 5
+    s = s.add("hello world, far past four bytes")
+    failed_len := s.len
+    // The allocator is HEALTHY again. A merely-broken builder would now succeed; a STICKY one
+    // cannot, and `freeze` must still report the failure that already happened.
+    a_budget = 64
+    s = s.add("ignored").add_one('!')
+    still_len := s.len
+    settled := s.freeze().match ({
+        .Ok(c)  => false,
+        .Err(e) => true,
+    })
+    formatln("sticky_string born_ok={} len_at_failure={} len_after_noops={} err={} releases={}", [arg_int(born_ok.match ({
+        true  => 1,
+        false => 0,
+    })), arg_int(failed_len), arg_int(still_len), arg_int(settled.then({ 1 }, { 0 })), arg_int(a_releases)])
+    born_ok && failed_len == 0 && still_len == 0 && settled && a_releases == 1
+}
+sticky_vec = () bool {
+    src := run_of(8)
+    a_budget = 1
+    a_releases = 0
+    v: Vec<i64> := alloc_a().vec(2)
+    v = v.add(src.view())
+    failed_len := v.len
+    a_budget = 64
+    v = v.add_one(9)
+    still_len := v.len
+    settled := v.freeze().match ({
+        .Ok(c)  => false,
+        .Err(e) => true,
+    })
+    formatln("sticky_vec len_at_failure={} len_after_noops={} err={} releases={}", [arg_int(failed_len), arg_int(still_len), arg_int(settled.match ({
+        true  => 1,
+        false => 0,
+    })), arg_int(a_releases)])
+    src.drop()
+    failed_len == 0 && still_len == 0 && settled && a_releases == 1
+}
+// SHRINK: cap before vs len after, plus the resize the allocator actually saw.
+shrink_string = () bool {
+    a_budget = 64
+    a_releases = 0
+    a_last_resize = 0
+    s := alloc_a().string(64)
+    s = s.add("hello").add(" world")
+    cap_before := s.cap
+    frozen := s.freeze().match ({
+        .Ok(c)  => c,
+        .Err(e) => StringConst(
+            ptr: null_ptr(),
+            len: 0 - 1,
+            alloc: alloc_a(),
+        ),
+    })
+    formatln("shrink_string cap_before={} len_after={} allocator_saw_resize_to={}", [arg_int(cap_before), arg_int(frozen.len), arg_int(a_last_resize)])
+    ok := cap_before == 65 && frozen.len == 11 && a_last_resize == 11 && frozen.get(0) == 'h'
+    frozen.drop()
+    ok && a_releases == 1
+}
+shrink_vec = () bool {
+    src := run_of(3)
+    a_budget = 64
+    a_releases = 0
+    a_last_resize = 0
+    v: Vec<i64> := alloc_a().vec(32)
+    v = v.add(src.view())
+    cap_before := v.cap
+    frozen := v.freeze().match ({
+        .Ok(c)  => c,
+        .Err(e) => VecConst<i64>(
+            ptr: null_ptr(),
+            len: 0 - 1,
+            alloc: alloc_a(),
+        ),
+    })
+    formatln("shrink_vec cap_before={} len_after={} allocator_saw_resize_to={}", [arg_int(cap_before), arg_int(frozen.len), arg_int(a_last_resize)])
+    ok := cap_before == 32
+        && frozen.len == 3
+        && a_last_resize == 3 * sizeof(i64)
+        && frozen.get(2) == 3
+    frozen.drop()
+    src.drop()
+    ok && a_releases == 1
+}
+// THROUGH: `drop()` names no allocator, so the only thing that can decide the target is the value
+// itself. Born on A, dropped with no argument -> A's counter moves and B's does not.
+drop_through_owner = () bool {
+    a_budget = 64
+    a_releases = 0
+    b_releases = 0
+    on_a := alloc_a().string(8).add("a")
+    on_b := alloc_b().string(8).add("b")
+    on_a.drop()
+    after_a := a_releases
+    cross_b := b_releases
+    on_b.drop()
+    formatln("drop_through_owner a_after_a_drop={} b_after_a_drop={} b_after_b_drop={}", [arg_int(after_a), arg_int(cross_b), arg_int(b_releases)])
+    after_a == 1 && cross_b == 0 && b_releases == 1
+}
+// ROUND TRIP: freeze -> string_from (the spelled-out copy that replaces a `thaw()`) -> freeze again.
+// Also covers the fixed row, which is writable and never grows.
+roundtrip = () bool {
+    a_budget = 64
+    a_releases = 0
+    gpa := alloc_a()
+    frozen := gpa.string(4).add("zen").freeze().match ({
+        .Ok(c)  => c,
+        .Err(e) => StringConst(
+            ptr: null_ptr(),
+            len: 0 - 1,
+            alloc: gpa,
+        ),
+    })
+    back := gpa.string_from(frozen)
+    same := back.len == 3 && back.view()[2] == 'n'
+    back.drop()
+    frozen.drop()
+    fixed := gpa.string_fixed(8).match ({
+        .Ok(f)  => f,
+        .Err(e) => StringFixed(
+            ptr: null_ptr(),
+            len: 0 - 1,
+            alloc: gpa,
+        ),
+    })
+    fixed.set(0, 'z')
+    fixed_ok := fixed.len == 8 && fixed.get(0) == 'z'
+    fixed.drop()
+    vfixed: Result<VecFixed<i64>, IoError> := gpa.vec_fixed(4)
+    vf := vfixed.match ({
+        .Ok(f)  => f,
+        .Err(e) => VecFixed<i64>(
+            ptr: null_ptr(),
+            len: 0 - 1,
+            alloc: gpa,
+        ),
+    })
+    vf.set(3, 77)
+    vfixed_ok := vf.len == 4 && vf.get(3) == 77
+    vf.drop()
+    formatln("roundtrip copy_ok={} string_fixed_ok={} vec_fixed_ok={} releases={}", [arg_int(same.match ({
+        true  => 1,
+        false => 0,
+    })), arg_int(fixed_ok.then({ 1 }, { 0 })), arg_int(vfixed_ok.then({ 1 }, { 0 })), arg_int(a_releases)])
+    same && fixed_ok && vfixed_ok && a_releases == 4
+}
+// TRANSITIONAL: the threaded API (init/append_in/free_in) is still here and fills none of the carried
+// fields, so a String can still arrive from either surface. Meeting the carrying ops must be DEFINED
+// rather than a call through an empty vtable: `add` no-ops, `freeze` reports, `drop` declines — and
+// the threaded owner still frees normally afterwards (valgrind sees one free, not zero and not two).
+threaded_string_declines = () bool {
+    m := Malloc(_: 0)
+    a := m.addr()
+    s := a.init(8).expect("init")
+    s = s.append_in(a, "hi").expect("append")
+    grown := s.add(" there")
+    settled := s.freeze().match ({
+        .Ok(c)  => false,
+        .Err(e) => true,
+    })
+    s.drop()
+    formatln("threaded_string_declines add_len={} freeze_err={} carried={}", [arg_int(grown.len), arg_int(settled.match ({
+        true  => 1,
+        false => 0,
+    })), arg_int(s.carried.then({ 1 }, { 0 }))])
+    ok := grown.len == 2 && settled && s.carried == false
+    s.free_in(a)
+    ok
+}
+main = () i32 {
+    ok := sticky_string()
+    ok = sticky_vec() && ok
+    ok = shrink_string() && ok
+    ok = shrink_vec() && ok
+    ok = drop_through_owner() && ok
+    ok = roundtrip() && ok
+    ok = threaded_string_declines() && ok
+    ok.to_exit()
+}

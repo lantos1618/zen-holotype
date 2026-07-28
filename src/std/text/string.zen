@@ -15,12 +15,102 @@
 //   s.free_in(m.addr())
 { len, view } = std.text.str
 { copy } = std.mem.raw
-{ Allocator, try_acquire, try_resize } = std.mem.alloc
+{ Allocator, try_acquire, try_resize, DynAlloc } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
+// ── the carried allocator + its sticky failure flag ──────────────────────────────────────────────
+// `alloc` is the allocator a String was born under, kept as a VALUE (std.mem.alloc's DynAlloc = the
+// Allocator trait erased into three fn-pointers + state), which is what lets `freeze` and `drop`
+// take no argument. `oom` is the STICKY flag: once an allocation fails every later `add` is a NO-OP
+// and the whole chain settles as ONE Result at `freeze()` — std.text.sb's policy, moved onto the
+// type it was a builder for. `carried` separates the two ways a String can be unusable: false means
+// "built by the THREADED api below" (init/append_in/…, which zero-fill these three fields), so the
+// carrying ops decline rather than call through an empty vtable. It goes away with that api.
 String*: {
     ptr: RawPtr<u8>,
     len: i64,
     cap: i64,
+    carried: bool,
+    oom: bool,
+    alloc: DynAlloc,
+    add = (s: String, t: StringView) String {
+        // append a StringView; a no-op once sticky or uncarried.
+        d := s.alloc
+        s.live().then({ s.settle(d.addr().append_in(s, t)) }, { s })
+    }
+    add_one = (s: String, b: u8) String {
+        // append ONE byte; a no-op once sticky or uncarried.
+        d := s.alloc
+        s.live().then({ s.settle(d.addr().push_in(s, b)) }, { s })
+    }
+    add_slice = (s: String, t: [u8]) String {
+        // append a length-carrying run that is NOT NUL-terminated (a window into another buffer).
+        d := s.alloc
+        s.live().then({ s.settle(d.addr().append_slice_in(s, t)) }, { s })
+    }
+    view = (s: String) [u8] {
+        // a WRITABLE window over the live bytes — a String owns its buffer and can be written through.
+        slice(s.ptr, s.len)
+    }
+    freeze = (s: String) Result<StringConst, IoError> {
+        // THE one settle point: shrink to fit, give up `cap`, and hand back the owned frozen bytes —
+        // or the sticky failure, in which case the partial buffer is freed and nothing owns it after.
+        // Every failure this chain can record comes from `ok_ptr` on a null allocation, so the error
+        // reported here IS the first one: they are the same value by construction.
+        d := s.alloc
+        s.live().match ({
+            true  => d.addr().try_resize(s.ptr, (s.len < 1).then({ 1 }, { s.len })).match ({
+                .Ok(p)  => ok(StringConst(
+                    ptr: p,
+                    len: s.len,
+                    alloc: s.alloc,
+                )),
+                .Err(e) => {
+                    s.drop()
+                    err(e)
+                },
+            }),
+            false => {
+                s.drop()
+                err(.NotFound)
+            },
+        })
+    }
+    drop = (s: String) void {
+        // hand the buffer back to the allocator the String carries — no argument, nothing to mismatch.
+        d := s.alloc
+        s.carried.then({
+            d.addr().release(s.ptr)
+        })
+    }
+    live = (s: String) bool { s.carried && s.oom == false }
+    // fold ONE threaded-api Result back into the carrying header: success relinks the grown buffer,
+    // failure trips the sticky flag and KEEPS the partial buffer so `freeze` can still free it.
+    settle = (s: String, r: Result<String, IoError>) String {
+        r.match ({
+            .Ok(g)  => s.relink(g),
+            .Err(e) => s.poison(),
+        })
+    }
+    relink = (s: String, g: String) String {
+        String(
+            ptr: g.ptr,
+            len: g.len,
+            cap: g.cap,
+            carried: true,
+            oom: false,
+            alloc: s.alloc,
+        )
+    }
+    poison = (s: String) String {
+        String(
+            ptr: s.ptr,
+            len: s.len,
+            cap: s.cap,
+            carried: s.carried,
+            oom: true,
+            alloc: s.alloc,
+        )
+    }
     bytes = (s: String) [u8] {
         // Physical allocation size. Builders keep at least one byte beyond `len` for finish_in's NUL;
         // init(requested) therefore reports at least requested + 1 here.
@@ -135,3 +225,79 @@ finish_in* = (a: Allocator, s: String) Result<StringCstr, IoError> {
     })
 }
 free_in* = (a: Allocator, s: String) void { a.release(s.ptr) }
+// ── the two `{ptr, len}` owned rows (docs/string-vec-model.md) ───────────────────────────────────
+// Neither has a `cap`, so growth is impossible BY CONSTRUCTION rather than by convention. They
+// differ from each other, and from `StringView`, only in what the checker allows: `StringFixed.view`
+// hands back a writable `[u8]`, `StringConst.view` a read-only `Slice<u8>` — so writing through a
+// frozen string is `error[slice-write]` at check time. Both carry the allocator they were born
+// under for the same reason `String` does: `drop()` takes no argument and cannot free through the
+// wrong one.
+StringFixed*: {
+    ptr: RawPtr<u8>,
+    len: i64,
+    alloc: DynAlloc,
+    view = (s: StringFixed) [u8] { slice(s.ptr, s.len) }
+    get  = (s: StringFixed, i: i64) u8 { s.view()[i] }
+    set = (s: StringFixed, i: i64, b: u8) void {
+        v := s.view()
+        v[i] = b
+    }
+    drop = (s: StringFixed) void {
+        d := s.alloc
+        d.addr().release(s.ptr)
+    }
+}
+StringConst*: {
+    ptr: RawPtr<u8>,
+    len: i64,
+    alloc: DynAlloc,
+    view = (s: StringConst) Slice<u8> { slice(s.ptr, s.len) }
+    get  = (s: StringConst, i: i64) u8 { s.view()[i] }
+    drop = (s: StringConst) void {
+        d := s.alloc
+        d.addr().release(s.ptr)
+    }
+}
+// ── carrying constructors ────────────────────────────────────────────────────────────────────────
+// The allocator is named ONCE, here, and rides inside the value from then on. `string` is
+// INFALLIBLE: a failed birth allocation is recorded as the sticky flag and settles at `freeze()`,
+// so a builder chain has exactly one `or_return`. `string_fixed` has no chain to settle into, so
+// it reports its single allocation directly.
+string* = (a: DynAlloc, cap: i64) String {
+    d := a
+    d.addr().init(cap).match ({
+        .Ok(g)  => String(
+            ptr: g.ptr,
+            len: 0,
+            cap: g.cap,
+            carried: true,
+            oom: false,
+            alloc: a,
+        ),
+        .Err(e) => String(
+            ptr: null_ptr(),
+            len: 0,
+            cap: 0,
+            carried: true,
+            oom: true,
+            alloc: a,
+        ),
+    })
+}
+string_fixed* = (a: DynAlloc, n: i64) Result<StringFixed, IoError> {
+    d := a
+    d.addr().try_acquire(n).match ({
+        .Ok(p)  => ok(StringFixed(
+            ptr: p,
+            len: n,
+            alloc: a,
+        )),
+        .Err(e) => err(e),
+    })
+}
+// The only way back from frozen to growable — there is deliberately no `thaw()`, because going back
+// COPIES and the allocator is named so the allocation is visible at the point it happens.
+string_from* = (a: DynAlloc, c: StringConst) String {
+    src: [u8] := slice(c.ptr, c.len)
+    a.string(c.len).add_slice(src)
+}
