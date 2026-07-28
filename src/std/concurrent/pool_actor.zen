@@ -75,11 +75,13 @@ spawn_actor*<ActorT> = (
     try_spawn_actor(cap, actor, tramp, art).expect("pool_actor: actor spawn allocation failed")
 }
 // spawn_actor with allocation failure as a VALUE. `spawn_actor` KEEPS its `PooledHandle<ActorT>` return
-// (17 call sites across 13 files, incl. std.net.http_actor, which would have to grow a Result of its own)
-// and becomes a thin `.expect` over this — so an OOM at spawn is a checked, diagnosable abort for every
-// existing caller, and a `.Err(.Oom)` value for anyone who asks for it. The caller that would benefit
-// most is `supervise` — a restart happens mid-run, under the memory pressure that may have caused the
-// crash — but routing it there means widening `Child<ActorT>` and `start_child` too; not done here.
+// (17 call sites across 13 files, incl. std.net.http_actor, which RETURNS the handle and would have to grow
+// a Result of its own) and becomes a thin `.expect` over this — so an OOM at spawn is a checked, diagnosable
+// abort for every existing caller, and a `.Err(.Oom)` value for anyone who asks for it.
+// The caller that genuinely benefits is `supervise`, and it is wired through: `try_start_child` /
+// `try_supervise` (below) carry the failure as a value, `start_child` / `supervise` stay `.expect` wrappers.
+// That is ADDITIVE — `Child<ActorT>` is unchanged and not one of the 17 call sites moved — because the thing
+// a supervisor needs is a failed RESTART as a value, which is a widening of the RETURN, not of the handle.
 try_spawn_actor*<ActorT> = (
     cap: i64,
     actor: ActorT,
@@ -308,40 +310,64 @@ Child*<ActorT>: {
     spec: ChildSpec<ActorT>,
 }
 // (re)spawn an actor from its retained spec — a fresh actor with a fresh COPY of the initial state.
-spawn_from_spec<ActorT> = (spec: ChildSpec<ActorT>) PooledHandle<ActorT> {
-    spawn_actor(spec.cap, spec.initial, spec.tramp, spec.art)
+try_spawn_from_spec<ActorT> = (spec: ChildSpec<ActorT>) Result<PooledHandle<ActorT>, ActorError> {
+    try_spawn_actor(spec.cap, spec.initial, spec.tramp, spec.art)
 }
 // START a supervised child: spawn it from its spec (not yet runnable — the first `send` schedules it).
 start_child*<ActorT> = (spec: ChildSpec<ActorT>) Child<ActorT> {
-    Child<ActorT>(
-        handle: spawn_from_spec(spec),
-        restarts: 0,
-        spec: spec,
-    )
+    try_start_child(spec).expect("pool_actor: actor spawn allocation failed")
+}
+// start_child with the spawn failure as a VALUE — the entry half of restart-as-a-value (see try_supervise).
+try_start_child*<ActorT> = (spec: ChildSpec<ActorT>) Result<Child<ActorT>, ActorError> {
+    try_spawn_from_spec(spec).match ({
+        .Ok(h)  => .Ok(Child<ActorT>(
+            handle: h,
+            restarts: 0,
+            spec: spec,
+        )),
+        .Err(e) => .Err(e),
+    })
 }
 // SUPERVISE one child: if its actor is alive, return it unchanged; if it is DEAD, apply the policy —
 // Temporary leaves it dead (observable), Permanent frees the dead instance (Arc-decrement + state free via
 // `close`) and re-runs the retained spec into a FRESH actor, returning the new Child (restart count bumped).
 // Call after the pool has quiesced (pool_quiesce) so the dead instance has finished draining its backlog —
 // then `close` races no worker. The returned Child's `handle` addresses the live (restarted or original) actor.
+// A restart that cannot ALLOCATE still aborts here (the `.expect`); `try_supervise` is the value form.
 supervise*<ActorT> = (c: Child<ActorT>) Child<ActorT> {
+    try_supervise(c).expect("pool_actor: child restart allocation failed")
+}
+// RESTART AS A VALUE. This is the caller that actually needs it: a restart happens MID-RUN, under exactly
+// the memory pressure that killed the child, so "the supervisor could not revive the agent" is a condition
+// a supervisor must be able to act on (shed load, restart later, escalate to its own supervisor) rather
+// than a process-wide abort. `Child<ActorT>` itself does NOT widen — only the RETURN does.
+//
+// ORDER MATTERS, and it is deliberately spawn-BEFORE-free: the dead instance's pool block + state block are
+// released only once the replacement exists. So on `.Err` the caller's OWN `c` — a value it still holds,
+// since Zen rebinds rather than mutates — is untouched and still valid: it can retry `try_supervise(c)`
+// after shedding load, or `close` the child and give up. Freeing first would hand back an `.Err` alongside a
+// Child whose handle is already freed, i.e. an un-retryable, un-closable value — actionable in name only.
+// The cost is one actor's worth of peak memory during the swap, which is the price of a retryable failure.
+try_supervise*<ActorT> = (c: Child<ActorT>) Result<Child<ActorT>, ActorError> {
     pool_actor_dead(c.handle.raw).match ({
         true  => c.spec.policy.match ({
-            .Temporary => c,
-            .Permanent => {
-                pool_actor_free(c.handle.raw)    // drop the dead instance's Arc ref (frees its pool block)
-                free(c.handle.state)
-                Child<ActorT>(
-                    handle: spawn_from_spec(c.spec),
-                    restarts: c.restarts + 1,
-                    spec: c.spec,
-                )
-            },
-        }),
-        false => c,
+            .Temporary => .Ok(c),
+            .Permanent => try_spawn_from_spec(c.spec).match ({
+                .Ok(h)  => {
+                    pool_actor_free(c.handle.raw)    // drop the dead instance's Arc ref (frees its pool block)
+                    free(c.handle.state)
+                    .Ok(Child<ActorT>(
+                        handle: h,
+                        restarts: c.restarts + 1,
+                        spec: c.spec,
+                    ))
+                },    // free the dead instance's state block (same as `close`, inlined —
+                .Err(e) => .Err(e),
+            }),
+        }),    // `close` unqualified would flatten-collide with libc's `close`)
+        false => .Ok(c),
     })
-}    // free the dead instance's state block (same as `close`, inlined —
-// `close` unqualified would flatten-collide with libc's `close`)
+}
 // is this supervised child's actor currently dead? (thin typed wrapper over pool_actor_dead for the handle.)
 child_dead<ActorT> = (c: Child<ActorT>) bool { pool_actor_dead(c.handle.raw) }
 // reclaim a delivered message box — call from the trampoline AFTER `receive` returns. (The box was

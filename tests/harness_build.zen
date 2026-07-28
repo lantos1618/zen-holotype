@@ -318,6 +318,8 @@ shell_is_serial = (name: string_view) bool {
         || name == "pool_actor_stackoverflow_isolation"
         || name == "pool_actor_panic_box_freed"
         || name == "main_oom_panic_with_live_pool_aborts"
+        || name == "pool_rq_grow_oom_no_deadlock"
+        || name == "pool_supervisor_restart_oom_value"
 }
 // wrap ONE shell case's body so it is self-contained + gid-isolated: bind `$ZT` to a PER-CASE scratch
 // subdir `<zo_dir>/sh<gid>` (freshly recreated) so the hand-written pipelines — which reuse fixed scratch
@@ -2445,6 +2447,14 @@ harness_build_run* = () i32 {
             cmd: "./zen build tests/fixtures/zen/main_oom_panic_with_live_pool_aborts.zen -o $ZT/zmop 2>/dev/null && { $ZT/zmop >/dev/null 2>$ZT/zmop_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: vec.new: out of memory\" $ZT/zmop_e.txt && test \"$(grep -c 'zen: panic:' $ZT/zmop_e.txt)\" = 1",
         ),
         ShellCase(
+            name: "pool_rq_grow_oom_no_deadlock",
+            cmd: "cc -shared -fPIC -O2 scripts/alloc-fuzz/oom-shim.c -ldl -o $ZT/oom.so 2>/dev/null && ./zen build tests/fixtures/zen/pool_rq_grow_oom_no_deadlock.zen -o $ZT/zrqg 2>/dev/null && { timeout 60 $ZT/zrqg; test \"$?\" = 42; } && { FAIL_SIZE=2768 LD_PRELOAD=$ZT/oom.so timeout 60 $ZT/zrqg 2>$ZT/zrqg_e.txt; test \"$?\" = 43; } && ! grep -Fq \"zen: panic:\" $ZT/zrqg_e.txt",
+        ),
+        ShellCase(
+            name: "pool_supervisor_restart_oom_value",
+            cmd: "cc -shared -fPIC -O2 scripts/alloc-fuzz/oom-shim.c -ldl -o $ZT/oom.so 2>/dev/null && ./zen build tests/fixtures/zen/pool_supervisor_restart_oom_value.zen -o $ZT/zsov 2>/dev/null && { timeout 60 $ZT/zsov >/dev/null 2>&1; test \"$?\" = 41; } && { FAIL_SIZE=2504 FAIL_SKIP=1 FAIL_COUNT=1 LD_PRELOAD=$ZT/oom.so timeout 60 $ZT/zsov >/dev/null 2>$ZT/zsov_e.txt; test \"$?\" = 42; } && grep -Fqx \"zen: panic: integer divide by zero\" $ZT/zsov_e.txt && test \"$(grep -c 'zen: panic:' $ZT/zsov_e.txt)\" = 1",
+        ),
+        ShellCase(
             name: "deep_nontail_recursion_panics",
             cmd: "./zen build tests/fixtures/zen/deep_nontail_recursion.zen -o $ZT/zsof 2>/dev/null && { $ZT/zsof >/dev/null 2>$ZT/zsof_e.txt; test \"$?\" = 134; } && grep -Fqx \"zen: panic: stack overflow (recursion too deep)\" $ZT/zsof_e.txt",
         ),
@@ -2820,7 +2830,8 @@ harness_build_run* = () i32 {
             name: "cache_path_invocation_warms",
             cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
         ),
-    ])
+    ])    // TERMINATION is the assertion: `timeout` makes the pre-fix deadlock (rc 124) a FAILING case
+    // a failed RESTART is a value: exit 42 means the supervisor saw `.Err(.Oom)` and RETRIED back to health
     // the five atomic_* intrinsics, C vs node. genc lowers each to a __atomic_* builtin; before the
     // js backend lowered them too, `build --target js` exited 0 and the emitted call hit an
     // undefined name — `node` died with `ReferenceError: atomic_store_i64 is not defined`. Asserting
