@@ -16,6 +16,11 @@
 #   BUG:NULL  "null pointer dereference" — an unchecked allocation result was dereferenced
 #   BUG:HEAP  glibc "double free" / "corruption" / "malloc(): ..." — a corrupted heap on the error path
 #   BUG:SIG   died by signal with no clean panic line
+#   BUG:HANG  still running after TMO seconds — the failure path DEADLOCKED (or spun) instead of
+#             reporting. Every run is wrapped in `timeout`: without it a single hang froze the whole
+#             sweep, so the one failure mode that cannot be distinguished from "still working" was also
+#             the one the sweep could never report. (A panic under a held lock is exactly this class:
+#             `panic` unwinds into a pool worker's catch, the lock is never released, the pool hangs.)
 # Findings (BUG:*) are deduped by (class, signature) into fuzz-out/oom/findings.txt.
 set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -24,7 +29,7 @@ SHIM="$HERE/oom-shim.so"
 ZEN="$ROOT/zen"
 OUT="$ROOT/fuzz-out/oom"; mkdir -p "$OUT"
 
-LOW="${LOW:-96}"; STEP="${STEP:-0}"; CAP="${CAP:-0}"
+LOW="${LOW:-96}"; STEP="${STEP:-0}"; CAP="${CAP:-0}"; TMO="${TMO:-20}"
 export MALLOC_CHECK_="${MALLOC_CHECK_:-3}"   # libc aborts on detected heap corruption / double-free
 export ZENC_NO_CACHE=1                        # every compiler run re-does the full frontend (deterministic allocation profile)
 
@@ -41,10 +46,10 @@ esac
 [ ${#CMD[@]} -gt 0 ] || { echo "no target"; exit 1; }
 
 # baseline (no injection) rc, and the injectable allocation count.
-"${CMD[@]}" >/dev/null 2>&1; base=$?
-total=$(ZALLOC_COUNT=1 LD_PRELOAD="$SHIM" "${CMD[@]}" 2>&1 >/dev/null | grep -oE 'ZALLOC_TOTAL=[0-9]+' | cut -d= -f2)
+timeout "$TMO" "${CMD[@]}" >/dev/null 2>&1; base=$?
+total=$(ZALLOC_COUNT=1 LD_PRELOAD="$SHIM" timeout "$TMO" "${CMD[@]}" 2>&1 >/dev/null | grep -oE 'ZALLOC_TOTAL=[0-9]+' | cut -d= -f2)
 total="${total:-0}"
-echo "target: ${CMD[*]}"
+echo "target: ${CMD[*]}   (per-run timeout ${TMO}s)"
 echo "baseline rc=$base   injectable allocations=$total"
 
 # build the list of N to try: dense 1..min(LOW,total), then strided samples.
@@ -57,9 +62,14 @@ findings="$OUT/findings.txt"; : > "$findings"
 declare -A seen
 ok=0 handled=0 bug=0 nsig=0
 for N in "${Ns[@]}"; do
-  out=$(FAIL_AT=$N LD_PRELOAD="$SHIM" "${CMD[@]}" 2>&1 >/dev/null); rc=$?
+  out=$(FAIL_AT=$N LD_PRELOAD="$SHIM" timeout "$TMO" "${CMD[@]}" 2>&1 >/dev/null); rc=$?
   line=$(printf '%s\n' "$out" | grep -iE 'panic|corrupt|double free|malloc\(\)|free\(\)|sanitizer' | head -1)
-  if printf '%s' "$line" | grep -qi 'null pointer'; then cls=BUG:NULL
+  if [ $rc -eq 124 ]; then cls=BUG:HANG; line="no exit within ${TMO}s (deadlock?)${line:+ :: $line}"
+  # "null pointer dereference" (zenrt.c's SIGSEGV guard) is an UNCHECKED result being dereferenced — a
+  # bug. "null pointer deref" (assert_nonnull's own panic, c_expr.zen) is the program CHECKING and aborting
+  # on purpose. The two differ by four characters, so an un-anchored match filed every assert_nonnull as
+  # BUG:NULL; require the full word.
+  elif printf '%s' "$line" | grep -qi 'null pointer dereference'; then cls=BUG:NULL
   elif printf '%s' "$line" | grep -qiE 'double free|corrupt|malloc\(\)|free\(\)'; then cls=BUG:HEAP
   # `sanitizer` was in the EXTRACTION alternation above but in no classification branch: its only
   # effect was to make $line non-empty, which disqualified BUG:SIG and dropped an ASan abort into

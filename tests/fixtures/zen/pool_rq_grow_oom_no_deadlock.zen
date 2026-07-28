@@ -1,0 +1,79 @@
+// HAZARD 1: an allocation failure in `rq_grow` must not PANIC while the pool mutex `p.mu` is held.
+//
+// `rq_push` (and therefore `rq_grow`) runs UNDER `p.mu`, and `pool_send` is reachable from INSIDE a
+// behavior (an actor fanning work out to other actors). Since `std.core.result.panic` calls
+// `__zen_panic_unwind()` before `abort()`, a panic there siglongjmps into the worker's per-behavior
+// catch — with `p.mu` STILL LOCKED. The worker then deadlocks on its very next `p.mu.lock()` (the
+// deschedule in `run_quantum`), the main thread parks forever in `pool_quiesce_stop`, and the whole
+// pool hangs instead of reporting anything. So the growth allocation is a VALUE now: `rq_try_push`
+// returns false, `pool_send` unwinds its scheduling attempt and answers `.Err(.Oom)`.
+//
+// THE SHAPE: ONE worker, so nothing pops the run queue while the fanout actor is running; RQCAP=173
+// slots and NLEAF=256 leaves, so the 174th `pool_send` inside the behavior must grow the queue. The
+// growth allocates 173*2*8 = 2768 bytes — a size unique in this program — so
+// `FAIL_SIZE=2768 LD_PRELOAD=oom-shim.so` fails EXACTLY that allocation, on the worker thread,
+// deterministically (a global FAIL_AT counter is not reproducible once threads race for it).
+//
+// Asserted by the `pool_rq_grow_oom_no_deadlock` shell case, which runs the program TWICE:
+//   uninjected     -> exit 42: every leaf ran exactly once, zero errors.
+//   FAIL_SIZE=2768 -> exit 43 UNDER `timeout`: the queue could not grow, the sends that could not be
+//                     scheduled came back `.Err(.Oom)`, and delivered + refused still accounts for
+//                     every message. TERMINATION is the assertion — before the fix this hung forever.
+{ pool_open, pool_spawn, pool_actor_free, pool_view, Pool } = std.concurrent.pool
+NLEAF := 256    // leaves made runnable from inside ONE behavior
+RQCAP := 173    // initial run-queue slots; growth allocates 173*2*8 = 2768 bytes
+WORKERS := 1    // the lone worker is busy inside the fanout behavior, so the queue only fills
+delivered := assert_nonnull(malloc(8))
+refused := assert_nonnull(malloc(8))
+poolcell := assert_nonnull(malloc(8))    // the pool's backing block, so the behavior can rebuild a MutPtr<Pool>
+leaves := assert_nonnull(malloc(NLEAF * 8))
+leaf_behave = (user: RawPtr<u8>, msg: i64) void { atomic_add_i64(user, 1) }
+// send to every leaf FROM INSIDE a behavior — this is the run-queue growth path, under `p.mu`.
+fan = (p: MutPtr<Pool>, i: i64) void {
+    (i < NLEAF).then({
+        bad := p.pool_send(leaves.offset(i * 8).load_i64().offset(0), 1).match ({
+            .Ok(n)  => 0,
+            .Err(e) => 1,
+        })
+        (bad > 0).then({
+            atomic_add_i64(refused, 1)
+        })
+        fan(p, i + 1)
+    })
+}
+fanout_behave = (user: RawPtr<u8>, msg: i64) void { pool_view(load_i64(poolcell).offset(0)).fan(0) }
+spawn_leaves = (i: i64) void {
+    (i < NLEAF).then({
+        leaves.offset(i * 8).store_i64(pool_spawn(delivered, 4, leaf_behave))
+        spawn_leaves(i + 1)
+    })
+}
+free_leaves = (i: i64) void {
+    (i < NLEAF).then({
+        pool_actor_free(leaves.offset(i * 8).load_i64().offset(0))
+        free_leaves(i + 1)
+    })
+}
+main = () i32 {
+    store_i64(delivered, 0)
+    store_i64(refused, 0)
+    spawn_leaves(0)
+    fanout := pool_spawn(delivered, 4, fanout_behave)
+    p := pool_open(WORKERS, RQCAP)
+    poolcell.store_i64(p.pool_raw())
+    p.pool_send(fanout, 1)
+    p.pool_quiesce_stop()
+    got := load_i64(delivered)
+    refs := load_i64(refused)
+    free_leaves(0)
+    pool_actor_free(fanout)
+    p.pool_close()
+    free(leaves)
+    free(poolcell)
+    free(refused)
+    free(delivered)
+    (got + refs == NLEAF).match ({
+        true  => (refs == 0).then({ 42 }, { 43 }),
+        false => 1,
+    })
+}
