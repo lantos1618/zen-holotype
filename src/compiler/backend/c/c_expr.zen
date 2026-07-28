@@ -109,13 +109,13 @@ gen_tag_const = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>) String {
 // `break`/`continue` is both mistargeted by an intervening match switch and unusable in expression
 // position. The resolved handler is a unique local Var: jump to that loop's labels from a typed GNU
 // statement-expression. The dead `0` gives __typeof__/conditional arm typing an ordinary value.
-gen_loop_label = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: string_view) String {
+gen_loop_label = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: StringView) String {
     load(obj).match ({
         .Var(v) => s.gstr_append(alloc, v.name).gstr_append(alloc, suffix),
         _       => s.gstr_append(alloc, "zen__invalid_loop_handler"),
     })
 }
-gen_loop_jump = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: string_view) String {
+gen_loop_jump = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: StringView) String {
     s
         .gstr_append(alloc, "({ goto ")
         .gen_loop_label(alloc, obj, suffix)
@@ -300,10 +300,10 @@ EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI6
 // map a sizeof type-arg name to its C type name. Primitives (i64→int64_t, bool→…) must NOT leak the
 // Zen keyword into C; struct names and already-substituted tparams (sizeof(T)→sizeof(Expr)) pass through.
 // The whole string_* family shares the Phase-1 `const char*` layout, so one size answers for all three.
-sizeof_is_canonical_string = (n: string_view) bool {
-    n == "string_view" || n == "string_cstr" || n == "string_literal"
+sizeof_is_canonical_string = (n: StringView) bool {
+    n == "StringView" || n == "StringCstr" || n == "StringLiteral"
 }
-sizeof_base_cname = (n: string_view) string_view {
+sizeof_base_cname = (n: StringView) StringView {
     (n == "i32").then({
         return "int32_t"
     })
@@ -324,7 +324,7 @@ sizeof_base_cname = (n: string_view) string_view {
     })
     n
 }
-sizeof_cname = (n: string_view) string_view {
+sizeof_cname = (n: StringView) StringView {
     n.sizeof_is_canonical_string().then({ "const char*" }, { n.sizeof_base_cname() })
 }
 // `sizeof(<type>)`: route a bare type-name Var through sizeof_cname; any other arg form emits as-is.
@@ -339,7 +339,7 @@ gen_sizeof = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
     })
     body.gstr_append(alloc, ")")
 }
-call_kind = (name: string_view) EmitCallKind {
+call_kind = (name: StringView) EmitCallKind {
     kind := EmitCallKind.Normal
     (name == "__str_eq").then({
         kind = EmitCallKind.StrEq
@@ -448,7 +448,7 @@ gen_call_default = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
 // Argument emission for an ORDINARY call — the one position where a slice literal can be proven not to
 // escape (c_escape). Identical to gen_args except for that one classification; every other argument, and
 // every intrinsic's arguments (they never reach here), go through gen_expr and stay heap-promoted.
-gen_call_args = (s: String, alloc: MutPtr<Malloc>, fn: string_view, args: [Expr]) String {
+gen_call_args = (s: String, alloc: MutPtr<Malloc>, fn: StringView, args: [Expr]) String {
     out := s
     args.loop((h, i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
@@ -470,25 +470,25 @@ gen_intr1 = (
     s: String,
     alloc: MutPtr<Malloc>,
     c: CallData,
-    pre: string_view,
-    post: string_view,
+    pre: StringView,
+    post: StringView,
 ) String { s.gstr_append(alloc, pre).gen_arg_at(alloc, c, 0).gstr_append(alloc, post) }
 gen_intr2 = (
     s: String,
     alloc: MutPtr<Malloc>,
     c: CallData,
-    pre: string_view,
-    mid: string_view,
-    post: string_view,
+    pre: StringView,
+    mid: StringView,
+    post: StringView,
 ) String { s.gen_intr1(alloc, c, pre, mid).gen_arg_at(alloc, c, 1).gstr_append(alloc, post) }
 gen_intr3 = (
     s: String,
     alloc: MutPtr<Malloc>,
     c: CallData,
-    pre: string_view,
-    mid1: string_view,
-    mid2: string_view,
-    post: string_view,
+    pre: StringView,
+    mid1: StringView,
+    mid2: StringView,
+    post: StringView,
 ) String { s.gen_intr2(alloc, c, pre, mid1, mid2).gen_arg_at(alloc, c, 2).gstr_append(alloc, post) }
 gen_call = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
     c.fn.call_kind().match ({
@@ -607,8 +607,8 @@ gen_mkstruct = (s: String, alloc: MutPtr<Malloc>, m: MakeStructData) String {
 gen_armbind = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     a: ArmData,
 ) String {
     s
@@ -626,8 +626,8 @@ gen_armbind = (
 gen_armbody = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     a: ArmData,
 ) String {
     is_empty(a.bind).match ({
@@ -640,8 +640,8 @@ gen_armbody = (
 gen_armbind_stmt = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     a: ArmData,
 ) String {
     s
@@ -659,8 +659,8 @@ gen_armbind_stmt = (
 gen_armbody_stmt = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     a: ArmData,
 ) String {
     is_empty(a.bind).match ({
@@ -681,8 +681,8 @@ next_live_arm = (arms: [ArmData], i: i64) i64 {
 gen_match_type_expr = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     arms: [ArmData],
     i: i64,
 ) String {
@@ -708,8 +708,8 @@ gen_match_type_expr = (
 gen_match_out_decl = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     arms: [ArmData],
 ) String {
     s
@@ -722,8 +722,8 @@ gen_match_out_decl = (
 gen_switch_body = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     a: ArmData,
 ) String {
     a.body.blk_diverges().match ({
@@ -737,8 +737,8 @@ gen_switch_body = (
 gen_switch_stmt_body = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     a: ArmData,
 ) String {
     s
@@ -749,9 +749,9 @@ gen_switch_stmt_body = (
 gen_switch_case = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
-    ename: string_view,
+    subj: StringView,
+    sep: StringView,
+    ename: StringView,
     a: ArmData,
 ) String {
     s
@@ -765,16 +765,16 @@ gen_switch_case = (
 gen_switch_default = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     a: ArmData,
 ) String { s.gstr_append(alloc, "default: ").gen_switch_body(alloc, subj, sep, a) }
 gen_switch_stmt_case = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
-    ename: string_view,
+    subj: StringView,
+    sep: StringView,
+    ename: StringView,
     a: ArmData,
 ) String {
     s
@@ -788,8 +788,8 @@ gen_switch_stmt_case = (
 gen_switch_stmt_default = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
+    subj: StringView,
+    sep: StringView,
     a: ArmData,
 ) String { s.gstr_append(alloc, "default: ").gen_switch_stmt_body(alloc, subj, sep, a) }
 // A match with no explicit `_` arm was proved exhaustive by the CHECKER; the emitter must not silently
@@ -803,9 +803,9 @@ gen_switch_panic_default = (s: String, alloc: MutPtr<Malloc>) String {
 gen_switch_arm = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
-    ename: string_view,
+    subj: StringView,
+    sep: StringView,
+    ename: StringView,
     a: ArmData,
     last: bool,
 ) String {
@@ -820,9 +820,9 @@ gen_switch_arm = (
 gen_switch_stmt_arm = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
-    ename: string_view,
+    subj: StringView,
+    sep: StringView,
+    ename: StringView,
     a: ArmData,
     last: bool,
 ) String {
@@ -837,9 +837,9 @@ gen_switch_stmt_arm = (
 gen_switch_arms = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
-    ename: string_view,
+    subj: StringView,
+    sep: StringView,
+    ename: StringView,
     arms: [ArmData],
     i: i64,
 ) String {
@@ -857,9 +857,9 @@ gen_switch_arms = (
 gen_switch_stmt_arms = (
     s: String,
     alloc: MutPtr<Malloc>,
-    subj: string_view,
-    sep: string_view,
-    ename: string_view,
+    subj: StringView,
+    sep: StringView,
+    ename: StringView,
     arms: [ArmData],
     i: i64,
 ) String {

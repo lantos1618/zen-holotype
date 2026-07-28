@@ -47,7 +47,7 @@
 // single-module and harness paths keep their existing behavior.
 UfcsVis*: {
     on: bool,
-    flat: string_view,
+    flat: StringView,
     regions: [FlatRegion],
     table: ModuleTable,
     imports: Map<i64>,
@@ -61,7 +61,7 @@ UfcsVis*: {
     // an ALIAS-APPENDED module body is text-renamed (`abs` -> `m__abs`) including its own internal
     // references, so a self-call inside such a region carries the prefixed name while the module's
     // ORIGINAL source (what the visibility walk scanned) declares the bare tail — accept the tail.
-    vis_alias_tail_has = (vis: UfcsVis, a: MutPtr<Malloc>, mi: i64, name: string_view) bool {
+    vis_alias_tail_has = (vis: UfcsVis, a: MutPtr<Malloc>, mi: i64, name: StringView) bool {
         sep := name.alias_sep()
         (sep > 0).match ({
             true  => vis.imports.get(a.vis_key(mi, name.alias_tail(sep)), 0) == mi + 1,
@@ -72,7 +72,7 @@ UfcsVis*: {
     // False for every DISPATCH-REWRITTEN call — impl/mono/alias rewrites (`gstr_append_Malloc`,
     // `impl_Verdict_i32_or`, …) keep the surface method's pos but carry a mangled fn, and a rewrite
     // means dispatch RESOLVED the call, so the visibility check must not judge it.
-    vis_name_at = (vis: UfcsVis, pos: i32, name: string_view) bool {
+    vis_name_at = (vis: UfcsVis, pos: i32, name: StringView) bool {
         // Byte-compare `name` against flat[pos..] directly. The old body called flat.view() — a
         // strlen over the WHOLE flattened program — on every query. The && chain short-circuits at
         // the first mismatch, and name's bytes are never NUL, so the walk stops at (never crosses)
@@ -93,7 +93,7 @@ UfcsVis*: {
     // imports below a header comment / mid-file ns-alias lines, and fixing that scan would change
     // dedup/alias behavior for every resolver consumer.) A position outside every region (a
     // synthesized node) stays lenient — this check only ever REJECTS a call the user wrote.
-    vis_name_visible = (vis: UfcsVis, a: MutPtr<Malloc>, pos: i32, name: string_view) bool {
+    vis_name_visible = (vis: UfcsVis, a: MutPtr<Malloc>, pos: i32, name: StringView) bool {
         ri := vis.regions.fregion_find(to_i64(pos))
         (ri < 0).match ({
             true  => true,
@@ -122,7 +122,7 @@ ufcs_vis_off* = (a: MutPtr<Malloc>) UfcsVis {
 // contributes every identifier between its `{` and `}` (multi-line lists included — the walk resumes
 // from the line holding the `}`), any other line is skipped whole. Deliberately separate from the
 // resolver's symbol scan so shared dedup/alias behavior is untouched.
-vis_close_pos = (src: string_view, p: i32) i32 {
+vis_close_pos = (src: StringView, p: i32) i32 {
     out := p
     bs: [u8] := src.view()
     (to_i64(p) < bs.len).then({
@@ -136,7 +136,7 @@ vis_close_pos = (src: string_view, p: i32) i32 {
     })
     out
 }
-vis_copy_name = (a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) string_view {
+vis_copy_name = (a: MutPtr<Malloc>, src: StringView, p: i32, e: i32) StringView {
     s := a.gstr_string(to_i64(e - p) + 1)
     span: [u8] := slice(src.offset(p), to_i64(e - p))
     span.loop((h, i, b) {
@@ -149,7 +149,7 @@ vis_copy_name = (a: MutPtr<Malloc>, src: string_view, p: i32, e: i32) string_vie
 // collide with a real module index.
 // the module index renders through compiler.astops' one decimal writer (gstr_int; mi is a
 // non-negative index, so the bit-reinterpreting u64 path prints its plain decimal digits).
-vis_key = (a: MutPtr<Malloc>, mi: i64, name: string_view) string_view {
+vis_key = (a: MutPtr<Malloc>, mi: i64, name: StringView) StringView {
     s := a.gstr_string(name.view().len + 8).gstr_int(a, mi).gstr_push(a, '\t')
     nb: [u8] := name.view()
     nb.loop((h, i, b) {
@@ -157,7 +157,7 @@ vis_key = (a: MutPtr<Malloc>, mi: i64, name: string_view) string_view {
     })
     s.gstr_finish(a)
 }
-vis_head_fill = (a: MutPtr<Malloc>, src: string_view, mi: i64, p: i32, m0: Map<i64>) Map<i64> {
+vis_head_fill = (a: MutPtr<Malloc>, src: StringView, mi: i64, p: i32, m0: Map<i64>) Map<i64> {
     m := m0
     pos := p
     bs: [u8] := src.view()
@@ -185,7 +185,7 @@ vis_head_fill = (a: MutPtr<Malloc>, src: string_view, mi: i64, p: i32, m0: Map<i
     })
     m
 }
-vis_head_names = (a: MutPtr<Malloc>, src: string_view, mi: i64, m0: Map<i64>) Map<i64> {
+vis_head_names = (a: MutPtr<Malloc>, src: StringView, mi: i64, m0: Map<i64>) Map<i64> {
     m := m0
     pos: i32 := 0
     bs: [u8] := src.view()
@@ -218,7 +218,7 @@ vis_head_names = (a: MutPtr<Malloc>, src: string_view, mi: i64, m0: Map<i64>) Ma
 is_alnum_head = (b: u8) bool { b.is_alnum() && (b >= '0' && b <= '9') == false }
 ufcs_vis_of* = (
     a: MutPtr<Malloc>,
-    flat: string_view,
+    flat: StringView,
     regions: [FlatRegion],
     table: ModuleTable,
 ) UfcsVis {
@@ -249,7 +249,7 @@ DeclIndex*: {
     genstruct_idx: Map<i64>,
     genenum_idx: Map<i64>,
     dispatch_idx: Map<i64>,
-    idx_func = (idx: DeclIndex, decls: [Decl], name: string_view) Func {
+    idx_func = (idx: DeclIndex, decls: [Decl], name: StringView) Func {
         i := idx.func_idx.get(name, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -272,7 +272,7 @@ DeclIndex*: {
             ),
         })
     }
-    idx_struct_field = (idx: DeclIndex, decls: [Decl], sname: string_view, fname: string_view) Ty {
+    idx_struct_field = (idx: DeclIndex, decls: [Decl], sname: StringView, fname: StringView) Ty {
         i := idx.struct_idx.get(sname, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -284,7 +284,7 @@ DeclIndex*: {
     }
     // the full field list of a concrete struct `sname` (empty slice if `sname` is not a struct). Used by
     // the field_eq inliner (compiler.passes.subst) to expand `x.field_eq(y)` into a per-field `==` fold.
-    idx_struct_fields = (idx: DeclIndex, decls: [Decl], sname: string_view) [Field] {
+    idx_struct_fields = (idx: DeclIndex, decls: [Decl], sname: StringView) [Field] {
         i := idx.struct_idx.get(sname, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -298,8 +298,8 @@ DeclIndex*: {
         idx: DeclIndex,
         a: MutPtr<Malloc>,
         decls: [Decl],
-        gname: string_view,
-        fname: string_view,
+        gname: StringView,
+        fname: StringView,
         targs: [Ty],
     ) Ty {
         g := idx.idx_genstruct(decls, gname)
@@ -311,7 +311,7 @@ DeclIndex*: {
     // the full variant list of a concrete enum `ename` (empty slice if `ename` is not an enum) — the
     // enum mirror of idx_struct_fields. The variant_name inliner (compiler.passes.subst) expands
     // `e.variant_name()` into one match arm per variant.
-    idx_enum_variants = (idx: DeclIndex, decls: [Decl], ename: string_view) [VariantDef] {
+    idx_enum_variants = (idx: DeclIndex, decls: [Decl], ename: StringView) [VariantDef] {
         i := idx.enum_idx.get(ename, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -321,7 +321,7 @@ DeclIndex*: {
             false => slice(null_ptr(), 0),
         })
     }
-    idx_variant_payload = (idx: DeclIndex, decls: [Decl], ename: string_view, vn: string_view) Ty {
+    idx_variant_payload = (idx: DeclIndex, decls: [Decl], ename: StringView, vn: StringView) Ty {
         i := idx.enum_idx.get(ename, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -331,10 +331,10 @@ DeclIndex*: {
             false => tvoid(),
         })
     }
-    idx_template_call = (idx: DeclIndex, decls: [Decl], name: string_view) bool {
+    idx_template_call = (idx: DeclIndex, decls: [Decl], name: StringView) bool {
         idx.idx_func(decls, name).is_generic_fn()
     }
-    idx_genstruct = (idx: DeclIndex, decls: [Decl], name: string_view) GenStructDecl {
+    idx_genstruct = (idx: DeclIndex, decls: [Decl], name: StringView) GenStructDecl {
         i := idx.genstruct_idx.get(name, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -352,7 +352,7 @@ DeclIndex*: {
             ),
         })
     }
-    idx_genenum = (idx: DeclIndex, decls: [Decl], name: string_view) GenEnumDecl {
+    idx_genenum = (idx: DeclIndex, decls: [Decl], name: StringView) GenEnumDecl {
         i := idx.genenum_idx.get(name, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -373,8 +373,8 @@ DeclIndex*: {
     idx_variant_default = (
         idx: DeclIndex,
         decls: [Decl],
-        ename: string_view,
-        vn: string_view,
+        ename: StringView,
+        vn: StringView,
     ) Ptr<Expr> {
         i := idx.enum_idx.get(ename, 0 - 1)
         (i >= 0 && i < decls.len).match ({
@@ -386,7 +386,7 @@ DeclIndex*: {
         })
     }
 }    // DFunc.name | DForeign.name → index
-tdkey = (a: MutPtr<Malloc>, tr: string_view, m: string_view) string_view {
+tdkey = (a: MutPtr<Malloc>, tr: StringView, m: StringView) StringView {
     a
         .gstr_string(64)
         .gstr_append(a, tr)
@@ -400,7 +400,7 @@ tdkey = (a: MutPtr<Malloc>, tr: string_view, m: string_view) string_view {
 // UFCS fallback in dispatch_name can O(1)-reject names that no alias provides (the common case for
 // intrinsics like `store`/`offset` and deferred trait methods) before scanning for candidates.
 // byte position of the LAST `__` separator in `name`, or -1 when it has none.
-alias_sep_from = (name: string_view, p: i32, last: i32) i32 {
+alias_sep_from = (name: StringView, p: i32, last: i32) i32 {
     (name.at(p) == 0).match ({
         true  => last,
         false => (name.at(p) == '_' && name.at(p + 1) == '_').match ({
@@ -409,11 +409,11 @@ alias_sep_from = (name: string_view, p: i32, last: i32) i32 {
         }),
     })
 }
-alias_sep = (name: string_view) i32 { name.alias_sep_from(0, 0 - 1) }
+alias_sep = (name: StringView) i32 { name.alias_sep_from(0, 0 - 1) }
 // the method tail after the separator (`put` of `m__put`) — a NUL-terminated suffix, no copy.
-alias_tail = (name: string_view, sep: i32) string_view { cstr(offset(name, to_i64(sep + 2))) }
+alias_tail = (name: StringView, sep: i32) StringView { cstr(offset(name, to_i64(sep + 2))) }
 // does `name` begin with `pre` immediately followed by the `__` separator (`m` matches `m__put`)?
-alias_prefix_match_at = (name: string_view, pre: string_view, i: i32) bool {
+alias_prefix_match_at = (name: StringView, pre: StringView, i: i32) bool {
     (pre.at(i) == 0).match ({
         true  => name.at(i) == '_' && name.at(i + 1) == '_',
         false => (name.at(i) == pre.at(i)).match ({
@@ -425,7 +425,7 @@ alias_prefix_match_at = (name: string_view, pre: string_view, i: i32) bool {
 // is `name`'s prefix an ACTUAL module-alias binding (from `m = std.x.y` / `m = sibling`)? Only then is
 // `name` a genuine `alias__method` decl. Guards against phantom UFCS methods: a plain user fn that
 // merely has `__` in its name (`foo__grow`) has no matching alias, so it is NOT alias-shaped.
-alias_is_real_prefix = (name: string_view) bool {
+alias_is_real_prefix = (name: StringView) bool {
     f := false
     alias_prefixes_get().loop((h, i, p) {
         f = name.alias_prefix_match_at(p.name, 0).then({ true }, { f })
@@ -435,7 +435,7 @@ alias_is_real_prefix = (name: string_view) bool {
 // register `name` under its tail iff it is alias-shaped: a NON-EMPTY prefix that is a REAL module alias
 // (skips compiler internals like `__str_eq`, whose separator is at position 0, and plain user fns like
 // `foo__grow` whose prefix is not an alias binding).
-alias_note = (m: Map<i64>, a: MutPtr<Malloc>, name: string_view, i: i64) Map<i64> {
+alias_note = (m: Map<i64>, a: MutPtr<Malloc>, name: StringView, i: i64) Map<i64> {
     sep := name.alias_sep()
     (sep > 0 && name.alias_is_real_prefix()).match ({
         true  => m.put(a, name.alias_tail(sep), i).expect("check: decl-index alloc"),
@@ -582,7 +582,7 @@ ibuf = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire_or_die((n + 1) * size
 // Variable environment: params plus prior lets, as a cons-list.
 VList*: VNil | VCons(VCell)
 VCell: {
-    name: string_view,
+    name: StringView,
     ty: Ty,
     tail: Ptr<VList>,
 }
@@ -622,7 +622,7 @@ Env*: {
             _              => tvoid(),
         })
     }
-    env_func = (env: Env, name: string_view) Func {
+    env_func = (env: Env, name: StringView) Func {
         i := env.didx.func_idx.get(name, 0 - 1)
         (i >= 0 && i < env.decls.len).match ({
             true  => env.decls[i].match ({
@@ -645,17 +645,17 @@ Env*: {
             ),
         })
     }
-    var_or_global = (env: Env, name: string_view) Ty {
+    var_or_global = (env: Env, name: StringView) Ty {
         lv := env.vars.lookup_var(name)
         lv.is_void_ty().then({ env.global_or_fn(name) }, { lv })
     }
-    subj_variant_payload = (env: Env, t: Ty, variant: string_view) Ty {
+    subj_variant_payload = (env: Env, t: Ty, variant: StringView) Ty {
         t.match ({
             .Generic(g) => env.env_genenum(g.name).gen_variant_payload(variant).gsubst(env, g),
             _           => env.didx.idx_variant_payload(env.decls, t.enum_name(), variant),
         })
     }
-    env_gstruct = (env: Env, name: string_view) GenStructDecl {
+    env_gstruct = (env: Env, name: StringView) GenStructDecl {
         env.didx.idx_genstruct(env.decls, name)
     }
     // ── lazy arg-type memo for generic-call inference ── each argument's type is inferred at most
@@ -674,7 +674,7 @@ Env*: {
         })
         atys[i]
     }
-    call_targ = (env: Env, f: Func, args: [Expr], tp: string_view) Ty {
+    call_targ = (env: Env, f: Func, args: [Expr], tp: StringView) Ty {
         raw := env.a.acquire_or_die(args.len * sizeof(Ty) + args.len)
         atys: [Ty] := slice(raw, args.len)
         done: [u8] := slice(raw.offset(args.len * sizeof(Ty)), args.len)
@@ -683,7 +683,7 @@ Env*: {
         })
         env.call_targ_a(f, args, atys, done, tp)
     }
-    call_targ_a = (env: Env, f: Func, args: [Expr], atys: [Ty], done: [u8], tp: string_view) Ty {
+    call_targ_a = (env: Env, f: Func, args: [Expr], atys: [Ty], done: [u8], tp: StringView) Ty {
         arg := env.targ_of(f.params, args, atys, done, tp, false)
         arg = arg.is_void_ty().then({ env.ret_targ_of(f.ret, tp) }, { arg })
         arg.is_void_ty().then({ env.targ_of(f.params, args, atys, done, tp, true) }, { arg })
@@ -697,8 +697,8 @@ Env*: {
             a: env.a,
         )
     }
-    is_local = (env: Env, name: string_view) bool { env.vars.var_bound(name) }
-    is_bound = (env: Env, name: string_view) bool {
+    is_local = (env: Env, name: StringView) bool { env.vars.var_bound(name) }
+    is_bound = (env: Env, name: StringView) bool {
         env.vars.var_bound(name) || env.didx.global_idx.get(name, 0 - 1) >= 0
     }
     alias_ufcs_candidates = (env: Env, c: CallData, rty: Ty) AliasCands {
@@ -724,7 +724,7 @@ Env*: {
         })
         buf
     }
-    var_ty = (env: Env, name: string_view) Ty {
+    var_ty = (env: Env, name: StringView) Ty {
         (name == "true" || name == "false").then({ tbool() }, { env.var_or_global(name) })
     }
     targ_of = (
@@ -733,7 +733,7 @@ Env*: {
         args: [Expr],
         atys: [Ty],
         done: [u8],
-        tp: string_view,
+        tp: StringView,
         lits: bool,
     ) Ty {
         found := tvoid()
@@ -809,7 +809,7 @@ Env*: {
         })
         env.gen_call_ret(c)
     }
-    dispatch_name = (env: Env, c: CallData) string_view {
+    dispatch_name = (env: Env, c: CallData) StringView {
         (c.args.len > 0).match ({
             true  => env.dispatch_name_r(c, env.infer_expr(c.args[0].addr())),
             false => c.fn,
@@ -817,7 +817,7 @@ Env*: {
     }
     // rty = the receiver's already-inferred type — gen_call_ret infers it ONCE and shares it with
     // the targ scans (see arg_ty_memo); the public dispatch_name wrapper infers it for other callers.
-    dispatch_name_r = (env: Env, c: CallData, rty: Ty) string_view {
+    dispatch_name_r = (env: Env, c: CallData, rty: Ty) StringView {
         (c.args.len > 0).match ({
             true  => {
                 tyname := rty.dispatch_recv_name()
@@ -878,9 +878,7 @@ Env*: {
     block_ty = (env: Env, b: BlockData) Ty {
         b.stmts.stmts_diverge().then({ tvoid() }, { env.block_ty_from(b.stmts, 0) })
     }
-    env_genenum = (env: Env, name: string_view) GenEnumDecl {
-        env.didx.idx_genenum(env.decls, name)
-    }
+    env_genenum = (env: Env, name: StringView) GenEnumDecl { env.didx.idx_genenum(env.decls, name) }
 }    // a = allocator (heap-alloc in infer); didx = name→decl index
 // O(1) indexed lookups, replacing the O(n) decls scans. `the_func`/`fn_ret`/etc. linear forms below
 // remain for the few decls-only callers (template inlining, trait conformance) that lack an Env.
@@ -892,7 +890,7 @@ cenode*<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
     buf[0].addr()
 }
 // Pos-preserving rebuilds. Bare call()/vref() are only for synthesized nodes.
-recall* = (a: MutPtr<Malloc>, c: CallData, fn: string_view, args: [Expr]) Ptr<Expr> {
+recall* = (a: MutPtr<Malloc>, c: CallData, fn: StringView, args: [Expr]) Ptr<Expr> {
     a.cenode(call_full(fn, args, c.targs, c.pos, c.raw))
 }
 var_call = (a: MutPtr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> {
@@ -906,7 +904,7 @@ vlnode = (a: MutPtr<Malloc>, v: VList) Ptr<VList> {
     buf[0].addr()
 }
 vnil_val = () VList { .VNil }
-vcons_val = (nm: string_view, t: Ty, tail: Ptr<VList>) VList {
+vcons_val = (nm: StringView, t: Ty, tail: Ptr<VList>) VList {
     .VCons(VCell(
         name: nm,
         ty: t,
@@ -914,7 +912,7 @@ vcons_val = (nm: string_view, t: Ty, tail: Ptr<VList>) VList {
     ))
 }
 vnil* = (a: MutPtr<Malloc>) Ptr<VList> { a.vlnode(vnil_val()) }
-vcons* = (a: MutPtr<Malloc>, nm: string_view, t: Ty, tail: Ptr<VList>) Ptr<VList> {
+vcons* = (a: MutPtr<Malloc>, nm: StringView, t: Ty, tail: Ptr<VList>) Ptr<VList> {
     a.vlnode(vcons_val(nm, t, tail))
 }
 params_env* = (a: MutPtr<Malloc>, ps: [Param]) Ptr<VList> {
@@ -928,8 +926,8 @@ params_env* = (a: MutPtr<Malloc>, ps: [Param]) Ptr<VList> {
 // variable reference (the single hottest checker fn), and almost every node on the chain fails the
 // compare — one byte load rejects it without the strcmp call. Byte-identical answers: names are
 // NUL-terminated, so equal strings always share their first byte (both possibly NUL).
-lookup_var* = (v: Ptr<VList>, name: string_view) Ty { v.lookup_var_b(load(offset(name, 0)), name) }
-lookup_var_b = (v: Ptr<VList>, b0: u8, name: string_view) Ty {
+lookup_var* = (v: Ptr<VList>, name: StringView) Ty { v.lookup_var_b(load(offset(name, 0)), name) }
+lookup_var_b = (v: Ptr<VList>, b0: u8, name: StringView) Ty {
     v.match ({
         .VNil     => tvoid(),
         .VCons(c) => (load(offset(c.name, 0)) == b0 && c.name == name).match ({
@@ -965,7 +963,7 @@ bind_tparams* = (a: MutPtr<Malloc>, vars: Ptr<VList>, tparams: [Param]) Ptr<VLis
     })
     e
 }
-tparam_declared* = (v: Ptr<VList>, name: string_view) bool {
+tparam_declared* = (v: Ptr<VList>, name: StringView) bool {
     v.match ({
         .VNil     => false,
         .VCons(c) => (c.name == "0#tp" && c.ty.ty_name() == name).match ({
@@ -975,7 +973,7 @@ tparam_declared* = (v: Ptr<VList>, name: string_view) bool {
     })
 }
 // Infer global init types; bind the global name while doing so to avoid self-recursive lookup.
-infer_global_init = (env: Env, name: string_view, init: Ptr<Expr>) Ty {
+infer_global_init = (env: Env, name: StringView, init: Ptr<Expr>) Ty {
     env2 := Env(
         vars: env.a.vcons(name, tnamed(""), env.vars),
         decls: env.decls,
@@ -985,7 +983,7 @@ infer_global_init = (env: Env, name: string_view, init: Ptr<Expr>) Ty {
     )
     env2.infer_expr(init)
 }
-global_ty = (env: Env, name: string_view) Ty {
+global_ty = (env: Env, name: StringView) Ty {
     i := env.didx.global_idx.get(name, 0 - 1)
     (i >= 0 && i < env.decls.len).match ({
         true  => env.decls[i].match ({
@@ -998,16 +996,16 @@ global_ty = (env: Env, name: string_view) Ty {
 // a bare reference to a top-level function NAME is a first-class function value: its type is the
 // function's FnT signature (its params + ret). This lets `f := some_fn` bind `f` to a fn value and
 // `f()` call through it (an indirect call). Falls back after locals + globals so a same-named local wins.
-fn_value_ty = (env: Env, name: string_view) Ty {
+fn_value_ty = (env: Env, name: StringView) Ty {
     f := env.env_func(name)
     (f.name == name).then({ env.a.fnt_from_func_in(f) }, { tvoid() })
 }
-global_or_fn = (env: Env, name: string_view) Ty {
+global_or_fn = (env: Env, name: StringView) Ty {
     g := env.global_ty(name)
     g.is_void_ty().then({ env.fn_value_ty(name) }, { g })
 }
 // Membership check, distinct from type lookup; void-typed locals still count as bound.
-var_bound* = (v: Ptr<VList>, name: string_view) bool {
+var_bound* = (v: Ptr<VList>, name: StringView) bool {
     v.match ({
         .VNil     => false,
         .VCons(c) => (c.name == name).then({ true }, { c.tail.var_bound(name) }),
@@ -1017,13 +1015,13 @@ var_bound* = (v: Ptr<VList>, name: string_view) bool {
 // fns: the SHADOWING test. A fn's own params and locals shadow same-named top-level decls in its
 // body (the emitted C scopes them that way), so call validation must consult this before any
 // top-level name lookup.
-ty_name = (t: Ty) string_view {
+ty_name = (t: Ty) StringView {
     t.match ({
         .Named(n) => n,
         _         => "",
     })
 }
-recv_name* = (t: Ty) string_view {
+recv_name* = (t: Ty) StringView {
     t.match ({
         .I32           => "i32",
         .I64           => "i64",
@@ -1032,9 +1030,9 @@ recv_name* = (t: Ty) string_view {
         .Bool          => "bool",
         // String-family traits describe read-only behavior. All provenance variants dispatch
         // through the canonical view impl; the checker still keeps their value conversions distinct.
-        .StringView    => "string_view",
-        .StringCstr    => "string_view",
-        .StringLiteral => "string_view",
+        .StringView    => "StringView",
+        .StringCstr    => "StringView",
+        .StringLiteral => "StringView",
         .Named(n)      => n,
         .Generic(g)    => g.mangled,
         .Ptr(pd)       => load(pd.pointee).recv_name(),
@@ -1042,18 +1040,18 @@ recv_name* = (t: Ty) string_view {
     })
 }
 // The name a DIAGNOSTIC must show. `recv_name` answers "which impl table does this dispatch
-// through", so it folds the string family onto `string_view`; a message that reused it told a
-// `string_cstr` and a `string_literal` they were both `string_view`, which is the one thing the
+// through", so it folds the string family onto `StringView`; a message that reused it told a
+// `StringCstr` and a `StringLiteral` they were both `StringView`, which is the one thing the
 // reader needed to tell apart. Everything else shares recv_name's answer.
-show_name* = (t: Ty) string_view {
+show_name* = (t: Ty) StringView {
     t.match ({
-        .StringCstr    => "string_cstr",
-        .StringLiteral => "string_literal",
+        .StringCstr    => "StringCstr",
+        .StringLiteral => "StringLiteral",
         .Ptr(pd)       => load(pd.pointee).show_name(),
         _              => t.recv_name(),
     })
 }
-enum_name* = (t: Ty) string_view {
+enum_name* = (t: Ty) StringView {
     t.match ({
         .Named(n)   => n,
         .Generic(g) => g.mangled,
@@ -1081,13 +1079,13 @@ elem_of* = (t: Ty) Ty {
         _           => tvoid(),
     })
 }
-enum_has = (ed: EnumDecl, vn: string_view) bool { ed.variants.slice_any((v) { v.name == vn }) }
-pick_enum = (ed: EnumDecl, vn: string_view, found: string_view) string_view {
+enum_has = (ed: EnumDecl, vn: StringView) bool { ed.variants.slice_any((v) { v.name == vn }) }
+pick_enum = (ed: EnumDecl, vn: StringView, found: StringView) StringView {
     ed.enum_has(vn).then({ ed.name }, { found })
 }
-gen_enum_has = (g: GenEnumDecl, vn: string_view) bool { g.variants.slice_any((v) { v.name == vn }) }
+gen_enum_has = (g: GenEnumDecl, vn: StringView) bool { g.variants.slice_any((v) { v.name == vn }) }
 // Find the enum, concrete or generic, that declares variant `vn`.
-enum_of_variant = (decls: [Decl], vn: string_view) string_view {
+enum_of_variant = (decls: [Decl], vn: StringView) StringView {
     found := ""
     decls.loop((h, i, d) {
         found = d.match ({
@@ -1098,7 +1096,7 @@ enum_of_variant = (decls: [Decl], vn: string_view) string_view {
     })
     found
 }
-named_has = (decls: [Decl], ename: string_view, vn: string_view) bool {
+named_has = (decls: [Decl], ename: StringView, vn: StringView) bool {
     found := false
     decls.loop((h, i, d) {
         found = d.match ({
@@ -1110,7 +1108,7 @@ named_has = (decls: [Decl], ename: string_view, vn: string_view) bool {
 }
 // The base enum name an expected/annotated type names: a generic instance (`Opt2<i32>`) wants its
 // base `Opt2` (the GenEnumDecl key), not the mangled `Opt2_i32`; a plain enum its own name.
-exp_enum_base = (t: Ty) string_view {
+exp_enum_base = (t: Ty) StringView {
     t.match ({
         .Generic(g) => g.name,
         _           => t.enum_name(),
@@ -1119,7 +1117,7 @@ exp_enum_base = (t: Ty) string_view {
 // Constructor enum for a bare `.Foo` literal: the expected/annotated type WINS — try its concrete
 // enum, then its generic enum (so an annotated `Opt2<i32>` disambiguates `.Some` from a stdlib `Opt`
 // that shares the name) — only then fall back to scanning the ambient scope by variant name.
-ctor_enum_plain = (env: Env, vn: string_view) string_view {
+ctor_enum_plain = (env: Env, vn: StringView) StringView {
     base := env.exp.exp_enum_base()
     env.decls.named_has(base, vn).match ({
         true  => base,
@@ -1132,7 +1130,7 @@ ctor_enum_plain = (env: Env, vn: string_view) string_view {
 // The enum TYPE a constructor names, type args included: an already-stamped instance keeps its own
 // args, while a bare `.Foo` takes the expected type when that type IS its enum (so `Result<i64, Kind>`
 // arrives whole) and otherwise the ambient pick.
-ctor_enum_ty = (env: Env, ety: string_view, etargs: [Ty], variant: string_view) Ty {
+ctor_enum_ty = (env: Env, ety: StringView, etargs: [Ty], variant: StringView) Ty {
     (etargs.len > 0).match ({
         true  => tgeneric(ety, etargs, ""),
         false => is_empty(ety).match ({
@@ -1149,12 +1147,12 @@ ctor_enum_ty = (env: Env, ety: string_view, etargs: [Ty], variant: string_view) 
 // `enum_of_variant`'s ambient last-definition-wins scan — silently the wrong enum when a user enum
 // repeats a stdlib variant name. Void unless the instance is CONCRETE: a payload still mentioning the
 // enum's own tparams is no expectation at all, and must not leak into generic-call inference.
-ctor_payload_exp* = (env: Env, ety: string_view, etargs: [Ty], variant: string_view) Ty {
+ctor_payload_exp* = (env: Env, ety: StringView, etargs: [Ty], variant: StringView) Ty {
     t := env.ctor_enum_ty(ety, etargs, variant)
     pty := env.subj_variant_payload(t, variant)
     pty.ty_mentions_any(env.env_genenum(t.exp_enum_base()).tparams).then({ tvoid() }, { pty })
 }
-field_ty = (sd: StructDecl, fname: string_view) Ty {
+field_ty = (sd: StructDecl, fname: StringView) Ty {
     found := tvoid()
     sd.fields.loop((h, i, f) {
         found = (f.name == fname).then({ f.ty }, { found })
@@ -1162,13 +1160,13 @@ field_ty = (sd: StructDecl, fname: string_view) Ty {
     found
 }
 // O(1) indexed struct-field lookup for the light/inline path.
-is_cmp_op = (op: string_view) bool {
+is_cmp_op = (op: StringView) bool {
     // Bool-result ops; bitwise ops keep the lhs type.
     b := op.at(0)
     b1 := op.at(1)
     b == '=' || b == '!' || (b == '<' || b == '>') && b1 != b || (b == '&' || b == '|') && b1 == b
 }
-bin_ty* = (op: string_view, lt: Ty) Ty { op.is_cmp_op().then({ tbool() }, { lt }) }
+bin_ty* = (op: StringView, lt: Ty) Ty { op.is_cmp_op().then({ tbool() }, { lt }) }
 // A numeric binop's result is the WIDER operand (max integer rank), so `i32 + i64`
 // is i64 regardless of operand order — kills silent truncation + order-dependence.
 // A numeric LITERAL operand ADAPTS to the other side (it never forces widening), so
@@ -1218,26 +1216,26 @@ cond_ty = (env: Env, d: CondData) Ty {
 }
 // Generic enum constructors: compute base enum, type args, and mangled concrete name.
 EnumInst*: {
-    base: string_view,
-    mty: string_view,
+    base: StringView,
+    mty: StringView,
     targs: [Ty],
 }
-gen_variant_payload* = (g: GenEnumDecl, vname: string_view) Ty {
+gen_variant_payload* = (g: GenEnumDecl, vname: StringView) Ty {
     found := tvoid()
     g.variants.loop((h, i, v) {
         found = (v.name == vname).then({ v.payload }, { found })
     })
     found
 }
-infer_enum_targs = (env: Env, g: GenEnumDecl, variant: string_view, pty: Ty) [Ty] {
+infer_enum_targs = (env: Env, g: GenEnumDecl, variant: StringView, pty: Ty) [Ty] {
     vpt := g.gen_variant_payload(variant)
     map_slice(env.a, g.tparams, (tp) { vpt.unify_ty(pty, tp.name) })
 }
 enum_inst_payload = (
     env: Env,
     g: GenEnumDecl,
-    base: string_view,
-    variant: string_view,
+    base: StringView,
+    variant: StringView,
     pty: Ty,
 ) EnumInst {
     ta := env.infer_enum_targs(g, variant, pty)
@@ -1250,8 +1248,8 @@ enum_inst_payload = (
 enum_inst_gen = (
     env: Env,
     g: GenEnumDecl,
-    base: string_view,
-    variant: string_view,
+    base: StringView,
+    variant: StringView,
     pty: Ty,
 ) EnumInst {
     env.exp.match ({
@@ -1266,7 +1264,7 @@ enum_inst_gen = (
         _            => env.enum_inst_payload(g, base, variant, pty),
     })
 }
-enum_inst_of = (env: Env, base: string_view, variant: string_view, pty: Ty) EnumInst {
+enum_inst_of = (env: Env, base: StringView, variant: StringView, pty: Ty) EnumInst {
     g := env.env_genenum(base)
     (g.name == "").match ({
         true  => EnumInst(
@@ -1277,10 +1275,10 @@ enum_inst_of = (env: Env, base: string_view, variant: string_view, pty: Ty) Enum
         false => env.enum_inst_gen(g, base, variant, pty),
     })
 }    // a non-generic enum
-enum_inst_mk* = (env: Env, variant: string_view, payload: Ptr<Expr>) EnumInst {
+enum_inst_mk* = (env: Env, variant: StringView, payload: Ptr<Expr>) EnumInst {
     env.enum_inst_of(env.ctor_enum_plain(variant), variant, env.infer_expr(payload))
 }
-enum_inst_tag* = (env: Env, variant: string_view) EnumInst {
+enum_inst_tag* = (env: Env, variant: StringView) EnumInst {
     env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid())
 }
 // Block expressions take their trailing expression/return type.
@@ -1328,7 +1326,7 @@ is_weak_targ_arg* = (e: Ptr<Expr>) bool {
             _          => false,
         })
 }
-is_direct_tparam* = (t: Ty, tp: string_view) bool {
+is_direct_tparam* = (t: Ty, tp: StringView) bool {
     t.match ({
         .Named(n) => n == tp,
         _         => false,
@@ -1341,7 +1339,7 @@ weak_targ_env = (
     atys: [Ty],
     done: [u8],
     i: i64,
-    tp: string_view,
+    tp: StringView,
 ) bool {
     args[i].addr().is_weak_targ_arg()
         || pty.is_direct_tparam(tp) && env.arg_ty_memo(args, atys, done, i).is_str_t()
@@ -1349,19 +1347,19 @@ weak_targ_env = (
 // A lambda arg has no inferrable value type (infer_expr -> void — what the memo holds for one).
 // When a tparam sits in the closure's RETURN position `(T) U`, bind it from the lambda's DECLARED
 // return type so it never defaults to void.
-unify_arg = (env: Env, pty: Ty, args: [Expr], atys: [Ty], done: [u8], i: i64, tp: string_view) Ty {
+unify_arg = (env: Env, pty: Ty, args: [Expr], atys: [Ty], done: [u8], i: i64, tp: StringView) Ty {
     load(args[i].addr()).match ({
         .Lambda(lm) => pty.lam_ret_unify(lm, tp),
         _           => pty.unify_ty(env.arg_ty_memo(args, atys, done, i), tp),
     })
 }
-lam_ret_unify = (pty: Ty, lm: LambdaData, tp: string_view) Ty {
+lam_ret_unify = (pty: Ty, lm: LambdaData, tp: StringView) Ty {
     pty.match ({
         .FnT(ft) => lm.ret.is_void_ty().then({ tvoid() }, { load(ft.ret).unify_ty(lm.ret, tp) }),
         _        => tvoid(),
     })
 }
-ret_targ_of = (env: Env, ret: Ty, tp: string_view) Ty {
+ret_targ_of = (env: Env, ret: Ty, tp: StringView) Ty {
     env.exp.is_void_ty().then({ tvoid() }, { ret.unify_ty(env.exp, tp) })
 }
 // etargs = explicit turbofish type args (empty when none): a present one PINS the i-th tparam,
@@ -1391,7 +1389,7 @@ lam_body_targ_env = (
     targs: [Ty],
     params: [Param],
     args: [Expr],
-    tp: string_view,
+    tp: StringView,
 ) Ty {
     found := tvoid()
     params.loop((h, i, p) {
@@ -1411,7 +1409,7 @@ lam_body_one_env = (
     targs: [Ty],
     pty: Ty,
     arg: Ptr<Expr>,
-    tp: string_view,
+    tp: StringView,
 ) Ty {
     pty.match ({
         .FnT(ft) => load(arg).match ({
@@ -1448,9 +1446,9 @@ dispatch_recv* = (
     a: MutPtr<Malloc>,
     decls: [Decl],
     didx: DeclIndex,
-    fn: string_view,
-    tyname: string_view,
-) string_view {
+    fn: StringView,
+    tyname: StringView,
+) StringView {
     // O(1): dispatch_idx holds the LAST impl of `tyname` providing `fn` (directly or via a trait
     // default) — the same verdict the old whole-decls scan accumulated.
     i := didx.dispatch_idx.get(a.tdkey(tyname, fn), 0 - 1)
@@ -1462,7 +1460,7 @@ dispatch_recv* = (
         false => fn,
     })
 }
-dispatch_recv_name* = (t: Ty) string_view {
+dispatch_recv_name* = (t: Ty) StringView {
     t.match ({
         .Generic(g) => g.name,
         .Ptr(pd)    => load(pd.pointee).dispatch_recv_name(),
@@ -1485,7 +1483,7 @@ alias_recv_dispatchable = (t: Ty) bool {
 }
 // Compiler-level call intrinsics (typed in infer_call / lowered by genc). Lives here — not in
 // check_validate, which now imports it — so the alias-UFCS fallback below can refuse to shadow them.
-is_intrinsic* = (fn: string_view) bool {
+is_intrinsic* = (fn: StringView) bool {
     // grouped under a first-byte guard: this runs for every call site (dispatch + the alias-UFCS
     // fallback), and the 26-strcmp flat chain was a visible profile line. One byte load rejects
     // every non-intrinsic name whose first letter matches no intrinsic; same answers.
@@ -1526,8 +1524,8 @@ is_intrinsic* = (fn: string_view) bool {
 // program that resolves today changes meaning, and rejected programs can only gain a resolution.
 AliasCands: {
     count: i32,
-    first: string_view,
-    second: string_view,
+    first: StringView,
+    second: StringView,
 }
 alias_cands_none = () AliasCands {
     AliasCands(
@@ -1540,12 +1538,12 @@ alias_cands_none = () AliasCands {
 // keep their star in the FLAT source (`g__scale* = …`), and parse_module records every starred
 // top-level name (compiler.parse exports_get) — membership there means the aliased module exported
 // it. Private alias decls (`g__hidden = …`) exist for the module's own internals but never match.
-alias_name_is_pub = (name: string_view) bool { exports_get().slice_any((p) { p.name == name }) }
+alias_name_is_pub = (name: StringView) bool { exports_get().slice_any((p) { p.name == name }) }
 // is `f` an alias-prefixed candidate for method `fn` on receiver `rty`? Common gates: real alias
 // prefix (never a phantom `foo__grow`), tail == the method, `*`-exported, and first-param head is not
 // the fn's OWN tparam. `exact` selects param0-compat: exact head-string equality (pass 1) vs the same
 // receiver→param0 coercion the normal call path uses (`fits` — i32→i64, slice→slice, …) in pass 2.
-alias_cand_matches = (f: Func, fn: string_view, rty: Ty, exact: bool) bool {
+alias_cand_matches = (f: Func, fn: StringView, rty: Ty, exact: bool) bool {
     sep := f.name.alias_sep()
     (sep > 0
         && f.params.len > 0
@@ -1601,7 +1599,7 @@ alias_args_fit = (f: Func, atys: [Ty]) bool {
         false => false,
     })
 }
-alias_cands_scan = (env: Env, fn: string_view, rty: Ty, exact: bool, atys: [Ty]) AliasCands {
+alias_cands_scan = (env: Env, fn: StringView, rty: Ty, exact: bool, atys: [Ty]) AliasCands {
     rcnt := 0
     rfirst := ""
     rsecond := ""
@@ -1670,10 +1668,10 @@ gen_call_ret = (env: Env, c: CallData) Ty {
     env.a.window_ty(env.env_func(dn), ret, rty0)
 }
 // A slice RETURNED from a call on a read-only receiver is a read-only window over it. `view`,
-// `trim_view`, `substr_view` &c. are declared `(s: string_view) [u8]` — one signature for every
+// `trim_view`, `substr_view` &c. are declared `(s: StringView) [u8]` — one signature for every
 // provenance, because Zen cannot yet spell "a slice as mutable as my receiver". So the propagation
 // lives here: the declared `[T]` says "a window over arg0" and this decides its mutability from
-// what arg0 actually is. Without it `.view()` launders a `string_literal`'s `.rodata` into a
+// what arg0 actually is. Without it `.view()` launders a `StringLiteral`'s `.rodata` into a
 // writable window and the store segfaults at run time with `zen check` reporting ok.
 readonly_source_ty* = (t: Ty) bool {
     t.match ({
@@ -1692,7 +1690,7 @@ window_ty = (a: MutPtr<Malloc>, f: Func, ret: Ty, recv: Ty) Ty {
     })
 }
 // Is the returned slice a WINDOW over the receiver, or fresh storage that merely got LOOKED at?
-// `view = (s: string_view) [u8] { s.slice(s.strlen()) }` hands back its own argument's bytes, so its
+// `view = (s: StringView) [u8] { s.slice(s.strlen()) }` hands back its own argument's bytes, so its
 // mutability is the argument's. A function that allocates and returns a new buffer names its
 // parameter nowhere in what it returns, and its result stays writable however read-only the
 // argument was. The test is the returned EXPRESSION only — a body that reads the parameter on the
@@ -1703,7 +1701,7 @@ returns_recv = (f: Func) bool {
     })
     f.body.ret_mentions_stmts(f.params[0].name)
 }
-ret_mentions_stmts = (body: [Stmt], nm: string_view) bool {
+ret_mentions_stmts = (body: [Stmt], nm: StringView) bool {
     hit := false
     body.loop((h, i, st) {
         st.match ({
@@ -1718,7 +1716,7 @@ ret_mentions_stmts = (body: [Stmt], nm: string_view) bool {
     })
     hit
 }
-ret_mentions_e = (e: Ptr<Expr>, nm: string_view) bool {
+ret_mentions_e = (e: Ptr<Expr>, nm: StringView) bool {
     load(e).match ({
         .Var(v) => v.name == nm,
         _       => false.expr_fold_children(e, (acc, ch) { acc || ch.ret_mentions_e(nm) }, (acc, body) {
@@ -1772,7 +1770,7 @@ ty_under_ptr* = (t: Ty) Ty {
 // bytes you own, which is not a write. Demoting it to `Ptr<u8>` rejects every such release. Closing
 // the residual `v.ptr.store(…)` laundering path needs `release`/`resize` to take a read-only
 // pointer first (a std signature change, not a checker one).
-slice_member* = (a: MutPtr<Malloc>, field: string_view) Ty {
+slice_member* = (a: MutPtr<Malloc>, field: StringView) Ty {
     (field == "len").match ({
         true  => ti64(),
         false => (field == "ptr").then({ tptr(a.tnode(tu8())) }, { tvoid() }),
@@ -1781,7 +1779,7 @@ slice_member* = (a: MutPtr<Malloc>, field: string_view) Ty {
 // Field-type inference, auto-deref'd. Shared by `obj.field` (Member) and `obj->field` (Arrow); the
 // latter exists because resolve_member rewrites a pointer receiver to Arrow, and a later re-resolve
 // (e.g. dispatch on a generic-struct field receiver in an inlined template body) must re-infer it.
-infer_field = (env: Env, oty: Ty, field: string_view) Ty {
+infer_field = (env: Env, oty: Ty, field: StringView) Ty {
     oty.ty_under_ptr().match ({
         .Generic(g) => env.didx.idx_genstruct_field(env.a, env.decls, g.name, field, g.args),
         .Slice(e)   => env.a.slice_member(field),
@@ -1795,7 +1793,7 @@ infer_arm_ty = (env: Env, subjty: Ty, ar: ArmData) Ty {
 }
 // Least common result type. `ty_eq(got, want)` is directional: literal fits cstr/view and cstr fits
 // view, never the reverse. Therefore when `a` fits `b`, the safe join is the broader `b`; choosing
-// `a` would launder a borrowed arm into immortal `string_literal` provenance.
+// `a` would launder a borrowed arm into immortal `StringLiteral` provenance.
 common_ty* = (a: Ty, b: Ty) Ty {
     a.is_void_ty().match ({
         true  => b,
@@ -1834,7 +1832,7 @@ infer_match_ty = (env: Env, m: MatchData) Ty {
 sl_elem = (env: Env, items: [Expr]) Ty {
     (items.len == 0).then({ tvoid() }, { env.infer_expr(items[0].addr()) })
 }
-vdef_payload = (vs: [VariantDef], vn: string_view) Ty {
+vdef_payload = (vs: [VariantDef], vn: StringView) Ty {
     found := tvoid()
     vs.loop((h, i, v) {
         found = (v.name == vn).then({ v.payload }, { found })
@@ -1843,7 +1841,7 @@ vdef_payload = (vs: [VariantDef], vn: string_view) Ty {
 }
 // O(1) indexed variant-payload lookup for an enum named `ename`.
 // The default constant expr for a `Name = expr` variant, or a null Ptr<Expr> when the variant has none.
-vdef_default_of = (vs: [VariantDef], vn: string_view) Ptr<Expr> {
+vdef_default_of = (vs: [VariantDef], vn: StringView) Ptr<Expr> {
     found := expr_null()
     vs.loop((h, i, v) {
         found = (v.name == vn).then({ v.dflt }, { found })
@@ -1932,14 +1930,14 @@ loop_env* = (a: MutPtr<Malloc>, env: Env, l: LoopData) Env {
 // Template/lambda inlining pass.
 no_stmts* = () [Stmt] { slice(null_ptr(), 0) }
 empty_args* = () [Expr] { slice(null_ptr(), 0) }
-pidx = (params: [Param], name: string_view, found: i32, i: i32) i32 {
+pidx = (params: [Param], name: StringView, found: i32, i: i32) i32 {
     (i == params.len).match ({
         true  => found,
         false => (params[i].name == name).then({ i }, { params.pidx(name, found, i + 1) }),
     })
 }
-param_index* = (params: [Param], name: string_view) i32 { params.pidx(name, 0 - 1, 0) }
-hide_param = (a: MutPtr<Malloc>, params: [Param], name: string_view) [Param] {
+param_index* = (params: [Param], name: StringView) i32 { params.pidx(name, 0 - 1, 0) }
+hide_param = (a: MutPtr<Malloc>, params: [Param], name: StringView) [Param] {
     idx := params.param_index(name)
     (idx < 0).match ({
         true  => params,
@@ -1984,20 +1982,20 @@ inline_marks = (a: MutPtr<Malloc>, s: String, env: Ptr<VList>) String {
 name_marks = (
     a: MutPtr<Malloc>,
     s: String,
-    name: string_view,
+    name: StringView,
     env: Ptr<VList>,
     depth: i64,
-) string_view {
+) StringView {
     out := (depth > 0).then({ s.gstr_int(a, depth) }, { s })
     out = a.inline_marks(out, env)
     out = out.gstr_append(a, "_")
     out = out.gstr_append(a, name)
     out.gstr_finish(a)
 }
-local_name_at* = (a: MutPtr<Malloc>, name: string_view, env: Ptr<VList>, depth: i64) string_view {
+local_name_at* = (a: MutPtr<Malloc>, name: StringView, env: Ptr<VList>, depth: i64) StringView {
     a.name_marks(a.gstr_string(32).gstr_append(a, "_z"), name, env, depth)
 }
-add_subst_param* = (a: MutPtr<Malloc>, params: [Param], name: string_view) [Param] {
+add_subst_param* = (a: MutPtr<Malloc>, params: [Param], name: StringView) [Param] {
     base := a.hide_param(params, name)
     buf := a.pbuf(base.len + 1)
     base.loop((h, i, p) {
@@ -2010,7 +2008,7 @@ add_subst_param* = (a: MutPtr<Malloc>, params: [Param], name: string_view) [Para
     )
     buf
 }
-add_subst_arg* = (a: MutPtr<Malloc>, args: [Expr], name: string_view) [Expr] {
+add_subst_arg* = (a: MutPtr<Malloc>, args: [Expr], name: StringView) [Expr] {
     buf := a.cebuf(args.len + 1)
     args.loop((h, i, e) {
         buf[i] = e
@@ -2022,7 +2020,7 @@ add_subst_arg* = (a: MutPtr<Malloc>, args: [Expr], name: string_view) [Expr] {
 // local as a COMPILE-TIME ALIAS: shadow the name as an FnT "param" whose substituted "arg" is the
 // (already-xformed) lambda, so every later use — a direct call `g(x)` or a HOF arg `apply(g,…)` —
 // splices the lambda exactly like a directly-passed one. The `g := …` statement itself is dropped.
-add_fnt_param* = (a: MutPtr<Malloc>, params: [Param], name: string_view) [Param] {
+add_fnt_param* = (a: MutPtr<Malloc>, params: [Param], name: StringView) [Param] {
     base := a.hide_param(params, name)
     buf := a.pbuf(base.len + 1)
     base.loop((h, i, p) {
@@ -2052,7 +2050,7 @@ let_value_lambda* = (st: Stmt) bool {
         _       => false,
     })
 }
-the_func* = (decls: [Decl], name: string_view) Func {
+the_func* = (decls: [Decl], name: StringView) Func {
     found := Func(
         name: "",
         params: empty_params(),
@@ -2114,7 +2112,7 @@ wr_param_bind = (params: [Param], wbody: [Stmt], i: i64) bool {
 // Fresh C name for an arg-binding local: distinct "_za" prefix (never a valid "_z<digits>_…" body
 // local, since 'a' is neither a digit nor the marker separator), inline_marks keep it distinct
 // across nested inline depths, the index keeps each arg distinct within one inline.
-arg_local_name = (a: MutPtr<Malloc>, name: string_view, env: Ptr<VList>, idx: i64) string_view {
+arg_local_name = (a: MutPtr<Malloc>, name: StringView, env: Ptr<VList>, idx: i64) StringView {
     a.name_marks(a.gstr_string(32).gstr_append(a, "_za"), name, env, idx)
 }
 // Bind every non-trivial arg to a generated local; return the rewritten fargs (the param-use
@@ -2218,7 +2216,7 @@ lit_pins* = (
 // the C name a substituted arg carries: a Var holds the (renamed) local it stands for, so an
 // indirect call `f()` through a renamed local let recovers `f`'s renamed C name. Falls back to the
 // original callee name when the substituted arg isn't a plain Var.
-callee_subst_name* = (e: Expr, fallback: string_view) string_view {
+callee_subst_name* = (e: Expr, fallback: StringView) StringView {
     e.match ({
         .Var(v) => v.name,
         _       => fallback,

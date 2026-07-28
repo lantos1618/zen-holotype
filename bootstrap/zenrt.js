@@ -110,7 +110,7 @@ const __zr = (() => {
   // TYPED element access over a MEM-backed slice: `w` is the emitter's element-width code (js_expr's
   // js_elem_w — the cell codes plus 11 for an 8-byte pointer), the analog of C's `zen__idx(z, i,
   // sizeof(T))`. Without it the floor read ONE BYTE at `ptr + i` for every element type, so a
-  // `[string_view]` or `[i64]` that came from an allocator decoded to garbage and kept running.
+  // `[StringView]` or `[i64]` that came from an allocator decoded to garbage and kept running.
   // Code 0 = an element with no linear-memory form (a struct/enum/nested slice): MEM holds bytes and a
   // struct on this target is a JS object, so such a read is refused out loud, never guessed.
   const ELEMSZ = [0, 1, 2, 4, 4, 2, 1, 8, 8, 8, 1, 8];

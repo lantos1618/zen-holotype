@@ -35,7 +35,7 @@
 // Binding scope: names bound by this function, in binding order. Small and linear — a function with
 // enough locals for the scan to matter is already a problem this tool wants to report.
 CloneCtx*: {
-    names: [string_view],
+    names: [StringView],
     n: i64,
     nodes: i64,
 }
@@ -51,8 +51,8 @@ clone_node = (cx: MutPtr<CloneCtx>, h: i64) i64 {
     h
 }
 // fold a verbatim name / literal text
-clone_text = (h: i64, s: string_view) i64 { h.fnv1a64_fold(s.view()) }
-clone_bound_at = (cx: MutPtr<CloneCtx>, name: string_view, i: i64) i64 {
+clone_text = (h: i64, s: StringView) i64 { h.fnv1a64_fold(s.view()) }
+clone_bound_at = (cx: MutPtr<CloneCtx>, name: StringView, i: i64) i64 {
     (i >= cx.n).then({
         return 0 - 1
     })
@@ -63,14 +63,14 @@ clone_bound_at = (cx: MutPtr<CloneCtx>, name: string_view, i: i64) i64 {
 }
 // register a newly bound name (params, let). Silently saturates: past capacity a name simply reads
 // as free, which can only ever SPLIT a clone group, never merge two unrelated functions.
-clone_bind = (cx: MutPtr<CloneCtx>, name: string_view) void {
+clone_bind = (cx: MutPtr<CloneCtx>, name: StringView) void {
     (cx.n < cx.names.len).then({
         cx.names[cx.n] = name
         cx.n = cx.n + 1
     })
 }
 // RULE 1 + 2: a bound name hashes as its binding index; a free name hashes as itself.
-clone_name = (cx: MutPtr<CloneCtx>, h: i64, name: string_view) i64 {
+clone_name = (cx: MutPtr<CloneCtx>, h: i64, name: StringView) i64 {
     i := cx.clone_bound_at(name, 0)
     (i < 0).then({
         return h.clone_tag(2).clone_text(name)
@@ -204,7 +204,7 @@ CLONE_SCOPE_CAP = () i64 { 128 }
 // The fingerprint of one function: parameter TYPES (so a differing signature never collides), then
 // the body. Parameter NAMES are bound, not hashed — rule 1.
 clone_fn* = (mp: MutPtr<Malloc>, f: Func) i64 {
-    buf: [string_view] := slice(mp.acquire_or_die(CLONE_SCOPE_CAP() * sizeof(string_view)), CLONE_SCOPE_CAP())
+    buf: [StringView] := slice(mp.acquire_or_die(CLONE_SCOPE_CAP() * sizeof(StringView)), CLONE_SCOPE_CAP())
     c := CloneCtx(
         names: buf,
         n: 0,

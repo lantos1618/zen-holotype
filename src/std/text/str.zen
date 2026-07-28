@@ -6,13 +6,13 @@
 { Result, IoError, expect, ok, err } = std.core.result
 { strlen, strcmp } = std.c.libc
 { is_space, to_ascii_lower, to_ascii_upper } = std.text.ascii
-len* = (s: string_view) i64 { s.strlen() }
-is_empty* = (s: string_view) bool { (s.strlen() == 0).then({ true }, { false }) }
-eq* = (a: string_view, b: string_view) bool { (a.strcmp(b) == 0).then({ true }, { false }) }
-ne* = (a: string_view, b: string_view) bool { a.eq(b).then({ false }, { true }) }
+len* = (s: StringView) i64 { s.strlen() }
+is_empty* = (s: StringView) bool { (s.strlen() == 0).then({ true }, { false }) }
+eq* = (a: StringView, b: StringView) bool { (a.strcmp(b) == 0).then({ true }, { false }) }
+ne* = (a: StringView, b: StringView) bool { a.eq(b).then({ false }, { true }) }
 // `eq` with A-Z folded on both sides: HTTP header names, `Content-Type` vs `content-type`. Bytes
 // 0x80+ compare verbatim, so it is an ASCII fold, not a Unicode one.
-eq_ignore_case* = (a: string_view, b: string_view) bool {
+eq_ignore_case* = (a: StringView, b: StringView) bool {
     av := a.view()
     bv := b.view()
     (av.len == bv.len).match ({
@@ -30,11 +30,11 @@ eq_ignore_case* = (a: string_view, b: string_view) bool {
     })
 }
 // ── bytes: borrow or own ────────────────────────────────────────────────────
-view* = (s: string_view) [u8] { s.slice(s.strlen()) }
+view* = (s: StringView) [u8] { s.slice(s.strlen()) }
 alloc_size = (n: i64) i64 { (n == 0).then({ 1 }, { n }) }
 // `out` is always a FRESH allocation here, so it never overlaps `src` — `copy`, not `move`.
 copy_bytes = (src: [u8], out: [u8]) void { out.ptr.copy(src.ptr, src.len) }
-dup_bytes_in* = (a: Allocator, s: string_view) Result<[u8], IoError> {
+dup_bytes_in* = (a: Allocator, s: StringView) Result<[u8], IoError> {
     src := s.view()
     a.try_acquire(src.len.alloc_size()).match ({
         .Ok(p)  => {
@@ -45,7 +45,7 @@ dup_bytes_in* = (a: Allocator, s: string_view) Result<[u8], IoError> {
         .Err(e) => err(e),
     })
 }
-dup_bytes* = (a: Allocator, s: string_view) Result<[u8], IoError> { a.dup_bytes_in(s) }
+dup_bytes* = (a: Allocator, s: StringView) Result<[u8], IoError> { a.dup_bytes_in(s) }
 // ── search ──────────────────────────────────────────────────────────────────
 // do needle's bytes (pv) appear at sv[at..]? (caller guards at + pv.len <= sv.len)
 has_at = (sv: [u8], pv: [u8], at: i64) bool {
@@ -65,7 +65,7 @@ has_at = (sv: [u8], pv: [u8], at: i64) bool {
 }
 // byte index of the first occurrence of `needle` in `s`, -1 if absent.
 // the empty needle matches at 0 (the strstr convention).
-find* = (s: string_view, needle: string_view) i64 {
+find* = (s: StringView, needle: StringView) i64 {
     sv := s.view()
     pv := needle.view()
     (pv.len == 0).match ({
@@ -88,18 +88,18 @@ find* = (s: string_view, needle: string_view) i64 {
     })
 }
 // does `s` contain `needle`? (the empty needle is contained in everything)
-contains* = (s: string_view, needle: string_view) bool { s.find(needle) >= 0 }
+contains* = (s: StringView, needle: StringView) bool { s.find(needle) >= 0 }
 // NOTE: `find` IS the index-of operation (first byte index, -1 if absent) — there is no separate
 // `index_of` here on purpose: it would duplicate `find` AND collide on the flattened namespace with
 // std.core.slice's `index_of<T>`. Reach for `find` (raw -1 sentinel).
 // does `s` begin with `prefix`? (every str starts with the empty prefix)
-starts_with* = (s: string_view, prefix: string_view) bool {
+starts_with* = (s: StringView, prefix: StringView) bool {
     sv := s.view()
     pv := prefix.view()
     pv.len <= sv.len && sv.has_at(pv, 0)
 }
 // does `s` end with `suffix`? (every str ends with the empty suffix)
-ends_with* = (s: string_view, suffix: string_view) bool {
+ends_with* = (s: StringView, suffix: StringView) bool {
     sv := s.view()
     fv := suffix.view()
     fv.len <= sv.len && sv.has_at(fv, sv.len - fv.len)
@@ -117,7 +117,7 @@ copy_substr = (sv: [u8], out: [u8], lo: i64, m: i64) void {
     out[m] = 0
 }
 // Out-of-range is clamped: a.substr("hi", 1, 99) == "i"; a.substr("hi", 5, 2) == "".
-substr_in* = (a: Allocator, s: string_view, start: i64, n: i64) Result<string_view, IoError> {
+substr_in* = (a: Allocator, s: StringView, start: i64, n: i64) Result<StringView, IoError> {
     sv := s.view()
     lo := start.pin(0, sv.len)
     m := n.pin(0, sv.len - lo)
@@ -130,11 +130,11 @@ substr_in* = (a: Allocator, s: string_view, start: i64, n: i64) Result<string_vi
         .Err(e) => err(e),
     })
 }
-substr* = (a: Allocator, s: string_view, start: i64, n: i64) Result<string_view, IoError> {
+substr* = (a: Allocator, s: StringView, start: i64, n: i64) Result<StringView, IoError> {
     a.substr_in(s, start, n)
 }
 // the byte at index `i`, or 0 when `i` is out of range (negative or past the end)
-at* = (s: string_view, i: i64) u8 {
+at* = (s: StringView, i: i64) u8 {
     sv := s.view()
     (i >= 0 && i < sv.len).then({ sv[i] }, { 0 })
 }
@@ -166,46 +166,46 @@ ws_end = (v: [u8]) i64 {
     hi
 }
 // zero-copy `[u8]` sub-views (no allocation) — both ends / leading / trailing.
-trim_view* = (s: string_view) [u8] {
+trim_view* = (s: StringView) [u8] {
     v: [u8] := s.view()
     lo := v.ws_start()
     hi := v.ws_end()
     (hi > lo).then({ slice(v.ptr.offset(lo), hi - lo) }, { slice(v.ptr, 0) })
 }
-ltrim_view* = (s: string_view) [u8] {
+ltrim_view* = (s: StringView) [u8] {
     v: [u8] := s.view()
     lo := v.ws_start()
     slice(v.ptr.offset(lo), v.len - lo)
 }
-rtrim_view* = (s: string_view) [u8] {
+rtrim_view* = (s: StringView) [u8] {
     v: [u8] := s.view()
     slice(v.ptr, v.ws_end())
 }
 // allocator-owned NUL-terminated trimmed copy (both ends).
-trim_in = (a: Allocator, s: string_view) string_view {
+trim_in = (a: Allocator, s: StringView) StringView {
     v: [u8] := s.view()
     lo := v.ws_start()
     hi := v.ws_end()
     a.substr_in(s, lo, (hi > lo).then({ hi - lo }, { 0 })).expect("std.text.str: allocation failed")
 }
-trim* = (a: Allocator, s: string_view) string_view { a.trim_in(s) }
+trim* = (a: Allocator, s: StringView) StringView { a.trim_in(s) }
 // strip a leading `prefix` AS A STR — zero-copy (no allocation): dropping a prefix only advances
 // the start pointer and the original NUL still terminates the tail. Returns `s` unchanged when
 // it doesn't start with `prefix`. trim_prefix("--verbose", "--") == "verbose".
-trim_prefix* = (s: string_view, prefix: string_view) string_view {
+trim_prefix* = (s: StringView, prefix: StringView) StringView {
     s.starts_with(prefix).then({ cstr(s.view().ptr.offset(prefix.len())) }, { s })
 }
 // strip a trailing `suffix` — allocator-owned NUL-terminated copy (a fresh trailing boundary needs its
 // own NUL, so this can't be zero-copy). Returns a COPY of `s` when it doesn't end with `suffix`.
 // trim_suffix("file.zen", ".zen") == "file".
-trim_suffix_in = (a: Allocator, s: string_view, suffix: string_view) string_view {
+trim_suffix_in = (a: Allocator, s: StringView, suffix: StringView) StringView {
     n := s.len()
     s.ends_with(suffix).match ({
         true  => a.substr_in(s, 0, n - suffix.len()).expect("std.text.str: allocation failed"),
         false => a.substr_in(s, 0, n).expect("std.text.str: allocation failed"),
     })
 }
-trim_suffix* = (a: Allocator, s: string_view, suffix: string_view) string_view {
+trim_suffix* = (a: Allocator, s: StringView, suffix: StringView) StringView {
     a.trim_suffix_in(s, suffix)
 }
 // ── splitting: fields and words ───────────────────────────────────────────────
@@ -220,7 +220,7 @@ nbuf*<T> = (a: Allocator, seed: T, n: i64) [T] {
 }
 // split `s` into the `sep`-delimited fields. The field count is (separators + 1), so empty fields are
 // kept: "a,b,c" -> ["a","b","c"]; "a,,b" -> ["a","","b"]; "abc" -> ["abc"]; "" -> [""].
-split_in* = (a: Allocator, s: string_view, sep: u8) [string_view] {
+split_in* = (a: Allocator, s: StringView, sep: u8) [StringView] {
     sv := s.view()
     nf: i64 := 1
     sv.loop((h, i, b) {
@@ -228,7 +228,7 @@ split_in* = (a: Allocator, s: string_view, sep: u8) [string_view] {
             nf = nf + 1
         })
     })
-    out: [string_view] := a.nbuf("", nf)
+    out: [StringView] := a.nbuf("", nf)
     fi: i64 := 0    // next field slot
     start: i64 := 0
     sv.loop((h, i, b) {
@@ -241,10 +241,10 @@ split_in* = (a: Allocator, s: string_view, sep: u8) [string_view] {
     out[fi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
     out
 }
-split* = (a: Allocator, s: string_view, sep: u8) [string_view] { a.split_in(s, sep) }
+split* = (a: Allocator, s: StringView, sep: u8) [StringView] { a.split_in(s, sep) }
 // split `s` on RUNS of ASCII whitespace, dropping empty fields: "  the  cat sat " -> ["the","cat","sat"];
 // "" / all-whitespace -> [] (an empty slice).
-words_in = (a: Allocator, s: string_view) [string_view] {
+words_in = (a: Allocator, s: StringView) [StringView] {
     sv := s.view()
     nw: i64 := 0    // word count = whitespace(or start)->non-whitespace transitions
     inw := false
@@ -259,7 +259,7 @@ words_in = (a: Allocator, s: string_view) [string_view] {
             }),
         })
     })
-    out: [string_view] := a.nbuf("", nw)
+    out: [StringView] := a.nbuf("", nw)
     wi: i64 := 0    // next word slot
     start: i64 := 0 - 1
     sv.loop((h, i, b) {
@@ -280,7 +280,7 @@ words_in = (a: Allocator, s: string_view) [string_view] {
     })
     out
 }
-words* = (a: Allocator, s: string_view) [string_view] { a.words_in(s) }
+words* = (a: Allocator, s: StringView) [StringView] { a.words_in(s) }
 // ── building new strings: join / replace / case / repeat / pad ─────────────────
 //
 // Each op below ALLOCATES a fresh NUL-terminated `str` from the caller's allocator (an `a: Allocator`),
@@ -291,14 +291,14 @@ words* = (a: Allocator, s: string_view) [string_view] { a.words_in(s) }
 // common names. They are unique across std today (grepped) — the only near-miss is std.core.slice's
 // `index_of<T>`, which is why no `index_of` is defined here (use `find`). Keep new globals distinct.
 // copy `t`'s bytes into `out` starting at `at`; return the offset just past them.
-copy_at = (out: [u8], at: i64, t: string_view) i64 {
+copy_at = (out: [u8], at: i64, t: StringView) i64 {
     tv := t.view()
     out.ptr.offset(at).copy(tv.ptr, tv.len)
     at + tv.len
 }
 // ASCII lower/upper-cased COPY of `s`. Only A–Z / a–z are folded; every other byte (digits, punctuation,
 // UTF-8 continuation bytes) is copied verbatim. to_upper("hi!") == "HI!".
-to_lower_in = (a: Allocator, s: string_view) string_view {
+to_lower_in = (a: Allocator, s: StringView) StringView {
     sv := s.view()
     out: [u8] := a.try_acquire(sv.len + 1).expect("std.text.str: out of memory").slice(sv.len + 1)
     sv.loop((h, i, b) {
@@ -307,8 +307,8 @@ to_lower_in = (a: Allocator, s: string_view) string_view {
     out[sv.len] = 0
     cstr(out.ptr)
 }
-to_lower* = (a: Allocator, s: string_view) string_view { a.to_lower_in(s) }
-to_upper_in = (a: Allocator, s: string_view) string_view {
+to_lower* = (a: Allocator, s: StringView) StringView { a.to_lower_in(s) }
+to_upper_in = (a: Allocator, s: StringView) StringView {
     sv := s.view()
     out: [u8] := a.try_acquire(sv.len + 1).expect("std.text.str: out of memory").slice(sv.len + 1)
     sv.loop((h, i, b) {
@@ -317,9 +317,9 @@ to_upper_in = (a: Allocator, s: string_view) string_view {
     out[sv.len] = 0
     cstr(out.ptr)
 }
-to_upper* = (a: Allocator, s: string_view) string_view { a.to_upper_in(s) }
+to_upper* = (a: Allocator, s: StringView) StringView { a.to_upper_in(s) }
 // `s` concatenated `n` times. `n <= 0` yields ""; an empty `s` also yields "". repeat("ab", 3) == "ababab".
-repeat_in = (a: Allocator, s: string_view, n: i64) string_view {
+repeat_in = (a: Allocator, s: StringView, n: i64) StringView {
     sv := s.view()
     cnt := (n < 0).then({ 0 }, { n })
     total := sv.len * cnt
@@ -337,10 +337,10 @@ repeat_in = (a: Allocator, s: string_view, n: i64) string_view {
     })
     cstr(out.ptr)
 }
-repeat* = (a: Allocator, s: string_view, n: i64) string_view { a.repeat_in(s, n) }
+repeat* = (a: Allocator, s: StringView, n: i64) StringView { a.repeat_in(s, n) }
 // join a slice of `str`s with `sep` between each: join(["a","b","c"], ",") == "a,b,c".
 // An empty slice yields "", a one-element slice yields that element (no separator).
-join_in* = (a: Allocator, parts: [string_view], sep: string_view) string_view {
+join_in* = (a: Allocator, parts: [StringView], sep: StringView) StringView {
     np := parts.len
     total: i64 := 0
     parts.loop((h, i, p) {
@@ -359,7 +359,7 @@ join_in* = (a: Allocator, parts: [string_view], sep: string_view) string_view {
     out[total] = 0
     cstr(out.ptr)
 }
-join* = (a: Allocator, parts: [string_view], sep: string_view) string_view { a.join_in(parts, sep) }
+join* = (a: Allocator, parts: [StringView], sep: StringView) StringView { a.join_in(parts, sep) }
 // ── concatenation: explicit allocator, NO hidden heap ─────────────────────────
 //
 // Zen has no `str + str` operator on purpose: `+` would hide a malloc. Concatenation is
@@ -374,7 +374,7 @@ join* = (a: Allocator, parts: [string_view], sep: string_view) string_view { a.j
 //
 //   a.cat(a.cat("a", "b"), "c")  ==  a.join(["a", "b", "c"], "")  ==  "abc"
 //   a.join(["name=", name, "\n"], "")  builds  "name=<name>\n"
-cat_in* = (a: Allocator, x: string_view, y: string_view) string_view {
+cat_in* = (a: Allocator, x: StringView, y: StringView) StringView {
     xv := x.view()
     yv := y.view()
     total := xv.len + yv.len
@@ -384,7 +384,7 @@ cat_in* = (a: Allocator, x: string_view, y: string_view) string_view {
     out[total] = 0
     cstr(out.ptr)
 }
-cat* = (a: Allocator, x: string_view, y: string_view) string_view { a.cat_in(x, y) }
+cat* = (a: Allocator, x: StringView, y: StringView) StringView { a.cat_in(x, y) }
 // count NON-overlapping occurrences of `fv` (len >= 1) in `sv`. `nextpos` skips past a match's bytes so
 // "aaaa" has 2 occurrences of "aa", not 3.
 count_occ = (sv: [u8], fv: [u8]) i64 {
@@ -401,7 +401,7 @@ count_occ = (sv: [u8], fv: [u8]) i64 {
 // replace ALL non-overlapping occurrences of `from` with `to` (not just the first). An empty `from`
 // matches nothing and returns a copy of `s` unchanged (the strstr convention would loop forever).
 // replace("hello", "l", "L") == "heLLo"; replace("a.b.c", ".", "/") == "a/b/c".
-replace_in = (a: Allocator, s: string_view, from: string_view, to: string_view) string_view {
+replace_in = (a: Allocator, s: StringView, from: StringView, to: StringView) StringView {
     sv := s.view()
     fv := from.view()
     (fv.len == 0).match ({
@@ -434,12 +434,12 @@ replace_in = (a: Allocator, s: string_view, from: string_view, to: string_view) 
         },
     })
 }
-replace* = (a: Allocator, s: string_view, from: string_view, to: string_view) string_view {
+replace* = (a: Allocator, s: StringView, from: StringView, to: StringView) StringView {
     a.replace_in(s, from, to)
 }
 // pad `s` to at least `width` bytes by prepending / appending `fill`; a longer `s` is copied unchanged.
 // pad_left("7", 3, '0') == "007"; pad_right("hi", 4, ' ') == "hi  ".
-pad_left_in = (a: Allocator, s: string_view, width: i64, fill: u8) string_view {
+pad_left_in = (a: Allocator, s: StringView, width: i64, fill: u8) StringView {
     sv := s.view()
     pad := (width > sv.len).then({ width - sv.len }, { 0 })
     total := pad + sv.len
@@ -457,10 +457,10 @@ pad_left_in = (a: Allocator, s: string_view, width: i64, fill: u8) string_view {
     })
     cstr(out.ptr)
 }
-pad_left* = (a: Allocator, s: string_view, width: i64, fill: u8) string_view {
+pad_left* = (a: Allocator, s: StringView, width: i64, fill: u8) StringView {
     a.pad_left_in(s, width, fill)
 }
-pad_right_in = (a: Allocator, s: string_view, width: i64, fill: u8) string_view {
+pad_right_in = (a: Allocator, s: StringView, width: i64, fill: u8) StringView {
     sv := s.view()
     pad := (width > sv.len).then({ width - sv.len }, { 0 })
     total := sv.len + pad
@@ -478,7 +478,7 @@ pad_right_in = (a: Allocator, s: string_view, width: i64, fill: u8) string_view 
     })
     cstr(out.ptr)
 }
-pad_right* = (a: Allocator, s: string_view, width: i64, fill: u8) string_view {
+pad_right* = (a: Allocator, s: StringView, width: i64, fill: u8) StringView {
     a.pad_right_in(s, width, fill)
 }
 // ── ordering: byte-lexicographic, the order `LC_ALL=C sort` produces ─────────
@@ -489,13 +489,13 @@ sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
         false => (xv[i] == yv[i]).then({ xv.sv_lt_at(yv, i + 1) }, { xv[i] < yv[i] }),
     })
 }
-sv_lt* = (x: string_view, y: string_view) bool { x.view().sv_lt_at(y.view(), 0) }
+sv_lt* = (x: StringView, y: StringView) bool { x.view().sv_lt_at(y.view(), 0) }
 // ── numbers ─────────────────────────────────────────────────────────────────
 // the i64 value of the decimal text in `s`: an optional leading '-', then a run of
 // digits. Parsing stops at the first non-digit and never errors: no leading digits
 // (empty str, garbage, a bare '-') parse as 0 — parse_int("42") == 42,
 // parse_int("-7") == -7, parse_int("12ab") == 12, parse_int("zen") == 0.
-parse_int* = (s: string_view) i64 {
+parse_int* = (s: StringView) i64 {
     sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
     start: i64 := neg.then({ 1 }, { 0 })
@@ -521,13 +521,13 @@ I64_MAX_DIV10 := 922337203685477580    // i64 max / 10: the pre-multiply overflo
 // Human-readable variant name, mirroring IoError's `name` (std.core.result) so parse failures
 // print too: `println(e.parse_error_name())`. Flat namespace has no overloading, so the type
 // rides in the fn name. `.Trailing`'s offending byte is not rendered — match for it.
-parse_error_name* = (e: ParseError) string_view { e.variant_name() }
+parse_error_name* = (e: ParseError) StringView { e.variant_name() }
 e_nodigits = () ParseError { .NoDigits }
 e_trailing = (b: u8) ParseError { .Trailing(b) }
 e_overflow = () ParseError { .Overflow }
 // parse_int, honestly: "zen" and "12ab" are errors, not 0 and 12. An optional leading '-', then
 // digits to the very end; the magnitude must fit i64 (|INT64_MIN| itself counts as overflow).
-try_parse_int* = (s: string_view) Result<i64, ParseError> {
+try_parse_int* = (s: StringView) Result<i64, ParseError> {
     sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
     start: i64 := neg.then({ 1 }, { 0 })

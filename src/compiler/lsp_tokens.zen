@@ -33,11 +33,11 @@ LSPT_NUMBER = () i64 { 6 }
 LSPT_COMMENT = () i64 { 7 }
 LSPT_OPERATOR = () i64 { 8 }
 LSPT_ENUM_MEMBER = () i64 { 9 }
-lspt_legend* = () string_view {
+lspt_legend* = () StringView {
     "[\"keyword\",\"function\",\"type\",\"variable\",\"property\",\"string\",\"number\",\"comment\",\"operator\",\"enumMember\"]"
 }
 // ── classification ───────────────────────────────────────────────────────────────────────────────
-lspt_is_keyword = (src: string_view, t: Token) bool {
+lspt_is_keyword = (src: StringView, t: Token) bool {
     src.tok_in(t, "return|match|loop|impl|then|true|false").then({
         return true
     })
@@ -48,33 +48,33 @@ lspt_is_keyword = (src: string_view, t: Token) bool {
 }
 // A builtin scalar/pointer name highlights as a type even though it is an ordinary identifier to the
 // lexer. User types are caught by the uppercase-initial rule below.
-lspt_is_builtin_ty = (src: string_view, t: Token) bool {
+lspt_is_builtin_ty = (src: StringView, t: Token) bool {
     src.tok_in(t, "i8|i16|i32|i64|u8|u16|u32|u64|f32|f64|bool|void").then({
         return true
     })
-    src.tok_in(t, "string_literal|string_view|string_cstr|str|text").then({
+    src.tok_in(t, "StringLiteral|StringView|StringCstr").then({
         return true
     })
     false
 }
 // The byte before `start`, skipping nothing — a leading `.` is what distinguishes `.Variant` (enum
 // member) and `x.field` (property) from a bare name.
-lspt_after_dot = (src: string_view, start: i32) bool { start > 0 && at(src, start - 1) == '.' }
-lspt_skip_sp = (src: string_view, e: i32) i32 {
+lspt_after_dot = (src: StringView, start: i32) bool { start > 0 && at(src, start - 1) == '.' }
+lspt_skip_sp = (src: StringView, e: i32) i32 {
     p := e
     @while (at(src, p) == ' ') {
         p = p + 1
     }
     p
 }
-lspt_call_next = (src: string_view, e: i32) bool {
+lspt_call_next = (src: StringView, e: i32) bool {
     p := src.lspt_skip_sp(e)
     at(src, p) == '(' || at(src, p) == '<'
 }
 // A top-level declaration head: an identifier in column 0, optionally exported with `*`, followed by
 // `=` or `:`. `main = () i32 { … }` is a function even though no `(` follows the NAME — the `(` is
 // past the `=`. Without this every top-level fn highlights as a plain variable.
-lspt_decl_fn = (src: string_view, t: Token) bool {
+lspt_decl_fn = (src: StringView, t: Token) bool {
     (t.start != 0 && at(src, t.start - 1) != '\n').then({
         return false
     })
@@ -90,7 +90,7 @@ lspt_decl_fn = (src: string_view, t: Token) bool {
     })
     src.lspt_call_next(p + 1)
 }
-lspt_ident_type = (src: string_view, t: Token) i64 {
+lspt_ident_type = (src: StringView, t: Token) i64 {
     src.lspt_is_keyword(t).then({
         return LSPT_KEYWORD()
     })
@@ -111,7 +111,7 @@ lspt_ident_type = (src: string_view, t: Token) i64 {
     })
     LSPT_VARIABLE()
 }
-lspt_tok_type = (src: string_view, t: Token) i64 {
+lspt_tok_type = (src: StringView, t: Token) i64 {
     t.kind.match ({
         .Ident => src.lspt_ident_type(t),
         .Int   => LSPT_NUMBER(),
@@ -133,7 +133,7 @@ LsptCur: {
 }
 // UTF-16 length of src[a, b) — a byte >= 0xF0 opens a 4-byte sequence, which is a surrogate PAIR
 // (two units); every other sequence start is one unit; continuation bytes count for nothing.
-lspt_u16_len = (src: string_view, a: i32, b: i32) i64 {
+lspt_u16_len = (src: StringView, a: i32, b: i32) i64 {
     n: i64 := 0
     a.upto(b, (p) {
         c := at(src, p)
@@ -153,7 +153,7 @@ lspt_push_num = (s: String, mp: MutPtr<Malloc>, n: i64, first: bool) String {
 lspt_emit = (
     cur: LsptCur,
     mp: MutPtr<Malloc>,
-    src: string_view,
+    src: StringView,
     ls: i32,
     line: i64,
     start: i32,
@@ -181,7 +181,7 @@ lspt_emit = (
 lspt_emit_span = (
     cur: LsptCur,
     mp: MutPtr<Malloc>,
-    src: string_view,
+    src: StringView,
     st: LsptScanLine,
     start: i32,
     end: i32,
@@ -210,7 +210,7 @@ LsptScanLine: {
     line: i64,
     ls: i32,
 }
-lspt_advance = (src: string_view, st: LsptScanLine, to: i32) LsptScanLine {
+lspt_advance = (src: StringView, st: LsptScanLine, to: i32) LsptScanLine {
     line := st.line
     ls := st.ls
     ls.upto(to, (p) {
@@ -233,7 +233,7 @@ lspt_advance = (src: string_view, st: LsptScanLine, to: i32) LsptScanLine {
 // silently corrupts every token after it — the client stops highlighting the buffer entirely. The two
 // streams come from two different scanners, so their agreement is an assumption, not a guarantee;
 // anything that would move the cursor backwards is dropped instead of trusted.
-lspt_tokens* = (mp: MutPtr<Malloc>, src: string_view) string_view {
+lspt_tokens* = (mp: MutPtr<Malloc>, src: StringView) StringView {
     cmts := mp.collect_comments(src)
     cur := LsptCur(
         out: mp.gstr_string(4096).gstr_append(mp, "["),

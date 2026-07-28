@@ -48,7 +48,7 @@
 { getpid } = std.c.libc
 // dispatch ONE category by name (child mode). Unknown names FAIL loudly — a typo in the parent's
 // suite list must never become a silently-green suite.
-hp_run_cat = (name: string_view) i32 {
+hp_run_cat = (name: StringView) i32 {
     ran := false
     fails := 0
     (name == "value").then({
@@ -159,17 +159,17 @@ hp_inner = () i64 {
 // ZO_NWORKERS bounds the child's INNER case fan-out so pool×inner stays ≈ nproc-ish.
 hp_suite_cmd = (
     mp: MutPtr<Malloc>,
-    self: string_view,
-    name: string_view,
-    inner: string_view,
-    cache: string_view,
-) string_view {
-    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    self: StringView,
+    name: StringView,
+    inner: StringView,
+    cache: StringView,
+) StringView {
+    z: StringView := ""    // str-typed lead so the mixed literal/variable array infers as [str]
     d := mp.zo_dir()
     mp.zo_join([z, "mkdir -p ", cache, "; ZENC_CACHE_DIR=", cache, " ZO_NWORKERS=", inner, " ZEN_HARNESS_SUITE=", name, " ", self, " > ", d, "/s_", name, ".out 2>&1; echo $? > ", d, "/s_", name, ".rc"])
 }
 // membership test: is `needle` present in `hay`? (match-only, no early break — the lists are tiny).
-hp_list_has = (hay: [string_literal], needle: string_literal) bool {
+hp_list_has = (hay: [StringLiteral], needle: StringLiteral) bool {
     found := false
     hay.loop((h, i, s) {
         (s == needle).then({
@@ -184,7 +184,7 @@ hp_list_has = (hay: [string_literal], needle: string_literal) bool {
 // silently vanish), and one in `order` but not `sched` would be tallied though never run. This asserts
 // set-equality (same length AND mutual membership), names the offending suite, and returns the count
 // of discrepancies (0 == the two lists agree).
-hp_assert_sched_order = (mp: MutPtr<Malloc>, sched: [string_literal], order: [string_literal]) i32 {
+hp_assert_sched_order = (mp: MutPtr<Malloc>, sched: [StringLiteral], order: [StringLiteral]) i32 {
     bad := 0
     sched.loop((h, i, s) {
         (hp_list_has(order, s) == false).then({
@@ -230,7 +230,7 @@ hp_run_parallel = () i32 {
         return mismatch
     })
     n := sched.len
-    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    z: StringView := ""    // str-typed lead so the mixed literal/variable array infers as [str]
     self := mp.zo_join([z, "/proc/", mp.zo_itoa(getpid().to_i64()), "/exe"])
     inner := mp.zo_itoa(hp_inner())    // per-child case workers (see hp_inner)
     // ONE warm ZENC_CACHE_DIR shared by every suite child, PERSISTENT across runs (env
@@ -248,7 +248,7 @@ hp_run_parallel = () i32 {
     warm := is_empty(warm0).then({ "/tmp/zo-harness-cache" }, { warm0 })
     shell(mp.zo_join([z, "mkdir -p ", warm, "; test \"$(du -sm ", warm, " 2>/dev/null | cut -f1)\" -gt 2048 2>/dev/null && rm -rf ", warm, "; true"]))
     base := assert_nonnull(malloc(n * 8))
-    cmds: [string_view] := base.slice(n)
+    cmds: [StringView] := base.slice(n)
     sched.loop((h, i, s) {
         cmds[i] = mp.hp_suite_cmd(self, s, inner, warm)
     })

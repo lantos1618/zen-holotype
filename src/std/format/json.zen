@@ -6,9 +6,9 @@
 //
 // VALUE SHAPE. A `Value` is a tagged union over the six JSON kinds:
 //
-//   Entry*:  { key: string_view, val: Value }
+//   Entry*:  { key: StringView, val: Value }
 //   Object*: { entries: [Entry] }
-//   Value*:  Null | Bool(bool) | Int(i64) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
+//   Value*:  Null | Bool(bool) | Int(i64) | Num(f64) | Str(StringView) | Arr([Value]) | Obj(Object)
 //
 // Objects are an insertion-ordered slice of (key, value) Entry pairs, and growable
 // arrays/objects accumulate through the module-local generic `JBuf<T>` buffer.
@@ -19,7 +19,7 @@
 //   1. Objects can't be `Obj(Map<Value>)`. It compiles and round-trips WITHIN one file, but
 //      instantiating ANOTHER module's generic struct (`Map<T>`) against a recursive enum defined
 //      here fails to monomorphize once this module is imported (cross-module generic-struct-param).
-//   2. Objects can't use a parallel `Vec<string_view>` across this module boundary: that foreign
+//   2. Objects can't use a parallel `Vec<StringView>` across this module boundary: that foreign
 //      generic string-element buffer still hits the cross-module monomorphization limit.
 //      Wrapping the key in the local `Entry` struct dodges it.
 //
@@ -64,18 +64,18 @@
 // threads the caller's allocator whose exhaustion is fatal by policy, so builder Results are unwrapped
 // at the module boundary with these two helpers — parse/stringify keep their observable behavior.
 jok = (r: Result<String, IoError>) String { r.expect("std.json: allocation failed") }
-jfin = (r: Result<string_cstr, IoError>) string_view { r.expect("std.json: allocation failed") }
+jfin = (r: Result<StringCstr, IoError>) StringView { r.expect("std.json: allocation failed") }
 // ── the value type ───────────────────────────────────────────────────────────
 // One object member. Public so a tool can iterate an object's (key, value) pairs by name
 // (`as_obj`/`members` hand these out) instead of reaching through the porous enum payload.
 Entry*: {
-    key: string_view,
+    key: StringView,
     val: Value,
 }
 Object*: {
     entries: [Entry],
 }
-Value*: Null | Bool(bool) | Int(i64) | Num(f64) | Str(string_view) | Arr([Value]) | Obj(Object)
+Value*: Null | Bool(bool) | Int(i64) | Num(f64) | Str(StringView) | Arr([Value]) | Obj(Object)
 // A parse error, carrying the byte offset where it was detected (UnexpectedEof carries none).
 JsonError*: Unexpected(i64) | BadString(i64) | BadNumber(i64) | BadLiteral(i64) | TrailingGarbage(i64) | UnexpectedEof | TooDeep
 // nesting cap so a pathological "[[[[…" can't blow the native stack.
@@ -86,7 +86,7 @@ Step: {
     pos: i64,
 }
 StrStep: {
-    s: string_view,
+    s: StringView,
     pos: i64,
 }
 step_ok = (v: Value, pos: i64) Result<Step, JsonError> {
@@ -95,7 +95,7 @@ step_ok = (v: Value, pos: i64) Result<Step, JsonError> {
         pos: pos,
     ))
 }
-sstep_ok = (s: string_view, pos: i64) Result<StrStep, JsonError> {
+sstep_ok = (s: StringView, pos: i64) Result<StrStep, JsonError> {
     .Ok(StrStep(
         s: s,
         pos: pos,
@@ -195,7 +195,7 @@ push_utf8 = (a: Allocator, sb: String, cp: i64) String {
 }
 // decode the JSON string starting at sv[pos] == '"'; returns the decoded view + the offset
 // just past the closing quote. The decoded bytes are accumulated through `a`.
-parse_string_raw = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<StrStep, JsonError> {
+parse_string_raw = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<StrStep, JsonError> {
     sb: String := a.new_in().jok()
     endpos: i64 := 0 - 1
     errpos: i64 := 0 - 1
@@ -302,7 +302,7 @@ parse_string_raw = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<S
 }
 // ── scalar parsers ─────────────────────────────────────────────────────────────
 // match sv[pos..] against `word`; on success produce `v` at pos+len, else BadLiteral.
-parse_lit = (sv: [u8], pos: i64, word: string_view, v: Value) Result<Step, JsonError> {
+parse_lit = (sv: [u8], pos: i64, word: StringView, v: Value) Result<Step, JsonError> {
     wv := word.view()
     ok: bool := pos + wv.len <= sv.len
     wv.loop((h, i, b) {
@@ -318,7 +318,7 @@ parse_lit = (sv: [u8], pos: i64, word: string_view, v: Value) Result<Step, JsonE
     })
     ok.then({ step_ok(v, pos + wv.len) }, { err(.BadLiteral(pos)) })
 }
-parse_number = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
+parse_number = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<Step, JsonError> {
     endp: i64 := pos
     sv.loop((h, i, b) {
         (i < pos == false).then({
@@ -356,7 +356,7 @@ parse_number = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<Step,
 }
 // an INTEGER token: no '.', no exponent. Those are the only two number bytes that make a JSON number
 // non-integral, so their absence is exactly "this round-trips through i64" (modulo magnitude).
-num_is_integral = (txt: string_view) bool {
+num_is_integral = (txt: StringView) bool {
     intish := true
     txt.view().loop((h, i, b) {
         (b == '.' || b == 'e' || b == 'E').then({
@@ -366,13 +366,13 @@ num_is_integral = (txt: string_view) bool {
     })
     intish
 }
-parse_num_f64 = (txt: string_view, pos: i64, endp: i64) Result<Step, JsonError> {
+parse_num_f64 = (txt: StringView, pos: i64, endp: i64) Result<Step, JsonError> {
     parse_f64(txt).match ({
         .Ok(f)  => step_ok(.Num(f), endp),
         .Err(_) => err(.BadNumber(pos)),
     })
 }
-parse_str_value = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
+parse_str_value = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<Step, JsonError> {
     a.parse_string_raw(src, sv, pos).match ({
         .Ok(ss) => step_ok(.Str(ss.s), ss.pos),
         .Err(e) => err(e),
@@ -381,7 +381,7 @@ parse_str_value = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<St
 // ── aggregate parsers (mutually recursive with parse_value; OK because concrete) ──
 parse_array = (
     a: Allocator,
-    src: string_view,
+    src: StringView,
     sv: [u8],
     pos: i64,
     depth: i64,
@@ -403,7 +403,7 @@ parse_array = (
 }
 arr_loop = (
     a: Allocator,
-    src: string_view,
+    src: StringView,
     sv: [u8],
     p: i64,
     depth: i64,
@@ -429,7 +429,7 @@ arr_loop = (
 }
 parse_object = (
     a: Allocator,
-    src: string_view,
+    src: StringView,
     sv: [u8],
     pos: i64,
     depth: i64,
@@ -451,7 +451,7 @@ parse_object = (
 }
 obj_loop = (
     a: Allocator,
-    src: string_view,
+    src: StringView,
     sv: [u8],
     p: i64,
     depth: i64,
@@ -499,7 +499,7 @@ obj_loop = (
 // the core recursive-descent dispatcher: parse ONE value at sv[pos..].
 parse_value = (
     a: Allocator,
-    src: string_view,
+    src: StringView,
     sv: [u8],
     pos: i64,
     depth: i64,
@@ -542,7 +542,7 @@ parse_value = (
 // ── public parse ───────────────────────────────────────────────────────────────
 // Parse a complete JSON document. Returns Err on any malformed input, including
 // trailing non-whitespace after the value.
-parse* = (a: Allocator, s: string_view) Result<Value, JsonError> {
+parse* = (a: Allocator, s: StringView) Result<Value, JsonError> {
     sv := s.view()
     out: Result<Value, JsonError> := a.parse_value(s, sv, 0, 0).match ({
         .Err(e) => {
@@ -624,7 +624,7 @@ json_needs_esc = (b: u8) bool { b == '"' || b == '\\' || b < 32 }
 // pushing every byte one at a time. Byte-identical output; fewer grows/stores for plain text.
 // Deliberately NOT std.text.ascii.escape_into (the per-byte scan the backends/formatter share):
 // the run-copy bulk append is a different loop shape, kept for throughput on plain text.
-write_str_lit = (a: Allocator, sb: String, s: string_view) String {
+write_str_lit = (a: Allocator, sb: String, s: StringView) String {
     out: String := sb.push_in(a, '"').jok()
     sv := s.view()
     run_start: i64 := 0
@@ -689,7 +689,7 @@ write_value = (a: Allocator, sb: String, v: Value) String {
     })
 }
 // Serialize a Value to compact JSON text (allocator-owned, NUL-terminated view).
-stringify* = (a: Allocator, v: Value) string_view {
+stringify* = (a: Allocator, v: Value) StringView {
     sb: String := a.new_in().jok()
     sb = a.write_value(sb, v)
     sb.finish_in(a).jfin()
@@ -766,14 +766,14 @@ pwrite_value = (a: Allocator, sb: String, v: Value, depth: i64) String {
 }
 // Serialize a Value to indented JSON text (2-space indent, one element/member per line) — the
 // human-readable counterpart to `stringify`. Allocator-owned, NUL-terminated view.
-pretty* = (a: Allocator, v: Value) string_view {
+pretty* = (a: Allocator, v: Value) StringView {
     sb: String := a.new_in().jok()
     sb = a.pwrite_value(sb, v, 0)
     sb.finish_in(a).jfin()
 }
 // ── accessors ──────────────────────────────────────────────────────────────────
 // index of `key` in the object's entry list, or -1 (O(n) linear scan).
-obj_find = (o: Object, key: string_view) i64 {
+obj_find = (o: Object, key: StringView) i64 {
     found: i64 := 0 - 1
     o.entries.loop((h, i, e) {
         (found < 0).match ({
@@ -789,13 +789,13 @@ obj_find = (o: Object, key: string_view) i64 {
     found
 }
 // Object member lookup: .Some(value) if `key` is present, else .None.
-obj_get = (o: Object, key: string_view) Opt<Value> {
+obj_get = (o: Object, key: StringView) Opt<Value> {
     i := o.obj_find(key)
     out: Opt<Value> := (i < 0).then({ .None }, { .Some(o.entries[i].val) })
     out
 }
 // Member lookup on a Value: .Some(value) if it is an Obj containing `key`, else .None.
-get* = (obj: Value, key: string_view) Opt<Value> {
+get* = (obj: Value, key: StringView) Opt<Value> {
     out: Opt<Value> := obj.match ({
         .Obj(o) => o.obj_get(key),
         _       => .None,
@@ -829,8 +829,8 @@ as_int* = (v: Value) Opt<i64> {
     })
     out
 }
-as_str* = (v: Value) Opt<string_view> {
-    out: Opt<string_view> := v.match ({
+as_str* = (v: Value) Opt<StringView> {
+    out: Opt<StringView> := v.match ({
         .Str(s) => .Some(s),
         _       => .None,
     })

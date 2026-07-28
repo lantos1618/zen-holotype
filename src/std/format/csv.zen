@@ -1,7 +1,7 @@
 // std.format.csv — an RFC4180-ish CSV reader/writer built on the existing stdlib (the std.text.string
 // builder for field bytes, plus module-local growable buffers for the field/row backbones).
 //
-// SHAPE. A parsed document is `[[string_view]]` — rows of NUL-terminated field buffers.
+// SHAPE. A parsed document is `[[StringView]]` — rows of NUL-terminated field buffers.
 // `parse` decodes text into that shape; `write_rows` renders it back to one CSV view.
 //
 //   heap = std.mem.heap
@@ -39,13 +39,13 @@
 // here — parse/write_rows keep their observable behavior and reserve their own Err channel for real
 // structural faults (an unterminated quoted field).
 cok = (r: Result<String, IoError>) String { r.expect("std.csv: allocation failed") }
-cfin = (r: Result<string_cstr, IoError>) string_view { r.expect("std.csv: allocation failed") }
+cfin = (r: Result<StringCstr, IoError>) StringView { r.expect("std.csv: allocation failed") }
 cnew = (a: Allocator) String { a.new_in().expect("std.csv: allocation failed") }
 // ── module-local growable buffer (hand-rolled Vec) ────────────────────────────
 // The field/row backbones are built here rather than through std.collections.vec (whose foreign
 // generic struct hits the cross-module monomorphization limit). One same-module generic `CBuf<T>`
-// serves both backbones: fields as `CBuf<string_view>` (one row's fields) and rows as
-// `CBuf<[string_view]>` (the row list). `T` is phantom in the fields, mirroring std.collections.Vec;
+// serves both backbones: fields as `CBuf<StringView>` (one row's fields) and rows as
+// `CBuf<[StringView]>` (the row list). `T` is phantom in the fields, mirroring std.collections.Vec;
 // the element size flows through `sizeof(T)` at each same-module instantiation.
 // KEEP verdict (re-verified 2026-07-23): instantiating std.collections.vec's `Vec<T>` against a
 // type defined in the importing module still fails to monomorphize (`need-annotation` inside
@@ -89,10 +89,10 @@ cbuf_slice<T> = (cb: CBuf<T>) [T] { slice(cb.ptr, cb.len) }
 // and `resume` lets a two-byte token ("" or a CRLF pair) skip its second byte. Field bytes
 // accumulate in the `sb` String builder; a completed field joins `fields`, a completed record joins
 // `rows`. Returns `.Err(.Eof)` if a quoted field is never closed.
-parse* = (a: Allocator, text: string_view) Result<[[string_view]], IoError> {
+parse* = (a: Allocator, text: StringView) Result<[[StringView]], IoError> {
     sv: [u8] := text.view()
-    rows: CBuf<[string_view]> := a.cbuf_new()
-    fields: CBuf<string_view> := a.cbuf_new()
+    rows: CBuf<[StringView]> := a.cbuf_new()
+    fields: CBuf<StringView> := a.cbuf_new()
     sb: String := a.cnew()
     in_quotes := false
     active := false
@@ -134,7 +134,7 @@ parse* = (a: Allocator, text: string_view) Result<[[string_view]], IoError> {
                                 active.then({
                                     fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
                                     rows = a.cbuf_push(rows, fields.cbuf_slice())
-                                    fresh: CBuf<string_view> := a.cbuf_new()
+                                    fresh: CBuf<StringView> := a.cbuf_new()
                                     fields = fresh
                                     sb = a.cnew()
                                     active = false
@@ -157,7 +157,7 @@ parse* = (a: Allocator, text: string_view) Result<[[string_view]], IoError> {
             })
         })
     })
-    out: Result<[[string_view]], IoError> := in_quotes.match ({
+    out: Result<[[StringView]], IoError> := in_quotes.match ({
         true  => .Err(.Eof),
         false => {
             active.match ({
@@ -180,7 +180,7 @@ parse* = (a: Allocator, text: string_view) Result<[[string_view]], IoError> {
 }
 // ── write_rows ─────────────────────────────────────────────────────────────────────
 // does `s` need quoting? (contains a delimiter, a quote, or a line break)
-field_needs_quote = (s: string_view) bool {
+field_needs_quote = (s: StringView) bool {
     sv: [u8] := s.view()
     need := false
     sv.loop((h, i, b) {
@@ -192,7 +192,7 @@ field_needs_quote = (s: string_view) bool {
     need
 }
 // append `s` to the builder as one CSV field, quoting (and doubling embedded quotes) if required.
-write_field = (a: Allocator, sb: String, s: string_view) String {
+write_field = (a: Allocator, sb: String, s: StringView) String {
     sv: [u8] := s.view()
     s.field_needs_quote().match ({
         true  => {
@@ -215,10 +215,10 @@ write_field = (a: Allocator, sb: String, s: string_view) String {
 // Render `rows` to a single CSV view: fields joined by commas, records terminated by LF (including
 // a trailing LF after the last record). Round-trips through `parse`. Returns Ok always (allocation
 // failure is fatal by policy); the Result signature mirrors parse and the rest of std.
-write_rows* = (a: Allocator, rows: [[string_view]]) Result<string_view, IoError> {
+write_rows* = (a: Allocator, rows: [[StringView]]) Result<StringView, IoError> {
     out: String := a.cnew()
     rows.loop((h, i, row) {
-        r: [string_view] := row
+        r: [StringView] := row
         r.loop((h2, j, f) {
             (j > 0).then({
                 out = out.push_in(a, ',').cok()

@@ -98,7 +98,7 @@ to the hand-written match it replaces.
 
 ```zen
 Level: Debug | Info | Warn | Error
-tag = (l: Level) string_view { l.variant_name() }   // .Debug => "Debug", .Info => "Info", …
+tag = (l: Level) StringView { l.variant_name() }   // .Debug => "Debug", .Info => "Info", …
 ```
 
 The name is VERBATIM by design. Case folding was deliberately left out: it is a runtime
@@ -157,7 +157,7 @@ strings.
 **The ORM sketch — still the target application.** Drizzle-style, schema *is* a struct:
 
 ```zen
-User: { id: i32, name: string_view, active: bool }   // the table = a plain struct
+User: { id: i32, name: StringView, active: bool }   // the table = a plain struct
 
 users := table<User>("users")   // reflect fields -> columns; SQL type from each field's Ty
 

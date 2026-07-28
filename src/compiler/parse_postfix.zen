@@ -16,18 +16,18 @@
   paren_is_struct, take_args, take_inits, tyargs_end } = compiler.parse_primary
 { PExpr, parse_or } = compiler.parse_expr
 // a boolean `.match` lowers to genc's two-branch Cond: `(subj).match { true => X, false => Y }`
-is_dot* = (src: string_view, t: Token) bool { src.is_op(t, '.') }
-is_match_kw = (src: string_view, t: Token) bool {
+is_dot* = (src: StringView, t: Token) bool { src.is_op(t, '.') }
+is_match_kw = (src: StringView, t: Token) bool {
     t.kind.match ({
         .Ident => src.tok_eq(t, "match"),
         _      => false,
     })
 }
-is_match_at = (src: string_view, pos: i32) bool {
+is_match_at = (src: StringView, pos: i32) bool {
     dot := src.scan(pos)    // a '.' followed by `match`?
     src.is_dot(dot.tok).then({ src.is_match_kw(src.scan(dot.next).tok) }, { false })
 }
-is_then_kw = (src: string_view, t: Token) bool {
+is_then_kw = (src: StringView, t: Token) bool {
     t.kind.match ({
         .Ident => src.tok_eq(t, "then"),
         _      => false,
@@ -35,7 +35,7 @@ is_then_kw = (src: string_view, t: Token) bool {
 }
 // Reserve only the exact lazy-control shape `.then({`; a normal field named `then` (notably IfData.then)
 // and an ordinary method call with non-block arguments must continue through the regular field parser.
-is_then_at = (src: string_view, pos: i32) bool {
+is_then_at = (src: StringView, pos: i32) bool {
     dot := src.scan(pos)
     kw := src.scan(dot.next)
     lp := src.scan(kw.next)
@@ -55,14 +55,14 @@ is_ident_tok* = (t: Token) bool {
 }
 // is the position followed by `.ident`? — a postfix FIELD access (`x.f`) and, in type position, a
 // QUALIFIED name (`io.Writer`); syntactically the same two-token lookahead.
-is_field_at* = (src: string_view, pos: i32) bool {
+is_field_at* = (src: StringView, pos: i32) bool {
     dot := src.scan(pos)
     src.is_dot(dot.tok).then({ is_ident_tok(src.scan(dot.next).tok) }, { false })
 }
 // A postfix index `base[i]` continues the expression ONLY if the `[` is on the SAME line as
 // `base`. A `[` that opens a new line is a slice-literal STATEMENT (`[1, 2, 3]`), not an index —
 // without this guard it glues onto the previous statement (`x := 7` ⨯ `[1]` → `x := 7[1]`).
-is_index_at = (src: string_view, pos: i32) bool {
+is_index_at = (src: StringView, pos: i32) bool {
     sc := src.scan(pos)
     src.is_lbracket(sc.tok) && src.nl_between(pos, sc.tok.start).then({ false }, { true })
 }
@@ -72,7 +72,7 @@ is_index_at = (src: string_view, pos: i32) bool {
 // statement — Zen separates statements by whitespace, so `… / 2.0  (ng == g).match(…)` is two
 // statements, NOT a call of `2.0`. Same-line-only (as for `[index]`) is too weak: it would glue a
 // whitespace-separated parenthesized statement onto the previous expression.
-is_call_at = (src: string_view, pos: i32) bool {
+is_call_at = (src: StringView, pos: i32) bool {
     sc := src.scan(pos)
     src.is_lparen(sc.tok) && sc.tok.start == pos
 }
@@ -91,7 +91,7 @@ is_chain_base = (e: Ptr<Expr>) bool {
 // break (`Res /* two\nlines */ .Okv(1)` stays ONE line), while the newline that TERMINATES a `//`
 // line comment is a real break (everything after it is a new line). Both scans stay inside the
 // [lo, hi) gap between two real tokens, so any comment the lexer skipped there is complete.
-nl_between* = (src: string_view, lo: i32, hi: i32) bool {
+nl_between* = (src: StringView, lo: i32, hi: i32) bool {
     (lo >= hi).then({
         return false
     })
@@ -108,12 +108,12 @@ nl_between* = (src: string_view, lo: i32, hi: i32) bool {
 }
 // raw '\n' scan (the pre-comment-aware nl_between): used for the tail of a `//` comment, whose
 // terminating newline is a real line break.
-raw_nl = (src: string_view, lo: i32, hi: i32) bool {
+raw_nl = (src: StringView, lo: i32, hi: i32) bool {
     (lo >= hi).then({ false }, { src.at(lo) == '\n' || src.raw_nl(lo + 1, hi) })
 }
 // skip past the `*/` closing a block comment inside a token gap; an unterminated tail (only
 // possible when hi is the EOF sentinel) just ends the gap scan.
-skip_gap_comment = (src: string_view, pos: i32, hi: i32) i32 {
+skip_gap_comment = (src: StringView, pos: i32, hi: i32) i32 {
     (pos + 1 >= hi).match ({
         true  => hi,
         false => (src.at(pos) == '*' && src.at(pos + 1) == '/').match ({
@@ -122,13 +122,13 @@ skip_gap_comment = (src: string_view, pos: i32, hi: i32) i32 {
         }),
     })
 }
-is_loop_kw = (src: string_view, t: Token) bool {
+is_loop_kw = (src: StringView, t: Token) bool {
     t.kind.match ({
         .Ident => src.tok_eq(t, "loop"),
         _      => false,
     })
 }
-is_loop_at = (src: string_view, pos: i32) bool {
+is_loop_at = (src: StringView, pos: i32) bool {
     dot := src.scan(pos)
     src.is_dot(dot.tok).then({ src.is_loop_kw(src.scan(dot.next).tok) }, { false })
 }
@@ -145,7 +145,7 @@ is_loop_at = (src: string_view, pos: i32) bool {
 // STATEMENT-LEVEL ONLY (stmt_level, parse_type.zen): inside an unclosed `(`/`[`/arm value a new
 // statement cannot begin, so breaking there could only manufacture a parse error — the split
 // `true => Res` ⏎ `.Okv(1),` arm and the parenthesized `(Res` ⏎ `.Okv(2))` stay one expression.
-is_variant_break = (src: string_view, pos: i32) bool {
+is_variant_break = (src: StringView, pos: i32) bool {
     dot := src.scan(pos)
     fld := src.scan(dot.next)
     br := stmt_level() && src.nl_between(pos, dot.tok.start) && is_upper(src.at(fld.tok.start))
@@ -157,13 +157,13 @@ is_variant_break = (src: string_view, pos: i32) bool {
 // parse a full expression INSIDE an open delimiter (call/ctor/index/slice/struct-lit element,
 // paren group, match-arm value): a new statement cannot begin there, so the newline+`.Uppercase`
 // variant break is suppressed for the sub-parse (see is_variant_break / parse_type.delim_depth).
-parse_or_nested* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+parse_or_nested* = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
     delim_enter()
     r := a.parse_or(src, pos)
     delim_exit()
     r
 }
-parse_postfix* = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+parse_postfix* = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
     // DEPTH CAP (see parse_type.zen): a postfix chain `.f.f.f…` / `f(f(f(…)))` recurses through
     // parse_postfix per suffix WITHOUT re-entering the guarded parse_atom, so it needs its own bound.
     // Past the cap, stop consuming suffixes and return `base` (perr already set) — the frames unwind.
@@ -172,7 +172,7 @@ parse_postfix* = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
     pdepth_exit()
     r
 }
-parse_postfix_chain = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+parse_postfix_chain = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
     src.is_match_at(base.next).match ({
         true  => a.parse_match(src, base),
         false => src.is_then_at(base.next).match ({
@@ -198,7 +198,7 @@ parse_postfix_chain = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
 // `({ __chaintmp_N := base  __chaintmp_N(args) })`: binding the callee to a LOCAL reuses the supported
 // closure-local-call path (compiler.check.clos_local_call_name rewrites `__chaintmp_N(args)` to the
 // generated `__clos_K_call(__chaintmp_N, args)`). The block's trailing call is its value.
-parse_chained_call = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+parse_chained_call = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
     lp := src.scan(base.next)
     at := lp.tok.start
     buf := a.arg_buf()
@@ -213,7 +213,7 @@ parse_chained_call = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
     ))
 }
 // Foreach over recv; compiler.check fills the element type.
-parse_loop = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+parse_loop = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
     dot := src.scan(base.next)
     kw := src.scan(dot.next)
     lp := src.scan(kw.next)
@@ -237,7 +237,7 @@ parse_loop = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
         next: rp.next,
     ))
 }
-parse_index = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+parse_index = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
     lb := src.scan(base.next)
     ie := a.parse_or_nested(src, lb.next)
     rb := src.scan(ie.next)
@@ -247,7 +247,7 @@ parse_index = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
     ))
 }
 // Field access, UFCS calls, and qualified enum constructors share the dot parser.
-is_qual_ctor = (base: PExpr, name: string_view) bool {
+is_qual_ctor = (base: PExpr, name: StringView) bool {
     rn := subj_name(base.expr)
     rn.at(0).is_upper() && name.at(0).is_upper()
 }
@@ -256,7 +256,7 @@ is_qual_ctor = (base: PExpr, name: string_view) bool {
 // pre-flatten source where the `ns.` alias is still present (the flatten pipeline resolves `ns.Type` to
 // `Type` first, so only fmt reaches here); a method call takes POSITIONAL args (no `name:`), so the
 // `field:` shape disambiguates. Round-trips via a `MakeStruct` whose type carries the dotted `ns.Type`.
-is_qual_struct_lit = (src: string_view, base: PExpr, name: string_view, fld: Scan) bool {
+is_qual_struct_lit = (src: StringView, base: PExpr, name: StringView, fld: Scan) bool {
     nx := src.scan(fld.next)
     subj_name(base.expr).at(0) != 0
         && name.at(0).is_upper()
@@ -266,9 +266,9 @@ is_qual_struct_lit = (src: string_view, base: PExpr, name: string_view, fld: Sca
 }
 parse_qual_struct_lit = (
     a: MutPtr<Malloc>,
-    src: string_view,
+    src: StringView,
     base: PExpr,
-    name: string_view,
+    name: StringView,
     fld: Scan,
 ) PExpr {
     open := src.scan(fld.next)
@@ -284,7 +284,7 @@ parse_qual_struct_lit = (
 // closing `>` (or -1 if not a well-formed generic head). Like is_qual_struct_lit, only the faithful
 // (fmt) parser reaches here: the flatten pipeline strips the `subj.` alias before the compiler parse,
 // leaving the bare `Name<TyArgs>…` forms that parse_ident handles.
-qual_generic_after = (src: string_view, base: PExpr, name: string_view, fld: Scan) i32 {
+qual_generic_after = (src: StringView, base: PExpr, name: StringView, fld: Scan) i32 {
     nx := src.scan(fld.next)
     (subj_name(base.expr).at(0) != 0 && name.at(0).is_upper() && src.is_langle(nx.tok)).match ({
         true  => src.tyargs_end(nx.next, 1),
@@ -292,7 +292,7 @@ qual_generic_after = (src: string_view, base: PExpr, name: string_view, fld: Sca
     })
 }
 // `subj.Name<TyArgs>(field: val, …)` — a qualified generic struct literal.
-is_qual_generic_struct_lit = (src: string_view, base: PExpr, name: string_view, fld: Scan) bool {
+is_qual_generic_struct_lit = (src: StringView, base: PExpr, name: StringView, fld: Scan) bool {
     after := src.qual_generic_after(base, name, fld)
     (after < 0).match ({
         true  => false,
@@ -305,7 +305,7 @@ is_qual_generic_struct_lit = (src: string_view, base: PExpr, name: string_view, 
     })
 }
 // `subj.Name<TyArgs>.Variant(args)` (or nullary `subj.Name<TyArgs>.None`) — a qualified generic ctor.
-is_qual_generic_ctor = (src: string_view, base: PExpr, name: string_view, fld: Scan) bool {
+is_qual_generic_ctor = (src: StringView, base: PExpr, name: StringView, fld: Scan) bool {
     after := src.qual_generic_after(base, name, fld)
     (after < 0).match ({
         true  => false,
@@ -323,9 +323,9 @@ is_qual_generic_ctor = (src: string_view, base: PExpr, name: string_view, fld: S
 }
 parse_qual_generic_struct_lit = (
     a: MutPtr<Malloc>,
-    src: string_view,
+    src: StringView,
     base: PExpr,
-    name: string_view,
+    name: StringView,
     fld: Scan,
 ) PExpr {
     qn := a.dotted_name_in(subj_name(base.expr), name)
@@ -341,9 +341,9 @@ parse_qual_generic_struct_lit = (
 }
 parse_qual_generic_ctor = (
     a: MutPtr<Malloc>,
-    src: string_view,
+    src: StringView,
     base: PExpr,
-    name: string_view,
+    name: StringView,
     fld: Scan,
 ) PExpr {
     qn := a.dotted_name_in(subj_name(base.expr), name)
@@ -354,7 +354,7 @@ parse_qual_generic_ctor = (
     vn := a.lexeme(src, vs.tok)
     a.finish_generic_ctor(src, qn, a.mangle_str_in(qn, ta.args), ta.args, vn, vs)
 }
-parse_field = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
+parse_field = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
     dot := src.scan(base.next)
     fld := src.scan(dot.next)
     name := a.lexeme(src, fld.tok)
@@ -377,9 +377,9 @@ parse_field = (a: MutPtr<Malloc>, src: string_view, base: PExpr) PExpr {
 // statement (`nd := 10 + ed.w` ⏎ `(nd < 100).match(…)`), not `ed.w(nd < 100)`.
 parse_field_plain = (
     a: MutPtr<Malloc>,
-    src: string_view,
+    src: StringView,
     base: PExpr,
-    name: string_view,
+    name: StringView,
     fld: Scan,
 ) PExpr {
     nx := src.scan(fld.next)
@@ -396,9 +396,9 @@ parse_field_plain = (
 // nullary tag and the `(` a new statement (`a := State.Idle` ⏎ `(a).q()`), not `State.Idle(a)`.
 parse_qual_ctor = (
     a: MutPtr<Malloc>,
-    src: string_view,
-    tyname: string_view,
-    vn: string_view,
+    src: StringView,
+    tyname: StringView,
+    vn: StringView,
     fld: Scan,
 ) PExpr {
     nx := src.scan(fld.next)
@@ -418,9 +418,9 @@ parse_qual_ctor = (
 }
 parse_qual_payload = (
     a: MutPtr<Malloc>,
-    src: string_view,
-    tyname: string_view,
-    vn: string_view,
+    src: StringView,
+    tyname: StringView,
+    vn: StringView,
     lp: Scan,
 ) PExpr {
     pl := a.parse_payload_args(src, lp)
@@ -434,9 +434,9 @@ parse_qual_payload = (
 // lowers it back to the flat `Call(fn: method, args: [recv] ++ args, pos: at)` the old parser produced.
 parse_method = (
     a: MutPtr<Malloc>,
-    src: string_view,
+    src: StringView,
     base: PExpr,
-    name: string_view,
+    name: StringView,
     lp: Scan,
     at: i32,
 ) PExpr {

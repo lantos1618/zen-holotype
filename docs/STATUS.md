@@ -149,7 +149,7 @@ coherent row or tightly related group at a time.
 | P0 | Generic/function type mangling uses unescaped underscore concatenation, so distinct type argument trees can share a symbol and monomorphization entry. | `compiler.genc::mangle_ty`, `mangle_write_args`, `mangle_semantic_ty`; `compiler.mono::has_mangled` | Colliding names such as `Pair<A_B,C>` / `Pair<A,B_C>` emit distinct symbols and layouts. |
 | P0 | Generated C temporaries use fixed user-visible names such as `_zdl` and `_subj`. | `compiler.backend.c.c_emit` binary, match, sequence, and null lowerings | User locals with every reserved-looking name behave identically; generated names come from a hygienic ID. |
 | P0 | Parameter-capturing closure substitution ignores lambda-local shadowing. | `compiler.check::clos_sub_var`, `clos_sub_stmt`, `lift_arms_cap`, `clos_bad_arms` | Local-shadow closures preserve lexical binding. |
-| P0 | JS backend rewrites every field named `u`, dispatches intrinsic/DOM behavior by bare function name, and returns raw DOM objects/strings where Zen expects `Opt`/`string_view` representations. | `compiler.backend.js.js::js_member`, `js_dom_dispatch`; `compiler.backend.c.c_emit::call_kind`; DOM lowering | Ordinary `S(u:7).u`, function values named `load`, user `log`, DOM Some/None, and DOM text round-trip match C/source semantics. |
+| P0 | JS backend rewrites every field named `u`, dispatches intrinsic/DOM behavior by bare function name, and returns raw DOM objects/strings where Zen expects `Opt`/`StringView` representations. | `compiler.backend.js.js::js_member`, `js_dom_dispatch`; `compiler.backend.c.c_emit::call_kind`; DOM lowering | Ordinary `S(u:7).u`, function values named `load`, user `log`, DOM Some/None, and DOM text round-trip match C/source semantics. |
 | P1 | Formatter can remove generic parameters from bodyless signatures, change nonprintable `u8` chars into `i32` literals, and lose multi-payload enum syntax. | `compiler.pretty::ff_foreign`, `ff_char`, `ff_mkenum`, `ff_arm_pat` | Format, reparse, and compare typed meaning for all three forms; require idempotence. |
 | P1 | Duplicate boolean labels are accepted and reinterpreted; empty/multibyte chars and invalid hex escapes fabricate values; nested-bracket assignment places are misparsed. | `compiler.parse_expr::bool_close`, char/unescape paths; `compiler.lex::char_end`; `compiler.parse_stmt::skip_brackets` | Reject duplicate/non-exhaustive bool arms and malformed escapes; accept `a[b[0]] = 3`. |
 | P1 | Generic nesting beyond 24 is silently dropped; large enum default literals get contradictory `i32`/`i64` inference; JS fixed-width binding facts leak out of inner scopes. | `compiler.mono::add_inst`, `check::rc_add` / `light_ty`; `compiler.backend.js.js::vw_note` / `vw_lookup` | Deep finite generic gets output or a deliberate diagnostic; large enum and shadowed-width cases match C/JS. |
@@ -232,8 +232,8 @@ bodyless function, so adding `extern`, `@imports`, or an effect syntax would cre
 solving identity:
 
 ```zen
-read_config* = (fs: Fs, path: string_view) Result<String, IoError>
-read_config = (fs: Fs, path: string_view) Result<String, IoError> {
+read_config* = (fs: Fs, path: StringView) Result<String, IoError>
+read_config = (fs: Fs, path: StringView) Result<String, IoError> {
     // implementation
 }
 ```

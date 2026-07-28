@@ -33,7 +33,7 @@ name_errors_merge = (l: NameErrors, r: NameErrors) NameErrors {
         first_kind: (l.first_pos > 0).then({ l.first_kind }, { r.first_kind }),
     )
 }
-name_error = (env: Env, name: string_view, pos: i32) NameErrors {
+name_error = (env: Env, name: StringView, pos: i32) NameErrors {
     (pos > 0).match ({
         true  => {
             n := env.var_err(name)
@@ -167,7 +167,7 @@ KPTRWRITE* = () i32 { 21 }    // a write or writable-view construction through r
 KINFINITETYPE* = () i32 { 22 }    // a struct/enum that contains ITSELF by value (transitively) — infinite size
 KNULLDEREF* = () i32 { 23 }    // a load/store/offset through a nullable `RawPtr<T>` (T != u8) not proven non-null
 KNOTCALLABLE* = () i32 { 24 }    // a call whose target name IS defined but holds a non-function value (a scalar/struct), so it cannot be called
-KSLICEWRITE* = () i32 { 60 }    // a write through a read-only `Slice<T>` window — the `.view()` of a `string_literal`/`string_cstr`, whose bytes live in `.rodata`
+KSLICEWRITE* = () i32 { 60 }    // a write through a read-only `Slice<T>` window — the `.view()` of a `StringLiteral`/`StringCstr`, whose bytes live in `.rodata`
 KALLOCNULL* = () i32 { 59 }    // an ALLOCATOR result (`RawPtr<u8>` from acquire/resize/malloc/…) dereferenced with no null proof — the provenance rule `RawPtr<u8>`'s type-level exemption cannot express (compiler.validate.nullalloc)
 KFALLTHROUGH* = () i32 { 25 }    // a non-void function body that ends in a no-value statement (let/assign/loop) — no produced value
 KVBREAK* = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase` statement break (the split-statement shape)
@@ -202,22 +202,22 @@ KEXPECTINIT* = () i32 { 57 }    // a `:=` with no expression after it; caret on 
 KEOFINPUT* = () i32 { 58 }    // end of input in the middle of an expression (the parser's `__unexpected_eof` sentinel)
 Diagnostic*: {
     code: i32,
-    kind: string_view,
+    kind: StringView,
     span: SourceSpan,
     count: i32,
-    message: string_view,
-    hint: string_view,
+    message: StringView,
+    hint: StringView,
 }
 CheckDiagnostic*: {
     code: i32,
-    kind: string_view,
+    kind: StringView,
     source_offset: i32,
     span_width: i32,
     count: i32,
-    message: string_view,
-    hint: string_view,
+    message: StringView,
+    hint: StringView,
 }
-diagnostic_width_from = (src: string_view, pos: i32, n: i32) i32 {
+diagnostic_width_from = (src: StringView, pos: i32, n: i32) i32 {
     k := n
     @while (src.at(pos + k).is_alnum()) {
         k = k + 1
@@ -225,7 +225,7 @@ diagnostic_width_from = (src: string_view, pos: i32, n: i32) i32 {
     k
 }    // iterative — a long identifier/number literal must not recurse per byte to size its caret
 // a string literal carets across its quotes (`"hi"` -> `^~~~`), not just the opening `"`.
-diagnostic_strlit_width = (src: string_view, pos: i32, n: i32) i32 {
+diagnostic_strlit_width = (src: StringView, pos: i32, n: i32) i32 {
     k := n
     r := 0 - 1
     @while (r < 0) {
@@ -246,7 +246,7 @@ diagnostic_strlit_width = (src: string_view, pos: i32, n: i32) i32 {
     }
     r
 }    // iterative — a ~50KB string literal must not recurse per byte to size its caret
-diagnostic_span_width* = (src: string_view, pos: i32) i32 {
+diagnostic_span_width* = (src: StringView, pos: i32) i32 {
     (pos <= 0).match ({
         true  => 1,
         false => (src.at(pos) == '"').match ({
@@ -265,9 +265,9 @@ diagnostic_span_width* = (src: string_view, pos: i32) i32 {
 // custom channels — scope-escape/escape/scratch-escape/reserved-name, codes 33-36 — build their own
 // struct and are deliberately NOT in this table; their messages interpolate a runtime subject.)
 DiagInfo: {
-    kind: string_view,
-    message: string_view,
-    hint: string_view,
+    kind: StringView,
+    message: StringView,
+    hint: StringView,
 }
 diag_info = (code: i32) DiagInfo {
     (code == 1).then({
@@ -421,7 +421,7 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "slice-write",
             message: "cannot write through a read-only `Slice<T>`",
-            hint: "a view of a `string_literal`/`string_cstr` is read-only (its bytes may be in `.rodata`); copy the bytes into an allocator-owned buffer to get a writable `[T]`",
+            hint: "a view of a `StringLiteral`/`StringCstr` is read-only (its bytes may be in `.rodata`); copy the bytes into an allocator-owned buffer to get a writable `[T]`",
         )
     })
     (code == 22).then({
@@ -540,7 +540,7 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "ffi-type",
             message: "foreign declaration uses a type with no C ABI shape",
-            hint: "a bodyless (foreign) declaration is a raw C prototype; use fixed-width integers, f32/f64, bool, string_view (const char*), RawPtr<T>/Ptr<T>/MutPtr<T>, non-capturing fn pointers, or structs of those — pass buffers through the RawPtr<T> floor (pointer + length)",
+            hint: "a bodyless (foreign) declaration is a raw C prototype; use fixed-width integers, f32/f64, bool, StringView (const char*), RawPtr<T>/Ptr<T>/MutPtr<T>, non-capturing fn pointers, or structs of those — pass buffers through the RawPtr<T> floor (pointer + length)",
         )
     })
     (code == 44).then({
@@ -648,13 +648,13 @@ diag_info = (code: i32) DiagInfo {
         hint: "",
     )
 }
-diagnostic_kind_name* = (code: i32) string_view { code.diag_info().kind }
-diagnostic_message* = (code: i32) string_view { code.diag_info().message }
-diagnostic_hint* = (code: i32) string_view { code.diag_info().hint }
-diagnostic_from_source* = (src: string_view, packed: i32, count: i32) Diagnostic {
+diagnostic_kind_name* = (code: i32) StringView { code.diag_info().kind }
+diagnostic_message* = (code: i32) StringView { code.diag_info().message }
+diagnostic_hint* = (code: i32) StringView { code.diag_info().hint }
+diagnostic_from_source* = (src: StringView, packed: i32, count: i32) Diagnostic {
     src.check_diagnostic_from_source(packed, count).check_to_diagnostic()
 }
-desc_or* = (x: string_view, y: string_view) string_view { is_empty(x).then({ y }, { x }) }
+desc_or* = (x: StringView, y: StringView) StringView { is_empty(x).then({ y }, { x }) }
 // ── M5: explicit type-argument (turbofish) + closure-argument validation over RAW decls ──────────────
 // Local generic calls are INLINED during resolve_module, which ERASES the call site's explicit `<…>`
 // type args and its lambda arguments before check_module ever sees them. So an undefined turbofish type

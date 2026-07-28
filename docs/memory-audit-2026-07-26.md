@@ -152,7 +152,7 @@ paired in one expression), **100 trust-me (46%)**.
 
 The lane machine-checked every alloc-inline site for element-type/size agreement and found **zero
 real mismatches** — the sizing discipline is genuinely good. One is fragile and worth noting:
-`parse_match.zen:535` declares `[string_view]` but sizes with `sizeof(NameSlot)`; correct today,
+`parse_match.zen:535` declares `[StringView]` but sizes with `sizeof(NameSlot)`; correct today,
 silently under-allocates the moment `NameSlot` gains a field. That is exactly the shape of the
 `int32_t`-array-read-as-`int64_t` bug fixed in PR #699.
 

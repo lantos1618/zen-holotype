@@ -16,6 +16,7 @@
 // NOT ported (added here):
 //   9. scan set covers every non-test .zen                → "scan set covers every non-test .zen"
 //  10. src/std imports no compiler module                 → "std imports no compiler module"
+//  11. retired snake_case string spellings stay dead      → "retired snake_case string spellings…"
 //
 // HOW: enumerate the file set via `find ... > $ZT/ob_files.txt`, then read+scan each file in Zen.
 // The set is NO LONGER the python rglob: it also names the repo-root driver.zen and build.zen, which
@@ -69,7 +70,7 @@ tok_at = (sv: [u8], nv: Slice<u8>, at: i64) bool {
 }
 // the `\bNAME\s*\(` tail: keyword `name` starts at sv[i] AND is followed by `\s*(`. The trailing `(`
 // is what rejects e.g. `mallocate` and distinguishes `load(` from `load_i64(`.
-name_matches = (sv: [u8], i: i64, name: string_view) bool {
+name_matches = (sv: [u8], i: i64, name: StringView) bool {
     nv := name.view()
     (i + nv.len > sv.len).match ({
         true  => false,
@@ -83,8 +84,9 @@ name_matches = (sv: [u8], i: i64, name: string_view) bool {
     })
 }
 // the `\bNAME\b` tail: keyword `name` starts at sv[i] AND the byte after it is a word boundary (a
-// non-word char or EOF). Used for the bare `break` / `continue` keywords (no trailing `(`).
-word_matches = (sv: [u8], i: i64, name: string_view) bool {
+// non-word char or EOF). Written for the bare `break` / `continue` keywords; SUITE 11 is what
+// actually uses it (a retired type spelling is a bare word, not a call).
+word_matches = (sv: [u8], i: i64, name: StringView) bool {
     nv := name.view()
     (i + nv.len > sv.len).match ({
         true  => false,
@@ -118,7 +120,7 @@ atwhile_at = (sv: [u8], i: i64) bool {
 //   2 = `\bNAME\b`           (bare keyword — NO RULE USES THIS TODAY; it existed for break/continue,
 //                             which are not Zen keywords at all, so the check could never fire)
 //   _ = `@while\b`           (the literal @while token; `name` is ignored)
-matches_kind_at = (sv: [u8], i: i64, name: string_view, kind: i64) bool {
+matches_kind_at = (sv: [u8], i: i64, name: StringView, kind: i64) bool {
     (kind == 0).match ({
         true  => sv.bb_plain(i) && sv.name_matches(i, name),
         false => (kind == 1).match ({
@@ -138,7 +140,7 @@ matches_kind_at = (sv: [u8], i: i64, name: string_view, kind: i64) bool {
 // quoted bytes reported it as a raw-alloc violation. Quote parity also handles `"""` raw strings —
 // three toggles is one net toggle — so `"""…"""` opens and closes correctly. A raw string whose
 // CONTENT holds an odd number of `"` would desync; none of the scanned files does that today.
-file_has = (sv: [u8], name: string_view, kind: i64) bool {
+file_has = (sv: [u8], name: StringView, kind: i64) bool {
     found := false
     in_comment := false
     in_string := false
@@ -184,7 +186,7 @@ file_has = (sv: [u8], name: string_view, kind: i64) bool {
 // strip `//` line comments, keeping the part before `//` on each line plus the newline — byte-exact
 // port of `_code`'s `"\n".join(line.split("//",1)[0] for line in …)`. (No block-comment/string
 // handling, matching python.) Returns an allocator-owned NUL-terminated copy.
-strip_comments_in = (mp: MutPtr<Malloc>, src: string_view) string_view {
+strip_comments_in = (mp: MutPtr<Malloc>, src: StringView) StringView {
     sv := src.view()
     s := mp.new_in().expect("harness: oom")
     in_comment := false
@@ -209,7 +211,7 @@ strip_comments_in = (mp: MutPtr<Malloc>, src: string_view) string_view {
     mp.finish_in(s).expect("harness: oom")
 }
 // everything strictly AFTER the first occurrence of `m` (python `src.split(m,1)[1]`); "" if absent.
-after_marker = (mp: MutPtr<Malloc>, src: string_view, m: string_view) string_view {
+after_marker = (mp: MutPtr<Malloc>, src: StringView, m: StringView) StringView {
     i := src.find(m)
     (i < 0).match ({
         true  => "",
@@ -222,15 +224,15 @@ after_marker = (mp: MutPtr<Malloc>, src: string_view, m: string_view) string_vie
 }
 // everything strictly BEFORE the first occurrence of `m` (python `s.split(m,1)[0]`); all of `s` if
 // `m` is absent (python returns the whole string as the sole split field).
-before_marker = (mp: MutPtr<Malloc>, s: string_view, m: string_view) string_view {
+before_marker = (mp: MutPtr<Malloc>, s: StringView, m: StringView) StringView {
     j := s.find(m)
     (j < 0).then({ s }, { mp.substr(s, 0, j).expect("harness: oom") })
 }
 // the region between the first `m1` and the first following `m2` — python `split(m1,1)[1].split(m2,1)[0]`.
-region = (mp: MutPtr<Malloc>, src: string_view, m1: string_view, m2: string_view) string_view {
+region = (mp: MutPtr<Malloc>, src: StringView, m1: StringView, m2: StringView) StringView {
     mp.before_marker(mp.after_marker(src, m1), m2)
 }
-not_contains = (s: string_view, needle: string_view) bool {
+not_contains = (s: StringView, needle: StringView) bool {
     s.contains(needle).then({ false }, { true })
 }
 // A region whose START marker no longer occurs is the EMPTY string, and every `not_contains` over the
@@ -238,12 +240,12 @@ not_contains = (s: string_view, needle: string_view) bool {
 // instead of failing it. Proven: renaming `write_int` to `write_i64` in src/std/text/fmt.zen while
 // ALSO introducing the forbidden `.integer_in(` call left the fmt sub-suite green (7 dots, exit 0).
 // Every sliced region therefore carries this presence assertion beside its content assertions.
-found = (region: string_view) bool { region.is_empty().then({ false }, { true }) }
+found = (region: StringView) bool { region.is_empty().then({ false }, { true }) }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 4: raw malloc/calloc/realloc/free stay behind the allocator floor (the original port).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // RAW_ALLOC_ALLOWED's complement, mirrored EXACTLY from test_primitive_boundaries.py.
-alloc_not_whitelisted = (path: string_view) bool {
+alloc_not_whitelisted = (path: StringView) bool {
     ne(path, "src/std/mem/alloc.zen")
         && ne(path, "src/std/mem/raw.zen")
         && ne(path, "src/std/rt.zen")
@@ -261,7 +263,7 @@ file_has_raw_alloc = (sv: [u8]) bool {
         || sv.file_has("realloc", 1)
         || sv.file_has("free", 1)
 }
-alloc_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
+alloc_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
         false => mp.contents_in(path).match ({
@@ -314,7 +316,7 @@ example_violation = (sv: [u8]) bool {
 // functional loop handle. The check therefore caught zero real violations while banning the one
 // legal form, and examples/zvm.zen had its early exits removed to satisfy it. `@while` above is
 // the imperative loop this family actually targets, and it stays banned.
-example_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
+example_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
         false => mp.contents_in(path).match ({
@@ -340,13 +342,13 @@ example_suite = (mp: MutPtr<Malloc>) i32 {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 2: raw checkpoint_current stays behind std.concurrent.coroutine/runtime.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-checkpoint_allowed = (path: string_view) bool {
+checkpoint_allowed = (path: StringView) bool {
     path == "src/std/concurrent/coroutine.zen" || path == "src/std/concurrent/runtime.zen"
 }
 // the import regex `\{[^}\n]*\bcheckpoint_current\b[^}\n]*\}\s*=\s*std\.concurrent\.coroutine`, per
 // (comment-stripped) line: a destructure that brings `checkpoint_current` in from the coroutine module
 // — `{ … checkpoint_current … } = std.concurrent.coroutine` with the import target after the name.
-line_checkpoint_import = (line: string_view) bool {
+line_checkpoint_import = (line: StringView) bool {
     ci := line.find("checkpoint_current")
     (ci < 0).match ({
         true  => false,
@@ -356,7 +358,7 @@ line_checkpoint_import = (line: string_view) bool {
         },
     })
 }
-has_checkpoint_import = (mp: MutPtr<Malloc>, clean: string_view) bool {
+has_checkpoint_import = (mp: MutPtr<Malloc>, clean: StringView) bool {
     lines := mp.split_in(clean, '\n')
     found := false
     lines.loop((h, i, line) {
@@ -367,7 +369,7 @@ has_checkpoint_import = (mp: MutPtr<Malloc>, clean: string_view) bool {
     })
     found
 }
-checkpoint_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
+checkpoint_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
         false => path.checkpoint_allowed().match ({
@@ -402,7 +404,7 @@ checkpoint_suite = (mp: MutPtr<Malloc>) i32 {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 3: @while stays in the compiler / named low-level substrate.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-atwhile_allowed = (path: string_view) bool {
+atwhile_allowed = (path: StringView) bool {
     path == "src/compiler/lex.zen"
         || path == "src/compiler/parse.zen"
         || path == "src/compiler/parse_expr.zen"
@@ -470,7 +472,7 @@ atwhile_allowed = (path: string_view) bool {
 // asked to run forever (`n < 0`) accepts an unbounded number of connections; recursing once per
 // request is a stack overflow with a wall-clock fuse on it. Every other loop in the module (the
 // chunk decoder, the two read drains) is bounded by one message and stays recursive.
-atwhile_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
+atwhile_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
         false => path.atwhile_allowed().match ({
@@ -618,10 +620,10 @@ scanset_suite = (mp: MutPtr<Malloc>) i32 {
 // those two reach ast_types + genc + astops + mangle (~3k LOC), the AST/emitter subsystem and
 // nothing of the checker, parser or driver. Widening the set, or adding a third exemption, is a
 // design decision — make it here, in the open, rather than by adding an import line.
-layering_allowed = (path: string_view) bool {
+layering_allowed = (path: StringView) bool {
     path == "src/std/internal/ast.zen" || path == "src/std/io/c.zen"
 }
-layering_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
+layering_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
     path.starts_with("src/std/").match ({
         true  => path.layering_allowed().match ({
             true  => true,
@@ -647,6 +649,90 @@ layering_suite = (mp: MutPtr<Malloc>) i32 {
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 11: the retired snake_case string spellings never come back.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// The three string types were spelled `string_view` / `string_literal` / `string_cstr` and are now
+// `StringView` / `StringLiteral` / `StringCstr`. There is deliberately NO alias: the family had six
+// spellings for three types once (`str`, `text`, `Cstr` on top of these), and every one of them was
+// tolerated as "just a synonym" until three distinct guarantees read like six choices.
+//
+// This rule scans the RAW bytes — comments and string literals INCLUDED — which is the opposite of
+// what `file_has` does, and the difference is the whole point:
+//   * a string literal is how the spelling would ACTUALLY come back. `parse_type.ty_of` recognises a
+//     type keyword by `src.tok_eq(t, "StringView")`; one more `tok_eq(t, "string_view")` branch
+//     revives the old name, and nothing else in the tree would fail, because nothing else in the
+//     tree uses it. A rule that skipped string literals would be blind to the only realistic
+//     regression — a gate that cannot fail.
+//   * comments are rewritten too, because they DISCUSS the type. `// a view of a string_literal`
+//     is now wrong, not stylistically dated.
+// `\b…\b` word boundaries mean the AST-constructor family `tstring_view()` / `tstring_cstr()` /
+// `tstring_literal()` in compiler.genc does NOT match: those are function names, and Zen function
+// names are snake_case regardless of what type they build.
+//
+// Two files are exempt, both because they must NAME the dead spelling to do their job:
+//   * src/compiler/validate/util.zen — `retired_string_alias` turns `unknown type name
+//     `string_view`` into "that spelling was retired; write `StringView`". Redirecting a name
+//     requires writing it. It produces diagnostic TEXT only, so no parse/check path can be revived
+//     from here.
+//   * this file — it holds the needles.
+// Both are named individually, not by directory: a new file cannot inherit the exemption.
+spelling_allowed = (path: StringView) bool {
+    path == "src/compiler/validate/util.zen" || path == "tests/harness_boundaries.zen"
+}
+// `\bNAME\b` over the raw file — no comment stripping, no string skipping.
+file_has_raw_word = (sv: [u8], name: StringView) bool {
+    found := false
+    sv.loop((h, i, b) {
+        (sv.bb_plain(i) && sv.word_matches(i, name)).then({
+            found = true
+            h.break
+        })
+    })
+    found
+}
+file_has_retired_spelling = (sv: [u8]) bool {
+    sv.file_has_raw_word("string_view")
+        || sv.file_has_raw_word("string_literal")
+        || sv.file_has_raw_word("string_cstr")
+}
+spelling_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
+    path.is_empty().match ({
+        true  => true,
+        false => path.spelling_allowed().match ({
+            true  => true,
+            false => mp.contents_in(path).match ({
+                .Ok(raw) => raw.view().file_has_retired_spelling().match ({
+                    true  => {
+                        out("\n  retired string spelling in ")
+                        out(path)
+                        out(" — write StringView/StringLiteral/StringCstr\n")
+                        false
+                    },
+                    false => true,
+                }),
+                .Err(e)  => false,
+            }),
+        }),
+    })
+}    // unreadable = FAIL, never a silent pass
+// Its own file list, not ob_files.txt: this rule covers tests/ and scripts/ too, because a retired
+// spelling in a test fixture is a retired spelling. Same tree-wide `find` + same `.git`/`.claude`
+// pruning as SUITE 9 (sibling worktrees under .claude are full copies of the tree).
+spelling_suite = (mp: MutPtr<Malloc>) i32 {
+    shell(mp.zo_cmd("find . -name '*.zen' -not -path './.git/*' -not -path './.claude/*' 2>/dev/null | sed 's|^./||' | LC_ALL=C sort > $ZT/ob_all.txt"))
+    mp.contents_in(mp.zo_path("ob_all.txt")).match ({
+        .Ok(listing) => {
+            files := mp.split_in(listing, '\n')
+            results: [bool] := mp.nbuf(true, files.len)
+            files.loop((h, i, path) {
+                results[i] = mp.spelling_passes(path)
+            })
+            run_suite("boundaries: retired snake_case string spellings stay dead", results)
+        },
+        .Err(e)      => run_suite("boundaries: string spellings (cannot enumerate tree)", [false]),
+    })
+}
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 harness_boundaries_run* = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -668,6 +754,7 @@ harness_boundaries_run* = () i32 {
     fails = fails + mp.map_suite()
     fails = fails + mp.fmt_suite()
     fails = fails + mp.layering_suite()
+    fails = fails + mp.spelling_suite()
     fails = fails + mp.bigstr_suite()
     fails
 }

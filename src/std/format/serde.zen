@@ -3,7 +3,7 @@
 // `to_json(a, v)` serializes a struct — field names become JSON keys via `x.each_field(f)`
 // (the lambda is spliced once per field, statically typed) — with NO per-type code: per-field
 // serialization dispatches through `JsonWrite` impls on the scalar types (i32/i64/u8/f64/
-// bool/string_view). `from_json(a, s, seed)` parses JSON back into a struct value by reusing
+// bool/StringView). `from_json(a, s, seed)` parses JSON back into a struct value by reusing
 // std.format.json's parser and filling a COPY of `seed` field-by-field: an each_field lambda
 // param substitutes to a real member PLACE, so `fv = fv.jr_scalar(x)` assigns the field.
 //
@@ -83,7 +83,7 @@ jw_byte = (a: MutPtr<DynAlloc>, st: JwSt, b: u8) JwSt {
         }),
     })
 }
-jw_txt = (a: MutPtr<DynAlloc>, st: JwSt, t: string_view) JwSt {
+jw_txt = (a: MutPtr<DynAlloc>, st: JwSt, t: StringView) JwSt {
     st.failed.match ({
         true  => st,
         false => a.append_slice_in(st.sb, t.view()).match ({
@@ -128,7 +128,7 @@ jw_esc = (a: MutPtr<DynAlloc>, st: JwSt, b: u8) JwSt {
         }),
     })
 }
-jw_str = (a: MutPtr<DynAlloc>, st: JwSt, s: string_view) JwSt {
+jw_str = (a: MutPtr<DynAlloc>, st: JwSt, s: StringView) JwSt {
     out := a.jw_byte(st, '"')
     sv := s.view()
     sv.loop((h, i, b) {
@@ -144,7 +144,7 @@ jw_str = (a: MutPtr<DynAlloc>, st: JwSt, s: string_view) JwSt {
     a.jw_byte(out, '"')
 }
 // one "key": prefix (comma-separated), shared by both writers.
-jw_key = (a: MutPtr<DynAlloc>, st: JwSt, name: string_view, first: bool) JwSt {
+jw_key = (a: MutPtr<DynAlloc>, st: JwSt, name: StringView, first: bool) JwSt {
     out := first.then({ st }, { a.jw_byte(st, ',') })
     a.jw_byte(a.jw_str(out, name), ':')
 }
@@ -168,8 +168,8 @@ f64.impl(JsonWrite, {
 bool.impl(JsonWrite, {
     jw_scalar = (v: bool, a: MutPtr<DynAlloc>, st: JwSt) JwSt { a.jw_bool(st, v) }
 })
-string_view.impl(JsonWrite, {
-    jw_scalar = (v: string_view, a: MutPtr<DynAlloc>, st: JwSt) JwSt { a.jw_str(st, v) }
+StringView.impl(JsonWrite, {
+    jw_scalar = (v: StringView, a: MutPtr<DynAlloc>, st: JwSt) JwSt { a.jw_str(st, v) }
 })
 // ── object writers (reflection generics; always inlined at call sites) ───────────────────
 // flat: every field is a scalar.
@@ -205,7 +205,7 @@ jw_obj2<T> = (v: T, a: MutPtr<DynAlloc>, st: JwSt) JwSt {
 }
 // ── public serialize ─────────────────────────────────────────────────────────────────────
 // finish: unwrap the writer state into the public Result.
-jw_done = (a: MutPtr<DynAlloc>, st: JwSt) Result<string_view, IoError> {
+jw_done = (a: MutPtr<DynAlloc>, st: JwSt) Result<StringView, IoError> {
     st.failed.match ({
         true  => err(st.eno),
         false => st.sb.finish_in(a).match ({
@@ -215,16 +215,16 @@ jw_done = (a: MutPtr<DynAlloc>, st: JwSt) Result<string_view, IoError> {
     })
 }
 // Serialize a FLAT struct (scalar fields only) to compact JSON text.
-to_json*<T> = (a: MutPtr<DynAlloc>, v: T) Result<string_view, IoError> {
-    out: Result<string_view, IoError> := a.new_in().match ({
+to_json*<T> = (a: MutPtr<DynAlloc>, v: T) Result<StringView, IoError> {
+    out: Result<StringView, IoError> := a.new_in().match ({
         .Err(e) => .Err(e),
         .Ok(sb) => a.jw_done(v.jw_obj1(a, jw_st(sb))),
     })
     out
 }
 // Serialize a 2-level struct (every root field a struct of scalars) to compact JSON text.
-to_json_nested*<T> = (a: MutPtr<DynAlloc>, v: T) Result<string_view, IoError> {
-    out: Result<string_view, IoError> := a.new_in().match ({
+to_json_nested*<T> = (a: MutPtr<DynAlloc>, v: T) Result<StringView, IoError> {
+    out: Result<StringView, IoError> := a.new_in().match ({
         .Err(e) => .Err(e),
         .Ok(sb) => a.jw_done(v.jw_obj2(a, jw_st(sb))),
     })
@@ -269,8 +269,8 @@ bool.impl(JsonRead, {
         })
     }
 })
-string_view.impl(JsonRead, {
-    jr_scalar = (v: string_view, jv: Value) string_view {
+StringView.impl(JsonRead, {
+    jr_scalar = (v: StringView, jv: Value) StringView {
         jv.match ({
             .Str(s) => s,
             _       => v,
@@ -314,7 +314,7 @@ jr_obj2<T> = (v: T, jv: Value) T {
 // ── public deserialize ───────────────────────────────────────────────────────────────────
 // Parse `s` and fill a copy of `seed` (flat struct). Parsed strings are allocator-owned
 // copies (std.format.json's memory policy).
-from_json*<T> = (a: MutPtr<DynAlloc>, s: string_view, seed: T) Result<T, JsonError> {
+from_json*<T> = (a: MutPtr<DynAlloc>, s: StringView, seed: T) Result<T, JsonError> {
     out: Result<T, JsonError> := a.parse(s).match ({
         .Err(e) => .Err(e),
         .Ok(jv) => .Ok(seed.jr_obj1(jv)),
@@ -326,7 +326,7 @@ from_json*<T> = (a: MutPtr<DynAlloc>, s: string_view, seed: T) Result<T, JsonErr
 // a local only expands when its enclosing generic contains the intrinsic DIRECTLY (one
 // splice layer). Wrapped in a second generic, the inner receiver's let is renamed across
 // two inline passes and the expansion is silently dropped (unlowered-lambda C error).
-from_json_nested*<T> = (a: MutPtr<DynAlloc>, s: string_view, seed: T) Result<T, JsonError> {
+from_json_nested*<T> = (a: MutPtr<DynAlloc>, s: StringView, seed: T) Result<T, JsonError> {
     perr: JsonError := .UnexpectedEof
     got: bool := false
     jv: Value := .Null

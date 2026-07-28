@@ -32,7 +32,7 @@
 { Map, of } = std.collections.map
 // One function's borrowed-parameter set: bit `i` is set when parameter `i` is provably borrowed.
 SlxMask*: {
-    fn: string_view,
+    fn: StringView,
     mask: i64,
 }
 slx_no_masks = () [SlxMask] { slice(null_ptr(), 0) }
@@ -43,13 +43,13 @@ slx_masks_set = (xs: [SlxMask]) void { slx_masks = xs }
 slx_depth = () i32 { 4 }
 // THE emitter query: may the slice literal at argument `pi` of a call to `fn` live on the stack?
 // Unset table / unknown fn / any bit not proven → false → gen_slicelit heap-promotes as before.
-slx_arg_is_borrowed* = (fn: string_view, pi: i32) bool {
+slx_arg_is_borrowed* = (fn: StringView, pi: i32) bool {
     slx_masks.slice_any((k) { k.fn == fn && k.mask.slx_bit(pi) })
 }
 slx_bit = (mask: i64, pi: i32) bool {
     (pi >= 0 && pi < 63).then({ mask >> to_i64(pi) & 1 == 1 }, { false })
 }
-slx_is_var = (e: Ptr<Expr>, nm: string_view) bool {
+slx_is_var = (e: Ptr<Expr>, nm: StringView) bool {
     load(e).match ({
         .Var(v) => v.name == nm,
         _       => false,
@@ -69,7 +69,7 @@ slx_expr_retains = (
     decls: [Decl],
     fidx: Map<i64>,
     e: Ptr<Expr>,
-    nm: string_view,
+    nm: StringView,
     depth: i32,
 ) bool {
     load(e).match ({
@@ -99,7 +99,7 @@ slx_call_retains = (
     decls: [Decl],
     fidx: Map<i64>,
     c: CallData,
-    nm: string_view,
+    nm: StringView,
     depth: i32,
 ) bool {
     (c.fn == "addr").match ({
@@ -119,7 +119,7 @@ slx_call_retains = (
 }
 // does `nm` appear ANYWHERE under `e`? The whitelist-free companion of slx_expr_retains, for positions
 // where no use of the binding is a borrow.
-slx_mentions_e = (e: Ptr<Expr>, nm: string_view) bool {
+slx_mentions_e = (e: Ptr<Expr>, nm: StringView) bool {
     load(e).match ({
         .Var(v) => v.name == nm,
         _       => false.expr_fold_children(e, (acc, ch) { acc || ch.slx_mentions_e(nm) }, (acc, body) {
@@ -127,13 +127,13 @@ slx_mentions_e = (e: Ptr<Expr>, nm: string_view) bool {
         }),
     })
 }
-slx_mentions_args = (args: [Expr], nm: string_view) bool {
+slx_mentions_args = (args: [Expr], nm: StringView) bool {
     args.slice_any((x) { x.addr().slx_mentions_e(nm) })
 }
-slx_mentions_body = (body: [Stmt], nm: string_view) bool {
+slx_mentions_body = (body: [Stmt], nm: StringView) bool {
     body.slice_any((st) { st.slx_mentions_st(nm) })
 }
-slx_mentions_st = (st: Stmt, nm: string_view) bool {
+slx_mentions_st = (st: Stmt, nm: StringView) bool {
     st.match ({
         .Let(l)      => l.value.slx_mentions_e(nm),
         .Assign(x)   => x.target.slx_mentions_e(nm) || x.value.slx_mentions_e(nm),
@@ -154,7 +154,7 @@ slx_param_retains = (
     a: MutPtr<Malloc>,
     decls: [Decl],
     fidx: Map<i64>,
-    fn: string_view,
+    fn: StringView,
     pi: i32,
     depth: i32,
 ) bool {
@@ -180,7 +180,7 @@ slx_body_retains = (
     decls: [Decl],
     fidx: Map<i64>,
     body: [Stmt],
-    nm: string_view,
+    nm: StringView,
     depth: i32,
 ) bool { body.slice_any((st) { a.slx_stmt_retains(decls, fidx, st, nm, depth) }) }
 // `nm[i] = v` writes THROUGH the slice into the caller's own backing store — a borrow, like `nm[i]`.
@@ -190,7 +190,7 @@ slx_stmt_retains = (
     decls: [Decl],
     fidx: Map<i64>,
     st: Stmt,
-    nm: string_view,
+    nm: StringView,
     depth: i32,
 ) bool {
     st.match ({

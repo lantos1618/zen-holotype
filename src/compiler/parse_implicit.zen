@@ -23,13 +23,13 @@
 //    additive for explicit sites (their vars are already declared → found present → nothing added).
 // A `str` is NUL-terminated, so we read bytes directly: a tyvar name is a single upper letter (`A`) or
 // an upper letter followed by exactly one digit (`T1`), and nothing more.
-is_tyvar_name = (s: string_view) bool {
+is_tyvar_name = (s: StringView) bool {
     s.at(0).is_upper().match ({
         true  => (s.at(1) == 0).then({ true }, { s.at(1).is_digit() && s.at(2) == 0 }),
         false => false,
     })
 }
-tv_seen = (buf: [Param], cnt: i32, name: string_view) bool {
+tv_seen = (buf: [Param], cnt: i32, name: StringView) bool {
     found := false
     buf.loop((h, i, p) {
         found = (i < cnt).then({ found || p.name == name }, { found })
@@ -38,7 +38,7 @@ tv_seen = (buf: [Param], cnt: i32, name: string_view) bool {
 }
 // types = the module's declared/imported type names (the exclusion set). A name is collected only when
 // it looks like a tyvar AND names no declared/imported type AND is not already in the tparam buffer.
-add_tv = (buf: [Param], types: [Param], cnt: i32, name: string_view) i32 {
+add_tv = (buf: [Param], types: [Param], cnt: i32, name: StringView) i32 {
     (name.is_tyvar_name()
         && types.param_names_has(name).then({ false }, { true })
         && buf.tv_seen(cnt, name).then({ false }, { true })
@@ -97,7 +97,7 @@ copy_tparams = (buf: [Param], tparams: [Param]) i32 {
     n
 }
 // the exclusion set: every type a module declares or imports, by name.
-tv_add_name = (buf: [Param], cnt: i32, name: string_view) i32 {
+tv_add_name = (buf: [Param], cnt: i32, name: StringView) i32 {
     (cnt < buf.len).match ({
         true  => {
             buf[cnt] = param(name, tvoid())
@@ -142,7 +142,7 @@ collect_decltypes = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
 // holds function-VALUE (closure) fields is NOT — both are "structs with FnT fields" by shape, so this
 // USAGE check is what tells a closure record apart from a trait. Mirrors c_emit.struct_is_impld; a
 // closure-record param (e.g. `b: Box` where Box holds `op: (i32)i32`) must NOT desugar to a trait bound.
-struct_impld_p = (decls: [Decl], name: string_view) bool {
+struct_impld_p = (decls: [Decl], name: StringView) bool {
     decls.slice_any((d) {
         d.match ({
             .DImpl(im) => im.trname == name,
@@ -175,14 +175,14 @@ collect_traits = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
 // MutPtr<T> lowers to T* — the same Ty an explicit `MutPtr<A>` produces.
 mutptr_of = (a: MutPtr<Malloc>, t: Ty) Ty { tptr(a.tnode(t)) }
 // a one-character, NUL-terminated tparam name (`A`, `B`, …).
-make_letter = (a: MutPtr<Malloc>, c: u8) string_view {
+make_letter = (a: MutPtr<Malloc>, c: u8) StringView {
     p: RawPtr<u8> := a.acquire_or_die(2)
     p.offset(0).store(c)
     p.offset(1).store(0)
     cstr(p)
 }
 // the next single-letter name (from `c`) not already used as a tparam in buf[0..cnt].
-fresh_tparam_name = (a: MutPtr<Malloc>, buf: [Param], cnt: i32, c: u8) string_view {
+fresh_tparam_name = (a: MutPtr<Malloc>, buf: [Param], cnt: i32, c: u8) StringView {
     nm := a.make_letter(c)
     (buf.tv_seen(cnt, nm) && c < 'Z').then({ a.fresh_tparam_name(buf, cnt, c + 1) }, { nm })
 }

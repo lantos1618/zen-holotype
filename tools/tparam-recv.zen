@@ -63,7 +63,7 @@ g_unparsed := 0
 // pass-through: calling it constrains the receiver not at all); 2 = at least one declaration wants a
 // concrete or bounded receiver (calling it DOES constrain); 0 = never seen (treated as 2 — a lint
 // that goes quiet on names it failed to index would fail open).
-idx_note = (m: Map<i64>, a: Allocator, name: string_view, passthru: bool) Map<i64> {
+idx_note = (m: Map<i64>, a: Allocator, name: StringView, passthru: bool) Map<i64> {
     prev := m.get(name, 0)
     next: i64 := (passthru && prev != 2).then({ 1 }, { 2 })
     m.put(a, name, next).expect("tparam-recv: index alloc")
@@ -105,7 +105,7 @@ idx_module = (m: Map<i64>, a: Allocator, decls: [Decl]) Map<i64> {
 // the tparam a param's type names, through one level of pointer (`T` and `MutPtr<T>`/`Ptr<T>`/
 // `RawPtr<T>` are both receivers of T's methods). Anything else ( [T], Box<T>, a concrete type )
 // names no receiver tparam.
-recv_tyname = (t: Ty) string_view {
+recv_tyname = (t: Ty) StringView {
     t.match ({
         .Named(n) => n,
         .Ptr(pd)  => load(pd.pointee).match ({
@@ -116,7 +116,7 @@ recv_tyname = (t: Ty) string_view {
     })
 }
 // `name` is a tparam of `f` that carries NO bound. A bounded tparam is exactly the fixed case.
-unbound_tparam = (f: Func, name: string_view) bool {
+unbound_tparam = (f: Func, name: StringView) bool {
     hit := false
     f.tparams.loop((h, i, tp) {
         (tp.name == name && is_empty_sv(tp.name) == false).then({
@@ -125,9 +125,9 @@ unbound_tparam = (f: Func, name: string_view) bool {
     })
     hit
 }
-is_empty_sv = (s: string_view) bool { s == "" }
+is_empty_sv = (s: StringView) bool { s == "" }
 // the unbound tparam that `varname` (a parameter of `f`) is a receiver of, or "".
-param_recv_tparam = (f: Func, varname: string_view) string_view {
+param_recv_tparam = (f: Func, varname: StringView) StringView {
     res := ""
     f.params.loop((h, i, p) {
         (p.name == varname).then({
@@ -139,12 +139,12 @@ param_recv_tparam = (f: Func, varname: string_view) string_view {
 }
 // ── the walk ──────────────────────────────────────────────────────────────────
 Ctx: {
-    path: string_view,
-    src: string_view,
+    path: StringView,
+    src: StringView,
     f: Func,
     m: Map<i64>,
 }
-line_of = (src: string_view, pos: i32) i64 {
+line_of = (src: StringView, pos: i32) i64 {
     n := 1
     p := pos + 0
     src.view().loop((h, i, b) {
@@ -155,8 +155,8 @@ line_of = (src: string_view, pos: i32) i64 {
     n
 }
 // an allocator-shaped assumption: the three methods the Allocator trait declares.
-alloc_method = (m: string_view) bool { m == "acquire" || m == "resize" || m == "release" }
-report = (cx: Ctx, pos: i32, tp: string_view, recv: string_view, method: string_view) void {
+alloc_method = (m: StringView) bool { m == "acquire" || m == "resize" || m == "release" }
+report = (cx: Ctx, pos: i32, tp: StringView, recv: StringView, method: StringView) void {
     tag := method.alloc_method().then({ "alloc" }, { "other" })
     method.alloc_method().match ({
         true  => {
@@ -172,7 +172,7 @@ report = (cx: Ctx, pos: i32, tp: string_view, recv: string_view, method: string_
     })
 }
 // a method call whose receiver is a bare parameter name: `a.acquire(n)`.
-recv_var_name = (e: Ptr<Expr>) string_view {
+recv_var_name = (e: Ptr<Expr>) StringView {
     load(e).match ({
         .Var(v) => v.name,
         _       => "",
@@ -245,7 +245,7 @@ scan_body = (cx: Ctx, stmts: [Stmt]) void {
     })
 }
 // a fn with no tparams can hold no unbound-tparam receiver: skip the whole body.
-scan_fn = (m: Map<i64>, path: string_view, src: string_view, f: Func) void {
+scan_fn = (m: Map<i64>, path: StringView, src: StringView, f: Func) void {
     (f.tparams.len > 0).then({
         g_fns = g_fns + 1
         cx := Ctx(
@@ -257,7 +257,7 @@ scan_fn = (m: Map<i64>, path: string_view, src: string_view, f: Func) void {
         cx.scan_body(f.body)
     })
 }
-scan_module = (m: Map<i64>, path: string_view, src: string_view, decls: [Decl]) void {
+scan_module = (m: Map<i64>, path: StringView, src: StringView, decls: [Decl]) void {
     decls.loop((h, i, d) {
         d.match ({
             .DFunc(f) => m.scan_fn(path, src, f),
@@ -265,7 +265,7 @@ scan_module = (m: Map<i64>, path: string_view, src: string_view, decls: [Decl]) 
         })
     })
 }
-scan_file = (m: Map<i64>, a: Allocator, path: string_view) void {
+scan_file = (m: Map<i64>, a: Allocator, path: StringView) void {
     g_files = g_files + 1
     src := a.contents_in(path).expect("tparam-recv: cannot read file")
     decls := a.parse_module(src)
@@ -279,7 +279,7 @@ scan_file = (m: Map<i64>, a: Allocator, path: string_view) void {
         false => m.scan_module(path, src, decls),
     })
 }
-index_file = (m: Map<i64>, a: Allocator, path: string_view) Map<i64> {
+index_file = (m: Map<i64>, a: Allocator, path: StringView) Map<i64> {
     src := a.contents_in(path).expect("tparam-recv: cannot read file")
     decls := a.parse_module(src)
     (perr_get() || lerr_get()).then({ m }, { m.idx_module(a, decls) })
@@ -290,8 +290,8 @@ sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
         false => (xv[i] == yv[i]).then({ xv.sv_lt_at(yv, i + 1) }, { xv[i] < yv[i] }),
     })
 }
-sv_lt = (x: string_view, y: string_view) bool { x.view().sv_lt_at(y.view(), 0) }
-sift_left = (xs: [string_view], j: i64) void {
+sv_lt = (x: StringView, y: StringView) bool { x.view().sv_lt_at(y.view(), 0) }
+sift_left = (xs: [StringView], j: i64) void {
     (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
         t := xs[j]
         xs[j] = xs[j - 1]
@@ -299,15 +299,15 @@ sift_left = (xs: [string_view], j: i64) void {
         xs.sift_left(j - 1)
     })
 }
-sort_from = (xs: [string_view], i: i64) void {
+sort_from = (xs: [StringView], i: i64) void {
     (i < xs.len).then({
         xs.sift_left(i)
         xs.sort_from(i + 1)
     })
 }
-sort_names = (xs: [string_view]) void { xs.sort_from(1) }
+sort_names = (xs: [StringView]) void { xs.sort_from(1) }
 // phase 0 indexes, phase 1 scans — the same walk, as in tools/discards.zen.
-walk = (m: Map<i64>, a: Allocator, root: string_view, phase: i32) Map<i64> {
+walk = (m: Map<i64>, a: Allocator, root: StringView, phase: i32) Map<i64> {
     out := m
     root.is_dir().match ({
         true  => {

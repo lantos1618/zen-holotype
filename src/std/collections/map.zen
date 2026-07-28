@@ -1,4 +1,4 @@
-// std.collections.map — a string_view-keyed associative map with an EXPLICIT allocator.
+// std.collections.map — a StringView-keyed associative map with an EXPLICIT allocator.
 // Every op that allocates takes the allocator as `a: Allocator` and goes through std.mem.alloc's `Allocator`
 // trait — nothing here hides a malloc. Fallible ops (`empty`, `of`, `clone`, `put`, `append`, `grow`) return
 // Result<Map<T>, IoError> — allocation failure is a value: `.expect("…")` at fail-fast roots,
@@ -47,7 +47,7 @@
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
 // One key slot. The named one-pointer wrapper keeps this raw backing-store layout explicit.
 MKey: {
-    k: string_view,
+    k: StringView,
 }
 // one index slot: a single i64 (bucket head or next link).
 MIdx: {
@@ -59,7 +59,7 @@ Map*<T>: {
     idx: RawPtr<u8>,
     len: i64,
     cap: i64,
-    keys = (m: Map<T>) [string_view] {
+    keys = (m: Map<T>) [StringView] {
         // Live view over the LEN live entries (stored compactly in slots [0, len) in insertion
         // order — there is no delete, so no gaps). Sized to `len`, NOT `cap`: a `.loop` over the
         // result iterates only real entries instead of walking the empty/NULL tail of the backing
@@ -70,7 +70,7 @@ Map*<T>: {
         slice(m.keys, m.len)
     }
     vals = (m: Map<T>) [T] { slice(m.vals, m.len) }
-    keys_all = (m: Map<T>) [string_view] {
+    keys_all = (m: Map<T>) [StringView] {
         // CAP-sized views over the full backing buffers, for the one-past-len APPEND write (slot [len],
         // which is < cap and so in-bounds here, but past the len-sized `keys()`/`vals()` views).
         slice(m.keys, m.cap)
@@ -81,7 +81,7 @@ Map*<T>: {
         slice(m.idx, m.cap * 2)
     }
     len = (m: Map<T>) i64 { m.len }
-    find = (m: Map<T>, k: string_view) i64 {
+    find = (m: Map<T>, k: StringView) i64 {
         // O(1) average: hash to a bucket, walk the chain comparing keys bytewise.
         (m.cap == 0).then({ 0 - 1 }, { mfind(m.keys(), m.index(), m.cap, mhash(k, m.cap), k) })
     }
@@ -91,15 +91,15 @@ Map*<T>: {
         m
     }
     get_at = (m: Map<T>, i: i64, dflt: T) T { (i < 0).then({ dflt }, { m.vals()[i] }) }
-    get    = (m: Map<T>, k: string_view, dflt: T) T { m.get_at(m.find(k), dflt) }
-    get_opt = (m: Map<T>, k: string_view) Opt<T> {
+    get    = (m: Map<T>, k: StringView, dflt: T) T { m.get_at(m.find(k), dflt) }
+    get_opt = (m: Map<T>, k: StringView) Opt<T> {
         // The value under k as an option: .Some(v) if present, .None if absent. Unlike `get(k, dflt)`,
         // this distinguishes an absent key from a stored value that happens to equal the default.
         i := m.find(k)
         out: Opt<T> := (i < 0).then({ .None }, { .Some(m.vals()[i]) })
         out
     }
-    has = (m: Map<T>, k: string_view) bool { m.find(k) >= 0 }
+    has = (m: Map<T>, k: StringView) bool { m.find(k) >= 0 }
     grow = (m: Map<T>, a: Allocator) Result<Map<T>, IoError> {
         cap := m.cap * 2 + 1
         a.try_acquire3(cap * sizeof(MKey), cap * sizeof(T), cap * 2 * sizeof(MIdx)).match ({
@@ -179,7 +179,7 @@ Map*<T>: {
         ix[b] = slot
         m
     }
-    append = (m: Map<T>, a: Allocator, k: string_view, v: T) Result<Map<T>, IoError> {
+    append = (m: Map<T>, a: Allocator, k: StringView, v: T) Result<Map<T>, IoError> {
         k := k
         v := v
         out: Result<Map<T>, IoError> := (m.len < m.cap).match ({
@@ -222,7 +222,7 @@ Map*<T>: {
         })
         out
     }
-    put = (m: Map<T>, a: Allocator, k: string_view, v: T) Result<Map<T>, IoError> {
+    put = (m: Map<T>, a: Allocator, k: StringView, v: T) Result<Map<T>, IoError> {
         // Insert or upsert (allocation failure is a value). RETURNS the updated map — always rebind to
         // the result (`m = m.put(...).expect("…")`). On grow the buffers are realloced, so any handle
         // captured before this call dangles (see the VALUE-MOLD CONTRACT above). On an existing key the
@@ -289,7 +289,7 @@ Map*<T>: {
             },
         })
     }
-    each_pair = (m: Map<T>, f: (string_view, T) void) void {
+    each_pair = (m: Map<T>, f: (StringView, T) void) void {
         // Visit every live entry as (key, value) together, in insertion order. `f` is invoked DIRECTLY in
         // the loop body so an inline lambda splices in (like iter.each). Walking `keys()`/`vals()` in
         // parallel at the call site is no longer needed: `m.each_pair((k, v){ … })`.
@@ -308,18 +308,18 @@ Map*<T>: {
     }
 }
 // FNV-1a hash of k's bytes, folded into [0, cap). cap is always >= 1 at call sites.
-mhash = (k: string_view, cap: i64) i64 {
+mhash = (k: StringView, cap: i64) i64 {
     // mask to non-negative then mod into the bucket range
     (fnv1a32(k.view()) & 4611686018427387903) % cap
 }
 // Walk bucket chain b for key k in the index ix over key column ks (cap entries, links at [cap..]).
-mfind = (ks: [string_view], ix: [i64], cap: i64, b: i64, k: string_view) i64 {
+mfind = (ks: [StringView], ix: [i64], cap: i64, b: i64, k: StringView) i64 {
     mchain(ks, ix, cap, ix[b], k)
 }
 // First-byte prefilter before the full compare — map lookups run on every name/decl-index query in
 // the checker, and chain collisions almost always differ in byte 0. Same answers (equal strings
 // share their first byte).
-mchain = (ks: [string_view], ix: [i64], cap: i64, e: i64, k: string_view) i64 {
+mchain = (ks: [StringView], ix: [i64], cap: i64, e: i64, k: StringView) i64 {
     (e < 0).match ({
         true  => 0 - 1,
         false => (load(offset(ks[e], 0)) == load(offset(k, 0)) && ks[e] == k).match ({
@@ -360,7 +360,7 @@ empty*<T> = (a: Allocator) Result<Map<T>, IoError> {
 }
 // a `Map<T>` seeded with one entry, its buffers acquired from `a`. T inferred from the seed value
 // (Zen has no call-site type args). Starts at cap 1.
-of*<T> = (a: Allocator, seed_key: string_view, seed_val: T) Result<Map<T>, IoError> {
+of*<T> = (a: Allocator, seed_key: StringView, seed_val: T) Result<Map<T>, IoError> {
     a.try_acquire3(sizeof(MKey), sizeof(T), 2 * sizeof(MIdx)).match ({
         .Ok(bufs) => {
             kp := bufs.b1

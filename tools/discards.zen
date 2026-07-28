@@ -52,7 +52,7 @@ ret_is_result = (t: Ty) bool {
         _           => false,
     })
 }
-idx_note = (m: Map<i64>, a: MutPtr<Malloc>, name: string_view, res: bool) Map<i64> {
+idx_note = (m: Map<i64>, a: MutPtr<Malloc>, name: StringView, res: bool) Map<i64> {
     prev := m.get(name, 0)
     next: i64 := res.match ({
         true  => (prev == 0 || prev == 1).then({ 1 }, { 2 }),
@@ -61,7 +61,7 @@ idx_note = (m: Map<i64>, a: MutPtr<Malloc>, name: string_view, res: bool) Map<i6
     m.put(a, name, next).expect("discards: index alloc")
 }
 // the return type of the fn named `name` among `decls` (Void when absent)
-find_ret = (decls: [Decl], name: string_view) Ty {
+find_ret = (decls: [Decl], name: StringView) Ty {
     res: Ty := .Void
     found := false
     decls.loop((h, i, d) {
@@ -98,15 +98,15 @@ idx_module = (m: Map<i64>, a: MutPtr<Malloc>, decls: [Decl]) Map<i64> {
 }
 // ── phase 1: the scan ─────────────────────────────────────────────────────────
 Ctx: {
-    path: string_view,
-    src: string_view,
+    path: StringView,
+    src: StringView,
     m: Map<i64>,
     loc: Map<i64>,
-    fname: string_view,
+    fname: StringView,
     voidfn: i32,
 }
 // 1-based line of a byte offset
-line_of = (src: string_view, pos: i32) i64 {
+line_of = (src: StringView, pos: i32) i64 {
     n := 1
     p := pos + 0
     src.view().loop((h, i, b) {
@@ -116,7 +116,7 @@ line_of = (src: string_view, pos: i32) i64 {
     })
     n
 }
-callee_of = (e: Ptr<Expr>) string_view {
+callee_of = (e: Ptr<Expr>) StringView {
     load(e).match ({
         .Call(c)        => c.fn,
         .MethodCall(mc) => mc.method,
@@ -136,7 +136,7 @@ is_result_call = (cx: Ctx, e: Ptr<Expr>) bool {
     v := (nm == "" || l != 0).then({ l }, { cx.m.get(nm, 0) })
     v == 1 || g_loose == 1 && v == 2
 }
-report = (cx: Ctx, e: Ptr<Expr>, tag: string_view) void {
+report = (cx: Ctx, e: Ptr<Expr>, tag: StringView) void {
     format("{}:{}: {} in {} [{}]\n", [arg_str(cx.path), arg_int(cx.src.line_of(callee_pos(e))), arg_str(callee_of(e)), arg_str(cx.fname), arg_str(tag)])
 }
 scan_arms = (cx: Ctx, arms: [ArmData], mode: i32) void {
@@ -259,8 +259,8 @@ sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
         false => (xv[i] == yv[i]).then({ xv.sv_lt_at(yv, i + 1) }, { xv[i] < yv[i] }),
     })
 }
-sv_lt = (x: string_view, y: string_view) bool { x.view().sv_lt_at(y.view(), 0) }
-sift_left = (xs: [string_view], j: i64) void {
+sv_lt = (x: StringView, y: StringView) bool { x.view().sv_lt_at(y.view(), 0) }
+sift_left = (xs: [StringView], j: i64) void {
     (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
         t := xs[j]
         xs[j] = xs[j - 1]
@@ -268,21 +268,21 @@ sift_left = (xs: [string_view], j: i64) void {
         xs.sift_left(j - 1)
     })
 }
-sort_from = (xs: [string_view], i: i64) void {
+sort_from = (xs: [StringView], i: i64) void {
     (i < xs.len).then({
         xs.sift_left(i)
         xs.sort_from(i + 1)
     })
 }
-sort_names = (xs: [string_view]) void { xs.sort_from(1) }
+sort_names = (xs: [StringView]) void { xs.sort_from(1) }
 // index one file into `m` (phase 0)
-index_file = (m: Map<i64>, a: MutPtr<Malloc>, path: string_view) Map<i64> {
+index_file = (m: Map<i64>, a: MutPtr<Malloc>, path: StringView) Map<i64> {
     src := a.contents_in(path).expect("discards: cannot read file")
     decls := a.parse_module(src)
     (perr_get() || lerr_get()).then({ m }, { m.idx_module(a, decls) })
 }
 // scan one file (phase 1)
-scan_file = (m: Map<i64>, a: MutPtr<Malloc>, path: string_view) void {
+scan_file = (m: Map<i64>, a: MutPtr<Malloc>, path: StringView) void {
     g_files = g_files + 1
     src := a.contents_in(path).expect("discards: cannot read file")
     decls := a.parse_module(src)
@@ -301,7 +301,7 @@ scan_file = (m: Map<i64>, a: MutPtr<Malloc>, path: string_view) void {
     })
 }
 // walk a file or a directory tree: phase 0 = index, phase 1 = scan
-walk = (m: Map<i64>, a: MutPtr<Malloc>, root: string_view, phase: i32) Map<i64> {
+walk = (m: Map<i64>, a: MutPtr<Malloc>, root: StringView, phase: i32) Map<i64> {
     out := m
     root.is_dir().match ({
         true  => {

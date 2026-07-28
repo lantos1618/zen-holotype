@@ -38,15 +38,15 @@ g_files := 0
 g_hits := 0
 g_found := 0
 // ── path helpers ──────────────────────────────────────────────────────────────
-is_exec = (path: string_view) bool { path.access(ACCESS_X_OK) == 0 }
+is_exec = (path: StringView) bool { path.access(ACCESS_X_OK) == 0 }
 // ── byte-lexicographic ordering, so the sweep visits the corpus in a stable order ──
 // (`find` emits directory order, which varies between checkouts; the set of files is the same and the
 // summary counts are identical, but a sorted walk makes a HIT list reproducible run to run)
-sort_paths = (xs: [string_view]) void {
-    xs.sort_by((x: string_view, y: string_view) bool { x.sv_lt(y) })
+sort_paths = (xs: [StringView]) void {
+    xs.sort_by((x: StringView, y: StringView) bool { x.sv_lt(y) })
 }
 // ── the corpus walk (`find <dir> -name '*.zen'`, a missing dir contributing nothing) ──
-walk = (mp: MutPtr<Malloc>, dir: string_view, acc: String) String {
+walk = (mp: MutPtr<Malloc>, dir: StringView, acc: String) String {
     entries := mp.read_dir(dir).expect("fuzz-corpus: cannot read directory")
     acc2 := acc
     entries.loop((h, i, entry) {
@@ -65,13 +65,13 @@ walk = (mp: MutPtr<Malloc>, dir: string_view, acc: String) String {
     })
     acc2
 }
-walk_if_dir = (mp: MutPtr<Malloc>, dir: string_view, acc: String) String {
+walk_if_dir = (mp: MutPtr<Malloc>, dir: StringView, acc: String) String {
     dir.is_dir().then({ mp.walk(dir, acc) }, { acc })
 }
 // ── hit classification ────────────────────────────────────────────────────────
 // A sanitizer error prints "runtime error:" (UBSan) or an "AddressSanitizer"/"LeakSanitizer" banner;
 // the runtime frames name __asan / __ubsan. A signal exit (rc >= 128) counts on its own.
-is_sanitizer = (o: string_view) bool {
+is_sanitizer = (o: StringView) bool {
     o.contains("runtime error:")
         || o.contains("AddressSanitizer")
         || o.contains("LeakSanitizer")
@@ -79,7 +79,7 @@ is_sanitizer = (o: string_view) bool {
         || o.contains("__ubsan")
 }
 // `#[0-9]`: a stack-frame marker anywhere in the line
-has_frame_mark = (line: string_view) bool {
+has_frame_mark = (line: StringView) bool {
     v := line.view()
     found := false
     v.loop((h, i, b) {
@@ -87,13 +87,13 @@ has_frame_mark = (line: string_view) bool {
     })
     found
 }
-is_excerpt_line = (line: string_view) bool {
+is_excerpt_line = (line: StringView) bool {
     line.contains("runtime error:")
         || line.contains("ERROR")
         || line.contains("SUMMARY")
         || line.has_frame_mark()
 }
-print_excerpt = (mp: MutPtr<Malloc>, o: string_view) void {
+print_excerpt = (mp: MutPtr<Malloc>, o: StringView) void {
     kept := 0
     mp.split_in(o, '\n').loop((h, i, line) {
         (is_excerpt_line(line) && kept < EXCERPT_LINES).then({
@@ -102,14 +102,14 @@ print_excerpt = (mp: MutPtr<Malloc>, o: string_view) void {
         })
     })
 }
-report_hit = (mp: MutPtr<Malloc>, mode: string_view, f: string_view, o: string_view, rc: i64) void {
+report_hit = (mp: MutPtr<Malloc>, mode: StringView, f: StringView, o: StringView, rc: i64) void {
     format("=== SANITIZER HIT: {} {} (rc={}) ===\n", [arg_str(mode), arg_str(f), arg_int(rc)])
     mp.print_excerpt(o)
     g_hits = g_hits + 1
 }
 // One probe: `$ASAN <mode> <file> -o /tmp/fuzz-corpus.out 2>&1`. std.sys.process captures stdout only,
 // so stderr — where every sanitizer banner lands — is folded in with an explicit `2>&1`.
-probe = (mp: MutPtr<Malloc>, asan: string_view, mode: string_view, f: string_view) void {
+probe = (mp: MutPtr<Malloc>, asan: StringView, mode: StringView, f: StringView) void {
     cmd := mp.cat_in(mp.cat_in(mp.cat_in(mp.cat_in(asan, " "), mode), mp.cat_in(" ", f)), " -o /tmp/fuzz-corpus.out 2>&1")
     mp.run(cmd).match ({
         .Err(e) => mp.report_hit(mode, f, "spawn failed", 0 - 1),
@@ -118,26 +118,26 @@ probe = (mp: MutPtr<Malloc>, asan: string_view, mode: string_view, f: string_vie
         }),
     })
 }
-sweep_file = (mp: MutPtr<Malloc>, asan: string_view, f: string_view) void {
+sweep_file = (mp: MutPtr<Malloc>, asan: StringView, f: StringView) void {
     g_files = g_files + 1
     mp.probe(asan, "check", f)
     mp.probe(asan, "build", f)
 }
 // ── setup: the ASan compiler must exist, or the sweep proves nothing ──────────
-fail2 = (msg: string_view) i32 {
+fail2 = (msg: StringView) i32 {
     format("{}\n", [arg_str(msg)])
     2
 }
 // `[ -x "$ASAN" ] || scripts/fuzz-build.sh "$ASAN"` — the builder's own output goes straight to the
 // terminal (std.io.file.shell is the non-capturing system(3) floor), exactly as the shell version did.
-build_asan = (mp: MutPtr<Malloc>, root: string_view, asan: string_view) bool {
+build_asan = (mp: MutPtr<Malloc>, root: StringView, asan: StringView) bool {
     cmd := mp.cat_in(mp.cat_in(mp.cat_in(root, "/scripts/fuzz-build.sh "), asan), "")
     cmd.shell().match ({
         .Ok(rc) => rc == 0,
         .Err(e) => false,
     })
 }
-ensure_asan = (mp: MutPtr<Malloc>, root: string_view, asan: string_view) i32 {
+ensure_asan = (mp: MutPtr<Malloc>, root: StringView, asan: StringView) i32 {
     asan.is_exec().match ({
         true  => 0,
         false => mp.build_asan(root, asan).match ({
@@ -149,7 +149,7 @@ ensure_asan = (mp: MutPtr<Malloc>, root: string_view, asan: string_view) i32 {
         }),
     })
 }
-sweep = (mp: MutPtr<Malloc>, asan: string_view, corpus: [string_view]) i32 {
+sweep = (mp: MutPtr<Malloc>, asan: StringView, corpus: [StringView]) i32 {
     corpus.sort_paths()
     corpus.loop((h, i, f) {
         mp.sweep_file(asan, f)
@@ -157,7 +157,7 @@ sweep = (mp: MutPtr<Malloc>, asan: string_view, corpus: [string_view]) i32 {
     format("corpus: {} files, {} sanitizer hits\n", [arg_int(g_files), arg_int(g_hits)])
     (g_hits == 0).then({ 0 }, { 1 })
 }
-run_sweep = (mp: MutPtr<Malloc>, root: string_view, asan: string_view) i32 {
+run_sweep = (mp: MutPtr<Malloc>, root: StringView, asan: StringView) i32 {
     empty := mp.init(8192).expect("fuzz-corpus: oom")
     fixtures := mp.walk_if_dir(mp.cat_in(root, "/tests/fixtures/zen"), empty)
     both := mp.walk_if_dir(mp.cat_in(root, "/examples"), fixtures)

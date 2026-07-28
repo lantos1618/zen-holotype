@@ -22,11 +22,11 @@ enode* = (a: MutPtr<Malloc>, v: Expr) Ptr<Expr> {
     buf[0].addr()
 }
 // Copy a token span into an owned NUL-terminated str.
-copy_span = (src: string_view, start: i32, dst: RawPtr<u8>, n: i32) void {
+copy_span = (src: StringView, start: i32, dst: RawPtr<u8>, n: i32) void {
     n.times((i) { store(offset(dst, i), src.at(start + i)) })
 }
 // C keywords are mangled at the lexeme choke point so defs/refs stay consistent.
-is_c_kw = (src: string_view, t: Token) bool {
+is_c_kw = (src: StringView, t: Token) bool {
     src.tok_in(t, "double|short|long|int|char|float|unsigned|signed").then({
         return true
     })
@@ -48,7 +48,7 @@ is_c_kw = (src: string_view, t: Token) bool {
 // (mirrors perr / exports_buf); driver.fmt_render flips it on around the faithful parse, off after.
 gf_faithful_lexeme := false
 set_faithful_lexeme* = (b: bool) void { gf_faithful_lexeme = b }
-lexeme* = (a: MutPtr<Malloc>, src: string_view, t: Token) string_cstr {
+lexeme* = (a: MutPtr<Malloc>, src: StringView, t: Token) StringCstr {
     (src.is_c_kw(t) && gf_faithful_lexeme.then({ false }, { true })).match ({
         true  => {
             p := a.acquire_or_die(t.len + 4)
@@ -69,7 +69,7 @@ lexeme* = (a: MutPtr<Malloc>, src: string_view, t: Token) string_cstr {
 }
 // A float literal carries its source text verbatim into C, but C float syntax rejects `_`; copy the
 // span dropping any digit separators (`1_000.5` -> `1000.5`).
-copy_no_us = (src: string_view, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+copy_no_us = (src: StringView, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
     p := pos
     d := di
     @while (p < end) {
@@ -86,13 +86,13 @@ copy_no_us = (src: string_view, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i3
     }
     d
 }
-float_lexeme = (a: MutPtr<Malloc>, src: string_view, t: Token) string_view {
+float_lexeme = (a: MutPtr<Malloc>, src: StringView, t: Token) StringView {
     p := a.acquire_or_die(t.len + 1)
     n := src.copy_no_us(t.start, t.start + t.len, p, 0)
     store(offset(p, n), 0)
     cstr(p)
 }
-is_op* = (src: string_view, t: Token, c: u8) bool {
+is_op* = (src: StringView, t: Token, c: u8) bool {
     t.kind.match ({
         .Sym => src.at(t.start) == c,
         _    => false,
@@ -100,15 +100,15 @@ is_op* = (src: string_view, t: Token, c: u8) bool {
 }
 // the EXACT one-byte operator `c` — `is_op` alone matches any Sym STARTING with it, so `=` would
 // also fire on `==`/`=>` and `|` on `||`. Every single-char operator gate in the parser is this.
-is_op1* = (src: string_view, t: Token, c: u8) bool { t.len == 1 && src.is_op(t, c) }
+is_op1* = (src: StringView, t: Token, c: u8) bool { t.len == 1 && src.is_op(t, c) }
 // the two-byte `:=` walrus — the let/assign/global marker every parser stage looks for.
-is_walrus* = (src: string_view, t: Token) bool {
+is_walrus* = (src: StringView, t: Token) bool {
     t.kind.match ({
         .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == '=',
         _    => false,
     })
 }
-op_str* = (b: u8) string_literal {
+op_str* = (b: u8) StringLiteral {
     (b == '+').then({
         return "+"
     })
@@ -157,7 +157,7 @@ u64max_mod = (base: i32) u64 {
 // overflow the lexer stack). OVERFLOW: a literal whose value exceeds 2^64-1 is unrepresentable in ANY
 // zen integer type, so instead of silently wrapping to a wrong value it flags a positioned parse error
 // (caret at `off`, the literal's first byte) and the module is rejected.
-int_acc = (src: string_view, pos: i32, end: i32, base: i32, off: i32) i64 {
+int_acc = (src: StringView, pos: i32, end: i32, base: i32, off: i32) i64 {
     acc: u64 := 0
     over := false
     bu: u64 := base
@@ -186,7 +186,7 @@ int_acc = (src: string_view, pos: i32, end: i32, base: i32, off: i32) i64 {
     acc.to_i64()
 }
 // `0x...` base-16, `0b...` base-2, `0o...` base-8; otherwise decimal.
-to_int = (src: string_view, t: Token) i64 {
+to_int = (src: StringView, t: Token) i64 {
     src.is_hex_prefix(t.start).match ({
         true  => src.int_acc(t.start + 2, t.start + t.len, 16, t.start),
         false => src.is_bin_prefix(t.start).match ({
@@ -198,7 +198,7 @@ to_int = (src: string_view, t: Token) i64 {
         }),
     })
 }
-parse_atom* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+parse_atom* = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
     // DEPTH CAP (see parse_type.zen): every nested expression form — parens, prefix `-`/`!`, slice
     // literals, `.match`/`.loop`, lambdas — funnels through parse_atom, so one guard here bounds them
     // all. Past the cap, set the parse-error flag and return a placeholder WITHOUT recursing further;
@@ -214,7 +214,7 @@ parse_atom* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
     pdepth_exit()
     r
 }
-parse_base = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+parse_base = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Int   => PExpr(
@@ -252,7 +252,7 @@ parse_base = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
 }
 // Unterminated string tokens run to end-of-file. A raw `"""…"""` literal needs both delimiters, so
 // the shortest terminated one is `""""""` (six quotes, empty content).
-str_open = (src: string_view, t: Token) bool {
+str_open = (src: StringView, t: Token) bool {
     src.rawstr_at(t.start).match ({
         true  => t.len < 6 || src.rawstr_at(t.start + t.len - 3) == false,
         false => t.len < 2 || src.at(t.start + t.len - 1) != '"',
@@ -260,7 +260,7 @@ str_open = (src: string_view, t: Token) bool {
 }
 // Bad atom: no rule can start an expression at this token. Flag it as EXPECTED-AN-EXPRESSION (with
 // the offending token's offset), consume one token for progress, placeholder.
-parse_garbage = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
+parse_garbage = (a: MutPtr<Malloc>, src: StringView, sc: Scan) PExpr {
     perr_set_kind_at(sc.tok.start, PE_EXPR())
     PExpr(
         expr: a.enode(lit(0)),
@@ -268,7 +268,7 @@ parse_garbage = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
     )
 }
 // Non-literal atoms: ctor, prefix op, slice literal, lambda, parenthesized expr.
-parse_other = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
+parse_other = (a: MutPtr<Malloc>, src: StringView, sc: Scan) PExpr {
     src.is_lbrace(sc.tok).then({
         return a.parse_postfix(src, src.looks_anon_struct(sc.next).match ({
             true  => a.parse_anon_struct_lit(src, sc.next),
@@ -310,8 +310,8 @@ esc_byte = (e: u8) u8 {
 }
 // Two hex digits at `pos`,`pos+1` → one byte value (0..255) for `\xNN`. Returns i32 (the arithmetic
 // type); the store/char-lit sites narrow to the byte, matching how `char_val` carries byte values as i32.
-hex2 = (src: string_view, pos: i32) i32 { src.at(pos).hex_val() * 16 + src.at(pos + 1).hex_val() }
-char_val = (src: string_view, start: i32) i32 {
+hex2 = (src: StringView, pos: i32) i32 { src.at(pos).hex_val() * 16 + src.at(pos + 1).hex_val() }
+char_val = (src: StringView, start: i32) i32 {
     b := src.at(start + 1)
     (b == '\\').match ({
         true  => (src.at(start + 2) == 'x').match ({
@@ -322,7 +322,7 @@ char_val = (src: string_view, start: i32) i32 {
     })
 }    // '\xNN'
 // String literal value: copy content and resolve escapes.
-str_val = (a: MutPtr<Malloc>, src: string_view, t: Token) string_view {
+str_val = (a: MutPtr<Malloc>, src: StringView, t: Token) StringView {
     p := a.acquire_or_die(t.len)
     n := src.rawstr_at(t.start).match ({
         true  => src.copy_raw(src.rawstr_body(t), t.start + t.len - 3, p, 0),
@@ -339,13 +339,13 @@ str_val = (a: MutPtr<Malloc>, src: string_view, t: Token) string_view {
 // mean "line one\n" rather than "\nline one\n" — the newline that only exists to get off the
 // opening delimiter is not content. Nothing else is trimmed: indentation inside a raw literal is
 // part of the text, because the whole point of the form is that what you see is what you get.
-rawstr_body = (src: string_view, t: Token) i32 {
+rawstr_body = (src: StringView, t: Token) i32 {
     open := t.start + 3
     (src.at(open) == '\n').then({ open + 1 }, { open })
 }
 // Copy [pos, end) verbatim — no escape resolution, so `\n` inside a raw literal stays two bytes.
 // Iterative for the same reason as unescape: a block literal can be large.
-copy_raw = (src: string_view, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+copy_raw = (src: StringView, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
     d := di
     pos.upto(end, (p) {
         store(offset(dst, d), src.at(p))
@@ -356,7 +356,7 @@ copy_raw = (src: string_view, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 
 // Copy [pos, end) into `dst`, resolving `\`-escapes, returning the byte count written. ITERATIVE (a
 // 50KB string literal is O(n) heap iteration, not O(n) C-stack — per-char recursion overflowed the
 // stack on a long literal). `\xNN` consumes 4 source chars → 1 byte; other `\c` consumes 2 → 1 byte.
-unescape = (src: string_view, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
+unescape = (src: StringView, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
     p := pos
     d := di
     @while (p < end) {
@@ -383,7 +383,7 @@ unescape = (src: string_view, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 
     d
 }
 // Leading-dot enum constructor; compiler.check fills the enum type.
-parse_ctor = (a: MutPtr<Malloc>, src: string_view, dot: Scan) PExpr {
+parse_ctor = (a: MutPtr<Malloc>, src: StringView, dot: Scan) PExpr {
     vt := src.scan(dot.next)
     vt.tok.kind.match ({
         .Ident => a.parse_ctor_named(src, vt),
@@ -396,7 +396,7 @@ parse_ctor = (a: MutPtr<Malloc>, src: string_view, dot: Scan) PExpr {
 // begins a NEW statement (`(cond).match(…)`) — never a bogus call `.None(cond)` glued across the
 // break. Without this gate a value-position `.None` before a parenthesized statement fused into a
 // call, silently changing program meaning (surfaced by the formatter round-trip; #53).
-parse_ctor_named = (a: MutPtr<Malloc>, src: string_view, vt: Scan) PExpr {
+parse_ctor_named = (a: MutPtr<Malloc>, src: StringView, vt: Scan) PExpr {
     vn := a.lexeme(src, vt.tok)
     nx := src.scan(vt.next)
     (src.is_lparen(nx.tok) && src.nl_between(vt.next, nx.tok.start).then({ false }, { true })).match ({
@@ -410,14 +410,14 @@ parse_ctor_named = (a: MutPtr<Malloc>, src: string_view, vt: Scan) PExpr {
         ),
     })
 }
-parse_ctor_empty = (a: MutPtr<Malloc>, src: string_view, vn: string_view, lp: Scan) PExpr {
+parse_ctor_empty = (a: MutPtr<Malloc>, src: StringView, vn: StringView, lp: Scan) PExpr {
     rp := src.scan(lp.next)
     PExpr(
         expr: a.enode(mktag("", vn)),
         next: rp.next,
     )
 }
-parse_ctor_payload = (a: MutPtr<Malloc>, src: string_view, vn: string_view, lp: Scan) PExpr {
+parse_ctor_payload = (a: MutPtr<Malloc>, src: StringView, vn: StringView, lp: Scan) PExpr {
     pl := a.parse_payload_args(src, lp)
     PExpr(
         expr: a.enode(mkenum("", vn, pl.expr)),
@@ -426,7 +426,7 @@ parse_ctor_payload = (a: MutPtr<Malloc>, src: string_view, vn: string_view, lp: 
 }    // `.Variant(a, b, …)` payload
 // Parse the `(a, b, …)` args of a variant constructor into the payload EXPR: one arg is the payload
 // directly; 2+ args become an anon struct `{_0: a, _1: b, …}` matching the multi-field decl synthesis.
-parse_payload_args* = (a: MutPtr<Malloc>, src: string_view, lp: Scan) PExpr {
+parse_payload_args* = (a: MutPtr<Malloc>, src: StringView, lp: Scan) PExpr {
     buf := a.finit_buf()
     pe := a.fill_payload_args(src, lp.next, buf, 0)
     inits := buf.take_inits(pe.count)
@@ -441,7 +441,7 @@ parse_payload_args* = (a: MutPtr<Malloc>, src: string_view, lp: Scan) PExpr {
         ),
     })
 }    // single payload: the arg itself
-fill_payload_args = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i: i32) PEnd {
+fill_payload_args = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [FieldInit], i: i32) PEnd {
     (i >= buf.len).then({
         perr_set_at(pos)
         return PEnd(

@@ -15,16 +15,16 @@
 { enode, is_op, is_walrus, lexeme, parse_atom, parse_payload_args } = compiler.parse_atom
 { is_dot, is_ident_tok, nl_between, parse_or_nested, parse_postfix } = compiler.parse_postfix
 { PExpr } = compiler.parse_expr
-is_lparen* = (src: string_view, t: Token) bool { src.is_op(t, '(') }
-is_raw_at* = (src: string_view, t: Token) bool { src.is_op(t, '@') }
+is_lparen* = (src: StringView, t: Token) bool { src.is_op(t, '(') }
+is_raw_at* = (src: StringView, t: Token) bool { src.is_op(t, '@') }
 // One-char `:` marks struct field init; `:=` is a different two-byte symbol.
-is_field_colon* = (src: string_view, t: Token) bool { src.is_op(t, ':') && t.len == 1 }
+is_field_colon* = (src: StringView, t: Token) bool { src.is_op(t, ':') && t.len == 1 }
 // `Name(` is a struct construction iff the first item is `ident:`.
-paren_is_struct* = (src: string_view, pos: i32) bool {
+paren_is_struct* = (src: StringView, pos: i32) bool {
     id := src.scan(pos)
     is_ident_tok(id.tok).then({ src.is_field_colon(src.scan(id.next).tok) }, { false })
 }
-parse_ident* = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
+parse_ident* = (a: MutPtr<Malloc>, src: StringView, sc: Scan) PExpr {
     name := a.lexeme(src, sc.tok)
     nx := src.scan(sc.next)
     // Calls/constructions only continue on the same line as the name.
@@ -58,7 +58,7 @@ parse_ident* = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
 // `Name<TyArgs>.None`). Distinguished from turbofish/generic-struct-lit (which want a `(` after the
 // `>`) by an Uppercase `.Variant` following the closing `>`. If the shape isn't exact, `<` stays the
 // comparison operator (so `a < b > c` is intact).
-looks_generic_ctor = (src: string_view, pos: i32) bool {
+looks_generic_ctor = (src: StringView, pos: i32) bool {
     after := src.tyargs_end(pos, 1)
     (after < 0).match ({
         true  => false,
@@ -75,8 +75,8 @@ looks_generic_ctor = (src: string_view, pos: i32) bool {
     })
 }
 // First byte of a token span is Uppercase (a variant/type name, not a lowercase field/method).
-a_lex_upper* = (src: string_view, t: Token) bool { src.at(t.start).is_upper() }
-parse_generic_ctor = (a: MutPtr<Malloc>, src: string_view, name: string_view, pos: i32) PExpr {
+a_lex_upper* = (src: StringView, t: Token) bool { src.at(t.start).is_upper() }
+parse_generic_ctor = (a: MutPtr<Malloc>, src: StringView, name: StringView, pos: i32) PExpr {
     ta := a.parse_tyargs(src, pos)    // pos just past '<'
     dot := src.scan(ta.next)    // the '.'
     vs := src.scan(dot.next)    // the variant name
@@ -88,11 +88,11 @@ parse_generic_ctor = (a: MutPtr<Malloc>, src: string_view, name: string_view, po
 // statement. Empty `()` → nullary tag; `(a, …)` → payload enum; no `(` → nullary tag.
 finish_generic_ctor* = (
     a: MutPtr<Malloc>,
-    src: string_view,
-    ty: string_view,
-    mty: string_view,
+    src: StringView,
+    ty: StringView,
+    mty: StringView,
     targs: [Ty],
-    vn: string_view,
+    vn: StringView,
     vs: Scan,
 ) PExpr {
     nx := src.scan(vs.next)
@@ -120,7 +120,7 @@ finish_generic_ctor* = (
 // Disambiguates from comparison: require a well-formed `<Type…>` (parse_type tokens, matching `>`)
 // IMMEDIATELY followed by a `(` that is NOT a `field:` struct (that's looks_generic_lit's job). If
 // the shape isn't exact, `<` stays the comparison operator (so `a < b`, `a < b && c > d` are intact).
-looks_turbofish = (src: string_view, pos: i32) bool {
+looks_turbofish = (src: StringView, pos: i32) bool {
     after := src.tyargs_end(pos, 1)
     (after < 0).match ({
         true  => false,
@@ -135,8 +135,8 @@ looks_turbofish = (src: string_view, pos: i32) bool {
 }
 parse_turbofish_call = (
     a: MutPtr<Malloc>,
-    src: string_view,
-    name: string_view,
+    src: StringView,
+    name: StringView,
     pos: i32,
     at: i32,
 ) PExpr {
@@ -150,15 +150,15 @@ parse_turbofish_call = (
     )
 }
 // Decide whether `<...>` starts generic struct construction, not a comparison.
-looks_generic_lit = (src: string_view, pos: i32) bool {
+looks_generic_lit = (src: StringView, pos: i32) bool {
     after := src.tyargs_end(pos, 1)
     (after < 0).then({ false }, { src.generic_open(after) })
 }
-generic_open = (src: string_view, after: i32) bool {
+generic_open = (src: StringView, after: i32) bool {
     sc := src.scan(after)
     src.is_lparen(sc.tok).then({ src.paren_is_struct(sc.next) }, { false })
 }
-tyargs_end* = (src: string_view, pos: i32, depth: i32) i32 {
+tyargs_end* = (src: StringView, pos: i32, depth: i32) i32 {
     // DEPTH CAP: bound recursion so pathologically-nested `Ptr<Ptr<…>>` annotations
     // become a clean parse error (-1) instead of a stack overflow. Real programs never
     // approach this nesting (the monomorphizer caps well-formed depth at 24).
@@ -186,7 +186,7 @@ tyargs_end* = (src: string_view, pos: i32, depth: i32) i32 {
         }),
     })
 }
-is_tyarg_tok = (src: string_view, t: Token) bool {
+is_tyarg_tok = (src: StringView, t: Token) bool {
     is_ident_tok(t)
         || src.is_comma(t)
         || src.is_lbracket(t)
@@ -198,8 +198,8 @@ is_tyarg_tok = (src: string_view, t: Token) bool {
 // Generic struct construction is `Name<...>(f: v)`.
 parse_generic_struct_lit = (
     a: MutPtr<Malloc>,
-    src: string_view,
-    name: string_view,
+    src: StringView,
+    name: StringView,
     pos: i32,
     tnpos: i32,
 ) PExpr {
@@ -219,7 +219,7 @@ parse_generic_struct_lit = (
 // first top-level separator is a `,` or the closing `}` — NOT a `:=` (which would make it a typed-let
 // block `{ x: T := … }`). The literal's structural name (mangle_anon_in over the field names) matches
 // the one parse_type synthesizes for the corresponding `{ q: T, r: T }` TYPE, so they share a C struct.
-looks_anon_struct* = (src: string_view, pos: i32) bool {
+looks_anon_struct* = (src: StringView, pos: i32) bool {
     id := src.scan(pos)    // pos just past '{'
     is_ident_tok(id.tok).match ({
         true  => {
@@ -230,7 +230,7 @@ looks_anon_struct* = (src: string_view, pos: i32) bool {
     })
 }
 // 1 = anon struct (a top-level ',' or the closing '}'), 0 = block (a top-level ':='), -1 = EOF/garbage.
-anon_scan_kind = (src: string_view, pos: i32, depth: i32) i32 {
+anon_scan_kind = (src: StringView, pos: i32, depth: i32) i32 {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => 0 - 1,
@@ -243,7 +243,7 @@ anon_scan_kind = (src: string_view, pos: i32, depth: i32) i32 {
         }),
     })
 }
-anon_scan_open = (src: string_view, sc: Scan, depth: i32) i32 {
+anon_scan_open = (src: StringView, sc: Scan, depth: i32) i32 {
     (src.is_lparen(sc.tok) || src.is_lbracket(sc.tok)).match ({
         true  => src.anon_scan_kind(sc.next, depth + 1),
         false => (src.is_rparen(sc.tok) || src.is_rbracket(sc.tok)).match ({
@@ -283,7 +283,7 @@ inits_as_fields* = (a: MutPtr<Malloc>, inits: [FieldInit]) [Field] {
     })    // names-only mangle; types feed the hoisted StructDecl
     slice(buf.ptr, inits.len)
 }
-parse_anon_struct_lit* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
+parse_anon_struct_lit* = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
     buf := a.finit_buf()    // pos just past '{'
     fe := a.fill_ainits(src, pos, buf, 0)
     inits := buf.take_inits(fe.count)
@@ -295,7 +295,7 @@ parse_anon_struct_lit* = (a: MutPtr<Malloc>, src: string_view, pos: i32) PExpr {
         next: fe.next,
     )
 }    // hoist the synthesized struct decl (a bare literal has no type-position decl)
-fill_ainits = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i: i32) PEnd {
+fill_ainits = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [FieldInit], i: i32) PEnd {
     sc := src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
@@ -314,7 +314,7 @@ fill_ainits = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], 
         }),
     })
 }
-fill_ainit = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i: i32) PEnd {
+fill_ainit = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [FieldInit], i: i32) PEnd {
     (i >= buf.len).then({
         perr_set_at(pos)
         return PEnd(
@@ -346,8 +346,8 @@ finit_buf* = (a: MutPtr<Malloc>) [FieldInit] {
 take_inits* = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }
 parse_paren_struct_lit = (
     a: MutPtr<Malloc>,
-    src: string_view,
-    name: string_view,
+    src: StringView,
+    name: StringView,
     open: Scan,
     tnpos: i32,
 ) PExpr {
@@ -358,7 +358,7 @@ parse_paren_struct_lit = (
         next: fe.next,
     )
 }
-fill_pinits* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i: i32) PEnd {
+fill_pinits* = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [FieldInit], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({
         true  => PEnd(
@@ -368,7 +368,7 @@ fill_pinits* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit],
         false => a.fill_pinit(src, pos, buf, i),
     })
 }
-fill_pinit = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i: i32) PEnd {
+fill_pinit = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [FieldInit], i: i32) PEnd {
     // Guard fixed-size field-init buffer.
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -402,7 +402,7 @@ fill_pinit = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i
 arg_buf* = (a: MutPtr<Malloc>) [Expr] { slice(a.acquire_or_die(256 * sizeof(Expr)), 256) }
 slit_buf = (a: MutPtr<Malloc>) [Expr] { slice(a.acquire_or_die(2048 * sizeof(Expr)), 2048) }
 take_args* = (buf: [Expr], n: i32) [Expr] { slice(buf.ptr, n) }
-parse_call = (a: MutPtr<Malloc>, src: string_view, name: string_view, lp: Scan, at: i32) PExpr {
+parse_call = (a: MutPtr<Malloc>, src: StringView, name: StringView, lp: Scan, at: i32) PExpr {
     buf := a.arg_buf()
     ae := a.fill_args(src, lp.next, buf, 0)
     PExpr(
@@ -410,7 +410,7 @@ parse_call = (a: MutPtr<Malloc>, src: string_view, name: string_view, lp: Scan, 
         next: ae.next,
     )
 }
-parse_raw_call* = (a: MutPtr<Malloc>, src: string_view, at: Scan) PExpr {
+parse_raw_call* = (a: MutPtr<Malloc>, src: StringView, at: Scan) PExpr {
     nm := src.scan(at.next)
     nm.tok.kind.match ({
         .Ident => {
@@ -442,7 +442,7 @@ parse_raw_call* = (a: MutPtr<Malloc>, src: string_view, at: Scan) PExpr {
         },
     })
 }
-fill_args* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) PEnd {
+fill_args* = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Expr], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({
         true  => PEnd(
@@ -452,7 +452,7 @@ fill_args* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32
         false => a.fill_arg(src, pos, buf, i),
     })
 }
-fill_arg = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) PEnd {
+fill_arg = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Expr], i: i32) PEnd {
     // Guard fixed-size arg buffer.
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -479,7 +479,7 @@ fill_arg = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) 
         },
     })
 }
-parse_paren* = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
+parse_paren* = (a: MutPtr<Malloc>, src: StringView, open: Scan) PExpr {
     inner := a.parse_or_nested(src, open.next)
     close := src.scan(inner.next)
     src.is_rparen(close.tok).match ({
@@ -497,21 +497,21 @@ parse_paren* = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
     })
 }
 // Prefix ops lower without adding Unary nodes.
-is_minus* = (src: string_view, t: Token) bool { src.is_op(t, '-') }
-parse_neg* = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
+is_minus* = (src: StringView, t: Token) bool { src.is_op(t, '-') }
+parse_neg* = (a: MutPtr<Malloc>, src: StringView, sc: Scan) PExpr {
     inner := a.parse_atom(src, sc.next)
     PExpr(
         expr: a.enode(bin_at("-", a.enode(lit(0)), inner.expr, sc.tok.start)),
         next: inner.next,
     )
 }
-is_not* = (src: string_view, t: Token) bool {
+is_not* = (src: StringView, t: Token) bool {
     t.kind.match ({
         .Sym => src.at(t.start) == '!' && t.len == 1,
         _    => false,
     })
 }
-parse_not* = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
+parse_not* = (a: MutPtr<Malloc>, src: StringView, sc: Scan) PExpr {
     inner := a.parse_atom(src, sc.next)
     PExpr(
         expr: a.enode(cond(inner.expr, a.enode(vref("false")), a.enode(vref("true")))),
@@ -519,7 +519,7 @@ parse_not* = (a: MutPtr<Malloc>, src: string_view, sc: Scan) PExpr {
     )
 }
 // Slice literal element type is filled by compiler.check.
-fill_sitems = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) PEnd {
+fill_sitems = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Expr], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rbracket(sc.tok).match ({
         true  => PEnd(
@@ -529,7 +529,7 @@ fill_sitems = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i3
         false => a.fill_sitem(src, pos, buf, i),
     })
 }
-fill_sitem = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32) PEnd {
+fill_sitem = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Expr], i: i32) PEnd {
     // Guard fixed-size slice item buffer.
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -555,7 +555,7 @@ fill_sitem = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Expr], i: i32
         },
     })
 }
-parse_slicelit* = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
+parse_slicelit* = (a: MutPtr<Malloc>, src: StringView, open: Scan) PExpr {
     buf := a.slit_buf()
     ae := a.fill_sitems(src, open.next, buf, 0)
     a.parse_postfix(src, PExpr(
@@ -568,16 +568,16 @@ parse_slicelit* = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
 // detector (and parser) skip those with parse_ty. The compiler's own untyped lambdas `(h,i,x){…}` never
 // hit a `:`/return-type, so parse_ty is not invoked for them (the seed is unaffected).
 // `)` followed by `{`, or by a return TYPE then `{`.
-lam_ret_brace = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
+lam_ret_brace = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
     src.is_lbrace(src.scan(pos).tok).match ({
         true  => true,
         false => src.is_lbrace(src.scan(a.parse_ty(src, pos).next).tok),
     })
 }    // skip a return type, then '{'
-lam_open* = (a: MutPtr<Malloc>, src: string_view, open: Scan) bool {
+lam_open* = (a: MutPtr<Malloc>, src: StringView, open: Scan) bool {
     a.lam_params_ok(src, open.next)
 }
-lam_params_ok = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
+lam_params_ok = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({
         true  => a.lam_ret_brace(src, sc.next),
@@ -587,7 +587,7 @@ lam_params_ok = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
         }),
     })
 }
-lam_after_name = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
+lam_after_name = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
     sc := src.scan(pos)
     src.is_op(sc.tok, ':').match ({
         true  => a.lam_after_sep(src, src.scan(a.parse_ty(src, sc.next).next)),
@@ -595,7 +595,7 @@ lam_after_name = (a: MutPtr<Malloc>, src: string_view, pos: i32) bool {
     })
 }    // skip `: Type`
 // After a param (and its optional type): a ',' starts another param, a ')' ends the list.
-lam_after_sep = (a: MutPtr<Malloc>, src: string_view, sep: Scan) bool {
+lam_after_sep = (a: MutPtr<Malloc>, src: StringView, sep: Scan) bool {
     src.is_comma(sep.tok).match ({
         true  => a.lam_params_ok(src, sep.next),
         false => src.is_rparen(sep.tok).then({ a.lam_ret_brace(src, sep.next) }, { false }),
@@ -604,7 +604,7 @@ lam_after_sep = (a: MutPtr<Malloc>, src: string_view, sep: Scan) bool {
 // Lambda params accept an optional `: Type` each; the type is KEPT on the Param so the formatter
 // round-trips it (Void when unannotated). It stays inert otherwise — FnT context supplies the real
 // types when the lambda is inline-spliced, so the body still binds the names as before.
-fill_lnames = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i32) PEnd {
+fill_lnames = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)
     src.is_rparen(sc.tok).match ({
         true  => PEnd(
@@ -614,7 +614,7 @@ fill_lnames = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i
         false => a.fill_lname(src, pos, buf, i),
     })
 }
-fill_lname = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i32) PEnd {
+fill_lname = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
     // Guard fixed-size lambda-param buffer.
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -642,7 +642,7 @@ fill_lname = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i3
         ),
     })
 }
-parse_lambda* = (a: MutPtr<Malloc>, src: string_view, open: Scan) PExpr {
+parse_lambda* = (a: MutPtr<Malloc>, src: StringView, open: Scan) PExpr {
     buf := a.param_buf()
     pe := a.fill_lnames(src, open.next, buf, 0)
     // optional return type before the body '{' — KEEP it (lam_r) so a generic call can infer a tparam

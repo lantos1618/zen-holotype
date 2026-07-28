@@ -226,10 +226,10 @@ Each of these was reproduced on this commit.
   `http_get("http://example.com/")` fails with a `Connect` error.
 - **Text search has no byte-slice side.** `std.io.file.contents_bytes` gives you a
   binary-safe `[u8]`, but `find` / `contains` / `starts_with` / `split` in
-  `std.text.str` all take a NUL-terminated `string_view`. Searching what you just
-  read is `error[arg-type]: expected string_view, got [u8]`.
+  `std.text.str` all take a NUL-terminated `StringView`. Searching what you just
+  read is `error[arg-type]: expected StringView, got [u8]`.
 - **Allocated strings have no release verb.** `std.text.str`'s `cat` / `join` /
-  `replace` / `to_lower` return allocator-owned `string_view`s, and nothing in
+  `replace` / `to_lower` return allocator-owned `StringView`s, and nothing in
   the module hands one back. Freeing one means reaching past the API for
   `free(s.view().ptr)` yourself; the intended pattern is to back them with an
   arena and reset it.

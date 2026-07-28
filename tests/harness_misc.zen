@@ -3,7 +3,7 @@
 // Python). Sub-suites, each returning a fail count, summed by `harness_misc_run`:
 //
 //   traits       <- tests/test_traits.py        (impl/dispatch VALUE + conformance VERDICT)
-//   string_types <- tests/test_string_types.py   (string_literal/cstr/view lattice VERDICT)
+//   string_types <- tests/test_string_types.py   (StringLiteral/cstr/view lattice VERDICT)
 //   num_parse    <- tests/test_num_parse.py       (std.text.num parse, value + error-as-value, via `zenc run`)
 //   hashing      <- std.hash                       (SHA-256 published test vectors + FNV-1a-64, via `zenc run`)
 //   acid         <- tests/test_acid.py            (every real std/compiler source EMITs, output starts with HEAD)
@@ -28,7 +28,7 @@
 // the zslice header every emission must begin with (mirrors _oracle.HEAD).
 HEAD := "typedef struct { void* ptr; int64_t len; } zslice; "
 // ── shared helpers ────────────────────────────────────────────────────────────
-om_read_file = (mp: MutPtr<Malloc>, path: string_view) string_view {
+om_read_file = (mp: MutPtr<Malloc>, path: StringView) StringView {
     mp.contents_in(path).match ({
         .Ok(t)  => t,
         .Err(e) => "",
@@ -36,7 +36,7 @@ om_read_file = (mp: MutPtr<Malloc>, path: string_view) string_view {
 }
 om_not = (b: bool) bool { b.then({ false }, { true }) }
 // occurrences of `needle` in `s` (non-overlapping) — for exactly-once (dup-free) assertions.
-om_count = (s: string_view, needle: string_view) i64 {
+om_count = (s: StringView, needle: StringView) i64 {
     n: i64 := 0
     i: i64 := 0
     v := s.view()
@@ -67,7 +67,7 @@ om_count = (s: string_view, needle: string_view) i64 {
     n
 }
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
-om_cat3 = (mp: MutPtr<Malloc>, a: string_view, b: string_view, c: string_view) string_view {
+om_cat3 = (mp: MutPtr<Malloc>, a: StringView, b: StringView, c: StringView) StringView {
     mp.zo_cat2(a, mp.zo_cat2(b, c))
 }
 // ════════════════════════════════════════════════════════════════════════════════
@@ -153,77 +153,77 @@ harness_misc_traits = () i32 {
 harness_misc_string_types = () i32 {
     run_verdicts("string_types verdict", [
         VerdictCase(
-            src: "take = (s: string_literal) i32 { 0 }\nmain = () i32 { take(\"ok\") }",
+            src: "take = (s: StringLiteral) i32 { 0 }\nmain = () i32 { take(\"ok\") }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "take = (s: string_view) i32 { 0 }\nmain = () i32 { take(\"ok\") }",
+            src: "take = (s: StringView) i32 { 0 }\nmain = () i32 { take(\"ok\") }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "take = (s: string_view) i32 { 0 }\nmain = () i32 { take(cstr(null_ptr())) }",
+            src: "take = (s: StringView) i32 { 0 }\nmain = () i32 { take(cstr(null_ptr())) }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "take = (s: string_cstr) i32 { 0 }\nmain = () i32 { take(cstr(null_ptr())) }",
+            src: "take = (s: StringCstr) i32 { 0 }\nmain = () i32 { take(cstr(null_ptr())) }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "take = (s: string_literal) i32 { 0 }\nmain = () i32 { take(cstr(null_ptr())) }",
+            src: "take = (s: StringLiteral) i32 { 0 }\nmain = () i32 { take(cstr(null_ptr())) }",
             should_pass: false,
             kind: "arg-type",
         ),
         VerdictCase(
-            src: "bad = (s: string_view) string_literal { s }\nmain = () i32 { 0 }",
+            src: "bad = (s: StringView) StringLiteral { s }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "return-fit",
         ),
         VerdictCase(
-            src: "bad = (v: string_view, b: bool) string_literal { b.match ({ true => \"literal\", false => v }) }\nmain = () i32 { 0 }",
+            src: "bad = (v: StringView, b: bool) StringLiteral { b.match ({ true => \"literal\", false => v }) }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "return-fit",
         ),
         VerdictCase(
-            src: "bad = (v: string_view, b: bool) string_literal { b.match ({ true => v, false => \"literal\" }) }\nmain = () i32 { 0 }",
+            src: "bad = (v: StringView, b: bool) StringLiteral { b.match ({ true => v, false => \"literal\" }) }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "return-fit",
         ),
         VerdictCase(
-            src: "E: Lit | Borrow(string_view)\nbad = (e: E) string_literal { e.match ({ .Lit => \"literal\", .Borrow(v) => v }) }\nmain = () i32 { 0 }",
+            src: "E: Lit | Borrow(StringView)\nbad = (e: E) StringLiteral { e.match ({ .Lit => \"literal\", .Borrow(v) => v }) }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "return-fit",
         ),
         VerdictCase(
-            src: "E: Borrow(string_view) | Lit\nbad = (e: E) string_literal { e.match ({ .Borrow(v) => v, .Lit => \"literal\" }) }\nmain = () i32 { 0 }",
+            src: "E: Borrow(StringView) | Lit\nbad = (e: E) StringLiteral { e.match ({ .Borrow(v) => v, .Lit => \"literal\" }) }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "return-fit",
         ),
         VerdictCase(
-            src: "good = (v: string_view, b: bool) string_view { b.match ({ true => \"literal\", false => v }) }\nmain = () i32 { 0 }",
+            src: "good = (v: StringView, b: bool) StringView { b.match ({ true => \"literal\", false => v }) }\nmain = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "Box<T>: { value: T }\nneeds_literal = (b: Box<string_literal>) i32 { 0 }\nbad = (v: string_view) i32 { b: Box<string_view> := Box<string_view>(value: v)  needs_literal(b) }\nmain = () i32 { bad(\"ok\") }",
+            src: "Box<T>: { value: T }\nneeds_literal = (b: Box<StringLiteral>) i32 { 0 }\nbad = (v: StringView) i32 { b: Box<StringView> := Box<StringView>(value: v)  needs_literal(b) }\nmain = () i32 { bad(\"ok\") }",
             should_pass: false,
             kind: "arg-type",
         ),
         VerdictCase(
-            src: "R<T>: Ok(T) | Err(i32)\nbad = (r: R<string_cstr>) R<string_view> { r }\nmain = () i32 { 0 }",
+            src: "R<T>: Ok(T) | Err(i32)\nbad = (r: R<StringCstr>) R<StringView> { r }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "return-fit",
         ),
         VerdictCase(
-            src: "R<T>: Ok(T) | Err(i32)\ngood = (r: R<string_cstr>) R<string_view> { r.match ({ .Ok(v) => .Ok(v), .Err(e) => .Err(e) }) }\nmain = () i32 { 0 }",
+            src: "R<T>: Ok(T) | Err(i32)\ngood = (r: R<StringCstr>) R<StringView> { r.match ({ .Ok(v) => .Ok(v), .Err(e) => .Err(e) }) }\nmain = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "overwrite = (p: MutPtr<string_view>, v: string_view) void { p.store(v) }\nlaunder = (slot: string_literal, v: string_view) string_literal { overwrite(slot.addr(), v)  slot }\nmain = () i32 { launder(\"safe\", cstr(null_ptr()))  0 }",
+            src: "overwrite = (p: MutPtr<StringView>, v: StringView) void { p.store(v) }\nlaunder = (slot: StringLiteral, v: StringView) StringLiteral { overwrite(slot.addr(), v)  slot }\nmain = () i32 { launder(\"safe\", cstr(null_ptr()))  0 }",
             should_pass: false,
             kind: "arg-type",
         ),
@@ -248,12 +248,12 @@ harness_misc_string_types = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "Label*: { label: (string_view) i32 }\nstring_cstr.impl(Label, { label = (s: string_view) i32 { 0 } })\nmain = () i32 { \"legacy\".label() }",
+            src: "Label*: { label: (StringView) i32 }\nStringCstr.impl(Label, { label = (s: StringView) i32 { 0 } })\nmain = () i32 { \"legacy\".label() }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "bar = (x: string_view) i32 { foo(x) }\nfoo = (s: string_literal) i32 { 0 }\nmain = () i32 { bar(\"hi\") }",
+            src: "bar = (x: StringView) i32 { foo(x) }\nfoo = (s: StringLiteral) i32 { 0 }\nmain = () i32 { bar(\"hi\") }",
             should_pass: false,
             kind: "arg-type",
         ),
@@ -263,34 +263,34 @@ harness_misc_string_types = () i32 {
 // Slice mutability. `[T]`/`MutSlice<T>` is the writable window, `Slice<T>` the read-only one, named
 // off the `Ptr`/`MutPtr` pair (unmarked = read-only). The lattice runs ONE way: a writable slice
 // fits a read-only slot, never the reverse — and under a constructor neither fits the other. The
-// provenance half is `.view()`: a window over a `string_literal`/`string_cstr` is read-only, so the
+// provenance half is `.view()`: a window over a `StringLiteral`/`StringCstr` is read-only, so the
 // store that used to segfault in `.rodata` is a `zen check` error, while a window over bytes of
 // unknown/owned provenance stays writable (examples/strings_demo.zen's `port[0] = 'S'`).
 // ════════════════════════════════════════════════════════════════════════════════
 harness_misc_slice_mut = () i32 {
     run_verdicts("slice_mut verdict", [
         VerdictCase(
-            src: "{ view } = std.text.str\nbad = (s: string_cstr) u8 { v := s.view()  v[0] = 'H'  v[0] }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\nbad = (s: StringCstr) u8 { v := s.view()  v[0] = 'H'  v[0] }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "slice-write",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\nbad = (s: string_cstr) i64 { v: [u8] := s.view()  v.len }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\nbad = (s: StringCstr) i64 { v: [u8] := s.view()  v.len }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "assign-fit",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\nbad = (s: string_cstr) [u8] { s.view() }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\nbad = (s: StringCstr) [u8] { s.view() }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "return-fit",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\ntake = (v: [u8]) i64 { v.len }\nmain = () i32 { s: string_cstr := \"hi\"  to_i32(s.view().take()) }",
+            src: "{ view } = std.text.str\ntake = (v: [u8]) i64 { v.len }\nmain = () i32 { s: StringCstr := \"hi\"  to_i32(s.view().take()) }",
             should_pass: false,
             kind: "arg-type",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\ntake = (v: Slice<u8>) i64 { v.len }\nmain = () i32 { s: string_cstr := \"hi\"  to_i32(s.view().take()) }",
+            src: "{ view } = std.text.str\ntake = (v: Slice<u8>) i64 { v.len }\nmain = () i32 { s: StringCstr := \"hi\"  to_i32(s.view().take()) }",
             should_pass: true,
             kind: "",
         ),
@@ -305,26 +305,26 @@ harness_misc_slice_mut = () i32 {
             kind: "arg-type",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\ngood = (s: string_view) u8 { w := s.view()  w[0] = 'S'  w[0] }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\ngood = (s: StringView) u8 { w := s.view()  w[0] = 'S'  w[0] }\nmain = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
     ])
 }
-// a store through a view of a `string_cstr` -> rejected (this is the `.rodata` write)
+// a store through a view of a `StringCstr` -> rejected (this is the `.rodata` write)
 // the same view bound to a writable `[u8]` -> rejected at the binding
 // a read-only window returned where `[u8]` is declared -> rejected
 // a read-only window passed to a `[u8]` param -> rejected
 // the same window passed to a `Slice<u8>` param -> accepted (that IS the read-only spelling)
 // a writable `[u8]` passed to a `Slice<u8>` param -> accepted (capability may be dropped)
 // slice kinds are INVARIANT under a constructor: `Box<Slice<u8>>` does not fit `Box<[u8]>`
-// a store through a view of a plain `string_view` -> still accepted (strings_demo's shape)
+// a store through a view of a plain `StringView` -> still accepted (strings_demo's shape)
 // TEETH for the one-spelling-per-type rule: `str`, `text` and `Cstr` were aliases for
-// string_view/string_literal/string_cstr. They are gone, so each must now be an UNKNOWN
+// StringView/StringLiteral/StringCstr. They are gone, so each must now be an UNKNOWN
 // TYPE — silently accepting them is what let six spellings mean three things.
 // `str` survives as the std.text.str MODULE name — the alias deletion must not touch it.
-// A string-family impl receiver still canonicalizes onto the shared `string_view` table,
-// so declaring it on `string_cstr` reaches a literal receiver.
+// A string-family impl receiver still canonicalizes onto the shared `StringView` table,
+// so declaring it on `StringCstr` reaches a literal receiver.
 // The lattice itself, in canonical spellings: a view does not fit a literal param.
 // ════════════════════════════════════════════════════════════════════════════════
 // num_parse  <- tests/test_num_parse.py
@@ -333,7 +333,7 @@ harness_misc_slice_mut = () i32 {
 // never a silent 0). The value-case harness can't drive this (it has no module resolver), so this is
 // a small custom `zenc run` + stdout-substring runner.
 // ════════════════════════════════════════════════════════════════════════════════
-NP_PROG := "{ put } = std.text.fmt\n{ parse_f64, parse_i64_checked, parse_i64_radix } = std.text.num\n{ ParseError } = std.text.str\nemit_f = (label: string_view, r: Result<f64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").f(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nemit_i = (label: string_view, r: Result<i64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").i(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nmain = () i32 {\n    emit_f(\"f_pi|\",   parse_f64(\"3.14\"))\n    emit_f(\"f_neg|\",  parse_f64(\"-2.5\"))\n    emit_f(\"f_exp|\",  parse_f64(\"1e3\"))\n    emit_f(\"f_int|\",  parse_f64(\"42\"))\n    emit_f(\"f_bad|\",  parse_f64(\"abc\"))\n    emit_f(\"f_mt|\",   parse_f64(\"\"))\n    emit_f(\"f_dot2|\", parse_f64(\"1.2.3\"))\n    emit_i(\"i_ok|\",   parse_i64_checked(\"123\"))\n    emit_i(\"i_bad|\",  parse_i64_checked(\"12x\"))\n    emit_i(\"i_mt|\",   parse_i64_checked(\"\"))\n    emit_i(\"r_hex|\",  parse_i64_radix(\"ff\", 16))\n    emit_i(\"r_bin|\",  parse_i64_radix(\"1010\", 2))\n    emit_i(\"r_bad|\",  parse_i64_radix(\"zz\", 16))\n    0\n}\n"
+NP_PROG := "{ put } = std.text.fmt\n{ parse_f64, parse_i64_checked, parse_i64_radix } = std.text.num\n{ ParseError } = std.text.str\nemit_f = (label: StringView, r: Result<f64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").f(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nemit_i = (label: StringView, r: Result<i64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").i(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nmain = () i32 {\n    emit_f(\"f_pi|\",   parse_f64(\"3.14\"))\n    emit_f(\"f_neg|\",  parse_f64(\"-2.5\"))\n    emit_f(\"f_exp|\",  parse_f64(\"1e3\"))\n    emit_f(\"f_int|\",  parse_f64(\"42\"))\n    emit_f(\"f_bad|\",  parse_f64(\"abc\"))\n    emit_f(\"f_mt|\",   parse_f64(\"\"))\n    emit_f(\"f_dot2|\", parse_f64(\"1.2.3\"))\n    emit_i(\"i_ok|\",   parse_i64_checked(\"123\"))\n    emit_i(\"i_bad|\",  parse_i64_checked(\"12x\"))\n    emit_i(\"i_mt|\",   parse_i64_checked(\"\"))\n    emit_i(\"r_hex|\",  parse_i64_radix(\"ff\", 16))\n    emit_i(\"r_bin|\",  parse_i64_radix(\"1010\", 2))\n    emit_i(\"r_bad|\",  parse_i64_radix(\"zz\", 16))\n    0\n}\n"
 harness_misc_num_parse = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -353,7 +353,7 @@ harness_misc_num_parse = () i32 {
 // The value-case harness can't drive this (no module resolver + it clashes with libc redecls), so this
 // mirrors num_parse's custom `zenc run` + stdout-substring runner. These are the crypto correctness gate.
 // ════════════════════════════════════════════════════════════════════════════════
-HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ is_alpha } = std.text.ascii\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    empty: string_view := \"\"\n    abc: string_view := \"abc\"\n    abd: string_view := \"abd\"\n    hello: string_view := \"hello\"\n    fox: string_view := \"The quick brown fox jumps over the lazy dog\"\n    put(\"empty=\").s(mp.sha256_hex(empty.view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(abc.view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(fox.view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(abc.view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(hello.view()) == fnv1a(hello.view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(abc.view()) != fnv1a(abd.view())).nl()\n    0\n}\n"
+HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ is_alpha } = std.text.ascii\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    empty: StringView := \"\"\n    abc: StringView := \"abc\"\n    abd: StringView := \"abd\"\n    hello: StringView := \"hello\"\n    fox: StringView := \"The quick brown fox jumps over the lazy dog\"\n    put(\"empty=\").s(mp.sha256_hex(empty.view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(abc.view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(fox.view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(abc.view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(hello.view()) == fnv1a(hello.view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(abc.view()) != fnv1a(abd.view())).nl()\n    0\n}\n"
 harness_misc_hash = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -384,7 +384,7 @@ om_param_end = (sv: [u8], q: i64, depth: i64) i64 {
         })),
     })
 }
-om_param_list = (mp: MutPtr<Malloc>, src: string_view, q: i64) string_view {
+om_param_list = (mp: MutPtr<Malloc>, src: StringView, q: i64) StringView {
     e := src.view().om_param_end(q + 1, 1)
     mp.substr(src, q, e - q).expect("harness: oom")
 }
@@ -394,7 +394,7 @@ om_param_list = (mp: MutPtr<Malloc>, src: string_view, q: i64) string_view {
 // `\s` is approximated by space/tab between the tokens (the only whitespace real source uses there);
 // this only ever matches a SUBSET of the regex, so it can never raise a failure the regex wouldn't.
 // Byte access goes through a single `[u8]` view (O(1) index) — NOT `at` (which re-strlens per call).
-om_decls_survive = (mp: MutPtr<Malloc>, src: string_view, c: string_view) bool {
+om_decls_survive = (mp: MutPtr<Malloc>, src: StringView, c: StringView) bool {
     sv: [u8] := src.view()
     n := sv.len
     i: i64 := 0
@@ -444,13 +444,13 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: string_view, c: string_view) bool {
 // across the worker pool, each writing a gid-namespaced C output + P/F marker; Phase C reads them IN ORDER
 // and applies the SAME check (rc 0 AND output starts with HEAD AND every top-level decl name survives) —
 // byte-identical verdict to the old serial loop. Emitting the big compiler files serially was ~21s.
-om_acid_cmd = (mp: MutPtr<Malloc>, gid: i64, path: string_view) string_view {
-    z: string_view := ""
+om_acid_cmd = (mp: MutPtr<Malloc>, gid: i64, path: StringView) StringView {
+    z: StringView := ""
     outp := mp.zo_idpath("zo_acid", gid, ".c")
     rc := mp.zo_idpath("zo_acidrc", gid, ".txt")
     mp.zo_join([z, "if ./zen emit ", path, " > ", outp, " 2>/dev/null; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
-om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: string_view) bool {
+om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: StringView) bool {
     passed := mp.om_read_file(mp.zo_idpath("zo_acidrc", gid, ".txt")).starts_with("P")
     passed.match ({
         true  => {
@@ -469,7 +469,7 @@ harness_misc_acid = () i32 {
     out("\n")
     n := files.len
     base := assert_nonnull(malloc(n * 8))
-    cmds: [string_view] := base.slice(n)
+    cmds: [StringView] := base.slice(n)
     files.loop((h, i, f) {
         cmds[i] = mp.om_acid_cmd(i, f)
     })
@@ -582,7 +582,7 @@ om_arms = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
         },
     })
 }
-om_gen_many_params = (mp: MutPtr<Malloc>) string_view {
+om_gen_many_params = (mp: MutPtr<Malloc>) StringView {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "f* = (").expect("harness: oom")
     s = mp.om_decl_params(s, 0, 80)
@@ -591,7 +591,7 @@ om_gen_many_params = (mp: MutPtr<Malloc>) string_view {
     s = s.append_in(mp, ") }").expect("harness: oom")
     mp.finish_in(s).expect("harness: oom")
 }
-om_gen_many_fields = (mp: MutPtr<Malloc>) string_view {
+om_gen_many_fields = (mp: MutPtr<Malloc>) StringView {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "S*: { ").expect("harness: oom")
     s = mp.om_decl_fields(s, 0, 80)
@@ -600,7 +600,7 @@ om_gen_many_fields = (mp: MutPtr<Malloc>) string_view {
     s = s.append_in(mp, ").x79 }").expect("harness: oom")
     mp.finish_in(s).expect("harness: oom")
 }
-om_gen_many_arms = (mp: MutPtr<Malloc>) string_view {
+om_gen_many_arms = (mp: MutPtr<Malloc>) StringView {
     s := mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "test* = () i32 { (50).match({ ").expect("harness: oom")
     s = mp.om_arms(s, 0, 80)
@@ -631,14 +631,14 @@ harness_misc_differential = () i32 {
 // is idempotent, and on a REAL corpus emit(fmt F) == emit(F) and fmt(fmt F) == fmt(F).
 // ════════════════════════════════════════════════════════════════════════════════
 // fmt --ast a source string, returning the formatted output.
-om_do_fmt = (mp: MutPtr<Malloc>, src: string_view) string_view {
+om_do_fmt = (mp: MutPtr<Malloc>, src: StringView) StringView {
     save(mp.zo_path("zo_misc_fa.zen"), src, len(src))
     save(mp.zo_path("zo_misc_fa.out"), "", 0)
     shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_fa.zen > $ZT/zo_misc_fa.out 2>/dev/null"))
     mp.om_read_file(mp.zo_path("zo_misc_fa.out"))
 }
 // emit a source string, returning the emitted C.
-om_do_emit = (mp: MutPtr<Malloc>, src: string_view) string_view {
+om_do_emit = (mp: MutPtr<Malloc>, src: StringView) StringView {
     save(mp.zo_path("zo_misc_em.zen"), src, len(src))
     save(mp.zo_path("zo_misc_em.c"), "", 0)
     shell(mp.zo_cmd("./zen emit $ZT/zo_misc_em.zen > $ZT/zo_misc_em.c 2>/dev/null"))
@@ -647,14 +647,14 @@ om_do_emit = (mp: MutPtr<Malloc>, src: string_view) string_view {
 // `zenc run` a source string, returning the program's exit code (a value-returning main's value).
 // `shell` already DECODES the wait status (WEXITSTATUS, or 128 + signal), so its `.Ok` is the exit code
 // a normally-terminating program returned.
-om_run_rc = (src: string_view) i32 {
+om_run_rc = (src: StringView) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_misc_run.zen"), src, len(src))
     shell(mp.zo_cmd("./zen run $ZT/zo_misc_run.zen > /dev/null 2>&1")).expect("harness: shell")
 }
 // fmt --ast a source, then run the FORMATTED output; returns its exit code.
-om_fmt_then_run = (mp: MutPtr<Malloc>, src: string_view) i32 {
+om_fmt_then_run = (mp: MutPtr<Malloc>, src: StringView) i32 {
     save(mp.zo_path("zo_misc_ftr.zen"), src, len(src))
     shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_ftr.zen > $ZT/zo_misc_ftr_f.zen 2>/dev/null"))
     shell(mp.zo_cmd("./zen run $ZT/zo_misc_ftr_f.zen > /dev/null 2>&1")).expect("harness: shell")
@@ -664,44 +664,44 @@ om_fmt_then_run = (mp: MutPtr<Malloc>, src: string_view) i32 {
 // or not the command succeeded, so an unchained `cmp -s` of two failed runs compares two EMPTY files
 // and returns 0. Proven on the corpus variant below — pointing it at a nonexistent path left the
 // idempotency assertion green. Every producer must now succeed and produce bytes.
-om_fmt_idem = (src: string_view) bool {
+om_fmt_idem = (src: StringView) bool {
     m := Malloc(_: 0)
     mp := m.addr()
     save(mp.zo_path("zo_misc_id.zen"), src, len(src))
     shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_id.zen > $ZT/zo_misc_id1.zen 2>/dev/null && test -s $ZT/zo_misc_id1.zen && ./zen fmt --ast $ZT/zo_misc_id1.zen > $ZT/zo_misc_id2.zen 2>/dev/null && test -s $ZT/zo_misc_id2.zen && cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")).expect("harness: shell") == 0
 }
 // fmt(fmt F) == fmt(F) on a real corpus file at repo path `rel`.
-om_corpus_idem = (mp: MutPtr<Malloc>, rel: string_view) bool {
+om_corpus_idem = (mp: MutPtr<Malloc>, rel: StringView) bool {
     shell(mp.zo_cmd(mp.om_cat3("./zen fmt --ast ", rel, " > $ZT/zo_misc_c1.zen 2>/dev/null && test -s $ZT/zo_misc_c1.zen && ./zen fmt --ast $ZT/zo_misc_c1.zen > $ZT/zo_misc_c2.zen 2>/dev/null && test -s $ZT/zo_misc_c2.zen && cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen"))).expect("harness: shell") == 0
 }
 // emit(fmt F) == emit(F): the formatted AST resolves to byte-identical C (ZEN_ROOT=. resolves the
 // repo's std/compiler imports for both the original copy and the formatted copy identically).
-om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: string_view) bool {
-    z: string_view := ""
+om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: StringView) bool {
+    z: StringView := ""
     shell(mp.zo_cmd(mp.zo_join([z, "./zen fmt --ast ", rel, " > $ZT/zo_misc_cf.zen 2>/dev/null && test -s $ZT/zo_misc_cf.zen && cp ", rel, " $ZT/zo_misc_co.zen && ZEN_ROOT=. ./zen emit --force $ZT/zo_misc_co.zen > $ZT/zo_misc_eo.c 2>/dev/null && test -s $ZT/zo_misc_eo.c && ZEN_ROOT=. ./zen emit --force $ZT/zo_misc_cf.zen > $ZT/zo_misc_ef.c 2>/dev/null && test -s $ZT/zo_misc_ef.c && cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c"]))).expect("harness: shell") == 0
 }
 harness_misc_faithful = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     // fmt-output / emit / run scenarios (one bool per pytest assertion class).
-    o_ufcs := mp.om_do_fmt("len = (s: string_view) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
+    o_ufcs := mp.om_do_fmt("len = (s: StringView) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
     o_chain := mp.om_do_fmt("add = (a: i32, b: i32) i32 { a + b }\nmain = () i32 { 1.add(2).add(3) }\n")
     o_arms := mp.om_do_fmt("add = (a: i32, b: i32) i32 { a + b }\nOpt: Some(i32) | None\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\n")
     o_bin := mp.om_do_fmt("check = (n: i32) i32 { (n > 0).match ({ true => 1, false => 0 }) }\n")
-    o_tail := mp.om_do_fmt("len = (s: string_view) i32 { 5 }\nf = (s: string_view) i32 { s.len() }\n")
+    o_tail := mp.om_do_fmt("len = (s: StringView) i32 { 5 }\nf = (s: StringView) i32 { s.len() }\n")
     o_ret := mp.om_do_fmt("g = (n: i32) i32 {\n    (n < 0).match ({ true => { return 9 }, false => {} })\n    n\n}\n")
     o_imp := mp.om_do_fmt("{ println } = std.text.fmt\nhelper* = (n: i32) i32 { n }\nmain = () i32 { 0 }\n")
     o_lam := mp.om_do_fmt("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n")
     o_var := mp.om_do_fmt("sum = (xs: ...i32) i32 { 0 }\n")
     o_vdef := mp.om_do_fmt("Pixel: RGB(i32) | Blank = RGB(255)\n")
-    // an impl declared on `string_cstr` still formats under the canonical `string_view` receiver:
+    // an impl declared on `StringCstr` still formats under the canonical `StringView` receiver:
     // the three string types share ONE impl table (see parse_impl.canonical_impl_receiver).
-    o_simpl := mp.om_do_fmt("Label*: { label: (string_view) i32 }\nstring_cstr.impl(Label, { label = (s: string_view) i32 { 0 } })\n")
+    o_simpl := mp.om_do_fmt("Label*: { label: (StringView) i32 }\nStringCstr.impl(Label, { label = (s: StringView) i32 { 0 } })\n")
     // #61: a u64 literal above i64-max round-trips to its exact UNSIGNED decimal, never the signed-
     // normalized value (0xcbf29ce484222325 → 14695981039346656037, NOT -3750763034362895579).
     o_u64 := mp.om_do_fmt("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n")
-    o_emit := mp.om_do_emit("len = (s: string_view) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
-    f1 := run_suite("faithful_ast (fmt/run)", [o_emit.contains("len("), o_ufcs.contains("x.len()"), om_not(o_ufcs.contains("len(x)")), o_chain.contains("1.add(2).add(3)"), o_arms.contains(".Some(n) => n.add(1),"), o_arms.contains(".None    => 0,"), o_bin.contains("(n > 0).then({ 1 }, { 0 })"), om_not(o_bin.contains(".match")), o_tail.contains("s.len()"), om_not(o_tail.contains("return s.len()")), o_ret.contains("return 9"), o_imp.contains("{ println } = std.text.fmt"), o_imp.contains("helper* = (n: i32) i32"), o_lam.contains("(x: i32) i32 {"), om_not(o_lam.contains("x: void")), o_var.contains("xs: ...i32"), o_vdef.contains("Blank = RGB(255)"), o_simpl.contains("string_view.impl(Label"), om_not(o_simpl.contains("string_cstr.impl(Label")), o_u64.contains("14695981039346656037"), om_not(o_u64.contains("3750763034362895579")), om_fmt_idem("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n"), om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21, mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8, om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n")])
+    o_emit := mp.om_do_emit("len = (s: StringView) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
+    f1 := run_suite("faithful_ast (fmt/run)", [o_emit.contains("len("), o_ufcs.contains("x.len()"), om_not(o_ufcs.contains("len(x)")), o_chain.contains("1.add(2).add(3)"), o_arms.contains(".Some(n) => n.add(1),"), o_arms.contains(".None    => 0,"), o_bin.contains("(n > 0).then({ 1 }, { 0 })"), om_not(o_bin.contains(".match")), o_tail.contains("s.len()"), om_not(o_tail.contains("return s.len()")), o_ret.contains("return 9"), o_imp.contains("{ println } = std.text.fmt"), o_imp.contains("helper* = (n: i32) i32"), o_lam.contains("(x: i32) i32 {"), om_not(o_lam.contains("x: void")), o_var.contains("xs: ...i32"), o_vdef.contains("Blank = RGB(255)"), o_simpl.contains("StringView.impl(Label"), om_not(o_simpl.contains("StringCstr.impl(Label")), o_u64.contains("14695981039346656037"), om_not(o_u64.contains("3750763034362895579")), om_fmt_idem("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n"), om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21, mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8, om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n")])
     // PHASE 1: emit of `s.len()` still lowers to the flat `len(...)`
     // PHASE 2: fmt --ast keeps UFCS — `x.len()`, NOT `len(x)`
     // a multi-arg method chain round-trips with method args inside the parens
@@ -768,7 +768,7 @@ harness_misc_vbreak = () i32 {
 //  - shell() returns Result<i32, IoError> whose .Ok is the DECODED exit status (the shell `$?`
 //    convention): WEXITSTATUS for a normal exit, 127 for a command sh can't run, 128 + signal for a
 //    signal death. Before the fix it handed back the raw wait status with these folded together.
-om_shell_code = (cmd: string_view) i32 {
+om_shell_code = (cmd: StringView) i32 {
     shell(cmd).match ({
         .Ok(c)  => c,
         .Err(e) => 0 - 1,
@@ -781,9 +781,9 @@ om_shell_code = (cmd: string_view) i32 {
 // dots). (println/print stay best-effort and keep their i64 signatures — exercised by every other
 // value case that prints via fmt.)
 om_out_bytes_ok = () bool {
-    // `msg` is a `string_view`, not the literal itself: a view of a `string_literal`/`string_cstr` is
+    // `msg` is a `StringView`, not the literal itself: a view of a `StringLiteral`/`StringCstr` is
     // a read-only `Slice<u8>`, and `out_bytes` still declares a writable `[u8]` it never writes.
-    msg: string_view := "hi\n"
+    msg: StringView := "hi\n"
     out_bytes(msg.view()).match ({
         .Ok(n)  => n == 3,
         .Err(e) => false,
@@ -874,8 +874,8 @@ harness_misc_audit = () i32 {
 // ════════════════════════════════════════════════════════════════════════════════
 WS_HELP := "ws_f* = (x: i32) i32 { x + 1 }\nws_g* = (x: i32) i32 { x + 2 }\nws_h* = (x: i32) i32 { x + 3 }\nws_k* = (x: i32) i32 { x + 4 }\n"
 WS_MOD2 := "ws_m* = (x: i32) i32 { x + 5 }\nws_n* = (x: i32) i32 { x + 6 }\n"
-WS_A := "{ ws_f } = zo_ws_help\n{ ws_m } = sub.mod2\nEMB2 := \"m2 = sub.mod2\\n\"\nuse_sa = (s: string_view) i32 { 0 }\nmain = () i32 { ws_f(1) + ws_m(2) + EMB2.use_sa() }\n"
-WS_B := "{ ws_g } = zo_ws_help\nEMBED := \"{ ws_k } = zo_ws_help\\n\"\nuse_sb = (s: string_view) i32 { 0 }\nmain = () i32 { ws_g(2) + EMBED.use_sb() }\n"
+WS_A := "{ ws_f } = zo_ws_help\n{ ws_m } = sub.mod2\nEMB2 := \"m2 = sub.mod2\\n\"\nuse_sa = (s: StringView) i32 { 0 }\nmain = () i32 { ws_f(1) + ws_m(2) + EMB2.use_sa() }\n"
+WS_B := "{ ws_g } = zo_ws_help\nEMBED := \"{ ws_k } = zo_ws_help\\n\"\nuse_sb = (s: StringView) i32 { 0 }\nmain = () i32 { ws_g(2) + EMBED.use_sb() }\n"
 harness_misc_audit_ws = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()

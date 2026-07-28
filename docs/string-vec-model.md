@@ -34,6 +34,22 @@ is impossible by construction rather than by convention.
 differ only in what the checker will let you do. That is the good kind of type: it changes what
 compiles and changes nothing about what runs.
 
+### `StringCstr` is not one of the five
+
+The compiler also has a fourth string spelling, `StringCstr`, and it is deliberately absent from
+the table. The three axes above are ownership, mutability and growth; NUL-termination is none of
+them. It is a property of the *representation at the C boundary* — "there is a `\0` after the
+last byte, so a `const char*` handed to libc will terminate" — which is orthogonal to who owns
+the bytes and whether they can be written or grown. Folding it into the table would mean either
+inventing a role it does not fill or doubling every row into terminated/unterminated variants,
+and both would be lies about what the type is for.
+
+So `StringCstr` keeps the family prefix for spelling consistency and nothing else changed about
+it: it is the FFI-boundary spelling, it covers both `.rodata` literals and heap blocks from
+`sb().done()`, and a view of one is read-only. When the five roles land it will still be a
+separate axis, most likely a property carried alongside a role rather than a role of its own.
+Naming it honestly as an outsider is better than a forced fit.
+
 ## Creating them
 
 ```zen
@@ -119,10 +135,10 @@ being `Vec<u8>`.
 **Real now:** `String`, `Vec<T>`, views (as `[T]`), the `(a: Allocator)` sugar, `or_return`,
 sticky-error chaining (as `std.text.sb`).
 
-**Exists but misnamed:** three internal types, now with exactly three surface spellings —
-`string_literal`, `string_view`, `string_cstr` — each of which a diagnostic prints as itself.
-(The `str`, `text` and `Cstr` aliases are gone.) The names are still the old ones, so the
-CamelCase rename to `StringLiteral`/`StringView` remains ahead.
+**Real but partial:** three internal types, with exactly three surface spellings —
+`StringLiteral`, `StringView`, `StringCstr` — each of which a diagnostic prints as itself.
+(The `str`, `text` and `Cstr` aliases are gone, as are the old snake_case spellings; a
+`tests/harness_boundaries.zen` rule fails the build if any of the three comes back.)
 
 **Does not exist:** `StringConst`, `StringFixed`, `VecConst`, `VecFixed`, `freeze()`.
 
@@ -131,11 +147,11 @@ CamelCase rename to `StringLiteral`/`StringView` remains ahead.
 **1. Slices need a mutability bit.** DONE. Slices now carry the same kind tag pointers do:
 `Slice<T>` is the read-only window, `MutSlice<T>` the writable one, and `[T]` is the sugar for
 `MutSlice<T>`. Both are the same `{ptr, len}` layout. `.view()` propagates: a window over a
-`string_literal`/`string_cstr` is a `Slice<T>`, so this is now `error[slice-write]` at check time
+`StringLiteral`/`StringCstr` is a `Slice<T>`, so this is now `error[slice-write]` at check time
 instead of a segfault:
 
 ```zen
-s: string_cstr := "hello"
+s: StringCstr := "hello"
 v := s.view()            // Slice<u8> — a read-only window
 v[0] = 'H'               // error[slice-write]: cannot write through a read-only `Slice<T>`
 ```
@@ -146,8 +162,8 @@ The default stayed on `[T]` = writable, measured: making `[T]` read-only broke 2
 
 Immutability now has somewhere to live once you take a view, which is what `StringConst` and
 `StringFixed` needed. What is still missing for them is a type that says "owned, writable bytes":
-`string_cstr` today covers BOTH `.rodata` literals and heap blocks from `sb().done()`, so a view of
-one is conservatively read-only while a view of a plain `string_view` stays writable.
+`StringCstr` today covers BOTH `.rodata` literals and heap blocks from `sb().done()`, so a view of
+one is conservatively read-only while a view of a plain `StringView` stays writable.
 
 **2. The allocator decision.** `s.freeze()` and `s.drop()` taking no argument require the
 container to carry its allocator. Today the rule is: **carry the allocator and you give up
