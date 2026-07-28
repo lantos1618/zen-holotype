@@ -19,19 +19,23 @@
 // TEARDOWN: the pool is deliberately left open. With zero workers `p.live` (bumped by the scheduling
 // send) is never cleared, so `pool_quiesce_stop` would block by construction; the process exits instead.
 { to_exit } = std.core.bool
+{ gpa } = std.mem.heap
+{ view } = std.text.str
 { pool_drain_inline, pool_open } = std.concurrent.pool
 { Context, Receiver, dispatch } = std.concurrent.pool_actor
 pa = std.concurrent.pool_actor
 { HttpFetcher, HttpReplyMsg, http_fetch } = std.net.http_actor
-// the requester: counts the replies that actually landed.
+// the requester: counts the replies that actually landed. A DELIVERED reply's body is an owned copy
+// and becomes this actor's, so it is released here — the dropped one is freed by `reply_or_drop`.
 Sink*: {
     got: i64,
 }
 Sink.impl(Receiver, {
     receive = (s: MutPtr<Sink>, ctx: Context<HttpReplyMsg>) void {
         ctx.msg.match ({
-            .Done(_) => {
+            .Done(r) => {
                 s.got = s.got + 1
+                gpa().addr().release(r.body.view().ptr)
             },
         })
     }

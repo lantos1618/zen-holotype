@@ -16,7 +16,8 @@ halloc = std.mem.heap
 hm = std.collections.hmap
 { HMap } = std.collections.hmap
 { read_all } = std.io.stdin
-{ words } = std.text.str
+{ release_slice } = std.mem.alloc
+{ view, words } = std.text.str
 { Result, IoError } = std.core.result
 { formatln, arg_int, arg_str } = std.text.fmt
 // Bump the count for one word: `get_or(w, 0)` reads the current count (0 if absent),
@@ -41,6 +42,14 @@ main = () i32 {
     // formatln gives explicit control over the word/count layout.
     m.each((k, v) { formatln("{}: {}", [arg_str(k), arg_int(v)]) })
     formatln("{} distinct words", [arg_int(m.len())])
+    // Three owned things, freed in the order they stop being read: the map first, then the words —
+    // each its own copy out of `str.words`, and also the map's KEYS, so they have to outlive it —
+    // then their backbone, then the buffer `read_all` handed over.
     m.free(a)
+    ws.loop((h, i, w) {
+        a.release(w.view().ptr)
+    })
+    a.release_slice(ws)
+    a.release(text.view().ptr)
     0
 }

@@ -12,14 +12,18 @@
 { expect } = std.core.result
 { Heap } = std.mem.alloc
 { gpa } = std.mem.heap
-{ url_of, http_listen, serve_once, respond, no_headers, Request, Response } = std.net.http
+{ url_of, http_listen, serve_once, respond, no_headers, request_free, Request, Response } = std.net.http
+{ view } = std.text.str
 { spawn_http_fetcher, http_fetch, HttpReplyMsg } = std.net.http_actor
 { pool_open } = std.concurrent.pool
 { Context, Receiver, dispatch } = std.concurrent.pool_actor
 pa = std.concurrent.pool_actor
 BODY := "hello zen actors"    // 16 bytes
 // the app's receiver: whatever actor asked for the fetch — it just folds the reply into state.
+// `got` is not bookkeeping for show: the reply body is THIS actor's to release, and without it a
+// fetch that never answered would leave `body` as the literal placeholder and get freed as one.
 App*: {
+    got: bool,
     status: i64,
     body: StringView,
 }
@@ -27,6 +31,7 @@ App.impl(Receiver, {
     receive = (s: MutPtr<App>, ctx: Context<HttpReplyMsg>) void {
         ctx.msg.match ({
             .Done(r) => {
+                s.got = true
                 s.status = r.status
                 s.body = r.body
             },
@@ -43,18 +48,26 @@ main = () i32 {
     l := http_listen("127.0.0.1", 0).expect("demo: listen failed")
     fetcher := spawn_http_fetcher(8)
     app := pa.spawn_actor_heap(8, App(
+        got: false,
         status: 0,
         body: "",
     ), app_tramp)
     p := pool_open(2, 8)
-    p.send(fetcher, http_fetch(a.url_of("127.0.0.1", l.local_port(), "/"), app.ref_of(p)))
+    url := a.url_of("127.0.0.1", l.local_port(), "/")    // the sender's, until the reply is in
+    p.send(fetcher, http_fetch(url, app.ref_of(p)))
     // main is the server while the fetcher blocks on its worker: one connection, answered and closed.
-    a.serve_once(l, hello).expect("demo: serve failed")
+    req := a.serve_once(l, hello).expect("demo: serve failed")
+    a.request_free(req)
     l.close_listener()
     p.pool_quiesce_stop()
     st := pa.actor_state(app)
     formatln("status={} body={}", [arg_int(st.status), arg_str(st.body)])
     ok := st.status == 200 && st.body == "hello zen actors"
+    // quiescence is the proof the fetch is done with both: the url it read, and the body it sent us.
+    a.release(url.view().ptr)
+    st.got.then({
+        a.release(st.body.view().ptr)
+    })
     pa.close(fetcher)
     pa.close(app)
     p.pool_close()

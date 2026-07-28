@@ -15,6 +15,11 @@
 //   r.header("Content-Type").some_or("")        // case-insensitive lookup
 //   r.body_bytes                                // body as length-carrying [u8] (binary-safe)
 //   r.body                                      // same buffer as NUL-terminated text
+//   a.response_free(r)                          // hand every buffer in it back (see below)
+//
+// A PARSED message owns memory, so it has a matching release: `a.response_free(r)` for what the
+// client parsed, `a.request_free(q)` for what the server parsed, `a.url_free(u)` for `parse_url`.
+// Nothing else here leaves an allocation behind — every intermediate is freed where it is made.
 //
 // The SERVER half answers requests. It is here and not in a sibling module because a request is a
 // response with a different first line: `parse_parts` — the CRLFCRLF split, the header list, the
@@ -25,7 +30,8 @@
 //
 //   l := http_listen("127.0.0.1", 0).expect("listen")   // 0 = kernel-chosen ephemeral port
 //   hi = (a: MutPtr<Heap>, q: Request) Response { respond(200, a.no_headers(), "hi") }
-//   a.serve_once(l, hi)                        // accept one, answer it, close
+//   a.serve_once(l, hi)                        // accept one, answer it, close (its Ok is a Request:
+//                                              //   the caller's, and its `request_free`)
 //   a.serve_n(l, 0 - 1, hi)                    // ... or every connection until the listener dies
 //
 // Network/parse failures are `Result<_, HttpError>` values; internal allocation failures panic
@@ -98,6 +104,14 @@ lookup_header = (headers: [Header], name: StringView) Opt<StringView> {
     })
     res
 }
+// Release a PARSED response — what `parse_response`/`http_get`/`get` handed back. Every buffer in it
+// came from `a`: each header name and value, the header backbone, and the one allocation `body` and
+// `body_bytes` share. A response a SERVER built with `respond` holds the handler's own strings and is
+// not freed here.
+response_free* = (a: Allocator, r: Response) void {
+    a.release_headers(r.headers)
+    a.release_slice(r.body_bytes)
+}
 // ── response parsing (the testable core) ──────────────────────────────────────────────────────────────
 // byte index of the CRLFCRLF header/body boundary in `v`, or -1 if absent.
 crlfcrlf = (v: [u8]) i64 {
@@ -126,6 +140,24 @@ own_bytes = (a: Allocator, b: [u8]) [u8] {
     p.offset(b.len).store(0)
     out
 }
+// the inverse of `split`/`words`: a backbone of `n` slots plus one independent owned copy per field.
+// Every field this module cuts is either consumed into a fresh buffer or kept explicitly, so the
+// whole shape goes back through here.
+release_strs = (a: Allocator, xs: [StringView]) void {
+    xs.loop((h, i, x) {
+        a.release(x.view().ptr)
+    })
+    a.release_slice(xs)
+}
+// the inverse of `collect_headers`: backbone plus both halves of every pair. A header list a CALLER
+// built (`no_headers`/`one_header`) points at the caller's own strings and is NOT freed this way.
+release_headers = (a: Allocator, hs: [Header]) void {
+    hs.loop((h, i, hd) {
+        a.release(hd.name.view().ptr)
+        a.release(hd.value.view().ptr)
+    })
+    a.release_slice(hs)
+}
 // Everything an HTTP/1.1 request and response have in common: a first line whose MEANING differs
 // (status line vs request line) but whose position does not, the header list, and the resolved body.
 // Requests and responses share one parser because they share one grammar below the first line.
@@ -142,11 +174,15 @@ parse_parts = (a: Allocator, raw: [u8]) Result<MsgParts, HttpError> {
     out: Result<MsgParts, HttpError> := (sep < 0).match ({
         true  => err(malformed("http: no CRLFCRLF header terminator")),
         false => {
-            head := cstr(a.own_bytes(raw.take(sep)).ptr)
+            head := a.own_bytes(raw.take(sep))
             body_raw: [u8] := raw.drop(sep + 4)
-            lines := a.split(head, '\n')    // each line still carries a trailing '\r'
+            lines := a.split(cstr(head.ptr), '\n')    // each line still carries a trailing '\r'
             res: Result<MsgParts, HttpError> := a.collect_headers(lines).match ({
-                .Err(e)      => .Err(e),
+                .Err(e)      => {
+                    a.release(lines[0].view().ptr)    // `first` escapes on the Ok path only
+                    bad: Result<MsgParts, HttpError> := .Err(e)
+                    bad
+                },
                 .Ok(headers) => {
                     ok_res: Result<MsgParts, HttpError> := .Ok(MsgParts(
                         first: lines[0],
@@ -156,6 +192,16 @@ parse_parts = (a: Allocator, raw: [u8]) Result<MsgParts, HttpError> {
                     ok_res
                 },
             })
+            lines.loop((h, i, ln) {
+                // lines 1.. are consumed into the trimmed copies `collect_headers` cuts out of them —
+                // intermediates nothing above can reach. `lines[0]` is the exception: it leaves as
+                // `first`, so only the backbone around it goes.
+                (i > 0).then({
+                    a.release(ln.view().ptr)
+                })
+            })
+            a.release_slice(lines)
+            a.release(head.ptr)    // the scan buffer; every line is its own copy
             res
         },
     })
@@ -167,7 +213,12 @@ parse_response* = (a: Allocator, raw: [u8]) Result<Response, HttpError> {
         .Err(e) => .Err(e),
         .Ok(p)  => {
             res: Result<Response, HttpError> := a.parse_status(p.first).match ({
-                .Err(e)     => .Err(e),
+                .Err(e)     => {
+                    a.release_headers(p.headers)    // an unparsable status line strands the rest
+                    a.release_slice(p.body)
+                    bad: Result<Response, HttpError> := .Err(e)
+                    bad
+                },
                 .Ok(status) => {
                     ok_res: Result<Response, HttpError> := .Ok(Response(
                         status: status,
@@ -178,6 +229,7 @@ parse_response* = (a: Allocator, raw: [u8]) Result<Response, HttpError> {
                     ok_res
                 },
             })
+            a.release(p.first.view().ptr)    // the status line is read for its code and nothing else
             res
         },
     })
@@ -186,7 +238,7 @@ parse_response* = (a: Allocator, raw: [u8]) Result<Response, HttpError> {
 // status line -> numeric code: `HTTP/1.1 200 OK` -> 200. Rejects codes outside 100..599.
 parse_status = (a: Allocator, line: StringView) Result<i32, HttpError> {
     toks := a.words(line)
-    (toks.len < 2).match ({
+    out: Result<i32, HttpError> := (toks.len < 2).match ({
         true  => err(malformed("http: status line has fewer than two tokens")),
         false => toks[0].starts_with("HTTP/").match ({
             true  => {
@@ -199,6 +251,9 @@ parse_status = (a: Allocator, line: StringView) Result<i32, HttpError> {
             false => err(malformed("http: status line does not start with HTTP/")),
         }),
     })
+    // an `i32` is all that leaves — the tokens are a pure intermediate, freed here.
+    a.release_strs(toks)
+    out
 }
 // `s[start .. start+n]` with surrounding whitespace stripped, as ONE owned buffer. `trim` allocates a
 // fresh buffer out of whatever it is handed, so the `substr` feeding it is a pure intermediate that
@@ -216,13 +271,13 @@ collect_headers = (a: Allocator, lines: [StringView]) Result<[Header], HttpError
         name: "",
         value: "",
     ), n)
-    bad := false
+    // pairs written so far; short of `n` at the end means some line had no ':'
+    filled: i64 := 0
     lines.loop((h, i, line) {
         (i == 0 == false).then({
             ci := line.find(":")
             (ci < 0).match ({
                 true  => {
-                    bad = true
                     h.break
                 },
                 false => {
@@ -232,11 +287,20 @@ collect_headers = (a: Allocator, lines: [StringView]) Result<[Header], HttpError
                         name: nm,
                         value: val,
                     )
+                    filled = filled + 1
                 },
             })
         })
     })
-    bad.then({ err(malformed("http: header line missing ':'")) }, { ok(hs) })
+    (filled == n).match ({
+        true  => ok(hs),
+        false => {
+            // the `.Err` carries no headers, so the pairs already trimmed out are unreachable — they go
+            // back with the backbone. Only the written prefix is touched: `nbuf` leaves the rest unset.
+            a.release_headers(hs.take(filled))
+            err(malformed("http: header line missing ':'"))
+        },
+    })
 }
 // case-insensitive "does this Transfer-Encoding say chunked?". The lowercased copy is a one-question
 // intermediate — freed here, not left behind on every response that carries the header.
@@ -250,14 +314,24 @@ te_is_chunked = (a: Allocator, te: StringView) bool {
 // the read-to-EOF remainder verbatim. The chosen run is copied once into an owned NUL-terminated
 // buffer, so `body_bytes` keeps the true length and `body`/`cstr` stays valid.
 decide_body = (a: Allocator, headers: [Header], body_raw: [u8]) [u8] {
-    logical: [u8] := lookup_header(headers, "Transfer-Encoding").match ({
-        .Some(te) => a.te_is_chunked(te).then({ a.decode_chunked(body_raw) }, { body_raw }),
-        .None     => lookup_header(headers, "Content-Length").match ({
+    chunked := lookup_header(headers, "Transfer-Encoding").match ({
+        .Some(te) => a.te_is_chunked(te),
+        .None     => false,
+    })
+    logical: [u8] := chunked.match ({
+        true  => a.decode_chunked(body_raw),
+        false => lookup_header(headers, "Content-Length").match ({
             .Some(cl) => body_raw.take(cl.parse_int()),
             .None     => body_raw,
         }),
     })
-    a.own_bytes(logical)
+    out := a.own_bytes(logical)
+    // the other two runs are views into `body_raw`, but a DECODED one is its own buffer — and `out`
+    // is the copy that leaves, so the decode's scratch goes back here.
+    chunked.then({
+        a.release_slice(logical)
+    })
+    out
 }
 // ── chunked transfer-encoding decode ──────────────────────────────────────────────────────────────────
 // The three `[u8]` SCANS still here (`crlfcrlf` above, `hex_end`, `after_lf`) are not HTTP either —
@@ -310,13 +384,18 @@ decode_chunked = (a: Allocator, bv: [u8]) [u8] {
     a.chunk_loop(bv, 0, sb).bytes()
 }
 // ── request construction + the live socket path ───────────────────────────────────────────────────────
-// `n` as decimal text — the header values that are numbers (Content-Length, a port, a status code).
-decimal = (a: Allocator, n: i64) StringView {
-    a
+// append `n` as decimal text — the header values that are numbers (Content-Length, a port, a status
+// code). The rendered digits are a pure intermediate: the builder copies them in, so they are freed
+// here rather than left behind once per number on every message this module builds.
+append_decimal = (a: Allocator, sb: String, n: i64) String {
+    d: StringView := a
         .integer(n)
         .expect("http: oom")
         .finish_in(a)
         .expect("http: oom")
+    out := a.append_in(sb, d).expect("http: oom")
+    a.release(d.view().ptr)
+    out
 }
 // append a CRLF line terminator to the builder.
 crlf = (a: Allocator, sb: String) String { a.append_in(sb, "\r\n").expect("http: oom") }
@@ -349,7 +428,7 @@ build_request = (
     })
     (body.view().len > 0).then({
         sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
-        sb = a.append_in(sb, a.decimal(to_i64(body.view().len))).expect("http: oom")
+        sb = a.append_decimal(sb, to_i64(body.view().len))
         sb = a.crlf(sb)
     })
     sb = a.crlf(sb)    // blank line: end of headers
@@ -398,10 +477,14 @@ request* = (
             .Ok(w)  => {
                 raw := a.read_all(c)
                 c.close_conn()
-                a.parse_response(raw)
+                res := a.parse_response(raw)
+                // the parse COPIES everything it keeps, so the wire bytes end here.
+                a.release_slice(raw)
+                res
             },
         }),
     })
+    a.release(req.view().ptr)    // the serialised request is on the wire (or the dial failed)
     out
 }
 // an empty header list — the common case for a plain GET.
@@ -436,53 +519,74 @@ Url*: {
     path: StringView,
 }
 // parse "http://host[:port][/path]" (scheme optional) into a Url. Port defaults to 80, path to "/".
+// `host` and `path` are cut fresh in EVERY shape of input — never a view into `url` and never into
+// each other — so `url_free` releases exactly two buffers and can never free a literal twice.
 parse_url* = (a: Allocator, url: StringView) Result<Url, HttpError> {
     url.starts_with("https://").match ({
         true  => err(malformed("http: https is not supported (no TLS)")),
         false => {
-            rest := url.starts_with("http://").match ({
-                true  => a.substr(url, 7, url.view().len - 7).expect("http: oom"),
-                false => url,
-            })
-            rest.contains("://").match ({
+            skip := url.starts_with("http://").then({ 7 }, { 0 })
+            rest := a.substr(url, skip, url.view().len - skip).expect("http: oom")
+            out: Result<Url, HttpError> := rest.contains("://").match ({
                 true  => err(malformed("http: unsupported url scheme")),
                 false => {
                     slash := rest.find("/")
-                    auth := (slash < 0).match ({
-                        true  => rest,
-                        false => a.substr(rest, 0, slash).expect("http: oom"),
-                    })
+                    alen := (slash < 0).then({ rest.view().len }, { slash })    // the authority run
+                    auth := a.substr(rest, 0, alen).expect("http: oom")
                     path := (slash < 0).match ({
-                        true  => "/",
+                        true  => a.substr("/", 0, 1).expect("http: oom"),
                         false => a.substr(rest, slash, rest.view().len - slash).expect("http: oom"),
                     })
                     colon := auth.find(":")
-                    host := (colon < 0).match ({
-                        true  => auth,
-                        false => a.substr(auth, 0, colon).expect("http: oom"),
-                    })
+                    host := a
+                        .substr(auth, 0, (colon < 0).then({ alen }, { colon }))
+                        .expect("http: oom")
                     port := (colon < 0).match ({
                         true  => 80,
-                        false => a
-                            .substr(auth, colon + 1, auth.view().len - (colon + 1))
-                            .expect("http: oom")
-                            .parse_int(),
+                        false => {
+                            digits := a
+                                .substr(auth, colon + 1, alen - (colon + 1))
+                                .expect("http: oom")
+                            n := digits.parse_int()
+                            a.release(digits.view().ptr)
+                            n
+                        },
                     })
-                    (host.view().len == 0).match ({
-                        true  => err(malformed("http: empty host in url")),
+                    // "" is the accept; anything else is the rejection reason, and one test carries
+                    // both so the two owned cuts have a single place to go back.
+                    why := (host.view().len == 0).match ({
+                        true  => "http: empty host in url",
                         false => (port < 1 || port > 65535).match ({
-                            true  => err(malformed("http: port out of range in url")),
-                            false => ok(Url(
-                                host: host,
-                                port: to_i32(port),
-                                path: path,
-                            )),
+                            true  => "http: port out of range in url",
+                            false => "",
                         }),
                     })
+                    res: Result<Url, HttpError> := (why == "").match ({
+                        true  => ok(Url(
+                            host: host,
+                            port: to_i32(port),
+                            path: path,
+                        )),
+                        false => {
+                            a.release(host.view().ptr)    // a rejected Url never reaches `url_free`
+                            a.release(path.view().ptr)
+                            bad: Result<Url, HttpError> := err(malformed(why))
+                            bad
+                        },
+                    })
+                    a.release(auth.view().ptr)    // `host` and the port digits are cut OUT of it
+                    res
                 },
             })
+            a.release(rest.view().ptr)
+            out
         },
     })
+}
+// release a parsed Url — `parse_url` owns `host` and `path` and nothing else in the struct.
+url_free* = (a: Allocator, u: Url) void {
+    a.release(u.host.view().ptr)
+    a.release(u.path.view().ptr)
 }
 // build "http://host:port/path" — the inverse of parse_url (handy when the port is ephemeral).
 url_of* = (a: Allocator, host: StringView, port: i32, path: StringView) StringView {
@@ -490,7 +594,7 @@ url_of* = (a: Allocator, host: StringView, port: i32, path: StringView) StringVi
     sb = a.append_in(sb, "http://").expect("http: oom")
     sb = a.append_in(sb, host).expect("http: oom")
     sb = a.append_in(sb, ":").expect("http: oom")
-    sb = a.append_in(sb, a.decimal(to_i64(port))).expect("http: oom")
+    sb = a.append_decimal(sb, to_i64(port))
     sb = a.append_in(sb, path).expect("http: oom")
     a.finish_in(sb).expect("http: oom")
 }
@@ -509,7 +613,12 @@ http_request* = (
 ) Result<Response, HttpError> {
     a.parse_url(url).match ({
         .Err(e) => err(e),
-        .Ok(u)  => a.request(method, u.host, u.port, u.path, headers, body),
+        .Ok(u)  => {
+            out := a.request(method, u.host, u.port, u.path, headers, body)
+            // the Url is this call's private intermediate; only the Response is the caller's.
+            a.url_free(u)
+            out
+        },
     })
 }
 // ── server side: answering a request ──────────────────────────────────────────────────────────────────
@@ -524,6 +633,14 @@ Request*: {
     body_bytes: [u8],
     header = (r: Request, name: StringView) Opt<StringView> { lookup_header(r.headers, name) }
 }
+// Release a PARSED request — `serve_once`'s `Ok` value. `response_free`'s mirror, plus the two
+// tokens cut out of the request line.
+request_free* = (a: Allocator, r: Request) void {
+    a.release(r.method.view().ptr)
+    a.release(r.path.view().ptr)
+    a.release_headers(r.headers)
+    a.release_slice(r.body_bytes)
+}
 // parse a raw HTTP/1.1 request (`<method> <target> HTTP/1.1`, CRLF headers, blank line, body). Only
 // the first line is parsed here — every other byte goes through the same `parse_parts` the client's
 // `parse_response` uses, so there is exactly one header parser in this module.
@@ -532,7 +649,8 @@ parse_request* = (a: Allocator, raw: [u8]) Result<Request, HttpError> {
         .Err(e) => .Err(e),
         .Ok(p)  => {
             toks := a.words(p.first)
-            res: Result<Request, HttpError> := (toks.len < 2).match ({
+            keep := toks.len >= 2    // method + target; a shorter request line is malformed
+            res: Result<Request, HttpError> := (keep == false).match ({
                 true  => err(malformed("http: request line has fewer than two tokens")),
                 false => {
                     ok_res: Result<Request, HttpError> := .Ok(Request(
@@ -550,12 +668,18 @@ parse_request* = (a: Allocator, raw: [u8]) Result<Request, HttpError> {
                 // allocation. The Request keeps tokens 0 and 1 (method, path) and nothing else: the
                 // backbone and every token past the second — "HTTP/1.1" on every single request — are
                 // unreachable the moment this returns, so they are released here. The two kept tokens
-                // are NOT freed; they belong to the caller with the rest of the Request.
-                (i >= 2).then({
+                // are NOT freed; they belong to the caller with the rest of the Request — unless there
+                // is no Request, in which case nothing at all escapes.
+                (i >= 2 || keep == false).then({
                     a.release(t.view().ptr)
                 })
             })
             a.release_slice(toks)
+            a.release(p.first.view().ptr)    // the request line is read only through `toks`
+            (keep == false).then({
+                a.release_headers(p.headers)
+                a.release_slice(p.body)
+            })
             res
         },
     })
@@ -598,7 +722,7 @@ respond* = (status: i32, headers: [Header], body: StringView) Response {
 build_response* = (a: Allocator, r: Response) [u8] {
     sb := a.init(16).expect("http: oom")
     sb = a.append_in(sb, "HTTP/1.1 ").expect("http: oom")
-    sb = a.append_in(sb, a.decimal(to_i64(r.status))).expect("http: oom")
+    sb = a.append_decimal(sb, to_i64(r.status))
     sb = a.append_in(sb, " ").expect("http: oom")
     sb = a.append_in(sb, status_reason(r.status)).expect("http: oom")
     sb = a.crlf(sb)
@@ -609,7 +733,7 @@ build_response* = (a: Allocator, r: Response) [u8] {
         sb = a.crlf(sb)
     })
     sb = a.append_in(sb, "Content-Length: ").expect("http: oom")
-    sb = a.append_in(sb, a.decimal(r.body_bytes.len)).expect("http: oom")
+    sb = a.append_decimal(sb, r.body_bytes.len)
     sb = a.crlf(sb)
     sb = a.append_in(sb, "Connection: close").expect("http: oom")
     sb = a.crlf(sb)
@@ -626,14 +750,23 @@ wire_len = (a: Allocator, raw: [u8]) i64 {
     (sep < 0).match ({
         true  => 0 - 1,
         false => {
-            head := cstr(a.own_bytes(raw.take(sep)).ptr)
-            body: i64 := a.collect_headers(a.split(head, '\n')).match ({
-                .Ok(hs) => lookup_header(hs, "Content-Length").match ({
-                    .Some(cl) => cl.parse_int(),
-                    .None     => 0,
-                }),
+            head := a.own_bytes(raw.take(sep))
+            lines := a.split(cstr(head.ptr), '\n')
+            body: i64 := a.collect_headers(lines).match ({
+                .Ok(hs) => {
+                    n := lookup_header(hs, "Content-Length").match ({
+                        .Some(cl) => cl.parse_int(),
+                        .None     => 0,
+                    })
+                    a.release_headers(hs)
+                    n
+                },
                 .Err(e) => 0,
             })
+            // a pure MEASUREMENT of `raw`: one `i64` leaves, and this runs once per recv, so every
+            // buffer the re-parse touched goes straight back.
+            a.release_strs(lines)
+            a.release(head.ptr)
             sep + 4 + body
         },
     })
@@ -681,19 +814,27 @@ serve_once*<A: Allocator> = (
     out: Result<Request, HttpError> := l.accept_conn().match ({
         .Err(e) => err(listen_err(e)),
         .Ok(c)  => {
-            res: Result<Request, HttpError> := a.parse_request(a.read_request(c)).match ({
+            raw := a.read_request(c)
+            res: Result<Request, HttpError> := a.parse_request(raw).match ({
                 .Err(e)  => {
-                    c.send(a.build_response(respond(400, a.no_headers(), "")))
+                    wire := a.build_response(respond(400, a.no_headers(), ""))
+                    c.send(wire)
+                    a.release_slice(wire)
                     err(e)
                 },
                 .Ok(req) => {
-                    sent: Result<Request, HttpError> := c.send(a.build_response(handler(a, req))).match ({
+                    wire := a.build_response(handler(a, req))
+                    sent: Result<Request, HttpError> := c.send(wire).match ({
                         .Ok(n)  => ok(req),
                         .Err(e) => err(io_err(e)),
                     })
+                    // the serialised answer is on the wire; the Request that escapes is the
+                    // caller's to `request_free`, and a handler owns whatever IT allocated.
+                    a.release_slice(wire)
                     sent
                 },
             })
+            a.release_slice(raw)    // parsed into fresh buffers, never kept
             c.close_conn()
             res
         },
@@ -714,7 +855,10 @@ serve_n*<A: Allocator> = (
     live := true
     @while (live && (n < 0 || served < n)) {
         live = a.serve_once(l, handler).match ({
-            .Ok(r)  => true,
+            .Ok(r)  => {
+                a.request_free(r)    // the loop is the owner here — nothing above ever sees it
+                true
+            },
             .Err(e) => fatal(e).then({ false }, { true }),
         })
         served = live.then({ served + 1 }, { served })

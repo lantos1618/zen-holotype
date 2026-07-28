@@ -43,7 +43,7 @@ GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zen build regen clean harness harness-fast bench bench-compiler bench-valgrind difftest docs-check ffi-verify lint-bounds asan setup-git resolve-seed
+.PHONY: zen build regen clean harness harness-fast bench bench-compiler bench-valgrind difftest docs-check ffi-verify leak-sweep lint-bounds asan setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -169,6 +169,16 @@ lint-bounds: zen
 # signal counts. Slow (a full ASan rebuild), so it is its own target and its own CI job.
 asan: zen
 	cd $(ROOT) && ./scripts/fuzz-build.sh && $(ZENC) run tools/fuzz-corpus.zen $(ROOT)
+
+# Examples LEAK gate (scripts/leak-sweep.sh): build every examples/*.zen and run it under valgrind on
+# a representative invocation, failing on any `definitely lost` / `indirectly lost` block or valgrind
+# error. `bench-valgrind` above sweeps the BENCH suite and `asan` sweeps the fixture corpus; neither
+# ever ran an example, which is how six of them came to leak (docs/memory-audit-2026-07-26.md).
+# Fast (~7s), so `make harness` runs it too (harness_build's "build shell" suite) and this target is
+# the one to run by hand while fixing a leak.
+#   make -f bootstrap/Makefile leak-sweep
+leak-sweep: zen
+	cd $(ROOT) && ./scripts/leak-sweep.sh
 
 # FFI drift gate: prove std's hand-written foreign prototypes (src/std/c/libc.zen and friends)
 # match the REAL system headers. Reuses `zenc emit` (foreign decls lower to bare C prototypes),

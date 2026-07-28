@@ -2467,6 +2467,10 @@ harness_build_run* = () i32 {
             cmd: "printf 'the cat sat\\non the mat\\nthe cat ran\\n' > $ZT/ztp.txt && ./zen run examples/textproc.zen $ZT/ztp.txt > $ZT/ztp1.txt 2>/dev/null && printf '3 9 35\\n' | cmp -s - $ZT/ztp1.txt && printf 'a\\000b\\nc\\n' > $ZT/ztp.bin && ./zen run examples/textproc.zen $ZT/ztp.bin > $ZT/ztp2.txt 2>/dev/null && printf '2 2 6\\n' | cmp -s - $ZT/ztp2.txt && ./zen run examples/textproc.zen grep cat $ZT/ztp.txt > $ZT/ztp3.txt 2>/dev/null && printf 'the cat sat\\nthe cat ran\\n' | cmp -s - $ZT/ztp3.txt && ./zen run examples/textproc.zen re '^the .*t$' < $ZT/ztp.txt > $ZT/ztp4.txt 2>/dev/null && printf 'the cat sat\\n' | cmp -s - $ZT/ztp4.txt && { ./zen run examples/textproc.zen grep zzz $ZT/ztp.txt > /dev/null 2>&1; test \"$?\" = 1; } && { ./zen run examples/textproc.zen re '(' $ZT/ztp.txt > $ZT/ztp5.txt 2>/dev/null; test \"$?\" = 2; } && grep -Fq 'bad regex' $ZT/ztp5.txt",
         ),
         ShellCase(
+            name: "examples_leak_sweep",
+            cmd: "./scripts/leak-sweep.sh > $ZT/zleak.txt 2>&1 || { cat $ZT/zleak.txt; false; }",
+        ),
+        ShellCase(
             name: "tools_sigs_signature_map",
             cmd: "./zen run tools/sigs.zen tests/fixtures/sigs > $ZT/sigs.txt 2>/dev/null && cmp -s tests/fixtures/sigs/expected.txt $ZT/sigs.txt",
         ),
@@ -2899,6 +2903,12 @@ harness_build_run* = () i32 {
             cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
         ),
     ])
+    // The examples LEAK gate (scripts/leak-sweep.sh, also `make leak-sweep`): every examples/*.zen
+    // built and run under valgrind, failing on `definitely lost` / `indirectly lost` / any valgrind
+    // error. It lives here rather than in its own suite because these `zen run examples/…` cases
+    // are its neighbours: they prove the examples still WORK, this proves they give their memory
+    // back. The script fails closed — missing valgrind, a build failure, a timeout, or output it
+    // cannot parse are all failures, so this case can never pass by not running.
     // `sizeof` must never reach the js floor: a runtime `sizeof(name)` can only guess, and the
     // guess it used to make (8, for every type) is the miscompile js_memory_battery pins. The
     // emitter resolves it to a literal, so the emitted JS names no such helper.

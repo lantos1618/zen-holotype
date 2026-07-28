@@ -167,6 +167,8 @@ drain_stdin = (a: Allocator) Result<String, IoError> {
 // Reads stdin to EOF into one allocator-owned NUL-terminated view (the stdin twin of
 // std.io.file.contents_in — `a.contents_in("/dev/stdin")` needs a seekable fd; this doesn't).
 // TEXT surface: an embedded NUL truncates the view — use read_all_bytes for binary-safe reads.
+// The buffer is the CALLER's: release it via `a.release(text.view().ptr)` (or let an arena reclaim
+// it), exactly like read_line's line. Every internal scratch block is already freed by drain_stdin.
 read_all* = (a: Allocator) Result<StringView, IoError> {
     a.drain_stdin().match ({
         .Ok(s)  => s.finish_in(a).match ({
@@ -178,7 +180,7 @@ read_all* = (a: Allocator) Result<StringView, IoError> {
 }
 // Reads stdin to EOF into one allocator-owned length-carrying `[u8]` — BINARY-SAFE: embedded NULs are
 // preserved (the true byte count rides in the slice length). Pipe images / gzip / any non-text stream
-// through a Zen filter without truncation.
+// through a Zen filter without truncation. Also the CALLER's buffer: `a.release_slice(bytes)`.
 read_all_bytes* = (a: Allocator) Result<[u8], IoError> {
     a.drain_stdin().match ({
         .Ok(s)  => ok(s.bytes()),

@@ -28,8 +28,9 @@
 // std.collections' vec/hmap and std.sys.os. Pass `heap.gpa().addr()`, an arena, or any other allocator;
 // callers who already passed a `Malloc` keep working unchanged (`Malloc` still satisfies `A`).
 //
-// MEMORY. Parsed strings and object keys are allocator-owned NUL-terminated copies. Nothing here
-// frees on the error path — parse, consume, and drop (or back it with an arena and reset).
+// MEMORY. Parsed strings and object keys are allocator-owned NUL-terminated copies. On the SUCCESS
+// path `a.value_free(v)` gives the whole tree back; on the ERROR path nothing here frees the partial
+// tree, so back a fallible parse with an arena and reset it.
 //
 //   heap = std.mem.heap
 //   a := heap.gpa()
@@ -53,7 +54,7 @@
 // code point, UTF-8 encoded; surrogate PAIRS are not recombined). Encode re-escapes \" \\ \n \r
 // \t and emits \u00XX for the remaining control bytes (< 0x20); all other bytes (incl. UTF-8
 // continuation bytes) pass through verbatim.
-{ Allocator } = std.mem.alloc
+{ Allocator, release_slice } = std.mem.alloc
 { Result, Opt, IoError, err, expect } = std.core.result
 { String, new_in, push_in, append_in, append_slice_in, finish_in } = std.text.string
 { view, substr_in } = std.text.str
@@ -539,6 +540,30 @@ parse_value = (
         },
     })
 }
+// Release a parsed `Value` and everything hanging off it. What `parse` builds is a pure OWNING tree —
+// every `.Str`, every object key, and both backbones are their own fresh block, and no two nodes share
+// one — so a post-order walk frees each exactly once. Without this a program that outlives one document
+// has no way to reclaim it: the module's "parse, consume, and drop" only ends the story for a caller
+// whose allocator is an arena, and jq-shaped tools on the heap are not that caller.
+value_free* = (a: Allocator, v: Value) void {
+    v.match ({
+        .Str(s)  => a.release(s.view().ptr),
+        .Arr(xs) => {
+            xs.loop((h, i, x) {
+                a.value_free(x)
+            })
+            a.release_slice(xs)
+        },
+        .Obj(o)  => {
+            o.entries.loop((h, i, e) {
+                a.release(e.key.view().ptr)
+                a.value_free(e.val)
+            })
+            a.release_slice(o.entries)
+        },
+        _        => { },
+    })
+}
 // ── public parse ───────────────────────────────────────────────────────────────
 // Parse a complete JSON document. Returns Err on any malformed input, including
 // trailing non-whitespace after the value.
@@ -665,24 +690,21 @@ write_obj = (a: Allocator, sb: String, o: Object) String {
     })
     out.push_in(a, '}').jok()
 }
+// `integer_in`/`float_in` render into a block of their OWN, which `append_in` only COPIES out of —
+// a pure intermediate nothing above can reach, released here rather than leaked once per number
+// serialized (the same shape as the parser's number token at `.Int`/`.Num` decode).
+write_number = (a: Allocator, sb: String, digits: String) String {
+    txt := digits.finish_in(a).jfin()
+    out := sb.append_in(a, txt).jok()
+    a.release(txt.view().ptr)
+    out
+}
 write_value = (a: Allocator, sb: String, v: Value) String {
     v.match ({
         .Null    => sb.append_in(a, "null").jok(),
         .Bool(b) => b.then({ sb.append_in(a, "true").jok() }, { sb.append_in(a, "false").jok() }),
-        .Int(i)  => sb
-            .append_in(a, a
-                .integer_in(i)
-                .jok()
-                .finish_in(a)
-                .jfin())
-            .jok(),
-        .Num(n)  => sb
-            .append_in(a, a
-                .float_in(n)
-                .jok()
-                .finish_in(a)
-                .jfin())
-            .jok(),
+        .Int(i)  => a.write_number(sb, a.integer_in(i).jok()),
+        .Num(n)  => a.write_number(sb, a.float_in(n).jok()),
         .Str(s)  => a.write_str_lit(sb, s),
         .Arr(xs) => a.write_arr(sb, xs),
         .Obj(o)  => a.write_obj(sb, o),

@@ -12,12 +12,12 @@
 // With no [file], JSON is read from stdin. Output is std.format.json's 2-space `pretty`.
 // All failures (missing file, bad JSON, bad path) are values: a clean message, a non-zero exit.
 json = std.format.json
-{ Value, JsonError } = std.format.json
+{ Value, JsonError, value_free } = std.format.json
 { Result, expect, name } = std.core.result
 { gpa } = std.mem.heap
 { Allocator } = std.mem.alloc
 { println, formatln, arg_str, arg_int } = std.text.fmt
-{ len, at, substr, cat, parse_int } = std.text.str
+{ len, at, substr, cat, parse_int, view } = std.text.str
 { read_all } = std.io.stdin
 { contents } = std.io.file
 { argc, arg } = std.sys.os
@@ -36,6 +36,12 @@ report_bad_json = (e: JsonError) i64 {
     })
 }
 // ── filter engine ─────────────────────────────────────────────────────────────
+// Every `.Err` below carries an OWNED message, so `main` has exactly one rule — release it — rather
+// than having to tell an allocated message from a literal at run time (handing .rodata to free()
+// aborts). `cat` with an empty tail is the copy.
+fail = (a: Allocator, msg: StringView, tail: StringView) Result<Value, StringView> {
+    .Err(a.cat(msg, tail))
+}
 // Scan a field name starting at i, stopping at the next '.' or '['.
 scan_key = (s: StringView, i: i64) i64 {
     (i >= s.len()).match ({
@@ -79,13 +85,14 @@ apply = (a: Allocator, cur: Value, s: StringView, i: i64) Result<Value, StringVi
                 false => 0,
             })
             key := a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed")
-            return json.get(cur, key).match ({
+            // `key` is a copy out of the FILTER text, not part of the document, so it dies with this
+            // segment — after the lookup, and after the miss message that quotes it.
+            step := json.get(cur, key).match ({
                 .Some(nv) => a.apply(nv, s, j),
-                .None     => {
-                    miss: Result<Value, StringView> := .Err(a.cat("jq: no such field: ", key))
-                    miss
-                },
+                .None     => a.fail("jq: no such field: ", key),
             })
+            a.release(key.view().ptr)
+            return step
         },
         false => 0,
     })
@@ -94,30 +101,24 @@ apply = (a: Allocator, cur: Value, s: StringView, i: i64) Result<Value, StringVi
             j := s.scan_idx(i + 1)
             (j == i + 1 || j >= s.len() || s.at(j) != ']').match ({
                 true  => {
-                    bad: Result<Value, StringView> := .Err("jq: malformed index (expected [N])")
-                    return bad
+                    return a.fail("jq: malformed index (expected [N])", "")
                 },
                 false => 0,
             })
-            idx := a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed").parse_int()
+            digits := a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed")
+            idx := digits.parse_int()
+            a.release(digits.view().ptr)
             return json.as_arr(cur).match ({
                 .Some(xs) => (idx < xs.len).match ({
                     true  => a.apply(xs[idx], s, j + 1),
-                    false => {
-                        oob: Result<Value, StringView> := .Err("jq: index out of range")
-                        oob
-                    },
+                    false => a.fail("jq: index out of range", ""),
                 }),
-                .None     => {
-                    nota: Result<Value, StringView> := .Err("jq: not an array")
-                    nota
-                },
+                .None     => a.fail("jq: not an array", ""),
             })
         },
         false => 0,
     })
-    syn: Result<Value, StringView> := .Err("jq: bad filter syntax (expected '.' or '[')")
-    syn
+    a.fail("jq: bad filter syntax (expected '.' or '[')", "")
 }
 main = () i32 {
     h := gpa()
@@ -144,20 +145,30 @@ main = () i32 {
     doc := json.parse(a, src).match ({
         .Err(e) => {
             report_bad_json(e)
+            a.release(src.view().ptr)
             return 1
         },
         .Ok(v)  => v,
     })
-    a.apply(doc, filter, 0).match ({
+    // `sel` is a BORROWED subtree of `doc`, so only `doc` is freed — and last, after the selection
+    // has been rendered. `src` is the one buffer the reader handed over; the parse copied every
+    // string it kept, so it goes back independently.
+    rc := a.apply(doc, filter, 0).match ({
         .Err(msg) => {
             println(msg)
+            a.release(msg.view().ptr)
             1
         },
         .Ok(sel)  => {
             // json.pretty is the 2-space indented encoder — the whole hand-rolled printer this
             // example used to carry is one library call now.
-            println(json.pretty(a, sel))
+            out := json.pretty(a, sel)
+            println(out)
+            a.release(out.view().ptr)
             0
         },
     })
+    a.value_free(doc)
+    a.release(src.view().ptr)
+    rc
 }
