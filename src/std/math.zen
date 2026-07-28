@@ -19,6 +19,7 @@
 // The float f-prefixed helpers (`fabs`/`fmin`/`fmax`/`fpow`/`fsign`) deliberately dodge common identifiers.
 //
 // These integer helpers deliberately use i64; the language/backend also support the other widths.
+{ times } = std.core.count    // the count loop — `@while` belongs in the primitive, not here
 // ── constants ───────────────────────────────────────────────────────────────────────────────────────
 PI* := 3.141592653589793    // π
 E* := 2.718281828459045    // Euler's number e
@@ -53,11 +54,7 @@ pow_i* = (base: i64, exp: i64) i64 {
         true  => 0,
         false => {
             r := 1
-            e := exp
-            @while (e > 0) {
-                r = r * base
-                e = e - 1
-            }    // iterative: a huge exp must not recurse
+            exp.times((step) { r = r * base })    // count loop, not recursion: a huge exp must stay flat-stack
             r
         },
     })
@@ -70,6 +67,8 @@ ipow* = (base: i64, exp: i64) i64 {
         false => {
             r := 1
             b := base
+            // NOT a count loop: `e` HALVES per step, so the trip count is log2(exp) and the step is not
+            // 1 — `times`/`upto` cannot express it. This is one of the `@while` sites that stays.
             e := exp
             @while (e > 0) {
                 (e % 2 == 1).then({
@@ -89,6 +88,8 @@ isqrt* = (n: i64) i64 {
         true  => 0,
         false => {
             x := n
+            // NOT a count loop: it runs until Newton's iterate stops improving — no trip count exists to
+            // hand `times`. This is one of the `@while` sites that stays.
             y := (x + 1) / 2
             @while (y < x) {
                 x = y
@@ -129,11 +130,7 @@ fmax* = (a: f64, b: f64) f64 { (a > b).then({ a }, { b }) }
 // fpow(b, 0) = 1.0; negative exp via reciprocal.
 fpow_pos* = (base: f64, exp: i64) f64 {
     r := 1.0
-    e := exp
-    @while (e > 0) {
-        r = r * base
-        e = e - 1
-    }    // iterative: a huge exp must not recurse
+    exp.times((step) { r = r * base })    // count loop, not recursion: a huge exp must stay flat-stack
     r
 }
 fpow* = (base: f64, exp: i64) f64 {

@@ -21,6 +21,7 @@
 // are top-level names — import them (`{ seed, choice } = std.rand`, or `rand = std.rand` and
 // `rand.seed(n)`) and rename on your side if a name collides.
 { Opt } = std.core.result    // choice returns Opt<T> (.Some element / .None when the slice is empty)
+{ times } = std.core.count    // the count loop — `@while` belongs in the primitive, not here
 // splitmix64 constants: the golden-ratio increment (0x9e3779b97f4a7c15) and two avalanche multipliers.
 SM_GAMMA := 11400714819323198485    // 0x9e3779b97f4a7c15
 SM_MIX1 := 13787848793156543929    // 0xbf58476d1ce4e5b9
@@ -80,6 +81,8 @@ Rng*: {
                 s: u64 := span
                 zero: u64 := 0
                 t := (zero - s) % s    // 2^64 mod s: the count of low residues to reject
+                // NOT a count loop: REJECTION sampling has no trip count — it draws until a value lands
+                // outside the biased residues. This is one of the `@while` sites that stays.
                 x := r.next_u64()
                 @while (x < t) {
                     x = r.next_u64()
@@ -141,31 +144,33 @@ choice*<T> = (r: MutPtr<Rng>, xs: [T]) Opt<T> {
 // Bounded loop (no recursion); the result is a uniformly random permutation of the input. Advances `r`.
 shuffle*<T> = (r: MutPtr<Rng>, xs: [T]) void {
     n := xs.len
-    i := n - 1
-    @while (i > 0) {
+    // exactly n-1 swaps, so it is a COUNT loop; `step` counts UP while `i` walks n-1 down to 1, which
+    // is the order Fisher-Yates requires (and the order the golden draw sequence in harness_rand pins).
+    (n - 1).times((step) {
+        i := n - 1 - step
         j := r.range(0, i + 1)
         tmp := xs[i]
         xs[i] = xs[j]
         xs[j] = tmp
-        i = i - 1
-    }
+    })
 }
 // fill a caller-provided byte buffer with random bytes (no hidden heap). Draws one u64 per 8 bytes,
 // emitting its bytes little-endian, so it is ~8x cheaper than a draw per byte. Advances `r`.
 fill_bytes* = (r: MutPtr<Rng>, dst: [u8]) void {
     n := dst.len
+    // the OUTER loop is CURSOR-driven, not count-driven: one pass writes up to 8 bytes, so `i` advances a
+    // variable amount per step and no trip count exists to hand `times`. It stays `@while`. The inner
+    // "8 bytes per draw" IS a count, so it is a `times`.
     i := 0
     @while (i < n) {
         w := r.next_u64()
-        k := 0
-        @while (k < 8) {
+        8.times((byte) {
             (i < n).then({
                 b: i64 := w & 255
                 dst[i] = to_u8(b)
                 w = w >> 8
                 i = i + 1
             })
-            k = k + 1
-        }
+        })
     }
 }
