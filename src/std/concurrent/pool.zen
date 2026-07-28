@@ -50,19 +50,39 @@
 { Mutex, CondVar, new_mutex, new_cond } = std.concurrent.sync
 { spawn, JoinHandle } = std.concurrent.thread
 { is_null } = std.core.ptr
-{ Result, expect } = std.core.result
+{ Result, panic } = std.core.result
 { Ring } = std.concurrent.ring
 { Arena } = std.mem.arena
 QUANTUM := 64    // max messages an actor runs per turn before yielding the worker (fairness)
-// ── BACK-PRESSURE AS A VALUE (S2) ────────────────────────────────────────────────────────────────
-// A send either enqueues the message or the mailbox is full. `MailboxFull` is the ONE failure a send can
-// report today: it is DROPPED (dead-lettered), counted in `Pool.dropped` (see `pool_dropped`), so loss is
-// OBSERVABLE. Defined HERE (not std.core.result) so the widening touches no bootstrap-closure file beyond
-// std.concurrent. The caller MAY DISCARD the Result — the checker cannot force a use, so a full mailbox is
-// a value to inspect, never a silent corruption. (#519 spelled the cooperative-actor equivalent as
-// IoError.Errno(EAGAIN=11); a dedicated single-variant enum reads clearer for the parallel primitive and
-// keeps the two error channels — libc vs mailbox — from sharing a numeric code.)
-ActorError*: MailboxFull
+// CHECKED ABORT for the pool's own single-owner INFRASTRUCTURE blocks (the Pool block, the run-queue
+// ring, per-worker stats, the pthread handle/arg cells). Those live behind `pool_open() MutPtr<Pool>`
+// and `rq_grow() void` — signatures with no error channel, reached from 39 call sites — so an OOM there
+// cannot be a value without an API break (see the ActorError note above: the ACTOR path, which does have
+// a Result, reports `.Oom` properly). What this buys is the difference between a diagnosable
+// `zen: panic: pool: …` and a null pointer smuggled into the ring/stats array to be dereferenced by a
+// worker thread later. UFCS: `malloc(n).or_die("…")`.
+or_die = (p: RawPtr<u8>, msg: string_view) RawPtr<u8> {
+    is_null(p).match ({
+        true  => {
+            panic(msg)
+            p
+        },    // unreachable — panic aborts; only satisfies the arm's type
+        false => p,
+    })
+}
+// ── BACK-PRESSURE AND OOM AS VALUES (S2) ─────────────────────────────────────────────────────────
+// A send either enqueues the message, finds the mailbox full, or cannot allocate. `MailboxFull` is the
+// full-mailbox case: the message is DROPPED (dead-lettered), counted in `Pool.dropped` (see
+// `pool_dropped`), so loss is OBSERVABLE. `Oom` is a failed allocation on the send path (the typed
+// message box in std.concurrent.pool_actor, the actor block / mailbox ring at spawn): nothing was
+// enqueued, nothing was dead-lettered — the send simply did not happen. The two are DISTINCT because
+// the recoveries differ: MailboxFull says "the target is behind, retry or shed load", Oom says "the
+// process is out of memory, stop producing". Defined HERE (not std.core.result) so the widening touches
+// no bootstrap-closure file beyond std.concurrent. The caller MAY DISCARD the Result — the checker
+// cannot force a use, so both are values to inspect, never a silent corruption. (#519 spelled the
+// cooperative-actor equivalent as IoError.Errno(EAGAIN=11); a dedicated enum reads clearer for the
+// parallel primitive and keeps the two error channels — libc vs mailbox — from sharing a numeric code.)
+ActorError*: MailboxFull | Oom
 // success payload of a send: the number of messages enqueued (always 1 today — mirrors std.io.file's
 // `Result<i64, IoError>` convention where the Ok channel carries a "count of units that landed", since
 // Zen has no first-class unit/void value to spell `Result<void, _>`).
@@ -172,24 +192,55 @@ pool_spawn_scratch_rt* = (
     art: Rt,
     scratch: MutPtr<Arena>,
 ) RawPtr<u8> {
+    raw := pool_try_spawn_scratch_rt(user, mbcap, behavior, art, scratch)
+    is_null(raw).match ({
+        true  => {
+            panic("pool: actor block allocation failed")
+            raw
+        },    // unreachable — panic aborts; only satisfies the arm's type
+        false => raw,
+    })
+}
+// as pool_spawn_scratch_rt, but allocation failure is a VALUE: returns a NULL handle when the mailbox
+// ring or the Arc'd actor block could not be allocated, instead of dereferencing null (the mailbox ring
+// was previously handed to the PoolActor unchecked, so an OOM here surfaced later as a null-deref inside
+// `pool_send`). A partially-built actor is fully unwound before returning — the ring is freed when the
+// actor block is what failed — so the null return leaks nothing. `RawPtr<u8>` IS the value channel at
+// this layer: the raw pool's handle type is an opaque pointer, and `is_null(raw)` is the check. The
+// typed layer (std.concurrent.pool_actor.try_spawn_actor) lifts this null into `.Err(.Oom)`.
+pool_try_spawn_scratch_rt* = (
+    user: RawPtr<u8>,
+    mbcap: i64,
+    behavior: (RawPtr<u8>, i64) void,
+    art: Rt,
+    scratch: MutPtr<Arena>,
+) RawPtr<u8> {
     mark_spawned()    // latch the rt.set_default guard: the process default is now frozen (workers read it)
     ma := Malloc(_: 0)
     mbuf := malloc(mbcap * 8)
-    arc := new_in(ma.addr(), PoolActor(
-        user: user,
-        mbuf: mbuf,
-        head: 0,
-        tail: 0,
-        cap: mbcap,
-        mbmu: new_mutex(),
-        sched: 0,
-        behavior: behavior,
-        art: art,
-        dead: 0,
-        scratch: scratch,
-        boxed: 0,
-    )).expect("pool: actor block allocation failed")
-    arc.base
+    is_null(mbuf).match ({
+        true  => null_ptr(),
+        false => new_in(ma.addr(), PoolActor(
+            user: user,
+            mbuf: mbuf,
+            head: 0,
+            tail: 0,
+            cap: mbcap,
+            mbmu: new_mutex(),
+            sched: 0,
+            behavior: behavior,
+            art: art,
+            dead: 0,
+            scratch: scratch,
+            boxed: 0,
+        )).match ({
+            .Ok(arc) => arc.base,
+            .Err(e)  => {
+                free(mbuf)    // the actor block failed AFTER the ring landed — do not leak the ring
+                null_ptr()
+            },
+        }),
+    })
 }
 // spawn an untyped pool actor with the process DEFAULT ambient rt (heap unless the program called
 // `rt.set_default`). Delegates to pool_spawn_rt with `default()` — heap-when-unset is observationally
@@ -270,7 +321,7 @@ Pool*: {
     // and the current buffer — original or grown — is the one pool_close frees.
     rq_grow = (p: MutPtr<Pool>) void {
         newcap := p.rqcap * 2
-        nbuf := malloc(newcap * 8)
+        nbuf := malloc(newcap * 8).or_die("pool: run queue growth allocation failed")
         n := p.rqtail - p.rqhead
         p.rq_copy(nbuf, 0, n)
         free(p.rqbuf)
@@ -553,9 +604,9 @@ worker_body = (arg: RawPtr<u8>) RawPtr<u8> {
 // ── lifecycle ───────────────────────────────────────────────────────────────────────────────────
 // allocate + initialise a Pool block over a malloc'd run queue / locks / condvars / per-worker stats.
 new_pool = (nworkers: i64, rqcap: i64) RawPtr<u8> {
-    blk := malloc(sizeof(Pool))
-    rqbuf := malloc(rqcap * 8)
-    wstats := malloc(nworkers * 8)
+    blk := malloc(sizeof(Pool)).or_die("pool: pool block allocation failed")
+    rqbuf := malloc(rqcap * 8).or_die("pool: run queue allocation failed")
+    wstats := malloc(nworkers * 8).or_die("pool: worker stats allocation failed")
     zero_stats(wstats, 0, nworkers)
     pv: [Pool] := blk.slice(1)
     pv[0] = Pool(
@@ -570,8 +621,8 @@ new_pool = (nworkers: i64, rqcap: i64) RawPtr<u8> {
         stop: 0,
         nworkers: nworkers,
         wstats: wstats,
-        handles: malloc(nworkers * 8),
-        args: malloc(nworkers * 16),
+        handles: malloc(nworkers * 8).or_die("pool: worker handle table allocation failed"),
+        args: malloc(nworkers * 16).or_die("pool: worker arg cell allocation failed"),
         selfraw: blk,
         dropped: 0,
     )
