@@ -809,6 +809,10 @@ mode_sendable = (m: i32) bool { m == md_owned() || m == md_frozen() }
 // ALLOCATOR-CENTRIC free detection. The free surface is the `Allocator` trait, generic over every
 // allocator (built-in Heap/Malloc and user-defined) because conformance fixes the method names:
 //   a.release(p)     — frees ptr arg `p`        (receiver `a` is a MutPtr<_>, NOT an Own/Rc/Arc)
+//   a.release_slice(xs) — frees the BACKBONE of the owned slice `xs` (std.mem.alloc). Recognized on the
+//                    SAME line as `release`: it is `a.release(xs.ptr)` with the local, not a member
+//                    expression, in argument position — which is exactly what makes the free visible
+//                    here, since the kill-set is keyed on bare locals.
 //   a.resize(p, n)   — frees the OLD ptr `p`    (returns a NEW pointer; old `p` dangles)
 //   free(p)          — raw FFI/bootstrap floor  (rare in user code)
 // The receiver being a pointer (`.Ptr`) — not an Own/Rc/Arc generic — disambiguates the allocator
@@ -817,7 +821,8 @@ mode_sendable = (m: i32) bool { m == md_owned() || m == md_frozen() }
 alloc_free_call_name = (env: Env, c: CallData) string_view {
     c.fn.sx_named("free", "__free").match ({
         true  => (c.args.len == 1).then({ c.arg_var_name(0) }, { "" }),
-        false => c.fn.sx_named("release", "__release").match ({
+        false => (c.fn.sx_named("release", "__release")
+            || c.fn.sx_named("release_slice", "__release_slice")).match ({
             true  => (c.args.len == 2 && env.infer_expr(c.args[0].addr()).ty_is_ptr_t()).match ({
                 true  => c.arg_var_name(1),
                 false => "",

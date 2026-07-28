@@ -2295,6 +2295,21 @@ harness_verdict_run* = () i32 {
             kind: "ownership",
         ),
         VerdictCase(
+            src: "{ release_slice } = std.mem.alloc\n{ nbuf } = std.text.str\nhalloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    xs: [i64] := a.nbuf(0, 4)\n    a.release_slice(xs)\n    to_i32(xs[0])\n}",
+            should_pass: false,
+            kind: "ownership",
+        ),
+        VerdictCase(
+            src: "{ release_slice } = std.mem.alloc\n{ nbuf } = std.text.str\nhalloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    xs: [i64] := a.nbuf(0, 4)\n    a.release_slice(xs)\n    a.release_slice(xs)\n    0\n}",
+            should_pass: false,
+            kind: "ownership",
+        ),
+        VerdictCase(
+            src: "{ release_slice } = std.mem.alloc\n{ nbuf } = std.text.str\nhalloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    xs: [i64] := a.nbuf(0, 4)\n    xs[0] = 7\n    r := to_i32(xs[0])\n    a.release_slice(xs)\n    r\n}",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
             src: "halloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    p := a.acquire(16)\n    q := p\n    a.release(q)\n    to_i32(load_i64(p))\n}",
             should_pass: false,
             kind: "ownership",
@@ -3336,6 +3351,11 @@ harness_verdict_run* = () i32 {
     // not top-level `f`'s signature.
     // SHADOWING does not blunt M5 R5: a wrong-arity LAMBDA passed to a HOF whose FnT param is
     // named after a top-level fn is still rejected against the HOF's declared FnT.
+    // UAF through `a.release_slice(xs)`, std.mem.alloc's backbone free: the argument is the slice
+    // LOCAL, so the kill-set (keyed on bare locals) sees it — reading or re-freeing `xs` after is
+    // rejected. This is what the old `a.release(xs.ptr)` spelling could NOT give: a member
+    // expression in argument position frees the same bytes invisibly. Plus the no-over-rejection
+    // twin: read first, release_slice last, accepted.
     // UAF alias-class join: `q := p` names the SAME allocation, so freeing p then freeing (or
     // using) q is a double-free/use-after-free — the name-only kill-set used to miss it.
     // alias UAF read: load through the alias after the original was freed.

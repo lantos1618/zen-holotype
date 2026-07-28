@@ -207,6 +207,19 @@ try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
 try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> {
     ok_ptr(a.resize(p, n))
 }
+// Hand a `[T]` BACKBONE back — the block behind an allocator-owned slice, the counterpart of the
+// `a.nbuf(seed, n)` / `raw.of(seed, n)` / `a.split(s, sep)` that acquired it. Those three all build the
+// slice as `slice(a.acquire(n * sizeof(T)), n)`, so the slice's `ptr` IS the block's base and this is a
+// base free, never an interior one. The FREE-ONLY-A-BASE rule is the caller's to keep, and the surface is
+// shaped to make keeping it easy: pass the OWNING slice — the one a producer above returned — never a
+// window carved out of one (`s.view()`, `s.trim_view()`, `xs[lo..]`), whose ptr aims into the middle of
+// somebody else's block. Same rule, same wording, as `msg` in examples/strings_demo.zen.
+//
+// This exists because `a.release(xs.ptr)` — which does free the right bytes — is invisible to the
+// use-after-free checker: its argument is a MEMBER expression, and the checker's kill-set is keyed on
+// bare locals. `a.release_slice(xs)` passes the local itself, so freeing a backbone now kills `xs` and a
+// later read of it is reported (compiler/validate/ownership.zen: alloc_free_call_name).
+release_slice*<A, T> = (a: MutPtr<A>, xs: [T]) void { a.release(xs.ptr) }
 // ── refcount block: [ count:i64 | value:T ] ────────────────────────────────────────────────────────
 // The i64 count lives in the first 8 bytes; the value follows at `.offset(8)`. std.mem.{rc,arc,own}
 // all share THIS block shape and differ only in how they bump the count (plain vs atomic) and tear it
