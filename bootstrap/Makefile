@@ -43,7 +43,7 @@ GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zen build regen clean harness harness-fast bench bench-valgrind difftest docs-check ffi-verify lint-bounds asan setup-git resolve-seed
+.PHONY: zen build regen clean harness harness-fast bench bench-compiler bench-valgrind difftest docs-check ffi-verify lint-bounds asan setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -114,6 +114,18 @@ harness-fast: zen
 # suite's header for what each case measures and how to read liveB/op.
 bench: zen
 	cd $(ROOT) && ZB=/tmp/zbench.$$$$ && $(ZENC) build tests/harness_bench.zen -o $$ZB && $$ZB; rc=$$?; rm -f $$ZB; exit $$rc
+
+# The COMPILER-throughput suite (tests/harness_bench_compiler.zen): how long `zen check` / `zen build`
+# / `--build-self` take, their peak RSS, and their allocation COUNT — cold and warm compile cache
+# reported as separate rows. Same rules as `bench`: not in `make harness`, not a gate, no baseline
+# file. Its own target because it runs the compiler as a subprocess ~50 times and takes ~90 s, which
+# does not belong bolted onto the 5-second stdlib suite.
+#   make -f bootstrap/Makefile bench-compiler > before.txt   # …change something, rerun, then diff
+#   ZEN_BENCH_REPS=7 make -f bootstrap/Makefile bench-compiler   # a real noise floor (slow)
+# It manages its own scratch cache under $ZEN_BENCH_DIR (default /tmp/zen-bench-compiler) and never
+# touches the caller's ZENC_CACHE_DIR, so cold really means cold.
+bench-compiler: zen
+	cd $(ROOT) && ZB=/tmp/zbenchcc.$$$$ && $(ZENC) build tests/harness_bench_compiler.zen -o $$ZB && $$ZB; rc=$$?; rm -f $$ZB; exit $$rc
 
 # The same suite as a LEAK-REGRESSION check: valgrind reports exact allocation/free COUNTS and
 # backtraces, which the in-process liveB/op column cannot (it measures live bytes, not calls).
