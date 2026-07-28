@@ -25,6 +25,7 @@ halloc = std.mem.heap
 { sb } = std.text.sb
 { view, len, find, substr, split, nbuf, pad_right, repeat, trim_view, trim_prefix } = std.text.str
 { Result, ok, expect } = std.core.result
+{ release_slice } = std.mem.alloc
 // `str` is NUL-terminated, so dropping a PREFIX is free — the source's own NUL still
 // terminates what is left, and `trim_prefix` just hands back a pointer further along the
 // same block. Dropping a SUFFIX is not free (the new end has no NUL of its own). That one
@@ -246,18 +247,20 @@ free_lines*<A> = (a: MutPtr<A>, lines: [string_view]) void {
 log_text = () string_view {
     "2026-07-25T10:31:02 ERROR auth: token expired\n2026-07-25T10:31:07 WARN cache: 3 evictions\nnot a log line\n2026-07-25T10:32:00 INFO http: GET /health 200"
 }
-// HONEST NOTE 1 / WORKAROUND, about main below. `lines.ptr` is a RawPtr<string_view> and
-// `rows.ptr` a RawPtr<Fields>, while Allocator.release takes RawPtr<u8>; Zen has no cast
-// keyword and no method converts between RawPtr element types, so the two SLICE BACKBONES
-// (lines.len * 8 bytes, rows.len * 32) cannot be handed back at all. 160 bytes, leaked by
-// construction, confirmed under valgrind. The real fix is an arena (std.mem.arena):
-// allocate the whole parse into one, drop it, every backbone goes with it.
+// HONEST NOTE 1, about main below. A `[T]` is (ptr, len), and `lines`/`rows` are the OWNING
+// kind: split and nbuf each build one out of a single acquire of len * sizeof(T) bytes, so the
+// slice's ptr is that block's base. Those two SLICE BACKBONES (lines.len * 8 bytes, rows.len *
+// 32, 160 in all) go back through `a.release_slice(...)` at the bottom of main — the allocator
+// surface's counterpart to nbuf, and the freer named alongside those two allocations below.
+// Hand it an OWNING slice only: a window (`.view()`, `.trim_view()`) aims into the middle of
+// somebody else's block, and freeing an interior pointer is undefined — `msg`'s rule exactly.
 //
-// HONEST NOTE 2 — not this file's doing. Valgrind also charges the program ~1.1 KB inside
-// std.text.fmt: every `[arg_int(x), …]` slice literal handed to formatln is heap-promoted
-// by codegen and never released, and fmt's integer scratch loses 21 bytes per integer
-// printed. A program whose entire body is one `formatln("n={}", [arg_int(7)])` loses 53
-// bytes the same way. No caller can free those.
+// HONEST NOTE 2 — not this file's doing, and all that is left. Valgrind charges the program
+// 800 bytes in 13 blocks, one per `[arg_int(x), …]` slice literal handed to formatln: codegen
+// heap-promotes each such literal and nothing releases it. A program whose entire body is one
+// `formatln("n={}", [arg_int(7)])` loses 32 bytes the same way, so this scales with format
+// CALLS, not with data. fmt's integer scratch adds 21 bytes more, but as ONE still-reachable
+// buffer, not a leak per integer. No caller can free either.
 //
 // HONEST NOTE 3 — `zen fmt` moves comments: a trailing `// …`, a comment above a
 // `.loop(…)` call, and a comment at the tail of a function body were each relocated on
@@ -273,9 +276,9 @@ main = () i32 {
     src: string_view := log_text()
     // split ALLOCATES twice over: one block for the [string_view] backbone, and one
     // NUL-terminated copy per line (it cannot hand back views — a line ends at '\n' and
-    // there is no NUL there). free_lines frees the copies; the backbone is HONEST NOTE 1.
+    // there is no NUL there). free_lines frees the copies, release_slice the backbone.
     lines: [string_view] := a.split(src, '\n')
-    // ALLOC: the row array's backbone. Also HONEST NOTE 1.
+    // ALLOC: the row array's backbone. Its freer is the release_slice at the end of main.
     rows: [Fields] := a.nbuf(blank_fields(), lines.len)
     n: i64 := 0
     w := Widths(
@@ -331,5 +334,9 @@ main = () i32 {
     a.print_rows(rows, n, w)
     a.free_rows(rows, n)
     a.free_lines(lines)
+    // FREE: the two backbones, last — each slice must still be readable while the blocks it
+    // points AT are being freed above. Nothing may read `rows` or `lines` after these.
+    a.release_slice(rows)
+    a.release_slice(lines)
     0
 }
