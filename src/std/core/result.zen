@@ -12,6 +12,12 @@ err*<T, E> = (e: E) Result<T, E> { .Err(e) }
 // panic's minimal libc surface.
 { abort, write, strlen } = std.c.libc
 PANIC_STDERR_FD := 2
+// Bodyless FFI decl for the runtime's panic unwinder — the symbol lives in bootstrap/zenrt.c (like
+// std.concurrent.pool's `__zen_actor_call`), and every generated C module also carries a WEAK empty
+// definition in the genc preamble, so a standalone program that never links zenrt.c still resolves it
+// (to a no-op that returns). It siglongjmps into the pool worker's per-behavior catch when one is
+// installed, and RETURNS when none is — which is exactly what makes the `abort()` below unconditional.
+__zen_panic_unwind = () void
 // Converts a libc integer sentinel into Result.
 ok_if* = (rc: i32) Result<i32, IoError> { (rc >= 0).then({ .Ok(rc) }, { .Err(.Errno(rc)) }) }
 // Like ok_if, but yields a DIFFERENT ok-value `v` (already computed) instead of the sentinel itself:
@@ -27,7 +33,16 @@ ok_ptr* = (p: RawPtr<u8>) Result<RawPtr<u8>, IoError> {
 }
 // Explicit abort for impossible states. panic owns the framing so every give-up site prints
 // exactly like the compiler's runtime panics (div-zero/OOB guards in the genc preamble):
-// `zen: panic: <msg>` + newline on stderr, then abort.
+// `zen: panic: <msg>` + newline on stderr, then unwind-or-abort.
+//
+// SUPERVISABILITY: the unwind call is what makes an `.expect` failure behave like a compiler panic. The
+// genc preamble's `zen__panic` (div-zero, OOB index, salloc OOM) prints, calls `__zen_panic_unwind()`,
+// then aborts; this one used to abort DIRECTLY. Inside an actor that difference was the whole ballgame —
+// a divide by zero was caught by the worker (actor dead, pool alive, supervisor restarts), while an
+// allocation failure killed the PROCESS. Since nearly every `.expect` in std is an allocation failure,
+// out-of-memory was the one failure a supervisor could not survive. Now both paths unwind identically.
+// OUTSIDE an actor `__zen_panic_unwind` finds no jump buffer and simply returns, so `abort()` still runs
+// and the non-actor path is byte-identical (pinned by the result_expect_panics fixture, exit 134).
 panic* = (msg: string_view) void {
     prefix := "zen: panic: "
     pn := prefix.strlen()
@@ -37,6 +52,7 @@ panic* = (msg: string_view) void {
     newline := "\n"
     nn := newline.strlen()
     PANIC_STDERR_FD.write(newline.slice(nn).ptr, nn)
+    __zen_panic_unwind()
     abort()
 }
 // Human-readable variant name of a just-caught IoError, so error paths can PRINT what
