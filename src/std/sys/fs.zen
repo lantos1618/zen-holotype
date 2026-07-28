@@ -24,6 +24,7 @@
 { Result, IoError, ok, err, ok_if } = std.core.result
 { with_scratch } = std.mem.raw
 { substr_in, len, view } = std.text.str
+{ step_while } = std.core.count
 { access, mkdir, rmdir, rename, unlink, stat, opendir, readdir, rewinddir, closedir } = std.c.libc
 // access(path, F_OK) tests for existence only (no permission bits).
 F_OK := 0
@@ -75,11 +76,11 @@ is_dot_entry = (name: StringView) bool {
 // count the real entries left in `d`'s stream (skipping "." / "..").
 count_entries = (d: RawPtr<u8>) i64 {
     n := 0
-    e := d.readdir()
-    @while (e != null_ptr()) {
-        n = n + cstr(e.offset(D_NAME_OFF)).is_dot_entry().then({ 0 }, { 1 })    // iterative: a directory with many entries must not recurse per entry
-        e = d.readdir()
-    }
+    first := d.readdir()    // the cursor IS the dirent pointer; `next` is simply the next readdir
+    first.step_while((e) { e != null_ptr() }, (e) {
+        n = n + cstr(e.offset(D_NAME_OFF)).is_dot_entry().then({ 0 }, { 1 })
+        d.readdir()
+    })
     n
 }
 // copy each remaining entry name into `out[i..]`; return the next free slot, or `.Err` if a name copy
