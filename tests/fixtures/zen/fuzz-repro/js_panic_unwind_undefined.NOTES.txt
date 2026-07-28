@@ -1,0 +1,26 @@
+FINDING 6 — the JS backend emits a call to `__zen_panic_unwind()` that the JS
+runtime does not define, so EVERY panic on the JS backend dies with a
+ReferenceError instead of the clean panic path.
+
+FILE: js_panic_unwind_undefined.zen.txt
+CMD:  ./zen emit-js tests/fixtures/zen/fuzz-repro/js_panic_unwind_undefined.zen.txt | node
+OUT:  1
+      zen: panic: boom
+      ReferenceError: __zen_panic_unwind is not defined
+          at panic ([stdin]:166:481)
+          at zen_main ([stdin]:163:39)
+      rc 1
+C:    zen run <file>  ->  1 / "zen: panic: boom" / rc 134   (correct)
+
+CAUSE: `panic` in src/std/core/result.zen:20 declares `__zen_panic_unwind` as a
+      foreign function. The C side is fine — the genc preamble
+      (src/compiler/backend/c/c_emit.zen:260) ships a weak no-op
+      `__attribute__((weak)) void __zen_panic_unwind(void){}`. bootstrap/zenrt.js
+      has no counterpart: `grep -c __zen_panic_unwind bootstrap/zenrt.js` == 0.
+      Landed with the panic-unwind work (bddfde6, 2026-07-27) — the C preamble
+      got the stub, the JS runtime did not.
+
+CLASS: JS emitter/runtime defect on valid input. Invisible to
+      tools/fuzz-diff.zen because a panicking program makes the C side exit
+      134, which the taxonomy classifies C-FAIL and skips.
+FOUND BY: hand-directed panic-parity probing.

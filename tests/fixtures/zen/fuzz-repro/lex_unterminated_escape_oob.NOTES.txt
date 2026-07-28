@@ -1,0 +1,35 @@
+FINDING 1 — heap-buffer-overflow (1-byte OOB READ) in the lexer.
+
+FILE: lex_unterminated_escape_oob.zen.txt — 7 bytes, NO trailing newline:
+        x := "\
+      (the absolute minimum is the 2 bytes `"\`.)
+
+A string literal that is unterminated AND whose last byte is a backslash makes
+the escape handler consume the byte after the backslash — which is one past the
+end of the source buffer.
+
+CMD:  ./scripts/fuzz-build.sh                       # produces ./zen-asan
+      ASAN_OPTIONS=detect_leaks=0 ./zen-asan check \
+        tests/fixtures/zen/fuzz-repro/lex_unterminated_escape_oob.zen.txt
+
+OUT:  ==NNN==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x... 
+      READ of size 1 at 0x... thread T0
+          #0 ... in at bootstrap/zenc.gen.c:45
+          #1 ... in str_end
+          #2 ... in scan_one
+          #3 ... in scan
+          #4..#20 ... in import_close (recursive)
+          #21 ... in import_span_end
+          #22 ... in decl_span
+          #23 ... in provided_symbol_count_from
+          ...
+          #27 ... in module_graph
+      0x... is located 0 bytes after NNN-byte region  (the source buffer,
+      allocated by contents_in -> read_bytes_alloc)
+
+CLASS: sanitizer hit / out-of-bounds read on malformed input.
+       The un-instrumented ./zen does NOT crash — it reads whatever byte
+       follows the malloc'd source and emits a normal parse error — so this is
+       invisible without the ASan build.
+FOUND BY: scripts/fuzz-run.sh (tools/fuzz-mutate.zen), FUZZ_SEED=424242,
+          iteration 1408; reduced by hand from 558 bytes to 7.

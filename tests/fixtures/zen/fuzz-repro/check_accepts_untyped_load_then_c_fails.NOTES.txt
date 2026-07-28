@@ -1,0 +1,30 @@
+FINDING 9 — `zen check` accepts a program whose emitted C does not compile; the
+user gets a raw `cc` error, not a Zen diagnostic.
+
+FILE: check_accepts_untyped_load_then_c_fails.zen.txt
+        x: i32 := 5
+        p := x.addr()
+        println(load(offset(p, 0)))
+
+CMD:  ./zen check tests/fixtures/zen/fuzz-repro/check_accepts_untyped_load_then_c_fails.zen.txt
+OUT:  zenc: <file>: ok                                   rc 0
+
+CMD:  ./zen run tests/fixtures/zen/fuzz-repro/check_accepts_untyped_load_then_c_fails.zen.txt
+OUT:  /tmp/zenc_zd_NNNN.c: In function 'zen_main':
+      /tmp/zenc_zd_NNNN.c:46: error: too many arguments to function 'println_void'
+      rc 1
+
+WHAT genc EMITS:
+      println_void((*(((uint8_t*)(_z1__z1_p) + (0LL)))));
+      `offset` reinterprets the typed `int32_t*` as `uint8_t*`, so `load` has no
+      element type; the printer resolves to the no-Display fallback
+      `println_void` (zero parameters) and is then handed an argument anyway.
+
+CONTROL: `println(load(p))` — without the `offset` — checks AND runs fine
+      (emits `println_i32((*p))`, prints 5).
+
+CLASS: checker hole / checker-vs-emitter disagreement. Either `load` on an
+      untyped pointer should be rejected with a Zen diagnostic, or the printer
+      selection should fail loudly — leaking a C compiler error is neither.
+FOUND BY: hand-directed probing of the intrinsic pointer surface (addr / store /
+      load / offset), which tools/fuzz-diff.zen's grammar does not generate.

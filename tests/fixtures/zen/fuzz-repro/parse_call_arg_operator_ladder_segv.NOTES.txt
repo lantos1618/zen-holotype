@@ -1,0 +1,31 @@
+FINDING 3 — SIGSEGV: the parser recursion cap does not bound an operator
+ladder that sits inside a CALL ARGUMENT.
+
+FILE: parse_call_arg_operator_ladder_segv.zen.txt
+        f = (x: i32) i32 { x }
+        test* = () i32 { f(1+1+1+ ... +1) }      # 640 `1+` terms
+CMD:  ./zen check tests/fixtures/zen/fuzz-repro/parse_call_arg_operator_ladder_segv.zen.txt
+OUT:  zen: panic: segmentation fault (invalid memory access)      rc 134
+      (expected: rc 1 with an error[parse], which is what 620 terms produces)
+
+THRESHOLD (deterministic, default 8 MiB stack, 3/3 runs at each point):
+      f(1+ x620 +1)   -> rc 1, clean error[parse]
+      f(1+ x640 +1)   -> rc 134, SIGSEGV
+      `ulimit -s unlimited` makes the SIGSEGV go away and the clean parse error
+      come back => plain C-stack exhaustion, unbounded recursion.
+
+WHY THE EXISTING GATE MISSES IT: tests/harness_fuzz.zen fz_deep_phase probes
+      four shapes at d=600 — `1+1+…`, `1==1==…`, `x.f.f.f…`, `f(f(f(…)))`.
+      None of them is an operator ladder INSIDE a call argument, and the two
+      bare-ladder shapes do not crash even at d=3000 (verified). The one shape
+      that does crash is the untested combination, and its true threshold
+      (~630) is only 5% above the gate's d=600.
+
+SEE ALSO src/compiler/parse_type.zen:105 — "The cap (400) sits far below the
+      measured overflow point of the tightest path (~1000 nested binary/postfix
+      frames)". Measured today for the call-argument path: ~630, not ~1000.
+
+RELATED SHAPE (same class): `println(1 + 1 + … + 1)` inside `main` segfaults at
+      639 terms and is clean at 638.
+CLASS: crash (stack exhaustion) on input the compiler otherwise diagnoses.
+FOUND BY: hand-directed probing of the recursion-cap paths.
