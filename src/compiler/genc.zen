@@ -528,7 +528,21 @@ tptr_k* = (t: Ptr<Ty>, k: i32) Ty {
         kind: k,
     ))
 }
-tslice* = (e: Ptr<Ty>) Ty { .Slice(e) }
+// `[T]` sugar: a slice of the DEFAULT kind. `k_slice_dflt` is the one place the default lives, so
+// flipping `[T]` between writable and read-only is a one-line change (see docs/string-vec-model.md).
+tslice* = (e: Ptr<Ty>) Ty { tslice_k(e, k_slice_dflt()) }
+tslice_k* = (e: Ptr<Ty>, k: i32) Ty {
+    .Slice(PtrData(
+        pointee: e,
+        kind: k,
+    ))
+}
+// slice mutability, spelled with the SAME kind tags as pointers: `Slice<T>` is the read-only window
+// (k_ptr) and `MutSlice<T>` — for which `[T]` is the sugar — is the writable one (k_mut_ptr). A
+// read-only slice is what `.view()` of a `string_literal`/`string_cstr` yields, so writing into
+// `.rodata` is a checker error instead of a segfault.
+k_slice_dflt* = () i32 { k_mut_ptr() }
+slice_kw* = (kind: i32) string_view { (kind == k_ptr()).then({ "Slice" }, { "MutSlice" }) }
 param* = (nm: string_view, t: Ty) Param {
     Param(
         name: nm,
@@ -793,7 +807,7 @@ subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
     t.match ({
         .Named(n)   => tparams.tparam_arg(args, n, t),
         .Ptr(pd)    => tptr_k(a.tnode(a.subst_ty_in(tparams, args, load(pd.pointee))), pd.kind),
-        .Slice(e)   => tslice(a.tnode(a.subst_ty_in(tparams, args, load(e)))),
+        .Slice(e)   => tslice_k(a.tnode(a.subst_ty_in(tparams, args, load(e.pointee))), e.kind),
         .Generic(g) => a.subst_generic_in(tparams, args, g),    // a nested generic field: substitute its args, re-mangle
         .FnT(ft)    => a.subst_fnt_in(tparams, args, ft),    // a function-VALUE field `(S, i32) S`: substitute inside the signature
         _           => t,

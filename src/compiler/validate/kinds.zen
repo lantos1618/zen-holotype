@@ -23,7 +23,16 @@
 { KARGTYPE, KARITY, KBADBIND, KCAPACITY, KDIAG_CAP, KEOFINPUT, KEXPECTARROW, KEXPECTDECL,
   KEXPECTEXPR, KEXPECTINIT, KFFITYPE, KMISGEN, KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF,
   KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND, KUNCLOSED, KUNKNOWNTYPE, KUNREACHABLEARM,
-  KVBREAK, desc_or } = compiler.validate.diag
+  KPTRWRITE, KSLICEWRITE, KVBREAK, desc_or } = compiler.validate.diag
+// which read-only thing the lvalue walk stopped on -> the diagnostic that names it. `[T]` and
+// `Ptr<T>` are different mistakes with different fixes, so they get different messages.
+write_diag_kind = (c: i32) i32 {
+    (c == w_ok()).then({
+        return 0
+    })
+    (c == w_slice()).then({ KSLICEWRITE() }, { KPTRWRITE() })
+}
+{ w_ok, w_slice } = compiler.check_fits
 { zty } = compiler.validate.ownership
 { arg_err_at } = compiler.validate.args
 { kv_at, kv_one } = compiler.validate.core
@@ -390,7 +399,7 @@ ty_has_void_targ = (t: Ty) bool {
         // A `[void]` element type means a tparam in element/closure-return position was never
         // inferred (e.g. an unannotated `iter.map` with an untyped lambda). It only lowers to
         // garbage, so demand an annotation instead of silently miscompiling to a `[void]` slice.
-        .Slice(e)   => load(e).is_void_ty() || load(e).ty_has_void_targ(),
+        .Slice(e)   => load(e.pointee).is_void_ty() || load(e.pointee).ty_has_void_targ(),
         _           => false,
     })
 }
@@ -423,7 +432,7 @@ subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: string_view) Ty {
     t.match ({
         .Named(n) => (n == "Self").then({ impl_ty(tyname) }, { t }),
         .Ptr(pd)  => tptr_k(a.tnode(a.subst_self(load(pd.pointee), tyname)), pd.kind),
-        .Slice(p) => tslice(a.tnode(a.subst_self(load(p), tyname))),
+        .Slice(p) => tslice_k(a.tnode(a.subst_self(load(p.pointee), tyname)), p.kind),
         _         => t,
     })
 }
@@ -1509,8 +1518,8 @@ EnvKinds: {
     index_err: (Self, IndexData) i32,
     ret_err: (Self, Ptr<Expr>) i32,
     assign_err: (Self, AssignData) i32,
-    assign_ptr_write_err: (Self, AssignData) i32,
-    idxset_ptr_write_err: (Self, IndexSetData) i32,
+    assign_write_kind: (Self, AssignData) i32,
+    idxset_write_kind: (Self, IndexSetData) i32,
     idxset_err: (Self, IndexSetData) i32,
     let_fit_err: (Self, LetData) i32,
     let_needannot_err: (Self, LetData) i32,
@@ -1708,18 +1717,18 @@ Env.impl(EnvKinds, {
             }),
         })
     }
-    assign_ptr_write_err = (env: Env, x: AssignData) i32 {
+    assign_write_kind = (env: Env, x: AssignData) i32 {
         // Stage 2 mutability, the field-write half: `b.v = …` where `b: Ptr<Box>` (read-only) writes through a
         // non-writable pointer — the same hole `store()` guards, via Assign/Member. A `MutPtr<Box>` permits it
         // (k_mut_ptr), and plain local/struct mutation (no pointer base) is untouched. A NESTED write
         // (`b.inner.v = …`, `b.data[0] = …`) is the same hole one level down: it mutates `*b` just as the
         // direct field-set does, so walk the lvalue's member/index chain to its root and reject if the write
         // ultimately passes through a read-only `Ptr<T>`.
-        env.lvalue_writes_readonly(x.target).then({ 1 }, { 0 })
+        env.lvalue_write_code(x.target).write_diag_kind()
     }
-    idxset_ptr_write_err = (env: Env, x: IndexSetData) i32 {
+    idxset_write_kind = (env: Env, x: IndexSetData) i32 {
         // the index-set half of the read-only-pointer write guard: `b.data[0] = …` writes into `*b`.
-        env.write_thru_readonly(x.seq).then({ 1 }, { 0 })
+        env.write_thru_code(x.seq).write_diag_kind()
     }
     idxset_err = (env: Env, x: IndexSetData) i32 {
         rt := env.infer_expr(x.value)

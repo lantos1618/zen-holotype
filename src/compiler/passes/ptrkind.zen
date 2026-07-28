@@ -15,6 +15,8 @@ PtrKind*: {
     is_readonly_ptr_ty: (Self) bool,
     is_nonnull_ptr_ty: (Self) bool,
     is_nullable_ptr_ty: (Self) bool,
+    slice_kind_of: (Self) i32,
+    is_readonly_slice_ty: (Self) bool,
 }
 Ty.impl(PtrKind, {
     ptr_kind_of = (t: Ty) i32 {
@@ -62,5 +64,20 @@ Ty.impl(PtrKind, {
             true  => t.is_raw_ptr_ty().then({ false }, { true }),
             false => false,
         })
+    }
+    slice_kind_of = (t: Ty) i32 {
+        // Slice mutability: `[T]`/`MutSlice<T>` is k_mut_ptr, `Slice<T>` is k_ptr, and -1 = not a slice.
+        // A slice is a fat pointer, so it carries the SAME kind tags — but through its own accessor, so
+        // that `is_any_ptr`/nullability/`addr` keep answering only about real pointers.
+        t.match ({
+            .Slice(sd) => sd.kind,
+            _          => 0 - 1,
+        })
+    }
+    is_readonly_slice_ty = (t: Ty) bool {
+        // A store through a read-only `Slice<T>` window is rejected. This is where the immutability of
+        // `"lit".view()` lives: the view of a `string_literal`/`string_cstr` is read-only, so writing
+        // into `.rodata` is a checker error rather than a segfault.
+        t.slice_kind_of() == k_ptr()
     }
 })
