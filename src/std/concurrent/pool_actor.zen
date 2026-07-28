@@ -42,10 +42,9 @@
 // resolves to THIS actor's own rt — Pony-style per-actor heap. For this slice actors typically pass
 // heap_rt(); a per-actor arena is a later slice.
 { malloc, free } = std.mem.alloc
-{ Pool, pool_try_spawn_scratch_rt, pool_actor_free, ActorError, ActorRef, pool_actor_dead,
-  pool_actor_set_boxed } = std.concurrent.pool
-{ Result, expect } = std.core.result
-{ is_null } = std.core.ptr
+{ Pool, pool_spawn_rt, pool_spawn_scratch_rt, pool_actor_free, ActorError, ActorRef,
+  pool_actor_dead, pool_actor_set_boxed } = std.concurrent.pool
+{ Result } = std.core.result
 { Rt, default } = std.rt
 { Arena } = std.mem.arena
 { Context, Receiver } = std.concurrent.actor
@@ -72,22 +71,16 @@ spawn_actor*<ActorT> = (
     tramp: (RawPtr<u8>, i64) void,
     art: Rt,
 ) PooledHandle<ActorT> {
-    try_spawn_actor(cap, actor, tramp, art).expect("pool_actor: actor spawn allocation failed")
-}
-// spawn_actor with allocation failure as a VALUE. `spawn_actor` KEEPS its `PooledHandle<ActorT>` return
-// (17 call sites across 13 files, incl. std.net.http_actor, which would have to grow a Result of its own)
-// and becomes a thin `.expect` over this — so an OOM at spawn is a checked, diagnosable abort for every
-// existing caller, and a `.Err(.Oom)` value for anyone who asks for it. The caller that would benefit
-// most is `supervise` — a restart happens mid-run, under the memory pressure that may have caused the
-// crash — but routing it there means widening `Child<ActorT>` and `start_child` too; not done here.
-try_spawn_actor*<ActorT> = (
-    cap: i64,
-    actor: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
-    art: Rt,
-) Result<PooledHandle<ActorT>, ActorError> {
-    try_spawn_actor_scratch(cap, actor, tramp, art, null_ptr())
-}    // no scratch — identical to the pre-scratch spawn path
+    state := malloc(sizeof(ActorT))
+    slot: [ActorT] := state.slice(1)
+    slot[0] = actor
+    raw := pool_spawn_rt(state, cap, tramp, art)
+    pool_actor_set_boxed(raw)
+    PooledHandle<ActorT>(
+        raw: raw,
+        state: state,
+    )
+}    // typed messages are malloc'd box pointers → a dead actor's backlog is freed, not leaked
 // spawn a typed actor with the process DEFAULT ambient rt (heap unless the program called
 // `rt.set_default`) — the trivial-setup path. Inherits the whole program's chosen runtime.
 // A top-level `spawn` alias is intentionally NOT provided — it would flatten-collide with
@@ -108,28 +101,14 @@ spawn_actor_heap*<ActorT> = (
 // behavior (the receiver reads it off-thread after the reset), so messages stay heap-boxed by `send`/
 // `ref_send_msg`. The scratch-escape checker rejects routing a scratch pointer out through any send.
 new_scratch* = (cap: i64) MutPtr<Arena> {
-    try_new_scratch(cap).expect("pool_actor: scratch arena allocation failed")
-}
-// new_scratch with allocation failure as a VALUE. `MutPtr<Arena>` cannot BE the value channel here even
-// though a null pointer is spellable: `null` scratch already MEANS "this actor opted out of scratch"
-// (pool.zen's scratch_reset is null-guarded), so returning null on OOM would silently downgrade an actor
-// into one whose `self.scratch.bump(...)` writes through null on its first behavior — a worse crash,
-// further from the cause. Hence a real Result, with `new_scratch` kept as an `.expect` wrapper so the
-// 4 existing call sites are untouched.
-try_new_scratch* = (cap: i64) Result<MutPtr<Arena>, ActorError> {
     blk := malloc(sizeof(Arena) + cap)
-    is_null(blk).match ({
-        true  => .Err(.Oom),
-        false => {
-            ar: [Arena] := blk.slice(1)
-            ar[0] = Arena(
-                buf: blk.offset(sizeof(Arena)),
-                off: 0,
-                cap: cap,
-            )
-            .Ok(ar[0].addr())
-        },
-    })
+    ar: [Arena] := blk.slice(1)
+    ar[0] = Arena(
+        buf: blk.offset(sizeof(Arena)),
+        off: 0,
+        cap: cap,
+    )
+    ar[0].addr()
 }
 // free a scratch arena (call after the actor is closed and the pool has quiesced — no worker will reset
 // it again). One block backs the struct + the bump region: `sc.buf` sits sizeof(Arena) past the block
@@ -146,44 +125,16 @@ spawn_actor_scratch<ActorT> = (
     art: Rt,
     sc: MutPtr<Arena>,
 ) PooledHandle<ActorT> {
-    try_spawn_actor_scratch(cap, actor, tramp, art, sc).expect("pool_actor: actor spawn allocation failed")
-}
-// THE spawn: the whole typed-actor spawn path with allocation failure as a VALUE. Two allocations can
-// fail — the actor-state block here, and the pool's actor block / mailbox ring inside
-// `pool_try_spawn_scratch_rt` — and each unwinds the other, so `.Err(.Oom)` leaks nothing and leaves no
-// half-registered actor for a worker to find. `sc` is a BORROW the caller owns either way (a failed
-// spawn does not free it). Typed messages are malloc'd box pointers, hence `pool_actor_set_boxed` — a
-// dead actor's backlog is freed, not leaked.
-try_spawn_actor_scratch*<ActorT> = (
-    cap: i64,
-    actor: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
-    art: Rt,
-    sc: MutPtr<Arena>,
-) Result<PooledHandle<ActorT>, ActorError> {
     state := malloc(sizeof(ActorT))
-    is_null(state).match ({
-        true  => .Err(.Oom),
-        false => {
-            slot: [ActorT] := state.slice(1)
-            slot[0] = actor
-            raw := pool_try_spawn_scratch_rt(state, cap, tramp, art, sc)
-            is_null(raw).match ({
-                true  => {
-                    free(state)
-                    .Err(.Oom)
-                },    // the pool block failed AFTER the state block landed — unwind it
-                false => {
-                    pool_actor_set_boxed(raw)
-                    .Ok(PooledHandle<ActorT>(
-                        raw: raw,
-                        state: state,
-                    ))
-                },
-            })
-        },
-    })
-}
+    slot: [ActorT] := state.slice(1)
+    slot[0] = actor
+    raw := pool_spawn_scratch_rt(state, cap, tramp, art, sc)
+    pool_actor_set_boxed(raw)
+    PooledHandle<ActorT>(
+        raw: raw,
+        state: state,
+    )
+}    // typed messages are malloc'd box pointers → a dead actor's backlog is freed, not leaked
 // scratch-spawn under the process DEFAULT ambient rt (the trivial-setup path, mirrors spawn_actor_heap).
 spawn_actor_scratch_heap*<ActorT> = (
     cap: i64,
@@ -195,25 +146,16 @@ spawn_actor_scratch_heap*<ActorT> = (
 // later, off-thread), so it is heap-BOXED (`[M]` block) and the box POINTER rides as the pool's i64
 // payload (to_i64 → the trampoline recovers it with `msg.offset(0).slice(1)` and frees it via free_msg).
 // Returns `.Err(.MailboxFull)` + reclaims the box if the mailbox is full (back-pressure as a value; the
-// pool tallies the drop in its dead-letter counter), or `.Err(.Oom)` if the BOX ITSELF could not be
-// allocated — the message was never boxed, so there is nothing to reclaim and nothing to dead-letter.
-// The null check is what makes OOM a value here: `slot[0] = msg` would otherwise write M through a NULL
-// box (the mailbox-full case was already a value in this very function, the exhausted-heap case was a
-// segfault). The caller MAY discard the Result.
+// pool tallies the drop in its dead-letter counter). The caller MAY discard the Result.
 send*<M, ActorT> = (p: MutPtr<Pool>, h: PooledHandle<ActorT>, msg: M) Result<i64, ActorError> {
     box := malloc(sizeof(M))
-    is_null(box).match ({
-        true  => .Err(.Oom),
-        false => {
-            slot: [M] := box.slice(1)
-            slot[0] = msg
-            p.pool_send(h.raw, to_i64(box)).match ({
-                .Ok(n)  => .Ok(n),
-                .Err(e) => {
-                    free(box)
-                    .Err(e)
-                },
-            })
+    slot: [M] := box.slice(1)
+    slot[0] = msg
+    p.pool_send(h.raw, to_i64(box)).match ({
+        .Ok(n)  => .Ok(n),
+        .Err(e) => {
+            free(box)
+            .Err(e)
         },
     })
 }
@@ -222,25 +164,19 @@ send*<M, ActorT> = (p: MutPtr<Pool>, h: PooledHandle<ActorT>, msg: M) Result<i64
 // at spawn/setup, put it in the message: `p.send(server, .Req(n, client.ref_of(p)))`.
 ref_of*<ActorT> = (h: PooledHandle<ActorT>, p: MutPtr<Pool>) ActorRef { p.actor_ref(h.raw) }
 // TYPED send to an ActorRef (the reply primitive): box the message like `send`, ride the box pointer as
-// the i64 payload, hand it to the raw `ref_send`. Reclaims the box + returns `.Err(.MailboxFull)` on a
-// full mailbox, `.Err(.Oom)` when the box itself could not be allocated (same widening as `send`).
+// the i64 payload, hand it to the raw `ref_send`. Reclaims the box + returns `.Err` on a full mailbox.
 // This is a recognized send surface in the sendability checker (check_validate.zen), so a MutPtr-carrying
 // reply is rejected exactly like `send`/`pool_send`. Distinct name (no fn overloading) → UFCS reads
 // `reply_to.ref_send_msg(Response(...))`.
 ref_send_msg*<M> = (r: ActorRef, msg: M) Result<i64, ActorError> {
     box := malloc(sizeof(M))
-    is_null(box).match ({
-        true  => .Err(.Oom),
-        false => {
-            slot: [M] := box.slice(1)
-            slot[0] = msg
-            r.ref_send(to_i64(box)).match ({
-                .Ok(n)  => .Ok(n),
-                .Err(e) => {
-                    free(box)
-                    .Err(e)
-                },
-            })
+    slot: [M] := box.slice(1)
+    slot[0] = msg
+    r.ref_send(to_i64(box)).match ({
+        .Ok(n)  => .Ok(n),
+        .Err(e) => {
+            free(box)
+            .Err(e)
         },
     })
 }
