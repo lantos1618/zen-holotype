@@ -114,6 +114,7 @@ harness-fast: zen
 # suite's header for what each case measures and how to read liveB/op.
 bench: zen
 	cd $(ROOT) && ZB=/tmp/zbench.$$$$ && $(ZENC) build tests/harness_bench.zen -o $$ZB && $$ZB; rc=$$?; rm -f $$ZB; exit $$rc
+	cd $(ROOT) && ZB=/tmp/zbenchlsp.$$$$ && $(ZENC) build tests/harness_bench_lsp.zen -o $$ZB && $$ZB; rc=$$?; rm -f $$ZB; exit $$rc
 
 # The COMPILER-throughput suite (tests/harness_bench_compiler.zen): how long `zen check` / `zen build`
 # / `--build-self` take, their peak RSS, and their allocation COUNT — cold and warm compile cache

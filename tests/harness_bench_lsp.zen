@@ -1,0 +1,656 @@
+// tests/harness_bench_lsp.zen — the LANGUAGE SERVER benchmark: what one editor keystroke costs
+// `zen lsp` in TIME, and what a whole editing session costs it in RESIDENT MEMORY.
+//
+//   make -f bootstrap/Makefile bench          # runs after harness_bench's stdlib rows
+//   make -f bootstrap/Makefile bench > a.txt  # …after a change, rerun → `diff a.txt b.txt`
+//   ZEN_BENCH_REPS=5 make -f bootstrap/Makefile bench   # measure this box's noise floor FIRST
+//   ZEN_BENCH_SCALE=2 make -f bootstrap/Makefile bench  # double every request count
+//
+// To run this suite alone (it spawns a compiler per row and is the slow half of `bench`):
+//   ./zen build tests/harness_bench_lsp.zen -o /tmp/zblsp && /tmp/zblsp
+//
+// Like tests/harness_bench.zen it is deliberately NOT part of `make harness`, has NO expected-value
+// file, and gates nothing. Record the output; let a human compare two runs.
+//
+// ── WHY A SEPARATE SUITE FROM harness_bench.zen ───────────────────────────────────────────────────
+// harness_bench measures named stdlib operations inside ONE process. This measures a LONG-RUNNING
+// process, because that is where a per-request non-free stops being free. src/std/mem/alloc.zen:70
+// states the problem: a batch `zen check` is ALLOWED to leak — it builds an AST, prints, and exits,
+// and freeing would be work the OS is about to do anyway. `zen lsp` runs that same pipeline once per
+// `didChange`, i.e. once per keystroke, for hours. The same non-free is then unbounded growth, and
+// the figure that motivated the request scope was ~58 MB resident per didChange.
+//
+// So the headline number here is NOT latency. It is `d_B/req` on the `change_sweep` rows: the
+// resident-memory slope, in bytes, per additional didChange. A server that leaks shows a large
+// positive slope that does not depend on how many requests preceded it. A server that recycles shows
+// a slope indistinguishable from zero and a flat `peakKB` across the whole sweep.
+//
+// WHAT IT READ THE DAY IT WAS WRITTEN: peak RSS is ~57.5 MB after 0 didChange and ~57.5 MB after
+// 500, three reps running; the whole 500-request span moves peakKB by at most one 128 KB quantum,
+// and in either direction across reps. The ~58 MB figure is STALE by five orders of
+// magnitude — it was the cost of ONE request's pipeline, and the request scope now hands those bytes
+// to the next request instead of to the OS. It survives in the numbers as the LEVEL (peakKB
+// ~57.5 MB, one request's high-water mark, paid once at didOpen and never again), not as the SLOPE.
+// A server still leaking 58 MB per edit would have hit ~29 GB by the last row of the headline sweep.
+//
+// It is NOT exactly zero, and the `# rss-creep` line is what says so. peakKB cannot resolve better
+// than its 128 KB quantum; the in-flight trace resolves 4 KB pages, and traced at 100 / 300 / 600
+// edits it read 303, 425 and 434 B/didChange over three reps — a residual of a few hundred bytes an
+// edit, monotone with session length and reproducible. At ~20 000 keystrokes in an eight-hour day
+// that is single-digit MB of drift, which is why the sweep calls it flat and this line does not. Do
+// not round it to zero in either direction: report the creep number, and if it ever leaves the
+// few-hundred-bytes range, that is the signal.
+//
+// ── HOW MEMORY IS MEASURED ────────────────────────────────────────────────────────────────────────
+// PEAK resident set size of the server process, from `/usr/bin/time -v`'s "Maximum resident set size
+// (kbytes)" line — the kernel's own high-water mark for the child, not a sample. Peak is the right
+// statistic for a leak: it is monotone, so a slow leak cannot hide between two samples, and it is
+// immune to when the process happened to be observed. The whole session (initialize, didOpen, N
+// requests, shutdown, exit) is piped in from a file, so the server runs the requests back to back as
+// fast as it can and the peak is the session's true high-water mark.
+//
+// `d_B/req` on a row is (peakKB − previous row's peakKB) x 1024 / (reqs − previous row's reqs) —
+// the marginal cost of the requests added since the row above it, inside the SAME sweep. Reading the
+// consecutive slopes rather than one endpoint-to-endpoint number is deliberate: several independent
+// estimates of the same quantity are what tells you whether the number is real or noise. The
+// `# slope` line under each sweep gives the endpoint-to-endpoint figure as well.
+//
+// If `/usr/bin/time -v` is not on this machine every peakKB and d_B/req reads -1 rather than a
+// fabricated number, and a `# WARNING` line says so.
+//
+// A peak is a ceiling, not a shape, so one sweep is ALSO sampled in flight: `# rss-trace` comes from
+// a shell helper that backgrounds the server and reads field 2 of `/proc/<pid>/statm` (resident
+// pages) every 20 ms until it exits, then summarises the samples with awk. It is a shell helper, and
+// named as one, because Zen has no fork/wait surface to background a child and poll it from inside
+// this process — see WHAT IS NOT MEASURED. Its `startKB` is the server before its first request; the
+// quartiles are ordered by TIME, and since the traced session is a uniform stream of didChanges,
+// p25/p50/p75/end correspond to roughly a quarter, half, three quarters and all of the requests. The
+// trace runs at three session lengths and `# rss-creep` is the slope of their end-of-session RSS —
+// the residual per didChange, at a resolution the peak column cannot reach.
+// Zero samples are dropped: once the child is a zombie its statm reads all zeros, and a trailing 0
+// would otherwise be reported as `endKB=0` — a fake cliff at the end of every trace.
+//
+// THE RESOLUTION OF peakKB, and therefore the noise floor of d_B/req: measured on this box, peakKB
+// moves only in 128 KB steps (glibc grows and trims its arena in that quantum), and it jitters by
+// exactly one step between otherwise identical runs. So a d_B/req computed over an N-request span
+// cannot resolve anything finer than ±131072/N bytes per request: ±1310 at N=100, ±262 at N=500.
+// Any d_B/req at or below that is a rounding artifact of the quantum, NOT a measured per-request
+// cost — which is why the headline sweep runs out to 500 and why a leak claim needs peakKB itself to
+// climb across the sweep, not one nonzero delta.
+//
+// ── HOW LATENCY IS MEASURED ───────────────────────────────────────────────────────────────────────
+// `d_ns/req`, the same marginal treatment applied to CLOCK_MONOTONIC wall time around the whole
+// subprocess. Taking a difference between two request counts is what makes it meaningful: process
+// spawn, the ~57 MB the very first check pipeline touches, and the shell in between are all constant
+// per row and cancel out, leaving the cost of the requests that were added. The absolute `total_ns`
+// column is printed too, un-massaged, so nothing is hidden behind the subtraction.
+//
+// The kind rows do the same thing per REQUEST METHOD, at one document size, so the expensive methods
+// are visible against the cheap ones rather than averaged in with them.
+//
+// ── DOCUMENT SIZE ─────────────────────────────────────────────────────────────────────────────────
+// `change_50L` / `change_500L` / `change_2000L` are the same didChange measurement against synthetic
+// documents of ~50, ~500 and ~2000 lines. They are generated here rather than read from the repo so
+// the three differ ONLY in length: same two std imports, same shape, N repetitions of one function.
+//
+// The prompt for this suite named `src/compiler/check_validate.zen` (~7700 lines) as the worst case.
+// That file no longer exists — the god-file split landed and the largest .zen in the tree is now
+// driver.zen at ~3160 lines — so 2000 lines is within a factor of two of the real ceiling and the
+// synthetic curve is what is reported. Documents that import a large module graph would be slower
+// still; these import only std.text.fmt and std.text.str, which is what dominates the small-document
+// numbers (see the 0-import measurement in the NOISE section).
+//
+// ── CACHE STATE ───────────────────────────────────────────────────────────────────────────────────
+// `zen check`/`build` consult a compile cache (driver.zen's `cache_probe`, /tmp/zenc-cache, overridable
+// with ZENC_CACHE_DIR). The LSP path does NOT: `compiler.lsp` calls the check pipeline directly and
+// never probes. The `# cache` note MEASURES that claim rather than asserting it — it points
+// ZENC_CACHE_DIR at a fresh empty directory, runs a full LSP session, counts the files that appeared
+// (expect 0), then runs one `zen check` against the same directory and counts again (expect 1). The
+// `change_nocache` rows are the same didChange sweep under ZENC_NO_CACHE=1: if the cache were on the
+// LSP path those rows would diverge from `change_50L`.
+//
+// Therefore EVERY number in this file is a COLD-cache number, because there is no cache to be warm.
+// What IS warm by the second request is the OS page cache for the std sources the pipeline re-reads,
+// and the server's own recycled request-scope chunks; the `reqs=0` row of each sweep is the cold
+// process (spawn + one didOpen check) and the marginal columns are the warm steady state.
+//
+// ── NOISE ─────────────────────────────────────────────────────────────────────────────────────────
+// Every row is a subprocess doing real compiler work on a shared 16-core box, so the time columns are
+// noisier than harness_bench's in-process loops. `ZEN_BENCH_REPS=5` re-runs the whole suite five
+// times in one process (each rep prefixed `# rep k/N`); compare the reps to each other BEFORE
+// comparing to yesterday. harness_bench.zen records a 1.7x excursion on the time columns from one
+// unrelated background `cc`, and nothing here is immune to that. The memory columns are far steadier:
+// peakKB is a kernel high-water mark of a deterministic workload and moves by tenths of a percent.
+//
+// MEASURED on the 16-core dev box, load average ~1, ZEN_BENCH_REPS=3 — min-to-max of the `# slope`
+// ns/req across the three reps:
+//
+//   change_sweep  43.94–46.69 ms  6.3%      change_50L      43.26–44.84 ms  3.7%
+//   didChange     43.37–45.78 ms  5.6%      change_500L     48.89–52.55 ms  7.5%
+//   definition    32.79–34.00 ms  3.7%      change_2000L    66.84–67.77 ms  1.4%
+//   rss-creep     303–434 B/edit           change_nocache  44.97–46.87 ms  4.2%
+//
+// so ~4% is the floor for a row that does real work, ~7.5% worst. The four CHEAP kinds — hover,
+// completion, semanticTokens/full, documentSymbol — came back between -0.079 ms and +0.156 ms per
+// request across those reps, i.e. STRADDLING ZERO. Their true cost is below what a marginal taken
+// around a subprocess spawn can resolve; the honest reading of those rows is "under 0.2 ms, too
+// small to measure this way", never the specific number printed.
+//
+// peakKB over all 12 change_sweep rows of those three reps: 57344–57600 KB, a total spread of two
+// 128 KB quanta with NO trend against the request count.
+//
+// And a live example of why one run is not a measurement: in rep 2 above, the change_sweep reqs=200
+// row read 82.0 ms/edit against a 43–46 ms baseline — a 1.9x excursion from something else on the
+// box — while every memory column in the same row stayed put. Time columns are contention-sensitive;
+// memory columns are not.
+//
+// A single run is not a measurement. If a time column moves and you have one run of each, you have
+// nothing.
+//
+// ── WHAT IS NOT MEASURED, AND WHY ─────────────────────────────────────────────────────────────────
+//   * PER-REQUEST latency inside the server. Every number here is a marginal from outside the
+//     process. The server would have to timestamp its own dispatch to do better, and adding that
+//     instrumentation would change the thing being measured.
+//   * RSS sampled at a KNOWN request index. The trace samples on a wall-clock tick, and nothing
+//     correlates a sample with the request in flight; the sweep's peakKB column is the statistic that
+//     is exactly attributable, and the trace is corroboration.
+//   * Anything under an editor's real traffic mix (didChange racing a hover, cancellations,
+//     partial-sync incremental edits). These sessions are one method at a time, full-sync, back to
+//     back — a harder load than an editor generates, not a replay of one.
+//   * Allocation COUNTS. harness_bench's mallinfo2 column measures the bench process's own heap;
+//     here the heap under test belongs to a CHILD process, where mallinfo2 cannot see it. Counts for
+//     the server need `valgrind ./zen lsp < session` by hand.
+{ put } = std.text.fmt
+{ new_in, append_in, finish_in } = std.text.string
+{ Malloc } = std.mem.alloc
+{ save, contents_in, shell } = std.io.file
+{ len, is_empty, try_parse_int } = std.text.str
+{ expect } = std.core.result
+{ getEnv } = std.sys.os
+{ mono_ns } = std.time.clock
+{ zo_cmd, zo_dir, zo_idpath, zo_join, zo_itoa } = harness_lib
+// one measurement: how long the whole subprocess took, and the kernel's high-water RSS for it.
+// `peak_kb` is -1 when /usr/bin/time -v could not be read — never a guess.
+LbRes: {
+    ns: i64,
+    peak_kb: i64,
+}
+// scratch-file ids must be unique across the whole run (a rep re-runs every sweep), so they come
+// from one counter rather than from a per-sweep index.
+lb_gid := 0
+lb_next_gid = () i64 {
+    lb_gid = lb_gid + 1
+    lb_gid
+}
+// ── the session bytes ─────────────────────────────────────────────────────────────────────────────
+// one framed JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`, byte count from the body.
+lb_frame = (mp: MutPtr<Malloc>, body: string_view) string_view {
+    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    mp.zo_join([z, "Content-Length: ", mp.zo_itoa(len(body)), "\r\n\r\n", body])
+}
+LB_INIT = () string_view {
+    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"
+}
+LB_SHUT = () string_view { "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}" }
+LB_EXIT = () string_view { "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}" }
+// the document URI. Its dirname is where the server resolves sibling imports; this run's private
+// scratch dir has no siblings, so the only imports are std ones resolved from the source root.
+lb_uri = (mp: MutPtr<Malloc>) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "file://", mp.zo_dir(), "/lbdoc.zen"])
+}
+lb_open = (mp: MutPtr<Malloc>, uri: string_view, text: string_view) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"languageId\":\"zen\",\"version\":1,\"text\":\"", text, "\"}}}"])
+}
+// FULL-SYNC didChange: the whole document every time, which is what textDocumentSync:1 asks the
+// client for and therefore what a real editor sends. Each carries a fresh version so nothing the
+// server keys by version can be replayed from cache.
+lb_change = (mp: MutPtr<Malloc>, uri: string_view, text: string_view, ver: i64) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"version\":", mp.zo_itoa(ver), "},\"contentChanges\":[{\"text\":\"", text, "\"}]}}"])
+}
+// a request carrying a cursor position — definition, hover and completion need it; documentSymbol
+// and semanticTokens/full ignore it, and sending it anyway keeps ONE builder for every kind.
+lb_posreq = (
+    mp: MutPtr<Malloc>,
+    uri: string_view,
+    method: string_view,
+    id: i64,
+    line: i64,
+    ch: i64,
+) string_view {
+    z: string_view := ""
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":", mp.zo_itoa(id), ",\"method\":\"textDocument/", method, "\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":", mp.zo_itoa(line), ",\"character\":", mp.zo_itoa(ch), "}}}"])
+}
+// ── the documents ─────────────────────────────────────────────────────────────────────────────────
+// `nf` four-line functions between two std import records and a main that calls into both, rendered
+// as it sits INSIDE the JSON body (`\n` is the two-character JSON escape, not a newline). Line count
+// is 4*nf + 6, so nf picks the size:
+//
+//    0  { println } = std.text.fmt
+//    1  { len } = std.text.str
+//    2  f0 = (x: i32) i32 {          <- nf of these, four lines each
+//    3      y := x + 0
+//    4      y
+//    5  }
+//       …
+//       main = () i32 {              <- line 4*nf + 2
+//           println(len("abc"))
+//           f0(1)                    <- line 4*nf + 4: the cursor position every kind row probes
+//       }
+//
+// The imports are the point, not decoration: a document importing NOTHING re-checks in ~0.1 ms
+// (measured), so it would report the JSON plumbing rather than the check pipeline. Every real Zen
+// file opens with import records, and re-reading and re-checking those modules is what a keystroke
+// actually costs.
+lb_doc = (mp: MutPtr<Malloc>, nf: i64) string_view {
+    z: string_view := ""
+    s := mp.new_in().expect("bench: oom")
+    s = s
+        .append_in(mp, "{ println } = std.text.fmt\\n{ len } = std.text.str\\n")
+        .expect("bench: oom")
+    i := to_i64(0)
+    @while (i < nf) {
+        s = s
+            .append_in(mp, mp.zo_join([z, "f", mp.zo_itoa(i), " = (x: i32) i32 {\\n    y := x + ", mp.zo_itoa(i), "\\n    y\\n}\\n"]))
+            .expect("bench: oom")
+        i = i + 1
+    }
+    s = s
+        .append_in(mp, "main = () i32 {\\n    println(len(\\\"abc\\\"))\\n    f0(1)\\n}\\n")
+        .expect("bench: oom")
+    mp.finish_in(s).expect("bench: oom")
+}
+lb_doc_lines = (nf: i64) i64 { 4 * nf + 6 }
+lb_probe_line = (nf: i64) i64 { 4 * nf + 4 }    // the `f0(1)` call site
+LB_PROBE_CH = () i64 { 4 }
+// a whole scripted session: handshake, didOpen, then `n` requests of ONE kind, then a clean shutdown.
+// `method` is "didChange" for the edit loop, otherwise the textDocument/<method> to repeat.
+lb_session = (
+    mp: MutPtr<Malloc>,
+    doc: string_view,
+    nf: i64,
+    method: string_view,
+    n: i64,
+) string_view {
+    uri := mp.lb_uri()
+    s := mp.new_in().expect("bench: oom")
+    s = s.append_in(mp, mp.lb_frame(LB_INIT())).expect("bench: oom")
+    s = s.append_in(mp, mp.lb_frame(mp.lb_open(uri, doc))).expect("bench: oom")
+    i := to_i64(0)
+    @while (i < n) {
+        body := (method == "didChange").match ({
+            true  => mp.lb_change(uri, doc, i + 2),
+            false => mp.lb_posreq(uri, method, 100 + i, lb_probe_line(nf), LB_PROBE_CH()),
+        })
+        s = s.append_in(mp, mp.lb_frame(body)).expect("bench: oom")
+        i = i + 1
+    }
+    s = s.append_in(mp, mp.lb_frame(LB_SHUT())).expect("bench: oom")
+    s = s.append_in(mp, mp.lb_frame(LB_EXIT())).expect("bench: oom")
+    mp.finish_in(s).expect("bench: oom")
+}
+// ── running one session ───────────────────────────────────────────────────────────────────────────
+// a decimal integer from a file, or -1 when the file is missing/empty/not a number. `tr -dc 0-9`
+// upstream strips the trailing newline try_parse_int would refuse.
+lb_readnum = (mp: MutPtr<Malloc>, path: string_view) i64 {
+    mp.contents_in(path).match ({
+        .Ok(s)  => try_parse_int(s).match ({
+            .Ok(v)  => v,
+            .Err(e) => 0 - 1,
+        }),
+        .Err(e) => 0 - 1,
+    })
+}
+// pipe `session` through `zen lsp` under /usr/bin/time -v, wall-timing the subprocess and pulling
+// the kernel's peak RSS out of time's report. `env` is a (possibly empty) environment prefix.
+// The session and the server's stdout are deleted afterwards — a 500-request session against the
+// 2000-line document is megabytes, and both are reproducible from this file. The time -v report
+// (.tv) and the extracted number (.rss) are KEPT under the run's scratch dir so any row can be
+// checked by hand against the raw source of its number.
+lb_run = (mp: MutPtr<Malloc>, gid: i64, env: string_view, session: string_view) LbRes {
+    z: string_view := ""
+    inp := mp.zo_idpath("lb", gid, ".in")
+    outp := mp.zo_idpath("lb", gid, ".out")
+    tvp := mp.zo_idpath("lb", gid, ".tv")
+    rssp := mp.zo_idpath("lb", gid, ".rss")
+    save(inp, session, len(session))
+    cmd := mp.zo_join([z, env, "/usr/bin/time -v ./zen lsp < ", inp, " > ", outp, " 2> ", tvp, "; grep 'Maximum resident' ", tvp, " | tr -dc 0-9 > ", rssp, "; rm -f ", inp, " ", outp])
+    t0 := mono_ns()
+    shell(mp.zo_cmd(cmd)).expect("bench: shell")
+    t1 := mono_ns()
+    LbRes(
+        ns: t1 - t0,
+        peak_kb: mp.lb_readnum(rssp),
+    )
+}
+// does /usr/bin/time -v exist and print the line the rows are parsed from? Checked once, so a box
+// without it reports -1 everywhere instead of silently reporting zeros.
+lb_time_ok = (mp: MutPtr<Malloc>) bool {
+    z: string_view := ""
+    gid := lb_next_gid()
+    tvp := mp.zo_idpath("lb", gid, ".tv")
+    rssp := mp.zo_idpath("lb", gid, ".rss")
+    shell(mp.zo_cmd(mp.zo_join([z, "/usr/bin/time -v true 2> ", tvp, "; grep 'Maximum resident' ", tvp, " | tr -dc 0-9 > ", rssp]))).expect("bench: shell")
+    mp.lb_readnum(rssp) > 0
+}
+// ── report formatting ─────────────────────────────────────────────────────────────────────────────
+// Fixed-width columns, no timestamps or paths, so two runs diff cleanly. Every writer returns the
+// byte count fmt's Printer threads and every chain ends in `.n` — the must-use check is name-based,
+// and a bare statement-position `put(...)` reads as a discarded self-mutating container method.
+NAME_W = () i64 { 20 }
+DOCL_W = () i64 { 7 }
+REQS_W = () i64 { 7 }
+NS_W = () i64 { 15 }
+DNS_W = () i64 { 13 }
+PEAK_W = () i64 { 10 }
+DB_W = () i64 { 11 }
+lb_sp = (n: i64) i64 {
+    w := to_i64(0)
+    i := to_i64(0)
+    @while (i < n) {
+        w = w + put(" ").n
+        i = i + 1
+    }
+    w
+}
+lb_digits = (v: i64) i64 {
+    d := (v < 0).then({ 2 }, { 1 })
+    x := (v < 0).then({ 0 - v }, { v })
+    @while (x > 9) {
+        d = d + 1
+        x = x / 10
+    }
+    d
+}
+// right-align `v` in a `w`-wide column. The pad is bound BEFORE the digits are written: `a + b` has
+// no defined evaluation order in the emitted C, so one `lb_sp(…) + put(…).n` expression could print
+// the number ahead of its padding.
+lb_num = (v: i64, w: i64) i64 {
+    pad := lb_sp(w - lb_digits(v))
+    pad + put("").i(v).n
+}
+lb_text = (t: string_view, w: i64) i64 {
+    head := put(t).n
+    head + lb_sp(w - len(t))
+}
+lb_rtext = (t: string_view, w: i64) i64 {
+    pad := lb_sp(w - len(t))
+    pad + put(t).n
+}
+// the first row of a sweep has nothing to be marginal against, and prints `-` rather than a 0 that
+// would read as a measured zero.
+lb_dash = (w: i64) i64 { lb_rtext("-", w) }
+lb_cell = (v: i64, w: i64, dash: bool) i64 { dash.then({ lb_dash(w) }, { lb_num(v, w) }) }
+lb_header = () i64 {
+    lb_text("case", NAME_W())
+    lb_rtext("docL", DOCL_W() - 1)
+    lb_sp(1)
+    lb_rtext("reqs", REQS_W() - 1)
+    lb_sp(1)
+    lb_rtext("total_ns", NS_W() - 1)
+    lb_sp(1)
+    lb_rtext("d_ns/req", DNS_W() - 1)
+    lb_sp(1)
+    lb_rtext("peakKB", PEAK_W() - 1)
+    lb_sp(1)
+    lb_rtext("d_B/req", DB_W() - 1)
+    put("\n").n
+}
+// one measurement. `first` suppresses the two marginal columns; `dns`/`db` are the marginals against
+// the row above, and `db` is -1 when peak RSS was unavailable (lb_time_ok false).
+lb_row = (name: string_view, docl: i64, reqs: i64, r: LbRes, first: bool, dns: i64, db: i64) i64 {
+    lb_text(name, NAME_W())
+    lb_num(docl, DOCL_W() - 1)
+    lb_sp(1)
+    lb_num(reqs, REQS_W() - 1)
+    lb_sp(1)
+    lb_num(r.ns, NS_W() - 1)
+    lb_sp(1)
+    lb_cell(dns, DNS_W() - 1, first)
+    lb_sp(1)
+    lb_num(r.peak_kb, PEAK_W() - 1)
+    lb_sp(1)
+    lb_cell(db, DB_W() - 1, first)
+    put("\n").n
+}
+// a bare informational line, void so it can sit inside a `.then` action.
+lb_note = (t: string_view) void {
+    put(t).n
+    { }
+}
+lb_rep_note = (rep: i64, reps: i64) void {
+    put("# rep ")
+        .i(rep)
+        .s("/")
+        .i(reps)
+        .nl().n
+    { }
+}
+// the endpoint-to-endpoint summary of a sweep: the same two marginals taken across its full span,
+// which is the number to quote as "per didChange".
+lb_slope_note = (name: string_view, lo: i64, hi: i64, dns: i64, db: i64) void {
+    put("# slope ")
+        .s(name)
+        .s(" ")
+        .i(lo)
+        .s("->")
+        .i(hi)
+        .s(" reqs: ")
+        .i(dns)
+        .s(" ns/req, ")
+        .i(db)
+        .s(" B/req")
+        .nl().n
+    { }
+}
+// ── the sweeps ────────────────────────────────────────────────────────────────────────────────────
+// One sweep = the same session shape at several request counts. Each row's marginal columns are
+// against the row above it, so a sweep yields several independent estimates of the same slope; the
+// trailing `# slope` line gives the span. `pts` must be ascending.
+lb_sweep = (
+    mp: MutPtr<Malloc>,
+    name: string_view,
+    nf: i64,
+    doc: string_view,
+    method: string_view,
+    pts: [i64],
+    scale: i64,
+    env: string_view,
+) void {
+    prev_ns := to_i64(0)
+    prev_kb := to_i64(0)
+    prev_n := to_i64(0)
+    base_ns := to_i64(0)
+    base_kb := to_i64(0)
+    base_n := to_i64(0)
+    last_n := to_i64(0)
+    last_ns := to_i64(0)
+    last_kb := to_i64(0)
+    first := true
+    pts.loop((h, k, p) {
+        n := p * scale
+        r := mp.lb_run(lb_next_gid(), env, mp.lb_session(doc, nf, method, n))
+        step := (n - prev_n < 1).then({ 1 }, { n - prev_n })
+        lb_row(name, lb_doc_lines(nf), n, r, first, (r.ns - prev_ns) / step, (r.peak_kb - prev_kb) * 1024 / step)
+        first.then({
+            base_ns = r.ns
+            base_kb = r.peak_kb
+            base_n = n
+        })
+        first = false
+        prev_ns = r.ns
+        prev_kb = r.peak_kb
+        prev_n = n
+        last_n = n
+        last_ns = r.ns
+        last_kb = r.peak_kb
+    })
+    span := (last_n - base_n < 1).then({ 1 }, { last_n - base_n })
+    lb_slope_note(name, base_n, last_n, (last_ns - base_ns) / span, (last_kb - base_kb) * 1024 / span)
+}
+// ── the in-flight RSS trace ───────────────────────────────────────────────────────────────────────
+// The peak column says how high the server ever got; this says WHEN. A shell helper backgrounds the
+// server, reads resident pages out of /proc/<pid>/statm every 20 ms until it exits, and awk turns the
+// samples into one `#` line (pages x 4 = KB). The line is emitted by awk and printed verbatim: this
+// harness does not reformat a number it did not compute.
+//
+// Read it as: startKB is the process before its first check; p25/p50/p75/end walk the session in
+// time order. A leak makes those four climb; a recycling server holds them level a few KB apart.
+//
+// THIS IS THE FINEST INSTRUMENT IN THE FILE, and it is why the trace is run at three session lengths
+// rather than one. Resident pages resolve to 4 KB, where peakKB resolves to 128 KB — so a residual
+// too small for the sweep's d_B/req column to see at all still shows up here as a clean straight
+// line, and `# rss-creep` is its slope taken across the shortest and longest traced sessions. The
+// sweep answers "is there a leak"; this answers "how much is left".
+//
+// One trace: run the session with the sampler attached, then let awk emit BOTH the human line and,
+// separately, the final sample as a bare number this harness can do arithmetic on.
+lb_trace = (mp: MutPtr<Malloc>, doc: string_view, nf: i64, n: i64) i64 {
+    z: string_view := ""
+    gid := lb_next_gid()
+    inp := mp.zo_idpath("lb", gid, ".in")
+    trp := mp.zo_idpath("lb", gid, ".trace")
+    sump := mp.zo_idpath("lb", gid, ".sum")
+    endp := mp.zo_idpath("lb", gid, ".end")
+    sess := mp.lb_session(doc, nf, "didChange", n)
+    save(inp, sess, len(sess))
+    cmd := mp.zo_join([z, "./zen lsp < ", inp, " > /dev/null 2>/dev/null & p=$!; while kill -0 $p 2>/dev/null; do awk '{print $2}' /proc/$p/statm 2>/dev/null; sleep 0.02; done > ", trp, "; wait $p; awk '$1>0 {a[++n]=$1*4; if (a[n]>mx) mx=a[n]} END{ if (n==0) { print \"# rss-trace: no samples\"; exit } printf \"# rss-trace didChange=", mp.zo_itoa(n), " samples=%d startKB=%d p25KB=%d p50KB=%d p75KB=%d endKB=%d maxKB=%d\\n\", n, a[1], a[int(n*0.25)+1], a[int(n*0.5)+1], a[int(n*0.75)+1], a[n], mx }' ", trp, " > ", sump, "; awk '$1>0 {e=$1*4} END{ printf \"%d\", e+0 }' ", trp, " > ", endp, "; rm -f ", inp, " ", trp])
+    shell(mp.zo_cmd(cmd)).expect("bench: shell")
+    lb_note(mp.contents_in(sump).match ({
+        .Ok(s)  => s,
+        .Err(e) => "# rss-trace: unavailable\n",
+    }))
+    mp.lb_readnum(endp)
+}
+// the same session at several lengths: the end-of-session RSS against the number of edits that
+// produced it. The `# rss-creep` line is (longest end − shortest end) / (their request difference) —
+// the residual per didChange, in bytes, at 4 KB resolution.
+lb_trace_sweep = (mp: MutPtr<Malloc>, doc: string_view, nf: i64, pts: [i64], scale: i64) void {
+    base_kb := to_i64(0)
+    base_n := to_i64(0)
+    last_kb := to_i64(0)
+    last_n := to_i64(0)
+    first := true
+    pts.loop((h, k, p) {
+        n := p * scale
+        kb := mp.lb_trace(doc, nf, n)
+        first.then({
+            base_kb = kb
+            base_n = n
+        })
+        first = false
+        last_kb = kb
+        last_n = n
+    })
+    span := (last_n - base_n < 1).then({ 1 }, { last_n - base_n })
+    put("# rss-creep ")
+        .i(base_n)
+        .s("->")
+        .i(last_n)
+        .s(" didChange: ")
+        .i((last_kb - base_kb) * 1024 / span)
+        .s(" B/didChange at end of session (")
+        .i(base_kb)
+        .s(" -> ")
+        .i(last_kb)
+        .s(" KB)")
+        .nl().n
+    { }
+}
+// ── the cache question, measured ──────────────────────────────────────────────────────────────────
+// Point ZENC_CACHE_DIR at a fresh EMPTY directory, run a real LSP session, and count what appeared;
+// then run one `zen check` against the same directory and count again. The second count is the
+// control: it proves the directory is the one the compiler would populate, so a zero first count is
+// evidence the LSP path never consults the cache — not just evidence that nothing was written.
+lb_cache_note = (mp: MutPtr<Malloc>, doc: string_view, nf: i64) void {
+    z: string_view := ""
+    gid := lb_next_gid()
+    inp := mp.zo_idpath("lb", gid, ".in")
+    dir := mp.zo_idpath("lb", gid, ".cache")
+    src := mp.zo_idpath("lb", gid, ".probe.zen")
+    n1p := mp.zo_idpath("lb", gid, ".n1")
+    n2p := mp.zo_idpath("lb", gid, ".n2")
+    sess := mp.lb_session(doc, nf, "didChange", 10)
+    probe := "main = () i32 { 0 }\n"
+    save(inp, sess, len(sess))
+    save(src, probe, len(probe))
+    cmd := mp.zo_join([z, "rm -rf ", dir, "; mkdir -p ", dir, "; ZENC_CACHE_DIR=", dir, " ./zen lsp < ", inp, " > /dev/null 2>&1; find ", dir, " -type f | wc -l | tr -dc 0-9 > ", n1p, "; ZENC_CACHE_DIR=", dir, " ./zen check ", src, " > /dev/null 2>&1; find ", dir, " -type f | wc -l | tr -dc 0-9 > ", n2p, "; rm -rf ", dir, " ", inp])
+    shell(mp.zo_cmd(cmd)).expect("bench: shell")
+    put("# cache: files in a fresh ZENC_CACHE_DIR after an LSP session with 10 didChange = ")
+        .i(mp.lb_readnum(n1p))
+        .s("; after one `zen check` against the same dir = ")
+        .i(mp.lb_readnum(n2p))
+        .nl().n
+    { }
+}
+// ── driver ────────────────────────────────────────────────────────────────────────────────────────
+// a positive integer from the environment, or `dflt` when unset/unparseable/non-positive.
+lb_env_n = (name: string_view, dflt: i64) i64 {
+    e := getEnv(name)
+    is_empty(e).match ({
+        true  => dflt,
+        false => try_parse_int(e).match ({
+            .Ok(v)  => (v < 1).then({ dflt }, { v }),
+            .Err(x) => dflt,
+        }),
+    })
+}
+NF_SMALL = () i64 { 11 }    // 50 lines
+NF_MED = () i64 { 123 }    // 498 lines
+NF_BIG = () i64 { 498 }    // 1998 lines
+// the headline sweep: far enough out (500 edits ~ a couple of minutes of real typing) that a
+// per-request leak of even a few hundred KB would be unmistakable in peakKB.
+LB_SWEEP_PTS = () [i64] { [0, 50, 200, 500] }
+// the traced session lengths. Three points, not two: a straight line through three is what
+// distinguishes a per-request residual from a one-off startup cost that a two-point slope would
+// smear across the requests. The shortest is long enough (~4 s) to collect ~100 samples.
+LB_TRACE_PTS = () [i64] { [100, 300, 600] }
+// two points per request kind: enough for a marginal, cheap enough to do six of them.
+LB_KIND_PTS = () [i64] { [10, 110] }
+// document-size and no-cache sweeps only need a baseline and one loaded point.
+LB_DOC_PTS = () [i64] { [0, 20] }
+// every request kind an editor issues on the keys a user actually presses. didChange leads because
+// it is the one that re-runs the whole check pipeline; the rest are ordered as a reader meets them.
+LB_KINDS = () [string_view] {
+    ["didChange", "definition", "hover", "completion", "semanticTokens/full", "documentSymbol"]
+}
+lb_all = (mp: MutPtr<Malloc>, scale: i64) void {
+    d_small := mp.lb_doc(NF_SMALL())
+    d_med := mp.lb_doc(NF_MED())
+    d_big := mp.lb_doc(NF_BIG())
+    // (1) THE HEADLINE: does resident memory grow with the number of edits?
+    mp.lb_sweep("change_sweep", NF_SMALL(), d_small, "didChange", LB_SWEEP_PTS(), scale, "")
+    mp.lb_trace_sweep(d_small, NF_SMALL(), LB_TRACE_PTS(), scale)
+    LB_KINDS().loop((h, i, k) {
+        // (2) cost by request kind, all at one document size so the rows compare directly
+        mp.lb_sweep(k, NF_SMALL(), d_small, k, LB_KIND_PTS(), scale, "")
+    })
+    // (3) how a didChange scales with the size of the document being edited
+    mp.lb_sweep("change_50L", NF_SMALL(), d_small, "didChange", LB_DOC_PTS(), scale, "")
+    mp.lb_sweep("change_500L", NF_MED(), d_med, "didChange", LB_DOC_PTS(), scale, "")
+    mp.lb_sweep("change_2000L", NF_BIG(), d_big, "didChange", LB_DOC_PTS(), scale, "")
+    // (4) the cache state of every number above, measured rather than asserted
+    mp.lb_cache_note(d_small, NF_SMALL())
+    mp.lb_sweep("change_nocache", NF_SMALL(), d_small, "didChange", LB_DOC_PTS(), scale, "ZENC_NO_CACHE=1 ")
+}
+main* = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    scale := lb_env_n("ZEN_BENCH_SCALE", 1)
+    reps := lb_env_n("ZEN_BENCH_REPS", 1)
+    (mp.lb_time_ok() == false).then({
+        lb_note("# WARNING: /usr/bin/time -v unavailable — every peakKB and d_B/req reads -1\n")
+    })
+    lb_header()
+    r := to_i64(0)
+    @while (r < reps) {
+        (reps > 1).then({
+            lb_rep_note(r + 1, reps)
+        })
+        mp.lb_all(scale)
+        r = r + 1
+    }
+    0
+}
