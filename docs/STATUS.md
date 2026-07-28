@@ -1,7 +1,10 @@
 # Zen status and roadmap
 
-Last full code/document audit: 2026-07-12 (base `5f33f01`); refreshed 2026-07-18 after the no-`if`
-law (match guards removed), readonly-pointer write soundness, and `zenc init` landed (#493/#494).
+Last full code/document audit: 2026-07-26 (base `6b60d5b`) — see
+[memory-audit-2026-07-26.md](memory-audit-2026-07-26.md), which covers the memory surface. The
+preceding full code/document audit was 2026-07-12 (base `5f33f01`), refreshed 2026-07-18 after the
+no-`if` law (match guards removed), readonly-pointer write soundness, and `zenc init` landed
+(#493/#494). Rows below this line have not all been re-derived at `6b60d5b`.
 
 This is the one implementation ledger. It replaces scattered goals, feature inventories, design
 plans, judge reports, research notes, fix queues, and resolved repro essays. Status is derived from

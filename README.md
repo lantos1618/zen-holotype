@@ -124,9 +124,12 @@ What you just read, and where it is specified ([docs/SPEC.md](docs/SPEC.md)):
   `error[ptr-write]` at compile time.
 - **Raw strings.** `"""…"""` spans lines and takes bytes literally — a `\n`
   inside one stays two characters.
-- **Memory is explicit.** Allocators are values you thread; no hidden heap;
+- **Memory is explicit.** Allocators are values you thread; nothing allocates as a
+  side effect — no GC, no auto-boxing, every allocation is a call you can see;
   touching a pointer after `free` is `error[ownership]` at compile time.
-  ([docs/MEMORY_MODEL.md](docs/MEMORY_MODEL.md))
+  (Convenience constructors like `vec.new()` allocate from the process heap rather
+  than an allocator you pass — visible, but not threaded.
+  [docs/MEMORY_MODEL.md](docs/MEMORY_MODEL.md))
 - **Actors on real threads.** Typed actors on a pthread pool; a send moves
   ownership (checker-enforced), a panic kills one actor, not the pool.
   `./zen run examples/pool_actor_demo.zen` fans 1000 messages across OS cores

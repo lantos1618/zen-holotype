@@ -103,7 +103,8 @@ tag = (l: Level) string_view { l.variant_name() }   // .Debug => "Debug", .Info 
 
 The name is VERBATIM by design. Case folding was deliberately left out: it is a runtime
 string operation that allocates, and hiding a heap allocation behind a reflection intrinsic
-would contradict the no-hidden-heap rule. The declaration is the single source of truth for
+that otherwise returns a borrowed view would contradict the no-implicit-allocation rule
+([MEMORY_MODEL.md](MEMORY_MODEL.md)). The declaration is the single source of truth for
 the spelling; a caller who wants another one transforms it explicitly.
 
 Five stdlib converters now delegate to it (`std.core.result.name`, `std.text.str

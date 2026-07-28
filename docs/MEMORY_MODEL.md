@@ -5,9 +5,26 @@ final pointer/borrow/lifetime design.
 
 ## The model: explicit capabilities, threaded allocators
 
-Zen's memory model is **explicit**, not ambient. Memory comes from an `Allocator`
-that a function receives as a parameter, so allocation is visible in the
-signature — never a hidden global heap. The outside world enters through a
+Zen's memory model is **explicit**, not ambient. That is two claims, and only the
+first is a guarantee:
+
+1. **No implicit allocation.** An allocation is always written at the point it
+   happens — it is only ever the job of a call you can see. Nothing allocates as a
+   *side effect*: there is no GC, no auto-boxing, no growing an aggregate behind an
+   operator or an assignment, and no intrinsic that quietly heap-allocates. This is
+   the rule that rejects a case-folding option on `variant_name()` (see
+   [SPEC.md](SPEC.md)): folding case needs a fresh string, which would put an
+   allocation behind a reflection intrinsic that otherwise returns a borrowed view.
+2. **Allocator-explicit by default — a default, not a law.** The real construction
+   paths (`new_in`, `from_in`, `make_in`, …) take an `Allocator` as a parameter, so
+   the *choice* of allocator is visible in the signature. But this is not universal:
+   a zero-parameter function can reach the process heap (`std.mem.heap.gpa()`,
+   `dyn_heap()`), and the convenience wrappers named below do exactly that. Those
+   calls still allocate visibly — they just do not let the caller pick where from.
+
+Do not read the pair as "the allocator is always a parameter". It is not.
+
+The outside world enters through a
 **capability**: the entry `main = (sys: Sys) i32` receives a `Sys`
 (`std.sys`) and hands out narrow capabilities, notably `sys.heap()` (the process
 `Allocator`) and `sys.stdout()`/`sys.stderr()` (`Writer`s). Libraries take the
@@ -22,6 +39,9 @@ and ownership APIs.
 > and their `from`/`from` variants) no longer draw from `std.rt` — they capture the
 > process heap once via `dyn_heap()` at construction and store that `DynAlloc` for
 > the container's lifetime. `new_in`/`from_in` remain the explicit real paths.
+> **These wrappers are the named exception to rule 2 above** — the allocation is
+> still written where it happens (`vec.new()` is a constructor; rule 1 holds), but
+> the allocator is not a parameter.
 
 String bytes carry their own provenance discipline — static `string_literal`,
 borrowed NUL-terminated `string_cstr`, general borrowed `string_view`, and the
@@ -44,9 +64,15 @@ Raw allocation calls are guarded by `tests/harness_boundaries.zen`:
 thread an allocator and call `acquire`/`resize`/`release` or a higher-level
 allocator-aware API.
 
-Arena backing storage follows the same rule. `arena.new_in(backing, cap)` and
+Arena backing storage follows the same rule. `arena.make_in(backing, cap)` and
 `Arena.free_in(backing)` acquire and release the arena's backing block through a
 caller allocator. `Arena.free` is the default-heap convenience path.
+
+The arena constructor is spelled `make_in`, not `new_in`, on purpose: Zen's
+namespace is flat, so two modules that both export a top-level `new_in` cannot
+reach one program. `std.text.string` already owns `new_in`, and a String builder
+sits beside the arena often enough (anything pulling in `std.concurrent.actor`
+drags the arena along) that the arena took the distinct name.
 
 Compiler-adjacent AST builders follow the same convention where they return
 owned slices: `std.internal.ast.dbuf_in` and `derive_accessors_in` place
