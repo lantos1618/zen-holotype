@@ -433,7 +433,12 @@ runtime catching belongs in step 4.
 
 ## 8. Found and fixed during this audit — **OPEN PRs, not on `main`**
 
-> **Status, stated precisely:** all three are **open, CI-green, and NOT merged**. `origin/main` is
+> ⚠️ **THIS SECTION IS STALE (as of 2026-07-27).** All three PRs have since **merged**: #699 as
+> `b311d75`, #700 as `5378353`, #701 as `e813d8f`. The paragraph and table below are preserved as
+> the audit author wrote them on 2026-07-26 and are *not* rewritten; read them as a snapshot of that
+> day, not as current status.
+
+> **Status, stated precisely** *(as of 2026-07-26; superseded — see above)*: all three are **open, CI-green, and NOT merged**. `origin/main` is
 > `6b60d5b` (PR #698). A reader who checks out `main` does **not** have these fixes. An earlier
 > draft of this section said "fixed today", which was exactly the failure mode Appendix A and
 > Appendix B exist to prevent; the panel caught it.

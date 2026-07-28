@@ -1360,9 +1360,15 @@ sx_message* = (a: MutPtr<Malloc>, code: i32, subject: string_view) string_view {
         .gstr_append(a, tail)
         .gstr_finish(a)
 }
+// Name only remedies that EXIST today. There are no region-promotion verbs (no `.share`/`.give`) and
+// no typed regions — `sx_is_source` rejects four literal source shapes (`acquire(…)`, arena
+// `make_in(…)`, `<local>.addr()`, a slice literal), so the way out is to hand the actor something
+// that is not one of them and genuinely outlives the sender: a copied value, or an `Arc` (a call
+// result, and refcounted so the receiver keeps it alive). `Rc` is NOT a remedy — the send-Rc pass
+// rejects it. docs/STATUS.md's scratch/shared row is the ledger entry for this gap.
 sx_hint* = (code: i32) string_view {
     (code == KSCRATCHSEND()).match ({
-        true  => "construct inside the actor, or promote with `.share(alloc)` (Arc) / `.give(alloc)` (iso move) — see docs/two-memory-design.md",
-        false => "construct inside the actor, promote with `.share(alloc)` / `.give(alloc)`, or pass state as plain values — see docs/two-memory-design.md",
+        true  => "construct it inside the actor's `receive`, send a plain value, or share long-lived data as an `Arc` (`std.mem.arc.new_in`) — see the scratch/shared row in docs/STATUS.md",
+        false => "construct it inside the actor's `receive`, pass plain values as the initial state, or share long-lived data as an `Arc` (`std.mem.arc.new_in`) — see the scratch/shared row in docs/STATUS.md",
     })
 }

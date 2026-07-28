@@ -539,8 +539,10 @@ reflect off the generic declaration, since variant names never depend on the typ
 arguments; a side-effecting receiver is evaluated exactly once.
 
 The name is returned VERBATIM. There is no case-folding option: changing case is
-a runtime string operation that must allocate, which would put a hidden heap
-allocation behind a reflection intrinsic. A caller who wants a different spelling
+a runtime string operation that must allocate, which would put a heap allocation
+behind a reflection intrinsic that otherwise returns a borrowed view — the
+no-implicit-allocation rule ([MEMORY_MODEL.md](MEMORY_MODEL.md)) forbids it.
+A caller who wants a different spelling
 either declares the variants that way or transforms the name explicitly.
 
 Like the struct intrinsics, `variant_name` is a reserved name whose only
@@ -739,12 +741,18 @@ ownership types:
   `sizeof`, `load_i64`, `store_i64`, `atomic_add_i64`, `null_ptr`;
 - `std.mem.alloc`: `Allocator`, `Heap`, `Malloc`, namespace-bound
   `default`, `try_acquire`, `try_resize`;
-- `std.mem.arena`: `Arena`, namespace-bound `new_in` and `try_new_in`;
+- `std.mem.arena`: `Arena`, namespace-bound `make_in` — *not* `new_in`, because Zen's
+  namespace is flat and `new_in` is already taken by `std.text.string`; the two modules
+  reach one program whenever a String builder sits beside anything that pulls the arena
+  in transitively;
 - `std.core.slice`: allocator-first `alloc_buf`, `dup`, `node`, `concat`, their `_in`
   aliases, and fallible `try_*` variants for allocator-backed slice storage;
-- `std.mem.own`: `Own<T>` plus `Drop`, with `new_in` and `try_new_in`;
-- `std.mem.rc`: `Rc<T>`, with `new_in` and `try_new_in`;
-- `std.mem.arc`: atomic `Arc<T>`, with `new_in` and `try_new_in`;
+- `std.mem.own`: `Own<T>` plus `Drop`, with `new_in`;
+- `std.mem.rc`: `Rc<T>`, with `new_in`;
+- `std.mem.arc`: atomic `Arc<T>`, with `new_in`;
+
+  (`own`/`rc`/`arc` `new_in` already return `Result<_, IoError>`, so there is no separate
+  `try_new_in`.)
 - `std.mem.trace`: tracing/cycle-collection substrate.
 
 Allocator-threaded std APIs make allocation visible in signatures. Examples:
@@ -856,8 +864,8 @@ Note: `std.concurrent.runtime`'s colorless `checkpoint` and the ambient runtime
 (`std.rt`, `std.scope`) are an experiment, not the shipped model. The current
 direction threads capabilities explicitly (allocators, and a `Sys` at the entry);
 reworking the ambient runtime toward "ambient-within-scope, explicit-at-boundary"
-is a roadmap item; the current runtime source of truth is
-`docs/runtime-design.md`.
+is a roadmap item. The source of truth is the code plus the runtime-API row in
+[STATUS.md](STATUS.md); the older runtime design notes were retired, not replaced.
 
 `ActorEngine<M>` owns the internal queue state. `ActorCell<M>` is the
 lower-level queue wrapper: it exposes `tell(message)` for fire-and-forget sends,
