@@ -48,6 +48,12 @@ borrowed NUL-terminated `string_cstr`, general borrowed `string_view`, and the
 heap-owned `String` (freed through the allocator that owns its buffer). The old
 `text`/`Cstr`/`str` spellings are parser aliases; see the string types section of [SPEC.md](SPEC.md).
 
+That list describes what the compiler does TODAY, and it is drift, not design: six surface
+spellings collapse to three internal types and print as one name. The target — five roles
+(`Literal`/`Const`/`Fixed`/growable/`View`) over an element type, with `String` as the `u8` case
+of `Vec` — is written down in [string-vec-model.md](string-vec-model.md), together with the two
+language changes it needs. Read that first; this section records the interim.
+
 ## Current Rules
 
 Allocation is explicit. User-facing containers, ownership types, and runtime APIs
