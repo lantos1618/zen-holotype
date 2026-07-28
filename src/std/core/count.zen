@@ -1,0 +1,56 @@
+// std.core.count — count iteration, and NOTHING else.
+//
+// These live in their OWN leaf module, not in std.collections.iter, because Zen's import namespace is
+// flat: `{ times } = std.collections.iter` drags iter's entire export set — `each`, `find`, `map`,
+// `count`, … — into every transitive consumer. That is not hypothetical. Converting std.hash and
+// std.rand to `times` broke examples/wordfreq.zen (iter's 1-arg `each` shadowing hmap's) and
+// examples/zvm.zen, and both conversions had to be reverted. A module with one concern and four
+// exports can be imported by anyone; iter.zen cannot.
+// `.loop` iterates MEMORY — it indexes a `[T]`. A COUNT has no backing memory, so walking `0 .. n`
+// used to leave `@while` as the only option, which is exactly how the imperative loop escaped the
+// primitives and spread through ordinary code. These are the count-shaped `.loop`: the `@while` lives
+// HERE, in the primitive, and callers write a body instead.
+//
+// The body is an ordinary closure, so it INLINES at the call site — the emitted C is the same plain
+// `while (i < n) { … i = i + 1 }` the hand-written loop produced. Nothing is allocated and nothing is
+// called per step. Because it inlines:
+//   • assigning the enclosing function's locals works (`total = total + i`);
+//   • `return` in the body returns from the ENCLOSING FUNCTION — the early exit `@while` had;
+//   • an enclosing `.loop`'s `h.break` still breaks THAT loop from inside the body.
+// To stop the count loop itself and carry on after it, use the `_while` pair: the body answers
+// "keep going?" and the call reports the index it stopped on.
+//
+// `T` is the index type, taken from the bound, so `v.len.times(…)` iterates at whatever width `len`
+// has. Step is fixed at 1 — a cursor that consumes a variable number of positions per step (a lexer)
+// still needs `@while`. For a materialised `[i64]` of the same numbers, when a real slice has to be
+// handed on, use the allocator-threaded `range_in`/`range_from_in`/`range_step_in` below.
+// `lo` up to but excluding `hi`; `hi <= lo` runs the body zero times.
+upto*<T> = (lo: T, hi: T, body: (T) void) void {
+    i := lo
+    @while (i < hi) {
+        body(i)
+        i = i + 1
+    }
+}
+// `upto` that can stop early: `body` answers "keep going?". Reports the index it stopped ON, or `hi`
+// when the body never said stop (so `stopped < hi` means "exited early", and an empty range gives `lo`).
+upto_while*<T> = (lo: T, hi: T, body: (T) bool) T {
+    i := lo
+    go := true
+    @while (go && i < hi) {
+        go = body(i)
+        go.then({
+            i = i + 1
+        })
+    }
+    i
+}
+// `0` up to but excluding `n` — the count loop. `n <= 0` runs the body zero times.
+times*<T> = (n: T, body: (T) void) void {
+    zero: T := 0
+    zero.upto(n, body)
+}
+times_while*<T> = (n: T, body: (T) bool) T {
+    zero: T := 0
+    zero.upto_while(n, body)
+}
