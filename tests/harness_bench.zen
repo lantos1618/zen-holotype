@@ -113,6 +113,7 @@
 { new_in, append_in, finish_in, free_in } = std.text.string
 { integer_in } = std.text.num
 { sort_by } = std.sort
+citer = std.collections.iter
 // NAMESPACED: map.zen's constructors are bare `empty`/`of`, names too generic to pull into the flat
 // import namespace alongside everything else this file imports.
 maps = std.collections.map
@@ -279,6 +280,39 @@ bn_slicelit = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
         acc = acc + xs[0] + xs[3]
         i = i + 1
     }
+    t1 := mono_ns()
+    BenchRes(
+        ns: t1 - t0,
+        bytes: bn_live(cell) - b0,
+        sink: acc,
+    )
+}
+// ONE OP = one step of a count loop over `0 .. n`, folding the index into `acc`.
+// `count_while` and `count_times` are the SAME loop written two ways — hand-rolled `@while` versus
+// std.collections.iter's `n.times`, whose body closure inlines. The body is a single add, so there is
+// nowhere for iterator overhead to hide: read the two rows as a pair, and any gap between them IS the
+// cost of the iterator surface.
+bn_count_while = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+    acc := to_i64(0)
+    b0 := bn_live(cell)
+    t0 := mono_ns()
+    i := to_i64(0)
+    @while (i < n) {
+        acc = acc + i
+        i = i + 1
+    }
+    t1 := mono_ns()
+    BenchRes(
+        ns: t1 - t0,
+        bytes: bn_live(cell) - b0,
+        sink: acc,
+    )
+}
+bn_count_times = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+    acc := to_i64(0)
+    b0 := bn_live(cell)
+    t0 := mono_ns()
+    citer.times(n, (i) { acc = acc + i })
     t1 := mono_ns()
     BenchRes(
         ns: t1 - t0,
@@ -505,6 +539,8 @@ bn_env_n = (name: string_view, dflt: i64) i64 {
 // not dominate) while the whole suite stays a few seconds.
 bn_all = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, ok: bool, scale: i64) void {
     mp.bn_run(cell, ok, "slicelit_sum", 1000000 * scale, 1000, bn_slicelit)
+    mp.bn_run(cell, ok, "count_while", 20000000 * scale, 1000, bn_count_while)
+    mp.bn_run(cell, ok, "count_times", 20000000 * scale, 1000, bn_count_times)
     mp.bn_run(cell, ok, "sb_chain", 500000 * scale, 1000, bn_sb_chain)
     mp.bn_run(cell, ok, "string_append", 500000 * scale, 1000, bn_string_append)
     mp.bn_run(cell, ok, "println_int", 200000 * scale, 1000, bn_println_int)

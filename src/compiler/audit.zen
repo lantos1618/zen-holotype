@@ -8,7 +8,8 @@
 { then } = std.core.bool
 { expect } = std.core.result
 { Map, of } = std.collections.map    // name -> decl-index / seen-set maps
-{ contents_in, opendir, readdir, closedir } = std.io.file
+{ contents_in } = std.io.file
+{ opendir, readdir, closedir } = std.c.libc
 { impl_cname_in } = compiler.mangle    // recompute hoisted impl-method names
 { gstr_string, gstr_append, gstr_finish, gstr_push, is_expr_null } = compiler.genc
 { parse_module } = compiler.parse
@@ -19,6 +20,7 @@
 { ResolvedProgram, ModuleEntry, eprint, seen_name, add_name } = compiler.resolve
 { edges_of, cache_module_path } = compiler.modgraph
 { say, cstr_range, eprint, push_int, dir_exists, resolve_prog_or_exit, dirname } = compiler.drvutil
+{ times, upto } = std.collections.iter
 // ── zen audit — dead-code + unused-import + clone reporter (`--strict` exits 1; clones advisory) ──
 // Dead-decl analysis runs over the SAME whole-program pipeline `check` uses (resolve imports ->
 // parse -> resolve_module), so alias qualification, UFCS dispatch and trait-default materialization
@@ -671,8 +673,7 @@ aud_lt = (a: AudFinding, b: AudFinding) bool {
     c < 0 || c == 0 && (a.line < b.line || a.line == b.line && a.msg.aud_strcmp(b.msg) < 0)
 }
 aud_sort = (fb: [AudFinding], n: i64) void {
-    i := 1
-    @while (i < n) {
+    1.upto(n, (i) {
         x := fb[i]
         j := i - 1
         @while (j >= 0 && x.aud_lt(fb[j])) {
@@ -680,8 +681,7 @@ aud_sort = (fb: [AudFinding], n: i64) void {
             j = j - 1
         }
         fb[j + 1] = x
-        i = i + 1
-    }
+    })
 }
 // is this raw decl one the report should name? (kinds/prefixes exempted per the header comment)
 aud_reportable = (d: Decl) bool {
@@ -769,8 +769,7 @@ aud_ms_eq = (v: [u8], s: i64, e: i64, ms: [AudTM]) bool {
     hit
 }
 aud_mark_used = (ents: [AudImp], nents: i64, v: [u8], s: i64, e: i64) void {
-    k := 0
-    @while (k < nents) {
+    nents.times((k) {
         en := ents[k]
         (en.used == false
             && (s < en.lo || s >= en.hi)
@@ -778,8 +777,7 @@ aud_mark_used = (ents: [AudImp], nents: i64, v: [u8], s: i64, e: i64) void {
             en.used = true
             ents[k] = en
         })
-        k = k + 1
-    }
+    })
 }
 // one scanner step at byte i: skip a comment/string/char literal whole, consume an identifier and
 // match it against the imported names, else advance one byte. Returns the next position.
@@ -916,8 +914,7 @@ aud_mod_imports = (
         i = ents.aud_step(k, v, i)
     }
     n := n0
-    j := 0
-    @while (j < k) {
+    k.times((j) {
         en := ents[j]
         (en.used == false && n < fb.len).then({
             fb[n] = AudFinding(
@@ -928,8 +925,7 @@ aud_mod_imports = (
             )
             n = n + 1
         })
-        j = j + 1
-    }
+    })
     n
 }
 // ── the audit driver ──────────────────────────────────────────────────────────────────────────────
@@ -1030,11 +1026,7 @@ aud_clone_msg = (mp: MutPtr<Malloc>, nm: string_view, other: string_view) string
 // hex of the fingerprint, because Map is string-keyed. 16 nibbles, no allocation beyond the key.
 aud_hash_key = (mp: MutPtr<Malloc>, h: i64) string_view {
     s := mp.gstr_string(17)
-    i := 0
-    @while (i < 16) {
-        s = s.gstr_push(mp, aud_hexd(h >> 60 - i * 4 & 15))
-        i = i + 1
-    }
+    16.times((i) { s = s.gstr_push(mp, aud_hexd(h >> 60 - i * 4 & 15)) })
     s.gstr_finish(mp)
 }
 aud_hexd = (v: i64) u8 { load(offset("0123456789abcdef", v)) }
@@ -1124,8 +1116,7 @@ aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
     dead := 0
     clones := 0
     shown := 0
-    i := 0
-    @while (i < n) {
+    n.times((i) {
         f := fb[i]
         dup := i > 0
             && f.path == fb[i - 1].path
@@ -1148,8 +1139,7 @@ aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
                 .gstr_append(mp, f.msg)
                 .gstr_finish(mp))
         })
-        i = i + 1
-    }
+    })
     say(mp
         .gstr_string(64)
         .gstr_append(mp, "zen audit: ")
@@ -1206,8 +1196,7 @@ aud_join_path = (mp: MutPtr<Malloc>, dir: string_view, nm: string_view) string_v
 }
 // deterministic entry order regardless of readdir order.
 aud_sortp = (fs: [string_view], n: i64) void {
-    i := 1
-    @while (i < n) {
+    1.upto(n, (i) {
         x := fs[i]
         j := i - 1
         @while (j >= 0 && x.aud_strcmp(fs[j]) < 0) {
@@ -1215,8 +1204,7 @@ aud_sortp = (fs: [string_view], n: i64) void {
             j = j - 1
         }
         fs[j + 1] = x
-        i = i + 1
-    }
+    })
 }
 // `struct dirent`: the NUL-terminated entry name (d_name) at +19 on this ABI (matches std.sys.fs).
 AUD_DNAME := 19
@@ -1284,8 +1272,7 @@ aud_embed_lit = (
     b: i64,
 ) Map<i64> {
     m := mods
-    j := a
-    @while (j < b) {
+    a.upto(b, (j) {
         hit := v[j] == '='
             && (j + 1 >= b || v[j + 1] != '=')
             && j > a
@@ -1347,21 +1334,18 @@ aud_embed_lit = (
                 }
                 atbol := w < a || v[w] == '\n' || v[w] == 'n' && w > a && v[w - 1] == '\\'
                 dotted := false
-                y := s0
-                @while (y < q) {
+                s0.upto(q, (y) {
                     (v[y] == '.').then({
                         dotted = true
                     })
-                    y = y + 1
-                }
+                })
                 (atbol && dotted && v[is].is_alpha()).then({
                     one: i64 := 1
                     m = m.put(mp, mp.cstr_range(v, s0, q), one).expect("audit: oom")
                 })
             })
         })
-        j = j + 1
-    }
+    })
     m
 }
 // scan one module source for string literals, folding their import-shaped fragments into roots.
@@ -1617,11 +1601,7 @@ aud_ws_entry = (
                             ws.mods = ws.mods.put(mp, m.path, one).expect("audit: oom")
                             scratch := cbuf<AudFinding>(mp, 4096)
                             k := mp.aud_mod_imports(m, tms, scratch, 0)
-                            j := 0
-                            @while (j < k) {
-                                ws.aud_ws_pushi(scratch[j])
-                                j = j + 1
-                            }
+                            k.times((j) { ws.aud_ws_pushi(scratch[j]) })
                         })
                     })
                 },
@@ -1658,8 +1638,7 @@ audit_ws_cmd = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, strict:
         skipped: 0,
     )
     ws := wsc.addr()
-    k := 0
-    @while (k < wfc.n) {
+    wfc.n.times((k) {
         p := wfc.fs[k]
         contents_in(mp, p).match ({
             .Ok(s)  => s.aud_has_main().then({
@@ -1672,8 +1651,7 @@ audit_ws_cmd = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, strict:
             }),
             .Err(e) => { },
         })
-        k = k + 1
-    }
+    })
     say(mp
         .gstr_string(64)
         .gstr_append(mp, "zen audit --workspace: ")
@@ -1685,21 +1663,17 @@ audit_ws_cmd = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, strict:
     // survivors: dead candidates no entry proved live, then the per-file import findings.
     fb := cbuf<AudFinding>(mp, wsc.nd + wsc.ni)
     n := 0
-    i := 0
-    @while (i < wsc.nd) {
+    wsc.nd.times((i) {
         x := wsc.dfs[i]
         (wsc.live.has(x.key) == false).then({
             fb[n] = x.f
             n = n + 1
         })
-        i = i + 1
-    }
-    i = 0
-    @while (i < wsc.ni) {
+    })
+    wsc.ni.times((i) {
         fb[n] = wsc.ifs[i]
         n = n + 1
-        i = i + 1
-    }
+    })
     mp.aud_emit(fb, n, strict)
 }
 // `zenc audit <file.zen> [--strict]` — check first (a broken program cannot be audited), then run

@@ -17,8 +17,10 @@
 { at, is_alpha, is_alnum, is_upper } = std.text.ascii
 { String } = std.text.string
 { gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Comment, Token, collect_comments, scan, tok_in } = compiler.lex
+{ Comment, Token, collect_comments, scan } = compiler.lex
+{ tok_in } = compiler.parse_type
 { push_int } = compiler.drvutil
+{ upto } = std.collections.iter
 // The legend, in the order the client receives it. A token's `tokenType` is an INDEX into this
 // array, so the order here and the order advertised in `initialize` must stay in lockstep.
 LSPT_KEYWORD = () i64 { 0 }
@@ -133,14 +135,12 @@ LsptCur: {
 // (two units); every other sequence start is one unit; continuation bytes count for nothing.
 lspt_u16_len = (src: string_view, a: i32, b: i32) i64 {
     n: i64 := 0
-    p := a
-    @while (p < b) {
+    a.upto(b, (p) {
         c := at(src, p)
         (c & 192 == 128 == false).then({
             n = n + (c >= 240).then({ 2 }, { 1 })
         })
-        p = p + 1
-    }
+    })
     n
 }
 lspt_push_num = (s: String, mp: MutPtr<Malloc>, n: i64, first: bool) String {
@@ -189,18 +189,16 @@ lspt_emit_span = (
 ) LsptCur {
     c := cur
     seg := start
-    p := start
     ls := st.ls
     line := st.line
-    @while (p < end) {
+    start.upto(end, (p) {
         (at(src, p) == '\n').then({
             c = c.lspt_emit(mp, src, ls, line, seg, p, ty)
             line = line + 1
             ls = p + 1
             seg = p + 1
         })
-        p = p + 1
-    }
+    })
     (seg < end).then({
         c = c.lspt_emit(mp, src, ls, line, seg, end, ty)
     })
@@ -215,14 +213,12 @@ LsptScanLine: {
 lspt_advance = (src: string_view, st: LsptScanLine, to: i32) LsptScanLine {
     line := st.line
     ls := st.ls
-    p := ls
-    @while (p < to) {
+    ls.upto(to, (p) {
         (at(src, p) == '\n').then({
             line = line + 1
             ls = p + 1
         })
-        p = p + 1
-    }
+    })
     LsptScanLine(
         line: line,
         ls: ls,

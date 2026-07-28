@@ -10,6 +10,7 @@
 { getpid, opendir, closedir } = std.c.libc
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API
 { eprint, exit, resolve_failed, resolve_program_data, ResolvedProgram } = compiler.resolve    // eprint = the shared stderr write
+{ upto } = std.collections.iter
 // stdout is a REAL sink, not a void. `zenc emit|doc|fmt|targets > file` on a full disk (or into a
 // closed pipe) used to exit 0 having written nothing: every write Result was discarded at the call
 // site. Route every driver stdout write through `stdout_put`/`stdout_put_bytes`, which record a lost
@@ -111,11 +112,7 @@ join2* = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
 // a JSON body or module region is arbitrarily long, so it must not recurse the C stack per byte.
 cstr_range* = (mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) string_view {
     o := mp.gstr_string(e - s + 1)
-    i := s
-    @while (i < e) {
-        o = o.gstr_push(mp, v[i])
-        i = i + 1
-    }
+    s.upto(e, (i) { o = o.gstr_push(mp, v[i]) })
     o.gstr_finish(mp)
 }
 // src[start .. start+n) as an owned str. (named cstr_* to avoid colliding with std.text.str's
