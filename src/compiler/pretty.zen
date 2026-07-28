@@ -18,6 +18,7 @@
 { gstr_int, left_pos_of, stmt_left_pos } = compiler.astops
 { Comment, rawstr_end } = compiler.lex
 { at, rawstr_at } = std.text.ascii
+{ times, upto } = std.collections.iter
 { ff_cond_inline, ff_cond_is_then, ff_cond_multiline, ff_cond_nested, ff_current_col, ff_expr,
   ff_fits_width, ff_recv, ff_then } = compiler.pretty_expr
 { ff_decl, ff_is_anon_payload_name, ff_is_hoisted } = compiler.pretty_decl
@@ -54,9 +55,8 @@ gf_ident_ch = (b: u8) bool {
 gf_is_alias* = (name: string_view) bool {
     v: [u8] := name.view()
     src: [u8] := gf_src.view()
-    i: i64 := 0
     at_bol := true
-    @while (i < src.len) {
+    src.len.times((i) {
         hit := at_bol && i + v.len + 3 <= src.len
         j: i64 := 0
         @while (hit && j < v.len) {
@@ -77,8 +77,7 @@ gf_is_alias* = (name: string_view) bool {
             })
         })
         at_bol = src[i] == '\n'
-        i = i + 1
-    }
+    })
     false
 }
 // the line number (count of '\n' before `pos`) — used to decide if a trailing comment shares a stmt's line.
@@ -105,12 +104,8 @@ gf_cmt_end = (c: Comment) i32 {
 }
 ff_cmt_text = (s: String, a: MutPtr<Malloc>, c: Comment) String {
     out := s
-    i := c.start
     e := gf_cmt_end(c)
-    @while (i < e) {
-        out = out.ff_push(a, at(gf_src, i))
-        i = i + 1
-    }
+    c.start.upto(e, (i) { out = out.ff_push(a, at(gf_src, i)) })
     out
 }
 // flush every LEADING (own-line) comment whose start is before `before` — each on its own indented line.
@@ -285,11 +280,7 @@ gf_raw_lit* = (a: MutPtr<Malloc>, pos: i32) string_view {
     })
     end := gf_src.rawstr_end(pos + 3)
     out := a.gstr_string(end - pos + 1)
-    i := pos
-    @while (i < end) {
-        out = out.ff_push(a, at(gf_src, i))
-        i = i + 1
-    }
+    pos.upto(end, (i) { out = out.ff_push(a, at(gf_src, i)) })
     out.gstr_finish(a)
 }
 ff_push* = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }

@@ -14,6 +14,7 @@
   parse_anon_struct_lit, parse_ident, parse_lambda, parse_neg, parse_not, parse_paren,
   parse_raw_call, parse_slicelit, take_inits } = compiler.parse_primary
 { PExpr } = compiler.parse_expr
+{ times, upto } = std.collections.iter
 ebuf = (a: MutPtr<Malloc>) [Expr] { slice(a.acquire(sizeof(Expr)), 1) }
 enode* = (a: MutPtr<Malloc>, v: Expr) Ptr<Expr> {
     buf := a.ebuf()
@@ -22,11 +23,7 @@ enode* = (a: MutPtr<Malloc>, v: Expr) Ptr<Expr> {
 }
 // Copy a token span into an owned NUL-terminated str.
 copy_span = (src: string_view, start: i32, dst: RawPtr<u8>, n: i32) void {
-    i := 0
-    @while (i < n) {
-        store(offset(dst, i), src.at(start + i))
-        i = i + 1
-    }
+    n.times((i) { store(offset(dst, i), src.at(start + i)) })
 }
 // C keywords are mangled at the lexeme choke point so defs/refs stay consistent.
 is_c_kw = (src: string_view, t: Token) bool {
@@ -349,13 +346,11 @@ rawstr_body = (src: string_view, t: Token) i32 {
 // Copy [pos, end) verbatim — no escape resolution, so `\n` inside a raw literal stays two bytes.
 // Iterative for the same reason as unescape: a block literal can be large.
 copy_raw = (src: string_view, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    p := pos
     d := di
-    @while (p < end) {
+    pos.upto(end, (p) {
         store(offset(dst, d), src.at(p))
-        p = p + 1
         d = d + 1
-    }
+    })
     d
 }
 // Copy [pos, end) into `dst`, resolving `\`-escapes, returning the byte count written. ITERATIVE (a
