@@ -964,15 +964,38 @@ utn_body = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) string_
 utn_func* = (a: MutPtr<Malloc>, env: Env, f: Func) string_view {
     desc_or(env.utn_params(f.tparams, f.params), desc_or(env.utn_ty(f.tparams, f.ret), a.utn_body(env, f.tparams, f.body)))
 }
+// `str`/`text`/`Cstr` were alternate spellings of three types that already had names. They are no
+// longer types, so they land here as unknown names — and an unknown name is a dead end unless the
+// message says what replaced it.
+retired_string_alias = (nm: string_view) string_view {
+    (nm == "str").then({
+        return "string_view"
+    })
+    (nm == "text").then({
+        return "string_literal"
+    })
+    (nm == "Cstr").then({
+        return "string_cstr"
+    })
+    ""
+}
 // the unknown-type message NAMING the offending type (`unknown type name `Widget``), else the generic
 // ladder message when the name walk found nothing (should not happen when the kind walk fired).
 unknown_type_message* = (a: MutPtr<Malloc>, nm: string_view) string_view {
-    a
-        .gstr_string(48)
+    canon := nm.retired_string_alias()
+    head := a
+        .gstr_string(96)
         .gstr_append(a, "unknown type name `")
         .gstr_append(a, nm)
         .gstr_append(a, "`")
-        .gstr_finish(a)
+    is_empty(canon).match ({
+        true  => head.gstr_finish(a),
+        false => head
+            .gstr_append(a, " — that spelling was retired; write `")
+            .gstr_append(a, canon)
+            .gstr_append(a, "`")
+            .gstr_finish(a),
+    })
 }
 // ── infinite type: a struct/enum that contains ITSELF by VALUE (transitively) ──────────────────────────
 // A by-value field/payload whose type is the enclosing type — directly (`Node: { next: Node }`,

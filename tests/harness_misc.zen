@@ -3,7 +3,7 @@
 // Python). Sub-suites, each returning a fail count, summed by `harness_misc_run`:
 //
 //   traits       <- tests/test_traits.py        (impl/dispatch VALUE + conformance VERDICT)
-//   string_types <- tests/test_string_types.py   (text/Cstr/str lattice VERDICT)
+//   string_types <- tests/test_string_types.py   (string_literal/cstr/view lattice VERDICT)
 //   num_parse    <- tests/test_num_parse.py       (std.text.num parse, value + error-as-value, via `zenc run`)
 //   hashing      <- std.hash                       (SHA-256 published test vectors + FNV-1a-64, via `zenc run`)
 //   acid         <- tests/test_acid.py            (every real std/compiler source EMITs, output starts with HEAD)
@@ -228,22 +228,44 @@ harness_misc_string_types = () i32 {
             kind: "arg-type",
         ),
         VerdictCase(
-            src: "legacy = (v: str, l: text, c: Cstr) i32 { 0 }\nmain = () i32 { legacy(\"view\", \"literal\", cstr(null_ptr())) }",
+            src: "gone = (v: str) i32 { 0 }\nmain = () i32 { gone(\"view\") }",
+            should_pass: false,
+            kind: "unknown-type",
+        ),
+        VerdictCase(
+            src: "gone = (l: text) i32 { 0 }\nmain = () i32 { gone(\"literal\") }",
+            should_pass: false,
+            kind: "unknown-type",
+        ),
+        VerdictCase(
+            src: "gone = (c: Cstr) i32 { 0 }\nmain = () i32 { gone(cstr(null_ptr())) }",
+            should_pass: false,
+            kind: "unknown-type",
+        ),
+        VerdictCase(
+            src: "{ len } = std.text.str\nmain = () i32 { to_i32(\"abc\".len()) - 3 }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "Label*: { label: (string_view) i32 }\nstr.impl(Label, { label = (s: string_view) i32 { 0 } })\nmain = () i32 { \"legacy\".label() }",
+            src: "Label*: { label: (string_view) i32 }\nstring_cstr.impl(Label, { label = (s: string_view) i32 { 0 } })\nmain = () i32 { \"legacy\".label() }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "bar = (x: str) i32 { foo(x) }\nfoo = (s: text) i32 { 0 }\nmain = () i32 { bar(\"hi\") }",
+            src: "bar = (x: string_view) i32 { foo(x) }\nfoo = (s: string_literal) i32 { 0 }\nmain = () i32 { bar(\"hi\") }",
             should_pass: false,
             kind: "arg-type",
         ),
     ])
 }
+// TEETH for the one-spelling-per-type rule: `str`, `text` and `Cstr` were aliases for
+// string_view/string_literal/string_cstr. They are gone, so each must now be an UNKNOWN
+// TYPE — silently accepting them is what let six spellings mean three things.
+// `str` survives as the std.text.str MODULE name — the alias deletion must not touch it.
+// A string-family impl receiver still canonicalizes onto the shared `string_view` table,
+// so declaring it on `string_cstr` reaches a literal receiver.
+// The lattice itself, in canonical spellings: a view does not fit a literal param.
 // ════════════════════════════════════════════════════════════════════════════════
 // num_parse  <- tests/test_num_parse.py
 // Run ONE real program through `zenc run` (std.text.num imports resolved) and assert both the value
@@ -251,7 +273,7 @@ harness_misc_string_types = () i32 {
 // never a silent 0). The value-case harness can't drive this (it has no module resolver), so this is
 // a small custom `zenc run` + stdout-substring runner.
 // ════════════════════════════════════════════════════════════════════════════════
-NP_PROG := "{ put } = std.text.fmt\n{ parse_f64, parse_i64_checked, parse_i64_radix } = std.text.num\n{ ParseError } = std.text.str\nemit_f = (label: str, r: Result<f64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").f(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nemit_i = (label: str, r: Result<i64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").i(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nmain = () i32 {\n    emit_f(\"f_pi|\",   parse_f64(\"3.14\"))\n    emit_f(\"f_neg|\",  parse_f64(\"-2.5\"))\n    emit_f(\"f_exp|\",  parse_f64(\"1e3\"))\n    emit_f(\"f_int|\",  parse_f64(\"42\"))\n    emit_f(\"f_bad|\",  parse_f64(\"abc\"))\n    emit_f(\"f_mt|\",   parse_f64(\"\"))\n    emit_f(\"f_dot2|\", parse_f64(\"1.2.3\"))\n    emit_i(\"i_ok|\",   parse_i64_checked(\"123\"))\n    emit_i(\"i_bad|\",  parse_i64_checked(\"12x\"))\n    emit_i(\"i_mt|\",   parse_i64_checked(\"\"))\n    emit_i(\"r_hex|\",  parse_i64_radix(\"ff\", 16))\n    emit_i(\"r_bin|\",  parse_i64_radix(\"1010\", 2))\n    emit_i(\"r_bad|\",  parse_i64_radix(\"zz\", 16))\n    0\n}\n"
+NP_PROG := "{ put } = std.text.fmt\n{ parse_f64, parse_i64_checked, parse_i64_radix } = std.text.num\n{ ParseError } = std.text.str\nemit_f = (label: string_view, r: Result<f64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").f(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nemit_i = (label: string_view, r: Result<i64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").i(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nmain = () i32 {\n    emit_f(\"f_pi|\",   parse_f64(\"3.14\"))\n    emit_f(\"f_neg|\",  parse_f64(\"-2.5\"))\n    emit_f(\"f_exp|\",  parse_f64(\"1e3\"))\n    emit_f(\"f_int|\",  parse_f64(\"42\"))\n    emit_f(\"f_bad|\",  parse_f64(\"abc\"))\n    emit_f(\"f_mt|\",   parse_f64(\"\"))\n    emit_f(\"f_dot2|\", parse_f64(\"1.2.3\"))\n    emit_i(\"i_ok|\",   parse_i64_checked(\"123\"))\n    emit_i(\"i_bad|\",  parse_i64_checked(\"12x\"))\n    emit_i(\"i_mt|\",   parse_i64_checked(\"\"))\n    emit_i(\"r_hex|\",  parse_i64_radix(\"ff\", 16))\n    emit_i(\"r_bin|\",  parse_i64_radix(\"1010\", 2))\n    emit_i(\"r_bad|\",  parse_i64_radix(\"zz\", 16))\n    0\n}\n"
 harness_misc_num_parse = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -602,22 +624,24 @@ harness_misc_faithful = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     // fmt-output / emit / run scenarios (one bool per pytest assertion class).
-    o_ufcs := mp.om_do_fmt("len = (s: str) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
+    o_ufcs := mp.om_do_fmt("len = (s: string_view) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
     o_chain := mp.om_do_fmt("add = (a: i32, b: i32) i32 { a + b }\nmain = () i32 { 1.add(2).add(3) }\n")
     o_arms := mp.om_do_fmt("add = (a: i32, b: i32) i32 { a + b }\nOpt: Some(i32) | None\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\n")
     o_bin := mp.om_do_fmt("check = (n: i32) i32 { (n > 0).match ({ true => 1, false => 0 }) }\n")
-    o_tail := mp.om_do_fmt("len = (s: str) i32 { 5 }\nf = (s: str) i32 { s.len() }\n")
+    o_tail := mp.om_do_fmt("len = (s: string_view) i32 { 5 }\nf = (s: string_view) i32 { s.len() }\n")
     o_ret := mp.om_do_fmt("g = (n: i32) i32 {\n    (n < 0).match ({ true => { return 9 }, false => {} })\n    n\n}\n")
     o_imp := mp.om_do_fmt("{ println } = std.text.fmt\nhelper* = (n: i32) i32 { n }\nmain = () i32 { 0 }\n")
     o_lam := mp.om_do_fmt("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n")
     o_var := mp.om_do_fmt("sum = (xs: ...i32) i32 { 0 }\n")
     o_vdef := mp.om_do_fmt("Pixel: RGB(i32) | Blank = RGB(255)\n")
-    o_simpl := mp.om_do_fmt("Label*: { label: (str) i32 }\nstr.impl(Label, { label = (s: str) i32 { 0 } })\n")
+    // an impl declared on `string_cstr` still formats under the canonical `string_view` receiver:
+    // the three string types share ONE impl table (see parse_impl.canonical_impl_receiver).
+    o_simpl := mp.om_do_fmt("Label*: { label: (string_view) i32 }\nstring_cstr.impl(Label, { label = (s: string_view) i32 { 0 } })\n")
     // #61: a u64 literal above i64-max round-trips to its exact UNSIGNED decimal, never the signed-
     // normalized value (0xcbf29ce484222325 → 14695981039346656037, NOT -3750763034362895579).
     o_u64 := mp.om_do_fmt("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n")
-    o_emit := mp.om_do_emit("len = (s: str) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
-    f1 := run_suite("faithful_ast (fmt/run)", [o_emit.contains("len("), o_ufcs.contains("x.len()"), om_not(o_ufcs.contains("len(x)")), o_chain.contains("1.add(2).add(3)"), o_arms.contains(".Some(n) => n.add(1),"), o_arms.contains(".None    => 0,"), o_bin.contains("(n > 0).then({ 1 }, { 0 })"), om_not(o_bin.contains(".match")), o_tail.contains("s.len()"), om_not(o_tail.contains("return s.len()")), o_ret.contains("return 9"), o_imp.contains("{ println } = std.text.fmt"), o_imp.contains("helper* = (n: i32) i32"), o_lam.contains("(x: i32) i32 {"), om_not(o_lam.contains("x: void")), o_var.contains("xs: ...i32"), o_vdef.contains("Blank = RGB(255)"), o_simpl.contains("string_view.impl(Label"), om_not(o_simpl.contains("str.impl(Label")), o_u64.contains("14695981039346656037"), om_not(o_u64.contains("3750763034362895579")), om_fmt_idem("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n"), om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21, mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8, om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n")])
+    o_emit := mp.om_do_emit("len = (s: string_view) i32 { 5 }\nmain = () i32 { x := \"hi\"\n x.len() }\n")
+    f1 := run_suite("faithful_ast (fmt/run)", [o_emit.contains("len("), o_ufcs.contains("x.len()"), om_not(o_ufcs.contains("len(x)")), o_chain.contains("1.add(2).add(3)"), o_arms.contains(".Some(n) => n.add(1),"), o_arms.contains(".None    => 0,"), o_bin.contains("(n > 0).then({ 1 }, { 0 })"), om_not(o_bin.contains(".match")), o_tail.contains("s.len()"), om_not(o_tail.contains("return s.len()")), o_ret.contains("return 9"), o_imp.contains("{ println } = std.text.fmt"), o_imp.contains("helper* = (n: i32) i32"), o_lam.contains("(x: i32) i32 {"), om_not(o_lam.contains("x: void")), o_var.contains("xs: ...i32"), o_vdef.contains("Blank = RGB(255)"), o_simpl.contains("string_view.impl(Label"), om_not(o_simpl.contains("string_cstr.impl(Label")), o_u64.contains("14695981039346656037"), om_not(o_u64.contains("3750763034362895579")), om_fmt_idem("main = () i32 { x: u64 := 0xcbf29ce484222325\n 0 }\n"), om_run_rc("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, om_run_rc("add3 = (a: i32, b: i32, c: i32) i32 { a + b * 10 + c * 100 }\nmain = () i32 { 1.add3(2, 0) }\n") == 21, mp.om_fmt_then_run("inc = (n: i32) i32 { n + 1 }\ndbl = (n: i32) i32 { n * 2 }\nmain = () i32 { 5.inc().dbl() }\n") == 12, mp.om_fmt_then_run("apply = (f: (i32) i32, n: i32) i32 { f(n) }\nmain = () i32 { g := (x: i32) i32 { x + 1 }\n apply(g, 7) }\n") == 8, om_fmt_idem("Point: { x: i32, y: i32 }\nOpt: Some(i32) | None\nadd = (a: i32, b: i32) i32 { a + b }\nclassify = (o: Opt) i32 { o.match ({ .Some(n) => n.add(1), .None => 0 }) }\nmain = () i32 { p := Point(x: 3, y: 4)  1.add(2).add(3) }\n")])
     // PHASE 1: emit of `s.len()` still lowers to the flat `len(...)`
     // PHASE 2: fmt --ast keeps UFCS — `x.len()`, NOT `len(x)`
     // a multi-arg method chain round-trips with method args inside the parens

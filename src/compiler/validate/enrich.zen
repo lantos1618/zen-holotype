@@ -3,7 +3,7 @@
   Stmt, Ty } = compiler.ast.ast_types
 { gstr_append, gstr_finish, gstr_push, gstr_string } = compiler.genc
 { DeclIndex, Env, arm_env, bind_tparams, build_decl_index, dispatch_recv_name, extend_env,
-  is_intrinsic, loop_env, params_env, recv_name, the_func } = compiler.check
+  is_intrinsic, loop_env, params_env, recv_name, show_name, the_func } = compiler.check
 { Malloc } = std.mem.alloc
 { at } = std.text.ascii
 { is_empty } = std.text.str
@@ -149,7 +149,7 @@ denrich_enum_member_msg = (a: MutPtr<Malloc>, name: string_view, field: string_v
         .gstr_append(a, "` (enums are accessed via `.match`, not `.field`)")
         .gstr_finish(a)
 }
-// A fieldless string receiver (`str`/`Cstr`/`text`): its accessors are UFCS METHODS, so steer to `.field()`.
+// A fieldless string receiver (any of the three `string_*`): accessors are UFCS METHODS, so steer to `.field()`.
 denrich_str_member_msg = (a: MutPtr<Malloc>, field: string_view, objty: Ty) string_view {
     a
         .gstr_string(96)
@@ -240,12 +240,13 @@ denrich_bound_violation = (env: Env, f: Func, c: CallData, tp: Param) string_vie
     })
     a := env.a
     tr := tp.tparam_bound()
-    tn := env.call_targ(f, c.args, tp.name).recv_name()
+    ty := env.call_targ(f, c.args, tp.name)
+    tn := ty.recv_name()    // the impl-table key
     env.decls.is_struct(tr).match ({
         true  => a
             .gstr_string(160)
             .gstr_append(a, "type `")
-            .gstr_append(a, tn)
+            .gstr_append(a, ty.show_name())
             .gstr_append(a, "` does not satisfy the bound `")
             .gstr_append(a, tr)
             .gstr_append(a, "` required by `")
@@ -277,14 +278,15 @@ denrich_recv_msg = (env: Env, c: CallData) string_view {
         return ""
     })
     a := env.a
-    tn := env.infer_expr(c.args[0].addr()).recv_name()
+    ty := env.infer_expr(c.args[0].addr())
+    tn := ty.recv_name()    // the impl-table key
     tr := env.decls.trait_declaring(c.fn)
     (is_empty(tn) || is_empty(tr)).match ({
         true  => "",
         false => a
             .gstr_string(160)
             .gstr_append(a, "type `")
-            .gstr_append(a, tn)
+            .gstr_append(a, ty.show_name())
             .gstr_append(a, "` does not implement trait `")
             .gstr_append(a, tr)
             .gstr_append(a, "` (which declares `")
