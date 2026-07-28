@@ -22,6 +22,7 @@
 { hex_char } = std.text.ascii    // the shared hex-ENCODE nibble
 { Allocator, try_acquire } = std.mem.alloc    // sha256_hex allocates its hex buffer through the caller allocator
 { expect } = std.core.result
+{ times } = std.core.count    // the count loop — `@while` belongs in the primitive, not here
 // ── FNV-1a, 64-bit ────────────────────────────────────────────────────────────
 // The FNV-1a-64 prime, 0x100000001b3, and offset basis 0xcbf29ce484222325. The basis is above i64 max
 // but a u64 literal round-trips its exact bit pattern (lex → fmt → genc), so it is named directly.
@@ -103,8 +104,8 @@ sha256_words = (bytes: [u8], hh: [i64]) i64 {
     k: [i64] := [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, 2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411, 3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424, 2428436474, 2756734187, 3204031479, 3329325298]
     // the 64-word message schedule, reused per block.
     w: [i64] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    bi: i64 := 0
-    @while (bi < nblocks) {
+    // one pass per 512-bit block: a COUNT loop over `nblocks`, so the count primitive owns the stepping.
+    nblocks.times((bi) {
         base := bi * 64
         w.loop((lh, j, wj) {
             // load the 16 big-endian words of this 512-bit block (the first 16 schedule slots).
@@ -155,8 +156,7 @@ sha256_words = (bytes: [u8], hh: [i64]) i64 {
         hh[5] = hh[5] + f & SHA_MASK
         hh[6] = hh[6] + g & SHA_MASK
         hh[7] = hh[7] + hv & SHA_MASK
-        bi = bi + 1
-    }
+    })
     0
 }
 // SHA-256 of `bytes` written as 32 big-endian bytes into `dst` (dst.len must be >= 32). Pure: no
