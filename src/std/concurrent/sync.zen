@@ -20,6 +20,8 @@
 // body shape. Zen capturing closures can't escape their frame, so the protected work travels as a
 // fn + an `arg` pointer, C-style. For inline critical sections, call `lock`/`unlock` directly.
 { zeroed, release } = std.mem.raw
+{ panic } = std.core.result
+{ is_null } = std.core.ptr
 { pthread_mutex_init, pthread_mutex_lock, pthread_mutex_unlock, pthread_mutex_destroy } = std.c.libc
 { pthread_cond_init, pthread_cond_wait, pthread_cond_signal, pthread_cond_broadcast,
   pthread_cond_destroy } = std.c.libc
@@ -58,6 +60,13 @@ Mutex*: {
 // allocate + initialise a fresh mutex (storage from std.mem.raw).
 new_mutex* = () Mutex {
     raw := zeroed(MUTEX_SIZE)
+    // pthread_mutex_init memsets through this pointer, so a failed cell allocation is a SIGSEGV inside
+    // libc with no Zen frame to blame it on. `Mutex` has no error channel (it is a value type wrapping
+    // an opaque cell), so the honest floor is a named abort — `mutex_at` takes caller-owned storage for
+    // anyone who wants to own the failure themselves.
+    is_null(raw).then({
+        panic("sync: mutex cell allocation failed")
+    })
     pthread_mutex_init(raw, null_ptr())
     Mutex(raw: raw)
 }
@@ -96,6 +105,9 @@ CondVar*: {
 // allocate + initialise a fresh condvar (storage from std.mem.raw).
 new_cond* = () CondVar {
     raw := zeroed(COND_SIZE)
+    is_null(raw).then({
+        panic("sync: condvar cell allocation failed")
+    })    // as new_mutex, above
     pthread_cond_init(raw, null_ptr())
     CondVar(raw: raw)
 }
