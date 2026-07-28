@@ -1,8 +1,8 @@
 // zvm.zen — a stack virtual machine and the two-pass text assembler that feeds it.
 //
-//   ./zen run zvm.zen prog.asm       assemble, then execute
-//   ./zen run zvm.zen -d prog.asm    assemble, then disassemble
-//   ./zen run zvm.zen -t             built-in self test (no file needed)
+//   ./zen run examples/zvm.zen examples/zvm_demo.asm       assemble, then execute
+//   ./zen run examples/zvm.zen -d examples/zvm_demo.asm    assemble, then disassemble
+//   ./zen run examples/zvm.zen -t                          built-in self test (no file needed)
 //
 // The machine: an operand stack, a frame-relative locals array, and a call stack.
 // `call`/`enter`/`ret` are a real calling convention, so assembly programs recurse.
@@ -14,6 +14,7 @@ maps = std.collections.map
 { Vec } = std.collections.vec
 { Map } = std.collections.map
 { Result, IoError, expect, name } = std.core.result
+{ Allocator } = std.mem.alloc
 { println, formatln, arg_int, arg_str } = std.text.fmt
 { split, words, trim, substr, find, len, at, to_lower, try_parse_int } = std.text.str
 { alloc_buf, sub } = std.core.slice
@@ -260,7 +261,7 @@ Asm*: {
     pc: i64,
 }
 // drop a `;` or `#` comment, then the surrounding blanks
-clean_line<A> = (a: MutPtr<A>, s: string_view) string_view {
+clean_line = (a: Allocator, s: string_view) string_view {
     semi := s.find(";")
     hash := s.find("#")
     cut := (semi < 0).match ({
@@ -275,7 +276,7 @@ clean_line<A> = (a: MutPtr<A>, s: string_view) string_view {
 }
 ends_colon = (t: string_view) bool { t.len() > 0 && t.at(t.len() - 1) == ':' }
 // A leading `name:` token defines a label at the current instruction index.
-take_label<A> = (a: MutPtr<A>, st: Asm, t: string_view, ln: i64) Result<Asm, AsmError> {
+take_label = (a: Allocator, st: Asm, t: string_view, ln: i64) Result<Asm, AsmError> {
     nm := a.substr(t, 0, t.len() - 1).expect("zvm: oom")
     (nm.len() == 0).then({
         return .Err(AsmError(
@@ -296,7 +297,7 @@ take_label<A> = (a: MutPtr<A>, st: Asm, t: string_view, ln: i64) Result<Asm, Asm
     .Ok(out)
 }
 // One source line: an optional label, then an optional `mnemonic [operand]`.
-scan_line<A> = (a: MutPtr<A>, st: Asm, raw_line: string_view, ln: i64) Result<Asm, AsmError> {
+scan_line = (a: Allocator, st: Asm, raw_line: string_view, ln: i64) Result<Asm, AsmError> {
     text := a.clean_line(raw_line)
     (text.len() == 0).then({
         return .Ok(st)
@@ -351,7 +352,7 @@ scan_line<A> = (a: MutPtr<A>, st: Asm, raw_line: string_view, ln: i64) Result<As
     out.pc = cur.pc + 1
     .Ok(out)
 }
-scan_all<A> = (a: MutPtr<A>, lines: [string_view], i: i64, st: Asm) Result<Asm, AsmError> {
+scan_all = (a: Allocator, lines: [string_view], i: i64, st: Asm) Result<Asm, AsmError> {
     (i >= lines.len).then({
         return .Ok(st)
     })
@@ -411,8 +412,8 @@ resolve_row = (r: Raw, labels: Map<i64>) Result<Instr, AsmError> {
         line: r.line,
     ))
 }
-resolve_all<A> = (
-    a: MutPtr<A>,
+resolve_all = (
+    a: Allocator,
     rows: [Raw],
     labels: Map<i64>,
     i: i64,
@@ -428,7 +429,7 @@ Program*: {
     code: [Instr],
     labels: Map<i64>,
 }
-assemble<A> = (a: MutPtr<A>, src: string_view) Result<Program, AsmError> {
+assemble = (a: Allocator, src: string_view) Result<Program, AsmError> {
     rr: Result<Vec<Raw>, IoError> := vec.empty(a)
     lr: Result<Map<i64>, IoError> := maps.empty(a)
     cr: Result<Vec<Instr>, IoError> := vec.empty(a)
@@ -458,7 +459,7 @@ label_at = (labels: Map<i64>, pc: i64) string_view {
     })
     hit
 }
-disassemble<A> = (a: MutPtr<A>, p: Program) i64 {
+disassemble = (a: Allocator, p: Program) i64 {
     n: i64 := 0
     p.code.loop((h, i, ins) {
         lbl := p.labels.label_at(i)
@@ -775,7 +776,7 @@ Machine*: {
     calls: [i64],
     ticks: [i64],
 }
-machine_new<A> = (a: MutPtr<A>) Machine {
+machine_new = (a: Allocator) Machine {
     z: [i64] := [0]
     Machine(
         stack: a.alloc_buf(256, z).expect("zvm: oom"),
@@ -789,7 +790,7 @@ vm_error_print = (e: VmError, code: [Instr]) i64 {
     formatln("zvm: runtime error at pc {} (source line {}): {}", [arg_int(e.pc), arg_int(src), arg_str(e.fault.vm_fault_text())])
 }
 // Assemble and run one program; yields a process exit code.
-execute<A> = (a: MutPtr<A>, m: Machine, src: string_view) i32 {
+execute = (a: Allocator, m: Machine, src: string_view) i32 {
     a.assemble(src).match ({
         .Err(e) => {
             e.asm_error_print()
@@ -932,11 +933,11 @@ T_UNDERFLOW := """
         add
         halt
 """
-run_case<A> = (a: MutPtr<A>, m: Machine, title: string_view, src: string_view) i32 {
+run_case = (a: Allocator, m: Machine, title: string_view, src: string_view) i32 {
     formatln("--- {} ---", [arg_str(title)])
     a.execute(m, src)
 }
-self_test<A> = (a: MutPtr<A>, m: Machine) i32 {
+self_test = (a: Allocator, m: Machine) i32 {
     a.run_case(m, "factorial 10 -> 3628800", T_FACT)
     a.run_case(m, "sum 1..10 -> 55", T_SUM)
     a.run_case(m, "gcd 1071 462 -> 21", T_GCD)

@@ -1,6 +1,6 @@
 # Zen examples
 
-Eleven examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
+Twelve examples run through the C path; `dom_demo.zen` is browser/JavaScript-only.
 
 Build once, then run a C example with:
 
@@ -18,6 +18,16 @@ make
 | `strings_demo.zen` | String ownership in depth: borrow vs copy, aliasing, who frees what. |
 
 Run any of them as `./zen run examples/<name>.zen`.
+
+`zvm.zen` is the biggest example: a stack VM plus the two-pass assembler that feeds it, where every
+failure (bad mnemonic, undefined label, divide by zero, stack underflow) is a value carried back to
+`main` rather than a panic. It takes arguments, so it has its own run lines:
+
+```sh
+./zen run examples/zvm.zen examples/zvm_demo.asm       # assemble, then execute
+./zen run examples/zvm.zen -d examples/zvm_demo.asm    # assemble, then disassemble
+./zen run examples/zvm.zen -t                          # built-in self test, no file needed
+```
 
 ## Unix filters
 

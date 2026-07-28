@@ -13,26 +13,34 @@
 // The rule followed everywhere: an ALLOCATED block is named in a comment together with
 // whoever frees it. If you cannot name the freer, it is a leak.
 //
+// The allocator is THREADED, not ambient: every function that allocates takes `a: Allocator`
+// as a parameter, so the freer is always something the caller can name. That parameter is
+// sugar — `(a: Allocator)` is `<A: Allocator>(a: MutPtr<A>)` — and writing the bound is what
+// makes a wrong allocator fail at the CALL, not inside std. docs/string-vec-model.md carries
+// the wider model (allocator carried vs threaded, and where the string types are going).
+//
 // TWO HOUSE RULES shape the code below. Examples are gated ABOVE the raw pointer floor
 // (no `offset`, no `slice(`, no `cstr`, no `sizeof`), so every block here comes out of a
-// std.text.str call and every window is a `.view()` — there is not one raw pointer in the
-// file. And comments never trail after code, never sit directly above a `.loop(…)` /
-// `.then(…)` statement, and never end a function body: `zen fmt` relocates all three
-// (HONEST NOTE 3).
+// std.text.str call and every window is a `.view()`. A raw pointer is NAMED in exactly one
+// shape — `something.view().ptr`, the argument `a.release` wants — and never arithmetic'd.
+// And comments never trail after code, never sit directly above a `.loop(…)` / `.then(…)`
+// statement, and never end a function body: `zen fmt` relocates all three (HONEST NOTE 3).
 halloc = std.mem.heap
 { println, formatln, arg_int, arg_str, arg_owned } = std.text.fmt
 { String, init, append_in, free_in } = std.text.string
 { sb } = std.text.sb
 { view, len, find, substr, split, nbuf, pad_right, repeat, trim_view, trim_prefix } = std.text.str
 { Result, ok, expect } = std.core.result
-{ release_slice } = std.mem.alloc
+{ Allocator, release_slice } = std.mem.alloc
 // `str` is NUL-terminated, so dropping a PREFIX is free — the source's own NUL still
 // terminates what is left, and `trim_prefix` just hands back a pointer further along the
 // same block. Dropping a SUFFIX is not free (the new end has no NUL of its own). That one
 // asymmetry is why the parser below COPIES its first three fields and BORROWS the last.
 wider = (x: i64, y: i64) i64 { (x > y).then({ x }, { y }) }
 // ── 1. every string-ish type, side by side ───────────────────────────────────
-show_types<A> = (a: MutPtr<A>) void {
+// Four types today. docs/string-vec-model.md names the five ROLES they are converging on
+// (literal / const / fixed / growable / view) and why `String` is exactly `Vec<u8>`.
+show_types = (a: Allocator) void {
     println("-- 1. every string-ish type, and what it owns --")
     // (a) STRING LITERAL — bytes in the binary's read-only data. No allocation, no free;
     //     they outlive every function that sees them.
@@ -55,7 +63,7 @@ show_types<A> = (a: MutPtr<A>) void {
     g.free_in(a)
 }
 // ── 2. borrowing vs copying ──────────────────────────────────────────────────
-show_borrow_vs_copy<A> = (a: MutPtr<A>) void {
+show_borrow_vs_copy = (a: Allocator) void {
     println("")
     println("-- 2. borrow vs copy --")
     padded: string_view := "   auth: token expired   "
@@ -95,7 +103,7 @@ Fields*: {
     // Release exactly the three blocks parse_line allocated. `msg` is deliberately
     // absent: it points into the MIDDLE of the caller's line block, and freeing an
     // interior pointer is undefined. Whoever frees the line frees msg with it.
-    free<A> = (f: Fields, a: MutPtr<A>) void {
+    free = (f: Fields, a: Allocator) void {
         a.release(f.ts.view().ptr)
         a.release(f.level.view().ptr)
         a.release(f.comp.view().ptr)
@@ -118,7 +126,7 @@ upto = (i: i64) i64 { (i < 0).then({ 0 }, { i }) }
 //
 // Read it as an alternating rhythm: substr ALLOCATES a field, trim_prefix then steps over
 // the bytes just copied for FREE. Three mallocs, three zero-cost steps.
-parse_line*<A> = (a: MutPtr<A>, line: string_view) Result<Fields, string_view> {
+parse_line* = (a: Allocator, line: string_view) Result<Fields, string_view> {
     i1 := line.find(" ")
     // ALLOC 1 of 3.
     ts := a.substr(line, 0, i1.upto()).expect("strings_demo: out of memory")
@@ -183,7 +191,7 @@ rule_into* = (out: [u8], fill: u8) void {
 // Append `t`, padded to `w` columns, onto the String. Three memory events in three lines:
 // pad_right ALLOCATES a temporary, append_in COPIES its bytes into the String's block, the
 // now-dead temporary is RELEASED on the spot. This is the shape to copy.
-push_pad<A> = (a: MutPtr<A>, g: String, t: string_view, w: i64) String {
+push_pad = (a: Allocator, g: String, t: string_view, w: i64) String {
     p := a.pad_right(t, w, ' ')
     out := a.append_in(g, p).expect("strings_demo: out of memory")
     a.release(p.view().ptr)
@@ -192,7 +200,7 @@ push_pad<A> = (a: MutPtr<A>, g: String, t: string_view, w: i64) String {
 // (b) A buffer returned OUT of a callee. The String is built from `a` and RETURNED, so
 //     ownership MOVES to the caller, who must call free_in. Growth is realloc inside
 //     `a`, so the bytes never live on this stack frame and the return is safe.
-render_row*<A> = (a: MutPtr<A>, f: Fields, w: Widths) String {
+render_row* = (a: Allocator, f: Fields, w: Widths) String {
     g := a.init(64).expect("strings_demo: out of memory")
     g = a.push_pad(g, f.ts, w.ts + 2)
     g = a.push_pad(g, f.level, w.level + 2)
@@ -205,10 +213,10 @@ render_row*<A> = (a: MutPtr<A>, f: Fields, w: Widths) String {
 Report*: {
     title: string_view,
     body: String,
-    free<A> = (r: Report, a: MutPtr<A>) void { r.body.free_in(a) }
+    free = (r: Report, a: Allocator) void { r.body.free_in(a) }
 }
 // Print every row: a block out of render_row, parked in a Report, then given back.
-print_rows*<A> = (a: MutPtr<A>, rows: [Fields], n: i64, w: Widths) void {
+print_rows* = (a: Allocator, rows: [Fields], n: i64, w: Widths) void {
     rows.loop((h, i, f) {
         (i < n).then({
             // ALLOC: ownership MOVED out of render_row and into this frame.
@@ -230,7 +238,7 @@ print_rows*<A> = (a: MutPtr<A>, rows: [Fields], n: i64, w: Widths) void {
 // ── 5. release ───────────────────────────────────────────────────────────────
 // Three blocks per row. `msg` is never freed on its own: it is an interior pointer, and
 // the line block it aims into is the thing that owns those bytes.
-free_rows*<A> = (a: MutPtr<A>, rows: [Fields], n: i64) void {
+free_rows* = (a: Allocator, rows: [Fields], n: i64) void {
     rows.loop((h, i, f) {
         (i < n).then({
             f.free(a)
@@ -239,7 +247,7 @@ free_rows*<A> = (a: MutPtr<A>, rows: [Fields], n: i64) void {
 }
 // The per-line copies split handed out — and so the bytes every `msg` borrow points at.
 // Nothing may read a Fields after this runs.
-free_lines*<A> = (a: MutPtr<A>, lines: [string_view]) void {
+free_lines* = (a: Allocator, lines: [string_view]) void {
     lines.loop((h, i, ln) {
         a.release(ln.view().ptr)
     })
@@ -255,12 +263,13 @@ log_text = () string_view {
 // Hand it an OWNING slice only: a window (`.view()`, `.trim_view()`) aims into the middle of
 // somebody else's block, and freeing an interior pointer is undefined — `msg`'s rule exactly.
 //
-// HONEST NOTE 2 — not this file's doing, and all that is left. Valgrind charges the program
-// 800 bytes in 13 blocks, one per `[arg_int(x), …]` slice literal handed to formatln: codegen
-// heap-promotes each such literal and nothing releases it. A program whose entire body is one
-// `formatln("n={}", [arg_int(7)])` loses 32 bytes the same way, so this scales with format
-// CALLS, not with data. fmt's integer scratch adds 21 bytes more, but as ONE still-reachable
-// buffer, not a leak per integer. No caller can free either.
+// HONEST NOTE 2 — what valgrind actually says, and all that is left. 37 allocations, 36 frees,
+// ZERO bytes lost: every block named above goes back to `a`. The one survivor is 21 bytes STILL
+// REACHABLE — fmt's integer scratch, one buffer per thread for the process lifetime (std.text.fmt
+// `digits`), not a leak per integer and not this file's to free. Earlier revisions of this note
+// also charged the program ~800 bytes for the `[arg_int(x), …]` slice literals handed to formatln;
+// codegen no longer heap-promotes those, so that cost is gone. Re-measure before believing a
+// number in a comment: `./zen build examples/strings_demo.zen -o /tmp/sd && valgrind /tmp/sd`.
 //
 // HONEST NOTE 3 — `zen fmt` moves comments: a trailing `// …`, a comment above a
 // `.loop(…)` call, and a comment at the tail of a function body were each relocated on

@@ -18,13 +18,13 @@
 { new_in, push_in } = std.text.string
 { view } = std.text.str
 { gpa } = std.mem.heap
-{ Heap } = std.mem.alloc
+{ Allocator, Heap } = std.mem.alloc
 { parse_response, parse_url, http_get, get, http_error_name, HttpError, fatal } = std.net.http
 { parse_request, build_response, respond, status_reason, no_headers, one_header } = std.net.http
 { http_listen, serve_once, serve_n, Request, Response } = std.net.http
 // turn every '\n' into a CRLF, so a readable `\n`-delimited canned response becomes wire-format HTTP.
 // Returns a length-carrying `[u8]` (parse_response's binary-safe input) via the String builder's `.bytes()`.
-crlfify<A> = (a: MutPtr<A>, s: string_view) [u8] {
+crlfify = (a: Allocator, s: string_view) [u8] {
     sb := a.new_in().expect("http_parse: oom")
     s.view().loop((h, i, b) {
         (b == '\n').match ({
@@ -41,7 +41,7 @@ crlfify<A> = (a: MutPtr<A>, s: string_view) [u8] {
 }
 // A canned 200 response whose 7-byte body carries an EMBEDDED NUL ("ab\0cdef", NUL at index 2) — a
 // string literal can't hold a NUL, so the body bytes are pushed explicitly onto the CRLF'd head.
-nul_body<A> = (a: MutPtr<A>) [u8] {
+nul_body = (a: Allocator) [u8] {
     sb := a.new_in().expect("http_parse: oom")
     "HTTP/1.1 200 OK\nContent-Length: 7\n\n".view().loop((h, i, b) {
         (b == '\n').match ({
