@@ -20,7 +20,7 @@
 // start position that matches, and at that start the longest run reaching an accept state. So
 // `a|ab` on "ab" yields [0,2), not [0,1).
 //
-// ALLOCATOR. `compile` is generic over any `A: Allocator`: it takes `a: MutPtr<A>` and allocates
+// ALLOCATOR. `compile` is generic over any Allocator: it takes `a: Allocator` and allocates
 // the program, class tables, and the match-time scratch buffers through it. Pass `heap.gpa().addr()`,
 // an arena, or any other allocator. `re.regex_free(a)` hands every buffer back to the SAME allocator.
 // Errors are values: a malformed pattern is `.Err(RegexError)`, OOM is `.Err(.Oom)`.
@@ -556,7 +556,7 @@ map_err_code = (code: i64) RegexError {
 // human-readable name of a RegexError, for diagnostics.
 error_name* = (e: RegexError) string_view { e.variant_name() }
 // ── compile ─────────────────────────────────────────────────────────────────────
-compile*<A> = (a: MutPtr<A>, pattern: string_view) Result<Regex, RegexError> {
+compile* = (a: Allocator, pattern: string_view) Result<Regex, RegexError> {
     sv := pattern.view()
     plen := sv.len
     nodes_cap := plen * 4 + 8
@@ -658,7 +658,7 @@ compile*<A> = (a: MutPtr<A>, pattern: string_view) Result<Regex, RegexError> {
 // Named `regex_free` (not `free`): std.mem.alloc's C-floor `free(p)` is always in this module's
 // closure and the flat namespace binds the bare name there first — a `free*` here could never be
 // called (every `re.free(a)` / `free(re, a)` mis-bound to the 1-arg libc free).
-regex_free*<A> = (re: Regex, a: MutPtr<A>) void {
+regex_free* = (re: Regex, a: Allocator) void {
     a.release(re.insts.ptr)
     a.release(re.classes.ptr)
     a.release(re.ranges.ptr)
@@ -970,7 +970,7 @@ fill_matches = (re: Regex, sv: [u8], n: i64, out: [Match]) void {
     })
 }
 // every non-overlapping match, allocated through `a`. Empty when there are none.
-find_all*<A> = (re: Regex, a: MutPtr<A>, s: string_view) Result<[Match], IoError> {
+find_all* = (re: Regex, a: Allocator, s: string_view) Result<[Match], IoError> {
     sv := s.view()
     n := sv.len
     cnt := re.count_matches(sv, n)

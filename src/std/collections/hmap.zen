@@ -168,7 +168,7 @@ HMap*<K, V>: {
         i := m.find(k)
         (i < 0).then({ dflt }, { m.vals()[i] })
     }
-    grow<A> = (m: HMap<K, V>, a: MutPtr<A>) Result<HMap<K, V>, IoError> {
+    grow = (m: HMap<K, V>, a: Allocator) Result<HMap<K, V>, IoError> {
         cap := m.cap * 2 + 1
         a.try_acquire3(cap * sizeof(K), cap * sizeof(V), cap * 2 * sizeof(i64)).match ({
             .Ok(bufs) => {
@@ -232,7 +232,7 @@ HMap*<K, V>: {
         hashidx_link(m.index(), m.cap, slot, hbucket(m.keys()[slot], m.cap))
         m
     }
-    append<A> = (m: HMap<K, V>, a: MutPtr<A>, k: K, v: V) Result<HMap<K, V>, IoError> {
+    append = (m: HMap<K, V>, a: Allocator, k: K, v: V) Result<HMap<K, V>, IoError> {
         k := k
         v := v
         out: Result<HMap<K, V>, IoError> := (m.len < m.cap).match ({
@@ -275,7 +275,7 @@ HMap*<K, V>: {
         })
         out
     }
-    put<A> = (m: HMap<K, V>, a: MutPtr<A>, k: K, v: V) Result<HMap<K, V>, IoError> {
+    put = (m: HMap<K, V>, a: Allocator, k: K, v: V) Result<HMap<K, V>, IoError> {
         // Insert or upsert (allocation failure is a value). RETURNS the updated map — always
         // rebind (`m = m.put(...).expect("…")`): on grow the buffers are realloced, so a handle
         // captured before this call dangles (VALUE-MOLD CONTRACT). On an existing key the value
@@ -323,7 +323,7 @@ HMap*<K, V>: {
             },
         })
     }
-    free<A> = (m: HMap<K, V>, a: MutPtr<A>) void {
+    free = (m: HMap<K, V>, a: Allocator) void {
         a.release(m.keys)
         a.release(m.vals)
         a.release(m.idx)
@@ -351,7 +351,7 @@ HMap*<K, V>: {
 // annotation (a one-line `.expect` chain can't reach them — see the header comment):
 //   r: Result<HMap<str, i64>, IoError> := hmap.empty(a)
 //   m := r.expect("empty")
-empty*<K, V, A> = (a: MutPtr<A>) Result<HMap<K, V>, IoError> {
+empty*<K, V> = (a: Allocator) Result<HMap<K, V>, IoError> {
     a.try_acquire3(sizeof(K), sizeof(V), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
             kp := bufs.b1
@@ -376,7 +376,7 @@ empty*<K, V, A> = (a: MutPtr<A>) Result<HMap<K, V>, IoError> {
 // Internal three-argument construction path. Its module-specific name must stay unique after std
 // modules are flattened: a bare `of` can otherwise bind std.mem.raw's two-argument constructor when
 // an entry imports std.sys.root before this module.
-hmap_seed_in<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
+hmap_seed_in<K, V> = (a: Allocator, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
     a.try_acquire3(sizeof(K), sizeof(V), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
             kp := bufs.b1
@@ -405,7 +405,7 @@ hmap_seed_in<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, 
 // an `HMap<K, V>` seeded with one entry, its buffers acquired from `a`. K and V are inferred from
 // the seed pair (Zen has no call-site type args), so this one CHAINS:
 //   m := hmap.of(a, k, v).expect("of")
-of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
+of*<K, V> = (a: Allocator, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
     hmap_seed_in(a, seed_key, seed_val)
 }
 // ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
@@ -476,7 +476,7 @@ new_in*<K, V> = (a: DynAlloc) AHMap<K, V> {
 // a zero-entry ambient `AHMap<K, V>`. K/V appear only in the return type, so pin them via the LHS
 // annotation: `e: AHMap<str, i64> := hmap.new()`. The process heap is drawn ONCE here (as a DynAlloc)
 // and stored. `new_in`'s body is inlined (no bare `new_in` call — that bare name is ambiguous with
-// std.text.string's generic `new_in<A>(MutPtr<A>)` once both flatten together; qualified `hmap.new_in`
+// std.text.string's generic `new_in(a: Allocator)` once both flatten together; qualified `hmap.new_in`
 // stays the external real path).
 new*<K, V> = () AHMap<K, V> {
     a := dyn_heap()

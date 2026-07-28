@@ -20,13 +20,13 @@
 //   })
 //   s := dt.format_iso(a.addr()).expect("oom") // "2001-09-09T01:46:40" (allocator-threaded)
 //
-// ALLOCATOR. Only `format_iso` allocates (a 20-byte rendered string); it takes `a: MutPtr<A>` for any
-// `A: Allocator` and returns Result — allocation failure is a value, house style. Everything else
+// ALLOCATOR. Only `format_iso` allocates (a 20-byte rendered string); it takes `a: Allocator`
+// and returns Result — allocation failure is a value, house style. Everything else
 // (from_unix/to_unix/parse_iso/is_leap/days_in_month/weekday) is pure and allocation-free.
 { Result, IoError, ok, err } = std.core.result
 { len, view } = std.text.str
 { is_digit } = std.text.ascii    // canonical ASCII digit test (centralized in std.text.ascii)
-{ try_acquire } = std.mem.alloc
+{ Allocator, try_acquire } = std.mem.alloc
 { wall_s } = std.time.clock
 // seconds-of-day + era constants shared by the epoch bridge below.
 SEC_PER_MIN := 60
@@ -257,7 +257,7 @@ fmt_w4 = (p: RawPtr<u8>, at: i64, n: i64) i64 {
 // Render `dt` as the 19-byte `YYYY-MM-DDThh:mm:ss` (ISO-8601, the exact input parse_iso accepts) into a
 // fresh allocator-owned NUL-terminated str. A 4-digit year is assumed (0..9999); deliberately not a
 // full strftime. Allocation failure is a value (Result), house style.
-format_iso*<A> = (a: MutPtr<A>, dt: DateTime) Result<string_view, IoError> {
+format_iso* = (a: Allocator, dt: DateTime) Result<string_view, IoError> {
     a.try_acquire(20).match ({
         .Ok(p)  => {
             k := fmt_w4(p, 0, dt.year)

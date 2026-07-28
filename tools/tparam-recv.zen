@@ -1,0 +1,373 @@
+// tools/tparam-recv.zen — the UNBOUNDED-RECEIVER lint, written in Zen against the REAL parser
+// (same shape as tools/discards.zen — no regex, no second grammar).
+//
+//   ./zen run tools/tparam-recv.zen <scan-root> [<scan-root> …]
+//
+// WHAT IT FINDS. A type parameter used as a METHOD RECEIVER with no trait bound:
+//
+//   frobnicate<T> = (x: MutPtr<T>, n: i64) i64 { x.meow(n) }   // `meow` exists only on Cat
+//
+// Zen resolves the method NAME globally and defers the receiver-type question to monomorphization,
+// so that body compiles today and only explodes when someone instantiates it — blaming the LIBRARY's
+// line, not the call site that passed the wrong type. Writing the bound the body already assumes
+// (`<T: Meower>`, or the `(x: Meower)` sugar) moves the error to the call site and names the caller's
+// own type. Every hit here is a function whose body assumes an interface its signature never states.
+//
+// WHAT IT DOES NOT FIND — the false-positive line, deliberately drawn:
+//   * a tparam that is never a receiver (element types: `Opt<T>`, `[T]`, `Box<T>`, an accumulator);
+//   * a BOUND tparam (`<A: Allocator>`) and the `(a: Allocator)` sugar, which is that same bound;
+//   * compiler intrinsics (`addr`/`load`/`store`/`offset`/`to_i64`/…) — those are typed by the
+//     compiler for every type, not resolved through an impl, so they assume nothing. The roster is
+//     IMPORTED from compiler.check (is_intrinsic), never re-listed here.
+//   * `.match` / `.loop` / `.then`, which parse to their own Expr nodes, not to method calls.
+//   * a PASS-THROUGH call: every declaration of the method name takes its own first parameter as an
+//     UNBOUNDED tparam too (`println<T> = (x: T)` calling `x.fmt_println()`, serde's reflection
+//     writers). Such a callee constrains nothing, so neither does the call — the constraint, if any,
+//     lives further down the chain and is reported THERE, at its root. Phase 0 builds that index by
+//     parsing the whole repo with the same real parser. A consequence worth knowing: bounding a leaf
+//     turns its callers from pass-throughs into findings, so a chain is fixed root-first, one wave at
+//     a time, and the lint never reports the same missing bound in fifty places at once.
+//
+// OUTPUT. One line per site, plus a per-function roll-up of the methods it assumes:
+//
+//   src/std/text/str.zen:322: repeat_in: tparam `A` receiver `a` . acquire   [alloc]
+//
+// The `[alloc]` tag marks the allocator shape — a receiver whose method set is acquire/resize/release
+// — which is what `A: Allocator` is for. Everything else is tagged `[other]` and is a finding in its
+// own right. Exit status is the number of files with findings (0 = clean), so it gates.
+{ arg, argc } = std.sys.os
+{ Malloc } = std.mem.alloc
+{ contents_in } = std.io.file
+{ is_dir, read_dir } = std.sys.fs
+{ cat_in, ends_with, view } = std.text.str
+{ expect } = std.core.result
+{ then } = std.core.bool
+{ arg_int, arg_str, format } = std.text.fmt
+{ parse_module } = compiler.parse
+{ perr_get } = compiler.parse_type
+{ lerr_get } = compiler.lex
+{ ArmData, Decl, Expr, Func, ImplData, Param, Stmt, Ty } = compiler.ast.ast_types
+{ expr_fold_children } = compiler.ast.expr_children
+{ is_intrinsic } = compiler.check
+{ tparam_bound } = compiler.validate.util
+{ Map, of } = std.collections.map
+g_files := 0
+g_fns := 0
+g_sites := 0
+g_alloc := 0
+g_other := 0
+g_quiet := 0
+g_unparsed := 0
+// ── phase 0: the name → pass-through index ────────────────────────────────────
+// 1 = EVERY declaration of this name takes its own first parameter as an unbounded tparam (a
+// pass-through: calling it constrains the receiver not at all); 2 = at least one declaration wants a
+// concrete or bounded receiver (calling it DOES constrain); 0 = never seen (treated as 2 — a lint
+// that goes quiet on names it failed to index would fail open).
+idx_note = (m: Map<i64>, a: Allocator, name: string_view, passthru: bool) Map<i64> {
+    prev := m.get(name, 0)
+    next: i64 := (passthru && prev != 2).then({ 1 }, { 2 })
+    m.put(a, name, next).expect("tparam-recv: index alloc")
+}
+// a declaration is a PASS-THROUGH when its first parameter's receiver type names one of its own
+// UNBOUNDED tparams. A zero-param decl constrains nothing either, but nothing can call it as a
+// method, so it is irrelevant; treat it as constraining and let the shape below never match.
+decl_passthru = (f: Func) bool {
+    (f.params.len == 0).match ({
+        true  => false,
+        false => {
+            tn := f.params[0].ty.recv_tyname()
+            tn != "" && f.unbound_tparam(tn)
+        },
+    })
+}
+// an impl's methods bind a CONCRETE receiver type (`Heap.impl(Allocator, …)`), which is exactly the
+// constraint this lint is about — register every one under the simple name a UFCS call site writes.
+idx_impl = (m: Map<i64>, a: Allocator, im: ImplData) Map<i64> {
+    out := m
+    im.methods.loop((h, k, p) {
+        out = out.idx_note(a, p.name, false)
+    })
+    out
+}
+idx_module = (m: Map<i64>, a: Allocator, decls: [Decl]) Map<i64> {
+    out := m
+    decls.loop((h, i, d) {
+        out = d.match ({
+            .DFunc(f)    => out.idx_note(a, f.name, f.decl_passthru()),
+            .DForeign(f) => out.idx_note(a, f.name, false),
+            .DImpl(im)   => out.idx_impl(a, im),
+            _            => out,
+        })
+    })
+    out
+}
+// ── the shape test: is this receiver an UNBOUND tparam of the enclosing fn? ────
+// the tparam a param's type names, through one level of pointer (`T` and `MutPtr<T>`/`Ptr<T>`/
+// `RawPtr<T>` are both receivers of T's methods). Anything else ( [T], Box<T>, a concrete type )
+// names no receiver tparam.
+recv_tyname = (t: Ty) string_view {
+    t.match ({
+        .Named(n) => n,
+        .Ptr(pd)  => load(pd.pointee).match ({
+            .Named(n) => n,
+            _         => "",
+        }),
+        _         => "",
+    })
+}
+// `name` is a tparam of `f` that carries NO bound. A bounded tparam is exactly the fixed case.
+unbound_tparam = (f: Func, name: string_view) bool {
+    hit := false
+    f.tparams.loop((h, i, tp) {
+        (tp.name == name && is_empty_sv(tp.name) == false).then({
+            hit = tp.tparam_bound() == ""
+        })
+    })
+    hit
+}
+is_empty_sv = (s: string_view) bool { s == "" }
+// the unbound tparam that `varname` (a parameter of `f`) is a receiver of, or "".
+param_recv_tparam = (f: Func, varname: string_view) string_view {
+    res := ""
+    f.params.loop((h, i, p) {
+        (p.name == varname).then({
+            tn := p.ty.recv_tyname()
+            res = (tn != "" && f.unbound_tparam(tn)).then({ tn }, { res })
+        })
+    })
+    res
+}
+// ── the walk ──────────────────────────────────────────────────────────────────
+Ctx: {
+    path: string_view,
+    src: string_view,
+    f: Func,
+    m: Map<i64>,
+}
+line_of = (src: string_view, pos: i32) i64 {
+    n := 1
+    p := pos + 0
+    src.view().loop((h, i, b) {
+        (i < p && b == '\n').then({
+            n = n + 1
+        })
+    })
+    n
+}
+// an allocator-shaped assumption: the three methods the Allocator trait declares.
+alloc_method = (m: string_view) bool { m == "acquire" || m == "resize" || m == "release" }
+report = (cx: Ctx, pos: i32, tp: string_view, recv: string_view, method: string_view) void {
+    tag := method.alloc_method().then({ "alloc" }, { "other" })
+    method.alloc_method().match ({
+        true  => {
+            g_alloc = g_alloc + 1
+        },
+        false => {
+            g_other = g_other + 1
+        },
+    })
+    g_sites = g_sites + 1
+    (g_quiet == 0).then({
+        format("{}:{}: {}: tparam `{}` receiver `{}` . {}   [{}]\n", [arg_str(cx.path), arg_int(cx.src.line_of(pos)), arg_str(cx.f.name), arg_str(tp), arg_str(recv), arg_str(method), arg_str(tag)])
+    })
+}
+// a method call whose receiver is a bare parameter name: `a.acquire(n)`.
+recv_var_name = (e: Ptr<Expr>) string_view {
+    load(e).match ({
+        .Var(v) => v.name,
+        _       => "",
+    })
+}
+scan_arms = (cx: Ctx, arms: [ArmData]) void {
+    arms.loop((h, i, ar) {
+        cx.scan_expr(ar.body)
+    })
+}
+scan_expr = (cx: Ctx, e: Ptr<Expr>) void {
+    load(e).match ({
+        .MethodCall(mc) => {
+            rv := mc.recv.recv_var_name()
+            tp := (rv == "").then({ "" }, { cx.f.param_recv_tparam(rv) })
+            (tp != "" && mc.method.is_intrinsic() == false && cx.m.get(mc.method, 0) != 1).then({
+                cx.report(mc.pos, tp, rv, mc.method)
+            })
+            cx.scan_expr(mc.recv)
+            mc.args.loop((h, i, ag) {
+                cx.scan_expr(ag.addr())
+            })
+        },
+        .Block(b)       => cx.scan_body(b.stmts),
+        .Loop(l)        => {
+            cx.scan_expr(l.seq)
+            cx.scan_body(l.body)
+        },
+        .Lambda(lm)     => cx.scan_body(lm.body),
+        .Match(mt)      => {
+            cx.scan_expr(mt.subj)
+            cx.scan_arms(mt.arms)
+        },
+        _               => {
+            0.expr_fold_children(e, (acc, ch) {
+                cx.scan_expr(ch)
+                acc
+            }, (acc, body) {
+                cx.scan_body(body)
+                acc
+            })
+        },
+    })
+}
+scan_body = (cx: Ctx, stmts: [Stmt]) void {
+    stmts.loop((h, i, st) {
+        st.match ({
+            .ExprStmt(e) => cx.scan_expr(e),
+            .Let(l)      => cx.scan_expr(l.value),
+            .Assign(asg) => {
+                cx.scan_expr(asg.target)
+                cx.scan_expr(asg.value)
+            },
+            .Return(e)   => cx.scan_expr(e),
+            .If(f)       => {
+                cx.scan_expr(f.c)
+                cx.scan_body(f.then)
+                cx.scan_body(f.els)
+            },
+            .While(w)    => {
+                cx.scan_expr(w.c)
+                cx.scan_body(w.body)
+            },
+            .IndexSet(x) => {
+                cx.scan_expr(x.seq)
+                cx.scan_expr(x.idx)
+                cx.scan_expr(x.value)
+            },
+        })
+    })
+}
+// a fn with no tparams can hold no unbound-tparam receiver: skip the whole body.
+scan_fn = (m: Map<i64>, path: string_view, src: string_view, f: Func) void {
+    (f.tparams.len > 0).then({
+        g_fns = g_fns + 1
+        cx := Ctx(
+            path: path,
+            src: src,
+            f: f,
+            m: m,
+        )
+        cx.scan_body(f.body)
+    })
+}
+scan_module = (m: Map<i64>, path: string_view, src: string_view, decls: [Decl]) void {
+    decls.loop((h, i, d) {
+        d.match ({
+            .DFunc(f) => m.scan_fn(path, src, f),
+            _         => { },
+        })
+    })
+}
+scan_file = (m: Map<i64>, a: Allocator, path: string_view) void {
+    g_files = g_files + 1
+    src := a.contents_in(path).expect("tparam-recv: cannot read file")
+    decls := a.parse_module(src)
+    // A file that does not PARSE is reported as such rather than silently scanned as empty: a lint
+    // that fails open is the failure mode this repo has been bitten by.
+    (perr_get() || lerr_get()).match ({
+        true  => {
+            g_unparsed = g_unparsed + 1
+            format("{}: PARSE ERROR — not scanned\n", [arg_str(path)])
+        },
+        false => m.scan_module(path, src, decls),
+    })
+}
+index_file = (m: Map<i64>, a: Allocator, path: string_view) Map<i64> {
+    src := a.contents_in(path).expect("tparam-recv: cannot read file")
+    decls := a.parse_module(src)
+    (perr_get() || lerr_get()).then({ m }, { m.idx_module(a, decls) })
+}
+sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
+    (i >= xv.len || i >= yv.len).match ({
+        true  => xv.len < yv.len,
+        false => (xv[i] == yv[i]).then({ xv.sv_lt_at(yv, i + 1) }, { xv[i] < yv[i] }),
+    })
+}
+sv_lt = (x: string_view, y: string_view) bool { x.view().sv_lt_at(y.view(), 0) }
+sift_left = (xs: [string_view], j: i64) void {
+    (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
+        t := xs[j]
+        xs[j] = xs[j - 1]
+        xs[j - 1] = t
+        xs.sift_left(j - 1)
+    })
+}
+sort_from = (xs: [string_view], i: i64) void {
+    (i < xs.len).then({
+        xs.sift_left(i)
+        xs.sort_from(i + 1)
+    })
+}
+sort_names = (xs: [string_view]) void { xs.sort_from(1) }
+// phase 0 indexes, phase 1 scans — the same walk, as in tools/discards.zen.
+walk = (m: Map<i64>, a: Allocator, root: string_view, phase: i32) Map<i64> {
+    out := m
+    root.is_dir().match ({
+        true  => {
+            entries := a.read_dir(root).expect("tparam-recv: cannot read directory")
+            entries.sort_names()
+            entries.loop((h, i, entry) {
+                out = out.walk(a, a.cat_in(a.cat_in(root, "/"), entry), phase)
+            })
+        },
+        false => root.ends_with(".zen").then({
+            (phase == 0).match ({
+                true  => {
+                    out = out.index_file(a, root)
+                },
+                false => {
+                    m.scan_file(a, root)
+                },
+            })
+        }),
+    })
+    out
+}
+// the roots named on the command line, at `phase` (0 = index, 1 = scan). Indexing them too is what
+// lets a scanned file's OWN helpers resolve — a fixture outside the fixed index roots would otherwise
+// have every local method call read as unknown, and unknown means reported.
+scan_roots = (m: Map<i64>, a: Allocator, i: i32, phase: i32) Map<i64> {
+    out := m
+    (i < argc()).then({
+        (arg(i) == "--quiet").match ({
+            true  => {
+                g_quiet = 1
+            },
+            false => {
+                out = out.walk(a, arg(i), phase)
+            },
+        })
+        out = out.scan_roots(a, i + 1, phase)
+    })
+    out
+}
+main = () i32 {
+    mm := Malloc(_: 0)
+    a := mm.addr()
+    (argc() < 2).then({
+        format("usage: zen run tools/tparam-recv.zen <scan-root> [<scan-root> …] [--quiet]\n", [])
+        return 2
+    })
+    seed: i64 := 0
+    m := of(a, "", seed).expect("tparam-recv: index alloc")
+    // phase 0: index the WHOLE repo, so a method call into another module resolves
+    m = m.walk(a, "src", 0)
+    m = m.walk(a, "driver.zen", 0)
+    m = m.walk(a, "build.zen", 0)
+    m = m.walk(a, "tools", 0)
+    m = m.scan_roots(a, 1, 0)
+    m.scan_roots(a, 1, 1)
+    format("-- tparam-recv: {} files ({} unparsed), {} generic fns, {} unbounded-receiver sites ({} alloc, {} other)\n", [arg_int(g_files), arg_int(g_unparsed), arg_int(g_fns), arg_int(g_sites), arg_int(g_alloc), arg_int(g_other)])
+    // exit status = findings + unscannable files (capped into the byte range): a clean tree exits 0,
+    // so this is directly usable as a gate, and a file the lint could not READ fails it CLOSED —
+    // a scanner that goes green on input it never looked at is the failure this repo has been bitten by.
+    total := g_sites + g_unparsed
+    ((total > 100).then({ 100 }, { total })).to_i32()
+}

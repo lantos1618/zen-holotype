@@ -44,7 +44,7 @@ find*<T> = (xs: [T], pred: (T) bool) Opt<T> {
     })
     out
 }
-map_in*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError> {
+map_in*<T, U> = (a: Allocator, xs: [T], f: (T) U) Result<[U], IoError> {
     (xs.len <= 0).match ({
         true  => {
             empty: [U] := slice(null_ptr(), 0)
@@ -62,7 +62,7 @@ map_in*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError> {
         }),
     })
 }
-filter_in*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) Result<[T], IoError> {
+filter_in*<T> = (a: Allocator, xs: [T], keep: (T) bool) Result<[T], IoError> {
     (xs.len <= 0).match ({
         true  => {
             empty: [T] := slice(null_ptr(), 0)
@@ -113,10 +113,8 @@ sort<T> = (xs: [T], less: (T, T) bool) void {
         })
     })
 }
-map*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError> { a.map_in(xs, f) }
-filter*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) Result<[T], IoError> {
-    a.filter_in(xs, keep)
-}
+map*<T, U> = (a: Allocator, xs: [T], f: (T) U) Result<[U], IoError> { a.map_in(xs, f) }
+filter*<T> = (a: Allocator, xs: [T], keep: (T) bool) Result<[T], IoError> { a.filter_in(xs, keep) }
 // ── SCALAR COMBINATORS (allocator-free) ──────────────────────────────────────────────────────────
 // None of these allocate, so none thread an allocator. They are the everyday reductions over a `[T]`.
 // `fold_to` is the GENERAL fold — accumulate into a DIFFERENT type `U` than the element `T`; the older
@@ -249,10 +247,10 @@ position*<T> = (xs: [T], pred: (T) bool) Opt<i64> {
 }
 // ── PRODUCERS (allocator-threaded) ───────────────────────────────────────────────────────────────
 // Each allocates a fresh owned slice through the caller's allocator; failure stays in the value flow as
-// Result<_, IoError>. Empty results allocate nothing (a null/0 slice). `MutPtr<A>` is the first arg, so
+// Result<_, IoError>. Empty results allocate nothing (a null/0 slice). The allocator is the first arg, so
 // UFCS reads as `a.range_in(5)`. (For `reverse`/`concat` and the zero-copy `take`/`drop` VIEWS, use
 // std.core.slice — those already exist there; the `take_in`/`skip_in` here return OWNED copies.)
-range_in*<A> = (a: MutPtr<A>, n: i64) Result<[i64], IoError> {
+range_in* = (a: Allocator, n: i64) Result<[i64], IoError> {
     (n <= 0).match ({
         true  => {
             empty: [i64] := slice(null_ptr(), 0)
@@ -271,7 +269,7 @@ range_in*<A> = (a: MutPtr<A>, n: i64) Result<[i64], IoError> {
     })
 }
 // [lo, hi) ascending; hi <= lo → empty.
-range_from_in*<A> = (a: MutPtr<A>, lo: i64, hi: i64) Result<[i64], IoError> {
+range_from_in* = (a: Allocator, lo: i64, hi: i64) Result<[i64], IoError> {
     n := (hi > lo).then({ hi - lo }, { 0 })
     (n <= 0).match ({
         true  => {
@@ -291,7 +289,7 @@ range_from_in*<A> = (a: MutPtr<A>, lo: i64, hi: i64) Result<[i64], IoError> {
     })
 }
 // lo, lo+step, … < hi (step > 0). A non-positive step or hi <= lo yields an empty slice (never a hang).
-range_step_in*<A> = (a: MutPtr<A>, lo: i64, hi: i64, step: i64) Result<[i64], IoError> {
+range_step_in* = (a: Allocator, lo: i64, hi: i64, step: i64) Result<[i64], IoError> {
     n := (step > 0 && hi > lo).then({ (hi - lo + step - 1) / step }, { 0 })
     (n <= 0).match ({
         true  => {
@@ -313,7 +311,7 @@ range_step_in*<A> = (a: MutPtr<A>, lo: i64, hi: i64, step: i64) Result<[i64], Io
 // `enumerate_in`: pair each element with its index as `IdxPair<T>{ i, v }`. Storage comes through
 // core.slice's `buf_in` (a typed empty `like` fixes the element type, so its internal `sizeof` resolves
 // the struct size at mono — `sizeof(IdxPair<T>)` can't be spelled directly in an expression).
-enumerate_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[IdxPair<T>], IoError> {
+enumerate_in*<T> = (a: Allocator, xs: [T]) Result<[IdxPair<T>], IoError> {
     like: [IdxPair<T>] := slice(null_ptr(), 0)
     a.buf_in(xs.len, like).match ({
         .Ok(out) => {
@@ -329,7 +327,7 @@ enumerate_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[IdxPair<T>], IoError> {
     })
 }
 // `zip_in`: pair xs[i] with ys[i] up to the SHORTER length, as `Pair<T, U>{ a, b }`.
-zip_in*<A, T, U> = (a: MutPtr<A>, xs: [T], ys: [U]) Result<[Pair<T, U>], IoError> {
+zip_in*<T, U> = (a: Allocator, xs: [T], ys: [U]) Result<[Pair<T, U>], IoError> {
     n := (xs.len < ys.len).then({ xs.len }, { ys.len })
     like: [Pair<T, U>] := slice(null_ptr(), 0)
     a.buf_in(n, like).match ({
@@ -347,5 +345,5 @@ zip_in*<A, T, U> = (a: MutPtr<A>, xs: [T], ys: [U]) Result<[Pair<T, U>], IoError
 }
 // `take_in`/`skip_in`: OWNED copies of the first `n` / everything after the first `n` elements (n is
 // clamped to [0, len]). These allocate; for zero-copy VIEWS use core.slice's `take`/`drop`.
-take_in*<A, T> = (a: MutPtr<A>, xs: [T], n: i64) Result<[T], IoError> { a.dup_in(xs.take(n)) }
-skip_in*<A, T> = (a: MutPtr<A>, xs: [T], n: i64) Result<[T], IoError> { a.dup_in(xs.drop(n)) }
+take_in*<T> = (a: Allocator, xs: [T], n: i64) Result<[T], IoError> { a.dup_in(xs.take(n)) }
+skip_in*<T> = (a: Allocator, xs: [T], n: i64) Result<[T], IoError> { a.dup_in(xs.drop(n)) }

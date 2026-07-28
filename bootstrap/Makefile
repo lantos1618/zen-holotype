@@ -43,7 +43,7 @@ GEN_C   := $(HERE)zenc.gen.c
 SOURCES := $(HERE)zenc.gen.c $(HERE)zenrt.c
 HEADERS := $(HERE)zenrt.h
 
-.PHONY: zen build regen clean harness harness-fast bench bench-valgrind difftest docs-check ffi-verify asan setup-git resolve-seed
+.PHONY: zen build regen clean harness harness-fast bench bench-valgrind difftest docs-check ffi-verify lint-bounds asan setup-git resolve-seed
 
 # The standalone, Python-free compiler binary: driver.zen is the entry (emitted as zen_main); zenrt.c
 # supplies the runtime. Keep the friendly phony target as an alias, but put the recipe on the real file:
@@ -139,6 +139,15 @@ difftest: zen
 # the deliberate list exactly, and every local Markdown link target must exist.
 docs-check: zen
 	cd $(ROOT) && $(ZENC) run tools/check-docs.zen
+
+# Unbounded-receiver lint (tools/tparam-recv.zen): a type parameter used as a METHOD RECEIVER with no
+# trait bound — the shape that compiles today and only fails at someone else's monomorphization, deep
+# in the library. src/std is held at ZERO; `make harness` asserts the same thing (harness_misc), so
+# this target is the one to run by hand while fixing a wave. Point it at any root to survey:
+#   make -f bootstrap/Makefile lint-bounds
+#   ./zen run tools/tparam-recv.zen src examples tests   # the whole-tree survey
+lint-bounds: zen
+	cd $(ROOT) && $(ZENC) run tools/tparam-recv.zen src/std tools
 
 # Sanitizer gate: rebuild the compiler under ASan+UBSan (-fno-sanitize-recover=all) and sweep the
 # fixture corpus with it. Both scripts predate this target — they were written for the fuzz work and

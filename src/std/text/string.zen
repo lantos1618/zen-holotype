@@ -15,7 +15,7 @@
 //   s.free_in(m.addr())
 { len, view } = std.text.str
 { copy } = std.mem.raw
-{ try_acquire, try_resize } = std.mem.alloc
+{ Allocator, try_acquire, try_resize } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 String*: {
     ptr: RawPtr<u8>,
@@ -26,12 +26,12 @@ String*: {
         // init(requested) therefore reports at least requested + 1 here.
         s.ptr.slice(s.len)
     }
-    push_in<A> = (s: String, a: MutPtr<A>, b: u8) Result<String, IoError> { a.push_in(s, b) }
-    append_in<A> = (s: String, a: MutPtr<A>, t: string_view) Result<String, IoError> {
+    push_in = (s: String, a: Allocator, b: u8) Result<String, IoError> { a.push_in(s, b) }
+    append_in = (s: String, a: Allocator, t: string_view) Result<String, IoError> {
         a.append_in(s, t)
     }
-    finish_in<A> = (s: String, a: MutPtr<A>) Result<string_cstr, IoError> { a.finish_in(s) }
-    free_in<A>   = (s: String, a: MutPtr<A>) void { a.free_in(s) }
+    finish_in = (s: String, a: Allocator) Result<string_cstr, IoError> { a.finish_in(s) }
+    free_in   = (s: String, a: Allocator) void { a.free_in(s) }
 }
 // `copy` (not `move`): the destination run starts at `at` == the String's live length, so it lies
 // entirely in the spare capacity past every byte a source view could name — the ranges cannot overlap.
@@ -40,7 +40,7 @@ copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: string_view) void {
     dst.offset(at).copy(src.ptr, src.len)
 }
 // ── explicit allocator variants (all fallible ops return Result) ─────────────
-init*<A> = (a: MutPtr<A>, cap: i64) Result<String, IoError> {
+init* = (a: Allocator, cap: i64) Result<String, IoError> {
     // `cap` requests content capacity. The public field records physical allocation capacity,
     // including one spare byte for finish_in's trailing NUL.
     actual := cap + 1
@@ -53,8 +53,8 @@ init*<A> = (a: MutPtr<A>, cap: i64) Result<String, IoError> {
         .Err(e) => err(e),
     })
 }
-new_in*<A> = (a: MutPtr<A>) Result<String, IoError> { a.init(16) }
-grow_in<A> = (a: MutPtr<A>, s: String, ncap: i64) Result<String, IoError> {
+new_in* = (a: Allocator) Result<String, IoError> { a.init(16) }
+grow_in = (a: Allocator, s: String, ncap: i64) Result<String, IoError> {
     a.try_resize(s.ptr, ncap).match ({
         .Ok(p)  => ok(String(
             ptr: p,
@@ -69,12 +69,12 @@ grow_in<A> = (a: MutPtr<A>, s: String, ncap: i64) Result<String, IoError> {
 // an unbound `s` splices that whole subtree in at every read, and nested builders compound it to
 // EXPONENTIAL inlined size (and compile time). Binding once emits the subtree a single time; the
 // reads reference the cheap local. Keeps allocator-threaded String builders linear to inline.
-reserve_in<A> = (a: MutPtr<A>, s: String, need: i64) Result<String, IoError> {
+reserve_in = (a: Allocator, s: String, need: i64) Result<String, IoError> {
     s := s
     (s.len + need > s.cap).then({ a.grow_in(s, (s.cap + need) * 2) }, { ok(s) })
 }
 // Force value args to locals first so callers may safely pass expressions that read `s`.
-push_in*<A> = (a: MutPtr<A>, s: String, b: u8) Result<String, IoError> {
+push_in* = (a: Allocator, s: String, b: u8) Result<String, IoError> {
     b := b
     a.reserve_in(s, 2).match ({
         .Ok(r)  => {
@@ -88,7 +88,7 @@ push_in*<A> = (a: MutPtr<A>, s: String, b: u8) Result<String, IoError> {
         .Err(e) => err(e),
     })
 }
-append_in*<A> = (a: MutPtr<A>, s: String, t: string_view) Result<String, IoError> {
+append_in* = (a: Allocator, s: String, t: string_view) Result<String, IoError> {
     t := t
     n := t.len()
     a.reserve_in(s, n + 1).match ({
@@ -108,7 +108,7 @@ append_in*<A> = (a: MutPtr<A>, s: String, t: string_view) Result<String, IoError
 // its slice sibling, used by run-copy escapers (e.g. std.format.json's string writer) that bulk
 // copy the run between escapes.
 copy_slice_bytes = (dst: RawPtr<u8>, at: i64, t: [u8]) void { dst.offset(at).copy(t.ptr, t.len) }
-append_slice_in*<A> = (a: MutPtr<A>, s: String, t: [u8]) Result<String, IoError> {
+append_slice_in* = (a: Allocator, s: String, t: [u8]) Result<String, IoError> {
     t := t
     n := t.len
     a.reserve_in(s, n + 1).match ({
@@ -123,7 +123,7 @@ append_slice_in*<A> = (a: MutPtr<A>, s: String, t: [u8]) Result<String, IoError>
         .Err(e) => err(e),
     })
 }
-finish_in*<A> = (a: MutPtr<A>, s: String) Result<string_cstr, IoError> {
+finish_in* = (a: Allocator, s: String) Result<string_cstr, IoError> {
     // init/push/append maintain one spare byte, so this does not relocate the allocation and the
     // caller's String header remains the correct owner to pass to free_in.
     a.reserve_in(s, 1).match ({
@@ -134,4 +134,4 @@ finish_in*<A> = (a: MutPtr<A>, s: String) Result<string_cstr, IoError> {
         .Err(e)   => err(e),
     })
 }
-free_in*<A> = (a: MutPtr<A>, s: String) void { a.release(s.ptr) }
+free_in* = (a: Allocator, s: String) void { a.release(s.ptr) }

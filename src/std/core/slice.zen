@@ -6,7 +6,7 @@
 // duplicated `head_bytes`/`tail_bytes` rather than take that import). Keep new globals here specific.
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
-buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> {
+buf_in*<T> = (a: Allocator, n: i64, like: [T]) Result<[T], IoError> {
     (n <= 0).match ({
         true  => ok(slice(null_ptr(), 0)),
         false => a.try_acquire(n * sizeof(T)).match ({
@@ -15,7 +15,7 @@ buf_in*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> {
         }),
     })
 }
-dup_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
+dup_in*<T> = (a: Allocator, xs: [T]) Result<[T], IoError> {
     a.buf_in(xs.len, xs).match ({
         .Ok(buf) => {
             xs.loop((h, i, x) {
@@ -26,8 +26,8 @@ dup_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
         .Err(e)  => err(e),
     })
 }
-dupx_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.dup_in(xs) }
-node_in*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> {
+dupx_in*<T> = (a: Allocator, xs: [T]) Result<[T], IoError> { a.dup_in(xs) }
+node_in*<T> = (a: Allocator, v: T) Result<Ptr<T>, IoError> {
     a.dup_in([v]).match ({
         .Ok(buf) => {
             vals: [T] := buf
@@ -37,7 +37,7 @@ node_in*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> {
         .Err(e)  => err(e),
     })
 }
-concat_in*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> {
+concat_in*<T> = (a: Allocator, xs: [T], ys: [T]) Result<[T], IoError> {
     a.buf_in(xs.len + ys.len, xs).match ({
         .Ok(buf) => {
             xs.loop((h, i, x) {
@@ -51,11 +51,11 @@ concat_in*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> {
         .Err(e)  => err(e),
     })
 }
-alloc_buf*<A, T> = (a: MutPtr<A>, n: i64, like: [T]) Result<[T], IoError> { a.buf_in(n, like) }
-dup*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.dup_in(xs) }
-dupx*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.dupx_in(xs) }
-node*<A, T> = (a: MutPtr<A>, v: T) Result<Ptr<T>, IoError> { a.node_in(v) }
-concat*<A, T> = (a: MutPtr<A>, xs: [T], ys: [T]) Result<[T], IoError> { a.concat_in(xs, ys) }
+alloc_buf*<T> = (a: Allocator, n: i64, like: [T]) Result<[T], IoError> { a.buf_in(n, like) }
+dup*<T> = (a: Allocator, xs: [T]) Result<[T], IoError> { a.dup_in(xs) }
+dupx*<T> = (a: Allocator, xs: [T]) Result<[T], IoError> { a.dupx_in(xs) }
+node*<T> = (a: Allocator, v: T) Result<Ptr<T>, IoError> { a.node_in(v) }
+concat*<T> = (a: Allocator, xs: [T], ys: [T]) Result<[T], IoError> { a.concat_in(xs, ys) }
 // --- views (zero-copy) --------------------------------------------------------------------------
 // `offset` is BYTE arithmetic, so a sub-view advances the ptr by `lo * sizeof(T)`.
 sl_clamp = (v: i64, lo: i64, hi: i64) i64 {
@@ -75,7 +75,7 @@ sub*<T> = (xs: [T], lo: i64, hi: i64) [T] {
 take*<T> = (xs: [T], n: i64) [T] { xs.sub(0, n) }
 drop*<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }
 // --- reverse (allocates a NEW slice) ------------------------------------------------------------
-reverse_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
+reverse_in*<T> = (a: Allocator, xs: [T]) Result<[T], IoError> {
     a.buf_in(xs.len, xs).match ({
         .Ok(out) => {
             xs.loop((h, i, x) {
@@ -86,7 +86,7 @@ reverse_in*<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> {
         .Err(e)  => err(e),
     })
 }
-reverse<A, T> = (a: MutPtr<A>, xs: [T]) Result<[T], IoError> { a.reverse_in(xs) }
+reverse<T> = (a: Allocator, xs: [T]) Result<[T], IoError> { a.reverse_in(xs) }
 // --- search -------------------------------------------------------------------------------------
 // index_of/contains rely on `==`, which lowers to C `==`: valid for scalar element types
 // (i8..i64, u8..u64, bool, ptr/enum-tag). For struct/aggregate elements use find_by with an

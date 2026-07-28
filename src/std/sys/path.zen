@@ -16,6 +16,7 @@
 // std.text.str's `join`/`join_in` (a `[string_view]` with an arbitrary `sep`) and std.thread's `join`. Call
 // path's qualified — `path = std.sys.path; path.join(a, ["a","b"])` — so the right one resolves; an
 // unqualified `a.join(parts)` collides across the flattened import namespace.
+{ Allocator } = std.mem.alloc
 { view, len, starts_with, substr_in, split, nbuf } = std.text.str
 { String, new_in, append_in, finish_in } = std.text.string
 { Result, IoError, ok, err } = std.core.result
@@ -85,7 +86,7 @@ ext* = (p: string_view) string_view {
 // the directory portion (everything before the last component), trailing slashes collapsed.
 // dirname("/a/b/c") == "/a/b"; dirname("/a") == "/"; dirname("/") == "/"; dirname("abc") == "";
 // dirname("a/b/") == "a/b".
-dirname_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
+dirname_in = (a: Allocator, p: string_view) Result<string_view, IoError> {
     v := p.view()
     i := v.last_slash()
     (i < 0).match ({
@@ -96,14 +97,14 @@ dirname_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
         },
     })
 }
-dirname*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.dirname_in(p) }
+dirname* = (a: Allocator, p: string_view) Result<string_view, IoError> { a.dirname_in(p) }
 // the basename with its extension removed. stem("dir/f.tar.gz") == "f.tar"; stem(".bashrc") == ".bashrc".
-stem_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
+stem_in = (a: Allocator, p: string_view) Result<string_view, IoError> {
     b := p.basename()
     n := b.len() - p.ext().len()
     a.substr_in(b, 0, n)
 }
-stem*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.stem_in(p) }
+stem* = (a: Allocator, p: string_view) Result<string_view, IoError> { a.stem_in(p) }
 // ── join ──────────────────────────────────────────────────────────────────────
 // is the builder empty / does it currently end with a separator?
 sb_empty = (sb: String) bool { sb.len == 0 }
@@ -118,7 +119,7 @@ sb_ends_slash = (sb: String) bool {
 }
 // fold parts into `acc`, POSIX-style: an absolute part RESETS the accumulation; otherwise the part is
 // appended with exactly one '/' unless `acc` already ends with one (so no doubled separators).
-join_fold<A> = (a: MutPtr<A>, parts: [string_view], i: i64, acc: String) Result<String, IoError> {
+join_fold = (a: Allocator, parts: [string_view], i: i64, acc: String) Result<String, IoError> {
     (i >= parts.len).match ({
         true  => ok(acc),
         false => {
@@ -146,7 +147,7 @@ join_fold<A> = (a: MutPtr<A>, parts: [string_view], i: i64, acc: String) Result<
 }
 // join path components with '/'. join(["a","b","c"]) == "a/b/c"; an absolute component resets:
 // join(["a","/b"]) == "/b"; join([]) == "".
-join_in*<A> = (a: MutPtr<A>, parts: [string_view]) Result<string_view, IoError> {
+join_in* = (a: Allocator, parts: [string_view]) Result<string_view, IoError> {
     acc := a.new_in().or_return()
     full := a.join_fold(parts, 0, acc).or_return()
     full.finish_in(a).match ({
@@ -154,15 +155,15 @@ join_in*<A> = (a: MutPtr<A>, parts: [string_view]) Result<string_view, IoError> 
         .Err(e)   => err(e),
     })
 }
-join*<A> = (a: MutPtr<A>, parts: [string_view]) Result<string_view, IoError> { a.join_in(parts) }
+join* = (a: Allocator, parts: [string_view]) Result<string_view, IoError> { a.join_in(parts) }
 // ── normalize ─────────────────────────────────────────────────────────────────
 // append `sb` a '/' before all but the first kept component (keeps or_return out of a match-arm value).
-sep_before<A> = (a: MutPtr<A>, sb: String, k: i64) Result<String, IoError> {
+sep_before = (a: Allocator, sb: String, k: i64) Result<String, IoError> {
     (k > 0).then({ sb.append_in(a, "/") }, { ok(sb) })
 }
 // emit kept components `keep[0..top]` into `sb`, '/'-separated (no leading slash — the caller seeds it).
-norm_build<A> = (
-    a: MutPtr<A>,
+norm_build = (
+    a: Allocator,
     parts: [string_view],
     keep: [i64],
     k: i64,
@@ -181,7 +182,7 @@ norm_build<A> = (
 // collapse '.', '..' and runs of '/'. normalize("a/./b/../c") == "a/c"; normalize("/a/../b") == "/b";
 // normalize("") == "."; normalize("/") == "/". A leading '..' is kept on a relative path
 // (normalize("a/../../b") == "../b") but dropped at an absolute root (normalize("/..") == "/").
-normalize_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
+normalize_in = (a: Allocator, p: string_view) Result<string_view, IoError> {
     abs := p.is_absolute()
     parts := a.split(p, '/')
     z: i64 := 0
@@ -218,4 +219,4 @@ normalize_in<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> {
         .Err(e)   => err(e),
     })
 }
-normalize*<A> = (a: MutPtr<A>, p: string_view) Result<string_view, IoError> { a.normalize_in(p) }
+normalize* = (a: Allocator, p: string_view) Result<string_view, IoError> { a.normalize_in(p) }

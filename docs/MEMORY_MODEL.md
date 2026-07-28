@@ -29,7 +29,7 @@ The outside world enters through a
 (`std.sys`) and hands out narrow capabilities, notably `sys.heap()` (the process
 `Allocator`) and `sys.stdout()`/`sys.stderr()` (`Writer`s). Libraries take the
 narrowest capability they need (an `Allocator`, a `Writer`), which is the same
-discipline one level up from threading `MutPtr<A>` allocators through container
+discipline one level up from threading `a: Allocator` allocators through container
 and ownership APIs.
 
 > **The ambient runtime is not the model.** `std.rt` (a thread-local `Rt`
@@ -51,7 +51,8 @@ heap-owned `String` (freed through the allocator that owns its buffer). The old
 ## Current Rules
 
 Allocation is explicit. User-facing containers, ownership types, and runtime APIs
-should take an allocator (`MutPtr<A>`) or use a documented default-allocator convenience wrapper.
+should take an allocator (`a: Allocator` — the implicit bounded generic, equivalently
+`<A: Allocator>(a: MutPtr<A>)`) or use a documented default-allocator convenience wrapper.
 Raw `malloc`, `free`, pointer arithmetic, and `@` primitives are the substrate for
 bootstrap, FFI boundaries, and low-level std modules.
 `std.mem.raw` keeps direct `alloc`/`zeroed` escape hatches, and also exposes

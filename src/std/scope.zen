@@ -10,6 +10,7 @@
 // unlimited). When the budget is exhausted, `checkpoint` returns `.Stop(.Deadline)` — a real value
 // a body matches and bails on — instead of yielding. Cleanup is the REGION: `with_sync`/`with_async`
 // free the whole arena on exit, on every path.
+{ Allocator } = std.mem.alloc
 { Signal, CancelReason, SyncArena, AsyncArena, sync_in, async_in } = std.concurrent.runtime
 UNLIMITED := 0 - 1
 // The one capability value: a backing allocator/runtime + a cancellation budget, threaded explicitly.
@@ -35,7 +36,7 @@ Scope*<A>: {
     }
 }
 // open a SYNC scope over `backing`, run `body` with a Scope<SyncArena>, free the arena on exit.
-with_sync*<A, R> = (backing: MutPtr<A>, cap: i64, body: (MutPtr<Scope<SyncArena>>) R) R {
+with_sync*<R> = (backing: Allocator, cap: i64, body: (MutPtr<Scope<SyncArena>>) R) R {
     arena := backing.sync_in(cap)
     s := Scope<SyncArena>(
         alloc: arena.addr(),
@@ -46,7 +47,7 @@ with_sync*<A, R> = (backing: MutPtr<A>, cap: i64, body: (MutPtr<Scope<SyncArena>
     out
 }
 // open an ASYNC scope (checkpoint yields); same generic body shape, freed on exit.
-with_async<A, R> = (backing: MutPtr<A>, cap: i64, body: (MutPtr<Scope<AsyncArena>>) R) R {
+with_async<R> = (backing: Allocator, cap: i64, body: (MutPtr<Scope<AsyncArena>>) R) R {
     arena := backing.async_in(cap)
     s := Scope<AsyncArena>(
         alloc: arena.addr(),

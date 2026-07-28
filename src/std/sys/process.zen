@@ -39,7 +39,7 @@ decode_exit = (status: i64) i64 {
 }
 // Drain the pipe `f` into builder `s`, one fgets chunk at a time (recursive — no `@while`). fgets
 // returns NULL at end-of-stream; each non-NULL chunk is a NUL-terminated str appended onto `s`.
-drain<A> = (a: MutPtr<A>, f: RawPtr<u8>, chunk: RawPtr<u8>, s: String) Result<String, IoError> {
+drain = (a: Allocator, f: RawPtr<u8>, chunk: RawPtr<u8>, s: String) Result<String, IoError> {
     got := chunk.fgets(to_i32(CHUNK), f)
     (got == null_ptr()).match ({
         true  => ok(s),
@@ -51,7 +51,7 @@ drain<A> = (a: MutPtr<A>, f: RawPtr<u8>, chunk: RawPtr<u8>, s: String) Result<St
 }
 // Read the whole pipe into an owned str, close/reap the child, and pair the stdout with its exit code.
 // Split out of `run` so the popen NULL-guard stays a one-liner.
-capture<A> = (a: MutPtr<A>, f: RawPtr<u8>) Result<Output, IoError> {
+capture = (a: Allocator, f: RawPtr<u8>) Result<Output, IoError> {
     a.try_acquire(CHUNK).match ({
         .Err(e)    => {
             f.pclose()
@@ -99,13 +99,13 @@ capture<A> = (a: MutPtr<A>, f: RawPtr<u8>) Result<Output, IoError> {
 // `stdout` is allocator-owned — release it via `a.release(out.stdout.view().ptr)` (or let an arena
 // reclaim it). A nonzero exit is NOT an error here: it rides back in `Output.exit` for the caller to
 // inspect (use `run_ok` when a nonzero exit should be an error).
-run*<A> = (a: MutPtr<A>, cmd: string_view) Result<Output, IoError> {
+run* = (a: Allocator, cmd: string_view) Result<Output, IoError> {
     f := cmd.popen("r")
     (f == null_ptr()).then({ err(IoError.NotFound) }, { a.capture(f) })
 }
 // Convenience: run `cmd` and return its stdout, treating a nonzero exit as `.Err(.Errno(code))`. For
 // commands run purely for their output, where a failure should short-circuit the Result chain.
-run_ok*<A> = (a: MutPtr<A>, cmd: string_view) Result<string_view, IoError> {
+run_ok* = (a: Allocator, cmd: string_view) Result<string_view, IoError> {
     a.run(cmd).match ({
         .Err(e) => err(e),
         .Ok(o)  => (o.exit == 0).then({ ok(o.stdout) }, { err(IoError.Errno(to_i32(o.exit))) }),

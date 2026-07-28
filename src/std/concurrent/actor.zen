@@ -60,7 +60,7 @@ ActorSystem<M>: {
         state[0] = cur.advance()
         message
     }
-    run<ActorT> = (sys: ActorSystem<M>, actor: MutPtr<ActorT>) void {
+    run<ActorT: Receiver> = (sys: ActorSystem<M>, actor: MutPtr<ActorT>) void {
         sys.messages().loop((h, i, slot) {
             sys.has_messages().match ({
                 true  => {
@@ -74,7 +74,7 @@ ActorSystem<M>: {
             })
         })
     }
-    free<A> = (sys: ActorSystem<M>, alloc: MutPtr<A>) void {
+    free = (sys: ActorSystem<M>, alloc: Allocator) void {
         state := sys.state_slot()
         alloc.release(state[0].buf)
         alloc.release(sys.state)
@@ -111,7 +111,7 @@ ReplyRef*<T>: {
         // Cooperative only: meaningful after a same-thread `run`/`request` drain. Not pool-safe.
         reply.ready.load_i64() == 1
     }
-    await<A> = (reply: ReplyRef<T>, alloc: MutPtr<A>) T {
+    await = (reply: ReplyRef<T>, alloc: Allocator) T {
         // Reads the reply value after the caller has already drained (request/ask call `run` first).
         // Does NOT spin on `ready` — under the cooperative model the drain is synchronous, so the
         // value is already written. A pool-aware future would park; this path never will.
@@ -121,7 +121,7 @@ ReplyRef*<T>: {
         alloc.release(reply.ready)
         value
     }
-    discard<A> = (reply: ReplyRef<T>, alloc: MutPtr<A>) void {
+    discard = (reply: ReplyRef<T>, alloc: Allocator) void {
         // Free the reply cell WITHOUT reading it — for the back-pressure path where the request was
         // never enqueued (mailbox full), so no value was ever written. Mirrors `await`'s two releases
         // minus the (uninitialized) read, so no allocation leaks when a request bounces off a full box.
@@ -130,7 +130,7 @@ ReplyRef*<T>: {
     }
 }
 context<M> = (msg: M) Context<M> { Context<M>(msg: msg) }
-reply<A, T> = (alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
+reply<T> = (alloc: Allocator) Result<ReplyRef<T>, IoError> {
     alloc.try_acquire(sizeof(T)).match ({
         .Ok(value) => {
             alloc.try_acquire(8).match ({
@@ -155,7 +155,7 @@ reply<A, T> = (alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
         },
     })
 }
-make_system<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorSystem<M>, IoError> {
+make_system<M> = (alloc: Allocator, cap: i64) Result<ActorSystem<M>, IoError> {
     alloc.try_acquire(ACTOR_STATE_SIZE).match ({
         .Ok(state) => {
             alloc.try_acquire(cap * sizeof(M)).match ({
@@ -187,9 +187,9 @@ ActorEngine*<M>: {
     sys: ActorSystem<M>,
     ref           = (engine: ActorEngine<M>) CellRef<M> { engine.sys.ref() }
     drain<ActorT> = (engine: ActorEngine<M>, actor: MutPtr<ActorT>) void { engine.sys.run(actor) }
-    free<A>       = (engine: ActorEngine<M>, alloc: MutPtr<A>) void { engine.sys.free(alloc) }
+    free          = (engine: ActorEngine<M>, alloc: Allocator) void { engine.sys.free(alloc) }
 }
-engine<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorEngine<M>, IoError> {
+engine<M> = (alloc: Allocator, cap: i64) Result<ActorEngine<M>, IoError> {
     sys: Result<ActorSystem<M>, IoError> := alloc.make_system(cap)
     sys.match ({
         .Ok(s)  => {
@@ -204,24 +204,22 @@ engine<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorEngine<M>, IoError> {
 }
 ActorCell*<M>: {
     inner: ActorEngine<M>,
-    ref  = (cell: ActorCell<M>) CellRef<M> { cell.inner.ref() }
-    send = (cell: ActorCell<M>, message: M) bool { cell.ref().send(message) }
-    reply<A, T> = (cell: ActorCell<M>, alloc: MutPtr<A>) Result<ReplyRef<T>, IoError> {
-        alloc.reply()
-    }
+    ref      = (cell: ActorCell<M>) CellRef<M> { cell.inner.ref() }
+    send     = (cell: ActorCell<M>, message: M) bool { cell.ref().send(message) }
+    reply<T> = (cell: ActorCell<M>, alloc: Allocator) Result<ReplyRef<T>, IoError> { alloc.reply() }
     drain<ActorT> = (cell: ActorCell<M>, actor: MutPtr<ActorT>) void { cell.inner.drain(actor) }
-    await_reply<A, ActorT, T> = (
+    await_reply<ActorT, T> = (
         cell: ActorCell<M>,
-        alloc: MutPtr<A>,
+        alloc: Allocator,
         actor: MutPtr<ActorT>,
         reply_to: ReplyRef<T>,
     ) T {
         cell.drain(actor)
         reply_to.await(alloc)
     }
-    await_checked<A, ActorT, T> = (
+    await_checked<ActorT, T> = (
         cell: ActorCell<M>,
-        alloc: MutPtr<A>,
+        alloc: Allocator,
         actor: MutPtr<ActorT>,
         reply_to: ReplyRef<T>,
     ) Result<T, IoError> {
@@ -242,9 +240,9 @@ ActorCell*<M>: {
             },
         })
     }
-    ask<A, ActorT, T> = (
+    ask<ActorT, T> = (
         cell: ActorCell<M>,
-        alloc: MutPtr<A>,
+        alloc: Allocator,
         actor: MutPtr<ActorT>,
         issue: (ReplyRef<T>) void,
     ) Result<T, IoError> {
@@ -260,9 +258,9 @@ ActorCell*<M>: {
             },
         })
     }
-    request<A, ActorT, T> = (
+    request<ActorT, T> = (
         cell: ActorCell<M>,
-        alloc: MutPtr<A>,
+        alloc: Allocator,
         actor: MutPtr<ActorT>,
         make: (ReplyRef<T>) M,
     ) Result<T, IoError> {
@@ -286,7 +284,7 @@ ActorCell*<M>: {
             },
         })
     }
-    free<A> = (cell: ActorCell<M>, alloc: MutPtr<A>) void { cell.inner.free(alloc) }
+    free = (cell: ActorCell<M>, alloc: Allocator) void { cell.inner.free(alloc) }
 }
 ActorHandle*<M, ActorT>: {
     inner_cell: ActorCell<M>,
@@ -326,9 +324,9 @@ ActorHandle*<M, ActorT>: {
             })
         })
     }
-    await_checked<A, T> = (
+    await_checked<T> = (
         handle: ActorHandle<M, ActorT>,
-        alloc: MutPtr<A>,
+        alloc: Allocator,
         reply_to: ReplyRef<T>,
     ) Result<T, IoError> {
         // Drain the mailbox inline, then read the reply ONLY if it was written (see ActorCell.await_checked).
@@ -347,9 +345,9 @@ ActorHandle*<M, ActorT>: {
             },
         })
     }
-    request<A, T> = (
+    request<T> = (
         handle: ActorHandle<M, ActorT>,
-        alloc: MutPtr<A>,
+        alloc: Allocator,
         make: (ReplyRef<T>) M,
     ) Result<T, IoError> {
         // Cooperative RPC: enqueue + inline `run` + read reply. Blocks the caller; not pool-parallel.
@@ -372,9 +370,9 @@ ActorHandle*<M, ActorT>: {
             },
         })
     }
-    ask<A, T> = (
+    ask<T> = (
         handle: ActorHandle<M, ActorT>,
-        alloc: MutPtr<A>,
+        alloc: Allocator,
         issue: (ReplyRef<T>) void,
     ) Result<T, IoError> {
         r: Result<ReplyRef<T>, IoError> := alloc.reply()
@@ -389,7 +387,7 @@ ActorHandle*<M, ActorT>: {
             },
         })
     }
-    free<A> = (handle: ActorHandle<M, ActorT>, alloc: MutPtr<A>) void {
+    free = (handle: ActorHandle<M, ActorT>, alloc: Allocator) void {
         state: [Ring<M>] := handle.inner_cell.inner.sys.state.slice(1)
         alloc.release(state[0].buf)
         alloc.release(handle.inner_cell.inner.sys.state)
@@ -398,8 +396,8 @@ ActorHandle*<M, ActorT>: {
 }
 // Allocate actor state + mailbox and return an ActorHandle. Named spawn_handle, NOT spawn —
 // std.concurrent.thread owns `spawn`, and both flatten into any pool_actor program's closure.
-spawn_handle*<A, M, ActorT> = (
-    alloc: MutPtr<A>,
+spawn_handle*<M, ActorT> = (
+    alloc: Allocator,
     cap: i64,
     actor: ActorT,
 ) Result<ActorHandle<M, ActorT>, IoError> {
@@ -429,7 +427,7 @@ spawn_handle*<A, M, ActorT> = (
         },
     })
 }
-cell*<A, M> = (alloc: MutPtr<A>, cap: i64) Result<ActorCell<M>, IoError> {
+cell*<M> = (alloc: Allocator, cap: i64) Result<ActorCell<M>, IoError> {
     engine: Result<ActorEngine<M>, IoError> := alloc.engine(cap)
     engine.match ({
         .Ok(e)  => {

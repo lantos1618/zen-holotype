@@ -291,6 +291,21 @@ harness_misc_hash = () i32 {
 // Zen equivalent of pytest's `for name in _DECL_RE.findall(src): assert name in out`.
 // ════════════════════════════════════════════════════════════════════════════════
 om_is_alnum = (b: u8) bool { is_alpha(b) || b >= '0' && b <= '9' }
+// the text of the parameter list that OPENS at `q` (`src[q] == '('`), parens balanced, so a nested
+// fn-type param `(MutPtr<A>, Request) Response` cannot end it early.
+om_param_end = (sv: [u8], q: i64, depth: i64) i64 {
+    (q >= sv.len || depth == 0).match ({
+        true  => q,
+        false => sv.om_param_end(q + 1, depth + (sv[q] == '(').then({ 1 }, { 0 }) - (sv[q] == ')').match ({
+            true  => 1,
+            false => 0,
+        })),
+    })
+}
+om_param_list = (mp: MutPtr<Malloc>, src: string_view, q: i64) string_view {
+    e := src.view().om_param_end(q + 1, 1)
+    mp.substr(src, q, e - q).expect("harness: oom")
+}
 // Mirror of `_DECL_RE = ^([a-zA-Z_]\w*)\s*=\s*\(` (re.M): scan `src` for each line-initial
 // `name = (` declaration (col-0 only; `name*`/`name = <T>(` are excluded since the char after the
 // name is not `=`, and a generic's `<` is not `(`), and require every such `name` to appear in `c`.
@@ -322,7 +337,15 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: string_view, c: string_view) bool {
                 @while (q2 < n && (sv[q2] == ' ' || sv[q2] == '\t')) {
                     q2 = q2 + 1
                 }
-                (q2 < n && sv[q2] == '(').then({
+                // An IMPLICIT generic (`f = (a: Allocator, …)` — the trait-typed-param sugar for
+                // `f<A: Allocator> = (a: MutPtr<A>, …)`) is a template like any other generic: it emits
+                // no standalone C symbol, only per-instantiation ones. The `<A>` spelling kept those
+                // decls out of this scan for free; the sugar hides the angle brackets, so the param
+                // list has to be read. Only a trait-typed param can do this, and Allocator is the one
+                // std threads — a param `x: Trait` for any other declared trait would need adding here.
+                (q2 < n
+                    && sv[q2] == '('
+                    && mp.om_param_list(src, q2).contains(": Allocator") == false).then({
                     name := mp.substr(src, i, e - i).expect("harness: oom")
                     (contains(c, name) == false).then({
                         ok = false
@@ -890,12 +913,42 @@ harness_misc_clones = () i32 {
         .contains("cl_tiny")
         .om_not(), txt.om_count("structurally identical") == 3])
 }
+// ════════════════════════════════════════════════════════════════════════════════
+// tparam-recv  <- tools/tparam-recv.zen: a type parameter used as a METHOD RECEIVER with no bound.
+// The fixture plants BOTH answers, because a lint that cannot stay silent is worthless:
+//   tpr_frobnicate  MUST fire — `x.tpr_meow(n)` on a bare `<T>`; tpr_meow exists only on TprCat, yet
+//                   `zen check` ACCEPTS this file (asserted below), which is the whole problem: the
+//                   receiver-type question is deferred to monomorphization, so the nonsense ships;
+//   tpr_passthru    must stay silent — every decl of the callee takes its own first param as an
+//                   unbounded tparam, so calling it constrains nothing;
+//   tpr_grab        must stay silent — `<A: Allocator>` is the fixed case;
+//   tpr_first       must stay silent — `<E>` is an element type, never a receiver.
+// The second run is the DURABLE gate: src/std must stay at zero, so re-introducing a bare `<A>` on
+// an allocator parameter fails `make harness` instead of waiting for a user's monomorphization.
+// ════════════════════════════════════════════════════════════════════════════════
+TPR_SRC := "{ Allocator } = std.mem.alloc\nTprCat*: { lives: i32 }\ntpr_meow = (c: MutPtr<TprCat>, n: i64) i64 { c.lives.to_i64() + n }\ntpr_frobnicate<T> = (x: MutPtr<T>, n: i64) i64 { x.tpr_meow(n) }\ntpr_identity<T> = (x: MutPtr<T>) i64 { 1 }\ntpr_passthru<T> = (x: MutPtr<T>) i64 { x.tpr_identity() }\ntpr_grab<A: Allocator> = (a: MutPtr<A>, n: i64) RawPtr<u8> { a.acquire(n) }\ntpr_first<E> = (xs: [E], dflt: E) E { (xs.len == 0).then({ dflt }, { xs[0] }) }\nmain = () i32 {\n    c := TprCat(lives: 9)\n    c.addr().tpr_frobnicate(1).to_i32() + c.addr().tpr_passthru().to_i32()\n}\n"
+harness_misc_tparam_recv = () i32 {
+    m := Malloc(_: 0)
+    mp := m.addr()
+    save(mp.zo_path("zo_tpr.zen"), TPR_SRC, len(TPR_SRC))
+    save(mp.zo_path("zo_tpr.out"), "", 0)
+    save(mp.zo_path("zo_tpr_std.out"), "", 0)
+    rcc := shell(mp.zo_cmd("./zen check $ZT/zo_tpr.zen > /dev/null 2>&1")).expect("harness: shell")
+    rc := shell(mp.zo_cmd("./zen run tools/tparam-recv.zen $ZT/zo_tpr.zen > $ZT/zo_tpr.out 2>&1")).expect("harness: shell")
+    rcs := shell(mp.zo_cmd("./zen run tools/tparam-recv.zen src/std --quiet > $ZT/zo_tpr_std.out 2>&1")).expect("harness: shell")
+    txt := mp.om_read_file(mp.zo_path("zo_tpr.out"))
+    stdtxt := mp.om_read_file(mp.zo_path("zo_tpr_std.out"))
+    run_suite("tparam-recv (unbounded method receiver)", [rcc == 0, rc == 1, txt.contains("tpr_frobnicate: tparam `T` receiver `x` . tpr_meow"), txt.contains("1 unbounded-receiver sites"), txt
+        .contains("tpr_passthru")
+        .om_not(), txt.contains("tpr_grab").om_not(), txt.contains("tpr_first").om_not(), rcs == 0, stdtxt.contains("0 unbounded-receiver sites")])
+}
 // ── category entry: sum every sub-suite's fail count ────────────────────────────
 harness_misc_run* = () i32 {
     fails := 0
     fails = fails + harness_misc_audit()
     fails = fails + harness_misc_audit_ws()
     fails = fails + harness_misc_clones()
+    fails = fails + harness_misc_tparam_recv()
     fails = fails + harness_misc_traits()
     fails = fails + harness_misc_string_types()
     fails = fails + harness_misc_num_parse()

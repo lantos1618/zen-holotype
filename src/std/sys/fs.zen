@@ -84,7 +84,7 @@ count_entries = (d: RawPtr<u8>) i64 {
 }
 // copy each remaining entry name into `out[i..]`; return the next free slot, or `.Err` if a name copy
 // fails to allocate. read_dir advertises Result, so an OOM here threads out as a value — never aborts.
-fill_entries<A> = (a: MutPtr<A>, d: RawPtr<u8>, out: [string_view], i: i64) Result<i64, IoError> {
+fill_entries = (a: Allocator, d: RawPtr<u8>, out: [string_view], i: i64) Result<i64, IoError> {
     e := d.readdir()
     (e == null_ptr()).then({
         return ok(i)
@@ -99,14 +99,14 @@ fill_entries<A> = (a: MutPtr<A>, d: RawPtr<u8>, out: [string_view], i: i64) Resu
 }
 // allocator-owned `[T]` backbone of `n` slots, surfacing an alloc failure as `.Err` — the `nbuf` that
 // reports (`sizeof(T)` monomorphizes per element type exactly as `nbuf` does; `n == 0` is empty `.Ok`).
-nbuf_r<T, A> = (a: MutPtr<A>, seed: T, n: i64) Result<[T], IoError> {
+nbuf_r<T> = (a: Allocator, seed: T, n: i64) Result<[T], IoError> {
     a.try_acquire(n * sizeof(T)).match ({
         .Ok(p)  => ok(p.slice(n)),
         .Err(e) => err(e),
     })
 }
 // allocate the backbone and fill it, threading any alloc failure out as `.Err` (never `.expect`-abort).
-fill_all<A> = (a: MutPtr<A>, d: RawPtr<u8>, n: i64) Result<[string_view], IoError> {
+fill_all = (a: Allocator, d: RawPtr<u8>, n: i64) Result<[string_view], IoError> {
     buf: [string_view] := a.nbuf_r("", n).or_return()
     filled := a.fill_entries(d, buf, 0).or_return()
     ok(buf)
@@ -114,7 +114,7 @@ fill_all<A> = (a: MutPtr<A>, d: RawPtr<u8>, n: i64) Result<[string_view], IoErro
 // list `path`'s entries as an allocator-owned `[str]` (each an owned NUL-terminated copy), excluding
 // "." and "..". The order is the directory's own (unsorted). .Err(.NotFound) if `path` can't be opened;
 // .Err on an allocation failure while sizing the backbone or copying a name (surfaced, not aborted).
-read_dir*<A> = (a: MutPtr<A>, path: string_view) Result<[string_view], IoError> {
+read_dir* = (a: Allocator, path: string_view) Result<[string_view], IoError> {
     d := path.opendir()
     (d == null_ptr()).then({
         return err(IoError.NotFound)

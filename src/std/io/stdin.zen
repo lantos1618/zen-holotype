@@ -26,7 +26,7 @@ read_failed = () IoError { IoError.Errno(0 - 1) }
 // Reads one line from stdin: Ok(.Some(line)) without the '\n', Ok(.None) at EOF,
 // Err on read/allocation failure. The line is an allocator-owned view — release it
 // via `a.release(line.view().ptr)` (or let an arena reclaim it) when done.
-read_line*<A> = (a: MutPtr<A>) Result<Opt<string_view>, IoError> {
+read_line* = (a: Allocator) Result<Opt<string_view>, IoError> {
     a.init(64).match ({
         .Err(e) => err(e),
         .Ok(s0) => {
@@ -81,7 +81,7 @@ read_line*<A> = (a: MutPtr<A>) Result<Opt<string_view>, IoError> {
     })
 }
 // Append `n` bytes of `chunk` onto `s`; Err carries the allocation failure.
-append_chunk<A> = (a: MutPtr<A>, s: String, chunk: RawPtr<u8>, n: i64) Result<String, IoError> {
+append_chunk = (a: Allocator, s: String, chunk: RawPtr<u8>, n: i64) Result<String, IoError> {
     cur := s
     failed := false
     ev := IoError.Eof
@@ -105,7 +105,7 @@ append_chunk<A> = (a: MutPtr<A>, s: String, chunk: RawPtr<u8>, n: i64) Result<St
 // Drains stdin to EOF into one allocator-owned String builder — the shared core of read_all /
 // read_all_bytes. The builder carries the true byte count, so binary data (embedded NULs) is intact;
 // the caller decides whether to re-view it as NUL-terminated text (finish_in) or raw bytes (.bytes()).
-drain_stdin<A> = (a: MutPtr<A>) Result<String, IoError> {
+drain_stdin = (a: Allocator) Result<String, IoError> {
     a.try_acquire(READ_CHUNK).match ({
         .Err(e)    => err(e),
         .Ok(chunk) => a.init(READ_CHUNK).match ({
@@ -152,7 +152,7 @@ drain_stdin<A> = (a: MutPtr<A>) Result<String, IoError> {
 // Reads stdin to EOF into one allocator-owned NUL-terminated view (the stdin twin of
 // std.io.file.contents_in — `a.contents_in("/dev/stdin")` needs a seekable fd; this doesn't).
 // TEXT surface: an embedded NUL truncates the view — use read_all_bytes for binary-safe reads.
-read_all*<A> = (a: MutPtr<A>) Result<string_view, IoError> {
+read_all* = (a: Allocator) Result<string_view, IoError> {
     a.drain_stdin().match ({
         .Ok(s)  => s.finish_in(a).match ({
             .Ok(done) => ok(done),
@@ -164,7 +164,7 @@ read_all*<A> = (a: MutPtr<A>) Result<string_view, IoError> {
 // Reads stdin to EOF into one allocator-owned length-carrying `[u8]` — BINARY-SAFE: embedded NULs are
 // preserved (the true byte count rides in the slice length). Pipe images / gzip / any non-text stream
 // through a Zen filter without truncation.
-read_all_bytes*<A> = (a: MutPtr<A>) Result<[u8], IoError> {
+read_all_bytes* = (a: Allocator) Result<[u8], IoError> {
     a.drain_stdin().match ({
         .Ok(s)  => ok(s.bytes()),
         .Err(e) => err(e),
@@ -175,7 +175,7 @@ read_all_bytes*<A> = (a: MutPtr<A>) Result<[u8], IoError> {
 // must outlive the call. `on_line` is a first-class closure arg, same shape as
 // std.collections.iter's helpers, so an inline lambda splices straight in:
 // `a.lines((line) { out(line) })`.
-lines*<A> = (a: MutPtr<A>, on_line: (string_view) void) Result<i64, IoError> {
+lines* = (a: Allocator, on_line: (string_view) void) Result<i64, IoError> {
     n: i64 := 0
     failed := false
     ev := IoError.Eof

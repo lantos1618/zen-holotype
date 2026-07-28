@@ -199,12 +199,12 @@ Malloc.impl(Allocator, {
     resize = (s: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { heap_resize(null_ptr(), p, n) }
     release = (s: MutPtr<Malloc>, p: RawPtr<u8>) void { heap_release(null_ptr(), p) }
 })
-try_acquire*<A> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
+try_acquire*<A: Allocator> = (a: MutPtr<A>, n: i64) Result<RawPtr<u8>, IoError> {
     // A 0-byte request is an empty success, not OOM: acquire(0) returns null by design, and
     // ok_ptr would mis-map that null to .Err. Short-circuit before reaching ok_ptr.
     (n <= 0).then({ .Ok(null_ptr()) }, { ok_ptr(a.acquire(n)) })
 }
-try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> {
+try_resize*<A: Allocator> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoError> {
     ok_ptr(a.resize(p, n))
 }
 // Hand a `[T]` BACKBONE back — the block behind an allocator-owned slice, the counterpart of the
@@ -219,7 +219,7 @@ try_resize*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) Result<RawPtr<u8>, IoErro
 // use-after-free checker: its argument is a MEMBER expression, and the checker's kill-set is keyed on
 // bare locals. `a.release_slice(xs)` passes the local itself, so freeing a backbone now kills `xs` and a
 // later read of it is reported (compiler/validate/ownership.zen: alloc_free_call_name).
-release_slice*<A, T> = (a: MutPtr<A>, xs: [T]) void { a.release(xs.ptr) }
+release_slice*<T, A: Allocator> = (a: MutPtr<A>, xs: [T]) void { a.release(xs.ptr) }
 // ── refcount block: [ count:i64 | value:T ] ────────────────────────────────────────────────────────
 // The i64 count lives in the first 8 bytes; the value follows at `.offset(8)`. std.mem.{rc,arc,own}
 // all share THIS block shape and differ only in how they bump the count (plain vs atomic) and tear it
@@ -229,7 +229,7 @@ val_slot*<T> = (base: RawPtr<u8>) [T] { slice(base.offset(8), 1) }
 // Acquire a [count|value] block from `a`, set the count to 1, and copy `x` into the value slot; return
 // the block's base pointer (allocation failure stays in the Result). rc/arc/own `new_in` wrap the
 // returned base in their own pointer type; the count-bump and teardown differences stay per-type.
-rc_block_new_in*<A, T> = (a: MutPtr<A>, x: T) Result<RawPtr<u8>, IoError> {
+rc_block_new_in*<T, A: Allocator> = (a: MutPtr<A>, x: T) Result<RawPtr<u8>, IoError> {
     v := x
     a.try_acquire(8 + sizeof(T)).match ({
         .Ok(base) => {
@@ -257,7 +257,7 @@ Buf3*: {
     b2: RawPtr<u8>,
     b3: RawPtr<u8>,
 }
-try_acquire2*<A> = (a: MutPtr<A>, n1: i64, n2: i64) Result<Buf2, IoError> {
+try_acquire2*<A: Allocator> = (a: MutPtr<A>, n1: i64, n2: i64) Result<Buf2, IoError> {
     a.try_acquire(n1).match ({
         .Ok(b1) => {
             a.try_acquire(n2).match ({
@@ -281,7 +281,7 @@ try_acquire2*<A> = (a: MutPtr<A>, n1: i64, n2: i64) Result<Buf2, IoError> {
         },
     })
 }
-try_acquire3*<A> = (a: MutPtr<A>, n1: i64, n2: i64, n3: i64) Result<Buf3, IoError> {
+try_acquire3*<A: Allocator> = (a: MutPtr<A>, n1: i64, n2: i64, n3: i64) Result<Buf3, IoError> {
     a.try_acquire(n1).match ({
         .Ok(b1) => {
             a.try_acquire(n2).match ({

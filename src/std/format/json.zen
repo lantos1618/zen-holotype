@@ -24,7 +24,7 @@
 //      Wrapping the key in the local `Entry` struct dodges it.
 //
 // ALLOCATOR. parse/stringify are generic over the allocator: every allocating entry takes
-// `a: MutPtr<A>` for any `A: Allocator` (heap, arena, fixed-buffer, test), threaded exactly like
+// `a: Allocator` (heap, arena, fixed-buffer, test), threaded exactly like
 // std.collections' vec/hmap and std.sys.os. Pass `heap.gpa().addr()`, an arena, or any other allocator;
 // callers who already passed a `Malloc` keep working unchanged (`Malloc` still satisfies `A`).
 //
@@ -53,6 +53,7 @@
 // code point, UTF-8 encoded; surrogate PAIRS are not recombined). Encode re-escapes \" \\ \n \r
 // \t and emits \u00XX for the remaining control bytes (< 0x20); all other bytes (incl. UTF-8
 // continuation bytes) pass through verbatim.
+{ Allocator } = std.mem.alloc
 { Result, Opt, IoError, err, expect } = std.core.result
 { String, new_in, push_in, append_in, append_slice_in, finish_in } = std.text.string
 { view, substr_in } = std.text.str
@@ -114,14 +115,14 @@ JBuf<T>: {
     len: i64,
     cap: i64,
 }
-jbuf_new<A, T> = (a: MutPtr<A>) JBuf<T> {
+jbuf_new<T> = (a: Allocator) JBuf<T> {
     JBuf<T>(
         ptr: a.acquire(sizeof(T)),
         len: 0,
         cap: 1,
     )
 }
-jbuf_push<A, T> = (a: MutPtr<A>, jb: JBuf<T>, x: T) JBuf<T> {
+jbuf_push<T> = (a: Allocator, jb: JBuf<T>, x: T) JBuf<T> {
     x := x
     r := (jb.len < jb.cap).match ({
         true  => jb,
@@ -173,7 +174,7 @@ hex4 = (sv: [u8], at: i64) i64 {
     (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0).then({ 0 - 1 }, { d0 * 4096 + d1 * 256 + d2 * 16 + d3 })
 }
 // UTF-8 encode a BMP code point into the builder (1, 2, or 3 bytes).
-push_utf8<A> = (a: MutPtr<A>, sb: String, cp: i64) String {
+push_utf8 = (a: Allocator, sb: String, cp: i64) String {
     (cp < 128).match ({
         true  => sb.push_in(a, cp.to_u8()).jok(),
         false => (cp < 2048).match ({
@@ -194,12 +195,7 @@ push_utf8<A> = (a: MutPtr<A>, sb: String, cp: i64) String {
 }
 // decode the JSON string starting at sv[pos] == '"'; returns the decoded view + the offset
 // just past the closing quote. The decoded bytes are accumulated through `a`.
-parse_string_raw<A> = (
-    a: MutPtr<A>,
-    src: string_view,
-    sv: [u8],
-    pos: i64,
-) Result<StrStep, JsonError> {
+parse_string_raw = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<StrStep, JsonError> {
     sb: String := a.new_in().jok()
     endpos: i64 := 0 - 1
     errpos: i64 := 0 - 1
@@ -322,7 +318,7 @@ parse_lit = (sv: [u8], pos: i64, word: string_view, v: Value) Result<Step, JsonE
     })
     ok.then({ step_ok(v, pos + wv.len) }, { err(.BadLiteral(pos)) })
 }
-parse_number<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
+parse_number = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
     endp: i64 := pos
     sv.loop((h, i, b) {
         (i < pos == false).then({
@@ -371,15 +367,15 @@ parse_num_f64 = (txt: string_view, pos: i64, endp: i64) Result<Step, JsonError> 
         .Err(_) => err(.BadNumber(pos)),
     })
 }
-parse_str_value<A> = (a: MutPtr<A>, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
+parse_str_value = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<Step, JsonError> {
     a.parse_string_raw(src, sv, pos).match ({
         .Ok(ss) => step_ok(.Str(ss.s), ss.pos),
         .Err(e) => err(e),
     })
 }
 // ── aggregate parsers (mutually recursive with parse_value; OK because concrete) ──
-parse_array<A> = (
-    a: MutPtr<A>,
+parse_array = (
+    a: Allocator,
     src: string_view,
     sv: [u8],
     pos: i64,
@@ -400,8 +396,8 @@ parse_array<A> = (
         }),
     })
 }
-arr_loop<A> = (
-    a: MutPtr<A>,
+arr_loop = (
+    a: Allocator,
     src: string_view,
     sv: [u8],
     p: i64,
@@ -426,8 +422,8 @@ arr_loop<A> = (
         },
     })
 }
-parse_object<A> = (
-    a: MutPtr<A>,
+parse_object = (
+    a: Allocator,
     src: string_view,
     sv: [u8],
     pos: i64,
@@ -448,8 +444,8 @@ parse_object<A> = (
         }),
     })
 }
-obj_loop<A> = (
-    a: MutPtr<A>,
+obj_loop = (
+    a: Allocator,
     src: string_view,
     sv: [u8],
     p: i64,
@@ -496,8 +492,8 @@ obj_loop<A> = (
     })
 }
 // the core recursive-descent dispatcher: parse ONE value at sv[pos..].
-parse_value<A> = (
-    a: MutPtr<A>,
+parse_value = (
+    a: Allocator,
     src: string_view,
     sv: [u8],
     pos: i64,
@@ -541,7 +537,7 @@ parse_value<A> = (
 // ── public parse ───────────────────────────────────────────────────────────────
 // Parse a complete JSON document. Returns Err on any malformed input, including
 // trailing non-whitespace after the value.
-parse*<A> = (a: MutPtr<A>, s: string_view) Result<Value, JsonError> {
+parse* = (a: Allocator, s: string_view) Result<Value, JsonError> {
     sv := s.view()
     out: Result<Value, JsonError> := a.parse_value(s, sv, 0, 0).match ({
         .Err(e) => {
@@ -560,7 +556,7 @@ parse*<A> = (a: MutPtr<A>, s: string_view) Result<Value, JsonError> {
     out
 }
 // ── serialization ──────────────────────────────────────────────────────────────
-write_u_esc<A> = (a: MutPtr<A>, sb: String, b: u8) String {
+write_u_esc = (a: Allocator, sb: String, b: u8) String {
     bi := b.to_i64()
     sb
         .push_in(a, '\\')
@@ -576,7 +572,7 @@ write_u_esc<A> = (a: MutPtr<A>, sb: String, b: u8) String {
         .push_in(a, hex_char(bi & 15))
         .jok()
 }
-write_esc_byte<A> = (a: MutPtr<A>, sb: String, b: u8) String {
+write_esc_byte = (a: Allocator, sb: String, b: u8) String {
     (b == '"').match ({
         true  => sb
             .push_in(a, '\\')
@@ -623,7 +619,7 @@ json_needs_esc = (b: u8) bool { b == '"' || b == '\\' || b < 32 }
 // pushing every byte one at a time. Byte-identical output; fewer grows/stores for plain text.
 // Deliberately NOT std.text.ascii.escape_into (the per-byte scan the backends/formatter share):
 // the run-copy bulk append is a different loop shape, kept for throughput on plain text.
-write_str_lit<A> = (a: MutPtr<A>, sb: String, s: string_view) String {
+write_str_lit = (a: Allocator, sb: String, s: string_view) String {
     out: String := sb.push_in(a, '"').jok()
     sv := s.view()
     run_start: i64 := 0
@@ -641,7 +637,7 @@ write_str_lit<A> = (a: MutPtr<A>, sb: String, s: string_view) String {
     })
     out.push_in(a, '"').jok()
 }
-write_arr<A> = (a: MutPtr<A>, sb: String, xs: [Value]) String {
+write_arr = (a: Allocator, sb: String, xs: [Value]) String {
     out: String := sb.push_in(a, '[').jok()
     xs.loop((h, i, x) {
         (i > 0).then({
@@ -651,7 +647,7 @@ write_arr<A> = (a: MutPtr<A>, sb: String, xs: [Value]) String {
     })
     out.push_in(a, ']').jok()
 }
-write_obj<A> = (a: MutPtr<A>, sb: String, o: Object) String {
+write_obj = (a: Allocator, sb: String, o: Object) String {
     out: String := sb.push_in(a, '{').jok()
     es := o.entries
     es.loop((h, i, e) {
@@ -664,7 +660,7 @@ write_obj<A> = (a: MutPtr<A>, sb: String, o: Object) String {
     })
     out.push_in(a, '}').jok()
 }
-write_value<A> = (a: MutPtr<A>, sb: String, v: Value) String {
+write_value = (a: Allocator, sb: String, v: Value) String {
     v.match ({
         .Null    => sb.append_in(a, "null").jok(),
         .Bool(b) => b.then({ sb.append_in(a, "true").jok() }, { sb.append_in(a, "false").jok() }),
@@ -688,19 +684,19 @@ write_value<A> = (a: MutPtr<A>, sb: String, v: Value) String {
     })
 }
 // Serialize a Value to compact JSON text (allocator-owned, NUL-terminated view).
-stringify*<A> = (a: MutPtr<A>, v: Value) string_view {
+stringify* = (a: Allocator, v: Value) string_view {
     sb: String := a.new_in().jok()
     sb = a.write_value(sb, v)
     sb.finish_in(a).jfin()
 }
 // ── pretty serialization (2-space indent) ────────────────────────────────────────
 // push `n` spaces (one indentation run) onto the builder — recursion, not an imperative loop.
-push_indent<A> = (a: MutPtr<A>, sb: String, n: i64) String {
+push_indent = (a: Allocator, sb: String, n: i64) String {
     (n <= 0).then({ sb }, { a.push_indent(sb.push_in(a, ' ').jok(), n - 1) })
 }
 // one array element / object member per line, children indented `depth+1` levels (2 spaces each);
 // an empty array/object stays on one line ("[]" / "{}").
-pwrite_arr<A> = (a: MutPtr<A>, sb: String, xs: [Value], depth: i64) String {
+pwrite_arr = (a: Allocator, sb: String, xs: [Value], depth: i64) String {
     (xs.len == 0).match ({
         true  => sb.append_in(a, "[]").jok(),
         false => {
@@ -724,7 +720,7 @@ pwrite_arr<A> = (a: MutPtr<A>, sb: String, xs: [Value], depth: i64) String {
         },
     })
 }
-pwrite_obj<A> = (a: MutPtr<A>, sb: String, o: Object, depth: i64) String {
+pwrite_obj = (a: Allocator, sb: String, o: Object, depth: i64) String {
     es := o.entries
     (es.len == 0).match ({
         true  => sb.append_in(a, "{}").jok(),
@@ -756,7 +752,7 @@ pwrite_obj<A> = (a: MutPtr<A>, sb: String, o: Object, depth: i64) String {
     })
 }
 // scalars serialize exactly as compact; only arrays/objects gain the indented multi-line layout.
-pwrite_value<A> = (a: MutPtr<A>, sb: String, v: Value, depth: i64) String {
+pwrite_value = (a: Allocator, sb: String, v: Value, depth: i64) String {
     v.match ({
         .Arr(xs) => a.pwrite_arr(sb, xs, depth),
         .Obj(o)  => a.pwrite_obj(sb, o, depth),
@@ -765,7 +761,7 @@ pwrite_value<A> = (a: MutPtr<A>, sb: String, v: Value, depth: i64) String {
 }
 // Serialize a Value to indented JSON text (2-space indent, one element/member per line) — the
 // human-readable counterpart to `stringify`. Allocator-owned, NUL-terminated view.
-pretty*<A> = (a: MutPtr<A>, v: Value) string_view {
+pretty* = (a: Allocator, v: Value) string_view {
     sb: String := a.new_in().jok()
     sb = a.pwrite_value(sb, v, 0)
     sb.finish_in(a).jfin()

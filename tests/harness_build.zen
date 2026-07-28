@@ -2031,6 +2031,10 @@ harness_build_run* = () i32 {
             wants: [":6:34: error[trait-bound]: type `Blob` does not satisfy the bound `Show` required by `draw` — missing method(s): render", "  main = () i32 { b := Blob(v: 3)  draw(b) }", "                                   ^~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
         DiagCase(
+            src: "{ repeat } = std.text.str\nCat*: { lives: i32 }\nmain = () i32 {\n    c := Cat(lives: 9)\n    s := c.addr().repeat(\"ab\", 2)\n    0\n}\n",
+            wants: [":5:19: error[trait-bound]: type `Cat` does not satisfy the bound `Allocator` required by `repeat` — missing method(s): acquire, resize, release", "      s := c.addr().repeat(\"ab\", 2)", "                    ^~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
+        ),
+        DiagCase(
             src: "Show*: { render: (Ptr<Self>) i32 }\nBlob*: { v: i32 }\nmain = () i32 { b := Blob(v: 3)  b.render() }\n",
             wants: [":3:36: error[trait-bound]: type `Blob` does not implement trait `Show` (which declares `render`) — missing method(s): render", "  main = () i32 { b := Blob(v: 3)  b.render() }", "                                     ^~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
@@ -2211,6 +2215,10 @@ harness_build_run* = () i32 {
             wants: [":5:5: error[trait-bound]: type `Q` does not implement trait `Display` (which declares `fmt_print`) — missing method(s): fmt_print, fmt_println", "      print(q)", "      ^~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
     ])
+    // The STDLIB's own allocator generics carry the bound (`(a: Allocator)`, the implicit-generic
+    // sugar), so handing a non-allocator to `std.text.str.repeat` is diagnosed HERE, at the call
+    // site, naming the caller's own type — not 300 lines into src/std at the `a.acquire` that
+    // finally noticed. Revert the bound on `repeat` and this case goes red with the library's line.
     // PARSE TAXONOMY: an arm label with no `=>` names the arrow, not "unparseable top-level input".
     // PARSE TAXONOMY: end of input with a block still open carets the OPENING `{` — the hint names
     // the line the block opened on instead of pointing inside the body at "this top-level declaration".
@@ -2267,38 +2275,38 @@ harness_build_run* = () i32 {
     dc := run_docs("build doc", [
         DocCase(
             target: "std.text.fmt",
-            present: ["# std.text.fmt", "Display*: {", "write_int_in*<A> = (a: MutPtr<A>, n: i64) Result<i64, IoError>", "write_float_in*<A> = (a: MutPtr<A>, x: f64) Result<i64, IoError>", "print*<T> = (x: T) i64 { x.fmt_print() }", "println*<T> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
+            present: ["# std.text.fmt", "Display*: {", "write_int_in* = (a: Allocator, n: i64) Result<i64, IoError>", "write_float_in* = (a: Allocator, x: f64) Result<i64, IoError>", "print*<T: Display> = (x: T) i64 { x.fmt_print() }", "println*<T: Display> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
             absent: ["print_owned", "print_int", "println_int", "try_write_int_in", "try_write_float_in"],
         ),
         DocCase(
             target: "std.text.string",
-            present: ["init*<A> = (a: MutPtr<A>, cap: i64) Result<String, IoError>", "new_in*<A> = (a: MutPtr<A>) Result<String, IoError>"],
+            present: ["init* = (a: Allocator, cap: i64) Result<String, IoError>", "new_in* = (a: Allocator) Result<String, IoError>"],
             absent: ["try_init", "try_new", "new* = "],
         ),
         DocCase(
             target: "std.mem.own",
-            present: ["new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Own<T>, IoError>"],
+            present: ["new_in*<T> = (a: Allocator, x: T) Result<Own<T>, IoError>"],
             absent: ["new*<T>", "try_new", "release = (o: Own<T>)", "own_new", "own_clone", "own_ptr", "own_release"],
         ),
         DocCase(
             target: "std.mem.rc",
-            present: ["new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Rc<T>, IoError>"],
+            present: ["new_in*<T> = (a: Allocator, x: T) Result<Rc<T>, IoError>"],
             absent: ["new*<T>", "try_new", "drop = (r: Rc<T>)", "rc_new", "rc_get", "rc_clone", "rc_drop", "rc_count"],
         ),
         DocCase(
             target: "std.mem.arc",
-            present: ["new_in*<A, T> = (a: MutPtr<A>, x: T) Result<Arc<T>, IoError>"],
+            present: ["new_in*<T> = (a: Allocator, x: T) Result<Arc<T>, IoError>"],
             absent: ["new*<T>", "try_new", "drop = (r: Arc<T>)", "arc_new", "arc_get", "arc_clone", "arc_drop", "arc_count"],
         ),
         DocCase(
             target: "std.concurrent.actor",
-            present: ["CellRef*<M>: {", "ReplyRef*<T>: {", "ActorEngine*<M>: {", "ActorCell*<M>: {", "cell*<A, M>", "spawn_handle*<A, M, ActorT>"],
+            present: ["CellRef*<M>: {", "ReplyRef*<T>: {", "ActorEngine*<M>: {", "ActorCell*<M>: {", "cell*<M> = (alloc: Allocator, cap: i64)", "spawn_handle*<M, ActorT>"],
             absent: ["ActorRef*<M>", "spawn*<A", "reply*<", "try_reply", "try_spawn", "try_cell", "try_engine", "Mailbox", "ActorSystem", "ActorState", "actor_ref", "actor_system", "run_actor", "make_reply"],
         ),
         DocCase(
             target: "std.core.slice",
-            present: ["buf_in*<A, T>", "alloc_buf*<A, T>", "dup*<A, T>", "node*<A, T>", "concat*<A, T>"],
-            absent: ["buf*<T>", "try_buf", "dup*<T>", "try_dup", "node*<T>", "try_node", "concat*<T>", "try_concat", "nbuf"],
+            present: ["buf_in*<T> = (a: Allocator", "alloc_buf*<T> = (a: Allocator", "dup*<T> = (a: Allocator", "node*<T> = (a: Allocator", "concat*<T> = (a: Allocator"],
+            absent: ["buf*<T> = (n", "try_buf", "dup*<T> = (xs", "try_dup", "node*<T> = (v", "try_node", "concat*<T> = (xs", "try_concat", "nbuf"],
         ),
         DocCase(
             target: "std.text.ascii",
@@ -2307,22 +2315,22 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.concurrent.cown",
-            present: ["buf*<A> = (alloc: MutPtr<A>, n: i64) Result<Buf, IoError>", "file*<A> = (alloc: MutPtr<A>, path: string_view)", "file_in*<A>"],
+            present: ["buf* = (alloc: Allocator, n: i64) Result<Buf, IoError>", "file* = (alloc: Allocator, path: string_view)", "file_in* = (alloc: Allocator"],
             absent: ["try_buf", "buf_alloc", "buf_free", "file_open", "file_wrap"],
         ),
         DocCase(
             target: "std.concurrent.runtime",
-            present: ["sync_in*<A> = (backing: MutPtr<A>, cap: i64) SyncArena", "async_in*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena", "sync*<A> = (backing: MutPtr<A>, cap: i64) SyncArena", "async*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena"],
+            present: ["sync_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena", "async_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) AsyncArena", "sync*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena", "async*<A: Allocator> = (backing: MutPtr<A>, cap: i64) AsyncArena"],
             absent: ["sync* = (cap: i64) SyncArena", "async* = (cap: i64) AsyncArena", "sync_arena", "async_arena"],
         ),
         DocCase(
             target: "std.concurrent.coroutine",
-            present: ["spawn_in*<A>", "spawn*<A>"],
+            present: ["spawn_in* = (alloc: Allocator", "spawn* = (alloc: Allocator"],
             absent: ["try_spawn"],
         ),
         DocCase(
             target: "std.concurrent.sched",
-            present: ["run_in*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError>", "run*<A> = (alloc: MutPtr<A>, coros: [Coro]) Result<i32, IoError>"],
+            present: ["run_in* = (alloc: Allocator, coros: [Coro]) Result<i32, IoError>", "run* = (alloc: Allocator, coros: [Coro]) Result<i32, IoError>"],
             absent: ["try_run"],
         ),
         DocCase(
@@ -2337,42 +2345,42 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.mem.arena",
-            present: ["make_in*<A> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError>"],
+            present: ["make_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError>"],
             absent: ["try_make_in", "arena_new", "try_arena_new"],
         ),
         DocCase(
             target: "std.collections.vec",
-            present: ["of*<T, A> = (a: MutPtr<A>, xs: [T]) Result<Vec<T>, IoError>", "empty*<T, A>"],
+            present: ["of*<T> = (a: Allocator, xs: [T]) Result<Vec<T>, IoError>", "empty*<T> = (a: Allocator"],
             absent: ["try_of", "try_push", "try_grow", "vec_of", "try_vec_of", "vpush", "vgrow", "vfree", "vitems", "vlen"],
         ),
         DocCase(
             target: "std.collections.map",
-            present: ["of*<T, A> = (a: MutPtr<A>, seed_key: string_view, seed_val: T) Result<Map<T>, IoError>"],
+            present: ["of*<T> = (a: Allocator, seed_key: string_view, seed_val: T) Result<Map<T>, IoError>"],
             absent: ["try_of", "try_put", "try_append", "IntMap", "int_of", "map*<T", "try_map", "map_of", "try_map_of", "mput", "mget", "mhas", "mlen", "mfree"],
         ),
         DocCase(
             target: "std.collections.iter",
-            present: ["find*<T> = (xs: [T], pred: (T) bool) Opt<T>", "map*<A, T, U> = (a: MutPtr<A>, xs: [T], f: (T) U) Result<[U], IoError>", "filter*<A, T> = (a: MutPtr<A>, xs: [T], keep: (T) bool) Result<[T], IoError>"],
-            absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]", "map*<A> = (a: MutPtr<A>, xs: [i32]", "try_map", "try_filter"],
+            present: ["find*<T> = (xs: [T], pred: (T) bool) Opt<T>", "map*<T, U> = (a: Allocator, xs: [T], f: (T) U) Result<[U], IoError>", "filter*<T> = (a: Allocator, xs: [T], keep: (T) bool) Result<[T], IoError>"],
+            absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]", "map*<T, U> = (a: Allocator, xs: [i32]", "try_map", "try_filter"],
         ),
         DocCase(
             target: "std.mem.trace",
-            present: ["Traced*<T>: {", "tracked_in*<A, T>", "tracked*<A, T> = (alloc: MutPtr<A>, x: T) Result<Traced<T>, IoError>", "root_in*<A, T>", "root*<A, T> = (alloc: MutPtr<A>, r: Traced<T>) Result<i32, IoError>", "child*<T>", "set_kid* = (parent: Traced<Node>, child: Traced<Node>) void", "collect_in*<A>", "collect*<A> = (alloc: MutPtr<A>) Result<i32, IoError>"],
+            present: ["Traced*<T>: {", "tracked_in*<T> = (alloc: Allocator", "tracked*<T> = (alloc: Allocator, x: T) Result<Traced<T>, IoError>", "root_in*<T> = (alloc: Allocator", "root*<T> = (alloc: Allocator, r: Traced<T>) Result<i32, IoError>", "child*<T>", "set_kid* = (parent: Traced<Node>, child: Traced<Node>) void", "collect_in* = (alloc: Allocator", "collect* = (alloc: Allocator) Result<i32, IoError>"],
             absent: ["Rc*<T>: {", "tracked*<T> = (x: T)", "collect* = () void", "hcount*", "list_push*", "trace_child*", "node_set_kid*", "cc_mark*", "blk_drop*", "trace_child", "node_set_kid", "hcount", "list_push", "cc_mark", "blk_drop", "try_tracked", "try_root", "try_collect"],
         ),
         DocCase(
             target: "std.text.str",
-            present: ["dup_bytes*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError>", "dup_bytes_in*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError>", "substr*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string_view, IoError>", "substr_in*<A> = (a: MutPtr<A>, s: string_view, start: i64, n: i64) Result<string_view, IoError>", "at* = (s: string_view, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: string_view) Result<i64, ParseError>", "what made try_parse_int refuse"],
+            present: ["dup_bytes* = (a: Allocator, s: string_view) Result<[u8], IoError>", "dup_bytes_in* = (a: Allocator, s: string_view) Result<[u8], IoError>", "substr* = (a: Allocator, s: string_view, start: i64, n: i64) Result<string_view, IoError>", "substr_in* = (a: Allocator, s: string_view, start: i64, n: i64) Result<string_view, IoError>", "at* = (s: string_view, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: string_view) Result<i64, ParseError>", "what made try_parse_int refuse"],
             absent: ["try_dup_bytes", "try_substr", "char_at", "str_parse_int"],
         ),
         DocCase(
             target: "std.text.num",
-            present: ["integer_in*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError>", "integer*<A> = (a: MutPtr<A>, n: i64) Result<String, IoError>", "uinteger_in*<A> = (a: MutPtr<A>, n: u64) Result<String, IoError>", "float_in*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError>", "float*<A> = (a: MutPtr<A>, x: f64) Result<String, IoError>"],
+            present: ["integer_in* = (a: Allocator, n: i64) Result<String, IoError>", "integer* = (a: Allocator, n: i64) Result<String, IoError>", "uinteger_in* = (a: Allocator, n: u64) Result<String, IoError>", "float_in* = (a: Allocator, x: f64) Result<String, IoError>", "float* = (a: Allocator, x: f64) Result<String, IoError>"],
             absent: ["try_integer", "try_uinteger", "try_float", "int_string", "float_string", "int_to_str", "float_to_str"],
         ),
         DocCase(
             target: "std.io.file",
-            present: ["out* = (s: string_view) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_bytes_in*<A> = (a: MutPtr<A>, path: string_view) Result<[u8], IoError>", "contents_bytes*<A> = (a: MutPtr<A>, path: string_view) Result<[u8], IoError>", "contents_in*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "contents*<A> = (a: MutPtr<A>, path: string_view) Result<string_view, IoError>", "save* = (path: string_view, data: string_view, n: i64) Result<i64, IoError>", "O_WRTRUNC* := O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: string_view) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
+            present: ["out* = (s: string_view) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_bytes_in* = (a: Allocator, path: string_view) Result<[u8], IoError>", "contents_bytes* = (a: Allocator, path: string_view) Result<[u8], IoError>", "contents_in* = (a: Allocator, path: string_view) Result<string_view, IoError>", "contents* = (a: Allocator, path: string_view) Result<string_view, IoError>", "save* = (path: string_view, data: string_view, n: i64) Result<i64, IoError>", "O_WRTRUNC* := O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: string_view) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
             absent: ["contents* = (path: string_view) Result<string_view, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"],
         ),
         DocCase(

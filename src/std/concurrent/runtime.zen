@@ -11,17 +11,21 @@ Runtime: {
 }
 SyncArena*: {
     mem: Arena,
-    free_in<A> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void {
+    free_in<A: Allocator> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void {
         runtime.mem.addr().free_in(backing)
     }
-    free<A> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void { runtime.free_in(backing) }
+    free<A: Allocator> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void {
+        runtime.free_in(backing)
+    }
 }
 AsyncArena*: {
     mem: Arena,
-    free_in<A> = (runtime: MutPtr<AsyncArena>, backing: MutPtr<A>) void {
+    free_in<A: Allocator> = (runtime: MutPtr<AsyncArena>, backing: MutPtr<A>) void {
         runtime.mem.addr().free_in(backing)
     }
-    free<A> = (runtime: MutPtr<AsyncArena>, backing: MutPtr<A>) void { runtime.free_in(backing) }
+    free<A: Allocator> = (runtime: MutPtr<AsyncArena>, backing: MutPtr<A>) void {
+        runtime.free_in(backing)
+    }
 }
 SyncArena.impl(Runtime, {
     checkpoint = (s: MutPtr<SyncArena>) Signal { .Go }
@@ -46,15 +50,15 @@ AsyncArena.impl(Allocator, {
     resize = (s: MutPtr<AsyncArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
     release = (s: MutPtr<AsyncArena>, p: RawPtr<u8>) void { s.mem.addr().release(p) }
 })
-sync_in*<A> = (backing: MutPtr<A>, cap: i64) SyncArena {
+sync_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena {
     SyncArena(mem: backing
         .make_in(cap)
         .expect("std.concurrent.runtime: scope arena allocation failed"))
 }
-async_in*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena {
+async_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) AsyncArena {
     AsyncArena(mem: backing
         .make_in(cap)
         .expect("std.concurrent.runtime: scope arena allocation failed"))
 }
-sync*<A> = (backing: MutPtr<A>, cap: i64) SyncArena { backing.sync_in(cap) }
-async*<A> = (backing: MutPtr<A>, cap: i64) AsyncArena { backing.async_in(cap) }
+sync*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena { backing.sync_in(cap) }
+async*<A: Allocator> = (backing: MutPtr<A>, cap: i64) AsyncArena { backing.async_in(cap) }

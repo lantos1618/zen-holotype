@@ -23,13 +23,13 @@ Arena*: {
     }
     reset = (a: MutPtr<Arena>) void { a.off = 0 }
     used  = (a: Ptr<Arena>) i64 { a.off }
-    free_in<A> = (a: MutPtr<Arena>, backing: MutPtr<A>) void {
+    free_in<A: Allocator> = (a: MutPtr<Arena>, backing: MutPtr<A>) void {
         backing.release(a.buf)
         a.buf = null_ptr()
         a.off = 0
         a.cap = 0
     }
-    free<A> = (a: MutPtr<Arena>, backing: MutPtr<A>) void { a.free_in(backing) }
+    free<A: Allocator> = (a: MutPtr<Arena>, backing: MutPtr<A>) void { a.free_in(backing) }
 }
 // `make_in` (not `new_in`): the allocator-constructor name is unique per result type so two such
 // modules can be imported into one program. string/rc/arc/own keep `new_in`; arena's would
@@ -37,7 +37,7 @@ Arena*: {
 // (e.g. a String builder beside a std.concurrent.actor, which pulls arena in transitively).
 // Returns Result<Arena, IoError> — backing-allocator exhaustion is a value (`.expect("…")` at
 // fail-fast roots, `.or_return()` inside Result-returning fns).
-make_in*<A> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError> {
+make_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError> {
     backing.try_acquire(cap).match ({
         .Ok(p)  => ok(Arena(
             buf: p,

@@ -159,7 +159,7 @@ BTreeMap*<K, V>: {
         out: Opt<K> := (m.len == 0).then({ .None }, { .Some(m.keys()[m.len - 1]) })
         out
     }
-    grow<A> = (m: BTreeMap<K, V>, a: MutPtr<A>) Result<BTreeMap<K, V>, IoError> {
+    grow = (m: BTreeMap<K, V>, a: Allocator) Result<BTreeMap<K, V>, IoError> {
         // Fresh buffers (double the cap), copy the sorted entries over UNCHANGED (no reindex — the
         // array carries its own order), release the old ones. OOM at either acquire is a value.
         cap := m.cap * 2 + 1
@@ -199,9 +199,9 @@ BTreeMap*<K, V>: {
             },
         })
     }
-    insert_at<A> = (
+    insert_at = (
         m: BTreeMap<K, V>,
-        a: MutPtr<A>,
+        a: Allocator,
         pos: i64,
         k: K,
         v: V,
@@ -251,7 +251,7 @@ BTreeMap*<K, V>: {
         })
         out
     }
-    insert<A> = (m: BTreeMap<K, V>, a: MutPtr<A>, k: K, v: V) Result<BTreeMap<K, V>, IoError> {
+    insert = (m: BTreeMap<K, V>, a: Allocator, k: K, v: V) Result<BTreeMap<K, V>, IoError> {
         // Insert or upsert (allocation failure is a value). RETURNS the updated map — always rebind
         // (`m = m.insert(...).expect("…")`): on grow the buffers are realloced, so a handle captured
         // before this call dangles (VALUE-MOLD CONTRACT). On an existing key the value is overwritten
@@ -268,7 +268,7 @@ BTreeMap*<K, V>: {
         })
         out
     }
-    remove<A> = (m: BTreeMap<K, V>, a: MutPtr<A>, k: K) BTreeMap<K, V> {
+    remove = (m: BTreeMap<K, V>, a: Allocator, k: K) BTreeMap<K, V> {
         // Remove k if present — close the gap by shifting the tail down, len-1. No allocation, no
         // reindex; the array stays sorted. Absent keys are a no-op. RETURNS the updated map — always
         // rebind (`m = m.remove(a, k)`): a stale header lies about len. `a` is accepted for signature
@@ -290,7 +290,7 @@ BTreeMap*<K, V>: {
             false => m,
         })
     }
-    free<A> = (m: BTreeMap<K, V>, a: MutPtr<A>) void {
+    free = (m: BTreeMap<K, V>, a: Allocator) void {
         a.release(m.keys)
         a.release(m.vals)
     }
@@ -342,7 +342,7 @@ BTreeMap*<K, V>: {
 // annotation (a one-line `.expect` chain can't reach them):
 //   r: Result<BTreeMap<i64, i64>, IoError> := btree.empty(a)
 //   m := r.expect("empty")
-empty*<K, V, A> = (a: MutPtr<A>) Result<BTreeMap<K, V>, IoError> {
+empty*<K, V> = (a: Allocator) Result<BTreeMap<K, V>, IoError> {
     a.try_acquire2(sizeof(K), sizeof(V)).match ({
         .Ok(bufs) => {
             kp := bufs.b1
@@ -364,7 +364,7 @@ empty*<K, V, A> = (a: MutPtr<A>) Result<BTreeMap<K, V>, IoError> {
 }
 // a `BTreeMap<K, V>` seeded with one entry, its buffers acquired from `a`. K and V are inferred from the
 // seed pair (Zen has no call-site type args), so this one CHAINS: `m := btree.of(a, k, v).expect("of")`.
-of*<K, V, A> = (a: MutPtr<A>, seed_key: K, seed_val: V) Result<BTreeMap<K, V>, IoError> {
+of*<K, V> = (a: Allocator, seed_key: K, seed_val: V) Result<BTreeMap<K, V>, IoError> {
     a.try_acquire2(sizeof(K), sizeof(V)).match ({
         .Ok(bufs) => {
             kp := bufs.b1
@@ -418,7 +418,7 @@ BTreeSet*<K>: {
         out: Opt<K> := (s.len == 0).then({ .None }, { .Some(s.keys()[s.len - 1]) })
         out
     }
-    grow<A> = (s: BTreeSet<K>, a: MutPtr<A>) Result<BTreeSet<K>, IoError> {
+    grow = (s: BTreeSet<K>, a: Allocator) Result<BTreeSet<K>, IoError> {
         cap := s.cap * 2 + 1
         a.try_acquire(cap * sizeof(K)).match ({
             .Ok(kp) => {
@@ -449,7 +449,7 @@ BTreeSet*<K>: {
             },
         })
     }
-    insert_at<A> = (s: BTreeSet<K>, a: MutPtr<A>, pos: i64, k: K) Result<BTreeSet<K>, IoError> {
+    insert_at = (s: BTreeSet<K>, a: Allocator, pos: i64, k: K) Result<BTreeSet<K>, IoError> {
         k := k
         out: Result<BTreeSet<K>, IoError> := (s.len < s.cap).match ({
             true  => {
@@ -485,7 +485,7 @@ BTreeSet*<K>: {
         })
         out
     }
-    insert<A> = (s: BTreeSet<K>, a: MutPtr<A>, k: K) Result<BTreeSet<K>, IoError> {
+    insert = (s: BTreeSet<K>, a: Allocator, k: K) Result<BTreeSet<K>, IoError> {
         // Insert if absent (allocation failure is a value). Already-present is a no-op (len unchanged).
         // RETURNS the updated set — always rebind. Mirrors BTreeMap.insert.
         pos := s.pos_of(k)
@@ -498,7 +498,7 @@ BTreeSet*<K>: {
         })
         out
     }
-    remove<A> = (s: BTreeSet<K>, a: MutPtr<A>, k: K) BTreeSet<K> {
+    remove = (s: BTreeSet<K>, a: Allocator, k: K) BTreeSet<K> {
         // Remove k if present — close the gap, len-1, array stays sorted. Absent keys are a no-op.
         // RETURNS the updated set. `a` is accepted for signature symmetry; `remove` never reallocs.
         pos := s.pos_of(k)
@@ -515,7 +515,7 @@ BTreeSet*<K>: {
             false => s,
         })
     }
-    free<A> = (s: BTreeSet<K>, a: MutPtr<A>) void { a.release(s.keys) }
+    free = (s: BTreeSet<K>, a: Allocator) void { a.release(s.keys) }
     each = (s: BTreeSet<K>, f: (K) void) void {
         // Visit every element IN SORTED ORDER. `f` is invoked DIRECTLY in the loop body.
         ks := s.keys()
@@ -557,7 +557,7 @@ BTreeSet*<K>: {
 }
 // a zero-element `BTreeSet<K>` with capacity for one. K appears only in the return type, so pin it via
 // the LHS annotation: `r: Result<BTreeSet<i64>, IoError> := btree.set_empty(a)`.
-set_empty*<K, A> = (a: MutPtr<A>) Result<BTreeSet<K>, IoError> {
+set_empty*<K> = (a: Allocator) Result<BTreeSet<K>, IoError> {
     a.try_acquire(sizeof(K)).match ({
         .Ok(kp) => {
             s := BTreeSet<K>(
@@ -576,7 +576,7 @@ set_empty*<K, A> = (a: MutPtr<A>) Result<BTreeSet<K>, IoError> {
 }
 // a `BTreeSet<K>` seeded with one element, its buffer acquired from `a`. K inferred from the seed, so
 // this CHAINS: `s := btree.set_of(a, 10).expect("set_of")`.
-set_of<K, A> = (a: MutPtr<A>, first: K) Result<BTreeSet<K>, IoError> {
+set_of<K> = (a: Allocator, first: K) Result<BTreeSet<K>, IoError> {
     a.try_acquire(sizeof(K)).match ({
         .Ok(kp) => {
             s := BTreeSet<K>(
