@@ -31,7 +31,7 @@ FNV64_PRIME := 1099511628211
 FNV64_OFFSET := 14695981039346656037
 // FNV-1a hash of `bytes` (64-bit). Deterministic and fast; a good spread for hash-table keys, but NOT
 // a cryptographic hash (do not use it for integrity/security). Empty input hashes to the offset basis.
-fnv1a* = (bytes: [u8]) u64 {
+fnv1a* = (bytes: Slice<u8>) u64 {
     h: u64 := FNV64_OFFSET
     bytes.loop((hh, i, b) {
         x := to_i64(b)
@@ -44,7 +44,7 @@ fnv1a* = (bytes: [u8]) u64 {
 // cannot slide. `*` wraps mod 2^64 (every build has -fwrapv), exactly the FNV spec's u64 arithmetic.
 // Callers that chain many pieces (a binary's bytes, module sources, flag strings) into one content key
 // thread the returned hash back in as the next `h`.
-fnv1a64_fold* = (h: i64, bytes: [u8]) i64 {
+fnv1a64_fold* = (h: i64, bytes: Slice<u8>) i64 {
     hh := h
     bytes.loop((lh, i, b) {
         hh = (hh ^ to_i64(b)) * FNV64_PRIME
@@ -59,7 +59,7 @@ fnv1a64_fold* = (h: i64, bytes: [u8]) i64 {
 // bucket range (see hbucket / mhash).
 FNV32_PRIME := 16777619
 FNV32_OFFSET := 2166136261
-fnv1a32* = (bytes: [u8]) i64 {
+fnv1a32* = (bytes: Slice<u8>) i64 {
     h := FNV32_OFFSET
     bytes.loop((hh, i, b) {
         h = (h ^ to_i64(b)) * FNV32_PRIME
@@ -75,7 +75,7 @@ sha_rotr = (x: i64, n: i64) i64 { (x >> n | x << 32 - n) & SHA_MASK }
 // the byte at absolute position `i` of the padded message: the input bytes, then a single SHA_PAD
 // (0x80) byte, then zero padding, then the 64-bit big-endian message length in bits in the last 8
 // bytes. `plen` is the padded length; `bitlen` is `len * 8`.
-sha_msg_byte = (bytes: [u8], i: i64, len: i64, plen: i64, bitlen: i64) i64 {
+sha_msg_byte = (bytes: Slice<u8>, i: i64, len: i64, plen: i64, bitlen: i64) i64 {
     (i < len).match ({
         true  => to_i64(bytes[i]),
         false => (i == len).match ({
@@ -94,7 +94,7 @@ sha_msg_byte = (bytes: [u8], i: i64, len: i64, plen: i64, bitlen: i64) i64 {
 // heap-promoted by gen_slicelit and never freed: the `k`/`w`/`hh`/`d` locals this file used to hold
 // leaked 1120 bytes on every sha256_hex call, linearly, which is what made the "no hidden heap" claim
 // below false. Keep the literals in argument position.
-sha256_words = (bytes: [u8], hh: [i64]) i64 {
+sha256_words = (bytes: Slice<u8>, hh: [i64]) i64 {
     // initial hash values H0..H7 (fractional parts of sqrt of the first 8 primes).
     hh[0] = 1779033703
     hh[1] = 3144134277
@@ -109,7 +109,7 @@ sha256_words = (bytes: [u8], hh: [i64]) i64 {
     sha_compress(bytes, hh, [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, 2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411, 3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424, 2428436474, 2756734187, 3204031479, 3329325298], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 }
 // the block loop, over caller-supplied scratch: `k` the round constants, `w` the message schedule.
-sha_compress = (bytes: [u8], hh: [i64], k: [i64], w: [i64]) i64 {
+sha_compress = (bytes: Slice<u8>, hh: [i64], k: [i64], w: [i64]) i64 {
     len := bytes.len
     // padded length: input + one 0x80 + zeros + 8 length bytes, rounded up to a multiple of 64.
     plen := ((len + 8) / 64 + 1) * 64
@@ -172,8 +172,10 @@ sha_compress = (bytes: [u8], hh: [i64], k: [i64], w: [i64]) i64 {
 }
 // SHA-256 of `bytes` written as 32 big-endian bytes into `dst` (dst.len must be >= 32). Pure: no
 // allocation, no hidden heap — the whole computation lives in a fixed stack schedule.
-sha256_into* = (bytes: [u8], dst: [u8]) i64 { sha_words_into(bytes, dst, [0, 0, 0, 0, 0, 0, 0, 0]) }
-sha_words_into = (bytes: [u8], dst: [u8], hh: [i64]) i64 {
+sha256_into* = (bytes: Slice<u8>, dst: [u8]) i64 {
+    sha_words_into(bytes, dst, [0, 0, 0, 0, 0, 0, 0, 0])
+}
+sha_words_into = (bytes: Slice<u8>, dst: [u8], hh: [i64]) i64 {
     sha256_words(bytes, hh)
     hh.loop((lh, wi, v) {
         dst[wi * 4] = to_u8(v >> 24 & 255)
@@ -184,10 +186,10 @@ sha_words_into = (bytes: [u8], dst: [u8], hh: [i64]) i64 {
     0
 }
 // SHA-256 of `bytes` as a fresh 64-char lowercase-hex NUL-terminated `str` owned by `a`.
-sha256_hex* = (a: Allocator, bytes: [u8]) string_view {
+sha256_hex* = (a: Allocator, bytes: Slice<u8>) string_view {
     a.sha_hex_into(bytes, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
 }
-sha_hex_into = (a: Allocator, bytes: [u8], d: [u8]) string_view {
+sha_hex_into = (a: Allocator, bytes: Slice<u8>, d: [u8]) string_view {
     sha256_into(bytes, d)
     out: [u8] := a.try_acquire(65).expect("std.hash: out of memory").slice(65)
     d.loop((h, i, b) {
