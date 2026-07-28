@@ -1,0 +1,57 @@
+// A lambda that DEREFERENCES its erased state needs the genc call intrinsics — `load`, `store`,
+// `offset`, `slice`. They have no declaration for `lift_toplevel` to find, so the lift pass read each
+// one as a CAPTURED value, and every such lambda was rejected with error[lambda-value] however little
+// it actually captured. That is the shape of any `RawPtr<u8>`-erased callback, so the miss blocked
+// the whole "hand a fn pointer a state pointer" idiom.
+//
+// The exemption has a side condition, pinned as verdict cases: an intrinsic name IS a legal binder
+// (`g = (store_i64: (i64) i64) i64 { … }`), and a lifted body is a top-level fn where that binder is
+// out of scope — so a function that binds one lifts nothing.
+// STILL MISSING (a different misclassification): `sizeof(Counter)` names a TYPE in argument position,
+// which the same walk reads as a captured value — a lambda using it does not lift.
+{ println } = std.text.fmt
+Counter*: {
+    n: i64,
+    step: i64,
+}
+Ops*: {
+    peek: (RawPtr<u8>) i64,
+    tick: (RawPtr<u8>) void,
+    span: (RawPtr<u8>) i64,
+}
+// every lambda below reads/writes through `s` and captures NOTHING; each is a bare top-level fn.
+ops = () Ops {
+    Ops(
+        peek: (s: RawPtr<u8>) i64 {
+            r: MutPtr<Counter> := s
+            load(r).n
+        },
+        tick: (s: RawPtr<u8>) {
+            r: MutPtr<Counter> := s
+            c := load(r)
+            store(r, Counter(
+                n: c.n + c.step,
+                step: c.step,
+            ))
+        },
+        span: (s: RawPtr<u8>) i64 {
+            b: [u8] := slice(s.offset(0), 16)
+            b.len
+        },
+    )
+}
+main = () i32 {
+    c := Counter(
+        n: 7,
+        step: 5,
+    )
+    o := ops()
+    p := c.addr().offset(0)
+    o.tick(p)
+    o.tick(p)
+    (o.peek(p) == 17 && o.span(p) == 16).match ({
+        true  => println("intrinsic-lambda ok"),
+        false => println("intrinsic-lambda BAD"),
+    })
+    0
+}

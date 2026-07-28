@@ -1108,6 +1108,16 @@ harness_verdict_run* = () i32 {
             kind: "lambda-value",
         ),
         VerdictCase(
+            src: "Box*: { op: (i64) i64 }\nmk* = (load: (i64) i64) Box { Box(op: (k: i64) i64 { load(k) }) }\ntest* = () i32 { to_i32(mk((v: i64) i64 { v + 1 }).op(41)) }",
+            should_pass: false,
+            kind: "lambda-value",
+        ),
+        VerdictCase(
+            src: "Box*: { op: (RawPtr<u8>) i64 }\nmk* = () Box { Box(op: (s: RawPtr<u8>) i64 { r: MutPtr<i64> := s\nload(r) }) }\ntest* = () i32 { v := 42\nto_i32(mk().op(v.addr().offset(0))) }",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
             src: "Box<T>: { v: T }\nmk<T> = (x: T) Box<T> { Box<T>(v: x) }\ntest* = () i32 { bu: Box<u8> := mk(256)  0 }",
             should_pass: false,
             kind: "arg-type",
@@ -1288,6 +1298,10 @@ harness_verdict_run* = () i32 {
             kind: "trait-bound",
         ),
     ])
+    // an intrinsic name in a lifted lambda body is a genc intrinsic, NOT a capture — unless the
+    // enclosing function BINDS that name, in which case lifting would strand the binder out of
+    // scope and genc would re-read `load(k)` as `*(k)`. Both halves are pinned: the shadow keeps
+    // the honest lambda-value rejection, an unshadowed intrinsic lifts.
     // alloc-null (compiler.validate.nullalloc): the PROVENANCE rule that `RawPtr<u8>`'s type-level
     // exemption cannot express. The allocator's result is `RawPtr<u8>` exactly like `null_ptr()`, so
     // these four cases pin what the flow rule sees: an allocation dereferenced bare is rejected, and
