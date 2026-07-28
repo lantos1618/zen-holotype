@@ -1116,6 +1116,31 @@ ctor_enum_plain = (env: Env, vn: string_view) string_view {
         }),
     })
 }
+// The enum TYPE a constructor names, type args included: an already-stamped instance keeps its own
+// args, while a bare `.Foo` takes the expected type when that type IS its enum (so `Result<i64, Kind>`
+// arrives whole) and otherwise the ambient pick.
+ctor_enum_ty = (env: Env, ety: string_view, etargs: [Ty], variant: string_view) Ty {
+    (etargs.len > 0).match ({
+        true  => tgeneric(ety, etargs, ""),
+        false => is_empty(ety).match ({
+            true  => {
+                base := env.ctor_enum_plain(variant)
+                (env.exp.exp_enum_base() == base).then({ env.exp }, { tnamed(base) })
+            },
+            false => tnamed(ety),
+        }),
+    })
+}
+// Expected type for a constructor's PAYLOAD: the variant's declared payload in this instance. Without
+// it a nested bare `.Variant` (`.Err(.Oom)`) inherits no expectation and falls through to
+// `enum_of_variant`'s ambient last-definition-wins scan — silently the wrong enum when a user enum
+// repeats a stdlib variant name. Void unless the instance is CONCRETE: a payload still mentioning the
+// enum's own tparams is no expectation at all, and must not leak into generic-call inference.
+ctor_payload_exp* = (env: Env, ety: string_view, etargs: [Ty], variant: string_view) Ty {
+    t := env.ctor_enum_ty(ety, etargs, variant)
+    pty := env.subj_variant_payload(t, variant)
+    pty.ty_mentions_any(env.env_genenum(t.exp_enum_base()).tparams).then({ tvoid() }, { pty })
+}
 field_ty = (sd: StructDecl, fname: string_view) Ty {
     found := tvoid()
     sd.fields.loop((h, i, f) {

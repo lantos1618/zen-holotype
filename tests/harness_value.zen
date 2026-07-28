@@ -246,6 +246,26 @@ harness_value_run* = () i32 {
             want: "5",
         ),
         VCase(
+            src: "Res<T, E>: Ok(T) | Err(E)\nKind: Oom | Other\nMsg: Work | Oom\nmake = () Res<i64, Kind> { .Err(.Oom) }\ntest* = () i32 {\n  make().match({ .Ok(v) => 0, .Err(k) => k.match({ .Oom => 7, .Other => 8 }) })\n}",
+            want: "7",
+        ),
+        VCase(
+            src: "Res<T, E>: Ok(T) | Err(E)\nMsg: Work | Oom\nKind: Oom | Other\nmake = () Res<i64, Kind> { .Err(.Oom) }\ntest* = () i32 {\n  make().match({ .Ok(v) => 0, .Err(k) => k.match({ .Oom => 7, .Other => 8 }) })\n}",
+            want: "7",
+        ),
+        VCase(
+            src: "Res<T, E>: Ok(T) | Err(E)\nKind: Oom | Other\nMsg: Work | Oom\nmake = () Res<i64, Kind> { .Err(Kind.Oom) }\ntest* = () i32 {\n  make().match({ .Ok(v) => 0, .Err(k) => k.match({ .Oom => 7, .Other => 8 }) })\n}",
+            want: "7",
+        ),
+        VCase(
+            src: "Kind: Oom | Other\nMsg: Work | Oom\nOuter: Wrap(Kind) | Bare\nf = () Outer { .Wrap(.Oom) }\ntest* = () i32 {\n  f().match({ .Wrap(k) => k.match({ .Oom => 7, .Other => 8 }), .Bare => 0 })\n}",
+            want: "7",
+        ),
+        VCase(
+            src: "Res<T, E>: Ok(T) | Err(E)\nKind: Oom(i32) | Other\nMsg: Work | Oom(string_view)\nmake = () Res<i64, Kind> { .Err(.Oom(7)) }\ntest* = () i32 {\n  make().match({ .Ok(v) => 0, .Err(k) => k.match({ .Oom(n) => n, .Other => 8 }) })\n}",
+            want: "7",
+        ),
+        VCase(
             src: "Tree<T>: Leaf(T) | Node(T, T)\ntest* = () i32 {\n  t: Tree<i32> := .Node(1, 2)\n  t.match({ .Leaf(x) => x, .Node(a, b) => a + b })\n}",
             want: "3",
         ),
@@ -1637,6 +1657,15 @@ harness_value_run* = () i32 {
 // a generic enum whose variant name COLLIDES with another in-scope enum (here `Opt`/`Plain`) — the
 // expected-type-wins path only checked concrete `.DEnum`s, so it fell back to an ambient name scan
 // and emitted the wrong C type (a `cc` "invalid initializer"). All four cases mix a collision.
+// NESTED constructor argument disambiguation: the payload of `Res<i64, Kind>.Err` expects `Kind`, so
+// the bare `.Oom` inside `.Err(.Oom)` must resolve against Kind — not against whichever in-scope enum
+// last declared an `Oom` variant. The payload position inherited NO expected type, so it fell through
+// to the ambient last-definition-wins scan and emitted `(Msg){...}` into a `Kind` slot (cc: "incompatible
+// types when initializing"). Five shapes: the collision declared LAST (the failing order) and FIRST
+// (already worked — guards the fix from becoming order-dependent the other way), the explicitly
+// qualified `Kind.Oom` escape hatch, a NON-generic outer enum (`Outer.Wrap(Kind)`), and a collision
+// whose variants CARRY payloads of different types. `.Oom` is tag 0 in Kind and tag 1 in Msg, so a
+// wrong pick can never coincidentally print 7.
 // Inliner tparam-subst keystone (inline_template threads the tparam->arg map through xform_*):
 //   - `[M]` element type in an Index reached via a MutPtr<Box<M>> receiver (was `sizeof(void)`),
 //   - a `ms: [M] :=` let annotation in an inlined body,

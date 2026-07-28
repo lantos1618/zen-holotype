@@ -3,7 +3,7 @@
   ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData, MethodCallData, Param, Stmt,
   Ty, VariantDef } = compiler.ast.ast_types
 { cbuf, dforeign, gstr_append, gstr_finish, gstr_string, is_expr_null, no_tys, subst_ty_in, tbool,
-  tf64, ti32, ti64, tnamed, tnode, tptr_k, tslice, tstring_view, tu8, tvoid } = compiler.genc
+  tf64, tgeneric, ti32, ti64, tnamed, tnode, tptr_k, tslice, tstring_view, tu8, tvoid } = compiler.genc
 { impl_cname_in } = compiler.mangle
 { DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params,
   extend_env, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, recv_name, the_func,
@@ -1478,6 +1478,11 @@ first_gen_arg* = (t: Ty) Ty {
         _           => tvoid(),
     })
 }
+// The enum type a resolved constructor names — a generic instance keeps its type args, so the
+// variant's declared payload substitutes down to a CONCRETE type instead of a bare tparam.
+mkenum_subj_ty* = (mk: MakeEnumData) Ty {
+    (mk.targs.len > 0).then({ tgeneric(mk.ty, mk.targs, mk.mty) }, { tnamed(mk.ty) })
+}
 // ── per-node kind checks as Env METHODS ──────────────────────────────────────────────────────────
 // The util.zen EnvQuery pattern at scale: every Env-first validator here is a method on Env via an
 // out-of-module trait impl, so callers (core.zen's kv_* walk, enrich.zen, …) dispatch
@@ -1625,7 +1630,11 @@ Env.impl(EnvKinds, {
         is_empty(mk.ty).match ({
             true  => 0,
             false => {
-                pty := env.subj_variant_payload(tnamed(mk.ty), mk.variant)
+                // Type args INCLUDED: `Result<i64, Kind>.Err` declares payload `Kind`, but the bare
+                // `tnamed("Result")` form loses the args and leaves `E` — an unknown type the check
+                // then waves through, which is how a payload of the wrong enum reached cc as an
+                // `incompatible types when initializing` error on C the user never wrote.
+                pty := env.subj_variant_payload(mk.mkenum_subj_ty(), mk.variant)
                 lv := mk.payload.lit_slot_verdict(pty)
                 (lv >= 0).match ({
                     true  => lv,
