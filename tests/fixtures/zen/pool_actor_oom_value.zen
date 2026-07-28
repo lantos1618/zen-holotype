@@ -38,7 +38,12 @@ KEEP := 65536    // drain-slot capacity: 64Ki blocks is far more than any top-ch
 getrlimit = (resource: i32, rlim: RawPtr<u8>) i32
 setrlimit = (resource: i32, rlim: RawPtr<u8>) i32
 RLIMIT_AS := 9
-Msg*: Inc(i64)
+// `Oom` here is DELIBERATE, and it is a regression gate, not decoration. A bare `.Oom` in a nested
+// constructor argument resolves by a flat LAST-DEFINITION-WINS scan over every enum in the program, so
+// this user-side variant name is exactly what stole `ActorError.Oom` out of std.concurrent and broke the
+// build the first time these two lines met (see the note on ActorError in pool.zen). With this variant
+// present, un-qualifying any `.Err(ActorError.Oom)` in the stdlib makes THIS fixture fail to compile.
+Msg*: Inc(i64) | Oom(i64)
 Worker*: {
     acc: RawPtr<u8>,
 }
@@ -46,6 +51,9 @@ Worker.impl(Receiver, {
     receive = (w: MutPtr<Worker>, ctx: Context<Msg>) void {
         ctx.msg.match ({
             .Inc(n) => {
+                atomic_add_i64(w.acc, n)
+            },
+            .Oom(n) => {
                 atomic_add_i64(w.acc, n)
             },
         })

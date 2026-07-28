@@ -83,6 +83,19 @@ or_die = (p: RawPtr<u8>, msg: string_view) RawPtr<u8> {
 // cooperative-actor equivalent as IoError.Errno(EAGAIN=11); a dedicated enum reads clearer for the
 // parallel primitive and keeps the two error channels — libc vs mailbox — from sharing a numeric code.)
 ActorError*: MailboxFull | Oom
+// ALWAYS spell these QUALIFIED — `.Err(ActorError.Oom)`, never `.Err(.Oom)` — at every construction
+// site in this module and in std.concurrent.pool_actor. A BARE variant in a NESTED constructor argument
+// does not inherit the expected type: `ctor_enum_plain` (check.zen) honours `env.exp` only when the
+// expected type is known at that position, and for a generic-enum payload (`Result<_, ActorError>.Err`'s
+// argument) it is not, so resolution falls through to `enum_of_variant`, a flat LAST-DEFINITION-WINS
+// scan by variant name over every enum in the program. A user program that declares its own enum with an
+// `Oom` (or `MailboxFull`) variant AFTER the stdlib is flattened therefore silently steals the name, and
+// the emitted C initialises an ActorError slot with the wrong enum type — a hard `cc` error, never a
+// silent miscompile, but a build break caused entirely by a name the user is entitled to pick.
+// This bit exactly once: tests/fixtures/zen/pool_supervisor_oom_restart.zen declares
+// `Msg*: Work(i64) | Oom(i64)`. Qualifying removes the inference and the landmine with it. The real fix
+// is expected-type propagation into generic-enum constructor arguments — a compiler change, tracked
+// separately; until it lands, do not "simplify" these back to bare variants.
 // success payload of a send: the number of messages enqueued (always 1 today — mirrors std.io.file's
 // `Result<i64, IoError>` convention where the Ok channel carries a "count of units that landed", since
 // Zen has no first-class unit/void value to spell `Result<void, _>`).
@@ -387,7 +400,7 @@ Pool*: {
                 p.mu.lock()    // record the dead letter under the pool lock (same lock guarding live/rq)
                 p.dropped = p.dropped + 1
                 p.mu.unlock()
-                .Err(.MailboxFull)
+                .Err(ActorError.MailboxFull)
             },
         })
     }
