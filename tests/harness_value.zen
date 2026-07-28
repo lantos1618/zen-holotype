@@ -734,6 +734,22 @@ harness_value_run* = () i32 {
             want: "2282",
         ),
         VCase(
+            src: "mk = () [i32] { [1, 2, 3] }\ntest* = () i32 {\n  xs := mk()\n  xs[0] + xs[1] * 10 + xs[2] * 100\n}",
+            want: "321",
+        ),
+        VCase(
+            src: "keep = (xs: [i32]) [i32] { xs }\ntest* = () i32 {\n  r := keep([4, 5, 6])\n  r[0] + r[1] * 10 + r[2] * 100\n}",
+            want: "654",
+        ),
+        VCase(
+            src: "sum = (xs: [i32]) i32 {\n  t := 0\n  xs.loop((h, i, x) {\n    t = t + x\n  })\n  t\n}\ntest* = () i32 { sum([1, 2, 3]) }",
+            want: "6",
+        ),
+        VCase(
+            src: "first = (xs: [i32]) i32 { xs[0] }\nvia = (ys: [i32]) i32 { first(ys) }\ntest* = () i32 { via([7, 8, 9]) }",
+            want: "7",
+        ),
+        VCase(
             src: "Heap*: { z: i32 }\nhacq = (a: MutPtr<Heap>, n: i64) RawPtr<u8> { malloc(n) }\nhbuf<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] { slice(a.hacq(n * sizeof(T)), n) }\nreverse_in<A, T> = (a: MutPtr<A>, xs: [T]) [T] { out := a.hbuf(xs.len, xs)  xs.loop((h, i, x) { out[xs.len - 1 - i] = x })  out }\ntest* = () i32 {\n  h := Heap(z: 0)\n  r: [i32] := h.addr().reverse_in([1, 2, 3, 4])\n  r[0] * 1000 + r[1] * 100 + r[2] * 10 + r[3]\n}",
             want: "4321",
         ),
@@ -1491,6 +1507,13 @@ harness_value_run* = () i32 {
         ),
     ])
 }
+// ── slice-literal escape classification (compiler.backend.c.c_escape) ──────────────────────
+// The USE-AFTER-RETURN guard: a literal returned out of its frame must still read correctly in
+// the caller. Stack storage for this shape is exactly the bug the heap promotion exists to
+// prevent, so this case fails loudly if the classification ever widens to cover it.
+// the same escape, one hop further out: the callee hands the literal back to its caller.
+// a BORROWING callee (indexes + iterates only) — the shape that loses its malloc.
+// borrowing across TWO hops: the parameter is forwarded to another borrowing callee.
 // a raw literal is byte-identical to its escaped twin — the JSON case the form exists for
 // RAW: a backslash is an ordinary byte, so `\n` inside is two chars, not a newline
 // a newline immediately after the opening delimiter is dropped: the block form starts at line 1

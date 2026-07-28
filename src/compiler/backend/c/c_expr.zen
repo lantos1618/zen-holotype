@@ -7,6 +7,7 @@
 { ty_cname_in, blk_diverges, field, gstr_append, subword_ty } = compiler.genc
 { Malloc } = std.mem.alloc
 { gen_strlit } = compiler.backend.c.c_lit
+{ slx_arg_is_borrowed } = compiler.backend.c.c_escape
 { gstr_int, slice_count } = compiler.astops
 gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
@@ -165,17 +166,16 @@ gen_loop_body = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
 // OOM (mirrors the div/idx preamble guards) so an exhausted heap can never `memcpy` into NULL. Empty
 // `[]` needs no backing.
 //
-// KNOWN LEAK (scoped, not fixed here): this heap block is never freed. A NON-escaping literal — e.g.
-// the `[arg_int(n)]` argument slice every `formatln` call site builds, ~32 bytes lost per call — is
-// heap-promoted all the same because this site classifies EVERY literal as escaping. (std.text.fmt's
-// own digit scratch used to be the worked example here; it now uses one thread_local cell instead, so
-// the remaining per-call loss at a print site is the CALLER's argument literal.) The sound cure
-// (stack storage for the non-escaping ones) needs interprocedural escape info: write_int passes its
-// scratch BY VALUE to helpers (`b.write_scratch(…)`, `num_write_integer(b.ptr, …)`), which no local or
-// syntactic rule can distinguish from a real escape without over-rejecting valid stdlib — and pure
-// stack storage reintroduces a verified use-after-return for `f() [i32] { [1,2,3] }`. Fixing it means
-// wiring the checker's escape analysis into a per-literal `escapes` classification (heap-by-default, so
-// a miss is a leak, never a UAF); tracked as follow-up.
+// KNOWN LEAK (partly closed): this heap block is never freed, so every literal that reaches HERE is a
+// leak of its backing bytes. One literal shape no longer reaches here — a literal written DIRECTLY as a
+// call argument whose callee only BORROWS that parameter now emits gen_slicelit_stack instead (see
+// compiler.backend.c.c_escape for the classification and its heap-by-default law). That covers the
+// `[arg_int(n)]` argument slice every `formatln`/`format` call site builds — measured at 32 bytes per
+// call before, 0 after. Still leaking, deliberately: a literal that is RETURNED or bound to a local
+// (`xs := [1, 2, 3]`), stored into a struct/slice/enum, passed to a foreign or unknown callee, or passed
+// to a callee this analysis cannot clear within its hop bound. Those keep the malloc because pure stack
+// storage reintroduces a verified use-after-return for `f() [i32] { [1, 2, 3] }` — heap-by-default means
+// a misclassification is a leak, never a use-after-free.
 gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
     n := slice_count(sd.items)
     (n == 0).match ({
@@ -189,6 +189,24 @@ gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
                 .gen_args(alloc, sd.items)
                 .gstr_append(alloc, " }; uint8_t* _zsp = zen__salloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
             out.gstr_int(alloc, n).gstr_append(alloc, " }; })")
+        },
+    })
+}
+// The NON-escaping lowering: the backing array is a plain C compound literal, whose storage lasts to the
+// end of the ENCLOSING BLOCK — strictly longer than the call it is an argument to. No malloc, so nothing
+// to free. Only emitted where compiler.backend.c.c_escape proved the callee borrows the parameter.
+gen_slicelit_stack = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
+    n := slice_count(sd.items)
+    (n == 0).match ({
+        true  => s.gstr_append(alloc, "(zslice){ .ptr = (void*)0, .len = 0 }"),
+        false => {
+            out := s
+                .gstr_append(alloc, "(zslice){ .ptr = (void*)(")
+                .gstr_append(alloc, alloc.ty_cname_in(sd.elem))
+                .gstr_append(alloc, "[]){ ")
+                .gen_args(alloc, sd.items)
+                .gstr_append(alloc, " }, .len = ")
+            out.gstr_int(alloc, n).gstr_append(alloc, " }")
         },
     })
 }
@@ -412,8 +430,25 @@ gen_call_default = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
     s
         .gstr_append(alloc, c.fn)
         .gstr_append(alloc, "(")
-        .gen_args(alloc, c.args)
+        .gen_call_args(alloc, c.fn, c.args)
         .gstr_append(alloc, ")")
+}
+// Argument emission for an ORDINARY call — the one position where a slice literal can be proven not to
+// escape (c_escape). Identical to gen_args except for that one classification; every other argument, and
+// every intrinsic's arguments (they never reach here), go through gen_expr and stay heap-promoted.
+gen_call_args = (s: String, alloc: MutPtr<Malloc>, fn: string_view, args: [Expr]) String {
+    out := s
+    args.loop((h, i, arg) {
+        out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
+        out = arg.match ({
+            .SliceLit(sd) => fn.slx_arg_is_borrowed(i).match ({
+                true  => out.gen_slicelit_stack(alloc, sd),
+                false => out.gen_slicelit(alloc, sd),
+            }),
+            _             => out.gen_expr(alloc, arg.addr()),
+        })
+    })
+    out
 }
 // Every intrinsic expansion below is the SAME shape — fixed C text with the call's arguments spliced
 // between it — so one helper per argument count spells that shape once and each arm keeps only the
