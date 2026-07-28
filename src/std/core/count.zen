@@ -1,50 +1,62 @@
-// std.core.count — count iteration, and NOTHING else.
+// std.core.count — iteration, and NOTHING else.
 //
 // These live in their OWN leaf module, not in std.collections.iter, because Zen's import namespace is
 // flat: `{ times } = std.collections.iter` drags iter's entire export set — `each`, `find`, `map`,
 // `count`, … — into every transitive consumer. That is not hypothetical. Converting std.hash and
 // std.rand to `times` broke examples/wordfreq.zen (iter's 1-arg `each` shadowing hmap's) and
-// examples/zvm.zen, and both conversions had to be reverted. A module with one concern and four
-// exports can be imported by anyone; iter.zen cannot.
-// `.loop` iterates MEMORY — it indexes a `[T]`. A COUNT has no backing memory, so walking `0 .. n`
-// used to leave `@while` as the only option, which is exactly how the imperative loop escaped the
-// primitives and spread through ordinary code. These are the count-shaped `.loop`: the `@while` lives
-// HERE, in the primitive, and callers write a body instead.
+// examples/zvm.zen, and both conversions had to be reverted. A module with one concern and a handful
+// of exports can be imported by anyone; iter.zen cannot.
+// `.loop` iterates MEMORY — it indexes a `[T]`. A cursor has no backing memory, so walking one used to
+// leave `@while` as the only option, which is exactly how the imperative loop escaped the primitives
+// and spread through ordinary code. `step_while` is that loop, written once: it holds the ONLY `@while`
+// in the tree, and every other iteration is a call.
 //
-// The body is an ordinary closure, so it INLINES at the call site — the emitted C is the same plain
-// `while (i < n) { … i = i + 1 }` the hand-written loop produced. Nothing is allocated and nothing is
-// called per step. Because it inlines:
-//   • assigning the enclosing function's locals works (`total = total + i`);
-//   • `return` in the body returns from the ENCLOSING FUNCTION — the early exit `@while` had;
+// The lambdas are ordinary closures, so they INLINE at the call site — the emitted C is the same plain
+// `while (p < n && v[p] != '\n') { p = p + 1 }` the hand-written loop produced, byte for byte. Nothing
+// is allocated and nothing is called per step. Because they inline:
+//   • assigning the enclosing function's locals works (`total = total + i`, `line = line + 1`);
+//   • `return` in either lambda returns from the ENCLOSING FUNCTION — the early exit `@while` had;
 //   • an enclosing `.loop`'s `h.break` still breaks THAT loop from inside the body.
-// To stop the count loop itself and carry on after it, use the `_while` pair: the body answers
-// "keep going?" and the call reports the index it stopped on.
+// To stop the loop itself and carry on after it, answer `false` from `keep` (or from a `_while` body)
+// and read the cursor the call reports.
 //
-// `T` is the index type, taken from the bound, so `v.len.times(…)` iterates at whatever width `len`
-// has. Step is fixed at 1 — a cursor that consumes a variable number of positions per step (a lexer)
-// still needs `@while`. For a materialised `[i64]` of the same numbers, when a real slice has to be
-// handed on, use the allocator-threaded `range_in`/`range_from_in`/`range_step_in` below.
-// `lo` up to but excluding `hi`; `hi <= lo` runs the body zero times.
-upto*<T> = (lo: T, hi: T, body: (T) void) void {
-    i := lo
-    @while (i < hi) {
-        body(i)
-        i = i + 1
-    }
-}
-// `upto` that can stop early: `body` answers "keep going?". Reports the index it stopped ON, or `hi`
-// when the body never said stop (so `stopped < hi` means "exited early", and an empty range gives `lo`).
-upto_while*<T> = (lo: T, hi: T, body: (T) bool) T {
-    i := lo
-    go := true
-    @while (go && i < hi) {
-        go = body(i)
-        go.then({
-            i = i + 1
-        })
+// `T` is the cursor type, taken from the seed, so a scan over `v.len` runs at whatever width `len` has.
+// For a materialised `[i64]` of a range's numbers, when a real slice has to be handed on, use the
+// allocator-threaded `range_in`/`range_from_in`/`range_step_in` in std.collections.iter.
+// THE loop. Carry `from`, advance it with `next`, for as long as `keep` answers true. `keep` sees the
+// cursor BEFORE each step, so a false first answer runs `next` zero times, and the reported cursor is
+// the first one `keep` rejected. `next` may do the iteration's work as well as move — an effect that
+// must not run on the failing test belongs there, not in `keep`.
+step_while*<T> = (from: T, keep: (T) bool, next: (T) T) T {
+    i := from
+    @while (keep(i)) {
+        i = next(i)
     }
     i
 }
+// `step_while` for the step every scanner uses: `+ 1`. Reports the first position `keep` rejected.
+advance_while*<T> = (from: T, keep: (T) bool) T { from.step_while(keep, (i) { i + 1 }) }
+// The unbounded loop: run `body` until it answers false. `body` sees the 0-based iteration ordinal and
+// runs AT LEAST ONCE — there is nothing to test before the first pass — so this is the shape of
+// `done := false  @while (done == false) { … }`, not of a guarded scan. Reports how many passes ran.
+repeat_while* = (body: (i64) bool) i64 {
+    go := true
+    zero: i64 := 0
+    zero.step_while((n) { go }, (n) {
+        go = body(n)
+        n + 1
+    })
+}
+// `lo` up to but excluding `hi`; `hi <= lo` runs the body zero times.
+upto*<T> = (lo: T, hi: T, body: (T) void) void {
+    lo.step_while((i) { i < hi }, (i) {
+        body(i)
+        i + 1
+    })
+}
+// `upto` that can stop early: `body` answers "keep going?". Reports the index it stopped ON, or `hi`
+// when the body never said stop (so `stopped < hi` means "exited early", and an empty range gives `lo`).
+upto_while*<T> = (lo: T, hi: T, body: (T) bool) T { lo.advance_while((i) { i < hi && body(i) }) }
 // `0` up to but excluding `n` — the count loop. `n <= 0` runs the body zero times.
 times*<T> = (n: T, body: (T) void) void {
     zero: T := 0
