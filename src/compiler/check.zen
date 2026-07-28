@@ -7,7 +7,7 @@
 { cbuf, vref, cond, call_at, call_full, slett, sexpr, block, stmts_diverge, fnt_from_func_in,
   fntype, subst_ty_in, no_tys, expr_null, tgeneric, ti32, ti64, tu8, tf64, tbool, tstring_cstr,
   tstring_literal, tnamed, tnode, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr,
-  gstr_string, gstr_push, gstr_append, gstr_finish } = compiler.genc
+  gstr_string, gstr_push, gstr_append, gstr_finish, acquire_or_die, acquire_or_die } = compiler.genc
 { mangle_str_in, impl_cname_in } = compiler.mangle
 { Malloc } = std.mem.alloc
 { exports_get, alias_prefixes_get, module_sigs_get } = compiler.parse
@@ -576,7 +576,7 @@ build_decl_index_vis* = (a: MutPtr<Malloc>, decls: [Decl], vis: UfcsVis) DeclInd
     idx.vis = vis
     idx
 }
-ibuf = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire((n + 1) * sizeof(i64)), n) }
+ibuf = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire_or_die((n + 1) * sizeof(i64)), n) }
 // O(1) indexed generic-decl lookups (same last-match sentinels as the linear gstruct_of/find_genenum).
 // Variable environment: params plus prior lets, as a cons-list.
 VList*: VNil | VCons(VCell)
@@ -674,7 +674,7 @@ Env*: {
         atys[i]
     }
     call_targ = (env: Env, f: Func, args: [Expr], tp: string_view) Ty {
-        raw := env.a.acquire(args.len * sizeof(Ty) + args.len)
+        raw := env.a.acquire_or_die(args.len * sizeof(Ty) + args.len)
         atys: [Ty] := slice(raw, args.len)
         done: [u8] := slice(raw.offset(args.len * sizeof(Ty)), args.len)
         args.loop((h, i, x) {
@@ -849,7 +849,7 @@ Env*: {
     call_targs_r = (env: Env, f: Func, args: [Expr], etargs: [Ty], rty0: Ty, has0: bool) [Ty] {
         buf := cbuf<Ty>(env.a, f.tparams.len)
         // one lazy arg-type memo shared by every tparam's scans, in a single allocation.
-        raw := env.a.acquire(args.len * sizeof(Ty) + args.len)
+        raw := env.a.acquire_or_die(args.len * sizeof(Ty) + args.len)
         atys: [Ty] := slice(raw, args.len)
         done: [u8] := slice(raw.offset(args.len * sizeof(Ty)), args.len)
         args.loop((h, i, x) {
@@ -884,7 +884,7 @@ Env*: {
 // O(1) indexed lookups, replacing the O(n) decls scans. `the_func`/`fn_ret`/etc. linear forms below
 // remain for the few decls-only callers (template inlining, trait conformance) that lack an Env.
 // Heap-node helpers. c* names avoid flat-TU collisions with parser helpers.
-cebuf*<A> = (a: MutPtr<A>, n: i64) [Expr] { slice(a.acquire(n * sizeof(Expr)), n) }
+cebuf*<A> = (a: MutPtr<A>, n: i64) [Expr] { slice(a.acquire_or_die(n * sizeof(Expr)), n) }
 cenode*<A> = (a: MutPtr<A>, v: Expr) Ptr<Expr> {
     buf := a.cebuf(1)
     buf[0] = v
@@ -898,7 +898,7 @@ var_call = (a: MutPtr<Malloc>, v: VarData, args: [Expr]) Ptr<Expr> {
     a.cenode(call_at(v.name, args, v.pos))
 }
 // Heap-own a Ty so Ptr<Ty> fields do not dangle.
-vlbuf = (a: MutPtr<Malloc>) [VList] { slice(a.acquire(sizeof(VList)), 1) }
+vlbuf = (a: MutPtr<Malloc>) [VList] { slice(a.acquire_or_die(sizeof(VList)), 1) }
 vlnode = (a: MutPtr<Malloc>, v: VList) Ptr<VList> {
     buf := a.vlbuf()
     buf[0] = v
@@ -2293,7 +2293,7 @@ inline_lambda* = (
 }
 // Trait default methods are materialized for impls that omit them.
 pbuf* = (a: MutPtr<Malloc>, n: i64) [Param] {
-    slice(a.acquire(n * sizeof(Param) + sizeof(Param)), n)
+    slice(a.acquire_or_die(n * sizeof(Param) + sizeof(Param)), n)
 }
 // Shared by resolve_module and check_validate.
 empty_params* = () [Param] { slice(null_ptr(), 0) }

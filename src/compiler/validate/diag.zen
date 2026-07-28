@@ -167,6 +167,7 @@ KPTRWRITE* = () i32 { 21 }    // a write or writable-view construction through r
 KINFINITETYPE* = () i32 { 22 }    // a struct/enum that contains ITSELF by value (transitively) — infinite size
 KNULLDEREF* = () i32 { 23 }    // a load/store/offset through a nullable `RawPtr<T>` (T != u8) not proven non-null
 KNOTCALLABLE* = () i32 { 24 }    // a call whose target name IS defined but holds a non-function value (a scalar/struct), so it cannot be called
+KALLOCNULL* = () i32 { 59 }    // an ALLOCATOR result (`RawPtr<u8>` from acquire/resize/malloc/…) dereferenced with no null proof — the provenance rule `RawPtr<u8>`'s type-level exemption cannot express (compiler.validate.nullalloc)
 KFALLTHROUGH* = () i32 { 25 }    // a non-void function body that ends in a no-value statement (let/assign/loop) — no produced value
 KVBREAK* = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase` statement break (the split-statement shape)
 KMAINPARAMS* = () i32 { 30 }    // `main` declared with parameters — the OS entry calls zen_main() with none, so they'd read garbage
@@ -427,6 +428,13 @@ diag_info = (code: i32) DiagInfo {
             kind: "null-deref",
             message: "`RawPtr<T>` may be null; deref requires a null-check first",
             hint: "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref",
+        )
+    })
+    (code == 59).then({
+        return DiagInfo(
+            kind: "alloc-null",
+            message: "allocation result may be null; this dereferences it without checking",
+            hint: "handle the failure as a value (`a.try_acquire(n).match({ .Ok(p) => …, .Err(e) => … })`, or `ok_ptr(p)`), test it (`p.is_null()`), or make the failure a loud panic with `assert_nonnull(…)`",
         )
     })
     (code == 24).then({

@@ -2,7 +2,7 @@
 // Split out of compiler.parse_expr (god-file split); pure move, no logic changes.
 { ArmData, Expr, Stmt } = compiler.ast.ast_types
 { arm, arm_at, bin, bin_at, block, call, call_at, cond, cond_at, cond_oa, ematch, lit, member,
-  sexpr, slet, sret, vref } = compiler.genc
+  sexpr, slet, sret, vref, acquire_or_die, acquire_or_die } = compiler.genc
 { payload_fname } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
 { at } = std.text.ascii
@@ -16,7 +16,7 @@
 { PExpr } = compiler.parse_expr
 // A one-statement `[Stmt]` holding `return v` — so `=> return v` lowers exactly like `=> { return v }`.
 ret_arm_stmts = (a: MutPtr<Malloc>, v: Ptr<Expr>) [Stmt] {
-    buf := slice(a.acquire(sizeof(Stmt)), 1)
+    buf := slice(a.acquire_or_die(sizeof(Stmt)), 1)
     buf[0] = sret(v)
     buf
 }
@@ -526,7 +526,7 @@ subj_name* = (e: Ptr<Expr>) string_view {
     })
 }
 // Variant match arms; compiler.check fills the enum name.
-arm_buf = (a: MutPtr<Malloc>) [ArmData] { slice(a.acquire(1024 * sizeof(ArmData)), 1024) }
+arm_buf = (a: MutPtr<Malloc>) [ArmData] { slice(a.acquire_or_die(1024 * sizeof(ArmData)), 1024) }
 take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }
 // A comma-separated payload binder list `(x, y, …)` — one entry for a single binder, N for a destructure.
 BindList: {
@@ -539,7 +539,7 @@ BindList: {
 NameSlot: {
     s: string_view,
 }
-bind_buf = (a: MutPtr<Malloc>) [string_view] { slice(a.acquire(64 * sizeof(NameSlot)), 64) }
+bind_buf = (a: MutPtr<Malloc>) [string_view] { slice(a.acquire_or_die(64 * sizeof(NameSlot)), 64) }
 fill_binds = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [string_view], i: i32) BindList {
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -584,7 +584,7 @@ fill_destr = (a: MutPtr<Malloc>, bl: BindList, stm: [Stmt], k: i32) void {
 }
 destr_body = (a: MutPtr<Malloc>, bl: BindList, body: Ptr<Expr>) Ptr<Expr> {
     n := bl.count
-    stm := slice(a.acquire((n + 1) * sizeof(Stmt)), n + 1)
+    stm := slice(a.acquire_or_die((n + 1) * sizeof(Stmt)), n + 1)
     a.fill_destr(bl, stm, 0)
     stm[n] = sexpr(body)
     a.enode(block(stm))

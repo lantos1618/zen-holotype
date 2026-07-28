@@ -2,7 +2,7 @@
 // Expressions, statements, and types live in parse_expr/parse_stmt/parse_type.
 { Expr, Func, Stmt, Param, Ty, Decl } = compiler.ast.ast_types
 { param, gsdef_at, genumdef_at, dfunc, dstruct, denum, dforeign, dimport_at, dgenstruct, dgenenum,
-  dglobal, dglobal_at, dglobal_tl_at, dglobal_alias_at, lit, tvoid } = compiler.genc
+  dglobal, dglobal_at, dglobal_tl_at, dglobal_alias_at, lit, tvoid, acquire_or_die, acquire_or_die } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get, lerr_off_get } = compiler.lex
 { slice_any } = compiler.astops
 { at } = std.text.ascii
@@ -213,7 +213,7 @@ decl_is_bad_binding = (src: string_view, pos: i32) bool {
         false => false,
     })
 }
-decl_buf = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire(16384 * sizeof(Decl)), 16384) }
+decl_buf = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire_or_die(16384 * sizeof(Decl)), 16384) }
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // ── EXPORT markers (the `*` after a top-level decl name) ─────────────────────────────────────────
 // `skip_name_star` discards the `*` from the AST, but it is load-bearing (cross-module export +
@@ -235,7 +235,7 @@ exports_buf := no_exports()
 exports_n := 0
 no_exports = () [Param] { slice(null_ptr(), 0) }
 exports_reset = (a: MutPtr<Malloc>) void {
-    exports_buf = slice(a.acquire(16384 * sizeof(Param)), 16384)
+    exports_buf = slice(a.acquire_or_die(16384 * sizeof(Param)), 16384)
     exports_n = 0
 }
 exports_get* = () [Param] { slice(exports_buf.ptr, exports_n) }
@@ -258,7 +258,7 @@ note_export = (name: string_view) void {
 alias_prefix_buf := no_exports()
 alias_prefix_n := 0
 alias_prefixes_reset* = (a: MutPtr<Malloc>) void {
-    alias_prefix_buf = slice(a.acquire(4096 * sizeof(Param)), 4096)
+    alias_prefix_buf = slice(a.acquire_or_die(4096 * sizeof(Param)), 4096)
     alias_prefix_n = 0
     reg_overflow_reset()
 }
@@ -305,7 +305,7 @@ module_sig_buf := no_sigs()
 module_sig_n := 0
 no_sigs = () [SigEntry] { slice(null_ptr(), 0) }
 module_sigs_reset* = (a: MutPtr<Malloc>) void {
-    module_sig_buf = slice(a.acquire(32768 * sizeof(SigEntry)), 32768)
+    module_sig_buf = slice(a.acquire_or_die(32768 * sizeof(SigEntry)), 32768)
     module_sig_n = 0
     reg_overflow_reset()
 }
@@ -344,7 +344,7 @@ skip_path = (src: string_view, pos: i32) i32 {
     dot := src.scan(id.next)
     src.is_dot(dot.tok).then({ src.skip_path(dot.next) }, { id.next })
 }
-import_buf = (a: MutPtr<Malloc>) [Param] { slice(a.acquire(256 * sizeof(Param)), 256) }
+import_buf = (a: MutPtr<Malloc>) [Param] { slice(a.acquire_or_die(256 * sizeof(Param)), 256) }
 ImportEnd: {
     count: i32,
     next: i32,
@@ -602,7 +602,7 @@ read_import_path = (a: MutPtr<Malloc>, src: string_view, pos: i32) ImportPath {
     first := src.scan(pos)
     last := src.path_end_tok(pos)
     n := last.start + last.len - first.tok.start
-    p: RawPtr<u8> := a.acquire(n + 1)
+    p: RawPtr<u8> := a.acquire_or_die(n + 1)
     src.path_copy_into(first.tok.start, p, 0, n)
     p.offset(n).store(0)
     ImportPath(
@@ -805,7 +805,7 @@ named_span = (a: MutPtr<Malloc>, src: string_view, pos: i32, start: i32) DeclSpa
     })
 }
 // Parse impl methods into scratch buffers only to find the block end.
-impl_scratch = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire(1024 * sizeof(Decl)), 1024) }
+impl_scratch = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire_or_die(1024 * sizeof(Decl)), 1024) }
 impl_span_end = (a: MutPtr<Malloc>, src: string_view, pos: i32) i32 {
     ie := a.fill_impl_methods(src, src.skip_to_brace(pos), a.impl_scratch(), 0, a.param_buf(), 0, "", "")
     src.scan(ie.next).next

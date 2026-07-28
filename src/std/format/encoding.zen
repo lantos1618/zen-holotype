@@ -15,8 +15,8 @@
 // DECODE ERRORS ride IoError.Errno with these codes (match `.Errno(c)` to tell them apart), reusing
 // the POSIX numbers whose meaning already fits: a length that can't be a whole codeword, or a byte
 // outside the alphabet (an out-of-place `=` counts as a bad byte).
-{ Allocator } = std.mem.alloc
-{ Result, IoError, ok, err } = std.core.result
+{ Allocator, try_acquire } = std.mem.alloc
+{ Result, IoError, ok, err, expect } = std.core.result
 { view } = std.text.str
 { hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode (centralized in std.text.ascii)
 ENC_BAD_LEN := 22    // EINVAL — input length is not a valid base64/hex codeword multiple
@@ -64,7 +64,10 @@ base64_encode* = (a: Allocator, data: [u8]) string_view {
     n := data.len
     ngroups := (n + 2) / 3
     olen := ngroups * 4
-    out: [u8] := a.acquire(olen + 1).slice(olen + 1)
+    out: [u8] := a
+        .try_acquire(olen + 1)
+        .expect("std.format.encoding: out of memory")
+        .slice(olen + 1)
     oi: i64 := 0
     b0: i64 := 0
     b1: i64 := 0
@@ -215,7 +218,10 @@ base64_decode_in* = (a: Allocator, s: string_view) Result<[u8], IoError> { a.bas
 hex_encode* = (a: Allocator, data: [u8]) string_view {
     n := data.len
     olen := n * 2
-    out: [u8] := a.acquire(olen + 1).slice(olen + 1)
+    out: [u8] := a
+        .try_acquire(olen + 1)
+        .expect("std.format.encoding: out of memory")
+        .slice(olen + 1)
     data.loop((h, i, b) {
         v := b.to_i64()
         out[i * 2] = hex_char(v >> 4)

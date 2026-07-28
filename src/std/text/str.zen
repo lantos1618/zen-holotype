@@ -215,7 +215,9 @@ trim_suffix* = (a: Allocator, s: string_view, suffix: string_view) string_view {
 // and every field are acquired from the caller's allocator (reusing `substr_in` for each copy).
 // an allocator-owned `[T]` of `n` slots, uninitialised. `seed` is unread — it only pins T (sizeof(T)
 // is rewritten per concrete element type at monomorphization). `n == 0` yields an empty slice.
-nbuf*<T> = (a: Allocator, seed: T, n: i64) [T] { slice(a.acquire(n * sizeof(T)), n) }
+nbuf*<T> = (a: Allocator, seed: T, n: i64) [T] {
+    slice(a.try_acquire(n * sizeof(T)).expect("std.text.str: out of memory"), n)
+}
 // split `s` into the `sep`-delimited fields. The field count is (separators + 1), so empty fields are
 // kept: "a,b,c" -> ["a","b","c"]; "a,,b" -> ["a","","b"]; "abc" -> ["abc"]; "" -> [""].
 split_in* = (a: Allocator, s: string_view, sep: u8) [string_view] {
@@ -298,7 +300,7 @@ copy_at = (out: [u8], at: i64, t: string_view) i64 {
 // UTF-8 continuation bytes) is copied verbatim. to_upper("hi!") == "HI!".
 to_lower_in = (a: Allocator, s: string_view) string_view {
     sv := s.view()
-    out: [u8] := a.acquire(sv.len + 1).slice(sv.len + 1)
+    out: [u8] := a.try_acquire(sv.len + 1).expect("std.text.str: out of memory").slice(sv.len + 1)
     sv.loop((h, i, b) {
         out[i] = b.to_ascii_lower()
     })
@@ -308,7 +310,7 @@ to_lower_in = (a: Allocator, s: string_view) string_view {
 to_lower* = (a: Allocator, s: string_view) string_view { a.to_lower_in(s) }
 to_upper_in = (a: Allocator, s: string_view) string_view {
     sv := s.view()
-    out: [u8] := a.acquire(sv.len + 1).slice(sv.len + 1)
+    out: [u8] := a.try_acquire(sv.len + 1).expect("std.text.str: out of memory").slice(sv.len + 1)
     sv.loop((h, i, b) {
         out[i] = b.to_ascii_upper()
     })
@@ -321,7 +323,7 @@ repeat_in = (a: Allocator, s: string_view, n: i64) string_view {
     sv := s.view()
     cnt := (n < 0).then({ 0 }, { n })
     total := sv.len * cnt
-    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    out: [u8] := a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
     out.loop((h, i, b) {
         (i < total).match ({
             true  => {
@@ -346,7 +348,7 @@ join_in* = (a: Allocator, parts: [string_view], sep: string_view) string_view {
     })
     seps := (np > 0).then({ np - 1 }, { 0 })
     total = total + sep.len() * seps
-    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    out: [u8] := a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
     pos: i64 := 0
     parts.loop((h, i, p) {
         (i > 0).then({
@@ -376,7 +378,7 @@ cat_in* = (a: Allocator, x: string_view, y: string_view) string_view {
     xv := x.view()
     yv := y.view()
     total := xv.len + yv.len
-    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    out: [u8] := a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
     p := out.copy_at(0, x)
     out.copy_at(p, y)
     out[total] = 0
@@ -407,7 +409,10 @@ replace_in = (a: Allocator, s: string_view, from: string_view, to: string_view) 
         false => {
             cnt := sv.count_occ(fv)    // empty pattern: unchanged copy (no infinite loop)
             total := sv.len + cnt * (to.len() - fv.len)
-            out: [u8] := a.acquire(total + 1).slice(total + 1)
+            out: [u8] := a
+                .try_acquire(total + 1)
+                .expect("std.text.str: out of memory")
+                .slice(total + 1)
             pos: i64 := 0
             skip: i64 := 0
             sv.loop((h, i, b) {
@@ -438,7 +443,7 @@ pad_left_in = (a: Allocator, s: string_view, width: i64, fill: u8) string_view {
     sv := s.view()
     pad := (width > sv.len).then({ width - sv.len }, { 0 })
     total := pad + sv.len
-    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    out: [u8] := a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
     out.loop((h, i, b) {
         (i < total).match ({
             true  => {
@@ -459,7 +464,7 @@ pad_right_in = (a: Allocator, s: string_view, width: i64, fill: u8) string_view 
     sv := s.view()
     pad := (width > sv.len).then({ width - sv.len }, { 0 })
     total := sv.len + pad
-    out: [u8] := a.acquire(total + 1).slice(total + 1)
+    out: [u8] := a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
     out.loop((h, i, b) {
         (i < total).match ({
             true  => {

@@ -6,7 +6,8 @@
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
 { Param, Ty, Field, StructDecl } = compiler.ast.ast_types
 { param, pvariadic, field, sdef, fntype, tgeneric, ti32, ti64, tu8, tf64, tbool, tstring_view,
-  tstring_cstr, tstring_literal, tvoid, tnamed, tptr_k, tslice, k_raw_ptr, k_ptr, k_mut_ptr } = compiler.genc
+  tstring_cstr, tstring_literal, tvoid, tnamed, tptr_k, tslice, k_raw_ptr, k_ptr, k_mut_ptr,
+  acquire_or_die, acquire_or_die } = compiler.genc
 { mangle_str_in, mangle_anon_in, payload_fname } = compiler.mangle
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.ascii
@@ -153,7 +154,7 @@ anon_decls := no_sdecls()
 anon_n := 0
 no_sdecls = () [StructDecl] { slice(null_ptr(), 0) }
 anon_reset* = (a: MutPtr<Malloc>) void {
-    anon_decls = slice(a.acquire(4096 * sizeof(StructDecl)), 4096)
+    anon_decls = slice(a.acquire_or_die(4096 * sizeof(StructDecl)), 4096)
     anon_n = 0
 }
 anon_decls_get* = () [StructDecl] { slice(anon_decls.ptr, anon_n) }
@@ -273,7 +274,7 @@ TyEnd*: {
     ty: Ty,
     next: i32,
 }
-tybuf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(sizeof(Ty)), 1) }
+tybuf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire_or_die(sizeof(Ty)), 1) }
 tynode = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
     buf := a.tybuf()
     buf[0] = t
@@ -421,7 +422,7 @@ fill_anon_field = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Field], 
 // QUALIFIED type name (`io.Writer`) verbatim — the `.` and the segments are contiguous in source.
 lexeme_range = (a: MutPtr<Malloc>, src: string_view, start: i32, endpos: i32) string_view {
     n := endpos - start
-    p := a.acquire(n + 1)
+    p := a.acquire_or_die(n + 1)
     n.times((i) { store(offset(p, i), at(src, start + i)) })
     store(offset(p, n), 0)
     cstr(p)
@@ -525,7 +526,7 @@ parse_generic_ty = (a: MutPtr<Malloc>, src: string_view, nameTok: Scan, pos: i32
 }
 // a function type `(A, T) R`: a `)`-terminated type list, then the return type. Only ever a
 // parameter type — a function with one is an inline template (lowered at the call site).
-ty_buf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire(256 * sizeof(Ty)), 256) }    // cap 256
+ty_buf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire_or_die(256 * sizeof(Ty)), 256) }    // cap 256
 take_tys = (buf: [Ty], n: i32) [Ty] { slice(buf.ptr, n) }
 fill_tys = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Ty], i: i32) PEnd {
     sc := src.scan(pos)
@@ -621,7 +622,7 @@ skip_to_lparen* = (src: string_view, pos: i32) i32 {
         _    => src.is_lparen(sc.tok).then({ sc.next }, { src.skip_to_lparen(sc.next) }),
     })
 }
-param_buf* = (a: MutPtr<Malloc>) [Param] { slice(a.acquire(1024 * sizeof(Param)), 1024) }    // cap 1024
+param_buf* = (a: MutPtr<Malloc>) [Param] { slice(a.acquire_or_die(1024 * sizeof(Param)), 1024) }    // cap 1024
 take_params* = (buf: [Param], n: i64) [Param] { slice(buf.ptr, n) }    // exact length
 fill_params* = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [Param], i: i32) PEnd {
     sc := src.scan(pos)

@@ -497,9 +497,15 @@ null_deref_kind* = (env: Env, c: CallData) i32 {
 // pointer. A NON-pointer arg (e.g. a scalar) makes the result's `pointee_of` collapse to void and the
 // emitted C drops a value into a void slot ("void value not ignored"). Reject only genuinely
 // non-pointer args — a redundant `assert_nonnull` on an already-non-null `Ptr`/`MutPtr` is harmless.
+// UNKNOWN stays lenient: inside a generic `f<A>(a: MutPtr<A>, …)` the allocator's `acquire` return
+// type is only known after mono, so `assert_nonnull(a.acquire(n))` infers to nothing here — rejecting
+// it would forbid the one guard a generic allocator helper can write.
 assert_nonnull_badarg = (env: Env, c: CallData) bool {
     (c.fn == "assert_nonnull" && c.args.len >= 1).match ({
-        true  => env.infer_expr(c.args[0].addr()).is_ptr_ty_g() == false,
+        true  => {
+            argty := env.infer_expr(c.args[0].addr())
+            env.unknown_ty(argty).then({ false }, { argty.is_ptr_ty_g() == false })
+        },
         false => false,
     })
 }

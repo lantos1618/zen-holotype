@@ -11,7 +11,8 @@
 { view } = std.text.str
 { Malloc } = std.mem.alloc
 { Ty, Field, FnTData } = compiler.ast.ast_types
-{ k_mut_ptr, k_raw_ptr, gstr_string, gstr_append, gstr_finish, write_str, finish_buf, acquire } = compiler.genc
+{ k_mut_ptr, k_raw_ptr, gstr_string, gstr_append, gstr_finish, write_str, finish_buf, acquire,
+  acquire_or_die, acquire_or_die } = compiler.genc
 { dec_digit } = compiler.astops
 // the monomorphized C name of a generic instance: `Box<i32>` -> `Box_i32`, `Vec<Ptr<u8>>` ->
 // `Vec_ptr_u8`. Pointer KINDS get distinct fragments (`rawptr_`/`ptr_`/`mutptr_`) even though all
@@ -112,7 +113,7 @@ mangle_semantic_in* = (a: MutPtr<Malloc>, base: string_view, args: [Ty]) string_
 // pipeline resolves `ns.Type` to `Type` BEFORE parsing, so only fmt reaches the dotted form.
 dotted_name_in* = (a: MutPtr<Malloc>, ns: string_view, name: string_view) string_view {
     n := ns.view().len + 1 + name.view().len
-    buf: RawPtr<u8> := a.acquire(n + 1)
+    buf: RawPtr<u8> := a.acquire_or_die(n + 1)
     end := buf.write_str(buf.write_str(buf.write_str(0, ns), "."), name)
     buf.finish_buf(end)
 }
@@ -140,7 +141,7 @@ anon_write_fields = (dst: RawPtr<u8>, at: i64, fields: [Field]) i64 {
 }
 mangle_anon_in* = (a: MutPtr<Malloc>, fields: [Field]) string_view {
     n := 6 + fields.anon_fields_len()    // "__anon" = 6 bytes
-    buf: RawPtr<u8> := a.acquire(n + 1)
+    buf: RawPtr<u8> := a.acquire_or_die(n + 1)
     end := buf.anon_write_fields(buf.write_str(0, "__anon"), fields)
     buf.finish_buf(end)
 }
@@ -164,7 +165,7 @@ pf_write = (dst: RawPtr<u8>, at: i64, v: i32) i64 {
 // callee to (see compiler.parse_expr.parse_chained_call). `pos` is the call's byte offset, unique
 // per source, so sibling/nested chained calls never collide.
 chain_tmp_name* = (a: MutPtr<Malloc>, pos: i32) string_view {
-    buf: RawPtr<u8> := a.acquire(32)
+    buf: RawPtr<u8> := a.acquire_or_die(32)
     buf.finish_buf(buf.pf_write(buf.write_str(0, "__chaintmp_"), pos))
 }
 // A unique local name `__comptmp_<pos>_<k>` for a hoisted compound-assign index (see the
@@ -172,11 +173,11 @@ chain_tmp_name* = (a: MutPtr<Malloc>, pos: i32) string_view {
 // `k` the index ordinal within the place, so sibling hoists in one statement never collide; the `__`
 // prefix keeps it out of the user namespace (same convention as chain_tmp_name).
 comp_tmp_name* = (a: MutPtr<Malloc>, pos: i32, k: i32) string_view {
-    buf: RawPtr<u8> := a.acquire(40)
+    buf: RawPtr<u8> := a.acquire_or_die(40)
     buf.finish_buf(buf.pf_write(buf.write_str(buf.pf_write(buf.write_str(0, "__comptmp_"), pos), "_"), k))
 }
 payload_fname* = (a: MutPtr<Malloc>, idx: i32) string_view {
-    buf: RawPtr<u8> := a.acquire(24)
+    buf: RawPtr<u8> := a.acquire_or_die(24)
     buf.finish_buf(buf.pf_write(buf.write_str(0, "_"), idx))
 }
 // the mangled C name of a trait method's concrete impl: `impl_<Trait>_<Type>_<method>` — so two
@@ -189,7 +190,7 @@ impl_cname_in* = (
     method: string_view,
 ) string_view {
     n := 5 + trname.view().len + 1 + ty.view().len + 1 + method.view().len
-    buf: RawPtr<u8> := a.acquire(n + 1)
+    buf: RawPtr<u8> := a.acquire_or_die(n + 1)
     p1 := buf.write_str(0, "impl_")
     p2 := buf.write_str(p1, trname)
     p3 := buf.write_str(p2, "_")

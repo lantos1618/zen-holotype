@@ -273,6 +273,26 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
+            src: "{ malloc } = std.mem.alloc\ntest* = () i32 { p := malloc(64)\n b: [i64] := p.slice(1)\n b[0] = 1\n 0 }",
+            should_pass: false,
+            kind: "alloc-null",
+        ),
+        VerdictCase(
+            src: "{ malloc } = std.mem.alloc\n{ is_null } = std.core.ptr\ntest* = () i32 { p := malloc(64)\n p.is_null().match({ true => 1, false => { b: [i64] := p.slice(1)\n b[0] = 1\n 0 } }) }",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "{ malloc } = std.mem.alloc\ntest* = () i32 { p := assert_nonnull(malloc(64))\n b: [i64] := p.slice(1)\n b[0] = 1\n 0 }",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "{ Malloc, try_acquire } = std.mem.alloc\n{ expect } = std.core.result\ntest* = () i32 { m := Malloc(_: 0)\n p := m.addr().try_acquire(64).expect(\"oom\")\n b: [i64] := p.slice(1)\n b[0] = 1\n 0 }",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
             src: "test* = () i32 { x: u8 := 9\n p: RawPtr<u8> := x.addr()\n to_i32(load(p)) }",
             should_pass: true,
             kind: "",
@@ -538,12 +558,12 @@ harness_verdict_run* = () i32 {
             kind: "arity",
         ),
         VerdictCase(
-            src: "test* = () i64 { p := malloc(8)  store_i64(p, 7)  load_i64(p) }",
+            src: "test* = () i64 { p := assert_nonnull(malloc(8))  store_i64(p, 7)  load_i64(p) }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "test* = () i64 { p := malloc(8)  q := p.offset(8)  load_i64(p) }",
+            src: "test* = () i64 { p := assert_nonnull(malloc(8))  q := p.offset(8)  load_i64(p) }",
             should_pass: true,
             kind: "",
         ),
@@ -1268,6 +1288,10 @@ harness_verdict_run* = () i32 {
             kind: "trait-bound",
         ),
     ])
+    // alloc-null (compiler.validate.nullalloc): the PROVENANCE rule that `RawPtr<u8>`'s type-level
+    // exemption cannot express. The allocator's result is `RawPtr<u8>` exactly like `null_ptr()`, so
+    // these four cases pin what the flow rule sees: an allocation dereferenced bare is rejected, and
+    // each of the three discharges (is_null test / assert_nonnull / try_acquire-as-value) is accepted.
     // the SAME violated bound, but the call sits inside a SLICE LITERAL / a LAMBDA body. Both
     // used to pass: kvb_expr_kind's hand-written arm list had no `.SliceLit` and no `.Lambda`
     // arm, so its `_ => 0` default swallowed the whole subtree. It now delegates its default to
@@ -2620,7 +2644,7 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "halloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    p := a.acquire(16)\n    q := p\n    store_i64(q, 42)\n    r := to_i32(load_i64(p))\n    a.release(p)\n    r\n}",
+            src: "halloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    p := assert_nonnull(a.acquire(16))\n    q := p\n    store_i64(q, 42)\n    r := to_i32(load_i64(p))\n    a.release(p)\n    r\n}",
             should_pass: true,
             kind: "",
         ),

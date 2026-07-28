@@ -3,7 +3,7 @@
 { Expr, Field, FieldInit, Param, Ty } = compiler.ast.ast_types
 { bin_at, call_at, call_targs_at, cond, field, finit, lam_r, lit, mkenumg, mkstruct, mkstruct_at,
   mkstructg_at, mktagg, param, raw_call_at, slit, tf64, ti32, ti64, tnamed, tstring_literal, tu8,
-  tvoid, vref, vref_at } = compiler.genc
+  tvoid, vref, vref_at, acquire_or_die, acquire_or_die } = compiler.genc
 { mangle_anon_in, mangle_str_in } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
 { at, is_upper } = std.text.ascii
@@ -261,7 +261,7 @@ anon_scan_open = (src: string_view, sc: Scan, depth: i32) i32 {
         }),
     })
 }
-afield_buf* = (a: MutPtr<Malloc>) [Field] { slice(a.acquire(256 * sizeof(Field)), 256) }
+afield_buf* = (a: MutPtr<Malloc>) [Field] { slice(a.acquire_or_die(256 * sizeof(Field)), 256) }
 // Syntactically infer a literal field VALUE's type, mirroring the checker's infer_expr for the forms a
 // struct-literal field can take directly (int/byte/float/string literals and nested struct literals). The
 // structural NAME is names-only, so this only feeds the synthesized StructDecl's C field types; a value the
@@ -340,7 +340,9 @@ fill_ainit = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i
     })
 }
 // Paren struct construction: `Name(field: value, ...)`.
-finit_buf* = (a: MutPtr<Malloc>) [FieldInit] { slice(a.acquire(1024 * sizeof(FieldInit)), 1024) }
+finit_buf* = (a: MutPtr<Malloc>) [FieldInit] {
+    slice(a.acquire_or_die(1024 * sizeof(FieldInit)), 1024)
+}
 take_inits* = (buf: [FieldInit], n: i32) [FieldInit] { slice(buf.ptr, n) }
 parse_paren_struct_lit = (
     a: MutPtr<Malloc>,
@@ -397,8 +399,8 @@ fill_pinit = (a: MutPtr<Malloc>, src: string_view, pos: i32, buf: [FieldInit], i
     })
 }
 // Argument and slice-literal buffers; slice literals need more room for data tables.
-arg_buf* = (a: MutPtr<Malloc>) [Expr] { slice(a.acquire(256 * sizeof(Expr)), 256) }
-slit_buf = (a: MutPtr<Malloc>) [Expr] { slice(a.acquire(2048 * sizeof(Expr)), 2048) }
+arg_buf* = (a: MutPtr<Malloc>) [Expr] { slice(a.acquire_or_die(256 * sizeof(Expr)), 256) }
+slit_buf = (a: MutPtr<Malloc>) [Expr] { slice(a.acquire_or_die(2048 * sizeof(Expr)), 2048) }
 take_args* = (buf: [Expr], n: i32) [Expr] { slice(buf.ptr, n) }
 parse_call = (a: MutPtr<Malloc>, src: string_view, name: string_view, lp: Scan, at: i32) PExpr {
     buf := a.arg_buf()
