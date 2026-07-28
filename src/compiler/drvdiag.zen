@@ -19,6 +19,7 @@
   check_module_unknown_type_diagnostic_from_source, check_module_ffi_diagnostic_from_source,
   check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
   check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
+{ check_module_nullalloc_diagnostic_from_source } = compiler.validate.nullalloc
 { diag_user_span, diag_line_span, DiagSpan, diagnostic_span_width, render_diagnostic } = compiler.diagnostic
 { js_unsupported_get, js_unsupported_pos_get } = compiler.backend.js.js_expr
 { ResolvedProgram, ModuleEntry, eprint, fregion_find, fregion_src_line, undefined_name_hint } = compiler.resolve
@@ -363,7 +364,28 @@ report_check* = (
             (n > DIAG_CAP()).then({
                 mp.emit_more_trailer(n - DIAG_CAP())
             })
-            n
+            (n == 0).then({ mp.report_alloc_null(raw, decls, rp, path, user) }, { n })
+        },
+    })
+}
+// alloc-null runs DEAD LAST — after every spec channel AND the whole main batch. It is a USE-site
+// rule about a value some OTHER defect may already explain: an arity/not-callable/ownership error on
+// the same `store_i64(p)` names the real mistake, and reporting "the allocation may be null" instead
+// would bury it. Only a program that is otherwise completely clean gets judged on this.
+report_alloc_null = (
+    mp: MutPtr<Malloc>,
+    raw: [Decl],
+    decls: [Decl],
+    rp: ResolvedProgram,
+    path: string_view,
+    user: string_view,
+) i32 {
+    na := mp.check_module_nullalloc_diagnostic_from_source(raw, rp.flat)
+    (na.code == 0).match ({
+        true  => 0,
+        false => {
+            mp.emit_one(raw, decls, rp, path, user, na)
+            na.count
         },
     })
 }

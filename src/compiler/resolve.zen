@@ -2,7 +2,8 @@
 // Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 { at, block_comment_at, is_alpha, is_alnum, is_blank, line_comment_at, rawstr_at } = std.text.ascii
 { Decl } = compiler.ast.ast_types
-{ gstr_string, gstr_push, gstr_append, gstr_append_bytes, gstr_finish } = compiler.genc
+{ gstr_string, gstr_push, gstr_append, gstr_append_bytes, gstr_finish, acquire_or_die,
+  acquire_or_die } = compiler.genc
 { gstr_int } = compiler.astops    // the compiler-side decimal writer (res_udec delegates to it)
 { decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset, note_module_sig,
   module_sigs_reset, module_sig_flags, module_sig_alias_stamped } = compiler.parse
@@ -613,7 +614,7 @@ guard_module = (
     file_exists(path).then({ 0 }, { a.fail_unknown_module(inpath, id, path) })
 }
 module_entry_buf = (a: MutPtr<Malloc>, n: i64) [ModuleEntry] {
-    slice(a.acquire(n * sizeof(ModuleEntry)), n)
+    slice(a.acquire_or_die(n * sizeof(ModuleEntry)), n)
 }
 // Append an entry, doubling the buffer when full (DFS preorder is preserved: an entry is pushed
 // BEFORE its own import edges are followed, exactly the order the old fill pass wrote).
@@ -1735,7 +1736,7 @@ module_body = (
     hs.gstr_finish(a)
 }
 parsed_module_buf = (a: MutPtr<Malloc>, n: i64) [ParsedModule] {
-    slice(a.acquire(n * sizeof(ParsedModule)), n)
+    slice(a.acquire_or_die(n * sizeof(ParsedModule)), n)
 }
 parse_module_entry = (
     a: MutPtr<Malloc>,
@@ -1777,7 +1778,9 @@ resolve_parsed_program* = (
 ) ParsedProgram {
     a.parse_resolved_program(a.resolve_program_data(root, progdir, inpath, mainsrc), inpath)
 }
-parsed_decl_buf = (a: MutPtr<Malloc>, n: i64) [Decl] { slice(a.acquire(n * sizeof(Decl)), n) }
+parsed_decl_buf = (a: MutPtr<Malloc>, n: i64) [Decl] {
+    slice(a.acquire_or_die(n * sizeof(Decl)), n)
+}
 append_decls_to = (dst: [Decl], at: i64, src: [Decl]) i64 {
     j := at
     src.loop((h, i, d) {
@@ -1845,7 +1848,7 @@ no_uregions = () [UserRegion] { slice(null_ptr(), 0) }
 uregion_buf := no_uregions()
 uregion_n := 0
 uregions_reset = (a: MutPtr<Malloc>) void {
-    uregion_buf = slice(a.acquire(UREGION_CAP * sizeof(UserRegion)), UREGION_CAP)
+    uregion_buf = slice(a.acquire_or_die(UREGION_CAP * sizeof(UserRegion)), UREGION_CAP)
     uregion_n = 0
 }
 note_uregion = (id: string_view, lo: i64, hi: i64) void {
@@ -1878,10 +1881,10 @@ no_ldrops = () [i64] { slice(null_ptr(), 0) }
 ldrop_buf := no_ldrops()    // flattened (start, end) pairs, ascending, from ONE dedup pass
 ldrop_n := 0
 freg_alloc = (a: MutPtr<Malloc>, n: i64) [FlatRegion] {
-    slice(a.acquire(n * sizeof(FlatRegion)), n)
+    slice(a.acquire_or_die(n * sizeof(FlatRegion)), n)
 }
-lsrc_alloc = (a: MutPtr<Malloc>, n: i64) [i32] { slice(a.acquire(n * sizeof(i32)), n) }
-ldrop_alloc = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire(n * sizeof(i64)), n) }
+lsrc_alloc = (a: MutPtr<Malloc>, n: i64) [i32] { slice(a.acquire_or_die(n * sizeof(i32)), n) }
+ldrop_alloc = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire_or_die(n * sizeof(i64)), n) }
 lmap_reset = (a: MutPtr<Malloc>) void {
     freg_buf = a.freg_alloc(64)
     freg_n = 0

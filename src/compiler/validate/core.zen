@@ -1,7 +1,7 @@
 // compiler.validate.core — orchestration: the kv_* validation walk, check_module*, public entry points.
 { ArmData, AssignData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, ImplData, IndexData,
   IndexSetData, LetData, MakeStructData, MatchData, Param, Stmt, StructDecl, Ty } = compiler.ast.ast_types
-{ cbuf, gstr_append, gstr_finish, gstr_string, tvoid } = compiler.genc
+{ cbuf, gstr_append, gstr_finish, gstr_string, tvoid, acquire_or_die, acquire_or_die } = compiler.genc
 { DeclIndex, Env, UfcsVis, arm_env, bind_tparams, build_decl_index, build_decl_index_vis,
   extend_env, is_intrinsic, is_void_ty, loop_env, params_env, ufcs_vis_off } = compiler.check
 { resolve_module } = compiler.check_resolve
@@ -124,7 +124,7 @@ loop_outer_frees = (
 check_module = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     (a.check_module_kind(decls) == 0).then({ 0 }, { 1 })
 }
-check_diagnostic_none = () CheckDiagnostic {
+check_diagnostic_none* = () CheckDiagnostic {
     CheckDiagnostic(
         code: 0,
         kind: "ok",
@@ -1333,7 +1333,7 @@ kv_dup_name_kind = (decls: [Decl]) i32 {
 // Return the first packed diagnostic from the same collector used by batch mode. A one-slot sink
 // preserves first-error behavior without maintaining a second module/function traversal.
 check_module_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    buf: [i32] := slice(a.acquire(sizeof(i32)), 1)
+    buf: [i32] := slice(a.acquire_or_die(sizeof(i32)), 1)
     cnt := a.check_module_kind_all(decls, a.ufcs_vis_off(), buf, 0)
     (cnt == 0).then({ 0 }, { buf[0] })
 }
@@ -1386,7 +1386,7 @@ check_module_batch_vis* = (
 ) [CheckDiagnostic] {
     buf := a.kdiag_buf()
     cnt := a.check_module_kind_all(decls, vis, buf, 0)
-    out := slice(a.acquire(to_i64(cnt) * sizeof(CheckDiagnostic)), to_i64(cnt))
+    out := slice(a.acquire_or_die(to_i64(cnt) * sizeof(CheckDiagnostic)), to_i64(cnt))
     buf.loop((h, i, p) {
         (i < to_i64(cnt)).then({
             out[i] = src.check_diagnostic_from_source(p, 1)

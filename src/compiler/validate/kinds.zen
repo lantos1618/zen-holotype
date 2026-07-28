@@ -3,7 +3,8 @@
   ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData, MethodCallData, Param, Stmt,
   Ty, VariantDef } = compiler.ast.ast_types
 { cbuf, dforeign, gstr_append, gstr_finish, gstr_string, is_expr_null, no_tys, subst_ty_in, tbool,
-  tf64, tgeneric, ti32, ti64, tnamed, tnode, tptr_k, tslice, tstring_view, tu8, tvoid } = compiler.genc
+  tf64, tgeneric, ti32, ti64, tnamed, tnode, tptr_k, tslice, tstring_view, tu8, tvoid,
+  acquire_or_die, acquire_or_die } = compiler.genc
 { impl_cname_in } = compiler.mangle
 { DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params,
   extend_env, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, recv_name, the_func,
@@ -590,7 +591,7 @@ ka_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
 // resolver's desugar produces. Rebuild the flat arg list here (without mutating the shared raw decls,
 // which a later pass still reads in surface form) so the closure/arg checks see the receiver as arg 0.
 ka_mcall_args = (a: MutPtr<Malloc>, mc: MethodCallData) [Expr] {
-    buf := slice(a.acquire((mc.args.len + 1) * sizeof(Expr)), mc.args.len + 1)
+    buf := slice(a.acquire_or_die((mc.args.len + 1) * sizeof(Expr)), mc.args.len + 1)
     buf[0] = load(mc.recv)
     mc.args.loop((h, i, ar) {
         buf[i + 1] = mc.args[i]
@@ -1363,7 +1364,9 @@ ffi_func_msg* = (a: MutPtr<Malloc>, env: Env, f: Func) string_view {
         false => a.ffi_ret_msg(f.name, a.zty(f.ret)),
     }))
 }
-kdiag_buf* = (a: MutPtr<Malloc>) [i32] { slice(a.acquire(KDIAG_CAP() * sizeof(i32)), KDIAG_CAP()) }
+kdiag_buf* = (a: MutPtr<Malloc>) [i32] {
+    slice(a.acquire_or_die(KDIAG_CAP() * sizeof(i32)), KDIAG_CAP())
+}
 // already collected? (dedup: two channels can position the same packed kind at one site)
 kdiag_seen = (buf: [i32], cnt: i32, packed: i32) bool {
     found := false

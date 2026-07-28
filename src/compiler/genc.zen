@@ -13,6 +13,7 @@
 { String } = std.text.string
 { view } = std.text.str
 { Malloc, malloc, realloc } = std.mem.alloc
+{ panic } = std.core.result
 // mangle_str_in lives in compiler.mangle (the Ty→C-name family split out of this file); subst_generic_in
 // re-mangles a nested generic instance after substitution. compiler.mangle imports the shared AST
 // types from compiler.ast.ast_types and this file's buffer helpers back — a cycle the flat
@@ -22,7 +23,7 @@
 // cbuf<T>: allocate a fresh `[T]` buffer of n elements. ONE generic replaces the ~20 per-type
 // `Xbuf = (a, n) [X] { slice(a.acquire(n * sizeof(X)), n) }` copies that used to live across the
 // compiler. T sits only in return position, so callers pass an explicit turbofish: `cbuf<Ty>(a, n)`.
-cbuf*<T> = (a: MutPtr<Malloc>, n: i64) [T] { slice(a.acquire(n * sizeof(T)), n) }
+cbuf*<T> = (a: MutPtr<Malloc>, n: i64) [T] { slice(a.acquire_or_die(n * sizeof(T)), n) }
 // sbyte: the i-th byte of a string_view. ONE accessor replaces the sbyte/jbyte/dsbyte/ffbyte copies.
 sbyte* = (v: string_view, i: i64) u8 { load(offset(v, i)) }
 // pointer KIND tag (safety-goal-D). All three spellings still lower to `T*`; their semantic/mono
@@ -44,6 +45,29 @@ ptr_kw* = (kind: i32) string_view {
 // flatten std.mem.alloc's trait impls still have concrete UFCS targets for Malloc.
 acquire* = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> { (n <= 0).then({ null_ptr() }, { malloc(n) }) }
 resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
+// The compiler's OWN allocations are INFALLIBLE BY CONTRACT, and these two verbs are where that
+// contract is written down. The AST/table/String buffers below are built in expression position from
+// ~50 files and have no error channel to thread a `Result` through; a compiler that cannot allocate
+// also has nothing useful left to do. So allocation failure STOPS here with a named panic
+// (`zen: panic: compiler: out of memory`) instead of handing back a null the caller dereferences —
+// the difference between a diagnosable abort and a segfault, exactly as std.concurrent.pool's
+// `or_die` does for the scheduler's un-Result-able allocations. `n <= 0` is acquire's legal empty
+// allocation (it returns null by design), so it is NOT a failure. Sites that CAN carry the failure as
+// a value should use `try_acquire` instead; these are the ones that cannot.
+acquire_or_die*<A> = (a: MutPtr<A>, n: i64) RawPtr<u8> {
+    p := a.acquire(n)
+    (p == null_ptr() && n > 0).then({
+        panic("compiler: out of memory")
+    })
+    p
+}
+resize_or_die*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+    q := a.resize(p, n)
+    (q == null_ptr() && n > 0).then({
+        panic("compiler: out of memory")
+    })
+    q
+}
 write_str* = (dst: RawPtr<u8>, at: i64, t: string_view) i64 { dst.write_str_at(at, t, 0) }
 write_str_at = (dst: RawPtr<u8>, at: i64, t: string_view, i: i64) i64 {
     k := i
@@ -63,14 +87,14 @@ finish_buf* = (dst: RawPtr<u8>, n: i64) string_view {
 // inliner namespaces inlined locals by their inline-marker chain (see check.inline_marks).
 gstr_string*<A> = (a: MutPtr<A>, cap: i64) String {
     String(
-        ptr: a.acquire(cap),
+        ptr: a.acquire_or_die(cap),
         len: 0,
         cap: cap,
     )
 }
 gstr_grow<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
     String(
-        ptr: a.resize(s.ptr, ncap),
+        ptr: a.resize_or_die(s.ptr, ncap),
         len: s.len,
         cap: ncap,
     )
@@ -748,7 +772,7 @@ cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
 // (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
 ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) string_view {
     n := t.cname_len()
-    buf: RawPtr<u8> := a.acquire(n + 1)
+    buf: RawPtr<u8> := a.acquire_or_die(n + 1)
     buf.finish_buf(buf.cname_write(0, t))
 }
 // ── type substitution (tparam→arg): shared by compiler.check (subst_ty_in/find_genenum) and the

@@ -363,7 +363,7 @@ run_mod_values = (name: string_view, cs: [ModValCase]) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
-    base := malloc(n * 8)
+    base := assert_nonnull(malloc(n * 8))
     cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
@@ -419,7 +419,7 @@ run_mod_deep = (name: string_view, cs: [DeepCase]) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
-    base := malloc(n * 8)
+    base := assert_nonnull(malloc(n * 8))
     cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.base_files)    // fresh per-gid dir + sibling module files
@@ -449,7 +449,7 @@ run_mod_verdicts = (name: string_view, cs: [ModVerdictCase]) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
-    base := malloc(n * 8)
+    base := assert_nonnull(malloc(n * 8))
     cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
@@ -514,7 +514,7 @@ run_mod_emits = (name: string_view, cs: [ModEmitCase]) i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     n := cs.len
-    base := malloc(n * 8)
+    base := assert_nonnull(malloc(n * 8))
     cmds: [string_view] := base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
@@ -926,7 +926,7 @@ harness_modules_run* = () i32 {
                 ),
                 ModFile(
                     name: "p.zen",
-                    src: "heap = std.mem.heap\nright = right\nmain = () i32 {\n  h := heap.gpa()\n  p := h.addr().acquire(8)\n  p.store_i64(30)\n  n := p.load_i64()\n  h.addr().release(p)\n  to_i32(n) + right.default(7)\n}\n",
+                    src: "heap = std.mem.heap\nright = right\nmain = () i32 {\n  h := heap.gpa()\n  p := assert_nonnull(h.addr().acquire(8))\n  p.store_i64(30)\n  n := p.load_i64()\n  h.addr().release(p)\n  to_i32(n) + right.default(7)\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1166,7 +1166,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "c = std.io.c\nmain = () i32 {\n    p := c.malloc(8)\n    store_i64(p, 37)\n    (load_i64(p) == 37).match ({ true => 37, false => 0 })\n}\n",
+                    src: "c = std.io.c\nmain = () i32 {\n    p := assert_nonnull(c.malloc(8))\n    store_i64(p, 37)\n    (load_i64(p) == 37).match ({ true => 37, false => 0 })\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1386,7 +1386,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "rt = std.rt\n{ malloc, free } = std.mem.alloc\ncnt_acq = (s: RawPtr<u8>, n: i64) RawPtr<u8> {\n  s.store_i64(s.load_i64() + 1)\n  malloc(n)\n}\ncnt_rel = (s: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }\ncnt_rsz = (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { p }\nthree = () i32 {\n  a := rt.alloc(8)\n  b := rt.alloc(8)\n  c := rt.alloc(8)\n  rt.release(a)\n  rt.release(b)\n  rt.release(c)\n  0\n}\nmain = () i32 {\n  counter := malloc(8)\n  counter.store_i64(0)\n  crt := rt.mem_rt(cnt_acq, cnt_rsz, cnt_rel, counter)\n  rt.with(crt, three)\n  v := counter.load_i64()\n  free(counter)\n  to_i32(v)\n}\n",
+                    src: "rt = std.rt\n{ malloc, free } = std.mem.alloc\ncnt_acq = (s: RawPtr<u8>, n: i64) RawPtr<u8> {\n  s.store_i64(s.load_i64() + 1)\n  malloc(n)\n}\ncnt_rel = (s: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }\ncnt_rsz = (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { p }\nthree = () i32 {\n  a := rt.alloc(8)\n  b := rt.alloc(8)\n  c := rt.alloc(8)\n  rt.release(a)\n  rt.release(b)\n  rt.release(c)\n  0\n}\nmain = () i32 {\n  counter := assert_nonnull(malloc(8))\n  counter.store_i64(0)\n  crt := rt.mem_rt(cnt_acq, cnt_rsz, cnt_rel, counter)\n  rt.with(crt, three)\n  v := counter.load_i64()\n  free(counter)\n  to_i32(v)\n}\n",
                 ),
             ],
             entry: "p.zen",
