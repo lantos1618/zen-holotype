@@ -9,16 +9,31 @@
 { gen_strlit } = compiler.backend.c.c_lit
 { slx_arg_is_borrowed } = compiler.backend.c.c_escape
 { gstr_int, slice_count } = compiler.astops
+// Suffix `LL` so an UNTYPED integer literal is a 64-bit C constant: bare literals are C `int`
+// (32-bit), so `100000 * 100000` (or `1 << 40`) would overflow at int width BEFORE any i64
+// assignment. With `LL` the arithmetic happens at >=64-bit, then the final assign/cast truncates
+// (the C-correct widen-then-narrow). Small i32 math is unchanged: int32_t op long long promotes,
+// computes, and the i32 store/cast narrows back.
+//
+// A NEGATIVE `n` must stay SIGNED. gstr_int prints the u64 bit pattern (i64-MIN has no decimal
+// spelling, and a written u64 magnitude above i64-max arrives here as a negative `n`), so the plain
+// pattern + `ULL` is an UNSIGNED constant — and C's usual conversions then drag any signed operand
+// beside it up to unsigned, turning `n < -9007199254740992` into an always-true unsigned compare.
+// Emitting the negated MAGNITUDE is correct in both worlds: signed neighbours compare as written, and
+// an unsigned slot converts it back to the same bit pattern. i64-MIN, whose magnitude has no i64
+// spelling, takes C's standard `MIN+1 - 1` form.
+gen_int_lit = (s: String, alloc: MutPtr<Malloc>, n: i64) String {
+    (n >= 0).then({
+        return s.gstr_int(alloc, n).gstr_append(alloc, "LL")
+    })
+    (n == 0 - 9223372036854775807 - 1).then({
+        return s.gstr_append(alloc, "(-9223372036854775807LL - 1LL)")
+    })
+    s.gstr_append(alloc, "(-").gstr_int(alloc, 0 - n).gstr_append(alloc, "LL)")
+}
 gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
     e.match ({
-        // Suffix `LL` so an UNTYPED integer literal is a 64-bit C constant: bare literals are C `int`
-        // (32-bit), so `100000 * 100000` (or `1 << 40`) would overflow at int width BEFORE any i64
-        // assignment. With `LL` the arithmetic happens at >=64-bit, then the final assign/cast truncates
-        // (the C-correct widen-then-narrow). Small i32 math is unchanged: int32_t op long long promotes,
-        // computes, and the i32 store/cast narrows back.
-        .Int(n)         => s
-            .gstr_int(alloc, n)
-            .gstr_append(alloc, (n < 0).then({ "ULL" }, { "LL" })),
+        .Int(n)         => s.gen_int_lit(alloc, n),
         .Byte(n)        => s.gstr_int(alloc, n),
         .FloatLit(ft)   => s.gstr_append(alloc, ft),
         .Var(v)         => s.gstr_append(alloc, v.name),

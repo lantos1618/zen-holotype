@@ -6,7 +6,7 @@
   GlobalData, LetData, LoopData, MakeStructData, MatchData, MemberData, Param, SliceData, Stmt, Ty } = compiler.ast.ast_types
 { arith_rty, arm_at, arrow_at, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc,
   dglobal, dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish,
-  gstr_string, is_expr_null, member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys,
+  gstr_string, is_expr_null, lit, member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys,
   sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret, subst_ty_in, swhile, ti32,
   tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
@@ -21,6 +21,7 @@
 { unify_ty } = compiler.check_infer
 { reflect_fields } = compiler.passes.subst
 { eq_impl_provides, eq_struct_fields_ok } = compiler.validate.kinds
+{ LitVal, fold_wide_int } = compiler.validate.util
 { inline_decl, lower_closures, mono_close, no_inline_gen_f } = compiler.check_inline
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { lower_stmt_expr, subj_payload, subj_tag, tag_const } = compiler.check_lower
@@ -359,6 +360,13 @@ is_enum_ty = (env: Env, t: Ty) bool {
     })
 }
 resolve_bin = (a: MutPtr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
+    // A constant binop that overflows i32 becomes the `.Int` it denotes, so every consumer — the
+    // width inference behind a `:=` slot most of all — reads the VALUE instead of the leftmost
+    // operand's width. See fold_wide_int: in-range constant math is left exactly as written.
+    wide := fold_wide_int(b.op, b.lhs, b.rhs)
+    wide.ok.then({
+        return a.cenode(lit(wide.v))
+    })
     lhs := a.resolve_expr(env.clr_exp(), b.lhs)
     rhs := a.resolve_expr(env.clr_exp(), b.rhs)
     cmp := b.op == "==" || b.op == "!="
