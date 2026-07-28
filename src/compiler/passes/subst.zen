@@ -2,8 +2,8 @@
 { ArmData, CallData, Decl, Expr, Field, FieldInit, GenStructDecl, LambdaData, MakeStructData,
   MatchData, Param, Stmt, Ty, VarData, VariantDef } = compiler.ast.ast_types
 { cbuf, arm, arrow_at, bin_at, block, call_full, cond_oa, eindex, eloop, ematch, ematchp, finit,
-  lam_r, member_at, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, sassign_at, sexpr,
-  sidxset_at, sif, slett_at, slit, sret, strlit_at, subst_ty_in, swhile, tvoid, ty_cname_in,
+  lam_r, member_at, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, param, sassign_at,
+  sexpr, sidxset_at, sif, slett_at, slit, sret, strlit_at, subst_ty_in, swhile, tvoid, ty_cname_in,
   vref_at } = compiler.genc
 { mangle_str_in } = compiler.mangle
 { DeclIndex, VList, add_fnt_param, add_lambda_arg, add_subst_arg, add_subst_param, bind_fnret,
@@ -226,6 +226,13 @@ subst_tparam_var = (
         false => a.cenode(vref_at(a.ty_cname_in(targs[i]), cs_or(cs, v.pos))),
     })
 }
+// A lambda body is ORDINARY code of the enclosing generic: its param/return/local annotations name
+// the enclosing tparams, so an instance must substitute through it. Passing the node through left
+// `MutPtr<T>` in the substituted copy, which then lifted to a top-level fn naming an undeclared `T`.
+subst_lam = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], lm: LambdaData) Expr {
+    ps := map_slice(a, lm.params, (p) { param(p.name, a.subst_ty_in(tparams, targs, p.ty)) })
+    lam_r(ps, a.subst_body(cs, tparams, targs, lm.body), a.subst_ty_in(tparams, targs, lm.ret))
+}
 subst_expr = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Var(v)        => a.subst_tparam_var(cs, tparams, targs, v, e),
@@ -242,6 +249,7 @@ subst_expr = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], e: Ptr<
         .Loop(l)       => a.cenode(eloop(a.subst_expr(cs, tparams, targs, l.seq), l.idx, l.elem, a.subst_ty_in(tparams, targs, l.elemTy), a.subst_body(cs, tparams, targs, l.body), l.h)),
         .SliceLit(sd)  => a.cenode(slit(a.subst_ty_in(tparams, targs, sd.elem), a.subst_exprs(cs, tparams, targs, sd.items))),
         .Block(b)      => a.cenode(block(a.subst_body(cs, tparams, targs, b.stmts))),
+        .Lambda(lm)    => a.cenode(a.subst_lam(cs, tparams, targs, lm)),
         _              => e,
     })
 }

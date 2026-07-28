@@ -11,6 +11,11 @@
 lift_toplevel = (idx: DeclIndex, decls: [Decl], n: StringView) bool {
     idx.func_idx.get(n, 0 - 1) >= 0 || idx.global_idx.get(n, 0 - 1) >= 0
 }
+// A CALLED name that some impl (or trait default) provides is a METHOD dispatch, not a captured
+// value. Without this, an identical lambda's liftability turned on whether an unrelated module
+// happened to define a free fn of the same name — `release` exists in std.mem.raw, `acquire` does
+// not, so `r.release(p)` lifted and `r.acquire(n)` did not.
+lift_method = (idx: DeclIndex, n: StringView) bool { idx.tmethod_idx.get(n, 0 - 1) >= 0 }
 lift_is_captured* = (decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, n: StringView) bool {
     (bound.var_bound(n) || idx.lift_toplevel(decls, n) || n == "true" || n == "false").match ({
         true  => false,
@@ -109,7 +114,7 @@ lift_expr_cap = (
         // `.Match`/`.Loop`/`.Lambda` EXTEND the bound set for their bodies (arm binder, loop
         // idx/elem, lambda params). Everything else delegates to the one exhaustive child listing.
         .Var(v)     => lift_is_captured(decls, idx, bound, v.name),
-        .Call(c)    => lift_is_captured(decls, idx, bound, c.fn)
+        .Call(c)    => lift_is_captured(decls, idx, bound, c.fn) && idx.lift_method(c.fn) == false
             || a.lift_args_cap(decls, idx, bound, c.args),
         .Match(m)   => a.lift_expr_cap(decls, idx, bound, m.subj)
             || a.lift_arms_cap(decls, idx, bound, m.arms),
@@ -144,6 +149,29 @@ lift_func_of = (a: MutPtr<Malloc>, lm: LambdaData, ft: FnTData, name: StringView
         tparams: empty_params(),
         body: lm.body,
     ))
+}
+// A lambda lifted out of a GENERIC body still names its enclosing type params (`r: MutPtr<A> := s`),
+// so the lifted fn must carry them — otherwise it is a top-level fn mentioning an undeclared `A`. The
+// decls generated while rewriting ONE function are exactly gen[lo..hi), so stamping that range covers
+// every nesting depth. A tparam'd lifted fn is a TEMPLATE (genc skips it); the mono INSTANCE of the
+// enclosing fn was copied before this pass and lifts its own already-substituted lambda.
+lift_tag_tparams = (gen: [Decl], lo: i32, hi: i32, tps: [Param]) void {
+    (tps.len > 0).then({
+        gen.loop((h, i, g) {
+            (i >= lo && i < hi).then({
+                gen[i] = g.match ({
+                    .DFunc(f) => dfunc(Func(
+                        name: f.name,
+                        params: f.params,
+                        ret: f.ret,
+                        tparams: tps,
+                        body: f.body,
+                    )),
+                    _         => g,
+                })
+            })
+        })
+    })
 }
 // lift the value `val` if it is a liftable lambda whose expected type `fnt` is a function type; else
 // recurse so nested lift sites are still found.
@@ -291,14 +319,19 @@ lift_rw_decl = (
     d: Decl,
 ) Decl {
     d.match ({
-        .DFunc(f) => dfunc(Func(
-            name: f.name,
-            params: f.params,
-            ret: f.ret,
-            tparams: f.tparams,
-            body: a.lift_rw_body(decls, idx, gcp, gen, f.ret, f.body),
-            pos: f.pos,
-        )),
+        .DFunc(f) => {
+            lo := load_i64(gcp).to_i32()
+            nb := a.lift_rw_body(decls, idx, gcp, gen, f.ret, f.body)
+            gen.lift_tag_tparams(lo, load_i64(gcp).to_i32(), f.tparams)
+            dfunc(Func(
+                name: f.name,
+                params: f.params,
+                ret: f.ret,
+                tparams: f.tparams,
+                body: nb,
+                pos: f.pos,
+            ))
+        },
         _         => d,
     })
 }

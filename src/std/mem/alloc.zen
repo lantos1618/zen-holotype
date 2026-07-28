@@ -358,6 +358,29 @@ dyn_of* = (
         state: state,
     )
 }
+// Erase a THREADED allocator into a DynAlloc VALUE. `(a: Allocator)` desugars to
+// `<A: Allocator>(a: MutPtr<A>)`, so a fn that RECEIVES an allocator holds a typed pointer, not a
+// value — this is the bridge from that pointer to the one concrete field a container can store.
+// The tparam is spelled explicitly because the three vtable lambdas name `A`; they lift to top-level
+// fns per instantiation. `state` carries the allocator itself, erased at the raw floor by `offset(0)`.
+// The pointee must outlive every DynAlloc copy (it is borrowed, not owned).
+dyn_from*<A: Allocator> = (a: MutPtr<A>) DynAlloc {
+    DynAlloc(
+        d_acquire: (s: RawPtr<u8>, n: i64) RawPtr<u8> {
+            r: MutPtr<A> := s
+            r.acquire(n)
+        },
+        d_resize: (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+            r: MutPtr<A> := s
+            r.resize(p, n)
+        },
+        d_release: (s: RawPtr<u8>, p: RawPtr<u8>) {
+            r: MutPtr<A> := s
+            r.release(p)
+        },
+        state: a.offset(0),
+    )
+}
 // The process-heap allocator as a DynAlloc value (malloc/realloc/free floor; state unused). The
 // narrow-capability analog of rt.heap_rt() — a container built from this touches NO ambient rt. The
 // three fn-pointers are the canonical heap_* floor above, erased into the DynAlloc vtable.
