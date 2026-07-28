@@ -2755,6 +2755,14 @@ harness_build_run* = () i32 {
             cmd: "printf 'main = () i32 {\\n    x := 5\\n' > $ZT/zpe_brace.zen && ./zen check $ZT/zpe_brace.zen > $ZT/zpe_brace.txt 2>&1; grep -Fq ':1:15: error[parse]: unclosed `{`: expected a matching `}`, found end of input' $ZT/zpe_brace.txt && grep -Fq '  main = () i32 {' $ZT/zpe_brace.txt && grep -Fq '                ^' $ZT/zpe_brace.txt && grep -Fq 'hint: close the block that opens on this line with a `}`' $ZT/zpe_brace.txt",
         ),
         ShellCase(
+            name: "c_target_rejects_js_platform_module",
+            cmd: "{ ./zen build examples/dom_demo.zen -o $ZT/zdom >/dev/null 2>$ZT/zdom_e.txt; test \"$?\" = 1; } && ! test -e $ZT/zdom && grep -Fq 'error[c-target]: `std.web.dom` is a JavaScript-platform binding' $ZT/zdom_e.txt && grep -Fq '^~~~~~~~~~~' $ZT/zdom_e.txt && grep -Fq 'hint: build this program for the js target instead' $ZT/zdom_e.txt && ! grep -Fq 'undefined reference' $ZT/zdom_e.txt && ! grep -Fq 'unknown type name' $ZT/zdom_e.txt && { ./zen emit examples/dom_demo.zen >$ZT/zdom.c 2>$ZT/zdom_ce.txt; test \"$?\" = 1; } && ! test -s $ZT/zdom.c && grep -Fq 'error[c-target]' $ZT/zdom_ce.txt && ./zen check examples/dom_demo.zen >/dev/null && ./zen emit-js examples/dom_demo.zen >$ZT/zdom.js 2>/dev/null && grep -Fq 'document.createElement' $ZT/zdom.js",
+        ),
+        ShellCase(
+            name: "foreign_decl_generic_return_emits_its_mono_struct",
+            cmd: "printf '{ Opt } = std.core.result\\nWidget*: {\\n    handle: RawPtr<u8>,\\n}\\nfind_widget* = (id: string_view) Opt<Widget>\\nmain = () i32 { 0 }\\n' > $ZT/zfwd.zen && ./zen fmt --check $ZT/zfwd.zen && ./zen emit $ZT/zfwd.zen >$ZT/zfwd.c 2>/dev/null && grep -Fq 'typedef struct Opt_Widget Opt_Widget;' $ZT/zfwd.c && grep -Fq 'Opt_Widget find_widget(const char* id);' $ZT/zfwd.c && ./zen build $ZT/zfwd.zen -o $ZT/zfwd_bin 2>$ZT/zfwd_e.txt && ! grep -Fq 'unknown type name' $ZT/zfwd_e.txt && { $ZT/zfwd_bin; test \"$?\" = 0; }",
+        ),
+        ShellCase(
             name: "cache_bin_hit_reuses_cached_binary",
             cmd: "rm -rf $ZT/zcc1 && printf 'main = () i32 { 41 }\\n' > $ZT/zcc1.zen && ZENC_CACHE_DIR=$ZT/zcc1 ./zen build $ZT/zcc1.zen -o $ZT/zcc1a 2>/dev/null && { $ZT/zcc1a; test \"$?\" = 41; } && test -n \"$(ls $ZT/zcc1 2>/dev/null)\" && ZENC_CACHE_DIR=$ZT/zcc1 ./zen check $ZT/zcc1.zen 2>$ZT/zcc1_c1.txt && ZENC_CACHE_DIR=$ZT/zcc1 ./zen check $ZT/zcc1.zen 2>$ZT/zcc1_c2.txt && cmp -s $ZT/zcc1_c1.txt $ZT/zcc1_c2.txt && ls $ZT/zcc1 | grep -q '^check_' && printf 'main = () i32 { 42 }\\n' > $ZT/zcc1_other.zen && ZENC_NO_CACHE=1 ./zen build $ZT/zcc1_other.zen -o $ZT/zcc1_other_bin 2>/dev/null && cp $ZT/zcc1_other_bin $ZT/zcc1/bin_* && ZENC_CACHE_DIR=$ZT/zcc1 ./zen build $ZT/zcc1.zen -o $ZT/zcc1b 2>/dev/null && { $ZT/zcc1b; test \"$?\" = 42; }",
         ),
@@ -2812,6 +2820,13 @@ harness_build_run* = () i32 {
     // via contents_bytes_in yields the FULL 7 bytes (NUL preserved); the text contents_in view stops at 3.
     // stdin_read_all_bytes_nul_cat: read_all_bytes + out_bytes is a binary `cat` — a piped stream with an
     // embedded NUL round-trips byte-exact (5 in, 5 out), where the strlen-based read_all would truncate.
+    // c_target_rejects_js_platform_module: std.web.dom's stubs ARE the browser, so a C build could only
+    // hand `ld` symbols no C host defines. The C entry points (build/emit) refuse with a POSITIONED
+    // error[c-target] at the import and never reach cc — no `undefined reference` / `unknown type name`
+    // may appear — while `check` and `emit-js` still accept the very same program.
+    // foreign_decl_generic_return_emits_its_mono_struct: a BODYLESS decl's prototype names its types too,
+    // so a generic instance reachable only from a foreign signature (`Opt<Widget>`) must still be
+    // monomorphized and emitted; missing it made genc write a prototype over an undeclared C type.
     // ── (k) bootstrap-binary battery (ported from test_bootstrap.py + test_build_self.py): the committed
     // `./zen` IS the cc-built bootstrap binary, so drive it directly — emit-compile-run real programs,
     // survive malformed input (no signal death), report missing files, and `--build-self` usage errors.
