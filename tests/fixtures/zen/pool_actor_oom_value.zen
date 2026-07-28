@@ -1,0 +1,148 @@
+// Allocation failure on the typed pool-actor path is a VALUE (`.Err(.Oom)`), not a segfault.
+//
+// `send` already returned `Result<i64, ActorError>` and already reported a full mailbox as
+// `.Err(.MailboxFull)` — but in the SAME function an exhausted heap wrote the message through a NULL
+// box (`box := malloc(sizeof(M))`, then `slot[0] = msg`). This fixture pins the widened channel:
+// back-pressure and OOM are both values now, and the success paths are byte-for-byte what they were.
+//
+// TWO ways to fail an allocation deterministically, because the two sites need different levers:
+//   • a HUGE capacity — `try_new_scratch(cap)` and `try_spawn_actor(cap, …)` size their allocation from
+//     a RUNTIME argument, so an absurd cap fails the malloc outright, portably, consuming no memory.
+//   • a DRAINED heap — `send`/`ref_send_msg` box `sizeof(M)`, a compile-time size with no knob and no
+//     Allocator seam (the box is libc malloc/free because the RECEIVING worker frees it off-thread), so
+//     an in-Zen LimitAlloc cannot reach it. Instead: lower RLIMIT_AS so brk/mmap can no longer extend
+//     the heap, then drain what is already mapped (descending block sizes, ending at `sizeof(Msg)`)
+//     until malloc returns null. After that a message-sized request has no chunk left and truly fails.
+// The drain is bounded and REVERSIBLE (the hard limit is left alone, the drained blocks are freed), and
+// the fixture FAILS rather than skips if it cannot establish the OOM condition — a gate that cannot go
+// red proves nothing.
+{ pool_open, Pool, ActorError } = std.concurrent.pool
+{ malloc, free } = std.mem.alloc
+{ Result } = std.core.result
+{ is_null } = std.core.ptr
+{ times, times_while } = std.core.count
+{ Arena } = std.mem.arena
+{ default } = std.rt
+pa = std.concurrent.pool_actor
+{ Context, Receiver } = std.concurrent.pool_actor
+NMSG := 8
+// 1 PB — past x86-64's 128 TB user address space, so the mapping is refused whatever the overcommit
+// policy says, and no memory is touched. Spelled in decimal on purpose: `1 << 55` evaluates to 0 here
+// (the shift is done at i32 width before the i64 binding takes it), which would silently make this
+// "allocate nothing" and pass for the wrong reason.
+HUGE := 1000000000000000
+KEEP := 65536    // drain-slot capacity: 64Ki blocks is far more than any top-chunk remainder
+// getrlimit/setrlimit(2). `rlim` points at a two-slot i64 cell — `struct rlimit { rlim_cur; rlim_max }`
+// on LP64. RLIMIT_AS is Linux/x86-64's address-space limit (the CI platform); lowering only rlim_cur
+// leaves the hard limit intact, so the fixture can raise it back afterwards.
+getrlimit = (resource: i32, rlim: RawPtr<u8>) i32
+setrlimit = (resource: i32, rlim: RawPtr<u8>) i32
+RLIMIT_AS := 9
+Msg*: Inc(i64)
+Worker*: {
+    acc: RawPtr<u8>,
+}
+Worker.impl(Receiver, {
+    receive = (w: MutPtr<Worker>, ctx: Context<Msg>) void {
+        ctx.msg.match ({
+            .Inc(n) => {
+                atomic_add_i64(w.acc, n)
+            },
+        })
+    }
+})
+tramp = (user: RawPtr<u8>, msg: i64) void {
+    a: [Worker] := user.slice(1)
+    b: [Msg] := msg.offset(0).slice(1)
+    a[0].addr().receive(Context(msg: b[0]))
+    pa.free_msg(msg)
+}
+// `.Err(.Oom)` → true; `.Ok` or `.Err(.MailboxFull)` → false. The two error variants must stay
+// DISTINGUISHABLE: a full mailbox means "the target is behind", OOM means "the heap is gone".
+is_oom = (r: Result<i64, ActorError>) bool {
+    r.match ({
+        .Ok(n)  => false,
+        .Err(e) => e.match ({
+            .Oom         => true,
+            .MailboxFull => false,
+        }),
+    })
+}
+scratch_is_oom = (r: Result<MutPtr<Arena>, ActorError>) bool {
+    r.match ({
+        .Ok(s)  => false,
+        .Err(e) => true,
+    })
+}
+handle_is_oom = (r: Result<pa.PooledHandle<Worker>, ActorError>) bool {
+    r.match ({
+        .Ok(h)  => false,
+        .Err(e) => true,
+    })
+}
+// PORTABLE half: the two sites whose allocation size is a runtime argument.
+huge_cap_is_value = (acc: RawPtr<u8>) bool {
+    scratch_is_oom(pa.try_new_scratch(HUGE))
+        && handle_is_oom(pa.try_spawn_actor(HUGE, Worker(acc: acc), tramp, default()))
+}
+// drain every remaining heap chunk of `size` bytes into `ks` from slot `from`; report the new fill
+// level. Stops at the first null (nothing that big is left) or when the slot array fills. Nothing is
+// WRITTEN to the drained blocks, so this costs address space, not resident pages.
+drain_at = (ks: [RawPtr<u8>], from: i64, size: i64) i64 {
+    from + (KEEP - from).times_while((i) {
+        b := malloc(size)
+        is_null(b).match ({
+            true  => false,
+            false => {
+                ks[from + i] = b
+                true
+            },
+        })
+    })
+}
+// Drain DESCENDING (1 MiB → 4 KiB → message-sized), which is what keeps the slot count small: a worker
+// thread leaves glibc a per-thread arena holding tens of MiB of already-mapped address space, and
+// growing THAT costs an mprotect, not an mmap — RLIMIT_AS never sees it. Big blocks swallow those
+// arenas in a few hundred calls; only the final fragments need message-sized requests.
+drain_all = (ks: [RawPtr<u8>], msgsz: i64) i64 {
+    drain_at(ks, drain_at(ks, drain_at(ks, 0, 1048576), 4096), msgsz)
+}
+main = () i32 {
+    acc := malloc(8)
+    store_i64(acc, 0)
+    h := pa.spawn_actor_heap(NMSG + 8, Worker(acc: acc), tramp)
+    p := pool_open(2, 8)
+    r := h.ref_of(p)
+    // 1. the SUCCESS path is untouched: every send lands, exactly once.
+    NMSG.times((k) { p.send(h, Msg.Inc(1)) })
+    p.pool_quiesce_stop()
+    delivered := load_i64(acc)
+    // 2. runtime-sized allocations fail as values (portable, no memory consumed).
+    huge_ok := huge_cap_is_value(acc)
+    // 3. exhaust the heap, then the box mallocs must come back as `.Err(.Oom)`.
+    keep := malloc(KEEP * 8)
+    ks: [RawPtr<u8>] := keep.slice(KEEP)
+    rl := malloc(16)
+    getrlimit(RLIMIT_AS, rl)
+    saved := load_i64(rl)
+    store_i64(rl, 1)    // rlim_cur = 1 byte: no further brk/mmap can succeed
+    limited := setrlimit(RLIMIT_AS, rl) == 0
+    taken := drain_all(ks, sizeof(Msg))
+    // the PRECONDITION, asserted rather than assumed: a message-sized request must now genuinely fail.
+    // Without this the fixture could pass on a machine where the heap was never exhausted at all.
+    drained := limited && taken < KEEP && is_null(malloc(sizeof(Msg)))
+    send_ok := is_oom(p.send(h, Msg.Inc(1)))
+    reply_ok := is_oom(r.ref_send_msg(Msg.Inc(1)))
+    // 4. give the heap back and prove nothing was enqueued or delivered behind our back.
+    taken.times((i) { free(ks[i]) })
+    store_i64(rl, saved)
+    setrlimit(RLIMIT_AS, rl)
+    quiet := load_i64(acc) == delivered && p.pool_dropped() == 0
+    free(rl)
+    free(keep)
+    pa.close(h)
+    p.pool_close()
+    free(acc)
+    ok := delivered == NMSG && huge_ok && drained && send_ok && reply_ok && quiet
+    ok.then({ 7 }, { 1 })
+}
