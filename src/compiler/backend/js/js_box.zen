@@ -1,0 +1,130 @@
+// compiler.backend.js.js_box — which of a function's locals have their ADDRESS taken.
+//
+// WHY: on the js target a struct is a JS object, so `addr` on one is the identity and every use of the
+// resulting pointer (`->`, a field write) still reaches the original. A SCALAR is a JS number — a copy
+// — so identity `addr` handed `store` a value, the write landed nowhere, and `c: i32 := 0; store(c.addr(), 7)`
+// printed 0 under node and 7 under C, both exiting 0.
+//
+// THE FIX: give an address-taken scalar local real storage. js_decl/js_expr box such a variable into a
+// one-cell allocation in the shared linear memory (`__zr.box`), read it through `__zr.ld` and write it
+// through `__zr.st`, so its `addr()` IS a MEM offset and load/store/offset over it behave exactly as in
+// C — including a BYTE store into the low byte of an i32, which the repro above relies on.
+//
+// This module is only the QUESTION "is this name's address taken anywhere in the function", answered by
+// one pre-pass over the body before emission (the address may be taken textually after the `let`). The
+// walk visits exactly the children the js emitter itself emits, so it can never miss a reachable `addr`.
+{ Expr, Stmt, Param, CallData } = compiler.ast.ast_types
+{ param, tvoid, acquire_or_die } = compiler.genc
+{ Malloc } = std.mem.alloc
+jb_none = () [Param] { slice(null_ptr(), 0) }
+jb_buf := jb_none()
+jb_n := 0
+// One buffer for the whole emission, refilled per function (Zen has no nested fns — lambdas are inlined
+// before js — so one flat table per function is exact). A name past the cap simply stays unboxed, which
+// is the pre-existing behaviour, never a wrong answer for a name already in the table.
+js_box_reset* = (a: MutPtr<Malloc>) void {
+    (jb_buf.len == 0).then({
+        jb_buf = slice(a.acquire_or_die(1024 * sizeof(Param)), 1024)
+    })
+    jb_n = 0
+}
+js_box_scan* = (body: [Stmt]) void { jb_stmts(body) }
+js_box_taken* = (name: string_view) bool {
+    found := false
+    seen: [Param] := slice(jb_buf.ptr, jb_n)
+    seen.loop((h, i, p) {
+        found = found || p.name == name
+    })
+    found
+}
+jb_add = (name: string_view) void {
+    (jb_n < jb_buf.len && js_box_taken(name).then({ false }, { true })).then({
+        jb_buf[jb_n] = param(name, tvoid())
+        jb_n = jb_n + 1
+    })
+}
+jb_stmts = (body: [Stmt]) void {
+    body.loop((h, i, st) {
+        jb_stmt(st)
+    })
+}
+jb_stmt = (st: Stmt) void {
+    st.match ({
+        .Let(l)      => jb_expr(l.value),
+        .Assign(x)   => {
+            jb_expr(x.target)
+            jb_expr(x.value)
+        },
+        .Return(e)   => jb_expr(e),
+        .ExprStmt(e) => jb_expr(e),
+        .If(f)       => {
+            jb_expr(f.c)
+            jb_stmts(f.then)
+            jb_stmts(f.els)
+        },
+        .While(w)    => {
+            jb_expr(w.c)
+            jb_stmts(w.body)
+        },
+        .IndexSet(x) => {
+            jb_expr(x.seq)
+            jb_expr(x.idx)
+            jb_expr(x.value)
+        },
+    })
+}
+jb_expr = (e: Ptr<Expr>) void {
+    load(e).match ({
+        .Bin(b)        => {
+            jb_expr(b.lhs)
+            jb_expr(b.rhs)
+        },
+        .Call(c)       => jb_call(c),
+        .Cond(d)       => {
+            jb_expr(d.c)
+            jb_expr(d.t)
+            jb_expr(d.e)
+        },
+        .Member(m)     => jb_expr(m.obj),
+        .Arrow(ar)     => jb_expr(ar.obj),
+        .MakeEnum(m)   => jb_expr(m.payload),
+        .MakeStruct(m) => m.inits.loop((h, i, fi) {
+            jb_expr(fi.value)
+        }),
+        .Match(mt)     => {
+            jb_expr(mt.subj)
+            mt.arms.loop((h, i, ar) {
+                jb_expr(ar.body)
+            })
+        },
+        .SliceLit(sd)  => sd.items.loop((h, i, it) {
+            jb_expr(it.addr())
+        }),
+        .Index(ix)     => {
+            jb_expr(ix.seq)
+            jb_expr(ix.idx)
+        },
+        .Loop(l)       => {
+            jb_expr(l.seq)
+            jb_stmts(l.body)
+        },
+        .Block(b)      => jb_stmts(b.stmts),
+        _              => { },
+    })
+}
+// `addr(x)` on a bare variable is the boxing trigger; every other argument shape (a field, an index, a
+// call result) keeps the identity lowering and is recorded by nothing here.
+jb_call = (c: CallData) void {
+    (c.fn == "addr" && c.args.len > 0).then({
+        jb_note_addr(c.args[0])
+    })
+    c.args.loop((h, i, ar) {
+        jb_expr(ar.addr())
+    })
+}
+jb_note_addr = (e: Expr) void {
+    e.match ({
+        .Var(v) => jb_add(v.name),
+        _       => { },
+    })
+}

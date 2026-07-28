@@ -5,9 +5,20 @@
 // in C, so the whole memory model is uniform. Prepended to every emitted module by the driver.
 //
 // MINIMAL FLOOR (phase 1): enough for the str-print path (str literal → intern → view → write) plus
-// the raw-memory intrinsics. Actors, i64-exact math, typed slice element reads, and the full libc/DOM
-// surface are DEFERRED — the stubs below keep dead closure code loadable without pulling those in.
+// the raw-memory intrinsics. Actors and the full libc/DOM surface are DEFERRED — the stubs below keep
+// dead closure code loadable without pulling those in.
+//
+// NO STUB HERE MAY RETURN A PLAUSIBLE WRONG ANSWER. `sizeof` used to answer 8 for every type and
+// `addr` used to be the identity for scalars; both let a program run to completion under node and
+// print different numbers than the same program under C, with no diagnostic at either end. `sizeof`
+// is now resolved to a literal by the emitter (compiler.backend.js.js_size) and never reaches this
+// file; an address-taken scalar is boxed into a real cell (`box`/`ld`/`st`). What genuinely cannot be
+// expressed on this target PANICS with a `js target:` message — silence is the one outcome ruled out.
 "use strict";
+// Every byte this floor writes goes out through fs.writeSync, NOT process.stdout.write: on a pipe the
+// latter is ASYNCHRONOUS, so a program that prints and then panics (which exits immediately, below)
+// would lose its output. Synchronous writes make stdout ordering identical to C's write(2).
+const fs = require("fs");
 const __zr = (() => {
   const CAP = 1 << 26;                 // 64 MiB linear memory
   const MEM = new Uint8Array(CAP);
@@ -32,12 +43,50 @@ const __zr = (() => {
   const decode = (p, len) => dec.decode(MEM.subarray(p, p + Number(len)));
   const jstr = (p) => decode(p, strlen(p));  // a Zen `str` (MEM offset) -> a real JS string, for DOM/API boundaries
 
-  const load = (p) => MEM[p];
+  // ── pointers ──────────────────────────────────────────────────────────────────────────────────
+  // A pointer is a MEM offset (a number) EXCEPT for a pointer to a struct, which is the JS object
+  // itself — objects are references, so `MutPtr<T>` needs no indirection and `load` on one is the
+  // identity deref (`*p` in C). `isref` is that discriminator. A JS ARRAY is the backing of a non-byte
+  // slice literal and is deliberately NOT a struct reference.
+  const isref = (p) => p !== null && typeof p === "object" && !Array.isArray(p);
+  // Byte arithmetic on an object-backed pointer has no meaning on this target. It used to write to a
+  // Uint8Array under a non-index key — silently discarded — so say so instead of losing the write.
+  const notbytes = (op) => panic("zen: panic: js target: " + op + " through an object-backed pointer\n");
+  const load = (p) => isref(p) ? p : MEM[p];
   // a stored byte may arrive as a BigInt (a digit derived from a 64-bit value), so mask through `u8`.
-  const store = (p, b) => { const v = u8(b); MEM[p] = v; return v; };
-  const offset = (p, n) => p + Number(n);
-  const load_i64 = (p) => norm(dv.getBigInt64(p, true));
-  const store_i64 = (p, v) => { dv.setBigInt64(p, BigInt(v), true); return v; };
+  const store = (p, b) => { if (isref(p)) notbytes("store"); const v = u8(b); MEM[p] = v; return v; };
+  const offset = (p, n) => { if (isref(p)) notbytes("offset"); return p + Number(n); };
+  const load_i64 = (p) => { if (isref(p)) notbytes("load_i64"); return norm(dv.getBigInt64(p, true)); };
+  const store_i64 = (p, v) => { if (isref(p)) notbytes("store_i64"); dv.setBigInt64(p, BigInt(v), true); return v; };
+  // ── boxed (address-taken) scalar locals ───────────────────────────────────────────────────────
+  // The js backend gives a scalar local whose address is taken a real one-value cell here, so that
+  // `addr` yields a MEM offset and load/store/offset over it behave exactly as in C. `w` is the
+  // emitter's width code (js_expr.js_cell_w): 1 u8, 2 u16, 3 u32, 4 i32, 5 i16, 6 i8, 7 u64, 8 i64,
+  // 9 f64, 10 bool. The cell is exactly as wide as the C variable, so a BYTE store lands in its low
+  // byte and a subsequent read of the variable sees it — which identity `addr` could never do.
+  const CELLSZ = [0, 1, 2, 4, 4, 2, 1, 8, 8, 8, 1];
+  const ld = (p, w) => {
+    if (w === 1) return MEM[p];
+    if (w === 2) return dv.getUint16(p, true);
+    if (w === 3) return dv.getUint32(p, true);
+    if (w === 4) return dv.getInt32(p, true);
+    if (w === 5) return dv.getInt16(p, true);
+    if (w === 6) return dv.getInt8(p);
+    if (w === 7) return norm(dv.getBigUint64(p, true));
+    if (w === 8) return norm(dv.getBigInt64(p, true));
+    if (w === 9) return dv.getFloat64(p, true);
+    return MEM[p] !== 0;
+  };
+  const st = (p, v, w) => {
+    if (w === 1 || w === 6) { MEM[p] = u8(v); return v; }
+    if (w === 2 || w === 5) { dv.setUint16(p, Number(v) & 0xffff, true); return v; }
+    if (w === 3 || w === 4) { dv.setUint32(p, Number(v) >>> 0, true); return v; }
+    if (w === 7 || w === 8) { dv.setBigInt64(p, BigInt.asIntN(64, tobig(v)), true); return v; }
+    if (w === 9) { dv.setFloat64(p, Number(v), true); return v; }
+    MEM[p] = v ? 1 : 0;
+    return v;
+  };
+  const box = (v, w) => { const p = malloc(CELLSZ[w]); return st(p, v, w), p; };
   const slice = (ptr, len) => ({ ptr, len: Number(len) });
   // a [u8] SLICE LITERAL: copy the element values into linear memory and hand back the offset, so
   // the resulting `.ptr` is a real RawPtr (offset/store/load/write all work over MEM, as in C).
@@ -49,12 +98,41 @@ const __zr = (() => {
   // carries a JS ARRAY (index it directly), while a str/byte view carries a MEM OFFSET (an integer —
   // read the byte out of linear memory). Without this split, `sv.ptr[i]` on a byte view indexes an
   // integer and yields `undefined`, which silently broke every byte-scan (e.g. format's `{}` finder).
-  const idx = (seq, i) => { const p = seq.ptr; return Array.isArray(p) ? p[i] : MEM[p + Number(i)]; };
-  const setidx = (seq, i, v) => { const p = seq.ptr; if (Array.isArray(p)) { p[i] = v; } else { MEM[p + Number(i)] = u8(v); } return v; };
+  // BOUNDS-CHECKED, like C's zen__idx (the genc preamble): an out-of-range slice index PANICS. This is
+  // a language guarantee, not a debug aid — without the check `xs[5]` on a 3-element slice quietly read
+  // MEM out of the slice (or `undefined` off a JS array) and the program exited 0 with a wrong answer.
+  const bound = (seq, i) => {
+    if (seq === null || typeof seq !== "object") panic("zen: panic: js target: index through a non-slice\n");
+    const n = Number(i);
+    if (n < 0 || n >= seq.len) panic("zen: panic: slice index out of bounds\n");
+    return n;
+  };
+  // TYPED element access over a MEM-backed slice: `w` is the emitter's element-width code (js_expr's
+  // js_elem_w — the cell codes plus 11 for an 8-byte pointer), the analog of C's `zen__idx(z, i,
+  // sizeof(T))`. Without it the floor read ONE BYTE at `ptr + i` for every element type, so a
+  // `[string_view]` or `[i64]` that came from an allocator decoded to garbage and kept running.
+  // Code 0 = an element with no linear-memory form (a struct/enum/nested slice): MEM holds bytes and a
+  // struct on this target is a JS object, so such a read is refused out loud, never guessed.
+  const ELEMSZ = [0, 1, 2, 4, 4, 2, 1, 8, 8, 8, 1, 8];
+  const elat = (p, n, w) => {
+    if (!w) panic("zen: panic: js target: slice element of this type has no linear-memory representation\n");
+    return p + n * ELEMSZ[w];
+  };
+  const rdel = (p, w) => w === 11 ? Number(dv.getBigUint64(p, true)) : ld(p, w);
+  // An object-backed pointer (a `MutPtr<Struct>`, which IS the JS object) has no byte image, so a
+  // `[MutPtr<T>]` living in linear memory is refused here rather than silently stored as something else.
+  const wrel = (p, v, w) => {
+    if (w === 11) { if (isref(v)) notbytes("slice element store of a pointer"); dv.setBigUint64(p, BigInt(v), true); return v; }
+    return st(p, v, w);
+  };
+  const idx = (seq, i, w) => { const n = bound(seq, i); const p = seq.ptr; return Array.isArray(p) ? p[n] : rdel(elat(p, n, w), w); };
+  const setidx = (seq, i, v, w) => { const n = bound(seq, i); const p = seq.ptr; if (Array.isArray(p)) { p[n] = v; return v; } return wrel(elat(p, n, w), v, w); };
   const eq = (a, b) => a === b || decode(a, strlen(a)) === decode(b, strlen(b));
   const nn = (p) => { if (p === 0) panic("zen: panic: null pointer deref\n"); return p; };
-  const addr = (x) => x;               // JS objects are references; scalar aliasing is DEFERRED (boxed refs)
-  const sizeof = (_name) => 8;         // element sizes unused on the print path; DEFERRED for typed slices
+  // `addr` on an object-backed pointer (a struct) is the identity — the object IS the reference. An
+  // address-taken SCALAR never reaches here: the emitter boxes it (see `box` above) and lowers its
+  // `addr` to the variable itself, which already holds the cell offset.
+  const addr = (x) => x;
   // ── 64-bit integer model ───────────────────────────────────────────────────────────────────────
   // A JS `number` is a 32-bit-op / 53-bit-mantissa view, so i64/u64 are modeled as BigInt (arbitrary-
   // precision, EXACT). To keep ordinary/narrow arithmetic cheap, a 64-bit value is kept as a `number`
@@ -76,7 +154,16 @@ const __zr = (() => {
   // float `/` is emitted natively by the js backend, never here.
   const div = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = tobig(b); if (bb === 0n) panic("zen: panic: integer divide by zero\n"); return norm(tobig(a) / bb); } if (b === 0) panic("zen: panic: integer divide by zero\n"); return Math.trunc(a / b); };
   const mod = (a, b) => { if (typeof a === "bigint" || typeof b === "bigint") { const bb = tobig(b); if (bb === 0n) panic("zen: panic: integer modulo by zero\n"); return norm(tobig(a) % bb); } if (b === 0) panic("zen: panic: integer modulo by zero\n"); return a % b; };
-  const panic = (m) => { const s = typeof m === "number" ? decode(m, strlen(m)) : String(m); process.stderr.write(s); throw new Error("zen panic"); };
+  // A panic is FATAL, exactly as in C: the message goes to stderr and the process dies with C's abort
+  // status (128 + SIGABRT). Exiting rather than throwing keeps the two backends' observable behaviour
+  // identical — same stderr line, same non-zero status — instead of a JS stack trace at status 1. Safe
+  // because `write` below is synchronous, so nothing buffered is lost.
+  const ZEN_ABORT_STATUS = 134;
+  const panic = (m) => {
+    const s = typeof m === "number" ? decode(m, strlen(m)) : String(m);
+    try { fs.writeSync(2, s); } catch (_e) { }
+    process.exit(ZEN_ABORT_STATUS);
+  };
   // ── seq-cst atomics over an i64 cell (the atomic_* intrinsics) ─────────────────────────
   // These are NOT stubs. Emitted JS runs on ONE thread with run-to-completion semantics: no other
   // agent can observe an intermediate state of a synchronous read-modify-write, and a fence has no
@@ -92,16 +179,21 @@ const __zr = (() => {
   const atomic_cas = (p, exp, des) => { if (tobig(load_i64(p)) !== tobig(exp)) return false; store_i64(p, des); return true; };
   const atomic_fence = () => {};
 
-  // fd 1 = stdout, 2 = stderr; ptr is a MEM offset (or, for a JS-array slice, ignored).
+  // fd 1 = stdout, 2 = stderr; ptr is a MEM offset (or, for a JS-array slice, ignored). SYNCHRONOUS
+  // (fs.writeSync), so ordering against stderr and against a panic's exit matches C's write(2).
   const write = (fd, ptr, len) => {
     const s = decode(ptr, len);
-    (fd === 2 ? process.stderr : process.stdout).write(s);
+    fs.writeSync(Number(fd), s);
     return Number(len);
   };
 
-  return { MEM, str, strlen, decode, jstr, malloc, load, store, offset, load_i64, store_i64,
+  // `main`'s return value is the process exit status, exactly as in C (`& 255`). Set as `exitCode`
+  // rather than `process.exit` so anything still queued flushes on the normal exit path.
+  const exit_main = (v) => { process.exitCode = Number(v || 0) & 255; };
+
+  return { MEM, str, strlen, decode, jstr, malloc, load, store, offset, load_i64, store_i64, exit_main,
            slice, u8lit, view, idx, setidx, eq, nn, addr, i32, i64, u8, big, wi64, wu64, u64,
-           sizeof, div, mod, panic, write,
+           ld, st, box, div, mod, panic, write,
            atomic_load, atomic_store, atomic_add, atomic_cas, atomic_fence };
 })();
 
@@ -117,13 +209,18 @@ const memcpy = (dst, src, n) => { for (let i = 0; i < Number(n); i++) __zr.MEM[d
 // element (the Vec growth regression produced 4 instead of 10). C realloc preserves contents; so must this.
 const realloc = (p, n) => { const q = __zr.malloc(n); n = Number(n); for (let i = 0; i < n; i++) __zr.MEM[q + i] = __zr.MEM[p + i]; return q; };
 const free = (_p) => {};
-const abort = () => { throw new Error("abort"); };
+const abort = () => { process.exit(134); };
+// std.core.result's `panic` writes its own `zen: panic: …` line, calls this, then aborts. The genc
+// preamble ships a WEAK no-op for the C target (c_emit.zen); without the JS counterpart every panic on
+// this backend died with `ReferenceError: __zen_panic_unwind is not defined` after the message. There
+// is no actor supervisor on this target to siglongjmp into, so — as in the weak C stub — it returns,
+// which is what makes the `abort()` that follows it unconditional.
+const __zen_panic_unwind = () => {};
 // read(2): pull up to `n` bytes from fd into MEM at `ptr`; return the count (0 at EOF, -1 on error). The
 // print path never calls it, but any stdin program (std.io.stdin → `read(STDIN, buf, 1)`) did before this
 // → ReferenceError. Node's only synchronous stdin read is fs.readSync; on a pipe/file it blocks until data
 // or EOF (the C contract). LIMITATION: a live TTY fd 0 can raise EAGAIN with no data ready; we retry (a
 // blocking emulation), which busy-waits — fine for the piped-filter use case, not for interactive TTYs.
-const fs = require("fs");
 const read = (fd, ptr, n) => {
   fd = Number(fd); n = Number(n);
   const buf = Buffer.allocUnsafe(n);

@@ -11,6 +11,8 @@
 { slice_count } = compiler.astops
 { jint, jname, jstrlit } = compiler.backend.js.js_lit
 { js_dom_dispatch } = compiler.backend.js.js_dom
+{ js_box_taken } = compiler.backend.js.js_box
+{ js_size_of_name } = compiler.backend.js.js_size
 { is_intrinsic } = compiler.check    // the ONE intrinsic roster; the parity gate below reads it, never a copy
 // ── expressions ───────────────────────────────────────────────────────────────────────────────────
 js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
@@ -18,7 +20,7 @@ js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
         .Int(n)         => s.js_int_lit(a, n),
         .Byte(n)        => s.jint(a, n),
         .FloatLit(ft)   => s.gstr_append(a, ft),
-        .Var(v)         => s.jname(a, v.name),
+        .Var(v)         => s.js_var_ref(a, v.name),
         .Bin(b)         => s.js_bin(a, b),
         .Call(c)        => s.js_call(a, c),
         .MethodCall(mc) => s.gstr_append(a, "__zr.undesugared_method_call"),
@@ -50,8 +52,8 @@ js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
         // A [u8] literal is a BYTE BUFFER: back it with linear memory (__zr.u8lit copies the items
         // into MEM and returns the offset), so `.ptr` supports the full RawPtr surface — offset/
         // store/load/slice/write — exactly as C's stack compound literal does (std.text.fmt's digit
-        // scratch depends on this). Non-byte element types keep the JS-array fat pointer (typed MEM
-        // element reads are DEFERRED; __zr.idx/setidx dispatch on the backing either way).
+        // scratch depends on this). Non-byte element types keep the JS-array fat pointer; __zr.idx/
+        // setidx dispatch on the backing, taking the element width (js_elem_w) for the MEM case.
         .SliceLit(sd)   => sd.elem.match ({
             .U8 => s
                 .gstr_append(a, "({ ptr: __zr.u8lit([")
@@ -71,10 +73,72 @@ js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
             .js_expr(a, ix.seq)
             .gstr_append(a, ", ")
             .js_expr(a, ix.idx)
+            .gstr_append(a, ", ")
+            .jint(a, js_elem_w(ix.elem))
             .gstr_append(a, ")"),
         .Loop(l)        => s.js_loop(a, l),
         .Lambda(lm)     => s.gstr_append(a, "__zr.unlowered_lambda"),
         .Block(b)       => s.js_block_expr(a, b),
+    })
+}
+// ── BOXED (address-taken) SCALAR LOCALS ───────────────────────────────────────────────────────────
+// `addr` on a struct is the identity (a JS object IS a reference), but a scalar is a JS number, so an
+// identity `addr` handed `store` a COPY and the write vanished. A scalar local whose address is taken
+// anywhere in the function (compiler.backend.js.js_box's pre-pass) is therefore given real storage: one
+// cell in the shared linear memory. The variable then HOLDS the MEM offset, so `addr(x)` is `x` itself
+// and every load/store/offset over it behaves as in C; reads become `__zr.ld(x, w)` and writes
+// `__zr.st(x, v, w)`, with `w` the same width code int_width already assigns (plus 9 = f64, 10 = bool),
+// so the cell is exactly as wide as the C variable and a BYTE store lands in its low byte.
+// Width 0 (a struct, pointer, slice, string, or unannotated binding) is NOT boxed — the identity
+// lowering is right for those, and boxing an object would break it.
+js_cell_w* = (t: Ty) i32 {
+    w := int_width(t)
+    (w != 0).then({
+        return w
+    })
+    t.match ({
+        .F64  => 9,
+        .Bool => 10,
+        _     => 0,
+    })
+}
+// ── typed slice ELEMENTS ──────────────────────────────────────────────────────────────────────────
+// A slice's `.ptr` is either a JS array (a non-byte slice literal) or a MEM offset (everything that came
+// through an allocator). In the MEM case an element read must know the element's WIDTH, exactly as C's
+// `zen__idx(z, i, sizeof(T))` does: the floor used to read one BYTE at `ptr + i` whatever T was, so
+// every `[i64]`/`[string_view]`/`[i32]` slice backed by linear memory decoded to garbage — silently,
+// since a byte is a perfectly good number. `js_elem_w` extends the cell-width codes with 11 = an
+// 8-byte POINTER (a str/RawPtr/fn element, read back as a MEM offset). Code 0 means "no linear-memory
+// representation" (a struct, enum, or nested slice element): the floor PANICS on such a read rather
+// than inventing one, since MEM holds bytes and a struct on this target is a JS object.
+js_elem_w* = (t: Ty) i32 {
+    w := js_cell_w(t)
+    (w != 0).then({
+        return w
+    })
+    t.match ({
+        .Ptr(pd)       => 11,
+        .StringView    => 11,
+        .StringCstr    => 11,
+        .StringLiteral => 11,
+        .FnT(ft)       => 11,
+        _              => 0,
+    })
+}
+// the boxing width of a NAME: nonzero only when its address is taken AND its declared type is scalar.
+js_boxed_w* = (name: string_view) i32 {
+    js_box_taken(name).then({ js_cell_w(vw_lookup(name)) }, { 0 })
+}
+js_var_ref = (s: String, a: MutPtr<Malloc>, name: string_view) String {
+    w := js_boxed_w(name)
+    (w == 0).match ({
+        true  => s.jname(a, name),
+        false => s
+            .gstr_append(a, "__zr.ld(")
+            .jname(a, name)
+            .gstr_append(a, ", ")
+            .jint(a, w)
+            .gstr_append(a, ")"),
     })
 }
 // Loop control may cross match IIFEs and nested loop IIFEs, so bare JS break/continue cannot represent
@@ -338,7 +402,7 @@ js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
         return s.gstr_append(a, "0")
     })
     (c.fn == "addr").then({
-        return s.gstr_append(a, "__zr.addr(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.js_addr(a, c)
     })
     (c.fn == "assert_nonnull").then({
         return s.gstr_append(a, "__zr.nn(").js_arg_at(a, c, 0).gstr_append(a, ")")
@@ -452,17 +516,41 @@ js_unsupported_reset* = () void {
     js_unsupported_name = js_no_unsupported()
     js_unsupported_pos = 0
 }
+// `addr(x)` on a BOXED scalar local is the variable itself — it already holds the cell's MEM offset.
+// Every other shape keeps the identity lowering (`__zr.addr`), which is exactly right for a struct.
+js_addr = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+    (c.args.len == 0).then({
+        return s.gstr_append(a, "__zr.addr(0)")
+    })
+    c.args[0].addr().match ({
+        .Var(v) => (js_boxed_w(v.name) == 0).match ({
+            true  => s.gstr_append(a, "__zr.addr(").jname(a, v.name).gstr_append(a, ")"),
+            false => s.jname(a, v.name),
+        }),
+        _       => s.gstr_append(a, "__zr.addr(").js_arg_at(a, c, 0).gstr_append(a, ")"),
+    })
+}
+// `sizeof(T)` is resolved to a LITERAL byte count at emit time (compiler.backend.js.js_size), because the
+// js floor's memory is the same byte-addressed space C's is and there is no JS `sizeof` to defer to.
+// The floor stub this replaced answered 8 for every type, silently corrupting every `n * sizeof(T)`
+// stride and allocation. A type the layout walk cannot resolve REFUSES the build (error[js-target])
+// rather than guessing — a plausible-but-wrong size is the defect this fix exists to remove.
 js_sizeof = (s: String, a: MutPtr<Malloc>, c: CallData) String {
     (c.args.len > 0).match ({
         true  => c.args[0].addr().match ({
-            .Var(v) => s
-                .gstr_append(a, "__zr.sizeof(\"")
-                .gstr_append(a, v.name)
-                .gstr_append(a, "\")"),
-            _       => s.gstr_append(a, "8"),
+            .Var(v) => s.js_size_lit(a, v.name, c.pos),
+            _       => s.js_size_refuse(a, c.pos),
         }),
-        false => s.gstr_append(a, "8"),
+        false => s.js_size_refuse(a, c.pos),
     })
+}
+js_size_lit = (s: String, a: MutPtr<Malloc>, name: string_view, pos: i32) String {
+    n := js_size_of_name(name)
+    (n < 0).then({ s.js_size_refuse(a, pos) }, { s.jint(a, n) })
+}
+js_size_refuse = (s: String, a: MutPtr<Malloc>, pos: i32) String {
+    js_unsupported_note("sizeof", pos)
+    s.gstr_append(a, "__zen_js_unsized_type")
 }
 // ── match: value position -> an IIFE returning an arm value; statement position -> a real `switch` (so
 //    an arm's early `return` leaves the enclosing function, not just the IIFE). Enum tag is the variant
@@ -588,6 +676,8 @@ js_loop = (s: String, a: MutPtr<Malloc>, l: LoopData) String {
         .jname(a, l.elem)
         .gstr_append(a, " = __zr.idx(_seq, ")
         .jname(a, l.idx)
+        .gstr_append(a, ", ")
+        .jint(a, js_elem_w(l.elemTy))
         .gstr_append(a, "); try { ")
     out = out.js_stmts(a, l.body)
     out = out
@@ -623,23 +713,55 @@ js_block_stmts = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
 // ── statements ────────────────────────────────────────────────────────────────────────────────────
 // a `let`: record the binding's declared width in the per-function table, then emit the initializer
 // coerced to that width (`x: u32 := a*b` → `let x = ((a*b) >>> 0);`; an unannotated let is width 0 → bare).
+// An address-taken scalar binds its CELL instead of its value: `__zr.box(init, w)` allocates the cell,
+// writes the initializer into it, and yields the MEM offset the variable then carries.
 js_let = (s: String, a: MutPtr<Malloc>, l: LetData) String {
     vw_note(l.name, l.ty)
-    s
-        .gstr_append(a, "let ")
-        .jname(a, l.name)
-        .gstr_append(a, " = ")
-        .js_expr_w(a, l.value, int_width(l.ty))
-        .gstr_append(a, ";")
+    bw := js_boxed_w(l.name)
+    open := s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ")
+    boxed := (bw == 0).match ({
+        true  => open.js_expr_w(a, l.value, int_width(l.ty)),
+        false => open
+            .gstr_append(a, "__zr.box(")
+            .js_expr_w(a, l.value, int_width(l.ty))
+            .gstr_append(a, ", ")
+            .jint(a, bw)
+            .gstr_append(a, ")"),
+    })
+    boxed.gstr_append(a, ";")
 }
 // an assign: coerce the value to the TARGET variable's declared width (looked up in the per-function
 // table) so a mutating narrow accumulator wraps like C. A non-Var target (field/index) is width 0.
+// An assignment to a BOXED local writes through its cell (`__zr.st`), never rebinding the offset.
 js_assign = (s: String, a: MutPtr<Malloc>, x: AssignData) String {
+    bw := js_assign_boxed_w(load(x.target))
+    (bw == 0).then({
+        return s
+            .js_expr(a, x.target)
+            .gstr_append(a, " = ")
+            .js_expr_w(a, x.value, js_assign_width(load(x.target)))
+            .gstr_append(a, ";")
+    })
     s
-        .js_expr(a, x.target)
-        .gstr_append(a, " = ")
+        .gstr_append(a, "__zr.st(")
+        .js_assign_target_name(a, load(x.target))
+        .gstr_append(a, ", ")
         .js_expr_w(a, x.value, js_assign_width(load(x.target)))
-        .gstr_append(a, ";")
+        .gstr_append(a, ", ")
+        .jint(a, bw)
+        .gstr_append(a, ");")
+}
+js_assign_boxed_w = (e: Expr) i32 {
+    e.match ({
+        .Var(v) => js_boxed_w(v.name),
+        _       => 0,
+    })
+}
+js_assign_target_name = (s: String, a: MutPtr<Malloc>, e: Expr) String {
+    e.match ({
+        .Var(v) => s.jname(a, v.name),
+        _       => s.gstr_append(a, "__zen_invalid_boxed_target"),
+    })
 }
 js_assign_width = (e: Expr) i32 {
     e.match ({
@@ -677,6 +799,8 @@ js_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
             .js_expr(a, x.idx)
             .gstr_append(a, ", ")
             .js_expr(a, x.value)
+            .gstr_append(a, ", ")
+            .jint(a, js_elem_w(x.elem))
             .gstr_append(a, ");"),
     })
 }
