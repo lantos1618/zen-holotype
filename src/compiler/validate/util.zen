@@ -136,16 +136,16 @@ fit_err* = (env: Env, argty: Ty, pty: Ty) i32 {
         }),
     })
 }
-// Constant-fold a numeric literal expr: an `.Int`, or a +/-/* of folded literals — a negative literal
-// like `-1` lowers to the Bin `0 - 1`, so folding is what lets unsigned slots reject negatives.
-// ok=false when not a foldable integer constant (Byte/Cond/var/shift/…) → range checks stay lenient.
+// Constant-fold a numeric literal expr: an `.Int`, or a +/-/*/<</>> of folded literals — a negative
+// literal like `-1` lowers to the Bin `0 - 1`, so folding is what lets unsigned slots reject negatives.
+// ok=false when not a foldable integer constant (Byte/Cond/var/`/`/…) → range checks stay lenient.
 //
 // `v` is the i64 BIT PATTERN of the literal. A u64 magnitude above i64-max (e.g. u64 MAX) overflows
 // `v` to a negative i64, so `v < 0` alone cannot tell a written magnitude from a real negative. `neg`
 // records the SEMANTIC sign: a bare `.Int` is a non-negative written magnitude (neg=false) even when
 // `v` wrapped negative; only a subtraction/negation that yields a negative result sets neg=true. That
 // lets `x: u64 := 18446744073709551615` fit while `x: u64 := -1` (i.e. `0 - 1`) is still rejected.
-LitVal: {
+LitVal*: {
     ok: bool,
     v: i64,
     neg: bool,
@@ -172,6 +172,11 @@ lit_mul_wraps = (l: i64, r: i64) bool {
         }),
     })
 }
+// A shift folds only for a count C has defined behaviour for (0..63); `<<` additionally degrades to
+// unfoldable when the result wraps i64, so `1 << 63` (2^63 — no i64 holds it) never produces a
+// verdict from a wrapped bit pattern. `>>` is arithmetic and cannot wrap.
+lit_shift_ok = (r: i64) bool { r >= 0 && r < 64 }
+lit_shl_wraps = (l: i64, r: i64) bool { l << r >> r != l }
 lit_unfoldable = () LitVal {
     LitVal(
         ok: false,
@@ -179,38 +184,33 @@ lit_unfoldable = () LitVal {
         neg: false,
     )
 }
+lit_folded = (v: i64) LitVal {
+    LitVal(
+        ok: true,
+        v: v,
+        neg: v < 0,
+    )
+}
 lit_binop = (op: string_view, l: i64, r: i64) LitVal {
-    (op == "+").match ({
-        true  => lit_add_wraps(l, r).match ({
-            true  => lit_unfoldable(),
-            false => LitVal(
-                ok: true,
-                v: l + r,
-                neg: l + r < 0,
-            ),
-        }),
-        false => (op == "-").match ({
-            true  => lit_sub_wraps(l, r).match ({
-                true  => lit_unfoldable(),
-                false => LitVal(
-                    ok: true,
-                    v: l - r,
-                    neg: l - r < 0,
-                ),
-            }),
-            false => (op == "*").match ({
-                true  => lit_mul_wraps(l, r).match ({
-                    true  => lit_unfoldable(),
-                    false => LitVal(
-                        ok: true,
-                        v: l * r,
-                        neg: l * r < 0,
-                    ),
-                }),
-                false => lit_unfoldable(),
-            }),
-        }),
+    (op == "+").then({
+        return lit_add_wraps(l, r).then({ lit_unfoldable() }, { lit_folded(l + r) })
     })
+    (op == "-").then({
+        return lit_sub_wraps(l, r).then({ lit_unfoldable() }, { lit_folded(l - r) })
+    })
+    (op == "*").then({
+        return lit_mul_wraps(l, r).then({ lit_unfoldable() }, { lit_folded(l * r) })
+    })
+    (op == "<<").then({
+        return (lit_shift_ok(r) == false || lit_shl_wraps(l, r)).match ({
+            true  => lit_unfoldable(),
+            false => lit_folded(l << r),
+        })
+    })
+    (op == ">>").then({
+        return lit_shift_ok(r).then({ lit_folded(l >> r) }, { lit_unfoldable() })
+    })
+    lit_unfoldable()
 }
 lit_val = (e: Ptr<Expr>) LitVal {
     load(e).match ({
@@ -238,6 +238,23 @@ lit_val = (e: Ptr<Expr>) LitVal {
         ),
     })
 }
+// A bare integer literal picks its own WIDTH from its value (`.Int(n)` > i32-max infers i64), but a
+// binop takes the width of its leftmost operand — so `G := 1 << 32` inferred an i32 SLOT and the
+// (correctly 64-bit) C constant truncated on the way in, silently. Fold such a binop to the plain
+// `.Int` it denotes so one rule decides the width everywhere. Only OUT-OF-i32-RANGE constants fold:
+// in-range constant math keeps its written form, so its emitted C is byte-for-byte unchanged.
+fold_wide_int* = (op: string_view, lhs: Ptr<Expr>, rhs: Ptr<Expr>) LitVal {
+    l := lhs.lit_val()
+    r := rhs.lit_val()
+    (l.ok && r.ok).match ({
+        true  => {
+            v := lit_binop(op, l.v, r.v)
+            (v.ok && v.v.i32_range_ok() == false).then({ v }, { lit_unfoldable() })
+        },
+        false => lit_unfoldable(),
+    })
+}
+i32_range_ok = (n: i64) bool { n >= 0 - 2147483648 && n <= 2147483647 }
 // The narrow widths arrive as Named("i8")/Named("u32")/… (no Ty variant); range-check them by name.
 // u64 holds values an i64 can't represent as a positive `n`, so its upper bound cannot be checked in
 // i64; any non-negative literal fits (every i64 bit pattern is a valid u64). `neg` rejects `-1` etc.
@@ -262,7 +279,7 @@ named_int_range_ok = (nm: string_view, n: i64, neg: bool) bool {
 lit_range_ok = (t: Ty, n: i64, neg: bool) bool {
     t.match ({
         .U8        => n >= 0 && n <= 255,
-        .I32       => n >= 0 - 2147483648 && n <= 2147483647,
+        .I32       => n.i32_range_ok(),
         .I64       => true,
         .Named(nm) => nm.named_int_range_ok(n, neg),
         _          => true,
