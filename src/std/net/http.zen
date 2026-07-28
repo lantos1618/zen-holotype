@@ -32,7 +32,7 @@
 // via `.expect` (the std.text.str convention). `parse_response` is independently testable: it
 // takes the raw response as a length-carrying `[u8]` and needs no socket, so canned responses
 // (including bodies with embedded NULs) are the deterministic test gate.
-{ Allocator } = std.mem.alloc
+{ Allocator, release_slice } = std.mem.alloc
 { Result, Opt, IoError, ok, err, expect } = std.core.result
 { try_acquire } = std.mem.alloc
 { TcpConn, TcpListener, serve, dial } = std.net.socket
@@ -200,6 +200,15 @@ parse_status = (a: Allocator, line: string_view) Result<i32, HttpError> {
         }),
     })
 }
+// `s[start .. start+n]` with surrounding whitespace stripped, as ONE owned buffer. `trim` allocates a
+// fresh buffer out of whatever it is handed, so the `substr` feeding it is a pure intermediate that
+// nothing above can reach — freed here rather than leaked twice per header line.
+trimmed_cut = (a: Allocator, s: string_view, start: i64, n: i64) string_view {
+    cut := a.substr(s, start, n).expect("http: oom")
+    out := a.trim(cut)
+    a.release(cut.view().ptr)
+    out
+}
 // every line after the status line -> a `[Header]`; a colon-less line is a malformed response.
 collect_headers = (a: Allocator, lines: [string_view]) Result<[Header], HttpError> {
     n := lines.len - 1
@@ -217,10 +226,8 @@ collect_headers = (a: Allocator, lines: [string_view]) Result<[Header], HttpErro
                     h.break
                 },
                 false => {
-                    nm := a.trim(a.substr(line, 0, ci).expect("http: oom"))
-                    val := a.trim(a
-                        .substr(line, ci + 1, line.view().len - (ci + 1))
-                        .expect("http: oom"))
+                    nm := a.trimmed_cut(line, 0, ci)
+                    val := a.trimmed_cut(line, ci + 1, line.view().len - (ci + 1))
                     hs[i - 1] = Header(
                         name: nm,
                         value: val,
@@ -231,15 +238,20 @@ collect_headers = (a: Allocator, lines: [string_view]) Result<[Header], HttpErro
     })
     bad.then({ err(malformed("http: header line missing ':'")) }, { ok(hs) })
 }
+// case-insensitive "does this Transfer-Encoding say chunked?". The lowercased copy is a one-question
+// intermediate — freed here, not left behind on every response that carries the header.
+te_is_chunked = (a: Allocator, te: string_view) bool {
+    lo := a.to_lower(te)
+    out := lo.contains("chunked")
+    a.release(lo.view().ptr)
+    out
+}
 // resolve the body: decode a `chunked` transfer-encoding, else trim to `Content-Length`, else take
 // the read-to-EOF remainder verbatim. The chosen run is copied once into an owned NUL-terminated
 // buffer, so `body_bytes` keeps the true length and `body`/`cstr` stays valid.
 decide_body = (a: Allocator, headers: [Header], body_raw: [u8]) [u8] {
     logical: [u8] := lookup_header(headers, "Transfer-Encoding").match ({
-        .Some(te) => a.to_lower(te).contains("chunked").match ({
-            true  => a.decode_chunked(body_raw),
-            false => body_raw,
-        }),
+        .Some(te) => a.te_is_chunked(te).then({ a.decode_chunked(body_raw) }, { body_raw }),
         .None     => lookup_header(headers, "Content-Length").match ({
             .Some(cl) => body_raw.take(cl.parse_int()),
             .None     => body_raw,
@@ -533,6 +545,17 @@ parse_request* = (a: Allocator, raw: [u8]) Result<Request, HttpError> {
                     ok_res
                 },
             })
+            toks.loop((h, i, t) {
+                // `words` owns a BACKBONE plus one owned copy per token, and each is an independent
+                // allocation. The Request keeps tokens 0 and 1 (method, path) and nothing else: the
+                // backbone and every token past the second — "HTTP/1.1" on every single request — are
+                // unreachable the moment this returns, so they are released here. The two kept tokens
+                // are NOT freed; they belong to the caller with the rest of the Request.
+                (i >= 2).then({
+                    a.release(t.view().ptr)
+                })
+            })
+            a.release_slice(toks)
             res
         },
     })

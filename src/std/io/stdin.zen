@@ -26,12 +26,27 @@ read_failed = () IoError { IoError.Errno(0 - 1) }
 // Reads one line from stdin: Ok(.Some(line)) without the '\n', Ok(.None) at EOF,
 // Err on read/allocation failure. The line is an allocator-owned view — release it
 // via `a.release(line.view().ptr)` (or let an arena reclaim it) when done.
+//
+// The 1-byte read target is acquired and RELEASED here rather than written as a `cell: [u8] := [0]`
+// local: a slice literal bound to a local is heap-promoted by the C backend (gen_slicelit) and never
+// freed, so the "on the stack" cell this used to hold leaked one byte per line read — unbounded on a
+// filter draining a large stream. The escape analysis cannot stack it either, since `cell.ptr` is
+// handed to read(2). One acquire/release per line is noise beside the per-BYTE read syscall below.
 read_line* = (a: Allocator) Result<Opt<string_view>, IoError> {
+    a.try_acquire(1).match ({
+        .Err(e)   => err(e),
+        .Ok(cell) => {
+            out := a.read_line_into(cell.slice(1))
+            a.release(cell)
+            out
+        },
+    })
+}
+read_line_into = (a: Allocator, cell: [u8]) Result<Opt<string_view>, IoError> {
     a.init(64).match ({
         .Err(e) => err(e),
         .Ok(s0) => {
             s := s0
-            cell: [u8] := [0]    // 1-byte read target on the stack
             consumed := 0    // bytes taken off the stream, INCLUDING a '\n'
             failed := false
             ev := IoError.Eof

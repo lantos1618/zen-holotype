@@ -23,6 +23,7 @@
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { String, init, append_in, finish_in } = std.text.string
+{ view } = std.text.str
 // fgets reads at most CHUNK-1 bytes per call (stopping at a newline), NUL-terminating the buffer; the
 // recursive loop reassembles the full stream across calls, so this is a throughput knob, not a cap.
 CHUNK := 4096
@@ -108,6 +109,15 @@ run* = (a: Allocator, cmd: string_view) Result<Output, IoError> {
 run_ok* = (a: Allocator, cmd: string_view) Result<string_view, IoError> {
     a.run(cmd).match ({
         .Err(e) => err(e),
-        .Ok(o)  => (o.exit == 0).then({ ok(o.stdout) }, { err(IoError.Errno(to_i32(o.exit))) }),
+        // On the nonzero-exit path the captured stdout never reaches the caller, so nothing else can
+        // ever release it — the buffer is freed HERE. It is the whole captured output, so a loop over
+        // failing commands leaked in proportion to what they printed, not a fixed cell.
+        .Ok(o)  => (o.exit == 0).match ({
+            true  => ok(o.stdout),
+            false => {
+                a.release(o.stdout.view().ptr)
+                err(IoError.Errno(to_i32(o.exit)))
+            },
+        }),
     })
 }

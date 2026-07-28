@@ -10,7 +10,7 @@
 // the caller passes the full token (`os.has_flag("--verbose")`, `os.flag_str("--out")`). A typed
 // `parse(a, T)` / positional collector is a later wave (see the tail of this file).
 { clock_gettime, getenv } = std.c.libc
-{ Allocator, try_acquire } = std.mem.alloc
+{ Allocator, heap_acquire, try_acquire } = std.mem.alloc
 { Result, IoError } = std.core.result
 // bound to zenrt.c (bodyless = foreign).
 zen_argc = () i32
@@ -23,13 +23,32 @@ unsetenv = (name: string_view) i32
 // clock id 1 = CLOCK_MONOTONIC, in milliseconds — the one clock reading available inside the
 // bootstrap closure (std.time.clock, which names the id, is not in the seed manifest and cannot be:
 // its cell comes from std.mem.raw, whose `of*` collides with std.collections.map's under the flat
-// namespace). The id stays a literal here for exactly that reason. The timespec cell is a STACK
-// slice literal, deliberately not an allocator cell: a heap alloc+free would perturb the allocation
-// sequence of whatever is being timed, and a reading must observe its subject, not move it.
+// namespace). The id stays a literal here for exactly that reason.
+//
+// The timespec cell is ONE per OS thread, allocated on first use and reused forever after: a reading
+// must observe its subject, not move it, so a timing call must not allocate. `ts: [i64] := [0, 0]`
+// looked like a stack cell and was not — a slice literal bound to a LOCAL is heap-promoted by the C
+// backend (see gen_slicelit) and never freed, so every clock_ms leaked 16 bytes AND perturbed the
+// very allocation sequence this comment says it must not. The cell here costs one acquire for the
+// process (a null test per call) and leaks nothing. `thread_local` so two threads timing at once
+// never share a timespec; the const `null_ptr()` init leaves a freshly spawned worker unset rather
+// than pointing at the main thread's cell. A cell allocation that fails reads as 0 ms.
+//
+// It comes from `heap_acquire` — std.mem.alloc's canonical process-heap floor — and not from a bare
+// `malloc`: raw allocation calls stay BEHIND the allocator floor, and tests/harness_boundaries.zen
+// enforces that for every file under src/ but the allocator itself.
+ts_cell := thread_local(null_ptr())
 clock_ms* = () i64 {
-    ts: [i64] := [0, 0]
-    clock_gettime(1, ts.ptr)
-    ts[0] * 1000 + ts[1] / 1000000
+    (ts_cell == null_ptr()).then({
+        ts_cell = heap_acquire(null_ptr(), 16)
+    })
+    (ts_cell == null_ptr()).match ({
+        true  => 0,
+        false => {
+            clock_gettime(1, ts_cell)
+            load_i64(ts_cell) * 1000 + load_i64(ts_cell.offset(8)) / 1000000
+        },
+    })
 }
 argc* = () i32 { zen_argc() }    // os.argc()  — number of CLI args (incl. argv[0])
 arg* = (i: i32) string_view { zen_argv_at(i) }    // os.arg(i)  — the i-th arg ("" if out of range)

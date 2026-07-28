@@ -31,7 +31,7 @@
 // std.json makes) and is unwrapped at the module boundary via the `c*` helpers below.
 { Allocator } = std.mem.alloc
 { Result, IoError, expect } = std.core.result
-{ String, new_in, push_in, append_in, finish_in } = std.text.string
+{ String, new_in, push_in, append_in, finish_in, free_in } = std.text.string
 { view } = std.text.str
 // ── OOM policy ────────────────────────────────────────────────────────────────
 // The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
@@ -160,9 +160,18 @@ parse* = (a: Allocator, text: string_view) Result<[[string_view]], IoError> {
     out: Result<[[string_view]], IoError> := in_quotes.match ({
         true  => .Err(.Eof),
         false => {
-            active.then({
-                fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
-                rows = a.cbuf_push(rows, fields.cbuf_slice())
+            active.match ({
+                true  => {
+                    fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
+                    rows = a.cbuf_push(rows, fields.cbuf_slice())
+                },
+                // No record in progress (the usual case — the text ended with a newline): the builder
+                // and field backbone opened for the NEXT record are dead, and neither is reachable
+                // from the returned rows. Free them, or every parse leaks one of each.
+                false => {
+                    sb.free_in(a)
+                    a.release(fields.ptr)
+                },
             })
             .Ok(rows.cbuf_slice())
         },
