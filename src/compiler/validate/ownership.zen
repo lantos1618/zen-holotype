@@ -1364,9 +1364,26 @@ mu_is_var = (e: Expr) bool {
         _       => false,
     })
 }
-mu_call_kind = (mvm: Map<i64>, e: Ptr<Expr>) i32 {
+// SHADOWING GATE: UFCS only ever desugars to a TOP-LEVEL name, so a call through a name bound
+// LOCALLY — a param, or a `f := (x: i64) void {…}` local — is never a method call and has no
+// receiver. Without this, an unrelated `f(i)` was flagged in any module whose closure declares a
+// value-mold `f` (std.text.fmt's `Printer.f`). This pass runs BEFORE resolve, so shadowing is
+// decided by NAME alone: `bound` is the set of names bound in the enclosing function, carried down
+// the walk (params up front, each `:=` as the walk passes it, lambda/loop bindings at their arm).
+// A `.MethodCall` names its receiver explicitly, so a like-named local does not shadow it.
+mu_bound_names = (a: MutPtr<Malloc>, bound: Ptr<DeadList>, params: [Param]) Ptr<DeadList> {
+    out := bound
+    params.loop((h, i, p) {
+        out = a.dead_cons(p.name, out)
+    })
+    out
+}
+mu_call_kind = (mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Call(c)        => (mvm.get(c.fn, 0) == 1 && c.args.len > 0 && mu_is_var(c.args[0])).match ({
+        .Call(c)        => (mvm.get(c.fn, 0) == 1
+            && bound.dead_has(c.fn) == false
+            && c.args.len > 0
+            && mu_is_var(c.args[0])).match ({
             true  => KMUSTUSE().kv_at(c.pos),
             false => 0,
         }),
@@ -1377,53 +1394,94 @@ mu_call_kind = (mvm: Map<i64>, e: Ptr<Expr>) i32 {
         _               => 0,
     })
 }
-mu_arms_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, arms: [ArmData]) i32 {
+mu_arms_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, arms: [ArmData]) i32 {
     acc := 0
     arms.loop((h, i, ar) {
-        acc = acc.or(a.mu_expr_kind(mvm, ar.body))
+        acc = acc.or(a.mu_expr_kind(mvm, bound, ar.body))
     })    // arm body = the arm's VALUE (tail)
     acc
 }
 // recurse into nested control-flow whose bodies can hold discarded statements.
-mu_expr_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>) i32 {
+mu_expr_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
-        .Block(b) => a.mu_body_kind(mvm, b.stmts),
-        .Loop(l)  => a.mu_body_kind(mvm, l.body),
-        .Match(m) => a.mu_arms_kind(mvm, m.arms),
-        .Cond(d)  => a.mu_expr_kind(mvm, d.t).or(a.mu_expr_kind(mvm, d.e)),
+        .Block(b)  => a.mu_body_kind(mvm, bound, b.stmts),
+        // a `xs.loop(…)` body runs for EFFECT — it yields no value, so it has no tail. Its handler,
+        // index and element are fresh bindings.
+        .Loop(l)   => a
+            .mu_expr_kind(mvm, bound, l.seq)
+            .or(a.mu_effect_body_kind(mvm, a.dead_cons(l.h, a.dead_cons(l.idx, a.dead_cons(l.elem, bound))), l.body)),
+        .Lambda(m) => a.mu_body_kind(mvm, a.mu_bound_names(bound, m.params), m.body),
+        .Match(m)  => a.mu_arms_kind(mvm, bound, m.arms),
+        .Cond(d)   => a.mu_expr_kind(mvm, bound, d.t).or(a.mu_expr_kind(mvm, bound, d.e)),
         // the rest descends structurally: a discarded self-mutation can sit in ANY statement list, and
         // the hand-written list reached none through a call argument — including the `.Lambda` a
         // template call carries (`apply(() { b.bump(5) … })`).
-        _         => 0.expr_fold_children(e, (acc, ch) { acc.or(a.mu_expr_kind(mvm, ch)) }, (acc, body) {
-            acc.or(a.mu_body_kind(mvm, body))
+        _          => 0.expr_fold_children(e, (acc, ch) { acc.or(a.mu_expr_kind(mvm, bound, ch)) }, (acc, body) {
+            acc.or(a.mu_body_kind(mvm, bound, body))
         }),
     })
 }
 // an ExprStmt: flag a discarded value-mold call when NOT in tail position, and always recurse for nested
 // discards. (Extracted so the nested `is_tail.match(...)` is a plain statement, not a chained arm body.)
-mu_exprstmt_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, e: Ptr<Expr>, is_tail: bool) i32 {
-    head := is_tail.then({ 0 }, { mvm.mu_call_kind(e) })
-    head.or(a.mu_expr_kind(mvm, e))
+mu_exprstmt_kind = (
+    a: MutPtr<Malloc>,
+    mvm: Map<i64>,
+    bound: Ptr<DeadList>,
+    e: Ptr<Expr>,
+    is_tail: bool,
+) i32 {
+    head := is_tail.then({ 0 }, { mvm.mu_call_kind(bound, e) })
+    head.or(a.mu_expr_kind(mvm, bound, e))
 }
-mu_stmt_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, st: Stmt, is_tail: bool) i32 {
+mu_stmt_kind = (
+    a: MutPtr<Malloc>,
+    mvm: Map<i64>,
+    bound: Ptr<DeadList>,
+    st: Stmt,
+    is_tail: bool,
+) i32 {
     st.match ({
-        .ExprStmt(e) => a.mu_exprstmt_kind(mvm, e, is_tail),
-        .Let(l)      => a.mu_expr_kind(mvm, l.value),
-        .Assign(x)   => a.mu_expr_kind(mvm, x.value),
-        .Return(r)   => a.mu_expr_kind(mvm, r),
-        .If(f)       => a.mu_body_kind(mvm, f.then).or(a.mu_body_kind(mvm, f.els)),
-        .While(w)    => a.mu_body_kind(mvm, w.body),
-        .IndexSet(x) => a.mu_expr_kind(mvm, x.value),
+        .ExprStmt(e) => a.mu_exprstmt_kind(mvm, bound, e, is_tail),
+        .Let(l)      => a.mu_expr_kind(mvm, bound, l.value),
+        .Assign(x)   => a.mu_expr_kind(mvm, bound, x.value),
+        .Return(r)   => a.mu_expr_kind(mvm, bound, r),
+        .If(f)       => a.mu_body_kind(mvm, bound, f.then).or(a.mu_body_kind(mvm, bound, f.els)),
+        // a `@while` body runs for EFFECT — its last statement is a discard like any other.
+        .While(w)    => a
+            .mu_expr_kind(mvm, bound, w.c)
+            .or(a.mu_effect_body_kind(mvm, bound, w.body)),
+        .IndexSet(x) => a.mu_expr_kind(mvm, bound, x.value),
     })
 }
-// the body's LAST statement is its produced value (tail) — never a discard; every earlier ExprStmt is.
-mu_body_kind* = (a: MutPtr<Malloc>, mvm: Map<i64>, body: [Stmt]) i32 {
+mu_stmts_kind = (
+    a: MutPtr<Malloc>,
+    mvm: Map<i64>,
+    bound: Ptr<DeadList>,
+    body: [Stmt],
+    has_tail: bool,
+) i32 {
     acc := 0
     n := body.len
+    scope := bound
     body.loop((h, i, st) {
-        acc = acc.or(a.mu_stmt_kind(mvm, st, i == n - 1))
+        acc = acc.or(a.mu_stmt_kind(mvm, scope, st, has_tail && i == n - 1))
+        scope = st.match ({
+            .Let(l) => a.dead_cons(l.name, scope),
+            _       => scope,
+        })
     })
     acc
+}
+// the body's LAST statement is its produced value (tail) — never a discard; every earlier ExprStmt is.
+mu_body_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, body: [Stmt]) i32 {
+    a.mu_stmts_kind(mvm, bound, body, true)
+}
+// a body run purely for effect (`@while` / `xs.loop`) yields nothing, so no statement in it is a tail.
+mu_effect_body_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, body: [Stmt]) i32 {
+    a.mu_stmts_kind(mvm, bound, body, false)
+}
+mu_func_kind* = (a: MutPtr<Malloc>, mvm: Map<i64>, f: Func) i32 {
+    a.mu_body_kind(mvm, a.mu_bound_names(a.dead_nil(), f.params), f.body)
 }
 scope_params* = (a: MutPtr<Malloc>, params: [Param]) Ptr<DeadList> {
     out := a.dead_nil()
