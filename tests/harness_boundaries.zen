@@ -114,7 +114,8 @@ atwhile_at = (sv: [u8], i: i64) bool {
 // a pattern match anchored at index i. kind selects the regex shape:
 //   0 = `\bNAME\s*\(`        (call, plain word boundary — `.NAME(` still matches, as in python)
 //   1 = `(?<!\.)\bNAME\s*\(` (call, boundary EXCLUDING a leading `.` — e.g. "raw addr")
-//   2 = `\bNAME\b`           (bare keyword — break / continue)
+//   2 = `\bNAME\b`           (bare keyword — NO RULE USES THIS TODAY; it existed for break/continue,
+//                             which are not Zen keywords at all, so the check could never fire)
 //   _ = `@while\b`           (the literal @while token; `name` is ignored)
 matches_kind_at = (sv: [u8], i: i64, name: string_view, kind: i64) bool {
     (kind == 0).match ({
@@ -294,8 +295,6 @@ example_violation = (sv: [u8]) bool {
     sv.file_has("addr", 1)
         || sv.file_has("checkpoint_current", 0)
         || sv.file_has("@while", 3)
-        || sv.file_has("break", 2)
-        || sv.file_has("continue", 2)
         || sv.file_has("malloc", 0)
         || sv.file_has("load", 0)
         || sv.file_has("store", 0)
@@ -308,6 +307,12 @@ example_violation = (sv: [u8]) bool {
         || sv.file_has("cstr", 0)
         || sv.file_has("sizeof", 0)
 }
+// `break`/`continue` USED to be banned here as imperative control flow. They are gone because
+// the rule could not fire: a bare `break` or `continue` is `error[undefined-name]` in Zen — it
+// does not parse — so the only spellings that exist are `h.break`/`h.continue`, methods on the
+// functional loop handle. The check therefore caught zero real violations while banning the one
+// legal form, and examples/zvm.zen had its early exits removed to satisfy it. `@while` above is
+// the imperative loop this family actually targets, and it stays banned.
 example_passes = (mp: MutPtr<Malloc>, path: string_view) bool {
     path.is_empty().match ({
         true  => true,

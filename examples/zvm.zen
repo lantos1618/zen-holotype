@@ -742,14 +742,18 @@ exec_one = (v: Vm, code: [Instr]) Result<Vm, VmError> {
 run_quantum = (v: Vm, code: [Instr], ticks: [i64]) Result<Vm, VmError> {
     res: Result<Vm, VmError> := .Ok(v)
     ticks.loop((h, i, t) {
-        // Halted and error are NO-OPS rather than `h.break`: the boundary suite bans `break` as a bare
-        // word in examples, which catches the loop-handle method too. Same result either way — a halted
-        // or failed `res` never changes again — at the cost of spinning out the rest of the quantum.
         res.match ({
-            .Ok(cur) => (cur.halted == false).then({
-                res = cur.exec_one(code)
+            .Ok(cur) => cur.halted.match ({
+                true  => {
+                    h.break
+                },
+                false => {
+                    res = cur.exec_one(code)
+                },
             }),
-            .Err(e)  => { },
+            .Err(e)  => {
+                h.break
+            },
         })
     })
     res
