@@ -4,7 +4,7 @@
   gstr_append, gstr_finish, gstr_string, lam_r, member_at, mkenumg, mkstructg_at, sassign_at, sexpr,
   sidxset_at, sif, slett_at, slit, sret, swhile, tvoid, vref, acquire_or_die, acquire_or_die } = compiler.genc
 { gstr_int, map_slice } = compiler.astops
-{ DeclIndex, VList, empty_params, pbuf, recall, var_bound, vcons, vnil } = compiler.check
+{ DeclIndex, VList, empty_params, is_intrinsic, pbuf, recall, var_bound, vcons, vnil } = compiler.check
 { field_fnt } = compiler.check_inline
 { Malloc } = std.mem.alloc
 { expr_fold_children } = compiler.ast.expr_children
@@ -16,6 +16,10 @@ lift_toplevel = (idx: DeclIndex, decls: [Decl], n: StringView) bool {
 // happened to define a free fn of the same name — `release` exists in std.mem.raw, `acquire` does
 // not, so `r.release(p)` lifted and `r.acquire(n)` did not.
 lift_method = (idx: DeclIndex, n: StringView) bool { idx.tmethod_idx.get(n, 0 - 1) >= 0 }
+// The genc CALL INTRINSICS (`load`/`store`/`sizeof`/`offset`/`slice`/…) are the same story with no
+// declaration at all to find, so `lift_toplevel` missed and EVERY lambda that dereferences a pointer
+// looked like it captured. genc lowers them by NAME, so a lifted body still means the intrinsic —
+// but only while nothing in scope SHADOWS the name; `lift_shadows_intrinsic` is that side condition.
 lift_is_captured* = (decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, n: StringView) bool {
     (bound.var_bound(n) || idx.lift_toplevel(decls, n) || n == "true" || n == "false").match ({
         true  => false,
@@ -114,7 +118,8 @@ lift_expr_cap = (
         // `.Match`/`.Loop`/`.Lambda` EXTEND the bound set for their bodies (arm binder, loop
         // idx/elem, lambda params). Everything else delegates to the one exhaustive child listing.
         .Var(v)     => lift_is_captured(decls, idx, bound, v.name),
-        .Call(c)    => lift_is_captured(decls, idx, bound, c.fn) && idx.lift_method(c.fn) == false
+        .Call(c)    => lift_is_captured(decls, idx, bound, c.fn)
+            && (idx.lift_method(c.fn) || c.fn.is_intrinsic()) == false
             || a.lift_args_cap(decls, idx, bound, c.args),
         .Match(m)   => a.lift_expr_cap(decls, idx, bound, m.subj)
             || a.lift_arms_cap(decls, idx, bound, m.arms),
@@ -129,6 +134,69 @@ lift_expr_cap = (
 // a lambda is liftable iff it does NOT capture (only its own params + body binders + top-level names).
 lift_liftable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaData) bool {
     a.lift_body_cap(decls, idx, a.lift_lamparams(a.vnil(), lm.params), lm.body) == false
+}
+// ── the side condition on the intrinsic exemption above ──────────────────────────────────────────
+// An intrinsic name IS a legal binder — `g = (store_i64: (i64) i64) i64 { store_i64(21) }` and
+// `load := (x: i64) i64 { x + 1 }` are both pinned green (harness_value, harness_build), and every
+// use site resolves to the binder, not to genc. A LIFTED body is a top-level fn, where that binder is
+// out of scope and genc re-reads the name as the intrinsic: `load(k)` becomes `*(k)` (a C error on the
+// generated file) and `to_i64(k)` becomes a cast that silently drops the call. So a function that
+// BINDS an intrinsic name anywhere keeps the pre-exemption answer for all of its lambdas — they stay
+// put and report the honest error[lambda-value]. Costs nothing real: no src/ function that binds one
+// (`offset`, `addr`) holds a liftable lambda.
+lift_shadow_params = (ps: [Param]) bool {
+    found := false
+    ps.loop((h, i, p) {
+        found = found || p.name.is_intrinsic()
+    })
+    found
+}
+lift_shadow_arms = (arms: [ArmData]) bool {
+    found := false
+    arms.loop((h, i, ar) {
+        found = found || ar.bind.is_intrinsic() || ar.body.lift_shadow_expr()
+    })
+    found
+}
+lift_shadow_body = (body: [Stmt]) bool {
+    found := false
+    body.loop((h, i, st) {
+        found = found || st.lift_shadow_stmt()
+    })
+    found
+}
+lift_shadow_stmt = (st: Stmt) bool {
+    st.match ({
+        .Let(l)      => l.name.is_intrinsic() || l.value.lift_shadow_expr(),
+        .Assign(x)   => x.target.lift_shadow_expr() || x.value.lift_shadow_expr(),
+        .Return(r)   => r.lift_shadow_expr(),
+        .ExprStmt(e) => e.lift_shadow_expr(),
+        .If(f)       => f.c.lift_shadow_expr()
+            || f.then.lift_shadow_body()
+            || f.els.lift_shadow_body(),
+        .While(w)    => w.c.lift_shadow_expr() || w.body.lift_shadow_body(),
+        .IndexSet(x) => x.seq.lift_shadow_expr()
+            || x.idx.lift_shadow_expr()
+            || x.value.lift_shadow_expr(),
+    })
+}
+// the binding shapes, exactly as lift_expr_cap names them: `.Loop` idx/elem, `.Lambda` params,
+// `.Match` arm binder. Everything else delegates to the one exhaustive child listing.
+lift_shadow_expr = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Loop(l)    => l.idx.is_intrinsic()
+            || l.elem.is_intrinsic()
+            || l.seq.lift_shadow_expr()
+            || l.body.lift_shadow_body(),
+        .Lambda(la) => la.params.lift_shadow_params() || la.body.lift_shadow_body(),
+        .Match(m)   => m.subj.lift_shadow_expr() || m.arms.lift_shadow_arms(),
+        _           => false.expr_fold_children(e, (acc, ch) { acc || ch.lift_shadow_expr() }, (acc, body) {
+            acc || body.lift_shadow_body()
+        }),
+    })
+}
+lift_shadows_intrinsic = (f: Func) bool {
+    f.params.lift_shadow_params() || f.body.lift_shadow_body()
 }
 // --- the lift transform: replace each liftable lambda (in a field-init / return value) with the name
 //     of a freshly generated top-level fn, collected (with a shared counter) for appending. ---
@@ -319,19 +387,22 @@ lift_rw_decl = (
     d: Decl,
 ) Decl {
     d.match ({
-        .DFunc(f) => {
-            lo := load_i64(gcp).to_i32()
-            nb := a.lift_rw_body(decls, idx, gcp, gen, f.ret, f.body)
-            gen.lift_tag_tparams(lo, load_i64(gcp).to_i32(), f.tparams)
-            dfunc(Func(
-                name: f.name,
-                params: f.params,
-                ret: f.ret,
-                tparams: f.tparams,
-                body: nb,
-                pos: f.pos,
-            ))
-        },
+        .DFunc(f) => f.lift_shadows_intrinsic().match ({
+            true  => d,
+            false => {
+                lo := load_i64(gcp).to_i32()
+                nb := a.lift_rw_body(decls, idx, gcp, gen, f.ret, f.body)
+                gen.lift_tag_tparams(lo, load_i64(gcp).to_i32(), f.tparams)
+                dfunc(Func(
+                    name: f.name,
+                    params: f.params,
+                    ret: f.ret,
+                    tparams: f.tparams,
+                    body: nb,
+                    pos: f.pos,
+                ))
+            },
+        }),
         _         => d,
     })
 }
