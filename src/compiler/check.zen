@@ -786,6 +786,17 @@ Env*: {
         (c.fn == "load").then({
             return env.arg0_ty(c).pointee_of()
         })
+        // `offset` is BYTE address arithmetic and stays deliberately untyped (void): its result is read
+        // back at whatever type the field it lands on has, which is why the same call reaches an i64
+        // header word and a u8 payload. The one property it must not erase is read-only-ness — bytes one
+        // offset along from `.rodata` are still `.rodata` — or `v.ptr.offset(0).slice(n)` walks around
+        // the read-only pointer exactly as `v.ptr.slice(n)` used to.
+        (c.fn == "offset").then({
+            return env.arg0_ty(c).is_readonly_ptr_ty().match ({
+                true  => tptr_k(env.a.tnode(tu8()), k_ptr()),
+                false => tvoid(),
+            })
+        })
         (c.fn == "to_i32").then({
             return ti32()
         })
@@ -1765,15 +1776,17 @@ ty_under_ptr* = (t: Ty) Ty {
         _        => t,
     })
 }
-// `.ptr` deliberately does NOT inherit the window's read-only-ness: it is the raw floor where a
-// slice meets the allocator and FFI, and its dominant use is `a.release(x.view().ptr)` — freeing
-// bytes you own, which is not a write. Demoting it to `Ptr<u8>` rejects every such release. Closing
-// the residual `v.ptr.store(…)` laundering path needs `release`/`resize` to take a read-only
-// pointer first (a std signature change, not a checker one).
-slice_member* = (a: MutPtr<Malloc>, field: StringView) Ty {
+// `.ptr` INHERITS the window's read-only-ness — the slice's own `kind` is the pointer's kind. Without
+// it `.ptr` was a laundry: `v.ptr.slice(v.len)` handed a writable `[u8]` back over `.rodata` bytes and
+// the store aborted at run time with `zen check` reporting ok. `store`/`slice` on a read-only `Ptr<T>`
+// were already rejected (store_writes_readonly); this is the missing half that makes them reachable.
+// The cost: `a.release(x.view().ptr)` now needs `x` to be a spelling whose window stays writable,
+// because `release` takes the `RawPtr<u8>` floor and a read-only `Ptr<u8>` does not fit it. Every
+// such site in std already frees a `StringView`'s block; only `sb().done()`'s `StringCstr` did not.
+slice_member* = (a: MutPtr<Malloc>, field: StringView, kind: i32) Ty {
     (field == "len").match ({
         true  => ti64(),
-        false => (field == "ptr").then({ tptr(a.tnode(tu8())) }, { tvoid() }),
+        false => (field == "ptr").then({ tptr_k(a.tnode(tu8()), kind) }, { tvoid() }),
     })
 }
 // Field-type inference, auto-deref'd. Shared by `obj.field` (Member) and `obj->field` (Arrow); the
@@ -1782,7 +1795,7 @@ slice_member* = (a: MutPtr<Malloc>, field: StringView) Ty {
 infer_field = (env: Env, oty: Ty, field: StringView) Ty {
     oty.ty_under_ptr().match ({
         .Generic(g) => env.didx.idx_genstruct_field(env.a, env.decls, g.name, field, g.args),
-        .Slice(e)   => env.a.slice_member(field),
+        .Slice(e)   => env.a.slice_member(field, e.kind),
         _           => env.didx.idx_struct_field(env.decls, oty.enum_name(), field),
     })
 }

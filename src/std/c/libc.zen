@@ -21,17 +21,21 @@ calloc* = (n: i64, size: i64) RawPtr<u8>
 // memcpy's two ranges MUST NOT overlap (C undefined behaviour); memmove's may. std.mem.raw wraps the
 // pair as `copy` / `move` — import those, not these, unless you are inside std.mem itself.
 // memset's fill value is a C `int` (i32 here) even though only its low byte is stored.
-memcpy* = (dst: RawPtr<u8>, src: RawPtr<u8>, n: i64) RawPtr<u8>
-memmove* = (dst: RawPtr<u8>, src: RawPtr<u8>, n: i64) RawPtr<u8>
+// The operands these three only READ are `const void *` in C, so they take the read-only floor:
+// a window over `.rodata` is a legal source. `RawPtr`/`MutPtr` arguments still fit.
+memcpy* = (dst: RawPtr<u8>, src: Ptr<u8>, n: i64) RawPtr<u8>
+memmove* = (dst: RawPtr<u8>, src: Ptr<u8>, n: i64) RawPtr<u8>
 memset* = (p: RawPtr<u8>, v: i32, n: i64) RawPtr<u8>
-memcmp* = (a: RawPtr<u8>, b: RawPtr<u8>, n: i64) i32
+memcmp* = (a: Ptr<u8>, b: Ptr<u8>, n: i64) i32
 // ── strings ──────────────────────────────────────────────────────────────────
 strlen* = (s: StringView) i64
 strcmp* = (a: StringView, b: StringView) i32
 // ── POSIX file descriptors ───────────────────────────────────────────────────
 open* = (path: StringView, flags: i32, mode: i32) i32
 read* = (fd: i32, buf: RawPtr<u8>, n: i64) i64
-write* = (fd: i32, buf: RawPtr<u8>, n: i64) i64
+// `write` only READS its buffer (C spells it `const void *`), so it takes the read-only floor: a
+// window over `.rodata` is printable. `RawPtr`/`MutPtr` arguments still fit, so no caller changes.
+write* = (fd: i32, buf: Ptr<u8>, n: i64) i64
 close* = (fd: i32) i32
 lseek* = (fd: i32, off: i64, whence: i32) i64
 // isatty(fd) -> 1 when fd refers to a terminal, 0 otherwise. The driver uses it to tell an
