@@ -5,8 +5,8 @@
 //
 //   b := "abc".view()                         // [u8] over the bytes
 //   sha256_hex(a, b)                           // "ba7816bf8f01cfea…f20015ad"  (64 lowercase hex chars)
-//   dst: [u8] := [ … 32 bytes … ]             // or hash into a fixed buffer with NO allocation:
-//   sha256_into(b, dst)                        // writes exactly 32 bytes into dst (dst.len must be >= 32)
+//   sha256_into(b, [ … 32 zero bytes … ])      // or hash into a fixed buffer with NO allocation
+//                                              // (writes exactly 32 bytes; dst.len must be >= 32)
 //   fnv1a(b)                                   // a u64 hash — fast, deterministic, NOT collision-safe
 //
 // The backend's integer primitives are i32/i64/u8/f64/bool plus width types (u64 lowers to uint64_t).
@@ -19,10 +19,10 @@
 // one of these names (or imports another module that does) collides at flatten time; import the names
 // you use (`{ sha256_hex, fnv1a } = std.hash`) and rename on your side if needed.
 { then } = std.core.bool
+{ times } = std.core.count
 { hex_char } = std.text.ascii    // the shared hex-ENCODE nibble
 { Allocator, try_acquire } = std.mem.alloc    // sha256_hex allocates its hex buffer through the caller allocator
 { expect } = std.core.result
-{ times } = std.core.count    // the count loop — `@while` belongs in the primitive, not here
 // ── FNV-1a, 64-bit ────────────────────────────────────────────────────────────
 // The FNV-1a-64 prime, 0x100000001b3, and offset basis 0xcbf29ce484222325. The basis is above i64 max
 // but a u64 literal round-trips its exact bit pattern (lex → fmt → genc), so it is named directly.
@@ -85,12 +85,16 @@ sha_msg_byte = (bytes: [u8], i: i64, len: i64, plen: i64, bitlen: i64) i64 {
     })
 }
 // core compression: hash `bytes` and leave the eight 32-bit result words in `hh` (hh.len must be 8).
+//
+// EVERY fixed buffer this algorithm needs — the round constants `k`, the message schedule `w`, the
+// running hash `hh`, and sha256_hex's digest cell `d` — is written as a slice literal in ARGUMENT
+// POSITION to a callee that only borrows it (indexes it, `.loop`s it, or hands it on to another such
+// callee). That is exactly the shape compiler.backend.c.c_escape proves non-escaping, so the backend
+// lowers them to C compound literals with automatic storage. A literal bound to a LOCAL instead is
+// heap-promoted by gen_slicelit and never freed: the `k`/`w`/`hh`/`d` locals this file used to hold
+// leaked 1120 bytes on every sha256_hex call, linearly, which is what made the "no hidden heap" claim
+// below false. Keep the literals in argument position.
 sha256_words = (bytes: [u8], hh: [i64]) i64 {
-    len := bytes.len
-    // padded length: input + one 0x80 + zeros + 8 length bytes, rounded up to a multiple of 64.
-    plen := ((len + 8) / 64 + 1) * 64
-    bitlen := len * 8
-    nblocks := plen / 64
     // initial hash values H0..H7 (fractional parts of sqrt of the first 8 primes).
     hh[0] = 1779033703
     hh[1] = 3144134277
@@ -100,11 +104,18 @@ sha256_words = (bytes: [u8], hh: [i64]) i64 {
     hh[5] = 2600822924
     hh[6] = 528734635
     hh[7] = 1541459225
-    // round constants K0..K63 (fractional parts of cbrt of the first 64 primes).
-    k: [i64] := [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, 2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411, 3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424, 2428436474, 2756734187, 3204031479, 3329325298]
-    // the 64-word message schedule, reused per block.
-    w: [i64] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    // one pass per 512-bit block: a COUNT loop over `nblocks`, so the count primitive owns the stepping.
+    // round constants K0..K63 (fractional parts of cbrt of the first 64 primes), then the 64-word
+    // message schedule (zeroed; every slot is written before it is read).
+    sha_compress(bytes, hh, [1116352408, 1899447441, 3049323471, 3921009573, 961987163, 1508970993, 2453635748, 2870763221, 3624381080, 310598401, 607225278, 1426881987, 1925078388, 2162078206, 2614888103, 3248222580, 3835390401, 4022224774, 264347078, 604807628, 770255983, 1249150122, 1555081692, 1996064986, 2554220882, 2821834349, 2952996808, 3210313671, 3336571891, 3584528711, 113926993, 338241895, 666307205, 773529912, 1294757372, 1396182291, 1695183700, 1986661051, 2177026350, 2456956037, 2730485921, 2820302411, 3259730800, 3345764771, 3516065817, 3600352804, 4094571909, 275423344, 430227734, 506948616, 659060556, 883997877, 958139571, 1322822218, 1537002063, 1747873779, 1955562222, 2024104815, 2227730452, 2361852424, 2428436474, 2756734187, 3204031479, 3329325298], [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+}
+// the block loop, over caller-supplied scratch: `k` the round constants, `w` the message schedule.
+sha_compress = (bytes: [u8], hh: [i64], k: [i64], w: [i64]) i64 {
+    len := bytes.len
+    // padded length: input + one 0x80 + zeros + 8 length bytes, rounded up to a multiple of 64.
+    plen := ((len + 8) / 64 + 1) * 64
+    bitlen := len * 8
+    nblocks := plen / 64
+    // one pass per 512-bit block: a COUNT loop, so the count primitive owns the stepping.
     nblocks.times((bi) {
         base := bi * 64
         w.loop((lh, j, wj) {
@@ -161,8 +172,8 @@ sha256_words = (bytes: [u8], hh: [i64]) i64 {
 }
 // SHA-256 of `bytes` written as 32 big-endian bytes into `dst` (dst.len must be >= 32). Pure: no
 // allocation, no hidden heap — the whole computation lives in a fixed stack schedule.
-sha256_into* = (bytes: [u8], dst: [u8]) i64 {
-    hh: [i64] := [0, 0, 0, 0, 0, 0, 0, 0]
+sha256_into* = (bytes: [u8], dst: [u8]) i64 { sha_words_into(bytes, dst, [0, 0, 0, 0, 0, 0, 0, 0]) }
+sha_words_into = (bytes: [u8], dst: [u8], hh: [i64]) i64 {
     sha256_words(bytes, hh)
     hh.loop((lh, wi, v) {
         dst[wi * 4] = to_u8(v >> 24 & 255)
@@ -174,7 +185,9 @@ sha256_into* = (bytes: [u8], dst: [u8]) i64 {
 }
 // SHA-256 of `bytes` as a fresh 64-char lowercase-hex NUL-terminated `str` owned by `a`.
 sha256_hex* = (a: Allocator, bytes: [u8]) string_view {
-    d: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    a.sha_hex_into(bytes, [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+}
+sha_hex_into = (a: Allocator, bytes: [u8], d: [u8]) string_view {
     sha256_into(bytes, d)
     out: [u8] := a.try_acquire(65).expect("std.hash: out of memory").slice(65)
     d.loop((h, i, b) {

@@ -339,13 +339,18 @@ parse_number = (a: Allocator, src: string_view, sv: [u8], pos: i64) Result<Step,
             txt := a.substr_in(src, pos, n).expect("std.json: allocation failed")
             // an integer token becomes `.Int` (exact round-trip); a magnitude past i64 falls back to
             // the f64 approximation, as does anything with a fraction or an exponent.
-            txt.num_is_integral().match ({
+            out: Result<Step, JsonError> := txt.num_is_integral().match ({
                 true  => parse_i64_checked(txt).match ({
                     .Ok(i)  => step_ok(.Int(i), endp),
                     .Err(_) => parse_num_f64(txt, pos, endp),
                 }),
                 false => parse_num_f64(txt, pos, endp),
             })
+            // `txt` is a NUL-terminated COPY of the token, needed only so the parsers can read it as
+            // a `str`. A number Value carries an i64/f64, never this buffer, so nothing above the
+            // parser can ever free it: released here, or every number token in the input leaks.
+            a.release(txt.view().ptr)
+            out
         },
     })
 }
