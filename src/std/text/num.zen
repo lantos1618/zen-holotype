@@ -23,7 +23,7 @@ num_integer_len = (n: i64) i64 {
 // integer writers below (jsony's dumpNumberFast trick): dividing by 100 and emitting a
 // zero-padded pair halves the divisions vs one digit per step. Exported so std.text.fmt's
 // streaming writers share the one table.
-num_two_digits* = () string_view {
+num_two_digits* = () StringView {
     "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899"
 }
 // Write the zero-padded two-digit decimal of `pair` (0..99) at p[at..at+2); returns at+2.
@@ -136,7 +136,7 @@ uinteger_in* = (a: Allocator, n: u64) Result<String, IoError> {
     })
 }
 uinteger* = (a: Allocator, n: u64) Result<String, IoError> { a.uinteger_in(n) }
-num_copy_text = (p: RawPtr<u8>, at: i64, s: string_view, i: i64) i64 {
+num_copy_text = (p: RawPtr<u8>, at: i64, s: StringView, i: i64) i64 {
     b := s.offset(i).load()
     (b == '\0').match ({
         true  => at,
@@ -146,10 +146,10 @@ num_copy_text = (p: RawPtr<u8>, at: i64, s: string_view, i: i64) i64 {
         },
     })
 }
-num_text_len_at = (s: string_view, i: i64) i64 {
+num_text_len_at = (s: StringView, i: i64) i64 {
     (s.offset(i).load() == '\0').then({ i }, { num_text_len_at(s, i + 1) })
 }
-num_text_len = (s: string_view) i64 { num_text_len_at(s, 0) }
+num_text_len = (s: StringView) i64 { num_text_len_at(s, 0) }
 num_write_fpad* = (p: RawPtr<u8>, at: i64, n: i64, w: i64) i64 {
     (w == 1).match ({
         true  => {
@@ -283,7 +283,7 @@ num_write_fabs_digits = (p: RawPtr<u8>, at: i64, x: f64) i64 {
 // the formatter renders in scientific notation). A TRUE infinity is detected arithmetically:
 // for finite x, x - x == 0; for +/-inf, inf - inf == nan != 0. Magnitude alone is NOT used —
 // that mislabels large finite numbers as infinity.
-f64_special* = (x: f64) string_view {
+f64_special* = (x: f64) StringView {
     (x != x).match ({
         true  => "nan",
         false => (x - x != 0.0).match ({
@@ -292,7 +292,7 @@ f64_special* = (x: f64) string_view {
         }),
     })
 }
-num_is_special_text = (s: string_view) bool { s.offset(0).load() != '\0' }
+num_is_special_text = (s: StringView) bool { s.offset(0).load() != '\0' }
 num_float_cap = (x: f64) i64 {
     sp := x.f64_special()
     sp.num_is_special_text().then({ num_text_len(sp) + 1 }, { 80 })
@@ -335,7 +335,7 @@ float* = (a: Allocator, x: f64) Result<String, IoError> { a.float_in(x) }
 // decimal digits to the very end, magnitude must fit i64.
 //   parse_i64_checked("123") => .Ok(123)   parse_i64_checked("12x") => .Err(.Trailing('x'))
 //   parse_i64_checked("")    => .Err(.NoDigits)
-parse_i64_checked* = (s: string_view) Result<i64, ParseError> { s.try_parse_int() }
+parse_i64_checked* = (s: StringView) Result<i64, ParseError> { s.try_parse_int() }
 // 10^e as f64, for any sign of e. Recursive — e is a (small) decimal exponent.
 pf_pow10 = (e: i64) f64 {
     (e == 0).match ({
@@ -353,7 +353,7 @@ pf_pow10 = (e: i64) f64 {
 // OVERFLOW: magnitudes beyond f64 range silently become +/-inf (no Overflow error).
 // ERRORS: empty/sign-only input or a fraction-only "." => .NoDigits; a stray byte
 // (incl. a second '.') => .Trailing(byte); "1e"/"1e+" with no exponent digit => .NoDigits.
-parse_f64* = (s: string_view) Result<f64, ParseError> {
+parse_f64* = (s: StringView) Result<f64, ParseError> {
     sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
     pos := sv.len > 0 && sv[0] == '+'
@@ -457,7 +457,7 @@ pf_digit_val = (b: u8) i64 {
 // `base` to the end. e.g. parse_i64_radix("ff", 16) => .Ok(255), ("1010", 2) => .Ok(10).
 // ERRORS: nothing to parse => .NoDigits; a digit out of range (or stray byte) => .Trailing.
 // No overflow signaling — magnitudes past i64 wrap (caller picks a trusted base/width).
-parse_i64_radix* = (s: string_view, base: i64) Result<i64, ParseError> {
+parse_i64_radix* = (s: StringView, base: i64) Result<i64, ParseError> {
     sv := s.view()
     neg := sv.len > 0 && sv[0] == '-'
     start: i64 := neg.then({ 1 }, { 0 })

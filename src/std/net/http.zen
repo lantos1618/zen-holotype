@@ -48,13 +48,13 @@
 // Connect: the client's TCP handshake failed. Listen: the server's bind/listen/accept failed — a
 // listener-level fault, not one connection's. Io: a send/receive failed mid-exchange. Malformed: the
 // bytes arrived but are not a well-formed HTTP/1.1 message (the payload is the human reason).
-HttpError*: Connect(IoError) | Listen(IoError) | Io(IoError) | Malformed(string_view)
+HttpError*: Connect(IoError) | Listen(IoError) | Io(IoError) | Malformed(StringView)
 connect_err = (e: IoError) HttpError { .Connect(e) }
 listen_err = (e: IoError) HttpError { .Listen(e) }
 io_err = (e: IoError) HttpError { .Io(e) }
-malformed = (m: string_view) HttpError { .Malformed(m) }
+malformed = (m: StringView) HttpError { .Malformed(m) }
 // human-readable label; `.Malformed` renders its own reason string.
-http_error_name* = (e: HttpError) string_view {
+http_error_name* = (e: HttpError) StringView {
     e.match ({
         .Connect(x)   => "Connect",
         .Listen(x)    => "Listen",
@@ -72,8 +72,8 @@ fatal* = (e: HttpError) bool {
 // ── response shape ────────────────────────────────────────────────────────────────────────────────────
 // one `Name: value` header pair (values trimmed of the leading space and trailing CR).
 Header*: {
-    name: string_view,
-    value: string_view,
+    name: StringView,
+    value: StringView,
 }
 // A parsed response. The body rides twice over one allocation: `body_bytes` is the length-carrying
 // `[u8]` truth (binary-safe, embedded NULs preserved); `body` is the same buffer as NUL-terminated
@@ -82,14 +82,14 @@ Header*: {
 Response*: {
     status: i32,
     headers: [Header],
-    body: string_view,
+    body: StringView,
     body_bytes: [u8],
-    header = (r: Response, name: string_view) Opt<string_view> { lookup_header(r.headers, name) }
+    header = (r: Response, name: StringView) Opt<StringView> { lookup_header(r.headers, name) }
     ok     = (r: Response) bool { r.status >= 200 && r.status < 300 }
 }
 // first header whose name case-insensitively equals `name`, or `.None`.
-lookup_header = (headers: [Header], name: string_view) Opt<string_view> {
-    res: Opt<string_view> := .None
+lookup_header = (headers: [Header], name: StringView) Opt<StringView> {
+    res: Opt<StringView> := .None
     headers.loop((h, i, hd) {
         hd.name.eq_ignore_case(name).then({
             res = .Some(hd.value)
@@ -130,7 +130,7 @@ own_bytes = (a: Allocator, b: [u8]) [u8] {
 // (status line vs request line) but whose position does not, the header list, and the resolved body.
 // Requests and responses share one parser because they share one grammar below the first line.
 MsgParts: {
-    first: string_view,
+    first: StringView,
     headers: [Header],
     body: [u8],
 }
@@ -184,7 +184,7 @@ parse_response* = (a: Allocator, raw: [u8]) Result<Response, HttpError> {
     out
 }
 // status line -> numeric code: `HTTP/1.1 200 OK` -> 200. Rejects codes outside 100..599.
-parse_status = (a: Allocator, line: string_view) Result<i32, HttpError> {
+parse_status = (a: Allocator, line: StringView) Result<i32, HttpError> {
     toks := a.words(line)
     (toks.len < 2).match ({
         true  => err(malformed("http: status line has fewer than two tokens")),
@@ -203,14 +203,14 @@ parse_status = (a: Allocator, line: string_view) Result<i32, HttpError> {
 // `s[start .. start+n]` with surrounding whitespace stripped, as ONE owned buffer. `trim` allocates a
 // fresh buffer out of whatever it is handed, so the `substr` feeding it is a pure intermediate that
 // nothing above can reach — freed here rather than leaked twice per header line.
-trimmed_cut = (a: Allocator, s: string_view, start: i64, n: i64) string_view {
+trimmed_cut = (a: Allocator, s: StringView, start: i64, n: i64) StringView {
     cut := a.substr(s, start, n).expect("http: oom")
     out := a.trim(cut)
     a.release(cut.view().ptr)
     out
 }
 // every line after the status line -> a `[Header]`; a colon-less line is a malformed response.
-collect_headers = (a: Allocator, lines: [string_view]) Result<[Header], HttpError> {
+collect_headers = (a: Allocator, lines: [StringView]) Result<[Header], HttpError> {
     n := lines.len - 1
     hs: [Header] := a.nbuf(Header(
         name: "",
@@ -240,7 +240,7 @@ collect_headers = (a: Allocator, lines: [string_view]) Result<[Header], HttpErro
 }
 // case-insensitive "does this Transfer-Encoding say chunked?". The lowercased copy is a one-question
 // intermediate — freed here, not left behind on every response that carries the header.
-te_is_chunked = (a: Allocator, te: string_view) bool {
+te_is_chunked = (a: Allocator, te: StringView) bool {
     lo := a.to_lower(te)
     out := lo.contains("chunked")
     a.release(lo.view().ptr)
@@ -311,7 +311,7 @@ decode_chunked = (a: Allocator, bv: [u8]) [u8] {
 }
 // ── request construction + the live socket path ───────────────────────────────────────────────────────
 // `n` as decimal text — the header values that are numbers (Content-Length, a port, a status code).
-decimal = (a: Allocator, n: i64) string_view {
+decimal = (a: Allocator, n: i64) StringView {
     a
         .integer(n)
         .expect("http: oom")
@@ -324,12 +324,12 @@ crlf = (a: Allocator, sb: String) String { a.append_in(sb, "\r\n").expect("http:
 // `headers`, an auto `Content-Length` when `body` is non-empty, the blank line, then the body.
 build_request = (
     a: Allocator,
-    method: string_view,
-    host: string_view,
-    path: string_view,
+    method: StringView,
+    host: StringView,
+    path: StringView,
     headers: [Header],
-    body: string_view,
-) string_view {
+    body: StringView,
+) StringView {
     sb := a.init(16).expect("http: oom")
     sb = a.append_in(sb, method).expect("http: oom")
     sb = a.append_in(sb, " ").expect("http: oom")
@@ -380,12 +380,12 @@ read_all = (a: Allocator, c: TcpConn) [u8] {
 // whole response, parse it. Any step's failure surfaces as the matching `HttpError`.
 request* = (
     a: Allocator,
-    method: string_view,
-    host: string_view,
+    method: StringView,
+    host: StringView,
     port: i32,
-    path: string_view,
+    path: StringView,
     headers: [Header],
-    body: string_view,
+    body: StringView,
 ) Result<Response, HttpError> {
     req := a.build_request(method, host, path, headers, body)
     out: Result<Response, HttpError> := dial(host, port).match ({
@@ -413,7 +413,7 @@ no_headers* = (a: Allocator) [Header] {
 }
 // a one-element header list — the common case for a server that sets a Content-Type. `nbuf` hands
 // back UNINITIALISED slots (its seed is only a type witness), so the slot is written here.
-one_header* = (a: Allocator, name: string_view, value: string_view) [Header] {
+one_header* = (a: Allocator, name: StringView, value: StringView) [Header] {
     hs := a.nbuf(Header(
         name: "",
         value: "",
@@ -425,18 +425,18 @@ one_header* = (a: Allocator, name: string_view, value: string_view) [Header] {
     hs
 }
 // the common case: a GET with no extra headers and no body.
-get* = (a: Allocator, host: string_view, port: i32, path: string_view) Result<Response, HttpError> {
+get* = (a: Allocator, host: StringView, port: i32, path: StringView) Result<Response, HttpError> {
     a.request("GET", host, port, path, a.no_headers(), "")
 }
 // ── URLs: parse / build / the one-call surface ────────────────────────────────────────────────────────
 // A parsed http URL. Only `http://` (or scheme-less) URLs are accepted — there is no TLS.
 Url*: {
-    host: string_view,
+    host: StringView,
     port: i32,
-    path: string_view,
+    path: StringView,
 }
 // parse "http://host[:port][/path]" (scheme optional) into a Url. Port defaults to 80, path to "/".
-parse_url* = (a: Allocator, url: string_view) Result<Url, HttpError> {
+parse_url* = (a: Allocator, url: StringView) Result<Url, HttpError> {
     url.starts_with("https://").match ({
         true  => err(malformed("http: https is not supported (no TLS)")),
         false => {
@@ -485,7 +485,7 @@ parse_url* = (a: Allocator, url: string_view) Result<Url, HttpError> {
     })
 }
 // build "http://host:port/path" — the inverse of parse_url (handy when the port is ephemeral).
-url_of* = (a: Allocator, host: string_view, port: i32, path: string_view) string_view {
+url_of* = (a: Allocator, host: StringView, port: i32, path: StringView) StringView {
     sb := a.init(16).expect("http: oom")
     sb = a.append_in(sb, "http://").expect("http: oom")
     sb = a.append_in(sb, host).expect("http: oom")
@@ -496,16 +496,16 @@ url_of* = (a: Allocator, host: string_view, port: i32, path: string_view) string
 }
 // the one-liner: GET a URL, get a parsed Response back.
 //   r := a.http_get("http://127.0.0.1:8080/").expect("fetch")
-http_get* = (a: Allocator, url: string_view) Result<Response, HttpError> {
+http_get* = (a: Allocator, url: StringView) Result<Response, HttpError> {
     a.http_request(url, "GET", a.no_headers(), "")
 }
 // the general URL form: any method, caller headers, optional body.
 http_request* = (
     a: Allocator,
-    url: string_view,
-    method: string_view,
+    url: StringView,
+    method: StringView,
     headers: [Header],
-    body: string_view,
+    body: StringView,
 ) Result<Response, HttpError> {
     a.parse_url(url).match ({
         .Err(e) => err(e),
@@ -517,12 +517,12 @@ http_request* = (
 // (`body_bytes` is the binary-safe truth, `body` the NUL-terminated text view); only the first line
 // differs, carrying `method`/`path` where a response carries `status`.
 Request*: {
-    method: string_view,
-    path: string_view,
+    method: StringView,
+    path: StringView,
     headers: [Header],
-    body: string_view,
+    body: StringView,
     body_bytes: [u8],
-    header = (r: Request, name: string_view) Opt<string_view> { lookup_header(r.headers, name) }
+    header = (r: Request, name: StringView) Opt<StringView> { lookup_header(r.headers, name) }
 }
 // parse a raw HTTP/1.1 request (`<method> <target> HTTP/1.1`, CRLF headers, blank line, body). Only
 // the first line is parsed here — every other byte goes through the same `parse_parts` the client's
@@ -563,7 +563,7 @@ parse_request* = (a: Allocator, raw: [u8]) Result<Request, HttpError> {
 }
 // the reason phrase for the codes a minimal server actually emits. HTTP/1.1 lets a client ignore the
 // phrase entirely, so an unlisted code borrows "OK" rather than growing a table nobody reads.
-status_reason* = (code: i32) string_view {
+status_reason* = (code: i32) StringView {
     (code == 201).match ({
         true  => "Created",
         false => (code == 204).match ({
@@ -584,7 +584,7 @@ status_reason* = (code: i32) string_view {
 // the answer a handler hands back. It is the same `Response` the client PARSES — one struct describes
 // a response on both sides of the wire. `body_bytes` mirrors `body`, so a body containing NULs must
 // build the struct directly instead of going through here.
-respond* = (status: i32, headers: [Header], body: string_view) Response {
+respond* = (status: i32, headers: [Header], body: StringView) Response {
     Response(
         status: status,
         headers: headers,
@@ -662,7 +662,7 @@ read_request = (a: Allocator, c: TcpConn) [u8] {
 }
 // bind an HTTP listener on `host:port` (port 0 = kernel-chosen ephemeral, read back with
 // `l.local_port()`). The one call that opens a socket, so an HTTP app never imports std.net.socket.
-http_listen* = (host: string_view, port: i32) Result<TcpListener, HttpError> {
+http_listen* = (host: StringView, port: i32) Result<TcpListener, HttpError> {
     serve(host, port).match ({
         .Ok(l)  => ok(l),
         .Err(e) => err(listen_err(e)),

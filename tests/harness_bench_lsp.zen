@@ -184,43 +184,41 @@ lb_next_gid = () i64 {
 }
 // ── the session bytes ─────────────────────────────────────────────────────────────────────────────
 // one framed JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`, byte count from the body.
-lb_frame = (mp: MutPtr<Malloc>, body: string_view) string_view {
-    z: string_view := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+lb_frame = (mp: MutPtr<Malloc>, body: StringView) StringView {
+    z: StringView := ""    // str-typed lead so the mixed literal/variable array infers as [str]
     mp.zo_join([z, "Content-Length: ", mp.zo_itoa(len(body)), "\r\n\r\n", body])
 }
-LB_INIT = () string_view {
-    "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}"
-}
-LB_SHUT = () string_view { "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}" }
-LB_EXIT = () string_view { "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}" }
+LB_INIT = () StringView { "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}" }
+LB_SHUT = () StringView { "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"shutdown\"}" }
+LB_EXIT = () StringView { "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}" }
 // the document URI. Its dirname is where the server resolves sibling imports; this run's private
 // scratch dir has no siblings, so the only imports are std ones resolved from the source root.
-lb_uri = (mp: MutPtr<Malloc>) string_view {
-    z: string_view := ""
+lb_uri = (mp: MutPtr<Malloc>) StringView {
+    z: StringView := ""
     mp.zo_join([z, "file://", mp.zo_dir(), "/lbdoc.zen"])
 }
-lb_open = (mp: MutPtr<Malloc>, uri: string_view, text: string_view) string_view {
-    z: string_view := ""
+lb_open = (mp: MutPtr<Malloc>, uri: StringView, text: StringView) StringView {
+    z: StringView := ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"languageId\":\"zen\",\"version\":1,\"text\":\"", text, "\"}}}"])
 }
 // FULL-SYNC didChange: the whole document every time, which is what textDocumentSync:1 asks the
 // client for and therefore what a real editor sends. Each carries a fresh version so nothing the
 // server keys by version can be replayed from cache.
-lb_change = (mp: MutPtr<Malloc>, uri: string_view, text: string_view, ver: i64) string_view {
-    z: string_view := ""
+lb_change = (mp: MutPtr<Malloc>, uri: StringView, text: StringView, ver: i64) StringView {
+    z: StringView := ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"version\":", mp.zo_itoa(ver), "},\"contentChanges\":[{\"text\":\"", text, "\"}]}}"])
 }
 // a request carrying a cursor position — definition, hover and completion need it; documentSymbol
 // and semanticTokens/full ignore it, and sending it anyway keeps ONE builder for every kind.
 lb_posreq = (
     mp: MutPtr<Malloc>,
-    uri: string_view,
-    method: string_view,
+    uri: StringView,
+    method: StringView,
     id: i64,
     line: i64,
     ch: i64,
-) string_view {
-    z: string_view := ""
+) StringView {
+    z: StringView := ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":", mp.zo_itoa(id), ",\"method\":\"textDocument/", method, "\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":", mp.zo_itoa(line), ",\"character\":", mp.zo_itoa(ch), "}}}"])
 }
 // ── the documents ─────────────────────────────────────────────────────────────────────────────────
@@ -244,8 +242,8 @@ lb_posreq = (
 // (measured), so it would report the JSON plumbing rather than the check pipeline. Every real Zen
 // file opens with import records, and re-reading and re-checking those modules is what a keystroke
 // actually costs.
-lb_doc = (mp: MutPtr<Malloc>, nf: i64) string_view {
-    z: string_view := ""
+lb_doc = (mp: MutPtr<Malloc>, nf: i64) StringView {
+    z: StringView := ""
     s := mp.new_in().expect("bench: oom")
     s = s
         .append_in(mp, "{ println } = std.text.fmt\\n{ len } = std.text.str\\n")
@@ -267,13 +265,7 @@ lb_probe_line = (nf: i64) i64 { 4 * nf + 4 }    // the `f0(1)` call site
 LB_PROBE_CH = () i64 { 4 }
 // a whole scripted session: handshake, didOpen, then `n` requests of ONE kind, then a clean shutdown.
 // `method` is "didChange" for the edit loop, otherwise the textDocument/<method> to repeat.
-lb_session = (
-    mp: MutPtr<Malloc>,
-    doc: string_view,
-    nf: i64,
-    method: string_view,
-    n: i64,
-) string_view {
+lb_session = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, method: StringView, n: i64) StringView {
     uri := mp.lb_uri()
     s := mp.new_in().expect("bench: oom")
     s = s.append_in(mp, mp.lb_frame(LB_INIT())).expect("bench: oom")
@@ -294,7 +286,7 @@ lb_session = (
 // ── running one session ───────────────────────────────────────────────────────────────────────────
 // a decimal integer from a file, or -1 when the file is missing/empty/not a number. `tr -dc 0-9`
 // upstream strips the trailing newline try_parse_int would refuse.
-lb_readnum = (mp: MutPtr<Malloc>, path: string_view) i64 {
+lb_readnum = (mp: MutPtr<Malloc>, path: StringView) i64 {
     mp.contents_in(path).match ({
         .Ok(s)  => try_parse_int(s).match ({
             .Ok(v)  => v,
@@ -309,8 +301,8 @@ lb_readnum = (mp: MutPtr<Malloc>, path: string_view) i64 {
 // 2000-line document is megabytes, and both are reproducible from this file. The time -v report
 // (.tv) and the extracted number (.rss) are KEPT under the run's scratch dir so any row can be
 // checked by hand against the raw source of its number.
-lb_run = (mp: MutPtr<Malloc>, gid: i64, env: string_view, session: string_view) LbRes {
-    z: string_view := ""
+lb_run = (mp: MutPtr<Malloc>, gid: i64, env: StringView, session: StringView) LbRes {
+    z: StringView := ""
     inp := mp.zo_idpath("lb", gid, ".in")
     outp := mp.zo_idpath("lb", gid, ".out")
     tvp := mp.zo_idpath("lb", gid, ".tv")
@@ -328,7 +320,7 @@ lb_run = (mp: MutPtr<Malloc>, gid: i64, env: string_view, session: string_view) 
 // does /usr/bin/time -v exist and print the line the rows are parsed from? Checked once, so a box
 // without it reports -1 everywhere instead of silently reporting zeros.
 lb_time_ok = (mp: MutPtr<Malloc>) bool {
-    z: string_view := ""
+    z: StringView := ""
     gid := lb_next_gid()
     tvp := mp.zo_idpath("lb", gid, ".tv")
     rssp := mp.zo_idpath("lb", gid, ".rss")
@@ -371,11 +363,11 @@ lb_num = (v: i64, w: i64) i64 {
     pad := lb_sp(w - lb_digits(v))
     pad + put("").i(v).n
 }
-lb_text = (t: string_view, w: i64) i64 {
+lb_text = (t: StringView, w: i64) i64 {
     head := put(t).n
     head + lb_sp(w - len(t))
 }
-lb_rtext = (t: string_view, w: i64) i64 {
+lb_rtext = (t: StringView, w: i64) i64 {
     pad := lb_sp(w - len(t))
     pad + put(t).n
 }
@@ -400,7 +392,7 @@ lb_header = () i64 {
 }
 // one measurement. `first` suppresses the two marginal columns; `dns`/`db` are the marginals against
 // the row above, and `db` is -1 when peak RSS was unavailable (lb_time_ok false).
-lb_row = (name: string_view, docl: i64, reqs: i64, r: LbRes, first: bool, dns: i64, db: i64) i64 {
+lb_row = (name: StringView, docl: i64, reqs: i64, r: LbRes, first: bool, dns: i64, db: i64) i64 {
     lb_text(name, NAME_W())
     lb_num(docl, DOCL_W() - 1)
     lb_sp(1)
@@ -416,7 +408,7 @@ lb_row = (name: string_view, docl: i64, reqs: i64, r: LbRes, first: bool, dns: i
     put("\n").n
 }
 // a bare informational line, void so it can sit inside a `.then` action.
-lb_note = (t: string_view) void {
+lb_note = (t: StringView) void {
     put(t).n
     { }
 }
@@ -430,7 +422,7 @@ lb_rep_note = (rep: i64, reps: i64) void {
 }
 // the endpoint-to-endpoint summary of a sweep: the same two marginals taken across its full span,
 // which is the number to quote as "per didChange".
-lb_slope_note = (name: string_view, lo: i64, hi: i64, dns: i64, db: i64) void {
+lb_slope_note = (name: StringView, lo: i64, hi: i64, dns: i64, db: i64) void {
     put("# slope ")
         .s(name)
         .s(" ")
@@ -451,13 +443,13 @@ lb_slope_note = (name: string_view, lo: i64, hi: i64, dns: i64, db: i64) void {
 // trailing `# slope` line gives the span. `pts` must be ascending.
 lb_sweep = (
     mp: MutPtr<Malloc>,
-    name: string_view,
+    name: StringView,
     nf: i64,
-    doc: string_view,
-    method: string_view,
+    doc: StringView,
+    method: StringView,
     pts: [i64],
     scale: i64,
-    env: string_view,
+    env: StringView,
 ) void {
     prev_ns := to_i64(0)
     prev_kb := to_i64(0)
@@ -507,8 +499,8 @@ lb_sweep = (
 //
 // One trace: run the session with the sampler attached, then let awk emit BOTH the human line and,
 // separately, the final sample as a bare number this harness can do arithmetic on.
-lb_trace = (mp: MutPtr<Malloc>, doc: string_view, nf: i64, n: i64) i64 {
-    z: string_view := ""
+lb_trace = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, n: i64) i64 {
+    z: StringView := ""
     gid := lb_next_gid()
     inp := mp.zo_idpath("lb", gid, ".in")
     trp := mp.zo_idpath("lb", gid, ".trace")
@@ -527,7 +519,7 @@ lb_trace = (mp: MutPtr<Malloc>, doc: string_view, nf: i64, n: i64) i64 {
 // the same session at several lengths: the end-of-session RSS against the number of edits that
 // produced it. The `# rss-creep` line is (longest end − shortest end) / (their request difference) —
 // the residual per didChange, in bytes, at 4 KB resolution.
-lb_trace_sweep = (mp: MutPtr<Malloc>, doc: string_view, nf: i64, pts: [i64], scale: i64) void {
+lb_trace_sweep = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, pts: [i64], scale: i64) void {
     base_kb := to_i64(0)
     base_n := to_i64(0)
     last_kb := to_i64(0)
@@ -564,8 +556,8 @@ lb_trace_sweep = (mp: MutPtr<Malloc>, doc: string_view, nf: i64, pts: [i64], sca
 // then run one `zen check` against the same directory and count again. The second count is the
 // control: it proves the directory is the one the compiler would populate, so a zero first count is
 // evidence the LSP path never consults the cache — not just evidence that nothing was written.
-lb_cache_note = (mp: MutPtr<Malloc>, doc: string_view, nf: i64) void {
-    z: string_view := ""
+lb_cache_note = (mp: MutPtr<Malloc>, doc: StringView, nf: i64) void {
+    z: StringView := ""
     gid := lb_next_gid()
     inp := mp.zo_idpath("lb", gid, ".in")
     dir := mp.zo_idpath("lb", gid, ".cache")
@@ -587,7 +579,7 @@ lb_cache_note = (mp: MutPtr<Malloc>, doc: string_view, nf: i64) void {
 }
 // ── driver ────────────────────────────────────────────────────────────────────────────────────────
 // a positive integer from the environment, or `dflt` when unset/unparseable/non-positive.
-lb_env_n = (name: string_view, dflt: i64) i64 {
+lb_env_n = (name: StringView, dflt: i64) i64 {
     e := getEnv(name)
     is_empty(e).match ({
         true  => dflt,
@@ -613,7 +605,7 @@ LB_KIND_PTS = () [i64] { [10, 110] }
 LB_DOC_PTS = () [i64] { [0, 20] }
 // every request kind an editor issues on the keys a user actually presses. didChange leads because
 // it is the one that re-runs the whole check pipeline; the rest are ordered as a reader meets them.
-LB_KINDS = () [string_view] {
+LB_KINDS = () [StringView] {
     ["didChange", "definition", "hover", "completion", "semanticTokens/full", "documentSymbol"]
 }
 lb_all = (mp: MutPtr<Malloc>, scale: i64) void {

@@ -43,8 +43,8 @@ and ownership APIs.
 > still written where it happens (`vec.new()` is a constructor; rule 1 holds), but
 > the allocator is not a parameter.
 
-String bytes carry their own provenance discipline — static `string_literal`,
-borrowed NUL-terminated `string_cstr`, general borrowed `string_view`, and the
+String bytes carry their own provenance discipline — static `StringLiteral`,
+borrowed NUL-terminated `StringCstr`, general borrowed `StringView`, and the
 heap-owned `String` (freed through the allocator that owns its buffer). Those are
 the only spellings — the old `text`/`Cstr`/`str` aliases have been removed; see the
 string types section of [SPEC.md](SPEC.md).

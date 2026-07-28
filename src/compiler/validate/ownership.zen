@@ -23,7 +23,7 @@ DeadList*: DeadNil | DeadCons(DeadCell)    // let/assign/while/if/index-set prod
 // allocator-explicit `o.release_in(a)` / `r.drop_in(a)` calls still exist. After generic inlining those calls
 // become plain pointer operations, so this rule cannot be recovered reliably later.
 DeadCell: {
-    name: string_view,
+    name: StringView,
     tail: Ptr<DeadList>,
 }
 dead_buf = (a: MutPtr<Malloc>) [DeadList] { slice(a.acquire_or_die(sizeof(DeadList)), 1) }
@@ -33,13 +33,13 @@ dead_node = (a: MutPtr<Malloc>, v: DeadList) Ptr<DeadList> {
     buf[0].addr()
 }
 dead_nil* = (a: MutPtr<Malloc>) Ptr<DeadList> { a.dead_node(.DeadNil) }
-dead_cons* = (a: MutPtr<Malloc>, name: string_view, tail: Ptr<DeadList>) Ptr<DeadList> {
+dead_cons* = (a: MutPtr<Malloc>, name: StringView, tail: Ptr<DeadList>) Ptr<DeadList> {
     a.dead_node(.DeadCons(DeadCell(
         name: name,
         tail: tail,
     )))
 }
-dead_has* = (seen: Ptr<DeadList>, name: string_view) bool {
+dead_has* = (seen: Ptr<DeadList>, name: StringView) bool {
     seen.match ({
         .DeadNil     => false,
         .DeadCons(c) => (c.name == name).then({ true }, { c.tail.dead_has(name) }),
@@ -48,7 +48,7 @@ dead_has* = (seen: Ptr<DeadList>, name: string_view) bool {
 // REVIVAL: rebuild the kill-set without `name`. Rebinding a freed/moved local to a fresh value clears
 // its dead state (so `p := malloc(); a.release(p); p = malloc(); use(p)` and the idiomatic
 // `p = a.resize(p, n)` are NOT use-after-free). Removes every occurrence (dups are harmless).
-dead_remove* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, name: string_view) Ptr<DeadList> {
+dead_remove* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, name: StringView) Ptr<DeadList> {
     seen.match ({
         .DeadNil     => seen,
         .DeadCons(c) => (c.name == name).match ({
@@ -67,8 +67,8 @@ dead_remove* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, name: string_view) Ptr<D
 // matching the bare-locals-only scope of the rest of this pass.
 AliasList*: AliasNil | AliasCons(AliasCell)
 AliasCell: {
-    x: string_view,
-    y: string_view,
+    x: StringView,
+    y: StringView,
     tail: Ptr<AliasList>,
 }
 alias_buf = (a: MutPtr<Malloc>) [AliasList] { slice(a.acquire_or_die(sizeof(AliasList)), 1) }
@@ -80,8 +80,8 @@ alias_node = (a: MutPtr<Malloc>, v: AliasList) Ptr<AliasList> {
 alias_nil* = (a: MutPtr<Malloc>) Ptr<AliasList> { a.alias_node(.AliasNil) }
 alias_cons = (
     a: MutPtr<Malloc>,
-    x: string_view,
-    y: string_view,
+    x: StringView,
+    y: StringView,
     tail: Ptr<AliasList>,
 ) Ptr<AliasList> {
     a.alias_node(.AliasCons(AliasCell(
@@ -91,7 +91,7 @@ alias_cons = (
     )))
 }
 // drop every pair mentioning `name` — a rebind of `name` detaches it from its old class.
-alias_drop = (a: MutPtr<Malloc>, al: Ptr<AliasList>, name: string_view) Ptr<AliasList> {
+alias_drop = (a: MutPtr<Malloc>, al: Ptr<AliasList>, name: StringView) Ptr<AliasList> {
     al.match ({
         .AliasNil     => al,
         .AliasCons(c) => (c.x == name || c.y == name).match ({
@@ -106,7 +106,7 @@ alias_reach = (
     a: MutPtr<Malloc>,
     rest: Ptr<AliasList>,
     full: Ptr<AliasList>,
-    name: string_view,
+    name: StringView,
     acc: Ptr<DeadList>,
 ) Ptr<DeadList> {
     rest.match ({
@@ -129,9 +129,9 @@ dead_kill* = (
     a: MutPtr<Malloc>,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
-    name: string_view,
+    name: StringView,
 ) Ptr<DeadList> { a.dead_union(a.alias_reach(al, al, name, a.dead_cons(name, a.dead_nil())), seen) }
-owner_base* = (t: Ty) string_view {
+owner_base* = (t: Ty) StringView {
     t.match ({
         .Generic(g) => g.name,
         .Named(n)   => n,
@@ -180,7 +180,7 @@ is_default_owner_method* = (env: Env, c: CallData) bool {
         false => false,
     })
 }
-recv_var_name = (c: CallData) string_view {
+recv_var_name = (c: CallData) StringView {
     (c.args.len > 0).match ({
         true  => c.args[0].match ({
             .Var(v) => v.name,
@@ -192,7 +192,7 @@ recv_var_name = (c: CallData) string_view {
 // the consumed binding of a release/drop receiver: a bare Var, or — for a FIELD receiver like
 // `b.o.release_in(a)` — the ROOT local of the member chain (the field's owner is freed while the
 // base keeps a bit-copy naming the same allocation → the whole base binding dies; see member_move_root).
-recv_move_name = (c: CallData) string_view {
+recv_move_name = (c: CallData) StringView {
     (c.args.len > 0).match ({
         true  => c.args[0].match ({
             .Var(v)    => v.name,
@@ -213,7 +213,7 @@ recv_move_name = (c: CallData) string_view {
 // identity/wrapper shape), that argument IS the moved owner — name it dead. Deliberately narrow: a multi-arg
 // or non-Own-returning call is left alone (honest under-reject over breaking a fn that borrows an Own and
 // returns a fresh one). A fresh `send(.Give(make(a)))` (no Own arg) kills nothing — correctly still legal.
-sm_own_arg_launder = (env: Env, args: [Expr]) string_view {
+sm_own_arg_launder = (env: Env, args: [Expr]) StringView {
     (args.len == 1).match ({
         true  => args[0].match ({
             .Var(v) => (env.infer_expr(args[0].addr()).owner_base() == "Own").match ({
@@ -225,7 +225,7 @@ sm_own_arg_launder = (env: Env, args: [Expr]) string_view {
         false => "",
     })
 }
-send_own_var = (env: Env, e: Ptr<Expr>) string_view {
+send_own_var = (env: Env, e: Ptr<Expr>) StringView {
     load(e).match ({
         .Var(v)         => (env.infer_expr(e).owner_base() == "Own").then({ v.name }, { "" }),
         // an `Own<T>` sent OUT of a field (`send(h, b.o)`) moves it — whole-base kill (member_move_root).
@@ -247,7 +247,7 @@ send_own_var = (env: Env, e: Ptr<Expr>) string_view {
 }
 // the moved owner in an actor send — the MESSAGE (last arg) of the 2-arg inline / 3-arg parallel send
 // (name-matched like the sendable + scratch passes), so the iso move-kill covers the parallel path too.
-send_consume = (env: Env, c: CallData) string_view {
+send_consume = (env: Env, c: CallData) StringView {
     (c.fn.sx_named("send", "__send") && c.args.len >= 2
         || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3).match ({
         true  => env.send_own_var(c.args[c.args.len - 1].addr()),
@@ -267,7 +267,7 @@ send_consume = (env: Env, c: CallData) string_view {
 // analyzable; an imported/unknown callee summarizes to false (honest under-reject).
 consume_depth* = () i32 { 4 }    // interprocedural hop budget; deeper transitive consumes under-reject (safe)
 // does the KNOWN local fn `fn` consume its Own-typed param at index `pi`? (bounded interprocedural)
-fn_consumes_param = (env: Env, fn: string_view, pi: i32, depth: i32) bool {
+fn_consumes_param = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
     (depth <= 0).match ({
         true  => false,
         false => {
@@ -280,10 +280,10 @@ fn_consumes_param = (env: Env, fn: string_view, pi: i32, depth: i32) bool {
     })
 }
 // does `body` consume the local named `nm` on ANY path? (branch-may rule: a conditional consume counts)
-body_consumes_name = (env: Env, body: [Stmt], nm: string_view, depth: i32) bool {
+body_consumes_name = (env: Env, body: [Stmt], nm: StringView, depth: i32) bool {
     body.slice_any((st) { env.stmt_consumes_name(st, nm, depth) })
 }
-stmt_consumes_name = (env: Env, st: Stmt, nm: string_view, depth: i32) bool {
+stmt_consumes_name = (env: Env, st: Stmt, nm: StringView, depth: i32) bool {
     st.match ({
         .Let(l)      => env.expr_consumes_name(l.value, nm, depth),
         .Assign(x)   => env.expr_consumes_name(x.value, nm, depth),
@@ -299,7 +299,7 @@ stmt_consumes_name = (env: Env, st: Stmt, nm: string_view, depth: i32) bool {
             || env.expr_consumes_name(x.value, nm, depth),
     })
 }
-expr_consumes_name = (env: Env, e: Ptr<Expr>, nm: string_view, depth: i32) bool {
+expr_consumes_name = (env: Env, e: Ptr<Expr>, nm: StringView, depth: i32) bool {
     (depth <= 0).match ({
         true  => false,
         false => load(e).match ({
@@ -321,10 +321,10 @@ expr_consumes_name = (env: Env, e: Ptr<Expr>, nm: string_view, depth: i32) bool 
         }),
     })
 }
-arms_consume_name = (env: Env, arms: [ArmData], nm: string_view, depth: i32) bool {
+arms_consume_name = (env: Env, arms: [ArmData], nm: StringView, depth: i32) bool {
     arms.slice_any((ar) { env.expr_consumes_name(ar.body, nm, depth) })
 }
-args_consume_name = (env: Env, args: [Expr], nm: string_view, depth: i32) bool {
+args_consume_name = (env: Env, args: [Expr], nm: StringView, depth: i32) bool {
     found := false
     args.loop((h, i, ar) {
         found = env.expr_consumes_name(ar.addr(), nm, depth).then({ true }, { found })
@@ -334,7 +334,7 @@ args_consume_name = (env: Env, args: [Expr], nm: string_view, depth: i32) bool {
 // does call `c` consume the local `nm`? LEAF: `nm` is the receiver of a release/drop or the moved owner
 // of a send. TRANSITIVE: `nm` is a bare-Var arg at an Own-typed param position of a callee that itself
 // consumes that param (one interprocedural hop, depth-1). Also descends nested arg exprs.
-call_consumes_name = (env: Env, c: CallData, nm: string_view, depth: i32) bool {
+call_consumes_name = (env: Env, c: CallData, nm: StringView, depth: i32) bool {
     consumed := env.is_consume_method(c).then({ c.recv_var_name() }, { env.send_consume(c) })
     leaf := nm == "" == false && consumed == nm
     leaf.match ({
@@ -344,7 +344,7 @@ call_consumes_name = (env: Env, c: CallData, nm: string_view, depth: i32) bool {
     })
 }
 // the transitive-hop check, hoisted so the loop's inner match does not nest inside call_consumes_name.
-call_arg_consumes_name = (env: Env, c: CallData, nm: string_view, depth: i32) bool {
+call_arg_consumes_name = (env: Env, c: CallData, nm: StringView, depth: i32) bool {
     ps := env.env_params(c.fn)
     found := false
     (ps.len == c.args.len).then({
@@ -371,12 +371,12 @@ call_arg_consumes_name = (env: Env, c: CallData, nm: string_view, depth: i32) bo
 // owner-pointer whose callee frees through it. Sound (reject-more) + zero over-reject: gated on the param
 // being an owner-pointer AND the callee actually freeing through it; a borrow that only READS through the
 // pointer (`load(p).get()`) matches no consume verb and frees nothing, so it stays legal.
-is_owner_base* = (b: string_view) bool { b == "Own" || b == "Rc" || b == "Arc" }
+is_owner_base* = (b: StringView) bool { b == "Own" || b == "Rc" || b == "Arc" }
 // the pointee's owner base of a pointer type: `MutPtr<Own<T>>` / `Ptr<Own<T>>` -> "Own" (also Rc/Arc); "" otherwise.
-owner_ptr_base = (t: Ty) string_view { t.pointee_of().owner_base() }
+owner_ptr_base = (t: Ty) StringView { t.pointee_of().owner_base() }
 // the owner-consume verbs, matched by NAME (no receiver-type infer — the callee's params/locals are not in
 // the caller env that drives the summary, so detection must be structural + the call-site param-type gate).
-is_consume_fn_name = (fn: string_view) bool {
+is_consume_fn_name = (fn: StringView) bool {
     fn.sx_named("release", "__release")
         || fn.sx_named("release_in", "__release_in")
         || fn.sx_named("drop", "__drop")
@@ -384,7 +384,7 @@ is_consume_fn_name = (fn: string_view) bool {
 }
 // `<owner>.addr()` where the receiver is an Own/Rc/Arc local -> that owner's var name, else "". Inferred in
 // the CALLER env (which HAS the local bound by the time own_step reaches the call), so infer resolves it.
-addr_owner_var = (env: Env, e: Ptr<Expr>) string_view {
+addr_owner_var = (env: Env, e: Ptr<Expr>) StringView {
     load(e).match ({
         .Call(c) => (c.fn == "addr" && c.args.len == 1).match ({
             true  => c.args[0].match ({
@@ -400,7 +400,7 @@ addr_owner_var = (env: Env, e: Ptr<Expr>) string_view {
     })
 }
 // `load(pname)` (or any deref intrinsic reading through `pname`): the borrow deref of a specific pointer.
-is_deref_of_var = (e: Ptr<Expr>, pname: string_view) bool {
+is_deref_of_var = (e: Ptr<Expr>, pname: StringView) bool {
     load(e).match ({
         .Call(c) => (c.fn.is_deref_intrinsic() && c.args.len >= 1).match ({
             true  => c.args[0].match ({
@@ -413,7 +413,7 @@ is_deref_of_var = (e: Ptr<Expr>, pname: string_view) bool {
     })
 }
 // locals bound to a deref of `pname` (`r := load(pname)`): consuming `r` later == consuming the pointee.
-cdl_expr = (env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>, pname: string_view) Ptr<DeadList> {
+cdl_expr = (env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>, pname: StringView) Ptr<DeadList> {
     load(e).match ({
         .Match(m) => env.cdl_arms(seen, m.arms, pname),
         .Block(b) => env.cdl_body(seen, b.stmts, pname),
@@ -425,14 +425,14 @@ cdl_expr = (env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>, pname: string_view) Ptr
         }),
     })
 }
-cdl_arms = (env: Env, seen: Ptr<DeadList>, arms: [ArmData], pname: string_view) Ptr<DeadList> {
+cdl_arms = (env: Env, seen: Ptr<DeadList>, arms: [ArmData], pname: StringView) Ptr<DeadList> {
     out := seen
     arms.loop((h, i, ar) {
         out = env.cdl_expr(out, ar.body, pname)
     })
     out
 }
-cdl_stmt = (env: Env, seen: Ptr<DeadList>, st: Stmt, pname: string_view) Ptr<DeadList> {
+cdl_stmt = (env: Env, seen: Ptr<DeadList>, st: Stmt, pname: StringView) Ptr<DeadList> {
     st.match ({
         .Let(l)      => is_deref_of_var(l.value, pname).match ({
             true  => env.a.dead_cons(l.name, seen),
@@ -445,7 +445,7 @@ cdl_stmt = (env: Env, seen: Ptr<DeadList>, st: Stmt, pname: string_view) Ptr<Dea
         _            => seen,
     })
 }
-cdl_body = (env: Env, seen: Ptr<DeadList>, body: [Stmt], pname: string_view) Ptr<DeadList> {
+cdl_body = (env: Env, seen: Ptr<DeadList>, body: [Stmt], pname: StringView) Ptr<DeadList> {
     out := seen
     body.loop((h, i, st) {
         out = env.cdl_stmt(out, st, pname)
@@ -454,7 +454,7 @@ cdl_body = (env: Env, seen: Ptr<DeadList>, body: [Stmt], pname: string_view) Ptr
 }
 // does a consume verb in `c` free the pointee of `pname`? receiver is `load(pname)` directly, a local in the
 // deref set `dl`, or `pname` is forwarded (by pointer) to a callee that frees through it (one bounded hop).
-bft_call = (env: Env, c: CallData, pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
+bft_call = (env: Env, c: CallData, pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
     leaf := (is_consume_fn_name(c.fn) && c.args.len > 0).match ({
         true  => c.args[0].match ({
             .Var(v) => dl.dead_has(v.name),
@@ -468,7 +468,7 @@ bft_call = (env: Env, c: CallData, pname: string_view, dl: Ptr<DeadList>, depth:
     })
 }
 // the transitive hop: `pname` passed as a pointer arg to a callee that itself frees through that param.
-bft_forward = (env: Env, c: CallData, pname: string_view, depth: i32) bool {
+bft_forward = (env: Env, c: CallData, pname: StringView, depth: i32) bool {
     (depth <= 1).match ({
         true  => false,
         false => {
@@ -485,13 +485,13 @@ bft_forward = (env: Env, c: CallData, pname: string_view, depth: i32) bool {
         },
     })
 }
-bft_args = (env: Env, args: [Expr], pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
+bft_args = (env: Env, args: [Expr], pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
     args.slice_any((ar) { env.bft_expr(ar.addr(), pname, dl, depth) })
 }
-bft_arms = (env: Env, arms: [ArmData], pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
+bft_arms = (env: Env, arms: [ArmData], pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
     arms.slice_any((ar) { env.bft_expr(ar.body, pname, dl, depth) })
 }
-bft_expr = (env: Env, e: Ptr<Expr>, pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
+bft_expr = (env: Env, e: Ptr<Expr>, pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
     load(e).match ({
         .Call(c)      => env.bft_call(c, pname, dl, depth),
         .Block(b)     => env.bft_body(b.stmts, pname, dl, depth),
@@ -510,7 +510,7 @@ bft_expr = (env: Env, e: Ptr<Expr>, pname: string_view, dl: Ptr<DeadList>, depth
         }, (acc, body) { acc || env.bft_body(body, pname, dl, depth) }),
     })
 }
-bft_stmt = (env: Env, st: Stmt, pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
+bft_stmt = (env: Env, st: Stmt, pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
     st.match ({
         .Let(l)      => env.bft_expr(l.value, pname, dl, depth),
         .Assign(x)   => env.bft_expr(x.value, pname, dl, depth),
@@ -525,15 +525,15 @@ bft_stmt = (env: Env, st: Stmt, pname: string_view, dl: Ptr<DeadList>, depth: i3
         _            => false,
     })
 }
-bft_body = (env: Env, body: [Stmt], pname: string_view, dl: Ptr<DeadList>, depth: i32) bool {
+bft_body = (env: Env, body: [Stmt], pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
     body.slice_any((st) { env.bft_stmt(st, pname, dl, depth) })
 }
-body_frees_through_ptr = (env: Env, body: [Stmt], pname: string_view, depth: i32) bool {
+body_frees_through_ptr = (env: Env, body: [Stmt], pname: StringView, depth: i32) bool {
     dl := env.cdl_body(env.a.dead_nil(), body, pname)
     env.bft_body(body, pname, dl, depth)
 }
 // does the KNOWN local fn `fn` free the pointee of its pointer param at index `pi`? (bounded interprocedural)
-fn_frees_through_ptr = (env: Env, fn: string_view, pi: i32, depth: i32) bool {
+fn_frees_through_ptr = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
     (depth <= 0).match ({
         true  => false,
         false => {
@@ -620,7 +620,7 @@ own_stmt_call_kills = (
 // top-level `.Member` in a position where a bare `.Var` counts as a move today, AND whose expr the
 // context has gated as owner-typed, counts; a value field read (`b.n: i32`) or a borrow through a
 // call (`b.o.get()`, a Call not a Member) is NOT a move source, so plain field reads are unaffected.
-member_move_root = (e: Ptr<Expr>) string_view {
+member_move_root = (e: Ptr<Expr>) StringView {
     load(e).match ({
         .Member(m) => m.obj.expr_root_var(),
         _          => "",
@@ -629,7 +629,7 @@ member_move_root = (e: Ptr<Expr>) string_view {
 // the bare-Var name of an expr whose inferred type is `Own<T>` (else "") — the moved-owner shape shared
 // by every consume site (mirrors own_var_move / sm_own_arg_launder). A `.Member` source moves the owner
 // out of its field: the whole-base kill (member_move_root) names the root binding dead.
-own_moved_var* = (env: Env, e: Ptr<Expr>) string_view {
+own_moved_var* = (env: Env, e: Ptr<Expr>) StringView {
     load(e).match ({
         .Var(v)    => (env.infer_expr(e).owner_base() == "Own").then({ v.name }, { "" }),
         .Member(m) => (env.infer_expr(e).owner_base() == "Own").match ({
@@ -705,7 +705,7 @@ own_stmt_struct_kills = (
 // bare Var, so it is NOT a move (the legitimate two-owner path). Self-copy `o = o` moves nothing.
 // A `.Member` source (`c := b.o`, b.o an `Own<T>`) is the SAME affine move out of the field: the
 // struct keeps a bit-copy of the owner, so the whole base binding dies (member_move_root).
-own_var_move = (env: Env, e: Ptr<Expr>, tgt: string_view) string_view {
+own_var_move = (env: Env, e: Ptr<Expr>, tgt: StringView) StringView {
     load(e).match ({
         .Var(v)    => (env.infer_expr(e).owner_base() == "Own" && v.name == tgt == false).match ({
             true  => v.name,
@@ -719,7 +719,7 @@ own_var_move = (env: Env, e: Ptr<Expr>, tgt: string_view) string_view {
         _          => "",
     })
 }
-own_move_src = (env: Env, st: Stmt) string_view {
+own_move_src = (env: Env, st: Stmt) StringView {
     st.match ({
         .Let(l)    => env.own_var_move(l.value, l.name),
         .Assign(x) => env.own_var_move(x.value, env.a.target_var_name(x.target)),
@@ -764,7 +764,7 @@ ty_reaches_mutptr = (decls: [Decl], t: Ty, depth: i32) bool {
 }
 // the opaque capability generics: their type args must NOT be structurally descended (they mediate their
 // own interior aliasing — see the send-rc / owner-verb capability set: Own/Arc/Rc + the two actor caps).
-sm_is_opaque_cap = (name: string_view) bool {
+sm_is_opaque_cap = (name: StringView) bool {
     name == "Own" || name == "Arc" || name == "Rc" || name == "ReplyRef" || name == "CellRef"
 }
 fields_reach_mutptr = (decls: [Decl], fields: [Field], depth: i32) bool {
@@ -820,7 +820,7 @@ mode_sendable = (m: i32) bool { m == md_owned() || m == md_frozen() }
 // The receiver being a pointer (`.Ptr`) — not an Own/Rc/Arc generic — disambiguates the allocator
 // `release` from the owner `o.release(a)` consume (handled by is_consume_method). Returns the freed
 // bare-local name, or "" when nothing simple is freed.
-alloc_free_call_name = (env: Env, c: CallData) string_view {
+alloc_free_call_name = (env: Env, c: CallData) StringView {
     c.fn.sx_named("free", "__free").match ({
         true  => (c.args.len == 1).then({ c.arg_var_name(0) }, { "" }),
         false => (c.fn.sx_named("release", "__release")
@@ -841,13 +841,13 @@ alloc_free_call_name = (env: Env, c: CallData) string_view {
 }
 // the freed local for a whole statement: a bare free call, or a free that is the VALUE of a let/assign
 // (e.g. `p = a.resize(p, n)` frees the old `p`; the rebind then revives it in own_step).
-alloc_free_expr_name = (env: Env, e: Ptr<Expr>) string_view {
+alloc_free_expr_name = (env: Env, e: Ptr<Expr>) StringView {
     load(e).match ({
         .Call(c) => env.alloc_free_call_name(c),
         _        => "",
     })
 }
-alloc_free_stmt_name = (env: Env, st: Stmt) string_view {
+alloc_free_stmt_name = (env: Env, st: Stmt) StringView {
     st.match ({
         .ExprStmt(e) => env.alloc_free_expr_name(e),
         .Let(l)      => env.alloc_free_expr_name(l.value),
@@ -860,7 +860,7 @@ alloc_free_stmt_name = (env: Env, st: Stmt) string_view {
 // A dot is not a legal identifier byte, so this key can never collide with a bare-local name, and distinct
 // (base, field) pairs map to distinct keys — letting a field pointer join the same alias machinery as a
 // bare local. Deeper chains (`h.inner.ptr`) stay untracked (under-reject, never over-reject).
-member_field_name = (a: MutPtr<Malloc>, e: Ptr<Expr>) string_view {
+member_field_name = (a: MutPtr<Malloc>, e: Ptr<Expr>) StringView {
     load(e).match ({
         .Member(m) => load(m.obj).match ({
             .Var(v) => a
@@ -886,13 +886,13 @@ member_path_dead* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, e: Ptr<Expr>) bool 
 // field (`h.ptr`) IS a rebind of that field's dotted alias key (so a later reassignment revives it).
 // the (re)bound name of an assign/index target (bare local or dotted field key, else ""). Hoisted to its
 // own fn: a nested match inside an outer statement-match arm miscompiles, so the load+match lives here.
-target_var_name = (a: MutPtr<Malloc>, t: Ptr<Expr>) string_view {
+target_var_name = (a: MutPtr<Malloc>, t: Ptr<Expr>) StringView {
     load(t).match ({
         .Var(v) => v.name,
         _       => a.member_field_name(t),
     })
 }
-rebind_stmt_name = (a: MutPtr<Malloc>, st: Stmt) string_view {
+rebind_stmt_name = (a: MutPtr<Malloc>, st: Stmt) StringView {
     st.match ({
         .Let(l)    => l.name,
         .Assign(x) => a.target_var_name(x.target),
@@ -901,13 +901,13 @@ rebind_stmt_name = (a: MutPtr<Malloc>, st: Stmt) string_view {
 }
 // the source name of a direct pointer copy (`q := p` / `q = p`): a bare Var whose inferred type is a
 // pointer (any `.Ptr` kind). Non-pointer copies (ints, structs, owners) never join an alias class.
-copy_src_name = (env: Env, e: Ptr<Expr>) string_view {
+copy_src_name = (env: Env, e: Ptr<Expr>) StringView {
     load(e).match ({
         .Var(v) => env.infer_expr(e).ty_is_ptr_t().then({ v.name }, { "" }),
         _       => "",
     })
 }
-alias_src_name = (env: Env, st: Stmt) string_view {
+alias_src_name = (env: Env, st: Stmt) StringView {
     st.match ({
         .Let(l)    => env.copy_src_name(l.value),
         .Assign(x) => env.copy_src_name(x.value),
@@ -926,7 +926,7 @@ alias_step* = (a: MutPtr<Malloc>, env: Env, al: Ptr<AliasList>, st: Stmt) Ptr<Al
     })
     out
 }
-consume_name = (env: Env, st: Stmt) string_view {
+consume_name = (env: Env, st: Stmt) StringView {
     st.match ({
         .ExprStmt(e) => load(e).match ({
             .Call(c) => env.is_consume_method(c).match ({
@@ -1188,14 +1188,14 @@ ufcs_vis_miss* = (env: Env, c: CallData) bool {
 // index resolves the call without any import, so it is not a flat-namespace bind.
 // (A blanket trait-method-NAME exemption would be too broad: once Vec/HMap
 // instantiate, `len` is an impl-method name in every big closure, and the original
-// #574 `string_view.len()` would sail through on the name alone.)
+// #574 `StringView.len()` would sail through on the name alone.)
 // ── enriched diagnostic text: name the offending field / operator + the operand types ────────────
 // Built lazily by the driver only AFTER a check error is located, so this never affects the compile of
 // an accepted program. `denrich_module` walks the resolved decls to the node at the error's byte offset
 // (the SAME offset the kind pass reported) and returns a precise message; "" means the offset names no
 // enrichable node, so the driver keeps the generic message. The env is threaded exactly as the validator
 // threads it (params + lets + arms), so receiver and operand types infer the same way.
-zty_generic = (a: MutPtr<Malloc>, g: GenericData) string_view {
+zty_generic = (a: MutPtr<Malloc>, g: GenericData) StringView {
     out := a.gstr_string(48).gstr_append(a, g.name).gstr_append(a, "<")
     g.args.loop((h, i, t) {
         (i > 0).then({
@@ -1205,16 +1205,16 @@ zty_generic = (a: MutPtr<Malloc>, g: GenericData) string_view {
     })
     out.gstr_append(a, ">").gstr_finish(a)
 }
-zty* = (a: MutPtr<Malloc>, t: Ty) string_view {
+zty* = (a: MutPtr<Malloc>, t: Ty) StringView {
     t.match ({
         .I32           => "i32",
         .I64           => "i64",
         .U8            => "u8",
         .F64           => "f64",
         .Bool          => "bool",
-        .StringView    => "string_view",
-        .StringCstr    => "string_cstr",
-        .StringLiteral => "string_literal",
+        .StringView    => "StringView",
+        .StringCstr    => "StringCstr",
+        .StringLiteral => "StringLiteral",
         .Void          => "(unknown)",
         .Named(n)      => n,
         .Generic(g)    => a.zty_generic(g),
@@ -1298,8 +1298,8 @@ mu_func_value_mold = (
     a: MutPtr<Malloc>,
     decls: [Decl],
     idx: DeclIndex,
-    ty: string_view,
-    m: string_view,
+    ty: StringView,
+    m: StringView,
 ) bool {
     cname := a.impl_cname_in(ty, ty, m)
     i := idx.func_idx.get(cname, 0 - 1)
@@ -1317,7 +1317,7 @@ mu_index_methods = (
     decls: [Decl],
     idx: DeclIndex,
     m: Map<i64>,
-    ty: string_view,
+    ty: StringView,
     methods: [Param],
     j: i32,
 ) Map<i64> {
@@ -1504,7 +1504,7 @@ scope_params* = (a: MutPtr<Malloc>, params: [Param]) Ptr<DeadList> {
     out
 }
 // the root Var name of a member/arrow chain (`s.alloc` -> "s"); "" if not rooted at a plain Var.
-expr_root_var* = (e: Ptr<Expr>) string_view {
+expr_root_var* = (e: Ptr<Expr>) StringView {
     load(e).match ({
         .Var(v)    => v.name,
         .Member(m) => m.obj.expr_root_var(),
@@ -1654,7 +1654,7 @@ escape_step* = (
     })
     out
 }
-expr_is_var_named = (e: Ptr<Expr>, nm: string_view) bool {
+expr_is_var_named = (e: Ptr<Expr>, nm: StringView) bool {
     load(e).match ({
         .Var(v) => v.name == nm,
         _       => false,
@@ -1663,7 +1663,7 @@ expr_is_var_named = (e: Ptr<Expr>, nm: string_view) bool {
 // true iff `nm` appears in `e` in ANY position that is NOT the arg-0 receiver of a whitelisted getter.
 // A getter call with `nm` as its receiver contributes NOTHING (a pure read); every other occurrence —
 // including a getter's NON-receiver args — is impure. Total over var-bearing shapes; leaves → false.
-impure_use_in_expr = (nm: string_view, e: Ptr<Expr>) bool {
+impure_use_in_expr = (nm: StringView, e: Ptr<Expr>) bool {
     load(e).match ({
         .Var(v)         => v.name == nm,
         .Bin(b)         => nm.impure_use_in_expr(b.lhs) || nm.impure_use_in_expr(b.rhs),
@@ -1693,11 +1693,11 @@ impure_use_in_expr = (nm: string_view, e: Ptr<Expr>) bool {
         _               => false,
     })
 }
-impure_use_in_args = (nm: string_view, args: [Expr]) bool {
+impure_use_in_args = (nm: StringView, args: [Expr]) bool {
     args.slice_any((ar) { nm.impure_use_in_expr(ar.addr()) })
 }
 // args EXCEPT index 0 (the getter receiver already accounted for as a pure read).
-impure_use_in_args_from1 = (nm: string_view, args: [Expr]) bool {
+impure_use_in_args_from1 = (nm: StringView, args: [Expr]) bool {
     f := false
     args.loop((h, i, ar) {
         (i > 0).then({
@@ -1706,13 +1706,13 @@ impure_use_in_args_from1 = (nm: string_view, args: [Expr]) bool {
     })
     f
 }
-impure_use_in_inits = (nm: string_view, inits: [FieldInit]) bool {
+impure_use_in_inits = (nm: StringView, inits: [FieldInit]) bool {
     inits.slice_any((fi) { nm.impure_use_in_expr(fi.value) })
 }
-impure_use_in_arms = (nm: string_view, arms: [ArmData]) bool {
+impure_use_in_arms = (nm: StringView, arms: [ArmData]) bool {
     arms.slice_any((ar) { nm.impure_use_in_expr(ar.body) })
 }
-impure_use_in_stmt = (nm: string_view, st: Stmt) bool {
+impure_use_in_stmt = (nm: StringView, st: Stmt) bool {
     st.match ({
         .Let(l)      => nm.impure_use_in_expr(l.value),
         .Assign(x)   => nm.impure_use_in_expr(x.target) || nm.impure_use_in_expr(x.value),
@@ -1727,11 +1727,11 @@ impure_use_in_stmt = (nm: string_view, st: Stmt) bool {
         .ExprStmt(e) => nm.impure_use_in_expr(e),
     })
 }
-impure_use_in_body = (nm: string_view, body: [Stmt]) bool {
+impure_use_in_body = (nm: StringView, body: [Stmt]) bool {
     body.slice_any((st) { nm.impure_use_in_stmt(st) })
 }
 // is `nm` used IMPURELY (discharged/escaped, not a pure getter read) in any statement strictly AFTER k?
-impure_use_after = (nm: string_view, body: [Stmt], k: i32) bool {
+impure_use_after = (nm: StringView, body: [Stmt], k: i32) bool {
     f := false
     body.loop((h, i, st) {
         (i > k).then({

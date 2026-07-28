@@ -3,13 +3,13 @@
 // Three surfaces, all allocator-explicit (no hidden heap):
 //
 //   { read_line, read_all, read_all_bytes, lines } = std.io.stdin
-//   a.read_line()          // Result<Opt<string_view>, IoError> — Some(line) per line, None at EOF
-//   a.read_all()           // Result<string_view, IoError>      — everything until EOF, one owned buffer
+//   a.read_line()          // Result<Opt<StringView>, IoError> — Some(line) per line, None at EOF
+//   a.read_all()           // Result<StringView, IoError>      — everything until EOF, one owned buffer
 //   a.read_all_bytes()     // Result<[u8], IoError>             — same, BINARY-SAFE (length-carrying)
 //   a.lines((line) { … })  // Result<i64, IoError>      — run a closure per line, count returned
 //
 // Lines are returned WITHOUT the trailing '\n'. A final unterminated line ("abc" then EOF)
-// still comes back as Some("abc"); the next call reports None. The `string_view` surfaces are
+// still comes back as Some("abc"); the next call reports None. The `StringView` surfaces are
 // allocator-owned NUL-terminated buffers (same contract as std.io.file.contents_in), so a stdin
 // stream containing NULs truncates the TEXT view at the first NUL — pipe binary through
 // `read_all_bytes`, whose `[u8]` carries the true byte count and preserves embedded NULs.
@@ -32,7 +32,7 @@ read_failed = () IoError { IoError.Errno(0 - 1) }
 // freed, so the "on the stack" cell this used to hold leaked one byte per line read — unbounded on a
 // filter draining a large stream. The escape analysis cannot stack it either, since `cell.ptr` is
 // handed to read(2). One acquire/release per line is noise beside the per-BYTE read syscall below.
-read_line* = (a: Allocator) Result<Opt<string_view>, IoError> {
+read_line* = (a: Allocator) Result<Opt<StringView>, IoError> {
     a.try_acquire(1).match ({
         .Err(e)   => err(e),
         .Ok(cell) => {
@@ -42,7 +42,7 @@ read_line* = (a: Allocator) Result<Opt<string_view>, IoError> {
         },
     })
 }
-read_line_into = (a: Allocator, cell: [u8]) Result<Opt<string_view>, IoError> {
+read_line_into = (a: Allocator, cell: [u8]) Result<Opt<StringView>, IoError> {
     a.init(64).match ({
         .Err(e) => err(e),
         .Ok(s0) => {
@@ -71,7 +71,7 @@ read_line_into = (a: Allocator, cell: [u8]) Result<Opt<string_view>, IoError> {
                     false => s,
                 })
             }
-            out: Result<Opt<string_view>, IoError> := failed.match ({
+            out: Result<Opt<StringView>, IoError> := failed.match ({
                 true  => {
                     s.free_in(a)
                     err(ev)
@@ -79,12 +79,12 @@ read_line_into = (a: Allocator, cell: [u8]) Result<Opt<string_view>, IoError> {
                 false => (consumed == 0).match ({
                     true  => {
                         s.free_in(a)
-                        none: Opt<string_view> := .None
+                        none: Opt<StringView> := .None
                         ok(none)
                     },
                     false => s.finish_in(a).match ({
                         .Ok(line) => {
-                            some: Opt<string_view> := .Some(line)
+                            some: Opt<StringView> := .Some(line)
                             ok(some)
                         },
                         .Err(fe)  => err(fe),
@@ -167,7 +167,7 @@ drain_stdin = (a: Allocator) Result<String, IoError> {
 // Reads stdin to EOF into one allocator-owned NUL-terminated view (the stdin twin of
 // std.io.file.contents_in — `a.contents_in("/dev/stdin")` needs a seekable fd; this doesn't).
 // TEXT surface: an embedded NUL truncates the view — use read_all_bytes for binary-safe reads.
-read_all* = (a: Allocator) Result<string_view, IoError> {
+read_all* = (a: Allocator) Result<StringView, IoError> {
     a.drain_stdin().match ({
         .Ok(s)  => s.finish_in(a).match ({
             .Ok(done) => ok(done),
@@ -190,7 +190,7 @@ read_all_bytes* = (a: Allocator) Result<[u8], IoError> {
 // must outlive the call. `on_line` is a first-class closure arg, same shape as
 // std.collections.iter's helpers, so an inline lambda splices straight in:
 // `a.lines((line) { out(line) })`.
-lines* = (a: Allocator, on_line: (string_view) void) Result<i64, IoError> {
+lines* = (a: Allocator, on_line: (StringView) void) Result<i64, IoError> {
     n: i64 := 0
     failed := false
     ev := IoError.Eof

@@ -1,6 +1,6 @@
 // std.text.string — a growable, allocator-backed byte String, ASSEMBLED at runtime.
 //
-// `string_literal` is compile-time storage; a `String` is built while the program runs —
+// `StringLiteral` is compile-time storage; a `String` is built while the program runs —
 // the keystone for runtime code generation (a backend that emits source as a value).
 // The API is functional: each op returns the updated String. The (ptr, len, cap)
 // header is a small value passed by copy; the byte buffer is realloc'd underneath, so
@@ -27,15 +27,15 @@ String*: {
         s.ptr.slice(s.len)
     }
     push_in = (s: String, a: Allocator, b: u8) Result<String, IoError> { a.push_in(s, b) }
-    append_in = (s: String, a: Allocator, t: string_view) Result<String, IoError> {
+    append_in = (s: String, a: Allocator, t: StringView) Result<String, IoError> {
         a.append_in(s, t)
     }
-    finish_in = (s: String, a: Allocator) Result<string_cstr, IoError> { a.finish_in(s) }
+    finish_in = (s: String, a: Allocator) Result<StringCstr, IoError> { a.finish_in(s) }
     free_in   = (s: String, a: Allocator) void { a.free_in(s) }
 }
 // `copy` (not `move`): the destination run starts at `at` == the String's live length, so it lies
 // entirely in the spare capacity past every byte a source view could name — the ranges cannot overlap.
-copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: string_view) void {
+copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: StringView) void {
     src := t.view()
     dst.offset(at).copy(src.ptr, src.len)
 }
@@ -88,7 +88,7 @@ push_in* = (a: Allocator, s: String, b: u8) Result<String, IoError> {
         .Err(e) => err(e),
     })
 }
-append_in* = (a: Allocator, s: String, t: string_view) Result<String, IoError> {
+append_in* = (a: Allocator, s: String, t: StringView) Result<String, IoError> {
     t := t
     n := t.len()
     a.reserve_in(s, n + 1).match ({
@@ -104,7 +104,7 @@ append_in* = (a: Allocator, s: String, t: string_view) Result<String, IoError> {
     })
 }
 // Bulk-copy a length-carrying [u8] slice (NOT NUL-terminated — a sub-run of a larger buffer)
-// onto the String in one grow. `append_in` above is for NUL-terminated `string_view`s; this is
+// onto the String in one grow. `append_in` above is for NUL-terminated `StringView`s; this is
 // its slice sibling, used by run-copy escapers (e.g. std.format.json's string writer) that bulk
 // copy the run between escapes.
 copy_slice_bytes = (dst: RawPtr<u8>, at: i64, t: [u8]) void { dst.offset(at).copy(t.ptr, t.len) }
@@ -123,7 +123,7 @@ append_slice_in* = (a: Allocator, s: String, t: [u8]) Result<String, IoError> {
         .Err(e) => err(e),
     })
 }
-finish_in* = (a: Allocator, s: String) Result<string_cstr, IoError> {
+finish_in* = (a: Allocator, s: String) Result<StringCstr, IoError> {
     // init/push/append maintain one spare byte, so this does not relocate the allocation and the
     // caller's String header remains the correct owner to pass to free_in.
     a.reserve_in(s, 1).match ({

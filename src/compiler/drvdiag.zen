@@ -42,7 +42,7 @@ check_diag_no_main = (
     mp: MutPtr<Malloc>,
     raw: [Decl],
     decls: [Decl],
-    flat: string_view,
+    flat: StringView,
 ) CheckDiagnostic {
     t0 := clock_ms()
     c0 := check_module_no_if_diagnostic_from_source(flat)
@@ -77,17 +77,17 @@ check_diag_no_main = (
     c6
 }
 RenderTarget*: {
-    path: string_view,
-    src: string_view,
+    path: StringView,
+    src: StringView,
 }
 pick_module = (
-    flat: string_view,
+    flat: StringView,
     mods: [ModuleEntry],
     i: i64,
     off: i32,
     w: i32,
-    rpath: string_view,
-    rsrc: string_view,
+    rpath: StringView,
+    rsrc: StringView,
 ) RenderTarget {
     (i >= mods.len).match ({
         true  => RenderTarget(
@@ -111,8 +111,8 @@ pick_render = (
     rp: ResolvedProgram,
     off: i32,
     w: i32,
-    rpath: string_view,
-    rsrc: string_view,
+    rpath: StringView,
+    rsrc: StringView,
 ) RenderTarget {
     (diag_user_span(rp.flat, rsrc, off, w).line == 0).match ({
         true  => rp.flat.pick_module(rp.table.modules, 0, off, w, rpath, rsrc),
@@ -124,8 +124,8 @@ pick_render = (
 }
 // a fully located diagnostic: the module file it lives in plus its line:col span there.
 DiagLoc*: {
-    path: string_view,
-    src: string_view,
+    path: StringView,
+    src: StringView,
     sp: DiagSpan,
 }
 // IDENTITY-FIRST location: binary-search the resolver's region map (flat offset → module + original
@@ -136,8 +136,8 @@ locate_diag* = (
     rp: ResolvedProgram,
     off: i32,
     w: i32,
-    rpath: string_view,
-    rsrc: string_view,
+    rpath: StringView,
+    rsrc: StringView,
 ) DiagLoc {
     ri := rp.regions.fregion_find(to_i64(off))
     (off >= 0 && ri >= 0).then({
@@ -166,8 +166,8 @@ emit_one* = (
     raw: [Decl],
     decls: [Decl],
     rp: ResolvedProgram,
-    path: string_view,
-    user: string_view,
+    path: StringView,
+    user: StringView,
     cd: CheckDiagnostic,
 ) i64 {
     dl := locate_diag(rp, cd.source_offset, cd.span_width, path, user)
@@ -186,7 +186,7 @@ emit_one* = (
 // Source-only commands (`fmt` and the deliberately-untyped raw emitter) do not own a ResolvedProgram,
 // but the no-if and no-ternary language laws still apply. Render the same structured diagnostic
 // directly against their input so every user-facing command teaches the canonical postfix forms.
-report_no_if_plain* = (mp: MutPtr<Malloc>, path: string_view, src: string_view) i32 {
+report_no_if_plain* = (mp: MutPtr<Malloc>, path: StringView, src: StringView) i32 {
     cd := check_module_no_if_diagnostic_from_source(src).cd_or(check_module_no_ternary_diagnostic_from_source(src))
     (cd.code == 0).match ({
         true  => 0,
@@ -203,8 +203,8 @@ report_no_if_plain* = (mp: MutPtr<Malloc>, path: string_view, src: string_view) 
 report_no_if_resolved* = (
     mp: MutPtr<Malloc>,
     rp: ResolvedProgram,
-    path: string_view,
-    user: string_view,
+    path: StringView,
+    user: StringView,
 ) i32 {
     cd := check_module_no_if_diagnostic_from_source(rp.flat).cd_or(check_module_no_ternary_diagnostic_from_source(rp.flat))
     (cd.code == 0).match ({
@@ -225,8 +225,8 @@ report_no_if_resolved* = (
 report_js_unsupported* = (
     mp: MutPtr<Malloc>,
     rp: ResolvedProgram,
-    path: string_view,
-    user: string_view,
+    path: StringView,
+    user: StringView,
 ) i32 {
     nm := js_unsupported_get()
     is_empty(nm).then({
@@ -250,12 +250,12 @@ report_js_unsupported* = (
 // (`undefined reference to document`). The module simply is not available on this target, so say so
 // at the import, in Zen, instead of leaking a linker dump. `zen check` still passes and `emit-js` /
 // `build --target js` still build the same program — this gates only the C backend's entry points.
-JS_PLATFORM_MODULE = () string_view { "std.web.dom" }
+JS_PLATFORM_MODULE = () StringView { "std.web.dom" }
 // the same module as the ModuleTable spells it: resolve_scan normalises an import id to PATH form
 // (`std.web.dom` -> `std/web/dom`), so the dotted user spelling above never matches a table entry.
-JS_PLATFORM_MODULE_ID = () string_view { "std/web/dom" }
+JS_PLATFORM_MODULE_ID = () StringView { "std/web/dom" }
 // do the bytes of `want` sit at offset `p` of `s`?
-sv_has_at = (s: string_view, p: i32, want: string_view) bool {
+sv_has_at = (s: StringView, p: i32, want: StringView) bool {
     ok := true
     wb: [u8] := want.view()
     wb.loop((h, i, b) {
@@ -272,7 +272,7 @@ sv_has_at = (s: string_view, p: i32, want: string_view) bool {
 // import from a mention of the same dotted name in a comment. A transitive import (a dependency's)
 // has nothing to point at here, so the span stays 0 and render_diagnostic drops the caret block —
 // the header still names the module.
-js_platform_import_span = (user: string_view) DiagSpan {
+js_platform_import_span = (user: StringView) DiagSpan {
     mod := JS_PLATFORM_MODULE()
     sp := DiagSpan(
         line: 0,
@@ -304,8 +304,8 @@ js_platform_import_span = (user: string_view) DiagSpan {
 report_c_unsupported* = (
     mp: MutPtr<Malloc>,
     rp: ResolvedProgram,
-    path: string_view,
-    user: string_view,
+    path: StringView,
+    user: StringView,
 ) i32 {
     (rp.table.has(JS_PLATFORM_MODULE_ID()) == false).then({
         return 0
@@ -338,8 +338,8 @@ report_check* = (
     raw: [Decl],
     decls: [Decl],
     rp: ResolvedProgram,
-    path: string_view,
-    user: string_view,
+    path: StringView,
+    user: StringView,
 ) i32 {
     // a specialized channel (parse / ownership / escape / bound / …) is the ROOT — report it alone.
     t0 := clock_ms()
@@ -377,8 +377,8 @@ report_alloc_null = (
     raw: [Decl],
     decls: [Decl],
     rp: ResolvedProgram,
-    path: string_view,
-    user: string_view,
+    path: StringView,
+    user: StringView,
 ) i32 {
     na := mp.check_module_nullalloc_diagnostic_from_source(raw, rp.flat)
     (na.code == 0).match ({

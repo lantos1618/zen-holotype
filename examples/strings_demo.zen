@@ -44,11 +44,11 @@ show_types = (a: Allocator) void {
     println("-- 1. every string-ish type, and what it owns --")
     // (a) STRING LITERAL — bytes in the binary's read-only data. No allocation, no free;
     //     they outlive every function that sees them.
-    lit: string_view := "zen strings"
+    lit: StringView := "zen strings"
     formatln("  literal  {} len={}  storage=binary .rodata          freed=never", [arg_str(lit), arg_int(lit.len())])
-    // (b) str / string_view — a BORROWED, NUL-terminated pointer, carrying no length and
+    // (b) str / StringView — a BORROWED, NUL-terminated pointer, carrying no length and
     //     no allocator. Same address as `lit`; owns nothing, the literal is still owner.
-    borrowed: string_view := lit
+    borrowed: StringView := lit
     formatln("  str      {} len={}  storage=whatever it points at   freed=by that owner", [arg_str(borrowed), arg_int(borrowed.len())])
     // (c) [u8] — a slice: (ptr, len). A WRITABLE window over someone else's block. Owns
     //     nothing either, but it carries a length and you can store through it.
@@ -66,7 +66,7 @@ show_types = (a: Allocator) void {
 show_borrow_vs_copy = (a: Allocator) void {
     println("")
     println("-- 2. borrow vs copy --")
-    padded: string_view := "   auth: token expired   "
+    padded: StringView := "   auth: token expired   "
     // BORROW. trim_view returns a [u8] aiming INTO `padded`. Zero bytes allocated. It is
     // a [u8] and not a str precisely because the trimmed end has no NUL of its own.
     tv: [u8] := padded.trim_view()
@@ -96,10 +96,10 @@ show_borrow_vs_copy = (a: Allocator) void {
 //   msg              runs to the end of the line, so it is a free tail view: a BORROW
 //                    into the caller's line buffer, dying with it.
 Fields*: {
-    ts: string_view,
-    level: string_view,
-    comp: string_view,
-    msg: string_view,
+    ts: StringView,
+    level: StringView,
+    comp: StringView,
+    msg: StringView,
     // Release exactly the three blocks parse_line allocated. `msg` is deliberately
     // absent: it points into the MIDDLE of the caller's line block, and freeing an
     // interior pointer is undefined. Whoever frees the line frees msg with it.
@@ -126,7 +126,7 @@ upto = (i: i64) i64 { (i < 0).then({ 0 }, { i }) }
 //
 // Read it as an alternating rhythm: substr ALLOCATES a field, trim_prefix then steps over
 // the bytes just copied for FREE. Three mallocs, three zero-cost steps.
-parse_line* = (a: Allocator, line: string_view) Result<Fields, string_view> {
+parse_line* = (a: Allocator, line: StringView) Result<Fields, StringView> {
     i1 := line.find(" ")
     // ALLOC 1 of 3.
     ts := a.substr(line, 0, i1.upto()).expect("strings_demo: out of memory")
@@ -148,7 +148,7 @@ parse_line* = (a: Allocator, line: string_view) Result<Fields, string_view> {
             a.release(ts.view().ptr)
             a.release(level.view().ptr)
             a.release(comp.view().ptr)
-            bad: Result<Fields, string_view> := .Err("expected '<ts> <level> <comp>: <msg>'")
+            bad: Result<Fields, StringView> := .Err("expected '<ts> <level> <comp>: <msg>'")
             return bad
         },
         false => 0,
@@ -161,7 +161,7 @@ parse_line* = (a: Allocator, line: string_view) Result<Fields, string_view> {
         comp: comp,
         msg: msg,
     )
-    out: Result<Fields, string_view> := ok(f)
+    out: Result<Fields, StringView> := ok(f)
     out
 }
 // Column widths, widened one parsed row at a time. A pure value: nothing owned.
@@ -191,7 +191,7 @@ rule_into* = (out: [u8], fill: u8) void {
 // Append `t`, padded to `w` columns, onto the String. Three memory events in three lines:
 // pad_right ALLOCATES a temporary, append_in COPIES its bytes into the String's block, the
 // now-dead temporary is RELEASED on the spot. This is the shape to copy.
-push_pad = (a: Allocator, g: String, t: string_view, w: i64) String {
+push_pad = (a: Allocator, g: String, t: StringView, w: i64) String {
     p := a.pad_right(t, w, ' ')
     out := a.append_in(g, p).expect("strings_demo: out of memory")
     a.release(p.view().ptr)
@@ -211,7 +211,7 @@ render_row* = (a: Allocator, f: Fields, w: Widths) String {
 //     `title` (a literal in .rodata). One field must be freed and the other must never
 //     be; the `free` method is where that asymmetry is written down.
 Report*: {
-    title: string_view,
+    title: StringView,
     body: String,
     free = (r: Report, a: Allocator) void { r.body.free_in(a) }
 }
@@ -247,12 +247,12 @@ free_rows* = (a: Allocator, rows: [Fields], n: i64) void {
 }
 // The per-line copies split handed out — and so the bytes every `msg` borrow points at.
 // Nothing may read a Fields after this runs.
-free_lines* = (a: Allocator, lines: [string_view]) void {
+free_lines* = (a: Allocator, lines: [StringView]) void {
     lines.loop((h, i, ln) {
         a.release(ln.view().ptr)
     })
 }
-log_text = () string_view {
+log_text = () StringView {
     "2026-07-25T10:31:02 ERROR auth: token expired\n2026-07-25T10:31:07 WARN cache: 3 evictions\nnot a log line\n2026-07-25T10:32:00 INFO http: GET /health 200"
 }
 // HONEST NOTE 1, about main below. A `[T]` is (ptr, len), and `lines`/`rows` are the OWNING
@@ -282,11 +282,11 @@ main = () i32 {
     println("")
     println("-- 3-5. the real program: log lines -> aligned table --")
     // The source text is a LITERAL: static, never freed, outlives main.
-    src: string_view := log_text()
-    // split ALLOCATES twice over: one block for the [string_view] backbone, and one
+    src: StringView := log_text()
+    // split ALLOCATES twice over: one block for the [StringView] backbone, and one
     // NUL-terminated copy per line (it cannot hand back views — a line ends at '\n' and
     // there is no NUL there). free_lines frees the copies, release_slice the backbone.
-    lines: [string_view] := a.split(src, '\n')
+    lines: [StringView] := a.split(src, '\n')
     // ALLOC: the row array's backbone. Its freer is the release_slice at the end of main.
     rows: [Fields] := a.nbuf(blank_fields(), lines.len)
     n: i64 := 0

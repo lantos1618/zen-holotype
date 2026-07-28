@@ -38,7 +38,7 @@ failure (bad mnemonic, undefined label, divide by zero, stack underflow) is a va
 | `jq.zen` | `./zen run examples/jq.zen '.a.b[0]' file.json` (or pipe JSON on stdin) |
 | `textproc.zen` | `./zen run examples/textproc.zen grep cat FILE` (also `re PAT FILE`, or bare for `wc`) |
 
-`wordfreq.zen` uses `HMap<string_view, i64>` to count input words.
+`wordfreq.zen` uses `HMap<StringView, i64>` to count input words.
 
 `jq.zen` is a mini-`jq`: `std.format.json` parses the document, a `.a.b[0]` path selects a node, and
 `json.pretty` renders it; all failures (missing file, bad JSON, bad path) are clean messages with a

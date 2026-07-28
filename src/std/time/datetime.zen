@@ -51,7 +51,7 @@ DateTime*: {
 // month 13, or 2001-02-29 which isn't a leap year).
 DateError*: BadLength | BadDigit(u8) | BadSeparator(u8) | OutOfRange
 // Human-readable variant name, for printing an error path.
-error_name* = (e: DateError) string_view { e.variant_name() }
+error_name* = (e: DateError) StringView { e.variant_name() }
 // ── calendar predicates ───────────────────────────────────────────────────────
 // A Gregorian leap year: divisible by 4, except centuries, except those divisible by 400.
 is_leap* = (year: i64) bool { year % 4 == 0 && year % 100 != 0 || year % 400 == 0 }
@@ -124,24 +124,24 @@ now* = () DateTime { from_unix(wall_s()) }
 // The byte at index `i`, or 0 when out of range. Local (not std.text.str.at) because `at` collides on
 // the flat namespace with std.text.ascii.at (an i32-index variant), so it can bind to the wrong one;
 // going through `view` (a unique name) sidesteps that.
-byte_at = (s: string_view, i: i64) u8 {
+byte_at = (s: StringView, i: i64) u8 {
     sv := view(s)
     (i >= 0 && i < sv.len).then({ sv[i] }, { 0 })
 }
 // Scan s[i..end); return the first non-digit byte, or 0 when every byte in the range is a digit
 // (a digit byte is never 0, so 0 is an unambiguous "all clear").
-first_nondigit = (s: string_view, i: i64, end: i64) u8 {
+first_nondigit = (s: StringView, i: i64, end: i64) u8 {
     (i >= end).match ({
         true  => 0,
         false => is_digit(byte_at(s, i)).then({ first_nondigit(s, i + 1, end) }, { byte_at(s, i) }),
     })
 }
 // Decode the 2-digit decimal at s[i..i+2] (positions already validated to be digits).
-num2 = (s: string_view, i: i64) i64 {
+num2 = (s: StringView, i: i64) i64 {
     (byte_at(s, i) - '0').to_i64() * 10 + (byte_at(s, i + 1) - '0').to_i64()
 }
 // Decode the 4-digit decimal at s[i..i+4].
-num4 = (s: string_view, i: i64) i64 { num2(s, i) * 100 + num2(s, i + 2) }
+num4 = (s: StringView, i: i64) i64 { num2(s, i) * 100 + num2(s, i + 2) }
 // Is every field of `dt` within its civil range? (month 1..12, day 1..days_in_month, 24h clock)
 in_range = (dt: DateTime) bool {
     dt.month >= 1
@@ -158,7 +158,7 @@ in_range = (dt: DateTime) bool {
 // Parse the ISO-8601 subset `YYYY-MM-DD` (date only, time = 00:00:00) or `YYYY-MM-DDThh:mm:ss`. Returns
 // the filled DateTime (weekday computed) or a DateError pinpointing the first fault. Strict: exact
 // width, exact separators, all-digit fields, and every field range-checked (so 2001-02-29 → OutOfRange).
-parse_iso* = (s: string_view) Result<DateTime, DateError> {
+parse_iso* = (s: StringView) Result<DateTime, DateError> {
     n := len(s)
     has_time := n == 19
     ((n == 10 || n == 19) == false).then({
@@ -257,7 +257,7 @@ fmt_w4 = (p: RawPtr<u8>, at: i64, n: i64) i64 {
 // Render `dt` as the 19-byte `YYYY-MM-DDThh:mm:ss` (ISO-8601, the exact input parse_iso accepts) into a
 // fresh allocator-owned NUL-terminated str. A 4-digit year is assumed (0..9999); deliberately not a
 // full strftime. Allocation failure is a value (Result), house style.
-format_iso* = (a: Allocator, dt: DateTime) Result<string_view, IoError> {
+format_iso* = (a: Allocator, dt: DateTime) Result<StringView, IoError> {
     a.try_acquire(20).match ({
         .Ok(p)  => {
             k := fmt_w4(p, 0, dt.year)

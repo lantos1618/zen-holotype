@@ -7,9 +7,9 @@
 // per module:
 //
 //   ## src/std/text/str.zen
-//     len* = (s: string_view) i64
-//     dup_bytes_in*<A> = (a: MutPtr<A>, s: string_view) Result<[u8], IoError>
-//     Param*: { name: string_view, ty: Ty, variadic: bool }
+//     len* = (s: StringView) i64
+//     dup_bytes_in*<A> = (a: MutPtr<A>, s: StringView) Result<[u8], IoError>
+//     Param*: { name: StringView, ty: Ty, variadic: bool }
 //     Expr*: Int(i64) | Byte(i32) | ...
 //
 // What is included (and the calls made):
@@ -53,7 +53,7 @@ g_types := 0
 no_params = () [Param] { slice(null_ptr(), 0) }
 // the fn named `name` among `decls` (name == "" when absent) — pretty_decl keeps its finder private,
 // so the lookup is re-stated here (~10 lines)
-find_fn = (decls: [Decl], name: string_view) Func {
+find_fn = (decls: [Decl], name: StringView) Func {
     res := Func(
         name: "",
         params: no_params(),
@@ -71,7 +71,7 @@ find_fn = (decls: [Decl], name: string_view) Func {
     })
     res
 }
-is_exported = (exp: [Param], name: string_view) bool {
+is_exported = (exp: [Param], name: StringView) bool {
     found := false
     exp.loop((h, i, p) {
         found = found || p.name == name
@@ -79,7 +79,7 @@ is_exported = (exp: [Param], name: string_view) bool {
     found
 }
 // `name` plus the trailing `*` export marker when the parse recorded it
-sig_name = (s: String, mp: MutPtr<Malloc>, exp: [Param], name: string_view) String {
+sig_name = (s: String, mp: MutPtr<Malloc>, exp: [Param], name: StringView) String {
     is_exported(exp, name).match ({
         true  => s.ff_append(mp, name).ff_append(mp, "*"),
         false => s.ff_append(mp, name),
@@ -142,7 +142,7 @@ sig_struct = (
     s: String,
     mp: MutPtr<Malloc>,
     exp: [Param],
-    name: string_view,
+    name: StringView,
     tps: [Param],
     fields: [Field],
 ) String {
@@ -160,7 +160,7 @@ sig_struct = (
 }
 // a multi-payload variant `V(t0, t1)` is desugared at parse time into a synthesized `__anon…` struct;
 // re-inline its field types as the surface tuple (the struct itself is suppressed at top level)
-sig_tuple = (s: String, mp: MutPtr<Malloc>, decls: [Decl], nm: string_view, t: Ty) String {
+sig_tuple = (s: String, mp: MutPtr<Malloc>, decls: [Decl], nm: StringView, t: Ty) String {
     found := false
     body := s
     decls.loop((h, i, d) {
@@ -201,7 +201,7 @@ sig_enum = (
     mp: MutPtr<Malloc>,
     exp: [Param],
     decls: [Decl],
-    name: string_view,
+    name: StringView,
     tps: [Param],
     vs: [VariantDef],
 ) String {
@@ -281,7 +281,7 @@ sig_decl = (s: String, mp: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl)
 }    // DImport / DRaw / DTraitDefault declare no printable signature
 // ── the walk ──────────────────────────────────────────────────────────────────
 // parse one module and print its section (`## path` + one line per decl)
-emit_file = (mp: MutPtr<Malloc>, path: string_view) void {
+emit_file = (mp: MutPtr<Malloc>, path: StringView) void {
     g_files = g_files + 1
     src := mp.contents_in(path).expect("sigs: cannot read file")
     decls := mp.parse_module(src)
@@ -302,11 +302,11 @@ emit_file = (mp: MutPtr<Malloc>, path: string_view) void {
     out(s.gstr_finish(mp)).or(0)
 }
 // directory listings are unsorted; sections must be stable
-sort_names = (xs: [string_view]) void {
-    xs.sort_by((x: string_view, y: string_view) bool { x.sv_lt(y) })
+sort_names = (xs: [StringView]) void {
+    xs.sort_by((x: StringView, y: StringView) bool { x.sv_lt(y) })
 }
 // recurse into subdirectories, emit every `.zen` file, sorted at each level
-walk = (mp: MutPtr<Malloc>, dir: string_view) void {
+walk = (mp: MutPtr<Malloc>, dir: StringView) void {
     entries := mp.read_dir(dir).expect("sigs: cannot read directory")
     entries.sort_names()
     entries.loop((h, i, entry) {
@@ -324,7 +324,7 @@ walk = (mp: MutPtr<Malloc>, dir: string_view) void {
     })
 }
 // the target directory: the last non-`--` CLI arg (scanned recursively), defaulting to `src`
-pick_root_from = (i: i32, acc: string_view) string_view {
+pick_root_from = (i: i32, acc: StringView) StringView {
     (i >= argc()).match ({
         true  => acc,
         false => {
@@ -333,7 +333,7 @@ pick_root_from = (i: i32, acc: string_view) string_view {
         },
     })
 }
-pick_root = () string_view { pick_root_from(1, "src") }
+pick_root = () StringView { pick_root_from(1, "src") }
 main = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()

@@ -26,7 +26,7 @@ Op*: Push | Pop | Dup | Swap | Over | Add | Sub | Mul | Div | Mod | Neg | Eq | N
 // One row per mnemonic: `takes` says whether an operand is required, `jumps` says the
 // operand names a code label rather than a plain number.
 OpDef*: {
-    nm: string_view,
+    nm: StringView,
     op: Op,
     takes: bool,
     jumps: bool,
@@ -208,7 +208,7 @@ OPS := [
     ),
 ]
 // index of `t` in OPS, or -1
-op_find = (t: string_view) i64 {
+op_find = (t: StringView) i64 {
     hit: i64 := 0 - 1
     OPS.loop((h, i, d) {
         (hit < 0 && d.nm == t).then({
@@ -225,15 +225,15 @@ Instr*: {
 // `o.variant_name()` written directly inside a `.loop` lambda emits an unresolved
 // `variant_name` symbol and the link fails, so the intrinsic is wrapped here and the
 // disassembler calls the wrapper instead.
-op_name = (o: Op) string_view { o.variant_name() }
+op_name = (o: Op) StringView { o.variant_name() }
 // ── assembler diagnostics ─────────────────────────────────────────────────────────────
 AsmFault*: UnknownMnemonic | MissingOperand | UnexpectedOperand | BadNumber | UnknownLabel | DuplicateLabel | JunkAfterOperand | EmptyLabel
 AsmError*: {
     fault: AsmFault,
     line: i64,
-    tok: string_view,
+    tok: StringView,
 }
-asm_fault_text = (f: AsmFault) string_view {
+asm_fault_text = (f: AsmFault) StringView {
     f.match ({
         .UnknownMnemonic   => "unknown instruction",
         .MissingOperand    => "instruction needs an operand",
@@ -250,8 +250,8 @@ asm_error_print = (e: AsmError) i64 {
 }
 // ── pass 1: text → raw rows + a label table ───────────────────────────────────────────
 Raw*: {
-    nm: string_view,
-    operand: string_view,
+    nm: StringView,
+    operand: StringView,
     has_operand: bool,
     line: i64,
 }
@@ -261,7 +261,7 @@ Asm*: {
     pc: i64,
 }
 // drop a `;` or `#` comment, then the surrounding blanks
-clean_line = (a: Allocator, s: string_view) string_view {
+clean_line = (a: Allocator, s: StringView) StringView {
     semi := s.find(";")
     hash := s.find("#")
     cut := (semi < 0).match ({
@@ -274,9 +274,9 @@ clean_line = (a: Allocator, s: string_view) string_view {
     body := (cut < 0).then({ s }, { a.substr(s, 0, cut).expect("zvm: oom") })
     a.trim(body)
 }
-ends_colon = (t: string_view) bool { t.len() > 0 && t.at(t.len() - 1) == ':' }
+ends_colon = (t: StringView) bool { t.len() > 0 && t.at(t.len() - 1) == ':' }
 // A leading `name:` token defines a label at the current instruction index.
-take_label = (a: Allocator, st: Asm, t: string_view, ln: i64) Result<Asm, AsmError> {
+take_label = (a: Allocator, st: Asm, t: StringView, ln: i64) Result<Asm, AsmError> {
     nm := a.substr(t, 0, t.len() - 1).expect("zvm: oom")
     (nm.len() == 0).then({
         return .Err(AsmError(
@@ -297,7 +297,7 @@ take_label = (a: Allocator, st: Asm, t: string_view, ln: i64) Result<Asm, AsmErr
     .Ok(out)
 }
 // One source line: an optional label, then an optional `mnemonic [operand]`.
-scan_line = (a: Allocator, st: Asm, raw_line: string_view, ln: i64) Result<Asm, AsmError> {
+scan_line = (a: Allocator, st: Asm, raw_line: StringView, ln: i64) Result<Asm, AsmError> {
     text := a.clean_line(raw_line)
     (text.len() == 0).then({
         return .Ok(st)
@@ -352,7 +352,7 @@ scan_line = (a: Allocator, st: Asm, raw_line: string_view, ln: i64) Result<Asm, 
     out.pc = cur.pc + 1
     .Ok(out)
 }
-scan_all = (a: Allocator, lines: [string_view], i: i64, st: Asm) Result<Asm, AsmError> {
+scan_all = (a: Allocator, lines: [StringView], i: i64, st: Asm) Result<Asm, AsmError> {
     (i >= lines.len).then({
         return .Ok(st)
     })
@@ -361,7 +361,7 @@ scan_all = (a: Allocator, lines: [string_view], i: i64, st: Asm) Result<Asm, Asm
 }
 // ── pass 2: raw rows → instructions, with labels resolved ─────────────────────────────
 // `'x'` is a one-byte character operand; anything else is decimal.
-char_operand = (t: string_view) i64 {
+char_operand = (t: StringView) i64 {
     (t.len() == 3 && t.at(0) == '\'' && t.at(2) == '\'').then({ t.at(1).to_i64() }, { 0 - 1 })
 }
 number_operand = (r: Raw) Result<i64, AsmError> {
@@ -429,7 +429,7 @@ Program*: {
     code: [Instr],
     labels: Map<i64>,
 }
-assemble = (a: Allocator, src: string_view) Result<Program, AsmError> {
+assemble = (a: Allocator, src: StringView) Result<Program, AsmError> {
     rr: Result<Vec<Raw>, IoError> := vec.empty(a)
     lr: Result<Map<i64>, IoError> := maps.empty(a)
     cr: Result<Vec<Instr>, IoError> := vec.empty(a)
@@ -448,8 +448,8 @@ assemble = (a: Allocator, src: string_view) Result<Program, AsmError> {
 }
 // ── disassembler ──────────────────────────────────────────────────────────────────────
 // The label whose address is `pc`, or "" — a reverse lookup over the label table.
-label_at = (labels: Map<i64>, pc: i64) string_view {
-    hit: string_view := ""
+label_at = (labels: Map<i64>, pc: i64) StringView {
+    hit: StringView := ""
     ks := labels.keys()
     vs := labels.vals()
     ks.loop((h, i, k) {
@@ -482,7 +482,7 @@ VmError*: {
     fault: VmFault,
     pc: i64,
 }
-vm_fault_text = (f: VmFault) string_view {
+vm_fault_text = (f: VmFault) StringView {
     f.match ({
         .StackUnderflow    => "operand stack underflow",
         .StackOverflow     => "operand stack overflow",
@@ -790,7 +790,7 @@ vm_error_print = (e: VmError, code: [Instr]) i64 {
     formatln("zvm: runtime error at pc {} (source line {}): {}", [arg_int(e.pc), arg_int(src), arg_str(e.fault.vm_fault_text())])
 }
 // Assemble and run one program; yields a process exit code.
-execute = (a: Allocator, m: Machine, src: string_view) i32 {
+execute = (a: Allocator, m: Machine, src: StringView) i32 {
     a.assemble(src).match ({
         .Err(e) => {
             e.asm_error_print()
@@ -933,7 +933,7 @@ T_UNDERFLOW := """
         add
         halt
 """
-run_case = (a: Allocator, m: Machine, title: string_view, src: string_view) i32 {
+run_case = (a: Allocator, m: Machine, title: StringView, src: StringView) i32 {
     formatln("--- {} ---", [arg_str(title)])
     a.execute(m, src)
 }

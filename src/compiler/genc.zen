@@ -24,8 +24,8 @@
 // `Xbuf = (a, n) [X] { slice(a.acquire(n * sizeof(X)), n) }` copies that used to live across the
 // compiler. T sits only in return position, so callers pass an explicit turbofish: `cbuf<Ty>(a, n)`.
 cbuf*<T> = (a: MutPtr<Malloc>, n: i64) [T] { slice(a.acquire_or_die(n * sizeof(T)), n) }
-// sbyte: the i-th byte of a string_view. ONE accessor replaces the sbyte/jbyte/dsbyte/ffbyte copies.
-sbyte* = (v: string_view, i: i64) u8 { load(offset(v, i)) }
+// sbyte: the i-th byte of a StringView. ONE accessor replaces the sbyte/jbyte/dsbyte/ffbyte copies.
+sbyte* = (v: StringView, i: i64) u8 { load(offset(v, i)) }
 // pointer KIND tag (safety-goal-D). All three spellings still lower to `T*`; their semantic/mono
 // names remain distinct so a generic wrapper cannot erase a nested capability. Direct pointer
 // direction is checked by `fits`/`mode_fits`. 0=RawPtr (nullable FFI floor), 1=Ptr (read-only borrow),
@@ -35,7 +35,7 @@ k_ptr* = () i32 { 1 }
 k_mut_ptr* = () i32 { 2 }
 // The canonical surface keyword for a pointer kind. Shared by the formatter and diagnostics so a
 // rejected `Ptr<T>` -> `MutPtr<T>` conversion never prints two indistinguishable `Ptr<T>` types.
-ptr_kw* = (kind: i32) string_view {
+ptr_kw* = (kind: i32) StringView {
     (kind == k_raw_ptr()).match ({
         true  => "RawPtr",
         false => (kind == k_mut_ptr()).then({ "MutPtr" }, { "Ptr" }),
@@ -68,8 +68,8 @@ resize_or_die*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
     })
     q
 }
-write_str* = (dst: RawPtr<u8>, at: i64, t: string_view) i64 { dst.write_str_at(at, t, 0) }
-write_str_at = (dst: RawPtr<u8>, at: i64, t: string_view, i: i64) i64 {
+write_str* = (dst: RawPtr<u8>, at: i64, t: StringView) i64 { dst.write_str_at(at, t, 0) }
+write_str_at = (dst: RawPtr<u8>, at: i64, t: StringView, i: i64) i64 {
     k := i
     @while (load(offset(t, k)) != 0) {
         dst.offset(at + k).store(load(offset(t, k)))
@@ -77,7 +77,7 @@ write_str_at = (dst: RawPtr<u8>, at: i64, t: string_view, i: i64) i64 {
     }
     at + k
 }    // ITERATIVE: copying a long string is O(n) iteration, not O(n) C-stack recursion
-finish_buf* = (dst: RawPtr<u8>, n: i64) string_view {
+finish_buf* = (dst: RawPtr<u8>, n: i64) StringView {
     dst.offset(n).store(0)
     cstr(dst)
 }
@@ -119,7 +119,7 @@ gstr_push*<A> = (s: String, a: MutPtr<A>, b: u8) String {
 // whose per-byte capacity check dominated self-compile profiles (gstr_append ~8.7% of samples).
 // Same bytes appended, so emitted C is unchanged; only the capacity growth schedule differs.
 // The [u8] form is the primitive: a caller that already knows the length (a String, a sub-slice)
-// appends without re-measuring; the string_view form pays its one unavoidable strlen in view().
+// appends without re-measuring; the StringView form pays its one unavoidable strlen in view().
 gstr_append_bytes*<A> = (s: String, a: MutPtr<A>, bs: [u8]) String {
     r := a.gstr_reserve(s, bs.len)
     bs.loop((h, i, b) {
@@ -131,28 +131,28 @@ gstr_append_bytes*<A> = (s: String, a: MutPtr<A>, bs: [u8]) String {
         cap: r.cap,
     )
 }
-gstr_append*<A> = (s: String, a: MutPtr<A>, t: string_view) String {
+gstr_append*<A> = (s: String, a: MutPtr<A>, t: StringView) String {
     s.gstr_append_bytes(a, t.view())
 }
-gstr_finish*<A> = (s: String, a: MutPtr<A>) string_cstr { cstr(s.gstr_push(a, 0).ptr) }
+gstr_finish*<A> = (s: String, a: MutPtr<A>) StringCstr { cstr(s.gstr_push(a, 0).ptr) }
 // constructors — return a value; the caller calls `.addr()` on an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", e.addr()), sret(r.addr())]`
 lit* = (n: i64) Expr { .Int(n) }
 byte_lit* = (n: i32) Expr { .Byte(n) }    // a char literal's byte value (typed u8 by the checker)
-flit* = (t: string_view) Expr { .FloatLit(t) }    // a float literal — its lexeme text, emitted verbatim (typed f64)
-vref* = (nm: string_view) Expr {
+flit* = (t: StringView) Expr { .FloatLit(t) }    // a float literal — its lexeme text, emitted verbatim (typed f64)
+vref* = (nm: StringView) Expr {
     .Var(VarData(
         name: nm,
         pos: 0,
     ))
 }
-vref_at* = (nm: string_view, p: i32) Expr {
+vref_at* = (nm: StringView, p: i32) Expr {
     .Var(VarData(
         name: nm,
         pos: p,
     ))
 }
-bin_at* = (op: string_view, l: Ptr<Expr>, r: Ptr<Expr>, p: i32) Expr {
+bin_at* = (op: StringView, l: Ptr<Expr>, r: Ptr<Expr>, p: i32) Expr {
     .Bin(BinData(
         op: op,
         lhs: l,
@@ -162,7 +162,7 @@ bin_at* = (op: string_view, l: Ptr<Expr>, r: Ptr<Expr>, p: i32) Expr {
     ))
 }
 // like bin_at but records a sub-width int RESULT type so genc re-truncates the promoted value.
-bin_rty* = (op: string_view, l: Ptr<Expr>, r: Ptr<Expr>, p: i32, rt: Ty) Expr {
+bin_rty* = (op: StringView, l: Ptr<Expr>, r: Ptr<Expr>, p: i32, rt: Ty) Expr {
     .Bin(BinData(
         op: op,
         lhs: l,
@@ -171,7 +171,7 @@ bin_rty* = (op: string_view, l: Ptr<Expr>, r: Ptr<Expr>, p: i32, rt: Ty) Expr {
         rty: rt,
     ))
 }
-bin* = (op: string_view, l: Ptr<Expr>, r: Ptr<Expr>) Expr { bin_at(op, l, r, 0) }
+bin* = (op: StringView, l: Ptr<Expr>, r: Ptr<Expr>) Expr { bin_at(op, l, r, 0) }
 // C integer promotion widens a sub-32-bit operand (u8/i8/i16/u16) to `int` for any operator, and Zen
 // only narrows at a store — so a used operator RESULT leaks the un-truncated value. These name the
 // types + width-preserving ops that must re-truncate; i32/u32/i64/u64 are native C widths, left alone.
@@ -182,14 +182,14 @@ subword_ty* = (t: Ty) bool {
         _         => false,
     })
 }
-narrow_op* = (op: string_view) bool {
+narrow_op* = (op: StringView) bool {
     op == "+" || op == "-" || op == "*" || op == "<<" || op == "&" || op == "|" || op == "^"
 }
 // result type to record on a Bin so genc re-truncates a sub-width arithmetic result; Void = no cast.
-arith_rty* = (op: string_view, lty: Ty) Ty {
+arith_rty* = (op: StringView, lty: Ty) Ty {
     (narrow_op(op) && subword_ty(lty)).then({ lty }, { tvoid() })
 }
-call_full* = (fn: string_view, args: [Expr], targs: [Ty], p: i32, raw: bool) Expr {
+call_full* = (fn: StringView, args: [Expr], targs: [Ty], p: i32, raw: bool) Expr {
     .Call(CallData(
         fn: fn,
         args: args,
@@ -198,16 +198,16 @@ call_full* = (fn: string_view, args: [Expr], targs: [Ty], p: i32, raw: bool) Exp
         raw: raw,
     ))
 }
-call* = (fn: string_view, args: [Expr]) Expr { call_full(fn, args, no_tys(), 0, false) }
-call_at* = (fn: string_view, args: [Expr], p: i32) Expr { call_full(fn, args, no_tys(), p, false) }
-raw_call_at* = (fn: string_view, args: [Expr], p: i32) Expr {
+call* = (fn: StringView, args: [Expr]) Expr { call_full(fn, args, no_tys(), 0, false) }
+call_at* = (fn: StringView, args: [Expr], p: i32) Expr { call_full(fn, args, no_tys(), p, false) }
+raw_call_at* = (fn: StringView, args: [Expr], p: i32) Expr {
     call_full(fn, args, no_tys(), p, true)
 }
 // explicit turbofish call `fn<T, …>(args)` — type args pinned at the call site.
-call_targs_at* = (fn: string_view, args: [Expr], targs: [Ty], p: i32) Expr {
+call_targs_at* = (fn: StringView, args: [Expr], targs: [Ty], p: i32) Expr {
     call_full(fn, args, targs, p, false)
 }
-emcall* = (recv: Ptr<Expr>, method: string_view, args: [Expr], p: i32) Expr {
+emcall* = (recv: Ptr<Expr>, method: StringView, args: [Expr], p: i32) Expr {
     .MethodCall(MethodCallData(
         recv: recv,
         method: method,
@@ -227,35 +227,35 @@ cond_at* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>, oa: i32, tpos: i32, epos: 
         epos: epos,
     ))
 }
-member* = (o: Ptr<Expr>, f: string_view) Expr {
+member* = (o: Ptr<Expr>, f: StringView) Expr {
     .Member(MemberData(
         obj: o,
         field: f,
         pos: 0,
     ))
 }
-member_at* = (o: Ptr<Expr>, f: string_view, p: i32) Expr {
+member_at* = (o: Ptr<Expr>, f: StringView, p: i32) Expr {
     .Member(MemberData(
         obj: o,
         field: f,
         pos: p,
     ))
 }
-arrow* = (o: Ptr<Expr>, f: string_view) Expr {
+arrow* = (o: Ptr<Expr>, f: StringView) Expr {
     .Arrow(ArrowData(
         obj: o,
         field: f,
         pos: 0,
     ))
 }
-arrow_at* = (o: Ptr<Expr>, f: string_view, p: i32) Expr {
+arrow_at* = (o: Ptr<Expr>, f: StringView, p: i32) Expr {
     .Arrow(ArrowData(
         obj: o,
         field: f,
         pos: p,
     ))
 }
-mkenum* = (ty: string_view, v: string_view, p: Ptr<Expr>) Expr {
+mkenum* = (ty: StringView, v: StringView, p: Ptr<Expr>) Expr {
     .MakeEnum(MakeEnumData(
         ty: ty,
         mty: ty,
@@ -264,7 +264,7 @@ mkenum* = (ty: string_view, v: string_view, p: Ptr<Expr>) Expr {
         payload: p,
     ))
 }
-mkenumg* = (ty: string_view, mty: string_view, targs: [Ty], v: string_view, p: Ptr<Expr>) Expr {
+mkenumg* = (ty: StringView, mty: StringView, targs: [Ty], v: StringView, p: Ptr<Expr>) Expr {
     .MakeEnum(MakeEnumData(
         ty: ty,
         mty: mty,
@@ -273,13 +273,13 @@ mkenumg* = (ty: string_view, mty: string_view, targs: [Ty], v: string_view, p: P
         payload: p,
     ))
 }
-finit* = (nm: string_view, v: Ptr<Expr>) FieldInit {
+finit* = (nm: StringView, v: Ptr<Expr>) FieldInit {
     FieldInit(
         name: nm,
         value: v,
     )
 }
-mkstruct* = (ty: string_view, inits: [FieldInit]) Expr {
+mkstruct* = (ty: StringView, inits: [FieldInit]) Expr {
     .MakeStruct(MakeStructData(
         ty: ty,
         mty: ty,
@@ -288,7 +288,7 @@ mkstruct* = (ty: string_view, inits: [FieldInit]) Expr {
         pos: 0,
     ))
 }
-mkstruct_at* = (ty: string_view, inits: [FieldInit], p: i32) Expr {
+mkstruct_at* = (ty: StringView, inits: [FieldInit], p: i32) Expr {
     .MakeStruct(MakeStructData(
         ty: ty,
         mty: ty,
@@ -297,7 +297,7 @@ mkstruct_at* = (ty: string_view, inits: [FieldInit], p: i32) Expr {
         pos: p,
     ))
 }
-mkstructg_at* = (ty: string_view, mty: string_view, targs: [Ty], inits: [FieldInit], p: i32) Expr {
+mkstructg_at* = (ty: StringView, mty: StringView, targs: [Ty], inits: [FieldInit], p: i32) Expr {
     .MakeStruct(MakeStructData(
         ty: ty,
         mty: mty,
@@ -322,11 +322,11 @@ eindex* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty) Expr {
 }
 eloop* = (
     seq: Ptr<Expr>,
-    idx: string_view,
-    elem: string_view,
+    idx: StringView,
+    elem: StringView,
     elemTy: Ty,
     body: [Stmt],
-    h: string_view,
+    h: StringView,
 ) Expr {
     .Loop(LoopData(
         seq: seq,
@@ -375,7 +375,7 @@ fntype* = (params: [Ty], ret: Ptr<Ty>) Ty {
         ret: ret,
     ))
 }
-mktag* = (ty: string_view, v: string_view) Expr {
+mktag* = (ty: StringView, v: StringView) Expr {
     .Tag(TagData(
         ty: ty,
         mty: ty,
@@ -383,7 +383,7 @@ mktag* = (ty: string_view, v: string_view) Expr {
         targs: no_tys(),
     ))
 }
-mktagg* = (ty: string_view, mty: string_view, targs: [Ty], v: string_view) Expr {
+mktagg* = (ty: StringView, mty: StringView, targs: [Ty], v: StringView) Expr {
     .Tag(TagData(
         ty: ty,
         mty: mty,
@@ -391,7 +391,7 @@ mktagg* = (ty: string_view, mty: string_view, targs: [Ty], v: string_view) Expr 
         targs: targs,
     ))
 }
-arm* = (v: string_view, bind: string_view, body: Ptr<Expr>) ArmData {
+arm* = (v: StringView, bind: StringView, body: Ptr<Expr>) ArmData {
     ArmData(
         variant: v,
         bind: bind,
@@ -399,7 +399,7 @@ arm* = (v: string_view, bind: string_view, body: Ptr<Expr>) ArmData {
         pos: 0,
     )
 }
-arm_at* = (v: string_view, bind: string_view, body: Ptr<Expr>, p: i32) ArmData {
+arm_at* = (v: StringView, bind: StringView, body: Ptr<Expr>, p: i32) ArmData {
     ArmData(
         variant: v,
         bind: bind,
@@ -407,7 +407,7 @@ arm_at* = (v: string_view, bind: string_view, body: Ptr<Expr>, p: i32) ArmData {
         pos: p,
     )
 }    // source-backed (formatter anchors arm comments)
-ematch* = (subj: Ptr<Expr>, ename: string_view, arms: [ArmData]) Expr {
+ematch* = (subj: Ptr<Expr>, ename: StringView, arms: [ArmData]) Expr {
     .Match(MatchData(
         subj: subj,
         ename: ename,
@@ -415,7 +415,7 @@ ematch* = (subj: Ptr<Expr>, ename: string_view, arms: [ArmData]) Expr {
         ptr: false,
     ))
 }
-ematchp* = (subj: Ptr<Expr>, ename: string_view, arms: [ArmData]) Expr {
+ematchp* = (subj: Ptr<Expr>, ename: StringView, arms: [ArmData]) Expr {
     .Match(MatchData(
         subj: subj,
         ename: ename,
@@ -423,7 +423,7 @@ ematchp* = (subj: Ptr<Expr>, ename: string_view, arms: [ArmData]) Expr {
         ptr: true,
     ))
 }
-strlit_at* = (v: string_view, p: i32) Expr {
+strlit_at* = (v: StringView, p: i32) Expr {
     .StrLit(StrData(
         value: v,
         pos: p,
@@ -432,8 +432,8 @@ strlit_at* = (v: string_view, p: i32) Expr {
 tstring_view* = () Ty { .StringView }
 tstring_cstr* = () Ty { .StringCstr }
 tstring_literal* = () Ty { .StringLiteral }
-tstr* = () Ty { .StringView }    // deprecated alias → string_view
-slet* = (nm: string_view, v: Ptr<Expr>) Stmt {
+tstr* = () Ty { .StringView }    // deprecated alias → StringView
+slet* = (nm: StringView, v: Ptr<Expr>) Stmt {
     .Let(LetData(
         name: nm,
         ty: tvoid(),
@@ -441,7 +441,7 @@ slet* = (nm: string_view, v: Ptr<Expr>) Stmt {
         pos: 0,
     ))
 }
-slett* = (nm: string_view, t: Ty, v: Ptr<Expr>) Stmt {
+slett* = (nm: StringView, t: Ty, v: Ptr<Expr>) Stmt {
     .Let(LetData(
         name: nm,
         ty: t,
@@ -449,7 +449,7 @@ slett* = (nm: string_view, t: Ty, v: Ptr<Expr>) Stmt {
         pos: 0,
     ))
 }    // a TYPED let
-slet_at* = (nm: string_view, v: Ptr<Expr>, p: i32) Stmt {
+slet_at* = (nm: StringView, v: Ptr<Expr>, p: i32) Stmt {
     .Let(LetData(
         name: nm,
         ty: tvoid(),
@@ -457,7 +457,7 @@ slet_at* = (nm: string_view, v: Ptr<Expr>, p: i32) Stmt {
         pos: p,
     ))
 }    // source-backed let (formatter needs the name position)
-slett_at* = (nm: string_view, t: Ty, v: Ptr<Expr>, p: i32) Stmt {
+slett_at* = (nm: StringView, t: Ty, v: Ptr<Expr>, p: i32) Stmt {
     .Let(LetData(
         name: nm,
         ty: t,
@@ -508,8 +508,8 @@ ti64* = () Ty { .I64 }
 tu8* = () Ty { .U8 }
 tf64* = () Ty { .F64 }
 tbool* = () Ty { .Bool }
-tnamed* = (n: string_view) Ty { .Named(n) }
-tgeneric* = (nm: string_view, args: [Ty], mangled: string_view) Ty {
+tnamed* = (n: StringView) Ty { .Named(n) }
+tgeneric* = (nm: StringView, args: [Ty], mangled: StringView) Ty {
     .Generic(GenericData(
         name: nm,
         args: args,
@@ -539,45 +539,45 @@ tslice_k* = (e: Ptr<Ty>, k: i32) Ty {
 }
 // slice mutability, spelled with the SAME kind tags as pointers: `Slice<T>` is the read-only window
 // (k_ptr) and `MutSlice<T>` — for which `[T]` is the sugar — is the writable one (k_mut_ptr). A
-// read-only slice is what `.view()` of a `string_literal`/`string_cstr` yields, so writing into
+// read-only slice is what `.view()` of a `StringLiteral`/`StringCstr` yields, so writing into
 // `.rodata` is a checker error instead of a segfault.
 k_slice_dflt* = () i32 { k_mut_ptr() }
-slice_kw* = (kind: i32) string_view { (kind == k_ptr()).then({ "Slice" }, { "MutSlice" }) }
-param* = (nm: string_view, t: Ty) Param {
+slice_kw* = (kind: i32) StringView { (kind == k_ptr()).then({ "Slice" }, { "MutSlice" }) }
+param* = (nm: StringView, t: Ty) Param {
     Param(
         name: nm,
         ty: t,
         variadic: false,
     )
 }
-pvariadic* = (nm: string_view, t: Ty) Param {
+pvariadic* = (nm: StringView, t: Ty) Param {
     Param(
         name: nm,
         ty: t,
         variadic: true,
     )
 }    // a `...T` param: ty = the collected `[T]`
-field* = (nm: string_view, t: Ty) Field {
+field* = (nm: StringView, t: Ty) Field {
     Field(
         name: nm,
         ty: t,
     )
 }
-sdef* = (nm: string_view, fs: [Field]) StructDecl {
+sdef* = (nm: StringView, fs: [Field]) StructDecl {
     StructDecl(
         name: nm,
         fields: fs,
         pos: 0,
     )
 }
-sdef_at* = (nm: string_view, fs: [Field], p: i32) StructDecl {
+sdef_at* = (nm: StringView, fs: [Field], p: i32) StructDecl {
     StructDecl(
         name: nm,
         fields: fs,
         pos: p,
     )
 }    // source-backed (formatter anchors a leading comment above the struct)
-gsdef_at* = (nm: string_view, tps: [Param], fs: [Field], p: i32) GenStructDecl {
+gsdef_at* = (nm: StringView, tps: [Param], fs: [Field], p: i32) GenStructDecl {
     GenStructDecl(
         name: nm,
         tparams: tps,
@@ -585,7 +585,7 @@ gsdef_at* = (nm: string_view, tps: [Param], fs: [Field], p: i32) GenStructDecl {
         pos: p,
     )
 }
-genumdef_at* = (nm: string_view, tps: [Param], vs: [VariantDef], p: i32) GenEnumDecl {
+genumdef_at* = (nm: StringView, tps: [Param], vs: [VariantDef], p: i32) GenEnumDecl {
     GenEnumDecl(
         name: nm,
         tparams: tps,
@@ -594,14 +594,14 @@ genumdef_at* = (nm: string_view, tps: [Param], vs: [VariantDef], p: i32) GenEnum
     )
 }
 tvoid* = () Ty { .Void }
-vdef* = (nm: string_view, p: Ty) VariantDef {
+vdef* = (nm: StringView, p: Ty) VariantDef {
     VariantDef(
         name: nm,
         payload: p,
         dflt: null_ptr(),
     )
 }
-vdef_default* = (nm: string_view, p: Ty, e: Ptr<Expr>) VariantDef {
+vdef_default* = (nm: StringView, p: Ty, e: Ptr<Expr>) VariantDef {
     VariantDef(
         name: nm,
         payload: p,
@@ -610,7 +610,7 @@ vdef_default* = (nm: string_view, p: Ty, e: Ptr<Expr>) VariantDef {
 }
 expr_null* = () Ptr<Expr> { vdef("", tvoid()).dflt }    // a null Ptr<Expr> carrying the right static type
 is_expr_null* = (e: Ptr<Expr>) bool { e == null_ptr() }
-edef_at* = (nm: string_view, vs: [VariantDef], p: i32) EnumDecl {
+edef_at* = (nm: StringView, vs: [VariantDef], p: i32) EnumDecl {
     EnumDecl(
         name: nm,
         variants: vs,
@@ -621,7 +621,7 @@ dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 dforeign* = (f: Func) Decl { .DForeign(f) }
-dimport_at* = (names: [Param], module: string_view, p: i32) Decl {
+dimport_at* = (names: [Param], module: StringView, p: i32) Decl {
     .DImport(ImportData(
         names: names,
         module: module,
@@ -630,7 +630,7 @@ dimport_at* = (names: [Param], module: string_view, p: i32) Decl {
 }    // source-backed import (formatter anchors a file-header comment above it)
 dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
-dimpl* = (ty: string_view, trname: string_view, methods: [Param]) Decl {
+dimpl* = (ty: StringView, trname: StringView, methods: [Param]) Decl {
     .DImpl(ImplData(
         ty: ty,
         trname: trname,
@@ -639,7 +639,7 @@ dimpl* = (ty: string_view, trname: string_view, methods: [Param]) Decl {
         pos: 0,
     ))
 }
-dimpl_at* = (ty: string_view, trname: string_view, trty: Ty, methods: [Param], pos: i32) Decl {
+dimpl_at* = (ty: StringView, trname: StringView, trty: Ty, methods: [Param], pos: i32) Decl {
     .DImpl(ImplData(
         ty: ty,
         trname: trname,
@@ -648,7 +648,7 @@ dimpl_at* = (ty: string_view, trname: string_view, trty: Ty, methods: [Param], p
         pos: pos,
     ))
 }
-dglobal* = (name: string_view, ty: Ty, init: Ptr<Expr>) Decl {
+dglobal* = (name: StringView, ty: Ty, init: Ptr<Expr>) Decl {
     .DGlobal(GlobalData(
         name: name,
         ty: ty,
@@ -658,7 +658,7 @@ dglobal* = (name: string_view, ty: Ty, init: Ptr<Expr>) Decl {
         pos: 0,
     ))
 }
-dglobal_tl* = (name: string_view, ty: Ty, init: Ptr<Expr>) Decl {
+dglobal_tl* = (name: StringView, ty: Ty, init: Ptr<Expr>) Decl {
     .DGlobal(GlobalData(
         name: name,
         ty: ty,
@@ -668,7 +668,7 @@ dglobal_tl* = (name: string_view, ty: Ty, init: Ptr<Expr>) Decl {
         pos: 0,
     ))
 }
-dglobal_at* = (name: string_view, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
+dglobal_at* = (name: StringView, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
     .DGlobal(GlobalData(
         name: name,
         ty: ty,
@@ -678,7 +678,7 @@ dglobal_at* = (name: string_view, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
         pos: p,
     ))
 }
-dglobal_tl_at* = (name: string_view, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
+dglobal_tl_at* = (name: StringView, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
     .DGlobal(GlobalData(
         name: name,
         ty: ty,
@@ -688,7 +688,7 @@ dglobal_tl_at* = (name: string_view, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
         pos: p,
     ))
 }
-dglobal_alias_at* = (name: string_view, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
+dglobal_alias_at* = (name: StringView, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
     .DGlobal(GlobalData(
         name: name,
         ty: ty,
@@ -698,7 +698,7 @@ dglobal_alias_at* = (name: string_view, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
         pos: p,
     ))
 }    // source-backed module-alias
-dtraitdef* = (trname: string_view, fn: Func) Decl {
+dtraitdef* = (trname: StringView, fn: Func) Decl {
     .DTraitDefault(TraitDefData(
         trname: trname,
         fn: fn,
@@ -727,7 +727,7 @@ fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty {
 // map a narrow int/float type name to its C type; any other name passes through unchanged.
 // the checker accepts i8/i16/u16/u32/u64/f32 but they reach genc as Named(name), so without
 // this they'd leak the Zen name (`u32`, `f32`, …) straight to cc as an unknown C type.
-width_cname = (n: string_view) string_view {
+width_cname = (n: StringView) StringView {
     (n == "i8").then({
         return "int8_t"
     })
@@ -752,7 +752,7 @@ width_cname = (n: string_view) string_view {
 // agree byte for byte, because cname_len sizes the buffer that cname_write then fills: the lengths
 // used to be spelled here as literals (7, 6, 4, 11, …), so re-spelling a type in the write ladder
 // and forgetting its count in the length ladder under-sized the buffer and wrote past it.
-cname_head = (t: Ty) string_view {
+cname_head = (t: Ty) StringView {
     t.match ({
         .I32           => "int32_t",
         .I64           => "int64_t",
@@ -784,7 +784,7 @@ cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
 }
 // the C type name of a Ty as a plain string — used to substitute `sizeof(T)` in a generic body
 // (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
-ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) string_view {
+ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) StringView {
     n := t.cname_len()
     buf: RawPtr<u8> := a.acquire_or_die(n + 1)
     buf.finish_buf(buf.cname_write(0, t))
@@ -793,7 +793,7 @@ ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) string_view {
 //    monomorphize pass (compiler.mono). A tiny stack of [Ty] buffer helpers + the recursive
 //    substitution + the generic-enum lookup; they're TYPE helpers, so they live in the base. ──
 // substitute tparam→arg in a type (recursing Ptr/Slice); a Named that IS a tparam becomes its arg.
-tparam_arg = (tparams: [Param], args: [Ty], n: string_view, dflt: Ty) Ty {
+tparam_arg = (tparams: [Param], args: [Ty], n: StringView, dflt: Ty) Ty {
     found := dflt
     tparams.loop((h, i, tp) {
         // Guard `i < args.len`: a WRONG-ARITY explicit targ list (too few `<…>` args for the declared
@@ -831,7 +831,7 @@ subst_generic_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], g: GenericD
     })
     tgeneric(g.name, tys, a.mangle_str_in(g.name, tys))
 }
-find_genenum* = (decls: [Decl], name: string_view) GenEnumDecl {
+find_genenum* = (decls: [Decl], name: StringView) GenEnumDecl {
     found := GenEnumDecl(
         name: "",
         tparams: slice(null_ptr(), 0),

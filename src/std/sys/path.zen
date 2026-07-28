@@ -1,11 +1,11 @@
-// std.sys.path — POSIX path manipulation, pure functions over `string_view`.
+// std.sys.path — POSIX path manipulation, pure functions over `StringView`.
 //
 // Two honest shapes, the same split as std.text.str:
 //   • ZERO-COPY (no allocation) — `is_absolute`, `basename`, `ext`. `basename`/`ext` return a view
 //     that POINTS INTO the input (a suffix view): dropping a prefix only advances the start pointer,
 //     and the input's NUL still terminates the tail. Valid only while the input string lives.
 //   • ALLOCATING — `dirname`, `stem`, `join`, `normalize` build a fresh NUL-terminated buffer and so
-//     thread the caller's allocator and return Result<string_view, IoError> (OOM is a value),
+//     thread the caller's allocator and return Result<StringView, IoError> (OOM is a value),
 //     matching the std string-builder contract. `.expect("…")` at fail-fast roots, `.or_return()` in
 //     Result-returning fns.
 //
@@ -13,7 +13,7 @@
 // case is not preserved. All ops are ASCII/byte-oriented and never touch the filesystem.
 //
 // FLAT-NAMESPACE NOTE: `join`/`join_in` here are PATH join (parts separated by '/'), distinct from
-// std.text.str's `join`/`join_in` (a `[string_view]` with an arbitrary `sep`) and std.thread's `join`. Call
+// std.text.str's `join`/`join_in` (a `[StringView]` with an arbitrary `sep`) and std.thread's `join`. Call
 // path's qualified — `path = std.sys.path; path.join(a, ["a","b"])` — so the right one resolves; an
 // unqualified `a.join(parts)` collides across the flattened import namespace.
 { Allocator, release_slice } = std.mem.alloc
@@ -63,11 +63,11 @@ back_over_slashes = (v: [u8], j: i64) i64 {
 }
 // ── pure, zero-copy ───────────────────────────────────────────────────────────
 // does `p` start at the root? is_absolute("/a") == true, is_absolute("a") == false.
-is_absolute* = (p: string_view) bool { p.starts_with("/") }
+is_absolute* = (p: StringView) bool { p.starts_with("/") }
 // the final path component (everything after the last '/'), as a zero-copy suffix view.
 // basename("/a/b/c") == "c"; basename("abc") == "abc"; basename("/a/b/") == "" (trailing-slash rule);
 // basename("/") == "".
-basename* = (p: string_view) string_view {
+basename* = (p: StringView) StringView {
     v := p.view()
     i := v.last_slash()
     cstr(v.ptr.offset(i + 1))
@@ -75,18 +75,18 @@ basename* = (p: string_view) string_view {
 // the extension INCLUDING the dot, from the last '.' in the basename to the end; "" when there is none.
 // A leading dot is a dotfile marker, not an extension. Zero-copy suffix view.
 // ext("f.tar.gz") == ".gz"; ext("f.") == "."; ext(".bashrc") == ""; ext("noext") == "".
-ext* = (p: string_view) string_view {
+ext* = (p: StringView) StringView {
     b := p.basename()
     bv := b.view()
     ld := bv.leading_dots()
     k := bv.last_dot()
     (k > ld).then({ cstr(bv.ptr.offset(k)) }, { "" })
 }
-// ── allocating (Result<string_view, IoError>) ─────────────────────────────────
+// ── allocating (Result<StringView, IoError>) ─────────────────────────────────
 // the directory portion (everything before the last component), trailing slashes collapsed.
 // dirname("/a/b/c") == "/a/b"; dirname("/a") == "/"; dirname("/") == "/"; dirname("abc") == "";
 // dirname("a/b/") == "a/b".
-dirname_in = (a: Allocator, p: string_view) Result<string_view, IoError> {
+dirname_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
     v := p.view()
     i := v.last_slash()
     (i < 0).match ({
@@ -97,14 +97,14 @@ dirname_in = (a: Allocator, p: string_view) Result<string_view, IoError> {
         },
     })
 }
-dirname* = (a: Allocator, p: string_view) Result<string_view, IoError> { a.dirname_in(p) }
+dirname* = (a: Allocator, p: StringView) Result<StringView, IoError> { a.dirname_in(p) }
 // the basename with its extension removed. stem("dir/f.tar.gz") == "f.tar"; stem(".bashrc") == ".bashrc".
-stem_in = (a: Allocator, p: string_view) Result<string_view, IoError> {
+stem_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
     b := p.basename()
     n := b.len() - p.ext().len()
     a.substr_in(b, 0, n)
 }
-stem* = (a: Allocator, p: string_view) Result<string_view, IoError> { a.stem_in(p) }
+stem* = (a: Allocator, p: StringView) Result<StringView, IoError> { a.stem_in(p) }
 // ── join ──────────────────────────────────────────────────────────────────────
 // is the builder empty / does it currently end with a separator?
 sb_empty = (sb: String) bool { sb.len == 0 }
@@ -119,7 +119,7 @@ sb_ends_slash = (sb: String) bool {
 }
 // fold parts into `acc`, POSIX-style: an absolute part RESETS the accumulation; otherwise the part is
 // appended with exactly one '/' unless `acc` already ends with one (so no doubled separators).
-join_fold = (a: Allocator, parts: [string_view], i: i64, acc: String) Result<String, IoError> {
+join_fold = (a: Allocator, parts: [StringView], i: i64, acc: String) Result<String, IoError> {
     (i >= parts.len).match ({
         true  => ok(acc),
         false => {
@@ -150,7 +150,7 @@ join_fold = (a: Allocator, parts: [string_view], i: i64, acc: String) Result<Str
 }
 // join path components with '/'. join(["a","b","c"]) == "a/b/c"; an absolute component resets:
 // join(["a","/b"]) == "/b"; join([]) == "".
-join_in* = (a: Allocator, parts: [string_view]) Result<string_view, IoError> {
+join_in* = (a: Allocator, parts: [StringView]) Result<StringView, IoError> {
     acc := a.new_in().or_return()
     full := a.join_fold(parts, 0, acc).or_return()
     full.finish_in(a).match ({
@@ -158,7 +158,7 @@ join_in* = (a: Allocator, parts: [string_view]) Result<string_view, IoError> {
         .Err(e)   => err(e),
     })
 }
-join* = (a: Allocator, parts: [string_view]) Result<string_view, IoError> { a.join_in(parts) }
+join* = (a: Allocator, parts: [StringView]) Result<StringView, IoError> { a.join_in(parts) }
 // ── normalize ─────────────────────────────────────────────────────────────────
 // append `sb` a '/' before all but the first kept component (keeps or_return out of a match-arm value).
 sep_before = (a: Allocator, sb: String, k: i64) Result<String, IoError> {
@@ -167,7 +167,7 @@ sep_before = (a: Allocator, sb: String, k: i64) Result<String, IoError> {
 // emit kept components `keep[0..top]` into `sb`, '/'-separated (no leading slash — the caller seeds it).
 norm_build = (
     a: Allocator,
-    parts: [string_view],
+    parts: [StringView],
     keep: [i64],
     k: i64,
     top: i64,
@@ -185,7 +185,7 @@ norm_build = (
 // collapse '.', '..' and runs of '/'. normalize("a/./b/../c") == "a/c"; normalize("/a/../b") == "/b";
 // normalize("") == "."; normalize("/") == "/". A leading '..' is kept on a relative path
 // (normalize("a/../../b") == "../b") but dropped at an absolute root (normalize("/..") == "/").
-normalize_in = (a: Allocator, p: string_view) Result<string_view, IoError> {
+normalize_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
     abs := p.is_absolute()
     parts := a.split(p, '/')
     z: i64 := 0
@@ -217,7 +217,7 @@ normalize_in = (a: Allocator, p: string_view) Result<string_view, IoError> {
     need_dot := top == 0 && abs.then({ false }, { true })
     ended_r: Result<String, IoError> := need_dot.then({ full.append_in(a, ".") }, { ok(full) })
     ended := ended_r.or_return()
-    out: Result<string_view, IoError> := ended.finish_in(a).match ({
+    out: Result<StringView, IoError> := ended.finish_in(a).match ({
         .Ok(done) => ok(done),
         .Err(e)   => err(e),
     })
@@ -231,4 +231,4 @@ normalize_in = (a: Allocator, p: string_view) Result<string_view, IoError> {
     a.release_slice(keep)
     out
 }
-normalize* = (a: Allocator, p: string_view) Result<string_view, IoError> { a.normalize_in(p) }
+normalize* = (a: Allocator, p: StringView) Result<StringView, IoError> { a.normalize_in(p) }

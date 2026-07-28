@@ -37,7 +37,7 @@ report_bad_json = (e: JsonError) i64 {
 }
 // ── filter engine ─────────────────────────────────────────────────────────────
 // Scan a field name starting at i, stopping at the next '.' or '['.
-scan_key = (s: string_view, i: i64) i64 {
+scan_key = (s: StringView, i: i64) i64 {
     (i >= s.len()).match ({
         true  => i,
         false => {
@@ -47,7 +47,7 @@ scan_key = (s: string_view, i: i64) i64 {
     })
 }
 // Scan decimal digits starting at i, stopping at ']' or end.
-scan_idx = (s: string_view, i: i64) i64 {
+scan_idx = (s: StringView, i: i64) i64 {
     (i >= s.len()).match ({
         true  => i,
         false => {
@@ -58,10 +58,10 @@ scan_idx = (s: string_view, i: i64) i64 {
 }
 // Apply the filter starting at byte i to the current value: .Ok(selected) or .Err(message).
 // One path segment per call, recursing into the tail.
-apply = (a: Allocator, cur: Value, s: string_view, i: i64) Result<Value, string_view> {
+apply = (a: Allocator, cur: Value, s: StringView, i: i64) Result<Value, StringView> {
     (i >= s.len()).match ({
         true  => {
-            done: Result<Value, string_view> := .Ok(cur)
+            done: Result<Value, StringView> := .Ok(cur)
             return done
         },
         false => 0,
@@ -73,7 +73,7 @@ apply = (a: Allocator, cur: Value, s: string_view, i: i64) Result<Value, string_
             // a bare trailing "." is the identity filter
             (j == i + 1 && j >= s.len()).match ({
                 true  => {
-                    id: Result<Value, string_view> := .Ok(cur)
+                    id: Result<Value, StringView> := .Ok(cur)
                     return id
                 },
                 false => 0,
@@ -82,7 +82,7 @@ apply = (a: Allocator, cur: Value, s: string_view, i: i64) Result<Value, string_
             return json.get(cur, key).match ({
                 .Some(nv) => a.apply(nv, s, j),
                 .None     => {
-                    miss: Result<Value, string_view> := .Err(a.cat("jq: no such field: ", key))
+                    miss: Result<Value, StringView> := .Err(a.cat("jq: no such field: ", key))
                     miss
                 },
             })
@@ -94,7 +94,7 @@ apply = (a: Allocator, cur: Value, s: string_view, i: i64) Result<Value, string_
             j := s.scan_idx(i + 1)
             (j == i + 1 || j >= s.len() || s.at(j) != ']').match ({
                 true  => {
-                    bad: Result<Value, string_view> := .Err("jq: malformed index (expected [N])")
+                    bad: Result<Value, StringView> := .Err("jq: malformed index (expected [N])")
                     return bad
                 },
                 false => 0,
@@ -104,19 +104,19 @@ apply = (a: Allocator, cur: Value, s: string_view, i: i64) Result<Value, string_
                 .Some(xs) => (idx < xs.len).match ({
                     true  => a.apply(xs[idx], s, j + 1),
                     false => {
-                        oob: Result<Value, string_view> := .Err("jq: index out of range")
+                        oob: Result<Value, StringView> := .Err("jq: index out of range")
                         oob
                     },
                 }),
                 .None     => {
-                    nota: Result<Value, string_view> := .Err("jq: not an array")
+                    nota: Result<Value, StringView> := .Err("jq: not an array")
                     nota
                 },
             })
         },
         false => 0,
     })
-    syn: Result<Value, string_view> := .Err("jq: bad filter syntax (expected '.' or '[')")
+    syn: Result<Value, StringView> := .Err("jq: bad filter syntax (expected '.' or '[')")
     syn
 }
 main = () i32 {

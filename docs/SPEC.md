@@ -89,7 +89,7 @@ Implemented scalar and structural types:
 
 ```zen
 i32 i64 u8 f64 bool void
-string_literal string_cstr string_view
+StringLiteral StringCstr StringView
 Ptr<T> MutPtr<T> RawPtr<T>
 [T] Slice<T> MutSlice<T>
 (A, B) C
@@ -98,12 +98,12 @@ Name<T, U>
 ```
 
 The three canonical non-owning string types express provenance:
-`string_literal` is static literal storage, `string_cstr` is a borrowed
-NUL-terminated pointer, and `string_view` is the general readable borrow. They
+`StringLiteral` is static literal storage, `StringCstr` is a borrowed
+NUL-terminated pointer, and `StringView` is the general readable borrow. They
 currently lower to `const char*`; a true `(ptr, len)` view is a later phase
 (tracked in [STATUS.md](STATUS.md)). Each type has exactly ONE spelling: the
 former `text`, `Cstr` and `str` aliases are gone, and a diagnostic names the
-type you wrote rather than folding all three onto `string_view`. (`str` remains
+type you wrote rather than folding all three onto `StringView`. (`str` remains
 the name of the `std.text.str` module, which is not a type.) The owned growable
 buffer remains `String`. `[T]` is a fat slice with a
 pointer and length. Function types are parameter types for inline templates and
@@ -112,7 +112,7 @@ closure arguments.
 Assembling text goes through `std.text.sb`'s sticky builder `Sb`: the allocator
 is named once, each op (`.s` str, `.i` i64, `.ch` byte, `.rep` iterated repeat)
 no-ops after a recorded failure, and `.done()` settles the chain as one
-`Result<string_cstr, IoError>` — so allocation failure stays a value without an
+`Result<StringCstr, IoError>` — so allocation failure stays a value without an
 `.expect` per append:
 
 ```zen
@@ -131,7 +131,7 @@ only what the checker permits, and it is absent from the ABI mangling for that
 reason (it is present in the SEMANTIC one, so a generic body that stores
 through a `[T]` parameter is never reused for a `Slice<T>` instantiation).
 `.view()` decides which kind you get from what you viewed: a window over a
-`string_literal` or `string_cstr` is a `Slice<T>`, so a store into `.rodata` is
+`StringLiteral` or `StringCstr` is a `Slice<T>`, so a store into `.rodata` is
 `error[slice-write]` at check time rather than a segfault at run time. More
 generally, a slice-returning call on a read-only receiver yields a read-only
 window when the callee's returned expression names its first parameter — a
@@ -272,7 +272,7 @@ UFCS is part of call syntax: `x.f(a)` parses as `f(x, a)`. The checker can route
 that call to receiver-specific inherent or trait methods.
 
 For read-only trait lookup, all three non-owning string provenances dispatch
-through the canonical `string_view` receiver. Thus one `string_view.impl(Trait,
+through the canonical `StringView` receiver. Thus one `StringView.impl(Trait,
 { ... })` serves literals, C strings, and views; this lookup normalization does
 not weaken their value conversions or aggregate invariance.
 
@@ -342,8 +342,8 @@ The entire implicit-conversion surface is one function: `fits` in
 - **Nullability never vanishes implicitly**: a typed `RawPtr<T>` (nullable)
   never fits a non-null `Ptr<T>`/`MutPtr<T>` slot; it must pass
   `assert_nonnull` first.
-- **String provenance is directional**: `string_literal` fits `string_cstr`
-  and `string_view`, and `string_cstr` fits `string_view`, never the reverse
+- **String provenance is directional**: `StringLiteral` fits `StringCstr`
+  and `StringView`, and `StringCstr` fits `StringView`, never the reverse
   (`ty_eq`).
 - **Slice capability only weakens** (`slice_mode_fits`): a writable `[T]` fits
   a `Slice<T>` slot, but a read-only `Slice<T>` never fits `[T]`.
@@ -545,7 +545,7 @@ into an ordinary match yielding one literal per variant:
 ```zen
 Level: Debug | Info | Warn | Error
 
-tag = (l: Level) string_view { l.variant_name() }
+tag = (l: Level) StringView { l.variant_name() }
 // expands to: l.match ({ .Debug => "Debug", .Info => "Info", … })
 ```
 
@@ -564,7 +564,7 @@ either declares the variants that way or transforms the name explicitly.
 
 Like the struct intrinsics, `variant_name` is a reserved name whose only
 definable shape is a generic delegating wrapper
-(`vname<E> = (e: E) string_view { e.variant_name() }`), a generic body using it
+(`vname<E> = (e: E) StringView { e.variant_name() }`), a generic body using it
 is always inlined at its call sites, and a receiver that can never be an enum —
 a scalar, a string, a slice, a pointer, or a struct — is rejected with
 `error[arg-type]`.
@@ -598,13 +598,13 @@ the same file.
 work:
 
 ```zen
-ImportEdge*: { module: string_view, alias: string_view, namespace: bool, start: i32, next: i32 }
-ProvidedSymbol*: { name: string_view, start: i32, next: i32, decl_start: i32, decl_next: i32, imported: bool, foreign: bool }
+ImportEdge*: { module: StringView, alias: StringView, namespace: bool, start: i32, next: i32 }
+ProvidedSymbol*: { name: StringView, start: i32, next: i32, decl_start: i32, decl_next: i32, imported: bool, foreign: bool }
 ModuleGraph*: { imports: [ImportEdge], symbols: [ProvidedSymbol] }
-ModuleEntry*: { id: string_view, path: string_view, source: string_view, graph: ModuleGraph }
+ModuleEntry*: { id: StringView, path: StringView, source: StringView, graph: ModuleGraph }
 ModuleTable*: { modules: [ModuleEntry] }
-ResolvedProgram*: { table: ModuleTable, flat: string_view, body_start: i64, body_end: i64 }
-ParsedModule*: { id: string_view, path: string_view, source: string_view, body: string_view, graph: ModuleGraph, decls: [Decl] }
+ResolvedProgram*: { table: ModuleTable, flat: StringView, body_start: i64, body_end: i64 }
+ParsedModule*: { id: StringView, path: StringView, source: StringView, body: StringView, graph: ModuleGraph, decls: [Decl] }
 ParsedProgram*: { resolved: ResolvedProgram, modules: [ParsedModule], flat_decls: [Decl] }
 ```
 

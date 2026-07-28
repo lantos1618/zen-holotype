@@ -169,20 +169,20 @@
 // ── knobs ────────────────────────────────────────────────────────────────────────────────────────
 // The scratch root: cache dir, generated corpus, build outputs and the alloc shim all live under it,
 // and it is wiped at startup. Nothing outside it is written or removed.
-DEFAULT_DIR = () string_view { "/tmp/zen-bench-compiler" }
+DEFAULT_DIR = () StringView { "/tmp/zen-bench-compiler" }
 DEFAULT_REPS = () i64 { 3 }
 // The five-line corpus. Byte-stable by construction: it is this literal, not a repo file, so the
 // small-input rows stay comparable across every future edit to examples/ and tests/.
-HELLO_SRC = () string_view {
+HELLO_SRC = () StringView {
     "{ println } = std.text.fmt\n\nmain* = () i32 {\n    println(\"hello\")\n    0\n}\n"
 }
 // cache-state tags (the `cache` column). NA = the verb never consults the compile cache.
 CACHE_NA = () i64 { 0 }
 CACHE_COLD = () i64 { 1 }
 CACHE_WARM = () i64 { 2 }
-// `""` alone infers the narrower `string_literal`, which nothing computed can be assigned to; going
-// through a function pins these at `string_view` (tools/fuzz-mutate.zen uses the same idiom).
-cb_empty_sv = () string_view { "" }
+// `""` alone infers the narrower `StringLiteral`, which nothing computed can be assigned to; going
+// through a function pins these at `StringView` (tools/fuzz-mutate.zen uses the same idiom).
+cb_empty_sv = () StringView { "" }
 g_dir := cb_empty_sv()
 g_cache := cb_empty_sv()
 g_shim := cb_empty_sv()
@@ -223,21 +223,21 @@ cb_num = (v: i64, w: i64) i64 {
     pad := cb_sp(w - cb_digits(v))
     pad + put("").i(v).n
 }
-cb_text = (t: string_view, w: i64) i64 {
+cb_text = (t: StringView, w: i64) i64 {
     head := put(t).n
     head + cb_sp(w - len(t))
 }
-cb_rtext = (t: string_view, w: i64) i64 {
+cb_rtext = (t: StringView, w: i64) i64 {
     pad := cb_sp(w - len(t))
     pad + put(t).n
 }
-cb_cache_name = (c: i64) string_view {
+cb_cache_name = (c: i64) StringView {
     (c == CACHE_COLD()).match ({
         true  => "cold",
         false => (c == CACHE_WARM()).then({ "warm" }, { "n/a" }),
     })
 }
-cb_note = (t: string_view) void {
+cb_note = (t: StringView) void {
     put(t).n
     { }
 }
@@ -262,7 +262,7 @@ cb_header = () i64 {
 }
 // one report row. A -1 in maxRSS_kB or allocs means the measurement was unavailable, never a guess.
 cb_row = (
-    name: string_view,
+    name: StringView,
     cache: i64,
     reps: i64,
     lo: i64,
@@ -292,7 +292,7 @@ cb_row = (
 // ── number scraping ──────────────────────────────────────────────────────────────────────────────
 // Read the unsigned integer that follows position `i` (any leading spaces skipped). -1 when there is
 // no digit run there — an absent number is reported as absent, never defaulted to 0.
-cb_num_from = (s: string_view, start: i64) i64 {
+cb_num_from = (s: StringView, start: i64) i64 {
     n := len(s)
     i := start
     @while (i < n && s.at(i) == ' ') {
@@ -307,7 +307,7 @@ cb_num_from = (s: string_view, start: i64) i64 {
     }
     got.then({ v }, { 0 - 1 })
 }
-cb_num_after = (s: string_view, marker: string_view) i64 {
+cb_num_after = (s: StringView, marker: StringView) i64 {
     at_i := s.find(marker)
     (at_i < 0).then({
         return 0 - 1
@@ -316,7 +316,7 @@ cb_num_after = (s: string_view, marker: string_view) i64 {
 }
 // Read a `<int>.<frac> ms` stage clock as MICROSECONDS ("42.6 ms" -> 42600). The compiler prints one
 // decimal; up to three are consumed so a future widening does not silently truncate.
-cb_us_after = (s: string_view, marker: string_view) i64 {
+cb_us_after = (s: StringView, marker: StringView) i64 {
     at_i := s.find(marker)
     (at_i < 0).then({
         return 0 - 1
@@ -353,14 +353,14 @@ cb_us_after = (s: string_view, marker: string_view) i64 {
 }
 // ── running subprocesses ─────────────────────────────────────────────────────────────────────────
 // Run `cmd` for effect and throw its captured output away. Used for setup only — never timed.
-cb_quiet = (mp: MutPtr<Malloc>, cmd: string_view) void {
+cb_quiet = (mp: MutPtr<Malloc>, cmd: StringView) void {
     mp.run(cmd).match ({
         .Ok(o)  => free(o.stdout.view().ptr),
         .Err(e) => { },
     })
 }
 // Run `cmd` and scrape the integer after `marker` from its captured stdout.
-cb_scrape = (mp: MutPtr<Malloc>, cmd: string_view, marker: string_view) i64 {
+cb_scrape = (mp: MutPtr<Malloc>, cmd: StringView, marker: StringView) i64 {
     mp.run(cmd).match ({
         .Err(e) => 0 - 1,
         .Ok(o)  => {
@@ -371,7 +371,7 @@ cb_scrape = (mp: MutPtr<Malloc>, cmd: string_view, marker: string_view) i64 {
     })
 }
 // Run `cmd` and return its whole captured stdout — allocator-owned, the caller frees it.
-cb_capture = (mp: MutPtr<Malloc>, cmd: string_view) string_view {
+cb_capture = (mp: MutPtr<Malloc>, cmd: StringView) StringView {
     mp.run(cmd).match ({
         .Ok(o)  => o.stdout,
         .Err(e) => "",
@@ -379,7 +379,7 @@ cb_capture = (mp: MutPtr<Malloc>, cmd: string_view) string_view {
 }
 // ONE timed run: the clock brackets popen/exec/wait of the whole subprocess. The apparatus's own
 // share of that is measured, not assumed — see the `sh_floor` and `zen_startup` rows.
-cb_time_us = (mp: MutPtr<Malloc>, cmd: string_view) i64 {
+cb_time_us = (mp: MutPtr<Malloc>, cmd: StringView) i64 {
     t0 := mono_ns()
     mp.cb_quiet(cmd)
     (mono_ns() - t0) / 1000
@@ -387,7 +387,7 @@ cb_time_us = (mp: MutPtr<Malloc>, cmd: string_view) i64 {
 // ── command construction ─────────────────────────────────────────────────────────────────────────
 // Every child gets ZENC_CACHE_DIR pointed at this suite's scratch cache, so cache state is
 // deliberate and the developer's own cache is never touched.
-cb_timed_cmd = (mp: MutPtr<Malloc>, bare: string_view) string_view {
+cb_timed_cmd = (mp: MutPtr<Malloc>, bare: StringView) StringView {
     mp
         .sb()
         .s("ZENC_CACHE_DIR=")
@@ -400,7 +400,7 @@ cb_timed_cmd = (mp: MutPtr<Malloc>, bare: string_view) string_view {
 }
 // `/usr/bin/time -f '@RSS %M'` around the same command; the `grep` keeps our marker line and drops
 // whatever the compiler wrote to stderr, and `tail -1` keeps the outermost (last-exiting) process.
-cb_rss_cmd = (mp: MutPtr<Malloc>, bare: string_view) string_view {
+cb_rss_cmd = (mp: MutPtr<Malloc>, bare: StringView) StringView {
     mp
         .sb()
         .s("/usr/bin/time -f '@RSS %M' sh -c 'ZENC_CACHE_DIR=")
@@ -414,7 +414,7 @@ cb_rss_cmd = (mp: MutPtr<Malloc>, bare: string_view) string_view {
 // The shim prints ZALLOC_TOTAL on stderr, so stderr goes to the pipe and the child's stdout to
 // /dev/null (`2>&1 >/dev/null`, in that order). A forked cc inherits the preload and prints its own
 // total first; the zen process exits last, so `tail -1` is the zen count.
-cb_alloc_cmd = (mp: MutPtr<Malloc>, bare: string_view) string_view {
+cb_alloc_cmd = (mp: MutPtr<Malloc>, bare: StringView) StringView {
     mp
         .sb()
         .s("ZENC_CACHE_DIR=")
@@ -427,7 +427,7 @@ cb_alloc_cmd = (mp: MutPtr<Malloc>, bare: string_view) string_view {
         .done()
         .expect("bench-compiler: oom")
 }
-cb_free_str = (s: string_view) void {
+cb_free_str = (s: StringView) void {
     free(s.view().ptr)
     { }
 }
@@ -445,13 +445,7 @@ cb_wipe = (mp: MutPtr<Malloc>) void {
 // `reps` timed runs at the stated cache state, then ONE run for peak RSS and ONE for the allocation
 // count at that same state. Cold wipes the cache before EVERY measured run; warm wipes once and
 // primes with exactly one identical run, so "warm" means the same thing in every row.
-cb_measure = (
-    mp: MutPtr<Malloc>,
-    name: string_view,
-    bare: string_view,
-    cache: i64,
-    reps: i64,
-) void {
+cb_measure = (mp: MutPtr<Malloc>, name: StringView, bare: StringView, cache: i64, reps: i64) void {
     timed := mp.cb_timed_cmd(bare)
     buf := assert_nonnull(malloc(reps * sizeof(i64)))
     xs: [i64] := buf.slice(reps)
@@ -516,11 +510,11 @@ cb_stage_header = () i64 {
     cb_rtext("total", STAGE_W() - 1)
     put("\n").n
 }
-cb_stage_cell = (out: string_view, marker: string_view) i64 {
+cb_stage_cell = (out: StringView, marker: StringView) i64 {
     cb_num(out.cb_us_after(marker), STAGE_W() - 1)
     cb_sp(1)
 }
-cb_stage = (mp: MutPtr<Malloc>, name: string_view, bare: string_view, cache: i64) void {
+cb_stage = (mp: MutPtr<Malloc>, name: StringView, bare: StringView, cache: i64) void {
     (cache == CACHE_WARM()).match ({
         true  => {
             prime := mp.cb_timed_cmd(bare)
@@ -569,7 +563,7 @@ cb_count_cache = (mp: MutPtr<Malloc>) i64 {
     cb_free_str(cmd)
     v
 }
-cb_proof_line = (label: string_view, v: i64) void {
+cb_proof_line = (label: StringView, v: i64) void {
     put("# ")
         .s(label)
         .s(" = ")
@@ -577,7 +571,7 @@ cb_proof_line = (label: string_view, v: i64) void {
         .nl().n
     { }
 }
-cb_proof = (mp: MutPtr<Malloc>, hello_check: string_view) void {
+cb_proof = (mp: MutPtr<Malloc>, hello_check: StringView) void {
     cb_note("# proof the measured work is real (re-derived from the filesystem, this run)\n")
     // The WRAPPED command, exactly what the timed loop ran: a bare one would inherit the ambient
     // ZENC_CACHE_DIR and count entries in a dir it never wrote — which is how this block earned its
@@ -613,7 +607,7 @@ cb_proof = (mp: MutPtr<Malloc>, hello_check: string_view) void {
 }
 // ── setup ────────────────────────────────────────────────────────────────────────────────────────
 // A positive integer from the environment, or `dflt` when unset/unparseable/non-positive.
-cb_env_n = (name: string_view, dflt: i64) i64 {
+cb_env_n = (name: StringView, dflt: i64) i64 {
     e := getEnv(name)
     is_empty(e).match ({
         true  => dflt,
@@ -623,11 +617,11 @@ cb_env_n = (name: string_view, dflt: i64) i64 {
         }),
     })
 }
-cb_env_s = (name: string_view, dflt: string_view) string_view {
+cb_env_s = (name: StringView, dflt: StringView) StringView {
     e := getEnv(name)
     is_empty(e).then({ dflt }, { e })
 }
-cb_join = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
+cb_join = (mp: MutPtr<Malloc>, a: StringView, b: StringView) StringView {
     mp
         .sb()
         .s(a)
@@ -652,7 +646,7 @@ cb_setup_shim = (mp: MutPtr<Malloc>) void {
         cb_note("# WARNING: could not build scripts/alloc-fuzz/oom-shim.c — allocs column is -1\n")
     })
 }
-cb_setup = (mp: MutPtr<Malloc>) string_view {
+cb_setup = (mp: MutPtr<Malloc>) StringView {
     g_dir = cb_env_s("ZEN_BENCH_DIR", DEFAULT_DIR())
     g_cache = mp.cb_join(g_dir, "/cache")
     g_shim = mp.cb_join(g_dir, "/alloc-shim.so")

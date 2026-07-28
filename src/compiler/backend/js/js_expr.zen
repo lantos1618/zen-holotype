@@ -106,7 +106,7 @@ js_cell_w* = (t: Ty) i32 {
 // A slice's `.ptr` is either a JS array (a non-byte slice literal) or a MEM offset (everything that came
 // through an allocator). In the MEM case an element read must know the element's WIDTH, exactly as C's
 // `zen__idx(z, i, sizeof(T))` does: the floor used to read one BYTE at `ptr + i` whatever T was, so
-// every `[i64]`/`[string_view]`/`[i32]` slice backed by linear memory decoded to garbage — silently,
+// every `[i64]`/`[StringView]`/`[i32]` slice backed by linear memory decoded to garbage — silently,
 // since a byte is a perfectly good number. `js_elem_w` extends the cell-width codes with 11 = an
 // 8-byte POINTER (a str/RawPtr/fn element, read back as a MEM offset). Code 0 means "no linear-memory
 // representation" (a struct, enum, or nested slice element): the floor PANICS on such a read rather
@@ -126,10 +126,10 @@ js_elem_w* = (t: Ty) i32 {
     })
 }
 // the boxing width of a NAME: nonzero only when its address is taken AND its declared type is scalar.
-js_boxed_w* = (name: string_view) i32 {
+js_boxed_w* = (name: StringView) i32 {
     js_box_taken(name).then({ js_cell_w(vw_lookup(name)) }, { 0 })
 }
-js_var_ref = (s: String, a: MutPtr<Malloc>, name: string_view) String {
+js_var_ref = (s: String, a: MutPtr<Malloc>, name: StringView) String {
     w := js_boxed_w(name)
     (w == 0).match ({
         true  => s.jname(a, name),
@@ -147,13 +147,13 @@ js_var_ref = (s: String, a: MutPtr<Malloc>, name: string_view) String {
 // `.u` is genc's union-payload access baked by the checker's or_return / match-payload lowering
 // (`subj.u.Variant`). The JS enum has NO `u` level — it's a flat `{ tag, Variant }` — so `.u` erases
 // to identity: `subj.u.Ok` emits as `subj.Ok`. (`break_zk`/`continue_zk` are the loop-handler verbs.)
-js_loop_token = (s: String, a: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: string_view) String {
+js_loop_token = (s: String, a: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: StringView) String {
     load(obj).match ({
         .Var(v) => s.jname(a, v.name).gstr_append(a, suffix),
         _       => s.gstr_append(a, "__zen_invalid_loop_handler"),
     })
 }
-js_loop_throw = (s: String, a: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: string_view) String {
+js_loop_throw = (s: String, a: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: StringView) String {
     s.gstr_append(a, "(() => { throw ").js_loop_token(a, obj, suffix).gstr_append(a, "; })()")
 }
 js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String {
@@ -230,9 +230,7 @@ js_bin_core = (s: String, a: MutPtr<Malloc>, b: BinData, big: bool) String {
 // the width to truncate a bin RESULT to: only the arithmetic ops overflow a JS number (bitwise ops
 // self-coerce); `iw_bin` gives 0 for a comparison or unknown-width operand → no wrap.
 js_trunc_w = (b: BinData) i32 { js_leak_op(b.op).then({ iw_bin(b) }, { 0 }) }
-js_leak_op = (op: string_view) bool {
-    op == "+" || op == "-" || op == "*" || op == "/" || op == "%"
-}
+js_leak_op = (op: StringView) bool { op == "+" || op == "-" || op == "*" || op == "/" || op == "%" }
 // one operand of a binary op. In a 64-bit op, force BigInt: an integer literal renders as a BigInt literal
 // `Nn`; everything else is normalized by `__zr.big` (number -> BigInt; a BigInt passes through). Wrapping
 // unconditionally is what makes it robust — a boundary norms a small 64-bit value back to a `number`, so
@@ -249,7 +247,7 @@ js_bexpr = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, big: bool) String {
 }
 // the emitted operator: a 64-bit op keeps its BigInt spelling (`>>` on a BigInt is width-exact — logical
 // for a non-negative u64, arithmetic for i64); a ≤32-bit UNSIGNED `>>` becomes logical `>>>`; else as-is.
-js_bin_op = (b: BinData, big: bool) string_view {
+js_bin_op = (b: BinData, big: bool) StringView {
     big.then({
         return js_op(b.op)
     })
@@ -258,7 +256,7 @@ js_bin_op = (b: BinData, big: bool) string_view {
     })
     js_op(b.op)
 }
-js_op = (op: string_view) string_view {
+js_op = (op: StringView) StringView {
     (op == "==").match ({
         true  => "===",
         false => (op == "!=").then({ "!==" }, { op }),
@@ -319,7 +317,7 @@ iw_join = (l: i32, r: i32) i32 {
 }
 is_w64 = (w: i32) bool { w == 7 || w == 8 }
 is_uns_narrow = (w: i32) bool { w == 1 || w == 2 || w == 3 }
-js_is_cmp = (op: string_view) bool {
+js_is_cmp = (op: StringView) bool {
     op == "=="
         || op == "!="
         || op == "<"
@@ -490,7 +488,7 @@ js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
 // "the js backend lowers every intrinsic the C backend lowers" — checked on every emitted call
 // rather than by two hand-synced lists. is_intrinsic keeps its first-byte guard; this adds nothing
 // to the C path and only runs on names that already failed every js lowering above.
-js_unlowered_intrinsic = (fn: string_view) bool {
+js_unlowered_intrinsic = (fn: StringView) bool {
     fn.is_intrinsic()
         && fn != "malloc"
         && fn != "field_eq"
@@ -501,16 +499,16 @@ js_unlowered_intrinsic = (fn: string_view) bool {
 // emitter parks the offending name + call position here and the driver reports it (drvdiag
 // report_js_unsupported) BEFORE writing any .js. First escape wins — one root diagnostic, not one
 // per call site of the same unlowered intrinsic.
-js_no_unsupported = () string_view { "" }
+js_no_unsupported = () StringView { "" }
 js_unsupported_name := js_no_unsupported()
 js_unsupported_pos := 0
-js_unsupported_note = (fn: string_view, pos: i32) void {
+js_unsupported_note = (fn: StringView, pos: i32) void {
     is_empty(js_unsupported_name).then({
         js_unsupported_name = fn
         js_unsupported_pos = pos
     })
 }
-js_unsupported_get* = () string_view { js_unsupported_name }
+js_unsupported_get* = () StringView { js_unsupported_name }
 js_unsupported_pos_get* = () i32 { js_unsupported_pos }
 js_unsupported_reset* = () void {
     js_unsupported_name = js_no_unsupported()
@@ -544,7 +542,7 @@ js_sizeof = (s: String, a: MutPtr<Malloc>, c: CallData) String {
         false => s.js_size_refuse(a, c.pos),
     })
 }
-js_size_lit = (s: String, a: MutPtr<Malloc>, name: string_view, pos: i32) String {
+js_size_lit = (s: String, a: MutPtr<Malloc>, name: StringView, pos: i32) String {
     n := js_size_of_name(name)
     (n < 0).then({ s.js_size_refuse(a, pos) }, { s.jint(a, n) })
 }
@@ -851,7 +849,7 @@ int_width* = (t: Ty) i32 {
         _         => 0,
     })
 }
-iw_named = (n: string_view) i32 {
+iw_named = (n: StringView) i32 {
     (n == "u16").then({
         return 2
     })
@@ -958,14 +956,14 @@ vw_reset* = (a: MutPtr<Malloc>) void {
     vw_n = 0
 }
 vw_get = () [Param] { slice(vw_buf.ptr, vw_n) }
-vw_note* = (name: string_view, ty: Ty) void {
+vw_note* = (name: StringView, ty: Ty) void {
     (vw_n < vw_buf.len).then({
         vw_buf[vw_n] = param(name, ty)
         vw_n = vw_n + 1
     })
 }
 // last matching entry wins (an inner-scope shadow declared later overrides an earlier sibling).
-vw_lookup = (name: string_view) Ty {
+vw_lookup = (name: StringView) Ty {
     r := tvoid()
     vw_get().loop((h, i, p) {
         r = (p.name == name).then({ p.ty }, { r })

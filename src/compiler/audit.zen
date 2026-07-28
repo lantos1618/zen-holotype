@@ -31,7 +31,7 @@
 //     types are NOT tracked, so this can never miss a dispatch target (false-negative direction);
 //   * a live TYPE keeps every method of every impl block on it (trait dispatch may reach any), plus
 //     the traits those impls conform to;
-//   * impl blocks on BUILTIN receivers (string_view, u8, slices — no type decl to anchor) are roots;
+//   * impl blocks on BUILTIN receivers (StringView, u8, slices — no type decl to anchor) are roots;
 //   * BOTH the raw and the resolved forms of each decl are walked: raw carries the surface names
 //     (calls to inline templates disappear after inlining), resolved carries synthesized dispatch
 //     (materialized trait defaults, mono instances, lowered closures, `eq`->impl rewrites).
@@ -49,12 +49,12 @@
 // compiler.passes.ptrkind` exists to pull the trait's impl module into the closure, and the module
 // then spells only `t.ptr_kind_of()`, never `PtrKind` itself (see AudTM below).
 AudPair: {
-    bare: string_view,
-    full: string_view,
+    bare: StringView,
+    full: StringView,
 }    // method-name fanout: bare method/tail name -> hoisted/aliased decl name
 AudImplM: {
-    ty: string_view,
-    full: string_view,
+    ty: StringView,
+    full: StringView,
 }    // type-liveness fanout: impl'd type -> hoisted method (or trait) name
 AudCtx*: {
     mp: MutPtr<Malloc>,
@@ -67,7 +67,7 @@ AudCtx*: {
     pairs: [AudPair],
     implms: [AudImplM],
 }
-aud_decl_name* = (d: Decl) string_view {
+aud_decl_name* = (d: Decl) StringView {
     d.match ({
         .DFunc(f)      => f.name,
         .DForeign(f)   => f.name,
@@ -100,7 +100,7 @@ aud_decl_is_type = (d: Decl) bool {
     })
 }
 // the reporting kind word; "" = this decl kind is never reported (see the exemption list above).
-aud_decl_kind = (d: Decl) string_view {
+aud_decl_kind = (d: Decl) StringView {
     d.match ({
         .DFunc(f)      => "fn",
         .DStruct(sd)   => "struct",
@@ -123,7 +123,7 @@ aud_index* = (mp: MutPtr<Malloc>, ds: [Decl]) Map<i64> {
     m
 }
 // byte position AFTER the last `__` separator in `name`; -1 when it has none (or it leads).
-aud_tail_at* = (name: string_view) i64 {
+aud_tail_at* = (name: StringView) i64 {
     v: [u8] := name.view()
     best := 0 - 1
     i := 1
@@ -137,7 +137,7 @@ aud_tail_at* = (name: string_view) i64 {
 }
 // mark `name` live and (once) walk both its raw and resolved decls; a live TYPE also keeps every
 // impl-block method on it (aud_implms).
-aud_ref* = (ac: MutPtr<AudCtx>, name: string_view) void {
+aud_ref* = (ac: MutPtr<AudCtx>, name: StringView) void {
     ((is_empty(name) || ac.seen.has(name)) == false).then({
         one: i64 := 1
         ac.seen = ac.seen.put(ac.mp, name, one).expect("audit: oom")
@@ -156,7 +156,7 @@ aud_ref* = (ac: MutPtr<AudCtx>, name: string_view) void {
     })
 }
 // a METHOD-position name: the free fn `m`, plus every hoisted impl method / alias tail for `m`.
-aud_mref* = (ac: MutPtr<AudCtx>, m: string_view) void {
+aud_mref* = (ac: MutPtr<AudCtx>, m: StringView) void {
     ((is_empty(m) || ac.mseen.has(m)) == false).then({
         one: i64 := 1
         ac.mseen = ac.mseen.put(ac.mp, m, one).expect("audit: oom")
@@ -169,7 +169,7 @@ aud_mref* = (ac: MutPtr<AudCtx>, m: string_view) void {
     })
 }
 // type-liveness fanout: every impl-block method (and trait) recorded against `tyname`.
-aud_implms* = (ac: MutPtr<AudCtx>, tyname: string_view) void {
+aud_implms* = (ac: MutPtr<AudCtx>, tyname: StringView) void {
     ac.implms.loop((h, i, im) {
         (im.ty == tyname).then({
             ac.aud_ref(im.full)
@@ -372,7 +372,7 @@ aud_walk_expr = (ac: MutPtr<AudCtx>, e: Ptr<Expr>) void {
         _               => { },
     })
 }
-aud_join2 = (mp: MutPtr<Malloc>, a: string_view, b: string_view) string_view {
+aud_join2 = (mp: MutPtr<Malloc>, a: StringView, b: StringView) StringView {
     mp
         .gstr_string(32)
         .gstr_append(mp, a)
@@ -409,7 +409,7 @@ aud_td_idxs* = (mp: MutPtr<Malloc>, decls: [Decl]) [i64] {
     buf
 }
 // defaults of impl `im`'s trait: how many DTraitDefault decls share its trait name.
-aud_impl_dflts* = (decls: [Decl], tds: [i64], trname: string_view) i64 {
+aud_impl_dflts* = (decls: [Decl], tds: [i64], trname: StringView) i64 {
     n := 0
     tds.loop((h, j, ti) {
         decls[ti].match ({
@@ -534,7 +534,7 @@ aud_tables* = (mp: MutPtr<Malloc>, decls: [Decl]) AudTables {
 // trait `tr` is: every DImpl method under `tr`, every DTraitDefault of `tr`, and `tr`'s own
 // fn-typed struct fields.
 AudTM*: {
-    tr: string_view,
+    tr: StringView,
     mv: [u8],
 }
 aud_fnt_fields = (fs: [Field]) i64 {
@@ -570,7 +570,7 @@ aud_tm_count = (decls: [Decl]) i64 {
     })
     n
 }
-aud_tm_push_fields = (tms: [AudTM], k: i64, tr: string_view, fs: [Field]) i64 {
+aud_tm_push_fields = (tms: [AudTM], k: i64, tr: StringView, fs: [Field]) i64 {
     j := k
     fs.loop((h, i, f) {
         f.ty.match ({
@@ -619,7 +619,7 @@ aud_tms = (mp: MutPtr<Malloc>, decls: [Decl]) [AudTM] {
     tms
 }
 // the trait-method subset credited to imported name `name` (empty when `name` is not a trait).
-aud_tm_for = (mp: MutPtr<Malloc>, tms: [AudTM], name: string_view) [AudTM] {
+aud_tm_for = (mp: MutPtr<Malloc>, tms: [AudTM], name: StringView) [AudTM] {
     n := 0
     tms.loop((h, i, t) {
         (t.tr == name).then({
@@ -638,13 +638,13 @@ aud_tm_for = (mp: MutPtr<Malloc>, tms: [AudTM], name: string_view) [AudTM] {
 }
 // ── audit findings ────────────────────────────────────────────────────────────────────────────────
 AudFinding: {
-    path: string_view,
+    path: StringView,
     line: i64,
-    msg: string_view,
+    msg: StringView,
     dead: bool,
     clone: bool,
 }    // clone = a `warning[clone]` row: counted on its own line and EXEMPT from --strict (see aud_emit)
-aud_strcmp = (a: string_view, b: string_view) i64 {
+aud_strcmp = (a: StringView, b: StringView) i64 {
     av: [u8] := a.view()
     bv: [u8] := b.view()
     i := 0
@@ -692,7 +692,7 @@ aud_reportable = (d: Decl) bool {
         && nm.starts_with("impl_") == false
         && nm.starts_with("__") == false
 }
-aud_dead_msg = (mp: MutPtr<Malloc>, kind: string_view, nm: string_view) string_view {
+aud_dead_msg = (mp: MutPtr<Malloc>, kind: StringView, nm: StringView) StringView {
     mp
         .gstr_string(64)
         .gstr_append(mp, "warning[dead-code]: ")
@@ -704,10 +704,10 @@ aud_dead_msg = (mp: MutPtr<Malloc>, kind: string_view, nm: string_view) string_v
 }
 // ── unused-import scan (per original module source; tokenizer-disciplined) ────────────────────────
 AudImp: {
-    name: string_view,
+    name: StringView,
     nv: [u8],
     ms: [AudTM],
-    mod: string_view,
+    mod: StringView,
     pos: i32,
     alias: bool,
     used: bool,
@@ -822,7 +822,7 @@ aud_step = (ents: [AudImp], nents: i64, v: [u8], i0: i64) i64 {
     })
     i0 + 1
 }
-aud_imp_msg = (mp: MutPtr<Malloc>, en: AudImp) string_view {
+aud_imp_msg = (mp: MutPtr<Malloc>, en: AudImp) StringView {
     en.alias.match ({
         true  => mp
             .gstr_string(64)
@@ -1003,7 +1003,7 @@ aud_live_tails = (mp: MutPtr<Malloc>, c: AudCtx) Map<i64> {
 // is decl name `nm` unreached? — not live, with no live `__`-twin in either direction (suppress a
 // dead `f` when some live `*__f` twin exists, and a dead `alias__f` when its bare tail `f` is live;
 // false-negative direction).
-aud_unreached = (c: AudCtx, tails: Map<i64>, nm: string_view) bool {
+aud_unreached = (c: AudCtx, tails: Map<i64>, nm: StringView) bool {
     nta := nm.aud_tail_at()
     twin := tails.has(nm) || nta > 0 && c.seen.has(cstr(offset(nm, nta)))
     c.seen.has(nm) == false && twin == false
@@ -1012,7 +1012,7 @@ aud_unreached = (c: AudCtx, tails: Map<i64>, nm: string_view) bool {
 // Fingerprint every function over the AST (compiler.clones) and report any two that canonicalise to
 // the same tree. This is a hash bucket, not a comparison of every pair: O(n) over the program, so it
 // can run on every audit rather than as an occasional sweep.
-aud_clone_msg = (mp: MutPtr<Malloc>, nm: string_view, other: string_view) string_view {
+aud_clone_msg = (mp: MutPtr<Malloc>, nm: StringView, other: StringView) StringView {
     mp
         .gstr_string(96)
         .gstr_append(mp, "warning[clone]: fn '")
@@ -1024,7 +1024,7 @@ aud_clone_msg = (mp: MutPtr<Malloc>, nm: string_view, other: string_view) string
 }
 // hash -> the name that claimed it first. A second claimant is the finding.
 // hex of the fingerprint, because Map is string-keyed. 16 nibbles, no allocation beyond the key.
-aud_hash_key = (mp: MutPtr<Malloc>, h: i64) string_view {
+aud_hash_key = (mp: MutPtr<Malloc>, h: i64) StringView {
     s := mp.gstr_string(17)
     16.times((i) { s = s.gstr_push(mp, aud_hexd(h >> 60 - i * 4 & 15)) })
     s.gstr_finish(mp)
@@ -1035,14 +1035,14 @@ aud_clones = (
     mp: MutPtr<Malloc>,
     rp: ResolvedProgram,
     raw: [Decl],
-    path: string_view,
-    src: string_view,
+    path: StringView,
+    src: StringView,
     fb: [AudFinding],
     n0: i32,
 ) i32 {
     seedv: i64 := 0 - 1
     seen := of(mp, "", seedv).expect("audit: oom")
-    names := cbuf<string_view>(mp, raw.len + 8)
+    names := cbuf<StringView>(mp, raw.len + 8)
     n := n0
     k: i64 := 0
     raw.loop((h, i, d) {
@@ -1080,8 +1080,8 @@ aud_run* = (
     rp: ResolvedProgram,
     raw: [Decl],
     rdecls: [Decl],
-    path: string_view,
-    src: string_view,
+    path: StringView,
+    src: StringView,
     strict: bool,
 ) i32 {
     c := mp.aud_analyze(rp, raw, rdecls)
@@ -1172,12 +1172,12 @@ aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
 // not workspace programs.
 AudWsFiles: {
     mp: MutPtr<Malloc>,
-    fs: [string_view],
+    fs: [StringView],
     n: i64,
 }
-aud_ws_addf = (wf: MutPtr<AudWsFiles>, p: string_view) void {
+aud_ws_addf = (wf: MutPtr<AudWsFiles>, p: StringView) void {
     (wf.n >= wf.fs.len).then({
-        grown := cbuf<string_view>(wf.mp, wf.fs.len * 2)
+        grown := cbuf<StringView>(wf.mp, wf.fs.len * 2)
         wf.fs.loop((h, i, x) {
             grown[i] = x
         })
@@ -1186,7 +1186,7 @@ aud_ws_addf = (wf: MutPtr<AudWsFiles>, p: string_view) void {
     wf.fs[wf.n] = p
     wf.n = wf.n + 1
 }
-aud_join_path = (mp: MutPtr<Malloc>, dir: string_view, nm: string_view) string_view {
+aud_join_path = (mp: MutPtr<Malloc>, dir: StringView, nm: StringView) StringView {
     mp
         .gstr_string(64)
         .gstr_append(mp, dir)
@@ -1195,7 +1195,7 @@ aud_join_path = (mp: MutPtr<Malloc>, dir: string_view, nm: string_view) string_v
         .gstr_finish(mp)
 }
 // deterministic entry order regardless of readdir order.
-aud_sortp = (fs: [string_view], n: i64) void {
+aud_sortp = (fs: [StringView], n: i64) void {
     1.upto(n, (i) {
         x := fs[i]
         j := i - 1
@@ -1209,7 +1209,7 @@ aud_sortp = (fs: [string_view], n: i64) void {
 // `struct dirent`: the NUL-terminated entry name (d_name) at +19 on this ABI (matches std.sys.fs).
 AUD_DNAME := 19
 // recursively collect the `*.zen` files under `dir` (skipping dot-entries and `fixtures/` corpora).
-aud_walk_tree = (mp: MutPtr<Malloc>, dir: string_view, wf: MutPtr<AudWsFiles>) void {
+aud_walk_tree = (mp: MutPtr<Malloc>, dir: StringView, wf: MutPtr<AudWsFiles>) void {
     d := opendir(dir)
     (d == null_ptr() == false).then({
         e := readdir(d)
@@ -1231,7 +1231,7 @@ aud_walk_tree = (mp: MutPtr<Malloc>, dir: string_view, wf: MutPtr<AudWsFiles>) v
 }
 // cheap textual entry test: some line starts `main` then (spaces) `=` — no parse, so a broken
 // candidate costs nothing here (resolve/check vet the survivors).
-aud_has_main = (src: string_view) bool {
+aud_has_main = (src: StringView) bool {
     v: [u8] := src.view()
     found := false
     bol := true
@@ -1349,12 +1349,7 @@ aud_embed_lit = (
     m
 }
 // scan one module source for string literals, folding their import-shaped fragments into roots.
-aud_embed_src = (
-    ac: MutPtr<AudCtx>,
-    mp: MutPtr<Malloc>,
-    mods: Map<i64>,
-    src: string_view,
-) Map<i64> {
+aud_embed_src = (ac: MutPtr<AudCtx>, mp: MutPtr<Malloc>, mods: Map<i64>, src: StringView) Map<i64> {
     v: [u8] := src.view()
     m := mods
     n := v.len
@@ -1397,7 +1392,7 @@ aud_embed_src = (
 }
 // does table module id `id` (loader-normalized: `u/sub/mod2`, `std/io/file`) spell the embedded
 // dotted id (`sub.mod2`, `std.io.file`)?
-aud_id_matches = (id: string_view, dotted: string_view) bool {
+aud_id_matches = (id: StringView, dotted: StringView) bool {
     iv: [u8] := id.view()
     dv: [u8] := dotted.view()
     off := id.starts_with("u/").then({ 2 }, { 0 })
@@ -1449,7 +1444,7 @@ aud_embed_roots = (ac: MutPtr<AudCtx>, mp: MutPtr<Malloc>, rp: ResolvedProgram, 
 // `live` holds keys some entry reached, `idx` the keys already recorded as dead candidates, `mods`
 // the module paths whose import scan already ran.
 AudWsF: {
-    key: string_view,
+    key: StringView,
     f: AudFinding,
 }
 AudWs: {
@@ -1464,7 +1459,7 @@ AudWs: {
     entries: i64,
     skipped: i64,
 }
-aud_ws_key = (mp: MutPtr<Malloc>, path: string_view, line: i64, msg: string_view) string_view {
+aud_ws_key = (mp: MutPtr<Malloc>, path: StringView, line: i64, msg: StringView) StringView {
     mp
         .gstr_string(96)
         .gstr_append(mp, path)
@@ -1474,7 +1469,7 @@ aud_ws_key = (mp: MutPtr<Malloc>, path: string_view, line: i64, msg: string_view
         .gstr_append(mp, msg)
         .gstr_finish(mp)
 }
-aud_ws_push = (ws: MutPtr<AudWs>, key: string_view, f: AudFinding) void {
+aud_ws_push = (ws: MutPtr<AudWs>, key: StringView, f: AudFinding) void {
     (ws.nd >= ws.dfs.len).then({
         grown := cbuf<AudWsF>(ws.mp, ws.dfs.len * 2)
         ws.dfs.loop((h, i, x) {
@@ -1508,9 +1503,9 @@ AudPre: {
 }
 aud_pre_one = (
     mp: MutPtr<Malloc>,
-    root: string_view,
-    progdir: string_view,
-    id: string_view,
+    root: StringView,
+    progdir: StringView,
+    id: StringView,
     st: AudPre,
 ) AudPre {
     idn := mp.gstr_string(24).gstr_append(mp, id)
@@ -1533,8 +1528,8 @@ aud_pre_one = (
 }
 aud_pre_edges = (
     mp: MutPtr<Malloc>,
-    root: string_view,
-    progdir: string_view,
+    root: StringView,
+    progdir: StringView,
     edges: [ImportEdge],
     st: AudPre,
 ) AudPre {
@@ -1544,7 +1539,7 @@ aud_pre_edges = (
     })
     cur
 }
-aud_pre_ok = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: string_view) bool {
+aud_pre_ok = (mp: MutPtr<Malloc>, root: StringView, path: StringView, src: StringView) bool {
     st := mp.aud_pre_edges(root, mp.dirname(path), mp.edges_of(src), AudPre(
         seen: mp.gstr_string(64),
         ok: true,
@@ -1555,9 +1550,9 @@ aud_pre_ok = (mp: MutPtr<Malloc>, root: string_view, path: string_view, src: str
 // cross-entry union (live-anywhere wins) and scan each not-yet-seen module file's imports.
 aud_ws_entry = (
     mp: MutPtr<Malloc>,
-    root: string_view,
-    path: string_view,
-    src: string_view,
+    root: StringView,
+    path: StringView,
+    src: StringView,
     ws: MutPtr<AudWs>,
 ) void {
     one: i64 := 1
@@ -1615,11 +1610,11 @@ aud_ws_entry = (
         },
     })
 }
-audit_ws_cmd = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, strict: bool) i32 {
+audit_ws_cmd = (mp: MutPtr<Malloc>, root: StringView, dir: StringView, strict: bool) i32 {
     seedv: i64 := 0 - 1
     wfc := AudWsFiles(
         mp: mp,
-        fs: cbuf<string_view>(mp, 64),
+        fs: cbuf<StringView>(mp, 64),
         n: 0,
     )
     wf := wfc.addr()
@@ -1681,10 +1676,10 @@ audit_ws_cmd = (mp: MutPtr<Malloc>, root: string_view, dir: string_view, strict:
 // `zenc audit --workspace <dir> [--strict]` unions dead-code across every entry under <dir>.
 audit_cmd* = (
     mp: MutPtr<Malloc>,
-    root: string_view,
-    a2: string_view,
-    a3: string_view,
-    a4: string_view,
+    root: StringView,
+    a2: StringView,
+    a3: StringView,
+    a4: StringView,
 ) i32 {
     (a2 == "--workspace").then({
         (a3 == "").then({

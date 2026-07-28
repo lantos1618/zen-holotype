@@ -28,10 +28,10 @@
 // grants into the module-level cell below before resolving (see uregions_reset for the pattern);
 // the entry pragma is read from the entry SOURCE directly, so it folds into content-keyed caches
 // for free. ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly like error[private-name].
-ffi_no_grants = () string_view { "" }
+ffi_no_grants = () StringView { "" }
 ffi_grants := ffi_no_grants()
-ffi_grants_set* = (g: string_view) void { ffi_grants = g }
-ffi_grants_get* = () string_view { ffi_grants }
+ffi_grants_set* = (g: StringView) void { ffi_grants = g }
+ffi_grants_get* = () StringView { ffi_grants }
 // ── registered c_library genmods: an EXPLICIT (dotted id → generated path) map ───────────────────
 // build.zen's `exe.use(c_library(b, CLib(…)))` materializes a generated FFI module under the
 // project's .zen/gen/ dir; the driver stamps the mapping here (exactly like ffi_grants above)
@@ -39,13 +39,13 @@ ffi_grants_get* = () string_view { ffi_grants }
 // is unambiguous: registered genmod path, then the ordinary <progdir>/<segs>.zen mapping. Format:
 // one `<dotted-id> <path>` pair per line, newline-terminated.
 genmods := ffi_no_grants()
-genmods_set* = (g: string_view) void { genmods = g }
-genmods_get* = () string_view { genmods }
-gm_word_end = (s: string_view, p: i32) i32 {
+genmods_set* = (g: StringView) void { genmods = g }
+genmods_get* = () StringView { genmods }
+gm_word_end = (s: StringView, p: i32) i32 {
     (s.at(p) == 0 || s.at(p) == ' ' || s.at(p) == '\n').then({ p }, { s.gm_word_end(p + 1) })
 }
 // first `<dotted> <path>` registry line whose id matches → the path (own copy); "" when unregistered.
-gm_find = (a: MutPtr<Malloc>, g: string_view, p: i32, dotted: string_view) string_view {
+gm_find = (a: MutPtr<Malloc>, g: StringView, p: i32, dotted: StringView) StringView {
     (g.at(p) == 0).match ({
         true  => "",
         false => {
@@ -59,7 +59,7 @@ gm_find = (a: MutPtr<Malloc>, g: string_view, p: i32, dotted: string_view) strin
     })
 }
 // the registered-genmod path for a USER module id, or "" (std/compiler ids never match the map).
-genmod_lookup* = (a: MutPtr<Malloc>, id: String) string_view {
+genmod_lookup* = (a: MutPtr<Malloc>, id: String) StringView {
     id.id_is_user().match ({
         true  => {
             dotted := a.mappend_id_name(a.gstr_string(24), id).gstr_finish(a)
@@ -70,7 +70,7 @@ genmod_lookup* = (a: MutPtr<Malloc>, id: String) string_view {
 }
 ffi_delim = (b: u8) bool { b == ',' || b == ' ' || b == '\t' || b == '\r' }
 // s[p..e) == w, byte-exact (w is NUL-terminated; ids are short, recursion is bounded).
-ffi_span_eq = (s: string_view, p: i32, e: i32, w: string_view, j: i32) bool {
+ffi_span_eq = (s: StringView, p: i32, e: i32, w: StringView, j: i32) bool {
     (p + j == e).match ({
         true  => w.at(j) == 0,
         false => (w.at(j) == 0).match ({
@@ -79,11 +79,11 @@ ffi_span_eq = (s: string_view, p: i32, e: i32, w: string_view, j: i32) bool {
         }),
     })
 }
-ffi_token_end = (s: string_view, p: i32, e: i32) i32 {
+ffi_token_end = (s: StringView, p: i32, e: i32) i32 {
     (p >= e || ffi_delim(s.at(p))).then({ p }, { s.ffi_token_end(p + 1, e) })
 }
 // does the grant list s[p..e) contain the token `name`? (delimiters: comma / whitespace)
-ffi_list_has = (s: string_view, p: i32, e: i32, name: string_view) bool {
+ffi_list_has = (s: StringView, p: i32, e: i32, name: StringView) bool {
     (p >= e).match ({
         true  => false,
         false => ffi_delim(s.at(p)).match ({
@@ -95,12 +95,12 @@ ffi_list_has = (s: string_view, p: i32, e: i32, name: string_view) bool {
         }),
     })
 }
-ffi_line_end = (s: string_view, p: i32) i32 {
+ffi_line_end = (s: StringView, p: i32) i32 {
     (s.at(p) == 0 || s.at(p) == '\n').then({ p }, { s.ffi_line_end(p + 1) })
 }
-FFI_PRAGMA = () string_view { "//! ffi:" }
+FFI_PRAGMA = () StringView { "//! ffi:" }
 // does the ENTRY source carry a `//! ffi: modid, modid` pragma line granting `name`?
-ffi_pragma_has = (src: string_view, name: string_view) bool {
+ffi_pragma_has = (src: StringView, name: StringView) bool {
     found := false
     pos := 0
     bs: [u8] := src.view()
@@ -122,7 +122,7 @@ ffi_pragma_has = (src: string_view, name: string_view) bool {
     })
     found
 }
-ffi_skip_sp = (s: string_view, p: i32) i32 {
+ffi_skip_sp = (s: StringView, p: i32) i32 {
     (s.at(p) == ' ' || s.at(p) == '\t' || s.at(p) == '\n' || s.at(p) == '\r').match ({
         true  => s.ffi_skip_sp(p + 1),
         false => p,
@@ -130,7 +130,7 @@ ffi_skip_sp = (s: string_view, p: i32) i32 {
 }
 // a foreign FUNCTION decl reads `name[*] = (…` — the textual `foreign` scan flag alone also catches
 // module globals (`X := 5` has `=` and no `{`), which are NOT an FFI surface.
-ffi_foreign_fn = (src: string_view, sym: ProvidedSymbol) bool {
+ffi_foreign_fn = (src: StringView, sym: ProvidedSymbol) bool {
     sym.foreign.match ({
         true  => {
             p := (src.at(sym.next) == '*').then({ sym.next + 1 }, { sym.next })
@@ -140,19 +140,19 @@ ffi_foreign_fn = (src: string_view, sym: ProvidedSymbol) bool {
         false => false,
     })
 }
-ffi_dotted_id = (a: MutPtr<Malloc>, id: string_view) string_view {
+ffi_dotted_id = (a: MutPtr<Malloc>, id: StringView) StringView {
     a.mappend_mid_display(a.gstr_string(24), id).gstr_finish(a)
 }
-ffi_module_granted = (mainsrc: string_view, dotted: string_view) bool {
+ffi_module_granted = (mainsrc: StringView, dotted: StringView) bool {
     g := ffi_grants
     g.ffi_list_has(0, to_i32(g.view().len), dotted) || mainsrc.ffi_pragma_has(dotted)
 }
 ffi_fail = (
     a: MutPtr<Malloc>,
-    path: string_view,
-    src: string_view,
+    path: StringView,
+    src: StringView,
     sym: ProvidedSymbol,
-    dotted: string_view,
+    dotted: StringView,
     report: bool,
 ) i32 {
     line := src.res_line_of(sym.start)
@@ -185,7 +185,7 @@ ffi_fail = (
 enforce_ffi_grants* = (
     a: MutPtr<Malloc>,
     table: ModuleTable,
-    mainsrc: string_view,
+    mainsrc: StringView,
     report: bool,
 ) i32 {
     table.modules.loop((h, i, entry) {

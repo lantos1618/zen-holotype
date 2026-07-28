@@ -37,7 +37,7 @@ write_diag_kind = (c: i32) i32 {
 { arg_err_at } = compiler.validate.args
 { kv_at, kv_one } = compiler.validate.core
 // Does some `Type.impl(Trait)` exist? i.e. a DImpl naming this type + trait.
-type_impls_trait = (decls: [Decl], tyname: string_view, trname: string_view) bool {
+type_impls_trait = (decls: [Decl], tyname: StringView, trname: StringView) bool {
     found := false
     decls.loop((h, i, d) {
         found = d.match ({
@@ -54,7 +54,7 @@ type_impls_trait = (decls: [Decl], tyname: string_view, trname: string_view) boo
 // empty/unknown name, a caller tparam passed through (`tn` names an in-scope tparam — kvb_func_kind
 // binds them, so a tparam that shadows a global type name still defers), and generic residue
 // (recv_name of a Generic is its mangled instance name, matching no decl).
-bound_prim_name = (n: string_view) bool {
+bound_prim_name = (n: StringView) bool {
     n == "i8"
         || n == "i16"
         || n == "i32"
@@ -66,9 +66,9 @@ bound_prim_name = (n: string_view) bool {
         || n == "f32"
         || n == "f64"
         || n == "bool"
-        || n == "string_view"
+        || n == "StringView"
 }
-bound_targ_concrete = (env: Env, tn: string_view) bool {
+bound_targ_concrete = (env: Env, tn: StringView) bool {
     env.decls.is_struct(tn) || env.env_is_enum(tn) || tn.bound_prim_name()
 }
 bound_errs = (env: Env, f: Func, c: CallData) i32 {
@@ -152,7 +152,7 @@ expr_drops_return* = (e: Ptr<Expr>) i32 {
 }
 // Enum matches must be exhaustive and have no duplicate arms.
 no_variants = () [VariantDef] { slice(null_ptr(), 0) }
-enum_variants* = (decls: [Decl], ename: string_view) [VariantDef] {
+enum_variants* = (decls: [Decl], ename: StringView) [VariantDef] {
     found := no_variants()
     decls.loop((h, i, d) {
         found = d.match ({
@@ -164,7 +164,7 @@ enum_variants* = (decls: [Decl], ename: string_view) [VariantDef] {
     found
 }
 has_wildcard* = (arms: [ArmData]) bool { arms.slice_any((a) { a.variant == "_" }) }
-arm_covers = (arms: [ArmData], vname: string_view) bool {
+arm_covers = (arms: [ArmData], vname: StringView) bool {
     arms.slice_any((a) { a.variant == vname })
 }
 missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
@@ -176,14 +176,14 @@ missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
 }
 // the NAME of the first declared variant the arms do not cover, else "" — the uncovered
 // variant an exhaustiveness diagnostic names so the fix is a copy-pasteable `.Variant => …` arm.
-first_missing_variant* = (variants: [VariantDef], arms: [ArmData]) string_view {
+first_missing_variant* = (variants: [VariantDef], arms: [ArmData]) StringView {
     r := ""
     variants.loop((h, i, v) {
         r = (is_empty(r) && arms.arm_covers(v.name) == false).then({ v.name }, { r })
     })
     r
 }
-dup_before = (arms: [ArmData], vname: string_view, upto: i32) bool {
+dup_before = (arms: [ArmData], vname: StringView, upto: i32) bool {
     f := false
     arms.loop((h, i, a) {
         f = (i < upto && a.variant == vname).then({ true }, { f })
@@ -219,7 +219,7 @@ unreachable_arm_errs* = (arms: [ArmData]) i32 {
     n
 }
 // Reject constructors whose variant is not declared in the linked decl set.
-enum_declares = (decls: [Decl], vn: string_view) bool {
+enum_declares = (decls: [Decl], vn: StringView) bool {
     decls.slice_any((d) {
         d.match ({
             .DEnum(ed)   => ed.variants.arm_known(vn),
@@ -229,15 +229,15 @@ enum_declares = (decls: [Decl], vn: string_view) bool {
     })
 }
 // Every non-wildcard arm must name a declared variant.
-arm_known = (vs: [VariantDef], vname: string_view) bool { vs.slice_any((v) { v.name == vname }) }
+arm_known = (vs: [VariantDef], vname: StringView) bool { vs.slice_any((v) { v.name == vname }) }
 // Operand checking stays lenient for uninferable operands.
-is_arith_op = (op: string_view) bool {
+is_arith_op = (op: StringView) bool {
     b := op.at(0)
     b == '+' || b == '-' || b == '*' || b == '/' || b == '%'
 }
 // Strict comparisons require numeric operands; shifts are separate bitwise ops.
-is_cmp_op_v = (op: string_view) bool { op == "<" || op == ">" || op == "<=" || op == ">=" }
-is_bitwise_op = (op: string_view) bool {
+is_cmp_op_v = (op: StringView) bool { op == "<" || op == ">" || op == "<=" || op == ">=" }
+is_bitwise_op = (op: StringView) bool {
     op == "&" || op == "|" || op == "^" || op == "<<" || op == ">>"
 }
 is_bool_ty = (t: Ty) bool {
@@ -261,12 +261,12 @@ non_bool = (env: Env, e: Ptr<Expr>) bool {
     })
 }
 // f64 operators are strict: no implicit int<->float mixing.
-is_eq_op_v = (op: string_view) bool { op == "==" || op == "!=" }
-f64_op_ok = (op: string_view) bool {
+is_eq_op_v = (op: StringView) bool { op == "==" || op == "!=" }
+f64_op_ok = (op: StringView) bool {
     op == "+" || op == "-" || op == "*" || op == "/" || op == "/." || op.is_cmp_op_v()
 }
 f64_side_ok = (env: Env, t: Ty) bool { t.is_f64_ty() || env.unknown_ty(t) }
-f64_operand_err = (env: Env, op: string_view, lt: Ty, rt: Ty) i32 {
+f64_operand_err = (env: Env, op: StringView, lt: Ty, rt: Ty) i32 {
     (env.f64_side_ok(lt) && env.f64_side_ok(rt) && op.f64_op_ok()).then({ 0 }, { 1 })
 }
 // Any f64 side routes to the f64 surface; otherwise use integer numeric rules.
@@ -405,7 +405,7 @@ ty_has_void_targ = (t: Ty) bool {
 }
 tys_mention_void = (ts: [Ty]) bool { ts.slice_any((t) { t.is_void_ty() || t.ty_has_void_targ() }) }
 // rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
-impl_ty = (tyname: string_view) Ty {
+impl_ty = (tyname: StringView) Ty {
     (tyname == "i32").match ({
         true  => ti32(),
         false => (tyname == "i64").match ({
@@ -416,9 +416,9 @@ impl_ty = (tyname: string_view) Ty {
                     true  => tf64(),
                     false => (tyname == "bool").match ({
                         true  => tbool(),
-                        // Only `string_view` appears here: parse_impl canonicalizes every
+                        // Only `StringView` appears here: parse_impl canonicalizes every
                         // string-family impl receiver onto it, so `Self` in a string impl is a view.
-                        false => (tyname == "string_view").match ({
+                        false => (tyname == "StringView").match ({
                             true  => tstring_view(),
                             false => tnamed(tyname),
                         }),
@@ -428,7 +428,7 @@ impl_ty = (tyname: string_view) Ty {
         }),
     })
 }
-subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: string_view) Ty {
+subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: StringView) Ty {
     t.match ({
         .Named(n) => (n == "Self").then({ impl_ty(tyname) }, { t }),
         .Ptr(pd)  => tptr_k(a.tnode(a.subst_self(load(pd.pointee), tyname)), pd.kind),
@@ -437,7 +437,7 @@ subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: string_view) Ty {
     })
 }
 // each declared param type (Self→tyname) must equal the impl method's, left to right.
-params_match = (a: MutPtr<Malloc>, tps: [Ty], ips: [Param], tyname: string_view, i: i32) bool {
+params_match = (a: MutPtr<Malloc>, tps: [Ty], ips: [Param], tyname: StringView, i: i32) bool {
     (i == tps.len).match ({
         true  => true,
         false => a.subst_self(tps[i], tyname).ty_eq(ips[i].ty).match ({
@@ -447,7 +447,7 @@ params_match = (a: MutPtr<Malloc>, tps: [Ty], ips: [Param], tyname: string_view,
     })
 }
 // the impl method `f` matches the trait's FnT field `fd` (Self→tyname): same arity, param types, ret.
-sig_matches = (a: MutPtr<Malloc>, fd: FnTData, f: Func, tyname: string_view) bool {
+sig_matches = (a: MutPtr<Malloc>, fd: FnTData, f: Func, tyname: StringView) bool {
     (fd.params.len == f.params.len).match ({
         true  => a.params_match(fd.params, f.params, tyname, 0).match ({
             true  => a.subst_self(load(fd.ret), tyname).ty_eq(f.ret),
@@ -457,7 +457,7 @@ sig_matches = (a: MutPtr<Malloc>, fd: FnTData, f: Func, tyname: string_view) boo
     })
 }
 // does the trait `trname` declare a DEFAULT body for method `m`? (then an impl may OMIT it.)
-trait_has_default* = (decls: [Decl], trname: string_view, m: string_view) bool {
+trait_has_default* = (decls: [Decl], trname: StringView, m: StringView) bool {
     found := false
     decls.loop((h, i, d) {
         found = d.match ({
@@ -492,7 +492,7 @@ method_err* = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
 arms_first_pos* = (arms: [ArmData]) i32 { (arms.len == 0).then({ 0 }, { arms[0].pos }) }
 // ── trait-bound enrichment ─────────────────────────────────────────────────────────────────────
 // the method names an impl of (type `tn`, trait `tr`) provides; empty when no such impl exists.
-impl_methods_of* = (decls: [Decl], tn: string_view, tr: string_view) [Param] {
+impl_methods_of* = (decls: [Decl], tn: StringView, tr: StringView) [Param] {
     found := empty_params()
     decls.loop((h, i, d) {
         found = d.match ({
@@ -503,7 +503,7 @@ impl_methods_of* = (decls: [Decl], tn: string_view, tr: string_view) [Param] {
     found
 }
 // `/.` is the checker's internal float-division marker; a diagnostic must show the SOURCE operator `/`.
-op_display* = (op: string_view) string_view { (op == "/.").then({ "/" }, { op }) }
+op_display* = (op: StringView) StringView { (op == "/.").then({ "/" }, { op }) }
 // ── bounded-generics enforcement over RAW (pre-inline) decls ─────────────────────────────
 // Local generic calls are INLINED during resolve_module, so by check_module time the call site is
 // gone. This pass therefore runs on the raw, pre-inline decls (like the M5 escape check), walking
@@ -763,7 +763,7 @@ ka_args_check = (
 ka_call_core = (
     env: Env,
     tparams: [Param],
-    fn: string_view,
+    fn: StringView,
     args: [Expr],
     etargs: [Ty],
     pos: i32,
@@ -904,7 +904,7 @@ ka_inline_only = (f: Func) bool {
 // the sanctioned reflection WRAPPER (`field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }`) is not
 // recursion: its same-named inner call targets the INTRINSIC (name-intercepted in the inliner) and
 // never the wrapper itself.
-ka_reflect_name = (nm: string_view) bool {
+ka_reflect_name = (nm: StringView) bool {
     nm == "field_eq" || nm == "each_field" || nm == "zip_fields" || nm == "variant_name"
 }
 // ── reflect-return: a `return` under a loop in an inline-only REFLECT generic ─────────────────────
@@ -996,7 +996,7 @@ krr_loop_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_loop_ret_
 krw_refl_shape = (c: CallData) bool {
     c.fn == "each_field" && c.args.len == 2 || c.fn == "zip_fields" && c.args.len == 3
 }
-krw_value_param = (ps: [Param], nm: string_view) bool {
+krw_value_param = (ps: [Param], nm: StringView) bool {
     f := false
     ps.loop((h, i, p) {
         f = (i >= 1 && p.name == nm).then({ true }, { f })
@@ -1275,7 +1275,7 @@ ko_global_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalDa
 // coroutine}, std.web.dom) and verified against genc's lowering (cname_write):
 //   • builtin scalars   I32/I64/U8/F64/Bool → int32_t/int64_t/uint8_t/double/bool
 //   • width primitives  Named i8/i16/u16/u32/u64/f32 → the C fixed-width types
-//   • strings           string_view/string_cstr/string_literal → const char*
+//   • strings           StringView/StringCstr/StringLiteral → const char*
 //   • pointers          RawPtr/Ptr/MutPtr<T> ALL lower to a plain C `T*` (any pointee)
 //   • fn pointers       FnT lowers to the single `void(*)(void)` typedef — a plain C function
 //                       pointer (pthread_create's start routine, dom's event callbacks); its own
@@ -1283,7 +1283,7 @@ ko_global_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalDa
 //   • flat structs      a declared struct whose fields are ALL FFI-safe is a by-value C struct
 //                       (std.web.dom's opaque `{ handle: RawPtr<u8> }` interface handles)
 //   • generic instances a CONCRETE instantiation of a declared generic with FFI-safe args emits a
-//                       concrete monomorphized struct (std.web.dom returns Opt<Node>/Opt<string_view>)
+//                       concrete monomorphized struct (std.web.dom returns Opt<Node>/Opt<StringView>)
 //   • void              the return slot
 // REJECTED: type parameters on the decl (one foreign symbol cannot have per-instantiation ABI),
 // slices `[T]` (the zslice fat pointer is Zen-internal — no hand-written C in the tree receives one;
@@ -1326,10 +1326,10 @@ ffi_bad_generic = (f: Func) i32 { (f.tparams.len > 0).then({ 1 }, { 0 }) }
 // parameter/return type, in user spelling.
 ffi_param_msg = (
     a: MutPtr<Malloc>,
-    fname: string_view,
-    pname: string_view,
-    tname: string_view,
-) string_view {
+    fname: StringView,
+    pname: StringView,
+    tname: StringView,
+) StringView {
     a
         .gstr_string(96)
         .gstr_append(a, "foreign declaration `")
@@ -1341,7 +1341,7 @@ ffi_param_msg = (
         .gstr_append(a, "`")
         .gstr_finish(a)
 }
-ffi_ret_msg = (a: MutPtr<Malloc>, fname: string_view, tname: string_view) string_view {
+ffi_ret_msg = (a: MutPtr<Malloc>, fname: StringView, tname: StringView) StringView {
     a
         .gstr_string(96)
         .gstr_append(a, "foreign declaration `")
@@ -1351,7 +1351,7 @@ ffi_ret_msg = (a: MutPtr<Malloc>, fname: string_view, tname: string_view) string
         .gstr_append(a, "` is not FFI-safe")
         .gstr_finish(a)
 }
-ffi_generic_msg = (a: MutPtr<Malloc>, fname: string_view) string_view {
+ffi_generic_msg = (a: MutPtr<Malloc>, fname: StringView) StringView {
     a
         .gstr_string(96)
         .gstr_append(a, "foreign declaration `")
@@ -1359,7 +1359,7 @@ ffi_generic_msg = (a: MutPtr<Malloc>, fname: string_view) string_view {
         .gstr_append(a, "` declares type parameters — a foreign symbol binds ONE concrete C signature")
         .gstr_finish(a)
 }
-ffi_func_msg* = (a: MutPtr<Malloc>, env: Env, f: Func) string_view {
+ffi_func_msg* = (a: MutPtr<Malloc>, env: Env, f: Func) StringView {
     (f.tparams.len > 0).then({
         return a.ffi_generic_msg(f.name)
     })
@@ -1425,7 +1425,7 @@ kmisgen_kind = (init: Ptr<Expr>) i32 { KMISGEN().ksent_at(init.kparse_off()) }
 kcapacity_kind = (init: Ptr<Expr>) i32 { KCAPACITY().ksent_at(init.kparse_off()) }
 // the PARSE TAXONOMY sentinels (compiler.parse.sentinel_name): each names what the parser EXPECTED
 // where it failed, so the diagnostic says WHAT is wrong, not only where. All carry a real caret pos.
-taxonomy_kind = (nm: string_view, init: Ptr<Expr>) i32 {
+taxonomy_kind = (nm: StringView, init: Ptr<Expr>) i32 {
     (nm == "__unclosed_block").then({
         return KUNCLOSED().ksent_at(init.kparse_off())
     })
@@ -1447,7 +1447,7 @@ taxonomy_kind = (nm: string_view, init: Ptr<Expr>) i32 {
     0
 }
 // packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
-parse_sentinel_kind* = (nm: string_view, init: Ptr<Expr>) i32 {
+parse_sentinel_kind* = (nm: StringView, init: Ptr<Expr>) i32 {
     (nm == "__syntax_error").match ({
         true  => init.kparse_kind(),
         false => (nm == "__bad_binding").match ({
@@ -1511,7 +1511,7 @@ EnvKinds: {
     value_void_arm_err: (Self, Ty, Ptr<Expr>) i32,
     call_void_arm_errs: (Self, CallData) i32,
     exhaustive_err: (Self, MatchData) i32,
-    mkenum_err: (Self, string_view, string_view) i32,
+    mkenum_err: (Self, StringView, StringView) i32,
     enum_payload_err: (Self, MakeEnumData) i32,
     unknown_arm_errs: (Self, MatchData) i32,
     operand_err: (Self, BinData) i32,
@@ -1622,7 +1622,7 @@ Env.impl(EnvKinds, {
             false => (vs.missing_count(m.arms) > 0).then({ 1 }, { 0 }),
         })
     }
-    mkenum_err = (env: Env, ty: string_view, variant: string_view) i32 {
+    mkenum_err = (env: Env, ty: StringView, variant: StringView) i32 {
         // Unknown enum ctor: bare `.Variant` (empty ty) must name SOME declared variant; qualified
         // `Color.Purple` / `Result.Bogus` (non-empty ty) must name a variant OF THAT enum. Previously the
         // qualified branch always returned 0, so `Color.Purple` passed check and ICEd at cc.
@@ -1748,7 +1748,7 @@ Env.impl(EnvKinds, {
             false => {
                 // infer under the DECLARED type as expected context, exactly as resolve_let resolves the
                 // value — a generic call whose tparam sits only in return position (`a.nbuf("", n)` for a
-                // `[string_view]` let) binds it from the declaration, not from the weak literal fallback.
+                // `[StringView]` let) binds it from the declaration, not from the weak literal fallback.
                 vt := env.with_exp(l.ty).infer_expr(l.value)
                 lv := l.value.lit_slot_verdict(l.ty)
                 (lv >= 0).match ({

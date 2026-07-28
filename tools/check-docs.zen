@@ -30,13 +30,13 @@ EXPECTED := "./README.md\n./bootstrap/README.md\n./docs/ARCHITECTURE.md\n./docs/
 g_found := 0
 g_failed := 0
 // best-effort, like `println` over `out` — a checker that cannot write its complaint has nowhere to report that
-eputs = (s: string_view) i64 { eout(s).or(0) }
+eputs = (s: StringView) i64 { eout(s).or(0) }
 // ── the walk ──────────────────────────────────────────────────────────────────
 // `find . -name .git -prune -o -path './.claude' -prune -o -name '*.md' -type f -print`:
 // a directory named `.git` at any depth is pruned, the single path `./.claude` is pruned, and every
 // remaining regular file whose name ends in `.md` is reported as `./dir/name.md`.
-is_pruned = (name: string_view, full: string_view) bool { name == ".git" || full == "./.claude" }
-walk = (mp: MutPtr<Heap>, dir: string_view, acc: String) String {
+is_pruned = (name: StringView, full: StringView) bool { name == ".git" || full == "./.claude" }
+walk = (mp: MutPtr<Heap>, dir: StringView, acc: String) String {
     entries := mp.read_dir(dir).expect("check-docs: cannot read directory")
     acc2 := acc
     entries.loop((h, i, entry) {
@@ -66,24 +66,24 @@ close_at = (v: [u8], j: i64) i64 {
         false => (v[j] == ')').then({ j }, { v.close_at(j + 1) }),
     })
 }
-is_remote = (t: string_view) bool {
+is_remote = (t: StringView) bool {
     t.starts_with("http://") || t.starts_with("https://") || t.starts_with("mailto:")
 }
 // the target's own prefix tests run BEFORE the fragment is stripped (`case` then `%%#*` in the shell)
-is_skipped = (t: string_view) bool { t.len() == 0 || t.starts_with("#") || is_remote(t) }
+is_skipped = (t: StringView) bool { t.len() == 0 || t.starts_with("#") || is_remote(t) }
 // `${target%%#*}`
-strip_fragment = (mp: MutPtr<Heap>, t: string_view) string_view {
+strip_fragment = (mp: MutPtr<Heap>, t: StringView) StringView {
     cut := t.find("#")
     (cut < 0).then({ t }, { mp.substr_in(t, 0, cut).expect("check-docs: oom") })
 }
 // `${target#'<'}` then `${target%>}`
-strip_angles = (mp: MutPtr<Heap>, t: string_view) string_view {
+strip_angles = (mp: MutPtr<Heap>, t: StringView) StringView {
     lo := t.starts_with("<").then({ 1 }, { 0 })
     hi := t.ends_with(">").then({ t.len() - 1 }, { t.len() })
     (hi <= lo).then({ "" }, { mp.substr_in(t, lo, hi - lo).expect("check-docs: oom") })
 }
 // `dir=${file%/*}` — every path here starts `./`, so the slash always exists
-dir_of = (mp: MutPtr<Heap>, file: string_view) string_view {
+dir_of = (mp: MutPtr<Heap>, file: StringView) StringView {
     v := file.view()
     cut := 0 - 1
     v.loop((h, i, b) {
@@ -91,7 +91,7 @@ dir_of = (mp: MutPtr<Heap>, file: string_view) string_view {
     })
     (cut <= 0).then({ "." }, { mp.substr_in(file, 0, cut).expect("check-docs: oom") })
 }
-check_link = (mp: MutPtr<Heap>, file: string_view, raw: string_view) void {
+check_link = (mp: MutPtr<Heap>, file: StringView, raw: StringView) void {
     (is_skipped(raw) == false).then({
         target := mp.strip_angles(mp.strip_fragment(raw))
         full := mp.cat_in(mp.cat_in(mp.dir_of(file), "/"), target)
@@ -104,7 +104,7 @@ check_link = (mp: MutPtr<Heap>, file: string_view, raw: string_view) void {
         })
     })
 }
-scan_links = (mp: MutPtr<Heap>, file: string_view, src: string_view) void {
+scan_links = (mp: MutPtr<Heap>, file: StringView, src: StringView) void {
     v := src.view()
     v.loop((h, i, b) {
         (b == '(' && i > 0 && v[i - 1] == ']').then({
@@ -118,7 +118,7 @@ scan_links = (mp: MutPtr<Heap>, file: string_view, src: string_view) void {
 // An unreadable file is a HARD stop (status 2): the scan did not run, so it proves nothing. std has no
 // libc `exit` binding, so the stop is recorded in g_failed and every later file is skipped — the same
 // output and the same status the shell's `exit 2` produced.
-read_and_scan = (mp: MutPtr<Heap>, file: string_view) void {
+read_and_scan = (mp: MutPtr<Heap>, file: StringView) void {
     mp.contents_in(file).match ({
         .Ok(src) => mp.scan_links(file, src),
         .Err(e)  => {
@@ -128,12 +128,12 @@ read_and_scan = (mp: MutPtr<Heap>, file: string_view) void {
         },
     })
 }
-check_file = (mp: MutPtr<Heap>, file: string_view) void {
+check_file = (mp: MutPtr<Heap>, file: StringView) void {
     (g_failed == 2 == false).then({
         mp.read_and_scan(file)
     })
 }
-report_mismatch = (actual: string_view) void {
+report_mismatch = (actual: StringView) void {
     eputs("documentation inventory changed; consolidate it or update tools/check-docs.zen intentionally\n")
     eputs("expected:\n")
     eputs(EXPECTED)
@@ -147,7 +147,7 @@ main = () i32 {
     empty := mp.init(4096).expect("check-docs: oom")
     joined := mp.walk(".", empty).finish_in(mp).expect("check-docs: oom")
     files := mp.split_in(joined, '\n')
-    files.sort_by((x: string_view, y: string_view) bool { x.sv_lt(y) })
+    files.sort_by((x: StringView, y: StringView) bool { x.sv_lt(y) })
     actual := mp.join_in(files, "\n")
     (actual == EXPECTED).match ({
         true  => {

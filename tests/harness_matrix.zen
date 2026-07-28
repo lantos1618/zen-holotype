@@ -36,39 +36,39 @@
 // test, `@T@` its type, `@Z@` a well-typed zero of that type (used to fill the OTHER slots so the
 // program stays type-correct with the carrier removed).
 MxPos*: {
-    name: string_view,
-    body: string_view,
+    name: StringView,
+    body: StringView,
 }
 // one semantic rule, as a pair of interchangeable expressions of the SAME type: `bad` carries the
 // defect, `good` is the near-miss. Splicing either into any MxPos gives a well-typed program, so the
 // only variable across a row is the position. `hzero` fills the shared helper decls (which sit at
 // top level, where a probe parameter like `g` is not in scope, so it may differ from `zero`).
 MxRule*: {
-    name: string_view,
-    ty: string_view,
-    zero: string_view,
-    hzero: string_view,
-    prelude: string_view,
-    setup_bad: string_view,
-    bad: string_view,
-    setup_good: string_view,
-    good: string_view,
-    params: string_view,
+    name: StringView,
+    ty: StringView,
+    zero: StringView,
+    hzero: StringView,
+    prelude: StringView,
+    setup_bad: StringView,
+    bad: StringView,
+    setup_good: StringView,
+    good: StringView,
+    params: StringView,
 }
 // the STATEMENT family: rules whose defect is statement-shaped (a leaked `let`, a discarded
 // self-mutation, a write through a read-only pointer) and therefore cannot be spliced into an
 // expression slot. `body` carries one placeholder, `@S@`.
 MxStmtPos*: {
-    name: string_view,
-    body: string_view,
+    name: StringView,
+    body: StringView,
 }
 MxStmtRule*: {
-    name: string_view,
-    prelude: string_view,
-    setup: string_view,
-    bad: string_view,
-    good: string_view,
-    params: string_view,
+    name: StringView,
+    prelude: StringView,
+    setup: StringView,
+    bad: StringView,
+    good: StringView,
+    params: StringView,
 }
 // ── AXIS 1: POSITIONS ─────────────────────────────────────────────────────────
 // Derived from the `Expr` variants (Int/Byte/FloatLit/Var/Bin/Call/MethodCall/Cond/Member/Arrow/
@@ -213,7 +213,7 @@ mx_positions* = () [MxPos] {
 // the shared per-type helper decls every generated program carries: a one-arg sink (also the UFCS
 // receiver probe), a two-arg sink (second-argument position), a zero-arg FnT taker (lambda body), a
 // variadic taker, a one-field struct and a one-payload enum.
-mx_helpers = () string_view {
+mx_helpers = () StringView {
     "sink = (v: @T@) @T@ { v }\nsink2 = (a: @T@, b: @T@) @T@ { b }\napply = (f: () @T@) @T@ { f() }\nvsum = (xs: ...@T@) @T@ {\n    n: @T@ := @H@\n    xs.loop((h, i, e) {\n        n = e\n    })\n    n\n}\nBox: { v: @T@ }\nCell: N | S(@T@)\n"
 }
 // ── AXIS 2: RULES ─────────────────────────────────────────────────────────────
@@ -447,13 +447,13 @@ mx_stmt_rules* = () [MxStmtRule] {
     ]
 }
 // ── generation ────────────────────────────────────────────────────────────────
-// a string_view of a literal: zo_join infers its slice-literal element type from element 0, so a
+// a StringView of a literal: zo_join infers its slice-literal element type from element 0, so a
 // list that starts with a literal and continues with views needs the head widened explicitly.
-mx_sv = (s: string_view) string_view { s }
-mx_cell_name = (mp: MutPtr<Malloc>, rule: string_view, pos: string_view, is_bad: bool) string_view {
+mx_sv = (s: StringView) StringView { s }
+mx_cell_name = (mp: MutPtr<Malloc>, rule: StringView, pos: StringView, is_bad: bool) StringView {
     mp.zo_join([rule, "__", pos, is_bad.then({ "__bad" }, { "__good" })])
 }
-mx_expr_src = (mp: MutPtr<Malloc>, r: MxRule, p: MxPos, is_bad: bool) string_view {
+mx_expr_src = (mp: MutPtr<Malloc>, r: MxRule, p: MxPos, is_bad: bool) StringView {
     withe := mp.replace(p.body, "@E@", is_bad.then({ r.bad }, { r.good }))
     body := mp.replace(mp.replace(withe, "@T@", r.ty), "@Z@", r.zero)
     helpers := mp.replace(mp.replace(mx_helpers(), "@T@", r.ty), "@H@", r.hzero)
@@ -462,18 +462,18 @@ mx_expr_src = (mp: MutPtr<Malloc>, r: MxRule, p: MxPos, is_bad: bool) string_vie
         false => r.setup_good,
     }), body, "\n}\nmain = () i32 {\n    return 0\n}\n"])
 }
-mx_stmt_src = (mp: MutPtr<Malloc>, r: MxStmtRule, p: MxStmtPos, is_bad: bool) string_view {
+mx_stmt_src = (mp: MutPtr<Malloc>, r: MxStmtRule, p: MxStmtPos, is_bad: bool) StringView {
     stmt := mp.zo_join([mx_sv("\n"), is_bad.then({ r.bad }, { r.good }), "\n        sink(2)"])
     mp.zo_join([r.prelude, "sink = (v: i64) i64 { v }\nprobe = (", r.params, ") i64 {\n", r.setup, mp.replace(p.body, "@S@", stmt), "\n    0\n}\nmain = () i32 {\n    return 0\n}\n"])
 }
-mx_write = (mp: MutPtr<Malloc>, name: string_view, src: string_view) void {
+mx_write = (mp: MutPtr<Malloc>, name: StringView, src: StringView) void {
     save(mp.zo_path(mp.zo_join([mx_sv("mx/"), name, ".zen"])), src, len(src)).expect("harness: save")
 }
 // the per-run shell driver: check every generated case, record `<name> TAB <error[kind]>` (empty kind =
 // accepted), and diff the sorted result against columns 1-2 of the checked-in table. Batched 16-wide
 // because `zen check` is a subprocess per case and the matrix is ~900 of them. Exit status is diff's,
 // so `shell` returning 0 IS the assertion.
-mx_runner = () string_view {
+mx_runner = () StringView {
     "set -u\nZT=\"$1\"\nrm -rf \"$ZT/mxr\"\nmkdir -p \"$ZT/mxr\"\ni=0\nfor f in \"$ZT\"/mx/*.zen; do\n  n=$(basename \"$f\" .zen)\n  { k=$(./zen check \"$f\" 2>&1 | grep -o 'error\\[[a-z-]*\\]' | head -1); printf '%s\\t%s\\n' \"$n\" \"$k\" > \"$ZT/mxr/$n.txt\"; } &\n  i=$((i + 1))\n  [ $((i % 16)) -eq 0 ] && wait\ndone\nwait\ncat \"$ZT\"/mxr/*.txt | LC_ALL=C sort > \"$ZT/mx_actual.tsv\"\ncut -f1,2 tests/fixtures/matrix/expected.tsv | LC_ALL=C sort > \"$ZT/mx_expected.tsv\"\ndiff -u \"$ZT/mx_expected.tsv\" \"$ZT/mx_actual.tsv\" > \"$ZT/mx_diff.txt\" 2>&1\n"
 }
 harness_matrix_run* = () i32 {

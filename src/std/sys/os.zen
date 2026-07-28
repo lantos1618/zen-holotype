@@ -5,7 +5,7 @@
 // `main` chooses to read them.
 //
 // Two ways to read argv: point reads (`argc()` / `arg(i)`) for a quick scan, or `args(a)` for the
-// whole vector as one allocator-owned `[string_view]` you can index/iterate. The `has_flag` / `flag_str`
+// whole vector as one allocator-owned `[StringView]` you can index/iterate. The `has_flag` / `flag_str`
 // helpers are the minimal flag reader: exact-token match on argv, no allocation, no parser state —
 // the caller passes the full token (`os.has_flag("--verbose")`, `os.flag_str("--out")`). A typed
 // `parse(a, T)` / positional collector is a later wave (see the tail of this file).
@@ -14,12 +14,12 @@
 { Result, IoError } = std.core.result
 // bound to zenrt.c (bodyless = foreign).
 zen_argc = () i32
-zen_argv_at = (i: i32) string_view
+zen_argv_at = (i: i32) StringView
 // libc environment mutators (POSIX). getenv still funnels through std.c.libc; setenv/unsetenv are
 // declared foreign here, alongside argv's zenrt hooks. Both return 0 on success, -1 on failure —
 // `int setenv(const char *name, const char *value, int overwrite)`, `int unsetenv(const char *name)`.
-setenv = (name: string_view, value: string_view, overwrite: i32) i32
-unsetenv = (name: string_view) i32
+setenv = (name: StringView, value: StringView, overwrite: i32) i32
+unsetenv = (name: StringView) i32
 // clock id 1 = CLOCK_MONOTONIC, in milliseconds — the one clock reading available inside the
 // bootstrap closure (std.time.clock, which names the id, is not in the seed manifest and cannot be:
 // its cell comes from std.mem.raw, whose `of*` collides with std.collections.map's under the flat
@@ -51,37 +51,37 @@ clock_ms* = () i64 {
     })
 }
 argc* = () i32 { zen_argc() }    // os.argc()  — number of CLI args (incl. argv[0])
-arg* = (i: i32) string_view { zen_argv_at(i) }    // os.arg(i)  — the i-th arg ("" if out of range)
-getEnv* = (name: string_view) string_view {
+arg* = (i: i32) StringView { zen_argv_at(i) }    // os.arg(i)  — the i-th arg ("" if out of range)
+getEnv* = (name: StringView) StringView {
     p := getenv(name)
     (p == null_ptr()).then({ "" }, { cstr(p) })
 }    // "" if unset
 // set_env(name, value): create/overwrite the variable. unset_env(name): remove it. Both return
 // true on success (a clean bool over libc's 0/-1, the getEnv-style wrapping). The env owns the copy,
 // so `value` need not outlive the call.
-set_env* = (name: string_view, value: string_view) bool {
+set_env* = (name: StringView, value: StringView) bool {
     (setenv(name, value, 1) == 0).then({ true }, { false })
 }
-unset_env* = (name: string_view) bool { (unsetenv(name) == 0).then({ true }, { false }) }
+unset_env* = (name: StringView) bool { (unsetenv(name) == 0).then({ true }, { false }) }
 // copy each argv slot into `out[i..]` (the strings are argv-backed, stable for the process lifetime,
 // so this borrows them — no per-string copy, only the backbone is owned).
-fill_argv = (out: [string_view], i: i32, n: i32) void {
+fill_argv = (out: [StringView], i: i32, n: i32) void {
     (i < n).then({
         out[to_i64(i)] = zen_argv_at(i)
         fill_argv(out, i + 1, n)
     })
 }
-// args(a) — the whole command line as an allocator-owned `Result<[string_view], IoError>` (argv[0] = the
+// args(a) — the whole command line as an allocator-owned `Result<[StringView], IoError>` (argv[0] = the
 // program), so a caller indexes/iterates instead of threading argc()/arg(i) by hand. Allocation failure
 // stays in the value flow: `try_acquire` fails as `.Err(.NotFound)` rather than handing back a null
 // backbone that `fill_argv` would then write through (a write-to-null crash). On success the backbone is
 // `a`-owned; the strings borrow argv (process-lifetime stable). Fail-fast roots close with
 // `.expect("…")`; robust callers `.match` the `.Err`.
-args* = (a: Allocator) Result<[string_view], IoError> {
+args* = (a: Allocator) Result<[StringView], IoError> {
     n := zen_argc()
-    a.try_acquire(to_i64(n) * sizeof(string_view)).match ({
+    a.try_acquire(to_i64(n) * sizeof(StringView)).match ({
         .Ok(p)  => {
-            buf: [string_view] := slice(p, to_i64(n))
+            buf: [StringView] := slice(p, to_i64(n))
             fill_argv(buf, 0, n)
             .Ok(buf)
         },
@@ -89,22 +89,22 @@ args* = (a: Allocator) Result<[string_view], IoError> {
     })
 }
 // has_flag(tok): is the exact token `tok` present anywhere in argv? (e.g. os.has_flag("--verbose"))
-flag_at = (tok: string_view, i: i32) bool {
+flag_at = (tok: StringView, i: i32) bool {
     (i >= zen_argc()).match ({
         true  => false,
         false => (zen_argv_at(i) == tok).then({ true }, { flag_at(tok, i + 1) }),
     })
 }
-has_flag* = (tok: string_view) bool { flag_at(tok, 0) }
+has_flag* = (tok: StringView) bool { flag_at(tok, 0) }
 // flag_str(key): the argv token that follows the first exact `key` (the `--key value` shape), or ""
 // when `key` is absent or is the last token (no value follows). (e.g. os.flag_str("--out"))
-flag_str_at = (key: string_view, i: i32) string_view {
+flag_str_at = (key: StringView, i: i32) StringView {
     (i + 1 >= zen_argc()).match ({
         true  => "",
         false => (zen_argv_at(i) == key).then({ zen_argv_at(i + 1) }, { flag_str_at(key, i + 1) }),
     })
 }
-flag_str* = (key: string_view) string_view { flag_str_at(key, 0) }
-// FOLLOW-UP (later wave): `--key=value` splitting, a positional collector (`positionals(a) [string_view]`),
+flag_str* = (key: StringView) StringView { flag_str_at(key, 0) }
+// FOLLOW-UP (later wave): `--key=value` splitting, a positional collector (`positionals(a) [StringView]`),
 // and a typed `parse(a, T)` that fills a struct of flags. Kept out here to stay small — has_flag /
 // flag_str + args() cover `--flag`, `--key value`, and raw positionals via indexing today.

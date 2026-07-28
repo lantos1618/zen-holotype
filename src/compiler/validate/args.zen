@@ -18,8 +18,8 @@
 { kv_at } = compiler.validate.core
 { expr_fold_children } = compiler.ast.expr_children
 // A slice LITERAL may be element-wise coerced into an expected slice type while stored slice types
-// remain invariant. This accepts `["a", "b"]` at a `[string_view]` call slot without allowing a
-// named `[string_literal]` variable to flow to mutable `[string_view]` storage.
+// remain invariant. This accepts `["a", "b"]` at a `[StringView]` call slot without allowing a
+// named `[StringLiteral]` variable to flow to mutable `[StringView]` storage.
 slicelit_slot_verdict = (env: Env, ar: Expr, pty: Ty) i32 {
     ar.match ({
         .SliceLit(sd) => pty.match ({
@@ -64,7 +64,7 @@ arg_err_at* = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
 // impls in the module a required trait method fell through to undefined-name, hiding the real
 // story (the receiver type lacks an impl). Used only to pick the KIND and message of an already-
 // rejected call — it never flips accept/reject.
-fields_declare_method* = (fields: [Field], m: string_view) bool {
+fields_declare_method* = (fields: [Field], m: StringView) bool {
     found := false
     fields.loop((h, i, f) {
         found = (f.name == m).match ({
@@ -79,7 +79,7 @@ fields_declare_method* = (fields: [Field], m: string_view) bool {
 }
 // Struct literals check known fields and value fits; imported/generic literals stay lenient.
 no_fields* = () [Field] { slice(null_ptr(), 0) }
-struct_fields* = (decls: [Decl], name: string_view) [Field] {
+struct_fields* = (decls: [Decl], name: StringView) [Field] {
     found := no_fields()
     decls.loop((h, i, d) {
         found = d.match ({
@@ -89,7 +89,7 @@ struct_fields* = (decls: [Decl], name: string_view) [Field] {
     })
     found
 }
-has_field* = (fields: [Field], fname: string_view) bool {
+has_field* = (fields: [Field], fname: StringView) bool {
     fields.slice_any((fl) { fl.name == fname })
 }
 field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
@@ -151,7 +151,7 @@ gen_struct_init_errs = (
     })
     acc
 }
-inits_has = (inits: [FieldInit], name: string_view) bool {
+inits_has = (inits: [FieldInit], name: StringView) bool {
     inits.slice_any((fi) { fi.name == name })
 }    // is this field named in the literal?
 // Would zero-filling a value of type `t` produce a NULL non-null `Ptr` — directly, or TRANSITIVELY
@@ -227,7 +227,7 @@ makestruct_err* = (env: Env, m: MakeStructData) i32 {
         }),
     })
 }    // a generic literal: check concrete fields
-gen_base_of = (t: Ty) string_view {
+gen_base_of = (t: Ty) StringView {
     t.match ({
         .Generic(g) => g.name,    // unknown gen-struct (template residue) -> lenient
         // the BASE name of a generic-struct receiver (`Box` of `Box<i32>`), through a Ptr receiver.
@@ -263,7 +263,7 @@ is_fieldless_prim = (t: Ty) bool {
 // enum receiver — concrete (`DEnum`) or generic (`DGenEnum` like `Result<i32,IoError>`) — has no fields
 // at all: you reach its variants via `.match`, so any `.field` on one is rejected (closes census #58/#41,
 // where `r.len` on a Result passed `check` then ICE'd in cc with only a `.c` column).
-member_err* = (env: Env, obj: Ptr<Expr>, field: string_view) i32 {
+member_err* = (env: Env, obj: Ptr<Expr>, field: StringView) i32 {
     obj.is_lit_numeric().match ({
         true  => 1,
         false => {
@@ -307,7 +307,7 @@ sl_elem_fit* = (env: Env, ety: Ty, it: Expr) i32 {
 // generic-struct literal has no concrete field types here, so it under-rejects (honest, safe).
 // the owner moved by a struct-literal field init: the field's DECLARED type is `Own<T>` AND the init is a
 // bare `Own<T>` Var. The field-type gate is exactly what keeps a borrow field (`p: MutPtr<T>`) legal.
-struct_field_move_src* = (env: Env, fields: [Field], fi: FieldInit) string_view {
+struct_field_move_src* = (env: Env, fields: [Field], fi: FieldInit) StringView {
     (field_in(fields, fi.name).owner_base() == "Own").then({ env.own_moved_var(fi.value) }, { "" })
 }
 // kill every source owner moved into an Own field of a CONCRETE struct literal.
@@ -351,7 +351,7 @@ slicelit_elem_kills* = (
 // the bare-Var name of arg `i` (else ""). We only track frees/escapes of SIMPLE LOCALS — a field free
 // like `a.release(m.keys)` (vec/map grow constantly do this) is deliberately NOT tracked, so the
 // stdlib does not over-reject. Field-level liveness is out of scope for v1.
-arg_var_name* = (c: CallData, i: i32) string_view {
+arg_var_name* = (c: CallData, i: i32) StringView {
     (i < c.args.len).match ({
         true  => c.args[i].match ({
             .Var(v) => v.name,
@@ -557,7 +557,7 @@ ae_fn_returns_param = (
     a: MutPtr<Malloc>,
     decls: [Decl],
     idx: DeclIndex,
-    fn: string_view,
+    fn: StringView,
     pi: i32,
     depth: i32,
 ) bool {
@@ -577,7 +577,7 @@ ae_ret_yields = (
     a: MutPtr<Malloc>,
     decls: [Decl],
     idx: DeclIndex,
-    name: string_view,
+    name: StringView,
     e: Ptr<Expr>,
     depth: i32,
 ) bool {
@@ -607,7 +607,7 @@ ae_ret_inits = (
     decls: [Decl],
     idx: DeclIndex,
     inits: [FieldInit],
-    name: string_view,
+    name: StringView,
     depth: i32,
 ) bool { inits.slice_any((fi) { a.ae_ret_yields(decls, idx, name, fi.value, depth) }) }
 ae_ret_valarms = (
@@ -615,7 +615,7 @@ ae_ret_valarms = (
     decls: [Decl],
     idx: DeclIndex,
     arms: [ArmData],
-    name: string_view,
+    name: StringView,
     depth: i32,
 ) bool { arms.slice_any((ar) { a.ae_ret_yields(decls, idx, name, ar.body, depth) }) }
 ae_ret_items = (
@@ -623,7 +623,7 @@ ae_ret_items = (
     decls: [Decl],
     idx: DeclIndex,
     items: [Expr],
-    name: string_view,
+    name: StringView,
     depth: i32,
 ) bool { items.slice_any((it) { a.ae_ret_yields(decls, idx, name, it.addr(), depth) }) }
 ae_ret_blockval = (
@@ -631,7 +631,7 @@ ae_ret_blockval = (
     decls: [Decl],
     idx: DeclIndex,
     stmts: [Stmt],
-    name: string_view,
+    name: StringView,
     depth: i32,
 ) bool {
     (stmts.len == 0).match ({
@@ -649,7 +649,7 @@ ae_ret_call = (
     decls: [Decl],
     idx: DeclIndex,
     c: CallData,
-    name: string_view,
+    name: StringView,
     depth: i32,
 ) bool {
     (depth <= 1).match ({
@@ -675,7 +675,7 @@ ae_ret_body = (
     decls: [Decl],
     idx: DeclIndex,
     body: [Stmt],
-    name: string_view,
+    name: StringView,
     depth: i32,
 ) bool {
     f := body.slice_any((st) { a.ae_ret_stmt(decls, idx, st, name, depth) })
@@ -692,7 +692,7 @@ ae_ret_stmt = (
     decls: [Decl],
     idx: DeclIndex,
     st: Stmt,
-    name: string_view,
+    name: StringView,
     depth: i32,
 ) bool {
     st.match ({
@@ -709,7 +709,7 @@ ae_ret_estmt = (
     decls: [Decl],
     idx: DeclIndex,
     e: Ptr<Expr>,
-    name: string_view,
+    name: StringView,
     depth: i32,
 ) bool {
     load(e).match ({
@@ -726,7 +726,7 @@ ae_ret_stmtarms = (
     decls: [Decl],
     idx: DeclIndex,
     arms: [ArmData],
-    name: string_view,
+    name: StringView,
     depth: i32,
 ) bool {
     f := false
@@ -765,7 +765,7 @@ ae_call_escapes = (a: MutPtr<Malloc>, cx: AeCtx, c: CallData) bool {
 //   (3) the destination call-site arg must OUTLIVE this frame (rooted at a param/global, NOT a local — so
 //       `stash(local_box.addr(), x.addr())`, where both die together, is NOT flagged).
 // index of `rn` among `f`'s params when it names a POINTER param, else -1.
-ae_ptr_param_idx = (f: Func, rn: string_view) i32 {
+ae_ptr_param_idx = (f: Func, rn: StringView) i32 {
     di := 0 - 1
     (rn == "" == false).then({
         f.params.loop((h, i, p) {
@@ -783,7 +783,7 @@ ae_fn_store_dest = (
     a: MutPtr<Malloc>,
     decls: [Decl],
     idx: DeclIndex,
-    fn: string_view,
+    fn: StringView,
     si: i32,
     depth: i32,
 ) i32 {
@@ -798,7 +798,7 @@ ae_store_scan = (
     decls: [Decl],
     idx: DeclIndex,
     f: Func,
-    sname: string_view,
+    sname: StringView,
     si: i32,
     body: [Stmt],
     depth: i32,
@@ -822,7 +822,7 @@ ae_store_hit = (
     decls: [Decl],
     idx: DeclIndex,
     f: Func,
-    sname: string_view,
+    sname: StringView,
     si: i32,
     target: Ptr<Expr>,
     value: Ptr<Expr>,
@@ -1224,7 +1224,7 @@ sx_kv = (pos: i32, k: i32) i32 { (pos == 0).then({ 0 }, { kv_at(k, pos) }) }
 //              `spawn_handle` is std.concurrent.actor's cooperative constructor (renamed from `spawn`
 //              so it never flatten-collides with std.concurrent.thread's `spawn`); both spellings are
 //              recognized here so user fns simply NAMED `spawn` keep their guard.
-sx_named* = (fn: string_view, bare: string_view, qual: string_view) bool {
+sx_named* = (fn: StringView, bare: StringView, qual: StringView) bool {
     fn == bare || fn.ends_with(qual)
 }
 sx_call_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, c: CallData) i32 {
@@ -1335,10 +1335,10 @@ sx_func_kind* = (a: MutPtr<Malloc>, f: Func) i32 { a.sx_body_kind(a.dead_nil(), 
 // name the value in the message (teach-the-fix, spec §5): copy the identifier the caret points at
 // out of the source; a non-identifier anchor (a slice literal's first item, a synthesized pos)
 // falls back to a generic subject.
-sx_push_name = (s: String, a: MutPtr<Malloc>, src: string_view, pos: i32, i: i32, w: i32) String {
+sx_push_name = (s: String, a: MutPtr<Malloc>, src: StringView, pos: i32, i: i32, w: i32) String {
     (i >= w).then({ s }, { sx_push_name(s.gstr_push(a, src.at(pos + i)), a, src, pos, i + 1, w) })
 }
-sx_subject* = (a: MutPtr<Malloc>, src: string_view, pos: i32, w: i32) string_view {
+sx_subject* = (a: MutPtr<Malloc>, src: StringView, pos: i32, w: i32) StringView {
     src.at(pos).is_alnum().match ({
         true  => a
             .gstr_string(w + 4)
@@ -1349,7 +1349,7 @@ sx_subject* = (a: MutPtr<Malloc>, src: string_view, pos: i32, w: i32) string_vie
         false => "this value",
     })
 }
-sx_message* = (a: MutPtr<Malloc>, code: i32, subject: string_view) string_view {
+sx_message* = (a: MutPtr<Malloc>, code: i32, subject: StringView) StringView {
     tail := (code == KSCRATCHSEND()).match ({
         true  => " is spawner-local scratch memory (allocator/arena/stack storage) and crosses an actor boundary in this send; the sender frees it independently of the receiving actor (use-after-free)",
         false => " is spawner-local scratch memory (allocator/arena/stack storage) embedded in the initial actor state; the actor outlives the spawner's scratch (use-after-free)",
@@ -1366,7 +1366,7 @@ sx_message* = (a: MutPtr<Malloc>, code: i32, subject: string_view) string_view {
 // that is not one of them and genuinely outlives the sender: a copied value, or an `Arc` (a call
 // result, and refcounted so the receiver keeps it alive). `Rc` is NOT a remedy — the send-Rc pass
 // rejects it. docs/STATUS.md's scratch/shared row is the ledger entry for this gap.
-sx_hint* = (code: i32) string_view {
+sx_hint* = (code: i32) StringView {
     (code == KSCRATCHSEND()).match ({
         true  => "construct it inside the actor's `receive`, send a plain value, or share long-lived data as an `Arc` (`std.mem.arc.new_in`) — see the scratch/shared row in docs/STATUS.md",
         false => "construct it inside the actor's `receive`, pass plain values as the initial state, or share long-lived data as an `Arc` (`std.mem.arc.new_in`) — see the scratch/shared row in docs/STATUS.md",
