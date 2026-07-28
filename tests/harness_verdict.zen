@@ -3125,6 +3125,21 @@ harness_verdict_run* = () i32 {
             kind: "must-use",
         ),
         VerdictCase(
+            src: "Bx*: {\n    v: i32,\n    bump = (b: Bx, n: i32) Bx { Bx(v: b.v + n) },\n}\nmk = () i32 {\n    b := Bx(v: 1)\n    i := 0\n    @while (i < 3) {\n        i = i + 1\n        b.bump(5)\n    }\n    b.v\n}\ntest* = () i32 { 0 }\n",
+            should_pass: false,
+            kind: "must-use",
+        ),
+        VerdictCase(
+            src: "{ put } = std.text.fmt\nrun = (n: i64, f: (i64) void) void {\n    i := 0\n    @while (i < n) {\n        f(i)\n        i = i + 1\n    }\n}\ntest* = () i32 {\n    run(3, (x) { })\n    0\n}\n",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "{ put } = std.text.fmt\ntest* = () i32 {\n    f := (x: i64) void { }\n    i := 0\n    f(i)\n    0\n}\n",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
             src: "{ Resource, new_in } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\nsink = (v: i32) i32 { v }\nmk = () i32 {\n    al := halloc.gpa()\n    true.match ({\n        true  => {\n            o := al.addr().new_in(Resource(id: 7, slot: 0)).expect(\"m\")\n            sink(1)\n        },\n        false => { },\n    })\n    0\n}\ntest* = () i32 { 0 }\n",
             should_pass: false,
             kind: "leak",
@@ -3175,6 +3190,12 @@ harness_verdict_run* = () i32 {
     // `apply(() { x.addr() })` yields its value to a call site that throws it away (the lambda's
     // implicit trailing return is not a return from the enclosing function), and an owner released
     // inside the same lambda that created it is discharged.
+    // MUST-USE SHADOWING: a `@while`/`xs.loop` body runs for EFFECT, so its LAST statement is a
+    // discard like any other — `b.bump(5)` there used to slip through the "body's tail is its value"
+    // exemption. The mirror pair pins the false POSITIVE that exemption was masking: UFCS only
+    // desugars to a TOP-LEVEL name, so a call through a locally bound callee (an FnT param, or a
+    // local `f := (x: i64) void { … }`) is never a method call — it must check clean even when the
+    // import closure declares a value-mold method of the same name (std.text.fmt's `Printer.f`).
     // explicit by-name import wins: `{ at } = std.text.str` designates str's at(_, i64) as the
     // authoritative `at`, so `s.at(i64)` type-checks even though ascii's at(_, i32) is pulled into
     // the flat program (str imports ascii for is_space). Regression pin for UFCS dispatch precedence.
