@@ -13,10 +13,10 @@ halloc = std.mem.heap
 { read_all, read_all_bytes } = std.io.stdin
 { stdout_bufw_in, bufw_println, bufw_close } = std.io.bufwriter
 { argc, arg } = std.sys.os
-{ split, contains } = std.text.str
+{ split, contains, view } = std.text.str
 { compile, matches, error_name, regex_free } = std.text.regex
 { Result, IoError, name } = std.core.result
-{ Allocator } = std.mem.alloc
+{ Allocator, release_slice } = std.mem.alloc
 { formatln, arg_int, arg_str } = std.text.fmt
 // Count '\n' bytes — wc's line count (a final unterminated line is not counted, like `wc -l`).
 count_lines = (v: [u8]) i64 {
@@ -74,9 +74,20 @@ emit_hits = (a: Allocator, lines: [StringView], keep: (StringView) bool) i32 {
         },
     })
 }
+// `str.split` copies: every line is its own owned block, hanging off an owned backbone. `emit_hits`
+// only BORROWS them, so the caller that split is the one that frees — here, once printing is done.
+free_lines = (a: Allocator, lines: [StringView]) void {
+    lines.loop((h, i, line) {
+        a.release(line.view().ptr)
+    })
+    a.release_slice(lines)
+}
 // grep (substring) mode.
 run_grep = (a: Allocator, text: StringView, pat: StringView) i32 {
-    a.emit_hits(a.split(text, '\n'), (line) bool { line.contains(pat) })
+    lines := a.split(text, '\n')
+    rc := a.emit_hits(lines, (line) bool { line.contains(pat) })
+    a.free_lines(lines)
+    rc
 }
 // regex mode: compile `pat`, then print every line it matches anywhere.
 run_re = (a: Allocator, text: StringView, pat: StringView) i32 {
@@ -86,7 +97,9 @@ run_re = (a: Allocator, text: StringView, pat: StringView) i32 {
             2
         },
         .Ok(re) => {
-            rc := a.emit_hits(a.split(text, '\n'), (line) bool { re.matches(line) })
+            lines := a.split(text, '\n')
+            rc := a.emit_hits(lines, (line) bool { re.matches(line) })
+            a.free_lines(lines)
             re.regex_free(a)
             rc
         },
@@ -118,16 +131,26 @@ main = () i32 {
     searching := is_grep || is_re
     p := src_path(searching.then({ 3 }, { 1 }))
     pat := (argc() > 2).then({ arg(2) }, { "" })
+    // Both readers hand back ONE owned buffer — stdin's and the file's alike — and it is ours to
+    // release once the mode that reads it is done.
     searching.match ({
         true  => a.read_text(p).match ({
-            .Ok(t)  => is_grep.then({ a.run_grep(t, pat) }, { a.run_re(t, pat) }),
+            .Ok(t)  => {
+                rc := is_grep.then({ a.run_grep(t, pat) }, { a.run_re(t, pat) })
+                a.release(t.view().ptr)
+                rc
+            },
             .Err(e) => {
                 formatln("textproc: {}: {}", [arg_str(src_name(p)), arg_str(name(e))])
                 1
             },
         }),
         false => a.read_bytes(p).match ({
-            .Ok(v)  => run_wc(v),
+            .Ok(v)  => {
+                rc := run_wc(v)
+                a.release_slice(v)
+                rc
+            },
             .Err(e) => {
                 formatln("textproc: {}: {}", [arg_str(src_name(p)), arg_str(name(e))])
                 1

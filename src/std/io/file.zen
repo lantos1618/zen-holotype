@@ -39,6 +39,14 @@ out* = (s: StringView) Result<i64, IoError> {
 }
 // Writes length-tracked bytes to stdout without requiring a trailing NUL. Same Result contract as `out`.
 out_bytes* = (bytes: [u8]) Result<i64, IoError> { write_all(STDOUT, bytes.ptr, bytes.len, 0) }
+// Writes ONE byte — the byte-at-a-time emitter's sink. Spelling it `out_bytes([b])` at the call site
+// leaks: a slice literal handed to something that reads `.ptr` is heap-promoted (compiler.backend.c's
+// gen_slicelit) and owned by nobody, so it costs a block per byte written. A view over a local costs
+// nothing, and keeping it HERE keeps the raw-pointer step out of the callers.
+out_byte* = (b: u8) Result<i64, IoError> {
+    v := b
+    write_all(STDOUT, slice(v.addr(), 1).ptr, 1, 0)
+}
 // The stderr pair — same Result contract as `out`/`out_bytes`.
 eout* = (s: StringView) Result<i64, IoError> {
     v := s.view()

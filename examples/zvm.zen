@@ -9,6 +9,7 @@
 // Every failure — a bad mnemonic, an undefined label, a divide by zero, a stack
 // underflow — is a value carried back to `main`, never a panic.
 halloc = std.mem.heap
+arena = std.mem.arena
 vec = std.collections.vec
 maps = std.collections.map
 { Vec } = std.collections.vec
@@ -18,7 +19,7 @@ maps = std.collections.map
 { println, formatln, arg_int, arg_str } = std.text.fmt
 { split, words, trim, substr, find, len, at, to_lower, try_parse_int } = std.text.str
 { alloc_buf, sub } = std.core.slice
-{ out_bytes, contents } = std.io.file
+{ out_byte, contents } = std.io.file
 { argc, arg } = std.sys.os
 // ── instruction set ───────────────────────────────────────────────────────────────────
 // Payload-free so `variant_name()` can spell each one back out for the disassembler.
@@ -667,8 +668,9 @@ vm_print = (v: Vm) Result<Vm, VmError> {
 }
 vm_emit = (v: Vm) Result<Vm, VmError> {
     o := v.vm_take1().or_return()
-    b: [u8] := [o.x.to_u8()]
-    out_bytes(b).or(0)
+    // `out_byte`, not `out_bytes([b])`: a slice literal handed to a `.ptr` reader is heap-promoted
+    // and then owned by nobody, which cost one leaked block per byte emitted.
+    out_byte(o.x.to_u8()).or(0)
     .Ok(o.vm)
 }
 vm_dup = (v: Vm) Result<Vm, VmError> {
@@ -776,14 +778,22 @@ Machine*: {
     calls: [i64],
     ticks: [i64],
 }
+// `alloc_buf` reads its `like` argument for nothing but the element type, and a slice literal
+// written inline as a borrowed call argument gets stack storage — binding `[0]` to a local first
+// would heap-promote it into a block nobody owns.
 machine_new = (a: Allocator) Machine {
-    z: [i64] := [0]
     Machine(
-        stack: a.alloc_buf(256, z).expect("zvm: oom"),
-        locals: a.alloc_buf(1024, z).expect("zvm: oom"),
-        calls: a.alloc_buf(512, z).expect("zvm: oom"),
-        ticks: a.alloc_buf(4096, z).expect("zvm: oom"),
+        stack: a.alloc_buf(256, [0.to_i64()]).expect("zvm: oom"),
+        locals: a.alloc_buf(1024, [0.to_i64()]).expect("zvm: oom"),
+        calls: a.alloc_buf(512, [0.to_i64()]).expect("zvm: oom"),
+        ticks: a.alloc_buf(4096, [0.to_i64()]).expect("zvm: oom"),
     )
+}
+machine_free = (a: Allocator, m: Machine) void {
+    a.release(m.stack.ptr)
+    a.release(m.locals.ptr)
+    a.release(m.calls.ptr)
+    a.release(m.ticks.ptr)
 }
 vm_error_print = (e: VmError, code: [Instr]) i64 {
     src := (e.pc >= 0 && e.pc < code.len).then({ code[e.pc].line }, { 0 })
@@ -956,10 +966,13 @@ self_test = (a: Allocator, m: Machine) i32 {
     })
     0
 }
-main = () i32 {
-    heap := halloc.gpa()
-    a := heap.addr()
-    m := a.machine_new()
+// Everything a run allocates — the source text, one NUL-terminated copy per line and per token,
+// the row and instruction vectors, the label table — is alive until the run ends and dead the
+// moment it does, and the copies alias each other besides, so `main` bump-allocates the whole run
+// out of one arena and hands it back in a single call. Like the operand stack and the call stack,
+// its size is a fixed budget: scratch runs about fifteen bytes per byte of assembly.
+SCRATCH := 1048576
+run_mode = (a: Allocator, m: Machine) i32 {
     mode := (argc() > 1).then({ arg(1) }, { "" })
     (mode == "").then({
         formatln("usage: zvm [-d] FILE.asm | zvm -t", [])
@@ -992,4 +1005,16 @@ main = () i32 {
             false => a.execute(m, src),
         }),
     })
+}
+// Zen has no `defer`, so every early exit lives inside `run_mode` and the one path out of `main`
+// carries the whole teardown.
+main = () i32 {
+    heap := halloc.gpa()
+    h := heap.addr()
+    m := h.machine_new()
+    scratch := arena.make_in(h, SCRATCH).expect("zvm: oom")
+    code := scratch.addr().run_mode(m)
+    h.machine_free(m)
+    scratch.addr().free_in(h)
+    code
 }

@@ -10,13 +10,18 @@
 //   p.send(fetcher, http_fetch("http://127.0.0.1:8080/", me.ref_of(p)))
 //   // ... the reply arrives at `me` as HttpReplyMsg.Done(HttpReply(status, body))
 //
-// The reply body is heap-owned (gpa) and lives for the program — a per-actor arena is the
-// tracked upgrade. Streaming is not offered yet: `http_get` buffers the whole response; a
-// chunk-per-message stream would hand the fetcher the TcpConn and ride recv_into (future slice).
+// Both strings that cross an actor boundary here are heap-owned (gpa) and have ONE owner each: the
+// requester owns the `url` it sends (the fetcher only reads it, and only until it replies), and the
+// requester owns the `body` it is replied with (see `HttpReply`). Streaming is not offered yet:
+// `http_get` buffers the whole response; a chunk-per-message stream would hand the fetcher the
+// TcpConn and ride recv_into (future slice).
 { ActorRef } = std.concurrent.pool
 { Context, Receiver, dispatch, ref_send_msg } = std.concurrent.pool_actor
 pa = std.concurrent.pool_actor
-{ http_get, http_error_name } = std.net.http
+{ http_get, http_error_name, response_free } = std.net.http
+{ Allocator } = std.mem.alloc
+{ expect } = std.core.result
+{ substr, view } = std.text.str
 { gpa } = std.mem.heap
 // an order: fetch this URL, reply to this address (both fields are sendable).
 HttpFetch*: {
@@ -25,13 +30,17 @@ HttpFetch*: {
 }
 HttpFetchMsg*: Fetch(HttpFetch)
 // the outcome: status + body text. A request that failed outright is status 0 with the
-// HttpError's name as the body.
+// HttpError's name as the body. `body` is ALWAYS a fresh heap copy, on both outcomes — the Response
+// it was parsed out of dies with the turn that made it — so the RECEIVER owns it and releases it
+// (`a.release(rep.body.view().ptr)`) once it has read what it needs.
 HttpReply*: {
     status: i64,
     body: StringView,
 }
 HttpReplyMsg*: Done(HttpReply)
-// message constructor — callers never write a module-qualified enum-variant literal.
+// message constructor — callers never write a module-qualified enum-variant literal. The SENDER keeps
+// ownership of `url`: the fetcher only reads it, so an allocated one is the sender's to release once
+// the reply is in (a literal, of course, is nobody's).
 http_fetch* = (url: StringView, reply_to: ActorRef) HttpFetchMsg {
     .Fetch(HttpFetch(
         url: url,
@@ -46,6 +55,11 @@ HttpFetcher*: {
     fetches: i64,
     dropped: i64,
 }
+// the one shape a reply body ever has: an owned copy. A parsed body dies with its Response and an
+// error name is a literal — copying both means the receiver frees `body` without asking which it got.
+reply_text = (a: Allocator, s: StringView) StringView {
+    a.substr(s, 0, s.view().len).expect("http_actor: oom")
+}
 // Deliver one reply, or TALLY the loss. A reply send is a real send: it returns `.Err(.MailboxFull)`
 // when the requester's mailbox is full, and dropping that Result silently leaves the requester waiting
 // for a reply that will never come. A behaviour has no caller to propagate to (`receive` returns void)
@@ -53,10 +67,13 @@ HttpFetcher*: {
 // recorded as state instead: `f.dropped` mirrors the pool's own `pool_dropped` dead-letter counter, one
 // scope down, and is readable through `pa.actor_state(h).dropped`. The pool tallies the same drop, so
 // the loss is observable per-fetcher AND per-pool, never invisible.
-reply_or_drop = (f: MutPtr<HttpFetcher>, req: HttpFetch, rep: HttpReply) void {
+reply_or_drop = (f: MutPtr<HttpFetcher>, a: Allocator, req: HttpFetch, rep: HttpReply) void {
     req.reply_to.ref_send_msg(HttpReplyMsg.Done(rep)).match ({
         .Ok(_)  => { },
         .Err(_) => {
+            // the body was copied FOR a requester that never got it, so it has no new owner —
+            // without this the dead-letter path leaks one body per drop.
+            a.release(rep.body.view().ptr)
             f.dropped = f.dropped + 1
         },
     })
@@ -69,13 +86,19 @@ HttpFetcher.impl(Receiver, {
                 h := gpa()
                 a := h.addr()
                 a.http_get(req.url).match ({
-                    .Ok(r)  => f.reply_or_drop(req, HttpReply(
-                        status: to_i64(r.status),
-                        body: r.body,
-                    )),
-                    .Err(e) => f.reply_or_drop(req, HttpReply(
+                    .Ok(r)  => {
+                        // copy the body OUT before the Response goes back: the reply outlives this
+                        // turn, the buffers it was parsed into do not.
+                        rep := HttpReply(
+                            status: to_i64(r.status),
+                            body: a.reply_text(r.body),
+                        )
+                        a.response_free(r)
+                        f.reply_or_drop(a, req, rep)
+                    },
+                    .Err(e) => f.reply_or_drop(a, req, HttpReply(
                         status: 0,
-                        body: http_error_name(e),
+                        body: a.reply_text(http_error_name(e)),
                     )),
                 })
             },
