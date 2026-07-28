@@ -128,18 +128,26 @@ CamelCase rename to `StringLiteral`/`StringView` remains ahead.
 
 ### Two language changes gate the missing rows
 
-**1. Slices need a mutability bit.** `Ty` spells pointers as `Ptr` / `MutPtr` / `RawPtr`, but
-slices are `Slice(elem)` with no read/write distinction — so every `[T]` is writable. That is why
-this compiles and then segfaults:
+**1. Slices need a mutability bit.** DONE. Slices now carry the same kind tag pointers do:
+`Slice<T>` is the read-only window, `MutSlice<T>` the writable one, and `[T]` is the sugar for
+`MutSlice<T>`. Both are the same `{ptr, len}` layout. `.view()` propagates: a window over a
+`string_literal`/`string_cstr` is a `Slice<T>`, so this is now `error[slice-write]` at check time
+instead of a segfault:
 
 ```zen
 s: string_cstr := "hello"
-v: [u8] := s.view()      // .view() launders const away
-v[0] = 'H'               // writes into .rodata
+v := s.view()            // Slice<u8> — a read-only window
+v[0] = 'H'               // error[slice-write]: cannot write through a read-only `Slice<T>`
 ```
 
-`zen check` accepts it. Until a slice can be immutable, `StringConst` and `StringFixed` cannot be
-told apart from `StringView`, and immutability has nowhere to live once you take a view.
+The default stayed on `[T]` = writable, measured: making `[T]` read-only broke 233 write sites in
+73 files, while making views-of-immutable read-only broke 5. Flipping it later is one line
+(`k_slice_dflt` in compiler.genc) now that both spellings exist.
+
+Immutability now has somewhere to live once you take a view, which is what `StringConst` and
+`StringFixed` needed. What is still missing for them is a type that says "owned, writable bytes":
+`string_cstr` today covers BOTH `.rodata` literals and heap blocks from `sb().done()`, so a view of
+one is conservatively read-only while a view of a plain `string_view` stays writable.
 
 **2. The allocator decision.** `s.freeze()` and `s.drop()` taking no argument require the
 container to carry its allocator. Today the rule is: **carry the allocator and you give up

@@ -6,12 +6,13 @@
   GenericData, MakeEnumData, TagData, LoopData, GenEnumDecl, GenStructDecl } = compiler.ast.ast_types
 { cbuf, vref, cond, call_at, call_full, slett, sexpr, block, stmts_diverge, fnt_from_func_in,
   fntype, subst_ty_in, no_tys, expr_null, tgeneric, ti32, ti64, tu8, tf64, tbool, tstring_cstr,
-  tstring_literal, tnamed, tnode, tptr, tptr_k, tslice, tvoid, k_ptr, k_mut_ptr, k_raw_ptr,
-  gstr_string, gstr_push, gstr_append, gstr_finish, acquire_or_die, acquire_or_die } = compiler.genc
+  tstring_literal, tnamed, tnode, tptr, tptr_k, tslice, tslice_k, tvoid, k_ptr, k_mut_ptr,
+  k_raw_ptr, gstr_string, gstr_push, gstr_append, gstr_finish, acquire_or_die, acquire_or_die } = compiler.genc
 { mangle_str_in, impl_cname_in } = compiler.mangle
 { Malloc } = std.mem.alloc
 { exports_get, alias_prefixes_get, module_sigs_get } = compiler.parse
 { expect } = std.core.result
+{ expr_fold_children } = compiler.ast.expr_children
 { view, is_empty, ends_with } = std.text.str
 { String } = std.text.string
 { at, is_alnum } = std.text.ascii
@@ -1075,7 +1076,7 @@ ty_is_vec = (g: GenericData) bool { g.name == "Vec" || g.name.ends_with("__Vec")
 // over a Vec binds T from the receiver's generic param, not void.
 elem_of* = (t: Ty) Ty {
     t.match ({
-        .Slice(e)   => load(e),
+        .Slice(e)   => load(e.pointee),
         .Generic(g) => (g.ty_is_vec() && g.args.len > 0).then({ g.args[0] }, { tvoid() }),
         _           => tvoid(),
     })
@@ -1659,11 +1660,69 @@ gen_call_ret = (env: Env, c: CallData) Ty {
     rty0 := (c.args.len > 0).then({ env.infer_expr(c.args[0].addr()) }, { tvoid() })
     dn := env.dispatch_name_r(c, rty0)
     f := env.env_func(dn)
-    (f.name == "").match ({
+    ret := (f.name == "").match ({
         true  => env.var_or_global(c.fn).fnt_ret(),
         false => (f.tparams.len > 0).match ({
             true  => env.a.subst_ty_in(f.tparams, env.call_targs_r(f, c.args, c.targs, rty0, c.args.len > 0), f.ret),
             false => f.ret,
+        }),
+    })
+    env.a.window_ty(env.env_func(dn), ret, rty0)
+}
+// A slice RETURNED from a call on a read-only receiver is a read-only window over it. `view`,
+// `trim_view`, `substr_view` &c. are declared `(s: string_view) [u8]` — one signature for every
+// provenance, because Zen cannot yet spell "a slice as mutable as my receiver". So the propagation
+// lives here: the declared `[T]` says "a window over arg0" and this decides its mutability from
+// what arg0 actually is. Without it `.view()` launders a `string_literal`'s `.rodata` into a
+// writable window and the store segfaults at run time with `zen check` reporting ok.
+readonly_source_ty* = (t: Ty) bool {
+    t.match ({
+        .StringLiteral => true,
+        .StringCstr    => true,
+        _              => t.is_readonly_ptr_ty() || t.is_readonly_slice_ty(),
+    })
+}
+window_ty = (a: MutPtr<Malloc>, f: Func, ret: Ty, recv: Ty) Ty {
+    (recv.readonly_source_ty() && f.returns_recv()).match ({
+        true  => ret.match ({
+            .Slice(sd) => tslice_k(a.tnode(load(sd.pointee)), k_ptr()),
+            _          => ret,
+        }),
+        false => ret,
+    })
+}
+// Is the returned slice a WINDOW over the receiver, or fresh storage that merely got LOOKED at?
+// `view = (s: string_view) [u8] { s.slice(s.strlen()) }` hands back its own argument's bytes, so its
+// mutability is the argument's. A function that allocates and returns a new buffer names its
+// parameter nowhere in what it returns, and its result stays writable however read-only the
+// argument was. The test is the returned EXPRESSION only — a body that reads the parameter on the
+// way to a fresh buffer (`b.ptr.copy(seed.view().ptr, n)`) is not a window.
+returns_recv = (f: Func) bool {
+    (f.params.len == 0).then({
+        return false
+    })
+    f.body.ret_mentions_stmts(f.params[0].name)
+}
+ret_mentions_stmts = (body: [Stmt], nm: string_view) bool {
+    hit := false
+    body.loop((h, i, st) {
+        st.match ({
+            .Return(r)   => {
+                hit = hit || r.ret_mentions_e(nm)
+            },
+            .ExprStmt(e) => {
+                hit = hit || i == body.len - 1 && e.ret_mentions_e(nm)
+            },
+            _            => { },
+        })
+    })
+    hit
+}
+ret_mentions_e = (e: Ptr<Expr>, nm: string_view) bool {
+    load(e).match ({
+        .Var(v) => v.name == nm,
+        _       => false.expr_fold_children(e, (acc, ch) { acc || ch.ret_mentions_e(nm) }, (acc, body) {
+            acc || body.ret_mentions_stmts(nm)
         }),
     })
 }
@@ -1708,6 +1767,11 @@ ty_under_ptr* = (t: Ty) Ty {
         _        => t,
     })
 }
+// `.ptr` deliberately does NOT inherit the window's read-only-ness: it is the raw floor where a
+// slice meets the allocator and FFI, and its dominant use is `a.release(x.view().ptr)` — freeing
+// bytes you own, which is not a write. Demoting it to `Ptr<u8>` rejects every such release. Closing
+// the residual `v.ptr.store(…)` laundering path needs `release`/`resize` to take a read-only
+// pointer first (a std signature change, not a checker one).
 slice_member* = (a: MutPtr<Malloc>, field: string_view) Ty {
     (field == "len").match ({
         true  => ti64(),

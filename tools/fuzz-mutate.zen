@@ -95,7 +95,7 @@ write_bytes = (path: string_view, b: [u8]) i64 {
     })
 }
 // ── byte-level scanning (the compiled-output searches that `find` cannot do on a str) ─────────────
-bytes_has_at = (v: [u8], p: [u8], at: i64) bool {
+bytes_has_at = (v: [u8], p: Slice<u8>, at: i64) bool {
     ok := at >= 0 && at + p.len <= v.len
     p.loop((h, i, b) {
         ok.then({
@@ -106,7 +106,7 @@ bytes_has_at = (v: [u8], p: [u8], at: i64) bool {
     })
     ok
 }
-bytes_find_from = (v: [u8], p: [u8], start: i64) i64 {
+bytes_find_from = (v: [u8], p: Slice<u8>, start: i64) i64 {
     res := 0 - 1
     v.loop((h, i, b) {
         (i >= start && v.bytes_has_at(p, i)).then({
@@ -286,7 +286,13 @@ class_key = (mp: MutPtr<Malloc>, out: string_view, rc: i64) string_view {
 }
 // `#1 0x[0-9a-f]+ in ([A-Za-z0-9_]+)` — the first non-asan frame's function name, "?" when absent.
 // Recursion depth = the number of "#1 0x" occurrences in the report (one, in practice).
-frame_from = (mp: MutPtr<Malloc>, out: string_view, v: [u8], hv: [u8], start: i64) string_view {
+frame_from = (
+    mp: MutPtr<Malloc>,
+    out: string_view,
+    v: [u8],
+    hv: Slice<u8>,
+    start: i64,
+) string_view {
     p := v.bytes_find_from(hv, start)
     (p < 0).match ({
         true  => "?",
@@ -304,7 +310,7 @@ frame_from = (mp: MutPtr<Malloc>, out: string_view, v: [u8], hv: [u8], start: i6
 }
 frame_key = (mp: MutPtr<Malloc>, out: string_view) string_view {
     v: [u8] := out.view()
-    hv: [u8] := FRAME_HEAD.view()
+    hv: Slice<u8> := FRAME_HEAD.view()
     mp.frame_from(out, v, hv, 0)
 }
 // the dedupe key: `<class>@<frame>`, hashed and truncated to 12 hex chars. OPAQUE — it never leaves
@@ -376,7 +382,7 @@ one_iter = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, toks: [[u8]], b: [u8], seeds: [
 }
 // ── setup ─────────────────────────────────────────────────────────────────────
 // "9" * 300, "0x" + "f" * 200, "a" * 500 … — a prefix plus a repeated run, as one byte slice
-rep_tok = (mp: MutPtr<Malloc>, pre: string_view, s: string_view, n: i64) [u8] {
+rep_tok = (mp: MutPtr<Malloc>, pre: string_view, s: string_view, n: i64) Slice<u8> {
     mp
         .sb()
         .s(pre)

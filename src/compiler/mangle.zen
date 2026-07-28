@@ -27,6 +27,13 @@ ptr_mangle_prefix = (s: String, a: MutPtr<Malloc>, kind: i32) String {
         }),
     })
 }
+// Slice mutability is a CHECKER distinction over one `{ptr,len}` layout, so it is deliberately
+// absent from `mangle_ty` (the ABI/layout name: both kinds are `zslice`) and present here, in the
+// semantic key — a generic body that STORES through its `[T]` parameter must not be reused for a
+// read-only `Slice<T>` instantiation, which is exactly what this mangler exists to prevent.
+slice_mangle_prefix = (s: String, a: MutPtr<Malloc>, kind: i32) String {
+    (kind == k_mut_ptr()).then({ s.gstr_append(a, "slice_") }, { s.gstr_append(a, "roslice_") })
+}
 mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
     t.match ({
         .I32           => s.gstr_append(a, "i32"),
@@ -43,7 +50,7 @@ mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
         .Named(n)      => s.gstr_append(a, n),
         .Generic(g)    => s.gstr_append(a, g.mangled),
         .Ptr(pd)       => s.ptr_mangle_prefix(a, pd.kind).mangle_ty(a, load(pd.pointee)),
-        .Slice(e)      => s.gstr_append(a, "slice_").mangle_ty(a, load(e)),
+        .Slice(e)      => s.gstr_append(a, "slice_").mangle_ty(a, load(e.pointee)),
         .FnT(ft)       => s.gstr_append(a, "fn"),
     })
 }
@@ -91,7 +98,7 @@ mangle_semantic_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
             out
         },
         .Ptr(pd)       => s.gstr_append(a, "ptr_").mangle_semantic_ty(a, load(pd.pointee)),
-        .Slice(e)      => s.gstr_append(a, "slice_").mangle_semantic_ty(a, load(e)),
+        .Slice(e)      => s.slice_mangle_prefix(a, e.kind).mangle_semantic_ty(a, load(e.pointee)),
         .FnT(ft)       => {
             out := s.gstr_append(a, "fn")
             ft.params.loop((h, i, x) {

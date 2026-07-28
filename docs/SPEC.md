@@ -91,7 +91,7 @@ Implemented scalar and structural types:
 i32 i64 u8 f64 bool void
 string_literal string_cstr string_view
 Ptr<T> MutPtr<T> RawPtr<T>
-[T]
+[T] Slice<T> MutSlice<T>
 (A, B) C
 Name
 Name<T, U>
@@ -123,6 +123,19 @@ Pointer kinds are enforced by the checker even though all three lower to `T*`
 in C. `Ptr<T>` is non-null/read-only, `MutPtr<T>` is non-null/writable, and
 `RawPtr<T>` is nullable. A writable pointer may flow to a read-only slot, but
 not the reverse; nested pointer, slice, and generic arguments are invariant.
+
+Slices carry the same read/write distinction under the same naming rule:
+`Slice<T>` is the read-only window and `MutSlice<T>` the writable one, for
+which `[T]` is the sugar. Both are one `{ptr, len}` layout — the kind changes
+only what the checker permits, and it is absent from the ABI mangling for that
+reason (it is present in the SEMANTIC one, so a generic body that stores
+through a `[T]` parameter is never reused for a `Slice<T>` instantiation).
+`.view()` decides which kind you get from what you viewed: a window over a
+`string_literal` or `string_cstr` is a `Slice<T>`, so a store into `.rodata` is
+`error[slice-write]` at check time rather than a segfault at run time. More
+generally, a slice-returning call on a read-only receiver yields a read-only
+window when the callee's returned expression names its first parameter — a
+function that allocates a fresh buffer keeps handing back a writable `[T]`.
 `null_ptr()` has type `RawPtr<u8>`, the deliberately permissive allocator/FFI
 floor. Typed `RawPtr<T>` values require `assert_nonnull` before non-null use, and
 that assertion preserves an existing direction (`Ptr` stays `Ptr`, `MutPtr`
@@ -332,12 +345,14 @@ The entire implicit-conversion surface is one function: `fits` in
 - **String provenance is directional**: `string_literal` fits `string_cstr`
   and `string_view`, and `string_cstr` fits `string_view`, never the reverse
   (`ty_eq`).
+- **Slice capability only weakens** (`slice_mode_fits`): a writable `[T]` fits
+  a `Slice<T>` slot, but a read-only `Slice<T>` never fits `[T]`.
 
 None of the above happens under a constructor. Pointees, slice elements,
 function types, and generic type arguments compare with `invariant_ty_eq`:
 `[i32]` does not fit `[i64]`, `MutPtr<u8>` does not fit a `MutPtr<i32>` or
-nested `Ptr<u8>` position, and the string provenances are distinct types inside
-aggregates. Widening and capability loss are outer-value coercions only.
+nested `Ptr<u8>` position, `Box<Slice<u8>>` does not fit `Box<[u8]>`, and the
+string provenances are distinct types inside aggregates. Widening and capability loss are outer-value coercions only.
 
 ### Evaluation order
 

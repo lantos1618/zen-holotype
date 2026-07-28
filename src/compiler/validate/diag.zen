@@ -167,6 +167,7 @@ KPTRWRITE* = () i32 { 21 }    // a write or writable-view construction through r
 KINFINITETYPE* = () i32 { 22 }    // a struct/enum that contains ITSELF by value (transitively) — infinite size
 KNULLDEREF* = () i32 { 23 }    // a load/store/offset through a nullable `RawPtr<T>` (T != u8) not proven non-null
 KNOTCALLABLE* = () i32 { 24 }    // a call whose target name IS defined but holds a non-function value (a scalar/struct), so it cannot be called
+KSLICEWRITE* = () i32 { 60 }    // a write through a read-only `Slice<T>` window — the `.view()` of a `string_literal`/`string_cstr`, whose bytes live in `.rodata`
 KALLOCNULL* = () i32 { 59 }    // an ALLOCATOR result (`RawPtr<u8>` from acquire/resize/malloc/…) dereferenced with no null proof — the provenance rule `RawPtr<u8>`'s type-level exemption cannot express (compiler.validate.nullalloc)
 KFALLTHROUGH* = () i32 { 25 }    // a non-void function body that ends in a no-value statement (let/assign/loop) — no produced value
 KVBREAK* = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase` statement break (the split-statement shape)
@@ -414,6 +415,13 @@ diag_info = (code: i32) DiagInfo {
             kind: "ptr-write",
             message: "cannot write through a read-only `Ptr<T>`",
             hint: "give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it",
+        )
+    })
+    (code == 60).then({
+        return DiagInfo(
+            kind: "slice-write",
+            message: "cannot write through a read-only `Slice<T>`",
+            hint: "a view of a `string_literal`/`string_cstr` is read-only (its bytes may be in `.rodata`); copy the bytes into an allocator-owned buffer to get a writable `[T]`",
         )
     })
     (code == 22).then({

@@ -259,6 +259,66 @@ harness_misc_string_types = () i32 {
         ),
     ])
 }
+// ════════════════════════════════════════════════════════════════════════════════
+// Slice mutability. `[T]`/`MutSlice<T>` is the writable window, `Slice<T>` the read-only one, named
+// off the `Ptr`/`MutPtr` pair (unmarked = read-only). The lattice runs ONE way: a writable slice
+// fits a read-only slot, never the reverse — and under a constructor neither fits the other. The
+// provenance half is `.view()`: a window over a `string_literal`/`string_cstr` is read-only, so the
+// store that used to segfault in `.rodata` is a `zen check` error, while a window over bytes of
+// unknown/owned provenance stays writable (examples/strings_demo.zen's `port[0] = 'S'`).
+// ════════════════════════════════════════════════════════════════════════════════
+harness_misc_slice_mut = () i32 {
+    run_verdicts("slice_mut verdict", [
+        VerdictCase(
+            src: "{ view } = std.text.str\nbad = (s: string_cstr) u8 { v := s.view()  v[0] = 'H'  v[0] }\nmain = () i32 { 0 }",
+            should_pass: false,
+            kind: "slice-write",
+        ),
+        VerdictCase(
+            src: "{ view } = std.text.str\nbad = (s: string_cstr) i64 { v: [u8] := s.view()  v.len }\nmain = () i32 { 0 }",
+            should_pass: false,
+            kind: "assign-fit",
+        ),
+        VerdictCase(
+            src: "{ view } = std.text.str\nbad = (s: string_cstr) [u8] { s.view() }\nmain = () i32 { 0 }",
+            should_pass: false,
+            kind: "return-fit",
+        ),
+        VerdictCase(
+            src: "{ view } = std.text.str\ntake = (v: [u8]) i64 { v.len }\nmain = () i32 { s: string_cstr := \"hi\"  to_i32(s.view().take()) }",
+            should_pass: false,
+            kind: "arg-type",
+        ),
+        VerdictCase(
+            src: "{ view } = std.text.str\ntake = (v: Slice<u8>) i64 { v.len }\nmain = () i32 { s: string_cstr := \"hi\"  to_i32(s.view().take()) }",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "take = (v: Slice<u8>) i64 { v.len }\nmain = () i32 { b: [u8] := ['a', 'b']  to_i32(b.take()) }",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "Box<T>: { v: T }\nneeds_mut = (b: Box<[u8]>) i64 { b.v.len }\nbad = (r: Box<Slice<u8>>) i64 { needs_mut(r) }\nmain = () i32 { 0 }",
+            should_pass: false,
+            kind: "arg-type",
+        ),
+        VerdictCase(
+            src: "{ view } = std.text.str\ngood = (s: string_view) u8 { w := s.view()  w[0] = 'S'  w[0] }\nmain = () i32 { 0 }",
+            should_pass: true,
+            kind: "",
+        ),
+    ])
+}
+// a store through a view of a `string_cstr` -> rejected (this is the `.rodata` write)
+// the same view bound to a writable `[u8]` -> rejected at the binding
+// a read-only window returned where `[u8]` is declared -> rejected
+// a read-only window passed to a `[u8]` param -> rejected
+// the same window passed to a `Slice<u8>` param -> accepted (that IS the read-only spelling)
+// a writable `[u8]` passed to a `Slice<u8>` param -> accepted (capability may be dropped)
+// slice kinds are INVARIANT under a constructor: `Box<Slice<u8>>` does not fit `Box<[u8]>`
+// a store through a view of a plain `string_view` -> still accepted (strings_demo's shape)
 // TEETH for the one-spelling-per-type rule: `str`, `text` and `Cstr` were aliases for
 // string_view/string_literal/string_cstr. They are gone, so each must now be an UNKNOWN
 // TYPE — silently accepting them is what let six spellings mean three things.
@@ -293,7 +353,7 @@ harness_misc_num_parse = () i32 {
 // The value-case harness can't drive this (no module resolver + it clashes with libc redecls), so this
 // mirrors num_parse's custom `zenc run` + stdout-substring runner. These are the crypto correctness gate.
 // ════════════════════════════════════════════════════════════════════════════════
-HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ is_alpha } = std.text.ascii\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    put(\"empty=\").s(mp.sha256_hex(\"\".view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(\"abc\".view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(\"The quick brown fox jumps over the lazy dog\".view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(\"abc\".view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(\"hello\".view()) == fnv1a(\"hello\".view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(\"abc\".view()) != fnv1a(\"abd\".view())).nl()\n    0\n}\n"
+HASH_PROG := "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ is_alpha } = std.text.ascii\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m := Malloc(_: 0)\n    mp := m.addr()\n    empty: string_view := \"\"\n    abc: string_view := \"abc\"\n    abd: string_view := \"abd\"\n    hello: string_view := \"hello\"\n    fox: string_view := \"The quick brown fox jumps over the lazy dog\"\n    put(\"empty=\").s(mp.sha256_hex(empty.view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(abc.view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(fox.view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(abc.view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(hello.view()) == fnv1a(hello.view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(abc.view()) != fnv1a(abd.view())).nl()\n    0\n}\n"
 harness_misc_hash = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
@@ -721,7 +781,10 @@ om_shell_code = (cmd: string_view) i32 {
 // dots). (println/print stay best-effort and keep their i64 signatures — exercised by every other
 // value case that prints via fmt.)
 om_out_bytes_ok = () bool {
-    out_bytes(view("hi\n")).match ({
+    // `msg` is a `string_view`, not the literal itself: a view of a `string_literal`/`string_cstr` is
+    // a read-only `Slice<u8>`, and `out_bytes` still declares a writable `[u8]` it never writes.
+    msg: string_view := "hi\n"
+    out_bytes(msg.view()).match ({
         .Ok(n)  => n == 3,
         .Err(e) => false,
     })
@@ -975,6 +1038,7 @@ harness_misc_run* = () i32 {
     fails = fails + harness_misc_tparam_recv()
     fails = fails + harness_misc_traits()
     fails = fails + harness_misc_string_types()
+    fails = fails + harness_misc_slice_mut()
     fails = fails + harness_misc_num_parse()
     fails = fails + harness_misc_hash()
     fails = fails + harness_misc_acid()

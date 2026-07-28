@@ -14,6 +14,7 @@ TyFits*: {
     is_f64_ty: (Self) bool,
     ty_eq: (Self, Ty) bool,
     mode_fits: (Self, Ty) bool,
+    slice_mode_fits: (Self, Ty) bool,
     fits: (Self, Ty) bool,
 }
 Ty.impl(TyFits, {
@@ -84,7 +85,7 @@ Ty.impl(TyFits, {
                 _        => false,
             }),
             .Slice(pa)     => w.match ({
-                .Slice(pb) => load(pa).invariant_ty_eq(load(pb)),
+                .Slice(pb) => load(pa.pointee).invariant_ty_eq(load(pb.pointee)),
                 _          => false,
             }),
             .FnT(fa)       => false,
@@ -101,8 +102,14 @@ Ty.impl(TyFits, {
         (g.ptr_kind_of() == k_ptr()
             && (w.ptr_kind_of() == k_mut_ptr() || w.ptr_kind_of() == k_raw_ptr())).match ({
             true  => false,
-            false => true,
+            false => g.slice_mode_fits(w),
         })
+    }
+    slice_mode_fits = (g: Ty, w: Ty) bool {
+        // The same direction one constructor out: a writable `[T]` fits a read-only `Slice<T>` slot
+        // (capability may be dropped), a read-only slice never fits a writable one. This is the arm
+        // that makes `v: [u8] := lit.view()` a type error instead of a segfault three lines later.
+        (g.slice_kind_of() == k_ptr() && w.slice_kind_of() == k_mut_ptr()).then({ false }, { true })
     }
     fits = (g: Ty, w: Ty) bool {
         numeric := g.ty_rank() >= 0 && w.ty_rank() >= 0
@@ -169,7 +176,7 @@ invariant_ty_eq = (g: Ty, w: Ty) bool {
             _        => false,
         }),
         .Slice(pa)     => w.match ({
-            .Slice(pb) => load(pa).invariant_ty_eq(load(pb)),
+            .Slice(pb) => pa.kind == pb.kind && load(pa.pointee).invariant_ty_eq(load(pb.pointee)),
             _          => false,
         }),
         .FnT(fa)       => w.match ({
@@ -199,23 +206,44 @@ invariant_tys_eq = (gs: [Ty], ws: [Ty]) bool {
 // ── Ty pointer-kind inspection, as a trait ───────────────────────────────────
 is_any_ptr = (t: Ty) bool { t.ptr_kind_of() >= 0 }
 // ── lvalue write-provenance, as Env methods ──────────────────────────────────
+// The walk answers WHICH read-only thing a write passes through, not merely whether one exists, so
+// the diagnostic can name it: `w_ok` = writable, `w_ptr` = a read-only `Ptr<T>`, `w_slice` = a
+// read-only `Slice<T>` window. The two boolean wrappers keep every existing caller unchanged.
+w_ok* = () i32 { 0 }
+w_ptr* = () i32 { 1 }
+w_slice* = () i32 { 2 }
 EnvFits*: {
     write_thru_readonly: (Self, Ptr<Expr>) bool,
     lvalue_writes_readonly: (Self, Ptr<Expr>) bool,
+    write_thru_code: (Self, Ptr<Expr>) i32,
+    lvalue_write_code: (Self, Ptr<Expr>) i32,
 }
 Env.impl(EnvFits, {
-    write_thru_readonly = (env: Env, obj: Ptr<Expr>) bool {
+    write_thru_readonly = (env: Env, obj: Ptr<Expr>) bool { env.write_thru_code(obj) != w_ok() }
+    lvalue_writes_readonly = (env: Env, target: Ptr<Expr>) bool {
+        env.lvalue_write_code(target) != w_ok()
+    }
+    write_thru_code = (env: Env, obj: Ptr<Expr>) i32 {
         // Preserve lvalue provenance across addr(): taking the address of storage reached through Ptr<T>
         // yields Ptr<U>, never MutPtr<U>. The walk stops at the first pointer indirection, matching writes.
         ot := env.infer_expr(obj)
-        ot.is_any_ptr().then({ ot.is_readonly_ptr_ty() }, { env.lvalue_writes_readonly(obj) })
+        // A read-only slice STOPS the walk with a verdict of its own: `v[0] = …` where `v: Slice<u8>`
+        // writes through the window's own pointer, so no enclosing base decides it. Everything else
+        // keeps the pre-existing pointer walk verbatim.
+        ot.is_readonly_slice_ty().then({
+            return w_slice()
+        })
+        ot.is_any_ptr().then({
+            return ot.is_readonly_ptr_ty().then({ w_ptr() }, { w_ok() })
+        })
+        env.lvalue_write_code(obj)
     }
-    lvalue_writes_readonly = (env: Env, target: Ptr<Expr>) bool {
+    lvalue_write_code = (env: Env, target: Ptr<Expr>) i32 {
         load(target).match ({
-            .Member(m) => env.write_thru_readonly(m.obj),
-            .Arrow(ar) => env.infer_expr(ar.obj).is_readonly_ptr_ty(),
-            .Index(ix) => env.write_thru_readonly(ix.seq),
-            _          => false,
+            .Member(m) => env.write_thru_code(m.obj),
+            .Arrow(ar) => env.infer_expr(ar.obj).is_readonly_ptr_ty().then({ w_ptr() }, { w_ok() }),
+            .Index(ix) => env.write_thru_code(ix.seq),
+            _          => w_ok(),
         })
     }
 })

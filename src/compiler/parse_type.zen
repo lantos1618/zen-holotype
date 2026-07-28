@@ -6,8 +6,8 @@
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
 { Param, Ty, Field, StructDecl } = compiler.ast.ast_types
 { param, pvariadic, field, sdef, fntype, tgeneric, ti32, ti64, tu8, tf64, tbool, tstring_view,
-  tstring_cstr, tstring_literal, tvoid, tnamed, tptr_k, tslice, k_raw_ptr, k_ptr, k_mut_ptr,
-  acquire_or_die, acquire_or_die } = compiler.genc
+  tstring_cstr, tstring_literal, tvoid, tnamed, tptr_k, tslice, tslice_k, k_raw_ptr, k_ptr,
+  k_mut_ptr, acquire_or_die, acquire_or_die } = compiler.genc
 { mangle_str_in, mangle_anon_in, payload_fname } = compiler.mangle
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.ascii
@@ -298,7 +298,10 @@ parse_ty_inner = (a: MutPtr<Malloc>, src: string_view, pos: i32) TyEnd {
                 true  => a.parse_fn_ty(src, tt.next),
                 false => src.is_ptr_kw(tt.tok).match ({
                     true  => a.parse_ptr_ty(src, tt.tok, tt.next),
-                    false => a.parse_leaf_ty(src, tt),
+                    false => src.is_slice_kw(tt.tok).match ({
+                        true  => a.parse_slice_kw_ty(src, tt.tok, tt.next),
+                        false => a.parse_leaf_ty(src, tt),
+                    }),
                 }),
             }),
         }),
@@ -588,6 +591,24 @@ parse_slice_ty = (a: MutPtr<Malloc>, src: string_view, pos: i32) TyEnd {
         next: rb.next,
     )
 }    // ']'
+// `Slice<T>` / `MutSlice<T>`: the SPELLED slice kinds, named off `Ptr`/`MutPtr` — unmarked is the
+// read-only window, `Mut` is the writable one. `[T]` stays the sugar for the default kind, so
+// existing source is untouched; the keyword form exists so a signature can say "read-only window"
+// (what `.view()` of a `string_literal`/`string_cstr` yields) where `[T]` cannot.
+is_slice_kw = (src: string_view, t: Token) bool { src.tok_in(t, "Slice|MutSlice") }
+slice_kw_kind = (src: string_view, t: Token) i32 {
+    src.tok_in(t, "MutSlice").then({ k_mut_ptr() }, { k_ptr() })
+}
+parse_slice_kw_ty = (a: MutPtr<Malloc>, src: string_view, kw: Token, pos: i32) TyEnd {
+    kind := src.slice_kw_kind(kw)    // kw = the Slice/MutSlice keyword; pos just past it
+    lt := src.scan(pos)    // '<'
+    inner := a.parse_ty(src, lt.next)    // the element type (recursive)
+    gt := src.scan(inner.next)
+    TyEnd(
+        ty: tslice_k(a.tynode(inner.ty), kind),
+        next: src.gt_resume(gt),
+    )
+}    // '>' (or a nested '>>')
 parse_ptr_ty = (a: MutPtr<Malloc>, src: string_view, kw: Token, pos: i32) TyEnd {
     kind := src.ptr_kw_kind(kw)    // kw = the Ptr/MutPtr/RawPtr keyword; pos just past it
     // which spelling fired
