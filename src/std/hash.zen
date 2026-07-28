@@ -20,7 +20,8 @@
 // you use (`{ sha256_hex, fnv1a } = std.hash`) and rename on your side if needed.
 { then } = std.core.bool
 { hex_char } = std.text.ascii    // the shared hex-ENCODE nibble
-{ Allocator } = std.mem.alloc    // sha256_hex's `a.acquire` needs the trait's method name in scope
+{ Allocator, try_acquire } = std.mem.alloc    // sha256_hex allocates its hex buffer through the caller allocator
+{ expect } = std.core.result
 // ── FNV-1a, 64-bit ────────────────────────────────────────────────────────────
 // The FNV-1a-64 prime, 0x100000001b3, and offset basis 0xcbf29ce484222325. The basis is above i64 max
 // but a u64 literal round-trips its exact bit pattern (lex → fmt → genc), so it is named directly.
@@ -175,7 +176,7 @@ sha256_into* = (bytes: [u8], dst: [u8]) i64 {
 sha256_hex*<A> = (a: MutPtr<A>, bytes: [u8]) string_view {
     d: [u8] := [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     sha256_into(bytes, d)
-    out: [u8] := a.acquire(65).slice(65)
+    out: [u8] := a.try_acquire(65).expect("std.hash: out of memory").slice(65)
     d.loop((h, i, b) {
         v := to_i64(b)
         out[i * 2] = hex_char(v >> 4)

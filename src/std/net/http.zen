@@ -33,6 +33,7 @@
 // takes the raw response as a length-carrying `[u8]` and needs no socket, so canned responses
 // (including bodies with embedded NULs) are the deterministic test gate.
 { Result, Opt, IoError, ok, err, expect } = std.core.result
+{ try_acquire } = std.mem.alloc
 { TcpConn, TcpListener, serve, dial } = std.net.socket
 // `init`, NOT `new_in`: std.mem.arc also exports `new_in`, and a program combining this module
 // with the actor pool (std.concurrent.pool imports arc) would collide in the flat namespace.
@@ -116,7 +117,7 @@ crlfcrlf = (v: [u8]) i64 {
 // copy `b` into a fresh allocator-owned `[u8]` carrying its exact length plus one trailing NUL —
 // binary-safe (the length lives in the slice) and still viewable as text via `cstr(out.ptr)`.
 own_bytes<A> = (a: MutPtr<A>, b: [u8]) [u8] {
-    p := a.acquire(b.len + 1)
+    p := a.try_acquire(b.len + 1).expect("std.net.http: out of memory")
     out: [u8] := p.slice(b.len)
     b.loop((h, i, x) {
         out[i] = x
