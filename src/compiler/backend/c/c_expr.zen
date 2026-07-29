@@ -43,10 +43,6 @@ gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
         .MethodCall(mc) => s.gstr_append(alloc, "zen__undesugared_method_call"),    // desugared to Call before codegen — marker if the invariant ever breaks
         .Cond(d)        => s.gen_cond(alloc, d),
         .Member(m)      => s.gen_member(alloc, m),
-        .Arrow(a)       => s
-            .gen_expr(alloc, a.obj)
-            .gstr_append(alloc, "->")
-            .gstr_append(alloc, a.field),
         .MakeEnum(m)    => s.gen_mkenum(alloc, m),
         .MakeStruct(m)  => s.gen_mkstruct(alloc, m),
         .Tag(t)         => s
@@ -123,6 +119,9 @@ gen_loop_jump = (s: String, alloc: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: Strin
         .gstr_append(alloc, "; 0; })")
 }
 gen_member = (s: String, alloc: MutPtr<Malloc>, m: MemberData) String {
+    m.ptr.then({
+        return s.gen_expr(alloc, m.obj).gstr_append(alloc, "->").gstr_append(alloc, m.field)
+    })
     (m.field == "break_zk").match ({
         true  => s.gen_loop_jump(alloc, m.obj, "__b"),
         false => (m.field == "continue_zk").match ({
@@ -413,8 +412,7 @@ call_kind = (name: StringView) EmitCallKind {
 is_lvalue = (e: Ptr<Expr>) bool {
     e.match ({
         .Var(v)    => true,
-        .Member(m) => is_lvalue(m.obj),
-        .Arrow(a)  => true,
+        .Member(m) => m.ptr || is_lvalue(m.obj),
         .Index(ix) => true,
         .Call(c)   => c.fn == "load",
         _          => false,

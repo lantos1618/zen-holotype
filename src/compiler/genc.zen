@@ -5,7 +5,7 @@
 // this module keeps everything with logic: the value constructors (vref/bin_at/call_full/…),
 // the canonical allocator-explicit String builder (gstr_*), the pointer-kind constants,
 // C-type-name helpers, and the tparam→arg type substitution shared by check and mono.
-{ Expr, VarData, BinData, CallData, MethodCallData, CondData, MemberData, ArrowData, MakeEnumData,
+{ Expr, VarData, BinData, CallData, MethodCallData, CondData, MemberData, MakeEnumData,
   MakeStructData, FieldInit, TagData, ArmData, MatchData, StrData, SliceData, IndexData, LoopData,
   LambdaData, BlockData, Stmt, LetData, AssignData, IfData, WhileData, IndexSetData, Ty, FnTData,
   GenericData, PtrData, Param, Func, Field, StructDecl, GenStructDecl, VariantDef, EnumDecl,
@@ -228,34 +228,19 @@ cond_at* = (c: Ptr<Expr>, t: Ptr<Expr>, e: Ptr<Expr>, oa: i32, tpos: i32, epos: 
         epos: epos,
     ))
 }
-member* = (o: Ptr<Expr>, f: StringView) Expr {
-    .Member(MemberData(
-        obj: o,
-        field: f,
-        pos: 0,
-    ))
-}
-member_at* = (o: Ptr<Expr>, f: StringView, p: i32) Expr {
+// the one field-access constructor; `ptr` picks `->` over `.` at emit (see MemberData). A pass that
+// REBUILDS a Member must carry `m.ptr` through — dropping it silently re-emits a deref as a value read.
+mfield* = (o: Ptr<Expr>, f: StringView, p: i32, ptr: bool) Expr {
     .Member(MemberData(
         obj: o,
         field: f,
         pos: p,
+        ptr: ptr,
     ))
 }
-arrow* = (o: Ptr<Expr>, f: StringView) Expr {
-    .Arrow(ArrowData(
-        obj: o,
-        field: f,
-        pos: 0,
-    ))
-}
-arrow_at* = (o: Ptr<Expr>, f: StringView, p: i32) Expr {
-    .Arrow(ArrowData(
-        obj: o,
-        field: f,
-        pos: p,
-    ))
-}
+member* = (o: Ptr<Expr>, f: StringView) Expr { mfield(o, f, 0, false) }
+member_at* = (o: Ptr<Expr>, f: StringView, p: i32) Expr { mfield(o, f, p, false) }
+arrow* = (o: Ptr<Expr>, f: StringView) Expr { mfield(o, f, 0, true) }
 mkenum* = (ty: StringView, v: StringView, p: Ptr<Expr>) Expr {
     .MakeEnum(MakeEnumData(
         ty: ty,
