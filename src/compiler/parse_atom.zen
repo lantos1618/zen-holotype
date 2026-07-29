@@ -327,7 +327,12 @@ esc_byte = (e: u8) u8 {
 }
 // Two hex digits at `pos`,`pos+1` → one byte value (0..255) for `\xNN`. Returns i32 (the arithmetic
 // type); the store/char-lit sites narrow to the byte, matching how `char_val` carries byte values as i32.
-hex2 = (src: StringView, pos: i32) i32 { src.at(pos).hex_val() * 16 + src.at(pos + 1).hex_val() }
+// A truncated `'\x` / `"…\x` at EOF puts the terminator in the HIGH nibble; the low one is then off
+// the end of the buffer, so stop at the terminator instead of reading past it.
+hex2 = (src: StringView, pos: i32) i32 {
+    hi = src.at(pos)
+    (hi == '\0').then({ 0 }, { hi.hex_val() * 16 + src.at(pos + 1).hex_val() })
+}
 char_val = (src: StringView, start: i32) i32 {
     b = src.at(start + 1)
     (b == '\\').match ({

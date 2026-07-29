@@ -15,7 +15,7 @@
 //   • zen-asan still missing after the build
 //   • an empty corpus
 { Malloc } = std.mem.alloc
-{ shell, write_all } = std.io.file
+{ save, shell, write_all } = std.io.file
 { is_dir, read_dir } = std.sys.fs
 { access } = std.c.libc
 { run } = std.sys.process
@@ -123,6 +123,28 @@ sweep_file = (mp: MutPtr<Malloc>, asan: StringView, f: StringView) void {
     mp.probe(asan, "check", f)
     mp.probe(asan, "build", f)
 }
+// ── the EOF-adjacent edge shapes, carried here as literal bytes ───────────────
+// `at` is a raw indexed load whose ONLY bound is the NUL terminator, so a lookahead past the byte the
+// caller has proven non-NUL reads off the end of the source buffer — real UB, in the parser, on
+// untrusted input. Three shapes did exactly that until compiler.lex / compiler.parse_atom guarded the
+// last read; each is the minimal input that trips its site:
+//   `…}`    an operator char as the LAST byte  — sym_end probed pos+2 for `::=`, past the NUL
+//   `…"hi\` a backslash as the last byte       — str_end's escape skip stepped p+2, past the NUL
+//   `…'\x`  a truncated hex escape             — hex2 read the low nibble, past the NUL
+// A corpus FILE cannot pin them: each ends mid-token with no trailing newline, and the fmt gate (which
+// covers tests/, examples/ and tools/) would rewrite that ending away. So they are written out and
+// swept through the same ASan `check` as everything else.
+EDGE_PATH = "/tmp/fuzz-corpus-edge.zen"
+sweep_edge = (mp: MutPtr<Malloc>, asan: StringView, src: StringView) void {
+    EDGE_PATH.save(src, src.len()).expect("fuzz-corpus: cannot write the edge-shape input")
+    g_files = g_files + 1
+    mp.probe(asan, "check", EDGE_PATH)
+}
+sweep_edges = (mp: MutPtr<Malloc>, asan: StringView) void {
+    mp.sweep_edge(asan, "main = () void {\n    x = 1\n    x.println()\n}")
+    mp.sweep_edge(asan, "main = () void {\n    s = \"hi\\")
+    mp.sweep_edge(asan, "main = () void {\n    c = '\\x")
+}
 // ── setup: the ASan compiler must exist, or the sweep proves nothing ──────────
 fail2 = (msg: StringView) i32 {
     format("{}\n", [arg_str(msg)])
@@ -154,6 +176,7 @@ sweep = (mp: MutPtr<Malloc>, asan: StringView, corpus: [StringView]) i32 {
     corpus.loop((h, i, f) {
         mp.sweep_file(asan, f)
     })
+    mp.sweep_edges(asan)
     format("corpus: {} files, {} sanitizer hits\n", [arg_int(g_files), arg_int(g_hits)])
     (g_hits == 0).then({ 0 }, { 1 })
 }
