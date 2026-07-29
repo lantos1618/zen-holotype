@@ -50,6 +50,7 @@
 { integer, hex_value } = std.text.num
 { is_hex } = std.text.ascii
 { take, drop, sub } = std.core.slice
+{ step_while } = std.core.count    // THE loop — `@while` lives in the primitive, not here
 // ── error channel ────────────────────────────────────────────────────────────────────────────────────
 // Connect: the client's TCP handshake failed. Listen: the server's bind/listen/accept failed — a
 // listener-level fault, not one connection's. Io: a send/receive failed mid-exchange. Malformed: the
@@ -851,9 +852,11 @@ serve_n*<A: Allocator> = (
     n: i64,
     handler: (MutPtr<A>, Request) Response,
 ) i64 {
-    served: i64 := 0
+    // `step_while`, NOT `repeat_while`: the guard must be tested BEFORE the first accept, since
+    // `serve_n(0)` answers zero connections. The cursor IS the served count, so the loop reports it.
     live := true
-    @while (live && (n < 0 || served < n)) {
+    zero: i64 := 0
+    zero.step_while((served) { live && (n < 0 || served < n) }, (served) {
         live = a.serve_once(l, handler).match ({
             .Ok(r)  => {
                 a.request_free(r)    // the loop is the owner here — nothing above ever sees it
@@ -861,7 +864,6 @@ serve_n*<A: Allocator> = (
             },
             .Err(e) => fatal(e).then({ false }, { true }),
         })
-        served = live.then({ served + 1 }, { served })
-    }
-    served
+        live.then({ served + 1 }, { served })
+    })
 }

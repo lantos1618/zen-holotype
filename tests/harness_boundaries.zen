@@ -406,17 +406,14 @@ checkpoint_suite = (mp: MutPtr<Malloc>) i32 {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 atwhile_allowed = (path: StringView) bool {
     path == "src/compiler/parse.zen"
-        || path == "src/compiler/parse_expr.zen"
         || path == "src/compiler/parse_atom.zen"
         || path == "src/compiler/parse_stmt.zen"
         || path == "src/compiler/parse_type.zen"
         || path == "src/compiler/pretty.zen"
         || path == "src/compiler/pretty_expr.zen"
         || path == "src/compiler/genc.zen"
-        || path == "src/compiler/backend/c/c_emit.zen"
         || path == "src/compiler/diagnostic.zen"
         || path == "driver.zen"
-        || path == "src/compiler/drvutil.zen"
         || path == "src/compiler/lsp.zen"
         || path == "src/compiler/lsp_tokens.zen"
         || path == "src/compiler/lsp_query.zen"
@@ -424,37 +421,30 @@ atwhile_allowed = (path: StringView) bool {
         || path == "src/compiler/validate/util.zen"
         || path == "src/compiler/validate/diag.zen"
         || path == "src/std/core/count.zen"
-        || path == "src/std/collections/iter.zen"
-        || path == "src/std/math.zen"
-        || path == "src/std/rand.zen"
-        || path == "src/std/text/ascii.zen"
-        || path == "src/std/io/stdin.zen"
-        || path == "src/std/hash.zen"
         || path == "src/compiler/resolve.zen"
         || path == "src/compiler/resolve_scan.zen"
-        || path == "src/std/net/http.zen"
 }
 // std.core.count is the ONE place `@while` is supposed to live, and the ENDGAME for this list is that
 // it is the only entry left: `step_while` (carry a cursor, advance it with `next`, while `keep` holds)
 // covers every shape below, `advance_while`/`repeat_while` are the two shorthands over it, and
-// `upto`/`times` are calls, not loops. compiler.lex and std.sys.fs are already off this list — their
-// scanners went through `step_while` and the emitted C did not change. Each conversion lane deletes
-// its own entry here; when only `src/std/core/count.zen` remains, replace this allowlist with an
-// equality test on that one path — `file_has` already ignores comments and strings, so count.zen's
-// doc comment naming `@while` a dozen times cannot trip it.
-// low-level numeric/stdin substrate: these primitives MUST iterate, not recurse — an unbounded
-// recursion depth (huge exponent / stdin byte or line count /
-// SHA-256 512-bit block count over a large message) is a stack-overflow segfault. std.rand joins for
-// the same reason: its range() uses REJECTION SAMPLING (redraw until the value clears the bias cutoff),
-// a loop with no fixed iteration bound — recursing it would risk exactly the stack overflow this class
-// guards against — plus the xoshiro fill_bytes/shuffle counting loops. The compiler's
-// codegen/diagnostic scanners join for the same reason: a ~50KB string literal, a long numeric
-// literal, or a long source line must emit/caret by iteration, not per-byte recursion (#66c).
-// std.text.ascii joins as the shared escape-loop substrate: escape_into is THE per-byte scan the
-// C/JS backends and the formatter splice their escape tables into (c_lit's own @while moved there).
-// compiler.drvutil joins as the OWNER of that scan: cstr_range (the shared [s,e) byte-range copy the
-// LSP's JSON reader and audit's identifier scanner both call) must iterate for exactly the reason
-// those two callers do — the range is a whole JSON body or module region, not a bounded token.
+// `upto`/`times` are calls, not loops. compiler.lex, std.sys.fs and ALL OF src/std are already off
+// this list — their scanners went through `step_while` and the emitted C did not change. Each
+// conversion lane deletes its own entry here; when only `src/std/core/count.zen` remains, replace this
+// allowlist with an equality test on that one path — `file_has` already ignores comments and strings,
+// so count.zen's doc comment naming `@while` a dozen times cannot trip it.
+// Every remaining entry is compiler-side. std.math (ipow's halving cursor, isqrt's Newton iterate),
+// std.rand (range's REJECTION-sampling redraw, fill_bytes' variable-stride cursor), std.text.ascii
+// (escape_into, THE per-byte literal scan the C/JS backends and the formatter splice their escape
+// tables into), std.io.stdin (the three read-to-EOF drains) and std.net.http (serve_n's accept loop)
+// were all in this class for the SAME reason — an unbounded trip count that must not become C-stack
+// recursion — and all of them now express it as `step_while`/`repeat_while`, which is iteration by
+// construction. Their exemption was never about the keyword; it was about not recursing, and the
+// vocabulary keeps that property while the keyword goes. std.net.http's serve_n is the one shape that
+// pins `step_while` specifically: `serve_n(0)` must answer ZERO connections, so the guard has to run
+// BEFORE the first accept — `repeat_while` is do-while and would block in accept(2) forever.
+// The compiler's codegen/diagnostic scanners stay for the original reason: a ~50KB string literal, a
+// long numeric literal, or a long source line must emit/caret by iteration, not per-byte recursion
+// (#66c).
 // driver.zen, compiler.lsp, compiler.lsp_query and compiler.audit join as scanners over unbounded
 // input: the LSP's hand-rolled JSON reader walks a whole request body (a `didChange` carries the
 // entire document), lsp_query's hover/completion scans walk a whole open BUFFER line by line,
@@ -467,13 +457,9 @@ atwhile_allowed = (path: StringView) bool {
 // walks whole flattened sources byte-by-byte to the next newline, and both per-byte recursion
 // (stack) and a per-call strlen (quadratic — the old shape, the top resolve-imports hotspot) are
 // exactly what this substrate class exists to avoid.
-// Five entries below are already STALE — c_emit, drvutil, parse_expr, std.collections.iter and
-// std.hash hold no `@while` at all. They are left in place only so this change stays reviewable as
-// one thing; drop them with the next lane.
-// std.net.http joins for ONE loop, `serve_n`'s accept loop — the archetype of this class. A server
-// asked to run forever (`n < 0`) accepts an unbounded number of connections; recursing once per
-// request is a stack overflow with a wall-clock fuse on it. Every other loop in the module (the
-// chunk decoder, the two read drains) is bounded by one message and stays recursive.
+// The five STALE entries flagged by the previous lane — c_emit, drvutil, parse_expr,
+// std.collections.iter and std.hash, none of which holds a `@while` at all — are gone too. An
+// allowlist entry with nothing behind it is an exemption waiting to be spent by accident.
 atwhile_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
     path.is_empty().match ({
         true  => true,

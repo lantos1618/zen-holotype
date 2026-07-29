@@ -18,6 +18,7 @@
 { Allocator, try_acquire } = std.mem.alloc
 { String, init, push_in, finish_in, free_in } = std.text.string
 { view } = std.text.str
+{ repeat_while } = std.core.count    // the do-while — `@while` lives in the primitive, not here
 STDIN := 0
 READ_CHUNK := 4096
 // read(2) failed outright: no errno plumbing at this floor, so carry the -1 sentinel
@@ -50,27 +51,27 @@ read_line_into = (a: Allocator, cell: [u8]) Result<Opt<StringView>, IoError> {
             consumed := 0    // bytes taken off the stream, INCLUDING a '\n'
             failed := false
             ev := IoError.Eof
-            done := false
-            @while (done == false) {
+            // at least one read(2) always happens, so this is the do-while shape: `repeat_while`
+            repeat_while((step) {
                 r := STDIN.read(cell.ptr, 1)
                 failed = r < 0
                 ev = failed.then({ read_failed() }, { ev })
                 consumed = consumed + (r > 0).then({ 1 }, { 0 })
-                done = r <= 0 || cell[0] == '\n'
+                more := r > 0 && cell[0] != '\n'
                 // builder-threaded push: every arm yields the String, so failure stays a value
-                s = (r > 0 && cell[0] != '\n').match ({
+                s = more.match ({
                     true  => a.push_in(s, cell[0]).match ({
                         .Ok(ns)  => ns,
                         .Err(pe) => {
                             failed = true
                             ev = pe
-                            done = true
                             s
                         },
                     }),
                     false => s,
                 })
-            }
+                more && failed == false
+            })
             out: Result<Opt<StringView>, IoError> := failed.match ({
                 true  => {
                     s.free_in(a)
@@ -132,25 +133,23 @@ drain_stdin = (a: Allocator) Result<String, IoError> {
                 s := s0
                 failed := false
                 ev := IoError.Eof
-                done := false
-                @while (done == false) {
+                repeat_while((step) {
                     r := STDIN.read(chunk, READ_CHUNK)
                     failed = r < 0
                     ev = failed.then({ read_failed() }, { ev })
-                    done = r <= 0
                     s = (r > 0).match ({
                         true  => a.append_chunk(s, chunk, r).match ({
                             .Ok(ns)  => ns,
                             .Err(ae) => {
                                 failed = true
                                 ev = ae
-                                done = true
                                 s
                             },
                         }),
                         false => s,
                     })
-                }
+                    r > 0 && failed == false
+                })
                 a.release(chunk)
                 out: Result<String, IoError> := failed.match ({
                     true  => {
@@ -196,30 +195,26 @@ lines* = (a: Allocator, on_line: (StringView) void) Result<i64, IoError> {
     n: i64 := 0
     failed := false
     ev := IoError.Eof
-    done := false
-    @while (done == false) {
-        // uniform i32 arms: side effects thread through the outer locals, the match stays a value
-        step := a.read_line().match ({
+    // uniform bool arms: side effects thread through the outer locals, and the match IS the
+    // "keep going?" answer `repeat_while` asks for — no `done` flag left to carry.
+    repeat_while((step) {
+        a.read_line().match ({
             .Err(e) => {
                 failed = true
                 ev = e
-                done = true
-                0
+                false
             },
             .Ok(o)  => o.match ({
-                .None       => {
-                    done = true
-                    0
-                },
+                .None       => false,
                 .Some(line) => {
                     on_line(line)
                     n = n + 1
                     a.release(line.view().ptr)
-                    0
+                    true
                 },
             }),
         })
-    }
+    })
     out: Result<i64, IoError> := failed.then({ err(ev) }, { ok(n) })
     out
 }
