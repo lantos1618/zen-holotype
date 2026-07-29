@@ -24,6 +24,7 @@
 { len, contains, starts_with, is_empty, view, substr } = std.text.str
 { new_in, append_in, finish_in, push_in } = std.text.string
 { expect } = std.core.result
+{ times, step_while, advance_while } = std.core.count
 { malloc, free } = std.mem.alloc
 // the zslice header every emission must begin with (mirrors _oracle.HEAD).
 HEAD := "typedef struct { void* ptr; int64_t len; } zslice; "
@@ -38,32 +39,27 @@ om_not = (b: bool) bool { b.then({ false }, { true }) }
 // occurrences of `needle` in `s` (non-overlapping) — for exactly-once (dup-free) assertions.
 om_count = (s: StringView, needle: StringView) i64 {
     n: i64 := 0
-    i: i64 := 0
     v := s.view()
     nv := needle.view()
-    @while (i + nv.len <= v.len) {
+    to_i64(0).step_while((i) { i + nv.len <= v.len }, (i) {
         hit := true
-        k: i64 := 0
-        @while (hit && k < nv.len) {
+        to_i64(0).step_while((k) { hit && k < nv.len }, (k) {
             (v[i + k] == nv[k]).match ({
-                true  => {
-                    k = k + 1
-                },
+                true  => k + 1,
                 false => {
                     hit = false
+                    k
                 },
             })
-        }
+        })
         hit.match ({
             true  => {
                 n = n + 1
-                i = i + nv.len
+                i + nv.len
             },
-            false => {
-                i = i + 1
-            },
+            false => i + 1,
         })
-    }
+    })
     n
 }
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
@@ -431,28 +427,18 @@ om_param_list = (mp: MutPtr<Malloc>, src: StringView, q: i64) StringView {
 om_decls_survive = (mp: MutPtr<Malloc>, src: StringView, c: StringView) bool {
     sv: [u8] := src.view()
     n := sv.len
-    i: i64 := 0
     ls := true    // at a line start?
     ok := true
-    @while (i < n) {
+    to_i64(0).step_while((i) { i < n }, (i) {
         b := sv[i]
         (ls && is_alpha(b)).then({
             // identifier [i, e)
-            e := i
-            @while (e < n && om_is_alnum(sv[e])) {
-                e = e + 1
-            }
+            e: i64 := i.advance_while((p) { p < n && om_is_alnum(sv[p]) })
             // skip spaces/tabs, expect '='
-            q := e
-            @while (q < n && (sv[q] == ' ' || sv[q] == '\t')) {
-                q = q + 1
-            }
+            q := e.advance_while((p) { p < n && (sv[p] == ' ' || sv[p] == '\t') })
             (q < n && sv[q] == '=').then({
                 // skip spaces/tabs, expect '('
-                q2 := q + 1
-                @while (q2 < n && (sv[q2] == ' ' || sv[q2] == '\t')) {
-                    q2 = q2 + 1
-                }
+                q2 := (q + 1).advance_while((p) { p < n && (sv[p] == ' ' || sv[p] == '\t') })
                 // An IMPLICIT generic (`f = (a: Allocator, …)` — the trait-typed-param sugar for
                 // `f<A: Allocator> = (a: MutPtr<A>, …)`) is a template like any other generic: it emits
                 // no standalone C symbol, only per-instantiation ones. The `<A>` spelling kept those
@@ -470,8 +456,8 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: StringView, c: StringView) bool {
             })
         })
         ls = b == '\n'
-        i = i + 1
-    }
+        i + 1
+    })
     ok
 }
 // PARALLEL acid (3-phase, dogfoods zo_par_run): `zenc emit <src>` for each real compiler/std source runs
@@ -852,13 +838,11 @@ harness_misc_capacity = () i32 {
     m := Malloc(_: 0)
     mp := m.addr()
     s := mp.new_in().expect("harness: oom")
-    i: i64 := 0
-    @while (i < 16385) {
+    to_i64(16385).times((i) {
         s = s.append_in(mp, "f").expect("harness: oom")
         s = s.append_in(mp, mp.zo_itoa(i)).expect("harness: oom")
         s = s.append_in(mp, "* = () i32 { 0 }\n").expect("harness: oom")
-        i = i + 1
-    }
+    })
     src := mp.finish_in(s).expect("harness: oom")
     run_suite("capacity (oversized module rejects with error[capacity])", [
         run_verdict(VerdictCase(

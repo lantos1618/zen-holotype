@@ -161,6 +161,7 @@
 //     here the heap under test belongs to a CHILD process, where mallinfo2 cannot see it. Counts for
 //     the server need `valgrind ./zen lsp < session` by hand.
 { put } = std.text.fmt
+{ times, step_while } = std.core.count
 { new_in, append_in, finish_in } = std.text.string
 { Malloc } = std.mem.alloc
 { save, contents_in, shell } = std.io.file
@@ -248,13 +249,11 @@ lb_doc = (mp: MutPtr<Malloc>, nf: i64) StringView {
     s = s
         .append_in(mp, "{ println } = std.text.fmt\\n{ len } = std.text.str\\n")
         .expect("bench: oom")
-    i := to_i64(0)
-    @while (i < nf) {
+    nf.times((i) {
         s = s
             .append_in(mp, mp.zo_join([z, "f", mp.zo_itoa(i), " = (x: i32) i32 {\\n    y := x + ", mp.zo_itoa(i), "\\n    y\\n}\\n"]))
             .expect("bench: oom")
-        i = i + 1
-    }
+    })
     s = s
         .append_in(mp, "main = () i32 {\\n    println(len(\\\"abc\\\"))\\n    f0(1)\\n}\\n")
         .expect("bench: oom")
@@ -270,15 +269,13 @@ lb_session = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, method: StringView, 
     s := mp.new_in().expect("bench: oom")
     s = s.append_in(mp, mp.lb_frame(LB_INIT())).expect("bench: oom")
     s = s.append_in(mp, mp.lb_frame(mp.lb_open(uri, doc))).expect("bench: oom")
-    i := to_i64(0)
-    @while (i < n) {
+    n.times((i) {
         body := (method == "didChange").match ({
             true  => mp.lb_change(uri, doc, i + 2),
             false => mp.lb_posreq(uri, method, 100 + i, lb_probe_line(nf), LB_PROBE_CH()),
         })
         s = s.append_in(mp, mp.lb_frame(body)).expect("bench: oom")
-        i = i + 1
-    }
+    })
     s = s.append_in(mp, mp.lb_frame(LB_SHUT())).expect("bench: oom")
     s = s.append_in(mp, mp.lb_frame(LB_EXIT())).expect("bench: oom")
     mp.finish_in(s).expect("bench: oom")
@@ -340,20 +337,16 @@ PEAK_W = () i64 { 10 }
 DB_W = () i64 { 11 }
 lb_sp = (n: i64) i64 {
     w := to_i64(0)
-    i := to_i64(0)
-    @while (i < n) {
-        w = w + put(" ").n
-        i = i + 1
-    }
+    n.times((i) { w = w + put(" ").n })
     w
 }
 lb_digits = (v: i64) i64 {
     d := (v < 0).then({ 2 }, { 1 })
     x := (v < 0).then({ 0 - v }, { v })
-    @while (x > 9) {
+    x.step_while((r) { r > 9 }, (r) {
         d = d + 1
-        x = x / 10
-    }
+        r / 10
+    })
     d
 }
 // right-align `v` in a `w`-wide column. The pad is bound BEFORE the digits are written: `a + b` has
@@ -636,13 +629,11 @@ main* = () i32 {
         lb_note("# WARNING: /usr/bin/time -v unavailable — every peakKB and d_B/req reads -1\n")
     })
     lb_header()
-    r := to_i64(0)
-    @while (r < reps) {
+    reps.times((r) {
         (reps > 1).then({
             lb_rep_note(r + 1, reps)
         })
         mp.lb_all(scale)
-        r = r + 1
-    }
+    })
     0
 }

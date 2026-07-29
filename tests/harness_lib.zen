@@ -31,6 +31,7 @@
 { len, contains, is_empty, starts_with, try_parse_int } = std.text.str
 { new_in, append_in, finish_in } = std.text.string
 { expect } = std.core.result
+{ times, step_while } = std.core.count
 { integer_in } = std.text.num
 { getpid } = std.c.libc
 { getEnv } = std.sys.os
@@ -174,11 +175,14 @@ zo_nproc = (mp: MutPtr<Malloc>) i64 {
     })
 }
 // worker's inner loop: claim the next index with a fetch-add (atomic_add returns the NEW value, so the
-// claimed index is NEW-1), run its command, repeat until all indices are taken. `@while` (not recursion)
-// keeps the stack flat no matter how many cases one worker drains.
+// claimed index is NEW-1), run its command, repeat until all indices are taken. `step_while` (not
+// recursion) keeps the stack flat no matter how many cases one worker drains. NOT `repeat_while`,
+// which is the do-while shape this wants but MISCOMPILES here: its body closure reads an enclosing
+// PARAMETER as 0 (`n` above), so every worker claims nothing and exits — verified, and every suite
+// goes red at once when it does.
 zo_par_loop = (cmds: [StringView], n: i64, counter: RawPtr<u8>) void {
     go := true
-    @while (go) {
+    to_i64(0).step_while((s) { go }, (s) {
         idx := atomic_add_i64(counter, 1) - 1
         (idx < n).match ({
             true  => {
@@ -188,7 +192,8 @@ zo_par_loop = (cmds: [StringView], n: i64, counter: RawPtr<u8>) void {
                 go = false
             },
         })
-    }
+        s + 1
+    })
 }
 // non-capturing pthread body (std.thread contract): arg → [ cmds_base:i64 | n:i64 | counter_ptr:i64 ].
 // Rebuild the `[str]` command view from its base pointer and run the shared work loop.
@@ -223,17 +228,11 @@ zo_par_run_n* = (cmds: [StringView], n: i64, workers: i64) void {
         arg.offset(8).store_i64(n)
         arg.offset(16).store_i64(counter)
         handles := assert_nonnull(malloc(w * 8))
-        i: i64 := 0
-        @while (i < w) {
+        w.times((i) {
             hh := thread.spawn(zo_par_worker, arg)
             handles.offset(i * 8).store_i64(hh.tid)
-            i = i + 1
-        }
-        j: i64 := 0
-        @while (j < w) {
-            thread.JoinHandle(tid: handles.offset(j * 8).load_i64().offset(0)).join()
-            j = j + 1
-        }
+        })
+        w.times((j) { thread.JoinHandle(tid: handles.offset(j * 8).load_i64().offset(0)).join() })
         free(handles)
         free(arg)
         free(counter)

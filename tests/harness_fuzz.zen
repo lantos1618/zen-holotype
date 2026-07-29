@@ -25,6 +25,7 @@
 { len, try_parse_int, view } = std.text.str
 { String, new_in, append_in, finish_in, push_in } = std.text.string
 { expect } = std.core.result
+{ times } = std.core.count
 { Rng, seed } = std.rand
 // fixed, reproducible seed (NO Date.now — the sequence is identical on every run).
 FZ_SEED := 20260623
@@ -202,16 +203,13 @@ fz_crash_count = (mp: MutPtr<Malloc>, gid: i64) i32 {
 fz_batch = (mp: MutPtr<Malloc>, srcs: [StringView], n: i64) i32 {
     base := assert_nonnull(malloc(n * 8))
     cmds: [StringView] := base.slice(n)
-    i: i64 := 0
-    @while (i < n) {
+    n.times((i) {
         save(mp.zo_idpath("fz", i, ".zen"), srcs[i], len(srcs[i]))
         cmds[i] = mp.fz_cmd(i)
-        i = i + 1
-    }
+    })
     zo_par_run(cmds, n)
     crashes := 0
-    j: i64 := 0
-    @while (j < n) {
+    n.times((j) {
         cn := mp.fz_crash_count(j)
         (cn > 0).match ({
             true  => {
@@ -222,8 +220,7 @@ fz_batch = (mp: MutPtr<Malloc>, srcs: [StringView], n: i64) i32 {
             },
             false => out("."),
         })
-        j = j + 1
-    }
+    })
     free(base)
     crashes
 }
@@ -232,13 +229,11 @@ fz_batch = (mp: MutPtr<Malloc>, srcs: [StringView], n: i64) i32 {
 fz_soup_phase = (mp: MutPtr<Malloc>, toks: [StringView], nt: i64, rp: MutPtr<Rng>, n: i64) i32 {
     base := assert_nonnull(malloc(n * 8))
     srcs: [StringView] := base.slice(n)
-    i: i64 := 0
-    @while (i < n) {
+    n.times((i) {
         srcs[i] = mp
             .finish_in(mp.fz_soup(mp.new_in().expect("fuzz: oom"), toks, nt, rp, 0, rp.range(1, 30)))
             .expect("fuzz: oom")
-        i = i + 1
-    }
+    })
     r := mp.fz_batch(srcs, n)
     free(base)
     r
@@ -246,13 +241,11 @@ fz_soup_phase = (mp: MutPtr<Malloc>, toks: [StringView], nt: i64, rp: MutPtr<Rng
 fz_noise_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, n: i64) i32 {
     base := assert_nonnull(malloc(n * 8))
     srcs: [StringView] := base.slice(n)
-    i: i64 := 0
-    @while (i < n) {
+    n.times((i) {
         srcs[i] = mp
             .finish_in(mp.fz_noise(mp.new_in().expect("fuzz: oom"), rp, 0, rp.range(1, 60)))
             .expect("fuzz: oom")
-        i = i + 1
-    }
+    })
     r := mp.fz_batch(srcs, n)
     free(base)
     r
@@ -260,11 +253,7 @@ fz_noise_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, n: i64) i32 {
 fz_target_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, n: i64) i32 {
     base := assert_nonnull(malloc(n * 8))
     srcs: [StringView] := base.slice(n)
-    i: i64 := 0
-    @while (i < n) {
-        srcs[i] = mp.fz_targeted(rp, rp.range(0, 8))
-        i = i + 1
-    }
+    n.times((i) { srcs[i] = mp.fz_targeted(rp, rp.range(0, 8)) })
     r := mp.fz_batch(srcs, n)
     free(base)
     r
