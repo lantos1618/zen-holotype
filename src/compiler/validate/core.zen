@@ -11,20 +11,20 @@
 { is_empty } = std.text.str
 { assert_nonnull_kind, body_pos, cv_no_params, env_imported, env_is_enum, env_is_gen_struct,
   env_is_struct, env_known_fn, env_params, env_struct_fields, env_trait_method, expr_pos,
-  first_if_offset, first_qmark_offset, fn_name_of, fn_pos_of, fnt_arg_err_at, inf_gen_fields,
-  inf_gen_variants, inf_named_reaches, intrinsic_arity, is_badmatchlabel_call, is_dupmatcharm_call,
-  is_duplitarm_call, is_forbidden_raw_call, is_imported_generic, is_nonexhaust_lit_call,
-  is_unresolved_trait_call, null_deref_kind, pos_or, positive_count, shadow_not_callable,
-  shadows_toplevel, source_span, stmt_pos, store_mut_kind, trait_declaring, ty_carries_ptr,
-  unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind, ut_payloads_kind, utn_fields,
-  utn_func, utn_payloads } = compiler.validate.util
+  first_coroutine_offset, first_if_offset, first_qmark_offset, fn_name_of, fn_pos_of,
+  fnt_arg_err_at, inf_gen_fields, inf_gen_variants, inf_named_reaches, intrinsic_arity,
+  is_badmatchlabel_call, is_dupmatcharm_call, is_duplitarm_call, is_forbidden_raw_call,
+  is_imported_generic, is_nonexhaust_lit_call, is_unresolved_trait_call, null_deref_kind, pos_or,
+  positive_count, shadow_not_callable, shadows_toplevel, source_span, stmt_pos, store_mut_kind,
+  trait_declaring, ty_carries_ptr, unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind,
+  ut_payloads_kind, utn_fields, utn_func, utn_payloads } = compiler.validate.util
 { CheckDiagnostic, Diagnostic, KARGTYPE, KARITY, KARMVOID, KASSIGNFIT, KBOOLARM, KCONFORMANCE,
   KDUPFN, KDUPVARIANT, KESCAPE, KEXHAUST, KFALLTHROUGH, KINDEX, KINFINITETYPE, KLAMBDAVALUE, KLEAK,
   KDUPLITARM, KDUPMATCHARM, KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT,
-  KNOIF, KNOTCALLABLE, KNOTERNARY, KNULLDEREF, KOPERAND, KOWNERSHIP, KRETURNFIT, KSTRUCTFIELD,
-  KTARGARITY, KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN, desc_or, diagnostic_hint,
-  diagnostic_kind_name, diagnostic_message, diagnostic_span_width, name_errors_body,
-  name_errors_expr } = compiler.validate.diag
+  KNOCOROUTINE, KNOIF, KNOTCALLABLE, KNOTERNARY, KNULLDEREF, KOPERAND, KOWNERSHIP, KRETURNFIT,
+  KSTRUCTFIELD, KTARGARITY, KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN, desc_or,
+  diagnostic_hint, diagnostic_kind_name, diagnostic_message, diagnostic_span_width,
+  name_errors_body, name_errors_expr } = compiler.validate.diag
 { AliasList, DeadList, alias_nil, alias_step, count_loop_freed, dead_cons, dead_has, dead_nil,
   escape_step, expr_escapes, is_default_owner_method, is_owner_base, leak_alias_value,
   member_path_dead, mu_build_index, mu_func_kind, nm_read_or_leak, own_dead_body, own_moved_var,
@@ -165,6 +165,26 @@ check_module_no_ternary_diagnostic_from_source* = (src: StringView) CheckDiagnos
             count: 1,
             message: "ternary `?:` (and any `?`) is not part of Zen; conditional control flow is a visible postfix method, never punctuation",
             hint: "use `cond.then({ yes }, { no })` for a conditional expression, or `.match` for statement-position control flow",
+        ),
+    })
+}
+// The concurrency law, PERMANENT and beside no-if/no-ternary: `yield`, `async`, and `await` all ask to
+// SUSPEND a running function and resume it later. Zen's concurrency is Pony-style actors — a behaviour
+// runs to completion — so the language has no suspension point to name (stackful coroutines exist only
+// as @self-hosted-only substrate). The answer is a receiver, not a suspension: back-pressure is `send`
+// returning `bool` and end-of-stream is a `.Done` message, both ordinary values.
+check_module_no_coroutine_diagnostic_from_source* = (src: StringView) CheckDiagnostic {
+    pos := src.first_coroutine_offset()
+    (pos < 0).match ({
+        true  => check_diagnostic_none(),
+        false => CheckDiagnostic(
+            code: KNOCOROUTINE(),
+            kind: "no-coroutine",
+            source_offset: pos,
+            span_width: 5,
+            count: 1,
+            message: "`yield`, `async`, and `await` are not part of Zen; each suspends a running function mid-body, and a Pony-style actor behaviour always runs to completion",
+            hint: "build a receiver instead of suspending: declare the message enum (`Item*: Value(i64) | Done`), give the state a `Sum.impl(Receiver, { receive = (s, ctx) void { … } })`, then `spawn_handle` it and `send`; back-pressure is a value — `send` returns false when the mailbox is full — and end-of-stream is a `.Done` message, not a language feature",
         ),
     })
 }
