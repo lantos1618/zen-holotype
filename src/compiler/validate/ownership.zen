@@ -47,7 +47,7 @@ dead_has* = (seen: Ptr<DeadList>, name: StringView) bool {
     })
 }
 // REVIVAL: rebuild the kill-set without `name`. Rebinding a freed/moved local to a fresh value clears
-// its dead state (so `p := malloc(); a.release(p); p = malloc(); use(p)` and the idiomatic
+// its dead state (so `p = malloc(); a.release(p); p = malloc(); use(p)` and the idiomatic
 // `p = a.resize(p, n)` are NOT use-after-free). Removes every occurrence (dups are harmless).
 dead_remove* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, name: StringView) Ptr<DeadList> {
     seen.match ({
@@ -59,9 +59,9 @@ dead_remove* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, name: StringView) Ptr<De
     })
 }
 // ── ALIAS CLASSES (name-only) ────────────────────────────────────────────────────────────────────
-// `q := p` copies a POINTER, not the allocation: freeing either name frees the ONE allocation, so a
+// `q = p` copies a POINTER, not the allocation: freeing either name frees the ONE allocation, so a
 // later use (or second free) of the other name is a hole the per-name kill-set misses. We track
-// direct pointer-copy binds (`q := p` / `q = p`, both bare locals, pointer-typed) as ALIAS PAIRS;
+// direct pointer-copy binds (`q = p` / `q = p`, both bare locals, pointer-typed) as ALIAS PAIRS;
 // killing any name kills its whole (transitive) alias class, while REVIVAL stays per-name: rebinding
 // `q` detaches only `q` (its pairs are dropped, only `q` leaves the kill-set). Anything indirect —
 // field reads, call returns, `.addr()` — is deliberately untracked (under-reject, never over-reject),
@@ -413,7 +413,7 @@ is_deref_of_var = (e: Ptr<Expr>, pname: StringView) bool {
         _        => false,
     })
 }
-// locals bound to a deref of `pname` (`r := load(pname)`): consuming `r` later == consuming the pointee.
+// locals bound to a deref of `pname` (`r = load(pname)`): consuming `r` later == consuming the pointee.
 cdl_expr = (env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>, pname: StringView) Ptr<DeadList> {
     load(e).match ({
         .Match(m) => env.cdl_arms(seen, m.arms, pname),
@@ -612,7 +612,7 @@ own_stmt_call_kills = (
     })
 }
 // ── MOVE-OUT OF A STRUCT FIELD (audit hole) ────────────────────────────────────────────────────────
-// An `Own<T>` read OUT of a field in a MOVE position (`c := b.o`, `b.o` passed to a consuming Own
+// An `Own<T>` read OUT of a field in a MOVE position (`c = b.o`, `b.o` passed to a consuming Own
 // param, `b.o` into an Own field/element, `send(h, b.o)`, `b.o.release_in(a)`) moves the owner the
 // FIELD held — the struct keeps a bit-copy naming the SAME allocation, so a later free through the
 // field (`b.o.release_in(a)`) double-frees. The dead-set unit is a BINDING NAME, so the move kills
@@ -700,11 +700,11 @@ own_stmt_struct_kills = (
 // — the second move is a use-after-consume. Threads a FRESH in-literal kill-set so it counts ONLY the
 // Intra-literal duplicate tracking is separate from the already-dead binding check so the positioned
 // visitor reports the second move once, at the value that performs it.
-// AFFINE COPY: `c := o` / `c = o` where `o` is `Own<T>` MOVES o — a bare struct copy does NOT bump the
+// AFFINE COPY: `c = o` / `c = o` where `o` is `Own<T>` MOVES o — a bare struct copy does NOT bump the
 // refcount (only `.clone()` does), so both names free the ONE allocation → double-free. c becomes the
-// live owner; o's binding dies (later use of o → use-after-consume). `c := o.clone()` is a Call, not a
+// live owner; o's binding dies (later use of o → use-after-consume). `c = o.clone()` is a Call, not a
 // bare Var, so it is NOT a move (the legitimate two-owner path). Self-copy `o = o` moves nothing.
-// A `.Member` source (`c := b.o`, b.o an `Own<T>`) is the SAME affine move out of the field: the
+// A `.Member` source (`c = b.o`, b.o an `Own<T>`) is the SAME affine move out of the field: the
 // struct keeps a bit-copy of the owner, so the whole base binding dies (member_move_root).
 own_var_move = (env: Env, e: Ptr<Expr>, tgt: StringView) StringView {
     load(e).match ({
@@ -995,7 +995,7 @@ rebind_stmt_name = (a: MutPtr<Malloc>, st: Stmt) StringView {
         _          => "",
     })
 }
-// the source name of a direct pointer copy (`q := p` / `q = p`): a bare Var whose inferred type is a
+// the source name of a direct pointer copy (`q = p` / `q = p`): a bare Var whose inferred type is a
 // pointer (any `.Ptr` kind). Non-pointer copies (ints, structs, owners) never join an alias class.
 copy_src_name = (env: Env, e: Ptr<Expr>) StringView {
     load(e).match ({
@@ -1186,14 +1186,14 @@ own_step* = (
     // 2c'. STRUCT-FIELD / SLICE-ELEMENT move (re-census #63): an `Own<T>` moved into an Own struct-literal
     //      field / slice element is consumed here — later use of the source binding → UAF / double-free.
     out = a.own_stmt_struct_kills(env, out, al, st)
-    // 2d. AFFINE COPY: `c := o` / `c = o` (o an `Own<T>`) MOVES o — c is the live owner, o's binding dies.
+    // 2d. AFFINE COPY: `c = o` / `c = o` (o an `Own<T>`) MOVES o — c is the live owner, o's binding dies.
     mv = env.own_move_src(st)
     (mv.is_empty() == false).then({
         out = a.dead_kill(out, al, mv)
     })
     // 3. revival — a (re)bind of a local clears its dead state (ONLY that name: an alias of it stays
     //    dead). Runs LAST so `p = a.resize(p, n)` (free old p in step 2, then rebind p here) nets to
-    //    ALIVE, while `q := a.resize(p, n)` leaves p dead (q != p).
+    //    ALIVE, while `q = a.resize(p, n)` leaves p dead (q != p).
     rb = a.rebind_stmt_name(st)
     (rb.is_empty() == false).then({
         out = a.dead_remove(out, rb)
@@ -1472,11 +1472,11 @@ mu_is_var = (e: Expr) bool {
     })
 }
 // SHADOWING GATE: UFCS only ever desugars to a TOP-LEVEL name, so a call through a name bound
-// LOCALLY — a param, or a `f := (x: i64) void {…}` local — is never a method call and has no
+// LOCALLY — a param, or a `f = (x: i64) void {…}` local — is never a method call and has no
 // receiver. Without this, an unrelated `f(i)` was flagged in any module whose closure declares a
 // value-mold `f` (std.text.fmt's `Printer.f`). This pass runs BEFORE resolve, so shadowing is
 // decided by NAME alone: `bound` is the set of names bound in the enclosing function, carried down
-// the walk (params up front, each `:=` as the walk passes it, lambda/loop bindings at their arm).
+// the walk (params up front, each `=` as the walk passes it, lambda/loop bindings at their arm).
 // A `.MethodCall` names its receiver explicitly, so a like-named local does not shadow it.
 mu_bound_names = (a: MutPtr<Malloc>, bound: Ptr<DeadList>, params: [Param]) Ptr<DeadList> {
     out ::= bound
@@ -1612,7 +1612,7 @@ let_is_scope_derived = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
     svars.is_scope_acquire(e) || svars.is_scope_alloc_member(e)
 }
 // aliasing laundering: a value that IS an already-derived local — a bare Var, or a member/arrow chain
-// rooted at one — so `q := p` / `q := p.f` taints `q` once `p` is derived.
+// rooted at one — so `q = p` / `q = p.f` taints `q` once `p` is derived.
 expr_is_derived = (derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
     load(e).match ({
         .Var(v)    => derived.dead_has(v.name),
@@ -1622,7 +1622,7 @@ expr_is_derived = (derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
     })
 }
 // a `let` value that becomes a derived local: a scope acquire / `s.alloc` field, an alias of one, OR any
-// value the escape walk itself says carries a scope value out (`q := [p]`, `q := Box(p: s.acquire(n))`) —
+// value the escape walk itself says carries a scope value out (`q = [p]`, `q = Box(p: s.acquire(n))`) —
 // so a binding cannot launder through a shape the two narrower tests do not name.
 let_taints = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
     svars.let_is_scope_derived(e) || derived.expr_is_derived(e) || a.expr_escapes(svars, derived, e)
