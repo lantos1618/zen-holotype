@@ -2497,6 +2497,46 @@ harness_verdict_run* = () i32 {
             kind: "leak",
         ),
         VerdictCase(
+            src: "{ expect } = std.core.result\nvec = std.collections.vec\nhalloc = std.mem.heap\ntest* = () i64 {\n    m := halloc.gpa()\n    v := vec.of(m.addr(), [1, 2, 3]).expect(\"v\")\n    v.free(m.addr())\n    v.len()\n}",
+            should_pass: false,
+            kind: "ownership",
+        ),
+        VerdictCase(
+            src: "{ expect } = std.core.result\nvec = std.collections.vec\nhalloc = std.mem.heap\ntest* = () i32 {\n    m := halloc.gpa()\n    v := vec.of(m.addr(), [1, 2, 3]).expect(\"v\")\n    v.free(m.addr())\n    v.free(m.addr())\n    0\n}",
+            should_pass: false,
+            kind: "ownership",
+        ),
+        VerdictCase(
+            src: "{ expect } = std.core.result\nvec = std.collections.vec\nhalloc = std.mem.heap\ntest* = () i64 {\n    m := halloc.gpa()\n    v := vec.of(m.addr(), [1, 2, 3]).expect(\"v\")\n    n := v.len()\n    v.free(m.addr())\n    n\n}",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "{ expect } = std.core.result\nset = std.collections.set\nhalloc = std.mem.heap\ntest* = () i64 {\n    m := halloc.gpa()\n    s := set.of(m.addr(), 7).expect(\"s\")\n    s.free(m.addr())\n    s.len()\n}",
+            should_pass: false,
+            kind: "ownership",
+        ),
+        VerdictCase(
+            src: "{ expect } = std.core.result\nmap = std.collections.map\nhalloc = std.mem.heap\ntest* = () i64 {\n    m := halloc.gpa()\n    d := map.of(m.addr(), \"k\", 1).expect(\"d\")\n    d.free(m.addr())\n    d.len()\n}",
+            should_pass: false,
+            kind: "ownership",
+        ),
+        VerdictCase(
+            src: "{ Malloc } = std.mem.alloc\n{ String, init, free_in } = std.text.string\n{ expect } = std.core.result\ntest* = () i64 {\n    m := Malloc(_: 0)\n    a := m.addr()\n    s := a.init(8).expect(\"s\")\n    s.free_in(a)\n    s.len\n}",
+            should_pass: false,
+            kind: "ownership",
+        ),
+        VerdictCase(
+            src: "halloc = std.mem.heap\n{ Allocator } = std.mem.alloc\nBlob*: {\n    ptr: RawPtr<u8>,\n    n: i64,\n    deinit = (b: Blob, a: Allocator) void { a.release(b.ptr) }\n}\ntest* = () i64 {\n    m := halloc.gpa()\n    b := Blob(\n        ptr: m.addr().acquire(16),\n        n: 16,\n    )\n    b.deinit(m.addr())\n    b.n\n}",
+            should_pass: false,
+            kind: "ownership",
+        ),
+        VerdictCase(
+            src: "halloc = std.mem.heap\n{ Allocator } = std.mem.alloc\nBlob*: {\n    ptr: RawPtr<u8>,\n    n: i64,\n    deinit = (b: Blob, a: Allocator) void { a.release(b.ptr) }\n}\ntest* = () i64 {\n    m := halloc.gpa()\n    b := Blob(\n        ptr: m.addr().acquire(16),\n        n: 16,\n    )\n    deinit(b, m.addr())\n    b.n\n}",
+            should_pass: false,
+            kind: "ownership",
+        ),
+        VerdictCase(
             src: "{ Own, new_in, Resource } = std.mem.own\n{ expect } = std.core.result\nhalloc = std.mem.heap\ntest* = () i32 {\n    alloc := halloc.gpa()\n    a := alloc.addr()\n    o := a.new_in(Resource(id: 7, slot: 0)).expect(\"own\")\n    o.release_in(a)\n    0\n}",
             should_pass: true,
             kind: "",
@@ -3292,6 +3332,12 @@ harness_verdict_run* = () i32 {
             kind: "parse",
         ),
     ])
+    // RELEASE BY PROVENANCE (Bug B): the UAF matcher keyed on the verb `free` at ARITY 1, so the
+    // UFCS `v.free(a)` — `free(v, a)`, two args — walked past it, and Vec/Set/Map/HMap/BTreeMap/
+    // BTreeSet/ActorSystem/ActorCell/ActorHandle all spell their release exactly that way. The rule
+    // now resolves the call through the RECEIVER'S TYPE and asks the resolved method's body whether
+    // it releases the receiver's storage, so the last two cases — a verb the checker has never heard
+    // of, in both call spellings — are caught for the same reason as `free`.
     // ONE SPELLING PER JOB: `x: T = v` is not a second spelling of `x: T := v` — `:=` binds, `=`
     // assigns, `:` annotates, and adding a type must not change the binding operator. Both
     // statement positions (a body, a nested block) reject; the `:=` form is unchanged.

@@ -4,7 +4,8 @@
 { gstr_append, gstr_finish, gstr_string, k_mut_ptr, k_slice_dflt, ptr_kw, slice_kw, tnamed, tvoid,
   acquire_or_die, acquire_or_die } = compiler.genc
 { impl_cname_in } = compiler.mangle
-{ DeclIndex, Env, arm_env, extend_env, is_intrinsic, is_void_ty, pointee_of, recv_name } = compiler.check
+{ DeclIndex, Env, arm_env, dispatch_recv, dispatch_recv_name, extend_env, is_intrinsic, is_void_ty,
+  pointee_of, recv_name } = compiler.check
 { Malloc } = std.mem.alloc
 { slice_any } = compiler.astops
 { expr_fold_children } = compiler.ast.expr_children
@@ -821,7 +822,7 @@ mode_sendable = (m: i32) bool { m == md_owned() || m == md_frozen() }
 // `release` from the owner `o.release(a)` consume (handled by is_consume_method). Returns the freed
 // bare-local name, or "" when nothing simple is freed.
 alloc_free_call_name = (env: Env, c: CallData) StringView {
-    c.fn.sx_named("free", "__free").match ({
+    direct := c.fn.sx_named("free", "__free").match ({
         true  => (c.args.len == 1).then({ c.arg_var_name(0) }, { "" }),
         false => (c.fn.sx_named("release", "__release")
             || c.fn.sx_named("release_slice", "__release_slice")).match ({
@@ -836,6 +837,101 @@ alloc_free_call_name = (env: Env, c: CallData) StringView {
                 }),
                 false => "",
             }),
+        }),
+    })
+    direct.is_empty().then({ env.recv_free_call_name(c) }, { direct })
+}
+// ── RELEASE BY PROVENANCE, not by spelling ───────────────────────────────────────────────────────
+// The three matchers above name a VERB at an ARITY, so `v.free(a)` — which desugars to `free(v, a)`,
+// two args — walked straight past the arity-1 `free`, and no use-after-free was reported for Vec, Set,
+// Map, HMap, BTreeMap, BTreeSet, ActorSystem, ActorCell or ActorHandle: every one of them spells its
+// release `free(self, Allocator)`. Widening the arity would only move the hole one hop — `deinit`,
+// `close`, `dispose`, `free_in` and the next container's verb are each one rename away.
+// So the rule below keys on NEITHER the name NOR the arity. It resolves the call through the
+// RECEIVER'S TYPE — the same dispatch the compiler itself performs — and asks the RESOLVED METHOD'S
+// BODY whether it releases storage rooted at its own receiver parameter. A call consumes because of
+// what the callee DOES, so a new container earns the rule the day its method frees a pointer, under
+// any verb, at any arity, in either call spelling (`v.free(a)` and `free(v, a)` reach here as the
+// same flat Call, so one lookup answers both).
+// Two deliberate limits, both UNDER-rejects:
+//   · the receiver must be a BARE LOCAL — a member receiver would kill the whole base binding, and
+//     the stdlib's grow paths free a field pointer (`a.release(m.keys)`) while the base stays live;
+//   · the release must be UNGUARDED (in the body's straight-line statements, or one bounded hop
+//     from them). A release the callee gates on its own state is a DECLINE protocol — `Vec.drop` and
+//     `String.drop` free only when `carried` — and treating a may-free as a definite consume would
+//     make that documented protocol unwriteable.
+recv_free_call_name = (env: Env, c: CallData) StringView {
+    nm := c.arg_var_name(0)
+    (nm.is_empty() == false && env.callee_releases_recv(c)).then({ nm }, { "" })
+}
+// The method `c` dispatches to through arg 0's TYPE — "" when the receiver's type provides no such
+// method. Deliberately NOT falling back to the flat fn of the same name: Zen's namespace is flat, so
+// `release`/`free`/`drop` name several unrelated functions, and picking one by spelling is exactly the
+// mistake this rule exists to stop (it made `a.release(m.keys)` inside `Map.free` kill the ALLOCATOR).
+recv_callee_name = (env: Env, c: CallData) StringView {
+    tyn := env.infer_expr(c.args[0].addr()).dispatch_recv_name()
+    cn := tyn.is_empty().then({ c.fn }, { env.a.dispatch_recv(env.decls, env.didx, c.fn, tyn) })
+    (cn == c.fn).then({ "" }, { cn })
+}
+callee_releases_recv = (env: Env, c: CallData) bool {
+    cn := env.recv_callee_name(c)
+    cn.is_empty().then({ false }, { env.fn_releases_param(cn, 0, consume_depth()) })
+}
+// does the KNOWN fn `fn` release storage rooted at its param `pi`, on the way through? Depth-bounded,
+// so mutual and self recursion terminate (exhausting it answers `false` — under-reject, never over).
+fn_releases_param = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
+    f := env.env_func(fn)
+    (depth > 0 && f.name == fn && pi >= 0 && pi < f.params.len).match ({
+        true  => env.body_releases_param(f.body, f.params[pi].name, depth),
+        false => false,
+    })
+}
+body_releases_param = (env: Env, body: [Stmt], pname: StringView, depth: i32) bool {
+    body.slice_any((st) { env.stmt_releases_param(st, pname, depth) })
+}
+stmt_releases_param = (env: Env, st: Stmt, pname: StringView, depth: i32) bool {
+    st.match ({
+        .ExprStmt(e) => env.expr_releases_param(e, pname, depth),
+        .Let(l)      => env.expr_releases_param(l.value, pname, depth),
+        .Assign(x)   => env.expr_releases_param(x.value, pname, depth),
+        .Return(r)   => env.expr_releases_param(r, pname, depth),
+        _            => false,
+    })
+}
+expr_releases_param = (env: Env, e: Ptr<Expr>, pname: StringView, depth: i32) bool {
+    load(e).match ({
+        .Call(c) => c.alloc_free_root_name() == pname || env.call_forwards_release(c, pname, depth),
+        _        => false,
+    })
+}
+// `pname` handed to a known callee that releases it: `String.free_in`'s whole body is `a.free_in(s)`,
+// one hop from the `a.release(s.ptr)` that does the work.
+call_forwards_release = (env: Env, c: CallData, pname: StringView, depth: i32) bool {
+    found := false
+    (env.env_params(c.fn).len == c.args.len).then({
+        c.args.loop((h, i, ar) {
+            (ar.addr().expr_root_var() == pname && env.fn_releases_param(c.fn, i, depth - 1)).then({
+                found = true
+            })
+        })
+    })
+    found
+}
+// The freed name of an allocator free, allowing a MEMBER root: `a.release(v.ptr)` answers "v". Used
+// only inside a callee-body summary, where the question is "does this body release storage rooted at
+// the parameter" — at a CALL SITE the strict bare-Var `alloc_free_call_name` above still decides
+// which of the CALLER's locals died, so a field free never kills a whole base binding. Structural,
+// like every other summary leaf: the callee's own locals are not bound in the Env driving the walk.
+alloc_free_root_name = (c: CallData) StringView {
+    (c.fn.sx_named("free", "__free") && c.args.len == 1).match ({
+        true  => c.args[0].addr().expr_root_var(),
+        false => ((c.fn.sx_named("release", "__release")
+            || c.fn.sx_named("release_slice", "__release_slice")
+            || c.fn.sx_named("resize", "__resize"))
+            && c.args.len >= 2
+            && c.args.len <= 3).match ({
+            true  => c.args[1].addr().expr_root_var(),
+            false => "",
         }),
     })
 }
