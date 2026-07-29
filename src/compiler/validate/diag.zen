@@ -201,6 +201,8 @@ KEXPECTEXPR* = () i32 { 55 }    // a token that can begin no expression (the par
 KEXPECTDECL* = () i32 { 56 }    // a token that can begin no top-level declaration (the parser's `__expected_decl` sentinel)
 KEXPECTINIT* = () i32 { 57 }    // a `:=` with no expression after it; caret on the `:=` (the parser's `__expected_init` sentinel)
 KEOFINPUT* = () i32 { 58 }    // end of input in the middle of an expression (the parser's `__unexpected_eof` sentinel)
+KBINDOP* = () i32 { 62 }    // a local binding spelled `x: T = v`; `:=` binds a new name and `=` assigns to an existing one, so an annotation must not change the operator (the parser's `__typed_assign` sentinel). Statement-level sibling of KBADBIND
+KFIELDDEFAULT* = () i32 { 63 }    // a struct field default (`total: i64 = 0`) whose value is not a constant — a computed/allocating default would be a hidden per-construction effect (the parser's `__field_default` sentinel)
 Diagnostic*: {
     code: i32,
     kind: StringView,
@@ -620,6 +622,20 @@ diag_info = (code: i32) DiagInfo {
             kind: "parse",
             message: "unexpected end of input while parsing an expression",
             hint: "the file ends mid-expression — finish it, or close the delimiter it left open",
+        )
+    })
+    (code == 62).then({
+        return DiagInfo(
+            kind: "bad-binding",
+            message: "`x: T = v` is not a binding; `:=` binds a new name, `=` assigns to an existing one, and `:` annotates — adding a type must not change the binding operator",
+            hint: "write `x: T := v` to bind the annotated name; keep a single `=` for assigning a name that already exists (`x = v`)",
+        )
+    })
+    (code == 63).then({
+        return DiagInfo(
+            kind: "field-default",
+            message: "a struct field default must be a constant (an integer, float, string, or char literal, `true`, or `false`)",
+            hint: "a default is re-evaluated at every construction, so a call or an allocation here would be a hidden per-value effect; use a constant, or set the field explicitly at the construction site",
         )
     })
     (code == 47).then({

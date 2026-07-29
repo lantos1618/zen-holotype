@@ -2,9 +2,9 @@
 // type-parameter list (`<A, B: Trait>`). Produces StructEnd/EnumEnd/TParamEnd for the top-level
 // dispatch in compiler.parse. Distinct from compiler.parse_type, which parses type EXPRESSIONS.
 // Split out of the compiler.parse god file. Style: UFCS throughout.
-{ Field, StructDecl, EnumDecl, VariantDef, Ty, Param, Func } = compiler.ast.ast_types
-{ param, field, sdef_at, edef_at, vdef, vdef_default, tnamed, tvoid, fnt_from_func_in,
-  acquire_or_die, acquire_or_die } = compiler.genc
+{ Expr, Field, StructDecl, EnumDecl, VariantDef, Ty, Param, Func } = compiler.ast.ast_types
+{ param, field, field_default, expr_null, sdef_at, edef_at, vdef, vdef_default, tnamed, tvoid,
+  fnt_from_func_in, acquire_or_die, acquire_or_die } = compiler.genc
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
@@ -12,8 +12,8 @@
 { is_ident_tok } = compiler.parse_postfix
 { is_lparen } = compiler.parse_primary
 { parse_bxor } = compiler.parse_expr
-{ parse_ty, parse_variant_payload, perr_set_at, PEnd, is_langle, is_rangle, is_rbrace, is_comma,
-  param_buf, skip_to_brace, take_params } = compiler.parse_type
+{ parse_ty, parse_variant_payload, perr_set_at, perr_set_kind_at, PE_FIELDDEFAULT, PEnd, is_langle,
+  is_rangle, is_rbrace, is_comma, param_buf, skip_to_brace, take_params } = compiler.parse_type
 { parse_decl_at, decl_marker, is_colon, is_star } = compiler.parse
 StructEnd*: {
     sd: StructDecl,
@@ -159,6 +159,46 @@ fill_field_default = (
     nxt := src.is_comma(after.tok).then({ after.next }, { de.next })
     a.fill_fields(src, nxt, buf, i + 1, dbuf, dn + 1)
 }
+// ── FIELD DEFAULTS `total: i64 = 0` ─────────────────────────────────────────────────────────────
+// A struct literal that omits the field gets this value instead of C's zero-fill (compiler
+// .check_resolve.fill_field_defaults). The value must be a CONSTANT — a literal, `true`/`false`, or
+// arithmetic over them (`-1` parses as `0 - 1`). A default is re-evaluated at every construction, so
+// anything that CALLS could allocate there, and Zen keeps every allocation visible at its site: a
+// non-constant default is `error[field-default]` rather than a hidden per-value effect.
+FDflt: {
+    expr: Ptr<Expr>,
+    next: i32,
+}
+field_dflt_const = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Int(v)      => true,
+        .Byte(b)     => true,
+        .FloatLit(f) => true,
+        .StrLit(sd)  => true,
+        .Var(v)      => v.name == "true" || v.name == "false",
+        .Bin(b)      => b.lhs.field_dflt_const() && b.rhs.field_dflt_const(),
+        _            => false,
+    })
+}
+field_dflt = (a: MutPtr<Malloc>, src: StringView, pos: i32) FDflt {
+    eq := src.scan(pos)
+    src.is_op1(eq.tok, '=').match ({
+        true  => {
+            de := a.parse_bxor(src, eq.next)
+            (de.expr.field_dflt_const() == false).then({
+                perr_set_kind_at(src.scan(eq.next).tok.start, PE_FIELDDEFAULT())
+            })
+            FDflt(
+                expr: de.expr,
+                next: de.next,
+            )
+        },
+        false => FDflt(
+            expr: expr_null(),
+            next: pos,
+        ),
+    })
+}
 fill_field = (
     a: MutPtr<Malloc>,
     src: StringView,
@@ -184,12 +224,13 @@ fill_field = (
         true  => a.fill_field_default(src, pos, buf, i, dbuf, dn, nm),
         false => {
             te := a.parse_ty(src, mk.next)
-            buf[i] = field(nm, te.ty)
-            after := src.scan(te.next)
+            df := a.field_dflt(src, te.next)
+            buf[i] = field_default(nm, te.ty, df.expr)
+            after := src.scan(df.next)
             src.is_comma(after.tok).match ({
                 true  => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn),
                 false => is_ident_tok(after.tok).match ({
-                    true  => a.fill_fields(src, te.next, buf, i + 1, dbuf, dn),
+                    true  => a.fill_fields(src, df.next, buf, i + 1, dbuf, dn),
                     false => {
                         // A no-trailing-comma field list closes on `}`; anything else (a stray token, or EOF on an
                         // unterminated `{ …`) is a positioned parse error, not a silent close (task: unclosed `{`).

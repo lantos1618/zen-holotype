@@ -16,8 +16,8 @@
 { is_field_colon } = compiler.parse_primary
 { parse_or } = compiler.parse_expr
 { is_lbracket, is_rbracket, is_rbrace, lbrace_off, skip_to_brace, skip_to_lparen, tok_eq, parse_ty,
-  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, PE_INIT, bopen_enter, bopen_exit,
-  pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
+  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, PE_INIT, PE_TYPEDASSIGN, bopen_enter,
+  bopen_exit, pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
 // get materialized into a HEAP [Stmt] for genc. A stack `[…]` literal can't be used — it
@@ -50,9 +50,9 @@ is_let_here = (src: StringView, pos: i32) bool {
         _      => false,
     })
 }
-// a TYPED let `name : Type :=` / `name : Type =` — an Ident, a single ':', a type, then ':='/'='. Lets a
-// user write `x: i32 := 5` / `x: i32 = 5`; the annotation is parsed (to find the '=') then DISCARDED (the
-// binding infers like a plain `x := 5`). Was: misclassified as a bare expr statement → mis-parsed (fuzz #9).
+// a TYPED let `name : Type :=` — an Ident, a single ':', a type, then ':='. The `=` spelling is
+// classified here TOO so it gets the rule-naming diagnostic below instead of a mis-parse (fuzz #9);
+// see check_bind_op. Top-level globals already require `:=` (parse.decl_is_typed_global).
 is_typed_let_here = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
     sc := src.scan(pos)
     sc.tok.kind.match ({
@@ -421,13 +421,22 @@ parse_let_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
     v := a.parse_or(src, at.next)    // value (full expression, incl. comparison)
     a.scons(slet_at(name, v.expr, nt.tok.start), a.parse_stmts(src, v.next))
 }    // … then the rest of the body
-// `name : Type := value` / `name : Type = value` — annotation is parsed, checked, and drives inference.
+// ONE spelling per job: `:=` binds a new name, `=` assigns to an existing one, `:` annotates. The
+// three marks are orthogonal and compose, so an annotation must not change the binding operator —
+// `x: T = v` is rejected (error[bad-binding]) rather than accepted as a second spelling of `x: T := v`.
+check_bind_op = (src: StringView, op: Token) void {
+    (src.is_walrus(op) == false).then({
+        perr_set_kind_at(op.start, PE_TYPEDASSIGN())
+    })
+}
+// `name : Type := value` — annotation is parsed, checked, and drives inference.
 parse_typed_let_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
     nt := src.scan(pos)
     name := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)    // ':'
     te := a.parse_ty(src, colon.next)    // type annotation; te.next lands at ':='/'='
     op := src.scan(te.next)
+    src.check_bind_op(op.tok)
     v := a.parse_or(src, op.next)    // value
     a.scons(slett_at(name, te.ty, v.expr, nt.tok.start), a.parse_stmts(src, v.next))
 }
@@ -568,8 +577,9 @@ block_typed_let = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
     nt := src.scan(pos)
     name := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)    // ':'
-    te := a.parse_ty(src, colon.next)    // (discarded) type annotation
-    op := src.scan(te.next)    // ':=' / '='
+    te := a.parse_ty(src, colon.next)    // type annotation
+    op := src.scan(te.next)    // ':='
+    src.check_bind_op(op.tok)
     v := a.parse_or(src, op.next)
     rest := a.parse_block(src, v.next)
     BlockEnd(

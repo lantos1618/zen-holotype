@@ -73,7 +73,7 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "R*: Ok(StringView) | Err(i32)\nmain = () i32 {\n    done := false\n    s: StringView := \"init\"\n    r: R = .Err(3)\n    s = r.match ({ .Ok(ns) => ns, .Err(e) => {\n        done = true\n        s\n    } })\n    0\n}\n",
+            src: "R*: Ok(StringView) | Err(i32)\nmain = () i32 {\n    done := false\n    s: StringView := \"init\"\n    r: R := .Err(3)\n    s = r.match ({ .Ok(ns) => ns, .Err(e) => {\n        done = true\n        s\n    } })\n    0\n}\n",
             should_pass: true,
             kind: "",
         ),
@@ -1427,7 +1427,7 @@ harness_verdict_run* = () i32 {
     // (i32 := 2G+2G still assign-fit).
     b := run_verdicts("verdict-kind", [
         VerdictCase(
-            src: "R*: Ok(StringView) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
+            src: "R*: Ok(StringView) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R := .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
             should_pass: false,
             kind: "arm-value",
         ),
@@ -1512,7 +1512,7 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "side = () void { }\nR*: Ok(StringView) | Err(i32)\nmain = () i32 {\n    r: R = .Err(3)\n    s := r.match ({ .Ok(ns) => ns, .Err(e) => side() })\n    0\n}\n",
+            src: "side = () void { }\nR*: Ok(StringView) | Err(i32)\nmain = () i32 {\n    r: R := .Err(3)\n    s := r.match ({ .Ok(ns) => ns, .Err(e) => side() })\n    0\n}\n",
             should_pass: false,
             kind: "arm-value",
         ),
@@ -1522,7 +1522,7 @@ harness_verdict_run* = () i32 {
             kind: "arm-value",
         ),
         VerdictCase(
-            src: "use_s = (s: StringView) i32 { 0 }\nR*: Ok(StringView) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R = .Err(3)\n    use_s(r.match ({ .Ok(ns) => ns, .Err(e) => { done = true } }))\n}\n",
+            src: "use_s = (s: StringView) i32 { 0 }\nR*: Ok(StringView) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R := .Err(3)\n    use_s(r.match ({ .Ok(ns) => ns, .Err(e) => { done = true } }))\n}\n",
             should_pass: false,
             kind: "arm-value",
         ),
@@ -3251,7 +3251,54 @@ harness_verdict_run* = () i32 {
             should_pass: true,
             kind: "",
         ),
+        VerdictCase(
+            src: "test* = () i32 {\n    x: i64 = 5\n    x.to_i32()\n}\n",
+            should_pass: false,
+            kind: "bad-binding",
+        ),
+        VerdictCase(
+            src: "test* = () i32 {\n    n := 0\n    @while (n < 1) {\n        y: i64 = 2\n        n = n + 1\n    }\n    n\n}\n",
+            should_pass: false,
+            kind: "bad-binding",
+        ),
+        VerdictCase(
+            src: "test* = () i32 {\n    x: i64 := 5\n    x = x + 1\n    x.to_i32() - 6\n}\n",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "seed = () i64 { 3 }\nD: { n: i64 = seed() }\ntest* = () i32 { 0 }\n",
+            should_pass: false,
+            kind: "field-default",
+        ),
+        VerdictCase(
+            src: "halloc = std.mem.heap\nD: { p: RawPtr<u8> = halloc.gpa().addr().acquire(64) }\ntest* = () i32 { 0 }\n",
+            should_pass: false,
+            kind: "field-default",
+        ),
+        VerdictCase(
+            src: "D: { n: i64 = -1, f: f64 = 1.5, s: StringView = \"hi\", b: bool = true }\ntest* = () i32 { 0 }\n",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "f = (x) i32 { 0 }\ntest* = () i32 { f(1) }\n",
+            should_pass: false,
+            kind: "parse",
+        ),
+        VerdictCase(
+            src: "S: { v: i32 }\nTr*: { m: (MutPtr<Self>, i32) i32 }\nS.impl(Tr, {\n    m = (s, k) i32 { s.v }\n})\ntest* = () i32 { 0 }\n",
+            should_pass: false,
+            kind: "parse",
+        ),
     ])
+    // ONE SPELLING PER JOB: `x: T = v` is not a second spelling of `x: T := v` — `:=` binds, `=`
+    // assigns, `:` annotates, and adding a type must not change the binding operator. Both
+    // statement positions (a body, a nested block) reject; the `:=` form is unchanged.
+    // FIELD DEFAULTS are constants: a default is re-evaluated at every construction, so a call
+    // (and therefore an allocation) there would be a hidden per-value effect — no hidden heap.
+    // The bare receiver is legal ONLY in an impl block's first parameter slot; everywhere else an
+    // unannotated parameter is still a parse error, and only the receiver slot may be bare.
     // WALKER DELEGATION (this PR): every rule below was blind to a POSITION, not to a shape. The four
     // lambda-body cases (ownership use-after-consume, consume INSIDE the lambda, sendable, must-use)
     // are one defect — a `_` arm that omitted `.Lambda` — and the leak cases are the same defect on

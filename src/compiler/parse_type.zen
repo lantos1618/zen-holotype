@@ -14,7 +14,7 @@
 { Malloc } = std.mem.alloc
 { is_op, lexeme } = compiler.parse_atom
 { is_dot, is_field_at, is_ident_tok } = compiler.parse_postfix
-{ afield_buf, is_lparen } = compiler.parse_primary
+{ afield_buf, is_field_colon, is_lparen } = compiler.parse_primary
 { times } = std.core.count
 // ── PARSER TOTALITY: the module-wide parse-failure flag ──────────────────────────
 // The recursive-descent parsers have no error channel (every result is a plain value), so a parse
@@ -48,6 +48,8 @@ PE_EXPR* = () i32 { 5 }    // a token that cannot begin an expression
 PE_DECL* = () i32 { 6 }    // a token that cannot begin a top-level declaration
 PE_INIT* = () i32 { 7 }    // a `:=` with no expression after it — offset = the `:=`
 PE_EOF* = () i32 { 8 }    // end of input in the middle of an expression
+PE_TYPEDASSIGN* = () i32 { 9 }    // a local binding spelled `x: T = v` — a new name binds with `:=`, never `=`
+PE_FIELDDEFAULT* = () i32 { 10 }    // a struct field default that is not a constant — offset = the offending token
 perr_set* = () void { parse_failed = 1 }
 // flag + record the failing token's source offset AND its taxonomy kind (first offset-bearing site
 // wins, so the kind and the offset it carets always describe the SAME failure).
@@ -687,10 +689,62 @@ fill_one = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) 
     nt := src.scan(pos)    // param name
     nm := a.lexeme(src, nt.tok)
     colon := src.scan(nt.next)    // ':'
+    (irecv_on() && i == 0 && src.is_field_colon(colon.tok) == false).then({
+        return a.fill_recv(src, nm, nt.next, buf, i)
+    })
     src.is_ellipsis(colon.next).match ({
         true  => a.fill_variadic(src, nm, colon.next, buf, i),
         false => a.fill_fixed(src, nm, colon.next, buf, i),
     })
+}
+// ── IMPL RECEIVER: an impl method's first parameter may be written bare ─────────────────────────
+// `Type.impl(Tr, { m = (s, ctx: Ctx) void { … } })` — the receiver's type is structurally known (it
+// is the type the impl is on), so annotating it is noise. Only that slot may be bare, and only
+// inside an impl block: elsewhere an unannotated parameter stays a parse error, and the trait's
+// OTHER parameter types are not in reach here (the trait decl may live in another module, and
+// `Type.impl(mod, …)` names a module, not a trait), so they keep their annotations.
+irecv := 0
+irecv_enter* = () i32 {
+    prev := irecv
+    irecv = 1
+    prev
+}
+irecv_exit* = (prev: i32) void { irecv = prev }
+irecv_on = () bool { irecv == 1 }
+// the bare receiver slot: parsed as void, filled by impl_recv_param once the receiver name is known.
+fill_recv = (
+    a: MutPtr<Malloc>,
+    src: StringView,
+    nm: StringView,
+    pos: i32,
+    buf: [Param],
+    i: i32,
+) PEnd {
+    buf[i] = param(nm, tvoid())
+    after := src.scan(pos)    // ',' or ')'
+    src.is_comma(after.tok).match ({
+        true  => a.fill_params(src, after.next, buf, i + 1),
+        false => PEnd(
+            count: i + 1,
+            next: after.next,
+        ),
+    })
+}
+// Give a bare receiver the impl's type as `MutPtr<Type>`: every trait in src/std declares its
+// receiver `MutPtr<Self>` (a behaviour that mutates its state must), and a read-only method reads
+// through the pointer just as well — whereas inferring the by-value form would silently mutate a
+// copy. The by-value receiver stays available by writing it out.
+recv_is_bare = (t: Ty) bool {
+    t.match ({
+        .Void => true,
+        _     => false,
+    })
+}
+impl_recv_param* = (a: MutPtr<Malloc>, tyname: StringView, ps: [Param]) [Param] {
+    (ps.len > 0 && ps[0].ty.recv_is_bare()).then({
+        ps[0] = param(ps[0].name, tptr_k(a.tynode(tnamed(tyname)), k_mut_ptr()))
+    })
+    ps
 }
 fill_fixed = (
     a: MutPtr<Malloc>,

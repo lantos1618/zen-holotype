@@ -6,9 +6,9 @@
   GlobalData, LetData, LoopData, MakeStructData, MatchData, MemberData, Param, SliceData, Stmt, Ty } = compiler.ast.ast_types
 { arith_rty, arm_at, arrow_at, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc,
   dglobal, dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish,
-  gstr_string, is_expr_null, lit, member, member_at, mkenumg, mkstructg_at, mktag, mktagg, no_tys,
-  sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret, subst_ty_in, swhile, ti32,
-  tvoid, vref } = compiler.genc
+  gstr_string, is_expr_null, lit, member, member_at, mkenumg, mkstruct_at, mkstructg_at, mktag,
+  mktagg, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret,
+  subst_ty_in, swhile, ti32, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
 { gstr_int, is_prim_width, map_slice, one_stmt, param_names_has, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
@@ -306,10 +306,75 @@ init_exp_ty = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, fname: StringVie
     })
 }
 resolve_inits = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit]) [FieldInit] {
-    map_slice(a, inits, (fi) {
+    written := map_slice(a, inits, (fi) {
         finit(fi.name, a.resolve_expr(env.with_exp(a.init_exp_ty(env, sd, fi.name)), fi.value))
     })
+    a.fill_field_defaults(env, sd, written)
 }
+// ── FIELD DEFAULTS: `Sum*: { total: i64 = 0 }` ──────────────────────────────────────────────────
+// A literal that OMITS a field declaring a default gets that constant; a field with no default
+// keeps C's designated-initializer zero-fill, so every literal written before defaults existed is
+// byte-for-byte unchanged. The written inits come first and WIN — the appended slots only cover
+// names the literal never mentions — which also makes re-resolution idempotent (resolve_module
+// resolves several times; the later passes find nothing missing).
+struct_decl_fields = (env: Env, sd: MakeStructData) [Field] {
+    plain := env.didx.idx_struct_fields(env.decls, sd.ty)
+    (plain.len > 0).then({ plain }, { env.env_gstruct(sd.ty).fields })
+}
+inits_have = (inits: [FieldInit], nm: StringView) bool {
+    found := false
+    inits.loop((h, i, fi) {
+        found = found || fi.name == nm
+    })
+    found
+}
+dflt_is_missing = (f: Field, inits: [FieldInit]) bool {
+    is_expr_null(f.dflt) == false && inits.inits_have(f.name) == false
+}
+dflt_missing_count = (fields: [Field], inits: [FieldInit]) i32 {
+    n := 0
+    fields.loop((h, i, f) {
+        f.dflt_is_missing(inits).then({
+            n = n + 1
+        })
+    })
+    n
+}
+fill_field_defaults = (
+    a: MutPtr<Malloc>,
+    env: Env,
+    sd: MakeStructData,
+    inits: [FieldInit],
+) [FieldInit] {
+    fields := env.struct_decl_fields(sd)
+    n := fields.dflt_missing_count(inits)
+    (n == 0).match ({
+        true  => inits,
+        false => {
+            buf := cbuf<FieldInit>(a, inits.len + n)
+            j := 0
+            inits.loop((h, i, fi) {
+                buf[j] = fi
+                j = j + 1
+            })
+            fields.loop((h, i, f) {
+                f.dflt_is_missing(inits).then({
+                    buf[j] = finit(f.name, a.resolve_expr(env.with_exp(f.ty), f.dflt))
+                    j = j + 1
+                })
+            })
+            buf
+        },
+    })
+}
+// `Sum()` — a zero-argument call naming a STRUCT (with no function of that name) is the EMPTY struct
+// literal: every defaulted field takes its constant, the rest zero-fill. `Sum(f: v)` is already a
+// literal by the parser's `field:` shape, which an empty `()` cannot show, so only this form needs
+// the declaration table to tell a constructor from a call.
+is_bare_struct_lit = (env: Env, nm: StringView) bool {
+    env.didx.struct_idx.get(nm, 0 - 1) >= 0 && is_empty(env.env_func(nm).name)
+}
+no_field_inits = () [FieldInit] { slice(null_ptr(), 0) }
 enum_payload_mono_ty = (env: Env, ename: StringView, etargs: [Ty], variant: StringView) Ty {
     env
         .env_genenum(ename)
@@ -705,6 +770,9 @@ ufcs_auto_ref_arg0 = (a: MutPtr<Malloc>, env: Env, ps: [Param], buf: [Expr], pos
 // name if `g` is such a local (its type is a Named struct with a matching `_call` fn in the index),
 // else "". The closure value is threaded as the call's first argument (its captured environment).
 resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
+    (c.args.len == 0 && env.is_bare_struct_lit(c.fn)).then({
+        return a.resolve_expr(env, a.cenode(mkstruct_at(c.fn, no_field_inits(), c.pos)))
+    })
     dn := env.dispatch_name(c)
     fn := env.env_func(dn)
     ps := fn.params
