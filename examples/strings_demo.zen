@@ -29,7 +29,8 @@ halloc = std.mem.heap
 { println, formatln, arg_int, arg_str, arg_owned } = std.text.fmt
 { String, init, append_in, free_in } = std.text.string
 { sb } = std.text.sb
-{ view, len, find, substr, split, nbuf, pad_right, repeat, trim_view, trim_prefix } = std.text.str
+{ view, len, find, substr, split, nbuf, pad_right, repeat, trim_view, trim_prefix, own_ptr,
+  own_window } = std.text.str
 { Result, ok, expect } = std.core.result
 { Allocator, release_slice } = std.mem.alloc
 // `str` is NUL-terminated, so dropping a PREFIX is free — the source's own NUL still
@@ -52,7 +53,7 @@ show_types = (a: Allocator) void {
     formatln("  str      {} len={}  storage=whatever it points at   freed=by that owner", [arg_str(borrowed), arg_int(borrowed.len())])
     // (c) [u8] — a slice: (ptr, len). A WRITABLE window over someone else's block. Owns
     //     nothing either, but it carries a length and you can store through it.
-    win: [u8] = lit.view()
+    win: Slice<u8> = lit.view()
     formatln("  [u8]     {} len={}  storage=whatever it points at   freed=by that owner", [arg_str(lit), arg_int(win.len)])
     // (d) String — the only OWNING type: (ptr, len, cap) over an allocator-backed block
     //     that grows. The next two lines ALLOCATE; the free_in below is the freer.
@@ -69,7 +70,7 @@ show_borrow_vs_copy = (a: Allocator) void {
     padded: StringView = "   auth: token expired   "
     // BORROW. trim_view returns a [u8] aiming INTO `padded`. Zero bytes allocated. It is
     // a [u8] and not a str precisely because the trimmed end has no NUL of its own.
-    tv: [u8] = padded.trim_view()
+    tv: Slice<u8> = padded.trim_view()
     formatln("  BORROW  trim_view -> [u8] len={}, allocated 0 bytes (aims into the literal)", [arg_int(tv.len)])
     // COPY. THIS LINE ALLOCATED: substr mallocs len+1 bytes through `a` and copies into
     // them, so the result gets its own NUL and can be handed round as a str.
@@ -77,16 +78,17 @@ show_borrow_vs_copy = (a: Allocator) void {
     formatln("  COPY    substr    -> str  len={}, allocated {} bytes (fresh block, `a` owns it)", [arg_int(cp.len()), arg_int(tv.len + 1)])
     // ALIASING, made unmissable. ALLOC: `mine` is a fresh block, freed six lines down.
     mine = a.substr("shared bytes", 0, 12).expect("strings_demo: out of memory")
-    // BORROW: a window over mine's block. Allocates nothing, copies nothing.
-    port :: [u8] = mine.view()
+    // OWN: a WRITABLE window over mine's block. `view()` is the borrowed, read-only window and
+    // would refuse the store below — `own_window` is the spelling that says "I allocated these".
+    port :: [u8] = mine.own_ptr().own_window(mine.len())
     // One store through the window. Nothing copies it back — the source simply IS those
     // bytes, so `mine` reads differently on the very next line.
     port[0] = 'S'
     formatln("  ALIAS   stored 'S' through a [u8] window; its source now reads: {}", [arg_str(mine)])
     // FREE both copies. `padded` and "shared bytes" are literals and are NOT freed —
     // handing .rodata to free() would abort. Only what `a` handed out goes back to `a`.
-    a.release(cp.view().ptr)
-    a.release(mine.view().ptr)
+    a.release(cp.own_ptr())
+    a.release(mine.own_ptr())
     println("  FREED   both substr blocks released; the two literals are never freed")
 }
 // ── the parser: three copies and one borrow ──────────────────────────────────
@@ -104,9 +106,9 @@ Fields*: {
     // absent: it points into the MIDDLE of the caller's line block, and freeing an
     // interior pointer is undefined. Whoever frees the line frees msg with it.
     free = (f: Fields, a: Allocator) void {
-        a.release(f.ts.view().ptr)
-        a.release(f.level.view().ptr)
-        a.release(f.comp.view().ptr)
+        a.release(f.ts.own_ptr())
+        a.release(f.level.own_ptr())
+        a.release(f.comp.own_ptr())
     }
 }
 blank_fields = () Fields {
@@ -145,9 +147,9 @@ parse_line* = (a: Allocator, line: StringView) Result<Fields, StringView> {
         true  => {
             // FREE: the error path owns the three blocks it already took, and must give
             // them back. A `return` that skipped this would leak on every bad line.
-            a.release(ts.view().ptr)
-            a.release(level.view().ptr)
-            a.release(comp.view().ptr)
+            a.release(ts.own_ptr())
+            a.release(level.own_ptr())
+            a.release(comp.own_ptr())
             bad: Result<Fields, StringView> = .Err("expected '<ts> <level> <comp>: <msg>'")
             return bad
         },
@@ -194,7 +196,7 @@ rule_into* = (out: [u8], fill: u8) void {
 push_pad = (a: Allocator, g: String, t: StringView, w: i64) String {
     p = a.pad_right(t, w, ' ')
     out = a.append_in(g, p).expect("strings_demo: out of memory")
-    a.release(p.view().ptr)
+    a.release(p.own_ptr())
     out
 }
 // (b) A buffer returned OUT of a callee. The String is built from `a` and RETURNED, so
@@ -332,18 +334,18 @@ main = () i32 {
         .expect("strings_demo: out of memory")
     println(head)
     // FREE: the built header block.
-    a.release(head.view().ptr)
+    a.release(head.own_ptr())
     // ── 4a. a buffer passed INTO a callee: we allocate it, rule_into only fills it. ──
-    // ALLOC: repeat hands back a NUL-terminated block of `total` spaces. Taking .view()
-    // of it is a BORROW — a writable [u8] window over a block we still own. That is how
-    // an example gets a mutable buffer without ever naming a raw pointer.
+    // ALLOC: repeat hands back a NUL-terminated block of `total` spaces. `own_window()` is the
+    // WRITABLE window over it — `view()` would hand back a read-only `Slice<u8>`, because a view
+    // borrows and cannot know it is looking at a block the caller owns.
     total = w.ts + w.level + w.comp + w.msg + 6
     canvas = a.repeat(" ", total)
-    bar: [u8] = canvas.view()
+    bar: [u8] = canvas.own_ptr().own_window(total)
     bar.rule_into('-')
     formatln("  {}", [arg_str(canvas)])
     // FREE: still ours. rule_into never took ownership, so nothing else can free it.
-    a.release(canvas.view().ptr)
+    a.release(canvas.own_ptr())
     a.print_rows(rows, n, w)
     a.free_rows(rows, n)
     a.free_lines(lines)

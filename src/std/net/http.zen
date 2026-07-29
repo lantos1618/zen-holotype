@@ -46,7 +46,7 @@
 // with the actor pool (std.concurrent.pool imports arc) would collide in the flat namespace.
 { String, init, append_in, push_in, finish_in } = std.text.string
 { view, find, substr, split, words, trim, starts_with, to_lower, contains, parse_int, nbuf,
-  eq_ignore_case } = std.text.str
+  eq_ignore_case, own_ptr } = std.text.str
 { integer, hex_value } = std.text.num
 { is_hex } = std.text.ascii
 { take, drop, sub } = std.core.slice
@@ -146,7 +146,7 @@ own_bytes = (a: Allocator, b: [u8]) [u8] {
 // whole shape goes back through here.
 release_strs = (a: Allocator, xs: [StringView]) void {
     xs.loop((h, i, x) {
-        a.release(x.view().ptr)
+        a.release(x.own_ptr())
     })
     a.release_slice(xs)
 }
@@ -154,8 +154,8 @@ release_strs = (a: Allocator, xs: [StringView]) void {
 // built (`no_headers`/`one_header`) points at the caller's own strings and is NOT freed this way.
 release_headers = (a: Allocator, hs: [Header]) void {
     hs.loop((h, i, hd) {
-        a.release(hd.name.view().ptr)
-        a.release(hd.value.view().ptr)
+        a.release(hd.name.own_ptr())
+        a.release(hd.value.own_ptr())
     })
     a.release_slice(hs)
 }
@@ -180,7 +180,7 @@ parse_parts = (a: Allocator, raw: [u8]) Result<MsgParts, HttpError> {
             lines = a.split(cstr(head.ptr), '\n')    // each line still carries a trailing '\r'
             res: Result<MsgParts, HttpError> = a.collect_headers(lines).match ({
                 .Err(e)      => {
-                    a.release(lines[0].view().ptr)    // `first` escapes on the Ok path only
+                    a.release(lines[0].own_ptr())    // `first` escapes on the Ok path only
                     bad: Result<MsgParts, HttpError> = .Err(e)
                     bad
                 },
@@ -198,7 +198,7 @@ parse_parts = (a: Allocator, raw: [u8]) Result<MsgParts, HttpError> {
                 // intermediates nothing above can reach. `lines[0]` is the exception: it leaves as
                 // `first`, so only the backbone around it goes.
                 (i > 0).then({
-                    a.release(ln.view().ptr)
+                    a.release(ln.own_ptr())
                 })
             })
             a.release_slice(lines)
@@ -230,7 +230,7 @@ parse_response* = (a: Allocator, raw: [u8]) Result<Response, HttpError> {
                     ok_res
                 },
             })
-            a.release(p.first.view().ptr)    // the status line is read for its code and nothing else
+            a.release(p.first.own_ptr())    // the status line is read for its code and nothing else
             res
         },
     })
@@ -262,7 +262,7 @@ parse_status = (a: Allocator, line: StringView) Result<i32, HttpError> {
 trimmed_cut = (a: Allocator, s: StringView, start: i64, n: i64) StringView {
     cut = a.substr(s, start, n).expect("http: oom")
     out = a.trim(cut)
-    a.release(cut.view().ptr)
+    a.release(cut.own_ptr())
     out
 }
 // every line after the status line -> a `[Header]`; a colon-less line is a malformed response.
@@ -308,7 +308,7 @@ collect_headers = (a: Allocator, lines: [StringView]) Result<[Header], HttpError
 te_is_chunked = (a: Allocator, te: StringView) bool {
     lo = a.to_lower(te)
     out = lo.contains("chunked")
-    a.release(lo.view().ptr)
+    a.release(lo.own_ptr())
     out
 }
 // resolve the body: decode a `chunked` transfer-encoding, else trim to `Content-Length`, else take
@@ -351,10 +351,10 @@ after_lf = (bv: [u8], i: i64) i64 {
     })
 }
 // append bv[start .. start+n] (clamped to the view) onto the builder `sb`.
-append_range = (a: Allocator, bv: [u8], start: i64, n: i64, sb: String) String {
+append_range = (a: Allocator, bv: Slice<u8>, start: i64, n: i64, sb: String) String {
     avail = bv.len - start
     m = (n < avail).then({ n }, { avail })
-    part: [u8] = bv.sub(start, start + m)
+    part: Slice<u8> = slice(bv.ptr.offset(start), m)
     acc ::= sb
     part.loop((h, i, b) {
         acc = a.push_in(acc, b).expect("http: oom")
@@ -395,7 +395,7 @@ append_decimal = (a: Allocator, sb: String, n: i64) String {
         .finish_in(a)
         .expect("http: oom")
     out = a.append_in(sb, d).expect("http: oom")
-    a.release(d.view().ptr)
+    a.release(d.own_ptr())
     out
 }
 // append a CRLF line terminator to the builder.
@@ -485,7 +485,7 @@ request* = (
             },
         }),
     })
-    a.release(req.view().ptr)    // the serialised request is on the wire (or the dial failed)
+    a.release(req.own_ptr())    // the serialised request is on the wire (or the dial failed)
     out
 }
 // an empty header list — the common case for a plain GET.
@@ -549,7 +549,7 @@ parse_url* = (a: Allocator, url: StringView) Result<Url, HttpError> {
                                 .substr(auth, colon + 1, alen - (colon + 1))
                                 .expect("http: oom")
                             n = digits.parse_int()
-                            a.release(digits.view().ptr)
+                            a.release(digits.own_ptr())
                             n
                         },
                     })
@@ -569,25 +569,25 @@ parse_url* = (a: Allocator, url: StringView) Result<Url, HttpError> {
                             path: path,
                         )),
                         false => {
-                            a.release(host.view().ptr)    // a rejected Url never reaches `url_free`
-                            a.release(path.view().ptr)
+                            a.release(host.own_ptr())    // a rejected Url never reaches `url_free`
+                            a.release(path.own_ptr())
                             bad: Result<Url, HttpError> = err(malformed(why))
                             bad
                         },
                     })
-                    a.release(auth.view().ptr)    // `host` and the port digits are cut OUT of it
+                    a.release(auth.own_ptr())    // `host` and the port digits are cut OUT of it
                     res
                 },
             })
-            a.release(rest.view().ptr)
+            a.release(rest.own_ptr())
             out
         },
     })
 }
 // release a parsed Url — `parse_url` owns `host` and `path` and nothing else in the struct.
 url_free* = (a: Allocator, u: Url) void {
-    a.release(u.host.view().ptr)
-    a.release(u.path.view().ptr)
+    a.release(u.host.own_ptr())
+    a.release(u.path.own_ptr())
 }
 // build "http://host:port/path" — the inverse of parse_url (handy when the port is ephemeral).
 url_of* = (a: Allocator, host: StringView, port: i32, path: StringView) StringView {
@@ -637,8 +637,8 @@ Request*: {
 // Release a PARSED request — `serve_once`'s `Ok` value. `response_free`'s mirror, plus the two
 // tokens cut out of the request line.
 request_free* = (a: Allocator, r: Request) void {
-    a.release(r.method.view().ptr)
-    a.release(r.path.view().ptr)
+    a.release(r.method.own_ptr())
+    a.release(r.path.own_ptr())
     a.release_headers(r.headers)
     a.release_slice(r.body_bytes)
 }
@@ -672,11 +672,11 @@ parse_request* = (a: Allocator, raw: [u8]) Result<Request, HttpError> {
                 // are NOT freed; they belong to the caller with the rest of the Request — unless there
                 // is no Request, in which case nothing at all escapes.
                 (i >= 2 || keep == false).then({
-                    a.release(t.view().ptr)
+                    a.release(t.own_ptr())
                 })
             })
             a.release_slice(toks)
-            a.release(p.first.view().ptr)    // the request line is read only through `toks`
+            a.release(p.first.own_ptr())    // the request line is read only through `toks`
             (keep == false).then({
                 a.release_headers(p.headers)
                 a.release_slice(p.body)
@@ -714,7 +714,7 @@ respond* = (status: i32, headers: [Header], body: StringView) Response {
         status: status,
         headers: headers,
         body: body,
-        body_bytes: body.view(),
+        body_bytes: body.own_ptr().slice(body.view().len),
     )
 }
 // serialise a response onto the wire: status line, the caller's headers, an auto `Content-Length` taken

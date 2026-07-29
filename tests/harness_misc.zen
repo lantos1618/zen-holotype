@@ -259,12 +259,40 @@ harness_misc_string_types = () i32 {
 // Slice mutability. `[T]`/`MutSlice<T>` is the writable window, `Slice<T>` the read-only one, named
 // off the `Ptr`/`MutPtr` pair (unmarked = read-only). The lattice runs ONE way: a writable slice
 // fits a read-only slot, never the reverse — and under a constructor neither fits the other. The
-// provenance half is `.view()`: a window over a `StringLiteral`/`StringCstr` is read-only, so the
-// store that used to segfault in `.rodata` is a `zen check` error, while a window over bytes of
-// unknown/owned provenance stays writable (examples/strings_demo.zen's `port[0] = 'S'`).
+// provenance half is `.view()`: a window over ANY of the three string spellings is read-only, so the
+// store that used to segfault in `.rodata` is a `zen check` error. `StringView` is in that list on
+// purpose — docs/string-vec-model.md's table says the borrowed row is not mutable, and it is the row
+// every literal WIDENS into at a call boundary, so leaving it writable let `poke("lit")` launder a
+// `.rodata` pointer into a writable `[u8]` with `zen check` reporting ok. To write bytes you own,
+// name the ownership (`s.own_ptr().slice(n)`) — see examples/strings_demo.zen.
 // ════════════════════════════════════════════════════════════════════════════════
 harness_misc_slice_mut = () i32 {
     run_verdicts("slice_mut verdict", [
+        VerdictCase(
+            src: "{ trim_view } = std.text.str\nmain = () i32 { v ::= trim_view(\"hello\")  v[0] = 72  0 }",
+            should_pass: false,
+            kind: "slice-write",
+        ),
+        VerdictCase(
+            src: "{ view } = std.text.str\npoke = (s: StringView) i32 { v ::= s.view()  v[0] = 72  0 }\nmain = () i32 { poke(\"hello\") }",
+            should_pass: false,
+            kind: "slice-write",
+        ),
+        VerdictCase(
+            src: "{ own_ptr, own_window, len } = std.text.str\nmine = (s: StringView) u8 { w ::= s.own_ptr().own_window(s.len())  w[0] = 72  w[0] }\nmain = () i32 { 0 }",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "read_sub = (p: Ptr<u8>, n: i64) i64 { v: Slice<u8> = slice(p, n)  v.len }\nmain = () i32 { 0 }",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "widen = (p: Ptr<u8>, n: i64) i64 { v: [u8] = slice(p, n)  v.len }\nmain = () i32 { 0 }",
+            should_pass: false,
+            kind: "assign-fit",
+        ),
         VerdictCase(
             src: "{ view } = std.text.str\nbad = (s: StringCstr) u8 { v ::= s.view()  v[0] = 'H'  v[0] }\nmain = () i32 { 0 }",
             should_pass: false,
@@ -316,14 +344,19 @@ harness_misc_slice_mut = () i32 {
             kind: "arg-type",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\ngood = (s: StringView) u8 { w ::= s.view()  w[0] = 'S'  w[0] }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\nbad = (s: StringView) u8 { w ::= s.view()  w[0] = 'S'  w[0] }\nmain = () i32 { 0 }",
+            should_pass: false,
+            kind: "slice-write",
+        ),
+        VerdictCase(
+            src: "{ own_ptr, own_window, len } = std.text.str\ngood = (s: StringView) u8 { w ::= s.own_ptr().own_window(s.len())  w[0] = 'S'  w[0] }\nmain = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
             src: "{ view } = std.text.str\nbad = (s: StringCstr) i64 { v = s.view()  w: [u8] = v.ptr.slice(v.len)  w.len }\nmain = () i32 { 0 }",
             should_pass: false,
-            kind: "ptr-write",
+            kind: "assign-fit",
         ),
         VerdictCase(
             src: "{ view } = std.text.str\n{ copy } = std.mem.raw\nfine = (s: StringCstr, d: [u8]) void { v = s.view()  d.ptr.copy(v.ptr, v.len) }\nmain = () i32 { 0 }",
@@ -331,12 +364,27 @@ harness_misc_slice_mut = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\nfine = (s: StringView) [u8] { v = s.view()  v.ptr.slice(v.len) }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\nbad = (s: StringView) [u8] { v = s.view()  v.ptr.slice(v.len) }\nmain = () i32 { 0 }",
+            should_pass: false,
+            kind: "return-fit",
+        ),
+        VerdictCase(
+            src: "{ view } = std.text.str\nfine = (s: StringView) Slice<u8> { v = s.view()  v.ptr.slice(v.len) }\nmain = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
     ])
-}
+}    // was `should_pass: true` — that was THE hole: a literal widens into a `StringView`
+// parameter, so a writable window here is a writable window over `.rodata`
+// THE defect this pins: `trim_view` and friends hand back a window over BORROWED bytes, so
+// the window is `Slice<u8>`. Before, they returned `[u8]` and this compiled clean, wrote
+// `.rodata` and died with SIGABRT at run time.
+// the WIDENING case: a `StringLiteral` fits a `StringView` parameter, and inside the callee
+// nothing remembers where the bytes came from. Only `StringView` being read-only ITSELF
+// closes it — no call-site analysis can, because the body sees only the declared type.
+// and the escape hatch stays open for bytes you really do own: name the ownership.
+// a read-only `Ptr<T>` may now be SLICED — it just yields a read-only window rather than
+// being refused outright. That is what lets `trim_view` exist at all.
 // a store through a view of a `StringCstr` -> rejected (this is the `.rodata` write)
 // the same view bound to a writable `[u8]` -> rejected at the binding
 // a read-only window returned where `[u8]` is declared -> rejected
@@ -405,7 +453,7 @@ harness_misc_hash = () i32 {
 om_is_alnum = (b: u8) bool { is_alpha(b) || b >= '0' && b <= '9' }
 // the text of the parameter list that OPENS at `q` (`src[q] == '('`), parens balanced, so a nested
 // fn-type param `(MutPtr<A>, Request) Response` cannot end it early.
-om_param_end = (sv: [u8], q: i64, depth: i64) i64 {
+om_param_end = (sv: Slice<u8>, q: i64, depth: i64) i64 {
     (q >= sv.len || depth == 0).match ({
         true  => q,
         false => sv.om_param_end(q + 1, depth + (sv[q] == '(').then({ 1 }, { 0 }) - (sv[q] == ')').match ({
@@ -425,7 +473,7 @@ om_param_list = (mp: MutPtr<Malloc>, src: StringView, q: i64) StringView {
 // this only ever matches a SUBSET of the regex, so it can never raise a failure the regex wouldn't.
 // Byte access goes through a single `[u8]` view (O(1) index) — NOT `at` (which re-strlens per call).
 om_decls_survive = (mp: MutPtr<Malloc>, src: StringView, c: StringView) bool {
-    sv: [u8] = src.view()
+    sv: Slice<u8> = src.view()
     n = sv.len
     ls ::= true    // at a line start?
     ok ::= true

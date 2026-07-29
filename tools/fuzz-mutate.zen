@@ -95,7 +95,7 @@ write_bytes = (path: StringView, b: [u8]) i64 {
     })
 }
 // ── byte-level scanning (the compiled-output searches that `find` cannot do on a str) ─────────────
-bytes_has_at = (v: [u8], p: Slice<u8>, at: i64) bool {
+bytes_has_at = (v: Slice<u8>, p: Slice<u8>, at: i64) bool {
     ok ::= at >= 0 && at + p.len <= v.len
     p.loop((h, i, b) {
         ok.then({
@@ -106,7 +106,7 @@ bytes_has_at = (v: [u8], p: Slice<u8>, at: i64) bool {
     })
     ok
 }
-bytes_find_from = (v: [u8], p: Slice<u8>, start: i64) i64 {
+bytes_find_from = (v: Slice<u8>, p: Slice<u8>, start: i64) i64 {
     res ::= 0 - 1
     v.loop((h, i, b) {
         (i >= start && v.bytes_has_at(p, i)).then({
@@ -121,10 +121,10 @@ is_ident = (b: u8) bool {
     b >= '0' && b <= '9' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_'
 }
 // recursion depth = the run's own length (a hex address, an identifier) — short and bounded
-hex_run_end = (v: [u8], i: i64) i64 {
+hex_run_end = (v: Slice<u8>, i: i64) i64 {
     (i < v.len && is_hex_lc(v[i])).then({ v.hex_run_end(i + 1) }, { i })
 }
-ident_run_end = (v: [u8], i: i64) i64 {
+ident_run_end = (v: Slice<u8>, i: i64) i64 {
     (i < v.len && is_ident(v[i])).then({ v.ident_run_end(i + 1) }, { i })
 }
 // ── the mutation ops ──────────────────────────────────────────────────────────
@@ -257,7 +257,7 @@ first_hit_line = (mp: MutPtr<Malloc>, out: StringView) StringView {
 }
 // `runtime error:[^\n]*` — the class text runs to the end of its line
 line_from = (mp: MutPtr<Malloc>, out: StringView, pos: i64) StringView {
-    v: [u8] = out.view()
+    v: Slice<u8> = out.view()
     e ::= v.len
     v.loop((h, i, b) {
         (i >= pos && b == '\n').then({
@@ -286,7 +286,13 @@ class_key = (mp: MutPtr<Malloc>, out: StringView, rc: i64) StringView {
 }
 // `#1 0x[0-9a-f]+ in ([A-Za-z0-9_]+)` — the first non-asan frame's function name, "?" when absent.
 // Recursion depth = the number of "#1 0x" occurrences in the report (one, in practice).
-frame_from = (mp: MutPtr<Malloc>, out: StringView, v: [u8], hv: Slice<u8>, start: i64) StringView {
+frame_from = (
+    mp: MutPtr<Malloc>,
+    out: StringView,
+    v: Slice<u8>,
+    hv: Slice<u8>,
+    start: i64,
+) StringView {
     p = v.bytes_find_from(hv, start)
     (p < 0).match ({
         true  => "?",
@@ -303,7 +309,7 @@ frame_from = (mp: MutPtr<Malloc>, out: StringView, v: [u8], hv: Slice<u8>, start
     })
 }
 frame_key = (mp: MutPtr<Malloc>, out: StringView) StringView {
-    v: [u8] = out.view()
+    v: Slice<u8> = out.view()
     hv: Slice<u8> = FRAME_HEAD.view()
     mp.frame_from(out, v, hv, 0)
 }

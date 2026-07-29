@@ -265,8 +265,8 @@ work: naming and building the `Vec` counterparts, and deleting the threaded API.
 
 **1. Slices need a mutability bit.** DONE. Slices now carry the same kind tag pointers do:
 `Slice<T>` is the read-only window, `MutSlice<T>` the writable one, and `[T]` is the sugar for
-`MutSlice<T>`. Both are the same `{ptr, len}` layout. `.view()` propagates: a window over a
-`StringLiteral`/`StringCstr` is a `Slice<T>`, so this is now `error[slice-write]` at check time
+`MutSlice<T>`. Both are the same `{ptr, len}` layout. `.view()` propagates: a window over ANY of
+the three string spellings is a `Slice<T>`, so this is now `error[slice-write]` at check time
 instead of a segfault:
 
 ```zen
@@ -283,9 +283,38 @@ Immutability now has somewhere to live once you take a view, which is what `Stri
 `StringFixed` needed — and both of those types have since landed (see "Real now, as of the
 carrying rebuild" above). `StringFixed` **is** the "owned, writable bytes" type this paragraph
 used to say was missing: `StringFixed.view` hands back a writable `[u8]`, `StringConst.view` a
-read-only `Slice<u8>`. What remains is a representation wart, not a missing type: `StringCstr`
+read-only `Slice<u8>`.
+
+**And `str.view` on a plain `StringView` is read-only too, as of the provenance fix.** It used to
+stay writable, and that was the last hole. `StringView` is the row every `StringLiteral` WIDENS into
+at a call boundary, so
+
+```zen
+poke = (s: StringView) i32 { v ::= s.view()  v[0] = 72  0 }
+main = () i32 { poke("hello") }
+```
+
+handed back a writable window onto `.rodata` with `zen check` reporting ok. The table above already
+said the borrowed row is not mutable; the checker now agrees. No call-site analysis could have
+closed it — the body of `poke` sees only the declared parameter type, so the fact has to live on
+the type itself. It needs no payload to do that: the provenance of a borrow does not VARY, and a
+nullary variant carries a constant fact exactly as `StringLiteral` and `StringCstr` already did.
+
+Making that stick needed one more thing. `slice(p, n)` over a read-only `Ptr<T>` was a blanket
+`error[ptr-write]`, so there was no way to build a read-only window over borrowed bytes at all —
+which is why `trim_view` and the other `*_view` helpers returned a writable `[u8]` in the first
+place. It now yields a read-only `Slice<T>`, the way `offset` already keeps read-only-ness one
+address along. Asking for that window as a writable `[T]` is still refused, one constructor out,
+as `error[assign-fit]`.
+
+What remains is a representation wart and a typing debt, not a missing type. The wart: `StringCstr`
 still covers BOTH `.rodata` literals and heap blocks from `sb().done()`, so a view of one is
-conservatively read-only, while `str.view` on a plain `StringView` still yields a writable `[u8]`.
+conservatively read-only. The debt: the ~62 allocating helpers still hand their block back typed as
+a borrowed `StringView`, so the places that free or write through one have to say so out loud —
+`own_ptr()` on the release path, `own_ptr().own_window(n)` for a writable window. Both are
+deliberately ugly and deliberately greppable: `git grep own_ptr` is that migration's inventory, and
+both spellings disappear when those helpers return `StringFixed`/`StringConst` and the capability
+comes from the type instead of from a claim.
 
 **2. The allocator decision.** DECIDED: the container carries it. The old rule was **carry the
 allocator and you give up errors-as-values** (`AVec`/`ASet`/`AHMap` store a `DynAlloc` and panic)

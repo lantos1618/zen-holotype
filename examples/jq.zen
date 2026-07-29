@@ -17,7 +17,7 @@ json = std.format.json
 { gpa } = std.mem.heap
 { Allocator } = std.mem.alloc
 { println, formatln, arg_str, arg_int } = std.text.fmt
-{ len, at, substr, cat, parse_int, view } = std.text.str
+{ len, at, substr, cat, parse_int, view, own_ptr } = std.text.str
 { read_all } = std.io.stdin
 { contents } = std.io.file
 { argc, arg } = std.sys.os
@@ -91,7 +91,7 @@ apply = (a: Allocator, cur: Value, s: StringView, i: i64) Result<Value, StringVi
                 .Some(nv) => a.apply(nv, s, j),
                 .None     => a.fail("jq: no such field: ", key),
             })
-            a.release(key.view().ptr)
+            a.release(key.own_ptr())
             return step
         },
         false => 0,
@@ -107,7 +107,7 @@ apply = (a: Allocator, cur: Value, s: StringView, i: i64) Result<Value, StringVi
             })
             digits = a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed")
             idx = digits.parse_int()
-            a.release(digits.view().ptr)
+            a.release(digits.own_ptr())
             return json.as_arr(cur).match ({
                 .Some(xs) => (idx < xs.len).match ({
                     true  => a.apply(xs[idx], s, j + 1),
@@ -145,7 +145,7 @@ main = () i32 {
     doc = json.parse(a, src).match ({
         .Err(e) => {
             report_bad_json(e)
-            a.release(src.view().ptr)
+            a.release(src.own_ptr())
             return 1
         },
         .Ok(v)  => v,
@@ -156,7 +156,7 @@ main = () i32 {
     rc = a.apply(doc, filter, 0).match ({
         .Err(msg) => {
             println(msg)
-            a.release(msg.view().ptr)
+            a.release(msg.own_ptr())
             1
         },
         .Ok(sel)  => {
@@ -164,11 +164,11 @@ main = () i32 {
             // example used to carry is one library call now.
             out = json.pretty(a, sel)
             println(out)
-            a.release(out.view().ptr)
+            a.release(out.own_ptr())
             0
         },
     })
     a.value_free(doc)
-    a.release(src.view().ptr)
+    a.release(src.own_ptr())
     rc
 }

@@ -79,7 +79,7 @@ UfcsVis*: {
         // the flat's terminator; a flat shorter than pos+len mismatches on the NUL exactly where
         // the old length guard said false. The tail probe only runs when every name byte matched,
         // so its offset is at most the terminator.
-        nb: [u8] = name.view()
+        nb: Slice<u8> = name.view()
         same ::= true
         nb.loop((h, i, b) {
             same = same && load(offset(vis.flat, to_i64(pos) + i)) == b
@@ -124,7 +124,7 @@ ufcs_vis_off* = (a: MutPtr<Malloc>) UfcsVis {
 // resolver's symbol scan so shared dedup/alias behavior is untouched.
 vis_close_pos = (src: StringView, p: i32) i32 {
     out ::= p
-    bs: [u8] = src.view()
+    bs: Slice<u8> = src.view()
     (to_i64(p) < bs.len).then({
         span: [u8] = slice(src.offset(p), bs.len - to_i64(p))
         span.loop((h, i, b) {
@@ -151,7 +151,7 @@ vis_copy_name = (a: MutPtr<Malloc>, src: StringView, p: i32, e: i32) StringView 
 // non-negative index, so the bit-reinterpreting u64 path prints its plain decimal digits).
 vis_key = (a: MutPtr<Malloc>, mi: i64, name: StringView) StringView {
     s ::= a.gstr_string(name.view().len + 8).gstr_int(a, mi).gstr_push(a, '\t')
-    nb: [u8] = name.view()
+    nb: Slice<u8> = name.view()
     nb.loop((h, i, b) {
         s = s.gstr_push(a, b)
     })
@@ -160,7 +160,7 @@ vis_key = (a: MutPtr<Malloc>, mi: i64, name: StringView) StringView {
 vis_head_fill = (a: MutPtr<Malloc>, src: StringView, mi: i64, p: i32, m0: Map<i64>) Map<i64> {
     m ::= m0
     pos ::= p
-    bs: [u8] = src.view()
+    bs: Slice<u8> = src.view()
     bs.loop((h, i, b) {
         ii = to_i32(i)
         (ii < pos == false).then({
@@ -188,7 +188,7 @@ vis_head_fill = (a: MutPtr<Malloc>, src: StringView, mi: i64, p: i32, m0: Map<i6
 vis_head_names = (a: MutPtr<Malloc>, src: StringView, mi: i64, m0: Map<i64>) Map<i64> {
     m ::= m0
     pos :: i32 = 0
-    bs: [u8] = src.view()
+    bs: Slice<u8> = src.view()
     bs.loop((h, i, b) {
         ii = to_i32(i)
         (ii < pos == false).then({
@@ -794,6 +794,17 @@ Env*: {
         (c.fn == "offset").then({
             return env.arg0_ty(c).is_readonly_ptr_ty().match ({
                 true  => tptr_k(env.a.tnode(tu8()), k_ptr()),
+                false => tvoid(),
+            })
+        })
+        // `slice(p, n)` over a READ-ONLY `Ptr<T>` builds a READ-ONLY `Slice<T>` window, the same way
+        // `offset` keeps read-only-ness one address along. Without this the only two outcomes were
+        // "reject every sub-slice of borrowed bytes" or "hand back a writable `[T]`" — and it was the
+        // second that let `trim_view("hello")[0] = 'H'` reach `.rodata`. Over a writable pointer the
+        // result stays untyped (void) so the slot's annotation decides the element type, as before.
+        (c.fn == "slice").then({
+            return env.arg0_ty(c).is_readonly_ptr_ty().match ({
+                true  => tslice_k(env.a.tnode(env.arg0_ty(c).pointee_of()), k_ptr()),
                 false => tvoid(),
             })
         })
@@ -1693,6 +1704,7 @@ readonly_source_ty* = (t: Ty) bool {
     t.match ({
         .StringLiteral => true,
         .StringCstr    => true,
+        .StringView    => true,
         _              => t.is_readonly_ptr_ty() || t.is_readonly_slice_ty(),
     })
 }

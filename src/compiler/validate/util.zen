@@ -453,10 +453,12 @@ is_write_intrinsic* = (fn: StringView) bool {
         || fn == "atomic_store_i64"
         || fn == "atomic_cas_i64"
 }
-// Slices are writable views, so constructing one from Ptr<T> would launder read-only memory just as
-// directly as a store. RawPtr and MutPtr retain the explicitly writable paths.
+// `slice` is NOT here. A slice built from a read-only `Ptr<T>` is a read-only `Slice<T>` (check.zen's
+// infer_call types it that way), so it launders nothing and the fits lattice rejects the one thing
+// that would — dropping it into a writable `[T]` slot — as error[assign-fit]/error[arg-type]. Only
+// the intrinsics that genuinely DEREFERENCE-AND-WRITE belong in this test.
 store_writes_readonly = (env: Env, c: CallData) bool {
-    ((c.fn.is_write_intrinsic() || c.fn == "slice") && c.args.len >= 1).match ({
+    (c.fn.is_write_intrinsic() && c.args.len >= 1).match ({
         true  => env.infer_expr(c.args[0].addr()).is_readonly_ptr_ty(),
         false => false,
     })
@@ -708,7 +710,7 @@ first_qmark_offset* = (src: StringView) i32 {
 // string literals, and char literals are their own token kinds — same rationale as first_if_offset.
 tok_word_is = (src: StringView, t: Token, w: StringView) bool {
     ok ::= true
-    wb: [u8] = w.view()
+    wb: Slice<u8> = w.view()
     wb.loop((h, i, b) {
         (src.at(t.start + to_i32(i)) == b == false).then({
             ok = false
