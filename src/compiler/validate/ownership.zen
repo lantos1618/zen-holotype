@@ -291,9 +291,6 @@ stmt_consumes_name = (env: Env, st: Stmt, nm: StringView, depth: i32) bool {
         .Assign(x)   => env.expr_consumes_name(x.value, nm, depth),
         .Return(r)   => env.expr_consumes_name(r, nm, depth),
         .ExprStmt(e) => env.expr_consumes_name(e, nm, depth),
-        .If(f)       => env.expr_consumes_name(f.c, nm, depth)
-            || env.body_consumes_name(f.then, nm, depth)
-            || env.body_consumes_name(f.els, nm, depth),
         .While(w)    => env.expr_consumes_name(w.c, nm, depth)
             || env.body_consumes_name(w.body, nm, depth),
         .IndexSet(x) => env.expr_consumes_name(x.seq, nm, depth)
@@ -439,7 +436,6 @@ cdl_stmt = (env: Env, seen: Ptr<DeadList>, st: Stmt, pname: StringView) Ptr<Dead
             false => env.cdl_expr(seen, l.value, pname),
         }),
         .Assign(x)   => env.cdl_expr(seen, x.value, pname),
-        .If(f)       => env.cdl_body(env.cdl_body(seen, f.then, pname), f.els, pname),
         .While(w)    => env.cdl_body(seen, w.body, pname),
         .ExprStmt(e) => env.cdl_expr(seen, e, pname),
         _            => seen,
@@ -514,9 +510,6 @@ bft_stmt = (env: Env, st: Stmt, pname: StringView, dl: Ptr<DeadList>, depth: i32
         .Assign(x)   => env.bft_expr(x.value, pname, dl, depth),
         .Return(r)   => env.bft_expr(r, pname, dl, depth),
         .ExprStmt(e) => env.bft_expr(e, pname, dl, depth),
-        .If(f)       => env.bft_expr(f.c, pname, dl, depth)
-            || env.bft_body(f.then, pname, dl, depth)
-            || env.bft_body(f.els, pname, dl, depth),
         .While(w)    => env.bft_expr(w.c, pname, dl, depth)
             || env.bft_body(w.body, pname, dl, depth),
         .IndexSet(x) => env.bft_expr(x.value, pname, dl, depth),
@@ -1166,10 +1159,6 @@ own_step* = (
     //     inside a branch enters the kill-set (conditionally dead → dead after the branch). Only branches
     //     that FALL THROUGH contribute; free-then-rebind within one branch nets to ALIVE via own_step.
     out = st.match ({
-        .If(f)       => a.dead_union(body_falls_through(f.then).match ({
-            true  => a.own_dead_body(env, out, al, f.then),
-            false => out,
-        }), body_falls_through(f.els).then({ a.own_dead_body(env, out, al, f.els) }, { out })),
         .While(w)    => body_falls_through(w.body).match ({
             true  => a.own_dead_body(env, out, al, w.body),
             false => out,
@@ -1545,7 +1534,6 @@ mu_stmt_kind = (
         .Let(l)      => a.mu_expr_kind(mvm, bound, l.value),
         .Assign(x)   => a.mu_expr_kind(mvm, bound, x.value),
         .Return(r)   => a.mu_expr_kind(mvm, bound, r),
-        .If(f)       => a.mu_body_kind(mvm, bound, f.then).or(a.mu_body_kind(mvm, bound, f.els)),
         // a `@while` body runs for EFFECT — its last statement is a discard like any other.
         .While(w)    => a
             .mu_expr_kind(mvm, bound, w.c)
@@ -1802,9 +1790,6 @@ impure_use_in_stmt = (nm: StringView, st: Stmt) bool {
         .Let(l)      => nm.impure_use_in_expr(l.value),
         .Assign(x)   => nm.impure_use_in_expr(x.target) || nm.impure_use_in_expr(x.value),
         .Return(r)   => nm.impure_use_in_expr(r),
-        .If(f)       => nm.impure_use_in_expr(f.c)
-            || nm.impure_use_in_body(f.then)
-            || nm.impure_use_in_body(f.els),
         .While(w)    => nm.impure_use_in_expr(w.c) || nm.impure_use_in_body(w.body),
         .IndexSet(x) => nm.impure_use_in_expr(x.seq)
             || nm.impure_use_in_expr(x.idx)

@@ -72,7 +72,6 @@ loop_lets_stmt = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, st: Stmt) Ptr<DeadList>
         .Assign(x)   => a.loop_lets_expr(acc, x.value),
         .Return(r)   => a.loop_lets_expr(acc, r),
         .ExprStmt(e) => a.loop_lets_expr(acc, e),
-        .If(f)       => a.loop_lets(a.loop_lets(acc, f.then), f.els),
         .While(w)    => a.loop_lets(acc, w.body),
         _            => acc,
     })
@@ -398,10 +397,6 @@ kv_own_stmt_kind = (
             .or(a.kv_own_expr_kind(env, seen, al, x.value)),
         .Return(r)   => a.kv_own_expr_kind(env, seen, al, r),
         .ExprStmt(e) => a.kv_own_expr_kind(env, seen, al, e),
-        .If(f)       => a
-            .kv_own_expr_kind(env, seen, al, f.c)
-            .or(a.kv_own_body_kind(env, seen, al, f.then))
-            .or(a.kv_own_body_kind(env, seen, al, f.els)),
         .While(w)    => a
             .kv_own_expr_kind(env, seen, al, w.c)
             .or(a.kv_own_body_kind(env, seen, al, w.body))
@@ -787,7 +782,6 @@ kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
             .or(env.kv_value_void_arm_kind(env.exp, r))
             .or(env.kv_slice_elem_kind(env.exp, r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
-        .If(f)       => env.kv_check_expr_kind(f.c),
         .While(w)    => env.kv_check_expr_kind(w.c),
         .IndexSet(x) => env
             .kv_check_expr_kind(x.seq)
@@ -950,10 +944,6 @@ kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
             .or(env.kv_value_void_arm_kind(env.exp, r))
             .or(env.kv_slice_elem_kind(env.exp, r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
-        .If(f)       => env
-            .kv_check_expr_kind(f.c)
-            .or(a.kv_check_body_kind(env, f.then))
-            .or(a.kv_check_body_kind(env, f.els)),
         .While(w)    => env.kv_check_expr_kind(w.c).or(a.kv_check_body_kind(env, w.body)),
         .IndexSet(x) => env
             .kv_check_expr_kind(x.seq)
@@ -1408,7 +1398,6 @@ kca_stmt = (st: Stmt, scope: [Stmt]) i32 {
         .Assign(x)   => x.target.kca_expr().or(x.value.kca_expr()),
         .Return(r)   => r.kca_expr(),
         .ExprStmt(e) => e.kca_expr(),
-        .If(f)       => f.c.kca_expr().or(f.then.kca_body()).or(f.els.kca_body()),
         .While(w)    => w.c.kca_expr().or(w.body.kca_body()),
         .IndexSet(x) => x.seq.kca_expr().or(x.idx.kca_expr()).or(x.value.kca_expr()),
     })
@@ -1512,9 +1501,6 @@ kv_escape_stmt = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList
             true  => load(r).expr_pos().pos_or(1),
             false => 0,
         }),
-        .If(f)       => a
-            .kv_escape_stmts(svars, derived, f.then)
-            .or(a.kv_escape_stmts(svars, derived, f.els)),
         .While(w)    => a.kv_escape_stmts(svars, derived, w.body),
         .ExprStmt(e) => a.kv_escape_expr_stmt(svars, derived, e),
         _            => 0,
@@ -1669,9 +1655,6 @@ name_read_in_stmt = (nm: StringView, st: Stmt) bool {
         .Let(l)      => nm.name_read_in_expr(l.value),
         .Assign(x)   => nm.name_read_in_expr(x.target) || nm.name_read_in_expr(x.value),
         .Return(r)   => nm.name_read_in_expr(r),
-        .If(f)       => nm.name_read_in_expr(f.c)
-            || nm.name_read_in_body(f.then)
-            || nm.name_read_in_body(f.els),
         .While(w)    => nm.name_read_in_expr(w.c) || nm.name_read_in_body(w.body),
         .IndexSet(x) => nm.name_read_in_expr(x.seq)
             || nm.name_read_in_expr(x.idx)
@@ -1697,7 +1680,6 @@ kv_leak_stmt = (a: MutPtr<Malloc>, env: Env, body: [Stmt], k: i32, st: Stmt) i32
         .Assign(x)   => a.kv_leak_expr(env, x.value),
         .Return(r)   => a.kv_leak_expr(env, r),
         .ExprStmt(e) => a.kv_leak_expr(env, e),
-        .If(f)       => a.kv_leak_body(env, f.then).or(a.kv_leak_body(env, f.els)),
         .While(w)    => a.kv_leak_body(env, w.body),
         .IndexSet(x) => a.kv_leak_expr(env, x.value),
     })
