@@ -24,18 +24,18 @@
   pool_view, Pool } = std.concurrent.pool
 { spawn, JoinHandle } = std.concurrent.thread
 { println } = std.text.fmt
-NPROD := 8    // producer threads
-MSGS := 1500    // messages per producer (each does a ref+send+unref → heavy atomic churn)
-NACT := 6    // shared actors hammered concurrently
-WORKERS := 4
-ITERS := 50
-processed := malloc(8)
+NPROD = 8    // producer threads
+MSGS = 1500    // messages per producer (each does a ref+send+unref → heavy atomic churn)
+NACT = 6    // shared actors hammered concurrently
+WORKERS = 4
+ITERS = 50
+processed = malloc(8)
 behave = (user: RawPtr<u8>, msg: i64) void { atomic_add_i64(user, 1) }
 // producer arg layout: [0]=pool_raw [8]=actors_ptr [16]=pid [24]=ok_out
-PA_POOL := 0
-PA_ACTS := 8
-PA_PID := 16
-PA_OK := 24
+PA_POOL = 0
+PA_ACTS = 8
+PA_PID = 16
+PA_OK = 24
 // per message: clone the handle (+1), send, drop the clone (-1) — the owner ref keeps the actor alive
 // so this unref never frees, but it races every other producer's ref/unref AND the workers' scheduled
 // clone/drop on the SAME refcount word.
@@ -43,10 +43,10 @@ send_loop = (p: MutPtr<Pool>, acts: RawPtr<u8>, pid: i64, k: i64, ok: i64) i64 {
     (k >= MSGS).match ({
         true  => ok,
         false => {
-            target := (pid + k) % NACT
-            a := acts.offset(target * 8).load_i64().offset(0)
-            h := pool_actor_ref(a)    // clone (atomic +1) — independent cross-thread handle
-            sent := p.pool_send(h, 1)
+            target = (pid + k) % NACT
+            a = acts.offset(target * 8).load_i64().offset(0)
+            h = pool_actor_ref(a)    // clone (atomic +1) — independent cross-thread handle
+            sent = p.pool_send(h, 1)
             pool_actor_unref(h)    // drop the clone (atomic -1) — must NOT free (owner alive)
             send_loop(p, acts, pid, k + 1, sent.match ({
                 .Ok(n)  => ok + 1,
@@ -56,11 +56,11 @@ send_loop = (p: MutPtr<Pool>, acts: RawPtr<u8>, pid: i64, k: i64, ok: i64) i64 {
     })
 }
 producer = (arg: RawPtr<u8>) RawPtr<u8> {
-    pool_raw := load_i64(arg.offset(PA_POOL)).offset(0)
-    acts := load_i64(arg.offset(PA_ACTS)).offset(0)
-    pid := load_i64(arg.offset(PA_PID))
-    p := pool_view(pool_raw)
-    ok := send_loop(p, acts, pid, 0, 0)
+    pool_raw = load_i64(arg.offset(PA_POOL)).offset(0)
+    acts = load_i64(arg.offset(PA_ACTS)).offset(0)
+    pid = load_i64(arg.offset(PA_PID))
+    p = pool_view(pool_raw)
+    ok = send_loop(p, acts, pid, 0, 0)
     arg.offset(PA_OK).store_i64(ok)
     null_ptr()
 }
@@ -95,12 +95,12 @@ start_prods = (
     i: i64,
 ) void {
     (i < NPROD).then({
-        c := ar.offset(i * 32)
+        c = ar.offset(i * 32)
         c.offset(PA_POOL).store_i64(pool_raw)
         c.offset(PA_ACTS).store_i64(acts)
         c.offset(PA_PID).store_i64(i)
         c.offset(PA_OK).store_i64(0)
-        h := spawn(producer, c)
+        h = spawn(producer, c)
         hs.offset(i * 8).store_i64(h.tid)
         start_prods(pool_raw, acts, hs, ar, i + 1)
     })
@@ -117,17 +117,17 @@ join_prods = (hs: RawPtr<u8>, ar: RawPtr<u8>, i: i64, acc: i64) i64 {
 // one scenario-1 iteration: returns 1 on pass, 0 on fail.
 iteration = () i64 {
     store_i64(processed, 0)
-    acts := malloc(NACT * 8)
+    acts = malloc(NACT * 8)
     spawn_actors(acts, 0)
-    p := pool_open(WORKERS, NACT + 8)
-    pool_raw := p.pool_raw()
-    hs := malloc(NPROD * 8)
-    ar := malloc(NPROD * 32)
+    p = pool_open(WORKERS, NACT + 8)
+    pool_raw = p.pool_raw()
+    hs = malloc(NPROD * 8)
+    ar = malloc(NPROD * 32)
     start_prods(pool_raw, acts, hs, ar, 0)
-    sent := join_prods(hs, ar, 0, 0)    // total ACCEPTED sends across producers
+    sent = join_prods(hs, ar, 0, 0)    // total ACCEPTED sends across producers
     p.pool_quiesce_stop()
-    got := load_i64(processed)
-    counts_ok := check_counts(acts, 0, 1)    // every actor back to refcount 1 (owner only)
+    got = load_i64(processed)
+    counts_ok = check_counts(acts, 0, 1)    // every actor back to refcount 1 (owner only)
     free_actors(acts, 0)    // owner drops its ref → count 0 → freed exactly once
     p.pool_close()
     free(acts)
@@ -153,8 +153,8 @@ burst = (p: MutPtr<Pool>, a: RawPtr<u8>, k: i64) void {
 }
 scheduler_frees_last = () void {
     store_i64(processed, 0)
-    p := pool_open(WORKERS, 16)
-    a := pool_spawn(processed, 4096, behave)
+    p = pool_open(WORKERS, 16)
+    a = pool_spawn(processed, 4096, behave)
     burst(p, a, 0)
     pool_actor_free(a)    // owner drops NOW; the scheduled ref keeps it alive,
     p.pool_quiesce_stop()    // and a WORKER frees it on the final deschedule.
@@ -162,7 +162,7 @@ scheduler_frees_last = () void {
 }
 main = () i32 {
     scheduler_frees_last()
-    passes := run_iters(0, 0)
+    passes = run_iters(0, 0)
     println(passes)
     free(processed)
     (passes == ITERS).then({ 42 }, { 1 })

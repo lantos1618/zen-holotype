@@ -5,8 +5,8 @@
 { view } = std.text.str
 { Result, IoError, ok, err } = std.core.result
 { open, read, write, close, lseek, system } = std.c.libc
-STDOUT := 1
-STDERR* := 2
+STDOUT = 1
+STDERR* = 2
 // write-all retry loop over a raw fd: emit `[ptr, ptr+len)` in full, threading the running total in
 // `done`. write(2) returning < 0 → `.Err(.Errno(rc))`; a 0-byte return on a non-empty buffer means no
 // progress, so we stop with `.Err(.Eof)` rather than spin forever; a short write advances the pointer
@@ -16,10 +16,10 @@ STDERR* := 2
 // ONE fd write-all loop for the whole stdlib: std.sys.root (Writer) and std.net (send) import it from here —
 // io.file is the lowest-level file module (sys already imports it), so the flat namespace holds one def.
 write_all* = (fd: i32, ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError> {
-    out: Result<i64, IoError> := (len <= 0).match ({
+    out: Result<i64, IoError> = (len <= 0).match ({
         true  => ok(done),
         false => {
-            w := fd.write(ptr, len)
+            w = fd.write(ptr, len)
             (w < 0).match ({
                 true  => err(IoError.Errno(to_i32(w))),
                 false => (w == 0).match ({
@@ -34,7 +34,7 @@ write_all* = (fd: i32, ptr: RawPtr<u8>, len: i64, done: i64) Result<i64, IoError
 // Writes a str to stdout without the trailing NUL. Returns `.Ok(byte count)` on success, or `.Err` on a
 // write failure — the root fd sink under fmt/io. println/print discard the Result to stay best-effort.
 out* = (s: StringView) Result<i64, IoError> {
-    v := s.view()
+    v = s.view()
     write_all(STDOUT, v.ptr, v.len, 0)
 }
 // Writes length-tracked bytes to stdout without requiring a trailing NUL. Same Result contract as `out`.
@@ -44,30 +44,30 @@ out_bytes* = (bytes: [u8]) Result<i64, IoError> { write_all(STDOUT, bytes.ptr, b
 // gen_slicelit) and owned by nobody, so it costs a block per byte written. A view over a local costs
 // nothing, and keeping it HERE keeps the raw-pointer step out of the callers.
 out_byte* = (b: u8) Result<i64, IoError> {
-    v := b
+    v = b
     write_all(STDOUT, slice(v.addr(), 1).ptr, 1, 0)
 }
 // The stderr pair — same Result contract as `out`/`out_bytes`.
 eout* = (s: StringView) Result<i64, IoError> {
-    v := s.view()
+    v = s.view()
     write_all(STDERR, v.ptr, v.len, 0)
 }
 eout_bytes* = (bytes: [u8]) Result<i64, IoError> { write_all(STDERR, bytes.ptr, bytes.len, 0) }
 // POSIX open(2) bit flags. Export the atoms so callers can state the exact mask they need instead of
 // copying opaque decimal sums; O_WRTRUNC is the common create-or-truncate writer used by save().
-O_RDONLY* := 0
-O_WRONLY* := 1
-O_CREAT* := 64
-O_EXCL* := 128
-O_TRUNC := 512
-O_WRTRUNC* := O_WRONLY | O_CREAT | O_TRUNC
-MODE_644* := 420    // 0o644
-MODE_755* := 493    // 0o755
-SEEK_SET := 0
-SEEK_END := 2
+O_RDONLY* = 0
+O_WRONLY* = 1
+O_CREAT* = 64
+O_EXCL* = 128
+O_TRUNC = 512
+O_WRTRUNC* = O_WRONLY | O_CREAT | O_TRUNC
+MODE_644* = 420    // 0o644
+MODE_755* = 493    // 0o755
+SEEK_SET = 0
+SEEK_END = 2
 // Returns file size and rewinds the descriptor to the start.
 file_size = (fd: i32) i64 {
-    n := fd.lseek(0, SEEK_END)
+    n = fd.lseek(0, SEEK_END)
     fd.lseek(0, SEEK_SET)
     n
 }
@@ -76,20 +76,20 @@ fd_read_all = (fd: i32, buf: RawPtr<u8>, off: i64, n: i64) i64 {
     (off >= n).match ({
         true  => n,
         false => {
-            r := fd.read(buf.offset(off), n - off)
+            r = fd.read(buf.offset(off), n - off)
             (r <= 0).then({ off }, { fd.fd_read_all(buf, off + r, n) })
         },
     })
 }
-ENOMEM := 12
+ENOMEM = 12
 // Finish a byte read: `got == n` bytes into `buf`, close the fd, and hand back a length-carrying `[u8]`.
 // A trailing NUL is written at `buf[n]` (the buffer was sized `n + 1`), so the SAME allocation is also a
 // valid NUL-terminated `StringView` via `cstr(buf)` — the text path below reuses it. The slice length
 // carries the TRUE byte count, so an embedded NUL does NOT truncate (unlike a strlen-based view).
 read_bytes_finish = (a: Allocator, fd: i32, buf: RawPtr<u8>, n: i64) Result<[u8], IoError> {
-    got := fd.fd_read_all(buf, 0, n)
+    got = fd.fd_read_all(buf, 0, n)
     fd.close()
-    out: Result<[u8], IoError> := (got == n).match ({
+    out: Result<[u8], IoError> = (got == n).match ({
         true  => {
             buf.offset(n).store(0)
             ok(buf.slice(n))
@@ -111,8 +111,8 @@ read_bytes_alloc = (a: Allocator, fd: i32, n: i64) Result<[u8], IoError> {
     })
 }
 read_bytes_open = (a: Allocator, fd: i32) Result<[u8], IoError> {
-    n := fd.file_size()
-    out: Result<[u8], IoError> := (n < 0).match ({
+    n = fd.file_size()
+    out: Result<[u8], IoError> = (n < 0).match ({
         true  => {
             fd.close()
             err(IoError.Errno(0 - 1))
@@ -125,11 +125,8 @@ read_bytes_open = (a: Allocator, fd: i32) Result<[u8], IoError> {
 // preserved (the true byte count rides in the slice length, not strlen). Reach for this for `wc`, images,
 // gzip, or any data not guaranteed NUL-free; `contents_in` below is the NUL-terminated TEXT twin.
 contents_bytes_in* = (a: Allocator, path: StringView) Result<[u8], IoError> {
-    fd := path.open(O_RDONLY, 0)
-    out: Result<[u8], IoError> := (fd < 0).match ({
-        true  => err(IoError.NotFound),
-        false => a.read_bytes_open(fd),
-    })
+    fd = path.open(O_RDONLY, 0)
+    out: Result<[u8], IoError> = (fd < 0).then({ err(IoError.NotFound) }, { a.read_bytes_open(fd) })
     out
 }
 contents_bytes* = (a: Allocator, path: StringView) Result<[u8], IoError> {
@@ -147,18 +144,18 @@ contents_in* = (a: Allocator, path: StringView) Result<StringView, IoError> {
 contents* = (a: Allocator, path: StringView) Result<StringView, IoError> { a.contents_in(path) }
 // Writes a str's bytes to a file, creating/truncating it.
 save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError> {
-    fd := path.open(O_WRTRUNC, MODE_644)
-    out: Result<i64, IoError> := (fd < 0).match ({
+    fd = path.open(O_WRTRUNC, MODE_644)
+    out: Result<i64, IoError> = (fd < 0).match ({
         true  => err(IoError.Denied),
         false => {
-            v := data.view()
+            v = data.view()
             // clamp the requested byte count to the buffer's real length — never read past `data`.
-            nn := (n < v.len).then({ n }, { v.len })
-            w := fd.write(v.ptr, nn)
+            nn = (n < v.len).then({ n }, { v.len })
+            w = fd.write(v.ptr, nn)
             // close() reports deferred write errors (NFS/ENOSPC/EIO): the write buffered fine but the flush
             // on close failed, so the bytes are NOT durable. Ignoring close's return is silent DATA-LOSS —
             // check it, and surface a nonzero close as `.Err(.Errno)` rather than a bogus `.Ok`.
-            c := fd.close()
+            c = fd.close()
             (w == nn).match ({
                 true  => (c == 0).then({ ok(w) }, { err(IoError.Errno(c)) }),
                 false => err(IoError.Eof),
@@ -173,11 +170,11 @@ save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError> {
 // was killed by a signal (the shell `$?` convention). This decodes what raw `system()` folds together:
 // -1 (fork failure), 127 (command not found), and a real exit code were all indistinguishable before.
 shell* = (cmd: StringView) Result<i32, IoError> {
-    st := cmd.system()
+    st = cmd.system()
     (st < 0).match ({
         true  => err(IoError.Errno(st)),
         false => {
-            sig := st & 127
+            sig = st & 127
             ok((sig == 0).then({ st >> 8 & 255 }, { 128 + sig }))
         },
     })

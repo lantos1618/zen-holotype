@@ -80,7 +80,7 @@ Value*: Null | Bool(bool) | Int(i64) | Num(f64) | Str(StringView) | Arr([Value])
 // A parse error, carrying the byte offset where it was detected (UnexpectedEof carries none).
 JsonError*: Unexpected(i64) | BadString(i64) | BadNumber(i64) | BadLiteral(i64) | TrailingGarbage(i64) | UnexpectedEof | TooDeep
 // nesting cap so a pathological "[[[[…" can't blow the native stack.
-MAX_DEPTH := 256
+MAX_DEPTH = 256
 // ── internal step values (a parsed node + the offset just past it) ────────────
 Step: {
     v: Value,
@@ -124,8 +124,8 @@ jbuf_new<T> = (a: Allocator) JBuf<T> {
     )
 }
 jbuf_push<T> = (a: Allocator, jb: JBuf<T>, x: T) JBuf<T> {
-    x := x
-    r := (jb.len < jb.cap).match ({
+    x = x
+    r = (jb.len < jb.cap).match ({
         true  => jb,
         false => JBuf<T>(
             ptr: a.resize(jb.ptr, (jb.cap * 2 + 1) * sizeof(T)),
@@ -133,7 +133,7 @@ jbuf_push<T> = (a: Allocator, jb: JBuf<T>, x: T) JBuf<T> {
             cap: jb.cap * 2 + 1,
         ),
     })
-    s: [T] := slice(r.ptr, r.cap)
+    s :: [T] = slice(r.ptr, r.cap)
     s[r.len] = x
     JBuf<T>(
         ptr: r.ptr,
@@ -150,7 +150,7 @@ is_num_byte = (b: u8) bool {
 }
 // first index >= pos that is not JSON whitespace (or sv.len when the tail is all whitespace).
 skip_ws = (sv: [u8], pos: i64) i64 {
-    p: i64 := pos
+    p :: i64 = pos
     sv.loop((h, i, b) {
         (i < p == false).then({
             b.json_ws().match ({
@@ -168,10 +168,10 @@ skip_ws = (sv: [u8], pos: i64) i64 {
 // ── string decoding (allocator-owned, escapes resolved) ───────────────────────
 // the code point of the 4 hex digits at sv[at..at+4], or -1 if any byte is not hex.
 hex4 = (sv: [u8], at: i64) i64 {
-    d0 := hex_nibble(sv[at])
-    d1 := hex_nibble(sv[at + 1])
-    d2 := hex_nibble(sv[at + 2])
-    d3 := hex_nibble(sv[at + 3])
+    d0 = hex_nibble(sv[at])
+    d1 = hex_nibble(sv[at + 1])
+    d2 = hex_nibble(sv[at + 2])
+    d3 = hex_nibble(sv[at + 3])
     (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0).then({ 0 - 1 }, { d0 * 4096 + d1 * 256 + d2 * 16 + d3 })
 }
 // UTF-8 encode a BMP code point into the builder (1, 2, or 3 bytes).
@@ -197,10 +197,10 @@ push_utf8 = (a: Allocator, sb: String, cp: i64) String {
 // decode the JSON string starting at sv[pos] == '"'; returns the decoded view + the offset
 // just past the closing quote. The decoded bytes are accumulated through `a`.
 parse_string_raw = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<StrStep, JsonError> {
-    sb: String := a.new_in().jok()
-    endpos: i64 := 0 - 1
-    errpos: i64 := 0 - 1
-    resume: i64 := pos + 1
+    sb :: String = a.new_in().jok()
+    endpos :: i64 = 0 - 1
+    errpos :: i64 = 0 - 1
+    resume :: i64 = pos + 1
     sv.loop((h, i, b) {
         (i < resume == false).then({
             (b == '"').match ({
@@ -261,7 +261,7 @@ parse_string_raw = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<St
                                                                     h.break
                                                                 },
                                                                 false => {
-                                                                    cp := hex4(sv, i + 2)
+                                                                    cp = hex4(sv, i + 2)
                                                                     (cp < 0).match ({
                                                                         true  => {
                                                                             errpos = i
@@ -304,8 +304,8 @@ parse_string_raw = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<St
 // ── scalar parsers ─────────────────────────────────────────────────────────────
 // match sv[pos..] against `word`; on success produce `v` at pos+len, else BadLiteral.
 parse_lit = (sv: [u8], pos: i64, word: StringView, v: Value) Result<Step, JsonError> {
-    wv := word.view()
-    ok: bool := pos + wv.len <= sv.len
+    wv = word.view()
+    ok :: bool = pos + wv.len <= sv.len
     wv.loop((h, i, b) {
         ok.match ({
             true  => (sv[pos + i] == b == false).then({
@@ -320,7 +320,7 @@ parse_lit = (sv: [u8], pos: i64, word: StringView, v: Value) Result<Step, JsonEr
     ok.then({ step_ok(v, pos + wv.len) }, { err(.BadLiteral(pos)) })
 }
 parse_number = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<Step, JsonError> {
-    endp: i64 := pos
+    endp :: i64 = pos
     sv.loop((h, i, b) {
         (i < pos == false).then({
             b.is_num_byte().match ({
@@ -333,14 +333,14 @@ parse_number = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<Step, 
             })
         })
     })
-    n := endp - pos
+    n = endp - pos
     (n <= 0).match ({
         true  => err(.BadNumber(pos)),
         false => {
-            txt := a.substr_in(src, pos, n).expect("std.json: allocation failed")
+            txt = a.substr_in(src, pos, n).expect("std.json: allocation failed")
             // an integer token becomes `.Int` (exact round-trip); a magnitude past i64 falls back to
             // the f64 approximation, as does anything with a fraction or an exponent.
-            out: Result<Step, JsonError> := txt.num_is_integral().match ({
+            out: Result<Step, JsonError> = txt.num_is_integral().match ({
                 true  => parse_i64_checked(txt).match ({
                     .Ok(i)  => step_ok(.Int(i), endp),
                     .Err(_) => parse_num_f64(txt, pos, endp),
@@ -358,7 +358,7 @@ parse_number = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<Step, 
 // an INTEGER token: no '.', no exponent. Those are the only two number bytes that make a JSON number
 // non-integral, so their absence is exactly "this round-trips through i64" (modulo magnitude).
 num_is_integral = (txt: StringView) bool {
-    intish := true
+    intish ::= true
     txt.view().loop((h, i, b) {
         (b == '.' || b == 'e' || b == 'E').then({
             intish = false
@@ -387,16 +387,16 @@ parse_array = (
     pos: i64,
     depth: i64,
 ) Result<Step, JsonError> {
-    p := sv.skip_ws(pos + 1)
+    p = sv.skip_ws(pos + 1)
     (p >= sv.len).match ({
         true  => err(.UnexpectedEof),
         false => (sv[p] == ']').match ({
             true  => {
-                empty: JBuf<Value> := a.jbuf_new()
+                empty: JBuf<Value> = a.jbuf_new()
                 step_ok(.Arr(empty.jbuf_slice()), p + 1)
             },
             false => {
-                seed: JBuf<Value> := a.jbuf_new()
+                seed: JBuf<Value> = a.jbuf_new()
                 a.arr_loop(src, sv, p, depth, seed)
             },
         }),
@@ -413,8 +413,8 @@ arr_loop = (
     a.parse_value(src, sv, p, depth + 1).match ({
         .Err(e) => err(e),
         .Ok(st) => {
-            vb2 := a.jbuf_push(vb, st.v)
-            q := sv.skip_ws(st.pos)
+            vb2 = a.jbuf_push(vb, st.v)
+            q = sv.skip_ws(st.pos)
             (q >= sv.len).match ({
                 true  => err(.UnexpectedEof),
                 false => (sv[q] == ',').match ({
@@ -435,16 +435,16 @@ parse_object = (
     pos: i64,
     depth: i64,
 ) Result<Step, JsonError> {
-    p := sv.skip_ws(pos + 1)
+    p = sv.skip_ws(pos + 1)
     (p >= sv.len).match ({
         true  => err(.UnexpectedEof),
         false => (sv[p] == '}').match ({
             true  => {
-                empty: JBuf<Entry> := a.jbuf_new()
+                empty: JBuf<Entry> = a.jbuf_new()
                 step_ok(.Obj(Object(entries: empty.jbuf_slice())), p + 1)
             },
             false => {
-                seed: JBuf<Entry> := a.jbuf_new()
+                seed: JBuf<Entry> = a.jbuf_new()
                 a.obj_loop(src, sv, p, depth, seed)
             },
         }),
@@ -464,7 +464,7 @@ obj_loop = (
             true  => a.parse_string_raw(src, sv, p).match ({
                 .Err(e) => err(e),
                 .Ok(ks) => {
-                    q := sv.skip_ws(ks.pos)
+                    q = sv.skip_ws(ks.pos)
                     (q >= sv.len || sv[q] != ':').match ({
                         true  => (q >= sv.len).match ({
                             true  => err(.UnexpectedEof),
@@ -473,11 +473,11 @@ obj_loop = (
                         false => a.parse_value(src, sv, q + 1, depth + 1).match ({
                             .Err(e) => err(e),
                             .Ok(st) => {
-                                eb2 := a.jbuf_push(eb, Entry(
+                                eb2 = a.jbuf_push(eb, Entry(
                                     key: ks.s,
                                     val: st.v,
                                 ))
-                                r := sv.skip_ws(st.pos)
+                                r = sv.skip_ws(st.pos)
                                 (r >= sv.len).match ({
                                     true  => err(.UnexpectedEof),
                                     false => (sv[r] == ',').match ({
@@ -508,11 +508,11 @@ parse_value = (
     (depth > MAX_DEPTH).match ({
         true  => err(.TooDeep),
         false => {
-            p := sv.skip_ws(pos)
+            p = sv.skip_ws(pos)
             (p >= sv.len).match ({
                 true  => err(.UnexpectedEof),
                 false => {
-                    b := sv[p]
+                    b = sv[p]
                     b.is_num_start().match ({
                         true  => a.parse_number(src, sv, p),
                         false => (b == '{').match ({
@@ -568,15 +568,15 @@ value_free* = (a: Allocator, v: Value) void {
 // Parse a complete JSON document. Returns Err on any malformed input, including
 // trailing non-whitespace after the value.
 parse* = (a: Allocator, s: StringView) Result<Value, JsonError> {
-    sv := s.view()
-    out: Result<Value, JsonError> := a.parse_value(s, sv, 0, 0).match ({
+    sv = s.view()
+    out: Result<Value, JsonError> = a.parse_value(s, sv, 0, 0).match ({
         .Err(e) => {
-            r: Result<Value, JsonError> := .Err(e)
+            r: Result<Value, JsonError> = .Err(e)
             r
         },
         .Ok(st) => {
-            p := sv.skip_ws(st.pos)
-            r: Result<Value, JsonError> := (p < sv.len).match ({
+            p = sv.skip_ws(st.pos)
+            r: Result<Value, JsonError> = (p < sv.len).match ({
                 true  => .Err(.TrailingGarbage(p)),
                 false => .Ok(st.v),
             })
@@ -587,7 +587,7 @@ parse* = (a: Allocator, s: StringView) Result<Value, JsonError> {
 }
 // ── serialization ──────────────────────────────────────────────────────────────
 write_u_esc = (a: Allocator, sb: String, b: u8) String {
-    bi := b.to_i64()
+    bi = b.to_i64()
     sb
         .push_in(a, '\\')
         .jok()
@@ -650,9 +650,9 @@ json_needs_esc = (b: u8) bool { b == '"' || b == '\\' || b < 32 }
 // Deliberately NOT std.text.ascii.escape_into (the per-byte scan the backends/formatter share):
 // the run-copy bulk append is a different loop shape, kept for throughput on plain text.
 write_str_lit = (a: Allocator, sb: String, s: StringView) String {
-    out: String := sb.push_in(a, '"').jok()
-    sv := s.view()
-    run_start: i64 := 0
+    out :: String = sb.push_in(a, '"').jok()
+    sv = s.view()
+    run_start :: i64 = 0
     sv.loop((h, i, b) {
         json_needs_esc(b).then({
             (i > run_start).then({
@@ -668,7 +668,7 @@ write_str_lit = (a: Allocator, sb: String, s: StringView) String {
     out.push_in(a, '"').jok()
 }
 write_arr = (a: Allocator, sb: String, xs: [Value]) String {
-    out: String := sb.push_in(a, '[').jok()
+    out :: String = sb.push_in(a, '[').jok()
     xs.loop((h, i, x) {
         (i > 0).then({
             out = out.push_in(a, ',').jok()
@@ -678,8 +678,8 @@ write_arr = (a: Allocator, sb: String, xs: [Value]) String {
     out.push_in(a, ']').jok()
 }
 write_obj = (a: Allocator, sb: String, o: Object) String {
-    out: String := sb.push_in(a, '{').jok()
-    es := o.entries
+    out :: String = sb.push_in(a, '{').jok()
+    es = o.entries
     es.loop((h, i, e) {
         (i > 0).then({
             out = out.push_in(a, ',').jok()
@@ -694,8 +694,8 @@ write_obj = (a: Allocator, sb: String, o: Object) String {
 // a pure intermediate nothing above can reach, released here rather than leaked once per number
 // serialized (the same shape as the parser's number token at `.Int`/`.Num` decode).
 write_number = (a: Allocator, sb: String, digits: String) String {
-    txt := digits.finish_in(a).jfin()
-    out := sb.append_in(a, txt).jok()
+    txt = digits.finish_in(a).jfin()
+    out = sb.append_in(a, txt).jok()
     a.release(txt.view().ptr)
     out
 }
@@ -712,7 +712,7 @@ write_value = (a: Allocator, sb: String, v: Value) String {
 }
 // Serialize a Value to compact JSON text (allocator-owned, NUL-terminated view).
 stringify* = (a: Allocator, v: Value) StringView {
-    sb: String := a.new_in().jok()
+    sb :: String = a.new_in().jok()
     sb = a.write_value(sb, v)
     sb.finish_in(a).jfin()
 }
@@ -727,7 +727,7 @@ pwrite_arr = (a: Allocator, sb: String, xs: [Value], depth: i64) String {
     (xs.len == 0).match ({
         true  => sb.append_in(a, "[]").jok(),
         false => {
-            out: String := sb
+            out :: String = sb
                 .push_in(a, '[')
                 .jok()
                 .push_in(a, '\n')
@@ -748,11 +748,11 @@ pwrite_arr = (a: Allocator, sb: String, xs: [Value], depth: i64) String {
     })
 }
 pwrite_obj = (a: Allocator, sb: String, o: Object, depth: i64) String {
-    es := o.entries
+    es = o.entries
     (es.len == 0).match ({
         true  => sb.append_in(a, "{}").jok(),
         false => {
-            out: String := sb
+            out :: String = sb
                 .push_in(a, '{')
                 .jok()
                 .push_in(a, '\n')
@@ -789,14 +789,14 @@ pwrite_value = (a: Allocator, sb: String, v: Value, depth: i64) String {
 // Serialize a Value to indented JSON text (2-space indent, one element/member per line) — the
 // human-readable counterpart to `stringify`. Allocator-owned, NUL-terminated view.
 pretty* = (a: Allocator, v: Value) StringView {
-    sb: String := a.new_in().jok()
+    sb :: String = a.new_in().jok()
     sb = a.pwrite_value(sb, v, 0)
     sb.finish_in(a).jfin()
 }
 // ── accessors ──────────────────────────────────────────────────────────────────
 // index of `key` in the object's entry list, or -1 (O(n) linear scan).
 obj_find = (o: Object, key: StringView) i64 {
-    found: i64 := 0 - 1
+    found :: i64 = 0 - 1
     o.entries.loop((h, i, e) {
         (found < 0).match ({
             true  => (e.key == key).then({
@@ -812,20 +812,20 @@ obj_find = (o: Object, key: StringView) i64 {
 }
 // Object member lookup: .Some(value) if `key` is present, else .None.
 obj_get = (o: Object, key: StringView) Opt<Value> {
-    i := o.obj_find(key)
-    out: Opt<Value> := (i < 0).then({ .None }, { .Some(o.entries[i].val) })
+    i = o.obj_find(key)
+    out: Opt<Value> = (i < 0).then({ .None }, { .Some(o.entries[i].val) })
     out
 }
 // Member lookup on a Value: .Some(value) if it is an Obj containing `key`, else .None.
 get* = (obj: Value, key: StringView) Opt<Value> {
-    out: Opt<Value> := obj.match ({
+    out: Opt<Value> = obj.match ({
         .Obj(o) => o.obj_get(key),
         _       => .None,
     })
     out
 }
 as_obj* = (v: Value) Opt<Object> {
-    out: Opt<Object> := v.match ({
+    out: Opt<Object> = v.match ({
         .Obj(o) => .Some(o),
         _       => .None,
     })
@@ -834,7 +834,7 @@ as_obj* = (v: Value) Opt<Object> {
 // The value as an f64 — `.Int` widens (exact below 2^53, rounded above), `.Num` passes through. Use
 // `as_int` when the exactness of a large integer matters.
 as_num* = (v: Value) Opt<f64> {
-    out: Opt<f64> := v.match ({
+    out: Opt<f64> = v.match ({
         .Int(i) => .Some(to_f64(i)),
         .Num(n) => .Some(n),
         _       => .None,
@@ -845,28 +845,28 @@ as_num* = (v: Value) Opt<f64> {
 // fit i64. A `.Num` (2.0, 1e3, or an integer too big for i64) is deliberately `.None`: the whole point
 // of the `.Int`/`.Num` split is that "was this an exact integer?" has an honest answer.
 as_int* = (v: Value) Opt<i64> {
-    out: Opt<i64> := v.match ({
+    out: Opt<i64> = v.match ({
         .Int(i) => .Some(i),
         _       => .None,
     })
     out
 }
 as_str* = (v: Value) Opt<StringView> {
-    out: Opt<StringView> := v.match ({
+    out: Opt<StringView> = v.match ({
         .Str(s) => .Some(s),
         _       => .None,
     })
     out
 }
 as_bool* = (v: Value) Opt<bool> {
-    out: Opt<bool> := v.match ({
+    out: Opt<bool> = v.match ({
         .Bool(b) => .Some(b),
         _        => .None,
     })
     out
 }
 as_arr* = (v: Value) Opt<[Value]> {
-    out: Opt<[Value]> := v.match ({
+    out: Opt<[Value]> = v.match ({
         .Arr(xs) => .Some(xs),
         _        => .None,
     })
@@ -877,7 +877,7 @@ as_arr* = (v: Value) Opt<[Value]> {
 // public fn does not collide with `Object`'s public `entries` field in the flat namespace):
 //   json.members(v).loop((h, i, e) { …e.key… json.stringify(a, e.val)… })
 members* = (v: Value) [Entry] {
-    out: [Entry] := v.match ({
+    out: [Entry] = v.match ({
         .Obj(o) => o.entries,
         _       => slice(null_ptr(), 0),
     })
@@ -888,7 +888,7 @@ arr_eq = (xs: [Value], ys: [Value]) bool {
     (xs.len != ys.len).match ({
         true  => false,
         false => {
-            ok: bool := true
+            ok :: bool = true
             xs.loop((h, i, x) {
                 (equals(x, ys[i]) == false).then({
                     ok = false
@@ -903,9 +903,9 @@ obj_eq = (a: Object, b: Object) bool {
     (a.entries.len != b.entries.len).match ({
         true  => false,
         false => {
-            ok: bool := true
+            ok :: bool = true
             a.entries.loop((h, i, e) {
-                j := b.obj_find(e.key)
+                j = b.obj_find(e.key)
                 (j < 0).match ({
                     true  => {
                         ok = false

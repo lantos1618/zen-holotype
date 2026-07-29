@@ -10,11 +10,11 @@
 // catch, so the overflow kills ONLY that actor: the `stack overflow` panic + the `actor marked dead` note
 // print, the pool keeps draining, both survivors complete their full PERMSG, and the program exits 0.
 { pool_open, pool_spawn, pool_actor_free, Pool } = std.concurrent.pool
-NACT := 3
-PERMSG := 2000
-WORKERS := 3
-acc := malloc(8)
-actors := malloc(NACT * 8)
+NACT = 3
+PERMSG = 2000
+WORKERS = 3
+acc = malloc(8)
+actors = malloc(NACT * 8)
 // Deep NON-tail recursion: the recursive result `r` feeds a branch before the frame returns, so no
 // sibling-call / accumulator transform applies at any -O — each frame must persist. At depth 100,000,000
 // this exhausts the C stack and raises SIGSEGV (the worker's stack-overflow panic).
@@ -22,7 +22,7 @@ depth = (n: i64) i64 {
     (n == 0).match ({
         true  => 0,
         false => {
-            r := depth(n - 1)
+            r = depth(n - 1)
             (r < n).then({ r + 1 }, { n })
         },
     })
@@ -32,7 +32,7 @@ depth = (n: i64) i64 {
 behave = (user: RawPtr<u8>, msg: i64) void {
     (msg == 0).match ({
         true  => {
-            d := depth(100000000)
+            d = depth(100000000)
             (d < 0).then({
                 atomic_add_i64(user, 1)
             })
@@ -63,19 +63,19 @@ free_all = (i: i64) void {
 main = () i32 {
     store_i64(acc, 0)
     spawn_all(0)
-    p := pool_open(WORKERS, NACT + 8)
+    p = pool_open(WORKERS, NACT + 8)
     // actors 0 and 2 are survivors: PERMSG live messages each. actor 1 gets ONE poison message and dies.
     send_n(p, actors.offset(0 * 8).load_i64().offset(0), 0, PERMSG)
     p.pool_send(actors.offset(1 * 8).load_i64().offset(0), 0)
     send_n(p, actors.offset(2 * 8).load_i64().offset(0), 0, PERMSG)
     p.pool_quiesce_stop()
-    total := load_i64(acc)
+    total = load_i64(acc)
     free_all(0)
     p.pool_close()
     free(actors)
     free(acc)
     // exit 0 IFF both survivors processed their full load (the dead actor contributed nothing). Without
     // isolation the process is killed RAW (139) long before here, so exit 0 is itself proof the pool survived.
-    expected := 2 * PERMSG
+    expected = 2 * PERMSG
     (total == expected).then({ 0 }, { 1 })
 }

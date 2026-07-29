@@ -21,6 +21,7 @@
 { genModuleIn } = compiler.backend.c.c_emit
 { genJsModuleIn } = compiler.backend.js.js
 { pretty_module_in, pretty_set_comments } = compiler.pretty
+{ mut_infer_decls } = compiler.astops
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
 { eprint, first_user_import_in, file_exists } = compiler.resolve
 { ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = compiler.resolve_ffi
@@ -45,19 +46,19 @@ TMPC = (mp: MutPtr<Malloc>) StringView { mp.pid_path("/tmp/zenc_zd_", ".c") }
 TMPBIN = (mp: MutPtr<Malloc>) StringView { mp.pid_path("/tmp/zenc_zd_", ".bin") }
 // write the runnable temp.c: zenrt.h-include head, then the emitted body (after HEAD).
 write_runnable_c = (tmpc: StringView, gen: String) bool {
-    hl := HEAD().view().len
-    fd := tmpc.open(O_WRTRUNC, MODE_644)
+    hl = HEAD().view().len
+    fd = tmpc.open(O_WRTRUNC, MODE_644)
     (fd < 0).match ({
         true  => false,
         false => {
-            hv := HEAD_REPL().view()
+            hv = HEAD_REPL().view()
             // A short write (ENOSPC/EIO), or a deferred error that only surfaces at close, leaves a
             // TRUNCATED temp.c that `cc` would then compile. `write_all` retries short writes and
             // reports the rest as a value; close is still run on the failure path (the fd must not
             // leak), and its own nonzero return counts as a failed write.
-            wh := write_all(fd, hv.ptr, hv.len, 0).or(0 - 1)
-            wb := write_all(fd, gen.ptr.offset(hl), gen.len - hl, 0).or(0 - 1)
-            closed := fd.close()
+            wh = write_all(fd, hv.ptr, hv.len, 0).or(0 - 1)
+            wb = write_all(fd, gen.ptr.offset(hl), gen.len - hl, 0).or(0 - 1)
+            closed = fd.close()
             wh >= 0 && wb >= 0 && closed == 0
         },
     })
@@ -90,7 +91,7 @@ PROFILE_RELEASE = () StringView { "-O2 -fno-strict-aliasing" }    // overrides t
 // never replays as (or from) a plain dev build.
 PROFILE_PERF = () StringView { "-g -fno-omit-frame-pointer" }
 PROFILE_GPROF = () StringView { "-g -pg -fno-omit-frame-pointer" }
-profile_flags := PROFILE_DEV()
+profile_flags ::= PROFILE_DEV()
 profile_release_set = () void { profile_flags = PROFILE_RELEASE() }
 profile_perf_set = () void { profile_flags = PROFILE_PERF() }
 profile_gprof_set = () void { profile_flags = PROFILE_GPROF() }
@@ -104,7 +105,7 @@ cc_command = (
     links: StringView,
     ccname: StringView,
 ) StringView {
-    line := mp
+    line = mp
         .gstr_string(256)
         .gstr_append(mp, ccname)
         .gstr_append(mp, " -std=gnu11 -Wno-error=implicit-function-declaration -O1 -foptimize-sibling-calls -fwrapv -w -I")
@@ -154,11 +155,11 @@ cross_cc = (mp: MutPtr<Malloc>, target: StringView) StringView {
     (target == "").then({
         return "cc"
     })
-    envcc := getEnv("ZENC_TARGET_CC")
+    envcc = getEnv("ZENC_TARGET_CC")
     (envcc == "" == false).then({
         return envcc
     })
-    gcc := mp
+    gcc = mp
         .gstr_string(32)
         .gstr_append(mp, target)
         .gstr_append(mp, "-gcc")
@@ -191,9 +192,9 @@ fnv_flag_files = (mp: MutPtr<Malloc>, h: i64, v: [u8], i: i64) i64 {
         false => (v[i] == ' ').match ({
             true  => mp.fnv_flag_files(h, v, i + 1),
             false => {
-                e := flag_token_end(v, i)
-                tok := push_prefix(mp.gstr_string(e - i + 1), mp, v, i, e).gstr_finish(mp)
-                h2 := contents_in(mp, tok).match ({
+                e = flag_token_end(v, i)
+                tok = push_prefix(mp.gstr_string(e - i + 1), mp, v, i, e).gstr_finish(mp)
+                h2 = contents_in(mp, tok).match ({
                     .Ok(c)  => h.fnv_str(c),
                     .Err(x) => h,
                 })
@@ -203,7 +204,7 @@ fnv_flag_files = (mp: MutPtr<Malloc>, h: i64, v: [u8], i: i64) i64 {
     })
 }
 fnv_flags = (h: i64, mp: MutPtr<Malloc>, s: StringView) i64 {
-    v: [u8] := s.view()
+    v: [u8] = s.view()
     mp.fnv_flag_files(h.fnv_str(s), v, 0)
 }
 // the compiler's own identity: the hash of the running zenc binary. A rebuilt zenc — new checker, new
@@ -215,22 +216,22 @@ fnv_flags = (h: i64, mp: MutPtr<Malloc>, s: StringView) i64 {
 // explicit-length chunks and fold as [u8]: an ELF binary has a NUL at byte 5, so any strlen-based view
 // (contents_in -> .view()) would hash only the first ~4 bytes and stamp EVERY build identically.
 self_exe_fd = () i32 {
-    fd := "/proc/self/exe".open(O_RDONLY, 0)
+    fd = "/proc/self/exe".open(O_RDONLY, 0)
     (fd < 0).then({ arg(0).open(O_RDONLY, 0) }, { fd })
 }
 cache_self = (mp: MutPtr<Malloc>) i64 {
-    fd := self_exe_fd()
+    fd = self_exe_fd()
     (fd < 0).match ({
         true  => 0,
         false => {
-            h := fd.cache_self_fold(mp.gstr_string(65536), FNV_BASIS())
+            h = fd.cache_self_fold(mp.gstr_string(65536), FNV_BASIS())
             fd.close()
             h
         },
     })
 }
 cache_self_fold = (fd: i32, buf: String, h: i64) i64 {
-    n := fd.read(buf.ptr, 65536)
+    n = fd.read(buf.ptr, 65536)
     (n <= 0).then({ h }, { fd.cache_self_fold(buf, h.fnv1a64_fold(buf.ptr.slice(n))) })
 }
 cache_hex_digit = (d: i64) u8 { load(offset("0123456789abcdef", d)) }
@@ -238,13 +239,13 @@ push_hex = (s: String, mp: MutPtr<Malloc>, h: i64, i: i64) String {
     (i < 0).match ({
         true  => s,
         false => {
-            hs := s.gstr_push(mp, cache_hex_digit(h >> i * 4 & 15))
+            hs = s.gstr_push(mp, cache_hex_digit(h >> i * 4 & 15))
             hs.push_hex(mp, h, i - 1)
         },
     })
 }    // nibble i*4..0, most significant first (hoist: gstr_reserve re-evals the receiver)
 cache_dir = () StringView {
-    e := getEnv("ZENC_CACHE_DIR")
+    e = getEnv("ZENC_CACHE_DIR")
     (e == "").then({ "/tmp/zenc-cache" }, { e })
 }
 cache_on = () bool { getEnv("ZENC_NO_CACHE") == "" }
@@ -262,7 +263,7 @@ cache_probe = (
     // An unreadable binary (neither /proc/self/exe nor argv[0] opens) means the compiler-identity stamp
     // is unavailable; a shared degenerate stamp would let a REBUILT compiler replay a stale entry. Empty
     // key = cache disabled for this run.
-    self := mp.cache_self()
+    self = mp.cache_self()
     (self == 0).then({
         return ""
     })
@@ -277,7 +278,7 @@ cache_probe = (
     // cached aarch64 binary must never replay as the x86_64 build (or vice versa).
     // The build profile (dev vs release, see cc_command) is part of the key the same way: a dev
     // `-O1 -g` binary must never replay as the `-r` release build (or vice versa).
-    h0 := self
+    h0 = self
         .fnv_str(VERSION())
         .fnv_str(kind)
         .fnv_str(getEnv("ZEN_VIS_REPORT"))
@@ -288,7 +289,7 @@ cache_probe = (
         .fnv_flags(mp, links)
         .fnv_str(target)
         .fnv_str(src)
-    st := mp.cache_walk_edges(root, mp.dirname(path), mp.edges_of(src), CacheWalk(
+    st = mp.cache_walk_edges(root, mp.dirname(path), mp.edges_of(src), CacheWalk(
         seen: mp.gstr_string(256),
         h: h0,
     ))
@@ -322,7 +323,7 @@ cache_bin_cmd = (mp: MutPtr<Malloc>, cb: StringView, out: StringView) StringView
 // concurrent zenc never observes a half-written entry (and an exec'ing reader never sees ETXTBSY).
 cache_store_bin = (mp: MutPtr<Malloc>, cb: StringView, out: StringView) i32 {
     mkdir(cache_dir(), MODE_755)
-    tmp := mp
+    tmp = mp
         .gstr_string(96)
         .gstr_append(mp, cb)
         .gstr_push(mp, '.')
@@ -346,21 +347,21 @@ cache_store_bin = (mp: MutPtr<Malloc>, cb: StringView, out: StringView) i32 {
 // finishes. Off by default: tm_mark/tm_lap return 0 without reading the clock, so the stamps woven
 // through compile_flat cost nothing when the flag is absent. Finer in-compiler splits (desugar/
 // inline/mono inside check+emit) are a follow-up — these are the honest driver-level boundaries.
-time_on := false
+time_on ::= false
 time_enable = () void { time_on = true }
-tm_flatten := to_i64(0)
-tm_parse := to_i64(0)
-tm_resolve := to_i64(0)
-tm_check := to_i64(0)
-tm_emit := to_i64(0)
-tm_cc := to_i64(0)
-tm_cache_hit := false
+tm_flatten ::= to_i64(0)
+tm_parse ::= to_i64(0)
+tm_resolve ::= to_i64(0)
+tm_check ::= to_i64(0)
+tm_emit ::= to_i64(0)
+tm_cc ::= to_i64(0)
+tm_cache_hit ::= false
 // CLOCK_MONOTONIC via the libc clock_gettime FFI (std.time.clock is not in the seed manifest, so
 // the driver reads the two timespec i64 fields itself — same layout contract as std.time.clock).
 TM_CLOCK_MONOTONIC = () i32 { 1 }
 TM_NS_PER_S = () i64 { 1000000000 }
 tm_now = (mp: MutPtr<Malloc>) i64 {
-    cell := mp.acquire_or_die(16)
+    cell = mp.acquire_or_die(16)
     clock_gettime(TM_CLOCK_MONOTONIC(), cell)
     load_i64(cell) * TM_NS_PER_S() + load_i64(cell.offset(8))
 }
@@ -368,7 +369,7 @@ tm_mark = (mp: MutPtr<Malloc>) i64 { time_on.then({ mp.tm_now() }, { 0 }) }
 tm_lap = (mp: MutPtr<Malloc>, t0: i64) i64 { time_on.then({ mp.tm_now() - t0 }, { 0 }) }
 // nanoseconds -> "12.3" (milliseconds, one decimal).
 push_ms = (s: String, mp: MutPtr<Malloc>, ns: i64) String {
-    t := ns / 100000
+    t = ns / 100000
     s.push_int(mp, t / 10).gstr_push(mp, '.').push_int(mp, t % 10)
 }
 tm_row = (mp: MutPtr<Malloc>, name: StringView, ns: i64) void {
@@ -384,7 +385,7 @@ tm_row = (mp: MutPtr<Malloc>, name: StringView, ns: i64) void {
 }
 tm_report = (mp: MutPtr<Malloc>, wall: i64, other_label: StringView) void {
     time_on.then({
-        sum := tm_flatten + tm_parse + tm_resolve + tm_check + tm_emit + tm_cc
+        sum = tm_flatten + tm_parse + tm_resolve + tm_check + tm_emit + tm_cc
         eprint("zenc --time: pipeline stages\n")
         tm_cache_hit.then({
             eprint("  (binary cache hit — compile stages skipped; ZENC_NO_CACHE=1 forces a full compile)\n")
@@ -413,18 +414,18 @@ compile_to = (
     links: StringView,
     target: StringView,
 ) i32 {
-    ccname := mp.cross_cc(target)
+    ccname = mp.cross_cc(target)
     (ccname == "").then({
         return 1
     })    // unresolvable cross toolchain: already reported loudly; NEVER fall back to host cc
-    cb := mp.cache_probe("bin", root, path, src, ccflags, links, target)
+    cb = mp.cache_probe("bin", root, path, src, ccflags, links, target)
     (cache_on() && cb == "" == false && file_exists(cb) && mp.cache_bin_cmd(cb, out).system() == 0).match ({
         true  => {
             tm_cache_hit = true
             0
         },
         false => {
-            rc := mp.compile_flat(root, path, src, out, ccflags, links, ccname)
+            rc = mp.compile_flat(root, path, src, out, ccflags, links, ccname)
             (rc == 0 && cache_on() && cb == "" == false).then({
                 mp.cache_store_bin(cb, out)
             })
@@ -442,32 +443,32 @@ compile_flat = (
     links: StringView,
     ccname: StringView,
 ) i32 {
-    t0 := mp.tm_mark()
-    rp := mp.resolve_prog_or_exit(root, path, src)
+    t0 = mp.tm_mark()
+    rp = mp.resolve_prog_or_exit(root, path, src)
     tm_flatten = mp.tm_lap(t0)
     (mp.report_no_if_resolved(rp, path, src) == 0).match ({
         true  => {
-            t1 := mp.tm_mark()
-            raw := mp.parse_module(rp.flat)
+            t1 = mp.tm_mark()
+            raw = mp.parse_module(rp.flat)
             tm_parse = mp.tm_lap(t1)
-            t2 := mp.tm_mark()
-            decls := mp.resolve_module(raw)
+            t2 = mp.tm_mark()
+            decls = mp.resolve_module(raw)
             tm_resolve = mp.tm_lap(t2)
-            t3 := mp.tm_mark()
-            crc := mp.report_check(raw, decls, rp, path, src)
+            t3 = mp.tm_mark()
+            crc = mp.report_check(raw, decls, rp, path, src)
             tm_check = mp.tm_lap(t3)
             // gate BEFORE emission: a js-platform import has no C implementation to link against,
             // and `ld`'s undefined-reference dump is not a diagnostic a user can act on.
             (crc == 0 && mp.report_c_unsupported(rp, path, src) == 0).match ({
                 true  => {
-                    t4 := mp.tm_mark()
-                    gen := mp.genModuleIn(decls)
+                    t4 = mp.tm_mark()
+                    gen = mp.genModuleIn(decls)
                     tm_emit = mp.tm_lap(t4)
-                    tmpc := mp.TMPC()
+                    tmpc = mp.TMPC()
                     write_runnable_c(tmpc, gen).match ({
                         true  => {
-                            t5 := mp.tm_mark()
-                            ccrc := mp.cc_command(root, tmpc, out, ccflags, links, ccname).system()
+                            t5 = mp.tm_mark()
+                            ccrc = mp.cc_command(root, tmpc, out, ccflags, links, ccname).system()
                             tm_cc = mp.tm_lap(t5)
                             (ccrc == 0).match ({
                                 true  => 0,
@@ -491,9 +492,9 @@ compile_flat = (
 // never produces C that references undefined names. `--force` / `--no-check` are CLI aliases of the
 // checked path (they do NOT bypass the validator); flag may sit before OR after the path.
 emit_file = (mp: MutPtr<Malloc>, root: StringView, a2: StringView, a3: StringView) i32 {
-    flag2 := a2 == "--force" || a2 == "--no-check"
-    path := flag2.then({ a3 }, { a2 })
-    force := flag2 || a3 == "--force" || a3 == "--no-check"
+    flag2 = a2 == "--force" || a2 == "--no-check"
+    path = flag2.then({ a3 }, { a2 })
+    force = flag2 || a3 == "--force" || a3 == "--no-check"
     force.then({ mp.emit_raw(root, path) }, { mp.emit_checked(root, path) })
 }
 // emit_raw is an alias of emit_checked — kept so older call sites still resolve.
@@ -504,11 +505,11 @@ emit_raw = (mp: MutPtr<Malloc>, root: StringView, path: StringView) i32 {
 emit_checked = (mp: MutPtr<Malloc>, root: StringView, path: StringView) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog_or_exit(root, path, src)
+            rp = mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
-                    raw := mp.parse_module(rp.flat)
-                    decls := mp.resolve_module(raw)
+                    raw = mp.parse_module(rp.flat)
+                    decls = mp.resolve_module(raw)
                     (mp.report_check(raw, decls, rp, path, src) == 0
                         && mp.report_c_unsupported(rp, path, src) == 0).match ({
                         true  => {
@@ -543,15 +544,15 @@ js_floor = (mp: MutPtr<Malloc>, root: StringView) StringView {
 emit_js = (mp: MutPtr<Malloc>, root: StringView, path: StringView) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog_or_exit(root, path, src)
+            rp = mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
-                    raw := mp.parse_module(rp.flat)
-                    decls := mp.resolve_module(raw)
+                    raw = mp.parse_module(rp.flat)
+                    decls = mp.resolve_module(raw)
                     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
                         true  => {
                             js_unsupported_reset()
-                            mod := mp.genJsModuleIn(decls)
+                            mod = mp.genJsModuleIn(decls)
                             (mp.report_js_unsupported(rp, path, src) == 0).match ({
                                 true  => {
                                     stdout_put(mp.js_floor(root))
@@ -578,24 +579,24 @@ emit_js = (mp: MutPtr<Malloc>, root: StringView, path: StringView) i32 {
 build_js = (mp: MutPtr<Malloc>, root: StringView, path: StringView, out_path: StringView) i32 {
     contents_in(mp, path).match ({
         .Ok(src) => {
-            rp := mp.resolve_prog_or_exit(root, path, src)
+            rp = mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
-                    raw := mp.parse_module(rp.flat)
-                    decls := mp.resolve_module(raw)
+                    raw = mp.parse_module(rp.flat)
+                    decls = mp.resolve_module(raw)
                     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
                         true  => {
-                            js := mp
+                            js = mp
                                 .gstr_string(8192)
                                 .gstr_append(mp, mp.js_floor(root))
                                 .gstr_append(mp, "\n")
                             js_unsupported_reset()
-                            mod := mp.genJsModuleIn(decls)
+                            mod = mp.genJsModuleIn(decls)
                             // gate BEFORE save: a .js holding a call to an undefined function must
                             // never reach disk, or `node` reports the compiler's bug as the user's.
                             (mp.report_js_unsupported(rp, path, src) == 0).match ({
                                 true  => {
-                                    full := js.gstr_append(mp, mod.finish_cstr(mp))
+                                    full = js.gstr_append(mp, mod.finish_cstr(mp))
                                     save(out_path, full.finish_cstr(mp), full.len).match ({
                                         .Ok(n)  => {
                                             eprint("zenc: wrote ")
@@ -632,7 +633,7 @@ proj_dir = (a: StringView) StringView { (a == "" && file_exists("build.zen")).th
 // backend; otherwise the ordinary C `build`. Unshifted args: arg(2)=--target arg(3)=js
 // arg(4)=<file> arg(5)=-o arg(6)=<out>.
 build_flags = (s: i32) i32 {
-    a := arg(2 + s)
+    a = arg(2 + s)
     (a == "--time").then({
         time_enable()
         return build_flags(s + 1)
@@ -646,13 +647,13 @@ build_flags = (s: i32) i32 {
 build_target = (mp: MutPtr<Malloc>, root: StringView, s: i32) i32 {
     (arg(2 + s) == "--target" && arg(3 + s) == "js").match ({
         true  => {
-            out := (arg(5 + s) == "-o").then({ arg(6 + s) }, { "a.js" })
+            out = (arg(5 + s) == "-o").then({ arg(6 + s) }, { "a.js" })
             mp.build_js(root, arg(4 + s), out)
         },
         false => (arg(2 + s) == "--target").match ({
             true  => mp.build_named_plan(root, proj_dir(arg(4 + s)), arg(3 + s)),
             false => {
-                dir := proj_dir(arg(2 + s))
+                dir = proj_dir(arg(2 + s))
                 file_exists(mp.join2(dir, "build.zen")).match ({
                     true  => mp.build_all_plan(root, dir),
                     false => mp.build_spec(root, mp.resolve_spec(root, dir), arg(3 + s), arg(4 + s)),
@@ -672,15 +673,15 @@ check_spec_ok = (mp: MutPtr<Malloc>, root: StringView, spec: Spec) i32 {
     contents_in(mp, spec.source).match ({
         .Ok(src) => {
             // a probe hit means this exact closure content already checked clean: replay the ok line.
-            ck := mp.cache_probe("check", root, spec.source, src, spec.ccflags, spec.links, spec.target)
+            ck = mp.cache_probe("check", root, spec.source, src, spec.ccflags, spec.links, spec.target)
             (cache_on() && ck == "" == false && file_exists(ck)).match ({
                 true  => check_ok_line(spec.source),
                 false => {
-                    rp := mp.resolve_prog_or_exit(root, spec.source, src)
+                    rp = mp.resolve_prog_or_exit(root, spec.source, src)
                     (mp.report_no_if_resolved(rp, spec.source, src) == 0).match ({
                         true  => {
-                            raw := mp.parse_module(rp.flat)
-                            decls := mp.resolve_module(raw)
+                            raw = mp.parse_module(rp.flat)
+                            decls = mp.resolve_module(raw)
                             (mp.report_check(raw, decls, rp, spec.source, src) == 0).match ({
                                 true  => {
                                     (cache_on() && ck == "" == false).then({
@@ -723,7 +724,7 @@ build_spec = (
             })
             ffi_grants_set(spec.ffi)    // manifest/registry FFI grants: stamped before probe AND resolve
             genmods_set(spec.genmods)    // registered c_library genmods: same stamp discipline
-            out := (spec.out == "").then({ build_out(flag, outarg) }, { spec.out })
+            out = (spec.out == "").then({ build_out(flag, outarg) }, { spec.out })
             contents_in(mp, spec.source).match ({
                 .Ok(src) => (mp.compile_to(root, spec.source, src, out, spec.ccflags, spec.links, spec.target) == 0).match ({
                     true  => file_exists(out).match ({
@@ -761,8 +762,8 @@ build_spec = (
 // shell-quote one forwarded arg for the `system()` sh -c line: wrap in single quotes,
 // an embedded `'` becomes `'\''` (close, escaped quote, reopen).
 quote_arg = (s: String, mp: MutPtr<Malloc>, t: StringView) String {
-    cur := s.gstr_push(mp, '\'')
-    v: [u8] := t.view()
+    cur ::= s.gstr_push(mp, '\'')
+    v: [u8] = t.view()
     v.loop((h, i, b) {
         cur = (b == '\'').then({ cur.gstr_append(mp, "'\\''") }, { cur.gstr_push(mp, b) })
     })
@@ -777,7 +778,7 @@ append_run_args = (s: String, mp: MutPtr<Malloc>, i: i32, n: i32) String {
 // `zenc run <file> a b c` — everything after the source path is forwarded to the program's argv
 // (arg(3).., or arg(4).. when `--time` shifted the path; the program reads it back via
 // std.sys.os.arg(i)/argc(), argv[0] being the temp binary).
-run_fwd_from := 3
+run_fwd_from ::= 3
 run_command = (mp: MutPtr<Malloc>, bin: StringView) StringView {
     mp
         .gstr_string(128)
@@ -796,7 +797,7 @@ run_spec = (mp: MutPtr<Malloc>, root: StringView, spec: Spec) i32 {
             genmods_set(spec.genmods)    // registered c_library genmods: same stamp discipline
             contents_in(mp, spec.source).match ({
                 .Ok(src) => {
-                    bin := mp.TMPBIN()
+                    bin = mp.TMPBIN()
                     (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links, spec.target) == 0).match ({
                         true  => mp.run_command(bin).system() / 256,
                         false => 1,
@@ -815,20 +816,20 @@ run_spec = (mp: MutPtr<Malloc>, root: StringView, spec: Spec) i32 {
 }
 // ── `zenc run`/`zenc build` verb wrappers: peel `--time`, run, then print the stage table ─────────
 run_cmd = (mp: MutPtr<Malloc>, root: StringView) i32 {
-    tt := arg(2) == "--time"
+    tt = arg(2) == "--time"
     tt.then({
         time_enable()
         run_fwd_from = 4
     })
-    t0 := mp.tm_mark()
-    rc := mp.run_spec(root, mp.resolve_spec(root, tt.then({ arg(3) }, { arg(2) })))
+    t0 = mp.tm_mark()
+    rc = mp.run_spec(root, mp.resolve_spec(root, tt.then({ arg(3) }, { arg(2) })))
     mp.tm_report(mp.tm_lap(t0), "other (io/cache/run)")
     rc
 }
 build_cmd = (mp: MutPtr<Malloc>, root: StringView) i32 {
-    s := build_flags(0)
-    t0 := mp.tm_mark()
-    rc := mp.build_target(root, s)
+    s = build_flags(0)
+    t0 = mp.tm_mark()
+    rc = mp.build_target(root, s)
     mp.tm_report(mp.tm_lap(t0), "other (io/cache)")
     rc
 }
@@ -870,7 +871,7 @@ prof_args = (i: i32, n: i32, acc: ProfArgs) ProfArgs {
     (i >= n).then({
         return acc
     })
-    a := arg(i)
+    a = arg(i)
     (a == "--").then({
         return ProfArgs(
             path: acc.path,
@@ -922,7 +923,7 @@ prof_digits = (v: [u8], i: i64, e: i64, acc: i64) ProfPct {
 // "12.34" at i -> 1234 hundredths (perf and gprof both print percentages as %.2f; anything else,
 // including a bare integer or a "7208/7208" calls token, is rejected with val -1).
 prof_pct = (v: [u8], i: i64, e: i64) ProfPct {
-    d1 := v.prof_digits(i, e, 0)
+    d1 = v.prof_digits(i, e, 0)
     (d1.end == i).then({
         return ProfPct(
             val: 0 - 1,
@@ -931,7 +932,7 @@ prof_pct = (v: [u8], i: i64, e: i64) ProfPct {
     })
     (d1.end < e && v[d1.end] == '.').match ({
         true  => {
-            d2 := v.prof_digits(d1.end + 1, e, 0)
+            d2 = v.prof_digits(d1.end + 1, e, 0)
             (d2.end == d1.end + 3).match ({
                 true  => ProfPct(
                     val: d1.val * 100 + d2.val,
@@ -953,43 +954,43 @@ prof_span = (mp: MutPtr<Malloc>, v: [u8], a: i64, b: i64) StringView {
     push_span(mp.gstr_string(b - a + 1), mp, v, a, b).gstr_finish(mp)
 }
 prof_starts = (v: [u8], ls: i64, le: i64, lit: StringView) bool {
-    w: [u8] := lit.view()
+    w: [u8] = lit.view()
     (le - ls < w.len).then({
         return false
     })
-    ok := true
+    ok ::= true
     w.loop((h, i, b) {
         ok = ok && v[ls + i] == b
     })
     ok
 }
 prof_token = (mp: MutPtr<Malloc>, v: [u8], i: i64, e: i64) StringView {
-    a := v.prof_skip_sp(i, e)
+    a = v.prof_skip_sp(i, e)
     mp.prof_span(v, a, v.prof_skip_tok(a, e))
 }
 // a perf data row: `   12.34%  cmd  dso  [.] symbol` (the `#` header/comment lines, callchain
 // residue, and anything not opening with a %.2f percent are all rejected).
 prof_perf_row = (mp: MutPtr<Malloc>, v: [u8], ls: i64, le: i64) ProfRow {
-    none := ProfRow(
+    none = ProfRow(
         pct: 0 - 1,
         sym: "",
         dso: "",
     )
-    e := v.prof_rtrim(ls, le)
-    i := v.prof_skip_sp(ls, e)
+    e = v.prof_rtrim(ls, le)
+    i = v.prof_skip_sp(ls, e)
     (i >= e || v[i] < '0' || v[i] > '9').then({
         return none
     })
-    p := v.prof_pct(i, e)
+    p = v.prof_pct(i, e)
     (p.val < 0 || p.end >= e || v[p.end] == '%' == false).then({
         return none
     })
-    j := v.prof_skip_sp(p.end + 1, e)
+    j ::= v.prof_skip_sp(p.end + 1, e)
     j = v.prof_skip_tok(j, e)    // command (the process name)
     j = v.prof_skip_sp(j, e)
-    d0 := j
+    d0 = j
     j = v.prof_skip_tok(j, e)    // shared object
-    dso := mp.prof_span(v, d0, j)
+    dso = mp.prof_span(v, d0, j)
     j = v.prof_skip_sp(j, e)
     (j < e && v[j] == '[').then({
         j = v.prof_skip_tok(j, e)    // the "[.]"/"[k]" privilege marker
@@ -1010,17 +1011,17 @@ prof_perf_row = (mp: MutPtr<Malloc>, v: [u8], ls: i64, le: i64) ProfRow {
     )
 }
 prof_parse_perf = (mp: MutPtr<Malloc>, body: StringView, rows: [ProfRow]) ProfParse {
-    v: [u8] := body.view()
-    n := 0
-    samples := ""
-    ls := 0
+    v: [u8] = body.view()
+    n ::= 0
+    samples ::= ""
+    ls ::= 0
     v.loop((h, i, b) {
         (b == '\n').then({
             (n < rows.len).then({
                 v.prof_starts(ls, i, "# Samples: ").then({
                     samples = mp.prof_token(v, ls + 11, i)
                 })
-                r := mp.prof_perf_row(v, ls, i)
+                r = mp.prof_perf_row(v, ls, i)
                 (r.pct >= 0).then({
                     rows[n] = r
                     n = n + 1
@@ -1045,21 +1046,21 @@ prof_tok_back = (v: [u8], lo: i64, i: i64) i64 {
 // columns vary — uncounted rows leave calls/ms blank — so the NAME is the last token, guarded to
 // not itself start with a digit).
 prof_gprof_row = (mp: MutPtr<Malloc>, v: [u8], ls: i64, le: i64) ProfRow {
-    none := ProfRow(
+    none = ProfRow(
         pct: 0 - 1,
         sym: "",
         dso: "",
     )
-    e := v.prof_rtrim(ls, le)
-    i := v.prof_skip_sp(ls, e)
+    e = v.prof_rtrim(ls, le)
+    i = v.prof_skip_sp(ls, e)
     (i >= e || v[i] < '0' || v[i] > '9').then({
         return none
     })
-    p := v.prof_pct(i, e)
+    p = v.prof_pct(i, e)
     (p.val < 0 || p.end >= e || v[p.end] == ' ' == false).then({
         return none
     })
-    t := v.prof_tok_back(p.end + 1, e)
+    t = v.prof_tok_back(p.end + 1, e)
     (t <= p.end + 1 || v[t] >= '0' && v[t] <= '9').then({
         return none
     })
@@ -1070,13 +1071,13 @@ prof_gprof_row = (mp: MutPtr<Malloc>, v: [u8], ls: i64, le: i64) ProfRow {
     )
 }
 prof_parse_gprof = (mp: MutPtr<Malloc>, body: StringView, rows: [ProfRow]) i64 {
-    v: [u8] := body.view()
-    n := 0
-    ls := 0
+    v: [u8] = body.view()
+    n ::= 0
+    ls ::= 0
     v.loop((h, i, b) {
         (b == '\n').then({
             (n < rows.len).then({
-                r := mp.prof_gprof_row(v, ls, i)
+                r = mp.prof_gprof_row(v, ls, i)
                 (r.pct >= 0).then({
                     rows[n] = r
                     n = n + 1
@@ -1097,8 +1098,8 @@ prof_disp = (mp: MutPtr<Malloc>, ty: StringView, mname: StringView) StringView {
         .gstr_finish(mp)
 }
 prof_names = (mp: MutPtr<Malloc>, decls: [Decl]) ProfNames {
-    tds := mp.aud_td_idxs(decls)
-    n := 0
+    tds = mp.aud_td_idxs(decls)
+    n ::= 0
     decls.loop((h, i, d) {
         d.match ({
             .DImpl(im) => {
@@ -1107,10 +1108,10 @@ prof_names = (mp: MutPtr<Malloc>, decls: [Decl]) ProfNames {
             _          => { },
         })
     })
-    disp := cbuf<StringView>(mp, n + 1)
-    seedv: i64 := 0 - 1
-    m := of(mp, "", seedv).expect("profile: oom")
-    k := 0
+    disp ::= cbuf<StringView>(mp, n + 1)
+    seedv: i64 = 0 - 1
+    m ::= of(mp, "", seedv).expect("profile: oom")
+    k ::= 0
     decls.loop((h, i, d) {
         d.match ({
             .DImpl(im) => {
@@ -1147,26 +1148,26 @@ prof_names = (mp: MutPtr<Malloc>, decls: [Decl]) ProfNames {
 // the compiled program's parse-level decls carry every DImpl — a light frontend pass (resolve
 // imports + parse, no check) is enough to rebuild the impl-method name table for display.
 prof_names_of = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView) ProfNames {
-    rp := mp.resolve_prog_or_exit(root, spec.source, src)
+    rp = mp.resolve_prog_or_exit(root, spec.source, src)
     mp.prof_names(mp.parse_module(rp.flat))
 }
 prof_binname = (mp: MutPtr<Malloc>, p: StringView) StringView {
-    v: [u8] := p.view()
-    cut := last_slash(v, 0, 0 - 1)
+    v: [u8] = p.view()
+    cut = last_slash(v, 0, 0 - 1)
     (cut < 0).then({ p }, { cstr(offset(p, cut + 1)) })
 }
 // %.2f right-aligned to 6 columns (from hundredths).
 push_pct = (s: String, mp: MutPtr<Malloc>, h: i64) String {
-    ip := h / 100
-    pad := (ip < 10).match ({
+    ip = h / 100
+    pad = (ip < 10).match ({
         true  => 3,
         false => (ip < 100).match ({
             true  => 2,
             false => (ip < 1000).then({ 1 }, { 0 }),
         }),
     })
-    s2 := s.pad_sp(mp, pad).push_int(mp, ip).gstr_push(mp, '.')
-    f := h % 100
+    s2 = s.pad_sp(mp, pad).push_int(mp, ip).gstr_push(mp, '.')
+    f = h % 100
     (f < 10).then({ s2.gstr_push(mp, '0').push_int(mp, f) }, { s2.push_int(mp, f) })
 }
 prof_table = (
@@ -1179,7 +1180,7 @@ prof_table = (
     names: ProfNames,
     binname: StringView,
 ) void {
-    hdr := mp
+    hdr ::= mp
         .gstr_string(128)
         .gstr_append(mp, "zen profile: ")
         .gstr_append(mp, source)
@@ -1191,13 +1192,13 @@ prof_table = (
     })
     say(hdr.gstr_finish(mp))
     say("  SELF%     CUM%  FUNCTION")
-    cum := to_i64(0)
+    cum ::= to_i64(0)
     rows.loop((h, i, r) {
         (i < n).then({
             cum = cum + r.pct
-            di := names.idx.get(r.sym, 0 - 1)
-            disp := (di < 0).then({ r.sym }, { names.disp[di] })
-            line := mp
+            di = names.idx.get(r.sym, 0 - 1)
+            disp = (di < 0).then({ r.sym }, { names.disp[di] })
+            line ::= mp
                 .gstr_string(96)
                 .push_pct(mp, r.pct)
                 .gstr_append(mp, "  ")
@@ -1216,12 +1217,12 @@ prof_table = (
 // try gprof" (perf on PATH but perf_event_paranoid too strict is exactly this shape).
 prof_perf = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView, pa: ProfArgs) i32 {
     profile_perf_set()
-    bin := mp.pid_path("/tmp/zenprof_", ".bin")
+    bin = mp.pid_path("/tmp/zenprof_", ".bin")
     (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links, spec.target) == 0 == false).then({
         return 1
     })
-    data := mp.pid_path("/tmp/zenprof_", ".data")
-    prc := mp
+    data = mp.pid_path("/tmp/zenprof_", ".data")
+    prc = mp
         .gstr_string(256)
         .gstr_append(mp, "perf record -q -g --call-graph fp -o ")
         .gstr_append(mp, data)
@@ -1230,7 +1231,7 @@ prof_perf = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView, 
         .append_run_args(mp, pa.fwd, argc())
         .gstr_finish(mp)
         .system()
-    txt := mp.pid_path("/tmp/zenprof_", ".txt")
+    txt = mp.pid_path("/tmp/zenprof_", ".txt")
     mp
         .gstr_string(256)
         .gstr_append(mp, "perf report --stdio --no-children ")
@@ -1242,7 +1243,7 @@ prof_perf = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView, 
         .gstr_append(mp, " 2>/dev/null")
         .gstr_finish(mp)
         .system()
-    body := contents_in(mp, txt).or("")
+    body = contents_in(mp, txt).or("")
     pa.raw.then({
         (body == "").then({
             return 0 - 1
@@ -1250,8 +1251,8 @@ prof_perf = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView, 
         stdout_put(body)
         return 0
     })
-    rows := cbuf<ProfRow>(mp, PROF_TOP())
-    pp := mp.prof_parse_perf(body, rows)
+    rows = cbuf<ProfRow>(mp, PROF_TOP())
+    pp = mp.prof_parse_perf(body, rows)
     (pp.n == 0).then({
         return 0 - 1
     })
@@ -1262,12 +1263,12 @@ prof_perf = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView, 
 // then `gprof -b -p` for the flat profile (-b alone, with the call graph, for --raw).
 prof_gprof = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView, pa: ProfArgs) i32 {
     profile_gprof_set()
-    bin := mp.pid_path("/tmp/zenprof_", ".bin")
+    bin = mp.pid_path("/tmp/zenprof_", ".bin")
     (mp.compile_to(root, spec.source, src, bin, spec.ccflags, spec.links, spec.target) == 0 == false).then({
         return 1
     })
-    dir := mp.pid_path("/tmp/zenprof_gm_", "")
-    rrc := mp
+    dir = mp.pid_path("/tmp/zenprof_gm_", "")
+    rrc = mp
         .gstr_string(256)
         .gstr_append(mp, "mkdir -p ")
         .gstr_append(mp, dir)
@@ -1278,7 +1279,7 @@ prof_gprof = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView,
         .append_run_args(mp, pa.fwd, argc())
         .gstr_finish(mp)
         .system()
-    txt := mp.pid_path("/tmp/zenprof_", ".txt")
+    txt = mp.pid_path("/tmp/zenprof_", ".txt")
     mp
         .gstr_string(256)
         .gstr_append(mp, "gprof -b ")
@@ -1291,7 +1292,7 @@ prof_gprof = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView,
         .gstr_append(mp, " 2>/dev/null")
         .gstr_finish(mp)
         .system()
-    body := contents_in(mp, txt).or("")
+    body = contents_in(mp, txt).or("")
     (body == "").then({
         eprint("zenc: profile: gprof produced no output (did the program run? did it exit through panic?)\n")
         return 1
@@ -1300,8 +1301,8 @@ prof_gprof = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringView,
         stdout_put(body)
         return 0
     })
-    rows := cbuf<ProfRow>(mp, PROF_TOP())
-    n := mp.prof_parse_gprof(body, rows)
+    rows = cbuf<ProfRow>(mp, PROF_TOP())
+    n = mp.prof_parse_gprof(body, rows)
     (n == 0).then({
         eprint("zenc: profile: no samples — the program finished too fast to profile; give it more work\n")
         return 1
@@ -1319,7 +1320,7 @@ prof_run = (
 ) i32 {
     have_perf.match ({
         true  => {
-            rc := mp.prof_perf(root, spec, src, pa)
+            rc = mp.prof_perf(root, spec, src, pa)
             (rc >= 0).then({
                 return rc
             })
@@ -1338,7 +1339,7 @@ prof_run = (
     })
 }
 profile_cmd = (mp: MutPtr<Malloc>, root: StringView) i32 {
-    pa := prof_args(2, argc(), ProfArgs(
+    pa = prof_args(2, argc(), ProfArgs(
         path: "",
         raw: false,
         fwd: argc(),
@@ -1347,12 +1348,12 @@ profile_cmd = (mp: MutPtr<Malloc>, root: StringView) i32 {
         eprint(PROF_USAGE())
         return 2
     })
-    have_perf := mp.which_ok("perf")
+    have_perf = mp.which_ok("perf")
     (have_perf == false && mp.which_ok("gprof") == false).then({
         eprint("zenc: profile needs a profiler on PATH: install `perf` (linux-tools) or `gprof` (binutils)\n")
         return 1
     })
-    spec := mp.resolve_spec(root, pa.path)
+    spec = mp.resolve_spec(root, pa.path)
     spec.ok.match ({
         true  => {
             spec.library.then({
@@ -1377,7 +1378,7 @@ profile_cmd = (mp: MutPtr<Malloc>, root: StringView) i32 {
 // the project ROOT (holds src/std + src/compiler + bootstrap): $ZEN_ROOT if set (a relocated binary
 // points it at a checkout), else the directory of the binary (argv[0]).
 root_of = (mp: MutPtr<Malloc>) StringView {
-    e := getEnv("ZEN_ROOT")
+    e = getEnv("ZEN_ROOT")
     (e == "").then({ mp.dirname(arg(0)) }, { e })
 }
 // ONE command list drives BOTH dispatch and `--help`, so the two can never drift (they did: `emit-js`
@@ -1480,7 +1481,7 @@ COMMANDS = () [Cmd] {
         ),
         Cmd(
             name: "fmt",
-            help: "",
+            help: "fmt [--check|--stdout|--migrate] <in.zen>...\n                                       --migrate rewrites the retired `x := v` spelling to const-by-default\n                                       (`x = v` when the binding is never assigned, `x ::= v` when it is)",
             run: cmd_fmt,
         ),
         Cmd(
@@ -1496,8 +1497,8 @@ COMMANDS = () [Cmd] {
     ]
 }
 HELP = (mp: MutPtr<Malloc>) StringView {
-    cs: [Cmd] := COMMANDS()
-    s := mp.gstr_string(2048).gstr_append(mp, "usage: zenc <")
+    cs: [Cmd] = COMMANDS()
+    s ::= mp.gstr_string(2048).gstr_append(mp, "usage: zenc <")
     cs.loop((h, i, c) {
         s = (i > 0).then({ s.gstr_append(mp, "|") }, { s })
         s = s.gstr_append(mp, c.name)
@@ -1515,9 +1516,9 @@ VERSION = () StringView { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // als
 // one flat pass over COMMANDS() — `hit` (not the return code) decides "found", so a command that
 // legitimately exits nonzero is never mistaken for an unknown one and re-run as `default_emit`.
 dispatch_cmd = (mp: MutPtr<Malloc>, root: StringView, cmd: StringView) i32 {
-    rc := 0
-    hit := false
-    cs: [Cmd] := COMMANDS()
+    rc ::= 0
+    hit ::= false
+    cs: [Cmd] = COMMANDS()
     cs.loop((h, i, c) {
         (c.name == cmd).then({
             rc = c.run(mp, root, cmd)
@@ -1528,13 +1529,13 @@ dispatch_cmd = (mp: MutPtr<Malloc>, root: StringView, cmd: StringView) i32 {
     hit.then({ rc }, { mp.default_emit(cmd) })
 }
 main = () i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    root := mp.root_of()
-    cmd := arg(1)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    root = mp.root_of()
+    cmd = arg(1)
     // out_status: a stdout write that was LOST (full disk, closed pipe) outranks the command's own
     // exit code — `zenc emit x.zen > file` must not report success having written nothing.
-    rc := (cmd == "--help").match ({
+    rc = (cmd == "--help").match ({
         true  => {
             say(mp.HELP())
             0
@@ -1572,7 +1573,7 @@ default_emit = (mp: MutPtr<Malloc>, path: StringView) i32 {
 // piped stdin has no directory, so a sibling import `{ f } = b` can't resolve — error cleanly instead
 // of emitting C that references undefined names (std imports stay raw, which the harness relies on).
 stdin_emit = (mp: MutPtr<Malloc>, src: StringView) i32 {
-    sib := mp.first_user_import_in(src)
+    sib = mp.first_user_import_in(src)
     (sib == "").match ({
         true  => mp.raw_emit_src("<stdin>", src),
         false => {
@@ -1605,15 +1606,15 @@ raw_emit_src = (mp: MutPtr<Malloc>, path: StringView, src: StringView) i32 {
     })
 }
 // read all of fd 0 (stdin/pipe — no seekable size) into one buffer.
-STDIN_CAP := 8388608
+STDIN_CAP = 8388608
 read_stdin = (mp: MutPtr<Malloc>) StringView {
-    buf := mp.acquire_or_die(STDIN_CAP)
-    n := read_fd_all(0, buf, 0, STDIN_CAP)
+    buf = mp.acquire_or_die(STDIN_CAP)
+    n = read_fd_all(0, buf, 0, STDIN_CAP)
     buf.offset(n).store(0)
     cstr(buf)
 }
 read_fd_all = (fd: i32, buf: RawPtr<u8>, off: i64, cap: i64) i64 {
-    r := fd.read(buf.offset(off), cap - off)
+    r = fd.read(buf.offset(off), cap - off)
     (r <= 0).match ({
         true  => off,
         false => (off + r >= cap).then({ cap }, { read_fd_all(fd, buf, off + r, cap) }),
@@ -1650,7 +1651,7 @@ bs_trim_end = (v: [u8], s: i64, e: i64) i64 {
     })
 }
 bs_line_end = (v: [u8], p0: i64, n: i64) i64 {
-    p := p0
+    p ::= p0
     @while (p < n && v[p] != '\n') {
         p = p + 1
     }    // iterative: a long line must not recurse per char
@@ -1663,7 +1664,7 @@ bs_eq_run = (v: [u8], at: i64, nv: [u8], i: i64) bool {
     })
 }
 bs_match_at = (v: [u8], at: i64, e: i64, needle: StringView) bool {
-    nv := needle.view()
+    nv = needle.view()
     (at + nv.len > e).then({ false }, { v.bs_eq_run(at, nv, 0) })
 }
 bs_has_needle = (v: [u8], p: i64, e: i64) bool {
@@ -1683,7 +1684,7 @@ bs_brace_open = (b: u8) bool {
     b == ' ' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_'
 }
 bs_is_import = (v: [u8], p: i64, e: i64) bool {
-    s := v.bs_skip_space(p, e)
+    s = v.bs_skip_space(p, e)
     (s + 1 < e).match ({
         true  => (v[s] == '{').match ({
             true  => v[s + 1].bs_brace_open().then({ v.bs_has_needle(p, e) }, { false }),
@@ -1696,16 +1697,16 @@ bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first
     (p >= n).match ({
         true  => out,
         false => {
-            e := v.bs_line_end(p, n)
-            drop := v.bs_is_import(p, e)
-            o2 := drop.match ({
+            e = v.bs_line_end(p, n)
+            drop = v.bs_is_import(p, e)
+            o2 = drop.match ({
                 true  => out,
                 false => {
-                    sep := first.then({ out }, { out.gstr_push(mp, '\n') })
+                    sep = first.then({ out }, { out.gstr_push(mp, '\n') })
                     mp.bs_push_range(sep, v, p, e)
                 },
             })
-            nf := drop.then({ first }, { false })
+            nf = drop.then({ first }, { false })
             (e >= n).then({ o2 }, { mp.bs_strip_file(o2, v, e + 1, n, nf) })
         },
     })
@@ -1714,10 +1715,10 @@ bs_rel = (mp: MutPtr<Malloc>, mv: [u8], s: i64, t: i64) StringView {
     mp.bs_push_range(mp.gstr_string(256), mv, s, t).gstr_finish(mp)
 }
 bs_add_source = (mp: MutPtr<Malloc>, out: String, root: StringView, rel: StringView) String {
-    path := mp.join2(root, rel)
+    path = mp.join2(root, rel)
     contents_in(mp, path).match ({
         .Ok(src) => {
-            sv := src.view()
+            sv = src.view()
             mp.bs_strip_file(out, sv, 0, sv.len, true)
         },
         .Err(e)  => {
@@ -1738,19 +1739,19 @@ bs_walk_manifest = (
     (p >= n).match ({
         true  => out,
         false => {
-            e := mv.bs_line_end(p, n)
-            s := mv.bs_skip_space(p, e)
-            t := mv.bs_trim_end(s, e)
-            keep := (s < t).then({ mv[s] != '#' }, { false })
-            o2 := keep.match ({
+            e = mv.bs_line_end(p, n)
+            s = mv.bs_skip_space(p, e)
+            t = mv.bs_trim_end(s, e)
+            keep = (s < t).then({ mv[s] != '#' }, { false })
+            o2 = keep.match ({
                 true  => {
-                    sep := (count > 0).then({ out.gstr_push(mp, '\n') }, { out })
-                    rel := mp.bs_rel(mv, s, t)
+                    sep = (count > 0).then({ out.gstr_push(mp, '\n') }, { out })
+                    rel = mp.bs_rel(mv, s, t)
                     mp.bs_add_source(sep, root, rel)
                 },
                 false => out,
             })
-            nc := keep.then({ count + 1 }, { count })
+            nc = keep.then({ count + 1 }, { count })
             (e >= n).then({ o2 }, { mp.bs_walk_manifest(o2, root, mv, e + 1, n, nc) })
         },
     })
@@ -1762,18 +1763,18 @@ bs_gen_end = (gv: [u8], n: i64) i64 {
     })
 }
 bs_write = (out_path: StringView, gen: String) bool {
-    hl := BS_HEAD().view().len
-    end := gen.bytes().bs_gen_end(gen.len)
-    fd := out_path.open(O_WRTRUNC, MODE_644)
+    hl = BS_HEAD().view().len
+    end = gen.bytes().bs_gen_end(gen.len)
+    fd = out_path.open(O_WRTRUNC, MODE_644)
     (fd < 0).match ({
         true  => false,
         false => {
-            hv := BS_HEAD_REPL().view()
+            hv = BS_HEAD_REPL().view()
             // Same hazard as write_runnable_c, on a file that OUTLIVES the run: a truncated seed
             // reported as written is a corrupt bootstrap that only explodes on the next build.
-            wh := write_all(fd, hv.ptr, hv.len, 0).or(0 - 1)
-            wb := write_all(fd, gen.ptr.offset(hl), end - hl, 0).or(0 - 1)
-            closed := fd.close()
+            wh = write_all(fd, hv.ptr, hv.len, 0).or(0 - 1)
+            wb = write_all(fd, gen.ptr.offset(hl), end - hl, 0).or(0 - 1)
+            closed = fd.close()
             wh >= 0 && wb >= 0 && closed == 0
         },
     })
@@ -1793,25 +1794,25 @@ bs_emit_checked = (
     esrc: StringView,
     shake: bool,
 ) i32 {
-    t0 := clock_ms()
-    rp := mp.resolve_prog_or_exit(root, entry, esrc)
-    t1 := mp.zt_log("resolve-imports", t0)
+    t0 = clock_ms()
+    rp = mp.resolve_prog_or_exit(root, entry, esrc)
+    t1 = mp.zt_log("resolve-imports", t0)
     (mp.report_no_if_resolved(rp, entry, esrc) == 0).match ({
         true  => {
-            raw := mp.parse_module(rp.flat)
-            t2 := mp.zt_log("parse", t1)
-            decls := mp.resolve_module(raw)
-            t3 := mp.zt_log("resolve", t2)
+            raw = mp.parse_module(rp.flat)
+            t2 = mp.zt_log("parse", t1)
+            decls = mp.resolve_module(raw)
+            t3 = mp.zt_log("resolve", t2)
             (mp.report_check(raw, decls, rp, entry, esrc) == 0).match ({
                 true  => {
-                    t4 := mp.zt_log("validate", t3)
-                    rawf := mp.parse_module(flat)
-                    t5 := mp.zt_log("parse-manifest", t4)
-                    kept := shake.then({ mp.bs_shake(rawf) }, { rawf })
-                    t6 := mp.zt_log("shake", t5)
-                    rd := mp.resolve_module(kept)    // type error in compiler source — fail, don't regenerate a miscompiled seed
-                    t7 := mp.zt_log("resolve-manifest", t6)
-                    gen := mp.genModuleIn(rd)
+                    t4 = mp.zt_log("validate", t3)
+                    rawf = mp.parse_module(flat)
+                    t5 = mp.zt_log("parse-manifest", t4)
+                    kept = shake.then({ mp.bs_shake(rawf) }, { rawf })
+                    t6 = mp.zt_log("shake", t5)
+                    rd = mp.resolve_module(kept)    // type error in compiler source — fail, don't regenerate a miscompiled seed
+                    t7 = mp.zt_log("resolve-manifest", t6)
+                    gen = mp.genModuleIn(rd)
                     mp.zt_log("emit", t7)
                     mp.zt_log("total", t0)
                     gen.bytes().bs_eq_run(0, BS_HEAD().view(), 0).match ({
@@ -1839,14 +1840,14 @@ bs_emit_checked = (
 // stops growing, so the kept set is reference-closed: no emitted decl can reference a dropped one.
 // `--build-self-full` bypasses the shake (the fat seed, every manifest decl).
 bs_trait_live = (ac: MutPtr<AudCtx>, trname: StringView) bool {
-    neg1: i64 := 0 - 1
+    neg1: i64 = 0 - 1
     ac.ridx.get(trname, neg1) < 0 || ac.seen.has(trname)
 }
 // mark a kept-for-a-reason name live when the fixpoint alone did not reach it: `__`-synthesized
 // decls, and the bare/alias twin of a live name (same source line, so it is emitted either way).
 bs_root_twin = (ac: MutPtr<AudCtx>, tails: Map<i64>, nm: StringView) void {
-    nta := nm.aud_tail_at()
-    twin := tails.has(nm) || nta > 0 && ac.seen.has(cstr(offset(nm, nta)))
+    nta = nm.aud_tail_at()
+    twin = tails.has(nm) || nta > 0 && ac.seen.has(cstr(offset(nm, nta)))
     (is_empty(nm) == false && (nm.starts_with("__") || twin)).then({
         ac.aud_ref(nm)
     })
@@ -1871,12 +1872,12 @@ bs_root_kept = (ac: MutPtr<AudCtx>, tails: Map<i64>, d: Decl) void {
 }
 // `__`-tail set of the live names, rebuilt per sweep (aud_run's twin-suppression set, keep direction).
 bs_tails = (ac: MutPtr<AudCtx>) Map<i64> {
-    seedv: i64 := 0 - 1
-    tails := of(ac.mp, "", seedv).expect("build-self: oom")
+    seedv: i64 = 0 - 1
+    tails ::= of(ac.mp, "", seedv).expect("build-self: oom")
     ac.seen.keys().loop((h, i, k) {
-        ta := k.aud_tail_at()
+        ta = k.aud_tail_at()
         (ta > 0).then({
-            one: i64 := 1
+            one: i64 = 1
             tails = tails.put(ac.mp, cstr(offset(k, ta)), one).expect("build-self: oom")
         })
     })
@@ -1885,10 +1886,10 @@ bs_tails = (ac: MutPtr<AudCtx>) Map<i64> {
 // iterate bs_root_kept sweeps to a fixpoint: newly-live names can make more types live, which keeps
 // more impl blocks, whose methods reference more names — stop when the seen set stops growing.
 bs_close = (ac: MutPtr<AudCtx>, raw: [Decl]) void {
-    prev: i64 := 0 - 1
+    prev :: i64 = 0 - 1
     @while (ac.seen.keys().len != prev) {
         prev = ac.seen.keys().len
-        tails := ac.bs_tails()
+        tails = ac.bs_tails()
         raw.loop((h, i, d) {
             ac.bs_root_kept(tails, d)
         })
@@ -1896,13 +1897,13 @@ bs_close = (ac: MutPtr<AudCtx>, raw: [Decl]) void {
 }
 // the emission filter over the closed live set: which raw manifest decls reach the seed.
 bs_keep = (ac: MutPtr<AudCtx>, d: Decl) bool {
-    neg1: i64 := 0 - 1
+    neg1: i64 = 0 - 1
     d.match ({
         .DImpl(im)         => ac.ridx.get(im.ty, neg1) < 0 || ac.seen.has(im.ty),
         .DTraitDefault(td) => ac.bs_trait_live(td.trname),
         .DForeign(f)       => true,
         _                  => {
-            nm := d.aud_decl_name()
+            nm = d.aud_decl_name()
             is_empty(nm) || ac.seen.has(nm)
         },
     })
@@ -1913,10 +1914,10 @@ bs_keep = (ac: MutPtr<AudCtx>, d: Decl) bool {
 // The kept subset is re-resolved by the caller, so mono instances, lowered closures and materialized
 // trait defaults are re-synthesized for the surviving decls only.
 bs_shake = (mp: MutPtr<Malloc>, raw: [Decl]) [Decl] {
-    rdecls := mp.resolve_module(raw)
-    t := mp.aud_tables(raw)
-    seedv: i64 := 0 - 1
-    c := AudCtx(
+    rdecls = mp.resolve_module(raw)
+    t = mp.aud_tables(raw)
+    seedv: i64 = 0 - 1
+    c = AudCtx(
         mp: mp,
         decls: raw,
         rdecls: rdecls,
@@ -1927,9 +1928,9 @@ bs_shake = (mp: MutPtr<Malloc>, raw: [Decl]) [Decl] {
         pairs: t.pairs,
         implms: t.implms,
     )
-    ac := c.addr()
+    ac = c.addr()
     ac.aud_ref("main")
-    mi := c.ridx.get("main", 0 - 1)
+    mi = c.ridx.get("main", 0 - 1)
     (mi >= 0).then({
         raw[mi].match ({
             .DFunc(f) => {
@@ -1954,14 +1955,14 @@ bs_shake = (mp: MutPtr<Malloc>, raw: [Decl]) [Decl] {
         })
     })
     ac.bs_close(raw)
-    n := 0
+    n ::= 0
     raw.loop((h, i, d) {
         ac.bs_keep(d).then({
             n = n + 1
         })
     })
-    kept := cbuf<Decl>(mp, n)
-    k := 0
+    kept ::= cbuf<Decl>(mp, n)
+    k ::= 0
     raw.loop((h, i, d) {
         ac.bs_keep(d).then({
             kept[k] = d
@@ -1971,12 +1972,12 @@ bs_shake = (mp: MutPtr<Malloc>, raw: [Decl]) [Decl] {
     kept
 }
 build_self = (mp: MutPtr<Malloc>, root: StringView, out_path: StringView, shake: bool) i32 {
-    mpath := mp.join2(root, "bootstrap/sources.txt")
+    mpath = mp.join2(root, "bootstrap/sources.txt")
     contents_in(mp, mpath).match ({
         .Ok(man) => {
-            mv := man.view()
-            flat := mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
-            entry := mp.join2(root, "driver.zen")
+            mv = man.view()
+            flat = mp.bs_walk_manifest(mp.gstr_string(256), root, mv, 0, mv.len, 0).gstr_finish(mp)
+            entry = mp.join2(root, "driver.zen")
             contents_in(mp, entry).match ({
                 .Ok(esrc) => mp.bs_emit_checked(root, out_path, flat, entry, esrc, shake),
                 .Err(e)   => {
@@ -1993,7 +1994,7 @@ build_self = (mp: MutPtr<Malloc>, root: StringView, out_path: StringView, shake:
 }
 // ── doc: a module's public decls + their leading doc comments (ported from driver.c doc_source) ───
 ends_zen = (s: StringView) bool {
-    v: [u8] := s.view()
+    v: [u8] = s.view()
     v.len >= 4
         && v[v.len - 4] == '.'
         && v[v.len - 3] == 'z'
@@ -2011,7 +2012,7 @@ mod_path = (mp: MutPtr<Malloc>, root: StringView, mod: StringView) StringView {
     ends_zen(mod).match ({
         true  => mod,
         false => {
-            rel := mp
+            rel = mp
                 .push_mod(mp.gstr_string(128).gstr_append(mp, "src/"), mod.view(), 0)
                 .gstr_append(mp, ".zen")
                 .gstr_finish(mp)
@@ -2043,8 +2044,8 @@ out_range = (v: [u8], p: i64, t: i64) i64 {
 doc_line = (mp: MutPtr<Malloc>, v: [u8], p: i64, t: i64, docs: String) String {
     (t - p >= 2 && v[p] == '/' && v[p + 1] == '/').match ({
         true  => {
-            s := (p + 2 < t && v[p + 2] == ' ').then({ p + 3 }, { p + 2 })
-            dl := mp.bs_push_range(docs, v, s, t)
+            s = (p + 2 < t && v[p + 2] == ' ').then({ p + 3 }, { p + 2 })
+            dl = mp.bs_push_range(docs, v, s, t)
             dl.gstr_push(mp, '\n')
         },
         false => (p >= t).match ({
@@ -2065,9 +2066,9 @@ doc_lines = (mp: MutPtr<Malloc>, v: [u8], p: i64, docs: String) i64 {
     (p >= v.len).match ({
         true  => 0,
         false => {
-            e := v.bs_line_end(p, v.len)
-            t := v.bs_trim_end(p, e)
-            d2 := mp.doc_line(v, p, t, docs)
+            e = v.bs_line_end(p, v.len)
+            t = v.bs_trim_end(p, e)
+            d2 = mp.doc_line(v, p, t, docs)
             mp.doc_lines(v, (e >= v.len).then({ v.len }, { e + 1 }), d2)
         },
     })
@@ -2113,10 +2114,19 @@ FmtResult*: {
     len: i64,
     ok: bool,
 }    // ok=false => parse/lex error, text/len unused
+// `zenc fmt --migrate`: ONE-SHOT rewrite of the retired `x := v` spelling to const-by-default.
+// Off by default, so an ordinary `zenc fmt` PRESERVES what the source wrote — mutability is a
+// declaration, not a formatting choice, and re-deriving it on every format would silently flip a
+// deliberate `::=` whose only write sits behind a shape the analysis cannot see.
+fmt_migrate ::= 0
+fmt_set_migrate = (on: bool) void { fmt_migrate = on.then({ 1 }, { 0 }) }
 fmt_render = (mp: MutPtr<Malloc>, src: StringView) FmtResult {
     set_faithful_lexeme(true)    // keep C-keyword identifiers RAW (float, if, …) for round-trip
-    decls := mp.parse_module(src)    // faithful AST (keeps MethodCall)
+    decls = mp.parse_module(src)    // faithful AST (keeps MethodCall)
     set_faithful_lexeme(false)
+    (fmt_migrate == 1).then({
+        mut_infer_decls(decls)
+    })
     (perr_get() || lerr_get()).match ({
         true  => FmtResult(
             text: "",
@@ -2124,9 +2134,9 @@ fmt_render = (mp: MutPtr<Malloc>, src: StringView) FmtResult {
             ok: false,
         ),
         false => {
-            exps := exports_get()
+            exps = exports_get()
             pretty_set_comments(src, mp.collect_comments(src))
-            o := mp.pretty_module_in(decls, exps)
+            o = mp.pretty_module_in(decls, exps)
             FmtResult(
                 text: o.gstr_finish(mp),
                 len: o.len,
@@ -2140,9 +2150,9 @@ fmt_render = (mp: MutPtr<Malloc>, src: StringView) FmtResult {
 // the user source, so diag_user_span maps the offset directly). A negative offset is the vbreak
 // encoding (parse.fill_decls) — clamp to its absolute position for the caret.
 fmt_parse_err = (mp: MutPtr<Malloc>, path: StringView, src: StringView) i32 {
-    off := (perr_off_get() == 0).then({ lerr_off_get() }, { perr_off_get() })
-    o := (off < 0).then({ 0 - off }, { off })
-    sp := diag_user_span(src, src, o, 1)
+    off = (perr_off_get() == 0).then({ lerr_off_get() }, { perr_off_get() })
+    o = (off < 0).then({ 0 - off }, { off })
+    sp = diag_user_span(src, src, o, 1)
     eprint(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, "parse", "cannot format (syntax error — a faithful formatter refuses a file it cannot represent)", "fix the parse error first (`zenc check` reports the full diagnostic), then re-run fmt", 1))
     1
 }
@@ -2154,8 +2164,8 @@ fmt_parse_err = (mp: MutPtr<Malloc>, path: StringView, src: StringView) i32 {
 // NUL shortening the C string) both flag dirty; once all three lengths agree the content is NUL-free and
 // equal-length, so `eq` (strcmp) then compares every one of the r.len bytes — a full byte-for-byte match.
 fmt_dirty = (src: StringView, r: FmtResult) bool {
-    sv := src.view()
-    rv := r.text.view()
+    sv = src.view()
+    rv = r.text.view()
     (sv.len != r.len).match ({
         true  => true,
         false => (rv.len != r.len).match ({
@@ -2171,7 +2181,7 @@ fmt_file = (mp: MutPtr<Malloc>, path: StringView, check: bool) i32 {
         .Ok(src) => {
             (mp.report_no_if_plain(path, src) == 0).match ({
                 true  => {
-                    r := mp.fmt_render(src)
+                    r = mp.fmt_render(src)
                     r.ok.match ({
                         true  => fmt_dirty(src, r).match ({
                             true  => check.match ({
@@ -2206,7 +2216,7 @@ fmt_stdout = (mp: MutPtr<Malloc>, path: StringView) i32 {
         .Ok(src) => {
             (mp.report_no_if_plain(path, src) == 0).match ({
                 true  => {
-                    r := mp.fmt_render(src)
+                    r = mp.fmt_render(src)
                     r.ok.match ({
                         true  => {
                             stdout_put(r.text)
@@ -2233,12 +2243,22 @@ fmt_files = (mp: MutPtr<Malloc>, i: i32, n: i32, check: bool, rc: i32) i32 {
     (i >= n).match ({
         true  => rc,
         false => {
-            r := mp.fmt_file(arg(i), check)
+            r = mp.fmt_file(arg(i), check)
             mp.fmt_files(i + 1, n, check, (r == 0).then({ rc }, { r }))
         },
     })
 }
 fmt_cmd = (mp: MutPtr<Malloc>, a2: StringView, a3: StringView) i32 {
+    fmt_set_migrate(a2 == "--migrate")
+    (a2 == "--migrate").then({
+        return (a3 == "").match ({
+            true  => {
+                eprint("usage: zenc fmt --migrate <in.zen>...\n")
+                2
+            },
+            false => mp.fmt_files(3, argc(), false, 0),
+        })
+    })
     (a2 == "--ast" || a2 == "--stdout").match ({
         true  => (a3 == "").match ({
             true  => {
@@ -2275,9 +2295,9 @@ ZiInitArgs: {
     ok: bool,
     help: bool,
 }
-ZI_KIND_PROMPT := 0
-ZI_KIND_EXECUTABLE := 1
-ZI_KIND_LIBRARY := 2
+ZI_KIND_PROMPT = 0
+ZI_KIND_EXECUTABLE = 1
+ZI_KIND_LIBRARY = 2
 zi_pick_kind = (have: i32, want: i32) i32 {
     (have == ZI_KIND_PROMPT || have == want).then({ want }, { 0 - 1 })
 }
@@ -2293,19 +2313,19 @@ zi_scan_args = (i: i32, n: i32, path: StringView, kind: i32, valid: bool) ZiInit
     (i >= n).then({
         return zi_init_args(path, kind, valid, false)
     })
-    a := arg(i)
+    a = arg(i)
     (a == "--help").then({
         return zi_init_args(path, kind, true, true)
     })
     (a == "--bin" || a == "--exe").then({
-        next := zi_pick_kind(kind, ZI_KIND_EXECUTABLE)
+        next = zi_pick_kind(kind, ZI_KIND_EXECUTABLE)
         return zi_scan_args(i + 1, n, path, next, valid && next > 0)
     })
     (a == "--lib").then({
-        next := zi_pick_kind(kind, ZI_KIND_LIBRARY)
+        next = zi_pick_kind(kind, ZI_KIND_LIBRARY)
         return zi_scan_args(i + 1, n, path, next, valid && next > 0)
     })
-    v: [u8] := a.view()
+    v: [u8] = a.view()
     (v.len > 0 && v[0] == '-').match ({
         true  => zi_init_args(path, kind, false, false),
         false => (path == "").match ({
@@ -2317,11 +2337,11 @@ zi_scan_args = (i: i32, n: i32, path: StringView, kind: i32, valid: bool) ZiInit
 // One prompt line, without consuming the next prompt's input (read_stdin intentionally reads to EOF).
 zi_read_line = (mp: MutPtr<Malloc>, prompt: StringView) StringView {
     eprint(prompt)
-    s := mp.gstr_string(64)
-    cell: [u8] := [0]
-    done := false
+    s ::= mp.gstr_string(64)
+    cell: [u8] = [0]
+    done ::= false
     @while (done == false) {
-        n := read(0, cell.ptr, 1)
+        n = read(0, cell.ptr, 1)
         done = n <= 0 || cell[0] == '\n'
         s = (n > 0 && cell[0] != '\n' && cell[0] != '\r').then({ s.gstr_push(mp, cell[0]) }, { s })
     }
@@ -2352,12 +2372,12 @@ zi_name_tail = (v: [u8], i: i64) bool {
     })
 }
 zi_name_valid = (s: StringView) bool {
-    v: [u8] := s.view()
+    v: [u8] = s.view()
     v.len > 0 && zi_ascii_alnum(v[0]) && v.zi_name_tail(1)
 }
 zi_path_char = (b: u8) bool { zi_ascii_alnum(b) || b == '_' || b == '-' || b == '.' || b == '/' }
 zi_dot_segment = (v: [u8], start: i64, end: i64) bool {
-    n := end - start
+    n = end - start
     n == 1 && v[start] == '.' || n == 2 && v[start] == '.' && v[start + 1] == '.'
 }
 zi_path_valid_at = (v: [u8], i: i64, start: i64) bool {
@@ -2380,17 +2400,17 @@ zi_trim_end = (v: [u8], n: i64) i64 {
     (n > 0 && v[n - 1] == '/').then({ v.zi_trim_end(n - 1) }, { n })
 }
 zi_normal_path = (mp: MutPtr<Malloc>, raw: StringView) StringView {
-    v: [u8] := raw.view()
-    n := v.zi_trim_end(v.len)
+    v: [u8] = raw.view()
+    n = v.zi_trim_end(v.len)
     (n == v.len).then({ raw }, { mp.cstr_substr(raw, 0, to_i32(n)) })
 }
 zi_project_name = (mp: MutPtr<Malloc>, path: StringView) StringView {
-    v: [u8] := path.view()
-    slash := last_slash(v, 0, 0 - 1)
-    start := slash + 1
+    v: [u8] = path.view()
+    slash = last_slash(v, 0, 0 - 1)
+    start = slash + 1
     mp.cstr_substr(path, to_i32(start), to_i32(v.len - start))
 }
-ZI_OPEN_NEW := O_WRONLY | O_CREAT | O_EXCL
+ZI_OPEN_NEW = O_WRONLY | O_CREAT | O_EXCL
 ZiDirCreate: {
     ok: bool,
     created: bool,
@@ -2416,12 +2436,12 @@ zi_ensure_dir = (path: StringView) ZiDirCreate {
     })
 }
 zi_make_tree = (mp: MutPtr<Malloc>, path: StringView) ZiDirCreate {
-    v: [u8] := path.view()
-    i: i64 := 1
-    ok := true
+    v: [u8] = path.view()
+    i :: i64 = 1
+    ok ::= true
     @while (i < v.len && ok) {
         (v[i] == '/').then({
-            prefix := mp.cstr_substr(path, 0, to_i32(i))
+            prefix = mp.cstr_substr(path, 0, to_i32(i))
             ok = zi_ensure_dir(prefix).ok
         })
         i = i + 1
@@ -2438,20 +2458,20 @@ zi_write_all = (fd: i32, p: RawPtr<u8>, n: i64) bool {
     (n <= 0).match ({
         true  => true,
         false => {
-            wrote := write(fd, p, n)
+            wrote = write(fd, p, n)
             (wrote <= 0).then({ false }, { zi_write_all(fd, p.offset(wrote), n - wrote) })
         },
     })
 }
 // Exclusive creation is the no-clobber guarantee even if another process races the preflight.
 zi_save_new = (path: StringView, data: StringView) bool {
-    fd := open(path, ZI_OPEN_NEW, MODE_644)
+    fd = open(path, ZI_OPEN_NEW, MODE_644)
     (fd < 0).match ({
         true  => false,
         false => {
-            v: [u8] := data.view()
-            wrote := zi_write_all(fd, v.ptr, v.len)
-            shut := close(fd) == 0
+            v: [u8] = data.view()
+            wrote = zi_write_all(fd, v.ptr, v.len)
+            shut = close(fd) == 0
             (wrote && shut).match ({
                 true  => true,
                 false => {
@@ -2463,7 +2483,7 @@ zi_save_new = (path: StringView, data: StringView) bool {
     })
 }
 zi_manifest = (mp: MutPtr<Malloc>, name: StringView, kind: i32) StringView {
-    s := mp.gstr_string(160).gstr_append(mp, "package = \"").gstr_append(mp, name)
+    s = mp.gstr_string(160).gstr_append(mp, "package = \"").gstr_append(mp, name)
     (kind == ZI_KIND_LIBRARY).match ({
         true  => s
             .gstr_append(mp, "\"\nkind = \"library\"\nroot = \"src\"\nmain = \"lib.zen\"\n")
@@ -2492,18 +2512,18 @@ zi_collision = (path: StringView) i32 {
     eprint(" already exists; nothing was changed\n")
     1
 }
-zi_remove_dir = (path: StringView) void { removed := rmdir(path) }
+zi_remove_dir = (path: StringView) void { removed = rmdir(path) }
 zi_cleanup_dirs = (srcdir: StringView, target: StringView, made_src: bool, made_target: bool) void {
     made_src.then(() { zi_remove_dir(srcdir) })
     made_target.then(() { zi_remove_dir(target) })
 }
 zi_create = (mp: MutPtr<Malloc>, target: StringView, name: StringView, kind: i32) i32 {
-    manifest := mp.join2(target, "zen.toml")
-    buildfile := mp.join2(target, "build.zen")
-    srcdir := mp.join2(target, "src")
-    entry := (kind == ZI_KIND_LIBRARY).then({ "lib.zen" }, { "main.zen" })
-    source := mp.join2(srcdir, entry)
-    target_exists := file_exists(target)
+    manifest = mp.join2(target, "zen.toml")
+    buildfile = mp.join2(target, "build.zen")
+    srcdir = mp.join2(target, "src")
+    entry = (kind == ZI_KIND_LIBRARY).then({ "lib.zen" }, { "main.zen" })
+    source = mp.join2(srcdir, entry)
+    target_exists = file_exists(target)
     (target_exists && dir_exists(target) == false).then({
         eprint("zenc init: target exists and is not a directory: ")
         eprint(target)
@@ -2522,14 +2542,14 @@ zi_create = (mp: MutPtr<Malloc>, target: StringView, name: StringView, kind: i32
     file_exists(source).then({
         return zi_collision(source)
     })
-    target_dir := mp.zi_make_tree(target)
+    target_dir = mp.zi_make_tree(target)
     (target_dir.ok == false).then({
         eprint("zenc init: could not create project directory: ")
         eprint(target)
         eprint("\n")
         return 1
     })
-    src_dir := zi_ensure_dir(srcdir)
+    src_dir = zi_ensure_dir(srcdir)
     (src_dir.ok == false).then({
         eprint("zenc init: could not create source directory: ")
         eprint(srcdir)
@@ -2568,7 +2588,7 @@ zi_create = (mp: MutPtr<Malloc>, target: StringView, name: StringView, kind: i32
     0
 }
 zi_cmd = (mp: MutPtr<Malloc>) i32 {
-    parsed := zi_scan_args(2, argc(), "", ZI_KIND_PROMPT, true)
+    parsed = zi_scan_args(2, argc(), "", ZI_KIND_PROMPT, true)
     parsed.help.then({
         say(ZI_USAGE())
         return 0
@@ -2577,21 +2597,21 @@ zi_cmd = (mp: MutPtr<Malloc>) i32 {
         eprint(ZI_USAGE())
         return 2
     })
-    rawpath := (parsed.path == "").match ({
+    rawpath = (parsed.path == "").match ({
         true  => mp.zi_read_line("Project name or path: "),
         false => parsed.path,
     })
-    path := mp.zi_normal_path(rawpath)
+    path = mp.zi_normal_path(rawpath)
     (path == "" || zi_path_valid(path) == false).then({
         eprint("zenc init: project path uses unsafe characters or a '.'/'..' component\n")
         return 2
     })
-    name := mp.zi_project_name(path)
+    name = mp.zi_project_name(path)
     (zi_name_valid(name) == false).then({
         eprint("zenc init: project name must match [A-Za-z0-9][A-Za-z0-9_-]*\n")
         return 2
     })
-    kind := (parsed.kind == ZI_KIND_PROMPT).then({ mp.zi_prompt_kind() }, { parsed.kind })
+    kind = (parsed.kind == ZI_KIND_PROMPT).then({ mp.zi_prompt_kind() }, { parsed.kind })
     (kind != ZI_KIND_EXECUTABLE && kind != ZI_KIND_LIBRARY).then({
         eprint("zenc init: choose 1/executable or 2/library\n")
         return 2
@@ -2619,17 +2639,17 @@ link_flag = (mp: MutPtr<Malloc>, lk: StringView) StringView {
 }
 // a zen.toml `key = "value"` -> the value (or "" if absent), via the Zen manifest parser.
 manifest_value = (mp: MutPtr<Malloc>, src: StringView, key: StringView) StringView {
-    sp := manifest_value_span(src, to_i32(src.view().len), key, 0)
+    sp = manifest_value_span(src, to_i32(src.view().len), key, 0)
     (sp.start < 0).then({ "" }, { mp.cstr_substr(src, sp.start, sp.len) })
 }
 // read <dir>/zen.toml -> a project Spec (ok=false if absent or missing root/main).
 proj_spec = (mp: MutPtr<Malloc>, dir: StringView) Spec {
     contents_in(mp, mp.join2(dir, "zen.toml")).match ({
         .Ok(src) => {
-            root := mp.manifest_value(src, "root")
-            main := mp.manifest_value(src, "main")
-            kind := mp.manifest_value(src, "kind")
-            kind_ok := kind == "" || kind == "executable" || kind == "library"
+            root = mp.manifest_value(src, "root")
+            main = mp.manifest_value(src, "main")
+            kind = mp.manifest_value(src, "kind")
+            kind_ok = kind == "" || kind == "executable" || kind == "library"
             (root == "" || main == "" || kind_ok == false).match ({
                 true  => Spec(
                     source: "",
@@ -2643,10 +2663,10 @@ proj_spec = (mp: MutPtr<Malloc>, dir: StringView) Spec {
                     ok: false,
                 ),
                 false => {
-                    out := mp.manifest_value(src, "out")
-                    cc := mp.manifest_value(src, "ccflags")
-                    lk := mp.manifest_value(src, "link")
-                    fg := mp.manifest_value(src, "ffi")
+                    out = mp.manifest_value(src, "out")
+                    cc = mp.manifest_value(src, "ccflags")
+                    lk = mp.manifest_value(src, "link")
+                    fg = mp.manifest_value(src, "ffi")
                     Spec(
                         source: mp.join2(mp.join2(dir, root), main),
                         out: (out == "").then({ "" }, { mp.join2(dir, out) }),
@@ -2682,7 +2702,7 @@ resolve_spec = (mp: MutPtr<Malloc>, root: StringView, arg: StringView) Spec {
         true  => mp.build_zen_spec(root, arg),
         false => file_exists(mp.join2(arg, "zen.toml")).match ({
             true  => {
-                s := mp.proj_spec(arg)
+                s = mp.proj_spec(arg)
                 s.ok.match ({
                     true  => s,
                     false => {
@@ -2723,8 +2743,8 @@ line_start = (v: [u8], idx: i32, p: i64) i64 {
     })
 }
 spec_field = (mp: MutPtr<Malloc>, v: [u8], idx: i32) StringView {
-    s := v.line_start(idx, 0)
-    e := v.bs_line_end(s, v.len)
+    s = v.line_start(idx, 0)
+    e = v.bs_line_end(s, v.len)
     mp.bs_push_range(mp.gstr_string(e - s + 1), v, s, e).gstr_finish(mp)
 }
 source_word_end = (v: [u8], i: i64) i64 {
@@ -2736,15 +2756,15 @@ source_words = (mp: MutPtr<Malloc>, dir: StringView, v: [u8], i: i64, out: Strin
         false => (v[i] == ' ').match ({
             true  => mp.source_words(dir, v, i + 1, out),
             false => {
-                e := v.source_word_end(i)
+                e = v.source_word_end(i)
                 // a `-`-prefixed word is a cc flag (Target.cflags / `-l` link input), passed
                 // through verbatim; anything else names a project-relative extra .c source
                 // (absolute paths also pass through).
-                prefixed := (v[i] == '/' || v[i] == '-').match ({
+                prefixed = (v[i] == '/' || v[i] == '-').match ({
                     true  => out,
                     false => out.gstr_append(mp, dir).gstr_append(mp, "/"),
                 })
-                next := mp.bs_push_range(prefixed, v, i, e).gstr_append(mp, " ")
+                next = mp.bs_push_range(prefixed, v, i, e).gstr_append(mp, " ")
                 mp.source_words(dir, v, e, next)
             },
         }),
@@ -2760,7 +2780,7 @@ source_flags = (mp: MutPtr<Malloc>, dir: StringView, src: StringView) StringView
 // else is a cross target, canonicalized to the `<arch>-<os>-<abi>` GNU config triple
 // (aarch64-linux-gnu, riscv64-linux-musl, …) that names the conventional cross gcc. ─────────────
 spec_code = (s: StringView) i32 {
-    v: [u8] := s.view()
+    v: [u8] = s.view()
     (v.len <= 0).then({ 0 - 1 }, { to_i32(v[0] - '0') })
 }    // one plan code line -> its integer (codes are single digits); absent line -> -1
 cross_os_code = (o: Os) i32 {
@@ -2831,9 +2851,9 @@ cross_abi_name = (n: i32) StringView {
     })
 }
 cross_triple = (mp: MutPtr<Malloc>, osc: i32, arc: i32, abc: i32) StringView {
-    hp := host()
-    absent := osc < 0 || arc < 0 || abc < 0
-    is_host := osc == cross_os_code(hp.os)
+    hp = host()
+    absent = osc < 0 || arc < 0 || abc < 0
+    is_host = osc == cross_os_code(hp.os)
         && arc == cross_arch_code(hp.arch)
         && abc == cross_abi_code(hp.abi)
     (absent || is_host).match ({
@@ -2856,19 +2876,19 @@ cross_supported = (osc: i32, arc: i32, abc: i32) bool {
     osc == 2 && (arc == 1 || arc == 2 || arc == 3) && (abc == 2 || abc == 3)
 }
 parse_spec_at = (mp: MutPtr<Malloc>, dir: StringView, specsrc: StringView, index: i32) Spec {
-    v: [u8] := specsrc.view()
-    base := 1 + index * 10
-    name := mp.spec_field(v, base)
-    root := mp.spec_field(v, base + 1)
-    main := mp.spec_field(v, base + 2)
-    out := mp.spec_field(v, base + 3)
-    link := mp.spec_field(v, base + 4)
-    cc := mp.spec_field(v, base + 5)
-    osc := spec_code(mp.spec_field(v, base + 6))
-    arc := spec_code(mp.spec_field(v, base + 7))
-    abc := spec_code(mp.spec_field(v, base + 8))
-    fg := mp.spec_field(v, base + 9)
-    tgt := mp.cross_triple(osc, arc, abc)
+    v: [u8] = specsrc.view()
+    base = 1 + index * 10
+    name = mp.spec_field(v, base)
+    root = mp.spec_field(v, base + 1)
+    main = mp.spec_field(v, base + 2)
+    out = mp.spec_field(v, base + 3)
+    link = mp.spec_field(v, base + 4)
+    cc = mp.spec_field(v, base + 5)
+    osc = spec_code(mp.spec_field(v, base + 6))
+    arc = spec_code(mp.spec_field(v, base + 7))
+    abc = spec_code(mp.spec_field(v, base + 8))
+    fg = mp.spec_field(v, base + 9)
+    tgt = mp.cross_triple(osc, arc, abc)
     (root == "" || main == "").match ({
         true  => {
             eprint("zenc: build.zen: target is missing root/main\n")
@@ -2944,9 +2964,9 @@ gmx_write = (
     blen: i64,
 ) StringView {
     mkdir(mp.join2(dir, ".zen"), MODE_755)
-    gdir := mp.join2(dir, GENSUB())
+    gdir = mp.join2(dir, GENSUB())
     mkdir(gdir, MODE_755)
-    gpath := mp
+    gpath = mp
         .gstr_string(96)
         .gstr_append(mp, gdir)
         .gstr_append(mp, "/")
@@ -2968,19 +2988,19 @@ genmods_from = (
     left: i32,
     acc: String,
 ) StringView {
-    v: [u8] := specsrc.view()
+    v: [u8] = specsrc.view()
     (left <= 0 || p >= v.len).match ({
         true  => acc.gstr_finish(mp),
         false => {
-            te := v.gmx_tok_end(p)
-            ie := v.gmx_tok_end(te + 1)
-            le := v.gmx_tok_end(ie + 1)
-            ke := v.bs_line_end(le + 1, v.len)
-            be := v.gmx_skip_lines(ke + 1, v.plan_nat(le + 1, ke, 0))
-            nxt := (mp.cstr_substr(specsrc, to_i32(p), to_i32(te - p)) == tname).match ({
+            te = v.gmx_tok_end(p)
+            ie = v.gmx_tok_end(te + 1)
+            le = v.gmx_tok_end(ie + 1)
+            ke = v.bs_line_end(le + 1, v.len)
+            be = v.gmx_skip_lines(ke + 1, v.plan_nat(le + 1, ke, 0))
+            nxt = (mp.cstr_substr(specsrc, to_i32(p), to_i32(te - p)) == tname).match ({
                 true  => {
-                    id := mp.cstr_substr(specsrc, to_i32(te + 1), to_i32(ie - te - 1))
-                    body := mp.cstr_substr(specsrc, to_i32(ke + 1), to_i32(be - ke - 1))
+                    id = mp.cstr_substr(specsrc, to_i32(te + 1), to_i32(ie - te - 1))
+                    body = mp.cstr_substr(specsrc, to_i32(ke + 1), to_i32(be - ke - 1))
                     acc
                         .gstr_append(mp, id)
                         .gstr_append(mp, " ")
@@ -2999,9 +3019,9 @@ genmods_extract = (
     specsrc: StringView,
     index: i32,
 ) StringView {
-    v: [u8] := specsrc.view()
-    gs := v.line_start(1 + specsrc.plan_count() * 10, 0)
-    g := v.plan_nat(gs, v.bs_line_end(gs, v.len), 0)
+    v: [u8] = specsrc.view()
+    gs = v.line_start(1 + specsrc.plan_count() * 10, 0)
+    g = v.plan_nat(gs, v.bs_line_end(gs, v.len), 0)
     mp.genmods_from(dir, specsrc, mp.spec_field(v, 1 + index * 10), v.bs_line_end(gs, v.len) + 1, g, mp.gstr_string(64))
 }
 plan_nat = (v: [u8], i: i64, e: i64, n: i32) i32 {
@@ -3014,7 +3034,7 @@ plan_nat = (v: [u8], i: i64, e: i64, n: i32) i32 {
     })
 }
 plan_count = (specsrc: StringView) i32 {
-    v := specsrc.view()
+    v = specsrc.view()
     v.plan_nat(0, v.bs_line_end(0, v.len), 0)
 }
 PlanSource*: {
@@ -3024,19 +3044,19 @@ PlanSource*: {
 build_zen_plan = (mp: MutPtr<Malloc>, root: StringView, dir: StringView) PlanSource {
     contents_in(mp, mp.join2(dir, "build.zen")).match ({
         .Ok(bsrc) => {
-            es := mp.gstr_string(1024).gstr_append(mp, bsrc).gstr_append(mp, BUILD_TAIL())
-            entry := es.gstr_finish(mp)
-            epath := mp.join2(dir, ".zenbuild_entry.zen")
+            es = mp.gstr_string(1024).gstr_append(mp, bsrc).gstr_append(mp, BUILD_TAIL())
+            entry = es.gstr_finish(mp)
+            epath = mp.join2(dir, ".zenbuild_entry.zen")
             save(epath, entry, es.len).match ({
                 .Ok(n)  => { },
                 .Err(e) => { },
             })
-            bbin := mp.BUILDBIN()
-            rc := mp.compile_to(root, epath, entry, bbin, "", "", "")    // the build program always runs on the HOST
+            bbin = mp.BUILDBIN()
+            rc = mp.compile_to(root, epath, entry, bbin, "", "", "")    // the build program always runs on the HOST
             unlink(epath)    // don't leave the entry in the project dir
             (rc == 0).match ({
                 true  => {
-                    spf := mp.SPECFILE()
+                    spf = mp.SPECFILE()
                     mp
                         .gstr_string(256)
                         .gstr_append(mp, bbin)
@@ -3044,7 +3064,7 @@ build_zen_plan = (mp: MutPtr<Malloc>, root: StringView, dir: StringView) PlanSou
                         .gstr_append(mp, spf)
                         .gstr_finish(mp)
                         .system()
-                    sp := contents_in(mp, spf).match ({
+                    sp = contents_in(mp, spf).match ({
                         .Ok(spec) => PlanSource(
                             src: spec,
                             ok: true,
@@ -3083,13 +3103,13 @@ plan_find_name = (mp: MutPtr<Malloc>, src: StringView, wanted: StringView, i: i3
     })
 }
 build_zen_spec = (mp: MutPtr<Malloc>, root: StringView, dir: StringView) Spec {
-    p := mp.build_zen_plan(root, dir)
+    p = mp.build_zen_plan(root, dir)
     (p.ok && p.src.plan_count() > 0).then({ mp.parse_spec_at(dir, p.src, 0) }, { empty_spec() })
 }    // no build.zen -> try zen.toml
 build_named_plan = (mp: MutPtr<Malloc>, root: StringView, dir: StringView, wanted: StringView) i32 {
-    p := mp.build_zen_plan(root, dir)
-    n := p.src.plan_count()
-    i := mp.plan_find_name(p.src, wanted, 0, n)
+    p = mp.build_zen_plan(root, dir)
+    n = p.src.plan_count()
+    i = mp.plan_find_name(p.src, wanted, 0, n)
     (p.ok && i >= 0).match ({
         true  => mp.build_spec(root, mp.parse_spec_at(dir, p.src, i), "", ""),
         false => {
@@ -3115,7 +3135,7 @@ build_plan_from = (
     })
 }
 build_all_plan = (mp: MutPtr<Malloc>, root: StringView, dir: StringView) i32 {
-    p := mp.build_zen_plan(root, dir)
+    p = mp.build_zen_plan(root, dir)
     p.ok.then({ mp.build_plan_from(root, dir, p.src, 0, p.src.plan_count(), 0) }, { 1 })
 }
 list_plan_from = (mp: MutPtr<Malloc>, src: StringView, i: i32, n: i32) i32 {
@@ -3128,6 +3148,6 @@ list_plan_from = (mp: MutPtr<Malloc>, src: StringView, i: i32, n: i32) i32 {
     })
 }
 list_plan_targets = (mp: MutPtr<Malloc>, root: StringView, dir: StringView) i32 {
-    p := mp.build_zen_plan(root, dir)
+    p = mp.build_zen_plan(root, dir)
     p.ok.then({ mp.list_plan_from(p.src, 0, p.src.plan_count()) }, { 1 })
 }

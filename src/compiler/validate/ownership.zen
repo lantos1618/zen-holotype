@@ -29,7 +29,7 @@ DeadCell: {
 }
 dead_buf = (a: MutPtr<Malloc>) [DeadList] { slice(a.acquire_or_die(sizeof(DeadList)), 1) }
 dead_node = (a: MutPtr<Malloc>, v: DeadList) Ptr<DeadList> {
-    buf := a.dead_buf()
+    buf ::= a.dead_buf()
     buf[0] = v
     buf[0].addr()
 }
@@ -74,7 +74,7 @@ AliasCell: {
 }
 alias_buf = (a: MutPtr<Malloc>) [AliasList] { slice(a.acquire_or_die(sizeof(AliasList)), 1) }
 alias_node = (a: MutPtr<Malloc>, v: AliasList) Ptr<AliasList> {
-    buf := a.alias_buf()
+    buf ::= a.alias_buf()
     buf[0] = v
     buf[0].addr()
 }
@@ -113,7 +113,7 @@ alias_reach = (
     rest.match ({
         .AliasNil     => acc,
         .AliasCons(c) => {
-            out := acc
+            out ::= acc
             (c.x == name && out.dead_has(c.y) == false).then({
                 out = a.alias_reach(full, full, c.y, a.dead_cons(c.y, out))
             })
@@ -148,7 +148,7 @@ owner_base* = (t: Ty) StringView {
 is_consume_method = (env: Env, c: CallData) bool {
     (c.args.len > 0).match ({
         true  => {
-            base := env.infer_expr(c.args[0].addr()).owner_base()
+            base = env.infer_expr(c.args[0].addr()).owner_base()
             c.fn.sx_named("release", "__release").match ({
                 true  => base == "Own",
                 false => c.fn.sx_named("release_in", "__release_in").match ({
@@ -169,7 +169,7 @@ is_consume_method = (env: Env, c: CallData) bool {
 is_default_owner_method* = (env: Env, c: CallData) bool {
     (c.args.len > 0).match ({
         true  => {
-            base := env.infer_expr(c.args[0].addr()).owner_base()
+            base = env.infer_expr(c.args[0].addr()).owner_base()
             c.fn.sx_named("release", "__release").match ({
                 true  => base == "Own",
                 false => c.fn.sx_named("drop", "__drop").match ({
@@ -272,7 +272,7 @@ fn_consumes_param = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
     (depth <= 0).match ({
         true  => false,
         false => {
-            f := env.env_func(fn)
+            f = env.env_func(fn)
             (f.name == fn && pi >= 0 && pi < f.params.len).match ({
                 true  => env.body_consumes_name(f.body, f.params[pi].name, depth),
                 false => false,
@@ -326,7 +326,7 @@ arms_consume_name = (env: Env, arms: [ArmData], nm: StringView, depth: i32) bool
     arms.slice_any((ar) { env.expr_consumes_name(ar.body, nm, depth) })
 }
 args_consume_name = (env: Env, args: [Expr], nm: StringView, depth: i32) bool {
-    found := false
+    found ::= false
     args.loop((h, i, ar) {
         found = env.expr_consumes_name(ar.addr(), nm, depth).then({ true }, { found })
     })
@@ -336,8 +336,8 @@ args_consume_name = (env: Env, args: [Expr], nm: StringView, depth: i32) bool {
 // of a send. TRANSITIVE: `nm` is a bare-Var arg at an Own-typed param position of a callee that itself
 // consumes that param (one interprocedural hop, depth-1). Also descends nested arg exprs.
 call_consumes_name = (env: Env, c: CallData, nm: StringView, depth: i32) bool {
-    consumed := env.is_consume_method(c).then({ c.recv_var_name() }, { env.send_consume(c) })
-    leaf := nm == "" == false && consumed == nm
+    consumed = env.is_consume_method(c).then({ c.recv_var_name() }, { env.send_consume(c) })
+    leaf = nm == "" == false && consumed == nm
     leaf.match ({
         true  => true,
         false => env.call_arg_consumes_name(c, nm, depth)
@@ -346,8 +346,8 @@ call_consumes_name = (env: Env, c: CallData, nm: StringView, depth: i32) bool {
 }
 // the transitive-hop check, hoisted so the loop's inner match does not nest inside call_consumes_name.
 call_arg_consumes_name = (env: Env, c: CallData, nm: StringView, depth: i32) bool {
-    ps := env.env_params(c.fn)
-    found := false
+    ps = env.env_params(c.fn)
+    found ::= false
     (ps.len == c.args.len).then({
         c.args.loop((h, i, ar) {
             (c.arg_var_name(i) == nm
@@ -427,7 +427,7 @@ cdl_expr = (env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>, pname: StringView) Ptr<
     })
 }
 cdl_arms = (env: Env, seen: Ptr<DeadList>, arms: [ArmData], pname: StringView) Ptr<DeadList> {
-    out := seen
+    out ::= seen
     arms.loop((h, i, ar) {
         out = env.cdl_expr(out, ar.body, pname)
     })
@@ -447,7 +447,7 @@ cdl_stmt = (env: Env, seen: Ptr<DeadList>, st: Stmt, pname: StringView) Ptr<Dead
     })
 }
 cdl_body = (env: Env, seen: Ptr<DeadList>, body: [Stmt], pname: StringView) Ptr<DeadList> {
-    out := seen
+    out ::= seen
     body.loop((h, i, st) {
         out = env.cdl_stmt(out, st, pname)
     })
@@ -456,7 +456,7 @@ cdl_body = (env: Env, seen: Ptr<DeadList>, body: [Stmt], pname: StringView) Ptr<
 // does a consume verb in `c` free the pointee of `pname`? receiver is `load(pname)` directly, a local in the
 // deref set `dl`, or `pname` is forwarded (by pointer) to a callee that frees through it (one bounded hop).
 bft_call = (env: Env, c: CallData, pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
-    leaf := (is_consume_fn_name(c.fn) && c.args.len > 0).match ({
+    leaf = (is_consume_fn_name(c.fn) && c.args.len > 0).match ({
         true  => c.args[0].match ({
             .Var(v) => dl.dead_has(v.name),
             _       => is_deref_of_var(c.args[0].addr(), pname),
@@ -473,8 +473,8 @@ bft_forward = (env: Env, c: CallData, pname: StringView, depth: i32) bool {
     (depth <= 1).match ({
         true  => false,
         false => {
-            ps := env.env_params(c.fn)
-            found := false
+            ps = env.env_params(c.fn)
+            found ::= false
             (ps.len == c.args.len).then({
                 c.args.loop((h, i, ar) {
                     (c.arg_var_name(i) == pname && env.fn_frees_through_ptr(c.fn, i, depth - 1)).then({
@@ -530,7 +530,7 @@ bft_body = (env: Env, body: [Stmt], pname: StringView, dl: Ptr<DeadList>, depth:
     body.slice_any((st) { env.bft_stmt(st, pname, dl, depth) })
 }
 body_frees_through_ptr = (env: Env, body: [Stmt], pname: StringView, depth: i32) bool {
-    dl := env.cdl_body(env.a.dead_nil(), body, pname)
+    dl = env.cdl_body(env.a.dead_nil(), body, pname)
     env.bft_body(body, pname, dl, depth)
 }
 // does the KNOWN local fn `fn` free the pointee of its pointer param at index `pi`? (bounded interprocedural)
@@ -538,7 +538,7 @@ fn_frees_through_ptr = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
     (depth <= 0).match ({
         true  => false,
         false => {
-            f := env.env_func(fn)
+            f = env.env_func(fn)
             (f.name == fn && pi >= 0 && pi < f.params.len).match ({
                 true  => env.body_frees_through_ptr(f.body, f.params[pi].name, depth),
                 false => false,
@@ -556,14 +556,14 @@ own_call_kills = (
     al: Ptr<AliasList>,
     c: CallData,
 ) Ptr<DeadList> {
-    out := seen
-    ps := env.env_params(c.fn)
+    out ::= seen
+    ps = env.env_params(c.fn)
     (ps.len == c.args.len).then({
         c.args.loop((h, i, ar) {
             (ps[i].ty.owner_base() == "Own"
                 && env.infer_expr(ar.addr()).owner_base() == "Own"
                 && env.fn_consumes_param(c.fn, i, consume_depth())).then({
-                nm := c.arg_var_name(i)
+                nm ::= c.arg_var_name(i)
                 // a `.Member` arg (`consume(b.o)`) moves the owner OUT of the field → whole-base kill.
                 nm.is_empty().then({
                     nm = ar.addr().member_move_root()
@@ -574,7 +574,7 @@ own_call_kills = (
             })
             (is_owner_base(ps[i].ty.owner_ptr_base())
                 && env.fn_frees_through_ptr(c.fn, i, consume_depth())).then({
-                onm := env.addr_owner_var(ar.addr())
+                onm = env.addr_owner_var(ar.addr())
                 (onm.is_empty() == false).then({
                     out = a.dead_kill(out, al, onm)
                 })
@@ -648,8 +648,8 @@ indexset_own_kill = (
     al: Ptr<AliasList>,
     v: Ptr<Expr>,
 ) Ptr<DeadList> {
-    out := seen
-    nm := env.own_moved_var(v)
+    out ::= seen
+    nm = env.own_moved_var(v)
     (nm.is_empty() == false).then({
         out = a.dead_kill(out, al, nm)
     })
@@ -1014,9 +1014,9 @@ alias_src_name = (env: Env, st: Stmt) StringView {
 // then a direct pointer copy pairs target and source. Runs alongside own_step (aliases established
 // BEFORE a statement govern that statement's kills).
 alias_step* = (a: MutPtr<Malloc>, env: Env, al: Ptr<AliasList>, st: Stmt) Ptr<AliasList> {
-    rb := a.rebind_stmt_name(st)
-    out := rb.is_empty().then({ al }, { a.alias_drop(al, rb) })
-    src := env.alias_src_name(st)
+    rb = a.rebind_stmt_name(st)
+    out ::= rb.is_empty().then({ al }, { a.alias_drop(al, rb) })
+    src = env.alias_src_name(st)
     (rb.is_empty() == false && src.is_empty() == false && rb == src == false).then({
         out = a.alias_cons(rb, src, out)
     })
@@ -1073,9 +1073,9 @@ own_dead_body* = (
     al: Ptr<AliasList>,
     body: [Stmt],
 ) Ptr<DeadList> {
-    e := env
-    d := seen
-    al2 := al
+    e ::= env
+    d ::= seen
+    al2 ::= al
     body.loop((h, i, st) {
         d = a.own_step(e, d, al2, st)
         al2 = a.alias_step(e, al2, st)
@@ -1093,7 +1093,7 @@ own_dead_arms = (
     subjty: Ty,
     arms: [ArmData],
 ) Ptr<DeadList> {
-    out := seen
+    out ::= seen
     arms.loop((h, i, ar) {
         expr_falls_through(ar.body).then({
             out = a.dead_union(a.own_dead_expr(a.arm_env(env, subjty, ar), seen, al, ar.body), out)
@@ -1122,12 +1122,12 @@ own_dead_expr = (
         // a loop body may run: its frees are conditionally dead after the loop (same may-rule as branches).
         .Loop(l)  => a.own_dead_body(env, seen, al, l.body),
         .Call(c)  => {
-            out := seen
-            fn := env.alloc_free_call_name(c)
+            out ::= seen
+            fn = env.alloc_free_call_name(c)
             (fn.is_empty() == false).then({
                 out = a.dead_kill(out, al, fn)
             })
-            cn := env.is_consume_method(c).then({ c.recv_move_name() }, { env.send_consume(c) })
+            cn = env.is_consume_method(c).then({ c.recv_move_name() }, { env.send_consume(c) })
             (cn.is_empty() == false).then({
                 out = a.dead_kill(out, al, cn)
             })
@@ -1153,15 +1153,15 @@ own_step* = (
     al: Ptr<AliasList>,
     st: Stmt,
 ) Ptr<DeadList> {
-    out := seen
+    out ::= seen
     // 1. owner consume (Own.release / Rc.drop / …) marks the receiver dead.
-    nm := env.consume_name(st)
+    nm = env.consume_name(st)
     (nm.is_empty() == false).then({
         out = a.dead_kill(out, al, nm)
     })
     // 2. allocator free (a.release(p) / a.resize(p,n) / free(p)) marks the freed local dead — and its
     //    whole alias class with it (every member names the SAME allocation).
-    fn := env.alloc_free_stmt_name(st)
+    fn = env.alloc_free_stmt_name(st)
     (fn.is_empty() == false).then({
         out = a.dead_kill(out, al, fn)
     })
@@ -1187,14 +1187,14 @@ own_step* = (
     //      field / slice element is consumed here — later use of the source binding → UAF / double-free.
     out = a.own_stmt_struct_kills(env, out, al, st)
     // 2d. AFFINE COPY: `c := o` / `c = o` (o an `Own<T>`) MOVES o — c is the live owner, o's binding dies.
-    mv := env.own_move_src(st)
+    mv = env.own_move_src(st)
     (mv.is_empty() == false).then({
         out = a.dead_kill(out, al, mv)
     })
     // 3. revival — a (re)bind of a local clears its dead state (ONLY that name: an alias of it stays
     //    dead). Runs LAST so `p = a.resize(p, n)` (free old p in step 2, then rebind p here) nets to
     //    ALIVE, while `q := a.resize(p, n)` leaves p dead (q != p).
-    rb := a.rebind_stmt_name(st)
+    rb = a.rebind_stmt_name(st)
     (rb.is_empty() == false).then({
         out = a.dead_remove(out, rb)
     })
@@ -1232,10 +1232,10 @@ count_loop_freed* = (
 recv_typed_miss* = (env: Env, c: CallData) bool {
     (c.args.len > 0 && env.env_trait_method(c.fn)).match ({
         true  => {
-            f := env.env_func(c.fn)
+            f = env.env_func(c.fn)
             (f.params.len > 0 && f.tparams.ty_mentions_tparam(f.params[0].ty) == false).match ({
                 true  => {
-                    rty := env.infer_expr(c.args[0].addr())
+                    rty = env.infer_expr(c.args[0].addr())
                     (env.unknown_ty(rty) || rty.is_void_ty()).match ({
                         true  => false,
                         false => rty.fits(f.params[0].ty) == false,
@@ -1260,7 +1260,7 @@ recv_typed_miss* = (env: Env, c: CallData) bool {
 // receivers (pre-inline tparam contexts). Dispatch that DID resolve (impl/alias rewrites, inlined
 // generics) never reaches here with the flat name at all.
 ufcs_vis_miss* = (env: Env, c: CallData) bool {
-    vis := env.didx.vis
+    vis = env.didx.vis
     (vis.on
         && c.pos > 0
         && c.args.len > 0
@@ -1270,7 +1270,7 @@ ufcs_vis_miss* = (env: Env, c: CallData) bool {
         && vis.vis_method_shaped(c.pos)
         && vis.vis_name_at(c.pos, c.fn)).match ({
         true  => {
-            rty := env.infer_expr(c.args[0].addr())
+            rty = env.infer_expr(c.args[0].addr())
             (env.unknown_ty(rty) || rty.is_void_ty()).match ({
                 true  => false,
                 false => env.dispatch_name(c) == c.fn
@@ -1292,7 +1292,7 @@ ufcs_vis_miss* = (env: Env, c: CallData) bool {
 // enrichable node, so the driver keeps the generic message. The env is threaded exactly as the validator
 // threads it (params + lets + arms), so receiver and operand types infer the same way.
 zty_generic = (a: MutPtr<Malloc>, g: GenericData) StringView {
-    out := a.gstr_string(48).gstr_append(a, g.name).gstr_append(a, "<")
+    out ::= a.gstr_string(48).gstr_append(a, g.name).gstr_append(a, "<")
     g.args.loop((h, i, t) {
         (i > 0).then({
             out = out.gstr_append(a, ", ")
@@ -1381,7 +1381,7 @@ mu_is_value_mold = (f: Func) bool {
     (f.params.len == 0).match ({
         true  => false,
         false => {
-            p0 := f.params[0].ty
+            p0 = f.params[0].ty
             (p0.mu_ty_is_container() && f.ret.mu_ty_is_container()).match ({
                 true  => f.ret.mu_ret_is_self(p0),
                 false => false,
@@ -1397,8 +1397,8 @@ mu_func_value_mold = (
     ty: StringView,
     m: StringView,
 ) bool {
-    cname := a.impl_cname_in(ty, ty, m)
-    i := idx.func_idx.get(cname, 0 - 1)
+    cname = a.impl_cname_in(ty, ty, m)
+    i = idx.func_idx.get(cname, 0 - 1)
     (i >= 0 && i < decls.len).match ({
         true  => decls[i].match ({
             .DFunc(f) => f.mu_is_value_mold(),
@@ -1420,10 +1420,10 @@ mu_index_methods = (
     (j >= methods.len).match ({
         true  => m,
         false => {
-            p := methods[j]
-            vm := a.mu_func_value_mold(decls, idx, ty, p.name)
-            prev := m.get(p.name, 0)
-            next: i64 := vm.match ({
+            p = methods[j]
+            vm = a.mu_func_value_mold(decls, idx, ty, p.name)
+            prev = m.get(p.name, 0)
+            next: i64 = vm.match ({
                 true  => (prev == 0).match ({
                     true  => 1,
                     false => (prev == 1).then({ 1 }, { 2 }),
@@ -1447,8 +1447,8 @@ mu_index_impl = (
 }
 // method name → 1 iff it is an inherent method AND value-mold on EVERY struct that declares it.
 mu_build_index* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) Map<i64> {
-    seed: i64 := 0 - 1
-    m := of(a, "", seed).expect("check: method-mold index alloc")
+    seed: i64 = 0 - 1
+    m ::= of(a, "", seed).expect("check: method-mold index alloc")
     decls.loop((h, i, d) {
         m = d.match ({
             .DImpl(im) => a.mu_index_impl(decls, idx, m, im),
@@ -1479,7 +1479,7 @@ mu_is_var = (e: Expr) bool {
 // the walk (params up front, each `:=` as the walk passes it, lambda/loop bindings at their arm).
 // A `.MethodCall` names its receiver explicitly, so a like-named local does not shadow it.
 mu_bound_names = (a: MutPtr<Malloc>, bound: Ptr<DeadList>, params: [Param]) Ptr<DeadList> {
-    out := bound
+    out ::= bound
     params.loop((h, i, p) {
         out = a.dead_cons(p.name, out)
     })
@@ -1502,7 +1502,7 @@ mu_call_kind = (mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     })
 }
 mu_arms_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, arms: [ArmData]) i32 {
-    acc := 0
+    acc ::= 0
     arms.loop((h, i, ar) {
         acc = acc.or(a.mu_expr_kind(mvm, bound, ar.body))
     })    // arm body = the arm's VALUE (tail)
@@ -1537,7 +1537,7 @@ mu_exprstmt_kind = (
     e: Ptr<Expr>,
     is_tail: bool,
 ) i32 {
-    head := is_tail.then({ 0 }, { mvm.mu_call_kind(bound, e) })
+    head = is_tail.then({ 0 }, { mvm.mu_call_kind(bound, e) })
     head.or(a.mu_expr_kind(mvm, bound, e))
 }
 mu_stmt_kind = (
@@ -1567,9 +1567,9 @@ mu_stmts_kind = (
     body: [Stmt],
     has_tail: bool,
 ) i32 {
-    acc := 0
-    n := body.len
-    scope := bound
+    acc ::= 0
+    n = body.len
+    scope ::= bound
     body.loop((h, i, st) {
         acc = acc.or(a.mu_stmt_kind(mvm, scope, st, has_tail && i == n - 1))
         scope = st.match ({
@@ -1591,7 +1591,7 @@ mu_func_kind* = (a: MutPtr<Malloc>, mvm: Map<i64>, f: Func) i32 {
     a.mu_body_kind(mvm, a.mu_bound_names(a.dead_nil(), f.params), f.body)
 }
 scope_params* = (a: MutPtr<Malloc>, params: [Param]) Ptr<DeadList> {
-    out := a.dead_nil()
+    out ::= a.dead_nil()
     params.loop((h, i, p) {
         p.ty.is_scope_param_ty().then({
             out = a.dead_cons(p.name, out)
@@ -1680,8 +1680,8 @@ loop_val_escapes = (
     derived: Ptr<DeadList>,
     stmts: [Stmt],
 ) bool {
-    f := false
-    d := derived
+    f ::= false
+    d ::= derived
     stmts.loop((h, i, st) {
         st.match ({
             .Return(r) => {
@@ -1718,8 +1718,8 @@ block_val_escapes = (
     derived: Ptr<DeadList>,
     stmts: [Stmt],
 ) bool {
-    f := false
-    d := derived
+    f ::= false
+    d ::= derived
     stmts.loop((h, i, st) {
         st.match ({
             .Return(r)   => {
@@ -1741,7 +1741,7 @@ escape_step* = (
     derived: Ptr<DeadList>,
     st: Stmt,
 ) Ptr<DeadList> {
-    out := derived
+    out ::= derived
     st.match ({
         .Let(l) => a.let_taints(svars, derived, l.value).then({
             out = a.dead_cons(l.name, derived)
@@ -1794,7 +1794,7 @@ impure_use_in_args = (nm: StringView, args: [Expr]) bool {
 }
 // args EXCEPT index 0 (the getter receiver already accounted for as a pure read).
 impure_use_in_args_from1 = (nm: StringView, args: [Expr]) bool {
-    f := false
+    f ::= false
     args.loop((h, i, ar) {
         (i > 0).then({
             f = nm.impure_use_in_expr(ar.addr()).then({ true }, { f })
@@ -1828,7 +1828,7 @@ impure_use_in_body = (nm: StringView, body: [Stmt]) bool {
 }
 // is `nm` used IMPURELY (discharged/escaped, not a pure getter read) in any statement strictly AFTER k?
 impure_use_after = (nm: StringView, body: [Stmt], k: i32) bool {
-    f := false
+    f ::= false
     body.loop((h, i, st) {
         (i > k).then({
             f = nm.impure_use_in_stmt(st).then({ true }, { f })
@@ -1914,7 +1914,7 @@ sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
 // empty, so M from the (concretely-typed) handle is what resolves the variant. Lenient when NEITHER
 // pins the enum (both void) — the payload-expression descent still applies, so nothing over-rejects.
 sm_variant_decl_mut = (env: Env, mty: Ty, mk: MakeEnumData) bool {
-    ety := is_empty(mk.ty).then({ mty }, { tnamed(mk.ty) })
+    ety = is_empty(mk.ty).then({ mty }, { tnamed(mk.ty) })
     env.decls.mode_of(env.subj_variant_payload(ety, mk.variant)).mode_sendable() == false
 }
 sm_msg_mut = (env: Env, mty: Ty, e: Ptr<Expr>) bool {

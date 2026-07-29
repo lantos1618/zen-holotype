@@ -2,7 +2,8 @@
 { ArmData, Decl, Expr, FieldInit, FnTData, Func, LambdaData, Param, Stmt, Ty } = compiler.ast.ast_types
 { cbuf, arm, arrow_at, bin_at, block, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit,
   gstr_append, gstr_finish, gstr_string, lam_r, member_at, mkenumg, mkstructg_at, sassign_at, sexpr,
-  sidxset_at, sif, slett_at, slit, sret, swhile, tvoid, vref, acquire_or_die, acquire_or_die } = compiler.genc
+  sidxset_at, sif, slett_at, slett_atm, slit, sret, swhile, tvoid, vref, acquire_or_die,
+  acquire_or_die } = compiler.genc
 { gstr_int, map_slice } = compiler.astops
 { DeclIndex, VList, empty_params, is_intrinsic, pbuf, recall, var_bound, vcons, vnil } = compiler.check
 { field_fnt } = compiler.check_inline
@@ -33,7 +34,7 @@ lift_extend* = (a: MutPtr<Malloc>, bound: Ptr<VList>, st: Stmt) Ptr<VList> {
     })
 }
 lift_lamparams* = (a: MutPtr<Malloc>, bound: Ptr<VList>, ps: [Param]) Ptr<VList> {
-    out := bound
+    out ::= bound
     ps.loop((h, i, p) {
         out = a.vcons(p.name, tvoid(), out)
     })
@@ -46,7 +47,7 @@ lift_args_cap = (
     bound: Ptr<VList>,
     xs: [Expr],
 ) bool {
-    found := false
+    found ::= false
     xs.loop((h, i, x) {
         found = found.then({ true }, { a.lift_expr_cap(decls, idx, bound, x.addr()) })
     })
@@ -59,7 +60,7 @@ lift_arms_cap = (
     bound: Ptr<VList>,
     arms: [ArmData],
 ) bool {
-    found := false
+    found ::= false
     arms.loop((h, i, ar) {
         found = found.match ({
             true  => true,
@@ -75,8 +76,8 @@ lift_body_cap = (
     bound: Ptr<VList>,
     body: [Stmt],
 ) bool {
-    found := false
-    b := bound
+    found ::= false
+    b ::= bound
     body.loop((h, i, st) {
         found = found.then({ true }, { a.lift_stmt_cap(decls, idx, b, st) })
         b = a.lift_extend(b, st)
@@ -145,21 +146,21 @@ lift_liftable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaDa
 // put and report the honest error[lambda-value]. Costs nothing real: no src/ function that binds one
 // (`offset`, `addr`) holds a liftable lambda.
 lift_shadow_params = (ps: [Param]) bool {
-    found := false
+    found ::= false
     ps.loop((h, i, p) {
         found = found || p.name.is_intrinsic()
     })
     found
 }
 lift_shadow_arms = (arms: [ArmData]) bool {
-    found := false
+    found ::= false
     arms.loop((h, i, ar) {
         found = found || ar.bind.is_intrinsic() || ar.body.lift_shadow_expr()
     })
     found
 }
 lift_shadow_body = (body: [Stmt]) bool {
-    found := false
+    found ::= false
     body.loop((h, i, st) {
         found = found || st.lift_shadow_stmt()
     })
@@ -201,12 +202,12 @@ lift_shadows_intrinsic = (f: Func) bool {
 // --- the lift transform: replace each liftable lambda (in a field-init / return value) with the name
 //     of a freshly generated top-level fn, collected (with a shared counter) for appending. ---
 lift_name = (a: MutPtr<Malloc>, k: i64) StringView {
-    s := a.gstr_string(24).gstr_append(a, "__lam_")
+    s = a.gstr_string(24).gstr_append(a, "__lam_")
     s.gstr_int(a, k).gstr_finish(a)
 }
 // the (function) type of struct `sty`'s field `fname` — substituted for a generic instance's targs.
 lift_func_of = (a: MutPtr<Malloc>, lm: LambdaData, ft: FnTData, name: StringView) Decl {
-    ps := a.pbuf(lm.params.len)
+    ps ::= a.pbuf(lm.params.len)
     lm.params.loop((h, i, p) {
         ps[i] = param(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }))
     })
@@ -256,8 +257,8 @@ lift_at = (
         .Lambda(lm) => fnt.match ({
             .FnT(ft) => a.lift_liftable(decls, idx, lm).match ({
                 true  => {
-                    k := load_i64(gcp)
-                    nm := a.lift_name(k)
+                    k = load_i64(gcp)
+                    nm = a.lift_name(k)
                     gen[k.to_i32()] = a.lift_func_of(lm, ft, nm)
                     store_i64(gcp, k + 1)
                     a.cenode(vref(nm))
@@ -277,7 +278,7 @@ lift_rw_args = (
     gen: [Decl],
     xs: [Expr],
 ) [Expr] {
-    buf := a.cebuf(xs.len)
+    buf ::= a.cebuf(xs.len)
     xs.loop((h, i, x) {
         buf[i] = load(a.lift_rw_expr(decls, idx, gcp, gen, x.addr()))
     })
@@ -351,7 +352,7 @@ lift_rw_stmt = (
     st: Stmt,
 ) Stmt {
     st.match ({
-        .Let(l)      => slett_at(l.name, l.ty, a.lift_rw_expr(decls, idx, gcp, gen, l.value), l.pos),
+        .Let(l)      => slett_atm(l.name, l.ty, a.lift_rw_expr(decls, idx, gcp, gen, l.value), l.pos, l.mut),
         .Assign(x)   => sassign_at(a.lift_rw_expr(decls, idx, gcp, gen, x.target), a.lift_rw_expr(decls, idx, gcp, gen, x.value), x.pos),
         .Return(r)   => sret(a.lift_at(decls, idx, gcp, gen, fnret, r)),
         .ExprStmt(e) => sexpr(tail.match ({
@@ -372,7 +373,7 @@ lift_rw_body = (
     fnret: Ty,
     body: [Stmt],
 ) [Stmt] {
-    buf := cbuf<Stmt>(a, body.len)
+    buf ::= cbuf<Stmt>(a, body.len)
     body.loop((h, i, st) {
         buf[i] = a.lift_rw_stmt(decls, idx, gcp, gen, fnret, i == body.len - 1, st)
     })
@@ -390,8 +391,8 @@ lift_rw_decl = (
         .DFunc(f) => f.lift_shadows_intrinsic().match ({
             true  => d,
             false => {
-                lo := load_i64(gcp).to_i32()
-                nb := a.lift_rw_body(decls, idx, gcp, gen, f.ret, f.body)
+                lo = load_i64(gcp).to_i32()
+                nb = a.lift_rw_body(decls, idx, gcp, gen, f.ret, f.body)
                 gen.lift_tag_tparams(lo, load_i64(gcp).to_i32(), f.tparams)
                 dfunc(Func(
                     name: f.name,
@@ -407,15 +408,15 @@ lift_rw_decl = (
     })
 }
 lift_lambdas* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
-    gcp: RawPtr<u8> := a.acquire_or_die(8)
+    gcp: RawPtr<u8> = a.acquire_or_die(8)
     store_i64(gcp, 0)
-    gen := cbuf<Decl>(a, 4096)
-    out := cbuf<Decl>(a, decls.len + 4096)
+    gen = cbuf<Decl>(a, 4096)
+    out ::= cbuf<Decl>(a, decls.len + 4096)
     decls.loop((h, i, d) {
         out[i] = a.lift_rw_decl(decls, idx, gcp, gen, d)
     })
-    n := load_i64(gcp)
-    k := decls.len
+    n = load_i64(gcp)
+    k ::= decls.len
     gen.loop((h, i, g) {
         (i < n.to_i32()).then({
             out[k] = g

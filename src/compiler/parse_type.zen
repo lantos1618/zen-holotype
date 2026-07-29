@@ -23,16 +23,16 @@
 // (which the checker then misreported as a position-less type error, or worse, ran wrong).
 // parse_module reads it and plants the `__syntax_error` sentinel decl FIRST, so the validator
 // rejects the module as a parse error (KPARSE). Reset at every parse_module entry.
-parse_failed := 0
+parse_failed ::= 0
 // byte offset of the FIRST parse error that carried one (0 = none recorded). parse_module plants it
 // into the __syntax_error sentinel's value so the KPARSE diagnostic can caret the failing token.
-parse_err_off := 0
+parse_err_off ::= 0
 // kind of the FIRST offset-bearing parse error (0 = generic KPARSE/KVBREAK; 1 = bad-binding). Set with
 // the offset (same first-wins guard) so the sentinel NAME parse_module plants — hence the diagnostic
 // code — matches the offset it carets. A single-`=` top-level binding is ONLY a module alias (ident
 // RHS) or a function (`(` RHS); anything else (`k = 5`) is a malformed value global (use `:=`), which
 // must be a CLEAN error, not silently mis-parsed as a function that swallows the next decl.
-parse_err_kind := 0
+parse_err_kind ::= 0
 // ── the PARSE-ERROR TAXONOMY ─────────────────────────────────────────────────────
 // Every value below is a `parse_err_kind`; parse.sentinel_name maps it to the sentinel decl
 // parse_module plants, and compiler.validate.kinds maps that name to the diagnostic that NAMES WHAT
@@ -48,8 +48,13 @@ PE_EXPR* = () i32 { 5 }    // a token that cannot begin an expression
 PE_DECL* = () i32 { 6 }    // a token that cannot begin a top-level declaration
 PE_INIT* = () i32 { 7 }    // a `:=` with no expression after it — offset = the `:=`
 PE_EOF* = () i32 { 8 }    // end of input in the middle of an expression
-PE_TYPEDASSIGN* = () i32 { 9 }    // a local binding spelled `x: T = v` — a new name binds with `:=`, never `=`
 PE_FIELDDEFAULT* = () i32 { 10 }    // a struct field default that is not a constant — offset = the offending token
+// The local-binding forms commit at token 2 (`x :` / `x ::`), so everything after the mark has a
+// precise expectation to report instead of the old `expected an expression` with the caret parked on
+// the colon: PE_LETTY when the annotation is missing/unparseable, PE_LETEQ when the `=` that binds
+// the value is missing. Both caret the offending token, not the mark.
+PE_LETTY* = () i32 { 11 }    // `x ::` / `x:` with no type after the mark — offset = the token that is not a type
+PE_LETEQ* = () i32 { 12 }    // `x: T <junk>` — the annotation parsed but no `=` follows; offset = that token
 perr_set* = () void { parse_failed = 1 }
 // flag + record the failing token's source offset AND its taxonomy kind (first offset-bearing site
 // wins, so the kind and the offset it carets always describe the SAME failure).
@@ -75,9 +80,9 @@ perr_set_misgen_at* = (off: i32) void { perr_set_kind_at(off, PE_MISGEN()) }
 // line the user never mistyped. The block-opening sites save/restore this anchor (exactly like
 // delim_save/delim_restore), so the EOF sites can caret the `{` that was never closed and the
 // diagnostic NAMES THE LINE THE BLOCK OPENED ON. 0 = no block open (fall back to the EOF position).
-brace_open := 0
+brace_open ::= 0
 bopen_enter* = (off: i32) i32 {
-    prev := brace_open
+    prev = brace_open
     brace_open = off
     prev
 }
@@ -105,8 +110,8 @@ perr_kind_get* = () i32 { parse_err_kind }
 // The cap (400) sits far below the measured overflow point of the tightest path (~1000 nested
 // binary/postfix frames) yet orders of magnitude above any real program's nesting, so it never
 // over-rejects. Reset (with the parse-failure flags) at every parse_module entry. Mirrors `tyargs_end`'s 256 cap.
-parse_depth := 0
-PARSE_DEPTH_CAP := 400
+parse_depth ::= 0
+PARSE_DEPTH_CAP = 400
 pdepth_enter* = () void { parse_depth = parse_depth + 1 }
 pdepth_exit* = () void { parse_depth = parse_depth - 1 }
 // flag + report once we are nested too deep; the caller returns a placeholder instead of recursing.
@@ -127,12 +132,12 @@ pdepth_reset* = () void { parse_depth = 0 }
 // `.Variant` broken onto its own line there is a CONTINUATION of the expression, not a break.
 // Expression descents into open delimiters bump this depth (parse_expr.parse_or_nested); a brace
 // BLOCK re-enters statement level (parse_stmts / parse_block save-0-restore around the body).
-delim_depth := 0
+delim_depth ::= 0
 delim_enter* = () void { delim_depth = delim_depth + 1 }
 delim_exit* = () void { delim_depth = delim_depth - 1 }
 stmt_level* = () bool { delim_depth == 0 }
 delim_save* = () i32 {
-    d := delim_depth
+    d = delim_depth
     delim_depth = 0
     d
 }
@@ -141,7 +146,7 @@ delim_reset* = () void { delim_depth = 0 }
 // byte offset of the `.` of the LAST variant break that FIRED (0 = none). parse.fill_decls consults
 // it: a top-level parse failure exactly AT that dot means the break split the statement there, so
 // the diagnostic can name the newline+`.Uppercase` rule instead of the generic KPARSE message.
-vbreak_off := 0
+vbreak_off ::= 0
 vbreak_note* = (off: i32) void { vbreak_off = off }
 vbreak_get* = () i32 { vbreak_off }
 vbreak_reset* = () void { vbreak_off = 0 }
@@ -152,8 +157,8 @@ vbreak_reset* = () void { vbreak_off = 0 }
 // StructDecls into the module decl list, so the checker + codegen see ordinary named structs.
 // The buffer is (re)allocated per parse_module run; registration is a no-op until then (so the
 // resolver's decl-span probes, which call parse_ty without a buffer, never write through null).
-anon_decls := no_sdecls()
-anon_n := 0
+anon_decls ::= no_sdecls()
+anon_n ::= 0
 no_sdecls = () [StructDecl] { slice(null_ptr(), 0) }
 anon_reset* = (a: MutPtr<Malloc>) void {
     anon_decls = slice(a.acquire_or_die(4096 * sizeof(StructDecl)), 4096)
@@ -161,7 +166,7 @@ anon_reset* = (a: MutPtr<Malloc>) void {
 }
 anon_decls_get* = () [StructDecl] { slice(anon_decls.ptr, anon_n) }
 anon_has = (name: StringView) bool {
-    found := false
+    found ::= false
     anon_decls.loop((h, i, sd) {
         found = (i < anon_n).then({ found || sd.name == name }, { found })
     })
@@ -178,7 +183,7 @@ register_anon* = (name: StringView, fields: [Field]) void {
 // ── type tokens ──────────────────────────────────────────────────────────────────
 is_lbrace* = (src: StringView, t: Token) bool { src.is_op(t, '{') }
 skip_to_brace* = (src: StringView, pos: i32) i32 {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => sc.next,    // stop at EOF (scan returns next==pos there)
         _    => src.is_lbrace(sc.tok).then({ sc.next }, { src.skip_to_brace(sc.next) }),
@@ -187,7 +192,7 @@ skip_to_brace* = (src: StringView, pos: i32) i32 {
 // the byte offset of the `{` that skip_to_brace stops just past (0 = none before EOF) — the anchor
 // an unclosed-block diagnostic carets, so it names the line the block OPENED on.
 lbrace_off* = (src: StringView, pos: i32) i32 {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => 0,
         _    => src.is_lbrace(sc.tok).then({ sc.tok.start }, { src.lbrace_off(sc.next) }),
@@ -272,7 +277,7 @@ TyEnd*: {
 }
 tybuf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire_or_die(sizeof(Ty)), 1) }
 tynode = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
-    buf := a.tybuf()
+    buf ::= a.tybuf()
     buf[0] = t
     buf[0].addr()
 }
@@ -280,7 +285,7 @@ is_lbracket* = (src: StringView, t: Token) bool { src.is_op(t, '[') }
 is_rbracket* = (src: StringView, t: Token) bool { src.is_op(t, ']') }
 parse_ty* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
     pdepth_enter()
-    r := pdepth_over().match ({
+    r = pdepth_over().match ({
         true  => TyEnd(
             ty: tvoid(),
             next: pos,
@@ -291,7 +296,7 @@ parse_ty* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
     r
 }
 parse_ty_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
-    tt := src.scan(pos)    // the head type token
+    tt = src.scan(pos)    // the head type token
     src.is_lbrace(tt.tok).match ({
         true  => a.parse_anon_ty(src, tt.next),
         false => src.is_lbracket(tt.tok).match ({
@@ -311,15 +316,15 @@ parse_ty_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
 }    // { name: T, … } -> a structural anon struct
 take_afields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }    // ( A, T ) R -> FnT (a closure/template param)
 parse_anon_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
-    buf := a.afield_buf()    // Ptr<inner> / MutPtr<inner> / RawPtr<inner> -> inner* (kind from the keyword)
+    buf = a.afield_buf()    // Ptr<inner> / MutPtr<inner> / RawPtr<inner> -> inner* (kind from the keyword)
     // a leaf type, maybe a generic instance N<…>
     // An anonymous struct type `{ name: T, … }` -> a synthesized named struct (structural identity by
     // ordered field names). `pos` is just past the opening `{`. Registers the shape so parse_module hoists
     // its StructDecl, and returns the type as `Named(__anon_…)` so the rest of the pipeline is unchanged.
     // pos just past '{'
-    fe := a.fill_anon_fields(src, pos, buf, 0)
-    fields := buf.take_afields(fe.count)
-    name := a.mangle_anon_in(fields)
+    fe = a.fill_anon_fields(src, pos, buf, 0)
+    fields = buf.take_afields(fe.count)
+    name = a.mangle_anon_in(fields)
     register_anon(name, fields)
     TyEnd(
         ty: tnamed(name),
@@ -330,16 +335,16 @@ parse_anon_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
 // `{_0: T1, _1: T2, …}` (positional fields) so multi-field payloads reuse the existing anon-struct
 // lowering with NO checker/codegen changes. `pos` is just past the '('; returns the type + pos past ')'.
 parse_variant_payload* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
-    buf := a.afield_buf()
-    fe := a.fill_payload_tys(src, pos, buf, 0)
+    buf = a.afield_buf()
+    fe = a.fill_payload_tys(src, pos, buf, 0)
     (fe.count == 1).match ({
         true  => TyEnd(
             ty: buf[0].ty,
             next: fe.next,
         ),
         false => {
-            fields := buf.take_afields(fe.count)    // single payload: the bare type
-            name := a.mangle_anon_in(fields)
+            fields = buf.take_afields(fe.count)    // single payload: the bare type
+            name = a.mangle_anon_in(fields)
             register_anon(name, fields)
             TyEnd(
                 ty: tnamed(name),
@@ -356,9 +361,9 @@ fill_payload_tys = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], 
             next: pos,
         )
     })
-    te := a.parse_ty(src, pos)
+    te = a.parse_ty(src, pos)
     buf[i] = field(a.payload_fname(i), te.ty)
-    after := src.scan(te.next)
+    after = src.scan(te.next)
     src.is_comma(after.tok).match ({
         true  => a.fill_payload_tys(src, after.next, buf, i + 1),
         false => {
@@ -373,7 +378,7 @@ fill_payload_tys = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], 
     })
 }    // past ')'
 fill_anon_fields = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], i: i32) PEnd {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
             perr_set_at(pos)
@@ -400,12 +405,12 @@ fill_anon_field = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], i
             next: pos,
         )
     })
-    nt := src.scan(pos)    // field name
-    nm := a.lexeme(src, nt.tok)
-    colon := src.scan(nt.next)    // ':'
-    te := a.parse_ty(src, colon.next)    // the field type (may be Ptr<…>, nested anon, …)
+    nt = src.scan(pos)    // field name
+    nm = a.lexeme(src, nt.tok)
+    colon = src.scan(nt.next)    // ':'
+    te = a.parse_ty(src, colon.next)    // the field type (may be Ptr<…>, nested anon, …)
     buf[i] = field(nm, te.ty)
-    after := src.scan(te.next)    // ',' / next field / '}'
+    after = src.scan(te.next)    // ',' / next field / '}'
     src.is_comma(after.tok).match ({
         true  => a.fill_anon_fields(src, after.next, buf, i + 1),
         false => is_ident_tok(after.tok).match ({
@@ -420,8 +425,8 @@ fill_anon_field = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], i
 // copy the raw source span `[start, endpos)` into a fresh NUL-terminated string. Used to materialize a
 // QUALIFIED type name (`io.Writer`) verbatim — the `.` and the segments are contiguous in source.
 lexeme_range = (a: MutPtr<Malloc>, src: StringView, start: i32, endpos: i32) StringView {
-    n := endpos - start
-    p := a.acquire_or_die(n + 1)
+    n = endpos - start
+    p = a.acquire_or_die(n + 1)
     n.times((i) { store(offset(p, i), at(src, start + i)) })
     store(offset(p, n), 0)
     cstr(p)
@@ -430,8 +435,8 @@ lexeme_range = (a: MutPtr<Malloc>, src: StringView, start: i32, endpos: i32) Str
 // FINAL ident segment (`io.Vec` → the `Vec` token; its `.next` resumes after it). ITERATIVE so a deep
 // `a.b.c.d` qualifier never recurses per-segment.
 qual_end = (src: StringView, after_name: i32) Scan {
-    last := src.scan(after_name)    // updated to each segment ident as we go
-    cur := after_name
+    last ::= src.scan(after_name)    // updated to each segment ident as we go
+    cur ::= after_name
     @while (src.is_dot(src.scan(cur).tok) && is_ident_tok(src.scan(src.scan(cur).next).tok)) {
         last = src.scan(src.scan(cur).next)    // the ident after this `.`
         cur = last.next
@@ -444,12 +449,12 @@ qual_end = (src: StringView, after_name: i32) Scan {
 parse_leaf_ty = (a: MutPtr<Malloc>, src: StringView, tt: Scan) TyEnd {
     src.is_field_at(tt.next).match ({
         true  => {
-            qe := src.qual_end(tt.next)    // qe.tok = the final qualifier segment ident
-            name := a.lexeme_range(src, tt.tok.start, qe.tok.start + qe.tok.len)    // [start .. end of last ident)
+            qe = src.qual_end(tt.next)    // qe.tok = the final qualifier segment ident
+            name = a.lexeme_range(src, tt.tok.start, qe.tok.start + qe.tok.len)    // [start .. end of last ident)
             a.leaf_after_name(src, name, qe.next, src.scan(qe.next))
         },
         false => {
-            nx := src.scan(tt.next)
+            nx = src.scan(tt.next)
             src.is_langle(nx.tok).match ({
                 true  => a.parse_generic_ty(src, tt, nx.next),
                 false => TyEnd(
@@ -471,7 +476,7 @@ leaf_after_name = (
 ) TyEnd {
     src.is_langle(nx.tok).match ({
         true  => {
-            ta := a.parse_tyargs(src, nx.next)
+            ta = a.parse_tyargs(src, nx.next)
             TyEnd(
                 ty: tgeneric(name, ta.args, a.mangle_str_in(name, ta.args)),
                 next: ta.next,
@@ -488,8 +493,8 @@ TyArgs*: {
     next: i32,
 }
 parse_tyargs* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyArgs {
-    buf := a.ty_buf()    // pos just past '<'
-    ae := a.fill_tyargs(src, pos, buf, 0)
+    buf = a.ty_buf()    // pos just past '<'
+    ae = a.fill_tyargs(src, pos, buf, 0)
     TyArgs(
         args: buf.take_tys(ae.count),
         next: ae.next,
@@ -504,9 +509,9 @@ fill_tyargs = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) 
         )
     })    // `>`-terminated type list
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
-    te := a.parse_ty(src, pos)
+    te = a.parse_ty(src, pos)
     buf[i] = te.ty
-    after := src.scan(te.next)    // ',' or '>'
+    after = src.scan(te.next)    // ',' or '>'
     src.is_comma(after.tok).match ({
         true  => a.fill_tyargs(src, after.next, buf, i + 1),
         false => PEnd(
@@ -516,8 +521,8 @@ fill_tyargs = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) 
     })
 }    // '>' (splits a nested '>>')
 parse_generic_ty = (a: MutPtr<Malloc>, src: StringView, nameTok: Scan, pos: i32) TyEnd {
-    name := a.lexeme(src, nameTok.tok)    // pos just past '<'
-    ta := a.parse_tyargs(src, pos)
+    name = a.lexeme(src, nameTok.tok)    // pos just past '<'
+    ta = a.parse_tyargs(src, pos)
     TyEnd(
         ty: tgeneric(name, ta.args, a.mangle_str_in(name, ta.args)),
         next: ta.next,
@@ -528,7 +533,7 @@ parse_generic_ty = (a: MutPtr<Malloc>, src: StringView, nameTok: Scan, pos: i32)
 ty_buf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire_or_die(256 * sizeof(Ty)), 256) }    // cap 256
 take_tys = (buf: [Ty], n: i32) [Ty] { slice(buf.ptr, n) }
 fill_tys = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     src.is_rparen(sc.tok).match ({
         true  => PEnd(
             count: i,
@@ -546,9 +551,9 @@ fill_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd
             next: pos,
         )
     })
-    te := a.parse_ty(src, pos)    // one parameter type
+    te = a.parse_ty(src, pos)    // one parameter type
     buf[i] = te.ty
-    after := src.scan(te.next)    // ',' or ')'
+    after = src.scan(te.next)    // ',' or ')'
     src.is_comma(after.tok).match ({
         true  => a.fill_tys(src, after.next, buf, i + 1),
         false => {
@@ -565,9 +570,9 @@ fill_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd
     })
 }
 parse_fn_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
-    buf := a.ty_buf()    // pos just past '('
-    pe := a.fill_tys(src, pos, buf, 0)    // param types, pos just past ')'
-    rt := a.parse_ty(src, pe.next)
+    buf = a.ty_buf()    // pos just past '('
+    pe = a.fill_tys(src, pos, buf, 0)    // param types, pos just past ')'
+    rt = a.parse_ty(src, pe.next)
     TyEnd(
         ty: fntype(buf.take_tys(pe.count), a.tynode(rt.ty)),
         next: rt.next,
@@ -585,9 +590,9 @@ ptr_kw_kind = (src: StringView, t: Token) i32 {
     })
 }
 parse_slice_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
-    inner := a.parse_ty(src, pos)    // pos just past '['
+    inner = a.parse_ty(src, pos)    // pos just past '['
     // the element type
-    rb := src.scan(inner.next)
+    rb = src.scan(inner.next)
     TyEnd(
         ty: tslice(a.tynode(inner.ty)),
         next: rb.next,
@@ -602,21 +607,21 @@ slice_kw_kind = (src: StringView, t: Token) i32 {
     src.tok_in(t, "MutSlice").then({ k_mut_ptr() }, { k_ptr() })
 }
 parse_slice_kw_ty = (a: MutPtr<Malloc>, src: StringView, kw: Token, pos: i32) TyEnd {
-    kind := src.slice_kw_kind(kw)    // kw = the Slice/MutSlice keyword; pos just past it
-    lt := src.scan(pos)    // '<'
-    inner := a.parse_ty(src, lt.next)    // the element type (recursive)
-    gt := src.scan(inner.next)
+    kind = src.slice_kw_kind(kw)    // kw = the Slice/MutSlice keyword; pos just past it
+    lt = src.scan(pos)    // '<'
+    inner = a.parse_ty(src, lt.next)    // the element type (recursive)
+    gt = src.scan(inner.next)
     TyEnd(
         ty: tslice_k(a.tynode(inner.ty), kind),
         next: src.gt_resume(gt),
     )
 }    // '>' (or a nested '>>')
 parse_ptr_ty = (a: MutPtr<Malloc>, src: StringView, kw: Token, pos: i32) TyEnd {
-    kind := src.ptr_kw_kind(kw)    // kw = the Ptr/MutPtr/RawPtr keyword; pos just past it
+    kind = src.ptr_kw_kind(kw)    // kw = the Ptr/MutPtr/RawPtr keyword; pos just past it
     // which spelling fired
-    lt := src.scan(pos)    // '<'
-    inner := a.parse_ty(src, lt.next)    // the pointee (recursive)
-    gt := src.scan(inner.next)
+    lt = src.scan(pos)    // '<'
+    inner = a.parse_ty(src, lt.next)    // the pointee (recursive)
+    gt = src.scan(inner.next)
     TyEnd(
         ty: tptr_k(a.tynode(inner.ty), kind),
         next: src.gt_resume(gt),
@@ -630,7 +635,7 @@ PEnd*: {
 is_rparen* = (src: StringView, t: Token) bool { src.is_op(t, ')') }
 is_comma* = (src: StringView, t: Token) bool { src.is_op(t, ',') }
 skip_to_lparen* = (src: StringView, pos: i32) i32 {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
             perr_set_at(pos)    // stop at EOF (scan returns next==pos there)
@@ -642,7 +647,7 @@ skip_to_lparen* = (src: StringView, pos: i32) i32 {
 param_buf* = (a: MutPtr<Malloc>) [Param] { slice(a.acquire_or_die(1024 * sizeof(Param)), 1024) }    // cap 1024
 take_params* = (buf: [Param], n: i64) [Param] { slice(buf.ptr, n) }    // exact length
 fill_params* = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
             perr_set_at(pos)
@@ -663,18 +668,18 @@ fill_params* = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i
 // `...` (a variadic-param marker before the element type). Three consecutive `.` Sym tokens — the
 // lexer never glues them, so detect/skip them token-by-token.
 is_ellipsis = (src: StringView, pos: i32) bool {
-    d1 := src.scan(pos)
+    d1 = src.scan(pos)
     src.is_op(d1.tok, '.').match ({
         true  => {
-            d2 := src.scan(d1.next)
+            d2 = src.scan(d1.next)
             src.is_op(d2.tok, '.').then({ src.is_op(src.scan(d2.next).tok, '.') }, { false })
         },
         false => false,
     })
 }
 ellipsis_skip = (src: StringView, pos: i32) i32 {
-    d1 := src.scan(pos)    // pos at the first `.`; return pos past the third
-    d2 := src.scan(d1.next)
+    d1 = src.scan(pos)    // pos at the first `.`; return pos past the third
+    d2 = src.scan(d1.next)
     src.scan(d2.next).next
 }
 fill_one = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
@@ -686,9 +691,9 @@ fill_one = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) 
             next: pos,
         )
     })
-    nt := src.scan(pos)    // param name
-    nm := a.lexeme(src, nt.tok)
-    colon := src.scan(nt.next)    // ':'
+    nt = src.scan(pos)    // param name
+    nm = a.lexeme(src, nt.tok)
+    colon = src.scan(nt.next)    // ':'
     (irecv_on() && i == 0 && src.is_field_colon(colon.tok) == false).then({
         return a.fill_recv(src, nm, nt.next, buf, i)
     })
@@ -703,9 +708,9 @@ fill_one = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) 
 // inside an impl block: elsewhere an unannotated parameter stays a parse error, and the trait's
 // OTHER parameter types are not in reach here (the trait decl may live in another module, and
 // `Type.impl(mod, …)` names a module, not a trait), so they keep their annotations.
-irecv := 0
+irecv ::= 0
 irecv_enter* = () i32 {
-    prev := irecv
+    prev = irecv
     irecv = 1
     prev
 }
@@ -721,7 +726,7 @@ fill_recv = (
     i: i32,
 ) PEnd {
     buf[i] = param(nm, tvoid())
-    after := src.scan(pos)    // ',' or ')'
+    after = src.scan(pos)    // ',' or ')'
     src.is_comma(after.tok).match ({
         true  => a.fill_params(src, after.next, buf, i + 1),
         false => PEnd(
@@ -754,9 +759,9 @@ fill_fixed = (
     buf: [Param],
     i: i32,
 ) PEnd {
-    te := a.parse_ty(src, tpos)    // the type (may be Ptr<…>)
+    te = a.parse_ty(src, tpos)    // the type (may be Ptr<…>)
     buf[i] = param(nm, te.ty)
-    after := src.scan(te.next)    // ',' or ')'
+    after = src.scan(te.next)    // ',' or ')'
     src.is_comma(after.tok).match ({
         true  => a.fill_params(src, after.next, buf, i + 1),
         false => PEnd(
@@ -775,9 +780,9 @@ fill_variadic = (
     buf: [Param],
     i: i32,
 ) PEnd {
-    te := a.parse_ty(src, src.ellipsis_skip(dotpos))    // the element type T
+    te = a.parse_ty(src, src.ellipsis_skip(dotpos))    // the element type T
     buf[i] = pvariadic(nm, tslice(a.tynode(te.ty)))    // body sees `[T]`
-    after := src.scan(te.next)    // must be ')'
+    after = src.scan(te.next)    // must be ')'
     src.is_comma(after.tok).match ({
         true  => {
             perr_set_at(after.tok.start)
@@ -798,7 +803,7 @@ is_rbrace* = (src: StringView, t: Token) bool { src.is_op(t, '}') }    // ')'
 // this subset `{`/`}` only ever open/close a body, so token scanning suffices.
 skip_block* = (src: StringView, pos: i32) i32 { src.skip_block_d(pos, 1) }
 skip_block_d = (src: StringView, pos: i32, depth: i32) i32 {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
             perr_set_unclosed_at(pos)

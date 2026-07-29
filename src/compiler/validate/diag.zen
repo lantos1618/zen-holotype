@@ -36,7 +36,7 @@ name_errors_merge = (l: NameErrors, r: NameErrors) NameErrors {
 name_error = (env: Env, name: StringView, pos: i32) NameErrors {
     (pos > 0).match ({
         true  => {
-            n := env.var_err(name)
+            n = env.var_err(name)
             NameErrors(
                 count: n,
                 first_pos: (n == 0).then({ 0 }, { pos }),
@@ -47,8 +47,8 @@ name_error = (env: Env, name: StringView, pos: i32) NameErrors {
     })
 }
 name_errors_onearm = (d: CondData) NameErrors {
-    n := d.cond_onearm_err()
-    p := load(d.c).expr_pos()
+    n = d.cond_onearm_err()
+    p = load(d.c).expr_pos()
     NameErrors(
         count: n,
         first_pos: (n == 0).then({ 0 }, { p }),
@@ -56,21 +56,21 @@ name_errors_onearm = (d: CondData) NameErrors {
     )
 }
 name_errors_args = (env: Env, args: [Expr]) NameErrors {
-    acc := name_errors_none()
+    acc ::= name_errors_none()
     args.loop((h, i, ar) {
         acc = acc.name_errors_merge(env.name_errors_expr(ar.addr()))
     })
     acc
 }
 name_errors_inits = (env: Env, inits: [FieldInit]) NameErrors {
-    acc := name_errors_none()
+    acc ::= name_errors_none()
     inits.loop((h, i, fi) {
         acc = acc.name_errors_merge(env.name_errors_expr(fi.value))
     })
     acc
 }
 name_errors_arms = (env: Env, subjty: Ty, arms: [ArmData]) NameErrors {
-    acc := name_errors_none()
+    acc ::= name_errors_none()
     arms.loop((h, i, ar) {
         acc = acc.name_errors_merge(env.a.arm_env(env, subjty, ar).name_errors_expr(ar.body))
     })
@@ -101,7 +101,7 @@ name_errors_expr* = (env: Env, e: Ptr<Expr>) NameErrors {
         .Member(m)      => env.name_errors_expr(m.obj),    // field NAME deferred (h.break_zk etc.)
         .Arrow(ar)      => env.name_errors_expr(ar.obj),
         .Match(m)       => {
-            subjty := env.infer_expr(m.subj)
+            subjty = env.infer_expr(m.subj)
             env.name_errors_expr(m.subj).name_errors_merge(env.name_errors_arms(subjty, m.arms))
         },
         .MakeEnum(mk)   => env.name_errors_expr(mk.payload),
@@ -133,8 +133,8 @@ name_errors_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) NameErrors {
     })
 }
 name_errors_body* = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) NameErrors {
-    acc := name_errors_none()
-    e := env
+    acc ::= name_errors_none()
+    e ::= env
     body.loop((h, i, st) {
         acc = acc.name_errors_merge(a.name_errors_stmt(e, st))
         e = a.extend_env(e, st)
@@ -201,8 +201,11 @@ KEXPECTEXPR* = () i32 { 55 }    // a token that can begin no expression (the par
 KEXPECTDECL* = () i32 { 56 }    // a token that can begin no top-level declaration (the parser's `__expected_decl` sentinel)
 KEXPECTINIT* = () i32 { 57 }    // a `:=` with no expression after it; caret on the `:=` (the parser's `__expected_init` sentinel)
 KEOFINPUT* = () i32 { 58 }    // end of input in the middle of an expression (the parser's `__unexpected_eof` sentinel)
-KBINDOP* = () i32 { 62 }    // a local binding spelled `x: T = v`; `:=` binds a new name and `=` assigns to an existing one, so an annotation must not change the operator (the parser's `__typed_assign` sentinel). Statement-level sibling of KBADBIND
 KFIELDDEFAULT* = () i32 { 63 }    // a struct field default (`total: i64 = 0`) whose value is not a constant — a computed/allocating default would be a hidden per-construction effect (the parser's `__field_default` sentinel)
+KLETTYPE* = () i32 { 62 }    // a local binding's `:`/`::` mark with no type after it (the parser's `__expected_let_type` sentinel)
+KLETEQ* = () i32 { 64 }    // a local binding whose annotation is not followed by the `=` that binds its value (the parser's `__expected_let_eq` sentinel)
+// ── const-by-default ────────────────────────────────────────────────────────────────────────────
+KASSIGNCONST* = () i32 { 65 }    // an assignment to a binding declared WITHOUT the `::` mutability mark. Zen locals are constants unless marked, so this is the whole content of the rule: `x = 0` binds once, `x ::= 0` binds a variable
 Diagnostic*: {
     code: i32,
     kind: StringView,
@@ -221,7 +224,7 @@ CheckDiagnostic*: {
     hint: StringView,
 }
 diagnostic_width_from = (src: StringView, pos: i32, n: i32) i32 {
-    k := n
+    k ::= n
     @while (src.at(pos + k).is_alnum()) {
         k = k + 1
     }
@@ -229,10 +232,10 @@ diagnostic_width_from = (src: StringView, pos: i32, n: i32) i32 {
 }    // iterative — a long identifier/number literal must not recurse per byte to size its caret
 // a string literal carets across its quotes (`"hi"` -> `^~~~`), not just the opening `"`.
 diagnostic_strlit_width = (src: StringView, pos: i32, n: i32) i32 {
-    k := n
-    r := 0 - 1
+    k ::= n
+    r ::= 0 - 1
     @while (r < 0) {
-        b := src.at(pos + k)    // caret width once the closing `"` / line end is reached; <0 while still scanning
+        b = src.at(pos + k)    // caret width once the closing `"` / line end is reached; <0 while still scanning
         (b == 0 || b == '\n').match ({
             true  => {
                 r = k
@@ -255,7 +258,7 @@ diagnostic_span_width* = (src: StringView, pos: i32) i32 {
         false => (src.at(pos) == '"').match ({
             true  => src.diagnostic_strlit_width(pos, 1),
             false => {
-                n := src.diagnostic_width_from(pos, 0)
+                n = src.diagnostic_width_from(pos, 0)
                 (n < 1).then({ 1 }, { n })
             },
         }),
@@ -626,9 +629,9 @@ diag_info = (code: i32) DiagInfo {
     })
     (code == 62).then({
         return DiagInfo(
-            kind: "bad-binding",
-            message: "`x: T = v` is not a binding; `:=` binds a new name, `=` assigns to an existing one, and `:` annotates — adding a type must not change the binding operator",
-            hint: "write `x: T := v` to bind the annotated name; keep a single `=` for assigning a name that already exists (`x = v`)",
+            kind: "parse",
+            message: "expected a type after this binding's `:`/`::` mark, found a token that cannot start one",
+            hint: "a local binding is `x = v` (constant), `x: T = v`, `x ::= v` (mutable), or `x :: T = v`",
         )
     })
     (code == 63).then({
@@ -636,6 +639,20 @@ diag_info = (code: i32) DiagInfo {
             kind: "field-default",
             message: "a struct field default must be a constant (an integer, float, string, or char literal, `true`, or `false`)",
             hint: "a default is re-evaluated at every construction, so a call or an allocation here would be a hidden per-value effect; use a constant, or set the field explicitly at the construction site",
+        )
+    })
+    (code == 64).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "expected `=` after this binding's type annotation",
+            hint: "`=` binds the value: `x: T = v` for a constant, `x :: T = v` for a mutable binding",
+        )
+    })
+    (code == 65).then({
+        return DiagInfo(
+            kind: "assign-const",
+            message: "assignment to a constant binding; a binding declared without the `::` mutability mark is bound once",
+            hint: "mark the declaration mutable — write `x ::= 0` (or `x :: T = 0`) — or bind a new name instead of assigning",
         )
     })
     (code == 47).then({
@@ -717,7 +734,7 @@ KRESERVEDNAME* = () i32 { 36 }    // a top-level fn named after a compiler intri
 // top-level statement inside a function, then per decl across the module. The inner recursion is
 // unchanged (still first-error within a statement / expression), so a single root cause never
 // cascades: after a statement errs we resume at the next statement, after a decl at the next decl.
-// Consumers unpack each entry with the same `& 63` / `(>> 6) - 1` scheme (check_diagnostic_from_source).
+// Consumers unpack each entry with the same `& 127` / `(>> 7) - 1` scheme (check_diagnostic_from_source).
 KDIAG_CAP* = () i32 { 512 }
 // ════════════════════════════════════════════════════════════════════════════════════════
 // ── M5: LEXICAL SCOPE-ESCAPE CHECK ──────────────────────────────────────────────────────

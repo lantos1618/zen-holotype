@@ -16,7 +16,7 @@
 // Type dependency ordering: by-value contained types must emit before their users.
 maxi = (a: i32, b: i32) i32 { (a >= b).then({ a }, { b }) }
 slen = (decls: [Decl]) i32 {
-    n := 0
+    n ::= 0
     decls.loop((h, i, d) {
         n = n + 1
     })
@@ -34,7 +34,7 @@ DepthMemo: {
     d: i32,
 }
 ty_idx = (decls: [Decl], name: StringView) i32 {
-    found := 0 - 1
+    found ::= 0 - 1
     decls.loop((h, i, d) {
         found = is_type_named(d, name).then({ i }, { found })
     })
@@ -48,14 +48,14 @@ slot_depth = (decls: [Decl], cache: [DepthMemo], t: Ty) i32 {
     })
 }
 struct_depth = (decls: [Decl], cache: [DepthMemo], sd: StructDecl) i32 {
-    d := 0
+    d ::= 0
     sd.fields.loop((h, i, f) {
         d = maxi(d, decls.slot_depth(cache, f.ty))
     })
     d
 }
 enum_depth = (decls: [Decl], cache: [DepthMemo], ed: EnumDecl) i32 {
-    d := 0
+    d ::= 0
     ed.variants.loop((h, i, v) {
         d = maxi(d, decls.slot_depth(cache, v.payload))
     })
@@ -70,7 +70,7 @@ decl_body_depth = (decls: [Decl], cache: [DepthMemo], d: Decl) i32 {
 }
 compute_idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
     cache[idx] = DepthMemo(d: 0 - 2)
-    r := decls.decl_body_depth(cache, decls[idx])
+    r = decls.decl_body_depth(cache, decls[idx])
     cache[idx] = DepthMemo(d: r)
     r
 }
@@ -84,7 +84,7 @@ idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
     })
 }
 depth_cache = (a: MutPtr<Malloc>, decls: [Decl]) [DepthMemo] {
-    c := cbuf<DepthMemo>(a, decls.slen())
+    c ::= cbuf<DepthMemo>(a, decls.slen())
     c.loop((h, i, x) {
         c[i] = DepthMemo(d: 0 - 1)
     })
@@ -98,7 +98,7 @@ gen_types_at = (
     cache: [DepthMemo],
     k: i32,
 ) String {
-    out := s
+    out ::= s
     decls.loop((h, i, d) {
         d.match ({
             .DStruct(sd) => (impld.emit_is_trait(d) == false).then({
@@ -123,7 +123,7 @@ gen_types_upto = (
     k: i32,
     n: i32,
 ) String {
-    out := s
+    out ::= s
     (k < n).then({
         out = out.gen_types_at(alloc, decls, impld, cache, k)
         out = out.gen_types_upto(alloc, decls, impld, cache, k + 1, n)
@@ -131,7 +131,7 @@ gen_types_upto = (
     out
 }
 gen_funcs = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
-    out := s
+    out ::= s
     decls.loop((h, i, d) {
         (d.is_template() == false).then({
             d.match ({
@@ -165,10 +165,10 @@ is_const_init = (e: Ptr<Expr>) bool {
     })
 }
 gen_global = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
-    out := s
+    out ::= s
     d.match ({
         .DGlobal(g) => {
-            stor := g.tl.then({ "static _Thread_local " }, { "static " })
+            stor = g.tl.then({ "static _Thread_local " }, { "static " })
             g.init.is_const_init().match ({
                 true  => {
                     out = out
@@ -195,7 +195,7 @@ gen_global = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
     out
 }
 gen_global_inits = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
-    out := s.gstr_append(alloc, "static void zen__init_globals(void) { ")
+    out ::= s.gstr_append(alloc, "static void zen__init_globals(void) { ")
     decls.loop((h, i, d) {
         d.match ({
             .DGlobal(g) => (g.init.is_const_init() == false).then({
@@ -226,7 +226,7 @@ has_sys_main = (decls: [Decl]) bool {
 // the record `Sys`, whose name is `root` or ends `__root` — so the trampoline calls the actual emitted
 // name in both forms. Falls back to bare `root`.
 sys_root_cname = (decls: [Decl]) StringView {
-    nm := "root"
+    nm ::= "root"
     decls.loop((h, i, d) {
         nm = d.match ({
             .DFunc(f) => (f.params.len == 0
@@ -250,16 +250,16 @@ platform_prelude = () StringView {
 }
 // Whole translation unit emission.
 genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
-    decls := a.monomorphize(raw)
+    decls = a.monomorphize(raw)
     a.slx_classify(decls)    // slice-literal escape verdicts, read by gen_call_args below
     // zslice is the EXACT leading HEAD; zfn (fn pointers, A2) and the malloc/memcpy prototypes follow so
     // heap-promoted slice literals (gen_slicelit) link in standalone programs that don't import std.mem
     // (types match std.mem/std.string foreign decls — compatible redecl).
-    s := a
+    s ::= a
         .gstr_string(4096)
         .gstr_append(a, "typedef struct { void* ptr; int64_t len; } zslice; typedef void (*zfn)(void); uint8_t* malloc(int64_t); uint8_t* memcpy(uint8_t*, uint8_t*, int64_t); void abort(void); int64_t write(int32_t, uint8_t*, int64_t); __attribute__((weak)) void __zen_panic_unwind(void){ } static void zen__panic(const char* m){ int64_t n=0; while(m[n]){ n=n+1; } write(2,(uint8_t*)m,n); __zen_panic_unwind(); abort(); } static int64_t zen__divz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } if(b==-1 && a==(-9223372036854775807LL-1)){ zen__panic(\"zen: panic: integer division overflow\\n\"); } return a/b; } static int32_t zen__divz32(int32_t a, int32_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } if(b==-1 && a==(-2147483647-1)){ zen__panic(\"zen: panic: integer division overflow\\n\"); } return a/b; } static int64_t zen__modz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } if(b==-1){ return 0; } return a%b; } static uint64_t zen__udivz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } return a/b; } static uint64_t zen__umodz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } return a%b; } static uint8_t* zen__idx(zslice z, int64_t i, int64_t esz){ if(i<0 || i>=z.len){ zen__panic(\"zen: panic: slice index out of bounds\\n\"); } return (uint8_t*)z.ptr + i*esz; } static uint8_t* zen__salloc(int64_t n){ uint8_t* p = malloc(n); if(!p){ zen__panic(\"zen: panic: out of memory\\n\"); } return p; }")
         .gstr_append(a, platform_prelude())
-    impld := a.impld_set(decls)
+    impld = a.impld_set(decls)
     decls.loop((h, i, d) {
         s = s.gen_fwd(a, impld, d)
     })
@@ -272,7 +272,7 @@ genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
         s = s.gen_global(a, d)
     })
     s = s.gen_global_inits(a, decls)
-    out := s.gen_funcs(a, decls)
+    out = s.gen_funcs(a, decls)
     // Append the niladic `zen_main` trampoline for the `main = (sys: Sys) i32` entry (its user body was
     // emitted as `zen_user_main`). Named here — not in gen_func — so `root` resolves to its real C name
     // even when std.sys.root was reached through a namespace alias (`sys__root`).

@@ -178,7 +178,7 @@ LbRes: {
 }
 // scratch-file ids must be unique across the whole run (a rep re-runs every sweep), so they come
 // from one counter rather than from a per-sweep index.
-lb_gid := 0
+lb_gid ::= 0
 lb_next_gid = () i64 {
     lb_gid = lb_gid + 1
     lb_gid
@@ -186,7 +186,7 @@ lb_next_gid = () i64 {
 // ── the session bytes ─────────────────────────────────────────────────────────────────────────────
 // one framed JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`, byte count from the body.
 lb_frame = (mp: MutPtr<Malloc>, body: StringView) StringView {
-    z: StringView := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    z: StringView = ""    // str-typed lead so the mixed literal/variable array infers as [str]
     mp.zo_join([z, "Content-Length: ", mp.zo_itoa(len(body)), "\r\n\r\n", body])
 }
 LB_INIT = () StringView { "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}" }
@@ -195,18 +195,18 @@ LB_EXIT = () StringView { "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}" }
 // the document URI. Its dirname is where the server resolves sibling imports; this run's private
 // scratch dir has no siblings, so the only imports are std ones resolved from the source root.
 lb_uri = (mp: MutPtr<Malloc>) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "file://", mp.zo_dir(), "/lbdoc.zen"])
 }
 lb_open = (mp: MutPtr<Malloc>, uri: StringView, text: StringView) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"languageId\":\"zen\",\"version\":1,\"text\":\"", text, "\"}}}"])
 }
 // FULL-SYNC didChange: the whole document every time, which is what textDocumentSync:1 asks the
 // client for and therefore what a real editor sends. Each carries a fresh version so nothing the
 // server keys by version can be replayed from cache.
 lb_change = (mp: MutPtr<Malloc>, uri: StringView, text: StringView, ver: i64) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"version\":", mp.zo_itoa(ver), "},\"contentChanges\":[{\"text\":\"", text, "\"}]}}"])
 }
 // a request carrying a cursor position — definition, hover and completion need it; documentSymbol
@@ -219,7 +219,7 @@ lb_posreq = (
     line: i64,
     ch: i64,
 ) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":", mp.zo_itoa(id), ",\"method\":\"textDocument/", method, "\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":", mp.zo_itoa(line), ",\"character\":", mp.zo_itoa(ch), "}}}"])
 }
 // ── the documents ─────────────────────────────────────────────────────────────────────────────────
@@ -244,8 +244,8 @@ lb_posreq = (
 // file opens with import records, and re-reading and re-checking those modules is what a keystroke
 // actually costs.
 lb_doc = (mp: MutPtr<Malloc>, nf: i64) StringView {
-    z: StringView := ""
-    s := mp.new_in().expect("bench: oom")
+    z: StringView = ""
+    s ::= mp.new_in().expect("bench: oom")
     s = s
         .append_in(mp, "{ println } = std.text.fmt\\n{ len } = std.text.str\\n")
         .expect("bench: oom")
@@ -265,12 +265,12 @@ LB_PROBE_CH = () i64 { 4 }
 // a whole scripted session: handshake, didOpen, then `n` requests of ONE kind, then a clean shutdown.
 // `method` is "didChange" for the edit loop, otherwise the textDocument/<method> to repeat.
 lb_session = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, method: StringView, n: i64) StringView {
-    uri := mp.lb_uri()
-    s := mp.new_in().expect("bench: oom")
+    uri = mp.lb_uri()
+    s ::= mp.new_in().expect("bench: oom")
     s = s.append_in(mp, mp.lb_frame(LB_INIT())).expect("bench: oom")
     s = s.append_in(mp, mp.lb_frame(mp.lb_open(uri, doc))).expect("bench: oom")
     n.times((i) {
-        body := (method == "didChange").match ({
+        body = (method == "didChange").match ({
             true  => mp.lb_change(uri, doc, i + 2),
             false => mp.lb_posreq(uri, method, 100 + i, lb_probe_line(nf), LB_PROBE_CH()),
         })
@@ -299,16 +299,16 @@ lb_readnum = (mp: MutPtr<Malloc>, path: StringView) i64 {
 // (.tv) and the extracted number (.rss) are KEPT under the run's scratch dir so any row can be
 // checked by hand against the raw source of its number.
 lb_run = (mp: MutPtr<Malloc>, gid: i64, env: StringView, session: StringView) LbRes {
-    z: StringView := ""
-    inp := mp.zo_idpath("lb", gid, ".in")
-    outp := mp.zo_idpath("lb", gid, ".out")
-    tvp := mp.zo_idpath("lb", gid, ".tv")
-    rssp := mp.zo_idpath("lb", gid, ".rss")
+    z: StringView = ""
+    inp = mp.zo_idpath("lb", gid, ".in")
+    outp = mp.zo_idpath("lb", gid, ".out")
+    tvp = mp.zo_idpath("lb", gid, ".tv")
+    rssp = mp.zo_idpath("lb", gid, ".rss")
     save(inp, session, len(session))
-    cmd := mp.zo_join([z, env, "/usr/bin/time -v ./zen lsp < ", inp, " > ", outp, " 2> ", tvp, "; grep 'Maximum resident' ", tvp, " | tr -dc 0-9 > ", rssp, "; rm -f ", inp, " ", outp])
-    t0 := mono_ns()
+    cmd = mp.zo_join([z, env, "/usr/bin/time -v ./zen lsp < ", inp, " > ", outp, " 2> ", tvp, "; grep 'Maximum resident' ", tvp, " | tr -dc 0-9 > ", rssp, "; rm -f ", inp, " ", outp])
+    t0 = mono_ns()
     shell(mp.zo_cmd(cmd)).expect("bench: shell")
-    t1 := mono_ns()
+    t1 = mono_ns()
     LbRes(
         ns: t1 - t0,
         peak_kb: mp.lb_readnum(rssp),
@@ -317,10 +317,10 @@ lb_run = (mp: MutPtr<Malloc>, gid: i64, env: StringView, session: StringView) Lb
 // does /usr/bin/time -v exist and print the line the rows are parsed from? Checked once, so a box
 // without it reports -1 everywhere instead of silently reporting zeros.
 lb_time_ok = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    gid := lb_next_gid()
-    tvp := mp.zo_idpath("lb", gid, ".tv")
-    rssp := mp.zo_idpath("lb", gid, ".rss")
+    z: StringView = ""
+    gid = lb_next_gid()
+    tvp = mp.zo_idpath("lb", gid, ".tv")
+    rssp = mp.zo_idpath("lb", gid, ".rss")
     shell(mp.zo_cmd(mp.zo_join([z, "/usr/bin/time -v true 2> ", tvp, "; grep 'Maximum resident' ", tvp, " | tr -dc 0-9 > ", rssp]))).expect("bench: shell")
     mp.lb_readnum(rssp) > 0
 }
@@ -336,13 +336,13 @@ DNS_W = () i64 { 13 }
 PEAK_W = () i64 { 10 }
 DB_W = () i64 { 11 }
 lb_sp = (n: i64) i64 {
-    w := to_i64(0)
+    w ::= to_i64(0)
     n.times((i) { w = w + put(" ").n })
     w
 }
 lb_digits = (v: i64) i64 {
-    d := (v < 0).then({ 2 }, { 1 })
-    x := (v < 0).then({ 0 - v }, { v })
+    d ::= (v < 0).then({ 2 }, { 1 })
+    x = (v < 0).then({ 0 - v }, { v })
     x.step_while((r) { r > 9 }, (r) {
         d = d + 1
         r / 10
@@ -353,15 +353,15 @@ lb_digits = (v: i64) i64 {
 // no defined evaluation order in the emitted C, so one `lb_sp(…) + put(…).n` expression could print
 // the number ahead of its padding.
 lb_num = (v: i64, w: i64) i64 {
-    pad := lb_sp(w - lb_digits(v))
+    pad = lb_sp(w - lb_digits(v))
     pad + put("").i(v).n
 }
 lb_text = (t: StringView, w: i64) i64 {
-    head := put(t).n
+    head = put(t).n
     head + lb_sp(w - len(t))
 }
 lb_rtext = (t: StringView, w: i64) i64 {
-    pad := lb_sp(w - len(t))
+    pad = lb_sp(w - len(t))
     pad + put(t).n
 }
 // the first row of a sweep has nothing to be marginal against, and prints `-` rather than a 0 that
@@ -444,20 +444,20 @@ lb_sweep = (
     scale: i64,
     env: StringView,
 ) void {
-    prev_ns := to_i64(0)
-    prev_kb := to_i64(0)
-    prev_n := to_i64(0)
-    base_ns := to_i64(0)
-    base_kb := to_i64(0)
-    base_n := to_i64(0)
-    last_n := to_i64(0)
-    last_ns := to_i64(0)
-    last_kb := to_i64(0)
-    first := true
+    prev_ns ::= to_i64(0)
+    prev_kb ::= to_i64(0)
+    prev_n ::= to_i64(0)
+    base_ns ::= to_i64(0)
+    base_kb ::= to_i64(0)
+    base_n ::= to_i64(0)
+    last_n ::= to_i64(0)
+    last_ns ::= to_i64(0)
+    last_kb ::= to_i64(0)
+    first ::= true
     pts.loop((h, k, p) {
-        n := p * scale
-        r := mp.lb_run(lb_next_gid(), env, mp.lb_session(doc, nf, method, n))
-        step := (n - prev_n < 1).then({ 1 }, { n - prev_n })
+        n = p * scale
+        r = mp.lb_run(lb_next_gid(), env, mp.lb_session(doc, nf, method, n))
+        step = (n - prev_n < 1).then({ 1 }, { n - prev_n })
         lb_row(name, lb_doc_lines(nf), n, r, first, (r.ns - prev_ns) / step, (r.peak_kb - prev_kb) * 1024 / step)
         first.then({
             base_ns = r.ns
@@ -472,7 +472,7 @@ lb_sweep = (
         last_ns = r.ns
         last_kb = r.peak_kb
     })
-    span := (last_n - base_n < 1).then({ 1 }, { last_n - base_n })
+    span = (last_n - base_n < 1).then({ 1 }, { last_n - base_n })
     lb_slope_note(name, base_n, last_n, (last_ns - base_ns) / span, (last_kb - base_kb) * 1024 / span)
 }
 // ── the in-flight RSS trace ───────────────────────────────────────────────────────────────────────
@@ -493,15 +493,15 @@ lb_sweep = (
 // One trace: run the session with the sampler attached, then let awk emit BOTH the human line and,
 // separately, the final sample as a bare number this harness can do arithmetic on.
 lb_trace = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, n: i64) i64 {
-    z: StringView := ""
-    gid := lb_next_gid()
-    inp := mp.zo_idpath("lb", gid, ".in")
-    trp := mp.zo_idpath("lb", gid, ".trace")
-    sump := mp.zo_idpath("lb", gid, ".sum")
-    endp := mp.zo_idpath("lb", gid, ".end")
-    sess := mp.lb_session(doc, nf, "didChange", n)
+    z: StringView = ""
+    gid = lb_next_gid()
+    inp = mp.zo_idpath("lb", gid, ".in")
+    trp = mp.zo_idpath("lb", gid, ".trace")
+    sump = mp.zo_idpath("lb", gid, ".sum")
+    endp = mp.zo_idpath("lb", gid, ".end")
+    sess = mp.lb_session(doc, nf, "didChange", n)
     save(inp, sess, len(sess))
-    cmd := mp.zo_join([z, "./zen lsp < ", inp, " > /dev/null 2>/dev/null & p=$!; while kill -0 $p 2>/dev/null; do awk '{print $2}' /proc/$p/statm 2>/dev/null; sleep 0.02; done > ", trp, "; wait $p; awk '$1>0 {a[++n]=$1*4; if (a[n]>mx) mx=a[n]} END{ if (n==0) { print \"# rss-trace: no samples\"; exit } printf \"# rss-trace didChange=", mp.zo_itoa(n), " samples=%d startKB=%d p25KB=%d p50KB=%d p75KB=%d endKB=%d maxKB=%d\\n\", n, a[1], a[int(n*0.25)+1], a[int(n*0.5)+1], a[int(n*0.75)+1], a[n], mx }' ", trp, " > ", sump, "; awk '$1>0 {e=$1*4} END{ printf \"%d\", e+0 }' ", trp, " > ", endp, "; rm -f ", inp, " ", trp])
+    cmd = mp.zo_join([z, "./zen lsp < ", inp, " > /dev/null 2>/dev/null & p=$!; while kill -0 $p 2>/dev/null; do awk '{print $2}' /proc/$p/statm 2>/dev/null; sleep 0.02; done > ", trp, "; wait $p; awk '$1>0 {a[++n]=$1*4; if (a[n]>mx) mx=a[n]} END{ if (n==0) { print \"# rss-trace: no samples\"; exit } printf \"# rss-trace didChange=", mp.zo_itoa(n), " samples=%d startKB=%d p25KB=%d p50KB=%d p75KB=%d endKB=%d maxKB=%d\\n\", n, a[1], a[int(n*0.25)+1], a[int(n*0.5)+1], a[int(n*0.75)+1], a[n], mx }' ", trp, " > ", sump, "; awk '$1>0 {e=$1*4} END{ printf \"%d\", e+0 }' ", trp, " > ", endp, "; rm -f ", inp, " ", trp])
     shell(mp.zo_cmd(cmd)).expect("bench: shell")
     lb_note(mp.contents_in(sump).match ({
         .Ok(s)  => s,
@@ -513,14 +513,14 @@ lb_trace = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, n: i64) i64 {
 // produced it. The `# rss-creep` line is (longest end − shortest end) / (their request difference) —
 // the residual per didChange, in bytes, at 4 KB resolution.
 lb_trace_sweep = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, pts: [i64], scale: i64) void {
-    base_kb := to_i64(0)
-    base_n := to_i64(0)
-    last_kb := to_i64(0)
-    last_n := to_i64(0)
-    first := true
+    base_kb ::= to_i64(0)
+    base_n ::= to_i64(0)
+    last_kb ::= to_i64(0)
+    last_n ::= to_i64(0)
+    first ::= true
     pts.loop((h, k, p) {
-        n := p * scale
-        kb := mp.lb_trace(doc, nf, n)
+        n = p * scale
+        kb = mp.lb_trace(doc, nf, n)
         first.then({
             base_kb = kb
             base_n = n
@@ -529,7 +529,7 @@ lb_trace_sweep = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, pts: [i64], scal
         last_kb = kb
         last_n = n
     })
-    span := (last_n - base_n < 1).then({ 1 }, { last_n - base_n })
+    span = (last_n - base_n < 1).then({ 1 }, { last_n - base_n })
     put("# rss-creep ")
         .i(base_n)
         .s("->")
@@ -550,18 +550,18 @@ lb_trace_sweep = (mp: MutPtr<Malloc>, doc: StringView, nf: i64, pts: [i64], scal
 // control: it proves the directory is the one the compiler would populate, so a zero first count is
 // evidence the LSP path never consults the cache — not just evidence that nothing was written.
 lb_cache_note = (mp: MutPtr<Malloc>, doc: StringView, nf: i64) void {
-    z: StringView := ""
-    gid := lb_next_gid()
-    inp := mp.zo_idpath("lb", gid, ".in")
-    dir := mp.zo_idpath("lb", gid, ".cache")
-    src := mp.zo_idpath("lb", gid, ".probe.zen")
-    n1p := mp.zo_idpath("lb", gid, ".n1")
-    n2p := mp.zo_idpath("lb", gid, ".n2")
-    sess := mp.lb_session(doc, nf, "didChange", 10)
-    probe := "main = () i32 { 0 }\n"
+    z: StringView = ""
+    gid = lb_next_gid()
+    inp = mp.zo_idpath("lb", gid, ".in")
+    dir = mp.zo_idpath("lb", gid, ".cache")
+    src = mp.zo_idpath("lb", gid, ".probe.zen")
+    n1p = mp.zo_idpath("lb", gid, ".n1")
+    n2p = mp.zo_idpath("lb", gid, ".n2")
+    sess = mp.lb_session(doc, nf, "didChange", 10)
+    probe = "main = () i32 { 0 }\n"
     save(inp, sess, len(sess))
     save(src, probe, len(probe))
-    cmd := mp.zo_join([z, "rm -rf ", dir, "; mkdir -p ", dir, "; ZENC_CACHE_DIR=", dir, " ./zen lsp < ", inp, " > /dev/null 2>&1; find ", dir, " -type f | wc -l | tr -dc 0-9 > ", n1p, "; ZENC_CACHE_DIR=", dir, " ./zen check ", src, " > /dev/null 2>&1; find ", dir, " -type f | wc -l | tr -dc 0-9 > ", n2p, "; rm -rf ", dir, " ", inp])
+    cmd = mp.zo_join([z, "rm -rf ", dir, "; mkdir -p ", dir, "; ZENC_CACHE_DIR=", dir, " ./zen lsp < ", inp, " > /dev/null 2>&1; find ", dir, " -type f | wc -l | tr -dc 0-9 > ", n1p, "; ZENC_CACHE_DIR=", dir, " ./zen check ", src, " > /dev/null 2>&1; find ", dir, " -type f | wc -l | tr -dc 0-9 > ", n2p, "; rm -rf ", dir, " ", inp])
     shell(mp.zo_cmd(cmd)).expect("bench: shell")
     put("# cache: files in a fresh ZENC_CACHE_DIR after an LSP session with 10 didChange = ")
         .i(mp.lb_readnum(n1p))
@@ -573,7 +573,7 @@ lb_cache_note = (mp: MutPtr<Malloc>, doc: StringView, nf: i64) void {
 // ── driver ────────────────────────────────────────────────────────────────────────────────────────
 // a positive integer from the environment, or `dflt` when unset/unparseable/non-positive.
 lb_env_n = (name: StringView, dflt: i64) i64 {
-    e := getEnv(name)
+    e = getEnv(name)
     is_empty(e).match ({
         true  => dflt,
         false => try_parse_int(e).match ({
@@ -602,9 +602,9 @@ LB_KINDS = () [StringView] {
     ["didChange", "definition", "hover", "completion", "semanticTokens/full", "documentSymbol"]
 }
 lb_all = (mp: MutPtr<Malloc>, scale: i64) void {
-    d_small := mp.lb_doc(NF_SMALL())
-    d_med := mp.lb_doc(NF_MED())
-    d_big := mp.lb_doc(NF_BIG())
+    d_small = mp.lb_doc(NF_SMALL())
+    d_med = mp.lb_doc(NF_MED())
+    d_big = mp.lb_doc(NF_BIG())
     // (1) THE HEADLINE: does resident memory grow with the number of edits?
     mp.lb_sweep("change_sweep", NF_SMALL(), d_small, "didChange", LB_SWEEP_PTS(), scale, "")
     mp.lb_trace_sweep(d_small, NF_SMALL(), LB_TRACE_PTS(), scale)
@@ -621,10 +621,10 @@ lb_all = (mp: MutPtr<Malloc>, scale: i64) void {
     mp.lb_sweep("change_nocache", NF_SMALL(), d_small, "didChange", LB_DOC_PTS(), scale, "ZENC_NO_CACHE=1 ")
 }
 main* = () i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    scale := lb_env_n("ZEN_BENCH_SCALE", 1)
-    reps := lb_env_n("ZEN_BENCH_REPS", 1)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    scale = lb_env_n("ZEN_BENCH_SCALE", 1)
+    reps = lb_env_n("ZEN_BENCH_REPS", 1)
     (mp.lb_time_ok() == false).then({
         lb_note("# WARNING: /usr/bin/time -v unavailable — every peakKB and d_B/req reads -1\n")
     })

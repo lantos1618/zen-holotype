@@ -17,7 +17,7 @@
 { times, upto } = std.core.count
 ebuf = (a: MutPtr<Malloc>) [Expr] { slice(a.acquire_or_die(sizeof(Expr)), 1) }
 enode* = (a: MutPtr<Malloc>, v: Expr) Ptr<Expr> {
-    buf := a.ebuf()
+    buf ::= a.ebuf()
     buf[0] = v
     buf[0].addr()
 }
@@ -46,12 +46,12 @@ is_c_kw = (src: StringView, t: Token) bool {
 // pipeline mangles those to `name_zk` (below) so the emitted C is legal; fmt never emits C, so in faithful
 // mode the mangle is DISABLED and `float` formats back to `float`, not `float_zk`. Module-level state
 // (mirrors perr / exports_buf); driver.fmt_render flips it on around the faithful parse, off after.
-gf_faithful_lexeme := false
+gf_faithful_lexeme ::= false
 set_faithful_lexeme* = (b: bool) void { gf_faithful_lexeme = b }
 lexeme* = (a: MutPtr<Malloc>, src: StringView, t: Token) StringCstr {
     (src.is_c_kw(t) && gf_faithful_lexeme.then({ false }, { true })).match ({
         true  => {
-            p := a.acquire_or_die(t.len + 4)
+            p = a.acquire_or_die(t.len + 4)
             src.copy_span(t.start, p, t.len)
             store(offset(p, t.len), '_')
             store(offset(p, t.len + 1), 'z')
@@ -60,7 +60,7 @@ lexeme* = (a: MutPtr<Malloc>, src: StringView, t: Token) StringCstr {
             cstr(p)
         },
         false => {
-            p := a.acquire_or_die(t.len + 1)
+            p = a.acquire_or_die(t.len + 1)
             src.copy_span(t.start, p, t.len)
             store(offset(p, t.len), 0)
             cstr(p)
@@ -70,8 +70,8 @@ lexeme* = (a: MutPtr<Malloc>, src: StringView, t: Token) StringCstr {
 // A float literal carries its source text verbatim into C, but C float syntax rejects `_`; copy the
 // span dropping any digit separators (`1_000.5` -> `1000.5`).
 copy_no_us = (src: StringView, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    p := pos
-    d := di
+    p ::= pos
+    d ::= di
     @while (p < end) {
         (src.at(p) == '_').match ({
             true  => {
@@ -87,8 +87,8 @@ copy_no_us = (src: StringView, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32
     d
 }
 float_lexeme = (a: MutPtr<Malloc>, src: StringView, t: Token) StringView {
-    p := a.acquire_or_die(t.len + 1)
-    n := src.copy_no_us(t.start, t.start + t.len, p, 0)
+    p = a.acquire_or_die(t.len + 1)
+    n = src.copy_no_us(t.start, t.start + t.len, p, 0)
     store(offset(p, n), 0)
     cstr(p)
 }
@@ -105,6 +105,22 @@ is_op1* = (src: StringView, t: Token, c: u8) bool { t.len == 1 && src.is_op(t, c
 is_walrus* = (src: StringView, t: Token) bool {
     t.kind.match ({
         .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == '=',
+        _    => false,
+    })
+}
+// `::` — the MUTABILITY mark of a local binding, and `::=` — its inferred-type form. Zen locals are
+// const by default (`x = e`, `x: T = e`); `::` is the one mark that makes a binding assignable.
+// Both are single Sym tokens (compiler.lex fuses them), so `::` can never be mistaken for the
+// single `:` of a type annotation / struct-literal field / generic bound.
+is_dcolon* = (src: StringView, t: Token) bool {
+    t.kind.match ({
+        .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == ':',
+        _    => false,
+    })
+}
+is_mut_walrus* = (src: StringView, t: Token) bool {
+    t.kind.match ({
+        .Sym => t.len == 3 && src.at(t.start) == ':' && src.at(t.start + 1) == ':',
         _    => false,
     })
 }
@@ -158,20 +174,20 @@ u64max_mod = (base: i32) u64 {
 // zen integer type, so instead of silently wrapping to a wrong value it flags a positioned parse error
 // (caret at `off`, the literal's first byte) and the module is rejected.
 int_acc = (src: StringView, pos: i32, end: i32, base: i32, off: i32) i64 {
-    acc: u64 := 0
-    over := false
-    bu: u64 := base
-    lim: u64 := u64max_div(base)
-    rem: u64 := u64max_mod(base)
-    p := pos
+    acc :: u64 = 0
+    over ::= false
+    bu: u64 = base
+    lim: u64 = u64max_div(base)
+    rem: u64 = u64max_mod(base)
+    p ::= pos
     @while (p < end) {
-        b := src.at(p)
+        b = src.at(p)
         (b == '_').match ({
             true  => {
                 p = p + 1
             },
             false => {
-                d: u64 := (base == 16).then({ b.hex_val() }, { b.digit_val() })
+                d: u64 = (base == 16).then({ b.hex_val() }, { b.digit_val() })
                 (acc > lim || acc == lim && d > rem).then({
                     over = true
                 })
@@ -204,7 +220,7 @@ parse_atom* = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
     // all. Past the cap, set the parse-error flag and return a placeholder WITHOUT recursing further;
     // the enclosing frames simply unwind (each does O(1) work), so there is no hang.
     pdepth_enter()
-    r := pdepth_over().match ({
+    r = pdepth_over().match ({
         true  => PExpr(
             expr: a.enode(lit(0)),
             next: pos,
@@ -215,7 +231,7 @@ parse_atom* = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
     r
 }
 parse_base = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Int   => PExpr(
             expr: a.enode(lit(src.to_int(sc.tok))),
@@ -312,7 +328,7 @@ esc_byte = (e: u8) u8 {
 // type); the store/char-lit sites narrow to the byte, matching how `char_val` carries byte values as i32.
 hex2 = (src: StringView, pos: i32) i32 { src.at(pos).hex_val() * 16 + src.at(pos + 1).hex_val() }
 char_val = (src: StringView, start: i32) i32 {
-    b := src.at(start + 1)
+    b = src.at(start + 1)
     (b == '\\').match ({
         true  => (src.at(start + 2) == 'x').match ({
             true  => src.hex2(start + 3),
@@ -323,8 +339,8 @@ char_val = (src: StringView, start: i32) i32 {
 }    // '\xNN'
 // String literal value: copy content and resolve escapes.
 str_val = (a: MutPtr<Malloc>, src: StringView, t: Token) StringView {
-    p := a.acquire_or_die(t.len)
-    n := src.rawstr_at(t.start).match ({
+    p = a.acquire_or_die(t.len)
+    n = src.rawstr_at(t.start).match ({
         true  => src.copy_raw(src.rawstr_body(t), t.start + t.len - 3, p, 0),
         false => src.unescape(t.start + 1, t.start + t.len - 1, p, 0),
     })
@@ -340,13 +356,13 @@ str_val = (a: MutPtr<Malloc>, src: StringView, t: Token) StringView {
 // opening delimiter is not content. Nothing else is trimmed: indentation inside a raw literal is
 // part of the text, because the whole point of the form is that what you see is what you get.
 rawstr_body = (src: StringView, t: Token) i32 {
-    open := t.start + 3
+    open = t.start + 3
     (src.at(open) == '\n').then({ open + 1 }, { open })
 }
 // Copy [pos, end) verbatim — no escape resolution, so `\n` inside a raw literal stays two bytes.
 // Iterative for the same reason as unescape: a block literal can be large.
 copy_raw = (src: StringView, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    d := di
+    d ::= di
     pos.upto(end, (p) {
         store(offset(dst, d), src.at(p))
         d = d + 1
@@ -357,8 +373,8 @@ copy_raw = (src: StringView, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
 // 50KB string literal is O(n) heap iteration, not O(n) C-stack — per-char recursion overflowed the
 // stack on a long literal). `\xNN` consumes 4 source chars → 1 byte; other `\c` consumes 2 → 1 byte.
 unescape = (src: StringView, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
-    p := pos
-    d := di
+    p ::= pos
+    d ::= di
     @while (p < end) {
         (src.at(p) == '\\').match ({
             true  => (src.at(p + 1) == 'x').match ({
@@ -384,7 +400,7 @@ unescape = (src: StringView, pos: i32, end: i32, dst: RawPtr<u8>, di: i32) i32 {
 }
 // Leading-dot enum constructor; compiler.check fills the enum type.
 parse_ctor = (a: MutPtr<Malloc>, src: StringView, dot: Scan) PExpr {
-    vt := src.scan(dot.next)
+    vt = src.scan(dot.next)
     vt.tok.kind.match ({
         .Ident => a.parse_ctor_named(src, vt),
         _      => a.reject_match(vt.next),
@@ -397,8 +413,8 @@ parse_ctor = (a: MutPtr<Malloc>, src: StringView, dot: Scan) PExpr {
 // break. Without this gate a value-position `.None` before a parenthesized statement fused into a
 // call, silently changing program meaning (surfaced by the formatter round-trip; #53).
 parse_ctor_named = (a: MutPtr<Malloc>, src: StringView, vt: Scan) PExpr {
-    vn := a.lexeme(src, vt.tok)
-    nx := src.scan(vt.next)
+    vn = a.lexeme(src, vt.tok)
+    nx = src.scan(vt.next)
     (src.is_lparen(nx.tok) && src.nl_between(vt.next, nx.tok.start).then({ false }, { true })).match ({
         true  => src.is_rparen(src.scan(nx.next).tok).match ({
             true  => a.parse_ctor_empty(src, vn, nx),
@@ -411,14 +427,14 @@ parse_ctor_named = (a: MutPtr<Malloc>, src: StringView, vt: Scan) PExpr {
     })
 }
 parse_ctor_empty = (a: MutPtr<Malloc>, src: StringView, vn: StringView, lp: Scan) PExpr {
-    rp := src.scan(lp.next)
+    rp = src.scan(lp.next)
     PExpr(
         expr: a.enode(mktag("", vn)),
         next: rp.next,
     )
 }
 parse_ctor_payload = (a: MutPtr<Malloc>, src: StringView, vn: StringView, lp: Scan) PExpr {
-    pl := a.parse_payload_args(src, lp)
+    pl = a.parse_payload_args(src, lp)
     PExpr(
         expr: a.enode(mkenum("", vn, pl.expr)),
         next: pl.next,
@@ -427,9 +443,9 @@ parse_ctor_payload = (a: MutPtr<Malloc>, src: StringView, vn: StringView, lp: Sc
 // Parse the `(a, b, …)` args of a variant constructor into the payload EXPR: one arg is the payload
 // directly; 2+ args become an anon struct `{_0: a, _1: b, …}` matching the multi-field decl synthesis.
 parse_payload_args* = (a: MutPtr<Malloc>, src: StringView, lp: Scan) PExpr {
-    buf := a.finit_buf()
-    pe := a.fill_payload_args(src, lp.next, buf, 0)
-    inits := buf.take_inits(pe.count)
+    buf = a.finit_buf()
+    pe = a.fill_payload_args(src, lp.next, buf, 0)
+    inits = buf.take_inits(pe.count)
     (pe.count == 1).match ({
         true  => PExpr(
             expr: inits[0].value,
@@ -449,9 +465,9 @@ fill_payload_args = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [FieldIn
             next: pos,
         )
     })
-    v := a.parse_or_nested(src, pos)
+    v = a.parse_or_nested(src, pos)
     buf[i] = finit(a.payload_fname(i), v.expr)
-    after := src.scan(v.next)
+    after = src.scan(v.next)
     src.is_comma(after.tok).match ({
         true  => a.fill_payload_args(src, after.next, buf, i + 1),
         false => {

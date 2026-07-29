@@ -25,19 +25,19 @@
 { default } = std.rt
 pa = std.concurrent.pool_actor
 { Context, Receiver } = std.concurrent.pool_actor
-NMSG := 8
+NMSG = 8
 // 1 PB — past x86-64's 128 TB user address space, so the mapping is refused whatever the overcommit
 // policy says, and no memory is touched. Spelled in decimal on purpose: `1 << 55` evaluates to 0 here
 // (the shift is done at i32 width before the i64 binding takes it), which would silently make this
 // "allocate nothing" and pass for the wrong reason.
-HUGE := 1000000000000000
-KEEP := 65536    // drain-slot capacity: 64Ki blocks is far more than any top-chunk remainder
+HUGE = 1000000000000000
+KEEP = 65536    // drain-slot capacity: 64Ki blocks is far more than any top-chunk remainder
 // getrlimit/setrlimit(2). `rlim` points at a two-slot i64 cell — `struct rlimit { rlim_cur; rlim_max }`
 // on LP64. RLIMIT_AS is Linux/x86-64's address-space limit (the CI platform); lowering only rlim_cur
 // leaves the hard limit intact, so the fixture can raise it back afterwards.
 getrlimit = (resource: i32, rlim: RawPtr<u8>) i32
 setrlimit = (resource: i32, rlim: RawPtr<u8>) i32
-RLIMIT_AS := 9
+RLIMIT_AS = 9
 // `Oom` here is DELIBERATE, and it is a regression gate, not decoration. A bare `.Oom` in a nested
 // constructor argument resolves by a flat LAST-DEFINITION-WINS scan over every enum in the program, so
 // this user-side variant name is exactly what stole `ActorError.Oom` out of std.concurrent and broke the
@@ -60,8 +60,8 @@ Worker.impl(Receiver, {
     }
 })
 tramp = (user: RawPtr<u8>, msg: i64) void {
-    a: [Worker] := user.slice(1)
-    b: [Msg] := msg.offset(0).slice(1)
+    a: [Worker] = user.slice(1)
+    b: [Msg] = msg.offset(0).slice(1)
     a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
@@ -98,7 +98,7 @@ huge_cap_is_value = (acc: RawPtr<u8>) bool {
 // WRITTEN to the drained blocks, so this costs address space, not resident pages.
 drain_at = (ks: [RawPtr<u8>], from: i64, size: i64) i64 {
     from + (KEEP - from).times_while((i) {
-        b := malloc(size)
+        b = malloc(size)
         is_null(b).match ({
             true  => false,
             false => {
@@ -116,41 +116,41 @@ drain_all = (ks: [RawPtr<u8>], msgsz: i64) i64 {
     drain_at(ks, drain_at(ks, drain_at(ks, 0, 1048576), 4096), msgsz)
 }
 main = () i32 {
-    acc := assert_nonnull(malloc(8))
+    acc = assert_nonnull(malloc(8))
     store_i64(acc, 0)
-    h := pa.spawn_actor_heap(NMSG + 8, Worker(acc: acc), tramp)
-    p := pool_open(2, 8)
-    r := h.ref_of(p)
+    h = pa.spawn_actor_heap(NMSG + 8, Worker(acc: acc), tramp)
+    p = pool_open(2, 8)
+    r = h.ref_of(p)
     // 1. the SUCCESS path is untouched: every send lands, exactly once.
     NMSG.times((k) { p.send(h, Msg.Inc(1)) })
     p.pool_quiesce_stop()
-    delivered := load_i64(acc)
+    delivered = load_i64(acc)
     // 2. runtime-sized allocations fail as values (portable, no memory consumed).
-    huge_ok := huge_cap_is_value(acc)
+    huge_ok = huge_cap_is_value(acc)
     // 3. exhaust the heap, then the box mallocs must come back as `.Err(.Oom)`.
-    keep := assert_nonnull(malloc(KEEP * 8))
-    ks: [RawPtr<u8>] := keep.slice(KEEP)
-    rl := assert_nonnull(malloc(16))
+    keep = assert_nonnull(malloc(KEEP * 8))
+    ks: [RawPtr<u8>] = keep.slice(KEEP)
+    rl = assert_nonnull(malloc(16))
     getrlimit(RLIMIT_AS, rl)
-    saved := load_i64(rl)
+    saved = load_i64(rl)
     store_i64(rl, 1)    // rlim_cur = 1 byte: no further brk/mmap can succeed
-    limited := setrlimit(RLIMIT_AS, rl) == 0
-    taken := drain_all(ks, sizeof(Msg))
+    limited = setrlimit(RLIMIT_AS, rl) == 0
+    taken = drain_all(ks, sizeof(Msg))
     // the PRECONDITION, asserted rather than assumed: a message-sized request must now genuinely fail.
     // Without this the fixture could pass on a machine where the heap was never exhausted at all.
-    drained := limited && taken < KEEP && is_null(malloc(sizeof(Msg)))
-    send_ok := is_oom(p.send(h, Msg.Inc(1)))
-    reply_ok := is_oom(r.ref_send_msg(Msg.Inc(1)))
+    drained = limited && taken < KEEP && is_null(malloc(sizeof(Msg)))
+    send_ok = is_oom(p.send(h, Msg.Inc(1)))
+    reply_ok = is_oom(r.ref_send_msg(Msg.Inc(1)))
     // 4. give the heap back and prove nothing was enqueued or delivered behind our back.
     taken.times((i) { free(ks[i]) })
     store_i64(rl, saved)
     setrlimit(RLIMIT_AS, rl)
-    quiet := load_i64(acc) == delivered && p.pool_dropped() == 0
+    quiet = load_i64(acc) == delivered && p.pool_dropped() == 0
     free(rl)
     free(keep)
     pa.close(h)
     p.pool_close()
     free(acc)
-    ok := delivered == NMSG && huge_ok && drained && send_ok && reply_ok && quiet
+    ok = delivered == NMSG && huge_ok && drained && send_ok && reply_ok && quiet
     ok.then({ 7 }, { 1 })
 }

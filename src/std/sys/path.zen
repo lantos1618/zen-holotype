@@ -23,7 +23,7 @@
 // ── scanning helpers (byte views) ─────────────────────────────────────────────
 // index of the last '/', or -1 when there is none.
 last_slash = (v: [u8]) i64 {
-    idx: i64 := 0 - 1
+    idx :: i64 = 0 - 1
     v.loop((h, i, b) {
         (b == '/').then({
             idx = i
@@ -33,7 +33,7 @@ last_slash = (v: [u8]) i64 {
 }
 // index of the last '.', or -1 when there is none.
 last_dot = (v: [u8]) i64 {
-    idx: i64 := 0 - 1
+    idx :: i64 = 0 - 1
     v.loop((h, i, b) {
         (b == '.').then({
             idx = i
@@ -43,7 +43,7 @@ last_dot = (v: [u8]) i64 {
 }
 // how many '.' bytes lead `v` (the dotfile prefix): "..foo" -> 2, "foo" -> 0.
 leading_dots = (v: [u8]) i64 {
-    n: i64 := 0
+    n :: i64 = 0
     v.loop((h, i, b) {
         (b == '.').match ({
             true  => {
@@ -68,18 +68,18 @@ is_absolute* = (p: StringView) bool { p.starts_with("/") }
 // basename("/a/b/c") == "c"; basename("abc") == "abc"; basename("/a/b/") == "" (trailing-slash rule);
 // basename("/") == "".
 basename* = (p: StringView) StringView {
-    v := p.view()
-    i := v.last_slash()
+    v = p.view()
+    i = v.last_slash()
     cstr(v.ptr.offset(i + 1))
 }
 // the extension INCLUDING the dot, from the last '.' in the basename to the end; "" when there is none.
 // A leading dot is a dotfile marker, not an extension. Zero-copy suffix view.
 // ext("f.tar.gz") == ".gz"; ext("f.") == "."; ext(".bashrc") == ""; ext("noext") == "".
 ext* = (p: StringView) StringView {
-    b := p.basename()
-    bv := b.view()
-    ld := bv.leading_dots()
-    k := bv.last_dot()
+    b = p.basename()
+    bv = b.view()
+    ld = bv.leading_dots()
+    k = bv.last_dot()
     (k > ld).then({ cstr(bv.ptr.offset(k)) }, { "" })
 }
 // ── allocating (Result<StringView, IoError>) ─────────────────────────────────
@@ -87,12 +87,12 @@ ext* = (p: StringView) StringView {
 // dirname("/a/b/c") == "/a/b"; dirname("/a") == "/"; dirname("/") == "/"; dirname("abc") == "";
 // dirname("a/b/") == "a/b".
 dirname_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
-    v := p.view()
-    i := v.last_slash()
+    v = p.view()
+    i = v.last_slash()
     (i < 0).match ({
         true  => a.substr_in(p, 0, 0),
         false => {
-            j := v.back_over_slashes(i)
+            j = v.back_over_slashes(i)
             (j == 0).then({ a.substr_in(p, 0, 1) }, { a.substr_in(p, 0, j) })
         },
     })
@@ -100,8 +100,8 @@ dirname_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
 dirname* = (a: Allocator, p: StringView) Result<StringView, IoError> { a.dirname_in(p) }
 // the basename with its extension removed. stem("dir/f.tar.gz") == "f.tar"; stem(".bashrc") == ".bashrc".
 stem_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
-    b := p.basename()
-    n := b.len() - p.ext().len()
+    b = p.basename()
+    n = b.len() - p.ext().len()
     a.substr_in(b, 0, n)
 }
 stem* = (a: Allocator, p: StringView) Result<StringView, IoError> { a.stem_in(p) }
@@ -112,7 +112,7 @@ sb_ends_slash = (sb: String) bool {
     (sb.len == 0).match ({
         true  => false,
         false => {
-            bv: [u8] := sb.ptr.slice(sb.len)
+            bv: [u8] = sb.ptr.slice(sb.len)
             bv[sb.len - 1] == '/'
         },
     })
@@ -123,24 +123,24 @@ join_fold = (a: Allocator, parts: [StringView], i: i64, acc: String) Result<Stri
     (i >= parts.len).match ({
         true  => ok(acc),
         false => {
-            p := parts[i]
+            p = parts[i]
             p.is_absolute().match ({
                 true  => {
                     // an absolute part RESTARTS the accumulation, so `acc` is dead here — free it
                     // before the fresh builder, or every reset leaks the discarded prefix.
                     acc.free_in(a)
-                    fresh := a.new_in().or_return()
-                    nacc := fresh.append_in(a, p).or_return()
+                    fresh = a.new_in().or_return()
+                    nacc = fresh.append_in(a, p).or_return()
                     a.join_fold(parts, i + 1, nacc)
                 },
                 false => (acc.sb_empty() || acc.sb_ends_slash()).match ({
                     true  => {
-                        nacc := acc.append_in(a, p).or_return()
+                        nacc = acc.append_in(a, p).or_return()
                         a.join_fold(parts, i + 1, nacc)
                     },
                     false => {
-                        withsep := acc.append_in(a, "/").or_return()
-                        nacc := withsep.append_in(a, p).or_return()
+                        withsep = acc.append_in(a, "/").or_return()
+                        nacc = withsep.append_in(a, p).or_return()
                         a.join_fold(parts, i + 1, nacc)
                     },
                 }),
@@ -151,8 +151,8 @@ join_fold = (a: Allocator, parts: [StringView], i: i64, acc: String) Result<Stri
 // join path components with '/'. join(["a","b","c"]) == "a/b/c"; an absolute component resets:
 // join(["a","/b"]) == "/b"; join([]) == "".
 join_in* = (a: Allocator, parts: [StringView]) Result<StringView, IoError> {
-    acc := a.new_in().or_return()
-    full := a.join_fold(parts, 0, acc).or_return()
+    acc = a.new_in().or_return()
+    full = a.join_fold(parts, 0, acc).or_return()
     full.finish_in(a).match ({
         .Ok(done) => ok(done),
         .Err(e)   => err(e),
@@ -176,8 +176,8 @@ norm_build = (
     (k >= top).match ({
         true  => ok(sb),
         false => {
-            sep := a.sep_before(sb, k).or_return()
-            withc := sep.append_in(a, parts[keep[k]]).or_return()
+            sep = a.sep_before(sb, k).or_return()
+            withc = sep.append_in(a, parts[keep[k]]).or_return()
             a.norm_build(parts, keep, k + 1, top, withc)
         },
     })
@@ -186,11 +186,11 @@ norm_build = (
 // normalize("") == "."; normalize("/") == "/". A leading '..' is kept on a relative path
 // (normalize("a/../../b") == "../b") but dropped at an absolute root (normalize("/..") == "/").
 normalize_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
-    abs := p.is_absolute()
-    parts := a.split(p, '/')
-    z: i64 := 0
-    keep: [i64] := a.nbuf(z, parts.len)
-    top: i64 := 0
+    abs = p.is_absolute()
+    parts = a.split(p, '/')
+    z: i64 = 0
+    keep :: [i64] = a.nbuf(z, parts.len)
+    top :: i64 = 0
     parts.loop((h, i, comp) {
         ((comp.len() == 0 || comp == ".") == false).then({
             (comp == "..").match ({
@@ -210,14 +210,14 @@ normalize_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
             })
         })
     })
-    sb0 := a.new_in().or_return()
-    seeded_r: Result<String, IoError> := abs.then({ sb0.append_in(a, "/") }, { ok(sb0) })
-    seeded := seeded_r.or_return()
-    full := a.norm_build(parts, keep, 0, top, seeded).or_return()
-    need_dot := top == 0 && abs.then({ false }, { true })
-    ended_r: Result<String, IoError> := need_dot.then({ full.append_in(a, ".") }, { ok(full) })
-    ended := ended_r.or_return()
-    out: Result<StringView, IoError> := ended.finish_in(a).match ({
+    sb0 = a.new_in().or_return()
+    seeded_r: Result<String, IoError> = abs.then({ sb0.append_in(a, "/") }, { ok(sb0) })
+    seeded = seeded_r.or_return()
+    full = a.norm_build(parts, keep, 0, top, seeded).or_return()
+    need_dot = top == 0 && abs.then({ false }, { true })
+    ended_r: Result<String, IoError> = need_dot.then({ full.append_in(a, ".") }, { ok(full) })
+    ended = ended_r.or_return()
+    out: Result<StringView, IoError> = ended.finish_in(a).match ({
         .Ok(done) => ok(done),
         .Err(e)   => err(e),
     })

@@ -25,10 +25,10 @@
 { Arena } = std.mem.arena
 pa = std.concurrent.pool_actor
 { Context, Receiver } = std.concurrent.pool_actor
-PERMSG := 2000
-SCAP := 256
-CHUNK := 64
-WORKERS := 3
+PERMSG = 2000
+SCAP = 256
+CHUNK = 64
+WORKERS = 3
 Msg*: Work(i64) | Boom(i64)
 Worker*: {
     scratch: MutPtr<Arena>,
@@ -38,15 +38,15 @@ Worker.impl(Receiver, {
     receive = (w: MutPtr<Worker>, ctx: Context<Msg>) void {
         ctx.msg.match ({
             .Work(n) => {
-                p := w.scratch.bump(CHUNK)
+                p = w.scratch.bump(CHUNK)
                 (is_null(p) == false).then({
                     atomic_add_i64(w.ok, 1)
                 })
             },
             .Boom(n) => {
-                hit := w.scratch.bump(CHUNK)    // allocate into scratch FIRST (off advances to CHUNK)
+                hit = w.scratch.bump(CHUNK)    // allocate into scratch FIRST (off advances to CHUNK)
                 (is_null(hit) == false).then({
-                    g := 100 / n    // n == 0 → integer divide by zero → PANIC (worker catches it)
+                    g = 100 / n    // n == 0 → integer divide by zero → PANIC (worker catches it)
                     atomic_add_i64(w.ok, g)
                 })
             },
@@ -54,8 +54,8 @@ Worker.impl(Receiver, {
     }
 })    // unreached on panic
 tramp = (user: RawPtr<u8>, msg: i64) void {
-    a: [Worker] := user.slice(1)
-    b: [Msg] := msg.offset(0).slice(1)
+    a: [Worker] = user.slice(1)
+    b: [Msg] = msg.offset(0).slice(1)
     a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
@@ -66,32 +66,32 @@ send_work = (p: MutPtr<Pool>, h: pa.PooledHandle<Worker>, k: i64) void {
     })
 }
 main = () i32 {
-    ok := assert_nonnull(malloc(8))
+    ok = assert_nonnull(malloc(8))
     store_i64(ok, 0)
-    sc0 := pa.new_scratch(SCAP)
-    sc1 := pa.new_scratch(SCAP)
-    sc2 := pa.new_scratch(SCAP)
-    h0 := pa.spawn_actor_scratch_heap(PERMSG + 16, Worker(
+    sc0 = pa.new_scratch(SCAP)
+    sc1 = pa.new_scratch(SCAP)
+    sc2 = pa.new_scratch(SCAP)
+    h0 = pa.spawn_actor_scratch_heap(PERMSG + 16, Worker(
         scratch: sc0,
         ok: ok,
     ), tramp, sc0)
-    h1 := pa.spawn_actor_scratch_heap(16, Worker(
+    h1 = pa.spawn_actor_scratch_heap(16, Worker(
         scratch: sc1,
         ok: ok,
     ), tramp, sc1)
-    h2 := pa.spawn_actor_scratch_heap(PERMSG + 16, Worker(
+    h2 = pa.spawn_actor_scratch_heap(PERMSG + 16, Worker(
         scratch: sc2,
         ok: ok,
     ), tramp, sc2)
-    p := pool_open(WORKERS, 16)
+    p = pool_open(WORKERS, 16)
     send_work(p, h0, 0)
     p.send(h1, Msg.Boom(0))    // ONE poison message → the middle actor panics after touching its scratch
     send_work(p, h2, 0)
     p.pool_quiesce_stop()
-    got := load_i64(ok)
-    bomb_used := sc1.used()    // 0 iff the crash-path reset reclaimed the panicking behavior's scratch
-    s0_used := sc0.used()
-    s2_used := sc2.used()
+    got = load_i64(ok)
+    bomb_used = sc1.used()    // 0 iff the crash-path reset reclaimed the panicking behavior's scratch
+    s0_used = sc0.used()
+    s2_used = sc2.used()
     pa.close(h0)
     pa.close(h1)
     pa.close(h2)

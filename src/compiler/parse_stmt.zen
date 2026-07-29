@@ -5,18 +5,18 @@
 //
 // Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
 { Stmt, Expr, ArmData } = compiler.ast.ast_types
-{ cbuf, slet, slet_at, slett_at, sassign_at, sidxset_at, swhile, sret, sexpr, vref, eindex, bin_at,
-  member_at, tvoid, acquire_or_die, acquire_or_die } = compiler.genc
+{ cbuf, slet, slet_at, slett_at, slett_atm, sassign_at, sidxset_at, swhile, sret, sexpr, vref,
+  eindex, bin_at, member_at, tvoid, acquire_or_die, acquire_or_die } = compiler.genc
 { comp_tmp_name } = compiler.mangle
 { Token, scan } = compiler.lex
 { at } = std.text.ascii
 { Malloc } = std.mem.alloc
-{ enode, is_op, is_op1, is_walrus, lexeme, op_str, parse_atom } = compiler.parse_atom
+{ enode, is_dcolon, is_mut_walrus, is_op, is_op1, is_walrus, lexeme, op_str, parse_atom } = compiler.parse_atom
 { is_dot, parse_or_nested } = compiler.parse_postfix
 { is_field_colon } = compiler.parse_primary
 { parse_or } = compiler.parse_expr
 { is_lbracket, is_rbracket, is_rbrace, lbrace_off, skip_to_brace, skip_to_lparen, tok_eq, parse_ty,
-  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, PE_INIT, PE_TYPEDASSIGN, bopen_enter,
+  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, PE_INIT, PE_LETTY, PE_LETEQ, bopen_enter,
   bopen_exit, pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
 // ── statement sequence: zero or more `name := expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
@@ -37,37 +37,47 @@ scons_val = (h: Stmt, t: Ptr<SList>) SList {
 }
 slbuf = (a: MutPtr<Malloc>) [SList] { slice(a.acquire_or_die(sizeof(SList)), 1) }
 slnode = (a: MutPtr<Malloc>, v: SList) Ptr<SList> {
-    buf := a.slbuf()
+    buf ::= a.slbuf()
     buf[0] = v
     buf[0].addr()
 }
 snil = (a: MutPtr<Malloc>) Ptr<SList> { a.slnode(snil_val()) }
 scons = (a: MutPtr<Malloc>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
-is_let_here = (src: StringView, pos: i32) bool {
-    sc := src.scan(pos)
+// ── local bindings: CONST BY DEFAULT ───────────────────────────────────────────────────────────
+// Four forms, three independently optional marks — `::` marks MUTABILITY, `:` introduces the TYPE,
+// `=` binds the VALUE:
+//     x = 0            constant, type inferred
+//     x: T = 0         constant, type written
+//     x ::= 0          mutable,  type inferred
+//     x :: T = 0       mutable,  type written
+// A binding STATEMENT is therefore an Ident followed by one of `:` `::` `::=` (plus the retired
+// `:=`, kept until the migration completes). `x = 0` is NOT recognized here: it is parsed as an
+// assignment and turned into a constant binding by compiler.passes.declbind, which is the only
+// stage that knows whether `x` is already in scope.
+//
+// The classifier commits on TOKEN 2 — O(1), with no speculative type parse. The old typed-let
+// predicate ran a full recursive `parse_ty` just to CLASSIFY (allocating a type buffer and, through
+// parse_anon_ty → register_anon, writing into a global registry) and `parse_typed_let_stmt` then
+// parsed the very same type a second time. At statement position an Ident followed by `:` can only
+// begin a declaration — an anonymous struct literal is decided before parse_stmts ever runs
+// (compiler.parse_primary.looks_anon_struct) and begins with `{`, not with a name.
+is_binding_here = (src: StringView, pos: i32) bool {
+    sc = src.scan(pos)
     sc.tok.kind.match ({
-        .Ident => src.is_walrus(src.scan(sc.next).tok),
+        .Ident => src.is_binding_mark(src.scan(sc.next).tok),
         _      => false,
     })
 }
-// a TYPED let `name : Type :=` — an Ident, a single ':', a type, then ':='. The `=` spelling is
-// classified here TOO so it gets the rule-naming diagnostic below instead of a mis-parse (fuzz #9);
-// see check_bind_op. Top-level globals already require `:=` (parse.decl_is_typed_global).
-is_typed_let_here = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
-    sc := src.scan(pos)
+is_binding_mark = (src: StringView, t: Token) bool {
+    src.is_field_colon(t) || src.is_dcolon(t) || src.is_mut_walrus(t) || src.is_walrus(t)
+}
+// can this token begin a TYPE? A name (`i32`, `Ptr<T>`), a `[T]` slice, a `{ a: T }` anonymous
+// struct, or a `(A) R` function type. Anything else after a binding's `:`/`::` is PE_LETTY.
+ty_starts_at = (src: StringView, pos: i32) bool {
+    sc = src.scan(pos)
     sc.tok.kind.match ({
-        .Ident => {
-            colon := src.scan(sc.next)
-            src.is_field_colon(colon.tok).match ({
-                true  => {
-                    te := a.parse_ty(src, colon.next)    // consume the type; te.next lands at ':=' or '='
-                    op := src.scan(te.next)
-                    src.is_walrus(op.tok) || src.is_op1(op.tok, '=')
-                },
-                false => false,
-            })
-        },
-        _      => false,
+        .Ident => true,
+        _      => src.is_lbracket(sc.tok) || src.is_op1(sc.tok, '{') || src.is_op1(sc.tok, '('),
     })
 }
 // Skip a place-expression suffix: a chain of `.field` and `[index]` postfixes after the head ident, so
@@ -75,7 +85,7 @@ is_typed_let_here = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
 // same chain for the real LHS, and gen_expr lowers an Index target to the same valid C lvalue a read
 // produces (`((elem*)(seq).ptr)[idx]`), so sassign stores through it directly.
 skip_place = (src: StringView, pos: i32) i32 {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     src.is_dot(sc.tok).match ({
         true  => src.skip_place(src.scan(sc.next).next),
         false => src.is_lbracket(sc.tok).match ({
@@ -85,7 +95,7 @@ skip_place = (src: StringView, pos: i32) i32 {
     })
 }    // `.field` -> skip the dot and the field name
 is_set_here = (src: StringView, pos: i32) bool {
-    sc := src.scan(pos)    // `[ … ]` -> skip past the matching ']'
+    sc = src.scan(pos)    // `[ … ]` -> skip past the matching ']'
     sc.tok.kind.match ({
         .Ident => src.is_op1(src.scan(src.skip_place(sc.next)).tok, '='),
         _      => false,
@@ -93,7 +103,7 @@ is_set_here = (src: StringView, pos: i32) bool {
 }    // ident (.field | [i])* '='
 // is there a `name[…] =` at `pos`? (an Ident, a '[', past the matching ']', then a single `=`)
 skip_brackets = (src: StringView, pos: i32) i32 {
-    sc := src.scan(pos)    // pos just past '['; returns pos past ']'
+    sc = src.scan(pos)    // pos just past '['; returns pos past ']'
     sc.tok.kind.match ({
         .Eof => {
             perr_set_at(pos)
@@ -103,7 +113,7 @@ skip_brackets = (src: StringView, pos: i32) i32 {
     })
 }
 is_idxset_here = (src: StringView, pos: i32) bool {
-    nt := src.scan(pos)
+    nt = src.scan(pos)
     nt.tok.kind.match ({
         .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({
             true  => src.is_op1(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok, '='),
@@ -131,7 +141,7 @@ is_compound_op = (src: StringView, t: Token) bool {
 }
 // `name[…] OP=` — an Ident, a '[', past the matching ']', then a compound-assign op.
 is_compound_idxset_here = (src: StringView, pos: i32) bool {
-    nt := src.scan(pos)
+    nt = src.scan(pos)
     nt.tok.kind.match ({
         .Ident => src.is_lbracket(src.scan(nt.next).tok).match ({
             true  => src.is_compound_op(src.scan(src.skip_brackets(src.scan(nt.next).next)).tok),
@@ -142,7 +152,7 @@ is_compound_idxset_here = (src: StringView, pos: i32) bool {
 }
 // `name (.field | [i])* OP=` — a place expression then a compound-assign op (the non-index case).
 is_compound_set_here = (src: StringView, pos: i32) bool {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Ident => src.is_compound_op(src.scan(src.skip_place(sc.next)).tok),
         _      => false,
@@ -157,9 +167,9 @@ is_return_kw* = (src: StringView, t: Token) bool {
     })
 }
 is_return_here = (src: StringView, pos: i32) bool {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     src.is_return_kw(sc.tok).match ({
-        true  => src.is_walrus(src.scan(sc.next).tok).match ({
+        true  => src.is_binding_mark(src.scan(sc.next).tok).match ({
             true  => false,
             false => src.is_op1(src.scan(sc.next).tok, '=').then({ false }, { true }),
         }),
@@ -168,24 +178,21 @@ is_return_here = (src: StringView, pos: i32) bool {
 }
 // what kind of statement begins at `pos` — classified ONCE (a priority chain of the `…_here`
 // predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
-SKind: SLet | SLetT | SIdx | SSet | SCIdx | SCSet | SWhile | SRet | SExpr
-stmt_kind = (a: MutPtr<Malloc>, src: StringView, pos: i32) SKind {
-    a.is_typed_let_here(src, pos).match ({
-        true  => .SLetT,
-        false => src.is_let_here(pos).match ({
-            true  => .SLet,
-            false => src.is_idxset_here(pos).match ({
-                true  => .SIdx,
-                false => src.is_set_here(pos).match ({
-                    true  => .SSet,
-                    false => src.is_compound_idxset_here(pos).match ({
-                        true  => .SCIdx,
-                        false => src.is_compound_set_here(pos).match ({
-                            true  => .SCSet,
-                            false => src.is_while_here(pos).match ({
-                                true  => .SWhile,
-                                false => src.is_return_here(pos).then({ .SRet }, { .SExpr }),
-                            }),
+SKind: SLet | SIdx | SSet | SCIdx | SCSet | SWhile | SRet | SExpr
+stmt_kind = (src: StringView, pos: i32) SKind {
+    src.is_binding_here(pos).match ({
+        true  => .SLet,
+        false => src.is_idxset_here(pos).match ({
+            true  => .SIdx,
+            false => src.is_set_here(pos).match ({
+                true  => .SSet,
+                false => src.is_compound_idxset_here(pos).match ({
+                    true  => .SCIdx,
+                    false => src.is_compound_set_here(pos).match ({
+                        true  => .SCSet,
+                        false => src.is_while_here(pos).match ({
+                            true  => .SWhile,
+                            false => src.is_return_here(pos).then({ .SRet }, { .SExpr }),
                         }),
                     }),
                 }),
@@ -201,8 +208,8 @@ parse_stmts = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
     // consumed as a one-token bad statement) would overflow the C stack. Past the cap, stop the list
     // (perr already set) — the same effect as reaching the body's end.
     pdepth_enter()
-    d := delim_save()    // a body is STATEMENT level even inside an open delimiter (a lambda/block arg)
-    r := pdepth_over().then({ a.snil() }, { a.parse_stmts_inner(src, pos) })
+    d = delim_save()    // a body is STATEMENT level even inside an open delimiter (a lambda/block arg)
+    r = pdepth_over().then({ a.snil() }, { a.parse_stmts_inner(src, pos) })
     delim_restore(d)
     pdepth_exit()
     r
@@ -210,9 +217,8 @@ parse_stmts = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
 parse_stmts_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
     src.at_body_end(pos).match ({
         true  => a.snil(),
-        false => a.stmt_kind(src, pos).match ({
+        false => src.stmt_kind(pos).match ({
             .SLet   => a.parse_let_stmt(src, pos),    // an empty body `{ }` (a void no-op) — no statements
-            .SLetT  => a.parse_typed_let_stmt(src, pos),
             .SIdx   => a.parse_idxset_stmt(src, pos),
             .SSet   => a.parse_set_stmt(src, pos),
             .SCIdx  => a.parse_comp_idxset_stmt(src, pos),
@@ -225,20 +231,20 @@ parse_stmts_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
 }
 // `name[i] = value` — an index assignment. The element type is left void; compiler.check fills it.
 parse_idxset_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
-    nt := src.scan(pos)    // the array name
-    name := a.lexeme(src, nt.tok)
-    lb := src.scan(nt.next)    // '['
-    ie := a.parse_or_nested(src, lb.next)    // the index
-    rb := src.scan(ie.next)    // ']'
-    eq := src.scan(rb.next)    // '='
-    v := a.parse_or(src, eq.next)    // the value
+    nt = src.scan(pos)    // the array name
+    name = a.lexeme(src, nt.tok)
+    lb = src.scan(nt.next)    // '['
+    ie = a.parse_or_nested(src, lb.next)    // the index
+    rb = src.scan(ie.next)    // ']'
+    eq = src.scan(rb.next)    // '='
+    v = a.parse_or(src, eq.next)    // the value
     a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), v.expr, nt.tok.start), a.parse_stmts(src, v.next))
 }
 parse_set_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
-    start := src.scan(pos).tok.start
-    lhs := a.parse_atom(src, pos)    // the lvalue target: a Var `x` or a Member chain `p.x.y`
-    eq := src.scan(lhs.next)    // '='
-    v := a.parse_or(src, eq.next)    // value
+    start = src.scan(pos).tok.start
+    lhs = a.parse_atom(src, pos)    // the lvalue target: a Var `x` or a Member chain `p.x.y`
+    eq = src.scan(lhs.next)    // '='
+    v = a.parse_or(src, eq.next)    // value
     a.scons(sassign_at(lhs.expr, v.expr, start), a.parse_stmts(src, v.next))
 }
 // ── single-evaluation guard for compound places ─────────────────────────────────
@@ -298,10 +304,10 @@ PlaceRw: {
 place_hoist = (a: MutPtr<Malloc>, e: Ptr<Expr>, start: i32, k: i32, lets: Ptr<SList>) PlaceRw {
     e.match ({
         .Index(ix) => {
-            b := a.place_hoist(ix.seq, start, k, lets)
+            b = a.place_hoist(ix.seq, start, k, lets)
             ix.idx.has_call().match ({
                 true  => {
-                    tmp := a.comp_tmp_name(start, b.k)
+                    tmp = a.comp_tmp_name(start, b.k)
                     PlaceRw(
                         e: a.enode(eindex(b.e, a.enode(vref(tmp)), ix.elem)),
                         lets: a.scons(slet(tmp, ix.idx), b.lets),
@@ -316,7 +322,7 @@ place_hoist = (a: MutPtr<Malloc>, e: Ptr<Expr>, start: i32, k: i32, lets: Ptr<SL
             })
         },
         .Member(m) => {
-            b := a.place_hoist(m.obj, start, k, lets)
+            b = a.place_hoist(m.obj, start, k, lets)
             PlaceRw(
                 e: a.enode(member_at(b.e, m.field, m.pos)),
                 lets: b.lets,
@@ -334,18 +340,18 @@ place_hoist = (a: MutPtr<Malloc>, e: Ptr<Expr>, start: i32, k: i32, lets: Ptr<SL
 // so the two index expressions are independent AST (no shared node); a call-bearing index is bound
 // to a hidden temp first so it evaluates ONCE. Reuses sidxset_at, like parse_idxset_stmt.
 comp_idxset_desugar = (a: MutPtr<Malloc>, src: StringView, pos: i32) CompDes {
-    nt := src.scan(pos)    // the array name
-    name := a.lexeme(src, nt.tok)
-    lb := src.scan(nt.next)    // '['
-    ie := a.parse_or_nested(src, lb.next)    // the index (store target)
-    rb := src.scan(ie.next)    // ']'
-    op := src.scan(rb.next)    // the `OP=` token
-    ops := src.at(op.tok.start).op_str()
-    v := a.parse_or(src, op.next)    // rhs
+    nt = src.scan(pos)    // the array name
+    name = a.lexeme(src, nt.tok)
+    lb = src.scan(nt.next)    // '['
+    ie = a.parse_or_nested(src, lb.next)    // the index (store target)
+    rb = src.scan(ie.next)    // ']'
+    op = src.scan(rb.next)    // the `OP=` token
+    ops = src.at(op.tok.start).op_str()
+    v = a.parse_or(src, op.next)    // rhs
     ie.expr.has_call().match ({
         true  => {
-            tmp := a.comp_tmp_name(nt.tok.start, 0)
-            cur := a.enode(eindex(a.enode(vref(name)), a.enode(vref(tmp)), tvoid()))
+            tmp = a.comp_tmp_name(nt.tok.start, 0)
+            cur = a.enode(eindex(a.enode(vref(name)), a.enode(vref(tmp)), tvoid()))
             CompDes(
                 lets: a.scons(slet(tmp, ie.expr), a.snil()),
                 stmt: sidxset_at(a.enode(vref(name)), a.enode(vref(tmp)), tvoid(), a.enode(bin_at(ops, cur, v.expr, op.tok.start)), nt.tok.start),
@@ -353,7 +359,7 @@ comp_idxset_desugar = (a: MutPtr<Malloc>, src: StringView, pos: i32) CompDes {
             )
         },
         false => {
-            cur := a.enode(eindex(a.enode(vref(name)), a.parse_or_nested(src, lb.next).expr, tvoid()))
+            cur = a.enode(eindex(a.enode(vref(name)), a.parse_or_nested(src, lb.next).expr, tvoid()))
             CompDes(
                 lets: a.snil(),
                 stmt: sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), a.enode(bin_at(ops, cur, v.expr, op.tok.start)), nt.tok.start),
@@ -363,7 +369,7 @@ comp_idxset_desugar = (a: MutPtr<Malloc>, src: StringView, pos: i32) CompDes {
     })
 }
 parse_comp_idxset_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
-    d := a.comp_idxset_desugar(src, pos)
+    d = a.comp_idxset_desugar(src, pos)
     a.comp_prefix(d, a.parse_stmts(src, d.next))
 }
 // `place OP= rhs`  →  `place = place OP rhs` (non-index lvalue). parse_atom is pure, so reading the
@@ -371,16 +377,16 @@ parse_comp_idxset_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SLis
 // A place whose index sub-exprs contain calls goes through place_hoist instead — twice, once per
 // copy (the second walk mints the same temp names and its duplicate lets are discarded).
 comp_set_desugar = (a: MutPtr<Malloc>, src: StringView, pos: i32) CompDes {
-    start := src.scan(pos).tok.start
-    lhs := a.parse_atom(src, pos)    // store target (Var or Member chain)
-    cur := a.parse_atom(src, pos)    // identical copy, the left operand
-    op := src.scan(lhs.next)    // the `OP=` token
-    ops := src.at(op.tok.start).op_str()
-    v := a.parse_or(src, op.next)    // rhs
+    start = src.scan(pos).tok.start
+    lhs = a.parse_atom(src, pos)    // store target (Var or Member chain)
+    cur = a.parse_atom(src, pos)    // identical copy, the left operand
+    op = src.scan(lhs.next)    // the `OP=` token
+    ops = src.at(op.tok.start).op_str()
+    v = a.parse_or(src, op.next)    // rhs
     lhs.expr.has_call().match ({
         true  => {
-            t := a.place_hoist(lhs.expr, start, 0, a.snil())    // target copy + the hoist lets
-            o := a.place_hoist(cur.expr, start, 0, a.snil())
+            t = a.place_hoist(lhs.expr, start, 0, a.snil())    // target copy + the hoist lets
+            o = a.place_hoist(cur.expr, start, 0, a.snil())
             CompDes(
                 lets: t.lets,
                 stmt: sassign_at(t.e, a.enode(bin_at(ops, o.e, v.expr, op.tok.start)), start),
@@ -395,14 +401,14 @@ comp_set_desugar = (a: MutPtr<Malloc>, src: StringView, pos: i32) CompDes {
     })
 }
 parse_comp_set_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
-    d := a.comp_set_desugar(src, pos)
+    d = a.comp_set_desugar(src, pos)
     a.comp_prefix(d, a.parse_stmts(src, d.next))
 }
 // a `:=` with nothing left to bind: the very next token CLOSES the enclosing construct (`}` `)` `]`
 // `,`) or the file ends. Zen has no statement terminator, so `x :=` followed by a value on the NEXT
 // LINE is a legal binding — only these closers prove the initializer is genuinely absent.
 init_missing = (src: StringView, pos: i32) bool {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => true,
         _    => src.is_rbrace(sc.tok)
@@ -411,58 +417,76 @@ init_missing = (src: StringView, pos: i32) bool {
             || src.is_op1(sc.tok, ')'),
     })
 }
-parse_let_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
-    nt := src.scan(pos)    // the bound name
-    name := a.lexeme(src, nt.tok)
-    at := src.scan(nt.next)    // ':='
-    src.init_missing(at.next).then({
-        perr_set_kind_at(at.tok.start, PE_INIT())
-    })    // caret the `:=` that binds nothing
-    v := a.parse_or(src, at.next)    // value (full expression, incl. comparison)
-    a.scons(slet_at(name, v.expr, nt.tok.start), a.parse_stmts(src, v.next))
-}    // … then the rest of the body
-// ONE spelling per job: `:=` binds a new name, `=` assigns to an existing one, `:` annotates. The
-// three marks are orthogonal and compose, so an annotation must not change the binding operator —
-// `x: T = v` is rejected (error[bad-binding]) rather than accepted as a second spelling of `x: T := v`.
-check_bind_op = (src: StringView, op: Token) void {
-    (src.is_walrus(op) == false).then({
-        perr_set_kind_at(op.start, PE_TYPEDASSIGN())
+// ONE parser for all four binding forms, shared by the statement list (parse_let_stmt) and by
+// loop/if block bodies (block_let), so the two dispatch families cannot drift apart.
+LetParse*: {
+    st: Stmt,
+    next: i32,
+}
+parse_binding* = (a: MutPtr<Malloc>, src: StringView, pos: i32) LetParse {
+    nt = src.scan(pos)    // the bound name
+    name = a.lexeme(src, nt.tok)
+    mk = src.scan(nt.next)    // the mark: `::=` / `::` / `:` (or the retired `:=`)
+    // inferred-type forms — the value follows the mark directly. Both are MUTABLE: `::=` says so,
+    // and the retired `:=` was unconditionally mutable.
+    (src.is_mut_walrus(mk.tok) || src.is_walrus(mk.tok)).then({
+        src.init_missing(mk.next).then({
+            perr_set_kind_at(mk.tok.start, PE_INIT())
+        })    // caret the mark that binds nothing
+        v = a.parse_or(src, mk.next)
+        return LetParse(
+            st: slett_atm(name, tvoid(), v.expr, nt.tok.start, true),
+            next: v.next,
+        )
+    })    // value (full expression, incl. comparison)
+    // annotated forms: `x :: T = v` (mutable) / `x: T = v` (constant) / the retired `x: T := v`.
+    // We are already committed to a declaration, so every later token has a precise expectation.
+    mut = src.is_dcolon(mk.tok)
+    (src.ty_starts_at(mk.next) == false).then({
+        perr_set_kind_at(src.scan(mk.next).tok.start, PE_LETTY())
     })
-}
-// `name : Type := value` — annotation is parsed, checked, and drives inference.
-parse_typed_let_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
-    nt := src.scan(pos)
-    name := a.lexeme(src, nt.tok)
-    colon := src.scan(nt.next)    // ':'
-    te := a.parse_ty(src, colon.next)    // type annotation; te.next lands at ':='/'='
-    op := src.scan(te.next)
-    src.check_bind_op(op.tok)
-    v := a.parse_or(src, op.next)    // value
-    a.scons(slett_at(name, te.ty, v.expr, nt.tok.start), a.parse_stmts(src, v.next))
-}
+    te = a.parse_ty(src, mk.next)    // the annotation, parsed ONCE
+    op = src.scan(te.next)
+    legacy = src.is_walrus(op.tok)
+    (src.is_op1(op.tok, '=') || legacy).match ({
+        true  => src.init_missing(op.next).then({
+            perr_set_kind_at(op.tok.start, PE_INIT())
+        }),
+        false => perr_set_kind_at(op.tok.start, PE_LETEQ()),
+    })
+    v = a.parse_or(src, op.next)
+    LetParse(
+        st: slett_atm(name, te.ty, v.expr, nt.tok.start, mut || legacy),
+        next: v.next,
+    )
+}    // value
+parse_let_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+    b = a.parse_binding(src, pos)
+    a.scons(b.st, a.parse_stmts(src, b.next))
+}    // … then the rest of the body
 // the final expression of a body is its return; a non-final expression (something else
 // follows before the closing `}`) is a bare statement, evaluated for effect (e.g. `f()`).
 at_body_end = (src: StringView, pos: i32) bool {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => true,
         _    => src.is_rbrace(sc.tok),
     })
 }
 parse_ret_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
-    r := a.parse_or(src, pos)
+    r = a.parse_or(src, pos)
     src.at_body_end(r.next).match ({
         true  => a.scons(sret(r.expr), a.snil()),
         false => a.scons(sexpr(r.expr), a.parse_stmts(src, r.next)),
     })
 }    // final expression -> return
 parse_return_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
-    kw := src.scan(pos)    // a bare expr statement
+    kw = src.scan(pos)    // a bare expr statement
     // an EARLY `return <expr>` statement: the `return` keyword, then a value, then the rest of the body.
     // Produces the same Return Stmt as a trailing expression, but here it can sit mid-body (e.g. inside
     // a nested match arm) — genc emits `return expr;`, which actually leaves the enclosing function.
     // the 'return' keyword
-    r := a.parse_or(src, kw.next)    // the returned value
+    r = a.parse_or(src, kw.next)    // the returned value
     a.scons(sret(r.expr), a.parse_stmts(src, r.next))
 }
 // ── @while loops ─────────────────────────────────────────────────────────────────
@@ -479,7 +503,7 @@ is_while_kw = (src: StringView, t: Token) bool {
     })
 }
 is_while_here = (src: StringView, pos: i32) bool {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     src.is_at(sc.tok).then({ src.is_while_kw(src.scan(sc.next).tok) }, { false })
 }
 // a parsed `@while`: the While statement + where it ends (just past the closing `}`)
@@ -488,14 +512,14 @@ WhileEnd: {
     next: i32,
 }
 parse_while = (a: MutPtr<Malloc>, src: StringView, pos: i32) WhileEnd {
-    at := src.scan(pos)    // '@'
-    wk := src.scan(at.next)    // 'while'
-    lp := src.skip_to_lparen(wk.next)    // pos just past '('
-    c := a.parse_or_nested(src, lp)    // condition (stops at ')') — inside the open '('
-    rp := src.scan(c.next)    // ')'
-    bstart := src.skip_to_brace(rp.next)    // pos just past '{'
-    prev := bopen_enter(src.lbrace_off(rp.next))    // anchor this `{` for the unclosed-block diagnostic
-    blk := a.parse_block(src, bstart)
+    at = src.scan(pos)    // '@'
+    wk = src.scan(at.next)    // 'while'
+    lp = src.skip_to_lparen(wk.next)    // pos just past '('
+    c = a.parse_or_nested(src, lp)    // condition (stops at ')') — inside the open '('
+    rp = src.scan(c.next)    // ')'
+    bstart = src.skip_to_brace(rp.next)    // pos just past '{'
+    prev = bopen_enter(src.lbrace_off(rp.next))    // anchor this `{` for the unclosed-block diagnostic
+    blk = a.parse_block(src, bstart)
     bopen_exit(prev)
     WhileEnd(
         stmt: swhile(c.expr, a.materialize(blk.list)),
@@ -504,7 +528,7 @@ parse_while = (a: MutPtr<Malloc>, src: StringView, pos: i32) WhileEnd {
 }    // statements until '}'
 // the top-level statement form: a While, then the rest of the function body
 parse_while_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
-    w := a.parse_while(src, pos)
+    w = a.parse_while(src, pos)
     a.scons(w.stmt, a.parse_stmts(src, w.next))
 }
 // a loop-body block: statements until `}` (no return). Returns the list + pos past `}`.
@@ -518,8 +542,8 @@ parse_block* = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
     // the Eof case. The bail consumes no token, but the caller re-dispatches from a position that advances
     // by a full cap's worth of nesting each outer pass, so the retry chain stays shallow and terminates.
     pdepth_enter()
-    d := delim_save()    // a brace block re-enters STATEMENT level (see parse_type.delim_depth)
-    r := pdepth_over().match ({
+    d = delim_save()    // a brace block re-enters STATEMENT level (see parse_type.delim_depth)
+    r = pdepth_over().match ({
         true  => BlockEnd(
             list: a.snil(),
             next: pos,
@@ -531,7 +555,7 @@ parse_block* = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
     r
 }
 parse_block_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
             perr_set_unclosed_at(pos)
@@ -552,9 +576,8 @@ parse_block_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
 // same flat dispatch as parse_stmts, but a body has no trailing-return rule — `SExpr` is a bare
 // statement. An explicit `return <expr>` (SRet) IS allowed inside a block (a guard arm's body).
 block_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    a.stmt_kind(src, pos).match ({
+    src.stmt_kind(pos).match ({
         .SLet   => a.block_let(src, pos),
-        .SLetT  => a.block_typed_let(src, pos),
         .SIdx   => a.block_idxset(src, pos),    // buf[i] = v  inside a loop/if body
         .SSet   => a.block_set(src, pos),
         .SCIdx  => a.block_comp_idxset(src, pos),    // buf[i] += v
@@ -565,67 +588,50 @@ block_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
     })
 }    // a bare expression statement (e.g. putchar(b))
 block_return = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    kw := src.scan(pos)    // 'return'
-    r := a.parse_or(src, kw.next)    // the returned value
-    rest := a.parse_block(src, r.next)
+    kw = src.scan(pos)    // 'return'
+    r = a.parse_or(src, kw.next)    // the returned value
+    rest = a.parse_block(src, r.next)
     BlockEnd(
         list: a.scons(sret(r.expr), rest.list),
         next: rest.next,
     )
 }
-block_typed_let = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    nt := src.scan(pos)
-    name := a.lexeme(src, nt.tok)
-    colon := src.scan(nt.next)    // ':'
-    te := a.parse_ty(src, colon.next)    // type annotation
-    op := src.scan(te.next)    // ':='
-    src.check_bind_op(op.tok)
-    v := a.parse_or(src, op.next)
-    rest := a.parse_block(src, v.next)
-    BlockEnd(
-        list: a.scons(slett_at(name, te.ty, v.expr, nt.tok.start), rest.list),
-        next: rest.next,
-    )
-}
 block_idxset = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    nt := src.scan(pos)    // the array name
-    name := a.lexeme(src, nt.tok)
-    lb := src.scan(nt.next)    // '['
-    ie := a.parse_or_nested(src, lb.next)    // index
-    rb := src.scan(ie.next)    // ']'
-    eq := src.scan(rb.next)    // '='
-    v := a.parse_or(src, eq.next)    // value
-    rest := a.parse_block(src, v.next)
+    nt = src.scan(pos)    // the array name
+    name = a.lexeme(src, nt.tok)
+    lb = src.scan(nt.next)    // '['
+    ie = a.parse_or_nested(src, lb.next)    // index
+    rb = src.scan(ie.next)    // ']'
+    eq = src.scan(rb.next)    // '='
+    v = a.parse_or(src, eq.next)    // value
+    rest = a.parse_block(src, v.next)
     BlockEnd(
         list: a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), v.expr, nt.tok.start), rest.list),
         next: rest.next,
     )
 }
 block_expr = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    e := a.parse_or(src, pos)    // a bare expression, evaluated for effect
-    rest := a.parse_block(src, e.next)
+    e = a.parse_or(src, pos)    // a bare expression, evaluated for effect
+    rest = a.parse_block(src, e.next)
     BlockEnd(
         list: a.scons(sexpr(e.expr), rest.list),
         next: rest.next,
     )
 }
 block_let = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    nt := src.scan(pos)
-    name := a.lexeme(src, nt.tok)
-    at := src.scan(nt.next)    // ':='
-    v := a.parse_or(src, at.next)
-    rest := a.parse_block(src, v.next)
+    b = a.parse_binding(src, pos)
+    rest = a.parse_block(src, b.next)
     BlockEnd(
-        list: a.scons(slet_at(name, v.expr, nt.tok.start), rest.list),
+        list: a.scons(b.st, rest.list),
         next: rest.next,
     )
 }
 block_set = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    start := src.scan(pos).tok.start
-    lhs := a.parse_atom(src, pos)    // the lvalue target (Var or Member chain)
-    eq := src.scan(lhs.next)    // '='
-    v := a.parse_or(src, eq.next)
-    rest := a.parse_block(src, v.next)
+    start = src.scan(pos).tok.start
+    lhs = a.parse_atom(src, pos)    // the lvalue target (Var or Member chain)
+    eq = src.scan(lhs.next)    // '='
+    v = a.parse_or(src, eq.next)
+    rest = a.parse_block(src, v.next)
     BlockEnd(
         list: a.scons(sassign_at(lhs.expr, v.expr, start), rest.list),
         next: rest.next,
@@ -633,8 +639,8 @@ block_set = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
 }
 // compound `name[i] OP= rhs` inside a block — the same desugar as parse_comp_idxset_stmt
 block_comp_idxset = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    d := a.comp_idxset_desugar(src, pos)
-    rest := a.parse_block(src, d.next)
+    d = a.comp_idxset_desugar(src, pos)
+    rest = a.parse_block(src, d.next)
     BlockEnd(
         list: a.comp_prefix(d, rest.list),
         next: rest.next,
@@ -642,16 +648,16 @@ block_comp_idxset = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
 }
 // compound `place OP= rhs` inside a block — the same desugar as parse_comp_set_stmt
 block_comp_set = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    d := a.comp_set_desugar(src, pos)
-    rest := a.parse_block(src, d.next)
+    d = a.comp_set_desugar(src, pos)
+    rest = a.parse_block(src, d.next)
     BlockEnd(
         list: a.comp_prefix(d, rest.list),
         next: rest.next,
     )
 }
 block_while = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
-    w := a.parse_while(src, pos)
-    rest := a.parse_block(src, w.next)
+    w = a.parse_while(src, pos)
+    rest = a.parse_block(src, w.next)
     BlockEnd(
         list: a.scons(w.stmt, rest.list),
         next: rest.next,
@@ -677,7 +683,7 @@ sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
 // a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
 // materialize a statement cons-list into a heap [Stmt] (counted, then filled in order)
 materialize* = (a: MutPtr<Malloc>, stmts: Ptr<SList>) [Stmt] {
-    body := cbuf<Stmt>(a, stmts.scount())
+    body = cbuf<Stmt>(a, stmts.scount())
     body.sfill(stmts, 0)
     body
 }

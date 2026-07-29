@@ -53,7 +53,7 @@
 { Result, panic } = std.core.result
 { Ring } = std.concurrent.ring
 { Arena } = std.mem.arena
-QUANTUM := 64    // max messages an actor runs per turn before yielding the worker (fairness)
+QUANTUM = 64    // max messages an actor runs per turn before yielding the worker (fairness)
 // CHECKED ABORT for the pool's own single-owner INFRASTRUCTURE blocks (the Pool block, the initial
 // run-queue ring, per-worker stats, the pthread handle/arg cells). Those live behind
 // `pool_open() MutPtr<Pool>` — a signature with no error channel — so an OOM there cannot be a value
@@ -107,8 +107,8 @@ ActorError*: MailboxFull | Oom
 // success payload of a send: the number of messages enqueued (always 1 today — mirrors std.io.file's
 // `Result<i64, IoError>` convention where the Ok channel carries a "count of units that landed", since
 // Zen has no first-class unit/void value to spell `Result<void, _>`).
-SENT_ONE := 1
-STDERR_FD := 2    // fd 2 for the "actor marked dead" note (mirrors std.core.result's panic framing)
+SENT_ONE = 1
+STDERR_FD = 2    // fd 2 for the "actor marked dead" note (mirrors std.core.result's panic framing)
 // PER-ACTOR PANIC ISOLATION (bootstrap/zenrt.c). Run `behavior(user, msg)` under a thread-local setjmp
 // catch installed for the duration of THIS call only; returns 0 if it returned normally, 1 if it panicked
 // (div0/OOB/null/explicit — genc's zen__panic longjmp'd back). A panic OUTSIDE a pool worker (main, the
@@ -225,7 +225,7 @@ pool_spawn_scratch_rt* = (
     art: Rt,
     scratch: MutPtr<Arena>,
 ) RawPtr<u8> {
-    raw := pool_try_spawn_scratch_rt(user, mbcap, behavior, art, scratch)
+    raw = pool_try_spawn_scratch_rt(user, mbcap, behavior, art, scratch)
     is_null(raw).match ({
         true  => {
             panic("pool: actor block allocation failed")
@@ -249,8 +249,8 @@ pool_try_spawn_scratch_rt* = (
     scratch: MutPtr<Arena>,
 ) RawPtr<u8> {
     mark_spawned()    // latch the rt.set_default guard: the process default is now frozen (workers read it)
-    ma := Malloc(_: 0)
-    mbuf := malloc(mbcap * 8)
+    ma = Malloc(_: 0)
+    mbuf = malloc(mbcap * 8)
     is_null(mbuf).match ({
         true  => null_ptr(),
         false => new_in(ma.addr(), PoolActor(
@@ -293,7 +293,7 @@ pool_actor_ref* = (raw: RawPtr<u8>) RawPtr<u8> {
 // LAST reference and frees the block + the mailbox it owns + its mutex — exactly once, no UAF, no leak.
 pool_actor_unref* = (raw: RawPtr<u8>) void {
     (atomic_add_i64(raw, 0 - 1) == 0).then({
-        a := actor_view(raw)
+        a = actor_view(raw)
         free(a.mbuf)
         a.mbmu.destroy()
         free(raw)
@@ -314,7 +314,7 @@ pool_actor_dead* = (raw: RawPtr<u8>) bool { actor_view(raw).dead != 0 }
 // (backlog leak fix, #519's deferred class) instead of silently dropping it. Called by the typed pool_actor
 // spawn path right after the raw spawn; raw pool actors leave `boxed` 0 (their i64 payload is a value).
 pool_actor_set_boxed* = (raw: RawPtr<u8>) void {
-    a := actor_view(raw)
+    a ::= actor_view(raw)
     a.boxed = 1
 }
 // ── Pool: M workers + ONE global run queue behind ONE mutex + condvar (Cut 1) ───────────────────
@@ -344,7 +344,7 @@ Pool*: {
     // is the CALLER's job to give up the scheduling claim it was about to make (pool_send) or to keep
     // running the actor itself (run_quantum). A bool, not a panic, because this runs inside `p.mu`.
     rq_try_push = (p: MutPtr<Pool>, actor: RawPtr<u8>) bool {
-        room := (p.rqtail - p.rqhead >= p.rqcap).then({ p.rq_try_grow() }, { true })
+        room = (p.rqtail - p.rqhead >= p.rqcap).then({ p.rq_try_grow() }, { true })
         room.then({
             p.rqbuf.offset(p.rqtail % p.rqcap * 8).store_i64(actor)
             p.rqtail = p.rqtail + 1
@@ -359,12 +359,12 @@ Pool*: {
     // Returns false (leaving the queue EXACTLY as it was) when the new ring could not be allocated: this
     // executes under `p.mu`, so it must never panic — see the or_die note at the top of this file.
     rq_try_grow = (p: MutPtr<Pool>) bool {
-        newcap := p.rqcap * 2
-        nbuf := malloc(newcap * 8)
+        newcap = p.rqcap * 2
+        nbuf = malloc(newcap * 8)
         is_null(nbuf).match ({
             true  => false,
             false => {
-                n := p.rqtail - p.rqhead
+                n = p.rqtail - p.rqhead
                 p.rq_copy(nbuf, 0, n)
                 free(p.rqbuf)
                 p.rqbuf = nbuf
@@ -383,7 +383,7 @@ Pool*: {
         })
     }
     rq_pop = (p: MutPtr<Pool>) RawPtr<u8> {
-        a := p.rqbuf.offset(p.rqhead % p.rqcap * 8).load_i64().offset(0)
+        a = p.rqbuf.offset(p.rqhead % p.rqcap * 8).load_i64().offset(0)
         p.rqhead = p.rqhead + 1
         a
     }
@@ -396,10 +396,10 @@ Pool*: {
     // discard the Result (an ignored `.Err` is not a corruption, just an unobserved drop — the counter
     // still records it).
     pool_send = (p: MutPtr<Pool>, actor: RawPtr<u8>, msg: i64) Result<i64, ActorError> {
-        a := actor_view(actor)
+        a ::= actor_view(actor)
         a.mbmu.lock()
-        cur := a.actor_mb()
-        sent := cur.is_full().match ({
+        cur = a.actor_mb()
+        sent = cur.is_full().match ({
             true  => false,
             false => {
                 a.tail = cur.push(msg).tail
@@ -407,7 +407,7 @@ Pool*: {
             },
         })
         // flip scheduled false→true ONLY when we actually enqueued work; remember if WE won the transition.
-        won := sent.match ({
+        won = sent.match ({
             true  => (a.sched == 0).match ({
                 true  => {
                     a.sched = 1
@@ -422,11 +422,11 @@ Pool*: {
         // GROW is the one allocation failure on this path, and it is a VALUE (`.Err(.Oom)`): panicking here
         // would siglongjmp into the worker's per-behavior catch with `p.mu` still locked and deadlock the
         // whole pool (this fn is reachable from inside a behavior via ActorRef.ref_send).
-        queued := won.match ({
+        queued = won.match ({
             true  => {
                 pool_actor_ref(actor)    // the run queue now OWNS a reference (the "scheduled" ref):
                 p.mu.lock()    // the actor cannot be freed while it is queued or running.
-                ok := p.rq_try_push(actor)
+                ok = p.rq_try_push(actor)
                 ok.then({
                     p.live = p.live + 1
                     p.work_cv.signal()
@@ -467,11 +467,11 @@ Pool*: {
             true  => count,
             false => {
                 a.mbmu.lock()
-                cur := a.actor_mb()
-                has := cur.nonempty()
-                msg := has.match ({
+                cur = a.actor_mb()
+                has = cur.nonempty()
+                msg = has.match ({
                     true  => {
-                        m := cur.peek()
+                        m = cur.peek()
                         a.head = cur.advance().head
                         m
                     },
@@ -497,14 +497,14 @@ Pool*: {
                                 p.drain_batch(a, count + 1)
                             },
                             false => {
-                                saved := enter(a.art)    // set this actor's rt as the ambient (M4 §2b) around the behavior;
-                                crashed := __zen_actor_call(a.behavior, a.user, msg)    // run under the panic catch (isolation)
+                                saved = enter(a.art)    // set this actor's rt as the ambient (M4 §2b) around the behavior;
+                                crashed = __zen_actor_call(a.behavior, a.user, msg)    // run under the panic catch (isolation)
                                 leave(saved)    // restore the worker's prior slot — runs even on a caught panic (trampoline returns normally)
                                 a.scratch_reset()    // wholesale-reclaim this behavior's scratch (normal return OR caught panic), on the normal stack
                                 (crashed != 0).then({
                                     a.dead = 1    // the actor panicked (zen__panic already printed the reason); mark it dead
-                                    note := "zen: actor marked dead, pool continues\n"    // follow-up to zen__panic's reason line
-                                    nn := note.strlen()
+                                    note = "zen: actor marked dead, pool continues\n"    // follow-up to zen__panic's reason line
+                                    nn = note.strlen()
                                     STDERR_FD.write(note.slice(nn).ptr, nn)
                                 })
                                 p.drain_batch(a, count + 1)
@@ -525,15 +525,15 @@ Pool*: {
     // FAIRNESS (other queued actors wait out this actor's backlog), never correctness — and it is the only
     // option that keeps the `sched`/`live` bookkeeping intact, since the actor is mid-flight.
     run_turn = (p: MutPtr<Pool>, actor: RawPtr<u8>, acc: i64) i64 {
-        a := actor_view(actor)
-        processed := acc + p.drain_batch(a, 0)
+        a ::= actor_view(actor)
+        processed = acc + p.drain_batch(a, 0)
         a.mbmu.lock()
-        remaining := a.tail - a.head
+        remaining = a.tail - a.head
         (remaining > 0).match ({
             true  => {
                 a.mbmu.unlock()    // still scheduled==1; give other actors a turn (fairness)
                 p.mu.lock()
-                requeued := p.rq_try_push(actor)
+                requeued = p.rq_try_push(actor)
                 requeued.then({
                     p.work_cv.signal()
                 })
@@ -571,17 +571,17 @@ Pool*: {
     }
     pool_next = (p: MutPtr<Pool>) RawPtr<u8> {
         p.mu.lock()    // re-check predicate (guards spurious wakeups)
-        r := p.pool_next_locked()
+        r = p.pool_next_locked()
         p.mu.unlock()
         r
     }
     // the worker loop: pop/park, run a quantum, tally messages into this worker's stat slot (only this
     // worker writes its slot → no contention), repeat until shutdown.
     worker_loop = (p: MutPtr<Pool>, wid: i64) void {
-        actor := p.pool_next()
+        actor = p.pool_next()
         (is_null(actor) == false).then({
-            n := p.run_quantum(actor)
-            slot := p.wstats.offset(wid * 8)
+            n = p.run_quantum(actor)
+            slot = p.wstats.offset(wid * 8)
             slot.store_i64(slot.load_i64() + n)
             p.worker_loop(wid)
         })
@@ -662,20 +662,20 @@ ActorRef*: {
 // non-capturing pthread body: arg → [pool_block_ptr, worker_id]; rebuild the pool view and run the loop.
 worker_body = (arg: RawPtr<u8>) RawPtr<u8> {
     __zen_thread_init()    // register this worker's per-thread sigaltstack BEFORE it runs any behavior (recursion → SIGSEGV)
-    pool_raw := load_i64(arg).offset(0)
-    wid := load_i64(arg.offset(8))
-    p := pool_view(pool_raw)
+    pool_raw = load_i64(arg).offset(0)
+    wid = load_i64(arg.offset(8))
+    p = pool_view(pool_raw)
     p.worker_loop(wid)
     null_ptr()
 }
 // ── lifecycle ───────────────────────────────────────────────────────────────────────────────────
 // allocate + initialise a Pool block over a malloc'd run queue / locks / condvars / per-worker stats.
 new_pool = (nworkers: i64, rqcap: i64) RawPtr<u8> {
-    blk := malloc(sizeof(Pool)).or_die("pool: pool block allocation failed")
-    rqbuf := malloc(rqcap * 8).or_die("pool: run queue allocation failed")
-    wstats := malloc(nworkers * 8).or_die("pool: worker stats allocation failed")
+    blk = malloc(sizeof(Pool)).or_die("pool: pool block allocation failed")
+    rqbuf = malloc(rqcap * 8).or_die("pool: run queue allocation failed")
+    wstats = malloc(nworkers * 8).or_die("pool: worker stats allocation failed")
     zero_stats(wstats, 0, nworkers)
-    pv: [Pool] := blk.slice(1)
+    pv :: [Pool] = blk.slice(1)
     pv[0] = Pool(
         rqbuf: rqbuf,
         rqhead: 0,
@@ -698,8 +698,8 @@ new_pool = (nworkers: i64, rqcap: i64) RawPtr<u8> {
 // open a running pool: allocate it and spawn the M worker pthreads. The returned pointer is the pool
 // handle; drive it with pool_spawn/pool_send, then pool_quiesce_stop → (read stats) → pool_close.
 pool_open* = (nworkers: i64, rqcap: i64) MutPtr<Pool> {
-    pool_raw := new_pool(nworkers, rqcap)
-    p := pool_view(pool_raw)
+    pool_raw = new_pool(nworkers, rqcap)
+    p = pool_view(pool_raw)
     start_workers(pool_raw, p.handles, p.args, 0, nworkers)
     p
 }
@@ -713,10 +713,10 @@ zero_stats = (w: RawPtr<u8>, i: i64, n: i64) void {
 // (16 bytes/worker) holds each worker's [pool_raw, id] cell. Both are freed after join.
 start_workers = (pool_raw: RawPtr<u8>, handles: RawPtr<u8>, args: RawPtr<u8>, i: i64, n: i64) void {
     (i < n).then({
-        ac := args.offset(i * 16)
+        ac = args.offset(i * 16)
         ac.store_i64(pool_raw)
         ac.offset(8).store_i64(i)
-        h := spawn(worker_body, ac)
+        h = spawn(worker_body, ac)
         handles.offset(i * 8).store_i64(h.tid)
         start_workers(pool_raw, handles, args, i + 1, n)
     })
@@ -737,8 +737,8 @@ count_busy = (w: RawPtr<u8>, i: i64, n: i64, acc: i64) i64 {
 // Start M workers, run the SAME actor-spawning body across the pool, drain to quiescence, shut down,
 // free. `spawn`/`send` (pool_spawn/pool_send) are unchanged from the single-thread surface.
 with_pool*<R> = (nworkers: i64, rqcap: i64, body: (MutPtr<Pool>) R) R {
-    p := pool_open(nworkers, rqcap)
-    out := body(p)
+    p = pool_open(nworkers, rqcap)
+    out = body(p)
     p.pool_quiesce_stop()
     p.pool_close()
     out
@@ -747,16 +747,16 @@ with_pool*<R> = (nworkers: i64, rqcap: i64, body: (MutPtr<Pool>) R) R {
 // no threads). The SAME `behavior` the pool fans out — the colorless proof that the driver, not the
 // actor, decides sync vs parallel. Returns messages processed.
 pool_drain_inline* = (actor: RawPtr<u8>) i64 {
-    a := actor_view(actor)
+    a = actor_view(actor)
     drain_inline_loop(a, 0)
 }
 drain_inline_loop = (a: MutPtr<PoolActor>, count: i64) i64 {
-    cur := a.actor_mb()
+    cur = a.actor_mb()
     cur.nonempty().match ({
         true  => {
-            m := cur.peek()
+            m = cur.peek()
             a.head = cur.advance().head
-            saved := enter(a.art)    // same ambient-rt wiring on the inline driver (identical to the pool path)
+            saved = enter(a.art)    // same ambient-rt wiring on the inline driver (identical to the pool path)
             a.behavior(a.user, m)
             leave(saved)
             a.scratch_reset()    // same per-behavior scratch reclamation on the inline (colorless) driver
@@ -767,8 +767,8 @@ drain_inline_loop = (a: MutPtr<PoolActor>, count: i64) i64 {
 }
 // post a message to an actor's mailbox with NO scheduling (for the inline sync driver / pre-loading).
 pool_post* = (actor: RawPtr<u8>, msg: i64) bool {
-    a := actor_view(actor)
-    cur := a.actor_mb()
+    a ::= actor_view(actor)
+    cur = a.actor_mb()
     cur.is_full().match ({
         true  => false,
         false => {

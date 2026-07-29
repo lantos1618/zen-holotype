@@ -84,8 +84,8 @@ Set*<T>: {
     }
     seq = (s: Set<T>, a: i64, b: i64) bool {
         // byte-wise equality of two slots.
-        ab: [u8] := s.bytes_of(a)
-        bb: [u8] := s.bytes_of(b)
+        ab: [u8] = s.bytes_of(a)
+        bb: [u8] = s.bytes_of(b)
         ab.ptr.compare(bb.ptr, ab.len) == 0
     }
     find = (s: Set<T>, x: T) i64 {
@@ -93,9 +93,9 @@ Set*<T>: {
         (s.cap == 0).match ({
             true  => 0 - 1,
             false => {
-                sl := s.slots()
+                sl ::= s.slots()
                 sl[s.cap] = x
-                ix := s.index()
+                ix = s.index()
                 s.schain(ix[s.shash(s.cap)])
             },
         })
@@ -111,19 +111,19 @@ Set*<T>: {
         // Acquire fresh buffers (double the cap), copy the live entries over, release the old ones, then
         // reindex. OOM at either acquire is returned as .Err (the old buffers stay valid and are NOT freed
         // on the failure path). Mirrors HMap.grow.
-        cap := s.cap * 2 + 1
+        cap = s.cap * 2 + 1
         a.try_acquire2((cap + 1) * sizeof(T), cap * 2 * sizeof(i64)).match ({
             .Ok(bufs) => {
-                ep := bufs.b1
-                ip := bufs.b2
-                olds := s.slots()
-                next := Set<T>(
+                ep = bufs.b1
+                ip = bufs.b2
+                olds = s.slots()
+                next = Set<T>(
                     elems: ep,
                     idx: ip,
                     len: s.len,
                     cap: cap,
                 )
-                dst := next.slots()
+                dst ::= next.slots()
                 olds.loop((h, i, e) {
                     (i < s.len).match ({
                         true  => {
@@ -136,21 +136,21 @@ Set*<T>: {
                 })
                 a.release(s.elems)
                 a.release(s.idx)
-                ok: Result<Set<T>, IoError> := .Ok(next.reindex())
+                ok: Result<Set<T>, IoError> = .Ok(next.reindex())
                 ok
             },
             .Err(e)   => {
-                err: Result<Set<T>, IoError> := .Err(e)
+                err: Result<Set<T>, IoError> = .Err(e)
                 err
             },
         })
     }
     reindex = (s: Set<T>) Set<T> {
         // Rebuild the hash index from the live element column. O(len).
-        ix := s.index()
-        cap := s.cap
+        ix = s.index()
+        cap = s.cap
         hashidx_clear(ix, cap)
-        sl := s.slots()
+        sl = s.slots()
         sl.loop((h, i, e) {
             (i < s.len).match ({
                 true  => {
@@ -171,12 +171,12 @@ Set*<T>: {
     append = (s: Set<T>, a: Allocator, x: T) Result<Set<T>, IoError> {
         // Append an element (caller has ensured it is absent) and link it into its bucket. Grows first when
         // full; a grow OOM is returned as .Err. Mirrors HMap.append.
-        x := x
-        out: Result<Set<T>, IoError> := (s.len < s.cap).match ({
+        x = x
+        out: Result<Set<T>, IoError> = (s.len < s.cap).match ({
             true  => {
-                sl := s.slots()
+                sl ::= s.slots()
                 sl[s.len] = x
-                ok: Result<Set<T>, IoError> := .Ok(Set<T>(
+                ok: Result<Set<T>, IoError> = .Ok(Set<T>(
                     elems: s.elems,
                     idx: s.idx,
                     len: s.len + 1,
@@ -187,9 +187,9 @@ Set*<T>: {
             false => {
                 s.grow(a).match ({
                     .Ok(next) => {
-                        sl := next.slots()
+                        sl ::= next.slots()
                         sl[next.len] = x
-                        ok: Result<Set<T>, IoError> := .Ok(Set<T>(
+                        ok: Result<Set<T>, IoError> = .Ok(Set<T>(
                             elems: next.elems,
                             idx: next.idx,
                             len: next.len + 1,
@@ -198,7 +198,7 @@ Set*<T>: {
                         ok
                     },
                     .Err(e)   => {
-                        err: Result<Set<T>, IoError> := .Err(e)
+                        err: Result<Set<T>, IoError> = .Err(e)
                         err
                     },
                 })
@@ -211,11 +211,11 @@ Set*<T>: {
         // result (`s = s.add(...).expect("…")` / `.or_return()`). Adding an element already present is a
         // no-op (len unchanged). On grow the buffers are realloced, so any handle captured before this call
         // dangles (see the VALUE-MOLD CONTRACT above). Mirrors HMap.put.
-        i := s.find(x)
-        out: Result<Set<T>, IoError> := (i < 0).match ({
+        i = s.find(x)
+        out: Result<Set<T>, IoError> = (i < 0).match ({
             true  => s.append(a, x),
             false => {
-                ok: Result<Set<T>, IoError> := .Ok(s)
+                ok: Result<Set<T>, IoError> = .Ok(s)
                 ok
             },
         })
@@ -225,13 +225,13 @@ Set*<T>: {
         // Delete an element. RETURNS the updated set. Absent element => unchanged. Implemented as a swap-remove
         // (the last live element fills the hole) followed by a reindex; iteration order is NOT preserved. `a` is
         // accepted for signature symmetry with the other owned ops — `remove` never reallocs (it does not shrink).
-        i := s.find(x)
-        out: Set<T> := (i < 0).match ({
+        i = s.find(x)
+        out: Set<T> = (i < 0).match ({
             true  => s,
             false => {
-                sl := s.slots()
+                sl ::= s.slots()
                 sl[i] = sl[s.len - 1]
-                next := Set<T>(
+                next = Set<T>(
                     elems: s.elems,
                     idx: s.idx,
                     len: s.len - 1,
@@ -251,19 +251,19 @@ Set*<T>: {
         // clone (or the original) never writes through to the other. The clone owns its buffers and must be
         // `free`d independently. O(len). OOM on either acquire is returned as .Err (the first buffer is
         // released before returning if the second fails).
-        cap := s.cap
+        cap = s.cap
         a.try_acquire2((cap + 1) * sizeof(T), cap * 2 * sizeof(i64)).match ({
             .Ok(bufs) => {
-                ep := bufs.b1
-                ip := bufs.b2
-                next := Set<T>(
+                ep = bufs.b1
+                ip = bufs.b2
+                next = Set<T>(
                     elems: ep,
                     idx: ip,
                     len: s.len,
                     cap: cap,
                 )
-                src := s.slots()
-                dst := next.slots()
+                src = s.slots()
+                dst ::= next.slots()
                 src.loop((h, i, e) {
                     (i < s.len).match ({
                         true  => {
@@ -274,11 +274,11 @@ Set*<T>: {
                         },
                     })
                 })
-                ok: Result<Set<T>, IoError> := .Ok(next.reindex())
+                ok: Result<Set<T>, IoError> = .Ok(next.reindex())
                 ok
             },
             .Err(e)   => {
-                err: Result<Set<T>, IoError> := .Err(e)
+                err: Result<Set<T>, IoError> = .Err(e)
                 err
             },
         })
@@ -286,7 +286,7 @@ Set*<T>: {
     each = (s: Set<T>, f: (T) void) void {
         // Visit every live element, in insertion order (until the first remove). `f` is invoked DIRECTLY in the
         // loop body so an inline lambda splices in (like map.each_pair / iter.each): `s.each((x){ … })`.
-        sl := s.slots()
+        sl = s.slots()
         sl.loop((h, i, e) {
             (i < s.len).match ({
                 true  => {
@@ -305,19 +305,19 @@ Set*<T>: {
 empty*<T> = (a: Allocator) Result<Set<T>, IoError> {
     a.try_acquire2((1 + 1) * sizeof(T), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
-            ep := bufs.b1
-            ip := bufs.b2
-            s := Set<T>(
+            ep = bufs.b1
+            ip = bufs.b2
+            s = Set<T>(
                 elems: ep,
                 idx: ip,
                 len: 0,
                 cap: 1,
             )
-            ok: Result<Set<T>, IoError> := .Ok(s.reindex())
+            ok: Result<Set<T>, IoError> = .Ok(s.reindex())
             ok
         },
         .Err(e)   => {
-            err: Result<Set<T>, IoError> := .Err(e)
+            err: Result<Set<T>, IoError> = .Err(e)
             err
         },
     })
@@ -327,21 +327,21 @@ empty*<T> = (a: Allocator) Result<Set<T>, IoError> {
 of*<T> = (a: Allocator, first: T) Result<Set<T>, IoError> {
     a.try_acquire2((1 + 1) * sizeof(T), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
-            ep := bufs.b1
-            ip := bufs.b2
-            s := Set<T>(
+            ep = bufs.b1
+            ip = bufs.b2
+            s = Set<T>(
                 elems: ep,
                 idx: ip,
                 len: 1,
                 cap: 1,
             )
-            sl := s.slots()
+            sl ::= s.slots()
             sl[0] = first
-            ok: Result<Set<T>, IoError> := .Ok(s.reindex())
+            ok: Result<Set<T>, IoError> = .Ok(s.reindex())
             ok
         },
         .Err(e)   => {
-            err: Result<Set<T>, IoError> := .Err(e)
+            err: Result<Set<T>, IoError> = .Err(e)
             err
         },
     })
@@ -352,7 +352,7 @@ add_if<T> = (a: Allocator, r: Set<T>, e: T, keep: bool) Result<Set<T>, IoError> 
     keep.match ({
         true  => r.add(a, e),
         false => {
-            same: Result<Set<T>, IoError> := .Ok(r)
+            same: Result<Set<T>, IoError> = .Ok(r)
             same
         },
     })
@@ -362,12 +362,12 @@ add_if<T> = (a: Allocator, r: Set<T>, e: T, keep: bool) Result<Set<T>, IoError> 
 union_fold<T> = (a: Allocator, r: Set<T>, y: Set<T>, i: i64) Result<Set<T>, IoError> {
     (i >= y.len).match ({
         true  => {
-            done: Result<Set<T>, IoError> := .Ok(r)
+            done: Result<Set<T>, IoError> = .Ok(r)
             done
         },
         false => {
-            sl := y.slots()
-            nr := r.add(a, sl[i]).or_return()
+            sl = y.slots()
+            nr = r.add(a, sl[i]).or_return()
             a.union_fold(nr, y, i + 1)
         },
     })
@@ -384,14 +384,14 @@ sift_fold<T> = (
 ) Result<Set<T>, IoError> {
     (i >= x.len).match ({
         true  => {
-            done: Result<Set<T>, IoError> := .Ok(r)
+            done: Result<Set<T>, IoError> = .Ok(r)
             done
         },
         false => {
-            sl := x.slots()
-            e := sl[i]
-            keep := y.has(e) == keep_when
-            nr := a.add_if(r, e, keep).or_return()
+            sl = x.slots()
+            e = sl[i]
+            keep = y.has(e) == keep_when
+            nr = a.add_if(r, e, keep).or_return()
             a.sift_fold(nr, x, y, i + 1, keep_when)
         },
     })
@@ -402,29 +402,29 @@ union*<T> = (a: Allocator, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
     x.clone(a).match ({
         .Ok(r)  => a.union_fold(r, y, 0),
         .Err(e) => {
-            err: Result<Set<T>, IoError> := .Err(e)
+            err: Result<Set<T>, IoError> = .Err(e)
             err
         },
     })
 }
 // {x} ∩ {y}: a fresh set holding the elements present in BOTH. O(|x|) membership probes into y.
 intersect*<T> = (a: Allocator, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
-    er: Result<Set<T>, IoError> := empty(a)
+    er: Result<Set<T>, IoError> = empty(a)
     er.match ({
         .Ok(r)  => a.sift_fold(r, x, y, 0, true),
         .Err(e) => {
-            err: Result<Set<T>, IoError> := .Err(e)
+            err: Result<Set<T>, IoError> = .Err(e)
             err
         },
     })
 }
 // {x} \ {y}: a fresh set holding the elements of x that are NOT in y. O(|x|) membership probes into y.
 difference*<T> = (a: Allocator, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
-    er: Result<Set<T>, IoError> := empty(a)
+    er: Result<Set<T>, IoError> = empty(a)
     er.match ({
         .Ok(r)  => a.sift_fold(r, x, y, 0, false),
         .Err(e) => {
-            err: Result<Set<T>, IoError> := .Err(e)
+            err: Result<Set<T>, IoError> = .Err(e)
             err
         },
     })
@@ -455,21 +455,21 @@ ASet*<T>: {
         // In a chain (`s.add(x).add(y)`) the receiver `w` is the previous op's side-effecting
         // result, and its link step is NON-idempotent. The inliner binds such a multiply-used arg
         // to one temp (evaluate-once), so referencing `w` several times below is safe.
-        a := w.alloc
+        a = w.alloc
         ASet<T>(
             inner: w.inner.add(a.addr(), x).expect("set.add: out of memory"),
             alloc: w.alloc,
         )
     }
     remove = (w: ASet<T>, x: T) ASet<T> {
-        a := w.alloc
+        a = w.alloc
         ASet<T>(
             inner: w.inner.remove(a.addr(), x),
             alloc: w.alloc,
         )
     }
     free = (w: ASet<T>) void {
-        a := w.alloc
+        a = w.alloc
         w.inner.free(a.addr())
     }
 }
@@ -478,8 +478,8 @@ ASet*<T>: {
 // `new()` below is a one-line shim — the single
 // process-heap draw (`dyn_heap()`) on the set construction path.
 new_in*<T> = (a: DynAlloc) ASet<T> {
-    da := a
-    sr: Result<Set<T>, IoError> := empty(da.addr())
+    da = a
+    sr: Result<Set<T>, IoError> = empty(da.addr())
     ASet<T>(
         inner: sr.expect("set.new: out of memory"),
         alloc: a,
@@ -491,8 +491,8 @@ new_in*<T> = (a: DynAlloc) ASet<T> {
 // std.text.string's generic `new_in(a: Allocator)` once both flatten together; qualified `set.new_in`
 // stays the external real path).
 new*<T> = () ASet<T> {
-    a := dyn_heap()
-    sr: Result<Set<T>, IoError> := empty(a.addr())
+    a = dyn_heap()
+    sr: Result<Set<T>, IoError> = empty(a.addr())
     ASet<T>(
         inner: sr.expect("set.new: out of memory"),
         alloc: a,
@@ -501,9 +501,9 @@ new*<T> = () ASet<T> {
 // EXPLICIT-allocator seed constructor: an `ASet<T>` bound to `a`, seeded from a slice (dedups via `add`).
 // No implicit allocator selection. T is inferred from the elements.
 from_in*<T> = (a: DynAlloc, xs: [T]) ASet<T> {
-    da := a
-    sr: Result<Set<T>, IoError> := empty(da.addr())
-    st := sr.expect("set.from: out of memory")
+    da = a
+    sr: Result<Set<T>, IoError> = empty(da.addr())
+    st ::= sr.expect("set.from: out of memory")
     xs.loop((h, i, x) {
         st = st.add(da.addr(), x).expect("set.from: out of memory")
     })
@@ -515,9 +515,9 @@ from_in*<T> = (a: DynAlloc, xs: [T]) ASet<T> {
 // a process-heap `ASet<T>` seeded from a slice. Capture `dyn_heap()` once; `from_in`'s body is inlined
 // (no bare `from_in` call — same string-`new_in` collision avoidance).
 from*<T> = (xs: [T]) ASet<T> {
-    a := dyn_heap()
-    sr: Result<Set<T>, IoError> := empty(a.addr())
-    st := sr.expect("set.from: out of memory")
+    a = dyn_heap()
+    sr: Result<Set<T>, IoError> = empty(a.addr())
+    st ::= sr.expect("set.from: out of memory")
     xs.loop((h, i, x) {
         st = st.add(a.addr(), x).expect("set.from: out of memory")
     })

@@ -3,8 +3,8 @@
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, TraitDefData, ArmData, MatchData, VariantDef,
   MethodCallData, FieldInit, GlobalData } = compiler.ast.ast_types
 { cbuf, bin_at, cond_oa, call_at, member_at, arrow_at, ematch, ematchp, arm_at, eindex, eloop,
-  slett_at, sassign_at, sret, sexpr, sif, swhile, sidxset_at, finit, subst_ty_in, dfunc, mkenumg,
-  is_expr_null, tnamed, tvoid, acquire_or_die, acquire_or_die } = compiler.genc
+  slett_at, slett_atm, sassign_at, sret, sexpr, sif, swhile, sidxset_at, finit, subst_ty_in, dfunc,
+  mkenumg, is_expr_null, tnamed, tvoid, acquire_or_die, acquire_or_die } = compiler.genc
 { impl_cname_in } = compiler.mangle
 { Malloc } = std.mem.alloc
 { DeclIndex, cebuf, cenode, pbuf, vnil } = compiler.check
@@ -12,20 +12,20 @@
 { light_ty } = compiler.check_infer
 tybuf1 = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire_or_die(sizeof(Ty)), 1) }
 self_param = (a: MutPtr<Malloc>) [Param] {
-    buf := a.pbuf(1)
+    buf ::= a.pbuf(1)
     buf[0] = param("Self", tvoid())
     buf
 }
 self_arg = (a: MutPtr<Malloc>, tyname: StringView) [Ty] {
-    buf := a.tybuf1()
+    buf ::= a.tybuf1()
     buf[0] = tnamed(tyname)
     buf
 }
 // Specialize default Func to a concrete impl type.
 default_for_type = (a: MutPtr<Malloc>, td: TraitDefData, tyname: StringView) Func {
-    sp := a.self_param()
-    ag := a.self_arg(tyname)
-    ps := a.pbuf(td.fn.params.len)
+    sp = a.self_param()
+    ag = a.self_arg(tyname)
+    ps ::= a.pbuf(td.fn.params.len)
     td.fn.params.loop((h, i, p) {
         ps[i] = param(p.name, a.subst_ty_in(sp, ag, p.ty))
     })
@@ -50,7 +50,7 @@ def_provided = (decls: [Decl], tyname: StringView, trname: StringView, m: String
     })
 }
 default_expansion_count = (decls: [Decl]) i64 {
-    n := 0
+    n ::= 0
     decls.loop((h, i, d) {
         d.match ({
             .DTraitDefault(td) => decls.loop((h2, j, e) {
@@ -68,7 +68,7 @@ default_expansion_count = (decls: [Decl]) i64 {
     n
 }
 emit_defaults_for = (a: MutPtr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
-    k := j
+    k ::= j
     decls.loop((h, i, d) {
         d.match ({
             .DImpl(im) => (im.trname == td.trname
@@ -82,15 +82,15 @@ emit_defaults_for = (a: MutPtr<Malloc>, decls: [Decl], td: TraitDefData, buf: [D
     k
 }
 expand_defaults* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
-    extra := decls.default_expansion_count()
+    extra = decls.default_expansion_count()
     (extra == 0).match ({
         true  => decls,
         false => {
-            buf := cbuf<Decl>(a, decls.len + extra)
+            buf ::= cbuf<Decl>(a, decls.len + extra)
             decls.loop((h, i, d) {
                 buf[i] = d
             })
-            k := decls.len
+            k ::= decls.len
             decls.loop((h, i, d) {
                 d.match ({
                     .DTraitDefault(td) => {
@@ -151,7 +151,7 @@ dmc_body = (a: MutPtr<Malloc>, body: [Stmt]) void {
 // `sp` is a MUTABLE slot (a [Stmt] slice element), so the rebuilt statement is stored back through it.
 dmc_stmt = (a: MutPtr<Malloc>, sp: MutPtr<Stmt>) void {
     sp.match ({
-        .Let(l)      => store(sp, slett_at(l.name, l.ty, a.dmc_expr_val(l.value), l.pos)),
+        .Let(l)      => store(sp, slett_atm(l.name, l.ty, a.dmc_expr_val(l.value), l.pos, l.mut)),
         .Assign(asn) => store(sp, sassign_at(a.dmc_expr_val(asn.target), a.dmc_expr_val(asn.value), asn.pos)),
         .Return(e)   => store(sp, sret(a.dmc_expr_val(e))),
         .If(f)       => {
@@ -187,9 +187,9 @@ dmc_arms = (a: MutPtr<Malloc>, arms: [ArmData]) void {
 // old parse_method built (buf[0] = recv, method args from index 1, via call_at). The recv and args are
 // lowered first (recv functionally, args in their mutable slice slots).
 dmc_lower = (a: MutPtr<Malloc>, mc: MethodCallData) Expr {
-    rv := a.dmc_expr_val(mc.recv)
+    rv = a.dmc_expr_val(mc.recv)
     a.dmc_args(mc.args)
-    buf := a.cebuf(mc.args.len + 1)
+    buf ::= a.cebuf(mc.args.len + 1)
     buf[0] = load(rv)
     mc.args.loop((h, i, ar) {
         buf[i + 1] = mc.args[i]

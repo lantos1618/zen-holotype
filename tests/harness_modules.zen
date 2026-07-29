@@ -76,7 +76,7 @@ ModStdinCase*: {
 mod_dir = (mp: MutPtr<Malloc>) StringView { mp.zo_path("zo_mods/") }
 // concat three strings through an allocator-owned String (no fixed-buffer assumptions).
 join3 = (mp: MutPtr<Malloc>, a: StringView, b: StringView, c: StringView) StringView {
-    s := mp.new_in().expect("harness: oom")
+    s ::= mp.new_in().expect("harness: oom")
     s = s.append_in(mp, a).expect("harness: oom")
     s = s.append_in(mp, b).expect("harness: oom")
     s = s.append_in(mp, c).expect("harness: oom")
@@ -85,8 +85,8 @@ join3 = (mp: MutPtr<Malloc>, a: StringView, b: StringView, c: StringView) String
 // ── source generators (for the recursion-depth / stack-growth stress cases) ──────────────────────
 // "v0* = () i32 { 0 }\n" … "v{n-1}* = () i32 { (i%10) }\n" — an n-decl module body.
 gen_decls = (mp: MutPtr<Malloc>, n: i32) StringView {
-    s := mp.new_in().expect("harness: oom")
-    i := 0
+    s ::= mp.new_in().expect("harness: oom")
+    i ::= 0
     @while (i < n) {
         s = s.append_in(mp, "v").expect("harness: oom")
         s = s
@@ -111,8 +111,8 @@ gen_decls = (mp: MutPtr<Malloc>, n: i32) StringView {
 }
 // "v0, v1, … v{n-1}" — a comma-separated import-head name list.
 gen_names = (mp: MutPtr<Malloc>, n: i32) StringView {
-    s := mp.new_in().expect("harness: oom")
-    i := 0
+    s ::= mp.new_in().expect("harness: oom")
+    i ::= 0
     @while (i < n) {
         (i > 0).then({
             s = s.append_in(mp, ", ").expect("harness: oom")
@@ -131,8 +131,8 @@ gen_names = (mp: MutPtr<Malloc>, n: i32) StringView {
 }
 // `chunk` repeated `n` times.
 gen_repeat = (mp: MutPtr<Malloc>, chunk: StringView, n: i32) StringView {
-    s := mp.new_in().expect("harness: oom")
-    i := 0
+    s ::= mp.new_in().expect("harness: oom")
+    i ::= 0
     @while (i < n) {
         s = s.append_in(mp, chunk).expect("harness: oom")
         i = i + 1
@@ -142,8 +142,8 @@ gen_repeat = (mp: MutPtr<Malloc>, chunk: StringView, n: i32) StringView {
 // directory part of a project-relative file name ("app/utils.zen" → "app"; "" when flat) — dotted
 // module fixtures write NESTED files, so the writers mkdir the subdirectory first.
 file_dir_of = (mp: MutPtr<Malloc>, name: StringView) StringView {
-    cut := 0 - 1
-    v: [u8] := view(name)
+    cut ::= 0 - 1
+    v: [u8] = view(name)
     v.loop((h, i, b) {
         (b == '/').then({
             cut = to_i32(i)
@@ -152,7 +152,7 @@ file_dir_of = (mp: MutPtr<Malloc>, name: StringView) StringView {
     (cut < 0).match ({
         true  => "",
         false => {
-            s := mp.new_in().expect("harness: oom")
+            s ::= mp.new_in().expect("harness: oom")
             v.loop((h, i, b) {
                 (to_i32(i) < cut).then({
                     s = s.push_in(mp, b).expect("harness: oom")
@@ -164,7 +164,7 @@ file_dir_of = (mp: MutPtr<Malloc>, name: StringView) StringView {
 }
 // ensure the subdirectory of `name` exists under the slash-terminated `dirslash` (no-op when flat).
 ensure_file_dir = (mp: MutPtr<Malloc>, dirslash: StringView, name: StringView) void {
-    d := mp.file_dir_of(name)
+    d = mp.file_dir_of(name)
     (is_empty(d) == false).then({
         shell(mp.zo_cmd(mp.join3("mkdir -p ", dirslash, d)))
     })
@@ -175,18 +175,18 @@ write_files = (mp: MutPtr<Malloc>, files: [ModFile]) void {
     shell(mp.zo_cmd("rm -rf $ZT/zo_mods && mkdir -p $ZT/zo_mods"))
     files.loop((h, i, f) {
         mp.ensure_file_dir(mp.mod_dir(), f.name)
-        p := mp.zo_cat2(mp.mod_dir(), f.name)
+        p = mp.zo_cat2(mp.mod_dir(), f.name)
         save(p, f.src, len(f.src))
     })
 }
 // VALUE: build the project, `zenc run <entry>`, compare its exit code to `want`.
 run_mod_value* = (mc: ModValCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     mp.write_files(mc.files)
-    entry := mp.zo_cat2(mp.mod_dir(), mc.entry)
-    cmd := mp.join3("./zen run ", entry, " > $ZT/zo_mods_out.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
+    entry = mp.zo_cat2(mp.mod_dir(), mc.entry)
+    cmd = mp.join3("./zen run ", entry, " > $ZT/zo_mods_out.txt 2>&1")
+    rc = shell(mp.zo_cmd(cmd)).expect("harness: shell")
     // `shell` now returns the DECODED exit code (WEXITSTATUS, or 128 + signal). A build/loader failure
     // surfaces as rc != 0.
     rc == mc.want
@@ -194,12 +194,12 @@ run_mod_value* = (mc: ModValCase) bool {
 // VERDICT: build the project, `zenc check <entry>`. should_pass => rc 0; else rc != 0 and (if `needle`
 // non-empty) the captured diagnostic must contain `needle`.
 run_mod_verdict* = (mc: ModVerdictCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     mp.write_files(mc.files)
-    entry := mp.zo_cat2(mp.mod_dir(), mc.entry)
-    cmd := mp.join3("./zen check ", entry, " > $ZT/zo_mods_chk.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
+    entry = mp.zo_cat2(mp.mod_dir(), mc.entry)
+    cmd = mp.join3("./zen check ", entry, " > $ZT/zo_mods_chk.txt 2>&1")
+    rc = shell(mp.zo_cmd(cmd)).expect("harness: shell")
     mc.should_pass.match ({
         true  => rc == 0,
         false => (rc == 0).match ({
@@ -217,17 +217,17 @@ run_mod_verdict* = (mc: ModVerdictCase) bool {
 // EMIT: build the project, `zenc emit <entry>`; must succeed and the C must hold every `present`
 // substring and none of the `absent` ones.
 run_mod_emit* = (mc: ModEmitCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     mp.write_files(mc.files)
-    entry := mp.zo_cat2(mp.mod_dir(), mc.entry)
-    cmd := mp.join3("./zen emit ", entry, " > $ZT/zo_mods_emit.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
+    entry = mp.zo_cat2(mp.mod_dir(), mc.entry)
+    cmd = mp.join3("./zen emit ", entry, " > $ZT/zo_mods_emit.txt 2>&1")
+    rc = shell(mp.zo_cmd(cmd)).expect("harness: shell")
     (rc == 0).match ({
         true  => mp.contents_in(mp.zo_path("zo_mods_emit.txt")).match ({
             .Err(e)  => false,
             .Ok(txt) => {
-                bad := 0
+                bad ::= 0
                 mc.present.loop((h, i, s) {
                     (txt.contains(s) == false).then({
                         bad = bad + 1
@@ -246,15 +246,15 @@ run_mod_emit* = (mc: ModEmitCase) bool {
 }
 // DOC: `zenc doc <module>`; must succeed and contain every `present` substring.
 run_mod_doc* = (mc: ModDocCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    cmd := mp.join3("./zen doc ", mc.module, " > $ZT/zo_mods_doc.txt 2>&1")
-    rc := shell(mp.zo_cmd(cmd)).expect("harness: shell")
+    m = Malloc(_: 0)
+    mp = m.addr()
+    cmd = mp.join3("./zen doc ", mc.module, " > $ZT/zo_mods_doc.txt 2>&1")
+    rc = shell(mp.zo_cmd(cmd)).expect("harness: shell")
     (rc == 0).match ({
         true  => mp.contents_in(mp.zo_path("zo_mods_doc.txt")).match ({
             .Err(e)  => false,
             .Ok(txt) => {
-                bad := 0
+                bad ::= 0
                 mc.present.loop((h, i, s) {
                     (txt.contains(s) == false).then({
                         bad = bad + 1
@@ -269,16 +269,16 @@ run_mod_doc* = (mc: ModDocCase) bool {
 // STDIN: pipe `src` into `./zen` (no file arg → the source→C filter / sibling-from-stdin path).
 // should_succeed => exit 0 else != 0; combined stdout+stderr must contain every `present` substring.
 run_mod_stdin* = (mc: ModStdinCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     save(mp.zo_path("zo_mods_stdin.zen"), mc.src, len(mc.src))
-    rc := shell(mp.zo_cmd("./zen < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1")).expect("harness: shell")
-    ok_rc := mc.should_succeed.then({ rc == 0 }, { rc != 0 })
+    rc = shell(mp.zo_cmd("./zen < $ZT/zo_mods_stdin.zen > $ZT/zo_mods_stdin_out.txt 2>&1")).expect("harness: shell")
+    ok_rc = mc.should_succeed.then({ rc == 0 }, { rc != 0 })
     ok_rc.match ({
         true  => mp.contents_in(mp.zo_path("zo_mods_stdin_out.txt")).match ({
             .Err(e)  => false,
             .Ok(txt) => {
-                bad := 0
+                bad ::= 0
                 mc.present.loop((h, i, s) {
                     (txt.contains(s) == false).then({
                         bad = bad + 1
@@ -306,18 +306,18 @@ mod_chk_path = (mp: MutPtr<Malloc>, gid: i64) StringView {
 }
 // Phase A: fresh per-case project dir + write its files (serial, Zen-side).
 mod_write_files_id = (mp: MutPtr<Malloc>, gid: i64, files: [ModFile]) void {
-    dir := mp.mod_dir_id(gid)
+    dir = mp.mod_dir_id(gid)
     shell(mp.zo_cmd(mp.zo_cat2(mp.join3("rm -rf ", dir, " && mkdir -p "), dir)))
     files.loop((h, i, f) {
         mp.ensure_file_dir(mp.zo_cat2(dir, "/"), f.name)
-        p := mp.join3(dir, "/", f.name)
+        p = mp.join3(dir, "/", f.name)
         save(p, f.src, len(f.src))
     })
 }
 // VALUE per-case command: `zenc run <entry>`; capture the program's exit code (WEXITSTATUS / 128+sig —
 // exactly what shell() decoded serially) into rc<gid> with `printf %s` (no newline, so try_parse_int accepts it).
 mod_value_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: StringView) StringView {
-    ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
+    ent = mp.join3(mp.mod_dir_id(gid), "/", entry)
     mp.zo_cat2(mp.join3("./zen run ", ent, " > /dev/null 2>&1; printf %s \"$?\" > "), mp.mod_rc_path(gid))
 }
 mod_value_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModValCase) bool {
@@ -331,14 +331,14 @@ mod_value_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModValCase) bool {
 }
 // VERDICT per-case command: `zenc check <entry>`; capture accept(P)/reject(F) + the diagnostic.
 mod_verdict_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: StringView) StringView {
-    z: StringView := ""
-    ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
-    chk := mp.mod_chk_path(gid)
-    rc := mp.mod_rc_path(gid)
+    z: StringView = ""
+    ent = mp.join3(mp.mod_dir_id(gid), "/", entry)
+    chk = mp.mod_chk_path(gid)
+    rc = mp.mod_rc_path(gid)
     mp.zo_join([z, "if ./zen check ", ent, " > ", chk, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
 mod_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModVerdictCase) bool {
-    accepted := mp.contents_in(mp.mod_rc_path(gid)).match ({
+    accepted = mp.contents_in(mp.mod_rc_path(gid)).match ({
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
@@ -360,17 +360,17 @@ mod_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModVerdictCase) bool {
 run_mod_values = (name: StringView, cs: [ModValCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
         cmds[i] = mp.mod_value_cmd(i, c.entry)
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         mp.mod_value_ok(i, c).match ({
             true  => out("."),
@@ -416,20 +416,20 @@ deep_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
 run_mod_deep = (name: StringView, cs: [DeepCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.base_files)    // fresh per-gid dir + sibling module files
-        dir := mp.zo_cat2(mp.mod_dir_id(i), "/")    // slash-terminated progdir baked into the driver
-        drv := mp.deep_driver_src(c.kind, dir)
+        dir = mp.zo_cat2(mp.mod_dir_id(i), "/")    // slash-terminated progdir baked into the driver
+        drv = mp.deep_driver_src(c.kind, dir)
         save(mp.join3(mp.mod_dir_id(i), "/", "driver.zen"), drv, len(drv))
         cmds[i] = mp.mod_value_cmd(i, "driver.zen")
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         mp.deep_ok(i).match ({
             true  => out("."),
@@ -446,17 +446,17 @@ run_mod_deep = (name: StringView, cs: [DeepCase]) i32 {
 run_mod_verdicts = (name: StringView, cs: [ModVerdictCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
         cmds[i] = mp.mod_verdict_cmd(i, c.entry)
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         mp.mod_verdict_ok(i, c).match ({
             true  => out("."),
@@ -476,14 +476,14 @@ mod_emit_path = (mp: MutPtr<Malloc>, gid: i64) StringView {
     mp.zo_path(mp.join3("zo_mods_emit", mp.zo_itoa(gid), ".txt"))
 }
 mod_emit_cmd = (mp: MutPtr<Malloc>, gid: i64, entry: StringView) StringView {
-    z: StringView := ""
-    ent := mp.join3(mp.mod_dir_id(gid), "/", entry)
-    outp := mp.mod_emit_path(gid)
-    rc := mp.mod_rc_path(gid)
+    z: StringView = ""
+    ent = mp.join3(mp.mod_dir_id(gid), "/", entry)
+    outp = mp.mod_emit_path(gid)
+    rc = mp.mod_rc_path(gid)
     mp.zo_join([z, "if ./zen emit ", ent, " > ", outp, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
 mod_emit_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModEmitCase) bool {
-    passed := mp.contents_in(mp.mod_rc_path(gid)).match ({
+    passed = mp.contents_in(mp.mod_rc_path(gid)).match ({
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
@@ -491,7 +491,7 @@ mod_emit_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModEmitCase) bool {
         true  => mp.contents_in(mp.mod_emit_path(gid)).match ({
             .Err(e)  => false,
             .Ok(txt) => {
-                bad := 0
+                bad ::= 0
                 mc.present.loop((h, i, s) {
                     (txt.contains(s) == false).then({
                         bad = bad + 1
@@ -511,17 +511,17 @@ mod_emit_ok = (mp: MutPtr<Malloc>, gid: i64, mc: ModEmitCase) bool {
 run_mod_emits = (name: StringView, cs: [ModEmitCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
         cmds[i] = mp.mod_emit_cmd(i, c.entry)
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         mp.mod_emit_ok(i, c).match ({
             true  => out("."),
@@ -538,7 +538,7 @@ run_mod_emits = (name: StringView, cs: [ModEmitCase]) i32 {
 run_mod_docs = (name: StringView, cs: [ModDocCase]) i32 {
     out(name)
     out("\n")
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         run_mod_doc(c).match ({
             true  => out("."),
@@ -554,7 +554,7 @@ run_mod_docs = (name: StringView, cs: [ModDocCase]) i32 {
 run_mod_stdins = (name: StringView, cs: [ModStdinCase]) i32 {
     out(name)
     out("\n")
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         run_mod_stdin(c).match ({
             true  => out("."),
@@ -568,22 +568,22 @@ run_mod_stdins = (name: StringView, cs: [ModStdinCase]) i32 {
     fails
 }
 harness_modules_run* = () i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    z: StringView := ""    // typed leading element so mixed literal/variable arrays infer as [StringView]
+    m = Malloc(_: 0)
+    mp = m.addr()
+    z: StringView = ""    // typed leading element so mixed literal/variable arrays infer as [StringView]
     // ── generated stress sources (recursion-depth / stack-growth guards) ─────────────────────────
-    big240 := mp.gen_decls(240)    // 240 top-level decls (symbol-consumer stress)
-    big120 := mp.gen_decls(120)    // 120 decls + a 120-name import head
-    names120 := mp.gen_names(120)
-    dedup260 := mp.zo_cat2(mp.gen_decls(260), "v0* = () i32 { 777 }\n")    // 260 + a dup v0 (final-dedup stress)
-    mid700 := mp.gen_repeat("right = right\n", 700)
-    edges700 := mp.zo_join([z, "first = first\n", mid700, "{ last } = last\nmain = () i32 { 0 }\n"])
+    big240 = mp.gen_decls(240)    // 240 top-level decls (symbol-consumer stress)
+    big120 = mp.gen_decls(120)    // 120 decls + a 120-name import head
+    names120 = mp.gen_names(120)
+    dedup260 = mp.zo_cat2(mp.gen_decls(260), "v0* = () i32 { 777 }\n")    // 260 + a dup v0 (final-dedup stress)
+    mid700 = mp.gen_repeat("right = right\n", 700)
+    edges700 = mp.zo_join([z, "first = first\n", mid700, "{ last } = last\nmain = () i32 { 0 }\n"])
     // Cross-module USER-DEFINED GENERIC fn/type resolution (#48): a generic type/fn/enum defined in one
     // module and instantiated at a concrete type in another must resolve + monomorphize across the file
     // boundary exactly as single-file. Pinned below via the g/base+mid/opt/bx projects: flat generic
     // fn+type import, a TRANSITIVE generic threaded through two boundaries, a generic enum matched through
     // its def module's generic unwrap, and a qualified-alias `bx.mk<i32>()` + inherent generic method.
-    v := run_mod_values("modules value (import resolution / value)", [
+    v = run_mod_values("modules value (import resolution / value)", [
         ModValCase(
             files: [
                 ModFile(
@@ -1770,7 +1770,7 @@ harness_modules_run* = () i32 {
     // control: an ns-aliased fn merely NAMED `release` (`mathlib__release` after flatten) over
     // NON-owner args must stay legal — the suffix match still gates on the first argument's
     // Own/Rc/Arc type, so plain code never trips the consume matchers.
-    d := run_mod_verdicts("modules verdict (cross-module check / loader errors)", [
+    d = run_mod_verdicts("modules verdict (cross-module check / loader errors)", [
         ModVerdictCase(
             files: [
                 ModFile(
@@ -2973,7 +2973,7 @@ harness_modules_run* = () i32 {
     // lambdas: a bound local lambda used as a HOF arg compiles; a non-capturing field/returned lambda
     // is lifted (accepts); a CAPTURING field lambda rejects with error[lambda-value].
     // ── a large namespace-bound compiler module resolves without overflowing the resolver ────
-    e := run_mod_emits("modules emit (resolution-before-cgen / literal preservation)", [
+    e = run_mod_emits("modules emit (resolution-before-cgen / literal preservation)", [
         ModEmitCase(
             files: [
                 ModFile(
@@ -3080,14 +3080,14 @@ harness_modules_run* = () i32 {
     // the namespace rewriter preserves string literals + comments (only real calls rewritten).
     // a large namespace-bound compiler module emits the qualified symbol without overflow.
     // import-head spacing variants all emit the resolved sibling call (test_modules_oracle).
-    dc := run_mod_docs("modules doc (exported signatures)", [
+    dc = run_mod_docs("modules doc (exported signatures)", [
         ModDocCase(
             module: "std.concurrent.actor",
             present: ["spawn_handle*<M, ActorT>", "cell*<M> = (alloc: Allocator"],
         ),
     ])
     // std.concurrent.actor exports the generic Result-returning spawn/cell signatures.
-    sd := run_mod_stdins("modules stdin (no program dir)", [
+    sd = run_mod_stdins("modules stdin (no program dir)", [
         ModStdinCase(
             src: "{ helper } = b\nmain = () i32 { helper(21) }\n",
             should_succeed: false,
@@ -3106,7 +3106,7 @@ harness_modules_run* = () i32 {
     // boundary, and graph-linked cross-module check) directly, as `zenc run` driver programs. The
     // progdir is this run's private mod_dir (baked into the generated driver at runtime); root is "."
     // because the harness runs `./zen` from the repo root, so std resolves relative to the cwd.
-    dl := run_mod_deep("modules value (deep loader API: resolve_program_data / parsed_program / check)", [
+    dl = run_mod_deep("modules value (deep loader API: resolve_program_data / parsed_program / check)", [
         DeepCase(
             base_files: [
                 ModFile(
@@ -3192,7 +3192,7 @@ harness_modules_run* = () i32 {
     // buffers are sized exactly, so ids/aliases longer than the old fixed 128/64-byte caps resolve
     // without silent truncation. A missing nested file keeps the unknown-module error naming the
     // attempted path, and `*` privacy is enforced unchanged for dotted modules.
-    dv := run_mod_values("modules value (dotted user module ids)", [
+    dv = run_mod_values("modules value (dotted user module ids)", [
         ModValCase(
             files: [
                 ModFile(
@@ -3271,7 +3271,7 @@ harness_modules_run* = () i32 {
     // ── identity-based diagnostic map (flat offset → module + original line, no text matching) ────
     // Each case pins the full `path:line:col` needle (the temp project dir always contains
     // `zo_mods/`), so a wrong file, line, OR column fails the case.
-    im := run_mod_verdicts("modules verdict (identity diagnostics map)", [
+    im = run_mod_verdicts("modules verdict (identity diagnostics map)", [
         ModVerdictCase(
             files: [
                 ModFile(
@@ -3368,7 +3368,7 @@ harness_modules_run* = () i32 {
     // pins the module and line (column falls back to 1 rather than losing the location).
     // (e) two modules contain an IDENTICAL source line ("    x + 1"); the error is in b.zen —
     // the map's module IDENTITY must win (text matching used to attribute this to a.zen).
-    dd := run_mod_verdicts("modules verdict (dotted user module ids)", [
+    dd = run_mod_verdicts("modules verdict (dotted user module ids)", [
         ModVerdictCase(
             files: [
                 ModFile(
@@ -3403,28 +3403,28 @@ harness_modules_run* = () i32 {
 // the entry inpath (mod_dir already ends in `/`, so `<dir>subject.zen` is a well-formed sibling path);
 // root is "." (the harness's cwd is the repo root). want = 0 via `.to_exit()` on the whole assertion.
 deep_src_table = (mp: MutPtr<Malloc>, dir: StringView) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{ Malloc } = std.mem.alloc\n{ resolve_program_data } = compiler.resolve\n{ to_exit } = std.core.bool\n{ contains } = std.text.str\nmain = () i32 {\n    a := Malloc(_: 0)\n    subject := \"left = left\\nright = right\\n{ plain } = plain\\nmain = () i32 { left.thing() + right.thing() + plain() }\\n\"\n    resolved := a.addr().resolve_program_data(\".\", \"", dir, "\", \"", dir, "subject.zen\", subject)\n    table := resolved.table\n    left := table.module(\"u/left\")\n    helper := table.module(\"u/helper\")\n    ok := (table.count() == 5)\n        && table.has(\"u/left\") && table.has(\"u/right\") && table.has(\"u/plain\") && table.has(\"u/helper\")\n        && left.graph.has(\"thing\") && helper.graph.has(\"value\")\n        && resolved.flat.contains(\"left__thing\") && resolved.flat.contains(\"plain\")\n        && (!resolved.flat.contains(\"left = left\")) && (resolved.body_start <= resolved.body_end)\n    ok.to_exit()\n}\n"])
 }
 deep_src_parsed = (mp: MutPtr<Malloc>, dir: StringView) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program } = compiler.resolve\n{ to_exit } = std.core.bool\n{ contains } = std.text.str\nmain = () i32 {\n    a := Malloc(_: 0)\n    subject := \"left = left\\nright = right\\n{ plain } = plain\\nmain = () i32 { left.thing() + right.thing() + plain() }\\n\"\n    program := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "subject.zen\", subject)\n    root := program.module(\"\")\n    left := program.module(\"u/left\")\n    helper := program.module(\"u/helper\")\n    ok := (program.count() == 5)\n        && (program.flat_decls.len == 5)\n        && (root.decls.len == 1) && root.body.contains(\"left__thing\") && (!root.body.contains(\"left = left\"))\n        && (left.decls.len == 1) && left.body.contains(\"helper__value\") && (!left.body.contains(\"helper = helper\"))\n        && (helper.decls.len == 1) && helper.body.contains(\"value\")\n    ok.to_exit()\n}\n"])
 }
 deep_src_check = (mp: MutPtr<Malloc>, dir: StringView) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, root_link_decls, check_parsed_program } = compiler.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain(3) }\\n\"\n    bad_ns := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1) + plain(3) }\\n\"\n    bad_plain := \"left = left\\n{ plain } = plain\\nmain = () i32 { left.thing(1, 2) + plain() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    nsp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_ns.zen\", bad_ns)\n    pp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "bad_plain.zen\", bad_plain)\n    lib := a.addr().root_link_decls(gp)\n    ok := (lib.len == 2)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_parsed_program(nsp) > 0)\n        && (a.addr().check_parsed_program(pp) > 0)\n    ok.to_exit()\n}\n"])
 }
 deep_src_check_all = (mp: MutPtr<Malloc>, dir: StringView) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{ Malloc } = std.mem.alloc\n{ resolve_parsed_program, module_link_decls, check_parsed_program, check_all_parsed_modules } = compiler.resolve\n{ to_exit } = std.core.bool\nmain = () i32 {\n    a := Malloc(_: 0)\n    good := \"left = left\\nmain = () i32 { left.thing() }\\n\"\n    gp := a.addr().resolve_parsed_program(\".\", \"", dir, "\", \"", dir, "good.zen\", good)\n    left := gp.module(\"u/left\")\n    lib := a.addr().module_link_decls(gp, left)\n    ok := (lib.len == 1)\n        && (a.addr().check_parsed_program(gp) == 0)\n        && (a.addr().check_all_parsed_modules(gp) > 0)\n    ok.to_exit()\n}\n"])
 }
 // escape "\n" (newline) → the literal backslash-n in a generated source so it can be embedded inside a
 // Zen string literal in the GENERATED program text. The byte we look for is ASCII 10.
 esc_nl = (mp: MutPtr<Malloc>, s: StringView) StringView {
-    out := mp.new_in().expect("harness: oom")
-    v: [u8] := s.view()
-    i: i64 := 0
-    n: i64 := len(s)
+    out ::= mp.new_in().expect("harness: oom")
+    v: [u8] = s.view()
+    i :: i64 = 0
+    n: i64 = len(s)
     @while (i < n) {
         (v[i] == 10).match ({
             true  => {

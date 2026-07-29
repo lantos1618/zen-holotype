@@ -70,7 +70,7 @@ gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
 // returns before splicing — see blk_diverges) and emits as a REAL `return`, leaving the enclosing C
 // function. Such a block diverges: its emitters (gen_switch_body / gen_cond) never use its value.
 gen_blockexpr = (s: String, alloc: MutPtr<Malloc>, b: BlockData) String {
-    out := s.gstr_append(alloc, "({ ")
+    out ::= s.gstr_append(alloc, "({ ")
     b.stmts.loop((h, i, st) {
         out = out.gen_block_one(alloc, st, i == b.stmts.len - 1).gstr_append(alloc, " ")
     })
@@ -137,7 +137,7 @@ gen_member = (s: String, alloc: MutPtr<Malloc>, m: MemberData) String {
     })
 }
 gen_loop = (s: String, alloc: MutPtr<Malloc>, l: LoopData) String {
-    out := s
+    out ::= s
     // GNU local labels are scoped to this statement-expression. Generic inlining may clone a loop
     // (and therefore its handler spelling) multiple times in one C function; ordinary labels would
     // collide function-wide and could bind a jump to the wrong clone.
@@ -168,7 +168,7 @@ gen_loop = (s: String, alloc: MutPtr<Malloc>, l: LoopData) String {
     out.gstr_append(alloc, l.h).gstr_append(alloc, "__b: ; 0; })")
 }
 gen_loop_body = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
-    out := s
+    out ::= s
     body.loop((h, i, st) {
         out = out.gen_stmt(alloc, st).gstr_append(alloc, " ")
     })
@@ -192,12 +192,12 @@ gen_loop_body = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
 // storage reintroduces a verified use-after-return for `f() [i32] { [1, 2, 3] }` — heap-by-default means
 // a misclassification is a leak, never a use-after-free.
 gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
-    n := slice_count(sd.items)
+    n = slice_count(sd.items)
     (n == 0).match ({
         true  => s.gstr_append(alloc, "(zslice){ .ptr = (void*)0, .len = 0 }"),
         false => {
-            tn := alloc.ty_cname_in(sd.elem)
-            out := s
+            tn = alloc.ty_cname_in(sd.elem)
+            out = s
                 .gstr_append(alloc, "({ ")
                 .gstr_append(alloc, tn)
                 .gstr_append(alloc, " _zsa[] = { ")
@@ -211,11 +211,11 @@ gen_slicelit = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
 // end of the ENCLOSING BLOCK — strictly longer than the call it is an argument to. No malloc, so nothing
 // to free. Only emitted where compiler.backend.c.c_escape proved the callee borrows the parameter.
 gen_slicelit_stack = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
-    n := slice_count(sd.items)
+    n = slice_count(sd.items)
     (n == 0).match ({
         true  => s.gstr_append(alloc, "(zslice){ .ptr = (void*)0, .len = 0 }"),
         false => {
-            out := s
+            out = s
                 .gstr_append(alloc, "(zslice){ .ptr = (void*)(")
                 .gstr_append(alloc, alloc.ty_cname_in(sd.elem))
                 .gstr_append(alloc, "[]){ ")
@@ -230,7 +230,7 @@ gen_slicelit_stack = (s: String, alloc: MutPtr<Malloc>, sd: SliceData) String {
 // member base / address-of target). A plain function call — not a macro — so comma-bearing operands
 // (compound literals etc.) parse as real C, and seq/idx each evaluate exactly once.
 gen_index = (s: String, alloc: MutPtr<Malloc>, ix: IndexData) String {
-    tn := alloc.ty_cname_in(ix.elem)
+    tn = alloc.ty_cname_in(ix.elem)
     s
         .gstr_append(alloc, "(*(")
         .gstr_append(alloc, tn)
@@ -271,15 +271,15 @@ gen_bin = (s: String, alloc: MutPtr<Malloc>, b: BinData) String {
                     .gen_expr(alloc, b.rhs)
                     .gstr_append(alloc, "); _Generic(_zml + _zmr, double:(int64_t)0, float:(int64_t)0, unsigned int: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), default: zen__modz((int64_t)_zml, (int64_t)_zmr)); })"),
                 false => {
-                    cast := b.rty.subword_ty()
-                    lead := cast.match ({
+                    cast = b.rty.subword_ty()
+                    lead = cast.match ({
                         true  => s
                             .gstr_append(alloc, "((")
                             .gstr_append(alloc, alloc.ty_cname_in(b.rty))
                             .gstr_append(alloc, ")("),
                         false => s.gstr_append(alloc, "("),
                     })
-                    mid := lead
+                    mid = lead
                         .gen_expr(alloc, b.lhs)
                         .gstr_append(alloc, " ")
                         .gstr_append(alloc, b.op)
@@ -329,8 +329,8 @@ sizeof_cname = (n: StringView) StringView {
 }
 // `sizeof(<type>)`: route a bare type-name Var through sizeof_cname; any other arg form emits as-is.
 gen_sizeof = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
-    out := s.gstr_append(alloc, "sizeof(")
-    body := (c.args.len > 0).match ({
+    out = s.gstr_append(alloc, "sizeof(")
+    body = (c.args.len > 0).match ({
         true  => c.args[0].addr().match ({
             .Var(v) => out.gstr_append(alloc, sizeof_cname(v.name)),
             _       => out.gen_arg_at(alloc, c, 0),
@@ -340,7 +340,7 @@ gen_sizeof = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
     body.gstr_append(alloc, ")")
 }
 call_kind = (name: StringView) EmitCallKind {
-    kind := EmitCallKind.Normal
+    kind ::= EmitCallKind.Normal
     (name == "__str_eq").then({
         kind = EmitCallKind.StrEq
     })
@@ -449,7 +449,7 @@ gen_call_default = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
 // escape (c_escape). Identical to gen_args except for that one classification; every other argument, and
 // every intrinsic's arguments (they never reach here), go through gen_expr and stay heap-promoted.
 gen_call_args = (s: String, alloc: MutPtr<Malloc>, fn: StringView, args: [Expr]) String {
-    out := s
+    out ::= s
     args.loop((h, i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
         out = arg.match ({
@@ -526,7 +526,7 @@ gen_call = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
 }
 // a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
 gen_args = (s: String, alloc: MutPtr<Malloc>, args: [Expr]) String {
-    out := s
+    out ::= s
     args.loop((h, i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
         out = out.gen_expr(alloc, arg.addr())
@@ -575,7 +575,7 @@ gen_cond_div = (s: String, alloc: MutPtr<Malloc>, d: CondData) String {
         .gstr_append(alloc, " _out; })")
 }
 gen_mkenum = (s: String, alloc: MutPtr<Malloc>, m: MakeEnumData) String {
-    head := s
+    head = s
         .gstr_append(alloc, "(")
         .gstr_append(alloc, m.mty)
         .gstr_append(alloc, "){ .tag = ")
@@ -591,7 +591,7 @@ gen_mkenum = (s: String, alloc: MutPtr<Malloc>, m: MakeEnumData) String {
 }
 // a struct literal: `(T){ .a = …, .b = … }` (a C compound literal, designated initializers)
 gen_mkstruct = (s: String, alloc: MutPtr<Malloc>, m: MakeStructData) String {
-    out := s.gstr_append(alloc, "(").gstr_append(alloc, m.mty).gstr_append(alloc, "){ ")
+    out ::= s.gstr_append(alloc, "(").gstr_append(alloc, m.mty).gstr_append(alloc, "){ ")
     m.inits.loop((h, i, fi) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // mty = the monomorphized name for a generic literal
         // comma between, not before
@@ -686,7 +686,7 @@ gen_match_type_expr = (
     arms: [ArmData],
     i: i64,
 ) String {
-    j := arms.next_live_arm(i)
+    j = arms.next_live_arm(i)
     (j >= arms.len).match ({
         true  => s.gstr_append(alloc, "0"),
         false => (arms.next_live_arm(j + 1) >= arms.len).match ({
@@ -812,7 +812,7 @@ gen_switch_arm = (
     (a.variant == "_").match ({
         true  => s.gen_switch_default(alloc, subj, sep, a),
         false => {
-            out := s.gen_switch_case(alloc, subj, sep, ename, a)
+            out = s.gen_switch_case(alloc, subj, sep, ename, a)
             last.then({ out.gen_switch_panic_default(alloc) }, { out })
         },
     })
@@ -829,7 +829,7 @@ gen_switch_stmt_arm = (
     (a.variant == "_").match ({
         true  => s.gen_switch_stmt_default(alloc, subj, sep, a),
         false => {
-            out := s.gen_switch_stmt_case(alloc, subj, sep, ename, a)
+            out = s.gen_switch_stmt_case(alloc, subj, sep, ename, a)
             last.then({ out.gen_switch_panic_default(alloc) }, { out })
         },
     })
@@ -846,7 +846,7 @@ gen_switch_arms = (
     (i >= arms.len).match ({
         true  => s,
         false => {
-            out := s.gen_switch_arm(alloc, subj, sep, ename, arms[i], i == arms.len - 1)
+            out = s.gen_switch_arm(alloc, subj, sep, ename, arms[i], i == arms.len - 1)
             (arms[i].variant == "_").match ({
                 true  => out,
                 false => out.gen_switch_arms(alloc, subj, sep, ename, arms, i + 1),
@@ -866,7 +866,7 @@ gen_switch_stmt_arms = (
     (i >= arms.len).match ({
         true  => s,
         false => {
-            out := s.gen_switch_stmt_arm(alloc, subj, sep, ename, arms[i], i == arms.len - 1)
+            out = s.gen_switch_stmt_arm(alloc, subj, sep, ename, arms[i], i == arms.len - 1)
             (arms[i].variant == "_").match ({
                 true  => out,
                 false => out.gen_switch_stmt_arms(alloc, subj, sep, ename, arms, i + 1),
@@ -877,7 +877,7 @@ gen_switch_stmt_arms = (
 // the subject can be any expression, so bind it once to a temp. Enum matches emit as a switch inside a
 // GCC statement-expression; `__typeof__(first_arm)` gives us the result type without evaluating an arm.
 gen_match = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
-    sep := m.ptr.then({ "->" }, { "." })
+    sep = m.ptr.then({ "->" }, { "." })
     s
         .gstr_append(alloc, "({ __auto_type _subj = ")
         .gen_expr(alloc, m.subj)
@@ -890,7 +890,7 @@ gen_match = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
         .gstr_append(alloc, "} _out; })")
 }
 gen_match_stmt = (s: String, alloc: MutPtr<Malloc>, m: MatchData) String {
-    sep := m.ptr.then({ "->" }, { "." })
+    sep = m.ptr.then({ "->" }, { "." })
     s
         .gstr_append(alloc, "{ __auto_type _subj = ")
         .gen_expr(alloc, m.subj)
@@ -986,14 +986,14 @@ gen_stmt_void = (s: String, alloc: MutPtr<Malloc>, st: Stmt) String {
 }
 // emit a brace-wrapped block: `{ s1; s2; … }`
 gen_block* = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
-    open := s.gstr_append(alloc, "{ ")
+    open ::= s.gstr_append(alloc, "{ ")
     body.loop((h, i, st) {
         open = open.gen_stmt_effect(alloc, st).gstr_append(alloc, " ")
     })
     open.gstr_append(alloc, "}")
 }
 gen_block_void* = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
-    open := s.gstr_append(alloc, "{ ")
+    open ::= s.gstr_append(alloc, "{ ")
     body.loop((h, i, st) {
         open = open.gen_stmt_void(alloc, st).gstr_append(alloc, " ")
     })

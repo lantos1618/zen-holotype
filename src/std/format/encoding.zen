@@ -19,8 +19,8 @@
 { Result, IoError, ok, err, expect } = std.core.result
 { view } = std.text.str
 { hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode (centralized in std.text.ascii)
-ENC_BAD_LEN := 22    // EINVAL — input length is not a valid base64/hex codeword multiple
-ENC_BAD_CHAR := 84    // EILSEQ — a byte outside the alphabet (or a misplaced `=` pad)
+ENC_BAD_LEN = 22    // EINVAL — input length is not a valid base64/hex codeword multiple
+ENC_BAD_CHAR = 84    // EILSEQ — a byte outside the alphabet (or a misplaced `=` pad)
 // ── base64 ────────────────────────────────────────────────────────────────────
 // sextet value (0..63) -> its RFC 4648 alphabet byte.
 b64_char = (v: i64) u8 {
@@ -53,7 +53,7 @@ b64_val = (c: u8) i64 {
 }
 // trailing `=` padding count (0..2). Caller guarantees sv.len is a positive multiple of 4.
 b64_pad = (sv: [u8]) i64 {
-    n := sv.len
+    n = sv.len
     (sv[n - 1] == '=').match ({
         true  => (sv[n - 2] == '=').then({ 2 }, { 1 }),
         false => 0,
@@ -61,19 +61,19 @@ b64_pad = (sv: [u8]) i64 {
 }
 // base64-encode `data`. Output length is 4*ceil(n/3) with `=` padding; empty input yields "".
 base64_encode* = (a: Allocator, data: [u8]) StringView {
-    n := data.len
-    ngroups := (n + 2) / 3
-    olen := ngroups * 4
-    out: [u8] := a
+    n = data.len
+    ngroups = (n + 2) / 3
+    olen = ngroups * 4
+    out :: [u8] = a
         .try_acquire(olen + 1)
         .expect("std.format.encoding: out of memory")
         .slice(olen + 1)
-    oi: i64 := 0
-    b0: i64 := 0
-    b1: i64 := 0
-    b2: i64 := 0
+    oi :: i64 = 0
+    b0 :: i64 = 0
+    b1 :: i64 = 0
+    b2 :: i64 = 0
     // `k` = bytes buffered in the current 3-byte group (0..3); every 3 bytes flush 4 chars.
-    k: i64 := 0
+    k :: i64 = 0
     data.loop((h, i, b) {
         (k == 0).match ({
             true  => {
@@ -117,36 +117,35 @@ base64_encode_in* = (a: Allocator, data: [u8]) StringView { a.base64_encode(data
 // base64-decode `s`. `.Err(.Errno(ENC_BAD_LEN))` when the length is not a multiple of 4;
 // `.Err(.Errno(ENC_BAD_CHAR))` on any byte outside the alphabet (incl. a misplaced `=`).
 base64_decode* = (a: Allocator, s: StringView) Result<[u8], IoError> {
-    sv := s.view()
-    n := sv.len
+    sv = s.view()
+    n = sv.len
     (n == 0).match ({
         true  => ok(slice(null_ptr(), 0)),
         false => (n % 4 != 0).match ({
             true  => err(IoError.Errno(ENC_BAD_LEN)),
             false => {
-                pad := sv.b64_pad()
-                ngroups := n / 4
-                olen := ngroups * 3 - pad
+                pad = sv.b64_pad()
+                ngroups = n / 4
+                olen = ngroups * 3 - pad
                 a.try_acquire(olen).match ({
                     .Ok(p)  => {
-                        out: [u8] := p.slice(olen)
-                        oi: i64 := 0
-                        s0: i64 := 0
-                        s1: i64 := 0
-                        s2: i64 := 0
-                        bad := false
+                        out :: [u8] = p.slice(olen)
+                        oi :: i64 = 0
+                        s0 :: i64 = 0
+                        s1 :: i64 = 0
+                        s2 :: i64 = 0
+                        bad ::= false
                         sv.loop((h, i, c) {
                             bad.match ({
                                 true  => {
                                     h.break
                                 },
                                 false => {
-                                    pos := i % 4
-                                    g := i / 4
-                                    last := g == ngroups - 1
-                                    padslot := last
-                                        && (pos == 3 && pad >= 1 || pos == 2 && pad == 2)
-                                    val := (c == '=').match ({
+                                    pos = i % 4
+                                    g = i / 4
+                                    last = g == ngroups - 1
+                                    padslot = last && (pos == 3 && pad >= 1 || pos == 2 && pad == 2)
+                                    val = (c == '=').match ({
                                         true  => padslot.match ({
                                             true  => 0,
                                             false => {
@@ -155,7 +154,7 @@ base64_decode* = (a: Allocator, s: StringView) Result<[u8], IoError> {
                                             },
                                         }),
                                         false => {
-                                            v := c.b64_val()
+                                            v = c.b64_val()
                                             (v < 0).then({
                                                 bad = true
                                             })
@@ -177,7 +176,7 @@ base64_decode* = (a: Allocator, s: StringView) Result<[u8], IoError> {
                                                 false => {
                                                     // pos == 3: whole codeword read — emit (3 - pad) bytes for the last group.
                                                     (bad == false).then({
-                                                        nout := last.then({ 3 - pad }, { 3 })
+                                                        nout = last.then({ 3 - pad }, { 3 })
                                                         (nout >= 1).then({
                                                             out[oi] = (s0 << 2 | s1 >> 4).to_u8()
                                                             oi = oi + 1
@@ -216,14 +215,14 @@ base64_decode_in* = (a: Allocator, s: StringView) Result<[u8], IoError> { a.base
 // ── hex ───────────────────────────────────────────────────────────────────────
 // lowercase-hex-encode `data`. Output length is 2*n; empty input yields "".
 hex_encode* = (a: Allocator, data: [u8]) StringView {
-    n := data.len
-    olen := n * 2
-    out: [u8] := a
+    n = data.len
+    olen = n * 2
+    out :: [u8] = a
         .try_acquire(olen + 1)
         .expect("std.format.encoding: out of memory")
         .slice(olen + 1)
     data.loop((h, i, b) {
-        v := b.to_i64()
+        v = b.to_i64()
         out[i * 2] = hex_char(v >> 4)
         out[i * 2 + 1] = hex_char(v & 15)
     })
@@ -234,21 +233,21 @@ hex_encode_in* = (a: Allocator, data: [u8]) StringView { a.hex_encode(data) }
 // hex-decode `s` (either case). `.Err(.Errno(ENC_BAD_LEN))` when the length is odd;
 // `.Err(.Errno(ENC_BAD_CHAR))` on any non-hex byte.
 hex_decode* = (a: Allocator, s: StringView) Result<[u8], IoError> {
-    sv := s.view()
-    n := sv.len
+    sv = s.view()
+    n = sv.len
     (n % 2 != 0).match ({
         true  => err(IoError.Errno(ENC_BAD_LEN)),
         false => {
-            olen := n / 2
+            olen = n / 2
             (olen == 0).match ({
                 true  => ok(slice(null_ptr(), 0)),
                 false => a.try_acquire(olen).match ({
                     .Ok(p)  => {
-                        out: [u8] := p.slice(olen)
-                        bad := false
+                        out :: [u8] = p.slice(olen)
+                        bad ::= false
                         out.loop((h, i, b) {
-                            hi := sv[i * 2].hex_nibble()
-                            lo := sv[i * 2 + 1].hex_nibble()
+                            hi = sv[i * 2].hex_nibble()
+                            lo = sv[i * 2 + 1].hex_nibble()
                             (hi < 0 || lo < 0).match ({
                                 true  => {
                                     bad = true

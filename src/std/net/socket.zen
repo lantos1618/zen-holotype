@@ -45,13 +45,13 @@ setsockopt = (fd: i32, level: i32, optname: i32, optval: RawPtr<u8>, optlen: i32
 // so a listener created on port 0 can report the ephemeral port the kernel actually assigned.
 getsockname = (fd: i32, addr: RawPtr<u8>, addrlen: RawPtr<u8>) i32
 // ── Linux x86-64 constants ─────────────────────────────────────────────────────────────────────────
-AF_INET := 2    // IPv4 address family
-SOCK_STREAM := 1    // reliable byte stream (TCP)
-IPPROTO := 0    // 0 lets the kernel pick TCP for a SOCK_STREAM socket
-SOL_SOCKET := 1    // socket-level option level
-SO_REUSEADDR := 2    // reuse a local address still in TIME_WAIT
-SOCKADDR_LEN := 16    // sizeof(struct sockaddr_in) on this ABI
-BACKLOG := 128    // pending-connection queue depth
+AF_INET = 2    // IPv4 address family
+SOCK_STREAM = 1    // reliable byte stream (TCP)
+IPPROTO = 0    // 0 lets the kernel pick TCP for a SOCK_STREAM socket
+SOL_SOCKET = 1    // socket-level option level
+SO_REUSEADDR = 2    // reuse a local address still in TIME_WAIT
+SOCKADDR_LEN = 16    // sizeof(struct sockaddr_in) on this ABI
+BACKLOG = 128    // pending-connection queue depth
 // ── handles: a file descriptor is the raw floor ─────────────────────────────────────────────────────
 TcpListener*: {
     fd: i32,
@@ -60,12 +60,12 @@ TcpListener*: {
         with_scratch(8, (lenc) {
             with_scratch(SOCKADDR_LEN, (cell) {
                 store_i64(lenc, SOCKADDR_LEN)    // socklen_t in/out; low 4 bytes = 16
-                r := l.fd.getsockname(cell, lenc)
+                r = l.fd.getsockname(cell, lenc)
                 (r < 0).match ({
                     true  => 0,
                     false => {
-                        hi := to_i64(cell.offset(2).load())    // sin_port is network order (big-endian)
-                        lo := to_i64(cell.offset(3).load())
+                        hi = to_i64(cell.offset(2).load())    // sin_port is network order (big-endian)
+                        lo = to_i64(cell.offset(3).load())
                         to_i32(hi * 256 + lo)
                     },
                 })
@@ -74,7 +74,7 @@ TcpListener*: {
     }
     // block until the next client connects; returns its `TcpConn` or the accept errno.
     accept_conn = (l: TcpListener) Result<TcpConn, IoError> {
-        fd := l.fd.accept(null_ptr(), null_ptr())
+        fd = l.fd.accept(null_ptr(), null_ptr())
         errno_or(fd, TcpConn(fd: fd))
     }
     // stop listening (close the passive socket).
@@ -85,7 +85,7 @@ TcpConn*: {
     // read up to `n` bytes into the caller-owned `buf`; returns the count (0 = peer closed) or errno. The
     // low-level read — no allocation, the caller sizes the buffer.
     recv_into = (c: TcpConn, buf: RawPtr<u8>, n: i64) Result<i64, IoError> {
-        r := c.fd.read(buf, n)
+        r = c.fd.read(buf, n)
         errno_or(to_i32(r), r)
     }
     // write every byte of `bytes`; Ok(count) on a full write, .Err(.Eof) on a short/failed write. Rides
@@ -122,7 +122,7 @@ parse_octets = (v: [u8], i: i64, cell: RawPtr<u8>, octet: i64, count: i64, seen:
             false => 0 - 1,
         }),
         false => {
-            b := v[i]
+            b = v[i]
             (b == '.').match ({
                 true  => (seen && count < 3 && octet <= 255).match ({
                     true  => {
@@ -176,22 +176,22 @@ set_reuse = (fd: i32) void {
 // IPv4 dotted-quad or "localhost"; "0.0.0.0" binds every interface. Returns a ready `TcpListener` whose
 // accept queue is `BACKLOG` deep, or the first failing step's errno.
 serve* = (host: StringView, port: i32) Result<TcpListener, IoError> {
-    fd := socket(AF_INET, SOCK_STREAM, IPPROTO)
-    out: Result<TcpListener, IoError> := (fd < 0).match ({
+    fd = socket(AF_INET, SOCK_STREAM, IPPROTO)
+    out: Result<TcpListener, IoError> = (fd < 0).match ({
         true  => err(IoError.Errno(fd)),
         false => {
             fd.set_reuse()
             with_scratch(SOCKADDR_LEN, (cell) {
                 fill_sockaddr(cell, host, port).match ({
                     true  => {
-                        b := fd.bind(cell, to_i32(SOCKADDR_LEN))
+                        b = fd.bind(cell, to_i32(SOCKADDR_LEN))
                         (b < 0).match ({
                             true  => {
                                 fd.close()
                                 err(IoError.Errno(b))
                             },
                             false => {
-                                lr := fd.listen(BACKLOG)
+                                lr = fd.listen(BACKLOG)
                                 (lr < 0).match ({
                                     true  => {
                                         fd.close()
@@ -216,14 +216,14 @@ serve* = (host: StringView, port: i32) Result<TcpListener, IoError> {
 // open an active TCP connection to `host:port` ("localhost"/dotted-quad). Returns a live `TcpConn`
 // or the failing step's errno. Blocking: connect returns once the handshake completes.
 dial* = (host: StringView, port: i32) Result<TcpConn, IoError> {
-    fd := socket(AF_INET, SOCK_STREAM, IPPROTO)
-    out: Result<TcpConn, IoError> := (fd < 0).match ({
+    fd = socket(AF_INET, SOCK_STREAM, IPPROTO)
+    out: Result<TcpConn, IoError> = (fd < 0).match ({
         true  => err(IoError.Errno(fd)),
         false => {
             with_scratch(SOCKADDR_LEN, (cell) {
                 fill_sockaddr(cell, host, port).match ({
                     true  => {
-                        r := fd.connect(cell, to_i32(SOCKADDR_LEN))
+                        r = fd.connect(cell, to_i32(SOCKADDR_LEN))
                         (r < 0).match ({
                             true  => {
                                 fd.close()
@@ -247,8 +247,8 @@ dial* = (host: StringView, port: i32) Result<TcpConn, IoError> {
 recv* = (a: Allocator, c: TcpConn, n: i64) Result<StringView, IoError> {
     a.try_acquire(n + 1).match ({
         .Ok(buf) => {
-            r := c.fd.read(buf, n)
-            out: Result<StringView, IoError> := (r < 0).match ({
+            r = c.fd.read(buf, n)
+            out: Result<StringView, IoError> = (r < 0).match ({
                 true  => {
                     a.release(buf)
                     err(IoError.Errno(to_i32(r)))

@@ -21,13 +21,13 @@
 { malloc, free } = std.mem.alloc
 pa = std.concurrent.pool_actor
 { Context, Receiver } = std.concurrent.pool_actor
-NSERV := 8
-NREQ := 8000
-WORKERS := 4
-SCAP := 1100    // server mailbox cap ≥ NREQ/NSERV (worst-case backlog to one server) → no drops
-CCAP := 8100    // client mailbox cap ≥ NREQ (worst case: every reply queued before the client runs)
-SPH := 16    // sizeof(PooledHandle<Server>) = 2 RawPtr; sizeof-of-a-generic-instance does not parse
-shandles := malloc(NSERV * SPH)
+NSERV = 8
+NREQ = 8000
+WORKERS = 4
+SCAP = 1100    // server mailbox cap ≥ NREQ/NSERV (worst-case backlog to one server) → no drops
+CCAP = 8100    // client mailbox cap ≥ NREQ (worst case: every reply queued before the client runs)
+SPH = 16    // sizeof(PooledHandle<Server>) = 2 RawPtr; sizeof-of-a-generic-instance does not parse
+shandles = malloc(NSERV * SPH)
 // a request: a value to compute + the requester's reply-address (an ActorRef — a RawPtr pair, so the
 // whole message is a sendable `frozen` payload).
 Req*: {
@@ -49,7 +49,7 @@ Server.impl(Receiver, {
     receive = (s: MutPtr<Server>, ctx: Context<ReqMsg>) void {
         ctx.msg.match ({
             .Ask(req) => {
-                result := req.n * 2 + 1
+                result = req.n * 2 + 1
                 req.reply_to.ref_send_msg(ReplyMsg.Ans(Reply(
                     id: req.id,
                     result: result,
@@ -76,28 +76,28 @@ Client.impl(Receiver, {
 })
 // concrete per-(Msg, ActorT) trampolines (Zen inlines generic fns → their address can't be taken).
 serv_tramp = (user: RawPtr<u8>, msg: i64) void {
-    a: [Server] := user.slice(1)
-    b: [ReqMsg] := msg.offset(0).slice(1)
+    a: [Server] = user.slice(1)
+    b: [ReqMsg] = msg.offset(0).slice(1)
     a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
 cli_tramp = (user: RawPtr<u8>, msg: i64) void {
-    a: [Client] := user.slice(1)
-    b: [ReplyMsg] := msg.offset(0).slice(1)
+    a: [Client] = user.slice(1)
+    b: [ReplyMsg] = msg.offset(0).slice(1)
     a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
 sslot = () [pa.PooledHandle<Server>] { shandles.slice(NSERV) }
 spawn_servers = (i: i64) void {
     (i < NSERV).then({
-        ss := sslot()
+        ss ::= sslot()
         ss[i] = pa.spawn_actor_heap(SCAP, Server(tag: 0), serv_tramp)
         spawn_servers(i + 1)
     })
 }
 fire = (p: MutPtr<Pool>, cref: ActorRef, i: i64) void {
     (i < NREQ).then({
-        ss := sslot()
+        ss = sslot()
         p.send(ss[i % NSERV], ReqMsg.Ask(Req(
             id: i,
             n: i,
@@ -108,34 +108,34 @@ fire = (p: MutPtr<Pool>, cref: ActorRef, i: i64) void {
 }
 close_servers = (i: i64) void {
     (i < NSERV).then({
-        ss := sslot()
+        ss = sslot()
         pa.close(ss[i])
         close_servers(i + 1)
     })
 }
 main = () i32 {
     spawn_servers(0)
-    hc := pa.spawn_actor_heap(CCAP, Client(
+    hc = pa.spawn_actor_heap(CCAP, Client(
         sum: 0,
         count: 0,
         id_sum: 0,
     ), cli_tramp)
-    p := pool_open(WORKERS, NSERV + 16)
-    cref := hc.ref_of(p)    // the client's SENDABLE reply-address (built once p exists)
+    p = pool_open(WORKERS, NSERV + 16)
+    cref = hc.ref_of(p)    // the client's SENDABLE reply-address (built once p exists)
     fire(p, cref, 0)
     p.pool_quiesce_stop()
     p.workers_busy()    // observed to exercise the API post-quiesce; see note below — NON-FATAL
-    dropped := p.pool_dropped()
-    cst := pa.actor_state(hc)
-    got_count := cst.count
-    got_sum := cst.sum
-    got_id := cst.id_sum
+    dropped = p.pool_dropped()
+    cst = pa.actor_state(hc)
+    got_count = cst.count
+    got_sum = cst.sum
+    got_id = cst.id_sum
     close_servers(0)
     pa.close(hc)
     p.pool_close()
     free(shandles)
-    exp_sum := NREQ * NREQ    // Σ_{i<N}(2i+1) = N²
-    exp_id := NREQ * (NREQ - 1) / 2    // Σ_{i<N} i
+    exp_sum = NREQ * NREQ    // Σ_{i<N}(2i+1) = N²
+    exp_id = NREQ * (NREQ - 1) / 2    // Σ_{i<N} i
     // `busy >= 2` used to gate the exit code, but it is a MACHINE observation, not a correctness
     // property: on a starved runner (CI fans many harness suites across few cores) one worker can
     // legally drain every mailbox before a second is ever scheduled. That flaked exit 3 on a correct

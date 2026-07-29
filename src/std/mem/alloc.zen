@@ -44,8 +44,8 @@ heap_request_acquire = (n: i64) RawPtr<u8> {
 heap_resize* = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
     hs_owns(p).match ({
         true  => {
-            keep := hs_size(p)
-            q := hs_alloc(n)
+            keep = hs_size(p)
+            q = hs_alloc(n)
             (q == null_ptr()).match ({
                 true  => q,
                 false => {
@@ -89,9 +89,9 @@ heap_release* = (state: RawPtr<u8>, p: RawPtr<u8>) void {
 HS_HDR = () i64 { 32 }
 HS_BLK = () i64 { 16 }
 HS_CHUNK0 = () i64 { 4194304 }
-hs_on := false
-hs_head := null_ptr()
-hs_cur := null_ptr()
+hs_on ::= false
+hs_head ::= null_ptr()
+hs_cur ::= null_ptr()
 hs_next = (c: RawPtr<u8>) RawPtr<u8> { load_i64(c).offset(0) }
 hs_set_next = (c: RawPtr<u8>, nx: RawPtr<u8>) void { store_i64(c, to_i64(nx)) }
 hs_cap = (c: RawPtr<u8>) i64 { load_i64(c.offset(8)) }
@@ -99,7 +99,7 @@ hs_off = (c: RawPtr<u8>) i64 { load_i64(c.offset(16)) }
 hs_set_off = (c: RawPtr<u8>, v: i64) void { store_i64(c.offset(16), v) }
 hs_size = (p: RawPtr<u8>) i64 { load_i64(p.offset(0 - HS_BLK())) }
 hs_chunk = (cap: i64) RawPtr<u8> {
-    c := malloc(HS_HDR() + cap)
+    c = malloc(HS_HDR() + cap)
     (c == null_ptr()).match ({
         true  => c,
         false => {
@@ -112,7 +112,7 @@ hs_chunk = (cap: i64) RawPtr<u8> {
 }
 // the chunk that can serve `need` bytes: the current one while it has room, else the next link.
 hs_fit = (need: i64) RawPtr<u8> {
-    c := hs_cur
+    c = hs_cur
     (c != null_ptr() && hs_cap(c) - hs_off(c) >= need).then({ c }, { hs_extend(need) })
 }
 // Walk to the next chunk the chain ALREADY holds (a request recycling the previous request's memory)
@@ -120,7 +120,7 @@ hs_fit = (need: i64) RawPtr<u8> {
 // chunk of at least double the last in front of it — splicing rather than appending so no existing
 // chunk is ever orphaned.
 hs_extend = (need: i64) RawPtr<u8> {
-    nxt := (hs_cur == null_ptr()).then({ hs_head }, { hs_next(hs_cur) })
+    nxt = (hs_cur == null_ptr()).then({ hs_head }, { hs_next(hs_cur) })
     (nxt != null_ptr() && hs_cap(nxt) >= need).match ({
         true  => {
             hs_set_off(nxt, 0)
@@ -128,8 +128,8 @@ hs_extend = (need: i64) RawPtr<u8> {
             nxt
         },
         false => {
-            grow := (hs_cur == null_ptr()).then({ HS_CHUNK0() }, { hs_cap(hs_cur) * 2 })
-            fresh := hs_chunk((grow < need).then({ need }, { grow }))
+            grow = (hs_cur == null_ptr()).then({ HS_CHUNK0() }, { hs_cap(hs_cur) * 2 })
+            fresh = hs_chunk((grow < need).then({ need }, { grow }))
             (fresh == null_ptr()).match ({
                 true  => fresh,
                 false => {
@@ -153,12 +153,12 @@ hs_extend = (need: i64) RawPtr<u8> {
 }
 // bump `n` bytes out of the open scope; null when the chain cannot grow (the OOM contract of malloc).
 hs_alloc = (n: i64) RawPtr<u8> {
-    need := HS_BLK() + (n + 15) / 16 * 16
-    c := (need < 0).then({ null_ptr() }, { hs_fit(need) })
+    need = HS_BLK() + (n + 15) / 16 * 16
+    c = (need < 0).then({ null_ptr() }, { hs_fit(need) })
     (c == null_ptr()).match ({
         true  => c,
         false => {
-            p := c.offset(HS_HDR() + hs_off(c))
+            p = c.offset(HS_HDR() + hs_off(c))
             hs_set_off(c, hs_off(c) + need)
             store_i64(p, n)
             p.offset(HS_BLK())
@@ -168,7 +168,7 @@ hs_alloc = (n: i64) RawPtr<u8> {
 // is `p` a block this scope's chunks handed out? The chain is a handful of links, so this is a few
 // range compares — and exactly one null test in a process that never opens a scope.
 hs_in_chunk = (c: RawPtr<u8>, a: i64) bool {
-    base := to_i64(c) + HS_HDR()
+    base = to_i64(c) + HS_HDR()
     a >= base && a < base + hs_cap(c)
 }
 hs_owns_from = (c: RawPtr<u8>, a: i64) bool {
@@ -230,11 +230,11 @@ val_slot*<T> = (base: RawPtr<u8>) [T] { slice(base.offset(8), 1) }
 // the block's base pointer (allocation failure stays in the Result). rc/arc/own `new_in` wrap the
 // returned base in their own pointer type; the count-bump and teardown differences stay per-type.
 rc_block_new_in*<T, A: Allocator> = (a: MutPtr<A>, x: T) Result<RawPtr<u8>, IoError> {
-    v := x
+    v = x
     a.try_acquire(8 + sizeof(T)).match ({
         .Ok(base) => {
             store_i64(base, 1)
-            s := val_slot<T>(base)
+            s ::= val_slot<T>(base)
             s[0] = v
             ok(base)
         },
@@ -262,7 +262,7 @@ try_acquire2*<A: Allocator> = (a: MutPtr<A>, n1: i64, n2: i64) Result<Buf2, IoEr
         .Ok(b1) => {
             a.try_acquire(n2).match ({
                 .Ok(b2) => {
-                    ok: Result<Buf2, IoError> := .Ok(Buf2(
+                    ok: Result<Buf2, IoError> = .Ok(Buf2(
                         b1: b1,
                         b2: b2,
                     ))
@@ -270,13 +270,13 @@ try_acquire2*<A: Allocator> = (a: MutPtr<A>, n1: i64, n2: i64) Result<Buf2, IoEr
                 },
                 .Err(e) => {
                     a.release(b1)
-                    err: Result<Buf2, IoError> := .Err(e)
+                    err: Result<Buf2, IoError> = .Err(e)
                     err
                 },
             })
         },
         .Err(e) => {
-            err: Result<Buf2, IoError> := .Err(e)
+            err: Result<Buf2, IoError> = .Err(e)
             err
         },
     })
@@ -288,7 +288,7 @@ try_acquire3*<A: Allocator> = (a: MutPtr<A>, n1: i64, n2: i64, n3: i64) Result<B
                 .Ok(b2) => {
                     a.try_acquire(n3).match ({
                         .Ok(b3) => {
-                            ok: Result<Buf3, IoError> := .Ok(Buf3(
+                            ok: Result<Buf3, IoError> = .Ok(Buf3(
                                 b1: b1,
                                 b2: b2,
                                 b3: b3,
@@ -298,20 +298,20 @@ try_acquire3*<A: Allocator> = (a: MutPtr<A>, n1: i64, n2: i64, n3: i64) Result<B
                         .Err(e) => {
                             a.release(b1)
                             a.release(b2)
-                            err: Result<Buf3, IoError> := .Err(e)
+                            err: Result<Buf3, IoError> = .Err(e)
                             err
                         },
                     })
                 },
                 .Err(e) => {
                     a.release(b1)
-                    err: Result<Buf3, IoError> := .Err(e)
+                    err: Result<Buf3, IoError> = .Err(e)
                     err
                 },
             })
         },
         .Err(e) => {
-            err: Result<Buf3, IoError> := .Err(e)
+            err: Result<Buf3, IoError> = .Err(e)
             err
         },
     })
@@ -332,15 +332,15 @@ DynAlloc*: {
 }
 DynAlloc.impl(Allocator, {
     acquire = (s: MutPtr<DynAlloc>, n: i64) RawPtr<u8> {
-        d := s.load()
+        d = s.load()
         d.d_acquire(d.state, n)
     }
     resize = (s: MutPtr<DynAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
-        d := s.load()
+        d = s.load()
         d.d_resize(d.state, p, n)
     }
     release = (s: MutPtr<DynAlloc>, p: RawPtr<u8>) void {
-        d := s.load()
+        d = s.load()
         d.d_release(d.state, p)
     }
 })
@@ -367,15 +367,15 @@ dyn_of* = (
 dyn_from*<A: Allocator> = (a: MutPtr<A>) DynAlloc {
     DynAlloc(
         d_acquire: (s: RawPtr<u8>, n: i64) RawPtr<u8> {
-            r: MutPtr<A> := s
+            r: MutPtr<A> = s
             r.acquire(n)
         },
         d_resize: (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
-            r: MutPtr<A> := s
+            r: MutPtr<A> = s
             r.resize(p, n)
         },
         d_release: (s: RawPtr<u8>, p: RawPtr<u8>) {
-            r: MutPtr<A> := s
+            r: MutPtr<A> = s
             r.release(p)
         },
         state: a.offset(0),

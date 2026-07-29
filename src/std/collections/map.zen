@@ -86,7 +86,7 @@ Map*<T>: {
         (m.cap == 0).then({ 0 - 1 }, { mfind(m.keys(), m.index(), m.cap, mhash(k, m.cap), k) })
     }
     set = (m: Map<T>, i: i64, v: T) Map<T> {
-        vals := m.vals()
+        vals ::= m.vals()
         vals[i] = v
         m
     }
@@ -95,29 +95,29 @@ Map*<T>: {
     get_opt = (m: Map<T>, k: StringView) Opt<T> {
         // The value under k as an option: .Some(v) if present, .None if absent. Unlike `get(k, dflt)`,
         // this distinguishes an absent key from a stored value that happens to equal the default.
-        i := m.find(k)
-        out: Opt<T> := (i < 0).then({ .None }, { .Some(m.vals()[i]) })
+        i = m.find(k)
+        out: Opt<T> = (i < 0).then({ .None }, { .Some(m.vals()[i]) })
         out
     }
     has = (m: Map<T>, k: StringView) bool { m.find(k) >= 0 }
     grow = (m: Map<T>, a: Allocator) Result<Map<T>, IoError> {
-        cap := m.cap * 2 + 1
+        cap = m.cap * 2 + 1
         a.try_acquire3(cap * sizeof(MKey), cap * sizeof(T), cap * 2 * sizeof(MIdx)).match ({
             .Ok(bufs) => {
-                kp := bufs.b1
-                vp := bufs.b2
-                ip := bufs.b3
-                oldks := m.keys()
-                oldvs := m.vals()
-                next := Map<T>(
+                kp = bufs.b1
+                vp = bufs.b2
+                ip = bufs.b3
+                oldks = m.keys()
+                oldvs = m.vals()
+                next = Map<T>(
                     keys: kp,
                     vals: vp,
                     idx: ip,
                     len: m.len,
                     cap: cap,
                 )
-                keys := next.keys()
-                vals := next.vals()
+                keys ::= next.keys()
+                vals ::= next.vals()
                 oldks.loop((h, i, k) {
                     (i < m.len).match ({
                         true  => {
@@ -132,19 +132,19 @@ Map*<T>: {
                 a.release(m.keys)
                 a.release(m.vals)
                 a.release(m.idx)
-                ok: Result<Map<T>, IoError> := .Ok(next.reindex())
+                ok: Result<Map<T>, IoError> = .Ok(next.reindex())
                 ok
             },
             .Err(e)   => {
-                err: Result<Map<T>, IoError> := .Err(e)
+                err: Result<Map<T>, IoError> = .Err(e)
                 err
             },
         })
     }
     reindex = (m: Map<T>) Map<T> {
         // Rebuild the hash index from the live key column. O(len).
-        ix := m.index()
-        cap := m.cap
+        ix ::= m.index()
+        cap = m.cap
         ix.loop((h, i, v) {
             // clear all bucket heads to -1
             (i < cap).match ({
@@ -156,11 +156,11 @@ Map*<T>: {
                 },
             })
         })
-        ks := m.keys()
+        ks = m.keys()
         ks.loop((h, i, k) {
             (i < m.len).match ({
                 true  => {
-                    b := mhash(k, cap)
+                    b = mhash(k, cap)
                     ix[cap + i] = ix[b]
                     ix[b] = i
                 },
@@ -173,22 +173,22 @@ Map*<T>: {
     }
     link = (m: Map<T>, slot: i64) Map<T> {
         // Append a key/val pair (caller has ensured the key is absent) and link it into its bucket.
-        ix := m.index()
-        b := mhash(m.keys()[slot], m.cap)
+        ix ::= m.index()
+        b = mhash(m.keys()[slot], m.cap)
         ix[m.cap + slot] = ix[b]
         ix[b] = slot
         m
     }
     append = (m: Map<T>, a: Allocator, k: StringView, v: T) Result<Map<T>, IoError> {
-        k := k
-        v := v
-        out: Result<Map<T>, IoError> := (m.len < m.cap).match ({
+        k = k
+        v = v
+        out: Result<Map<T>, IoError> = (m.len < m.cap).match ({
             true  => {
-                keys := m.keys_all()
-                vals := m.vals_all()
+                keys ::= m.keys_all()
+                vals ::= m.vals_all()
                 keys[m.len] = k
                 vals[m.len] = v
-                ok: Result<Map<T>, IoError> := .Ok(Map<T>(
+                ok: Result<Map<T>, IoError> = .Ok(Map<T>(
                     keys: m.keys,
                     vals: m.vals,
                     idx: m.idx,
@@ -200,11 +200,11 @@ Map*<T>: {
             false => {
                 m.grow(a).match ({
                     .Ok(next) => {
-                        keys := next.keys_all()
-                        vals := next.vals_all()
+                        keys ::= next.keys_all()
+                        vals ::= next.vals_all()
                         keys[next.len] = k
                         vals[next.len] = v
-                        ok: Result<Map<T>, IoError> := .Ok(Map<T>(
+                        ok: Result<Map<T>, IoError> = .Ok(Map<T>(
                             keys: next.keys,
                             vals: next.vals,
                             idx: next.idx,
@@ -214,7 +214,7 @@ Map*<T>: {
                         ok
                     },
                     .Err(e)   => {
-                        err: Result<Map<T>, IoError> := .Err(e)
+                        err: Result<Map<T>, IoError> = .Err(e)
                         err
                     },
                 })
@@ -228,12 +228,12 @@ Map*<T>: {
         // captured before this call dangles (see the VALUE-MOLD CONTRACT above). On an existing key the
         // value is overwritten IN PLACE, so the new value is visible through every header that shares
         // this map's storage; `clone` first for an independent copy.
-        i := m.find(k)
-        out: Result<Map<T>, IoError> := (i < 0).match ({
+        i = m.find(k)
+        out: Result<Map<T>, IoError> = (i < 0).match ({
             true  => m.append(a, k, v),
             false => {
-                next := m.set(i, v)
-                ok: Result<Map<T>, IoError> := .Ok(next)
+                next = m.set(i, v)
+                ok: Result<Map<T>, IoError> = .Ok(next)
                 ok
             },
         })
@@ -252,23 +252,23 @@ Map*<T>: {
         // bytes — same outlives-the-map rule as everywhere else); values are copied by value. The clone
         // owns its buffers and must be `free`d independently. O(len). Allocation failure is a value: OOM on
         // any of the three acquires is returned as .Err (already-acquired buffers are released first).
-        cap := m.cap
+        cap = m.cap
         a.try_acquire3(cap * sizeof(MKey), cap * sizeof(T), cap * 2 * sizeof(MIdx)).match ({
             .Ok(bufs) => {
-                kp := bufs.b1
-                vp := bufs.b2
-                ip := bufs.b3
-                next := Map<T>(
+                kp = bufs.b1
+                vp = bufs.b2
+                ip = bufs.b3
+                next = Map<T>(
                     keys: kp,
                     vals: vp,
                     idx: ip,
                     len: m.len,
                     cap: cap,
                 )
-                srcks := m.keys()
-                srcvs := m.vals()
-                dstks := next.keys()
-                dstvs := next.vals()
+                srcks = m.keys()
+                srcvs = m.vals()
+                dstks ::= next.keys()
+                dstvs ::= next.vals()
                 srcks.loop((h, i, k) {
                     (i < m.len).match ({
                         true  => {
@@ -280,11 +280,11 @@ Map*<T>: {
                         },
                     })
                 })
-                ok: Result<Map<T>, IoError> := .Ok(next.reindex())
+                ok: Result<Map<T>, IoError> = .Ok(next.reindex())
                 ok
             },
             .Err(e)   => {
-                err: Result<Map<T>, IoError> := .Err(e)
+                err: Result<Map<T>, IoError> = .Err(e)
                 err
             },
         })
@@ -293,8 +293,8 @@ Map*<T>: {
         // Visit every live entry as (key, value) together, in insertion order. `f` is invoked DIRECTLY in
         // the loop body so an inline lambda splices in (like iter.each). Walking `keys()`/`vals()` in
         // parallel at the call site is no longer needed: `m.each_pair((k, v){ … })`.
-        ks := m.keys()
-        vs := m.vals()
+        ks = m.keys()
+        vs = m.vals()
         ks.loop((h, i, k) {
             (i < m.len).match ({
                 true  => {
@@ -339,21 +339,21 @@ mchain = (ks: [StringView], ix: [i64], cap: i64, e: i64, k: StringView) i64 {
 empty*<T> = (a: Allocator) Result<Map<T>, IoError> {
     a.try_acquire3(sizeof(MKey), sizeof(T), 2 * sizeof(MIdx)).match ({
         .Ok(bufs) => {
-            kp := bufs.b1
-            vp := bufs.b2
-            ip := bufs.b3
-            m := Map<T>(
+            kp = bufs.b1
+            vp = bufs.b2
+            ip = bufs.b3
+            m = Map<T>(
                 keys: kp,
                 vals: vp,
                 idx: ip,
                 len: 0,
                 cap: 1,
             )
-            ok: Result<Map<T>, IoError> := .Ok(m.reindex())
+            ok: Result<Map<T>, IoError> = .Ok(m.reindex())
             ok
         },
         .Err(e)   => {
-            err: Result<Map<T>, IoError> := .Err(e)
+            err: Result<Map<T>, IoError> = .Err(e)
             err
         },
     })
@@ -363,25 +363,25 @@ empty*<T> = (a: Allocator) Result<Map<T>, IoError> {
 of*<T> = (a: Allocator, seed_key: StringView, seed_val: T) Result<Map<T>, IoError> {
     a.try_acquire3(sizeof(MKey), sizeof(T), 2 * sizeof(MIdx)).match ({
         .Ok(bufs) => {
-            kp := bufs.b1
-            vp := bufs.b2
-            ip := bufs.b3
-            m := Map<T>(
+            kp = bufs.b1
+            vp = bufs.b2
+            ip = bufs.b3
+            m = Map<T>(
                 keys: kp,
                 vals: vp,
                 idx: ip,
                 len: 1,
                 cap: 1,
             )
-            keys := m.keys()
-            vals := m.vals()
+            keys ::= m.keys()
+            vals ::= m.vals()
             keys[0] = seed_key
             vals[0] = seed_val
-            ok: Result<Map<T>, IoError> := .Ok(m.reindex())
+            ok: Result<Map<T>, IoError> = .Ok(m.reindex())
             ok
         },
         .Err(e)   => {
-            err: Result<Map<T>, IoError> := .Err(e)
+            err: Result<Map<T>, IoError> = .Err(e)
             err
         },
     })

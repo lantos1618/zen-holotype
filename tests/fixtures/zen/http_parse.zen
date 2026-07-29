@@ -25,7 +25,7 @@
 // turn every '\n' into a CRLF, so a readable `\n`-delimited canned response becomes wire-format HTTP.
 // Returns a length-carrying `[u8]` (parse_response's binary-safe input) via the String builder's `.bytes()`.
 crlfify = (a: Allocator, s: StringView) [u8] {
-    sb := a.new_in().expect("http_parse: oom")
+    sb ::= a.new_in().expect("http_parse: oom")
     s.view().loop((h, i, b) {
         (b == '\n').match ({
             true  => {
@@ -42,7 +42,7 @@ crlfify = (a: Allocator, s: StringView) [u8] {
 // A canned 200 response whose 7-byte body carries an EMBEDDED NUL ("ab\0cdef", NUL at index 2) — a
 // string literal can't hold a NUL, so the body bytes are pushed explicitly onto the CRLF'd head.
 nul_body = (a: Allocator) [u8] {
-    sb := a.new_in().expect("http_parse: oom")
+    sb ::= a.new_in().expect("http_parse: oom")
     "HTTP/1.1 200 OK\nContent-Length: 7\n\n".view().loop((h, i, b) {
         (b == '\n').match ({
             true  => {
@@ -54,7 +54,7 @@ nul_body = (a: Allocator) [u8] {
             },
         })
     })
-    body: [u8] := ['a', 'b', 0, 'c', 'd', 'e', 'f']
+    body: [u8] = ['a', 'b', 0, 'c', 'd', 'e', 'f']
     body.loop((h, i, b) {
         sb = a.push_in(sb, b).expect("http_parse: oom")
     })
@@ -63,10 +63,10 @@ nul_body = (a: Allocator) [u8] {
 // a server handler is an ordinary function value, so it names a CONCRETE allocator type.
 echo_path = (a: MutPtr<Heap>, req: Request) Response { respond(200, a.no_headers(), req.path) }
 main = () i32 {
-    h := gpa()
-    a := h.addr()
+    h = gpa()
+    a = h.addr()
     // (1) 200 with Content-Length body + case-insensitive header lookup.
-    c1 := a.parse_response(a.crlfify("HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 5\n\nhello")).match ({
+    c1 = a.parse_response(a.crlfify("HTTP/1.1 200 OK\nContent-Type: text/plain\nContent-Length: 5\n\nhello")).match ({
         .Ok(r)  => r.status == 200
             && r.ok()
             && r.body == "hello"
@@ -74,12 +74,12 @@ main = () i32 {
         .Err(e) => false,
     })
     // (2) 404, empty body, ok() false.
-    c2 := a.parse_response(a.crlfify("HTTP/1.1 404 Not Found\nContent-Length: 0\n\n")).match ({
+    c2 = a.parse_response(a.crlfify("HTTP/1.1 404 Not Found\nContent-Length: 0\n\n")).match ({
         .Ok(r)  => r.status == 404 && r.ok().then({ false }, { true }) && r.body == "",
         .Err(e) => false,
     })
     // (3) multi-header: header count, exact + case-insensitive lookups, body.
-    c3 := a.parse_response(a.crlfify("HTTP/1.1 201 Created\nServer: zen/0.1\nX-Custom: abc\nContent-Length: 2\n\nhi")).match ({
+    c3 = a.parse_response(a.crlfify("HTTP/1.1 201 Created\nServer: zen/0.1\nX-Custom: abc\nContent-Length: 2\n\nhi")).match ({
         .Ok(r)  => r.status == 201
             && r.ok()
             && r.headers.len == 3
@@ -89,23 +89,23 @@ main = () i32 {
         .Err(e) => false,
     })
     // (4) malformed: no CRLFCRLF terminator -> Err.
-    c4 := a.parse_response(a.crlfify("this is not http")).match ({
+    c4 = a.parse_response(a.crlfify("this is not http")).match ({
         .Ok(r)  => false,
         .Err(e) => true,
     })
     // (5) chunked transfer-encoding decode -> assembled payload; body_bytes carries its true length.
-    c5 := a.parse_response(a.crlfify("HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n5\nhello\n6\n world\n0\n\n")).match ({
+    c5 = a.parse_response(a.crlfify("HTTP/1.1 200 OK\nTransfer-Encoding: chunked\n\n5\nhello\n6\n world\n0\n\n")).match ({
         .Ok(r)  => r.status == 200 && r.body == "hello world" && r.body_bytes.len == 11,
         .Err(e) => false,
     })
     // (6) malformed: a colon-less header line -> Err.
-    c6 := a.parse_response(a.crlfify("HTTP/1.1 200 OK\nbadheader\n\n")).match ({
+    c6 = a.parse_response(a.crlfify("HTTP/1.1 200 OK\nbadheader\n\n")).match ({
         .Ok(r)  => false,
         .Err(e) => true,
     })
     // (7) BINARY-SAFE body: an embedded NUL no longer truncates. body_bytes carries the FULL 7 bytes
     // (the NUL survives at index 2), while the TEXT view `body` truncates at the NUL to "ab".
-    c7 := a.parse_response(a.nul_body()).match ({
+    c7 = a.parse_response(a.nul_body()).match ({
         .Ok(r)  => r.status == 200
             && r.body_bytes.len == 7
             && r.body_bytes[2] == 0
@@ -114,32 +114,32 @@ main = () i32 {
         .Err(e) => false,
     })
     // (9) URL parsing (pure, no network): explicit port + path, the defaults, and the rejections.
-    u1 := a.parse_url("http://127.0.0.1:8080/x").match ({
+    u1 = a.parse_url("http://127.0.0.1:8080/x").match ({
         .Ok(u)  => u.host == "127.0.0.1" && u.port == 8080 && u.path == "/x",
         .Err(e) => false,
     })
-    u2 := a.parse_url("example.com").match ({
+    u2 = a.parse_url("example.com").match ({
         .Ok(u)  => u.host == "example.com" && u.port == 80 && u.path == "/",
         .Err(e) => false,
     })
-    u3 := a.parse_url("https://example.com/").match ({
+    u3 = a.parse_url("https://example.com/").match ({
         .Ok(u)  => false,
         .Err(e) => true,
     })
-    u4 := a.parse_url("http://:80/").match ({
+    u4 = a.parse_url("http://:80/").match ({
         .Ok(u)  => false,
         .Err(e) => true,
     })
-    c9 := u1 && u2 && u3 && u4
+    c9 = u1 && u2 && u3 && u4
     // force-compile the live socket paths without touching the network (guard is statically false).
-    probe := false.match ({
+    probe = false.match ({
         true  => a.get("127.0.0.1", 80, "/").match ({
             .Ok(r)  => r.status,
             .Err(e) => 0,
         }),
         false => 0,
     })
-    probe2 := false.match ({
+    probe2 = false.match ({
         true  => a.http_get("http://127.0.0.1/").match ({
             .Ok(r)  => r.status,
             .Err(e) => 0,
@@ -148,16 +148,16 @@ main = () i32 {
     })
     // (8) the public HttpError renderer names each variant (`.Malformed` renders its own reason);
     // only a listener-level fault is `fatal` (the flag a serve loop stops on).
-    e_conn: HttpError := .Connect(.NotFound)
-    e_bad: HttpError := .Malformed("boom")
-    e_lis: HttpError := .Listen(.NotFound)
-    c8 := http_error_name(e_conn) == "Connect"
+    e_conn: HttpError = .Connect(.NotFound)
+    e_bad: HttpError = .Malformed("boom")
+    e_lis: HttpError = .Listen(.NotFound)
+    c8 = http_error_name(e_conn) == "Connect"
         && http_error_name(e_bad) == "boom"
         && http_error_name(e_lis) == "Listen"
         && fatal(e_lis)
         && fatal(e_conn).then({ false }, { true })
     // (10) the SERVER's request parser: method / target / header lookup / empty body.
-    c10 := a.parse_request(a.crlfify("GET /hello HTTP/1.1\nHost: zen.local\nUser-Agent: zen/0.1\n\n")).match ({
+    c10 = a.parse_request(a.crlfify("GET /hello HTTP/1.1\nHost: zen.local\nUser-Agent: zen/0.1\n\n")).match ({
         .Ok(q)  => q.method == "GET"
             && q.path == "/hello"
             && q.headers.len == 2
@@ -166,7 +166,7 @@ main = () i32 {
         .Err(e) => false,
     })
     // (11) a request WITH a Content-Length body, and the two malformed shapes.
-    c11 := a.parse_request(a.crlfify("POST /submit HTTP/1.1\nContent-Length: 4\n\nbody")).match ({
+    c11 = a.parse_request(a.crlfify("POST /submit HTTP/1.1\nContent-Length: 4\n\nbody")).match ({
         .Ok(q)  => q.method == "POST"
             && q.path == "/submit"
             && q.body == "body"
@@ -183,8 +183,8 @@ main = () i32 {
         })
     // (12) build_response -> parse_response ROUND-TRIP: what the server writes is what the client
     // reads. Proves the status line, the caller's header, the auto Content-Length and the CRLFs.
-    hs := a.one_header("Content-Type", "text/plain")
-    c12 := a.parse_response(a.build_response(respond(404, hs, "nope"))).match ({
+    hs = a.one_header("Content-Type", "text/plain")
+    c12 = a.parse_response(a.build_response(respond(404, hs, "nope"))).match ({
         .Ok(r)  => r.status == 404
             && r.ok().then({ false }, { true })
             && r.body == "nope"
@@ -193,11 +193,11 @@ main = () i32 {
         .Err(e) => false,
     })
     // (13) the reason phrases that ride the status line.
-    c13 := status_reason(200) == "OK"
+    c13 = status_reason(200) == "OK"
         && status_reason(404) == "Not Found"
         && status_reason(418) == "OK"
     // force-compile the live SERVER path too (guard is statically false).
-    probe3 := false.match ({
+    probe3 = false.match ({
         true  => http_listen("127.0.0.1", 0).match ({
             .Ok(l)  => a.serve_n(l, 1, echo_path) + a.serve_once(l, echo_path).match ({
                 .Ok(q)  => 0,

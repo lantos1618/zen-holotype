@@ -37,13 +37,13 @@
 { name_read_in_body } = compiler.validate.core
 { impl_cname_in } = compiler.mangle
 // running totals for the trailing summary line
-g_files := 0
-g_fns := 0
-g_stmt := 0
-g_lambda := 0
-g_unread := 0
-g_calls := 0
-g_loose := 0    // --loose: count AMBIGUOUS names (state 2) as Result too — the upper bound
+g_files ::= 0
+g_fns ::= 0
+g_stmt ::= 0
+g_lambda ::= 0
+g_unread ::= 0
+g_calls ::= 0
+g_loose ::= 0    // --loose: count AMBIGUOUS names (state 2) as Result too — the upper bound
 // ── phase 0: the name → return-shape index ────────────────────────────────────
 // 0 = unseen, 1 = every decl of this name returns Result, 2 = decls disagree, 3 = none returns Result
 ret_is_result = (t: Ty) bool {
@@ -53,8 +53,8 @@ ret_is_result = (t: Ty) bool {
     })
 }
 idx_note = (m: Map<i64>, a: MutPtr<Malloc>, name: StringView, res: bool) Map<i64> {
-    prev := m.get(name, 0)
-    next: i64 := res.match ({
+    prev = m.get(name, 0)
+    next: i64 = res.match ({
         true  => (prev == 0 || prev == 1).then({ 1 }, { 2 }),
         false => (prev == 0 || prev == 3).then({ 3 }, { 2 }),
     })
@@ -62,8 +62,8 @@ idx_note = (m: Map<i64>, a: MutPtr<Malloc>, name: StringView, res: bool) Map<i64
 }
 // the return type of the fn named `name` among `decls` (Void when absent)
 find_ret = (decls: [Decl], name: StringView) Ty {
-    res: Ty := .Void
-    found := false
+    res :: Ty = .Void
+    found ::= false
     decls.loop((h, i, d) {
         d.match ({
             .DFunc(f) => (f.name == name && found == false).then({
@@ -77,15 +77,15 @@ find_ret = (decls: [Decl], name: StringView) Ty {
 }
 // an impl's methods, registered under the SIMPLE method name (the UFCS call-site spelling)
 idx_impl = (m: Map<i64>, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) Map<i64> {
-    out := m
+    out ::= m
     im.methods.loop((h, k, p) {
-        r := decls.find_ret(a.impl_cname_in(im.trname, im.ty, p.name))
+        r = decls.find_ret(a.impl_cname_in(im.trname, im.ty, p.name))
         out = out.idx_note(a, p.name, r.ret_is_result())
     })
     out
 }
 idx_module = (m: Map<i64>, a: MutPtr<Malloc>, decls: [Decl]) Map<i64> {
-    out := m
+    out ::= m
     decls.loop((h, i, d) {
         out = d.match ({
             .DFunc(f)    => out.idx_note(a, f.name, f.ret.ret_is_result()),
@@ -107,8 +107,8 @@ Ctx: {
 }
 // 1-based line of a byte offset
 line_of = (src: StringView, pos: i32) i64 {
-    n := 1
-    p := pos + 0
+    n ::= 1
+    p = pos + 0
     src.view().loop((h, i, b) {
         (i < p && b == '\n').then({
             n = n + 1
@@ -131,9 +131,9 @@ callee_pos = (e: Ptr<Expr>) i32 {
     })
 }
 is_result_call = (cx: Ctx, e: Ptr<Expr>) bool {
-    nm := callee_of(e)
-    l := (nm == "").then({ 0 }, { cx.loc.get(nm, 0) })
-    v := (nm == "" || l != 0).then({ l }, { cx.m.get(nm, 0) })
+    nm = callee_of(e)
+    l = (nm == "").then({ 0 }, { cx.loc.get(nm, 0) })
+    v = (nm == "" || l != 0).then({ l }, { cx.m.get(nm, 0) })
     v == 1 || g_loose == 1 && v == 2
 }
 report = (cx: Ctx, e: Ptr<Expr>, tag: StringView) void {
@@ -190,7 +190,7 @@ scan_expr = (cx: Ctx, e: Ptr<Expr>, mode: i32) void {
 }
 scan_body = (cx: Ctx, stmts: [Stmt], mode: i32) void {
     stmts.loop((h, i, st) {
-        tail := i == stmts.len - 1
+        tail = i == stmts.len - 1
         st.match ({
             .ExprStmt(e) => cx.scan_expr(e, tail.then({ mode }, { 1 })),
             .Let(l)      => {
@@ -233,8 +233,8 @@ ty_is_void = (t: Ty) bool {
 }
 scan_fn = (cx: Ctx, f: Func) void {
     g_fns = g_fns + 1
-    vf: i32 := f.ret.ty_is_void().then({ 1 }, { 0 })
-    c2 := Ctx(
+    vf: i32 = f.ret.ty_is_void().then({ 1 }, { 0 })
+    c2 = Ctx(
         path: cx.path,
         src: cx.src,
         m: cx.m,
@@ -262,7 +262,7 @@ sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
 sv_lt = (x: StringView, y: StringView) bool { x.view().sv_lt_at(y.view(), 0) }
 sift_left = (xs: [StringView], j: i64) void {
     (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
-        t := xs[j]
+        t = xs[j]
         xs[j] = xs[j - 1]
         xs[j - 1] = t
         xs.sift_left(j - 1)
@@ -277,19 +277,19 @@ sort_from = (xs: [StringView], i: i64) void {
 sort_names = (xs: [StringView]) void { xs.sort_from(1) }
 // index one file into `m` (phase 0)
 index_file = (m: Map<i64>, a: MutPtr<Malloc>, path: StringView) Map<i64> {
-    src := a.contents_in(path).expect("discards: cannot read file")
-    decls := a.parse_module(src)
+    src = a.contents_in(path).expect("discards: cannot read file")
+    decls = a.parse_module(src)
     (perr_get() || lerr_get()).then({ m }, { m.idx_module(a, decls) })
 }
 // scan one file (phase 1)
 scan_file = (m: Map<i64>, a: MutPtr<Malloc>, path: StringView) void {
     g_files = g_files + 1
-    src := a.contents_in(path).expect("discards: cannot read file")
-    decls := a.parse_module(src)
+    src = a.contents_in(path).expect("discards: cannot read file")
+    decls = a.parse_module(src)
     ((perr_get() || lerr_get()) == false).then({
-        seed: i64 := 0
-        loc := of(a, "", seed).expect("discards: local index alloc").idx_module(a, decls)
-        cx := Ctx(
+        seed: i64 = 0
+        loc = of(a, "", seed).expect("discards: local index alloc").idx_module(a, decls)
+        cx = Ctx(
             path: path,
             src: src,
             m: m,
@@ -302,10 +302,10 @@ scan_file = (m: Map<i64>, a: MutPtr<Malloc>, path: StringView) void {
 }
 // walk a file or a directory tree: phase 0 = index, phase 1 = scan
 walk = (m: Map<i64>, a: MutPtr<Malloc>, root: StringView, phase: i32) Map<i64> {
-    out := m
+    out ::= m
     root.is_dir().match ({
         true  => {
-            entries := a.read_dir(root).expect("discards: cannot read directory")
+            entries = a.read_dir(root).expect("discards: cannot read directory")
             entries.sort_names()
             entries.loop((h, i, entry) {
                 out = out.walk(a, a.cat_in(a.cat_in(root, "/"), entry), phase)
@@ -340,10 +340,10 @@ scan_roots = (m: Map<i64>, a: MutPtr<Malloc>, i: i32) void {
     })
 }
 main = () i32 {
-    mm := Malloc(_: 0)
-    a := mm.addr()
-    seed: i64 := 0
-    m := of(a, "", seed).expect("discards: index alloc")
+    mm = Malloc(_: 0)
+    a = mm.addr()
+    seed: i64 = 0
+    m ::= of(a, "", seed).expect("discards: index alloc")
     // phase 0: index the WHOLE repo, so a call into another module resolves
     m = m.walk(a, "src", 0)
     m = m.walk(a, "driver.zen", 0)
@@ -351,7 +351,7 @@ main = () i32 {
     m = m.walk(a, "tools", 0)
     // `--index` dumps the classification of every indexed name (1 = Result-only, 2 = ambiguous)
     (argc() > 1 && arg(1) == "--index").then({
-        ks := m.keys()
+        ks = m.keys()
         ks.loop((h, k, key) {
             format("IDX {} {}\n", [arg_str(key), arg_int(m.get(key, 0))])
         })

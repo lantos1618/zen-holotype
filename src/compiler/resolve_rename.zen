@@ -68,9 +68,9 @@ ren_seen = (set: [u8], src: [u8], p: i64, e: i64, i: i64) bool {
 // is whether the receiver names a type. Zen's namespace is flat, so a name that is a type in any loaded
 // module is a type here. Stamped once per program, beside the other resolve-entry resets.
 ren_no_types = () StringView { "" }
-ren_types := ren_no_types()
+ren_types ::= ren_no_types()
 ren_types_set* = (a: MutPtr<Malloc>, table: ModuleTable) void {
-    out := a.gstr_string(512)
+    out ::= a.gstr_string(512)
     table.modules.loop((h, i, m) {
         m.graph.symbols.loop((h2, j, sym) {
             sym.is_type.then({
@@ -85,15 +85,15 @@ ren_types_set* = (a: MutPtr<Malloc>, table: ModuleTable) void {
 // LOCAL: it is not this module's decl, so it is never renamed and neither are the references it binds.
 // A stack with mark/drop gives real block scoping — a `x := …` shadows only the statements after it.
 ren_no_binds = () [StringView] { slice(null_ptr(), 0) }
-ren_binds := ren_no_binds()
-ren_bind_n := 0
+ren_binds ::= ren_no_binds()
+ren_bind_n ::= 0
 ren_binds_reset = (a: MutPtr<Malloc>) void {
     ren_binds = slice(a.acquire_or_die(256 * sizeof(StringView)), 256)
     ren_bind_n = 0
 }
 ren_bind_push = (a: MutPtr<Malloc>, nm: StringView) void {
     (ren_bind_n >= ren_binds.len).then({
-        grown: [StringView] := slice(a.acquire_or_die(ren_binds.len * 2 * sizeof(StringView)), ren_binds.len * 2)
+        grown :: [StringView] = slice(a.acquire_or_die(ren_binds.len * 2 * sizeof(StringView)), ren_binds.len * 2)
         ren_binds.loop((h, i, v) {
             grown[i] = v
         })
@@ -105,8 +105,8 @@ ren_bind_push = (a: MutPtr<Malloc>, nm: StringView) void {
 ren_bind_mark = () i32 { ren_bind_n }
 ren_bind_drop = (m: i32) void { ren_bind_n = m }
 ren_bind_has = (nm: StringView) bool {
-    found := false
-    live: [StringView] := slice(ren_binds.ptr, ren_bind_n)
+    found ::= false
+    live: [StringView] = slice(ren_binds.ptr, ren_bind_n)
     live.loop((h, i, v) {
         (v == nm).then({
             found = true
@@ -127,10 +127,10 @@ RenCtx: {
 }
 // mark the identifier that STARTS at `p` when it is one of the names being renamed.
 ren_mark_ref = (c: RenCtx, p: i32) void {
-    ms := c.marks
-    off := to_i64(p)
+    ms ::= c.marks
+    off = to_i64(p)
     (off >= 0 && off < ms.len).then({
-        e := to_i64(c.sv.res_ident_end(p))
+        e = to_i64(c.sv.res_ident_end(p))
         c.names.ren_seen(c.src, off, e, 0).then({
             ms[off] = 1
         })
@@ -139,8 +139,8 @@ ren_mark_ref = (c: RenCtx, p: i32) void {
 // `bound` mode: mark the identifier at `p` unconditionally — the caller already established that the
 // binder stack holds its name, which is the whole fact the qualifier rewrite asks for.
 ren_mark_local = (c: RenCtx, p: i32) void {
-    ms := c.marks
-    off := to_i64(p)
+    ms ::= c.marks
+    off = to_i64(p)
     (off >= 0 && off < ms.len).then({
         ms[off] = 1
     })
@@ -192,7 +192,7 @@ ren_expr = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
             },
             .Loop(l)        => {
                 c.ren_expr(a, l.seq)
-                m := ren_bind_mark()
+                m = ren_bind_mark()
                 a.ren_bind_push(l.idx)
                 a.ren_bind_push(l.elem)
                 a.ren_bind_push(l.h)
@@ -201,7 +201,7 @@ ren_expr = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
                 0
             },
             .Lambda(lm)     => {
-                m := ren_bind_mark()
+                m = ren_bind_mark()
                 lm.params.loop((h, i, p) {
                     a.ren_bind_push(p.name)
                 })
@@ -212,7 +212,7 @@ ren_expr = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
             .Match(mt)      => {
                 c.ren_expr(a, mt.subj)
                 mt.arms.loop((h, i, ar) {
-                    m := ren_bind_mark()
+                    m = ren_bind_mark()
                     a.ren_bind_push(ar.bind)
                     c.ren_expr(a, ar.body)
                     ren_bind_drop(m)
@@ -224,7 +224,7 @@ ren_expr = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
     })
 }
 ren_stmts = (c: RenCtx, a: MutPtr<Malloc>, body: [Stmt]) i32 {
-    m := ren_bind_mark()
+    m = ren_bind_mark()
     body.loop((h, i, s) {
         c.ren_stmt(a, s)
     })
@@ -262,7 +262,7 @@ ren_stmt = (c: RenCtx, a: MutPtr<Malloc>, s: Stmt) i32 {
 }
 ren_func = (c: RenCtx, a: MutPtr<Malloc>, f: Func) i32 {
     c.ren_mark_ref(f.pos)
-    m := ren_bind_mark()
+    m = ren_bind_mark()
     f.params.loop((h, i, p) {
         a.ren_bind_push(p.name)
     })
@@ -294,15 +294,15 @@ ren_decl = (c: RenCtx, a: MutPtr<Malloc>, d: Decl) i32 {
 // splice `alias__` in at the marked identifier starts — the only text edit the rename makes, so every
 // byte the walk did not name survives verbatim and no line boundary moves.
 ren_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8], alias: String) String {
-    cur := out
-    pos: i32 := 0
-    bs: [u8] := s.str_bytes()
+    cur ::= out
+    pos :: i32 = 0
+    bs: [u8] = s.str_bytes()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (marks[i] == 1).match ({
                 true  => {
-                    ie := s.res_ident_end(pos)
+                    ie = s.res_ident_end(pos)
                     cur = cur.rappend_string(a, alias).rappend(a, "__").rappend_span(a, s, pos, ie)
                     pos = ie
                 },
@@ -316,7 +316,7 @@ ren_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8], alias: 
     cur
 }
 ren_marks = (a: MutPtr<Malloc>, n: i64) [u8] {
-    ms: [u8] := slice(a.acquire_or_die(n + 1), n + 1)
+    ms :: [u8] = slice(a.acquire_or_die(n + 1), n + 1)
     ms.loop((h, i, b) {
         ms[i] = 0
     })
@@ -331,8 +331,8 @@ rename_ns_names* = (
     names: String,
     alias: String,
 ) String {
-    sb: [u8] := s.str_bytes()
-    c := RenCtx(
+    sb: [u8] = s.str_bytes()
+    c = RenCtx(
         marks: a.ren_marks(sb.len),
         sv: s,
         src: sb,
@@ -365,8 +365,8 @@ rename_ns_names* = (
 // marked-offset splice: `A.` and `A__` are the same line, so every `file:line:col` is untouched.
 ren_no_names = () [u8] { slice(null_ptr(), 0) }
 ns_local_marks = (a: MutPtr<Malloc>, s: StringView) [u8] {
-    sb: [u8] := s.str_bytes()
-    c := RenCtx(
+    sb: [u8] = s.str_bytes()
+    c = RenCtx(
         marks: a.ren_marks(sb.len),
         sv: s,
         src: sb,
@@ -392,7 +392,7 @@ qual_fate = (
     strip_qnames: String,
     strip_all_quals: String,
 ) u8 {
-    qn := qual_name_at(a.gstr_string(32), a, s, p, ie)
+    qn = qual_name_at(a.gstr_string(32), a, s, p, ie)
     qnames.seen_name(qn).match ({
         true  => 1,
         false => (strip_qnames.seen_name(qn)
@@ -415,15 +415,15 @@ qual_mark_tok = (
     strip_qnames: String,
     strip_all_quals: String,
 ) i32 {
-    p := sc.tok.start
-    ie := p + sc.tok.len
+    p = sc.tok.start
+    ie = p + sc.tok.len
     (is_ident_tok(sc.tok)
         && locals[to_i64(p)] == 0
         && at(s, ie) == '.'
         && at(s, ie + 1).is_alpha()
         && quals.seen_name(a.mimport_name_span(s, p, ie))).match ({
         true  => {
-            f := a.qual_fate(s, p, ie, qnames, strip_qnames, strip_all_quals)
+            f = a.qual_fate(s, p, ie, qnames, strip_qnames, strip_all_quals)
             ms[to_i64(p)] = f
             (f == 0).then({ s.res_ident_end(ie + 1) }, { ie + 1 })
         },
@@ -438,14 +438,14 @@ qual_marks = (
     strip_qnames: String,
     strip_all_quals: String,
 ) [u8] {
-    locals := a.ns_local_marks(s)
-    sb: [u8] := s.str_bytes()
-    ms := a.ren_marks(sb.len)
-    pos: i32 := 0
+    locals = a.ns_local_marks(s)
+    sb: [u8] = s.str_bytes()
+    ms = a.ren_marks(sb.len)
+    pos :: i32 = 0
     sb.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
-            sc := s.scan(pos)
+            sc = s.scan(pos)
             (sc.tok.len == 0).match ({
                 true  => {
                     h.break
@@ -459,11 +459,11 @@ qual_marks = (
     ms
 }
 qual_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8]) String {
-    cur := out
-    pos: i32 := 0
-    bs: [u8] := s.str_bytes()
+    cur ::= out
+    pos :: i32 = 0
+    bs: [u8] = s.str_bytes()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (marks[i] == 0).match ({
                 true  => {
@@ -471,7 +471,7 @@ qual_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8]) String
                     pos = pos + 1
                 },
                 false => {
-                    ie := s.res_ident_end(pos)
+                    ie = s.res_ident_end(pos)
                     cur = (marks[i] == 1).match ({
                         true  => cur.rappend_span(a, s, pos, ie).rappend(a, "__"),
                         false => cur,

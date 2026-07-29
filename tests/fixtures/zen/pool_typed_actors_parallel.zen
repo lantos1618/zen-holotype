@@ -10,12 +10,12 @@
 { malloc, free } = std.mem.alloc
 pa = std.concurrent.pool_actor
 { Context, Receiver } = std.concurrent.pool_actor
-NACT := 8
-PERMSG := 5000
-WORKERS := 4
-PH_SIZE := 16    // sizeof(PooledHandle<Worker>) = 2 RawPtr; sizeof-of-a-generic-instance does not parse
-acc := malloc(8)
-handles := malloc(NACT * PH_SIZE)
+NACT = 8
+PERMSG = 5000
+WORKERS = 4
+PH_SIZE = 16    // sizeof(PooledHandle<Worker>) = 2 RawPtr; sizeof-of-a-generic-instance does not parse
+acc = malloc(8)
+handles = malloc(NACT * PH_SIZE)
 Msg*: Inc(i64)
 Worker*: {
     acc: RawPtr<u8>,
@@ -34,15 +34,15 @@ Worker.impl(Receiver, {
 // `Context(msg: b[0])` infers M from the field (Context is the canonical std.concurrent.actor type,
 // imported through pool_actor's destructured re-export).
 tramp = (user: RawPtr<u8>, msg: i64) void {
-    a: [Worker] := user.slice(1)
-    b: [Msg] := msg.offset(0).slice(1)
+    a: [Worker] = user.slice(1)
+    b: [Msg] = msg.offset(0).slice(1)
     a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
 hslot = () [pa.PooledHandle<Worker>] { handles.slice(NACT) }
 spawn_all = (i: i64) void {
     (i < NACT).then({
-        hs := hslot()
+        hs ::= hslot()
         hs[i] = pa.spawn_actor_heap(PERMSG + 16, Worker(acc: acc), tramp)
         spawn_all(i + 1)
     })
@@ -55,14 +55,14 @@ send_n = (p: MutPtr<Pool>, h: pa.PooledHandle<Worker>, k: i64) void {
 }
 blast = (p: MutPtr<Pool>, i: i64) void {
     (i < NACT).then({
-        hs := hslot()
+        hs = hslot()
         send_n(p, hs[i], 0)
         blast(p, i + 1)
     })
 }
 close_all = (i: i64) void {
     (i < NACT).then({
-        hs := hslot()
+        hs = hslot()
         pa.close(hs[i])
         close_all(i + 1)
     })
@@ -70,16 +70,16 @@ close_all = (i: i64) void {
 main = () i32 {
     store_i64(acc, 0)
     spawn_all(0)
-    p := pool_open(WORKERS, NACT + 8)
+    p = pool_open(WORKERS, NACT + 8)
     blast(p, 0)
     p.pool_quiesce_stop()
     p.workers_busy()    // observed to exercise the API post-quiesce; see note below — NON-FATAL
-    total := load_i64(acc)
+    total = load_i64(acc)
     close_all(0)
     p.pool_close()
     free(handles)
     free(acc)
-    expected := NACT * PERMSG
+    expected = NACT * PERMSG
     // `busy >= 2` used to gate the exit code, but it is a MACHINE observation, not a correctness
     // property: on a starved runner (CI fans many harness suites across few cores) one worker can
     // legally drain every mailbox before a second is ever scheduled. That flaked exit 3 on a

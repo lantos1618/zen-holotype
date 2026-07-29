@@ -119,11 +119,11 @@ new_scratch* = (cap: i64) MutPtr<Arena> {
 // further from the cause. Hence a real Result, with `new_scratch` kept as an `.expect` wrapper so the
 // 4 existing call sites are untouched.
 try_new_scratch* = (cap: i64) Result<MutPtr<Arena>, ActorError> {
-    blk := malloc(sizeof(Arena) + cap)
+    blk = malloc(sizeof(Arena) + cap)
     is_null(blk).match ({
         true  => .Err(ActorError.Oom),
         false => {
-            ar: [Arena] := blk.slice(1)
+            ar :: [Arena] = blk.slice(1)
             ar[0] = Arena(
                 buf: blk.offset(sizeof(Arena)),
                 off: 0,
@@ -163,13 +163,13 @@ try_spawn_actor_scratch*<ActorT> = (
     art: Rt,
     sc: MutPtr<Arena>,
 ) Result<PooledHandle<ActorT>, ActorError> {
-    state := malloc(sizeof(ActorT))
+    state = malloc(sizeof(ActorT))
     is_null(state).match ({
         true  => .Err(ActorError.Oom),
         false => {
-            slot: [ActorT] := state.slice(1)
+            slot :: [ActorT] = state.slice(1)
             slot[0] = actor
-            raw := pool_try_spawn_scratch_rt(state, cap, tramp, art, sc)
+            raw = pool_try_spawn_scratch_rt(state, cap, tramp, art, sc)
             is_null(raw).match ({
                 true  => {
                     free(state)
@@ -203,11 +203,11 @@ spawn_actor_scratch_heap*<ActorT> = (
 // box (the mailbox-full case was already a value in this very function, the exhausted-heap case was a
 // segfault). The caller MAY discard the Result.
 send*<M, ActorT> = (p: MutPtr<Pool>, h: PooledHandle<ActorT>, msg: M) Result<i64, ActorError> {
-    box := malloc(sizeof(M))
+    box = malloc(sizeof(M))
     is_null(box).match ({
         true  => .Err(ActorError.Oom),
         false => {
-            slot: [M] := box.slice(1)
+            slot :: [M] = box.slice(1)
             slot[0] = msg
             p.pool_send(h.raw, to_i64(box)).match ({
                 .Ok(n)  => .Ok(n),
@@ -230,11 +230,11 @@ ref_of*<ActorT> = (h: PooledHandle<ActorT>, p: MutPtr<Pool>) ActorRef { p.actor_
 // reply is rejected exactly like `send`/`pool_send`. Distinct name (no fn overloading) → UFCS reads
 // `reply_to.ref_send_msg(Response(...))`.
 ref_send_msg*<M> = (r: ActorRef, msg: M) Result<i64, ActorError> {
-    box := malloc(sizeof(M))
+    box = malloc(sizeof(M))
     is_null(box).match ({
         true  => .Err(ActorError.Oom),
         false => {
-            slot: [M] := box.slice(1)
+            slot :: [M] = box.slice(1)
             slot[0] = msg
             r.ref_send(to_i64(box)).match ({
                 .Ok(n)  => .Ok(n),
@@ -248,7 +248,7 @@ ref_send_msg*<M> = (r: ActorRef, msg: M) Result<i64, ActorError> {
 }
 // typed accessor for the actor's final state (read after quiescence, e.g. in tests/assertions).
 actor_state*<ActorT> = (h: PooledHandle<ActorT>) MutPtr<ActorT> {
-    slot: [ActorT] := h.state.slice(1)
+    slot: [ActorT] = h.state.slice(1)
     slot[0].addr()
 }
 // close a typed handle: drop the pool actor's Arc reference (frees the pool block when it was the last)
@@ -381,8 +381,8 @@ free_msg* = (msg: i64) void { free(msg.offset(0)) }
 // nothing in the args pins ActorT/M) — keeping all raw-pointer surgery here in the stdlib. The stub
 // itself must STAY concrete (generic fns are inlined, so their address cannot be taken).
 dispatch*<ActorT, M> = (user: RawPtr<u8>, msg: i64) void {
-    a: [ActorT] := user.slice(1)
-    b: [M] := msg.offset(0).slice(1)
+    a: [ActorT] = user.slice(1)
+    b: [M] = msg.offset(0).slice(1)
     __zen_actor_set_inflight(msg)
     b.loop((h, i, m) {
         a[0].addr().receive(Context<M>(msg: m))

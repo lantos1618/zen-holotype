@@ -32,7 +32,7 @@ env_is_struct* = (env: Env, name: StringView) bool { env.didx.struct_idx.get(nam
 // a mistake (you reach variants via `.match`). Generic enums (Result) are caught via cv_is_gen_enum.
 env_is_enum* = (env: Env, name: StringView) bool { env.didx.enum_idx.get(name, 0 - 1) >= 0 }
 env_struct_fields* = (env: Env, name: StringView) [Field] {
-    i := env.didx.struct_idx.get(name, 0 - 1)
+    i = env.didx.struct_idx.get(name, 0 - 1)
     (i >= 0 && i < env.decls.len).match ({
         true  => env.decls[i].match ({
             .DStruct(sd) => sd.fields,
@@ -220,8 +220,8 @@ lit_val = (e: Ptr<Expr>) LitVal {
             neg: false,
         ),
         .Bin(b) => {
-            l := b.lhs.lit_val()
-            r := b.rhs.lit_val()
+            l = b.lhs.lit_val()
+            r = b.rhs.lit_val()
             (l.ok && r.ok).match ({
                 true  => lit_binop(b.op, l.v, r.v),
                 false => LitVal(
@@ -244,11 +244,11 @@ lit_val = (e: Ptr<Expr>) LitVal {
 // `.Int` it denotes so one rule decides the width everywhere. Only OUT-OF-i32-RANGE constants fold:
 // in-range constant math keeps its written form, so its emitted C is byte-for-byte unchanged.
 fold_wide_int* = (op: StringView, lhs: Ptr<Expr>, rhs: Ptr<Expr>) LitVal {
-    l := lhs.lit_val()
-    r := rhs.lit_val()
+    l = lhs.lit_val()
+    r = rhs.lit_val()
     (l.ok && r.ok).match ({
         true  => {
-            v := lit_binop(op, l.v, r.v)
+            v = lit_binop(op, l.v, r.v)
             (v.ok && v.v.i32_range_ok() == false).then({ v }, { lit_unfoldable() })
         },
         false => lit_unfoldable(),
@@ -287,7 +287,7 @@ lit_range_ok = (t: Ty, n: i64, neg: bool) bool {
 }
 // Numeric literals fit numeric slots only when in range (constant-folded; lenient on non-constants).
 lit_fits = (e: Ptr<Expr>, t: Ty) bool {
-    lv := e.lit_val()
+    lv = e.lit_val()
     lv.ok.then({ t.lit_range_ok(lv.v, lv.neg) }, { true })
 }
 // the narrow widths are Named, so ty_rank can't see them — recognize them as int slots here.
@@ -346,7 +346,7 @@ gen_ptr_arg_fits* = (g: Ty, w: Ty) bool {
 tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
     pty.is_ptr_ty_g().match ({
         true  => {
-            argty := env.infer_expr(ar.addr())
+            argty = env.infer_expr(ar.addr())
             env.unknown_ty(argty).match ({
                 true  => 0,
                 false => gen_ptr_arg_fits(argty, pty).then({ 0 }, { 1 }),
@@ -356,7 +356,7 @@ tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
     })
 }
 trait_declaring* = (decls: [Decl], m: StringView) StringView {
-    found := ""
+    found ::= ""
     decls.loop((h, i, d) {
         found = d.match ({
             .DStruct(sd) => (is_empty(found) && sd.fields.fields_declare_method(m)).match ({
@@ -442,7 +442,7 @@ shadows_toplevel* = (env: Env, fn: StringView) bool {
 // Reject when the local's type is concretely KNOWN (calling an i64 is never valid); stay lenient only
 // for an unknown/untypable shadow (pre-inline generic bodies), preserving #370's no-over-rejection.
 shadow_not_callable* = (env: Env, fn: StringView) bool {
-    t := env.var_or_global(fn)
+    t = env.var_or_global(fn)
     (t.is_void_ty() || env.unknown_ty(t)).then({ false }, { true })
 }
 is_write_intrinsic = (fn: StringView) bool {
@@ -503,7 +503,7 @@ null_deref_kind* = (env: Env, c: CallData) i32 {
 assert_nonnull_badarg = (env: Env, c: CallData) bool {
     (c.fn == "assert_nonnull" && c.args.len >= 1).match ({
         true  => {
-            argty := env.infer_expr(c.args[0].addr())
+            argty = env.infer_expr(c.args[0].addr())
             env.unknown_ty(argty).then({ false }, { argty.is_ptr_ty_g() == false })
         },
         false => false,
@@ -535,7 +535,7 @@ tparam_bound* = (tp: Param) StringView {
 fnt_arg_err_at* = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
     (i < ptys.len).match ({
         true  => {
-            lv := ar.addr().lit_slot_verdict(ptys[i])
+            lv = ar.addr().lit_slot_verdict(ptys[i])
             (lv >= 0).match ({
                 true  => lv,
                 false => env.unknown_ty(ptys[i]).match ({
@@ -548,7 +548,7 @@ fnt_arg_err_at* = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
     })
 }
 is_struct* = (decls: [Decl], name: StringView) bool {
-    f := false
+    f ::= false
     decls.loop((h, i, d) {
         f = d.match ({
             .DStruct(sd) => (sd.name == name).then({ true }, { f }),
@@ -623,7 +623,7 @@ fn_pos_of* = (d: Decl) i32 {
 // Codes 33-36 belong to the CUSTOM diagnostic channels (KESCAPE / KSCRATCHSEND / KSCRATCHSTATE /
 // KRESERVEDNAME) that build their own CheckDiagnostic with a hand-written kind/message/hint and
 // never route through the diag_info() ladder. They still occupy globally-unique numbers in the
-// 6-bit (0-63) code space so `code` alone identifies a kind — see diag_info below. (Private-name
+// 7-bit (0-127) code space so `code` alone identifies a kind — see diag_info below. (Private-name
 // has NO code: compiler.resolve renders `error[private-name]` directly at load time.)
 SourceSpan*: {
     start: i32,
@@ -646,11 +646,11 @@ is_if_token = (src: StringView, t: Token) bool {
     })
 }
 first_if_offset* = (src: StringView) i32 {
-    pos := 0
-    found := 0 - 1
-    done := false
+    pos ::= 0
+    found ::= 0 - 1
+    done ::= false
     @while (done.then({ false }, { true })) {
-        sc := src.scan(pos)
+        sc = src.scan(pos)
         sc.tok.kind.match ({
             .Eof => {
                 done = true
@@ -680,11 +680,11 @@ is_qmark_token = (src: StringView, t: Token) bool {
     })
 }
 first_qmark_offset* = (src: StringView) i32 {
-    pos := 0
-    found := 0 - 1
-    done := false
+    pos ::= 0
+    found ::= 0 - 1
+    done ::= false
     @while (done.then({ false }, { true })) {
-        sc := src.scan(pos)
+        sc = src.scan(pos)
         sc.tok.kind.match ({
             .Eof => {
                 done = true
@@ -710,8 +710,8 @@ first_qmark_offset* = (src: StringView) i32 {
 // free from the lexer (`async_count` and `awaited` are single longer Ident tokens), and comments,
 // string literals, and char literals are their own token kinds — same rationale as first_if_offset.
 tok_word_is = (src: StringView, t: Token, w: StringView) bool {
-    ok := true
-    wb: [u8] := w.view()
+    ok ::= true
+    wb: [u8] = w.view()
     wb.loop((h, i, b) {
         (src.at(t.start + to_i32(i)) == b == false).then({
             ok = false
@@ -730,11 +730,11 @@ is_coroutine_token = (src: StringView, t: Token) bool {
     })
 }
 first_coroutine_offset* = (src: StringView) i32 {
-    pos := 0
-    found := 0 - 1
-    done := false
+    pos ::= 0
+    found ::= 0 - 1
+    done ::= false
     @while (done.then({ false }, { true })) {
-        sc := src.scan(pos)
+        sc = src.scan(pos)
         sc.tok.kind.match ({
             .Eof => {
                 done = true
@@ -837,7 +837,7 @@ ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
     })
 }
 ut_unknown_tys* = (env: Env, tparams: [Param], ts: [Ty]) i32 {
-    acc := 0
+    acc ::= 0
     ts.loop((h, i, t) {
         acc = acc.or(env.ut_unknown_ty(tparams, t))
     })
@@ -847,21 +847,21 @@ ut_unknown_tys* = (env: Env, tparams: [Param], ts: [Ty]) i32 {
 // their unknown-type caret on the enclosing declaration's name offset (`pos`) — always located, even
 // though it points at the decl name rather than the bare type token.
 ut_params_kind = (env: Env, tparams: [Param], ps: [Param], pos: i32) i32 {
-    acc := 0
+    acc ::= 0
     ps.loop((h, i, p) {
         acc = acc.or(env.ut_unknown_ty(tparams, p.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
 ut_fields_kind* = (env: Env, tparams: [Param], fs: [Field], pos: i32) i32 {
-    acc := 0
+    acc ::= 0
     fs.loop((h, i, f) {
         acc = acc.or(env.ut_unknown_ty(tparams, f.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
 ut_payloads_kind* = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32 {
-    acc := 0
+    acc ::= 0
     vs.loop((h, i, v) {
         acc = acc.or(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
@@ -871,7 +871,7 @@ ut_payloads_kind* = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32
 // undefined one leaked an unknown C type just like a param/field/return would. Recurse through nested
 // control flow (Block/Loop/Match/Cond) so a deeply-nested `let` annotation is checked too.
 ut_arms_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], arms: [ArmData]) i32 {
-    acc := 0
+    acc ::= 0
     arms.loop((h, i, ar) {
         acc = acc.or(a.ut_expr_kind(env, tparams, ar.body))
     })
@@ -911,7 +911,7 @@ ut_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
     })
 }
 ut_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32 {
-    acc := 0
+    acc ::= 0
     body.loop((h, i, st) {
         acc = acc.or(a.ut_stmt_kind(env, tparams, st))
     })
@@ -947,35 +947,35 @@ utn_ty = (env: Env, tparams: [Param], t: Ty) StringView {
     })
 }
 utn_tys = (env: Env, tparams: [Param], ts: [Ty]) StringView {
-    r := ""
+    r ::= ""
     ts.loop((h, i, t) {
         r = desc_or(r, env.utn_ty(tparams, t))
     })
     r
 }
 utn_params = (env: Env, tparams: [Param], ps: [Param]) StringView {
-    r := ""
+    r ::= ""
     ps.loop((h, i, p) {
         r = desc_or(r, env.utn_ty(tparams, p.ty))
     })
     r
 }
 utn_fields* = (env: Env, tparams: [Param], fs: [Field]) StringView {
-    r := ""
+    r ::= ""
     fs.loop((h, i, f) {
         r = desc_or(r, env.utn_ty(tparams, f.ty))
     })
     r
 }
 utn_payloads* = (env: Env, tparams: [Param], vs: [VariantDef]) StringView {
-    r := ""
+    r ::= ""
     vs.loop((h, i, v) {
         r = desc_or(r, env.utn_ty(tparams, v.payload))
     })
     r
 }
 utn_arms = (a: MutPtr<Malloc>, env: Env, tparams: [Param], arms: [ArmData]) StringView {
-    r := ""
+    r ::= ""
     arms.loop((h, i, ar) {
         r = desc_or(r, a.utn_expr(env, tparams, ar.body))
     })
@@ -1005,7 +1005,7 @@ utn_stmt = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) StringView 
     })
 }
 utn_body = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) StringView {
-    r := ""
+    r ::= ""
     body.loop((h, i, st) {
         r = desc_or(r, a.utn_stmt(env, tparams, st))
     })
@@ -1034,8 +1034,8 @@ retired_string_alias = (nm: StringView) StringView {
 // the unknown-type message NAMING the offending type (`unknown type name `Widget``), else the generic
 // ladder message when the name walk found nothing (should not happen when the kind walk fired).
 unknown_type_message* = (a: MutPtr<Malloc>, nm: StringView) StringView {
-    canon := nm.retired_string_alias()
-    head := a
+    canon = nm.retired_string_alias()
+    head = a
         .gstr_string(96)
         .gstr_append(a, "unknown type name `")
         .gstr_append(a, nm)
@@ -1068,7 +1068,7 @@ inf_edge_name = (t: Ty) StringView {
 // does the member type `t` reach `target` by value? `depth` bounds the walk (= max distinct names) so a
 // cycle terminates instead of looping forever.
 inf_edge_reaches = (decls: [Decl], target: StringView, t: Ty, depth: i64) bool {
-    en := t.inf_edge_name()
+    en = t.inf_edge_name()
     en.is_empty().match ({
         true  => false,
         false => (en == target).match ({
@@ -1081,14 +1081,14 @@ inf_edge_reaches = (decls: [Decl], target: StringView, t: Ty, depth: i64) bool {
     })
 }
 inf_fields_reach = (decls: [Decl], target: StringView, fields: [Field], depth: i64) bool {
-    hit := false
+    hit ::= false
     fields.loop((h, i, fl) {
         hit = hit.then({ true }, { decls.inf_edge_reaches(target, fl.ty, depth) })
     })
     hit
 }
 inf_variants_reach = (decls: [Decl], target: StringView, vs: [VariantDef], depth: i64) bool {
-    hit := false
+    hit ::= false
     vs.loop((h, i, v) {
         hit = hit.then({ true }, { decls.inf_edge_reaches(target, v.payload, depth) })
     })
@@ -1198,14 +1198,14 @@ variant_tags_has = (vs: [VariantDef], a: MutPtr<Malloc>, ename: StringView, name
 // validator recognizes such a tag by shape: it starts with the gen-enum base name and ends with one
 // of its variant names (`Result_…` + `…_Err`). Keeps lowered generic-enum guards from false-rejecting.
 variant_affix = (a: MutPtr<Malloc>, lead: StringView, vn: StringView) StringView {
-    s := a.gstr_string(64)
+    s ::= a.gstr_string(64)
     s = s.gstr_append(a, lead)
     s = s.gstr_append(a, vn)
     s.gstr_finish(a)
 }
 gen_tag_match = (a: MutPtr<Malloc>, vs: [VariantDef], base: StringView, name: StringView) bool {
-    found := false
-    pre := a.variant_affix(base, "_")
+    found ::= false
+    pre = a.variant_affix(base, "_")
     vs.loop((h, i, v) {
         found = (name.starts_with(pre) && name.ends_with(a.variant_affix("_", v.name))).match ({
             true  => true,
@@ -1215,7 +1215,7 @@ gen_tag_match = (a: MutPtr<Malloc>, vs: [VariantDef], base: StringView, name: St
     found
 }
 is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: StringView) bool {
-    found := false
+    found ::= false
     decls.loop((h, i, d) {
         found = d.match ({
             .DEnum(ed)   => ed.variants.variant_tags_has(a, ed.name, name).then({ true }, { found }),

@@ -61,14 +61,14 @@ lspt_is_builtin_ty = (src: StringView, t: Token) bool {
 // member) and `x.field` (property) from a bare name.
 lspt_after_dot = (src: StringView, start: i32) bool { start > 0 && at(src, start - 1) == '.' }
 lspt_skip_sp = (src: StringView, e: i32) i32 {
-    p := e
+    p ::= e
     @while (at(src, p) == ' ') {
         p = p + 1
     }
     p
 }
 lspt_call_next = (src: StringView, e: i32) bool {
-    p := src.lspt_skip_sp(e)
+    p = src.lspt_skip_sp(e)
     at(src, p) == '(' || at(src, p) == '<'
 }
 // A top-level declaration head: an identifier in column 0, optionally exported with `*`, followed by
@@ -78,7 +78,7 @@ lspt_decl_fn = (src: StringView, t: Token) bool {
     (t.start != 0 && at(src, t.start - 1) != '\n').then({
         return false
     })
-    p := t.start + t.len
+    p ::= t.start + t.len
     (at(src, p) == '*').then({
         p = p + 1
     })
@@ -134,9 +134,9 @@ LsptCur: {
 // UTF-16 length of src[a, b) — a byte >= 0xF0 opens a 4-byte sequence, which is a surrogate PAIR
 // (two units); every other sequence start is one unit; continuation bytes count for nothing.
 lspt_u16_len = (src: StringView, a: i32, b: i32) i64 {
-    n: i64 := 0
+    n :: i64 = 0
     a.upto(b, (p) {
-        c := at(src, p)
+        c = at(src, p)
         (c & 192 == 128 == false).then({
             n = n + (c >= 240).then({ 2 }, { 1 })
         })
@@ -160,10 +160,10 @@ lspt_emit = (
     end: i32,
     ty: i64,
 ) LsptCur {
-    col := src.lspt_u16_len(ls, start)
-    dline := line - cur.line
-    dcol := (dline == 0 && cur.first == false).then({ col - cur.col }, { col })
-    s := cur.out
+    col = src.lspt_u16_len(ls, start)
+    dline = line - cur.line
+    dcol = (dline == 0 && cur.first == false).then({ col - cur.col }, { col })
+    s = cur.out
         .lspt_push_num(mp, dline, cur.first)
         .lspt_push_num(mp, dcol, false)
         .lspt_push_num(mp, src.lspt_u16_len(start, end), false)
@@ -187,10 +187,10 @@ lspt_emit_span = (
     end: i32,
     ty: i64,
 ) LsptCur {
-    c := cur
-    seg := start
-    ls := st.ls
-    line := st.line
+    c ::= cur
+    seg ::= start
+    ls ::= st.ls
+    line ::= st.line
     start.upto(end, (p) {
         (at(src, p) == '\n').then({
             c = c.lspt_emit(mp, src, ls, line, seg, p, ty)
@@ -211,8 +211,8 @@ LsptScanLine: {
     ls: i32,
 }
 lspt_advance = (src: StringView, st: LsptScanLine, to: i32) LsptScanLine {
-    line := st.line
-    ls := st.ls
+    line ::= st.line
+    ls ::= st.ls
     ls.upto(to, (p) {
         (at(src, p) == '\n').then({
             line = line + 1
@@ -234,30 +234,30 @@ lspt_advance = (src: StringView, st: LsptScanLine, to: i32) LsptScanLine {
 // streams come from two different scanners, so their agreement is an assumption, not a guarantee;
 // anything that would move the cursor backwards is dropped instead of trusted.
 lspt_tokens* = (mp: MutPtr<Malloc>, src: StringView) StringView {
-    cmts := mp.collect_comments(src)
-    cur := LsptCur(
+    cmts = mp.collect_comments(src)
+    cur ::= LsptCur(
         out: mp.gstr_string(4096).gstr_append(mp, "["),
         line: 0,
         col: 0,
         first: true,
     )
-    st := LsptScanLine(
+    st ::= LsptScanLine(
         line: 0,
         ls: 0,
     )
-    ci: i64 := 0
-    pos := 0
-    emitted := 0
-    running := true
+    ci :: i64 = 0
+    pos ::= 0
+    emitted ::= 0
+    running ::= true
     @while (running) {
-        sc := src.scan(pos)
-        tstart := sc.tok.kind.match ({
+        sc = src.scan(pos)
+        tstart = sc.tok.kind.match ({
             .Eof => 0 - 1,
             _    => sc.tok.start,
         })
         @while (ci < cmts.len && (tstart < 0 || cmts[ci].start < tstart)) {
             // drain every comment that opens before the next token (or all of them at Eof)
-            c := cmts[ci]
+            c = cmts[ci]
             (c.start >= emitted).then({
                 st = src.lspt_advance(st, c.start)
                 cur = cur.lspt_emit_span(mp, src, st, c.start, c.start + c.len, LSPT_COMMENT())

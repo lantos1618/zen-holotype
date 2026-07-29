@@ -42,13 +42,13 @@ lspd_none = () [LspDoc] { slice(null_ptr(), 0) }
 // must still be there on the next keystroke. The same floor `Heap` sits on.
 lspd_acquire = (n: i64) RawPtr<u8> { heap_acquire(null_ptr(), n) }
 lspd_free = (p: RawPtr<u8>) void { heap_release(null_ptr(), p) }
-lspd_buf := lspd_none()
-lspd_n := 0
+lspd_buf ::= lspd_none()
+lspd_n ::= 0
 lspd_alloc = (n: i64) [LspDoc] { slice(lspd_acquire(n * sizeof(LspDoc)), n) }
 lspd_grow = () void {
     (lspd_n >= lspd_buf.len).then({
-        grown := lspd_alloc((lspd_buf.len < 4).then({ 4 }, { lspd_buf.len * 2 }))
-        old := lspd_buf.ptr
+        grown ::= lspd_alloc((lspd_buf.len < 4).then({ 4 }, { lspd_buf.len * 2 }))
+        old = lspd_buf.ptr
         lspd_buf.loop((h, i, d) {
             grown[i] = d
         })
@@ -59,11 +59,11 @@ lspd_grow = () void {
 // a DURABLE copy of a request-scoped view — NUL-terminated, so it reads back as a plain StringView.
 // The empty view keeps the "" literal (nothing to own, nothing to release).
 lspd_own = (s: StringView) StringView {
-    v: [u8] := s.view()
+    v: [u8] = s.view()
     (v.len == 0).match ({
         true  => "",
         false => {
-            p := lspd_acquire(v.len + 1)
+            p = lspd_acquire(v.len + 1)
             (p == null_ptr()).match ({
                 true  => "",
                 false => {
@@ -77,13 +77,13 @@ lspd_own = (s: StringView) StringView {
 }
 // release an OWNED copy. "" is the literal miss/absent marker and is never heap — see MEMORY above.
 lspd_release = (s: StringView) void {
-    v: [u8] := s.view()
+    v: [u8] = s.view()
     (v.len > 0).then({
         lspd_free(v.ptr)
     })
 }
 lspd_free_entry = (i: i64) void {
-    d := lspd_buf[i]
+    d = lspd_buf[i]
     lspd_release(d.uri)
     lspd_release(d.text)
     lspd_release(d.tokens)
@@ -99,14 +99,14 @@ lspd_find* = (uri: StringView) i64 { lspd_scan(0, uri) }
 lspd_text_at* = (i: i64) StringView { lspd_buf[i].text }
 // the memoized token array for the document's CURRENT version, or "" when nothing is cached for it.
 lspd_tokens_at* = (i: i64) StringView {
-    d := lspd_buf[i]
+    d = lspd_buf[i]
     (d.tok_version == d.version).then({ d.tokens }, { "" })
 }
 // didOpen / didChange: keep a durable copy of `uri` + `text`, free what they replace, drop the token
 // cache, and return the entry's index.
 lspd_set* = (uri: StringView, text: StringView, version: i64) i64 {
-    i := lspd_find(uri)
-    fresh := LspDoc(
+    i = lspd_find(uri)
+    fresh = LspDoc(
         uri: lspd_own(uri),
         text: lspd_own(text),
         tokens: "",
@@ -129,7 +129,7 @@ lspd_set* = (uri: StringView, text: StringView, version: i64) i64 {
 }
 // memoize `toks` against the document's current version, as a durable copy.
 lspd_cache_tokens* = (i: i64, toks: StringView) void {
-    d := lspd_buf[i]
+    d = lspd_buf[i]
     lspd_release(d.tokens)
     lspd_buf[i] = LspDoc(
         uri: d.uri,
@@ -142,7 +142,7 @@ lspd_cache_tokens* = (i: i64, toks: StringView) void {
 // didClose: free the entry's buffers and swap the last entry into its slot. After this the document
 // is no longer open, so disk is once again the source of truth for it.
 lspd_close* = (uri: StringView) void {
-    i := lspd_find(uri)
+    i = lspd_find(uri)
     (i >= 0).then({
         lspd_free_entry(i)
         lspd_buf[i] = lspd_buf[lspd_n - 1]
