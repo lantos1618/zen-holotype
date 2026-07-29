@@ -822,7 +822,7 @@ mode_sendable = (m: i32) bool { m == md_owned() || m == md_frozen() }
 // `release` from the owner `o.release(a)` consume (handled by is_consume_method). Returns the freed
 // bare-local name, or "" when nothing simple is freed.
 alloc_free_call_name = (env: Env, c: CallData) StringView {
-    direct := c.fn.sx_named("free", "__free").match ({
+    direct ::= c.fn.sx_named("free", "__free").match ({
         true  => (c.args.len == 1).then({ c.arg_var_name(0) }, { "" }),
         false => (c.fn.sx_named("release", "__release")
             || c.fn.sx_named("release_slice", "__release_slice")).match ({
@@ -861,7 +861,7 @@ alloc_free_call_name = (env: Env, c: CallData) StringView {
 //     `String.drop` free only when `carried` — and treating a may-free as a definite consume would
 //     make that documented protocol unwriteable.
 recv_free_call_name = (env: Env, c: CallData) StringView {
-    nm := c.arg_var_name(0)
+    nm ::= c.arg_var_name(0)
     (nm.is_empty() == false && env.callee_releases_recv(c)).then({ nm }, { "" })
 }
 // The method `c` dispatches to through arg 0's TYPE — "" when the receiver's type provides no such
@@ -869,18 +869,18 @@ recv_free_call_name = (env: Env, c: CallData) StringView {
 // `release`/`free`/`drop` name several unrelated functions, and picking one by spelling is exactly the
 // mistake this rule exists to stop (it made `a.release(m.keys)` inside `Map.free` kill the ALLOCATOR).
 recv_callee_name = (env: Env, c: CallData) StringView {
-    tyn := env.infer_expr(c.args[0].addr()).dispatch_recv_name()
-    cn := tyn.is_empty().then({ c.fn }, { env.a.dispatch_recv(env.decls, env.didx, c.fn, tyn) })
+    tyn ::= env.infer_expr(c.args[0].addr()).dispatch_recv_name()
+    cn ::= tyn.is_empty().then({ c.fn }, { env.a.dispatch_recv(env.decls, env.didx, c.fn, tyn) })
     (cn == c.fn).then({ "" }, { cn })
 }
 callee_releases_recv = (env: Env, c: CallData) bool {
-    cn := env.recv_callee_name(c)
+    cn ::= env.recv_callee_name(c)
     cn.is_empty().then({ false }, { env.fn_releases_param(cn, 0, consume_depth()) })
 }
 // does the KNOWN fn `fn` release storage rooted at its param `pi`, on the way through? Depth-bounded,
 // so mutual and self recursion terminate (exhausting it answers `false` — under-reject, never over).
 fn_releases_param = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
-    f := env.env_func(fn)
+    f ::= env.env_func(fn)
     (depth > 0 && f.name == fn && pi >= 0 && pi < f.params.len).match ({
         true  => env.body_releases_param(f.body, f.params[pi].name, depth),
         false => false,
@@ -907,7 +907,7 @@ expr_releases_param = (env: Env, e: Ptr<Expr>, pname: StringView, depth: i32) bo
 // `pname` handed to a known callee that releases it: `String.free_in`'s whole body is `a.free_in(s)`,
 // one hop from the `a.release(s.ptr)` that does the work.
 call_forwards_release = (env: Env, c: CallData, pname: StringView, depth: i32) bool {
-    found := false
+    found ::= false
     (env.env_params(c.fn).len == c.args.len).then({
         c.args.loop((h, i, ar) {
             (ar.addr().expr_root_var() == pname && env.fn_releases_param(c.fn, i, depth - 1)).then({
