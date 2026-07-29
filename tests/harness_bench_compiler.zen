@@ -158,6 +158,7 @@
 { put } = std.text.fmt
 { sb } = std.text.sb
 { sort_by } = std.sort
+{ times, step_while, advance_while } = std.core.count
 { Malloc, malloc, free } = std.mem.alloc
 { run } = std.sys.process
 { mono_ns } = std.time.clock
@@ -200,20 +201,16 @@ ALLOC_W = () i64 { 12 }
 STAGE_W = () i64 { 11 }
 cb_sp = (n: i64) i64 {
     w := to_i64(0)
-    i := to_i64(0)
-    @while (i < n) {
-        w = w + put(" ").n
-        i = i + 1
-    }
+    n.times((i) { w = w + put(" ").n })
     w
 }
 cb_digits = (v: i64) i64 {
     d := (v < 0).then({ 2 }, { 1 })
     x := (v < 0).then({ 0 - v }, { v })
-    @while (x > 9) {
+    x.step_while((r) { r > 9 }, (r) {
         d = d + 1
-        x = x / 10
-    }
+        r / 10
+    })
     d
 }
 // right-align `v` in a `w`-wide column. The pad is bound BEFORE the digits are written: `a + b` has
@@ -294,17 +291,14 @@ cb_row = (
 // no digit run there — an absent number is reported as absent, never defaulted to 0.
 cb_num_from = (s: StringView, start: i64) i64 {
     n := len(s)
-    i := start
-    @while (i < n && s.at(i) == ' ') {
-        i = i + 1
-    }
+    i := start.advance_while((p) { p < n && s.at(p) == ' ' })
     v := to_i64(0)
     got := false
-    @while (i < n && s.at(i) >= '0' && s.at(i) <= '9') {
-        v = v * 10 + to_i64(s.at(i) - '0')
+    i.step_while((p) { p < n && s.at(p) >= '0' && s.at(p) <= '9' }, (p) {
+        v = v * 10 + to_i64(s.at(p) - '0')
         got = true
-        i = i + 1
-    }
+        p + 1
+    })
     got.then({ v }, { 0 - 1 })
 }
 cb_num_after = (s: StringView, marker: StringView) i64 {
@@ -322,33 +316,30 @@ cb_us_after = (s: StringView, marker: StringView) i64 {
         return 0 - 1
     })
     n := len(s)
-    i := at_i + len(marker)
-    @while (i < n && s.at(i) != '\n' && (s.at(i) < '0' || s.at(i) > '9')) {
-        // Skip to the first digit ON THIS LINE, not merely past spaces: one label carries a parenthesised
-        // qualifier (`other (io/cache)`), and the newline guard keeps a stage that printed no number from
-        // silently borrowing the next line's.
-        i = i + 1
-    }
+    // Skip to the first digit ON THIS LINE, not merely past spaces: one label carries a parenthesised
+    // qualifier (`other (io/cache)`), and the newline guard keeps a stage that printed no number from
+    // silently borrowing the next line's.
+    i := (at_i + len(marker)).advance_while((p) {
+        p < n && s.at(p) != '\n' && (s.at(p) < '0' || s.at(p) > '9')
+    })
     ms := to_i64(0)
     got := false
-    @while (i < n && s.at(i) >= '0' && s.at(i) <= '9') {
-        ms = ms * 10 + to_i64(s.at(i) - '0')
+    d := i.step_while((p) { p < n && s.at(p) >= '0' && s.at(p) <= '9' }, (p) {
+        ms = ms * 10 + to_i64(s.at(p) - '0')
         got = true
-        i = i + 1
-    }
+        p + 1
+    })
     (got == false).then({
         return 0 - 1
     })
     frac := to_i64(0)
     w := to_i64(100)
-    (i < n && s.at(i) == '.').then({
-        i = i + 1
-    })
-    @while (i < n && w > 0 && s.at(i) >= '0' && s.at(i) <= '9') {
-        frac = frac + to_i64(s.at(i) - '0') * w
+    f0 := (d < n && s.at(d) == '.').then({ d + 1 }, { d })
+    f0.step_while((p) { p < n && w > 0 && s.at(p) >= '0' && s.at(p) <= '9' }, (p) {
+        frac = frac + to_i64(s.at(p) - '0') * w
         w = w / 10
-        i = i + 1
-    }
+        p + 1
+    })
     ms * 1000 + frac
 }
 // ── running subprocesses ─────────────────────────────────────────────────────────────────────────
@@ -453,14 +444,12 @@ cb_measure = (mp: MutPtr<Malloc>, name: StringView, bare: StringView, cache: i64
         mp.cb_wipe()
         mp.cb_quiet(timed)
     })
-    i := to_i64(0)
-    @while (i < reps) {
+    reps.times((i) {
         (cache == CACHE_COLD()).then({
             mp.cb_wipe()
         })
         xs[i] = mp.cb_time_us(timed)
-        i = i + 1
-    }
+    })
     xs.sort_by((a: i64, b: i64) bool { a < b })
     (cache == CACHE_COLD()).then({
         mp.cb_wipe()

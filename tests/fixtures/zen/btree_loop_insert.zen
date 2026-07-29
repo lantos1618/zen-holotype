@@ -1,5 +1,5 @@
 // std.collections.btree — REGRESSION for the loop-reassign miscompile (#70), fixed by #489's inliner
-// evaluate-once pass. Building a BTreeMap/BTreeSet with `m = m.insert(...)` inside a `@while` loop must
+// evaluate-once pass. Building a BTreeMap/BTreeSet with `m = m.insert(...)` inside a LOOP BODY must
 // keep EVERY entry: the pre-#489 inliner multiply-evaluated a call arg whose param was used >1× in the
 // body, so a struct-returning op reassigned in a loop lost entries. Here we insert 0..9 IN A LOOP, in a
 // scrambled order (forcing several grows), and assert all 10 land, sorted and reachable — for both the
@@ -9,18 +9,18 @@ btree = std.collections.btree
 { Result, IoError } = std.core.result
 { BTreeMap, BTreeSet } = std.collections.btree
 { println, print } = std.text.fmt
+{ times } = std.core.count
 main = () i32 {
     alloc := halloc.gpa()
     a := alloc.addr()
     // ── BTreeMap<i64,i64> built via LOOP reassignment (the #70 trigger) ──
     r: Result<BTreeMap<i64, i64>, IoError> := btree.empty(a)
     m := r.expect("empty")
-    i: i64 := 0
-    @while (i < 10) {
+    n: i64 := 10
+    n.times((i) {
         k := i * 7 % 10    // 0,7,4,1,8,5,2,9,6,3 — a scramble of 0..9 (gcd(7,10)=1)
         m = m.insert(a, k, k * 10).expect("insert")
-        i = i + 1
-    }
+    })
     println(m.len())    // 10 — no entries lost to the loop
     // ordered iteration is sorted 0..9 with value key*10
     m.each((k, v) {
@@ -29,22 +29,16 @@ main = () i32 {
         println(v)
     })
     good: i64 := 0
-    j: i64 := 0
-    @while (j < 10) {
+    n.times((j) {
         (m.get_or(j, 0 - 1) == j * 10).then({
             good = good + 1
         })
-        j = j + 1
-    }
+    })
     println(good)    // 10 — every key reachable with the right value
     // ── BTreeSet<i64> built via LOOP reassignment ──
     sr: Result<BTreeSet<i64>, IoError> := btree.set_empty(a)
     s := sr.expect("set_empty")
-    p: i64 := 0
-    @while (p < 10) {
-        s = s.insert(a, p * 3 % 10).expect("insert")    // 0,3,6,9,2,5,8,1,4,7 — scramble of 0..9
-        p = p + 1
-    }
+    n.times((p) { s = s.insert(a, p * 3 % 10).expect("insert") })    // 0,3,6,9,2,5,8,1,4,7 — scramble of 0..9
     println(s.len())    // 10
     // ordered iteration is sorted 0..9
     s.each((w) { println(w) })
