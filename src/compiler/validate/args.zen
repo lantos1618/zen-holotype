@@ -10,8 +10,8 @@
 { String } = std.text.string
 { enum_variants } = compiler.validate.kinds
 { env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_struct_fields, expr_pos,
-  fit_err, is_enum_repr_field, is_ptr_ty, lit_slot_verdict, pos_or, tparam_shape_err,
-  ty_carries_ptr, ty_mentions_tparam } = compiler.validate.util
+  fit_err, is_enum_repr_field, is_ptr_ty, is_write_intrinsic, lit_slot_verdict, pos_or,
+  tparam_shape_err, ty_carries_ptr, ty_mentions_tparam } = compiler.validate.util
 { KSCRATCHSEND, KSCRATCHSTATE } = compiler.validate.diag
 { AliasList, DeadList, consume_depth, dead_cons, dead_has, dead_kill, dead_nil, dead_remove,
   own_moved_var, owner_base, sd_call_pos, sm_call_pos, sm_mcall_pos } = compiler.validate.ownership
@@ -408,19 +408,36 @@ ae_collect = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList
 // name sets it threads — `locals`, every `let` in the function (the storage that dies with the frame),
 // and `tainted`, the subset whose VALUE derives from a `<local>.addr()` (so naming one, or a place
 // rooted at one, hands the address out). `tainted` grows statement by statement; the rest is fixed.
+// `outlives` is the third name set: locals proven to be a SECOND NAME for storage this frame does not
+// own, so a write through one is a write the caller can still read (see ae_root_outlives).
 AeCtx: {
     decls: [Decl],
     idx: DeclIndex,
+    params: [Param],
     locals: Ptr<DeadList>,
     tainted: Ptr<DeadList>,
+    outlives: Ptr<DeadList>,
     ptr_ret: bool,
 }
 ae_taint = (cx: AeCtx, tainted: Ptr<DeadList>) AeCtx {
     AeCtx(
         decls: cx.decls,
         idx: cx.idx,
+        params: cx.params,
         locals: cx.locals,
         tainted: tainted,
+        outlives: cx.outlives,
+        ptr_ret: cx.ptr_ret,
+    )
+}
+ae_outl = (cx: AeCtx, outlives: Ptr<DeadList>) AeCtx {
+    AeCtx(
+        decls: cx.decls,
+        idx: cx.idx,
+        params: cx.params,
+        locals: cx.locals,
+        tainted: cx.tainted,
+        outlives: outlives,
         ptr_ret: cx.ptr_ret,
     )
 }
@@ -840,6 +857,98 @@ ae_arg_outlives = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
     rn = e.wr_root_name()
     rn == "" == false && locals.dead_has(rn) == false
 }
+// ── ESCAPE THROUGH A WRITE INTO CALLER-VISIBLE STORAGE ─────────────────────────────────────────────
+// Everything above reports a frame address leaving through the RETURN value. Return position is not the
+// FACT, though — it is one instance of it. The fact is: a pointer into this frame was written into
+// storage that outlives this frame. `out.v = x.addr()`, `dst[0] = x.addr()`, `store(out, x.addr())` and
+// `store(dst, S(p: x.addr()))` write exactly that, and every one of them was accepted for as long as the
+// rule keyed on the syntactic position rather than on the fact. The rules below key on the DESTINATION's
+// PROVENANCE — where the written-to storage lives — so no statement form, verb or arity can walk past
+// them; a new way to spell "write" only has to route through `ae_write_pos` to be covered.
+// does this type hand the frame a WINDOW onto memory it does not own? A pointer and a slice do; a
+// scalar/struct parameter is this frame's own copy.
+ae_indirect_ty = (t: Ty) bool {
+    is_ptr_ty(t)
+        || t.match ({
+            .Slice(ep) => true,
+            _          => false,
+        })
+}
+// a PARAMETER named `rn` through which the callee reaches the caller's memory. A name that is not a
+// parameter yields false: a global is deliberately still out of scope for this walk (as it is for the
+// return path), and so are the loop-element / match-arm bindings that `ae_collect` never collects.
+ae_param_indirect = (params: [Param], rn: StringView) bool {
+    f ::= false
+    params.loop((h, i, p) {
+        (p.name == rn && p.ty.ae_indirect_ty()).then({
+            f = true
+        })
+    })
+    f
+}
+// the destination test: storage reachable by the caller after this frame dies — an indirect parameter,
+// or a local that is a second NAME for one.
+ae_root_outlives = (cx: AeCtx, rn: StringView) bool {
+    (rn == "").then({ false }, { cx.outlives.dead_has(rn) || cx.params.ae_param_indirect(rn) })
+}
+// a local bound from a BARE NAME that already denotes caller-visible storage (`q ::= out`) is a second
+// name for the very same storage — an indirect parameter is a pointer/slice, so binding its name copies
+// the window, not the memory. Only a bare name propagates: a FIELD read (`s ::= out.inner`) may copy a
+// by-value struct into this frame, and calling that an alias would reject a write to a local copy. The
+// cost is one under-reject (a pointer-typed field read is a real alias this walk does not follow); the
+// alternative costs a false positive, and a false positive in a safety rule is the worse currency.
+ae_outl_step = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) Ptr<DeadList> {
+    st.match ({
+        .Let(l) => load(l.value).match ({
+            .Var(v) => cx.ae_root_outlives(v.name).match ({
+                true  => a.dead_cons(l.name, cx.outlives),
+                false => cx.outlives,
+            }),
+            _       => cx.outlives,
+        }),
+        _       => cx.outlives,
+    })
+}
+// grow BOTH name sets across one statement — the taint set (what carries a frame address) and the
+// outlives set (what names caller-visible storage). Both are monotone, so one forward pass suffices.
+ae_step = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) AeCtx {
+    cx.ae_taint(a.ae_taint_step(cx, st)).ae_outl(a.ae_outl_step(cx, st))
+}
+// THE rule: a write whose destination outlives this frame and whose value yields a pointer into it.
+ae_write_pos = (a: MutPtr<Malloc>, cx: AeCtx, dest: Ptr<Expr>, val: Ptr<Expr>, pos: i32) i32 {
+    (cx.ae_root_outlives(dest.wr_root_name()) && a.ae_escapes(cx, val, true)).match ({
+        true  => pos.pos_or(load(val).expr_pos()).pos_or(1),
+        false => 0,
+    })
+}
+// an assignment place that reaches THROUGH its root (`out.v`, `out->v`, `out[i]`) rather than rebinding
+// it: `out = x.addr()` overwrites this frame's own copy of the parameter, which dies with the frame.
+ae_thru_place = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Member(m) => true,
+        .Arrow(ar) => true,
+        .Index(ix) => true,
+        _          => false,
+    })
+}
+ae_assign_write_pos = (
+    a: MutPtr<Malloc>,
+    cx: AeCtx,
+    target: Ptr<Expr>,
+    val: Ptr<Expr>,
+    pos: i32,
+) i32 { target.ae_thru_place().then({ a.ae_write_pos(cx, target, val, pos) }, { 0 }) }
+// the write INTRINSICS are the same write spelled as a call: `store(p, v)` IS `*p = v`, and arg0 IS the
+// place. Keyed on the family that writes through arg0 (is_write_intrinsic), not on the name `store`.
+ae_intrin_write_pos = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Call(c) => (c.fn.is_write_intrinsic() && c.args.len >= 2).match ({
+            true  => a.ae_write_pos(cx, c.args[0].addr(), c.args[1].addr(), c.pos),
+            false => 0,
+        }),
+        _        => 0,
+    })
+}
 // statement-position store escape: the source offset of a call that plants a pointer into this frame
 // through an out-param whose destination arg outlives this frame, else 0.
 ae_store_pos = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
@@ -918,33 +1027,46 @@ ae_kv_arms = (a: MutPtr<Malloc>, cx: AeCtx, arms: [ArmData]) i32 {
     })
     acc
 }
+// the intrinsic-write check leads: a `store` sits in statement position, but it is just as valid nested
+// inside a call argument or a match arm, and this walk is the one that reaches every such position.
 ae_kv_expr_stmt = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
-    load(e).match ({
-        .Match(m)   => a.ae_kv_arms(cx, m.arms),
-        .Cond(d)    => a.ae_kv_expr_stmt(cx, d.t).or(a.ae_kv_expr_stmt(cx, d.e)),
-        .Block(b)   => a.ae_kv_stmts(cx, b.stmts),
-        .Loop(l)    => a.ae_kv_stmts(cx, l.body),
-        // a lambda body is checked WITHOUT its implicit trailing return: that value is the lambda's
-        // result, which this discarded call throws away — reading it as a function return would
-        // reject `apply(() { x.addr() })`, where nothing leaves the frame.
-        .Lambda(lm) => a.ae_kv_stmts(cx, lm.body.lam_stmt_body()),
-        // a send / out-param store / escaping return can sit in ANY nested statement list, and a
-        // `.Lambda` body reached only through a call argument was in none of the arms above.
-        _           => 0.expr_fold_children(e, (acc, ch) { acc.or(a.ae_kv_expr_stmt(cx, ch)) }, (acc, body) {
-            acc.or(a.ae_kv_stmts(cx, body))
-        }),
-    })
+    a
+        .ae_intrin_write_pos(cx, e)
+        .or(load(e).match ({
+            .Match(m)   => a.ae_kv_arms(cx, m.arms),
+            .Cond(d)    => a.ae_kv_expr_stmt(cx, d.t).or(a.ae_kv_expr_stmt(cx, d.e)),
+            .Block(b)   => a.ae_kv_stmts(cx, b.stmts),
+            .Loop(l)    => a.ae_kv_stmts(cx, l.body),
+            // a lambda body is checked WITHOUT its implicit trailing return: that value is the lambda's
+            // result, which this discarded call throws away — reading it as a function return would
+            // reject `apply(() { x.addr() })`, where nothing leaves the frame.
+            .Lambda(lm) => a.ae_kv_stmts(cx, lm.body.lam_stmt_body()),
+            // a send / out-param store / escaping return can sit in ANY nested statement list, and a
+            // `.Lambda` body reached only through a call argument was in none of the arms above.
+            _           => 0.expr_fold_children(e, (acc, ch) { acc.or(a.ae_kv_expr_stmt(cx, ch)) }, (acc, body) {
+                acc.or(a.ae_kv_stmts(cx, body))
+            }),
+        }))
 }
 ae_kv_stmt = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) i32 {
     st.match ({
+        // a void function's trailing statement arrives here as a `.Return`, so the write checks belong
+        // on this path too — that is where `store(out, x.addr())` as the last statement lives.
         .Return(r)   => (cx.ptr_ret && a.ae_escapes(cx, r, true)).match ({
             true  => load(r).expr_pos().pos_or(1),
-            false => a.ae_store_pos(cx, r),
+            false => a.ae_store_pos(cx, r).or(a.ae_intrin_write_pos(cx, r)),
         }),
         .If(f)       => a.ae_kv_stmts(cx, f.then).or(a.ae_kv_stmts(cx, f.els)),
         .While(w)    => a.ae_kv_stmts(cx, w.body),
         .Let(l)      => a.ae_send_pos(cx, l.value).or(a.ae_store_pos(cx, l.value)),
-        .Assign(x)   => a.ae_send_pos(cx, x.value).or(a.ae_store_pos(cx, x.value)),
+        .Assign(x)   => a
+            .ae_send_pos(cx, x.value)
+            .or(a.ae_store_pos(cx, x.value))
+            .or(a.ae_assign_write_pos(cx, x.target, x.value, x.pos)),
+        .IndexSet(x) => a
+            .ae_send_pos(cx, x.value)
+            .or(a.ae_store_pos(cx, x.value))
+            .or(a.ae_write_pos(cx, x.seq, x.value, x.pos)),
         .ExprStmt(e) => a.ae_kv_expr_stmt(cx, e).or(a.ae_send_pos(cx, e)).or(a.ae_store_pos(cx, e)),
         _            => 0,
     })
@@ -954,7 +1076,7 @@ ae_kv_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
     cur ::= cx
     body.loop((h, i, st) {
         acc = acc.or(a.ae_kv_stmt(cur, st))
-        cur = cur.ae_taint(a.ae_taint_step(cur, st))
+        cur = a.ae_step(cur, st)
     })
     acc
 }
@@ -963,7 +1085,7 @@ ae_kv_body = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
     cur ::= cx
     body.loop((h, i, st) {
         acc = acc.or(a.ae_kv_stmt(cur, st))
-        cur = cur.ae_taint(a.ae_taint_step(cur, st))
+        cur = a.ae_step(cur, st)
     })
     acc.or((body.len == 0).match ({
         true  => 0,
@@ -980,8 +1102,10 @@ ae_check_func* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32
     a.ae_kv_body(AeCtx(
         decls: decls,
         idx: idx,
+        params: f.params,
         locals: a.ae_collect(a.dead_nil(), f.body),
         tainted: a.dead_nil(),
+        outlives: a.dead_nil(),
         ptr_ret: f.ret.ty_carries_ptr(),
     ), f.body)
 }

@@ -208,6 +208,7 @@ KLETEQ* = () i32 { 64 }    // a local binding whose annotation is not followed b
 // ── const-by-default ────────────────────────────────────────────────────────────────────────────
 KASSIGNCONST* = () i32 { 65 }    // an assignment to a binding declared WITHOUT the `::` mutability mark. Zen locals are constants unless marked, so this is the whole content of the rule: `x = 0` binds once, `x ::= 0` binds a variable
 KWALRUS* = () i32 { 66 }    // the RETIRED `:=` binding spelling (the parser's `__retired_walrus` sentinel). One always-mutable form became four that say what they mean, so `:=` is not a binding form at all — it is recognized only to name its replacement
+KSLICEELEM* = () i32 { 67 }    // a `slice(p, n)` whose declared ELEMENT TYPE disagrees with the element type of the storage `p` was derived from. `zen__idx` guards the element COUNT; the element WIDTH came from an unchecked annotation, so a wider element read past the end of the allocation
 Diagnostic*: {
     code: i32,
     kind: StringView,
@@ -644,6 +645,13 @@ diag_info = (code: i32) DiagInfo {
             kind: "parse",
             message: "`:=` is retired",
             hint: "write `x = v` for a constant binding or `x ::= v` for a mutable one; annotated, `x: T = v` and `x :: T = v`",
+        )
+    })
+    (code == 67).then({
+        return DiagInfo(
+            kind: "slice-elem",
+            message: "slice element type does not match the memory this pointer came from (the element WIDTH is unchecked: a wider element reads past the end of the allocation)",
+            hint: "declare the same element type the storage holds, or take the window from the value itself (`xs.view()`/`xs`) instead of re-widening its `.ptr`",
         )
     })
     (code == 47).then({
