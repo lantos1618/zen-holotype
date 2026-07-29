@@ -534,15 +534,64 @@ is_slicelit_expr = (e: Expr) bool {
         _            => false,
     })
 }
-already_collected = (ps: [Param], args: [Expr]) bool {
-    (args.len == ps.len).match ({
-        true  => (args.len > 0).then({ is_slicelit_expr(args[args.len - 1]) }, { false }),
+// The same test doubles as SPREAD: a value of the collected `[T]` type passed in the variadic slot is
+// forwarded as-is instead of being wrapped one level deeper. That keeps the pre-varargs
+// `formatln(t, [arg_int(n)])` spelling working after `args` becomes `...Arg`, and lets a variadic fn
+// forward its own collected slice to another (`formatln` -> `format`). The two readings never collide:
+// a `[T]` can only be an ELEMENT of a `...T` list when T = [T], which no type satisfies.
+already_collected = (env: Env, ps: [Param], args: [Expr]) bool {
+    (args.len == ps.len && args.len > 0).match ({
+        true  => {
+            last := args[args.len - 1]
+            is_slicelit_expr(last) || env.infer_expr(last.addr()).fits(ps[ps.len - 1].ty)
+        },
         false => false,
     })
 }
+// ── implicit variant wrapping in the variadic tail ───────────────────────────
+// `formatln("{} {}", n, s)` against `args: ...Arg` wraps each surplus argument as the `Arg` variant
+// that carries its static type — `.Int(n)`, `.Str(s)` — so no call site spells `arg_int`/`arg_str`.
+// It fires only when the element type is a concrete enum, the argument is not already that enum, and
+// EXACTLY ONE variant's payload accepts the argument's type under the ordinary `fits` lattice (so an
+// i32 widens into `.Int(i64)` and a string literal lands in `.Str(StringView)`). Zero candidates — a
+// struct, say — or several leave the argument alone and the normal arg-type error stands.
+vararg_variant = (env: Env, ename: StringView, got: Ty) StringView {
+    hit := ""
+    n: i32 := 0
+    env.didx.idx_enum_variants(env.decls, ename).loop((h, i, v) {
+        got.fits(v.payload).then({
+            hit = v.name
+            n = n + 1
+        })
+    })
+    (n == 1).then({ hit }, { "" })
+}
+vararg_wrap = (a: MutPtr<Malloc>, env: Env, ps: [Param], i: i32, e: Expr) Expr {
+    (last_variadic(ps) && i >= ps.len - 1).match ({
+        true  => {
+            want := ps[ps.len - 1].ty.vararg_elem()
+            ename := want.enum_name()
+            got := env.infer_expr(e.addr())
+            // `got.fits(collected)` is the SPREAD arm of already_collected: skip it here too, so a
+            // re-resolve pass (or an explicit `[T]`) is never wrapped as one more element — which an
+            // enum carrying a `[Self]` payload would otherwise accept.
+            (ename == "" || got.ty_eq(want) || got.is_void_ty() || got.fits(ps[ps.len - 1].ty)).match ({
+                true  => e,
+                false => env.vararg_variant(ename, got).match_wrap(a, ename, e),
+            })
+        },
+        false => e,
+    })
+}
+match_wrap = (variant: StringView, a: MutPtr<Malloc>, ename: StringView, e: Expr) Expr {
+    (variant == "").match ({
+        true  => e,
+        false => load(a.cenode(mkenumg(ename, ename, no_tys(), variant, a.cenode(e)))),
+    })
+}
 // rewrite `f(a, b, c)` with `f = (x: X, ys: ...Y)` into `f(a, [b, c])`: surplus args → one SliceLit.
-collect_varargs = (a: MutPtr<Malloc>, ps: [Param], args: [Expr]) [Expr] {
-    (last_variadic(ps) && ps.already_collected(args) == false).match ({
+collect_varargs = (a: MutPtr<Malloc>, env: Env, ps: [Param], args: [Expr]) [Expr] {
+    (last_variadic(ps) && env.already_collected(ps, args) == false).match ({
         true  => {
             fixed := ps.len - 1
             (args.len < fixed).match ({
@@ -664,7 +713,7 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
     buf := a.cebuf(c.args.len)
     c.args.loop((h, i, ar) {
         ex := env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
-        buf[i] = load(a.resolve_expr(env.with_exp(ex), ar.addr()))
+        buf[i] = a.vararg_wrap(env, ps, i, load(a.resolve_expr(env.with_exp(ex), ar.addr())))
     })
     // After args resolve: value→Ptr/MutPtr auto-ref on arg0 (UFCS MutPtr receivers like r.next()).
     (ps.len == buf.len).then({
@@ -676,7 +725,7 @@ resolve_call = (a: MutPtr<Malloc>, env: Env, c: CallData) Ptr<Expr> {
         false => (cclos == "").match ({
             true  => env.is_fn_field_call(dn, buf).match ({
                 true  => a.rewrite_fn_field_call(env, c.fn, buf),
-                false => a.recall(c, env.rec_dispatch(dn, fn, c.args, c.targs), a.collect_varargs(ps, buf)),
+                false => a.recall(c, env.rec_dispatch(dn, fn, c.args, c.targs), a.collect_varargs(env, ps, buf)),
             }),
             false => a.clos_call_rewrite(c, cclos, buf),
         }),

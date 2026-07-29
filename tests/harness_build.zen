@@ -2465,6 +2465,14 @@ harness_build_run* = () i32 {
             cmd: "f=$ZT/decl_cap_2000.zen && : >$f && i=0 && while test $i -lt 2000; do printf 'f%s = () i32 { %s }\\n' \"$i\" \"$((i % 100))\" >>$f; i=$((i + 1)); done && printf 'main = () i32 { f1999() }\\n' >>$f && ./zen build $f -o $ZT/decl_cap_2000 >/dev/null 2>&1 && { $ZT/decl_cap_2000; test \"$?\" = 99; }",
         ),
         ShellCase(
+            name: "formatln_heterogeneous_varargs",
+            cmd: "printf '{ formatln, arg_int } = std.text.fmt\\nmain = () i32 {\\n n := 42\\n s: StringView := \"hi\"\\n b := true\\n formatln(\"{} {} {}\", n, s, b)\\n formatln(\"zero\")\\n formatln(\"{} {}\", 3.25, [arg_int(7)][0])\\n formatln(\"old {}\", [arg_int(5)])\\n 0\\n}\\n' > $ZT/zva.zen && ./zen run $ZT/zva.zen > $ZT/zva.txt 2>/dev/null && printf '42 hi true\\nzero\\n3.25 7\\nold 5\\n' | cmp -s - $ZT/zva.txt",
+        ),
+        ShellCase(
+            name: "formatln_varargs_rejects_unwrappable",
+            cmd: "printf 'P: { x: i64 }\\n{ formatln } = std.text.fmt\\nmain = () i32 { formatln(\"{}\", P(x: 1))\\n 0 }\\n' > $ZT/zvab.zen && { ./zen check $ZT/zvab.zen 2>$ZT/zvab_e.txt; test \"$?\" = 1; } && grep -Fq 'error[arg-type]' $ZT/zvab_e.txt",
+        ),
+        ShellCase(
             name: "run_forwards_args",
             cmd: "./zen run tests/fixtures/zen/echo_args.zen alpha beta 'g z' > $ZT/zargs.txt 2>/dev/null && printf '3\\nalpha\\nbeta\\ng z\\n' | cmp -s - $ZT/zargs.txt",
         ),
@@ -2933,6 +2941,11 @@ harness_build_run* = () i32 {
             cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
         ),
     ])
+    // `formatln("{} {}", a, b)`: heterogeneous arguments wrap themselves into the `Arg` variant
+    // that carries each one's static type, so no call site spells arg_int/arg_str/arg_bool — and a
+    // bool goes in as a bool (no `.to_i64()`). The explicit `[Arg]` slice spelling keeps working
+    // unchanged in the same file (the variadic slot SPREADS a value already of the collected type),
+    // zero args needs no `[]`, and a type no variant accepts is still an arg-type error.
     // the floor's copy spreads a PLAIN object only. A live JS object (what the dom lowering hands
     // back) and a slice's backing array must pass through by identity — `{...node}` would keep the
     // own fields and drop the prototype, and the methods ARE the value.
