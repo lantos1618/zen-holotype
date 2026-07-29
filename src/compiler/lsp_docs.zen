@@ -59,7 +59,7 @@ lspd_grow = () void {
 // a DURABLE copy of a request-scoped view — NUL-terminated, so it reads back as a plain StringView.
 // The empty view keeps the "" literal (nothing to own, nothing to release).
 lspd_own = (s: StringView) StringView {
-    v: [u8] = s.view()
+    v: Slice<u8> = s.view()
     (v.len == 0).match ({
         true  => "",
         false => {
@@ -77,11 +77,13 @@ lspd_own = (s: StringView) StringView {
 }
 // release an OWNED copy. "" is the literal miss/absent marker and is never heap — see MEMORY above.
 lspd_release = (s: StringView) void {
-    v: [u8] = s.view()
+    v: Slice<u8> = s.view()
     (v.len > 0).then({
-        lspd_free(v.ptr)
+        lspd_free(s.offset(0))
     })
-}
+}    // `s.offset(0)` is std.text.str's `own_ptr` respelled: this file is in the bootstrap
+// manifest, which does not carry std.text.str, so the name cannot be imported here. `v.ptr` is a
+// BORROWED `Ptr<u8>` and will not free; `lspd_own` allocated this block, so the claim is honest.
 lspd_free_entry = (i: i64) void {
     d = lspd_buf[i]
     lspd_release(d.uri)

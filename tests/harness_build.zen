@@ -2472,7 +2472,7 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.io.file",
-            present: ["out* = (s: StringView) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_bytes_in* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_bytes* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_in* = (a: Allocator, path: StringView) Result<StringView, IoError>", "contents* = (a: Allocator, path: StringView) Result<StringView, IoError>", "save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError>", "O_WRTRUNC* = O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: StringView) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
+            present: ["out* = (s: StringView) Result<i64, IoError>", "out_bytes* = (bytes: Slice<u8>) Result<i64, IoError>", "contents_bytes_in* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_bytes* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_in* = (a: Allocator, path: StringView) Result<StringView, IoError>", "contents* = (a: Allocator, path: StringView) Result<StringView, IoError>", "save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError>", "O_WRTRUNC* = O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: StringView) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
             absent: ["contents* = (path: StringView) Result<StringView, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"],
         ),
         DocCase(
@@ -2942,7 +2942,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "readonly_ptr_no_launder",
-            cmd: "{ ./zen check tests/fixtures/zen/readonly_ptr_launder.zen > $ZT/zrpl.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[ptr-write\\]: cannot write through a read-only' $ZT/zrpl.txt)\" = 5 && grep -Fq ':12:23:' $ZT/zrpl.txt && grep -Fq ':19:23:' $ZT/zrpl.txt && grep -Fq ':26:23:' $ZT/zrpl.txt && grep -Fq ':33:11:' $ZT/zrpl.txt && grep -Fq ':39:33:' $ZT/zrpl.txt && grep -Fq '  w :: [u8] = v.ptr.slice(v.len)' $ZT/zrpl.txt && grep -Fq '  w :: [u8] = v.ptr.offset(0).slice(v.len)' $ZT/zrpl.txt && grep -Fq \"  v.ptr.store('H')\" $ZT/zrpl.txt && printf '{ view } = std.text.str\\n{ copy } = std.mem.raw\\nfrom_ro = (s: StringCstr, d: [u8]) void {\\n    v = s.view()\\n    d.ptr.copy(v.ptr, v.len)\\n}\\nstill_writable = (s: StringView) [u8] {\\n    v = s.view()\\n    v.ptr.slice(v.len)\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zrpok.zen && ./zen check $ZT/zrpok.zen",
+            cmd: "{ ./zen check tests/fixtures/zen/readonly_ptr_launder.zen > $ZT/zrpl.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[assign-fit\\]: expected `\\[u8\\]`, got `Slice<u8>`' $ZT/zrpl.txt)\" = 4 && test \"$(grep -c 'error\\[ptr-write\\]: cannot write through a read-only' $ZT/zrpl.txt)\" = 1 && grep -Fq ':12:23:' $ZT/zrpl.txt && grep -Fq ':19:23:' $ZT/zrpl.txt && grep -Fq ':26:23:' $ZT/zrpl.txt && grep -Fq ':33:11:' $ZT/zrpl.txt && grep -Fq ':39:33:' $ZT/zrpl.txt && grep -Fq '  w :: [u8] = v.ptr.slice(v.len)' $ZT/zrpl.txt && grep -Fq '  w :: [u8] = v.ptr.offset(0).slice(v.len)' $ZT/zrpl.txt && grep -Fq \"  v.ptr.store('H')\" $ZT/zrpl.txt && printf '{ view } = std.text.str\\n{ copy } = std.mem.raw\\nfrom_ro = (s: StringCstr, d: [u8]) void {\\n    v = s.view()\\n    d.ptr.copy(v.ptr, v.len)\\n}\\nstill_readonly = (s: StringView) Slice<u8> {\\n    v = s.view()\\n    v.ptr.slice(v.len)\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zrpok.zen && ./zen check $ZT/zrpok.zen",
         ),
         ShellCase(
             name: "store_obeys_assign_fit",
@@ -2950,7 +2950,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "slice_elem_width_matches_storage",
-            cmd: "{ ./zen check tests/fixtures/zen/slice_elem_width.zen > $ZT/zsew.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[slice-elem\\]' $ZT/zsew.txt)\" = 4 && grep -Fq ':12:19:' $ZT/zsew.txt && grep -Fq ':16:39:' $ZT/zsew.txt && grep -Fq ':26:19:' $ZT/zsew.txt && grep -Fq ':32:19:' $ZT/zsew.txt && grep -Fq '      ys :: [i64] = slice(xs.ptr, 4)' $ZT/zsew.txt && printf '{ Allocator, Malloc } = std.mem.alloc\\n{ view } = std.text.str\\nsame_elem = (xs: [i32]) i32 {\\n    ys :: [i32] = slice(xs.ptr, xs.len)\\n    ys[0]\\n}\\nbytes_from_typed = (xs: [i32]) u8 {\\n    bs :: [u8] = slice(xs.ptr, xs.len * 4)\\n    bs[0]\\n}\\ntyped_from_raw = (a: MutPtr<Malloc>, n: i64) [i64] {\\n    slice(assert_nonnull(a.acquire(n * sizeof(i64))), n)\\n}\\nbytes_window = (s: StringView) u8 {\\n    v = s.view()\\n    w :: [u8] = slice(v.ptr, v.len)\\n    w[0]\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zsewok.zen && ./zen check $ZT/zsewok.zen",
+            cmd: "{ ./zen check tests/fixtures/zen/slice_elem_width.zen > $ZT/zsew.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[slice-elem\\]' $ZT/zsew.txt)\" = 4 && grep -Fq ':12:19:' $ZT/zsew.txt && grep -Fq ':16:39:' $ZT/zsew.txt && grep -Fq ':26:19:' $ZT/zsew.txt && grep -Fq ':32:19:' $ZT/zsew.txt && grep -Fq '      ys :: [i64] = slice(xs.ptr, 4)' $ZT/zsew.txt && printf '{ Allocator, Malloc } = std.mem.alloc\\n{ view } = std.text.str\\nsame_elem = (xs: [i32]) i32 {\\n    ys :: [i32] = slice(xs.ptr, xs.len)\\n    ys[0]\\n}\\nbytes_from_typed = (xs: [i32]) u8 {\\n    bs :: [u8] = slice(xs.ptr, xs.len * 4)\\n    bs[0]\\n}\\ntyped_from_raw = (a: MutPtr<Malloc>, n: i64) [i64] {\\n    slice(assert_nonnull(a.acquire(n * sizeof(i64))), n)\\n}\\nbytes_window = (s: StringView) u8 {\\n    v = s.view()\\n    w: Slice<u8> = slice(v.ptr, v.len)\\n    w[0]\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zsewok.zen && ./zen check $ZT/zsewok.zen",
         ),
         ShellCase(
             name: "outparam_escape_rejected",
@@ -2981,6 +2981,10 @@ harness_build_run* = () i32 {
             cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
         ),
     ])
+    // its accept-companion's `bytes_window` takes the window as `Slice<u8>`, not `[u8]`: a `.view()`
+    // of a `StringView` is READ-ONLY, so re-widening its `.ptr` into a writable slice is the
+    // laundering tests/fixtures/zen/readonly_ptr_launder.zen exists to reject. The case is still
+    // about the ELEMENT WIDTH rule — u8-from-u8 is the byte floor, which is what it must accept.
     // `formatln("{} {}", a, b)`: heterogeneous arguments wrap themselves into the `Arg` variant
     // that carries each one's static type, so no call site spells arg_int/arg_str/arg_bool — and a
     // bool goes in as a bool (no `.to_i64()`). The explicit `[Arg]` slice spelling keeps working

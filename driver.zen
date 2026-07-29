@@ -182,12 +182,12 @@ cross_cc = (mp: MutPtr<Malloc>, target: StringView) StringView {
     eprint(" or zig\n")
     ""
 }
-flag_token_end = (v: [u8], i: i64) i64 {
+flag_token_end = (v: Slice<u8>, i: i64) i64 {
     (i >= v.len || v[i] == ' ').then({ i }, { v.flag_token_end(i + 1) })
 }
 // fold a flag string: its text (order + non-file tokens like -lm), plus the CONTENT of every
 // whitespace token that names a readable file (a project's extra .c sources compiled into the binary).
-fnv_flag_files = (mp: MutPtr<Malloc>, h: i64, v: [u8], i: i64) i64 {
+fnv_flag_files = (mp: MutPtr<Malloc>, h: i64, v: Slice<u8>, i: i64) i64 {
     (i >= v.len).match ({
         true  => h,
         false => (v[i] == ' ').match ({
@@ -205,7 +205,7 @@ fnv_flag_files = (mp: MutPtr<Malloc>, h: i64, v: [u8], i: i64) i64 {
     })
 }
 fnv_flags = (h: i64, mp: MutPtr<Malloc>, s: StringView) i64 {
-    v: [u8] = s.view()
+    v: Slice<u8> = s.view()
     mp.fnv_flag_files(h.fnv_str(s), v, 0)
 }
 // the compiler's own identity: the hash of the running zenc binary. A rebuilt zenc — new checker, new
@@ -764,7 +764,7 @@ build_spec = (
 // an embedded `'` becomes `'\''` (close, escaped quote, reopen).
 quote_arg = (s: String, mp: MutPtr<Malloc>, t: StringView) String {
     cur ::= s.gstr_push(mp, '\'')
-    v: [u8] = t.view()
+    v: Slice<u8> = t.view()
     v.loop((h, i, b) {
         cur = (b == '\'').then({ cur.gstr_append(mp, "'\\''") }, { cur.gstr_push(mp, b) })
     })
@@ -955,7 +955,7 @@ prof_span = (mp: MutPtr<Malloc>, v: [u8], a: i64, b: i64) StringView {
     push_span(mp.gstr_string(b - a + 1), mp, v, a, b).gstr_finish(mp)
 }
 prof_starts = (v: [u8], ls: i64, le: i64, lit: StringView) bool {
-    w: [u8] = lit.view()
+    w: Slice<u8> = lit.view()
     (le - ls < w.len).then({
         return false
     })
@@ -1012,7 +1012,7 @@ prof_perf_row = (mp: MutPtr<Malloc>, v: [u8], ls: i64, le: i64) ProfRow {
     )
 }
 prof_parse_perf = (mp: MutPtr<Malloc>, body: StringView, rows: [ProfRow]) ProfParse {
-    v: [u8] = body.view()
+    v: Slice<u8> = body.view()
     n ::= 0
     samples ::= ""
     ls ::= 0
@@ -1072,7 +1072,7 @@ prof_gprof_row = (mp: MutPtr<Malloc>, v: [u8], ls: i64, le: i64) ProfRow {
     )
 }
 prof_parse_gprof = (mp: MutPtr<Malloc>, body: StringView, rows: [ProfRow]) i64 {
-    v: [u8] = body.view()
+    v: Slice<u8> = body.view()
     n ::= 0
     ls ::= 0
     v.loop((h, i, b) {
@@ -1153,7 +1153,7 @@ prof_names_of = (mp: MutPtr<Malloc>, root: StringView, spec: Spec, src: StringVi
     mp.prof_names(mp.parse_module(rp.flat))
 }
 prof_binname = (mp: MutPtr<Malloc>, p: StringView) StringView {
-    v: [u8] = p.view()
+    v: Slice<u8> = p.view()
     cut = last_slash(v, 0, 0 - 1)
     (cut < 0).then({ p }, { cstr(offset(p, cut + 1)) })
 }
@@ -1639,30 +1639,32 @@ bs_is_space = (b: u8) bool {
         }),
     })
 }
-bs_skip_space = (v: [u8], i: i64, e: i64) i64 {
+bs_skip_space = (v: Slice<u8>, i: i64, e: i64) i64 {
     (i >= e).match ({
         true  => e,
         false => bs_is_space(v[i]).then({ v.bs_skip_space(i + 1, e) }, { i }),
     })
 }
-bs_trim_end = (v: [u8], s: i64, e: i64) i64 {
+bs_trim_end = (v: Slice<u8>, s: i64, e: i64) i64 {
     (e <= s).match ({
         true  => s,
         false => bs_is_space(v[e - 1]).then({ v.bs_trim_end(s, e - 1) }, { e }),
     })
 }
-bs_line_end = (v: [u8], p0: i64, n: i64) i64 { p0.advance_while((p) { p < n && v[p] != '\n' }) }    // iterative: a long line must not recurse per char
-bs_eq_run = (v: [u8], at: i64, nv: [u8], i: i64) bool {
+bs_line_end = (v: Slice<u8>, p0: i64, n: i64) i64 {
+    p0.advance_while((p) { p < n && v[p] != '\n' })
+}    // iterative: a long line must not recurse per char
+bs_eq_run = (v: Slice<u8>, at: i64, nv: Slice<u8>, i: i64) bool {
     (i >= nv.len).match ({
         true  => true,
         false => (v[at + i] == nv[i]).then({ v.bs_eq_run(at, nv, i + 1) }, { false }),
     })
 }
-bs_match_at = (v: [u8], at: i64, e: i64, needle: StringView) bool {
+bs_match_at = (v: Slice<u8>, at: i64, e: i64, needle: StringView) bool {
     nv = needle.view()
     (at + nv.len > e).then({ false }, { v.bs_eq_run(at, nv, 0) })
 }
-bs_has_needle = (v: [u8], p: i64, e: i64) bool {
+bs_has_needle = (v: Slice<u8>, p: i64, e: i64) bool {
     (p >= e).match ({
         true  => false,
         false => v.bs_match_at(p, e, "= std.").match ({
@@ -1678,7 +1680,7 @@ bs_has_needle = (v: [u8], p: i64, e: i64) bool {
 bs_brace_open = (b: u8) bool {
     b == ' ' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b == '_'
 }
-bs_is_import = (v: [u8], p: i64, e: i64) bool {
+bs_is_import = (v: Slice<u8>, p: i64, e: i64) bool {
     s = v.bs_skip_space(p, e)
     (s + 1 < e).match ({
         true  => (v[s] == '{').match ({
@@ -1688,7 +1690,14 @@ bs_is_import = (v: [u8], p: i64, e: i64) bool {
         false => false,
     })
 }
-bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first: bool) String {
+bs_strip_file = (
+    mp: MutPtr<Malloc>,
+    out: String,
+    v: Slice<u8>,
+    p: i64,
+    n: i64,
+    first: bool,
+) String {
     (p >= n).match ({
         true  => out,
         false => {
@@ -1706,7 +1715,7 @@ bs_strip_file = (mp: MutPtr<Malloc>, out: String, v: [u8], p: i64, n: i64, first
         },
     })
 }
-bs_rel = (mp: MutPtr<Malloc>, mv: [u8], s: i64, t: i64) StringView {
+bs_rel = (mp: MutPtr<Malloc>, mv: Slice<u8>, s: i64, t: i64) StringView {
     mp.bs_push_range(mp.gstr_string(256), mv, s, t).gstr_finish(mp)
 }
 bs_add_source = (mp: MutPtr<Malloc>, out: String, root: StringView, rel: StringView) String {
@@ -1726,7 +1735,7 @@ bs_walk_manifest = (
     mp: MutPtr<Malloc>,
     out: String,
     root: StringView,
-    mv: [u8],
+    mv: Slice<u8>,
     p: i64,
     n: i64,
     count: i64,
@@ -1989,7 +1998,7 @@ build_self = (mp: MutPtr<Malloc>, root: StringView, out_path: StringView, shake:
 }
 // ── doc: a module's public decls + their leading doc comments (ported from driver.c doc_source) ───
 ends_zen = (s: StringView) bool {
-    v: [u8] = s.view()
+    v: Slice<u8> = s.view()
     v.len >= 4
         && v[v.len - 4] == '.'
         && v[v.len - 3] == 'z'
@@ -1997,7 +2006,7 @@ ends_zen = (s: StringView) bool {
         && v[v.len - 1] == 'n'
 }
 is_name_start = (b: u8) bool { b >= 'A' && b <= 'Z' || b >= 'a' && b <= 'z' || b == '_' }
-push_mod = (mp: MutPtr<Malloc>, s: String, v: [u8], i: i64) String {
+push_mod = (mp: MutPtr<Malloc>, s: String, v: Slice<u8>, i: i64) String {
     (i >= v.len).match ({
         true  => s,
         false => mp.push_mod(s.gstr_push(mp, (v[i] == '.').then({ '/' }, { v[i] })), v, i + 1),
@@ -2020,7 +2029,7 @@ mod_path = (mp: MutPtr<Malloc>, root: StringView, mod: StringView) StringView {
         },
     })
 }
-doc_has_star = (v: [u8], i: i64, t: i64) bool {
+doc_has_star = (v: Slice<u8>, i: i64, t: i64) bool {
     (i >= t).match ({
         true  => false,
         false => (v[i] == '*').match ({
@@ -2029,14 +2038,14 @@ doc_has_star = (v: [u8], i: i64, t: i64) bool {
         }),
     })
 }
-doc_is_pub = (v: [u8], p: i64, t: i64) bool {
+doc_is_pub = (v: Slice<u8>, p: i64, t: i64) bool {
     (p >= t).then({ false }, { is_name_start(v[p]) && v.doc_has_star(p, t) })
 }
-out_range = (v: [u8], p: i64, t: i64) i64 {
+out_range = (v: Slice<u8>, p: i64, t: i64) i64 {
     stdout_put_bytes(slice(v.ptr.offset(p), t - p))
     0
 }
-doc_line = (mp: MutPtr<Malloc>, v: [u8], p: i64, t: i64, docs: String) String {
+doc_line = (mp: MutPtr<Malloc>, v: Slice<u8>, p: i64, t: i64, docs: String) String {
     (t - p >= 2 && v[p] == '/' && v[p + 1] == '/').match ({
         true  => {
             s = (p + 2 < t && v[p + 2] == ' ').then({ p + 3 }, { p + 2 })
@@ -2057,7 +2066,7 @@ doc_line = (mp: MutPtr<Malloc>, v: [u8], p: i64, t: i64, docs: String) String {
         }),
     })
 }
-doc_lines = (mp: MutPtr<Malloc>, v: [u8], p: i64, docs: String) i64 {
+doc_lines = (mp: MutPtr<Malloc>, v: Slice<u8>, p: i64, docs: String) i64 {
     (p >= v.len).match ({
         true  => 0,
         false => {
@@ -2321,7 +2330,7 @@ zi_scan_args = (i: i32, n: i32, path: StringView, kind: i32, valid: bool) ZiInit
         next = zi_pick_kind(kind, ZI_KIND_LIBRARY)
         return zi_scan_args(i + 1, n, path, next, valid && next > 0)
     })
-    v: [u8] = a.view()
+    v: Slice<u8> = a.view()
     (v.len > 0 && v[0] == '-').match ({
         true  => zi_init_args(path, kind, false, false),
         false => (path == "").match ({
@@ -2357,7 +2366,7 @@ zi_prompt_kind = (mp: MutPtr<Malloc>) i32 {
 zi_ascii_alnum = (b: u8) bool {
     b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
-zi_name_tail = (v: [u8], i: i64) bool {
+zi_name_tail = (v: Slice<u8>, i: i64) bool {
     (i >= v.len).match ({
         true  => true,
         false => (zi_ascii_alnum(v[i]) || v[i] == '_' || v[i] == '-').match ({
@@ -2367,15 +2376,15 @@ zi_name_tail = (v: [u8], i: i64) bool {
     })
 }
 zi_name_valid = (s: StringView) bool {
-    v: [u8] = s.view()
+    v: Slice<u8> = s.view()
     v.len > 0 && zi_ascii_alnum(v[0]) && v.zi_name_tail(1)
 }
 zi_path_char = (b: u8) bool { zi_ascii_alnum(b) || b == '_' || b == '-' || b == '.' || b == '/' }
-zi_dot_segment = (v: [u8], start: i64, end: i64) bool {
+zi_dot_segment = (v: Slice<u8>, start: i64, end: i64) bool {
     n = end - start
     n == 1 && v[start] == '.' || n == 2 && v[start] == '.' && v[start + 1] == '.'
 }
-zi_path_valid_at = (v: [u8], i: i64, start: i64) bool {
+zi_path_valid_at = (v: Slice<u8>, i: i64, start: i64) bool {
     (i >= v.len).match ({
         true  => v.zi_dot_segment(start, i) == false,
         false => (zi_path_char(v[i]) && (v[i] != '/' || i == 0 || v[i - 1] != '/')).match ({
@@ -2391,16 +2400,16 @@ zi_path_valid_at = (v: [u8], i: i64, start: i64) bool {
     })
 }
 zi_path_valid = (s: StringView) bool { s.view().zi_path_valid_at(0, 0) }
-zi_trim_end = (v: [u8], n: i64) i64 {
+zi_trim_end = (v: Slice<u8>, n: i64) i64 {
     (n > 0 && v[n - 1] == '/').then({ v.zi_trim_end(n - 1) }, { n })
 }
 zi_normal_path = (mp: MutPtr<Malloc>, raw: StringView) StringView {
-    v: [u8] = raw.view()
+    v: Slice<u8> = raw.view()
     n = v.zi_trim_end(v.len)
     (n == v.len).then({ raw }, { mp.cstr_substr(raw, 0, to_i32(n)) })
 }
 zi_project_name = (mp: MutPtr<Malloc>, path: StringView) StringView {
-    v: [u8] = path.view()
+    v: Slice<u8> = path.view()
     slash = last_slash(v, 0, 0 - 1)
     start = slash + 1
     mp.cstr_substr(path, to_i32(start), to_i32(v.len - start))
@@ -2431,7 +2440,7 @@ zi_ensure_dir = (path: StringView) ZiDirCreate {
     })
 }
 zi_make_tree = (mp: MutPtr<Malloc>, path: StringView) ZiDirCreate {
-    v: [u8] = path.view()
+    v: Slice<u8> = path.view()
     ok ::= true
     one: i64 = 1
     one.step_while((i) { i < v.len && ok }, (i) {
@@ -2449,7 +2458,7 @@ zi_make_tree = (mp: MutPtr<Malloc>, path: StringView) ZiDirCreate {
         ),
     })
 }
-zi_write_all = (fd: i32, p: RawPtr<u8>, n: i64) bool {
+zi_write_all = (fd: i32, p: Ptr<u8>, n: i64) bool {
     (n <= 0).match ({
         true  => true,
         false => {
@@ -2464,7 +2473,7 @@ zi_save_new = (path: StringView, data: StringView) bool {
     (fd < 0).match ({
         true  => false,
         false => {
-            v: [u8] = data.view()
+            v: Slice<u8> = data.view()
             wrote = zi_write_all(fd, v.ptr, v.len)
             shut = close(fd) == 0
             (wrote && shut).match ({
@@ -2731,21 +2740,21 @@ BUILD_TAIL = () StringView {
     "\nmain = () i32 { b = build_context()  build(b.addr())  b.emit_spec()  b.deinit()  0 }\n"
 }
 // the [start,end) of line `idx` (0-based) in v; field idx of the emitted spec.
-line_start = (v: [u8], idx: i32, p: i64) i64 {
+line_start = (v: Slice<u8>, idx: i32, p: i64) i64 {
     (idx <= 0).match ({
         true  => p,
         false => (p >= v.len).then({ p }, { v.line_start(idx - 1, v.bs_line_end(p, v.len) + 1) }),
     })
 }
-spec_field = (mp: MutPtr<Malloc>, v: [u8], idx: i32) StringView {
+spec_field = (mp: MutPtr<Malloc>, v: Slice<u8>, idx: i32) StringView {
     s = v.line_start(idx, 0)
     e = v.bs_line_end(s, v.len)
     mp.bs_push_range(mp.gstr_string(e - s + 1), v, s, e).gstr_finish(mp)
 }
-source_word_end = (v: [u8], i: i64) i64 {
+source_word_end = (v: Slice<u8>, i: i64) i64 {
     (i >= v.len || v[i] == ' ').then({ i }, { v.source_word_end(i + 1) })
 }
-source_words = (mp: MutPtr<Malloc>, dir: StringView, v: [u8], i: i64, out: String) String {
+source_words = (mp: MutPtr<Malloc>, dir: StringView, v: Slice<u8>, i: i64, out: String) String {
     (i >= v.len).match ({
         true  => out,
         false => (v[i] == ' ').match ({
@@ -2775,7 +2784,7 @@ source_flags = (mp: MutPtr<Malloc>, dir: StringView, src: StringView) StringView
 // else is a cross target, canonicalized to the `<arch>-<os>-<abi>` GNU config triple
 // (aarch64-linux-gnu, riscv64-linux-musl, …) that names the conventional cross gcc. ─────────────
 spec_code = (s: StringView) i32 {
-    v: [u8] = s.view()
+    v: Slice<u8> = s.view()
     (v.len <= 0).then({ 0 - 1 }, { to_i32(v[0] - '0') })
 }    // one plan code line -> its integer (codes are single digits); absent line -> -1
 cross_os_code = (o: Os) i32 {
@@ -2871,7 +2880,7 @@ cross_supported = (osc: i32, arc: i32, abc: i32) bool {
     osc == 2 && (arc == 1 || arc == 2 || arc == 3) && (abc == 2 || abc == 3)
 }
 parse_spec_at = (mp: MutPtr<Malloc>, dir: StringView, specsrc: StringView, index: i32) Spec {
-    v: [u8] = specsrc.view()
+    v: Slice<u8> = specsrc.view()
     base = 1 + index * 10
     name = mp.spec_field(v, base)
     root = mp.spec_field(v, base + 1)
@@ -2945,10 +2954,10 @@ empty_spec = () Spec {
 // ffi grants, before probe AND resolve, so the cache walk and the module loader both see the
 // generated file through the one canonical module_path.
 GENSUB = () StringView { ".zen/gen" }
-gmx_tok_end = (v: [u8], i: i64) i64 {
+gmx_tok_end = (v: Slice<u8>, i: i64) i64 {
     (i >= v.len || v[i] == ' ' || v[i] == '\n').then({ i }, { v.gmx_tok_end(i + 1) })
 }
-gmx_skip_lines = (v: [u8], p: i64, k: i32) i64 {
+gmx_skip_lines = (v: Slice<u8>, p: i64, k: i32) i64 {
     (k <= 0 || p >= v.len).then({ p }, { v.gmx_skip_lines(v.bs_line_end(p, v.len) + 1, k - 1) })
 }
 gmx_write = (
@@ -2983,7 +2992,7 @@ genmods_from = (
     left: i32,
     acc: String,
 ) StringView {
-    v: [u8] = specsrc.view()
+    v: Slice<u8> = specsrc.view()
     (left <= 0 || p >= v.len).match ({
         true  => acc.gstr_finish(mp),
         false => {
@@ -3014,12 +3023,12 @@ genmods_extract = (
     specsrc: StringView,
     index: i32,
 ) StringView {
-    v: [u8] = specsrc.view()
+    v: Slice<u8> = specsrc.view()
     gs = v.line_start(1 + specsrc.plan_count() * 10, 0)
     g = v.plan_nat(gs, v.bs_line_end(gs, v.len), 0)
     mp.genmods_from(dir, specsrc, mp.spec_field(v, 1 + index * 10), v.bs_line_end(gs, v.len) + 1, g, mp.gstr_string(64))
 }
-plan_nat = (v: [u8], i: i64, e: i64, n: i32) i32 {
+plan_nat = (v: Slice<u8>, i: i64, e: i64, n: i32) i32 {
     (i >= e).match ({
         true  => n,
         false => (v[i] >= '0' && v[i] <= '9').match ({

@@ -78,7 +78,7 @@ push_uesc = (sb: String, mp: MutPtr<Malloc>, b: u8) String {
 // append `s` as a JSON string LITERAL (surrounding quotes + escaped) to the builder.
 push_jstr = (sb: String, mp: MutPtr<Malloc>, s: StringView) String {
     cur ::= sb.gstr_push(mp, '"')
-    v: [u8] = s.view()
+    v: Slice<u8> = s.view()
     v.loop((h, i, b) {
         cur = (b == '"').match ({
             true  => cur.gstr_append(mp, "\\\""),
@@ -108,7 +108,7 @@ push_jstr = (sb: String, mp: MutPtr<Malloc>, s: StringView) String {
 // happens to sit INSIDE a string value (e.g. the document source text) is never mistaken for a key.
 // String scanning/decoding ITERATES (step_while) so a megabyte document never recurses the C stack.
 // index just past the closing quote of the string opening at v[i]=='"' (respecting `\` escapes).
-json_str_end = (v: [u8], i: i64) i64 {
+json_str_end = (v: Slice<u8>, i: i64) i64 {
     e = (i + 1).step_while((j) { j < v.len && v[j] != '"' }, (j) {
         (v[j] == '\\').then({ j + 2 }, { j + 1 })
     })
@@ -130,8 +130,8 @@ json_str_eq_range = (v: [u8], start: i64, end: i64, kv: [u8]) bool {
 }
 // the byte offset of the VALUE for the first object key named `key`, or -1. Strings are consumed whole,
 // so key matches inside a value never fire and nesting is transparent.
-json_find_key = (v: [u8], key: StringView) i64 {
-    kv: [u8] = key.view()
+json_find_key = (v: Slice<u8>, key: StringView) i64 {
+    kv: Slice<u8> = key.view()
     result :: i64 = 0 - 1
     zero: i64 = 0
     zero.step_while((i) { result < 0 && i < v.len }, (i) {
@@ -180,7 +180,7 @@ push_utf8 = (sb: String, mp: MutPtr<Malloc>, cp: i64) String {
     })
 }
 // decode the JSON string opening at v[i]=='"' into an allocator-owned view (escapes resolved).
-json_decode_str = (mp: MutPtr<Malloc>, v: [u8], i: i64) StringView {
+json_decode_str = (mp: MutPtr<Malloc>, v: Slice<u8>, i: i64) StringView {
     sb ::= mp.gstr_string(v.len - i + 1)
     (i + 1).step_while((j) { j < v.len && v[j] != '"' }, (j) {
         b = v[j]
@@ -246,7 +246,7 @@ json_decode_str = (mp: MutPtr<Malloc>, v: [u8], i: i64) StringView {
     sb.gstr_finish(mp)
 }
 // raw bytes of the value at v[i]: a quoted string (incl. quotes) or a bare token up to `,`/`}`/`]`/ws.
-json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) StringView {
+json_raw_at = (mp: MutPtr<Malloc>, v: Slice<u8>, i: i64) StringView {
     (i >= v.len).match ({
         true  => "null",
         false => (v[i] == '"').match ({
@@ -269,7 +269,7 @@ json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) StringView {
 }
 // the decoded string value of the first key `key`, or "" if absent / non-string.
 json_str_field = (mp: MutPtr<Malloc>, body: StringView, key: StringView) StringView {
-    v: [u8] = body.view()
+    v: Slice<u8> = body.view()
     p = v.json_find_key(key)
     (p < 0 || p >= v.len).match ({
         true  => "",
@@ -278,17 +278,17 @@ json_str_field = (mp: MutPtr<Malloc>, body: StringView, key: StringView) StringV
 }
 // the request id as a raw JSON fragment (number or quoted string), echoed verbatim into the reply.
 lsp_id = (mp: MutPtr<Malloc>, body: StringView) StringView {
-    v: [u8] = body.view()
+    v: Slice<u8> = body.view()
     p = v.json_find_key("id")
     (p < 0).then({ "null" }, { mp.json_raw_at(v, p) })
 }
 // ── URI -> filesystem path (strip a leading `file://`; percent-decoding is a later refinement) ─────
 lsp_has_prefix = (s: StringView, pre: StringView) bool {
-    sv: [u8] = s.view()
-    pv: [u8] = pre.view()
+    sv: Slice<u8> = s.view()
+    pv: Slice<u8> = pre.view()
     (sv.len < pv.len).then({ false }, { lsp_prefix_bytes(sv, pv, 0) })
 }
-lsp_prefix_bytes = (sv: [u8], pv: [u8], i: i64) bool {
+lsp_prefix_bytes = (sv: Slice<u8>, pv: Slice<u8>, i: i64) bool {
     (i >= pv.len).match ({
         true  => true,
         false => (sv[i] == pv[i]).then({ sv.lsp_prefix_bytes(pv, i + 1) }, { false }),
@@ -333,7 +333,7 @@ lsp_zero_span = (sp: DiagSpan) ZSpan {
 // any line with non-ASCII bytes before the error. Conversion walks the located line once: every
 // non-continuation byte counts 1 unit, and a 4-byte UTF-8 lead (>= 0xF0, a supplementary-plane char)
 // counts 2 (its UTF-16 surrogate pair).
-lsp_line_start = (v: [u8], ln: i64) i64 {
+lsp_line_start = (v: Slice<u8>, ln: i64) i64 {
     k :: i64 = 0
     zero: i64 = 0
     zero.step_while((i) { k < ln && i < v.len }, (i) {
@@ -343,7 +343,7 @@ lsp_line_start = (v: [u8], ln: i64) i64 {
         i + 1
     })
 }
-lsp_utf16_col = (v: [u8], ls: i64, bytecol: i64) i64 {
+lsp_utf16_col = (v: Slice<u8>, ls: i64, bytecol: i64) i64 {
     u :: i64 = 0
     end = ls + bytecol
     ls.step_while((i) { i < v.len && i < end && v[i] != '\n' }, (i) {
@@ -377,7 +377,7 @@ lsp_push_diag = (
             z = lsp_zero_span(dl.sp)
             // byte -> UTF-16 columns against the line the span actually points into (dl.src is the
             // owning module's source; for the open document it IS the client's text).
-            sv: [u8] = dl.src.view()
+            sv: Slice<u8> = dl.src.view()
             ls = sv.lsp_line_start(z.l)
             zc ::= sv.lsp_utf16_col(ls, z.c)
             ze ::= sv.lsp_utf16_col(ls, z.e)
@@ -462,7 +462,7 @@ lsp_head_diag = (mp: MutPtr<Malloc>, msg: StringView) StringView {
 // the latched rejection text is newline-terminated (it was written straight to stderr); an LSP
 // message keeps its internal newlines (hint lines) but never a trailing one.
 lsp_trim_nl = (mp: MutPtr<Malloc>, s: StringView) StringView {
-    v: [u8] = s.view()
+    v: Slice<u8> = s.view()
     (v.len > 0 && v[v.len - 1] == '\n').then({ mp.cstr_substr(s, 0, to_i32(v.len - 1)) }, { s })
 }
 lsp_diags_array = (
@@ -576,11 +576,11 @@ lsp_reply_location = (
 }
 // read a non-negative integer JSON field by key (e.g. position.line / .character).
 lsp_json_int = (body: StringView, key: StringView) i64 {
-    v: [u8] = body.view()
+    v: Slice<u8> = body.view()
     p = v.json_find_key(key)
     (p < 0).then({ 0 }, { v.lsp_parse_dec(p, 0) })
 }
-lsp_parse_dec = (v: [u8], i: i64, acc: i64) i64 {
+lsp_parse_dec = (v: Slice<u8>, i: i64, acc: i64) i64 {
     (i < v.len && v[i] >= '0' && v[i] <= '9').match ({
         true  => v.lsp_parse_dec(i + 1, acc * 10 + (v[i] - '0').to_i64()),
         false => acc,
@@ -680,7 +680,7 @@ lsp_def_via_ast = (
         return false
     })
     z = lsp_zero_span(dl.sp)
-    sv: [u8] = dl.src.view()
+    sv: Slice<u8> = dl.src.view()
     ls = sv.lsp_line_start(z.l)
     zc = sv.lsp_utf16_col(ls, z.c)
     ze = sv.lsp_utf16_col(ls, z.e)
@@ -704,7 +704,7 @@ lsp_def_via_ast = (
 lsp_definition = (mp: MutPtr<Malloc>, root: StringView, body: StringView) i64 {
     uri = mp.json_str_field(body, "uri")
     txt = mp.lsp_doc_text(uri)
-    v: [u8] = txt.view()
+    v: Slice<u8> = txt.view()
     off = v.lsp_byte_of_pos(body.lsp_json_int("line"), body.lsp_json_int("character"), 0, 0)
     s = v.lsp_ident_start(off)
     e = v.lsp_ident_end(off)
@@ -714,7 +714,7 @@ lsp_definition = (mp: MutPtr<Malloc>, root: StringView, body: StringView) i64 {
     mp.lsp_def_via_ast(root, body, mp.lsp_uri_path(uri), txt, mp.cstr_range(v, s, e)).then({
         return 0
     })
-    name: [u8] = v.ptr.offset(s).slice(e - s)
+    name: Slice<u8> = v.ptr.offset(s).slice(e - s)
     d = v.lsp_find_def(name, 0, true)
     (d < 0).match ({
         true  => mp.lsp_reply_null(body),
@@ -983,7 +983,7 @@ lsp_decl_sym = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], d: Decl) StringView 
 // alone also keeps the outline answering while an import line is half-typed.
 lsp_symbols_json = (mp: MutPtr<Malloc>, text: StringView) StringView {
     decls = mp.parse_module(text)
-    v: [u8] = text.view()
+    v: Slice<u8> = text.view()
     sb ::= mp.gstr_string(1024)
     n ::= 0
     decls.loop((h, i, d) {
@@ -1138,7 +1138,7 @@ lsp_handle = (mp: MutPtr<Malloc>, root: StringView, body: StringView) i32 {
         mp.lsp_semantic_tokens(body)
         return 0
     })
-    v: [u8] = body.view()
+    v: Slice<u8> = body.view()
     (v.json_find_key("id") >= 0 && lsp_is_notification(method) == false).then({
         mp.lsp_reply_method_not_found(body)
     })
@@ -1169,7 +1169,7 @@ lsp_read_headers = (mp: MutPtr<Malloc>, buf: RawPtr<u8>, off: i64) i64 {
         }),
     })
 }
-lsp_match_bytes = (buf: RawPtr<u8>, i: i64, wv: [u8], k: i64) bool {
+lsp_match_bytes = (buf: RawPtr<u8>, i: i64, wv: Slice<u8>, k: i64) bool {
     (k >= wv.len).match ({
         true  => true,
         false => (load(buf.offset(i + k)) == wv[k]).match ({
@@ -1179,7 +1179,7 @@ lsp_match_bytes = (buf: RawPtr<u8>, i: i64, wv: [u8], k: i64) bool {
     })
 }
 lsp_match_at = (buf: RawPtr<u8>, i: i64, len: i64, word: StringView) bool {
-    wv: [u8] = word.view()
+    wv: Slice<u8> = word.view()
     (i + wv.len > len).then({ false }, { buf.lsp_match_bytes(i, wv, 0) })
 }
 // read a decimal starting at `i` (skipping leading spaces); -1 if no digit before end/non-space.

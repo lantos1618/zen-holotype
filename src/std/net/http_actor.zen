@@ -21,7 +21,7 @@ pa = std.concurrent.pool_actor
 { http_get, http_error_name, response_free } = std.net.http
 { Allocator } = std.mem.alloc
 { expect } = std.core.result
-{ substr, view } = std.text.str
+{ substr, view, own_ptr } = std.text.str
 { gpa } = std.mem.heap
 // an order: fetch this URL, reply to this address (both fields are sendable).
 HttpFetch*: {
@@ -32,7 +32,7 @@ HttpFetchMsg*: Fetch(HttpFetch)
 // the outcome: status + body text. A request that failed outright is status 0 with the
 // HttpError's name as the body. `body` is ALWAYS a fresh heap copy, on both outcomes — the Response
 // it was parsed out of dies with the turn that made it — so the RECEIVER owns it and releases it
-// (`a.release(rep.body.view().ptr)`) once it has read what it needs.
+// (`a.release(rep.body.own_ptr())`) once it has read what it needs.
 HttpReply*: {
     status: i64,
     body: StringView,
@@ -73,7 +73,7 @@ reply_or_drop = (f: MutPtr<HttpFetcher>, a: Allocator, req: HttpFetch, rep: Http
         .Err(_) => {
             // the body was copied FOR a requester that never got it, so it has no new owner —
             // without this the dead-letter path leaks one body per drop.
-            a.release(rep.body.view().ptr)
+            a.release(rep.body.own_ptr())
             f.dropped = f.dropped + 1
         },
     })

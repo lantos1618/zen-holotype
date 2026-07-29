@@ -47,7 +47,7 @@ bb_plain = (sv: [u8], i: i64) bool { i == 0 || sv[i - 1].not_word() }
 // `(?<!\.)\b` boundary before index i (word boundary that ALSO excludes a preceding `.`).
 bb_dot = (sv: [u8], i: i64) bool { i == 0 || sv[i - 1].is_boundary_before() }
 // `\s` skip: advance past spaces/tabs/newlines/CRs, returning the next index (or len at EOF).
-skip_ws = (sv: [u8], j: i64) i64 {
+skip_ws = (sv: Slice<u8>, j: i64) i64 {
     (j >= sv.len).match ({
         true  => j,
         false => {
@@ -207,7 +207,7 @@ push_literal_at = (sv: [u8], i: i64) bool {
 // treated as string content and never scanned. `push_in(a, 8)` sat inside one of those blind windows.
 // `in_char` closes it, and a newline force-clears it so a stray apostrophe in prose (a block comment,
 // which this scanner does not model) can desync at most one line instead of the rest of the file.
-file_has = (sv: [u8], name: StringView, kind: i64) bool {
+file_has = (sv: Slice<u8>, name: StringView, kind: i64) bool {
     found ::= false
     in_comment ::= false
     in_string ::= false
@@ -333,7 +333,7 @@ alloc_not_whitelisted = (path: StringView) bool {
         && ne(path, "src/compiler/genc.zen")
 }
 // `(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(` anchored at i (kind 1 = dot-excluded boundary).
-file_has_raw_alloc = (sv: [u8]) bool {
+file_has_raw_alloc = (sv: Slice<u8>) bool {
     sv.file_has("malloc", 1)
         || sv.file_has("calloc", 1)
         || sv.file_has("realloc", 1)
@@ -370,7 +370,7 @@ alloc_suite = (mp: MutPtr<Malloc>) i32 {
 // kind per python pattern: "raw addr" = 1 (dot-excluded); break/continue = 2 (bare word); @while = 3
 // (literal token); everything else = 0 (plain `\bNAME\s*\(`). `offset`'s `(?:\boffset|\.\s*offset)`
 // alternation is equivalent to `\boffset\s*\(` for matching (both fire iff offset starts at a boundary).
-example_violation = (sv: [u8]) bool {
+example_violation = (sv: Slice<u8>) bool {
     sv.file_has("addr", 1)
         || sv.file_has("checkpoint_current", 0)
         || sv.file_has("@while", 3)
@@ -714,7 +714,7 @@ spelling_allowed = (path: StringView) bool {
     path == "src/compiler/validate/util.zen" || path == "tests/harness_boundaries.zen"
 }
 // `\bNAME\b` over the raw file — no comment stripping, no string skipping.
-file_has_raw_word = (sv: [u8], name: StringView) bool {
+file_has_raw_word = (sv: Slice<u8>, name: StringView) bool {
     found ::= false
     sv.loop((h, i, b) {
         (sv.bb_plain(i) && sv.word_matches(i, name)).then({
@@ -724,7 +724,7 @@ file_has_raw_word = (sv: [u8], name: StringView) bool {
     })
     found
 }
-file_has_retired_spelling = (sv: [u8]) bool {
+file_has_retired_spelling = (sv: Slice<u8>) bool {
     sv.file_has_raw_word("string_view")
         || sv.file_has_raw_word("string_literal")
         || sv.file_has_raw_word("string_cstr")
@@ -811,7 +811,7 @@ walrus_at = (sv: [u8], i: i64) bool {
         false => sv[i] == ':' && sv[i + 1] == '=' && (i == 0 || sv[i - 1] != ':'),
     })
 }
-file_has_walrus = (sv: [u8]) bool {
+file_has_walrus = (sv: Slice<u8>) bool {
     found ::= false
     sv.loop((h, i, b) {
         sv.walrus_at(i).then({

@@ -23,7 +23,7 @@
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { String, init, append_in, finish_in } = std.text.string
-{ view } = std.text.str
+{ view, own_ptr } = std.text.str
 // fgets reads at most CHUNK-1 bytes per call (stopping at a newline), NUL-terminating the buffer; the
 // recursive loop reassembles the full stream across calls, so this is a throughput knob, not a cap.
 CHUNK = 4096
@@ -97,7 +97,7 @@ capture = (a: Allocator, f: RawPtr<u8>) Result<Output, IoError> {
 }
 // Run `cmd` (via /bin/sh), capturing its stdout and exit code into an Output. `.Err(.NotFound)` when
 // the pipe can't be opened; `.Err(.Errno(-1))` when pclose fails to reap the child. The returned
-// `stdout` is allocator-owned — release it via `a.release(out.stdout.view().ptr)` (or let an arena
+// `stdout` is allocator-owned — release it via `a.release(out.stdout.own_ptr())` (or let an arena
 // reclaim it). A nonzero exit is NOT an error here: it rides back in `Output.exit` for the caller to
 // inspect (use `run_ok` when a nonzero exit should be an error).
 run* = (a: Allocator, cmd: StringView) Result<Output, IoError> {
@@ -115,7 +115,7 @@ run_ok* = (a: Allocator, cmd: StringView) Result<StringView, IoError> {
         .Ok(o)  => (o.exit == 0).match ({
             true  => ok(o.stdout),
             false => {
-                a.release(o.stdout.view().ptr)
+                a.release(o.stdout.own_ptr())
                 err(IoError.Errno(to_i32(o.exit)))
             },
         }),
