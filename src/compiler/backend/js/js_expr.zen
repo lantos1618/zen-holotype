@@ -5,14 +5,16 @@
 { String } = std.text.string
 { is_empty } = std.text.str
 { Expr, Stmt, Ty, Param, ArmData, BinData, CallData, CondData, MatchData, MemberData,
-  MakeStructData, LoopData, BlockData, LetData, AssignData } = compiler.ast.ast_types
-{ param, tvoid, gstr_append, acquire_or_die, acquire_or_die } = compiler.genc
+  MakeStructData, MakeEnumData, LoopData, BlockData, LetData, AssignData } = compiler.ast.ast_types
+{ param, tvoid, tnamed, gstr_append, acquire_or_die, acquire_or_die } = compiler.genc
 { Malloc } = std.mem.alloc
 { slice_count } = compiler.astops
 { jint, jname, jstrlit } = compiler.backend.js.js_lit
 { js_dom_dispatch } = compiler.backend.js.js_dom
 { js_box_taken } = compiler.backend.js.js_box
 { js_size_of_name } = compiler.backend.js.js_size
+{ js_cp_needed, js_cp_open, js_cp_close, jsc_member_ty, js_variant_ty, js_init_ty, js_func_ret,
+  js_is_defined_fn } = compiler.backend.js.js_copy
 { is_intrinsic } = compiler.check    // the ONE intrinsic roster; the parity gate below reads it, never a copy
 // ── expressions ───────────────────────────────────────────────────────────────────────────────────
 js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
@@ -34,14 +36,7 @@ js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
             .gstr_append(a, ")"),
         .Member(m)      => s.js_member(a, m),
         .Arrow(ar)      => s.js_expr(a, ar.obj).gstr_append(a, ".").gstr_append(a, ar.field),
-        .MakeEnum(m)    => s
-            .gstr_append(a, "({ tag: \"")
-            .gstr_append(a, m.variant)
-            .gstr_append(a, "\", ")
-            .gstr_append(a, m.variant)
-            .gstr_append(a, ": ")
-            .js_expr(a, m.payload)
-            .gstr_append(a, " })"),
+        .MakeEnum(m)    => s.js_mkenum(a, m),
         .MakeStruct(m)  => s.js_mkstruct(a, m),
         .Tag(t)         => s
             .gstr_append(a, "({ tag: \"")
@@ -63,7 +58,7 @@ js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
                 .gstr_append(a, " })"),
             _   => s
                 .gstr_append(a, "({ ptr: [")
-                .js_args(a, sd.items)
+                .js_cp_items(a, sd.items, sd.elem)
                 .gstr_append(a, "], len: ")
                 .jint(a, slice_count(sd.items))
                 .gstr_append(a, " })"),
@@ -327,13 +322,111 @@ js_is_cmp = (op: StringView) bool {
         || op == "&&"
         || op == "||"
 }
+// ── static TYPE reconstruction (the AGGREGATE analog of iw_of above) ──────────────────────────────
+// A struct is a VALUE in Zen and a REFERENCE in JS, so every sink C copies at has to copy here too
+// (compiler.backend.js.js_copy says what a copy IS). Which sinks copy is a question about the STATIC type, and
+// the js AST has erased it — so rebuild exactly what the decision needs: the typed-var table, the
+// declared field/payload types, and the element type indexing already carries. Anything unresolved
+// answers Void, which copies nothing and leaves the pre-existing lowering byte-identical.
+js_ty_of = (e: Expr) Ty {
+    e.match ({
+        .Var(v)        => vw_lookup(v.name),
+        .Member(m)     => js_member_ty(m.field, load(m.obj)),
+        .Arrow(ar)     => js_member_ty(ar.field, load(ar.obj)),
+        .Index(ix)     => ix.elem,
+        .Call(c)       => js_call_ty(c),
+        .MakeStruct(m) => tnamed(m.mty),
+        .MakeEnum(m)   => tnamed(m.mty),
+        .Tag(t)        => tnamed(t.mty),
+        .Cond(d)       => js_ty_of(load(d.t)),
+        .Block(b)      => js_block_ty(b),
+        _              => tvoid(),
+    })
+}
+// genc's union level `subj.u.Ok` has no js analog — `.u` IS the enum (js_member erases it), and the
+// next field names the variant, so the payload lookup answers both.
+js_member_ty = (field: StringView, obj: Expr) Ty {
+    t := js_deref(js_ty_of(obj))
+    (field == "u").then({ t }, { jsc_member_ty(t, field) })
+}
+js_deref = (t: Ty) Ty {
+    t.match ({
+        .Ptr(pd) => load(pd.pointee),
+        _        => t,
+    })
+}
+// `load(p)` is the deref; a DEFINED function answers its declared return type. Every other intrinsic
+// answers Void — which is what keeps `p := s.addr()` the pointer ALIAS it has to be.
+js_call_ty = (c: CallData) Ty {
+    (c.fn == "load" && c.args.len > 0).then({
+        return js_deref(js_ty_of(c.args[0]))
+    })
+    js_func_ret(c.fn)
+}
+js_block_ty = (b: BlockData) Ty {
+    r := tvoid()
+    b.stmts.loop((h, i, st) {
+        r = (i == b.stmts.len - 1).then({ js_stmt_ty(st) }, { r })
+    })
+    r
+}
+js_stmt_ty = (st: Stmt) Ty {
+    st.match ({
+        .ExprStmt(e) => js_ty_of(load(e)),
+        .Return(e)   => js_ty_of(load(e)),
+        _            => tvoid(),
+    })
+}
+// the type of a value only where it is a copyable AGGREGATE; Void otherwise. Scalar inference stays
+// out of the typed-var table on purpose — int_width reads that table, and widening its answers would
+// change every emitted coercion rather than only the copies.
+js_agg_ty = (e: Expr) Ty {
+    t := js_ty_of(e)
+    js_cp_needed(t).then({ t }, { tvoid() })
+}
+// ── the value SINKS ───────────────────────────────────────────────────────────────────────────────
+// an expression bound at a sink: width-coerced as before, then COPIED when the sink's type is a value
+// aggregate. A freshly built value is elided — a literal has no other referent, and a call to a
+// defined function returns a value its own `return` already copied.
+js_sink = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, t: Ty, w: i32) String {
+    js_cp_at(load(e), t).match ({
+        true  => s.js_cp_open(a, t).js_expr_w(a, e, w).js_cp_close(a, t),
+        false => s.js_expr_w(a, e, w),
+    })
+}
+js_cp_at = (e: Expr, t: Ty) bool { js_expr_fresh(e).then({ false }, { js_cp_needed(t) }) }
+js_expr_fresh = (e: Expr) bool {
+    e.match ({
+        .MakeStruct(m) => true,
+        .MakeEnum(m)   => true,
+        .Tag(t)        => true,
+        .SliceLit(sd)  => true,
+        .Call(c)       => js_is_defined_fn(c.fn),
+        _              => false,
+    })
+}
+// a struct literal's field takes a COPY of its initializer, exactly as C's `(S){ .f = v }` does.
 js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
     out := s.gstr_append(a, "({ ")
     m.inits.loop((h, i, fi) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
-        out = out.gstr_append(a, fi.name).gstr_append(a, ": ").js_expr(a, fi.value)
+        out = out
+            .gstr_append(a, fi.name)
+            .gstr_append(a, ": ")
+            .js_sink(a, fi.value, js_init_ty(m.mty, fi.name), 0)
     })
     out.gstr_append(a, " })")
+}
+// …and so does an enum PAYLOAD (C writes it into the union).
+js_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData) String {
+    s
+        .gstr_append(a, "({ tag: \"")
+        .gstr_append(a, m.variant)
+        .gstr_append(a, "\", ")
+        .gstr_append(a, m.variant)
+        .gstr_append(a, ": ")
+        .js_sink(a, m.payload, js_variant_ty(m.mty, m.variant), 0)
+        .gstr_append(a, " })")
 }
 // a call's comma-separated args (each Expr value -> a Ptr<Expr> child).
 js_args* = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
@@ -341,6 +434,15 @@ js_args* = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
     args.loop((h, i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
         out = out.js_expr(a, arg.addr())
+    })
+    out
+}
+// a slice literal's items: C copies each ELEMENT into the array, so a struct item copies here too.
+js_cp_items = (s: String, a: MutPtr<Malloc>, items: [Expr], elem: Ty) String {
+    out := s
+    items.loop((h, i, arg) {
+        out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
+        out = out.js_sink(a, arg.addr(), elem, 0)
     })
     out
 }
@@ -554,15 +656,30 @@ js_size_refuse = (s: String, a: MutPtr<Malloc>, pos: i32) String {
 //    an arm's early `return` leaves the enclosing function, not just the IIFE). Enum tag is the variant
 //    NAME string; a payload binds `_subj.<Variant>`. An explicit `_` arm is `default`; without one the
 //    checker proved coverage, so every arm is its own `case` and `default` traps (mirrors genc). ───────
-js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
+// The BIND is a value sink: C's `T v = _subj.u.V;` copies the payload out of the union, so a struct
+// payload is copied here and the arm body cannot write through to the matched value.
+js_arm_bind = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView) String {
+    pty := js_variant_ty(ename, ar.variant)
+    vw_note(ar.bind, js_agg_ty_or(pty))
+    s
+        .gstr_append(a, "const ")
+        .jname(a, ar.bind)
+        .gstr_append(a, " = ")
+        .js_cp_open(a, pty)
+        .gstr_append(a, "_subj.")
+        .gstr_append(a, ar.variant)
+        .js_cp_close(a, pty)
+        .gstr_append(a, "; ")
+}
+// the bind's type enters the typed-var table only when it is an aggregate — same rule as a let's.
+js_agg_ty_or = (t: Ty) Ty { js_cp_needed(t).then({ t }, { tvoid() }) }
+js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView) String {
     is_empty(ar.bind).match ({
         true  => s.js_expr(a, ar.body),
         false => s
-            .gstr_append(a, "(() => { const ")
-            .jname(a, ar.bind)
-            .gstr_append(a, " = _subj.")
-            .gstr_append(a, ar.variant)
-            .gstr_append(a, "; return ")
+            .gstr_append(a, "(() => { ")
+            .js_arm_bind(a, ar, ename)
+            .gstr_append(a, "return ")
             .js_expr(a, ar.body)
             .gstr_append(a, "; })()"),
     })
@@ -570,26 +687,35 @@ js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
 js_switch_panic_default = (s: String, a: MutPtr<Malloc>) String {
     s.gstr_append(a, "default: __zr.panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ")
 }
-js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String {
+js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool, ename: StringView) String {
     (ar.variant == "_").match ({
-        true  => s.gstr_append(a, "default: return ").js_arm_body_expr(a, ar).gstr_append(a, "; "),
+        true  => s
+            .gstr_append(a, "default: return ")
+            .js_arm_body_expr(a, ar, ename)
+            .gstr_append(a, "; "),
         false => {
             out := s
                 .gstr_append(a, "case \"")
                 .gstr_append(a, ar.variant)
                 .gstr_append(a, "\": return ")
-                .js_arm_body_expr(a, ar)
+                .js_arm_body_expr(a, ar, ename)
                 .gstr_append(a, "; ")
             last.then({ out.js_switch_panic_default(a) }, { out })
         },
     })
 }
-js_switch_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String {
+js_switch_cases = (
+    s: String,
+    a: MutPtr<Malloc>,
+    arms: [ArmData],
+    i: i64,
+    ename: StringView,
+) String {
     (i >= arms.len).match ({
         true  => s,
         false => {
-            out := s.js_switch_case(a, arms[i], i == arms.len - 1)
-            (arms[i].variant == "_").then({ out }, { out.js_switch_cases(a, arms, i + 1) })
+            out := s.js_switch_case(a, arms[i], i == arms.len - 1, ename)
+            (arms[i].variant == "_").then({ out }, { out.js_switch_cases(a, arms, i + 1, ename) })
         },
     })
 }
@@ -598,19 +724,16 @@ js_match_expr = (s: String, a: MutPtr<Malloc>, m: MatchData) String {
         .gstr_append(a, "(() => { const _subj = ")
         .js_expr(a, m.subj)
         .gstr_append(a, "; switch (_subj.tag) { ")
-        .js_switch_cases(a, m.arms, 0)
+        .js_switch_cases(a, m.arms, 0, m.ename)
         .gstr_append(a, "} })()")
 }
 // statement-position match: arms run as statements so a diverging arm's `return` propagates.
-js_arm_stmt = (s: String, a: MutPtr<Malloc>, ar: ArmData) String {
+js_arm_stmt = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView) String {
     is_empty(ar.bind).match ({
         true  => s.js_arm_stmt_body(a, ar.body),
         false => s
-            .gstr_append(a, "{ const ")
-            .jname(a, ar.bind)
-            .gstr_append(a, " = _subj.")
-            .gstr_append(a, ar.variant)
-            .gstr_append(a, "; ")
+            .gstr_append(a, "{ ")
+            .js_arm_bind(a, ar, ename)
             .js_arm_stmt_body(a, ar.body)
             .gstr_append(a, " }"),
     })
@@ -622,26 +745,41 @@ js_arm_stmt_body = (s: String, a: MutPtr<Malloc>, body: Ptr<Expr>) String {
         _         => s.js_expr_stmt(a, body),
     })
 }
-js_switch_stmt_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool) String {
+js_switch_stmt_case = (
+    s: String,
+    a: MutPtr<Malloc>,
+    ar: ArmData,
+    last: bool,
+    ename: StringView,
+) String {
     (ar.variant == "_").match ({
-        true  => s.gstr_append(a, "default: ").js_arm_stmt(a, ar).gstr_append(a, " break; "),
+        true  => s.gstr_append(a, "default: ").js_arm_stmt(a, ar, ename).gstr_append(a, " break; "),
         false => {
             out := s
                 .gstr_append(a, "case \"")
                 .gstr_append(a, ar.variant)
                 .gstr_append(a, "\": ")
-                .js_arm_stmt(a, ar)
+                .js_arm_stmt(a, ar, ename)
                 .gstr_append(a, " break; ")
             last.then({ out.js_switch_panic_default(a) }, { out })
         },
     })
 }
-js_switch_stmt_cases = (s: String, a: MutPtr<Malloc>, arms: [ArmData], i: i64) String {
+js_switch_stmt_cases = (
+    s: String,
+    a: MutPtr<Malloc>,
+    arms: [ArmData],
+    i: i64,
+    ename: StringView,
+) String {
     (i >= arms.len).match ({
         true  => s,
         false => {
-            out := s.js_switch_stmt_case(a, arms[i], i == arms.len - 1)
-            (arms[i].variant == "_").then({ out }, { out.js_switch_stmt_cases(a, arms, i + 1) })
+            out := s.js_switch_stmt_case(a, arms[i], i == arms.len - 1, ename)
+            (arms[i].variant == "_").match ({
+                true  => out,
+                false => out.js_switch_stmt_cases(a, arms, i + 1, ename),
+            })
         },
     })
 }
@@ -650,7 +788,7 @@ js_match_stmt = (s: String, a: MutPtr<Malloc>, m: MatchData) String {
         .gstr_append(a, "{ const _subj = ")
         .js_expr(a, m.subj)
         .gstr_append(a, "; switch (_subj.tag) { ")
-        .js_switch_stmt_cases(a, m.arms, 0)
+        .js_switch_stmt_cases(a, m.arms, 0, m.ename)
         .gstr_append(a, "} }")
 }
 // A foreach loop is still an expression-valued IIFE. Handler-specific identity tokens make control
@@ -714,11 +852,12 @@ js_block_stmts = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
 // An address-taken scalar binds its CELL instead of its value: `__zr.box(init, w)` allocates the cell,
 // writes the initializer into it, and yields the MEM offset the variable then carries.
 js_let = (s: String, a: MutPtr<Malloc>, l: LetData) String {
-    vw_note(l.name, l.ty)
+    lty := js_let_ty(l)
+    vw_note(l.name, lty)
     bw := js_boxed_w(l.name)
     open := s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ")
     boxed := (bw == 0).match ({
-        true  => open.js_expr_w(a, l.value, int_width(l.ty)),
+        true  => open.js_sink(a, l.value, lty, int_width(l.ty)),
         false => open
             .gstr_append(a, "__zr.box(")
             .js_expr_w(a, l.value, int_width(l.ty))
@@ -728,16 +867,30 @@ js_let = (s: String, a: MutPtr<Malloc>, l: LetData) String {
     })
     boxed.gstr_append(a, ";")
 }
+// the binding's type: its annotation, or — unannotated (`b := a`, where C writes `__auto_type`) — the
+// initializer's reconstructed aggregate type. That is the case the struct-aliasing bug lived in.
+js_let_ty = (l: LetData) Ty {
+    l.ty.match ({
+        .Void => js_agg_ty(load(l.value)),
+        _     => l.ty,
+    })
+}
 // an assign: coerce the value to the TARGET variable's declared width (looked up in the per-function
 // table) so a mutating narrow accumulator wraps like C. A non-Var target (field/index) is width 0.
 // An assignment to a BOXED local writes through its cell (`__zr.st`), never rebinding the offset.
 js_assign = (s: String, a: MutPtr<Malloc>, x: AssignData) String {
+    load(x.target).match ({
+        .Index(ix) => {
+            return s.js_setidx(a, ix.seq, ix.idx, x.value, ix.elem)
+        },
+        _          => { },
+    })
     bw := js_assign_boxed_w(load(x.target))
     (bw == 0).then({
         return s
             .js_expr(a, x.target)
             .gstr_append(a, " = ")
-            .js_expr_w(a, x.value, js_assign_width(load(x.target)))
+            .js_sink(a, x.value, js_ty_of(load(x.target)), js_assign_width(load(x.target)))
             .gstr_append(a, ";")
     })
     s
@@ -773,7 +926,7 @@ js_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
         .Assign(x)   => s.js_assign(a, x),
         .Return(e)   => s
             .gstr_append(a, "return ")
-            .js_expr_w(a, e, ret_coerce_w())
+            .js_sink(a, e, js_agg_ty(load(e)), ret_coerce_w())
             .gstr_append(a, ";"),
         .ExprStmt(e) => s.js_expr_stmt(a, e),
         .If(f)       => s
@@ -790,17 +943,33 @@ js_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
             .gstr_append(a, ") { ")
             .js_stmts(a, w.body)
             .gstr_append(a, "}"),
-        .IndexSet(x) => s
-            .gstr_append(a, "__zr.setidx(")
-            .js_expr(a, x.seq)
-            .gstr_append(a, ", ")
-            .js_expr(a, x.idx)
-            .gstr_append(a, ", ")
-            .js_expr(a, x.value)
-            .gstr_append(a, ", ")
-            .jint(a, js_elem_w(x.elem))
-            .gstr_append(a, ");"),
+        .IndexSet(x) => s.js_setidx(a, x.seq, x.idx, x.value, x.elem),
     })
+}
+// an element store. C's `*(T*)zen__idx(z, i, sizeof(T)) = v` is an LVALUE, so the same store reaches
+// the js backend two ways: as an IndexSet statement, and — when the sequence is itself a field, like
+// `h.s[0] = v` — as an ordinary Assign whose TARGET is an Index. The second used to emit
+// `__zr.idx(…) = v`, which is not a JS assignment target at all: `node` died with a SyntaxError on a
+// program `zen build --target js` had just accepted. Both route through the floor's setidx, and the
+// stored value takes the element type's copy.
+js_setidx = (
+    s: String,
+    a: MutPtr<Malloc>,
+    seq: Ptr<Expr>,
+    idx: Ptr<Expr>,
+    value: Ptr<Expr>,
+    elem: Ty,
+) String {
+    s
+        .gstr_append(a, "__zr.setidx(")
+        .js_expr(a, seq)
+        .gstr_append(a, ", ")
+        .js_expr(a, idx)
+        .gstr_append(a, ", ")
+        .js_sink(a, value, elem, 0)
+        .gstr_append(a, ", ")
+        .jint(a, js_elem_w(elem))
+        .gstr_append(a, ");")
 }
 // a bare expression statement; a match here becomes a real `switch` (so arm returns fire).
 js_expr_stmt = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {

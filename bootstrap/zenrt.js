@@ -133,6 +133,21 @@ const __zr = (() => {
   // address-taken SCALAR never reaches here: the emitter boxes it (see `box` above) and lowers its
   // `addr` to the variable itself, which already holds the cell offset.
   const addr = (x) => x;
+  // ── struct VALUE semantics ────────────────────────────────────────────────────────────────────
+  // A Zen struct is a value: `b = a` copies it in C, so a write through `b` is invisible through `a`.
+  // A JS object is a reference, so the emitter copies at every sink C copies at. THIS is the one-level
+  // half of that copy — a type whose every field is itself shared by a C copy (a scalar, a pointer, a
+  // `zslice` header whose BUFFER stays shared). A type with a field that must be copied in turn gets a
+  // generated `__zc_<Name>` walk instead (compiler.backend.js.js_copy); a deep clone can NOT live here,
+  // because a `MutPtr<T>` on this target IS the object, and cloning one would fork an allocator.
+  // Non-objects (a number, a BigInt, a MEM offset) are already values: pass them through — and so is
+  // anything that is not a PLAIN object. Every Zen struct/enum/slice on this target is an object
+  // literal, so `Object.prototype` is the exact discriminator; a real DOM node reaching a value sink
+  // (the dom lowering hands back live objects) must pass through untouched, since `{...node}` would
+  // keep its own fields and lose its prototype — the methods ARE the value. It also excludes arrays,
+  // which back slice literals and are the shared BUFFER, never the copied header.
+  const PLAIN = Object.prototype;
+  const cp = (x) => (x !== null && typeof x === "object" && Object.getPrototypeOf(x) === PLAIN) ? { ...x } : x;
   // ── 64-bit integer model ───────────────────────────────────────────────────────────────────────
   // A JS `number` is a 32-bit-op / 53-bit-mantissa view, so i64/u64 are modeled as BigInt (arbitrary-
   // precision, EXACT). To keep ordinary/narrow arithmetic cheap, a 64-bit value is kept as a `number`
@@ -192,7 +207,7 @@ const __zr = (() => {
   const exit_main = (v) => { process.exitCode = Number(v || 0) & 255; };
 
   return { MEM, str, strlen, decode, jstr, malloc, load, store, offset, load_i64, store_i64, exit_main,
-           slice, u8lit, view, idx, setidx, eq, nn, addr, i32, i64, u8, big, wi64, wu64, u64,
+           slice, u8lit, view, idx, setidx, eq, nn, addr, cp, i32, i64, u8, big, wi64, wu64, u64,
            ld, st, box, div, mod, panic, write,
            atomic_load, atomic_store, atomic_add, atomic_cas, atomic_fence };
 })();

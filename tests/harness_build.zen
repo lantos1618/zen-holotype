@@ -2573,6 +2573,18 @@ harness_build_run* = () i32 {
             cmd: "./zen build tests/fixtures/zen/js_memory_battery.zen -o $ZT/zjmb 2>/dev/null && $ZT/zjmb > $ZT/zjmb_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_memory_battery.zen -o $ZT/zjmb.js 2>/dev/null && node $ZT/zjmb.js > $ZT/zjmb_js.txt 2>/dev/null && cmp -s $ZT/zjmb_c.txt $ZT/zjmb_js.txt && printf '1\\n4\\n8\\n8\\n1\\n1\\n4\\n8\\n16\\n2\\n16\\n7\\n7\\n300\\n42\\n3000000\\n43\\n1000000000000\\n-5\\n0\\n3\\n6\\n99\\n' | cmp -s - $ZT/zjmb_c.txt",
         ),
         ShellCase(
+            name: "js_struct_value_battery_dual_backend",
+            cmd: "./zen build tests/fixtures/zen/js_struct_value_battery.zen -o $ZT/zjsv 2>/dev/null && $ZT/zjsv > $ZT/zjsv_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_struct_value_battery.zen -o $ZT/zjsv.js 2>/dev/null && node $ZT/zjsv.js > $ZT/zjsv_js.txt 2>/dev/null && cmp -s $ZT/zjsv_c.txt $ZT/zjsv_js.txt && printf '1\\n9\\n1\\n2\\n10\\n20\\n1\\n3\\n7\\n1\\n7\\n77\\n2\\n2\\n198\\n1\\n2\\n3\\n5\\n6\\n2\\n42\\n1\\n1\\n50\\n' | cmp -s - $ZT/zjsv_c.txt",
+        ),
+        ShellCase(
+            name: "js_struct_copy_is_deep_not_shallow",
+            cmd: "./zen build --target js tests/fixtures/zen/js_struct_value_battery.zen -o $ZT/zjsd.js 2>/dev/null && grep -Fq 'function __zc_Nest(x) { return ({ ...x, inner: __zr.cp(x.inner) }); }' $ZT/zjsd.js && grep -Fq 'function __zc_Holder(x) { return ({ ...x, s: __zr.cp(x.s) }); }' $ZT/zjsd.js && grep -Fq 'function __zc_Box(x) { switch (x.tag) { case \"Val\": return ({ ...x, Val: __zc_Nest(x.Val) }); } return ({ ...x }); }' $ZT/zjsd.js",
+        ),
+        ShellCase(
+            name: "js_copy_never_spreads_a_live_object",
+            cmd: "printf 'main = () i32 {\\n    0\\n}\\n' > $ZT/zjcp.zen && ./zen build --target js $ZT/zjcp.zen -o $ZT/zjcp.js 2>/dev/null && cp $ZT/zjcp.js $ZT/zjcp2.js && printf 'class L { constructor() { this.id = 7; } greet() { return \"ok\"; } }\\nconst _n = new L();\\nif (__zr.cp(_n) !== _n || __zr.cp(_n).greet() !== \"ok\") process.exit(1);\\nconst _a = [1, 2];\\nif (__zr.cp(_a) !== _a) process.exit(1);\\nconst _p = { v: 1 };\\nconst _c = __zr.cp(_p);\\n_c.v = 9;\\nif (_c === _p || _p.v !== 1) process.exit(1);\\n' >> $ZT/zjcp2.js && node $ZT/zjcp2.js",
+        ),
+        ShellCase(
             name: "js_sizeof_never_reaches_the_floor",
             cmd: "./zen build --target js tests/fixtures/zen/js_memory_battery.zen -o $ZT/zjsz.js 2>/dev/null && ! grep -Eq '__zr[.]sizeof[[:space:]]*\\(' $ZT/zjsz.js && ! grep -Eq 'const sizeof' bootstrap/zenrt.js",
         ),
@@ -2921,6 +2933,13 @@ harness_build_run* = () i32 {
             cmd: "rm -rf $ZT/zpc $ZT/zpcbin $ZT/zpc_cache && mkdir -p $ZT/zpc $ZT/zpcbin && cp ./zen $ZT/zpcbin/zen && printf 'main = () i32 { 0 }\\n' > $ZT/zpc/hello.zen && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >/dev/null 2>&1 ) && ls $ZT/zpc_cache | grep -q '^check_' && ( cd $ZT/zpc && env PATH=$ZT/zpcbin ZENC_CACHE_DIR=$ZT/zpc_cache zen check hello.zen >$ZT/zpc_c2.txt 2>&1 ) && grep -Fq 'hello.zen: ok' $ZT/zpc_c2.txt && ls $ZT/zpc_cache | grep -q '^check_'",
         ),
     ])
+    // the floor's copy spreads a PLAIN object only. A live JS object (what the dom lowering hands
+    // back) and a slice's backing array must pass through by identity — `{...node}` would keep the
+    // own fields and drop the prototype, and the methods ARE the value.
+    // the js copy is DEEP by the declared field types, never one blanket spread: a nested struct
+    // field must be walked (`__zc_`), and a `[T]` field must copy its header while sharing the
+    // buffer. Both shapes are in the battery above, so their emitted forms are pinned here — a
+    // regression to a shallow `{...x}` still passes `node` on the top level and fails this.
     // The examples LEAK gate (scripts/leak-sweep.sh, also `make leak-sweep`): every examples/*.zen
     // built and run under valgrind, failing on `definitely lost` / `indirectly lost` / any valgrind
     // error. It lives here rather than in its own suite because these `zen run examples/…` cases

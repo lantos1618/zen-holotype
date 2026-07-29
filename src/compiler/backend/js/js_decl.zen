@@ -8,6 +8,7 @@
 { jint, jname } = compiler.backend.js.js_lit
 { js_stmts, js_expr, int_width, js_w_open, js_w_close, vw_note, vw_reset, set_ret_w, js_boxed_w } = compiler.backend.js.js_expr
 { js_box_reset, js_box_scan } = compiler.backend.js.js_box
+{ js_cp_needed, js_cp_open, js_cp_close } = compiler.backend.js.js_copy
 // ── declarations ──────────────────────────────────────────────────────────────────────────────────
 // a function; every param is a bare JS name (types erased). `main` becomes `zen_main`.
 js_func_name = (s: String, a: MutPtr<Malloc>, name: StringView) String {
@@ -29,13 +30,15 @@ js_param_norms = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     })
     out
 }
-// A param is coerced to its declared width at entry (C truncates there), and then — if the body takes
-// its address — moved into a linear-memory cell, so `addr(p)` yields a real offset. Order matters: the
-// value is width-correct BEFORE it is written into the cell.
+// A param is coerced to its declared width at entry (C truncates there), COPIED there if it is a
+// struct/enum/slice VALUE (C's by-value parameter passing: a callee that writes its param must not
+// reach the caller's), and then — if the body takes its address — moved into a linear-memory cell, so
+// `addr(p)` yields a real offset. Order matters: the value is width-correct BEFORE it is written into
+// the cell, and the copy is what the cell then holds. The three are mutually exclusive by type.
 js_param_norm = (s: String, a: MutPtr<Malloc>, p: Param) String {
     w := int_width(p.ty)
     normed := (w == 0).match ({
-        true  => s,
+        true  => s.js_param_copy(a, p),
         false => s
             .jname(a, p.name)
             .gstr_append(a, " = ")
@@ -54,6 +57,18 @@ js_param_norm = (s: String, a: MutPtr<Malloc>, p: Param) String {
             .gstr_append(a, ", ")
             .jint(a, bw)
             .gstr_append(a, "); "),
+    })
+}
+js_param_copy = (s: String, a: MutPtr<Malloc>, p: Param) String {
+    js_cp_needed(p.ty).match ({
+        true  => s
+            .jname(a, p.name)
+            .gstr_append(a, " = ")
+            .js_cp_open(a, p.ty)
+            .jname(a, p.name)
+            .js_cp_close(a, p.ty)
+            .gstr_append(a, "; "),
+        false => s,
     })
 }
 js_func* = (s: String, a: MutPtr<Malloc>, f: Func) String {
