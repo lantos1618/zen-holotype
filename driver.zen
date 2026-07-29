@@ -12,6 +12,7 @@
 { contents_in, save, write_all, O_RDONLY, O_WRONLY, O_CREAT, O_EXCL, O_WRTRUNC, MODE_644, MODE_755 } = std.io.file
 { or, expect } = std.core.result
 { then } = std.core.bool
+{ advance_while, repeat_while, step_while } = std.core.count
 { open, read, write, close, system, unlink, mkdir, rmdir, getpid, isatty, clock_gettime } = std.c.libc
 { parse_module, exports_get } = compiler.parse
 { set_faithful_lexeme } = compiler.parse_atom
@@ -1650,13 +1651,7 @@ bs_trim_end = (v: [u8], s: i64, e: i64) i64 {
         false => bs_is_space(v[e - 1]).then({ v.bs_trim_end(s, e - 1) }, { e }),
     })
 }
-bs_line_end = (v: [u8], p0: i64, n: i64) i64 {
-    p ::= p0
-    @while (p < n && v[p] != '\n') {
-        p = p + 1
-    }    // iterative: a long line must not recurse per char
-    p
-}
+bs_line_end = (v: [u8], p0: i64, n: i64) i64 { p0.advance_while((p) { p < n && v[p] != '\n' }) }    // iterative: a long line must not recurse per char
 bs_eq_run = (v: [u8], at: i64, nv: [u8], i: i64) bool {
     (i >= nv.len).match ({
         true  => true,
@@ -1886,14 +1881,14 @@ bs_tails = (ac: MutPtr<AudCtx>) Map<i64> {
 // iterate bs_root_kept sweeps to a fixpoint: newly-live names can make more types live, which keeps
 // more impl blocks, whose methods reference more names — stop when the seen set stops growing.
 bs_close = (ac: MutPtr<AudCtx>, raw: [Decl]) void {
-    prev :: i64 = 0 - 1
-    @while (ac.seen.keys().len != prev) {
+    repeat_while((pass) {
         prev = ac.seen.keys().len
         tails = ac.bs_tails()
         raw.loop((h, i, d) {
             ac.bs_root_kept(tails, d)
         })
-    }
+        ac.seen.keys().len != prev
+    })
 }
 // the emission filter over the closed live set: which raw manifest decls reach the seed.
 bs_keep = (ac: MutPtr<AudCtx>, d: Decl) bool {
@@ -2339,12 +2334,11 @@ zi_read_line = (mp: MutPtr<Malloc>, prompt: StringView) StringView {
     eprint(prompt)
     s ::= mp.gstr_string(64)
     cell: [u8] = [0]
-    done ::= false
-    @while (done == false) {
+    repeat_while((k) {
         n = read(0, cell.ptr, 1)
-        done = n <= 0 || cell[0] == '\n'
         s = (n > 0 && cell[0] != '\n' && cell[0] != '\r').then({ s.gstr_push(mp, cell[0]) }, { s })
-    }
+        (n <= 0 || cell[0] == '\n') == false
+    })
     s.gstr_finish(mp)
 }
 zi_kind_choice = (s: StringView) i32 {
@@ -2437,15 +2431,15 @@ zi_ensure_dir = (path: StringView) ZiDirCreate {
 }
 zi_make_tree = (mp: MutPtr<Malloc>, path: StringView) ZiDirCreate {
     v: [u8] = path.view()
-    i :: i64 = 1
     ok ::= true
-    @while (i < v.len && ok) {
+    one: i64 = 1
+    one.step_while((i) { i < v.len && ok }, (i) {
         (v[i] == '/').then({
             prefix = mp.cstr_substr(path, 0, to_i32(i))
             ok = zi_ensure_dir(prefix).ok
         })
-        i = i + 1
-    }
+        i + 1
+    })
     ok.match ({
         true  => zi_ensure_dir(path),
         false => ZiDirCreate(

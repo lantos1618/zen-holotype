@@ -10,7 +10,7 @@
 { String } = std.text.string
 { gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
 { gstr_int } = compiler.astops
-{ upto } = std.core.count
+{ upto, advance_while, step_while } = std.core.count
 // line:col span in the USER source; line == 0 means "could not locate".
 DiagSpan*: {
     line: i32,
@@ -26,34 +26,19 @@ dspan_none = () DiagSpan {
 }
 // length of the line of `s` that starts at byte `p` (up to '\n' or NUL)
 dline_len = (s: StringView, p: i32, n: i32) i32 {
-    k ::= n
-    @while (s.at(p + k) != 0 && s.at(p + k) != '\n') {
-        k = k + 1
-    }
-    k
+    n.advance_while((k) { s.at(p + k) != 0 && s.at(p + k) != '\n' })
 }
 // start byte of the line containing `off` (scan back past the previous '\n')
 dline_start = (s: StringView, off: i32) i32 {
-    p ::= off
-    @while (p != 0 && s.at(p - 1) != '\n') {
-        p = p - 1
-    }
-    p
+    off.step_while((p) { p != 0 && s.at(p - 1) != '\n' }, (p) { p - 1 })
 }
 // user[up..up+ln] == flat[fp..fp+ln] byte-exact
 dseg_eq = (user: StringView, up: i32, flat: StringView, fp: i32, ln: i32, i: i32) bool {
-    k ::= i
     eq ::= true
-    @while (k < ln && eq == true) {
-        (user.at(up + k) == flat.at(fp + k)).match ({
-            true  => {
-                k = k + 1
-            },
-            false => {
-                eq = false
-            },
-        })
-    }
+    i.step_while((k) { k < ln && eq }, (k) {
+        eq = user.at(up + k) == flat.at(fp + k)
+        k + 1
+    })
     eq
 }
 // the 1-based line in `user` whose text exactly equals flat[fp..fp+ln], else 0.
@@ -147,19 +132,14 @@ duser_line_ns_at = (user: StringView, up: i32, flat: StringView, fp: i32, flen: 
 }
 // flat offset -> column counting each `__` as one char
 dnorm_col = (flat: StringView, fp: i32, flen: i32, off: i32, i: i32, col: i32) i32 {
-    k ::= i
     c ::= col
-    @while (k < off) {
-        (k + 1 < flen && flat.at(fp + k) == '_' && flat.at(fp + k + 1) == '_').match ({
-            true  => {
-                k = k + 2
-            },
-            false => {
-                k = k + 1
-            },
-        })
+    i.step_while((k) { k < off }, (k) {
         c = c + 1
-    }
+        (k + 1 < flen && flat.at(fp + k) == '_' && flat.at(fp + k + 1) == '_').match ({
+            true  => k + 2,
+            false => k + 1,
+        })
+    })
     c
 }
 // the entry point main.c calls per candidate source: flat = import-flattened source the checker saw,
@@ -381,24 +361,21 @@ manifest_value_span* = (src: StringView, len: i32, key: StringView, p: i32) MfSp
 // file I/O and the per-module span search.
 // byte offset of the start of the `line`-th (1-based) line in `user`
 dline_off = (user: StringView, line: i32, p: i32) i32 {
-    q ::= p
     ln ::= line
-    @while (ln > 1 && user.at(q) != 0) {
+    p.step_while((q) { ln > 1 && user.at(q) != 0 }, (q) {
         (user.at(q) == '\n').then({
             ln = ln - 1
         })
-        q = q + 1
-    }
-    q
+        q + 1
+    })
 }
 // append the source line at byte `p` (until \n/NUL/CR) to s
 dput_line = (s: String, a: MutPtr<Malloc>, user: StringView, p: i32) String {
     acc ::= s
-    q ::= p
-    @while (user.at(q) != 0 && user.at(q) != '\n' && user.at(q) != '\r') {
+    p.step_while((q) { user.at(q) != 0 && user.at(q) != '\n' && user.at(q) != '\r' }, (q) {
         acc = acc.gstr_push(a, user.at(q))
-        q = q + 1
-    }
+        q + 1
+    })
     acc
 }
 // append `col-1` leading-blanks, preserving tabs from the source line at `ls`

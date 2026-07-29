@@ -16,6 +16,7 @@
 { contents_in, O_RDONLY } = std.io.file
 { open, close, write } = std.c.libc
 { ends_with, is_empty, starts_with, view } = std.text.str
+{ advance_while } = std.core.count
 // Extracted internal helper families (shared types + this pipeline stay here; see each module head).
 { enforce_visibility, enforce_private_leaks, vis_report_mode } = compiler.resolve_vis
 { enforce_ffi_grants, genmod_lookup } = compiler.resolve_ffi
@@ -34,10 +35,7 @@ is_import_line* = (s: StringView, p: i32) bool {
 // resolve-imports hotspot). Reads only bytes in [p, first NUL], never past the terminator; `p` at or
 // past the NUL returns `p` unchanged, exactly like the old length-guarded body.
 next_line* = (s: StringView, p: i32) i32 {
-    pos ::= p
-    @while (load(offset(s, pos)) != 0 && load(offset(s, pos)) != '\n') {
-        pos = pos + 1
-    }
+    pos = p.advance_while((q) { load(offset(s, q)) != 0 && load(offset(s, q)) != '\n' })
     (load(offset(s, pos)) == '\n').then({ pos + 1 }, { pos })
 }
 quoted_at* = (s: StringView, p: i32) bool { s.at(p) == '"' || s.at(p) == '\'' }
@@ -47,10 +45,7 @@ quoted_at* = (s: StringView, p: i32) bool { s.at(p) == '"' || s.at(p) == '\'' }
 // body's braces and keys as source. Escapes do not apply inside, so only the delimiter ends it.
 // position just past the closing `"""`, or at the NUL when unterminated (the parser reports that).
 raw_lit_end* = (s: StringView, p: i32) i32 {
-    q ::= p + 3
-    @while (s.at(q) != '\0' && s.rawstr_at(q) == false) {
-        q = q + 1
-    }
+    q = (p + 3).advance_while((r) { s.at(r) != '\0' && s.rawstr_at(r) == false })
     (s.at(q) == '\0').then({ q }, { q + 3 })
 }
 STD_MARKER_LEN* = 6

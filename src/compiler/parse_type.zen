@@ -15,7 +15,7 @@
 { is_op, lexeme } = compiler.parse_atom
 { is_dot, is_field_at, is_ident_tok } = compiler.parse_postfix
 { afield_buf, is_field_colon, is_lparen } = compiler.parse_primary
-{ times } = std.core.count
+{ times, step_while } = std.core.count
 // ── PARSER TOTALITY: the module-wide parse-failure flag ──────────────────────────
 // The recursive-descent parsers have no error channel (every result is a plain value), so a parse
 // that detects garbage — an unclosed delimiter, a desynced arm record, a token no rule accepts —
@@ -436,11 +436,12 @@ lexeme_range = (a: MutPtr<Malloc>, src: StringView, start: i32, endpos: i32) Str
 // `a.b.c.d` qualifier never recurses per-segment.
 qual_end = (src: StringView, after_name: i32) Scan {
     last ::= src.scan(after_name)    // updated to each segment ident as we go
-    cur ::= after_name
-    @while (src.is_dot(src.scan(cur).tok) && is_ident_tok(src.scan(src.scan(cur).next).tok)) {
+    after_name.step_while((cur) {
+        src.is_dot(src.scan(cur).tok) && is_ident_tok(src.scan(src.scan(cur).next).tok)
+    }, (cur) {
         last = src.scan(src.scan(cur).next)    // the ident after this `.`
-        cur = last.next
-    }
+        last.next
+    })
     last
 }
 // a leaf type: a primitive/named type, OR a generic instance `Box<i32>` when a `<` follows the name,

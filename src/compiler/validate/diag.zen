@@ -3,6 +3,7 @@
 { Env, arm_env, extend_env, loop_env } = compiler.check
 { Malloc } = std.mem.alloc
 { at, is_alnum } = std.text.ascii
+{ advance_while } = std.core.count
 { is_empty } = std.text.str
 { CondQuery, EnvQuery, SourceSpan, expr_pos } = compiler.validate.util    // trait imports: enable UFCS `env.var_err()`/`d.cond_onearm_err()` via the impl index
 { check_diagnostic_from_source, check_to_diagnostic } = compiler.validate.core
@@ -224,33 +225,15 @@ CheckDiagnostic*: {
     hint: StringView,
 }
 diagnostic_width_from = (src: StringView, pos: i32, n: i32) i32 {
-    k ::= n
-    @while (src.at(pos + k).is_alnum()) {
-        k = k + 1
-    }
-    k
+    n.advance_while((k) { src.at(pos + k).is_alnum() })
 }    // iterative — a long identifier/number literal must not recurse per byte to size its caret
 // a string literal carets across its quotes (`"hi"` -> `^~~~`), not just the opening `"`.
 diagnostic_strlit_width = (src: StringView, pos: i32, n: i32) i32 {
-    k ::= n
-    r ::= 0 - 1
-    @while (r < 0) {
-        b = src.at(pos + k)    // caret width once the closing `"` / line end is reached; <0 while still scanning
-        (b == 0 || b == '\n').match ({
-            true  => {
-                r = k
-            },
-            false => (b == '"').match ({
-                true  => {
-                    r = k + 1
-                },
-                false => {
-                    k = k + 1
-                },
-            }),
-        })
-    }
-    r
+    e = n.advance_while((k) {
+        b = src.at(pos + k)    // scan to the closing `"` or the line end, whichever comes first
+        b != 0 && b != '\n' && b != '"'
+    })
+    (src.at(pos + e) == '"').then({ e + 1 }, { e })
 }    // iterative — a ~50KB string literal must not recurse per byte to size its caret
 diagnostic_span_width* = (src: StringView, pos: i32) i32 {
     (pos <= 0).match ({

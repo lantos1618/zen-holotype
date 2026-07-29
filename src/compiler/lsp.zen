@@ -8,6 +8,7 @@
 { contents_in } = std.io.file
 { read, write } = std.c.libc
 { hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode
+{ advance_while, repeat_while, step_while } = std.core.count
 { CheckDiagnostic, desc_or } = compiler.validate.diag
 { denrich_check } = compiler.validate.enrich
 { parse_module } = compiler.parse
@@ -105,35 +106,18 @@ push_jstr = (sb: String, mp: MutPtr<Malloc>, s: StringView) String {
 // flat `parse`/`get` names once this closure imports compiler.parse, so a targeted scanner is used).
 // The scanner walks left-to-right skipping over complete JSON strings, so a `"key":` byte-pattern that
 // happens to sit INSIDE a string value (e.g. the document source text) is never mistaken for a key.
-// String scanning/decoding is ITERATIVE (`@while`) so a megabyte document never recurses the C stack.
+// String scanning/decoding ITERATES (step_while) so a megabyte document never recurses the C stack.
 // index just past the closing quote of the string opening at v[i]=='"' (respecting `\` escapes).
 json_str_end = (v: [u8], i: i64) i64 {
-    j ::= i + 1
-    done :: i64 = 0 - 1
-    @while (done < 0 && j < v.len) {
-        b = v[j]
-        (b == '\\').match ({
-            true  => {
-                j = j + 2
-            },
-            false => (b == '"').match ({
-                true  => {
-                    done = j + 1
-                },
-                false => {
-                    j = j + 1
-                },
-            }),
-        })
-    }
-    (done < 0).then({ v.len }, { done })
+    e = (i + 1).step_while((j) { j < v.len && v[j] != '"' }, (j) {
+        (v[j] == '\\').then({ j + 2 }, { j + 1 })
+    })
+    (e < v.len).then({ e + 1 }, { v.len })
 }
 json_skip_ws = (v: [u8], p: i64) i64 {
-    q ::= p
-    @while (q < v.len && (v[q] == ' ' || v[q] == '\t' || v[q] == '\n' || v[q] == '\r')) {
-        q = q + 1
-    }
-    q
+    p.advance_while((q) {
+        q < v.len && (v[q] == ' ' || v[q] == '\t' || v[q] == '\n' || v[q] == '\r')
+    })
 }
 json_range_eq = (v: [u8], start: i64, kv: [u8], k: i64) bool {
     (k >= kv.len).match ({
@@ -148,34 +132,21 @@ json_str_eq_range = (v: [u8], start: i64, end: i64, kv: [u8]) bool {
 // so key matches inside a value never fire and nesting is transparent.
 json_find_key = (v: [u8], key: StringView) i64 {
     kv: [u8] = key.view()
-    i :: i64 = 0
     result :: i64 = 0 - 1
-    stop ::= false
-    @while (stop == false && i < v.len) {
+    zero: i64 = 0
+    zero.step_while((i) { result < 0 && i < v.len }, (i) {
         (v[i] == '"').match ({
             true  => {
                 se = v.json_str_end(i)
                 cs = v.json_skip_ws(se)
-                (cs < v.len && v[cs] == ':').match ({
-                    true  => v.json_str_eq_range(i + 1, se - 1, kv).match ({
-                        true  => {
-                            result = v.json_skip_ws(cs + 1)
-                            stop = true
-                        },
-                        false => {
-                            i = se
-                        },
-                    }),
-                    false => {
-                        i = se
-                    },
+                (cs < v.len && v[cs] == ':' && v.json_str_eq_range(i + 1, se - 1, kv)).then({
+                    result = v.json_skip_ws(cs + 1)
                 })
+                se
             },
-            false => {
-                i = i + 1
-            },
+            false => i + 1,
         })
-    }
+    })
     result
 }
 json_hexq = (v: [u8], at: i64) i64 {
@@ -211,74 +182,67 @@ push_utf8 = (sb: String, mp: MutPtr<Malloc>, cp: i64) String {
 // decode the JSON string opening at v[i]=='"' into an allocator-owned view (escapes resolved).
 json_decode_str = (mp: MutPtr<Malloc>, v: [u8], i: i64) StringView {
     sb ::= mp.gstr_string(v.len - i + 1)
-    j ::= i + 1
-    stop ::= false
-    @while (stop == false && j < v.len) {
+    (i + 1).step_while((j) { j < v.len && v[j] != '"' }, (j) {
         b = v[j]
-        (b == '"').match ({
+        (b == '\\' && j + 1 < v.len).match ({
             true  => {
-                stop = true
-            },
-            false => (b == '\\' && j + 1 < v.len).match ({
-                true  => {
-                    e = v[j + 1]
-                    (e == 'n').match ({
+                e = v[j + 1]
+                (e == 'n').match ({
+                    true  => {
+                        sb = sb.gstr_push(mp, '\n')
+                        j + 2
+                    },
+                    false => (e == 't').match ({
                         true  => {
-                            sb = sb.gstr_push(mp, '\n')
-                            j = j + 2
+                            sb = sb.gstr_push(mp, '\t')
+                            j + 2
                         },
-                        false => (e == 't').match ({
+                        false => (e == 'r').match ({
                             true  => {
-                                sb = sb.gstr_push(mp, '\t')
-                                j = j + 2
+                                sb = sb.gstr_push(mp, '\r')
+                                j + 2
                             },
-                            false => (e == 'r').match ({
+                            false => (e == 'b').match ({
                                 true  => {
-                                    sb = sb.gstr_push(mp, '\r')
-                                    j = j + 2
+                                    sb = sb.gstr_push(mp, 8.to_u8())
+                                    j + 2
                                 },
-                                false => (e == 'b').match ({
+                                false => (e == 'f').match ({
                                     true  => {
-                                        sb = sb.gstr_push(mp, 8.to_u8())
-                                        j = j + 2
+                                        sb = sb.gstr_push(mp, 12.to_u8())
+                                        j + 2
                                     },
-                                    false => (e == 'f').match ({
+                                    false => (e == 'u').match ({
                                         true  => {
-                                            sb = sb.gstr_push(mp, 12.to_u8())
-                                            j = j + 2
+                                            cp = v.json_hexq(j + 2)
+                                            (cp < 0).match ({
+                                                true  => {
+                                                    sb = sb.gstr_push(mp, e)
+                                                    j + 2
+                                                },
+                                                false => {
+                                                    sb = sb.push_utf8(mp, cp)
+                                                    j + 6
+                                                },
+                                            })
                                         },
-                                        false => (e == 'u').match ({
-                                            true  => {
-                                                cp = v.json_hexq(j + 2)
-                                                (cp < 0).match ({
-                                                    true  => {
-                                                        sb = sb.gstr_push(mp, e)
-                                                        j = j + 2
-                                                    },
-                                                    false => {
-                                                        sb = sb.push_utf8(mp, cp)
-                                                        j = j + 6
-                                                    },
-                                                })
-                                            },
-                                            false => {
-                                                sb = sb.gstr_push(mp, e)
-                                                j = j + 2
-                                            },
-                                        }),
+                                        false => {
+                                            sb = sb.gstr_push(mp, e)
+                                            j + 2
+                                        },
                                     }),
                                 }),
                             }),
                         }),
-                    })
-                },
-                false => {
-                    sb = sb.gstr_push(mp, b)
-                    j = j + 1
-                },
-            }),
+                    }),
+                })
+            },
+            false => {
+                sb = sb.gstr_push(mp, b)
+                j + 1
+            },
         })
-    }
+    })
     sb.gstr_finish(mp)
 }
 // raw bytes of the value at v[i]: a quoted string (incl. quotes) or a bare token up to `,`/`}`/`]`/ws.
@@ -288,25 +252,16 @@ json_raw_at = (mp: MutPtr<Malloc>, v: [u8], i: i64) StringView {
         false => (v[i] == '"').match ({
             true  => mp.cstr_range(v, i, v.json_str_end(i)),
             false => {
-                e ::= i
-                stop ::= false
-                @while (stop == false && e < v.len) {
-                    b = v[e]
-                    (b == ','
-                        || b == '}'
-                        || b == ']'
-                        || b == ' '
-                        || b == '\t'
-                        || b == '\n'
-                        || b == '\r').match ({
-                        true  => {
-                            stop = true
-                        },
-                        false => {
-                            e = e + 1
-                        },
-                    })
-                }
+                e = i.advance_while((p) {
+                    p < v.len
+                        && v[p] != ','
+                        && v[p] != '}'
+                        && v[p] != ']'
+                        && v[p] != ' '
+                        && v[p] != '\t'
+                        && v[p] != '\n'
+                        && v[p] != '\r'
+                })
                 mp.cstr_range(v, i, e)
             },
         }),
@@ -379,27 +334,25 @@ lsp_zero_span = (sp: DiagSpan) ZSpan {
 // non-continuation byte counts 1 unit, and a 4-byte UTF-8 lead (>= 0xF0, a supplementary-plane char)
 // counts 2 (its UTF-16 surrogate pair).
 lsp_line_start = (v: [u8], ln: i64) i64 {
-    i :: i64 = 0
     k :: i64 = 0
-    @while (k < ln && i < v.len) {
+    zero: i64 = 0
+    zero.step_while((i) { k < ln && i < v.len }, (i) {
         (v[i] == '\n').then({
             k = k + 1
         })
-        i = i + 1
-    }
-    i
+        i + 1
+    })
 }
 lsp_utf16_col = (v: [u8], ls: i64, bytecol: i64) i64 {
     u :: i64 = 0
-    i ::= ls
     end = ls + bytecol
-    @while (i < v.len && i < end && v[i] != '\n') {
+    ls.step_while((i) { i < v.len && i < end && v[i] != '\n' }, (i) {
         bi = v[i].to_i64()
         (bi & 192 != 128).then({
             u = u + (bi >= 240).then({ 2 }, { 1 })
         })
-        i = i + 1
-    }
+        i + 1
+    })
     u
 }
 // ── one diagnostic -> one LSP Diagnostic object, accumulated (comma-separated) into the array ──────
@@ -823,22 +776,18 @@ LSP_SK_STRUCT = () i64 { 23 }
 // definition can afford (one conversion per request) and an outline cannot (four per symbol).
 lsp_line_at = (v: [u8], off: i64) i64 {
     ln :: i64 = 0
-    i :: i64 = 0
-    @while (i < off && i < v.len) {
+    zero: i64 = 0
+    zero.step_while((i) { i < off && i < v.len }, (i) {
         (v[i] == '\n').then({
             ln = ln + 1
         })
-        i = i + 1
-    }
+        i + 1
+    })
     ln
 }
 // byte offset of the start of the line `off` sits on.
 lsp_bol_at = (v: [u8], off: i64) i64 {
-    i ::= off
-    @while (i > 0 && v[i - 1] != '\n') {
-        i = i - 1
-    }
-    i
+    off.step_while((i) { i > 0 && v[i - 1] != '\n' }, (i) { i - 1 })
 }
 // one LSP Position for a byte offset. `character` is a UTF-16 code-unit column, not a byte column.
 lsp_push_pos = (sb: String, mp: MutPtr<Malloc>, v: [u8], off: i64) String {
@@ -1272,20 +1221,19 @@ lsp_read_body = (buf: RawPtr<u8>, off: i64, n: i64) i64 {
 // 0 if `exit` arrived after `shutdown`, else 1 (also 1 if the stream closes without a clean shutdown).
 lsp_cmd* = (mp: MutPtr<Malloc>, root: StringView) i32 {
     hbuf = mp.acquire_or_die(LSP_HDR_CAP())
-    running ::= true
     shut ::= false
     code ::= 1
-    @while (running) {
+    repeat_while((frame) {
         hlen = mp.lsp_read_headers(hbuf, 0)
         (hlen <= 0).match ({
             true  => {
-                running = false
                 code = shut.then({ 0 }, { 1 })
+                false
             },
             false => {
                 n = hbuf.lsp_content_length(0, hlen)
                 (n < 0 || n > LSP_BODY_MAX()).match ({
-                    true  => 0,
+                    true  => true,
                     false => {
                         // ONE REQUEST, ONE SCOPE: the frame buffer, the JSON decode, and the whole
                         // check pipeline the handler runs all allocate inside the scope and are
@@ -1303,15 +1251,17 @@ lsp_cmd* = (mp: MutPtr<Malloc>, root: StringView) i32 {
                         (act == 1).then({
                             shut = true
                         })
-                        (act == 2).then({
-                            running = false
-                            code = shut.then({ 0 }, { 1 })
+                        (act == 2).match ({
+                            true  => {
+                                code = shut.then({ 0 }, { 1 })
+                                false
+                            },
+                            false => true,
                         })
-                        0
                     },
                 })
             },
         })
-    }
+    })
     code
 }
