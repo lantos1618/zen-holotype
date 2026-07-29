@@ -33,6 +33,7 @@
 { Result, IoError, expect } = std.core.result
 { String, new_in, push_in, append_in, finish_in, free_in } = std.text.string
 { view } = std.text.str
+{ loop_at } = std.core.count
 // ── OOM policy ────────────────────────────────────────────────────────────────
 // The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
 // threads the caller's allocator whose exhaustion is fatal by policy, so those Results are unwrapped
@@ -97,7 +98,7 @@ parse* = (a: Allocator, text: StringView) Result<[[StringView]], IoError> {
     in_quotes ::= false
     active ::= false
     resume :: i64 = 0
-    sv.loop((h, i, b) {
+    sv.loop_at((i, b) {
         (i < resume == false).then({
             in_quotes.match ({
                 true  => (b == '"').match ({
@@ -197,7 +198,7 @@ write_field = (a: Allocator, sb: String, s: StringView) String {
     s.field_needs_quote().match ({
         true  => {
             out :: String = sb.push_in(a, '"').cok()
-            sv.loop((h, i, b) {
+            sv.loop_at((i, b) {
                 out = (b == '"').match ({
                     true  => out
                         .push_in(a, '"')
@@ -217,9 +218,9 @@ write_field = (a: Allocator, sb: String, s: StringView) String {
 // failure is fatal by policy); the Result signature mirrors parse and the rest of std.
 write_rows* = (a: Allocator, rows: [[StringView]]) Result<StringView, IoError> {
     out :: String = a.cnew()
-    rows.loop((h, i, row) {
+    rows.loop_at((i, row) {
         r: [StringView] = row
-        r.loop((h2, j, f) {
+        r.loop_at((j, f) {
             (j > 0).then({
                 out = out.push_in(a, ',').cok()
             })

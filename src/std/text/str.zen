@@ -6,6 +6,7 @@
 { Result, IoError, expect, ok, err } = std.core.result
 { strlen, strcmp } = std.c.libc
 { is_space, to_ascii_lower, to_ascii_upper } = std.text.ascii
+{ loop_at } = std.core.count
 len* = (s: StringView) i64 { s.strlen() }
 is_empty* = (s: StringView) bool { (s.strlen() == 0).then({ true }, { false }) }
 eq* = (a: StringView, b: StringView) bool { (a.strcmp(b) == 0).then({ true }, { false }) }
@@ -172,7 +173,7 @@ ws_start = (v: Slice<u8>) i64 {
 // one past the last non-whitespace index, or 0 when `v` is empty / all whitespace.
 ws_end = (v: Slice<u8>) i64 {
     hi :: i64 = 0
-    v.loop((h, i, b) {
+    v.loop_at((i, b) {
         (b.is_space() == false).then({
             hi = i + 1
         })
@@ -239,7 +240,7 @@ nbuf*<T> = (a: Allocator, seed: T, n: i64) [T] {
 split_in* = (a: Allocator, s: StringView, sep: u8) [StringView] {
     sv = s.view()
     nf :: i64 = 1
-    sv.loop((h, i, b) {
+    sv.loop_at((i, b) {
         (b == sep).then({
             nf = nf + 1
         })
@@ -247,7 +248,7 @@ split_in* = (a: Allocator, s: StringView, sep: u8) [StringView] {
     out :: [StringView] = a.nbuf("", nf)
     fi :: i64 = 0    // next field slot
     start :: i64 = 0
-    sv.loop((h, i, b) {
+    sv.loop_at((i, b) {
         (b == sep).then({
             out[fi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current field's start offset
             fi = fi + 1
@@ -264,7 +265,7 @@ words_in = (a: Allocator, s: StringView) [StringView] {
     sv = s.view()
     nw :: i64 = 0    // word count = whitespace(or start)->non-whitespace transitions
     inw ::= false
-    sv.loop((h, i, b) {
+    sv.loop_at((i, b) {
         b.is_space().match ({
             true  => {
                 inw = false
@@ -278,7 +279,7 @@ words_in = (a: Allocator, s: StringView) [StringView] {
     out :: [StringView] = a.nbuf("", nw)
     wi :: i64 = 0    // next word slot
     start :: i64 = 0 - 1
-    sv.loop((h, i, b) {
+    sv.loop_at((i, b) {
         b.is_space().match ({
             true  => (start >= 0).then({
                 out[wi] = a.substr_in(s, start, i - start).expect("std.text.str: allocation failed")    // current word's start offset, -1 when between words
@@ -317,9 +318,7 @@ copy_at = (out: [u8], at: i64, t: StringView) i64 {
 to_lower_in = (a: Allocator, s: StringView) StringView {
     sv = s.view()
     out :: [u8] = a.try_acquire(sv.len + 1).expect("std.text.str: out of memory").slice(sv.len + 1)
-    sv.loop((h, i, b) {
-        out[i] = b.to_ascii_lower()
-    })
+    sv.loop_at((i, b) { out[i] = b.to_ascii_lower() })
     out[sv.len] = 0
     cstr(out.ptr)
 }
@@ -327,9 +326,7 @@ to_lower* = (a: Allocator, s: StringView) StringView { a.to_lower_in(s) }
 to_upper_in = (a: Allocator, s: StringView) StringView {
     sv = s.view()
     out :: [u8] = a.try_acquire(sv.len + 1).expect("std.text.str: out of memory").slice(sv.len + 1)
-    sv.loop((h, i, b) {
-        out[i] = b.to_ascii_upper()
-    })
+    sv.loop_at((i, b) { out[i] = b.to_ascii_upper() })
     out[sv.len] = 0
     cstr(out.ptr)
 }
@@ -359,14 +356,12 @@ repeat* = (a: Allocator, s: StringView, n: i64) StringView { a.repeat_in(s, n) }
 join_in* = (a: Allocator, parts: [StringView], sep: StringView) StringView {
     np = parts.len
     total :: i64 = 0
-    parts.loop((h, i, p) {
-        total = total + p.len()
-    })
+    parts.loop_at((i, p) { total = total + p.len() })
     seps = (np > 0).then({ np - 1 }, { 0 })
     total = total + sep.len() * seps
     out :: [u8] = a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
     pos :: i64 = 0
-    parts.loop((h, i, p) {
+    parts.loop_at((i, p) {
         (i > 0).then({
             pos = out.copy_at(pos, sep)
         })
@@ -406,7 +401,7 @@ cat* = (a: Allocator, x: StringView, y: StringView) StringView { a.cat_in(x, y) 
 count_occ = (sv: Slice<u8>, fv: Slice<u8>) i64 {
     cnt :: i64 = 0
     nextpos :: i64 = 0
-    sv.loop((h, i, b) {
+    sv.loop_at((i, b) {
         (i >= nextpos && i + fv.len <= sv.len && sv.has_at(fv, i)).then({
             cnt = cnt + 1
             nextpos = i + fv.len
@@ -431,7 +426,7 @@ replace_in = (a: Allocator, s: StringView, from: StringView, to: StringView) Str
                 .slice(total + 1)
             pos :: i64 = 0
             skip :: i64 = 0
-            sv.loop((h, i, b) {
+            sv.loop_at((i, b) {
                 (i < skip == false).then({
                     (i + fv.len <= sv.len && sv.has_at(fv, i)).match ({
                         true  => {

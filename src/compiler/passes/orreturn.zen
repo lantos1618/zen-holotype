@@ -8,6 +8,7 @@
 { is_or_return_call } = compiler.check_resolve
 { remk_match } = compiler.check_desugar
 { Malloc } = std.mem.alloc
+{ loop_at } = std.core.count
 orx_count* = (e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => c.args.orx_count_args() + is_or_return_fn(c).then({ 1 }, { 0 }),
@@ -29,16 +30,12 @@ orx_count* = (e: Ptr<Expr>) i32 {
 }
 orx_count_args = (args: [Expr]) i32 {
     n ::= 0
-    args.loop((h, i, ar) {
-        n = n + args[i].addr().orx_count()
-    })
+    args.loop_at((i, ar) { n = n + args[i].addr().orx_count() })
     n
 }
 orx_count_inits = (inits: [FieldInit]) i32 {
     n ::= 0
-    inits.loop((h, i, fi) {
-        n = n + fi.value.orx_count()
-    })
+    inits.loop_at((i, fi) { n = n + fi.value.orx_count() })
     n
 }
 // hoistable or_returns of one STATEMENT: a direct `x = recv.or_return()` let keeps its top call
@@ -140,7 +137,7 @@ orx_rw* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) Orx
 orx_rw_args = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]) OrxRwA {
     buf ::= a.cebuf(args.len)
     k ::= n0
-    args.loop((h, i, ar) {
+    args.loop_at((i, ar) {
         r = a.orx_rw(hbuf, base, k, args[i].addr())
         buf[i] = load(r.e)
         k = r.n
@@ -178,7 +175,7 @@ orx_rw_bin = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, b: BinData) Or
 orx_rw_mkstruct = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, sd: MakeStructData) OrxRw {
     buf ::= cbuf<FieldInit>(a, sd.inits.len)
     k ::= n
-    sd.inits.loop((h, i, fi) {
+    sd.inits.loop_at((i, fi) {
         r = a.orx_rw(hbuf, base, k, fi.value)
         buf[i] = finit(fi.name, r.e)
         k = r.n

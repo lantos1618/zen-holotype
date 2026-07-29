@@ -50,6 +50,7 @@
 { integer, hex_value } = std.text.num
 { is_hex } = std.text.ascii
 { take, drop, sub } = std.core.slice
+{ loop_at } = std.core.count
 { step_while } = std.core.count    // THE loop — `@while` lives in the primitive, not here
 // ── error channel ────────────────────────────────────────────────────────────────────────────────────
 // Connect: the client's TCP handshake failed. Listen: the server's bind/listen/accept failed — a
@@ -135,9 +136,7 @@ crlfcrlf = (v: [u8]) i64 {
 own_bytes = (a: Allocator, b: [u8]) [u8] {
     p = a.try_acquire(b.len + 1).expect("std.net.http: out of memory")
     out :: [u8] = p.slice(b.len)
-    b.loop((h, i, x) {
-        out[i] = x
-    })
+    b.loop_at((i, x) { out[i] = x })
     p.offset(b.len).store(0)
     out
 }
@@ -145,15 +144,13 @@ own_bytes = (a: Allocator, b: [u8]) [u8] {
 // Every field this module cuts is either consumed into a fresh buffer or kept explicitly, so the
 // whole shape goes back through here.
 release_strs = (a: Allocator, xs: [StringView]) void {
-    xs.loop((h, i, x) {
-        a.release(x.own_ptr())
-    })
+    xs.loop_at((i, x) { a.release(x.own_ptr()) })
     a.release_slice(xs)
 }
 // the inverse of `collect_headers`: backbone plus both halves of every pair. A header list a CALLER
 // built (`no_headers`/`one_header`) points at the caller's own strings and is NOT freed this way.
 release_headers = (a: Allocator, hs: [Header]) void {
-    hs.loop((h, i, hd) {
+    hs.loop_at((i, hd) {
         a.release(hd.name.own_ptr())
         a.release(hd.value.own_ptr())
     })
@@ -193,7 +190,7 @@ parse_parts = (a: Allocator, raw: [u8]) Result<MsgParts, HttpError> {
                     ok_res
                 },
             })
-            lines.loop((h, i, ln) {
+            lines.loop_at((i, ln) {
                 // lines 1.. are consumed into the trimmed copies `collect_headers` cuts out of them —
                 // intermediates nothing above can reach. `lines[0]` is the exception: it leaves as
                 // `first`, so only the backbone around it goes.
@@ -356,9 +353,7 @@ append_range = (a: Allocator, bv: Slice<u8>, start: i64, n: i64, sb: String) Str
     m = (n < avail).then({ n }, { avail })
     part: Slice<u8> = slice(bv.ptr.offset(start), m)
     acc ::= sb
-    part.loop((h, i, b) {
-        acc = a.push_in(acc, b).expect("http: oom")
-    })
+    part.loop_at((i, b) { acc = a.push_in(acc, b).expect("http: oom") })
     acc
 }
 // walk the chunked body: at `i` read the hex size line, append that many data bytes, skip the
@@ -421,7 +416,7 @@ build_request = (
     sb = a.crlf(sb)
     sb = a.append_in(sb, "Connection: close").expect("http: oom")
     sb = a.crlf(sb)
-    headers.loop((h, i, hd) {
+    headers.loop_at((i, hd) {
         sb = a.append_in(sb, hd.name).expect("http: oom")
         sb = a.append_in(sb, ": ").expect("http: oom")
         sb = a.append_in(sb, hd.value).expect("http: oom")
@@ -664,7 +659,7 @@ parse_request* = (a: Allocator, raw: [u8]) Result<Request, HttpError> {
                     ok_res
                 },
             })
-            toks.loop((h, i, t) {
+            toks.loop_at((i, t) {
                 // `words` owns a BACKBONE plus one owned copy per token, and each is an independent
                 // allocation. The Request keeps tokens 0 and 1 (method, path) and nothing else: the
                 // backbone and every token past the second — "HTTP/1.1" on every single request — are
@@ -727,7 +722,7 @@ build_response* = (a: Allocator, r: Response) [u8] {
     sb = a.append_in(sb, " ").expect("http: oom")
     sb = a.append_in(sb, status_reason(r.status)).expect("http: oom")
     sb = a.crlf(sb)
-    r.headers.loop((h, i, hd) {
+    r.headers.loop_at((i, hd) {
         sb = a.append_in(sb, hd.name).expect("http: oom")
         sb = a.append_in(sb, ": ").expect("http: oom")
         sb = a.append_in(sb, hd.value).expect("http: oom")

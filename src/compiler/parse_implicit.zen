@@ -10,6 +10,7 @@
 { Malloc } = std.mem.alloc
 { field_is_method } = compiler.parse_type_decl
 { param_buf, take_params } = compiler.parse_type
+{ loop_at } = std.core.count
 // ── implicit type parameters (M2): a free, short ALL-CAPS name (A, T, E, R, K, V, T1, …) used in a
 //    param / field / payload TYPE position introduces the type parameter, so the `<A>` declaration list
 //    becomes OPTIONAL (the existing explicit lists keep working untouched). Two gates make this safe:
@@ -31,9 +32,7 @@ is_tyvar_name = (s: StringView) bool {
 }
 tv_seen = (buf: [Param], cnt: i32, name: StringView) bool {
     found ::= false
-    buf.loop((h, i, p) {
-        found = (i < cnt).then({ found || p.name == name }, { found })
-    })
+    buf.loop_at((i, p) { found = (i < cnt).then({ found || p.name == name }, { found }) })
     found
 }
 // types = the module's declared/imported type names (the exclusion set). A name is collected only when
@@ -62,35 +61,29 @@ collect_tv_ty = (buf: [Param], types: [Param], cnt: i32, t: Ty) i32 {
 }
 collect_tv_tys = (buf: [Param], types: [Param], cnt: i32, ts: [Ty]) i32 {
     c ::= cnt
-    ts.loop((h, i, t) {
-        c = buf.collect_tv_ty(types, c, t)
-    })
+    ts.loop_at((i, t) { c = buf.collect_tv_ty(types, c, t) })
     c
 }
 collect_tv_params = (buf: [Param], types: [Param], cnt: i32, ps: [Param]) i32 {
     c ::= cnt
-    ps.loop((h, i, p) {
-        c = buf.collect_tv_ty(types, c, p.ty)
-    })
+    ps.loop_at((i, p) { c = buf.collect_tv_ty(types, c, p.ty) })
     c
 }
 collect_tv_fields = (buf: [Param], types: [Param], cnt: i32, fields: [Field]) i32 {
     c ::= cnt
-    fields.loop((h, i, f) {
+    fields.loop_at((i, f) {
         c = f.field_is_method().then({ c }, { buf.collect_tv_ty(types, c, f.ty) })
     })
     c
 }
 collect_tv_variants = (buf: [Param], types: [Param], cnt: i32, vs: [VariantDef]) i32 {
     c ::= cnt
-    vs.loop((h, i, v) {
-        c = buf.collect_tv_ty(types, c, v.payload)
-    })
+    vs.loop_at((i, v) { c = buf.collect_tv_ty(types, c, v.payload) })
     c
 }
 copy_tparams = (buf: [Param], tparams: [Param]) i32 {
     n ::= 0
-    tparams.loop((h, i, p) {
+    tparams.loop_at((i, p) {
         buf[n] = p
         n = n + 1
     })
@@ -108,9 +101,7 @@ tv_add_name = (buf: [Param], cnt: i32, name: StringView) i32 {
 }
 tv_add_names = (buf: [Param], cnt: i32, names: [Param]) i32 {
     c ::= cnt
-    names.loop((h, i, p) {
-        c = buf.tv_add_name(c, p.name)
-    })
+    names.loop_at((i, p) { c = buf.tv_add_name(c, p.name) })
     c
 }
 collect_decltype = (buf: [Param], cnt: i32, d: Decl) i32 {
@@ -126,9 +117,7 @@ collect_decltype = (buf: [Param], cnt: i32, d: Decl) i32 {
 collect_decltypes = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
     buf = cbuf<Param>(a, decls.len + 8)
     n ::= 0
-    decls.loop((h, i, d) {
-        n = buf.collect_decltype(n, d)
-    })
+    decls.loop_at((i, d) { n = buf.collect_decltype(n, d) })
     buf.take_params(n)
 }
 // ── implicit trait-bound params: a param `name: Trait` (Trait a DECLARED trait) is sugar for a
@@ -167,9 +156,7 @@ collect_trait = (buf: [Param], decls: [Decl], cnt: i32, d: Decl) i32 {
 collect_traits = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
     buf = cbuf<Param>(a, decls.len + 8)
     n ::= 0
-    decls.loop((h, i, d) {
-        n = buf.collect_trait(decls, n, d)
-    })
+    decls.loop_at((i, d) { n = buf.collect_trait(decls, n, d) })
     buf.take_params(n)
 }
 // MutPtr<T> lowers to T* — the same Ty an explicit `MutPtr<A>` produces.
@@ -207,7 +194,7 @@ desugar_trait_params = (
 ) TDesugar {
     out ::= a.param_buf()
     n ::= cnt
-    params.loop((h, i, p) {
+    params.loop_at((i, p) {
         traits.is_trait_param(p).match ({
             true  => {
                 nm = a.fresh_tparam_name(buf, n, 'A')
@@ -282,8 +269,6 @@ rewrite_decl = (a: MutPtr<Malloc>, types: [Param], traits: [Param], d: Decl) Dec
 implicit_tparams* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     types = a.collect_decltypes(decls)
     traits = a.collect_traits(decls)
-    decls.loop((h, i, d) {
-        decls[i] = a.rewrite_decl(types, traits, d)
-    })
+    decls.loop_at((i, d) { decls[i] = a.rewrite_decl(types, traits, d) })
     decls
 }

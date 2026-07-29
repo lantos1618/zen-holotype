@@ -23,6 +23,7 @@
 { sx_named } = compiler.validate.args
 { CheckDiagnostic, KALLOCNULL } = compiler.validate.diag
 { check_diagnostic_from_source, check_diagnostic_none, kv_at } = compiler.validate.core
+{ loop_at } = std.core.count
 nz_or = (a: i32, b: i32) i32 { (a == 0).then({ b }, { a }) }
 // The allocator verbs, matched by NAME + ARITY in BOTH surface forms — this pass runs PRE-desugar,
 // so `a.acquire(n)` is a MethodCall and `acquire(a, n)` a flat Call. `nargs` always counts the
@@ -100,9 +101,7 @@ nz_proofs_stmt = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, st: Stmt) Ptr<DeadList>
 }
 nz_proofs_body* = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
     out ::= acc
-    body.loop((h, i, st) {
-        out = a.nz_proofs_stmt(out, st)
-    })
+    body.loop_at((i, st) { out = a.nz_proofs_stmt(out, st) })
     out
 }
 // ── pass 2: every local BOUND to an allocation and never proven ───────────────────────────────────
@@ -151,9 +150,7 @@ nz_unproven_body* = (
     body: [Stmt],
 ) Ptr<DeadList> {
     out ::= acc
-    body.loop((h, i, st) {
-        out = a.nz_unproven_stmt(proven, out, st)
-    })
+    body.loop_at((i, st) { out = a.nz_unproven_stmt(proven, out, st) })
     out
 }
 // ── pass 3: report the first deref of an unproven allocation ──────────────────────────────────────
@@ -209,9 +206,7 @@ nz_stmt_kind = (un: Ptr<DeadList>, st: Stmt) i32 {
 }
 nz_body_kind* = (un: Ptr<DeadList>, body: [Stmt]) i32 {
     acc ::= 0
-    body.loop((h, i, st) {
-        acc = acc.nz_or(un.nz_stmt_kind(st))
-    })
+    body.loop_at((i, st) { acc = acc.nz_or(un.nz_stmt_kind(st)) })
     acc
 }
 nz_func_kind* = (a: MutPtr<Malloc>, f: Func) i32 {
@@ -220,7 +215,7 @@ nz_func_kind* = (a: MutPtr<Malloc>, f: Func) i32 {
 }
 check_module_nullalloc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.nz_or(d.match ({
             .DFunc(f) => a.nz_func_kind(f),
             _         => 0,

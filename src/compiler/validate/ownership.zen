@@ -19,6 +19,7 @@
 { arg_var_name, mkstruct_field_kills, slicelit_elem_kills, struct_fields, sx_named } = compiler.validate.args
 { enum_variants, first_gen_arg } = compiler.validate.kinds
 { kv_at, name_read_in_args, name_read_in_body, name_read_in_expr } = compiler.validate.core
+{ loop_at } = std.core.count
 DeadList*: DeadNil | DeadCons(DeadCell)    // let/assign/while/if/index-set produce no value
 // Raw ownership validation runs before resolve_module in the CLI, while source-level
 // allocator-explicit `o.release_in(a)` / `r.drop_in(a)` calls still exist. After generic inlining those calls
@@ -327,7 +328,7 @@ arms_consume_name = (env: Env, arms: [ArmData], nm: StringView, depth: i32) bool
 }
 args_consume_name = (env: Env, args: [Expr], nm: StringView, depth: i32) bool {
     found ::= false
-    args.loop((h, i, ar) {
+    args.loop_at((i, ar) {
         found = env.expr_consumes_name(ar.addr(), nm, depth).then({ true }, { found })
     })
     found
@@ -349,7 +350,7 @@ call_arg_consumes_name = (env: Env, c: CallData, nm: StringView, depth: i32) boo
     ps = env.env_params(c.fn)
     found ::= false
     (ps.len == c.args.len).then({
-        c.args.loop((h, i, ar) {
+        c.args.loop_at((i, ar) {
             (c.arg_var_name(i) == nm
                 && nm == "" == false
                 && ps[i].ty.owner_base() == "Own"
@@ -428,9 +429,7 @@ cdl_expr = (env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>, pname: StringView) Ptr<
 }
 cdl_arms = (env: Env, seen: Ptr<DeadList>, arms: [ArmData], pname: StringView) Ptr<DeadList> {
     out ::= seen
-    arms.loop((h, i, ar) {
-        out = env.cdl_expr(out, ar.body, pname)
-    })
+    arms.loop_at((i, ar) { out = env.cdl_expr(out, ar.body, pname) })
     out
 }
 cdl_stmt = (env: Env, seen: Ptr<DeadList>, st: Stmt, pname: StringView) Ptr<DeadList> {
@@ -448,9 +447,7 @@ cdl_stmt = (env: Env, seen: Ptr<DeadList>, st: Stmt, pname: StringView) Ptr<Dead
 }
 cdl_body = (env: Env, seen: Ptr<DeadList>, body: [Stmt], pname: StringView) Ptr<DeadList> {
     out ::= seen
-    body.loop((h, i, st) {
-        out = env.cdl_stmt(out, st, pname)
-    })
+    body.loop_at((i, st) { out = env.cdl_stmt(out, st, pname) })
     out
 }
 // does a consume verb in `c` free the pointee of `pname`? receiver is `load(pname)` directly, a local in the
@@ -476,7 +473,7 @@ bft_forward = (env: Env, c: CallData, pname: StringView, depth: i32) bool {
             ps = env.env_params(c.fn)
             found ::= false
             (ps.len == c.args.len).then({
-                c.args.loop((h, i, ar) {
+                c.args.loop_at((i, ar) {
                     (c.arg_var_name(i) == pname && env.fn_frees_through_ptr(c.fn, i, depth - 1)).then({
                         found = true
                     })
@@ -559,7 +556,7 @@ own_call_kills = (
     out ::= seen
     ps = env.env_params(c.fn)
     (ps.len == c.args.len).then({
-        c.args.loop((h, i, ar) {
+        c.args.loop_at((i, ar) {
             (ps[i].ty.owner_base() == "Own"
                 && env.infer_expr(ar.addr()).owner_base() == "Own"
                 && env.fn_consumes_param(c.fn, i, consume_depth())).then({
@@ -909,7 +906,7 @@ expr_releases_param = (env: Env, e: Ptr<Expr>, pname: StringView, depth: i32) bo
 call_forwards_release = (env: Env, c: CallData, pname: StringView, depth: i32) bool {
     found ::= false
     (env.env_params(c.fn).len == c.args.len).then({
-        c.args.loop((h, i, ar) {
+        c.args.loop_at((i, ar) {
             (ar.addr().expr_root_var() == pname && env.fn_releases_param(c.fn, i, depth - 1)).then({
                 found = true
             })
@@ -1076,7 +1073,7 @@ own_dead_body* = (
     e ::= env
     d ::= seen
     al2 ::= al
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         d = a.own_step(e, d, al2, st)
         al2 = a.alias_step(e, al2, st)
         e = a.extend_env(e, st)
@@ -1094,7 +1091,7 @@ own_dead_arms = (
     arms: [ArmData],
 ) Ptr<DeadList> {
     out ::= seen
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         expr_falls_through(ar.body).then({
             out = a.dead_union(a.own_dead_expr(a.arm_env(env, subjty, ar), seen, al, ar.body), out)
         })
@@ -1131,7 +1128,7 @@ own_dead_expr = (
             (cn.is_empty() == false).then({
                 out = a.dead_kill(out, al, cn)
             })
-            c.args.loop((h, i, ar) {
+            c.args.loop_at((i, ar) {
                 // a consume can also sit INSIDE an argument — most of all the `.Lambda` a template call
                 // carries (`apply(() { o.release_in(al) })` consumes `o` at THIS statement).
                 out = a.own_dead_expr(env, out, al, ar.addr())
@@ -1293,7 +1290,7 @@ ufcs_vis_miss* = (env: Env, c: CallData) bool {
 // threads it (params + lets + arms), so receiver and operand types infer the same way.
 zty_generic = (a: MutPtr<Malloc>, g: GenericData) StringView {
     out ::= a.gstr_string(48).gstr_append(a, g.name).gstr_append(a, "<")
-    g.args.loop((h, i, t) {
+    g.args.loop_at((i, t) {
         (i > 0).then({
             out = out.gstr_append(a, ", ")
         })
@@ -1449,7 +1446,7 @@ mu_index_impl = (
 mu_build_index* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) Map<i64> {
     seed: i64 = 0 - 1
     m ::= of(a, "", seed).expect("check: method-mold index alloc")
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         m = d.match ({
             .DImpl(im) => a.mu_index_impl(decls, idx, m, im),
             _          => m,
@@ -1480,9 +1477,7 @@ mu_is_var = (e: Expr) bool {
 // A `.MethodCall` names its receiver explicitly, so a like-named local does not shadow it.
 mu_bound_names = (a: MutPtr<Malloc>, bound: Ptr<DeadList>, params: [Param]) Ptr<DeadList> {
     out ::= bound
-    params.loop((h, i, p) {
-        out = a.dead_cons(p.name, out)
-    })
+    params.loop_at((i, p) { out = a.dead_cons(p.name, out) })
     out
 }
 mu_call_kind = (mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<Expr>) i32 {
@@ -1503,9 +1498,7 @@ mu_call_kind = (mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<Expr>) i32 {
 }
 mu_arms_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, arms: [ArmData]) i32 {
     acc ::= 0
-    arms.loop((h, i, ar) {
-        acc = acc.or(a.mu_expr_kind(mvm, bound, ar.body))
-    })    // arm body = the arm's VALUE (tail)
+    arms.loop_at((i, ar) { acc = acc.or(a.mu_expr_kind(mvm, bound, ar.body)) })    // arm body = the arm's VALUE (tail)
     acc
 }
 // recurse into nested control-flow whose bodies can hold discarded statements.
@@ -1570,7 +1563,7 @@ mu_stmts_kind = (
     acc ::= 0
     n = body.len
     scope ::= bound
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         acc = acc.or(a.mu_stmt_kind(mvm, scope, st, has_tail && i == n - 1))
         scope = st.match ({
             .Let(l) => a.dead_cons(l.name, scope),
@@ -1592,7 +1585,7 @@ mu_func_kind* = (a: MutPtr<Malloc>, mvm: Map<i64>, f: Func) i32 {
 }
 scope_params* = (a: MutPtr<Malloc>, params: [Param]) Ptr<DeadList> {
     out ::= a.dead_nil()
-    params.loop((h, i, p) {
+    params.loop_at((i, p) {
         p.ty.is_scope_param_ty().then({
             out = a.dead_cons(p.name, out)
         })
@@ -1682,7 +1675,7 @@ loop_val_escapes = (
 ) bool {
     f ::= false
     d ::= derived
-    stmts.loop((h, i, st) {
+    stmts.loop_at((i, st) {
         st.match ({
             .Return(r) => {
                 f = a.expr_escapes(svars, d, r).then({ true }, { f })
@@ -1720,7 +1713,7 @@ block_val_escapes = (
 ) bool {
     f ::= false
     d ::= derived
-    stmts.loop((h, i, st) {
+    stmts.loop_at((i, st) {
         st.match ({
             .Return(r)   => {
                 f = a.expr_escapes(svars, d, r).then({ true }, { f })
@@ -1795,7 +1788,7 @@ impure_use_in_args = (nm: StringView, args: [Expr]) bool {
 // args EXCEPT index 0 (the getter receiver already accounted for as a pure read).
 impure_use_in_args_from1 = (nm: StringView, args: [Expr]) bool {
     f ::= false
-    args.loop((h, i, ar) {
+    args.loop_at((i, ar) {
         (i > 0).then({
             f = nm.impure_use_in_expr(ar.addr()).then({ true }, { f })
         })
@@ -1829,7 +1822,7 @@ impure_use_in_body = (nm: StringView, body: [Stmt]) bool {
 // is `nm` used IMPURELY (discharged/escaped, not a pure getter read) in any statement strictly AFTER k?
 impure_use_after = (nm: StringView, body: [Stmt], k: i32) bool {
     f ::= false
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         (i > k).then({
             f = nm.impure_use_in_stmt(st).then({ true }, { f })
         })

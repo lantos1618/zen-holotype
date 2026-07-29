@@ -27,6 +27,7 @@
 { gstr_append, tvoid, tnamed } = compiler.genc
 { Malloc } = std.mem.alloc
 { js_size_decls } = compiler.backend.js.js_size
+{ loop_at } = std.core.count
 // copy MODES: 0 = share (scalar, pointer, unknown type — as C shares a copied pointer), 1 = one
 // spread (`__zr.cp`: a slice header, or an aggregate whose every field shares), 2 = the generated
 // per-type walk `__zc_<Name>`.
@@ -50,7 +51,7 @@ jsc_mode = (t: Ty, depth: i32) i32 {
 // a declared struct/enum copies; anything else named (a foreign or opaque type) shares.
 jsc_name_mode = (n: StringView, depth: i32) i32 {
     r ::= jsc_share()
-    js_size_decls().loop((h, i, d) {
+    js_size_decls().loop_at((i, d) {
         r = d.match ({
             .DStruct(sd) => (sd.name == n).then({ jsc_fields_mode(sd.fields, depth) }, { r }),
             .DEnum(ed)   => (ed.name == n).then({ jsc_variants_mode(ed.variants, depth) }, { r }),
@@ -61,14 +62,12 @@ jsc_name_mode = (n: StringView, depth: i32) i32 {
 }
 jsc_fields_mode = (fs: [Field], depth: i32) i32 {
     m ::= jsc_spread()
-    fs.loop((h, i, f) {
-        m = (jsc_mode(f.ty, depth + 1) == jsc_share()).then({ m }, { jsc_walk() })
-    })
+    fs.loop_at((i, f) { m = (jsc_mode(f.ty, depth + 1) == jsc_share()).then({ m }, { jsc_walk() }) })
     m
 }
 jsc_variants_mode = (vs: [VariantDef], depth: i32) i32 {
     m ::= jsc_spread()
-    vs.loop((h, i, v) {
+    vs.loop_at((i, v) {
         m = (jsc_mode(v.payload, depth + 1) == jsc_share()).then({ m }, { jsc_walk() })
     })
     m
@@ -99,7 +98,7 @@ js_cp_close* = (s: String, a: MutPtr<Malloc>, t: Ty) String {
 // module; JS hoists function declarations, so a global initializer may already call one.
 js_copy_defs* = (s: String, a: MutPtr<Malloc>) String {
     out ::= s
-    js_size_decls().loop((h, i, d) {
+    js_size_decls().loop_at((i, d) {
         out = d.match ({
             .DStruct(sd) => (jsc_fields_mode(sd.fields, 0) == jsc_walk()).match ({
                 true  => out.jsc_struct_def(a, sd),
@@ -119,7 +118,7 @@ jsc_struct_def = (s: String, a: MutPtr<Malloc>, sd: StructDecl) String {
         .gstr_append(a, "function __zc_")
         .gstr_append(a, sd.name)
         .gstr_append(a, "(x) { return ({ ...x")
-    sd.fields.loop((h, i, f) {
+    sd.fields.loop_at((i, f) {
         out = (js_cp_mode(f.ty) == jsc_share()).match ({
             true  => out,
             false => out
@@ -145,7 +144,7 @@ jsc_enum_def = (s: String, a: MutPtr<Malloc>, ed: EnumDecl) String {
         .gstr_append(a, "function __zc_")
         .gstr_append(a, ed.name)
         .gstr_append(a, "(x) { switch (x.tag) { ")
-    ed.variants.loop((h, i, v) {
+    ed.variants.loop_at((i, v) {
         out = (js_cp_mode(v.payload) == jsc_share()).then({ out }, { out.jsc_variant_case(a, v) })
     })
     out.gstr_append(a, "} return ({ ...x }); }\n")
@@ -168,7 +167,7 @@ jsc_variant_case = (s: String, a: MutPtr<Malloc>, v: VariantDef) String {
 jsc_member_ty* = (t: Ty, field: StringView) Ty {
     n = jsc_ty_name(t)
     r ::= tvoid()
-    js_size_decls().loop((h, i, d) {
+    js_size_decls().loop_at((i, d) {
         r = d.match ({
             .DStruct(sd) => (sd.name == n).then({ jsc_field_ty(sd.fields, field) }, { r }),
             .DEnum(ed)   => (ed.name == n).then({ jsc_payload_ty(ed.variants, field) }, { r }),
@@ -179,22 +178,18 @@ jsc_member_ty* = (t: Ty, field: StringView) Ty {
 }
 jsc_field_ty = (fs: [Field], name: StringView) Ty {
     r ::= tvoid()
-    fs.loop((h, i, f) {
-        r = (f.name == name).then({ f.ty }, { r })
-    })
+    fs.loop_at((i, f) { r = (f.name == name).then({ f.ty }, { r }) })
     r
 }
 jsc_payload_ty = (vs: [VariantDef], name: StringView) Ty {
     r ::= tvoid()
-    vs.loop((h, i, v) {
-        r = (v.name == name).then({ v.payload }, { r })
-    })
+    vs.loop_at((i, v) { r = (v.name == name).then({ v.payload }, { r }) })
     r
 }
 // the payload a match arm BINDS (`.Ok(v) => …`), by enum name.
 js_variant_ty* = (ename: StringView, variant: StringView) Ty {
     r ::= tvoid()
-    js_size_decls().loop((h, i, d) {
+    js_size_decls().loop_at((i, d) {
         r = d.match ({
             .DEnum(ed) => (ed.name == ename).then({ jsc_payload_ty(ed.variants, variant) }, { r }),
             _          => r,
@@ -208,7 +203,7 @@ js_init_ty* = (sname: StringView, field: StringView) Ty { jsc_member_ty(tnamed(s
 // yields a FRESH value (its `return` copies), which is what lets a sink elide its own copy.
 js_func_ret* = (name: StringView) Ty {
     r ::= tvoid()
-    js_size_decls().loop((h, i, d) {
+    js_size_decls().loop_at((i, d) {
         r = d.match ({
             .DFunc(f) => (f.name == name).then({ f.ret }, { r }),
             _         => r,
@@ -218,7 +213,7 @@ js_func_ret* = (name: StringView) Ty {
 }
 js_is_defined_fn* = (name: StringView) bool {
     found ::= false
-    js_size_decls().loop((h, i, d) {
+    js_size_decls().loop_at((i, d) {
         found = found
             || d.match ({
                 .DFunc(f) => f.name == name,

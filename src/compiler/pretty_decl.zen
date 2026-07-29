@@ -12,6 +12,7 @@
 { impl_cname_in, payload_fname } = compiler.mangle
 { ff_append, ff_block, ff_flush_leading, ff_indent, ff_str_has_nl, ff_string, ff_ty, ff_tys } = compiler.pretty
 { ff_current_col, ff_expr, ff_fits_width, ff_pad } = compiler.pretty_expr
+{ loop_at } = std.core.count
 // ── declarations ────────────────────────────────────────────────────────────────
 // a trailing `...T` param stores its type as the collected `[T]`; recover the element T to re-print `...T`.
 ff_slice_elem = (t: Ty) Ty {
@@ -28,7 +29,7 @@ ff_param_one = (s: String, a: MutPtr<Malloc>, p: Param) String {
 }
 ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out ::= s
-    ps.loop((h, i, p) {
+    ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
         out = out.ff_param_one(a, p)
     })
@@ -54,7 +55,7 @@ ff_sig = (s: String, a: MutPtr<Malloc>, ps: [Param], ret: Ty, ind: i32) String {
             .ff_ty(a, ret),
         false => {
             out ::= s.ff_append(a, " = (\n")
-            ps.loop((h, i, p) {
+            ps.loop_at((i, p) {
                 sep = p.variadic.then({ "\n" }, { ",\n" })
                 out = out.ff_indent(a, ind + 1).ff_param_one(a, p).ff_append(a, sep)
             })
@@ -67,7 +68,7 @@ ff_sig = (s: String, a: MutPtr<Malloc>, ps: [Param], ret: Ty, ind: i32) String {
 // present; an unannotated param prints as its bare NAME — `(x)`, never `(x: void)`.
 ff_lparams* = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out ::= s
-    ps.loop((h, i, p) {
+    ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
         out = p.ty.match ({
             .Void => out.ff_append(a, p.name),
@@ -83,7 +84,7 @@ ff_tparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
         false => {
             open = s.ff_append(a, "<")
             body ::= open
-            ps.loop((h, i, p) {
+            ps.loop_at((i, p) {
                 body = (i == 0).then({ body }, { body.ff_append(a, ", ") })
                 body = p.ty.match ({
                     .Void => body.ff_append(a, p.name),
@@ -125,7 +126,7 @@ ff_find_func = (a: MutPtr<Malloc>, decls: [Decl], name: StringView) Func {
         tparams: ff_no_params(),
         body: slice(null_ptr(), 0),
     )
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DFunc(f) => (f.name == name).then({
                 res = f
@@ -138,7 +139,7 @@ ff_find_func = (a: MutPtr<Malloc>, decls: [Decl], name: StringView) Func {
 // the type's own tparams (so a method's print drops them, keeping only the method's OWN tparams)
 ff_type_tparams = (decls: [Decl], tyname: StringView) [Param] {
     res ::= ff_no_params()
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DGenStruct(g) => (g.name == tyname).then({
                 res = g.tparams
@@ -154,7 +155,7 @@ ff_type_tparams = (decls: [Decl], tyname: StringView) [Param] {
 ff_minus_tparams = (a: MutPtr<Malloc>, full: [Param], drop: [Param]) [Param] {
     buf ::= slice(a.acquire_or_die((full.len + 1) * sizeof(Param)), full.len + 1)
     n ::= 0
-    full.loop((h, i, p) {
+    full.loop_at((i, p) {
         (drop.param_names_has(p.name) == false).then({
             buf[n] = p
             n = n + 1
@@ -168,7 +169,7 @@ ff_minus_tparams = (a: MutPtr<Malloc>, full: [Param], drop: [Param]) [Param] {
 // printing it as a standalone fn would hoist the body out of the record, where `Self` is unbound.
 ff_has_default = (decls: [Decl], trname: StringView, fname: StringView) bool {
     found ::= false
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DTraitDefault(td) => (td.trname == trname && td.fn.name == fname).then({
                 found = true
@@ -186,7 +187,7 @@ ff_find_default = (a: MutPtr<Malloc>, decls: [Decl], trname: StringView, fname: 
         tparams: ff_no_params(),
         body: slice(null_ptr(), 0),
     )
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DTraitDefault(td) => (td.trname == trname && td.fn.name == fname).then({
                 res = td.fn
@@ -199,9 +200,9 @@ ff_find_default = (a: MutPtr<Malloc>, decls: [Decl], trname: StringView, fname: 
 // is `fname` a hoisted impl method (so it must NOT print as a standalone top-level fn)?
 ff_is_hoisted* = (a: MutPtr<Malloc>, decls: [Decl], fname: StringView) bool {
     found ::= false
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
-            .DImpl(im) => im.methods.loop((h2, k, mp) {
+            .DImpl(im) => im.methods.loop_at((k, mp) {
                 (a.impl_cname_in(im.trname, im.ty, mp.name) == fname).then({
                     found = true
                 })
@@ -235,7 +236,7 @@ ff_method_facts = (
     ind: i32,
 ) [MethodFact] {
     buf ::= slice(a.acquire_or_die((im.methods.len + 1) * sizeof(MethodFact)), im.methods.len + 1)
-    im.methods.loop((h, k, mp) {
+    im.methods.loop_at((k, mp) {
         f = a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
         own = a.ff_minus_tparams(f.tparams, ctp)
         above = a.ff_string(64).ff_flush_leading(a, f.pos, ind)
@@ -318,7 +319,7 @@ ff_methods = (
     gf_idx = save
     pads = a.ff_method_pads(facts)
     out ::= s
-    im.methods.loop((h, k, mp) {
+    im.methods.loop_at((k, mp) {
         f = a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
         own = a.ff_minus_tparams(f.tparams, ctp)
         // own-line comments written ABOVE this method flush at method indent (bounded by the method's
@@ -344,7 +345,7 @@ ff_inherent_methods = (
     ind: i32,
 ) String {
     out ::= s
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => (im.ty == tyname && im.trname == tyname).then({
                 out = out.ff_methods(a, decls, im, ctp, ind)
@@ -395,9 +396,7 @@ ff_field_dflt = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
 ff_struct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], sd: StructDecl) String {
     open = s.ff_name(a, exp, sd.name).ff_append(a, ": {\n")
     body ::= open
-    sd.fields.loop((h, i, fl) {
-        body = body.ff_record_field(a, decls, sd.name, ff_no_params(), fl)
-    })
+    sd.fields.loop_at((i, fl) { body = body.ff_record_field(a, decls, sd.name, ff_no_params(), fl) })
     body.ff_inherent_methods(a, decls, sd.name, ff_no_params(), 1).ff_append(a, "}")
 }
 ff_genstruct = (
@@ -409,9 +408,7 @@ ff_genstruct = (
 ) String {
     open = s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": {\n")
     body ::= open
-    g.fields.loop((h, i, fl) {
-        body = body.ff_record_field(a, decls, g.name, g.tparams, fl)
-    })
+    g.fields.loop_at((i, fl) { body = body.ff_record_field(a, decls, g.name, g.tparams, fl) })
     body.ff_inherent_methods(a, decls, g.name, g.tparams, 1).ff_append(a, "}")
 }
 // the impl head prints im.trty — the trait reference AS WRITTEN (qualifier + type args, e.g.
@@ -447,9 +444,7 @@ ff_is_positional_fields = (a: MutPtr<Malloc>, fields: [Field]) bool {
         true  => false,
         false => {
             ok ::= true
-            fields.loop((h, i, fl) {
-                ok = ok && fl.name == a.payload_fname(to_i32(i))
-            })
+            fields.loop_at((i, fl) { ok = ok && fl.name == a.payload_fname(to_i32(i)) })
             ok
         },
     })
@@ -462,7 +457,7 @@ ff_is_anon_payload_name* = (a: MutPtr<Malloc>, decls: [Decl], nm: StringView) bo
 }
 ff_anon_payload_fields = (a: MutPtr<Malloc>, decls: [Decl], nm: StringView) [Field] {
     res ::= ff_no_fields()
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DStruct(sd) => (sd.name == nm).then({
                 res = sd.fields
@@ -490,7 +485,7 @@ ff_anon_payload_tys = (a: MutPtr<Malloc>, decls: [Decl], nm: StringView) [Ty] {
     fields = a.ff_anon_payload_fields(decls, nm)
     buf ::= slice(a.acquire_or_die((fields.len + 1) * sizeof(Ty)), fields.len + 1)
     n ::= 0
-    fields.loop((h, i, fl) {
+    fields.loop_at((i, fl) {
         buf[n] = fl.ty
         n = n + 1
     })
@@ -506,7 +501,7 @@ ff_variant = (s: String, a: MutPtr<Malloc>, decls: [Decl], vd: VariantDef) Strin
 }
 ff_variants = (s: String, a: MutPtr<Malloc>, decls: [Decl], vs: [VariantDef]) String {
     body ::= s
-    vs.loop((h, i, vd) {
+    vs.loop_at((i, vd) {
         body = (i == 0).then({ body }, { body.ff_append(a, " | ") })
         body = body.ff_variant(a, decls, vd)
     })
@@ -550,7 +545,7 @@ ff_decl* = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) 
 ff_import_inline = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
     open = s.ff_append(a, "{ ")
     body ::= open
-    im.names.loop((h, i, p) {
+    im.names.loop_at((i, p) {
         body = (i == 0).then({ body }, { body.ff_append(a, ", ") })
         body = body.ff_append(a, p.name)
     })
@@ -564,7 +559,7 @@ ff_import_inline = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
 ff_import_wrapped = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
     out ::= s.ff_append(a, "{ ")
     col ::= 2
-    im.names.loop((h, i, p) {
+    im.names.loop_at((i, p) {
         w = to_i32(view(p.name).len)
         out = (i == 0).match ({
             true  => out.ff_append(a, p.name),

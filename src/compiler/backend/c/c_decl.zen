@@ -9,9 +9,10 @@
 { Malloc } = std.mem.alloc
 { slice_any } = compiler.astops
 { gen_block, gen_block_void } = compiler.backend.c.c_expr
+{ loop_at } = std.core.count
 any_payload = (vs: [VariantDef]) bool {
     found ::= false
-    vs.loop((h, i, v) {
+    vs.loop_at((i, v) {
         found = v.payload.match ({
             .Void => found,
             _     => true,
@@ -21,7 +22,7 @@ any_payload = (vs: [VariantDef]) bool {
 }
 gen_ty_list = (s: String, alloc: MutPtr<Malloc>, ts: [Ty]) String {
     out ::= s
-    ts.loop((h, i, t) {
+    ts.loop_at((i, t) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma-separated bare types: `A, B, C`
         out = out.gstr_append(alloc, alloc.ty_cname_in(t))
     })
@@ -41,7 +42,7 @@ gen_fnptr_param = (s: String, alloc: MutPtr<Malloc>, ft: FnTData, name: StringVi
 }
 gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
     out ::= s
-    ps.loop((h, i, p) {
+    ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
         out = p.ty.match ({
             .FnT(ft) => out.gen_fnptr_param(alloc, ft, p.name),
@@ -114,7 +115,7 @@ gen_fnt_typedef_ret = (s: String, alloc: MutPtr<Malloc>, ret: Ty) String {
 }
 gen_fnt_typedefs* = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
     out ::= s
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         out = d.match ({
             .DFunc(f)    => out.gen_fnt_typedef_ret(alloc, f.ret),
             .DForeign(f) => out.gen_fnt_typedef_ret(alloc, f.ret),
@@ -180,7 +181,7 @@ gen_proto* = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
 // the C arg list of a function type: `i32, i32` (empty -> `void`).
 gen_fnt_params = (s: String, alloc: MutPtr<Malloc>, ps: [Ty]) String {
     out ::= s
-    ps.loop((h, i, p) {
+    ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })
         out = out.gstr_append(alloc, alloc.ty_cname_in(p))
     })
@@ -207,15 +208,13 @@ gen_field_decl = (s: String, alloc: MutPtr<Malloc>, fld: Field) String {
 }
 gen_struct = (s: String, alloc: MutPtr<Malloc>, sd: StructDecl) String {
     open ::= s.gstr_append(alloc, "struct ").gstr_append(alloc, sd.name).gstr_append(alloc, " { ")
-    sd.fields.loop((h, i, fld) {
-        open = open.gen_field_decl(alloc, fld)
-    })
+    sd.fields.loop_at((i, fld) { open = open.gen_field_decl(alloc, fld) })
     open.gstr_append(alloc, "};")
 }
 // emit an enum's union members (the payload-carrying variants) and tag constants
 gen_union = (s: String, alloc: MutPtr<Malloc>, vs: [VariantDef]) String {
     u ::= s.gstr_append(alloc, " union { ")
-    vs.loop((h, i, v) {
+    vs.loop_at((i, v) {
         v.payload.match ({
             .Void => { },
             _     => {
@@ -231,7 +230,7 @@ gen_union = (s: String, alloc: MutPtr<Malloc>, vs: [VariantDef]) String {
 }
 gen_tags = (s: String, alloc: MutPtr<Malloc>, ename: StringView, vs: [VariantDef]) String {
     e ::= s.gstr_append(alloc, " enum { ")
-    vs.loop((h, i, v) {
+    vs.loop_at((i, v) {
         e = (i == 0).then({ e }, { e.gstr_append(alloc, ", ") })
         e = e.gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, v.name)
     })
@@ -256,7 +255,7 @@ gen_enum = (s: String, alloc: MutPtr<Malloc>, ed: EnumDecl) String {
 impld_set* = (a: MutPtr<Malloc>, decls: [Decl]) Map<i64> {
     seedv: i64 = 0 - 1
     m ::= of(a, "", seedv).expect("c_decl: impld_set alloc")
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => {
                 m = m.put(a, im.trname, 0).expect("c_decl: impld_set alloc")

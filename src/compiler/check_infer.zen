@@ -12,6 +12,7 @@
 { VList, DeclIndex, bin_ty, common_ty, dispatch_recv_name, enum_name, gen_variant_payload,
   is_direct_tparam, is_lit_numeric, is_str_t, is_void_ty, is_weak_targ_arg, lookup_var,
   slice_member, ty_under_ptr, vcons } = compiler.check
+{ loop_at } = std.core.count
 light_sl_elem = (
     a: MutPtr<Malloc>,
     items: [Expr],
@@ -45,7 +46,7 @@ light_one = (
     lits: bool,
 ) Ty {
     found ::= tvoid()
-    params.loop((h, i, p) {
+    params.loop_at((i, p) {
         found = found.is_void_ty().match ({
             true  => (i < args.len && args[i].addr().is_lit_numeric() == lits).match ({
                 true  => p.ty.unify_ty(args[i].addr().light_ty(a, env, decls, idx), tp),
@@ -244,7 +245,7 @@ light_match_ty = (
 ) Ty {
     st = m.subj.light_ty(a, env, decls, idx)
     found ::= tvoid()
-    m.arms.loop((h, i, ar) {
+    m.arms.loop_at((i, ar) {
         found = found.common_ty(ar.body.light_ty(a, a.xform_arm_env(decls, idx, st, m.ename, ar, env), decls, idx))
     })
     found
@@ -270,7 +271,7 @@ unify_ty* = (pty: Ty, aty: Ty, tp: StringView) Ty {
 }
 unify_args = (pargs: [Ty], aargs: [Ty], tp: StringView) Ty {
     found ::= tvoid()
-    pargs.loop((h, i, pa) {
+    pargs.loop_at((i, pa) {
         found = found.is_void_ty().match ({
             true  => (i < aargs.len).then({ pa.unify_ty(aargs[i], tp) }, { found }),
             false => found,
@@ -281,7 +282,7 @@ unify_args = (pargs: [Ty], aargs: [Ty], tp: StringView) Ty {
 // The declared payload type of variant `vn`, scanning every enum decl (concrete or generic).
 variant_payload_ty = (decls: [Decl], vn: StringView) Ty {
     found ::= tvoid()
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         found = found.is_void_ty().match ({
             true  => d.match ({
                 .DEnum(ed)   => ed.enum_variant_payload(vn),
@@ -295,9 +296,7 @@ variant_payload_ty = (decls: [Decl], vn: StringView) Ty {
 }
 enum_variant_payload = (ed: EnumDecl, vn: StringView) Ty {
     found ::= tvoid()
-    ed.variants.loop((h, i, v) {
-        found = (v.name == vn).then({ v.payload }, { found })
-    })
+    ed.variants.loop_at((i, v) { found = (v.name == vn).then({ v.payload }, { found }) })
     found
 }
 // Infer a lambda parameter's concrete type from a `.Variant(param)` constructor in the body: the
@@ -306,7 +305,7 @@ enum_variant_payload = (ed: EnumDecl, vn: StringView) Ty {
 // recover T even with no return to flow it from — the actor ask/request inline-closure reply handler.
 lam_param_payload = (decls: [Decl], body: [Stmt], pname: StringView) Ty {
     found ::= tvoid()
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         found = found.is_void_ty().then({ decls.lpp_stmt(st, pname) }, { found })
     })
     found
@@ -337,7 +336,7 @@ lpp_payload = (decls: [Decl], variant: StringView, payload: Ptr<Expr>, pname: St
 }
 lpp_args = (decls: [Decl], args: [Expr], pname: StringView) Ty {
     found ::= tvoid()
-    args.loop((h, i, ar) {
+    args.loop_at((i, ar) {
         found = found.is_void_ty().then({ decls.lpp_expr(ar.addr(), pname) }, { found })
     })
     found
@@ -352,7 +351,7 @@ lam_unify = (decls: [Decl], fpty: Ty, lm: LambdaData, tp: StringView) Ty {
     fpty.match ({
         .FnT(ft) => {
             found ::= tvoid()
-            ft.params.loop((h, i, pt) {
+            ft.params.loop_at((i, pt) {
                 found = found.is_void_ty().match ({
                     true  => (i < lm.params.len).match ({
                         true  => pt.unify_ty(decls.lam_param_payload(lm.body, lm.params[i].name), tp),
@@ -395,7 +394,7 @@ infer_one = (
     lits: bool,
 ) Ty {
     found ::= tvoid()
-    params.loop((h, i, p) {
+    params.loop_at((i, p) {
         found = found.is_void_ty().match ({
             true  => (i < cargs.len
                 && a.weak_targ_light(decls, idx, p.ty, cargs[i].addr(), tp, env) == lits).match ({
@@ -455,16 +454,12 @@ ty_mentions* = (t: Ty, n: StringView) bool {
 }
 tys_mention = (ts: [Ty], n: StringView) bool {
     f ::= false
-    ts.loop((h, i, t) {
-        f = f || t.ty_mentions(n)
-    })
+    ts.loop_at((i, t) { f = f || t.ty_mentions(n) })
     f
 }
 ty_mentions_any* = (t: Ty, tparams: [Param]) bool {
     f ::= false
-    tparams.loop((h, i, tp) {
-        f = f || t.ty_mentions(tp.name)
-    })
+    tparams.loop_at((i, tp) { f = f || t.ty_mentions(tp.name) })
     f
 }
 // FALLBACK 1 — closure-return inference: a tparam that appears in an FnT param's RETURN position
@@ -483,7 +478,7 @@ lam_body_targ = (
     idx: DeclIndex,
 ) Ty {
     found ::= tvoid()
-    params.loop((h, i, p) {
+    params.loop_at((i, p) {
         found = found.is_void_ty().match ({
             true  => (i < cargs.len).match ({
                 true  => a.lam_body_one(tparams, targs, p.ty, cargs[i].addr(), tp, env, decls, idx),
@@ -510,7 +505,7 @@ lam_body_one = (
             .Lambda(lm) => (lm.ret.is_void_ty() && load(ft.ret).ty_mentions(tp)).match ({
                 true  => {
                     e2 ::= env
-                    lm.params.loop((h, k, lp) {
+                    lm.params.loop_at((k, lp) {
                         e2 = a.vcons(lp.name, (k < ft.params.len).match ({
                             true  => a.subst_ty_in(tparams, targs, ft.params[k]),
                             false => tvoid(),
@@ -544,7 +539,7 @@ impl_trait_targ* = (
     tp: StringView,
 ) Ty {
     found ::= tvoid()
-    tparams.loop((h, i, x) {
+    tparams.loop_at((i, x) {
         found = found.is_void_ty().match ({
             true  => a.impl_trait_targ_of(decls, idx, targs[i].dispatch_recv_name(), tp),
             false => found,
@@ -563,7 +558,7 @@ impl_trait_targ_of = (
         true  => tvoid(),
         false => {
             found ::= tvoid()
-            decls.loop((h, i, d) {
+            decls.loop_at((i, d) {
                 found = found.is_void_ty().match ({
                     true  => d.match ({
                         .DImpl(im) => (im.ty == tyname).match ({
@@ -591,7 +586,7 @@ impl_trait_solve = (
         true  => tvoid(),
         false => {
             found ::= tvoid()
-            g.fields.loop((h, i, f) {
+            g.fields.loop_at((i, f) {
                 found = found.is_void_ty().match ({
                     true  => a.impl_method_solve(decls, idx, im, f, tp),
                     false => found,
@@ -616,7 +611,7 @@ impl_method_solve = (
                 true  => tvoid(),
                 false => {
                     found ::= load(ft.ret).unify_ty(mf.ret, tp)
-                    ft.params.loop((h, j, pt) {
+                    ft.params.loop_at((j, pt) {
                         found = found.is_void_ty().match ({
                             true  => (j < mf.params.len).match ({
                                 true  => pt.unify_ty(mf.params[j].ty, tp),
@@ -644,13 +639,13 @@ deep_targs = (
     decls: [Decl],
     idx: DeclIndex,
 ) [Ty] {
-    tparams.loop((h, i, tp) {
+    tparams.loop_at((i, tp) {
         buf[i] = buf[i].is_void_ty().match ({
             true  => a.lam_body_targ(tparams, buf, params, cargs, tp.name, env, decls, idx),
             false => buf[i],
         })
     })
-    tparams.loop((h, i, tp) {
+    tparams.loop_at((i, tp) {
         buf[i] = buf[i].is_void_ty().match ({
             true  => a.impl_trait_targ(decls, idx, tparams, buf, tp.name),
             false => buf[i],
@@ -673,7 +668,7 @@ infer_targs* = (
     etargs: [Ty],
 ) [Ty] {
     buf ::= cbuf<Ty>(a, tparams.len)
-    tparams.loop((h, i, tp) {
+    tparams.loop_at((i, tp) {
         buf[i] = (i < etargs.len).match ({
             true  => etargs[i],
             false => params.infer_one_exp(ret, exp, a, cargs, tp.name, env, decls, idx),

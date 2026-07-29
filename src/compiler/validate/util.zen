@@ -4,7 +4,7 @@
 { Env, is_intrinsic, is_lit_numeric, is_void_ty, the_func, tparam_declared } = compiler.check
 { tag_const } = compiler.check_lower
 { Token, scan } = compiler.lex
-{ repeat_while } = std.core.count
+{ repeat_while, loop_at } = std.core.count
 { is_prim_width, param_names_has, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
 { at } = std.text.ascii
@@ -358,7 +358,7 @@ tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
 }
 trait_declaring* = (decls: [Decl], m: StringView) StringView {
     found ::= ""
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         found = d.match ({
             .DStruct(sd) => (is_empty(found) && sd.fields.fields_declare_method(m)).match ({
                 true  => sd.name,
@@ -552,7 +552,7 @@ fnt_arg_err_at* = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
 }
 is_struct* = (decls: [Decl], name: StringView) bool {
     f ::= false
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         f = d.match ({
             .DStruct(sd) => (sd.name == name).then({ true }, { f }),
             _            => f,
@@ -835,9 +835,7 @@ ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
 }
 ut_unknown_tys* = (env: Env, tparams: [Param], ts: [Ty]) i32 {
     acc ::= 0
-    ts.loop((h, i, t) {
-        acc = acc.or(env.ut_unknown_ty(tparams, t))
-    })
+    ts.loop_at((i, t) { acc = acc.or(env.ut_unknown_ty(tparams, t)) })
     acc
 }
 // Params/fields/payloads/return carry no per-type source position (a `Ty` node has none), so anchor
@@ -845,21 +843,21 @@ ut_unknown_tys* = (env: Env, tparams: [Param], ts: [Ty]) i32 {
 // though it points at the decl name rather than the bare type token.
 ut_params_kind = (env: Env, tparams: [Param], ps: [Param], pos: i32) i32 {
     acc ::= 0
-    ps.loop((h, i, p) {
+    ps.loop_at((i, p) {
         acc = acc.or(env.ut_unknown_ty(tparams, p.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
 ut_fields_kind* = (env: Env, tparams: [Param], fs: [Field], pos: i32) i32 {
     acc ::= 0
-    fs.loop((h, i, f) {
+    fs.loop_at((i, f) {
         acc = acc.or(env.ut_unknown_ty(tparams, f.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
 ut_payloads_kind* = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32 {
     acc ::= 0
-    vs.loop((h, i, v) {
+    vs.loop_at((i, v) {
         acc = acc.or(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
@@ -869,9 +867,7 @@ ut_payloads_kind* = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32
 // control flow (Block/Loop/Match/Cond) so a deeply-nested `let` annotation is checked too.
 ut_arms_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], arms: [ArmData]) i32 {
     acc ::= 0
-    arms.loop((h, i, ar) {
-        acc = acc.or(a.ut_expr_kind(env, tparams, ar.body))
-    })
+    arms.loop_at((i, ar) { acc = acc.or(a.ut_expr_kind(env, tparams, ar.body)) })
     acc
 }
 ut_expr_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
@@ -909,9 +905,7 @@ ut_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
 }
 ut_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32 {
     acc ::= 0
-    body.loop((h, i, st) {
-        acc = acc.or(a.ut_stmt_kind(env, tparams, st))
-    })
+    body.loop_at((i, st) { acc = acc.or(a.ut_stmt_kind(env, tparams, st)) })
     acc
 }
 ut_func_kind* = (a: MutPtr<Malloc>, env: Env, f: Func) i32 {
@@ -945,37 +939,27 @@ utn_ty = (env: Env, tparams: [Param], t: Ty) StringView {
 }
 utn_tys = (env: Env, tparams: [Param], ts: [Ty]) StringView {
     r ::= ""
-    ts.loop((h, i, t) {
-        r = desc_or(r, env.utn_ty(tparams, t))
-    })
+    ts.loop_at((i, t) { r = desc_or(r, env.utn_ty(tparams, t)) })
     r
 }
 utn_params = (env: Env, tparams: [Param], ps: [Param]) StringView {
     r ::= ""
-    ps.loop((h, i, p) {
-        r = desc_or(r, env.utn_ty(tparams, p.ty))
-    })
+    ps.loop_at((i, p) { r = desc_or(r, env.utn_ty(tparams, p.ty)) })
     r
 }
 utn_fields* = (env: Env, tparams: [Param], fs: [Field]) StringView {
     r ::= ""
-    fs.loop((h, i, f) {
-        r = desc_or(r, env.utn_ty(tparams, f.ty))
-    })
+    fs.loop_at((i, f) { r = desc_or(r, env.utn_ty(tparams, f.ty)) })
     r
 }
 utn_payloads* = (env: Env, tparams: [Param], vs: [VariantDef]) StringView {
     r ::= ""
-    vs.loop((h, i, v) {
-        r = desc_or(r, env.utn_ty(tparams, v.payload))
-    })
+    vs.loop_at((i, v) { r = desc_or(r, env.utn_ty(tparams, v.payload)) })
     r
 }
 utn_arms = (a: MutPtr<Malloc>, env: Env, tparams: [Param], arms: [ArmData]) StringView {
     r ::= ""
-    arms.loop((h, i, ar) {
-        r = desc_or(r, a.utn_expr(env, tparams, ar.body))
-    })
+    arms.loop_at((i, ar) { r = desc_or(r, a.utn_expr(env, tparams, ar.body)) })
     r
 }
 utn_expr = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) StringView {
@@ -1003,9 +987,7 @@ utn_stmt = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) StringView 
 }
 utn_body = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) StringView {
     r ::= ""
-    body.loop((h, i, st) {
-        r = desc_or(r, a.utn_stmt(env, tparams, st))
-    })
+    body.loop_at((i, st) { r = desc_or(r, a.utn_stmt(env, tparams, st)) })
     r
 }
 utn_func* = (a: MutPtr<Malloc>, env: Env, f: Func) StringView {
@@ -1079,14 +1061,14 @@ inf_edge_reaches = (decls: [Decl], target: StringView, t: Ty, depth: i64) bool {
 }
 inf_fields_reach = (decls: [Decl], target: StringView, fields: [Field], depth: i64) bool {
     hit ::= false
-    fields.loop((h, i, fl) {
+    fields.loop_at((i, fl) {
         hit = hit.then({ true }, { decls.inf_edge_reaches(target, fl.ty, depth) })
     })
     hit
 }
 inf_variants_reach = (decls: [Decl], target: StringView, vs: [VariantDef], depth: i64) bool {
     hit ::= false
-    vs.loop((h, i, v) {
+    vs.loop_at((i, v) {
         hit = hit.then({ true }, { decls.inf_edge_reaches(target, v.payload, depth) })
     })
     hit
@@ -1203,7 +1185,7 @@ variant_affix = (a: MutPtr<Malloc>, lead: StringView, vn: StringView) StringView
 gen_tag_match = (a: MutPtr<Malloc>, vs: [VariantDef], base: StringView, name: StringView) bool {
     found ::= false
     pre = a.variant_affix(base, "_")
-    vs.loop((h, i, v) {
+    vs.loop_at((i, v) {
         found = (name.starts_with(pre) && name.ends_with(a.variant_affix("_", v.name))).match ({
             true  => true,
             false => found,
@@ -1213,7 +1195,7 @@ gen_tag_match = (a: MutPtr<Malloc>, vs: [VariantDef], base: StringView, name: St
 }
 is_tag_const = (decls: [Decl], a: MutPtr<Malloc>, name: StringView) bool {
     found ::= false
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         found = d.match ({
             .DEnum(ed)   => ed.variants.variant_tags_has(a, ed.name, name).then({ true }, { found }),
             .DGenEnum(g) => a.gen_tag_match(g.variants, g.name, name).then({ true }, { found }),

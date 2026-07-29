@@ -12,7 +12,7 @@
   GenEnumDecl, ImplData, ImportData, GlobalData, TraitDefData, Decl } = compiler.ast.ast_types
 { String } = std.text.string
 { view } = std.text.str
-{ step_while } = std.core.count
+{ step_while, loop_at } = std.core.count
 { Malloc, malloc, realloc } = std.mem.alloc
 { panic } = std.core.result
 // mangle_str_in lives in compiler.mangle (the Ty→C-name family split out of this file); subst_generic_in
@@ -121,9 +121,7 @@ gstr_push*<A> = (s: String, a: MutPtr<A>, b: u8) String {
 // appends without re-measuring; the StringView form pays its one unavoidable strlen in view().
 gstr_append_bytes*<A> = (s: String, a: MutPtr<A>, bs: Slice<u8>) String {
     r = a.gstr_reserve(s, bs.len)
-    bs.loop((h, i, b) {
-        r.ptr.offset(r.len + i).store(b)
-    })
+    bs.loop_at((i, b) { r.ptr.offset(r.len + i).store(b) })
     String(
         ptr: r.ptr,
         len: r.len + bs.len,
@@ -698,9 +696,7 @@ tnode* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
 // a Field type so conformance sees a normal method signature. Allocates a [Ty] of the param types.
 fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
     buf ::= cbuf<Ty>(a, ps.len)
-    ps.loop((h, i, p) {
-        buf[i] = p.ty
-    })
+    ps.loop_at((i, p) { buf[i] = p.ty })
     buf
 }
 fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty {
@@ -778,7 +774,7 @@ ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) StringView {
 // substitute tparam→arg in a type (recursing Ptr/Slice); a Named that IS a tparam becomes its arg.
 tparam_arg = (tparams: [Param], args: [Ty], n: StringView, dflt: Ty) Ty {
     found ::= dflt
-    tparams.loop((h, i, tp) {
+    tparams.loop_at((i, tp) {
         // Guard `i < args.len`: a WRONG-ARITY explicit targ list (too few `<…>` args for the declared
         // tparams) would otherwise index past `args` and panic. Leave an un-pinned tparam lenient here;
         // the targ-arity diagnostic (kv_makestruct_targ_kind) owns the real error report.
@@ -799,9 +795,7 @@ subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
 // substitute tparam→arg inside a function type `(S, i32) S` -> `(AppState, i32) AppState`.
 subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty {
     ptys ::= cbuf<Ty>(a, ft.params.len)
-    ft.params.loop((h, i, p) {
-        ptys[i] = a.subst_ty_in(tparams, args, p)
-    })
+    ft.params.loop_at((i, p) { ptys[i] = a.subst_ty_in(tparams, args, p) })
     fntype(ptys, a.tnode(a.subst_ty_in(tparams, args, load(ft.ret))))
 }
 // substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
@@ -809,9 +803,7 @@ subst_generic_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], g: GenericD
     // `tys` (not `buf`): mangle_str_in inlines a local `buf: RawPtr<u8>`, and the inliner
     // substitutes args by name — a caller arg also named `buf` would be captured by that local.
     tys ::= cbuf<Ty>(a, g.args.len)
-    g.args.loop((h, i, gt) {
-        tys[i] = a.subst_ty_in(tparams, args, gt)
-    })
+    g.args.loop_at((i, gt) { tys[i] = a.subst_ty_in(tparams, args, gt) })
     tgeneric(g.name, tys, a.mangle_str_in(g.name, tys))
 }
 find_genenum* = (decls: [Decl], name: StringView) GenEnumDecl {
@@ -820,7 +812,7 @@ find_genenum* = (decls: [Decl], name: StringView) GenEnumDecl {
         tparams: slice(null_ptr(), 0),
         variants: slice(null_ptr(), 0),
     )
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         found = d.match ({
             .DGenEnum(g) => (g.name == name).then({ g }, { found }),
             _            => found,

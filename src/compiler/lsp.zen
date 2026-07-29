@@ -8,7 +8,7 @@
 { contents_in } = std.io.file
 { read, write } = std.c.libc
 { hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode
-{ advance_while, repeat_while, step_while } = std.core.count
+{ advance_while, repeat_while, step_while, loop_at } = std.core.count
 { CheckDiagnostic, desc_or } = compiler.validate.diag
 { denrich_check } = compiler.validate.enrich
 { parse_module } = compiler.parse
@@ -79,7 +79,7 @@ push_uesc = (sb: String, mp: MutPtr<Malloc>, b: u8) String {
 push_jstr = (sb: String, mp: MutPtr<Malloc>, s: StringView) String {
     cur ::= sb.gstr_push(mp, '"')
     v: Slice<u8> = s.view()
-    v.loop((h, i, b) {
+    v.loop_at((i, b) {
         cur = (b == '"').match ({
             true  => cur.gstr_append(mp, "\\\""),
             false => (b == '\\').match ({
@@ -511,9 +511,7 @@ lsp_diags_array = (
                 a = mp.lsp_push_diag(a, rp, raw, decls, path, text, check_module_main_diagnostic_from_source(raw, rp.flat))
                 a = mp.lsp_push_diag(a, rp, raw, decls, path, text, mp.check_module_mustuse_diagnostic_from_source(raw, rp.flat))
                 ds = mp.check_module_batch_vis(decls, rp.flat, mp.ufcs_vis_of(rp.flat, rp.regions, rp.table))
-                ds.loop((h, i, cd) {
-                    a = mp.lsp_push_diag(a, rp, raw, decls, path, text, cd)
-                })
+                ds.loop_at((i, cd) { a = mp.lsp_push_diag(a, rp, raw, decls, path, text, cd) })
                 a
             },
         }),
@@ -611,7 +609,7 @@ lsp_path_uri = (mp: MutPtr<Malloc>, path: StringView) StringView {
 // pos 0 as "synthesized", so 0 doubles as this scan's miss.
 lsp_decl_pos = (decls: [Decl], name: StringView) i32 {
     found :: i32 = 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         p = d.match ({
             .DFunc(f)      => (f.name == name).then({ f.pos }, { 0 }),
             .DForeign(f)   => (f.name == name).then({ f.pos }, { 0 }),
@@ -634,9 +632,9 @@ lsp_decl_pos = (decls: [Decl], name: StringView) i32 {
 // same un-hoisting compiler.pretty_decl does to round-trip a type body.
 lsp_method_pos = (mp: MutPtr<Malloc>, decls: [Decl], name: StringView) i32 {
     found :: i32 = 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
-            .DImpl(im) => im.methods.loop((h2, k, m) {
+            .DImpl(im) => im.methods.loop_at((k, m) {
                 (found == 0 && m.name == name).then({
                     found = decls.lsp_decl_pos(mp.impl_cname_in(im.trname, im.ty, m.name))
                 })
@@ -750,7 +748,7 @@ lsp_completion = (mp: MutPtr<Malloc>, body: StringView) i64 {
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
         .gstr_append(mp, mp.lsp_id(body))
         .gstr_append(mp, ",\"result\":{\"isIncomplete\":false,\"items\":[")
-    items.loop((h, i, it) {
+    items.loop_at((i, it) {
         sb = sb
             .gstr_append(mp, (i > 0).then({ "," }, { "" }))
             .gstr_append(mp, "{\"label\":")
@@ -846,7 +844,7 @@ lsp_leaf_sym = (mp: MutPtr<Malloc>, v: [u8], name: StringView, kind: i64, off: i
 lsp_impl_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], im: ImplData) StringView {
     sb ::= mp.gstr_string(256)
     n ::= 0
-    im.methods.loop((h, k, m) {
+    im.methods.loop_at((k, m) {
         off = to_i64(decls.lsp_decl_pos(mp.impl_cname_in(im.trname, im.ty, m.name)))
         (off > 0).then({
             sb = sb
@@ -863,7 +861,7 @@ lsp_impl_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], im: ImplData) Strin
 lsp_method_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], ty: StringView) StringView {
     sb ::= mp.gstr_string(384)
     n ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => (im.ty == ty).then({
                 one = mp.lsp_impl_syms(decls, v, im)
@@ -881,10 +879,10 @@ lsp_method_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], ty: StringView) S
 // its children's, so the type symbol's range is stretched to its last method's name.
 lsp_methods_end = (mp: MutPtr<Malloc>, decls: [Decl], ty: StringView, from: i64) i64 {
     last ::= from
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => (im.ty == ty).then({
-                im.methods.loop((h2, k, m) {
+                im.methods.loop_at((k, m) {
                     off = to_i64(decls.lsp_decl_pos(mp.impl_cname_in(im.trname, im.ty, m.name)))
                     e = off + m.name.view().len
                     (off > 0 && e > last).then({
@@ -920,7 +918,7 @@ lsp_type_sym = (
 // symbol here, so its methods are emitted at top level rather than dropped.
 lsp_has_type = (decls: [Decl], name: StringView) bool {
     found ::= false
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DStruct(sd)   => (sd.name == name).then({
                 found = true
@@ -986,7 +984,7 @@ lsp_symbols_json = (mp: MutPtr<Malloc>, text: StringView) StringView {
     v: Slice<u8> = text.view()
     sb ::= mp.gstr_string(1024)
     n ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         one = mp.lsp_decl_sym(decls, v, d)
         (is_empty(one) == false).then({
             sb = sb.gstr_append(mp, (n > 0).then({ "," }, { "" })).gstr_append(mp, one)

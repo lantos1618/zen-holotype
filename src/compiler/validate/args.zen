@@ -17,6 +17,7 @@
   own_moved_var, owner_base, sd_call_pos, sm_call_pos, sm_mcall_pos } = compiler.validate.ownership
 { kv_at } = compiler.validate.core
 { expr_fold_children } = compiler.ast.expr_children
+{ loop_at } = std.core.count
 // A slice LITERAL may be element-wise coerced into an expected slice type while stored slice types
 // remain invariant. This accepts `["a", "b"]` at a `[StringView]` call slot without allowing a
 // named `[StringLiteral]` variable to flow to mutable `[StringView]` storage.
@@ -25,9 +26,7 @@ slicelit_slot_verdict = (env: Env, ar: Expr, pty: Ty) i32 {
         .SliceLit(sd) => pty.match ({
             .Slice(ep) => {
                 errs ::= 0
-                sd.items.loop((h, i, it) {
-                    errs = errs + env.sl_elem_fit(load(ep.pointee), it)
-                })
+                sd.items.loop_at((i, it) { errs = errs + env.sl_elem_fit(load(ep.pointee), it) })
                 (errs == 0).then({ 0 }, { 1 })
             },
             _          => 0 - 1,
@@ -66,7 +65,7 @@ arg_err_at* = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
 // rejected call — it never flips accept/reject.
 fields_declare_method* = (fields: [Field], m: StringView) bool {
     found ::= false
-    fields.loop((h, i, f) {
+    fields.loop_at((i, f) {
         found = (f.name == m).match ({
             true  => f.ty.match ({
                 .FnT(fd) => true,
@@ -81,7 +80,7 @@ fields_declare_method* = (fields: [Field], m: StringView) bool {
 no_fields* = () [Field] { slice(null_ptr(), 0) }
 struct_fields* = (decls: [Decl], name: StringView) [Field] {
     found ::= no_fields()
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         found = d.match ({
             .DStruct(sd) => (sd.name == name).then({ sd.fields }, { found }),
             _            => found,
@@ -108,9 +107,7 @@ init_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
 }    // unknown field -> 1
 struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
     acc ::= 0
-    inits.loop((h, i, fi) {
-        acc = acc + env.init_err(fields, fi)
-    })
+    inits.loop_at((i, fi) { acc = acc + env.init_err(fields, fi) })
     acc
 }
 // A generic-struct literal `Box<i32>(v: …)` binds each tparam to its explicit targ, so a field typed
@@ -143,7 +140,7 @@ gen_struct_init_errs = (
     inits: [FieldInit],
 ) i32 {
     acc ::= 0
-    inits.loop((h, i, fi) {
+    inits.loop_at((i, fi) {
         acc = acc + fields.has_field(fi.name).match ({
             true  => env.gen_field_fit_err(tps, targs, fields, fi),
             false => 1,
@@ -189,7 +186,7 @@ tag0_zerofills_null_ptr = (vs: [VariantDef], env: Env, fuel: i32) bool {
 // enum tag-0 payload), since zero-filling it nulls that pointer just the same.
 field_missing_nonnull_ptr = (fields: [Field], env: Env, inits: [FieldInit]) i32 {
     acc ::= 0
-    fields.loop((h, i, fl) {
+    fields.loop_at((i, fl) {
         acc = acc + (env.ty_zerofills_null_ptr(fl.ty, 64) && inits.inits_has(fl.name) == false).match ({
             true  => 1,
             false => 0,
@@ -200,9 +197,9 @@ field_missing_nonnull_ptr = (fields: [Field], env: Env, inits: [FieldInit]) i32 
 // A repeated initializer for the same field (`Box(v: 5, v: 9)`) is almost certainly a mistake.
 dup_init_errs = (inits: [FieldInit]) i32 {
     acc ::= 0
-    inits.loop((h, i, fi) {
+    inits.loop_at((i, fi) {
         earlier ::= false
-        inits.loop((h2, j, fj) {
+        inits.loop_at((j, fj) {
             earlier = (j < i && fj.name == fi.name).then({ true }, { earlier })
         })
         acc = acc + earlier.then({ 1 }, { 0 })
@@ -321,7 +318,7 @@ mkstruct_field_kills* = (
     out ::= seen
     env.env_is_struct(s.ty).then({
         fields = env.env_struct_fields(s.ty)
-        s.inits.loop((h, i, fi) {
+        s.inits.loop_at((i, fi) {
             nm = env.struct_field_move_src(fields, fi)
             (nm.is_empty() == false).then({
                 out = a.dead_kill(out, al, nm)
@@ -340,7 +337,7 @@ slicelit_elem_kills* = (
     items: [Expr],
 ) Ptr<DeadList> {
     out ::= seen
-    items.loop((h, i, it) {
+    items.loop_at((i, it) {
         nm = env.own_moved_var(it.addr())
         (nm.is_empty() == false).then({
             out = a.dead_kill(out, al, nm)
@@ -370,9 +367,7 @@ arg_var_name* = (c: CallData, i: i32) StringView {
 // position. NOT tracked: heap-store aliasing, escape through a global.
 ae_collect_arms = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
     out ::= seen
-    arms.loop((h, i, ar) {
-        out = a.ae_collect_expr(out, ar.body)
-    })
+    arms.loop_at((i, ar) { out = a.ae_collect_expr(out, ar.body) })
     out
 }
 ae_collect_expr = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadList> {
@@ -399,9 +394,7 @@ ae_collect_stmt = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadLis
 }
 ae_collect = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
     out ::= seen
-    body.loop((h, i, st) {
-        out = a.ae_collect_stmt(out, st)
-    })
+    body.loop_at((i, st) { out = a.ae_collect_stmt(out, st) })
     out
 }
 // the addr-of-local walk's context: the module (for the bounded interprocedural summaries) plus the two
@@ -491,9 +484,7 @@ ae_taint_step = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) Ptr<DeadList> {
 // descent — every statement list an expression carries gets the same threading as the top level.
 ae_taint_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) Ptr<DeadList> {
     cur ::= cx
-    body.loop((h, i, st) {
-        cur = cur.ae_taint(a.ae_taint_step(cur, st))
-    })
+    body.loop_at((i, st) { cur = cur.ae_taint(a.ae_taint_step(cur, st)) })
     cur.tainted
 }
 // a loop BINDS its element name, so iterating a sequence that carries a frame address makes the element
@@ -533,7 +524,7 @@ ae_taint_store = (a: MutPtr<Malloc>, cx: AeCtx, target: Ptr<Expr>, value: Ptr<Ex
 ae_stmts_val_escapes = (a: MutPtr<Malloc>, cx: AeCtx, stmts: [Stmt], hop: bool, tail: bool) bool {
     f ::= false
     cur ::= cx
-    stmts.loop((h, i, st) {
+    stmts.loop_at((i, st) {
         hit = st.match ({
             .Return(r)   => a.ae_escapes(cur, r, hop),
             .ExprStmt(e) => tail && i == stmts.len - 1 && a.ae_escapes(cur, e, hop),
@@ -675,7 +666,7 @@ ae_ret_call = (
             f = idx.idx_func(decls, c.fn)
             found ::= false
             (f.name == "" == false && f.params.len == c.args.len).then({
-                c.args.loop((h, i, ar) {
+                c.args.loop_at((i, ar) {
                     (a.ae_ret_yields(decls, idx, name, ar.addr(), depth - 1)
                         && a.ae_fn_returns_param(decls, idx, c.fn, i, depth - 1)).then({
                         found = true
@@ -747,7 +738,7 @@ ae_ret_stmtarms = (
     depth: i32,
 ) bool {
     f ::= false
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         hit = load(ar.body).match ({
             .Block(b) => a.ae_ret_body(decls, idx, b.stmts, name, depth),
             _         => false,
@@ -761,7 +752,7 @@ ae_call_escapes = (a: MutPtr<Malloc>, cx: AeCtx, c: CallData) bool {
     f = cx.idx.idx_func(cx.decls, c.fn)
     found ::= false
     (f.name == "" == false && f.params.len == c.args.len).then({
-        c.args.loop((h, i, ar) {
+        c.args.loop_at((i, ar) {
             (a.ae_escapes(cx, ar.addr(), true)
                 && a.ae_fn_returns_param(cx.decls, cx.idx, c.fn, i, consume_depth())).then({
                 found = true
@@ -785,7 +776,7 @@ ae_call_escapes = (a: MutPtr<Malloc>, cx: AeCtx, c: CallData) bool {
 ae_ptr_param_idx = (f: Func, rn: StringView) i32 {
     di ::= 0 - 1
     (rn == "" == false).then({
-        f.params.loop((h, i, p) {
+        f.params.loop_at((i, p) {
             (p.name == rn && is_ptr_ty(p.ty)).then({
                 di = i
             })
@@ -821,7 +812,7 @@ ae_store_scan = (
     depth: i32,
 ) i32 {
     dest ::= 0 - 1
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         di = st.match ({
             .Assign(x)   => a.ae_store_hit(decls, idx, f, sname, si, x.target, x.value, depth),
             .IndexSet(x) => a.ae_store_hit(decls, idx, f, sname, si, x.seq, x.value, depth),
@@ -879,7 +870,7 @@ ae_indirect_ty = (t: Ty) bool {
 // return path), and so are the loop-element / match-arm bindings that `ae_collect` never collects.
 ae_param_indirect = (params: [Param], rn: StringView) bool {
     f ::= false
-    params.loop((h, i, p) {
+    params.loop_at((i, p) {
         (p.name == rn && p.ty.ae_indirect_ty()).then({
             f = true
         })
@@ -955,7 +946,7 @@ ae_store_pos = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c) => {
             acc ::= 0
-            c.args.loop((h, si, ar) {
+            c.args.loop_at((si, ar) {
                 a.ae_escapes(cx, ar.addr(), true).then({
                     di = a.ae_fn_store_dest(cx.decls, cx.idx, c.fn, si, consume_depth())
                     (di >= 0 && di < c.args.len && cx.locals.ae_arg_outlives(c.args[di].addr())).then({
@@ -1022,9 +1013,7 @@ ae_kv_arm = (a: MutPtr<Malloc>, cx: AeCtx, body: Ptr<Expr>) i32 {
 }
 ae_kv_arms = (a: MutPtr<Malloc>, cx: AeCtx, arms: [ArmData]) i32 {
     acc ::= 0
-    arms.loop((h, i, ar) {
-        acc = acc.or(a.ae_kv_arm(cx, ar.body))
-    })
+    arms.loop_at((i, ar) { acc = acc.or(a.ae_kv_arm(cx, ar.body)) })
     acc
 }
 // the intrinsic-write check leads: a `store` sits in statement position, but it is just as valid nested
@@ -1074,7 +1063,7 @@ ae_kv_stmt = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) i32 {
 ae_kv_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
     acc ::= 0
     cur ::= cx
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         acc = acc.or(a.ae_kv_stmt(cur, st))
         cur = a.ae_step(cur, st)
     })
@@ -1083,7 +1072,7 @@ ae_kv_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
 ae_kv_body = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
     acc ::= 0
     cur ::= cx
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         acc = acc.or(a.ae_kv_stmt(cur, st))
         cur = a.ae_step(cur, st)
     })
@@ -1121,23 +1110,17 @@ sv_call_pos = (env: Env, c: CallData, mode: i32) i32 {
 }
 sv_args = (a: MutPtr<Malloc>, env: Env, args: [Expr], mode: i32) i32 {
     acc ::= 0
-    args.loop((h, i, ar) {
-        acc = acc.or(a.sv_expr(env, ar.addr(), mode))
-    })
+    args.loop_at((i, ar) { acc = acc.or(a.sv_expr(env, ar.addr(), mode)) })
     acc
 }
 sv_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData], mode: i32) i32 {
     acc ::= 0
-    arms.loop((h, i, ar) {
-        acc = acc.or(a.sv_expr(a.arm_env(env, subjty, ar), ar.body, mode))
-    })
+    arms.loop_at((i, ar) { acc = acc.or(a.sv_expr(a.arm_env(env, subjty, ar), ar.body, mode)) })
     acc
 }
 sv_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit], mode: i32) i32 {
     acc ::= 0
-    inits.loop((h, i, fi) {
-        acc = acc.or(a.sv_expr(env, fi.value, mode))
-    })
+    inits.loop_at((i, fi) { acc = acc.or(a.sv_expr(env, fi.value, mode)) })
     acc
 }
 sv_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, mode: i32) i32 {
@@ -1193,7 +1176,7 @@ sv_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, mode: i32) i32 {
 sv_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], mode: i32) i32 {
     acc ::= 0
     e ::= env
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         acc = acc.or(a.sv_stmt(e, st, mode))
         e = a.extend_env(e, st)
     })
@@ -1297,9 +1280,7 @@ sx_step = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
 // fresh binders (lambda params, loop idx/elem/handler, arm binds) shadow any same-named taint.
 sx_drop_params = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, ps: [Param]) Ptr<DeadList> {
     out ::= taint
-    ps.loop((h, i, p) {
-        out = a.dead_remove(out, p.name)
-    })
+    ps.loop_at((i, p) { out = a.dead_remove(out, p.name) })
     out
 }
 // a positioned anchor for a source expression (expr_pos has no MethodCall arm; this pass sees the
@@ -1326,9 +1307,7 @@ sx_payload_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
 }
 sx_inits_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
     acc ::= 0
-    inits.loop((h, i, fi) {
-        acc = acc.or(a.sx_payload_pos(taint, fi.value))
-    })
+    inits.loop_at((i, fi) { acc = acc.or(a.sx_payload_pos(taint, fi.value)) })
     acc
 }
 // pack an offending position under a rule kind (0 = clean stays 0 — kv_at alone would emit a bare kind).
@@ -1382,14 +1361,12 @@ sx_mcall_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, mc: MethodCallData) i3
 }
 sx_args_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, args: [Expr]) i32 {
     acc ::= 0
-    args.loop((h, i, ar) {
-        acc = acc.or(a.sx_expr_kind(taint, ar.addr()))
-    })
+    args.loop_at((i, ar) { acc = acc.or(a.sx_expr_kind(taint, ar.addr())) })
     acc
 }
 sx_arms_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, arms: [ArmData]) i32 {
     acc ::= 0
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         t2 = is_empty(ar.bind).then({ taint }, { a.dead_remove(taint, ar.bind) })
         acc = acc.or(a.sx_expr_kind(t2, ar.body))
     })
@@ -1397,9 +1374,7 @@ sx_arms_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, arms: [ArmData]) i32 {
 }
 sx_inits_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
     acc ::= 0
-    inits.loop((h, i, fi) {
-        acc = acc.or(a.sx_expr_kind(taint, fi.value))
-    })
+    inits.loop_at((i, fi) { acc = acc.or(a.sx_expr_kind(taint, fi.value)) })
     acc
 }
 sx_expr_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
@@ -1449,7 +1424,7 @@ sx_stmt_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) i32 {
 sx_body_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, body: [Stmt]) i32 {
     acc ::= 0
     t ::= taint
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         acc = acc.or(a.sx_stmt_kind(t, st))
         t = a.sx_step(t, st)
     })

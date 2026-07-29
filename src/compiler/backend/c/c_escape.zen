@@ -30,6 +30,7 @@
 { acquire_or_die } = compiler.genc
 { Malloc } = std.mem.alloc
 { Map, of } = std.collections.map
+{ loop_at } = std.core.count
 // One function's borrowed-parameter set: bit `i` is set when parameter `i` is provably borrowed.
 SlxMask*: {
     fn: StringView,
@@ -106,7 +107,7 @@ slx_call_retains = (
         true  => c.args.slx_mentions_args(nm),
         false => {
             r ::= c.fn == nm
-            c.args.loop((h, j, arg) {
+            c.args.loop_at((j, arg) {
                 r = r
                     || arg.addr().slx_is_var(nm).match ({
                         true  => a.slx_param_retains(decls, fidx, c.fn, j, depth - 1),
@@ -215,7 +216,7 @@ slx_has_slice_param = (f: Func) bool { f.params.slice_any((p) { p.ty.slx_is_slic
 slx_fn_mask = (a: MutPtr<Malloc>, decls: [Decl], fidx: Map<i64>, f: Func) i64 {
     mask ::= to_i64(0)
     bit ::= to_i64(1)
-    f.params.loop((h, j, p) {
+    f.params.loop_at((j, p) {
         (bit > 0
             && p.ty.slx_is_slice()
             && a.slx_body_retains(decls, fidx, f.body, p.name, slx_depth()) == false).then({
@@ -227,7 +228,7 @@ slx_fn_mask = (a: MutPtr<Malloc>, decls: [Decl], fidx: Map<i64>, f: Func) i64 {
 }
 slx_fn_index = (a: MutPtr<Malloc>, decls: [Decl]) Map<i64> {
     m ::= of(a, "", to_i64(0) - 1).expect("c_escape: fn-index alloc")
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DFunc(f) => {
                 m = m.put(a, f.name, to_i64(i)).expect("c_escape: fn-index alloc")
@@ -239,7 +240,7 @@ slx_fn_index = (a: MutPtr<Malloc>, decls: [Decl]) Map<i64> {
 }
 slx_mask_count = (decls: [Decl]) i64 {
     n ::= to_i64(0)
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DFunc(f) => f.slx_has_slice_param().then({
                 n = n + 1
@@ -262,7 +263,7 @@ slx_classify* = (a: MutPtr<Malloc>, decls: [Decl]) void {
             xs ::= a.slx_mask_buf(n)
             fidx = a.slx_fn_index(decls)
             k ::= to_i64(0)
-            decls.loop((h, i, d) {
+            decls.loop_at((i, d) {
                 d.match ({
                     .DFunc(f) => f.slx_has_slice_param().then({
                         xs[k] = SlxMask(

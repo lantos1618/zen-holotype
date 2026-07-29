@@ -25,6 +25,7 @@
 { Result, Opt, expect } = std.core.result
 { len, view, starts_with, trim_prefix, find, substr_in, nbuf } = std.text.str
 { Sb, sb } = std.text.sb
+{ loop_at } = std.core.count
 // ── spec records ─────────────────────────────────────────────────────────────
 // A `short` of 0 means "no short form". `name` is the long name WITHOUT the leading `--`.
 FlagSpec: {
@@ -63,27 +64,21 @@ ap_none = () Opt<StringView> { .None }
 ap_add<T> = (a: Allocator, xs: [T], x: T) [T] {
     n = xs.len
     out :: [T] = slice(a.try_acquire((n + 1) * sizeof(T)).expect("std.argparse: out of memory"), n + 1)
-    xs.loop((h, i, e) {
-        out[i] = e
-    })
+    xs.loop_at((i, e) { out[i] = e })
     out[n] = x
     out
 }
 // an all-false `[bool]` of length `n` (parallel to the flag specs).
 ap_bools = (a: Allocator, n: i64) [bool] {
     out :: [bool] = a.nbuf(false, n)
-    out.loop((h, i, e) {
-        out[i] = false
-    })
+    out.loop_at((i, e) { out[i] = false })
     out
 }
 // an all-`.None` `[Opt<str>]` of length `n` (parallel to the option specs).
 ap_opts = (a: Allocator, n: i64) [Opt<StringView>] {
     seed: Opt<StringView> = .None
     out :: [Opt<StringView>] = a.nbuf(seed, n)
-    out.loop((h, i, e) {
-        out[i] = seed
-    })
+    out.loop_at((i, e) { out[i] = seed })
     out
 }
 // ── the parser spec ──────────────────────────────────────────────────────────
@@ -198,7 +193,7 @@ Parser*: {
     req_pos_count = (p: Parser) i64 {
         // number of required positionals (they are satisfied left-to-right).
         c :: i64 = 0
-        p.poss.loop((h, i, ps) {
+        p.poss.loop_at((i, ps) {
             ps.req.then({
                 c = c + 1
             })
@@ -218,7 +213,7 @@ Parser*: {
             .s("usage: ")
             .s(p.prog)
             .s(" [options]")
-        p.poss.loop((h, i, ps) {
+        p.poss.loop_at((i, ps) {
             b = b
                 .s(" ")
                 .s(ps.req.then({ "<" }, { "[" }))
@@ -226,7 +221,7 @@ Parser*: {
                 .s(ps.req.then({ ">" }, { "]" }))
         })
         b = b.ch('\n')
-        p.flags.loop((h, i, f) {
+        p.flags.loop_at((i, f) {
             b = b
                 .s("  --")
                 .s(f.name)
@@ -234,7 +229,7 @@ Parser*: {
                 .s(f.help)
                 .ch('\n')
         })
-        p.opts.loop((h, i, o) {
+        p.opts.loop_at((i, o) {
             b = b
                 .s("  --")
                 .s(o.name)

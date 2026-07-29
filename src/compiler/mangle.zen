@@ -14,6 +14,7 @@
 { k_mut_ptr, k_raw_ptr, gstr_string, gstr_append, gstr_finish, write_str, finish_buf, acquire,
   acquire_or_die, acquire_or_die } = compiler.genc
 { dec_digit } = compiler.astops
+{ loop_at } = std.core.count
 // the monomorphized C name of a generic instance: `Box<i32>` -> `Box_i32`, `Vec<Ptr<u8>>` ->
 // `Vec_ptr_u8`. Pointer KINDS get distinct fragments (`rawptr_`/`ptr_`/`mutptr_`) even though all
 // still lower to `T*`; the name is also the generic-instance identity used by mono/check dedup.
@@ -59,9 +60,7 @@ mangle_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
 // `__fnt_AppState_i32_r_AppState`. The matching `typedef Ret (*name)(Args);` is emitted by c_emit.
 fnt_cname* = (a: MutPtr<Malloc>, ft: FnTData) StringView {
     s ::= a.gstr_string(48).gstr_append(a, "__fnt")
-    ft.params.loop((h, i, p) {
-        s = s.gstr_append(a, "_").mangle_ty(a, p)
-    })
+    ft.params.loop_at((i, p) { s = s.gstr_append(a, "_").mangle_ty(a, p) })
     s.gstr_append(a, "_r_").mangle_ty(a, load(ft.ret)).gstr_finish(a)
 }
 // `base<args…>` -> `base_<arg0>_<arg1>…`. Built by appending `mangle_ty` per arg into a String, so the
@@ -69,9 +68,7 @@ fnt_cname* = (a: MutPtr<Malloc>, ft: FnTData) StringView {
 // measure/write copies to desync (the seed fixpoint would surface any mismatch as a re-keyed symbol).
 mangle_str_in* = (a: MutPtr<Malloc>, base: StringView, args: [Ty]) StringView {
     out ::= a.gstr_string(base.view().len + 16).gstr_append(a, base)
-    args.loop((h, i, t) {
-        out = out.gstr_append(a, "_").mangle_ty(a, t)
-    })
+    args.loop_at((i, t) { out = out.gstr_append(a, "_").mangle_ty(a, t) })
     out.gstr_finish(a)
 }
 // Semantic instance key for recursive/hidden-return generic FUNCTIONS. Aggregate ABI names may share
@@ -92,27 +89,21 @@ mangle_semantic_ty = (s: String, a: MutPtr<Malloc>, t: Ty) String {
         .Named(n)      => s.gstr_append(a, n),
         .Generic(g)    => {
             out ::= s.gstr_append(a, g.name)
-            g.args.loop((h, i, x) {
-                out = out.gstr_append(a, "_").mangle_semantic_ty(a, x)
-            })
+            g.args.loop_at((i, x) { out = out.gstr_append(a, "_").mangle_semantic_ty(a, x) })
             out
         },
         .Ptr(pd)       => s.gstr_append(a, "ptr_").mangle_semantic_ty(a, load(pd.pointee)),
         .Slice(e)      => s.slice_mangle_prefix(a, e.kind).mangle_semantic_ty(a, load(e.pointee)),
         .FnT(ft)       => {
             out ::= s.gstr_append(a, "fn")
-            ft.params.loop((h, i, x) {
-                out = out.gstr_append(a, "_").mangle_semantic_ty(a, x)
-            })
+            ft.params.loop_at((i, x) { out = out.gstr_append(a, "_").mangle_semantic_ty(a, x) })
             out.gstr_append(a, "_r_").mangle_semantic_ty(a, load(ft.ret))
         },
     })
 }
 mangle_semantic_in* = (a: MutPtr<Malloc>, base: StringView, args: [Ty]) StringView {
     out ::= a.gstr_string(64).gstr_append(a, base)
-    args.loop((h, i, x) {
-        out = out.gstr_append(a, "_").mangle_semantic_ty(a, x)
-    })
+    args.loop_at((i, x) { out = out.gstr_append(a, "_").mangle_semantic_ty(a, x) })
     out.gstr_finish(a)
 }
 // `ns.Type` — a dotted qualified name. The FAITHFUL parser (fmt) keeps a namespace-qualified struct
@@ -133,14 +124,12 @@ dotted_name_in* = (a: MutPtr<Malloc>, ns: StringView, name: StringView) StringVi
 // position) is hoisted into the module decl list by the parser.
 anon_fields_len = (fields: [Field]) i64 {
     n ::= 0
-    fields.loop((h, i, f) {
-        n = n + 1 + f.name.view().len
-    })    // 1 for the '_' separator
+    fields.loop_at((i, f) { n = n + 1 + f.name.view().len })    // 1 for the '_' separator
     n
 }
 anon_write_fields = (dst: RawPtr<u8>, at: i64, fields: [Field]) i64 {
     out ::= at
-    fields.loop((h, i, f) {
+    fields.loop_at((i, f) {
         out = dst.write_str(out, "_")
         out = dst.write_str(out, f.name)
     })

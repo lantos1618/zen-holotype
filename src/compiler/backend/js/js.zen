@@ -41,6 +41,7 @@
 { js_func, js_global } = compiler.backend.js.js_decl
 { js_size_set } = compiler.backend.js.js_size
 { js_copy_defs } = compiler.backend.js.js_copy
+{ loop_at } = std.core.count
 // does the module define a `main`? then the emitted JS invokes it.
 js_has_main = (decls: [Decl]) bool {
     decls.slice_any((d) {
@@ -56,15 +57,13 @@ genJsModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
     decls = a.monomorphize(raw)
     js_size_set(decls)    // `sizeof(T)` resolves to a literal against THIS decl list
     s ::= a.gstr_string(4096).gstr_append(a, "\"use strict\";\n").js_copy_defs(a)
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         s = d.match ({
             .DGlobal(g) => s.js_global(a, g),
             _           => s,
         })
     })
-    decls.loop((h, i, d) {
-        s = s.js_decl_fn(a, d)
-    })
+    decls.loop_at((i, d) { s = s.js_decl_fn(a, d) })
     // `main`'s value IS the process exit status on the C target, so it must be here too: the bare
     // `zen_main();` this replaces THREW IT AWAY, so node exited 0 for every program whose verdict is
     // its exit code (the release_slice/actor fixtures print nothing and return 0-or-1) — the same

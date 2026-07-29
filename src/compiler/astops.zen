@@ -22,6 +22,7 @@
 { String } = std.text.string
 { Malloc } = std.mem.alloc
 { expr_fold_children } = compiler.ast.expr_children
+{ loop_at } = std.core.count
 // a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
 // (compiler.check splices it), never emitted as a C function — so genModule skips it.
 TyQuery*: {
@@ -43,17 +44,13 @@ Ty.impl(TyQuery, {
 // struct-field lookup behind generic field reads, ownership's struct-literal gate and arg fitting.
 field_in* = (fields: [Field], fname: StringView) Ty {
     found ::= tvoid()
-    fields.loop((h, i, fl) {
-        found = (fl.name == fname).then({ fl.ty }, { found })
-    })
+    fields.loop_at((i, fl) { found = (fl.name == fname).then({ fl.ty }, { found }) })
     found
 }
 // the number of elements in an AST slice — the C and JS backends both size a slice literal with it.
 slice_count* = (items: [Expr]) i32 {
     n ::= 0
-    items.loop((h, i, it) {
-        n = n + 1
-    })
+    items.loop_at((i, it) { n = n + 1 })
     n
 }
 // is `name` one of `ps`? the shared param/field-name membership test — every "does this fn/impl
@@ -62,9 +59,7 @@ slice_count* = (items: [Expr]) i32 {
 // parser's implicit-tparam pass, and the formatter's export/tparam markers.
 param_names_has* = (ps: [Param], name: StringView) bool {
     found ::= false
-    ps.loop((h, i, p) {
-        found = found || p.name == name
-    })
+    ps.loop_at((i, p) { found = found || p.name == name })
     found
 }
 // the narrow int/float widths arrive as Named("u32") etc. (no Ty variant), but they ARE valid
@@ -104,9 +99,7 @@ lam_stmt_body* = (body: [Stmt]) [Stmt] {
 }
 has_fnt_param* = (ps: [Param]) bool {
     found ::= false
-    ps.loop((h, i, p) {
-        found = p.ty.is_fnt().then({ true }, { found })
-    })
+    ps.loop_at((i, p) { found = p.ty.is_fnt().then({ true }, { found }) })
     found
 }
 // a TEMPLATE: a fn inlined/monomorphized per call site — has an FnT param (a lambda to splice) or
@@ -133,9 +126,7 @@ StructDeclQuery*: {
 StructDecl.impl(StructDeclQuery, {
     struct_is_trait = (sd: StructDecl) bool {
         found ::= false
-        sd.fields.loop((h, i, f) {
-            found = f.ty.is_fnt().then({ true }, { found })
-        })
+        sd.fields.loop_at((i, f) { found = f.ty.is_fnt().then({ true }, { found }) })
         found
     }
 })
@@ -200,9 +191,7 @@ gstr_int* = (out: String, a: MutPtr<Malloc>, n: i64) String {
 // blocks across the frontend. The alloc param is the concrete `MutPtr<Malloc>` cbuf itself takes.
 map_slice*<T, U> = (a: MutPtr<Malloc>, xs: [T], f: (T) U) [U] {
     buf ::= cbuf<U>(a, xs.len)
-    xs.loop((h, i, x) {
-        buf[i] = f(x)
-    })
+    xs.loop_at((i, x) { buf[i] = f(x) })
     buf
 }
 // slice_any: the pervasive OR-fold — true iff some element satisfies p. One generic replaces ~50
@@ -210,9 +199,7 @@ map_slice*<T, U> = (a: MutPtr<Malloc>, xs: [T], f: (T) U) [U] {
 // visit order and count match the inlined form exactly.
 slice_any*<T> = (xs: [T], p: (T) bool) bool {
     f ::= false
-    xs.loop((h, i, y) {
-        f = p(y).then({ true }, { f })
-    })
+    xs.loop_at((i, y) { f = p(y).then({ true }, { f }) })
     f
 }
 // ── leftmost source position of an Expr / Stmt (leftmost known byte offset; 0 = unknown) ─────────
@@ -287,7 +274,7 @@ wr_lam_writes_value* = (e: Expr) bool {
     e.match ({
         .Lambda(la) => {
             f ::= false
-            la.params.loop((h, i, p) {
+            la.params.loop_at((i, p) {
                 f = (i >= 1 && la.body.wr_writes_name(p.name)).then({ true }, { f })
             })
             f
@@ -387,7 +374,7 @@ mi_stmt = (st: Stmt, scope: [Stmt]) i32 {
     })
 }
 mi_body* = (body: [Stmt]) i32 {
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         st.match ({
             .Let(l) => {
                 body[i] = slett_atm(l.name, l.ty, l.value, l.pos, body.wr_writes_name(l.name))
@@ -400,7 +387,7 @@ mi_body* = (body: [Stmt]) i32 {
 }
 mi_global_written = (decls: [Decl], nm: StringView) bool {
     hit ::= false
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DFunc(f) => f.body.wr_writes_name(nm).then({
                 hit = true
@@ -411,13 +398,13 @@ mi_global_written = (decls: [Decl], nm: StringView) bool {
     hit
 }
 mut_infer_decls* = (decls: [Decl]) void {
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DFunc(f) => f.body.mi_body(),
             _         => 0,
         })
     })
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DGlobal(g) => (g.alias == false).then({
                 decls[i] = dglobal_full(g.name, g.ty, g.init, g.pos, g.tl, false, decls.mi_global_written(g.name))
@@ -476,9 +463,7 @@ dbn = (a: MutPtr<Malloc>, nm: StringView, t: Ptr<DbNames>) Ptr<DbNames> {
 }
 dbn_params = (a: MutPtr<Malloc>, ps: [Param], t: Ptr<DbNames>) Ptr<DbNames> {
     out ::= t
-    ps.loop((h, i, p) {
-        out = a.dbn(p.name, out)
-    })
+    ps.loop_at((i, p) { out = a.dbn(p.name, out) })
     out
 }
 dbn_has = (sc: Ptr<DbNames>, nm: StringView) bool {
@@ -501,9 +486,7 @@ db_expr = (a: MutPtr<Malloc>, e: Ptr<Expr>, sc: Ptr<DbNames>, gs: [StringView]) 
         .Lambda(lm) => a.db_body(lm.body, a.dbn_params(lm.params, sc), gs),
         .Match(m)   => {
             acc ::= a.db_expr(m.subj, sc, gs)
-            m.arms.loop((h, i, ar) {
-                acc = acc.db_or(a.db_expr(ar.body, a.dbn(ar.bind, sc), gs))
-            })
+            m.arms.loop_at((i, ar) { acc = acc.db_or(a.db_expr(ar.body, a.dbn(ar.bind, sc), gs)) })
             acc
         },
         _           => 0.expr_fold_children(e, (acc, ch) { a.db_expr(ch, sc, gs) }, (acc, b) {
@@ -537,7 +520,7 @@ db_stmt_name = (st: Stmt) StringView {
 }
 db_body* = (a: MutPtr<Malloc>, body: [Stmt], sc0: Ptr<DbNames>, gs: [StringView]) i32 {
     sc ::= sc0
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         st.match ({
             .Assign(x) => {
                 nm = load(x.target).db_target_name()
@@ -566,14 +549,14 @@ db_global_name = (d: Decl) StringView {
 }
 db_global_names = (a: MutPtr<Malloc>, decls: [Decl]) [StringView] {
     n ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.db_assignable_global().then({
             n = n + 1
         })
     })
     buf ::= cbuf<StringView>(a, to_i64(n))
     k ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.db_assignable_global().then({
             buf[k] = d.db_global_name()
             k = k + 1
@@ -583,7 +566,7 @@ db_global_names = (a: MutPtr<Malloc>, decls: [Decl]) [StringView] {
 }
 declare_bare_assigns* = (a: MutPtr<Malloc>, decls: [Decl]) void {
     gs = a.db_global_names(decls)
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DFunc(f) => a.db_body(f.body, a.dbn_params(f.params, a.dbn_nil()), gs),
             _         => 0,
