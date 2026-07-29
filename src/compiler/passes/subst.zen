@@ -8,7 +8,7 @@
 { mangle_str_in } = compiler.mangle
 { DeclIndex, VList, add_fnt_param, add_lambda_arg, add_subst_arg, add_subst_param, bind_fnret,
   callee_subst_name, blockify, cat_stmts, fnret_of, gen_variant_payload, inline_lambda, is_void_ty,
-  enum_name, let_value_lambda, local_name_at, no_stmts, param_index, recall, ref_pos, vcons } = compiler.check
+  enum_name, let_value_lambda, local_name_at, no_stmts, param_index, pbuf, recall, ref_pos, vcons } = compiler.check
 { light_ty } = compiler.check_infer
 { cs_or, maybe_template } = compiler.check_inline
 { Malloc } = std.mem.alloc
@@ -603,15 +603,22 @@ xform_lambda = (
     fargs: [Expr],
     env: Ptr<VList>,
 ) Ptr<Expr> {
+    // RENAME the lambda's own params, exactly as `.Loop` renames idx/elem/h. A lambda is the only
+    // binder xform used to leave spelled as written, so a template's `(n) { … body(n) … }` re-bound
+    // any `n` free in the SPLICED argument — a caller PARAMETER named `n` (a caller local is already
+    // renamed) silently read the lambda's `n` instead. That is `repeat_while` reading 0 for 5.
     ps := params
     xs := fargs
+    nps := a.pbuf(lm.params.len)
     lm.params.loop((h, i, p) {
+        nm := a.local_name_at(p.name, env, params.len + to_i64(i))
+        nps[i] = param(nm, p.ty)
         ps = a.add_subst_param(ps, p.name)
-        xs = a.add_subst_arg(xs, p.name)
+        xs = a.add_subst_arg(xs, nm)
     })
     // bind the lambda's OWN return type (possibly void) so an enclosing fn's fnret never leaks
     // into the lambda body's `return`s.
-    a.cenode(lam_r(lm.params, a.xform_body(decls, idx, lm.body, ps, xs, a.bind_fnret(env, lm.ret), tvoid()), lm.ret))
+    a.cenode(lam_r(nps, a.xform_body(decls, idx, lm.body, ps, xs, a.bind_fnret(env, lm.ret), tvoid()), lm.ret))
 }
 xform_expr = (
     a: MutPtr<Malloc>,
