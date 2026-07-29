@@ -1522,6 +1522,80 @@ harness_modules_run* = () i32 {
             entry: "p.zen",
             want: 5,
         ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "vlib.zen",
+                    src: "E*: Some(i64) | None\nSome* = (n: i64) i64 { n * 10 }\nmk* = (n: i64) E { E.Some(n) }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "L = vlib\nmain = () i32 { L.mk(3).match ({ .Some(v) => v.to_i32() + L.Some(1).to_i32(), .None => 0 }) }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 13,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "optmod.zen",
+                    src: "Opt*: Some(i64) | None\nNone* = () i64 { 4 }\nmk* = (n: i64) Opt { Opt.Some(n) }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "L = optmod\nmain = () i32 { L.mk(3).match ({ .Some(v) => v.to_i32() + L.None().to_i32(), .None => 0 }) }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 7,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "tickmod.zen",
+                    src: "E*: Tick | Tock\nTock* = () i64 { 2 }\nmk* = () E { E.Tock }\nnum* = (e: E) i64 { e.match ({ .Tick => 1, .Tock => 2 }) }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "L = tickmod\nmain = () i32 { (L.num(L.mk()) + L.Tock()).to_i32() }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 4,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "genmod.zen",
+                    src: "Opt*<T>: Some(T) | None\nSome* = (n: i64) i64 { n }\nmk*<T> = (v: T) Opt<T> { Opt<T>.Some(v) }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "L = genmod\nmain = () i32 { L.mk<i32>(8).match ({ .Some(v) => v, .None => 0 }) }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 8,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "ety.zen",
+                    src: "E*: Some(i64) | None\n",
+                ),
+                ModFile(
+                    name: "elib.zen",
+                    src: "{ E } = ety\nSome* = (n: i64) i64 { n * 10 }\nmk* = (n: i64) E { E.Some(n) }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "L = elib\nmain = () i32 { L.mk(3).match ({ .Some(v) => v.to_i32(), .None => 0 }) }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 3,
+        ),
     ])
     // …and the guard must not over-reach: a `{` after a FIELD LABEL is a block VALUE, so the typed
     // local inside it is a binder and still gets prefixed (`S: {` type bodies are the other way round).
@@ -1532,6 +1606,13 @@ harness_modules_run* = () i32 {
     // The other half of the rule: field DECL (`{ len: i64 }`) and label (`S(len: n)`) keep their bare
     // names, while the BINDERS that share the name — the `len` param, the typed local `n`, the typed
     // global `g` — must still be prefixed exactly like the uses that follow them.
+    // VARIANTS ARE NOT NAMES EITHER — both faces. A module that exports a fn named like one of its own
+    // enum's VARIANTS (`Some*` beside `E: Some(i64) | None`) had the variant renamed at its USE
+    // (`E.Some(n)`), and a variant sharing a name with an export (`| None` beside `None*`) had the
+    // DECLARATION renamed: either way the consumer's `.Some(v)` arm no longer covered the enum
+    // (`does not cover variant .L__Some`) and the error pointed into the aliased module, which checks
+    // clean standalone. Payload-less variants, a GENERIC enum, and an enum reached through a
+    // by-name import (so the receiver's type-ness is only knowable from another module) all pin it.
     // Same rewrite, shadow-rename path: a user's top-level `len` collides with an UNIMPORTED
     // transitive std export and is renamed `zshadow__len` — which used to rename the struct field too.
     // ONE impl block reached via TWO import paths (by-name + namespace alias): the alias emission
