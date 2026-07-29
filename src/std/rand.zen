@@ -21,7 +21,7 @@
 // are top-level names — import them (`{ seed, choice } = std.rand`, or `rand = std.rand` and
 // `rand.seed(n)`) and rename on your side if a name collides.
 { Opt } = std.core.result    // choice returns Opt<T> (.Some element / .None when the slice is empty)
-{ times } = std.core.count    // the count loop — `@while` belongs in the primitive, not here
+{ times, step_while } = std.core.count    // the loop vocabulary — `@while` lives in the primitive, not here
 // splitmix64 constants: the golden-ratio increment (0x9e3779b97f4a7c15) and two avalanche multipliers.
 SM_GAMMA := 11400714819323198485    // 0x9e3779b97f4a7c15
 SM_MIX1 := 13787848793156543929    // 0xbf58476d1ce4e5b9
@@ -82,11 +82,8 @@ Rng*: {
                 zero: u64 := 0
                 t := (zero - s) % s    // 2^64 mod s: the count of low residues to reject
                 // NOT a count loop: REJECTION sampling has no trip count — it draws until a value lands
-                // outside the biased residues. This is one of the `@while` sites that stays.
-                x := r.next_u64()
-                @while (x < t) {
-                    x = r.next_u64()
-                }
+                // outside the biased residues. The cursor IS the draw; `next` is simply the next draw.
+                x := r.next_u64().step_while((v) { v < t }, (v) { r.next_u64() })
                 w: i64 := x % s
                 lo + w
             },
@@ -158,19 +155,21 @@ shuffle*<T> = (r: MutPtr<Rng>, xs: [T]) void {
 // emitting its bytes little-endian, so it is ~8x cheaper than a draw per byte. Advances `r`.
 fill_bytes* = (r: MutPtr<Rng>, dst: [u8]) void {
     n := dst.len
-    // the OUTER loop is CURSOR-driven, not count-driven: one pass writes up to 8 bytes, so `i` advances a
-    // variable amount per step and no trip count exists to hand `times`. It stays `@while`. The inner
-    // "8 bytes per draw" IS a count, so it is a `times`.
-    i := 0
-    @while (i < n) {
+    // the OUTER loop is CURSOR-driven, not count-driven: one pass writes up to 8 bytes, so the cursor
+    // advances a variable amount per step and no trip count exists to hand `times` — that is exactly
+    // `step_while`. The inner "8 bytes per draw" IS a count, so it is a `times`.
+    zero: i64 := 0
+    zero.step_while((i) { i < n }, (i) {
         w := r.next_u64()
+        k := i
         8.times((byte) {
-            (i < n).then({
+            (k < n).then({
                 b: i64 := w & 255
-                dst[i] = to_u8(b)
+                dst[k] = to_u8(b)
                 w = w >> 8
-                i = i + 1
+                k = k + 1
             })
         })
-    }
+        k
+    })
 }

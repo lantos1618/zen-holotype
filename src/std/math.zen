@@ -19,7 +19,7 @@
 // The float f-prefixed helpers (`fabs`/`fmin`/`fmax`/`fpow`/`fsign`) deliberately dodge common identifiers.
 //
 // These integer helpers deliberately use i64; the language/backend also support the other widths.
-{ times } = std.core.count    // the count loop — `@while` belongs in the primitive, not here
+{ times, step_while } = std.core.count    // the loop vocabulary — `@while` lives in the primitive, not here
 // ── constants ───────────────────────────────────────────────────────────────────────────────────────
 PI* := 3.141592653589793    // π
 E* := 2.718281828459045    // Euler's number e
@@ -68,15 +68,14 @@ ipow* = (base: i64, exp: i64) i64 {
             r := 1
             b := base
             // NOT a count loop: `e` HALVES per step, so the trip count is log2(exp) and the step is not
-            // 1 — `times`/`upto` cannot express it. This is one of the `@while` sites that stays.
-            e := exp
-            @while (e > 0) {
+            // 1 — `times`/`upto` cannot express it. `step_while` carries the halving cursor.
+            exp.step_while((e) { e > 0 }, (e) {
                 (e % 2 == 1).then({
                     r = r * b
                 })
                 b = b * b
-                e = e / 2
-            }
+                e / 2
+            })
             r
         },
     })
@@ -89,12 +88,11 @@ isqrt* = (n: i64) i64 {
         false => {
             x := n
             // NOT a count loop: it runs until Newton's iterate stops improving — no trip count exists to
-            // hand `times`. This is one of the `@while` sites that stays.
-            y := (x + 1) / 2
-            @while (y < x) {
+            // hand `times`. The cursor is the iterate `y`; `x` lags one step behind it.
+            ((n + 1) / 2).step_while((y) { y < x }, (y) {
                 x = y
-                y = (x + n / x) / 2
-            }
+                (x + n / x) / 2
+            })
             x
         },
     })
