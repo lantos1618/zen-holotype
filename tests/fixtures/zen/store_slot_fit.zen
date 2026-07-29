@@ -1,0 +1,44 @@
+// A REJECT fixture: `store(p, v)` IS `*p = v`, so it answers to the same `assign-fit` rule the plain
+// assignment does. Before this, `store` was the one write in the language that performed NO fit check —
+// `store(x.addr(), 5000000000)` silently truncated an i64 into an i32 slot and `zen check` said ok.
+// The rule keys on the SLOT's type (the pointer's pointee), not on the verb: an `offset`/alias hop that
+// keeps the pointer type keeps the check, and both call spellings (`store(p, v)` and `p.store(v)`) are
+// the same AST node by the time validation runs.
+// Gated by the `store_obeys_assign_fit` shell case in tests/harness_build.zen, which pins the exact
+// diagnostics and the accepted counterparts. This file NEVER compiles.
+// the shape that truncated: an i64 into an i32 slot
+store_narrowing = (big: i64) i32 {
+    x ::= 0
+    store(x.addr(), big)
+    x
+}
+// the same through an explicitly-typed pointer local
+store_narrowing_alias = (big: i64) i32 {
+    x ::= 0
+    p ::= x.addr()
+    store(p, big)
+    x
+}
+// the UFCS spelling is the same node
+store_narrowing_ufcs = (big: i64) i32 {
+    x ::= 0
+    x.addr().store(big)
+    x
+}
+// a float into an integer slot: no implicit conversion exists for `x = f`, so none exists here
+store_float_into_int = (f: f64) i32 {
+    x ::= 0
+    store(x.addr(), f)
+    x
+}
+// a struct into a scalar slot
+Pair: {
+    a: i32,
+    b: i32,
+}
+store_struct_into_int = (pr: Pair) i32 {
+    x ::= 0
+    store(x.addr(), pr)
+    x
+}
+main = () i32 { store_narrowing(5000000000) }

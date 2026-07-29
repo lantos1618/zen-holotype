@@ -22,8 +22,8 @@
   KDUPFN, KDUPVARIANT, KESCAPE, KEXHAUST, KFALLTHROUGH, KINDEX, KINFINITETYPE, KLAMBDAVALUE, KLEAK,
   KDUPLITARM, KDUPMATCHARM, KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT,
   KNOCOROUTINE, KNOIF, KNOTCALLABLE, KNOTERNARY, KNULLDEREF, KOPERAND, KOWNERSHIP, KRETURNFIT,
-  KSTRUCTFIELD, KTARGARITY, KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN, desc_or,
-  diagnostic_hint, diagnostic_kind_name, diagnostic_message, diagnostic_span_width,
+  KSLICEELEM, KSTRUCTFIELD, KTARGARITY, KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN,
+  desc_or, diagnostic_hint, diagnostic_kind_name, diagnostic_message, diagnostic_span_width,
   name_errors_body, name_errors_expr } = compiler.validate.diag
 { AliasList, DeadList, alias_nil, alias_step, count_loop_freed, dead_cons, dead_has, dead_nil,
   escape_step, expr_escapes, is_default_owner_method, is_owner_base, leak_alias_value,
@@ -789,16 +789,19 @@ kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
             .kv_check_expr_kind(l.value)
             .or(env.kv_let_fit_kind(l))
             .or(env.kv_let_needannot_kind(l))
-            .or(env.kv_value_void_arm_kind(l.ty, l.value)),
+            .or(env.kv_value_void_arm_kind(l.ty, l.value))
+            .or(env.kv_slice_elem_kind(l.ty, l.value)),
         .Assign(x)   => env
             .kv_check_expr_kind(x.target)
             .or(env.kv_check_expr_kind(x.value))
             .or(env.kv_assign_kind(x))
-            .or(env.kv_value_void_arm_kind(env.infer_expr(x.target), x.value)),
+            .or(env.kv_value_void_arm_kind(env.infer_expr(x.target), x.value))
+            .or(env.kv_slice_elem_kind(env.infer_expr(x.target), x.value)),
         .Return(r)   => env
             .kv_check_expr_kind(r)
             .or(env.kv_ret_kind(r))
-            .or(env.kv_value_void_arm_kind(env.exp, r)),
+            .or(env.kv_value_void_arm_kind(env.exp, r))
+            .or(env.kv_slice_elem_kind(env.exp, r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
         .If(f)       => env.kv_check_expr_kind(f.c),
         .While(w)    => env.kv_check_expr_kind(w.c),
@@ -807,7 +810,8 @@ kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
             .or(env.kv_check_expr_kind(x.idx))
             .or(env.kv_check_expr_kind(x.value))
             .or(env.kv_idxset_kind(x))
-            .or(env.kv_value_void_arm_kind(x.elem, x.value)),
+            .or(env.kv_value_void_arm_kind(x.elem, x.value))
+            .or(env.kv_slice_elem_kind(x.elem, x.value)),
     })
 }
 kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
@@ -851,6 +855,7 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
             .kv_check_call_kind(c)
             .kv_at(c.pos)
             .or(env.store_mut_kind(c))
+            .or(env.store_fit_err(c).kv_one(KASSIGNFIT()).kv_at(c.pos))
             .or(env.null_deref_kind(c))
             .or(env.assert_nonnull_kind(c))
             .or(env.call_void_arm_errs(c).kv_one(KARMVOID()).kv_at(c.pos))
@@ -913,6 +918,11 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         _               => 0,
     })
 }
+// the slice-element-width check, kind-flavoured: the caret lands on the `slice` call that made the
+// claim, not on the annotation that received it.
+kv_slice_elem_kind = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
+    env.slice_elem_err(want, e).kv_one(KSLICEELEM()).kv_at(load(e).expr_pos())
+}
 kv_ret_kind = (env: Env, r: Ptr<Expr>) i32 {
     env.ret_err(r).kv_one(KRETURNFIT()).kv_at(load(r).expr_pos())
 }
@@ -945,16 +955,19 @@ kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
             .kv_check_expr_kind(l.value)
             .or(env.kv_let_fit_kind(l))
             .or(env.kv_let_needannot_kind(l))
-            .or(env.kv_value_void_arm_kind(l.ty, l.value)),
+            .or(env.kv_value_void_arm_kind(l.ty, l.value))
+            .or(env.kv_slice_elem_kind(l.ty, l.value)),
         .Assign(x)   => env
             .kv_check_expr_kind(x.target)
             .or(env.kv_check_expr_kind(x.value))
             .or(env.kv_assign_kind(x))
-            .or(env.kv_value_void_arm_kind(env.infer_expr(x.target), x.value)),
+            .or(env.kv_value_void_arm_kind(env.infer_expr(x.target), x.value))
+            .or(env.kv_slice_elem_kind(env.infer_expr(x.target), x.value)),
         .Return(r)   => env
             .kv_check_expr_kind(r)
             .or(env.kv_ret_kind(r))
-            .or(env.kv_value_void_arm_kind(env.exp, r)),
+            .or(env.kv_value_void_arm_kind(env.exp, r))
+            .or(env.kv_slice_elem_kind(env.exp, r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
         .If(f)       => env
             .kv_check_expr_kind(f.c)
@@ -966,7 +979,8 @@ kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
             .or(env.kv_check_expr_kind(x.idx))
             .or(env.kv_check_expr_kind(x.value))
             .or(env.kv_idxset_kind(x))
-            .or(env.kv_value_void_arm_kind(x.elem, x.value)),
+            .or(env.kv_value_void_arm_kind(x.elem, x.value))
+            .or(env.kv_slice_elem_kind(x.elem, x.value)),
     })
 }
 kv_check_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
@@ -982,7 +996,10 @@ kv_check_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
 // expr that doesn't fit, is a KRETURNFIT (a missing/mistyped produced value).
 kv_last_stmt_kind = (env: Env, st: Stmt) i32 {
     st.match ({
-        .ExprStmt(e) => env.kv_ret_kind(e).or(env.kv_value_void_arm_kind(env.exp, e)),
+        .ExprStmt(e) => env
+            .kv_ret_kind(e)
+            .or(env.kv_value_void_arm_kind(env.exp, e))
+            .or(env.kv_slice_elem_kind(env.exp, e)),
         .Return(r)   => 0,
         _            => KFALLTHROUGH().kv_at(st.stmt_pos()),
     })

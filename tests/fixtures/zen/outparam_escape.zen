@@ -1,0 +1,42 @@
+// A REJECT fixture: a pointer into this frame written into storage the CALLER can still read. The
+// escape walk used to key on the syntactic RETURN position, so every one of these — which plants the
+// same dangling pointer, just through an out-parameter instead of the return value — was accepted, and
+// ASan reported `stack-use-after-return` on programs `zen check` called ok.
+// The rule keys on the DESTINATION's provenance: storage that outlives this frame (an indirect
+// parameter, or a local that is a second name for one). Return position is one instance of that fact,
+// not the fact itself, so no statement form, verb or arity spells a way past it.
+// Gated by the `outparam_escape_rejected` shell case in tests/harness_build.zen, which checks each shape
+// on its own (the escape channel reports the first hit per module). This file NEVER compiles.
+Box: {
+    v: MutPtr<i32>,
+}
+Cell: {
+    p: MutPtr<i32>,
+}
+// shape 1: a member store through an out-parameter
+leak_member = (out: MutPtr<Box>) void {
+    x ::= 41
+    out.v = x.addr()
+}
+// shape 2: the same write spelled as the `store` intrinsic
+leak_store = (out: MutPtr<MutPtr<i32>>) void {
+    x ::= 42
+    store(out, x.addr())
+}
+// shape 3: an index-set into a slice the caller owns
+leak_index = (dst: [MutPtr<i32>]) void {
+    x ::= 43
+    dst[0] = x.addr()
+}
+// shape 4: the address wrapped in a struct — the value walk follows it through
+leak_struct = (dst: MutPtr<Cell>) void {
+    x ::= 44
+    store(dst, Cell(p: x.addr()))
+}
+// shape 5: one alias hop — a local that is a second name for the out-parameter
+leak_alias = (out: MutPtr<Box>) void {
+    q ::= out
+    x ::= 45
+    q.v = x.addr()
+}
+main = () i32 { 0 }

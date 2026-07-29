@@ -6,9 +6,9 @@
   tf64, tgeneric, ti32, ti64, tnamed, tnode, tptr_k, tslice, tstring_view, tu8, tvoid,
   acquire_or_die, acquire_or_die } = compiler.genc
 { impl_cname_in } = compiler.mangle
-{ DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params,
-  extend_env, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, recv_name, the_func,
-  tparam_declared } = compiler.check
+{ DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params, elem_of,
+  extend_env, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, pointee_of, recv_name,
+  the_func, tparam_declared } = compiler.check
 { calls_reflect, rc_calls_body } = compiler.passes.refcount
 { reflect_fields } = compiler.passes.subst
 { has_fnt_param, is_logic_op, is_or_return_fn, is_prim_width, param_names_has, slice_any,
@@ -372,6 +372,14 @@ signcmp_err = (env: Env, b: BinData) i32 {
         && b.rhs.is_lit_numeric() == false).match ({
         true  => env.infer_expr(b.lhs).sign_mismatch(env.infer_expr(b.rhs)).then({ 1 }, { 0 }),
         false => 0,
+    })
+}
+// `u8` is Zen's raw BYTE: the unit every allocator hands out and the unit any object can be read as.
+// A `u8` element type is therefore not a claim about what the storage holds (see elem_claim_err).
+is_byte_floor = (t: Ty) bool {
+    t.match ({
+        .U8 => true,
+        _   => false,
     })
 }
 // Indexing needs a slice and numeric index; uninferable types skip.
@@ -1529,10 +1537,15 @@ EnvKinds: {
     operand_err: (Self, BinData) i32,
     index_err: (Self, IndexData) i32,
     ret_err: (Self, Ptr<Expr>) i32,
+    slot_fit_err: (Self, Ty, Ptr<Expr>) i32,
+    slice_elem_err: (Self, Ty, Ptr<Expr>) i32,
+    slice_prov_elem: (Self, Ptr<Expr>) Ty,
+    elem_claim_err: (Self, Ty, Ty) i32,
     assign_err: (Self, AssignData) i32,
     assign_write_kind: (Self, AssignData) i32,
     idxset_write_kind: (Self, IndexSetData) i32,
     idxset_err: (Self, IndexSetData) i32,
+    store_fit_err: (Self, CallData) i32,
     let_fit_err: (Self, LetData) i32,
     let_needannot_err: (Self, LetData) i32,
     undef_is_method: (Self, CallData) bool,
@@ -1717,16 +1730,79 @@ Env.impl(EnvKinds, {
             }),
         })
     }
-    assign_err = (env: Env, x: AssignData) i32 {
-        vt = env.infer_expr(x.target)
-        rt = env.infer_expr(x.value)
-        lv = x.value.lit_slot_verdict(vt)
+    slot_fit_err = (env: Env, slot: Ty, v: Ptr<Expr>) i32 {
+        // ONE fit rule for every typed write SLOT: the stored value must fit the slot's own type. Keyed on
+        // the slot TYPE, so every spelling of a write shares it — `x = v`, `xs[i] = v` and `store(p, v)`
+        // (which is `*p = v` written as a call) are three surfaces over one rule, not three rules. That is
+        // the point: `store` bypassed `assign-fit` for as long as each surface re-derived the check itself.
+        rt = env.infer_expr(v)
+        lv = v.lit_slot_verdict(slot)
         (lv >= 0).match ({
             true  => lv,
-            false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
+            false => (env.unknown_ty(slot) || env.unknown_ty(rt)).match ({
                 true  => 0,
-                false => rt.fits(vt).then({ 0 }, { 1 }),
+                false => rt.fits(slot).then({ 0 }, { 1 }),
             }),
+        })
+    }
+    assign_err = (env: Env, x: AssignData) i32 {
+        env.slot_fit_err(env.infer_expr(x.target), x.value)
+    }
+    slice_elem_err = (env: Env, slot: Ty, v: Ptr<Expr>) i32 {
+        // ── SLICE ELEMENT WIDTH ───────────────────────────────────────────────────────────────────────
+        // `slice(p, n)` states two things — a COUNT and an element WIDTH — and only the count was ever
+        // checked (`zen__idx` bounds-guards the index). The width came from the annotation at the point of
+        // use with nothing to compare it against, so `ys: [i64] = slice(xs.ptr, 4)` over an `[i32]` reads
+        // 32 bytes out of a 16-byte allocation: an ASan heap-buffer-overflow that `zen check` called ok.
+        // The fact checked here is the PROVENANCE of the pointer — the element width of the storage it was
+        // derived from — not the shape of the call.
+        load(v).match ({
+            .Call(c) => (c.fn == "slice" && c.args.len == 2).match ({
+                true  => env.elem_claim_err(env.slice_prov_elem(c.args[0].addr()), slot.elem_of()),
+                false => 0,
+            }),
+            _        => 0,
+        })
+    }
+    slice_prov_elem = (env: Env, e: Ptr<Expr>) Ty {
+        // the element type of the storage a pointer EXPRESSION was derived from, `void` when it makes no
+        // claim. `.ptr` erases the element into `Ptr<u8>` (compiler.check slice_member), so the pointer's
+        // own type can no longer answer and the width is read back off the value that produced it.
+        load(e).match ({
+            .Member(m) => (m.field == "ptr").then({ env.infer_expr(m.obj).elem_of() }, { tvoid() }),
+            .Arrow(ar) => (ar.field == "ptr").match ({
+                true  => env.infer_expr(ar.obj).elem_of(),
+                false => tvoid(),
+            }),
+            .Call(c)   => (c.fn == "addr" && c.args.len == 1).match ({
+                true  => env.infer_expr(c.args[0].addr()),
+                false => tvoid(),
+            }),
+            _          => tvoid(),
+        })
+    }
+    elem_claim_err = (env: Env, have: Ty, want: Ty) i32 {
+        // Two element widths disagree when both are concrete and neither is the BYTE FLOOR. `u8` is not an
+        // element claim in either direction: raw untyped storage is exactly what a `slice` call is for
+        // (every allocator hands back `RawPtr<u8>`, and `n * sizeof(T)` bytes of it is a legitimate `[T]`),
+        // and reading any object back as bytes is always inside its own extent. That is the entire
+        // carve-out — a property of the byte type, not a list of privileged files.
+        (env.unknown_ty(have)
+            || env.unknown_ty(want)
+            || have.is_byte_floor()
+            || want.is_byte_floor()).match ({
+            true  => 0,
+            false => have.ty_eq(want).then({ 0 }, { 1 }),
+        })
+    }
+    store_fit_err = (env: Env, c: CallData) i32 {
+        // the write-through-a-pointer surface: the slot is the pointer's POINTEE, read off arg0's own type,
+        // so an `offset`/alias hop that keeps the pointer type keeps the check. An untyped pointer (the
+        // `RawPtr<u8>` floor, or an unresolved generic) has no slot type and stays lenient, as `x = v` does
+        // when either side is unknown.
+        (c.fn == "store" && c.args.len == 2).match ({
+            true  => env.slot_fit_err(env.infer_expr(c.args[0].addr()).pointee_of(), c.args[1].addr()),
+            false => 0,
         })
     }
     assign_write_kind = (env: Env, x: AssignData) i32 {
@@ -1742,17 +1818,7 @@ Env.impl(EnvKinds, {
         // the index-set half of the read-only-pointer write guard: `b.data[0] = …` writes into `*b`.
         env.write_thru_code(x.seq).write_diag_kind()
     }
-    idxset_err = (env: Env, x: IndexSetData) i32 {
-        rt = env.infer_expr(x.value)
-        lv = x.value.lit_slot_verdict(x.elem)
-        (lv >= 0).match ({
-            true  => lv,
-            false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
-                true  => 0,
-                false => rt.fits(x.elem).then({ 0 }, { 1 }),
-            }),
-        })
-    }
+    idxset_err = (env: Env, x: IndexSetData) i32 { env.slot_fit_err(x.elem, x.value) }
     let_fit_err = (env: Env, l: LetData) i32 {
         // Annotated lets must fit their declared type; unannotated lets are inferred only.
         l.ty.is_void_ty().match ({
