@@ -20,6 +20,7 @@
 { enforce_visibility, enforce_private_leaks, vis_report_mode } = compiler.resolve_vis
 { enforce_ffi_grants, genmod_lookup } = compiler.resolve_ffi
 { shadow_flat, shadow_flat_users } = compiler.resolve_shadow
+{ rename_ns_names, ren_types_set } = compiler.resolve_rename
 { all_decl_names_in, copy_block_comment, copy_line_comment, copy_literal, edge_alias_in, edge_id_in,
   is_any_marker_at, is_c_kw_name_span, has_import_marker, module_graph, opens_import, str_bytes,
   symbol_name_in, value_decl_names_in } = compiler.resolve_scan
@@ -1409,114 +1410,6 @@ ns_scan = (a: MutPtr<Malloc>, c: Closure) NsScan {
         c: c,
     )
 }
-alias_name = (out: String, a: MutPtr<Malloc>, alias: String, name: String) String {
-    out.rappend_string(a, alias).rappend(a, "__").rappend_string(a, name)
-}
-// A FIELD-LABEL context is a ctor/call paren (`Box(`) or a type body (`S: {`) — the only two brackets
-// whose direct children can be `name:` field labels. A fn/lambda param list (`= (n: i64)`) and a block
-// (`{ n: i64 := … }`) are NOT: those `name:` are BINDERS, and a binder must be prefixed exactly like the
-// uses that follow it. Bit `d - 1` of a mask records the bracket opened at depth `d`; past 64 the mask
-// runs out and the answer falls back to "not a label" (the pre-existing behaviour).
-opens_call_ctx = (b: u8, last: u8) bool { b == '(' && (last.is_alnum() || last == '>') }
-// `{` right after a `:` is a type body — UNLESS that `:` was itself a field label, in which case the
-// brace is a labelled block VALUE (`S(v: { n: i64 := 5 … })`) whose contents are statements, not fields.
-opens_type_ctx = (b: u8, last: u8, in_call: bool) bool {
-    b == '{' && last == ':' && in_call == false
-}
-label_mask_put = (m: i64, d: i32, on: bool) i64 {
-    (d > 64).then({
-        return m
-    })
-    bit := 1 << to_i64(d) - 1
-    (m | bit) ^ on.then({ 0 }, { bit })
-}
-label_mask_top = (m: i64, d: i32) bool { d > 0 && d <= 64 && m >> to_i64(d) - 1 & 1 == 1 }
-alias_hit = (s: StringView, p: i32, ie: i32, names: String, nm: String, label: bool) bool {
-    after_dot := p > 0 && s.at(p - 1) == '.'
-    rewrite_member := after_dot.then({ s.at(s.lstrip(ie)) == '(' }, { true })
-    // `len:` inside `Box(…)` names Box's FIELD, not this module's `len` fn — never prefix it.
-    field_label := label && s.at(s.lstrip(ie)) == ':'
-    names.seen_name(nm) && rewrite_member && field_label == false
-}
-rewrite_alias_names* = (
-    out: String,
-    a: MutPtr<Malloc>,
-    s: StringView,
-    p: i32,
-    names: String,
-    alias: String,
-) String {
-    cur := out
-    pos := p
-    depth: i32 := 0
-    cmask: i64 := 0    // per-depth: the bracket is a ctor/call paren
-    tmask: i64 := 0    // per-depth: the bracket is a type body
-    last: u8 := 0    // last significant byte, for classifying the next `(` / `{`
-    bs: [u8] := s.str_bytes()
-    bs.loop((h, i, b) {
-        ii := to_i32(i)
-        (ii < pos == false).then({
-            (b == 0).match ({
-                true  => {
-                    h.break
-                },
-                false => s.line_comment_at(pos).match ({
-                    true  => {
-                        sk := cur.copy_line_comment(a, s, pos)
-                        cur = sk.out
-                        pos = sk.next
-                    },
-                    false => s.block_comment_at(pos).match ({
-                        true  => {
-                            sk := cur.copy_block_comment(a, s, pos)
-                            cur = sk.out
-                            pos = sk.next
-                        },
-                        false => s.quoted_at(pos).match ({
-                            true  => {
-                                sk := cur.copy_literal(a, s, pos)
-                                cur = sk.out
-                                pos = sk.next
-                            },
-                            false => (b.is_alpha()
-                                && (pos == 0 || s.at(pos - 1).is_alnum().then({ false }, { true }))).match ({
-                                true  => {
-                                    ie := s.res_ident_end(pos)
-                                    nm := a.mimport_name_span(s, pos, ie)
-                                    in_lbl := cmask.label_mask_top(depth)
-                                        || tmask.label_mask_top(depth)
-                                    cur = s.alias_hit(pos, ie, names, nm, in_lbl).match ({
-                                        true  => cur.alias_name(a, alias, nm),
-                                        false => cur.rappend_span(a, s, pos, ie),
-                                    })
-                                    last = s.at(ie - 1)
-                                    pos = ie
-                                },
-                                false => {
-                                    (b == '(' || b == '{' || b == '[').then({
-                                        in_call := cmask.label_mask_top(depth)
-                                        depth = depth + 1
-                                        cmask = cmask.label_mask_put(depth, b.opens_call_ctx(last))
-                                        tmask = tmask.label_mask_put(depth, b.opens_type_ctx(last, in_call))
-                                    })
-                                    (b == ')' || b == '}' || b == ']').then({
-                                        depth = (depth > 0).then({ depth - 1 }, { 0 })
-                                    })
-                                    (b.is_blank() == false && b != '\n' && b != '\r').then({
-                                        last = b
-                                    })
-                                    cur = cur.rpush(a, b)
-                                    pos = pos + 1
-                                },
-                            }),
-                        }),
-                    }),
-                }),
-            })
-        })
-    })
-    cur
-}
 // Stage B4/R2: stamp one ns-alias bind's per-module export sig into the compiler.parse registry —
 // one SigEntry per provided symbol (name + pub/type/imported/foreign flags + origin ModuleId), so
 // the checker can enumerate an alias's exports without a compiler.resolve import. Stamped at the
@@ -1548,7 +1441,7 @@ alias_module_body = (
     // Record this alias prefix so the checker's UFCS-alias fallback treats only `alias__` decls as
     // alias-shaped (never a plain user fn that merely has `__` in its name). Fresh NUL-terminated copy.
     note_alias_prefix(a.gstr_string(16).rappend_string(a, alias).gstr_finish(a))
-    a.gstr_string(4096).rewrite_alias_names(a, body, 0, names, alias)
+    a.gstr_string(4096).rename_ns_names(a, body, names, alias)
 }
 line_name* = (out: String, a: MutPtr<Malloc>, names: String, i: i64) String {
     (i >= names.len || names.res_sbyte(i) == '\n').match ({
@@ -2573,6 +2466,7 @@ resolve_program_data* = (
     a.lmap_reset()    // fresh per program: flat-region + original-line maps recorded during closure load
     graph := a.module_graph(mainsrc)
     table := a.module_table_graph(root, progdir, inpath, mainsrc, graph)
+    a.ren_types_set(table)    // fresh per program: the rename's "is this receiver a TYPE?" answer
     a.enforce_visibility(table, vis_report_mode())
     a.enforce_private_leaks(table, vis_report_mode())
     a.enforce_ffi_grants(table, mainsrc, vis_report_mode())
