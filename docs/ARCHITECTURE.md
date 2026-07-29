@@ -16,10 +16,10 @@ lexer → recursive-descent parser → shared AST
     │     lex.zen + parse*.zen     ast/ast_types.zen
     ▼
 resolution / inference / inlining / monomorphization / closure lowering
-    │                         check.zen + mono.zen
+    │              check*.zen + passes/*.zen + mono.zen
     ▼
 type, diagnostic, ownership, escape, send, and boundary validation
-    │                         check_validate.zen + diagnostic.zen
+    │                    validate/*.zen + diagnostic.zen
     ├──────────────► faithful source formatter       pretty.zen
     ├──────────────► C emitter → cc → executable     backend/c/c_emit.zen
     └──────────────► JavaScript emitter              backend/js/js.zen
@@ -28,6 +28,11 @@ type, diagnostic, ownership, escape, send, and boundary validation
 The backends walk the same resolved/monomorphized AST. C is the complete bootstrap path. JavaScript
 is a second emitter with a smaller runtime floor and a target-limited subset; it does not define a
 separate frontend or type system.
+
+**Partial.** Sharing the frontend is a structural fact, not a semantic-equivalence guarantee: the JS
+emitter is where the two backends diverge, and [STATUS.md](STATUS.md) records an open P0 for it (field
+names rewritten, intrinsic/DOM dispatch by bare function name, DOM values returned in representations
+Zen expects as `Opt`/`StringView`). Read "same AST" as "same input", not "same meaning".
 
 ## Source and AST ownership
 
@@ -66,18 +71,33 @@ the allocator-explicit builders that copy pointer and slice children onto the he
 does not dangle. A re-export facade is impossible under the flat namespace regardless: a same-named
 wrapper is a C redefinition of the symbol it wraps.
 
-The parser is split by concern:
+The parser is split by concern across eleven `parse*.zen` files (`ls src/compiler/parse*.zen`) plus
+the lexer — the result of breaking up the original `parse.zen`/`parse_expr.zen` god files:
 
 | Source | Responsibility |
 |---|---|
 | `lex.zen` | Tokens, literals, comments, and source positions. |
-| `parse_type.zen` | Types, parameters, delimiters, and parser state. |
-| `parse_expr.zen` | Expressions, operators, calls, lambdas, matches, and guards. |
+| `parse.zen` | Public parser entry, top-level declaration dispatch, and module assembly. |
+| `parse_type.zen` | Type *expressions*, typed parameter lists, brace-skip helpers, and the shared punctuation predicates. |
+| `parse_type_decl.zen` | Type *declarations*: struct/enum bodies, fields, variants, and the `<A, B: Trait>` type-parameter list. |
+| `parse_impl.zen` | `Type.impl(Trait, {…})` blocks, inherent methods, and trait-default decl synthesis. |
+| `parse_implicit.zen` | Post-parse pass: implicit ALL-CAPS type parameters and `name: Trait` params desugared to bounded generics. |
+| `parse_expr.zen` | Expression entry and operator-precedence climbing (term/add/shift/bitwise/compare/and/or). |
+| `parse_atom.zen` | Atoms and literals: int/float/char/string, leading-dot constructors, lexeme buffers. |
+| `parse_primary.zen` | Identifier-led primaries: idents, turbofish, struct literals, parens, prefix ops, slice literals, lambdas. |
+| `parse_postfix.zen` | Postfix chains: call/member/index/method/loop suffixes and struct-literal disambiguation. |
+| `parse_match.zen` | `match`/`then` forms: arm parsing, boolean/literal/variant matches, pattern binds and destructuring. |
 | `parse_stmt.zen` | Blocks, bindings, assignment, return, and internal lowered statements. |
-| `parse.zen` | Top-level declarations, records, enums, imports, impls, and module assembly. |
 
-`pretty.zen` renders that parsed structure while retaining source comments. `zenc fmt --check` and
-the in-place formatter compare/render the same canonical result; fixtures enforce idempotence.
+Match parsing lives in `parse_match.zen`, not `parse_expr.zen`, and there are no match guards to parse:
+guards were removed from the language in 2026-07 along with `if`.
+
+`pretty.zen` renders that parsed structure while retaining source comments. `zenc fmt --check` and the
+in-place formatter compare/render the same canonical result, and fixtures enforce idempotence —
+but **Partial**: idempotence is not fidelity. [STATUS.md](STATUS.md) rates the formatter "Partial:
+known semantic round-trip failures" and lists the open ones (generic parameters dropped from bodyless
+signatures, multi-payload enum syntax lost). A formatted file can be stable under re-formatting and
+still not mean what the original meant.
 
 ## Modules
 
@@ -110,7 +130,7 @@ The semantic layer works, but its shape is the largest maintainability risk.
 - some pointer and call rules;
 - construction of backend-ready lowered nodes.
 
-`check_validate.zen` then re-walks raw and resolved ASTs for:
+The `src/compiler/validate/` package then re-walks raw and resolved ASTs for:
 
 - core error counts;
 - packed first-error kinds and source positions;
@@ -122,15 +142,31 @@ The semantic layer works, but its shape is the largest maintainability risk.
 - must-use, main-signature, infinite-type, and reserved-name checks.
 
 The CLI manually orders these channels and suppresses cascades. This preserves useful diagnostics,
-but duplicates traversal and judgments. `check.zen` is roughly 4.7k lines and
-`check_validate.zen` roughly 6.1k lines; size alone is not the problem, but the same fact being
-reconstructed by several walkers is.
+but duplicates traversal and judgments.
 
-The simplification direction is:
+Both god files have since been split by prefix family, so the risk is now spread rather than
+concentrated (`wc -l src/compiler/check*.zen src/compiler/passes/*.zen src/compiler/validate/*.zen`):
+
+| Package | Files | Lines |
+|---|---|---|
+| `check.zen` | 1 | 2,397 |
+| `check_{desugar,fits,infer,inline,lower,resolve}.zen` | 6 | 3,091 |
+| `passes/{closures,lift,orreturn,ptrkind,refcount,subst}.zen` | 6 | 2,249 |
+| `validate/{args,core,diag,enrich,kinds,nullalloc,ownership,util}.zen` | 8 | 10,126 |
+
+Size alone was never the problem, and splitting did not fix it: the same fact is still reconstructed
+by several walkers, now across more files.
+
+The simplification direction — **Planned**:
 
 | Keep | Consolidate | Separate clearly | Retire after migration |
 |---|---|---|---|
 | `Ty`, `fits`, declaration index, source spans, typed AST, monomorphization | Count/kind/batch/enrichment into direct `Diagnostic` emission | Module linking, type checking, flow safety, and lowering | Flat-source compatibility, manual diagnostic channel chain, name/shape-only safety guesses |
+
+None of the four columns is finished. The only structural step that has landed is the mechanical
+split above — a file-boundary move, not a consolidation: the driver still manually orders the
+diagnostic channels, and flat-source compatibility is still the CLI's parser/checker boundary. Read
+the table as a direction, not as a progress bar.
 
 A practical sequence is listed in [STATUS.md](STATUS.md). The key constraint is behavioral: every
 semantic refactor must preserve accepted/rejected programs, diagnostic kinds/spans, both backends,
@@ -138,19 +174,48 @@ and the bootstrap fixpoint before deleting the old path.
 
 ## CLI and projects
 
-`driver.zen` owns command dispatch and orchestration:
+`driver.zen` owns command dispatch and orchestration. It ships fourteen commands
+(`grep -n 'name: "' driver.zen`); three of them — `check`, `emit`, `emit-js` — carry an empty help
+string and so do not appear in `--help`:
 
-- reads a single file or resolves `zen.toml`/`build.zen` projects;
-- runs the checked compiler pipeline;
-- renders mapped diagnostics from flattened offsets back to source files;
-- invokes `cc` for C builds and runs binaries;
-- emits JS with `bootstrap/zenrt.js`;
-- implements `fmt`, `doc`, and the embedded `init` templates;
-- assembles compiler sources for `--build-self`.
+| Command | Role |
+|---|---|
+| `init` | Embedded `--bin`/`--lib` project templates. |
+| `build` | Build registered targets; dev profile by default, `-r`/`--release` optimized. |
+| `run` | Compile and run; `--time` prints per-stage timings. |
+| `profile` | Sampling profile (perf, gprof fallback) with Zen-native symbol names. |
+| `targets` | List a project's registered targets. |
+| `doc` | Minimal doc extraction for a module or file. |
+| `audit` | Dead-code, unused-import, and clone report; `--workspace` unions over every main-bearing entry. |
+| `lsp` | Diagnostics-only Language Server, JSON-RPC over stdio. |
+| `check` | Front-end only; no artifact. |
+| `emit` | Emit C. |
+| `emit-js` | Emit JavaScript. |
+| `fmt` | `--check`/`--stdout`/`--migrate` over the AST formatter. |
+| `--build-self` | Regenerate the seed, tree-shaken to what `main` reaches. |
+| `--build-self-full` | Regenerate the full seed, no tree-shake. |
 
-`build.zen` is itself compiled and run to emit a five-field target specification. It wins over
-`zen.toml`. This is a useful proof that build configuration can use Zen values, but project-local
-temporary naming and single-target/single-link-library limits remain rough.
+Underneath those it reads a single file or resolves `zen.toml`/`build.zen` projects, runs the checked
+compiler pipeline, renders mapped diagnostics from flattened offsets back to source files, invokes
+`cc` for C builds, emits JS with `bootstrap/zenrt.js`, and assembles compiler sources for
+`--build-self`.
+
+The `lsp` command is a compiler surface, not a driver detail: it is backed by four modules
+(`src/compiler/lsp.zen`, `lsp_docs.zen`, `lsp_query.zen`, `lsp_tokens.zen`, 2,129 lines by
+`wc -l src/compiler/lsp*.zen`) and its own harness suite (`tests/harness_lsp.zen`). It reuses the
+same check pipeline and diagnostic mapping as `check`, so it is a client of the semantic layer rather
+than a parallel implementation of it.
+
+`build.zen` is itself compiled and run to emit a target specification, which wins over `zen.toml`. The
+Zen-side `Target*` record carries eleven fields (`src/std/build.zen:57`: `name`, `root_`, `main_`,
+`out_`, `links_`, `sources_`, `frameworks_`, `libraries_`, `platform_`, `ffi_`, `cflags_`). Those
+cross the process boundary as a printed ten-line record per target (`std.build::emit_target`) —
+name, root, main, out, linker flags, compiler inputs, os, arch, abi, ffi grants — with the
+multi-valued fields flattened into the linker-flags and compiler-inputs lines. `driver.zen` parses
+that back (`parse_spec_at`) into a nine-field `Spec*` (`driver.zen:2616`: `source`, `out`, `ccflags`,
+`links`, `ffi`, `genmods`, `target`, `library`, `ok`). This is a useful proof that build configuration
+can use Zen values, but a printed-text ABI between two Zen programs and project-local temporary
+naming remain rough.
 
 ## Bootstrap and fixpoint
 
@@ -170,8 +235,12 @@ cmp /tmp/zenc.fixpoint.c bootstrap/zenc.gen.c
 ```
 
 The hand-written C floor supplies process entry, allocation/IO boundaries, threads, signals, and
-pooled-actor panic isolation. The JavaScript floor supplies its target runtime. Everything above
-those floors is intended to remain ordinary Zen.
+pooled-actor panic isolation. The JavaScript floor supplies its target runtime.
+
+Everything above those floors is ordinary Zen today, and keeping it that way is a **Planned** policy,
+not an enforced invariant: no gate rejects a new hand-written C or JS function added beside the
+existing floor. The `tests/harness_boundaries.zen` scans police module layering inside Zen, not the
+size of the target substrate.
 
 See [bootstrap/README.md](../bootstrap/README.md) for the exact local workflow.
 
@@ -201,8 +270,14 @@ build a trampoline from; actor API convergence is roadmap work, not a shipped ab
 ## Tests
 
 `tests/harness.zen` dispatches a Zen-native suite. A 16-line C runner supplies only the executable
-entry used to run the compiled harness. Major suites are split into value, verdict, modules, build,
-boundaries, misc/differential, fuzz, argparse, datetime, and fixpoint groups.
+entry used to run the compiled harness. It imports sixteen category suites
+(`grep -n 'harness_' tests/harness.zen`): value, verdict, build, modules, boundaries, misc, fuzz,
+argparse, datetime, fmt_roundtrip, lsp, stdsurface, sort, math, iter, and rand.
+
+Two things that read like categories are not: the differential comparison is a separate `make
+difftest` gate (`scripts/difftest.sh`, an old-compiler/new-compiler behavioural diff), and the
+bootstrap fixpoint check is `fixpoint_ok` in `tests/harness_lib.zen`, called by suites rather than
+being one.
 
 The test system's strengths are independent runtime checks, explicit reject kinds, source-span
 diagnostics, C/JS differential cases, fixpoint validation, architectural source-boundary checks, and
@@ -215,14 +290,20 @@ coverage and reduction plan are in [STATUS.md](STATUS.md).
 
 ## Change discipline
 
-For compiler or runtime work:
+For compiler or runtime work. The **CI-enforced** steps fail the merge gate on their own
+(`.github/workflows/ci.yml`); the **convention** steps are review discipline with no automated check:
 
-1. reproduce the behavior with the smallest pass/fail or value pair;
-2. run formatter checks on touched Zen;
-3. run the smallest relevant harness slice, then the full harness for semantic changes;
-4. regenerate `bootstrap/zenc.gen.c` after any compiler/driver/bootstrap-source change;
-5. prove a second regeneration is byte-identical;
-6. remove a compatibility path only after its replacement passes the same evidence.
+| # | Step | Enforcement |
+|---|---|---|
+| 1 | Reproduce the behavior with the smallest pass/fail or value pair. | Convention |
+| 2 | Run formatter checks on touched Zen. | CI-enforced — `scripts/fmt-check.sh` |
+| 3 | Run the smallest relevant harness slice, then the full harness for semantic changes. | CI-enforced — `harness-fast` then `harness` |
+| 4 | Regenerate `bootstrap/zenc.gen.c` after any compiler/driver/bootstrap-source change. | CI-enforced — the seed-staleness job re-runs `regen` and diffs |
+| 5 | Prove a second regeneration is byte-identical. | CI-enforced — same job; a non-fixpoint seed shows as a diff |
+| 6 | Remove a compatibility path only after its replacement passes the same evidence. | Convention |
+
+CI additionally runs `docs-check`, `ffi-verify`, an ASan build, and a conflict-marker scan, none of
+which appear in the list above.
 
 Do not use an old plan, audit score, or generated C as semantic authority when the Zen source and
 executable tests say otherwise.

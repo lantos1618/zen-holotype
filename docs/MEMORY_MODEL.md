@@ -26,7 +26,9 @@ Do not read the pair as "the allocator is always a parameter". It is not.
 
 The outside world enters through a
 **capability**: the entry `main = (sys: Sys) i32` receives a `Sys`
-(`std.sys`) and hands out narrow capabilities, notably `sys.heap()` (the process
+(`std.sys.root` — there is no importable `std.sys` module; the directory
+`src/std/sys/` holds `root.zen`, `fs.zen`, `os.zen`, `path.zen`, `platform.zen`
+and `process.zen`) and hands out narrow capabilities, notably `sys.heap()` (the process
 `Allocator`) and `sys.stdout()`/`sys.stderr()` (`Writer`s). Libraries take the
 narrowest capability they need (an `Allocator`, a `Writer`), which is the same
 discipline one level up from threading `a: Allocator` allocators through container
@@ -44,20 +46,30 @@ and ownership APIs.
 > the allocator is not a parameter.
 
 String bytes carry their own provenance discipline — static `StringLiteral`,
-borrowed NUL-terminated `StringCstr`, general borrowed `StringView`, and the
-heap-owned `String` (freed through the allocator that owns its buffer). Those are
-the only spellings — the old `text`/`Cstr`/`str` aliases have been removed; see the
-string types section of [SPEC.md](SPEC.md).
+borrowed NUL-terminated `StringCstr`, general borrowed `StringView`, the
+heap-owned growable `String`, the frozen owned `StringConst`
+(`src/std/text/string.zen:250`) and the sized-once writable `StringFixed`
+(`:235`) — the owned three freed through the allocator the value carries. Six
+live spellings, all of them real annotatable types today. The old
+`text`/`Cstr`/`str` aliases have been removed, and so have the snake_case
+spellings; see the string types section of [SPEC.md](SPEC.md).
 
-That list describes what the compiler does TODAY: three names for three types, each printed as
-itself. It is still short of the target — five roles
+That list describes what the compiler does TODAY. The target model — five roles
 (`Literal`/`Const`/`Fixed`/growable/`View`) over an element type, with `String` as the `u8` case
-of `Vec` — is written down in [string-vec-model.md](string-vec-model.md), together with the two
-language changes it needs. Read that first; this section records the interim.
+of `Vec` — is written down in [string-vec-model.md](string-vec-model.md). The two language
+changes that document once listed as gating it are both resolved (slice mutability is DONE;
+the allocator-carrying question is DECIDED), so what is left is naming and coverage on the
+`Vec` side, not a language change. Read that first; this section records the interim.
 
 ## Current Rules
 
-Allocation is explicit. User-facing containers, ownership types, and runtime APIs
+> **Enforced vs. convention.** Only two things in this section are checked by a
+> machine: the raw-allocation allowlist below (`tests/harness_boundaries.zen`)
+> and the local ownership rule further down (the checker). Every sentence in
+> this section written with "should" or "by convention" is a **house style rule
+> a reviewer enforces, not the compiler** — code that breaks it still compiles.
+
+Allocation is explicit. **(Convention.)** User-facing containers, ownership types, and runtime APIs
 should take an allocator (`a: Allocator` — the implicit bounded generic, equivalently
 `<A: Allocator>(a: MutPtr<A>)`) or use a documented default-allocator convenience wrapper.
 Raw `malloc`, `free`, pointer arithmetic, and `@` primitives are the substrate for
@@ -66,15 +78,27 @@ bootstrap, FFI boundaries, and low-level std modules.
 `try_alloc`/`try_zeroed`/`try_of` when allocation failure should stay in the
 value flow.
 
-Raw allocation calls are guarded by `tests/harness_boundaries.zen`:
-`malloc`/`calloc`/`realloc`/`free` may appear only in `std.mem.alloc`,
-`std.mem.raw`, or the compiler bootstrap allocation shim. Everything else should
-thread an allocator and call `acquire`/`resize`/`release` or a higher-level
-allocator-aware API.
+**(Enforced.)** Raw allocation calls are guarded by `tests/harness_boundaries.zen`. Its
+`alloc_not_whitelisted` predicate is the authority, and the allowlist is six paths, not three —
+a bare `malloc`/`calloc`/`realloc`/`free` call may appear only in:
+
+- `src/std/mem/alloc.zen`
+- `src/std/mem/raw.zen`
+- `src/std/concurrent/thread.zen`
+- `src/std/concurrent/pool.zen`
+- `src/std/concurrent/pool_actor.zen`
+- `src/compiler/genc.zen`
+
+Everything else must thread an allocator and call `acquire`/`resize`/`release` or a higher-level
+allocator-aware API. An unreadable file fails the scan rather than passing silently.
 
 Arena backing storage follows the same rule. `arena.make_in(backing, cap)` and
 `Arena.free_in(backing)` acquire and release the arena's backing block through a
-caller allocator. `Arena.free` is the default-heap convenience path.
+caller allocator. `Arena.free` is **not** a default-heap convenience path — it is a
+one-line forwarder to `free_in` and takes the backing allocator as a required
+parameter (`free<A: Allocator> = (a: MutPtr<Arena>, backing: MutPtr<A>) void`,
+`src/std/mem/arena.zen:32`). There is no way to free an arena without naming the
+allocator its block came from.
 
 The arena constructor is spelled `make_in`, not `new_in`, on purpose: Zen's
 namespace is flat, so two modules that both export a top-level `new_in` cannot
@@ -82,7 +106,7 @@ reach one program. `std.text.string` already owns `new_in`, and a String builder
 sits beside the arena often enough (anything pulling in `std.concurrent.actor`
 drags the arena along) that the arena took the distinct name.
 
-Compiler-adjacent AST builders follow the same convention where they return
+**(Convention.)** Compiler-adjacent AST builders follow the same style where they return
 owned slices: `std.internal.ast.dbuf_in` and `derive_accessors_in` place
 declaration buffers through a caller allocator, while the short builders use the
 documented default allocator helpers.
@@ -94,37 +118,52 @@ Owned values are library types:
 - `Rc<T>` is single-threaded shared ownership.
 - `Arc<T>` is atomically reference-counted shared ownership.
 - `std.mem.trace.Traced<T>` is the cycle-tracing experiment (its block carries an
-  extra trial-deletion color word, so it is deliberately NOT `Rc<T>` under another name). Its public allocation,
-  root-registration, and collection entrypoints have allocator-first forms
-  (`tracked_in`, `root_in`, `collect_in`) plus default-heap wrappers. Tracked
-  block allocation also has `try_tracked_in` / `try_tracked` so allocation
-  failure can stay in the value flow.
+  extra trial-deletion color word, so it is deliberately NOT `Rc<T>` under another name). Its public
+  allocation, root-registration, and collection entrypoints are **all** allocator-first and
+  **all** fallible: `tracked_in` / `root_in` / `collect_in`, plus `tracked` / `root` / `collect`,
+  which are one-line forwarders that take the same `Allocator` parameter — they are *not*
+  default-heap wrappers, and there is no allocator-free spelling. Every one of the six returns a
+  `Result`, so allocation failure already stays in the value flow; there is no separate
+  `try_tracked_in` / `try_tracked` (`src/std/mem/trace.zen:141,160,161,162,293,317`).
 
-The preferred ownership constructors are allocator-first:
+Ownership construction is allocator-first and fallible. `src/std/mem/own.zen`
+declares exactly **one** constructor —
+
+```
+new_in*<T> = (a: Allocator, x: T) Result<Own<T>, IoError>
+```
+
+— so there is no infallible/fallible pair to choose between: `new_in` *is* the
+fallible one, and its `Result` has to be opened before you hold an `Own<T>`.
+At a fail-fast root that is `.expect(...)`:
 
 ```zen
 own = std.mem.own
-alloc = std.mem.alloc
-heap := alloc.default()
-o := own.new_in(heap.addr(), own.Resource(id: 7, slot: 0))
-o.release_in(heap.addr())
+heap = std.mem.heap
+h = heap.gpa()
+o = own.new_in(h.addr(), own.Resource(id: 7, slot: 0)).expect("own.new_in")
+o.release_in(h.addr())
 ```
 
-Fallible constructors are value-shaped and use the same allocator:
+Inside a `Result`-returning function, use `or_return()` instead; where allocation
+failure is a real branch, match the same value:
 
 ```zen
-alloc = std.mem.alloc
-heap := alloc.default()
-r := own.try_new_in(heap.addr(), own.Resource(id: 7, slot: 0))
+own = std.mem.own
+heap = std.mem.heap
+h = heap.gpa()
+r = own.new_in(h.addr(), own.Resource(id: 7, slot: 0))
 r.match({
-    .Ok(o) => { o.release_in(heap.addr()) },
-    .Err(e) => {}
+    .Ok(o)  => { o.release_in(h.addr()) },
+    .Err(e) => {},
 })
 ```
 
 The short default-heap forms are intentionally absent for ownership containers.
-Use `new_in`/`try_new_in` plus `release_in`/`drop_in` so the allocator that owns
-the block is explicit at both construction and release.
+Use `new_in` plus `release_in`/`drop_in` so the allocator that owns the block is
+explicit at both construction and release. **(Convention — nothing rejects a
+convenience wrapper if someone adds one; the absence is a design choice, not a
+checked rule.)**
 
 ## Sendability (move-on-send)
 
@@ -144,11 +183,11 @@ method calls into raw pointer operations:
 
 ```zen
 own = std.mem.own
-alloc = std.mem.alloc
-heap := alloc.default()
-o := own.new_in(heap.addr(), own.Resource(id: 7, slot: 0))
-o.release_in(heap.addr())
-o.get()          // rejected: use of consumed owner
+heap = std.mem.heap
+h = heap.gpa()
+o = own.new_in(h.addr(), own.Resource(id: 7, slot: 0)).expect("own.new_in")
+o.release_in(h.addr())
+o.get()          // error[ownership]: use of an owner after it was consumed
 ```
 
 For a local variable in the same function body:
@@ -162,13 +201,13 @@ Cloning before consuming is still valid because the clone is a different local:
 
 ```zen
 own = std.mem.own
-alloc = std.mem.alloc
-heap := alloc.default()
-o := own.new_in(heap.addr(), own.Resource(id: 7, slot: 0))
-c := o.clone()
-o.release_in(heap.addr())
-n := c.get().id
-c.release_in(heap.addr())
+heap = std.mem.heap
+h = heap.gpa()
+o = own.new_in(h.addr(), own.Resource(id: 7, slot: 0)).expect("own.new_in")
+c = o.clone()
+o.release_in(h.addr())
+n = c.get().id
+c.release_in(h.addr())
 ```
 
 ## Partly Enforced; Remaining Work

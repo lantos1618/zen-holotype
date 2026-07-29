@@ -14,7 +14,7 @@
 { view } = std.text.str
 { Malloc } = std.mem.alloc
 { Stmt, Decl, Param, Ty, PtrData, CondData, LetData } = compiler.ast.ast_types
-{ ptr_kw, slice_kw, k_slice_dflt, gstr_push, gstr_append, acquire_or_die, acquire_or_die } = compiler.genc
+{ ptr_kw, slice_kw, k_slice_dflt, gstr_push, gstr_append, acquire_or_die, sbyte } = compiler.genc
 { gstr_int, left_pos_of, stmt_left_pos } = compiler.astops
 { Comment, rawstr_end } = compiler.lex
 { at, rawstr_at } = std.text.ascii
@@ -286,10 +286,28 @@ ff_push* = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
 // set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are `0 - x` Bin nodes, never a
 // negative `.Int` — so gstr_int reinterprets its exact bit pattern and prints UNSIGNED decimal
 // (`0xcbf29ce484222325` → `14695981039346656037`, not the wrong signed `-3750763034362895579`).
+// A non-printable byte as a `\xNN` hex escape — the ONLY numeric escape the Zen lexer accepts, in both
+// a string literal (parse_atom.unescape) and a char literal (parse_atom.char_val); there is no octal
+// form, so genc's `\ooo` cannot be reused here. Shared by `ff_char` below and `ff_escape_byte` in
+// compiler.pretty_expr.
+ffhex = (d: i64) u8 { sbyte("0123456789abcdef", d) }
+ff_hex_byte* = (s: String, a: MutPtr<Malloc>, b: u8) String {
+    n = b.to_i64()
+    s.ff_append(a, "\\x").ff_push(a, ffhex(n / 16)).ff_push(a, ffhex(n % 16))
+}
 // render a char-literal byte `n` back as a `'x'` literal (a `.Byte` AST node ONLY ever comes from a
 // char literal, so this round-trips `'a'` → `'a'` instead of leaking the raw byte value `97`). Common
-// escapes are re-escaped; a printable ASCII byte prints bare; anything else falls back to the integer
-// (which still emits the identical value, so the lowered AST / C is unchanged either way).
+// escapes are re-escaped; a printable ASCII byte prints bare; every other byte is `'\xNN'` — the SAME
+// spelling it was written with, which is what makes `zen fmt` a round-trip for `'\x08'` instead of
+// reverting it to the bare number `8`.
+//
+// The `\xNN` form is deliberately printed VERBATIM rather than normalized to a friendlier escape:
+// Zen's `esc_byte` knows only `\n \t \r \0` and falls through to the escaped char itself for anything
+// else, so `'\b'` is the byte `'b'` (98), NOT backspace (8). Printing `'\b'` for byte 8 would be a
+// miscompile. `\xNN` is the only spelling that reparses to the byte it came from.
+//
+// The integer fallback is unreachable for a real char literal (`char_val` yields 0..255) and is kept
+// only so an out-of-range `.Byte` would still emit its exact value rather than a truncated escape.
 ff_char* = (s: String, a: MutPtr<Malloc>, n: i32) String {
     (n == '\n').then({
         return s.ff_append(a, "'\\n'")
@@ -309,8 +327,11 @@ ff_char* = (s: String, a: MutPtr<Malloc>, n: i32) String {
     (n == '\'').then({
         return s.ff_append(a, "'\\''")
     })
-    (n >= ' ' && n <= '~').match ({
-        true  => s.ff_append(a, "'").ff_push(a, to_u8(n)).ff_append(a, "'"),
+    (n >= ' ' && n <= '~').then({
+        return s.ff_append(a, "'").ff_push(a, to_u8(n)).ff_append(a, "'")
+    })
+    (n >= 0 && n <= 255).match ({
+        true  => s.ff_append(a, "'").ff_hex_byte(a, to_u8(n)).ff_append(a, "'"),
         false => s.gstr_int(a, n),
     })
 }

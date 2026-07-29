@@ -1,0 +1,32 @@
+// tests/fixtures/fmt/char_escapes_formatted.zen — every char-literal spelling the formatter can
+// print, already in canonical form. `zen fmt` on this file must be a byte-for-byte NO-OP.
+//
+// The bug this pins: `'\x08'` is legal Zen, but the formatter had no `\xNN` case for a char literal
+// and fell back to printing the raw byte VALUE, so `'\x08'` came back as `8`. That is not a
+// round-trip — it silently deletes what the byte MEANS, and it made the fmt gate and the char-literal
+// gate (harness_boundaries SUITE 13) contradict each other on the JSON `\b`/`\f` decoders.
+//
+// The canonical spelling of a non-printable byte is `'\xNN'`, VERBATIM, never a friendlier escape:
+// Zen's `esc_byte` (compiler.parse_atom) knows only `\n \t \r \0` and falls through to the escaped
+// character itself for everything else, so `'\b'` is the byte `'b'` (98), NOT backspace (8).
+// Printing `'\b'` for byte 8 would change the program's meaning.
+//
+// `main` returns the byte sum mod 256, so `zen run` also proves the VALUES survive the format.
+main = () i64 {
+    bs = '\x08'    // backspace — no short escape exists in Zen
+    ff = '\x0c'    // form feed
+    vt = '\x0b'    // vertical tab
+    del = '\x7f'    // DEL, just past printable ASCII
+    hi = '\xff'    // high byte
+    nl = '\n'
+    tab = '\t'
+    cr = '\r'
+    nul = '\0'
+    bsl = '\\'
+    quo = '\''
+    sp = ' '    // the low end of the bare-printable range
+    tilde = '~'    // the high end
+    sum = bs.to_i64() + ff.to_i64() + vt.to_i64() + del.to_i64() + hi.to_i64() + nl.to_i64()
+    rest = tab.to_i64() + cr.to_i64() + nul.to_i64() + bsl.to_i64() + quo.to_i64() + sp.to_i64() + tilde.to_i64()
+    (sum + rest) % 256
+}

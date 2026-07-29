@@ -45,7 +45,7 @@ Top-level declarations are one of:
 name* = (a: i32, b: i32) i32 { a + b }    // public function
 helper = () i32 { 1 }                      // private function
 foreign = (n: i64) RawPtr<u8>              // bodyless C extern
-counter := 0                               // mutable module global
+counter ::= 0                              // mutable module global
 Point*: { x: i32, y: i32 }                 // struct
 Shape*: Circle(i32) | Square(i32) | Dot    // enum
 Box*<T>: { value: T }                      // generic struct
@@ -154,9 +154,9 @@ A `"…"` literal resolves `\`-escapes (`\n`, `\t`, `\"`, `\\`, `\xNN`).
 A `"""…"""` literal is **raw** and may span lines:
 
 ```zen
-src := """{"name":"zen","ok":true,"nums":[1,2,3]}"""
+src = """{"name":"zen","ok":true,"nums":[1,2,3]}"""
 
-blob := """
+blob = """
 line one
 line two with "quotes" and \n that stays two characters
 """
@@ -224,15 +224,20 @@ fits on one line, while long, nested, or block-bodied forms keep the multiline
 Statements:
 
 ```zen
-x := value       // local let
-x: T := value    // typed local let
-x = value        // assignment
+x = value        // binds a constant — or assigns, if `x` is already bound
+x: T = value     // binds a constant, explicit type
+x ::= value      // binds a mutable local, inferred type
+x :: T = value   // binds a mutable local, explicit type
 obj.field = v    // field assignment
 xs[i] = v        // slice element assignment
 expr             // expression statement, trailing expression returns
 return expr      // early return
 @while(cond) { } // compiler/substrate primitive, not public style
 ```
+
+A bare `x = value` is a DECLARATION or an ASSIGNMENT depending on what is
+already in scope — see [Definite initialization](#definite-initialization)
+below for the exact rule.
 
 Source-level branching is `.match` (with two-arm `.then({ a }, { b })` as its
 expression spelling). `if`, `for`, and ordinary `while` are not source syntax.
@@ -286,9 +291,9 @@ Sum.impl(Receiver, {
     }
 })
 main = () i32 {
-    h := heap.gpa()
-    sink := h.addr().spawn_handle(16, Sum(total: 0, seen: 0, closed: false)).expect("spawn")
-    xs: [i64] := [10, 20, 30]
+    h = heap.gpa()
+    sink = h.addr().spawn_handle(16, Sum(total: 0, seen: 0, closed: false)).expect("spawn")
+    xs: [i64] = [10, 20, 30]
     xs.loop((hh, i, v) { sink.send(.Value(v)) })    // send returns bool: false = mailbox full
     sink.send(.Done)                                // end-of-stream is a message
     sink.run()
@@ -330,7 +335,7 @@ Structs are product types:
 
 ```zen
 Point*: { x: i32, y: i32 }
-p := Point(x: 3, y: 4)
+p = Point(x: 3, y: 4)
 p.x
 ```
 
@@ -434,39 +439,88 @@ drop a side-effecting argument. Do not write code whose correctness depends on
 evaluation order or count of side effects within one expression until those
 rows close.
 
+### Bindings
+
+There are three marks and each is independently optional: `::` says the binding
+may be assigned again, `:` introduces a type, and `=` supplies the value. That
+gives four local forms and no others:
+
+```zen
+x = 0          // constant, inferred type
+x: T = 0       // constant, explicit type
+x ::= 0        // mutable, inferred type
+x :: T = 0     // mutable, explicit type
+```
+
+**Constant is the unmarked default, and mutability is what you have to write.**
+That is a frequency decision, not a moral one: constants outnumber mutable
+bindings by more than three to one across this tree, so the mark belongs on the
+rarer case. Assigning to a binding that carries no `::` is `error[assign-const]`,
+reported at the DECLARATION, with a hint naming the two mutable spellings.
+
+At MODULE scope only three of the four are available: `k = 5` (constant,
+inferred), `k: T = 5` (constant, annotated) and `k ::= 5` (mutable, inferred).
+The annotated-mutable global `k :: T = 5` is not a top-level form; today it is
+silently misread as a one-variant enum declaration and the name is then
+undefined, so write `k ::= 5` for a mutable global.
+
+`:=` is **retired**. It is rejected at parse — ``error[parse]: `:=` is
+retired`` — with a diagnostic naming all four replacements. It is not a synonym for any of
+them: it was always-mutable, and being always-mutable is exactly the property
+const-by-default removed. This document is the one place in the repository
+allowed to print that token — a raw-byte scan (`harness_boundaries.zen`
+SUITE 12) fails the build on it everywhere else, in `.zen` and `.md` alike,
+comments and string literals included.
+
 ### Definite initialization
 
-Every local binding form carries a value: `x := v` and `x: T := v`. A
-value-less local declaration (`x: i32` alone) is not syntax — it is rejected at
-parse. Uninitialized locals therefore do not exist by construction, and there
-is no definite-assignment analysis because there is nothing for it to check.
+Every binding form carries a value. A value-less local declaration (`x: i32`
+alone) is not syntax: it is rejected at parse with ``expected `=` after this
+binding's type annotation``. Uninitialized locals therefore do not exist by
+construction, and there is no definite-assignment analysis because there is
+nothing for it to check.
 
-`:=` binds a new name, `=` assigns to an existing one, and `:` annotates. The
-three marks are orthogonal and compose, so adding a type never changes the
-binding operator: `x: T = v` is `error[bad-binding]`, not a second spelling of
-`x: T := v`. Value globals follow the same rule (`k := 5`, `k: T := 5`).
+### Shadowing and rebinding
 
-### Shadowing
+A bare `x = v` DECLARES a constant `x` only when nothing named `x` is in scope
+at that point — no parameter, no binding from an enclosing scope (an earlier
+binding in this statement list, a loop's index/element/handler, a lambda
+parameter, a match-arm bind), and no module global. Otherwise it ASSIGNS to the
+`x` that is in scope. The rule is implemented over the finished declaration
+list, in `mi_*`/`dbn_*` in `compiler/astops.zen`, because a body may assign a
+module global that is not yet parsed when the body is.
 
-`x := v` always introduces a fresh binding, even when `x` is already bound.
+Scope is lexical and threaded, not a flat per-function name set: two sibling
+match arms that each bind `b` are independent.
+
 Verified current behavior:
 
-- A local may shadow a parameter, and the initializer still sees the old
-  binding: in `f = (x: i32) i32 { x := x + 1; x }`, `f(41)` is `42`.
-- Rebinding in the same block is accepted — there is no redeclaration error —
-  and the later binding wins for subsequent statements. The new binding may
-  even change type: `x := 1` followed by `x := "hello"` is accepted.
+- **Rebinding in the same block is NOT accepted.** `x = 1` followed by `x = 2`
+  is `error[assign-const]` — the second statement assigns the first binding
+  rather than replacing it. Write `x ::= 1` if the name is meant to change.
+- **Parameters are assignable.** `x = v` on a parameter name is an assignment to
+  the parameter, and it is visible after the block it sits in. To shadow a
+  parameter with a fresh binding, write the `::` form: in
+  `f = (x: i32) i32 { x ::= x + 1; x }` the initializer still sees the old
+  binding, so `f(41)` is `42`.
+- **A type cannot change under a name.** The second statement is an assignment,
+  so `x = 1` followed by `x = "hello"` is `error[assign-fit]`, not a rebinding.
 - Loop-lambda parameters (`xs.loop((h, i, x) { ... })`) and bindings inside
   match-arm blocks shadow outer names only within their block; the outer
   binding is unchanged afterwards.
+- A constant local cannot shadow a module global by name — the global is in
+  scope, so `k = 3` assigns it. Write `k ::= 3` for a shadowing local. The rule
+  is deliberately insensitive to the global's own mutability, because reading a
+  global's `::` mark across a module boundary is not reliable before flatten,
+  and guessing would silently turn `depth = depth + 1` into a fresh local.
 
 Locals and parameters also shadow same-named top-level functions and
 intrinsics; calls through such a name go to the local value
-(`shadows_toplevel` in `compiler/check_validate.zen`).
+(`shadows_toplevel` in `compiler/validate/util.zen`).
 
 ### Match arm order and coverage
 
-For an enum match, the checker enforces (`compiler/check_validate.zen`,
+For an enum match, the checker enforces (`compiler/validate/core.zen`,
 `kv_match_kind`):
 
 - **Coverage**: without `_`, every declared variant needs an arm —
@@ -576,7 +630,7 @@ zero runtime cost, no comptime block, no stringly-typed API.
 
 ```zen
 sum_fields<T> = (v: T) i64 {
-    acc: i64 := 0
+    acc :: i64 = 0
     v.each_field((name, fv) {
         acc = acc + fv
     })
@@ -609,7 +663,7 @@ NOT a plain local (a member expression, a call result, or an enclosing
 reflection lambda's value parameter) is evaluated once into a hidden temp;
 assigning through such a bound subject's lambda is rejected with
 `error[reflect-write]` — bind the subject to a local first, fill the local,
-and assign it back whole (`leaf := fv` … `fv = leaf`).
+and assign it back whole (`leaf = fv` … `fv = leaf`).
 
 ### Enum Reflection
 
@@ -796,7 +850,7 @@ edge:
 
 ```zen
 // build.zen
-sdl := c_library(b, CLib(
+sdl = c_library(b, CLib(
     lib: "m",                                  // -> "-lm" appended to the target's link flags
     name: "cmath",                             // the module id programs import
     decls: [
@@ -947,7 +1001,7 @@ receivers implement `Receiver<M>` through
 Two concurrency safety guarantees are enforced, not just documented:
 
 - **Sendability (move-on-send).** The checker's SENDABILITY pass
-  (`compiler.check_validate`) kills the sender's binding when an owned `Own<T>` is
+  (`compiler.validate.args`) kills the sender's binding when an owned `Own<T>` is
   passed into a `send`, so the sender cannot keep using memory the receiving actor
   now owns (a later use is `error[ownership]`). A `Ptr<T>` is sendable only when
   `T` is deeply immutable; `Arc<T>` is the shared-sendable path. A companion
@@ -968,7 +1022,7 @@ lower-level queue wrapper: it exposes `tell(message)` for fire-and-forget sends,
 drives a receiver through `claim_reply`, wraps request/reply flows through
 `request`, and frees the engine storage through `free`. Actor cells infer
 their message type from typed destinations such as
-`cell_r: Result<actor.ActorCell<Msg>, IoError> := actor.cell(heap.addr(), 16)`,
+`cell_r: Result<actor.ActorCell<Msg>, IoError> = actor.cell(heap.addr(), 16)`,
 then unwrap with `cell_r.expect("cell allocation")` (or keep the failure in the
 value flow with `.match` / `.or_return()`), where `actor` is a namespace bind
 for `std.concurrent.actor` and `heap` may come from namespace-bound

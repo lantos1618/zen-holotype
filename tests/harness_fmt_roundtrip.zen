@@ -141,6 +141,18 @@ frt_unparseable_fmt_preserves = (mp: MutPtr<Malloc>) bool {
     rc = shell(mp.zo_cmd("cp $ZT/rtbad.zen $ZT/rtbad2.zen; timeout 60 ./zen fmt $ZT/rtbad2.zen >/dev/null 2>&1; rc=$?; cmp -s $ZT/rtbad.zen $ZT/rtbad2.zen && test $rc -ne 0")).expect("harness: shell")
     rc == 0
 }
+// ── CHAR LITERALS round-trip through their SOURCE spelling, not just their value ──────────────────
+// The corpus checks above cannot see this class of bug. Emit-equivalence is blind to it (a char
+// literal and its byte value lower to the identical C) and so is idempotence (`8` formats to `8`,
+// stably) — yet `'\x08'` coming back as `8` is a real loss: the byte survives, the meaning does not.
+// So this asserts the missing property directly: the formatter is a byte-for-byte FIXED POINT on a
+// file spelling every char literal it can print. Pre-fix, `zen fmt` rewrote `'\x08'`/`'\x0c'`/
+// `'\x0b'`/`'\x7f'`/`'\xff'` to bare numbers and the `cmp` fails; the second `fmt` pass is the
+// `fmt(fmt(x)) == fmt(x)` leg, and `zen run` proves the bytes still carry their values (222).
+frt_char_escapes_roundtrip = (mp: MutPtr<Malloc>) bool {
+    rc = shell(mp.zo_cmd(mp.zo_join(["", "f=tests/fixtures/fmt/char_escapes_formatted.zen; ", "cp $f $ZT/rtce.zen && timeout 60 ./zen fmt $ZT/rtce.zen >/dev/null 2>&1 && ", "cmp -s $ZT/rtce.zen $f && ", "timeout 60 ./zen fmt $ZT/rtce.zen >/dev/null 2>&1 && cmp -s $ZT/rtce.zen $f && ", "grep -Fq \"bs = '\\\\x08'\" $ZT/rtce.zen && grep -Fq \"hi = '\\\\xff'\" $ZT/rtce.zen && ", "timeout 60 ./zen run $ZT/rtce.zen; test $? = 222"]))).expect("harness: shell")
+    rc == 0
+}
 // ── entry: corpus round-trip (parallel) + the teeth self-tests (serial, cheap) ────────────────────
 harness_fmt_roundtrip_run* = () i32 {
     m = Malloc(_: 0)
@@ -186,6 +198,6 @@ harness_fmt_roundtrip_run* = () i32 {
     cf = mp.frt_report("fmt_roundtrip (idempotence + emit-equivalence per file)", files)
     free(cbase)
     free(base)
-    st = run_suite("fmt_roundtrip teeth (oracle catches a mutant; --check fails on unparseable)", [mp.frt_mutation_caught(), mp.frt_unparseable_check_fails(), mp.frt_unparseable_diag_positioned(), mp.frt_unparseable_fmt_preserves()])
+    st = run_suite("fmt_roundtrip teeth (oracle catches a mutant; --check fails on unparseable; char escapes)", [mp.frt_mutation_caught(), mp.frt_unparseable_check_fails(), mp.frt_unparseable_diag_positioned(), mp.frt_unparseable_fmt_preserves(), mp.frt_char_escapes_roundtrip()])
     cf + st
 }

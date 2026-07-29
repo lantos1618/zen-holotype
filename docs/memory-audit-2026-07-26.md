@@ -118,16 +118,16 @@ The read-only `Ptr<T>` discipline is real:
 | Probe | Result |
 |---|---|
 | `p: Ptr<i64>; p.store(99)` | `error[ptr-write]` |
-| `q: MutPtr<i64> := p` | `error[assign-fit]` |
+| `q: MutPtr<i64> = p` | `error[assign-fit]` |
 | `poke = (c: Ptr<Cell>) void { c.v = 7 }` | `error[ptr-write]` |
-| `s: [i64] := slice(p, 1)` from a `Ptr` | `error[ptr-write]` — `slice` is in the write gate |
+| `s: [i64] = slice(p, 1)` from a `Ptr` | `error[ptr-write]` — `slice` is in the write gate |
 
 That last row matters: someone thought about the laundering route through `slice` and closed it.
 
 ### 3.2 …and the one-token bypass  **[V]**
 
 ```zen
-p: Ptr<i64> := x.addr()
+p: Ptr<i64> = x.addr()
 p.store(99)              // error[ptr-write]
 p.offset(0).store(99)    // compiles, prints 99
 ```
@@ -270,8 +270,8 @@ Pony capability Zen actually has."~~ **That claim was false and is retracted.** 
 does kill the sender's *binding* — but it is affine in the binding, not in the object:
 
 ```zen
-o := a.new_in(Cell(v: 1)).expect("own")
-alias := o.ptr()      // public, zero-ceremony MutPtr<T> extraction
+o = a.new_in(Cell(v: 1)).expect("own")
+alias = o.ptr()      // public, zero-ceremony MutPtr<T> extraction
 o.release_in(a)       // owner consumed, block freed
 alias.v = 777         // zen check: ok  →  prints 777
 ```
