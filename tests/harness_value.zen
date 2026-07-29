@@ -1525,8 +1525,31 @@ harness_value_run* = () i32 {
             src: "C: Red | Green\ntest* = () i32 {\n  cs: [C] := [.Red, .Green]\n  n := 0\n  cs.loop((h, i, x) {\n    n = n + (x.variant_name() == \"Green\").match ({ true => 1, false => 0 })\n  })\n  n\n}",
             want: "1",
         ),
+        VCase(
+            src: "D: { a: i64 = 7, b: i64 = 5, c: i64 }\ntest* = () i64 {\n  x := D()\n  y := D(b: 100)\n  x.a * 1000 + x.b * 100 + x.c * 10 + y.b\n}",
+            want: "7600",
+        ),
+        VCase(
+            src: "Box*<T>: { v: T, tag: i64 = 9 }\ntest* = () i64 {\n  b := Box<i64>(v: 4)\n  b.v * 100 + b.tag\n}",
+            want: "409",
+        ),
+        VCase(
+            src: "S: { v: i32 }\nTr*: { m: (MutPtr<Self>) i32 }\nS.impl(Tr, {\n    m = (s) i32 { s.v + 1 }\n})\ntest* = () i32 {\n  s := S(v: 41)\n  s.addr().m()\n}",
+            want: "42",
+        ),
+        VCase(
+            src: "S: { n: i64 }\nTr*: { bump: (MutPtr<Self>) void }\nS.impl(Tr, {\n    bump = (s) void { s.n += 1 }\n})\ntest* = () i64 {\n  s := S(n: 41)\n  p := s.addr()\n  p.bump()\n  s.n\n}",
+            want: "42",
+        ),
     ])
 }
+// FIELD DEFAULTS beat zero-fill. Every default here is NON-ZERO on purpose: a zero default
+// would pass under the pre-existing designated-initializer zero-fill and prove nothing.
+// `D()` = every default; `D(b: 100)` = an explicit value WINS over the default it names while
+// the others still default; `c` has no default and keeps zero-fill.
+// INFERRED RECEIVER in an impl method. The mutation case is the load-bearing one: the receiver
+// is inferred as `MutPtr<S>`, so the write lands on the caller's value (a by-value receiver
+// would mutate a copy and yield 41).
 // ── slice-literal escape classification (compiler.backend.c.c_escape) ──────────────────────
 // The USE-AFTER-RETURN guard: a literal returned out of its frame must still read correctly in
 // the caller. Stack storage for this shape is exactly the bug the heap promotion exists to

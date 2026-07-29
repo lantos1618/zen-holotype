@@ -7,7 +7,8 @@
 { scan } = compiler.lex
 { Malloc } = std.mem.alloc
 { lexeme } = compiler.parse_atom
-{ parse_ty, perr_set_at, is_comma, is_rbrace, skip_to_brace, param_buf, take_params } = compiler.parse_type
+{ parse_ty, perr_set_at, impl_recv_param, irecv_enter, irecv_exit, is_comma, is_rbrace,
+  skip_to_brace, param_buf, take_params } = compiler.parse_type
 { parse_decl_at, DCont } = compiler.parse
 { StructEnd, data_fields } = compiler.parse_type_decl
 { param_names_has } = compiler.astops
@@ -102,11 +103,13 @@ fill_impl_one = (
             next: pos,
         )
     })
+    prev := irecv_enter()    // inside an impl block the receiver slot may be written bare
     de := a.parse_decl_at(src, pos)
+    irecv_exit(prev)
     cn := a.impl_cname_in(trname, tyname, de.func.name)
     buf[i] = dfunc(Func(
         name: cn,
-        params: de.func.params,
+        params: a.impl_recv_param(tyname, de.func.params),
         ret: de.func.ret,
         tparams: de.func.tparams,
         body: de.func.body,

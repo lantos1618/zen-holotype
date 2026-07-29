@@ -334,6 +334,23 @@ p := Point(x: 3, y: 4)
 p.x
 ```
 
+A field may declare a default. Any field may be omitted from a literal: an
+omitted field with a default gets it, an omitted field without one is
+zero-filled, and a written value always wins. A default is re-evaluated at
+every construction, so it must be a constant (a literal, `true`/`false`, or
+arithmetic over them) — a call there would be a hidden per-value effect, and an
+allocating one a hidden heap allocation; both are `error[field-default]`.
+
+```zen
+Sum*: { total: i64 = 0, seen: i64 = 0, closed: bool = false }
+Sum()            // total 0, seen 0, closed false
+Sum(seen: 2)     // seen 2, the rest defaulted
+```
+
+Defaults apply to the literal that names the type. A struct-typed field left
+out of a literal is zero-filled, not constructed, so its own type's defaults do
+not reach it — name it (`Outer(i: Inner())`) to get them.
+
 Enums are tagged sums:
 
 ```zen
@@ -424,6 +441,11 @@ value-less local declaration (`x: i32` alone) is not syntax — it is rejected a
 parse. Uninitialized locals therefore do not exist by construction, and there
 is no definite-assignment analysis because there is nothing for it to check.
 
+`:=` binds a new name, `=` assigns to an existing one, and `:` annotates. The
+three marks are orthogonal and compose, so adding a type never changes the
+binding operator: `x: T = v` is `error[bad-binding]`, not a second spelling of
+`x: T := v`. Value globals follow the same rule (`k := 5`, `k: T := 5`).
+
 ### Shadowing
 
 `x := v` always introduces a fresh binding, even when `x` is already bound.
@@ -471,6 +493,15 @@ Circle.impl(Area, {
     area = (c: Ptr<Circle>) i32 { 3 * c.r * c.r }
 })
 ```
+
+An impl method's receiver — its first parameter — may be written bare: its type
+is the type the impl is on, so `area = (c) i32 { 3 * c.r * c.r }` is the same
+declaration as above with the annotation elided. A bare receiver is inferred as
+`MutPtr<Type>`, the receiver every trait requirement in `src/std` declares, and
+a read-only method reads through it just as well; the by-value receiver stays
+available by writing it out. Only that slot may be bare — every other parameter
+still needs `name: Type`, and outside an impl block an unannotated parameter is
+a parse error.
 
 An impl must define every required method with the exact receiver, parameter,
 and return types after substituting `Self` with the implementing type. Trait
@@ -545,7 +576,7 @@ zero runtime cost, no comptime block, no stringly-typed API.
 
 ```zen
 sum_fields<T> = (v: T) i64 {
-    acc: i64 = 0
+    acc: i64 := 0
     v.each_field((name, fv) {
         acc = acc + fv
     })
