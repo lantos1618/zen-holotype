@@ -140,9 +140,10 @@ matches_kind_at = (sv: [u8], i: i64, name: StringView, kind: i64) bool {
 // about the call is checkable — a byte-typed parameter can legitimately take a computed number — so
 // the rule is exactly this shape and no wider: a BARE DECIMAL LITERAL as the LAST argument.
 //
-// It cannot see through a conversion (`gstr_push(mp, 8.to_u8())` ends in `)`, not a digit). That is
-// not laziness: `'\x08'` is a legal char literal that `zen fmt` prints back as `8`, so those six
-// sites CANNOT be written as char literals today and the rule must not demand it.
+// It DOES see through one conversion, `.to_u8()`, because that was the whole escape hatch: the JSON
+// `\b`/`\f` decoders wrote `gstr_push(mp, 8.to_u8())` only because `zen fmt` used to print the char
+// literal `'\x08'` back as the bare number `8`. The formatter round-trips `'\xNN'` now, so the cast
+// no longer buys anything and `to_u8_tail` below judges what it wraps.
 // the index of the `)` closing the `(` at `i`, or sv.len if the file ends first.
 close_paren = (sv: [u8], i: i64, depth: i64) i64 {
     (i >= sv.len).match ({
@@ -162,8 +163,16 @@ back_space = (sv: [u8], j: i64) i64 {
 back_digits = (sv: [u8], j: i64) i64 {
     (j >= 0 && sv[j] >= '0' && sv[j] <= '9').then({ sv.back_digits(j - 1) }, { j })
 }
+// `push(mp, 8.to_u8())` — a decimal wearing a conversion. `zen fmt` now round-trips `'\xNN'` (see
+// `ff_char` in compiler.pretty), so `'\x08'` is writable and the cast buys nothing the char literal
+// cannot say. Step back over the `.to_u8()` suffix and judge what it wraps: a bare decimal is a
+// violation, while `cp.to_u8()` / `(192 | cp >> 6).to_u8()` walk back onto a non-digit and pass.
+to_u8_tail = (sv: [u8], end: i64) i64 {
+    (end >= 8 && end <= sv.len && sv.tok_at(".to_u8()".view(), end - 8)).then({ end - 8 }, { end })
+}
 // walking back from the closing `)`: spaces, then a digit run, then the `,`/`(` that opens the slot.
-last_arg_is_decimal = (sv: [u8], end: i64) bool {
+last_arg_is_decimal = (sv: [u8], end0: i64) bool {
+    end = sv.to_u8_tail(end0)
     j = sv.back_space(end - 1)
     d = sv.back_digits(j)
     (d == j).match ({
@@ -191,38 +200,52 @@ push_literal_at = (sv: [u8], i: i64) bool {
 // quoted bytes reported it as a raw-alloc violation. Quote parity also handles `"""` raw strings —
 // three toggles is one net toggle — so `"""…"""` opens and closes correctly. A raw string whose
 // CONTENT holds an odd number of `"` would desync; none of the scanned files does that today.
+//
+// CHAR LITERALS ARE TRACKED TOO, and that is not cosmetic — it is why this scanner had teeth at all
+// on the JSON decoders. `'"'` is one quote byte inside a char literal; json.zen writes it 12 times
+// and lsp.zen 10, and each one flipped `in_string`, so alternating half of both files was silently
+// treated as string content and never scanned. `push_in(a, 8)` sat inside one of those blind windows.
+// `in_char` closes it, and a newline force-clears it so a stray apostrophe in prose (a block comment,
+// which this scanner does not model) can desync at most one line instead of the rest of the file.
 file_has = (sv: [u8], name: StringView, kind: i64) bool {
     found ::= false
     in_comment ::= false
     in_string ::= false
+    in_char ::= false
     escaped ::= false
     sv.loop((h, i, b) {
         (b == '\n').then({
             in_comment = false
+            in_char = false
         })
         (in_comment == false).then({
             escaped.match ({
                 true  => {
                     escaped = false
                 },
-                false => (b == '\\' && in_string).match ({
+                false => (b == '\\' && (in_string || in_char)).match ({
                     true  => {
                         escaped = true
                     },
-                    false => (b == '"').match ({
+                    false => (b == '"' && in_char == false).match ({
                         true  => {
                             in_string = in_string == false
                         },
-                        false => (in_string == false).then({
-                            (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({
-                                true  => {
-                                    in_comment = true
-                                },
-                                false => sv.matches_kind_at(i, name, kind).then({
-                                    found = true
-                                    h.break
-                                }),
-                            })
+                        false => (b == '\'' && in_string == false).match ({
+                            true  => {
+                                in_char = in_char == false
+                            },
+                            false => (in_string == false && in_char == false).then({
+                                (b == '/' && i + 1 < sv.len && sv[i + 1] == '/').match ({
+                                    true  => {
+                                        in_comment = true
+                                    },
+                                    false => sv.matches_kind_at(i, name, kind).then({
+                                        found = true
+                                        h.break
+                                    }),
+                                })
+                            }),
                         }),
                     }),
                 }),
@@ -766,17 +789,20 @@ spelling_suite = (mp: MutPtr<Malloc>) i32 {
 // The needle is the two bytes `:` `=` NOT preceded by another `:`, so `x ::= v` (the mutable form)
 // and `x :: T = v` never match.
 //
-// Three files are exempt, each because it must NAME the dead spelling to do its job:
+// Four files are exempt, each because it must NAME the dead spelling to do its job:
 //   * src/compiler/validate/diag.zen — the diagnostic that redirects it. Naming a retired spelling
 //     is the whole content of redirecting it (the same exemption SUITE 11 gives validate/util.zen).
 //   * tests/harness_build.zen — the diagnostic's own test inputs. A case that pins `:= is retired`
 //     has to feed the parser a walrus.
+//   * docs/SPEC.md — the language reference. A spec that cannot print the token it retired has to
+//     describe it in circumlocution, which is worse documentation than the risk this rule guards.
 //   * this file — it holds the needle.
 // Named individually, not by directory: a new file cannot inherit the exemption.
 walrus_allowed = (path: StringView) bool {
     path == "src/compiler/validate/diag.zen"
         || path == "tests/harness_build.zen"
         || path == "tests/harness_boundaries.zen"
+        || path == "docs/SPEC.md"
 }
 // `:=` at index i, with a leading `:` EXCLUDING the match — `::=` is the live mutable form.
 walrus_at = (sv: [u8], i: i64) bool {
@@ -818,8 +844,17 @@ walrus_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
 // Same tree-wide `find` as SUITE 11, for the same reason: tests/ and scripts/ hold real Zen that the
 // compiler compiles (scripts/alloc-fuzz/alloc-stress.zen was the last file in the tree still using
 // the retired spelling, and it sits outside BOTH ob_files.txt and the fmt gate's file set).
+//
+// …AND `*.md`, which is the other half and was the bigger hole. `make docs-check` verifies the
+// documentation INVENTORY and its link targets; nothing looked at what the prose TEACHES. So the
+// retirement landed in the parser while docs/SPEC.md still documented the dead spelling as THE
+// binding form — 24 sites across four documents, every one of them source a reader would type. A
+// doc that teaches a spelling the compiler rejects is not a smaller failure than a comment that
+// does; it is a larger one, because the comment has no audience outside this repo. Markdown is a
+// RAW-BYTE scan like the Zen half, with no code-fence special case: a walrus in prose is teaching
+// it just as surely as a walrus in a fence.
 walrus_suite = (mp: MutPtr<Malloc>) i32 {
-    shell(mp.zo_cmd("find . -name '*.zen' -not -path './.git/*' -not -path './.claude/*' 2>/dev/null | sed 's|^./||' | LC_ALL=C sort > $ZT/ob_all.txt"))
+    shell(mp.zo_cmd("find . '(' -name '*.zen' -o -name '*.md' ')' -not -path './.git/*' -not -path './.claude/*' 2>/dev/null | sed 's|^./||' | LC_ALL=C sort > $ZT/ob_all.txt"))
     mp.contents_in(mp.zo_path("ob_all.txt")).match ({
         .Ok(listing) => {
             files = mp.split_in(listing, '\n')

@@ -7,12 +7,11 @@
 { Malloc } = std.mem.alloc
 { ArmData, BinData, CallData, CondData, Expr, FieldInit, LambdaData, LoopData, MakeEnumData,
   MakeStructData, MatchData, MethodCallData, StrData, TagData, Ty } = compiler.ast.ast_types
-{ sbyte } = compiler.genc
 { escape_into } = std.text.ascii    // the shared scan-and-emit loop; the Zen-source escape TABLE stays here
 { payload_fname } = compiler.mangle
-{ ff_append, ff_block, ff_char, ff_cond, ff_flush_leading, ff_indent, ff_open_trailing, ff_push,
-  ff_str_has_nl, ff_string, ff_trailing, ff_ty, ff_tys, gf_is_alias, gf_cond_open_cmt, gf_line_of,
-  gf_raw_lit } = compiler.pretty
+{ ff_append, ff_block, ff_char, ff_cond, ff_flush_leading, ff_hex_byte, ff_indent, ff_open_trailing,
+  ff_push, ff_str_has_nl, ff_string, ff_trailing, ff_ty, ff_tys, gf_is_alias, gf_cond_open_cmt,
+  gf_line_of, gf_raw_lit } = compiler.pretty
 { gstr_int, left_pos_of } = compiler.astops
 { ff_lparams } = compiler.pretty_decl
 { times, step_while } = std.core.count
@@ -656,13 +655,8 @@ ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) S
     out
 }
 // ── string literal escaping ────────────────────────────────────────────────────
-// A non-printable byte as a `\xNN` hex escape — the ONLY numeric string escape the Zen lexer accepts
-// (parse_expr.unescape reads `\xNN`; there is no octal form, so genc's `\ooo` cannot be reused here).
-ffhex = (d: i64) u8 { sbyte("0123456789abcdef", d) }
-ff_hex_byte = (s: String, a: MutPtr<Malloc>, b: u8) String {
-    n = b.to_i64()
-    s.ff_append(a, "\\x").ff_push(a, ffhex(n / 16)).ff_push(a, ffhex(n % 16))
-}
+// `ff_hex_byte` (the shared `\xNN` writer) lives in compiler.pretty beside `ff_char`, which needs the
+// same escape for a non-printable CHAR literal.
 // escape one byte for a Zen string literal. `"`/`\` are quoted; the common control bytes get their short
 // escapes (\n \r \t); printable ASCII (0x20..0x7E) AND high UTF-8 bytes (>=0x80, valid multibyte text like
 // an em-dash) pass through verbatim; every remaining byte — the C0 controls (CR was the bug #62, plus \t

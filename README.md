@@ -73,7 +73,7 @@ checked_div = (n: i32, d: i32) Result<i32, IoError> {
     (d == 0).match({ true => .Err(.NotFound), false => .Ok(n / d) })
 }
 half = (n: i32) Result<i32, IoError> {
-    q := checked_div(n, 2).or_return()        // unwrap .Ok, or propagate the .Err
+    q = checked_div(n, 2).or_return()         // unwrap .Ok, or propagate the .Err
     .Ok(q)
 }
 

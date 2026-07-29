@@ -22,7 +22,7 @@ Labels:
 | Goal | Current result | Distance |
 |---|---|---|
 | Self-hosted, deterministic, small bootstrap | Zen compiler reproduces committed C byte-for-byte; C and JS runtime floors are the only hand-written target substrate. | **Shipped** |
-| One understandable language structure | Records, enums, signatures, traits-as-records, UFCS, and value matches form a promising core; match guards are gone (`if` is rejected at the lexer, `error[no-if]`). Enum/bitwise `\|`, internal `@while`, evaluate-more-than-once lowering, and backend name special cases still weaken it. | **Partial — coherent direction, unsafe lowering edges** |
+| One understandable language structure | Records, enums, signatures, traits-as-records, UFCS, and value matches form a promising core; match guards are gone (`if` is rejected by a source preflight in the validate pass, `error[no-if]`). Enum/bitwise `\|`, internal `@while`, evaluate-more-than-once lowering, and backend name special cases still weaken it. | **Partial — coherent direction, unsafe lowering edges** |
 | Correct programs accepted; bad programs rejected before C/JS | Broad type, generic, trait, pointer, ownership, escape, diagnostic, and fuzz coverage exists. The exhaustive audit also found silent miscompiles, type/symbol identity collisions, malformed literals that are accepted, and backend-specific reinterpretation. | **Partial — broad, not yet trustworthy** |
 | Errors are values, panic is explicit | `Result`, `Opt`, `.or_return`, fallible allocation/IO, and runtime checks work. Some best-effort/sentinel APIs and actor-panic cleanup gaps remain. | **Partial — good core, uneven std surface** |
 | Explicit capability and memory model | `Sys`, `Writer`, `Fs`, explicit allocators, pointer kinds, owner wrappers, and actor send checks exist. Ambient `std.rt` and scope/runtime experiments still coexist. | **Partial — competing surfaces** |
@@ -48,26 +48,32 @@ not instrument lines or branches. Every reported feature area is mapped to imple
 | Modules, privacy, namespace binds | Shipped/partial: dotted ids, ModuleSig, identity diagnostics; flat concat remains the compat layer | `compiler.resolve` | `harness_modules.zen`, `make difftest` | Strong |
 | C backend and runtime | Shipped | `backend/c/c_emit.zen`, `zenrt.c` | build/value/examples/fixpoint | Strong |
 | JavaScript backend | Experimental target subset | `backend/js/js.zen`, `zenrt.js` | build JS + limited differential suite | Moderate |
-| Diagnostics and source mapping | Shipped, multi-channel | `check_validate.zen`, `diagnostic.zen`, `driver.zen` | verdict-kind + diagnostic cases | Strong |
+| Diagnostics and source mapping | Shipped, multi-channel | `validate/*.zen`, `diagnostic.zen`, `driver.zen` | verdict-kind + diagnostic cases | Strong |
 | AST formatter | Partial: known semantic round-trip failures | `pretty.zen`, driver fmt path | fmt fixtures, whole-tree check, idempotence | Moderate |
 | `zenc doc` | Minimal by design | driver doc path | a few build-harness cases | Thin |
 | `Result`/`Opt`, IO, panic policy | Shipped/uneven | `std.core.result`, `std.io`, `std.sys` | result, IO, runtime panic cases | Moderate |
-| Pointer direction/nullability | Shipped with raw floor | `genc` type tags, `check`, `check_validate` | adversarial verdict/diagnostic pairs | Strong |
-| Ownership, escape, scratch, sendability | Partial bounded analyses | `check_validate.zen` | large verdict safety matrix | Moderate |
+| Pointer direction/nullability | Shipped with raw floor | `genc` type tags, `check*.zen`, `validate/*.zen` | adversarial verdict/diagnostic pairs | Strong |
+| Ownership, escape, scratch, sendability | Partial bounded analyses | `validate/ownership.zen` | large verdict safety matrix | Moderate |
 | Text and collections | Broad, APIs still shifting | `std.text`, `std.collections` | value/build/module/std fixtures | Moderate |
 | `Sys`, ambient rt, scopes | Multiple live surfaces | `std.sys`, `std.rt`, `std.scope`, concurrent runtime | build and rt/scope fixtures | Moderate |
 | Actors, pool, panic isolation | Working split APIs | `std.concurrent.actor`, `pool_actor`, `pool`, `zenrt.c` | parallel/stress/panic/stack-overflow fixtures | Moderate |
 
-Current test inventory is 201 `.zen` fixture files plus large inline case arrays across 8,790 lines
-of harness source. This audit removed a committed generated ELF and flagged misleadingly-named `bool_guard_wild`
+Current test inventory is 337 tracked `.zen` fixture files
+(`git ls-files 'tests/fixtures/**/*.zen' 'tests/fixtures/*.zen' | wc -l`) plus large inline case
+arrays across about 19,100 lines of harness source in 22 files (`cat tests/harness*.zen | wc -l`). The
+2026-07-12 audit removed a committed generated ELF and flagged misleadingly-named `bool_guard_wild`
 fixtures (they test return-in-arm, not wildcards) plus stale hard-coded verdict case counts.
 
-The census was exhaustive rather than sample-based: all 303 current `.zen` files were read, including
-all 213 test sources, all 77 compiler/stdlib sources, the root driver, and all 12 examples. All 52
-Markdown files present before consolidation and every other text source, workflow, manifest, editor,
-runtime, and script file were also read. Generated `bootstrap/zenc.gen.c` and the `zenc` executable
-were inspected mechanically; the generated C was regenerated and byte-compared rather than treated
-as independent handwritten logic.
+**Frozen audit record — 2026-07-12, base `5f33f01`. These counts describe the tree as it stood on
+that date and are deliberately not updated.** The census was exhaustive rather than sample-based:
+all 303 `.zen` files then present were read, including all 213 test sources, all 77 compiler/stdlib
+sources, the root driver, and all 12 examples. All 52 Markdown files present before consolidation and
+every other text source, workflow, manifest, editor, runtime, and script file were also read.
+Generated `bootstrap/zenc.gen.c` and the `zenc` executable were inspected mechanically; the generated
+C was regenerated and byte-compared rather than treated as independent handwritten logic. For scale,
+the tree has since grown to 525 tracked `.zen` files (359 under `tests`, 142 under `src`, 13
+examples) and consolidated down to 15 tracked `.md` files (`git ls-files '*.zen' | wc -l`,
+`git ls-files '*.md' | wc -l`); the findings below were derived at the smaller tree.
 
 ## Test audit
 
@@ -76,7 +82,7 @@ passed in 6.05 seconds. Slow project/module/runtime/campaign work consumed 96.4%
 numbers describe the audit host, not a portable performance guarantee.
 
 After the immediate cleanup and targeted `if` diagnostic, the final fast lane passed in 6.83 seconds
-and the full harness plus byte fixpoint still passed. With the new eight-job default the full run took
+and the full harness plus byte fixpoint still passed. With the bounded fan-out then introduced the full run took
 190.02 seconds and still reported 1.47 GB peak RSS: limiting fan-out is a useful system-load bound,
 but the heavyweight deep-resolver compile remains a separate memory target.
 
@@ -91,14 +97,14 @@ but the heavyweight deep-resolver compile remains a separate memory target.
 | 81 duplicate inline source groups causing 82 redundant verdict compilations | Redundant work and misleading test volume. | Collapse each source to one named case with all required assertions. |
 | Anonymous `.`/`F` reporting | Poor failure localization. | Add stable case names and print the name/source on failure. |
 | Source-grep architecture scans | Useful as a temporary fence, brittle as correctness proof. Four unreadable-file paths formerly passed. | Now fail closed; replace private-name substring checks with behavior or typed API-surface checks where possible. |
-| Unbounded `nproc` subprocess fan-out | Wasteful: the audit reached 1.47 GB RSS. | Default is now capped at 8; `ZEN_TEST_JOBS=N` is the explicit override. |
+| Unbounded `nproc` subprocess fan-out | Wasteful: the audit reached 1.47 GB RSS. | Bounded by two nested defaults in `tests/harness.zen`: the outer suite pool is 6 (`hp_pool`, :132, override `ZO_SUITE_POOL`) and each suite child fans its cases out over 8 inner workers (`hp_inner`, :159, override `ZO_SUITE_INNER`, passed down as `ZO_NWORKERS`). There is no `ZEN_TEST_JOBS`. |
 | Raw failure count as process exit | Incorrect at exactly 256/512/... failures because POSIX truncates status. | Fixed: the harness now exits 0/1 while retaining individual failure marks. |
 | Dead serial runner copies | Maintenance-only duplication. | Removed; argparse now reuses the parallel module-value runner. |
 | 220 random token/noise inputs on every full run | Campaign value, low merge-loop value after known crash seeds are retained. | Move random campaigns to an explicit campaign/nightly tier. |
 | “Anonymous struct” fixtures rewritten to generated named structs | Bullshit coverage: they no longer exercise anonymous source syntax. | Replace with raw-source compile plus formatter round-trip cases. |
 | OOM tests with unreachable branches or “any Err” oracles | Can pass without testing the claimed cleanup/error path. | Use allocation-stage sweeps, exact variants, and acquired/released balance. |
 | Concurrency assertions based only on worker count/timing | Scheduler-sensitive and sometimes unable to prove the claimed queue/CondVar path. | Add barriers/instrumentation; keep probabilistic variants out of the merge lane. |
-| `tests/atomic_test.zen` | Unwired and always returns success after printing. | Convert to assertions and wire it, or delete it. |
+| `tests/atomic_test.zen` | Unwired and always returned success after printing. | Done: the delete branch was taken — the file no longer exists. |
 
 ## Important current limits and defects
 
@@ -106,7 +112,7 @@ but the heavyweight deep-resolver compile remains a separate memory target.
 |---|---|---|
 | std path resolution | `zen` resolves `src/std` relative to the project root (the binary's directory, or `$ZEN_ROOT`), not the invocation cwd. | Run the repo-built `./zen` in place; a relocated binary needs `$ZEN_ROOT` pointing at the checkout. |
 | Parallelism fixtures | 5 pool fixtures assert *observed* concurrency and flake under machine load. | Their run stage is skipped in `make difftest`; check/emit still compared. |
-| Ordinary `if` | Any `if` token is rejected at the lexer with `error[no-if]` and a teaching hint; match guards were removed entirely (2026-07-18). | Use `.match` (or `.then` for one-way effects); nest a boolean `.match` in an arm body where a guard was wanted. |
+| Ordinary `if` | Any `if` token is rejected with `error[no-if]` and a teaching hint; match guards were removed entirely (2026-07-18). The rejection is a source preflight in the validate pass — `check_module_no_if_diagnostic_from_source` (`src/compiler/validate/core.zen:138`) over `first_if_offset` (`src/compiler/validate/util.zen:649`), which token-scans so `if` inside a comment or string does not trip. `src/compiler/lex.zen` knows nothing about `if`. | Use `.match` (or `.then` for one-way effects); nest a boolean `.match` in an arm body where a guard was wanted. |
 | Enum separator | `\|` separates variants and is also bitwise OR. | Comma-separated variants are the chosen cleanup direction but require a bootstrap migration. |
 | Local packages | Dotted user modules resolve from the entry program's directory as one logical namespace (`app.utils` → `app/utils.zen`); registered roots/dependency metadata still absent. | Structure projects freely under the entry dir; package roots are the next module-system stage. |
 | External signatures | Bodyless functions type-check calls and link only when used; no later Zen definition/completeness pairing. std's foreign prototypes are verified against the real system headers by `make ffi-verify` (CI-gated). | Use them for FFI today, not as a finished module-signature system. |
@@ -143,16 +149,16 @@ coherent row or tightly related group at a time.
 | P0 | Generic tracing is erased to `Traced<Node>` regardless of `T`, and collection frees tracked blocks through the collector caller's allocator rather than the allocator that created each block. | `std.mem.trace::tracked_in`, `blk_trace`, `blk_drop`, `free_white_in` | Two payload types and two counting allocators; dispatch the right trace/drop and free through original provenance. |
 | P0 | JS `realloc` copies the requested new size without knowing the old size, reading into adjacent allocations on growth. | `bootstrap/zenrt.js::__zr.realloc` | Grow a block adjacent to a sentinel allocation; copy exactly `min(old,new)` bytes. |
 | P0 | Compound assignments can evaluate the base/index twice. | `compiler.parse_stmt::parse_comp_idxset_stmt`, `parse_comp_set_stmt`, and block twins | `a[next()] += 1` calls `next` exactly once. |
-| P0 | Literal matches and discarded enum matches can evaluate their subject once per comparison/access rather than once per match. | `compiler.parse_expr::parse_lit_arm_lit` / `cons_lit_arm`; `compiler.check::lower_match_arms` | Side-effectful literal and enum subjects run once in value and statement position on C and JS. |
-| P0 | Generic substitution duplicates nested side effects when a parameter is reused and drops them when unused. | `compiler.check::subst_var`, `arg_needs_bind` | `twice(side()+1)` and `drop(side()+1)` each call `side` once. |
-| P0 | Anonymous structural identity hashes field names but not field types; different layouts can become the same generated type. | `compiler.genc::mangle_anon_in`; `compiler.parse_type::register_anon` | Use `{q:i32}` and `{q:i64}` together, plus distinct enum payload records; layouts and values remain distinct. |
-| P0 | Generic/function type mangling uses unescaped underscore concatenation, so distinct type argument trees can share a symbol and monomorphization entry. | `compiler.genc::mangle_ty`, `mangle_write_args`, `mangle_semantic_ty`; `compiler.mono::has_mangled` | Colliding names such as `Pair<A_B,C>` / `Pair<A,B_C>` emit distinct symbols and layouts. |
-| P0 | Generated C temporaries use fixed user-visible names such as `_zdl` and `_subj`. | `compiler.backend.c.c_emit` binary, match, sequence, and null lowerings | User locals with every reserved-looking name behave identically; generated names come from a hygienic ID. |
-| P0 | Parameter-capturing closure substitution ignores lambda-local shadowing. | `compiler.check::clos_sub_var`, `clos_sub_stmt`, `lift_arms_cap`, `clos_bad_arms` | Local-shadow closures preserve lexical binding. |
-| P0 | JS backend rewrites every field named `u`, dispatches intrinsic/DOM behavior by bare function name, and returns raw DOM objects/strings where Zen expects `Opt`/`StringView` representations. | `compiler.backend.js.js::js_member`, `js_dom_dispatch`; `compiler.backend.c.c_emit::call_kind`; DOM lowering | Ordinary `S(u:7).u`, function values named `load`, user `log`, DOM Some/None, and DOM text round-trip match C/source semantics. |
-| P1 | Formatter can remove generic parameters from bodyless signatures, change nonprintable `u8` chars into `i32` literals, and lose multi-payload enum syntax. | `compiler.pretty::ff_foreign`, `ff_char`, `ff_mkenum`, `ff_arm_pat` | Format, reparse, and compare typed meaning for all three forms; require idempotence. |
-| P1 | Duplicate boolean labels are accepted and reinterpreted; empty/multibyte chars and invalid hex escapes fabricate values; nested-bracket assignment places are misparsed. | `compiler.parse_expr::bool_close`, char/unescape paths; `compiler.lex::char_end`; `compiler.parse_stmt::skip_brackets` | Reject duplicate/non-exhaustive bool arms and malformed escapes; accept `a[b[0]] = 3`. |
-| P1 | Generic nesting beyond 24 is silently dropped; large enum default literals get contradictory `i32`/`i64` inference; JS fixed-width binding facts leak out of inner scopes. | `compiler.mono::add_inst`, `check::rc_add` / `light_ty`; `compiler.backend.js.js::vw_note` / `vw_lookup` | Deep finite generic gets output or a deliberate diagnostic; large enum and shadowed-width cases match C/JS. |
+| P0 | Literal matches and discarded enum matches can evaluate their subject once per comparison/access rather than once per match. | `compiler.parse_match::parse_lit_arm_lit` / `cons_lit_arm`; `compiler.check_lower::lower_match_arms` | Side-effectful literal and enum subjects run once in value and statement position on C and JS. |
+| P0 | Generic substitution duplicates nested side effects when a parameter is reused and drops them when unused. | `compiler.passes.subst::subst_var`; `compiler.check::arg_needs_bind` | `twice(side()+1)` and `drop(side()+1)` each call `side` once. |
+| P0 | Anonymous structural identity hashes field names but not field types; different layouts can become the same generated type. | `compiler.mangle::mangle_anon_in`; `compiler.parse_type::register_anon` | Use `{q:i32}` and `{q:i64}` together, plus distinct enum payload records; layouts and values remain distinct. |
+| P0 | Generic/function type mangling uses unescaped underscore concatenation, so distinct type argument trees can share a symbol and monomorphization entry. | `compiler.mangle::mangle_ty`, `mangle_write_args`, `mangle_semantic_ty`; `compiler.mono::has_mangled` | Colliding names such as `Pair<A_B,C>` / `Pair<A,B_C>` emit distinct symbols and layouts. |
+| P0 | Generated C temporaries use fixed user-visible names such as `_zdl` and `_subj`. | `compiler.backend.c.c_expr`/`c_emit` binary, match, sequence, and null lowerings | User locals with every reserved-looking name behave identically; generated names come from a hygienic ID. |
+| P0 | Parameter-capturing closure substitution ignores lambda-local shadowing. | `compiler.passes.closures::clos_sub_var`, `clos_sub_stmt`, `clos_bad_arms`; `compiler.passes.lift::lift_arms_cap` | Local-shadow closures preserve lexical binding. |
+| P0 | JS backend rewrites every field named `u`, dispatches intrinsic/DOM behavior by bare function name, and returns raw DOM objects/strings where Zen expects `Opt`/`StringView` representations. | `compiler.backend.js.js_expr::js_member`, `js_dom_dispatch`; `compiler.backend.js.js_dom`; `compiler.backend.c.c_expr::call_kind` | Ordinary `S(u:7).u`, function values named `load`, user `log`, DOM Some/None, and DOM text round-trip match C/source semantics. |
+| P1 | Formatter can remove generic parameters from bodyless signatures and lose multi-payload enum syntax. (The nonprintable-`u8`-to-`i32` clause is fixed: `ff_char`/`ff_hex_byte` re-render a non-printable byte as `'\xNN'` verbatim, gated by `tests/fixtures/fmt/char_escapes_formatted.zen` in the `fmt_roundtrip` suite.) | `compiler.pretty_decl::ff_foreign`; `compiler.pretty_expr::ff_mkenum`, `ff_arm_pat` | Format, reparse, and compare typed meaning for both remaining forms; require idempotence. |
+| P1 | Duplicate boolean labels are accepted and reinterpreted; empty/multibyte chars and invalid hex escapes fabricate values; nested-bracket assignment places are misparsed. | `compiler.parse_match::bool_close`; `compiler.parse_atom` char/unescape paths; `compiler.lex::char_end`; `compiler.parse_stmt::skip_brackets` | Reject duplicate/non-exhaustive bool arms and malformed escapes; accept `a[b[0]] = 3`. |
+| P1 | Generic nesting beyond 24 is silently dropped; large enum default literals get contradictory `i32`/`i64` inference; JS fixed-width binding facts leak out of inner scopes. | `compiler.mono::add_inst`; `compiler.passes.refcount::rc_add`; `compiler.check_infer::light_ty`; `compiler.backend.js.js_expr::vw_note` / `vw_lookup` | Deep finite generic gets output or a deliberate diagnostic; large enum and shadowed-width cases match C/JS. |
 | P1 | Resolver deletes every second `(receiver, trait)` implementation before SEMA, truncates module IDs/aliases into fixed buffers, and reads/scans dependencies twice while leaking the count graph. | `compiler.resolve::dedup_impls`, import buffers, `module_count_one`, `fill_module_one` | Conflicting impls reject; long legal IDs resolve or diagnose; one graph/read pass under a counting allocator and `strace`. |
 | P1 | Cooperative actor request ignores mailbox-full send, then awaits an uninitialized reply. | `std.concurrent.actor::request`, `ask` | Fill a capacity-one mailbox; request returns back-pressure, never `Ok(uninitialized)`. |
 | P1 | Actor panic/stack-overflow recovery can leak queued typed boxes and behavior allocations; `siglongjmp` can also skip a held `Mutex.with` unlock and deadlock the runtime. | `std.concurrent.pool_actor`, `std.sync::Mutex.with`; actor recovery in `bootstrap/zenrt.c` | Counting allocator cleanup plus a second actor acquiring a mutex after the first panics inside it. |
@@ -187,6 +193,12 @@ coherent row or tightly related group at a time.
 
 ## Next product build, after the correctness gate: package and signature spine
 
+**Planned — this whole section is a design, not resolver behaviour.** Registered package roots do not
+exist today (see the "Real modules and packages" and "Local packages" rows above): dotted user modules
+resolve from the entry program's directory only. Nothing below describes what `zen` does now, and the
+code blocks are proposed syntax, not working examples. Every "resolve"/"reject" is a requirement on
+the future implementation.
+
 Keep the existing import shape. Do not add `@imports`, a path-string import, or `self` in the first
 slice:
 
@@ -195,7 +207,8 @@ pkg = some_package
 { read_config } = some_package.config
 ```
 
-For a source root registered by `build.zen` or `zen.toml`, resolve logical identities as follows:
+For a source root registered by `build.zen` or `zen.toml`, logical identities should resolve as
+follows:
 
 | Logical module | Canonical file |
 |---|---|
@@ -204,8 +217,9 @@ For a source root registered by `build.zen` or `zen.toml`, resolve logical ident
 | `std.text.fmt` | Existing toolchain-root mapping, unchanged |
 | legacy bare sibling `util` | `<entry-directory>/util.zen`, temporarily retained only when no registered package conflicts |
 
-Reject absolute paths, `.`/`..` traversal, duplicate canonical identities, and an ambiguous package
-plus legacy sibling. A module is identified by its logical path, never by a flattened short name.
+Absolute paths, `.`/`..` traversal, duplicate canonical identities, and an ambiguous package plus
+legacy sibling should be rejected. A module should be identified by its logical path, never by a
+flattened short name.
 
 Land this as two reviewable changes, in order.
 
@@ -227,9 +241,14 @@ PR 1 is complete only when executable tests prove:
   stable diagnostic kind;
 - direct-file legacy siblings and existing `std`/`compiler` imports remain green.
 
-**PR 2 — signature/definition pairing.** Keep the existing syntax; the compiler already parses a
-bodyless function, so adding `extern`, `@imports`, or an effect syntax would create migration without
-solving identity:
+**PR 2 — signature/definition pairing. Planned.** Today a bodyless function type-checks calls and
+links only when used, with **no** definition/completeness pairing at all (see the "External
+signatures" row above). The code block below is the proposed shape, not a pattern that works now:
+writing both lines today does not create a checked pair, and every "must" in this subsection is a
+requirement on the unwritten implementation.
+
+Keep the existing syntax; the compiler already parses a bodyless function, so adding `extern`,
+`@imports`, or an effect syntax would create migration without solving identity:
 
 ```zen
 read_config* = (fs: Fs, path: StringView) Result<String, IoError>
@@ -238,20 +257,20 @@ read_config = (fs: Fs, path: StringView) Result<String, IoError> {
 }
 ```
 
-Treat the bodyless declaration as a neutral signature rather than inherently foreign. Separate
-signature and definition indexes, require exact structural agreement, and preserve both through
-resolution/emission. A referenced signature must have one Zen provider or remain an obligation for
-registered native/link input; an unreferenced signature is harmless. In the first implementation,
-“used” should mean syntactically referenced anywhere in emitted code. True `main`-rooted reachability
-needs call-graph dead-code elimination and is later work. Native link inputs remain linker-authoritative
-until build metadata can name provided symbols.
+The bodyless declaration should be treated as a neutral signature rather than inherently foreign.
+Separate signature and definition indexes, require exact structural agreement, and preserve both
+through resolution/emission. A referenced signature should have one Zen provider or remain an
+obligation for registered native/link input; an unreferenced signature should be harmless. In the
+first implementation, “used” should mean syntactically referenced anywhere in emitted code. True
+`main`-rooted reachability needs call-graph dead-code elimination and is later work. Native link
+inputs remain linker-authoritative until build metadata can name provided symbols.
 
 `String` is legal in a signature: it is a concrete owned library value, not proof that the language
 needs a move system or an effect annotation. Full exported record definitions already provide layout
 signatures; opaque/incomplete by-value records are a separate feature and should be deferred.
 
 PR 2 touches the declaration variant/model in `ast/ast_types.zen`/`parse.zen`, separate signature and body
-lookup in `check.zen`, pairing diagnostics in `check_validate.zen`, prototype/body emission in
+lookup in `check.zen`, pairing diagnostics in `validate/*.zen`, prototype/body emission in
 `backend/c/c_emit.zen`, source-preserving formatting in `pretty.zen`, and signature-aware symbol retention in
 `compiler.resolve`. It is complete when tests prove:
 
@@ -271,11 +290,24 @@ the stable work; flow analysis should cover only facts that genuinely depend on 
 | Current responsibility | Current shape | Target owner | Retire after parity |
 |---|---|---|---|
 | Module identity/imports | `compiler.resolve` builds a graph, then flattens and rewrites names as text. | `World` of `ModuleId`, public `ModuleSig`, and canonical paths. | Alias text rewriting, flat concatenation, shadow/dedup compatibility passes. |
-| Types and calls | `check.zen` overlaps `infer_expr`, `light_ty`, `infer_targs`, `fits`, and repeated resolve/inline rounds. | One typed-body pass, one `resolve_call`, one `coerce`, stable `SymbolId`/`TypeId`. | Mangled-name semantic lookup and pseudo-local context keys. |
-| Diagnostics | `check_validate.zen` repeats count, kind, batch, enrichment, and specialized safety walkers; the driver manually orders about 15 channels. | One diagnostic sink emitted during signature/body checking with module-aware spans. | Packed kind/count values, enrichment re-walks, flat-source inverse mapping. |
+| Types and calls | `check.zen` plus `check_{infer,fits,resolve,inline}.zen` overlap `infer_expr`, `light_ty`, `infer_targs`, `fits`, and repeated resolve/inline rounds. | One typed-body pass, one `resolve_call`, one `coerce`, stable `SymbolId`/`TypeId`. | Mangled-name semantic lookup and pseudo-local context keys. |
+| Diagnostics | `validate/{core,diag,enrich,kinds}.zen` repeat count, kind, batch, enrichment, and specialized safety walkers; the driver manually orders about 15 channels. | One diagnostic sink emitted during signature/body checking with module-aware spans. | Packed kind/count values, enrichment re-walks, flat-source inverse mapping. |
 | Rewriting/lowering | Source AST is rewritten before all source judgments are complete. | A separate lowering pass after successful SEMA. | Diagnostic archaeology over inlined/mangled source. |
 | Generics | Function specialization in `check.zen`, aggregate specialization in `mono.zen`, and backend repetition. | One deterministic monomorphization pass shared by C and JS. | Textual generic inlining and backend-owned instantiation. |
-| Ownership/send safety | About 1,900 lines of bounded move/alias/escape/scratch/send heuristics. | Explicit language decision for `Own`; structural `sendable(Ty)` and straightforward pointer rules. | Partial Rust-like dead-variable state and function-name/source-shape guesses. |
+| Ownership/send safety | 1,967 lines of bounded move/alias/escape/scratch/send heuristics in `validate/ownership.zen` (`wc -l`). | Explicit language decision for `Own`; structural `sendable(Ty)` and straightforward pointer rules. | Partial Rust-like dead-variable state and function-name/source-shape guesses. |
+
+Per-step status. Splitting the two semantic god files into the `check_*`, `passes/`, and
+`validate/` families has landed, but that was a file-boundary move: no step below is finished, and
+the driver still orders the diagnostic channels by hand.
+
+| Step | Status |
+|---|---|
+| 1. Diagnostics as the result | **Planned** — the channels are still parallel shadows. |
+| 2. Unify declaration/type lookup | **Partial** — lookup is split across `check_{infer,fits,resolve}.zen` by file, not unified by responsibility. |
+| 3. Validate before destructive lowering | **Partial** — `validate/*.zen` still re-walks both raw and resolved ASTs. |
+| 4. Do not port the partial move checker | **Planned** — an open decision about `Own<T>`, not a change. |
+| 5. Flat source → linked module signatures | **Partial** — `ModuleSig` exists and drives privacy/dup checks; flat concatenation is still the CLI's parser/checker boundary. |
+| 6. Delete in slices | **Convention** — the standing rule for every step above. |
 
 1. **Make diagnostics the result, not a parallel shadow.** Introduce one sink/list used by the core
    semantic walk. Derive error counts and first-error behavior from that list. Preserve current kind,
@@ -298,9 +330,10 @@ the stable work; flow analysis should cover only facts that genuinely depend on 
    where relevant, pass the full harness, regenerate the seed, and prove the byte fixpoint before the
    old path is removed.
 
-Success is structural, not a line-count contest: the driver no longer manually chains specialized
-diagnostic channels; one semantic fact is computed in one place; source diagnostics do not depend on
-post-lowering archaeology; and safety promises match the actual analysis.
+Success criteria — **Planned**; none of these hold yet. The plan is done when: the driver no longer
+manually chains specialized diagnostic channels (today it still orders about 15 of them, per the
+Diagnostics row above); one semantic fact is computed in one place; source diagnostics do not depend
+on post-lowering archaeology; and safety promises match the actual analysis.
 
 ## Test simplification direction
 
@@ -333,12 +366,20 @@ suites should remain explicit shards; the deterministic semantic core should sta
 
 ## Stable design decisions
 
+Decisions that hold in the shipped compiler:
+
 - No ordinary `if` statement; `.match` is branching.
 - No attempt to copy Rust's universal move/borrow semantics.
 - Errors are values; `panic` is explicit.
-- Signatures, path identity, and type structure are the desired module/effect boundary.
-- `|` should remain bitwise OR; enum commas are the migration direction, not current syntax.
-- Capabilities should be explicit at boundaries and attenuated to the narrowest required value.
 - C remains an intentional bootstrap/backend target, not a fallback implementation language.
+
+Decisions about where the language is going — settled in intent, **not yet implemented**:
+
+- **Planned.** Signatures, path identity, and type structure are the chosen module/effect boundary.
+  Neither registered path identity nor signature/definition pairing exists yet.
+- **Planned.** `|` is to become bitwise OR only; enum commas are the migration direction, not current
+  syntax — `|` still separates enum variants and needs a bootstrap migration.
+- **Partial.** Capabilities are to be explicit at boundaries and attenuated to the narrowest required
+  value. `Sys` does this; ambient `std.rt` and the scope/runtime experiments still coexist with it.
 - Historical audits belong in Git history; maintained docs describe only current truth and ordered
   next work.

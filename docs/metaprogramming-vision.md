@@ -34,13 +34,13 @@ corpus — generic-struct receivers, receiver-evaluated-once, name matching):
 
 ```zen
 sum_fields<T> = (v: T) i64 {
-    acc: i64 := 0
+    acc :: i64 = 0
     v.each_field((name, fv) { acc = acc + fv })
     acc
 }
 
 diff_count<T> = (x: T, y: T) i64 {
-    d: i64 := 0
+    d :: i64 = 0
     x.zip_fields(y, (name, va, vb) {
         (va == vb == false).then({ d = d + 1 })
     })
@@ -81,7 +81,7 @@ is why `from_json` needed **no new intrinsic**.
 
 ```zen
 { to_json, from_json } = std.format.serde
-da := dyn_heap()
+da = dyn_heap()
 to_json(da.addr(), Point(x: 3, y: 4))          // .Ok("{\"x\":3,\"y\":4}")
 from_json(da.addr(), s, Point(x: 0, y: 0))     // .Ok(Point(x: 3, y: 4)); seed = defaults
 ```
@@ -159,9 +159,9 @@ strings.
 ```zen
 User: { id: i32, name: StringView, active: bool }   // the table = a plain struct
 
-users := table<User>("users")   // reflect fields -> columns; SQL type from each field's Ty
+users = table<User>("users")   // reflect fields -> columns; SQL type from each field's Ty
 
-adults := db.from(users)
+adults = db.from(users)
     .where(users.col(.active).eq(true))    // typed column ref, not "active"
     .order_by(users.col(.name))
     .select()                              // -> [User], rows scanned back via reflection
