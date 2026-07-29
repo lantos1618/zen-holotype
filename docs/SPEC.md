@@ -844,6 +844,34 @@ symbol; `ZEN_VIS_REPORT=1` downgrades it to a report-only sweep, exactly like
 `error[private-name]`. The manifest/registry grant text folds into the content
 cache key (the entry pragma lives in the keyed source already).
 
+A grant says a module MAY hold foreign declarations; it does not say where the
+symbols come from. That is a second, separate declaration: a module holding
+foreign declarations states its linkage once, at the top, as a pragma line of
+the same shape — no keyword, no new syntax.
+
+```zen
+//! link: c, pthread          // std.c.libc — the C standard library, plus -lpthread
+//! link: m                   // std.math   — -lm
+//! link: zenrt               // the compiler's own C runtime (bootstrap/zenrt.c)
+//! link: js                  // std.web.dom — the JavaScript host implements these stubs
+//! link: native.c            // a .c source this project compiles in
+```
+
+Token to link flag: `c` (linked by default), `zenrt` (always compiled in), `js`
+(not a C library at all) and any `<name>.c` source contribute NO flag; every
+other token `X` becomes `-lX`. The union over the resolved closure is what the
+driver puts on the cc line, so a build links exactly what its declarations
+claim — `-lm` appears when `std.math` is in the closure and not otherwise. The
+set is derived from sources the content cache key already hashes.
+
+A foreign declaration in a module that declares no linkage rejects during
+resolution as `error[ffi-unlinked]` at the declaration's line, so a symbol
+nothing provides is a positioned compiler error instead of an `ld` dump with no
+file and no line; `ZEN_VIS_REPORT=1` downgrades it to a report-only sweep. This
+check covers the ENTRY module too — unlike the grant, whose threat model is
+dependencies, the question "which library defines this?" is no more self-evident
+in the program's own file than in a dependency's.
+
 On top of the grant system, `build.zen` projects can declare a C library as a
 VALUE (`std.build`): a typed module, its link flag, and its grant travel as one
 edge:

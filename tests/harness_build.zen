@@ -2028,8 +2028,12 @@ harness_build_run* = () i32 {
             wants: [":1:1: error[no-if]", "  if (true) { 1 }", "  ^~", "hint: in expression position write `cond.then({ yes }, { no })`"],
         ),
         DiagCase(
-            src: "// a foreign decl with a slice param has no C ABI shape — the diagnostic names the offending\n// parameter and its type, positioned on the declaration, with the RawPtr-floor hint.\nfrob = (xs: [i32]) i64\nmain = () i32 { 0 }\n",
-            wants: [":3:1: error[ffi-type]: foreign declaration `frob`: parameter `xs` has non-FFI-safe type `[i32]`", "  frob = (xs: [i32]) i64", "  ^~~~", "hint: a bodyless (foreign) declaration is a raw C prototype", "pass buffers through the RawPtr<T> floor (pointer + length)"],
+            src: "//! link: c\n// a foreign decl with a slice param has no C ABI shape — the diagnostic names the offending\n// parameter and its type, positioned on the declaration, with the RawPtr-floor hint.\nfrob = (xs: [i32]) i64\nmain = () i32 { 0 }\n",
+            wants: [":4:1: error[ffi-type]: foreign declaration `frob`: parameter `xs` has non-FFI-safe type `[i32]`", "  frob = (xs: [i32]) i64", "  ^~~~", "hint: a bodyless (foreign) declaration is a raw C prototype", "pass buffers through the RawPtr<T> floor (pointer + length)"],
+        ),
+        DiagCase(
+            src: "// a foreign decl in a module that declares NO linkage: nothing says which library defines the\n// symbol, so `ld` would be the first thing to notice. error[ffi-unlinked] notices at check time.\nfrobnicate = (x: i64) i64\nmain = () i32 { 0 }\n",
+            wants: [":3:1: error[ffi-unlinked]: foreign declaration `frobnicate` names no library: this module declares no linkage, so nothing says which library defines the symbol", "  frobnicate = (x: i64) i64", "  ^~~~~~~~~~", "hint: declare it at the top of this file: `//! link: c` (the C standard library)"],
         ),
         DiagCase(
             src: "main = () i32 {\n    if (1 < 2) { 1 } else { 0 }\n}\n",
@@ -2756,19 +2760,27 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "project_ffi_grant",
-            cmd: "rm -rf $ZT/zfg && mkdir -p $ZT/zfg/src && printf 'root = \"src\"\\nmain = \"main.zen\"\\n' >$ZT/zfg/zen.toml && printf 'boost* = () i32\\n' >$ZT/zfg/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfg/src/main.zen && { ./zen check $ZT/zfg >$ZT/zfg.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfg.txt && grep -Fq \"module 'sysdep' declares foreign function\" $ZT/zfg.txt && grep -Fq 'ffi = \"sysdep\"' $ZT/zfg.txt && printf 'ffi = \"sysdep\"\\n' >>$ZT/zfg/zen.toml && ./zen check $ZT/zfg 2>$ZT/zfg_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfg_ok.txt",
+            cmd: "rm -rf $ZT/zfg && mkdir -p $ZT/zfg/src && printf 'root = \"src\"\\nmain = \"main.zen\"\\n' >$ZT/zfg/zen.toml && printf '//! link: c\\nboost* = () i32\\n' >$ZT/zfg/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfg/src/main.zen && { ./zen check $ZT/zfg >$ZT/zfg.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfg.txt && grep -Fq \"module 'sysdep' declares foreign function\" $ZT/zfg.txt && grep -Fq 'ffi = \"sysdep\"' $ZT/zfg.txt && printf 'ffi = \"sysdep\"\\n' >>$ZT/zfg/zen.toml && ./zen check $ZT/zfg 2>$ZT/zfg_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfg_ok.txt",
         ),
         ShellCase(
             name: "project_ffi_report_mode",
-            cmd: "rm -rf $ZT/zfr && mkdir -p $ZT/zfr/src && printf 'root = \"src\"\\nmain = \"main.zen\"\\n' >$ZT/zfr/zen.toml && printf 'boost* = () i32\\n' >$ZT/zfr/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfr/src/main.zen && ZEN_VIS_REPORT=1 ZENC_NO_CACHE=1 ./zen check $ZT/zfr >$ZT/zfr.txt 2>&1 && grep -Fq 'error[ffi-ungranted]' $ZT/zfr.txt && grep -Fq 'src/main.zen: ok' $ZT/zfr.txt",
+            cmd: "rm -rf $ZT/zfr && mkdir -p $ZT/zfr/src && printf 'root = \"src\"\\nmain = \"main.zen\"\\n' >$ZT/zfr/zen.toml && printf '//! link: c\\nboost* = () i32\\n' >$ZT/zfr/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfr/src/main.zen && ZEN_VIS_REPORT=1 ZENC_NO_CACHE=1 ./zen check $ZT/zfr >$ZT/zfr.txt 2>&1 && grep -Fq 'error[ffi-ungranted]' $ZT/zfr.txt && grep -Fq 'src/main.zen: ok' $ZT/zfr.txt",
         ),
         ShellCase(
             name: "project_ffi_build_zen",
-            cmd: "rm -rf $ZT/zfb && mkdir -p $ZT/zfb/src && printf '{ Build } = std.build\\nbuild = (b: MutPtr<Build>) void {\\n    b.install(b.exe(\"ffidemo\").root(\"src\").main(\"main.zen\").out(\"ffi-bin\").ffi(\"sysdep\"))\\n}\\n' >$ZT/zfb/build.zen && printf 'boost* = () i32\\n' >$ZT/zfb/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfb/src/main.zen && ./zen check $ZT/zfb 2>$ZT/zfb_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfb_ok.txt && sed -i 's/.ffi(\"sysdep\")//' $ZT/zfb/build.zen && { ./zen check $ZT/zfb >$ZT/zfb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfb.txt",
+            cmd: "rm -rf $ZT/zfb && mkdir -p $ZT/zfb/src && printf '{ Build } = std.build\\nbuild = (b: MutPtr<Build>) void {\\n    b.install(b.exe(\"ffidemo\").root(\"src\").main(\"main.zen\").out(\"ffi-bin\").ffi(\"sysdep\"))\\n}\\n' >$ZT/zfb/build.zen && printf '//! link: c\\nboost* = () i32\\n' >$ZT/zfb/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfb/src/main.zen && ./zen check $ZT/zfb 2>$ZT/zfb_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfb_ok.txt && sed -i 's/.ffi(\"sysdep\")//' $ZT/zfb/build.zen && { ./zen check $ZT/zfb >$ZT/zfb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfb.txt",
+        ),
+        ShellCase(
+            name: "ffi_unlinked_teeth",
+            cmd: "printf 'frobnicate = (x: i64) i64\\nmain = () i32 { to_i32(frobnicate(1)) }\\n' >$ZT/zul.zen && { ./zen check $ZT/zul.zen >$ZT/zul.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-unlinked]' $ZT/zul.txt && grep -Fq 'names no library' $ZT/zul.txt && ZEN_VIS_REPORT=1 ZENC_NO_CACHE=1 ./zen check $ZT/zul.zen >$ZT/zulr.txt 2>&1 && grep -Fq 'error[ffi-unlinked]' $ZT/zulr.txt && printf '//! link: c\\nfrobnicate = (x: i64) i64\\nmain = () i32 { to_i32(frobnicate(1)) }\\n' >$ZT/zul2.zen && ./zen check $ZT/zul2.zen >/dev/null 2>&1",
+        ),
+        ShellCase(
+            name: "ffi_declared_links_reach_cc",
+            cmd: "printf 'main = () i32 { 0 }\\n' >$ZT/zdl0.zen && ZENC_NO_CACHE=1 ZENC_SHOW_CC=1 ./zen build $ZT/zdl0.zen -o $ZT/zdl0 2>$ZT/zdl0.txt && ! grep -q -e ' -l' $ZT/zdl0.txt && printf '{ sqrt } = std.math\\nmain = () i32 { to_i32(sqrt(4.0)) }\\n' >$ZT/zdl1.zen && ZENC_NO_CACHE=1 ZENC_SHOW_CC=1 ./zen build $ZT/zdl1.zen -o $ZT/zdl1 2>$ZT/zdl1.txt && grep -q -e ' -lm ' $ZT/zdl1.txt && { $ZT/zdl1; test \"$?\" = 2; } && printf '{ getpid } = std.c.libc\\nmain = () i32 { getpid() }\\n' >$ZT/zdl2.zen && ZENC_NO_CACHE=1 ZENC_SHOW_CC=1 ./zen build $ZT/zdl2.zen -o $ZT/zdl2 2>$ZT/zdl2.txt && grep -q -e ' -lpthread ' $ZT/zdl2.txt && ! grep -q -e ' -lm ' $ZT/zdl2.txt",
         ),
         ShellCase(
             name: "project_clib_demo",
-            cmd: "rm -rf $ZT/zcl && cp -r tests/fixtures/project/clib_demo $ZT/zcl && ./zen build $ZT/zcl >/dev/null 2>&1 && test -x $ZT/zcl/clib-bin && { $ZT/zcl/clib-bin; test \"$?\" = 3; } && { ./zen run $ZT/zcl; test \"$?\" = 3; } && grep -Fq 'cbrt* = (x: f64) f64' $ZT/zcl/.zen/gen/cmath.zen && grep -Fq 'handle: RawPtr<u8>' $ZT/zcl/.zen/gen/cmath.zen",
+            cmd: "rm -rf $ZT/zcl && cp -r tests/fixtures/project/clib_demo $ZT/zcl && ./zen build $ZT/zcl >/dev/null 2>&1 && test -x $ZT/zcl/clib-bin && { $ZT/zcl/clib-bin; test \"$?\" = 3; } && { ./zen run $ZT/zcl; test \"$?\" = 3; } && grep -Fq 'cbrt* = (x: f64) f64' $ZT/zcl/.zen/gen/cmath.zen && grep -Fq 'handle: RawPtr<u8>' $ZT/zcl/.zen/gen/cmath.zen && grep -Fq '//! link: m' $ZT/zcl/.zen/gen/cmath.zen",
         ),
         ShellCase(
             name: "project_clib_ungranted",
@@ -2776,7 +2788,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "project_clib_badsig",
-            cmd: "rm -rf $ZT/zcb && cp -r tests/fixtures/project/clib_demo $ZT/zcb && sed -i 's#c_fn(\"cbrt\", \"(x: f64) f64\")#c_fn(\"frob\", \"(xs: [i32]) i32\")#' $ZT/zcb/build.zen && printf 'cm = cmath\\nmain = () i32 { xs: [i32] = [1, 2]  cm.frob(xs) }\\n' >$ZT/zcb/src/main.zen && { ./zen check $ZT/zcb >$ZT/zcb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-type]' $ZT/zcb.txt && grep -Fq '.zen/gen/cmath.zen:2:1' $ZT/zcb.txt",
+            cmd: "rm -rf $ZT/zcb && cp -r tests/fixtures/project/clib_demo $ZT/zcb && sed -i 's#c_fn(\"cbrt\", \"(x: f64) f64\")#c_fn(\"frob\", \"(xs: [i32]) i32\")#' $ZT/zcb/build.zen && printf 'cm = cmath\\nmain = () i32 { xs: [i32] = [1, 2]  cm.frob(xs) }\\n' >$ZT/zcb/src/main.zen && { ./zen check $ZT/zcb >$ZT/zcb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-type]' $ZT/zcb.txt && grep -Fq '.zen/gen/cmath.zen:3:1' $ZT/zcb.txt",
         ),
         ShellCase(
             name: "project_clib_cache",
@@ -2968,7 +2980,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "foreign_decl_generic_return_emits_its_mono_struct",
-            cmd: "printf '{ Opt } = std.core.result\\nWidget*: {\\n    handle: RawPtr<u8>,\\n}\\nfind_widget* = (id: StringView) Opt<Widget>\\nmain = () i32 { 0 }\\n' > $ZT/zfwd.zen && ./zen fmt --check $ZT/zfwd.zen && ./zen emit $ZT/zfwd.zen >$ZT/zfwd.c 2>/dev/null && grep -Fq 'typedef struct Opt_Widget Opt_Widget;' $ZT/zfwd.c && grep -Fq 'Opt_Widget find_widget(const char* id);' $ZT/zfwd.c && ./zen build $ZT/zfwd.zen -o $ZT/zfwd_bin 2>$ZT/zfwd_e.txt && ! grep -Fq 'unknown type name' $ZT/zfwd_e.txt && { $ZT/zfwd_bin; test \"$?\" = 0; }",
+            cmd: "printf '//! link: c\\n{ Opt } = std.core.result\\nWidget*: {\\n    handle: RawPtr<u8>,\\n}\\nfind_widget* = (id: StringView) Opt<Widget>\\nmain = () i32 { 0 }\\n' > $ZT/zfwd.zen && ./zen fmt --check $ZT/zfwd.zen && ./zen emit $ZT/zfwd.zen >$ZT/zfwd.c 2>/dev/null && grep -Fq 'typedef struct Opt_Widget Opt_Widget;' $ZT/zfwd.c && grep -Fq 'Opt_Widget find_widget(const char* id);' $ZT/zfwd.c && ./zen build $ZT/zfwd.zen -o $ZT/zfwd_bin 2>$ZT/zfwd_e.txt && ! grep -Fq 'unknown type name' $ZT/zfwd_e.txt && { $ZT/zfwd_bin; test \"$?\" = 0; }",
         ),
         ShellCase(
             name: "cache_bin_hit_reuses_cached_binary",

@@ -25,7 +25,7 @@
 { mut_infer_decls } = compiler.astops
 { diag_user_span, render_diagnostic, manifest_value_span } = compiler.diagnostic
 { eprint, first_user_import_in, file_exists } = compiler.resolve
-{ ffi_grants_set, ffi_grants_get, genmods_set, genmods_get } = compiler.resolve_ffi
+{ ffi_grants_set, ffi_grants_get, genmods_set, genmods_get, link_libs_get } = compiler.resolve_ffi
 { say, stdout_put, stdout_put_bytes, out_status, eprint, push_int, pid_path, dirname, last_slash,
   push_prefix, push_span, pad_sp, finish_cstr, join2, cstr_substr, bs_push_range, zt_log,
   resolve_prog_or_exit, dir_exists } = compiler.drvutil
@@ -121,7 +121,6 @@ cc_command = (
         .gstr_append(mp, ccflags)
         .gstr_append(mp, " ")
         .gstr_append(mp, links)
-        .gstr_append(mp, " -lm")
         .gstr_append(mp, " -o ")
         .gstr_append(mp, out)
         .gstr_finish(mp)
@@ -133,7 +132,7 @@ cc_command = (
         eprint("\n")
     })
     line
-}    // libm: always link (sin/cos/log/exp/pow); free if unused
+}    // `links` = the spec's libraries PLUS the closure's declared ones (see declared_links below)
 // ── cross-toolchain selection (`Target.target(platform)` in build.zen) ────────────────────────────
 // A native Spec (target "") compiles with host `cc` — the command line above, byte-identical to
 // before. A cross triple resolves a C compiler in this order:
@@ -434,6 +433,20 @@ compile_to = (
         },
     })
 }
+// The link line the RESOLVED program actually asked for: the spec's own libraries (zen.toml `link =`
+// / build.zen `.links()` / `.libraries()`) followed by the `-l` flags every module in the closure
+// declared with `//! link:` (see compiler.resolve_ffi). This is what replaced the unconditional
+// `-lm`: -lm now appears exactly when std.math is in the closure, and -lpthread when std.c.libc is.
+// Read AFTER resolve — the set is stamped by the linkage sweep — and safe for the build cache, whose
+// key already hashes every source the set is derived from.
+declared_links = (mp: MutPtr<Malloc>, links: StringView) StringView {
+    mp
+        .gstr_string(96)
+        .gstr_append(mp, links)
+        .gstr_push(mp, ' ')
+        .gstr_append(mp, link_libs_get())
+        .gstr_finish(mp)
+}
 compile_flat = (
     mp: MutPtr<Malloc>,
     root: StringView,
@@ -469,7 +482,9 @@ compile_flat = (
                     write_runnable_c(tmpc, gen).match ({
                         true  => {
                             t5 = mp.tm_mark()
-                            ccrc = mp.cc_command(root, tmpc, out, ccflags, links, ccname).system()
+                            ccrc = mp
+                                .cc_command(root, tmpc, out, ccflags, mp.declared_links(links), ccname)
+                                .system()
                             tm_cc = mp.tm_lap(t5)
                             (ccrc == 0).match ({
                                 true  => 0,
