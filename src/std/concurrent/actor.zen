@@ -111,7 +111,7 @@ ReplyRef*<T>: {
         // Cooperative only: meaningful after a same-thread `run`/`request` drain. Not pool-safe.
         reply.ready.load_i64() == 1
     }
-    await = (reply: ReplyRef<T>, alloc: Allocator) T {
+    claim = (reply: ReplyRef<T>, alloc: Allocator) T {
         // Reads the reply value after the caller has already drained (request/ask call `run` first).
         // Does NOT spin on `ready` — under the cooperative model the drain is synchronous, so the
         // value is already written. A pool-aware future would park; this path never will.
@@ -123,7 +123,7 @@ ReplyRef*<T>: {
     }
     discard = (reply: ReplyRef<T>, alloc: Allocator) void {
         // Free the reply cell WITHOUT reading it — for the back-pressure path where the request was
-        // never enqueued (mailbox full), so no value was ever written. Mirrors `await`'s two releases
+        // never enqueued (mailbox full), so no value was ever written. Mirrors `claim`'s two releases
         // minus the (uninitialized) read, so no allocation leaks when a request bounces off a full box.
         alloc.release(reply.value)
         alloc.release(reply.ready)
@@ -208,16 +208,16 @@ ActorCell*<M>: {
     send     = (cell: ActorCell<M>, message: M) bool { cell.ref().send(message) }
     reply<T> = (cell: ActorCell<M>, alloc: Allocator) Result<ReplyRef<T>, IoError> { alloc.reply() }
     drain<ActorT> = (cell: ActorCell<M>, actor: MutPtr<ActorT>) void { cell.inner.drain(actor) }
-    await_reply<ActorT, T> = (
+    claim_reply<ActorT, T> = (
         cell: ActorCell<M>,
         alloc: Allocator,
         actor: MutPtr<ActorT>,
         reply_to: ReplyRef<T>,
     ) T {
         cell.drain(actor)
-        reply_to.await(alloc)
+        reply_to.claim(alloc)
     }
-    await_checked<ActorT, T> = (
+    claim_checked<ActorT, T> = (
         cell: ActorCell<M>,
         alloc: Allocator,
         actor: MutPtr<ActorT>,
@@ -230,7 +230,7 @@ ActorCell*<M>: {
         cell.drain(actor)
         reply_to.ready().match ({
             true  => {
-                got: Result<T, IoError> := .Ok(reply_to.await(alloc))
+                got: Result<T, IoError> := .Ok(reply_to.claim(alloc))
                 got
             },
             false => {
@@ -250,7 +250,7 @@ ActorCell*<M>: {
         r.match ({
             .Ok(reply_to) => {
                 issue(reply_to)
-                cell.await_checked(alloc, actor, reply_to)
+                cell.claim_checked(alloc, actor, reply_to)
             },
             .Err(e)       => {
                 failed: Result<T, IoError> := .Err(e)
@@ -268,7 +268,7 @@ ActorCell*<M>: {
         r.match ({
             .Ok(reply_to) => {
                 cell.send(make(reply_to)).match ({
-                    true  => cell.await_checked(alloc, actor, reply_to),
+                    true  => cell.claim_checked(alloc, actor, reply_to),
                     false => {
                         // mailbox FULL: nothing enqueued, the actor never runs, so the reply cell would
                         // stay uninitialized. Free it and report back-pressure instead of Ok(garbage).
@@ -324,18 +324,18 @@ ActorHandle*<M, ActorT>: {
             })
         })
     }
-    await_checked<T> = (
+    claim_checked<T> = (
         handle: ActorHandle<M, ActorT>,
         alloc: Allocator,
         reply_to: ReplyRef<T>,
     ) Result<T, IoError> {
-        // Drain the mailbox inline, then read the reply ONLY if it was written (see ActorCell.await_checked).
+        // Drain the mailbox inline, then read the reply ONLY if it was written (see ActorCell.claim_checked).
         // A request that never enqueued (mailbox full) leaves `ready == 0`; we free the cell and report
         // back-pressure rather than returning Ok over an uninitialized reply.
         handle.run()
         reply_to.ready().match ({
             true  => {
-                got: Result<T, IoError> := .Ok(reply_to.await(alloc))
+                got: Result<T, IoError> := .Ok(reply_to.claim(alloc))
                 got
             },
             false => {
@@ -355,7 +355,7 @@ ActorHandle*<M, ActorT>: {
         r.match ({
             .Ok(reply_to) => {
                 handle.send(make(reply_to)).match ({
-                    true  => handle.await_checked(alloc, reply_to),
+                    true  => handle.claim_checked(alloc, reply_to),
                     false => {
                         // mailbox FULL: nothing enqueued, so the reply cell stays uninitialized.
                         reply_to.discard(alloc)
@@ -379,7 +379,7 @@ ActorHandle*<M, ActorT>: {
         r.match ({
             .Ok(reply_to) => {
                 issue(reply_to)
-                handle.await_checked(alloc, reply_to)
+                handle.claim_checked(alloc, reply_to)
             },
             .Err(e)       => {
                 failed: Result<T, IoError> := .Err(e)

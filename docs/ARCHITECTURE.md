@@ -183,7 +183,7 @@ Three runtime ideas coexist in code:
 |---|---|---|
 | `std.sys.Sys` | Explicit executable root; attenuates to `Writer`, `Allocator`, `Env`, `Clock`, and `Fs`. | Preferred public direction. |
 | `std.rt` | Thread-local/process-default ambient allocator runtime; pool actors enter/leave it. | Live legacy/experimental substrate. |
-| `std.scope` + `std.concurrent.runtime` | Generic sync/async scope, arena, cancellation/checkpoint experiment. | Live and tested, but not the settled target. |
+| `std.scope` + `std.concurrent.runtime` | Generic sync/coroutine scope, arena, cancellation/checkpoint experiment. | Live and tested, but not the settled target. |
 
 Concurrency also has two actor surfaces:
 

@@ -1,17 +1,17 @@
 // std.scope — the generic capability value + region-scoped, colorless combinators.
 //
 // `Scope<A>` wraps a backing `A` that is BOTH the allocator and the execution mode (SyncArena:
-// checkpoint is a no-op; AsyncArena: checkpoint yields a coroutine). A colorless body takes
+// checkpoint is a no-op; CoroArena: checkpoint yields a coroutine). A colorless body takes
 // `MutPtr<Scope<A>>` and calls `s.acquire` / `s.checkpoint` — the SAME generic body runs under
 // any backing, decided by which combinator opened the scope. (s.acquire forwards to s.alloc.acquire,
 // a dispatch through a generic-struct field — see compiler A1.)
 //
 // Cancellation rides the checkpoint: a scope carries a `budget` (a checkpoint countdown; < 0 =
 // unlimited). When the budget is exhausted, `checkpoint` returns `.Stop(.Deadline)` — a real value
-// a body matches and bails on — instead of yielding. Cleanup is the REGION: `with_sync`/`with_async`
+// a body matches and bails on — instead of yielding. Cleanup is the REGION: `with_sync`/`with_coro`
 // free the whole arena on exit, on every path.
 { Allocator } = std.mem.alloc
-{ Signal, CancelReason, SyncArena, AsyncArena, sync_in, async_in } = std.concurrent.runtime
+{ Signal, CancelReason, SyncArena, CoroArena, sync_in, coro_in } = std.concurrent.runtime
 UNLIMITED := 0 - 1
 // The one capability value: a backing allocator/runtime + a cancellation budget, threaded explicitly.
 Scope*<A>: {
@@ -47,9 +47,9 @@ with_sync*<R> = (backing: Allocator, cap: i64, body: (MutPtr<Scope<SyncArena>>) 
     out
 }
 // open an ASYNC scope (checkpoint yields); same generic body shape, freed on exit.
-with_async<R> = (backing: Allocator, cap: i64, body: (MutPtr<Scope<AsyncArena>>) R) R {
-    arena := backing.async_in(cap)
-    s := Scope<AsyncArena>(
+with_coro<R> = (backing: Allocator, cap: i64, body: (MutPtr<Scope<CoroArena>>) R) R {
+    arena := backing.coro_in(cap)
+    s := Scope<CoroArena>(
         alloc: arena.addr(),
         budget: UNLIMITED,
     )

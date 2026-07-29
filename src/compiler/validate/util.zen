@@ -7,7 +7,7 @@
 { is_prim_width, param_names_has, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
 { at } = std.text.ascii
-{ ends_with, is_empty, starts_with } = std.text.str
+{ ends_with, is_empty, starts_with, view } = std.text.str
 { KARGTYPE, KNULLDEREF, KPTRWRITE, KUNKNOWNTYPE, desc_or } = compiler.validate.diag
 { DeadList, dead_has, expr_root_var } = compiler.validate.ownership
 { fields_declare_method, no_fields, struct_fields, sx_named } = compiler.validate.args
@@ -690,6 +690,56 @@ first_qmark_offset* = (src: StringView) i32 {
                 done = true
             },
             _    => src.is_qmark_token(sc.tok).match ({
+                true  => {
+                    found = sc.tok.start
+                    done = true
+                },
+                false => {
+                    pos = sc.next
+                },
+            }),
+        })
+    }
+    found
+}
+// The same PERMANENT law for suspension keywords: `yield`, `async`, and `await` each name a point
+// where a running function stops mid-body and is resumed later. Zen concurrency is Pony-style actors
+// whose behaviours run to COMPLETION, so no such point exists to name; stackful coroutines are
+// @self-hosted-only substrate, never public surface. All three spellings are five bytes, so the first
+// exact five-byte identifier token anchors error[no-coroutine] on its five bytes. Word boundaries come
+// free from the lexer (`async_count` and `awaited` are single longer Ident tokens), and comments,
+// string literals, and char literals are their own token kinds — same rationale as first_if_offset.
+tok_word_is = (src: StringView, t: Token, w: StringView) bool {
+    ok := true
+    wb: [u8] := w.view()
+    wb.loop((h, i, b) {
+        (src.at(t.start + to_i32(i)) == b == false).then({
+            ok = false
+            h.break
+        })
+    })
+    ok
+}
+is_coroutine_token = (src: StringView, t: Token) bool {
+    t.kind.match ({
+        .Ident => t.len == 5
+            && (src.tok_word_is(t, "yield")
+                || src.tok_word_is(t, "async")
+                || src.tok_word_is(t, "await")),
+        _      => false,
+    })
+}
+first_coroutine_offset* = (src: StringView) i32 {
+    pos := 0
+    found := 0 - 1
+    done := false
+    @while (done.then({ false }, { true })) {
+        sc := src.scan(pos)
+        sc.tok.kind.match ({
+            .Eof => {
+                done = true
+            },
+            _    => src.is_coroutine_token(sc.tok).match ({
                 true  => {
                     found = sc.tok.start
                     done = true

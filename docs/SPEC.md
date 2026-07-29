@@ -254,6 +254,54 @@ string literals, and char literals is of course fine. The diagnostic teaches
 `cond.then({ yes }, { no })` / `.match`. Both guards carry the same law
 status: they are language identity, not style.
 
+The third guard is the suspension law: an exact source identifier token
+`yield`, `async`, or `await` is rejected as `error[no-coroutine]`. Each of the
+three names a point where a running function stops mid-body and is resumed
+later, and Zen has no such point — concurrency is Pony-style actors whose
+behaviours run to completion. (Stackful coroutines exist as
+`@self-hosted-only` substrate in `std.concurrent.coroutine`; they are not
+public surface, and nothing in the language suspends a caller.) Instead of
+suspending you build a receiver: declare the message enum, `impl` the actor
+`receive`, and `send`. Back-pressure is a value — `send` returns `bool`, false
+when the mailbox is full — rather than a hidden suspension point, and
+end-of-stream is a message, not a language feature:
+
+```zen
+{ Context, Receiver, spawn_handle } = std.concurrent.actor
+Item*: Value(i64) | Done
+Sum*: {
+    total: i64,
+    seen: i64,
+    closed: bool,
+}
+Sum.impl(Receiver, {
+    receive = (s: MutPtr<Sum>, ctx: Context<Item>) void {
+        ctx.msg.match ({
+            .Value(v) => {
+                s.total = s.total + v
+                s.seen = s.seen + 1
+            },
+            .Done     => { s.closed = true },
+        })
+    }
+})
+main = () i32 {
+    h := heap.gpa()
+    sink := h.addr().spawn_handle(16, Sum(total: 0, seen: 0, closed: false)).expect("spawn")
+    xs: [i64] := [10, 20, 30]
+    xs.loop((hh, i, v) { sink.send(.Value(v)) })    // send returns bool: false = mailbox full
+    sink.send(.Done)                                // end-of-stream is a message
+    sink.run()
+    sink.free(h.addr())
+    0
+}
+```
+
+Like the other two, this is an exact-token guard: the words inside comments,
+string literals, and char literals are fine, and identifiers that merely
+contain them (`async_count`, `awaited`, `yielded`) are ordinary names. All
+three guards carry the same law status: language identity, not style.
+
 `loop` is the public slice iteration form:
 
 ```zen
@@ -839,8 +887,8 @@ Concurrency support is stdlib-level today:
 - `std.concurrent.coroutine`: coroutine substrate over context switching;
   `spawn` / `spawn_in` return `Result<Coro, IoError>` and clean up partial
   stack/context allocation before returning `.Err`;
-- `std.concurrent.runtime`: sync/async runtime and colorless `checkpoint`,
-  with namespace-bound `runtime.sync` / `runtime.async` constructors;
+- `std.concurrent.runtime`: sync/coroutine runtime and colorless `checkpoint`,
+  with namespace-bound `runtime.sync` / `runtime.coro` constructors;
 - `std.concurrent.sched`: small scheduler, with `try_run` / `try_run_in`
   for fallible scheduler flag allocation;
 - `std.concurrent.actor`: cooperative typed actors (inline drain on the caller
@@ -886,7 +934,7 @@ is a roadmap item. The source of truth is the code plus the runtime-API row in
 
 `ActorEngine<M>` owns the internal queue state. `ActorCell<M>` is the
 lower-level queue wrapper: it exposes `tell(message)` for fire-and-forget sends,
-drives a receiver through `await_reply`, wraps request/reply flows through
+drives a receiver through `claim_reply`, wraps request/reply flows through
 `request`, and frees the engine storage through `free`. Actor cells infer
 their message type from typed destinations such as
 `cell_r: Result<actor.ActorCell<Msg>, IoError> := actor.cell(heap.addr(), 16)`,
