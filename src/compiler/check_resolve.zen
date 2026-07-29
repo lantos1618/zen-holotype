@@ -7,7 +7,7 @@
 { arith_rty, arm_at, arrow_at, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc,
   dglobal, dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish,
   gstr_string, is_expr_null, lit, member, member_at, mkenumg, mkstruct_at, mkstructg_at, mktag,
-  mktagg, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret,
+  mktagg, narrow_op, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slit, sret,
   subst_ty_in, swhile, ti32, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
 { gstr_int, is_prim_width, map_slice, one_stmt, param_names_has, slice_any } = compiler.astops
@@ -25,7 +25,7 @@
 { inline_decl, lower_closures, mono_close, no_inline_gen_f } = compiler.check_inline
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { lower_stmt_expr, subj_payload, subj_tag, tag_const } = compiler.check_lower
-{ DeclIndex, Env, arm_env, bind_fnret, build_decl_index, cebuf, cenode, dispatch_recv,
+{ DeclIndex, Env, arm_env, bin_res_ty, bind_fnret, build_decl_index, cebuf, cenode, dispatch_recv,
   ctor_payload_exp, dispatch_recv_name, elem_of, empty_params, enum_inst_mk, enum_inst_tag,
   enum_name, extend_env, fnret_of, gen_variant_payload, gsubst, is_str_t, is_void_ty, local_name_at,
   no_stmts, params_env, pointee_of, recall, ty_is_ptr, vcons } = compiler.check
@@ -567,8 +567,14 @@ resolve_f64_neg = (
 ) Ptr<Expr> {
     (op == "-" && lhs.is_int_zero() && env.infer_expr(rhs).is_f64_ty()).match ({
         true  => a.cenode(bin_at(op, a.cenode(flit("0.0")), rhs, p)),
-        false => a.cenode(bin_rty(op, lhs, rhs, p, arith_rty(op, lty))),
+        false => a.cenode(bin_rty(op, lhs, rhs, p, env.narrow_rty(op, lty, lhs, rhs))),
     })
+}
+// The width genc must re-truncate this binop to, or Void. Uses the binop's OWN result type, so
+// `(i32) * 3` truncates to i32 while `(i32) * (i64)` stays 64-bit. Guarded by narrow_op so a
+// non-arithmetic binop never pays to infer its rhs.
+narrow_rty = (env: Env, op: StringView, lty: Ty, lhs: Ptr<Expr>, rhs: Ptr<Expr>) Ty {
+    narrow_op(op).then({ arith_rty(op, env.bin_res_ty(lty, lhs, rhs)) }, { tvoid() })
 }
 // ── variadic params: a trailing `...T` param collects the surplus call args into a `[T]` ──
 // Detect the marker (set by the parser), the element type T, and the per-arg expected type

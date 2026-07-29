@@ -172,13 +172,15 @@ bin_rty* = (op: StringView, l: Ptr<Expr>, r: Ptr<Expr>, p: i32, rt: Ty) Expr {
     ))
 }
 bin* = (op: StringView, l: Ptr<Expr>, r: Ptr<Expr>) Expr { bin_at(op, l, r, 0) }
-// C integer promotion widens a sub-32-bit operand (u8/i8/i16/u16) to `int` for any operator, and Zen
-// only narrows at a store — so a used operator RESULT leaks the un-truncated value. These name the
-// types + width-preserving ops that must re-truncate; i32/u32/i64/u64 are native C widths, left alone.
+// C promotes every operand narrower than its own arithmetic width, and Zen only narrows at a store —
+// so a used operator RESULT leaks the un-truncated value. u8/i8/i16/u16 promote to `int` for any
+// operator; i32/u32 promote to `long long` beside the `LL` of an untyped integer literal (gen_int_lit),
+// which is why `(a: i32) + 1 < a` silently computed at 64 bits. Only i64/u64 are already at width.
 subword_ty* = (t: Ty) bool {
     t.match ({
         .U8       => true,
-        .Named(n) => n == "i8" || n == "i16" || n == "u16",
+        .I32      => true,
+        .Named(n) => n == "i8" || n == "i16" || n == "u16" || n == "u32",
         _         => false,
     })
 }
@@ -186,8 +188,10 @@ narrow_op* = (op: StringView) bool {
     op == "+" || op == "-" || op == "*" || op == "<<" || op == "&" || op == "|" || op == "^"
 }
 // result type to record on a Bin so genc re-truncates a sub-width arithmetic result; Void = no cast.
-arith_rty* = (op: StringView, lty: Ty) Ty {
-    (narrow_op(op) && subword_ty(lty)).then({ lty }, { tvoid() })
+// `rty` must be the binop's OWN result type (num_result), not the lhs's: truncating `i32 * i64` to
+// the lhs width would be a new silent truncation in place of the old silent widening.
+arith_rty* = (op: StringView, rty: Ty) Ty {
+    (narrow_op(op) && subword_ty(rty)).then({ rty }, { tvoid() })
 }
 call_full* = (fn: StringView, args: [Expr], targs: [Ty], p: i32, raw: bool) Expr {
     .Call(CallData(
