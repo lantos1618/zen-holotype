@@ -15,6 +15,7 @@
 // impl set into this closure (and, via modules that import compiler.mono, into c_emit/js too).
 { map_slice, slice_any } = compiler.astops
 { gd_has_mangled, gd_tys_max_depth } = compiler.generics
+{ loop_at } = std.core.count
 // ── monomorphization: instantiate generic structs/enums per concrete use ─────────
 // Backend prepass. A `Box<T>: {…}` decl (DGenStruct) emits no concrete type by itself; instead, for
 // every distinct `Box<concrete>` the module uses, we create one concrete StructDecl `Box_i32` with tparam→arg
@@ -38,7 +39,7 @@ find_genstruct = (decls: [Decl], name: StringView) GenStructDecl {
         tparams: slice(null_ptr(), 0),
         fields: slice(null_ptr(), 0),
     )
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         found = d.match ({
             .DGenStruct(g) => (g.name == name).then({ g }, { found }),
             _              => found,
@@ -134,9 +135,7 @@ collect_ty = (buf: [GenericData], cnt: i32, t: Ty) i32 {
 }
 collect_tys = (buf: [GenericData], cnt: i32, ts: [Ty]) i32 {
     c ::= cnt
-    ts.loop((h, i, t) {
-        c = buf.collect_ty(c, t)
-    })
+    ts.loop_at((i, t) { c = buf.collect_ty(c, t) })
     c
 }
 collect_decl = (buf: [GenericData], cnt: i32, d: Decl) i32 {
@@ -150,23 +149,17 @@ collect_decl = (buf: [GenericData], cnt: i32, d: Decl) i32 {
 }
 collect_flds = (buf: [GenericData], cnt: i32, fields: [Field]) i32 {
     c ::= cnt
-    fields.loop((h, i, f) {
-        c = buf.collect_ty(c, f.ty)
-    })
+    fields.loop_at((i, f) { c = buf.collect_ty(c, f.ty) })
     c
 }
 collect_pays = (buf: [GenericData], cnt: i32, variants: [VariantDef]) i32 {
     c ::= cnt
-    variants.loop((h, i, v) {
-        c = buf.collect_ty(c, v.payload)
-    })
+    variants.loop_at((i, v) { c = buf.collect_ty(c, v.payload) })
     c
 }
 collect_func = (buf: [GenericData], cnt: i32, f: Func) i32 {
     c ::= cnt
-    f.params.loop((h, i, p) {
-        c = buf.collect_ty(c, p.ty)
-    })
+    f.params.loop_at((i, p) { c = buf.collect_ty(c, p.ty) })
     buf.collect_body(buf.collect_ty(c, f.ret), f.body)
 }    // also walk the BODY for generic literals
 // ── body walk: discover generic instances from struct LITERALS in expressions, not just from typed
@@ -177,23 +170,17 @@ add_gen = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
 }
 collect_exprs = (buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
     c ::= cnt
-    xs.loop((h, i, x) {
-        c = buf.collect_expr(c, x)
-    })
+    xs.loop_at((i, x) { c = buf.collect_expr(c, x) })
     c
 }
 collect_arms = (buf: [GenericData], cnt: i32, arms: [ArmData]) i32 {
     c ::= cnt
-    arms.loop((h, i, a) {
-        c = buf.collect_expr(c, load(a.body))
-    })
+    arms.loop_at((i, a) { c = buf.collect_expr(c, load(a.body)) })
     c
 }
 collect_inits = (buf: [GenericData], cnt: i32, inits: [FieldInit]) i32 {
     c ::= cnt
-    inits.loop((h, i, fi) {
-        c = buf.collect_expr(c, load(fi.value))
-    })
+    inits.loop_at((i, fi) { c = buf.collect_expr(c, load(fi.value)) })
     c
 }
 collect_makestruct = (buf: [GenericData], cnt: i32, m: MakeStructData) i32 {
@@ -261,9 +248,7 @@ collect_stmt = (buf: [GenericData], cnt: i32, st: Stmt) i32 {
 }
 collect_body = (buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
     c ::= cnt
-    body.loop((h, i, st) {
-        c = buf.collect_stmt(c, st)
-    })
+    body.loop_at((i, st) { c = buf.collect_stmt(c, st) })
     c
 }
 GBufEnd: {
@@ -273,9 +258,7 @@ GBufEnd: {
 collect_insts = (a: MutPtr<Malloc>, decls: [Decl]) GBufEnd {
     buf = cbuf<GenericData>(a, 2048)
     cnt ::= 0
-    decls.loop((h, i, d) {
-        cnt = buf.collect_decl(cnt, d)
-    })
+    decls.loop_at((i, d) { cnt = buf.collect_decl(cnt, d) })
     GBufEnd(
         buf: buf,
         count: cnt,
@@ -310,12 +293,8 @@ monomorphize* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
     cnt = a.expand_insts(decls, ce.buf, ce.count, 0)    // transitively close over nested generic instances
     out = cbuf<Decl>(a, decls.len + cnt)
     k ::= 0
-    decls.loop((h, i, d) {
-        k = d.is_gen_template().then({ k }, { out.put_decl(k, d) })
-    })
-    ce.buf.loop((h, i, g) {
-        k = (i < cnt).then({ out.put_decl(k, a.mono_inst(decls, g)) }, { k })
-    })
+    decls.loop_at((i, d) { k = d.is_gen_template().then({ k }, { out.put_decl(k, d) }) })
+    ce.buf.loop_at((i, g) { k = (i < cnt).then({ out.put_decl(k, a.mono_inst(decls, g)) }, { k }) })
     slice(out.ptr, k)
 }
 put_decl = (out: [Decl], k: i32, d: Decl) i32 {

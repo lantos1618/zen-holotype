@@ -37,6 +37,7 @@
 { set } = std.mem.raw
 { view } = std.text.str
 { sub } = std.core.slice
+{ loop_at } = std.core.count
 // ── public types ────────────────────────────────────────────────────────────────
 // A match is a half-open byte range [start, end) into the searched string.
 Match*: {
@@ -741,31 +742,31 @@ has_match = (re: Regex, clen: i64) bool {
 // taking epsilon-closures at `sp+1`. Returns the new nlist length.
 build_next = (re: Regex, sv: [u8], clen: i64, sp: i64, n: i64, gen: i64, b: u8) i64 {
     nlen :: i64 = 0
-    re.clist.sub(0, clen).loop((h, i, pc) {
-        inst = re.insts[pc]
-        (inst.op == OP_CHAR).match ({
-            true  => (b == inst.c).then({
-                nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-            }),
-            false => (inst.op == OP_ANY).match ({
-                true  => (b == '\n' == false).then({
+    re.clist
+        .sub(0, clen)
+        .loop_at((i, pc) {
+            inst = re.insts[pc]
+            (inst.op == OP_CHAR).match ({
+                true  => (b == inst.c).then({
                     nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
                 }),
-                false => (inst.op == OP_CLASS).then({
-                    re.class_match(inst.cls, b).then({
+                false => (inst.op == OP_ANY).match ({
+                    true  => (b == '\n' == false).then({
                         nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-                    })
+                    }),
+                    false => (inst.op == OP_CLASS).then({
+                        re.class_match(inst.cls, b).then({
+                            nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
+                        })
+                    }),
                 }),
-            }),
+            })
         })
-    })
     nlen
 }
 // copy nlist[0..nlen) back into clist (the two frontiers, no pointer swap).
 copy_threads = (re: Regex, nlen: i64) void {
-    re.nlist.sub(0, nlen).loop((h, i, pc) {
-        re.clist[i] = pc
-    })
+    re.nlist.sub(0, nlen).loop_at((i, pc) { re.clist[i] = pc })
 }
 match_from = (re: Regex, sv: Slice<u8>, start: i64, n: i64, gen0: i64) MatchRes {
     gen ::= gen0 + 1

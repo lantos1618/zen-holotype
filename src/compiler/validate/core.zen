@@ -35,6 +35,7 @@
   kdiag_add, kdiag_buf, ko_func_kind, ko_global_kind, kvb_func_kind, method_err,
   parse_sentinel_kind, unreachable_arm_errs } = compiler.validate.kinds
 { fn_dup_before, reserved_name_kind, reserved_name_of } = compiler.validate.enrich
+{ loop_at } = std.core.count
 // count an assign TARGET as a use only when it is NOT a bare local (a bare `p = …` is a rebind/revival,
 // not a read of `p`; a compound `arr[i] = …` / `m.f = …` reads the base/index, so still check those).
 kv_own_assign_target_kind = (
@@ -62,9 +63,7 @@ kv_own_assign_target_kind = (
 // every `let` name anywhere in a body (incl. nested arms/blocks/loops): fresh per iteration.
 loop_lets = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
     out ::= acc
-    body.loop((h, i, st) {
-        out = a.loop_lets_stmt(out, st)
-    })
+    body.loop_at((i, st) { out = a.loop_lets_stmt(out, st) })
     out
 }
 loop_lets_stmt = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
@@ -94,9 +93,7 @@ loop_lets_expr = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadL
 }
 loop_lets_arms = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
     out ::= acc
-    arms.loop((h, i, ar) {
-        out = a.loop_lets_expr(out, ar.body)
-    })
+    arms.loop_at((i, ar) { out = a.loop_lets_expr(out, ar.body) })
     out
 }
 loop_body_outer_frees = (
@@ -275,9 +272,7 @@ kv_own_args_kind = (
     args: [Expr],
 ) i32 {
     acc ::= 0
-    args.loop((h, i, ar) {
-        acc = acc.or(a.kv_own_expr_kind(env, seen, al, ar.addr()))
-    })
+    args.loop_at((i, ar) { acc = acc.or(a.kv_own_expr_kind(env, seen, al, ar.addr())) })
     acc
 }
 kv_own_inits_kind = (
@@ -288,9 +283,7 @@ kv_own_inits_kind = (
     inits: [FieldInit],
 ) i32 {
     acc ::= 0
-    inits.loop((h, i, fi) {
-        acc = acc.or(a.kv_own_expr_kind(env, seen, al, fi.value))
-    })
+    inits.loop_at((i, fi) { acc = acc.or(a.kv_own_expr_kind(env, seen, al, fi.value)) })
     acc
 }
 kv_own_arms_kind = (
@@ -302,7 +295,7 @@ kv_own_arms_kind = (
     arms: [ArmData],
 ) i32 {
     acc ::= 0
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         acc = acc.or(a.kv_own_expr_kind(a.arm_env(env, subjty, ar), seen, al, ar.body))
     })
     acc
@@ -314,7 +307,7 @@ kv_own_struct_dupmove_kind = (a: MutPtr<Malloc>, env: Env, s: MakeStructData) i3
     env.env_is_struct(s.ty).then({
         fields = env.env_struct_fields(s.ty)
         d ::= a.dead_nil()
-        s.inits.loop((h, i, fi) {
+        s.inits.loop_at((i, fi) {
             nm = env.struct_field_move_src(fields, fi)
             (nm.is_empty() == false).then({
                 acc = acc.or(d.dead_has(nm).match ({
@@ -330,7 +323,7 @@ kv_own_struct_dupmove_kind = (a: MutPtr<Malloc>, env: Env, s: MakeStructData) i3
 kv_own_slice_dupmove_kind = (a: MutPtr<Malloc>, env: Env, items: [Expr]) i32 {
     acc ::= 0
     d ::= a.dead_nil()
-    items.loop((h, i, it) {
+    items.loop_at((i, it) {
         nm = env.own_moved_var(it.addr())
         (nm.is_empty() == false).then({
             acc = acc.or(d.dead_has(nm).then({ KOWNERSHIP().kv_at(it.expr_pos()) }, { 0 }))
@@ -434,7 +427,7 @@ kv_own_body_kind = (
     e ::= env
     d ::= seen
     al2 ::= al
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         acc = acc.or(a.kv_own_stmt_kind(e, d, al2, st))
         d = a.own_step(e, d, al2, st)
         al2 = a.alias_step(e, al2, st)
@@ -455,7 +448,7 @@ kv_own_check_func_kind = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: F
 check_module_ownership_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc ::= 0
     idx = a.build_decl_index(decls)
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f) => a.kv_own_check_func_kind(decls, idx, f),
             _         => 0,
@@ -467,7 +460,7 @@ check_module_ownership_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
 // arg-type position: which arg first fails to fit (so a bad arg reports KARGTYPE not a blanket code).
 kv_arg_type_kind = (env: Env, tps: [Param], params: [Param], args: [Expr]) i32 {
     acc ::= 0
-    args.loop((h, i, ar) {
+    args.loop_at((i, ar) {
         acc = acc.or(env.arg_err_at(tps, params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos()))
     })
     acc
@@ -636,7 +629,7 @@ kv_reflect_kind = (env: Env, c: CallData) i32 {
 }
 kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
     acc ::= 0
-    args.loop((h, i, ar) {
+    args.loop_at((i, ar) {
         acc = acc.or(env.fnt_arg_err_at(ptys, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos()))
     })
     acc
@@ -652,14 +645,12 @@ kv_fnval_call_kind = (env: Env, c: CallData) i32 {
 }
 kv_check_args_kind = (env: Env, args: [Expr]) i32 {
     acc ::= 0
-    args.loop((h, i, ar) {
-        acc = acc.or(env.kv_check_expr_kind(ar.addr()))
-    })
+    args.loop_at((i, ar) { acc = acc.or(env.kv_check_expr_kind(ar.addr())) })
     acc
 }
 kv_check_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     acc ::= 0
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         acc = acc.or(env.a.arm_env(env, subjty, ar).kv_check_expr_kind(ar.body))
     })
     acc
@@ -670,9 +661,7 @@ kv_arm_result_kind = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
 kv_match_arm_result_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     want = env.match_result_ty(subjty, arms)
     acc ::= 0
-    arms.loop((h, i, ar) {
-        acc = acc.or(env.kv_arm_result_kind(subjty, want, ar))
-    })
+    arms.loop_at((i, ar) { acc = acc.or(env.kv_arm_result_kind(subjty, want, ar)) })
     acc
 }
 // the value-consumed void-arm rule, kind-flavoured (mirrors value_void_arm_err exactly; the caret
@@ -683,7 +672,7 @@ kv_value_void_arm_kind = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
         false => load(e).match ({
             .Match(m) => {
                 acc ::= 0
-                m.arms.loop((h, i, ar) {
+                m.arms.loop_at((i, ar) {
                     acc = acc.or(env
                         .novalue_arm_leaf(ar.body)
                         .kv_one(KARMVOID())
@@ -702,17 +691,13 @@ kv_value_void_arm_kind = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
 }
 kv_arm_return_kind = (arms: [ArmData]) i32 {
     acc ::= 0
-    arms.loop((h, i, ar) {
-        acc = acc.or(ar.body.expr_drops_return().kv_one(KVALPOSRETURN()))
-    })
+    arms.loop_at((i, ar) { acc = acc.or(ar.body.expr_drops_return().kv_one(KVALPOSRETURN())) })
     acc
 }
 // struct-literal init fields: an unknown field OR a mistyped value is KSTRUCTFIELD.
 kv_check_inits_kind = (env: Env, inits: [FieldInit]) i32 {
     acc ::= 0
-    inits.loop((h, i, fi) {
-        acc = acc.or(env.kv_check_expr_kind(fi.value))
-    })
+    inits.loop_at((i, fi) { acc = acc.or(env.kv_check_expr_kind(fi.value)) })
     acc
 }
 // struct-literal init: caret on the first init value's source position when it's positioned
@@ -817,7 +802,7 @@ kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
 kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
     acc ::= 0
     e ::= env
-    stmts.loop((h, i, st) {
+    stmts.loop_at((i, st) {
         acc = acc.or(e.kv_check_block_stmt_kind(st))
         e = e.a.extend_env(e, st)
     })
@@ -830,7 +815,7 @@ kv_slicelit_kind = (env: Env, items: [Expr]) i32 {
         false => {
             ety = env.infer_expr(items[0].addr())
             acc ::= 0
-            items.loop((h, i, it) {
+            items.loop_at((i, it) {
                 acc = acc.or(env.sl_elem_fit(ety, it).kv_one(KARGTYPE()).kv_at(it.expr_pos()))
             })
             acc
@@ -986,7 +971,7 @@ kv_check_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
 kv_check_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc ::= 0
     e ::= env
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         acc = acc.or(a.kv_check_stmt_kind(e, st))
         e = a.extend_env(e, st)
     })
@@ -1016,7 +1001,7 @@ kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
 check_module_bound_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx = a.build_decl_index(decls)
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f) => a.kvb_func_kind(decls, idx, f),
             _         => 0,
@@ -1035,7 +1020,7 @@ check_module_bound_diagnostic_from_source* = (
 check_module_arg_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx = a.build_decl_index(decls)
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f) => f
                 .ka_rec_hof_kind()
@@ -1058,7 +1043,7 @@ check_module_arg_diagnostic_from_source* = (
 check_module_or_return_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx = a.build_decl_index(decls)
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f)   => a.ko_func_kind(decls, idx, f),
             .DGlobal(g) => a.ko_global_kind(decls, idx, g),
@@ -1085,7 +1070,7 @@ check_module_unknown_type_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
         a: a,
     )
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f)      => a.ut_func_kind(env, f),
             .DForeign(f)   => a.ut_func_kind(env, f),
@@ -1108,7 +1093,7 @@ check_module_unknown_type_name = (a: MutPtr<Malloc>, decls: [Decl]) StringView {
         a: a,
     )
     r ::= ""
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         r = desc_or(r, d.match ({
             .DFunc(f)      => a.utn_func(env, f),
             .DForeign(f)   => a.utn_func(env, f),
@@ -1155,7 +1140,7 @@ check_module_ffi_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
         a: a,
     )
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DForeign(f) => env.ffi_func_kind(f),
             _            => 0,
@@ -1173,7 +1158,7 @@ check_module_ffi_name = (a: MutPtr<Malloc>, decls: [Decl]) StringView {
         a: a,
     )
     r ::= ""
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         r = desc_or(r, d.match ({
             .DForeign(f) => a.ffi_func_msg(env, f),
             _            => "",
@@ -1207,7 +1192,7 @@ check_module_ffi_diagnostic_from_source* = (
 }
 check_module_infinite_type_kind = (decls: [Decl]) i32 {
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DStruct(sd)   => decls.inf_named_reaches(sd.name, sd.name, decls.len).match ({
                 true  => KINFINITETYPE().kv_at(sd.pos),
@@ -1257,7 +1242,7 @@ main_param_is_sys = (f: Func) bool {
 }
 main_params_kind = (decls: [Decl]) i32 {
     k ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         k = (k == 0).match ({
             true  => d.match ({
                 .DFunc(f) => (f.name == "main" && f.params.len > 0).match ({
@@ -1317,7 +1302,7 @@ check_module_mustuse_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx = a.build_decl_index(decls)
     mvm = a.mu_build_index(decls, idx)
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f) => a.mu_func_kind(mvm, f),
             _         => 0,
@@ -1339,14 +1324,12 @@ kv_method_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 
 }
 kv_conformance_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
     acc ::= 0
-    sd.fields.loop((h, i, f) {
-        acc = acc.or(a.kv_method_kind(decls, im, f))
-    })
+    sd.fields.loop_at((i, f) { acc = acc.or(a.kv_method_kind(decls, im, f)) })
     acc
 }
 kv_impl_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DStruct(sd) => (sd.name == im.trname).match ({
                 true  => a.kv_conformance_kind(decls, im, sd),
@@ -1364,7 +1347,7 @@ kv_impl_kind = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData) i32 {
 // bare kind, exactly the pre-position behavior.
 kv_dup_name_kind = (decls: [Decl]) i32 {
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         nm = d.fn_name_of()
         dup = is_empty(nm).then({ false }, { decls.fn_dup_before(nm, i) })
         acc = acc.or(dup.then({ KDUPFN().kv_at(d.fn_pos_of()) }, { 0 }))
@@ -1396,7 +1379,7 @@ kv_check_func_kind_all = (
     )
     c ::= cnt
     e ::= env
-    f.body.loop((h, i, st) {
+    f.body.loop_at((i, st) {
         c = buf.kdiag_add(c, a.kv_check_stmt_kind(e, st))
         e = a.extend_env(e, st)
     })
@@ -1436,15 +1419,13 @@ kca_stmt = (st: Stmt, scope: [Stmt]) i32 {
 }
 kca_body = (body: [Stmt]) i32 {
     acc ::= 0
-    body.loop((h, i, st) {
-        acc = acc.or(st.kca_stmt(body))
-    })
+    body.loop_at((i, st) { acc = acc.or(st.kca_stmt(body)) })
     acc
 }
 check_module_kind_all = (a: MutPtr<Malloc>, decls: [Decl], vis: UfcsVis, buf: [i32], cnt: i32) i32 {
     idx = a.build_decl_index_vis(decls, vis)
     c ::= buf.kdiag_add(cnt, decls.kv_dup_name_kind())
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         c = d.match ({
             .DFunc(f)   => a.kv_check_func_kind_all(decls, idx, f, buf, c),
             .DImpl(im)  => buf.kdiag_add(c, a.kv_impl_kind(decls, im)),
@@ -1464,7 +1445,7 @@ check_module_batch_vis* = (
     buf = a.kdiag_buf()
     cnt = a.check_module_kind_all(decls, vis, buf, 0)
     out ::= slice(a.acquire_or_die(to_i64(cnt) * sizeof(CheckDiagnostic)), to_i64(cnt))
-    buf.loop((h, i, p) {
+    buf.loop_at((i, p) {
         (i < to_i64(cnt)).then({
             out[i] = src.check_diagnostic_from_source(p, 1)
         })
@@ -1476,7 +1457,7 @@ check_module_batch_vis* = (
 // downstream type error in the same module, so it must not be shadowed by one.
 check_module_parse_kind = (decls: [Decl]) i32 {
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DGlobal(g) => parse_sentinel_kind(g.name, g.init),
             _           => 0,
@@ -1509,12 +1490,8 @@ check_linked* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
     hdr = a.module_header(lib)
     rfile = a.resolve_module(decls)
     world ::= cbuf<Decl>(a, hdr.len + rfile.len)
-    hdr.loop((h, i, d) {
-        world[i] = d
-    })
-    rfile.loop((h, i, d) {
-        world[hdr.len + i] = d
-    })
+    hdr.loop_at((i, d) { world[i] = d })
+    rfile.loop_at((i, d) { world[hdr.len + i] = d })
     a.check_module(world)
 }
 // Authoritative kind/position pass: the source offset of the FIRST escaping return/trailing
@@ -1527,7 +1504,7 @@ kv_escape_stmts = (
 ) i32 {
     acc ::= 0
     d ::= derived
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         acc = acc.or(a.kv_escape_stmt(svars, d, st))
         d = a.escape_step(svars, d, st)
     })
@@ -1578,9 +1555,7 @@ kv_escape_arms = (
     arms: [ArmData],
 ) i32 {
     acc ::= 0
-    arms.loop((h, i, ar) {
-        acc = acc.or(a.kv_escape_arm(svars, derived, ar.body))
-    })
+    arms.loop_at((i, ar) { acc = acc.or(a.kv_escape_arm(svars, derived, ar.body)) })
     acc
 }
 kv_escape_arm = (
@@ -1616,7 +1591,7 @@ kv_escape_body = (
 ) i32 {
     acc ::= 0
     d ::= derived
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         acc = acc.or(a.kv_escape_stmt(svars, d, st))
         d = a.escape_step(svars, d, st)
     })
@@ -1637,7 +1612,7 @@ kv_escape_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
 }
 check_module_escape_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f) => a.kv_escape_check_func(f),
             _         => 0,
@@ -1680,23 +1655,17 @@ name_read_in_expr* = (nm: StringView, e: Ptr<Expr>) bool {
 }
 name_read_in_args* = (nm: StringView, args: [Expr]) bool {
     f ::= false
-    args.loop((h, i, ar) {
-        f = nm.name_read_in_expr(ar.addr()).then({ true }, { f })
-    })
+    args.loop_at((i, ar) { f = nm.name_read_in_expr(ar.addr()).then({ true }, { f }) })
     f
 }
 name_read_in_inits = (nm: StringView, inits: [FieldInit]) bool {
     f ::= false
-    inits.loop((h, i, fi) {
-        f = nm.name_read_in_expr(fi.value).then({ true }, { f })
-    })
+    inits.loop_at((i, fi) { f = nm.name_read_in_expr(fi.value).then({ true }, { f }) })
     f
 }
 name_read_in_arms = (nm: StringView, arms: [ArmData]) bool {
     f ::= false
-    arms.loop((h, i, ar) {
-        f = nm.name_read_in_expr(ar.body).then({ true }, { f })
-    })
+    arms.loop_at((i, ar) { f = nm.name_read_in_expr(ar.body).then({ true }, { f }) })
     f
 }
 name_read_in_stmt = (nm: StringView, st: Stmt) bool {
@@ -1716,9 +1685,7 @@ name_read_in_stmt = (nm: StringView, st: Stmt) bool {
 }
 name_read_in_body* = (nm: StringView, body: [Stmt]) bool {
     f ::= false
-    body.loop((h, i, st) {
-        f = nm.name_read_in_stmt(st).then({ true }, { f })
-    })
+    body.loop_at((i, st) { f = nm.name_read_in_stmt(st).then({ true }, { f }) })
     f
 }
 // a top-level `let` binding a FRESH owner that is never named again → the leak position (0 = none).
@@ -1752,7 +1719,7 @@ kv_leak_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) i32 {
 kv_leak_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc ::= 0
     e ::= env
-    body.loop((h, k, st) {
+    body.loop_at((k, st) {
         acc = acc.or(a.kv_leak_stmt(e, body, k, st))
         e = a.extend_env(e, st)
     })
@@ -1770,7 +1737,7 @@ kv_leak_check_func = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func)
 check_module_leak_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc ::= 0
     idx = a.build_decl_index(decls)
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f) => a.kv_leak_check_func(decls, idx, f),
             _         => 0,
@@ -1802,7 +1769,7 @@ check_module_leak_diagnostic_from_source* = (
 check_module_addr_escape_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     idx = a.build_decl_index(decls)
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f) => a.ae_check_func(decls, idx, f),
             _         => 0,
@@ -1832,7 +1799,7 @@ check_module_addr_escape_diagnostic_from_source* = (
 check_module_send_kind = (a: MutPtr<Malloc>, decls: [Decl], mode: i32) i32 {
     acc ::= 0
     idx = a.build_decl_index(decls)
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f) => a.sv_check_func(decls, idx, f, mode),
             _         => 0,
@@ -1886,7 +1853,7 @@ check_module_send_mut_diagnostic_from_source* = (
 }
 check_module_scratch_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DFunc(f) => a.sx_func_kind(f),
             _         => 0,

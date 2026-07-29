@@ -14,7 +14,7 @@
   gf_line_of, gf_raw_lit } = compiler.pretty
 { gstr_int, left_pos_of } = compiler.astops
 { ff_lparams } = compiler.pretty_decl
-{ times, step_while } = std.core.count
+{ times, step_while, loop_at } = std.core.count
 // ── precedence (mirrors the parser chain: || < && < cmp < | < ^ < & < shift < +- < */%  < postfix) ──
 // Parens are RE-INSERTED by precedence so the formatted output reparses to the SAME AST:
 //  • a Bin used as a postfix RECEIVER (`(n > 0).match(…)`, `(a + b).field`) must be wrapped — else
@@ -161,7 +161,7 @@ ff_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, ind: i32) String {
 }
 ff_args = (s: String, a: MutPtr<Malloc>, args: [Expr], ind: i32) String {
     out ::= s
-    args.loop((h, i, ar) {
+    args.loop_at((i, ar) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
         out = out.ff_expr(a, ar.addr(), ind)
     })
@@ -178,7 +178,7 @@ ff_args = (s: String, a: MutPtr<Malloc>, args: [Expr], ind: i32) String {
 // leading-dot element like `.Some(…)` still glues to its literal.
 ff_slice_rows = (s: String, a: MutPtr<Malloc>, items: [Expr], ind: i32) String {
     out ::= s
-    items.loop((h, i, it) {
+    items.loop_at((i, it) {
         out = out.ff_indent(a, ind).ff_expr(a, it.addr(), ind).ff_append(a, ",\n")
     })
     out
@@ -484,9 +484,7 @@ ff_is_anon_positional_inits = (a: MutPtr<Malloc>, ms: MakeStructData) bool {
             true  => false,
             false => {
                 ok ::= true
-                ms.inits.loop((h, i, fi) {
-                    ok = ok && fi.name == a.payload_fname(to_i32(i))
-                })
+                ms.inits.loop_at((i, fi) { ok = ok && fi.name == a.payload_fname(to_i32(i)) })
                 ok
             },
         }),
@@ -495,7 +493,7 @@ ff_is_anon_positional_inits = (a: MutPtr<Malloc>, ms: MakeStructData) bool {
 }
 ff_anon_ctor_args = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
     out ::= s
-    inits.loop((h, i, fi) {
+    inits.loop_at((i, fi) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
         out = out.ff_expr(a, fi.value, ind)
     })
@@ -539,7 +537,7 @@ ff_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData, ind: i32) String
 }
 ff_struct_inline = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
     out ::= s
-    inits.loop((h, i, fi) {
+    inits.loop_at((i, fi) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
         out = out.ff_append(a, fi.name).ff_append(a, ": ").ff_expr(a, fi.value, ind)
     })
@@ -547,7 +545,7 @@ ff_struct_inline = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) 
 }
 ff_struct_fields = (s: String, a: MutPtr<Malloc>, inits: [FieldInit], ind: i32) String {
     out ::= s
-    inits.loop((h, i, fi) {
+    inits.loop_at((i, fi) {
         out = out
             .ff_indent(a, ind)
             .ff_append(a, fi.name)
@@ -592,7 +590,7 @@ arm_pat_len = (a: MutPtr<Malloc>, ar: ArmData) i32 {
 }
 arms_max_pat = (a: MutPtr<Malloc>, arms: [ArmData]) i32 {
     m ::= 0
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         w = a.arm_pat_len(ar)
         m = (w > m).then({ w }, { m })
     })
@@ -643,7 +641,7 @@ gf_next_arm_pos = (arms: [ArmData], from: i32) i32 {
 // and makes re-formatting idempotent (a trailing comment always re-attaches to the same arm).
 ff_arms = (s: String, a: MutPtr<Malloc>, arms: [ArmData], maxw: i32, ind: i32) String {
     out ::= s
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         nb = gf_next_arm_pos(arms, i + 1)
         lead = out.ff_flush_leading(a, gf_arm_pos(ar), ind)
         line = lead.ff_indent(a, ind).ff_arm_pat(a, ar)

@@ -5,18 +5,17 @@
 { Malloc } = std.mem.alloc
 { one_stmt, slice_any } = compiler.astops
 { Env, arm_env, cenode, extend_env, no_stmts } = compiler.check
+{ loop_at } = std.core.count
 match_has_wild = (m: MatchData) bool { m.arms.slice_any((ar) { ar.variant == "_" }) }
 arm_covers_v = (m: MatchData, vn: StringView) bool { m.arms.slice_any((ar) { ar.variant == vn }) }
 ed_covered = (ed: EnumDecl, m: MatchData) bool {
     all ::= true
-    ed.variants.loop((h, i, v) {
-        all = m.arm_covers_v(v.name).then({ all }, { false })
-    })
+    ed.variants.loop_at((i, v) { all = m.arm_covers_v(v.name).then({ all }, { false }) })
     all
 }
 enum_exhaustive = (decls: [Decl], m: MatchData) bool {
     found ::= false
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         found = d.match ({
             .DEnum(ed) => (ed.name == m.ename).then({ ed.ed_covered(m) }, { found }),
             _          => found,
@@ -51,9 +50,7 @@ relower_tail_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) Stmt {
 }
 env_over = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt], upto: i64) Env {
     out ::= env
-    stmts.loop((h, i, st) {
-        out = (i < upto).then({ a.extend_env(out, st) }, { out })
-    })
+    stmts.loop_at((i, st) { out = (i < upto).then({ a.extend_env(out, st) }, { out }) })
     out
 }
 relower_block_tail = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt]) [Stmt] {
@@ -63,7 +60,7 @@ relower_block_tail = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt]) [Stmt] {
         false => {
             buf ::= cbuf<Stmt>(a, n)
             envT = a.env_over(env, stmts, n - 1)
-            stmts.loop((h, i, st) {
+            stmts.loop_at((i, st) {
                 buf[i] = (i == n - 1).then({ a.relower_tail_stmt(envT, st) }, { st })
             })
             buf
@@ -106,9 +103,7 @@ arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt
 cons_stmt = (a: MutPtr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
     buf ::= cbuf<Stmt>(a, rest.len + 1)
     buf[0] = head
-    rest.loop((h, i, st) {
-        buf[i + 1] = st
-    })
+    rest.loop_at((i, st) { buf[i + 1] = st })
     buf
 }
 // Build if/else chain over enum arms.

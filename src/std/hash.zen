@@ -19,7 +19,7 @@
 // one of these names (or imports another module that does) collides at flatten time; import the names
 // you use (`{ sha256_hex, fnv1a } = std.hash`) and rename on your side if needed.
 { then } = std.core.bool
-{ times } = std.core.count
+{ times, loop_at } = std.core.count
 { hex_char } = std.text.ascii    // the shared hex-ENCODE nibble
 { Allocator, try_acquire } = std.mem.alloc    // sha256_hex allocates its hex buffer through the caller allocator
 { expect } = std.core.result
@@ -33,7 +33,7 @@ FNV64_OFFSET = 14695981039346656037
 // a cryptographic hash (do not use it for integrity/security). Empty input hashes to the offset basis.
 fnv1a* = (bytes: Slice<u8>) u64 {
     h :: u64 = FNV64_OFFSET
-    bytes.loop((hh, i, b) {
+    bytes.loop_at((i, b) {
         x = to_i64(b)
         h = (h ^ x) * FNV64_PRIME
     })
@@ -46,9 +46,7 @@ fnv1a* = (bytes: Slice<u8>) u64 {
 // thread the returned hash back in as the next `h`.
 fnv1a64_fold* = (h: i64, bytes: Slice<u8>) i64 {
     hh ::= h
-    bytes.loop((lh, i, b) {
-        hh = (hh ^ to_i64(b)) * FNV64_PRIME
-    })
+    bytes.loop_at((i, b) { hh = (hh ^ to_i64(b)) * FNV64_PRIME })
     (hh ^ bytes.len) * FNV64_PRIME
 }
 // ── FNV-1a, 32-bit ────────────────────────────────────────────────────────────
@@ -61,9 +59,7 @@ FNV32_PRIME = 16777619
 FNV32_OFFSET = 2166136261
 fnv1a32* = (bytes: Slice<u8>) i64 {
     h ::= FNV32_OFFSET
-    bytes.loop((hh, i, b) {
-        h = (h ^ to_i64(b)) * FNV32_PRIME
-    })
+    bytes.loop_at((i, b) { h = (h ^ to_i64(b)) * FNV32_PRIME })
     h
 }
 // ── SHA-256 ─────────────────────────────────────────────────────────────────────
@@ -118,14 +114,14 @@ sha_compress = (bytes: Slice<u8>, hh: [i64], k: [i64], w: [i64]) i64 {
     // one pass per 512-bit block: a COUNT loop, so the count primitive owns the stepping.
     nblocks.times((bi) {
         base = bi * 64
-        w.loop((lh, j, wj) {
+        w.loop_at((j, wj) {
             // load the 16 big-endian words of this 512-bit block (the first 16 schedule slots).
             (j < 16).then({
                 o = base + j * 4
                 w[j] = sha_msg_byte(bytes, o, len, plen, bitlen) << 24 | sha_msg_byte(bytes, o + 1, len, plen, bitlen) << 16 | sha_msg_byte(bytes, o + 2, len, plen, bitlen) << 8 | sha_msg_byte(bytes, o + 3, len, plen, bitlen)
             })
         })
-        w.loop((lh, t, wt) {
+        w.loop_at((t, wt) {
             // extend the 16 words into the remaining 48 (each `t >= 16` slot derives from earlier ones).
             (t >= 16).then({
                 s0 = sha_rotr(w[t - 15], 7) ^ sha_rotr(w[t - 15], 18) ^ w[t - 15] >> 3
@@ -142,7 +138,7 @@ sha_compress = (bytes: Slice<u8>, hh: [i64], k: [i64], w: [i64]) i64 {
         f ::= hh[5]
         g ::= hh[6]
         hv ::= hh[7]
-        k.loop((lh, r, kr) {
+        k.loop_at((r, kr) {
             s1 = sha_rotr(e, 6) ^ sha_rotr(e, 11) ^ sha_rotr(e, 25)
             ch = e & f ^ (e ^ SHA_MASK) & g
             temp1 = hv + s1 + ch + kr + w[r] & SHA_MASK
@@ -177,7 +173,7 @@ sha256_into* = (bytes: Slice<u8>, dst: [u8]) i64 {
 }
 sha_words_into = (bytes: Slice<u8>, dst: [u8], hh: [i64]) i64 {
     sha256_words(bytes, hh)
-    hh.loop((lh, wi, v) {
+    hh.loop_at((wi, v) {
         dst[wi * 4] = to_u8(v >> 24 & 255)
         dst[wi * 4 + 1] = to_u8(v >> 16 & 255)
         dst[wi * 4 + 2] = to_u8(v >> 8 & 255)
@@ -192,7 +188,7 @@ sha256_hex* = (a: Allocator, bytes: Slice<u8>) StringView {
 sha_hex_into = (a: Allocator, bytes: Slice<u8>, d: [u8]) StringView {
     sha256_into(bytes, d)
     out :: [u8] = a.try_acquire(65).expect("std.hash: out of memory").slice(65)
-    d.loop((h, i, b) {
+    d.loop_at((i, b) {
         v = to_i64(b)
         out[i * 2] = hex_char(v >> 4)
         out[i * 2 + 1] = hex_char(v & 15)

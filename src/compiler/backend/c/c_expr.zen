@@ -9,6 +9,7 @@
 { gen_strlit } = compiler.backend.c.c_lit
 { slx_arg_is_borrowed } = compiler.backend.c.c_escape
 { gstr_int, slice_count } = compiler.astops
+{ loop_at } = std.core.count
 // Suffix `LL` so an UNTYPED integer literal is a 64-bit C constant: bare literals are C `int`
 // (32-bit), so `100000 * 100000` (or `1 << 40`) would overflow at int width BEFORE any i64
 // assignment. With `LL` the arithmetic happens at >=64-bit, then the final assign/cast truncates
@@ -71,7 +72,7 @@ gen_expr* = (s: String, alloc: MutPtr<Malloc>, e: Ptr<Expr>) String {
 // function. Such a block diverges: its emitters (gen_switch_body / gen_cond) never use its value.
 gen_blockexpr = (s: String, alloc: MutPtr<Malloc>, b: BlockData) String {
     out ::= s.gstr_append(alloc, "({ ")
-    b.stmts.loop((h, i, st) {
+    b.stmts.loop_at((i, st) {
         out = out.gen_block_one(alloc, st, i == b.stmts.len - 1).gstr_append(alloc, " ")
     })
     out.gstr_append(alloc, "})")
@@ -169,9 +170,7 @@ gen_loop = (s: String, alloc: MutPtr<Malloc>, l: LoopData) String {
 }
 gen_loop_body = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
     out ::= s
-    body.loop((h, i, st) {
-        out = out.gen_stmt(alloc, st).gstr_append(alloc, " ")
-    })
+    body.loop_at((i, st) { out = out.gen_stmt(alloc, st).gstr_append(alloc, " ") })
     out
 }
 // Slice literal -> heap-promoted zslice. A bare C compound literal `(T[]){…}` has AUTOMATIC storage,
@@ -450,7 +449,7 @@ gen_call_default = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
 // every intrinsic's arguments (they never reach here), go through gen_expr and stay heap-promoted.
 gen_call_args = (s: String, alloc: MutPtr<Malloc>, fn: StringView, args: [Expr]) String {
     out ::= s
-    args.loop((h, i, arg) {
+    args.loop_at((i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
         out = arg.match ({
             .SliceLit(sd) => fn.slx_arg_is_borrowed(i).match ({
@@ -527,7 +526,7 @@ gen_call = (s: String, alloc: MutPtr<Malloc>, c: CallData) String {
 // a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
 gen_args = (s: String, alloc: MutPtr<Malloc>, args: [Expr]) String {
     out ::= s
-    args.loop((h, i, arg) {
+    args.loop_at((i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
         out = out.gen_expr(alloc, arg.addr())
     })
@@ -592,7 +591,7 @@ gen_mkenum = (s: String, alloc: MutPtr<Malloc>, m: MakeEnumData) String {
 // a struct literal: `(T){ .a = …, .b = … }` (a C compound literal, designated initializers)
 gen_mkstruct = (s: String, alloc: MutPtr<Malloc>, m: MakeStructData) String {
     out ::= s.gstr_append(alloc, "(").gstr_append(alloc, m.mty).gstr_append(alloc, "){ ")
-    m.inits.loop((h, i, fi) {
+    m.inits.loop_at((i, fi) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // mty = the monomorphized name for a generic literal
         // comma between, not before
         out = out
@@ -987,16 +986,12 @@ gen_stmt_void = (s: String, alloc: MutPtr<Malloc>, st: Stmt) String {
 // emit a brace-wrapped block: `{ s1; s2; … }`
 gen_block* = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
     open ::= s.gstr_append(alloc, "{ ")
-    body.loop((h, i, st) {
-        open = open.gen_stmt_effect(alloc, st).gstr_append(alloc, " ")
-    })
+    body.loop_at((i, st) { open = open.gen_stmt_effect(alloc, st).gstr_append(alloc, " ") })
     open.gstr_append(alloc, "}")
 }
 gen_block_void* = (s: String, alloc: MutPtr<Malloc>, body: [Stmt]) String {
     open ::= s.gstr_append(alloc, "{ ")
-    body.loop((h, i, st) {
-        open = open.gen_stmt_void(alloc, st).gstr_append(alloc, " ")
-    })
+    body.loop_at((i, st) { open = open.gen_stmt_void(alloc, st).gstr_append(alloc, " ") })
     open.gstr_append(alloc, "}")
 }
 gen_if = (s: String, alloc: MutPtr<Malloc>, f: IfData) String {

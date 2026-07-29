@@ -20,11 +20,12 @@
 { view, len, starts_with, substr_in, split, nbuf } = std.text.str
 { String, new_in, append_in, finish_in, free_in } = std.text.string
 { Result, IoError, ok, err } = std.core.result
+{ loop_at } = std.core.count
 // ── scanning helpers (byte views) ─────────────────────────────────────────────
 // index of the last '/', or -1 when there is none.
 last_slash = (v: Slice<u8>) i64 {
     idx :: i64 = 0 - 1
-    v.loop((h, i, b) {
+    v.loop_at((i, b) {
         (b == '/').then({
             idx = i
         })
@@ -34,7 +35,7 @@ last_slash = (v: Slice<u8>) i64 {
 // index of the last '.', or -1 when there is none.
 last_dot = (v: Slice<u8>) i64 {
     idx :: i64 = 0 - 1
-    v.loop((h, i, b) {
+    v.loop_at((i, b) {
         (b == '.').then({
             idx = i
         })
@@ -191,7 +192,7 @@ normalize_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
     z: i64 = 0
     keep :: [i64] = a.nbuf(z, parts.len)
     top :: i64 = 0
-    parts.loop((h, i, comp) {
+    parts.loop_at((i, comp) {
         ((comp.len() == 0 || comp == ".") == false).then({
             (comp == "..").match ({
                 true  => (top > 0 && parts[keep[top - 1]] != "..").match ({
@@ -221,7 +222,7 @@ normalize_in = (a: Allocator, p: StringView) Result<StringView, IoError> {
         .Ok(done) => ok(done),
         .Err(e)   => err(e),
     })
-    parts.loop((h, i, comp) {
+    parts.loop_at((i, comp) {
         // `parts` (a `split` — an owned backbone plus one owned copy per component) and `keep` are
         // SCRATCH: the result is a fresh builder buffer, so nothing above survives this call and the
         // caller has no handle to any of it. Released here, in the reverse of the order acquired.

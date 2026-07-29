@@ -60,6 +60,8 @@
 { view, substr_in, own_ptr } = std.text.str
 { hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode (centralized in std.text.ascii)
 { parse_f64, parse_i64_checked, float_in, integer_in } = std.text.num
+{ loop_while } = std.core.count
+{ loop_at } = std.core.count
 // ── OOM policy ────────────────────────────────────────────────────────────────
 // The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
 // threads the caller's allocator whose exhaustion is fatal by policy, so builder Results are unwrapped
@@ -206,18 +208,16 @@ parse_string_raw = (
     endpos :: i64 = 0 - 1
     errpos :: i64 = 0 - 1
     resume :: i64 = pos + 1
-    sv.loop((h, i, b) {
+    sv.loop_while((i, b) {
         (i < resume == false).then({
             (b == '"').match ({
                 true  => {
                     endpos = i + 1
-                    h.break
                 },
                 false => (b == '\\').match ({
                     true  => (i + 1 >= sv.len).match ({
                         true  => {
                             errpos = i
-                            h.break
                         },
                         false => (sv[i + 1] == '"').match ({
                             true  => {
@@ -263,14 +263,12 @@ parse_string_raw = (
                                                             true  => (i + 5 >= sv.len).match ({
                                                                 true  => {
                                                                     errpos = i
-                                                                    h.break
                                                                 },
                                                                 false => {
                                                                     cp = hex4(sv, i + 2)
                                                                     (cp < 0).match ({
                                                                         true  => {
                                                                             errpos = i
-                                                                            h.break
                                                                         },
                                                                         false => {
                                                                             sb = a.push_utf8(sb, cp)
@@ -281,7 +279,6 @@ parse_string_raw = (
                                                             }),
                                                             false => {
                                                                 errpos = i
-                                                                h.break
                                                             },
                                                         }),
                                                     }),
@@ -300,6 +297,7 @@ parse_string_raw = (
                 }),
             })
         })
+        endpos < 0 && errpos < 0
     })
     (endpos < 0).match ({
         true  => (errpos >= 0).then({ err(.BadString(errpos)) }, { err(.UnexpectedEof) }),
@@ -311,17 +309,9 @@ parse_string_raw = (
 parse_lit = (sv: Slice<u8>, pos: i64, word: StringView, v: Value) Result<Step, JsonError> {
     wv = word.view()
     ok :: bool = pos + wv.len <= sv.len
-    wv.loop((h, i, b) {
-        ok.match ({
-            true  => (sv[pos + i] == b == false).then({
-                ok = false
-                h.break
-            }),
-            false => {
-                h.break
-            },
-        })
-    })
+    ok.then({
+        ok = wv.loop_while((i, b) { sv[pos + i] == b }) == wv.len
+    })    // the length precondition guards the reads; stopping short of `wv.len` is a mismatch
     ok.then({ step_ok(v, pos + wv.len) }, { err(.BadLiteral(pos)) })
 }
 parse_number = (a: Allocator, src: StringView, sv: Slice<u8>, pos: i64) Result<Step, JsonError> {
@@ -554,13 +544,11 @@ value_free* = (a: Allocator, v: Value) void {
     v.match ({
         .Str(s)  => a.release(s.own_ptr()),
         .Arr(xs) => {
-            xs.loop((h, i, x) {
-                a.value_free(x)
-            })
+            xs.loop_at((i, x) { a.value_free(x) })
             a.release_slice(xs)
         },
         .Obj(o)  => {
-            o.entries.loop((h, i, e) {
+            o.entries.loop_at((i, e) {
                 a.release(e.key.own_ptr())
                 a.value_free(e.val)
             })
@@ -661,7 +649,7 @@ write_str_lit = (a: Allocator, sb: String, s: StringView) String {
     out :: String = sb.push_in(a, '"').jok()
     sv = s.view()
     run_start :: i64 = 0
-    sv.loop((h, i, b) {
+    sv.loop_at((i, b) {
         json_needs_esc(b).then({
             (i > run_start).then({
                 out = a.append_slice_in(out, slice(sv.ptr.offset(run_start), i - run_start)).jok()
@@ -677,7 +665,7 @@ write_str_lit = (a: Allocator, sb: String, s: StringView) String {
 }
 write_arr = (a: Allocator, sb: String, xs: [Value]) String {
     out :: String = sb.push_in(a, '[').jok()
-    xs.loop((h, i, x) {
+    xs.loop_at((i, x) {
         (i > 0).then({
             out = out.push_in(a, ',').jok()
         })
@@ -688,7 +676,7 @@ write_arr = (a: Allocator, sb: String, xs: [Value]) String {
 write_obj = (a: Allocator, sb: String, o: Object) String {
     out :: String = sb.push_in(a, '{').jok()
     es = o.entries
-    es.loop((h, i, e) {
+    es.loop_at((i, e) {
         (i > 0).then({
             out = out.push_in(a, ',').jok()
         })
@@ -740,7 +728,7 @@ pwrite_arr = (a: Allocator, sb: String, xs: [Value], depth: i64) String {
                 .jok()
                 .push_in(a, '\n')
                 .jok()
-            xs.loop((h, i, x) {
+            xs.loop_at((i, x) {
                 (i > 0).then({
                     out = out
                         .push_in(a, ',')
@@ -765,7 +753,7 @@ pwrite_obj = (a: Allocator, sb: String, o: Object, depth: i64) String {
                 .jok()
                 .push_in(a, '\n')
                 .jok()
-            es.loop((h, i, e) {
+            es.loop_at((i, e) {
                 (i > 0).then({
                     out = out
                         .push_in(a, ',')

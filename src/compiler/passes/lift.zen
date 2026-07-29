@@ -9,6 +9,7 @@
 { field_fnt } = compiler.check_inline
 { Malloc } = std.mem.alloc
 { expr_fold_children } = compiler.ast.expr_children
+{ loop_at } = std.core.count
 lift_toplevel = (idx: DeclIndex, decls: [Decl], n: StringView) bool {
     idx.func_idx.get(n, 0 - 1) >= 0 || idx.global_idx.get(n, 0 - 1) >= 0
 }
@@ -35,9 +36,7 @@ lift_extend* = (a: MutPtr<Malloc>, bound: Ptr<VList>, st: Stmt) Ptr<VList> {
 }
 lift_lamparams* = (a: MutPtr<Malloc>, bound: Ptr<VList>, ps: [Param]) Ptr<VList> {
     out ::= bound
-    ps.loop((h, i, p) {
-        out = a.vcons(p.name, tvoid(), out)
-    })
+    ps.loop_at((i, p) { out = a.vcons(p.name, tvoid(), out) })
     out
 }
 lift_args_cap = (
@@ -48,7 +47,7 @@ lift_args_cap = (
     xs: [Expr],
 ) bool {
     found ::= false
-    xs.loop((h, i, x) {
+    xs.loop_at((i, x) {
         found = found.then({ true }, { a.lift_expr_cap(decls, idx, bound, x.addr()) })
     })
     found
@@ -61,7 +60,7 @@ lift_arms_cap = (
     arms: [ArmData],
 ) bool {
     found ::= false
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         found = found.match ({
             true  => true,
             false => a.lift_expr_cap(decls, idx, a.vcons(ar.bind, tvoid(), bound), ar.body),
@@ -78,7 +77,7 @@ lift_body_cap = (
 ) bool {
     found ::= false
     b ::= bound
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         found = found.then({ true }, { a.lift_stmt_cap(decls, idx, b, st) })
         b = a.lift_extend(b, st)
     })
@@ -147,23 +146,17 @@ lift_liftable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaDa
 // (`offset`, `addr`) holds a liftable lambda.
 lift_shadow_params = (ps: [Param]) bool {
     found ::= false
-    ps.loop((h, i, p) {
-        found = found || p.name.is_intrinsic()
-    })
+    ps.loop_at((i, p) { found = found || p.name.is_intrinsic() })
     found
 }
 lift_shadow_arms = (arms: [ArmData]) bool {
     found ::= false
-    arms.loop((h, i, ar) {
-        found = found || ar.bind.is_intrinsic() || ar.body.lift_shadow_expr()
-    })
+    arms.loop_at((i, ar) { found = found || ar.bind.is_intrinsic() || ar.body.lift_shadow_expr() })
     found
 }
 lift_shadow_body = (body: [Stmt]) bool {
     found ::= false
-    body.loop((h, i, st) {
-        found = found || st.lift_shadow_stmt()
-    })
+    body.loop_at((i, st) { found = found || st.lift_shadow_stmt() })
     found
 }
 lift_shadow_stmt = (st: Stmt) bool {
@@ -208,7 +201,7 @@ lift_name = (a: MutPtr<Malloc>, k: i64) StringView {
 // the (function) type of struct `sty`'s field `fname` — substituted for a generic instance's targs.
 lift_func_of = (a: MutPtr<Malloc>, lm: LambdaData, ft: FnTData, name: StringView) Decl {
     ps ::= a.pbuf(lm.params.len)
-    lm.params.loop((h, i, p) {
+    lm.params.loop_at((i, p) {
         ps[i] = param(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }))
     })
     dfunc(Func(
@@ -226,7 +219,7 @@ lift_func_of = (a: MutPtr<Malloc>, lm: LambdaData, ft: FnTData, name: StringView
 // enclosing fn was copied before this pass and lifts its own already-substituted lambda.
 lift_tag_tparams = (gen: [Decl], lo: i32, hi: i32, tps: [Param]) void {
     (tps.len > 0).then({
-        gen.loop((h, i, g) {
+        gen.loop_at((i, g) {
             (i >= lo && i < hi).then({
                 gen[i] = g.match ({
                     .DFunc(f) => dfunc(Func(
@@ -279,9 +272,7 @@ lift_rw_args = (
     xs: [Expr],
 ) [Expr] {
     buf ::= a.cebuf(xs.len)
-    xs.loop((h, i, x) {
-        buf[i] = load(a.lift_rw_expr(decls, idx, gcp, gen, x.addr()))
-    })
+    xs.loop_at((i, x) { buf[i] = load(a.lift_rw_expr(decls, idx, gcp, gen, x.addr())) })
     buf
 }
 lift_rw_inits = (
@@ -374,7 +365,7 @@ lift_rw_body = (
     body: [Stmt],
 ) [Stmt] {
     buf ::= cbuf<Stmt>(a, body.len)
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         buf[i] = a.lift_rw_stmt(decls, idx, gcp, gen, fnret, i == body.len - 1, st)
     })
     buf
@@ -412,12 +403,10 @@ lift_lambdas* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     store_i64(gcp, 0)
     gen = cbuf<Decl>(a, 4096)
     out ::= cbuf<Decl>(a, decls.len + 4096)
-    decls.loop((h, i, d) {
-        out[i] = a.lift_rw_decl(decls, idx, gcp, gen, d)
-    })
+    decls.loop_at((i, d) { out[i] = a.lift_rw_decl(decls, idx, gcp, gen, d) })
     n = load_i64(gcp)
     k ::= decls.len
-    gen.loop((h, i, g) {
+    gen.loop_at((i, g) {
         (i < n.to_i32()).then({
             out[k] = g
             k = k + 1

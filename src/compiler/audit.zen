@@ -20,7 +20,7 @@
 { ResolvedProgram, ModuleEntry, eprint, seen_name, add_name } = compiler.resolve
 { edges_of, cache_module_path } = compiler.modgraph
 { say, cstr_range, eprint, push_int, dir_exists, resolve_prog_or_exit, dirname } = compiler.drvutil
-{ times, upto, advance_while, repeat_while, step_while } = std.core.count
+{ times, upto, advance_while, repeat_while, step_while, loop_at } = std.core.count
 // ── zen audit — dead-code + unused-import + clone reporter (`--strict` exits 1; clones advisory) ──
 // Dead-decl analysis runs over the SAME whole-program pipeline `check` uses (resolve imports ->
 // parse -> resolve_module), so alias qualification, UFCS dispatch and trait-default materialization
@@ -114,7 +114,7 @@ aud_decl_kind = (d: Decl) StringView {
 aud_index* = (mp: MutPtr<Malloc>, ds: [Decl]) Map<i64> {
     seedv: i64 = 0 - 1
     m ::= of(mp, "", seedv).expect("audit: oom")
-    ds.loop((h, i, d) {
+    ds.loop_at((i, d) {
         nm = d.aud_decl_name()
         (is_empty(nm) == false).then({
             m = m.put(mp, nm, i).expect("audit: oom")
@@ -161,7 +161,7 @@ aud_mref* = (ac: MutPtr<AudCtx>, m: StringView) void {
         one: i64 = 1
         ac.mseen = ac.mseen.put(ac.mp, m, one).expect("audit: oom")
         ac.aud_ref(m)
-        ac.pairs.loop((h, i, p) {
+        ac.pairs.loop_at((i, p) {
             (p.bare == m).then({
                 ac.aud_ref(p.full)
             })
@@ -170,7 +170,7 @@ aud_mref* = (ac: MutPtr<AudCtx>, m: StringView) void {
 }
 // type-liveness fanout: every impl-block method (and trait) recorded against `tyname`.
 aud_implms* = (ac: MutPtr<AudCtx>, tyname: StringView) void {
-    ac.implms.loop((h, i, im) {
+    ac.implms.loop_at((i, im) {
         (im.ty == tyname).then({
             ac.aud_ref(im.full)
         })
@@ -200,21 +200,15 @@ aud_walk_fn* = (ac: MutPtr<AudCtx>, f: Func) void {
     ac.aud_walk_stmts(f.body)
 }
 aud_walk_sig* = (ac: MutPtr<AudCtx>, f: Func) void {
-    f.params.loop((h, i, p) {
-        ac.aud_walk_ty(p.ty)
-    })
-    f.tparams.loop((h, i, p) {
-        ac.aud_walk_ty(p.ty)
-    })    // generic BOUNDS (`f<A: Allocator>`) reference the trait
+    f.params.loop_at((i, p) { ac.aud_walk_ty(p.ty) })
+    f.tparams.loop_at((i, p) { ac.aud_walk_ty(p.ty) })    // generic BOUNDS (`f<A: Allocator>`) reference the trait
     ac.aud_walk_ty(f.ret)
 }
 aud_walk_fields = (ac: MutPtr<AudCtx>, fs: [Field]) void {
-    fs.loop((h, i, f) {
-        ac.aud_walk_ty(f.ty)
-    })
+    fs.loop_at((i, f) { ac.aud_walk_ty(f.ty) })
 }
 aud_walk_variants = (ac: MutPtr<AudCtx>, vs: [VariantDef]) void {
-    vs.loop((h, i, v) {
+    vs.loop_at((i, v) {
         ac.aud_walk_ty(v.payload)
         (v.dflt.is_expr_null() == false).then({
             ac.aud_walk_expr(v.dflt)
@@ -226,25 +220,19 @@ aud_walk_ty = (ac: MutPtr<AudCtx>, t: Ty) void {
         .Named(n)   => ac.aud_ref(n),
         .Generic(g) => {
             ac.aud_ref(g.name)
-            g.args.loop((h, i, x) {
-                ac.aud_walk_ty(x)
-            })
+            g.args.loop_at((i, x) { ac.aud_walk_ty(x) })
         },
         .Ptr(pd)    => ac.aud_walk_ty(load(pd.pointee)),
         .Slice(e)   => ac.aud_walk_ty(load(e.pointee)),
         .FnT(ft)    => {
-            ft.params.loop((h, i, x) {
-                ac.aud_walk_ty(x)
-            })
+            ft.params.loop_at((i, x) { ac.aud_walk_ty(x) })
             ac.aud_walk_ty(load(ft.ret))
         },
         _           => { },
     })
 }
 aud_walk_stmts = (ac: MutPtr<AudCtx>, body: [Stmt]) void {
-    body.loop((h, i, st) {
-        ac.aud_walk_stmt(st)
-    })
+    body.loop_at((i, st) { ac.aud_walk_stmt(st) })
 }
 aud_walk_stmt = (ac: MutPtr<AudCtx>, st: Stmt) void {
     st.match ({
@@ -286,19 +274,13 @@ aud_walk_expr = (ac: MutPtr<AudCtx>, e: Ptr<Expr>) void {
         },
         .Call(c)        => {
             ac.aud_mref(c.fn)
-            c.targs.loop((h, i, t) {
-                ac.aud_walk_ty(t)
-            })
-            c.args.loop((h, i, x) {
-                ac.aud_walk_expr(x.addr())
-            })
+            c.targs.loop_at((i, t) { ac.aud_walk_ty(t) })
+            c.args.loop_at((i, x) { ac.aud_walk_expr(x.addr()) })
         },
         .MethodCall(mc) => {
             ac.aud_mref(mc.method)
             ac.aud_walk_expr(mc.recv)
-            mc.args.loop((h, i, x) {
-                ac.aud_walk_expr(x.addr())
-            })
+            mc.args.loop_at((i, x) { ac.aud_walk_expr(x.addr()) })
         },
         .Cond(cd)       => {
             ac.aud_walk_expr(cd.c)
@@ -316,40 +298,28 @@ aud_walk_expr = (ac: MutPtr<AudCtx>, e: Ptr<Expr>) void {
         .Arrow(ar)      => ac.aud_walk_expr(ar.obj),
         .MakeEnum(mk)   => {
             ac.aud_ref(mk.ty)
-            mk.targs.loop((h, i, t) {
-                ac.aud_walk_ty(t)
-            })
+            mk.targs.loop_at((i, t) { ac.aud_walk_ty(t) })
             (mk.payload.is_expr_null() == false).then({
                 ac.aud_walk_expr(mk.payload)
             })
         },
         .MakeStruct(ms) => {
             ac.aud_ref(ms.ty)
-            ms.targs.loop((h, i, t) {
-                ac.aud_walk_ty(t)
-            })
-            ms.inits.loop((h, i, fi) {
-                ac.aud_walk_expr(fi.value)
-            })
+            ms.targs.loop_at((i, t) { ac.aud_walk_ty(t) })
+            ms.inits.loop_at((i, fi) { ac.aud_walk_expr(fi.value) })
         },
         .Tag(tg)        => {
             ac.aud_ref(tg.ty)
-            tg.targs.loop((h, i, t) {
-                ac.aud_walk_ty(t)
-            })
+            tg.targs.loop_at((i, t) { ac.aud_walk_ty(t) })
         },
         .Match(md)      => {
             ac.aud_ref(md.ename)
             ac.aud_walk_expr(md.subj)
-            md.arms.loop((h, i, ar2) {
-                ac.aud_walk_expr(ar2.body)
-            })
+            md.arms.loop_at((i, ar2) { ac.aud_walk_expr(ar2.body) })
         },
         .SliceLit(sd)   => {
             ac.aud_walk_ty(sd.elem)
-            sd.items.loop((h, i, x) {
-                ac.aud_walk_expr(x.addr())
-            })
+            sd.items.loop_at((i, x) { ac.aud_walk_expr(x.addr()) })
         },
         .Index(ix)      => {
             ac.aud_walk_expr(ix.seq)
@@ -362,9 +332,7 @@ aud_walk_expr = (ac: MutPtr<AudCtx>, e: Ptr<Expr>) void {
             ac.aud_walk_stmts(lp.body)
         },
         .Lambda(la)     => {
-            la.params.loop((h, i, p) {
-                ac.aud_walk_ty(p.ty)
-            })
+            la.params.loop_at((i, p) { ac.aud_walk_ty(p.ty) })
             ac.aud_walk_ty(la.ret)
             ac.aud_walk_stmts(la.body)
         },
@@ -387,7 +355,7 @@ aud_join2 = (mp: MutPtr<Malloc>, a: StringView, b: StringView) StringView {
 //   implms — (impl'd type -> hoisted method name / trait name): the type-liveness fanout.
 aud_td_idxs* = (mp: MutPtr<Malloc>, decls: [Decl]) [i64] {
     n ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DTraitDefault(td) => {
                 n = n + 1
@@ -397,7 +365,7 @@ aud_td_idxs* = (mp: MutPtr<Malloc>, decls: [Decl]) [i64] {
     })
     buf ::= cbuf<i64>(mp, n)
     k ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DTraitDefault(td) => {
                 buf[k] = i
@@ -411,7 +379,7 @@ aud_td_idxs* = (mp: MutPtr<Malloc>, decls: [Decl]) [i64] {
 // defaults of impl `im`'s trait: how many DTraitDefault decls share its trait name.
 aud_impl_dflts* = (decls: [Decl], tds: [i64], trname: StringView) i64 {
     n ::= 0
-    tds.loop((h, j, ti) {
+    tds.loop_at((j, ti) {
         decls[ti].match ({
             .DTraitDefault(td) => {
                 (td.trname == trname).then({
@@ -425,7 +393,7 @@ aud_impl_dflts* = (decls: [Decl], tds: [i64], trname: StringView) i64 {
 }
 aud_pair_count = (decls: [Decl], tds: [i64]) i64 {
     n ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => {
                 n = n + im.methods.len + decls.aud_impl_dflts(tds, im.trname)
@@ -441,7 +409,7 @@ aud_pair_count = (decls: [Decl], tds: [i64]) i64 {
 }
 aud_implm_count = (decls: [Decl], tds: [i64]) i64 {
     n ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => {
                 n = n + im.methods.len + decls.aud_impl_dflts(tds, im.trname) + 1
@@ -461,10 +429,10 @@ aud_tables* = (mp: MutPtr<Malloc>, decls: [Decl]) AudTables {
     implms ::= cbuf<AudImplM>(mp, decls.aud_implm_count(tds))
     pk ::= 0
     mk2 ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => {
-                im.methods.loop((h2, j, p) {
+                im.methods.loop_at((j, p) {
                     full = mp.impl_cname_in(im.trname, im.ty, p.name)
                     pairs[pk] = AudPair(
                         bare: p.name,
@@ -477,7 +445,7 @@ aud_tables* = (mp: MutPtr<Malloc>, decls: [Decl]) AudTables {
                     )
                     mk2 = mk2 + 1
                 })
-                tds.loop((h2, j, ti) {
+                tds.loop_at((j, ti) {
                     // trait-default materializations this impl can dispatch to (methods it OMITS are
                     // still reachable through its trait's defaults).
                     decls[ti].match ({
@@ -539,7 +507,7 @@ AudTM*: {
 }
 aud_fnt_fields = (fs: [Field]) i64 {
     n ::= 0
-    fs.loop((h, i, f) {
+    fs.loop_at((i, f) {
         f.ty.match ({
             .FnT(ft) => {
                 n = n + 1
@@ -551,7 +519,7 @@ aud_fnt_fields = (fs: [Field]) i64 {
 }
 aud_tm_count = (decls: [Decl]) i64 {
     n ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im)         => {
                 n = n + im.methods.len
@@ -572,7 +540,7 @@ aud_tm_count = (decls: [Decl]) i64 {
 }
 aud_tm_push_fields = (tms: [AudTM], k: i64, tr: StringView, fs: [Field]) i64 {
     j ::= k
-    fs.loop((h, i, f) {
+    fs.loop_at((i, f) {
         f.ty.match ({
             .FnT(ft) => {
                 tms[j] = AudTM(
@@ -589,10 +557,10 @@ aud_tm_push_fields = (tms: [AudTM], k: i64, tr: StringView, fs: [Field]) i64 {
 aud_tms = (mp: MutPtr<Malloc>, decls: [Decl]) [AudTM] {
     tms ::= cbuf<AudTM>(mp, decls.aud_tm_count())
     k ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im)         => {
-                im.methods.loop((h2, j, p) {
+                im.methods.loop_at((j, p) {
                     tms[k] = AudTM(
                         tr: im.trname,
                         mv: p.name.view(),
@@ -621,14 +589,14 @@ aud_tms = (mp: MutPtr<Malloc>, decls: [Decl]) [AudTM] {
 // the trait-method subset credited to imported name `name` (empty when `name` is not a trait).
 aud_tm_for = (mp: MutPtr<Malloc>, tms: [AudTM], name: StringView) [AudTM] {
     n ::= 0
-    tms.loop((h, i, t) {
+    tms.loop_at((i, t) {
         (t.tr == name).then({
             n = n + 1
         })
     })
     sub ::= cbuf<AudTM>(mp, n)
     k ::= 0
-    tms.loop((h, i, t) {
+    tms.loop_at((i, t) {
         (t.tr == name).then({
             sub[k] = t
             k = k + 1
@@ -824,7 +792,7 @@ aud_mod_imports = (
     ds = mp.parse_module(m.source)
     v: Slice<u8> = m.source.view()
     cnt ::= 0
-    ds.loop((h, i, d) {
+    ds.loop_at((i, d) {
         d.match ({
             .DImport(imp) => {
                 cnt = cnt + imp.names.len
@@ -842,11 +810,11 @@ aud_mod_imports = (
     })
     ents ::= cbuf<AudImp>(mp, cnt)
     k ::= 0
-    ds.loop((h, i, d) {
+    ds.loop_at((i, d) {
         d.match ({
             .DImport(imp) => {
                 hi = v.aud_imp_span_hi(to_i64(imp.pos))
-                imp.names.loop((h2, j, p) {
+                imp.names.loop_at((j, p) {
                     ents[k] = AudImp(
                         name: p.name,
                         nv: p.name.view(),
@@ -929,12 +897,12 @@ aud_analyze = (mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl], rdecls: [De
             _         => { },
         })
     })
-    raw.loop((h, i, d) {
+    raw.loop_at((i, d) {
         d.match ({
             .DImpl(im) => {
                 (c.ridx.get(im.ty, 0 - 1) < 0).then({
                     ac.aud_ref(im.trname)
-                    im.methods.loop((h2, j, p) {
+                    im.methods.loop_at((j, p) {
                         ac.aud_ref(mp.impl_cname_in(im.trname, im.ty, p.name))
                     })
                 })
@@ -943,7 +911,7 @@ aud_analyze = (mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl], rdecls: [De
         })
     })
     (mi < 0).then({
-        raw.loop((h, i, d) {
+        raw.loop_at((i, d) {
             // no entry `main` (a library): every decl of the ENTRY module region is a root.
             p = d.aud_decl_pos()
             ri = rp.regions.fregion_find(to_i64(p))
@@ -960,13 +928,15 @@ aud_analyze = (mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl], rdecls: [De
 aud_live_tails = (mp: MutPtr<Malloc>, c: AudCtx) Map<i64> {
     seedv: i64 = 0 - 1
     tails ::= of(mp, "", seedv).expect("audit: oom")
-    c.seen.keys().loop((h, i, k) {
-        ta = k.aud_tail_at()
-        (ta > 0).then({
-            one: i64 = 1
-            tails = tails.put(mp, cstr(offset(k, ta)), one).expect("audit: oom")
+    c.seen
+        .keys()
+        .loop_at((i, k) {
+            ta = k.aud_tail_at()
+            (ta > 0).then({
+                one: i64 = 1
+                tails = tails.put(mp, cstr(offset(k, ta)), one).expect("audit: oom")
+            })
         })
-    })
     tails
 }
 // is decl name `nm` unreached? — not live, with no live `__`-twin in either direction (suppress a
@@ -1014,7 +984,7 @@ aud_clones = (
     names ::= cbuf<StringView>(mp, raw.len + 8)
     n ::= n0
     k :: i64 = 0
-    raw.loop((h, i, d) {
+    raw.loop_at((i, d) {
         d.match ({
             .DFunc(f) => {
                 fp = mp.clone_fn(f)    // 0 = tree too small to be worth reporting
@@ -1058,7 +1028,7 @@ aud_run* = (
     // collect findings: dead decls (flat order), then unused imports (per module file).
     fb ::= cbuf<AudFinding>(mp, raw.len + 8192)
     n ::= 0
-    raw.loop((h, i, d) {
+    raw.loop_at((i, d) {
         (d.aud_reportable() && c.aud_unreached(tails, d.aud_decl_name()) && n < fb.len).then({
             dl = locate_diag(rp, d.aud_decl_pos(), 1, path, src)
             fb[n] = AudFinding(
@@ -1072,9 +1042,7 @@ aud_run* = (
     })
     n = mp.aud_clones(rp, raw, path, src, fb, n)
     tms = mp.aud_tms(raw)
-    rp.table.modules.loop((h, i, m) {
-        n = mp.aud_mod_imports(m, tms, fb, n)
-    })
+    rp.table.modules.loop_at((i, m) { n = mp.aud_mod_imports(m, tms, fb, n) })
     mp.aud_emit(fb, n, strict)
 }
 // sort, dedupe on (path, line, msg), print, summarize; returns the `--strict` exit code. The same
@@ -1147,9 +1115,7 @@ AudWsFiles: {
 aud_ws_addf = (wf: MutPtr<AudWsFiles>, p: StringView) void {
     (wf.n >= wf.fs.len).then({
         grown ::= cbuf<StringView>(wf.mp, wf.fs.len * 2)
-        wf.fs.loop((h, i, x) {
-            grown[i] = x
-        })
+        wf.fs.loop_at((i, x) { grown[i] = x })
         wf.fs = grown
     })
     wf.fs[wf.n] = p
@@ -1349,21 +1315,21 @@ aud_id_matches = (id: StringView, dotted: StringView) bool {
 aud_embed_roots = (ac: MutPtr<AudCtx>, mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl]) void {
     seedv: i64 = 0 - 1
     mods ::= of(mp, "", seedv).expect("audit: oom")
-    rp.table.modules.loop((h, i, m) {
-        mods = ac.aud_embed_src(mp, mods, m.source)
-    })
+    rp.table.modules.loop_at((i, m) { mods = ac.aud_embed_src(mp, mods, m.source) })
     // per-module rooted flags: some embedded dotted id names this module.
     rooted ::= cbuf<i64>(mp, rp.table.modules.len)
-    rp.table.modules.loop((h, i, m) {
+    rp.table.modules.loop_at((i, m) {
         r :: i64 = 0
-        mods.keys().loop((h2, j, k) {
-            m.id.aud_id_matches(k).then({
-                r = 1
+        mods
+            .keys()
+            .loop_at((j, k) {
+                m.id.aud_id_matches(k).then({
+                    r = 1
+                })
             })
-        })
         rooted[i] = r
     })
-    raw.loop((h, i, d) {
+    raw.loop_at((i, d) {
         p = to_i64(d.aud_decl_pos())
         ri = rp.regions.fregion_find(p)
         (p > 0 && ri >= 0 && rooted[rp.regions[ri].midx] > 0).then({
@@ -1403,9 +1369,7 @@ aud_ws_key = (mp: MutPtr<Malloc>, path: StringView, line: i64, msg: StringView) 
 aud_ws_push = (ws: MutPtr<AudWs>, key: StringView, f: AudFinding) void {
     (ws.nd >= ws.dfs.len).then({
         grown ::= cbuf<AudWsF>(ws.mp, ws.dfs.len * 2)
-        ws.dfs.loop((h, i, x) {
-            grown[i] = x
-        })
+        ws.dfs.loop_at((i, x) { grown[i] = x })
         ws.dfs = grown
     })
     ws.dfs[ws.nd] = AudWsF(
@@ -1417,9 +1381,7 @@ aud_ws_push = (ws: MutPtr<AudWs>, key: StringView, f: AudFinding) void {
 aud_ws_pushi = (ws: MutPtr<AudWs>, f: AudFinding) void {
     (ws.ni >= ws.ifs.len).then({
         grown ::= cbuf<AudFinding>(ws.mp, ws.ifs.len * 2)
-        ws.ifs.loop((h, i, x) {
-            grown[i] = x
-        })
+        ws.ifs.loop_at((i, x) { grown[i] = x })
         ws.ifs = grown
     })
     ws.ifs[ws.ni] = f
@@ -1465,9 +1427,7 @@ aud_pre_edges = (
     st: AudPre,
 ) AudPre {
     cur ::= st
-    edges.loop((lh, i, e) {
-        cur = mp.aud_pre_one(root, progdir, e.module, cur)
-    })
+    edges.loop_at((i, e) { cur = mp.aud_pre_one(root, progdir, e.module, cur) })
     cur
 }
 aud_pre_ok = (mp: MutPtr<Malloc>, root: StringView, path: StringView, src: StringView) bool {
@@ -1499,7 +1459,7 @@ aud_ws_entry = (
                     ac = c.addr()
                     ac.aud_embed_roots(mp, rp, raw)
                     tails = mp.aud_live_tails(c)
-                    raw.loop((h, i, d) {
+                    raw.loop_at((i, d) {
                         d.aud_reportable().then({
                             nm = d.aud_decl_name()
                             dl = locate_diag(rp, d.aud_decl_pos(), 1, path, src)
@@ -1522,7 +1482,7 @@ aud_ws_entry = (
                         })
                     })
                     tms = mp.aud_tms(raw)
-                    rp.table.modules.loop((h, i, m) {
+                    rp.table.modules.loop_at((i, m) {
                         (ws.mods.has(m.path) == false).then({
                             ws.mods = ws.mods.put(mp, m.path, one).expect("audit: oom")
                             scratch = cbuf<AudFinding>(mp, 4096)

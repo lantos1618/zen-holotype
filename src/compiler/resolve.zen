@@ -16,7 +16,7 @@
 { contents_in, O_RDONLY } = std.io.file
 { open, close, write } = std.c.libc
 { ends_with, is_empty, starts_with, view } = std.text.str
-{ advance_while } = std.core.count
+{ advance_while, loop_at } = std.core.count
 // Extracted internal helper families (shared types + this pipeline stay here; see each module head).
 { enforce_visibility, enforce_private_leaks, vis_report_mode } = compiler.resolve_vis
 { enforce_ffi_grants, genmod_lookup } = compiler.resolve_ffi
@@ -120,7 +120,7 @@ mappend_string* = (a: MutPtr<Malloc>, out: String, src: String) String {
 mcopy_from = (a: MutPtr<Malloc>, out: String, src: String, i: i64) String {
     cur ::= out
     bs: [u8] = src.bytes()
-    bs.loop((h, idx, b) {
+    bs.loop_at((idx, b) {
         (idx < i == false).then({
             cur = cur.gstr_push(a, b)
         })
@@ -156,7 +156,7 @@ rappend_span* = (s: String, a: MutPtr<Malloc>, src: StringView, p: i32, e: i32) 
 mcopy_id_dotted = (a: MutPtr<Malloc>, out: String, id: String, i: i64) String {
     cur ::= out
     bs: [u8] = id.bytes()
-    bs.loop((h, idx, b) {
+    bs.loop_at((idx, b) {
         (idx < i == false).then({
             (b == '/').match ({
                 true  => {
@@ -295,35 +295,27 @@ ModuleTable*: {
     count = (t: ModuleTable) i64 { t.modules.len }
     has = (t: ModuleTable, id: StringView) bool {
         found ::= false
-        t.modules.loop((h, i, m) {
-            found = (m.id == id).then({ true }, { found })
-        })
+        t.modules.loop_at((i, m) { found = (m.id == id).then({ true }, { found }) })
         found
     }
     has_id = (t: ModuleTable, id: String) bool {
         found ::= false
-        t.modules.loop((h, i, m) {
-            found = id.string_eq_str(m.id).then({ true }, { found })
-        })
+        t.modules.loop_at((i, m) { found = id.string_eq_str(m.id).then({ true }, { found }) })
         found
     }
     module = (t: ModuleTable, id: StringView) ModuleEntry {
         found ::= t.modules[0]
-        t.modules.loop((h, i, m) {
-            found = (m.id == id).then({ m }, { found })
-        })
+        t.modules.loop_at((i, m) { found = (m.id == id).then({ m }, { found }) })
         found
     }
     module_id = (t: ModuleTable, id: String) ModuleEntry {
         found ::= t.modules[0]
-        t.modules.loop((h, i, m) {
-            found = id.string_eq_str(m.id).then({ m }, { found })
-        })
+        t.modules.loop_at((i, m) { found = id.string_eq_str(m.id).then({ m }, { found }) })
         found
     }
     index_of_id = (t: ModuleTable, id: String) i64 {
         found ::= 0 - 1
-        t.modules.loop((h, i, m) {
+        t.modules.loop_at((i, m) {
             (found < 0 && id.string_eq_str(m.id)).then({
                 found = i
             })
@@ -332,7 +324,7 @@ ModuleTable*: {
     }
     index_of_sv = (t: ModuleTable, id: StringView) i64 {
         found ::= 0 - 1
-        t.modules.loop((h, i, m) {
+        t.modules.loop_at((i, m) {
             (found < 0 && m.id == id).then({
                 found = i
             })
@@ -376,9 +368,7 @@ ParsedProgram*: {
     count = (p: ParsedProgram) i64 { p.modules.len }
     module = (p: ParsedProgram, id: StringView) ParsedModule {
         found ::= p.modules[0]
-        p.modules.loop((h, i, m) {
-            found = (m.id == id).then({ m }, { found })
-        })
+        p.modules.loop_at((i, m) { found = (m.id == id).then({ m }, { found }) })
         found
     }
 }
@@ -612,9 +602,7 @@ mload_push = (a: MutPtr<Malloc>, st: ModuleLoad, e: ModuleEntry) ModuleLoad {
     buf ::= st.entries
     (st.n >= buf.len).then({
         grown ::= a.module_entry_buf(buf.len * 2)
-        buf.loop((h, i, m) {
-            grown[i] = m
-        })
+        buf.loop_at((i, m) { grown[i] = m })
         buf = grown
     })
     buf[st.n] = e
@@ -668,7 +656,7 @@ fill_module_edges = (
     st: ModuleLoad,
 ) ModuleLoad {
     cur ::= st
-    edges.loop((h, i, edge) {
+    edges.loop_at((i, edge) {
         cur = a.fill_module_one(root, progdir, inpath, edge.edge_id_in(a), cur)
     })
     cur
@@ -742,7 +730,7 @@ load_import_edges_table = (
     c: Closure,
 ) Closure {
     cur ::= c
-    edges.loop((h, idx, edge) {
+    edges.loop_at((idx, edge) {
         (idx < i == false).then({
             (edge.namespace == false).then({
                 id = edge.edge_id_in(a)
@@ -805,7 +793,7 @@ collect_ns_edges_table = (
     st: NsScan,
 ) NsScan {
     cur ::= st
-    edges.loop((h, idx, edge) {
+    edges.loop_at((idx, edge) {
         (idx < i == false).then({
             edge.namespace.then({
                 cur = a.load_ns_edge_table(table, inpath, src, edge, cur)
@@ -908,7 +896,7 @@ user_decls_from_symbols = (
     inpath: StringView,
 ) Map<i64> {
     cur ::= useen
-    symbols.loop((h, idx, sym) {
+    symbols.loop_at((idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
                 cur = a.user_symbol_seen(cur, sym, table, id, inpath)
@@ -967,7 +955,7 @@ res_ident_end* = (flat: StringView, p: i32) i32 {
 append_to_nul* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) String {
     cur ::= out
     bs: Slice<u8> = s.view()
-    bs.loop((h, i, b) {
+    bs.loop_at((i, b) {
         (i < p == false).then({
             cur = cur.rpush(a, b)
         })
@@ -1005,7 +993,7 @@ main_symbol_names = (
     bodyend: i64,
 ) String {
     cur ::= set
-    symbols.loop((h, idx, sym) {
+    symbols.loop_at((idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
                 key = sym.symbol_key_in(a).expect("compiler.resolve: allocation failed")
@@ -1031,8 +1019,8 @@ main_symbol_names = (
 import_claims = (a: MutPtr<Malloc>, table: ModuleTable) Map<i64> {
     seed: i64 = 0 - 1
     m ::= of(a, "", seed).expect("compiler.resolve: import-claim alloc")
-    table.modules.loop((h, i, mod) {
-        mod.graph.imports.loop((h2, j, e) {
+    table.modules.loop_at((i, mod) {
+        mod.graph.imports.loop_at((j, e) {
             (e.namespace == false).then({
                 tgt = table.index_of_sv(e.module)
                 (tgt >= 0).then({
@@ -1151,7 +1139,7 @@ dedup_symbols = (
     pos ::= p
     seen ::= set
     main_seen ::= mainset
-    symbols.loop((h, idx, sym) {
+    symbols.loop_at((idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
                 nm = sym.symbol_key_in(a).expect("compiler.resolve: allocation failed")
@@ -1412,7 +1400,7 @@ ns_scan = (a: MutPtr<Malloc>, c: Closure) NsScan {
 note_module_sigs = (a: MutPtr<Malloc>, alias: String, graph: ModuleGraph, origin: i64) void {
     an = a.gstr_string(16).rappend_string(a, alias).gstr_finish(a)
     (module_sig_alias_stamped(an, origin) == false).then({
-        graph.symbols.loop((h, i, sym) {
+        graph.symbols.loop_at((i, sym) {
             note_module_sig(an, sym.name, module_sig_flags(sym.is_pub, sym.is_type, sym.imported, sym.foreign), origin)
         })
     })
@@ -1496,7 +1484,7 @@ strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32, fi
     lline ::= 1    // 1-based source line of `lpos`, advanced lazily as kept lines are recorded
     lpos ::= 0
     bs: Slice<u8> = s.view()
-    bs.loop((h, i, b) {
+    bs.loop_at((i, b) {
         ii = to_i32(i)
         (ii < pos == false).then({
             s.is_import_line(pos).match ({
@@ -1588,7 +1576,7 @@ parse_resolved_program = (
     inpath: StringView,
 ) ParsedProgram {
     mods ::= a.parsed_module_buf(resolved.table.count())
-    resolved.table.modules.loop((h, i, entry) {
+    resolved.table.modules.loop_at((i, entry) {
         mods[i] = a.parse_module_entry(resolved.table, inpath, entry)
     })
     ParsedProgram(
@@ -1611,7 +1599,7 @@ parsed_decl_buf = (a: MutPtr<Malloc>, n: i64) [Decl] {
 }
 append_decls_to = (dst: [Decl], at: i64, src: [Decl]) i64 {
     j ::= at
-    src.loop((h, i, d) {
+    src.loop_at((i, d) {
         dst[j] = d
         j = j + 1
     })
@@ -1629,15 +1617,13 @@ root_link_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [
 }
 module_link_count = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) i64 {
     n ::= 0
-    m.graph.imports.loop((h, i, edge) {
-        n = n + a.root_link_edge_decls(p, edge).len
-    })
+    m.graph.imports.loop_at((i, edge) { n = n + a.root_link_edge_decls(p, edge).len })
     n
 }
 module_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) [Decl] {
     buf = a.parsed_decl_buf(a.module_link_count(p, m))
     j ::= 0
-    m.graph.imports.loop((h, i, edge) {
+    m.graph.imports.loop_at((i, edge) {
         j = buf.append_decls_to(j, a.root_link_edge_decls(p, edge))
     })
     slice(buf.ptr, j)
@@ -1654,9 +1640,7 @@ check_parsed_program* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
 // stripped body — the incremental step toward a full symbol-table/module-world resolver (GOALS #5).
 check_all_parsed_modules* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
     acc ::= 0
-    p.modules.loop((h, i, m) {
-        acc = acc + a.check_linked(m.decls, a.module_link_decls(p, m))
-    })
+    p.modules.loop_at((i, m) { acc = acc + a.check_linked(m.decls, a.module_link_decls(p, m)) })
     acc
 }
 // ── USER-MODULE region registry ─────────────────────────────────────────────────────────────────
@@ -1729,27 +1713,21 @@ lsrc_get = () [i32] { slice(lsrc_buf.ptr, lsrc_n) }
 freg_grow = (a: MutPtr<Malloc>) void {
     (freg_n >= freg_buf.len).then({
         grown ::= a.freg_alloc(freg_buf.len * 2)
-        freg_buf.loop((h, i, r) {
-            grown[i] = r
-        })
+        freg_buf.loop_at((i, r) { grown[i] = r })
         freg_buf = grown
     })
 }
 lsrc_grow = (a: MutPtr<Malloc>) void {
     (lsrc_n >= lsrc_buf.len).then({
         grown ::= a.lsrc_alloc(lsrc_buf.len * 2)
-        lsrc_buf.loop((h, i, v) {
-            grown[i] = v
-        })
+        lsrc_buf.loop_at((i, v) { grown[i] = v })
         lsrc_buf = grown
     })
 }
 ldrop_grow = (a: MutPtr<Malloc>) void {
     (ldrop_n + 1 >= ldrop_buf.len).then({
         grown ::= a.ldrop_alloc(ldrop_buf.len * 2)
-        ldrop_buf.loop((h, i, v) {
-            grown[i] = v
-        })
+        ldrop_buf.loop_at((i, v) { grown[i] = v })
         ldrop_buf = grown
     })
 }
@@ -1758,7 +1736,7 @@ count_nl = (s: StringView, lo: i32, hi: i32) i64 {
     n :: i64 = 0
     (hi > lo).then({
         span: [u8] = slice(s.offset(lo), to_i64(hi - lo))
-        span.loop((h, i, b) {
+        span.loop_at((i, b) {
             (b == '\n').then({
                 n = n + 1
             })
@@ -1798,7 +1776,7 @@ fregions_splice* = (slo: i64, shi: i64, newlen: i64) void {
     delta = newlen - (shi - slo)
     (lmap_on && delta != 0).then({
         regs = fregions_get()
-        regs.loop((h, i, r) {
+        regs.loop_at((i, r) {
             (r.lo >= shi).then({
                 freg_buf[i] = FlatRegion(
                     midx: r.midx,
@@ -1844,8 +1822,8 @@ lmap_apply_drops = (a: MutPtr<Malloc>, flat: StringView) void {
         drops = ldrops_get()
         dbuf ::= a.ldrop_alloc(ldrop_n * 2 + 2)
         dn ::= 0
-        regs.loop((h, ri, r) {
-            drops.loop((h2, j, dv) {
+        regs.loop_at((ri, r) {
+            drops.loop_at((j, dv) {
                 // A) dead line intervals
                 (j % 2 == 0).then({
                     ds = dv
@@ -1868,11 +1846,11 @@ lmap_apply_drops = (a: MutPtr<Malloc>, flat: StringView) void {
                 })
             })
         })
-        regs.loop((h, ri, r) {
+        regs.loop_at((ri, r) {
             // B) byte shifts: subtract every dropped byte before lo / before hi
             dlo :: i64 = 0
             dhi :: i64 = 0
-            drops.loop((h2, j, dv) {
+            drops.loop_at((j, dv) {
                 (j % 2 == 0).then({
                     ds = dv
                     de = drops[j + 1]
@@ -1894,11 +1872,11 @@ lmap_apply_drops = (a: MutPtr<Malloc>, flat: StringView) void {
                 line_n: r.line_n,
             )
         })
-        regs.loop((h, ri, r) {
+        regs.loop_at((ri, r) {
             // C) rebase line windows (byte fields already updated; line fields still pre-drop)
             cumb :: i64 = 0
             inw :: i64 = 0
-            dbuf.loop((h2, j, v) {
+            dbuf.loop_at((j, v) {
                 (j % 2 == 0 && j < dn).then({
                     (v < r.line_lo).then({
                         cumb = cumb + (dbuf[j + 1] - v)
@@ -1919,7 +1897,7 @@ lmap_apply_drops = (a: MutPtr<Malloc>, flat: StringView) void {
         // D) compact the line array
         w ::= 0
         di ::= 0
-        lsrc_get().loop((h, k, v) {
+        lsrc_get().loop_at((k, v) {
             (di < dn && k >= dbuf[di + 1]).then({
                 di = di + 2
             })
@@ -1970,7 +1948,7 @@ fregion_src_line* = (
 // name-decl offset of `nm` in a module's ORIGINAL source graph (for error line/col attribution).
 symbol_start_of* = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: StringView) i32 {
     posn ::= 0
-    syms.loop((h, i, s) {
+    syms.loop_at((i, s) {
         ((s.imported || s.foreign || s.is_type) == false && posn == 0).then({
             key = s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
             (cstr(key.ptr) == nm).then({
@@ -2032,10 +2010,10 @@ fail_import_redef = (a: MutPtr<Malloc>, m: ModuleEntry, s: ProvidedSymbol, nm: S
     a.res_reject(h1)
 }
 check_import_redefs = (a: MutPtr<Malloc>, table: ModuleTable) i32 {
-    table.modules.loop((h, i, m) {
+    table.modules.loop_at((i, m) {
         (is_empty(m.id) || m.id.mid_is_user()).then({
             imported = a.imported_value_name_set(a.rset_new(), m.graph.symbols)
-            m.graph.symbols.loop((h2, j, s) {
+            m.graph.symbols.loop_at((j, s) {
                 ((s.imported || s.foreign || s.is_type) == false).then({
                     key = s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
                     imported.rset_has(key).then({
@@ -2193,7 +2171,7 @@ find_split_call_site = (
         importer: "",
         found: false,
     )
-    table.modules.loop((h, i, m) {
+    table.modules.loop_at((i, m) {
         skip = res.found.then({ true }, { m.id == modid })
         (skip == false).then({
             called = a.has_method_call_of(m.source, splits)
@@ -2211,9 +2189,7 @@ find_split_call_site = (
 mappend_id_str_dotted* = (a: MutPtr<Malloc>, out: String, id: StringView) String {
     cur ::= out
     bs: Slice<u8> = id.view()
-    bs.loop((h, i, b) {
-        cur = (b == '/').then({ cur.gstr_push(a, '.') }, { cur.gstr_push(a, b) })
-    })
+    bs.loop_at((i, b) { cur = (b == '/').then({ cur.gstr_push(a, '.') }, { cur.gstr_push(a, b) }) })
     cur
 }
 fail_alias_collision = (
@@ -2269,7 +2245,7 @@ check_alias_collisions = (
     mainsrc: StringView,
     inpath: StringView,
 ) i32 {
-    graph.imports.loop((h, i, edge) {
+    graph.imports.loop_at((i, edge) {
         edge.namespace.then({
             entry = table.module(edge.module)
             splits = a.split_names(entry.source, entry.graph.value_decl_names_in(a))
@@ -2319,7 +2295,7 @@ undefined_name_hint_at = (
         false => {
             nm = a.mimport_name_span(flat, off, ie).gstr_finish(a)
             hit :: i64 = 0 - 1
-            table.modules.loop((h, i, m) {
+            table.modules.loop_at((i, m) {
                 (hit < 0 && i > 0).then({
                     m.graph.sig.exports_value(nm).then({
                         hit = i

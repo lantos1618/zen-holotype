@@ -10,6 +10,7 @@
 { DeclIndex, cebuf, cenode, pbuf, vnil } = compiler.check
 { map_slice, param_names_has, slice_any } = compiler.astops
 { light_ty } = compiler.check_infer
+{ loop_at } = std.core.count
 tybuf1 = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire_or_die(sizeof(Ty)), 1) }
 self_param = (a: MutPtr<Malloc>) [Param] {
     buf ::= a.pbuf(1)
@@ -26,9 +27,7 @@ default_for_type = (a: MutPtr<Malloc>, td: TraitDefData, tyname: StringView) Fun
     sp = a.self_param()
     ag = a.self_arg(tyname)
     ps ::= a.pbuf(td.fn.params.len)
-    td.fn.params.loop((h, i, p) {
-        ps[i] = param(p.name, a.subst_ty_in(sp, ag, p.ty))
-    })
+    td.fn.params.loop_at((i, p) { ps[i] = param(p.name, a.subst_ty_in(sp, ag, p.ty)) })
     Func(
         name: a.impl_cname_in(td.trname, tyname, td.fn.name),
         params: ps,
@@ -51,9 +50,9 @@ def_provided = (decls: [Decl], tyname: StringView, trname: StringView, m: String
 }
 default_expansion_count = (decls: [Decl]) i64 {
     n ::= 0
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
-            .DTraitDefault(td) => decls.loop((h2, j, e) {
+            .DTraitDefault(td) => decls.loop_at((j, e) {
                 e.match ({
                     .DImpl(im) => (im.trname == td.trname
                         && decls.def_provided(im.ty, td.trname, td.fn.name) == false).then({
@@ -69,7 +68,7 @@ default_expansion_count = (decls: [Decl]) i64 {
 }
 emit_defaults_for = (a: MutPtr<Malloc>, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
     k ::= j
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => (im.trname == td.trname
                 && decls.def_provided(im.ty, td.trname, td.fn.name) == false).then({
@@ -87,11 +86,9 @@ expand_defaults* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
         true  => decls,
         false => {
             buf ::= cbuf<Decl>(a, decls.len + extra)
-            decls.loop((h, i, d) {
-                buf[i] = d
-            })
+            decls.loop_at((i, d) { buf[i] = d })
             k ::= decls.len
-            decls.loop((h, i, d) {
+            decls.loop_at((i, d) {
                 d.match ({
                     .DTraitDefault(td) => {
                         k = a.emit_defaults_for(decls, td, buf, k)
@@ -117,9 +114,7 @@ expand_defaults* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
 // checking — a read-only `Ptr` is never silently treated as a writable `MutPtr` (the R1 rule). Mutable
 // SLICE storage (a [Stmt]/[Expr]/[FieldInit]/[ArmData] element, reached via `.addr()`) is updated in place.
 desugar_method_calls* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
-    decls.loop((h, i, d) {
-        store(decls[i].addr(), a.dmc_decl(d))
-    })
+    decls.loop_at((i, d) { store(decls[i].addr(), a.dmc_decl(d)) })
     decls
 }
 dmc_decl = (a: MutPtr<Malloc>, d: Decl) Decl {
@@ -144,9 +139,7 @@ dmc_decl = (a: MutPtr<Malloc>, d: Decl) Decl {
     })
 }
 dmc_body = (a: MutPtr<Malloc>, body: [Stmt]) void {
-    body.loop((h, i, st) {
-        a.dmc_stmt(body[i].addr())
-    })
+    body.loop_at((i, st) { a.dmc_stmt(body[i].addr()) })
 }
 // `sp` is a MUTABLE slot (a [Stmt] slice element), so the rebuilt statement is stored back through it.
 dmc_stmt = (a: MutPtr<Malloc>, sp: MutPtr<Stmt>) void {
@@ -169,17 +162,13 @@ dmc_stmt = (a: MutPtr<Malloc>, sp: MutPtr<Stmt>) void {
 }
 // `args[i]` is a mutable [Expr] slot, so each lowered element is stored back in place.
 dmc_args = (a: MutPtr<Malloc>, args: [Expr]) void {
-    args.loop((h, i, ar) {
-        store(args[i].addr(), load(a.dmc_expr_val(args[i].addr())))
-    })
+    args.loop_at((i, ar) { store(args[i].addr(), load(a.dmc_expr_val(args[i].addr()))) })
 }
 dmc_inits = (a: MutPtr<Malloc>, inits: [FieldInit]) void {
-    inits.loop((h, i, fi) {
-        store(inits[i].addr(), finit(fi.name, a.dmc_expr_val(fi.value)))
-    })
+    inits.loop_at((i, fi) { store(inits[i].addr(), finit(fi.name, a.dmc_expr_val(fi.value))) })
 }
 dmc_arms = (a: MutPtr<Malloc>, arms: [ArmData]) void {
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         store(arms[i].addr(), arm_at(ar.variant, ar.bind, a.dmc_expr_val(ar.body), ar.pos))
     })
 }
@@ -191,9 +180,7 @@ dmc_lower = (a: MutPtr<Malloc>, mc: MethodCallData) Expr {
     a.dmc_args(mc.args)
     buf ::= a.cebuf(mc.args.len + 1)
     buf[0] = load(rv)
-    mc.args.loop((h, i, ar) {
-        buf[i + 1] = mc.args[i]
-    })
+    mc.args.loop_at((i, ar) { buf[i + 1] = mc.args[i] })
     call_at(mc.method, buf, mc.pos)
 }
 remk_match* = (m: MatchData, subj: Ptr<Expr>) Expr {

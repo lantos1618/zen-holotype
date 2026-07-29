@@ -9,6 +9,7 @@
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, Opt, ok, err } = std.core.result
 { take, drop, dup_in, buf_in } = std.core.slice
+{ loop_at } = std.core.count
 // Pairing structs for `zip_in`/`enumerate_in` — the flat namespace has no tuples (rejected), so a
 // two-value element is a NAMED anonymous struct, exactly as multi-return is elsewhere in the tree.
 Pair*<T, U>: {
@@ -21,16 +22,10 @@ IdxPair*<T>: {
 }
 fold*<T> = (xs: [T], init: T, f: (T, T) T) T {
     acc ::= init
-    xs.loop((h, i, x) {
-        acc = f(acc, x)
-    })
+    xs.loop_at((i, x) { acc = f(acc, x) })
     acc
 }
-each*<T> = (xs: [T], f: (T) void) void {
-    xs.loop((h, i, x) {
-        f(x)
-    })
-}
+each*<T> = (xs: [T], f: (T) void) void { xs.loop_at((i, x) { f(x) }) }
 // First element satisfying `pred`, as `Opt<T>` (`.None` if none match). Allocates nothing; stops at the
 // first hit via `h.break`. `pred` is invoked DIRECTLY in the loop body so an inline lambda splices in:
 // `xs.find((x){ x > 2 })`; a stored `p = (x: T) bool { … }  xs.find(p)` works too.
@@ -53,9 +48,7 @@ map_in*<T, U> = (a: Allocator, xs: [T], f: (T) U) Result<[U], IoError> {
         false => a.try_acquire(xs.len * sizeof(U)).match ({
             .Ok(p)  => {
                 out :: [U] = p.slice(xs.len)
-                xs.loop((h, i, x) {
-                    out[i] = f(x)
-                })
+                xs.loop_at((i, x) { out[i] = f(x) })
                 ok(out)
             },
             .Err(e) => err(e),
@@ -72,7 +65,7 @@ filter_in*<T> = (a: Allocator, xs: [T], keep: (T) bool) Result<[T], IoError> {
             .Ok(p)  => {
                 buf :: [T] = p.slice(xs.len)
                 n ::= 0
-                xs.loop((h, i, x) {
+                xs.loop_at((i, x) {
                     buf[n] = x
                     n = n + keep(x).then({ 1 }, { 0 })
                 })
@@ -89,7 +82,7 @@ filter_in*<T> = (a: Allocator, xs: [T], keep: (T) bool) Result<[T], IoError> {
 // sorts descending. The comparator `less` is invoked DIRECTLY in the loop body (never forwarded to a
 // helper) so an inline lambda splices in, exactly as it does for `fold`/`each`.
 sort<T> = (xs: [T], less: (T, T) bool) void {
-    xs.loop((ho, i, _) {
+    xs.loop_at((i, _) {
         xs.loop((hi, k, _) {
             // Outer pass: insert each xs[i] into the already-sorted prefix [0, i).
             // Inner pass: sink element at j = i - k leftward while it precedes its neighbour. The break
@@ -121,9 +114,7 @@ filter*<T> = (a: Allocator, xs: [T], keep: (T) bool) Result<[T], IoError> { a.fi
 // `fold` above (init and accumulator both `T`) stays for its existing callers (Vec.fold delegates to it).
 fold_to*<T, U> = (xs: [T], init: U, f: (U, T) U) U {
     acc ::= init
-    xs.loop((h, i, x) {
-        acc = f(acc, x)
-    })
+    xs.loop_at((i, x) { acc = f(acc, x) })
     acc
 }
 // `sum`/`product` reduce an INTEGER slice (i8..i64, u8..u64) — T must support `+`/`*` AND accept the
@@ -132,16 +123,12 @@ fold_to*<T, U> = (xs: [T], init: U, f: (U, T) U) U {
 // float sum, use `fold`/`fold_to` with an explicit `0.0`/`1.0` seed: `xs.fold(0.0, (a, b){ a + b })`.
 sum*<T> = (xs: [T]) T {
     acc :: T = 0
-    xs.loop((h, i, x) {
-        acc = acc + x
-    })
+    xs.loop_at((i, x) { acc = acc + x })
     acc
 }
 product*<T> = (xs: [T]) T {
     acc :: T = 1
-    xs.loop((h, i, x) {
-        acc = acc * x
-    })
+    xs.loop_at((i, x) { acc = acc * x })
     acc
 }
 // element count. Identical to `xs.len`; kept for API parity with `count_if`.
@@ -149,7 +136,7 @@ count*<T> = (xs: [T]) i64 { xs.len }
 // how many elements satisfy `pred`.
 count_if*<T> = (xs: [T], pred: (T) bool) i64 {
     n ::= 0
-    xs.loop((h, i, x) {
+    xs.loop_at((i, x) {
         pred(x).then({
             n = n + 1
         })
@@ -184,7 +171,7 @@ none*<T> = (xs: [T], pred: (T) bool) bool { xs.any(pred) == false }
 // orders before `b`, exactly like `sort`). Empty slice → `.None`. Ties keep the FIRST occurrence.
 min_by*<T> = (xs: [T], less: (T, T) bool) Opt<T> {
     out :: Opt<T> = .None
-    xs.loop((h, i, x) {
+    xs.loop_at((i, x) {
         keep = out.match ({
             .Some(m) => less(x, m),
             .None    => true,
@@ -197,7 +184,7 @@ min_by*<T> = (xs: [T], less: (T, T) bool) Opt<T> {
 }
 max_by*<T> = (xs: [T], less: (T, T) bool) Opt<T> {
     out :: Opt<T> = .None
-    xs.loop((h, i, x) {
+    xs.loop_at((i, x) {
         keep = out.match ({
             .Some(m) => less(m, x),
             .None    => true,
@@ -219,7 +206,7 @@ max_of*<T> = (xs: [T]) Opt<T> { xs.max_by((a, b) { a < b }) }
 // `.None` (unlike `fold`, which always has `init`). `f` combines the running accumulator with the next.
 reduce*<T> = (xs: [T], f: (T, T) T) Opt<T> {
     out :: Opt<T> = .None
-    xs.loop((h, i, x) {
+    xs.loop_at((i, x) {
         out = out.match ({
             .Some(acc) => {
                 r: Opt<T> = .Some(f(acc, x))
@@ -259,9 +246,7 @@ range_in* = (a: Allocator, n: i64) Result<[i64], IoError> {
         false => a.try_acquire(n * sizeof(i64)).match ({
             .Ok(p)  => {
                 out :: [i64] = p.slice(n)
-                out.loop((h, i, x) {
-                    out[i] = i
-                })
+                out.loop_at((i, x) { out[i] = i })
                 ok(out)
             },
             .Err(e) => err(e),
@@ -279,9 +264,7 @@ range_from_in* = (a: Allocator, lo: i64, hi: i64) Result<[i64], IoError> {
         false => a.try_acquire(n * sizeof(i64)).match ({
             .Ok(p)  => {
                 out :: [i64] = p.slice(n)
-                out.loop((h, i, x) {
-                    out[i] = lo + i
-                })
+                out.loop_at((i, x) { out[i] = lo + i })
                 ok(out)
             },
             .Err(e) => err(e),
@@ -299,9 +282,7 @@ range_step_in* = (a: Allocator, lo: i64, hi: i64, step: i64) Result<[i64], IoErr
         false => a.try_acquire(n * sizeof(i64)).match ({
             .Ok(p)  => {
                 out :: [i64] = p.slice(n)
-                out.loop((h, i, x) {
-                    out[i] = lo + i * step
-                })
+                out.loop_at((i, x) { out[i] = lo + i * step })
                 ok(out)
             },
             .Err(e) => err(e),
@@ -315,7 +296,7 @@ enumerate_in*<T> = (a: Allocator, xs: [T]) Result<[IdxPair<T>], IoError> {
     like: [IdxPair<T>] = slice(null_ptr(), 0)
     a.buf_in(xs.len, like).match ({
         .Ok(out) => {
-            xs.loop((h, i, x) {
+            xs.loop_at((i, x) {
                 out[i] = IdxPair<T>(
                     i: i.to_i64(),
                     v: x,
@@ -332,7 +313,7 @@ zip_in*<T, U> = (a: Allocator, xs: [T], ys: [U]) Result<[Pair<T, U>], IoError> {
     like: [Pair<T, U>] = slice(null_ptr(), 0)
     a.buf_in(n, like).match ({
         .Ok(out) => {
-            out.loop((h, i, x) {
+            out.loop_at((i, x) {
                 out[i] = Pair<T, U>(
                     a: xs[i],
                     b: ys[i],

@@ -16,6 +16,7 @@
 // where the inliner substituted a tparam through genc.ty_cname_in, so both spellings are accepted.
 { Decl, Ty, StructDecl, EnumDecl } = compiler.ast.ast_types
 { ends_with } = std.text.str
+{ loop_at } = std.core.count
 js_size_unknown* = () i64 { 0 - 1 }
 jsz_no_decls = () [Decl] { slice(null_ptr(), 0) }
 // the module being emitted; parked by js.genJsModuleIn straight after monomorphize.
@@ -106,7 +107,7 @@ jsz_decl_size = (n: StringView, depth: i32) i64 {
         return js_size_unknown()
     })
     r ::= js_size_unknown()
-    jsz_decls.loop((h, i, d) {
+    jsz_decls.loop_at((i, d) {
         r = d.match ({
             .DStruct(sd) => (sd.name == n).then({ jsz_struct_size(sd, depth + 1) }, { r }),
             .DEnum(ed)   => (ed.name == n).then({ jsz_enum_size(ed, depth + 1) }, { r }),
@@ -120,7 +121,7 @@ jsz_decl_align = (n: StringView, depth: i32) i64 {
         return js_size_unknown()
     })
     r ::= js_size_unknown()
-    jsz_decls.loop((h, i, d) {
+    jsz_decls.loop_at((i, d) {
         r = d.match ({
             .DStruct(sd) => (sd.name == n).then({ jsz_struct_align(sd, depth + 1) }, { r }),
             .DEnum(ed)   => (ed.name == n).then({ jsz_enum_align(ed, depth + 1) }, { r }),
@@ -133,7 +134,7 @@ jsz_struct_size = (sd: StructDecl, depth: i32) i64 {
     off :: i64 = 0
     al :: i64 = 1
     bad ::= false
-    sd.fields.loop((h, i, f) {
+    sd.fields.loop_at((i, f) {
         fs = jsz_ty_size(f.ty, depth)
         fa = jsz_ty_align(f.ty, depth)
         bad = bad || fs < 0 || fa < 0
@@ -145,7 +146,7 @@ jsz_struct_size = (sd: StructDecl, depth: i32) i64 {
 jsz_struct_align = (sd: StructDecl, depth: i32) i64 {
     al :: i64 = 1
     bad ::= false
-    sd.fields.loop((h, i, f) {
+    sd.fields.loop_at((i, f) {
         fa = jsz_ty_align(f.ty, depth)
         bad = bad || fa < 0
         al = (fa < 0).then({ al }, { jsz_max(al, fa) })
@@ -156,7 +157,7 @@ jsz_struct_align = (sd: StructDecl, depth: i32) i64 {
 jsz_union_size = (ed: EnumDecl, depth: i32) i64 {
     usz :: i64 = 0
     bad ::= false
-    ed.variants.loop((h, i, v) {
+    ed.variants.loop_at((i, v) {
         v.payload.match ({
             .Void => { },
             _     => {
@@ -171,7 +172,7 @@ jsz_union_size = (ed: EnumDecl, depth: i32) i64 {
 jsz_union_align = (ed: EnumDecl, depth: i32) i64 {
     ual :: i64 = 1
     bad ::= false
-    ed.variants.loop((h, i, v) {
+    ed.variants.loop_at((i, v) {
         v.payload.match ({
             .Void => { },
             _     => {

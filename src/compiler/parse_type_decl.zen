@@ -15,6 +15,7 @@
 { parse_ty, parse_variant_payload, perr_set_at, perr_set_kind_at, PE_FIELDDEFAULT, PEnd, is_langle,
   is_rangle, is_rbrace, is_comma, param_buf, skip_to_brace, take_params } = compiler.parse_type
 { parse_decl_at, decl_marker, is_colon, is_star } = compiler.parse
+{ loop_at } = std.core.count
 StructEnd*: {
     sd: StructDecl,
     tparams: [Param],
@@ -272,9 +273,7 @@ field_is_method* = (f: Field) bool {
 }
 has_data_field* = (fields: [Field]) bool {
     found ::= false
-    fields.loop((h, i, f) {
-        found = f.field_is_method().then({ found }, { true })
-    })
+    fields.loop_at((i, f) { found = f.field_is_method().then({ found }, { true }) })
     found
 }
 // is `f` the SYNTHESIZED requirement field of one of the record's `=`-methods? fill_field_default
@@ -284,14 +283,12 @@ has_data_field* = (fields: [Field]) bool {
 // method's name (Map<T> has both a `keys` pointer field and a `keys = (…)` method) is not FnT.
 is_default_field = (defaults: [Func], f: Field) bool {
     found ::= false
-    defaults.loop((h, i, df) {
-        found = found || df.name == f.name && f.field_is_method()
-    })
+    defaults.loop_at((i, df) { found = found || df.name == f.name && f.field_is_method() })
     found
 }
 data_field_count = (fields: [Field], defaults: [Func]) i32 {
     n ::= 0
-    fields.loop((h, i, f) {
+    fields.loop_at((i, f) {
         (defaults.is_default_field(f) == false).then({
             n = n + 1
         })
@@ -301,7 +298,7 @@ data_field_count = (fields: [Field], defaults: [Func]) i32 {
 data_fields* = (a: MutPtr<Malloc>, fields: [Field], defaults: [Func]) [Field] {
     buf ::= a.field_buf()
     j ::= 0
-    fields.loop((h, i, f) {
+    fields.loop_at((i, f) {
         (defaults.is_default_field(f) == false).then({
             buf[j] = f
             j = j + 1

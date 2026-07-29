@@ -13,7 +13,7 @@
 { String } = std.text.string
 { Map, of } = std.collections.map
 { view } = std.text.str
-{ upto, advance_while } = std.core.count
+{ upto, advance_while, loop_at } = std.core.count
 { lstrip, is_import_line, next_line, STD_MARKER_LEN, COMPILER_MARKER_LEN, USER_MARKER_LEN, rset_add,
   rset_add_str, rpush, madd_str_name, ImportEdge, ProvidedSymbol, SIG_PUB, SIG_TYPE, SIG_IMPORTED,
   SIG_FOREIGN, ModuleSig, ModuleGraph, res_ident_end, is_ns_line, raw_lit_end } = compiler.resolve
@@ -238,7 +238,7 @@ import_edge_count_from = (src: StringView, p: i32, n: i32) i32 {
     pos ::= p
     count ::= n
     bs: Slice<u8> = src.view()
-    bs.loop((h, i, b) {
+    bs.loop_at((i, b) {
         ii = to_i32(i)
         (ii < pos == false).then({
             (src.is_import_line(pos) || src.is_ns_line(pos)).match ({
@@ -569,7 +569,7 @@ copy_symbol_span_to = (buf: RawPtr<u8>, src: StringView, p: i32, e: i32) i64 {
     cur :: i64 = 0
     (p < e).then({
         span: [u8] = slice(src.offset(p), to_i64(e - p))
-        span.loop((h, i, b) {
+        span.loop_at((i, b) {
             buf.offset(cur).store(b)
             cur = cur + 1
         })
@@ -774,7 +774,7 @@ sym_sig_flags = (s: ProvidedSymbol) i64 {
 sig_of_symbols = (a: MutPtr<Malloc>, symbols: [ProvidedSymbol]) ModuleSig {
     seed: i64 = 0 - 1
     m ::= of(a, "", seed).expect("compiler.resolve: sig alloc")
-    symbols.loop((h, i, s) {
+    symbols.loop_at((i, s) {
         f = s.sym_sig_flags()
         (m.has(s.name) == false).then({
             m = m.put(a, s.name, f).expect("compiler.resolve: sig alloc")
@@ -840,7 +840,7 @@ symbol_names_into_in = (
     include_foreign: bool,
 ) String {
     cur ::= set
-    symbols.loop((h, idx, sym) {
+    symbols.loop_at((idx, sym) {
         (idx < i == false).then({
             sym.symbol_allowed(include_imported, include_foreign).then({
                 cur = a.madd_str_name(cur, sym.name)
@@ -857,7 +857,7 @@ value_symbol_names_into_in = (
     i: i64,
 ) String {
     cur ::= set
-    symbols.loop((h, idx, sym) {
+    symbols.loop_at((idx, sym) {
         (idx < i == false).then({
             (sym.symbol_allowed(false, false) && sym.is_type.then({ false }, { true })).then({
                 cur = a.madd_str_name(cur, sym.name)
@@ -871,7 +871,7 @@ value_symbol_names_into_in = (
 // clean identifier), matching the original allnames String that shadow_mangled(key) is looked up against.
 imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur ::= m
-    symbols.loop((h, idx, sym) {
+    symbols.loop_at((idx, sym) {
         (sym.imported && sym.is_type.then({ false }, { true })).then({
             cur = cur.rset_add(a, sym.symbol_key_in(a).expect("compiler.resolve: allocation failed"))
         })
@@ -880,7 +880,7 @@ imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSy
 }
 value_symbol_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur ::= m
-    symbols.loop((h, idx, sym) {
+    symbols.loop_at((idx, sym) {
         (sym.symbol_allowed(false, false) && sym.is_type.then({ false }, { true })).then({
             cur = cur.rset_add_str(a, sym.name)
         })

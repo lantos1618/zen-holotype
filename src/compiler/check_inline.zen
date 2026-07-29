@@ -14,6 +14,7 @@
   param_index, params_env, recall, vcons, vnil } = compiler.check
 { resolve_decl } = compiler.check_resolve
 { infer_targs } = compiler.check_infer
+{ loop_at } = std.core.count
 // A generic template's body is inlined INTO its call site, but its AST nodes keep the LIBRARY byte
 // offsets they were parsed at — so a type error uncovered while checking the instantiated body would
 // point deep inside std (e.g. `fmt.zen:108`), a place the user never wrote. `cs` is the call-site
@@ -83,9 +84,7 @@ inline_template = (
 // instance-context inference, and a pinned void would win over it.
 all_concrete_targs = (ts: [Ty]) bool {
     con ::= true
-    ts.loop((h, i, t) {
-        con = t.is_void_ty().then({ false }, { con })
-    })
+    ts.loop_at((i, t) { con = t.is_void_ty().then({ false }, { con }) })
     con
 }
 // ── DIAGNOSTICS fallback: splice a template whose instantiation would MISS a trait impl ─────────
@@ -112,9 +111,7 @@ tmiss_tp_of = (ps: [Param], tparams: [Param], e: Ptr<Expr>) StringView {
 }
 tmiss_targ_for = (tparams: [Param], targs: [Ty], n: StringView) Ty {
     t ::= tvoid()
-    tparams.loop((h, i, tp) {
-        t = (tp.name == n && i < targs.len).then({ targs[i] }, { t })
-    })
+    tparams.loop_at((i, tp) { t = (tp.name == n && i < targs.len).then({ targs[i] }, { t }) })
     t
 }
 // is `fn` trait-flavored — provided by some impl, defaulted by a trait, or declared by a trait
@@ -169,9 +166,7 @@ tmiss_es = (
     xs: [Expr],
 ) bool {
     f ::= false
-    xs.loop((h, i, x) {
-        f = f.then({ true }, { a.tmiss_e(decls, idx, tf, targs, x.addr()) })
-    })
+    xs.loop_at((i, x) { f = f.then({ true }, { a.tmiss_e(decls, idx, tf, targs, x.addr()) }) })
     f
 }
 tmiss_e = (
@@ -225,9 +220,7 @@ tmiss_body = (
     body: [Stmt],
 ) bool {
     f ::= false
-    body.loop((h, i, st) {
-        f = f.then({ true }, { a.tmiss_stmt(decls, idx, tf, targs, st) })
-    })
+    body.loop_at((i, st) { f = f.then({ true }, { a.tmiss_stmt(decls, idx, tf, targs, st) }) })
     f
 }
 pin_targs = (
@@ -326,11 +319,9 @@ mono_rec = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, from: i64) [Decl] 
         true  => decls,
         false => {
             out ::= cbuf<Decl>(a, decls.len + cnt)
-            decls.loop((h, i, d) {
-                out[i] = d
-            })
+            decls.loop_at((i, d) { out[i] = d })
             k ::= decls.len
-            buf.loop((h, i, g) {
+            buf.loop_at((i, g) {
                 (i < cnt).then({
                     out[k] = base.rc_gen(g)
                     k = k + 1
@@ -355,7 +346,7 @@ mono_close* = (a: MutPtr<Malloc>, decls: [Decl], from: i64, guard: i32) [Decl] {
         false => {
             eidx = a.build_decl_index(exp)
             buf ::= cbuf<Decl>(a, exp.len)
-            exp.loop((h, i, d) {
+            exp.loop_at((i, d) {
                 buf[i] = (i < decls.len).match ({
                     true  => d,
                     false => a.inline_decl(exp, eidx, a.resolve_decl(exp, eidx, d)),
@@ -392,7 +383,7 @@ lower_closures* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     store_i64(ccp, 0)
     gen = cbuf<Decl>(a, 4096)
     out ::= cbuf<Decl>(a, decls.len + 4096)
-    decls.loop((h, i, d) {
+    decls.loop_at((i, d) {
         out[i] = d.match ({
             .DFunc(f) => a.clos_lowerable(decls, idx, f).match ({
                 true  => a.clos_lower_func(ccp, gen, f),
@@ -403,7 +394,7 @@ lower_closures* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
     })
     n = load_i64(ccp) * 2
     k ::= decls.len
-    gen.loop((h, i, g) {
+    gen.loop_at((i, g) {
         (i < n.to_i32()).then({
             out[k] = g
             k = k + 1

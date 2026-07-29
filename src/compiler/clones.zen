@@ -32,6 +32,7 @@
 { fnv1a64_fold } = std.hash
 { is_expr_null, acquire_or_die, acquire_or_die } = compiler.genc
 { Expr, FieldInit, Func, LambdaData, LoopData, MatchData, Stmt, Ty } = compiler.ast.ast_types
+{ loop_at } = std.core.count
 // Binding scope: names bound by this function, in binding order. Small and linear — a function with
 // enough locals for the scan to matter is already a problem this tool wants to report.
 CloneCtx*: {
@@ -97,16 +98,12 @@ clone_ty = (h: i64, t: Ty) i64 {
 }
 clone_tys = (ts: [Ty], h: i64) i64 {
     acc ::= h
-    ts.loop((hh, i, t) {
-        acc = acc.clone_ty(t)
-    })
+    ts.loop_at((i, t) { acc = acc.clone_ty(t) })
     acc
 }
 clone_exprs = (cx: MutPtr<CloneCtx>, h: i64, xs: [Expr]) i64 {
     acc ::= h
-    xs.loop((hh, i, x) {
-        acc = cx.clone_expr(acc, x.addr())
-    })
+    xs.loop_at((i, x) { acc = cx.clone_expr(acc, x.addr()) })
     acc
 }
 clone_expr = (cx: MutPtr<CloneCtx>, h0: i64, e: Ptr<Expr>) i64 {
@@ -136,7 +133,7 @@ clone_expr = (cx: MutPtr<CloneCtx>, h0: i64, e: Ptr<Expr>) i64 {
 }
 clone_arms = (cx: MutPtr<CloneCtx>, h: i64, m: MatchData) i64 {
     acc ::= h
-    m.arms.loop((hh, i, a) {
+    m.arms.loop_at((i, a) {
         cx.clone_bind(a.bind)    // `.Some(v) =>` binds v — rule 1, or the arm's spelling of v splits the group
         acc = cx.clone_expr(acc.clone_tag(60).clone_text(a.variant), a.body)
     })
@@ -148,9 +145,7 @@ clone_arms = (cx: MutPtr<CloneCtx>, h: i64, m: MatchData) i64 {
 // Field names follow rule 2 (free, verbatim), so `S(a: t, b: u)` and `S(a: u, b: t)` differ.
 clone_inits = (cx: MutPtr<CloneCtx>, h: i64, inits: [FieldInit]) i64 {
     acc ::= h
-    inits.loop((hh, i, f) {
-        acc = cx.clone_expr(acc.clone_tag(61).clone_text(f.name), f.value)
-    })
+    inits.loop_at((i, f) { acc = cx.clone_expr(acc.clone_tag(61).clone_text(f.name), f.value) })
     acc
 }
 // An optional child — an enum payload (`.None` has none) or a synthesized valueless return. Absent is
@@ -171,7 +166,7 @@ clone_loop = (cx: MutPtr<CloneCtx>, h: i64, l: LoopData) i64 {
 }
 clone_lambda = (cx: MutPtr<CloneCtx>, h: i64, l: LambdaData) i64 {
     acc ::= h
-    l.params.loop((hh, i, p) {
+    l.params.loop_at((i, p) {
         cx.clone_bind(p.name)
         acc = acc.clone_ty(p.ty)
     })
@@ -179,9 +174,7 @@ clone_lambda = (cx: MutPtr<CloneCtx>, h: i64, l: LambdaData) i64 {
 }
 clone_stmts = (cx: MutPtr<CloneCtx>, h: i64, body: [Stmt]) i64 {
     acc ::= h
-    body.loop((hh, i, st) {
-        acc = cx.clone_stmt(acc, st)
-    })
+    body.loop_at((i, st) { acc = cx.clone_stmt(acc, st) })
     acc
 }
 clone_stmt = (cx: MutPtr<CloneCtx>, h0: i64, st: Stmt) i64 {
@@ -212,7 +205,7 @@ clone_fn* = (mp: MutPtr<Malloc>, f: Func) i64 {
     )
     cx = c.addr()
     h ::= CLONE_BASIS().clone_ty(f.ret)
-    f.params.loop((hh, i, p) {
+    f.params.loop_at((i, p) {
         cx.clone_bind(p.name)
         h = h.clone_ty(p.ty)
     })

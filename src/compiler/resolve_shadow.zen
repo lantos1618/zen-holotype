@@ -13,6 +13,7 @@
   snext_line, symbol_start_of, uregions_get } = compiler.resolve
 { imported_value_name_set, value_symbol_name_set, symbol_key_in, module_graph } = compiler.resolve_scan
 { rename_ns_names } = compiler.resolve_rename
+{ loop_at } = std.core.count
 // ── user-name shadow rename ────────────────────────────────────────────────────────────────────
 // THE #1 newcomer bounce: a user's top-level helper (`len`/`split`/`map`/…) collides with a
 // same-named PUBLIC decl pulled in TRANSITIVELY by an import the user never named (e.g. `std.io.file`
@@ -67,7 +68,7 @@ shadow_name_sets = (
     mainseen ::= a.rset_new()
     maindup ::= a.rset_new()
     nonmain ::= a.rset_new()
-    syms.loop((h, i, s) {
+    syms.loop_at((i, s) {
         ((s.imported || s.foreign || s.is_type) == false).then({
             key = s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
             (s.decl_start >= lo && s.decl_start < hi).match ({
@@ -89,7 +90,7 @@ shadow_name_sets = (
     out ::= a.gstr_string(64)
     bad ::= a.gstr_string(16)
     outset ::= a.rset_new()
-    syms.loop((h, i, s) {
+    syms.loop_at((i, s) {
         ((s.imported || s.foreign || s.is_type) == false).then({
             key = s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
             inmain = s.decl_start >= lo && s.decl_start < hi
@@ -249,9 +250,9 @@ fail_shadow_mangled = (a: MutPtr<Malloc>, entry: ModuleEntry, bad: String, alias
 }
 // reject when ANY other module imports a to-be-renamed name from `entry` by name (see fail_shadow_import).
 shadow_guard_one = (a: MutPtr<Malloc>, table: ModuleTable, entry: ModuleEntry, nm: StringView) i32 {
-    table.modules.loop((h, i, m) {
+    table.modules.loop_at((i, m) {
         (m.id == entry.id == false).then({
-            m.graph.imports.loop((h2, j, e) {
+            m.graph.imports.loop_at((j, e) {
                 (e.namespace == false && e.module == entry.id).then({
                     m.source.edge_head_has_name(e.start, nm).then({
                         a.fail_shadow_import(entry, m.id, nm)
@@ -306,7 +307,7 @@ shadow_flat_users* = (
             renamed ::= false
             syms ::= a.module_graph(cur).symbols
             n = regions.len
-            regions.loop((h, i, r0) {
+            regions.loop_at((i, r0) {
                 idx = n - 1 - i
                 r = regions[idx]
                 adj = (r.lo < prebodylen).then({ 0 }, { maindelta })

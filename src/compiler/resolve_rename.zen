@@ -35,6 +35,7 @@
 { module_graph, str_bytes } = compiler.resolve_scan
 { at, is_alpha } = std.text.ascii
 { view } = std.text.str
+{ loop_at } = std.core.count
 // ── membership over a newline-delimited name set, compared against a SOURCE span ────────────────
 // The rename set is built by the top-level symbol scan, so its entries are source spellings. Asking
 // it about the source bytes (never about an AST name) keeps the decl and its references in step even
@@ -71,8 +72,8 @@ ren_no_types = () StringView { "" }
 ren_types ::= ren_no_types()
 ren_types_set* = (a: MutPtr<Malloc>, table: ModuleTable) void {
     out ::= a.gstr_string(512)
-    table.modules.loop((h, i, m) {
-        m.graph.symbols.loop((h2, j, sym) {
+    table.modules.loop_at((i, m) {
+        m.graph.symbols.loop_at((j, sym) {
             sym.is_type.then({
                 out = out.rappend(a, sym.name).rpush(a, '\n')
             })
@@ -94,9 +95,7 @@ ren_binds_reset = (a: MutPtr<Malloc>) void {
 ren_bind_push = (a: MutPtr<Malloc>, nm: StringView) void {
     (ren_bind_n >= ren_binds.len).then({
         grown :: [StringView] = slice(a.acquire_or_die(ren_binds.len * 2 * sizeof(StringView)), ren_binds.len * 2)
-        ren_binds.loop((h, i, v) {
-            grown[i] = v
-        })
+        ren_binds.loop_at((i, v) { grown[i] = v })
         ren_binds = grown
     })
     ren_binds[ren_bind_n] = nm
@@ -202,16 +201,14 @@ ren_expr = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
             },
             .Lambda(lm)     => {
                 m = ren_bind_mark()
-                lm.params.loop((h, i, p) {
-                    a.ren_bind_push(p.name)
-                })
+                lm.params.loop_at((i, p) { a.ren_bind_push(p.name) })
                 c.ren_stmts(a, lm.body)
                 ren_bind_drop(m)
                 0
             },
             .Match(mt)      => {
                 c.ren_expr(a, mt.subj)
-                mt.arms.loop((h, i, ar) {
+                mt.arms.loop_at((i, ar) {
                     m = ren_bind_mark()
                     a.ren_bind_push(ar.bind)
                     c.ren_expr(a, ar.body)
@@ -225,9 +222,7 @@ ren_expr = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
 }
 ren_stmts = (c: RenCtx, a: MutPtr<Malloc>, body: [Stmt]) i32 {
     m = ren_bind_mark()
-    body.loop((h, i, s) {
-        c.ren_stmt(a, s)
-    })
+    body.loop_at((i, s) { c.ren_stmt(a, s) })
     ren_bind_drop(m)
     0
 }
@@ -263,17 +258,13 @@ ren_stmt = (c: RenCtx, a: MutPtr<Malloc>, s: Stmt) i32 {
 ren_func = (c: RenCtx, a: MutPtr<Malloc>, f: Func) i32 {
     c.ren_mark_ref(f.pos)
     m = ren_bind_mark()
-    f.params.loop((h, i, p) {
-        a.ren_bind_push(p.name)
-    })
+    f.params.loop_at((i, p) { a.ren_bind_push(p.name) })
     c.ren_stmts(a, f.body)
     ren_bind_drop(m)
     0
 }
 ren_variants = (c: RenCtx, a: MutPtr<Malloc>, vs: [VariantDef]) i32 {
-    vs.loop((h, i, v) {
-        c.ren_expr(a, v.dflt)
-    })
+    vs.loop_at((i, v) { c.ren_expr(a, v.dflt) })
     0
 }
 // A METHOD's name is marked too (an impl/inherent method's Func carries the mangled name at the bare
@@ -297,7 +288,7 @@ ren_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8], alias: 
     cur ::= out
     pos :: i32 = 0
     bs: Slice<u8> = s.str_bytes()
-    bs.loop((h, i, b) {
+    bs.loop_at((i, b) {
         ii = to_i32(i)
         (ii < pos == false).then({
             (marks[i] == 1).match ({
@@ -317,9 +308,7 @@ ren_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8], alias: 
 }
 ren_marks = (a: MutPtr<Malloc>, n: i64) [u8] {
     ms :: [u8] = slice(a.acquire_or_die(n + 1), n + 1)
-    ms.loop((h, i, b) {
-        ms[i] = 0
-    })
+    ms.loop_at((i, b) { ms[i] = 0 })
     ms
 }
 // THE rename: prefix `alias__` onto every occurrence of `names` in module body `s` that is a value
@@ -339,15 +328,13 @@ rename_ns_names* = (
         names: names.bytes(),
         bound: false,
     )
-    a.module_graph(s).symbols.loop((h, i, sym) {
+    a.module_graph(s).symbols.loop_at((i, sym) {
         (sym.imported == false).then({
             c.ren_mark_ref(sym.start)
         })
     })
     a.ren_binds_reset()
-    a.parse_module(s).loop((h, i, d) {
-        c.ren_decl(a, d)
-    })
+    a.parse_module(s).loop_at((i, d) { c.ren_decl(a, d) })
     out.ren_apply(a, s, c.marks, alias)
 }
 // ── the namespace-QUALIFIER rewrite ─────────────────────────────────────────────────────────────
@@ -374,9 +361,7 @@ ns_local_marks = (a: MutPtr<Malloc>, s: StringView) [u8] {
         bound: true,
     )
     a.ren_binds_reset()
-    a.parse_module(s).loop((h, i, d) {
-        c.ren_decl(a, d)
-    })
+    a.parse_module(s).loop_at((i, d) { c.ren_decl(a, d) })
     c.marks
 }
 qual_name_at = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32, ie: i32) String {
@@ -462,7 +447,7 @@ qual_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8]) String
     cur ::= out
     pos :: i32 = 0
     bs: Slice<u8> = s.str_bytes()
-    bs.loop((h, i, b) {
+    bs.loop_at((i, b) {
         ii = to_i32(i)
         (ii < pos == false).then({
             (marks[i] == 0).match ({

@@ -6,6 +6,7 @@
 // duplicated `head_bytes`/`tail_bytes` rather than take that import). Keep new globals here specific.
 { Allocator, try_acquire } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
+{ loop_at } = std.core.count
 buf_in*<T> = (a: Allocator, n: i64, like: [T]) Result<[T], IoError> {
     (n <= 0).match ({
         true  => ok(slice(null_ptr(), 0)),
@@ -18,9 +19,7 @@ buf_in*<T> = (a: Allocator, n: i64, like: [T]) Result<[T], IoError> {
 dup_in*<T> = (a: Allocator, xs: [T]) Result<[T], IoError> {
     a.buf_in(xs.len, xs).match ({
         .Ok(buf) => {
-            xs.loop((h, i, x) {
-                buf[i] = x
-            })
+            xs.loop_at((i, x) { buf[i] = x })
             ok(buf)
         },
         .Err(e)  => err(e),
@@ -40,12 +39,8 @@ node_in*<T> = (a: Allocator, v: T) Result<Ptr<T>, IoError> {
 concat_in*<T> = (a: Allocator, xs: [T], ys: [T]) Result<[T], IoError> {
     a.buf_in(xs.len + ys.len, xs).match ({
         .Ok(buf) => {
-            xs.loop((h, i, x) {
-                buf[i] = x
-            })
-            ys.loop((h, i, y) {
-                buf[xs.len + i] = y
-            })
+            xs.loop_at((i, x) { buf[i] = x })
+            ys.loop_at((i, y) { buf[xs.len + i] = y })
             ok(buf)
         },
         .Err(e)  => err(e),
@@ -78,9 +73,7 @@ drop*<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }
 reverse_in*<T> = (a: Allocator, xs: [T]) Result<[T], IoError> {
     a.buf_in(xs.len, xs).match ({
         .Ok(out) => {
-            xs.loop((h, i, x) {
-                out[xs.len - 1 - i] = x
-            })
+            xs.loop_at((i, x) { out[xs.len - 1 - i] = x })
             ok(out)
         },
         .Err(e)  => err(e),
@@ -93,7 +86,7 @@ reverse<T> = (a: Allocator, xs: [T]) Result<[T], IoError> { a.reverse_in(xs) }
 // explicit predicate instead.
 index_of*<T> = (xs: [T], x: T) i64 {
     r ::= 0 - 1
-    xs.loop((h, i, e) {
+    xs.loop_at((i, e) {
         (e == x).then({
             (r < 0).then({
                 r = i
@@ -107,7 +100,7 @@ contains*<T> = (xs: [T], x: T) bool { xs.index_of(x) >= 0 }
 // type (no equality needed).
 find_by*<T> = (xs: [T], pred: (T) bool) i64 {
     r ::= 0 - 1
-    xs.loop((h, i, e) {
+    xs.loop_at((i, e) {
         pred(e).then({
             (r < 0).then({
                 r = i

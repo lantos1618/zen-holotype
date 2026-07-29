@@ -9,6 +9,7 @@
 { lift_extend, lift_is_captured, lift_lamparams, lift_liftable } = compiler.passes.lift
 { gstr_int, map_slice } = compiler.astops
 { Malloc } = std.mem.alloc
+{ loop_at } = std.core.count
 clos_local_call_name* = (env: Env, name: StringView) StringView {
     (env.env_func(name).name == "").match ({
         true  => env.var_ty(name).match ({
@@ -24,9 +25,7 @@ clos_local_call_name* = (env: Env, name: StringView) StringView {
 clos_call_rewrite* = (a: MutPtr<Malloc>, c: CallData, cn: StringView, buf: [Expr]) Ptr<Expr> {
     args ::= a.cebuf(buf.len + 1)
     args[0] = vref(c.fn)
-    buf.loop((h, i, e) {
-        args[i + 1] = e
-    })
+    buf.loop_at((i, e) { args[i + 1] = e })
     a.cenode(call_at(cn, args, c.pos))
 }
 clos_struct_name = (a: MutPtr<Malloc>, k: i64) StringView {
@@ -55,7 +54,7 @@ clos_bad_args = (
     xs: [Expr],
 ) bool {
     found ::= false
-    xs.loop((h, i, x) {
+    xs.loop_at((i, x) {
         found = found.then({ true }, { a.clos_bad_expr(decls, idx, bound, ps, x.addr()) })
     })
     found
@@ -69,7 +68,7 @@ clos_bad_inits = (
     inits: [FieldInit],
 ) bool {
     found ::= false
-    inits.loop((h, i, fi) {
+    inits.loop_at((i, fi) {
         found = found.then({ true }, { a.clos_bad_expr(decls, idx, bound, ps, fi.value) })
     })
     found
@@ -83,7 +82,7 @@ clos_bad_arms = (
     arms: [ArmData],
 ) bool {
     found ::= false
-    arms.loop((h, i, ar) {
+    arms.loop_at((i, ar) {
         found = found.match ({
             true  => true,
             false => a.clos_bad_expr(decls, idx, a.vcons(ar.bind, tvoid(), bound), ps, ar.body),
@@ -101,7 +100,7 @@ clos_bad_body = (
 ) bool {
     found ::= false
     b ::= bound
-    body.loop((h, i, st) {
+    body.loop_at((i, st) {
         found = found.then({ true }, { a.clos_bad_stmt(decls, idx, b, ps, st) })
         b = a.lift_extend(b, st)
     })
@@ -190,9 +189,7 @@ clos_sub_fncall = (a: MutPtr<Malloc>, ps: [Param], c: CallData) Ptr<Expr> {
 }
 clos_sub_args = (a: MutPtr<Malloc>, ps: [Param], xs: [Expr]) [Expr] {
     buf ::= a.cebuf(xs.len)
-    xs.loop((h, i, x) {
-        buf[i] = load(a.clos_sub_expr(ps, x.addr()))
-    })
+    xs.loop_at((i, x) { buf[i] = load(a.clos_sub_expr(ps, x.addr())) })
     buf
 }
 clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit] {
@@ -280,7 +277,7 @@ clos_tail_lam_of = (body: [Stmt]) LambdaData {
 clos_call_params = (a: MutPtr<Malloc>, structn: StringView, lm: LambdaData, ft: FnTData) [Param] {
     ps ::= a.pbuf(lm.params.len + 1)
     ps[0] = param("__clenv", tnamed(structn))
-    lm.params.loop((h, i, p) {
+    lm.params.loop_at((i, p) {
         ps[i + 1] = param(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }))
     })
     ps
@@ -289,9 +286,7 @@ clos_call_params = (a: MutPtr<Malloc>, structn: StringView, lm: LambdaData, ft: 
 clos_struct_fields = (a: MutPtr<Malloc>, fps: [Param]) [Field] {
     fs = a.acquire_or_die(fps.len * sizeof(Field))
     out :: [Field] = slice(fs, fps.len)
-    fps.loop((h, i, p) {
-        out[i] = field(p.name, p.ty)
-    })
+    fps.loop_at((i, p) { out[i] = field(p.name, p.ty) })
     out
 }
 // the closure literal's field inits = each captured param bound to its own current value.
@@ -301,9 +296,7 @@ clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
 // rebuild the enclosing body with its tail lambda replaced by the closure struct literal.
 clos_replace_tail = (a: MutPtr<Malloc>, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
     buf ::= cbuf<Stmt>(a, body.len)
-    body.loop((h, i, st) {
-        buf[i] = (i == body.len - 1).then({ sret(mk) }, { st })
-    })
+    body.loop_at((i, st) { buf[i] = (i == body.len - 1).then({ sret(mk) }, { st }) })
     buf
 }
 // does `f` return a capturing-over-params closure we can lower? (FnT return + tail lambda + it captures

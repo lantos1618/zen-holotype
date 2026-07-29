@@ -4,6 +4,7 @@
 // @self-hosted-only: generic struct literals are covered by self-hosted tests.
 { Allocator, try_acquire, try_resize, DynAlloc, dyn_from, dyn_heap } = std.mem.alloc
 { Result, IoError, Opt, ok, err, panic, expect } = std.core.result
+{ loop_at } = std.core.count
 // The carried allocator + sticky failure flag are the SAME three fields, in the same order, as
 // std.text.string's String, because `String` IS `Vec<u8>` and that identity is load-bearing. See
 // that struct for what each one means; the semantics here are identical over an element type.
@@ -187,16 +188,12 @@ Vec*<T>: {
         // fresh Vec wrapped in `Result` (no hidden heap; OOM is a value). The `vw: [T] =` intermediate
         // pins the element type for the loop.
         vw: [T] = v.view()
-        vw.loop((h, i, x) {
-            f(x)
-        })
+        vw.loop_at((i, x) { f(x) })
     }
     fold = (v: Vec<T>, init: T, f: (T, T) T) T {
         acc ::= init
         vw: [T] = v.view()
-        vw.loop((h, i, x) {
-            acc = f(acc, x)
-        })
+        vw.loop_at((i, x) { acc = f(acc, x) })
         acc
     }
     find = (v: Vec<T>, pred: (T) bool) Opt<T> {
@@ -217,9 +214,7 @@ Vec*<T>: {
             .Ok(p)  => {
                 out :: [U] = slice(p, v.len)
                 vw: [T] = v.view()
-                vw.loop((h, i, x) {
-                    out[i] = f(x)
-                })
+                vw.loop_at((i, x) { out[i] = f(x) })
                 ok: Result<Vec<U>, IoError> = .Ok(Vec<U>(
                     ptr: p,
                     len: v.len,
@@ -243,7 +238,7 @@ Vec*<T>: {
                 out :: [T] = slice(p, v.len)
                 vw: [T] = v.view()
                 n ::= 0
-                vw.loop((h, i, x) {
+                vw.loop_at((i, x) {
                     out[n] = x
                     n = n + keep(x).then({ 1 }, { 0 })
                 })
@@ -313,9 +308,7 @@ of*<T> = (a: Allocator, xs: [T]) Result<Vec<T>, IoError> {
                         alloc: dyn_from(a),
                     )
                     b ::= v.buf()
-                    xs.loop((h, i, x) {
-                        b[i] = x
-                    })
+                    xs.loop_at((i, x) { b[i] = x })
                     vok: Result<Vec<T>, IoError> = .Ok(v)
                     vok
                 },
@@ -367,9 +360,7 @@ extend_in*<T> = (a: Allocator, v: Vec<T>, xs: [T]) Result<Vec<T>, IoError> {
     a.reserve_cap(v, xs.len).match ({
         .Ok(r)  => {
             dst :: [T] = r.buf()
-            xs.loop((h, i, x) {
-                dst[r.len + i] = x
-            })
+            xs.loop_at((i, x) { dst[r.len + i] = x })
             vok: Result<Vec<T>, IoError> = .Ok(Vec<T>(
                 ptr: r.ptr,
                 len: r.len + xs.len,
