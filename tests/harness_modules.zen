@@ -1596,6 +1596,86 @@ harness_modules_run* = () i32 {
             entry: "p.zen",
             want: 3,
         ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "vallib.zen",
+                    src: "val* = (n: i64) i64 { n }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "m = vallib\nS*: { val: i64 }\nmain = () i32 {\n    m: S := S(val: 7)\n    m.val.to_i32()\n}\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 7,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "vallib.zen",
+                    src: "val* = (n: i64) i64 { n }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "m = vallib\nS*: { val: i64 }\nget = (m: S) i32 { m.val.to_i32() }\nmain = () i32 { get(S(val: 7)) }\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 7,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "onelib.zen",
+                    src: "one* = () i32 { 1 }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "m = onelib\nS*: { one: i32 }\nmain = () i32 {\n    b := 0\n    [S(one: 4)].loop((h, i, m) { b = m.one })\n    m.one() + b + m.one()\n}\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 6,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "cblib.zen",
+                    src: "cb* = (n: i64) i64 { n + 100 }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "m = cblib\nS*: { cb: (i64) i64 }\nid = (n: i64) i64 { n }\nmain = () i32 {\n    m: S := S(cb: id)\n    m.cb(7).to_i32()\n}\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 7,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "tylib.zen",
+                    src: "Val*: { q: i64 }\n",
+                ),
+                ModFile(
+                    name: "p.zen",
+                    src: "m = tylib\nS*: { Val: i64 }\nmain = () i32 {\n    m: S := S(Val: 7)\n    m.Val.to_i32()\n}\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 7,
+        ),
+        ModValCase(
+            files: [
+                ModFile(
+                    name: "p.zen",
+                    src: "c = std.io.c\nS*: { malloc: i64 }\nmain = () i32 {\n    c: S := S(malloc: 7)\n    c.malloc.to_i32()\n}\n",
+                ),
+            ],
+            entry: "p.zen",
+            want: 7,
+        ),
     ])
     // …and the guard must not over-reach: a `{` after a FIELD LABEL is a block VALUE, so the typed
     // local inside it is a binder and still gets prefixed (`S: {` type bodies are the other way round).
@@ -1613,6 +1693,14 @@ harness_modules_run* = () i32 {
     // (`does not cover variant .L__Some`) and the error pointed into the aliased module, which checks
     // clean standalone. Payload-less variants, a GENERIC enum, and an enum reached through a
     // by-name import (so the receiver's type-ness is only knowable from another module) all pin it.
+    // A LOCAL IS NOT A QUALIFIER. Under a bind `m = mod`, `m.f` used to be resolved from the spelling
+    // alone, so a variable named like the alias had its FIELD READS rewritten into references to the
+    // module's `f` — silently, with no diagnostic: `m: S := S(val: 7)` ⨯ `m.val` returned the function
+    // POINTER. Pinned across every binder kind (`:=`, a param, a loop element) and every fate the
+    // qualifier can take: the rename half (`m.val` → `m__val`), the strip half where the member names
+    // one of the module's TYPES, and the libc `c = std.io.c` strip-everything half. The callable field
+    // `m.cb(7)` is the same bug wearing a call. A qualified TYPE use of the alias still resolves in the
+    // same function the local shadows it in — type positions hold no locals.
     // Same rewrite, shadow-rename path: a user's top-level `len` collides with an UNIMPORTED
     // transitive std export and is renamed `zshadow__len` — which used to rename the struct field too.
     // ONE impl block reached via TWO import paths (by-name + namespace alias): the alias emission

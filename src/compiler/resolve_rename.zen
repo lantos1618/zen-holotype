@@ -26,10 +26,14 @@
 { expr_fold_children } = compiler.ast.expr_children
 { parse_module } = compiler.parse
 { gstr_string, gstr_finish, is_expr_null, acquire_or_die, acquire_or_die } = compiler.genc
+{ Scan, scan } = compiler.lex
+{ is_ident_tok } = compiler.parse_postfix
 { Malloc } = std.mem.alloc
 { String } = std.text.string
-{ ModuleTable, rappend, rappend_span, rappend_string, res_ident_end, rpush } = compiler.resolve
+{ ModuleTable, mimport_name_span, rappend, rappend_span, rappend_string, res_ident_end, rpush,
+  seen_name } = compiler.resolve
 { module_graph, str_bytes } = compiler.resolve_scan
+{ at, is_alpha } = std.text.ascii
 { view } = std.text.str
 // ── membership over a newline-delimited name set, compared against a SOURCE span ────────────────
 // The rename set is built by the top-level symbol scan, so its entries are source spellings. Asking
@@ -112,11 +116,14 @@ ren_bind_has = (nm: StringView) bool {
     found
 }
 // ── the walk ────────────────────────────────────────────────────────────────────────────────────
+// `bound` flips what the walk marks: false = the value decls/references being RENAMED, true = the
+// identifiers the binder stack knows are LOCALS (what the qualifier rewrite below needs to know).
 RenCtx: {
     marks: [u8],
     sv: StringView,
     src: [u8],
     names: [u8],
+    bound: bool,
 }
 // mark the identifier that STARTS at `p` when it is one of the names being renamed.
 ren_mark_ref = (c: RenCtx, p: i32) void {
@@ -127,6 +134,15 @@ ren_mark_ref = (c: RenCtx, p: i32) void {
         c.names.ren_seen(c.src, off, e, 0).then({
             ms[off] = 1
         })
+    })
+}
+// `bound` mode: mark the identifier at `p` unconditionally — the caller already established that the
+// binder stack holds its name, which is the whole fact the qualifier rewrite asks for.
+ren_mark_local = (c: RenCtx, p: i32) void {
+    ms := c.marks
+    off := to_i64(p)
+    (off >= 0 && off < ms.len).then({
+        ms[off] = 1
     })
 }
 ren_is_type_at = (c: RenCtx, p: i32) bool {
@@ -156,8 +172,11 @@ ren_expr = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
         true  => 0,
         false => load(e).match ({
             .Var(v)         => {
-                (v.name.ren_bind_has() == false).then({
-                    c.ren_mark_ref(v.pos)
+                v.name.ren_bind_has().match ({
+                    true  => c.bound.then({
+                        c.ren_mark_local(v.pos)
+                    }),
+                    false => c.ren_mark_ref(v.pos),
                 })
                 0
             },
@@ -318,6 +337,7 @@ rename_ns_names* = (
         sv: s,
         src: sb,
         names: names.bytes(),
+        bound: false,
     )
     a.module_graph(s).symbols.loop((h, i, sym) {
         (sym.imported == false).then({
@@ -330,3 +350,146 @@ rename_ns_names* = (
     })
     out.ren_apply(a, s, c.marks, alias)
 }
+// ── the namespace-QUALIFIER rewrite ─────────────────────────────────────────────────────────────
+// Under a bind `A = mod`, `A.f` resolves three ways: to `A__f` when `f` is a VALUE decl of mod (the
+// rename above moved it there), to a bare `f` when `f` is one of mod's TYPES (types keep their flat
+// name) or mod is libc, and to itself otherwise. Which one it was used to be decided from the
+// SPELLING alone — so a LOCAL named like an alias had its field reads rewritten into references to
+// the module's function, silently: `m: S := S(val: 7)` ⨯ `m.val` became `m__val`, the function
+// POINTER, and the program returned it instead of the field.
+//
+// The receiver is now decided on the AST. The walk above, run in `bound` mode, marks every identifier
+// the binder stack knows is a variable — a param, a `:=`, a loop index/element/handler, a lambda
+// param, a match-arm binding — and a marked identifier is never a qualifier. Candidate sites come
+// from the LEXER, so a comment or a string literal is not a site at all. Application stays a
+// marked-offset splice: `A.` and `A__` are the same line, so every `file:line:col` is untouched.
+ren_no_names = () [u8] { slice(null_ptr(), 0) }
+ns_local_marks = (a: MutPtr<Malloc>, s: StringView) [u8] {
+    sb: [u8] := s.str_bytes()
+    c := RenCtx(
+        marks: a.ren_marks(sb.len),
+        sv: s,
+        src: sb,
+        names: ren_no_names(),
+        bound: true,
+    )
+    a.ren_binds_reset()
+    a.parse_module(s).loop((h, i, d) {
+        c.ren_decl(a, d)
+    })
+    c.marks
+}
+qual_name_at = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32, ie: i32) String {
+    out.rappend_span(a, s, p, ie).rpush(a, '.').rappend_span(a, s, ie + 1, s.res_ident_end(ie + 1))
+}
+// what becomes of `A.f`, where `A` spans [p, ie): 0 = leave it alone, 1 = `A__f`, 2 = `f`.
+qual_fate = (
+    a: MutPtr<Malloc>,
+    s: StringView,
+    p: i32,
+    ie: i32,
+    qnames: String,
+    strip_qnames: String,
+    strip_all_quals: String,
+) u8 {
+    qn := qual_name_at(a.gstr_string(32), a, s, p, ie)
+    qnames.seen_name(qn).match ({
+        true  => 1,
+        false => (strip_qnames.seen_name(qn)
+            || strip_all_quals.seen_name(a.mimport_name_span(s, p, ie))).match ({
+            true  => 2,
+            false => 0,
+        }),
+    })
+}
+// classify ONE token and return where the scan resumes: past a qualifier that stays (nothing inside it
+// can start another one), else past the head identifier (`A.f.g` — `f` may head a qualifier too).
+qual_mark_tok = (
+    a: MutPtr<Malloc>,
+    s: StringView,
+    sc: Scan,
+    ms: [u8],
+    locals: [u8],
+    quals: String,
+    qnames: String,
+    strip_qnames: String,
+    strip_all_quals: String,
+) i32 {
+    p := sc.tok.start
+    ie := p + sc.tok.len
+    (is_ident_tok(sc.tok)
+        && locals[to_i64(p)] == 0
+        && at(s, ie) == '.'
+        && at(s, ie + 1).is_alpha()
+        && quals.seen_name(a.mimport_name_span(s, p, ie))).match ({
+        true  => {
+            f := a.qual_fate(s, p, ie, qnames, strip_qnames, strip_all_quals)
+            ms[to_i64(p)] = f
+            (f == 0).then({ s.res_ident_end(ie + 1) }, { ie + 1 })
+        },
+        false => sc.next,
+    })
+}
+qual_marks = (
+    a: MutPtr<Malloc>,
+    s: StringView,
+    quals: String,
+    qnames: String,
+    strip_qnames: String,
+    strip_all_quals: String,
+) [u8] {
+    locals := a.ns_local_marks(s)
+    sb: [u8] := s.str_bytes()
+    ms := a.ren_marks(sb.len)
+    pos: i32 := 0
+    sb.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos == false).then({
+            sc := s.scan(pos)
+            (sc.tok.len == 0).match ({
+                true  => {
+                    h.break
+                },
+                false => {
+                    pos = a.qual_mark_tok(s, sc, ms, locals, quals, qnames, strip_qnames, strip_all_quals)
+                },
+            })
+        })
+    })
+    ms
+}
+qual_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8]) String {
+    cur := out
+    pos: i32 := 0
+    bs: [u8] := s.str_bytes()
+    bs.loop((h, i, b) {
+        ii := to_i32(i)
+        (ii < pos == false).then({
+            (marks[i] == 0).match ({
+                true  => {
+                    cur = cur.rpush(a, b)
+                    pos = pos + 1
+                },
+                false => {
+                    ie := s.res_ident_end(pos)
+                    cur = (marks[i] == 1).match ({
+                        true  => cur.rappend_span(a, s, pos, ie).rappend(a, "__"),
+                        false => cur,
+                    })
+                    pos = ie + 1
+                },
+            })
+        })
+    })
+    cur
+}
+// THE qualifier rewrite: resolve every `alias.name` in module body `s` against the ns-bind sets.
+rewrite_ns_quals* = (
+    out: String,
+    a: MutPtr<Malloc>,
+    s: StringView,
+    quals: String,
+    qnames: String,
+    strip_qnames: String,
+    strip_all_quals: String,
+) String { out.qual_apply(a, s, a.qual_marks(s, quals, qnames, strip_qnames, strip_all_quals)) }
