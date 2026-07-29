@@ -41,7 +41,7 @@
 // where the parser rewrites a name — a C-keyword decl `double` is `double_zk` in the AST.
 ren_line_eq = (set: [u8], i: i64, src: [u8], p: i64, e: i64) bool {
     (p == e).match ({
-        true  => i < set.len && set[i] == 10,
+        true  => i < set.len && set[i] == '\n',
         false => (i < set.len && set[i] == src[p]).match ({
             true  => set.ren_line_eq(i + 1, src, p + 1, e),
             false => false,
@@ -51,7 +51,7 @@ ren_line_eq = (set: [u8], i: i64, src: [u8], p: i64, e: i64) bool {
 ren_next_line = (set: [u8], i: i64) i64 {
     (i >= set.len).match ({
         true  => set.len,
-        false => (set[i] == 10).then({ i + 1 }, { set.ren_next_line(i + 1) }),
+        false => (set[i] == '\n').then({ i + 1 }, { set.ren_next_line(i + 1) }),
     })
 }
 ren_seen = (set: [u8], src: [u8], p: i64, e: i64, i: i64) bool {
@@ -74,16 +74,16 @@ ren_types_set* = (a: MutPtr<Malloc>, table: ModuleTable) void {
     table.modules.loop((h, i, m) {
         m.graph.symbols.loop((h2, j, sym) {
             sym.is_type.then({
-                out = out.rappend(a, sym.name).rpush(a, 10)
+                out = out.rappend(a, sym.name).rpush(a, '\n')
             })
         })
     })
     ren_types = out.gstr_finish(a)
 }
 // ── binder scope ────────────────────────────────────────────────────────────────────────────────
-// A name bound by a param, a `:=`, a loop's index/element/handler, a lambda param or a match arm is a
+// A name bound by a param, a binding, a loop's index/element/handler, a lambda param or a match arm is a
 // LOCAL: it is not this module's decl, so it is never renamed and neither are the references it binds.
-// A stack with mark/drop gives real block scoping — a `x := …` shadows only the statements after it.
+// A stack with mark/drop gives real block scoping — a `x = …` shadows only the statements after it.
 ren_no_binds = () [StringView] { slice(null_ptr(), 0) }
 ren_binds ::= ren_no_binds()
 ren_bind_n ::= 0
@@ -355,11 +355,11 @@ rename_ns_names* = (
 // rename above moved it there), to a bare `f` when `f` is one of mod's TYPES (types keep their flat
 // name) or mod is libc, and to itself otherwise. Which one it was used to be decided from the
 // SPELLING alone — so a LOCAL named like an alias had its field reads rewritten into references to
-// the module's function, silently: `m: S := S(val: 7)` ⨯ `m.val` became `m__val`, the function
+// the module's function, silently: `m: S = S(val: 7)` ⨯ `m.val` became `m__val`, the function
 // POINTER, and the program returned it instead of the field.
 //
 // The receiver is now decided on the AST. The walk above, run in `bound` mode, marks every identifier
-// the binder stack knows is a variable — a param, a `:=`, a loop index/element/handler, a lambda
+// the binder stack knows is a variable — a param, a binding, a loop index/element/handler, a lambda
 // param, a match-arm binding — and a marked identifier is never a qualifier. Candidate sites come
 // from the LEXER, so a comment or a string literal is not a site at all. Application stays a
 // marked-offset splice: `A.` and `A__` are the same line, so every `file:line:col` is untouched.

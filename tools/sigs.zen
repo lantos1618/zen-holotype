@@ -20,7 +20,8 @@
 //     are themselves suppressed at top level — no internal name leaks)
 //   • impl methods (the parser hoists them to mangled top-level DFuncs) print DEMANGLED as
 //     `Ty.m = (params) ret` under a `Ty.impl(Trait)` head; the hoisted mangled fns are skipped
-//   • globals as `name[*] := <init>` (their declared ty is only filled in by resolve, so the init
+//   • globals as `name[*] = <init>` / `name[*] ::= <init>` (their declared ty is only filled in by
+//     resolve, so the init
 //     expression — rendered by the compiler's own ff_expr — is the honest parse-time signature);
 //     module aliases (`m = std.x`) and imports are skipped: they declare nothing
 // Types are rendered by the compiler's own pretty-printer (compiler.pretty.ff_ty), so every type
@@ -244,13 +245,16 @@ sig_impl = (s: String, mp: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
     })
     body
 }
-// a global `name := <init>` (its ty is only filled in by resolve, so the init IS the parse-time
-// signature); `thread_local(...)` wrapping is restored; module aliases (`m = std.x`) are skipped
+// a global `name = <init>` (its ty is only filled in by resolve, so the init IS the parse-time
+// signature); `thread_local(...)` wrapping is restored; module aliases (`m = std.x`) are skipped.
+// The mark says what the declaration says: `::=` when it carries the mutability mark, `=` otherwise
+// — an unmarked global is a constant, exactly like an unmarked local.
 sig_global = (s: String, mp: MutPtr<Malloc>, exp: [Param], g: GlobalData) String {
     g.alias.match ({
         true  => s,
         false => {
-            head = s.ff_append(mp, "  ").sig_name(mp, exp, g.name).ff_append(mp, " := ")
+            mark = g.mut.then({ " ::= " }, { " = " })
+            head = s.ff_append(mp, "  ").sig_name(mp, exp, g.name).ff_append(mp, mark)
             body = g.tl.match ({
                 true  => head
                     .ff_append(mp, "thread_local(")

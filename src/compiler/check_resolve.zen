@@ -177,7 +177,7 @@ genlit_g = (a: MutPtr<Malloc>, env: Env, sd: MakeStructData, inits: [FieldInit])
     a.cenode(mkstructg_at(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits, sd.pos))
 }
 // the expected type's args, when it names generic struct `base` — the authoritative source for a bare
-// literal's type args under a `st: Store<AppState> := …` annotation (or any expected-type position).
+// literal's type args under a `st: Store<AppState> = …` annotation (or any expected-type position).
 exp_targs_for = (exp: Ty, base: StringView) [Ty] {
     exp.match ({
         .Generic(g) => (g.name == base).then({ g.args }, { no_tys() }),
@@ -427,7 +427,7 @@ is_enum_ty = (env: Env, t: Ty) bool {
 }
 resolve_bin = (a: MutPtr<Malloc>, env: Env, b: BinData) Ptr<Expr> {
     // A constant binop that overflows i32 becomes the `.Int` it denotes, so every consumer — the
-    // width inference behind a `:=` slot most of all — reads the VALUE instead of the leftmost
+    // width inference behind a binding slot most of all — reads the VALUE instead of the leftmost
     // operand's width. See fold_wide_int: in-range constant math is left exactly as written.
     wide = fold_wide_int(b.op, b.lhs, b.rhs)
     wide.ok.then({
@@ -708,7 +708,7 @@ is_fn_field_call = (env: Env, dn: StringView, args: [Expr]) bool {
         false => false,
     })
 }
-// rewrite `op(b, x, y)` -> `({ __zclos_recv := b.op   __zclos_recv(x, y) })`: bind the field value to a
+// rewrite `op(b, x, y)` -> `({ __zclos_recv = b.op   __zclos_recv(x, y) })`: bind the field value to a
 // local, then call the local. This reuses the existing local-fn-value call path (C `__auto_type` +
 // native indirect call) — no new genc call node. Block scoping keeps the fixed temp name nesting-safe.
 rewrite_fn_field_call = (a: MutPtr<Malloc>, env: Env, field: StringView, buf: [Expr]) Ptr<Expr> {
@@ -895,7 +895,7 @@ resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool, vtail: bool) 
     })
     out
 }
-// `x := recv.or_return()` is keyword-free error propagation: the Ok payload becomes x, while an Err
+// `x = recv.or_return()` is keyword-free error propagation: the Ok payload becomes x, while an Err
 // early-returns the receiver from the enclosing function. It lowers to a temp-bind + Err-guard +
 // Ok-payload bind (three statements), so one source statement expands into three resolved ones.
 is_or_return_call* = (e: Ptr<Expr>) bool {
@@ -1050,14 +1050,14 @@ lower_or_return = (a: MutPtr<Malloc>, env: Env, st: Stmt) [Stmt] {
 // ── or_return in EXPRESSION position ─────────────────────────────────────────────────────────
 // `recv.or_return()` is legal in ANY expression position, not just as a whole let value: mid-chain
 // (`f().or_return().m()`), as a call argument, in return/trailing position, and in match arms. Each
-// expression-position occurrence is HOISTED into a fresh direct let `_orx_K := recv.or_return()` —
+// expression-position occurrence is HOISTED into a fresh direct let `_orx_K = recv.or_return()` —
 // which reuses the 3-stmt let-lowering above — and the original site reads the temp. Hoists are
 // emitted left-to-right in source order and innermost-first (a receiver's own or_returns hoist
 // before the outer one), so the FIRST Err in evaluation order is the one propagated.
 // UNCONDITIONALLY-evaluated positions hoist to statement level (fill_orx), where the Err-guard `if`
 // is a real statement the inliner's early-return lift can see. CONDITIONALLY-evaluated positions —
 // cond/match branch values and `&&`/`||` right operands — must NOT hoist past their guard: those
-// are wrapped in place into a value block `({ _orx := recv.or_return()  _orx })` when resolve_expr
+// are wrapped in place into a value block `({ _orx = recv.or_return()  _orx })` when resolve_expr
 // reaches the branch (resolve_orx), so the receiver only evaluates if its branch is taken.
 // orx_count counts the hoistable (unconditional-position) or_returns of ONE expression. Nested
 // statement bodies (Block/Loop/Lambda/If/While) and conditional branches are NOT counted — each is

@@ -96,7 +96,7 @@ snext_line* = (set: String, i: i64) i64 {
 }
 seen_name* = (set: String, name: String) bool { set.seen_scan(name, 0) }
 add_name* = (set: String, a: MutPtr<Malloc>, name: String) String {
-    set.rappend_string(a, name).rpush(a, 10)
+    set.rappend_string(a, name).rpush(a, '\n')
 }
 // O(1)-average presence set over the shadow-rename pass's symbol keys, replacing the newline-delimited
 // String + linear `seen_name` scan (which made shadow_rename_set O(n²) in decl count — 50k trivial fns
@@ -189,11 +189,11 @@ mappend_id_name* = (a: MutPtr<Malloc>, out: String, id: String) String {
 }
 madd_name* = (a: MutPtr<Malloc>, set: String, name: String) String {
     hs = a.mappend_string(set, name)
-    hs.gstr_push(a, 10)
+    hs.gstr_push(a, '\n')
 }
 madd_str_name* = (a: MutPtr<Malloc>, set: String, name: StringView) String {
     hs = set.gstr_append(a, name)
-    hs.gstr_push(a, 10)
+    hs.gstr_push(a, '\n')
 }
 // `useen` is the cross-module duplicate-definition map: dedup key → table index of the module that
 // FIRST provided that name (so a later redefinition names BOTH modules in the diagnostic). An O(1)
@@ -438,7 +438,7 @@ res_reject_text* = (text: StringView) i32 {
     0
 }    // first rejection wins — the one the exiting process used to print is still the one printed
 res_reject = (a: MutPtr<Malloc>, msg: String) i32 {
-    res_reject_text(msg.gstr_push(a, 10).gstr_finish(a))
+    res_reject_text(msg.gstr_push(a, '\n').gstr_finish(a))
 }
 // ── NAMESPACE-IMPORT CYCLE GUARD ───────────────────────────────────────────────────────────────
 // The namespace-closure loader (load_ns_closure_graph_table ↔ collect_ns_*_table) follows `m = pkg.mod`
@@ -540,7 +540,7 @@ fail_dup_user = (
     from = rnm.gstr_append(a, "', already provided by '")
     msg3 = a.mappend_id_name(from, origin)
     tail = msg3.gstr_append(a, "')")
-    l1 = tail.gstr_push(a, 10)
+    l1 = tail.gstr_push(a, '\n')
     // actionable hint: rename, or reach the original through a namespace alias instead of a bare import
     h0 = l1.gstr_append(a, "hint: rename '")
     h1 = a.mappend_string(h0, nm)
@@ -1291,7 +1291,7 @@ fail_dup_impl = (
         .gstr_push(a, '.')
         .rappend_span(a, flat, ts, te)
         .gstr_push(a, '`')
-    l1 = m0.gstr_push(a, 10)
+    l1 = m0.gstr_push(a, '\n')
     d0 = l1
         .gstr_append(a, "  a different `")
         .rappend_span(a, flat, p, re)
@@ -1308,7 +1308,7 @@ fail_dup_impl = (
         .gstr_push(a, ':')
         .res_udec(a, to_i32(o1.line))
         .gstr_push(a, ')')
-    l2 = d2.gstr_push(a, 10)
+    l2 = d2.gstr_push(a, '\n')
     h0 = l2.gstr_append(a, "hint: a type has one impl per trait — merge the two bodies or delete one block")
     a.res_reject(h0)
 }
@@ -1453,7 +1453,7 @@ add_qual_name = (set: String, a: MutPtr<Malloc>, alias: String, name: String) St
         .rappend_string(a, alias)
         .rpush(a, '.')
         .rappend_string(a, name)
-        .rpush(a, 10)
+        .rpush(a, '\n')
 }
 add_qual_names = (set: String, a: MutPtr<Malloc>, alias: String, names: String, i: i64) String {
     (i >= names.len).match ({
@@ -1484,7 +1484,7 @@ load_ns_closure_graph_table = (
     llo = lmap_lines()
     body = a.alias_module_body(src, graph, alias, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
     ns_depth = ns_depth - 1
-    out2 = ns.c.out.rpush(a, 10).rappend_string(a, body)
+    out2 = ns.c.out.rpush(a, '\n').rappend_string(a, body)
     midx = table.index_of_id(id)
     a.note_module_sigs(alias, graph, midx)    // Stage B4/R2: this bind's export sig → compiler.parse registry
     a.note_fregion(midx, out2.len - body.len, out2.len, llo)
@@ -1521,7 +1521,7 @@ strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32, fi
                         e = s.line_end(pos)
                         cur = is_first.match ({
                             true  => cur.rappend_span(a, s, pos, e),
-                            false => cur.rpush(a, 10).rappend_span(a, s, pos, e),
+                            false => cur.rpush(a, '\n').rappend_span(a, s, pos, e),
                         })
                         is_first = false
                         pos = s.next_line(pos)
@@ -1548,7 +1548,7 @@ strip_ns_into* = (
     (raw.at(0) == 0).match ({
         true  => out,
         false => {
-            base = first.then({ out }, { out.rpush(a, 10) })
+            base = first.then({ out }, { out.rpush(a, '\n') })
             (quals.len == 0).match ({
                 true  => base.rappend(a, raw),
                 false => base.rewrite_ns_quals(a, raw, quals, qnames, strip_qnames, strip_all_quals),
@@ -1781,7 +1781,7 @@ lmap_note_line = (a: MutPtr<Malloc>, srcline: i32) void {
 // a body append starts with the '\n' separator pushed before it (unless it opens the flat); the
 // region's first LINE starts just past that separator.
 freg_lo = (out: String, blo: i64) i64 {
-    (out.len > blo && out.res_sbyte(blo) == 10).then({ blo + 1 }, { blo })
+    (out.len > blo && out.res_sbyte(blo) == '\n').then({ blo + 1 }, { blo })
 }
 note_fregion = (a: MutPtr<Malloc>, midx: i64, lo: i64, hi: i64, line_lo: i64) void {
     (lmap_on && hi > lo && midx >= 0).then({
@@ -2029,7 +2029,7 @@ fail_import_redef = (a: MutPtr<Malloc>, m: ModuleEntry, s: ProvidedSymbol, nm: S
         .gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `")
     m1 = a.mappend_string(m0, nm).gstr_append(a, "` — this module also imports `")
     m2 = a.mappend_string(m1, nm).gstr_append(a, "` by name")
-    l1 = m2.gstr_push(a, 10)
+    l1 = m2.gstr_push(a, '\n')
     h0 = l1.gstr_append(a, "hint: drop `")
     h1 = a
         .mappend_string(h0, nm)
@@ -2242,7 +2242,7 @@ fail_alias_collision = (
         .gstr_append(a, ": error[import-collision]: module alias `")
     m1 = m0.gstr_append(a, edge.alias).gstr_append(a, " = ")
     m2 = a.mappend_id_str_dotted(m1, edge.module).gstr_append(a, "` collides in the flat namespace")
-    l1 = m2.gstr_push(a, 10)
+    l1 = m2.gstr_push(a, '\n')
     // detail: which other module pulls the same names in unqualified, and the shared name that breaks
     d0 = l1.gstr_append(a, "  `")
     d1 = a
@@ -2259,7 +2259,7 @@ fail_alias_collision = (
     d5 = d4.gstr_append(a, edge.alias).gstr_append(a, "__")
     d6 = a.mappend_string(d5, split).gstr_append(a, "`), so `.")
     d7 = a.mappend_string(d6, split).gstr_append(a, "(...)` calls elsewhere no longer resolve")
-    l2 = d7.gstr_push(a, 10)
+    l2 = d7.gstr_push(a, '\n')
     // actionable fix
     h0 = l2.gstr_append(a, "hint: replace the module alias with a selective import — e.g. `{ ... } = ")
     h1 = a

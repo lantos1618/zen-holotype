@@ -33,7 +33,7 @@
 // tree, so back a fallible parse with an arena and reset it.
 //
 //   heap = std.mem.heap
-//   a := heap.gpa()
+//   a = heap.gpa()
 //   json.parse(a.addr(), "{\"x\":[1,2,3]}").match ({
 //       .Ok(v)  => { ... json.get(v, "x") ... json.stringify(a.addr(), v) ... },
 //       .Err(e) => ...
@@ -246,12 +246,12 @@ parse_string_raw = (a: Allocator, src: StringView, sv: [u8], pos: i64) Result<St
                                                 },
                                                 false => (sv[i + 1] == 'b').match ({
                                                     true  => {
-                                                        sb = sb.push_in(a, 8.to_u8()).jok()
+                                                        sb = sb.push_in(a, 8).jok()
                                                         resume = i + 2
                                                     },
                                                     false => (sv[i + 1] == 'f').match ({
                                                         true  => {
-                                                            sb = sb.push_in(a, 12.to_u8()).jok()
+                                                            sb = sb.push_in(a, 12).jok()
                                                             resume = i + 2
                                                         },
                                                         false => (sv[i + 1] == 'u').match ({
@@ -633,7 +633,10 @@ write_esc_byte = (a: Allocator, sb: String, b: u8) String {
                             .jok()
                             .push_in(a, 'r')
                             .jok(),
-                        false => (b < 32).then({ a.write_u_esc(sb, b) }, { sb.push_in(a, b).jok() }),
+                        false => (b < ' ').match ({
+                            true  => a.write_u_esc(sb, b),
+                            false => sb.push_in(a, b).jok(),
+                        }),
                     }),
                 }),
             }),
@@ -643,7 +646,7 @@ write_esc_byte = (a: Allocator, sb: String, b: u8) String {
 // The bytes write_esc_byte rewrites: the two mandatory JSON escapes ('"', '\\') plus every
 // control byte (< 0x20 — \n \t \r get short escapes, the rest \u00XX). Everything else (incl.
 // UTF-8 continuation bytes) passes through verbatim, so it belongs to a bulk-copy run.
-json_needs_esc = (b: u8) bool { b == '"' || b == '\\' || b < 32 }
+json_needs_esc = (b: u8) bool { b == '"' || b == '\\' || b < ' ' }
 // Run-copy escaping (jsony's doCopy/copyMem): copy the run of pass-through bytes since the last
 // escape in ONE append, emit the escape via write_esc_byte, restart the run past it — instead of
 // pushing every byte one at a time. Byte-identical output; fewer grows/stores for plain text.
