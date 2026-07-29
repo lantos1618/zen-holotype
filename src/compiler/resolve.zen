@@ -20,10 +20,9 @@
 { enforce_visibility, enforce_private_leaks, vis_report_mode } = compiler.resolve_vis
 { enforce_ffi_grants, genmod_lookup } = compiler.resolve_ffi
 { shadow_flat, shadow_flat_users } = compiler.resolve_shadow
-{ rename_ns_names, ren_types_set } = compiler.resolve_rename
-{ all_decl_names_in, copy_block_comment, copy_line_comment, copy_literal, edge_alias_in, edge_id_in,
-  is_any_marker_at, is_c_kw_name_span, has_import_marker, module_graph, opens_import, str_bytes,
-  symbol_name_in, value_decl_names_in } = compiler.resolve_scan
+{ rename_ns_names, ren_types_set, rewrite_ns_quals } = compiler.resolve_rename
+{ all_decl_names_in, edge_alias_in, edge_id_in, is_any_marker_at, is_c_kw_name_span,
+  has_import_marker, module_graph, opens_import, str_bytes, symbol_name_in, value_decl_names_in } = compiler.resolve_scan
 lstrip* = (s: StringView, p: i32) i32 { at(s, p).is_blank().then({ s.lstrip(p + 1) }, { p }) }
 is_import_line* = (s: StringView, p: i32) bool {
     ls = s.lstrip(p)
@@ -1495,100 +1494,6 @@ load_ns_closure_graph_table = (
         useen: ns.c.useen,
     )
 }
-is_qual_access = (s: StringView, a: MutPtr<Malloc>, p: i32, ie: i32, quals: String) bool {
-    (s.at(ie) == '.' && s.at(ie + 1).is_alpha()).match ({
-        true  => quals.seen_name(a.mimport_name_span(s, p, ie)),
-        false => false,
-    })
-}
-qualified_name = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32, ie: i32) String {
-    out.rappend_span(a, s, p, ie).rpush(a, '.').rappend_span(a, s, ie + 1, s.res_ident_end(ie + 1))
-}
-rewrite_quals = (
-    out: String,
-    a: MutPtr<Malloc>,
-    s: StringView,
-    p: i32,
-    quals: String,
-    qnames: String,
-    strip_qnames: String,
-    strip_all_quals: String,
-) String {
-    cur ::= out
-    pos ::= p
-    bs: [u8] = s.str_bytes()
-    bs.loop((h, i, b) {
-        ii = to_i32(i)
-        (ii < pos == false).then({
-            (b == 0).match ({
-                true  => {
-                    h.break
-                },
-                false => s.line_comment_at(pos).match ({
-                    true  => {
-                        sk = cur.copy_line_comment(a, s, pos)
-                        cur = sk.out
-                        pos = sk.next
-                    },
-                    false => s.block_comment_at(pos).match ({
-                        true  => {
-                            sk = cur.copy_block_comment(a, s, pos)
-                            cur = sk.out
-                            pos = sk.next
-                        },
-                        false => s.quoted_at(pos).match ({
-                            true  => {
-                                sk = cur.copy_literal(a, s, pos)
-                                cur = sk.out
-                                pos = sk.next
-                            },
-                            false => (b.is_alpha()
-                                && (pos == 0 || s.at(pos - 1).is_alnum().then({ false }, { true }))).match ({
-                                true  => {
-                                    ie = s.res_ident_end(pos)
-                                    s.is_qual_access(a, pos, ie, quals).match ({
-                                        true  => {
-                                            alias = a.mimport_name_span(s, pos, ie)
-                                            qn = qualified_name(a.gstr_string(32), a, s, pos, ie)
-                                            me = s.res_ident_end(ie + 1)
-                                            qnames.seen_name(qn).match ({
-                                                true  => {
-                                                    cur = cur
-                                                        .rappend_span(a, s, pos, ie)
-                                                        .rappend(a, "__")
-                                                    pos = ie + 1
-                                                },
-                                                false => (strip_qnames.seen_name(qn)
-                                                    || strip_all_quals.seen_name(alias)).match ({
-                                                    true  => {
-                                                        pos = ie + 1
-                                                    },
-                                                    false => {
-                                                        cur = cur.rappend_span(a, s, pos, me)
-                                                        pos = me
-                                                    },
-                                                }),
-                                            })
-                                        },
-                                        false => {
-                                            cur = cur.rappend_span(a, s, pos, ie)
-                                            pos = ie
-                                        },
-                                    })
-                                },
-                                false => {
-                                    cur = cur.rpush(a, b)
-                                    pos = pos + 1
-                                },
-                            }),
-                        }),
-                    }),
-                }),
-            })
-        })
-    })
-    cur
-}
 strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32, first: bool) String {
     cur ::= out
     pos ::= p
@@ -1646,7 +1551,7 @@ strip_ns_into* = (
             base = first.then({ out }, { out.rpush(a, 10) })
             (quals.len == 0).match ({
                 true  => base.rappend(a, raw),
-                false => base.rewrite_quals(a, raw, 0, quals, qnames, strip_qnames, strip_all_quals),
+                false => base.rewrite_ns_quals(a, raw, quals, qnames, strip_qnames, strip_all_quals),
             })
         },
     })

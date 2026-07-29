@@ -1,0 +1,47 @@
+// Sub-64-bit arithmetic computes at ITS OWN width, whether or not the result lands in a typed slot.
+//
+// Regression for the silent wrong-answer where any integer LITERAL beside an i32/u32 operand dragged
+// the whole expression to 64 bits: gen_int_lit suffixes every literal `LL`, so C's usual arithmetic
+// conversions promoted the narrow operand, and genc only re-truncated u8/i8/i16/u16 — never i32/u32.
+// The same expression therefore gave two different answers depending on whether it was STORED:
+//
+//     stored: u32 := (h ^ 97) * 16777619    // 3826002220        — correct, the `: u32` slot truncated
+//     ((h ^ 97) * 16777619)                 // 36342608335481132 — WRONG, computed and used at 64 bits
+//
+// The security-shaped form is the textbook overflow guard, which silently reported "no overflow":
+// `(a + 1) < a` with a = i32-MAX was FALSE, because `a + 1LL` is 2147483648 at 64 bits.
+//
+// Fix: the re-truncation type recorded on a Bin is now the binop's OWN result width (num_result), and
+// i32/u32 count as widths that must be re-truncated. Mixed-width math is UNAFFECTED — `i32 * i64` is
+// i64 by num_wider and must NOT be truncated to the lhs, which the last two lines pin.
+//
+// Wrapping is defined: the build sets -fwrapv, so i32 overflow wraps at 32 bits rather than trapping.
+{ formatln, arg_int } = std.text.fmt
+would_overflow = (a: i32) bool { a + 1 < a }
+main = () i32 {
+    // ── the FNV-1a step: stored and inline must agree ──
+    h: u32 = 2166136261
+    stored: u32 = (h ^ 97) * 16777619
+    formatln("{} {}", [arg_int(stored.to_i64()), arg_int(((h ^ 97) * 16777619).to_i64())])
+    // ── the overflow guard: both the call and the stored form must see the wrap ──
+    a: i32 = 2147483647
+    b: i32 = a + 1
+    formatln("{} {} {}", [arg_int(would_overflow(a).to_i64()), arg_int((b < a).to_i64()), arg_int(b.to_i64())])
+    // ── i32/u32 boundary arithmetic wraps at ITS width, used directly ──
+    imin: i32 = 0 - 2147483648
+    umax: u32 = 4294967295
+    uzero: u32 = 0
+    formatln("{} {} {}", [arg_int((imin - 1).to_i64()), arg_int((umax + 1).to_i64()), arg_int((uzero - 1).to_i64())])
+    big: i32 = 100000
+    formatln("{} {}", [arg_int((big * big).to_i64()), arg_int((a * 2).to_i64())])
+    // ── u8/u16 keep the widths they already had ──
+    gb: u8 = 200
+    gs: u16 = 60000
+    formatln("{} {}", [arg_int((gb + gb).to_i64()), arg_int((gs + gs).to_i64())])
+    // ── mixed width must NOT truncate: the WIDER operand wins, either order ──
+    w: i64 = 1000000
+    lr: i64 = big * w
+    rl: i64 = w * big
+    formatln("{} {}", [arg_int(lr), arg_int(rl)])
+    0
+}
