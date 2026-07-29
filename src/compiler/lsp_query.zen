@@ -21,6 +21,7 @@
 { view, is_empty } = std.text.str
 { then } = std.core.bool
 { is_upper } = std.text.ascii
+{ advance_while, step_while } = std.core.count
 { String } = std.text.string
 { gstr_string, gstr_append, gstr_push, gstr_finish, acquire_or_die, acquire_or_die } = compiler.genc
 { cstr_range } = compiler.drvutil
@@ -123,13 +124,7 @@ lspq_bol = (v: [u8], off: i64) i64 {
     (off <= 0 || v[off - 1] == '\n').then({ off }, { v.lspq_bol(off - 1) })
 }
 // end of the line `off` sits on. Exported: compiler.audit's alias-span scan is the same walk.
-lspq_eol* = (v: [u8], off: i64) i64 {
-    p ::= off
-    @while (p < v.len && v[p] != '\n') {
-        p = p + 1
-    }
-    p
-}
+lspq_eol* = (v: [u8], off: i64) i64 { off.advance_while((p) { p < v.len && v[p] != '\n' }) }
 lspq_rtrim = (v: [u8], e: i64, s: i64) i64 {
     (e <= s).then({
         return e
@@ -155,10 +150,9 @@ LSPQ_BODY_LINES = () i64 { 24 }
 lspq_brace_end = (v: [u8], d: i64) i64 {
     depth ::= 0
     lines :: i64 = 0
-    i ::= d
     stop :: i64 = 0 - 1
-    @while (stop < 0 && i < v.len && lines < LSPQ_BODY_LINES()) {
-        b = v[i]
+    i = d.step_while((p) { stop < 0 && p < v.len && lines < LSPQ_BODY_LINES() }, (p) {
+        b = v[p]
         (b == '{').then({
             depth = depth + 1
         })
@@ -168,11 +162,11 @@ lspq_brace_end = (v: [u8], d: i64) i64 {
         (b == '}').then({
             depth = depth - 1
             (depth == 0).then({
-                stop = i + 1
+                stop = p + 1
             })
         })
-        i = i + 1
-    }
+        p + 1
+    })
     (stop < 0).then({ i }, { stop })
 }
 // what hover renders inside the fence: the signature, or a type's whole brace body when it opens one.
@@ -195,34 +189,24 @@ lspq_doc_start = (v: [u8], d: i64) i64 {
 // the doc run as markdown prose: each line's `//` marker (and the space after it) removed.
 lspq_push_doc = (sb: String, mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) String {
     o ::= sb
-    i ::= s
     bol ::= true
-    @while (i < e) {
+    s.step_while((i) { i < e }, (i) {
         b = v[i]
         (bol && b == '/' && i + 1 < e && v[i + 1] == '/').match ({
             true  => {
-                i = i + 2
-                (i < e && v[i] == ' ').then({
-                    i = i + 1
-                })
                 bol = false
+                (i + 2 < e && v[i + 2] == ' ').then({ i + 3 }, { i + 2 })
             },
             false => {
                 o = o.gstr_push(mp, b)
                 bol = b == '\n'
-                i = i + 1
+                i + 1
             },
         })
-    }
+    })
     o
 }
-lspq_close_brace = (v: [u8], i: i64) i64 {
-    p ::= i
-    @while (p < v.len && v[p] != '}') {
-        p = p + 1
-    }
-    p
-}
+lspq_close_brace = (v: [u8], i: i64) i64 { i.advance_while((p) { p < v.len && v[p] != '}' }) }
 lspq_word_at = (v: [u8], i: i64, name: [u8]) bool {
     (i + name.len > v.len || i > 0 && v[i - 1].lsp_is_ident_byte()).then({
         return false
@@ -232,13 +216,10 @@ lspq_word_at = (v: [u8], i: i64, name: [u8]) bool {
 }
 lspq_names_has = (v: [u8], s: i64, e: i64, name: [u8]) bool {
     hit ::= false
-    i ::= s
-    @while (i < e && hit == false) {
-        v.lspq_word_at(i, name).then({
-            hit = true
-        })
-        i = i + 1
-    }
+    s.step_while((i) { i < e && hit == false }, (i) {
+        hit = v.lspq_word_at(i, name)
+        i + 1
+    })
     hit
 }
 // the `= std.text.str` tail of an import record whose `}` sits at `c`.
@@ -256,8 +237,8 @@ lspq_module_after = (mp: MutPtr<Malloc>, v: [u8], c: i64) StringView {
 lspq_import_of = (mp: MutPtr<Malloc>, v: [u8], name: [u8]) StringView {
     found :: StringView = ""
     atcol0 ::= true
-    i :: i64 = 0
-    @while (i < v.len && is_empty(found)) {
+    zero: i64 = 0
+    zero.step_while((i) { i < v.len && is_empty(found) }, (i) {
         (atcol0 && v[i] == '{').then({
             c = v.lspq_close_brace(i)
             v.lspq_names_has(i + 1, c, name).then({
@@ -265,8 +246,8 @@ lspq_import_of = (mp: MutPtr<Malloc>, v: [u8], name: [u8]) StringView {
             })
         })
         atcol0 = v[i] == '\n'
-        i = i + 1
-    }
+        i + 1
+    })
     found
 }
 lspq_fence = (mp: MutPtr<Malloc>, cap: i64) String {
@@ -363,8 +344,7 @@ lspq_add_words = (
     sk: LspqSink,
 ) LspqSink {
     acc ::= sk
-    i ::= s
-    @while (i < e) {
+    s.step_while((i) { i < e }, (i) {
         v[i].lsp_is_ident_byte().match ({
             true  => {
                 j = v.lsp_ident_end(i)
@@ -373,13 +353,11 @@ lspq_add_words = (
                     false => kind,
                 })
                 acc = acc.lspq_put(mp.cstr_range(v, i, j), detail, k)
-                i = j
+                j
             },
-            false => {
-                i = i + 1
-            },
+            false => i + 1,
         })
-    }
+    })
     acc
 }
 // `Foo: {` is a type; `f = (` / `f<T> = (` / `f(` is a function; anything else bound with `=` is a value.
@@ -424,19 +402,22 @@ lspq_add_fixed = (
 lspq_collect = (mp: MutPtr<Malloc>, v: [u8], sk: LspqSink) LspqSink {
     acc ::= sk
     atcol0 ::= true
-    i :: i64 = 0
-    @while (i < v.len) {
-        (atcol0 && v[i] == '{').then({
-            c = v.lspq_close_brace(i)
-            acc = mp.lspq_add_words(v, i + 1, c, mp.lspq_module_after(v, c), LSPQ_BY_CASE(), acc)
-            i = c
+    zero: i64 = 0
+    zero.step_while((p) { p < v.len }, (start) {
+        i = (atcol0 && v[start] == '{').match ({
+            true  => {
+                c = v.lspq_close_brace(start)
+                acc = mp.lspq_add_words(v, start + 1, c, mp.lspq_module_after(v, c), LSPQ_BY_CASE(), acc)
+                c
+            },
+            false => start,
         })
         (atcol0 && v[i].lsp_is_ident_byte()).then({
             acc = mp.lspq_add_decl(v, i, acc)
         })
         atcol0 = v[i] == '\n'
-        i = i + 1
-    }
+        i + 1
+    })
     acc = mp.lspq_add_fixed(LSPQ_KEYWORDS(), "keyword", LSPQ_KEYWORD(), acc)
     mp.lspq_add_fixed(LSPQ_TYPES(), "builtin type", LSPQ_STRUCT(), acc)
 }

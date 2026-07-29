@@ -18,7 +18,7 @@
 { gstr_int, left_pos_of, stmt_left_pos } = compiler.astops
 { Comment, rawstr_end } = compiler.lex
 { at, rawstr_at } = std.text.ascii
-{ times, upto } = std.core.count
+{ times, upto, step_while } = std.core.count
 { ff_cond_inline, ff_cond_is_then, ff_cond_multiline, ff_cond_nested, ff_current_col, ff_expr,
   ff_fits_width, ff_recv, ff_then } = compiler.pretty_expr
 { ff_decl, ff_is_anon_payload_name, ff_is_hoisted } = compiler.pretty_decl
@@ -58,20 +58,18 @@ gf_is_alias* = (name: StringView) bool {
     at_bol ::= true
     src.len.times((i) {
         hit ::= at_bol && i + v.len + 3 <= src.len
-        j :: i64 = 0
-        @while (hit && j < v.len) {
-            (src[i + j] == v[j] == false).then({
-                hit = false
-            })
-            j = j + 1
-        }
+        zero: i64 = 0
+        zero.step_while((j) { hit && j < v.len }, (j) {
+            hit = src[i + j] == v[j]
+            j + 1
+        })
         (hit && src[i + v.len] == ' ' && src[i + v.len + 1] == '=' && src[i + v.len + 2] == ' ').then({
-            k ::= i + v.len + 3
-            ok ::= k < src.len && gf_ident_ch(src[k])
-            @while (k < src.len && src[k] != '\n') {
+            s = i + v.len + 3
+            ok ::= s < src.len && gf_ident_ch(src[s])
+            s.step_while((k) { k < src.len && src[k] != '\n' }, (k) {
                 ok = (gf_ident_ch(src[k]) || src[k] == '\r').then({ ok }, { false })
-                k = k + 1
-            }
+                k + 1
+            })
             ok.then({
                 return true
             })
@@ -82,25 +80,23 @@ gf_is_alias* = (name: StringView) bool {
 }
 // the line number (count of '\n' before `pos`) — used to decide if a trailing comment shares a stmt's line.
 gf_line_of* = (pos: i32) i32 {
-    i ::= 0
     n ::= 0
-    @while (i < pos) {
+    zero: i32 = 0
+    zero.step_while((i) { i < pos }, (i) {
         (at(gf_src, i) == '\n').then({
             n = n + 1
         })
-        i = i + 1
-    }
+        i + 1
+    })
     n
 }
 // append one comment's raw text, trimming trailing whitespace (a `//` span runs to but not past '\n';
 // trailing spaces before the newline are dropped so the formatted line has no dangling whitespace).
 gf_cmt_end = (c: Comment) i32 {
-    e ::= c.start + c.len
-    @while (e > c.start
-        && (at(gf_src, e - 1) == ' ' || at(gf_src, e - 1) == '\t' || at(gf_src, e - 1) == '\r')) {
-        e = e - 1
-    }
-    e
+    (c.start + c.len).step_while((e) {
+        e > c.start
+            && (at(gf_src, e - 1) == ' ' || at(gf_src, e - 1) == '\t' || at(gf_src, e - 1) == '\r')
+    }, (e) { e - 1 })
 }
 ff_cmt_text = (s: String, a: MutPtr<Malloc>, c: Comment) String {
     out ::= s
@@ -115,12 +111,14 @@ ff_flush_leading* = (s: String, a: MutPtr<Malloc>, before: i32, ind: i32) String
         return s
     })
     out ::= s
-    @while (gf_idx < gf_cmts.len
-        && gf_cmts[gf_idx].start < before
-        && gf_cmts[gf_idx].trailing.then({ false }, { true })) {
-        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx]).ff_append(a, "\n")
-        gf_idx = gf_idx + 1
-    }
+    gf_idx = gf_idx.step_while((k) {
+        k < gf_cmts.len
+            && gf_cmts[k].start < before
+            && gf_cmts[k].trailing.then({ false }, { true })
+    }, (k) {
+        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[k]).ff_append(a, "\n")
+        k + 1
+    })
     out
 }
 // weave a trailing comment that sits on the SAME source line as `line` (the construct's opening line)
@@ -218,19 +216,19 @@ ff_drain = (s: String, a: MutPtr<Malloc>, db: i32, ib: i32, ind: i32) String {
     (db <= 0).then({
         return out
     })
-    @while (gf_idx < gf_cmts.len && gf_cmts[gf_idx].start < db) {
-        out = out.ff_append(a, "\n").ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx])    // no own-line drain without a real next-stmt boundary
-        gf_idx = gf_idx + 1
-    }
+    gf_idx = gf_idx.step_while((k) { k < gf_cmts.len && gf_cmts[k].start < db }, (k) {
+        out = out.ff_append(a, "\n").ff_indent(a, ind).ff_cmt_text(a, gf_cmts[k])    // no own-line drain without a real next-stmt boundary
+        k + 1
+    })
     out
 }
 // flush all comments still pending (end of module): each as its own line.
 ff_flush_rest = (s: String, a: MutPtr<Malloc>, ind: i32) String {
     out ::= s
-    @while (gf_idx < gf_cmts.len) {
-        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx]).ff_append(a, "\n")
-        gf_idx = gf_idx + 1
-    }
+    gf_idx = gf_idx.step_while((k) { k < gf_cmts.len }, (k) {
+        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[k]).ff_append(a, "\n")
+        k + 1
+    })
     out
 }
 // a top-level decl's representative source offset = its OWN start byte (the name/keyword position), so a

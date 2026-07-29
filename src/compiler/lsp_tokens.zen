@@ -20,7 +20,7 @@
 { Comment, Token, collect_comments, scan } = compiler.lex
 { tok_in } = compiler.parse_type
 { push_int } = compiler.drvutil
-{ upto } = std.core.count
+{ upto, advance_while, repeat_while, step_while } = std.core.count
 // The legend, in the order the client receives it. A token's `tokenType` is an INDEX into this
 // array, so the order here and the order advertised in `initialize` must stay in lockstep.
 LSPT_KEYWORD = () i64 { 0 }
@@ -60,13 +60,7 @@ lspt_is_builtin_ty = (src: StringView, t: Token) bool {
 // The byte before `start`, skipping nothing — a leading `.` is what distinguishes `.Variant` (enum
 // member) and `x.field` (property) from a bare name.
 lspt_after_dot = (src: StringView, start: i32) bool { start > 0 && at(src, start - 1) == '.' }
-lspt_skip_sp = (src: StringView, e: i32) i32 {
-    p ::= e
-    @while (at(src, p) == ' ') {
-        p = p + 1
-    }
-    p
-}
+lspt_skip_sp = (src: StringView, e: i32) i32 { e.advance_while((p) { at(src, p) == ' ' }) }
 lspt_call_next = (src: StringView, e: i32) bool {
     p = src.lspt_skip_sp(e)
     at(src, p) == '(' || at(src, p) == '<'
@@ -78,13 +72,8 @@ lspt_decl_fn = (src: StringView, t: Token) bool {
     (t.start != 0 && at(src, t.start - 1) != '\n').then({
         return false
     })
-    p ::= t.start + t.len
-    (at(src, p) == '*').then({
-        p = p + 1
-    })
-    @while (at(src, p) == ' ') {
-        p = p + 1
-    }
+    e = t.start + t.len
+    p = src.lspt_skip_sp((at(src, e) == '*').then({ e + 1 }, { e }))
     (at(src, p) != '=').then({
         return false
     })
@@ -248,27 +237,24 @@ lspt_tokens* = (mp: MutPtr<Malloc>, src: StringView) StringView {
     ci :: i64 = 0
     pos ::= 0
     emitted ::= 0
-    running ::= true
-    @while (running) {
+    repeat_while((step) {
         sc = src.scan(pos)
         tstart = sc.tok.kind.match ({
             .Eof => 0 - 1,
             _    => sc.tok.start,
         })
-        @while (ci < cmts.len && (tstart < 0 || cmts[ci].start < tstart)) {
+        ci = ci.step_while((k) { k < cmts.len && (tstart < 0 || cmts[k].start < tstart) }, (k) {
             // drain every comment that opens before the next token (or all of them at Eof)
-            c = cmts[ci]
+            c = cmts[k]
             (c.start >= emitted).then({
                 st = src.lspt_advance(st, c.start)
                 cur = cur.lspt_emit_span(mp, src, st, c.start, c.start + c.len, LSPT_COMMENT())
                 emitted = c.start + c.len
             })
-            ci = ci + 1
-        }
+            k + 1
+        })
         (tstart < 0).match ({
-            true  => {
-                running = false
-            },
+            true  => false,
             false => {
                 (tstart >= emitted).then({
                     st = src.lspt_advance(st, tstart)
@@ -276,8 +262,9 @@ lspt_tokens* = (mp: MutPtr<Malloc>, src: StringView) StringView {
                     emitted = tstart + sc.tok.len
                 })
                 pos = sc.next
+                true
             },
         })
-    }
+    })
     cur.out.gstr_append(mp, "]").gstr_finish(mp)
 }
