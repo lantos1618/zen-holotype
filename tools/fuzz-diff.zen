@@ -115,7 +115,7 @@ ity_signed = (t: i64) bool { t < 3 }
 // AN RNG DRAW IS NEVER INLINED INTO A BUILDER CHAIN. `b.f(rp).g(rp)` lowers to `g(f(b, rp), rp)`
 // and C leaves the argument evaluation order of the outer call unspecified, so two draws in one
 // chain could swap and the stream would stop being reproducible. Every draw is therefore its own
-// `x := rp....` statement and the chain that follows is pure — which is why the *_draw / *_emit
+// `x ::= rp....` statement and the chain that follows is pure — which is why the *_draw / *_emit
 // split below exists at all.
 // a literal in `t`'s range: signed [-(2^(w-1)), 2^(w-1)-1], unsigned [0, 2^w-1].
 rlit_draw = (rp: MutPtr<Rng>, t: i64) i64 {
@@ -209,7 +209,7 @@ decl_ints = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, t: i64, k: i64, count: i64)
                 .ivar(n, k)
                 .s(": ")
                 .s(ITY_NAME[t])
-                .s(" := ")
+                .s(" = ")
                 .ilit(v)
                 .ch('\n')
             b1.decl_ints(rp, n, t, k + 1, count)
@@ -242,7 +242,7 @@ int_steps = (
                 .itmp(n, s)
                 .s(": ")
                 .s(ITY_NAME[t])
-                .s(" := ")
+                .s(" = ")
                 .icur(n)
                 .ch(' ')
             b1 = head.s(int_op(j, sg)).ch(' ')
@@ -299,8 +299,8 @@ f64_expr = (b: Sb<Malloc>, rp: MutPtr<Rng>, depth: i64) Sb<Malloc> {
 // It is split around the loop keyword only because tests/harness_boundaries.zen greps every
 // tools/*.zen for that literal token; the emitted text is byte-identical to the python's.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-PRELUDE_A = "{ println } = std.text.fmt\nBox3*: { a: i32, b: i32, c: i32 }\nCol*: R(i32) | G | B(i32)\nPair*<T>: { p: T, q: T }\nidv<T> = (v: T) T { v }\npick<T> = (a: T, b: T, c: bool) T { c.then({ a }, { b }) }\nfib = (n: i32) i32 { (n < 2).then({ n }, { fib(n - 1) + fib(n - 2) }) }\nsumto = (n: i32, acc: i32) i32 { (n <= 0).then({ acc }, { sumto(n - 1, acc + n) }) }\ncolval = (c: Col) i32 { c.match ({ .R(v) => v, .G => 0, .B(v) => v * 2 }) }\nfnv = (data: StringView, n: i32) u32 {\n    hash: u32 := 2166136261\n    i: i32 := 0\n    "
-PRELUDE_B = "while (i < n) {\n        b: u8 := load(offset(data, i))\n        hash = (hash ^ b) * 16777619\n        i = i + 1\n    }\n    hash\n}\n"
+PRELUDE_A = "{ println } = std.text.fmt\nBox3*: { a: i32, b: i32, c: i32 }\nCol*: R(i32) | G | B(i32)\nPair*<T>: { p: T, q: T }\nidv<T> = (v: T) T { v }\npick<T> = (a: T, b: T, c: bool) T { c.then({ a }, { b }) }\nfib = (n: i32) i32 { (n < 2).then({ n }, { fib(n - 1) + fib(n - 2) }) }\nsumto = (n: i32, acc: i32) i32 { (n <= 0).then({ acc }, { sumto(n - 1, acc + n) }) }\ncolval = (c: Col) i32 { c.match ({ .R(v) => v, .G => 0, .B(v) => v * 2 }) }\nfnv = (data: StringView, n: i32) u32 {\n    hash :: u32 = 2166136261\n    i :: i32 = 0\n    "
+PRELUDE_B = "while (i < n) {\n        b: u8 = load(offset(data, i))\n        hash = (hash ^ b) * 16777619\n        i = i + 1\n    }\n    hash\n}\n"
 prelude = (b: Sb<Malloc>) Sb<Malloc> { b.s(PRELUDE_A).ch('@').s(PRELUDE_B) }
 // the string-hash corpus (python's WORDS)
 WORD = ["hello", "zen", "the quick brown fox", "abc", "", "aa", "differential", "backend", "0123456789", "xyz"]
@@ -339,9 +339,9 @@ st2 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(IND)
         .ch('v')
         .i(n)
-        .s(": ")
+        .s(" :: ")
         .s(ITY_NAME[t])
-        .s(" := ")
+        .s(" = ")
         .ilit(v1)
         .ch('\n')
     add = decl
@@ -367,11 +367,11 @@ st3 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(IND)
         .ch('s')
         .i(n)
-        .s(": i32 := 0\n")
+        .s(" :: i32 = 0\n")
         .s(IND)
         .ch('i')
         .i(n)
-        .s(": i32 := 0\n")
+        .s(" :: i32 = 0\n")
     head = decl
         .s(IND)
         .ch('@')
@@ -406,7 +406,7 @@ st4 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(IND)
         .ch('x')
         .i(n)
-        .s(": i32 := ")
+        .s(": i32 = ")
         .i(x)
         .ch('\n')
     decl
@@ -467,7 +467,7 @@ st9 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(IND)
         .s("bx")
         .i(n)
-        .s(" := Box3(a: ")
+        .s(" ::= Box3(a: ")
         .i(av)
         .s(", b: ")
         .i(bv)
@@ -518,7 +518,7 @@ st11 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(IND)
         .s("pr")
         .i(n)
-        .s(" := Pair<i32>(p: ")
+        .s(" ::= Pair<i32>(p: ")
         .i(p)
         .s(", q: ")
         .i(q)
@@ -565,7 +565,7 @@ st15 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(IND)
         .s("pf")
         .i(n)
-        .s(" := Pair<f64>(p: ")
+        .s(" ::= Pair<f64>(p: ")
         .flit_emit(f1)
         .s(", q: ")
     decl = head.flit_emit(f2).s(")\n")

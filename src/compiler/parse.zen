@@ -17,8 +17,8 @@
   lbrace_off, bopen_enter, bopen_exit, is_lbrace, is_rbrace, is_langle, tok_eq, perr_set,
   perr_set_at, perr_set_kind_at, perr_set_misgen_at, perr_reset, perr_get, perr_off_get,
   perr_kind_get, pdepth_reset, delim_reset, PE_BADBIND, PE_MISGEN, PE_UNCLOSED, PE_ARROW, PE_EXPR,
-  PE_DECL, PE_INIT, PE_EOF, PE_FIELDDEFAULT, PE_LETTY, PE_LETEQ, vbreak_reset, vbreak_get,
-  anon_reset, anon_decls_get } = compiler.parse_type
+  PE_DECL, PE_INIT, PE_EOF, PE_WALRUS, PE_FIELDDEFAULT, PE_LETTY, PE_LETEQ, vbreak_reset,
+  vbreak_get, anon_reset, anon_decls_get } = compiler.parse_type
 { parse_tparams, skip_name_star, parse_struct_at, parse_enum_at, has_data_field } = compiler.parse_type_decl
 { fill_impl, fill_impl_methods, fill_defaults, fill_inherent_struct } = compiler.parse_impl
 { implicit_tparams } = compiler.parse_implicit
@@ -146,18 +146,36 @@ decl_is_enum = (src: StringView, pos: i32) bool {
         false => false,
     })
 }
-// A value global: `g ::= e` (mutable) or the retired `g := e`. The CONST spelling `g = e` is not
-// here — a single `=` at top level is first tested for the module-alias and function shapes, and
-// whatever survives that is routed to fill_global as a constant global (see decl_is_const_global).
+// A value global: `g ::= e` (mutable). The CONST spelling `g = e` is not here — a single `=` at top
+// level is first tested for the module-alias and function shapes, and whatever survives that is
+// routed to fill_global as a constant global (see decl_is_const_global). The RETIRED walrus is no
+// longer a global form: decl_is_retired_global recognizes it only to report PE_WALRUS, then lets the
+// decl parse on as a mutable global so ONE error is reported instead of a cascade.
 decl_is_global = (src: StringView, pos: i32) bool {
     m = src.decl_marker(pos)
-    src.is_walrus(m.tok) || src.is_mut_walrus(m.tok)
+    src.is_mut_walrus(m.tok) || src.decl_is_retired_global(pos)
 }
-// a TYPED top-level global `name : Type := expr` — matches the in-function typed-let form. The marker is
-// a single ':' (not ':=', a plain global; not ': {', a struct); after the annotation the operator must be
-// ':=' (walrus). It must be ':=', NOT '=': an enum's default-valued first variant reads as `Name = value`
-// (`Colour: Red = RGB(...) | …`), so a single '=' here is an enum, not a global. The annotation drives
-// nothing the inferred type wouldn't (resolve_global re-infers from the init), so it is parsed + discarded.
+decl_is_retired_global = (src: StringView, pos: i32) bool {
+    m = src.decl_marker(pos)
+    src.is_walrus(m.tok).match ({
+        true  => {
+            perr_set_kind_at(m.tok.start, PE_WALRUS())
+            true
+        },
+        false => false,
+    })
+}
+// a TYPED top-level global `name: Type = expr` — the const-by-default annotated form, matching the
+// in-function `x: T = v`. The marker is a single ':' (not ': {', a struct). The annotation drives
+// nothing the inferred type wouldn't (resolve_global re-infers from the init), so it is parsed and
+// discarded.
+//
+// The `=` is genuinely ambiguous with an ENUM whose first variant carries a default — `Colour: Red =
+// RGB(1, 2, 3) | Green` reads identically up to the init — and decl_is_enum accepts ANY `Name:` that
+// is not `Name: {`, so the enum wins by ladder order and the global misparses SILENTLY as a
+// one-variant enum. (That is exactly what `g: i32 = 42` did while the retired walrus was the only
+// operator accepted here.) The `|` is what tells them apart: an enum continues, a global's init ENDS
+// the declaration — so the init is parsed and the token after it must be a decl boundary.
 decl_is_typed_global = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
     m = src.decl_marker(pos)
     (src.is_colon(m.tok) && m.tok.len == 1).match ({
@@ -165,11 +183,39 @@ decl_is_typed_global = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
             true  => false,
             false => {
                 te = a.parse_ty(src, m.next)
-                src.is_walrus(src.scan(te.next).tok)
+                op = src.scan(te.next)
+                src.is_walrus(op.tok).then({
+                    perr_set_kind_at(op.tok.start, PE_WALRUS())
+                    return true
+                })    // the retired spelling: redirect, then parse on
+                src.is_op1(op.tok, '=') && a.typed_global_ends_decl(src, op.next)
             },
         }),
         false => false,
     })
+}
+// is there a `|` anywhere between `pos` and `end`? That is the enum's variant separator — and `|` is
+// ALSO bitwise-or, so an init that contains one stays an enum (today's reading), which keeps this
+// predicate strictly conservative: it only ever claims a declaration the enum rule was mis-reading.
+span_has_bar = (src: StringView, pos: i32, end: i32) bool {
+    (pos >= end).match ({
+        true  => false,
+        false => {
+            sc = src.scan(pos)
+            sc.tok.kind.match ({
+                .Eof => false,
+                _    => src.is_op1(sc.tok, '|') || src.span_has_bar(sc.next, end),
+            })
+        },
+    })
+}
+// does the init at `pos` END the declaration, with no `|` in it? An enum continues past its first
+// variant's default with `|`; a global's init is followed by the next decl's name, an import `{`, or
+// EOF. Both tests are needed: `parse_or` swallows `1 | Green` as a bitwise-or, so the boundary alone
+// cannot tell `Colour: Red = 1 | Green` from `g: i32 = 42`.
+typed_global_ends_decl = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
+    e = a.parse_or(src, pos).next
+    src.span_has_bar(pos, e) == false && src.decl_path_at_boundary(src.scan(e).tok)
 }
 // position just past a typed global's init expression (the type annotation is skipped, init parsed).
 typed_global_end = (a: MutPtr<Malloc>, src: StringView, pos: i32) i32 {
@@ -212,7 +258,7 @@ decl_path_at_boundary = (src: StringView, t: Token) bool {
 // a CONSTANT value global `k = 5`: marker `=` whose RHS is NEITHER an ident-headed module path (a
 // module alias, `raw = std.mem.raw`, peeled first) NOR `(` (a function literal, `f = () i32 {…}`).
 // Const-by-default makes this the ordinary spelling of a module constant — it used to be
-// `error[bad-binding]: use := for a value global`, which is exactly backwards under the new rule.
+// `error[bad-binding]: use = for a value global`, which is exactly backwards under the new rule.
 // Left to `fill_func` it would silently mis-parse `= <expr>` and swallow the FOLLOWING declaration
 // (and its `*` export marker); this predicate routes it to fill_global instead.
 // `= (` opens a FUNCTION literal only when the paren holds a PARAMETER LIST: `()`, or a first
@@ -533,7 +579,7 @@ fill_global = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32
     mk = src.decl_marker(pos)
     // A single `=` reaches here two ways: a module alias (`m = std.mod`, decided by
     // decl_is_module_alias before this call) or a CONSTANT value global (`k = 5`). Either way it is
-    // unmarked, so it is not mutable; `::=` / the retired `:=` are the mutable spellings.
+    // unmarked, so it is not mutable; `::=` is the mutable spelling.
     eq = src.is_op1(mk.tok, '=')
     pe = a.parse_or(src, mk.next)
     buf[i] = a.global_decl(nm, pe.expr, eq && src.decl_is_module_alias(pos), nt.tok.start, eq == false)
@@ -542,16 +588,18 @@ fill_global = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32
         i: i + 1,
     )
 }
-// `name : Type := expr` — a typed value global (always a value global, never a module alias — those
+// `name: Type = expr` — a typed value global (always a value global, never a module alias — those
 // carry no annotation — so alias = false). The type annotation is parsed then discarded (re-inferred).
 fill_typed_global = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
     nt = src.scan(pos)
     nm = a.lexeme(src, nt.tok)
     m = src.decl_marker(pos)    // the single ':'
-    te = a.parse_ty(src, m.next)    // the (discarded) type annotation; te.next lands at ':='
+    te = a.parse_ty(src, m.next)    // the (discarded) type annotation; te.next lands at the operator
     op = src.scan(te.next)
     pe = a.parse_or(src, op.next)
-    buf[i] = a.global_decl(nm, pe.expr, false, nt.tok.start, true)
+    // `g: T = v` is CONSTANT (the annotated const-by-default form); only the retired walrus was
+    // unconditionally mutable.
+    buf[i] = a.global_decl(nm, pe.expr, false, nt.tok.start, src.is_walrus(op.tok))
     DCont(
         next: pe.next,
         i: i + 1,
@@ -696,6 +744,9 @@ sentinel_name = (kind: i32) StringView {
     (kind == PE_INIT()).then({
         return "__expected_init"
     })
+    (kind == PE_WALRUS()).then({
+        return "__retired_walrus"
+    })
     (kind == PE_EOF()).then({
         return "__unexpected_eof"
     })
@@ -728,7 +779,7 @@ prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
     })
 }
 // decl_span is compiler.resolve's boundary oracle; it reuses the real decl parsers.
-// `is_type` marks a struct/enum/trait declaration (a `Name: …` head, NOT a `name :=`/`name =` value).
+// `is_type` marks a struct/enum/trait declaration (a `Name: …` head, NOT a `name ::=`/`name =` value).
 // compiler.resolve uses it so a namespace alias canonicalizes TYPE names to their bare spelling
 // (one C identity, deduped) instead of alias-prefixing them — only value/fn decls get the `alias__` prefix.
 DeclSpan*: {

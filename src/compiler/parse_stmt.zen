@@ -16,9 +16,9 @@
 { is_field_colon } = compiler.parse_primary
 { parse_or } = compiler.parse_expr
 { is_lbracket, is_rbracket, is_rbrace, lbrace_off, skip_to_brace, skip_to_lparen, tok_eq, parse_ty,
-  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, PE_INIT, PE_LETTY, PE_LETEQ, bopen_enter,
-  bopen_exit, pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
-// ── statement sequence: zero or more `name := expr` lines, then a final expression ──
+  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, PE_INIT, PE_WALRUS, PE_LETTY, PE_LETEQ,
+  bopen_enter, bopen_exit, pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
+// ── statement sequence: zero or more `name = expr` lines, then a final expression ──
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
 // get materialized into a HEAP [Stmt] for genc. A stack `[…]` literal can't be used — it
 // dangles the moment the Func is returned (genc would then walk freed memory).
@@ -51,7 +51,8 @@ scons = (a: MutPtr<Malloc>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_
 //     x ::= 0          mutable,  type inferred
 //     x :: T = 0       mutable,  type written
 // A binding STATEMENT is therefore an Ident followed by one of `:` `::` `::=` (plus the retired
-// `:=`, kept until the migration completes). `x = 0` is NOT recognized here: it is parsed as an
+// walrus, still classified here so parse_binding can redirect it). `x = 0` is NOT recognized here:
+// it is parsed as an
 // assignment and turned into a constant binding by compiler.passes.declbind, which is the only
 // stage that knows whether `x` is already in scope.
 //
@@ -158,7 +159,7 @@ is_compound_set_here = (src: StringView, pos: i32) bool {
         _      => false,
     })
 }
-// is there a `return` keyword at `pos`? (the Ident "return", NOT followed by ':=' or '=' — those
+// is there a `return` keyword at `pos`? (the Ident "return", NOT followed by a binding mark — those
 // make `return` an ordinary variable name being bound/assigned, not the early-return keyword).
 is_return_kw* = (src: StringView, t: Token) bool {
     t.kind.match ({
@@ -292,7 +293,7 @@ lets_splice = (a: MutPtr<Malloc>, lets: Ptr<SList>, tail: Ptr<SList>) Ptr<SList>
     })
 }
 // Rebuild a place's Member/Index spine, replacing each call-bearing index expression with a read of
-// the hidden temp `__comptmp_<start>_<k>` and accumulating its `tmp := idx` binding. Deterministic:
+// the hidden temp `__comptmp_<start>_<k>` and accumulating its `tmp = idx` binding. Deterministic:
 // walking the same source place mints the same temp names, so the target and operand copies (parsed
 // independently — no shared nodes) read the SAME evaluated index. Non-hoisted sub-exprs are kept
 // from the copy being walked, so the two results stay node-disjoint.
@@ -404,8 +405,8 @@ parse_comp_set_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> 
     d = a.comp_set_desugar(src, pos)
     a.comp_prefix(d, a.parse_stmts(src, d.next))
 }
-// a `:=` with nothing left to bind: the very next token CLOSES the enclosing construct (`}` `)` `]`
-// `,`) or the file ends. Zen has no statement terminator, so `x :=` followed by a value on the NEXT
+// a binding mark with nothing left to bind: the very next token CLOSES the enclosing construct (`}` `)` `]`
+// `,`) or the file ends. Zen has no statement terminator, so `x =` followed by a value on the NEXT
 // LINE is a legal binding — only these closers prove the initializer is genuinely absent.
 init_missing = (src: StringView, pos: i32) bool {
     sc = src.scan(pos)
@@ -426,9 +427,14 @@ LetParse*: {
 parse_binding* = (a: MutPtr<Malloc>, src: StringView, pos: i32) LetParse {
     nt = src.scan(pos)    // the bound name
     name = a.lexeme(src, nt.tok)
-    mk = src.scan(nt.next)    // the mark: `::=` / `::` / `:` (or the retired `:=`)
-    // inferred-type forms — the value follows the mark directly. Both are MUTABLE: `::=` says so,
-    // and the retired `:=` was unconditionally mutable.
+    mk = src.scan(nt.next)    // the mark: `::=` / `::` / `:` (or the retired walrus)
+    // The retired walrus is recognized ONLY to redirect it (PE_WALRUS names the four replacements),
+    // then parsed on as if it were `::=` — its old meaning — so ONE error is reported instead of a
+    // cascade from a body the parser could not enter.
+    src.is_walrus(mk.tok).then({
+        perr_set_kind_at(mk.tok.start, PE_WALRUS())
+    })
+    // inferred-type forms — the value follows the mark directly. `::=` is the mutable binding.
     (src.is_mut_walrus(mk.tok) || src.is_walrus(mk.tok)).then({
         src.init_missing(mk.next).then({
             perr_set_kind_at(mk.tok.start, PE_INIT())
@@ -439,7 +445,7 @@ parse_binding* = (a: MutPtr<Malloc>, src: StringView, pos: i32) LetParse {
             next: v.next,
         )
     })    // value (full expression, incl. comparison)
-    // annotated forms: `x :: T = v` (mutable) / `x: T = v` (constant) / the retired `x: T := v`.
+    // annotated forms: `x :: T = v` (mutable) / `x: T = v` (constant).
     // We are already committed to a declaration, so every later token has a precise expectation.
     mut = src.is_dcolon(mk.tok)
     (src.ty_starts_at(mk.next) == false).then({
@@ -447,7 +453,10 @@ parse_binding* = (a: MutPtr<Malloc>, src: StringView, pos: i32) LetParse {
     })
     te = a.parse_ty(src, mk.next)    // the annotation, parsed ONCE
     op = src.scan(te.next)
-    legacy = src.is_walrus(op.tok)
+    legacy = src.is_walrus(op.tok)    // the retired annotated walrus: redirect, then recover as `::`
+    legacy.then({
+        perr_set_kind_at(op.tok.start, PE_WALRUS())
+    })
     (src.is_op1(op.tok, '=') || legacy).match ({
         true  => src.init_missing(op.next).then({
             perr_set_kind_at(op.tok.start, PE_INIT())

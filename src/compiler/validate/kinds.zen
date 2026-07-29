@@ -23,7 +23,7 @@
 { KARGTYPE, KARITY, KASSIGNCONST, KBADBIND, KCAPACITY, KDIAG_CAP, KEOFINPUT, KEXPECTARROW,
   KEXPECTDECL, KEXPECTEXPR, KEXPECTINIT, KFFITYPE, KFIELDDEFAULT, KLETEQ, KLETTYPE, KMISGEN,
   KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND,
-  KUNCLOSED, KUNKNOWNTYPE, KUNREACHABLEARM, KPTRWRITE, KSLICEWRITE, KVBREAK, desc_or } = compiler.validate.diag
+  KUNCLOSED, KUNKNOWNTYPE, KUNREACHABLEARM, KPTRWRITE, KSLICEWRITE, KVBREAK, KWALRUS, desc_or } = compiler.validate.diag
 // which read-only thing the lvalue walk stopped on -> the diagnostic that names it. `[T]` and
 // `Ptr<T>` are different mistakes with different fixes, so they get different messages.
 write_diag_kind = (c: i32) i32 {
@@ -991,7 +991,7 @@ krr_loop_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_loop_ret_
 // compiles and runs but silently drops the writes (#587). Reject it up front, pointed at the call.
 // `ps` = the innermost enclosing reflection lambda's params ([] at fn top level); a subject naming
 // one of its VALUE params (index >= 1) is bound; any non-Var subject is bound. A subject copied to
-// a genuine local first (`leaf := fv`) is a plain Var — spliced unbound, its writes stick — which
+// a genuine local first (`leaf = fv`) is a plain Var — spliced unbound, its writes stick — which
 // is the sanctioned shape (std.format.serde's jr_obj2).
 krw_refl_shape = (c: CallData) bool {
     c.fn == "each_field" && c.args.len == 2 || c.fn == "zip_fields" && c.args.len == 3
@@ -1441,6 +1441,9 @@ taxonomy_kind = (nm: StringView, init: Ptr<Expr>) i32 {
     (nm == "__expected_init").then({
         return KEXPECTINIT().ksent_at(init.kparse_off())
     })
+    (nm == "__retired_walrus").then({
+        return KWALRUS().ksent_at(init.kparse_off())
+    })
     (nm == "__unexpected_eof").then({
         return KEOFINPUT().ksent_at(init.kparse_off())
     })
@@ -1772,7 +1775,7 @@ Env.impl(EnvKinds, {
     }
     let_needannot_err = (env: Env, l: LetData) i32 {
         // A let (post-resolve, ty = the inferred/declared type) whose stored type is a generic with an
-        // uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m := empty(7)` → Box<void> → mono emits
+        // uninferred tparam (`empty<T> = (k: i32) Box<T>` then `m = empty(7)` → Box<void> → mono emits
         // `Box_void`). check used to pass; require an annotation so the tparam is pinned.
         l.ty.ty_has_void_targ().then({ 1 }, { 0 })
     }

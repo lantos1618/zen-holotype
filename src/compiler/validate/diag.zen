@@ -158,7 +158,7 @@ KCONFORMANCE* = () i32 { 11 }    // a Type.impl(Trait) misses a method or its si
 KDUPFN* = () i32 { 12 }    // two top-level fns share a name (Zen has no overloading)
 KVALPOSRETURN* = () i32 { 13 }    // an early (dropped) return in a value-position block arm
 KPARSE* = () i32 { 14 }    // unparseable top-level input (the parser's __syntax_error sentinel)
-KOWNERSHIP* = () i32 { 15 }    // use of a local owner after it was consumed (release/drop, send, move into an owner param, or a bare `c := o` copy)
+KOWNERSHIP* = () i32 { 15 }    // use of a local owner after it was consumed (release/drop, send, move into an owner param, or a bare `c = o` copy)
 KTRAITBOUND* = () i32 { 16 }    // a type bound to `A: Trait` at a call site does not impl Trait
 KUNKNOWNTYPE* = () i32 { 17 }    // a type annotation names a type that is not declared/imported/a tparam
 KLAMBDAVALUE* = () i32 { 18 }    // a lambda used as a value the inliner can't splice (stored/returned)
@@ -174,7 +174,7 @@ KFALLTHROUGH* = () i32 { 25 }    // a non-void function body that ends in a no-v
 KVBREAK* = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase` statement break (the split-statement shape)
 KMAINPARAMS* = () i32 { 30 }    // `main` declared with parameters — the OS entry calls zen_main() with none, so they'd read garbage
 KARMVOID* = () i32 { 31 }    // a value-consumed match/cond arm that yields no value and does not diverge
-KBADBIND* = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) — a value global must use `:=` (the parser's __bad_binding sentinel)
+KBADBIND* = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) (the parser's __bad_binding sentinel). UNREACHABLE since const-by-default routed every surviving `name = <expr>` to fill_global as a constant
 KMISGEN* = () i32 { 44 }    // a misordered generic-decl head `Name<T>*:` (type params before the `*`); canonical is `Name*<T>:` (the parser's __misordered_generic sentinel)
 KUNREACHABLEARM* = () i32 { 37 }    // a match arm after a wildcard `_` arm can never fire (the emitter drops it)
 KMETHODNOTFOUND* = () i32 { 38 }    // an undefined CALL whose first argument is a concrete struct/enum receiver: reads as `recv.method()` UFCS with no such method (and no free function of that name) — distinct from a bare undefined name
@@ -200,13 +200,14 @@ KUNCLOSED* = () i32 { 53 }    // end of input with a `{` still open; the caret i
 KEXPECTARROW* = () i32 { 54 }    // a match-arm label not followed by `=>` (the parser's `__expected_arrow` sentinel)
 KEXPECTEXPR* = () i32 { 55 }    // a token that can begin no expression (the parser's `__expected_expr` sentinel)
 KEXPECTDECL* = () i32 { 56 }    // a token that can begin no top-level declaration (the parser's `__expected_decl` sentinel)
-KEXPECTINIT* = () i32 { 57 }    // a `:=` with no expression after it; caret on the `:=` (the parser's `__expected_init` sentinel)
+KEXPECTINIT* = () i32 { 57 }    // a binding mark with no expression after it; caret on the mark (the parser's `__expected_init` sentinel)
 KEOFINPUT* = () i32 { 58 }    // end of input in the middle of an expression (the parser's `__unexpected_eof` sentinel)
 KFIELDDEFAULT* = () i32 { 63 }    // a struct field default (`total: i64 = 0`) whose value is not a constant — a computed/allocating default would be a hidden per-construction effect (the parser's `__field_default` sentinel)
 KLETTYPE* = () i32 { 62 }    // a local binding's `:`/`::` mark with no type after it (the parser's `__expected_let_type` sentinel)
 KLETEQ* = () i32 { 64 }    // a local binding whose annotation is not followed by the `=` that binds its value (the parser's `__expected_let_eq` sentinel)
 // ── const-by-default ────────────────────────────────────────────────────────────────────────────
 KASSIGNCONST* = () i32 { 65 }    // an assignment to a binding declared WITHOUT the `::` mutability mark. Zen locals are constants unless marked, so this is the whole content of the rule: `x = 0` binds once, `x ::= 0` binds a variable
+KWALRUS* = () i32 { 66 }    // the RETIRED `:=` binding spelling (the parser's `__retired_walrus` sentinel). One always-mutable form became four that say what they mean, so `:=` is not a binding form at all — it is recognized only to name its replacement
 Diagnostic*: {
     code: i32,
     kind: StringView,
@@ -361,7 +362,7 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "ownership",
             message: "use of an owner after it was consumed (moved, released, or dropped)",
-            hint: "an owner is consumed by release/drop, an actor send, a move into an owner-typed parameter, or a bare `c := o` copy; bind a fresh owner (`o.clone()`) instead of reusing the consumed local",
+            hint: "an owner is consumed by release/drop, an actor send, a move into an owner-typed parameter, or a bare `c = o` copy; bind a fresh owner (`o.clone()`) instead of reusing the consumed local",
         )
     })
     (code == 16).then({
@@ -396,7 +397,7 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "need-annotation",
             message: "cannot infer the type parameter of this binding",
-            hint: "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> := …`",
+            hint: "annotate the binding so its type parameter is pinned, e.g. `m: Map<i32> = …`",
         )
     })
     (code == 21).then({
@@ -424,7 +425,7 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "null-deref",
             message: "`RawPtr<T>` may be null; deref requires a null-check first",
-            hint: "guard with `q := assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref",
+            hint: "guard with `q = assert_nonnull(p)` (panics on null, yields `MutPtr<T>`) then deref `q`, or null-check before deref",
         )
     })
     (code == 59).then({
@@ -459,7 +460,7 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "or-return",
             message: "`.or_return()` requires the enclosing function to return a `Result` carrying the receiver's error type",
-            hint: "declare the enclosing function's return type as `Result<_, E>` with the receiver's error type `E`; in a conditionally-evaluated position (`&&`/`||` rhs, branch value, while-loop condition) the receiver's WHOLE `Result<T, E>` must match — bind it on its own line first (`x := recv.or_return()`), or handle the `Result` with `.match`",
+            hint: "declare the enclosing function's return type as `Result<_, E>` with the receiver's error type `E`; in a conditionally-evaluated position (`&&`/`||` rhs, branch value, while-loop condition) the receiver's WHOLE `Result<T, E>` must match — bind it on its own line first (`x = recv.or_return()`), or handle the `Result` with `.match`",
         )
     })
     (code == 28).then({
@@ -494,7 +495,7 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "bad-binding",
             message: "top-level `=` binding is neither a module alias nor a function",
-            hint: "use `:=` for a value global (`k := 5`); a single `=` at top level is only a module alias (`m = std.mod`) or a function (`f = () T { … }`)",
+            hint: "a value global is `k = 5` (constant) or `k ::= 5` (mutable); a single `=` at top level is otherwise only a module alias (`m = std.mod`) or a function (`f = () T { … }`)",
         )
     })
     (code == 38).then({
@@ -593,14 +594,14 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "parse",
             message: "expected a top-level declaration, found a token that cannot start one",
-            hint: "a top-level item is `name = (params) Ret { … }`, `name := value`, `Name: { … }`, `Name.impl(Trait, { … })`, or `{ names } = module.path`",
+            hint: "a top-level item is `name = (params) Ret { … }`, `name ::= value`, `Name: { … }`, `Name.impl(Trait, { … })`, or `{ names } = module.path`",
         )
     })
     (code == 57).then({
         return DiagInfo(
             kind: "parse",
-            message: "expected an expression after `:=`, found the end of the binding",
-            hint: "give the binding a value (`name := <expr>`), or delete the binding",
+            message: "expected an expression after the binding mark, found the end of the binding",
+            hint: "give the binding a value (`name = <expr>`), or delete the binding",
         )
     })
     (code == 58).then({
@@ -638,6 +639,13 @@ diag_info = (code: i32) DiagInfo {
             hint: "mark the declaration mutable — write `x ::= 0` (or `x :: T = 0`) — or bind a new name instead of assigning",
         )
     })
+    (code == 66).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "`:=` is retired",
+            hint: "write `x = v` for a constant binding or `x ::= v` for a mutable one; annotated, `x: T = v` and `x :: T = v`",
+        )
+    })
     (code == 47).then({
         return DiagInfo(
             kind: "capacity",
@@ -656,7 +664,7 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "reflect-write",
             message: "assignment through a bound reflection subject — this subject is not a plain local variable, so it is evaluated once into a hidden temp and the lambda's writes would land on that discarded temp (a silent no-op)",
-            hint: "bind the subject to a local first and assign the struct back whole: `leaf := fv` … `leaf.each_field((n, f2) { f2 = … })` … `fv = leaf` — a plain local subject is spliced unbound, so its field writes stick",
+            hint: "bind the subject to a local first and assign the struct back whole: `leaf = fv` … `leaf.each_field((n, f2) { f2 = … })` … `fv = leaf` — a plain local subject is spliced unbound, so its field writes stick",
         )
     })
     DiagInfo(
@@ -725,7 +733,7 @@ KDIAG_CAP* = () i32 { 512 }
 // lives in the scope's arena, which `with_sync`/`with_coro` FREE on exit — so RETURNING such a
 // pointer (or a local bound to it) past the scope compiles a use-after-free. Scopes are lexical, so a
 // lexical rule suffices: collect the scope-receiver params, track locals bound to a scope-derived
-// pointer (`p := s.acquire(…)` / `p := s.alloc.acquire(…)` / `p := s.alloc`), and REJECT a
+// pointer (`p = s.acquire(…)` / `p = s.alloc.acquire(…)` / `p = s.alloc`), and REJECT a
 // `return <that>` / a trailing `<that>` where `<that>` is such a local OR a direct `s.acquire(…)`.
 // The direct form deliberately excludes Scope's own `s.alloc.acquire(n)` accessor (its receiver is the
 // `.alloc` field, not the scope var), so std.scope's primitives are never false-rejected.
@@ -738,7 +746,7 @@ KESCAPE* = () i32 { 33 }    // CUSTOM channel: reported via its own diagnostic (
 // positives (over-rejection is the cardinal sin — a false leak on legit std code is worse than a miss).
 //
 // SCOPE reached (deliberately narrow, must-leak-only v1):
-//   • Candidate = a TOP-LEVEL `let o := <v>` of a function body whose value's inferred type is an
+//   • Candidate = a TOP-LEVEL `let o = <v>` of a function body whose value's inferred type is an
 //     owner (owner_base ∈ {Own,Rc,Arc}) AND whose value is a FRESH PRODUCTION — NOT a bare `.Var`/
 //     `.Member`/`.Arrow`/`.Index` (those ALIAS/borrow an owner held elsewhere: the field/source still
 //     owns it, so releasing through the alias would double-free — flagging them would be a false

@@ -7,7 +7,7 @@
 //     to hand a file's tokens around; the scan form is better when you just consume them.
 // C strings are NUL-terminated, so byte 0 ends the scan and no length is threaded.
 //
-//   sc := scan(src, 0)        // one token + where to resume
+//   sc = scan(src, 0)        // one token + where to resume
 //   sc.tok.kind               // Ident | Int | Float | Str | Sym | Eof
 //   sc.next                   // feed back into scan for the next token
 { at, block_comment_at, is_digit, is_hex, is_bin, is_oct, is_alpha, is_alnum, is_space,
@@ -216,7 +216,8 @@ scan_quote_end = (src: StringView, pos: i32) i32 {
     (at(src, e) == '\0').then({ e }, { e + 1 })
 }    // unterminated ⇒ stop AT the NUL, don't overshoot the buffer
 // ── symbols ──────────────────────────────────────────────────────────────────
-// zen's two-char operators: `:=  ::  ==  <=  >=  &&  ||  =>`. A symbol token spans two
+// zen's two-char operators: `::  ==  <=  >=  &&  ||  =>` (and the retired walrus, still lexed so
+// the parser can name its replacement). A symbol token spans two
 // bytes when the pair forms one of these, else one — so the parser never re-glues.
 // `::` is the MUTABILITY mark of a local binding (`x :: T = e`); `::=` is its inferred-type
 // form and is the only three-byte operator (three_op, checked first so `::=` never splits
@@ -236,7 +237,7 @@ two_op = (b0: u8, b1: u8) bool {
         || b0 == '<' && b1 == '<'
         || b0 == '>' && b1 == '>'
         || b1 == '=' && (b0 == '+' || b0 == '-' || b0 == '*' || b0 == '/' || b0 == '%')
-}    // := ; the last clause adds the compound-assign ops `+= -= *= /= %=`
+}    // the retired walrus; the last clause adds the compound-assign ops `+= -= *= /= %=`
 // zen's ONE three-char operator: `::=`, the mutable-binding mark with an inferred type. Checked
 // before two_op so it never splits into `::` + `=` (which would read as a mutable binding whose
 // type annotation is missing).
@@ -331,7 +332,7 @@ count_from = (src: StringView, pos: i32) i32 {
 // ── comment sidecar: collect every `//` and `/* */` comment as a positioned span ──────────────────
 // The token scanner SKIPS comments (they carry no semantics), but the formatter must reproduce them.
 // So this is a SEPARATE pass over the raw source that records each comment as a span into it, plus
-// whether it is TRAILING — i.e. non-whitespace appears before it on the same line (`x := 1  // note`)
+// whether it is TRAILING — i.e. non-whitespace appears before it on the same line (`x = 1  // note`)
 // vs. a LEADING comment that owns its own line. Strings/chars are honored so a `//` inside `"…"`
 // or a `}` inside a comment never desyncs (mirrors the lexer's own string/char/escape handling) — and a
 // `"""` raw literal is skipped WHOLE, because its quotes are content: tracking them as open/close

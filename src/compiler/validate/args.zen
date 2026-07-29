@@ -365,7 +365,7 @@ arg_var_name* = (c: CallData, i: i32) StringView {
 // is a SEPARATE pass from the scope-escape above: it cannot reuse that walker, because a general
 // allocator's `a.acquire(n)` returns HEAP that outlives the call (returning it is fine) — only the
 // ADDRESS OF A LOCAL dangles. It taints `<local>.addr()`, forwards it through every value-carrying
-// expression shape, threads that taint across `let`/assignment ALIASES (`q := x.addr()` taints `q`, and
+// expression shape, threads that taint across `let`/assignment ALIASES (`q = x.addr()` taints `q`, and
 // naming `q`, `s.p` or `ps[0]` then launders the address back out), and flags it in return/trailing
 // position. NOT tracked: heap-store aliasing, escape through a global.
 ae_collect_arms = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
@@ -511,7 +511,7 @@ ae_taint_store = (a: MutPtr<Malloc>, cx: AeCtx, target: Ptr<Expr>, value: Ptr<Ex
 }
 // a statement list in VALUE position: any `return` inside it escapes, and — when `tail` — so does its
 // trailing value. `let`s thread the taint set exactly as at the top level, so a block that aliases first
-// (`{ q := x.addr() ⏎ q }`) is caught. `tail` is false for a `.Loop` body, whose trailing value is
+// (`{ q = x.addr() ⏎ q }`) is caught. `tail` is false for a `.Loop` body, whose trailing value is
 // discarded — only its returns reach the caller.
 ae_stmts_val_escapes = (a: MutPtr<Malloc>, cx: AeCtx, stmts: [Stmt], hop: bool, tail: bool) bool {
     f ::= false
@@ -531,7 +531,7 @@ ae_inits_escape = (a: MutPtr<Malloc>, cx: AeCtx, inits: [FieldInit], hop: bool) 
     inits.slice_any((fi) { a.ae_escapes(cx, fi.value, hop) })
 }
 // a match EXTRACTS: when the subject carries a frame address, the payload an arm binds carries it too,
-// so `ev := Cell.S(x.addr())` … `ev.match ({ .S(w) => w, … })` hands the address back out through `w`.
+// so `ev = Cell.S(x.addr())` … `ev.match ({ .S(w) => w, … })` hands the address back out through `w`.
 ae_arms_escape = (a: MutPtr<Malloc>, cx: AeCtx, arms: [ArmData], hop: bool, subj: bool) bool {
     arms.slice_any((ar) {
         a.ae_escapes(cx.ae_taint((subj && ar.bind == "" == false).match ({
@@ -860,7 +860,7 @@ ae_store_pos = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
     })
 }
 // value position: does this expression yield a pointer into THIS frame? It does when it IS a
-// `<local>.addr()`, when it names a local TAINTED by one (`q := x.addr()` … `q`), when it reads a place
+// `<local>.addr()`, when it names a local TAINTED by one (`q = x.addr()` … `q`), when it reads a place
 // rooted at such a local (`s.p`, `ps[0]`), when it forwards one through slice()/enum/struct/slice-literal/
 // match/cond/block/loop, or — only when `hop` — through a call to a fn that returns one of its pointer
 // params (identity/wrapper laundering). `hop` is on for the return/trailing escape (the actual
@@ -1142,7 +1142,7 @@ sx_is_source = (e: Ptr<Expr>) bool {
     e.sx_is_acquire() || e.sx_is_make_in() || e.sx_is_addr_of_var() || e.sx_is_slicelit()
 }
 // does a let/assign VALUE make its binding spawner-scratch? a direct source, or an alias of a
-// tainted local (`q := p`). Anything else (calls, member reads, literals) stays clean — lenient.
+// tainted local (`q = p`). Anything else (calls, member reads, literals) stays clean — lenient.
 sx_taints = (taint: Ptr<DeadList>, e: Ptr<Expr>) bool {
     e.sx_is_source().match ({
         true  => true,

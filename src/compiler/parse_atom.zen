@@ -101,7 +101,8 @@ is_op* = (src: StringView, t: Token, c: u8) bool {
 // the EXACT one-byte operator `c` — `is_op` alone matches any Sym STARTING with it, so `=` would
 // also fire on `==`/`=>` and `|` on `||`. Every single-char operator gate in the parser is this.
 is_op1* = (src: StringView, t: Token, c: u8) bool { t.len == 1 && src.is_op(t, c) }
-// the two-byte `:=` walrus — the let/assign/global marker every parser stage looks for.
+// the two-byte walrus — RETIRED as a binding form (const-by-default). Still recognized by every
+// stage that used to accept it, for one purpose: reporting PE_WALRUS, which names the replacement.
 is_walrus* = (src: StringView, t: Token) bool {
     t.kind.match ({
         .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == '=',
@@ -311,13 +312,13 @@ parse_other = (a: MutPtr<Malloc>, src: StringView, sc: Scan) PExpr {
 // Backslash escape byte value. `\\ \" \'` fall through `_ => e` (the char itself).
 esc_byte = (e: u8) u8 {
     (e == 'n').then({
-        return 10
+        return '\n'
     })
     (e == 't').then({
-        return 9
+        return '\t'
     })
     (e == 'r').then({
-        return 13
+        return '\r'
     })
     (e == '0').then({
         return 0
@@ -349,7 +350,7 @@ str_val = (a: MutPtr<Malloc>, src: StringView, t: Token) StringView {
 }
 // Where a raw literal's VALUE starts: just past the opening `"""`, and past one immediately
 // following newline. That strip is what lets the block form
-//     blob := """
+//     blob = """
 //     line one
 //     """
 // mean "line one\n" rather than "\nline one\n" — the newline that only exists to get off the
@@ -408,7 +409,7 @@ parse_ctor = (a: MutPtr<Malloc>, src: StringView, dot: Scan) PExpr {
 }
 // SAME-LINE GATE (mirrors parse_ident / parse_qual_ctor / parse_method): a bare leading-dot ctor
 // `.Variant(payload)` binds its `(payload)` ONLY when the `(` sits on the SAME line as the variant
-// name. A NEWLINE before the `(` means `.Variant` is a bare tag VALUE (`out := .None`) and the `(`
+// name. A NEWLINE before the `(` means `.Variant` is a bare tag VALUE (`out = .None`) and the `(`
 // begins a NEW statement (`(cond).match(…)`) — never a bogus call `.None(cond)` glued across the
 // break. Without this gate a value-position `.None` before a parenthesized statement fused into a
 // call, silently changing program meaning (surfaced by the formatter round-trip; #53).

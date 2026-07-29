@@ -119,7 +119,8 @@ atwhile_at = (sv: [u8], i: i64) bool {
 //   1 = `(?<!\.)\bNAME\s*\(` (call, boundary EXCLUDING a leading `.` — e.g. "raw addr")
 //   2 = `\bNAME\b`           (bare keyword — NO RULE USES THIS TODAY; it existed for break/continue,
 //                             which are not Zen keywords at all, so the check could never fire)
-//   _ = `@while\b`           (the literal @while token; `name` is ignored)
+//   3 = `@while\b`           (the literal @while token; `name` is ignored)
+//   _ = a byte-`push` call whose last argument is a bare decimal literal (`name` is ignored)
 matches_kind_at = (sv: [u8], i: i64, name: StringView, kind: i64) bool {
     (kind == 0).match ({
         true  => sv.bb_plain(i) && sv.name_matches(i, name),
@@ -127,16 +128,66 @@ matches_kind_at = (sv: [u8], i: i64, name: StringView, kind: i64) bool {
             true  => sv.bb_dot(i) && sv.name_matches(i, name),
             false => (kind == 2).match ({
                 true  => sv.bb_plain(i) && sv.word_matches(i, name),
-                false => sv.atwhile_at(i),
+                false => (kind == 3).then({ sv.atwhile_at(i) }, { sv.push_literal_at(i) }),
             }),
         }),
     })
+}
+// ── the byte-`push` decimal-literal needle (kind 4) ───────────────────────────────────────────────
+// `gstr_push`/`rpush`/`push_in` all take a `b: u8` — a BYTE. Zen has char literals (`'a'` is that
+// byte's value), and a raw decimal in that slot hides what the byte IS: `.rpush(a, 10)` and
+// `.rpush(a, '.')` sat two lines apart in compiler.resolve, one of them unreadable. Nothing else
+// about the call is checkable — a byte-typed parameter can legitimately take a computed number — so
+// the rule is exactly this shape and no wider: a BARE DECIMAL LITERAL as the LAST argument.
+//
+// It cannot see through a conversion (`gstr_push(mp, 8.to_u8())` ends in `)`, not a digit). That is
+// not laziness: `'\x08'` is a legal char literal that `zen fmt` prints back as `8`, so those six
+// sites CANNOT be written as char literals today and the rule must not demand it.
+// the index of the `)` closing the `(` at `i`, or sv.len if the file ends first.
+close_paren = (sv: [u8], i: i64, depth: i64) i64 {
+    (i >= sv.len).match ({
+        true  => sv.len,
+        false => (sv[i] == '(').match ({
+            true  => sv.close_paren(i + 1, depth + 1),
+            false => (sv[i] == ')' && depth == 1).match ({
+                true  => i,
+                false => sv.close_paren(i + 1, (sv[i] == ')').then({ depth - 1 }, { depth })),
+            }),
+        }),
+    })
+}
+back_space = (sv: [u8], j: i64) i64 {
+    (j >= 0 && sv[j] == ' ').then({ sv.back_space(j - 1) }, { j })
+}
+back_digits = (sv: [u8], j: i64) i64 {
+    (j >= 0 && sv[j] >= '0' && sv[j] <= '9').then({ sv.back_digits(j - 1) }, { j })
+}
+// walking back from the closing `)`: spaces, then a digit run, then the `,`/`(` that opens the slot.
+last_arg_is_decimal = (sv: [u8], end: i64) bool {
+    j = sv.back_space(end - 1)
+    d = sv.back_digits(j)
+    (d == j).match ({
+        true  => false,
+        false => {
+            k = sv.back_space(d)
+            k >= 0 && (sv[k] == ',' || sv[k] == '(')
+        },
+    })
+}
+// `push(` / `push_in(` anchored at i — a SUFFIX match, so `gstr_push(`, `rpush(` and `list_push(` all
+// land here, while `pushed(` and `push_uesc(` do not (the `(` must follow immediately).
+push_literal_at = (sv: [u8], i: i64) bool {
+    lp = sv.tok_at("push(".view(), i).match ({
+        true  => i + 4,
+        false => sv.tok_at("push_in(".view(), i).then({ i + 7 }, { 0 - 1 }),
+    })
+    (lp < 0).then({ false }, { sv.last_arg_is_decimal(sv.close_paren(lp, 0)) })
 }
 // does this file (a `[u8]` view of raw source) contain `pattern` of `kind` OUTSIDE a `//` line
 // comment? We track an in-comment flag (set at `//`, cleared at newline) — the same comment-stripping
 // python's `_code` does. Block comments and string literals are NOT special-cased (matching python).
 // STRING LITERALS ARE SKIPPED, like comments. A file that QUOTES a primitive is not USING one:
-// tools/memory_map.zen documents the raw floor with `example: "p := malloc(n)"`, and scanning the
+// tools/memory_map.zen documents the raw floor with `example: "p = malloc(n)"`, and scanning the
 // quoted bytes reported it as a raw-alloc violation. Quote parity also handles `"""` raw strings —
 // three toggles is one net toggle — so `"""…"""` opens and closes correctly. A raw string whose
 // CONTENT holds an odd number of `"` would desync; none of the scanned files does that today.
@@ -244,17 +295,19 @@ found = (region: StringView) bool { region.is_empty().then({ false }, { true }) 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 4: raw malloc/calloc/realloc/free stay behind the allocator floor (the original port).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// RAW_ALLOC_ALLOWED's complement, mirrored EXACTLY from test_primitive_boundaries.py.
+// RAW_ALLOC_ALLOWED's complement, originally mirrored from test_primitive_boundaries.py. Three of the
+// ported entries had NOTHING behind them and were deleted (`src/std/rt.zen`, `c_emit.zen`,
+// `c_expr.zen` — c_emit's only `malloc` is inside the C-prelude string literal, which file_has
+// correctly skips), on this file's own rule: an allowlist entry with nothing behind it is an
+// exemption waiting to be spent by accident. Deleting one is free to verify — the suite goes red the
+// moment the entry was load-bearing after all.
 alloc_not_whitelisted = (path: StringView) bool {
     ne(path, "src/std/mem/alloc.zen")
         && ne(path, "src/std/mem/raw.zen")
-        && ne(path, "src/std/rt.zen")
         && ne(path, "src/std/concurrent/thread.zen")
         && ne(path, "src/std/concurrent/pool.zen")
         && ne(path, "src/std/concurrent/pool_actor.zen")
         && ne(path, "src/compiler/genc.zen")
-        && ne(path, "src/compiler/backend/c/c_emit.zen")
-        && ne(path, "src/compiler/backend/c/c_expr.zen")
 }
 // `(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(` anchored at i (kind 1 = dot-excluded boundary).
 file_has_raw_alloc = (sv: [u8]) bool {
@@ -526,7 +579,7 @@ fmt_suite = (mp: MutPtr<Malloc>) i32 {
 // with a 200000-char string, compile + run it, and assert the runtime string's length is exact. At the
 // default stack this crashed (SIGSEGV) with the old per-char recursion; iterative lexing/codegen fixes it.
 bigstr_suite = (mp: MutPtr<Malloc>) i32 {
-    rc = shell(mp.zo_cmd("head -c 200000 /dev/zero | tr '\\0' A > $ZT/bb.txt; { printf '{ len } = std.text.str\\n{ to_exit } = std.core.bool\\nmain = () i32 {\\n    s := \"'; cat $ZT/bb.txt; printf '\"\\n    (s.len() == 200000).to_exit()\\n}\\n'; } > $ZT/bigstr.zen; ./zen run $ZT/bigstr.zen")).expect("harness: shell")
+    rc = shell(mp.zo_cmd("head -c 200000 /dev/zero | tr '\\0' A > $ZT/bb.txt; { printf '{ len } = std.text.str\\n{ to_exit } = std.core.bool\\nmain = () i32 {\\n    s ::= \"'; cat $ZT/bb.txt; printf '\"\\n    (s.len() == 200000).to_exit()\\n}\\n'; } > $ZT/bigstr.zen; ./zen run $ZT/bigstr.zen")).expect("harness: shell")
     run_suite("boundaries: 200KB string literal lexes + runs (no stack overflow, #66c)", [rc == 0])
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -691,6 +744,145 @@ spelling_suite = (mp: MutPtr<Malloc>) i32 {
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 12: the retired walrus binding spelling never comes back.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// Const-by-default replaced ONE always-mutable binding spelling with four that say what they mean:
+//   x = v      constant, inferred        x ::= v     mutable, inferred
+//   x: T = v   constant, annotated       x :: T = v  mutable, annotated
+// The parser no longer accepts the old one: every shape that used to (parse_binding, both marks;
+// decl_is_retired_global; decl_is_typed_global) now reports `error[parse]: `:=` is retired` and
+// names the four replacements. That diagnostic has its own teeth in tests/harness_build.zen.
+//
+// This rule is the OTHER half, and it scans RAW BYTES — comments and string literals INCLUDED,
+// exactly like SUITE 11. The reasoning is not the same, though, and saying so matters:
+//   * for the string spellings, a string literal was the REVIVAL path (one more `tok_eq` branch).
+//     The walrus is recognized by BYTE (parse_atom.is_walrus reads ':' then '='), so no string
+//     literal can revive it, and deleting the PE_WALRUS report is what the harness_build cases pin.
+//   * here the raw scan earns its keep because a walrus inside a comment or a string is not inert.
+//     tools/fuzz-diff.zen and tools/sigs.zen EMIT Zen source from string literals — a walrus there
+//     generates a program that no longer compiles. Every `//   m := Malloc(…)` doc-comment in
+//     src/std teaches a spelling the compiler now rejects. Both were live in this tree, and a
+//     comment/string-stripped scan would have reported neither.
+// The needle is the two bytes `:` `=` NOT preceded by another `:`, so `x ::= v` (the mutable form)
+// and `x :: T = v` never match.
+//
+// Three files are exempt, each because it must NAME the dead spelling to do its job:
+//   * src/compiler/validate/diag.zen — the diagnostic that redirects it. Naming a retired spelling
+//     is the whole content of redirecting it (the same exemption SUITE 11 gives validate/util.zen).
+//   * tests/harness_build.zen — the diagnostic's own test inputs. A case that pins `:= is retired`
+//     has to feed the parser a walrus.
+//   * this file — it holds the needle.
+// Named individually, not by directory: a new file cannot inherit the exemption.
+walrus_allowed = (path: StringView) bool {
+    path == "src/compiler/validate/diag.zen"
+        || path == "tests/harness_build.zen"
+        || path == "tests/harness_boundaries.zen"
+}
+// `:=` at index i, with a leading `:` EXCLUDING the match — `::=` is the live mutable form.
+walrus_at = (sv: [u8], i: i64) bool {
+    (i + 1 >= sv.len).match ({
+        true  => false,
+        false => sv[i] == ':' && sv[i + 1] == '=' && (i == 0 || sv[i - 1] != ':'),
+    })
+}
+file_has_walrus = (sv: [u8]) bool {
+    found ::= false
+    sv.loop((h, i, b) {
+        sv.walrus_at(i).then({
+            found = true
+            h.break
+        })
+    })
+    found
+}
+walrus_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
+    path.is_empty().match ({
+        true  => true,
+        false => path.walrus_allowed().match ({
+            true  => true,
+            false => mp.contents_in(path).match ({
+                .Ok(raw) => raw.view().file_has_walrus().match ({
+                    true  => {
+                        out("\n  retired walrus binding in ")
+                        out(path)
+                        out(" — write `x = v` / `x: T = v` (constant) or `x ::= v` / `x :: T = v` (mutable)\n")
+                        false
+                    },
+                    false => true,
+                }),
+                .Err(e)  => false,
+            }),
+        }),
+    })
+}    // unreadable = FAIL, never a silent pass
+// Same tree-wide `find` as SUITE 11, for the same reason: tests/ and scripts/ hold real Zen that the
+// compiler compiles (scripts/alloc-fuzz/alloc-stress.zen was the last file in the tree still using
+// the retired spelling, and it sits outside BOTH ob_files.txt and the fmt gate's file set).
+walrus_suite = (mp: MutPtr<Malloc>) i32 {
+    shell(mp.zo_cmd("find . -name '*.zen' -not -path './.git/*' -not -path './.claude/*' 2>/dev/null | sed 's|^./||' | LC_ALL=C sort > $ZT/ob_all.txt"))
+    mp.contents_in(mp.zo_path("ob_all.txt")).match ({
+        .Ok(listing) => {
+            files = mp.split_in(listing, '\n')
+            results :: [bool] = mp.nbuf(true, files.len)
+            files.loop((h, i, path) {
+                results[i] = mp.walrus_passes(path)
+            })
+            run_suite("boundaries: the retired walrus binding spelling stays dead", results)
+        },
+        .Err(e)      => run_suite("boundaries: walrus binding (cannot enumerate tree)", [false]),
+    })
+}
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// SUITE 13: a byte pushed into a builder is written as a CHAR LITERAL, never as its ASCII code.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
+// `'a'` is that byte's value in Zen, so `b == ':'` and `b == 58` compile identically — and only one
+// of them says what the byte is. compiler.resolve had `.rpush(a, '.')` and `.rpush(a, 10)` inside one
+// chain, and the comment above `res_body_start` spelled the separator `'\n'` while the code beside it
+// said `10`.
+//
+// The rule is DELIBERATELY narrow. "No magic numbers" is not mechanically checkable: most 2-3 digit
+// literals in this tree are genuinely numbers (diagnostic codes 1..66, errnos, buffer capacities,
+// SHA-256 rotations, UTF-8 masks, HTTP statuses, calendar ranges) and a wider scan would be a wall of
+// false positives nobody would keep green. What IS checkable is a slot whose TYPE is a byte: the
+// `push` family (`gstr_push`, `rpush`, `push_in` — all `(…, b: u8)`) takes one, so a bare decimal
+// literal there is always an ASCII code wearing a number's clothes. Comments and string literals are
+// skipped (file_has), because prose about byte 10 is prose.
+//
+// Not covered, and it must not be: a byte behind a conversion (`gstr_push(mp, 8.to_u8())`, the JSON
+// `\b`/`\f` escapes in lsp.zen and json.zen). `'\x08'` IS a legal char literal, but `zen fmt` prints
+// it back as `8`, so the fmt gate and this rule would contradict each other. The formatter has to
+// round-trip `'\xNN'` before those sites can be asked to change.
+alloc_push_file = (mp: MutPtr<Malloc>, path: StringView) bool {
+    path.is_empty().match ({
+        true  => true,
+        false => mp.contents_in(path).match ({
+            .Ok(raw) => raw.view().file_has("", 4).match ({
+                true  => {
+                    out("\n  ASCII code in a byte-push slot in ")
+                    out(path)
+                    out(" — write the char literal (`'\\n'`, `':'`), not its number\n")
+                    false
+                },
+                false => true,
+            }),
+            .Err(e)  => false,
+        }),
+    })
+}    // unreadable = FAIL, never a silent pass
+push_suite = (mp: MutPtr<Malloc>) i32 {
+    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
+        .Ok(listing) => {
+            files = mp.split_in(listing, '\n')
+            results :: [bool] = mp.nbuf(true, files.len)
+            files.loop((h, i, path) {
+                results[i] = mp.alloc_push_file(path)
+            })
+            run_suite("boundaries: a pushed byte is a char literal, not an ASCII code", results)
+        },
+        .Err(e)      => run_suite("boundaries: byte-push literals (cannot read file list)", [false]),
+    })
+}
+// ─────────────────────────────────────────────────────────────────────────────────────────────────
 harness_boundaries_run* = () i32 {
     m = Malloc(_: 0)
     mp = m.addr()
@@ -713,6 +905,8 @@ harness_boundaries_run* = () i32 {
     fails = fails + mp.fmt_suite()
     fails = fails + mp.layering_suite()
     fails = fails + mp.spelling_suite()
+    fails = fails + mp.walrus_suite()
+    fails = fails + mp.push_suite()
     fails = fails + mp.bigstr_suite()
     fails
 }

@@ -145,7 +145,7 @@ fit_err* = (env: Env, argty: Ty, pty: Ty) i32 {
 // `v` to a negative i64, so `v < 0` alone cannot tell a written magnitude from a real negative. `neg`
 // records the SEMANTIC sign: a bare `.Int` is a non-negative written magnitude (neg=false) even when
 // `v` wrapped negative; only a subtraction/negation that yields a negative result sets neg=true. That
-// lets `x: u64 := 18446744073709551615` fit while `x: u64 := -1` (i.e. `0 - 1`) is still rejected.
+// lets `x: u64 = 18446744073709551615` fit while `x: u64 = -1` (i.e. `0 - 1`) is still rejected.
 LitVal*: {
     ok: bool,
     v: i64,
@@ -240,7 +240,7 @@ lit_val = (e: Ptr<Expr>) LitVal {
     })
 }
 // A bare integer literal picks its own WIDTH from its value (`.Int(n)` > i32-max infers i64), but a
-// binop takes the width of its leftmost operand — so `G := 1 << 32` inferred an i32 SLOT and the
+// binop takes the width of its leftmost operand — so `G = 1 << 32` inferred an i32 SLOT and the
 // (correctly 64-bit) C constant truncated on the way in, silently. Fold such a binop to the plain
 // `.Int` it denotes so one rule decides the width everywhere. Only OUT-OF-i32-RANGE constants fold:
 // in-range constant math keeps its written form, so its emitted C is byte-for-byte unchanged.
@@ -303,7 +303,7 @@ is_int_slot = (t: Ty) bool {
 }
 // Authoritative verdict for a numeric LITERAL flowing into an int slot: 0 = fits, 1 = overflow,
 // -1 = not a literal-into-int-slot (caller falls back to its structural fit logic). This MUST take
-// precedence over the unknown_ty leniency, else `x: i8 := 200` (i8 is an undeclared Named → "unknown")
+// precedence over the unknown_ty leniency, else `x: i8 = 200` (i8 is an undeclared Named → "unknown")
 // would silently pass and truncate at cc.
 lit_slot_verdict* = (e: Ptr<Expr>, t: Ty) i32 {
     (e.is_lit_numeric() && t.is_int_slot()).match ({
@@ -489,7 +489,7 @@ derefs_nullable = (env: Env, c: CallData) bool {
 // Calls: local signatures are checked; imported/deferred trait names are accepted; unknowns reject.
 // Stage 3 nullability: a `load`/`store`/`offset` whose pointer operand is a nullable `RawPtr<T>`
 // (T != u8) that has NOT been proven non-null is rejected. The proof is carried by the TYPE: a
-// `q := assert_nonnull(p)` yields `q: MutPtr<T>`, so `load(q)` sees a non-nullable kind and passes.
+// `q = assert_nonnull(p)` yields `q: MutPtr<T>`, so `load(q)` sees a non-nullable kind and passes.
 // `RawPtr<u8>` (the byte-buffer floor) and `Ptr`/`MutPtr` are never nullable, so they are exempt.
 null_deref_kind* = (env: Env, c: CallData) i32 {
     kv_at(env.derefs_nullable(c).then({ KNULLDEREF() }, { 0 }), c.pos)
@@ -529,7 +529,7 @@ tparam_bound* = (tp: Param) StringView {
         _         => "",
     })
 }
-// An INDIRECT call through a fn-value (`f := g  f(x)`, or an FnT parameter `f`): check the arg COUNT
+// An INDIRECT call through a fn-value (`f = g  f(x)`, or an FnT parameter `f`): check the arg COUNT
 // against the FnT's params, then each CONCRETE param's arg type. Param positions typed by an unbound
 // tparam stay lenient (generic FnT-param templates resolve those at mono). Without this, a wrong-arity
 // indirect call slipped past SEMA and broke at cc ("too few arguments to function …").
@@ -862,7 +862,7 @@ ut_payloads_kind* = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32
     })
     acc
 }
-// also walk the body: a LOCAL `let` with an explicit annotation (`x: Foo := e`) names a type, and an
+// also walk the body: a LOCAL `let` with an explicit annotation (`x: Foo = e`) names a type, and an
 // undefined one leaked an unknown C type just like a param/field/return would. Recurse through nested
 // control flow (Block/Loop/Match/Cond) so a deeply-nested `let` annotation is checked too.
 ut_arms_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], arms: [ArmData]) i32 {
@@ -881,7 +881,7 @@ ut_expr_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], e: Ptr<Expr>) i32
         _         => 0,
     })
 }
-// a LOCAL `let` annotation (`x: T := e`); tvoid means unannotated, so nothing to check.
+// a LOCAL `let` annotation (`x: T = e`); tvoid means unannotated, so nothing to check.
 ut_let_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], l: LetData) i32 {
     l.ty.is_void_ty().match ({
         true  => 0,
@@ -1154,7 +1154,7 @@ is_scope_alloc_member* = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
 }
 // ── v2: USE vs DISCHARGE (widen from never-named to used-but-never-discharged) ─────────────────────
 // v1 exempted an owner the moment its name reappeared ANYWHERE (any mention = discharge). That misses
-// the common leak `o := alloc()  n := o.get().id  n` — `o` is named (the read) yet never freed/moved/
+// the common leak `o = alloc()  n = o.get().id  n` — `o` is named (the read) yet never freed/moved/
 // returned. v2 distinguishes a pure READ from a DISCHARGE: an owner leaks if EVERY later mention is a
 // pure owner-getter READ (`o.get()/o.val()/o.ptr()/o.count()/o.clone()` — the receiver position of a
 // non-consuming accessor), and it is NEVER discharged. Soundness (ZERO false positives): ANY real
@@ -1162,7 +1162,7 @@ is_scope_alloc_member* = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
 // receiver (`o.release_in(a)`: `release_in`∉getters), a send/move-into-consuming-call (`o` as a
 // non-receiver arg), a return/escape (`o` bare, or wrapped `ok(o)`/`.Some(o)` with `o` as a
 // non-getter-arg), a struct-literal field / slice element (`o` in a MakeStruct/SliceLit), an affine
-// copy (`c := o`: `o` bare in a let value), a pointer-free (`o.addr()`: `addr`∉getters) — so ANY of
+// copy (`c = o`: `o` bare in a let value), a pointer-free (`o.addr()`: `addr`∉getters) — so ANY of
 // these is an IMPURE use that suppresses the flag. Passing `o` to a callee we cannot summarize is
 // likewise `o` in a non-getter-arg position → impure → not flagged (the interprocedural under-report).
 // The ONLY thing treated as a non-discharging read is `o` as the arg-0 receiver of a whitelisted getter
