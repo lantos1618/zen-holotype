@@ -17,10 +17,10 @@
 { Arena } = std.mem.arena
 pa = std.concurrent.pool_actor
 { Context, Receiver } = std.concurrent.pool_actor
-NMSG := 2000
-SCAP := 256    // 4 chunks of headroom — far less than NMSG, so only per-behavior reset makes every bump fit
-CHUNK := 64
-WORKERS := 2
+NMSG = 2000
+SCAP = 256    // 4 chunks of headroom — far less than NMSG, so only per-behavior reset makes every bump fit
+CHUNK = 64
+WORKERS = 2
 Msg*: Work(i64)
 Worker*: {
     scratch: MutPtr<Arena>,
@@ -30,7 +30,7 @@ Worker.impl(Receiver, {
     receive = (w: MutPtr<Worker>, ctx: Context<Msg>) void {
         ctx.msg.match ({
             .Work(n) => {
-                p := w.scratch.bump(CHUNK)    // allocate this behavior's OWN temporary into scratch
+                p = w.scratch.bump(CHUNK)    // allocate this behavior's OWN temporary into scratch
                 (is_null(p) == false).then({
                     atomic_add_i64(w.ok, 1)
                 })
@@ -39,8 +39,8 @@ Worker.impl(Receiver, {
     }
 })
 tramp = (user: RawPtr<u8>, msg: i64) void {
-    a: [Worker] := user.slice(1)
-    b: [Msg] := msg.offset(0).slice(1)
+    a: [Worker] = user.slice(1)
+    b: [Msg] = msg.offset(0).slice(1)
     a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
@@ -51,18 +51,18 @@ send_n = (p: MutPtr<Pool>, h: pa.PooledHandle<Worker>, k: i64) void {
     })
 }
 main = () i32 {
-    ok := assert_nonnull(malloc(8))
+    ok = assert_nonnull(malloc(8))
     store_i64(ok, 0)
-    sc := pa.new_scratch(SCAP)
-    h := pa.spawn_actor_scratch_heap(NMSG + 16, Worker(
+    sc = pa.new_scratch(SCAP)
+    h = pa.spawn_actor_scratch_heap(NMSG + 16, Worker(
         scratch: sc,
         ok: ok,
     ), tramp, sc)
-    p := pool_open(WORKERS, 16)
+    p = pool_open(WORKERS, 16)
     send_n(p, h, 0)
     p.pool_quiesce_stop()
-    got := load_i64(ok)
-    high := sc.used()
+    got = load_i64(ok)
+    high = sc.used()
     pa.close(h)
     p.pool_close()
     pa.free_scratch(sc)

@@ -6,7 +6,7 @@
 // NO Python anywhere — the compiler tests itself, in itself, by driving the committed `zenc`.
 { VerdictCase, run_verdicts } = harness_lib
 harness_verdict_run* = () i32 {
-    a := run_verdicts("verdict", [
+    a = run_verdicts("verdict", [
         VerdictCase(
             src: "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\nHolder: { ptr: RawPtr<u8> }\nmain = () i32 {\n    a := halloc.gpa()\n    p := a.addr().acquire(64)\n    h := Holder(ptr: p)\n    a.addr().release(p)\n    q := a.addr().acquire(64)\n    h.ptr = q\n    v := load(h.ptr)\n    a.addr().release(q)\n    v.to_i32()\n}\n",
             should_pass: true,
@@ -1425,7 +1425,7 @@ harness_verdict_run* = () i32 {
     // LIT-FOLD OVERFLOW: a literal `+`/`-`/`*` whose i64 fold would WRAP no longer yields a wrong
     // range verdict — the fold defers (u64 := MAX+MAX accepted); in-range folds still verdict
     // (i32 := 2G+2G still assign-fit).
-    b := run_verdicts("verdict-kind", [
+    b = run_verdicts("verdict-kind", [
         VerdictCase(
             src: "R*: Ok(StringView) | Err(i32)\nmain = () i32 {\n    done := false\n    r: R := .Err(3)\n    s := r.match ({\n        .Ok(ns) => ns,\n        .Err(e) => { done = true },\n    })\n    0\n}\n",
             should_pass: false,
@@ -2897,24 +2897,29 @@ harness_verdict_run* = () i32 {
             kind: "sendable",
         ),
         VerdictCase(
-            src: "k = 5\nmain* = () i32 { 0 }\n",
-            should_pass: false,
-            kind: "bad-binding",
+            src: "k = 5\nmain* = () i32 { to_i32(k) }\n",
+            should_pass: true,
+            kind: "",
         ),
         VerdictCase(
-            src: "x = 3 + 4\nwanted* = () i32 { 7 }\nmain* = () i32 { wanted() }\n",
-            should_pass: false,
-            kind: "bad-binding",
+            src: "x = 3 + 4\nwanted* = () i32 { 7 }\nmain* = () i32 { to_i32(x) + wanted() }\n",
+            should_pass: true,
+            kind: "",
         ),
         VerdictCase(
-            src: "K = Ctor(1, 2)\nmain* = () i32 { 0 }\n",
-            should_pass: false,
-            kind: "bad-binding",
+            src: "K = (1 << 20) * 2\nmain* = () i32 { to_i32(K) }\n",
+            should_pass: true,
+            kind: "",
         ),
         VerdictCase(
-            src: "K = compute()\nmain* = () i32 { 0 }\n",
+            src: "f = (x) i32 { 0 }\nmain* = () i32 { f(1) }\n",
             should_pass: false,
-            kind: "bad-binding",
+            kind: "parse",
+        ),
+        VerdictCase(
+            src: "counter ::= 0\nbump = () i64 {\n    counter = counter + 1\n    counter\n}\nmain* = () i32 { to_i32(bump()) }\n",
+            should_pass: true,
+            kind: "",
         ),
         VerdictCase(
             src: "m = std.math\nmain* = () i32 { to_i32(m.abs(0 - 5)) }\n",
@@ -3253,13 +3258,43 @@ harness_verdict_run* = () i32 {
         ),
         VerdictCase(
             src: "test* = () i32 {\n    x: i64 = 5\n    x.to_i32()\n}\n",
-            should_pass: false,
-            kind: "bad-binding",
+            should_pass: true,
+            kind: "",
         ),
         VerdictCase(
-            src: "test* = () i32 {\n    n := 0\n    @while (n < 1) {\n        y: i64 = 2\n        n = n + 1\n    }\n    n\n}\n",
+            src: "test* = () i32 {\n    n ::= 0\n    @while (n < 1) {\n        y: i64 = 2\n        n = n + to_i32(y)\n    }\n    n\n}\n",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "test* = () i32 {\n    a = 1\n    b ::= 2\n    c :: i32 = 3\n    b = b + c\n    a + b\n}\n",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "test* = () i32 {\n    x = 0\n    x = 1\n    x\n}\n",
             should_pass: false,
-            kind: "bad-binding",
+            kind: "assign-const",
+        ),
+        VerdictCase(
+            src: "test* = () i32 {\n    x: i32 = 0\n    x = 1\n    x\n}\n",
+            should_pass: false,
+            kind: "assign-const",
+        ),
+        VerdictCase(
+            src: "test* = () i32 {\n    n ::= 0\n    (n == 0).match ({\n        true  => {\n            b = 1\n            n = b\n        },\n        false => {\n            b = 2\n            n = b\n        },\n    })\n    n\n}\n",
+            should_pass: true,
+            kind: "",
+        ),
+        VerdictCase(
+            src: "test* = () i32 {\n    x :: = 5\n    x\n}\n",
+            should_pass: false,
+            kind: "parse",
+        ),
+        VerdictCase(
+            src: "test* = () i32 {\n    x: i32 5\n    x\n}\n",
+            should_pass: false,
+            kind: "parse",
         ),
         VerdictCase(
             src: "test* = () i32 {\n    x: i64 := 5\n    x = x + 1\n    x.to_i32() - 6\n}\n",
@@ -3292,6 +3327,22 @@ harness_verdict_run* = () i32 {
             kind: "parse",
         ),
     ])
+    // ── const-by-default at TOP LEVEL: an unmarked `name = value` is a module CONSTANT. This was
+    // error[bad-binding] ("use `:=` for a value global"), which is exactly backwards now: `=` is
+    // the constant spelling and `::=` is the mutable one. A module ALIAS (`m = std.math`) and a
+    // FUNCTION (`f = () i32 { … }`) keep the same `=`, so the three shapes must stay apart.
+    // a parenthesized VALUE after `=` is a constant, not a function literal (the `(` used to
+    // decide that on its own, and swallowed the rest of the file)
+    // …while a real parameter list after `=` is still a function, so a missing parameter TYPE
+    // keeps its parse diagnostic instead of degrading into a global-initializer error
+    // ── const-by-default: the four local binding forms, and the rule that gives them teeth ──
+    // `::` marks MUTABILITY, `:` introduces the TYPE, `=` binds the VALUE; each mark is
+    // independently optional, so the four spellings below are the whole surface.
+    // the whole point: an UNMARKED binding is a constant, so assigning to it is a diagnostic and
+    // not a silently accepted second meaning of `=`
+    // a bare `x = v` DECLARES when nothing named `x` is in scope — including inside a nested
+    // block, and independently in two sibling match arms (the scope is lexical, not per-function)
+    // the annotated forms report what the parser WANTED, not a generic "expected an expression"
     // ONE SPELLING PER JOB: `x: T = v` is not a second spelling of `x: T := v` — `:=` binds, `=`
     // assigns, `:` annotates, and adding a type must not change the binding operator. Both
     // statement positions (a body, a nested block) reject; the `:=` form is unchanged.

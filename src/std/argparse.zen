@@ -61,8 +61,8 @@ ap_some = (v: StringView) Opt<StringView> { .Some(v) }
 ap_none = () Opt<StringView> { .None }
 // append one element to a slice, copied into a fresh allocator-owned buffer of length +1.
 ap_add<T> = (a: Allocator, xs: [T], x: T) [T] {
-    n := xs.len
-    out: [T] := slice(a.try_acquire((n + 1) * sizeof(T)).expect("std.argparse: out of memory"), n + 1)
+    n = xs.len
+    out :: [T] = slice(a.try_acquire((n + 1) * sizeof(T)).expect("std.argparse: out of memory"), n + 1)
     xs.loop((h, i, e) {
         out[i] = e
     })
@@ -71,7 +71,7 @@ ap_add<T> = (a: Allocator, xs: [T], x: T) [T] {
 }
 // an all-false `[bool]` of length `n` (parallel to the flag specs).
 ap_bools = (a: Allocator, n: i64) [bool] {
-    out: [bool] := a.nbuf(false, n)
+    out :: [bool] = a.nbuf(false, n)
     out.loop((h, i, e) {
         out[i] = false
     })
@@ -79,8 +79,8 @@ ap_bools = (a: Allocator, n: i64) [bool] {
 }
 // an all-`.None` `[Opt<str>]` of length `n` (parallel to the option specs).
 ap_opts = (a: Allocator, n: i64) [Opt<StringView>] {
-    seed: Opt<StringView> := .None
-    out: [Opt<StringView>] := a.nbuf(seed, n)
+    seed: Opt<StringView> = .None
+    out :: [Opt<StringView>] = a.nbuf(seed, n)
     out.loop((h, i, e) {
         out[i] = seed
     })
@@ -156,7 +156,7 @@ Parser*: {
     }
     flag_index = (p: Parser, name: StringView) i64 {
         // spec lookups: index into the parallel result arrays (-1 when absent).
-        idx: i64 := 0 - 1
+        idx :: i64 = 0 - 1
         p.flags.loop((h, i, f) {
             (f.name == name).then({
                 idx = i
@@ -166,7 +166,7 @@ Parser*: {
         idx
     }
     flag_by_short = (p: Parser, c: u8) i64 {
-        idx: i64 := 0 - 1
+        idx :: i64 = 0 - 1
         p.flags.loop((h, i, f) {
             (f.short == c).then({
                 idx = i
@@ -176,7 +176,7 @@ Parser*: {
         idx
     }
     opt_index = (p: Parser, name: StringView) i64 {
-        idx: i64 := 0 - 1
+        idx :: i64 = 0 - 1
         p.opts.loop((h, i, o) {
             (o.name == name).then({
                 idx = i
@@ -186,7 +186,7 @@ Parser*: {
         idx
     }
     opt_by_short = (p: Parser, c: u8) i64 {
-        idx: i64 := 0 - 1
+        idx :: i64 = 0 - 1
         p.opts.loop((h, i, o) {
             (o.short == c).then({
                 idx = i
@@ -197,7 +197,7 @@ Parser*: {
     }
     req_pos_count = (p: Parser) i64 {
         // number of required positionals (they are satisfied left-to-right).
-        c: i64 := 0
+        c :: i64 = 0
         p.poss.loop((h, i, ps) {
             ps.req.then({
                 c = c + 1
@@ -213,7 +213,7 @@ Parser*: {
         // a one-line-per-item usage / help string, allocator-owned. Built with std.text.sb's
         // sticky builder: the chain records the first allocation failure and every later op
         // no-ops, so ONE `.expect` at the settle replaces an expect per append.
-        b := a
+        b ::= a
             .sb()
             .s("usage: ")
             .s(p.prog)
@@ -247,9 +247,9 @@ Parser*: {
 }
 // a fresh parser with no specs. Build it up with the `.flag` / `.option` / `.positional` methods.
 ap_new* = (prog: StringView) Parser {
-    fs: [FlagSpec] := slice(null_ptr(), 0)
-    os: [OptSpec] := slice(null_ptr(), 0)
-    ps: [PosSpec] := slice(null_ptr(), 0)
+    fs: [FlagSpec] = slice(null_ptr(), 0)
+    os: [OptSpec] = slice(null_ptr(), 0)
+    ps: [PosSpec] = slice(null_ptr(), 0)
     Parser(
         prog: prog,
         flags: fs,
@@ -268,12 +268,12 @@ Parsed: {
     help: bool,
     get_flag = (r: Parsed, name: StringView) bool {
         // was `--<name>` / `-<short>` given? (unknown names read as false)
-        fi := r.spec.flag_index(name)
+        fi = r.spec.flag_index(name)
         (fi >= 0).then({ r.flags[fi] }, { false })
     }
     get_opt = (r: Parsed, name: StringView) Opt<StringView> {
         // the value of `--<name>`, or `.None` (unknown names also read as `.None`).
-        oi := r.spec.opt_index(name)
+        oi = r.spec.opt_index(name)
         (oi >= 0).then({ r.opts[oi] }, { ap_none() })
     }
     positionals = (r: Parsed) [StringView] {
@@ -293,19 +293,19 @@ Parsed: {
 // Walk `args` (the arguments AFTER the program name). Returns the filled `Parsed`, or the first
 // `ArgError` encountered. `a` owns every allocation in the result.
 ap_parse = (a: Allocator, p: Parser, args: [StringView]) Result<Parsed, ArgError> {
-    flags: [bool] := a.ap_bools(p.flags.len)
-    optvals: [Opt<StringView>] := a.ap_opts(p.opts.len)
-    poss: [StringView] := a.nbuf("", args.len)    // upper bound: every arg a positional
-    np: i64 := 0
-    help := false
-    end := false
-    skip: i64 := 0 - 1    // index whose value a preceding option already consumed
-    has_err := false
-    the_err: ArgError := .UnknownFlag("")
+    flags :: [bool] = a.ap_bools(p.flags.len)
+    optvals :: [Opt<StringView>] = a.ap_opts(p.opts.len)
+    poss :: [StringView] = a.nbuf("", args.len)    // upper bound: every arg a positional
+    np :: i64 = 0
+    help ::= false
+    end ::= false
+    skip :: i64 = 0 - 1    // index whose value a preceding option already consumed
+    has_err ::= false
+    the_err :: ArgError = .UnknownFlag("")
     args.loop((h, i, tok) {
         (i <= skip == false).then({
-            tv := tok.view()
-            nlen := tv.len
+            tv = tok.view()
+            nlen = tv.len
             end.match ({
                 true  => {
                     poss[np] = tok
@@ -318,15 +318,15 @@ ap_parse = (a: Allocator, p: Parser, args: [StringView]) Result<Parsed, ArgError
                     false => tok.starts_with("--").match ({
                         true  => {
                             // ── long: --name / --name=value ──
-                            rest := tok.trim_prefix("--")
-                            eqi := rest.find("=")
+                            rest = tok.trim_prefix("--")
+                            eqi = rest.find("=")
                             (eqi >= 0).match ({
                                 true  => {
-                                    name := a.substr_in(rest, 0, eqi).expect("argparse: oom")
-                                    val := a
+                                    name = a.substr_in(rest, 0, eqi).expect("argparse: oom")
+                                    val = a
                                         .substr_in(rest, eqi + 1, rest.len() - (eqi + 1))
                                         .expect("argparse: oom")
-                                    oi := p.opt_index(name)
+                                    oi = p.opt_index(name)
                                     (oi >= 0).match ({
                                         true  => {
                                             optvals[oi] = ap_some(val)
@@ -350,13 +350,13 @@ ap_parse = (a: Allocator, p: Parser, args: [StringView]) Result<Parsed, ArgError
                                         help = true
                                     },
                                     false => {
-                                        fi := p.flag_index(rest)
+                                        fi = p.flag_index(rest)
                                         (fi >= 0).match ({
                                             true  => {
                                                 flags[fi] = true
                                             },
                                             false => {
-                                                oi := p.opt_index(rest)
+                                                oi = p.opt_index(rest)
                                                 (oi >= 0).match ({
                                                     true  => (i + 1 < args.len).match ({
                                                         true  => {
@@ -384,20 +384,20 @@ ap_parse = (a: Allocator, p: Parser, args: [StringView]) Result<Parsed, ArgError
                         false => (nlen >= 2 && tv[0] == '-').match ({
                             true  => {
                                 // ── short: -f, bundled -abc, attached -ovalue, or -o value ──
-                                stop := false
+                                stop ::= false
                                 tv.loop((hc, j, c) {
                                     ((j == 0 || stop || has_err) == false).then({
-                                        fi := p.flag_by_short(c)
+                                        fi = p.flag_by_short(c)
                                         (fi >= 0).match ({
                                             true  => {
                                                 flags[fi] = true
                                             },
                                             false => {
-                                                oi := p.opt_by_short(c)
+                                                oi = p.opt_by_short(c)
                                                 (oi >= 0).match ({
                                                     true  => (j + 1 < tv.len).match ({
                                                         true  => {
-                                                            val := a
+                                                            val = a
                                                                 .substr_in(tok, j + 1, tv.len - (j + 1))
                                                                 .expect("argparse: oom")
                                                             optvals[oi] = ap_some(val)
@@ -460,7 +460,7 @@ ap_parse = (a: Allocator, p: Parser, args: [StringView]) Result<Parsed, ArgError
                     })
                 })
             })
-            rq := p.req_pos_count()
+            rq = p.req_pos_count()
             (has_err == false).then({
                 (np < rq).then({
                     the_err = ap_missing_required(p.poss[np].name)
@@ -469,7 +469,7 @@ ap_parse = (a: Allocator, p: Parser, args: [StringView]) Result<Parsed, ArgError
             })
         })
     })
-    out: Result<Parsed, ArgError> := has_err.match ({
+    out: Result<Parsed, ArgError> = has_err.match ({
         true  => .Err(the_err),
         false => .Ok(Parsed(
             spec: p,

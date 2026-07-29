@@ -9,7 +9,7 @@
 { String } = std.text.string
 { integer_in, float_in, f64_special } = std.text.num
 // std's ONE integer digit loop (see the seed-closure note in std.text.num): the streaming
-// writers below render through these buffer writers into a small stack scratch, then stream
+// writers below render through these buffer writers into a small stack fmt_scratch, then stream
 // the finished digits in a single out_bytes — no digit recursion is re-rolled here.
 { num_write_integer, num_write_udigits, num_uwrite_udigits, num_write_fpad, num_write_zeros } = std.text.num
 // Shared, emit-agnostic float-decomposition core (defined once in std.text.num): exponent,
@@ -25,7 +25,7 @@ Display*: {
 }
 // Print an owned temporary String and release its buffer.
 print_owned_in = (a: Allocator, t: String) i64 {
-    w := out_bytes(t.bytes()).or(0)
+    w = out_bytes(t.bytes()).or(0)
     t.free_in(a)
     w
 }
@@ -45,11 +45,11 @@ write_float_in* = (a: Allocator, x: f64) Result<i64, IoError> {
     })
 }
 write_digit = (d: i64) i64 { out_bytes("0123456789".offset(d).slice(1)).or(0) }
-// Stream the first `len` bytes of the digit scratch in one out_bytes call.
+// Stream the first `len` bytes of the digit fmt_scratch in one out_bytes call.
 // The digit loops themselves live ONCE in std.text.num (see the seed-closure note there);
 // output is byte-identical to the old per-digit streaming — same digits, one write call.
 write_scratch = (p: RawPtr<u8>, len: i64) i64 { out_bytes(slice(p, len)).or(0) }
-// ONE digit scratch per OS thread, allocated on first use and reused by every writer below.
+// ONE digit fmt_scratch per OS thread, allocated on first use and reused by every writer below.
 // 21 bytes covers the widest render: "-9223372036854775808" and u64-max are both 20 bytes.
 //
 // It is NOT a `b: [u8] := [0, …]` local: a slice literal is heap-promoted (the C backend cannot yet
@@ -59,38 +59,41 @@ write_scratch = (p: RawPtr<u8>, len: i64) i64 { out_bytes(slice(p, len)).or(0) }
 //
 // `thread_local`, so actors printing on different pool workers never interleave digits — and the
 // const `null_ptr()` init means a freshly spawned worker starts unset rather than sharing the main
-// thread's cell. Sharing ONE cell across the writers is safe because none of them holds the scratch
+// thread's cell. Sharing ONE cell across the writers is safe because none of them holds the fmt_scratch
 // across a call to another: each fills it and streams it before the next writer runs.
-SCRATCH_LEN := 21
-scratch := thread_local(null_ptr())
+SCRATCH_LEN = 21
+// PREFIXED name: Zen's namespace is flat and const-by-default makes a bare `x = v` an ASSIGNMENT
+// whenever `x` names a module global, so a global called `scratch` would silently claim that word
+// in every module that reaches std.text.fmt.
+fmt_scratch ::= thread_local(null_ptr())
 digits = () RawPtr<u8> {
-    scratch.is_null().then({
-        scratch = alloc(SCRATCH_LEN)
+    fmt_scratch.is_null().then({
+        fmt_scratch = alloc(SCRATCH_LEN)
     })
-    scratch.is_null().then({
+    fmt_scratch.is_null().then({
         panic("fmt: out of memory")
     })
-    scratch
+    fmt_scratch
 }
 // Non-negative n (callers: float significand/exponent paths and the sign-split below).
 write_uint = (n: i64) i64 {
-    b := digits()
+    b = digits()
     b.write_scratch(num_write_udigits(b, 0, n))
 }
 // Signed decimal; num_write_integer's negative-domain walk renders i64 min correctly.
 write_int = (n: i64) i64 {
-    b := digits()
+    b = digits()
     b.write_scratch(num_write_integer(b, n))
 }
 // Unsigned decimal for the full u64 range: num_uwrite_udigits keeps `/` and `%` UNSIGNED,
 // so values above i64 max (e.g. 18446744073709551615) print correctly, unlike write_int
 // which would treat the high bit as a sign.
 write_u64 = (n: u64) i64 {
-    b := digits()
+    b = digits()
     b.write_scratch(num_uwrite_udigits(b, 0, n))
 }
 write_fpad = (n: i64, w: i64) i64 {
-    b := digits()
+    b = digits()
     b.write_scratch(num_write_fpad(b, 0, n, w))
 }
 // ── float formatting: 15 significant digits, trailing zeros trimmed ───────────
@@ -107,7 +110,7 @@ write_fpad = (n: i64, w: i64) i64 {
 // plus their num_fexp_up/down, num_fpow10x, num_fscale_up/dn internals) lives ONCE in
 // std.text.num and is imported above — only the streaming render below is fmt-specific.
 fzeros = (n: i64) i64 {
-    b := digits()
+    b = digits()
     b.write_scratch(num_write_zeros(b, 0, n))
 }
 // fixed-notation body for significand `digs` (`ndig` digits, leading digit at place e, -4<=e<15).
@@ -117,7 +120,7 @@ write_ffixed = (digs: i64, ndig: i64, e: i64) i64 {
         false => (ndig <= e + 1).match ({
             true  => write_uint(digs) + fzeros(e + 1 - ndig) + ".0".write_text(),
             false => {
-                fw := ndig - (e + 1)    // fractional digit count
+                fw = ndig - (e + 1)    // fractional digit count
                 write_uint(digs / num_fpow10i(fw)) + ".".write_text() + write_fpad(digs % num_fpow10i(fw), fw)
             },
         }),
@@ -125,13 +128,13 @@ write_ffixed = (digs: i64, ndig: i64, e: i64) i64 {
 }
 // scientific-notation body "d.ddd e±EE".
 write_fsci = (digs: i64, ndig: i64, e: i64) i64 {
-    msd := digs / num_fpow10i(ndig - 1)
-    rest := digs % num_fpow10i(ndig - 1)
-    mant := write_digit(msd) + ".".write_text() + (ndig == 1).match ({
+    msd = digs / num_fpow10i(ndig - 1)
+    rest = digs % num_fpow10i(ndig - 1)
+    mant = write_digit(msd) + ".".write_text() + (ndig == 1).match ({
         true  => write_digit(0),
         false => write_fpad(rest, ndig - 1),
     })
-    sgn := (e < 0).then({ "e-".write_text() }, { "e+".write_text() })
+    sgn = (e < 0).then({ "e-".write_text() }, { "e+".write_text() })
     mant + sgn + write_uint((e < 0).then({ 0 - e }, { e }))
 }
 // non-negative magnitude: zero prints "0.0"; otherwise 15 sig digits, trailing zeros
@@ -140,11 +143,11 @@ write_fabs_digits = (x: f64) i64 {
     (x == 0.0).match ({
         true  => "0.0".write_text(),
         false => {
-            e0 := num_fexp(x)
-            d0 := num_fsig(x, e0)
-            e := (d0 >= 1000000000000000).then({ e0 + 1 }, { e0 })    // carry across 10^15
-            digs := num_fstrip((d0 >= 1000000000000000).then({ d0 / 10 }, { d0 }))
-            ndig := num_fndig(digs)
+            e0 = num_fexp(x)
+            d0 = num_fsig(x, e0)
+            e = (d0 >= 1000000000000000).then({ e0 + 1 }, { e0 })    // carry across 10^15
+            digs = num_fstrip((d0 >= 1000000000000000).then({ d0 / 10 }, { d0 }))
+            ndig = num_fndig(digs)
             (e >= 0 - 4 && e < 15).match ({
                 true  => write_ffixed(digs, ndig, e),
                 false => write_fsci(digs, ndig, e),
@@ -153,7 +156,7 @@ write_fabs_digits = (x: f64) i64 {
     })
 }
 write_float = (x: f64) i64 {
-    sp := x.f64_special()
+    sp = x.f64_special()
     (sp.at(0) != '\0').match ({
         true  => sp.write_text(),
         false => (x < 0.0).match ({
@@ -207,7 +210,7 @@ Printer*: {
     i = (p: Printer, k: i64) Printer { Printer(n: p.n + k.write_int()) }
     f = (p: Printer, x: f64) Printer { Printer(n: p.n + x.write_float()) }
     b = (p: Printer, x: bool) Printer {
-        t := x.then({ "true" }, { "false" })
+        t = x.then({ "true" }, { "false" })
         Printer(n: p.n + t.write_text())
     }
     owned = (p: Printer, g: String) Printer { Printer(n: p.n + g.write_string()) }
@@ -273,16 +276,16 @@ write_run = (sv: [u8], lo: i64, hi: i64) i64 { out_bytes(slice(sv.ptr.offset(lo)
 write_arg_at = (args: [Arg], i: i64) i64 { (i < args.len).then({ write_arg(args[i]) }, { 0 }) }
 // splice `args` into `template` at each `{}`; `{{`/`}}` emit literal braces. Returns bytes written.
 format* = (template: StringView, args: ...Arg) i64 {
-    sv := template.view()
-    n: i64 := 0    // bytes written so far
-    ai: i64 := 0    // next arg slot
-    start: i64 := 0    // start of the pending literal run
-    skip: i64 := 0
+    sv = template.view()
+    n :: i64 = 0    // bytes written so far
+    ai :: i64 = 0    // next arg slot
+    start :: i64 = 0    // start of the pending literal run
+    skip :: i64 = 0
     sv.loop((h, i, b) {
         (i < skip == false).then({
-            pair := i + 1 < sv.len    // resume index (skips the 2nd byte of a `{}`/`{{`/`}}` pair)
-            ph := b == '{' && pair && sv[i + 1] == '}'
-            esc := pair && (b == '{' && sv[i + 1] == '{' || b == '}' && sv[i + 1] == '}')
+            pair = i + 1 < sv.len    // resume index (skips the 2nd byte of a `{}`/`{{`/`}}` pair)
+            ph = b == '{' && pair && sv[i + 1] == '}'
+            esc = pair && (b == '{' && sv[i + 1] == '{' || b == '}' && sv[i + 1] == '}')
             (ph || esc).then({
                 (i > start).then({
                     n = n + sv.write_run(start, i)

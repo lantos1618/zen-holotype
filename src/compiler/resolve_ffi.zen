@@ -29,7 +29,7 @@
 // the entry pragma is read from the entry SOURCE directly, so it folds into content-keyed caches
 // for free. ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly like error[private-name].
 ffi_no_grants = () StringView { "" }
-ffi_grants := ffi_no_grants()
+ffi_grants ::= ffi_no_grants()
 ffi_grants_set* = (g: StringView) void { ffi_grants = g }
 ffi_grants_get* = () StringView { ffi_grants }
 // ── registered c_library genmods: an EXPLICIT (dotted id → generated path) map ───────────────────
@@ -38,7 +38,7 @@ ffi_grants_get* = () StringView { ffi_grants }
 // BEFORE probe and resolve. module_path consults this map FIRST for user ids, so the lookup order
 // is unambiguous: registered genmod path, then the ordinary <progdir>/<segs>.zen mapping. Format:
 // one `<dotted-id> <path>` pair per line, newline-terminated.
-genmods := ffi_no_grants()
+genmods ::= ffi_no_grants()
 genmods_set* = (g: StringView) void { genmods = g }
 genmods_get* = () StringView { genmods }
 gm_word_end = (s: StringView, p: i32) i32 {
@@ -49,8 +49,8 @@ gm_find = (a: MutPtr<Malloc>, g: StringView, p: i32, dotted: StringView) StringV
     (g.at(p) == 0).match ({
         true  => "",
         false => {
-            we := g.gm_word_end(p)
-            le := g.ffi_line_end(we)
+            we = g.gm_word_end(p)
+            le = g.ffi_line_end(we)
             g.ffi_span_eq(p, we, dotted, 0).match ({
                 true  => a.gstr_string(64).rappend_span(a, g, we + 1, le).gstr_finish(a),
                 false => (g.at(le) == 0).then({ "" }, { a.gm_find(g, le + 1, dotted) }),
@@ -62,7 +62,7 @@ gm_find = (a: MutPtr<Malloc>, g: StringView, p: i32, dotted: StringView) StringV
 genmod_lookup* = (a: MutPtr<Malloc>, id: String) StringView {
     id.id_is_user().match ({
         true  => {
-            dotted := a.mappend_id_name(a.gstr_string(24), id).gstr_finish(a)
+            dotted = a.mappend_id_name(a.gstr_string(24), id).gstr_finish(a)
             a.gm_find(genmods, 0, dotted)
         },
         false => "",
@@ -89,7 +89,7 @@ ffi_list_has = (s: StringView, p: i32, e: i32, name: StringView) bool {
         false => ffi_delim(s.at(p)).match ({
             true  => s.ffi_list_has(p + 1, e, name),
             false => {
-                te := s.ffi_token_end(p, e)
+                te = s.ffi_token_end(p, e)
                 s.ffi_span_eq(p, te, name, 0).then({ true }, { s.ffi_list_has(te, e, name) })
             },
         }),
@@ -101,11 +101,11 @@ ffi_line_end = (s: StringView, p: i32) i32 {
 FFI_PRAGMA = () StringView { "//! ffi:" }
 // does the ENTRY source carry a `//! ffi: modid, modid` pragma line granting `name`?
 ffi_pragma_has = (src: StringView, name: StringView) bool {
-    found := false
-    pos := 0
-    bs: [u8] := src.view()
+    found ::= false
+    pos ::= 0
+    bs: [u8] = src.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             found.match ({
                 true  => {
@@ -133,8 +133,8 @@ ffi_skip_sp = (s: StringView, p: i32) i32 {
 ffi_foreign_fn = (src: StringView, sym: ProvidedSymbol) bool {
     sym.foreign.match ({
         true  => {
-            p := (src.at(sym.next) == '*').then({ sym.next + 1 }, { sym.next })
-            q := src.ffi_skip_sp(p)
+            p = (src.at(sym.next) == '*').then({ sym.next + 1 }, { sym.next })
+            q = src.ffi_skip_sp(p)
             (src.at(q) == '=').then({ src.at(src.ffi_skip_sp(q + 1)) == '(' }, { false })
         },
         false => false,
@@ -144,7 +144,7 @@ ffi_dotted_id = (a: MutPtr<Malloc>, id: StringView) StringView {
     a.mappend_mid_display(a.gstr_string(24), id).gstr_finish(a)
 }
 ffi_module_granted = (mainsrc: StringView, dotted: StringView) bool {
-    g := ffi_grants
+    g = ffi_grants
     g.ffi_list_has(0, to_i32(g.view().len), dotted) || mainsrc.ffi_pragma_has(dotted)
 }
 ffi_fail = (
@@ -155,9 +155,9 @@ ffi_fail = (
     dotted: StringView,
     report: bool,
 ) i32 {
-    line := src.res_line_of(sym.start)
-    col := src.res_col_of(sym.start)
-    msg := a
+    line = src.res_line_of(sym.start)
+    col = src.res_col_of(sym.start)
+    msg = a
         .gstr_string(192)
         .gstr_append(a, "module '")
         .gstr_append(a, dotted)
@@ -165,7 +165,7 @@ ffi_fail = (
         .gstr_append(a, sym.name)
         .gstr_append(a, "` without a build grant")
         .gstr_finish(a)
-    hint := a
+    hint = a
         .gstr_string(192)
         .gstr_append(a, "grant it: `ffi = \"")
         .gstr_append(a, dotted)
@@ -173,7 +173,7 @@ ffi_fail = (
         .gstr_append(a, dotted)
         .gstr_append(a, "` in the entry file")
         .gstr_finish(a)
-    d := a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1)
+    d = a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1)
     report.match ({
         true  => {
             eprint(d)
@@ -190,7 +190,7 @@ enforce_ffi_grants* = (
 ) i32 {
     table.modules.loop((h, i, entry) {
         (i > 0 && entry.id.mid_is_user()).then({
-            dotted := a.ffi_dotted_id(entry.id)
+            dotted = a.ffi_dotted_id(entry.id)
             (mainsrc.ffi_module_granted(dotted) == false).then({
                 entry.graph.symbols.loop((h2, j, sym) {
                     entry.source.ffi_foreign_fn(sym).then({

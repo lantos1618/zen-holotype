@@ -38,17 +38,17 @@
 // ── session plumbing ──────────────────────────────────────────────────────────────────────────────
 // one framed JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`.
 lz_frame = (mp: MutPtr<Malloc>, body: StringView) StringView {
-    z: StringView := ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    z: StringView = ""    // str-typed lead so the mixed literal/variable array infers as [str]
     mp.zo_join([z, "Content-Length: ", mp.zo_itoa(len(body)), "\r\n\r\n", body])
 }
 // pipe `session` through the server (timeout-guarded so a hang can never wedge the harness); the
 // server's stdout is returned and its exit code lands in the per-case .rc file.
 lz_run = (mp: MutPtr<Malloc>, gid: i64, session: StringView) StringView {
-    inp := mp.zo_idpath("lzs", gid, ".in")
-    outp := mp.zo_idpath("lzs", gid, ".out")
-    rcp := mp.zo_idpath("lzs", gid, ".rc")
+    inp = mp.zo_idpath("lzs", gid, ".in")
+    outp = mp.zo_idpath("lzs", gid, ".out")
+    rcp = mp.zo_idpath("lzs", gid, ".rc")
     save(inp, session, len(session))
-    z: StringView := ""
+    z: StringView = ""
     shell(mp.zo_cmd(mp.zo_join([z, "timeout 20 ./zen lsp < ", inp, " > ", outp, " 2>/dev/null; printf %s $? > ", rcp]))).expect("harness: shell")
     mp.contents_in(outp).match ({
         .Ok(s)  => s,
@@ -68,15 +68,15 @@ LZ_EXIT = () StringView { "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}" }
 // a `file://` URI for a (virtual) document inside this run's private scratch dir — its dirname is
 // where the server resolves sibling imports, so on-disk $ZT siblings are import targets.
 lz_uri = (mp: MutPtr<Malloc>, name: StringView) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "file://", mp.zo_dir(), "/", name])
 }
 lz_open = (mp: MutPtr<Malloc>, uri: StringView, text: StringView) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"languageId\":\"zen\",\"version\":1,\"text\":\"", text, "\"}}}"])
 }
 lz_change_v = (mp: MutPtr<Malloc>, uri: StringView, text: StringView, ver: i64) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didChange\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"version\":", mp.zo_itoa(ver), "},\"contentChanges\":[{\"text\":\"", text, "\"}]}}"])
 }
 lz_change = (mp: MutPtr<Malloc>, uri: StringView, text: StringView) StringView {
@@ -91,16 +91,16 @@ lz_posreq = (
     line: i64,
     ch: i64,
 ) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":", mp.zo_itoa(id), ",\"method\":\"textDocument/", method, "\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":", mp.zo_itoa(line), ",\"character\":", mp.zo_itoa(ch), "}}}"])
 }
 // a `textDocument/semanticTokens/full` request for `uri` with request id `id`.
 lz_tokreq = (mp: MutPtr<Malloc>, uri: StringView, id: i64) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":", mp.zo_itoa(id), ",\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
 }
 lz_close = (mp: MutPtr<Malloc>, uri: StringView) StringView {
-    z: StringView := ""
+    z: StringView = ""
     mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didClose\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
 }
 // document texts as they sit INSIDE the JSON body (\n are JSON escapes the server decodes).
@@ -109,7 +109,7 @@ LZ_GOOD = () StringView { "main = () i32 {\\n    7\\n}\\n" }
 // ── the cases ─────────────────────────────────────────────────────────────────────────────────────
 // (1) initialize: framed reply, echoed id, full-sync capability advertised, clean shutdown/exit.
 lz_init_ok = (mp: MutPtr<Malloc>) bool {
-    o := mp.lz_run(0, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o = mp.lz_run(0, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("Content-Length: ")
         && o.contains("\"id\":1")
         && o.contains("\"textDocumentSync\":1")
@@ -118,8 +118,8 @@ lz_init_ok = (mp: MutPtr<Malloc>) bool {
 }
 // (2) didOpen broken doc: undefined-name at 0-based line 1, character 9 (the byte→LSP conversion).
 lz_open_bad = (mp: MutPtr<Malloc>) bool {
-    u := mp.lz_uri("lzdoc.zen")
-    o := mp.lz_run(1, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(u, LZ_BAD())), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    u = mp.lz_uri("lzdoc.zen")
+    o = mp.lz_run(1, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(u, LZ_BAD())), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("textDocument/publishDiagnostics")
         && o.contains("\"code\":\"undefined-name\"")
         && o.contains("\"start\":{\"line\":1,\"character\":9}")
@@ -128,16 +128,16 @@ lz_open_bad = (mp: MutPtr<Malloc>) bool {
 }
 // (3) didChange fixes the error: the second publish must carry an EMPTY diagnostics array.
 lz_change_clears = (mp: MutPtr<Malloc>) bool {
-    u := mp.lz_uri("lzdoc.zen")
-    o := mp.lz_run(2, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(u, LZ_BAD())), mp.lz_frame(mp.lz_change(u, LZ_GOOD())), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    u = mp.lz_uri("lzdoc.zen")
+    o = mp.lz_run(2, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(u, LZ_BAD())), mp.lz_frame(mp.lz_change(u, LZ_GOOD())), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"code\":\"undefined-name\"")
         && o.contains("\"diagnostics\":[]")
         && mp.lz_rc(2) == "0"
 }
 // (4) unknown REQUEST: -32601 with the echoed id; the server keeps serving afterwards.
 lz_unknown_method = (mp: MutPtr<Malloc>) bool {
-    probe := "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/references\",\"params\":{\"position\":{\"line\":0,\"character\":0}}}"
-    o := mp.lz_run(3, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(probe), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    probe = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/references\",\"params\":{\"position\":{\"line\":0,\"character\":0}}}"
+    o = mp.lz_run(3, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(probe), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"id\":7")
         && o.contains("-32601")
         && o.contains("\"result\":null")
@@ -146,8 +146,8 @@ lz_unknown_method = (mp: MutPtr<Malloc>) bool {
 // (5a) garbage Content-Length: the frame is skipped and the scan RESYNCHRONIZES on the next real
 // frame — shutdown is still answered and the session still exits 0. `timeout` guards against a hang.
 lz_garbage_cl = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    o := mp.lz_run(4, mp.zo_join([z, "Content-Length: banana\r\n\r\n{}", mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    z: StringView = ""
+    o = mp.lz_run(4, mp.zo_join([z, "Content-Length: banana\r\n\r\n{}", mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"result\":null") && mp.lz_rc(4) == "0"
 }
 // (5b) absurd Content-Length (100 TB): must NOT null-deref-panic (pre-fix: exit 134) and must NOT
@@ -158,8 +158,8 @@ lz_huge_cl = (mp: MutPtr<Malloc>) bool {
 }
 // (6) didClose: stale squiggles are cleared with an explicit empty publish.
 lz_didclose_clears = (mp: MutPtr<Malloc>) bool {
-    u := mp.lz_uri("lzdoc.zen")
-    o := mp.lz_run(6, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(u, LZ_BAD())), mp.lz_frame(mp.lz_close(u)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    u = mp.lz_uri("lzdoc.zen")
+    o = mp.lz_run(6, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(u, LZ_BAD())), mp.lz_frame(mp.lz_close(u)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"code\":\"undefined-name\"")
         && o.contains("\"diagnostics\":[]")
         && mp.lz_rc(6) == "0"
@@ -168,27 +168,27 @@ lz_didclose_clears = (mp: MutPtr<Malloc>) bool {
 // byte column is 21 but the LSP character MUST be 18. The é are written as JSON é escapes the
 // server decodes into UTF-8 — this file stays pure ASCII.
 lz_utf16_cols = (mp: MutPtr<Malloc>) bool {
-    txt := "main = () i32 {\\n    x := \\\"\\u00e9\\u00e9\\u00e9\\\" == undefined_name\\n    0\\n}\\n"
-    o := mp.lz_run(7, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(mp.lz_uri("lzu.zen"), txt)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    txt = "main = () i32 {\\n    x := \\\"\\u00e9\\u00e9\\u00e9\\\" == undefined_name\\n    0\\n}\\n"
+    o = mp.lz_run(7, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(mp.lz_uri("lzu.zen"), txt)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"code\":\"undefined-name\"")
         && o.contains("\"start\":{\"line\":1,\"character\":18}")
 }
 // (8a) sibling import: the open document pulls a real $ZT module; an error in the OPEN file (wrong
 // arity at the callsite) keeps its exact range there.
 lz_multifile_sibling = (mp: MutPtr<Malloc>) bool {
-    lib := "helper* = (x: i32) i32 { x }\n"
+    lib = "helper* = (x: i32) i32 { x }\n"
     save(mp.zo_join([mp.zo_dir(), "/lzlib.zen"]), lib, len(lib))
-    txt := "{ helper } = lzlib\\nmain = () i32 {\\n    helper(1, 2)\\n}\\n"
-    o := mp.lz_run(8, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(mp.lz_uri("lzmain.zen"), txt)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    txt = "{ helper } = lzlib\\nmain = () i32 {\\n    helper(1, 2)\\n}\\n"
+    o = mp.lz_run(8, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(mp.lz_uri("lzmain.zen"), txt)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"code\":\"arity\"") && o.contains("\"start\":{\"line\":2,\"character\":4}")
 }
 // (8b) an error INSIDE the imported sibling: pinned to the file head with the real location in the
 // message — never a lying range into the open document.
 lz_foreign_module_error = (mp: MutPtr<Malloc>) bool {
-    lib := "broken* = () i32 { undefined_in_lib }\n"
+    lib = "broken* = () i32 { undefined_in_lib }\n"
     save(mp.zo_join([mp.zo_dir(), "/lzbadlib.zen"]), lib, len(lib))
-    txt := "{ broken } = lzbadlib\\nmain = () i32 {\\n    broken()\\n}\\n"
-    o := mp.lz_run(9, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(mp.lz_uri("lzmain2.zen"), txt)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    txt = "{ broken } = lzbadlib\\nmain = () i32 {\\n    broken()\\n}\\n"
+    o = mp.lz_run(9, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(mp.lz_uri("lzmain2.zen"), txt)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("in imported module")
         && o.contains("lzbadlib.zen")
         && o.contains("\"start\":{\"line\":0,\"character\":0}")
@@ -204,14 +204,14 @@ lz_exit_no_shutdown = (mp: MutPtr<Malloc>) bool {
 // second didChange bumps the version to 3 and swaps in a 3-letter type (`0,0,3,2,0`): serving that
 // proves the version-keyed token cache re-derives on a new version instead of replaying the old array.
 lz_unsaved_buffer_tokens = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    disk := "// c\nmain = () i32 { 0 }\n"
+    z: StringView = ""
+    disk = "// c\nmain = () i32 { 0 }\n"
     save(mp.zo_join([mp.zo_dir(), z, "/lztok2.zen"]), disk, len(disk))
-    uri := mp.lz_uri("lztok2.zen")
-    bufa := "// c\\nmain = () i32 { 0 }\\n"    // the didOpen text: identical to the saved file
-    bufb := "Point*: { x: i32 }\\nmain = () i32 { 42 }\\n"
-    bufc := "Zed*: { y: i32 }\\nmain = () i32 { 1 }\\n"
-    o := mp.lz_run(13, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, bufa)), mp.lz_frame(mp.lz_change_v(uri, bufb, 2)), mp.lz_frame(mp.lz_tokreq(uri, 3)), mp.lz_frame(mp.lz_change_v(uri, bufc, 3)), mp.lz_frame(mp.lz_tokreq(uri, 4)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    uri = mp.lz_uri("lztok2.zen")
+    bufa = "// c\\nmain = () i32 { 0 }\\n"    // the didOpen text: identical to the saved file
+    bufb = "Point*: { x: i32 }\\nmain = () i32 { 42 }\\n"
+    bufc = "Zed*: { y: i32 }\\nmain = () i32 { 1 }\\n"
+    o = mp.lz_run(13, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, bufa)), mp.lz_frame(mp.lz_change_v(uri, bufb, 2)), mp.lz_frame(mp.lz_tokreq(uri, 3)), mp.lz_frame(mp.lz_change_v(uri, bufc, 3)), mp.lz_frame(mp.lz_tokreq(uri, 4)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"result\":{\"data\":[0,0,5,2,0")
         && o.contains("\"result\":{\"data\":[0,0,3,2,0")
         && o.contains("\"result\":{\"data\":[0,0,4,7,0") == false
@@ -220,12 +220,12 @@ lz_unsaved_buffer_tokens = (mp: MutPtr<Malloc>) bool {
 // (15) the other half of the lifecycle: didClose DROPS the entry, so the next request falls back to
 // disk — the same file whose comment-first token the open-buffer case above must never see.
 lz_close_reverts_to_disk = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    disk := "// c\nmain = () i32 { 0 }\n"
+    z: StringView = ""
+    disk = "// c\nmain = () i32 { 0 }\n"
     save(mp.zo_join([mp.zo_dir(), z, "/lztok3.zen"]), disk, len(disk))
-    uri := mp.lz_uri("lztok3.zen")
-    bufb := "Point*: { x: i32 }\\nmain = () i32 { 42 }\\n"
-    o := mp.lz_run(14, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, bufb)), mp.lz_frame(mp.lz_close(uri)), mp.lz_frame(mp.lz_tokreq(uri, 3)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    uri = mp.lz_uri("lztok3.zen")
+    bufb = "Point*: { x: i32 }\\nmain = () i32 { 42 }\\n"
+    o = mp.lz_run(14, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, bufb)), mp.lz_frame(mp.lz_close(uri)), mp.lz_frame(mp.lz_tokreq(uri, 3)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"result\":{\"data\":[0,0,4,7,0")
         && o.contains("\"result\":{\"data\":[0,0,5,2,0") == false
         && mp.lz_rc(14) == "0"
@@ -233,12 +233,12 @@ lz_close_reverts_to_disk = (mp: MutPtr<Malloc>) bool {
 // ── entry ─────────────────────────────────────────────────────────────────────────────────────────
 // (12) go-to-definition: cursor on the `foo` call resolves to the top-level `foo*` decl at line 0.
 lz_goto_def = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    src := "foo* = (x: i32) i32 { x }\nmain = () i32 {\n    foo(0)\n}\n"
+    z: StringView = ""
+    src = "foo* = (x: i32) i32 { x }\nmain = () i32 {\n    foo(0)\n}\n"
     save(mp.zo_join([mp.zo_dir(), z, "/lzdef.zen"]), src, len(src))
-    uri := mp.lz_uri("lzdef.zen")
-    req := mp.lz_posreq(uri, "definition", 2, 2, 4)
-    o := mp.lz_run(11, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    uri = mp.lz_uri("lzdef.zen")
+    req = mp.lz_posreq(uri, "definition", 2, 2, 4)
+    o = mp.lz_run(11, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"definitionProvider\":true")
         && o.contains("\"result\":{\"uri\":")
         && o.contains("\"line\":0,\"character\":0")
@@ -248,12 +248,12 @@ lz_goto_def = (mp: MutPtr<Malloc>) bool {
 // (uppercase), `main` is a function (a top-level `name = (` head), `42` is a number, and the leading
 // comment is a comment — the four classification rules that carry the highlighting.
 lz_semantic_tokens = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    src := "// c\nPoint*: { x: i32 }\nmain = () i32 { 42 }\n"
+    z: StringView = ""
+    src = "// c\nPoint*: { x: i32 }\nmain = () i32 { 42 }\n"
     save(mp.zo_join([mp.zo_dir(), z, "/lztok.zen"]), src, len(src))
-    uri := mp.lz_uri("lztok.zen")
-    req := mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
-    o := mp.lz_run(12, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    uri = mp.lz_uri("lztok.zen")
+    req = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"textDocument/semanticTokens/full\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
+    o = mp.lz_run(12, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"semanticTokensProvider\"")
         && o.contains("\"result\":{\"data\":[")
         && o.contains("0,0,4,7,0")
@@ -267,10 +267,10 @@ lz_semantic_tokens = (mp: MutPtr<Malloc>) bool {
 // highlighting (nvim: "INVALID_SERVER_JSON") — the array was truncated mid-number. The `//` bytes are
 // string content, so the reply must be one unbroken string token across both lines, `]`-terminated.
 lz_rawstring_token_order = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    src := "g = () void {\n    s := \"\"\"abc \"d // e\n    \"\"\"\n    y := 1\n}\n"
+    z: StringView = ""
+    src = "g = () void {\n    s := \"\"\"abc \"d // e\n    \"\"\"\n    y := 1\n}\n"
     save(mp.zo_join([mp.zo_dir(), z, "/lzraw.zen"]), src, len(src))
-    o := mp.lz_run(15, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_tokreq(mp.lz_uri("lzraw.zen"), 2)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o = mp.lz_run(15, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_tokreq(mp.lz_uri("lzraw.zen"), 2)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"result\":{\"data\":[0,0,1,1,0,")
         && o.contains("0,3,14,5,0,1,0,7,5,0,1,4,1,3,0,0,2,2,8,0,0,3,1,6,0,1,0,1,8,0]")
         && mp.lz_rc(15) == "0"
@@ -282,12 +282,12 @@ lz_rawstring_token_order = (mp: MutPtr<Malloc>) bool {
 // second probe (id 6) sits on indentation, where there is no identifier: the protocol's "no hover
 // here" is a null result, not an empty popup.
 lz_hover_buffer = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    disk := "// disk doc\nalpha* = (x: i32) i32 { x }\n"
+    z: StringView = ""
+    disk = "// disk doc\nalpha* = (x: i32) i32 { x }\n"
     save(mp.zo_join([mp.zo_dir(), z, "/lzhov.zen"]), disk, len(disk))
-    uri := mp.lz_uri("lzhov.zen")
-    buf := "// buffer doc\\nbeta* = (s: i32) i32 {\\n    s\\n}\\nmain = () i32 {\\n    beta(1)\\n}\\n"
-    o := mp.lz_run(16, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, "main = () i32 { 0 }\\n")), mp.lz_frame(mp.lz_change_v(uri, buf, 2)), mp.lz_frame(mp.lz_posreq(uri, "hover", 5, 5, 4)), mp.lz_frame(mp.lz_posreq(uri, "hover", 6, 5, 1)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    uri = mp.lz_uri("lzhov.zen")
+    buf = "// buffer doc\\nbeta* = (s: i32) i32 {\\n    s\\n}\\nmain = () i32 {\\n    beta(1)\\n}\\n"
+    o = mp.lz_run(16, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, "main = () i32 { 0 }\\n")), mp.lz_frame(mp.lz_change_v(uri, buf, 2)), mp.lz_frame(mp.lz_posreq(uri, "hover", 5, 5, 4)), mp.lz_frame(mp.lz_posreq(uri, "hover", 6, 5, 1)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"hoverProvider\":true")
         && o.contains("\"kind\":\"markdown\"")
         && o.contains("beta* = (s: i32) i32")
@@ -301,12 +301,12 @@ lz_hover_buffer = (mp: MutPtr<Malloc>) bool {
 // disk copy declares `gamma`, which the reply must not contain — the same stale-disk class again,
 // this time on the name list.
 lz_completion_items = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    disk := "gamma* = () i32 { 0 }\n"
+    z: StringView = ""
+    disk = "gamma* = () i32 { 0 }\n"
     save(mp.zo_join([mp.zo_dir(), z, "/lzcomp.zen"]), disk, len(disk))
-    uri := mp.lz_uri("lzcomp.zen")
-    buf := "{ view } = std.text.str\\nWidget*: { w: i32 }\\nmain = () i32 { 0 }\\n"
-    o := mp.lz_run(17, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, buf)), mp.lz_frame(mp.lz_posreq(uri, "completion", 2, 2, 0)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    uri = mp.lz_uri("lzcomp.zen")
+    buf = "{ view } = std.text.str\\nWidget*: { w: i32 }\\nmain = () i32 { 0 }\\n"
+    o = mp.lz_run(17, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, buf)), mp.lz_frame(mp.lz_posreq(uri, "completion", 2, 2, 0)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"completionProvider\":{\"resolveProvider\":false}")
         && o.contains("{\"label\":\"view\",\"kind\":3,\"detail\":\"std.text.str\"}")
         && o.contains("{\"label\":\"Widget\",\"kind\":22,\"detail\":\"Widget*: { w: i32 }\"}")
@@ -326,11 +326,11 @@ LZ_TYPED = () [StringView] {
     ["s", "st", "std", "std.", "std.t", "std.te", "std.tex", "std.text", "std.text.", "std.text.s", "std.text.st"]
 }
 lz_import_keystrokes = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    uri := mp.lz_uri("lzkeys.zen")
-    tail := "\\nmain = () i32 { 0 }\\n"
-    sess := mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_BAD()))])
-    ver := 2
+    z: StringView = ""
+    uri = mp.lz_uri("lzkeys.zen")
+    tail = "\\nmain = () i32 { 0 }\\n"
+    sess ::= mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_BAD()))])
+    ver ::= 2
     LZ_TYPED().loop((h, i, p) {
         sess = mp.zo_join([z, sess, mp.lz_frame(mp.lz_change_v(uri, mp.zo_join([z, "{ len } = ", p, tail]), ver))])
         // mid-typing, on a buffer that names no real module: the old server was already dead here
@@ -339,7 +339,7 @@ lz_import_keystrokes = (mp: MutPtr<Malloc>) bool {
         })
         ver = ver + 1
     })
-    o := mp.lz_run(18, mp.zo_join([z, sess, mp.lz_frame(mp.lz_change_v(uri, mp.zo_join([z, "{ len } = std.text.str", tail]), ver)), mp.lz_frame(mp.lz_tokreq(uri, 77)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o = mp.lz_run(18, mp.zo_join([z, sess, mp.lz_frame(mp.lz_change_v(uri, mp.zo_join([z, "{ len } = std.text.str", tail]), ver)), mp.lz_frame(mp.lz_tokreq(uri, 77)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"code\":\"unresolved-import\"")
         && o.contains("unknown module 's'")
         && o.contains("unknown module 'std.te'")
@@ -380,16 +380,16 @@ LZ_MOTION_DOC = () StringView {
 // never written to disk, so every answer below is also proof the buffer is what was consulted), ask
 // `textDocument/definition` at (line, ch) as request id 3, return the server's stdout.
 lz_def_probe = (mp: MutPtr<Malloc>, gid: i64, line: i64, ch: i64) StringView {
-    z: StringView := ""
-    lib := "lzfix_fn* = (x: i32) i32 { x }\n"
+    z: StringView = ""
+    lib = "lzfix_fn* = (x: i32) i32 { x }\n"
     save(mp.zo_join([mp.zo_dir(), z, "/lzfix.zen"]), lib, len(lib))
-    uri := mp.lz_uri("lzmot.zen")
+    uri = mp.lz_uri("lzmot.zen")
     mp.lz_run(gid, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_MOTION_DOC())), mp.lz_frame(mp.lz_posreq(uri, "definition", 3, line, ch)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
 }
 // the definition reply resolved INTO `file` at 0-based `line`,`col` — matched as ONE contiguous
 // substring so a request id can never be paired with a different probe's range.
 lz_def_is = (mp: MutPtr<Malloc>, o: StringView, file: StringView, line: i64, col: i64) bool {
-    z: StringView := ""
+    z: StringView = ""
     o.contains("\"id\":3,\"result\":{\"uri\":")
         && o.contains(mp.zo_join([z, file, "\",\"range\":{\"start\":{\"line\":", mp.zo_itoa(line), ",\"character\":", mp.zo_itoa(col), "}"]))
 }
@@ -436,9 +436,9 @@ lz_gd_qualified = (mp: MutPtr<Malloc>) bool {
 // share the definition path — it answers from `lspq_hover`, a scan of the open buffer — so it stays
 // same-file-only even now that `gd` resolves across modules. That divergence is the next thing to close.
 lz_hover_motion = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    uri := mp.lz_uri("lzmot.zen")
-    o := mp.lz_run(27, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_MOTION_DOC())), mp.lz_frame(mp.lz_posreq(uri, "hover", 3, 10, 9)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    z: StringView = ""
+    uri = mp.lz_uri("lzmot.zen")
+    o = mp.lz_run(27, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_MOTION_DOC())), mp.lz_frame(mp.lz_posreq(uri, "hover", 3, 10, 9)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("top* = (n: i32) i32") && mp.lz_rc(27) == "0"
 }
 // THE UNIMPLEMENTED REQUESTS, pinned. Each is a standard Neovim motion; each answers -32601
@@ -456,17 +456,17 @@ LZ_UNIMPL = () [StringView] {
     ["declaration", "implementation", "references", "rename", "typeDefinition", "signatureHelp"]
 }
 lz_unimplemented_motions = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    uri := mp.lz_uri("lzmot.zen")
-    sess := mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_MOTION_DOC()))])
-    id := 30
+    z: StringView = ""
+    uri = mp.lz_uri("lzmot.zen")
+    sess ::= mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_MOTION_DOC()))])
+    id ::= 30
     LZ_UNIMPL().loop((h, i, m) {
         sess = mp.zo_join([z, sess, mp.lz_frame(mp.lz_posreq(uri, m, id, 10, 9))])
         id = id + 1
     })
-    o := mp.lz_run(28, mp.zo_join([z, sess, mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
-    all := true
-    n := 30
+    o = mp.lz_run(28, mp.zo_join([z, sess, mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    all ::= true
+    n ::= 30
     LZ_UNIMPL().loop((h, i, m) {
         all = all
             && o.contains(mp.zo_join([z, "\"id\":", mp.zo_itoa(n), ",\"error\":{\"code\":-32601"]))
@@ -497,9 +497,9 @@ LZ_SYM_DOC = () StringView {
 }
 // one `textDocument/documentSymbol` against that fixture, as request id 4.
 lz_sym_probe = (mp: MutPtr<Malloc>, gid: i64) StringView {
-    z: StringView := ""
-    uri := mp.lz_uri("lzsym.zen")
-    req := mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
+    z: StringView = ""
+    uri = mp.lz_uri("lzsym.zen")
+    req = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"textDocument/documentSymbol\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"}}}"])
     mp.lz_run(gid, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, LZ_SYM_DOC())), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
 }
 // a symbol's name, kind and 0-based start, matched as ONE contiguous substring — a name can never be
@@ -512,13 +512,13 @@ lz_sym_is = (
     line: i64,
     col: i64,
 ) bool {
-    z: StringView := ""
+    z: StringView = ""
     o.contains(mp.zo_join([z, "{\"name\":\"", name, "\",\"kind\":", mp.zo_itoa(kind), ",\"range\":{\"start\":{\"line\":", mp.zo_itoa(line), ",\"character\":", mp.zo_itoa(col), "}"]))
 }
 // gO (a) THE TOP-LEVEL LIST: every declaration kind at its own line, under the LSP SymbolKind the
 // protocol names for it — Function=12, Struct=23, Enum=10, Variable=13.
 lz_docsym_top_level = (mp: MutPtr<Malloc>) bool {
-    o := mp.lz_sym_probe(34)
+    o = mp.lz_sym_probe(34)
     o.contains("\"documentSymbolProvider\":true")
         && mp.lz_sym_is(o, "Color", 10, 1, 0)
         && mp.lz_sym_is(o, "Shape", 23, 2, 0)
@@ -532,8 +532,8 @@ lz_docsym_top_level = (mp: MutPtr<Malloc>) bool {
 // (an outline listing it would also list it TWICE, once mangled and once as a child). `area` must
 // appear exactly once, as Shape's first child, at its real position inside the type body.
 lz_docsym_nests_methods = (mp: MutPtr<Malloc>) bool {
-    z: StringView := ""
-    o := mp.lz_sym_probe(35)
+    z: StringView = ""
+    o = mp.lz_sym_probe(35)
     mp.lz_sym_is(o, "area", 6, 3, 4)
         && o.contains(mp.zo_join([z, "\"children\":[{\"name\":\"area\",\"kind\":6"]))
         && o.contains("impl_") == false
@@ -544,7 +544,7 @@ lz_docsym_nests_methods = (mp: MutPtr<Malloc>) bool {
 // `Red` — neither a Field nor a VariantDef carries a source position in the AST, which is the same
 // gap that keeps go-to-definition off a field.
 lz_docsym_omits = (mp: MutPtr<Malloc>) bool {
-    o := mp.lz_sym_probe(36)
+    o = mp.lz_sym_probe(36)
     // the positive anchor first: a reply of `[]` would satisfy every absence below vacuously. The
     // list starts at the file's FIRST declaration, which is the enum on line 1 — not the import.
     o.contains("\"id\":4,\"result\":[{\"name\":\"Color\"")
@@ -556,8 +556,8 @@ lz_docsym_omits = (mp: MutPtr<Malloc>) bool {
 // ── completion, as an editor drives it ────────────────────────────────────────────────────────────
 // one completion probe on an UNSAVED buffer at (line, ch).
 lz_comp_probe = (mp: MutPtr<Malloc>, gid: i64, buf: StringView, line: i64, ch: i64) StringView {
-    z: StringView := ""
-    uri := mp.lz_uri("lzcmp.zen")
+    z: StringView = ""
+    uri = mp.lz_uri("lzcmp.zen")
     mp.lz_run(gid, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, buf)), mp.lz_frame(mp.lz_posreq(uri, "completion", 3, line, ch)), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
 }
 // (a) EMPTY buffer: the reply is the fixed keyword + builtin-type lists and nothing else. NOT
@@ -565,7 +565,7 @@ lz_comp_probe = (mp: MutPtr<Malloc>, gid: i64, buf: StringView, line: i64, ch: i
 // `Name*: { f: T }`, `Name*: A | B(p)`, `Type.impl(Trait, { })`, `{ n } = std.module`), and Zen's
 // forms are unusual enough that they cannot be guessed. None is offered, as a snippet or otherwise.
 lz_comp_empty_buffer = (mp: MutPtr<Malloc>) bool {
-    o := mp.lz_comp_probe(29, "", 0, 0)
+    o = mp.lz_comp_probe(29, "", 0, 0)
     o.contains("\"label\":\"match\",\"kind\":14")
         && o.contains("\"label\":\"i32\"")
         && o.contains("insertTextFormat") == false
@@ -575,14 +575,14 @@ lz_comp_empty_buffer = (mp: MutPtr<Malloc>) bool {
 // (b) TOP LEVEL of a half-typed file: the buffer's own column-0 declarations DO come back, and from
 // the buffer rather than disk. WORKS — and it is the part of completion that is genuinely right.
 lz_comp_top_level = (mp: MutPtr<Malloc>) bool {
-    o := mp.lz_comp_probe(30, "helper* = (x: i32) i32 { x }\\nmain = () i32 {\\n    0\\n}\\n", 2, 4)
+    o = mp.lz_comp_probe(30, "helper* = (x: i32) i32 { x }\\nmain = () i32 {\\n    0\\n}\\n", 2, 4)
     o.contains("\"label\":\"helper\"") && o.contains("\"label\":\"main\"") && mp.lz_rc(30) == "0"
 }
 // (c) AFTER `std.` in a half-typed import record. NOT IMPLEMENTED — the std module tree is on disk
 // and `tools/sigs.zen` already walks it with the real parser, but nothing enumerates it here, so the
 // keystroke that most needs help gets the same fixed keyword list as everywhere else.
 lz_comp_after_std_dot = (mp: MutPtr<Malloc>) bool {
-    o := mp.lz_comp_probe(31, "{ x } = std.\\nmain = () i32 { 0 }\\n", 0, 12)
+    o = mp.lz_comp_probe(31, "{ x } = std.\\nmain = () i32 { 0 }\\n", 0, 12)
     o.contains("\"label\":\"match\",\"kind\":14")
         && o.contains("\"label\":\"text.str\"") == false
         && o.contains("\"label\":\"mem.alloc\"") == false
@@ -593,8 +593,8 @@ lz_comp_after_std_dot = (mp: MutPtr<Malloc>) bool {
 // depend on the receiver at all. Same root as gd (c): members live inside type bodies, where no
 // column-0 textual scan can see them. `zen doc` and the (absent) symbol outline miss the same set.
 lz_comp_receiver_members = (mp: MutPtr<Malloc>) bool {
-    buf := "AVec*: { n: i32,\\n    push = (a: AVec, x: i32) i32 { x }\\n}\\nmain = () i32 {\\n    a := AVec(n: 0)\\n    a.\\n}\\n"
-    o := mp.lz_comp_probe(32, buf, 5, 6)
+    buf = "AVec*: { n: i32,\\n    push = (a: AVec, x: i32) i32 { x }\\n}\\nmain = () i32 {\\n    a := AVec(n: 0)\\n    a.\\n}\\n"
+    o = mp.lz_comp_probe(32, buf, 5, 6)
     o.contains("\"label\":\"AVec\"")
         && o.contains("\"label\":\"push\"") == false
         && o.contains("\"label\":\"n\"") == false
@@ -605,14 +605,14 @@ lz_comp_receiver_members = (mp: MutPtr<Malloc>) bool {
 // carrying the `{ println } = std.text.fmt` record an accepted item would have to insert. Both halves
 // of auto-import are absent, and `resolveProvider:false` means there is no lazy hook to add one to.
 lz_comp_auto_import = (mp: MutPtr<Malloc>) bool {
-    o := mp.lz_comp_probe(33, "main = () i32 {\\n    prin\\n    0\\n}\\n", 1, 8)
+    o = mp.lz_comp_probe(33, "main = () i32 {\\n    prin\\n    0\\n}\\n", 1, 8)
     o.contains("\"label\":\"println\"") == false
         && o.contains("additionalTextEdits") == false
         && o.contains("\"completionProvider\":{\"resolveProvider\":false}")
         && mp.lz_rc(33) == "0"
 }
 harness_lsp_run* = () i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown(), mp.lz_gd_same_file_fn(), mp.lz_gd_same_file_type(), mp.lz_gd_inherent_method(), mp.lz_gd_struct_field(), mp.lz_gd_cross_module(), mp.lz_gd_imported_std(), mp.lz_gd_qualified(), mp.lz_hover_motion(), mp.lz_unimplemented_motions(), mp.lz_docsym_top_level(), mp.lz_docsym_nests_methods(), mp.lz_docsym_omits(), mp.lz_comp_empty_buffer(), mp.lz_comp_top_level(), mp.lz_comp_after_std_dot(), mp.lz_comp_receiver_members(), mp.lz_comp_auto_import()])
 }

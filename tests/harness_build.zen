@@ -53,7 +53,7 @@ ShellCase*: {
 }
 // helper: build the command body  `./zen build <path> -o $ZT/zob 2>/dev/null` (wrapped by zo_cmd).
 build_cmd = (mp: MutPtr<Malloc>, path: StringView) StringView {
-    s := mp.new_in().expect("harness: oom")
+    s ::= mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "./zen build ").expect("harness: oom")
     s = s.append_in(mp, path).expect("harness: oom")
     s = s.append_in(mp, " -o $ZT/zob 2>/dev/null").expect("harness: oom")
@@ -62,7 +62,7 @@ build_cmd = (mp: MutPtr<Malloc>, path: StringView) StringView {
 // helper: build the command body  `$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test "$?" -eq <want_exit>`
 // (returns rc 0 iff the program's exit code equals want_exit; stdout is left in $ZT/zob_out.txt).
 run_cmd = (mp: MutPtr<Malloc>, want_exit: StringView) StringView {
-    s := mp.new_in().expect("harness: oom")
+    s ::= mp.new_in().expect("harness: oom")
     s = s
         .append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ")
         .expect("harness: oom")
@@ -71,13 +71,13 @@ run_cmd = (mp: MutPtr<Malloc>, want_exit: StringView) StringView {
 }
 // run ONE build fixture: build must succeed, then exit code (+ optional stdout) must match.
 run_fixture* = (fc: FixtureCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     save(mp.zo_path("zob_out.txt"), "", 0)
-    bc := shell(mp.zo_cmd(mp.build_cmd(fc.path))).expect("harness: shell")
+    bc = shell(mp.zo_cmd(mp.build_cmd(fc.path))).expect("harness: shell")
     (bc == 0).match ({
         true  => {
-            rc := shell(mp.zo_cmd(mp.run_cmd(fc.want_exit))).expect("harness: shell")    // `zenc build` must succeed
+            rc = shell(mp.zo_cmd(mp.run_cmd(fc.want_exit))).expect("harness: shell")    // `zenc build` must succeed
             (rc == 0).match ({
                 true  => fc.check_out.match ({
                     true  => mp.contents_in(mp.zo_path("zob_out.txt")).match ({
@@ -102,24 +102,24 @@ run_fixture* = (fc: FixtureCase) bool {
 // The program is NOT run here: many build fixtures are CONCURRENCY/pool acceptance programs that spawn
 // their OWN pthreads, so running 16 at once oversubscribes threads and fails nondeterministically.
 fix_build_cmd = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) StringView {
-    z: StringView := ""
-    zob := mp.zo_idpath("zob", gid, "")
-    brc := mp.zo_idpath("zobbrc", gid, ".txt")
+    z: StringView = ""
+    zob = mp.zo_idpath("zob", gid, "")
+    brc = mp.zo_idpath("zobbrc", gid, ".txt")
     mp.zo_join([z, "if ./zen build ", fc.path, " -o ", zob, " 2>/dev/null; then echo P > ", brc, "; else echo F > ", brc, "; fi"])
 }
 // PHASE B (SERIAL, one fixture at a time): the build must have succeeded, then RUN the binary now (serially
 // — no thread oversubscription) and assert exit == want_exit (+ optional stdout). Same verdict as serial.
 fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
-    built := mp.contents_in(mp.zo_idpath("zobbrc", gid, ".txt")).match ({
+    built = mp.contents_in(mp.zo_idpath("zobbrc", gid, ".txt")).match ({
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
     built.match ({
         true  => {
-            z: StringView := ""
-            zob := mp.zo_idpath("zob", gid, "")
-            o := mp.zo_idpath("zobout", gid, ".txt")
-            rc := shell(mp.zo_join([z, zob, " > ", o, " 2>/dev/null; test \"$?\" -eq ", fc.want_exit])).expect("harness: shell")
+            z: StringView = ""
+            zob = mp.zo_idpath("zob", gid, "")
+            o = mp.zo_idpath("zobout", gid, ".txt")
+            rc = shell(mp.zo_join([z, zob, " > ", o, " 2>/dev/null; test \"$?\" -eq ", fc.want_exit])).expect("harness: shell")
             (rc == 0).match ({
                 true  => fc.check_out.match ({
                     true  => mp.contents_in(mp.zo_idpath("zobout", gid, ".txt")).match ({
@@ -139,16 +139,16 @@ fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
 run_fixtures* = (name: StringView, cs: [FixtureCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         cmds[i] = mp.fix_build_cmd(i, c)
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         mp.fix_run_ok(i, c).match ({
             true  => out("."),
@@ -169,7 +169,7 @@ cmd_for = (
     path: StringView,
     redirect: StringView,
 ) StringView {
-    s := mp.new_in().expect("harness: oom")
+    s ::= mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "./zen ").expect("harness: oom")
     s = s.append_in(mp, verb).expect("harness: oom")
     s = s.append_in(mp, " ").expect("harness: oom")
@@ -179,7 +179,7 @@ cmd_for = (
 }
 // check every `present` substring is in `txt` and every `absent` substring is NOT — return the AND.
 all_present_absent = (txt: StringView, present: [StringView], absent: [StringView]) bool {
-    ok := true
+    ok ::= true
     present.loop((h, i, s) {
         (txt.contains(s) == false).then({
             ok = false
@@ -194,9 +194,9 @@ all_present_absent = (txt: StringView, present: [StringView], absent: [StringVie
 }
 // run ONE emit case: `zenc emit` must succeed and the C must satisfy present/absent.
 run_emit* = (ec: EmitCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    rc := shell(mp.zo_cmd(mp.cmd_for("emit", ec.path, " > $ZT/zoe_emit.c 2>/dev/null"))).expect("harness: shell")
+    m = Malloc(_: 0)
+    mp = m.addr()
+    rc = shell(mp.zo_cmd(mp.cmd_for("emit", ec.path, " > $ZT/zoe_emit.c 2>/dev/null"))).expect("harness: shell")
     (rc == 0).match ({
         true  => mp.contents_in(mp.zo_path("zoe_emit.c")).match ({
             .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
@@ -206,13 +206,13 @@ run_emit* = (ec: EmitCase) bool {
     })
 }
 emit_cmd = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) StringView {
-    z: StringView := ""
-    c := mp.zo_idpath("zoeemit", gid, ".c")
-    rc := mp.zo_idpath("zoeemitrc", gid, ".txt")
+    z: StringView = ""
+    c = mp.zo_idpath("zoeemit", gid, ".c")
+    rc = mp.zo_idpath("zoeemitrc", gid, ".txt")
     mp.zo_join([z, "if ./zen emit ", ec.path, " > ", c, " 2>/dev/null; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
 emit_ok = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) bool {
-    passed := mp.contents_in(mp.zo_idpath("zoeemitrc", gid, ".txt")).match ({
+    passed = mp.contents_in(mp.zo_idpath("zoeemitrc", gid, ".txt")).match ({
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
@@ -227,16 +227,16 @@ emit_ok = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) bool {
 run_emits* = (name: StringView, cs: [EmitCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         cmds[i] = mp.emit_cmd(i, c)
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         mp.emit_ok(i, c).match ({
             true  => out("."),
@@ -252,9 +252,9 @@ run_emits* = (name: StringView, cs: [EmitCase]) i32 {
 }
 // run ONE doc case: `zenc doc <target>` must exit 0 and the markdown must satisfy present/absent.
 run_doc* = (dc: DocCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    rc := shell(mp.zo_cmd(mp.cmd_for("doc", dc.target, " > $ZT/zoe_doc.txt 2>&1"))).expect("harness: shell")
+    m = Malloc(_: 0)
+    mp = m.addr()
+    rc = shell(mp.zo_cmd(mp.cmd_for("doc", dc.target, " > $ZT/zoe_doc.txt 2>&1"))).expect("harness: shell")
     (rc == 0).match ({
         true  => mp.contents_in(mp.zo_path("zoe_doc.txt")).match ({
             .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
@@ -264,13 +264,13 @@ run_doc* = (dc: DocCase) bool {
     })
 }
 doc_cmd = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) StringView {
-    z: StringView := ""
-    f := mp.zo_idpath("zoedoc", gid, ".txt")
-    rc := mp.zo_idpath("zoedocrc", gid, ".txt")
+    z: StringView = ""
+    f = mp.zo_idpath("zoedoc", gid, ".txt")
+    rc = mp.zo_idpath("zoedocrc", gid, ".txt")
     mp.zo_join([z, "if ./zen doc ", dc.target, " > ", f, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
 doc_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) bool {
-    passed := mp.contents_in(mp.zo_idpath("zoedocrc", gid, ".txt")).match ({
+    passed = mp.contents_in(mp.zo_idpath("zoedocrc", gid, ".txt")).match ({
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
@@ -285,16 +285,16 @@ doc_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) bool {
 run_docs* = (name: StringView, cs: [DocCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         cmds[i] = mp.doc_cmd(i, c)
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         mp.doc_ok(i, c).match ({
             true  => out("."),
@@ -330,9 +330,9 @@ shell_is_serial = (name: StringView) bool {
 // stray line (a fixture's own program output, a `fmt --check` "needs formatting") that — under parallel
 // execution — would interleave with the dot stream at a timing-dependent point, breaking determinism.
 shell_wrap = (mp: MutPtr<Malloc>, gid: i64, cmd: StringView) StringView {
-    z: StringView := ""
-    zt := mp.zo_idpath("sh", gid, "")
-    rc := mp.zo_idpath("shrc", gid, ".txt")
+    z: StringView = ""
+    zt = mp.zo_idpath("sh", gid, "")
+    rc = mp.zo_idpath("shrc", gid, ".txt")
     mp.zo_join([z, "ZT=", zt, "; rm -rf \"$ZT\"; mkdir -p \"$ZT\"; if ( ", cmd, " ) >/dev/null 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
 shell_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
@@ -345,18 +345,18 @@ shell_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
 // all others run across the worker pool. Every case's body is gid-isolated (its own `$ZT` subdir), so the
 // fixed scratch names never collide. Phase C reads the P/F markers IN ORDER — byte-identical verdict to serial.
 run_shells* = (name: StringView, cs: [ShellCase]) i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     out(name)
     out("\n")
-    n := cs.len
+    n = cs.len
     // Phase A: build every case's wrapped command; partition into the parallel-safe batch (dense array
     // `pcmds`) and run the thread-spawning ones serially right here (their markers land the same way).
-    pbase := assert_nonnull(malloc(n * 8))
-    pcmds: [StringView] := pbase.slice(n)
-    pn: i64 := 0
+    pbase = assert_nonnull(malloc(n * 8))
+    pcmds :: [StringView] = pbase.slice(n)
+    pn :: i64 = 0
     cs.loop((h, i, c) {
-        w := mp.shell_wrap(i, c.cmd)
+        w = mp.shell_wrap(i, c.cmd)
         c.name.shell_is_serial().match ({
             true  => {
                 shell(w).expect("harness: shell")
@@ -369,7 +369,7 @@ run_shells* = (name: StringView, cs: [ShellCase]) i32 {
     })
     zo_par_run(pcmds, pn)
     // Phase C: read markers IN ORIGINAL ORDER → identical '.'/'F' sequence, fail count, exit code.
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
         mp.shell_ok(i).match ({
             true  => out("."),
@@ -384,9 +384,9 @@ run_shells* = (name: StringView, cs: [ShellCase]) i32 {
     fails
 }
 harness_build_run* = () i32 {
-    fp := "tests/fixtures/zen/"
+    fp = "tests/fixtures/zen/"
     // ── (a) build+run+exit-only fixtures (concurrency / scope / runtime acceptance programs) ──────
-    ex := run_fixtures("build exit", [
+    ex = run_fixtures("build exit", [
         FixtureCase(
             path: "tests/fixtures/zen/zero_size_alloc.zen",
             want_exit: "0",
@@ -903,7 +903,7 @@ harness_build_run* = () i32 {
     // enum match numeric arms widen the result type (i64) so got==big() holds.
     // fmt numeric write helpers (Result-always) thread an explicit (counting/limiting) allocator.
     // ── (b) build+run+stdout fixtures (print / text / map acceptance programs) ───────────────────
-    so := run_fixtures("build stdout", [
+    so = run_fixtures("build stdout", [
         FixtureCase(
             path: "tests/fixtures/zen/bufwriter_stdout.zen",
             want_exit: "0",
@@ -1109,7 +1109,7 @@ harness_build_run* = () i32 {
     // binding-strength matrix: receiver/typed args > expected type > literals (sizeof proves
     // which type each generic call bound); includes literal-first, mixed, and to_i64 pinning.
     // ── batch 2: smaller self-contained build+run+exit programs (generics, HOFs, operators, casts) ─
-    ex2 := run_fixtures("build exit 2", [
+    ex2 = run_fixtures("build exit 2", [
         FixtureCase(
             path: "tests/fixtures/zen/gen_template_local_shadow.zen",
             want_exit: "7",
@@ -1233,7 +1233,7 @@ harness_build_run* = () i32 {
     // census #11: a 2000-decl program is not silently truncated at a 1024-decl cap; f1999 = 99.
     // newline + `.Uppercase` ends the statement even after a bare Uppercase variable (the glue repro).
     // a qualified ctor `Res.Okv(41)` with the dot on the SAME line still parses as one expression.
-    so2 := run_fixtures("build stdout 2", [
+    so2 = run_fixtures("build stdout 2", [
         FixtureCase(
             path: "tests/fixtures/zen/deep_tail_recursion.zen",
             want_exit: "0",
@@ -1310,7 +1310,7 @@ harness_build_run* = () i32 {
     // strings_demo.zen is the byte-ownership CANARY: the one example that borrows a view, writes
     // through it, and frees every block it named, so a change to what the allocating `std.text.str`
     // helpers return — or to whether a view of one is writable — fails HERE. docs/string-vec-model.md.
-    exm := run_fixtures("build examples", [
+    exm = run_fixtures("build examples", [
         FixtureCase(
             path: "examples/hello.zen",
             want_exit: "0",
@@ -1349,7 +1349,7 @@ harness_build_run* = () i32 {
         ),
     ])
     // ── (c) `zenc check` accept/reject fixtures (reuse harness_lib.run_verdict on inline SOURCE) ───
-    vd := run_verdicts("build check", [
+    vd = run_verdicts("build check", [
         VerdictCase(
             src: "main = () i32 { 6 * 2 }\n",
             should_pass: true,
@@ -1478,7 +1478,7 @@ harness_build_run* = () i32 {
     // mid-file garbage is a syntax error (not silently-dropped decls).
     // @malloc is not an intrinsic: it is an undefined name.
     // ── (d) run/stdout fixtures ported from test_build.py inline-source programs (exit only) ──────
-    r1 := run_fixtures("build result-paths", [
+    r1 = run_fixtures("build result-paths", [
         FixtureCase(
             path: "tests/fixtures/zen/build_emits_binary.zen",
             want_exit: "12",
@@ -1723,7 +1723,7 @@ harness_build_run* = () i32 {
     // cown_result_paths + io_file_result_paths use scratch FILE paths (`@@T@@/...`) — they are driven
     // as shell cases below so each run substitutes its own private `$ZT` dir and seeds the inputs.
     // ── (e) run/stdout fixtures with exact stdout ────────────────────────────────────────────────
-    r2 := run_fixtures("build result stdout", [
+    r2 = run_fixtures("build result stdout", [
         FixtureCase(
             path: "tests/fixtures/zen/bool_guard_wild_0.zen",
             want_exit: "0",
@@ -1836,7 +1836,7 @@ harness_build_run* = () i32 {
     // Vec<i32> via allocator: empty/push/view/loop-sum/free — pins the return-only-T `empty` + `.view().loop` pattern
     // ── (f) more `zenc check` rejects (string/slice/own/rc/arc allocator-first — the former try_* twins
     // now double as deleted-name rejects; typed-local mismatch) ─
-    vd2 := run_verdicts("build check 2", [
+    vd2 = run_verdicts("build check 2", [
         VerdictCase(
             src: "string = std.text.string\nmain = () i32 { s := string.init(16)  0 }\n",
             should_pass: false,
@@ -1968,7 +1968,7 @@ harness_build_run* = () i32 {
     // `free` this call only reached through flat-namespace luck.
     // deleted allocator/string ctor names (`new`/`try_new`) destructure-imported from a module that no
     // longer defines them → kindless `unknown name in module` reject; pin the exact message (no error[kind]).
-    vd2b := run_diags("build check 2 deleted-names", [
+    vd2b = run_diags("build check 2 deleted-names", [
         DiagCase(
             src: "{ new } = std.text.string\nmain = () i32 { s := new()  0 }\n",
             wants: ["error: unknown name 'new' in module 'std.text.string' (no such top-level definition)"],
@@ -2004,7 +2004,7 @@ harness_build_run* = () i32 {
     // a LOCAL fn value may shadow an intrinsic name (#370/#377 route its calls soundly).
     // a STRUCT METHOD named like an intrinsic is hoisted under a mangled `impl_…` name — allowed.
     // ── (g) POSITIONED diagnostics: kind + file:line:col + caret + message + hint ─────────────────
-    dg := run_diags("build diagnostics", [
+    dg = run_diags("build diagnostics", [
         DiagCase(
             src: "if (true) { 1 }\n",
             wants: [":1:1: error[no-if]", "  if (true) { 1 }", "  ^~", "hint: in expression position write `cond.then({ yes }, { no })`"],
@@ -2313,7 +2313,7 @@ harness_build_run* = () i32 {
     // a POSITIONED exhaustiveness diagnostic, identical in shape to the enum case above — NOT the old
     // position-less undefined-name sentinel. (In statement position the same form is legal; see harness_value.)
     // ── (h) `zenc emit` C-substring assertions (enum switch / bool ternary / no self-capture) ─────
-    em := run_emits("build emit", [
+    em = run_emits("build emit", [
         EmitCase(
             path: "tests/fixtures/zen/enum_emit.zen",
             present: ["switch (_subj.tag)", "case R_Ok:"],
@@ -2336,7 +2336,7 @@ harness_build_run* = () i32 {
         ),
     ])
     // ── (i) `zenc doc` public-surface + legacy-name assertions across the std modules + genc.zen ──
-    dc := run_docs("build doc", [
+    dc = run_docs("build doc", [
         DocCase(
             target: "std.text.fmt",
             present: ["# std.text.fmt", "Display*: {", "write_int_in* = (a: Allocator, n: i64) Result<i64, IoError>", "write_float_in* = (a: Allocator, x: f64) Result<i64, IoError>", "print*<T: Display> = (x: T) i64 { x.fmt_print() }", "println*<T: Display> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
@@ -2444,7 +2444,7 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.io.file",
-            present: ["out* = (s: StringView) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_bytes_in* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_bytes* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_in* = (a: Allocator, path: StringView) Result<StringView, IoError>", "contents* = (a: Allocator, path: StringView) Result<StringView, IoError>", "save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError>", "O_WRTRUNC* := O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: StringView) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
+            present: ["out* = (s: StringView) Result<i64, IoError>", "out_bytes* = (bytes: [u8]) Result<i64, IoError>", "contents_bytes_in* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_bytes* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_in* = (a: Allocator, path: StringView) Result<StringView, IoError>", "contents* = (a: Allocator, path: StringView) Result<StringView, IoError>", "save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError>", "O_WRTRUNC* = O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: StringView) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
             absent: ["contents* = (path: StringView) Result<StringView, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"],
         ),
         DocCase(
@@ -2459,7 +2459,7 @@ harness_build_run* = () i32 {
         ),
     ])
     // ── (j) procedural tests (project mode, fmt idempotency, help/version, bad-file, sibling, emit-eq) ─
-    sh := run_shells("build shell", [
+    sh = run_shells("build shell", [
         ShellCase(
             name: "decl_cap_2000_generated",
             cmd: "f=$ZT/decl_cap_2000.zen && : >$f && i=0 && while test $i -lt 2000; do printf 'f%s = () i32 { %s }\\n' \"$i\" \"$((i % 100))\" >>$f; i=$((i + 1)); done && printf 'main = () i32 { f1999() }\\n' >>$f && ./zen build $f -o $ZT/decl_cap_2000 >/dev/null 2>&1 && { $ZT/decl_cap_2000; test \"$?\" = 99; }",
@@ -2810,7 +2810,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "fmt_then_two_arm_canonicalize",
-            cmd: "cp tests/fixtures/fmt/then_two_arm_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/then_two_arm_formatted.zen && grep -Fq 'a := (n > 3).then({ 10 }, { 20 })' $ZT/zfmt.zen && grep -Fq 'false => (n < 10).then({ 2 }, { 3 }),' $ZT/zfmt.zen && grep -Fq 'd := (n > 3).then({ 1 }, { 2 }) + 5' $ZT/zfmt.zen && grep -Fq 'e := ((n > 3).then({ 1 }, { 2 })).helper(1, 2, 3)' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+            cmd: "cp tests/fixtures/fmt/then_two_arm_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/then_two_arm_formatted.zen && grep -Fq 'a ::= (n > 3).then({ 10 }, { 20 })' $ZT/zfmt.zen && grep -Fq 'false => (n < 10).then({ 2 }, { 3 }),' $ZT/zfmt.zen && grep -Fq 'd ::= (n > 3).then({ 1 }, { 2 }) + 5' $ZT/zfmt.zen && grep -Fq 'e ::= ((n > 3).then({ 1 }, { 2 })).helper(1, 2, 3)' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
         ),
         ShellCase(
             name: "fmt_trait_defaults",
@@ -2914,7 +2914,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "readonly_ptr_no_launder",
-            cmd: "{ ./zen check tests/fixtures/zen/readonly_ptr_launder.zen > $ZT/zrpl.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[ptr-write\\]: cannot write through a read-only' $ZT/zrpl.txt)\" = 5 && grep -Fq ':12:22:' $ZT/zrpl.txt && grep -Fq ':19:22:' $ZT/zrpl.txt && grep -Fq ':26:22:' $ZT/zrpl.txt && grep -Fq ':33:11:' $ZT/zrpl.txt && grep -Fq ':39:32:' $ZT/zrpl.txt && grep -Fq '  w: [u8] := v.ptr.slice(v.len)' $ZT/zrpl.txt && grep -Fq '  w: [u8] := v.ptr.offset(0).slice(v.len)' $ZT/zrpl.txt && grep -Fq \"  v.ptr.store('H')\" $ZT/zrpl.txt && printf '{ view } = std.text.str\\n{ copy } = std.mem.raw\\nfrom_ro = (s: StringCstr, d: [u8]) void {\\n    v := s.view()\\n    d.ptr.copy(v.ptr, v.len)\\n}\\nstill_writable = (s: StringView) [u8] {\\n    v := s.view()\\n    v.ptr.slice(v.len)\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zrpok.zen && ./zen check $ZT/zrpok.zen",
+            cmd: "{ ./zen check tests/fixtures/zen/readonly_ptr_launder.zen > $ZT/zrpl.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[ptr-write\\]: cannot write through a read-only' $ZT/zrpl.txt)\" = 5 && grep -Fq ':12:23:' $ZT/zrpl.txt && grep -Fq ':19:23:' $ZT/zrpl.txt && grep -Fq ':26:23:' $ZT/zrpl.txt && grep -Fq ':33:11:' $ZT/zrpl.txt && grep -Fq ':39:33:' $ZT/zrpl.txt && grep -Fq '  w :: [u8] = v.ptr.slice(v.len)' $ZT/zrpl.txt && grep -Fq '  w :: [u8] = v.ptr.offset(0).slice(v.len)' $ZT/zrpl.txt && grep -Fq \"  v.ptr.store('H')\" $ZT/zrpl.txt && printf '{ view } = std.text.str\\n{ copy } = std.mem.raw\\nfrom_ro = (s: StringCstr, d: [u8]) void {\\n    v := s.view()\\n    d.ptr.copy(v.ptr, v.len)\\n}\\nstill_writable = (s: StringView) [u8] {\\n    v := s.view()\\n    v.ptr.slice(v.len)\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zrpok.zen && ./zen check $ZT/zrpok.zen",
         ),
         ShellCase(
             name: "c_target_rejects_js_platform_module",
@@ -3027,7 +3027,7 @@ harness_build_run* = () i32 {
     // `./zen` IS the cc-built bootstrap binary, so drive it directly — emit-compile-run real programs,
     // survive malformed input (no signal death), report missing files, and `--build-self` usage errors.
     // (the self-host FIXPOINT itself is wired separately in oracle.zen via fixpoint_ok.)
-    bs := run_shells("bootstrap", [
+    bs = run_shells("bootstrap", [
         ShellCase(
             name: "bootstrap_compiles_zen",
             cmd: "printf '%s' 'sq* = (n: i32) i32 { n * n }' | ./zen >$ZT/zbc.c 2>/dev/null && grep -Fq 'int32_t sq(int32_t n)' $ZT/zbc.c && { echo '#include <stdint.h>'; cat $ZT/zbc.c; echo 'int main(void){ return sq(7) == 49 ? 0 : 1; }'; } > $ZT/zbc_full.c && cc -std=gnu11 -w $ZT/zbc_full.c -o $ZT/zbc_bin 2>/dev/null && $ZT/zbc_bin",

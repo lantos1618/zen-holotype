@@ -65,7 +65,7 @@ Hash*: {
 // splitmix-style multiplicative mix of an i64 (multiply wraps under -fwrapv — that wrap IS the
 // avalanche). Full-width: callers fold into a bucket range themselves (hbucket below).
 hmix = (k: i64) i64 {
-    h := k
+    h ::= k
     h = (h ^ h >> 33) * 1099511628211
     h = (h ^ h >> 29) * 1099511628211
     h ^ h >> 32
@@ -152,7 +152,7 @@ HMap*<K, V>: {
         (m.cap == 0).match ({
             true  => 0 - 1,
             false => {
-                ix := m.index()
+                ix = m.index()
                 hchain(m.keys(), ix, m.cap, ix[hbucket(k, m.cap)], k)
             },
         })
@@ -160,32 +160,32 @@ HMap*<K, V>: {
     has = (m: HMap<K, V>, k: K) bool { m.find(k) >= 0 }
     get = (m: HMap<K, V>, k: K) Opt<V> {
         // The value under k as an option: .Some(v) if present, .None if absent.
-        i := m.find(k)
-        out: Opt<V> := (i < 0).then({ .None }, { .Some(m.vals()[i]) })
+        i = m.find(k)
+        out: Opt<V> = (i < 0).then({ .None }, { .Some(m.vals()[i]) })
         out
     }
     get_or = (m: HMap<K, V>, k: K, dflt: V) V {
-        i := m.find(k)
+        i = m.find(k)
         (i < 0).then({ dflt }, { m.vals()[i] })
     }
     grow = (m: HMap<K, V>, a: Allocator) Result<HMap<K, V>, IoError> {
-        cap := m.cap * 2 + 1
+        cap = m.cap * 2 + 1
         a.try_acquire3(cap * sizeof(K), cap * sizeof(V), cap * 2 * sizeof(i64)).match ({
             .Ok(bufs) => {
-                kp := bufs.b1
-                vp := bufs.b2
-                ip := bufs.b3
-                oldks := m.keys()
-                oldvs := m.vals()
-                next := HMap<K, V>(
+                kp = bufs.b1
+                vp = bufs.b2
+                ip = bufs.b3
+                oldks = m.keys()
+                oldvs = m.vals()
+                next = HMap<K, V>(
                     keys: kp,
                     vals: vp,
                     idx: ip,
                     len: m.len,
                     cap: cap,
                 )
-                keys := next.keys()
-                vals := next.vals()
+                keys ::= next.keys()
+                vals ::= next.vals()
                 oldks.loop((h, i, k) {
                     (i < m.len).match ({
                         true  => {
@@ -200,21 +200,21 @@ HMap*<K, V>: {
                 a.release(m.keys)
                 a.release(m.vals)
                 a.release(m.idx)
-                ok: Result<HMap<K, V>, IoError> := .Ok(next.reindex())
+                ok: Result<HMap<K, V>, IoError> = .Ok(next.reindex())
                 ok
             },
             .Err(e)   => {
-                err: Result<HMap<K, V>, IoError> := .Err(e)
+                err: Result<HMap<K, V>, IoError> = .Err(e)
                 err
             },
         })
     }
     reindex = (m: HMap<K, V>) HMap<K, V> {
         // Rebuild the hash index from the live key column. O(len).
-        ix := m.index()
-        cap := m.cap
+        ix = m.index()
+        cap = m.cap
         hashidx_clear(ix, cap)
-        ks := m.keys()
+        ks = m.keys()
         ks.loop((h, i, k) {
             (i < m.len).match ({
                 true  => {
@@ -233,15 +233,15 @@ HMap*<K, V>: {
         m
     }
     append = (m: HMap<K, V>, a: Allocator, k: K, v: V) Result<HMap<K, V>, IoError> {
-        k := k
-        v := v
-        out: Result<HMap<K, V>, IoError> := (m.len < m.cap).match ({
+        k = k
+        v = v
+        out: Result<HMap<K, V>, IoError> = (m.len < m.cap).match ({
             true  => {
-                keys := m.keys_all()
-                vals := m.vals_all()
+                keys ::= m.keys_all()
+                vals ::= m.vals_all()
                 keys[m.len] = k
                 vals[m.len] = v
-                ok: Result<HMap<K, V>, IoError> := .Ok(HMap<K, V>(
+                ok: Result<HMap<K, V>, IoError> = .Ok(HMap<K, V>(
                     keys: m.keys,
                     vals: m.vals,
                     idx: m.idx,
@@ -253,11 +253,11 @@ HMap*<K, V>: {
             false => {
                 m.grow(a).match ({
                     .Ok(next) => {
-                        keys := next.keys_all()
-                        vals := next.vals_all()
+                        keys ::= next.keys_all()
+                        vals ::= next.vals_all()
                         keys[next.len] = k
                         vals[next.len] = v
-                        ok: Result<HMap<K, V>, IoError> := .Ok(HMap<K, V>(
+                        ok: Result<HMap<K, V>, IoError> = .Ok(HMap<K, V>(
                             keys: next.keys,
                             vals: next.vals,
                             idx: next.idx,
@@ -267,7 +267,7 @@ HMap*<K, V>: {
                         ok
                     },
                     .Err(e)   => {
-                        err: Result<HMap<K, V>, IoError> := .Err(e)
+                        err: Result<HMap<K, V>, IoError> = .Err(e)
                         err
                     },
                 })
@@ -280,13 +280,13 @@ HMap*<K, V>: {
         // rebind (`m = m.put(...).expect("…")`): on grow the buffers are realloced, so a handle
         // captured before this call dangles (VALUE-MOLD CONTRACT). On an existing key the value
         // is overwritten IN PLACE (visible through every header sharing this storage).
-        i := m.find(k)
-        out: Result<HMap<K, V>, IoError> := (i < 0).match ({
+        i = m.find(k)
+        out: Result<HMap<K, V>, IoError> = (i < 0).match ({
             true  => m.append(a, k, v),
             false => {
-                vals := m.vals()
+                vals ::= m.vals()
                 vals[i] = v
-                ok: Result<HMap<K, V>, IoError> := .Ok(m)
+                ok: Result<HMap<K, V>, IoError> = .Ok(m)
                 ok
             },
         })
@@ -297,15 +297,15 @@ HMap*<K, V>: {
         // into the freed slot (re-linking it under its new index), shrink len. No allocation, no
         // tombstones; the slot is reused by the next insert. Absent keys are a no-op. RETURNS the
         // updated map — always rebind (`m = m.delete(k)`): a stale header lies about len.
-        e := m.find(k)
+        e = m.find(k)
         (e < 0).match ({
             true  => m,
             false => {
-                ix := m.index()
-                ks := m.keys()
-                vs := m.vals()
+                ix = m.index()
+                ks ::= m.keys()
+                vs ::= m.vals()
                 hunlink(ix, m.cap, hbucket(ks[e], m.cap), e)
-                last := m.len - 1
+                last = m.len - 1
                 (e < last).then({
                     // move the last entry down into the freed slot and re-link it there
                     hunlink(ix, m.cap, hbucket(ks[last], m.cap), last)
@@ -332,8 +332,8 @@ HMap*<K, V>: {
         // Visit every live entry as (key, value). `f` is invoked DIRECTLY in the loop body so an
         // inline lambda splices in (like iter.each). Order is the column order — insertion order
         // until the first delete perturbs it.
-        ks := m.keys()
-        vs := m.vals()
+        ks = m.keys()
+        vs = m.vals()
         ks.loop((h, i, k) {
             (i < m.len).match ({
                 true  => {
@@ -354,21 +354,21 @@ HMap*<K, V>: {
 empty*<K, V> = (a: Allocator) Result<HMap<K, V>, IoError> {
     a.try_acquire3(sizeof(K), sizeof(V), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
-            kp := bufs.b1
-            vp := bufs.b2
-            ip := bufs.b3
-            m := HMap<K, V>(
+            kp = bufs.b1
+            vp = bufs.b2
+            ip = bufs.b3
+            m = HMap<K, V>(
                 keys: kp,
                 vals: vp,
                 idx: ip,
                 len: 0,
                 cap: 1,
             )
-            ok: Result<HMap<K, V>, IoError> := .Ok(m.reindex())
+            ok: Result<HMap<K, V>, IoError> = .Ok(m.reindex())
             ok
         },
         .Err(e)   => {
-            err: Result<HMap<K, V>, IoError> := .Err(e)
+            err: Result<HMap<K, V>, IoError> = .Err(e)
             err
         },
     })
@@ -379,25 +379,25 @@ empty*<K, V> = (a: Allocator) Result<HMap<K, V>, IoError> {
 hmap_seed_in<K, V> = (a: Allocator, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
     a.try_acquire3(sizeof(K), sizeof(V), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
-            kp := bufs.b1
-            vp := bufs.b2
-            ip := bufs.b3
-            m := HMap<K, V>(
+            kp = bufs.b1
+            vp = bufs.b2
+            ip = bufs.b3
+            m = HMap<K, V>(
                 keys: kp,
                 vals: vp,
                 idx: ip,
                 len: 1,
                 cap: 1,
             )
-            keys := m.keys()
-            vals := m.vals()
+            keys ::= m.keys()
+            vals ::= m.vals()
             keys[0] = seed_key
             vals[0] = seed_val
-            ok: Result<HMap<K, V>, IoError> := .Ok(m.reindex())
+            ok: Result<HMap<K, V>, IoError> = .Ok(m.reindex())
             ok
         },
         .Err(e)   => {
-            err: Result<HMap<K, V>, IoError> := .Err(e)
+            err: Result<HMap<K, V>, IoError> = .Err(e)
             err
         },
     })
@@ -444,7 +444,7 @@ AHMap*<K, V>: {
         // side-effecting result, and its link step is NON-idempotent. The inliner binds such a
         // multiply-used arg to one temp (evaluate-once), so referencing `w` several times below is
         // safe — no local rebind needed here.
-        a := w.alloc
+        a = w.alloc
         AHMap<K, V>(
             inner: w.inner.put(a.addr(), k, v).expect("hmap.put: out of memory"),
             alloc: w.alloc,
@@ -457,7 +457,7 @@ AHMap*<K, V>: {
         )
     }
     free = (w: AHMap<K, V>) void {
-        a := w.alloc
+        a = w.alloc
         w.inner.free(a.addr())
     }
 }
@@ -466,8 +466,8 @@ AHMap*<K, V>: {
 // explicit capability threading is the model). The ambient `new()` below is a one-line shim — the single
 // process-heap draw (`dyn_heap()`) on the hmap construction path.
 new_in*<K, V> = (a: DynAlloc) AHMap<K, V> {
-    da := a
-    ir: Result<HMap<K, V>, IoError> := empty(da.addr())
+    da = a
+    ir: Result<HMap<K, V>, IoError> = empty(da.addr())
     AHMap<K, V>(
         inner: ir.expect("hmap.new: out of memory"),
         alloc: a,
@@ -479,8 +479,8 @@ new_in*<K, V> = (a: DynAlloc) AHMap<K, V> {
 // std.text.string's generic `new_in(a: Allocator)` once both flatten together; qualified `hmap.new_in`
 // stays the external real path).
 new*<K, V> = () AHMap<K, V> {
-    a := dyn_heap()
-    ir: Result<HMap<K, V>, IoError> := empty(a.addr())
+    a = dyn_heap()
+    ir: Result<HMap<K, V>, IoError> = empty(a.addr())
     AHMap<K, V>(
         inner: ir.expect("hmap.new: out of memory"),
         alloc: a,
@@ -489,8 +489,8 @@ new*<K, V> = () AHMap<K, V> {
 // EXPLICIT-allocator seed constructor: an `AHMap<K, V>` bound to `a`, seeded with one pair. No ambient
 // draw. (Mirrors `HMap.of`'s shape — there is no pair-slice literal, so it takes the pair directly.)
 from_in*<K, V> = (a: DynAlloc, k: K, v: V) AHMap<K, V> {
-    da := a
-    ih: HMap<K, V> := hmap_seed_in(da.addr(), k, v).expect("hmap.from: out of memory")
+    da = a
+    ih: HMap<K, V> = hmap_seed_in(da.addr(), k, v).expect("hmap.from: out of memory")
     AHMap<K, V>(
         inner: ih,
         alloc: a,
@@ -501,8 +501,8 @@ from_in*<K, V> = (a: DynAlloc, k: K, v: V) AHMap<K, V> {
 // so this CHAINS: `m := hmap.from(k, v)`. (Named `from`, not `of`, since module `of` is the explicit
 // allocator-threaded seed constructor.)
 from*<K, V> = (k: K, v: V) AHMap<K, V> {
-    a := dyn_heap()
-    ih: HMap<K, V> := hmap_seed_in(a.addr(), k, v).expect("hmap.from: out of memory")
+    a = dyn_heap()
+    ih: HMap<K, V> = hmap_seed_in(a.addr(), k, v).expect("hmap.from: out of memory")
     AHMap<K, V>(
         inner: ih,
         alloc: a,

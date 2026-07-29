@@ -17,8 +17,8 @@
 { dispatch } = std.concurrent.pool_actor
 pa = std.concurrent.pool_actor
 { Context, Receiver } = std.concurrent.pool_actor
-WORKERS := 2
-CAP := 64
+WORKERS = 2
+CAP = 64
 Msg*: Work(i64) | Poison(i64)
 Agent*: {
     acc: RawPtr<u8>,
@@ -32,7 +32,7 @@ Agent.impl(Receiver, {
                 a.seen = a.seen + 1
             },
             .Poison(d) => {
-                boom := 100 / d    // d == 0 → PANIC → actor marked dead
+                boom = 100 / d    // d == 0 → PANIC → actor marked dead
                 atomic_add_i64(a.acc, boom)
             },
         })
@@ -40,28 +40,28 @@ Agent.impl(Receiver, {
 })
 tramp = (user: RawPtr<u8>, msg: i64) void { dispatch<Agent, Msg>(user, msg) }
 main = () i32 {
-    acc := assert_nonnull(malloc(8))
+    acc = assert_nonnull(malloc(8))
     store_i64(acc, 0)
-    spec := pa.child_spec(CAP, Agent(
+    spec = pa.child_spec(CAP, Agent(
         acc: acc,
         seen: 0,
     ), tramp, pa.temporary())
-    child0 := pa.start_child(spec)
-    p := pool_open(WORKERS, 16)
+    child0 = pa.start_child(spec)
+    p = pool_open(WORKERS, 16)
     p.send(child0.handle, Msg.Work(10))
     p.send(child0.handle, Msg.Poison(0))
     p.send(child0.handle, Msg.Work(10))
     p.pool_quiesce()
-    crashed := pool_actor_dead(child0.handle.raw)
-    dropped := p.pool_dropped()
-    acc_val := load_i64(acc)
-    child1 := child0.supervise()    // Temporary → no restart
-    not_restarted := child1.restarts == child0.restarts
-    still_dead := pool_actor_dead(child1.handle.raw)
+    crashed = pool_actor_dead(child0.handle.raw)
+    dropped = p.pool_dropped()
+    acc_val = load_i64(acc)
+    child1 = child0.supervise()    // Temporary → no restart
+    not_restarted = child1.restarts == child0.restarts
+    still_dead = pool_actor_dead(child1.handle.raw)
     p.pool_quiesce_stop()
     pa.close(child1.handle)
     p.pool_close()
     free(acc)
-    ok := crashed && not_restarted && still_dead && dropped == 1 && acc_val == 10
+    ok = crashed && not_restarted && still_dead && dropped == 1 && acc_val == 10
     ok.then({ 33 }, { 1 })
 }

@@ -20,10 +20,10 @@
 { env_imported, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn,
   env_struct_fields, env_trait_method, expr_pos, fit_err, is_ctx_typed_arg, is_ptr_ty, is_struct,
   lit_slot_verdict, pos_or, tparam_bound, ty_mentions_tparam, unknown_ty, ut_unknown_tys } = compiler.validate.util
-{ KARGTYPE, KARITY, KBADBIND, KBINDOP, KCAPACITY, KDIAG_CAP, KEOFINPUT, KEXPECTARROW, KEXPECTDECL,
-  KEXPECTEXPR, KEXPECTINIT, KFFITYPE, KFIELDDEFAULT, KMISGEN, KNOTYPEARGS, KORRETURN, KPARSE,
-  KRECHOF, KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND, KUNCLOSED, KUNKNOWNTYPE,
-  KUNREACHABLEARM, KPTRWRITE, KSLICEWRITE, KVBREAK, desc_or } = compiler.validate.diag
+{ KARGTYPE, KARITY, KASSIGNCONST, KBADBIND, KCAPACITY, KDIAG_CAP, KEOFINPUT, KEXPECTARROW,
+  KEXPECTDECL, KEXPECTEXPR, KEXPECTINIT, KFFITYPE, KFIELDDEFAULT, KLETEQ, KLETTYPE, KMISGEN,
+  KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND,
+  KUNCLOSED, KUNKNOWNTYPE, KUNREACHABLEARM, KPTRWRITE, KSLICEWRITE, KVBREAK, desc_or } = compiler.validate.diag
 // which read-only thing the lvalue walk stopped on -> the diagnostic that names it. `[T]` and
 // `Ptr<T>` are different mistakes with different fixes, so they get different messages.
 write_diag_kind = (c: i32) i32 {
@@ -38,7 +38,7 @@ write_diag_kind = (c: i32) i32 {
 { kv_at, kv_one } = compiler.validate.core
 // Does some `Type.impl(Trait)` exist? i.e. a DImpl naming this type + trait.
 type_impls_trait = (decls: [Decl], tyname: StringView, trname: StringView) bool {
-    found := false
+    found ::= false
     decls.loop((h, i, d) {
         found = d.match ({
             .DImpl(im) => (im.ty == tyname && im.trname == trname).then({ true }, { found }),
@@ -72,7 +72,7 @@ bound_targ_concrete = (env: Env, tn: StringView) bool {
     env.decls.is_struct(tn) || env.env_is_enum(tn) || tn.bound_prim_name()
 }
 bound_errs = (env: Env, f: Func, c: CallData) i32 {
-    acc := 0
+    acc ::= 0
     f.tparams.loop((h, i, tp) {
         acc = acc + env.bound_err(f, c, tp)
     })
@@ -110,7 +110,7 @@ cond_compatible = (d: CondData, tt: Ty, et: Ty) bool {
 //   * only CONSUMED positions fire — a discarded match (e.g. the tail of a void fn) keeps its
 //     mixed side-effect arms, which emit fine as `(c ? f() : ({ }))`.
 known_void_call = (env: Env, c: CallData) bool {
-    f := env.env_func(c.fn)
+    f = env.env_func(c.fn)
     (f.name == c.fn).then({ f.tparams.len == 0 && f.ret.is_void_ty() }, { false })
 }
 novalue_block_tail = (env: Env, stmts: [Stmt]) i32 {
@@ -124,7 +124,7 @@ novalue_block_tail = (env: Env, stmts: [Stmt]) i32 {
     })
 }    // a Let/Assign/If/While/IndexSet tail is a statement, never a value
 novalue_match_arms = (env: Env, m: MatchData) i32 {
-    acc := 0
+    acc ::= 0
     m.arms.loop((h, i, ar) {
         acc = acc + env.novalue_arm_leaf(ar.body)
     })
@@ -132,7 +132,7 @@ novalue_match_arms = (env: Env, m: MatchData) i32 {
 }
 // Early returns inside value-position block arms would be dropped by expression emission.
 early_returns = (stmts: [Stmt]) bool {
-    found := false
+    found ::= false
     stmts.loop((h, i, st) {
         found = (i < stmts.len - 1).match ({
             true  => st.match ({
@@ -153,7 +153,7 @@ expr_drops_return* = (e: Ptr<Expr>) i32 {
 // Enum matches must be exhaustive and have no duplicate arms.
 no_variants = () [VariantDef] { slice(null_ptr(), 0) }
 enum_variants* = (decls: [Decl], ename: StringView) [VariantDef] {
-    found := no_variants()
+    found ::= no_variants()
     decls.loop((h, i, d) {
         found = d.match ({
             .DEnum(ed)   => (ed.name == ename).then({ ed.variants }, { found }),
@@ -168,7 +168,7 @@ arm_covers = (arms: [ArmData], vname: StringView) bool {
     arms.slice_any((a) { a.variant == vname })
 }
 missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
-    n := 0
+    n ::= 0
     variants.loop((h, i, v) {
         n = arms.arm_covers(v.name).then({ n }, { n + 1 })
     })
@@ -177,21 +177,21 @@ missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
 // the NAME of the first declared variant the arms do not cover, else "" — the uncovered
 // variant an exhaustiveness diagnostic names so the fix is a copy-pasteable `.Variant => …` arm.
 first_missing_variant* = (variants: [VariantDef], arms: [ArmData]) StringView {
-    r := ""
+    r ::= ""
     variants.loop((h, i, v) {
         r = (is_empty(r) && arms.arm_covers(v.name) == false).then({ v.name }, { r })
     })
     r
 }
 dup_before = (arms: [ArmData], vname: StringView, upto: i32) bool {
-    f := false
+    f ::= false
     arms.loop((h, i, a) {
         f = (i < upto && a.variant == vname).then({ true }, { f })
     })
     f
 }
 dup_arm_errs* = (arms: [ArmData]) i32 {
-    n := 0
+    n ::= 0
     arms.loop((h, i, a) {
         n = n + (a.variant == "_").match ({
             true  => 0,
@@ -205,14 +205,14 @@ dup_arm_errs* = (arms: [ArmData]) i32 {
 // letting code that looks reachable vanish. (A duplicate variant arm — the other never-fires
 // shape — is already KDUPVARIANT, whether or not a wildcard is present.)
 wildcard_before = (arms: [ArmData], upto: i32) bool {
-    f := false
+    f ::= false
     arms.loop((h, i, a) {
         f = (i < upto && a.variant == "_").then({ true }, { f })
     })
     f
 }
 unreachable_arm_errs* = (arms: [ArmData]) i32 {
-    n := 0
+    n ::= 0
     arms.loop((h, i, a) {
         n = n + arms.wildcard_before(i).then({ 1 }, { 0 })
     })
@@ -232,7 +232,7 @@ enum_declares = (decls: [Decl], vn: StringView) bool {
 arm_known = (vs: [VariantDef], vname: StringView) bool { vs.slice_any((v) { v.name == vname }) }
 // Operand checking stays lenient for uninferable operands.
 is_arith_op = (op: StringView) bool {
-    b := op.at(0)
+    b = op.at(0)
     b == '+' || b == '-' || b == '*' || b == '/' || b == '%'
 }
 // Strict comparisons require numeric operands; shifts are separate bitwise ops.
@@ -247,14 +247,14 @@ is_bool_ty = (t: Ty) bool {
     })
 }
 non_numeric = (env: Env, e: Ptr<Expr>) bool {
-    t := env.infer_expr(e)
+    t = env.infer_expr(e)
     env.unknown_ty(t).match ({
         true  => false,
         false => (t.ty_rank() >= 0).then({ false }, { true }),
     })
 }
 non_bool = (env: Env, e: Ptr<Expr>) bool {
-    t := env.infer_expr(e)
+    t = env.infer_expr(e)
     env.unknown_ty(t).match ({
         true  => false,
         false => t.is_bool_ty().then({ false }, { true }),
@@ -271,8 +271,8 @@ f64_operand_err = (env: Env, op: StringView, lt: Ty, rt: Ty) i32 {
 }
 // Any f64 side routes to the f64 surface; otherwise use integer numeric rules.
 num_operand_err = (env: Env, b: BinData) i32 {
-    lt := env.infer_expr(b.lhs)
-    rt := env.infer_expr(b.rhs)
+    lt = env.infer_expr(b.lhs)
+    rt = env.infer_expr(b.rhs)
     (lt.is_f64_ty() || rt.is_f64_ty()).match ({
         true  => env.f64_operand_err(b.op, lt, rt),
         false => (env.non_numeric(b.lhs) || env.non_numeric(b.rhs)).then({ 1 }, { 0 }),
@@ -307,7 +307,7 @@ eq_field_ty_ok = (env: Env, t: Ty) bool {
     })
 }
 eq_struct_fields_ok* = (env: Env, t: Ty) bool {
-    ok := true
+    ok ::= true
     reflect_fields(env.a, env.decls, env.didx, t).loop((h, i, f) {
         ok = env.eq_field_ty_ok(f.ty).then({ ok }, { false })
     })
@@ -316,7 +316,7 @@ eq_struct_fields_ok* = (env: Env, t: Ty) bool {
 // a type whose impl provides an `eq` method compares via THAT (resolve dispatches to it), so its
 // field shapes are irrelevant to acceptance.
 eq_impl_provides* = (env: Env, t: Ty) bool {
-    tn := t.dispatch_recv_name()
+    tn = t.dispatch_recv_name()
     env.didx.impl_idx.get(tn, 0 - 1) >= 0
         && env.a.dispatch_recv(env.decls, env.didx, "eq", tn) == "eq" == false
 }
@@ -334,8 +334,8 @@ eq_nominal_ok = (env: Env, a: Ty, b: Ty) bool {
 }
 // Equality rejects f64/non-f64 mixes and heterogeneous comparisons (`"hi" == 5`, `true == 5`).
 eq_mix_err = (env: Env, b: BinData) i32 {
-    lt := env.infer_expr(b.lhs)
-    rt := env.infer_expr(b.rhs)
+    lt = env.infer_expr(b.lhs)
+    rt = env.infer_expr(b.rhs)
     (lt.is_f64_ty() || rt.is_f64_ty()).match ({
         true  => (env.f64_side_ok(lt) && env.f64_side_ok(rt)).then({ 0 }, { 1 }),
         false => (env.unknown_ty(lt) || env.unknown_ty(rt)).match ({
@@ -382,7 +382,7 @@ is_slice_ty = (t: Ty) bool {
     })
 }
 non_slice = (env: Env, e: Ptr<Expr>) bool {
-    t := env.infer_expr(e)
+    t = env.infer_expr(e)
     env.unknown_ty(t).match ({
         true  => false,
         false => t.is_slice_ty().then({ false }, { true }),
@@ -458,7 +458,7 @@ sig_matches = (a: MutPtr<Malloc>, fd: FnTData, f: Func, tyname: StringView) bool
 }
 // does the trait `trname` declare a DEFAULT body for method `m`? (then an impl may OMIT it.)
 trait_has_default* = (decls: [Decl], trname: StringView, m: StringView) bool {
-    found := false
+    found ::= false
     decls.loop((h, i, d) {
         found = d.match ({
             .DTraitDefault(td) => (td.trname == trname && td.fn.name == m).then({ true }, { found }),
@@ -493,7 +493,7 @@ arms_first_pos* = (arms: [ArmData]) i32 { (arms.len == 0).then({ 0 }, { arms[0].
 // ── trait-bound enrichment ─────────────────────────────────────────────────────────────────────
 // the method names an impl of (type `tn`, trait `tr`) provides; empty when no such impl exists.
 impl_methods_of* = (decls: [Decl], tn: StringView, tr: StringView) [Param] {
-    found := empty_params()
+    found ::= empty_params()
     decls.loop((h, i, d) {
         found = d.match ({
             .DImpl(im) => (im.ty == tn && im.trname == tr).then({ im.methods }, { found }),
@@ -530,21 +530,21 @@ kvb_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     })
 }
 kvb_args_kind = (env: Env, args: [Expr]) i32 {
-    acc := 0
+    acc ::= 0
     args.loop((h, i, ar) {
         acc = acc.or(env.kvb_expr_kind(ar.addr()))
     })
     acc
 }
 kvb_inits_kind = (env: Env, inits: [FieldInit]) i32 {
-    acc := 0
+    acc ::= 0
     inits.loop((h, i, fi) {
         acc = acc.or(env.kvb_expr_kind(fi.value))
     })
     acc
 }
 kvb_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
-    acc := 0
+    acc ::= 0
     arms.loop((h, i, ar) {
         acc = acc.or(env.a.arm_env(env, subjty, ar).kvb_expr_kind(ar.body))
     })
@@ -568,8 +568,8 @@ kvb_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
     })
 }
 kvb_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
-    acc := 0
-    e := env
+    acc ::= 0
+    e ::= env
     body.loop((h, i, st) {
         acc = acc.or(a.kvb_stmt_kind(e, st))
         e = a.extend_env(e, st)
@@ -577,7 +577,7 @@ kvb_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     acc
 }
 kvb_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
-    env := Env(
+    env = Env(
         vars: a.bind_tparams(a.params_env(f.params), f.tparams),
         decls: decls,
         didx: idx,
@@ -592,7 +592,7 @@ kvb_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32
 // inferred from the value args (exactly as the resolver's call_targs does) so a closure FnT param
 // substitutes to its concrete types for the arity/return check below.
 ka_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
-    buf := cbuf<Ty>(env.a, f.tparams.len)
+    buf ::= cbuf<Ty>(env.a, f.tparams.len)
     f.tparams.loop((h, i, tp) {
         buf[i] = (i < etargs.len).then({ etargs[i] }, { env.call_targ(f, args, tp.name) })
     })
@@ -602,7 +602,7 @@ ka_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
 // resolver's desugar produces. Rebuild the flat arg list here (without mutating the shared raw decls,
 // which a later pass still reads in surface form) so the closure/arg checks see the receiver as arg 0.
 ka_mcall_args = (a: MutPtr<Malloc>, mc: MethodCallData) [Expr] {
-    buf := slice(a.acquire_or_die((mc.args.len + 1) * sizeof(Expr)), mc.args.len + 1)
+    buf ::= slice(a.acquire_or_die((mc.args.len + 1) * sizeof(Expr)), mc.args.len + 1)
     buf[0] = load(mc.recv)
     mc.args.loop((h, i, ar) {
         buf[i + 1] = mc.args[i]
@@ -616,11 +616,11 @@ ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i
     (i < params.len).match ({
         true  => tparams.ty_mentions_tparam(params[i].ty).match ({
             true  => {
-                ct := env.a.subst_ty_in(tparams, targs, params[i].ty)
+                ct = env.a.subst_ty_in(tparams, targs, params[i].ty)
                 (env.unknown_ty(ct) || ar.is_ctx_typed_arg() || ct.is_fnt()).match ({
                     true  => 0,
                     false => {
-                        lv := ar.addr().lit_slot_verdict(ct)
+                        lv = ar.addr().lit_slot_verdict(ct)
                         (lv >= 0).then({ lv }, { env.fit_err(env.infer_expr(ar.addr()), ct) })
                     },
                 })
@@ -634,7 +634,7 @@ ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i
 // FnT's concrete (substituted) param/return types are known — the lambda's body value must fit the FnT
 // return type. Bind each lambda param to the FnT's substituted param type, then infer the body's value.
 ka_lam_params = (a: MutPtr<Malloc>, lmps: [Param], fps: [Ty]) [Param] {
-    buf := cbuf<Param>(a, lmps.len)
+    buf ::= cbuf<Param>(a, lmps.len)
     lmps.loop((h, i, p) {
         buf[i] = Param(
             name: p.name,
@@ -648,7 +648,7 @@ ka_lam_body_ty = (env: Env, lm: LambdaData, fps: [Ty]) Ty {
     (lm.body.len == 0).match ({
         true  => tvoid(),
         false => {
-            benv := Env(
+            benv = Env(
                 vars: env.a.params_env(env.a.ka_lam_params(lm.params, fps)),
                 decls: env.decls,
                 didx: env.didx,
@@ -668,11 +668,11 @@ ka_last_ty = (env: Env, st: Stmt) Ty {
 }
 // the lambda's body return doesn't fit the FnT's return type — only when both are concrete-known.
 ka_lam_ret_err = (env: Env, fd: FnTData, lm: LambdaData, fps: [Ty]) i32 {
-    rty := load(fd.ret)
+    rty = load(fd.ret)
     (env.unknown_ty(rty) || lm.ret.is_void_ty() == false).match ({
         true  => env.unknown_ty(rty).then({ 0 }, { env.fit_err(lm.ret, rty) }),
         false => {
-            bty := env.ka_lam_body_ty(lm, fps)
+            bty = env.ka_lam_body_ty(lm, fps)
             (bty.is_void_ty() || env.unknown_ty(bty)).then({ 0 }, { env.fit_err(bty, rty) })
         },
     })
@@ -738,9 +738,9 @@ ka_args_check = (
     etargs: [Ty],
     pos: i32,
 ) i32 {
-    targs := env.ka_targs(f, args, etargs)
-    tf := etargs.len > 0
-    acc := 0
+    targs = env.ka_targs(f, args, etargs)
+    tf = etargs.len > 0
+    acc ::= 0
     args.loop((h, i, ar) {
         acc = acc
             .or(tf.match ({
@@ -770,13 +770,13 @@ ka_call_core = (
 ) i32 {
     (env.env_known_fn(fn) && env.is_local(fn) == false).match ({
         true  => {
-            f := env.env_func(fn)
+            f = env.env_func(fn)
             // `the_func(fn)`'s signature is the authoritative callee only when `fn` is not ALSO a trait/impl
             // method — otherwise UFCS may dispatch to the impl by receiver type, and the free-fn signature
             // is the wrong yardstick for the concrete-arg check (which then defers). (Zen has no free-fn
             // overloading, so a name with no impl method resolves uniquely to this decl.)
-            authoritative := env.env_trait_method(fn) == false
-            tf := (etargs.len == 0).match ({
+            authoritative = env.env_trait_method(fn) == false
+            tf = (etargs.len == 0).match ({
                 true  => 0,
                 false => (f.tparams.len == 0).match ({
                     true  => KNOTYPEARGS().kv_at(pos),
@@ -804,7 +804,7 @@ ka_expr_kind = (env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
             .ka_call_core(tparams, c.fn, c.args, c.targs, c.pos)
             .or(env.ka_args_kind(tparams, c.args)),
         .MethodCall(mc) => {
-            cargs := env.a.ka_mcall_args(mc)
+            cargs = env.a.ka_mcall_args(mc)
             env
                 .ka_call_core(tparams, mc.method, cargs, no_tys(), mc.pos)
                 .or(env.ka_args_kind(tparams, cargs))
@@ -840,21 +840,21 @@ ka_expr_kind = (env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
     })
 }
 ka_args_kind = (env: Env, tparams: [Param], args: [Expr]) i32 {
-    acc := 0
+    acc ::= 0
     args.loop((h, i, ar) {
         acc = acc.or(env.ka_expr_kind(tparams, ar.addr()))
     })
     acc
 }
 ka_inits_kind = (env: Env, tparams: [Param], inits: [FieldInit]) i32 {
-    acc := 0
+    acc ::= 0
     inits.loop((h, i, fi) {
         acc = acc.or(env.ka_expr_kind(tparams, fi.value))
     })
     acc
 }
 ka_arms_kind = (env: Env, tparams: [Param], subjty: Ty, arms: [ArmData]) i32 {
-    acc := 0
+    acc ::= 0
     arms.loop((h, i, ar) {
         acc = acc.or(env.a.arm_env(env, subjty, ar).ka_expr_kind(tparams, ar.body))
     })
@@ -878,8 +878,8 @@ ka_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
     })
 }
 ka_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32 {
-    acc := 0
-    e := env
+    acc ::= 0
+    e ::= env
     body.loop((h, i, st) {
         acc = acc.or(a.ka_stmt_kind(e, tparams, st))
         e = a.extend_env(e, st)
@@ -887,7 +887,7 @@ ka_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32
     acc
 }
 ka_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
-    env := Env(
+    env = Env(
         vars: a.params_env(f.params),
         decls: decls,
         didx: idx,
@@ -997,7 +997,7 @@ krw_refl_shape = (c: CallData) bool {
     c.fn == "each_field" && c.args.len == 2 || c.fn == "zip_fields" && c.args.len == 3
 }
 krw_value_param = (ps: [Param], nm: StringView) bool {
-    f := false
+    f ::= false
     ps.loop((h, i, p) {
         f = (i >= 1 && p.name == nm).then({ true }, { f })
     })
@@ -1010,8 +1010,8 @@ krw_subject_bound = (e: Ptr<Expr>, ps: [Param]) bool {
     })
 }
 krw_call = (c: CallData, ps: [Param]) i32 {
-    nsub := (c.fn == "each_field").then({ 1 }, { 2 })
-    bound := false
+    nsub = (c.fn == "each_field").then({ 1 }, { 2 })
+    bound ::= false
     c.args.loop((h, i, x) {
         bound = (i < to_i64(nsub) && x.addr().krw_subject_bound(ps)).then({ true }, { bound })
     })
@@ -1038,14 +1038,14 @@ krw_e = (e: Ptr<Expr>, ps: [Param]) i32 {
         .Arrow(ar)     => ar.obj.krw_e(ps),
         .MakeEnum(mk)  => mk.payload.krw_e(ps),
         .MakeStruct(s) => {
-            acc := 0
+            acc ::= 0
             s.inits.loop((h, i, fi) {
                 acc = acc.or(fi.value.krw_e(ps))
             })
             acc
         },
         .Match(m)      => {
-            acc := m.subj.krw_e(ps)
+            acc ::= m.subj.krw_e(ps)
             m.arms.loop((h, i, ar) {
                 acc = acc.or(ar.body.krw_e(ps))
             })
@@ -1062,7 +1062,7 @@ krw_e = (e: Ptr<Expr>, ps: [Param]) i32 {
 // walk the first n exprs of xs (a reflection call's SUBJECT args; the lambda arg is walked
 // separately with ITS params as the bound set).
 krw_subj_es = (xs: [Expr], n: i64, ps: [Param]) i32 {
-    acc := 0
+    acc ::= 0
     xs.loop((h, i, x) {
         acc = (i < n).then({ acc.or(x.addr().krw_e(ps)) }, { acc })
     })
@@ -1080,7 +1080,7 @@ krw_stmt = (st: Stmt, ps: [Param]) i32 {
     })
 }
 krw_body = (body: [Stmt], ps: [Param]) i32 {
-    acc := 0
+    acc ::= 0
     body.loop((h, i, st) {
         acc = acc.or(st.krw_stmt(ps))
     })
@@ -1104,15 +1104,15 @@ ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32)
     (tps.ty_mentions_tparam(want) || env.unknown_ty(want)).match ({
         true  => 0,
         false => {
-            fE := env.subj_variant_payload(want, "Err")
+            fE = env.subj_variant_payload(want, "Err")
             fE.is_void_ty().match ({
                 true  => KORRETURN().kv_at(pos),
                 false => {
-                    rt := env.infer_expr(recv)
+                    rt = env.infer_expr(recv)
                     (rt.is_void_ty() || env.unknown_ty(rt) || tps.ty_mentions_tparam(rt)).match ({
                         true  => 0,
                         false => {
-                            rE := env.subj_variant_payload(rt, "Err")
+                            rE = env.subj_variant_payload(rt, "Err")
                             (rE.is_void_ty()
                                 || env.unknown_ty(rE)
                                 || env.unknown_ty(fE)
@@ -1134,8 +1134,8 @@ ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32)
 // the Ok side of the same judgment (CONDITIONAL positions only), entered once both Err payloads are
 // known and agree. Same leniency: an unknown / tparam-typed / payloadless (void) Ok side defers.
 ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
-    fO := env.subj_variant_payload(want, "Ok")
-    rO := env.subj_variant_payload(rt, "Ok")
+    fO = env.subj_variant_payload(want, "Ok")
+    rO = env.subj_variant_payload(rt, "Ok")
     (fO.is_void_ty()
         || rO.is_void_ty()
         || env.unknown_ty(fO)
@@ -1147,11 +1147,11 @@ ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
     })
 }
 ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData, cnd: bool) i32 {
-    own := is_or_return_fn(c).then({ env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos) }, { 0 })
+    own = is_or_return_fn(c).then({ env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos) }, { 0 })
     own.or(env.ko_args_kind(tps, want, c.args, cnd))
 }
 ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData, cnd: bool) i32 {
-    own := ko_is_or_mcall(mc).then({ env.ko_at(tps, want, mc.recv, cnd, mc.pos) }, { 0 })
+    own = ko_is_or_mcall(mc).then({ env.ko_at(tps, want, mc.recv, cnd, mc.pos) }, { 0 })
     own.or(env.ko_expr_kind(tps, want, mc.recv, cnd)).or(env.ko_args_kind(tps, want, mc.args, cnd))
 }
 // `cnd` marks descent into a CONDITIONALLY-evaluated / value-block position (see ko_at): those
@@ -1190,14 +1190,14 @@ ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
     })
 }
 ko_args_kind = (env: Env, tps: [Param], want: Ty, args: [Expr], cnd: bool) i32 {
-    acc := 0
+    acc ::= 0
     args.loop((h, i, ar) {
         acc = acc.or(env.ko_expr_kind(tps, want, args[i].addr(), cnd))
     })
     acc
 }
 ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool) i32 {
-    acc := 0
+    acc ::= 0
     inits.loop((h, i, fi) {
         acc = acc.or(env.ko_expr_kind(tps, want, fi.value, cnd))
     })
@@ -1206,7 +1206,7 @@ ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool
 // Arm bodies are always conditional (only the selected arm evaluates), and a statement-position
 // match resolves its arms under a cleared expected type, so the rebuild cannot fire there either.
 ko_arms_kind = (env: Env, tps: [Param], want: Ty, subjty: Ty, arms: [ArmData]) i32 {
-    acc := 0
+    acc ::= 0
     arms.loop((h, i, ar) {
         acc = acc.or(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true))
     })
@@ -1234,8 +1234,8 @@ ko_stmt_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, st: Stmt, c
     })
 }
 ko_body_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, body: [Stmt], cnd: bool) i32 {
-    acc := 0
-    e := env
+    acc ::= 0
+    e ::= env
     body.loop((h, i, st) {
         acc = acc.or(a.ko_stmt_kind(e, tps, want, st, cnd))
         e = a.extend_env(e, st)
@@ -1243,7 +1243,7 @@ ko_body_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, body: [Stmt
     acc
 }
 ko_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
-    env := Env(
+    env = Env(
         vars: a.params_env(f.params),
         decls: decls,
         didx: idx,
@@ -1258,7 +1258,7 @@ ko_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 
 // (i32) so ANY or_return inside it reports KORRETURN at its own position — the same "no matching
 // Result to propagate into" judgment the fn-body walk makes, with nothing lenient to defer to.
 ko_global_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalData) i32 {
-    env := Env(
+    env = Env(
         vars: a.params_env(empty_params()),
         decls: decls,
         didx: idx,
@@ -1305,14 +1305,14 @@ ffi_ty_ok = (env: Env, t: Ty, depth: i64) bool {
     })
 }    // I32/I64/U8/F64/Bool/Void/string_*/Ptr(any kind) — direct C shapes
 ffi_tys_ok = (env: Env, ts: [Ty], depth: i64) bool {
-    ok := true
+    ok ::= true
     ts.loop((h, i, t) {
         ok = env.ffi_ty_ok(t, depth) && ok
     })
     ok
 }
 ffi_fields_ok = (env: Env, fs: [Field], depth: i64) bool {
-    ok := true
+    ok ::= true
     fs.loop((h, i, f) {
         ok = env.ffi_ty_ok(f.ty, depth) && ok
     })
@@ -1363,7 +1363,7 @@ ffi_func_msg* = (a: MutPtr<Malloc>, env: Env, f: Func) StringView {
     (f.tparams.len > 0).then({
         return a.ffi_generic_msg(f.name)
     })
-    r := ""
+    r ::= ""
     f.params.loop((h, i, p) {
         r = desc_or(r, env.ffi_ty_ok(p.ty, FFI_DEPTH()).match ({
             true  => "",
@@ -1380,7 +1380,7 @@ kdiag_buf* = (a: MutPtr<Malloc>) [i32] {
 }
 // already collected? (dedup: two channels can position the same packed kind at one site)
 kdiag_seen = (buf: [i32], cnt: i32, packed: i32) bool {
-    found := false
+    found ::= false
     buf.loop((h, i, e) {
         found = (i < cnt).match ({
             true  => (e == packed).then({ true }, { found }),
@@ -1410,7 +1410,7 @@ kparse_off = (init: Ptr<Expr>) i32 {
 // a NEGATIVE sentinel offset (parse.fill_decls) marks the variant-break split: the failing token is
 // the `.` of a newline+`.Uppercase` statement break, so report the rule (KVBREAK) at that dot.
 kparse_kind = (init: Ptr<Expr>) i32 {
-    off := init.kparse_off()
+    off = init.kparse_off()
     (off < 0).then({ KVBREAK().kv_at(0 - off) }, { KPARSE().ksent_at(off) })
 }
 // A sentinel's Int init uses 0 for "no offset was recorded" (compiler.parse_type's parse_err_off),
@@ -1444,11 +1444,14 @@ taxonomy_kind = (nm: StringView, init: Ptr<Expr>) i32 {
     (nm == "__unexpected_eof").then({
         return KEOFINPUT().ksent_at(init.kparse_off())
     })
-    (nm == "__typed_assign").then({
-        return KBINDOP().ksent_at(init.kparse_off())
-    })
     (nm == "__field_default").then({
         return KFIELDDEFAULT().ksent_at(init.kparse_off())
+    })
+    (nm == "__expected_let_type").then({
+        return KLETTYPE().ksent_at(init.kparse_off())
+    })
+    (nm == "__expected_let_eq").then({
+        return KLETEQ().ksent_at(init.kparse_off())
     })
     0
 }
@@ -1548,10 +1551,10 @@ Env.impl(EnvKinds, {
         })
     }
     match_result_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
-        out := tvoid()
+        out ::= tvoid()
         arms.loop((h, i, ar) {
-            aenv := env.a.arm_env(env, subjty, ar)
-            got := aenv.infer_expr(ar.body)
+            aenv = env.a.arm_env(env, subjty, ar)
+            got = aenv.infer_expr(ar.body)
             out = out.is_void_ty().match ({
                 true  => (got.is_void_ty() || aenv.unknown_ty(got)).then({ out }, { got }),
                 false => out,
@@ -1560,8 +1563,8 @@ Env.impl(EnvKinds, {
         out
     }
     cond_result_err = (env: Env, d: CondData) i32 {
-        tt := env.infer_expr(d.t)
-        et := env.infer_expr(d.e)
+        tt = env.infer_expr(d.t)
+        et = env.infer_expr(d.e)
         (tt.is_void_ty() || et.is_void_ty() || env.unknown_ty(tt) || env.unknown_ty(et)).match ({
             true  => 0,
             false => d.cond_compatible(tt, et).then({ 0 }, { 1 }),
@@ -1577,8 +1580,8 @@ Env.impl(EnvKinds, {
         })
     }
     arm_result_err = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
-        aenv := env.a.arm_env(env, subjty, ar)
-        got := aenv.infer_expr(ar.body)
+        aenv = env.a.arm_env(env, subjty, ar)
+        got = aenv.infer_expr(ar.body)
         (want.is_void_ty() || got.is_void_ty() || aenv.unknown_ty(want) || aenv.unknown_ty(got)).match ({
             true  => 0,
             false => want.result_compatible(got).then({ 0 }, { 1 }),
@@ -1606,8 +1609,8 @@ Env.impl(EnvKinds, {
     }
     call_void_arm_errs = (env: Env, c: CallData) i32 {
         // argument position: a match/cond arg flowing into a CONCRETE (non-tparam) param slot.
-        f := env.env_func(c.fn)
-        acc := 0
+        f = env.env_func(c.fn)
+        acc ::= 0
         (f.name == c.fn).then({
             c.args.loop((h, i, ar) {
                 acc = acc + (i < f.params.len).match ({
@@ -1622,7 +1625,7 @@ Env.impl(EnvKinds, {
         acc
     }
     exhaustive_err = (env: Env, m: MatchData) i32 {
-        vs := env.decls.enum_variants(m.ename)
+        vs = env.decls.enum_variants(m.ename)
         (vs.len == 0).match ({
             true  => 0,
             false => (vs.missing_count(m.arms) > 0).then({ 1 }, { 0 }),
@@ -1635,7 +1638,7 @@ Env.impl(EnvKinds, {
         is_empty(ty).match ({
             true  => env.decls.enum_declares(variant).then({ 0 }, { 1 }),
             false => {
-                vs := env.decls.enum_variants(ty)
+                vs = env.decls.enum_variants(ty)
                 (vs.len == 0).match ({
                     true  => 0,
                     false => vs.arm_known(variant).then({ 0 }, { 1 }),
@@ -1654,12 +1657,12 @@ Env.impl(EnvKinds, {
                 // `tnamed("Result")` form loses the args and leaves `E` — an unknown type the check
                 // then waves through, which is how a payload of the wrong enum reached cc as an
                 // `incompatible types when initializing` error on C the user never wrote.
-                pty := env.subj_variant_payload(mk.mkenum_subj_ty(), mk.variant)
-                lv := mk.payload.lit_slot_verdict(pty)
+                pty = env.subj_variant_payload(mk.mkenum_subj_ty(), mk.variant)
+                lv = mk.payload.lit_slot_verdict(pty)
                 (lv >= 0).match ({
                     true  => lv,
                     false => {
-                        vt := env.infer_expr(mk.payload)
+                        vt = env.infer_expr(mk.payload)
                         (pty.is_void_ty() || env.unknown_ty(pty) || env.unknown_ty(vt)).match ({
                             true  => 0,
                             false => vt.fits(pty).then({ 0 }, { 1 }),
@@ -1670,8 +1673,8 @@ Env.impl(EnvKinds, {
         })
     }
     unknown_arm_errs = (env: Env, m: MatchData) i32 {
-        vs := env.decls.enum_variants(m.ename)
-        n := 0
+        vs = env.decls.enum_variants(m.ename)
+        n ::= 0
         (vs.len == 0).match ({
             true  => 0,
             false => {
@@ -1701,8 +1704,8 @@ Env.impl(EnvKinds, {
         // Return/assign/index-set checks only reject concrete mismatches. A function-VALUE return
         // (declared return is a function type) is accepted structurally — ty_eq treats FnT as
         // never-equal so fits() can't validate it; C checks the fn-ptr type (M1c).
-        rt := env.infer_expr(r)
-        lv := r.lit_slot_verdict(env.exp)    // a numeric literal return is decided by range
+        rt = env.infer_expr(r)
+        lv = r.lit_slot_verdict(env.exp)    // a numeric literal return is decided by range
         (lv >= 0).match ({
             true  => lv,
             false => (env.unknown_ty(rt) || env.unknown_ty(env.exp) || env.exp.is_fnt()).match ({
@@ -1712,9 +1715,9 @@ Env.impl(EnvKinds, {
         })
     }
     assign_err = (env: Env, x: AssignData) i32 {
-        vt := env.infer_expr(x.target)
-        rt := env.infer_expr(x.value)
-        lv := x.value.lit_slot_verdict(vt)
+        vt = env.infer_expr(x.target)
+        rt = env.infer_expr(x.value)
+        lv = x.value.lit_slot_verdict(vt)
         (lv >= 0).match ({
             true  => lv,
             false => (env.unknown_ty(vt) || env.unknown_ty(rt)).match ({
@@ -1737,8 +1740,8 @@ Env.impl(EnvKinds, {
         env.write_thru_code(x.seq).write_diag_kind()
     }
     idxset_err = (env: Env, x: IndexSetData) i32 {
-        rt := env.infer_expr(x.value)
-        lv := x.value.lit_slot_verdict(x.elem)
+        rt = env.infer_expr(x.value)
+        lv = x.value.lit_slot_verdict(x.elem)
         (lv >= 0).match ({
             true  => lv,
             false => (env.unknown_ty(rt) || env.unknown_ty(x.elem)).match ({
@@ -1755,8 +1758,8 @@ Env.impl(EnvKinds, {
                 // infer under the DECLARED type as expected context, exactly as resolve_let resolves the
                 // value — a generic call whose tparam sits only in return position (`a.nbuf("", n)` for a
                 // `[StringView]` let) binds it from the declaration, not from the weak literal fallback.
-                vt := env.with_exp(l.ty).infer_expr(l.value)
-                lv := l.value.lit_slot_verdict(l.ty)
+                vt = env.with_exp(l.ty).infer_expr(l.value)
+                lv = l.value.lit_slot_verdict(l.ty)
                 (lv >= 0).match ({
                     true  => lv,
                     false => (env.unknown_ty(vt) || env.unknown_ty(l.ty)).match ({
@@ -1782,8 +1785,8 @@ Env.impl(EnvKinds, {
         (c.args.len == 0).match ({
             true  => false,
             false => {
-                rty := env.infer_expr(c.args[0].addr())
-                tn := rty.recv_name()
+                rty = env.infer_expr(c.args[0].addr())
+                tn = rty.recv_name()
                 (is_empty(tn) || env.env_is_struct(tn) == false && env.env_is_enum(tn) == false).match ({
                     true  => false,
                     false => env.alias_ufcs_candidates(c, rty).count < 2,
@@ -1793,18 +1796,18 @@ Env.impl(EnvKinds, {
     }
     ffi_func_kind = (env: Env, f: Func) i32 {
         // the kind walk: first offending foreign decl, caret on the decl (a Ty carries no source position).
-        acc := f.ffi_bad_generic().kv_one(KFFITYPE()).kv_at(f.pos)
+        acc ::= f.ffi_bad_generic().kv_one(KFFITYPE()).kv_at(f.pos)
         f.params.loop((h, i, p) {
             acc = acc.or(env.ffi_bad_ty(p.ty).kv_one(KFFITYPE()).kv_at(f.pos))
         })
         acc.or(env.ffi_bad_ty(f.ret).kv_one(KFFITYPE()).kv_at(f.pos))
     }
     bound_err = (env: Env, f: Func, c: CallData, tp: Param) i32 {
-        tr := tp.tparam_bound()
+        tr = tp.tparam_bound()
         is_empty(tr).match ({
             true  => 0,
             false => {
-                tn := env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
+                tn = env.call_targ(f, c.args, tp.name).recv_name()    // unbounded tparam: nothing to check
                 // concrete type A binds to
                 (is_empty(tn)
                     || env.vars.tparam_declared(tn)

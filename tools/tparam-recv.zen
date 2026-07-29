@@ -51,21 +51,21 @@
 { is_intrinsic } = compiler.check
 { tparam_bound } = compiler.validate.util
 { Map, of } = std.collections.map
-g_files := 0
-g_fns := 0
-g_sites := 0
-g_alloc := 0
-g_other := 0
-g_quiet := 0
-g_unparsed := 0
+g_files ::= 0
+g_fns ::= 0
+g_sites ::= 0
+g_alloc ::= 0
+g_other ::= 0
+g_quiet ::= 0
+g_unparsed ::= 0
 // ── phase 0: the name → pass-through index ────────────────────────────────────
 // 1 = EVERY declaration of this name takes its own first parameter as an unbounded tparam (a
 // pass-through: calling it constrains the receiver not at all); 2 = at least one declaration wants a
 // concrete or bounded receiver (calling it DOES constrain); 0 = never seen (treated as 2 — a lint
 // that goes quiet on names it failed to index would fail open).
 idx_note = (m: Map<i64>, a: Allocator, name: StringView, passthru: bool) Map<i64> {
-    prev := m.get(name, 0)
-    next: i64 := (passthru && prev != 2).then({ 1 }, { 2 })
+    prev = m.get(name, 0)
+    next: i64 = (passthru && prev != 2).then({ 1 }, { 2 })
     m.put(a, name, next).expect("tparam-recv: index alloc")
 }
 // a declaration is a PASS-THROUGH when its first parameter's receiver type names one of its own
@@ -75,7 +75,7 @@ decl_passthru = (f: Func) bool {
     (f.params.len == 0).match ({
         true  => false,
         false => {
-            tn := f.params[0].ty.recv_tyname()
+            tn = f.params[0].ty.recv_tyname()
             tn != "" && f.unbound_tparam(tn)
         },
     })
@@ -83,14 +83,14 @@ decl_passthru = (f: Func) bool {
 // an impl's methods bind a CONCRETE receiver type (`Heap.impl(Allocator, …)`), which is exactly the
 // constraint this lint is about — register every one under the simple name a UFCS call site writes.
 idx_impl = (m: Map<i64>, a: Allocator, im: ImplData) Map<i64> {
-    out := m
+    out ::= m
     im.methods.loop((h, k, p) {
         out = out.idx_note(a, p.name, false)
     })
     out
 }
 idx_module = (m: Map<i64>, a: Allocator, decls: [Decl]) Map<i64> {
-    out := m
+    out ::= m
     decls.loop((h, i, d) {
         out = d.match ({
             .DFunc(f)    => out.idx_note(a, f.name, f.decl_passthru()),
@@ -117,7 +117,7 @@ recv_tyname = (t: Ty) StringView {
 }
 // `name` is a tparam of `f` that carries NO bound. A bounded tparam is exactly the fixed case.
 unbound_tparam = (f: Func, name: StringView) bool {
-    hit := false
+    hit ::= false
     f.tparams.loop((h, i, tp) {
         (tp.name == name && is_empty_sv(tp.name) == false).then({
             hit = tp.tparam_bound() == ""
@@ -128,10 +128,10 @@ unbound_tparam = (f: Func, name: StringView) bool {
 is_empty_sv = (s: StringView) bool { s == "" }
 // the unbound tparam that `varname` (a parameter of `f`) is a receiver of, or "".
 param_recv_tparam = (f: Func, varname: StringView) StringView {
-    res := ""
+    res ::= ""
     f.params.loop((h, i, p) {
         (p.name == varname).then({
-            tn := p.ty.recv_tyname()
+            tn = p.ty.recv_tyname()
             res = (tn != "" && f.unbound_tparam(tn)).then({ tn }, { res })
         })
     })
@@ -145,8 +145,8 @@ Ctx: {
     m: Map<i64>,
 }
 line_of = (src: StringView, pos: i32) i64 {
-    n := 1
-    p := pos + 0
+    n ::= 1
+    p = pos + 0
     src.view().loop((h, i, b) {
         (i < p && b == '\n').then({
             n = n + 1
@@ -157,7 +157,7 @@ line_of = (src: StringView, pos: i32) i64 {
 // an allocator-shaped assumption: the three methods the Allocator trait declares.
 alloc_method = (m: StringView) bool { m == "acquire" || m == "resize" || m == "release" }
 report = (cx: Ctx, pos: i32, tp: StringView, recv: StringView, method: StringView) void {
-    tag := method.alloc_method().then({ "alloc" }, { "other" })
+    tag = method.alloc_method().then({ "alloc" }, { "other" })
     method.alloc_method().match ({
         true  => {
             g_alloc = g_alloc + 1
@@ -186,8 +186,8 @@ scan_arms = (cx: Ctx, arms: [ArmData]) void {
 scan_expr = (cx: Ctx, e: Ptr<Expr>) void {
     load(e).match ({
         .MethodCall(mc) => {
-            rv := mc.recv.recv_var_name()
-            tp := (rv == "").then({ "" }, { cx.f.param_recv_tparam(rv) })
+            rv = mc.recv.recv_var_name()
+            tp = (rv == "").then({ "" }, { cx.f.param_recv_tparam(rv) })
             (tp != "" && mc.method.is_intrinsic() == false && cx.m.get(mc.method, 0) != 1).then({
                 cx.report(mc.pos, tp, rv, mc.method)
             })
@@ -248,7 +248,7 @@ scan_body = (cx: Ctx, stmts: [Stmt]) void {
 scan_fn = (m: Map<i64>, path: StringView, src: StringView, f: Func) void {
     (f.tparams.len > 0).then({
         g_fns = g_fns + 1
-        cx := Ctx(
+        cx = Ctx(
             path: path,
             src: src,
             f: f,
@@ -267,8 +267,8 @@ scan_module = (m: Map<i64>, path: StringView, src: StringView, decls: [Decl]) vo
 }
 scan_file = (m: Map<i64>, a: Allocator, path: StringView) void {
     g_files = g_files + 1
-    src := a.contents_in(path).expect("tparam-recv: cannot read file")
-    decls := a.parse_module(src)
+    src = a.contents_in(path).expect("tparam-recv: cannot read file")
+    decls = a.parse_module(src)
     // A file that does not PARSE is reported as such rather than silently scanned as empty: a lint
     // that fails open is the failure mode this repo has been bitten by.
     (perr_get() || lerr_get()).match ({
@@ -280,8 +280,8 @@ scan_file = (m: Map<i64>, a: Allocator, path: StringView) void {
     })
 }
 index_file = (m: Map<i64>, a: Allocator, path: StringView) Map<i64> {
-    src := a.contents_in(path).expect("tparam-recv: cannot read file")
-    decls := a.parse_module(src)
+    src = a.contents_in(path).expect("tparam-recv: cannot read file")
+    decls = a.parse_module(src)
     (perr_get() || lerr_get()).then({ m }, { m.idx_module(a, decls) })
 }
 sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
@@ -293,7 +293,7 @@ sv_lt_at = (xv: [u8], yv: [u8], i: i64) bool {
 sv_lt = (x: StringView, y: StringView) bool { x.view().sv_lt_at(y.view(), 0) }
 sift_left = (xs: [StringView], j: i64) void {
     (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
-        t := xs[j]
+        t = xs[j]
         xs[j] = xs[j - 1]
         xs[j - 1] = t
         xs.sift_left(j - 1)
@@ -308,10 +308,10 @@ sort_from = (xs: [StringView], i: i64) void {
 sort_names = (xs: [StringView]) void { xs.sort_from(1) }
 // phase 0 indexes, phase 1 scans — the same walk, as in tools/discards.zen.
 walk = (m: Map<i64>, a: Allocator, root: StringView, phase: i32) Map<i64> {
-    out := m
+    out ::= m
     root.is_dir().match ({
         true  => {
-            entries := a.read_dir(root).expect("tparam-recv: cannot read directory")
+            entries = a.read_dir(root).expect("tparam-recv: cannot read directory")
             entries.sort_names()
             entries.loop((h, i, entry) {
                 out = out.walk(a, a.cat_in(a.cat_in(root, "/"), entry), phase)
@@ -334,7 +334,7 @@ walk = (m: Map<i64>, a: Allocator, root: StringView, phase: i32) Map<i64> {
 // lets a scanned file's OWN helpers resolve — a fixture outside the fixed index roots would otherwise
 // have every local method call read as unknown, and unknown means reported.
 scan_roots = (m: Map<i64>, a: Allocator, i: i32, phase: i32) Map<i64> {
-    out := m
+    out ::= m
     (i < argc()).then({
         (arg(i) == "--quiet").match ({
             true  => {
@@ -349,14 +349,14 @@ scan_roots = (m: Map<i64>, a: Allocator, i: i32, phase: i32) Map<i64> {
     out
 }
 main = () i32 {
-    mm := Malloc(_: 0)
-    a := mm.addr()
+    mm = Malloc(_: 0)
+    a = mm.addr()
     (argc() < 2).then({
         format("usage: zen run tools/tparam-recv.zen <scan-root> [<scan-root> …] [--quiet]\n", [])
         return 2
     })
-    seed: i64 := 0
-    m := of(a, "", seed).expect("tparam-recv: index alloc")
+    seed: i64 = 0
+    m ::= of(a, "", seed).expect("tparam-recv: index alloc")
     // phase 0: index the WHOLE repo, so a method call into another module resolves
     m = m.walk(a, "src", 0)
     m = m.walk(a, "driver.zen", 0)
@@ -368,6 +368,6 @@ main = () i32 {
     // exit status = findings + unscannable files (capped into the byte range): a clean tree exits 0,
     // so this is directly usable as a gate, and a file the lint could not READ fails it CLOSED —
     // a scanner that goes green on input it never looked at is the failure this repo has been bitten by.
-    total := g_sites + g_unparsed
+    total = g_sites + g_unparsed
     ((total > 100).then({ 100 }, { total })).to_i32()
 }

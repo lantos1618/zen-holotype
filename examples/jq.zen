@@ -47,7 +47,7 @@ scan_key = (s: StringView, i: i64) i64 {
     (i >= s.len()).match ({
         true  => i,
         false => {
-            b := s.at(i)
+            b = s.at(i)
             (b == '.' || b == '[').then({ i }, { s.scan_key(i + 1) })
         },
     })
@@ -57,7 +57,7 @@ scan_idx = (s: StringView, i: i64) i64 {
     (i >= s.len()).match ({
         true  => i,
         false => {
-            b := s.at(i)
+            b = s.at(i)
             (b >= '0' && b <= '9').then({ s.scan_idx(i + 1) }, { i })
         },
     })
@@ -67,27 +67,27 @@ scan_idx = (s: StringView, i: i64) i64 {
 apply = (a: Allocator, cur: Value, s: StringView, i: i64) Result<Value, StringView> {
     (i >= s.len()).match ({
         true  => {
-            done: Result<Value, StringView> := .Ok(cur)
+            done: Result<Value, StringView> = .Ok(cur)
             return done
         },
         false => 0,
     })
-    b := s.at(i)
+    b = s.at(i)
     (b == '.').match ({
         true  => {
-            j := s.scan_key(i + 1)
+            j = s.scan_key(i + 1)
             // a bare trailing "." is the identity filter
             (j == i + 1 && j >= s.len()).match ({
                 true  => {
-                    id: Result<Value, StringView> := .Ok(cur)
+                    id: Result<Value, StringView> = .Ok(cur)
                     return id
                 },
                 false => 0,
             })
-            key := a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed")
+            key = a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed")
             // `key` is a copy out of the FILTER text, not part of the document, so it dies with this
             // segment — after the lookup, and after the miss message that quotes it.
-            step := json.get(cur, key).match ({
+            step = json.get(cur, key).match ({
                 .Some(nv) => a.apply(nv, s, j),
                 .None     => a.fail("jq: no such field: ", key),
             })
@@ -98,15 +98,15 @@ apply = (a: Allocator, cur: Value, s: StringView, i: i64) Result<Value, StringVi
     })
     (b == '[').match ({
         true  => {
-            j := s.scan_idx(i + 1)
+            j = s.scan_idx(i + 1)
             (j == i + 1 || j >= s.len() || s.at(j) != ']').match ({
                 true  => {
                     return a.fail("jq: malformed index (expected [N])", "")
                 },
                 false => 0,
             })
-            digits := a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed")
-            idx := digits.parse_int()
+            digits = a.substr(s, i + 1, j - (i + 1)).expect("jq: substr failed")
+            idx = digits.parse_int()
             a.release(digits.view().ptr)
             return json.as_arr(cur).match ({
                 .Some(xs) => (idx < xs.len).match ({
@@ -121,12 +121,12 @@ apply = (a: Allocator, cur: Value, s: StringView, i: i64) Result<Value, StringVi
     a.fail("jq: bad filter syntax (expected '.' or '[')", "")
 }
 main = () i32 {
-    h := gpa()
-    a := h.addr()
-    n := argc()
+    h = gpa()
+    a = h.addr()
+    n = argc()
     // arg(0) is the program; the filter is arg(1), an optional source file arg(2).
-    filter := (n >= 2).then({ arg(1) }, { "." })
-    src := (n >= 3).match ({
+    filter = (n >= 2).then({ arg(1) }, { "." })
+    src = (n >= 3).match ({
         true  => a.contents(arg(2)).match ({
             .Err(e) => {
                 formatln("jq: {}: {}", [arg_str(arg(2)), arg_str(name(e))])
@@ -142,7 +142,7 @@ main = () i32 {
             .Ok(s)  => s,
         }),
     })
-    doc := json.parse(a, src).match ({
+    doc = json.parse(a, src).match ({
         .Err(e) => {
             report_bad_json(e)
             a.release(src.view().ptr)
@@ -153,7 +153,7 @@ main = () i32 {
     // `sel` is a BORROWED subtree of `doc`, so only `doc` is freed — and last, after the selection
     // has been rendered. `src` is the one buffer the reader handed over; the parse copied every
     // string it kept, so it goes back independently.
-    rc := a.apply(doc, filter, 0).match ({
+    rc = a.apply(doc, filter, 0).match ({
         .Err(msg) => {
             println(msg)
             a.release(msg.view().ptr)
@@ -162,7 +162,7 @@ main = () i32 {
         .Ok(sel)  => {
             // json.pretty is the 2-space indented encoder — the whole hand-rolled printer this
             // example used to carry is one library call now.
-            out := json.pretty(a, sel)
+            out = json.pretty(a, sel)
             println(out)
             a.release(out.view().ptr)
             0

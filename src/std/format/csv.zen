@@ -64,8 +64,8 @@ cbuf_new<T> = (a: Allocator) CBuf<T> {
     )
 }
 cbuf_push<T> = (a: Allocator, cb: CBuf<T>, x: T) CBuf<T> {
-    x := x
-    r := (cb.len < cb.cap).match ({
+    x = x
+    r = (cb.len < cb.cap).match ({
         true  => cb,
         false => CBuf<T>(
             ptr: a.resize(cb.ptr, (cb.cap * 2 + 1) * sizeof(T)),
@@ -73,7 +73,7 @@ cbuf_push<T> = (a: Allocator, cb: CBuf<T>, x: T) CBuf<T> {
             cap: cb.cap * 2 + 1,
         ),
     })
-    s: [T] := slice(r.ptr, r.cap)
+    s :: [T] = slice(r.ptr, r.cap)
     s[r.len] = x
     CBuf<T>(
         ptr: r.ptr,
@@ -90,13 +90,13 @@ cbuf_slice<T> = (cb: CBuf<T>) [T] { slice(cb.ptr, cb.len) }
 // accumulate in the `sb` String builder; a completed field joins `fields`, a completed record joins
 // `rows`. Returns `.Err(.Eof)` if a quoted field is never closed.
 parse* = (a: Allocator, text: StringView) Result<[[StringView]], IoError> {
-    sv: [u8] := text.view()
-    rows: CBuf<[StringView]> := a.cbuf_new()
-    fields: CBuf<StringView> := a.cbuf_new()
-    sb: String := a.cnew()
-    in_quotes := false
-    active := false
-    resume: i64 := 0
+    sv: [u8] = text.view()
+    rows :: CBuf<[StringView]> = a.cbuf_new()
+    fields :: CBuf<StringView> = a.cbuf_new()
+    sb :: String = a.cnew()
+    in_quotes ::= false
+    active ::= false
+    resume :: i64 = 0
     sv.loop((h, i, b) {
         (i < resume == false).then({
             in_quotes.match ({
@@ -134,7 +134,7 @@ parse* = (a: Allocator, text: StringView) Result<[[StringView]], IoError> {
                                 active.then({
                                     fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
                                     rows = a.cbuf_push(rows, fields.cbuf_slice())
-                                    fresh: CBuf<StringView> := a.cbuf_new()
+                                    fresh: CBuf<StringView> = a.cbuf_new()
                                     fields = fresh
                                     sb = a.cnew()
                                     active = false
@@ -157,7 +157,7 @@ parse* = (a: Allocator, text: StringView) Result<[[StringView]], IoError> {
             })
         })
     })
-    out: Result<[[StringView]], IoError> := in_quotes.match ({
+    out: Result<[[StringView]], IoError> = in_quotes.match ({
         true  => .Err(.Eof),
         false => {
             active.match ({
@@ -181,8 +181,8 @@ parse* = (a: Allocator, text: StringView) Result<[[StringView]], IoError> {
 // ── write_rows ─────────────────────────────────────────────────────────────────────
 // does `s` need quoting? (contains a delimiter, a quote, or a line break)
 field_needs_quote = (s: StringView) bool {
-    sv: [u8] := s.view()
-    need := false
+    sv: [u8] = s.view()
+    need ::= false
     sv.loop((h, i, b) {
         (b == ',' || b == '"' || b == '\n' || b == '\r').then({
             need = true
@@ -193,10 +193,10 @@ field_needs_quote = (s: StringView) bool {
 }
 // append `s` to the builder as one CSV field, quoting (and doubling embedded quotes) if required.
 write_field = (a: Allocator, sb: String, s: StringView) String {
-    sv: [u8] := s.view()
+    sv: [u8] = s.view()
     s.field_needs_quote().match ({
         true  => {
-            out: String := sb.push_in(a, '"').cok()
+            out :: String = sb.push_in(a, '"').cok()
             sv.loop((h, i, b) {
                 out = (b == '"').match ({
                     true  => out
@@ -216,9 +216,9 @@ write_field = (a: Allocator, sb: String, s: StringView) String {
 // a trailing LF after the last record). Round-trips through `parse`. Returns Ok always (allocation
 // failure is fatal by policy); the Result signature mirrors parse and the rest of std.
 write_rows* = (a: Allocator, rows: [[StringView]]) Result<StringView, IoError> {
-    out: String := a.cnew()
+    out :: String = a.cnew()
     rows.loop((h, i, row) {
-        r: [StringView] := row
+        r: [StringView] = row
         r.loop((h2, j, f) {
             (j > 0).then({
                 out = out.push_in(a, ',').cok()

@@ -24,7 +24,7 @@ slicelit_slot_verdict = (env: Env, ar: Expr, pty: Ty) i32 {
     ar.match ({
         .SliceLit(sd) => pty.match ({
             .Slice(ep) => {
-                errs := 0
+                errs ::= 0
                 sd.items.loop((h, i, it) {
                     errs = errs + env.sl_elem_fit(load(ep.pointee), it)
                 })
@@ -43,11 +43,11 @@ arg_err_at* = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
         true  => tps.ty_mentions_tparam(params[i].ty).match ({
             true  => env.tparam_shape_err(params[i].ty, ar),
             false => {
-                sv := env.slicelit_slot_verdict(ar, params[i].ty)
+                sv = env.slicelit_slot_verdict(ar, params[i].ty)
                 (sv >= 0).match ({
                     true  => sv,
                     false => {
-                        lv := ar.addr().lit_slot_verdict(params[i].ty)
+                        lv = ar.addr().lit_slot_verdict(params[i].ty)
                         (lv >= 0).match ({
                             true  => lv,
                             false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty),
@@ -65,7 +65,7 @@ arg_err_at* = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
 // story (the receiver type lacks an impl). Used only to pick the KIND and message of an already-
 // rejected call — it never flips accept/reject.
 fields_declare_method* = (fields: [Field], m: StringView) bool {
-    found := false
+    found ::= false
     fields.loop((h, i, f) {
         found = (f.name == m).match ({
             true  => f.ty.match ({
@@ -80,7 +80,7 @@ fields_declare_method* = (fields: [Field], m: StringView) bool {
 // Struct literals check known fields and value fits; imported/generic literals stay lenient.
 no_fields* = () [Field] { slice(null_ptr(), 0) }
 struct_fields* = (decls: [Decl], name: StringView) [Field] {
-    found := no_fields()
+    found ::= no_fields()
     decls.loop((h, i, d) {
         found = d.match ({
             .DStruct(sd) => (sd.name == name).then({ sd.fields }, { found }),
@@ -93,12 +93,12 @@ has_field* = (fields: [Field], fname: StringView) bool {
     fields.slice_any((fl) { fl.name == fname })
 }
 field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
-    fty := fields.field_in(fi.name)
-    sv := env.slicelit_slot_verdict(load(fi.value), fty)
+    fty = fields.field_in(fi.name)
+    sv = env.slicelit_slot_verdict(load(fi.value), fty)
     (sv >= 0).match ({
         true  => sv,
         false => {
-            lv := fi.value.lit_slot_verdict(fty)    // a numeric literal must fit the field width
+            lv = fi.value.lit_slot_verdict(fty)    // a numeric literal must fit the field width
             (lv >= 0).then({ lv }, { env.fit_err(env.infer_expr(fi.value), fty) })
         },
     })
@@ -107,7 +107,7 @@ init_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
     fields.has_field(fi.name).then({ env.field_fit_err(fields, fi) }, { 1 })
 }    // unknown field -> 1
 struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
-    acc := 0
+    acc ::= 0
     inits.loop((h, i, fi) {
         acc = acc + env.init_err(fields, fi)
     })
@@ -118,16 +118,16 @@ struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
 // value (`Box<i32>(v: P(…))`) slipped past SEMA and broke at cc. A field whose type stays a tparam after
 // substitution (no matching targ) remains lenient, deferred to monomorphization.
 gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: FieldInit) i32 {
-    fty := fields.field_in(fi.name)
-    cty := (targs.len == tps.len).then({ env.a.subst_ty_in(tps, targs, fty) }, { fty })
+    fty = fields.field_in(fi.name)
+    cty = (targs.len == tps.len).then({ env.a.subst_ty_in(tps, targs, fty) }, { fty })
     tps.ty_mentions_tparam(cty).match ({
         true  => 0,
         false => {
-            sv := env.slicelit_slot_verdict(load(fi.value), cty)
+            sv = env.slicelit_slot_verdict(load(fi.value), cty)
             (sv >= 0).match ({
                 true  => sv,
                 false => {
-                    lv := fi.value.lit_slot_verdict(cty)    // still a tparam -> lenient
+                    lv = fi.value.lit_slot_verdict(cty)    // still a tparam -> lenient
                     // a numeric literal must fit the field width
                     (lv >= 0).then({ lv }, { env.fit_err(env.infer_expr(fi.value), cty) })
                 },
@@ -142,7 +142,7 @@ gen_struct_init_errs = (
     fields: [Field],
     inits: [FieldInit],
 ) i32 {
-    acc := 0
+    acc ::= 0
     inits.loop((h, i, fi) {
         acc = acc + fields.has_field(fi.name).match ({
             true  => env.gen_field_fit_err(tps, targs, fields, fi),
@@ -188,7 +188,7 @@ tag0_zerofills_null_ptr = (vs: [VariantDef], env: Env, fuel: i32) bool {
 // it — and likewise reject a field whose type only TRANSITIVELY reaches such a pointer (nested struct,
 // enum tag-0 payload), since zero-filling it nulls that pointer just the same.
 field_missing_nonnull_ptr = (fields: [Field], env: Env, inits: [FieldInit]) i32 {
-    acc := 0
+    acc ::= 0
     fields.loop((h, i, fl) {
         acc = acc + (env.ty_zerofills_null_ptr(fl.ty, 64) && inits.inits_has(fl.name) == false).match ({
             true  => 1,
@@ -199,9 +199,9 @@ field_missing_nonnull_ptr = (fields: [Field], env: Env, inits: [FieldInit]) i32 
 }
 // A repeated initializer for the same field (`Box(v: 5, v: 9)`) is almost certainly a mistake.
 dup_init_errs = (inits: [FieldInit]) i32 {
-    acc := 0
+    acc ::= 0
     inits.loop((h, i, fi) {
-        earlier := false
+        earlier ::= false
         inits.loop((h2, j, fj) {
             earlier = (j < i && fj.name == fi.name).then({ true }, { earlier })
         })
@@ -213,14 +213,14 @@ makestruct_err* = (env: Env, m: MakeStructData) i32 {
     (m.targs.len > 0).match ({
         true  => env.env_is_gen_struct(m.ty).match ({
             true  => {
-                gf := env.env_gstruct(m.ty).fields
+                gf = env.env_gstruct(m.ty).fields
                 env.gen_struct_init_errs(env.env_gstruct(m.ty).tparams, m.targs, gf, m.inits) + gf.field_missing_nonnull_ptr(env, m.inits) + m.inits.dup_init_errs()
             },
             false => 0,
         }),
         false => env.env_is_struct(m.ty).match ({
             true  => {
-                sf := env.env_struct_fields(m.ty)
+                sf = env.env_struct_fields(m.ty)
                 env.struct_init_errs(sf, m.inits) + sf.field_missing_nonnull_ptr(env, m.inits) + m.inits.dup_init_errs()
             },
             false => 0,
@@ -267,12 +267,12 @@ member_err* = (env: Env, obj: Ptr<Expr>, field: StringView) i32 {
     obj.is_lit_numeric().match ({
         true  => 1,
         false => {
-            rty := env.infer_expr(obj)
-            sname := rty.enum_name()
+            rty = env.infer_expr(obj)
+            sname = rty.enum_name()
             env.env_is_struct(sname).match ({
                 true  => env.env_struct_fields(sname).has_field(field).then({ 0 }, { 1 }),
                 false => {
-                    base := rty.gen_base_of()
+                    base = rty.gen_base_of()
                     (is_empty(base) == false && env.env_is_gen_struct(base)).match ({
                         true  => env.env_gstruct(base).fields.has_field(field).then({ 0 }, { 1 }),
                         false => (env.env_is_enum(sname)
@@ -291,7 +291,7 @@ member_err* = (env: Env, obj: Ptr<Expr>, field: StringView) i32 {
 // would be silently coerced under -w — a miscompile. Numeric elements stay lenient (C widens them),
 // and unknown/generic-residue elements defer (fit_err handles both).
 sl_elem_fit* = (env: Env, ety: Ty, it: Expr) i32 {
-    ity := env.infer_expr(it.addr())
+    ity = env.infer_expr(it.addr())
     (ety.ty_rank() >= 0 && ity.ty_rank() >= 0).then({ 0 }, { env.fit_err(ity, ety) })
 }
 // ── STRUCT-FIELD / SLICE-ELEMENT CONSUME (re-census #63) ───────────────────────────────────────────
@@ -318,11 +318,11 @@ mkstruct_field_kills* = (
     al: Ptr<AliasList>,
     s: MakeStructData,
 ) Ptr<DeadList> {
-    out := seen
+    out ::= seen
     env.env_is_struct(s.ty).then({
-        fields := env.env_struct_fields(s.ty)
+        fields = env.env_struct_fields(s.ty)
         s.inits.loop((h, i, fi) {
-            nm := env.struct_field_move_src(fields, fi)
+            nm = env.struct_field_move_src(fields, fi)
             (nm.is_empty() == false).then({
                 out = a.dead_kill(out, al, nm)
             })
@@ -339,9 +339,9 @@ slicelit_elem_kills* = (
     al: Ptr<AliasList>,
     items: [Expr],
 ) Ptr<DeadList> {
-    out := seen
+    out ::= seen
     items.loop((h, i, it) {
-        nm := env.own_moved_var(it.addr())
+        nm = env.own_moved_var(it.addr())
         (nm.is_empty() == false).then({
             out = a.dead_kill(out, al, nm)
         })
@@ -369,7 +369,7 @@ arg_var_name* = (c: CallData, i: i32) StringView {
 // naming `q`, `s.p` or `ps[0]` then launders the address back out), and flags it in return/trailing
 // position. NOT tracked: heap-store aliasing, escape through a global.
 ae_collect_arms = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
-    out := seen
+    out ::= seen
     arms.loop((h, i, ar) {
         out = a.ae_collect_expr(out, ar.body)
     })
@@ -398,7 +398,7 @@ ae_collect_stmt = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadLis
     })
 }
 ae_collect = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
-    out := seen
+    out ::= seen
     body.loop((h, i, st) {
         out = a.ae_collect_stmt(out, st)
     })
@@ -473,7 +473,7 @@ ae_taint_step = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) Ptr<DeadList> {
 // over-approximation of running it any number of times, and the walk is otherwise pure structural
 // descent — every statement list an expression carries gets the same threading as the top level.
 ae_taint_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) Ptr<DeadList> {
-    cur := cx
+    cur ::= cx
     body.loop((h, i, st) {
         cur = cur.ae_taint(a.ae_taint_step(cur, st))
     })
@@ -484,8 +484,8 @@ ae_taint_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) Ptr<DeadList> {
 // (unless the name was already tainted outside), so the loop's private name cannot taint an unrelated
 // later local that happens to share it.
 ae_taint_loop = (a: MutPtr<Malloc>, cx: AeCtx, l: LoopData) Ptr<DeadList> {
-    esc := a.ae_escapes(cx, l.seq, true)
-    inner := a.ae_taint_stmts(cx.ae_taint(esc.match ({
+    esc = a.ae_escapes(cx, l.seq, true)
+    inner = a.ae_taint_stmts(cx.ae_taint(esc.match ({
         true  => a.dead_cons(l.elem, cx.tainted),
         false => cx.tainted,
     })), l.body)
@@ -503,7 +503,7 @@ ae_taint_expr = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) Ptr<DeadList> {
 // store rooted at a param/global is a different escape (the out-param store, `ae_store_pos`), not a
 // local alias, so it adds nothing here.
 ae_taint_store = (a: MutPtr<Malloc>, cx: AeCtx, target: Ptr<Expr>, value: Ptr<Expr>) Ptr<DeadList> {
-    rn := target.wr_root_name()
+    rn = target.wr_root_name()
     (cx.locals.dead_has(rn) && a.ae_escapes(cx, value, true)).match ({
         true  => a.dead_cons(rn, cx.tainted),
         false => cx.tainted,
@@ -514,10 +514,10 @@ ae_taint_store = (a: MutPtr<Malloc>, cx: AeCtx, target: Ptr<Expr>, value: Ptr<Ex
 // (`{ q := x.addr() ⏎ q }`) is caught. `tail` is false for a `.Loop` body, whose trailing value is
 // discarded — only its returns reach the caller.
 ae_stmts_val_escapes = (a: MutPtr<Malloc>, cx: AeCtx, stmts: [Stmt], hop: bool, tail: bool) bool {
-    f := false
-    cur := cx
+    f ::= false
+    cur ::= cx
     stmts.loop((h, i, st) {
-        hit := st.match ({
+        hit = st.match ({
             .Return(r)   => a.ae_escapes(cur, r, hop),
             .ExprStmt(e) => tail && i == stmts.len - 1 && a.ae_escapes(cur, e, hop),
             _            => false,
@@ -564,7 +564,7 @@ ae_fn_returns_param = (
     (depth <= 0).match ({
         true  => false,
         false => {
-            f := idx.idx_func(decls, fn)
+            f = idx.idx_func(decls, fn)
             (f.name == "" == false && pi >= 0 && pi < f.params.len).match ({
                 true  => a.ae_ret_body(decls, idx, f.body, f.params[pi].name, depth),
                 false => false,
@@ -655,8 +655,8 @@ ae_ret_call = (
     (depth <= 1).match ({
         true  => false,
         false => {
-            f := idx.idx_func(decls, c.fn)
-            found := false
+            f = idx.idx_func(decls, c.fn)
+            found ::= false
             (f.name == "" == false && f.params.len == c.args.len).then({
                 c.args.loop((h, i, ar) {
                     (a.ae_ret_yields(decls, idx, name, ar.addr(), depth - 1)
@@ -678,7 +678,7 @@ ae_ret_body = (
     name: StringView,
     depth: i32,
 ) bool {
-    f := body.slice_any((st) { a.ae_ret_stmt(decls, idx, st, name, depth) })
+    f = body.slice_any((st) { a.ae_ret_stmt(decls, idx, st, name, depth) })
     (body.len == 0).match ({
         true  => f,
         false => body[body.len - 1].match ({
@@ -729,9 +729,9 @@ ae_ret_stmtarms = (
     name: StringView,
     depth: i32,
 ) bool {
-    f := false
+    f ::= false
     arms.loop((h, i, ar) {
-        hit := load(ar.body).match ({
+        hit = load(ar.body).match ({
             .Block(b) => a.ae_ret_body(decls, idx, b.stmts, name, depth),
             _         => false,
         })
@@ -741,8 +741,8 @@ ae_ret_stmtarms = (
 }
 // the call-following forward for the escape walk: a local's address escaping into a returning-param arg.
 ae_call_escapes = (a: MutPtr<Malloc>, cx: AeCtx, c: CallData) bool {
-    f := cx.idx.idx_func(cx.decls, c.fn)
-    found := false
+    f = cx.idx.idx_func(cx.decls, c.fn)
+    found ::= false
     (f.name == "" == false && f.params.len == c.args.len).then({
         c.args.loop((h, i, ar) {
             (a.ae_escapes(cx, ar.addr(), true)
@@ -766,7 +766,7 @@ ae_call_escapes = (a: MutPtr<Malloc>, cx: AeCtx, c: CallData) bool {
 //       `stash(local_box.addr(), x.addr())`, where both die together, is NOT flagged).
 // index of `rn` among `f`'s params when it names a POINTER param, else -1.
 ae_ptr_param_idx = (f: Func, rn: StringView) i32 {
-    di := 0 - 1
+    di ::= 0 - 1
     (rn == "" == false).then({
         f.params.loop((h, i, p) {
             (p.name == rn && is_ptr_ty(p.ty)).then({
@@ -787,7 +787,7 @@ ae_fn_store_dest = (
     si: i32,
     depth: i32,
 ) i32 {
-    f := idx.idx_func(decls, fn)
+    f = idx.idx_func(decls, fn)
     (f.name == "" == false && si >= 0 && si < f.params.len).match ({
         true  => a.ae_store_scan(decls, idx, f, f.params[si].name, si, f.body, depth),
         false => 0 - 1,
@@ -803,9 +803,9 @@ ae_store_scan = (
     body: [Stmt],
     depth: i32,
 ) i32 {
-    dest := 0 - 1
+    dest ::= 0 - 1
     body.loop((h, i, st) {
-        di := st.match ({
+        di = st.match ({
             .Assign(x)   => a.ae_store_hit(decls, idx, f, sname, si, x.target, x.value, depth),
             .IndexSet(x) => a.ae_store_hit(decls, idx, f, sname, si, x.seq, x.value, depth),
             _            => 0 - 1,
@@ -828,7 +828,7 @@ ae_store_hit = (
     value: Ptr<Expr>,
     depth: i32,
 ) i32 {
-    di := ae_ptr_param_idx(f, target.wr_root_name())
+    di = ae_ptr_param_idx(f, target.wr_root_name())
     (di >= 0 && di == si == false && a.ae_ret_yields(decls, idx, sname, value, depth)).match ({
         true  => di,
         false => 0 - 1,
@@ -837,7 +837,7 @@ ae_store_hit = (
 // a call-site arg that names a place OUTLIVING this frame: rooted at a plain var that is NOT a collected
 // local (i.e. a parameter or a global). Not rooted at a var → not-outliving (safe under-reject).
 ae_arg_outlives = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
-    rn := e.wr_root_name()
+    rn = e.wr_root_name()
     rn == "" == false && locals.dead_has(rn) == false
 }
 // statement-position store escape: the source offset of a call that plants a pointer into this frame
@@ -845,10 +845,10 @@ ae_arg_outlives = (locals: Ptr<DeadList>, e: Ptr<Expr>) bool {
 ae_store_pos = (a: MutPtr<Malloc>, cx: AeCtx, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c) => {
-            acc := 0
+            acc ::= 0
             c.args.loop((h, si, ar) {
                 a.ae_escapes(cx, ar.addr(), true).then({
-                    di := a.ae_fn_store_dest(cx.decls, cx.idx, c.fn, si, consume_depth())
+                    di = a.ae_fn_store_dest(cx.decls, cx.idx, c.fn, si, consume_depth())
                     (di >= 0 && di < c.args.len && cx.locals.ae_arg_outlives(c.args[di].addr())).then({
                         acc = acc.or(c.pos.pos_or(1))
                     })
@@ -912,7 +912,7 @@ ae_kv_arm = (a: MutPtr<Malloc>, cx: AeCtx, body: Ptr<Expr>) i32 {
     })
 }
 ae_kv_arms = (a: MutPtr<Malloc>, cx: AeCtx, arms: [ArmData]) i32 {
-    acc := 0
+    acc ::= 0
     arms.loop((h, i, ar) {
         acc = acc.or(a.ae_kv_arm(cx, ar.body))
     })
@@ -950,8 +950,8 @@ ae_kv_stmt = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) i32 {
     })
 }
 ae_kv_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
-    acc := 0
-    cur := cx
+    acc ::= 0
+    cur ::= cx
     body.loop((h, i, st) {
         acc = acc.or(a.ae_kv_stmt(cur, st))
         cur = cur.ae_taint(a.ae_taint_step(cur, st))
@@ -959,8 +959,8 @@ ae_kv_stmts = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
     acc
 }
 ae_kv_body = (a: MutPtr<Malloc>, cx: AeCtx, body: [Stmt]) i32 {
-    acc := 0
-    cur := cx
+    acc ::= 0
+    cur ::= cx
     body.loop((h, i, st) {
         acc = acc.or(a.ae_kv_stmt(cur, st))
         cur = cur.ae_taint(a.ae_taint_step(cur, st))
@@ -996,21 +996,21 @@ sv_call_pos = (env: Env, c: CallData, mode: i32) i32 {
     (mode == 0).then({ env.sd_call_pos(c) }, { env.sm_call_pos(c) })
 }
 sv_args = (a: MutPtr<Malloc>, env: Env, args: [Expr], mode: i32) i32 {
-    acc := 0
+    acc ::= 0
     args.loop((h, i, ar) {
         acc = acc.or(a.sv_expr(env, ar.addr(), mode))
     })
     acc
 }
 sv_arms = (a: MutPtr<Malloc>, env: Env, subjty: Ty, arms: [ArmData], mode: i32) i32 {
-    acc := 0
+    acc ::= 0
     arms.loop((h, i, ar) {
         acc = acc.or(a.sv_expr(a.arm_env(env, subjty, ar), ar.body, mode))
     })
     acc
 }
 sv_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit], mode: i32) i32 {
-    acc := 0
+    acc ::= 0
     inits.loop((h, i, fi) {
         acc = acc.or(a.sv_expr(env, fi.value, mode))
     })
@@ -1067,8 +1067,8 @@ sv_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, mode: i32) i32 {
     })
 }
 sv_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], mode: i32) i32 {
-    acc := 0
-    e := env
+    acc ::= 0
+    e ::= env
     body.loop((h, i, st) {
         acc = acc.or(a.sv_stmt(e, st, mode))
         e = a.extend_env(e, st)
@@ -1076,7 +1076,7 @@ sv_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], mode: i32) i32 {
     acc
 }
 sv_check_func* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func, mode: i32) i32 {
-    env := Env(
+    env = Env(
         vars: a.params_env(f.params),
         decls: decls,
         didx: idx,
@@ -1172,7 +1172,7 @@ sx_step = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
 }
 // fresh binders (lambda params, loop idx/elem/handler, arm binds) shadow any same-named taint.
 sx_drop_params = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, ps: [Param]) Ptr<DeadList> {
-    out := taint
+    out ::= taint
     ps.loop((h, i, p) {
         out = a.dead_remove(out, p.name)
     })
@@ -1201,7 +1201,7 @@ sx_payload_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     })
 }
 sx_inits_pos = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
-    acc := 0
+    acc ::= 0
     inits.loop((h, i, fi) {
         acc = acc.or(a.sx_payload_pos(taint, fi.value))
     })
@@ -1228,13 +1228,13 @@ sx_named* = (fn: StringView, bare: StringView, qual: StringView) bool {
     fn == bare || fn.ends_with(qual)
 }
 sx_call_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, c: CallData) i32 {
-    sk := (c.fn.sx_named("send", "__send") && c.args.len >= 2
+    sk = (c.fn.sx_named("send", "__send") && c.args.len >= 2
         || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3
         || c.fn.sx_named("ref_send_msg", "__ref_send_msg") && c.args.len == 2).match ({
         true  => a.sx_payload_pos(taint, c.args[c.args.len - 1].addr()).sx_kv(KSCRATCHSEND()),
         false => 0,
     })
-    st := ((c.fn.sx_named("spawn", "__spawn") || c.fn.sx_named("spawn_handle", "__spawn_handle"))
+    st = ((c.fn.sx_named("spawn", "__spawn") || c.fn.sx_named("spawn_handle", "__spawn_handle"))
         && c.args.len == 3).match ({
         true  => a.sx_payload_pos(taint, c.args[2].addr()).sx_kv(KSCRATCHSTATE()),
         false => 0,
@@ -1242,13 +1242,13 @@ sx_call_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, c: CallData) i32 {
     sk.or(st)
 }
 sx_mcall_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, mc: MethodCallData) i32 {
-    sk := (mc.method.sx_named("send", "__send") && mc.args.len >= 1
+    sk = (mc.method.sx_named("send", "__send") && mc.args.len >= 1
         || mc.method.sx_named("pool_send", "__pool_send") && mc.args.len == 2
         || mc.method.sx_named("ref_send_msg", "__ref_send_msg") && mc.args.len == 1).match ({
         true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSEND()),
         false => 0,
     })
-    st := ((mc.method.sx_named("spawn", "__spawn")
+    st = ((mc.method.sx_named("spawn", "__spawn")
         || mc.method.sx_named("spawn_handle", "__spawn_handle"))
         && (mc.args.len == 2 || mc.args.len == 3)).match ({
         true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSTATE()),
@@ -1257,22 +1257,22 @@ sx_mcall_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, mc: MethodCallData) i3
     sk.or(st)
 }
 sx_args_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, args: [Expr]) i32 {
-    acc := 0
+    acc ::= 0
     args.loop((h, i, ar) {
         acc = acc.or(a.sx_expr_kind(taint, ar.addr()))
     })
     acc
 }
 sx_arms_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, arms: [ArmData]) i32 {
-    acc := 0
+    acc ::= 0
     arms.loop((h, i, ar) {
-        t2 := is_empty(ar.bind).then({ taint }, { a.dead_remove(taint, ar.bind) })
+        t2 = is_empty(ar.bind).then({ taint }, { a.dead_remove(taint, ar.bind) })
         acc = acc.or(a.sx_expr_kind(t2, ar.body))
     })
     acc
 }
 sx_inits_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
-    acc := 0
+    acc ::= 0
     inits.loop((h, i, fi) {
         acc = acc.or(a.sx_expr_kind(taint, fi.value))
     })
@@ -1323,8 +1323,8 @@ sx_stmt_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) i32 {
     })
 }
 sx_body_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, body: [Stmt]) i32 {
-    acc := 0
-    t := taint
+    acc ::= 0
+    t ::= taint
     body.loop((h, i, st) {
         acc = acc.or(a.sx_stmt_kind(t, st))
         t = a.sx_step(t, st)
@@ -1350,7 +1350,7 @@ sx_subject* = (a: MutPtr<Malloc>, src: StringView, pos: i32, w: i32) StringView 
     })
 }
 sx_message* = (a: MutPtr<Malloc>, code: i32, subject: StringView) StringView {
-    tail := (code == KSCRATCHSEND()).match ({
+    tail = (code == KSCRATCHSEND()).match ({
         true  => " is spawner-local scratch memory (allocator/arena/stack storage) and crosses an actor boundary in this send; the sender frees it independently of the receiving actor (use-after-free)",
         false => " is spawner-local scratch memory (allocator/arena/stack storage) embedded in the initial actor state; the actor outlives the spawner's scratch (use-after-free)",
     })

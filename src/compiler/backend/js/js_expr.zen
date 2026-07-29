@@ -87,7 +87,7 @@ js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
 // Width 0 (a struct, pointer, slice, string, or unannotated binding) is NOT boxed — the identity
 // lowering is right for those, and boxing an object would break it.
 js_cell_w* = (t: Ty) i32 {
-    w := int_width(t)
+    w = int_width(t)
     (w != 0).then({
         return w
     })
@@ -107,7 +107,7 @@ js_cell_w* = (t: Ty) i32 {
 // representation" (a struct, enum, or nested slice element): the floor PANICS on such a read rather
 // than inventing one, since MEM holds bytes and a struct on this target is a JS object.
 js_elem_w* = (t: Ty) i32 {
-    w := js_cell_w(t)
+    w = js_cell_w(t)
     (w != 0).then({
         return w
     })
@@ -125,7 +125,7 @@ js_boxed_w* = (name: StringView) i32 {
     js_box_taken(name).then({ js_cell_w(vw_lookup(name)) }, { 0 })
 }
 js_var_ref = (s: String, a: MutPtr<Malloc>, name: StringView) String {
-    w := js_boxed_w(name)
+    w = js_boxed_w(name)
     (w == 0).match ({
         true  => s.jname(a, name),
         false => s
@@ -173,7 +173,7 @@ js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String {
 // boundary (let/param/assign/return) wraps back to the type's width. A 32-bit-or-narrower UNSIGNED `>>`
 // becomes the logical `>>>` (a signed `>>` sign-fills a high-bit-set u32). See bootstrap/zenrt.js.
 js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String {
-    big := is_w64(iw_of(load(b.lhs))) || is_w64(iw_of(load(b.rhs)))
+    big = is_w64(iw_of(load(b.lhs))) || is_w64(iw_of(load(b.rhs)))
     (b.op == "/.").then({
         return s
             .gstr_append(a, "(")
@@ -188,7 +188,7 @@ js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String {
     // C, which wraps at every step (-fwrapv). 64-bit stays exact in BigInt (w=0, boundary wraps);
     // bitwise `& | ^ << >>` self-coerce to int32 in JS, so only arithmetic needs this. A 32-bit
     // multiply routes through Math.imul (its product exceeds 2^53 before any mask could catch it).
-    w := big.then({ 0 }, { js_trunc_w(b) })
+    w = big.then({ 0 }, { js_trunc_w(b) })
     js_is_mul32(.Bin(b), w).then({
         return s.js_mul32(a, .Bin(b), w)
     })
@@ -346,7 +346,7 @@ js_ty_of = (e: Expr) Ty {
 // genc's union level `subj.u.Ok` has no js analog — `.u` IS the enum (js_member erases it), and the
 // next field names the variant, so the payload lookup answers both.
 js_member_ty = (field: StringView, obj: Expr) Ty {
-    t := js_deref(js_ty_of(obj))
+    t = js_deref(js_ty_of(obj))
     (field == "u").then({ t }, { jsc_member_ty(t, field) })
 }
 js_deref = (t: Ty) Ty {
@@ -364,7 +364,7 @@ js_call_ty = (c: CallData) Ty {
     js_func_ret(c.fn)
 }
 js_block_ty = (b: BlockData) Ty {
-    r := tvoid()
+    r ::= tvoid()
     b.stmts.loop((h, i, st) {
         r = (i == b.stmts.len - 1).then({ js_stmt_ty(st) }, { r })
     })
@@ -381,7 +381,7 @@ js_stmt_ty = (st: Stmt) Ty {
 // out of the typed-var table on purpose — int_width reads that table, and widening its answers would
 // change every emitted coercion rather than only the copies.
 js_agg_ty = (e: Expr) Ty {
-    t := js_ty_of(e)
+    t = js_ty_of(e)
     js_cp_needed(t).then({ t }, { tvoid() })
 }
 // ── the value SINKS ───────────────────────────────────────────────────────────────────────────────
@@ -407,7 +407,7 @@ js_expr_fresh = (e: Expr) bool {
 }
 // a struct literal's field takes a COPY of its initializer, exactly as C's `(S){ .f = v }` does.
 js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
-    out := s.gstr_append(a, "({ ")
+    out ::= s.gstr_append(a, "({ ")
     m.inits.loop((h, i, fi) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
         out = out
@@ -430,7 +430,7 @@ js_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData) String {
 }
 // a call's comma-separated args (each Expr value -> a Ptr<Expr> child).
 js_args* = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
-    out := s
+    out ::= s
     args.loop((h, i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
         out = out.js_expr(a, arg.addr())
@@ -439,7 +439,7 @@ js_args* = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
 }
 // a slice literal's items: C copies each ELEMENT into the array, so a struct item copies here too.
 js_cp_items = (s: String, a: MutPtr<Malloc>, items: [Expr], elem: Ty) String {
-    out := s
+    out ::= s
     items.loop((h, i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
         out = out.js_sink(a, arg.addr(), elem, 0)
@@ -602,8 +602,8 @@ js_unlowered_intrinsic = (fn: StringView) bool {
 // report_js_unsupported) BEFORE writing any .js. First escape wins — one root diagnostic, not one
 // per call site of the same unlowered intrinsic.
 js_no_unsupported = () StringView { "" }
-js_unsupported_name := js_no_unsupported()
-js_unsupported_pos := 0
+js_unsupported_name ::= js_no_unsupported()
+js_unsupported_pos ::= 0
 js_unsupported_note = (fn: StringView, pos: i32) void {
     is_empty(js_unsupported_name).then({
         js_unsupported_name = fn
@@ -645,7 +645,7 @@ js_sizeof = (s: String, a: MutPtr<Malloc>, c: CallData) String {
     })
 }
 js_size_lit = (s: String, a: MutPtr<Malloc>, name: StringView, pos: i32) String {
-    n := js_size_of_name(name)
+    n = js_size_of_name(name)
     (n < 0).then({ s.js_size_refuse(a, pos) }, { s.jint(a, n) })
 }
 js_size_refuse = (s: String, a: MutPtr<Malloc>, pos: i32) String {
@@ -659,7 +659,7 @@ js_size_refuse = (s: String, a: MutPtr<Malloc>, pos: i32) String {
 // The BIND is a value sink: C's `T v = _subj.u.V;` copies the payload out of the union, so a struct
 // payload is copied here and the arm body cannot write through to the matched value.
 js_arm_bind = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView) String {
-    pty := js_variant_ty(ename, ar.variant)
+    pty = js_variant_ty(ename, ar.variant)
     vw_note(ar.bind, js_agg_ty_or(pty))
     s
         .gstr_append(a, "const ")
@@ -694,7 +694,7 @@ js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool, ename: 
             .js_arm_body_expr(a, ar, ename)
             .gstr_append(a, "; "),
         false => {
-            out := s
+            out = s
                 .gstr_append(a, "case \"")
                 .gstr_append(a, ar.variant)
                 .gstr_append(a, "\": return ")
@@ -714,7 +714,7 @@ js_switch_cases = (
     (i >= arms.len).match ({
         true  => s,
         false => {
-            out := s.js_switch_case(a, arms[i], i == arms.len - 1, ename)
+            out = s.js_switch_case(a, arms[i], i == arms.len - 1, ename)
             (arms[i].variant == "_").then({ out }, { out.js_switch_cases(a, arms, i + 1, ename) })
         },
     })
@@ -755,7 +755,7 @@ js_switch_stmt_case = (
     (ar.variant == "_").match ({
         true  => s.gstr_append(a, "default: ").js_arm_stmt(a, ar, ename).gstr_append(a, " break; "),
         false => {
-            out := s
+            out = s
                 .gstr_append(a, "case \"")
                 .gstr_append(a, ar.variant)
                 .gstr_append(a, "\": ")
@@ -775,7 +775,7 @@ js_switch_stmt_cases = (
     (i >= arms.len).match ({
         true  => s,
         false => {
-            out := s.js_switch_stmt_case(a, arms[i], i == arms.len - 1, ename)
+            out = s.js_switch_stmt_case(a, arms[i], i == arms.len - 1, ename)
             (arms[i].variant == "_").match ({
                 true  => out,
                 false => out.js_switch_stmt_cases(a, arms, i + 1, ename),
@@ -795,7 +795,7 @@ js_match_stmt = (s: String, a: MutPtr<Malloc>, m: MatchData) String {
 // expression-safe and let it cross nested match/loop IIFEs; the iteration catch consumes only THIS
 // loop's continue/break and rethrows every outer-loop token or ordinary exception unchanged.
 js_loop = (s: String, a: MutPtr<Malloc>, l: LoopData) String {
-    out := s
+    out ::= s
         .gstr_append(a, "(() => { const _seq = ")
         .js_expr(a, l.seq)
         .gstr_append(a, "; const ")
@@ -825,9 +825,9 @@ js_loop = (s: String, a: MutPtr<Malloc>, l: LoopData) String {
     out.gstr_append(a, " return 0; })()")
 }
 js_block_expr = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
-    out := s.gstr_append(a, "(() => { ")
+    out ::= s.gstr_append(a, "(() => { ")
     b.stmts.loop((h, i, st) {
-        one := (i == b.stmts.len - 1).then({ out.js_block_last(a, st) }, { out.js_stmt(a, st) })
+        one = (i == b.stmts.len - 1).then({ out.js_block_last(a, st) }, { out.js_stmt(a, st) })
         out = one.gstr_append(a, " ")
     })
     out.gstr_append(a, "})()")
@@ -840,7 +840,7 @@ js_block_last = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
     })
 }
 js_block_stmts = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
-    out := s
+    out ::= s
     b.stmts.loop((h, i, st) {
         out = out.js_stmt(a, st).gstr_append(a, " ")
     })
@@ -852,11 +852,11 @@ js_block_stmts = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
 // An address-taken scalar binds its CELL instead of its value: `__zr.box(init, w)` allocates the cell,
 // writes the initializer into it, and yields the MEM offset the variable then carries.
 js_let = (s: String, a: MutPtr<Malloc>, l: LetData) String {
-    lty := js_let_ty(l)
+    lty = js_let_ty(l)
     vw_note(l.name, lty)
-    bw := js_boxed_w(l.name)
-    open := s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ")
-    boxed := (bw == 0).match ({
+    bw = js_boxed_w(l.name)
+    open = s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ")
+    boxed = (bw == 0).match ({
         true  => open.js_sink(a, l.value, lty, int_width(l.ty)),
         false => open
             .gstr_append(a, "__zr.box(")
@@ -885,7 +885,7 @@ js_assign = (s: String, a: MutPtr<Malloc>, x: AssignData) String {
         },
         _          => { },
     })
-    bw := js_assign_boxed_w(load(x.target))
+    bw = js_assign_boxed_w(load(x.target))
     (bw == 0).then({
         return s
             .js_expr(a, x.target)
@@ -991,7 +991,7 @@ js_cond_stmt = (s: String, a: MutPtr<Malloc>, d: CondData) String {
         .gstr_append(a, " }")
 }
 js_stmts* = (s: String, a: MutPtr<Malloc>, body: [Stmt]) String {
-    out := s
+    out ::= s
     body.loop((h, i, st) {
         out = out.js_stmt(a, st).gstr_append(a, " ")
     })
@@ -1117,8 +1117,8 @@ js_mul32 = (s: String, a: MutPtr<Malloc>, e: Expr, w: i32) String {
 // width (the FNV-hash case: `hash = (hash ^ b) * 16777619` where `hash: u32` mutates in a loop). Mirrors
 // parse.zen's exports_buf pattern; reset at every function entry (Zen has no nested fns — lambdas are
 // inlined before js — so one flat table per function is exact).
-vw_buf := vw_none()
-vw_n := 0
+vw_buf ::= vw_none()
+vw_n ::= 0
 vw_none = () [Param] { slice(null_ptr(), 0) }
 vw_reset* = (a: MutPtr<Malloc>) void {
     vw_buf = slice(a.acquire_or_die(8192 * sizeof(Param)), 8192)
@@ -1133,7 +1133,7 @@ vw_note* = (name: StringView, ty: Ty) void {
 }
 // last matching entry wins (an inner-scope shadow declared later overrides an earlier sibling).
 vw_lookup = (name: StringView) Ty {
-    r := tvoid()
+    r ::= tvoid()
     vw_get().loop((h, i, p) {
         r = (p.name == name).then({ p.ty }, { r })
     })
@@ -1142,6 +1142,6 @@ vw_lookup = (name: StringView) Ty {
 // current function's return width — set at function entry (js_decl.js_func). A `return` COERCES its value
 // to this width ONLY for the 64-bit types (an i64/u64 return must be a BigInt, else an inline `return a*b`
 // would lose precision or mix); narrower returns are already truncated at the CALLER's binding boundary.
-cur_ret_w := 0
+cur_ret_w ::= 0
 set_ret_w* = (w: i32) void { cur_ret_w = w }
 ret_coerce_w = () i32 { is_w64(cur_ret_w).then({ cur_ret_w }, { 0 }) }

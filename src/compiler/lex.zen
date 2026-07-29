@@ -30,11 +30,11 @@ Scan*: {
 // this (lerr_get, mirroring parse_type's perr_get) and rejects the module as a parse error
 // instead of compiling the truncated prefix. (An unterminated STRING is caught by the parser
 // itself — its token still reaches str_open; a swallowed comment never surfaces as a token.)
-lex_failed := 0
+lex_failed ::= 0
 // byte offset of the first lexer error that carried one (0 = none) — the `/*` of an unterminated
 // block comment, or the `0` of a malformed radix literal. parse_module folds it into the
 // __syntax_error sentinel so the KPARSE diagnostic can caret the failing site (mirrors perr_set_at).
-lex_err_off := 0
+lex_err_off ::= 0
 lerr_set_at = (off: i32) void {
     (lex_err_off == 0).then({
         lex_err_off = off
@@ -55,8 +55,8 @@ skip_block_comment = (src: StringView, pos: i32) i32 { src.skip_bc_d(pos, 1, pos
 // NESTED block comments: track depth so `/* /* */ */` closes at the OUTER `*/`, not the first one.
 // `open` carries the byte offset of the OUTER `/*` so an unterminated comment can caret its start.
 skip_bc_d = (src: StringView, pos: i32, depth: i32, open: i32) i32 {
-    d := depth
-    e := pos.step_while((p) {
+    d ::= depth
+    e = pos.step_while((p) {
         at(src, p) != '\0' && (d == 1 && at(src, p) == '*' && at(src, p + 1) == '/') == false
     }, (p) {
         (at(src, p) == '/' && at(src, p + 1) == '*').match ({
@@ -82,7 +82,7 @@ skip_bc_d = (src: StringView, pos: i32, depth: i32, open: i32) i32 {
     })
 }    // unterminated — stop at NUL and FLAG it (positioned at the opening `/*`)
 skip = (src: StringView, pos: i32) i32 {
-    p := pos
+    p ::= pos
     repeat_while((n) {
         is_space(at(src, p)).match ({
             true  => {
@@ -168,17 +168,14 @@ radix_end = (src: StringView, ds: i32, e: i32) i32 {
 exp_end = (src: StringView, pos: i32) i32 {
     (at(src, pos) == 'e' || at(src, pos) == 'E').match ({
         true  => {
-            p2 := (at(src, pos + 1) == '+' || at(src, pos + 1) == '-').match ({
-                true  => pos + 2,
-                false => pos + 1,
-            })
+            p2 = (at(src, pos + 1) == '+' || at(src, pos + 1) == '-').then({ pos + 2 }, { pos + 1 })
             is_digit(at(src, p2)).then({ src.int_end(p2) }, { pos })
         },
         false => pos,
     })
 }
 str_end = (src: StringView, pos: i32) i32 {
-    e := pos.step_while((p) { at(src, p) != '\0' && at(src, p) != '"' }, (p) {
+    e = pos.step_while((p) { at(src, p) != '\0' && at(src, p) != '"' }, (p) {
         (at(src, p) == '\\').then({ p + 2 }, { p + 1 })
     })    // pos just past the opening quote; a `\` swallows the byte after it
     (at(src, e) == '\0').then({ e }, { e + 1 })
@@ -191,11 +188,11 @@ str_end = (src: StringView, pos: i32) i32 {
 // handling — a backslash is an ordinary byte, so only the delimiter can end the scan. Iterative for
 // the same reason as str_end: a multi-kilobyte block literal must not recurse the C stack.
 rawstr_end* = (src: StringView, pos: i32) i32 {
-    e := pos.advance_while((p) { at(src, p) != '\0' && src.rawstr_at(p) == false })
+    e = pos.advance_while((p) { at(src, p) != '\0' && src.rawstr_at(p) == false })
     (at(src, e) == '\0').then({ e }, { e + 3 })
 }
 char_end = (src: StringView, pos: i32) i32 {
-    b := at(src, pos)    // first byte inside the quotes
+    b = at(src, pos)    // first byte inside the quotes
     // a char literal `'x'` or `'\n'` — pos is just past the opening quote; returns the
     // position just past the closing quote. One char, or a `\.` escape.
     // NUL first ⇒ unterminated at EOF: stop like str_end, never step past the terminator.
@@ -215,14 +212,20 @@ scan_quote_end = (src: StringView, pos: i32) i32 {
     // Scan to (and past) the closing `'`. Keeps a malformed multi-char literal like 'ab' from
     // DESYNCING the token stream — it consumes the whole literal instead of leaving a stray quote.
     // Iterative so a long malformed char literal cannot recurse per byte.
-    e := pos.advance_while((p) { at(src, p) != '\'' && at(src, p) != '\0' })
+    e = pos.advance_while((p) { at(src, p) != '\'' && at(src, p) != '\0' })
     (at(src, e) == '\0').then({ e }, { e + 1 })
 }    // unterminated ⇒ stop AT the NUL, don't overshoot the buffer
 // ── symbols ──────────────────────────────────────────────────────────────────
-// zen's two-char operators: `:=  ==  <=  >=  &&  ||  =>`. A symbol token spans two
+// zen's two-char operators: `:=  ::  ==  <=  >=  &&  ||  =>`. A symbol token spans two
 // bytes when the pair forms one of these, else one — so the parser never re-glues.
+// `::` is the MUTABILITY mark of a local binding (`x :: T = e`); `::=` is its inferred-type
+// form and is the only three-byte operator (three_op, checked first so `::=` never splits
+// into `::` + `=`). Nothing else in the grammar puts two colons in a row — a type annotation,
+// a struct-literal field (`S(v: 7)`), a generic bound (`<A: Allocator>`), a match arm and a
+// trait body each spell a SINGLE `:` followed by a name/type, never by another `:`.
 two_op = (b0: u8, b1: u8) bool {
     b0 == ':' && b1 == '='
+        || b0 == ':' && b1 == ':'
         || b0 == '=' && b1 == '='
         || b0 == '<' && b1 == '='
         || b0 == '>' && b1 == '='
@@ -234,7 +237,14 @@ two_op = (b0: u8, b1: u8) bool {
         || b0 == '>' && b1 == '>'
         || b1 == '=' && (b0 == '+' || b0 == '-' || b0 == '*' || b0 == '/' || b0 == '%')
 }    // := ; the last clause adds the compound-assign ops `+= -= *= /= %=`
+// zen's ONE three-char operator: `::=`, the mutable-binding mark with an inferred type. Checked
+// before two_op so it never splits into `::` + `=` (which would read as a mutable binding whose
+// type annotation is missing).
+three_op = (b0: u8, b1: u8, b2: u8) bool { b0 == ':' && b1 == ':' && b2 == '=' }
 sym_end = (src: StringView, pos: i32) i32 {
+    three_op(at(src, pos), at(src, pos + 1), at(src, pos + 2)).then({
+        return pos + 3
+    })
     two_op(at(src, pos), at(src, pos + 1)).then({ pos + 2 }, { pos + 1 })
 }    // ==
 mk = (k: TokKind, start: i32, end: i32) Scan {
@@ -249,7 +259,7 @@ mk = (k: TokKind, start: i32, end: i32) Scan {
 }    // <=
 tok_eof = () TokKind { .Eof }    // >=
 num_tok = (src: StringView, pos: i32) Scan {
-    e := src.num_end(pos)    // =>
+    e = src.num_end(pos)    // =>
     // &&
     // !=
     // ||
@@ -261,10 +271,10 @@ num_tok = (src: StringView, pos: i32) Scan {
     // `1.5e-3`, `6.022e23`, `1.0E5`. The dot must be followed by a digit, so `1.match` /
     // `xs[0].addr()` still scan as an Int + a `.` postfix; the exponent only fuses when a digit
     // follows `e`, so `x.e` / a var `e1` are untouched. Hex (`0x…`) never floats.
-    nofloat := src.is_hex_prefix(pos) || src.is_bin_prefix(pos) || src.is_oct_prefix(pos)
-    has_frac := nofloat.then({ false }, { at(src, e) == '.' && is_digit(at(src, e + 1)) })
-    me := has_frac.then({ src.int_end(e + 1) }, { e })
-    end := nofloat.then({ me }, { src.exp_end(me) })
+    nofloat = src.is_hex_prefix(pos) || src.is_bin_prefix(pos) || src.is_oct_prefix(pos)
+    has_frac = nofloat.then({ false }, { at(src, e) == '.' && is_digit(at(src, e + 1)) })
+    me = has_frac.then({ src.int_end(e + 1) }, { e })
+    end = nofloat.then({ me }, { src.exp_end(me) })
     (has_frac || end > me).then({ mk(.Float, pos, end) }, { mk(.Int, pos, e) })
 }
 scan_one = (src: StringView, pos: i32, b: u8) Scan {
@@ -286,8 +296,8 @@ scan_one = (src: StringView, pos: i32, b: u8) Scan {
     })
 }
 scan* = (src: StringView, pos0: i32) Scan {
-    pos := src.skip(pos0)
-    b := at(src, pos)
+    pos = src.skip(pos0)
+    b = at(src, pos)
     (b == '\0').match ({
         true  => Scan(
             tok: Token(
@@ -308,7 +318,7 @@ scan* = (src: StringView, pos0: i32) Scan {
 // total token count, Eof excluded — a traversal of the entire stream by iteration.
 count* = (src: StringView) i32 { src.count_from(0) }
 count_from = (src: StringView, pos: i32) i32 {
-    sc := src.scan(pos)
+    sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => 0,
         _    => 1 + src.count_from(sc.next),
@@ -337,20 +347,20 @@ Comment*: {
 cmt_buf = (a: MutPtr<Malloc>, n: i32) [Comment] { slice(a.acquire_or_die(n * sizeof(Comment)), n) }
 // count comments first so the buffer is exact (no cap guesswork on a 100KB file).
 collect_comments* = (a: MutPtr<Malloc>, src: StringView) [Comment] {
-    n := src.count_comments()
-    buf := a.cmt_buf(n + 1)    // +1 keeps a 0-comment file from a 0-size acquire
+    n = src.count_comments()
+    buf = a.cmt_buf(n + 1)    // +1 keeps a 0-comment file from a 0-size acquire
     src.fill_comments(buf, 0)
     slice(buf.ptr, n)
 }
 // number of comments in the source — one iterative scan (no per-byte recursion: big files).
 count_comments = (src: StringView) i32 {
-    zero: i32 := 0
-    n := 0
-    in_str := false
-    in_char := false
-    esc := false
+    zero: i32 = 0
+    n ::= 0
+    in_str ::= false
+    in_char ::= false
+    esc ::= false
     zero.step_while((i) { at(src, i) != '\0' }, (i) {
-        b := at(src, i)
+        b = at(src, i)
         in_str.match ({
             true  => esc.match ({
                 true  => {
@@ -434,7 +444,7 @@ count_comments = (src: StringView) i32 {
 }
 // is byte position `s` the start of a fresh line (only whitespace back to the previous '\n' / BOF)?
 line_is_blank_before = (src: StringView, s: i32) bool {
-    blank := true
+    blank ::= true
     (s - 1).step_while((p) { p >= 0 && at(src, p) != '\n' }, (p) {
         (is_space(at(src, p)) == false).then({
             blank = false
@@ -445,13 +455,13 @@ line_is_blank_before = (src: StringView, s: i32) bool {
 }
 // record each comment span into `buf` (exactly count_comments() of them); same scanner as the count.
 fill_comments = (src: StringView, buf: [Comment], k0: i32) void {
-    zero: i32 := 0
-    k := k0
-    in_str := false
-    in_char := false
-    esc := false
+    zero: i32 = 0
+    k ::= k0
+    in_str ::= false
+    in_char ::= false
+    esc ::= false
     zero.step_while((i) { at(src, i) != '\0' }, (i) {
-        b := at(src, i)
+        b = at(src, i)
         in_str.match ({
             true  => esc.match ({
                 true  => {
@@ -498,7 +508,7 @@ fill_comments = (src: StringView, buf: [Comment], k0: i32) void {
                 }),
                 false => (b == '/' && at(src, i + 1) == '/').match ({
                     true  => {
-                        e := src.skip_line(i + 2)
+                        e = src.skip_line(i + 2)
                         buf[k] = Comment(
                             start: i,
                             len: e - i,
@@ -509,7 +519,7 @@ fill_comments = (src: StringView, buf: [Comment], k0: i32) void {
                     },
                     false => (b == '/' && at(src, i + 1) == '*').match ({
                         true  => {
-                            e := src.skip_block_comment(i + 2)
+                            e = src.skip_block_comment(i + 2)
                             buf[k] = Comment(
                                 start: i,
                                 len: e - i,

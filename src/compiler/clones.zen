@@ -71,7 +71,7 @@ clone_bind = (cx: MutPtr<CloneCtx>, name: StringView) void {
 }
 // RULE 1 + 2: a bound name hashes as its binding index; a free name hashes as itself.
 clone_name = (cx: MutPtr<CloneCtx>, h: i64, name: StringView) i64 {
-    i := cx.clone_bound_at(name, 0)
+    i = cx.clone_bound_at(name, 0)
     (i < 0).then({
         return h.clone_tag(2).clone_text(name)
     })
@@ -96,21 +96,21 @@ clone_ty = (h: i64, t: Ty) i64 {
     })
 }
 clone_tys = (ts: [Ty], h: i64) i64 {
-    acc := h
+    acc ::= h
     ts.loop((hh, i, t) {
         acc = acc.clone_ty(t)
     })
     acc
 }
 clone_exprs = (cx: MutPtr<CloneCtx>, h: i64, xs: [Expr]) i64 {
-    acc := h
+    acc ::= h
     xs.loop((hh, i, x) {
         acc = cx.clone_expr(acc, x.addr())
     })
     acc
 }
 clone_expr = (cx: MutPtr<CloneCtx>, h0: i64, e: Ptr<Expr>) i64 {
-    h := cx.clone_node(h0)
+    h = cx.clone_node(h0)
     load(e).match ({
         .Int(v)         => h.clone_tag(40).clone_tag(v),
         .Byte(v)        => h.clone_tag(41).clone_tag(v),
@@ -135,7 +135,7 @@ clone_expr = (cx: MutPtr<CloneCtx>, h0: i64, e: Ptr<Expr>) i64 {
     })
 }
 clone_arms = (cx: MutPtr<CloneCtx>, h: i64, m: MatchData) i64 {
-    acc := h
+    acc ::= h
     m.arms.loop((hh, i, a) {
         cx.clone_bind(a.bind)    // `.Some(v) =>` binds v — rule 1, or the arm's spelling of v splits the group
         acc = cx.clone_expr(acc.clone_tag(60).clone_text(a.variant), a.body)
@@ -147,7 +147,7 @@ clone_arms = (cx: MutPtr<CloneCtx>, h: i64, m: MatchData) i64 {
 // build a `PExpr(expr: …, next: …)` and everything that distinguishes them lives in the fields.
 // Field names follow rule 2 (free, verbatim), so `S(a: t, b: u)` and `S(a: u, b: t)` differ.
 clone_inits = (cx: MutPtr<CloneCtx>, h: i64, inits: [FieldInit]) i64 {
-    acc := h
+    acc ::= h
     inits.loop((hh, i, f) {
         acc = cx.clone_expr(acc.clone_tag(61).clone_text(f.name), f.value)
     })
@@ -163,14 +163,14 @@ clone_opt = (cx: MutPtr<CloneCtx>, h: i64, e: Ptr<Expr>) i64 {
 // the spelling of a loop variable. All three bind unconditionally (a name the source omitted is ""),
 // so the binding indices stay aligned between any two loops.
 clone_loop = (cx: MutPtr<CloneCtx>, h: i64, l: LoopData) i64 {
-    acc := cx.clone_expr(h, l.seq).clone_ty(l.elemTy)
+    acc = cx.clone_expr(h, l.seq).clone_ty(l.elemTy)
     cx.clone_bind(l.idx)
     cx.clone_bind(l.elem)
     cx.clone_bind(l.h)
     cx.clone_stmts(acc, l.body)
 }
 clone_lambda = (cx: MutPtr<CloneCtx>, h: i64, l: LambdaData) i64 {
-    acc := h
+    acc ::= h
     l.params.loop((hh, i, p) {
         cx.clone_bind(p.name)
         acc = acc.clone_ty(p.ty)
@@ -178,17 +178,17 @@ clone_lambda = (cx: MutPtr<CloneCtx>, h: i64, l: LambdaData) i64 {
     cx.clone_stmts(acc, l.body)
 }
 clone_stmts = (cx: MutPtr<CloneCtx>, h: i64, body: [Stmt]) i64 {
-    acc := h
+    acc ::= h
     body.loop((hh, i, st) {
         acc = cx.clone_stmt(acc, st)
     })
     acc
 }
 clone_stmt = (cx: MutPtr<CloneCtx>, h0: i64, st: Stmt) i64 {
-    h := cx.clone_node(h0)
+    h = cx.clone_node(h0)
     st.match ({
         .Let(l)      => {
-            v := cx.clone_expr(h.clone_tag(70).clone_ty(l.ty), l.value)
+            v = cx.clone_expr(h.clone_tag(70).clone_ty(l.ty), l.value)
             cx.clone_bind(l.name)    // bind AFTER the initialiser: `x := x` refers to the OUTER x
             v
         },
@@ -204,20 +204,20 @@ CLONE_SCOPE_CAP = () i64 { 128 }
 // The fingerprint of one function: parameter TYPES (so a differing signature never collides), then
 // the body. Parameter NAMES are bound, not hashed — rule 1.
 clone_fn* = (mp: MutPtr<Malloc>, f: Func) i64 {
-    buf: [StringView] := slice(mp.acquire_or_die(CLONE_SCOPE_CAP() * sizeof(StringView)), CLONE_SCOPE_CAP())
-    c := CloneCtx(
+    buf: [StringView] = slice(mp.acquire_or_die(CLONE_SCOPE_CAP() * sizeof(StringView)), CLONE_SCOPE_CAP())
+    c = CloneCtx(
         names: buf,
         n: 0,
         nodes: 0,
     )
-    cx := c.addr()
-    h := CLONE_BASIS().clone_ty(f.ret)
+    cx = c.addr()
+    h ::= CLONE_BASIS().clone_ty(f.ret)
     f.params.loop((hh, i, p) {
         cx.clone_bind(p.name)
         h = h.clone_ty(p.ty)
     })
-    r := cx.clone_stmts(h, f.body)
-    small := cx.nodes < CLONE_MIN_NODES()
+    r = cx.clone_stmts(h, f.body)
+    small = cx.nodes < CLONE_MIN_NODES()
     mp.release(buf.ptr)
     small.then({ 0 }, { r })
 }    // 0 = below the size gate, not worth reporting — see CLONE_MIN_NODES

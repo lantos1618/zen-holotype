@@ -6,15 +6,15 @@
 // (scheduling interleavings are probabilistic).
 { pool_open, pool_spawn, pool_actor_free, pool_view, Pool } = std.concurrent.pool
 { println } = std.text.fmt
-NACT := 256    // runnable actors (>> rqcap)
-RQCAP := 4    // deliberately tiny initial run-queue capacity
-WORKERS := 1    // one consumer, so pushes outpace pops
-ITERS := 20
-processed := malloc(8)
+NACT = 256    // runnable actors (>> rqcap)
+RQCAP = 4    // deliberately tiny initial run-queue capacity
+WORKERS = 1    // one consumer, so pushes outpace pops
+ITERS = 20
+processed = malloc(8)
 spin = (n: i64, s: i64) i64 { (n <= 0).then({ s }, { spin(n - 1, s + n) }) }
 // each message costs a little work, keeping the lone worker busy while the queue fills.
 behave = (user: RawPtr<u8>, msg: i64) void {
-    junk := spin(400, 0)
+    junk = spin(400, 0)
     (junk >= 0).then({
         atomic_add_i64(user, 1)
     })
@@ -30,8 +30,8 @@ send_all = (p: MutPtr<Pool>, acts: RawPtr<u8>, i: i64, ok: i64) i64 {
     (i >= NACT).match ({
         true  => ok,
         false => {
-            a := acts.offset(i * 8).load_i64().offset(0)
-            sent := p.pool_send(a, 1)
+            a = acts.offset(i * 8).load_i64().offset(0)
+            sent = p.pool_send(a, 1)
             send_all(p, acts, i + 1, sent.match ({
                 .Ok(n)  => ok + 1,
                 .Err(e) => ok,
@@ -48,12 +48,12 @@ free_actors = (acts: RawPtr<u8>, i: i64) void {
 // one overflow iteration: returns 1 on pass (exactly-once), 0 on fail.
 iteration = () i64 {
     store_i64(processed, 0)
-    acts := malloc(NACT * 8)
+    acts = malloc(NACT * 8)
     spawn_actors(acts, 0)
-    p := pool_open(WORKERS, RQCAP)
-    sent := send_all(p, acts, 0, 0)
+    p = pool_open(WORKERS, RQCAP)
+    sent = send_all(p, acts, 0, 0)
     p.pool_quiesce_stop()
-    got := load_i64(processed)
+    got = load_i64(processed)
     free_actors(acts, 0)
     p.pool_close()
     free(acts)
@@ -66,7 +66,7 @@ run_iters = (i: i64, passes: i64) i64 {
     (i >= ITERS).then({ passes }, { run_iters(i + 1, passes + iteration()) })
 }
 main = () i32 {
-    passes := run_iters(0, 0)
+    passes = run_iters(0, 0)
     println(passes)
     free(processed)
     (passes == ITERS).then({ 42 }, { 1 })

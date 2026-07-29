@@ -3,8 +3,8 @@
   StructDecl, VarData } = compiler.ast.ast_types
 { cbuf, arm_at, arrow_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop, ematch, ematchp,
   finit, gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mkenumg, mkstruct,
-  mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_at, slit, sret, swhile,
-  tnamed, tnode, tvoid, vref, vref_at, acquire_or_die, acquire_or_die } = compiler.genc
+  mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_at, slett_atm, slit, sret,
+  swhile, tnamed, tnode, tvoid, vref, vref_at, acquire_or_die, acquire_or_die } = compiler.genc
 { DeclIndex, Env, VList, empty_params, no_stmts, param_index, pbuf, recall, vcons, vnil } = compiler.check
 { lift_extend, lift_is_captured, lift_lamparams, lift_liftable } = compiler.passes.lift
 { gstr_int, map_slice } = compiler.astops
@@ -13,7 +13,7 @@ clos_local_call_name* = (env: Env, name: StringView) StringView {
     (env.env_func(name).name == "").match ({
         true  => env.var_ty(name).match ({
             .Named(sn) => {
-                cn := env.a.clos_call_name(sn)
+                cn = env.a.clos_call_name(sn)
                 (env.didx.func_idx.get(cn, 0 - 1) >= 0).then({ cn }, { "" })
             },
             _          => "",
@@ -22,7 +22,7 @@ clos_local_call_name* = (env: Env, name: StringView) StringView {
     })
 }
 clos_call_rewrite* = (a: MutPtr<Malloc>, c: CallData, cn: StringView, buf: [Expr]) Ptr<Expr> {
-    args := a.cebuf(buf.len + 1)
+    args ::= a.cebuf(buf.len + 1)
     args[0] = vref(c.fn)
     buf.loop((h, i, e) {
         args[i + 1] = e
@@ -54,7 +54,7 @@ clos_bad_args = (
     ps: [Param],
     xs: [Expr],
 ) bool {
-    found := false
+    found ::= false
     xs.loop((h, i, x) {
         found = found.then({ true }, { a.clos_bad_expr(decls, idx, bound, ps, x.addr()) })
     })
@@ -68,7 +68,7 @@ clos_bad_inits = (
     ps: [Param],
     inits: [FieldInit],
 ) bool {
-    found := false
+    found ::= false
     inits.loop((h, i, fi) {
         found = found.then({ true }, { a.clos_bad_expr(decls, idx, bound, ps, fi.value) })
     })
@@ -82,7 +82,7 @@ clos_bad_arms = (
     ps: [Param],
     arms: [ArmData],
 ) bool {
-    found := false
+    found ::= false
     arms.loop((h, i, ar) {
         found = found.match ({
             true  => true,
@@ -99,8 +99,8 @@ clos_bad_body = (
     ps: [Param],
     body: [Stmt],
 ) bool {
-    found := false
-    b := bound
+    found ::= false
+    b ::= bound
     body.loop((h, i, st) {
         found = found.then({ true }, { a.clos_bad_stmt(decls, idx, b, ps, st) })
         b = a.lift_extend(b, st)
@@ -180,16 +180,16 @@ clos_sub_var = (a: MutPtr<Malloc>, ps: [Param], v: VarData) Ptr<Expr> {
 // Same shape as check.rewrite_fn_field_call (the proven local-fn-value genc path — C `__auto_type` +
 // native indirect call); the fixed temp name is block-scoped, so nested closure calls never collide.
 clos_sub_fncall = (a: MutPtr<Malloc>, ps: [Param], c: CallData) Ptr<Expr> {
-    rest := a.clos_sub_args(ps, c.args)
-    letst := slet("__zclos_recv", a.cenode(member(a.cenode(vref("__clenv")), c.fn)))
-    callx := a.cenode(call_at("__zclos_recv", rest, c.pos))
-    sbuf2 := cbuf<Stmt>(a, 2)
+    rest = a.clos_sub_args(ps, c.args)
+    letst = slet("__zclos_recv", a.cenode(member(a.cenode(vref("__clenv")), c.fn)))
+    callx = a.cenode(call_at("__zclos_recv", rest, c.pos))
+    sbuf2 ::= cbuf<Stmt>(a, 2)
     sbuf2[0] = letst
     sbuf2[1] = sexpr(callx)
     a.cenode(block(sbuf2))
 }
 clos_sub_args = (a: MutPtr<Malloc>, ps: [Param], xs: [Expr]) [Expr] {
-    buf := a.cebuf(xs.len)
+    buf ::= a.cebuf(xs.len)
     xs.loop((h, i, x) {
         buf[i] = load(a.clos_sub_expr(ps, x.addr()))
     })
@@ -228,7 +228,7 @@ clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
 }
 clos_sub_stmt = (a: MutPtr<Malloc>, ps: [Param], st: Stmt) Stmt {
     st.match ({
-        .Let(l)      => slett_at(l.name, l.ty, a.clos_sub_expr(ps, l.value), l.pos),
+        .Let(l)      => slett_atm(l.name, l.ty, a.clos_sub_expr(ps, l.value), l.pos, l.mut),
         .Assign(x)   => sassign_at(a.clos_sub_expr(ps, x.target), a.clos_sub_expr(ps, x.value), x.pos),
         .Return(r)   => sret(a.clos_sub_expr(ps, r)),
         .ExprStmt(e) => sexpr(a.clos_sub_expr(ps, e)),
@@ -259,7 +259,7 @@ clos_tail_lambda = (body: [Stmt]) bool {
     })
 }
 clos_tail_lam_of = (body: [Stmt]) LambdaData {
-    none := LambdaData(
+    none = LambdaData(
         params: empty_params(),
         body: no_stmts(),
         ret: tvoid(),
@@ -278,7 +278,7 @@ clos_tail_lam_of = (body: [Stmt]) LambdaData {
 }
 // build the lifted call fn's params: `__clenv: __clos_K` then each lambda param typed from the FnT sig.
 clos_call_params = (a: MutPtr<Malloc>, structn: StringView, lm: LambdaData, ft: FnTData) [Param] {
-    ps := a.pbuf(lm.params.len + 1)
+    ps ::= a.pbuf(lm.params.len + 1)
     ps[0] = param("__clenv", tnamed(structn))
     lm.params.loop((h, i, p) {
         ps[i + 1] = param(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }))
@@ -287,8 +287,8 @@ clos_call_params = (a: MutPtr<Malloc>, structn: StringView, lm: LambdaData, ft: 
 }
 // the closure struct's fields = the enclosing function's params (captured by value).
 clos_struct_fields = (a: MutPtr<Malloc>, fps: [Param]) [Field] {
-    fs := a.acquire_or_die(fps.len * sizeof(Field))
-    out: [Field] := slice(fs, fps.len)
+    fs = a.acquire_or_die(fps.len * sizeof(Field))
+    out :: [Field] = slice(fs, fps.len)
     fps.loop((h, i, p) {
         out[i] = field(p.name, p.ty)
     })
@@ -300,7 +300,7 @@ clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
 }
 // rebuild the enclosing body with its tail lambda replaced by the closure struct literal.
 clos_replace_tail = (a: MutPtr<Malloc>, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
-    buf := cbuf<Stmt>(a, body.len)
+    buf ::= cbuf<Stmt>(a, body.len)
     body.loop((h, i, st) {
         buf[i] = (i == body.len - 1).then({ sret(mk) }, { st })
     })
@@ -312,9 +312,9 @@ clos_lowerable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) bo
     f.ret.match ({
         .FnT(ft) => f.body.clos_tail_lambda().match ({
             true  => {
-                lm := f.body.clos_tail_lam_of()
-                cap := a.lift_liftable(decls, idx, lm) == false    // captures something
-                bad := a.clos_bad_body(decls, idx, a.lift_lamparams(a.vnil(), lm.params), f.params, lm.body)
+                lm = f.body.clos_tail_lam_of()
+                cap = a.lift_liftable(decls, idx, lm) == false    // captures something
+                bad = a.clos_bad_body(decls, idx, a.lift_lamparams(a.vnil(), lm.params), f.params, lm.body)
                 cap && bad == false && f.params.len > 0
             },
             false => false,
@@ -326,17 +326,17 @@ clos_lowerable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) bo
 // 2*id and 2*id+1), bump the closure counter, and return the rewritten enclosing function (returns the
 // struct by value; ret type becomes the closure struct).
 clos_lower_func* = (a: MutPtr<Malloc>, ccp: RawPtr<u8>, gen: [Decl], f: Func) Decl {
-    ft := f.ret.match ({
+    ft = f.ret.match ({
         .FnT(g) => g,
         _       => FnTData(
             params: no_tys(),
             ret: a.tnode(tvoid()),
         ),
     })
-    lm := f.body.clos_tail_lam_of()
-    id := load_i64(ccp)
-    structn := a.clos_struct_name(id)
-    calln := a.clos_call_name(structn)
+    lm = f.body.clos_tail_lam_of()
+    id = load_i64(ccp)
+    structn = a.clos_struct_name(id)
+    calln = a.clos_call_name(structn)
     gen[(id * 2).to_i32()] = dstruct(StructDecl(
         name: structn,
         fields: a.clos_struct_fields(f.params),
@@ -350,7 +350,7 @@ clos_lower_func* = (a: MutPtr<Malloc>, ccp: RawPtr<u8>, gen: [Decl], f: Func) De
         body: a.clos_sub_body(f.params, lm.body),
     ))
     store_i64(ccp, id + 1)
-    mk := a.cenode(mkstruct(structn, a.clos_struct_inits(f.params)))
+    mk = a.cenode(mkstruct(structn, a.clos_struct_inits(f.params)))
     dfunc(Func(
         name: f.name,
         params: f.params,

@@ -1,8 +1,8 @@
 // compiler.passes.orreturn — or_return lowering sub-pass extracted from compiler.check.
 { BinData, CallData, Expr, FieldInit, MakeStructData, Stmt } = compiler.ast.ast_types
 { cbuf, arrow_at, bin_at, cond_oa, eindex, eloop, finit, gstr_append, gstr_finish, gstr_string,
-  member_at, mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at, sif, slett_at, slit, sret, tvoid,
-  vref_at } = compiler.genc
+  member_at, mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at, sif, slett_at, slett_atm, slit,
+  sret, tvoid, vref_at } = compiler.genc
 { gstr_int, is_logic_op, is_or_return_fn } = compiler.astops
 { recall } = compiler.check
 { is_or_return_call } = compiler.check_resolve
@@ -28,14 +28,14 @@ orx_count* = (e: Ptr<Expr>) i32 {
     })
 }
 orx_count_args = (args: [Expr]) i32 {
-    n := 0
+    n ::= 0
     args.loop((h, i, ar) {
         n = n + args[i].addr().orx_count()
     })
     n
 }
 orx_count_inits = (inits: [FieldInit]) i32 {
-    n := 0
+    n ::= 0
     inits.loop((h, i, fi) {
         n = n + fi.value.orx_count()
     })
@@ -68,7 +68,7 @@ orx_recv_count = (e: Ptr<Expr>) i32 {
 // disambiguates same-position synthesized calls; the source pos disambiguates statements (slots
 // restart per statement, but two statements never share a user-written call position).
 orx_name = (a: MutPtr<Malloc>, slot: i32, pos: i32) StringView {
-    s := a.gstr_string(48)
+    s ::= a.gstr_string(48)
     s = s.gstr_append(a, "_orx_")
     s = s.gstr_int(a, slot.to_i64())
     s = s.gstr_append(a, "_")
@@ -100,37 +100,37 @@ orx_rw* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) Orx
             .Call(c)        => a.orx_rw_call(hbuf, base, n, c),
             .Bin(b)         => a.orx_rw_bin(hbuf, base, n, b),
             .Cond(d)        => {
-                cc := a.orx_rw(hbuf, base, n, d.c)
+                cc = a.orx_rw(hbuf, base, n, d.c)
                 orx_rw_mk(a.cenode(cond_oa(cc.e, d.t, d.e, d.oa)), cc.n)
             },
             .Match(m)       => {
-                s2 := a.orx_rw(hbuf, base, n, m.subj)
+                s2 = a.orx_rw(hbuf, base, n, m.subj)
                 orx_rw_mk(a.cenode(remk_match(m, s2.e)), s2.n)
             },
             .Member(mm)     => {
-                o2 := a.orx_rw(hbuf, base, n, mm.obj)
+                o2 = a.orx_rw(hbuf, base, n, mm.obj)
                 orx_rw_mk(a.cenode(member_at(o2.e, mm.field, mm.pos)), o2.n)
             },
             .Arrow(ar)      => {
-                o2 := a.orx_rw(hbuf, base, n, ar.obj)
+                o2 = a.orx_rw(hbuf, base, n, ar.obj)
                 orx_rw_mk(a.cenode(arrow_at(o2.e, ar.field, ar.pos)), o2.n)
             },
             .MakeEnum(mk)   => {
-                p2 := a.orx_rw(hbuf, base, n, mk.payload)
+                p2 = a.orx_rw(hbuf, base, n, mk.payload)
                 orx_rw_mk(a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, p2.e)), p2.n)
             },
             .MakeStruct(sd) => a.orx_rw_mkstruct(hbuf, base, n, sd),
             .SliceLit(sd)   => {
-                r := a.orx_rw_args(hbuf, base, n, sd.items)
+                r = a.orx_rw_args(hbuf, base, n, sd.items)
                 orx_rw_mk(a.cenode(slit(sd.elem, r.args)), r.n)
             },
             .Index(ix)      => {
-                s2 := a.orx_rw(hbuf, base, n, ix.seq)
-                i2 := a.orx_rw(hbuf, base, s2.n, ix.idx)
+                s2 = a.orx_rw(hbuf, base, n, ix.seq)
+                i2 = a.orx_rw(hbuf, base, s2.n, ix.idx)
                 orx_rw_mk(a.cenode(eindex(s2.e, i2.e, ix.elem)), i2.n)
             },
             .Loop(l)        => {
-                s2 := a.orx_rw(hbuf, base, n, l.seq)
+                s2 = a.orx_rw(hbuf, base, n, l.seq)
                 orx_rw_mk(a.cenode(eloop(s2.e, l.idx, l.elem, l.elemTy, l.body, l.h)), s2.n)
             },
             _               => orx_rw_mk(e, n),
@@ -138,10 +138,10 @@ orx_rw* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) Orx
     })
 }
 orx_rw_args = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]) OrxRwA {
-    buf := a.cebuf(args.len)
-    k := n0
+    buf ::= a.cebuf(args.len)
+    k ::= n0
     args.loop((h, i, ar) {
-        r := a.orx_rw(hbuf, base, k, args[i].addr())
+        r = a.orx_rw(hbuf, base, k, args[i].addr())
         buf[i] = load(r.e)
         k = r.n
     })
@@ -153,11 +153,11 @@ orx_rw_args = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]
 // args first (innermost-first: the receiver's own hoists land before this one), then hoist the
 // or_return call itself into a fresh temp let and read the temp at the original site.
 orx_rw_call = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, c: CallData) OrxRw {
-    r := a.orx_rw_args(hbuf, base, n, c.args)
-    ncall := a.recall(c, c.fn, r.args)
+    r = a.orx_rw_args(hbuf, base, n, c.args)
+    ncall = a.recall(c, c.fn, r.args)
     is_or_return_fn(c).match ({
         true  => {
-            nm := a.orx_name(base + r.n, c.pos)
+            nm = a.orx_name(base + r.n, c.pos)
             hbuf[r.n] = slett_at(nm, tvoid(), ncall, c.pos)
             orx_rw_mk(a.cenode(vref_at(nm, c.pos)), r.n + 1)
         },
@@ -166,20 +166,20 @@ orx_rw_call = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, c: CallData) 
 }
 // a short-circuit rhs is conditionally evaluated: leave it for resolve_orx to wrap in place.
 orx_rw_bin = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, b: BinData) OrxRw {
-    l2 := a.orx_rw(hbuf, base, n, b.lhs)
+    l2 = a.orx_rw(hbuf, base, n, b.lhs)
     is_logic_op(b.op).match ({
         true  => orx_rw_mk(a.cenode(bin_at(b.op, l2.e, b.rhs, b.pos)), l2.n),
         false => {
-            r2 := a.orx_rw(hbuf, base, l2.n, b.rhs)
+            r2 = a.orx_rw(hbuf, base, l2.n, b.rhs)
             orx_rw_mk(a.cenode(bin_at(b.op, l2.e, r2.e, b.pos)), r2.n)
         },
     })
 }
 orx_rw_mkstruct = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, sd: MakeStructData) OrxRw {
-    buf := cbuf<FieldInit>(a, sd.inits.len)
-    k := n
+    buf ::= cbuf<FieldInit>(a, sd.inits.len)
+    k ::= n
     sd.inits.loop((h, i, fi) {
-        r := a.orx_rw(hbuf, base, k, fi.value)
+        r = a.orx_rw(hbuf, base, k, fi.value)
         buf[i] = finit(fi.name, r.e)
         k = r.n
     })
@@ -188,10 +188,10 @@ orx_rw_mkstruct = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, sd: MakeS
 // rewrite ONE statement's expressions, hoisting into hbuf; the statement itself is rebuilt with the
 // temps substituted. A direct or_return let keeps its top call (only its receiver is rewritten).
 orx_rw_recv = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, e: Ptr<Expr>) Ptr<Expr> {
-    out := e
+    out ::= e
     load(e).match ({
         .Call(c) => {
-            r := a.orx_rw_args(hbuf, base, 0, c.args)
+            r = a.orx_rw_args(hbuf, base, 0, c.args)
             out = a.recall(c, c.fn, r.args)
         },
         _        => { },
@@ -199,17 +199,17 @@ orx_rw_recv = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, e: Ptr<Expr>) Ptr<Exp
     out
 }
 orx_rw_stmt* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, st: Stmt) Stmt {
-    out := st
+    out ::= st
     st.match ({
         .Let(l)      => {
             out = l.value.is_or_return_call().match ({
-                true  => slett_at(l.name, l.ty, a.orx_rw_recv(hbuf, base, l.value), l.pos),
-                false => slett_at(l.name, l.ty, a.orx_rw(hbuf, base, 0, l.value).e, l.pos),
+                true  => slett_atm(l.name, l.ty, a.orx_rw_recv(hbuf, base, l.value), l.pos, l.mut),
+                false => slett_atm(l.name, l.ty, a.orx_rw(hbuf, base, 0, l.value).e, l.pos, l.mut),
             })
         },
         .Assign(x)   => {
-            t2 := a.orx_rw(hbuf, base, 0, x.target)
-            v2 := a.orx_rw(hbuf, base, t2.n, x.value)
+            t2 = a.orx_rw(hbuf, base, 0, x.target)
+            v2 = a.orx_rw(hbuf, base, t2.n, x.value)
             out = sassign_at(t2.e, v2.e, x.pos)
         },
         .Return(r)   => {
@@ -222,9 +222,9 @@ orx_rw_stmt* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, st: Stmt) Stmt {
             out = sif(a.orx_rw(hbuf, base, 0, f.c).e, f.then, f.els)
         },
         .IndexSet(x) => {
-            s2 := a.orx_rw(hbuf, base, 0, x.seq)
-            i2 := a.orx_rw(hbuf, base, s2.n, x.idx)
-            v2 := a.orx_rw(hbuf, base, i2.n, x.value)
+            s2 = a.orx_rw(hbuf, base, 0, x.seq)
+            i2 = a.orx_rw(hbuf, base, s2.n, x.idx)
+            v2 = a.orx_rw(hbuf, base, i2.n, x.value)
             out = sidxset_at(s2.e, i2.e, x.elem, v2.e, x.pos)
         },
         _            => { },

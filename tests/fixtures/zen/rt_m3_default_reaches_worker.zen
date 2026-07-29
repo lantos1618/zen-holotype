@@ -12,8 +12,8 @@
 { mem_rt, set_default, alloc, release } = std.rt
 pa = std.concurrent.pool_actor
 { Context, Receiver } = std.concurrent.pool_actor
-N := 40
-allocs := malloc(8)    // the counting rt's counter: # of ambient allocs observed inside behaviors
+N = 40
+allocs = malloc(8)    // the counting rt's counter: # of ambient allocs observed inside behaviors
 Msg*: Ping
 Probe*: {
     hits: i64,
@@ -30,7 +30,7 @@ Probe.impl(Receiver, {
     receive = (pr: MutPtr<Probe>, ctx: Context<Msg>) void {
         ctx.msg.match ({
             .Ping => {
-                q := alloc(16)    // AMBIENT alloc — resolves to the PROCESS-DEFAULT counting rt (the proof)
+                q = alloc(16)    // AMBIENT alloc — resolves to the PROCESS-DEFAULT counting rt (the proof)
                 release(q)
                 pr.hits = pr.hits + 1
             },
@@ -38,8 +38,8 @@ Probe.impl(Receiver, {
     }
 })
 tramp = (user: RawPtr<u8>, msg: i64) void {
-    a: [Probe] := user.slice(1)
-    b: [Msg] := msg.offset(0).slice(1)
+    a: [Probe] = user.slice(1)
+    b: [Msg] = msg.offset(0).slice(1)
     a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
@@ -51,14 +51,14 @@ send_pings = (p: MutPtr<Pool>, h: pa.PooledHandle<Probe>, k: i64) void {
 }
 main = () i32 {
     store_i64(allocs, 0)
-    crt := mem_rt(count_acquire, count_resize, count_release, allocs)
+    crt = mem_rt(count_acquire, count_resize, count_release, allocs)
     set_default(crt)    // configure the WHOLE program's runtime ONCE, before any spawn
-    h := pa.spawn_actor_heap(64, Probe(hits: 0), tramp)    // DEFAULT path — no explicit rt threaded
-    p := pool_open(2, 8)
+    h = pa.spawn_actor_heap(64, Probe(hits: 0), tramp)    // DEFAULT path — no explicit rt threaded
+    p = pool_open(2, 8)
     send_pings(p, h, 0)
     p.pool_quiesce_stop()
-    observed := load_i64(allocs)
-    hits := pa.actor_state(h).hits
+    observed = load_i64(allocs)
+    hits = pa.actor_state(h).hits
     pa.close(h)
     p.pool_close()
     free(allocs)

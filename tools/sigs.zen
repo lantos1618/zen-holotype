@@ -46,15 +46,15 @@
 { ff_is_hoisted } = compiler.pretty_decl
 { impl_cname_in } = compiler.mangle
 // running totals for the trailing summary line (module-level mutable globals — Goal Z E1)
-g_files := 0
-g_fns := 0
-g_types := 0
+g_files ::= 0
+g_fns ::= 0
+g_types ::= 0
 // ── small local helpers over the compiler AST ─────────────────────────────────
 no_params = () [Param] { slice(null_ptr(), 0) }
 // the fn named `name` among `decls` (name == "" when absent) — pretty_decl keeps its finder private,
 // so the lookup is re-stated here (~10 lines)
 find_fn = (decls: [Decl], name: StringView) Func {
-    res := Func(
+    res ::= Func(
         name: "",
         params: no_params(),
         ret: tvoid(),
@@ -72,7 +72,7 @@ find_fn = (decls: [Decl], name: StringView) Func {
     res
 }
 is_exported = (exp: [Param], name: StringView) bool {
-    found := false
+    found ::= false
     exp.loop((h, i, p) {
         found = found || p.name == name
     })
@@ -90,7 +90,7 @@ sig_tparams = (s: String, mp: MutPtr<Malloc>, tps: [Param]) String {
     (tps.len == 0).match ({
         true  => s,
         false => {
-            body := s.ff_append(mp, "<")
+            body ::= s.ff_append(mp, "<")
             tps.loop((h, i, p) {
                 body = (i == 0).then({ body }, { body.ff_append(mp, ", ") })
                 body = p.ty.match ({
@@ -110,7 +110,7 @@ variadic_elem = (t: Ty) Ty {
     })
 }
 sig_params = (s: String, mp: MutPtr<Malloc>, ps: [Param]) String {
-    body := s
+    body ::= s
     ps.loop((h, i, p) {
         body = (i == 0).then({ body }, { body.ff_append(mp, ", ") })
         body = p.variadic.match ({
@@ -147,7 +147,7 @@ sig_struct = (
     fields: [Field],
 ) String {
     g_types = g_types + 1
-    body := s
+    body ::= s
         .ff_append(mp, "  ")
         .sig_name(mp, exp, name)
         .sig_tparams(mp, tps)
@@ -161,8 +161,8 @@ sig_struct = (
 // a multi-payload variant `V(t0, t1)` is desugared at parse time into a synthesized `__anon…` struct;
 // re-inline its field types as the surface tuple (the struct itself is suppressed at top level)
 sig_tuple = (s: String, mp: MutPtr<Malloc>, decls: [Decl], nm: StringView, t: Ty) String {
-    found := false
-    body := s
+    found ::= false
+    body ::= s
     decls.loop((h, i, d) {
         d.match ({
             .DStruct(sd) => (sd.name == nm && found == false).then({
@@ -190,7 +190,7 @@ sig_payload = (s: String, mp: MutPtr<Malloc>, decls: [Decl], t: Ty) String {
 }
 // one variant: `Name`, `Name(Payload)`, or — zero-arg ctor with a default constant — `Name = expr`
 sig_variant = (s: String, mp: MutPtr<Malloc>, decls: [Decl], vd: VariantDef) String {
-    base := vd.payload.match ({
+    base = vd.payload.match ({
         .Void => s.ff_append(mp, vd.name),
         _     => s.ff_append(mp, vd.name).sig_payload(mp, decls, vd.payload),
     })
@@ -206,7 +206,7 @@ sig_enum = (
     vs: [VariantDef],
 ) String {
     g_types = g_types + 1
-    body := s
+    body ::= s
         .ff_append(mp, "  ")
         .sig_name(mp, exp, name)
         .sig_tparams(mp, tps)
@@ -222,7 +222,7 @@ sig_enum = (
 // then each method DEMANGLED back from its hoisted `impl_<Tr>_<Ty>_<m>` fn as `Ty.m = (params) ret`.
 // A method absent among the decls (satisfied by a trait default) prints nothing here.
 sig_impl = (s: String, mp: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
-    body := (im.ty == im.trname).match ({
+    body ::= (im.ty == im.trname).match ({
         true  => s,
         false => s
             .ff_append(mp, "  ")
@@ -232,7 +232,7 @@ sig_impl = (s: String, mp: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
             .ff_append(mp, ")\n"),
     })
     im.methods.loop((h, k, p) {
-        f := find_fn(decls, mp.impl_cname_in(im.trname, im.ty, p.name))
+        f = find_fn(decls, mp.impl_cname_in(im.trname, im.ty, p.name))
         (f.name == "" == false).then({
             body = body
                 .ff_append(mp, "  ")
@@ -250,8 +250,8 @@ sig_global = (s: String, mp: MutPtr<Malloc>, exp: [Param], g: GlobalData) String
     g.alias.match ({
         true  => s,
         false => {
-            head := s.ff_append(mp, "  ").sig_name(mp, exp, g.name).ff_append(mp, " := ")
-            body := g.tl.match ({
+            head = s.ff_append(mp, "  ").sig_name(mp, exp, g.name).ff_append(mp, " := ")
+            body = g.tl.match ({
                 true  => head
                     .ff_append(mp, "thread_local(")
                     .ff_expr(mp, g.init, 0)
@@ -283,10 +283,10 @@ sig_decl = (s: String, mp: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl)
 // parse one module and print its section (`## path` + one line per decl)
 emit_file = (mp: MutPtr<Malloc>, path: StringView) void {
     g_files = g_files + 1
-    src := mp.contents_in(path).expect("sigs: cannot read file")
-    decls := mp.parse_module(src)
-    exp := exports_get()
-    s := mp
+    src = mp.contents_in(path).expect("sigs: cannot read file")
+    decls = mp.parse_module(src)
+    exp = exports_get()
+    s ::= mp
         .ff_string(4096)
         .ff_append(mp, "## ")
         .ff_append(mp, path)
@@ -307,10 +307,10 @@ sort_names = (xs: [StringView]) void {
 }
 // recurse into subdirectories, emit every `.zen` file, sorted at each level
 walk = (mp: MutPtr<Malloc>, dir: StringView) void {
-    entries := mp.read_dir(dir).expect("sigs: cannot read directory")
+    entries = mp.read_dir(dir).expect("sigs: cannot read directory")
     entries.sort_names()
     entries.loop((h, i, entry) {
-        full := mp.cat_in(mp.cat_in(dir, "/"), entry)
+        full = mp.cat_in(mp.cat_in(dir, "/"), entry)
         full.is_dir().match ({
             true  => {
                 mp.walk(full)
@@ -328,16 +328,16 @@ pick_root_from = (i: i32, acc: StringView) StringView {
     (i >= argc()).match ({
         true  => acc,
         false => {
-            a := arg(i)
+            a = arg(i)
             (a == "--").then({ pick_root_from(i + 1, acc) }, { pick_root_from(i + 1, a) })
         },
     })
 }
 pick_root = () StringView { pick_root_from(1, "src") }
 main = () i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    root := pick_root()
+    m = Malloc(_: 0)
+    mp = m.addr()
+    root = pick_root()
     root.is_dir().match ({
         true  => {
             mp.walk(root)

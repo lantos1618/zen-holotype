@@ -31,13 +31,13 @@
 // without them — only the formatted text changes. State is module-level (mirrors parse's exports_buf).
 gf_no_cmts = () [Comment] { slice(null_ptr(), 0) }
 gf_empty_str = () StringView { "" }    // a str-typed (not fixed-array) empty literal
-gf_src := gf_empty_str()
-gf_cmts := gf_no_cmts()
-gf_idx := 0
+gf_src ::= gf_empty_str()
+gf_cmts ::= gf_no_cmts()
+gf_idx ::= 0
 // the source offset where the current top-level decl ENDS (= the next decl's position). Used as the
 // drain boundary for a body's LAST statement, so its interior comments drain up to the decl end but NEVER
 // past it into the following decl. Set per top-level decl in pretty_module_in; 0 = the final decl.
-gf_block_end := 0
+gf_block_end ::= 0
 pretty_set_block_end* = (e: i32) void { gf_block_end = e }
 pretty_set_comments* = (src: StringView, cmts: [Comment]) void {
     gf_src = src
@@ -53,12 +53,12 @@ gf_ident_ch = (b: u8) bool {
     b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_' || b == '.'
 }
 gf_is_alias* = (name: StringView) bool {
-    v: [u8] := name.view()
-    src: [u8] := gf_src.view()
-    at_bol := true
+    v: [u8] = name.view()
+    src: [u8] = gf_src.view()
+    at_bol ::= true
     src.len.times((i) {
-        hit := at_bol && i + v.len + 3 <= src.len
-        j: i64 := 0
+        hit ::= at_bol && i + v.len + 3 <= src.len
+        j :: i64 = 0
         @while (hit && j < v.len) {
             (src[i + j] == v[j] == false).then({
                 hit = false
@@ -66,8 +66,8 @@ gf_is_alias* = (name: StringView) bool {
             j = j + 1
         }
         (hit && src[i + v.len] == ' ' && src[i + v.len + 1] == '=' && src[i + v.len + 2] == ' ').then({
-            k := i + v.len + 3
-            ok := k < src.len && gf_ident_ch(src[k])
+            k ::= i + v.len + 3
+            ok ::= k < src.len && gf_ident_ch(src[k])
             @while (k < src.len && src[k] != '\n') {
                 ok = (gf_ident_ch(src[k]) || src[k] == '\r').then({ ok }, { false })
                 k = k + 1
@@ -82,8 +82,8 @@ gf_is_alias* = (name: StringView) bool {
 }
 // the line number (count of '\n' before `pos`) — used to decide if a trailing comment shares a stmt's line.
 gf_line_of* = (pos: i32) i32 {
-    i := 0
-    n := 0
+    i ::= 0
+    n ::= 0
     @while (i < pos) {
         (at(gf_src, i) == '\n').then({
             n = n + 1
@@ -95,7 +95,7 @@ gf_line_of* = (pos: i32) i32 {
 // append one comment's raw text, trimming trailing whitespace (a `//` span runs to but not past '\n';
 // trailing spaces before the newline are dropped so the formatted line has no dangling whitespace).
 gf_cmt_end = (c: Comment) i32 {
-    e := c.start + c.len
+    e ::= c.start + c.len
     @while (e > c.start
         && (at(gf_src, e - 1) == ' ' || at(gf_src, e - 1) == '\t' || at(gf_src, e - 1) == '\r')) {
         e = e - 1
@@ -103,8 +103,8 @@ gf_cmt_end = (c: Comment) i32 {
     e
 }
 ff_cmt_text = (s: String, a: MutPtr<Malloc>, c: Comment) String {
-    out := s
-    e := gf_cmt_end(c)
+    out ::= s
+    e = gf_cmt_end(c)
     c.start.upto(e, (i) { out = out.ff_push(a, at(gf_src, i)) })
     out
 }
@@ -114,7 +114,7 @@ ff_flush_leading* = (s: String, a: MutPtr<Malloc>, before: i32, ind: i32) String
     (before <= 0).then({
         return s
     })
-    out := s
+    out ::= s
     @while (gf_idx < gf_cmts.len
         && gf_cmts[gf_idx].start < before
         && gf_cmts[gf_idx].trailing.then({ false }, { true })) {
@@ -132,7 +132,7 @@ ff_flush_leading* = (s: String, a: MutPtr<Malloc>, before: i32, ind: i32) String
 ff_open_trailing* = (s: String, a: MutPtr<Malloc>, line: i32) String {
     (gf_idx < gf_cmts.len && gf_cmts[gf_idx].trailing && gf_line_of(gf_cmts[gf_idx].start) == line).match ({
         true  => {
-            out := s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])
+            out = s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])
             gf_idx = gf_idx + 1
             out
         },
@@ -157,14 +157,14 @@ gf_cond_open_cmt* = (d: CondData) bool {
     (gf_cmts[gf_idx].trailing == false).then({
         return false
     })
-    rp := left_pos_of(d.c)
+    rp = left_pos_of(d.c)
     (rp <= 0).then({
         return false
     })
     (gf_line_of(gf_cmts[gf_idx].start) != gf_line_of(rp)).then({
         return false
     })
-    bm := d.gf_cond_arm_max()
+    bm = d.gf_cond_arm_max()
     bm > 0 && gf_cmts[gf_idx].start < bm
 }
 // Is the next pending comment INTERIOR to this Cond — sitting after the receiver and before the arm
@@ -175,8 +175,8 @@ gf_cond_interior_cmt* = (d: CondData) bool {
     (gf_idx >= gf_cmts.len).then({
         return false
     })
-    rp := left_pos_of(d.c)
-    bm := d.gf_cond_arm_max()
+    rp = left_pos_of(d.c)
+    bm = d.gf_cond_arm_max()
     bm > 0 && gf_cmts[gf_idx].start > rp && gf_cmts[gf_idx].start < bm
 }
 // if the NEXT pending comment is TRAILING (code precedes it on its source line), emit it inline after
@@ -188,7 +188,7 @@ gf_cond_interior_cmt* = (d: CondData) bool {
 ff_trailing* = (s: String, a: MutPtr<Malloc>, boundary: i32) String {
     (gf_idx < gf_cmts.len && gf_cmts[gf_idx].trailing && gf_before(gf_cmts[gf_idx].start, boundary)).match ({
         true  => {
-            out := s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])
+            out = s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])
             gf_idx = gf_idx + 1
             out
         },
@@ -214,7 +214,7 @@ ff_drain = (s: String, a: MutPtr<Malloc>, db: i32, ib: i32, ind: i32) String {
     // ib <= 0 ⇒ this is the block's LAST statement: emit NO inline trailing comment here (a comment after
     // the block's closing `}` is a DECL-level trailing, handled by ff_top_decl) — otherwise the unbounded
     // ff_trailing would steal a much-later decl's comment. ib > 0 ⇒ a real next-stmt bound.
-    out := (ib > 0).then({ s.ff_trailing(a, ib) }, { s })
+    out ::= (ib > 0).then({ s.ff_trailing(a, ib) }, { s })
     (db <= 0).then({
         return out
     })
@@ -226,7 +226,7 @@ ff_drain = (s: String, a: MutPtr<Malloc>, db: i32, ib: i32, ind: i32) String {
 }
 // flush all comments still pending (end of module): each as its own line.
 ff_flush_rest = (s: String, a: MutPtr<Malloc>, ind: i32) String {
-    out := s
+    out ::= s
     @while (gf_idx < gf_cmts.len) {
         out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[gf_idx]).ff_append(a, "\n")
         gf_idx = gf_idx + 1
@@ -274,12 +274,12 @@ ff_append* = (s: String, a: MutPtr<Malloc>, t: StringView) String { s.gstr_appen
 // whole literal INCLUDING both delimiters, or "" when `pos` does not open one (pos 0 = synthesized
 // node, and gf_src is empty outside `zen fmt`, so both fall through to the escaping path).
 gf_raw_lit* = (a: MutPtr<Malloc>, pos: i32) StringView {
-    v: [u8] := gf_src.view()
+    v: [u8] = gf_src.view()
     (pos <= 0 || pos + 6 > v.len.to_i32() || gf_src.rawstr_at(pos) == false).then({
         return ""
     })
-    end := gf_src.rawstr_end(pos + 3)
-    out := a.gstr_string(end - pos + 1)
+    end = gf_src.rawstr_end(pos + 3)
+    out ::= a.gstr_string(end - pos + 1)
     pos.upto(end, (i) { out = out.ff_push(a, at(gf_src, i)) })
     out.gstr_finish(a)
 }
@@ -364,7 +364,7 @@ ff_slice_ty = (s: String, a: MutPtr<Malloc>, pd: PtrData) String {
     })
 }
 ff_tys* = (s: String, a: MutPtr<Malloc>, ts: [Ty]) String {
-    out := s
+    out ::= s
     ts.loop((h, i, t) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
         out = out.ff_ty(a, t)
@@ -387,10 +387,10 @@ ff_cond* = (s: String, a: MutPtr<Malloc>, d: CondData, ind: i32) String {
     d.gf_cond_interior_cmt().then({
         return s.ff_cond_multiline(a, d, ind)
     })
-    saved_comment := gf_idx
-    trial := a.ff_string(256).ff_cond_inline(a, d, ind)
+    saved_comment = gf_idx
+    trial = a.ff_string(256).ff_cond_inline(a, d, ind)
     gf_idx = saved_comment
-    single_line := trial.ff_str_has_nl().then({ false }, { true })
+    single_line = trial.ff_str_has_nl().then({ false }, { true })
     (single_line && trial.ff_fits_width(s.ff_current_col(), 100)).match ({
         true  => s.ff_cond_inline(a, d, ind),
         false => s.ff_cond_multiline(a, d, ind),
@@ -420,14 +420,14 @@ ff_str_has_nl* = (s: String) bool { ff_scan_nl(s.ptr, 0, s.len) }
 // An overlong one-liner expands to block form, where the statement re-renders at ind+1 and the
 // chain-wrapping in ff_bin / the MethodCall spine takes over (compiler.pretty_expr).
 ff_one_line_fits = (a: MutPtr<Malloc>, s: String, st: Stmt, drop: bool, ind: i32) bool {
-    save := gf_idx
-    trial := a.ff_string(256).ff_stmt_at(a, st, drop, ind)
+    save = gf_idx
+    trial = a.ff_string(256).ff_stmt_at(a, st, drop, ind)
     gf_idx = save
     trial.ff_fits_width(s.ff_current_col() + 2, 98)
 }
 ff_one_line = (a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32) bool {
-    save := gf_idx
-    r := ff_str_has_nl(a.ff_string(256).ff_stmt_at(a, st, drop, ind)).then({ false }, { true })
+    save = gf_idx
+    r = ff_str_has_nl(a.ff_string(256).ff_stmt_at(a, st, drop, ind)).then({ false }, { true })
     gf_idx = save
     r
 }
@@ -463,23 +463,23 @@ ff_block* = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: boo
             && a.ff_one_line_fits(s, body[0], drop_ret, ind)).match ({
             true  => s.ff_append(a, "{ ").ff_stmt_at(a, body[0], drop_ret, ind).ff_append(a, " }"),
             false => {
-                open := s.ff_append(a, "{\n")
-                inner := open.ff_stmts(a, body, ind + 1, drop_ret)
+                open = s.ff_append(a, "{\n")
+                inner = open.ff_stmts(a, body, ind + 1, drop_ret)
                 inner.ff_indent(a, ind).ff_append(a, "}")
             },
         }),
     })
 }
 ff_stmts = (s: String, a: MutPtr<Malloc>, body: [Stmt], ind: i32, drop_ret: bool) String {
-    out := s
-    last := body.len - 1
+    out ::= s
+    last = body.len - 1
     body.loop((h, i, st) {
         // Both the OWN-LINE drain and the INLINE same-line comment are capped at the NEXT statement's pos,
         // so neither pulls a following statement's comment back. The LAST statement uses 0 for BOTH — it
         // emits no trailing comment itself; a comment trailing the block's closing `}` is a DECL-level
         // trailing comment, emitted by ff_top_decl (bounded by the next decl), which keeps it from being
         // stolen by a sibling one-liner and keeps re-formatting idempotent.
-        nb := (i < last).then({ stmt_left_pos(body[i + 1]) }, { 0 })
+        nb = (i < last).then({ stmt_left_pos(body[i + 1]) }, { 0 })
         out = out.ff_one_stmt(a, st, drop_ret && i == last, ind, nb, nb)
     })
     out
@@ -496,10 +496,10 @@ ff_one_stmt = (
     db: i32,
     ib: i32,
 ) String {
-    sp := stmt_left_pos(st)
-    lead := s.ff_flush_leading(a, sp, ind)
-    body := lead.ff_indent(a, ind).ff_stmt_at(a, st, drop, ind)
-    withc := body.ff_drain(a, db, ib, ind)
+    sp = stmt_left_pos(st)
+    lead = s.ff_flush_leading(a, sp, ind)
+    body = lead.ff_indent(a, ind).ff_stmt_at(a, st, drop, ind)
+    withc = body.ff_drain(a, db, ib, ind)
     withc.ff_append(a, "\n")
 }
 ff_stmt_at = (s: String, a: MutPtr<Malloc>, st: Stmt, drop: bool, ind: i32) String {
@@ -541,20 +541,27 @@ ff_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt, ind: i32) String {
     })
 }
 // `name := value` (inferred) or `name: T := value` (annotated)
+// const-by-default: an UNMARKED binding is a constant, `::` marks a mutable one, and the three marks
+// are independent — `x = v`, `x: T = v`, `x ::= v`, `x :: T = v`. The `::=` contraction exists only
+// because a mutable binding with no annotation would otherwise have to be spelled `x :: = v`.
 ff_let = (s: String, a: MutPtr<Malloc>, l: LetData, ind: i32) String {
-    head := l.ty.match ({
-        .Void => s.ff_append(a, l.name),
-        _     => s.ff_append(a, l.name).ff_append(a, ": ").ff_ty(a, l.ty),
+    head = l.ty.match ({
+        .Void => s.ff_append(a, l.name).ff_append(a, l.mut.then({ " ::= " }, { " = " })),
+        _     => s
+            .ff_append(a, l.name)
+            .ff_append(a, l.mut.then({ " :: " }, { ": " }))
+            .ff_ty(a, l.ty)
+            .ff_append(a, " = "),
     })
-    head.ff_append(a, " := ").ff_expr(a, l.value, ind)
+    head.ff_expr(a, l.value, ind)
 }
 // ── module: each decl on its own line; hoisted methods + inherent-impl markers are skipped (their
 // bodies print inside the owning struct / trait impl instead). ───────────────────────────────────
 pretty_module_in* = (a: MutPtr<Malloc>, decls: [Decl], exp: [Param]) String {
-    s := a.ff_string(8192)
-    out := s
+    s = a.ff_string(8192)
+    out ::= s
     decls.loop((h, i, d) {
-        nb := a.gf_next_decl_pos(decls, i + 1)    // the next EMITTED decl's pos → trailing-comment boundary
+        nb = a.gf_next_decl_pos(decls, i + 1)    // the next EMITTED decl's pos → trailing-comment boundary
         pretty_set_block_end(nb)    // bound this decl's body last-stmt drain to the decl end
         d.match ({
             .DFunc(f)          => (a.ff_is_hoisted(decls, f.name) == false).then({
@@ -587,7 +594,7 @@ gf_next_decl_pos = (a: MutPtr<Malloc>, decls: [Decl], i: i32) i32 {
     // carries its own name offset (for ff_methods' leading-comment flush); that offset sits BEFORE the
     // owner's closing brace, so it too must be skipped — otherwise a comment trailing the record's `}`
     // would be truncated out of the record's trailing-comment region and leak into the next decl's body.
-    p := decls[i].match ({
+    p = decls[i].match ({
         .DTraitDefault(td) => 0,
         .DFunc(f)          => a.ff_is_hoisted(decls, f.name).then({ 0 }, { f.pos }),
         _                  => gf_decl_pos(decls[i]),
@@ -596,8 +603,8 @@ gf_next_decl_pos = (a: MutPtr<Malloc>, decls: [Decl], i: i32) i32 {
 }
 // one top-level decl: leading comments (col 0) → the decl → its trailing comment (bounded by `nb`) → newline.
 ff_top_decl = (a: MutPtr<Malloc>, s: String, exp: [Param], decls: [Decl], d: Decl, nb: i32) String {
-    lead := s.ff_flush_leading(a, gf_decl_pos(d), 0)
-    body := lead.ff_decl(a, exp, decls, d)
-    withc := body.ff_trailing(a, nb)    // a decl gets only an inline same-line comment; own-line
+    lead = s.ff_flush_leading(a, gf_decl_pos(d), 0)
+    body = lead.ff_decl(a, exp, decls, d)
+    withc = body.ff_trailing(a, nb)    // a decl gets only an inline same-line comment; own-line
     withc.ff_append(a, "\n")
 }    // comments between decls are LEADING for the next decl

@@ -24,7 +24,7 @@
 // swallows the module's NEXT real declaration — which then silently vanishes from the export sig
 // ("unknown name … no such top-level definition" on a name that is plainly there, star and all).
 is_skippable_line = (s: StringView, p: i32) bool {
-    c := s.lstrip(p)
+    c = s.lstrip(p)
     s.line_comment_at(c) || s.at(c) == '\n' || s.at(c) == '\r'
 }
 // A top-level line opening an import: `{` then a space OR a binding name directly (`{println}`).
@@ -34,7 +34,7 @@ opens_import* = (s: StringView, p: i32) bool {
     s.at(p) == '{' && (s.at(p + 1) == ' ' || s.at(p + 1).is_alpha() || s.at(p + 1) == '_')
 }
 import_marker_from = (s: StringView, p: i32) i32 {
-    b := s.at(p)
+    b = s.at(p)
     (b == 0).match ({
         true  => 0 - 1,
         false => (b == '}').then({ s.marker_after_close(p + 1) }, { s.import_marker_from(p + 1) }),
@@ -60,13 +60,22 @@ is_marker_at = (s: StringView, p: i32) bool { s.is_std_marker_at(p) || s.is_comp
 // `std.`/`compiler.` heads keep their own markers (excluded via `is_marker_at`). The RHS must NOT be
 // a call (`= compute()`; without the `!= '('` guard a value-global `pi = compute()` is mis-read as
 // importing a module `compute` — spurious "unknown module") NOR carry a trailing bare dot (`= a.`
-// stays a plain decl, exactly as before dotted user ids existed).
+// stays a plain decl, exactly as before dotted user ids existed), and the path must END the line:
+// under const-by-default a module CONSTANT shares this spelling (`O_WRTRUNC = O_WRONLY | O_CREAT`),
+// and without the end-of-line requirement its first operand reads as a module id ("unknown module
+// 'O_WRONLY'"). Mirrors compiler.parse.decl_path_at_boundary, which the AST parser already applies
+// to the same shape.
+path_ends_line = (s: StringView, p: i32) bool {
+    e = s.lstrip(p)
+    s.at(e) == '\n' || s.at(e) == '\r' || s.at(e) == 0 || s.line_comment_at(e)
+}
 is_user_marker_at = (s: StringView, p: i32) bool {
     s.at(p) == '='
         && s.at(p + 1) == ' '
         && s.at(p + 2).is_alpha()
         && s.at(s.dotted_path_end(p + 2)) != '.'
         && s.at(s.dotted_path_end(p + 2)) != '('
+        && s.path_ends_line(s.dotted_path_end(p + 2))
         && s.is_marker_at(p) == false
 }
 is_any_marker_at* = (s: StringView, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
@@ -75,7 +84,7 @@ import_end = (s: StringView, p: i32) i32 { s.next_line(s.import_marker_from(s.ls
 // at the NUL terminator — the old body called `s.view()` (a strlen over the WHOLE source) on every
 // call, quadratic for per-line callers. Reads only [p, first NUL], never past the terminator.
 line_end = (s: StringView, p: i32) i32 {
-    pos := p
+    pos ::= p
     @while (load(offset(s, pos)) != 0 && load(offset(s, pos)) != '\n') {
         pos = pos + 1
     }
@@ -87,11 +96,11 @@ RewriteSkip*: {
     next: i32,
 }
 copy_line_comment* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteSkip {
-    cur := out
-    pos := p
-    bs: [u8] := s.view()
+    cur ::= out
+    pos ::= p
+    bs: [u8] = s.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (b == 0 || b == '\n').match ({
                 true  => {
@@ -110,11 +119,11 @@ copy_line_comment* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) Rew
     )
 }
 copy_block_comment* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteSkip {
-    cur := out
-    pos := p
-    bs: [u8] := s.view()
+    cur ::= out
+    pos ::= p
+    bs: [u8] = s.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (b == 0).match ({
                 true  => {
@@ -142,8 +151,8 @@ copy_block_comment* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) Re
 // A raw `"""…"""` literal is copied through verbatim, delimiters and all — the flattener's output
 // is still zen source, so the literal must survive the pass unchanged.
 copy_rawstr = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteSkip {
-    e := s.raw_lit_end(p)
-    cur := out
+    e = s.raw_lit_end(p)
+    cur ::= out
     p.upto(e, (i) { cur = cur.rpush(a, s.at(i)) })
     RewriteSkip(
         out: cur,
@@ -154,13 +163,13 @@ copy_literal* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteS
     s.rawstr_at(p).then({
         return out.copy_rawstr(a, s, p)
     })
-    q := s.at(p)
-    cur := out
-    pos := p
-    esc := false
-    bs: [u8] := s.view()
+    q = s.at(p)
+    cur ::= out
+    pos ::= p
+    esc ::= false
+    bs: [u8] = s.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (b == 0).match ({
                 true  => {
@@ -193,11 +202,11 @@ copy_literal* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteS
 }
 // Copy a dotted module id (`utils.strings`) verbatim — alnum and interior dots (for messages).
 take_dotted = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) String {
-    cur := out
-    pos := p
-    bs: [u8] := s.view()
+    cur ::= out
+    pos ::= p
+    bs: [u8] = s.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (s.at(pos).is_alnum() || s.at(pos) == '.').match ({
                 true  => {
@@ -226,15 +235,15 @@ all_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
 }
 // end of a dotted module path (`util.helpers`) whose first identifier starts at `p`.
 dotted_path_end = (s: StringView, p: i32) i32 {
-    e := s.res_ident_end(p)
+    e = s.res_ident_end(p)
     (s.at(e) == '.' && s.at(e + 1).is_alpha()).then({ s.dotted_path_end(e + 1) }, { e })
 }
 import_edge_count_from = (src: StringView, p: i32, n: i32) i32 {
-    pos := p
-    count := n
-    bs: [u8] := src.view()
+    pos ::= p
+    count ::= n
+    bs: [u8] = src.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (src.is_import_line(pos) || src.is_ns_line(pos)).match ({
                 true  => {
@@ -262,8 +271,8 @@ edge_buf<A> = (a: MutPtr<A>, n: i64) Result<[ImportEdge], IoError> {
 // Edge id/alias buffers are sized EXACTLY (measure, then allocate): a module id or namespace alias
 // of any length round-trips — the old fixed 128/64-byte caps silently truncated long ids.
 copy_lit_to = (buf: RawPtr<u8>, start: i64, lit: StringView, cap: i64) i64 {
-    cur := start
-    bs: [u8] := lit.view()
+    cur ::= start
+    bs: [u8] = lit.view()
     bs.loop((h, i, b) {
         (cur >= cap - 1).match ({
             true  => {
@@ -278,11 +287,11 @@ copy_lit_to = (buf: RawPtr<u8>, start: i64, lit: StringView, cap: i64) i64 {
     cur
 }
 copy_name_to = (buf: RawPtr<u8>, start: i64, s: StringView, p: i32, cap: i64) i64 {
-    cur := start
-    pos := p
-    bs: [u8] := s.view()
+    cur ::= start
+    pos ::= p
+    bs: [u8] = s.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (cur >= cap - 1 || s.at(pos).is_alnum().then({ false }, { true })).match ({
                 true  => {
@@ -299,11 +308,11 @@ copy_name_to = (buf: RawPtr<u8>, start: i64, s: StringView, p: i32, cap: i64) i6
     cur
 }
 copy_module_path_to = (buf: RawPtr<u8>, start: i64, s: StringView, p: i32, cap: i64) i64 {
-    cur := start
-    pos := p
-    bs: [u8] := s.view()
+    cur ::= start
+    pos ::= p
+    bs: [u8] = s.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (cur >= cap - 1).match ({
                 true  => {
@@ -347,10 +356,10 @@ write_import_id_at = (buf: RawPtr<u8>, s: StringView, p: i32, cap: i64) i64 {
 // starts. Callers only pass lines already classified as import/ns lines, so a marker exists on the
 // line; the scan is a loop, constant stack.
 marker_pos = (s: StringView, p: i32) i32 {
-    pos := p
-    bs: [u8] := s.view()
+    pos ::= p
+    bs: [u8] = s.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             s.is_any_marker_at(pos).match ({
                 true  => {
@@ -380,11 +389,11 @@ import_id_len_at = (s: StringView, mk: i32) i64 {
     })
 }
 import_id_alloc<A> = (a: MutPtr<A>, s: StringView, p: i32) Result<StringView, IoError> {
-    mk := s.marker_pos(p)
-    cap := s.import_id_len_at(mk) + 1
+    mk = s.marker_pos(p)
+    cap = s.import_id_len_at(mk) + 1
     a.try_acquire(cap).match ({
         .Ok(buf) => {
-            out := buf.write_import_id_at(s, mk, cap)
+            out = buf.write_import_id_at(s, mk, cap)
             buf.offset(out).store(0)
             ok(cstr(buf))
         },
@@ -392,11 +401,11 @@ import_id_alloc<A> = (a: MutPtr<A>, s: StringView, p: i32) Result<StringView, Io
     })
 }
 ns_qualifier_alloc<A> = (a: MutPtr<A>, s: StringView, p: i32) Result<StringView, IoError> {
-    ls := s.lstrip(p)
-    cap := to_i64(s.res_ident_end(ls) - ls) + 1
+    ls = s.lstrip(p)
+    cap = to_i64(s.res_ident_end(ls) - ls) + 1
     a.try_acquire(cap).match ({
         .Ok(buf) => {
-            out := buf.copy_name_to(0, s, ls, cap)
+            out = buf.copy_name_to(0, s, ls, cap)
             buf.offset(out).store(0)
             ok(cstr(buf))
         },
@@ -404,7 +413,7 @@ ns_qualifier_alloc<A> = (a: MutPtr<A>, s: StringView, p: i32) Result<StringView,
     })
 }
 edge_from_line<A> = (a: MutPtr<A>, src: StringView, p: i32) Result<ImportEdge, IoError> {
-    ns := src.is_ns_line(p)
+    ns = src.is_ns_line(p)
     a.import_id_alloc(src, p).match ({
         .Ok(mod) => ns.match ({
             true  => a.ns_qualifier_alloc(src, p).match ({
@@ -435,18 +444,18 @@ fill_import_edges<A> = (
     out: [ImportEdge],
     i: i32,
 ) Result<[ImportEdge], IoError> {
-    pos := p
-    idx := i
-    failed := false
-    last_err: IoError := .NotFound
-    bs: [u8] := src.view()
+    pos ::= p
+    idx ::= i
+    failed ::= false
+    last_err :: IoError = .NotFound
+    bs: [u8] = src.view()
     bs.loop((h, n, b) {
         failed.match ({
             true  => {
                 h.break
             },
             false => {
-                ii := to_i32(n)
+                ii = to_i32(n)
                 (ii < pos == false).then({
                     (src.is_import_line(pos) || src.is_ns_line(pos)).match ({
                         true  => {
@@ -487,11 +496,11 @@ edge_alias_in* = (e: ImportEdge, a: MutPtr<Malloc>) String {
 }
 // Import-head validation: `{ f, g } = m` must be provided by `m`.
 provided_head_count = (src: StringView, p: i32, n: i32) i32 {
-    pos := p
-    count := n
-    bs: [u8] := src.view()
+    pos ::= p
+    count ::= n
+    bs: [u8] = src.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             (b == '}' || b == 0).match ({
                 true  => {
@@ -512,11 +521,11 @@ provided_head_count = (src: StringView, p: i32, n: i32) i32 {
     count
 }
 provided_symbol_count_from = (a: MutPtr<Malloc>, src: StringView, p: i32, n: i32) i32 {
-    pos := p
-    count := n
-    bs: [u8] := src.view()
+    pos ::= p
+    count ::= n
+    bs: [u8] = src.view()
     bs.loop((h, i, b) {
-        ii := to_i32(i)
+        ii = to_i32(i)
         (ii < pos == false).then({
             src.is_import_line(pos).match ({
                 true  => {
@@ -528,7 +537,7 @@ provided_symbol_count_from = (a: MutPtr<Malloc>, src: StringView, p: i32, n: i32
                         pos = src.next_line(pos)
                     },
                     false => {
-                        sp := a.decl_span(src, pos)
+                        sp = a.decl_span(src, pos)
                         (sp.eof || sp.next <= pos).match ({
                             true  => {
                                 h.break
@@ -555,15 +564,15 @@ symbol_buf<A> = (a: MutPtr<A>, n: i64) Result<[ProvidedSymbol], IoError> {
     })
 }
 symbol_name_len = (src: StringView, p: i32, e: i32, escape: bool) i64 {
-    base := to_i64(e - p)
+    base = to_i64(e - p)
     (escape && src.is_c_kw_name_span(p, e)).then({ base + 3 }, { base })
 }
 // Copy src[p..e) into buf[0..), returning the count written. Iterates a sub-slice that starts at `p`
 // — NOT a scan from 0, and NOT recursive — so it is O(e-p) with constant stack.
 copy_symbol_span_to = (buf: RawPtr<u8>, src: StringView, p: i32, e: i32) i64 {
-    cur: i64 := 0
+    cur :: i64 = 0
     (p < e).then({
-        span: [u8] := slice(src.offset(p), to_i64(e - p))
+        span: [u8] = slice(src.offset(p), to_i64(e - p))
         span.loop((h, i, b) {
             buf.offset(cur).store(b)
             cur = cur + 1
@@ -572,7 +581,7 @@ copy_symbol_span_to = (buf: RawPtr<u8>, src: StringView, p: i32, e: i32) i64 {
     cur
 }
 finish_symbol_name = (buf: RawPtr<u8>, src: StringView, p: i32, e: i32, escape: bool) StringView {
-    cur := buf.copy_symbol_span_to(src, p, e)
+    cur ::= buf.copy_symbol_span_to(src, p, e)
     (escape && src.is_c_kw_name_span(p, e)).then({
         buf.offset(cur).store('_')
         buf.offset(cur + 1).store('z')
@@ -601,18 +610,18 @@ fill_head_symbols_in<A> = (
     out: [ProvidedSymbol],
     i: i32,
 ) Result<i32, IoError> {
-    pos := p
-    idx := i
-    failed := false
-    last_err: IoError := .NotFound
-    bs: [u8] := src.view()
+    pos ::= p
+    idx ::= i
+    failed ::= false
+    last_err :: IoError = .NotFound
+    bs: [u8] = src.view()
     bs.loop((h, n, b) {
         failed.match ({
             true  => {
                 h.break
             },
             false => {
-                ii := to_i32(n)
+                ii = to_i32(n)
                 (ii < pos == false).then({
                     (b == '}' || b == 0).match ({
                         true  => {
@@ -620,7 +629,7 @@ fill_head_symbols_in<A> = (
                         },
                         false => b.is_alpha().match ({
                             true  => {
-                                ie := src.res_ident_end(pos)
+                                ie = src.res_ident_end(pos)
                                 alloc.symbol_name_alloc(src, pos, ie, true).match ({
                                     .Ok(name) => {
                                         out[idx] = ProvidedSymbol(
@@ -663,18 +672,18 @@ fill_provided_symbols_in<A> = (
     out: [ProvidedSymbol],
     i: i32,
 ) Result<[ProvidedSymbol], IoError> {
-    pos := p
-    idx := i
-    failed := false
-    last_err: IoError := .NotFound
-    bs: [u8] := src.view()
+    pos ::= p
+    idx ::= i
+    failed ::= false
+    last_err :: IoError = .NotFound
+    bs: [u8] = src.view()
     bs.loop((h, n, b) {
         failed.match ({
             true  => {
                 h.break
             },
             false => {
-                ii := to_i32(n)
+                ii = to_i32(n)
                 (ii < pos == false).then({
                     src.is_import_line(pos).match ({
                         true  => {
@@ -695,14 +704,14 @@ fill_provided_symbols_in<A> = (
                                 pos = src.next_line(pos)
                             },
                             false => {
-                                sp := a.decl_span(src, pos)
+                                sp = a.decl_span(src, pos)
                                 (sp.eof || sp.next <= pos).match ({
                                     true  => {
                                         h.break
                                     },
                                     false => {
                                         sp.named.then({
-                                            ie := src.res_ident_end(sp.start)
+                                            ie = src.res_ident_end(sp.start)
                                             alloc.symbol_name_alloc(src, sp.start, ie, false).match ({
                                                 .Ok(name) => {
                                                     out[idx] = ProvidedSymbol(
@@ -749,7 +758,7 @@ provided_symbols_in*<A> = (
 }
 // flags word for one scanned symbol (see ModuleSig).
 sym_sig_flags = (s: ProvidedSymbol) i64 {
-    f: i64 := 0
+    f :: i64 = 0
     s.is_pub.then({
         f = f + SIG_PUB
     })
@@ -767,17 +776,17 @@ sym_sig_flags = (s: ProvidedSymbol) i64 {
 // Build the sig map from one symbol scan: first occurrence wins, and a raw C-keyword decl name is
 // additionally registered under its `_zk`-escaped key (see ModuleSig).
 sig_of_symbols = (a: MutPtr<Malloc>, symbols: [ProvidedSymbol]) ModuleSig {
-    seed: i64 := 0 - 1
-    m := of(a, "", seed).expect("compiler.resolve: sig alloc")
+    seed: i64 = 0 - 1
+    m ::= of(a, "", seed).expect("compiler.resolve: sig alloc")
     symbols.loop((h, i, s) {
-        f := s.sym_sig_flags()
+        f = s.sym_sig_flags()
         (m.has(s.name) == false).then({
             m = m.put(a, s.name, f).expect("compiler.resolve: sig alloc")
         })
-        e := s.name.res_ident_end(0)
+        e = s.name.res_ident_end(0)
         s.name.is_c_kw_name_span(0, e).then({
-            key := s.symbol_key_in(a).expect("compiler.resolve: sig alloc")
-            ke := cstr(key.ptr)
+            key = s.symbol_key_in(a).expect("compiler.resolve: sig alloc")
+            ke = cstr(key.ptr)
             (m.has(ke) == false).then({
                 m = m.put(a, ke, f).expect("compiler.resolve: sig alloc")
             })
@@ -787,8 +796,8 @@ sig_of_symbols = (a: MutPtr<Malloc>, symbols: [ProvidedSymbol]) ModuleSig {
 }
 module_graph* = (a: MutPtr<Malloc>, src: StringView) ModuleGraph { a.module_graph_in(a, src) }
 module_graph_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: StringView) ModuleGraph {
-    imports := alloc.import_edges(src).expect("compiler.resolve: allocation failed")
-    symbols := a.provided_symbols_in(alloc, src).expect("compiler.resolve: allocation failed")
+    imports = alloc.import_edges(src).expect("compiler.resolve: allocation failed")
+    symbols = a.provided_symbols_in(alloc, src).expect("compiler.resolve: allocation failed")
     ModuleGraph(
         imports: imports,
         symbols: symbols,
@@ -796,8 +805,8 @@ module_graph_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: StringView) Mod
     )
 }
 symbol_key_in*<A> = (s: ProvidedSymbol, a: MutPtr<A>) Result<String, IoError> {
-    e := s.name.res_ident_end(0)
-    n := s.name.symbol_name_len(0, e, true)
+    e = s.name.res_ident_end(0)
+    n = s.name.symbol_name_len(0, e, true)
     a.try_acquire(n + 1).match ({
         .Ok(buf) => {
             buf.finish_symbol_name(s.name, 0, e, true)
@@ -834,7 +843,7 @@ symbol_names_into_in = (
     include_imported: bool,
     include_foreign: bool,
 ) String {
-    cur := set
+    cur ::= set
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
             sym.symbol_allowed(include_imported, include_foreign).then({
@@ -851,7 +860,7 @@ value_symbol_names_into_in = (
     symbols: [ProvidedSymbol],
     i: i64,
 ) String {
-    cur := set
+    cur ::= set
     symbols.loop((h, idx, sym) {
         (idx < i == false).then({
             (sym.symbol_allowed(false, false) && sym.is_type.then({ false }, { true })).then({
@@ -865,7 +874,7 @@ value_symbol_names_into_in = (
 // presence sets for shadow_rename_set (see rset_*). value_symbol_name_set keys on `sym.name` (the raw
 // clean identifier), matching the original allnames String that shadow_mangled(key) is looked up against.
 imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
-    cur := m
+    cur ::= m
     symbols.loop((h, idx, sym) {
         (sym.imported && sym.is_type.then({ false }, { true })).then({
             cur = cur.rset_add(a, sym.symbol_key_in(a).expect("compiler.resolve: allocation failed"))
@@ -874,7 +883,7 @@ imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSy
     cur
 }
 value_symbol_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
-    cur := m
+    cur ::= m
     symbols.loop((h, idx, sym) {
         (sym.symbol_allowed(false, false) && sym.is_type.then({ false }, { true })).then({
             cur = cur.rset_add_str(a, sym.name)

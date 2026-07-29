@@ -23,11 +23,11 @@
 { Opt } = std.core.result    // choice returns Opt<T> (.Some element / .None when the slice is empty)
 { times, step_while } = std.core.count    // the loop vocabulary — `@while` lives in the primitive, not here
 // splitmix64 constants: the golden-ratio increment (0x9e3779b97f4a7c15) and two avalanche multipliers.
-SM_GAMMA := 11400714819323198485    // 0x9e3779b97f4a7c15
-SM_MIX1 := 13787848793156543929    // 0xbf58476d1ce4e5b9
-SM_MIX2 := 10723151780598845931    // 0x94d049bb133111eb
+SM_GAMMA = 11400714819323198485    // 0x9e3779b97f4a7c15
+SM_MIX1 = 13787848793156543929    // 0xbf58476d1ce4e5b9
+SM_MIX2 = 10723151780598845931    // 0x94d049bb133111eb
 // TWO_53 = 2^53: next_f64 divides a 53-bit integer (exactly representable in f64) by this for [0,1).
-TWO_53 := 9007199254740992.0
+TWO_53 = 9007199254740992.0
 // 256-bit generator state (four u64 words). Construct with `seed`, advance with `.next_u64()` etc.
 Rng*: {
     s0: u64,
@@ -36,13 +36,13 @@ Rng*: {
     s3: u64,
     // core step: advance the state and return the next full 64-bit value (the whole u64 range).
     next_u64 = (r: MutPtr<Rng>) u64 {
-        x0 := r.s0
-        x1 := r.s1
-        x2 := r.s2
-        x3 := r.s3
+        x0 ::= r.s0
+        x1 ::= r.s1
+        x2 ::= r.s2
+        x3 ::= r.s3
         // scrambler: rotl(s1 * 5, 7) * 9 (the "**" variant's output function).
-        result := (x1 * 5 << 7 | x1 * 5 >> 57) * 9
-        t := x1 << 17
+        result = (x1 * 5 << 7 | x1 * 5 >> 57) * 9
+        t = x1 << 17
         x2 = x2 ^ x0
         x3 = x3 ^ x1
         x1 = x1 ^ x2
@@ -57,13 +57,13 @@ Rng*: {
     }
     // the next value reinterpreted as a signed i64 (uniform over the full i64 range, incl. negatives).
     next_i64 = (r: MutPtr<Rng>) i64 {
-        v: i64 := r.next_u64()
+        v: i64 = r.next_u64()
         v
     }
     // a NON-NEGATIVE i64 in [0, 2^63) — the top 63 bits of a draw. Kept for callers that want a
     // plain non-negative integer (e.g. `r.next() % k` stays non-negative). Prefer next_u64/range.
     next = (r: MutPtr<Rng>) i64 {
-        v: i64 := r.next_u64() >> 1
+        v: i64 = r.next_u64() >> 1
         v
     }
     // uniform integer in [lo, hi) (hi exclusive). Returns lo when hi <= lo.
@@ -74,24 +74,24 @@ Rng*: {
     // The surviving range [t, 2^64) is an exact multiple of span, so every bucket is equally likely.
     // Rejection probability is t/2^64 < span/2^64 <= 1/2, so the loop draws < 2 values in expectation.
     range = (r: MutPtr<Rng>, lo: i64, hi: i64) i64 {
-        span := hi - lo
+        span = hi - lo
         (span <= 0).match ({
             true  => lo,
             false => {
-                s: u64 := span
-                zero: u64 := 0
-                t := (zero - s) % s    // 2^64 mod s: the count of low residues to reject
+                s: u64 = span
+                zero: u64 = 0
+                t = (zero - s) % s    // 2^64 mod s: the count of low residues to reject
                 // NOT a count loop: REJECTION sampling has no trip count — it draws until a value lands
                 // outside the biased residues. The cursor IS the draw; `next` is simply the next draw.
-                x := r.next_u64().step_while((v) { v < t }, (v) { r.next_u64() })
-                w: i64 := x % s
+                x = r.next_u64().step_while((v) { v < t }, (v) { r.next_u64() })
+                w: i64 = x % s
                 lo + w
             },
         })
     }
     // a uniform float in [0.0, 1.0): the top 53 bits of a draw (all exactly representable in f64) over 2^53.
     next_f64 = (r: MutPtr<Rng>) f64 {
-        bits := r.next_u64() >> 11
+        bits = r.next_u64() >> 11
         to_f64(bits) / TWO_53
     }
     // true with probability `p` (p<=0 => always false, p>=1 => always true, since next_f64 ∈ [0,1)).
@@ -101,15 +101,15 @@ Rng*: {
 // u64 and run through splitmix64 to fill all four state words, so no seed maps to the forbidden all-zero
 // state. Same seed => same stream, always.
 seed* = (s: i64) Rng {
-    z: u64 := s
+    z :: u64 = s
     z = z + SM_GAMMA
-    a := sm_mix(z)
+    a = sm_mix(z)
     z = z + SM_GAMMA
-    b := sm_mix(z)
+    b = sm_mix(z)
     z = z + SM_GAMMA
-    c := sm_mix(z)
+    c = sm_mix(z)
     z = z + SM_GAMMA
-    d := sm_mix(z)
+    d = sm_mix(z)
     Rng(
         s0: a,
         s1: b,
@@ -119,20 +119,20 @@ seed* = (s: i64) Rng {
 }
 // splitmix64 finalizer: avalanche a counter value into a well-mixed u64. Every op wraps mod 2^64.
 sm_mix = (z: u64) u64 {
-    v := (z ^ z >> 30) * SM_MIX1
+    v ::= (z ^ z >> 30) * SM_MIX1
     v = (v ^ v >> 27) * SM_MIX2
     v ^ v >> 31
 }
 // pick a uniformly random element of `xs`; `.None` when `xs` is empty. Advances `r` in place.
 choice*<T> = (r: MutPtr<Rng>, xs: [T]) Opt<T> {
-    n := xs.len
+    n = xs.len
     (n <= 0).match ({
         true  => {
-            none: Opt<T> := .None
+            none: Opt<T> = .None
             none
         },
         false => {
-            some: Opt<T> := .Some(xs[r.range(0, n)])
+            some: Opt<T> = .Some(xs[r.range(0, n)])
             some
         },
     })
@@ -140,13 +140,13 @@ choice*<T> = (r: MutPtr<Rng>, xs: [T]) Opt<T> {
 // in-place Fisher-Yates shuffle: for i from n-1 down to 1, swap xs[i] with a random xs[j], j in [0, i].
 // Bounded loop (no recursion); the result is a uniformly random permutation of the input. Advances `r`.
 shuffle*<T> = (r: MutPtr<Rng>, xs: [T]) void {
-    n := xs.len
+    n = xs.len
     // exactly n-1 swaps, so it is a COUNT loop; `step` counts UP while `i` walks n-1 down to 1, which
     // is the order Fisher-Yates requires (and the order the golden draw sequence in harness_rand pins).
     (n - 1).times((step) {
-        i := n - 1 - step
-        j := r.range(0, i + 1)
-        tmp := xs[i]
+        i = n - 1 - step
+        j = r.range(0, i + 1)
+        tmp = xs[i]
         xs[i] = xs[j]
         xs[j] = tmp
     })
@@ -154,17 +154,17 @@ shuffle*<T> = (r: MutPtr<Rng>, xs: [T]) void {
 // fill a caller-provided byte buffer with random bytes (no hidden heap). Draws one u64 per 8 bytes,
 // emitting its bytes little-endian, so it is ~8x cheaper than a draw per byte. Advances `r`.
 fill_bytes* = (r: MutPtr<Rng>, dst: [u8]) void {
-    n := dst.len
+    n = dst.len
     // the OUTER loop is CURSOR-driven, not count-driven: one pass writes up to 8 bytes, so the cursor
     // advances a variable amount per step and no trip count exists to hand `times` — that is exactly
     // `step_while`. The inner "8 bytes per draw" IS a count, so it is a `times`.
-    zero: i64 := 0
+    zero: i64 = 0
     zero.step_while((i) { i < n }, (i) {
-        w := r.next_u64()
-        k := i
+        w ::= r.next_u64()
+        k ::= i
         8.times((byte) {
             (k < n).then({
-                b: i64 := w & 255
+                b: i64 = w & 255
                 dst[k] = to_u8(b)
                 w = w >> 8
                 k = k + 1

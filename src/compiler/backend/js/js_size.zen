@@ -19,7 +19,7 @@
 js_size_unknown* = () i64 { 0 - 1 }
 jsz_no_decls = () [Decl] { slice(null_ptr(), 0) }
 // the module being emitted; parked by js.genJsModuleIn straight after monomorphize.
-jsz_decls := jsz_no_decls()
+jsz_decls ::= jsz_no_decls()
 js_size_set* = (decls: [Decl]) void { jsz_decls = decls }
 // the same parked list, for the sibling walks that also need the module's declared types (js_copy).
 js_size_decls* = () [Decl] { jsz_decls }
@@ -43,7 +43,7 @@ jsz_prim_size = (n: StringView) i64 {
 }
 // every scalar's alignment IS its size on LP64; only the aggregates below differ.
 jsz_named_size = (n: StringView, depth: i32) i64 {
-    p := jsz_prim_size(n)
+    p = jsz_prim_size(n)
     (p >= 0).then({
         return p
     })
@@ -56,7 +56,7 @@ jsz_named_size = (n: StringView, depth: i32) i64 {
     jsz_decl_size(n, depth)
 }
 jsz_named_align = (n: StringView, depth: i32) i64 {
-    p := jsz_prim_size(n)
+    p = jsz_prim_size(n)
     (p >= 0).then({
         return p
     })
@@ -105,7 +105,7 @@ jsz_decl_size = (n: StringView, depth: i32) i64 {
     (depth > 24).then({
         return js_size_unknown()
     })
-    r := js_size_unknown()
+    r ::= js_size_unknown()
     jsz_decls.loop((h, i, d) {
         r = d.match ({
             .DStruct(sd) => (sd.name == n).then({ jsz_struct_size(sd, depth + 1) }, { r }),
@@ -119,7 +119,7 @@ jsz_decl_align = (n: StringView, depth: i32) i64 {
     (depth > 24).then({
         return js_size_unknown()
     })
-    r := js_size_unknown()
+    r ::= js_size_unknown()
     jsz_decls.loop((h, i, d) {
         r = d.match ({
             .DStruct(sd) => (sd.name == n).then({ jsz_struct_align(sd, depth + 1) }, { r }),
@@ -130,12 +130,12 @@ jsz_decl_align = (n: StringView, depth: i32) i64 {
     r
 }
 jsz_struct_size = (sd: StructDecl, depth: i32) i64 {
-    off: i64 := 0
-    al: i64 := 1
-    bad := false
+    off :: i64 = 0
+    al :: i64 = 1
+    bad ::= false
     sd.fields.loop((h, i, f) {
-        fs := jsz_ty_size(f.ty, depth)
-        fa := jsz_ty_align(f.ty, depth)
+        fs = jsz_ty_size(f.ty, depth)
+        fa = jsz_ty_align(f.ty, depth)
         bad = bad || fs < 0 || fa < 0
         off = (fs < 0 || fa < 0).then({ off }, { jsz_round(off, fa) + fs })
         al = (fa < 0).then({ al }, { jsz_max(al, fa) })
@@ -143,10 +143,10 @@ jsz_struct_size = (sd: StructDecl, depth: i32) i64 {
     bad.then({ js_size_unknown() }, { jsz_round(off, al) })
 }
 jsz_struct_align = (sd: StructDecl, depth: i32) i64 {
-    al: i64 := 1
-    bad := false
+    al :: i64 = 1
+    bad ::= false
     sd.fields.loop((h, i, f) {
-        fa := jsz_ty_align(f.ty, depth)
+        fa = jsz_ty_align(f.ty, depth)
         bad = bad || fa < 0
         al = (fa < 0).then({ al }, { jsz_max(al, fa) })
     })
@@ -154,13 +154,13 @@ jsz_struct_align = (sd: StructDecl, depth: i32) i64 {
 }
 // the union of the payload-carrying variants: size = max payload rounded to the union's alignment.
 jsz_union_size = (ed: EnumDecl, depth: i32) i64 {
-    usz: i64 := 0
-    bad := false
+    usz :: i64 = 0
+    bad ::= false
     ed.variants.loop((h, i, v) {
         v.payload.match ({
             .Void => { },
             _     => {
-                ps := jsz_ty_size(v.payload, depth)
+                ps = jsz_ty_size(v.payload, depth)
                 bad = bad || ps < 0
                 usz = (ps < 0).then({ usz }, { jsz_max(usz, ps) })
             },
@@ -169,13 +169,13 @@ jsz_union_size = (ed: EnumDecl, depth: i32) i64 {
     bad.then({ js_size_unknown() }, { usz })
 }
 jsz_union_align = (ed: EnumDecl, depth: i32) i64 {
-    ual: i64 := 1
-    bad := false
+    ual :: i64 = 1
+    bad ::= false
     ed.variants.loop((h, i, v) {
         v.payload.match ({
             .Void => { },
             _     => {
-                pa := jsz_ty_align(v.payload, depth)
+                pa = jsz_ty_align(v.payload, depth)
                 bad = bad || pa < 0
                 ual = (pa < 0).then({ ual }, { jsz_max(ual, pa) })
             },
@@ -184,16 +184,16 @@ jsz_union_align = (ed: EnumDecl, depth: i32) i64 {
     bad.then({ js_size_unknown() }, { ual })
 }
 jsz_enum_size = (ed: EnumDecl, depth: i32) i64 {
-    usz := jsz_union_size(ed, depth)
-    ual := jsz_union_align(ed, depth)
+    usz = jsz_union_size(ed, depth)
+    ual = jsz_union_align(ed, depth)
     (usz < 0 || ual < 0).then({
         return js_size_unknown()
     })
-    al := jsz_max(4, ual)
+    al = jsz_max(4, ual)
     jsz_round(jsz_round(4, ual) + jsz_round(usz, ual), al)
 }
 jsz_enum_align = (ed: EnumDecl, depth: i32) i64 {
-    ual := jsz_union_align(ed, depth)
+    ual = jsz_union_align(ed, depth)
     (ual < 0).then({
         return js_size_unknown()
     })

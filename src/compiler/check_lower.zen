@@ -8,14 +8,14 @@
 match_has_wild = (m: MatchData) bool { m.arms.slice_any((ar) { ar.variant == "_" }) }
 arm_covers_v = (m: MatchData, vn: StringView) bool { m.arms.slice_any((ar) { ar.variant == vn }) }
 ed_covered = (ed: EnumDecl, m: MatchData) bool {
-    all := true
+    all ::= true
     ed.variants.loop((h, i, v) {
         all = m.arm_covers_v(v.name).then({ all }, { false })
     })
     all
 }
 enum_exhaustive = (decls: [Decl], m: MatchData) bool {
-    found := false
+    found ::= false
     decls.loop((h, i, d) {
         found = d.match ({
             .DEnum(ed) => (ed.name == m.ename).then({ ed.ed_covered(m) }, { found }),
@@ -28,7 +28,7 @@ match_lowerable = (decls: [Decl], m: MatchData) bool {
     match_has_wild(m).then({ true }, { decls.enum_exhaustive(m) })
 }
 branch_stmts = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
-    out := a.one_stmt(a.lower_stmt_expr(env, e))
+    out ::= a.one_stmt(a.lower_stmt_expr(env, e))
     load(e).match ({
         .Block(b) => {
             out = a.relower_block_tail(env, b.stmts)
@@ -50,19 +50,19 @@ relower_tail_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) Stmt {
     })
 }
 env_over = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt], upto: i64) Env {
-    out := env
+    out ::= env
     stmts.loop((h, i, st) {
         out = (i < upto).then({ a.extend_env(out, st) }, { out })
     })
     out
 }
 relower_block_tail = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt]) [Stmt] {
-    n := stmts.len
+    n = stmts.len
     (n == 0).match ({
         true  => stmts,
         false => {
-            buf := cbuf<Stmt>(a, n)
-            envT := a.env_over(env, stmts, n - 1)
+            buf ::= cbuf<Stmt>(a, n)
+            envT = a.env_over(env, stmts, n - 1)
             stmts.loop((h, i, st) {
                 buf[i] = (i == n - 1).then({ a.relower_tail_stmt(envT, st) }, { st })
             })
@@ -71,29 +71,29 @@ relower_block_tail = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt]) [Stmt] {
     })
 }
 tag_const* = (a: MutPtr<Malloc>, ename: StringView, variant: StringView) StringView {
-    s := a.gstr_string(64)
+    s ::= a.gstr_string(64)
     s = s.gstr_append(a, ename)
     s = s.gstr_append(a, "_")
     s = s.gstr_append(a, variant)
     s.gstr_finish(a)
 }
 subj_tag* = (a: MutPtr<Malloc>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
-    out := a.cenode(member(subj, "tag"))
+    out ::= a.cenode(member(subj, "tag"))
     ptr.then({
         out = a.cenode(arrow(subj, "tag"))
     })
     out
 }
 subj_payload* = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: StringView, ptr: bool) Ptr<Expr> {
-    u := a.cenode(member(subj, "u"))
+    u ::= a.cenode(member(subj, "u"))
     ptr.then({
         u = a.cenode(arrow(subj, "u"))
     })
     a.cenode(member(u, variant))
 }
 arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
-    body := a.branch_stmts(a.arm_env(env, t, ar), ar.body)
-    out := body
+    body = a.branch_stmts(a.arm_env(env, t, ar), ar.body)
+    out ::= body
     (ar.bind == "" == false).then({
         // TYPED payload let (not bare slet): without the concrete payload type, a later light/inline
         // inference can't recover the binding's type from the enum union access (`e.u.Num`), so a
@@ -104,7 +104,7 @@ arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt
     out
 }
 cons_stmt = (a: MutPtr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
-    buf := cbuf<Stmt>(a, rest.len + 1)
+    buf ::= cbuf<Stmt>(a, rest.len + 1)
     buf[0] = head
     rest.loop((h, i, st) {
         buf[i + 1] = st
@@ -113,9 +113,9 @@ cons_stmt = (a: MutPtr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
 }
 // Build if/else chain over enum arms.
 lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [Stmt] {
-    out := no_stmts()
+    out ::= no_stmts()
     (i >= m.arms.len == false).then({
-        ar := m.arms[i]
+        ar = m.arms[i]
         (ar.variant == "_").match ({
             true  => {
                 out = a.branch_stmts(env, ar.body)
@@ -123,8 +123,8 @@ lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [S
             false => {
                 // Keep the tag as a semantic Tag node. C folds `.tag` to its enum constant, while JS
                 // emits the variant string; baking a C-only `Enum_Variant` Var breaks the JS backend.
-                tag := a.subj_tag(a.cenode(mktag(m.ename, ar.variant)), false)
-                cond := a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), tag))
+                tag = a.subj_tag(a.cenode(mktag(m.ename, ar.variant)), false)
+                cond = a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), tag))
                 out = a.one_stmt(sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
             },
         })
@@ -132,9 +132,9 @@ lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [S
     out
 }
 lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
-    t := env.infer_expr(m.subj)
-    stmts := a.lower_match_arms(env, t, m, 0)
-    out := sexpr(a.cenode(block(stmts)))
+    t = env.infer_expr(m.subj)
+    stmts = a.lower_match_arms(env, t, m, 0)
+    out ::= sexpr(a.cenode(block(stmts)))
     (stmts.len == 1).then({
         out = stmts[0]
     })
@@ -145,7 +145,7 @@ lower_cond_stmt = (a: MutPtr<Malloc>, env: Env, d: CondData) Stmt {
     sif(d.c, a.branch_stmts(env, d.t), a.cond_else(env, d.e))
 }
 cond_else = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
-    out := a.branch_stmts(env, e)
+    out ::= a.branch_stmts(env, e)
     load(e).match ({
         .Cond(d) => {
             out = a.one_stmt(a.lower_cond_stmt(env, d))
@@ -156,7 +156,7 @@ cond_else = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
 }
 // Lower resolved statement-position expressions whose values are discarded.
 lower_stmt_expr* = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
-    out := sexpr(e)
+    out ::= sexpr(e)
     load(e).match ({
         .Match(m) => env.decls.match_lowerable(m).match ({
             true  => {

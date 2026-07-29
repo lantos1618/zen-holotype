@@ -10,7 +10,7 @@
 { expr_fold_children } = compiler.ast.expr_children
 { gd_has_mangled, gd_tys_max_depth } = compiler.generics
 rc_calls_es = (xs: [Expr], nm: StringView) bool {
-    f := false
+    f ::= false
     xs.loop((h, i, x) {
         f = f.then({ true }, { x.addr().rc_calls_e(nm) })
     })
@@ -38,7 +38,7 @@ rc_calls_stmt = (st: Stmt, nm: StringView) bool {
     })
 }
 rc_calls_body* = (body: [Stmt], nm: StringView) bool {
-    f := false
+    f ::= false
     body.loop((h, i, st) {
         f = f.then({ true }, { st.rc_calls_stmt(nm) })
     })
@@ -89,30 +89,30 @@ rc_add = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
 // discovery: walk concrete bodies (Env-threaded for full type inference incl. addr/dispatch), recording
 // one instance per recursive-generic call site (targs inferred exactly as resolve_call will mangle them).
 rc_col_es = (env: Env, buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
-    c := cnt
+    c ::= cnt
     xs.loop((h, i, x) {
         c = env.rc_col_e(buf, c, x.addr())
     })
     c
 }
 rc_col_inits = (env: Env, buf: [GenericData], cnt: i32, inits: [FieldInit]) i32 {
-    c := cnt
+    c ::= cnt
     inits.loop((h, i, fi) {
         c = env.rc_col_e(buf, c, fi.value)
     })
     c
 }
 rc_col_match = (env: Env, buf: [GenericData], cnt: i32, m: MatchData) i32 {
-    c := env.clr_exp().rc_col_e(buf, cnt, m.subj)
-    t := env.infer_expr(m.subj)
+    c ::= env.clr_exp().rc_col_e(buf, cnt, m.subj)
+    t = env.infer_expr(m.subj)
     m.arms.loop((h, i, ar) {
         c = env.a.arm_env(env, t, ar).rc_col_e(buf, c, ar.body)
     })
     c
 }
 rc_col_loop = (env: Env, buf: [GenericData], cnt: i32, l: LoopData) i32 {
-    c := env.clr_exp().rc_col_e(buf, cnt, l.seq)
-    e := Env(
+    c = env.clr_exp().rc_col_e(buf, cnt, l.seq)
+    e = Env(
         vars: env.a.vcons(l.elem, l.elemTy, env.a.vcons(l.idx, ti64(), env.vars)),
         decls: env.decls,
         didx: env.didx,
@@ -122,7 +122,7 @@ rc_col_loop = (env: Env, buf: [GenericData], cnt: i32, l: LoopData) i32 {
     e.rc_col_body(buf, c, l.body)
 }
 rc_lam_env = (env: Env, ps: [Param]) Env {
-    e := env
+    e ::= env
     ps.loop((h, i, p) {
         // bind as Void (opaque), NOT p.ty: a lambda param's ty is only its formatter-round-trip `: Type`
         // annotation — the rc pass must see the same opaque binding whether or not the source annotated it.
@@ -137,19 +137,19 @@ rc_lam_env = (env: Env, ps: [Param]) Env {
     e
 }
 rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
-    dn := env.dispatch_name(c)
-    f := env.env_func(dn)
-    known := f.name == dn && f.params.len == c.args.len
-    tmpl := known && f.is_generic_fn()
-    atargs := tmpl.then({ env.call_targs(f, c.args, c.targs) }, { no_tys() })
-    c2 := cnt
+    dn = env.dispatch_name(c)
+    f = env.env_func(dn)
+    known = f.name == dn && f.params.len == c.args.len
+    tmpl = known && f.is_generic_fn()
+    atargs = tmpl.then({ env.call_targs(f, c.args, c.targs) }, { no_tys() })
+    c2 ::= cnt
     c.args.loop((h, i, ar) {
-        ax := known.then({ env.call_arg_exp(tmpl, f.tparams, atargs, f.params, i) }, { tvoid() })
+        ax = known.then({ env.call_arg_exp(tmpl, f.tparams, atargs, f.params, i) }, { tvoid() })
         c2 = env.with_exp(ax).rc_col_e(buf, c2, ar.addr())
     })
     (known && f.no_inline_gen_f()).match ({
         true  => {
-            m := env.a.mangle_semantic_in(dn, atargs)
+            m = env.a.mangle_semantic_in(dn, atargs)
             (buf.gd_has_mangled(c2, m) || env.didx.func_idx.get(m, 0 - 1) >= 0).match ({
                 true  => c2,
                 false => buf.rc_add(c2, GenericData(
@@ -194,8 +194,8 @@ rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt, last: bool) i32
         .Let(l)      => env.let_exp(l.ty).rc_col_e(buf, cnt, l.value),
         .Assign(x)   => env.clr_exp().rc_col_e(buf, env.rc_col_e(buf, cnt, x.target), x.value),
         .Return(r)   => {
-            rt := env.vars.fnret_of()
-            renv := rt.is_void_ty().then({ env }, { env.with_exp(rt) })
+            rt = env.vars.fnret_of()
+            renv = rt.is_void_ty().then({ env }, { env.with_exp(rt) })
             renv.rc_col_e(buf, cnt, r)
         },
         .ExprStmt(e) => (last && env.exp.is_void_ty() == false).match ({
@@ -214,8 +214,8 @@ rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt, last: bool) i32
     })
 }
 rc_col_body = (env: Env, buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
-    c := cnt
-    e := env
+    c ::= cnt
+    e ::= env
     body.loop((h, i, st) {
         c = e.rc_col_stmt(buf, c, st, i == body.len - 1)
         e = e.a.extend_env(e, st)
@@ -235,7 +235,7 @@ rc_fn_env = (env: Env, f: Func) Env {
 // `from` skips decls already seeded by an earlier mono_close round: only the tail appended (and
 // HOF-spliced) since the previous round can surface NEW instances — the head's bodies are unchanged.
 rc_seed* = (env: Env, buf: [GenericData], cnt: i32, from: i64) i32 {
-    c := cnt
+    c ::= cnt
     env.decls.loop((h, i, d) {
         c = (i >= from).match ({
             true  => d.match ({
@@ -252,7 +252,7 @@ rc_seed* = (env: Env, buf: [GenericData], cnt: i32, from: i64) i32 {
 }
 // the substituted param list of one instance (tparam→arg in each param type).
 rc_subst_params = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], ps: [Param]) [Param] {
-    buf := a.pbuf(ps.len)
+    buf ::= a.pbuf(ps.len)
     ps.loop((h, i, p) {
         buf[i] = param(p.name, a.subst_ty_in(tparams, targs, p.ty))
     })
@@ -261,12 +261,12 @@ rc_subst_params = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], ps: [Param]
 // transitive closure: each instance's substituted body may name further instances (its own self-call,
 // or a call to another recursive generic), so walk every instance body until no new ones appear.
 rc_expand_one = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
-    g := buf[i]
-    tf := env.didx.idx_func(env.decls, g.name)
-    iparams := env.a.rc_subst_params(tf.tparams, g.args, tf.params)
-    ibody := env.a.subst_body(0, tf.tparams, g.args, tf.body)
-    iret := env.a.subst_ty_in(tf.tparams, g.args, tf.ret)
-    ienv := Env(
+    g = buf[i]
+    tf = env.didx.idx_func(env.decls, g.name)
+    iparams = env.a.rc_subst_params(tf.tparams, g.args, tf.params)
+    ibody = env.a.subst_body(0, tf.tparams, g.args, tf.body)
+    iret = env.a.subst_ty_in(tf.tparams, g.args, tf.ret)
+    ienv = Env(
         vars: env.a.bind_fnret(env.a.params_env(iparams), iret),
         decls: env.decls,
         didx: env.didx,
@@ -282,7 +282,7 @@ rc_expand* = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
 // mangled name. Its self-call stays the bare template name; the final resolve_call mangles it (the
 // instance decl now exists), which also resolves dispatch (e.g. allocator methods) on the concrete type.
 rc_gen* = (env: Env, g: GenericData) Decl {
-    tf := env.didx.idx_func(env.decls, g.name)
+    tf = env.didx.idx_func(env.decls, g.name)
     dfunc(Func(
         name: g.mangled,
         params: env.a.rc_subst_params(tf.tparams, g.args, tf.params),

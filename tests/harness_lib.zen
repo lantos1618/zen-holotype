@@ -56,7 +56,7 @@ thread = std.concurrent.thread    // NAMESPACED: thread.join collides in the fla
 //       one-at-a-time. Per-run uniqueness gives the same correctness with full parallelism.)
 // the private scratch directory for this run, e.g. `/tmp/zo.12345` (no trailing slash).
 zo_dir* = (mp: MutPtr<Malloc>) StringView {
-    b := mp.new_in().expect("harness: oom")
+    b ::= mp.new_in().expect("harness: oom")
     b = b.append_in(mp, "/tmp/zo.").expect("harness: oom")
     b = b
         .append_in(mp, mp
@@ -67,7 +67,7 @@ zo_dir* = (mp: MutPtr<Malloc>) StringView {
 }
 // build `<zo_dir>/<name>` — a scratch path private to this harness run (for std.io save/contents_in).
 zo_path* = (mp: MutPtr<Malloc>, name: StringView) StringView {
-    b := mp.new_in().expect("harness: oom")
+    b ::= mp.new_in().expect("harness: oom")
     b = b.append_in(mp, mp.zo_dir()).expect("harness: oom")
     b = b.append_in(mp, "/").expect("harness: oom")
     b = b.append_in(mp, name).expect("harness: oom")
@@ -79,7 +79,7 @@ zo_path* = (mp: MutPtr<Malloc>, name: StringView) StringView {
 // intermediates (`/tmp/zenc_zd_<pid>.*`), so concurrent harness runs never collide — they run fully
 // in parallel.
 zo_cmd* = (mp: MutPtr<Malloc>, body: StringView) StringView {
-    s := mp.new_in().expect("harness: oom")
+    s ::= mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "ZT=").expect("harness: oom")
     s = s.append_in(mp, mp.zo_dir()).expect("harness: oom")
     s = s.append_in(mp, "; mkdir -p \"$ZT\"; ").expect("harness: oom")
@@ -88,15 +88,15 @@ zo_cmd* = (mp: MutPtr<Malloc>, body: StringView) StringView {
 }
 // create the private scratch dir (idempotent); call once at harness startup before any std.io save.
 zo_ensure* = () i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     shell(mp.zo_cmd("true")).expect("harness: shell")
 }
 // remove the private scratch dir; call once at harness teardown.
 zo_cleanup* = () i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
-    s := mp.new_in().expect("harness: oom")
+    m = Malloc(_: 0)
+    mp = m.addr()
+    s ::= mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "rm -rf ").expect("harness: oom")
     s = s.append_in(mp, mp.zo_dir()).expect("harness: oom")
     shell(mp.finish_in(s).expect("harness: oom")).expect("harness: shell")
@@ -116,7 +116,7 @@ zo_cleanup* = () i32 {
 // Per-case path uniqueness (the #1 hazard the old fixed /tmp names created under parallelism) comes from
 // the case's suite-local index `gid`: sources at `<$ZT>/<pfx><gid>.zen`, and value cases compile into a
 // PRIVATE include dir `<$ZT>/d<gid>/` so the runner's fixed `#include "zo_body.c"` never collides.
-NWORKERS_FALLBACK := 8    // used only if `nproc` can't be read
+NWORKERS_FALLBACK = 8    // used only if `nproc` can't be read
 // integer → allocator-owned str (decimal), for building per-case paths/commands.
 zo_itoa* = (mp: MutPtr<Malloc>, n: i64) StringView {
     mp
@@ -127,14 +127,14 @@ zo_itoa* = (mp: MutPtr<Malloc>, n: i64) StringView {
 }
 // concat two strings through an allocator-owned String (no fixed-buffer assumptions).
 zo_cat2* = (mp: MutPtr<Malloc>, a: StringView, b: StringView) StringView {
-    s := mp.new_in().expect("harness: oom")
+    s ::= mp.new_in().expect("harness: oom")
     s = s.append_in(mp, a).expect("harness: oom")
     s = s.append_in(mp, b).expect("harness: oom")
     mp.finish_in(s).expect("harness: oom")
 }
 // concat a list of pieces through an allocator-owned String.
 zo_join* = (mp: MutPtr<Malloc>, parts: [StringView]) StringView {
-    s := mp.new_in().expect("harness: oom")
+    s ::= mp.new_in().expect("harness: oom")
     parts.loop((h, i, p) {
         s = s.append_in(mp, p).expect("harness: oom")
     })
@@ -152,8 +152,8 @@ zo_idpath* = (mp: MutPtr<Malloc>, prefix: StringView, gid: i64, suffix: StringVi
 // sets it on each suite child so pool×inner-workers stays bounded instead of pool×nproc oversubscribing
 // (and over-forking memory) on a box already running the suite pool.
 zo_nproc = (mp: MutPtr<Malloc>) i64 {
-    envw := getEnv("ZO_NWORKERS")
-    ov := is_empty(envw).match ({
+    envw = getEnv("ZO_NWORKERS")
+    ov = is_empty(envw).match ({
         true  => 0,
         false => try_parse_int(envw).match ({
             .Ok(v)  => v,
@@ -180,7 +180,7 @@ zo_nproc = (mp: MutPtr<Malloc>) i64 {
 // shape this wants — the body must claim before it can know there is nothing left.
 zo_par_loop = (cmds: [StringView], n: i64, counter: RawPtr<u8>) void {
     repeat_while((k) {
-        idx := atomic_add_i64(counter, 1) - 1
+        idx = atomic_add_i64(counter, 1) - 1
         (idx < n).then({
             shell(cmds[idx])
         })
@@ -190,10 +190,10 @@ zo_par_loop = (cmds: [StringView], n: i64, counter: RawPtr<u8>) void {
 // non-capturing pthread body (std.thread contract): arg → [ cmds_base:i64 | n:i64 | counter_ptr:i64 ].
 // Rebuild the `[str]` command view from its base pointer and run the shared work loop.
 zo_par_worker = (arg: RawPtr<u8>) RawPtr<u8> {
-    cmds_base := load_i64(arg).offset(0)
-    n := load_i64(arg.offset(8))
-    counter := load_i64(arg.offset(16)).offset(0)
-    cmds: [StringView] := cmds_base.slice(n)
+    cmds_base = load_i64(arg).offset(0)
+    n = load_i64(arg.offset(8))
+    counter = load_i64(arg.offset(16)).offset(0)
+    cmds: [StringView] = cmds_base.slice(n)
     zo_par_loop(cmds, n, counter)
     null_ptr()
 }
@@ -201,8 +201,8 @@ zo_par_worker = (arg: RawPtr<u8>) RawPtr<u8> {
 // commands are independent and write disjoint per-case files, so this is a pure fan-out/join — the only
 // shared state is the atomic work counter. Blocks until all cases have run.
 zo_par_run* = (cmds: [StringView], n: i64) void {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     zo_par_run_n(cmds, n, mp.zo_nproc())
 }
 // zo_par_run with an EXPLICIT worker count (still never more than #cases, clamped ≥ 1). The suite-level
@@ -211,17 +211,17 @@ zo_par_run* = (cmds: [StringView], n: i64) void {
 // the per-case pools inside each child keep their own sizing.
 zo_par_run_n* = (cmds: [StringView], n: i64, workers: i64) void {
     (n <= 0 == false).then({
-        w0 := (workers < 1).then({ 1 }, { workers })
-        w := (w0 > n).then({ n }, { w0 })    // never spawn more workers than cases
-        counter := assert_nonnull(malloc(8))
+        w0 = (workers < 1).then({ 1 }, { workers })
+        w = (w0 > n).then({ n }, { w0 })    // never spawn more workers than cases
+        counter = assert_nonnull(malloc(8))
         counter.store_i64(0)
-        arg := assert_nonnull(malloc(24))
+        arg = assert_nonnull(malloc(24))
         arg.store_i64(cmds.ptr)
         arg.offset(8).store_i64(n)
         arg.offset(16).store_i64(counter)
-        handles := assert_nonnull(malloc(w * 8))
+        handles = assert_nonnull(malloc(w * 8))
         w.times((i) {
-            hh := thread.spawn(zo_par_worker, arg)
+            hh = thread.spawn(zo_par_worker, arg)
             handles.offset(i * 8).store_i64(hh.tid)
         })
         w.times((j) { thread.JoinHandle(tid: handles.offset(j * 8).load_i64().offset(0)).join() })
@@ -253,7 +253,7 @@ DiagCase*: {
 }
 // build the diagnostic needle `error[<kind>]` for a kind label.
 kind_needle = (mp: MutPtr<Malloc>, kind: StringView) StringView {
-    s := mp.new_in().expect("harness: oom")
+    s ::= mp.new_in().expect("harness: oom")
     s = s.append_in(mp, "error[").expect("harness: oom")
     s = s.append_in(mp, kind).expect("harness: oom")
     s = s.append_in(mp, "]").expect("harness: oom")
@@ -265,8 +265,8 @@ kind_needle = (mp: MutPtr<Malloc>, kind: StringView) StringView {
 // run under `timeout`: a miscompiled infinite loop must fail the case (empty output ≠ want), never
 // hang the harness.
 run_value* = (vc: VCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     save(mp.zo_path("zo_case.zen"), vc.src, len(vc.src))
     save(mp.zo_path("zo_out.txt"), "", 0)
     shell(mp.zo_cmd("timeout 60 ./zen emit $ZT/zo_case.zen > $ZT/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I$ZT tests/harness_runner.c -o $ZT/zo_prog 2>/dev/null && timeout 30 $ZT/zo_prog > $ZT/zo_out.txt 2>/dev/null"))
@@ -281,10 +281,10 @@ run_value* = (vc: VCase) bool {
 // A reject ALWAYS has to produce an `error[` diagnostic: exit codes 1..123 also cover usage errors and
 // internal failures, so "nonzero" on its own is not evidence that the checker diagnosed anything.
 run_verdict* = (vc: VerdictCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     save(mp.zo_path("zo_v.zen"), vc.src, len(vc.src))
-    rc := shell(mp.zo_cmd("timeout 60 ./zen check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("harness: shell")
+    rc = shell(mp.zo_cmd("timeout 60 ./zen check $ZT/zo_v.zen > $ZT/zo_chk.txt 2>&1")).expect("harness: shell")
     (rc == 124).match ({
         true  => false,
         false => vc.should_pass.match ({
@@ -306,15 +306,15 @@ run_verdict* = (vc: VerdictCase) bool {
 // require every `wants` substring to be present. /tmp/zod_out.txt is overwritten each run.
 // `timeout 60` as in run_verdict: rc 124 fails the case.
 run_diag* = (dc: DiagCase) bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     save(mp.zo_path("zod_v.zen"), dc.src, len(dc.src))
-    rc := shell(mp.zo_cmd("timeout 60 ./zen check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
+    rc = shell(mp.zo_cmd("timeout 60 ./zen check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
     (rc == 0 || rc == 124).match ({
         true  => false,
         false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
             .Ok(txt) => {
-                all := true
+                all ::= true
                 dc.wants.loop((h, i, wnt) {
                     (txt.contains(wnt) == false).then({
                         all = false
@@ -329,10 +329,10 @@ run_diag* = (dc: DiagCase) bool {
 // the self-host FIXPOINT: `zenc --build-self` regenerates the bootstrap C byte-for-byte. Build to a
 // temp file and `cmp` against the committed bootstrap/zenc.gen.c — the committed file is never touched.
 fixpoint_ok* = () bool {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     shell(mp.zo_cmd("./zen --build-self $ZT/zo_gen_after.c . 2>/dev/null"))
-    same := shell(mp.zo_cmd("cmp -s $ZT/zo_gen_after.c bootstrap/zenc.gen.c")).expect("harness: shell")
+    same = shell(mp.zo_cmd("cmp -s $ZT/zo_gen_after.c bootstrap/zenc.gen.c")).expect("harness: shell")
     same == 0
 }
 // REPORTER: print `name (N)` then '.'/'F' per result, return the failing count. A failing mark is
@@ -341,9 +341,9 @@ fixpoint_ok* = () bool {
 run_suite* = (name: StringView, results: [bool]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    fails := 0
+    m = Malloc(_: 0)
+    mp = m.addr()
+    fails ::= 0
     results.loop((h, i, ok) {
         ok.match ({
             true  => out("."),
@@ -366,11 +366,11 @@ run_suite* = (name: StringView, results: [bool]) i32 {
 // program run under `timeout`: a compiler hang or a miscompiled infinite loop leaves `o<gid>.txt` empty,
 // which FAILS the case in Phase C instead of hanging the harness.
 zo_value_cmd = (mp: MutPtr<Malloc>, gid: i64) StringView {
-    z: StringView := ""    // str-typed lead so the mixed literal/variable array infers as [str]
-    src := mp.zo_idpath("c", gid, ".zen")
-    dir := mp.zo_idpath("d", gid, "")
-    prog := mp.zo_idpath("p", gid, "")
-    outp := mp.zo_idpath("o", gid, ".txt")
+    z: StringView = ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    src = mp.zo_idpath("c", gid, ".zen")
+    dir = mp.zo_idpath("d", gid, "")
+    prog = mp.zo_idpath("p", gid, "")
+    outp = mp.zo_idpath("o", gid, ".txt")
     mp.zo_join([z, "mkdir -p ", dir, "; timeout 60 ./zen emit ", src, " > ", dir, "/zo_body.c 2>/dev/null && cc -std=gnu11 -w -I", dir, " tests/harness_runner.c -o ", prog, " 2>/dev/null && timeout 30 ", prog, " > ", outp, " 2>/dev/null; true"])
 }
 // batch VALUE runner + reporter: build every case's command (serial), run them in parallel, then compare
@@ -380,21 +380,21 @@ zo_value_cmd = (mp: MutPtr<Malloc>, gid: i64) StringView {
 run_values* = (name: StringView, cs: [VCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         save(mp.zo_idpath("c", i, ".zen"), c.src, len(c.src))
         save(mp.zo_idpath("o", i, ".txt"), "", 0)    // clear stale output (mirrors serial's cleared zo_out.txt)
         cmds[i] = mp.zo_value_cmd(i)
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
-        got := mp.contents_in(mp.zo_idpath("o", i, ".txt"))
-        ok := got.match ({
+        got = mp.contents_in(mp.zo_idpath("o", i, ".txt"))
+        ok = got.match ({
             .Ok(g)  => g == c.want,
             .Err(e) => false,
         })
@@ -426,10 +426,10 @@ run_values* = (name: StringView, cs: [VCase]) i32 {
 // threshold the fuzz category uses). The full diagnostic lands in `chk<gid>.txt`. (We can't return the
 // shell exit code through the worker, so the outcome is recorded in a file and read back in Phase C.)
 zo_verdict_cmd = (mp: MutPtr<Malloc>, gid: i64) StringView {
-    z: StringView := ""
-    v := mp.zo_idpath("v", gid, ".zen")
-    chk := mp.zo_idpath("chk", gid, ".txt")
-    rc := mp.zo_idpath("rc", gid, ".txt")
+    z: StringView = ""
+    v = mp.zo_idpath("v", gid, ".zen")
+    chk = mp.zo_idpath("chk", gid, ".txt")
+    rc = mp.zo_idpath("rc", gid, ".txt")
     mp.zo_join([z, "timeout 60 ./zen check ", v, " > ", chk, " 2>&1; rc=$?; if [ $rc -eq 0 ]; then echo P > ", rc, "; elif [ $rc -ge 124 ]; then echo T > ", rc, "; else echo F > ", rc, "; fi"])
 }
 // decode a P/F/T marker file: 0 = accepted, 1 = rejected, 2 = TIMEOUT (or missing/unreadable marker).
@@ -447,7 +447,7 @@ zo_rc_state = (mp: MutPtr<Malloc>, path: StringView) i64 {
 // VERDICT per-case check (Phase C): identical logic to run_verdict — accept(P) vs reject(F), and when
 // rejecting with a non-empty `kind`, the captured diagnostic must contain `error[<kind>]`. T fails always.
 zo_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, vc: VerdictCase) bool {
-    st := mp.zo_rc_state(mp.zo_idpath("rc", gid, ".txt"))
+    st = mp.zo_rc_state(mp.zo_idpath("rc", gid, ".txt"))
     (st == 2).match ({
         true  => false,
         false => vc.should_pass.match ({
@@ -471,20 +471,20 @@ zo_verdict_ok = (mp: MutPtr<Malloc>, gid: i64, vc: VerdictCase) bool {
 run_verdicts* = (name: StringView, cs: [VerdictCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         save(mp.zo_idpath("v", i, ".zen"), c.src, len(c.src))
         cmds[i] = mp.zo_verdict_cmd(i)
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
-        st := mp.zo_rc_state(mp.zo_idpath("rc", i, ".txt"))
-        ok := mp.zo_verdict_ok(i, c)
+        st = mp.zo_rc_state(mp.zo_idpath("rc", i, ".txt"))
+        ok = mp.zo_verdict_ok(i, c)
         ok.match ({
             true  => out("."),
             false => {
@@ -521,20 +521,20 @@ run_verdicts* = (name: StringView, cs: [VerdictCase]) i32 {
 // marker as verdicts (`drc<gid>.txt`) plus the full diagnostic (`do<gid>.txt`) so Phase C can require
 // every `wants` substring. T (timeout) fails the case — a hang is not a rejection.
 zo_diag_cmd = (mp: MutPtr<Malloc>, gid: i64) StringView {
-    z: StringView := ""
-    v := mp.zo_idpath("dv", gid, ".zen")
-    outp := mp.zo_idpath("do", gid, ".txt")
-    rc := mp.zo_idpath("drc", gid, ".txt")
+    z: StringView = ""
+    v = mp.zo_idpath("dv", gid, ".zen")
+    outp = mp.zo_idpath("do", gid, ".txt")
+    rc = mp.zo_idpath("drc", gid, ".txt")
     mp.zo_join([z, "timeout 60 ./zen check ", v, " > ", outp, " 2>&1; rc=$?; if [ $rc -eq 0 ]; then echo P > ", rc, "; elif [ $rc -ge 124 ]; then echo T > ", rc, "; else echo F > ", rc, "; fi"])
 }
 // DIAGNOSTIC per-case check (Phase C): identical logic to run_diag — must reject (F) AND the diagnostic
 // must contain every `wants` substring. T (timeout/missing marker) fails always.
 zo_diag_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiagCase) bool {
-    st := mp.zo_rc_state(mp.zo_idpath("drc", gid, ".txt"))
+    st = mp.zo_rc_state(mp.zo_idpath("drc", gid, ".txt"))
     (st == 1).match ({
         true  => mp.contents_in(mp.zo_idpath("do", gid, ".txt")).match ({
             .Ok(txt) => {
-                all := true
+                all ::= true
                 dc.wants.loop((h, i, wnt) {
                     (txt.contains(wnt) == false).then({
                         all = false
@@ -553,21 +553,21 @@ zo_diag_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiagCase) bool {
 run_diags* = (name: StringView, cs: [DiagCase]) i32 {
     out(name)
     out("\n")
-    m := Malloc(_: 0)
-    mp := m.addr()
-    n := cs.len
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    m = Malloc(_: 0)
+    mp = m.addr()
+    n = cs.len
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     cs.loop((h, i, c) {
         save(mp.zo_idpath("dv", i, ".zen"), c.src, len(c.src))
         cmds[i] = mp.zo_diag_cmd(i)
     })
     zo_par_run(cmds, n)
-    fails := 0
+    fails ::= 0
     cs.loop((h, i, c) {
-        st := mp.zo_rc_state(mp.zo_idpath("drc", i, ".txt"))
-        txt := mp.contents_in(mp.zo_idpath("do", i, ".txt"))
-        ok := mp.zo_diag_ok(i, c)
+        st = mp.zo_rc_state(mp.zo_idpath("drc", i, ".txt"))
+        txt = mp.contents_in(mp.zo_idpath("do", i, ".txt"))
+        ok = mp.zo_diag_ok(i, c)
         ok.match ({
             true  => out("."),
             false => {

@@ -55,14 +55,14 @@ resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
 // allocation (it returns null by design), so it is NOT a failure. Sites that CAN carry the failure as
 // a value should use `try_acquire` instead; these are the ones that cannot.
 acquire_or_die*<A> = (a: MutPtr<A>, n: i64) RawPtr<u8> {
-    p := a.acquire(n)
+    p = a.acquire(n)
     (p == null_ptr() && n > 0).then({
         panic("compiler: out of memory")
     })
     p
 }
 resize_or_die*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
-    q := a.resize(p, n)
+    q = a.resize(p, n)
     (q == null_ptr() && n > 0).then({
         panic("compiler: out of memory")
     })
@@ -70,7 +70,7 @@ resize_or_die*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
 }
 write_str* = (dst: RawPtr<u8>, at: i64, t: StringView) i64 { dst.write_str_at(at, t, 0) }
 write_str_at = (dst: RawPtr<u8>, at: i64, t: StringView, i: i64) i64 {
-    k := i
+    k ::= i
     @while (load(offset(t, k)) != 0) {
         dst.offset(at + k).store(load(offset(t, k)))
         k = k + 1
@@ -100,14 +100,14 @@ gstr_grow<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
     )
 }
 gstr_reserve<A> = (a: MutPtr<A>, s: String, need: i64) String {
-    out := s
+    out ::= s
     (s.len + need > s.cap).then({
         out = a.gstr_grow(s, (s.cap + need) * 2)
     })
     out
 }
 gstr_push*<A> = (s: String, a: MutPtr<A>, b: u8) String {
-    r := a.gstr_reserve(s, 1)
+    r = a.gstr_reserve(s, 1)
     r.ptr.offset(r.len).store(b)
     String(
         ptr: r.ptr,
@@ -121,7 +121,7 @@ gstr_push*<A> = (s: String, a: MutPtr<A>, b: u8) String {
 // The [u8] form is the primitive: a caller that already knows the length (a String, a sub-slice)
 // appends without re-measuring; the StringView form pays its one unavoidable strlen in view().
 gstr_append_bytes*<A> = (s: String, a: MutPtr<A>, bs: [u8]) String {
-    r := a.gstr_reserve(s, bs.len)
+    r = a.gstr_reserve(s, bs.len)
     bs.loop((h, i, b) {
         r.ptr.offset(r.len + i).store(b)
     })
@@ -433,38 +433,23 @@ tstring_view* = () Ty { .StringView }
 tstring_cstr* = () Ty { .StringCstr }
 tstring_literal* = () Ty { .StringLiteral }
 tstr* = () Ty { .StringView }    // deprecated alias → StringView
-slet* = (nm: StringView, v: Ptr<Expr>) Stmt {
-    .Let(LetData(
-        name: nm,
-        ty: tvoid(),
-        value: v,
-        pos: 0,
-    ))
-}
-slett* = (nm: StringView, t: Ty, v: Ptr<Expr>) Stmt {
-    .Let(LetData(
-        name: nm,
-        ty: t,
-        value: v,
-        pos: 0,
-    ))
-}    // a TYPED let
-slet_at* = (nm: StringView, v: Ptr<Expr>, p: i32) Stmt {
-    .Let(LetData(
-        name: nm,
-        ty: tvoid(),
-        value: v,
-        pos: p,
-    ))
-}    // source-backed let (formatter needs the name position)
-slett_at* = (nm: StringView, t: Ty, v: Ptr<Expr>, p: i32) Stmt {
+// The ONE Let constructor: `m` records the source's `::` mutability mark. Every synthesized let
+// (temps, or_return payloads, inliner binds) goes through the `m`-less wrappers below and is MUTABLE
+// — a compiler-generated name has no source spelling to enforce, and the const rule is a rule about
+// what the USER wrote.
+slett_atm* = (nm: StringView, t: Ty, v: Ptr<Expr>, p: i32, m: bool) Stmt {
     .Let(LetData(
         name: nm,
         ty: t,
         value: v,
         pos: p,
+        mut: m,
     ))
 }
+slet* = (nm: StringView, v: Ptr<Expr>) Stmt { slett_atm(nm, tvoid(), v, 0, true) }
+slett* = (nm: StringView, t: Ty, v: Ptr<Expr>) Stmt { slett_atm(nm, t, v, 0, true) }    // a TYPED let
+slet_at* = (nm: StringView, v: Ptr<Expr>, p: i32) Stmt { slett_atm(nm, tvoid(), v, p, true) }    // source-backed let (formatter needs the name position)
+slett_at* = (nm: StringView, t: Ty, v: Ptr<Expr>, p: i32) Stmt { slett_atm(nm, t, v, p, true) }
 sret* = (v: Ptr<Expr>) Stmt { .Return(v) }
 sexpr* = (v: Ptr<Expr>) Stmt { .ExprStmt(v) }    // a bare expression evaluated for effect
 sassign* = (tgt: Ptr<Expr>, v: Ptr<Expr>) Stmt {
@@ -656,55 +641,42 @@ dimpl_at* = (ty: StringView, trname: StringView, trty: Ty, methods: [Param], pos
         pos: pos,
     ))
 }
-dglobal* = (name: StringView, ty: Ty, init: Ptr<Expr>) Decl {
+// The ONE global constructor: `m` records the `::` mutability mark, mirroring slett_atm for locals.
+// A module ALIAS (`m = std.mod`) and a synthesized global are constants — neither has a source
+// spelling that could mark them mutable.
+dglobal_full* = (
+    name: StringView,
+    ty: Ty,
+    init: Ptr<Expr>,
+    p: i32,
+    tl: bool,
+    alias: bool,
+    m: bool,
+) Decl {
     .DGlobal(GlobalData(
         name: name,
         ty: ty,
         init: init,
-        tl: false,
-        alias: false,
-        pos: 0,
+        tl: tl,
+        alias: alias,
+        pos: p,
+        mut: m,
     ))
+}
+dglobal* = (name: StringView, ty: Ty, init: Ptr<Expr>) Decl {
+    dglobal_full(name, ty, init, 0, false, false, true)
 }
 dglobal_tl* = (name: StringView, ty: Ty, init: Ptr<Expr>) Decl {
-    .DGlobal(GlobalData(
-        name: name,
-        ty: ty,
-        init: init,
-        tl: true,
-        alias: false,
-        pos: 0,
-    ))
+    dglobal_full(name, ty, init, 0, true, false, true)
 }
 dglobal_at* = (name: StringView, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
-    .DGlobal(GlobalData(
-        name: name,
-        ty: ty,
-        init: init,
-        tl: false,
-        alias: false,
-        pos: p,
-    ))
+    dglobal_full(name, ty, init, p, false, false, true)
 }
 dglobal_tl_at* = (name: StringView, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
-    .DGlobal(GlobalData(
-        name: name,
-        ty: ty,
-        init: init,
-        tl: true,
-        alias: false,
-        pos: p,
-    ))
+    dglobal_full(name, ty, init, p, true, false, true)
 }
 dglobal_alias_at* = (name: StringView, ty: Ty, init: Ptr<Expr>, p: i32) Decl {
-    .DGlobal(GlobalData(
-        name: name,
-        ty: ty,
-        init: init,
-        tl: false,
-        alias: true,
-        pos: p,
-    ))
+    dglobal_full(name, ty, init, p, false, true, false)
 }    // source-backed module-alias
 dtraitdef* = (trname: StringView, fn: Func) Decl {
     .DTraitDefault(TraitDefData(
@@ -715,14 +687,14 @@ dtraitdef* = (trname: StringView, fn: Func) Decl {
 // `t` boxed into a fresh 1-element heap cell — THE way a Ty child (Ptr pointee, Slice elem,
 // FnT ret) is attached to its parent, since the AST recurses through Ptr<Ty>.
 tnode* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
-    buf := cbuf<Ty>(a, 1)
+    buf ::= cbuf<Ty>(a, 1)
     buf[0] = t
     buf[0].addr()
 }
 // the FnT SIGNATURE of a function (its param types + ret) — used to give a default-bodied trait method
 // a Field type so conformance sees a normal method signature. Allocates a [Ty] of the param types.
 fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
-    buf := cbuf<Ty>(a, ps.len)
+    buf ::= cbuf<Ty>(a, ps.len)
     ps.loop((h, i, p) {
         buf[i] = p.ty
     })
@@ -793,8 +765,8 @@ cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
 // the C type name of a Ty as a plain string — used to substitute `sizeof(T)` in a generic body
 // (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
 ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) StringView {
-    n := t.cname_len()
-    buf: RawPtr<u8> := a.acquire_or_die(n + 1)
+    n = t.cname_len()
+    buf: RawPtr<u8> = a.acquire_or_die(n + 1)
     buf.finish_buf(buf.cname_write(0, t))
 }
 // ── type substitution (tparam→arg): shared by compiler.check (subst_ty_in/find_genenum) and the
@@ -802,7 +774,7 @@ ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) StringView {
 //    substitution + the generic-enum lookup; they're TYPE helpers, so they live in the base. ──
 // substitute tparam→arg in a type (recursing Ptr/Slice); a Named that IS a tparam becomes its arg.
 tparam_arg = (tparams: [Param], args: [Ty], n: StringView, dflt: Ty) Ty {
-    found := dflt
+    found ::= dflt
     tparams.loop((h, i, tp) {
         // Guard `i < args.len`: a WRONG-ARITY explicit targ list (too few `<…>` args for the declared
         // tparams) would otherwise index past `args` and panic. Leave an un-pinned tparam lenient here;
@@ -823,7 +795,7 @@ subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
 }
 // substitute tparam→arg inside a function type `(S, i32) S` -> `(AppState, i32) AppState`.
 subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty {
-    ptys := cbuf<Ty>(a, ft.params.len)
+    ptys ::= cbuf<Ty>(a, ft.params.len)
     ft.params.loop((h, i, p) {
         ptys[i] = a.subst_ty_in(tparams, args, p)
     })
@@ -833,14 +805,14 @@ subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty
 subst_generic_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], g: GenericData) Ty {
     // `tys` (not `buf`): mangle_str_in inlines a local `buf: RawPtr<u8>`, and the inliner
     // substitutes args by name — a caller arg also named `buf` would be captured by that local.
-    tys := cbuf<Ty>(a, g.args.len)
+    tys ::= cbuf<Ty>(a, g.args.len)
     g.args.loop((h, i, gt) {
         tys[i] = a.subst_ty_in(tparams, args, gt)
     })
     tgeneric(g.name, tys, a.mangle_str_in(g.name, tys))
 }
 find_genenum* = (decls: [Decl], name: StringView) GenEnumDecl {
-    found := GenEnumDecl(
+    found ::= GenEnumDecl(
         name: "",
         tparams: slice(null_ptr(), 0),
         variants: slice(null_ptr(), 0),

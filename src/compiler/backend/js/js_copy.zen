@@ -49,7 +49,7 @@ jsc_mode = (t: Ty, depth: i32) i32 {
 }
 // a declared struct/enum copies; anything else named (a foreign or opaque type) shares.
 jsc_name_mode = (n: StringView, depth: i32) i32 {
-    r := jsc_share()
+    r ::= jsc_share()
     js_size_decls().loop((h, i, d) {
         r = d.match ({
             .DStruct(sd) => (sd.name == n).then({ jsc_fields_mode(sd.fields, depth) }, { r }),
@@ -60,14 +60,14 @@ jsc_name_mode = (n: StringView, depth: i32) i32 {
     r
 }
 jsc_fields_mode = (fs: [Field], depth: i32) i32 {
-    m := jsc_spread()
+    m ::= jsc_spread()
     fs.loop((h, i, f) {
         m = (jsc_mode(f.ty, depth + 1) == jsc_share()).then({ m }, { jsc_walk() })
     })
     m
 }
 jsc_variants_mode = (vs: [VariantDef], depth: i32) i32 {
-    m := jsc_spread()
+    m ::= jsc_spread()
     vs.loop((h, i, v) {
         m = (jsc_mode(v.payload, depth + 1) == jsc_share()).then({ m }, { jsc_walk() })
     })
@@ -85,7 +85,7 @@ jsc_ty_name = (t: Ty) StringView {
 }
 // wrap an emitted expression in its copy: `__zr.cp(e)` / `__zc_T(e)` / `e` unchanged.
 js_cp_open* = (s: String, a: MutPtr<Malloc>, t: Ty) String {
-    m := js_cp_mode(t)
+    m = js_cp_mode(t)
     (m == jsc_spread()).then({
         return s.gstr_append(a, "__zr.cp(")
     })
@@ -98,7 +98,7 @@ js_cp_close* = (s: String, a: MutPtr<Malloc>, t: Ty) String {
 // One `function __zc_<Name>(x)` per declared type that has a field to copy. Emitted at the top of the
 // module; JS hoists function declarations, so a global initializer may already call one.
 js_copy_defs* = (s: String, a: MutPtr<Malloc>) String {
-    out := s
+    out ::= s
     js_size_decls().loop((h, i, d) {
         out = d.match ({
             .DStruct(sd) => (jsc_fields_mode(sd.fields, 0) == jsc_walk()).match ({
@@ -115,7 +115,7 @@ js_copy_defs* = (s: String, a: MutPtr<Malloc>) String {
     out
 }
 jsc_struct_def = (s: String, a: MutPtr<Malloc>, sd: StructDecl) String {
-    out := s
+    out ::= s
         .gstr_append(a, "function __zc_")
         .gstr_append(a, sd.name)
         .gstr_append(a, "(x) { return ({ ...x")
@@ -141,7 +141,7 @@ jsc_field_copy = (s: String, a: MutPtr<Malloc>, f: Field) String {
 // an enum is `{ tag, <Variant>: payload }`: spread the tag, and override only the payload of the
 // variants that carry something to copy — a `.None` must not grow a payload key it never had.
 jsc_enum_def = (s: String, a: MutPtr<Malloc>, ed: EnumDecl) String {
-    out := s
+    out ::= s
         .gstr_append(a, "function __zc_")
         .gstr_append(a, ed.name)
         .gstr_append(a, "(x) { switch (x.tag) { ")
@@ -166,8 +166,8 @@ jsc_variant_case = (s: String, a: MutPtr<Malloc>, v: VariantDef) String {
 // ── decl lookups the type reconstruction (js_expr.js_ty_of) needs ─────────────────────────────────
 // `obj.field` where obj is a struct — or, after genc's `.u` union level, an enum PAYLOAD (`subj.u.Ok`).
 jsc_member_ty* = (t: Ty, field: StringView) Ty {
-    n := jsc_ty_name(t)
-    r := tvoid()
+    n = jsc_ty_name(t)
+    r ::= tvoid()
     js_size_decls().loop((h, i, d) {
         r = d.match ({
             .DStruct(sd) => (sd.name == n).then({ jsc_field_ty(sd.fields, field) }, { r }),
@@ -178,14 +178,14 @@ jsc_member_ty* = (t: Ty, field: StringView) Ty {
     r
 }
 jsc_field_ty = (fs: [Field], name: StringView) Ty {
-    r := tvoid()
+    r ::= tvoid()
     fs.loop((h, i, f) {
         r = (f.name == name).then({ f.ty }, { r })
     })
     r
 }
 jsc_payload_ty = (vs: [VariantDef], name: StringView) Ty {
-    r := tvoid()
+    r ::= tvoid()
     vs.loop((h, i, v) {
         r = (v.name == name).then({ v.payload }, { r })
     })
@@ -193,7 +193,7 @@ jsc_payload_ty = (vs: [VariantDef], name: StringView) Ty {
 }
 // the payload a match arm BINDS (`.Ok(v) => …`), by enum name.
 js_variant_ty* = (ename: StringView, variant: StringView) Ty {
-    r := tvoid()
+    r ::= tvoid()
     js_size_decls().loop((h, i, d) {
         r = d.match ({
             .DEnum(ed) => (ed.name == ename).then({ jsc_payload_ty(ed.variants, variant) }, { r }),
@@ -207,7 +207,7 @@ js_init_ty* = (sname: StringView, field: StringView) Ty { jsc_member_ty(tnamed(s
 // the return type of a DEFINED function, and whether the name is one. A call to a defined function
 // yields a FRESH value (its `return` copies), which is what lets a sink elide its own copy.
 js_func_ret* = (name: StringView) Ty {
-    r := tvoid()
+    r ::= tvoid()
     js_size_decls().loop((h, i, d) {
         r = d.match ({
             .DFunc(f) => (f.name == name).then({ f.ret }, { r }),
@@ -217,7 +217,7 @@ js_func_ret* = (name: StringView) Ty {
     r
 }
 js_is_defined_fn* = (name: StringView) bool {
-    found := false
+    found ::= false
     js_size_decls().loop((h, i, d) {
         found = found
             || d.match ({

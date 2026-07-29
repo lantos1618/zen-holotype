@@ -26,7 +26,7 @@
 { view } = std.text.str
 // fgets reads at most CHUNK-1 bytes per call (stopping at a newline), NUL-terminating the buffer; the
 // recursive loop reassembles the full stream across calls, so this is a throughput knob, not a cap.
-CHUNK := 4096
+CHUNK = 4096
 // A finished subprocess: its captured stdout and decoded exit code.
 Output*: {
     stdout: StringView,
@@ -35,13 +35,13 @@ Output*: {
 // Decode a pclose/waitpid status into a plain exit code: WEXITSTATUS (`status >> 8 & 0xff`) for a
 // normal exit, or 128 + signal number when the child was terminated by a signal (the low 7 bits).
 decode_exit = (status: i64) i64 {
-    sig := status & 127
+    sig = status & 127
     (sig == 0).then({ status >> 8 & 255 }, { 128 + sig })
 }
 // Drain the pipe `f` into builder `s`, one fgets chunk at a time (recursive — no `@while`). fgets
 // returns NULL at end-of-stream; each non-NULL chunk is a NUL-terminated str appended onto `s`.
 drain = (a: Allocator, f: RawPtr<u8>, chunk: RawPtr<u8>, s: String) Result<String, IoError> {
-    got := chunk.fgets(to_i32(CHUNK), f)
+    got = chunk.fgets(to_i32(CHUNK), f)
     (got == null_ptr()).match ({
         true  => ok(s),
         false => a.append_in(s, cstr(chunk)).match ({
@@ -65,7 +65,7 @@ capture = (a: Allocator, f: RawPtr<u8>) Result<Output, IoError> {
                 err(e)
             },
             .Ok(s0) => {
-                out: Result<Output, IoError> := a.drain(f, chunk, s0).match ({
+                out: Result<Output, IoError> = a.drain(f, chunk, s0).match ({
                     .Err(e) => {
                         a.release(chunk)
                         f.pclose()
@@ -79,7 +79,7 @@ capture = (a: Allocator, f: RawPtr<u8>) Result<Output, IoError> {
                         },
                         .Ok(text) => {
                             a.release(chunk)
-                            status := to_i64(f.pclose())
+                            status = to_i64(f.pclose())
                             (status < 0).match ({
                                 true  => err(IoError.Errno(0 - 1)),
                                 false => ok(Output(
@@ -101,7 +101,7 @@ capture = (a: Allocator, f: RawPtr<u8>) Result<Output, IoError> {
 // reclaim it). A nonzero exit is NOT an error here: it rides back in `Output.exit` for the caller to
 // inspect (use `run_ok` when a nonzero exit should be an error).
 run* = (a: Allocator, cmd: StringView) Result<Output, IoError> {
-    f := cmd.popen("r")
+    f = cmd.popen("r")
     (f == null_ptr()).then({ err(IoError.NotFound) }, { a.capture(f) })
 }
 // Convenience: run `cmd` and return its stdout, treating a nonzero exit as `.Err(.Errno(code))`. For

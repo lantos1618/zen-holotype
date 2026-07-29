@@ -49,8 +49,8 @@
 // dispatch ONE category by name (child mode). Unknown names FAIL loudly — a typo in the parent's
 // suite list must never become a silently-green suite.
 hp_run_cat = (name: StringView) i32 {
-    ran := false
-    fails := 0
+    ran ::= false
+    fails ::= 0
     (name == "value").then({
         ran = true
         fails = harness_value_run()
@@ -131,7 +131,7 @@ hp_run_cat = (name: StringView) i32 {
 // the 16-core dev box — each child fans its own case pipelines out over ZO_NWORKERS workers, so the
 // pool must stay well under nproc or the box thrashes on fork pressure). Env ZO_SUITE_POOL overrides.
 hp_pool = () i64 {
-    e := getEnv("ZO_SUITE_POOL")
+    e = getEnv("ZO_SUITE_POOL")
     is_empty(e).match ({
         true  => 6,
         false => try_parse_int(e).match ({
@@ -144,7 +144,7 @@ hp_pool = () i64 {
 // pool×inner beyond ~3×nproc buys nothing and piles up fork memory; 4 starves the build/modules
 // suites whose case pipelines block on cc). Env ZO_SUITE_INNER overrides for tuning.
 hp_inner = () i64 {
-    e := getEnv("ZO_SUITE_INNER")
+    e = getEnv("ZO_SUITE_INNER")
     is_empty(e).match ({
         true  => 8,
         false => try_parse_int(e).match ({
@@ -164,13 +164,13 @@ hp_suite_cmd = (
     inner: StringView,
     cache: StringView,
 ) StringView {
-    z: StringView := ""    // str-typed lead so the mixed literal/variable array infers as [str]
-    d := mp.zo_dir()
+    z: StringView = ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    d = mp.zo_dir()
     mp.zo_join([z, "mkdir -p ", cache, "; ZENC_CACHE_DIR=", cache, " ZO_NWORKERS=", inner, " ZEN_HARNESS_SUITE=", name, " ", self, " > ", d, "/s_", name, ".out 2>&1; echo $? > ", d, "/s_", name, ".rc"])
 }
 // membership test: is `needle` present in `hay`? (match-only, no early break — the lists are tiny).
 hp_list_has = (hay: [StringLiteral], needle: StringLiteral) bool {
-    found := false
+    found ::= false
     hay.loop((h, i, s) {
         (s == needle).then({
             found = true
@@ -185,7 +185,7 @@ hp_list_has = (hay: [StringLiteral], needle: StringLiteral) bool {
 // set-equality (same length AND mutual membership), names the offending suite, and returns the count
 // of discrepancies (0 == the two lists agree).
 hp_assert_sched_order = (mp: MutPtr<Malloc>, sched: [StringLiteral], order: [StringLiteral]) i32 {
-    bad := 0
+    bad ::= 0
     sched.loop((h, i, s) {
         (hp_list_has(order, s) == false).then({
             out("harness: SCHED/ORDER MISMATCH — suite '")
@@ -215,24 +215,24 @@ hp_assert_sched_order = (mp: MutPtr<Malloc>, sched: [StringLiteral], order: [Str
 // FULL run, parallel at the suite level: fan the categories out as child processes through a bounded
 // pool, then print each suite's captured block in the ORIGINAL serial order and count failed suites.
 hp_run_parallel = () i32 {
-    m := Malloc(_: 0)
-    mp := m.addr()
+    m = Malloc(_: 0)
+    mp = m.addr()
     // SCHEDULING order — longest poles first so the pool never idles into a tail (measured on the
     // 16-core dev box: build ~32s, modules ~30s, misc ~15s, fmt_roundtrip/fixpoint ~12s, rest ≤3s).
-    sched := ["build", "modules", "misc", "fmt_roundtrip", "fixpoint", "stdsurface", "value", "argparse", "verdict", "datetime", "boundaries", "fuzz", "lsp", "sort", "rand", "iter", "math"]
+    sched = ["build", "modules", "misc", "fmt_roundtrip", "fixpoint", "stdsurface", "value", "argparse", "verdict", "datetime", "boundaries", "fuzz", "lsp", "sort", "rand", "iter", "math"]
     // PRINTING order — the exact order the old serial harness ran, so the report reads identically.
     // Declared up here (not just before the tally loop) so the sched≡order guard can run at startup,
     // BEFORE any suite is scheduled: a mismatch is a wiring bug, so fail loudly and run nothing.
-    order := ["value", "verdict", "modules", "build", "boundaries", "misc", "fuzz", "argparse", "datetime", "fmt_roundtrip", "lsp", "stdsurface", "sort", "rand", "iter", "math", "fixpoint"]
-    mismatch := mp.hp_assert_sched_order(sched, order)
+    order = ["value", "verdict", "modules", "build", "boundaries", "misc", "fuzz", "argparse", "datetime", "fmt_roundtrip", "lsp", "stdsurface", "sort", "rand", "iter", "math", "fixpoint"]
+    mismatch = mp.hp_assert_sched_order(sched, order)
     (mismatch == 0 == false).then({
         out("harness: refusing to run — sched/order lists disagree (see above)\n")
         return mismatch
     })
-    n := sched.len
-    z: StringView := ""    // str-typed lead so the mixed literal/variable array infers as [str]
-    self := mp.zo_join([z, "/proc/", mp.zo_itoa(getpid().to_i64()), "/exe"])
-    inner := mp.zo_itoa(hp_inner())    // per-child case workers (see hp_inner)
+    n = sched.len
+    z: StringView = ""    // str-typed lead so the mixed literal/variable array infers as [str]
+    self = mp.zo_join([z, "/proc/", mp.zo_itoa(getpid().to_i64()), "/exe"])
+    inner = mp.zo_itoa(hp_inner())    // per-child case workers (see hp_inner)
     // ONE warm ZENC_CACHE_DIR shared by every suite child, PERSISTENT across runs (env
     // ZO_HARNESS_CACHE_DIR overrides — point it into the run's scratch dir to force a cold run).
     // Sharing/persisting is safe: entries are CONTENT-keyed (running-compiler binary hash + full
@@ -244,17 +244,17 @@ hp_run_parallel = () i32 {
     // dir — those cases stay exactly as cold as they demand (see harness_build's
     // project_ffi_report_mode for the one output-mode case that NEEDS a cold check).
     // Stale-compiler entries accumulate across rebuilds, so a size guard wipes the dir past ~2GB.
-    warm0 := getEnv("ZO_HARNESS_CACHE_DIR")
-    warm := is_empty(warm0).then({ "/tmp/zo-harness-cache" }, { warm0 })
+    warm0 = getEnv("ZO_HARNESS_CACHE_DIR")
+    warm = is_empty(warm0).then({ "/tmp/zo-harness-cache" }, { warm0 })
     shell(mp.zo_join([z, "mkdir -p ", warm, "; test \"$(du -sm ", warm, " 2>/dev/null | cut -f1)\" -gt 2048 2>/dev/null && rm -rf ", warm, "; true"]))
-    base := assert_nonnull(malloc(n * 8))
-    cmds: [StringView] := base.slice(n)
+    base = assert_nonnull(malloc(n * 8))
+    cmds :: [StringView] = base.slice(n)
     sched.loop((h, i, s) {
         cmds[i] = mp.hp_suite_cmd(self, s, inner, warm)
     })
     zo_par_run_n(cmds, n, hp_pool())
     free(base)
-    fails := 0
+    fails ::= 0
     order.loop((h, i, s) {
         mp.contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".out"])).match ({
             .Ok(txt) => out(txt),
@@ -264,7 +264,7 @@ hp_run_parallel = () i32 {
                 out("': no captured output (child crashed before writing?)\n")
             },
         })
-        ok := mp.contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".rc"])).match ({
+        ok = mp.contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".rc"])).match ({
             .Ok(t)  => t.starts_with("0"),
             .Err(e) => false,
         })    // missing exit marker = the child never finished — a failure, never a silent pass
@@ -282,9 +282,9 @@ main* = () i32 {
     zo_ensure()
     // CHILD mode (env ZEN_HARNESS_SUITE=<cat>): run exactly that category and exit 0/1. The parent
     // captures this process's whole output; it must NOT print the final ALL PASS/FAILURES verdict.
-    suite := getEnv("ZEN_HARNESS_SUITE")
+    suite = getEnv("ZEN_HARNESS_SUITE")
     (is_empty(suite) == false).then({
-        f := hp_run_cat(suite)
+        f = hp_run_cat(suite)
         zo_cleanup()
         return (f == 0).then({ 0 }, { 1 })
     })
@@ -292,8 +292,8 @@ main* = () i32 {
     // deterministic correctness suites (value + verdict) in-process and skip the slow subprocess-heavy
     // ones (modules ~90s of multi-file builds, build/boundaries/misc/fuzz, + the full self-host
     // fixpoint). For inner-loop iteration; the full `make harness` stays the merge gate.
-    fast := is_empty(getEnv("ZEN_HARNESS_FAST")).then({ false }, { true })
-    fails := fast.then({ harness_value_run() + harness_verdict_run() }, { hp_run_parallel() })
+    fast = is_empty(getEnv("ZEN_HARNESS_FAST")).then({ false }, { true })
+    fails = fast.then({ harness_value_run() + harness_verdict_run() }, { hp_run_parallel() })
     // remove this run's private scratch dir (unique per pid, so cleanup is best-effort housekeeping).
     zo_cleanup()
     (fails == 0).match ({
