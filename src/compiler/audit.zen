@@ -20,7 +20,7 @@
 { ResolvedProgram, ModuleEntry, eprint, seen_name, add_name } = compiler.resolve
 { edges_of, cache_module_path } = compiler.modgraph
 { say, cstr_range, eprint, push_int, dir_exists, resolve_prog_or_exit, dirname } = compiler.drvutil
-{ times, upto } = std.core.count
+{ times, upto, advance_while, repeat_while, step_while } = std.core.count
 // ── zen audit — dead-code + unused-import + clone reporter (`--strict` exits 1; clones advisory) ──
 // Dead-decl analysis runs over the SAME whole-program pipeline `check` uses (resolve imports ->
 // parse -> resolve_module), so alias qualification, UFCS dispatch and trait-default materialization
@@ -126,13 +126,13 @@ aud_index* = (mp: MutPtr<Malloc>, ds: [Decl]) Map<i64> {
 aud_tail_at* = (name: StringView) i64 {
     v: [u8] = name.view()
     best ::= 0 - 1
-    i ::= 1
-    @while (i + 1 < v.len) {
+    one: i64 = 1
+    one.step_while((i) { i + 1 < v.len }, (i) {
         (v[i] == '_' && v[i + 1] == '_').then({
             best = i + 2
         })
-        i = i + 1
-    }
+        i + 1
+    })
     best
 }
 // mark `name` live and (once) walk both its raw and resolved decls; a live TYPE also keeps every
@@ -647,17 +647,17 @@ AudFinding: {
 aud_strcmp = (a: StringView, b: StringView) i64 {
     av: [u8] = a.view()
     bv: [u8] = b.view()
-    i ::= 0
     r ::= 0
-    @while (r == 0 && i < av.len && i < bv.len) {
+    zero: i64 = 0
+    zero.step_while((i) { r == 0 && i < av.len && i < bv.len }, (i) {
         (av[i] < bv[i]).then({
             r = 0 - 1
         })
         (av[i] > bv[i]).then({
             r = 1
         })
-        i = i + 1
-    }
+        i + 1
+    })
     (r == 0 && av.len < bv.len).then({
         r = 0 - 1
     })
@@ -675,11 +675,10 @@ aud_lt = (a: AudFinding, b: AudFinding) bool {
 aud_sort = (fb: [AudFinding], n: i64) void {
     1.upto(n, (i) {
         x = fb[i]
-        j ::= i - 1
-        @while (j >= 0 && x.aud_lt(fb[j])) {
-            fb[j + 1] = fb[j]
-            j = j - 1
-        }
+        j = (i - 1).step_while((p) { p >= 0 && x.aud_lt(fb[p]) }, (p) {
+            fb[p + 1] = fb[p]
+            p - 1
+        })
         fb[j + 1] = x
     })
 }
@@ -717,44 +716,31 @@ AudImp: {
 // 1-based line of byte `pos` (iterative — module sources are hundreds of KB).
 aud_line_of = (v: [u8], pos: i64) i64 {
     ln ::= 1
-    i ::= 0
-    @while (i < pos && i < v.len) {
+    zero: i64 = 0
+    zero.step_while((i) { i < pos && i < v.len }, (i) {
         (v[i] == '\n').then({
             ln = ln + 1
         })
-        i = i + 1
-    }
+        i + 1
+    })
     ln
 }
 // end of an import statement's span: from `{` past the matching `}`, the `=`, and the dotted path.
 aud_imp_span_hi = (v: [u8], pos: i64) i64 {
-    i ::= pos
-    @while (i < v.len && v[i] != '}') {
-        i = i + 1
-    }
-    i = i + 1
-    @while (i < v.len && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '=')) {
-        i = i + 1
-    }
-    @while (i < v.len && (v[i].is_alnum() || v[i] == '.')) {
-        i = i + 1
-    }
-    i
+    brace = pos.advance_while((p) { p < v.len && v[p] != '}' }) + 1
+    dot = brace.advance_while((p) {
+        p < v.len && (v[p] == ' ' || v[p] == '\t' || v[p] == '\n' || v[p] == '=')
+    })
+    dot.advance_while((p) { p < v.len && (v[p].is_alnum() || v[p] == '.') })
 }
 // identifier token [s,e) equals `nv`?
 aud_tok_eq = (v: [u8], s: i64, e: i64, nv: [u8]) bool {
     ok ::= nv.len == e - s
-    k ::= 0
-    @while (ok && k < nv.len) {
-        (v[s + k] == nv[k]).match ({
-            true  => {
-                k = k + 1
-            },
-            false => {
-                ok = false
-            },
-        })
-    }
+    zero: i64 = 0
+    zero.step_while((k) { ok && k < nv.len }, (k) {
+        ok = v[s + k] == nv[k]
+        k + 1
+    })
     ok
 }
 // does token [s,e) equal any credited trait-method name?
@@ -785,38 +771,23 @@ aud_step = (ents: [AudImp], nents: i64, v: [u8], i0: i64) i64 {
     n = v.len
     b = v[i0]
     (b == '/' && i0 + 1 < n && v[i0 + 1] == '/').then({
-        i ::= i0 + 2
-        @while (i < n && v[i] != '\n') {
-            i = i + 1
-        }
-        return i + 1
+        return (i0 + 2).advance_while((i) { i < n && v[i] != '\n' }) + 1
     })
     (b == '/' && i0 + 1 < n && v[i0 + 1] == '*').then({
-        i ::= i0 + 2
-        @while (i + 1 < n && (v[i] == '*' && v[i + 1] == '/') == false) {
-            i = i + 1
-        }
-        return i + 2
+        return (i0 + 2).advance_while((i) { i + 1 < n && (v[i] == '*' && v[i + 1] == '/') == false }) + 2
     })
     (b == '"').then({
-        i ::= i0 + 1
-        @while (i < n && v[i] != '"') {
-            i = (v[i] == '\\').then({ i + 2 }, { i + 1 })
-        }
-        return i + 1
+        return (i0 + 1).step_while((i) { i < n && v[i] != '"' }, (i) {
+            (v[i] == '\\').then({ i + 2 }, { i + 1 })
+        }) + 1
     })
     (b == '\'').then({
-        i ::= i0 + 1
-        @while (i < n && v[i] != '\'') {
-            i = (v[i] == '\\').then({ i + 2 }, { i + 1 })
-        }
-        return i + 1
+        return (i0 + 1).step_while((i) { i < n && v[i] != '\'' }, (i) {
+            (v[i] == '\\').then({ i + 2 }, { i + 1 })
+        }) + 1
     })
     b.is_alpha().then({
-        i ::= i0 + 1
-        @while (i < n && v[i].is_alnum()) {
-            i = i + 1
-        }
+        i = (i0 + 1).advance_while((p) { p < n && v[p].is_alnum() })
         ents.aud_mark_used(nents, v, i0, i)
         return i
     })
@@ -909,10 +880,8 @@ aud_mod_imports = (
             _             => { },
         })
     })
-    i :: i64 = 0
-    @while (i < v.len) {
-        i = ents.aud_step(k, v, i)
-    }
+    zero: i64 = 0
+    zero.step_while((i) { i < v.len }, (i) { ents.aud_step(k, v, i) })
     n ::= n0
     k.times((j) {
         en = ents[j]
@@ -1198,11 +1167,10 @@ aud_join_path = (mp: MutPtr<Malloc>, dir: StringView, nm: StringView) StringView
 aud_sortp = (fs: [StringView], n: i64) void {
     1.upto(n, (i) {
         x = fs[i]
-        j ::= i - 1
-        @while (j >= 0 && x.aud_strcmp(fs[j]) < 0) {
-            fs[j + 1] = fs[j]
-            j = j - 1
-        }
+        j = (i - 1).step_while((p) { p >= 0 && x.aud_strcmp(fs[p]) < 0 }, (p) {
+            fs[p + 1] = fs[p]
+            p - 1
+        })
         fs[j + 1] = x
     })
 }
@@ -1212,20 +1180,25 @@ AUD_DNAME = 19
 aud_walk_tree = (mp: MutPtr<Malloc>, dir: StringView, wf: MutPtr<AudWsFiles>) void {
     d = opendir(dir)
     (d == null_ptr() == false).then({
-        e ::= readdir(d)
-        @while (e != null_ptr()) {
-            nm = cstr(e.offset(AUD_DNAME))
-            ((nm.starts_with(".") || nm == "fixtures") == false).then({
-                full = mp.aud_join_path(dir, nm)
-                dir_exists(full).match ({
-                    true  => mp.aud_walk_tree(full, wf),
-                    false => full.ends_with(".zen").then({
-                        wf.aud_ws_addf(full)
-                    }),
-                })
-            })
+        repeat_while((n) {
             e = readdir(d)
-        }
+            (e == null_ptr()).match ({
+                true  => false,
+                false => {
+                    nm = cstr(e.offset(AUD_DNAME))
+                    ((nm.starts_with(".") || nm == "fixtures") == false).then({
+                        full = mp.aud_join_path(dir, nm)
+                        dir_exists(full).match ({
+                            true  => mp.aud_walk_tree(full, wf),
+                            false => full.ends_with(".zen").then({
+                                wf.aud_ws_addf(full)
+                            }),
+                        })
+                    })
+                    true
+                },
+            })
+        })
         closedir(d)
     })
 }
@@ -1235,8 +1208,8 @@ aud_has_main = (src: StringView) bool {
     v: [u8] = src.view()
     found ::= false
     bol ::= true
-    i ::= 0
-    @while (found == false && i < v.len) {
+    zero: i64 = 0
+    zero.step_while((i) { found == false && i < v.len }, (i) {
         (bol
             && i + 4 < v.len
             && v[i] == 'm'
@@ -1244,20 +1217,16 @@ aud_has_main = (src: StringView) bool {
             && v[i + 2] == 'i'
             && v[i + 3] == 'n'
             && v[i + 4].is_alnum() == false).then({
-            j ::= i + 4
-            (j < v.len && v[j] == '*').then({
-                j = j + 1
-            })
-            @while (j < v.len && (v[j] == ' ' || v[j] == '\t')) {
-                j = j + 1
-            }    // exported entry: `main* = (...)`
+            s = i + 4
+            star = (s < v.len && v[s] == '*').then({ s + 1 }, { s })    // exported entry: `main* = (…)`
+            j = star.advance_while((p) { p < v.len && (v[p] == ' ' || v[p] == '\t') })
             (j + 1 < v.len && v[j] == '=' && v[j + 1] != '=').then({
                 found = true
             })
         })
         bol = v[i] == '\n'
-        i = i + 1
-    }
+        i + 1
+    })
     found
 }
 // one string-literal body [a,b): find import-shaped fragments. `{ x, y } = mod` aud_refs each name
@@ -1282,56 +1251,33 @@ aud_embed_lit = (
             && v[j - 1] != '<'
             && v[j - 1] != '>'
         hit.then({
-            k ::= j - 1
-            @while (k > a && (v[k] == ' ' || v[k] == '\t')) {
-                k = k - 1
-            }
-            q ::= j + 1
-            @while (q < b && (v[q] == ' ' || v[q] == '\t')) {
-                q = q + 1
-            }
-            s0 = q
-            @while (q < b && (v[q].is_alnum() || v[q] == '.')) {
-                q = q + 1
-            }
-            @while (q > s0 && v[q - 1] == '.') {
-                q = q - 1
-            }
+            k = (j - 1).step_while((p) { p > a && (v[p] == ' ' || v[p] == '\t') }, (p) { p - 1 })
+            s0 = (j + 1).advance_while((p) { p < b && (v[p] == ' ' || v[p] == '\t') })
+            end = s0.advance_while((p) { p < b && (v[p].is_alnum() || v[p] == '.') })
+            q = end.step_while((p) { p > s0 && v[p - 1] == '.' }, (p) { p - 1 })
             rhs_ok = q > s0 && v[s0].is_alpha()
             (rhs_ok && v[k] == '}').then({
                 // `{ names } = mod` — each imported name becomes a root.
-                p ::= k - 1
-                @while (p > a && v[p] != '{') {
-                    p = p - 1
-                }
+                p = (k - 1).step_while((z) { z > a && v[z] != '{' }, (z) { z - 1 })
                 (v[p] == '{').then({
-                    x ::= p + 1
-                    @while (x < k) {
+                    (p + 1).step_while((x) { x < k }, (x) {
                         v[x].is_alpha().match ({
                             true  => {
-                                x0 = x
-                                @while (x < k && v[x].is_alnum()) {
-                                    x = x + 1
-                                }
-                                ac.aud_ref(mp.cstr_range(v, x0, x))
+                                x1 = x.advance_while((z) { z < k && v[z].is_alnum() })
+                                ac.aud_ref(mp.cstr_range(v, x, x1))
+                                x1
                             },
-                            false => {
-                                x = x + 1
-                            },
+                            false => x + 1,
                         })
-                    }
+                    })
                 })
             })
             (rhs_ok && v[k].is_alnum()).then({
                 // `alias = dotted.mod` — require a dotted RHS at (embedded) line start.
-                is ::= k
-                @while (is > a && v[is - 1].is_alnum()) {
-                    is = is - 1
-                }
-                w ::= is - 1
-                @while (w > a && (v[w] == ' ' || v[w] == '\t')) {
-                    w = w - 1
-                }
+                is = k.step_while((z) { z > a && v[z - 1].is_alnum() }, (z) { z - 1 })
+                w = (is - 1).step_while((z) { z > a && (v[z] == ' ' || v[z] == '\t') }, (z) {
+                    z - 1
+                })
                 atbol = w < a || v[w] == '\n' || v[w] == 'n' && w > a && v[w - 1] == '\\'
                 dotted ::= false
                 s0.upto(q, (y) {
@@ -1353,41 +1299,32 @@ aud_embed_src = (ac: MutPtr<AudCtx>, mp: MutPtr<Malloc>, mods: Map<i64>, src: St
     v: [u8] = src.view()
     m ::= mods
     n = v.len
-    i ::= 0
-    @while (i < n) {
+    zero: i64 = 0
+    zero.step_while((i) { i < n }, (i) {
         b = v[i]
         nx ::= i + 1
         (b == '/' && i + 1 < n && v[i + 1] == '/').then({
-            j ::= i + 2
-            @while (j < n && v[j] != '\n') {
-                j = j + 1
-            }
-            nx = j + 1
+            nx = (i + 2).advance_while((j) { j < n && v[j] != '\n' }) + 1
         })
         (b == '/' && i + 1 < n && v[i + 1] == '*').then({
-            j ::= i + 2
-            @while (j + 1 < n && (v[j] == '*' && v[j + 1] == '/') == false) {
-                j = j + 1
-            }
-            nx = j + 2
+            nx = (i + 2).advance_while((j) {
+                j + 1 < n && (v[j] == '*' && v[j + 1] == '/') == false
+            }) + 2
         })
         (b == '\'').then({
-            j ::= i + 1
-            @while (j < n && v[j] != '\'') {
-                j = (v[j] == '\\').then({ j + 2 }, { j + 1 })
-            }
-            nx = j + 1
+            nx = (i + 1).step_while((j) { j < n && v[j] != '\'' }, (j) {
+                (v[j] == '\\').then({ j + 2 }, { j + 1 })
+            }) + 1
         })
         (b == '"').then({
-            j ::= i + 1
-            @while (j < n && v[j] != '"') {
-                j = (v[j] == '\\').then({ j + 2 }, { j + 1 })
-            }
+            j = (i + 1).step_while((p) { p < n && v[p] != '"' }, (p) {
+                (v[p] == '\\').then({ p + 2 }, { p + 1 })
+            })
             m = ac.aud_embed_lit(mp, m, v, i + 1, j)
             nx = j + 1
         })
-        i = nx
-    }
+        nx
+    })
     m
 }
 // does table module id `id` (loader-normalized: `u/sub/mod2`, `std/io/file`) spell the embedded
@@ -1397,19 +1334,13 @@ aud_id_matches = (id: StringView, dotted: StringView) bool {
     dv: [u8] = dotted.view()
     off = id.starts_with("u/").then({ 2 }, { 0 })
     ok ::= iv.len - off == dv.len
-    k ::= 0
-    @while (ok && k < dv.len) {
+    zero: i64 = 0
+    zero.step_while((k) { ok && k < dv.len }, (k) {
         x = iv[off + k]
         y = dv[k]
-        (x == y || x == '/' && y == '.').match ({
-            true  => {
-                k = k + 1
-            },
-            false => {
-                ok = false
-            },
-        })
-    }
+        ok = x == y || x == '/' && y == '.'
+        k + 1
+    })
     ok
 }
 // the --workspace embedded-source heuristic (#595): harness files BUILD test programs as string
