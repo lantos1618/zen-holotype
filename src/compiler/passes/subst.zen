@@ -1,8 +1,8 @@
 // compiler.passes.subst — generic substitution + xform sub-pass extracted from compiler.check.
 { ArmData, CallData, Decl, Expr, Field, FieldInit, GenStructDecl, LambdaData, MakeStructData,
   MatchData, Param, Stmt, Ty, VarData, VariantDef } = compiler.ast.ast_types
-{ cbuf, arm, arrow_at, bin_at, block, call_full, cond_oa, eindex, eloop, ematch, ematchp, finit,
-  lam_r, member_at, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, param, sassign_at,
+{ cbuf, arm, bin_at, block, call_full, cond_oa, eindex, eloop, ematch, ematchp, finit, lam_r,
+  member_at, mfield, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, param, sassign_at,
   sexpr, sidxset_at, sif, slett_at, slett_atm, slit, sret, strlit_at, subst_ty_in, swhile, tvoid,
   ty_cname_in, vref_at } = compiler.genc
 { mangle_str_in } = compiler.mangle
@@ -235,8 +235,7 @@ subst_expr = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], e: Ptr<
         .Var(v)        => a.subst_tparam_var(cs, tparams, targs, v, e),
         .Bin(b)        => a.cenode(bin_at(b.op, a.subst_expr(cs, tparams, targs, b.lhs), a.subst_expr(cs, tparams, targs, b.rhs), cs_or(cs, b.pos))),
         .Cond(d)       => a.cenode(cond_oa(a.subst_expr(cs, tparams, targs, d.c), a.subst_expr(cs, tparams, targs, d.t), a.subst_expr(cs, tparams, targs, d.e), d.oa)),
-        .Member(m)     => a.cenode(member_at(a.subst_expr(cs, tparams, targs, m.obj), m.field, cs_or(cs, m.pos))),
-        .Arrow(ar)     => a.cenode(arrow_at(a.subst_expr(cs, tparams, targs, ar.obj), ar.field, cs_or(cs, ar.pos))),
+        .Member(m)     => a.cenode(mfield(a.subst_expr(cs, tparams, targs, m.obj), m.field, cs_or(cs, m.pos), m.ptr)),
         .Call(c)       => a.cenode(call_full(c.fn, a.subst_exprs(cs, tparams, targs, c.args), a.subst_targs(tparams, targs, c.targs), cs_or(cs, c.pos), c.raw)),
         .MakeEnum(mk)  => a.subst_mkenum(tparams, targs, mk.ty, mk.targs, mk.variant, a.subst_expr(cs, tparams, targs, mk.payload)),
         .Tag(t)        => a.subst_tag(tparams, targs, t.ty, t.targs, t.variant),
@@ -650,10 +649,7 @@ xform_expr_exp = (
             out = a.cenode(cond_oa(a.xform_expr(decls, idx, d.c, params, fargs, env), a.xform_expr_exp(decls, idx, d.t, params, fargs, env, exp), a.xform_expr_exp(decls, idx, d.e, params, fargs, env, exp), d.oa))
         },
         .Member(m)      => {
-            out = a.cenode(member_at(a.xform_expr(decls, idx, m.obj, params, fargs, env), m.field, m.pos))
-        },
-        .Arrow(ar)      => {
-            out = a.cenode(arrow_at(a.xform_expr(decls, idx, ar.obj, params, fargs, env), ar.field, ar.pos))
+            out = a.cenode(mfield(a.xform_expr(decls, idx, m.obj, params, fargs, env), m.field, m.pos, m.ptr))
         },
         .MakeEnum(mk)   => {
             out = a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.xform_expr(decls, idx, mk.payload, params, fargs, env)))

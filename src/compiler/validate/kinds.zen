@@ -809,7 +809,6 @@ ka_expr_kind = (env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
             .or(env.ka_expr_kind(tparams, d.t))
             .or(env.ka_expr_kind(tparams, d.e)),
         .Member(m)      => env.ka_expr_kind(tparams, m.obj),
-        .Arrow(ar)      => env.ka_expr_kind(tparams, ar.obj),
         // unreachable-arm judged HERE on the raw arms: a STATEMENT-position match lowers to an
         // if-chain during resolve (lower_match_arms stops at `_`, silently dropping later arms),
         // so the post-inline kv pass never sees them. Purely structural — no typing involved, so
@@ -907,7 +906,6 @@ krr_any_ret_e = (e: Ptr<Expr>) bool {
         .Cond(d)       => d.c.krr_any_ret_e() || d.t.krr_any_ret_e() || d.e.krr_any_ret_e(),
         .Call(c)       => c.args.krr_any_ret_es(),
         .Member(m)     => m.obj.krr_any_ret_e(),
-        .Arrow(ar)     => ar.obj.krr_any_ret_e(),
         .MakeEnum(mk)  => mk.payload.krr_any_ret_e(),
         .MakeStruct(s) => s.inits.krr_any_ret_inits(),
         .Match(m)      => m.subj.krr_any_ret_e() || m.arms.krr_any_ret_arms(),
@@ -942,7 +940,6 @@ krr_loop_ret_e = (e: Ptr<Expr>) bool {
         .Cond(d)       => d.c.krr_loop_ret_e() || d.t.krr_loop_ret_e() || d.e.krr_loop_ret_e(),
         .Call(c)       => c.args.krr_loop_ret_es(),
         .Member(m)     => m.obj.krr_loop_ret_e(),
-        .Arrow(ar)     => ar.obj.krr_loop_ret_e(),
         .MakeEnum(mk)  => mk.payload.krr_loop_ret_e(),
         .MakeStruct(s) => s.inits.krr_loop_ret_inits(),
         .Match(m)      => m.subj.krr_loop_ret_e() || m.arms.krr_loop_ret_arms(),
@@ -1022,7 +1019,6 @@ krw_e = (e: Ptr<Expr>, ps: [Param]) i32 {
             false => c.args.krw_subj_es(c.args.len, ps),
         }),
         .Member(m)     => m.obj.krw_e(ps),
-        .Arrow(ar)     => ar.obj.krw_e(ps),
         .MakeEnum(mk)  => mk.payload.krw_e(ps),
         .MakeStruct(s) => {
             acc ::= 0
@@ -1153,7 +1149,6 @@ ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
             .or(env.ko_expr_kind(tps, want, d.t, true))
             .or(env.ko_expr_kind(tps, want, d.e, true)),
         .Member(m)      => env.ko_expr_kind(tps, want, m.obj, cnd),
-        .Arrow(ar)      => env.ko_expr_kind(tps, want, ar.obj, cnd),
         .Match(m)       => env
             .ko_expr_kind(tps, want, m.subj, cnd)
             .or(env.ko_arms_kind(tps, want, env.infer_expr(m.subj), m.arms)),
@@ -1733,10 +1728,6 @@ Env.impl(EnvKinds, {
         // own type can no longer answer and the width is read back off the value that produced it.
         load(e).match ({
             .Member(m) => (m.field == "ptr").then({ env.infer_expr(m.obj).elem_of() }, { tvoid() }),
-            .Arrow(ar) => (ar.field == "ptr").match ({
-                true  => env.infer_expr(ar.obj).elem_of(),
-                false => tvoid(),
-            }),
             .Call(c)   => (c.fn == "addr" && c.args.len == 1).match ({
                 true  => env.infer_expr(c.args[0].addr()),
                 false => tvoid(),

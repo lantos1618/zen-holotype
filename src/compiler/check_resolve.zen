@@ -5,11 +5,11 @@
 { ArmData, AssignData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, GenStructDecl,
   GenericData, GlobalData, LetData, LoopData, MakeStructData, MatchData, MemberData, Param,
   SliceData, Stmt, Ty } = compiler.ast.ast_types
-{ arith_rty, arm_at, arrow_at, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc,
-  dglobal, dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish,
-  gstr_string, is_expr_null, lit, member, member_at, mkenumg, mkstruct_at, mkstructg_at, mktag,
-  mktagg, narrow_op, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slett_atm,
-  slit, sret, subst_ty_in, swhile, tvoid, vref } = compiler.genc
+{ arith_rty, arm_at, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc, dglobal,
+  dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish, gstr_string,
+  is_expr_null, lit, member, member_at, mkenumg, mkstruct_at, mkstructg_at, mktag, mfield, mktagg,
+  narrow_op, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slett_atm, slit,
+  sret, subst_ty_in, swhile, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
 { gstr_int, is_prim_width, map_slice, one_stmt, param_names_has, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
@@ -236,11 +236,6 @@ resolve_expr_plain = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Ptr<Expr> {
         .Cond(c)        => a.cenode(cond_oa(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e), c.oa)),
         .Call(c)        => a.resolve_call(env, c),
         .Member(mm)     => a.resolve_member(env, mm),
-        // An Arrow (a pass-1 Member→Arrow conversion) must keep resolving its OBJECT on later passes:
-        // a generic call inside it is only rewritten to its mono instance by the FINAL resolve (the
-        // instance decls don't exist earlier), and with no Arrow case that call stayed a bare
-        // template name (`counter.actor().n` emitted an undefined C symbol).
-        .Arrow(ar)      => a.cenode(arrow_at(a.resolve_expr(env.clr_exp(), ar.obj), ar.field, ar.pos)),
         .MakeStruct(sd) => a.resolve_genlit(env, sd),
         .Index(ix)      => a.cenode(eindex(a.resolve_expr(env.clr_exp(), ix.seq), a.resolve_expr(env.clr_exp(), ix.idx), env.keep_elem(ix.elem, ix.seq))),
         .Loop(l)        => a.resolve_loop(env, l),
@@ -260,13 +255,12 @@ resolve_slicelit = (a: MutPtr<Malloc>, env: Env, sd: SliceData) Ptr<Expr> {
     et = keep.then({ sd.elem }, { env.sl_elem_exp(sd.items) })
     a.cenode(slit(et, a.resolve_args(env.with_exp(et), sd.items)))
 }
-// Field access auto-derefs pointer receivers.
+// Field access auto-derefs pointer receivers. `ptr` is STICKY: resolve_module re-resolves several
+// times, and an already-deref'd member must keep resolving its OBJECT (a generic call inside it is
+// only rewritten to its mono instance by the FINAL resolve) without re-deciding the deref bit.
 resolve_member = (a: MutPtr<Malloc>, env: Env, mm: MemberData) Ptr<Expr> {
     obj = a.resolve_expr(env.clr_exp(), mm.obj)
-    env.infer_expr(mm.obj).ty_is_ptr().match ({
-        true  => a.cenode(arrow_at(obj, mm.field, mm.pos)),
-        false => a.cenode(member_at(obj, mm.field, mm.pos)),
-    })
+    a.cenode(mfield(obj, mm.field, mm.pos, mm.ptr || env.infer_expr(mm.obj).ty_is_ptr()))
 }
 // Resolve foreach body with index and element bindings.
 resolve_loop = (a: MutPtr<Malloc>, env: Env, l: LoopData) Ptr<Expr> {
@@ -738,14 +732,13 @@ is_slice_len_call = (env: Env, fn: StringView, buf: [Expr]) bool {
 }
 // UFCS auto-ref: a value `T` passed where param0 is `Ptr<T>` / `MutPtr<T>` (e.g. `r.next()` with
 // `next = (r: MutPtr<Rng>) …`) is rewritten to `addr(r)` so the call type-checks and emits `&r`.
-// Lvalue-only (Var/Member/Index/Arrow): a temp like `seed(1).next()` would otherwise mutate a
+// Lvalue-only (Var/Member/Index): a temp like `seed(1).next()` would otherwise mutate a
 // discarded copy. Already-pointer args and unknown/void types are left alone (idempotent).
 is_auto_ref_lvalue = (e: Expr) bool {
     e.match ({
         .Var(v)    => true,
         .Member(m) => true,
         .Index(ix) => true,
-        .Arrow(ar) => true,
         _          => false,
     })
 }

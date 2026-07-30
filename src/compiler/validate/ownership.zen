@@ -1597,7 +1597,6 @@ expr_root_var* = (e: Ptr<Expr>) StringView {
     load(e).match ({
         .Var(v)    => v.name,
         .Member(m) => m.obj.expr_root_var(),
-        .Arrow(ar) => ar.obj.expr_root_var(),
         _          => "",
     })
 }
@@ -1610,7 +1609,6 @@ expr_is_derived = (derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
     load(e).match ({
         .Var(v)    => derived.dead_has(v.name),
         .Member(m) => derived.dead_has(m.obj.expr_root_var()),
-        .Arrow(ar) => derived.dead_has(ar.obj.expr_root_var()),
         _          => false,
     })
 }
@@ -1652,7 +1650,6 @@ expr_escapes* = (
             // before validation reads a body — unreachable, listed to keep the match total
             .Var(v)         => derived.dead_has(v.name),
             .Member(m)      => a.expr_escapes(svars, derived, m.obj),
-            .Arrow(ar)      => a.expr_escapes(svars, derived, ar.obj),
             .Index(ix)      => a.expr_escapes(svars, derived, ix.seq),
             .MakeEnum(mk)   => a.expr_escapes(svars, derived, mk.payload),
             .MakeStruct(s)  => a.inits_escape(svars, derived, s.inits),
@@ -1770,7 +1767,6 @@ impure_use_in_expr = (nm: StringView, e: Ptr<Expr>) bool {
             || nm.impure_use_in_expr(d.t)
             || nm.impure_use_in_expr(d.e),
         .Member(m)      => nm.impure_use_in_expr(m.obj),
-        .Arrow(ar)      => nm.impure_use_in_expr(ar.obj),
         .MakeEnum(mk)   => nm.impure_use_in_expr(mk.payload),
         .MakeStruct(s)  => nm.impure_use_in_inits(s.inits),
         .Match(m)       => nm.impure_use_in_expr(m.subj) || nm.impure_use_in_arms(m.arms),
@@ -1836,7 +1832,6 @@ leak_alias_value* = (e: Ptr<Expr>) bool {
     load(e).match ({
         .Var(v)    => true,
         .Member(m) => true,
-        .Arrow(ar) => true,
         .Index(ix) => true,
         _          => false,
     })
@@ -1889,7 +1884,7 @@ sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
 // Classify a send-payload expression by the TYPE it reaches (Pony reference-capabilities), NOT its AST
 // shape. A constructor node (MakeEnum / MakeStruct) is descended into the SPECIFIC payload/fields actually
 // constructed — never inferred as a whole, so a `.Inc(3)` of an enum that ALSO has a `.Poke(MutPtr)` variant
-// is not wrongly rejected. EVERY OTHER leaf (Var, Call, MethodCall, Member, Arrow, Index, …) is classified
+// is not wrongly rejected. EVERY OTHER leaf (Var, Call, MethodCall, Member, Index, …) is classified
 // by `ty_reaches_mutptr(infer_expr(e))`: this is what makes the check SOUND THROUGH A CALL/MEMBER/FIELD —
 // `send(.Poke(o.ptr()))` (a method returning MutPtr) and `send(.Poke(launder(b.addr())))` (a MutPtr threaded
 // through an identity fn) both infer a MutPtr-reaching type and reject, closing the `.Var`-only hole where

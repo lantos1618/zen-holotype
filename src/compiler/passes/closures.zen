@@ -1,8 +1,8 @@
 // compiler.passes.closures — closure conversion sub-pass extracted from compiler.check.
 { ArmData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, LambdaData, Param, Stmt,
   StructDecl, VarData } = compiler.ast.ast_types
-{ cbuf, arm_at, arrow_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop, ematch, ematchp,
-  finit, gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mkenumg, mkstruct,
+{ cbuf, arm_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit,
+  gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mfield, mkenumg, mkstruct,
   mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_at, slett_atm, slit, sret,
   swhile, tnamed, tnode, tvoid, vref, vref_at, acquire_or_die, acquire_or_die } = compiler.genc
 { DeclIndex, Env, VList, empty_params, no_stmts, param_index, pbuf, recall, vcons, vnil } = compiler.check
@@ -150,7 +150,6 @@ clos_bad_expr = (
             || a.clos_bad_expr(decls, idx, bound, ps, d.t)
             || a.clos_bad_expr(decls, idx, bound, ps, d.e),
         .Member(m)     => a.clos_bad_expr(decls, idx, bound, ps, m.obj),
-        .Arrow(ar)     => a.clos_bad_expr(decls, idx, bound, ps, ar.obj),
         .MakeEnum(mk)  => a.clos_bad_expr(decls, idx, bound, ps, mk.payload),
         .MakeStruct(s) => a.clos_bad_inits(decls, idx, bound, ps, s.inits),
         .Match(m)      => a.clos_bad_expr(decls, idx, bound, ps, m.subj)
@@ -204,8 +203,7 @@ clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
         .MakeStruct(s) => a.cenode(mkstructg_at(s.ty, s.mty, s.targs, a.clos_sub_inits(ps, s.inits), s.pos)),
         .Bin(b)        => a.cenode(bin_at(b.op, a.clos_sub_expr(ps, b.lhs), a.clos_sub_expr(ps, b.rhs), b.pos)),
         .Cond(d)       => a.cenode(cond_oa(a.clos_sub_expr(ps, d.c), a.clos_sub_expr(ps, d.t), a.clos_sub_expr(ps, d.e), d.oa)),
-        .Member(m)     => a.cenode(member_at(a.clos_sub_expr(ps, m.obj), m.field, m.pos)),
-        .Arrow(ar)     => a.cenode(arrow_at(a.clos_sub_expr(ps, ar.obj), ar.field, ar.pos)),
+        .Member(m)     => a.cenode(mfield(a.clos_sub_expr(ps, m.obj), m.field, m.pos, m.ptr)),
         .Call(c)       => ps.clos_params_has(c.fn).match ({
             true  => a.clos_sub_fncall(ps, c),
             false => a.recall(c, c.fn, a.clos_sub_args(ps, c.args)),

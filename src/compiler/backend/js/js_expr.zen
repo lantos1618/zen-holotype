@@ -36,7 +36,6 @@ js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
             .js_expr(a, d.e)
             .gstr_append(a, ")"),
         .Member(m)      => s.js_member(a, m),
-        .Arrow(ar)      => s.js_expr(a, ar.obj).gstr_append(a, ".").gstr_append(a, ar.field),
         .MakeEnum(m)    => s.js_mkenum(a, m),
         .MakeStruct(m)  => s.js_mkstruct(a, m),
         .Tag(t)         => s
@@ -153,6 +152,9 @@ js_loop_throw = (s: String, a: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: StringVie
     s.gstr_append(a, "(() => { throw ").js_loop_token(a, obj, suffix).gstr_append(a, "; })()")
 }
 js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String {
+    m.ptr.then({
+        return s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field)
+    })
     (m.field == "break_zk").match ({
         true  => s.js_loop_throw(a, m.obj, "__b"),
         false => (m.field == "continue_zk").match ({
@@ -333,7 +335,6 @@ js_ty_of = (e: Expr) Ty {
     e.match ({
         .Var(v)        => vw_lookup(v.name),
         .Member(m)     => js_member_ty(m.field, load(m.obj)),
-        .Arrow(ar)     => js_member_ty(ar.field, load(ar.obj)),
         .Index(ix)     => ix.elem,
         .Call(c)       => js_call_ty(c),
         .MakeStruct(m) => tnamed(m.mty),
