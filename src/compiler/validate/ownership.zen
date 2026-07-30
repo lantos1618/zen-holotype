@@ -12,9 +12,8 @@
 { expect } = std.core.result
 { Map, of } = std.collections.map
 { is_empty } = std.text.str
-{ env_imported, env_params, env_trait_method, expr_pos, is_deref_intrinsic, is_direct_scope_acquire,
-  is_pure_owner_getter, is_scope_acquire, is_scope_alloc_member, is_scope_param_ty, pos_or,
-  ty_is_ptr_t, ty_mentions_tparam, unknown_ty } = compiler.validate.util
+{ env_imported, env_params, env_trait_method, expr_pos, is_deref_intrinsic, is_pure_owner_getter,
+  pos_or, ty_is_ptr_t, ty_mentions_tparam, unknown_ty } = compiler.validate.util
 { KMUSTUSE } = compiler.validate.diag
 { arg_var_name, mkstruct_field_kills, slicelit_elem_kills, struct_fields, sx_named } = compiler.validate.args
 { enum_variants, first_gen_arg } = compiler.validate.kinds
@@ -1583,15 +1582,6 @@ mu_effect_body_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, b
 mu_func_kind* = (a: MutPtr<Malloc>, mvm: Map<i64>, f: Func) i32 {
     a.mu_body_kind(mvm, a.mu_bound_names(a.dead_nil(), f.params), f.body)
 }
-scope_params* = (a: MutPtr<Malloc>, params: [Param]) Ptr<DeadList> {
-    out ::= a.dead_nil()
-    params.loop_at((i, p) {
-        p.ty.is_scope_param_ty().then({
-            out = a.dead_cons(p.name, out)
-        })
-    })
-    out
-}
 // the root Var name of a member/arrow chain (`s.alloc` -> "s"); "" if not rooted at a plain Var.
 expr_root_var* = (e: Ptr<Expr>) StringView {
     load(e).match ({
@@ -1599,146 +1589,6 @@ expr_root_var* = (e: Ptr<Expr>) StringView {
         .Member(m) => m.obj.expr_root_var(),
         _          => "",
     })
-}
-let_is_scope_derived = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
-    svars.is_scope_acquire(e) || svars.is_scope_alloc_member(e)
-}
-// aliasing laundering: a value that IS an already-derived local — a bare Var, or a member/arrow chain
-// rooted at one — so `q = p` / `q = p.f` taints `q` once `p` is derived.
-expr_is_derived = (derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
-    load(e).match ({
-        .Var(v)    => derived.dead_has(v.name),
-        .Member(m) => derived.dead_has(m.obj.expr_root_var()),
-        _          => false,
-    })
-}
-// a `let` value that becomes a derived local: a scope acquire / `s.alloc` field, an alias of one, OR any
-// value the escape walk itself says carries a scope value out (`q = [p]`, `q = Box(p: s.acquire(n))`) —
-// so a binding cannot launder through a shape the two narrower tests do not name.
-let_taints = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, e: Ptr<Expr>) bool {
-    svars.let_is_scope_derived(e) || derived.expr_is_derived(e) || a.expr_escapes(svars, derived, e)
-}
-// VALUE-position escape: a returned/trailing expr lets a scope value out when it IS a direct
-// `s.acquire(…)`, the raw `s.alloc` field, a derived local, a place rooted at one (`d.f`, `ds[0]`), OR
-// forwards one through an enum payload, a struct literal, a slice literal, a match arm value, a cond
-// branch, or a block's value. Call ARGS are deliberately NOT walked — passing a scope pointer into a
-// callee that returns a COPY (`to_i32(load_i64(p))`) does not escape.
-// EXHAUSTIVE over `Expr` BY DESIGN — there is no `_` arm. A default of `false` here reads "a shape I have
-// not thought about does not escape", which is how enum-payload, slice-literal and index laundering
-// shipped as accepted code; with every variant spelled out a new `Expr` variant is an exhaustiveness
-// ERROR, not a silent hole, and each `false` below is a claim about that shape rather than a fallthrough.
-expr_escapes* = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    e: Ptr<Expr>,
-) bool {
-    (svars.is_direct_scope_acquire(e) || svars.is_scope_alloc_member(e)).match ({
-        true  => true,
-        false => load(e).match ({
-            .Int(n)         => false,
-            .Byte(b)        => false,
-            .FloatLit(t)    => false,
-            .StrLit(s)      => false,    // static storage — outlives every scope
-            .Tag(t)         => false,    // a payload-less enum tag carries nothing
-            .Bin(b)         => false,    // Zen has no pointer arithmetic, so a `Bin` is a number or bool
-            .Lambda(lm)     => false,    // a lambda VALUE is only ever an argument to an FnT param and is
-            // inlined at the call site — it never stands in a scope fn's return position
-            .Call(c)        => false,    // args deliberately NOT walked (see above); the direct
-            // `s.acquire(…)` shape is already handled by the guard
-            .MethodCall(mc) => false,    // desugar_method_calls lowers every MethodCall to a flat Call
-            // before validation reads a body — unreachable, listed to keep the match total
-            .Var(v)         => derived.dead_has(v.name),
-            .Member(m)      => a.expr_escapes(svars, derived, m.obj),
-            .Index(ix)      => a.expr_escapes(svars, derived, ix.seq),
-            .MakeEnum(mk)   => a.expr_escapes(svars, derived, mk.payload),
-            .MakeStruct(s)  => a.inits_escape(svars, derived, s.inits),
-            .SliceLit(sd)   => a.items_escape(svars, derived, sd.items),
-            .Match(m)       => a.arms_escape(svars, derived, m.arms),
-            .Cond(d)        => a.expr_escapes(svars, derived, d.t)
-                || a.expr_escapes(svars, derived, d.e),
-            .Block(b)       => a.block_val_escapes(svars, derived, b.stmts),
-            .Loop(l)        => a.loop_val_escapes(svars, derived, l.body),
-        }),
-    })
-}
-// a loop in VALUE position: it never yields its trailing value, but a `return` inside its body
-// still escapes to the caller, so walk returns only (mirrors the statement-side .Loop handling).
-loop_val_escapes = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    stmts: [Stmt],
-) bool {
-    f ::= false
-    d ::= derived
-    stmts.loop_at((i, st) {
-        st.match ({
-            .Return(r) => {
-                f = a.expr_escapes(svars, d, r).then({ true }, { f })
-            },
-            _          => { },
-        })
-        d = a.escape_step(svars, d, st)
-    })
-    f
-}
-inits_escape = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    inits: [FieldInit],
-) bool { inits.slice_any((fi) { a.expr_escapes(svars, derived, fi.value) }) }
-items_escape = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    items: [Expr],
-) bool { items.slice_any((it) { a.expr_escapes(svars, derived, it.addr()) }) }
-arms_escape = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    arms: [ArmData],
-) bool { arms.slice_any((ar) { a.expr_escapes(svars, derived, ar.body) }) }
-// a block in VALUE position: its trailing value, or any `return` inside it, may escape (lets thread).
-block_val_escapes = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    stmts: [Stmt],
-) bool {
-    f ::= false
-    d ::= derived
-    stmts.loop_at((i, st) {
-        st.match ({
-            .Return(r)   => {
-                f = a.expr_escapes(svars, d, r).then({ true }, { f })
-            },
-            .ExprStmt(e) => (i == stmts.len - 1).then({
-                f = a.expr_escapes(svars, d, e).then({ true }, { f })
-            }),
-            _            => { },
-        })
-        d = a.escape_step(svars, d, st)
-    })
-    f
-}
-// thread the derived-local set across a `let` (now including aliases of derived locals).
-escape_step* = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    st: Stmt,
-) Ptr<DeadList> {
-    out ::= derived
-    st.match ({
-        .Let(l) => a.let_taints(svars, derived, l.value).then({
-            out = a.dead_cons(l.name, derived)
-        }),
-        _       => { },
-    })
-    out
 }
 expr_is_var_named = (e: Ptr<Expr>, nm: StringView) bool {
     load(e).match ({

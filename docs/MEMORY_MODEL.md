@@ -27,16 +27,15 @@ Do not read the pair as "the allocator is always a parameter". It is not.
 The outside world enters through a
 **capability**: the entry `main = (sys: Sys) i32` receives a `Sys`
 (`std.sys.root` — there is no importable `std.sys` module; the directory
-`src/std/sys/` holds `root.zen`, `fs.zen`, `os.zen`, `path.zen`, `platform.zen`
-and `process.zen`) and hands out narrow capabilities, notably `sys.heap()` (the process
+`src/std/sys/` holds `root.zen`, `fs.zen`, `os.zen`, `platform.zen`, and
+`process.zen`) and hands out narrow capabilities, notably `sys.heap()` (the process
 `Allocator`) and `sys.stdout()`/`sys.stderr()` (`Writer`s). Libraries take the
 narrowest capability they need (an `Allocator`, a `Writer`), which is the same
 discipline one level up from threading `a: Allocator` allocators through container
 and ownership APIs.
 
-> **The ambient runtime is not the model.** `std.rt` (a thread-local `Rt`
-> capability with `rt.alloc`/`rt.with`) and `std.scope` exist as an experiment
-> toward scoped runtimes, but the shipped, documented model is the explicit one
+> **The ambient runtime is not the model.** `std.rt` is a live thread-local `Rt`
+> substrate used by pooled actors, but the shipped, documented model is the explicit one
 > above. The A-wrapper convenience constructors (`vec.new`, `set.new`, `hmap.new`,
 > and their `from`/`from` variants) no longer draw from `std.rt` — they capture the
 > process heap once via `dyn_heap()` at construction and store that `DynAlloc` for
@@ -117,14 +116,6 @@ Owned values are library types:
   when the last owner is released.
 - `Rc<T>` is single-threaded shared ownership.
 - `Arc<T>` is atomically reference-counted shared ownership.
-- `std.mem.trace.Traced<T>` is the cycle-tracing experiment (its block carries an
-  extra trial-deletion color word, so it is deliberately NOT `Rc<T>` under another name). Its public
-  allocation, root-registration, and collection entrypoints are **all** allocator-first and
-  **all** fallible: `tracked_in` / `root_in` / `collect_in`, plus `tracked` / `root` / `collect`,
-  which are one-line forwarders that take the same `Allocator` parameter — they are *not*
-  default-heap wrappers, and there is no allocator-free spelling. Every one of the six returns a
-  `Result`, so allocation failure already stays in the value flow; there is no separate
-  `try_tracked_in` / `try_tracked` (`src/std/mem/trace.zen:141,160,161,162,293,317`).
 
 Ownership construction is allocator-first and fallible. `src/std/mem/own.zen`
 declares exactly **one** constructor —

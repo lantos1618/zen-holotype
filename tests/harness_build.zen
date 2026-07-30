@@ -300,7 +300,7 @@ run_shells* = (name: StringView, cs: [ShellCase]) i32 {
 }
 harness_build_run* = () i32 {
     fp = "tests/fixtures/zen/"
-    // ── (a) build+run+exit-only fixtures (concurrency / scope / runtime acceptance programs) ──────
+    // ── (a) build+run+exit-only fixtures (concurrency / runtime acceptance programs) ─────────────
     ex = run_fixtures("build exit", [
         FixtureCase(
             path: "tests/fixtures/zen/zero_size_alloc.zen",
@@ -609,24 +609,6 @@ harness_build_run* = () i32 {
             check_out: false,
         ),
         FixtureCase(
-            path: "tests/fixtures/zen/scope_cancellation.zen",
-            want_exit: "3",
-            want_out: "",
-            check_out: false,
-        ),
-        FixtureCase(
-            path: "tests/fixtures/zen/scope_colorless_sync_async.zen",
-            want_exit: "3",
-            want_out: "",
-            check_out: false,
-        ),
-        FixtureCase(
-            path: "tests/fixtures/zen/atomic_wrappers.zen",
-            want_exit: "42",
-            want_out: "",
-            check_out: false,
-        ),
-        FixtureCase(
             path: "tests/fixtures/zen/thread_atomic_counter.zen",
             want_exit: "42",
             want_out: "",
@@ -753,7 +735,7 @@ harness_build_run* = () i32 {
             check_out: false,
         ),
         FixtureCase(
-            path: "tests/fixtures/zen/scope_generic_field_dispatch.zen",
+            path: "tests/fixtures/zen/runtime_generic_field_dispatch.zen",
             want_exit: "105",
             want_out: "",
             check_out: false,
@@ -1599,37 +1581,7 @@ harness_build_run* = () i32 {
             check_out: false,
         ),
         FixtureCase(
-            path: "tests/fixtures/zen/trace_explicit_allocator.zen",
-            want_exit: "0",
-            want_out: "",
-            check_out: false,
-        ),
-        FixtureCase(
-            path: "tests/fixtures/zen/trace_tracked_result.zen",
-            want_exit: "0",
-            want_out: "",
-            check_out: false,
-        ),
-        FixtureCase(
-            path: "tests/fixtures/zen/trace_root_collect_result.zen",
-            want_exit: "0",
-            want_out: "",
-            check_out: false,
-        ),
-        FixtureCase(
-            path: "tests/fixtures/zen/trace_live_cycle_survives.zen",
-            want_exit: "0",
-            want_out: "",
-            check_out: false,
-        ),
-        FixtureCase(
             path: "tests/fixtures/zen/coroutine_spawn_result.zen",
-            want_exit: "0",
-            want_out: "",
-            check_out: false,
-        ),
-        FixtureCase(
-            path: "tests/fixtures/zen/scheduler_run_result.zen",
             want_exit: "0",
             want_out: "",
             check_out: false,
@@ -1653,8 +1605,8 @@ harness_build_run* = () i32 {
             check_out: false,
         ),
     ])
-    // cown_result_paths + io_file_result_paths use scratch FILE paths (`@@T@@/...`) — they are driven
-    // as shell cases below so each run substitutes its own private `$ZT` dir and seeds the inputs.
+    // io_file_result_paths uses scratch FILE paths (`@@T@@/...`) and is driven as a shell case below
+    // so each run substitutes its own private `$ZT` directory.
     // ── (e) run/stdout fixtures with exact stdout ────────────────────────────────────────────────
     r2 = run_fixtures("build result stdout", [
         FixtureCase(
@@ -2171,14 +2123,6 @@ harness_build_run* = () i32 {
             wants: [":10:16: error[ownership]: use of an owner after it was consumed (moved, released, or dropped)", "      v = load(h.ptr)", "                 ^~~"],
         ),
         DiagCase(
-            src: "{ Scope, with_sync } = std.scope\nhalloc = std.mem.heap\nleak = (s: MutPtr<Scope<A>>) RawPtr<u8> {\n    p = s.acquire(8)\n    p\n}\nmain = () i32 { h = halloc.gpa()  h.addr().with_sync(4096, leak)  0 }\n",
-            wants: [":5:5: error[scope-escape]: value from scope `s` escapes its scope", "      p", "      ^", "hint: do not return a pointer from `s.acquire(...)`"],
-        ),
-        DiagCase(
-            src: "{ Scope, with_sync } = std.scope\nhalloc = std.mem.heap\nleak = (s: MutPtr<Scope<A>>) RawPtr<u8> { s.acquire(8) }\nmain = () i32 { h = halloc.gpa()  h.addr().with_sync(4096, leak)  0 }\n",
-            wants: ["error[scope-escape]: value from scope `s` escapes its scope"],
-        ),
-        DiagCase(
             src: "Inner: { v: i64 }\nBox: { inner: Inner }\npoke = (b: Ptr<Box>) void { b.inner.v = 99 }\nmain = () i32 { 0 }\n",
             wants: [":3:29: error[ptr-write]: cannot write through a read-only `Ptr<T>`", "  poke = (b: Ptr<Box>) void { b.inner.v = 99 }", "                              ^", "hint: give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it"],
         ),
@@ -2331,11 +2275,6 @@ harness_build_run* = () i32 {
             absent: ["byte_at"],
         ),
         DocCase(
-            target: "std.concurrent.cown",
-            present: ["buf* = (alloc: Allocator, n: i64) Result<Buf, IoError>", "file* = (alloc: Allocator, path: StringView)", "file_in* = (alloc: Allocator"],
-            absent: ["try_buf", "buf_alloc", "buf_free", "file_open", "file_wrap"],
-        ),
-        DocCase(
             target: "std.concurrent.runtime",
             present: ["sync_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena", "coro_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) CoroArena", "sync*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena", "coro*<A: Allocator> = (backing: MutPtr<A>, cap: i64) CoroArena"],
             absent: ["sync* = (cap: i64) SyncArena", "coro* = (cap: i64) CoroArena", "sync_arena", "async_arena"],
@@ -2344,11 +2283,6 @@ harness_build_run* = () i32 {
             target: "std.concurrent.coroutine",
             present: ["spawn_in* = (alloc: Allocator", "spawn* = (alloc: Allocator"],
             absent: ["try_spawn"],
-        ),
-        DocCase(
-            target: "std.concurrent.sched",
-            present: ["run_in* = (alloc: Allocator, coros: [Coro]) Result<i32, IoError>", "run* = (alloc: Allocator, coros: [Coro]) Result<i32, IoError>"],
-            absent: ["try_run"],
         ),
         DocCase(
             target: "std.mem.heap",
@@ -2379,11 +2313,6 @@ harness_build_run* = () i32 {
             target: "std.collections.iter",
             present: ["find*<T> = (xs: [T], pred: (T) bool) Opt<T>", "map*<T, U> = (a: Allocator, xs: [T], f: (T) U) Result<[U], IoError>", "filter*<T> = (a: Allocator, xs: [T], keep: (T) bool) Result<[T], IoError>"],
             absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]", "map*<T, U> = (a: Allocator, xs: [i32]", "try_map", "try_filter"],
-        ),
-        DocCase(
-            target: "std.mem.trace",
-            present: ["Traced*<T>: {", "tracked_in*<T> = (alloc: Allocator", "tracked*<T> = (alloc: Allocator, x: T) Result<Traced<T>, IoError>", "root_in*<T> = (alloc: Allocator", "root*<T> = (alloc: Allocator, r: Traced<T>) Result<i32, IoError>", "child*<T>", "set_kid* = (parent: Traced<Node>, child: Traced<Node>) void", "collect_in* = (alloc: Allocator", "collect* = (alloc: Allocator) Result<i32, IoError>"],
-            absent: ["Rc*<T>: {", "tracked*<T> = (x: T)", "collect* = () void", "hcount*", "list_push*", "trace_child*", "node_set_kid*", "cc_mark*", "blk_drop*", "trace_child", "node_set_kid", "hcount", "list_push", "cc_mark", "blk_drop", "try_tracked", "try_root", "try_collect"],
         ),
         DocCase(
             target: "std.text.str",
@@ -2846,10 +2775,6 @@ harness_build_run* = () i32 {
             cmd: "cp tests/fixtures/zen/io_file_result_paths.zen $ZT/iofile.zen && sed -i \"s#@@T@@#$ZT#g\" $ZT/iofile.zen && ./zen build $ZT/iofile.zen -o $ZT/iofile_bin 2>/dev/null && { $ZT/iofile_bin; test \"$?\" = 0; }",
         ),
         ShellCase(
-            name: "cown_result_paths",
-            cmd: "cp tests/fixtures/zen/cown_result_paths.zen $ZT/cown.zen && sed -i \"s#@@T@@#$ZT#g\" $ZT/cown.zen && printf \"\" > $ZT/zo_cown_input.txt && ./zen build $ZT/cown.zen -o $ZT/cown_bin 2>/dev/null && { $ZT/cown_bin; test \"$?\" = 0; }",
-        ),
-        ShellCase(
             name: "stdin_echo_filter_pipe",
             cmd: "./zen build tests/fixtures/zen/stdin_echo_filter.zen -o $ZT/zo_stdin_filter 2>/dev/null && { printf 'hello\\nzen world\\nlast' | $ZT/zo_stdin_filter > $ZT/zo_stdin_out.txt; test \"$?\" -eq 3; } && printf '1: HELLO\\n2: ZEN WORLD\\n3: LAST\\n' | cmp -s - $ZT/zo_stdin_out.txt",
         ),
@@ -2977,8 +2902,6 @@ harness_build_run* = () i32 {
     // os_args_oom_result: args() under an always-fail allocator returns `.Err` as a value (prints `oom-err`, exit 0) — the OOM path never writes the argv strings through a null backbone.
     // io_file_result_paths: substitute this run's private scratch dir for the `@@T@@` placeholder, then
     // build+run; missing/denied/out paths now live under $ZT so concurrent runs never share scratch.
-    // cown_result_paths: same substitution, and SEED the input file first so `cown.file_in` opens it
-    // successfully and the allocator-wrap failure (LimitAlloc) is what yields the asserted .NotFound.
     // stdin_echo_filter_pipe: std.io.stdin.lines as a real unix filter — input PIPED via printf,
     // exit code = line count (3, incl. the unterminated final line), stdout cmp'd byte-exact.
     // stdin_read_all_cat: std.io.stdin.read_all is `cat` — redirected-file stdin round-trips

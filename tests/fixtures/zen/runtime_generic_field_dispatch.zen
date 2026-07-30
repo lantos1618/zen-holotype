@@ -1,0 +1,22 @@
+// Trait-method dispatch through a nested-generic struct field receiver, across an inlined generic
+// function. `run` is generic over `A`; its body dispatches `box.alloc.acquire`/`.checkpoint`.
+// Monomorphizing `RuntimeBox<A>(alloc: a.addr())` to `RuntimeBox<SyncArena>` and re-inferring the
+// dereferenced field receiver after inlining must route both trait calls correctly. Exit 105.
+{ sync } = std.concurrent.runtime
+halloc = std.mem.heap
+RuntimeBox<A>: {
+    alloc: MutPtr<A>,
+}
+run<A> = (box: MutPtr<RuntimeBox<A>>) i64 {
+    p = assert_nonnull(box.alloc.acquire(8))
+    store_i64(p, 5)
+    box.alloc.checkpoint()
+    store_i64(p, load_i64(p) + 100)
+    load_i64(p)
+}
+main = () i32 {
+    h = halloc.gpa()
+    a = h.addr().sync(4096)
+    box = RuntimeBox<A>(alloc: a.addr())
+    to_i32(run(box.addr()))
+}

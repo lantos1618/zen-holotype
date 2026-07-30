@@ -5,7 +5,7 @@
 { DeclIndex, Env, UfcsVis, arm_env, bind_tparams, build_decl_index, build_decl_index_vis,
   extend_env, is_intrinsic, is_void_ty, loop_env, params_env, ufcs_vis_off } = compiler.check
 { resolve_module } = compiler.check_resolve
-{ lam_stmt_body, map_slice, wr_writes_name } = compiler.astops
+{ map_slice, wr_writes_name } = compiler.astops
 { expr_fold_children } = compiler.ast.expr_children
 { Malloc } = std.mem.alloc
 { is_empty } = std.text.str
@@ -16,8 +16,8 @@
   is_badmatchlabel_call, is_dupmatcharm_call, is_duplitarm_call, is_forbidden_raw_call,
   is_imported_generic, is_nonexhaust_lit_call, is_unresolved_trait_call, null_deref_kind, pos_or,
   positive_count, shadow_not_callable, shadows_toplevel, source_span, stmt_pos, store_mut_kind,
-  trait_declaring, ty_carries_ptr, unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind,
-  ut_payloads_kind, utn_fields, utn_func, utn_payloads } = compiler.validate.util
+  trait_declaring, unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind, ut_payloads_kind,
+  utn_fields, utn_func, utn_payloads } = compiler.validate.util
 { CheckDiagnostic, Diagnostic, KARGTYPE, KARITY, KARMVOID, KASSIGNFIT, KBOOLARM, KCONFORMANCE,
   KDUPFN, KDUPVARIANT, KESCAPE, KEXHAUST, KFALLTHROUGH, KINDEX, KINFINITETYPE, KLAMBDAVALUE, KLEAK,
   KDUPLITARM, KDUPMATCHARM, KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT,
@@ -26,9 +26,9 @@
   desc_or, diagnostic_hint, diagnostic_kind_name, diagnostic_message, diagnostic_span_width,
   name_errors_body, name_errors_expr } = compiler.validate.diag
 { AliasList, DeadList, alias_nil, alias_step, count_loop_freed, dead_cons, dead_has, dead_nil,
-  escape_step, expr_escapes, is_default_owner_method, is_owner_base, leak_alias_value,
-  member_path_dead, mu_build_index, mu_func_kind, nm_read_or_leak, own_dead_body, own_moved_var,
-  own_step, owner_base, recv_typed_miss, scope_params, ufcs_vis_miss } = compiler.validate.ownership
+  is_default_owner_method, is_owner_base, leak_alias_value, member_path_dead, mu_build_index,
+  mu_func_kind, nm_read_or_leak, own_dead_body, own_moved_var, own_step, owner_base,
+  recv_typed_miss, ufcs_vis_miss } = compiler.validate.ownership
 { ae_check_func, arg_err_at, makestruct_err, member_err, sl_elem_fit, struct_field_move_src,
   sv_check_func, sx_func_kind, sx_hint, sx_message, sx_subject } = compiler.validate.args
 { arms_first_pos, as_sig, dup_arm_errs, expr_drops_return, ffi_func_msg, has_wildcard, ka_func_kind,
@@ -1498,153 +1498,6 @@ check_linked* = (a: MutPtr<Malloc>, decls: [Decl], lib: [Decl]) i32 {
     hdr.loop_at((i, d) { world[i] = d })
     rfile.loop_at((i, d) { world[hdr.len + i] = d })
     a.check_module(world)
-}
-// Authoritative kind/position pass: the source offset of the FIRST escaping return/trailing
-// (0 = none). Statement-position arms inspect returns only; their trailing values are discarded.
-kv_escape_stmts = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    body: [Stmt],
-) i32 {
-    acc ::= 0
-    d ::= derived
-    body.loop_at((i, st) {
-        acc = acc.or(a.kv_escape_stmt(svars, d, st))
-        d = a.escape_step(svars, d, st)
-    })
-    acc
-}
-kv_escape_stmt = (a: MutPtr<Malloc>, svars: Ptr<DeadList>, derived: Ptr<DeadList>, st: Stmt) i32 {
-    st.match ({
-        .Return(r)   => a.expr_escapes(svars, derived, r).match ({
-            true  => load(r).expr_pos().pos_or(1),
-            false => 0,
-        }),
-        .If(f)       => a
-            .kv_escape_stmts(svars, derived, f.then)
-            .or(a.kv_escape_stmts(svars, derived, f.els)),
-        .While(w)    => a.kv_escape_stmts(svars, derived, w.body),
-        .ExprStmt(e) => a.kv_escape_expr_stmt(svars, derived, e),
-        _            => 0,
-    })
-}
-kv_escape_expr_stmt = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    e: Ptr<Expr>,
-) i32 {
-    load(e).match ({
-        .Match(m)   => a.kv_escape_arms(svars, derived, m.arms),
-        .Cond(d)    => a
-            .kv_escape_expr_stmt(svars, derived, d.t)
-            .or(a.kv_escape_expr_stmt(svars, derived, d.e)),
-        .Block(b)   => a.kv_escape_stmts(svars, derived, b.stmts),
-        .Loop(l)    => a.kv_escape_stmts(svars, derived, l.body),
-        // a lambda body is walked WITHOUT its implicit trailing return: that value is the lambda's
-        // result (this statement discards it), not a return from the enclosing function.
-        .Lambda(lm) => a.kv_escape_stmts(svars, derived, lm.body.lam_stmt_body()),
-        // a `return` can sit in ANY nested statement list — including a `.Lambda` body handed to a
-        // template call, which the hand-written list never reached. Statement position all the way
-        // down: only returns are inspected, trailing values stay discarded.
-        _           => 0.expr_fold_children(e, (acc, ch) {
-            acc.or(a.kv_escape_expr_stmt(svars, derived, ch))
-        }, (acc, body) { acc.or(a.kv_escape_stmts(svars, derived, body)) }),
-    })
-}
-kv_escape_arms = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    arms: [ArmData],
-) i32 {
-    acc ::= 0
-    arms.loop_at((i, ar) { acc = acc.or(a.kv_escape_arm(svars, derived, ar.body)) })
-    acc
-}
-kv_escape_arm = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    body: Ptr<Expr>,
-) i32 {
-    load(body).match ({
-        .Block(b) => a.kv_escape_stmts(svars, derived, b.stmts),
-        _         => 0,
-    })
-}
-kv_escape_trailing = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    st: Stmt,
-) i32 {
-    st.match ({
-        .ExprStmt(e) => a.expr_escapes(svars, derived, e).match ({
-            true  => load(e).expr_pos().pos_or(1),
-            false => 0,
-        }),
-        _            => 0,
-    })
-}
-kv_escape_body = (
-    a: MutPtr<Malloc>,
-    svars: Ptr<DeadList>,
-    derived: Ptr<DeadList>,
-    body: [Stmt],
-) i32 {
-    acc ::= 0
-    d ::= derived
-    body.loop_at((i, st) {
-        acc = acc.or(a.kv_escape_stmt(svars, d, st))
-        d = a.escape_step(svars, d, st)
-    })
-    acc.or((body.len == 0).then({ 0 }, { a.kv_escape_trailing(svars, d, body[body.len - 1]) }))
-}
-// A scope value can only leave through the RETURN value here (this walk reports return/trailing
-// positions only), so a function whose return type cannot hold a pointer has nothing to check — the
-// guard is what keeps the field-insensitive walk from flagging a scalar read THROUGH a derived pointer.
-kv_escape_check_func = (a: MutPtr<Malloc>, f: Func) i32 {
-    svars = a.scope_params(f.params)
-    (f.ret.ty_carries_ptr() == false).match ({
-        true  => 0,
-        false => svars.match ({
-            .DeadNil     => 0,
-            .DeadCons(c) => a.kv_escape_body(svars, a.dead_nil(), f.body),
-        }),
-    })
-}
-check_module_escape_kind = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
-    acc ::= 0
-    decls.loop_at((i, d) {
-        acc = acc.or(d.match ({
-            .DFunc(f) => a.kv_escape_check_func(f),
-            _         => 0,
-        }))
-    })
-    acc
-}
-check_module_escape_diagnostic_from_source* = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    src: StringView,
-) CheckDiagnostic {
-    pos = a.check_module_escape_kind(decls)
-    (pos == 0).match ({
-        true  => check_diagnostic_none(),
-        false => {
-            CheckDiagnostic(
-                code: KESCAPE(),
-                kind: "scope-escape",
-                source_offset: pos,
-                span_width: src.diagnostic_span_width(pos),
-                count: 1,
-                message: "value from scope `s` escapes its scope (its arena is freed on scope exit)",
-                hint: "do not return a pointer from `s.acquire(...)`; copy the value out, or allocate in an outer scope",
-            )
-        },
-    })
 }
 // EXHAUSTIVE `.Var(nm)` occurrence scan — true iff the name is read ANYWHERE in the expr tree. Every
 // sub-expression-bearing shape is descended; missing one would risk a false positive (a real use gone

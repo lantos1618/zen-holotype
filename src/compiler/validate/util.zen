@@ -10,7 +10,6 @@
 { at } = std.text.ascii
 { ends_with, is_empty, starts_with, view } = std.text.str
 { KARGTYPE, KNULLDEREF, KPTRWRITE, KUNKNOWNTYPE, desc_or } = compiler.validate.diag
-{ DeadList, dead_has, expr_root_var } = compiler.validate.ownership
 { fields_declare_method, no_fields, struct_fields, sx_named } = compiler.validate.args
 { enum_variants } = compiler.validate.kinds
 { kv_at, kv_one } = compiler.validate.core
@@ -1092,48 +1091,6 @@ inf_gen_fields* = (fields: [Field], name: StringView) bool {
 }
 inf_gen_variants* = (vs: [VariantDef], name: StringView) bool {
     vs.slice_any((v) { v.payload.inf_gen_self(name) })
-}
-is_scope_param_ty* = (t: Ty) bool {
-    t.match ({
-        .Ptr(pd) => load(pd.pointee).match ({
-            .Generic(g) => g.name == "Scope",
-            _           => false,
-        }),
-        _        => false,
-    })
-}
-// a call `acquire(recv, …)` whose receiver chain is rooted at a scope var (covers `s.acquire` and
-// `s.alloc.acquire`). Used only to MARK a local binding as scope-derived (returning the local is the
-// hazard; Scope.acquire itself never binds a local).
-is_scope_acquire* = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
-    load(e).match ({
-        .Call(c) => (c.fn.sx_named("acquire", "__acquire") && c.args.len > 0).match ({
-            true  => svars.dead_has(c.args[0].addr().expr_root_var()),
-            false => false,
-        }),
-        _        => false,
-    })
-}
-// the DIRECT hazard `s.acquire(…)`: a UFCS acquire whose FIRST ARG IS the scope var itself (a bare
-// Var), NOT `s.alloc.acquire(…)` (whose first arg is the `.alloc` member — Scope's legit accessor).
-is_direct_scope_acquire* = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
-    load(e).match ({
-        .Call(c) => (c.fn.sx_named("acquire", "__acquire") && c.args.len > 0).match ({
-            true  => c.args[0].match ({
-                .Var(v) => svars.dead_has(v.name),
-                _       => false,
-            }),
-            false => false,
-        }),
-        _        => false,
-    })
-}
-// `s.alloc` — the raw allocator field of a scope var (also escapes the scope if returned).
-is_scope_alloc_member* = (svars: Ptr<DeadList>, e: Ptr<Expr>) bool {
-    load(e).match ({
-        .Member(m) => m.field == "alloc" && svars.dead_has(m.obj.expr_root_var()),
-        _          => false,
-    })
 }
 // ── v2: USE vs DISCHARGE (widen from never-named to used-but-never-discharged) ─────────────────────
 // v1 exempted an owner the moment its name reappeared ANYWHERE (any mention = discharge). That misses

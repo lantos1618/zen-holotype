@@ -263,7 +263,7 @@ diagnostic_span_width* = (src: StringView, pos: i32) i32 {
 // Every packed-channel diagnostic's (kind, message, hint) lives in a SINGLE `diag_info` ladder keyed
 // by `code`; the three accessors below just project one field. This is the sole source of truth for
 // the ladder-rendered kinds — no more three parallel 32-branch ladders drifting out of sync. (The
-// custom channels — scope-escape/escape/scratch-escape/reserved-name, codes 33-36 — build their own
+// custom channels — escape/scratch-escape/reserved-name, codes 33-36 — build their own
 // struct and are deliberately NOT in this table; their messages interpolate a runtime subject.)
 DiagInfo: {
     kind: StringView,
@@ -745,17 +745,8 @@ KRESERVEDNAME* = () i32 { 36 }    // a top-level fn named after a compiler intri
 // cascades: after a statement errs we resume at the next statement, after a decl at the next decl.
 // Consumers unpack each entry with the same `& 127` / `(>> 7) - 1` scheme (check_diagnostic_from_source).
 KDIAG_CAP* = () i32 { 512 }
-// ════════════════════════════════════════════════════════════════════════════════════════
-// ── M5: LEXICAL SCOPE-ESCAPE CHECK ──────────────────────────────────────────────────────
-// A parameter `s: MutPtr<Scope<…>>` is a SCOPE RECEIVER. Memory it hands out via `s.acquire(…)`
-// lives in the scope's arena, which `with_sync`/`with_coro` FREE on exit — so RETURNING such a
-// pointer (or a local bound to it) past the scope compiles a use-after-free. Scopes are lexical, so a
-// lexical rule suffices: collect the scope-receiver params, track locals bound to a scope-derived
-// pointer (`p = s.acquire(…)` / `p = s.alloc.acquire(…)` / `p = s.alloc`), and REJECT a
-// `return <that>` / a trailing `<that>` where `<that>` is such a local OR a direct `s.acquire(…)`.
-// The direct form deliberately excludes Scope's own `s.alloc.acquire(n)` accessor (its receiver is the
-// `.alloc` field, not the scope var), so std.scope's primitives are never false-rejected.
-KESCAPE* = () i32 { 33 }    // CUSTOM channel: reported via its own diagnostic (own kind/message/hint), never kv_at, never the diag_info ladder. Unique code, was 16 (collided with KTRAITBOUND)
+// Address-of-local escape uses a custom diagnostic channel with a hand-built message and hint.
+KESCAPE* = () i32 { 33 }    // unique code, formerly 16 (which collided with KTRAITBOUND)
 // ════════════════════════════════════════════════════════════════════════════════════════
 // ── UNDER-FREE (LEAK) CHECK — the DUAL of the over-free ownership pass ────────────────────
 // The ownership pass above is over-free-SOUND: it catches double-free / use-after-consume. Its blind

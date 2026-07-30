@@ -931,7 +931,6 @@ ownership types:
 
   (`own`/`rc`/`arc` `new_in` already return `Result<_, IoError>`, so there is no separate
   `try_new_in`.)
-- `std.mem.trace`: tracing/cycle-collection substrate.
 
 Allocator-threaded std APIs make allocation visible in signatures. Examples:
 `vec.of(a, [1, 2])`, `v.push(a, x)`, `vec.try_of(a, [1, 2])`, `v.try_push(a, x)`,
@@ -1002,8 +1001,6 @@ Concurrency support is stdlib-level today:
   stack/context allocation before returning `.Err`;
 - `std.concurrent.runtime`: sync/coroutine runtime and colorless `checkpoint`,
   with namespace-bound `runtime.sync` / `runtime.coro` constructors;
-- `std.concurrent.sched`: small scheduler, with `try_run` / `try_run_in`
-  for fallible scheduler flag allocation;
 - `std.concurrent.actor`: cooperative typed actors (inline drain on the caller
   thread) — `Receiver<M>`, `CellRef<M>`, `ReplyRef<T>`, `ActorEngine<M>`,
   `ActorCell<M>`, and `ActorHandle<M, ActorT>`. `run` / `request` / `ask` are
@@ -1013,8 +1010,6 @@ Concurrency support is stdlib-level today:
   imported from `std.concurrent.actor` — one canonical definition serves both
   actor surfaces. Requires a concrete trampoline
   stub per `(Msg, ActorT)` until the compiler can address generic instantiations.
-- `std.concurrent.cown`: owned FFI-handle examples, with namespace-bound
-  `cown.buf` / `cown.try_buf` / `cown.file` / `cown.file_in` spellings;
 - `std.concurrent.pool`: a multi-threaded actor pool that runs actors across N OS
   cores on real pthreads + atomics (one global mutex-guarded run queue; work-stealing
   deques are roadmap); `std.thread` / `std.sync` are the OS-thread and locking floor
@@ -1038,11 +1033,10 @@ Two concurrency safety guarantees are enforced, not just documented:
   deref, or stack overflow) unwinds into a per-worker catch in `zenrt.c` and kills
   that one actor; the worker and the rest of the pool continue.
 
-Note: `std.concurrent.runtime`'s colorless `checkpoint` and the ambient runtime
-(`std.rt`, `std.scope`) are an experiment, not the shipped model. The current
+Note: `std.concurrent.runtime`'s colorless `checkpoint` and the ambient `std.rt`
+substrate are not the shipped public model. The current
 direction threads capabilities explicitly (allocators, and a `Sys` at the entry);
-reworking the ambient runtime toward "ambient-within-scope, explicit-at-boundary"
-is a roadmap item. The source of truth is the code plus the runtime-API row in
+converging the remaining internal runtime surfaces is a roadmap item. The source of truth is the code plus the runtime-API row in
 [STATUS.md](STATUS.md); the older runtime design notes were retired, not replaced.
 
 `ActorEngine<M>` owns the internal queue state. `ActorCell<M>` is the

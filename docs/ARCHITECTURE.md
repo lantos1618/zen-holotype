@@ -246,13 +246,13 @@ See [bootstrap/README.md](../bootstrap/README.md) for the exact local workflow.
 
 ## Runtime surfaces
 
-Three runtime ideas coexist in code:
+Three runtime surfaces coexist in code:
 
 | Surface | Current role | Status |
 |---|---|---|
 | `std.sys.Sys` | Explicit executable root; attenuates to `Writer`, `Allocator`, `Env`, `Clock`, and `Fs`. | Preferred public direction. |
 | `std.rt` | Thread-local/process-default ambient allocator runtime; pool actors enter/leave it. | Live legacy/experimental substrate. |
-| `std.scope` + `std.concurrent.runtime` | Generic sync/coroutine scope, arena, cancellation/checkpoint experiment. | Live and tested, but not the settled target. |
+| `std.concurrent.runtime` | Sync/coroutine arenas and checkpoint substrate used by cooperative actors. | Live internal/experimental substrate. |
 
 Concurrency also has two actor surfaces:
 

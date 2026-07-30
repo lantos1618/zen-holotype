@@ -1,5 +1,9 @@
 # Zen memory audit — 2026-07-26
 
+> Follow-up (2026-07-30): the experimental `std.mem.trace`, `std.scope`,
+> `std.concurrent.sched`, `std.concurrent.atomic`, `std.concurrent.cown`, and unused `std.sys.path`
+> modules were retired. References below are preserved as historical audit evidence, not current APIs.
+
 **Scope.** Every memory surface in the tree: allocators, pointer kinds, raw operations, reference
 counting, cycle collection, the ambient runtime, the actor memory model, and what the docs promise
 versus what the compiler enforces.
