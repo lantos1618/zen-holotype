@@ -14,9 +14,9 @@
 //   s = s.append_in(m.addr(), "hello").expect("oom")    // or .or_return() in a Result fn
 //   s.free_in(m.addr())
 { len, view } = std.text.str
-{ copy } = std.mem.raw
-{ Allocator, try_acquire, try_resize, DynAlloc } = std.mem.alloc
+{ Allocator, try_acquire, DynAlloc } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
+buf = std.mem.buffer
 // ── the carried allocator + its sticky failure flag ──────────────────────────────────────────────
 // `alloc` is the allocator a String was born under, kept as a VALUE (std.mem.alloc's DynAlloc = the
 // Allocator trait erased into three fn-pointers + state), which is what lets `freeze` and `drop`
@@ -34,82 +34,61 @@ String*: {
     alloc: DynAlloc,
     add = (s: String, t: StringView) String {
         // append a StringView; a no-op once sticky or uncarried.
-        d = s.alloc
-        s.live().then({ s.settle(d.addr().append_in(s, t)) }, { s })
+        v = s.string_buffer()
+        d = v.alloc
+        buf.buffer_live(v).match ({
+            true  => buf.buffer_settle(v, buf.buffer_extend(d.addr(), v, t.view(), 1)).buffer_string(),
+            false => s,
+        })
     }
     add_one = (s: String, b: u8) String {
         // append ONE byte; a no-op once sticky or uncarried.
-        d = s.alloc
-        s.live().then({ s.settle(d.addr().push_in(s, b)) }, { s })
+        v = s.string_buffer()
+        d = v.alloc
+        b = b
+        buf.buffer_live(v).match ({
+            true  => buf.buffer_settle(v, buf.buffer_extend(d.addr(), v, slice(b.addr(), 1), 1)).buffer_string(),
+            false => s,
+        })
     }
     add_slice = (s: String, t: [u8]) String {
         // append a length-carrying run that is NOT NUL-terminated (a window into another buffer).
-        d = s.alloc
-        s.live().then({ s.settle(d.addr().append_slice_in(s, t)) }, { s })
+        v = s.string_buffer()
+        d = v.alloc
+        buf.buffer_live(v).match ({
+            true  => buf.buffer_settle(v, buf.buffer_extend(d.addr(), v, t, 1)).buffer_string(),
+            false => s,
+        })
     }
     view = (s: String) [u8] {
         // a WRITABLE window over the live bytes — a String owns its buffer and can be written through.
         slice(s.ptr, s.len)
     }
     freeze = (s: String) Result<StringConst, IoError> {
-        // THE one settle point: shrink to fit, give up `cap`, and hand back the owned frozen bytes —
-        // or the sticky failure, in which case the partial buffer is freed and nothing owns it after.
-        // Every failure this chain can record comes from `ok_ptr` on a null allocation, so the error
-        // reported here IS the first one: they are the same value by construction.
-        d = s.alloc
-        s.live().match ({
-            true  => d.addr().try_resize(s.ptr, (s.len < 1).then({ 1 }, { s.len })).match ({
-                .Ok(p)  => ok(StringConst(
-                    ptr: p,
-                    len: s.len,
-                    alloc: s.alloc,
-                )),
-                .Err(e) => {
-                    s.drop()
-                    err(e)
-                },
-            }),
-            false => {
-                s.drop()
-                err(.NotFound)
-            },
+        // Buffer owns the shared sticky-failure settle point; only the public frozen header differs.
+        buf.buffer_freeze(s.string_buffer()).match ({
+            .Ok(c)  => ok(c.buffer_string_const()),
+            .Err(e) => err(e),
         })
     }
-    drop = (s: String) void {
-        // hand the buffer back to the allocator the String carries — no argument, nothing to mismatch.
-        d = s.alloc
-        s.carried.then({
-            d.addr().release(s.ptr)
-        })
-    }
-    live = (s: String) bool { s.carried && s.oom == false }
-    // fold ONE threaded-api Result back into the carrying header: success relinks the grown buffer,
-    // failure trips the sticky flag and KEEPS the partial buffer so `freeze` can still free it.
+    drop = (s: String) void { buf.buffer_drop(s.string_buffer()) }
+    live = (s: String) bool { buf.buffer_live(s.string_buffer()) }
+    // Compatibility wrappers: these mechanics now live in std.mem.buffer, but remain callable so the
+    // storage refactor does not turn an implementation cleanup into an unrelated source break.
     settle = (s: String, r: Result<String, IoError>) String {
-        r.match ({
-            .Ok(g)  => s.relink(g),
-            .Err(e) => s.poison(),
+        br: Result<buf.Buffer<u8>, IoError> = r.match ({
+            .Ok(g)  => .Ok(g.string_buffer()),
+            .Err(e) => .Err(e),
         })
+        buf.buffer_settle(s.string_buffer(), br).buffer_string()
     }
     relink = (s: String, g: String) String {
-        String(
-            ptr: g.ptr,
-            len: g.len,
-            cap: g.cap,
-            carried: true,
-            oom: false,
-            alloc: s.alloc,
-        )
+        br: Result<buf.Buffer<u8>, IoError> = .Ok(g.string_buffer())
+        buf.buffer_settle(s.string_buffer(), br).buffer_string()
     }
     poison = (s: String) String {
-        String(
-            ptr: s.ptr,
-            len: s.len,
-            cap: s.cap,
-            carried: s.carried,
-            oom: true,
-            alloc: s.alloc,
-        )
+        br: Result<buf.Buffer<u8>, IoError> = .Err(.NotFound)
+        buf.buffer_settle(s.string_buffer(), br).buffer_string()
     }
     bytes = (s: String) [u8] {
         // Physical allocation size. Builders keep at least one byte beyond `len` for finish_in's NUL;
@@ -123,11 +102,26 @@ String*: {
     finish_in = (s: String, a: Allocator) Result<StringCstr, IoError> { a.finish_in(s) }
     free_in   = (s: String, a: Allocator) void { a.free_in(s) }
 }
-// `copy` (not `move`): the destination run starts at `at` == the String's live length, so it lies
-// entirely in the spare capacity past every byte a source view could name — the ranges cannot overlap.
-copy_str_bytes = (dst: RawPtr<u8>, at: i64, t: StringView) void {
-    src = t.view()
-    dst.offset(at).copy(src.ptr, src.len)
+// Private header adapters: String keeps its public flat layout while Buffer owns storage behavior.
+string_buffer = (s: String) buf.Buffer<u8> {
+    buf.Buffer<u8>(
+        ptr: s.ptr,
+        len: s.len,
+        cap: s.cap,
+        carried: s.carried,
+        oom: s.oom,
+        alloc: s.alloc,
+    )
+}
+buffer_string = (v: buf.Buffer<u8>) String {
+    String(
+        ptr: v.ptr,
+        len: v.len,
+        cap: v.cap,
+        carried: v.carried,
+        oom: v.oom,
+        alloc: v.alloc,
+    )
 }
 // ── explicit allocator variants (all fallible ops return Result) ─────────────
 init* = (a: Allocator, cap: i64) Result<String, IoError> {
@@ -144,16 +138,6 @@ init* = (a: Allocator, cap: i64) Result<String, IoError> {
     })
 }
 new_in* = (a: Allocator) Result<String, IoError> { a.init(16) }
-grow_in = (a: Allocator, s: String, ncap: i64) Result<String, IoError> {
-    a.try_resize(s.ptr, ncap).match ({
-        .Ok(p)  => ok(String(
-            ptr: p,
-            len: s.len,
-            cap: ncap,
-        )),
-        .Err(e) => err(e),
-    })
-}
 // Force `s` to a local FIRST: this function is inlined (generic over A), and `s` is read several
 // times. If the caller passes a non-trivial expression — e.g. a long `.push_in(…)` builder chain —
 // an unbound `s` splices that whole subtree in at every read, and nested builders compound it to
@@ -161,35 +145,23 @@ grow_in = (a: Allocator, s: String, ncap: i64) Result<String, IoError> {
 // reads reference the cheap local. Keeps allocator-threaded String builders linear to inline.
 reserve_in = (a: Allocator, s: String, need: i64) Result<String, IoError> {
     s = s
-    (s.len + need > s.cap).then({ a.grow_in(s, (s.cap + need) * 2) }, { ok(s) })
+    buf.buffer_reserve(a, s.string_buffer(), need).match ({
+        .Ok(v)  => ok(v.buffer_string()),
+        .Err(e) => err(e),
+    })
 }
 // Force value args to locals first so callers may safely pass expressions that read `s`.
 push_in* = (a: Allocator, s: String, b: u8) Result<String, IoError> {
     b = b
-    a.reserve_in(s, 2).match ({
-        .Ok(r)  => {
-            r.ptr.offset(r.len).store(b)
-            ok(String(
-                ptr: r.ptr,
-                len: r.len + 1,
-                cap: r.cap,
-            ))
-        },
+    buf.buffer_extend(a, s.string_buffer(), slice(b.addr(), 1), 1).match ({
+        .Ok(v)  => ok(v.buffer_string()),
         .Err(e) => err(e),
     })
 }
 append_in* = (a: Allocator, s: String, t: StringView) Result<String, IoError> {
     t = t
-    n = t.len()
-    a.reserve_in(s, n + 1).match ({
-        .Ok(r)  => {
-            r.ptr.copy_str_bytes(r.len, t)
-            ok(String(
-                ptr: r.ptr,
-                len: r.len + n,
-                cap: r.cap,
-            ))
-        },
+    buf.buffer_extend(a, s.string_buffer(), t.view(), 1).match ({
+        .Ok(v)  => ok(v.buffer_string()),
         .Err(e) => err(e),
     })
 }
@@ -197,21 +169,10 @@ append_in* = (a: Allocator, s: String, t: StringView) Result<String, IoError> {
 // onto the String in one grow. `append_in` above is for NUL-terminated `StringView`s; this is
 // its slice sibling, used by run-copy escapers (e.g. std.format.json's string writer) that bulk
 // copy the run between escapes.
-copy_slice_bytes = (dst: RawPtr<u8>, at: i64, t: Slice<u8>) void {
-    dst.offset(at).copy(t.ptr, t.len)
-}
 append_slice_in* = (a: Allocator, s: String, t: Slice<u8>) Result<String, IoError> {
     t = t
-    n = t.len
-    a.reserve_in(s, n + 1).match ({
-        .Ok(r)  => {
-            r.ptr.copy_slice_bytes(r.len, t)
-            ok(String(
-                ptr: r.ptr,
-                len: r.len + n,
-                cap: r.cap,
-            ))
-        },
+    buf.buffer_extend(a, s.string_buffer(), t, 1).match ({
+        .Ok(v)  => ok(v.buffer_string()),
         .Err(e) => err(e),
     })
 }
@@ -226,6 +187,8 @@ finish_in* = (a: Allocator, s: String) Result<StringCstr, IoError> {
         .Err(e)   => err(e),
     })
 }
+// Keep the owning String local visible to the use-after-free checker. Hiding it behind the private
+// Buffer header adapter would turn `s.free_in(a); use(s)` from a checked error into an accepted program.
 free_in* = (a: Allocator, s: String) void { a.release(s.ptr) }
 // ── the two `{ptr, len}` owned rows (docs/string-vec-model.md) ───────────────────────────────────
 // Neither has a `cap`, so growth is impossible BY CONSTRUCTION rather than by convention. They
@@ -244,10 +207,7 @@ StringFixed*: {
         v ::= s.view()
         v[i] = b
     }
-    drop = (s: StringFixed) void {
-        d = s.alloc
-        d.addr().release(s.ptr)
-    }
+    drop = (s: StringFixed) void { buf.buffer_fixed_drop(s.string_fixed_buffer()) }
 }
 StringConst*: {
     ptr: RawPtr<u8>,
@@ -255,10 +215,35 @@ StringConst*: {
     alloc: DynAlloc,
     view = (s: StringConst) Slice<u8> { slice(s.ptr, s.len) }
     get  = (s: StringConst, i: i64) u8 { s.view()[i] }
-    drop = (s: StringConst) void {
-        d = s.alloc
-        d.addr().release(s.ptr)
-    }
+    drop = (s: StringConst) void { buf.buffer_const_drop(s.string_const_buffer()) }
+}
+string_fixed_buffer = (s: StringFixed) buf.BufferFixed<u8> {
+    buf.BufferFixed<u8>(
+        ptr: s.ptr,
+        len: s.len,
+        alloc: s.alloc,
+    )
+}
+buffer_string_fixed = (v: buf.BufferFixed<u8>) StringFixed {
+    StringFixed(
+        ptr: v.ptr,
+        len: v.len,
+        alloc: v.alloc,
+    )
+}
+string_const_buffer = (s: StringConst) buf.BufferConst<u8> {
+    buf.BufferConst<u8>(
+        ptr: s.ptr,
+        len: s.len,
+        alloc: s.alloc,
+    )
+}
+buffer_string_const = (v: buf.BufferConst<u8>) StringConst {
+    StringConst(
+        ptr: v.ptr,
+        len: v.len,
+        alloc: v.alloc,
+    )
 }
 // ── carrying constructors ────────────────────────────────────────────────────────────────────────
 // The allocator is named ONCE, here, and rides inside the value from then on. `string` is
@@ -266,34 +251,13 @@ StringConst*: {
 // so a builder chain has exactly one `or_return`. `string_fixed` has no chain to settle into, so
 // it reports its single allocation directly.
 string* = (a: DynAlloc, cap: i64) String {
-    d = a
-    d.addr().init(cap).match ({
-        .Ok(g)  => String(
-            ptr: g.ptr,
-            len: 0,
-            cap: g.cap,
-            carried: true,
-            oom: false,
-            alloc: a,
-        ),
-        .Err(e) => String(
-            ptr: null_ptr(),
-            len: 0,
-            cap: 0,
-            carried: true,
-            oom: true,
-            alloc: a,
-        ),
-    })
+    v: buf.Buffer<u8> = buf.buffer_new(a, cap + 1)
+    v.buffer_string()
 }
 string_fixed* = (a: DynAlloc, n: i64) Result<StringFixed, IoError> {
-    d = a
-    d.addr().try_acquire(n).match ({
-        .Ok(p)  => ok(StringFixed(
-            ptr: p,
-            len: n,
-            alloc: a,
-        )),
+    r: Result<buf.BufferFixed<u8>, IoError> = buf.buffer_fixed(a, n)
+    r.match ({
+        .Ok(v)  => ok(v.buffer_string_fixed()),
         .Err(e) => err(e),
     })
 }

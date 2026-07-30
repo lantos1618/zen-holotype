@@ -26,6 +26,33 @@ model. Read it as "one model, instantiated twice", not as "one type".
 The last three fields are the allocator the value was born under and its sticky failure flag —
 "The allocator decision" below says what each one carries and why.
 
+### Shared storage kernel, nominal container surfaces
+
+The matching layout now has one shared implementation for its storage mechanics. `std.mem.buffer`
+defines internal `Buffer<T>`, `BufferFixed<T>` and `BufferConst<T>` headers and the `buffer_*`
+operations over them. `String` and `Vec<T>` still expose their own flat nominal headers — neither
+contains a nested `Buffer`, aliases the other, nor changes its public field layout. Small private
+adapters copy the header into the matching buffer header, delegate allocation, growth, sticky-OOM
+settlement, freeze and drop, and copy the resulting header back.
+
+The public container still owns element policy. `String` reserves a spare byte for its C terminator
+and exposes text operations; `Vec<T>` counts arbitrary elements and exposes collection operations.
+The kernel owns only the allocation lifecycle shared by both.
+
+`String` deliberately does not import the full `std.collections.vec` module. Zen resolves a
+program through a flat module closure, so importing Vec's method-rich public surface into the text
+foundation would add unrelated method candidates and collision-prone generic names to that closure.
+`std.mem.buffer` avoids that pollution: it declares no methods, and its functions use explicit
+`buffer_*` names. Both public containers can therefore share mechanics without making String depend
+on Vec's API.
+
+The compiler's `gstr` builder remains separate for a different reason: it is part of the bootstrap
+floor. The seed manifest does not include `std.text.string`, `std.collections.vec` or
+`std.mem.buffer`, and the bootstrap runtime supplies the compiler's smaller three-field String
+header. Pulling the library kernel into `gstr` would expand that bootstrap closure and change its
+ABI and failure model. `gstr` can follow the same broad growable-buffer discipline, but it is not a
+library container adapter unless the bootstrap boundary itself is redesigned.
+
 So there is one model, over an element type, and text is the `u8` case of it. Five roles, five
 names, no special cases — that is the target. **NOT BUILT:** two of the ten names it asks for do not exist
 yet; the next section marks which.
@@ -169,7 +196,7 @@ one claim in this document that most needs correcting. Today:
 |---|---|
 | `String` | `[u8]` (writable — `MutSlice<u8>`) |
 | `StringFixed` | `[u8]` (writable) |
-| `StringView` | `[u8]` (writable) |
+| `StringView` | `Slice<u8>` (read-only) |
 | `StringConst` | `Slice<u8>` (read-only) |
 | `StringLiteral` / `StringCstr` | `Slice<u8>` (read-only) |
 
@@ -228,7 +255,8 @@ same reasoning that chose `add` over `append`.
 
 **Text-specific API stays on the text type.** `split`, `trim`, `to_upper` are string-shaped and
 belong to `String`. `add`, `view`, `freeze`, `drop` are `Vec`-shaped operations that `String`
-declares in parallel — separate impls on a separate nominal type, not inheritance.
+declares on its separate nominal type, not through inheritance. Their public methods remain
+container-specific even where their allocation lifecycle delegates to `std.mem.buffer`.
 
 ## What exists today, and what this model needs
 
@@ -236,7 +264,8 @@ declares in parallel — separate impls on a separate nominal type, not inherita
 > model. Where it disagrees with anything above, this section wins.
 
 **Real now:** `String`, `Vec<T>`, views (as `[T]` / `Slice<T>`), the `(a: Allocator)` sugar,
-`or_return`, sticky-error chaining (as `std.text.sb`).
+`or_return`, and sticky-error chaining on the carrying `String` and `Vec<T>` APIs (with
+`std.text.sb` still present as the older builder surface).
 
 **Real but partial:** the borrowed/static string family — `StringLiteral`, `StringView`,
 `StringCstr` — each of which a diagnostic prints as itself. (The `str`, `text` and `Cstr` aliases
@@ -248,7 +277,9 @@ reappears. The harness does **not** gate the short aliases.)
 
 **Real now, as of the carrying rebuild:** `StringConst`, `StringFixed`, `VecConst`, `VecFixed`,
 `freeze()`, `drop()`, `add`/`add_one`, and the carrying constructors `string` / `string_fixed` /
-`string_from` / `vec` / `vec_fixed` / `vec_from`.
+`string_from` / `vec` / `vec_fixed` / `vec_from`. Their shared allocation, growth, sticky-OOM,
+freeze and drop mechanics live in `std.mem.buffer`; String and Vec retain distinct nominal flat
+layouts and adapt to that kernel privately.
 
 **Not done:** the threaded API (`init`/`push_in`/`append_in`/`finish_in`/`free_in`) and
 `std.text.sb` are still present and still work, and every consumer still uses them. Until they are
@@ -335,6 +366,10 @@ Three fields do it, in this order, identically on `Vec<T>` and `String`:
   the module is `error[private-name]`. Its wrapper `dyn_current` (`:159`) is private too, so
   there is currently **no** public `std.rt` route from an `Rt` to a `DynAlloc`; the ambient
   runtime cannot supply a carrying constructor from outside `std.rt` until one is exported.
+
+`std.mem.buffer` is now the single implementation of those carrying storage semantics. It does not
+replace either public header: the String and Vec modules adapt their identical flat fields to the
+kernel while retaining their own nominal types and policy-specific methods.
 
 Deciding that for `String` also decides `AVec`: it either becomes the default or disappears.
 

@@ -60,6 +60,11 @@ changes that document once listed as gating it are both resolved (slice mutabili
 the allocator-carrying question is DECIDED), so what is left is naming and coverage on the
 `Vec` side, not a language change. Read that first; this section records the interim.
 
+The growable `String` and `Vec<T>` remain distinct nominal types with flat public headers, while
+their shared allocation, growth, sticky-OOM, freeze and drop mechanics live in `std.mem.buffer`.
+The representation and module-boundary rationale is recorded in
+[string-vec-model.md](string-vec-model.md#shared-storage-kernel-nominal-container-surfaces).
+
 ## Current Rules
 
 > **Enforced vs. convention.** Only two things in this section are checked by a

@@ -5,6 +5,7 @@
 { Allocator, try_acquire, try_resize, DynAlloc, dyn_from, dyn_heap } = std.mem.alloc
 { Result, IoError, Opt, ok, err, panic, expect } = std.core.result
 { loop_at } = std.core.count
+buf = std.mem.buffer
 // The carried allocator + sticky failure flag are the SAME three fields, in the same order, as
 // std.text.string's String, because `String` IS `Vec<u8>` and that identity is load-bearing. See
 // that struct for what each one means; the semantics here are identical over an element type.
@@ -30,59 +31,27 @@ Vec*<T>: {
         v.live().then({ v.settle(v.push(d.addr(), x)) }, { v })
     }
     freeze = (v: Vec<T>) Result<VecConst<T>, IoError> {
-        // THE one settle point: shrink to fit, give up `cap`, hand back the owned frozen elements —
-        // or the sticky failure, with the partial buffer freed.
-        d = v.alloc
-        v.live().match ({
-            true  => d.addr().try_resize(v.ptr, (v.len < 1).then({ 1 }, { v.len * sizeof(T) })).match ({
-                .Ok(p)  => ok(VecConst<T>(
-                    ptr: p,
-                    len: v.len,
-                    alloc: v.alloc,
-                )),
-                .Err(e) => {
-                    v.drop()
-                    err(e)
-                },
-            }),
-            false => {
-                v.drop()
-                err(.NotFound)
-            },
+        vec_buffer(v).buffer_freeze().match ({
+            .Ok(c)  => ok(buffer_vec_const(c)),
+            .Err(e) => err(e),
         })
     }
-    drop = (v: Vec<T>) void {
-        d = v.alloc
-        v.carried.then({
-            d.addr().release(v.ptr)
-        })
-    }
-    live = (v: Vec<T>) bool { v.carried && v.oom == false }
+    drop = (v: Vec<T>) void { vec_buffer(v).buffer_drop() }
+    live = (v: Vec<T>) bool { vec_buffer(v).buffer_live() }
     settle = (v: Vec<T>, r: Result<Vec<T>, IoError>) Vec<T> {
-        r.match ({
-            .Ok(g)  => v.relink(g),
-            .Err(e) => v.poison(),
+        br: Result<buf.Buffer<T>, IoError> = r.match ({
+            .Ok(g)  => .Ok(vec_buffer(g)),
+            .Err(e) => .Err(e),
         })
+        buffer_vec(buf.buffer_settle(vec_buffer(v), br))
     }
     relink = (v: Vec<T>, g: Vec<T>) Vec<T> {
-        Vec<T>(
-            ptr: g.ptr,
-            len: g.len,
-            cap: g.cap,
-            carried: true,
-            oom: false,
-            alloc: v.alloc,
-        )
+        br: Result<buf.Buffer<T>, IoError> = .Ok(vec_buffer(g))
+        buffer_vec(buf.buffer_settle(vec_buffer(v), br))
     }
     poison = (v: Vec<T>) Vec<T> {
-        Vec<T>(
-            ptr: v.ptr,
-            len: v.len,
-            cap: v.cap,
-            carried: v.carried,
-            oom: true,
-            alloc: v.alloc,
-        )
+        br: Result<buf.Buffer<T>, IoError> = .Err(.NotFound)
+        buffer_vec(buf.buffer_settle(vec_buffer(v), br))
     }
     buf = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }
     view = (v: Vec<T>) [T] {
@@ -259,6 +228,26 @@ Vec*<T>: {
         })
     }
 }
+vec_buffer<T> = (v: Vec<T>) buf.Buffer<T> {
+    buf.Buffer<T>(
+        ptr: v.ptr,
+        len: v.len,
+        cap: v.cap,
+        carried: v.carried,
+        oom: v.oom,
+        alloc: v.alloc,
+    )
+}
+buffer_vec<T> = (b: buf.Buffer<T>) Vec<T> {
+    Vec<T>(
+        ptr: b.ptr,
+        len: b.len,
+        cap: b.cap,
+        carried: b.carried,
+        oom: b.oom,
+        alloc: b.alloc,
+    )
+}
 // a zero-element `Vec<T>` with capacity for at least one element (so `push` has somewhere to write
 // before the first grow). T can't be read off any argument, so it comes from the LHS annotation:
 // `r: Result<Vec<i32>, IoError> = vecs.empty(a)`. Fallible like `of`: the seed
@@ -323,59 +312,31 @@ of*<T> = (a: Allocator, xs: [T]) Result<Vec<T>, IoError> {
 // Grow `v` so `need` MORE elements fit, in one resize. Distinct from `grow`, which doubles blindly:
 // a bulk append knows exactly how much room it wants. Carried fields ride through untouched.
 reserve_cap*<T> = (a: Allocator, v: Vec<T>, need: i64) Result<Vec<T>, IoError> {
-    v = v
-    (v.len + need <= v.cap).match ({
-        true  => {
-            vok: Result<Vec<T>, IoError> = .Ok(v)
-            vok
-        },
-        false => {
-            ncap = (v.cap + need) * 2
-            a.try_resize(v.ptr, ncap * sizeof(T)).match ({
-                .Ok(p)  => {
-                    vok: Result<Vec<T>, IoError> = .Ok(Vec<T>(
-                        ptr: p,
-                        len: v.len,
-                        cap: ncap,
-                        carried: v.carried,
-                        oom: v.oom,
-                        alloc: v.alloc,
-                    ))
-                    vok
-                },
-                .Err(e) => {
-                    verr: Result<Vec<T>, IoError> = .Err(e)
-                    verr
-                },
-            })
+    buf.buffer_reserve(a, vec_buffer(v), need).match ({
+        .Ok(b)  => .Ok(buffer_vec(b)),
+        .Err(e) => .Err(e),
+    })
+}
+// Append every element of `xs` under ONE reservation, leaving `spare` elements after the new live end.
+// String uses the spare slot for its trailing C NUL; ordinary Vec extension asks for zero. Keeping the
+// reservation/copy path here makes String's byte storage an actual Vec specialization instead of a
+// second growable-buffer implementation.
+//
+// `xs` may be a view into `v` itself. Record its byte offset BEFORE reserve: realloc may move the backing
+// block and make the old slice pointer dangle. After reserve, rebase an internal source onto the new ptr.
+// A recursive per-element fill is a stack overflow waiting to happen: the bootstrap and harness compile
+// paths carry no -O flag, so C tail calls are not eliminated.
+extend_spare_in*<T> = (a: Allocator, v: Vec<T>, xs: Slice<T>, spare: i64) Result<Vec<T>, IoError> {
+    buf.buffer_extend(a, vec_buffer(v), xs, spare).match ({
+        .Ok(b)  => .Ok(buffer_vec(b)),
+        .Err(e) => {
+            out: Result<Vec<T>, IoError> = .Err(e)
+            out
         },
     })
 }
-// Append every element of `xs` under ONE reservation, then fill BY ITERATION (`.loop` over the
-// destination). A recursive per-element fill is a stack overflow waiting to happen: the bootstrap and
-// harness compile paths carry no -O flag, so C tail calls are not eliminated — the same rule that
-// shapes std.text.sb's `rep`.
 extend_in*<T> = (a: Allocator, v: Vec<T>, xs: [T]) Result<Vec<T>, IoError> {
-    xs = xs
-    a.reserve_cap(v, xs.len).match ({
-        .Ok(r)  => {
-            dst :: [T] = r.buf()
-            xs.loop_at((i, x) { dst[r.len + i] = x })
-            vok: Result<Vec<T>, IoError> = .Ok(Vec<T>(
-                ptr: r.ptr,
-                len: r.len + xs.len,
-                cap: r.cap,
-                carried: r.carried,
-                oom: r.oom,
-                alloc: r.alloc,
-            ))
-            vok
-        },
-        .Err(e) => {
-            verr: Result<Vec<T>, IoError> = .Err(e)
-            verr
-        },
-    })
+    a.extend_spare_in(v, xs, 0)
 }
 // ── the two `{ptr, len}` owned rows (docs/string-vec-model.md) ───────────────────────────────────
 // `VecFixed<T>` and `VecConst<T>` are `StringFixed`/`StringConst` over an element type, and the same
@@ -392,10 +353,7 @@ VecFixed*<T>: {
         w :: [T] = v.view()
         w[i] = x
     }
-    drop = (v: VecFixed<T>) void {
-        d = v.alloc
-        d.addr().release(v.ptr)
-    }
+    drop = (v: VecFixed<T>) void { buf.buffer_fixed_drop(vec_fixed_buffer(v)) }
 }
 VecConst*<T>: {
     ptr: RawPtr<u8>,
@@ -403,10 +361,35 @@ VecConst*<T>: {
     alloc: DynAlloc,
     view = (v: VecConst<T>) Slice<T> { slice(v.ptr, v.len) }
     get  = (v: VecConst<T>, i: i64) T { v.view()[i] }
-    drop = (v: VecConst<T>) void {
-        d = v.alloc
-        d.addr().release(v.ptr)
-    }
+    drop = (v: VecConst<T>) void { buf.buffer_const_drop(vec_const_buffer(v)) }
+}
+vec_fixed_buffer<T> = (v: VecFixed<T>) buf.BufferFixed<T> {
+    buf.BufferFixed<T>(
+        ptr: v.ptr,
+        len: v.len,
+        alloc: v.alloc,
+    )
+}
+buffer_vec_fixed<T> = (b: buf.BufferFixed<T>) VecFixed<T> {
+    VecFixed<T>(
+        ptr: b.ptr,
+        len: b.len,
+        alloc: b.alloc,
+    )
+}
+vec_const_buffer<T> = (v: VecConst<T>) buf.BufferConst<T> {
+    buf.BufferConst<T>(
+        ptr: v.ptr,
+        len: v.len,
+        alloc: v.alloc,
+    )
+}
+buffer_vec_const<T> = (b: buf.BufferConst<T>) VecConst<T> {
+    VecConst<T>(
+        ptr: b.ptr,
+        len: b.len,
+        alloc: b.alloc,
+    )
 }
 // ── carrying constructors ────────────────────────────────────────────────────────────────────────
 // The allocator is named ONCE and rides inside the value. `vec` is INFALLIBLE — a failed birth
@@ -414,41 +397,14 @@ VecConst*<T>: {
 // into, so it reports its single allocation directly. T comes from the explicit type argument
 // (`gpa.vec<i64>(16)`): there is no element to infer it from.
 vec*<T> = (a: DynAlloc, cap: i64) Vec<T> {
-    d = a
-    d.addr().try_acquire(cap * sizeof(T)).match ({
-        .Ok(p)  => Vec<T>(
-            ptr: p,
-            len: 0,
-            cap: cap,
-            carried: true,
-            oom: false,
-            alloc: a,
-        ),
-        .Err(e) => Vec<T>(
-            ptr: null_ptr(),
-            len: 0,
-            cap: 0,
-            carried: true,
-            oom: true,
-            alloc: a,
-        ),
-    })
+    b: buf.Buffer<T> = buf.buffer_new(a, cap)
+    buffer_vec(b)
 }
 vec_fixed*<T> = (a: DynAlloc, n: i64) Result<VecFixed<T>, IoError> {
-    d = a
-    d.addr().try_acquire(n * sizeof(T)).match ({
-        .Ok(p)  => {
-            vok: Result<VecFixed<T>, IoError> = .Ok(VecFixed<T>(
-                ptr: p,
-                len: n,
-                alloc: a,
-            ))
-            vok
-        },
-        .Err(e) => {
-            verr: Result<VecFixed<T>, IoError> = .Err(e)
-            verr
-        },
+    r: Result<buf.BufferFixed<T>, IoError> = buf.buffer_fixed(a, n)
+    r.match ({
+        .Ok(b)  => .Ok(buffer_vec_fixed(b)),
+        .Err(e) => .Err(e),
     })
 }
 // The only way back from frozen to growable — there is deliberately no `thaw()`, because going back

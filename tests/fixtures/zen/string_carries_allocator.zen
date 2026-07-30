@@ -248,6 +248,56 @@ threaded_string_declines = () bool {
     s.free_in(a)
     ok
 }
+// STORAGE ENGINE: String and Vec share std.mem.buffer. Both carrying and threaded strings may append
+// a view into their own buffer; a grow must rebase that view after realloc instead of copying through
+// the stale pre-grow pointer. The threaded half also proves the spare NUL slot survives Vec extension,
+// so finish_in cannot relocate behind the owning String header.
+buffer_backed_self_append = () bool {
+    a_budget = 64
+    gpa = alloc_a()
+    s ::= gpa.string(1).add("ab")
+    whole = s.view()
+    s = s.add_slice(whole)
+    middle: [u8] = slice(s.ptr.offset(1), 2)
+    s = s.add_slice(middle)
+    carrying_ok = s.len == 6
+        && s.view()[0] == 'a'
+        && s.view()[1] == 'b'
+        && s.view()[2] == 'a'
+        && s.view()[3] == 'b'
+        && s.view()[4] == 'b'
+        && s.view()[5] == 'a'
+    s.drop()
+    m = Malloc(_: 0)
+    a = m.addr()
+    t ::= a.init(1).expect("threaded init")
+    t = t.append_in(a, "xy").expect("threaded seed")
+    before = t.view()
+    t = a.append_slice_in(t, before).expect("threaded self append")
+    owner = t.ptr
+    done = t.finish_in(a).expect("threaded finish")
+    threaded_ok = t.len == 4 && done == cstr(owner) && owner.offset(t.len).load() == 0
+    t.free_in(a)
+    carrying_ok && threaded_ok
+}
+vec_self_append = () bool {
+    a_budget = 64
+    v :: Vec<i64> = alloc_a().vec(1)
+    v = v.add_one(1).add_one(2)
+    whole = v.view()
+    v = v.add(whole)
+    middle: [i64] = slice(v.ptr.offset(sizeof(i64)), 2)
+    v = v.add(middle)
+    ok = v.len == 6
+        && v.get(0) == 1
+        && v.get(1) == 2
+        && v.get(2) == 1
+        && v.get(3) == 2
+        && v.get(4) == 2
+        && v.get(5) == 1
+    v.drop()
+    ok
+}
 main = () i32 {
     ok ::= sticky_string()
     ok = sticky_vec() && ok
@@ -256,5 +306,7 @@ main = () i32 {
     ok = drop_through_owner() && ok
     ok = roundtrip() && ok
     ok = threaded_string_declines() && ok
+    ok = buffer_backed_self_append() && ok
+    ok = vec_self_append() && ok
     ok.to_exit()
 }
