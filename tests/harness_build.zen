@@ -19,11 +19,9 @@
 //
 // For `zenc check` accept/reject fixtures we reuse harness_lib.run_verdict on the fixture SOURCE.
 { Malloc, malloc, free } = std.mem.alloc
-{ out, save, contents_in, shell } = std.io.file
-{ len, contains, is_empty, starts_with } = std.text.str
-{ new_in, append_in, finish_in } = std.text.string
-{ VerdictCase, run_verdict, run_verdicts, DiagCase, run_diags, zo_path, zo_cmd, zo_par_run,
-  zo_idpath, zo_join } = harness_lib
+{ out, contents_in, shell } = std.io.file
+{ len, contains, starts_with } = std.text.str
+{ VerdictCase, run_verdicts, DiagCase, run_diags, zo_par_run, zo_idpath, zo_join } = harness_lib
 // a BUILD fixture: build the program, run it, assert exit code (+ optional stdout).
 FixtureCase*: {
     path: StringView,
@@ -51,52 +49,10 @@ ShellCase*: {
     name: StringView,
     cmd: StringView,
 }
-// helper: build the command body  `./zen build <path> -o $ZT/zob 2>/dev/null` (wrapped by zo_cmd).
-build_cmd = (mp: MutPtr<Malloc>, path: StringView) StringView {
-    s ::= mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, "./zen build ").expect("harness: oom")
-    s = s.append_in(mp, path).expect("harness: oom")
-    s = s.append_in(mp, " -o $ZT/zob 2>/dev/null").expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
-}
-// helper: build the command body  `$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test "$?" -eq <want_exit>`
-// (returns rc 0 iff the program's exit code equals want_exit; stdout is left in $ZT/zob_out.txt).
-run_cmd = (mp: MutPtr<Malloc>, want_exit: StringView) StringView {
-    s ::= mp.new_in().expect("harness: oom")
-    s = s
-        .append_in(mp, "$ZT/zob > $ZT/zob_out.txt 2>/dev/null; test \"$?\" -eq ")
-        .expect("harness: oom")
-    s = s.append_in(mp, want_exit).expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
-}
-// run ONE build fixture: build must succeed, then exit code (+ optional stdout) must match.
-run_fixture* = (fc: FixtureCase) bool {
-    m = Malloc(_: 0)
-    mp = m.addr()
-    save(mp.zo_path("zob_out.txt"), "", 0)
-    bc = shell(mp.zo_cmd(mp.build_cmd(fc.path))).expect("harness: shell")
-    (bc == 0).match ({
-        true  => {
-            rc = shell(mp.zo_cmd(mp.run_cmd(fc.want_exit))).expect("harness: shell")    // `zenc build` must succeed
-            (rc == 0).match ({
-                true  => fc.check_out.match ({
-                    true  => mp.contents_in(mp.zo_path("zob_out.txt")).match ({
-                        .Ok(got) => got == fc.want_out,    // exit code mismatch => fail
-                        .Err(e)  => false,
-                    }),
-                    false => true,
-                }),
-                false => false,
-            })
-        },
-        false => false,
-    })
-}    // exit-only fixture: matched
 // ── PARALLEL build/emit/doc runners (dogfoods std.thread via harness_lib's zo_par_run) ─────────────
 // Same three-phase shape as harness_lib's parallel runners: build a self-contained per-case command that
 // writes gid-namespaced result file(s) (each `zenc build/run` gets its OWN output binary `zob<gid>` and
-// stdout `zobout<gid>` — the serial runner reused fixed `zob`/`zob_out.txt`, fatal under parallelism),
-// run the batch across the worker pool, then compare IN ORDER — byte-identical verdict to serial.
+// stdout `zobout<gid>`), run the batch across the worker pool, then compare IN ORDER.
 // (run_shells stays SERIAL: its cases are hand-written `$ZT` pipelines with shared scratch names.)
 // PHASE A command: only the heavy `zenc build` (cc). Parallel-safe — a compile spawns no app threads.
 // The program is NOT run here: many build fixtures are CONCURRENCY/pool acceptance programs that spawn
@@ -108,7 +64,7 @@ fix_build_cmd = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) StringView {
     mp.zo_join([z, "if ./zen build ", fc.path, " -o ", zob, " 2>/dev/null; then echo P > ", brc, "; else echo F > ", brc, "; fi"])
 }
 // PHASE B (SERIAL, one fixture at a time): the build must have succeeded, then RUN the binary now (serially
-// — no thread oversubscription) and assert exit == want_exit (+ optional stdout). Same verdict as serial.
+// — no thread oversubscription) and assert exit == want_exit (+ optional stdout).
 fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
     built = mp.contents_in(mp.zo_idpath("zobbrc", gid, ".txt")).match ({
         .Ok(s)  => s.starts_with("P"),
@@ -162,21 +118,6 @@ run_fixtures* = (name: StringView, cs: [FixtureCase]) i32 {
     free(base)
     fails
 }
-// helper: build a one-arg command  `./zen <verb> <path> <redirect>`
-cmd_for = (
-    mp: MutPtr<Malloc>,
-    verb: StringView,
-    path: StringView,
-    redirect: StringView,
-) StringView {
-    s ::= mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, "./zen ").expect("harness: oom")
-    s = s.append_in(mp, verb).expect("harness: oom")
-    s = s.append_in(mp, " ").expect("harness: oom")
-    s = s.append_in(mp, path).expect("harness: oom")
-    s = s.append_in(mp, redirect).expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
-}
 // check every `present` substring is in `txt` and every `absent` substring is NOT — return the AND.
 all_present_absent = (txt: StringView, present: [StringView], absent: [StringView]) bool {
     ok ::= true
@@ -191,19 +132,6 @@ all_present_absent = (txt: StringView, present: [StringView], absent: [StringVie
         })
     })
     ok
-}
-// run ONE emit case: `zenc emit` must succeed and the C must satisfy present/absent.
-run_emit* = (ec: EmitCase) bool {
-    m = Malloc(_: 0)
-    mp = m.addr()
-    rc = shell(mp.zo_cmd(mp.cmd_for("emit", ec.path, " > $ZT/zoe_emit.c 2>/dev/null"))).expect("harness: shell")
-    (rc == 0).match ({
-        true  => mp.contents_in(mp.zo_path("zoe_emit.c")).match ({
-            .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
-            .Err(e)  => false,
-        }),
-        false => false,
-    })
 }
 emit_cmd = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) StringView {
     z: StringView = ""
@@ -249,19 +177,6 @@ run_emits* = (name: StringView, cs: [EmitCase]) i32 {
     out("\n")
     free(base)
     fails
-}
-// run ONE doc case: `zenc doc <target>` must exit 0 and the markdown must satisfy present/absent.
-run_doc* = (dc: DocCase) bool {
-    m = Malloc(_: 0)
-    mp = m.addr()
-    rc = shell(mp.zo_cmd(mp.cmd_for("doc", dc.target, " > $ZT/zoe_doc.txt 2>&1"))).expect("harness: shell")
-    (rc == 0).match ({
-        true  => mp.contents_in(mp.zo_path("zoe_doc.txt")).match ({
-            .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
-            .Err(e)  => false,
-        }),
-        false => false,
-    })
 }
 doc_cmd = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) StringView {
     z: StringView = ""

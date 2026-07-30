@@ -305,27 +305,6 @@ run_verdict* = (vc: VerdictCase) bool {
 // DIAGNOSTIC: `zenc check` must reject (exit nonzero); capture the FULL diagnostic (stdout+stderr) and
 // require every `wants` substring to be present. /tmp/zod_out.txt is overwritten each run.
 // `timeout 60` as in run_verdict: rc 124 fails the case.
-run_diag* = (dc: DiagCase) bool {
-    m = Malloc(_: 0)
-    mp = m.addr()
-    save(mp.zo_path("zod_v.zen"), dc.src, len(dc.src))
-    rc = shell(mp.zo_cmd("timeout 60 ./zen check $ZT/zod_v.zen > $ZT/zod_out.txt 2>&1")).expect("harness: shell")
-    (rc == 0 || rc == 124).match ({
-        true  => false,
-        false => mp.contents_in(mp.zo_path("zod_out.txt")).match ({
-            .Ok(txt) => {
-                all ::= true
-                dc.wants.loop((h, i, wnt) {
-                    (txt.contains(wnt) == false).then({
-                        all = false
-                    })
-                })    // must REJECT
-                all
-            },
-            .Err(e)  => false,
-        }),
-    })
-}
 // the self-host FIXPOINT: `zenc --build-self` regenerates the bootstrap C byte-for-byte. Build to a
 // temp file and `cmp` against the committed bootstrap/zenc.gen.c — the committed file is never touched.
 fixpoint_ok* = () bool {
@@ -527,7 +506,7 @@ zo_diag_cmd = (mp: MutPtr<Malloc>, gid: i64) StringView {
     rc = mp.zo_idpath("drc", gid, ".txt")
     mp.zo_join([z, "timeout 60 ./zen check ", v, " > ", outp, " 2>&1; rc=$?; if [ $rc -eq 0 ]; then echo P > ", rc, "; elif [ $rc -ge 124 ]; then echo T > ", rc, "; else echo F > ", rc, "; fi"])
 }
-// DIAGNOSTIC per-case check (Phase C): identical logic to run_diag — must reject (F) AND the diagnostic
+// DIAGNOSTIC per-case check (Phase C): must reject (F) AND the diagnostic
 // must contain every `wants` substring. T (timeout/missing marker) fails always.
 zo_diag_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DiagCase) bool {
     st = mp.zo_rc_state(mp.zo_idpath("drc", gid, ".txt"))
