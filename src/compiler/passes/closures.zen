@@ -3,7 +3,7 @@
   StructDecl, VarData } = compiler.ast.ast_types
 { cbuf, arm_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit,
   gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mfield, mkenumg, mkstruct,
-  mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, slet, slett_at, slett_atm, slit, sret,
+  mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_at, slett_atm, slit, sret,
   swhile, tnamed, tnode, tvoid, vref, vref_at, acquire_or_die, acquire_or_die } = compiler.genc
 { DeclIndex, Env, VList, empty_params, no_stmts, param_index, pbuf, recall, vcons, vnil } = compiler.check
 { lift_extend, lift_is_captured, lift_lamparams, lift_liftable } = compiler.passes.lift
@@ -120,6 +120,9 @@ clos_bad_stmt = (
             || a.clos_bad_expr(decls, idx, bound, ps, x.value),
         .Return(r)   => a.clos_bad_expr(decls, idx, bound, ps, r),
         .ExprStmt(e) => a.clos_bad_expr(decls, idx, bound, ps, e),
+        .If(f)       => a.clos_bad_expr(decls, idx, bound, ps, f.c)
+            || a.clos_bad_body(decls, idx, bound, ps, f.then)
+            || a.clos_bad_body(decls, idx, bound, ps, f.els),
         .While(w)    => a.clos_bad_expr(decls, idx, bound, ps, w.c)
             || a.clos_bad_body(decls, idx, bound, ps, w.body),
         .IndexSet(x) => a.clos_bad_expr(decls, idx, bound, ps, x.seq)
@@ -224,6 +227,7 @@ clos_sub_stmt = (a: MutPtr<Malloc>, ps: [Param], st: Stmt) Stmt {
         .Assign(x)   => sassign_at(a.clos_sub_expr(ps, x.target), a.clos_sub_expr(ps, x.value), x.pos),
         .Return(r)   => sret(a.clos_sub_expr(ps, r)),
         .ExprStmt(e) => sexpr(a.clos_sub_expr(ps, e)),
+        .If(f)       => sif(a.clos_sub_expr(ps, f.c), a.clos_sub_body(ps, f.then), a.clos_sub_body(ps, f.els)),
         .While(w)    => swhile(a.clos_sub_expr(ps, w.c), a.clos_sub_body(ps, w.body)),
         .IndexSet(x) => sidxset_at(a.clos_sub_expr(ps, x.seq), a.clos_sub_expr(ps, x.idx), x.elem, a.clos_sub_expr(ps, x.value), x.pos),
     })

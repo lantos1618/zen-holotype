@@ -1,9 +1,10 @@
 // compiler.check_lower — statement-position match/cond → if lowering. Extracted from compiler.check (pure move).
 { Expr, Stmt, Decl, Ty, EnumDecl, ArmData, MatchData, CondData } = compiler.ast.ast_types
-{ cbuf, bin, cond, member, arrow, mktag, slett, sexpr, block, gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ cbuf, bin, cond, member, arrow, mktag, slett, sexpr, sif, block, gstr_string, gstr_append,
+  gstr_finish } = compiler.genc
 { Malloc } = std.mem.alloc
 { one_stmt, slice_any } = compiler.astops
-{ Env, arm_env, cenode, extend_env, no_stmts, sif } = compiler.check
+{ Env, arm_env, cenode, extend_env, no_stmts } = compiler.check
 { loop_at } = std.core.count
 match_has_wild = (m: MatchData) bool { m.arms.slice_any((ar) { ar.variant == "_" }) }
 arm_covers_v = (m: MatchData, vn: StringView) bool { m.arms.slice_any((ar) { ar.variant == vn }) }
@@ -119,7 +120,7 @@ lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [S
                 // emits the variant string; baking a C-only `Enum_Variant` Var breaks the JS backend.
                 tag = a.subj_tag(a.cenode(mktag(m.ename, ar.variant)), false)
                 cond = a.cenode(bin("==", a.subj_tag(m.subj, m.ptr), tag))
-                out = a.one_stmt(a.sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
+                out = a.one_stmt(sif(cond, a.arm_then(env, t, m, ar), a.lower_match_arms(env, t, m, i + 1)))
             },
         })
     })
@@ -136,7 +137,7 @@ lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
 }
 // Bool/literal match in statement position: Cond -> if/else, recursing for literal chains.
 lower_cond_stmt = (a: MutPtr<Malloc>, env: Env, d: CondData) Stmt {
-    a.sif(d.c, a.branch_stmts(env, d.t), a.cond_else(env, d.e))
+    sif(d.c, a.branch_stmts(env, d.t), a.cond_else(env, d.e))
 }
 cond_else = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
     out ::= a.branch_stmts(env, e)

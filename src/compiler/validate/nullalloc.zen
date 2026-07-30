@@ -94,6 +94,7 @@ nz_proofs_stmt = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, st: Stmt) Ptr<DeadList>
         .Assign(x)   => a.nz_proofs_expr(a.nz_proofs_expr(acc, x.target), x.value),
         .Return(r)   => a.nz_proofs_expr(acc, r),
         .ExprStmt(e) => a.nz_proofs_expr(acc, e),
+        .If(f)       => a.nz_proofs_body(a.nz_proofs_body(a.nz_proofs_expr(acc, f.c), f.then), f.els),
         .While(w)    => a.nz_proofs_body(a.nz_proofs_expr(acc, w.c), w.body),
         .IndexSet(x) => a.nz_proofs_expr(a.nz_proofs_expr(a.nz_proofs_expr(acc, x.seq), x.idx), x.value),
     })
@@ -137,6 +138,7 @@ nz_unproven_stmt = (
         .Assign(x)   => a.nz_unproven_expr(proven, a.nz_bind(proven, acc, x.target.expr_root_var(), x.value), x.value),
         .Return(r)   => a.nz_unproven_expr(proven, acc, r),
         .ExprStmt(e) => a.nz_unproven_expr(proven, acc, e),
+        .If(f)       => a.nz_unproven_body(proven, a.nz_unproven_body(proven, a.nz_unproven_expr(proven, acc, f.c), f.then), f.els),
         .While(w)    => a.nz_unproven_body(proven, a.nz_unproven_expr(proven, acc, w.c), w.body),
         .IndexSet(x) => a.nz_unproven_expr(proven, acc, x.value),
     })
@@ -191,6 +193,10 @@ nz_stmt_kind = (un: Ptr<DeadList>, st: Stmt) i32 {
         .Assign(x)   => un.nz_expr_kind(x.target).nz_or(un.nz_expr_kind(x.value)),
         .Return(r)   => un.nz_expr_kind(r),
         .ExprStmt(e) => un.nz_expr_kind(e),
+        .If(f)       => un
+            .nz_expr_kind(f.c)
+            .nz_or(un.nz_body_kind(f.then))
+            .nz_or(un.nz_body_kind(f.els)),
         .While(w)    => un.nz_expr_kind(w.c).nz_or(un.nz_body_kind(w.body)),
         .IndexSet(x) => un
             .nz_expr_kind(x.seq)

@@ -386,6 +386,7 @@ ae_collect_expr = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, e: Ptr<Expr>) Ptr<Dea
 ae_collect_stmt = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
     st.match ({
         .Let(l)      => a.dead_cons(l.name, seen),
+        .If(f)       => a.ae_collect(a.ae_collect(seen, f.then), f.els),
         .While(w)    => a.ae_collect(seen, w.body),
         .ExprStmt(e) => a.ae_collect_expr(seen, e),
         _            => seen,
@@ -704,6 +705,8 @@ ae_ret_stmt = (
 ) bool {
     st.match ({
         .Return(r)   => a.ae_ret_yields(decls, idx, name, r, depth),
+        .If(f)       => a.ae_ret_body(decls, idx, f.then, name, depth)
+            || a.ae_ret_body(decls, idx, f.els, name, depth),
         .While(w)    => a.ae_ret_body(decls, idx, w.body, name, depth),
         .ExprStmt(e) => a.ae_ret_estmt(decls, idx, e, name, depth),
         _            => false,
@@ -1040,6 +1043,7 @@ ae_kv_stmt = (a: MutPtr<Malloc>, cx: AeCtx, st: Stmt) i32 {
             true  => load(r).expr_pos().pos_or(1),
             false => a.ae_store_pos(cx, r).or(a.ae_intrin_write_pos(cx, r)),
         }),
+        .If(f)       => a.ae_kv_stmts(cx, f.then).or(a.ae_kv_stmts(cx, f.els)),
         .While(w)    => a.ae_kv_stmts(cx, w.body),
         .Let(l)      => a.ae_send_pos(cx, l.value).or(a.ae_store_pos(cx, l.value)),
         .Assign(x)   => a
@@ -1155,6 +1159,10 @@ sv_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, mode: i32) i32 {
         .Assign(x)   => a.sv_expr(env, x.target, mode).or(a.sv_expr(env, x.value, mode)),
         .Return(r)   => a.sv_expr(env, r, mode),
         .ExprStmt(e) => a.sv_expr(env, e, mode),
+        .If(f)       => a
+            .sv_expr(env, f.c, mode)
+            .or(a.sv_body(env, f.then, mode))
+            .or(a.sv_body(env, f.els, mode)),
         .While(w)    => a.sv_expr(env, w.c, mode).or(a.sv_body(env, w.body, mode)),
         .IndexSet(x) => a
             .sv_expr(env, x.seq, mode)
@@ -1398,6 +1406,10 @@ sx_stmt_kind = (a: MutPtr<Malloc>, taint: Ptr<DeadList>, st: Stmt) i32 {
         .Assign(x)   => a.sx_expr_kind(taint, x.target).or(a.sx_expr_kind(taint, x.value)),
         .Return(r)   => a.sx_expr_kind(taint, r),
         .ExprStmt(e) => a.sx_expr_kind(taint, e),
+        .If(f)       => a
+            .sx_expr_kind(taint, f.c)
+            .or(a.sx_body_kind(taint, f.then))
+            .or(a.sx_body_kind(taint, f.els)),
         .While(w)    => a.sx_expr_kind(taint, w.c).or(a.sx_body_kind(taint, w.body)),
         .IndexSet(x) => a
             .sx_expr_kind(taint, x.seq)

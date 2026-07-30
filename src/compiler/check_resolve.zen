@@ -8,8 +8,8 @@
 { arith_rty, arm_at, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc, dglobal,
   dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish, gstr_string,
   is_expr_null, lit, member, member_at, mkenumg, mkstruct_at, mkstructg_at, mktag, mfield, mktagg,
-  narrow_op, no_tys, sassign_at, sexpr, sidxset_at, slet, slett, slett_at, slett_atm, slit, sret,
-  slit, sret, subst_ty_in, swhile, tvoid, vref } = compiler.genc
+  narrow_op, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slett_atm, slit,
+  sret, subst_ty_in, swhile, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
 { gstr_int, is_prim_width, map_slice, one_stmt, param_names_has, slice_any } = compiler.astops
 { Malloc } = std.mem.alloc
@@ -29,7 +29,7 @@
 { DeclIndex, Env, arm_env, bin_res_ty, bind_fnret, build_decl_index, cebuf, cenode, dispatch_recv,
   ctor_payload_exp, dispatch_recv_name, elem_of, empty_params, enum_inst_mk, enum_inst_tag,
   enum_name, extend_env, fnret_of, gen_variant_payload, gsubst, is_str_t, is_void_ty, local_name_at,
-  no_stmts, params_env, pointee_of, recall, sif, tloop_index, ty_is_ptr, vcons } = compiler.check
+  no_stmts, params_env, pointee_of, recall, tloop_index, ty_is_ptr, vcons } = compiler.check
 { loop_at } = std.core.count
 // Stamp enum constructors with their concrete generic instance when needed.
 resolve_mkenum = (
@@ -873,6 +873,9 @@ resolve_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, last: bool, vtail: bool) 
                 },
             })
         },
+        .If(f)       => {
+            out = sif(a.resolve_expr(env.clr_exp(), f.c), a.resolve_body(env, f.then), a.resolve_body(env, f.els))
+        },
         .While(w)    => {
             out = swhile(a.resolve_expr(env.clr_exp(), w.c), a.resolve_body(env, w.body))
         },
@@ -1016,7 +1019,7 @@ lower_or_return_let = (a: MutPtr<Malloc>, env: Env, l: LetData) [Stmt] {
     cnd = a.cenode(bin("==", a.subj_tag(a.cenode(vref(tmp)), ptr), a.or_err_tag(t, "Err")))
     buf ::= cbuf<Stmt>(a, 3)
     buf[0] = slett(tmp, t, recv2)
-    buf[1] = a.sif(cnd, a.one_stmt(sret(a.orret_err_value(env, t, tmp, ptr))), no_stmts())
+    buf[1] = sif(cnd, a.one_stmt(sret(a.orret_err_value(env, t, tmp, ptr))), no_stmts())
     buf[2] = slett(l.name, env.subj_variant_payload(t, "Ok"), a.subj_payload(a.cenode(vref(tmp)), "Ok", ptr))
     buf
 }

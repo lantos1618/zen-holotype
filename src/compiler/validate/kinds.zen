@@ -547,6 +547,10 @@ kvb_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
         .Assign(x)   => env.kvb_expr_kind(x.target).or(env.kvb_expr_kind(x.value)),
         .Return(r)   => env.kvb_expr_kind(r),
         .ExprStmt(e) => env.kvb_expr_kind(e),
+        .If(f)       => env
+            .kvb_expr_kind(f.c)
+            .or(a.kvb_body_kind(env, f.then))
+            .or(a.kvb_body_kind(env, f.els)),
         .While(w)    => env.kvb_expr_kind(w.c).or(a.kvb_body_kind(env, w.body)),
         .IndexSet(x) => env
             .kvb_expr_kind(x.seq)
@@ -850,6 +854,10 @@ ka_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
         .Assign(x)   => env.ka_expr_kind(tparams, x.target).or(env.ka_expr_kind(tparams, x.value)),
         .Return(r)   => env.ka_expr_kind(tparams, r),
         .ExprStmt(e) => env.ka_expr_kind(tparams, e),
+        .If(f)       => env
+            .ka_expr_kind(tparams, f.c)
+            .or(a.ka_body_kind(env, tparams, f.then))
+            .or(a.ka_body_kind(env, tparams, f.els)),
         .While(w)    => env.ka_expr_kind(tparams, w.c).or(a.ka_body_kind(env, tparams, w.body)),
         .IndexSet(x) => env
             .ka_expr_kind(tparams, x.seq)
@@ -918,6 +926,7 @@ krr_any_ret_stmt = (st: Stmt) bool {
         .Assign(x)   => x.target.krr_any_ret_e() || x.value.krr_any_ret_e(),
         .Return(r)   => true,
         .ExprStmt(e) => e.krr_any_ret_e(),
+        .If(f)       => f.c.krr_any_ret_e() || f.then.krr_any_ret_body() || f.els.krr_any_ret_body(),
         .While(w)    => w.c.krr_any_ret_e() || w.body.krr_any_ret_body(),
         .IndexSet(x) => x.seq.krr_any_ret_e() || x.idx.krr_any_ret_e() || x.value.krr_any_ret_e(),
     })
@@ -952,6 +961,9 @@ krr_loop_ret_stmt = (st: Stmt) bool {
         .Assign(x)   => x.target.krr_loop_ret_e() || x.value.krr_loop_ret_e(),
         .Return(r)   => r.krr_loop_ret_e(),
         .ExprStmt(e) => e.krr_loop_ret_e(),
+        .If(f)       => f.c.krr_loop_ret_e()
+            || f.then.krr_loop_ret_body()
+            || f.els.krr_loop_ret_body(),
         .While(w)    => w.body.krr_any_ret_body() || w.c.krr_loop_ret_e(),
         .IndexSet(x) => x.seq.krr_loop_ret_e() || x.idx.krr_loop_ret_e() || x.value.krr_loop_ret_e(),
     })
@@ -1039,6 +1051,7 @@ krw_stmt = (st: Stmt, ps: [Param]) i32 {
         .Assign(x)   => x.target.krw_e(ps).or(x.value.krw_e(ps)),
         .Return(r)   => r.krw_e(ps),
         .ExprStmt(e) => e.krw_e(ps),
+        .If(f)       => f.c.krw_e(ps).or(f.then.krw_body(ps)).or(f.els.krw_body(ps)),
         .While(w)    => w.c.krw_e(ps).or(w.body.krw_body(ps)),
         .IndexSet(x) => x.seq.krw_e(ps).or(x.idx.krw_e(ps)).or(x.value.krw_e(ps)),
     })
@@ -1177,6 +1190,10 @@ ko_stmt_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, st: Stmt, c
             .or(env.ko_expr_kind(tps, want, x.value, cnd)),
         .Return(r)   => env.ko_expr_kind(tps, want, r, cnd),
         .ExprStmt(e) => env.ko_expr_kind(tps, want, e, cnd),
+        .If(f)       => env
+            .ko_expr_kind(tps, want, f.c, cnd)
+            .or(a.ko_body_kind(env, tps, want, f.then, cnd))
+            .or(a.ko_body_kind(env, tps, want, f.els, cnd)),
         .While(w)    => env
             .ko_expr_kind(tps, want, w.c, true)
             .or(a.ko_body_kind(env, tps, want, w.body, cnd)),
