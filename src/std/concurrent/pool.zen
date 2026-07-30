@@ -39,14 +39,13 @@
 // dead code until threads existed — is now LOAD-BEARING under real contention.
 //
 // The pool's OWN infrastructure (the Pool block, run-queue ring, per-worker stats, pthread handle/arg
-// cells) is still malloc'd FFI/thread scratch — single-owner storage freed by the one owner in
+// cells) still uses durable process-heap scratch — single-owner storage released by the one owner in
 // pool_close after the workers join, the same explicit-alloc floor as std.thread/std.sync. Only the
 // cross-thread-shared ACTOR state needed refcounting; the single-owner infrastructure does not.
-{ malloc, free } = std.mem.alloc
+{ Heap, heap_acquire, heap_release } = std.mem.alloc
 { write, strlen } = std.c.libc
 { Rt, default, enter, leave, mark_spawned } = std.rt
 { Arc, new_in } = std.mem.arc
-{ Malloc } = std.mem.alloc
 { Mutex, CondVar, new_mutex, new_cond } = std.concurrent.sync
 { spawn, JoinHandle } = std.concurrent.thread
 { is_null } = std.core.ptr
@@ -60,7 +59,7 @@ QUANTUM = 64    // max messages an actor runs per turn before yielding the worke
 // without an API break (see the ActorError note above: the ACTOR path, which does have a Result,
 // reports `.Oom` properly). What this buys is the difference between a diagnosable
 // `zen: panic: pool: …` and a null pointer smuggled into the ring/stats array to be dereferenced by a
-// worker thread later. UFCS: `malloc(n).or_die("…")`.
+// worker thread later. UFCS: `heap_acquire(null_ptr(), n).or_die("…")`.
 //
 // EVERY REMAINING or_die IS IN `new_pool`, AND THAT IS LOAD-BEARING: it runs on the opening thread
 // BEFORE a single worker pthread exists and while NO lock is held, so its panic reaches `abort()` the
@@ -116,7 +115,7 @@ STDERR_FD = 2    // fd 2 for the "actor marked dead" note (mirrors std.core.resu
 // byte-identical. Bodyless FFI decl (like std.c.libc) — genc emits the prototype; the symbol is zenrt.c's.
 // KNOWN v1 LIMIT: a longjmp abandons the crashed frame. The in-flight typed message box is now reclaimed
 // on the catch path (the pool_actor trampoline records it via __zen_actor_set_inflight; zenrt.c frees it),
-// so a panicking actor no longer leaks its current box. Still deferred: other heap the behavior malloc'd
+// so a panicking actor no longer leaks its current box. Still deferred: other heap the behavior acquired
 // before the panic, and still-queued boxes in a dead actor's mailbox (drained-and-discarded, not freed) —
 // the real fix is a per-actor arena rt reset on death. No lock is held across the call (behavior runs
 // outside the mailbox lock).
@@ -142,7 +141,7 @@ __zen_thread_init = () void
 //
 // WHY the message box is NOT scratch (the crisp boundary): a SENT message must OUTLIVE the sender's
 // behavior — the RECEIVER reads it later, on another worker, after the sender's scratch has already been
-// reset. So messages/reply-boxes stay SHARED heap (malloc'd by `send`/`ref_send_msg`, freed by the worker
+// reset. So messages/reply-boxes stay SHARED heap (acquired by `send`/`ref_send_msg`, released by the worker
 // after the receiver's `receive` returns — S2/#519). Scratch is ONLY for the receiver's OWN temporaries,
 // never for anything that crosses a send. The scratch-escape checker (check_validate.zen) enforces this:
 // a scratch pointer routed out through `send`/`pool_send`/`ref_send_msg` is rejected.
@@ -160,8 +159,8 @@ PoolActor: {
     scratch: MutPtr<Arena>,
     boxed: i64,
 }    // user actor state (opaque to the pool); `scratch` = per-behavior bump arena (null = none);
-// `boxed` = 1 when this actor's i64 messages are malloc'd box POINTERS (the typed pool_actor path), so a
-// DEAD actor's still-queued backlog must `free` each drained box (supervision S5); 0 for raw pool actors
+// `boxed` = 1 when this actor's i64 messages are process-heap box POINTERS (the typed pool_actor path), so a
+// DEAD actor's still-queued backlog must release each drained box (supervision S5); 0 for raw pool actors
 // whose payload is a plain i64 value (freeing it would corrupt) — the drain-discard then only counts, no free.
 // (`art` = this actor's ambient rt; the worker sets it as the current-rt slot around each behavior run,
 // so `rt.current()` inside the behavior resolves to the actor's own rt — the M4 injection hook, §2b.
@@ -249,11 +248,11 @@ pool_try_spawn_scratch_rt* = (
     scratch: MutPtr<Arena>,
 ) RawPtr<u8> {
     mark_spawned()    // latch the rt.set_default guard: the process default is now frozen (workers read it)
-    ma = Malloc(_: 0)
-    mbuf = malloc(mbcap * 8)
+    ha = Heap(_: 0)
+    mbuf = heap_acquire(null_ptr(), mbcap * 8)
     is_null(mbuf).match ({
         true  => null_ptr(),
-        false => new_in(ma.addr(), PoolActor(
+        false => new_in(ha.addr(), PoolActor(
             user: user,
             mbuf: mbuf,
             head: 0,
@@ -269,7 +268,7 @@ pool_try_spawn_scratch_rt* = (
         )).match ({
             .Ok(arc) => arc.base,
             .Err(e)  => {
-                free(mbuf)    // the actor block failed AFTER the ring landed — do not leak the ring
+                heap_release(null_ptr(), mbuf)    // the actor block failed AFTER the ring landed — do not leak the ring
                 null_ptr()
             },
         }),
@@ -294,9 +293,9 @@ pool_actor_ref* = (raw: RawPtr<u8>) RawPtr<u8> {
 pool_actor_unref* = (raw: RawPtr<u8>) void {
     (atomic_add_i64(raw, 0 - 1) == 0).then({
         a = actor_view(raw)
-        free(a.mbuf)
+        heap_release(null_ptr(), a.mbuf)
         a.mbmu.destroy()
-        free(raw)
+        heap_release(null_ptr(), raw)
     })
 }
 // the spawner releases its reference (the symmetric counterpart of pool_spawn). Same as pool_actor_unref;
@@ -310,7 +309,7 @@ pool_actor_count* = (raw: RawPtr<u8>) i64 { load_i64(raw) }
 // the instant a behavior in this actor panicked — the actor may still be draining-and-discarding its
 // backlog, but it will run no further user code (at-most-once: post-death messages are dropped, not replayed).
 pool_actor_dead* = (raw: RawPtr<u8>) bool { actor_view(raw).dead != 0 }
-// mark this actor's messages as malloc'd box POINTERS: on death, drain_batch `free`s each still-queued box
+// mark this actor's messages as process-heap box POINTERS: on death, drain_batch releases each still-queued box
 // (backlog leak fix, #519's deferred class) instead of silently dropping it. Called by the typed pool_actor
 // spawn path right after the raw spawn; raw pool actors leave `boxed` 0 (their i64 payload is a value).
 pool_actor_set_boxed* = (raw: RawPtr<u8>) void {
@@ -354,19 +353,19 @@ Pool*: {
     // double the run queue's capacity: allocate a fresh ring, copy the (rqtail - rqhead) live slots to the
     // front in FIFO order, swap the buffers, free the old one. Caller MUST hold `p.mu` — the queue is ONE
     // mutex-guarded structure, so growth is a plain critical-section reallocation (no reader/writer can
-    // observe the swap mid-flight). Ownership is unchanged: the pool owns rqbuf (malloc'd in new_pool),
+    // observe the swap mid-flight). Ownership is unchanged: the pool owns rqbuf (acquired in new_pool),
     // and the current buffer — original or grown — is the one pool_close frees.
     // Returns false (leaving the queue EXACTLY as it was) when the new ring could not be allocated: this
     // executes under `p.mu`, so it must never panic — see the or_die note at the top of this file.
     rq_try_grow = (p: MutPtr<Pool>) bool {
         newcap = p.rqcap * 2
-        nbuf = malloc(newcap * 8)
+        nbuf = heap_acquire(null_ptr(), newcap * 8)
         is_null(nbuf).match ({
             true  => false,
             false => {
                 n = p.rqtail - p.rqhead
                 p.rq_copy(nbuf, 0, n)
-                free(p.rqbuf)
+                heap_release(null_ptr(), p.rqbuf)
                 p.rqbuf = nbuf
                 p.rqhead = 0
                 p.rqtail = n
@@ -486,10 +485,10 @@ Pool*: {
                             true  => {
                                 // BACKLOG FREE (S5, closes #519's deferred leak): a dead actor's still-queued message
                                 // boxes must be reclaimed, not silently dropped. For a typed actor (`boxed`) the i64 payload
-                                // is a malloc'd box pointer — free it; for a raw pool actor it is a plain value — only count.
+                                // is an owned box pointer — release it; for a raw pool actor it is a plain value — only count.
                                 // Each drop is a DEAD LETTER, tallied in the shared counter so restart-time loss is observable.
                                 (a.boxed != 0).then({
-                                    free(msg.offset(0))
+                                    heap_release(null_ptr(), msg.offset(0))
                                 })
                                 p.mu.lock()
                                 p.dropped = p.dropped + 1
@@ -618,20 +617,20 @@ Pool*: {
     }
     // free the pool's backing storage (only after pool_quiesce_stop has joined the workers).
     pool_close = (p: MutPtr<Pool>) void {
-        free(p.rqbuf)
-        free(p.wstats)
-        free(p.handles)
-        free(p.args)
+        heap_release(null_ptr(), p.rqbuf)
+        heap_release(null_ptr(), p.wstats)
+        heap_release(null_ptr(), p.handles)
+        heap_release(null_ptr(), p.args)
         p.mu.destroy()
         p.work_cv.destroy()
         p.done_cv.destroy()
-        free(p.selfraw)
+        heap_release(null_ptr(), p.selfraw)
     }
     // number of workers that processed at least one message (proof that work fanned across cores).
     workers_busy = (p: MutPtr<Pool>) i64 { count_busy(p.wstats, 0, p.nworkers, 0) }
 }    // DEAD-LETTER counter: messages dropped on a full mailbox (incremented under `mu`; read via pool_dropped)
 // global run queue ring (i64 slots holding PoolActor block pointers)
-// recover a MutPtr<Pool> from the pool's malloc'd block address (e.g. inside a worker/producer thread
+// recover a MutPtr<Pool> from the pool's process-heap block address (e.g. inside a worker/producer thread
 // body that received the raw pointer through its `arg`).
 pool_view* = (raw: RawPtr<u8>) MutPtr<Pool> { raw.slice(1)[0].addr() }
 // ── ActorRef: a SENDABLE address that can send/reply from INSIDE `receive` (S2) ──────────────────
@@ -669,11 +668,27 @@ worker_body = (arg: RawPtr<u8>) RawPtr<u8> {
     null_ptr()
 }
 // ── lifecycle ───────────────────────────────────────────────────────────────────────────────────
-// allocate + initialise a Pool block over a malloc'd run queue / locks / condvars / per-worker stats.
+// allocate + initialise a Pool block over process-heap run queue / locks / condvars / per-worker stats.
 new_pool = (nworkers: i64, rqcap: i64) RawPtr<u8> {
-    blk = malloc(sizeof(Pool)).or_die("pool: pool block allocation failed")
-    rqbuf = malloc(rqcap * 8).or_die("pool: run queue allocation failed")
-    wstats = malloc(nworkers * 8).or_die("pool: worker stats allocation failed")
+    blk = heap_acquire(null_ptr(), sizeof(Pool)).or_die("pool: pool block allocation failed")
+    rqbuf = heap_acquire(null_ptr(), rqcap * 8).or_die("pool: run queue allocation failed")
+    // A zero-worker pool is used by deterministic inline-driver fixtures. The canonical heap floor
+    // represents every zero-byte allocation as null, so its three empty worker tables need no block.
+    // This only makes construction valid: scheduled sends still raise `live`, and without a worker
+    // quiesce/teardown cannot clear it. Such fixtures must drain inline and deliberately leave the pool
+    // open; zero-worker lifecycle support is not implemented here.
+    wstats = (nworkers == 0).match ({
+        true  => null_ptr(),
+        false => heap_acquire(null_ptr(), nworkers * 8).or_die("pool: worker stats allocation failed"),
+    })
+    handles = (nworkers == 0).match ({
+        true  => null_ptr(),
+        false => heap_acquire(null_ptr(), nworkers * 8).or_die("pool: worker handle table allocation failed"),
+    })
+    args = (nworkers == 0).match ({
+        true  => null_ptr(),
+        false => heap_acquire(null_ptr(), nworkers * 16).or_die("pool: worker arg cell allocation failed"),
+    })
     zero_stats(wstats, 0, nworkers)
     pv :: [Pool] = blk.slice(1)
     pv[0] = Pool(
@@ -688,8 +703,8 @@ new_pool = (nworkers: i64, rqcap: i64) RawPtr<u8> {
         stop: 0,
         nworkers: nworkers,
         wstats: wstats,
-        handles: malloc(nworkers * 8).or_die("pool: worker handle table allocation failed"),
-        args: malloc(nworkers * 16).or_die("pool: worker arg cell allocation failed"),
+        handles: handles,
+        args: args,
         selfraw: blk,
         dropped: 0,
     )

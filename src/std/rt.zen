@@ -6,7 +6,7 @@
 // Surface (import as `rt = std.rt`, then `rt.current()` / `rt.with(...)` / `rt.alloc(n)`):
 //   rt.current()         -> Rt      read the ambient thread-local rt (process default when unset)
 //   rt.with(custom, body) -> R      save-set-restore the ambient rt around a lexical block
-//   rt.set_default(rt)              pick the whole program's rt once, before worker spawn
+//   rt.set_default(rt)              pick the whole program's rt once, before any OS-thread spawn
 //   rt.default()         -> Rt      the process-wide default rt (heap unless set_default was called)
 //   rt.alloc(n)          -> RawPtr  allocate n bytes via the AMBIENT rt (no allocator threading)
 //   rt.resize(p, n)      -> RawPtr  grow/shrink via the ambient rt
@@ -17,7 +17,7 @@
 // runtime a program picks once via `rt.set_default(...)` at the top of main; every unset thread (main +
 // pool workers) honors it, so a whole PARALLEL program can run under an arena. The thread-local `rt_slot`
 // is the per-actor override the pool sets around each behavior. `current()` = rt_slot when set, else
-// the process default. `set_default` is startup-only: it PANICS if called after the first spawn.
+// the process default. `set_default` is startup-only: it PANICS after the first raw-thread or actor spawn.
 //
 // WHY thread-local, not a true global: the pool runs different actors on different OS workers
 // concurrently, so "current rt" must be per-worker — a shared mutable global would race and hand a
@@ -25,31 +25,25 @@
 // thread (in zen__init_globals). A FRESH worker thread sees a zero-initialized rt_slot, so `ready == 0`
 // is the sentinel that means "nothing injected here" and `current()` falls back to the process default.
 // The pool uses this rt_slot to inject the actor's runtime around each behavior call.
-{ DynAlloc, dyn_of, heap_acquire, heap_resize, heap_release } = std.mem.alloc
+{ DynAlloc, dyn_of, dyn_heap } = std.mem.alloc
 { panic } = std.core.result
-// The runtime capability value. The three fn-pointer fields are the allocator vtable (Self erased
-// to RawPtr<u8> state, so any allocator plugs in without generic threading). `state` is the allocator
-// instance data (null for heap). `ready` is the init sentinel:
+// The runtime capability value. `mem` is the one erased allocator representation shared with owned
+// containers; Rt no longer repeats DynAlloc's three fn-pointers + state under a second set of names.
+// `ready` is the init sentinel:
 // 1 = a real Rt; 0 = a zero-init thread-local rt_slot on a fresh worker => use the heap default.
 Rt*: {
-    mem_acquire: (RawPtr<u8>, i64) RawPtr<u8>,
-    mem_resize: (RawPtr<u8>, RawPtr<u8>, i64) RawPtr<u8>,
-    mem_release: (RawPtr<u8>, RawPtr<u8>) void,
-    state: RawPtr<u8>,
+    mem: DynAlloc,
     ready: i64,
+    allocator = (r: Rt) DynAlloc { r.mem }
 }
 // The default heap vtable is the canonical malloc/realloc/free floor from std.mem.alloc
 // (heap_acquire/heap_resize/heap_release, imported above; state unused). rt.zen IS the runtime's
-// default heap-allocator floor, so it sits on the raw-allocation allowlist alongside
-// std.mem.{alloc,raw} / pool / thread — it just no longer re-inlines the three-line body.
+// default heap-allocator floor; this module stores its erased value and contains no raw allocation.
 // The process-wide default rt: heap-backed, no state. Cheap to build (just fills a struct), so
 // `current()` reconstructs it on demand when nothing is injected rather than storing it.
 heap_rt* = () Rt {
     Rt(
-        mem_acquire: heap_acquire,
-        mem_resize: heap_resize,
-        mem_release: heap_release,
-        state: null_ptr(),
+        mem: dyn_heap(),
         ready: 1,
     )
 }
@@ -62,10 +56,7 @@ mem_rt* = (
     state: RawPtr<u8>,
 ) Rt {
     Rt(
-        mem_acquire: acquire,
-        mem_resize: resize,
-        mem_release: release,
-        state: state,
+        mem: dyn_of(acquire, resize, release, state),
         ready: 1,
     )
 }
@@ -77,7 +68,8 @@ mem_rt* = (
 // whole PARALLEL program — pool actors included — can be run under an arena / custom allocator, which
 // `with`/`enter` (current-thread-only) cannot achieve.
 default_rt ::= heap_rt()
-// The startup-contract guard: set to 1 by `mark_spawned` on the FIRST pool spawn. `set_default` PANICS
+// The startup-contract guard: set to 1 by `mark_spawned` before the FIRST raw pthread is created or
+// pool actor is spawned. `set_default` PANICS
 // if called after this, turning the shared-mutable-global race (a worker reading `default_rt` while
 // main rewrites it) into a teaching error. The write is monotonic 0->1, so even a nested-spawn write
 // from a worker can only make the guard fire MORE, never falsely pass. Main-thread startup logic.
@@ -85,7 +77,8 @@ spawned ::= 0
 // Read the process default (the configurable "trivial default"). Used by `current()`'s unset fallback
 // and by the default-spawn paths in pool.zen / pool_actor.zen.
 default* = () Rt { default_rt }
-// Configure the process-wide default rt — call ONCE, at the top of `main`, BEFORE spawning any actor.
+// Configure the process-wide default rt — call ONCE, at the top of `main`, BEFORE spawning any OS
+// thread or actor.
 // Writes the process global (honored by pool workers via their zeroed-rt_slot fallback) AND the main
 // thread's own rt_slot (so main-thread ambient allocation honors it immediately). PANICS if called after
 // the first spawn: `default_rt` is read by worker threads with no lock, so it is only safe to write
@@ -96,11 +89,12 @@ set_default* = (custom: Rt) void {
             default_rt = custom
             rt_slot = custom
         },
-        false => panic("rt.set_default must be called before spawning any actor"),
+        false => panic("rt.set_default must be called before spawning any thread or actor"),
     })
 }
-// Called by the pool's single spawn choke point (pool_spawn_rt) on every spawn: latches the guard so a
-// subsequent `set_default` is rejected. Idempotent (monotonic 0->1).
+// Called synchronously by std.concurrent.thread immediately before pthread_create, and by the pool's
+// actor-spawn choke point as a conservative pre-worker latch. A subsequent `set_default` is rejected.
+// Idempotent (monotonic 0->1).
 mark_spawned* = () void { spawned = 1 }
 // The ambient current-rt, per OS thread. Init runs once on the main thread; fresh workers see a
 // zeroed slot (ready == 0) and fall back to the process default via `current()`.
@@ -133,27 +127,18 @@ enter* = (custom: Rt) Rt {
     saved
 }
 leave* = (saved: Rt) void { rt_slot = saved }
-// The ambient allocation path: read the current rt and dispatch through its vtable. This is the
-// single demonstrable proof that allocation reads the ambient rt with no allocator parameter. The
-// vtable fields are prefixed `mem_` so they never collide with these same-named public fns.
+// The ambient allocation path: read the current rt once, narrow it to its stored allocator, and
+// dispatch through that value. This is the single demonstrable proof that allocation reads the
+// ambient rt with no allocator parameter.
 alloc* = (n: i64) RawPtr<u8> {
-    r = current()
-    r.mem_acquire(r.state, n)
+    a = current().allocator()
+    a.d_acquire(a.state, n)
 }
 resize* = (p: RawPtr<u8>, n: i64) RawPtr<u8> {
-    r = current()
-    r.mem_resize(r.state, p, n)
+    a = current().allocator()
+    a.d_resize(a.state, p, n)
 }
 release* = (p: RawPtr<u8>) void {
-    r = current()
-    r.mem_release(r.state, p)
+    a = current().allocator()
+    a.d_release(a.state, p)
 }
-// Narrow an Rt to JUST its allocator capability (a `DynAlloc` value): keep acquire/resize/release +
-// state, drop sched/gc/ready. This is the bridge the ambient collections cross ONCE at construction —
-// they then store the narrow `DynAlloc`, not the whole `Rt` bundle: a container takes the narrowest
-// capability it needs, an Allocator, never the world (see docs/MEMORY_MODEL.md).
-dyn_of_rt = (r: Rt) DynAlloc { dyn_of(r.mem_acquire, r.mem_resize, r.mem_release, r.state) }
-// The AMBIENT allocator, narrowed: read `current()` ONCE and hand back a `DynAlloc`. This is the single
-// ambient draw on the ambient-container construction path; every later container op allocates through
-// the stored `DynAlloc`, never re-reading the thread-local.
-dyn_current = () DynAlloc { dyn_of_rt(current()) }

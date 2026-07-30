@@ -83,18 +83,22 @@ bootstrap, FFI boundaries, and low-level std modules.
 value flow.
 
 **(Enforced.)** Raw allocation calls are guarded by `tests/harness_boundaries.zen`. Its
-`alloc_not_whitelisted` predicate is the authority, and the allowlist is six paths, not three —
-a bare `malloc`/`calloc`/`realloc`/`free` call may appear only in:
+`alloc_not_whitelisted` predicate is the authority, and the allowlist for non-test production
+`.zen` source is two paths — a bare `malloc`/`calloc`/`realloc`/`free` call may appear only in:
 
 - `src/std/mem/alloc.zen`
 - `src/std/mem/raw.zen`
-- `src/std/concurrent/thread.zen`
-- `src/std/concurrent/pool.zen`
-- `src/std/concurrent/pool_actor.zen`
-- `src/compiler/genc.zen`
 
-Everything else must thread an allocator and call `acquire`/`resize`/`release` or a higher-level
-allocator-aware API. An unreadable file fails the scan rather than passing silently.
+Everything else in that production scan must thread an allocator and call
+`acquire`/`resize`/`release` or a higher-level
+allocator-aware API. Low-level thread and pool storage and the compiler's bootstrap compatibility
+shims route through the canonical heap floor rather than importing raw C allocation names. An
+unreadable file fails the scan rather than passing silently.
+
+`Allocator` and `DynAlloc` are two representations of that one capability, not two allocators:
+`Allocator` is a statically dispatched borrowed trait parameter; `DynAlloc` is its erased, storable
+value form for an owner that must remember where its bytes came from. `Rt` stores this same
+`DynAlloc` rather than declaring a second allocator vtable.
 
 Arena backing storage follows the same rule. `arena.make_in(backing, cap)` and
 `Arena.free_in(backing)` acquire and release the arena's backing block through a

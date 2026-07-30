@@ -58,13 +58,13 @@ We are paying for precision where it does not matter and taking it on faith wher
 | `Malloc` | `alloc.zen:20` | 1,317 `MutPtr<Malloc>` in `src/compiler` | **MERGE into `Heap`** |
 | `Heap` | `alloc.zen:17` | 8 std, 7 examples, 0 compiler | **KEEP as the one name** |
 | `DynAlloc` | `alloc.zen:314` | 4 std modules | **KEEP** — needs the missing ctor |
-| `Rt` (allocator half) | `rt.zen:34` | 4 sites, **all test-source strings** | **MERGE into `DynAlloc`** |
+| `Rt` (allocator half) | `rt.zen` | stores one `DynAlloc` | **DONE — duplicate vtable removed** |
 | `Arena` | `arena.zen:6` | `runtime.zen`, `pool.zen`, `pool_actor.zen` | **KEEP** |
 | `SyncArena`/`AsyncArena` | `runtime.zen:12,19` | `scope.zen` + fixtures | **MERGE into `Arena`** |
 | `Scope<A>` | `scope.zen:16` | **0** in `src/std`, `src/compiler`, `examples` | **DELETE or adopt** |
 | `Buf2`/`Buf3` + `try_acquire2/3` | `alloc.zen:238,242` | 7 call sites each | **KEEP** (a lane initially guessed dead — wrong) |
-| `genc.acquire` / `genc.resize` | `genc.zen:45,46` | **0**, verified against the seed | **DELETE** — they squat the C symbols `acquire`/`resize` |
-| `rt.dyn_of_rt` / `rt.dyn_current` | `rt.zen:152,156` | **0**, unexported | **DELETE** |
+| `genc.acquire` / `genc.resize` | `genc.zen:45,46` | bootstrap compatibility; no direct seed calls | **KEEP** — raw bodies replaced by `heap_request_acquire` / `heap_resize` routing |
+| `rt.dyn_of_rt` / `rt.dyn_current` | removed | 0 | **DONE** |
 | debug / GPA / counting allocator | — | **does not exist** | **ADD** |
 
 ### 2.2 The four-representations problem  **[V]**
@@ -72,17 +72,15 @@ We are paying for precision where it does not matter and taking it on faith wher
 `Allocator`, `DynAlloc`, `Rt`, and `Heap`/`Malloc` are **one concept at two levels of erasure,
 spelled four times**.
 
-`DynAlloc` and `Rt` are the same four fields under different field-name prefixes, and their
-constructors are the same bodies with different return types (`dyn_of`/`mem_rt`,
-`dyn_heap`/`heap_rt`).
+`DynAlloc` and `Rt` used to repeat the same four fields under different field-name prefixes. This
+part is resolved: `Rt` now stores one `DynAlloc`, and `Rt.allocator()` exposes the narrow capability.
 
 `Heap` and `Malloc` are both `{_: i32}` and differ in exactly one line — and **the names are
 backwards**: `Malloc` is the LSP request-scoped one, `Heap` is the durable one.
 
-**The load-bearing gap is a missing conversion.** There is no `dyn_of_alloc<A>(a: MutPtr<A>) DynAlloc`.
-That is why `AVec`/`ASet`/`AHMap` are permanently process-heap-backed — they hardcode `dyn_heap()`
-and cannot take an arena or a test allocator. `vec.zen:286` advertises a path through
-`rt.dyn_of_rt` that is **unexported with zero callers**: a false comment.
+**The load-bearing conversion gap is resolved.** `dyn_from(a)` erases a caller allocator into the
+storable value used by explicit container constructors, and `Rt.allocator()` exposes an already-erased
+runtime allocator without rebuilding its vtable. The old private zero-caller helpers were removed.
 
 ### 2.3 `heap.gpa()` is a promise the code does not keep  **[V]**
 
@@ -387,10 +385,11 @@ rely on it being untyped — keep `RawPtr<u8>.offset` byte-typed and tighten onl
 
 **2. Make `store` check its value** against the pointee. Will surface latent truncations.
 
-**3. Delete the dead surfaces.** `genc.acquire`/`genc.resize` (0 callers, and they squat the C
-symbols `acquire`/`resize`), `rt.dyn_of_rt`, `rt.dyn_current`, `Resource` (move to the test tree),
-and **`trace.zen`'s inert `Drop`** — import it from `std.mem.own` instead. All trivial, all
-provably unused.
+**3. Keep bootstrap compatibility on the canonical floor; delete genuinely dead surfaces.**
+`genc.acquire`/`genc.resize` remain as compatibility shims for the stripped bootstrap closure, but
+their raw allocation bodies are gone: they route through `heap_request_acquire` / `heap_resize`.
+Delete `Resource` (move it to the test tree) and **`trace.zen`'s inert `Drop`** — import that from
+`std.mem.own` instead.
 
 **4. Add `std.mem.debug`** — `Counting` and `Limit` implementing `Allocator`, plus poisoning,
 double-free detection, and a leak report. Then migrate the 26 fixtures that hand-roll it.

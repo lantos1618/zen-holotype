@@ -361,11 +361,9 @@ Three fields do it, in this order, identically on `Vec<T>` and `String`:
   lets the field exist at all: a `MutPtr<A>` allocator cannot be erased into a value, because a
   generic function cannot be taken as a fn-pointer and an impl method cannot be named as one. So
   the carrying constructors take a `DynAlloc` (`alloc.dyn_heap()`, or any `dyn_of(...)` vtable)
-  rather than the `a: Allocator` the threaded API takes. Note that `std.rt`'s `dyn_of_rt` is
-  **private** — its declaration carries no `*` (`src/std/rt.zen:155`), so naming it from outside
-  the module is `error[private-name]`. Its wrapper `dyn_current` (`:159`) is private too, so
-  there is currently **no** public `std.rt` route from an `Rt` to a `DynAlloc`; the ambient
-  runtime cannot supply a carrying constructor from outside `std.rt` until one is exported.
+  rather than the `a: Allocator` the threaded API takes. `Rt.allocator()` returns that same narrow
+  `DynAlloc` value, so an explicit runtime can construct an allocator-carrying container without
+  copying or rebuilding a second vtable representation.
 
 `std.mem.buffer` is now the single implementation of those carrying storage semantics. It does not
 replace either public header: the String and Vec modules adapt their identical flat fields to the

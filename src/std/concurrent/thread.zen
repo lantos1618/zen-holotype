@@ -17,37 +17,41 @@
 // Binaries that use this module must link -lpthread (std.build: `.links("pthread")`). On glibc
 // 2.34+ the pthread symbols are folded into libc so the link is a formality, but keep it for
 // portability.
-{ malloc, free } = std.mem.alloc
+{ heap_acquire, heap_release } = std.mem.alloc
 { pthread_create, pthread_join } = std.c.libc
 { panic } = std.core.result
 { is_null } = std.core.ptr
+{ mark_spawned } = std.rt
 // a handle to a running thread; `tid` points at the 8-byte pthread_t cell pthread_create filled in.
 JoinHandle*: {
     tid: RawPtr<u8>,
     // wait for the thread to finish and return whatever its body returned (the `void*` retval). Frees
     // the handle's backing cells, so a JoinHandle is single-use.
     join = (h: JoinHandle) RawPtr<u8> {
-        retcell = malloc(8)    // void* out-cell for the thread's return value
+        retcell = heap_acquire(null_ptr(), 8)    // void* out-cell for the thread's return value
         is_null(retcell).then({
             panic("thread: join out-cell allocation failed")
         })
         pthread_join(load_i64(h.tid), retcell)
         slot: [RawPtr<u8>] = retcell.slice(1)    // read the stored void* back out
         r = slot[0]
-        free(retcell)
-        free(h.tid)
+        heap_release(null_ptr(), retcell)
+        heap_release(null_ptr(), h.tid)
         r
     }
 }    // -> pthread_t (an i64 on glibc)
 // start `f(arg)` on a fresh OS thread. `f` MUST be non-capturing (see the module header); pass any
 // state it needs through `arg`. Returns a JoinHandle to wait on with `h.join()`.
 spawn* = (f: (RawPtr<u8>) RawPtr<u8>, arg: RawPtr<u8>) JoinHandle {
-    cell = malloc(8)    // pthread_t storage; pthread_create writes the id here
+    cell = heap_acquire(null_ptr(), 8)    // pthread_t storage; pthread_create writes the id here
     // pthread_create/pthread_join WRITE through these cells. `JoinHandle` is a plain value type with no
     // error channel, so a failed cell allocation aborts by name rather than segfaulting inside libc.
     is_null(cell).then({
         panic("thread: pthread_t cell allocation failed")
     })
+    // Freeze the process-wide ambient runtime before another OS thread can read it. This call is
+    // synchronous and precedes pthread_create, so a later rt.set_default is rejected without racing.
+    mark_spawned()
     pthread_create(cell, null_ptr(), f, arg)
     JoinHandle(tid: cell)
 }

@@ -23,7 +23,7 @@ Malloc*: {
 }
 // ── the canonical malloc/realloc/free floor ───────────────────────────────────────────────────────
 // The ONE process-heap allocator body, in erased-vtable shape (state: RawPtr<u8> ignored, so it plugs
-// into DynAlloc / Rt vtables directly). Every heap floor in the stdlib routes here: Heap.impl,
+// into DynAlloc directly; Rt stores that same value). Every heap floor in the stdlib routes here: Heap.impl,
 // Malloc.impl, dyn_heap(), and std.rt's heap vtable all call these three fns instead of re-inlining
 // the `(n<=0)?null:malloc` / realloc / free lines. acquire treats a 0-byte request as a null success.
 // heap_acquire is DURABLE by definition: it is the process heap, and what it returns lives until it
@@ -34,10 +34,10 @@ heap_acquire* = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
 }
 // the REQUEST floor: `Malloc.acquire`. With a scope open every allocation is a bump out of its chunk
 // chain; with none open this IS heap_acquire, one bool test earlier.
-heap_request_acquire = (n: i64) RawPtr<u8> {
+heap_request_acquire* = (n: i64) RawPtr<u8> {
     (n <= 0).match ({
         true  => null_ptr(),
-        false => hs_on.then({ hs_alloc(n) }, { malloc(n) }),
+        false => hs_on.then({ hs_alloc(n) }, { heap_acquire(null_ptr(), n) }),
     })
 }
 // A block the open scope handed out is grown INSIDE the scope (bump a fresh one, copy the recorded
@@ -100,7 +100,7 @@ hs_off = (c: RawPtr<u8>) i64 { load_i64(c.offset(16)) }
 hs_set_off = (c: RawPtr<u8>, v: i64) void { store_i64(c.offset(16), v) }
 hs_size = (p: RawPtr<u8>) i64 { load_i64(p.offset(0 - HS_BLK())) }
 hs_chunk = (cap: i64) RawPtr<u8> {
-    c = malloc(HS_HDR() + cap)
+    c = heap_acquire(null_ptr(), HS_HDR() + cap)
     (c == null_ptr()).match ({
         true  => c,
         false => {
@@ -321,7 +321,7 @@ try_acquire3*<A: Allocator> = (a: MutPtr<A>, n1: i64, n2: i64, n3: i64) Result<B
 // state. It lets a container STORE a narrow Allocator capability in one concrete field, with no
 // generic type parameter and WITHOUT depending on the wider `Rt` bundle (which also carries
 // sched/gc/ready). It IS the value form of the `Allocator` trait — the impl below dispatches
-// straight through the stored fn-pointers, the same shape `Rt`'s `mem_*` fields take. Build one from
+// straight through the stored fn-pointers. Rt stores this exact value instead of repeating the vtable. Build one from
 // the process heap (`dyn_heap()`) or any vtable (`dyn_of(...)`). A-wrapper constructors (`vec.new`,
 // `set.new`, `hmap.new`) draw `dyn_heap()` once at construction; `new_in`/`from_in` take an explicit
 // `DynAlloc` from the caller. `std.rt` remains for pool/actor ambient runtime — not for collections.

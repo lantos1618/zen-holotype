@@ -318,19 +318,14 @@ found = (region: StringView) bool { region.is_empty().then({ false }, { true }) 
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 4: raw malloc/calloc/realloc/free stay behind the allocator floor (the original port).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// RAW_ALLOC_ALLOWED's complement, originally mirrored from test_primitive_boundaries.py. Three of the
-// ported entries had NOTHING behind them and were deleted (`src/std/rt.zen`, `c_emit.zen`,
-// `c_expr.zen` — c_emit's only `malloc` is inside the C-prelude string literal, which file_has
-// correctly skips), on this file's own rule: an allowlist entry with nothing behind it is an
-// exemption waiting to be spent by accident. Deleting one is free to verify — the suite goes red the
-// moment the entry was load-bearing after all.
+// RAW_ALLOC_ALLOWED's complement, originally mirrored from test_primitive_boundaries.py. In non-test
+// source, raw process-heap calls now live only in the explicit memory escape hatch and the canonical
+// allocator floor. Thread/pool code and the compiler's bootstrap shim call the named heap floor
+// instead of importing libc-shaped allocation names. c_emit's only `malloc` is inside the generated
+// C-prelude string literal, which file_has correctly skips; escaping slice-literal ownership is
+// tracked separately.
 alloc_not_whitelisted = (path: StringView) bool {
-    ne(path, "src/std/mem/alloc.zen")
-        && ne(path, "src/std/mem/raw.zen")
-        && ne(path, "src/std/concurrent/thread.zen")
-        && ne(path, "src/std/concurrent/pool.zen")
-        && ne(path, "src/std/concurrent/pool_actor.zen")
-        && ne(path, "src/compiler/genc.zen")
+    ne(path, "src/std/mem/alloc.zen") && ne(path, "src/std/mem/raw.zen")
 }
 // `(?<!\.)\b(?:malloc|calloc|realloc|free)\s*\(` anchored at i (kind 1 = dot-excluded boundary).
 file_has_raw_alloc = (sv: Slice<u8>) bool {
