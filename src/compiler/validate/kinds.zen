@@ -7,8 +7,8 @@
   acquire_or_die, acquire_or_die } = compiler.genc
 { impl_cname_in } = compiler.mangle
 { DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params, elem_of,
-  extend_env, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, pointee_of, recv_name,
-  the_func, tparam_declared } = compiler.check
+  extend_env, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, params_onto, pointee_of,
+  recv_name, the_func, tparam_declared } = compiler.check
 { calls_reflect, rc_calls_body } = compiler.passes.refcount
 { reflect_fields } = compiler.passes.subst
 { has_fnt_param, is_logic_op, is_or_return_fn, is_prim_width, param_names_has, slice_any,
@@ -633,8 +633,12 @@ ka_lam_body_ty = (env: Env, lm: LambdaData, fps: [Ty]) Ty {
     (lm.body.len == 0).match ({
         true  => tvoid(),
         false => {
+            // params ON TOP of the enclosing scope, not instead of it: the lambda CAPTURES. Replacing
+            // env.vars made a captured local invisible, so a body that is a bare captured name fell
+            // through to global_or_fn and inferred an unrelated top-level `ok`/`found`/`cur` of that
+            // name — a phantom arg-type error that `== true` "fixed" only by hiding the inference.
             benv = Env(
-                vars: env.a.params_env(env.a.ka_lam_params(lm.params, fps)),
+                vars: env.a.params_onto(env.a.ka_lam_params(lm.params, fps), env.vars),
                 decls: env.decls,
                 didx: env.didx,
                 exp: tvoid(),

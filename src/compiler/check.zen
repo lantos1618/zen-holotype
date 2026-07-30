@@ -928,11 +928,12 @@ vnil* = (a: MutPtr<Malloc>) Ptr<VList> { a.vlnode(vnil_val()) }
 vcons* = (a: MutPtr<Malloc>, nm: StringView, t: Ty, tail: Ptr<VList>) Ptr<VList> {
     a.vlnode(vcons_val(nm, t, tail))
 }
-params_env* = (a: MutPtr<Malloc>, ps: [Param]) Ptr<VList> {
-    e ::= a.vnil()
+params_onto* = (a: MutPtr<Malloc>, ps: [Param], tail: Ptr<VList>) Ptr<VList> {
+    e ::= tail
     ps.loop_at((i, p) { e = a.vcons(p.name, p.ty, e) })
     e
 }
+params_env* = (a: MutPtr<Malloc>, ps: [Param]) Ptr<VList> { a.params_onto(ps, a.vnil()) }
 // First-byte prefilter before the full string compare: lookup_var walks the cons-list env once per
 // variable reference (the single hottest checker fn), and almost every node on the chain fails the
 // compare — one byte load rejects it without the strcmp call. Byte-identical answers: names are
@@ -1919,13 +1920,23 @@ extend_env* = (a: MutPtr<Malloc>, env: Env, st: Stmt) Env {
         _       => env,
     })
 }
+// The handler's own type. A RESERVED name — no source type can spell a space — so "is this receiver
+// a live loop handle" is answered by the binder the `.Loop` introduced, not by the field spelling at the
+// use site. That is what lets `h.<anything>` be rejected: the handle is real, the verb is not.
+tloop_handle* = () Ty { tnamed("loop handle") }    // the space keeps it unspellable AND reads in diagnostics
+is_loop_handle_ty* = (t: Ty) bool { t.enum_name() == "loop handle" }
+// The only handle verbs with a lowering (compiler.backend.{c,js} gen_member/js_member); any other field
+// on a handle reaches cc as an undeclared identifier.
+is_loop_verb* = (field: StringView) bool { field == "break_zk" || field == "continue_zk" }
+// The index binding's type, in ONE place. Three passes used to spell it independently (this env `i32`,
+// check_resolve.resolve_loop `i32`, passes.refcount `i64`) while the backend emitted `for (int64_t …)`;
+// the emitted width is the one that is real, and it is `xs.len`'s own type.
+tloop_index* = () Ty { ti64() }
 // The env a foreach/loop BODY is checked in: the element (`v`) and index (`i`) bindings the lowering
-// introduces, plus the handler (`h`) whose `h.break`/`h.continue` controls the loop. `h` is bound to an
-// unknown type so `h.break_zk` stays lenient (member_err defers on unknown receivers) — it exists only so
-// the handler name resolves and the validator can walk INTO the body to catch undefined names / type errs.
+// introduces, plus the handler (`h`) whose `h.break`/`h.continue` controls the loop.
 loop_env* = (a: MutPtr<Malloc>, env: Env, l: LoopData) Env {
     Env(
-        vars: a.vcons(l.h, tnamed(""), a.vcons(l.elem, l.elemTy, a.vcons(l.idx, ti32(), env.vars))),
+        vars: a.vcons(l.h, tloop_handle(), a.vcons(l.elem, l.elemTy, a.vcons(l.idx, tloop_index(), env.vars))),
         decls: env.decls,
         didx: env.didx,
         exp: env.exp,

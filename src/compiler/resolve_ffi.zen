@@ -11,7 +11,7 @@
 { view } = std.text.str
 { render_diagnostic } = compiler.diagnostic
 { ModuleTable, ProvidedSymbol, eprint, id_is_user, mappend_id_name, mappend_mid_display,
-  res_reject_text, mid_is_user, next_line, rappend_span, res_col_of, res_line_of } = compiler.resolve
+  res_reject_text, mid_is_user, next_line, rappend_span, res_col_of, res_line_of, res_ident_end } = compiler.resolve
 { loop_at } = std.core.count
 // ── error[ffi-ungranted]: FFI is a BUILD-GRANTED capability ──────────────────────────────────────
 // A bodyless (foreign) declaration binds a raw C symbol — any module holding one can reach ANY
@@ -130,13 +130,32 @@ ffi_skip_sp = (s: StringView, p: i32) i32 {
     })
 }
 // a foreign FUNCTION decl reads `name[*] = (…` — the textual `foreign` scan flag alone also catches
-// module globals (`X = 5` has `=` and no `{`), which are NOT an FFI surface.
+// module globals (`X = 5` has `=` and no `{`), which are NOT an FFI surface. `= (` alone is still not
+// enough: a parenthesised constant expression (`GNEST = (1 << 20) * (1 << 20)`) opens the same way, so
+// the paren must hold a PARAMETER LIST — empty, or `ident:` — which no expression can imitate.
+ffi_param_list_at = (src: StringView, lp: i32) bool {
+    q = src.ffi_skip_sp(lp + 1)
+    (src.at(q) == ')').then({
+        return true
+    })
+    e = src.res_ident_end(q)
+    (e == q).then({
+        return false
+    })
+    src.at(src.ffi_skip_sp(e)) == ':'
+}
 ffi_foreign_fn = (src: StringView, sym: ProvidedSymbol) bool {
     sym.foreign.match ({
         true  => {
             p = (src.at(sym.next) == '*').then({ sym.next + 1 }, { sym.next })
             q = src.ffi_skip_sp(p)
-            (src.at(q) == '=').then({ src.at(src.ffi_skip_sp(q + 1)) == '(' }, { false })
+            (src.at(q) == '=').match ({
+                true  => {
+                    lp = src.ffi_skip_sp(q + 1)
+                    (src.at(lp) == '(').then({ src.ffi_param_list_at(lp) }, { false })
+                },
+                false => false,
+            })
         },
         false => false,
     })
@@ -199,6 +218,140 @@ enforce_ffi_grants* = (
                     })
                 })
             })
+        })
+    })
+    0
+}
+// ── error[ffi-unlinked]: a foreign decl must NAME its provider ───────────────────────────────────
+// A bodyless decl says WHAT a symbol looks like and nothing about WHERE it comes from; it worked only
+// because `cc` links libc by default, so a typo'd or nonexistent symbol surfaced as an `ld` dump with
+// no file, no line and no hint. A module that holds foreign declarations therefore states its linkage
+// once, at the top, as a pragma line — the same shape as the `//! ffi:` grant, so no keyword and no
+// parser change:
+//
+//     //! link: c, pthread          std.c.libc — the C standard library plus -lpthread
+//     //! link: m                   std.math   — -lm
+//     //! link: zenrt               the compiler's own C runtime (bootstrap/zenrt.c)
+//     //! link: js                  std.web.dom — the JavaScript host implements these stubs
+//     //! link: native.c            a .c source this project compiles in
+//
+// Token → link flag: `c` (linked by default), `zenrt` (always compiled in), `js` (not a C library at
+// all) and any `*.c` source name contribute NO flag; every other token `X` becomes `-lX`. The union
+// over the resolved closure is what the driver puts on the cc line — the build links exactly what the
+// declarations claim, instead of a hard-coded `-lm` that was there whether anything needed it or not.
+// The check itself is per MODULE and covers the entry file too: the point is that every foreign decl
+// in a program has a named provider, and the program's own file is no more self-evident than a
+// dependency's. ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly like error[ffi-ungranted].
+LINK_PRAGMA = () StringView { "//! link:" }
+LINK_PRAGMA_LEN = () i32 { 9 }
+// offset just past `//! link:` on the first line that starts with it, or -1 when the module declares none.
+link_pragma_at = (src: StringView) i32 {
+    found ::= 0 - 1
+    pos ::= 0
+    bs: Slice<u8> = src.view()
+    bs.loop((h, i, b) {
+        ii = to_i32(i)
+        (ii < pos == false).then({
+            (found < 0).match ({
+                true  => {
+                    src.ffi_span_eq(ii, ii + LINK_PRAGMA_LEN(), LINK_PRAGMA(), 0).then({
+                        found = ii + LINK_PRAGMA_LEN()
+                    })
+                    pos = src.next_line(ii)
+                },
+                false => {
+                    h.break
+                },
+            })
+        })
+    })
+    found
+}
+// ── the resolved closure's declared link flags ───────────────────────────────────────────────────
+// Collected during the linkage sweep and read back by the driver just before it builds the cc line
+// (same module-cell channel as ffi_grants/genmods above, and safe for the build cache: the set is a
+// pure function of the closure sources the cache key already hashes).
+link_libs ::= ffi_no_grants()
+link_libs_get* = () StringView { link_libs }
+link_libs_reset* = () void { link_libs = ffi_no_grants() }
+// providers that contribute no `-l`: the default-linked C library, the always-compiled Zen runtime,
+// the JavaScript host, and any `<name>.c` source the target already compiles.
+link_implicit = (s: StringView, p: i32, e: i32) bool {
+    s.ffi_span_eq(p, e, "c", 0)
+        || s.ffi_span_eq(p, e, "zenrt", 0)
+        || s.ffi_span_eq(p, e, "js", 0)
+        || e - p > 2 && s.at(e - 2) == '.' && s.at(e - 1) == 'c'
+}
+link_add = (a: MutPtr<Malloc>, s: StringView, p: i32, e: i32) void {
+    flag = a
+        .gstr_string(24)
+        .gstr_append(a, "-l")
+        .rappend_span(a, s, p, e)
+        .gstr_finish(a)
+    cur = link_libs
+    (cur.ffi_list_has(0, to_i32(cur.view().len), flag) == false).then({
+        link_libs = a
+            .gstr_string(64)
+            .gstr_append(a, cur)
+            .gstr_append(a, flag)
+            .gstr_append(a, " ")
+            .gstr_finish(a)
+    })
+}
+// fold one module's `//! link:` list (comma/space separated) into the program's flag set.
+link_collect = (a: MutPtr<Malloc>, src: StringView, p: i32, e: i32) void {
+    (p < e).then({
+        ffi_delim(src.at(p)).match ({
+            true  => a.link_collect(src, p + 1, e),
+            false => {
+                te = src.ffi_token_end(p, e)
+                (src.link_implicit(p, te) == false).then({
+                    a.link_add(src, p, te)
+                })
+                a.link_collect(src, te, e)
+            },
+        })
+    })
+}
+link_fail = (
+    a: MutPtr<Malloc>,
+    path: StringView,
+    src: StringView,
+    sym: ProvidedSymbol,
+    report: bool,
+) i32 {
+    line = src.res_line_of(sym.start)
+    col = src.res_col_of(sym.start)
+    msg = a
+        .gstr_string(192)
+        .gstr_append(a, "foreign declaration `")
+        .gstr_append(a, sym.name)
+        .gstr_append(a, "` names no library: this module declares no linkage, so nothing says which library defines the symbol")
+        .gstr_finish(a)
+    hint = a
+        .gstr_string(192)
+        .gstr_append(a, "declare it at the top of this file: `//! link: c` (the C standard library), `//! link: m` for -lm, `//! link: zenrt`, `//! link: js`, or `//! link: <file>.c`")
+        .gstr_finish(a)
+    d = a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-unlinked", msg, hint, 1)
+    report.match ({
+        true  => {
+            eprint(d)
+            0
+        },
+        false => res_reject_text(d),
+    })
+}
+enforce_ffi_linkage* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 {
+    link_libs_reset()
+    table.modules.loop_at((i, entry) {
+        lp = entry.source.link_pragma_at()
+        (lp < 0).match ({
+            true  => entry.graph.symbols.loop_at((j, sym) {
+                entry.source.ffi_foreign_fn(sym).then({
+                    a.link_fail(entry.path, entry.source, sym, report)
+                })
+            }),
+            false => a.link_collect(entry.source, lp, entry.source.ffi_line_end(lp)),
         })
     })
     0

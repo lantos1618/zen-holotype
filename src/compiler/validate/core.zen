@@ -782,7 +782,13 @@ kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
             .or(env.kv_value_void_arm_kind(env.exp, r))
             .or(env.kv_slice_elem_kind(env.exp, r)),
         .ExprStmt(e) => env.kv_check_expr_kind(e),
-        .While(w)    => env.kv_check_expr_kind(w.c),
+        // BODIES too, under the narrowed walk `.Loop` bodies already get: an inlined `step_while`
+        // splices its `next` lambda into a `@while` body inside a value-position block, so stopping at
+        // the condition left everything a `times`/`loop_at` body holds unvisited — the escape route
+        // that let `h.break` on a handler that does not exist reach cc as "label 'h__b' used but not
+        // defined". Narrowed, not authoritative: this IS a loop body, and the same pre-mono deferrals
+        // apply (a stricter walk here rejects ~70 typing warts the stdlib and compiler already carry).
+        .While(w)    => env.kv_check_expr_kind(w.c).or(env.a.lkv_body_kind(env, w.body)),
         .IndexSet(x) => env
             .kv_check_expr_kind(x.seq)
             .or(env.kv_check_expr_kind(x.idx))

@@ -176,8 +176,8 @@ exp_end = (src: StringView, pos: i32) i32 {
 }
 str_end = (src: StringView, pos: i32) i32 {
     e = pos.step_while((p) { at(src, p) != '\0' && at(src, p) != '"' }, (p) {
-        (at(src, p) == '\\').then({ p + 2 }, { p + 1 })
-    })    // pos just past the opening quote; a `\` swallows the byte after it
+        (at(src, p) == '\\' && at(src, p + 1) != '\0').then({ p + 2 }, { p + 1 })
+    })    // pos just past the opening quote; a `\` swallows the byte after it, unless that is the EOF NUL
     (at(src, e) == '\0').then({ e }, { e + 1 })
 }    // unterminated — stop at NUL; ITERATIVE so a ~50KB string literal is O(n) iteration, not O(n) C-stack
 // A raw literal opens with THREE quotes. Checked before the single-quote form so maximal munch wins:
@@ -242,11 +242,16 @@ two_op = (b0: u8, b1: u8) bool {
 // before two_op so it never splits into `::` + `=` (which would read as a mutable binding whose
 // type annotation is missing).
 three_op = (b0: u8, b1: u8, b2: u8) bool { b0 == ':' && b1 == ':' && b2 == '=' }
+// The terminator is the ONLY bound `at` has, so byte pos+k may be read only once pos..pos+k-1 are
+// known non-NUL. `scan` proves pos, but pos+1 can BE the NUL — a source whose last byte is an
+// operator char — and call ARGUMENTS evaluate eagerly, so the third read is guarded at this call
+// site rather than inside three_op.
 sym_end = (src: StringView, pos: i32) i32 {
-    three_op(at(src, pos), at(src, pos + 1), at(src, pos + 2)).then({
+    b1 = at(src, pos + 1)
+    (b1 != '\0' && three_op(at(src, pos), b1, at(src, pos + 2))).then({
         return pos + 3
     })
-    two_op(at(src, pos), at(src, pos + 1)).then({ pos + 2 }, { pos + 1 })
+    two_op(at(src, pos), b1).then({ pos + 2 }, { pos + 1 })
 }    // ==
 mk = (k: TokKind, start: i32, end: i32) Scan {
     Scan(

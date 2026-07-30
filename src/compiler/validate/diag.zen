@@ -1,11 +1,11 @@
 // compiler.validate.diag — diagnostic primitives: error-kind constants, DiagInfo/Diagnostic, name errors.
-{ ArmData, Expr, FieldInit, Stmt, Ty } = compiler.ast.ast_types
-{ Env, arm_env, extend_env, loop_env } = compiler.check
+{ ArmData, Expr, FieldInit, MemberData, Stmt, Ty } = compiler.ast.ast_types
+{ Env, arm_env, extend_env, is_loop_handle_ty, is_loop_verb, loop_env } = compiler.check
 { Malloc } = std.mem.alloc
 { at, is_alnum } = std.text.ascii
 { advance_while, loop_at } = std.core.count
 { is_empty } = std.text.str
-{ CondQuery, EnvQuery, SourceSpan, expr_pos } = compiler.validate.util    // trait imports: enable UFCS `env.var_err()`/`d.cond_onearm_err()` via the impl index
+{ CondQuery, EnvQuery, SourceSpan, expr_pos, pos_or } = compiler.validate.util    // trait imports: enable UFCS `env.var_err()`/`d.cond_onearm_err()` via the impl index
 { check_diagnostic_from_source, check_to_diagnostic } = compiler.validate.core
 // ── narrowed LOOP/lambda-body walk: bare names + structural bool exhaustiveness ───────────────
 // Loop bodies are intentionally not fully type-checked before generic specialization. This walk reports
@@ -44,6 +44,21 @@ name_error = (env: Env, name: StringView, pos: i32) NameErrors {
                 first_kind: (n == 0).then({ 0 }, { KUNDEFINED() }),
             )
         },
+        false => name_errors_none(),
+    })
+}
+// Field names are otherwise DEFERRED here (a generic body legitimately reaches fields of an unbound
+// type param). A LOOP HANDLE is the exception, and structurally so: `h`'s binder is the `.Loop` itself,
+// which loop_env gives the reserved handle type, so the receiver is known even pre-mono. Only the two
+// verbs lower — `h.anything_else` used to pass `check` and surface as a raw cc "undeclared identifier".
+loop_verb_error = (env: Env, m: MemberData) NameErrors {
+    p = m.pos.pos_or(load(m.obj).expr_pos())
+    (p > 0 && env.infer_expr(m.obj).is_loop_handle_ty() && m.field.is_loop_verb() == false).match ({
+        true  => NameErrors(
+            count: 1,
+            first_pos: p,
+            first_kind: KSTRUCTFIELD(),
+        ),
         false => name_errors_none(),
     })
 }
@@ -95,7 +110,7 @@ name_errors_expr* = (env: Env, e: Ptr<Expr>) NameErrors {
             .name_errors_merge(env.name_errors_expr(d.t))
             .name_errors_merge(env.name_errors_expr(d.e))
             .name_errors_merge(d.name_errors_onearm()),
-        .Member(m)      => env.name_errors_expr(m.obj),    // field NAME deferred (h.break_zk etc.)
+        .Member(m)      => env.name_errors_expr(m.obj).name_errors_merge(env.loop_verb_error(m)),
         .Match(m)       => {
             subjty = env.infer_expr(m.subj)
             env.name_errors_expr(m.subj).name_errors_merge(env.name_errors_arms(subjty, m.arms))
