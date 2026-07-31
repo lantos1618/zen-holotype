@@ -21,7 +21,7 @@
 // input parse identically. A trailing newline does NOT yield a spurious empty final row, and blank
 // lines between records are skipped (an empty record has no fields to carry).
 //
-// ALLOCATOR. parse/write_rows are generic over the allocator: every allocating entry takes `a: Allocator`
+// ALLOCATOR. parse/write_rows are generic over the allocator: every allocating entry takes `a: AllocatorBackend`
 // (heap, arena, fixed-buffer, test), threaded exactly like std.json / std.text.
 // Parsed field strings and the row/field backbones are allocator-owned; nothing here frees — parse,
 // consume, and drop (or back it with an arena and reset).
@@ -29,7 +29,7 @@
 // ERRORS. The only structural error is an unterminated quoted field (a `"` opened but never closed
 // before EOF), surfaced as `.Err(.Eof)`. Allocation failure is fatal by policy (the same choice
 // std.json makes) and is unwrapped at the module boundary via the `c*` helpers below.
-{ Allocator } = std.mem.alloc
+{ AllocatorBackend } = std.mem.alloc
 { Result, IoError, expect } = std.core.result
 { String, new_in, push_in, append_in, finish_in, free_in } = std.text.string
 { view } = std.text.str
@@ -41,7 +41,7 @@
 // structural faults (an unterminated quoted field).
 cok = (r: Result<String, IoError>) String { r.expect("std.csv: allocation failed") }
 cfin = (r: Result<StringCstr, IoError>) StringView { r.expect("std.csv: allocation failed") }
-cnew = (a: Allocator) String { a.new_in().expect("std.csv: allocation failed") }
+cnew = (a: AllocatorBackend) String { a.new_in().expect("std.csv: allocation failed") }
 // ── module-local growable buffer (hand-rolled Vec) ────────────────────────────
 // The field/row backbones are built here rather than through std.collections.vec (whose foreign
 // generic struct hits the cross-module monomorphization limit). One same-module generic `CBuf<T>`
@@ -57,14 +57,14 @@ CBuf<T>: {
     len: i64,
     cap: i64,
 }
-cbuf_new<T> = (a: Allocator) CBuf<T> {
+cbuf_new<T> = (a: AllocatorBackend) CBuf<T> {
     CBuf<T>(
         ptr: a.acquire(sizeof(T)),
         len: 0,
         cap: 1,
     )
 }
-cbuf_push<T> = (a: Allocator, cb: CBuf<T>, x: T) CBuf<T> {
+cbuf_push<T> = (a: AllocatorBackend, cb: CBuf<T>, x: T) CBuf<T> {
     x = x
     r = (cb.len < cb.cap).match ({
         true  => cb,
@@ -90,7 +90,7 @@ cbuf_slice<T> = (cb: CBuf<T>) [T] { slice(cb.ptr, cb.len) }
 // and `resume` lets a two-byte token ("" or a CRLF pair) skip its second byte. Field bytes
 // accumulate in the `sb` String builder; a completed field joins `fields`, a completed record joins
 // `rows`. Returns `.Err(.Eof)` if a quoted field is never closed.
-parse* = (a: Allocator, text: StringView) Result<[[StringView]], IoError> {
+parse* = (a: AllocatorBackend, text: StringView) Result<[[StringView]], IoError> {
     sv: Slice<u8> = text.view()
     rows :: CBuf<[StringView]> = a.cbuf_new()
     fields :: CBuf<StringView> = a.cbuf_new()
@@ -193,7 +193,7 @@ field_needs_quote = (s: StringView) bool {
     need
 }
 // append `s` to the builder as one CSV field, quoting (and doubling embedded quotes) if required.
-write_field = (a: Allocator, sb: String, s: StringView) String {
+write_field = (a: AllocatorBackend, sb: String, s: StringView) String {
     sv: Slice<u8> = s.view()
     s.field_needs_quote().match ({
         true  => {
@@ -216,7 +216,7 @@ write_field = (a: Allocator, sb: String, s: StringView) String {
 // Render `rows` to a single CSV view: fields joined by commas, records terminated by LF (including
 // a trailing LF after the last record). Round-trips through `parse`. Returns Ok always (allocation
 // failure is fatal by policy); the Result signature mirrors parse and the rest of std.
-write_rows* = (a: Allocator, rows: [[StringView]]) Result<StringView, IoError> {
+write_rows* = (a: AllocatorBackend, rows: [[StringView]]) Result<StringView, IoError> {
     out :: String = a.cnew()
     rows.loop_at((i, row) {
         r: [StringView] = row

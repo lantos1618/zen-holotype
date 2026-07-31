@@ -8,7 +8,7 @@
 // separate tracing concern. `std.thread` and the actor pool use the atomic/thread substrate today.
 // `new_in` / `drop_in` use the caller's allocator.
 // `new_in` returns Result so allocation failure stays in the value flow.
-{ Allocator, val_slot, rc_block_new_in } = std.mem.alloc
+{ AllocatorBackend, val_slot, rc_block_new_in } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 Arc*<T>: {
     base: RawPtr<u8>,
@@ -19,14 +19,14 @@ Arc*<T>: {
         atomic_add_i64(r.base, 1)
         Arc<T>(base: r.base)
     }
-    drop_in = (r: Arc<T>, a: Allocator) void {
+    drop_in = (r: Arc<T>, a: AllocatorBackend) void {
         (atomic_add_i64(r.base, 0 - 1) == 0).then({
             a.release(r.base)
         })
     }
 }    // -> [ count:i64 | value:T ]
 // free exactly when the LAST reference goes away — the thread whose decrement returns 0 owns the free.
-new_in*<T> = (a: Allocator, x: T) Result<Arc<T>, IoError> {
+new_in*<T> = (a: AllocatorBackend, x: T) Result<Arc<T>, IoError> {
     rc_block_new_in(a, x).match ({
         .Ok(base) => ok(Arc<T>(base: base)),
         .Err(e)   => err(e),

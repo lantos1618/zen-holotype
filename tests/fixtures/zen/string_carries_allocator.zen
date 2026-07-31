@@ -9,7 +9,7 @@
 //              two independent counting allocators, and only the owner's counter moves.
 //   frozen   — a `StringConst`/`VecConst` view is read-only; that half is a check-time verdict
 //              (harness_misc slice_mut), because a rejected program cannot also be run here.
-{ DynAlloc, dyn_of, malloc, realloc, free, Malloc } = std.mem.alloc
+{ Allocator, AllocatorVTable, allocator_of, malloc, realloc, free, request_arena, heap_allocator } = std.mem.alloc
 { string, string_fixed, string_from, String, StringConst, StringFixed, init, append_in, free_in } = std.text.string
 { vec, vec_fixed, vec_from, Vec, VecConst, VecFixed } = std.collections.vec
 { to_exit } = std.core.bool
@@ -42,7 +42,12 @@ a_release = (state: RawPtr<u8>, p: RawPtr<u8>) void {
     a_releases = a_releases + 1
     free(p)
 }
-alloc_a = () DynAlloc { dyn_of(a_acquire, a_resize, a_release, null_ptr()) }
+a_vtable ::= AllocatorVTable(
+    vt_alloc: a_acquire,
+    vt_remap: a_resize,
+    vt_free: a_release,
+)
+alloc_a = () Allocator { allocator_of(null_ptr(), a_vtable.addr().offset(0)) }
 // ── allocator B: the same floor with its own counters, so a cross-allocator free is VISIBLE ───────
 b_releases ::= to_i64(0)
 b_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> { malloc(n) }
@@ -51,7 +56,12 @@ b_release = (state: RawPtr<u8>, p: RawPtr<u8>) void {
     b_releases = b_releases + 1
     free(p)
 }
-alloc_b = () DynAlloc { dyn_of(b_acquire, b_resize, b_release, null_ptr()) }
+b_vtable ::= AllocatorVTable(
+    vt_alloc: b_acquire,
+    vt_remap: b_resize,
+    vt_free: b_release,
+)
+alloc_b = () Allocator { allocator_of(null_ptr(), b_vtable.addr().offset(0)) }
 // A source run of n ascending i64s for the bulk `add`, owned by B so it never moves A's counters.
 // Spelled as a VecFixed rather than a `[1, 2, …]` literal on purpose: a slice literal bound to a
 // local is heap-promoted and never freed (a documented compiler leak, c_expr.gen_slicelit), which
@@ -230,7 +240,7 @@ roundtrip = () bool {
 // rather than a call through an empty vtable: `add` no-ops, `freeze` reports, `drop` declines — and
 // the threaded owner still frees normally afterwards (valgrind sees one free, not zero and not two).
 threaded_string_declines = () bool {
-    m = Malloc(_: 0)
+    m = request_arena(heap_allocator())
     a = m.addr()
     s ::= a.init(8).expect("init")
     s = s.append_in(a, "hi").expect("append")
@@ -268,7 +278,7 @@ buffer_backed_self_append = () bool {
         && s.view()[4] == 'b'
         && s.view()[5] == 'a'
     s.drop()
-    m = Malloc(_: 0)
+    m = request_arena(heap_allocator())
     a = m.addr()
     t ::= a.init(1).expect("threaded init")
     t = t.append_in(a, "xy").expect("threaded seed")

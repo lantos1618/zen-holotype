@@ -4,7 +4,7 @@
 // expression / statement walks in compiler.pretty / compiler.pretty_expr (flat-TU cycle, `*` exports).
 { String } = std.text.string
 { starts_with, view } = std.text.str
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { Decl, EnumDecl, Expr, Field, Func, GenEnumDecl, GenStructDecl, ImplData, ImportData, Param,
   StructDecl, Ty, VariantDef } = compiler.ast.ast_types
 { param_names_has } = compiler.astops
@@ -21,13 +21,13 @@ ff_slice_elem = (t: Ty) Ty {
         _         => t,
     })
 }
-ff_param_one = (s: String, a: MutPtr<Malloc>, p: Param) String {
+ff_param_one = (s: String, a: Allocator, p: Param) String {
     p.variadic.match ({
         true  => s.ff_append(a, p.name).ff_append(a, ": ...").ff_ty(a, ff_slice_elem(p.ty)),
         false => s.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
     })
 }
-ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+ff_params = (s: String, a: Allocator, ps: [Param]) String {
     out ::= s
     ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
@@ -40,7 +40,7 @@ ff_params = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
 // trailing comma on every param EXCEPT a variadic `...T` last param (the parser rejects a comma
 // there). Trial render measures the inline form at the caller's current column; params/types weave
 // no comments, so no gf_idx save is needed (the trial is naturally side-effect-free).
-ff_sig = (s: String, a: MutPtr<Malloc>, ps: [Param], ret: Ty, ind: i32) String {
+ff_sig = (s: String, a: Allocator, ps: [Param], ret: Ty, ind: i32) String {
     trial = a
         .ff_string(256)
         .ff_append(a, " = (")
@@ -66,7 +66,7 @@ ff_sig = (s: String, a: MutPtr<Malloc>, ps: [Param], ret: Ty, ind: i32) String {
 // lambda params: a param's ty is its declared `: Type` annotation (Void when the source wrote none —
 // the FnT context supplies the real types when the lambda is spliced). Print the annotation back when
 // present; an unannotated param prints as its bare NAME — `(x)`, never `(x: void)`.
-ff_lparams* = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+ff_lparams* = (s: String, a: Allocator, ps: [Param]) String {
     out ::= s
     ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
@@ -78,7 +78,7 @@ ff_lparams* = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
     out
 }
 // generic type params `<A, B>` (with optional bound `<A: Bound>`)
-ff_tparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
+ff_tparams = (s: String, a: Allocator, ps: [Param]) String {
     (ps.len == 0).match ({
         true  => s,
         false => {
@@ -97,7 +97,7 @@ ff_tparams = (s: String, a: MutPtr<Malloc>, ps: [Param]) String {
 }
 // the `*` export marker: appended right after a top-level decl name when it was starred in the
 // source — a param_names_has membership test over the export list.
-ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: StringView) String {
+ff_name = (s: String, a: Allocator, exp: [Param], name: StringView) String {
     exp.param_names_has(name).match ({
         true  => s.ff_append(a, name).ff_append(a, "*"),
         false => s.ff_append(a, name),
@@ -105,11 +105,11 @@ ff_name = (s: String, a: MutPtr<Malloc>, exp: [Param], name: StringView) String 
 }
 // The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
 // an anonymous-struct return type `{ field: T }`, changing the AST.
-ff_func = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
+ff_func = (s: String, a: Allocator, exp: [Param], f: Func) String {
     sig = s.ff_name(a, exp, f.name).ff_tparams(a, f.tparams).ff_sig(a, f.params, f.ret, 0)
     sig.ff_append(a, " ").ff_block(a, f.body, 0, true)
 }
-ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
+ff_foreign = (s: String, a: Allocator, exp: [Param], f: Func) String {
     s.ff_name(a, exp, f.name).ff_sig(a, f.params, f.ret, 0)
 }
 // ── un-hoisting inherent + trait methods ────────────────────────────────────────
@@ -118,7 +118,7 @@ ff_foreign = (s: String, a: MutPtr<Malloc>, exp: [Param], f: Func) String {
 // the formatter REASSEMBLES them: inherent methods print inside the struct body, trait-impl methods
 // inside `Ty.impl(Tr, { … })`, and the hoisted DFuncs / inherent DImpl markers are SKIPPED at top level.
 ff_no_params* = () [Param] { slice(null_ptr(), 0) }
-ff_find_func = (a: MutPtr<Malloc>, decls: [Decl], name: StringView) Func {
+ff_find_func = (a: Allocator, decls: [Decl], name: StringView) Func {
     res ::= Func(
         name: "",
         params: ff_no_params(),
@@ -152,7 +152,7 @@ ff_type_tparams = (decls: [Decl], tyname: StringView) [Param] {
     })
     res
 }
-ff_minus_tparams = (a: MutPtr<Malloc>, full: [Param], drop: [Param]) [Param] {
+ff_minus_tparams = (a: Allocator, full: [Param], drop: [Param]) [Param] {
     buf ::= slice(a.acquire_or_die((full.len + 1) * sizeof(Param)), full.len + 1)
     n ::= 0
     full.loop_at((i, p) {
@@ -179,7 +179,7 @@ ff_has_default = (decls: [Decl], trname: StringView, fname: StringView) bool {
     })
     found
 }
-ff_find_default = (a: MutPtr<Malloc>, decls: [Decl], trname: StringView, fname: StringView) Func {
+ff_find_default = (a: Allocator, decls: [Decl], trname: StringView, fname: StringView) Func {
     res ::= Func(
         name: "",
         params: ff_no_params(),
@@ -198,7 +198,7 @@ ff_find_default = (a: MutPtr<Malloc>, decls: [Decl], trname: StringView, fname: 
     res
 }
 // is `fname` a hoisted impl method (so it must NOT print as a standalone top-level fn)?
-ff_is_hoisted* = (a: MutPtr<Malloc>, decls: [Decl], fname: StringView) bool {
+ff_is_hoisted* = (a: Allocator, decls: [Decl], fname: StringView) bool {
     found ::= false
     decls.loop_at((i, d) {
         d.match ({
@@ -228,13 +228,7 @@ MethodFact: {
 }
 // The dry pass ADVANCES the comment cursor exactly as the real pass will, so every method's trial sees
 // the comments it will really see; ff_methods snapshots gf_idx around it and rewinds.
-ff_method_facts = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    im: ImplData,
-    ctp: [Param],
-    ind: i32,
-) [MethodFact] {
+ff_method_facts = (a: Allocator, decls: [Decl], im: ImplData, ctp: [Param], ind: i32) [MethodFact] {
     buf ::= slice(a.acquire_or_die((im.methods.len + 1) * sizeof(MethodFact)), im.methods.len + 1)
     im.methods.loop_at((k, mp) {
         f = a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
@@ -299,21 +293,14 @@ ff_pad_runs = (fs: [MethodFact], pads: [i32], i: i64) void {
     })
 }
 // spaces to insert after each method's name so a run's `=` line up (0 for a run of one)
-ff_method_pads = (a: MutPtr<Malloc>, fs: [MethodFact]) [i32] {
+ff_method_pads = (a: Allocator, fs: [MethodFact]) [i32] {
     pads = slice(a.acquire_or_die((fs.len + 1) * sizeof(i32)), fs.len + 1)
     fs.ff_pad_runs(pads, 0)
     pads
 }
 // print an impl's methods (each demangled to its original name; the type's tparams dropped from the
 // method's own tparam list). Reused for inherent (inside the struct) and trait impls (inside `.impl`).
-ff_methods = (
-    s: String,
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    im: ImplData,
-    ctp: [Param],
-    ind: i32,
-) String {
+ff_methods = (s: String, a: Allocator, decls: [Decl], im: ImplData, ctp: [Param], ind: i32) String {
     save = gf_idx
     facts = a.ff_method_facts(decls, im, ctp, ind)
     gf_idx = save
@@ -338,7 +325,7 @@ ff_methods = (
 // the inherent methods of `tyname` (the DImpl where ty == trname == tyname), printed at `ind`
 ff_inherent_methods = (
     s: String,
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     tyname: StringView,
     ctp: [Param],
@@ -360,7 +347,7 @@ ff_inherent_methods = (
 // prints `name: ty,`. Both spellings keep the trailing comma (fields are record entries).
 ff_record_field = (
     s: String,
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     owner: StringView,
     ctp: [Param],
@@ -390,22 +377,16 @@ ff_record_field = (
     })
 }
 // ` = <constant>` for a field that declares a default; nothing for one that does not.
-ff_field_dflt = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
+ff_field_dflt = (s: String, a: Allocator, e: Ptr<Expr>) String {
     is_expr_null(e).then({ s }, { s.ff_append(a, " = ").ff_expr(a, e, 1) })
 }
-ff_struct = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], sd: StructDecl) String {
+ff_struct = (s: String, a: Allocator, exp: [Param], decls: [Decl], sd: StructDecl) String {
     open = s.ff_name(a, exp, sd.name).ff_append(a, ": {\n")
     body ::= open
     sd.fields.loop_at((i, fl) { body = body.ff_record_field(a, decls, sd.name, ff_no_params(), fl) })
     body.ff_inherent_methods(a, decls, sd.name, ff_no_params(), 1).ff_append(a, "}")
 }
-ff_genstruct = (
-    s: String,
-    a: MutPtr<Malloc>,
-    exp: [Param],
-    decls: [Decl],
-    g: GenStructDecl,
-) String {
+ff_genstruct = (s: String, a: Allocator, exp: [Param], decls: [Decl], g: GenStructDecl) String {
     open = s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": {\n")
     body ::= open
     g.fields.loop_at((i, fl) { body = body.ff_record_field(a, decls, g.name, g.tparams, fl) })
@@ -414,7 +395,7 @@ ff_genstruct = (
 // the impl head prints im.trty — the trait reference AS WRITTEN (qualifier + type args, e.g.
 // `actor.Receiver<Msg>`) — never the bare im.trname mangle key, which drops the `.Receiver<Msg>` part
 // of a qualified reference and would silently change the code's meaning.
-ff_trait_impl = (s: String, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
+ff_trait_impl = (s: String, a: Allocator, decls: [Decl], im: ImplData) String {
     ctp = decls.ff_type_tparams(im.ty)
     (im.methods.len == 0).match ({
         true  => s
@@ -439,7 +420,7 @@ ff_no_fields = () [Field] { slice(null_ptr(), 0) }
 // re-derives it here: a payload struct is recognised by its `__anon` name AND ordered positional field
 // names, then re-rendered as the `(t0, t1, …)` tuple and the hoisted struct is suppressed at top level
 // (pretty_module_in) — the surface form round-trips and no `__anon…` internal name ever leaks.
-ff_is_positional_fields = (a: MutPtr<Malloc>, fields: [Field]) bool {
+ff_is_positional_fields = (a: Allocator, fields: [Field]) bool {
     (fields.len == 0).match ({
         true  => false,
         false => {
@@ -449,13 +430,13 @@ ff_is_positional_fields = (a: MutPtr<Malloc>, fields: [Field]) bool {
         },
     })
 }
-ff_is_anon_payload_name* = (a: MutPtr<Malloc>, decls: [Decl], nm: StringView) bool {
+ff_is_anon_payload_name* = (a: Allocator, decls: [Decl], nm: StringView) bool {
     nm.starts_with("__anon").match ({
         true  => a.ff_is_positional_fields(a.ff_anon_payload_fields(decls, nm)),
         false => false,
     })
 }
-ff_anon_payload_fields = (a: MutPtr<Malloc>, decls: [Decl], nm: StringView) [Field] {
+ff_anon_payload_fields = (a: Allocator, decls: [Decl], nm: StringView) [Field] {
     res ::= ff_no_fields()
     decls.loop_at((i, d) {
         d.match ({
@@ -469,7 +450,7 @@ ff_anon_payload_fields = (a: MutPtr<Malloc>, decls: [Decl], nm: StringView) [Fie
 }
 // the payload rendering for a variant: the surface `(t0, t1, …)` tuple when the payload is a
 // synthesized anon struct, else the payload type verbatim.
-ff_variant_payload = (s: String, a: MutPtr<Malloc>, decls: [Decl], t: Ty) String {
+ff_variant_payload = (s: String, a: Allocator, decls: [Decl], t: Ty) String {
     t.match ({
         .Named(nm) => a.ff_is_anon_payload_name(decls, nm).match ({
             true  => s
@@ -481,7 +462,7 @@ ff_variant_payload = (s: String, a: MutPtr<Malloc>, decls: [Decl], t: Ty) String
         _          => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
     })
 }
-ff_anon_payload_tys = (a: MutPtr<Malloc>, decls: [Decl], nm: StringView) [Ty] {
+ff_anon_payload_tys = (a: Allocator, decls: [Decl], nm: StringView) [Ty] {
     fields = a.ff_anon_payload_fields(decls, nm)
     buf ::= slice(a.acquire_or_die((fields.len + 1) * sizeof(Ty)), fields.len + 1)
     n ::= 0
@@ -492,14 +473,14 @@ ff_anon_payload_tys = (a: MutPtr<Malloc>, decls: [Decl], nm: StringView) [Ty] {
     slice(buf.ptr, n)
 }
 // one variant: `Name`, `Name(Payload)`, or — for a zero-arg ctor with a default constant — `Name = expr`.
-ff_variant = (s: String, a: MutPtr<Malloc>, decls: [Decl], vd: VariantDef) String {
+ff_variant = (s: String, a: Allocator, decls: [Decl], vd: VariantDef) String {
     base = vd.payload.match ({
         .Void => s.ff_append(a, vd.name),
         _     => s.ff_append(a, vd.name).ff_variant_payload(a, decls, vd.payload),
     })
     vd.dflt.is_expr_null().then({ base }, { base.ff_append(a, " = ").ff_expr(a, vd.dflt, 0) })
 }
-ff_variants = (s: String, a: MutPtr<Malloc>, decls: [Decl], vs: [VariantDef]) String {
+ff_variants = (s: String, a: Allocator, decls: [Decl], vs: [VariantDef]) String {
     body ::= s
     vs.loop_at((i, vd) {
         body = (i == 0).then({ body }, { body.ff_append(a, " | ") })
@@ -507,17 +488,17 @@ ff_variants = (s: String, a: MutPtr<Malloc>, decls: [Decl], vs: [VariantDef]) St
     })
     body
 }
-ff_enum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], ed: EnumDecl) String {
+ff_enum = (s: String, a: Allocator, exp: [Param], decls: [Decl], ed: EnumDecl) String {
     s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, decls, ed.variants)
 }
-ff_genenum = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], g: GenEnumDecl) String {
+ff_genenum = (s: String, a: Allocator, exp: [Param], decls: [Decl], g: GenEnumDecl) String {
     s
         .ff_name(a, exp, g.name)
         .ff_tparams(a, g.tparams)
         .ff_append(a, ": ")
         .ff_variants(a, decls, g.variants)
 }
-ff_decl* = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) String {
+ff_decl* = (s: String, a: Allocator, exp: [Param], decls: [Decl], d: Decl) String {
     d.match ({
         .DFunc(f)          => s.ff_func(a, exp, f),
         .DStruct(sd)       => s.ff_struct(a, exp, decls, sd),
@@ -542,7 +523,7 @@ ff_decl* = (s: String, a: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) 
         .DRaw(c)           => s.ff_append(a, c),
     })
 }
-ff_import_inline = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
+ff_import_inline = (s: String, a: Allocator, im: ImportData) String {
     open = s.ff_append(a, "{ ")
     body ::= open
     im.names.loop_at((i, p) {
@@ -556,7 +537,7 @@ ff_import_inline = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
 // spaces, aligning under the first name after `{ `, and the last line closes ` } = module.path`.
 // The parser (and the textual import scanner in compiler.resolve_scan, which seeks the `} =`
 // marker across newlines) both accept the wrapped form — verified end-to-end before shipping.
-ff_import_wrapped = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
+ff_import_wrapped = (s: String, a: Allocator, im: ImportData) String {
     out ::= s.ff_append(a, "{ ")
     col ::= 2
     im.names.loop_at((i, p) {
@@ -578,7 +559,7 @@ ff_import_wrapped = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
     })
     out.ff_append(a, " } = ").ff_append(a, im.module)
 }
-ff_import = (s: String, a: MutPtr<Malloc>, im: ImportData) String {
+ff_import = (s: String, a: Allocator, im: ImportData) String {
     trial = a.ff_string(256).ff_import_inline(a, im)
     trial.ff_fits_width(s.ff_current_col(), 100).match ({
         true  => s.ff_import_inline(a, im),

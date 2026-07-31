@@ -25,7 +25,7 @@
 // The self-test block also locks the `fmt --check` contract on UNPARSEABLE input: nonzero exit, a
 // positioned error[parse] diagnostic, and `fmt` refusing to touch the file's bytes (the exit-0 /
 // destructive-rewrite hole this suite was built to keep closed).
-{ Malloc, malloc, free } = std.mem.alloc
+{ Allocator, heap_allocator, malloc, free } = std.mem.alloc
 { out, contents_in, shell } = std.io.file
 { is_empty, starts_with, split_in } = std.text.str
 { expect } = std.core.result
@@ -40,7 +40,7 @@
 //   E  emit(orig) != emit(formatted) — the formatter changed program semantics
 // Every subprocess runs under `timeout` (harness_build convention): a hang leaves no P marker and
 // Phase C fails the case.
-frt_cmd = (mp: MutPtr<Malloc>, gid: i64, path: StringView) StringView {
+frt_cmd = (mp: Allocator, gid: i64, path: StringView) StringView {
     z: StringView = ""    // str-typed lead so the mixed literal/variable array infers as [str]
     c = mp.zo_idpath("rtc", gid, ".zen")    // the copy that gets formatted in place
     o = mp.zo_idpath("rto", gid, ".zen")    // untouched twin of the original (same $ZT resolution for both emits)
@@ -54,7 +54,7 @@ frt_cmd = (mp: MutPtr<Malloc>, gid: i64, path: StringView) StringView {
 // the module the closure re-imports). So the formatted copy lives inside a full `cp -r src` TREE copy
 // at the SAME relative path, which preserves module identity; emit of the tree copy is byte-identical
 // to emit of the in-repo original (verified for pretty_expr + check), so the comparison stays honest.
-frt_src_cmd = (mp: MutPtr<Malloc>, gid: i64, path: StringView) StringView {
+frt_src_cmd = (mp: Allocator, gid: i64, path: StringView) StringView {
     z: StringView = ""
     d = mp.zo_idpath("rtd", gid, "")    // per-case tree-copy root
     e1 = mp.zo_idpath("rte1", gid, ".c")
@@ -79,13 +79,13 @@ frt_reason = (st: StringView) StringView {
     })
 }
 // ── Phase C reporter: '.' pass / 's' skip / 'F' + a named FAIL line, returns the fail count ───────
-frt_report = (mp: MutPtr<Malloc>, name: StringView, files: [StringView]) i32 {
+frt_report = (mp: Allocator, name: StringView, files: [StringView]) i32 {
     out(name)
     out("\n")
     fails ::= 0
     skips :: i64 = 0
     files.loop((h, i, p) {
-        st = mp.contents_in(mp.zo_idpath("rtm", i, ".txt")).match ({
+        st = mp.addr().contents_in(mp.zo_idpath("rtm", i, ".txt")).match ({
             .Ok(s)  => s,
             .Err(e) => "",
         })
@@ -121,23 +121,23 @@ frt_report = (mp: MutPtr<Malloc>, name: StringView, files: [StringView]) i32 {
 // Format a known-good fixture, then append a real declaration to the formatted copy. If the emit
 // oracle were vacuous (empty outputs, path-sensitive bytes, dead cmp) this would sail through — the
 // case demands the two emits are non-empty AND differ.
-frt_mutation_caught = (mp: MutPtr<Malloc>) bool {
+frt_mutation_caught = (mp: Allocator) bool {
     rc = shell(mp.zo_cmd(mp.zo_join(["", "f=tests/fixtures/zen/http_parse.zen; ", "cp $f $ZT/rtmut.zen && timeout 60 ./zen fmt $ZT/rtmut.zen >/dev/null 2>&1 && ", "printf 'zz_frt_mutant* = () i32 { 42 }\\n' >> $ZT/rtmut.zen && ", "cp $f $ZT/rtmuto.zen && ", "ZEN_ROOT=. timeout 60 ./zen emit $ZT/rtmuto.zen > $ZT/rtmut1.c 2>/dev/null && ", "ZEN_ROOT=. timeout 60 ./zen emit $ZT/rtmut.zen > $ZT/rtmut2.c 2>/dev/null && ", "test -s $ZT/rtmut1.c && test -s $ZT/rtmut2.c && ! cmp -s $ZT/rtmut1.c $ZT/rtmut2.c"]))).expect("harness: shell")
     rc == 0
 }
 // ── `fmt --check` on UNPARSEABLE input: MUST exit nonzero (the exit-0 hole stays closed) ──────────
-frt_unparseable_check_fails = (mp: MutPtr<Malloc>) bool {
+frt_unparseable_check_fails = (mp: Allocator) bool {
     rc = shell(mp.zo_cmd("printf 'this is not zen at all }{ ((( garbage\\n' > $ZT/rtbad.zen; timeout 60 ./zen fmt --check $ZT/rtbad.zen >/dev/null 2>&1")).expect("harness: shell")
     rc != 0
 }
 // …and the refusal is a POSITIONED parse diagnostic (file:line:col + error[parse]) on stderr.
-frt_unparseable_diag_positioned = (mp: MutPtr<Malloc>) bool {
+frt_unparseable_diag_positioned = (mp: Allocator) bool {
     rc = shell(mp.zo_cmd("timeout 60 ./zen fmt --check $ZT/rtbad.zen 2>&1 | grep -q 'rtbad.zen:1:.*error\\[parse\\]'")).expect("harness: shell")
     rc == 0
 }
 // …and in-place `fmt` on unparseable input exits nonzero AND leaves the file's bytes untouched
 // (before the fix it silently REWROTE mis-recovered garbage, destroying the file, exit 0).
-frt_unparseable_fmt_preserves = (mp: MutPtr<Malloc>) bool {
+frt_unparseable_fmt_preserves = (mp: Allocator) bool {
     rc = shell(mp.zo_cmd("cp $ZT/rtbad.zen $ZT/rtbad2.zen; timeout 60 ./zen fmt $ZT/rtbad2.zen >/dev/null 2>&1; rc=$?; cmp -s $ZT/rtbad.zen $ZT/rtbad2.zen && test $rc -ne 0")).expect("harness: shell")
     rc == 0
 }
@@ -149,21 +149,20 @@ frt_unparseable_fmt_preserves = (mp: MutPtr<Malloc>) bool {
 // file spelling every char literal it can print. Pre-fix, `zen fmt` rewrote `'\x08'`/`'\x0c'`/
 // `'\x0b'`/`'\x7f'`/`'\xff'` to bare numbers and the `cmp` fails; the second `fmt` pass is the
 // `fmt(fmt(x)) == fmt(x)` leg, and `zen run` proves the bytes still carry their values (222).
-frt_char_escapes_roundtrip = (mp: MutPtr<Malloc>) bool {
+frt_char_escapes_roundtrip = (mp: Allocator) bool {
     rc = shell(mp.zo_cmd(mp.zo_join(["", "f=tests/fixtures/fmt/char_escapes_formatted.zen; ", "cp $f $ZT/rtce.zen && timeout 60 ./zen fmt $ZT/rtce.zen >/dev/null 2>&1 && ", "cmp -s $ZT/rtce.zen $f && ", "timeout 60 ./zen fmt $ZT/rtce.zen >/dev/null 2>&1 && cmp -s $ZT/rtce.zen $f && ", "grep -Fq \"bs = '\\\\x08'\" $ZT/rtce.zen && grep -Fq \"hi = '\\\\xff'\" $ZT/rtce.zen && ", "timeout 60 ./zen run $ZT/rtce.zen; test $? = 222"]))).expect("harness: shell")
     rc == 0
 }
 // ── entry: corpus round-trip (parallel) + the teeth self-tests (serial, cheap) ────────────────────
 harness_fmt_roundtrip_run* = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     // enumerate the fixture corpus at RUNTIME (sorted => deterministic case order/marks).
     shell(mp.zo_cmd("ls tests/fixtures/zen/*.zen | sort > $ZT/rt_list.txt")).expect("harness: shell")
-    listing = mp.contents_in(mp.zo_path("rt_list.txt")).match ({
+    listing = mp.addr().contents_in(mp.zo_path("rt_list.txt")).match ({
         .Ok(s)  => s,
         .Err(e) => "",
     })
-    lines = mp.split_in(listing, '\n')
+    lines = mp.addr().split_in(listing, '\n')
     // the src/ sample: the formatter's own printer, the biggest compiler module, and a std module
     // with heavy generics/comments. Full src/ is covered in aggregate by the CI seed fixpoint.
     srcs = ["src/compiler/pretty_expr.zen", "src/compiler/check.zen", "src/std/format/serde.zen"]

@@ -24,9 +24,9 @@
 //      Wrapping the key in the local `Entry` struct dodges it.
 //
 // ALLOCATOR. parse/stringify are generic over the allocator: every allocating entry takes
-// `a: Allocator` (heap, arena, fixed-buffer, test), threaded exactly like
+// `a: AllocatorBackend` (heap, arena, fixed-buffer, test), threaded exactly like
 // std.collections' vec/hmap and std.sys.os. Pass `heap.gpa().addr()`, an arena, or any other allocator;
-// callers who already passed a `Malloc` keep working unchanged (`Malloc` still satisfies `A`).
+// callers who already passed a `RequestArena` keep working unchanged (`RequestArena` still satisfies `A`).
 //
 // MEMORY. Parsed strings and object keys are allocator-owned NUL-terminated copies. On the SUCCESS
 // path `a.value_free(v)` gives the whole tree back; on the ERROR path nothing here frees the partial
@@ -54,7 +54,7 @@
 // code point, UTF-8 encoded; surrogate PAIRS are not recombined). Encode re-escapes \" \\ \n \r
 // \t and emits \u00XX for the remaining control bytes (< 0x20); all other bytes (incl. UTF-8
 // continuation bytes) pass through verbatim.
-{ Allocator, release_slice } = std.mem.alloc
+{ AllocatorBackend, release_slice } = std.mem.alloc
 { Result, Opt, IoError, err, expect } = std.core.result
 { String, new_in, push_in, append_in, append_slice_in, finish_in } = std.text.string
 { view, substr_in, own_ptr } = std.text.str
@@ -118,14 +118,14 @@ JBuf<T>: {
     len: i64,
     cap: i64,
 }
-jbuf_new<T> = (a: Allocator) JBuf<T> {
+jbuf_new<T> = (a: AllocatorBackend) JBuf<T> {
     JBuf<T>(
         ptr: a.acquire(sizeof(T)),
         len: 0,
         cap: 1,
     )
 }
-jbuf_push<T> = (a: Allocator, jb: JBuf<T>, x: T) JBuf<T> {
+jbuf_push<T> = (a: AllocatorBackend, jb: JBuf<T>, x: T) JBuf<T> {
     x = x
     r = (jb.len < jb.cap).match ({
         true  => jb,
@@ -177,7 +177,7 @@ hex4 = (sv: [u8], at: i64) i64 {
     (d0 < 0 || d1 < 0 || d2 < 0 || d3 < 0).then({ 0 - 1 }, { d0 * 4096 + d1 * 256 + d2 * 16 + d3 })
 }
 // UTF-8 encode a BMP code point into the builder (1, 2, or 3 bytes).
-push_utf8 = (a: Allocator, sb: String, cp: i64) String {
+push_utf8 = (a: AllocatorBackend, sb: String, cp: i64) String {
     (cp < 128).match ({
         true  => sb.push_in(a, cp.to_u8()).jok(),
         false => (cp < 2048).match ({
@@ -199,7 +199,7 @@ push_utf8 = (a: Allocator, sb: String, cp: i64) String {
 // decode the JSON string starting at sv[pos] == '"'; returns the decoded view + the offset
 // just past the closing quote. The decoded bytes are accumulated through `a`.
 parse_string_raw = (
-    a: Allocator,
+    a: AllocatorBackend,
     src: StringView,
     sv: Slice<u8>,
     pos: i64,
@@ -314,7 +314,12 @@ parse_lit = (sv: Slice<u8>, pos: i64, word: StringView, v: Value) Result<Step, J
     })    // the length precondition guards the reads; stopping short of `wv.len` is a mismatch
     ok.then({ step_ok(v, pos + wv.len) }, { err(.BadLiteral(pos)) })
 }
-parse_number = (a: Allocator, src: StringView, sv: Slice<u8>, pos: i64) Result<Step, JsonError> {
+parse_number = (
+    a: AllocatorBackend,
+    src: StringView,
+    sv: Slice<u8>,
+    pos: i64,
+) Result<Step, JsonError> {
     endp :: i64 = pos
     sv.loop((h, i, b) {
         (i < pos == false).then({
@@ -368,7 +373,12 @@ parse_num_f64 = (txt: StringView, pos: i64, endp: i64) Result<Step, JsonError> {
         .Err(_) => err(.BadNumber(pos)),
     })
 }
-parse_str_value = (a: Allocator, src: StringView, sv: Slice<u8>, pos: i64) Result<Step, JsonError> {
+parse_str_value = (
+    a: AllocatorBackend,
+    src: StringView,
+    sv: Slice<u8>,
+    pos: i64,
+) Result<Step, JsonError> {
     a.parse_string_raw(src, sv, pos).match ({
         .Ok(ss) => step_ok(.Str(ss.s), ss.pos),
         .Err(e) => err(e),
@@ -376,7 +386,7 @@ parse_str_value = (a: Allocator, src: StringView, sv: Slice<u8>, pos: i64) Resul
 }
 // ── aggregate parsers (mutually recursive with parse_value; OK because concrete) ──
 parse_array = (
-    a: Allocator,
+    a: AllocatorBackend,
     src: StringView,
     sv: Slice<u8>,
     pos: i64,
@@ -398,7 +408,7 @@ parse_array = (
     })
 }
 arr_loop = (
-    a: Allocator,
+    a: AllocatorBackend,
     src: StringView,
     sv: Slice<u8>,
     p: i64,
@@ -424,7 +434,7 @@ arr_loop = (
     })
 }
 parse_object = (
-    a: Allocator,
+    a: AllocatorBackend,
     src: StringView,
     sv: Slice<u8>,
     pos: i64,
@@ -446,7 +456,7 @@ parse_object = (
     })
 }
 obj_loop = (
-    a: Allocator,
+    a: AllocatorBackend,
     src: StringView,
     sv: Slice<u8>,
     p: i64,
@@ -494,7 +504,7 @@ obj_loop = (
 }
 // the core recursive-descent dispatcher: parse ONE value at sv[pos..].
 parse_value = (
-    a: Allocator,
+    a: AllocatorBackend,
     src: StringView,
     sv: Slice<u8>,
     pos: i64,
@@ -540,7 +550,7 @@ parse_value = (
 // one — so a post-order walk frees each exactly once. Without this a program that outlives one document
 // has no way to reclaim it: the module's "parse, consume, and drop" only ends the story for a caller
 // whose allocator is an arena, and jq-shaped tools on the heap are not that caller.
-value_free* = (a: Allocator, v: Value) void {
+value_free* = (a: AllocatorBackend, v: Value) void {
     v.match ({
         .Str(s)  => a.release(s.own_ptr()),
         .Arr(xs) => {
@@ -560,7 +570,7 @@ value_free* = (a: Allocator, v: Value) void {
 // ── public parse ───────────────────────────────────────────────────────────────
 // Parse a complete JSON document. Returns Err on any malformed input, including
 // trailing non-whitespace after the value.
-parse* = (a: Allocator, s: StringView) Result<Value, JsonError> {
+parse* = (a: AllocatorBackend, s: StringView) Result<Value, JsonError> {
     sv = s.view()
     out: Result<Value, JsonError> = a.parse_value(s, sv, 0, 0).match ({
         .Err(e) => {
@@ -579,7 +589,7 @@ parse* = (a: Allocator, s: StringView) Result<Value, JsonError> {
     out
 }
 // ── serialization ──────────────────────────────────────────────────────────────
-write_u_esc = (a: Allocator, sb: String, b: u8) String {
+write_u_esc = (a: AllocatorBackend, sb: String, b: u8) String {
     bi = b.to_i64()
     sb
         .push_in(a, '\\')
@@ -595,7 +605,7 @@ write_u_esc = (a: Allocator, sb: String, b: u8) String {
         .push_in(a, hex_char(bi & 15))
         .jok()
 }
-write_esc_byte = (a: Allocator, sb: String, b: u8) String {
+write_esc_byte = (a: AllocatorBackend, sb: String, b: u8) String {
     (b == '"').match ({
         true  => sb
             .push_in(a, '\\')
@@ -645,7 +655,7 @@ json_needs_esc = (b: u8) bool { b == '"' || b == '\\' || b < ' ' }
 // pushing every byte one at a time. Byte-identical output; fewer grows/stores for plain text.
 // Deliberately NOT std.text.ascii.escape_into (the per-byte scan the backends/formatter share):
 // the run-copy bulk append is a different loop shape, kept for throughput on plain text.
-write_str_lit = (a: Allocator, sb: String, s: StringView) String {
+write_str_lit = (a: AllocatorBackend, sb: String, s: StringView) String {
     out :: String = sb.push_in(a, '"').jok()
     sv = s.view()
     run_start :: i64 = 0
@@ -663,7 +673,7 @@ write_str_lit = (a: Allocator, sb: String, s: StringView) String {
     })
     out.push_in(a, '"').jok()
 }
-write_arr = (a: Allocator, sb: String, xs: [Value]) String {
+write_arr = (a: AllocatorBackend, sb: String, xs: [Value]) String {
     out :: String = sb.push_in(a, '[').jok()
     xs.loop_at((i, x) {
         (i > 0).then({
@@ -673,7 +683,7 @@ write_arr = (a: Allocator, sb: String, xs: [Value]) String {
     })
     out.push_in(a, ']').jok()
 }
-write_obj = (a: Allocator, sb: String, o: Object) String {
+write_obj = (a: AllocatorBackend, sb: String, o: Object) String {
     out :: String = sb.push_in(a, '{').jok()
     es = o.entries
     es.loop_at((i, e) {
@@ -689,13 +699,13 @@ write_obj = (a: Allocator, sb: String, o: Object) String {
 // `integer_in`/`float_in` render into a block of their OWN, which `append_in` only COPIES out of —
 // a pure intermediate nothing above can reach, released here rather than leaked once per number
 // serialized (the same shape as the parser's number token at `.Int`/`.Num` decode).
-write_number = (a: Allocator, sb: String, digits: String) String {
+write_number = (a: AllocatorBackend, sb: String, digits: String) String {
     txt = digits.finish_in(a).jfin()
     out = sb.append_in(a, txt).jok()
     a.release(txt.own_ptr())
     out
 }
-write_value = (a: Allocator, sb: String, v: Value) String {
+write_value = (a: AllocatorBackend, sb: String, v: Value) String {
     v.match ({
         .Null    => sb.append_in(a, "null").jok(),
         .Bool(b) => b.then({ sb.append_in(a, "true").jok() }, { sb.append_in(a, "false").jok() }),
@@ -707,19 +717,19 @@ write_value = (a: Allocator, sb: String, v: Value) String {
     })
 }
 // Serialize a Value to compact JSON text (allocator-owned, NUL-terminated view).
-stringify* = (a: Allocator, v: Value) StringView {
+stringify* = (a: AllocatorBackend, v: Value) StringView {
     sb :: String = a.new_in().jok()
     sb = a.write_value(sb, v)
     sb.finish_in(a).jfin()
 }
 // ── pretty serialization (2-space indent) ────────────────────────────────────────
 // push `n` spaces (one indentation run) onto the builder — recursion, not an imperative loop.
-push_indent = (a: Allocator, sb: String, n: i64) String {
+push_indent = (a: AllocatorBackend, sb: String, n: i64) String {
     (n <= 0).then({ sb }, { a.push_indent(sb.push_in(a, ' ').jok(), n - 1) })
 }
 // one array element / object member per line, children indented `depth+1` levels (2 spaces each);
 // an empty array/object stays on one line ("[]" / "{}").
-pwrite_arr = (a: Allocator, sb: String, xs: [Value], depth: i64) String {
+pwrite_arr = (a: AllocatorBackend, sb: String, xs: [Value], depth: i64) String {
     (xs.len == 0).match ({
         true  => sb.append_in(a, "[]").jok(),
         false => {
@@ -743,7 +753,7 @@ pwrite_arr = (a: Allocator, sb: String, xs: [Value], depth: i64) String {
         },
     })
 }
-pwrite_obj = (a: Allocator, sb: String, o: Object, depth: i64) String {
+pwrite_obj = (a: AllocatorBackend, sb: String, o: Object, depth: i64) String {
     es = o.entries
     (es.len == 0).match ({
         true  => sb.append_in(a, "{}").jok(),
@@ -775,7 +785,7 @@ pwrite_obj = (a: Allocator, sb: String, o: Object, depth: i64) String {
     })
 }
 // scalars serialize exactly as compact; only arrays/objects gain the indented multi-line layout.
-pwrite_value = (a: Allocator, sb: String, v: Value, depth: i64) String {
+pwrite_value = (a: AllocatorBackend, sb: String, v: Value, depth: i64) String {
     v.match ({
         .Arr(xs) => a.pwrite_arr(sb, xs, depth),
         .Obj(o)  => a.pwrite_obj(sb, o, depth),
@@ -783,8 +793,8 @@ pwrite_value = (a: Allocator, sb: String, v: Value, depth: i64) String {
     })
 }
 // Serialize a Value to indented JSON text (2-space indent, one element/member per line) — the
-// human-readable counterpart to `stringify`. Allocator-owned, NUL-terminated view.
-pretty* = (a: Allocator, v: Value) StringView {
+// human-readable counterpart to `stringify`. AllocatorBackend-owned, NUL-terminated view.
+pretty* = (a: AllocatorBackend, v: Value) StringView {
     sb :: String = a.new_in().jok()
     sb = a.pwrite_value(sb, v, 0)
     sb.finish_in(a).jfin()

@@ -2,7 +2,7 @@
 { Expr, Stmt, Decl, Ty, EnumDecl, ArmData, MatchData, CondData } = compiler.ast.ast_types
 { cbuf, bin, cond, member, arrow, mktag, slett, sexpr, sif, block, gstr_string, gstr_append,
   gstr_finish } = compiler.genc
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { one_stmt, slice_any } = compiler.astops
 { Env, arm_env, cenode, extend_env, no_stmts } = compiler.check
 { loop_at } = std.core.count
@@ -26,7 +26,7 @@ enum_exhaustive = (decls: [Decl], m: MatchData) bool {
 match_lowerable = (decls: [Decl], m: MatchData) bool {
     match_has_wild(m).then({ true }, { decls.enum_exhaustive(m) })
 }
-branch_stmts = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
+branch_stmts = (a: Allocator, env: Env, e: Ptr<Expr>) [Stmt] {
     out ::= a.one_stmt(a.lower_stmt_expr(env, e))
     load(e).match ({
         .Block(b) => {
@@ -42,18 +42,18 @@ branch_stmts = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
 // exprs and silently dropped. Re-running the stmt lowering on the tail keeps those returns as real
 // control flow, and recurses through branch_stmts into arbitrarily-nested arm tails. Non-tail statements
 // keep their resolved form (already lowered with last=false); only their bindings thread into the env.
-relower_tail_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt) Stmt {
+relower_tail_stmt = (a: Allocator, env: Env, st: Stmt) Stmt {
     st.match ({
         .ExprStmt(e) => a.lower_stmt_expr(env, e),
         _            => st,
     })
 }
-env_over = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt], upto: i64) Env {
+env_over = (a: Allocator, env: Env, stmts: [Stmt], upto: i64) Env {
     out ::= env
     stmts.loop_at((i, st) { out = (i < upto).then({ a.extend_env(out, st) }, { out }) })
     out
 }
-relower_block_tail = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt]) [Stmt] {
+relower_block_tail = (a: Allocator, env: Env, stmts: [Stmt]) [Stmt] {
     n = stmts.len
     (n == 0).match ({
         true  => stmts,
@@ -67,28 +67,28 @@ relower_block_tail = (a: MutPtr<Malloc>, env: Env, stmts: [Stmt]) [Stmt] {
         },
     })
 }
-tag_const* = (a: MutPtr<Malloc>, ename: StringView, variant: StringView) StringView {
+tag_const* = (a: Allocator, ename: StringView, variant: StringView) StringView {
     s ::= a.gstr_string(64)
     s = s.gstr_append(a, ename)
     s = s.gstr_append(a, "_")
     s = s.gstr_append(a, variant)
     s.gstr_finish(a)
 }
-subj_tag* = (a: MutPtr<Malloc>, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
+subj_tag* = (a: Allocator, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
     out ::= a.cenode(member(subj, "tag"))
     ptr.then({
         out = a.cenode(arrow(subj, "tag"))
     })
     out
 }
-subj_payload* = (a: MutPtr<Malloc>, subj: Ptr<Expr>, variant: StringView, ptr: bool) Ptr<Expr> {
+subj_payload* = (a: Allocator, subj: Ptr<Expr>, variant: StringView, ptr: bool) Ptr<Expr> {
     u ::= a.cenode(member(subj, "u"))
     ptr.then({
         u = a.cenode(arrow(subj, "u"))
     })
     a.cenode(member(u, variant))
 }
-arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
+arm_then = (a: Allocator, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
     body = a.branch_stmts(a.arm_env(env, t, ar), ar.body)
     out ::= body
     (ar.bind == "" == false).then({
@@ -100,14 +100,14 @@ arm_then = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt
     })
     out
 }
-cons_stmt = (a: MutPtr<Malloc>, head: Stmt, rest: [Stmt]) [Stmt] {
+cons_stmt = (a: Allocator, head: Stmt, rest: [Stmt]) [Stmt] {
     buf ::= cbuf<Stmt>(a, rest.len + 1)
     buf[0] = head
     rest.loop_at((i, st) { buf[i + 1] = st })
     buf
 }
 // Build if/else chain over enum arms.
-lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [Stmt] {
+lower_match_arms = (a: Allocator, env: Env, t: Ty, m: MatchData, i: i32) [Stmt] {
     out ::= no_stmts()
     (i >= m.arms.len == false).then({
         ar = m.arms[i]
@@ -126,7 +126,7 @@ lower_match_arms = (a: MutPtr<Malloc>, env: Env, t: Ty, m: MatchData, i: i32) [S
     })
     out
 }
-lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
+lower_match_stmt = (a: Allocator, env: Env, m: MatchData) Stmt {
     t = env.infer_expr(m.subj)
     stmts = a.lower_match_arms(env, t, m, 0)
     out ::= sexpr(a.cenode(block(stmts)))
@@ -136,10 +136,10 @@ lower_match_stmt = (a: MutPtr<Malloc>, env: Env, m: MatchData) Stmt {
     out
 }
 // Bool/literal match in statement position: Cond -> if/else, recursing for literal chains.
-lower_cond_stmt = (a: MutPtr<Malloc>, env: Env, d: CondData) Stmt {
+lower_cond_stmt = (a: Allocator, env: Env, d: CondData) Stmt {
     sif(d.c, a.branch_stmts(env, d.t), a.cond_else(env, d.e))
 }
-cond_else = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
+cond_else = (a: Allocator, env: Env, e: Ptr<Expr>) [Stmt] {
     out ::= a.branch_stmts(env, e)
     load(e).match ({
         .Cond(d) => {
@@ -150,7 +150,7 @@ cond_else = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) [Stmt] {
     out
 }
 // Lower resolved statement-position expressions whose values are discarded.
-lower_stmt_expr* = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>) Stmt {
+lower_stmt_expr* = (a: Allocator, env: Env, e: Ptr<Expr>) Stmt {
     out ::= sexpr(e)
     load(e).match ({
         .Match(m) => env.decls.match_lowerable(m).match ({

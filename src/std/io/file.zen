@@ -1,7 +1,7 @@
 // @self-hosted-only
 // File and process I/O for the Zen-side build driver.
 // Uses POSIX descriptors directly so the compiler std closure stays small.
-{ Allocator, try_acquire } = std.mem.alloc
+{ AllocatorBackend } = std.mem.alloc
 { view } = std.text.str
 { Result, IoError, ok, err } = std.core.result
 { open, read, write, close, lseek, system } = std.c.libc
@@ -86,7 +86,7 @@ ENOMEM = 12
 // A trailing NUL is written at `buf[n]` (the buffer was sized `n + 1`), so the SAME allocation is also a
 // valid NUL-terminated `StringView` via `cstr(buf)` — the text path below reuses it. The slice length
 // carries the TRUE byte count, so an embedded NUL does NOT truncate (unlike a strlen-based view).
-read_bytes_finish = (a: Allocator, fd: i32, buf: RawPtr<u8>, n: i64) Result<[u8], IoError> {
+read_bytes_finish = (a: AllocatorBackend, fd: i32, buf: RawPtr<u8>, n: i64) Result<[u8], IoError> {
     got = fd.fd_read_all(buf, 0, n)
     fd.close()
     out: Result<[u8], IoError> = (got == n).match ({
@@ -101,7 +101,7 @@ read_bytes_finish = (a: Allocator, fd: i32, buf: RawPtr<u8>, n: i64) Result<[u8]
     })
     out
 }
-read_bytes_alloc = (a: Allocator, fd: i32, n: i64) Result<[u8], IoError> {
+read_bytes_alloc = (a: AllocatorBackend, fd: i32, n: i64) Result<[u8], IoError> {
     a.try_acquire(n + 1).match ({
         .Ok(buf) => a.read_bytes_finish(fd, buf, n),
         .Err(e)  => {
@@ -110,7 +110,7 @@ read_bytes_alloc = (a: Allocator, fd: i32, n: i64) Result<[u8], IoError> {
         },
     })
 }
-read_bytes_open = (a: Allocator, fd: i32) Result<[u8], IoError> {
+read_bytes_open = (a: AllocatorBackend, fd: i32) Result<[u8], IoError> {
     n = fd.file_size()
     out: Result<[u8], IoError> = (n < 0).match ({
         true  => {
@@ -124,24 +124,26 @@ read_bytes_open = (a: Allocator, fd: i32) Result<[u8], IoError> {
 // Reads a whole file into an allocator-owned length-carrying `[u8]` — BINARY-SAFE: an embedded NUL is
 // preserved (the true byte count rides in the slice length, not strlen). Reach for this for `wc`, images,
 // gzip, or any data not guaranteed NUL-free; `contents_in` below is the NUL-terminated TEXT twin.
-contents_bytes_in* = (a: Allocator, path: StringView) Result<[u8], IoError> {
+contents_bytes_in* = (a: AllocatorBackend, path: StringView) Result<[u8], IoError> {
     fd = path.open(O_RDONLY, 0)
     out: Result<[u8], IoError> = (fd < 0).then({ err(IoError.NotFound) }, { a.read_bytes_open(fd) })
     out
 }
-contents_bytes* = (a: Allocator, path: StringView) Result<[u8], IoError> {
+contents_bytes* = (a: AllocatorBackend, path: StringView) Result<[u8], IoError> {
     a.contents_bytes_in(path)
 }
 // Reads a whole file into an allocator-owned NUL-terminated `StringView` (for TEXT). An embedded NUL
 // truncates the view at the first NUL — use `contents_bytes_in` for binary-safe reads. Delegates to the
 // byte reader (which leaves a trailing NUL) and re-views the same one allocation as a cstr.
-contents_in* = (a: Allocator, path: StringView) Result<StringView, IoError> {
+contents_in* = (a: AllocatorBackend, path: StringView) Result<StringView, IoError> {
     a.contents_bytes_in(path).match ({
         .Ok(bytes) => ok(cstr(bytes.ptr)),
         .Err(e)    => err(e),
     })
 }
-contents* = (a: Allocator, path: StringView) Result<StringView, IoError> { a.contents_in(path) }
+contents* = (a: AllocatorBackend, path: StringView) Result<StringView, IoError> {
+    a.contents_in(path)
+}
 // Writes a str's bytes to a file, creating/truncating it.
 save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError> {
     fd = path.open(O_WRTRUNC, MODE_644)

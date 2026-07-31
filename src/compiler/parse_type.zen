@@ -11,7 +11,7 @@
 { mangle_str_in, mangle_anon_in, payload_fname } = compiler.mangle
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.ascii
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { is_op, lexeme } = compiler.parse_atom
 { is_dot, is_field_at, is_ident_tok } = compiler.parse_postfix
 { afield_buf, is_field_colon, is_lparen } = compiler.parse_primary
@@ -165,7 +165,7 @@ vbreak_reset* = () void { vbreak_off = 0 }
 anon_decls ::= no_sdecls()
 anon_n ::= 0
 no_sdecls = () [StructDecl] { slice(null_ptr(), 0) }
-anon_reset* = (a: MutPtr<Malloc>) void {
+anon_reset* = (a: Allocator) void {
     anon_decls = slice(a.acquire_or_die(4096 * sizeof(StructDecl)), 4096)
     anon_n = 0
 }
@@ -240,7 +240,7 @@ tok_in_from = (src: StringView, t: Token, words: StringView, p: i32) bool {
 }
 tok_in* = (src: StringView, t: Token, words: StringView) bool { src.tok_in_from(t, words, 0) }
 // a single type token -> genc's Ty: a primitive keyword, else a Named type (the lexeme).
-ty_of = (a: MutPtr<Malloc>, src: StringView, t: Token) Ty {
+ty_of = (a: Allocator, src: StringView, t: Token) Ty {
     src.tok_eq(t, "i32").match ({
         true  => ti32(),
         false => src.tok_eq(t, "i64").match ({
@@ -280,15 +280,15 @@ TyEnd*: {
     ty: Ty,
     next: i32,
 }
-tybuf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire_or_die(sizeof(Ty)), 1) }
-tynode = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
+tybuf = (a: Allocator) [Ty] { slice(a.acquire_or_die(sizeof(Ty)), 1) }
+tynode = (a: Allocator, t: Ty) Ptr<Ty> {
     buf ::= a.tybuf()
     buf[0] = t
     buf[0].addr()
 }
 is_lbracket* = (src: StringView, t: Token) bool { src.is_op(t, '[') }
 is_rbracket* = (src: StringView, t: Token) bool { src.is_op(t, ']') }
-parse_ty* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
+parse_ty* = (a: Allocator, src: StringView, pos: i32) TyEnd {
     pdepth_enter()
     r = pdepth_over().match ({
         true  => TyEnd(
@@ -300,7 +300,7 @@ parse_ty* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
     pdepth_exit()
     r
 }
-parse_ty_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
+parse_ty_inner = (a: Allocator, src: StringView, pos: i32) TyEnd {
     tt = src.scan(pos)    // the head type token
     src.is_lbrace(tt.tok).match ({
         true  => a.parse_anon_ty(src, tt.next),
@@ -320,7 +320,7 @@ parse_ty_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
     })
 }    // { name: T, … } -> a structural anon struct
 take_afields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }    // ( A, T ) R -> FnT (a closure/template param)
-parse_anon_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
+parse_anon_ty = (a: Allocator, src: StringView, pos: i32) TyEnd {
     buf = a.afield_buf()    // Ptr<inner> / MutPtr<inner> / RawPtr<inner> -> inner* (kind from the keyword)
     // a leaf type, maybe a generic instance N<…>
     // An anonymous struct type `{ name: T, … }` -> a synthesized named struct (structural identity by
@@ -339,7 +339,7 @@ parse_anon_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
 // A variant payload: `(T)` keeps the single type as-is; `(T1, T2, …)` synthesizes an anon struct
 // `{_0: T1, _1: T2, …}` (positional fields) so multi-field payloads reuse the existing anon-struct
 // lowering with NO checker/codegen changes. `pos` is just past the '('; returns the type + pos past ')'.
-parse_variant_payload* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
+parse_variant_payload* = (a: Allocator, src: StringView, pos: i32) TyEnd {
     buf = a.afield_buf()
     fe = a.fill_payload_tys(src, pos, buf, 0)
     (fe.count == 1).match ({
@@ -358,7 +358,7 @@ parse_variant_payload* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
         },
     })
 }
-fill_payload_tys = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], i: i32) PEnd {
+fill_payload_tys = (a: Allocator, src: StringView, pos: i32, buf: [Field], i: i32) PEnd {
     (i >= buf.len).then({
         perr_set_at(pos)
         return PEnd(
@@ -382,7 +382,7 @@ fill_payload_tys = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], 
         },
     })
 }    // past ')'
-fill_anon_fields = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], i: i32) PEnd {
+fill_anon_fields = (a: Allocator, src: StringView, pos: i32, buf: [Field], i: i32) PEnd {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
@@ -401,7 +401,7 @@ fill_anon_fields = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], 
         }),
     })
 }
-fill_anon_field = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], i: i32) PEnd {
+fill_anon_field = (a: Allocator, src: StringView, pos: i32, buf: [Field], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -429,7 +429,7 @@ fill_anon_field = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Field], i
 }    // whitespace-separated fields (no comma)
 // copy the raw source span `[start, endpos)` into a fresh NUL-terminated string. Used to materialize a
 // QUALIFIED type name (`io.Writer`) verbatim — the `.` and the segments are contiguous in source.
-lexeme_range = (a: MutPtr<Malloc>, src: StringView, start: i32, endpos: i32) StringView {
+lexeme_range = (a: Allocator, src: StringView, start: i32, endpos: i32) StringView {
     n = endpos - start
     p = a.acquire_or_die(n + 1)
     n.times((i) { store(offset(p, i), at(src, start + i)) })
@@ -452,7 +452,7 @@ qual_end = (src: StringView, after_name: i32) Scan {
 // a leaf type: a primitive/named type, OR a generic instance `Box<i32>` when a `<` follows the name,
 // OR a QUALIFIED name `ns.Type` (with optional `<…>`) — the `ns.` prefix is kept verbatim in the Named
 // string so the formatter round-trips it and the resolver can namespace-resolve it.
-parse_leaf_ty = (a: MutPtr<Malloc>, src: StringView, tt: Scan) TyEnd {
+parse_leaf_ty = (a: Allocator, src: StringView, tt: Scan) TyEnd {
     src.is_field_at(tt.next).match ({
         true  => {
             qe = src.qual_end(tt.next)    // qe.tok = the final qualifier segment ident
@@ -473,13 +473,7 @@ parse_leaf_ty = (a: MutPtr<Malloc>, src: StringView, tt: Scan) TyEnd {
 }
 // resolve a leaf type given its (already materialized, possibly qualified) name and the resume position:
 // `<…>` after it → a generic instance, else a plain Named type.
-leaf_after_name = (
-    a: MutPtr<Malloc>,
-    src: StringView,
-    name: StringView,
-    after: i32,
-    nx: Scan,
-) TyEnd {
+leaf_after_name = (a: Allocator, src: StringView, name: StringView, after: i32, nx: Scan) TyEnd {
     src.is_langle(nx.tok).match ({
         true  => {
             ta = a.parse_tyargs(src, nx.next)
@@ -498,7 +492,7 @@ TyArgs*: {
     args: [Ty],
     next: i32,
 }
-parse_tyargs* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyArgs {
+parse_tyargs* = (a: Allocator, src: StringView, pos: i32) TyArgs {
     buf = a.ty_buf()    // pos just past '<'
     ae = a.fill_tyargs(src, pos, buf, 0)
     TyArgs(
@@ -506,7 +500,7 @@ parse_tyargs* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyArgs {
         next: ae.next,
     )
 }
-fill_tyargs = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd {
+fill_tyargs = (a: Allocator, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd {
     (i >= buf.len).then({
         perr_set_at(pos)
         return PEnd(
@@ -526,7 +520,7 @@ fill_tyargs = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) 
         ),
     })
 }    // '>' (splits a nested '>>')
-parse_generic_ty = (a: MutPtr<Malloc>, src: StringView, nameTok: Scan, pos: i32) TyEnd {
+parse_generic_ty = (a: Allocator, src: StringView, nameTok: Scan, pos: i32) TyEnd {
     name = a.lexeme(src, nameTok.tok)    // pos just past '<'
     ta = a.parse_tyargs(src, pos)
     TyEnd(
@@ -536,9 +530,9 @@ parse_generic_ty = (a: MutPtr<Malloc>, src: StringView, nameTok: Scan, pos: i32)
 }
 // a function type `(A, T) R`: a `)`-terminated type list, then the return type. Only ever a
 // parameter type — a function with one is an inline template (lowered at the call site).
-ty_buf = (a: MutPtr<Malloc>) [Ty] { slice(a.acquire_or_die(256 * sizeof(Ty)), 256) }    // cap 256
+ty_buf = (a: Allocator) [Ty] { slice(a.acquire_or_die(256 * sizeof(Ty)), 256) }    // cap 256
 take_tys = (buf: [Ty], n: i32) [Ty] { slice(buf.ptr, n) }
-fill_tys = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd {
+fill_tys = (a: Allocator, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd {
     sc = src.scan(pos)
     src.is_rparen(sc.tok).match ({
         true  => PEnd(
@@ -548,7 +542,7 @@ fill_tys = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) PEn
         false => a.fill_ty(src, pos, buf, i),
     })
 }
-fill_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd {
+fill_ty = (a: Allocator, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -575,7 +569,7 @@ fill_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Ty], i: i32) PEnd
         },
     })
 }
-parse_fn_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
+parse_fn_ty = (a: Allocator, src: StringView, pos: i32) TyEnd {
     buf = a.ty_buf()    // pos just past '('
     pe = a.fill_tys(src, pos, buf, 0)    // param types, pos just past ')'
     rt = a.parse_ty(src, pe.next)
@@ -595,7 +589,7 @@ ptr_kw_kind = (src: StringView, t: Token) i32 {
         false => src.tok_in(t, "RawPtr").then({ k_raw_ptr() }, { k_ptr() }),
     })
 }
-parse_slice_ty = (a: MutPtr<Malloc>, src: StringView, pos: i32) TyEnd {
+parse_slice_ty = (a: Allocator, src: StringView, pos: i32) TyEnd {
     inner = a.parse_ty(src, pos)    // pos just past '['
     // the element type
     rb = src.scan(inner.next)
@@ -612,7 +606,7 @@ is_slice_kw = (src: StringView, t: Token) bool { src.tok_in(t, "Slice|MutSlice")
 slice_kw_kind = (src: StringView, t: Token) i32 {
     src.tok_in(t, "MutSlice").then({ k_mut_ptr() }, { k_ptr() })
 }
-parse_slice_kw_ty = (a: MutPtr<Malloc>, src: StringView, kw: Token, pos: i32) TyEnd {
+parse_slice_kw_ty = (a: Allocator, src: StringView, kw: Token, pos: i32) TyEnd {
     kind = src.slice_kw_kind(kw)    // kw = the Slice/MutSlice keyword; pos just past it
     lt = src.scan(pos)    // '<'
     inner = a.parse_ty(src, lt.next)    // the element type (recursive)
@@ -622,7 +616,7 @@ parse_slice_kw_ty = (a: MutPtr<Malloc>, src: StringView, kw: Token, pos: i32) Ty
         next: src.gt_resume(gt),
     )
 }    // '>' (or a nested '>>')
-parse_ptr_ty = (a: MutPtr<Malloc>, src: StringView, kw: Token, pos: i32) TyEnd {
+parse_ptr_ty = (a: Allocator, src: StringView, kw: Token, pos: i32) TyEnd {
     kind = src.ptr_kw_kind(kw)    // kw = the Ptr/MutPtr/RawPtr keyword; pos just past it
     // which spelling fired
     lt = src.scan(pos)    // '<'
@@ -650,9 +644,9 @@ skip_to_lparen* = (src: StringView, pos: i32) i32 {
         _    => src.is_lparen(sc.tok).then({ sc.next }, { src.skip_to_lparen(sc.next) }),
     })
 }
-param_buf* = (a: MutPtr<Malloc>) [Param] { slice(a.acquire_or_die(1024 * sizeof(Param)), 1024) }    // cap 1024
+param_buf* = (a: Allocator) [Param] { slice(a.acquire_or_die(1024 * sizeof(Param)), 1024) }    // cap 1024
 take_params* = (buf: [Param], n: i64) [Param] { slice(buf.ptr, n) }    // exact length
-fill_params* = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
+fill_params* = (a: Allocator, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
@@ -688,7 +682,7 @@ ellipsis_skip = (src: StringView, pos: i32) i32 {
     d2 = src.scan(d1.next)
     src.scan(d2.next).next
 }
-fill_one = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
+fill_one = (a: Allocator, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -723,14 +717,7 @@ irecv_enter* = () i32 {
 irecv_exit* = (prev: i32) void { irecv = prev }
 irecv_on = () bool { irecv == 1 }
 // the bare receiver slot: parsed as void, filled by impl_recv_param once the receiver name is known.
-fill_recv = (
-    a: MutPtr<Malloc>,
-    src: StringView,
-    nm: StringView,
-    pos: i32,
-    buf: [Param],
-    i: i32,
-) PEnd {
+fill_recv = (a: Allocator, src: StringView, nm: StringView, pos: i32, buf: [Param], i: i32) PEnd {
     buf[i] = param(nm, tvoid())
     after = src.scan(pos)    // ',' or ')'
     src.is_comma(after.tok).match ({
@@ -751,20 +738,13 @@ recv_is_bare = (t: Ty) bool {
         _     => false,
     })
 }
-impl_recv_param* = (a: MutPtr<Malloc>, tyname: StringView, ps: [Param]) [Param] {
+impl_recv_param* = (a: Allocator, tyname: StringView, ps: [Param]) [Param] {
     (ps.len > 0 && ps[0].ty.recv_is_bare()).then({
         ps[0] = param(ps[0].name, tptr_k(a.tynode(tnamed(tyname)), k_mut_ptr()))
     })
     ps
 }
-fill_fixed = (
-    a: MutPtr<Malloc>,
-    src: StringView,
-    nm: StringView,
-    tpos: i32,
-    buf: [Param],
-    i: i32,
-) PEnd {
+fill_fixed = (a: Allocator, src: StringView, nm: StringView, tpos: i32, buf: [Param], i: i32) PEnd {
     te = a.parse_ty(src, tpos)    // the type (may be Ptr<…>)
     buf[i] = param(nm, te.ty)
     after = src.scan(te.next)    // ',' or ')'
@@ -779,7 +759,7 @@ fill_fixed = (
 // a trailing `name: ...T` param: store it as the collected `[T]` (the body sees a normal slice) and
 // flag the param variadic. It MUST be last — a `,` after it (another param follows) is a parse error.
 fill_variadic = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     nm: StringView,
     dotpos: i32,

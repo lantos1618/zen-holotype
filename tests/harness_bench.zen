@@ -9,10 +9,8 @@
 // ── WHY THIS EXISTS (the failure it is built to catch) ────────────────────────────────────────────
 // `zen profile` and `zen run --time` are PROFILING: a snapshot of one run. Nothing here measured a
 // named operation repeatedly, and nothing recorded a number a later run could be compared against.
-// The concrete cost: every `formatln` of an integer leaks ~53 bytes, linearly, and nothing noticed
-// until someone ran valgrind by hand. So this suite reports ALLOCATION as a first-class column —
-// `liveB/op`, the live-heap growth attributable to one operation. A case that leaks shows a nonzero
-// liveB/op and keeps showing it until someone fixes it. (Run it today: `formatln_int` is ~80.)
+// A past integer-formatting leak escaped normal profiling until valgrind exposed its linear growth.
+// This suite reports `liveB/op` so the same class of regression stays visible as nonzero live bytes.
 //
 // ── OUTPUT ───────────────────────────────────────────────────────────────────────────────────────
 // One line per case, fixed-width columns, no timestamps or paths — so two runs diff cleanly:
@@ -85,8 +83,8 @@
 //
 // followed by two bounds-checked `zen__idx` reads folded into `_z__z_acc`, which is returned as
 // `.sink` and printed. Each iteration therefore performs a real malloc and a real memcpy, and its
-// result is observable — cc cannot delete the loop at any -O level. `bn_sb_chain` similarly lowers
-// to cross-function calls (`impl_Sb_Sb_done_Malloc(…)`, `view`, `free`) that no compiler may drop.
+// result is observable — cc cannot delete the loop at any -O level. `bn_sb_chain` likewise crosses
+// the string-builder, view, and allocator-release call boundaries, so its work cannot be dropped.
 //
 // ── NO BASELINE FILE, ON PURPOSE ─────────────────────────────────────────────────────────────────
 // There is deliberately no committed file of "expected" numbers and nothing compares against one.
@@ -118,7 +116,7 @@ citer = std.core.count
 // NAMESPACED: map.zen's constructors are bare `empty`/`of`, names too generic to pull into the flat
 // import namespace alongside everything else this file imports.
 maps = std.collections.map
-{ Malloc, malloc, free } = std.mem.alloc
+{ Heap, malloc, free } = std.mem.alloc
 { open, close, memcpy } = std.c.libc
 { O_WRONLY } = std.io.file
 { mono_ns } = std.time.clock
@@ -271,7 +269,7 @@ bn_unmute = (saved: i32) void {
 // (c_expr.zen's gen_slicelit promotes every literal, escaping or not, and never frees it), so a
 // nonzero liveB/op here is CORRECT and expected — it is the documented KNOWN LEAK. If this row ever
 // reads 0, either the leak was fixed (good, say so) or the measurement broke (check `sink` moved).
-bn_slicelit = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+bn_slicelit = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     acc ::= to_i64(0)
     b0 = bn_live(cell)
     t0 = mono_ns()
@@ -293,7 +291,7 @@ bn_slicelit = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
 // std.collections.iter's `n.times`, whose body closure inlines. The body is a single add, so there is
 // nowhere for iterator overhead to hide: read the two rows as a pair, and any gap between them IS the
 // cost of the iterator surface.
-bn_count_while = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+bn_count_while = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     acc ::= to_i64(0)
     b0 = bn_live(cell)
     t0 = mono_ns()
@@ -309,7 +307,7 @@ bn_count_while = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
         sink: acc,
     )
 }
-bn_count_times = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+bn_count_times = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     acc ::= to_i64(0)
     b0 = bn_live(cell)
     t0 = mono_ns()
@@ -324,7 +322,7 @@ bn_count_times = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
 // ONE OP = build "id=<n> name=zen!" with the std.text.sb chain and free the result.
 // Paired with bn_string_append below: same output bytes, same allocator, different surface. The
 // delta between the two rows is what Sb's sticky-error wrapper costs over raw String appends.
-bn_sb_chain = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+bn_sb_chain = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     acc ::= to_i64(0)
     b0 = bn_live(cell)
     t0 = mono_ns()
@@ -353,7 +351,7 @@ bn_sb_chain = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
 // ONE OP = build the SAME "id=<n> name=zen!" with raw std.text.string appends and free it.
 // The digits go through `integer_in` + `finish_in` + `free_in`, which is exactly what `Sb.i` does
 // internally — so this measures the ceremony, not a different algorithm.
-bn_string_append = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+bn_string_append = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     acc ::= to_i64(0)
     b0 = bn_live(cell)
     t0 = mono_ns()
@@ -385,7 +383,7 @@ bn_string_append = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
 // is returned, so println's documented "byte count" is 1 for every integer. Nothing here can
 // observe the digits. The loop is still un-elidable (each iteration is a write(2) syscall) and
 // liveB/op still sees the per-call leak; only the checksum is weaker than formatln_int's.
-bn_println_int = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+bn_println_int = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     acc ::= to_i64(0)
     saved = bn_mute()
     b0 = bn_live(cell)
@@ -408,7 +406,7 @@ bn_println_int = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
 // THE case this whole suite was built for. Two heap blocks leak per call — the `[Arg]` slice literal
 // and `write_int`'s digit scratch, both heap-promoted by gen_slicelit and never freed — so liveB/op
 // reads ~80 (53 payload bytes rounded up to glibc chunks). It must go to 0 when that is fixed.
-bn_formatln_int = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+bn_formatln_int = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     acc ::= to_i64(0)
     saved = bn_mute()
     b0 = bn_live(cell)
@@ -435,7 +433,7 @@ SORT_N = () i64 { 10000 }
 // folds the first, middle and last element of every sorted pass, so a comparator that stopped
 // ordering the slice would change it (with values drawn from [0, 1000000) the three pinned
 // positions land near 0 / 500000 / 1000000 only if the sort really ran).
-bn_sort_by = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+bn_sort_by = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     m = SORT_N()
     srcbuf = assert_nonnull(malloc(m * sizeof(i64)))
     dstbuf = assert_nonnull(malloc(m * sizeof(i64)))
@@ -473,7 +471,7 @@ MAP_KEYS = () i64 { 2000 }
 // the map — that covers insertion, the rehash/grow path, and lookup. Keys are generated ONCE before
 // the snapshots (Map borrows key pointers, so they must outlive it) and freed after, keeping key
 // rendering out of both columns. liveB/op should be 0: every round frees what it took.
-bn_map_put_get = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
+bn_map_put_get = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     rounds = (n / MAP_KEYS() < 1).then({ 1 }, { n / MAP_KEYS() })
     nk = MAP_KEYS()
     keybuf = assert_nonnull(malloc(nk * sizeof(StringView)))
@@ -513,13 +511,13 @@ bn_map_put_get = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, n: i64) BenchRes {
 // ── driver ────────────────────────────────────────────────────────────────────────────────────────
 // run one case: a discarded warmup call, then the measured call, then the row.
 bn_run = (
-    mp: MutPtr<Malloc>,
+    mp: MutPtr<Heap>,
     cell: RawPtr<u8>,
     ok: bool,
     name: StringView,
     iters: i64,
     warm: i64,
-    f: (MutPtr<Malloc>, RawPtr<u8>, i64) BenchRes,
+    f: (MutPtr<Heap>, RawPtr<u8>, i64) BenchRes,
 ) void {
     warmup = f(mp, cell, warm)    // discarded: first-touch faults and arena growth belong to no op
     bn_row(name, iters, f(mp, cell, iters), ok)
@@ -538,7 +536,7 @@ bn_env_n = (name: StringView, dflt: i64) i64 {
 // every case at its measured size, scaled by ZEN_BENCH_SCALE. The sizes are picked so each timed
 // loop runs for order-10ms-to-1s (long enough that clock granularity and a stray context switch do
 // not dominate) while the whole suite stays a few seconds.
-bn_all = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, ok: bool, scale: i64) void {
+bn_all = (mp: MutPtr<Heap>, cell: RawPtr<u8>, ok: bool, scale: i64) void {
     mp.bn_run(cell, ok, "slicelit_sum", 1000000 * scale, 1000, bn_slicelit)
     mp.bn_run(cell, ok, "count_while", 20000000 * scale, 1000, bn_count_while)
     mp.bn_run(cell, ok, "count_times", 20000000 * scale, 1000, bn_count_times)
@@ -550,7 +548,7 @@ bn_all = (mp: MutPtr<Malloc>, cell: RawPtr<u8>, ok: bool, scale: i64) void {
     mp.bn_run(cell, ok, "map_put_get", 400 * scale * MAP_KEYS(), MAP_KEYS(), bn_map_put_get)
 }
 main* = () i32 {
-    m = Malloc(_: 0)
+    m = Heap(_: 0)
     mp = m.addr()
     cell = assert_nonnull(malloc(MI_SIZE()))
     ok = bn_abi_ok(cell)

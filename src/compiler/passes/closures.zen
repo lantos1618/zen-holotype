@@ -5,10 +5,11 @@
   gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mfield, mkenumg, mkstruct,
   mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_atm, slit, sret, swhile,
   tnamed, tnode, tvoid, vref, vref_at, acquire_or_die } = compiler.genc
-{ DeclIndex, Env, VList, empty_params, no_stmts, param_index, pbuf, recall, vcons, vnil } = compiler.check
+{ DeclIndex, Env, VList, cebuf, cenode, empty_params, no_stmts, param_index, pbuf, recall, vcons,
+  vnil } = compiler.check
 { lift_extend, lift_is_captured, lift_lamparams, lift_liftable } = compiler.passes.lift
 { gstr_int, map_slice } = compiler.astops
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { loop_at } = std.core.count
 clos_local_call_name* = (env: Env, name: StringView) StringView {
     (env.env_func(name).name == "").match ({
@@ -22,20 +23,20 @@ clos_local_call_name* = (env: Env, name: StringView) StringView {
         false => "",
     })
 }
-clos_call_rewrite* = (a: MutPtr<Malloc>, c: CallData, cn: StringView, buf: [Expr]) Ptr<Expr> {
+clos_call_rewrite* = (a: Allocator, c: CallData, cn: StringView, buf: [Expr]) Ptr<Expr> {
     args ::= a.cebuf(buf.len + 1)
     args[0] = vref(c.fn)
     buf.loop_at((i, e) { args[i + 1] = e })
     a.cenode(call_at(cn, args, c.pos))
 }
-clos_struct_name = (a: MutPtr<Malloc>, k: i64) StringView {
+clos_struct_name = (a: Allocator, k: i64) StringView {
     a
         .gstr_string(24)
         .gstr_append(a, "__clos_")
         .gstr_int(a, k)
         .gstr_finish(a)
 }
-clos_call_name = (a: MutPtr<Malloc>, structn: StringView) StringView {
+clos_call_name = (a: Allocator, structn: StringView) StringView {
     a
         .gstr_string(32)
         .gstr_append(a, structn)
@@ -46,7 +47,7 @@ clos_params_has = (ps: [Param], n: StringView) bool { ps.param_index(n) >= 0 }
 // Does the lambda body capture a FREE name that is NOT one of the enclosing function's params (and not
 // a lambda-bound name / top-level / true|false)? Such a closure is unsupported here → leave it be.
 clos_bad_args = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     bound: Ptr<VList>,
@@ -60,7 +61,7 @@ clos_bad_args = (
     found
 }
 clos_bad_inits = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     bound: Ptr<VList>,
@@ -74,7 +75,7 @@ clos_bad_inits = (
     found
 }
 clos_bad_arms = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     bound: Ptr<VList>,
@@ -91,7 +92,7 @@ clos_bad_arms = (
     found
 }
 clos_bad_body = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     bound: Ptr<VList>,
@@ -107,7 +108,7 @@ clos_bad_body = (
     found
 }
 clos_bad_stmt = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     bound: Ptr<VList>,
@@ -131,7 +132,7 @@ clos_bad_stmt = (
     })
 }
 clos_bad_expr = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     bound: Ptr<VList>,
@@ -167,7 +168,7 @@ clos_bad_expr = (
 // substitute every reference to a captured param `p` with `__clenv.p` (a member access) in the lifted
 // body. Captured-param names never collide with the lambda's own params (those are bound, not free), so
 // a flat name-keyed substitution is correct for the supported shape.
-clos_sub_var = (a: MutPtr<Malloc>, ps: [Param], v: VarData) Ptr<Expr> {
+clos_sub_var = (a: Allocator, ps: [Param], v: VarData) Ptr<Expr> {
     ps.clos_params_has(v.name).match ({
         true  => a.cenode(member_at(a.cenode(vref("__clenv")), v.name, v.pos)),
         false => a.cenode(vref_at(v.name, v.pos)),
@@ -177,7 +178,7 @@ clos_sub_var = (a: MutPtr<Malloc>, ps: [Param], v: VarData) Ptr<Expr> {
 // indirect call through that field: `f(args) -> ({ __zclos_recv = __clenv.f  __zclos_recv(args) })`.
 // Same shape as check.rewrite_fn_field_call (the proven local-fn-value genc path — C `__auto_type` +
 // native indirect call); the fixed temp name is block-scoped, so nested closure calls never collide.
-clos_sub_fncall = (a: MutPtr<Malloc>, ps: [Param], c: CallData) Ptr<Expr> {
+clos_sub_fncall = (a: Allocator, ps: [Param], c: CallData) Ptr<Expr> {
     rest = a.clos_sub_args(ps, c.args)
     letst = slet("__zclos_recv", a.cenode(member(a.cenode(vref("__clenv")), c.fn)))
     callx = a.cenode(call_at("__zclos_recv", rest, c.pos))
@@ -186,18 +187,18 @@ clos_sub_fncall = (a: MutPtr<Malloc>, ps: [Param], c: CallData) Ptr<Expr> {
     sbuf2[1] = sexpr(callx)
     a.cenode(block(sbuf2))
 }
-clos_sub_args = (a: MutPtr<Malloc>, ps: [Param], xs: [Expr]) [Expr] {
+clos_sub_args = (a: Allocator, ps: [Param], xs: [Expr]) [Expr] {
     buf ::= a.cebuf(xs.len)
     xs.loop_at((i, x) { buf[i] = load(a.clos_sub_expr(ps, x.addr())) })
     buf
 }
-clos_sub_inits = (a: MutPtr<Malloc>, ps: [Param], inits: [FieldInit]) [FieldInit] {
+clos_sub_inits = (a: Allocator, ps: [Param], inits: [FieldInit]) [FieldInit] {
     map_slice(a, inits, (fi) { finit(fi.name, a.clos_sub_expr(ps, fi.value)) })
 }
-clos_sub_arms = (a: MutPtr<Malloc>, ps: [Param], arms: [ArmData]) [ArmData] {
+clos_sub_arms = (a: Allocator, ps: [Param], arms: [ArmData]) [ArmData] {
     map_slice(a, arms, (ar) { arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos) })
 }
-clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
+clos_sub_expr = (a: Allocator, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Var(v)        => a.clos_sub_var(ps, v),
         .MakeStruct(s) => a.cenode(mkstructg_at(s.ty, s.mty, s.targs, a.clos_sub_inits(ps, s.inits), s.pos)),
@@ -221,7 +222,7 @@ clos_sub_expr = (a: MutPtr<Malloc>, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
         _              => e,
     })
 }
-clos_sub_stmt = (a: MutPtr<Malloc>, ps: [Param], st: Stmt) Stmt {
+clos_sub_stmt = (a: Allocator, ps: [Param], st: Stmt) Stmt {
     st.match ({
         .Let(l)      => slett_atm(l.name, l.ty, a.clos_sub_expr(ps, l.value), l.pos, l.mut),
         .Assign(x)   => sassign_at(a.clos_sub_expr(ps, x.target), a.clos_sub_expr(ps, x.value), x.pos),
@@ -232,7 +233,7 @@ clos_sub_stmt = (a: MutPtr<Malloc>, ps: [Param], st: Stmt) Stmt {
         .IndexSet(x) => sidxset_at(a.clos_sub_expr(ps, x.seq), a.clos_sub_expr(ps, x.idx), x.elem, a.clos_sub_expr(ps, x.value), x.pos),
     })
 }
-clos_sub_body = (a: MutPtr<Malloc>, ps: [Param], body: [Stmt]) [Stmt] {
+clos_sub_body = (a: Allocator, ps: [Param], body: [Stmt]) [Stmt] {
     map_slice(a, body, (st) { a.clos_sub_stmt(ps, st) })
 }
 // the tail (implicit-return) lambda of a body, if any: the last statement is a bare expression that is
@@ -272,7 +273,7 @@ clos_tail_lam_of = (body: [Stmt]) LambdaData {
     })
 }
 // build the lifted call fn's params: `__clenv: __clos_K` then each lambda param typed from the FnT sig.
-clos_call_params = (a: MutPtr<Malloc>, structn: StringView, lm: LambdaData, ft: FnTData) [Param] {
+clos_call_params = (a: Allocator, structn: StringView, lm: LambdaData, ft: FnTData) [Param] {
     ps ::= a.pbuf(lm.params.len + 1)
     ps[0] = param("__clenv", tnamed(structn))
     lm.params.loop_at((i, p) {
@@ -281,25 +282,25 @@ clos_call_params = (a: MutPtr<Malloc>, structn: StringView, lm: LambdaData, ft: 
     ps
 }
 // the closure struct's fields = the enclosing function's params (captured by value).
-clos_struct_fields = (a: MutPtr<Malloc>, fps: [Param]) [Field] {
+clos_struct_fields = (a: Allocator, fps: [Param]) [Field] {
     fs = a.acquire_or_die(fps.len * sizeof(Field))
     out :: [Field] = slice(fs, fps.len)
     fps.loop_at((i, p) { out[i] = field(p.name, p.ty) })
     out
 }
 // the closure literal's field inits = each captured param bound to its own current value.
-clos_struct_inits = (a: MutPtr<Malloc>, fps: [Param]) [FieldInit] {
+clos_struct_inits = (a: Allocator, fps: [Param]) [FieldInit] {
     map_slice(a, fps, (p) { finit(p.name, a.cenode(vref(p.name))) })
 }
 // rebuild the enclosing body with its tail lambda replaced by the closure struct literal.
-clos_replace_tail = (a: MutPtr<Malloc>, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
+clos_replace_tail = (a: Allocator, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
     buf ::= cbuf<Stmt>(a, body.len)
     body.loop_at((i, st) { buf[i] = (i == body.len - 1).then({ sret(mk) }, { st }) })
     buf
 }
 // does `f` return a capturing-over-params closure we can lower? (FnT return + tail lambda + it captures
 // at least one param + it captures NOTHING but params).
-clos_lowerable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) bool {
+clos_lowerable* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) bool {
     f.ret.match ({
         .FnT(ft) => f.body.clos_tail_lambda().match ({
             true  => {
@@ -316,7 +317,7 @@ clos_lowerable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) bo
 // lower one function (caller checked clos_lowerable): emit the struct + call fn into `gen` (2 decls at
 // 2*id and 2*id+1), bump the closure counter, and return the rewritten enclosing function (returns the
 // struct by value; ret type becomes the closure struct).
-clos_lower_func* = (a: MutPtr<Malloc>, ccp: RawPtr<u8>, gen: [Decl], f: Func) Decl {
+clos_lower_func* = (a: Allocator, ccp: RawPtr<u8>, gen: [Decl], f: Func) Decl {
     ft = f.ret.match ({
         .FnT(g) => g,
         _       => FnTData(

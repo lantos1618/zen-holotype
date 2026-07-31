@@ -28,7 +28,7 @@
 { gstr_string, gstr_finish, is_expr_null, acquire_or_die } = compiler.genc
 { Scan, scan } = compiler.lex
 { is_ident_tok } = compiler.parse_postfix
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { String } = std.text.string
 { ModuleTable, mimport_name_span, rappend, rappend_span, rappend_string, res_ident_end, rpush,
   seen_name } = compiler.resolve
@@ -70,7 +70,7 @@ ren_seen = (set: Slice<u8>, src: Slice<u8>, p: i64, e: i64, i: i64) bool {
 // module is a type here. Stamped once per program, beside the other resolve-entry resets.
 ren_no_types = () StringView { "" }
 ren_types ::= ren_no_types()
-ren_types_set* = (a: MutPtr<Malloc>, table: ModuleTable) void {
+ren_types_set* = (a: Allocator, table: ModuleTable) void {
     out ::= a.gstr_string(512)
     table.modules.loop_at((i, m) {
         m.graph.symbols.loop_at((j, sym) {
@@ -88,11 +88,11 @@ ren_types_set* = (a: MutPtr<Malloc>, table: ModuleTable) void {
 ren_no_binds = () [StringView] { slice(null_ptr(), 0) }
 ren_binds ::= ren_no_binds()
 ren_bind_n ::= 0
-ren_binds_reset = (a: MutPtr<Malloc>) void {
+ren_binds_reset = (a: Allocator) void {
     ren_binds = slice(a.acquire_or_die(256 * sizeof(StringView)), 256)
     ren_bind_n = 0
 }
-ren_bind_push = (a: MutPtr<Malloc>, nm: StringView) void {
+ren_bind_push = (a: Allocator, nm: StringView) void {
     (ren_bind_n >= ren_binds.len).then({
         grown :: [StringView] = slice(a.acquire_or_die(ren_binds.len * 2 * sizeof(StringView)), ren_binds.len * 2)
         ren_binds.loop_at((i, v) { grown[i] = v })
@@ -163,10 +163,10 @@ ren_ufcs = (c: RenCtx, mc: MethodCallData) void {
         c.ren_mark_ref(mc.pos)
     })
 }
-ren_kids = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
+ren_kids = (c: RenCtx, a: Allocator, e: Ptr<Expr>) i32 {
     0.expr_fold_children(e, (acc, ch) { c.ren_expr(a, ch) }, (acc, body) { c.ren_stmts(a, body) })
 }
-ren_expr = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
+ren_expr = (c: RenCtx, a: Allocator, e: Ptr<Expr>) i32 {
     e.is_expr_null().match ({
         true  => 0,
         false => load(e).match ({
@@ -220,13 +220,13 @@ ren_expr = (c: RenCtx, a: MutPtr<Malloc>, e: Ptr<Expr>) i32 {
         }),
     })
 }
-ren_stmts = (c: RenCtx, a: MutPtr<Malloc>, body: [Stmt]) i32 {
+ren_stmts = (c: RenCtx, a: Allocator, body: [Stmt]) i32 {
     m = ren_bind_mark()
     body.loop_at((i, s) { c.ren_stmt(a, s) })
     ren_bind_drop(m)
     0
 }
-ren_stmt = (c: RenCtx, a: MutPtr<Malloc>, s: Stmt) i32 {
+ren_stmt = (c: RenCtx, a: Allocator, s: Stmt) i32 {
     s.match ({
         .Let(l)      => {
             c.ren_expr(a, l.value)
@@ -255,7 +255,7 @@ ren_stmt = (c: RenCtx, a: MutPtr<Malloc>, s: Stmt) i32 {
         .ExprStmt(e) => c.ren_expr(a, e),
     })
 }
-ren_func = (c: RenCtx, a: MutPtr<Malloc>, f: Func) i32 {
+ren_func = (c: RenCtx, a: Allocator, f: Func) i32 {
     c.ren_mark_ref(f.pos)
     m = ren_bind_mark()
     f.params.loop_at((i, p) { a.ren_bind_push(p.name) })
@@ -263,7 +263,7 @@ ren_func = (c: RenCtx, a: MutPtr<Malloc>, f: Func) i32 {
     ren_bind_drop(m)
     0
 }
-ren_variants = (c: RenCtx, a: MutPtr<Malloc>, vs: [VariantDef]) i32 {
+ren_variants = (c: RenCtx, a: Allocator, vs: [VariantDef]) i32 {
     vs.loop_at((i, v) { c.ren_expr(a, v.dflt) })
     0
 }
@@ -271,7 +271,7 @@ ren_variants = (c: RenCtx, a: MutPtr<Malloc>, vs: [VariantDef]) i32 {
 // method's source position). A method name is not a top-level symbol, but `x.m(y)` may dispatch either
 // to a method or to a same-named free fn, so decl and call site have to move together or dispatch
 // changes meaning — see ren_ufcs.
-ren_decl = (c: RenCtx, a: MutPtr<Malloc>, d: Decl) i32 {
+ren_decl = (c: RenCtx, a: Allocator, d: Decl) i32 {
     d.match ({
         .DFunc(f)         => c.ren_func(a, f),
         .DForeign(f)      => c.ren_func(a, f),
@@ -284,7 +284,7 @@ ren_decl = (c: RenCtx, a: MutPtr<Malloc>, d: Decl) i32 {
 }
 // splice `alias__` in at the marked identifier starts — the only text edit the rename makes, so every
 // byte the walk did not name survives verbatim and no line boundary moves.
-ren_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8], alias: String) String {
+ren_apply = (out: String, a: Allocator, s: StringView, marks: [u8], alias: String) String {
     cur ::= out
     pos :: i32 = 0
     bs: Slice<u8> = s.str_bytes()
@@ -306,20 +306,14 @@ ren_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8], alias: 
     })
     cur
 }
-ren_marks = (a: MutPtr<Malloc>, n: i64) [u8] {
+ren_marks = (a: Allocator, n: i64) [u8] {
     ms :: [u8] = slice(a.acquire_or_die(n + 1), n + 1)
     ms.loop_at((i, b) { ms[i] = 0 })
     ms
 }
 // THE rename: prefix `alias__` onto every occurrence of `names` in module body `s` that is a value
 // decl or a value reference. Used both for a namespace alias and for the user-shadow rename.
-rename_ns_names* = (
-    out: String,
-    a: MutPtr<Malloc>,
-    s: StringView,
-    names: String,
-    alias: String,
-) String {
+rename_ns_names* = (out: String, a: Allocator, s: StringView, names: String, alias: String) String {
     sb: Slice<u8> = s.str_bytes()
     c = RenCtx(
         marks: a.ren_marks(sb.len),
@@ -351,7 +345,7 @@ rename_ns_names* = (
 // from the LEXER, so a comment or a string literal is not a site at all. Application stays a
 // marked-offset splice: `A.` and `A__` are the same line, so every `file:line:col` is untouched.
 ren_no_names = () [u8] { slice(null_ptr(), 0) }
-ns_local_marks = (a: MutPtr<Malloc>, s: StringView) [u8] {
+ns_local_marks = (a: Allocator, s: StringView) [u8] {
     sb: Slice<u8> = s.str_bytes()
     c = RenCtx(
         marks: a.ren_marks(sb.len),
@@ -364,12 +358,12 @@ ns_local_marks = (a: MutPtr<Malloc>, s: StringView) [u8] {
     a.parse_module(s).loop_at((i, d) { c.ren_decl(a, d) })
     c.marks
 }
-qual_name_at = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32, ie: i32) String {
+qual_name_at = (out: String, a: Allocator, s: StringView, p: i32, ie: i32) String {
     out.rappend_span(a, s, p, ie).rpush(a, '.').rappend_span(a, s, ie + 1, s.res_ident_end(ie + 1))
 }
 // what becomes of `A.f`, where `A` spans [p, ie): 0 = leave it alone, 1 = `A__f`, 2 = `f`.
 qual_fate = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     s: StringView,
     p: i32,
     ie: i32,
@@ -390,7 +384,7 @@ qual_fate = (
 // classify ONE token and return where the scan resumes: past a qualifier that stays (nothing inside it
 // can start another one), else past the head identifier (`A.f.g` — `f` may head a qualifier too).
 qual_mark_tok = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     s: StringView,
     sc: Scan,
     ms: [u8],
@@ -416,7 +410,7 @@ qual_mark_tok = (
     })
 }
 qual_marks = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     s: StringView,
     quals: String,
     qnames: String,
@@ -443,7 +437,7 @@ qual_marks = (
     })
     ms
 }
-qual_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8]) String {
+qual_apply = (out: String, a: Allocator, s: StringView, marks: [u8]) String {
     cur ::= out
     pos :: i32 = 0
     bs: Slice<u8> = s.str_bytes()
@@ -471,7 +465,7 @@ qual_apply = (out: String, a: MutPtr<Malloc>, s: StringView, marks: [u8]) String
 // THE qualifier rewrite: resolve every `alias.name` in module body `s` against the ns-bind sets.
 rewrite_ns_quals* = (
     out: String,
-    a: MutPtr<Malloc>,
+    a: Allocator,
     s: StringView,
     quals: String,
     qnames: String,

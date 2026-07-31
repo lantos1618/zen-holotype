@@ -1,3 +1,5 @@
+> **Historical audit (2026-07-26).** Names such as dyn_from, heap_scope, and hs_on below describe the pre-refactor tree. The current API is documented in MEMORY_MODEL.md.
+
 # Zen memory audit — 2026-07-26
 
 > Follow-up (2026-07-30): the experimental `std.mem.trace`, `std.scope`,

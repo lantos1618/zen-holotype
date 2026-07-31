@@ -4,9 +4,9 @@
   gstr_finish, gstr_string, lam_r, mfield, mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at,
   sif, slett_atm, slit, sret, swhile, tvoid, vref, acquire_or_die } = compiler.genc
 { gstr_int, map_slice } = compiler.astops
-{ DeclIndex, VList, empty_params, is_intrinsic, pbuf, recall, var_bound, vcons, vnil } = compiler.check
+{ DeclIndex, VList, cebuf, cenode, empty_params, is_intrinsic, pbuf, recall, var_bound, vcons, vnil } = compiler.check
 { field_fnt } = compiler.check_inline
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { expr_fold_children } = compiler.ast.expr_children
 { loop_at } = std.core.count
 lift_toplevel = (idx: DeclIndex, decls: [Decl], n: StringView) bool {
@@ -27,24 +27,18 @@ lift_is_captured* = (decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, n: String
         false => true,
     })
 }
-lift_extend* = (a: MutPtr<Malloc>, bound: Ptr<VList>, st: Stmt) Ptr<VList> {
+lift_extend* = (a: Allocator, bound: Ptr<VList>, st: Stmt) Ptr<VList> {
     st.match ({
         .Let(l) => a.vcons(l.name, tvoid(), bound),
         _       => bound,
     })
 }
-lift_lamparams* = (a: MutPtr<Malloc>, bound: Ptr<VList>, ps: [Param]) Ptr<VList> {
+lift_lamparams* = (a: Allocator, bound: Ptr<VList>, ps: [Param]) Ptr<VList> {
     out ::= bound
     ps.loop_at((i, p) { out = a.vcons(p.name, tvoid(), out) })
     out
 }
-lift_args_cap = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    bound: Ptr<VList>,
-    xs: [Expr],
-) bool {
+lift_args_cap = (a: Allocator, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, xs: [Expr]) bool {
     found ::= false
     xs.loop_at((i, x) {
         found = found.then({ true }, { a.lift_expr_cap(decls, idx, bound, x.addr()) })
@@ -52,7 +46,7 @@ lift_args_cap = (
     found
 }
 lift_arms_cap = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     bound: Ptr<VList>,
@@ -68,7 +62,7 @@ lift_arms_cap = (
     found
 }
 lift_body_cap = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     bound: Ptr<VList>,
@@ -82,13 +76,7 @@ lift_body_cap = (
     })
     found
 }
-lift_stmt_cap = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    bound: Ptr<VList>,
-    st: Stmt,
-) bool {
+lift_stmt_cap = (a: Allocator, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, st: Stmt) bool {
     st.match ({
         .Let(l)      => a.lift_expr_cap(decls, idx, bound, l.value),
         .Assign(x)   => a.lift_expr_cap(decls, idx, bound, x.target)
@@ -106,7 +94,7 @@ lift_stmt_cap = (
     })
 }
 lift_expr_cap = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     bound: Ptr<VList>,
@@ -131,7 +119,7 @@ lift_expr_cap = (
     })
 }
 // a lambda is liftable iff it does NOT capture (only its own params + body binders + top-level names).
-lift_liftable* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, lm: LambdaData) bool {
+lift_liftable* = (a: Allocator, decls: [Decl], idx: DeclIndex, lm: LambdaData) bool {
     a.lift_body_cap(decls, idx, a.lift_lamparams(a.vnil(), lm.params), lm.body) == false
 }
 // ── the side condition on the intrinsic exemption above ──────────────────────────────────────────
@@ -193,12 +181,12 @@ lift_shadows_intrinsic = (f: Func) bool {
 }
 // --- the lift transform: replace each liftable lambda (in a field-init / return value) with the name
 //     of a freshly generated top-level fn, collected (with a shared counter) for appending. ---
-lift_name = (a: MutPtr<Malloc>, k: i64) StringView {
+lift_name = (a: Allocator, k: i64) StringView {
     s = a.gstr_string(24).gstr_append(a, "__lam_")
     s.gstr_int(a, k).gstr_finish(a)
 }
 // the (function) type of struct `sty`'s field `fname` — substituted for a generic instance's targs.
-lift_func_of = (a: MutPtr<Malloc>, lm: LambdaData, ft: FnTData, name: StringView) Decl {
+lift_func_of = (a: Allocator, lm: LambdaData, ft: FnTData, name: StringView) Decl {
     ps ::= a.pbuf(lm.params.len)
     lm.params.loop_at((i, p) {
         ps[i] = param(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }))
@@ -237,7 +225,7 @@ lift_tag_tparams = (gen: [Decl], lo: i32, hi: i32, tps: [Param]) void {
 // lift the value `val` if it is a liftable lambda whose expected type `fnt` is a function type; else
 // recurse so nested lift sites are still found.
 lift_at = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     gcp: RawPtr<u8>,
@@ -263,7 +251,7 @@ lift_at = (
     })
 }
 lift_rw_args = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     gcp: RawPtr<u8>,
@@ -275,7 +263,7 @@ lift_rw_args = (
     buf
 }
 lift_rw_inits = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     gcp: RawPtr<u8>,
@@ -289,7 +277,7 @@ lift_rw_inits = (
     })
 }
 lift_rw_arms = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     gcp: RawPtr<u8>,
@@ -301,7 +289,7 @@ lift_rw_arms = (
     })
 }
 lift_rw_expr = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     gcp: RawPtr<u8>,
@@ -331,7 +319,7 @@ lift_rw_expr = (
 // RETURN / tail-expression positions (a body's implicit return) when the declared return type is a
 // function type — `fnret` carries that type; `tail` marks the body's last (implicit-return) statement.
 lift_rw_stmt = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     gcp: RawPtr<u8>,
@@ -354,7 +342,7 @@ lift_rw_stmt = (
     })
 }
 lift_rw_body = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     gcp: RawPtr<u8>,
@@ -369,7 +357,7 @@ lift_rw_body = (
     buf
 }
 lift_rw_decl = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     gcp: RawPtr<u8>,
@@ -396,7 +384,7 @@ lift_rw_decl = (
         _         => d,
     })
 }
-lift_lambdas* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
+lift_lambdas* = (a: Allocator, decls: [Decl], idx: DeclIndex) [Decl] {
     gcp: RawPtr<u8> = a.acquire_or_die(8)
     store_i64(gcp, 0)
     gen = cbuf<Decl>(a, 4096)

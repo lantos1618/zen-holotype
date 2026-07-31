@@ -12,7 +12,7 @@
 { reflect_fields } = compiler.passes.subst
 { has_fnt_param, is_logic_op, is_or_return_fn, is_prim_width, param_names_has, slice_any,
   wr_lam_writes_value } = compiler.astops
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { expr_fold_children } = compiler.ast.expr_children
 { at } = std.text.ascii
 { is_empty } = std.text.str
@@ -49,7 +49,7 @@ type_impls_trait = (decls: [Decl], tyname: StringView, trname: StringView) bool 
 }
 // Enforce ONE bounded tparam at a call site: bind A to its concrete targ, then require the bound.
 // Fires when A resolves to a CONCRETE nameable type — a struct, an enum, or a primitive (all live
-// in the impl table's key space, `i64.impl(Ord, …)` etc.), so `f<A: Allocator>` called with `i32`
+// in the impl table's key space, `i64.impl(Ord, …)` etc.), so `f<A: AllocatorBackend>` called with `i32`
 // no longer silently passes. Deferral remains ONLY for genuinely unresolved/abstract targs: an
 // empty/unknown name, a caller tparam passed through (`tn` names an in-scope tparam — kvb_func_kind
 // binds them, so a tparam that shadows a global type name still defers), and generic residue
@@ -424,7 +424,7 @@ impl_ty = (tyname: StringView) Ty {
         }),
     })
 }
-subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: StringView) Ty {
+subst_self = (a: Allocator, t: Ty, tyname: StringView) Ty {
     t.match ({
         .Named(n) => (n == "Self").then({ impl_ty(tyname) }, { t }),
         .Ptr(pd)  => tptr_k(a.tnode(a.subst_self(load(pd.pointee), tyname)), pd.kind),
@@ -433,7 +433,7 @@ subst_self = (a: MutPtr<Malloc>, t: Ty, tyname: StringView) Ty {
     })
 }
 // each declared param type (Self→tyname) must equal the impl method's, left to right.
-params_match = (a: MutPtr<Malloc>, tps: [Ty], ips: [Param], tyname: StringView, i: i32) bool {
+params_match = (a: Allocator, tps: [Ty], ips: [Param], tyname: StringView, i: i32) bool {
     (i == tps.len).match ({
         true  => true,
         false => a.subst_self(tps[i], tyname).ty_eq(ips[i].ty).match ({
@@ -443,7 +443,7 @@ params_match = (a: MutPtr<Malloc>, tps: [Ty], ips: [Param], tyname: StringView, 
     })
 }
 // the impl method `f` matches the trait's FnT field `fd` (Self→tyname): same arity, param types, ret.
-sig_matches = (a: MutPtr<Malloc>, fd: FnTData, f: Func, tyname: StringView) bool {
+sig_matches = (a: Allocator, fd: FnTData, f: Func, tyname: StringView) bool {
     (fd.params.len == f.params.len).match ({
         true  => a.params_match(fd.params, f.params, tyname, 0).match ({
             true  => a.subst_self(load(fd.ret), tyname).ty_eq(f.ret),
@@ -471,7 +471,7 @@ trait_has_default* = (decls: [Decl], trname: StringView, m: StringView) bool {
 // method bodies are top-level DFuncs found by name. So per declared method: missing → 1 error;
 // present but signature-mismatched → 1 error; present and matching → 0. The check is tied to THIS
 // impl (im.methods), not a global function search, so an unrelated same-named fn never satisfies it.
-method_err* = (a: MutPtr<Malloc>, decls: [Decl], im: ImplData, f: Field) i32 {
+method_err* = (a: Allocator, decls: [Decl], im: ImplData, f: Field) i32 {
     f.ty.match ({
         .FnT(fd) => im.methods.param_names_has(f.name).match ({
             true  => a.sig_matches(fd, decls.the_func(a.impl_cname_in(im.trname, im.ty, f.name)), im.ty).match ({
@@ -540,7 +540,7 @@ kvb_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
     arms.loop_at((i, ar) { acc = acc.or(env.a.arm_env(env, subjty, ar).kvb_expr_kind(ar.body)) })
     acc
 }
-kvb_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
+kvb_stmt_kind = (a: Allocator, env: Env, st: Stmt) i32 {
     st.match ({
         .Let(l)      => env.kvb_expr_kind(l.value),
         .Assign(x)   => env.kvb_expr_kind(x.target).or(env.kvb_expr_kind(x.value)),
@@ -557,7 +557,7 @@ kvb_stmt_kind = (a: MutPtr<Malloc>, env: Env, st: Stmt) i32 {
             .or(env.kvb_expr_kind(x.value)),
     })
 }
-kvb_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
+kvb_body_kind = (a: Allocator, env: Env, body: [Stmt]) i32 {
     acc ::= 0
     e ::= env
     body.loop_at((i, st) {
@@ -566,7 +566,7 @@ kvb_body_kind = (a: MutPtr<Malloc>, env: Env, body: [Stmt]) i32 {
     })
     acc
 }
-kvb_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+kvb_func_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     env = Env(
         vars: a.bind_tparams(a.params_env(f.params), f.tparams),
         decls: decls,
@@ -591,7 +591,7 @@ ka_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
 // a UFCS method call `recv.method(args)` lowers to `method(recv, …args)` — the SAME flat shape the
 // resolver's desugar produces. Rebuild the flat arg list here (without mutating the shared raw decls,
 // which a later pass still reads in surface form) so the closure/arg checks see the receiver as arg 0.
-ka_mcall_args = (a: MutPtr<Malloc>, mc: MethodCallData) [Expr] {
+ka_mcall_args = (a: Allocator, mc: MethodCallData) [Expr] {
     buf ::= slice(a.acquire_or_die((mc.args.len + 1) * sizeof(Expr)), mc.args.len + 1)
     buf[0] = load(mc.recv)
     mc.args.loop_at((i, ar) { buf[i + 1] = mc.args[i] })
@@ -621,7 +621,7 @@ ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i
 // (R5) a lambda bound to an FnT parameter: its declared param COUNT must match the FnT's, and — when the
 // FnT's concrete (substituted) param/return types are known — the lambda's body value must fit the FnT
 // return type. Bind each lambda param to the FnT's substituted param type, then infer the body's value.
-ka_lam_params = (a: MutPtr<Malloc>, lmps: [Param], fps: [Ty]) [Param] {
+ka_lam_params = (a: Allocator, lmps: [Param], fps: [Ty]) [Param] {
     buf ::= cbuf<Param>(a, lmps.len)
     lmps.loop_at((i, p) {
         buf[i] = Param(
@@ -847,7 +847,7 @@ ka_arms_kind = (env: Env, tparams: [Param], subjty: Ty, arms: [ArmData]) i32 {
     })
     acc
 }
-ka_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
+ka_stmt_kind = (a: Allocator, env: Env, tparams: [Param], st: Stmt) i32 {
     st.match ({
         .Let(l)      => env.ka_expr_kind(tparams, l.value),
         .Assign(x)   => env.ka_expr_kind(tparams, x.target).or(env.ka_expr_kind(tparams, x.value)),
@@ -864,7 +864,7 @@ ka_stmt_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], st: Stmt) i32 {
             .or(env.ka_expr_kind(tparams, x.value)),
     })
 }
-ka_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32 {
+ka_body_kind = (a: Allocator, env: Env, tparams: [Param], body: [Stmt]) i32 {
     acc ::= 0
     e ::= env
     body.loop_at((i, st) {
@@ -873,7 +873,7 @@ ka_body_kind = (a: MutPtr<Malloc>, env: Env, tparams: [Param], body: [Stmt]) i32
     })
     acc
 }
-ka_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+ka_func_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     env = Env(
         vars: a.params_env(f.params),
         decls: decls,
@@ -1181,7 +1181,7 @@ ko_arms_kind = (env: Env, tps: [Param], want: Ty, subjty: Ty, arms: [ArmData]) i
     })
     acc
 }
-ko_stmt_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, st: Stmt, cnd: bool) i32 {
+ko_stmt_kind = (a: Allocator, env: Env, tps: [Param], want: Ty, st: Stmt, cnd: bool) i32 {
     st.match ({
         .Let(l)      => env.ko_expr_kind(tps, want, l.value, cnd),
         .Assign(x)   => env
@@ -1202,7 +1202,7 @@ ko_stmt_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, st: Stmt, c
             .or(env.ko_expr_kind(tps, want, x.value, cnd)),
     })
 }
-ko_body_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, body: [Stmt], cnd: bool) i32 {
+ko_body_kind = (a: Allocator, env: Env, tps: [Param], want: Ty, body: [Stmt], cnd: bool) i32 {
     acc ::= 0
     e ::= env
     body.loop_at((i, st) {
@@ -1211,7 +1211,7 @@ ko_body_kind = (a: MutPtr<Malloc>, env: Env, tps: [Param], want: Ty, body: [Stmt
     })
     acc
 }
-ko_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+ko_func_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
     env = Env(
         vars: a.params_env(f.params),
         decls: decls,
@@ -1226,7 +1226,7 @@ ko_func_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, f: Func) i32 
 // zero-initialized (no diagnostic, wrong exit values). Walk the initializer with a non-Result `want`
 // (i32) so ANY or_return inside it reports KORRETURN at its own position — the same "no matching
 // Result to propagate into" judgment the fn-body walk makes, with nothing lenient to defer to.
-ko_global_kind* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, g: GlobalData) i32 {
+ko_global_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, g: GlobalData) i32 {
     env = Env(
         vars: a.params_env(empty_params()),
         decls: decls,
@@ -1289,12 +1289,7 @@ ffi_bad_ty = (env: Env, t: Ty) i32 { env.ffi_ty_ok(t, FFI_DEPTH()).then({ 0 }, {
 ffi_bad_generic = (f: Func) i32 { (f.tparams.len > 0).then({ 1 }, { 0 }) }
 // the NAME walk (same traversal order as the kind walk): the message naming the offending
 // parameter/return type, in user spelling.
-ffi_param_msg = (
-    a: MutPtr<Malloc>,
-    fname: StringView,
-    pname: StringView,
-    tname: StringView,
-) StringView {
+ffi_param_msg = (a: Allocator, fname: StringView, pname: StringView, tname: StringView) StringView {
     a
         .gstr_string(96)
         .gstr_append(a, "foreign declaration `")
@@ -1306,7 +1301,7 @@ ffi_param_msg = (
         .gstr_append(a, "`")
         .gstr_finish(a)
 }
-ffi_ret_msg = (a: MutPtr<Malloc>, fname: StringView, tname: StringView) StringView {
+ffi_ret_msg = (a: Allocator, fname: StringView, tname: StringView) StringView {
     a
         .gstr_string(96)
         .gstr_append(a, "foreign declaration `")
@@ -1316,7 +1311,7 @@ ffi_ret_msg = (a: MutPtr<Malloc>, fname: StringView, tname: StringView) StringVi
         .gstr_append(a, "` is not FFI-safe")
         .gstr_finish(a)
 }
-ffi_generic_msg = (a: MutPtr<Malloc>, fname: StringView) StringView {
+ffi_generic_msg = (a: Allocator, fname: StringView) StringView {
     a
         .gstr_string(96)
         .gstr_append(a, "foreign declaration `")
@@ -1324,7 +1319,7 @@ ffi_generic_msg = (a: MutPtr<Malloc>, fname: StringView) StringView {
         .gstr_append(a, "` declares type parameters — a foreign symbol binds ONE concrete C signature")
         .gstr_finish(a)
 }
-ffi_func_msg* = (a: MutPtr<Malloc>, env: Env, f: Func) StringView {
+ffi_func_msg* = (a: Allocator, env: Env, f: Func) StringView {
     (f.tparams.len > 0).then({
         return a.ffi_generic_msg(f.name)
     })
@@ -1340,7 +1335,7 @@ ffi_func_msg* = (a: MutPtr<Malloc>, env: Env, f: Func) StringView {
         false => a.ffi_ret_msg(f.name, a.zty(f.ret)),
     }))
 }
-kdiag_buf* = (a: MutPtr<Malloc>) [i32] {
+kdiag_buf* = (a: Allocator) [i32] {
     slice(a.acquire_or_die(KDIAG_CAP() * sizeof(i32)), KDIAG_CAP())
 }
 // already collected? (dedup: two channels can position the same packed kind at one site)
@@ -1446,7 +1441,7 @@ parse_sentinel_kind* = (nm: StringView, init: Ptr<Expr>) i32 {
 // arity/arg-type-checked exactly like a local one — while the header's bodyless sigs are never
 // re-checked (check_module only descends DFunc bodies). A name imported but absent from the header
 // stays known-but-unchecked (the #204 DImport path), so partial headers never false-reject.
-as_sig* = (a: MutPtr<Malloc>, d: Decl) Decl {
+as_sig* = (a: Allocator, d: Decl) Decl {
     d.match ({
         .DFunc(f) => dforeign(Func(
             name: f.name,

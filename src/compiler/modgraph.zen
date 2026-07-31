@@ -2,7 +2,7 @@
 // the compile cache (is this program's closure unchanged since the last build?) and by `zen audit`'s
 // workspace pre-pass (which entry points reach which modules). Both need the SAME notion of "the
 // modules this file pulls in", so the walk lives in one place rather than once per caller.
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { fnv1a64_fold } = std.hash    // shared FNV-1a-64 rolling byte fold (centralized in std.hash)
 { view } = std.text.str
 { contents_in } = std.io.file
@@ -37,19 +37,19 @@ CacheWalk*: {
     seen: String,
     h: i64,
 }
-edges_of* = (mp: MutPtr<Malloc>, src: StringView) [ImportEdge] {
-    mp.import_edges(src).expect("zenc: cache probe: allocation failed")
+edges_of* = (mp: Allocator, src: StringView) [ImportEdge] {
+    mp.addr().import_edges(src).expect("zenc: cache probe: allocation failed")
 }
 // id → file through the resolver's ONE exported module_path (the canonical ModuleId → path fn),
 // so the probe can never drift from the loader's mapping.
 cache_module_path* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     root: StringView,
     progdir: StringView,
     id: StringView,
 ) StringView { mp.module_path(root, progdir, mp.gstr_string(24).gstr_append(mp, id)) }
 cache_walk_one* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     root: StringView,
     progdir: StringView,
     id: StringView,
@@ -63,7 +63,7 @@ cache_walk_one* = (
                 seen: st.seen.add_name(mp, idn),
                 h: st.h.fnv_str(id),
             )
-            contents_in(mp, mp.cache_module_path(root, progdir, id)).match ({
+            contents_in(mp.addr(), mp.cache_module_path(root, progdir, id)).match ({
                 .Ok(msrc) => mp.cache_walk_edges(root, progdir, mp.edges_of(msrc), CacheWalk(
                     seen: next.seen,
                     h: next.h.fnv_str(msrc),
@@ -74,7 +74,7 @@ cache_walk_one* = (
     })
 }
 cache_walk_edges* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     root: StringView,
     progdir: StringView,
     edges: [ImportEdge],

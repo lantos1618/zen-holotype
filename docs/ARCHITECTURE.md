@@ -250,7 +250,7 @@ Three runtime surfaces coexist in code:
 
 | Surface | Current role | Status |
 |---|---|---|
-| `std.sys.Sys` | Explicit executable root; attenuates to `Writer`, `Allocator`, `Env`, `Clock`, and `Fs`. | Preferred public direction. |
+| `std.sys.Sys` | Explicit executable root; attenuates to `Writer`, `Heap`, `Env`, `Clock`, and `Fs`. | Preferred public direction. |
 | `std.rt` | Thread-local/process-default ambient allocator runtime; pool actors enter/leave it. | Live legacy/experimental substrate. |
 | `std.concurrent.runtime` | Sync/coroutine arenas and checkpoint substrate used by cooperative actors. | Live internal/experimental substrate. |
 

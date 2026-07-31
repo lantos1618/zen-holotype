@@ -6,7 +6,7 @@
 { Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FnTData } = compiler.ast.ast_types
 { ty_cname_in, gstr_append } = compiler.genc
 { fnt_cname } = compiler.mangle
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { gen_block, gen_block_void } = compiler.backend.c.c_expr
 { loop_at } = std.core.count
 any_payload = (vs: [VariantDef]) bool {
@@ -19,7 +19,7 @@ any_payload = (vs: [VariantDef]) bool {
     })
     found
 }
-gen_ty_list = (s: String, alloc: MutPtr<Malloc>, ts: [Ty]) String {
+gen_ty_list = (s: String, alloc: Allocator, ts: [Ty]) String {
     out ::= s
     ts.loop_at((i, t) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma-separated bare types: `A, B, C`
@@ -30,7 +30,7 @@ gen_ty_list = (s: String, alloc: MutPtr<Malloc>, ts: [Ty]) String {
 // a function-pointer parameter `RET (*name)(ARG, …)`. Most FnT params are a template's lambda (inlined
 // at the call site, never emitted); but an FnT param that survives into a REAL C signature — an extern
 // callback like makecontext's `void(*func)()` — must render as an actual function pointer here.
-gen_fnptr_param = (s: String, alloc: MutPtr<Malloc>, ft: FnTData, name: StringView) String {
+gen_fnptr_param = (s: String, alloc: Allocator, ft: FnTData, name: StringView) String {
     s
         .gstr_append(alloc, alloc.ty_cname_in(load(ft.ret)))
         .gstr_append(alloc, "(*")
@@ -39,7 +39,7 @@ gen_fnptr_param = (s: String, alloc: MutPtr<Malloc>, ft: FnTData, name: StringVi
         .gen_ty_list(alloc, ft.params)
         .gstr_append(alloc, ")")
 }
-gen_params = (s: String, alloc: MutPtr<Malloc>, ps: [Param]) String {
+gen_params = (s: String, alloc: Allocator, ps: [Param]) String {
     out ::= s
     ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
@@ -80,13 +80,13 @@ c_func_name_f = (f: Func) StringView {
 // a function signature `ret name(params)` — shared by the definition and the forward proto
 // the C name for a return type: a function-VALUE return (FnT) uses its precise typedef (M1c) so the
 // caller can call the result; everything else is the plain C type name.
-ret_cname = (alloc: MutPtr<Malloc>, ret: Ty) StringView {
+ret_cname = (alloc: Allocator, ret: Ty) StringView {
     ret.match ({
         .FnT(ft) => alloc.fnt_cname(ft),
         _        => alloc.ty_cname_in(ret),
     })
 }
-gen_sig = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
+gen_sig = (s: String, alloc: Allocator, f: Func) String {
     s
         .gstr_append(alloc, alloc.ret_cname(f.ret))
         .gstr_append(alloc, " ")
@@ -99,7 +99,7 @@ gen_sig = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
 // fn returning a function value has a precise, callable C return type. C11 allows an identical typedef
 // to repeat, so no dedup is needed. Emitted after the forward struct typedefs (a fn-pointer typedef may
 // reference an as-yet-incomplete struct) and before the prototypes that use it as a return type.
-gen_fnt_typedef_ret = (s: String, alloc: MutPtr<Malloc>, ret: Ty) String {
+gen_fnt_typedef_ret = (s: String, alloc: Allocator, ret: Ty) String {
     ret.match ({
         .FnT(ft) => s
             .gstr_append(alloc, "typedef ")
@@ -112,7 +112,7 @@ gen_fnt_typedef_ret = (s: String, alloc: MutPtr<Malloc>, ret: Ty) String {
         _        => s,
     })
 }
-gen_fnt_typedefs* = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
+gen_fnt_typedefs* = (s: String, alloc: Allocator, decls: [Decl]) String {
     out ::= s
     decls.loop_at((i, d) {
         out = d.match ({
@@ -123,7 +123,7 @@ gen_fnt_typedefs* = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
     })
     out
 }
-gen_func = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
+gen_func = (s: String, alloc: Allocator, f: Func) String {
     out ::= s.gen_sig(alloc, f)
     f.main_is_sys().match ({
         true  => {
@@ -150,7 +150,7 @@ gen_func = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
     })
     out
 }
-gen_func_body = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
+gen_func_body = (s: String, alloc: Allocator, f: Func) String {
     // Use `s` EXACTLY ONCE: gen_block reallocs s's buffer (freeing the old pointer), so the previous
     // form (out ::= s.gen_block(...); then for Void out = s.gen_block_void(...)) reused a freed `s`
     // (heap-use-after-free) for every void function whose body grows the output buffer.
@@ -161,7 +161,7 @@ gen_func_body = (s: String, alloc: MutPtr<Malloc>, f: Func) String {
     })
 }
 // a forward declaration so a function may call one defined later (mutual / out-of-order recursion)
-gen_proto* = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
+gen_proto* = (s: String, alloc: Allocator, d: Decl) String {
     out ::= s
     (d.is_template() == false).then({
         d.match ({
@@ -178,7 +178,7 @@ gen_proto* = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
 }
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
 // the C arg list of a function type: `i32, i32` (empty -> `void`).
-gen_fnt_params = (s: String, alloc: MutPtr<Malloc>, ps: [Ty]) String {
+gen_fnt_params = (s: String, alloc: Allocator, ps: [Ty]) String {
     out ::= s
     ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })
@@ -189,7 +189,7 @@ gen_fnt_params = (s: String, alloc: MutPtr<Malloc>, ps: [Ty]) String {
 // a struct field declaration. A function-VALUE field (FnT) is emitted as a precise C function-pointer
 // declarator `Ret (*name)(Args)` — so the field is natively callable and a same-signature function or
 // lifted lambda assigns to it with no cast (M1 closures, non-capturing). All other fields are `T name`.
-gen_field_decl = (s: String, alloc: MutPtr<Malloc>, fld: Field) String {
+gen_field_decl = (s: String, alloc: Allocator, fld: Field) String {
     fld.ty.match ({
         .FnT(ft) => s
             .gstr_append(alloc, alloc.ty_cname_in(load(ft.ret)))
@@ -205,13 +205,13 @@ gen_field_decl = (s: String, alloc: MutPtr<Malloc>, fld: Field) String {
             .gstr_append(alloc, "; "),
     })
 }
-gen_struct = (s: String, alloc: MutPtr<Malloc>, sd: StructDecl) String {
+gen_struct = (s: String, alloc: Allocator, sd: StructDecl) String {
     open ::= s.gstr_append(alloc, "struct ").gstr_append(alloc, sd.name).gstr_append(alloc, " { ")
     sd.fields.loop_at((i, fld) { open = open.gen_field_decl(alloc, fld) })
     open.gstr_append(alloc, "};")
 }
 // emit an enum's union members (the payload-carrying variants) and tag constants
-gen_union = (s: String, alloc: MutPtr<Malloc>, vs: [VariantDef]) String {
+gen_union = (s: String, alloc: Allocator, vs: [VariantDef]) String {
     u ::= s.gstr_append(alloc, " union { ")
     vs.loop_at((i, v) {
         v.payload.match ({
@@ -227,7 +227,7 @@ gen_union = (s: String, alloc: MutPtr<Malloc>, vs: [VariantDef]) String {
     })
     u.gstr_append(alloc, "} u;")
 }
-gen_tags = (s: String, alloc: MutPtr<Malloc>, ename: StringView, vs: [VariantDef]) String {
+gen_tags = (s: String, alloc: Allocator, ename: StringView, vs: [VariantDef]) String {
     e ::= s.gstr_append(alloc, " enum { ")
     vs.loop_at((i, v) {
         e = (i == 0).then({ e }, { e.gstr_append(alloc, ", ") })
@@ -236,7 +236,7 @@ gen_tags = (s: String, alloc: MutPtr<Malloc>, ename: StringView, vs: [VariantDef
     e.gstr_append(alloc, " };")
 }
 // emit an enum (tagged union): `typedef struct { int32_t tag; union { … } u; } E; enum { E_A, … };`
-gen_enum = (s: String, alloc: MutPtr<Malloc>, ed: EnumDecl) String {
+gen_enum = (s: String, alloc: Allocator, ed: EnumDecl) String {
     out ::= s
         .gstr_append(alloc, "struct ")
         .gstr_append(alloc, ed.name)
@@ -251,13 +251,13 @@ gen_enum = (s: String, alloc: MutPtr<Malloc>, ed: EnumDecl) String {
 // tells a closure record apart from a trait, since both are "structs with FnT fields" by shape.
 // The old per-query linear scan over the whole decl list ran per trait-shaped struct per depth
 // level (an O(decls^2) corner that showed up in the self-build profile).
-impld_set* = (a: MutPtr<Malloc>, decls: [Decl]) Map<i64> {
+impld_set* = (a: Allocator, decls: [Decl]) Map<i64> {
     seedv: i64 = 0 - 1
-    m ::= of(a, "", seedv).expect("c_decl: impld_set alloc")
+    m ::= of(a.addr(), "", seedv).expect("c_decl: impld_set alloc")
     decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => {
-                m = m.put(a, im.trname, 0).expect("c_decl: impld_set alloc")
+                m = m.put(a.addr(), im.trname, 0).expect("c_decl: impld_set alloc")
             },
             _          => { },
         })
@@ -276,7 +276,7 @@ emit_is_trait* = (impld: Map<i64>, d: Decl) bool {
     })
 }
 // forward-declare a struct/enum tag so recursive types compile: `typedef struct N N;`
-gen_fwd* = (s: String, alloc: MutPtr<Malloc>, impld: Map<i64>, d: Decl) String {
+gen_fwd* = (s: String, alloc: Allocator, impld: Map<i64>, d: Decl) String {
     out ::= s
     (impld.emit_is_trait(d) == false).then({
         d.match ({
@@ -302,7 +302,7 @@ gen_fwd* = (s: String, alloc: MutPtr<Malloc>, impld: Map<i64>, d: Decl) String {
     out
 }
 // emit a top-level declaration (a function, a struct, an enum, or verbatim C)
-gen_decl* = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
+gen_decl* = (s: String, alloc: Allocator, d: Decl) String {
     out ::= s
     d.match ({
         .DFunc(f)    => {

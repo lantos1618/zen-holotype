@@ -8,7 +8,7 @@
 harness_verdict_run* = () i32 {
     a = run_verdicts("verdict", [
         VerdictCase(
-            src: "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\nHolder: { ptr: RawPtr<u8> }\nmain = () i32 {\n    a = halloc.gpa()\n    p = a.addr().acquire(64)\n    h ::= Holder(ptr: p)\n    a.addr().release(p)\n    q = a.addr().acquire(64)\n    h.ptr = q\n    v = load(h.ptr)\n    a.addr().release(q)\n    v.to_i32()\n}\n",
+            src: "{ Allocator, heap_allocator } = std.mem.alloc\nhalloc = std.mem.heap\nHolder: { ptr: RawPtr<u8> }\nmain = () i32 {\n    a = halloc.gpa()\n    p = a.addr().acquire(64)\n    h ::= Holder(ptr: p)\n    a.addr().release(p)\n    q = a.addr().acquire(64)\n    h.ptr = q\n    v = load(h.ptr)\n    a.addr().release(q)\n    v.to_i32()\n}\n",
             should_pass: true,
             kind: "",
         ),
@@ -308,7 +308,7 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "{ Malloc, try_acquire } = std.mem.alloc\n{ expect } = std.core.result\ntest* = () i32 { m = Malloc(_: 0)\n p = m.addr().try_acquire(64).expect(\"oom\")\n b :: [i64] = p.slice(1)\n b[0] = 1\n 0 }",
+            src: "{ Allocator, heap_allocator } = std.mem.alloc\n{ expect } = std.core.result\ntest* = () i32 { m = heap_allocator()\n p = m.addr().try_acquire(64).expect(\"oom\")\n b :: [i64] = p.slice(1)\n b[0] = 1\n 0 }",
             should_pass: true,
             kind: "",
         ),
@@ -2502,17 +2502,17 @@ harness_verdict_run* = () i32 {
             kind: "leak",
         ),
         VerdictCase(
-            src: "{ expect } = std.core.result\nvec = std.collections.vec\nhalloc = std.mem.heap\ntest* = () i64 {\n    m = halloc.gpa()\n    v = vec.of(m.addr(), [1, 2, 3]).expect(\"v\")\n    v.free(m.addr())\n    v.len()\n}",
+            src: "{ expect } = std.core.result\nvec = std.collections.vec\nhalloc = std.mem.heap\ntest* = () i64 {\n    m = halloc.gpa()\n    v = vec.of(m.addr().allocator(), [1, 2, 3]).expect(\"v\")\n    v.free(m.addr())\n    v.len()\n}",
             should_pass: false,
             kind: "ownership",
         ),
         VerdictCase(
-            src: "{ expect } = std.core.result\nvec = std.collections.vec\nhalloc = std.mem.heap\ntest* = () i32 {\n    m = halloc.gpa()\n    v = vec.of(m.addr(), [1, 2, 3]).expect(\"v\")\n    v.free(m.addr())\n    v.free(m.addr())\n    0\n}",
+            src: "{ expect } = std.core.result\nvec = std.collections.vec\nhalloc = std.mem.heap\ntest* = () i32 {\n    m = halloc.gpa()\n    v = vec.of(m.addr().allocator(), [1, 2, 3]).expect(\"v\")\n    v.free(m.addr())\n    v.free(m.addr())\n    0\n}",
             should_pass: false,
             kind: "ownership",
         ),
         VerdictCase(
-            src: "{ expect } = std.core.result\nvec = std.collections.vec\nhalloc = std.mem.heap\ntest* = () i64 {\n    m = halloc.gpa()\n    v = vec.of(m.addr(), [1, 2, 3]).expect(\"v\")\n    n = v.len()\n    v.free(m.addr())\n    n\n}",
+            src: "{ expect } = std.core.result\nvec = std.collections.vec\nhalloc = std.mem.heap\ntest* = () i64 {\n    m = halloc.gpa()\n    v = vec.of(m.addr().allocator(), [1, 2, 3]).expect(\"v\")\n    n = v.len()\n    v.free(m.addr())\n    n\n}",
             should_pass: true,
             kind: "",
         ),
@@ -2527,17 +2527,17 @@ harness_verdict_run* = () i32 {
             kind: "ownership",
         ),
         VerdictCase(
-            src: "{ Malloc } = std.mem.alloc\n{ String, init, free_in } = std.text.string\n{ expect } = std.core.result\ntest* = () i64 {\n    m = Malloc(_: 0)\n    a = m.addr()\n    s = a.init(8).expect(\"s\")\n    s.free_in(a)\n    s.len\n}",
+            src: "{ Allocator, heap_allocator } = std.mem.alloc\n{ String, init, free_in } = std.text.string\n{ expect } = std.core.result\ntest* = () i64 {\n    m = heap_allocator()\n    a = m.addr()\n    s = a.init(8).expect(\"s\")\n    s.free_in(a)\n    s.len\n}",
             should_pass: false,
             kind: "ownership",
         ),
         VerdictCase(
-            src: "halloc = std.mem.heap\n{ Allocator } = std.mem.alloc\nBlob*: {\n    ptr: RawPtr<u8>,\n    n: i64,\n    deinit = (b: Blob, a: Allocator) void { a.release(b.ptr) }\n}\ntest* = () i64 {\n    m = halloc.gpa()\n    b = Blob(\n        ptr: m.addr().acquire(16),\n        n: 16,\n    )\n    b.deinit(m.addr())\n    b.n\n}",
+            src: "halloc = std.mem.heap\n{ AllocatorBackend } = std.mem.alloc\nBlob*: {\n    ptr: RawPtr<u8>,\n    n: i64,\n    deinit = (b: Blob, a: AllocatorBackend) void { a.release(b.ptr) }\n}\ntest* = () i64 {\n    m = halloc.gpa()\n    b = Blob(\n        ptr: m.addr().acquire(16),\n        n: 16,\n    )\n    b.deinit(m.addr())\n    b.n\n}",
             should_pass: false,
             kind: "ownership",
         ),
         VerdictCase(
-            src: "halloc = std.mem.heap\n{ Allocator } = std.mem.alloc\nBlob*: {\n    ptr: RawPtr<u8>,\n    n: i64,\n    deinit = (b: Blob, a: Allocator) void { a.release(b.ptr) }\n}\ntest* = () i64 {\n    m = halloc.gpa()\n    b = Blob(\n        ptr: m.addr().acquire(16),\n        n: 16,\n    )\n    deinit(b, m.addr())\n    b.n\n}",
+            src: "halloc = std.mem.heap\n{ AllocatorBackend } = std.mem.alloc\nBlob*: {\n    ptr: RawPtr<u8>,\n    n: i64,\n    deinit = (b: Blob, a: AllocatorBackend) void { a.release(b.ptr) }\n}\ntest* = () i64 {\n    m = halloc.gpa()\n    b = Blob(\n        ptr: m.addr().acquire(16),\n        n: 16,\n    )\n    deinit(b, m.addr())\n    b.n\n}",
             should_pass: false,
             kind: "ownership",
         ),

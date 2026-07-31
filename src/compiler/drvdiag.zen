@@ -1,13 +1,13 @@
 // drvdiag.zen — how the driver turns a compiled module into user-facing diagnostics: run the
 // validation specs, pick the module and source text an error should render against, and print it.
 // Split out of driver.zen so `zenc lsp` can publish the same diagnostics the CLI prints.
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { clock_ms } = std.sys.os
 { then } = std.core.bool
 { Map } = std.collections.map
 { view } = std.text.str
 { at } = std.text.ascii
-{ gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ gstr_string, gstr_push, gstr_append, gstr_finish } = compiler.genc
 { CheckDiagnostic, desc_or } = compiler.validate.diag
 { check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source,
   check_module_no_if_diagnostic_from_source, check_module_no_ternary_diagnostic_from_source,
@@ -39,12 +39,7 @@ cd_or* = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic {
 // types / arity / fit / exhaustiveness / …) is batched separately — check_module_batch — so its
 // INDEPENDENT errors are all reported at once. A parse error, being here, always short-circuits the
 // batch (the flat sentinels would otherwise spray bogus type errors).
-check_diag_no_main = (
-    mp: MutPtr<Malloc>,
-    raw: [Decl],
-    decls: [Decl],
-    flat: StringView,
-) CheckDiagnostic {
+check_diag_no_main = (mp: Allocator, raw: [Decl], decls: [Decl], flat: StringView) CheckDiagnostic {
     t0 = clock_ms()
     c0 = check_module_no_if_diagnostic_from_source(flat)
         .cd_or(check_module_no_ternary_diagnostic_from_source(flat))
@@ -163,7 +158,7 @@ locate_diag* = (
 // module its error actually lives in. cd.count>1 appends the legacy inline "(+K more)" suffix — used
 // only on the specialized-channel path, where a single root error stands in for a whole cascade.
 emit_one* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     raw: [Decl],
     decls: [Decl],
     rp: ResolvedProgram,
@@ -187,7 +182,7 @@ emit_one* = (
 // Source-only commands (`fmt` and the deliberately-untyped raw emitter) do not own a ResolvedProgram,
 // but the no-if and no-ternary language laws still apply. Render the same structured diagnostic
 // directly against their input so every user-facing command teaches the canonical postfix forms.
-report_no_if_plain* = (mp: MutPtr<Malloc>, path: StringView, src: StringView) i32 {
+report_no_if_plain* = (mp: Allocator, path: StringView, src: StringView) i32 {
     cd = check_module_no_if_diagnostic_from_source(src)
         .cd_or(check_module_no_ternary_diagnostic_from_source(src))
         .cd_or(check_module_no_coroutine_diagnostic_from_source(src))
@@ -204,7 +199,7 @@ report_no_if_plain* = (mp: MutPtr<Malloc>, path: StringView, src: StringView) i3
 // the obsolete guard parser/lowerer out of the execution path and still maps an `if` (or a ternary
 // `?`) in an imported module back to that module's real file.
 report_no_if_resolved* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     rp: ResolvedProgram,
     path: StringView,
     user: StringView,
@@ -228,7 +223,7 @@ report_no_if_resolved* = (
 // this turns it into a positioned `error[js-target]` and the js commands refuse to write output.
 // Call AFTER genJsModuleIn (the record is written during emission) and reset BEFORE it.
 report_js_unsupported* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     rp: ResolvedProgram,
     path: StringView,
     user: StringView,
@@ -307,7 +302,7 @@ js_platform_import_span = (user: StringView) DiagSpan {
     sp
 }
 report_c_unsupported* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     rp: ResolvedProgram,
     path: StringView,
     user: StringView,
@@ -328,7 +323,7 @@ report_c_unsupported* = (
 // how many main-channel diagnostics we print before collapsing the rest into a single trailer line.
 DIAG_CAP = () i32 { 20 }
 // after the cap, one line naming the K un-rendered errors (so the tail is never silently dropped).
-emit_more_trailer = (mp: MutPtr<Malloc>, k: i32) i64 {
+emit_more_trailer = (mp: Allocator, k: i32) i64 {
     s = mp
         .gstr_string(48)
         .gstr_append(mp, "zenc: (+")
@@ -339,7 +334,7 @@ emit_more_trailer = (mp: MutPtr<Malloc>, k: i32) i64 {
 }
 // 0 if clean; else render EVERY main-channel diagnostic (capped, with a trailer) and return the count.
 report_check* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     raw: [Decl],
     decls: [Decl],
     rp: ResolvedProgram,
@@ -378,7 +373,7 @@ report_check* = (
 // the same `store_i64(p)` names the real mistake, and reporting "the allocation may be null" instead
 // would bury it. Only a program that is otherwise completely clean gets judged on this.
 report_alloc_null = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     raw: [Decl],
     decls: [Decl],
     rp: ResolvedProgram,

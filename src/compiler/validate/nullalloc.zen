@@ -17,7 +17,7 @@
 //   * BODY-WIDE, not path-sensitive: ANY proof of a name anywhere in its function discharges it.
 { Decl, Expr, Func, Stmt } = compiler.ast.ast_types
 { expr_fold_children } = compiler.ast.expr_children
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { DeadList, dead_cons, dead_has, dead_nil, expr_root_var } = compiler.validate.ownership
 { expr_pos, is_deref_intrinsic, pos_or } = compiler.validate.util
 { sx_named } = compiler.validate.args
@@ -34,7 +34,6 @@ is_alloc_verb = (fn: StringView, nargs: i64) bool {
         || fn.sx_named("resize", "__resize") && nargs == 3
         || fn.sx_named("heap_acquire", "__heap_acquire") && nargs == 2
         || fn.sx_named("heap_resize", "__heap_resize") && nargs == 3
-        || fn.sx_named("heap_request_acquire", "__heap_request_acquire") && nargs == 1
         || fn.sx_named("malloc", "__malloc") && nargs == 1
         || fn.sx_named("realloc", "__realloc") && nargs == 2
 }
@@ -81,14 +80,14 @@ nz_proof_name = (e: Ptr<Expr>) StringView {
     })
 }
 // ── pass 1: every local PROVEN anywhere in the body ───────────────────────────────────────────────
-nz_proofs_expr = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadList> {
+nz_proofs_expr = (a: Allocator, acc: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadList> {
     nm = e.nz_proof_name()
     seed = (nm == "").then({ acc }, { a.dead_cons(nm, acc) })
     seed.expr_fold_children(e, (s, ch) { a.nz_proofs_expr(s, ch) }, (s, b) {
         a.nz_proofs_body(s, b)
     })
 }
-nz_proofs_stmt = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
+nz_proofs_stmt = (a: Allocator, acc: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
     st.match ({
         .Let(l)      => a.nz_proofs_expr(acc, l.value),
         .Assign(x)   => a.nz_proofs_expr(a.nz_proofs_expr(acc, x.target), x.value),
@@ -99,14 +98,14 @@ nz_proofs_stmt = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, st: Stmt) Ptr<DeadList>
         .IndexSet(x) => a.nz_proofs_expr(a.nz_proofs_expr(a.nz_proofs_expr(acc, x.seq), x.idx), x.value),
     })
 }
-nz_proofs_body* = (a: MutPtr<Malloc>, acc: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
+nz_proofs_body* = (a: Allocator, acc: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
     out ::= acc
     body.loop_at((i, st) { out = a.nz_proofs_stmt(out, st) })
     out
 }
 // ── pass 2: every local BOUND to an allocation and never proven ───────────────────────────────────
 nz_bind = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     proven: Ptr<DeadList>,
     acc: Ptr<DeadList>,
     name: StringView,
@@ -118,7 +117,7 @@ nz_bind = (
     })
 }
 nz_unproven_expr = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     proven: Ptr<DeadList>,
     acc: Ptr<DeadList>,
     e: Ptr<Expr>,
@@ -128,7 +127,7 @@ nz_unproven_expr = (
     })
 }
 nz_unproven_stmt = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     proven: Ptr<DeadList>,
     acc: Ptr<DeadList>,
     st: Stmt,
@@ -144,7 +143,7 @@ nz_unproven_stmt = (
     })
 }
 nz_unproven_body* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     proven: Ptr<DeadList>,
     acc: Ptr<DeadList>,
     body: [Stmt],
@@ -209,11 +208,11 @@ nz_body_kind* = (un: Ptr<DeadList>, body: [Stmt]) i32 {
     body.loop_at((i, st) { acc = acc.nz_or(un.nz_stmt_kind(st)) })
     acc
 }
-nz_func_kind* = (a: MutPtr<Malloc>, f: Func) i32 {
+nz_func_kind* = (a: Allocator, f: Func) i32 {
     proven = a.nz_proofs_body(a.dead_nil(), f.body)
     a.nz_unproven_body(proven, a.dead_nil(), f.body).nz_body_kind(f.body)
 }
-check_module_nullalloc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
+check_module_nullalloc_kind* = (a: Allocator, decls: [Decl]) i32 {
     acc ::= 0
     decls.loop_at((i, d) {
         acc = acc.nz_or(d.match ({
@@ -224,7 +223,7 @@ check_module_nullalloc_kind* = (a: MutPtr<Malloc>, decls: [Decl]) i32 {
     acc
 }
 check_module_nullalloc_diagnostic_from_source* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     src: StringView,
 ) CheckDiagnostic {

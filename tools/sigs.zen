@@ -28,7 +28,7 @@
 // spelling here is byte-identical to `zen fmt` output. A trailing `-- sigs:` summary line reports
 // file/fn/type counts.
 { arg, argc } = std.sys.os
-{ Malloc } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 { contents_in, out } = std.io.file
 { is_dir, read_dir } = std.sys.fs
 { cat_in, ends_with, starts_with, sv_lt } = std.text.str
@@ -80,14 +80,14 @@ is_exported = (exp: [Param], name: StringView) bool {
     found
 }
 // `name` plus the trailing `*` export marker when the parse recorded it
-sig_name = (s: String, mp: MutPtr<Malloc>, exp: [Param], name: StringView) String {
+sig_name = (s: String, mp: Allocator, exp: [Param], name: StringView) String {
     is_exported(exp, name).match ({
         true  => s.ff_append(mp, name).ff_append(mp, "*"),
         false => s.ff_append(mp, name),
     })
 }
 // `<A, B: Bound>` (empty tparams print nothing; a bound is carried as the tparam's Named ty)
-sig_tparams = (s: String, mp: MutPtr<Malloc>, tps: [Param]) String {
+sig_tparams = (s: String, mp: Allocator, tps: [Param]) String {
     (tps.len == 0).match ({
         true  => s,
         false => {
@@ -110,7 +110,7 @@ variadic_elem = (t: Ty) Ty {
         _         => t,
     })
 }
-sig_params = (s: String, mp: MutPtr<Malloc>, ps: [Param]) String {
+sig_params = (s: String, mp: Allocator, ps: [Param]) String {
     body ::= s
     ps.loop((h, i, p) {
         body = (i == 0).then({ body }, { body.ff_append(mp, ", ") })
@@ -125,7 +125,7 @@ sig_params = (s: String, mp: MutPtr<Malloc>, ps: [Param]) String {
     body
 }
 // the shared ` = (params) ret` tail of a fn/method signature line
-sig_tail = (s: String, mp: MutPtr<Malloc>, f: Func) String {
+sig_tail = (s: String, mp: Allocator, f: Func) String {
     g_fns = g_fns + 1
     s
         .sig_tparams(mp, f.tparams)
@@ -135,13 +135,13 @@ sig_tail = (s: String, mp: MutPtr<Malloc>, f: Func) String {
         .ff_ty(mp, f.ret)
         .ff_append(mp, "\n")
 }
-sig_fn = (s: String, mp: MutPtr<Malloc>, exp: [Param], f: Func) String {
+sig_fn = (s: String, mp: Allocator, exp: [Param], f: Func) String {
     s.ff_append(mp, "  ").sig_name(mp, exp, f.name).sig_tail(mp, f)
 }
 // ── structs / enums ───────────────────────────────────────────────────────────
 sig_struct = (
     s: String,
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     exp: [Param],
     name: StringView,
     tps: [Param],
@@ -161,7 +161,7 @@ sig_struct = (
 }
 // a multi-payload variant `V(t0, t1)` is desugared at parse time into a synthesized `__anon…` struct;
 // re-inline its field types as the surface tuple (the struct itself is suppressed at top level)
-sig_tuple = (s: String, mp: MutPtr<Malloc>, decls: [Decl], nm: StringView, t: Ty) String {
+sig_tuple = (s: String, mp: Allocator, decls: [Decl], nm: StringView, t: Ty) String {
     found ::= false
     body ::= s
     decls.loop((h, i, d) {
@@ -180,7 +180,7 @@ sig_tuple = (s: String, mp: MutPtr<Malloc>, decls: [Decl], nm: StringView, t: Ty
     })
     found.then({ body }, { body.ff_append(mp, "(").ff_ty(mp, t).ff_append(mp, ")") })
 }
-sig_payload = (s: String, mp: MutPtr<Malloc>, decls: [Decl], t: Ty) String {
+sig_payload = (s: String, mp: Allocator, decls: [Decl], t: Ty) String {
     t.match ({
         .Named(nm) => nm.starts_with("__anon").match ({
             true  => s.sig_tuple(mp, decls, nm, t),
@@ -190,7 +190,7 @@ sig_payload = (s: String, mp: MutPtr<Malloc>, decls: [Decl], t: Ty) String {
     })
 }
 // one variant: `Name`, `Name(Payload)`, or — zero-arg ctor with a default constant — `Name = expr`
-sig_variant = (s: String, mp: MutPtr<Malloc>, decls: [Decl], vd: VariantDef) String {
+sig_variant = (s: String, mp: Allocator, decls: [Decl], vd: VariantDef) String {
     base = vd.payload.match ({
         .Void => s.ff_append(mp, vd.name),
         _     => s.ff_append(mp, vd.name).sig_payload(mp, decls, vd.payload),
@@ -199,7 +199,7 @@ sig_variant = (s: String, mp: MutPtr<Malloc>, decls: [Decl], vd: VariantDef) Str
 }
 sig_enum = (
     s: String,
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     exp: [Param],
     decls: [Decl],
     name: StringView,
@@ -222,7 +222,7 @@ sig_enum = (
 // an impl marker: a `Ty.impl(Trait)` head (trait impls only — inherent impls have ty == trname),
 // then each method DEMANGLED back from its hoisted `impl_<Tr>_<Ty>_<m>` fn as `Ty.m = (params) ret`.
 // A method absent among the decls (satisfied by a trait default) prints nothing here.
-sig_impl = (s: String, mp: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
+sig_impl = (s: String, mp: Allocator, decls: [Decl], im: ImplData) String {
     body ::= (im.ty == im.trname).match ({
         true  => s,
         false => s
@@ -249,7 +249,7 @@ sig_impl = (s: String, mp: MutPtr<Malloc>, decls: [Decl], im: ImplData) String {
 // signature); `thread_local(...)` wrapping is restored; module aliases (`m = std.x`) are skipped.
 // The mark says what the declaration says: `::=` when it carries the mutability mark, `=` otherwise
 // — an unmarked global is a constant, exactly like an unmarked local.
-sig_global = (s: String, mp: MutPtr<Malloc>, exp: [Param], g: GlobalData) String {
+sig_global = (s: String, mp: Allocator, exp: [Param], g: GlobalData) String {
     g.alias.match ({
         true  => s,
         false => {
@@ -267,7 +267,7 @@ sig_global = (s: String, mp: MutPtr<Malloc>, exp: [Param], g: GlobalData) String
     })
 }
 // ── the per-decl dispatch ─────────────────────────────────────────────────────
-sig_decl = (s: String, mp: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl) String {
+sig_decl = (s: String, mp: Allocator, exp: [Param], decls: [Decl], d: Decl) String {
     d.match ({
         .DFunc(f)      => mp.ff_is_hoisted(decls, f.name).then({ s }, { s.sig_fn(mp, exp, f) }),    // a hoisted impl method — printed demangled via its DImpl marker
         .DForeign(f)   => s.sig_fn(mp, exp, f),
@@ -285,9 +285,9 @@ sig_decl = (s: String, mp: MutPtr<Malloc>, exp: [Param], decls: [Decl], d: Decl)
 }    // DImport / DRaw / DTraitDefault declare no printable signature
 // ── the walk ──────────────────────────────────────────────────────────────────
 // parse one module and print its section (`## path` + one line per decl)
-emit_file = (mp: MutPtr<Malloc>, path: StringView) void {
+emit_file = (mp: Allocator, path: StringView) void {
     g_files = g_files + 1
-    src = mp.contents_in(path).expect("sigs: cannot read file")
+    src = mp.addr().contents_in(path).expect("sigs: cannot read file")
     decls = mp.parse_module(src)
     exp = exports_get()
     s ::= mp
@@ -310,11 +310,11 @@ sort_names = (xs: [StringView]) void {
     xs.sort_by((x: StringView, y: StringView) bool { x.sv_lt(y) })
 }
 // recurse into subdirectories, emit every `.zen` file, sorted at each level
-walk = (mp: MutPtr<Malloc>, dir: StringView) void {
-    entries = mp.read_dir(dir).expect("sigs: cannot read directory")
+walk = (mp: Allocator, dir: StringView) void {
+    entries = mp.addr().read_dir(dir).expect("sigs: cannot read directory")
     entries.sort_names()
     entries.loop((h, i, entry) {
-        full = mp.cat_in(mp.cat_in(dir, "/"), entry)
+        full = mp.addr().cat_in(mp.addr().cat_in(dir, "/"), entry)
         full.is_dir().match ({
             true  => {
                 mp.walk(full)
@@ -339,8 +339,7 @@ pick_root_from = (i: i32, acc: StringView) StringView {
 }
 pick_root = () StringView { pick_root_from(1, "src") }
 main = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     root = pick_root()
     root.is_dir().match ({
         true  => {

@@ -13,7 +13,7 @@
 { String } = std.text.string
 { view } = std.text.str
 { step_while, loop_at } = std.core.count
-{ Malloc, heap_request_acquire, heap_resize } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { panic } = std.core.result
 // mangle_str_in lives in compiler.mangle (the Ty→C-name family split out of this file); subst_generic_in
 // re-mangles a nested generic instance after substitution. compiler.mangle imports the shared AST
@@ -24,7 +24,7 @@
 // cbuf<T>: allocate a fresh `[T]` buffer of n elements. ONE generic replaces the ~20 per-type
 // `Xbuf = (a, n) [X] { slice(a.acquire(n * sizeof(X)), n) }` copies that used to live across the
 // compiler. T sits only in return position, so callers pass an explicit turbofish: `cbuf<Ty>(a, n)`.
-cbuf*<T> = (a: MutPtr<Malloc>, n: i64) [T] { slice(a.acquire_or_die(n * sizeof(T)), n) }
+cbuf*<T> = (a: Allocator, n: i64) [T] { slice(a.acquire_or_die(n * sizeof(T)), n) }
 // sbyte: the i-th byte of a StringView. ONE accessor replaces the sbyte/jbyte/dsbyte/ffbyte copies.
 sbyte* = (v: StringView, i: i64) u8 { load(offset(v, i)) }
 // pointer KIND tag (safety-goal-D). All three spellings still lower to `T*`; their semantic/mono
@@ -42,10 +42,9 @@ ptr_kw* = (kind: i32) StringView {
         false => (kind == k_mut_ptr()).then({ "MutPtr" }, { "Ptr" }),
     })
 }
-// Compiler-owned allocations flow through these shims so stripped bootstrap drivers that do not
-// flatten std.mem.alloc's trait impls still have concrete UFCS targets for Malloc.
-acquire* = (a: MutPtr<Malloc>, n: i64) RawPtr<u8> { heap_request_acquire(n) }
-resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { heap_resize(null_ptr(), p, n) }
+// Compiler-owned allocations use these allocator value-method UFCS targets, including in stripped bootstrap drivers.
+acquire* = (a: Allocator, n: i64) RawPtr<u8> { a.acquire(n) }
+resize = (a: Allocator, p: RawPtr<u8>, n: i64) RawPtr<u8> { a.resize(p, n) }
 // The compiler's OWN allocations are INFALLIBLE BY CONTRACT, and these two verbs are where that
 // contract is written down. The AST/table/String buffers below are built in expression position from
 // ~50 files and have no error channel to thread a `Result` through; a compiler that cannot allocate
@@ -55,14 +54,14 @@ resize = (a: MutPtr<Malloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { heap_resize(nul
 // `or_die` does for the scheduler's un-Result-able allocations. `n <= 0` is acquire's legal empty
 // allocation (it returns null by design), so it is NOT a failure. Sites that CAN carry the failure as
 // a value should use `try_acquire` instead; these are the ones that cannot.
-acquire_or_die*<A> = (a: MutPtr<A>, n: i64) RawPtr<u8> {
+acquire_or_die* = (a: Allocator, n: i64) RawPtr<u8> {
     p = a.acquire(n)
     (p == null_ptr() && n > 0).then({
         panic("compiler: out of memory")
     })
     p
 }
-resize_or_die*<A> = (a: MutPtr<A>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+resize_or_die* = (a: Allocator, p: RawPtr<u8>, n: i64) RawPtr<u8> {
     q = a.resize(p, n)
     (q == null_ptr() && n > 0).then({
         panic("compiler: out of memory")
@@ -84,28 +83,28 @@ finish_buf* = (dst: RawPtr<u8>, n: i64) StringView {
 // passes whatever allocator it has (heap/arena/test). One implementation for the whole compiler — the
 // per-module emit_*/check_*/m* builders are thin aliases onto these. Safe to inline now that the
 // inliner namespaces inlined locals by their inline-marker chain (see check.inline_marks).
-gstr_string*<A> = (a: MutPtr<A>, cap: i64) String {
+gstr_string* = (a: Allocator, cap: i64) String {
     String(
         ptr: a.acquire_or_die(cap),
         len: 0,
         cap: cap,
     )
 }
-gstr_grow<A> = (a: MutPtr<A>, s: String, ncap: i64) String {
+gstr_grow = (a: Allocator, s: String, ncap: i64) String {
     String(
         ptr: a.resize_or_die(s.ptr, ncap),
         len: s.len,
         cap: ncap,
     )
 }
-gstr_reserve<A> = (a: MutPtr<A>, s: String, need: i64) String {
+gstr_reserve = (a: Allocator, s: String, need: i64) String {
     out ::= s
     (s.len + need > s.cap).then({
         out = a.gstr_grow(s, (s.cap + need) * 2)
     })
     out
 }
-gstr_push*<A> = (s: String, a: MutPtr<A>, b: u8) String {
+gstr_push* = (s: String, a: Allocator, b: u8) String {
     r = a.gstr_reserve(s, 1)
     r.ptr.offset(r.len).store(b)
     String(
@@ -119,7 +118,7 @@ gstr_push*<A> = (s: String, a: MutPtr<A>, b: u8) String {
 // Same bytes appended, so emitted C is unchanged; only the capacity growth schedule differs.
 // The [u8] form is the primitive: a caller that already knows the length (a String, a sub-slice)
 // appends without re-measuring; the StringView form pays its one unavoidable strlen in view().
-gstr_append_bytes*<A> = (s: String, a: MutPtr<A>, bs: Slice<u8>) String {
+gstr_append_bytes* = (s: String, a: Allocator, bs: Slice<u8>) String {
     r = a.gstr_reserve(s, bs.len)
     bs.loop_at((i, b) { r.ptr.offset(r.len + i).store(b) })
     String(
@@ -128,10 +127,8 @@ gstr_append_bytes*<A> = (s: String, a: MutPtr<A>, bs: Slice<u8>) String {
         cap: r.cap,
     )
 }
-gstr_append*<A> = (s: String, a: MutPtr<A>, t: StringView) String {
-    s.gstr_append_bytes(a, t.view())
-}
-gstr_finish*<A> = (s: String, a: MutPtr<A>) StringCstr { cstr(s.gstr_push(a, '\0').ptr) }
+gstr_append* = (s: String, a: Allocator, t: StringView) String { s.gstr_append_bytes(a, t.view()) }
+gstr_finish* = (s: String, a: Allocator) StringCstr { cstr(s.gstr_push(a, '\0').ptr) }
 // constructors — return a value; the caller calls `.addr()` on an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", e.addr()), sret(r.addr())]`
 lit* = (n: i64) Expr { .Int(n) }
@@ -672,19 +669,19 @@ dtraitdef* = (trname: StringView, fn: Func) Decl {
 }
 // `t` boxed into a fresh 1-element heap cell — THE way a Ty child (Ptr pointee, Slice elem,
 // FnT ret) is attached to its parent, since the AST recurses through Ptr<Ty>.
-tnode* = (a: MutPtr<Malloc>, t: Ty) Ptr<Ty> {
+tnode* = (a: Allocator, t: Ty) Ptr<Ty> {
     buf ::= cbuf<Ty>(a, 1)
     buf[0] = t
     buf[0].addr()
 }
 // the FnT SIGNATURE of a function (its param types + ret) — used to give a default-bodied trait method
 // a Field type so conformance sees a normal method signature. Allocates a [Ty] of the param types.
-fnt_param_tys_in = (a: MutPtr<Malloc>, ps: [Param]) [Ty] {
+fnt_param_tys_in = (a: Allocator, ps: [Param]) [Ty] {
     buf ::= cbuf<Ty>(a, ps.len)
     ps.loop_at((i, p) { buf[i] = p.ty })
     buf
 }
-fnt_from_func_in* = (a: MutPtr<Malloc>, f: Func) Ty {
+fnt_from_func_in* = (a: Allocator, f: Func) Ty {
     fntype(a.fnt_param_tys_in(f.params), a.tnode(f.ret))
 }
 // pragma, intrinsic decl, anything
@@ -748,7 +745,7 @@ cname_write = (dst: RawPtr<u8>, at: i64, t: Ty) i64 {
 }
 // the C type name of a Ty as a plain string — used to substitute `sizeof(T)` in a generic body
 // (the tparam Var `T` becomes the concrete type's C name, so `sizeof(T)` → `sizeof(Expr)`).
-ty_cname_in* = (a: MutPtr<Malloc>, t: Ty) StringView {
+ty_cname_in* = (a: Allocator, t: Ty) StringView {
     n = t.cname_len()
     buf: RawPtr<u8> = a.acquire_or_die(n + 1)
     buf.finish_buf(buf.cname_write(0, t))
@@ -767,7 +764,7 @@ tparam_arg = (tparams: [Param], args: [Ty], n: StringView, dflt: Ty) Ty {
     })
     found
 }
-subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
+subst_ty_in* = (a: Allocator, tparams: [Param], args: [Ty], t: Ty) Ty {
     t.match ({
         .Named(n)   => tparams.tparam_arg(args, n, t),
         .Ptr(pd)    => tptr_k(a.tnode(a.subst_ty_in(tparams, args, load(pd.pointee))), pd.kind),
@@ -778,13 +775,13 @@ subst_ty_in* = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], t: Ty) Ty {
     })
 }
 // substitute tparam→arg inside a function type `(S, i32) S` -> `(AppState, i32) AppState`.
-subst_fnt_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], ft: FnTData) Ty {
+subst_fnt_in = (a: Allocator, tparams: [Param], args: [Ty], ft: FnTData) Ty {
     ptys ::= cbuf<Ty>(a, ft.params.len)
     ft.params.loop_at((i, p) { ptys[i] = a.subst_ty_in(tparams, args, p) })
     fntype(ptys, a.tnode(a.subst_ty_in(tparams, args, load(ft.ret))))
 }
 // substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
-subst_generic_in = (a: MutPtr<Malloc>, tparams: [Param], args: [Ty], g: GenericData) Ty {
+subst_generic_in = (a: Allocator, tparams: [Param], args: [Ty], g: GenericData) Ty {
     // `tys` (not `buf`): mangle_str_in inlines a local `buf: RawPtr<u8>`, and the inliner
     // substitutes args by name — a caller arg also named `buf` would be captured by that local.
     tys ::= cbuf<Ty>(a, g.args.len)

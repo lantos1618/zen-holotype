@@ -2,7 +2,7 @@
 // monomorphization + closure lowering. Extracted from compiler.check (pure move).
 { Expr, Stmt, Decl, Func, Param, Ty, Field, CallData } = compiler.ast.ast_types
 { cbuf, call_full, subst_ty_in, dfunc, no_tys, tnamed, tvoid, acquire_or_die } = compiler.genc
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { expr_fold_children } = compiler.ast.expr_children
 { is_empty } = std.text.str
 { subst_body, xform_body } = compiler.passes.subst
@@ -42,7 +42,7 @@ is_inlining = (v: Ptr<VList>, name: StringView) bool {
     })
 }
 inline_template = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     name: StringView,
@@ -130,7 +130,7 @@ tmiss_declares = (fields: [Field], m: StringView) bool {
     fields.slice_any((f) { f.name == m && f.ty.is_fnt() })
 }
 tmiss_call = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     tf: Func,
@@ -157,26 +157,12 @@ tmiss_call = (
         false => false,
     })
 }
-tmiss_es = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    tf: Func,
-    targs: [Ty],
-    xs: [Expr],
-) bool {
+tmiss_es = (a: Allocator, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], xs: [Expr]) bool {
     f ::= false
     xs.loop_at((i, x) { f = f.then({ true }, { a.tmiss_e(decls, idx, tf, targs, x.addr()) }) })
     f
 }
-tmiss_e = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    tf: Func,
-    targs: [Ty],
-    e: Ptr<Expr>,
-) bool {
+tmiss_e = (a: Allocator, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], e: Ptr<Expr>) bool {
     load(e).match ({
         // `.Call` is the only shape a missing trait method is DIAGNOSED at; every other shape is a
         // plain structural descent, so it delegates to the one exhaustive child listing.
@@ -187,14 +173,7 @@ tmiss_e = (
         }, (acc, body) { acc || a.tmiss_body(decls, idx, tf, targs, body) }),
     })
 }
-tmiss_stmt = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    tf: Func,
-    targs: [Ty],
-    st: Stmt,
-) bool {
+tmiss_stmt = (a: Allocator, decls: [Decl], idx: DeclIndex, tf: Func, targs: [Ty], st: Stmt) bool {
     st.match ({
         .Let(l)      => a.tmiss_e(decls, idx, tf, targs, l.value),
         .Assign(x)   => a.tmiss_e(decls, idx, tf, targs, x.target)
@@ -212,7 +191,7 @@ tmiss_stmt = (
     })
 }
 tmiss_body = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     tf: Func,
@@ -224,7 +203,7 @@ tmiss_body = (
     f
 }
 pin_targs = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     c: CallData,
@@ -249,7 +228,7 @@ pin_targs = (
     })
 }
 maybe_template* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     c: CallData,
@@ -272,7 +251,7 @@ maybe_template* = (
 // bare call to the template name. compiler.check's mono_rec emits one concrete C instance per
 // (template, concrete-targs) and resolve_call rewrites the call to it. (is_inlining is the same
 // recursion-break, but a recursive generic must NEVER splice even on its first reach.)
-inline_decl* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
+inline_decl* = (a: Allocator, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
     d.match ({
         .DFunc(f) => dfunc(Func(
             name: f.name,
@@ -305,7 +284,7 @@ no_inline_gen_f* = (f: Func) bool {
     f.is_generic_fn() && f.params.has_fnt_param() == false && f.body.calls_reflect() == false
 }
 // instance buffer: deduped by mangled name, bounded against polymorphic-recursion blowup (like mono).
-mono_rec = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, from: i64) [Decl] {
+mono_rec = (a: Allocator, decls: [Decl], idx: DeclIndex, from: i64) [Decl] {
     base = Env(
         vars: a.vnil(),
         decls: decls,
@@ -338,7 +317,7 @@ mono_rec = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, from: i64) [Decl] 
 // discovery dedups against the decl index (an emitted instance is never re-added), so each round
 // either strictly grows the decl list or stops; the rc depth bound caps polymorphic recursion, and
 // `guard` hard-stops pathological growth (a legitimate program nests HOF splices far shallower).
-mono_close* = (a: MutPtr<Malloc>, decls: [Decl], from: i64, guard: i32) [Decl] {
+mono_close* = (a: Allocator, decls: [Decl], from: i64, guard: i32) [Decl] {
     idx = a.build_decl_index(decls)
     exp = a.mono_rec(decls, idx, from)
     (exp.len == decls.len || guard >= 16).match ({
@@ -365,7 +344,7 @@ mono_close* = (a: MutPtr<Malloc>, decls: [Decl], from: i64, guard: i32) [Decl] {
 // lambda's params, a binder introduced inside the body, a top-level fn/global, nor true/false? Such a
 // name is a captured enclosing local. `bound` threads the in-scope binder names (scope-correct).
 field_fnt* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     sty: StringView,
@@ -378,7 +357,7 @@ field_fnt* = (
     })
 }
 // generate the top-level fn for a lifted lambda: params typed from the expected FnT, body = lambda body.
-lower_closures* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) [Decl] {
+lower_closures* = (a: Allocator, decls: [Decl], idx: DeclIndex) [Decl] {
     ccp: RawPtr<u8> = a.acquire_or_die(8)
     store_i64(ccp, 0)
     gen = cbuf<Decl>(a, 4096)

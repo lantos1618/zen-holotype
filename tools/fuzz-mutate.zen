@@ -24,7 +24,7 @@
 // `timeout` does it: exit 124 means the budget blew. A first 124 is re-run at PER*4, and only a SECOND
 // 124 is a hang (an ASan run can blow a tight budget under CPU contention without looping forever).
 { arg, argc, clock_ms } = std.sys.os
-{ Malloc } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 { close, getenv, memcpy, memmove, open, write } = std.c.libc
 { contents_bytes_in, MODE_644, O_WRTRUNC, save } = std.io.file
 { run } = std.sys.process
@@ -72,11 +72,12 @@ g_hang_seen ::= false
 g_seen ::= empty_sv()    // "|sig|sig|…" — membership is a find of the delimited key
 imin = (a: i64, b: i64) i64 { (a < b).then({ a }, { b }) }
 imax = (a: i64, b: i64) i64 { (a > b).then({ a }, { b }) }
-itos = (mp: MutPtr<Malloc>, n: i64) StringView {
+itos = (mp: Allocator, n: i64) StringView {
     mp
+        .addr()
         .integer_in(n)
         .expect("fuzz-mutate: oom")
-        .finish_in(mp)
+        .finish_in(mp.addr())
         .expect("fuzz-mutate: oom")
 }
 // ── raw byte IO ───────────────────────────────────────────────────────────────
@@ -241,12 +242,12 @@ is_hit = (s: StringView) bool {
     })
     got
 }
-clip100 = (mp: MutPtr<Malloc>, s: StringView) StringView {
-    (s.len() > 100).then({ mp.substr_in(s, 0, 100).expect("fuzz-mutate: oom") }, { s })
+clip100 = (mp: Allocator, s: StringView) StringView {
+    (s.len() > 100).then({ mp.addr().substr_in(s, 0, 100).expect("fuzz-mutate: oom") }, { s })
 }
-first_hit_line = (mp: MutPtr<Malloc>, out: StringView) StringView {
+first_hit_line = (mp: Allocator, out: StringView) StringView {
     res :: StringView = ""
-    lines = mp.split_in(out, '\n')
+    lines = mp.addr().split_in(out, '\n')
     lines.loop((h, i, l) {
         is_hit(l).then({
             res = mp.clip100(l)
@@ -256,7 +257,7 @@ first_hit_line = (mp: MutPtr<Malloc>, out: StringView) StringView {
     res
 }
 // `runtime error:[^\n]*` — the class text runs to the end of its line
-line_from = (mp: MutPtr<Malloc>, out: StringView, pos: i64) StringView {
+line_from = (mp: Allocator, out: StringView, pos: i64) StringView {
     v: Slice<u8> = out.view()
     e ::= v.len
     v.loop((h, i, b) {
@@ -265,11 +266,11 @@ line_from = (mp: MutPtr<Malloc>, out: StringView, pos: i64) StringView {
             h.break
         })
     })
-    mp.substr_in(out, pos, e - pos).expect("fuzz-mutate: oom")
+    mp.addr().substr_in(out, pos, e - pos).expect("fuzz-mutate: oom")
 }
 // the leftmost failure class in `out`, ties broken by G_CLASS order (the regex alternation's rule);
 // with no class at all the key falls back to the Python's `sig%d` of the exit code
-class_key = (mp: MutPtr<Malloc>, out: StringView, rc: i64) StringView {
+class_key = (mp: Allocator, out: StringView, rc: i64) StringView {
     best ::= 0 - 1
     bi ::= 0 - 1
     G_CLASS.loop((h, i, p) {
@@ -280,19 +281,13 @@ class_key = (mp: MutPtr<Malloc>, out: StringView, rc: i64) StringView {
         })
     })
     (bi < 0).match ({
-        true  => mp.cat_in("sig", mp.itos(rc)),
+        true  => mp.addr().cat_in("sig", mp.itos(rc)),
         false => (bi == CLASS_RUNTIME).then({ mp.line_from(out, best) }, { G_CLASS[bi] }),
     })
 }
 // `#1 0x[0-9a-f]+ in ([A-Za-z0-9_]+)` — the first non-asan frame's function name, "?" when absent.
 // Recursion depth = the number of "#1 0x" occurrences in the report (one, in practice).
-frame_from = (
-    mp: MutPtr<Malloc>,
-    out: StringView,
-    v: Slice<u8>,
-    hv: Slice<u8>,
-    start: i64,
-) StringView {
+frame_from = (mp: Allocator, out: StringView, v: Slice<u8>, hv: Slice<u8>, start: i64) StringView {
     p = v.bytes_find_from(hv, start)
     (p < 0).match ({
         true  => "?",
@@ -302,22 +297,22 @@ frame_from = (
             ns = q + FRAME_SEP.len()
             ne = fit.then({ v.ident_run_end(ns) }, { ns })
             (fit && ne > ns).match ({
-                true  => mp.substr_in(out, ns, ne - ns).expect("fuzz-mutate: oom"),
+                true  => mp.addr().substr_in(out, ns, ne - ns).expect("fuzz-mutate: oom"),
                 false => mp.frame_from(out, v, hv, p + 1),
             })
         },
     })
 }
-frame_key = (mp: MutPtr<Malloc>, out: StringView) StringView {
+frame_key = (mp: Allocator, out: StringView) StringView {
     v: Slice<u8> = out.view()
     hv: Slice<u8> = FRAME_HEAD.view()
     mp.frame_from(out, v, hv, 0)
 }
 // the dedupe key: `<class>@<frame>`, hashed and truncated to 12 hex chars. OPAQUE — it never leaves
 // the run, so sha256-instead-of-sha1 changes nothing a caller can observe.
-sig_of = (mp: MutPtr<Malloc>, out: StringView, rc: i64) StringView {
-    key = mp.cat_in(mp.cat_in(mp.class_key(out, rc), "@"), mp.frame_key(out))
-    mp.substr_in(mp.sha256_hex(key.view()), 0, 12).expect("fuzz-mutate: oom")
+sig_of = (mp: Allocator, out: StringView, rc: i64) StringView {
+    key = mp.addr().cat_in(mp.addr().cat_in(mp.class_key(out, rc), "@"), mp.frame_key(out))
+    mp.addr().substr_in(mp.addr().sha256_hex(key.view()), 0, 12).expect("fuzz-mutate: oom")
 }
 // ── reporting ─────────────────────────────────────────────────────────────────
 say_hit = (s: StringView, rc: i64, first: StringView) void {
@@ -332,14 +327,14 @@ say_progress = () void {
 say_done = () void {
     format("done: {} iters, {} unique sanitizer hits, {} hangs -> {}\n", [arg_int(g_iter), arg_int(g_hits), arg_int(g_hangs), arg_str(g_cr)])
 }
-crash_path = (mp: MutPtr<Malloc>, s: StringView, ext: StringView) StringView {
-    mp.cat_in(mp.cat_in(mp.cat_in(g_cr, "/crash_"), s), ext)
+crash_path = (mp: Allocator, s: StringView, ext: StringView) StringView {
+    mp.addr().cat_in(mp.addr().cat_in(mp.addr().cat_in(g_cr, "/crash_"), s), ext)
 }
-record_hit = (mp: MutPtr<Malloc>, data: [u8], out: StringView, rc: i64) void {
+record_hit = (mp: Allocator, data: [u8], out: StringView, rc: i64) void {
     s = mp.sig_of(out, rc)
-    key = mp.cat_in(mp.cat_in("|", s), "|")
+    key = mp.addr().cat_in(mp.addr().cat_in("|", s), "|")
     (g_seen.find(key) >= 0 == false).then({
-        g_seen = mp.cat_in(g_seen, key)
+        g_seen = mp.addr().cat_in(g_seen, key)
         g_hits = g_hits + 1
         mp.crash_path(s, ".zen").write_bytes(data)
         save(mp.crash_path(s, ".log"), out, out.len()).or(0)
@@ -347,34 +342,37 @@ record_hit = (mp: MutPtr<Malloc>, data: [u8], out: StringView, rc: i64) void {
     })
 }
 // only the FIRST hang is recorded — the Python keeps one "hang" entry in the same dedupe set
-record_hang = (mp: MutPtr<Malloc>, data: [u8]) void {
+record_hang = (mp: Allocator, data: [u8]) void {
     (g_hang_seen == false).then({
         g_hang_seen = true
         g_hangs = g_hangs + 1
-        mp.cat_in(mp.cat_in(mp.cat_in(g_cr, "/hang_"), mp.itos(g_iter)), ".zen").write_bytes(data)
+        mp
+            .addr()
+            .cat_in(mp.addr().cat_in(mp.addr().cat_in(g_cr, "/hang_"), mp.itos(g_iter)), ".zen")
+            .write_bytes(data)
         say_hang()
     })
 }
 // a first 124 is only a suspicion; re-run at 4x and let a second 124 settle it
-reconfirm = (mp: MutPtr<Malloc>, data: [u8]) void {
-    r = mp.run(g_cmd_slow).expect("fuzz-mutate: cannot run the compiler")
+reconfirm = (mp: Allocator, data: [u8]) void {
+    r = mp.addr().run(g_cmd_slow).expect("fuzz-mutate: cannot run the compiler")
     (r.exit == 124).then({
         mp.record_hang(data)
     })
 }
 // a sanitizer report, OR a crash-signal exit (>= 128, e.g. 139 SEGV / 134 SIGABRT)
-classify = (mp: MutPtr<Malloc>, data: [u8], out: StringView, rc: i64) void {
+classify = (mp: Allocator, data: [u8], out: StringView, rc: i64) void {
     (is_hit(out) || rc >= 128).then({
         mp.record_hit(data, out, rc)
     })
 }
-one_iter = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, toks: [[u8]], b: [u8], seeds: [[u8]]) void {
+one_iter = (mp: Allocator, rp: MutPtr<Rng>, toks: [[u8]], b: [u8], seeds: [[u8]]) void {
     g_iter = g_iter + 1
     src: [u8] = seeds[rp.range(0, seeds.len)]
     rp.mutate(toks, b, src)
     data: [u8] = b.ptr.slice(g_len)
     TMP_IN.write_bytes(data)
-    r = mp.run(g_cmd_fast).expect("fuzz-mutate: cannot run the compiler")
+    r = mp.addr().run(g_cmd_fast).expect("fuzz-mutate: cannot run the compiler")
     (r.exit == 124).then({ mp.reconfirm(data) }, { mp.classify(data, r.stdout, r.exit) })
     (g_iter % 1000 == 0).then({
         say_progress()
@@ -382,8 +380,9 @@ one_iter = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, toks: [[u8]], b: [u8], seeds: [
 }
 // ── setup ─────────────────────────────────────────────────────────────────────
 // "9" * 300, "0x" + "f" * 200, "a" * 500 … — a prefix plus a repeated run, as one byte slice
-rep_tok = (mp: MutPtr<Malloc>, pre: StringView, s: StringView, n: i64) Slice<u8> {
+rep_tok = (mp: Allocator, pre: StringView, s: StringView, n: i64) Slice<u8> {
     mp
+        .addr()
         .sb()
         .s(pre)
         .rep(s, n)
@@ -394,14 +393,14 @@ rep_tok = (mp: MutPtr<Malloc>, pre: StringView, s: StringView, n: i64) Slice<u8>
 // The 0x00 and 0xff tokens are built by hand: a NUL is not expressible as a str (it terminates one),
 // and `zen fmt` rewrites a `"\xff"` escape into a raw 0xff byte, which would leave this source file
 // non-UTF-8.
-byte_tok = (mp: MutPtr<Malloc>, v: i64) [u8] {
+byte_tok = (mp: Allocator, v: i64) [u8] {
     p :: [u8] = assert_nonnull(mp.acquire(1)).slice(1)
     p[0] = to_u8(v)
     p
 }
 // Adversarial tokens: unbalanced openers, huge digit/identifier runs, stray quotes/escapes, and Zen
 // keywords that drive the deepest parser/checker paths (match/loop/impl/generics).
-make_tokens = (mp: MutPtr<Malloc>) [[u8]] {
+make_tokens = (mp: Allocator) [[u8]] {
     ts: [[u8]] = ["{".view(), "[".view(), "(".view(), "<".view(), "}".view(), "]".view(), ")".view(), ">".view(), "\"".view(), "'".view(), "\\".view(), "`".view(), mp.rep_tok("", "9", 300), mp.rep_tok("0x", "f", 200), mp.rep_tok("", "a", 500), mp.rep_tok("", ".", 64), mp.rep_tok("", "=", 32), "match".view(), ".loop".view(), "impl".view(), "return".view(), "=>".view(), "<T>".view(), "::".view(), "or_return".view(), byte_tok(mp, 0), byte_tok(mp, 255), "//".view(), "/*".view(), "*/".view(), "\n\t".view(), mp.rep_tok("", "_", 100)]
     // the literal has automatic storage; copy it onto the heap so it outlives this frame
     out :: [[u8]] = of(ts[0], ts.len)
@@ -410,18 +409,25 @@ make_tokens = (mp: MutPtr<Malloc>) [[u8]] {
     })
     out
 }
-load_seeds = (mp: MutPtr<Malloc>, first: i32) [[u8]] {
+load_seeds = (mp: Allocator, first: i32) [[u8]] {
     n = to_i64(argc()) - to_i64(first)
-    out :: [[u8]] = of(mp.contents_bytes_in(arg(first)).expect("fuzz-mutate: unreadable seed"), n)
+    out :: [[u8]] = of(mp
+        .addr()
+        .contents_bytes_in(arg(first))
+        .expect("fuzz-mutate: unreadable seed"), n)
     out.loop((h, i, x) {
-        out[i] = mp.contents_bytes_in(arg(first + to_i32(i))).expect("fuzz-mutate: unreadable seed")
+        out[i] = mp
+            .addr()
+            .contents_bytes_in(arg(first + to_i32(i)))
+            .expect("fuzz-mutate: unreadable seed")
     })
     out
 }
 // `timeout <secs> <ASAN> check <TMP_IN> 2>&1` — the shell gives us the combined streams and coreutils
 // `timeout` gives us exit 124 on a blown budget
-cmd_for = (mp: MutPtr<Malloc>, asan: StringView, secs: i64) StringView {
+cmd_for = (mp: Allocator, asan: StringView, secs: i64) StringView {
     mp
+        .addr()
         .sb()
         .s("timeout ")
         .i(secs)
@@ -445,7 +451,7 @@ usage = () i32 {
     format("usage: fuzz-mutate ITERS PER CRASH_DIR ASAN_BIN SEED...\n", [])
     2
 }
-fuzz = (mp: MutPtr<Malloc>) i32 {
+fuzz = (mp: Allocator) i32 {
     g_iters = arg(1).parse_int()
     g_per = arg(2).parse_int()
     g_cr = arg(3)
@@ -468,7 +474,6 @@ fuzz = (mp: MutPtr<Malloc>) i32 {
     (g_hits > 0 || g_hangs > 0).then({ 1 }, { 0 })
 }
 main = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     (argc() < 6).then({ usage() }, { mp.fuzz() })
 }

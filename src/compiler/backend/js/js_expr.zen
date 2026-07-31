@@ -7,7 +7,7 @@
 { Expr, Stmt, Ty, Param, ArmData, BinData, CallData, CondData, MatchData, MemberData,
   MakeStructData, MakeEnumData, LoopData, BlockData, LetData, AssignData } = compiler.ast.ast_types
 { param, tvoid, tnamed, gstr_append, acquire_or_die } = compiler.genc
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { slice_count } = compiler.astops
 { jint, jname, jstrlit } = compiler.backend.js.js_lit
 { js_dom_dispatch } = compiler.backend.js.js_dom
@@ -18,7 +18,7 @@
 { loop_at } = std.core.count
 { is_intrinsic } = compiler.check    // the ONE intrinsic roster; the parity gate below reads it, never a copy
 // ── expressions ───────────────────────────────────────────────────────────────────────────────────
-js_expr* = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
+js_expr* = (s: String, a: Allocator, e: Ptr<Expr>) String {
     e.match ({
         .Int(n)         => s.js_int_lit(a, n),
         .Byte(n)        => s.jint(a, n),
@@ -124,7 +124,7 @@ js_elem_w* = (t: Ty) i32 {
 js_boxed_w* = (name: StringView) i32 {
     js_box_taken(name).then({ js_cell_w(vw_lookup(name)) }, { 0 })
 }
-js_var_ref = (s: String, a: MutPtr<Malloc>, name: StringView) String {
+js_var_ref = (s: String, a: Allocator, name: StringView) String {
     w = js_boxed_w(name)
     (w == 0).match ({
         true  => s.jname(a, name),
@@ -142,16 +142,16 @@ js_var_ref = (s: String, a: MutPtr<Malloc>, name: StringView) String {
 // `.u` is genc's union-payload access baked by the checker's or_return / match-payload lowering
 // (`subj.u.Variant`). The JS enum has NO `u` level — it's a flat `{ tag, Variant }` — so `.u` erases
 // to identity: `subj.u.Ok` emits as `subj.Ok`. (`break_zk`/`continue_zk` are the loop-handler verbs.)
-js_loop_token = (s: String, a: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: StringView) String {
+js_loop_token = (s: String, a: Allocator, obj: Ptr<Expr>, suffix: StringView) String {
     load(obj).match ({
         .Var(v) => s.jname(a, v.name).gstr_append(a, suffix),
         _       => s.gstr_append(a, "__zen_invalid_loop_handler"),
     })
 }
-js_loop_throw = (s: String, a: MutPtr<Malloc>, obj: Ptr<Expr>, suffix: StringView) String {
+js_loop_throw = (s: String, a: Allocator, obj: Ptr<Expr>, suffix: StringView) String {
     s.gstr_append(a, "(() => { throw ").js_loop_token(a, obj, suffix).gstr_append(a, "; })()")
 }
-js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String {
+js_member = (s: String, a: Allocator, m: MemberData) String {
     m.ptr.then({
         return s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field)
     })
@@ -175,7 +175,7 @@ js_member = (s: String, a: MutPtr<Malloc>, m: MemberData) String {
 // both operands are coerced to BigInt (`js_bexpr(.., big)`) so nothing mixes BigInt with number, and the
 // boundary (let/param/assign/return) wraps back to the type's width. A 32-bit-or-narrower UNSIGNED `>>`
 // becomes the logical `>>>` (a signed `>>` sign-fills a high-bit-set u32). See bootstrap/zenrt.js.
-js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String {
+js_bin = (s: String, a: Allocator, b: BinData) String {
     big = is_w64(iw_of(load(b.lhs))) || is_w64(iw_of(load(b.rhs)))
     (b.op == "/.").then({
         return s
@@ -199,7 +199,7 @@ js_bin = (s: String, a: MutPtr<Malloc>, b: BinData) String {
 }
 // the untruncated core: integer `/`/`%` route through the guarded floor (div-by-zero panics); all
 // else is `(lhs op rhs)`. `big` promotes each operand to BigInt for the 64-bit path.
-js_bin_core = (s: String, a: MutPtr<Malloc>, b: BinData, big: bool) String {
+js_bin_core = (s: String, a: Allocator, b: BinData, big: bool) String {
     (b.op == "/").then({
         return s
             .gstr_append(a, "__zr.div(")
@@ -233,7 +233,7 @@ js_leak_op = (op: StringView) bool { op == "+" || op == "-" || op == "*" || op =
 // `Nn`; everything else is normalized by `__zr.big` (number -> BigInt; a BigInt passes through). Wrapping
 // unconditionally is what makes it robust — a boundary norms a small 64-bit value back to a `number`, so
 // even a detected i64 var must be re-promoted here. Non-64-bit ops emit the bare expression (unchanged).
-js_bexpr = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, big: bool) String {
+js_bexpr = (s: String, a: Allocator, e: Ptr<Expr>, big: bool) String {
     big.match ({
         true  => load(e).match ({
             .Int(n)  => s.jint(a, n).gstr_append(a, "n"),
@@ -262,7 +262,7 @@ js_op = (op: StringView) StringView {
 }
 // an integer literal: values outside +/- 2^53 can NOT be an exact JS `number`, so render them as a BigInt
 // literal `Nn` (they only ever occur in an i64/u64 context, whose boundary keeps them BigInt).
-js_int_lit = (s: String, a: MutPtr<Malloc>, n: i64) String {
+js_int_lit = (s: String, a: Allocator, n: i64) String {
     (n > 9007199254740992 || n < 0 - 9007199254740992).then({
         return s.jint(a, n).gstr_append(a, "n")
     })
@@ -388,7 +388,7 @@ js_agg_ty = (e: Expr) Ty {
 // an expression bound at a sink: width-coerced as before, then COPIED when the sink's type is a value
 // aggregate. A freshly built value is elided — a literal has no other referent, and a call to a
 // defined function returns a value its own `return` already copied.
-js_sink = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, t: Ty, w: i32) String {
+js_sink = (s: String, a: Allocator, e: Ptr<Expr>, t: Ty, w: i32) String {
     js_cp_at(load(e), t).match ({
         true  => s.js_cp_open(a, t).js_expr_w(a, e, w).js_cp_close(a, t),
         false => s.js_expr_w(a, e, w),
@@ -406,7 +406,7 @@ js_expr_fresh = (e: Expr) bool {
     })
 }
 // a struct literal's field takes a COPY of its initializer, exactly as C's `(S){ .f = v }` does.
-js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
+js_mkstruct = (s: String, a: Allocator, m: MakeStructData) String {
     out ::= s.gstr_append(a, "({ ")
     m.inits.loop_at((i, fi) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
@@ -418,7 +418,7 @@ js_mkstruct = (s: String, a: MutPtr<Malloc>, m: MakeStructData) String {
     out.gstr_append(a, " })")
 }
 // …and so does an enum PAYLOAD (C writes it into the union).
-js_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData) String {
+js_mkenum = (s: String, a: Allocator, m: MakeEnumData) String {
     s
         .gstr_append(a, "({ tag: \"")
         .gstr_append(a, m.variant)
@@ -429,7 +429,7 @@ js_mkenum = (s: String, a: MutPtr<Malloc>, m: MakeEnumData) String {
         .gstr_append(a, " })")
 }
 // a call's comma-separated args (each Expr value -> a Ptr<Expr> child).
-js_args* = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
+js_args* = (s: String, a: Allocator, args: [Expr]) String {
     out ::= s
     args.loop_at((i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
@@ -438,7 +438,7 @@ js_args* = (s: String, a: MutPtr<Malloc>, args: [Expr]) String {
     out
 }
 // a slice literal's items: C copies each ELEMENT into the array, so a struct item copies here too.
-js_cp_items = (s: String, a: MutPtr<Malloc>, items: [Expr], elem: Ty) String {
+js_cp_items = (s: String, a: Allocator, items: [Expr], elem: Ty) String {
     out ::= s
     items.loop_at((i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
@@ -446,12 +446,18 @@ js_cp_items = (s: String, a: MutPtr<Malloc>, items: [Expr], elem: Ty) String {
     })
     out
 }
-js_arg_at* = (s: String, a: MutPtr<Malloc>, c: CallData, i: i32) String {
+js_arg_at* = (s: String, a: Allocator, c: CallData, i: i32) String {
     (i < c.args.len).then({ s.js_expr(a, c.args[i].addr()) }, { s.gstr_append(a, "0") })
+}
+js_zero_lit = (e: Ptr<Expr>) bool {
+    e.match ({
+        .Int(n) => n == 0,
+        _       => false,
+    })
 }
 // intrinsics erase to floor calls; everything else is an ordinary JS call `name(args)` — one flat
 // early-return table (was two nested tiers, split only because the old pyramid nested too deep).
-js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+js_call = (s: String, a: Allocator, c: CallData) String {
     (c.fn == "__str_eq").then({
         return s
             .gstr_append(a, "__zr.eq(")
@@ -468,6 +474,11 @@ js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
             .js_arg_at(a, c, 1)
             .gstr_append(a, "))")
     })
+    // Allocator vtables are object-backed on JS. The source helper only casts the raw pointer
+    // back to its struct type; the object already is that reference on this target.
+    (c.fn == "allocator_vtable").then({
+        return s.gstr_append(a, "(").js_arg_at(a, c, 0).gstr_append(a, ").vtable")
+    })
     (c.fn == "load").then({
         return s.gstr_append(a, "__zr.load(").js_arg_at(a, c, 0).gstr_append(a, ")")
     })
@@ -480,6 +491,12 @@ js_call = (s: String, a: MutPtr<Malloc>, c: CallData) String {
             .gstr_append(a, ")")
     })
     (c.fn == "offset").then({
+        // Pointer plus zero is identity for both linear-memory and object-backed pointers.
+        // Folding it here preserves the raw-pointer cast idiom without asking the JS floor
+        // to perform byte arithmetic on a struct reference.
+        (c.args.len > 1 && c.args[1].addr().js_zero_lit()).then({
+            return s.js_arg_at(a, c, 0)
+        })
         return s
             .gstr_append(a, "__zr.offset(")
             .js_arg_at(a, c, 0)
@@ -618,7 +635,7 @@ js_unsupported_reset* = () void {
 }
 // `addr(x)` on a BOXED scalar local is the variable itself — it already holds the cell's MEM offset.
 // Every other shape keeps the identity lowering (`__zr.addr`), which is exactly right for a struct.
-js_addr = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+js_addr = (s: String, a: Allocator, c: CallData) String {
     (c.args.len == 0).then({
         return s.gstr_append(a, "__zr.addr(0)")
     })
@@ -635,7 +652,7 @@ js_addr = (s: String, a: MutPtr<Malloc>, c: CallData) String {
 // The floor stub this replaced answered 8 for every type, silently corrupting every `n * sizeof(T)`
 // stride and allocation. A type the layout walk cannot resolve REFUSES the build (error[js-target])
 // rather than guessing — a plausible-but-wrong size is the defect this fix exists to remove.
-js_sizeof = (s: String, a: MutPtr<Malloc>, c: CallData) String {
+js_sizeof = (s: String, a: Allocator, c: CallData) String {
     (c.args.len > 0).match ({
         true  => c.args[0].addr().match ({
             .Var(v) => s.js_size_lit(a, v.name, c.pos),
@@ -644,11 +661,11 @@ js_sizeof = (s: String, a: MutPtr<Malloc>, c: CallData) String {
         false => s.js_size_refuse(a, c.pos),
     })
 }
-js_size_lit = (s: String, a: MutPtr<Malloc>, name: StringView, pos: i32) String {
+js_size_lit = (s: String, a: Allocator, name: StringView, pos: i32) String {
     n = js_size_of_name(name)
     (n < 0).then({ s.js_size_refuse(a, pos) }, { s.jint(a, n) })
 }
-js_size_refuse = (s: String, a: MutPtr<Malloc>, pos: i32) String {
+js_size_refuse = (s: String, a: Allocator, pos: i32) String {
     js_unsupported_note("sizeof", pos)
     s.gstr_append(a, "__zen_js_unsized_type")
 }
@@ -658,7 +675,7 @@ js_size_refuse = (s: String, a: MutPtr<Malloc>, pos: i32) String {
 //    checker proved coverage, so every arm is its own `case` and `default` traps (mirrors genc). ───────
 // The BIND is a value sink: C's `T v = _subj.u.V;` copies the payload out of the union, so a struct
 // payload is copied here and the arm body cannot write through to the matched value.
-js_arm_bind = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView) String {
+js_arm_bind = (s: String, a: Allocator, ar: ArmData, ename: StringView) String {
     pty = js_variant_ty(ename, ar.variant)
     vw_note(ar.bind, js_agg_ty_or(pty))
     s
@@ -673,7 +690,7 @@ js_arm_bind = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView) Str
 }
 // the bind's type enters the typed-var table only when it is an aggregate — same rule as a let's.
 js_agg_ty_or = (t: Ty) Ty { js_cp_needed(t).then({ t }, { tvoid() }) }
-js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView) String {
+js_arm_body_expr = (s: String, a: Allocator, ar: ArmData, ename: StringView) String {
     is_empty(ar.bind).match ({
         true  => s.js_expr(a, ar.body),
         false => s
@@ -684,10 +701,10 @@ js_arm_body_expr = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView
             .gstr_append(a, "; })()"),
     })
 }
-js_switch_panic_default = (s: String, a: MutPtr<Malloc>) String {
+js_switch_panic_default = (s: String, a: Allocator) String {
     s.gstr_append(a, "default: __zr.panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ")
 }
-js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool, ename: StringView) String {
+js_switch_case = (s: String, a: Allocator, ar: ArmData, last: bool, ename: StringView) String {
     (ar.variant == "_").match ({
         true  => s
             .gstr_append(a, "default: return ")
@@ -704,13 +721,7 @@ js_switch_case = (s: String, a: MutPtr<Malloc>, ar: ArmData, last: bool, ename: 
         },
     })
 }
-js_switch_cases = (
-    s: String,
-    a: MutPtr<Malloc>,
-    arms: [ArmData],
-    i: i64,
-    ename: StringView,
-) String {
+js_switch_cases = (s: String, a: Allocator, arms: [ArmData], i: i64, ename: StringView) String {
     (i >= arms.len).match ({
         true  => s,
         false => {
@@ -719,7 +730,7 @@ js_switch_cases = (
         },
     })
 }
-js_match_expr = (s: String, a: MutPtr<Malloc>, m: MatchData) String {
+js_match_expr = (s: String, a: Allocator, m: MatchData) String {
     s
         .gstr_append(a, "(() => { const _subj = ")
         .js_expr(a, m.subj)
@@ -728,7 +739,7 @@ js_match_expr = (s: String, a: MutPtr<Malloc>, m: MatchData) String {
         .gstr_append(a, "} })()")
 }
 // statement-position match: arms run as statements so a diverging arm's `return` propagates.
-js_arm_stmt = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView) String {
+js_arm_stmt = (s: String, a: Allocator, ar: ArmData, ename: StringView) String {
     is_empty(ar.bind).match ({
         true  => s.js_arm_stmt_body(a, ar.body),
         false => s
@@ -739,19 +750,13 @@ js_arm_stmt = (s: String, a: MutPtr<Malloc>, ar: ArmData, ename: StringView) Str
     })
 }
 // a braced value-position body is a Block: splice its statements; otherwise it's a bare expr statement.
-js_arm_stmt_body = (s: String, a: MutPtr<Malloc>, body: Ptr<Expr>) String {
+js_arm_stmt_body = (s: String, a: Allocator, body: Ptr<Expr>) String {
     load(body).match ({
         .Block(b) => s.js_block_stmts(a, b),
         _         => s.js_expr_stmt(a, body),
     })
 }
-js_switch_stmt_case = (
-    s: String,
-    a: MutPtr<Malloc>,
-    ar: ArmData,
-    last: bool,
-    ename: StringView,
-) String {
+js_switch_stmt_case = (s: String, a: Allocator, ar: ArmData, last: bool, ename: StringView) String {
     (ar.variant == "_").match ({
         true  => s.gstr_append(a, "default: ").js_arm_stmt(a, ar, ename).gstr_append(a, " break; "),
         false => {
@@ -767,7 +772,7 @@ js_switch_stmt_case = (
 }
 js_switch_stmt_cases = (
     s: String,
-    a: MutPtr<Malloc>,
+    a: Allocator,
     arms: [ArmData],
     i: i64,
     ename: StringView,
@@ -783,7 +788,7 @@ js_switch_stmt_cases = (
         },
     })
 }
-js_match_stmt = (s: String, a: MutPtr<Malloc>, m: MatchData) String {
+js_match_stmt = (s: String, a: Allocator, m: MatchData) String {
     s
         .gstr_append(a, "{ const _subj = ")
         .js_expr(a, m.subj)
@@ -794,7 +799,7 @@ js_match_stmt = (s: String, a: MutPtr<Malloc>, m: MatchData) String {
 // A foreach loop is still an expression-valued IIFE. Handler-specific identity tokens make control
 // expression-safe and let it cross nested match/loop IIFEs; the iteration catch consumes only THIS
 // loop's continue/break and rethrows every outer-loop token or ordinary exception unchanged.
-js_loop = (s: String, a: MutPtr<Malloc>, l: LoopData) String {
+js_loop = (s: String, a: Allocator, l: LoopData) String {
     out ::= s
         .gstr_append(a, "(() => { const _seq = ")
         .js_expr(a, l.seq)
@@ -824,7 +829,7 @@ js_loop = (s: String, a: MutPtr<Malloc>, l: LoopData) String {
         .gstr_append(a, "__b) { break; } throw __zen_loop_ctl; } }")
     out.gstr_append(a, " return 0; })()")
 }
-js_block_expr = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
+js_block_expr = (s: String, a: Allocator, b: BlockData) String {
     out ::= s.gstr_append(a, "(() => { ")
     b.stmts.loop_at((i, st) {
         one = (i == b.stmts.len - 1).then({ out.js_block_last(a, st) }, { out.js_stmt(a, st) })
@@ -833,13 +838,13 @@ js_block_expr = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
     out.gstr_append(a, "})()")
 }
 // the LAST statement of a block-expr yields the block's value: a bare expr becomes `return expr;`.
-js_block_last = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
+js_block_last = (s: String, a: Allocator, st: Stmt) String {
     st.match ({
         .ExprStmt(e) => s.gstr_append(a, "return ").js_expr(a, e).gstr_append(a, ";"),
         _            => s.js_stmt(a, st),
     })
 }
-js_block_stmts = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
+js_block_stmts = (s: String, a: Allocator, b: BlockData) String {
     out ::= s
     b.stmts.loop_at((i, st) { out = out.js_stmt(a, st).gstr_append(a, " ") })
     out
@@ -849,7 +854,7 @@ js_block_stmts = (s: String, a: MutPtr<Malloc>, b: BlockData) String {
 // coerced to that width (`x :: u32 = a*b` → `let x = ((a*b) >>> 0);`; an unannotated let is width 0 → bare).
 // An address-taken scalar binds its CELL instead of its value: `__zr.box(init, w)` allocates the cell,
 // writes the initializer into it, and yields the MEM offset the variable then carries.
-js_let = (s: String, a: MutPtr<Malloc>, l: LetData) String {
+js_let = (s: String, a: Allocator, l: LetData) String {
     lty = js_let_ty(l)
     vw_note(l.name, lty)
     bw = js_boxed_w(l.name)
@@ -876,7 +881,7 @@ js_let_ty = (l: LetData) Ty {
 // an assign: coerce the value to the TARGET variable's declared width (looked up in the per-function
 // table) so a mutating narrow accumulator wraps like C. A non-Var target (field/index) is width 0.
 // An assignment to a BOXED local writes through its cell (`__zr.st`), never rebinding the offset.
-js_assign = (s: String, a: MutPtr<Malloc>, x: AssignData) String {
+js_assign = (s: String, a: Allocator, x: AssignData) String {
     load(x.target).match ({
         .Index(ix) => {
             return s.js_setidx(a, ix.seq, ix.idx, x.value, ix.elem)
@@ -906,7 +911,7 @@ js_assign_boxed_w = (e: Expr) i32 {
         _       => 0,
     })
 }
-js_assign_target_name = (s: String, a: MutPtr<Malloc>, e: Expr) String {
+js_assign_target_name = (s: String, a: Allocator, e: Expr) String {
     e.match ({
         .Var(v) => s.jname(a, v.name),
         _       => s.gstr_append(a, "__zen_invalid_boxed_target"),
@@ -918,7 +923,7 @@ js_assign_width = (e: Expr) i32 {
         _       => 0,
     })
 }
-js_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
+js_stmt = (s: String, a: Allocator, st: Stmt) String {
     st.match ({
         .Let(l)      => s.js_let(a, l),
         .Assign(x)   => s.js_assign(a, x),
@@ -952,7 +957,7 @@ js_stmt = (s: String, a: MutPtr<Malloc>, st: Stmt) String {
 // stored value takes the element type's copy.
 js_setidx = (
     s: String,
-    a: MutPtr<Malloc>,
+    a: Allocator,
     seq: Ptr<Expr>,
     idx: Ptr<Expr>,
     value: Ptr<Expr>,
@@ -970,7 +975,7 @@ js_setidx = (
         .gstr_append(a, ");")
 }
 // a bare expression statement; a match here becomes a real `switch` (so arm returns fire).
-js_expr_stmt = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
+js_expr_stmt = (s: String, a: Allocator, e: Ptr<Expr>) String {
     load(e).match ({
         .Match(m) => s.js_match_stmt(a, m),
         .Cond(d)  => s.js_cond_stmt(a, d),
@@ -978,7 +983,7 @@ js_expr_stmt = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>) String {
         _         => s.js_expr(a, e).gstr_append(a, ";"),
     })
 }
-js_cond_stmt = (s: String, a: MutPtr<Malloc>, d: CondData) String {
+js_cond_stmt = (s: String, a: Allocator, d: CondData) String {
     s
         .gstr_append(a, "if (")
         .js_expr(a, d.c)
@@ -988,7 +993,7 @@ js_cond_stmt = (s: String, a: MutPtr<Malloc>, d: CondData) String {
         .js_expr_stmt(a, d.e)
         .gstr_append(a, " }")
 }
-js_stmts* = (s: String, a: MutPtr<Malloc>, body: [Stmt]) String {
+js_stmts* = (s: String, a: Allocator, body: [Stmt]) String {
     out ::= s
     body.loop_at((i, st) { out = out.js_stmt(a, st).gstr_append(a, " ") })
     out
@@ -1032,7 +1037,7 @@ iw_named = (n: StringView) i32 {
     })
     0
 }
-js_w_open* = (s: String, a: MutPtr<Malloc>, w: i32) String {
+js_w_open* = (s: String, a: Allocator, w: i32) String {
     (w == 7).then({
         return s.gstr_append(a, "__zr.wu64((")
     })
@@ -1041,7 +1046,7 @@ js_w_open* = (s: String, a: MutPtr<Malloc>, w: i32) String {
     })
     (w == 0).then({ s }, { s.gstr_append(a, "((") })
 }
-js_w_close* = (s: String, a: MutPtr<Malloc>, w: i32) String {
+js_w_close* = (s: String, a: Allocator, w: i32) String {
     (w == 1).then({
         return s.gstr_append(a, ") & 255)")
     })
@@ -1073,7 +1078,7 @@ js_w_close* = (s: String, a: MutPtr<Malloc>, w: i32) String {
 // so it reproduces C's wrapping exactly. Only the OUTERMOST operator is rewritten; a multiply nested
 // under another operator whose own product exceeds 2^53 is a rarer edge (documented in bootstrap/zenrt.js
 // design notes). Narrower widths (≤16-bit) need no imul: their product never exceeds 2^32 < 2^53.
-js_expr_w = (s: String, a: MutPtr<Malloc>, e: Ptr<Expr>, w: i32) String {
+js_expr_w = (s: String, a: Allocator, e: Ptr<Expr>, w: i32) String {
     js_is_mul32(load(e), w).match ({
         true  => s.js_mul32(a, load(e), w),
         false => s.js_w_open(a, w).js_expr(a, e).js_w_close(a, w),
@@ -1088,7 +1093,7 @@ js_is_mul32 = (e: Expr, w: i32) bool {
         false => false,
     })
 }
-js_mul32 = (s: String, a: MutPtr<Malloc>, e: Expr, w: i32) String {
+js_mul32 = (s: String, a: Allocator, e: Expr, w: i32) String {
     e.match ({
         .Bin(b) => (w == 3).match ({
             true  => s
@@ -1116,7 +1121,7 @@ js_mul32 = (s: String, a: MutPtr<Malloc>, e: Expr, w: i32) String {
 vw_buf ::= vw_none()
 vw_n ::= 0
 vw_none = () [Param] { slice(null_ptr(), 0) }
-vw_reset* = (a: MutPtr<Malloc>) void {
+vw_reset* = (a: Allocator) void {
     vw_buf = slice(a.acquire_or_die(8192 * sizeof(Param)), 8192)
     vw_n = 0
 }

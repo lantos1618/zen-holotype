@@ -21,7 +21,7 @@
 //               is passed to, which a parse-only tool cannot see, so these are counted apart
 //   unread      `x = f()` where `x` is never read again in the body (bound, then dropped)
 { arg, argc } = std.sys.os
-{ Malloc } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 { contents_in } = std.io.file
 { is_dir, read_dir } = std.sys.fs
 { cat_in, ends_with, view } = std.text.str
@@ -52,13 +52,13 @@ ret_is_result = (t: Ty) bool {
         _           => false,
     })
 }
-idx_note = (m: Map<i64>, a: MutPtr<Malloc>, name: StringView, res: bool) Map<i64> {
+idx_note = (m: Map<i64>, a: Allocator, name: StringView, res: bool) Map<i64> {
     prev = m.get(name, 0)
     next: i64 = res.match ({
         true  => (prev == 0 || prev == 1).then({ 1 }, { 2 }),
         false => (prev == 0 || prev == 3).then({ 3 }, { 2 }),
     })
-    m.put(a, name, next).expect("discards: index alloc")
+    m.put(a.addr(), name, next).expect("discards: index alloc")
 }
 // the return type of the fn named `name` among `decls` (Void when absent)
 find_ret = (decls: [Decl], name: StringView) Ty {
@@ -76,7 +76,7 @@ find_ret = (decls: [Decl], name: StringView) Ty {
     res
 }
 // an impl's methods, registered under the SIMPLE method name (the UFCS call-site spelling)
-idx_impl = (m: Map<i64>, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) Map<i64> {
+idx_impl = (m: Map<i64>, a: Allocator, decls: [Decl], im: ImplData) Map<i64> {
     out ::= m
     im.methods.loop((h, k, p) {
         r = decls.find_ret(a.impl_cname_in(im.trname, im.ty, p.name))
@@ -84,7 +84,7 @@ idx_impl = (m: Map<i64>, a: MutPtr<Malloc>, decls: [Decl], im: ImplData) Map<i64
     })
     out
 }
-idx_module = (m: Map<i64>, a: MutPtr<Malloc>, decls: [Decl]) Map<i64> {
+idx_module = (m: Map<i64>, a: Allocator, decls: [Decl]) Map<i64> {
     out ::= m
     decls.loop((h, i, d) {
         out = d.match ({
@@ -276,19 +276,19 @@ sort_from = (xs: [StringView], i: i64) void {
 }
 sort_names = (xs: [StringView]) void { xs.sort_from(1) }
 // index one file into `m` (phase 0)
-index_file = (m: Map<i64>, a: MutPtr<Malloc>, path: StringView) Map<i64> {
-    src = a.contents_in(path).expect("discards: cannot read file")
+index_file = (m: Map<i64>, a: Allocator, path: StringView) Map<i64> {
+    src = a.addr().contents_in(path).expect("discards: cannot read file")
     decls = a.parse_module(src)
     (perr_get() || lerr_get()).then({ m }, { m.idx_module(a, decls) })
 }
 // scan one file (phase 1)
-scan_file = (m: Map<i64>, a: MutPtr<Malloc>, path: StringView) void {
+scan_file = (m: Map<i64>, a: Allocator, path: StringView) void {
     g_files = g_files + 1
-    src = a.contents_in(path).expect("discards: cannot read file")
+    src = a.addr().contents_in(path).expect("discards: cannot read file")
     decls = a.parse_module(src)
     ((perr_get() || lerr_get()) == false).then({
         seed: i64 = 0
-        loc = of(a, "", seed).expect("discards: local index alloc").idx_module(a, decls)
+        loc = of(a.addr(), "", seed).expect("discards: local index alloc").idx_module(a, decls)
         cx = Ctx(
             path: path,
             src: src,
@@ -301,14 +301,14 @@ scan_file = (m: Map<i64>, a: MutPtr<Malloc>, path: StringView) void {
     })
 }
 // walk a file or a directory tree: phase 0 = index, phase 1 = scan
-walk = (m: Map<i64>, a: MutPtr<Malloc>, root: StringView, phase: i32) Map<i64> {
+walk = (m: Map<i64>, a: Allocator, root: StringView, phase: i32) Map<i64> {
     out ::= m
     root.is_dir().match ({
         true  => {
-            entries = a.read_dir(root).expect("discards: cannot read directory")
+            entries = a.addr().read_dir(root).expect("discards: cannot read directory")
             entries.sort_names()
             entries.loop((h, i, entry) {
-                out = out.walk(a, a.cat_in(a.cat_in(root, "/"), entry), phase)
+                out = out.walk(a, a.addr().cat_in(a.addr().cat_in(root, "/"), entry), phase)
             })
         },
         false => root.ends_with(".zen").then({
@@ -326,7 +326,7 @@ walk = (m: Map<i64>, a: MutPtr<Malloc>, root: StringView, phase: i32) Map<i64> {
 }
 // The roots named on the command line. argv is a handful of entries, so recursion carries the cursor:
 // `@while` is for the scanners over unbounded input, not for a bounded argv walk.
-scan_roots = (m: Map<i64>, a: MutPtr<Malloc>, i: i32) void {
+scan_roots = (m: Map<i64>, a: Allocator, i: i32) void {
     (i < argc()).then({
         (arg(i) == "--loose").match ({
             true  => {
@@ -340,10 +340,10 @@ scan_roots = (m: Map<i64>, a: MutPtr<Malloc>, i: i32) void {
     })
 }
 main = () i32 {
-    mm = Malloc(_: 0)
-    a = mm.addr()
+    mm = heap_allocator()
+    a = mm
     seed: i64 = 0
-    m ::= of(a, "", seed).expect("discards: index alloc")
+    m ::= of(a.addr(), "", seed).expect("discards: index alloc")
     // phase 0: index the WHOLE repo, so a call into another module resolves
     m = m.walk(a, "src", 0)
     m = m.walk(a, "driver.zen", 0)

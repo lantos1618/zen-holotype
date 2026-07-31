@@ -6,7 +6,7 @@
 { param, field, field_default, expr_null, sdef_at, edef_at, vdef, vdef_default, tnamed, tvoid,
   fnt_from_func_in, acquire_or_die } = compiler.genc
 { Scan, scan } = compiler.lex
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { is_op1, lexeme } = compiler.parse_atom
 { is_ident_tok } = compiler.parse_postfix
 { is_lparen } = compiler.parse_primary
@@ -22,7 +22,7 @@ StructEnd*: {
     next: i32,
     defaults: [Func],
 }
-no_tparams = (a: MutPtr<Malloc>) [Param] { slice(null_ptr(), 0) }
+no_tparams = (a: Allocator) [Param] { slice(null_ptr(), 0) }
 skip_name_star* = (src: StringView, pos: i32) i32 {
     nt = src.scan(pos)
     a1 = src.scan(nt.next)
@@ -33,7 +33,7 @@ TParamEnd*: {
     count: i32,
     next: i32,
 }
-parse_tparams* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TParamEnd {
+parse_tparams* = (a: Allocator, src: StringView, pos: i32) TParamEnd {
     sc = src.scan(pos)
     src.is_langle(sc.tok).match ({
         true  => a.parse_tparam_list(src, sc.next),
@@ -44,7 +44,7 @@ parse_tparams* = (a: MutPtr<Malloc>, src: StringView, pos: i32) TParamEnd {
         ),
     })
 }
-parse_tparam_list = (a: MutPtr<Malloc>, src: StringView, pos: i32) TParamEnd {
+parse_tparam_list = (a: Allocator, src: StringView, pos: i32) TParamEnd {
     buf = a.param_buf()
     te = a.fill_tparams(src, pos, buf, 0)
     TParamEnd(
@@ -53,10 +53,10 @@ parse_tparam_list = (a: MutPtr<Malloc>, src: StringView, pos: i32) TParamEnd {
         next: te.next,
     )
 }
-// A tparam may carry a trait bound: `<A: Allocator>`. The bound is stored in the Param's `ty`
+// A tparam may carry a trait bound: `<A: AllocatorBackend>`. The bound is stored in the Param's `ty`
 // slot as a `Named(traitname)` (tparams otherwise leave `ty` = tvoid()); the checker enforces it
 // at call sites. No bound => tvoid(), exactly the prior behaviour, so plain `<A>` is unchanged.
-record_tparam = (a: MutPtr<Malloc>, src: StringView, sc: Scan, buf: [Param], i: i32) PEnd {
+record_tparam = (a: Allocator, src: StringView, sc: Scan, buf: [Param], i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).then({
         perr_set_at(sc.tok.start)
@@ -79,7 +79,7 @@ record_tparam = (a: MutPtr<Malloc>, src: StringView, sc: Scan, buf: [Param], i: 
         },
     })
 }
-fill_tparams = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
+fill_tparams = (a: Allocator, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
@@ -101,9 +101,9 @@ fill_tparams = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i
         }),
     })
 }
-field_buf = (a: MutPtr<Malloc>) [Field] { slice(a.acquire_or_die(1024 * sizeof(Field)), 1024) }
+field_buf = (a: Allocator) [Field] { slice(a.acquire_or_die(1024 * sizeof(Field)), 1024) }
 take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }
-dfn_buf = (a: MutPtr<Malloc>) [Func] { slice(a.acquire_or_die(256 * sizeof(Func)), 256) }
+dfn_buf = (a: Allocator) [Func] { slice(a.acquire_or_die(256 * sizeof(Func)), 256) }
 take_dfns = (buf: [Func], n: i32) [Func] { slice(buf.ptr, n) }
 // `m = (...) Ret {}` inside a pure method record is a trait default; inside a data record
 // it is an inherent method attached to the struct.
@@ -113,7 +113,7 @@ FieldsEnd: {
     next: i32,
 }
 fill_fields = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     pos: i32,
     buf: [Field],
@@ -143,7 +143,7 @@ fill_fields = (
 }
 // Default methods store both the FnT requirement and the reusable body.
 fill_field_default = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     pos: i32,
     buf: [Field],
@@ -180,7 +180,7 @@ field_dflt_const = (e: Ptr<Expr>) bool {
         _            => false,
     })
 }
-field_dflt = (a: MutPtr<Malloc>, src: StringView, pos: i32) FDflt {
+field_dflt = (a: Allocator, src: StringView, pos: i32) FDflt {
     eq = src.scan(pos)
     src.is_op1(eq.tok, '=').match ({
         true  => {
@@ -200,7 +200,7 @@ field_dflt = (a: MutPtr<Malloc>, src: StringView, pos: i32) FDflt {
     })
 }
 fill_field = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     pos: i32,
     buf: [Field],
@@ -248,7 +248,7 @@ fill_field = (
         },
     })
 }
-parse_struct_at* = (a: MutPtr<Malloc>, src: StringView, pos: i32) StructEnd {
+parse_struct_at* = (a: Allocator, src: StringView, pos: i32) StructEnd {
     nt = src.scan(pos)
     name = a.lexeme(src, nt.tok)
     tp = a.parse_tparams(src, src.skip_name_star(pos))
@@ -294,7 +294,7 @@ data_field_count = (fields: [Field], defaults: [Func]) i32 {
     })
     n
 }
-data_fields* = (a: MutPtr<Malloc>, fields: [Field], defaults: [Func]) [Field] {
+data_fields* = (a: Allocator, fields: [Field], defaults: [Func]) [Field] {
     buf ::= a.field_buf()
     j ::= 0
     fields.loop_at((i, f) {
@@ -320,18 +320,18 @@ VDf: {
     vdf: VariantDef,
     next: i32,
 }
-variant_buf = (a: MutPtr<Malloc>) [VariantDef] {
+variant_buf = (a: Allocator) [VariantDef] {
     slice(a.acquire_or_die(1024 * sizeof(VariantDef)), 1024)
 }
 take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }
-variant_payload = (a: MutPtr<Malloc>, src: StringView, pos: i32) VPay {
+variant_payload = (a: Allocator, src: StringView, pos: i32) VPay {
     te = a.parse_variant_payload(src, pos)
     VPay(
         ty: te.ty,
         next: te.next,
     )
 }    // `(T)` single, or `(T1, T2, …)` -> anon struct
-fill_variants = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [VariantDef], i: i32) PEnd {
+fill_variants = (a: Allocator, src: StringView, pos: i32, buf: [VariantDef], i: i32) PEnd {
     nt = src.scan(pos)
     nt.tok.kind.match ({
         .Eof => {
@@ -344,7 +344,7 @@ fill_variants = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [VariantDef]
         _    => a.fill_variant(src, nt, buf, i),
     })
 }
-fill_variant = (a: MutPtr<Malloc>, src: StringView, nt: Scan, buf: [VariantDef], i: i32) PEnd {
+fill_variant = (a: Allocator, src: StringView, nt: Scan, buf: [VariantDef], i: i32) PEnd {
     // Guard the variant buffer.
     (i >= buf.len).then({
         perr_set_at(nt.tok.start)
@@ -378,7 +378,7 @@ fill_variant = (a: MutPtr<Malloc>, src: StringView, nt: Scan, buf: [VariantDef],
     })
 }
 // After the variant name, dispatch on the next token: `(Type)` payload, `= expr` default, or bare.
-variant_after = (a: MutPtr<Malloc>, src: StringView, nm: StringView, nt: Scan, pk: Scan) VDf {
+variant_after = (a: Allocator, src: StringView, nm: StringView, nt: Scan, pk: Scan) VDf {
     src.is_lparen(pk.tok).match ({
         true  => {
             vp = a.variant_payload(src, pk.next)
@@ -413,7 +413,7 @@ skip_leading_bar = (src: StringView, pos: i32) i32 {
     sc = src.scan(pos)
     src.is_op1(sc.tok, '|').then({ sc.next }, { pos })
 }
-parse_enum_at* = (a: MutPtr<Malloc>, src: StringView, pos: i32) EnumEnd {
+parse_enum_at* = (a: Allocator, src: StringView, pos: i32) EnumEnd {
     nt = src.scan(pos)
     name = a.lexeme(src, nt.tok)
     tp = a.parse_tparams(src, src.skip_name_star(pos))

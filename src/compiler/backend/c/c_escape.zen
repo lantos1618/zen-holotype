@@ -28,7 +28,7 @@
 { expr_fold_children } = compiler.ast.expr_children
 { slice_any } = compiler.astops
 { acquire_or_die } = compiler.genc
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { Map, of } = std.collections.map
 { loop_at } = std.core.count
 // One function's borrowed-parameter set: bit `i` is set when parameter `i` is provably borrowed.
@@ -66,7 +66,7 @@ slx_is_slice = (t: Ty) bool {
 // whitelisted is a retain, so an Expr variant nobody thought about cannot silently read as a borrow:
 // the `_` arm delegates to compiler.ast.expr_children's one exhaustive child listing.
 slx_expr_retains = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     fidx: Map<i64>,
     e: Ptr<Expr>,
@@ -96,7 +96,7 @@ slx_expr_retains = (
 // an element access above, but the pointer it yields points INTO the literal's storage, so ANY mention of
 // `nm` under an `addr` is a retain.
 slx_call_retains = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     fidx: Map<i64>,
     c: CallData,
@@ -152,7 +152,7 @@ slx_mentions_st = (st: Stmt, nm: StringView) bool {
 // Does the KNOWN local fn `fn` retain its parameter `pi` past its own frame? An unknown name (an
 // intrinsic, a foreign decl, a call through a value) is not analysable → retains.
 slx_param_retains = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     fidx: Map<i64>,
     fn: StringView,
@@ -177,7 +177,7 @@ slx_param_retains = (
     })
 }
 slx_body_retains = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     fidx: Map<i64>,
     body: [Stmt],
@@ -187,7 +187,7 @@ slx_body_retains = (
 // `nm[i] = v` writes THROUGH the slice into the caller's own backing store — a borrow, like `nm[i]`.
 // An assignment whose TARGET is `nm` rebinds the parameter; that is left as a retain (conservative).
 slx_stmt_retains = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     fidx: Map<i64>,
     st: Stmt,
@@ -213,7 +213,7 @@ slx_stmt_retains = (
 slx_has_slice_param = (f: Func) bool { f.params.slice_any((p) { p.ty.slx_is_slice() }) }
 // the borrowed-parameter bitmask of one function. `bit` doubles per parameter, so a function with more
 // than 63 parameters simply stops setting bits (bit overflows to 0 under -fwrapv) — heap, as always.
-slx_fn_mask = (a: MutPtr<Malloc>, decls: [Decl], fidx: Map<i64>, f: Func) i64 {
+slx_fn_mask = (a: Allocator, decls: [Decl], fidx: Map<i64>, f: Func) i64 {
     mask ::= to_i64(0)
     bit ::= to_i64(1)
     f.params.loop_at((j, p) {
@@ -226,12 +226,12 @@ slx_fn_mask = (a: MutPtr<Malloc>, decls: [Decl], fidx: Map<i64>, f: Func) i64 {
     })
     mask
 }
-slx_fn_index = (a: MutPtr<Malloc>, decls: [Decl]) Map<i64> {
-    m ::= of(a, "", to_i64(0) - 1).expect("c_escape: fn-index alloc")
+slx_fn_index = (a: Allocator, decls: [Decl]) Map<i64> {
+    m ::= of(a.addr(), "", to_i64(0) - 1).expect("c_escape: fn-index alloc")
     decls.loop_at((i, d) {
         d.match ({
             .DFunc(f) => {
-                m = m.put(a, f.name, to_i64(i)).expect("c_escape: fn-index alloc")
+                m = m.put(a.addr(), f.name, to_i64(i)).expect("c_escape: fn-index alloc")
             },
             _         => { },
         })
@@ -250,12 +250,10 @@ slx_mask_count = (decls: [Decl]) i64 {
     })
     n
 }
-slx_mask_buf = (a: MutPtr<Malloc>, n: i64) [SlxMask] {
-    slice(a.acquire_or_die(n * sizeof(SlxMask)), n)
-}
+slx_mask_buf = (a: Allocator, n: i64) [SlxMask] { slice(a.acquire_or_die(n * sizeof(SlxMask)), n) }
 // Stamp the verdict table for one translation unit. Only functions that actually take a slice are
 // walked, so a module with no slice parameters costs one decl sweep and nothing else.
-slx_classify* = (a: MutPtr<Malloc>, decls: [Decl]) void {
+slx_classify* = (a: Allocator, decls: [Decl]) void {
     n = decls.slx_mask_count()
     (n == 0).match ({
         true  => slx_masks_set(slx_no_masks()),

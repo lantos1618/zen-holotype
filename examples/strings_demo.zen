@@ -13,11 +13,8 @@
 // The rule followed everywhere: an ALLOCATED block is named in a comment together with
 // whoever frees it. If you cannot name the freer, it is a leak.
 //
-// The allocator is THREADED, not ambient: every function that allocates takes `a: Allocator`
-// as a parameter, so the freer is always something the caller can name. That parameter is
-// sugar — `(a: Allocator)` is `<A: Allocator>(a: MutPtr<A>)` — and writing the bound is what
-// makes a wrong allocator fail at the CALL, not inside std. docs/string-vec-model.md carries
-// the wider model (allocator carried vs threaded, and where the string types are going).
+// Allocation is explicit: allocating functions take an `AllocatorBackend` parameter, and the
+// caller names the same backend when releasing owned storage. See docs/MEMORY_MODEL.md.
 //
 // TWO HOUSE RULES shape the code below. Examples are gated ABOVE the raw pointer floor
 // (no `offset`, no `slice(`, no `cstr`, no `sizeof`), so every block here comes out of a
@@ -32,7 +29,7 @@ halloc = std.mem.heap
 { view, len, find, substr, split, nbuf, pad_right, repeat, trim_view, trim_prefix, own_ptr,
   own_window } = std.text.str
 { Result, ok, expect } = std.core.result
-{ Allocator, release_slice } = std.mem.alloc
+{ AllocatorBackend, release_slice } = std.mem.alloc
 // `str` is NUL-terminated, so dropping a PREFIX is free — the source's own NUL still
 // terminates what is left, and `trim_prefix` just hands back a pointer further along the
 // same block. Dropping a SUFFIX is not free (the new end has no NUL of its own). That one
@@ -41,7 +38,7 @@ wider = (x: i64, y: i64) i64 { (x > y).then({ x }, { y }) }
 // ── 1. every string-ish type, side by side ───────────────────────────────────
 // Four types today. docs/string-vec-model.md names the five ROLES they are converging on
 // (literal / const / fixed / growable / view) and why `String` is exactly `Vec<u8>`.
-show_types = (a: Allocator) void {
+show_types = (a: AllocatorBackend) void {
     println("-- 1. every string-ish type, and what it owns --")
     // (a) STRING LITERAL — bytes in the binary's read-only data. No allocation, no free;
     //     they outlive every function that sees them.
@@ -64,7 +61,7 @@ show_types = (a: Allocator) void {
     g.free_in(a)
 }
 // ── 2. borrowing vs copying ──────────────────────────────────────────────────
-show_borrow_vs_copy = (a: Allocator) void {
+show_borrow_vs_copy = (a: AllocatorBackend) void {
     println("")
     println("-- 2. borrow vs copy --")
     padded: StringView = "   auth: token expired   "
@@ -105,7 +102,7 @@ Fields*: {
     // Release exactly the three blocks parse_line allocated. `msg` is deliberately
     // absent: it points into the MIDDLE of the caller's line block, and freeing an
     // interior pointer is undefined. Whoever frees the line frees msg with it.
-    free = (f: Fields, a: Allocator) void {
+    free = (f: Fields, a: AllocatorBackend) void {
         a.release(f.ts.own_ptr())
         a.release(f.level.own_ptr())
         a.release(f.comp.own_ptr())
@@ -128,7 +125,7 @@ upto = (i: i64) i64 { (i < 0).then({ 0 }, { i }) }
 //
 // Read it as an alternating rhythm: substr ALLOCATES a field, trim_prefix then steps over
 // the bytes just copied for FREE. Three mallocs, three zero-cost steps.
-parse_line* = (a: Allocator, line: StringView) Result<Fields, StringView> {
+parse_line* = (a: AllocatorBackend, line: StringView) Result<Fields, StringView> {
     i1 = line.find(" ")
     // ALLOC 1 of 3.
     ts = a.substr(line, 0, i1.upto()).expect("strings_demo: out of memory")
@@ -193,7 +190,7 @@ rule_into* = (out: [u8], fill: u8) void {
 // Append `t`, padded to `w` columns, onto the String. Three memory events in three lines:
 // pad_right ALLOCATES a temporary, append_in COPIES its bytes into the String's block, the
 // now-dead temporary is RELEASED on the spot. This is the shape to copy.
-push_pad = (a: Allocator, g: String, t: StringView, w: i64) String {
+push_pad = (a: AllocatorBackend, g: String, t: StringView, w: i64) String {
     p = a.pad_right(t, w, ' ')
     out = a.append_in(g, p).expect("strings_demo: out of memory")
     a.release(p.own_ptr())
@@ -202,7 +199,7 @@ push_pad = (a: Allocator, g: String, t: StringView, w: i64) String {
 // (b) A buffer returned OUT of a callee. The String is built from `a` and RETURNED, so
 //     ownership MOVES to the caller, who must call free_in. Growth is realloc inside
 //     `a`, so the bytes never live on this stack frame and the return is safe.
-render_row* = (a: Allocator, f: Fields, w: Widths) String {
+render_row* = (a: AllocatorBackend, f: Fields, w: Widths) String {
     g ::= a.init(64).expect("strings_demo: out of memory")
     g = a.push_pad(g, f.ts, w.ts + 2)
     g = a.push_pad(g, f.level, w.level + 2)
@@ -215,10 +212,10 @@ render_row* = (a: Allocator, f: Fields, w: Widths) String {
 Report*: {
     title: StringView,
     body: String,
-    free = (r: Report, a: Allocator) void { r.body.free_in(a) }
+    free = (r: Report, a: AllocatorBackend) void { r.body.free_in(a) }
 }
 // Print every row: a block out of render_row, parked in a Report, then given back.
-print_rows* = (a: Allocator, rows: [Fields], n: i64, w: Widths) void {
+print_rows* = (a: AllocatorBackend, rows: [Fields], n: i64, w: Widths) void {
     rows.loop((h, i, f) {
         (i < n).then({
             // ALLOC: ownership MOVED out of render_row and into this frame.
@@ -240,7 +237,7 @@ print_rows* = (a: Allocator, rows: [Fields], n: i64, w: Widths) void {
 // ── 5. release ───────────────────────────────────────────────────────────────
 // Three blocks per row. `msg` is never freed on its own: it is an interior pointer, and
 // the line block it aims into is the thing that owns those bytes.
-free_rows* = (a: Allocator, rows: [Fields], n: i64) void {
+free_rows* = (a: AllocatorBackend, rows: [Fields], n: i64) void {
     rows.loop((h, i, f) {
         (i < n).then({
             f.free(a)
@@ -249,7 +246,7 @@ free_rows* = (a: Allocator, rows: [Fields], n: i64) void {
 }
 // The per-line copies split handed out — and so the bytes every `msg` borrow points at.
 // Nothing may read a Fields after this runs.
-free_lines* = (a: Allocator, lines: [StringView]) void {
+free_lines* = (a: AllocatorBackend, lines: [StringView]) void {
     lines.loop((h, i, ln) {
         a.release(ln.view().ptr)
     })

@@ -5,7 +5,7 @@
 // decls. Only fires for USER programs (internal builds pass through untouched → seed unchanged). Shared
 // types + the resolve pipeline that calls shadow_flat/shadow_flat_users live in compiler.resolve.
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { String } = std.text.string
 { ModuleEntry, ModuleTable, ProvidedSymbol, append_to_nul, edge_head_has_name, res_reject_text,
   fregions_splice, line_name, madd_name, mappend_id_str_dotted, mappend_string, rappend,
@@ -26,13 +26,13 @@
 // diagnostic.zen's alias-`__`-removal inverse already un-mangles, so errors still render the user's name.
 // Only fires for USER programs (never internal sources → seed unchanged) and only when it is provably
 // safe (see shadow_rename_set). check_module never sees two same-named decls, so no dup-fn fires.
-shadow_alias_of = (a: MutPtr<Malloc>) String { a.gstr_string(16).gstr_append(a, "zshadow") }
+shadow_alias_of = (a: Allocator) String { a.gstr_string(16).gstr_append(a, "zshadow") }
 // per-region alias for USER-MODULE renames: `zshadow0`, `zshadow1`, … — the region index keeps two
 // modules that shadow the SAME std name (each defining its own `len`) from colliding on one mangled form.
-shadow_alias_idx = (a: MutPtr<Malloc>, idx: i64) String {
+shadow_alias_idx = (a: Allocator, idx: i64) String {
     a.gstr_string(20).gstr_append(a, "zshadow").res_udec(a, to_i32(idx))
 }
-shadow_mangled = (a: MutPtr<Malloc>, alias: String, name: String) String {
+shadow_mangled = (a: Allocator, alias: String, name: String) String {
     // NUL-terminate: the one caller feeds this to rset_has, which hashes via cstr(ptr) → strlen.
     // Without the terminator strlen runs past the uninitialized tail of the buffer (ASAN-caught
     // heap-buffer-overflow), so the membership answer depended on heap garbage — layout-dependent
@@ -56,7 +56,7 @@ ShadowSets: {
 // by name, and whose mangled form is not already taken. `bad` holds the colliding names whose mangled
 // form IS taken — those cannot be renamed, and silence is never allowed, so region callers fail loudly.
 shadow_name_sets = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     syms: [ProvidedSymbol],
     modsrc: StringView,
     lo: i64,
@@ -70,7 +70,7 @@ shadow_name_sets = (
     nonmain ::= a.rset_new()
     syms.loop_at((i, s) {
         ((s.imported || s.foreign || s.is_type) == false).then({
-            key = s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
+            key = s.symbol_key_in(a.addr()).expect("compiler.resolve: allocation failed")
             (s.decl_start >= lo && s.decl_start < hi).match ({
                 true  => mainseen.rset_has(key).match ({
                     true  => {
@@ -92,7 +92,7 @@ shadow_name_sets = (
     outset ::= a.rset_new()
     syms.loop_at((i, s) {
         ((s.imported || s.foreign || s.is_type) == false).then({
-            key = s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
+            key = s.symbol_key_in(a.addr()).expect("compiler.resolve: allocation failed")
             inmain = s.decl_start >= lo && s.decl_start < hi
             once = mainseen.rset_has(key) && maindup.rset_has(key).then({ false }, { true })
             unimported = imported.rset_has(key).then({ false }, { true })
@@ -116,7 +116,7 @@ shadow_name_sets = (
 // main-body form: the historical entry point (alias `zshadow`, unrenameable remainder ignored — a
 // kept main-body dup still surfaces as the checker's dup-fn).
 shadow_rename_set = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     syms: [ProvidedSymbol],
     mainsrc: StringView,
     lo: i64,
@@ -130,7 +130,7 @@ ShadowFlat*: {
 // Given the pre-dedup flat, rename the user's colliding decls in the body region [lo,hi) and return the
 // rewritten flat plus the shifted body end. `enable` is false for internal sources (byte-identical no-op).
 shadow_flat* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     pre: StringView,
     presyms: [ProvidedSymbol],
     mainsrc: StringView,
@@ -177,12 +177,7 @@ shadow_flat* = (
 // error[dup-fn], anchored at the USER module's own definition: the decl collides with an unimported
 // closure export AND another module imports it from here by name — renaming would silently misbind
 // the importer, and dropping either copy is silent misbinding too, so reject loudly with the fix.
-fail_shadow_import = (
-    a: MutPtr<Malloc>,
-    entry: ModuleEntry,
-    importer: StringView,
-    nm: StringView,
-) i32 {
+fail_shadow_import = (a: Allocator, entry: ModuleEntry, importer: StringView, nm: StringView) i32 {
     pos = a.symbol_start_of(entry.graph.symbols, nm)
     line = entry.source.res_line_of(pos)
     col = entry.source.res_col_of(pos)
@@ -218,7 +213,7 @@ fail_shadow_import = (
     res_reject_text(h0.gstr_push(a, '\n').gstr_finish(a))
 }
 // error[dup-fn] for a colliding decl whose mangled shadow form is already taken (never silent).
-fail_shadow_mangled = (a: MutPtr<Malloc>, entry: ModuleEntry, bad: String, alias: String) i32 {
+fail_shadow_mangled = (a: Allocator, entry: ModuleEntry, bad: String, alias: String) i32 {
     nm = line_name(a.gstr_string(16), a, bad, 0).gstr_finish(a)
     pos = a.symbol_start_of(entry.graph.symbols, nm)
     line = entry.source.res_line_of(pos)
@@ -249,7 +244,7 @@ fail_shadow_mangled = (a: MutPtr<Malloc>, entry: ModuleEntry, bad: String, alias
     res_reject_text(h0.gstr_push(a, '\n').gstr_finish(a))
 }
 // reject when ANY other module imports a to-be-renamed name from `entry` by name (see fail_shadow_import).
-shadow_guard_one = (a: MutPtr<Malloc>, table: ModuleTable, entry: ModuleEntry, nm: StringView) i32 {
+shadow_guard_one = (a: Allocator, table: ModuleTable, entry: ModuleEntry, nm: StringView) i32 {
     table.modules.loop_at((i, m) {
         (m.id == entry.id == false).then({
             m.graph.imports.loop_at((j, e) {
@@ -264,7 +259,7 @@ shadow_guard_one = (a: MutPtr<Malloc>, table: ModuleTable, entry: ModuleEntry, n
     0
 }
 shadow_guard_names = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     entry: ModuleEntry,
     names: String,
@@ -291,7 +286,7 @@ ShadowUsers*: {
 // ns-prefix end `nsl` shift the main-body window by the returned `shift`. Internal sources pass
 // through untouched (enable=false — the self-host flat stays byte-identical).
 shadow_flat_users* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     pre: StringView,
     table: ModuleTable,
     prebodylen: i64,

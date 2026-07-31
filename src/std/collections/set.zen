@@ -1,6 +1,5 @@
 // std.collections.set — a generic hash set `Set<T>` with an EXPLICIT allocator, in the std.collections.map mold.
-// Every op that allocates takes the allocator as `a: Allocator` and goes through std.mem.alloc's `Allocator`
-// trait — nothing here hides a malloc. Every op that ALLOCATES returns Result<Set<T>, IoError> —
+// Allocating operations take an explicit backend and return Result<Set<T>, IoError> —
 // allocation failure (OOM) is a value, exactly like std.collections.hmap (`empty`/`of`/`add`/`append`/
 // `grow`/`clone` and the set-algebra `union`/`intersect`/`difference`). `remove` never reallocs (swap-
 // remove + in-place reindex — it can't OOM), so it stays a plain `Set<T>`, mirroring `HMap.delete`.
@@ -56,7 +55,7 @@
 // module's `union` after flattening.
 //
 { Result, IoError } = std.core.result    // allocation failure is a Result value (OOM → .Err)
-{ Allocator, try_acquire2, DynAlloc, dyn_heap } = std.mem.alloc    // explicit allocator trait; DynAlloc = narrow Allocator stored by the AMBIENT form; try_acquire2 = all-or-nothing 2-buffer acquire
+{ AllocatorBackend, try_acquire2, Allocator, heap_allocator } = std.mem.alloc    // stored capability + atomic two-buffer acquisition
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
 { compare } = std.mem.raw    // byte-wise slot equality (see `seq`)
 { hashidx_fold, hashidx_clear, hashidx_link } = std.collections.hashidx    // shared open-hash index mechanics over the 2*cap i64 buffer
@@ -108,7 +107,7 @@ Set*<T>: {
         })
     }
     has = (s: Set<T>, x: T) bool { s.find(x) >= 0 }
-    grow = (s: Set<T>, a: Allocator) Result<Set<T>, IoError> {
+    grow = (s: Set<T>, a: AllocatorBackend) Result<Set<T>, IoError> {
         // Acquire fresh buffers (double the cap), copy the live entries over, release the old ones, then
         // reindex. OOM at either acquire is returned as .Err (the old buffers stay valid and are NOT freed
         // on the failure path). Mirrors HMap.grow.
@@ -169,7 +168,7 @@ Set*<T>: {
         hashidx_link(s.index(), s.cap, slot, s.shash(slot))
         s
     }
-    append = (s: Set<T>, a: Allocator, x: T) Result<Set<T>, IoError> {
+    append = (s: Set<T>, a: AllocatorBackend, x: T) Result<Set<T>, IoError> {
         // Append an element (caller has ensured it is absent) and link it into its bucket. Grows first when
         // full; a grow OOM is returned as .Err. Mirrors HMap.append.
         x = x
@@ -207,7 +206,7 @@ Set*<T>: {
         })
         out
     }
-    add = (s: Set<T>, a: Allocator, x: T) Result<Set<T>, IoError> {
+    add = (s: Set<T>, a: AllocatorBackend, x: T) Result<Set<T>, IoError> {
         // Insert if absent (allocation failure is a value). RETURNS the updated set — always rebind to the
         // result (`s = s.add(...).expect("…")` / `.or_return()`). Adding an element already present is a
         // no-op (len unchanged). On grow the buffers are realloced, so any handle captured before this call
@@ -222,7 +221,7 @@ Set*<T>: {
         })
         out
     }
-    remove = (s: Set<T>, a: Allocator, x: T) Set<T> {
+    remove = (s: Set<T>, a: AllocatorBackend, x: T) Set<T> {
         // Delete an element. RETURNS the updated set. Absent element => unchanged. Implemented as a swap-remove
         // (the last live element fills the hole) followed by a reindex; iteration order is NOT preserved. `a` is
         // accepted for signature symmetry with the other owned ops — `remove` never reallocs (it does not shrink).
@@ -243,11 +242,11 @@ Set*<T>: {
         })
         out
     }
-    free = (s: Set<T>, a: Allocator) void {
+    free = (s: Set<T>, a: AllocatorBackend) void {
         a.release(s.elems)
         a.release(s.idx)
     }
-    clone = (s: Set<T>, a: Allocator) Result<Set<T>, IoError> {
+    clone = (s: Set<T>, a: AllocatorBackend) Result<Set<T>, IoError> {
         // Deep-copy the set into fresh buffers from `a`, giving the result INDEPENDENT storage: mutating the
         // clone (or the original) never writes through to the other. The clone owns its buffers and must be
         // `free`d independently. O(len). OOM on either acquire is returned as .Err (the first buffer is
@@ -303,7 +302,7 @@ Set*<T>: {
 // a zero-element `Set<T>` with capacity for at least one entry. No seed pins T, so it comes from the LHS
 // annotation: `s: Set<i64> = sets.empty(a)`. The index is reindexed (its single
 // bucket head cleared to -1) so `find`/`has` on the empty set return absent immediately.
-empty*<T> = (a: Allocator) Result<Set<T>, IoError> {
+empty*<T> = (a: AllocatorBackend) Result<Set<T>, IoError> {
     a.try_acquire2((1 + 1) * sizeof(T), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
             ep = bufs.b1
@@ -325,7 +324,7 @@ empty*<T> = (a: Allocator) Result<Set<T>, IoError> {
 }
 // a `Set<T>` seeded with one element, its buffers acquired from `a`. T inferred from the seed value
 // (Zen has no call-site type args). Starts at cap 1.
-of*<T> = (a: Allocator, first: T) Result<Set<T>, IoError> {
+of*<T> = (a: AllocatorBackend, first: T) Result<Set<T>, IoError> {
     a.try_acquire2((1 + 1) * sizeof(T), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
             ep = bufs.b1
@@ -349,7 +348,7 @@ of*<T> = (a: Allocator, first: T) Result<Set<T>, IoError> {
 }
 // add `e` to `r` only when `keep` — the Result-valued conditional-insert helper the folds below use.
 // Returns `r` unchanged when `keep` is false.
-add_if<T> = (a: Allocator, r: Set<T>, e: T, keep: bool) Result<Set<T>, IoError> {
+add_if<T> = (a: AllocatorBackend, r: Set<T>, e: T, keep: bool) Result<Set<T>, IoError> {
     keep.match ({
         true  => r.add(a, e),
         false => {
@@ -360,7 +359,7 @@ add_if<T> = (a: Allocator, r: Set<T>, e: T, keep: bool) Result<Set<T>, IoError> 
 }
 // fold y's live elements into `r` (add-all), recursively; a per-element OOM threads out as .Err via
 // or_return (works inside this generic Result<Set<T>, …> body since #54 substitutes T in the Err guard).
-union_fold<T> = (a: Allocator, r: Set<T>, y: Set<T>, i: i64) Result<Set<T>, IoError> {
+union_fold<T> = (a: AllocatorBackend, r: Set<T>, y: Set<T>, i: i64) Result<Set<T>, IoError> {
     (i >= y.len).match ({
         true  => {
             done: Result<Set<T>, IoError> = .Ok(r)
@@ -376,7 +375,7 @@ union_fold<T> = (a: Allocator, r: Set<T>, y: Set<T>, i: i64) Result<Set<T>, IoEr
 // fold x's live elements into `r`, adding each only when `y.has(e) == keep_when` (true for intersect,
 // false for difference); a per-element OOM threads out as .Err via or_return (#54).
 sift_fold<T> = (
-    a: Allocator,
+    a: AllocatorBackend,
     r: Set<T>,
     x: Set<T>,
     y: Set<T>,
@@ -399,7 +398,7 @@ sift_fold<T> = (
 }
 // {x} ∪ {y}: a fresh set (buffers from `a`) holding every element of x and y. Starts as a clone of x, then
 // folds y in; the inputs are untouched. O(|x| + |y|). Allocation failure is a value.
-union*<T> = (a: Allocator, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
+union*<T> = (a: AllocatorBackend, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
     x.clone(a).match ({
         .Ok(r)  => a.union_fold(r, y, 0),
         .Err(e) => {
@@ -409,7 +408,7 @@ union*<T> = (a: Allocator, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
     })
 }
 // {x} ∩ {y}: a fresh set holding the elements present in BOTH. O(|x|) membership probes into y.
-intersect*<T> = (a: Allocator, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
+intersect*<T> = (a: AllocatorBackend, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
     er: Result<Set<T>, IoError> = empty(a)
     er.match ({
         .Ok(r)  => a.sift_fold(r, x, y, 0, true),
@@ -420,7 +419,7 @@ intersect*<T> = (a: Allocator, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
     })
 }
 // {x} \ {y}: a fresh set holding the elements of x that are NOT in y. O(|x|) membership probes into y.
-difference*<T> = (a: Allocator, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
+difference*<T> = (a: AllocatorBackend, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
     er: Result<Set<T>, IoError> = empty(a)
     er.match ({
         .Ok(r)  => a.sift_fold(r, x, y, 0, false),
@@ -430,25 +429,11 @@ difference*<T> = (a: Allocator, x: Set<T>, y: Set<T>) Result<Set<T>, IoError> {
         },
     })
 }
-// ── STORED-ALLOCATOR FORM (process-heap default) ─────────────────────────────────────────────────
-// The allocator-free twin of `Set<T>`, in the exact `AVec<T>` mold (see std.collections.vec for the full
-// rationale). `new()` stores `dyn_heap()`; `new_in(a)` stores the caller's `DynAlloc`, and every later
-// grow/free uses that same value. A custom allocator's raw `state` must outlive the ASet. Everything
-// above (the explicit `Set<T>` + `of(a, …)`/`s.add(a, x)`/`s.free(a)` forms and the set-algebra free fns)
-// is UNCHANGED; this section only adds new names on a new type.
-//
-//   s: ASet<i64> = set.new()          // T from the annotation (nothing to infer it)
-//   s  = s.add(10)                     // no allocator argument — uses the stored DynAlloc
-//   s  = s.add(20)
-//   s.has(10)                          // true
-//   s  = s.remove(10)
-//   n = s.len()   s.each((x){ ... })
-//   s.free()
-//
-//   t = set.from([1, 2, 2, 3])        // seed + dedup from a slice; T inferred (t.len() == 3)
+// ASet retains its birth allocator for every grow and release.
+// The allocator state must outlive the ASet. Allocation failure is fail-fast.
 ASet*<T>: {
     inner: Set<T>,
-    alloc: DynAlloc,
+    alloc: Allocator,
     len  = (w: ASet<T>) i64 { w.inner.len() }
     has  = (w: ASet<T>, x: T) bool { w.inner.has(x) }
     each = (w: ASet<T>, f: (T) void) void { w.inner.each(f) }
@@ -474,11 +459,8 @@ ASet*<T>: {
         w.inner.free(a.addr())
     }
 }
-// EXPLICIT-allocator constructor — THE REAL CONSTRUCTION PATH. Build a zero-element `ASet<T>` bound to a
-// caller-supplied narrow allocator (`a: DynAlloc`), with no implicit process-heap selection. The default
-// `new()` below is a one-line shim — the single
-// process-heap draw (`dyn_heap()`) on the set construction path.
-new_in*<T> = (a: DynAlloc) ASet<T> {
+// Explicit construction never reads the ambient runtime.
+new_in*<T> = (a: Allocator) ASet<T> {
     da = a
     sr: Result<Set<T>, IoError> = empty(da.addr())
     ASet<T>(
@@ -486,22 +468,17 @@ new_in*<T> = (a: DynAlloc) ASet<T> {
         alloc: a,
     )
 }
-// a zero-element process-heap `ASet<T>` (capacity for one, like `empty`). T comes from the LHS annotation:
-// `s: ASet<i64> = set.new()`. The process heap is drawn ONCE here (as a DynAlloc) and stored for the
-// life of the set. `new_in`'s body is inlined (no bare `new_in` call — that bare name is ambiguous with
-// std.text.string's generic `new_in(a: Allocator)` once both flatten together; qualified `set.new_in`
-// stays the external real path).
+// T comes from the result context. The body avoids a flat-namespace new_in collision.
 new*<T> = () ASet<T> {
-    a = dyn_heap()
+    a = heap_allocator()
     sr: Result<Set<T>, IoError> = empty(a.addr())
     ASet<T>(
         inner: sr.expect("set.new: out of memory"),
         alloc: a,
     )
 }
-// EXPLICIT-allocator seed constructor: an `ASet<T>` bound to `a`, seeded from a slice (dedups via `add`).
-// No implicit allocator selection. T is inferred from the elements.
-from_in*<T> = (a: DynAlloc, xs: [T]) ASet<T> {
+// Explicit seed construction deduplicates xs without reading the ambient runtime.
+from_in*<T> = (a: Allocator, xs: [T]) ASet<T> {
     da = a
     sr: Result<Set<T>, IoError> = empty(da.addr())
     st ::= sr.expect("set.from: out of memory")
@@ -511,10 +488,9 @@ from_in*<T> = (a: DynAlloc, xs: [T]) ASet<T> {
         alloc: a,
     )
 }
-// a process-heap `ASet<T>` seeded from a slice. Capture `dyn_heap()` once; `from_in`'s body is inlined
-// (no bare `from_in` call — same string-`new_in` collision avoidance).
+// Process-heap seed construction is fail-fast.
 from*<T> = (xs: [T]) ASet<T> {
-    a = dyn_heap()
+    a = heap_allocator()
     sr: Result<Set<T>, IoError> = empty(a.addr())
     st ::= sr.expect("set.from: out of memory")
     xs.loop_at((i, x) { st = st.add(a.addr(), x).expect("set.from: out of memory") })

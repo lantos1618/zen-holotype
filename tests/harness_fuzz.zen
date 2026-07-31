@@ -20,7 +20,7 @@
 //
 // Helpers are `fz_`-prefixed so they never collide on the flat-import flatten with std/harness_lib/etc.
 { run_suite, zo_par_run, zo_idpath, zo_join } = harness_lib
-{ Malloc, malloc, free } = std.mem.alloc
+{ Allocator, heap_allocator, malloc, free } = std.mem.alloc
 { out, save, contents_in } = std.io.file
 { len, try_parse_int, view } = std.text.str
 { String, new_in, append_in, finish_in, push_in } = std.text.string
@@ -33,66 +33,67 @@ FZ_SEED = 20260623
 FZ_FULL = "P*: { x: i32 }\nf* = (p: P) i32 { p.x .match ({ 0 => 1, _ => 2 }) }\ntest* = () i32 { f(P(x: 5)) }"
 // ── small builders (the value harness can't reach these; we build Zen source strings by hand) ─────
 // append a decimal integer VALUE (no leading zeros) — for generated type-cycle names.
-fz_app_int = (mp: MutPtr<Malloc>, s: String, n: i64) String {
+fz_app_int = (mp: Allocator, s: String, n: i64) String {
     (n < 10).match ({
         true  => {
             d: u8 = ('0' + n).to_u8()
-            mp.push_in(s, d).expect("fuzz: oom")
+            mp.addr().push_in(s, d).expect("fuzz: oom")
         },
         false => {
             s2 = mp.fz_app_int(s, n / 10)
             d2: u8 = ('0' + (n - n / 10 * 10)).to_u8()
-            mp.push_in(s2, d2).expect("fuzz: oom")
+            mp.addr().push_in(s2, d2).expect("fuzz: oom")
         },
     })
 }
 // append `frag` n times — for N-deep unterminated blocks / parens / tyarg tails.
-fz_rep = (mp: MutPtr<Malloc>, s: String, frag: StringView, i: i64, n: i64) String {
-    (i >= n).then({ s }, { mp.fz_rep(s.append_in(mp, frag).expect("fuzz: oom"), frag, i + 1, n) })
+fz_rep = (mp: Allocator, s: String, frag: StringView, i: i64, n: i64) String {
+    (i >= n).match ({
+        true  => s,
+        false => mp.fz_rep(s.append_in(mp.addr(), frag).expect("fuzz: oom"), frag, i + 1, n),
+    })
 }
 // build `pre` + `frag`×n + `post` as one source string — for the deep-nesting recursion bombs below.
-fz_deep = (
-    mp: MutPtr<Malloc>,
-    pre: StringView,
-    frag: StringView,
-    n: i64,
-    post: StringView,
-) StringView {
+fz_deep = (mp: Allocator, pre: StringView, frag: StringView, n: i64, post: StringView) StringView {
     s0 = mp
+        .addr()
         .new_in()
         .expect("fuzz: oom")
-        .append_in(mp, pre)
+        .append_in(mp.addr(), pre)
         .expect("fuzz: oom")
-    s1 = mp.fz_rep(s0, frag, 0, n).append_in(mp, post).expect("fuzz: oom")
-    mp.finish_in(s1).expect("fuzz: oom")
+    s1 = mp.fz_rep(s0, frag, 0, n).append_in(mp.addr(), post).expect("fuzz: oom")
+    mp.addr().finish_in(s1).expect("fuzz: oom")
 }
 // "A0*: { f: A1 }\nA1*: { f: A2 }\n...A(n-1)*: { f: A0 }\n" — a by-value struct type cycle of length n.
-fz_cycle = (mp: MutPtr<Malloc>, s: String, i: i64, n: i64) String {
+fz_cycle = (mp: Allocator, s: String, i: i64, n: i64) String {
     (i >= n).match ({
         true  => s,
         false => {
-            s1 = s.append_in(mp, "A").expect("fuzz: oom")
+            s1 = s.append_in(mp.addr(), "A").expect("fuzz: oom")
             s2 = mp.fz_app_int(s1, i)
-            s3 = s2.append_in(mp, "*: { f: A").expect("fuzz: oom")
+            s3 = s2.append_in(mp.addr(), "*: { f: A").expect("fuzz: oom")
             s4 = mp.fz_app_int(s3, (i + 1) % n)
-            s5 = s4.append_in(mp, " }\n").expect("fuzz: oom")
+            s5 = s4.append_in(mp.addr(), " }\n").expect("fuzz: oom")
             mp.fz_cycle(s5, i + 1, n)
         },
     })
 }
 // push the first k bytes of `src` — yields an off-by-token truncation of a real program.
-fz_trunc_go = (mp: MutPtr<Malloc>, s: String, sv: Slice<u8>, i: i64, k: i64) String {
-    (i >= k).then({ s }, { mp.fz_trunc_go(mp.push_in(s, sv[i]).expect("fuzz: oom"), sv, i + 1, k) })
+fz_trunc_go = (mp: Allocator, s: String, sv: Slice<u8>, i: i64, k: i64) String {
+    (i >= k).match ({
+        true  => s,
+        false => mp.fz_trunc_go(mp.addr().push_in(s, sv[i]).expect("fuzz: oom"), sv, i + 1, k),
+    })
 }
-fz_trunc = (mp: MutPtr<Malloc>, src: StringView, k: i64) StringView {
+fz_trunc = (mp: Allocator, src: StringView, k: i64) StringView {
     sv = src.view()
-    s = mp.new_in().expect("fuzz: oom")
-    mp.finish_in(mp.fz_trunc_go(s, sv, 0, k)).expect("fuzz: oom")
+    s = mp.addr().new_in().expect("fuzz: oom")
+    mp.addr().finish_in(mp.fz_trunc_go(s, sv, 0, k)).expect("fuzz: oom")
 }
 // ── input generators (deterministic via the seeded Rng) ───────────────────────────
 // token soup: n random tokens from `toks` joined by spaces.
 fz_soup = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     s: String,
     toks: [StringView],
     nt: i64,
@@ -104,59 +105,68 @@ fz_soup = (
         true  => s,
         false => {
             tok = toks[rp.range(0, nt)]
-            s1 = s.append_in(mp, tok).expect("fuzz: oom")
-            s2 = s1.append_in(mp, " ").expect("fuzz: oom")
+            s1 = s.append_in(mp.addr(), tok).expect("fuzz: oom")
+            s2 = s1.append_in(mp.addr(), " ").expect("fuzz: oom")
             mp.fz_soup(s2, toks, nt, rp, i + 1, n)
         },
     })
 }
 // byte noise: n random printable bytes in [32, 126].
-fz_noise = (mp: MutPtr<Malloc>, s: String, rp: MutPtr<Rng>, i: i64, n: i64) String {
+fz_noise = (mp: Allocator, s: String, rp: MutPtr<Rng>, i: i64, n: i64) String {
     (i >= n).match ({
         true  => s,
         false => {
             b: u8 = (' ' + rp.range(0, 95)).to_u8()
-            mp.fz_noise(mp.push_in(s, b).expect("fuzz: oom"), rp, i + 1, n)
+            mp.fz_noise(mp.addr().push_in(s, b).expect("fuzz: oom"), rp, i + 1, n)
         },
     })
 }
 // grammar-aware malformed programs aimed at the recursion sites (cycles, unterminated nests, tyargs,
 // recursive generics, polymorphic-recursive types, truncations).
-fz_targeted = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, pick: i64) StringView {
+fz_targeted = (mp: Allocator, rp: MutPtr<Rng>, pick: i64) StringView {
     (pick == 0).match ({
         true  => mp
-            .finish_in(mp.fz_cycle(mp.new_in().expect("fuzz: oom"), 0, rp.range(2, 7)))
+            .addr()
+            .finish_in(mp.fz_cycle(mp.addr().new_in().expect("fuzz: oom"), 0, rp.range(2, 7)))
             .expect("fuzz: oom"),
         false => (pick == 1).match ({
             true  => mp
+                .addr()
                 .finish_in(mp.fz_rep(mp
+                    .addr()
                     .new_in()
                     .expect("fuzz: oom")
-                    .append_in(mp, "test* = () i32 { ")
+                    .append_in(mp.addr(), "test* = () i32 { ")
                     .expect("fuzz: oom"), "{ ", 0, rp.range(1, 9)))
                 .expect("fuzz: oom"),
             false => (pick == 2).match ({
                 true  => mp
+                    .addr()
                     .finish_in(mp.fz_rep(mp
+                        .addr()
                         .new_in()
                         .expect("fuzz: oom")
-                        .append_in(mp, "test* = () i32 { ")
+                        .append_in(mp.addr(), "test* = () i32 { ")
                         .expect("fuzz: oom"), "( ", 0, rp.range(1, 12)))
                     .expect("fuzz: oom"),
                 false => (pick == 3).match ({
                     true  => mp
+                        .addr()
                         .finish_in(mp.fz_rep(mp
+                            .addr()
                             .new_in()
                             .expect("fuzz: oom")
-                            .append_in(mp, "test* = () i32 { 0 .match ({ ")
+                            .append_in(mp.addr(), "test* = () i32 { 0 .match ({ ")
                             .expect("fuzz: oom"), ".V => 0 ", 0, rp.range(1, 7)))
                         .expect("fuzz: oom"),
                     false => (pick == 4).match ({
                         true  => mp
+                            .addr()
                             .finish_in(mp.fz_rep(mp
+                                .addr()
                                 .new_in()
                                 .expect("fuzz: oom")
-                                .append_in(mp, "Foo")
+                                .append_in(mp.addr(), "Foo")
                                 .expect("fuzz: oom"), "<", 0, rp.range(1, 6)))
                             .expect("fuzz: oom"),
                         false => (pick == 5).match ({
@@ -183,15 +193,15 @@ fz_targeted = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, pick: i64) StringView {
 // <missing>` exits 1 (< 124), which the crash-only scoring below would read as "no crash" and print a
 // green dot. Deleting the `save` in fz_batch left all 237 fuzz cases green; the guard turns that into
 // marker 3 (a hard failure) instead of a silent pass.
-fz_cmd = (mp: MutPtr<Malloc>, gid: i64) StringView {
+fz_cmd = (mp: Allocator, gid: i64) StringView {
     z: StringView = ""
     f = mp.zo_idpath("fz", gid, ".zen")
     rc = mp.zo_idpath("fzrc", gid, ".txt")
     mp.zo_join([z, "if [ ! -s ", f, " ]; then printf 3 > ", rc, "; exit 0; fi; timeout 60 ./zen check ", f, " >/dev/null 2>&1; a=$?; timeout 60 ./zen emit ", f, " >/dev/null 2>&1; b=$?; c=0; [ $a -ge 124 ] && c=$((c+1)); [ $b -ge 124 ] && c=$((c+1)); printf %s $c > ", rc])
 }
 // crash count for input gid (0..2). An unreadable marker counts as a crash (fail loud, never silently pass).
-fz_crash_count = (mp: MutPtr<Malloc>, gid: i64) i32 {
-    mp.contents_in(mp.zo_idpath("fzrc", gid, ".txt")).match ({
+fz_crash_count = (mp: Allocator, gid: i64) i32 {
+    mp.addr().contents_in(mp.zo_idpath("fzrc", gid, ".txt")).match ({
         .Ok(s)  => try_parse_int(s).match ({
             .Ok(v)  => to_i32(v),
             .Err(e) => 2,
@@ -200,7 +210,7 @@ fz_crash_count = (mp: MutPtr<Malloc>, gid: i64) i32 {
     })
 }
 // run every generated src through both probes in parallel, then report IN ORDER; returns total crashes.
-fz_batch = (mp: MutPtr<Malloc>, srcs: [StringView], n: i64) i32 {
+fz_batch = (mp: Allocator, srcs: [StringView], n: i64) i32 {
     base = assert_nonnull(malloc(n * 8))
     cmds :: [StringView] = base.slice(n)
     n.times((i) {
@@ -226,31 +236,33 @@ fz_batch = (mp: MutPtr<Malloc>, srcs: [StringView], n: i64) i32 {
 }
 // ── phase drivers: generate all srcs (serial, seeded RNG threaded in the SAME order as before → the
 // inputs are byte-identical to the serial suite), then run the whole phase across the worker pool. ──
-fz_soup_phase = (mp: MutPtr<Malloc>, toks: [StringView], nt: i64, rp: MutPtr<Rng>, n: i64) i32 {
+fz_soup_phase = (mp: Allocator, toks: [StringView], nt: i64, rp: MutPtr<Rng>, n: i64) i32 {
     base = assert_nonnull(malloc(n * 8))
     srcs :: [StringView] = base.slice(n)
     n.times((i) {
         srcs[i] = mp
-            .finish_in(mp.fz_soup(mp.new_in().expect("fuzz: oom"), toks, nt, rp, 0, rp.range(1, 30)))
+            .addr()
+            .finish_in(mp.fz_soup(mp.addr().new_in().expect("fuzz: oom"), toks, nt, rp, 0, rp.range(1, 30)))
             .expect("fuzz: oom")
     })
     r = mp.fz_batch(srcs, n)
     free(base)
     r
 }
-fz_noise_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, n: i64) i32 {
+fz_noise_phase = (mp: Allocator, rp: MutPtr<Rng>, n: i64) i32 {
     base = assert_nonnull(malloc(n * 8))
     srcs :: [StringView] = base.slice(n)
     n.times((i) {
         srcs[i] = mp
-            .finish_in(mp.fz_noise(mp.new_in().expect("fuzz: oom"), rp, 0, rp.range(1, 60)))
+            .addr()
+            .finish_in(mp.fz_noise(mp.addr().new_in().expect("fuzz: oom"), rp, 0, rp.range(1, 60)))
             .expect("fuzz: oom")
     })
     r = mp.fz_batch(srcs, n)
     free(base)
     r
 }
-fz_target_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, n: i64) i32 {
+fz_target_phase = (mp: Allocator, rp: MutPtr<Rng>, n: i64) i32 {
     base = assert_nonnull(malloc(n * 8))
     srcs :: [StringView] = base.slice(n)
     n.times((i) { srcs[i] = mp.fz_targeted(rp, rp.range(0, 8)) })
@@ -259,7 +271,7 @@ fz_target_phase = (mp: MutPtr<Malloc>, rp: MutPtr<Rng>, n: i64) i32 {
     r
 }
 // crash-class REGRESSIONS: one minimal representative per known malformed-input non-termination bug.
-fz_seed_phase = (mp: MutPtr<Malloc>) i32 {
+fz_seed_phase = (mp: Allocator) i32 {
     seeds: [StringView] = ["g = g", "a = b\nb = a", "A*: { b: B } B*: { a: A }", "f = () i32 {", "f = () i32 { 0 .match ({ 1 => 2", "T*: { x: i32 } T.impl(Tr, { m = () void {", "f = () i32 { x = 5  x[0 ", "f = () i32 { s = [1,2]  s[0 = 3 }", "Foo<", "f<T> = (x: T) T { f(x) }", "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }", "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }", "P<T>: { a: T, n: P<P<T>> }  test* = () i32 { 0 }  use* = (b: P<i32>) i32 { 0 }"]    // self-referential global init
     // mutually-referential globals
     // struct A<->B by value
@@ -276,17 +288,19 @@ fz_seed_phase = (mp: MutPtr<Malloc>) i32 {
 // (`x.f.f.f…`, `f(f(f(…)))`) that overflowed the C stack (SIGSEGV) before the parser's recursion-depth
 // cap. Each nests 600 deep — well past the 400 cap — so the parser must REJECT cleanly (exit 1), never
 // crash: parse never builds the pathological tree, so `check`/`emit`/`fmt` all terminate without a signal.
-fz_deep_phase = (mp: MutPtr<Malloc>) i32 {
+fz_deep_phase = (mp: Allocator) i32 {
     d: i64 = 600
     // nested-call bomb needs balanced closers: `f(`×d then `1` then `)`×d.
     c0 = mp
+        .addr()
         .new_in()
         .expect("fuzz: oom")
-        .append_in(mp, "f = (x: i32) i32 { x }  test* = () i32 { ")
+        .append_in(mp.addr(), "f = (x: i32) i32 { x }  test* = () i32 { ")
         .expect("fuzz: oom")
-    c1 = mp.fz_rep(c0, "f(", 0, d).append_in(mp, "1").expect("fuzz: oom")
+    c1 = mp.fz_rep(c0, "f(", 0, d).append_in(mp.addr(), "1").expect("fuzz: oom")
     callc = mp
-        .finish_in(mp.fz_rep(c1, ")", 0, d).append_in(mp, " }").expect("fuzz: oom"))
+        .addr()
+        .finish_in(mp.fz_rep(c1, ")", 0, d).append_in(mp.addr(), " }").expect("fuzz: oom"))
         .expect("fuzz: oom")
     srcs: [StringView] = [mp.fz_deep("test* = () i32 { ", "1+", d, "1 }"), mp.fz_deep("test* = () i32 { ", "1==", d, "1 }"), mp.fz_deep("test* = () i32 { x", ".f", d, " }"), callc]    // operator ladder (add chain)
     // operator ladder (compare chain)
@@ -296,8 +310,7 @@ fz_deep_phase = (mp: MutPtr<Malloc>) i32 {
 }
 // ── category entry: run every phase, sum crashes (a non-zero result is a REAL bug to report) ──────
 harness_fuzz_run* = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     r = seed(FZ_SEED)
     rp = r.addr()
     // a grammar-flavoured alphabet (mirrors _fuzz_campaign.ALPHA): keywords, punctuation, names.

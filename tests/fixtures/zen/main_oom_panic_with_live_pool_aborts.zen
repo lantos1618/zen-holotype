@@ -11,13 +11,18 @@
 // Asserted by the `main_oom_panic_with_live_pool_aborts` shell case: exit 134 and exactly ONE
 // `zen: panic: vec.new: out of memory` line.
 { pool_open, pool_spawn, pool_actor_free, Pool } = std.concurrent.pool
-{ malloc, free, DynAlloc, dyn_of } = std.mem.alloc
+{ malloc, free, Allocator, AllocatorVTable, allocator_of } = std.mem.alloc
 vec = std.collections.vec
 // An allocator that always fails — a deterministic out-of-memory (see pool_supervisor_oom_restart.zen).
 oom_acquire = (s: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
 oom_resize = (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
 oom_release = (s: RawPtr<u8>, p: RawPtr<u8>) void { }
-oom_alloc = () DynAlloc { dyn_of(oom_acquire, oom_resize, oom_release, null_ptr()) }
+oom_vtable ::= AllocatorVTable(
+    vt_alloc: oom_acquire,
+    vt_remap: oom_resize,
+    vt_free: oom_release,
+)
+oom_alloc = () Allocator { allocator_of(null_ptr(), oom_vtable.addr().offset(0)) }
 acc = malloc(8)
 behave = (user: RawPtr<u8>, msg: i64) void { atomic_add_i64(user, msg) }
 main = () i32 {

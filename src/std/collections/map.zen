@@ -1,6 +1,5 @@
 // std.collections.map — a StringView-keyed associative map with an EXPLICIT allocator.
-// Every op that allocates takes the allocator as `a: Allocator` and goes through std.mem.alloc's `Allocator`
-// trait — nothing here hides a malloc. Fallible ops (`empty`, `of`, `clone`, `put`, `append`, `grow`) return
+// Allocating operations take an explicit backend. Fallible operations return
 // Result<Map<T>, IoError> — allocation failure is a value: `.expect("…")` at fail-fast roots,
 // `.or_return()` inside Result-returning fns.
 //
@@ -41,7 +40,7 @@
 //      explicit deep copy with `m.clone(a).expect("clone")` first (clone is fallible — it allocates),
 //      then mutate the copy.
 //
-{ Allocator, try_acquire3 } = std.mem.alloc    // explicit allocator trait; try_acquire3 = all-or-nothing 3-buffer acquire
+{ AllocatorBackend, try_acquire3 } = std.mem.alloc    // explicit allocator trait; try_acquire3 = all-or-nothing 3-buffer acquire
 { Result, IoError, Opt } = std.core.result
 { view } = std.text.str    // byte-wise equality (`==` on strings compares POINTERS) + hashing view
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
@@ -100,7 +99,7 @@ Map*<T>: {
         out
     }
     has = (m: Map<T>, k: StringView) bool { m.find(k) >= 0 }
-    grow = (m: Map<T>, a: Allocator) Result<Map<T>, IoError> {
+    grow = (m: Map<T>, a: AllocatorBackend) Result<Map<T>, IoError> {
         cap = m.cap * 2 + 1
         a.try_acquire3(cap * sizeof(MKey), cap * sizeof(T), cap * 2 * sizeof(MIdx)).match ({
             .Ok(bufs) => {
@@ -179,7 +178,7 @@ Map*<T>: {
         ix[b] = slot
         m
     }
-    append = (m: Map<T>, a: Allocator, k: StringView, v: T) Result<Map<T>, IoError> {
+    append = (m: Map<T>, a: AllocatorBackend, k: StringView, v: T) Result<Map<T>, IoError> {
         k = k
         v = v
         out: Result<Map<T>, IoError> = (m.len < m.cap).match ({
@@ -222,7 +221,7 @@ Map*<T>: {
         })
         out
     }
-    put = (m: Map<T>, a: Allocator, k: StringView, v: T) Result<Map<T>, IoError> {
+    put = (m: Map<T>, a: AllocatorBackend, k: StringView, v: T) Result<Map<T>, IoError> {
         // Insert or upsert (allocation failure is a value). RETURNS the updated map — always rebind to
         // the result (`m = m.put(...).expect("…")`). On grow the buffers are realloced, so any handle
         // captured before this call dangles (see the VALUE-MOLD CONTRACT above). On an existing key the
@@ -239,12 +238,12 @@ Map*<T>: {
         })
         out
     }
-    free = (m: Map<T>, a: Allocator) void {
+    free = (m: Map<T>, a: AllocatorBackend) void {
         a.release(m.keys)
         a.release(m.vals)
         a.release(m.idx)
     }
-    clone = (m: Map<T>, a: Allocator) Result<Map<T>, IoError> {
+    clone = (m: Map<T>, a: AllocatorBackend) Result<Map<T>, IoError> {
         // Deep-copy the map into fresh buffers from `a`, giving the result INDEPENDENT storage: mutating
         // the clone (or the original) never writes through to the other. This is the tool for value
         // semantics the by-value header doesn't provide on its own — clone before handing a Map to a child
@@ -336,7 +335,7 @@ mchain = (ks: [StringView], ix: [i64], cap: i64, e: i64, k: StringView) i64 {
 //   m = r.expect("empty")
 // The index is reindexed (its single bucket head cleared to -1) so `find`/`get`
 // on the empty map return absent immediately. Pair with `put`/`get`/`free` like `of`.
-empty*<T> = (a: Allocator) Result<Map<T>, IoError> {
+empty*<T> = (a: AllocatorBackend) Result<Map<T>, IoError> {
     a.try_acquire3(sizeof(MKey), sizeof(T), 2 * sizeof(MIdx)).match ({
         .Ok(bufs) => {
             kp = bufs.b1
@@ -360,7 +359,7 @@ empty*<T> = (a: Allocator) Result<Map<T>, IoError> {
 }
 // a `Map<T>` seeded with one entry, its buffers acquired from `a`. T inferred from the seed value
 // (Zen has no call-site type args). Starts at cap 1.
-of*<T> = (a: Allocator, seed_key: StringView, seed_val: T) Result<Map<T>, IoError> {
+of*<T> = (a: AllocatorBackend, seed_key: StringView, seed_val: T) Result<Map<T>, IoError> {
     a.try_acquire3(sizeof(MKey), sizeof(T), 2 * sizeof(MIdx)).match ({
         .Ok(bufs) => {
             kp = bufs.b1

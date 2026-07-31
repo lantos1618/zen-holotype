@@ -14,7 +14,7 @@
 //   • zen-asan missing and scripts/fuzz-build.sh could not produce it
 //   • zen-asan still missing after the build
 //   • an empty corpus
-{ Malloc } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 { save, shell } = std.io.file
 { is_dir, read_dir } = std.sys.fs
 { access } = std.c.libc
@@ -46,17 +46,17 @@ sort_paths = (xs: [StringView]) void {
     xs.sort_by((x: StringView, y: StringView) bool { x.sv_lt(y) })
 }
 // ── the corpus walk (`find <dir> -name '*.zen'`, a missing dir contributing nothing) ──
-walk = (mp: MutPtr<Malloc>, dir: StringView, acc: String) String {
-    entries = mp.read_dir(dir).expect("fuzz-corpus: cannot read directory")
+walk = (mp: Allocator, dir: StringView, acc: String) String {
+    entries = mp.addr().read_dir(dir).expect("fuzz-corpus: cannot read directory")
     acc2 ::= acc
     entries.loop((h, i, entry) {
-        full = mp.cat_in(mp.cat_in(dir, "/"), entry)
+        full = mp.addr().cat_in(mp.addr().cat_in(dir, "/"), entry)
         acc2 = full.is_dir().match ({
             true  => mp.walk(full, acc2),
             false => entry.ends_with(".zen").match ({
                 true  => {
                     g_found = g_found + 1
-                    line = (g_found == 1).then({ full }, { mp.cat_in("\n", full) })
+                    line = (g_found == 1).then({ full }, { mp.addr().cat_in("\n", full) })
                     mp.append_in(acc2, line).expect("fuzz-corpus: oom")
                 },
                 false => acc2,
@@ -65,7 +65,7 @@ walk = (mp: MutPtr<Malloc>, dir: StringView, acc: String) String {
     })
     acc2
 }
-walk_if_dir = (mp: MutPtr<Malloc>, dir: StringView, acc: String) String {
+walk_if_dir = (mp: Allocator, dir: StringView, acc: String) String {
     dir.is_dir().then({ mp.walk(dir, acc) }, { acc })
 }
 // ── hit classification ────────────────────────────────────────────────────────
@@ -93,32 +93,36 @@ is_excerpt_line = (line: StringView) bool {
         || line.contains("SUMMARY")
         || line.has_frame_mark()
 }
-print_excerpt = (mp: MutPtr<Malloc>, o: StringView) void {
+print_excerpt = (mp: Allocator, o: StringView) void {
     kept ::= 0
-    mp.split_in(o, '\n').loop((h, i, line) {
+    mp.addr().split_in(o, '\n').loop((h, i, line) {
         (is_excerpt_line(line) && kept < EXCERPT_LINES).then({
             kept = kept + 1
             format("{}\n", [arg_str(line)])
         })
     })
 }
-report_hit = (mp: MutPtr<Malloc>, mode: StringView, f: StringView, o: StringView, rc: i64) void {
+report_hit = (mp: Allocator, mode: StringView, f: StringView, o: StringView, rc: i64) void {
     format("=== SANITIZER HIT: {} {} (rc={}) ===\n", [arg_str(mode), arg_str(f), arg_int(rc)])
     mp.print_excerpt(o)
     g_hits = g_hits + 1
 }
 // One probe: `$ASAN <mode> <file> -o /tmp/fuzz-corpus.out 2>&1`. std.sys.process captures stdout only,
 // so stderr — where every sanitizer banner lands — is folded in with an explicit `2>&1`.
-probe = (mp: MutPtr<Malloc>, asan: StringView, mode: StringView, f: StringView) void {
-    cmd = mp.cat_in(mp.cat_in(mp.cat_in(mp.cat_in(asan, " "), mode), mp.cat_in(" ", f)), " -o /tmp/fuzz-corpus.out 2>&1")
-    mp.run(cmd).match ({
+probe = (mp: Allocator, asan: StringView, mode: StringView, f: StringView) void {
+    cmd = mp
+        .addr()
+        .cat_in(mp
+            .addr()
+            .cat_in(mp.addr().cat_in(mp.addr().cat_in(asan, " "), mode), mp.addr().cat_in(" ", f)), " -o /tmp/fuzz-corpus.out 2>&1")
+    mp.addr().run(cmd).match ({
         .Err(e) => mp.report_hit(mode, f, "spawn failed", 0 - 1),
         .Ok(o)  => (is_sanitizer(o.stdout) || o.exit >= 128).then({
             mp.report_hit(mode, f, o.stdout, o.exit)
         }),
     })
 }
-sweep_file = (mp: MutPtr<Malloc>, asan: StringView, f: StringView) void {
+sweep_file = (mp: Allocator, asan: StringView, f: StringView) void {
     g_files = g_files + 1
     mp.probe(asan, "check", f)
     mp.probe(asan, "build", f)
@@ -135,12 +139,12 @@ sweep_file = (mp: MutPtr<Malloc>, asan: StringView, f: StringView) void {
 // covers tests/, examples/ and tools/) would rewrite that ending away. So they are written out and
 // swept through the same ASan `check` as everything else.
 EDGE_PATH = "/tmp/fuzz-corpus-edge.zen"
-sweep_edge = (mp: MutPtr<Malloc>, asan: StringView, src: StringView) void {
+sweep_edge = (mp: Allocator, asan: StringView, src: StringView) void {
     EDGE_PATH.save(src, src.len()).expect("fuzz-corpus: cannot write the edge-shape input")
     g_files = g_files + 1
     mp.probe(asan, "check", EDGE_PATH)
 }
-sweep_edges = (mp: MutPtr<Malloc>, asan: StringView) void {
+sweep_edges = (mp: Allocator, asan: StringView) void {
     mp.sweep_edge(asan, "main = () void {\n    x = 1\n    x.println()\n}")
     mp.sweep_edge(asan, "main = () void {\n    s = \"hi\\")
     mp.sweep_edge(asan, "main = () void {\n    c = '\\x")
@@ -152,26 +156,32 @@ fail2 = (msg: StringView) i32 {
 }
 // `[ -x "$ASAN" ] || scripts/fuzz-build.sh "$ASAN"` — the builder's own output goes straight to the
 // terminal (std.io.file.shell is the non-capturing system(3) floor), exactly as the shell version did.
-build_asan = (mp: MutPtr<Malloc>, root: StringView, asan: StringView) bool {
-    cmd = mp.cat_in(mp.cat_in(mp.cat_in(root, "/scripts/fuzz-build.sh "), asan), "")
+build_asan = (mp: Allocator, root: StringView, asan: StringView) bool {
+    cmd = mp
+        .addr()
+        .cat_in(mp.addr().cat_in(mp.addr().cat_in(root, "/scripts/fuzz-build.sh "), asan), "")
     cmd.shell().match ({
         .Ok(rc) => rc == 0,
         .Err(e) => false,
     })
 }
-ensure_asan = (mp: MutPtr<Malloc>, root: StringView, asan: StringView) i32 {
+ensure_asan = (mp: Allocator, root: StringView, asan: StringView) i32 {
     asan.is_exec().match ({
         true  => 0,
         false => mp.build_asan(root, asan).match ({
             true  => asan.is_exec().match ({
                 true  => 0,
-                false => fail2(mp.cat_in("fuzz-corpus: FAIL — ", mp.cat_in(asan, " is missing after build"))),
+                false => fail2(mp
+                    .addr()
+                    .cat_in("fuzz-corpus: FAIL — ", mp
+                        .addr()
+                        .cat_in(asan, " is missing after build"))),
             }),
-            false => fail2(mp.cat_in("fuzz-corpus: FAIL — could not build ", asan)),
+            false => fail2(mp.addr().cat_in("fuzz-corpus: FAIL — could not build ", asan)),
         }),
     })
 }
-sweep = (mp: MutPtr<Malloc>, asan: StringView, corpus: [StringView]) i32 {
+sweep = (mp: Allocator, asan: StringView, corpus: [StringView]) i32 {
     corpus.sort_paths()
     corpus.loop((h, i, f) {
         mp.sweep_file(asan, f)
@@ -180,22 +190,21 @@ sweep = (mp: MutPtr<Malloc>, asan: StringView, corpus: [StringView]) i32 {
     format("corpus: {} files, {} sanitizer hits\n", [arg_int(g_files), arg_int(g_hits)])
     (g_hits == 0).then({ 0 }, { 1 })
 }
-run_sweep = (mp: MutPtr<Malloc>, root: StringView, asan: StringView) i32 {
-    empty = mp.init(8192).expect("fuzz-corpus: oom")
-    fixtures = mp.walk_if_dir(mp.cat_in(root, "/tests/fixtures/zen"), empty)
-    both = mp.walk_if_dir(mp.cat_in(root, "/examples"), fixtures)
-    listed = both.finish_in(mp).expect("fuzz-corpus: oom")
+run_sweep = (mp: Allocator, root: StringView, asan: StringView) i32 {
+    empty = mp.addr().init(8192).expect("fuzz-corpus: oom")
+    fixtures = mp.walk_if_dir(mp.addr().cat_in(root, "/tests/fixtures/zen"), empty)
+    both = mp.walk_if_dir(mp.addr().cat_in(root, "/examples"), fixtures)
+    listed = mp.addr().finish_in(both).expect("fuzz-corpus: oom")
     // An empty corpus is a broken run, not a clean one.
     (g_found == 0).match ({
         true  => fail2("fuzz-corpus: FAIL — no corpus files found under tests/fixtures/zen or examples"),
-        false => mp.sweep(asan, mp.split_in(listed, '\n')),
+        false => mp.sweep(asan, mp.addr().split_in(listed, '\n')),
     })
 }
 main = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     root = (argc() > 1).then({ arg(1) }, { "." })
-    asan = mp.cat_in(root, "/zen-asan")
+    asan = mp.addr().cat_in(root, "/zen-asan")
     set_env("ASAN_OPTIONS", ASAN_OPTS)
     set_env("UBSAN_OPTIONS", UBSAN_OPTS)
     (mp.ensure_asan(root, asan) == 0).then({ mp.run_sweep(root, asan) }, { 2 })

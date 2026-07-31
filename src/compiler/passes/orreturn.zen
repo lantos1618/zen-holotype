@@ -4,10 +4,10 @@
   mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at, sif, slett_at, slett_atm, slit, sret, tvoid,
   vref_at } = compiler.genc
 { gstr_int, is_logic_op, is_or_return_fn } = compiler.astops
-{ recall } = compiler.check
+{ cebuf, cenode, recall } = compiler.check
 { is_or_return_call } = compiler.check_resolve
 { remk_match } = compiler.check_desugar
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { loop_at } = std.core.count
 orx_count* = (e: Ptr<Expr>) i32 {
     load(e).match ({
@@ -63,7 +63,7 @@ orx_recv_count = (e: Ptr<Expr>) i32 {
 // A hoist temp name: `_orx_<slot>_<pos>`. The slot (the running hoist index of the enclosing scope)
 // disambiguates same-position synthesized calls; the source pos disambiguates statements (slots
 // restart per statement, but two statements never share a user-written call position).
-orx_name = (a: MutPtr<Malloc>, slot: i32, pos: i32) StringView {
+orx_name = (a: Allocator, slot: i32, pos: i32) StringView {
     s ::= a.gstr_string(48)
     s = s.gstr_append(a, "_orx_")
     s = s.gstr_int(a, slot.to_i64())
@@ -89,7 +89,7 @@ orx_rw_mk = (e: Ptr<Expr>, n: i32) OrxRw {
         n: n,
     )
 }
-orx_rw* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) OrxRw {
+orx_rw* = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) OrxRw {
     (e.orx_count() == 0).match ({
         true  => orx_rw_mk(e, n),
         false => load(e).match ({
@@ -129,7 +129,7 @@ orx_rw* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) Orx
         }),
     })
 }
-orx_rw_args = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]) OrxRwA {
+orx_rw_args = (a: Allocator, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]) OrxRwA {
     buf ::= a.cebuf(args.len)
     k ::= n0
     args.loop_at((i, ar) {
@@ -144,7 +144,7 @@ orx_rw_args = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]
 }
 // args first (innermost-first: the receiver's own hoists land before this one), then hoist the
 // or_return call itself into a fresh temp let and read the temp at the original site.
-orx_rw_call = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, c: CallData) OrxRw {
+orx_rw_call = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, c: CallData) OrxRw {
     r = a.orx_rw_args(hbuf, base, n, c.args)
     ncall = a.recall(c, c.fn, r.args)
     is_or_return_fn(c).match ({
@@ -157,7 +157,7 @@ orx_rw_call = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, c: CallData) 
     })
 }
 // a short-circuit rhs is conditionally evaluated: leave it for resolve_orx to wrap in place.
-orx_rw_bin = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, b: BinData) OrxRw {
+orx_rw_bin = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, b: BinData) OrxRw {
     l2 = a.orx_rw(hbuf, base, n, b.lhs)
     is_logic_op(b.op).match ({
         true  => orx_rw_mk(a.cenode(bin_at(b.op, l2.e, b.rhs, b.pos)), l2.n),
@@ -167,7 +167,7 @@ orx_rw_bin = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, b: BinData) Or
         },
     })
 }
-orx_rw_mkstruct = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, sd: MakeStructData) OrxRw {
+orx_rw_mkstruct = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, sd: MakeStructData) OrxRw {
     buf ::= cbuf<FieldInit>(a, sd.inits.len)
     k ::= n
     sd.inits.loop_at((i, fi) {
@@ -179,7 +179,7 @@ orx_rw_mkstruct = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, n: i32, sd: MakeS
 }
 // rewrite ONE statement's expressions, hoisting into hbuf; the statement itself is rebuilt with the
 // temps substituted. A direct or_return let keeps its top call (only its receiver is rewritten).
-orx_rw_recv = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, e: Ptr<Expr>) Ptr<Expr> {
+orx_rw_recv = (a: Allocator, hbuf: [Stmt], base: i32, e: Ptr<Expr>) Ptr<Expr> {
     out ::= e
     load(e).match ({
         .Call(c) => {
@@ -190,7 +190,7 @@ orx_rw_recv = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, e: Ptr<Expr>) Ptr<Exp
     })
     out
 }
-orx_rw_stmt* = (a: MutPtr<Malloc>, hbuf: [Stmt], base: i32, st: Stmt) Stmt {
+orx_rw_stmt* = (a: Allocator, hbuf: [Stmt], base: i32, st: Stmt) Stmt {
     out ::= st
     st.match ({
         .Let(l)      => {

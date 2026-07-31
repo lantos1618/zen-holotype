@@ -6,7 +6,7 @@
 { impl_cname_in } = compiler.mangle
 { DeclIndex, Env, arm_env, dispatch_recv, dispatch_recv_name, extend_env, is_intrinsic, is_void_ty,
   pointee_of, recv_name } = compiler.check
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { slice_any } = compiler.astops
 { expr_fold_children } = compiler.ast.expr_children
 { expect } = std.core.result
@@ -27,14 +27,14 @@ DeadCell: {
     name: StringView,
     tail: Ptr<DeadList>,
 }
-dead_buf = (a: MutPtr<Malloc>) [DeadList] { slice(a.acquire_or_die(sizeof(DeadList)), 1) }
-dead_node = (a: MutPtr<Malloc>, v: DeadList) Ptr<DeadList> {
+dead_buf = (a: Allocator) [DeadList] { slice(a.acquire_or_die(sizeof(DeadList)), 1) }
+dead_node = (a: Allocator, v: DeadList) Ptr<DeadList> {
     buf ::= a.dead_buf()
     buf[0] = v
     buf[0].addr()
 }
-dead_nil* = (a: MutPtr<Malloc>) Ptr<DeadList> { a.dead_node(.DeadNil) }
-dead_cons* = (a: MutPtr<Malloc>, name: StringView, tail: Ptr<DeadList>) Ptr<DeadList> {
+dead_nil* = (a: Allocator) Ptr<DeadList> { a.dead_node(.DeadNil) }
+dead_cons* = (a: Allocator, name: StringView, tail: Ptr<DeadList>) Ptr<DeadList> {
     a.dead_node(.DeadCons(DeadCell(
         name: name,
         tail: tail,
@@ -49,7 +49,7 @@ dead_has* = (seen: Ptr<DeadList>, name: StringView) bool {
 // REVIVAL: rebuild the kill-set without `name`. Rebinding a freed/moved local to a fresh value clears
 // its dead state (so `p = malloc(); a.release(p); p = malloc(); use(p)` and the idiomatic
 // `p = a.resize(p, n)` are NOT use-after-free). Removes every occurrence (dups are harmless).
-dead_remove* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, name: StringView) Ptr<DeadList> {
+dead_remove* = (a: Allocator, seen: Ptr<DeadList>, name: StringView) Ptr<DeadList> {
     seen.match ({
         .DeadNil     => seen,
         .DeadCons(c) => (c.name == name).match ({
@@ -72,19 +72,14 @@ AliasCell: {
     y: StringView,
     tail: Ptr<AliasList>,
 }
-alias_buf = (a: MutPtr<Malloc>) [AliasList] { slice(a.acquire_or_die(sizeof(AliasList)), 1) }
-alias_node = (a: MutPtr<Malloc>, v: AliasList) Ptr<AliasList> {
+alias_buf = (a: Allocator) [AliasList] { slice(a.acquire_or_die(sizeof(AliasList)), 1) }
+alias_node = (a: Allocator, v: AliasList) Ptr<AliasList> {
     buf ::= a.alias_buf()
     buf[0] = v
     buf[0].addr()
 }
-alias_nil* = (a: MutPtr<Malloc>) Ptr<AliasList> { a.alias_node(.AliasNil) }
-alias_cons = (
-    a: MutPtr<Malloc>,
-    x: StringView,
-    y: StringView,
-    tail: Ptr<AliasList>,
-) Ptr<AliasList> {
+alias_nil* = (a: Allocator) Ptr<AliasList> { a.alias_node(.AliasNil) }
+alias_cons = (a: Allocator, x: StringView, y: StringView, tail: Ptr<AliasList>) Ptr<AliasList> {
     a.alias_node(.AliasCons(AliasCell(
         x: x,
         y: y,
@@ -92,7 +87,7 @@ alias_cons = (
     )))
 }
 // drop every pair mentioning `name` — a rebind of `name` detaches it from its old class.
-alias_drop = (a: MutPtr<Malloc>, al: Ptr<AliasList>, name: StringView) Ptr<AliasList> {
+alias_drop = (a: Allocator, al: Ptr<AliasList>, name: StringView) Ptr<AliasList> {
     al.match ({
         .AliasNil     => al,
         .AliasCons(c) => (c.x == name || c.y == name).match ({
@@ -104,7 +99,7 @@ alias_drop = (a: MutPtr<Malloc>, al: Ptr<AliasList>, name: StringView) Ptr<Alias
 // grow `acc` with every name reachable from `name` through the pair list (transitive closure; `acc`
 // doubles as the visited set, so shared members are added once and cycles terminate).
 alias_reach = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     rest: Ptr<AliasList>,
     full: Ptr<AliasList>,
     name: StringView,
@@ -127,7 +122,7 @@ alias_reach = (
 // kill `name` AND its alias class: every class member joins the kill-set (its own fresh closure set,
 // so members already dead never mask the traversal).
 dead_kill* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
     name: StringView,
@@ -546,7 +541,7 @@ fn_frees_through_ptr = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
 // callee, mark that local dead (moved into the callee). Runs in own_step so both passes see the kill.
 // Also (re-census #1): an owner passed BY POINTER (`o.addr()`) to a borrow whose callee frees through it.
 own_call_kills = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -582,7 +577,7 @@ own_call_kills = (
 // dispatch own_call_kills on the top-level call of an expr (a bare call statement / a call as a
 // let/assign value). Nested-deeper calls under-reject (out of the direct-call slice's scope).
 own_expr_call_kills = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -594,7 +589,7 @@ own_expr_call_kills = (
     })
 }
 own_stmt_call_kills = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -638,7 +633,7 @@ own_moved_var* = (env: Env, e: Ptr<Expr>) StringView {
 }
 // kill the source owner stored into a slice slot by `arr[i] = o` (the value is a bare `Own<T>` Var).
 indexset_own_kill = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -652,7 +647,7 @@ indexset_own_kill = (
     out
 }
 own_expr_struct_kills = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -674,7 +669,7 @@ own_expr_struct_kills = (
 // dispatch struct/slice move-kills on the top-level value of a let/assign/expr statement (and the value
 // of `arr[i] = o`). Nested-deeper literals under-reject (same direct-value scope as own_stmt_call_kills).
 own_stmt_struct_kills = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -805,8 +800,8 @@ mode_of = (decls: [Decl], t: Ty) i32 {
 // a readonly alias that still reaches a MutPtr) are rejected — a cross-actor data race. Behavior-identical
 // to the previous `ty_reaches_mutptr(...) == false` leaf (see mode_of arms).
 mode_sendable = (m: i32) bool { m == md_owned() || m == md_frozen() }
-// ALLOCATOR-CENTRIC free detection. The free surface is the `Allocator` trait, generic over every
-// allocator (built-in Heap/Malloc and user-defined) because conformance fixes the method names:
+// ALLOCATOR-CENTRIC free detection. The free surface is the `AllocatorBackend` trait, generic over every
+// allocator (built-in Heap/RequestArena and user-defined) because conformance fixes the method names:
 //   a.release(p)     — frees ptr arg `p`        (receiver `a` is a MutPtr<_>, NOT an Own/Rc/Arc)
 //   a.release_slice(xs) — frees the BACKBONE of the owned slice `xs` (std.mem.alloc). Recognized on the
 //                    SAME line as `release`: it is `a.release(xs.ptr)` with the local, not a member
@@ -841,7 +836,7 @@ alloc_free_call_name = (env: Env, c: CallData) StringView {
 // The three matchers above name a VERB at an ARITY, so `v.free(a)` — which desugars to `free(v, a)`,
 // two args — walked straight past the arity-1 `free`, and no use-after-free was reported for Vec, Set,
 // Map, HMap, BTreeMap, BTreeSet, ActorSystem, ActorCell or ActorHandle: every one of them spells its
-// release `free(self, Allocator)`. Widening the arity would only move the hole one hop — `deinit`,
+// release `free(self, AllocatorBackend)`. Widening the arity would only move the hole one hop — `deinit`,
 // `close`, `dispose`, `free_in` and the next container's verb are each one rename away.
 // So the rule below keys on NEITHER the name NOR the arity. It resolves the call through the
 // RECEIVER'S TYPE — the same dispatch the compiler itself performs — and asks the RESOLVED METHOD'S
@@ -952,7 +947,7 @@ alloc_free_stmt_name = (env: Env, st: Stmt) StringView {
 // A dot is not a legal identifier byte, so this key can never collide with a bare-local name, and distinct
 // (base, field) pairs map to distinct keys — letting a field pointer join the same alias machinery as a
 // bare local. Deeper chains (`h.inner.ptr`) stay untracked (under-reject, never over-reject).
-member_field_name = (a: MutPtr<Malloc>, e: Ptr<Expr>) StringView {
+member_field_name = (a: Allocator, e: Ptr<Expr>) StringView {
     load(e).match ({
         .Member(m) => load(m.obj).match ({
             .Var(v) => a
@@ -968,7 +963,7 @@ member_field_name = (a: MutPtr<Malloc>, e: Ptr<Expr>) StringView {
 }
 // `base.field` is dead only inside a function that has already freed something (a non-empty kill-set),
 // so the key allocation is skipped on the common no-free path.
-member_path_dead* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, e: Ptr<Expr>) bool {
+member_path_dead* = (a: Allocator, seen: Ptr<DeadList>, e: Ptr<Expr>) bool {
     seen.match ({
         .DeadNil     => false,
         .DeadCons(c) => seen.dead_has(a.member_field_name(e)),
@@ -978,13 +973,13 @@ member_path_dead* = (a: MutPtr<Malloc>, seen: Ptr<DeadList>, e: Ptr<Expr>) bool 
 // field (`h.ptr`) IS a rebind of that field's dotted alias key (so a later reassignment revives it).
 // the (re)bound name of an assign/index target (bare local or dotted field key, else ""). Hoisted to its
 // own fn: a nested match inside an outer statement-match arm miscompiles, so the load+match lives here.
-target_var_name = (a: MutPtr<Malloc>, t: Ptr<Expr>) StringView {
+target_var_name = (a: Allocator, t: Ptr<Expr>) StringView {
     load(t).match ({
         .Var(v) => v.name,
         _       => a.member_field_name(t),
     })
 }
-rebind_stmt_name = (a: MutPtr<Malloc>, st: Stmt) StringView {
+rebind_stmt_name = (a: Allocator, st: Stmt) StringView {
     st.match ({
         .Let(l)    => l.name,
         .Assign(x) => a.target_var_name(x.target),
@@ -1009,7 +1004,7 @@ alias_src_name = (env: Env, st: Stmt) StringView {
 // thread the alias-pair set across a statement: a rebind detaches the target from its old class,
 // then a direct pointer copy pairs target and source. Runs alongside own_step (aliases established
 // BEFORE a statement govern that statement's kills).
-alias_step* = (a: MutPtr<Malloc>, env: Env, al: Ptr<AliasList>, st: Stmt) Ptr<AliasList> {
+alias_step* = (a: Allocator, env: Env, al: Ptr<AliasList>, st: Stmt) Ptr<AliasList> {
     rb = a.rebind_stmt_name(st)
     out ::= rb.is_empty().then({ al }, { a.alias_drop(al, rb) })
     src = env.alias_src_name(st)
@@ -1037,7 +1032,7 @@ consume_name = (env: Env, st: Stmt) StringView {
 // the post-branch set — this is what keeps the common error-path idiom legal:
 //   cond.match ({ err => { a.release(p)  return 1 }, ok => {} })   a.release(p)   // NOT a double-free
 // (the freeing arm returned, so the `release(p)` after only runs on the ok path, where p is still live).
-dead_union = (a: MutPtr<Malloc>, x: Ptr<DeadList>, y: Ptr<DeadList>) Ptr<DeadList> {
+dead_union = (a: Allocator, x: Ptr<DeadList>, y: Ptr<DeadList>) Ptr<DeadList> {
     x.match ({
         .DeadNil     => y,
         .DeadCons(c) => a.dead_cons(c.name, a.dead_union(c.tail, y)),
@@ -1063,7 +1058,7 @@ expr_falls_through = (e: Ptr<Expr>) bool {
 // net dead-set after a (possibly branching) statement body — threads own_step + alias_step + env
 // Follow the same environment/alias steps as the ownership diagnostic walk, but return the final kill-set.
 own_dead_body* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -1082,7 +1077,7 @@ own_dead_body* = (
 // union of the per-arm net dead-sets, over the arms that fall through (a returning arm contributes
 // nothing to the post-match set). Each arm is evaluated from the pre-match kill-set `seen`.
 own_dead_arms = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -1100,7 +1095,7 @@ own_dead_arms = (
 // net dead-set after an expression in statement position (a statement-position match, a block, a ternary,
 // or a bare free/consume call as a match-arm body). Mirrors own_step's free/consume detection.
 own_dead_expr = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -1143,7 +1138,7 @@ own_dead_expr = (
     })
 }
 own_step* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
@@ -1198,7 +1193,7 @@ own_step* = (
 }
 // count each net-new dead name declared OUTSIDE the body, once (`done` dedupes the cons-list walk).
 count_loop_freed* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     net: Ptr<DeadList>,
     base: Ptr<DeadList>,
     locals: Ptr<DeadList>,
@@ -1287,7 +1282,7 @@ ufcs_vis_miss* = (env: Env, c: CallData) bool {
 // (the SAME offset the kind pass reported) and returns a precise message; "" means the offset names no
 // enrichable node, so the driver keeps the generic message. The env is threaded exactly as the validator
 // threads it (params + lets + arms), so receiver and operand types infer the same way.
-zty_generic = (a: MutPtr<Malloc>, g: GenericData) StringView {
+zty_generic = (a: Allocator, g: GenericData) StringView {
     out ::= a.gstr_string(48).gstr_append(a, g.name).gstr_append(a, "<")
     g.args.loop_at((i, t) {
         (i > 0).then({
@@ -1297,7 +1292,7 @@ zty_generic = (a: MutPtr<Malloc>, g: GenericData) StringView {
     })
     out.gstr_append(a, ">").gstr_finish(a)
 }
-zty* = (a: MutPtr<Malloc>, t: Ty) StringView {
+zty* = (a: Allocator, t: Ty) StringView {
     t.match ({
         .I32           => "i32",
         .I64           => "i64",
@@ -1338,7 +1333,7 @@ zty* = (a: MutPtr<Malloc>, t: Ty) StringView {
 // ── must-use: a DISCARDED value-mold ((Self,…) Self) self-mutation (Stage-2 A.1) ───────────────────────
 // A value-mold CONTAINER method (`Map.put`, `Set.add`, … — shape `(Self, …) Self`) RETURNS the updated
 // container and INVALIDATES the receiver: a grow reallocs the backing buffer, so the input header is left
-// dangling. Discarding the result in statement position — `m.put(a, k, v)` as a bare statement, then
+// dangling. Discarding the result in statement position — `m.put(a.addr(), k, v)` as a bare statement, then
 // `m.get(...)` — segfaults while `check` says ok (the #1 trust-killer for a newcomer). This driver-only
 // pass runs on the RAW pre-inline decls (where the call is still a MethodCall; by check_module time the
 // generic method is INLINED away) and rejects such a discard with KMUSTUSE.
@@ -1387,7 +1382,7 @@ mu_is_value_mold = (f: Func) bool {
 }
 // the hoisted inherent func `impl_<Ty>_<Ty>_<m>` (fill_inherent_methods), looked up O(1) via the index.
 mu_func_value_mold = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     ty: StringView,
@@ -1405,7 +1400,7 @@ mu_func_value_mold = (
 }
 // fold one inherent-struct impl's methods into the name→state map (0 unseen, 1 value-mold-only, 2 tainted).
 mu_index_methods = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     m: Map<i64>,
@@ -1427,24 +1422,18 @@ mu_index_methods = (
                 false => 2,
             })
             a.mu_index_methods(decls, idx, m
-                .put(a, p.name, next)
+                .put(a.addr(), p.name, next)
                 .expect("check: method-mold index alloc"), ty, methods, j + 1)
         },
     })
 }
-mu_index_impl = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    idx: DeclIndex,
-    m: Map<i64>,
-    im: ImplData,
-) Map<i64> {
+mu_index_impl = (a: Allocator, decls: [Decl], idx: DeclIndex, m: Map<i64>, im: ImplData) Map<i64> {
     (im.ty == im.trname).then({ a.mu_index_methods(decls, idx, m, im.ty, im.methods, 0) }, { m })
 }
 // method name → 1 iff it is an inherent method AND value-mold on EVERY struct that declares it.
-mu_build_index* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex) Map<i64> {
+mu_build_index* = (a: Allocator, decls: [Decl], idx: DeclIndex) Map<i64> {
     seed: i64 = 0 - 1
-    m ::= of(a, "", seed).expect("check: method-mold index alloc")
+    m ::= of(a.addr(), "", seed).expect("check: method-mold index alloc")
     decls.loop_at((i, d) {
         m = d.match ({
             .DImpl(im) => a.mu_index_impl(decls, idx, m, im),
@@ -1474,7 +1463,7 @@ mu_is_var = (e: Expr) bool {
 // decided by NAME alone: `bound` is the set of names bound in the enclosing function, carried down
 // the walk (params up front, each `=` as the walk passes it, lambda/loop bindings at their arm).
 // A `.MethodCall` names its receiver explicitly, so a like-named local does not shadow it.
-mu_bound_names = (a: MutPtr<Malloc>, bound: Ptr<DeadList>, params: [Param]) Ptr<DeadList> {
+mu_bound_names = (a: Allocator, bound: Ptr<DeadList>, params: [Param]) Ptr<DeadList> {
     out ::= bound
     params.loop_at((i, p) { out = a.dead_cons(p.name, out) })
     out
@@ -1495,13 +1484,13 @@ mu_call_kind = (mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<Expr>) i32 {
         _               => 0,
     })
 }
-mu_arms_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, arms: [ArmData]) i32 {
+mu_arms_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, arms: [ArmData]) i32 {
     acc ::= 0
     arms.loop_at((i, ar) { acc = acc.or(a.mu_expr_kind(mvm, bound, ar.body)) })    // arm body = the arm's VALUE (tail)
     acc
 }
 // recurse into nested control-flow whose bodies can hold discarded statements.
-mu_expr_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<Expr>) i32 {
+mu_expr_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Block(b)  => a.mu_body_kind(mvm, bound, b.stmts),
         // a `xs.loop(…)` body runs for EFFECT — it yields no value, so it has no tail. Its handler,
@@ -1523,7 +1512,7 @@ mu_expr_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<E
 // an ExprStmt: flag a discarded value-mold call when NOT in tail position, and always recurse for nested
 // discards. (Extracted so the nested `is_tail.match(...)` is a plain statement, not a chained arm body.)
 mu_exprstmt_kind = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     mvm: Map<i64>,
     bound: Ptr<DeadList>,
     e: Ptr<Expr>,
@@ -1532,13 +1521,7 @@ mu_exprstmt_kind = (
     head = is_tail.then({ 0 }, { mvm.mu_call_kind(bound, e) })
     head.or(a.mu_expr_kind(mvm, bound, e))
 }
-mu_stmt_kind = (
-    a: MutPtr<Malloc>,
-    mvm: Map<i64>,
-    bound: Ptr<DeadList>,
-    st: Stmt,
-    is_tail: bool,
-) i32 {
+mu_stmt_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, st: Stmt, is_tail: bool) i32 {
     st.match ({
         .ExprStmt(e) => a.mu_exprstmt_kind(mvm, bound, e, is_tail),
         .Let(l)      => a.mu_expr_kind(mvm, bound, l.value),
@@ -1553,7 +1536,7 @@ mu_stmt_kind = (
     })
 }
 mu_stmts_kind = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     mvm: Map<i64>,
     bound: Ptr<DeadList>,
     body: [Stmt],
@@ -1572,14 +1555,14 @@ mu_stmts_kind = (
     acc
 }
 // the body's LAST statement is its produced value (tail) — never a discard; every earlier ExprStmt is.
-mu_body_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, body: [Stmt]) i32 {
+mu_body_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, body: [Stmt]) i32 {
     a.mu_stmts_kind(mvm, bound, body, true)
 }
 // a body run purely for effect (`@while` / `xs.loop`) yields nothing, so no statement in it is a tail.
-mu_effect_body_kind = (a: MutPtr<Malloc>, mvm: Map<i64>, bound: Ptr<DeadList>, body: [Stmt]) i32 {
+mu_effect_body_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, body: [Stmt]) i32 {
     a.mu_stmts_kind(mvm, bound, body, false)
 }
-mu_func_kind* = (a: MutPtr<Malloc>, mvm: Map<i64>, f: Func) i32 {
+mu_func_kind* = (a: Allocator, mvm: Map<i64>, f: Func) i32 {
     a.mu_body_kind(mvm, a.mu_bound_names(a.dead_nil(), f.params), f.body)
 }
 // the root Var name of a member/arrow chain (`s.alloc` -> "s"); "" if not rooted at a plain Var.

@@ -1,6 +1,6 @@
 // @self-hosted-only: runtime allocators. The allocator is the execution mode:
 // SyncArena.checkpoint is a no-op; CoroArena.checkpoint pauses the current coroutine.
-{ Allocator, Heap } = std.mem.alloc
+{ AllocatorBackend, Heap } = std.mem.alloc
 { Arena, make_in } = std.mem.arena
 { expect } = std.core.result
 { checkpoint_current } = std.concurrent.coroutine
@@ -11,19 +11,19 @@ Runtime: {
 }
 SyncArena*: {
     mem: Arena,
-    free_in<A: Allocator> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void {
+    free_in<A: AllocatorBackend> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void {
         runtime.mem.addr().free_in(backing)
     }
-    free<A: Allocator> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void {
+    free<A: AllocatorBackend> = (runtime: MutPtr<SyncArena>, backing: MutPtr<A>) void {
         runtime.free_in(backing)
     }
 }
 CoroArena*: {
     mem: Arena,
-    free_in<A: Allocator> = (runtime: MutPtr<CoroArena>, backing: MutPtr<A>) void {
+    free_in<A: AllocatorBackend> = (runtime: MutPtr<CoroArena>, backing: MutPtr<A>) void {
         runtime.mem.addr().free_in(backing)
     }
-    free<A: Allocator> = (runtime: MutPtr<CoroArena>, backing: MutPtr<A>) void {
+    free<A: AllocatorBackend> = (runtime: MutPtr<CoroArena>, backing: MutPtr<A>) void {
         runtime.free_in(backing)
     }
 }
@@ -40,21 +40,21 @@ CoroArena.impl(Runtime, {
     }
 })
 runtime_checkpoint* = () void { checkpoint_current() }
-SyncArena.impl(Allocator, {
+SyncArena.impl(AllocatorBackend, {
     acquire = (s: MutPtr<SyncArena>, n: i64) RawPtr<u8> { s.mem.addr().acquire(n) }
     resize  = (s: MutPtr<SyncArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
     release = (s: MutPtr<SyncArena>, p: RawPtr<u8>) void { s.mem.addr().release(p) }
 })
-CoroArena.impl(Allocator, {
+CoroArena.impl(AllocatorBackend, {
     acquire = (s: MutPtr<CoroArena>, n: i64) RawPtr<u8> { s.mem.addr().acquire(n) }
     resize  = (s: MutPtr<CoroArena>, p: RawPtr<u8>, n: i64) RawPtr<u8> { s.mem.addr().resize(p, n) }
     release = (s: MutPtr<CoroArena>, p: RawPtr<u8>) void { s.mem.addr().release(p) }
 })
-sync_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena {
+sync_in*<A: AllocatorBackend> = (backing: MutPtr<A>, cap: i64) SyncArena {
     SyncArena(mem: backing.make_in(cap).expect("std.concurrent.runtime: arena allocation failed"))
 }
-coro_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) CoroArena {
+coro_in*<A: AllocatorBackend> = (backing: MutPtr<A>, cap: i64) CoroArena {
     CoroArena(mem: backing.make_in(cap).expect("std.concurrent.runtime: arena allocation failed"))
 }
-sync*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena { backing.sync_in(cap) }
-coro*<A: Allocator> = (backing: MutPtr<A>, cap: i64) CoroArena { backing.coro_in(cap) }
+sync*<A: AllocatorBackend> = (backing: MutPtr<A>, cap: i64) SyncArena { backing.sync_in(cap) }
+coro*<A: AllocatorBackend> = (backing: MutPtr<A>, cap: i64) CoroArena { backing.coro_in(cap) }

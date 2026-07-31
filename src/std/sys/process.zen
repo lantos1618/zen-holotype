@@ -20,7 +20,7 @@
 // stream's own newlines. stderr is left on the parent's stderr — this captures stdout only, the
 // minimal-viable shape; a stderr-capturing variant would need fork+exec+pipe rather than popen.
 { popen, pclose, fgets } = std.c.libc
-{ Allocator, try_acquire } = std.mem.alloc
+{ AllocatorBackend } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { String, init, append_in, finish_in } = std.text.string
 { own_ptr } = std.text.str
@@ -40,7 +40,7 @@ decode_exit = (status: i64) i64 {
 }
 // Drain the pipe `f` into builder `s`, one fgets chunk at a time (recursive — no `@while`). fgets
 // returns NULL at end-of-stream; each non-NULL chunk is a NUL-terminated str appended onto `s`.
-drain = (a: Allocator, f: RawPtr<u8>, chunk: RawPtr<u8>, s: String) Result<String, IoError> {
+drain = (a: AllocatorBackend, f: RawPtr<u8>, chunk: RawPtr<u8>, s: String) Result<String, IoError> {
     got = chunk.fgets(to_i32(CHUNK), f)
     (got == null_ptr()).match ({
         true  => ok(s),
@@ -52,7 +52,7 @@ drain = (a: Allocator, f: RawPtr<u8>, chunk: RawPtr<u8>, s: String) Result<Strin
 }
 // Read the whole pipe into an owned str, close/reap the child, and pair the stdout with its exit code.
 // Split out of `run` so the popen NULL-guard stays a one-liner.
-capture = (a: Allocator, f: RawPtr<u8>) Result<Output, IoError> {
+capture = (a: AllocatorBackend, f: RawPtr<u8>) Result<Output, IoError> {
     a.try_acquire(CHUNK).match ({
         .Err(e)    => {
             f.pclose()
@@ -100,13 +100,13 @@ capture = (a: Allocator, f: RawPtr<u8>) Result<Output, IoError> {
 // `stdout` is allocator-owned — release it via `a.release(out.stdout.own_ptr())` (or let an arena
 // reclaim it). A nonzero exit is NOT an error here: it rides back in `Output.exit` for the caller to
 // inspect (use `run_ok` when a nonzero exit should be an error).
-run* = (a: Allocator, cmd: StringView) Result<Output, IoError> {
+run* = (a: AllocatorBackend, cmd: StringView) Result<Output, IoError> {
     f = cmd.popen("r")
     (f == null_ptr()).then({ err(IoError.NotFound) }, { a.capture(f) })
 }
 // Convenience: run `cmd` and return its stdout, treating a nonzero exit as `.Err(.Errno(code))`. For
 // commands run purely for their output, where a failure should short-circuit the Result chain.
-run_ok* = (a: Allocator, cmd: StringView) Result<StringView, IoError> {
+run_ok* = (a: AllocatorBackend, cmd: StringView) Result<StringView, IoError> {
     a.run(cmd).match ({
         .Err(e) => err(e),
         // On the nonzero-exit path the captured stdout never reaches the caller, so nothing else can

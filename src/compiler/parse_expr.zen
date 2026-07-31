@@ -5,7 +5,7 @@
 { bin_at } = compiler.genc
 { Scan, Token, scan } = compiler.lex
 { at } = std.text.ascii
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { enode, is_op, is_op1, op_str, parse_atom } = compiler.parse_atom
 { is_fat_arrow } = compiler.parse_match
 { pdepth_enter, pdepth_exit, pdepth_over } = compiler.parse_type
@@ -18,14 +18,14 @@ is_muldiv = (src: StringView, t: Token) bool {
     src.is_op(t, '*') || src.is_op(t, '/') || src.is_op(t, '%')
 }
 // Precedence ladder, left-associative unless noted.
-parse_term = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_term = (a: Allocator, src: StringView, pos: i32) PExpr {
     a.term_rest(src, a.parse_atom(src, pos))
 }
-term_rest = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr) PExpr {
+term_rest = (a: Allocator, src: StringView, lhs: PExpr) PExpr {
     sc = src.scan(lhs.next)
     src.is_muldiv(sc.tok).then({ a.term_more(src, lhs, sc) }, { lhs })
 }
-term_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
+term_more = (a: Allocator, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     // DEPTH CAP (see parse_type.zen): a flat operator chain (`1*1*1…`) recurses `_rest`→`_more` per
     // operator WITHOUT re-entering the balanced parse_atom guard, so each ladder level bounds its own
     // chain here. Past the cap, stop folding and return `lhs` (perr already set); the frames unwind.
@@ -43,14 +43,14 @@ term_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_exit()
     r
 }
-parse_expr = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_expr = (a: Allocator, src: StringView, pos: i32) PExpr {
     a.expr_rest(src, a.parse_term(src, pos))
 }
-expr_rest = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr) PExpr {
+expr_rest = (a: Allocator, src: StringView, lhs: PExpr) PExpr {
     sc = src.scan(lhs.next)
     src.is_addsub(sc.tok).then({ a.expr_more(src, lhs, sc) }, { lhs })
 }
-expr_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
+expr_more = (a: Allocator, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_enter()
     r = pdepth_over().match ({
         true  => lhs,
@@ -77,14 +77,14 @@ is_shift = (src: StringView, t: Token) bool {
 shift_op_str = (src: StringView, t: Token) StringView {
     (src.at(t.start) == '<').then({ "<<" }, { ">>" })
 }
-parse_shift = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_shift = (a: Allocator, src: StringView, pos: i32) PExpr {
     a.shift_rest(src, a.parse_expr(src, pos))
 }
-shift_rest = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr) PExpr {
+shift_rest = (a: Allocator, src: StringView, lhs: PExpr) PExpr {
     sc = src.scan(lhs.next)
     src.is_shift(sc.tok).then({ a.shift_more(src, lhs, sc) }, { lhs })
 }
-shift_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
+shift_more = (a: Allocator, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_enter()
     r = pdepth_over().match ({
         true  => lhs,
@@ -111,14 +111,14 @@ is_bxor = (src: StringView, t: Token) bool {
         _    => false,
     })
 }
-parse_band = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_band = (a: Allocator, src: StringView, pos: i32) PExpr {
     a.band_rest(src, a.parse_shift(src, pos))
 }
-band_rest = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr) PExpr {
+band_rest = (a: Allocator, src: StringView, lhs: PExpr) PExpr {
     sc = src.scan(lhs.next)
     src.is_band(sc.tok).then({ a.band_more(src, lhs, sc) }, { lhs })
 }
-band_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
+band_more = (a: Allocator, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_enter()
     r = pdepth_over().match ({
         true  => lhs,
@@ -135,14 +135,14 @@ band_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
 }
 // Exported for enum-variant default exprs (`Name = expr`): parses everything tighter than a single
 // `|`, so the variant separator is never swallowed as bitwise-or.
-parse_bxor* = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_bxor* = (a: Allocator, src: StringView, pos: i32) PExpr {
     a.bxor_rest(src, a.parse_band(src, pos))
 }
-bxor_rest = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr) PExpr {
+bxor_rest = (a: Allocator, src: StringView, lhs: PExpr) PExpr {
     sc = src.scan(lhs.next)
     src.is_bxor(sc.tok).then({ a.bxor_more(src, lhs, sc) }, { lhs })
 }
-bxor_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
+bxor_more = (a: Allocator, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_enter()
     r = pdepth_over().match ({
         true  => lhs,
@@ -157,14 +157,14 @@ bxor_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_exit()
     r
 }
-parse_bor = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_bor = (a: Allocator, src: StringView, pos: i32) PExpr {
     a.bor_rest(src, a.parse_bxor(src, pos))
 }
-bor_rest = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr) PExpr {
+bor_rest = (a: Allocator, src: StringView, lhs: PExpr) PExpr {
     sc = src.scan(lhs.next)
     src.is_op1(sc.tok, '|').then({ a.bor_more(src, lhs, sc) }, { lhs })
 }
-bor_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
+bor_more = (a: Allocator, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_enter()
     r = pdepth_over().match ({
         true  => lhs,
@@ -204,14 +204,14 @@ cmp_op_str = (src: StringView, t: Token) StringView {
         }),
     })
 }
-parse_cmp = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_cmp = (a: Allocator, src: StringView, pos: i32) PExpr {
     a.cmp_rest(src, a.parse_bor(src, pos))
 }
-cmp_rest = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr) PExpr {
+cmp_rest = (a: Allocator, src: StringView, lhs: PExpr) PExpr {
     sc = src.scan(lhs.next)
     src.is_cmp(sc.tok).then({ a.cmp_more(src, lhs, sc) }, { lhs })
 }
-cmp_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
+cmp_more = (a: Allocator, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_enter()
     r = pdepth_over().match ({
         true  => lhs,
@@ -239,14 +239,14 @@ is_or = (src: StringView, t: Token) bool {
         _    => false,
     })
 }
-parse_and = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_and = (a: Allocator, src: StringView, pos: i32) PExpr {
     a.and_rest(src, a.parse_cmp(src, pos))
 }
-and_rest = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr) PExpr {
+and_rest = (a: Allocator, src: StringView, lhs: PExpr) PExpr {
     sc = src.scan(lhs.next)
     src.is_and(sc.tok).then({ a.and_more(src, lhs, sc) }, { lhs })
 }
-and_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
+and_more = (a: Allocator, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_enter()
     r = pdepth_over().match ({
         true  => lhs,
@@ -261,14 +261,14 @@ and_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_exit()
     r
 }
-parse_or* = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_or* = (a: Allocator, src: StringView, pos: i32) PExpr {
     a.or_rest(src, a.parse_and(src, pos))
 }
-or_rest = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr) PExpr {
+or_rest = (a: Allocator, src: StringView, lhs: PExpr) PExpr {
     sc = src.scan(lhs.next)
     src.is_or(sc.tok).then({ a.or_more(src, lhs, sc) }, { lhs })
 }
-or_more = (a: MutPtr<Malloc>, src: StringView, lhs: PExpr, sc: Scan) PExpr {
+or_more = (a: Allocator, src: StringView, lhs: PExpr, sc: Scan) PExpr {
     pdepth_enter()
     r = pdepth_over().match ({
         true  => lhs,

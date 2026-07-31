@@ -23,7 +23,7 @@
 // the prefix-only glob never matched (see SUITE 9 — that omission hid the whole CLI). The scanner
 // mirrors python's regexes over `//`-comment-stripped text; the single-file region tests mirror python's
 // `_code(...).split(marker,1)[…]` substring slicing on comment-stripped source.
-{ Malloc } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 { out, contents_in, shell } = std.io.file
 { ne, view, is_empty, split_in, nbuf, find, contains, starts_with, substr } = std.text.str
 { new_in, push_in, finish_in } = std.text.string
@@ -260,14 +260,14 @@ file_has = (sv: Slice<u8>, name: StringView, kind: i64) bool {
 // strip `//` line comments, keeping the part before `//` on each line plus the newline — byte-exact
 // port of `_code`'s `"\n".join(line.split("//",1)[0] for line in …)`. (No block-comment/string
 // handling, matching python.) Returns an allocator-owned NUL-terminated copy.
-strip_comments_in = (mp: MutPtr<Malloc>, src: StringView) StringView {
+strip_comments_in = (mp: Allocator, src: StringView) StringView {
     sv = src.view()
-    s ::= mp.new_in().expect("harness: oom")
+    s ::= mp.addr().new_in().expect("harness: oom")
     in_comment ::= false
     sv.loop((h, i, b) {
         (b == '\n').match ({
             true  => {
-                s = s.push_in(mp, b).expect("harness: oom")
+                s = s.push_in(mp.addr(), b).expect("harness: oom")
                 in_comment = false
             },
             false => (in_comment == false).then({
@@ -276,34 +276,34 @@ strip_comments_in = (mp: MutPtr<Malloc>, src: StringView) StringView {
                         in_comment = true
                     },
                     false => {
-                        s = s.push_in(mp, b).expect("harness: oom")
+                        s = s.push_in(mp.addr(), b).expect("harness: oom")
                     },
                 })
             }),
         })
     })
-    mp.finish_in(s).expect("harness: oom")
+    mp.addr().finish_in(s).expect("harness: oom")
 }
 // everything strictly AFTER the first occurrence of `m` (python `src.split(m,1)[1]`); "" if absent.
-after_marker = (mp: MutPtr<Malloc>, src: StringView, m: StringView) StringView {
+after_marker = (mp: Allocator, src: StringView, m: StringView) StringView {
     i = src.find(m)
     (i < 0).match ({
         true  => "",
         false => {
             sv = src.view()
             start = i + m.view().len
-            mp.substr(src, start, sv.len - start).expect("harness: oom")
+            mp.addr().substr(src, start, sv.len - start).expect("harness: oom")
         },
     })
 }
 // everything strictly BEFORE the first occurrence of `m` (python `s.split(m,1)[0]`); all of `s` if
 // `m` is absent (python returns the whole string as the sole split field).
-before_marker = (mp: MutPtr<Malloc>, s: StringView, m: StringView) StringView {
+before_marker = (mp: Allocator, s: StringView, m: StringView) StringView {
     j = s.find(m)
-    (j < 0).then({ s }, { mp.substr(s, 0, j).expect("harness: oom") })
+    (j < 0).then({ s }, { mp.addr().substr(s, 0, j).expect("harness: oom") })
 }
 // the region between the first `m1` and the first following `m2` — python `split(m1,1)[1].split(m2,1)[0]`.
-region = (mp: MutPtr<Malloc>, src: StringView, m1: StringView, m2: StringView) StringView {
+region = (mp: Allocator, src: StringView, m1: StringView, m2: StringView) StringView {
     mp.before_marker(mp.after_marker(src, m1), m2)
 }
 not_contains = (s: StringView, needle: StringView) bool {
@@ -334,10 +334,10 @@ file_has_raw_alloc = (sv: Slice<u8>) bool {
         || sv.file_has("realloc", 1)
         || sv.file_has("free", 1)
 }
-alloc_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
+alloc_passes = (mp: Allocator, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
-        false => mp.contents_in(path).match ({
+        false => mp.addr().contents_in(path).match ({
             .Ok(raw) => (raw.view().file_has_raw_alloc() && path.alloc_not_whitelisted()).match ({
                 true  => false,
                 false => true,
@@ -346,11 +346,11 @@ alloc_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
         }),
     })
 }    // unreadable = FAIL, never a silent pass
-alloc_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
+alloc_suite = (mp: Allocator) i32 {
+    mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
-            files = mp.split_in(listing, '\n')
-            results :: [bool] = mp.nbuf(true, files.len)
+            files = mp.addr().split_in(listing, '\n')
+            results :: [bool] = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.alloc_passes(path)
             })
@@ -387,21 +387,21 @@ example_violation = (sv: Slice<u8>) bool {
 // functional loop handle. The check therefore caught zero real violations while banning the one
 // legal form, and examples/zvm.zen had its early exits removed to satisfy it. `@while` above is
 // the imperative loop this family actually targets, and it stays banned.
-example_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
+example_passes = (mp: Allocator, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
-        false => mp.contents_in(path).match ({
+        false => mp.addr().contents_in(path).match ({
             .Ok(raw) => raw.view().example_violation().then({ false }, { true }),
             .Err(e)  => false,
         }),
     })
 }    // unreadable = FAIL, never a silent pass
-example_suite = (mp: MutPtr<Malloc>) i32 {
+example_suite = (mp: Allocator) i32 {
     shell(mp.zo_cmd("find examples -name '*.zen' 2>/dev/null | LC_ALL=C sort > $ZT/ob_examples.txt"))
-    mp.contents_in(mp.zo_path("ob_examples.txt")).match ({
+    mp.addr().contents_in(mp.zo_path("ob_examples.txt")).match ({
         .Ok(listing) => {
-            files = mp.split_in(listing, '\n')
-            results :: [bool] = mp.nbuf(true, files.len)
+            files = mp.addr().split_in(listing, '\n')
+            results :: [bool] = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.example_passes(path)
             })
@@ -429,8 +429,8 @@ line_checkpoint_import = (line: StringView) bool {
         },
     })
 }
-has_checkpoint_import = (mp: MutPtr<Malloc>, clean: StringView) bool {
-    lines = mp.split_in(clean, '\n')
+has_checkpoint_import = (mp: Allocator, clean: StringView) bool {
+    lines = mp.addr().split_in(clean, '\n')
     found ::= false
     lines.loop((h, i, line) {
         line.line_checkpoint_import().then({
@@ -440,12 +440,12 @@ has_checkpoint_import = (mp: MutPtr<Malloc>, clean: StringView) bool {
     })
     found
 }
-checkpoint_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
+checkpoint_passes = (mp: Allocator, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
         false => path.checkpoint_allowed().match ({
             true  => true,
-            false => mp.contents_in(path).match ({
+            false => mp.addr().contents_in(path).match ({
                 .Ok(raw) => {
                     has_call = raw.view().file_has("checkpoint_current", 0)
                     has_imp = raw.contains("checkpoint_current").match ({
@@ -459,11 +459,11 @@ checkpoint_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
         }),
     })
 }    // unreadable = FAIL, never a silent pass
-checkpoint_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
+checkpoint_suite = (mp: Allocator) i32 {
+    mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
-            files = mp.split_in(listing, '\n')
-            results :: [bool] = mp.nbuf(true, files.len)
+            files = mp.addr().split_in(listing, '\n')
+            results :: [bool] = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.checkpoint_passes(path)
             })
@@ -501,23 +501,23 @@ atwhile_allowed = (path: StringView) bool {
 // The five STALE entries flagged by an earlier lane — c_emit, drvutil, parse_expr,
 // std.collections.iter and std.hash, none of which holds a `@while` at all — are gone too. An
 // allowlist entry with nothing behind it is an exemption waiting to be spent by accident.
-atwhile_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
+atwhile_passes = (mp: Allocator, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
         false => path.atwhile_allowed().match ({
             true  => true,
-            false => mp.contents_in(path).match ({
+            false => mp.addr().contents_in(path).match ({
                 .Ok(raw) => raw.view().file_has("@while", 3).then({ false }, { true }),
                 .Err(e)  => false,
             }),
         }),
     })
 }    // unreadable = FAIL, never a silent pass
-atwhile_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
+atwhile_suite = (mp: Allocator) i32 {
+    mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
-            files = mp.split_in(listing, '\n')
-            results :: [bool] = mp.nbuf(true, files.len)
+            files = mp.addr().split_in(listing, '\n')
+            results :: [bool] = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.atwhile_passes(path)
             })
@@ -529,8 +529,8 @@ atwhile_suite = (mp: MutPtr<Malloc>) i32 {
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 5: std.io.file contents_in allocator path keeps failure in Result flow (try_acquire).
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-io_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in("src/std/io/file.zen").match ({
+io_suite = (mp: Allocator) i32 {
+    mp.addr().contents_in("src/std/io/file.zen").match ({
         .Ok(raw) => {
             src = mp.strip_comments_in(raw)
             body = mp.region(src, "read_bytes_alloc", "read_bytes_open")
@@ -544,14 +544,14 @@ io_suite = (mp: MutPtr<Malloc>) i32 {
 // helpers — grow/of go through the all-or-nothing try_acquire3 combinator (which rolls back partially
 // acquired buffers on OOM), append grows through grow; never a bare panicking acquire.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-map_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in("src/std/collections/map.zen").match ({
+map_suite = (mp: Allocator) i32 {
+    mp.addr().contents_in("src/std/collections/map.zen").match ({
         .Ok(raw) => {
             src = mp.strip_comments_in(raw)
             grow = mp.region(src, "grow = (m: Map<T>", "reindex = ")
             appnd = mp.region(src, "append = (m: Map<T>", "put = (m: Map<T>")
             // `of` is the last fn in map.zen, so its region runs to EOF (no following marker).
-            of = mp.after_marker(src, "of*<T> = (a: Allocator")
+            of = mp.after_marker(src, "of*<T> = (a: AllocatorBackend")
             run_suite("boundaries: map fallible paths use result helpers", [grow.found(), appnd.found(), of.found(), grow.contains(".try_acquire3("), grow.not_contains(".acquire("), appnd.contains(".grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire3("), of.not_contains(".acquire(")])
         },
         .Err(e)  => run_suite("boundaries: map (unreadable)", [false]),
@@ -561,8 +561,8 @@ map_suite = (mp: MutPtr<Malloc>) i32 {
 // SUITE 8: std.text.fmt allocator-backed numeric writes (Result-always) go through the unified
 // Result num helpers (never a bare acquire); the plain streaming writes never touch an allocator.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-fmt_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in("src/std/text/fmt.zen").match ({
+fmt_suite = (mp: Allocator) i32 {
+    mp.addr().contents_in("src/std/text/fmt.zen").match ({
         .Ok(raw) => {
             src = mp.strip_comments_in(raw)
             ti = mp.region(src, "write_int_in", "write_float_in")
@@ -583,7 +583,7 @@ fmt_suite = (mp: MutPtr<Malloc>) i32 {
 // overflow the C stack (str_end / unescape / gen_escape_from recursed per byte). Generate a program
 // with a 200000-char string, compile + run it, and assert the runtime string's length is exact. At the
 // default stack this crashed (SIGSEGV) with the old per-char recursion; iterative lexing/codegen fixes it.
-bigstr_suite = (mp: MutPtr<Malloc>) i32 {
+bigstr_suite = (mp: Allocator) i32 {
     rc = shell(mp.zo_cmd("head -c 200000 /dev/zero | tr '\\0' A > $ZT/bb.txt; { printf '{ len } = std.text.str\\n{ to_exit } = std.core.bool\\nmain = () i32 {\\n    s ::= \"'; cat $ZT/bb.txt; printf '\"\\n    (s.len() == 200000).to_exit()\\n}\\n'; } > $ZT/bigstr.zen; ./zen run $ZT/bigstr.zen")).expect("harness: shell")
     run_suite("boundaries: 200KB string literal lexes + runs (no stack overflow, #66c)", [rc == 0])
 }
@@ -610,10 +610,10 @@ bigstr_suite = (mp: MutPtr<Malloc>) i32 {
 // copies of the tree — the same trap that made the docs-inventory gate false-fail locally — and
 // fuzz-out/ holds the crash fuzzer's MUTATED inputs, which are malformed .zen BY CONSTRUCTION, so
 // leaving it in made `make harness` fail for anyone who had run scripts/fuzz-run.sh.
-scanset_suite = (mp: MutPtr<Malloc>) i32 {
+scanset_suite = (mp: Allocator) i32 {
     shell(mp.zo_cmd("find . -name '*.zen' -not -path './.git/*' -not -path './.claude/*' -not -path './fuzz-out/*' -not -path './tests/*' -not -path './scripts/*' 2>/dev/null | sed 's|^./||' | LC_ALL=C sort > $ZT/ob_expect.txt"))
-    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
-        .Ok(scanned) => mp.contents_in(mp.zo_path("ob_expect.txt")).match ({
+    mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
+        .Ok(scanned) => mp.addr().contents_in(mp.zo_path("ob_expect.txt")).match ({
             .Ok(expect) => run_suite("boundaries: scan set covers every non-test .zen", [scanned == expect]),
             .Err(e)     => run_suite("boundaries: scan set (cannot enumerate tree)", [false]),
         }),
@@ -641,11 +641,11 @@ scanset_suite = (mp: MutPtr<Malloc>) i32 {
 layering_allowed = (path: StringView) bool {
     path == "src/std/internal/ast.zen" || path == "src/std/io/c.zen"
 }
-layering_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
+layering_passes = (mp: Allocator, path: StringView) bool {
     path.starts_with("src/std/").match ({
         true  => path.layering_allowed().match ({
             true  => true,
-            false => mp.contents_in(path).match ({
+            false => mp.addr().contents_in(path).match ({
                 .Ok(raw) => mp.strip_comments_in(raw).not_contains("= compiler."),
                 .Err(e)  => false,
             }),
@@ -653,11 +653,11 @@ layering_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
         false => true,
     })
 }    // unreadable = FAIL, never a silent pass
-layering_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
+layering_suite = (mp: Allocator) i32 {
+    mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
-            files = mp.split_in(listing, '\n')
-            results :: [bool] = mp.nbuf(true, files.len)
+            files = mp.addr().split_in(listing, '\n')
+            results :: [bool] = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.layering_passes(path)
             })
@@ -713,12 +713,12 @@ file_has_retired_spelling = (sv: Slice<u8>) bool {
         || sv.file_has_raw_word("string_literal")
         || sv.file_has_raw_word("string_cstr")
 }
-spelling_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
+spelling_passes = (mp: Allocator, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
         false => path.spelling_allowed().match ({
             true  => true,
-            false => mp.contents_in(path).match ({
+            false => mp.addr().contents_in(path).match ({
                 .Ok(raw) => raw.view().file_has_retired_spelling().match ({
                     true  => {
                         out("\n  retired string spelling in ")
@@ -736,12 +736,12 @@ spelling_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
 // Its own file list, not ob_files.txt: this rule covers tests/ and scripts/ too, because a retired
 // spelling in a test fixture is a retired spelling. Same tree-wide `find` + same `.git`/`.claude`
 // pruning as SUITE 9 (sibling worktrees under .claude are full copies of the tree).
-spelling_suite = (mp: MutPtr<Malloc>) i32 {
+spelling_suite = (mp: Allocator) i32 {
     shell(mp.zo_cmd("find . -name '*.zen' -not -path './.git/*' -not -path './.claude/*' 2>/dev/null | sed 's|^./||' | LC_ALL=C sort > $ZT/ob_all.txt"))
-    mp.contents_in(mp.zo_path("ob_all.txt")).match ({
+    mp.addr().contents_in(mp.zo_path("ob_all.txt")).match ({
         .Ok(listing) => {
-            files = mp.split_in(listing, '\n')
-            results :: [bool] = mp.nbuf(true, files.len)
+            files = mp.addr().split_in(listing, '\n')
+            results :: [bool] = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.spelling_passes(path)
             })
@@ -767,7 +767,7 @@ spelling_suite = (mp: MutPtr<Malloc>) i32 {
 //     literal can revive it, and deleting the PE_WALRUS report is what the harness_build cases pin.
 //   * here the raw scan earns its keep because a walrus inside a comment or a string is not inert.
 //     tools/fuzz-diff.zen and tools/sigs.zen EMIT Zen source from string literals — a walrus there
-//     generates a program that no longer compiles. Every `//   m := Malloc(…)` doc-comment in
+//     generates a program that no longer compiles. Every `//   m := heap_allocator()` doc-comment in
 //     src/std teaches a spelling the compiler now rejects. Both were live in this tree, and a
 //     comment/string-stripped scan would have reported neither.
 // The needle is the two bytes `:` `=` NOT preceded by another `:`, so `x ::= v` (the mutable form)
@@ -805,12 +805,12 @@ file_has_walrus = (sv: Slice<u8>) bool {
     })
     found
 }
-walrus_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
+walrus_passes = (mp: Allocator, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
         false => path.walrus_allowed().match ({
             true  => true,
-            false => mp.contents_in(path).match ({
+            false => mp.addr().contents_in(path).match ({
                 .Ok(raw) => raw.view().file_has_walrus().match ({
                     true  => {
                         out("\n  retired walrus binding in ")
@@ -837,12 +837,12 @@ walrus_passes = (mp: MutPtr<Malloc>, path: StringView) bool {
 // does; it is a larger one, because the comment has no audience outside this repo. Markdown is a
 // RAW-BYTE scan like the Zen half, with no code-fence special case: a walrus in prose is teaching
 // it just as surely as a walrus in a fence.
-walrus_suite = (mp: MutPtr<Malloc>) i32 {
+walrus_suite = (mp: Allocator) i32 {
     shell(mp.zo_cmd("find . '(' -name '*.zen' -o -name '*.md' ')' -not -path './.git/*' -not -path './.claude/*' 2>/dev/null | sed 's|^./||' | LC_ALL=C sort > $ZT/ob_all.txt"))
-    mp.contents_in(mp.zo_path("ob_all.txt")).match ({
+    mp.addr().contents_in(mp.zo_path("ob_all.txt")).match ({
         .Ok(listing) => {
-            files = mp.split_in(listing, '\n')
-            results :: [bool] = mp.nbuf(true, files.len)
+            files = mp.addr().split_in(listing, '\n')
+            results :: [bool] = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.walrus_passes(path)
             })
@@ -871,10 +871,10 @@ walrus_suite = (mp: MutPtr<Malloc>) i32 {
 // `\b`/`\f` escapes in lsp.zen and json.zen). `'\x08'` IS a legal char literal, but `zen fmt` prints
 // it back as `8`, so the fmt gate and this rule would contradict each other. The formatter has to
 // round-trip `'\xNN'` before those sites can be asked to change.
-alloc_push_file = (mp: MutPtr<Malloc>, path: StringView) bool {
+alloc_push_file = (mp: Allocator, path: StringView) bool {
     path.is_empty().match ({
         true  => true,
-        false => mp.contents_in(path).match ({
+        false => mp.addr().contents_in(path).match ({
             .Ok(raw) => raw.view().file_has("", 4).match ({
                 true  => {
                     out("\n  ASCII code in a byte-push slot in ")
@@ -888,11 +888,11 @@ alloc_push_file = (mp: MutPtr<Malloc>, path: StringView) bool {
         }),
     })
 }    // unreadable = FAIL, never a silent pass
-push_suite = (mp: MutPtr<Malloc>) i32 {
-    mp.contents_in(mp.zo_path("ob_files.txt")).match ({
+push_suite = (mp: Allocator) i32 {
+    mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
-            files = mp.split_in(listing, '\n')
-            results :: [bool] = mp.nbuf(true, files.len)
+            files = mp.addr().split_in(listing, '\n')
+            results :: [bool] = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.alloc_push_file(path)
             })
@@ -903,8 +903,7 @@ push_suite = (mp: MutPtr<Malloc>) i32 {
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 harness_boundaries_run* = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     // Every .zen file that ships as part of the compiler or the library. The repo-ROOT entries are
     // named explicitly because they have no directory prefix for `find` to match — and they are the
     // reason this list drifted: the python original globbed examples/tools/src/std/src/compiler back

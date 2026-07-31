@@ -30,9 +30,8 @@ for *architecture* (symbol tables, incremental compilation, LSP) more than for r
   - storage: one growable byte buffer (all names, NUL-separated) + `[i32]` offsets column +
     a `Map<i32>`-style FNV index for text→Sym on first sight. `sym_text(s) StringView` is an
     O(1) offset load, so *display/emit paths keep working on views*.
-  - ownership: the interner is allocated once in the driver and threaded exactly like the
-    `Malloc` shim (`a: MutPtr<Malloc>`) already is — an extra field on the parser/checker state
-    structs, NOT a global (flat-namespace globals would collide across modules).
+  - ownership: the interner is allocated once in the driver and passed beside the compiler allocator; it is an
+    extra field on parser/checker state, not a global (flat-namespace globals would collide across modules).
 - **Producers**: the lexer/parser interns at identifier-token creation (`parse_primary`/
   `parse_type`); resolve interns the names it mints (mangled/shadow names) at `gstr_finish` time.
 - **Consumers**: `Param.name`, `VarData.name`, `CallData.fn`, `Func.name`, struct/enum/field/

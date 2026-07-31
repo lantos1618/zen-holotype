@@ -27,7 +27,7 @@
 // Adding a position or a rule is one row in mx_positions()/mx_rules() plus regenerated table rows —
 // the cross-product stays complete for free. That is the whole point: a hole in a NEW rule shows up
 // in every position at once instead of waiting for someone to imagine the right example.
-{ Malloc } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 { contents_in, out, save, shell } = std.io.file
 { expect } = std.core.result
 { len, replace } = std.text.str
@@ -452,23 +452,25 @@ mx_stmt_rules* = () [MxStmtRule] {
 // a StringView of a literal: zo_join infers its slice-literal element type from element 0, so a
 // list that starts with a literal and continues with views needs the head widened explicitly.
 mx_sv = (s: StringView) StringView { s }
-mx_cell_name = (mp: MutPtr<Malloc>, rule: StringView, pos: StringView, is_bad: bool) StringView {
+mx_cell_name = (mp: Allocator, rule: StringView, pos: StringView, is_bad: bool) StringView {
     mp.zo_join([rule, "__", pos, is_bad.then({ "__bad" }, { "__good" })])
 }
-mx_expr_src = (mp: MutPtr<Malloc>, r: MxRule, p: MxPos, is_bad: bool) StringView {
-    withe = mp.replace(p.body, "@E@", is_bad.then({ r.bad }, { r.good }))
-    body = mp.replace(mp.replace(withe, "@T@", r.ty), "@Z@", r.zero)
-    helpers = mp.replace(mp.replace(mx_helpers(), "@T@", r.ty), "@H@", r.hzero)
+mx_expr_src = (mp: Allocator, r: MxRule, p: MxPos, is_bad: bool) StringView {
+    withe = mp.addr().replace(p.body, "@E@", is_bad.then({ r.bad }, { r.good }))
+    body = mp.addr().replace(mp.addr().replace(withe, "@T@", r.ty), "@Z@", r.zero)
+    helpers = mp.addr().replace(mp.addr().replace(mx_helpers(), "@T@", r.ty), "@H@", r.hzero)
     mp.zo_join([r.prelude, helpers, "probe = (", r.params, ") ", r.ty, " {\n", is_bad.match ({
         true  => r.setup_bad,
         false => r.setup_good,
     }), body, "\n}\nmain = () i32 {\n    return 0\n}\n"])
 }
-mx_stmt_src = (mp: MutPtr<Malloc>, r: MxStmtRule, p: MxStmtPos, is_bad: bool) StringView {
+mx_stmt_src = (mp: Allocator, r: MxStmtRule, p: MxStmtPos, is_bad: bool) StringView {
     stmt = mp.zo_join([mx_sv("\n"), is_bad.then({ r.bad }, { r.good }), "\n        sink(2)"])
-    mp.zo_join([r.prelude, "sink = (v: i64) i64 { v }\nprobe = (", r.params, ") i64 {\n", r.setup, mp.replace(p.body, "@S@", stmt), "\n    0\n}\nmain = () i32 {\n    return 0\n}\n"])
+    mp.zo_join([r.prelude, "sink = (v: i64) i64 { v }\nprobe = (", r.params, ") i64 {\n", r.setup, mp
+        .addr()
+        .replace(p.body, "@S@", stmt), "\n    0\n}\nmain = () i32 {\n    return 0\n}\n"])
 }
-mx_write = (mp: MutPtr<Malloc>, name: StringView, src: StringView) void {
+mx_write = (mp: Allocator, name: StringView, src: StringView) void {
     save(mp.zo_path(mp.zo_join([mx_sv("mx/"), name, ".zen"])), src, len(src)).expect("harness: save")
 }
 // the per-run shell driver: check every generated case, record `<name> TAB <error[kind]>` (empty kind =
@@ -479,8 +481,7 @@ mx_runner = () StringView {
     "set -u\nZT=\"$1\"\nrm -rf \"$ZT/mxr\"\nmkdir -p \"$ZT/mxr\"\ni=0\nfor f in \"$ZT\"/mx/*.zen; do\n  n=$(basename \"$f\" .zen)\n  { k=$(./zen check \"$f\" 2>&1 | grep -o 'error\\[[a-z-]*\\]' | head -1); printf '%s\\t%s\\n' \"$n\" \"$k\" > \"$ZT/mxr/$n.txt\"; } &\n  i=$((i + 1))\n  [ $((i % 16)) -eq 0 ] && wait\ndone\nwait\ncat \"$ZT\"/mxr/*.txt | LC_ALL=C sort > \"$ZT/mx_actual.tsv\"\ncut -f1,2 tests/fixtures/matrix/expected.tsv | LC_ALL=C sort > \"$ZT/mx_expected.tsv\"\ndiff -u \"$ZT/mx_expected.tsv\" \"$ZT/mx_actual.tsv\" > \"$ZT/mx_diff.txt\" 2>&1\n"
 }
 harness_matrix_run* = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     shell(mp.zo_cmd("rm -rf \"$ZT/mx\"; mkdir -p \"$ZT/mx\"")).expect("harness: shell")
     mx_rules().loop((h, ri, r) {
         mx_positions().loop((h2, pi, p) {
@@ -498,7 +499,7 @@ harness_matrix_run* = () i32 {
     rc = shell(mp.zo_cmd("sh \"$ZT/mxrun.sh\" \"$ZT\"")).expect("harness: shell")
     (rc == 0 == false).then({
         out("matrix: verdict table drift (- expected, + actual):\n")
-        out(mp.contents_in(mp.zo_path("mx_diff.txt")).match ({
+        out(mp.addr().contents_in(mp.zo_path("mx_diff.txt")).match ({
             .Ok(t)  => t,
             .Err(e) => "  (diff unavailable)\n",
         }))

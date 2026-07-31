@@ -5,7 +5,7 @@
   dglobal, dglobal_full, dglobal_alias_at, lit, tvoid, acquire_or_die } = compiler.genc
 { Token, Scan, scan, lerr_reset, lerr_get, lerr_off_get } = compiler.lex
 { declare_bare_assigns, slice_any } = compiler.astops
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { parse_or } = compiler.parse_expr
 { enode, is_mut_walrus, is_op, is_op1, is_walrus, lexeme } = compiler.parse_atom
 { is_dot, is_ident_tok } = compiler.parse_postfix
@@ -27,8 +27,8 @@ DeclEnd*: {
     next: i32,
     foreign: bool,
 }
-no_body = (a: MutPtr<Malloc>) [Stmt] { slice(null_ptr(), 0) }
-parse_decl_at* = (a: MutPtr<Malloc>, src: StringView, pos: i32) DeclEnd {
+no_body = (a: Allocator) [Stmt] { slice(null_ptr(), 0) }
+parse_decl_at* = (a: Allocator, src: StringView, pos: i32) DeclEnd {
     nt = src.scan(pos)
     name = a.lexeme(src, nt.tok)
     // An EXPLICIT tparam list `<A, B: Trait>` sits right after the name (before the `=` value
@@ -68,7 +68,7 @@ parse_decl_at* = (a: MutPtr<Malloc>, src: StringView, pos: i32) DeclEnd {
     })
 }
 parse_fn_body = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     name: StringView,
     params: [Param],
@@ -175,7 +175,7 @@ decl_is_retired_global = (src: StringView, pos: i32) bool {
 // one-variant enum. (That is exactly what `g: i32 = 42` did while the retired walrus was the only
 // operator accepted here.) The `|` is what tells them apart: an enum continues, a global's init ENDS
 // the declaration — so the init is parsed and the token after it must be a decl boundary.
-decl_is_typed_global = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
+decl_is_typed_global = (a: Allocator, src: StringView, pos: i32) bool {
     m = src.decl_marker(pos)
     (src.is_colon(m.tok) && m.tok.len == 1).match ({
         true  => src.is_lbrace(src.scan(m.next).tok).match ({
@@ -212,12 +212,12 @@ span_has_bar = (src: StringView, pos: i32, end: i32) bool {
 // variant's default with `|`; a global's init is followed by the next decl's name, an import `{`, or
 // EOF. Both tests are needed: `parse_or` swallows `1 | Green` as a bitwise-or, so the boundary alone
 // cannot tell `Colour: Red = 1 | Green` from `g: i32 = 42`.
-typed_global_ends_decl = (a: MutPtr<Malloc>, src: StringView, pos: i32) bool {
+typed_global_ends_decl = (a: Allocator, src: StringView, pos: i32) bool {
     e = a.parse_or(src, pos).next
     src.span_has_bar(pos, e) == false && src.decl_path_at_boundary(src.scan(e).tok)
 }
 // position just past a typed global's init expression (the type annotation is skipped, init parsed).
-typed_global_end = (a: MutPtr<Malloc>, src: StringView, pos: i32) i32 {
+typed_global_end = (a: Allocator, src: StringView, pos: i32) i32 {
     m = src.decl_marker(pos)
     te = a.parse_ty(src, m.next)
     a.parse_or(src, src.scan(te.next).next).next
@@ -284,7 +284,7 @@ decl_is_const_global = (src: StringView, pos: i32) bool {
     m = src.decl_marker(pos)
     src.is_op1(m.tok, '=') && src.decl_is_func_lit(pos) == false
 }
-decl_buf = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire_or_die(16384 * sizeof(Decl)), 16384) }
+decl_buf = (a: Allocator) [Decl] { slice(a.acquire_or_die(16384 * sizeof(Decl)), 16384) }
 take_decls = (buf: [Decl], n: i32) [Decl] { slice(buf.ptr, n) }
 // ── EXPORT markers (the `*` after a top-level decl name) ─────────────────────────────────────────
 // `skip_name_star` discards the `*` from the AST, but it is load-bearing (cross-module export +
@@ -305,7 +305,7 @@ reg_overflow_reset = () void { reg_overflow = 0 }
 exports_buf ::= no_exports()
 exports_n ::= 0
 no_exports = () [Param] { slice(null_ptr(), 0) }
-exports_reset = (a: MutPtr<Malloc>) void {
+exports_reset = (a: Allocator) void {
     exports_buf = slice(a.acquire_or_die(16384 * sizeof(Param)), 16384)
     exports_n = 0
 }
@@ -328,7 +328,7 @@ note_export = (name: StringView) void {
 // exports_reset never clobbers it (resolve runs BEFORE parse of the flat source).
 alias_prefix_buf ::= no_exports()
 alias_prefix_n ::= 0
-alias_prefixes_reset* = (a: MutPtr<Malloc>) void {
+alias_prefixes_reset* = (a: Allocator) void {
     alias_prefix_buf = slice(a.acquire_or_die(4096 * sizeof(Param)), 4096)
     alias_prefix_n = 0
     reg_overflow_reset()
@@ -375,7 +375,7 @@ module_sig_flags* = (is_pub: bool, is_type: bool, imported: bool, foreign: bool)
 module_sig_buf ::= no_sigs()
 module_sig_n ::= 0
 no_sigs = () [SigEntry] { slice(null_ptr(), 0) }
-module_sigs_reset* = (a: MutPtr<Malloc>) void {
+module_sigs_reset* = (a: Allocator) void {
     module_sig_buf = slice(a.acquire_or_die(32768 * sizeof(SigEntry)), 32768)
     module_sig_n = 0
     reg_overflow_reset()
@@ -402,7 +402,7 @@ note_module_sig* = (alias: StringView, name: StringView, flags: i64, origin: i64
     })
 }
 // record the decl name at `pos` if the token right after it is `*` — the export marker skip_name_star drops.
-note_export_if_starred = (a: MutPtr<Malloc>, src: StringView, pos: i32) void {
+note_export_if_starred = (a: Allocator, src: StringView, pos: i32) void {
     nt = src.scan(pos)
     src.is_star(src.scan(nt.next).tok).then({
         note_export(a.lexeme(src, nt.tok))
@@ -415,12 +415,12 @@ skip_path = (src: StringView, pos: i32) i32 {
     dot = src.scan(id.next)
     src.is_dot(dot.tok).then({ src.skip_path(dot.next) }, { id.next })
 }
-import_buf = (a: MutPtr<Malloc>) [Param] { slice(a.acquire_or_die(256 * sizeof(Param)), 256) }
+import_buf = (a: Allocator) [Param] { slice(a.acquire_or_die(256 * sizeof(Param)), 256) }
 ImportEnd: {
     count: i32,
     next: i32,
 }
-record_name = (a: MutPtr<Malloc>, src: StringView, sc: Scan, buf: [Param], i: i32) ImportEnd {
+record_name = (a: Allocator, src: StringView, sc: Scan, buf: [Param], i: i32) ImportEnd {
     // Guard the import-name buffer.
     (i >= buf.len).then({
         perr_set_at(sc.tok.start)
@@ -432,7 +432,7 @@ record_name = (a: MutPtr<Malloc>, src: StringView, sc: Scan, buf: [Param], i: i3
     buf[i] = param(a.lexeme(src, sc.tok), tvoid())
     a.fill_import_names(src, sc.next, buf, i + 1)
 }
-fill_import_names = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Param], i: i32) ImportEnd {
+fill_import_names = (a: Allocator, src: StringView, pos: i32, buf: [Param], i: i32) ImportEnd {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
@@ -461,7 +461,7 @@ DCont*: {
     next: i32,
     i: i32,
 }
-fill_decls = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) i32 {
+fill_decls = (a: Allocator, src: StringView, pos: i32, buf: [Decl], i: i32) i32 {
     p ::= pos
     n ::= i
     go ::= true
@@ -523,7 +523,7 @@ decl_is_impl* = (src: StringView, pos: i32) bool {
     dot = src.scan(nt.next)
     src.is_dot(dot.tok).then({ src.tok_eq(src.scan(dot.next).tok, "impl") }, { false })
 }
-fill_decl = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
+fill_decl = (a: Allocator, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
     a.note_export_if_starred(src, pos)
     // A misordered generic head `Name<T>*:` is a clean error (caret at the `<`): flag it, then let the
     // normal struct/enum cascade parse-and-advance past it (the module is rejected via the sentinel).
@@ -554,7 +554,7 @@ fill_decl = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) 
 // The wrapper is unwrapped here so the checker/codegen-init see the bare init; only the C storage
 // class changes (`static _Thread_local`). Reusable for any per-OS-thread global (scheduler workers).
 global_decl = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     nm: StringView,
     init: Ptr<Expr>,
     alias: bool,
@@ -572,7 +572,7 @@ global_decl = (
         _        => dglobal_full(nm, tvoid(), init, dpos, false, false, mut),
     })
 }
-fill_global = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
+fill_global = (a: Allocator, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
     nt = src.scan(pos)
     nm = a.lexeme(src, nt.tok)
     mk = src.decl_marker(pos)
@@ -589,7 +589,7 @@ fill_global = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32
 }
 // `name: Type = expr` — a typed value global (always a value global, never a module alias — those
 // carry no annotation — so alias = false). The type annotation is parsed then discarded (re-inferred).
-fill_typed_global = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
+fill_typed_global = (a: Allocator, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
     nt = src.scan(pos)
     nm = a.lexeme(src, nt.tok)
     m = src.decl_marker(pos)    // the single ':'
@@ -604,7 +604,7 @@ fill_typed_global = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], 
         i: i + 1,
     )
 }
-fill_enum = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
+fill_enum = (a: Allocator, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
     ee = a.parse_enum_at(src, pos)
     buf[i] = (ee.ntp > 0).match ({
         true  => dgenenum(genumdef_at(ee.ed.name, ee.tparams, ee.ed.variants, ee.ed.pos)),
@@ -615,7 +615,7 @@ fill_enum = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) 
         i: i + 1,
     )
 }
-fill_func = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
+fill_func = (a: Allocator, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
     de = a.parse_decl_at(src, pos)
     buf[i] = de.foreign.then({ dforeign(de.func) }, { dfunc(de.func) })
     DCont(
@@ -623,7 +623,7 @@ fill_func = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) 
         i: i + 1,
     )
 }
-fill_struct = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
+fill_struct = (a: Allocator, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
     se = a.parse_struct_at(src, pos)
     inherent = se.defaults.len > 0 && se.sd.fields.has_data_field()
     ni = inherent.match ({
@@ -641,7 +641,7 @@ fill_struct = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32
         i: ni,
     )
 }
-fill_import = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
+fill_import = (a: Allocator, src: StringView, pos: i32, buf: [Decl], i: i32) DCont {
     nbuf = a.import_buf()
     ie = a.fill_import_names(src, src.scan(pos).next, nbuf, 0)
     eq = src.scan(ie.next)
@@ -662,7 +662,7 @@ path_end_tok = (src: StringView, pos: i32) Token {
     dot = src.scan(id.next)
     src.is_dot(dot.tok).then({ src.path_end_tok(dot.next) }, { id.tok })
 }
-read_import_path = (a: MutPtr<Malloc>, src: StringView, pos: i32) ImportPath {
+read_import_path = (a: Allocator, src: StringView, pos: i32) ImportPath {
     first = src.scan(pos)
     last = src.path_end_tok(pos)
     n = last.start + last.len - first.tok.start
@@ -680,7 +680,7 @@ path_copy_into = (src: StringView, from: i32, dst: RawPtr<u8>, i: i32, n: i32) v
         src.path_copy_into(from, dst, i + 1, n)
     })
 }
-parse_module* = (a: MutPtr<Malloc>, src: StringView) [Decl] {
+parse_module* = (a: Allocator, src: StringView) [Decl] {
     perr_reset()
     pdepth_reset()
     delim_reset()
@@ -703,7 +703,7 @@ parse_module* = (a: MutPtr<Malloc>, src: StringView) [Decl] {
 }
 // Append the distinct anonymous-struct shapes collected during the parse as ordinary DStructs, so the
 // checker + codegen treat them as named structs. Guarded against the decl buffer's syntax-error slot.
-append_anon_decls = (a: MutPtr<Malloc>, buf: [Decl], n: i32) i32 {
+append_anon_decls = (a: Allocator, buf: [Decl], n: i32) i32 {
     i ::= n
     anon_decls_get().loop_at((j, sd) {
         (i < buf.len - 1).match ({
@@ -761,7 +761,7 @@ sentinel_name = (kind: i32) StringView {
     reg_overflow_get().then({ "__capacity" }, { "__syntax_error" })
 }
 // Parser totality: any parse/lex failure plants a leading syntax sentinel.
-prepend_syntax_error = (a: MutPtr<Malloc>, buf: [Decl], n: i32) [Decl] {
+prepend_syntax_error = (a: Allocator, buf: [Decl], n: i32) [Decl] {
     (n >= buf.len).match ({
         true  => buf.take_decls(n),
         false => {
@@ -789,7 +789,7 @@ DeclSpan*: {
     start: i32,
     next: i32,
 }
-decl_span* = (a: MutPtr<Malloc>, src: StringView, pos: i32) DeclSpan {
+decl_span* = (a: Allocator, src: StringView, pos: i32) DeclSpan {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => DeclSpan(
@@ -823,7 +823,7 @@ decl_span* = (a: MutPtr<Malloc>, src: StringView, pos: i32) DeclSpan {
         }),
     })
 }
-named_span = (a: MutPtr<Malloc>, src: StringView, pos: i32, start: i32) DeclSpan {
+named_span = (a: Allocator, src: StringView, pos: i32, start: i32) DeclSpan {
     nm = a.lexeme(src, src.scan(pos).tok)
     src.decl_is_impl(pos).match ({
         true  => DeclSpan(
@@ -895,8 +895,8 @@ named_span = (a: MutPtr<Malloc>, src: StringView, pos: i32, start: i32) DeclSpan
     })
 }
 // Parse impl methods into scratch buffers only to find the block end.
-impl_scratch = (a: MutPtr<Malloc>) [Decl] { slice(a.acquire_or_die(1024 * sizeof(Decl)), 1024) }
-impl_span_end = (a: MutPtr<Malloc>, src: StringView, pos: i32) i32 {
+impl_scratch = (a: Allocator) [Decl] { slice(a.acquire_or_die(1024 * sizeof(Decl)), 1024) }
+impl_span_end = (a: Allocator, src: StringView, pos: i32) i32 {
     ie = a.fill_impl_methods(src, src.skip_to_brace(pos), a.impl_scratch(), 0, a.param_buf(), 0, "", "")
     src.scan(ie.next).next
 }

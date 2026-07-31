@@ -8,7 +8,7 @@
 { at, is_alpha, is_alnum, line_comment_at, rawstr_at } = std.text.ascii
 { gstr_string, gstr_append } = compiler.genc
 { decl_span } = compiler.parse
-{ Malloc, try_acquire } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { String } = std.text.string
 { Map, of } = std.collections.map
@@ -91,7 +91,7 @@ RewriteSkip*: {
     out: String,
     next: i32,
 }
-copy_line_comment* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteSkip {
+copy_line_comment* = (out: String, a: Allocator, s: StringView, p: i32) RewriteSkip {
     cur ::= out
     pos ::= p
     bs: Slice<u8> = s.view()
@@ -114,7 +114,7 @@ copy_line_comment* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) Rew
         next: pos,
     )
 }
-copy_block_comment* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteSkip {
+copy_block_comment* = (out: String, a: Allocator, s: StringView, p: i32) RewriteSkip {
     cur ::= out
     pos ::= p
     bs: Slice<u8> = s.view()
@@ -146,7 +146,7 @@ copy_block_comment* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) Re
 }
 // A raw `"""…"""` literal is copied through verbatim, delimiters and all — the flattener's output
 // is still zen source, so the literal must survive the pass unchanged.
-copy_rawstr = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteSkip {
+copy_rawstr = (out: String, a: Allocator, s: StringView, p: i32) RewriteSkip {
     e = s.raw_lit_end(p)
     cur ::= out
     p.upto(e, (i) { cur = cur.rpush(a, s.at(i)) })
@@ -155,7 +155,7 @@ copy_rawstr = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteSki
         next: e,
     )
 }
-copy_literal* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteSkip {
+copy_literal* = (out: String, a: Allocator, s: StringView, p: i32) RewriteSkip {
     s.rawstr_at(p).then({
         return out.copy_rawstr(a, s, p)
     })
@@ -197,7 +197,7 @@ copy_literal* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) RewriteS
     )
 }
 // Copy a dotted module id (`utils.strings`) verbatim — alnum and interior dots (for messages).
-take_dotted = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) String {
+take_dotted = (out: String, a: Allocator, s: StringView, p: i32) String {
     cur ::= out
     pos ::= p
     bs: Slice<u8> = s.view()
@@ -217,16 +217,16 @@ take_dotted = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) String {
     })
     cur
 }
-decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
+decl_names_in* = (g: ModuleGraph, a: Allocator) String {
     a.symbol_names_into_in(a.gstr_string(256), g.symbols, 0, false, false)
 }
 // Like decl_names_in, but ALSO excludes TYPE (struct/enum) decls. A namespace alias prefixes only the
 // names this returns with `alias__`; TYPE names are deliberately left bare so the same type reached two
 // ways (`x = mod` vs `{ T } = mod`) keeps ONE canonical C identity (dedup_decls then collapses the copies).
-value_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
+value_decl_names_in* = (g: ModuleGraph, a: Allocator) String {
     a.value_symbol_names_into_in(a.gstr_string(256), g.symbols, 0)
 }
-all_decl_names_in* = (g: ModuleGraph, a: MutPtr<Malloc>) String {
+all_decl_names_in* = (g: ModuleGraph, a: Allocator) String {
     a.symbol_names_into_in(a.gstr_string(256), g.symbols, 0, false, true)
 }
 // end of a dotted module path (`util.helpers`) whose first identifier starts at `p`.
@@ -484,12 +484,8 @@ import_edges*<A> = (a: MutPtr<A>, src: StringView) Result<[ImportEdge], IoError>
         .Err(e)  => err(e),
     })
 }
-edge_id_in* = (e: ImportEdge, a: MutPtr<Malloc>) String {
-    a.gstr_string(24).gstr_append(a, e.module)
-}
-edge_alias_in* = (e: ImportEdge, a: MutPtr<Malloc>) String {
-    a.gstr_string(16).gstr_append(a, e.alias)
-}
+edge_id_in* = (e: ImportEdge, a: Allocator) String { a.gstr_string(24).gstr_append(a, e.module) }
+edge_alias_in* = (e: ImportEdge, a: Allocator) String { a.gstr_string(16).gstr_append(a, e.alias) }
 // Import-head validation: `{ f, g } = m` must be provided by `m`.
 provided_head_count = (src: StringView, p: i32, n: i32) i32 {
     pos ::= p
@@ -516,7 +512,7 @@ provided_head_count = (src: StringView, p: i32, n: i32) i32 {
     })
     count
 }
-provided_symbol_count_from = (a: MutPtr<Malloc>, src: StringView, p: i32, n: i32) i32 {
+provided_symbol_count_from = (a: Allocator, src: StringView, p: i32, n: i32) i32 {
     pos ::= p
     count ::= n
     bs: Slice<u8> = src.view()
@@ -550,7 +546,7 @@ provided_symbol_count_from = (a: MutPtr<Malloc>, src: StringView, p: i32, n: i32
     })
     count
 }
-provided_symbol_count = (a: MutPtr<Malloc>, src: StringView) i32 {
+provided_symbol_count = (a: Allocator, src: StringView) i32 {
     a.provided_symbol_count_from(src, 0, 0)
 }
 symbol_buf<A> = (a: MutPtr<A>, n: i64) Result<[ProvidedSymbol], IoError> {
@@ -661,7 +657,7 @@ fill_head_symbols_in<A> = (
     failed.then({ err(last_err) }, { ok(idx) })
 }
 fill_provided_symbols_in<A> = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     alloc: MutPtr<A>,
     src: StringView,
     p: i32,
@@ -743,7 +739,7 @@ fill_provided_symbols_in<A> = (
     failed.then({ err(last_err) }, { ok(out) })
 }
 provided_symbols_in*<A> = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     alloc: MutPtr<A>,
     src: StringView,
 ) Result<[ProvidedSymbol], IoError> {
@@ -771,27 +767,27 @@ sym_sig_flags = (s: ProvidedSymbol) i64 {
 }
 // Build the sig map from one symbol scan: first occurrence wins, and a raw C-keyword decl name is
 // additionally registered under its `_zk`-escaped key (see ModuleSig).
-sig_of_symbols = (a: MutPtr<Malloc>, symbols: [ProvidedSymbol]) ModuleSig {
+sig_of_symbols = (a: Allocator, symbols: [ProvidedSymbol]) ModuleSig {
     seed: i64 = 0 - 1
-    m ::= of(a, "", seed).expect("compiler.resolve: sig alloc")
+    m ::= of(a.addr(), "", seed).expect("compiler.resolve: sig alloc")
     symbols.loop_at((i, s) {
         f = s.sym_sig_flags()
         (m.has(s.name) == false).then({
-            m = m.put(a, s.name, f).expect("compiler.resolve: sig alloc")
+            m = m.put(a.addr(), s.name, f).expect("compiler.resolve: sig alloc")
         })
         e = s.name.res_ident_end(0)
         s.name.is_c_kw_name_span(0, e).then({
-            key = s.symbol_key_in(a).expect("compiler.resolve: sig alloc")
+            key = s.symbol_key_in(a.addr()).expect("compiler.resolve: sig alloc")
             ke = cstr(key.ptr)
             (m.has(ke) == false).then({
-                m = m.put(a, ke, f).expect("compiler.resolve: sig alloc")
+                m = m.put(a.addr(), ke, f).expect("compiler.resolve: sig alloc")
             })
         })
     })
     ModuleSig(names: m)
 }
-module_graph* = (a: MutPtr<Malloc>, src: StringView) ModuleGraph { a.module_graph_in(a, src) }
-module_graph_in*<A> = (a: MutPtr<Malloc>, alloc: MutPtr<A>, src: StringView) ModuleGraph {
+module_graph* = (a: Allocator, src: StringView) ModuleGraph { a.module_graph_in(a.addr(), src) }
+module_graph_in*<A> = (a: Allocator, alloc: MutPtr<A>, src: StringView) ModuleGraph {
     imports = alloc.import_edges(src).expect("compiler.resolve: allocation failed")
     symbols = a.provided_symbols_in(alloc, src).expect("compiler.resolve: allocation failed")
     ModuleGraph(
@@ -824,7 +820,7 @@ span_has_byte = (s: StringView, p: i32, e: i32, b: u8) bool {
 is_foreign_span = (s: StringView, p: i32, e: i32) bool {
     s.span_has_byte(p, e, '=') && s.span_has_byte(p, e, '{').then({ false }, { true })
 }
-symbol_name_in* = (s: ProvidedSymbol, a: MutPtr<Malloc>) String {
+symbol_name_in* = (s: ProvidedSymbol, a: Allocator) String {
     a.gstr_string(s.name.view().len + 1).gstr_append(a, s.name)
 }
 symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bool) bool {
@@ -832,7 +828,7 @@ symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bo
         && (include_foreign || s.foreign.then({ false }, { true }))
 }
 symbol_names_into_in = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     set: String,
     symbols: [ProvidedSymbol],
     i: i64,
@@ -850,12 +846,7 @@ symbol_names_into_in = (
     cur
 }
 // Module-DEFINED value/fn decl names only: non-imported, non-foreign, and NOT a type (struct/enum).
-value_symbol_names_into_in = (
-    a: MutPtr<Malloc>,
-    set: String,
-    symbols: [ProvidedSymbol],
-    i: i64,
-) String {
+value_symbol_names_into_in = (a: Allocator, set: String, symbols: [ProvidedSymbol], i: i64) String {
     cur ::= set
     symbols.loop_at((idx, sym) {
         (idx < i == false).then({
@@ -869,16 +860,18 @@ value_symbol_names_into_in = (
 // Map-set forms of imported_value_names / value_symbol_names_into_in — same filters, O(1)-membership
 // presence sets for shadow_rename_set (see rset_*). value_symbol_name_set keys on `sym.name` (the raw
 // clean identifier), matching the original allnames String that shadow_mangled(key) is looked up against.
-imported_value_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
+imported_value_name_set* = (a: Allocator, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur ::= m
     symbols.loop_at((idx, sym) {
         (sym.imported && sym.is_type.then({ false }, { true })).then({
-            cur = cur.rset_add(a, sym.symbol_key_in(a).expect("compiler.resolve: allocation failed"))
+            cur = cur.rset_add(a, sym
+                .symbol_key_in(a.addr())
+                .expect("compiler.resolve: allocation failed"))
         })
     })
     cur
 }
-value_symbol_name_set* = (a: MutPtr<Malloc>, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
+value_symbol_name_set* = (a: Allocator, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
     cur ::= m
     symbols.loop_at((idx, sym) {
         (sym.symbol_allowed(false, false) && sym.is_type.then({ false }, { true })).then({

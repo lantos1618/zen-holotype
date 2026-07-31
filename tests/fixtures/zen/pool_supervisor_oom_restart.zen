@@ -10,7 +10,7 @@
 // failure in the language. `panic` now calls `__zen_panic_unwind()` first, exactly like `zen__panic`.
 //
 // The failure is a REAL allocator failure, not a simulated panic: the agent builds an `AVec` from an
-// injected DynAlloc whose `acquire` returns null (a deterministic OOM — no attempt to exhaust the box),
+// injected Allocator whose `acquire` returns null (a deterministic OOM — no attempt to exhaust the box),
 // so `vec.new_in` hits `.expect("vec.new: out of memory")` on the genuine `Err` from `empty`.
 //
 // TIMELINE (single agent, FIFO mailbox, Permanent policy):
@@ -26,7 +26,7 @@
 //   fresh_seen == 2 / still_alive.
 // Exit 42 (not 134) is itself the headline: the process SURVIVED an out-of-memory inside an actor.
 { pool_open, pool_actor_dead, Pool } = std.concurrent.pool
-{ malloc, free, DynAlloc, dyn_of } = std.mem.alloc
+{ malloc, free, Allocator, AllocatorVTable, allocator_of } = std.mem.alloc
 { dispatch } = std.concurrent.pool_actor    // destructured: the faithful formatter accepts an unqualified generic call
 pa = std.concurrent.pool_actor
 { Context, Receiver } = std.concurrent.pool_actor
@@ -39,7 +39,12 @@ CAP = 64
 oom_acquire = (s: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
 oom_resize = (s: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
 oom_release = (s: RawPtr<u8>, p: RawPtr<u8>) void { }
-oom_alloc = () DynAlloc { dyn_of(oom_acquire, oom_resize, oom_release, null_ptr()) }
+oom_vtable ::= AllocatorVTable(
+    vt_alloc: oom_acquire,
+    vt_remap: oom_resize,
+    vt_free: oom_release,
+)
+oom_alloc = () Allocator { allocator_of(null_ptr(), oom_vtable.addr().offset(0)) }
 Msg*: Work(i64) | Oom(i64)
 Agent*: {
     acc: RawPtr<u8>,

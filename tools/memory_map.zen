@@ -11,9 +11,8 @@
 // TO REVIEW: edit the `verdict:` field of each Entry. Anything left "" is reported as open.
 // Suggested vocabulary — "keep" / "kill" / "merge into X" / "change: …" — but it is free text.
 //
-// Counts are from origin/main (6b60d5b), comments and declaring modules excluded. They have NOT been
-// recounted since; entry 1.9 is known stale (7260b12 landed the next day). Re-derive before relying
-// on a number, and check an entry's `issue` for a staleness note.
+// Counts are historical snapshots from origin/main (6b60d5b). Several entries predate the allocator
+// refactor; recount before relying on a number.
 { println, formatln, arg_str, arg_int } = std.text.fmt
 { is_empty } = std.text.str
 // One memory surface. `status` is what the evidence says; `verdict` is what YOU say.
@@ -40,7 +39,7 @@ getting = () [Entry] {
             example: "read_bytes_alloc<A> = (a: MutPtr<A>, …)",
             users: 184,
             status: "load-bearing",
-            issue: "284 sites use a BARE <A>; only 4 write <A: Allocator>, so the bound is convention. Passing a non-allocator blames the library's line, not the call site.",
+            issue: "stale: allocator parameters now use explicit AllocatorBackend bounds; recount users",
             verdict: "",
         ),
         Entry(
@@ -73,10 +72,10 @@ getting = () [Entry] {
         Entry(
             id: "1.5",
             name: "stored allocator (AVec/ASet/AHMap)",
-            example: "AVec*<T>: { …, alloc: DynAlloc }   //  vec.new() then v.push(x)",
+            example: "AVec*<T>: { …, alloc: Allocator }   //  vec.new() then v.push(x)",
             users: 4,
             status: "load-bearing",
-            issue: "no dyn_of_alloc<A>, so these are PERMANENTLY process-heap-backed; vec.zen:286 advertises a path with zero callers",
+            issue: "custom backend state and vtables must outlive stored Allocator copies",
             verdict: "",
         ),
         Entry(
@@ -112,7 +111,7 @@ getting = () [Entry] {
             example: "emitted for every escaping slice literal — no allocator, no owner, no free",
             users: 0,
             status: "invisible",
-            issue: "STALE, partly fixed by 7260b12 (2026-07-28): borrowed literals now emit a C compound literal — 116/243 (48%) across examples+fixtures no longer allocate, and formatln's 32 B/call leak measured 0. Returned and let-bound literals still heap-promote and still leak; error[leak] still never fires. The 10.6 MB / 300k-allocations-per-100k-formatln figure below the fix no longer holds.",
+            issue: "partly fixed: borrowed slice literals no longer allocate; returned and let-bound literals still heap-promote and leak",
             verdict: "",
         ),
         Entry(
@@ -121,16 +120,16 @@ getting = () [Entry] {
             example: "rt.alloc(n) / rt.with(custom, body)",
             users: 0,
             status: "dead",
-            issue: "zero production call sites; the pool's enter/leave writes a thread-local nothing reads. Tried in #420, reverted in 794828b.",
+            issue: "zero production call sites; pool enter/leave writes thread-local state that nothing reads",
             verdict: "",
         ),
         Entry(
             id: "1.11",
-            name: "LSP request scope (hidden ambient)",
-            example: "hs_on = false    // process-global mutable bool; Malloc.acquire routes on it",
+            name: "LSP request arena (explicit owner)",
+            example: "request = request_arena(heap_allocator())    // per-server chunk chain; reset after each frame",
             users: 2,
             status: "load-bearing",
-            issue: "1,343 MutPtr<Malloc> occurrences serve TWO call sites (lsp.zen:974,979). Heap/Malloc differ in one line and the names are backwards.",
+            issue: "",
             verdict: "",
         ),
     ]
@@ -203,16 +202,16 @@ releasing = () [Entry] {
             example: "a.release(p) / o.release_in(a)",
             users: 113,
             status: "load-bearing",
-            issue: "Allocator.release takes a pointer and NO SIZE — which is why a debug allocator cannot poison or report bytes-leaked, and why slice() lengths must be trusted",
+            issue: "release carries no size, limiting poisoning, leak accounting, and slice validation",
             verdict: "",
         ),
         Entry(
             id: "3.2",
-            name: "never releasing (arena culture)",
-            example: "alloc.zen:70 — a batch compile is ALLOWED to leak",
+            name: "arena reset",
+            example: "request.reset() invalidates one request and retains chunk capacity",
             users: 167,
             status: "load-bearing",
-            issue: "deliberate and documented; the whole compiler has 7 .release( calls",
+            issue: "request allocations are reclaimed in bulk; durable state uses the heap",
             verdict: "",
         ),
         Entry(

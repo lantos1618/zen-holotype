@@ -36,7 +36,7 @@
 { Decl } = compiler.ast.ast_types
 { gstr_string, gstr_append } = compiler.genc
 { monomorphize } = compiler.mono
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { slice_any } = compiler.astops
 { js_func, js_global } = compiler.backend.js.js_decl
 { js_size_set } = compiler.backend.js.js_size
@@ -53,7 +53,7 @@ js_has_main = (decls: [Decl]) bool {
 }
 // whole translation unit -> JS. Globals first (const-init, mirrors genc), then functions (hoisted in
 // JS, so order is free), then the `zen_main()` invocation. The `__zr` floor is prepended by the driver.
-genJsModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
+genJsModuleIn* = (a: Allocator, raw: [Decl]) String {
     decls = a.monomorphize(raw)
     js_size_set(decls)    // `sizeof(T)` resolves to a literal against THIS decl list
     s ::= a.gstr_string(4096).gstr_append(a, "\"use strict\";\n").js_copy_defs(a)
@@ -71,7 +71,7 @@ genJsModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
     decls.js_has_main().then({ s.gstr_append(a, "\n__zr.exit_main(zen_main());\n") }, { s })
 }
 // functions only (globals already emitted first, so a global's init never forward-refs a fn body at TDZ).
-js_decl_fn = (s: String, a: MutPtr<Malloc>, d: Decl) String {
+js_decl_fn = (s: String, a: Allocator, d: Decl) String {
     d.is_template().match ({
         true  => s,
         false => d.is_trait().match ({

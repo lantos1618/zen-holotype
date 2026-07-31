@@ -2,11 +2,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 typedef struct { void* ptr; int64_t len; } zslice;
-/* Like String below: a built program that imports std.mem.alloc emits its own `Malloc` (+ Allocator impls),
- * so the build path defines ZEN_NO_MALLOC to suppress zenrt's. The compiler binary (no macro) keeps it —
- * main.c's `Malloc m = {0}` + gen.c's `Malloc*` params need it, and gen.c emits none of its own (#98). */
+/* Like String below: a built program that imports std.mem.alloc emits its own `Heap` (+ Allocator
+ * impls), so runnable and bootstrap C define ZEN_NO_MALLOC to suppress zenrt's fallback. The guard's
+ * historical name stays for emitted-C compatibility; the fallback itself uses the current API name. */
 #ifndef ZEN_NO_MALLOC
-typedef struct { int32_t _; } Malloc;
+typedef struct { int32_t _; } Heap;
 #endif
 bool eq(const char* a, const char* b);
 bool is_empty(const char* s);

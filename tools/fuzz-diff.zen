@@ -46,7 +46,7 @@
 //  * The argument scan accepts `--flag value`; `--flag=value` and argparse's error message for an
 //    unknown flag are not reproduced (an unrecognised token is ignored).
 { arg, argc } = std.sys.os
-{ Malloc } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 { contents_in, eout, out, save } = std.io.file
 { Output, run } = std.sys.process
 { access, getpid } = std.c.libc
@@ -126,7 +126,9 @@ rlit_draw = (rp: MutPtr<Rng>, t: i64) i64 {
     rp.range(lo, hi + 1)
 }
 // negatives are parenthesized for safety (python's `f"({v})" if v < 0`)
-ilit = (b: Sb<Malloc>, v: i64) Sb<Malloc> { (v < 0).then({ b.ch('(').i(v).ch(')') }, { b.i(v) }) }
+ilit = (b: Sb<Allocator>, v: i64) Sb<Allocator> {
+    (v < 0).then({ b.ch('(').i(v).ch(')') }, { b.i(v) })
+}
 // ── float literals ───────────────────────────────────────────────────────────────────────────
 // python drew one of nine fixed constants AND one uniform(-50,50) rounded to 3 decimals, then
 // chose between the two 50/50. `mils` is that uniform value in thousandths, so its text is exact.
@@ -147,7 +149,7 @@ flit_draw = (rp: MutPtr<Rng>) Flit {
     )
 }
 // non-negative thousandths as `<int>.<3 digits>`
-fnum = (b: Sb<Malloc>, mils: i64) Sb<Malloc> {
+fnum = (b: Sb<Allocator>, mils: i64) Sb<Allocator> {
     b
         .i(mils / 1000)
         .ch('.')
@@ -155,7 +157,7 @@ fnum = (b: Sb<Malloc>, mils: i64) Sb<Malloc> {
         .i(mils / 10 % 10)
         .i(mils % 10)
 }
-flit_emit = (b: Sb<Malloc>, f: Flit) Sb<Malloc> {
+flit_emit = (b: Sb<Allocator>, f: Flit) Sb<Allocator> {
     f.fixed.match ({
         true  => b.s(FLIT_CONST[f.j]),
         false => (f.mils < 0).then({ b.s("(-").fnum(0 - f.mils).ch(')') }, { b.fnum(f.mils) }),
@@ -182,24 +184,24 @@ int_op = (j: i64, sg: bool) StringView { sg.then({ INT_OP_S[j] }, { INT_OP_U[j] 
 op_is_divmod = (j: i64, sg: bool) bool { sg.then({ j >= 8 }, { j >= 7 }) }
 op_is_shift = (j: i64, sg: bool) bool { j == 6 || sg && j == 7 }
 // a declared operand `a{n}_{k}`; an SSA step result `a{n}_t{s}`
-ivar = (b: Sb<Malloc>, n: i64, k: i64) Sb<Malloc> {
+ivar = (b: Sb<Allocator>, n: i64, k: i64) Sb<Allocator> {
     b
         .ch('a')
         .i(n)
         .ch('_')
         .i(k)
 }
-itmp = (b: Sb<Malloc>, n: i64, s: i64) Sb<Malloc> {
+itmp = (b: Sb<Allocator>, n: i64, s: i64) Sb<Allocator> {
     b
         .ch('a')
         .i(n)
         .s("_t")
         .i(s)
 }
-icur = (b: Sb<Malloc>, n: i64) Sb<Malloc> {
+icur = (b: Sb<Allocator>, n: i64) Sb<Allocator> {
     g_res_temp.then({ b.itmp(n, g_res_idx) }, { b.ivar(n, g_res_idx) })
 }
-decl_ints = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, t: i64, k: i64, count: i64) Sb<Malloc> {
+decl_ints = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, t: i64, k: i64, count: i64) Sb<Allocator> {
     (k >= count).match ({
         true  => b,
         false => {
@@ -217,14 +219,14 @@ decl_ints = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, t: i64, k: i64, count: i64)
     })
 }
 int_steps = (
-    b: Sb<Malloc>,
+    b: Sb<Allocator>,
     rp: MutPtr<Rng>,
     n: i64,
     t: i64,
     count: i64,
     s: i64,
     total: i64,
-) Sb<Malloc> {
+) Sb<Allocator> {
     (s >= total).match ({
         true  => b,
         false => {
@@ -255,7 +257,7 @@ int_steps = (
 }
 // emit SSA narrowed arithmetic of type `t`; the result var is left in g_res_temp / g_res_idx —
 // read it back with `.icur(n)`.
-build_int = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, t: i64) Sb<Malloc> {
+build_int = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, t: i64) Sb<Allocator> {
     count = rp.range(2, 4)
     b1 = b.decl_ints(rp, n, t, 0, count)
     pick = rp.range(0, count)
@@ -267,7 +269,7 @@ build_int = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, t: i64) Sb<Malloc> {
 // ── f64 expression tree ──────────────────────────────────────────────────────────────────────
 F64_OP = ["+", "-", "*", "/"]
 F64_DIV = ["2.0", "4.0", "3.0", "10.0", "7.0"]
-f64_expr = (b: Sb<Malloc>, rp: MutPtr<Rng>, depth: i64) Sb<Malloc> {
+f64_expr = (b: Sb<Allocator>, rp: MutPtr<Rng>, depth: i64) Sb<Allocator> {
     stop = depth <= 0 || rp.next_f64() < 0.4
     stop.match ({
         true  => {
@@ -301,7 +303,7 @@ f64_expr = (b: Sb<Malloc>, rp: MutPtr<Rng>, depth: i64) Sb<Malloc> {
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 PRELUDE_A = "{ println } = std.text.fmt\nBox3*: { a: i32, b: i32, c: i32 }\nCol*: R(i32) | G | B(i32)\nPair*<T>: { p: T, q: T }\nidv<T> = (v: T) T { v }\npick<T> = (a: T, b: T, c: bool) T { c.then({ a }, { b }) }\nfib = (n: i32) i32 { (n < 2).then({ n }, { fib(n - 1) + fib(n - 2) }) }\nsumto = (n: i32, acc: i32) i32 { (n <= 0).then({ acc }, { sumto(n - 1, acc + n) }) }\ncolval = (c: Col) i32 { c.match ({ .R(v) => v, .G => 0, .B(v) => v * 2 }) }\nfnv = (data: StringView, n: i32) u32 {\n    hash :: u32 = 2166136261\n    i :: i32 = 0\n    "
 PRELUDE_B = "while (i < n) {\n        b: u8 = load(offset(data, i))\n        hash = (hash ^ b) * 16777619\n        i = i + 1\n    }\n    hash\n}\n"
-prelude = (b: Sb<Malloc>) Sb<Malloc> { b.s(PRELUDE_A).ch('@').s(PRELUDE_B) }
+prelude = (b: Sb<Allocator>) Sb<Allocator> { b.s(PRELUDE_A).ch('@').s(PRELUDE_B) }
 // the string-hash corpus (python's WORDS)
 WORD = ["hello", "zen", "the quick brown fox", "abc", "", "aa", "differential", "backend", "0123456789", "xyz"]
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -312,7 +314,7 @@ WORD = ["hello", "zen", "the quick brown fox", "abc", "", "aa", "differential", 
 // emit unbound int arithmetic — see the header.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // i32 arithmetic chain (ops / wrap)
-st0 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st0 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     b1 = b.build_int(rp, n, 2)
     b1
         .s(IND)
@@ -321,7 +323,7 @@ st0 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(")\n")
 }
 // arithmetic over a random int width
-st1 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st1 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     t = rp.range(0, 6)
     b1 = b.build_int(rp, n, t)
     b1
@@ -331,7 +333,7 @@ st1 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(")\n")
 }
 // width-wrap: the add pushes past the type's range
-st2 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st2 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     t = rp.range(0, 6)
     v1 = rp.rlit_draw(t)
     v2 = rp.rlit_draw(t)
@@ -360,7 +362,7 @@ st2 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(")\n")
 }
 // bounded accumulate loop
-st3 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st3 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     lim = rp.range(1, 31)
     mul = rp.range(1, 8)
     decl = b
@@ -400,7 +402,7 @@ st3 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(")\n")
 }
 // match on an int literal
-st4 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st4 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     x = rp.range(0, 5)
     decl = b
         .s(IND)
@@ -416,7 +418,7 @@ st4 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(".match ({ 0 => 10, 1 => 20, 2 => 30, _ => 99 }))\n")
 }
 // match on a bool (an int comparison)
-st5 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st5 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     t = rp.range(0, 6)
     b1 = b.build_int(rp, n, t)
     v = rp.rlit_draw(t)
@@ -429,7 +431,7 @@ st5 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
     cmp.s(").match ({ true => 1, false => 0 }))\n")
 }
 // recursion: fib
-st6 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st6 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     v = rp.range(0, 23)
     b
         .s(IND)
@@ -438,7 +440,7 @@ st6 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s("))\n")
 }
 // recursion: sumto
-st7 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st7 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     v = rp.range(0, 101)
     b
         .s(IND)
@@ -447,7 +449,7 @@ st7 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(", 0))\n")
 }
 // enum + match dispatch
-st8 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st8 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     rv = rp.range(0 - 5, 51)
     bv = rp.range(0 - 5, 51)
     j = rp.range(0, 3)
@@ -459,7 +461,7 @@ st8 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
     body.s("))\n")
 }
 // struct field arithmetic
-st9 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st9 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     av = rp.range(0 - 100, 101)
     bv = rp.range(0 - 100, 101)
     cv = rp.range(0 - 100, 101)
@@ -485,7 +487,7 @@ st9 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(".c)\n")
 }
 // generics instantiated at 2+ types (i32 AND f64)
-st10 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st10 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     iv = rp.range(0 - 1000, 1001)
     f = rp.flit_draw()
     p1 = rp.range(0, 10)
@@ -511,7 +513,7 @@ st10 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
     l3.s((tf == 0).then({ "true" }, { "false" })).s("))\n")
 }
 // a generic struct at 2 types
-st11 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st11 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     p = rp.range(0, 51)
     q = rp.range(0, 51)
     decl = b
@@ -532,7 +534,7 @@ st11 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s(".q)\n")
 }
 // string byte hash (fnv over a literal)
-st12 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st12 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     j = rp.range(0, 10)
     w = WORD[j]
     b
@@ -546,19 +548,19 @@ st12 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .s("))\n")
 }
 // nested match (the arm re-matches the payload)
-st13 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st13 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     v = rp.range(0, 7)
     head = b.s(IND).s("println(Col.R(").i(v)
     head.s(").match ({ .R(w) => w.match ({ 0 => 100, _ => w * 3 }), .G => 0, .B(w) => w }))\n")
 }
 // f64 expression tree
-st14 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st14 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     d = rp.range(2, 6)
     b1 = b.s(IND).s("println(").f64_expr(rp, d)
     b1.s(")\n")
 }
 // a generic struct at f64
-st15 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+st15 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     f1 = rp.flit_draw()
     f2 = rp.flit_draw()
     head = b
@@ -577,7 +579,7 @@ st15 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         .i(n)
         .s(".q)\n")
 }
-stmt_0_3 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Malloc> {
+stmt_0_3 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
     (k == 0).match ({
         true  => b.st0(rp, n),
         false => (k == 1).match ({
@@ -586,7 +588,7 @@ stmt_0_3 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Malloc> {
         }),
     })
 }
-stmt_4_7 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Malloc> {
+stmt_4_7 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
     (k == 4).match ({
         true  => b.st4(rp, n),
         false => (k == 5).match ({
@@ -595,7 +597,7 @@ stmt_4_7 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Malloc> {
         }),
     })
 }
-stmt_8_11 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Malloc> {
+stmt_8_11 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
     (k == 8).match ({
         true  => b.st8(rp, n),
         false => (k == 9).match ({
@@ -604,7 +606,7 @@ stmt_8_11 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Malloc> {
         }),
     })
 }
-stmt_12_15 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Malloc> {
+stmt_12_15 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
     (k == 12).match ({
         true  => b.st12(rp, n),
         false => (k == 13).match ({
@@ -613,7 +615,7 @@ stmt_12_15 = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Malloc> {
         }),
     })
 }
-stmt = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
+stmt = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
     k = rp.range(0, 16)
     (k < 4).match ({
         true  => b.stmt_0_3(rp, n, k),
@@ -623,7 +625,7 @@ stmt = (b: Sb<Malloc>, rp: MutPtr<Rng>, n: i64) Sb<Malloc> {
         }),
     })
 }
-stmts = (b: Sb<Malloc>, rp: MutPtr<Rng>, i: i64, total: i64) Sb<Malloc> {
+stmts = (b: Sb<Allocator>, rp: MutPtr<Rng>, i: i64, total: i64) Sb<Allocator> {
     (i >= total).match ({
         true  => b,
         false => {
@@ -634,11 +636,15 @@ stmts = (b: Sb<Malloc>, rp: MutPtr<Rng>, i: i64, total: i64) Sb<Malloc> {
 }
 // program `i` of run `s`: the PRELUDE, then 4..10 statements, then `0` — exactly reproducible from
 // (s, i) alone, which is what `--only` reprints.
-gen_program = (mp: MutPtr<Malloc>, s: i64, i: i64) StringView {
+gen_program = (mp: Allocator, s: i64, i: i64) StringView {
     r = seed(s * 1000003 + i)
     rp = r.addr()
     nst = rp.range(4, 11)
-    head = mp.sb().prelude().s("main = () i32 {\n")
+    head = mp
+        .addr()
+        .sb()
+        .prelude()
+        .s("main = () i32 {\n")
     body = head.stmts(rp, 0, nst)
     body
         .s(IND)
@@ -655,8 +661,8 @@ gen_program = (mp: MutPtr<Malloc>, s: i64, i: i64) StringView {
 //   `2>/dev/null` == the stderr python captured and then discarded
 // run() captures stdout only, which is exactly the stream the two backends are compared on.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-sh = (mp: MutPtr<Malloc>, cmd: StringView) Output {
-    mp.run(cmd).match ({
+sh = (mp: Allocator, cmd: StringView) Output {
+    mp.addr().run(cmd).match ({
         .Ok(o)  => o,
         .Err(e) => Output(
             stdout: "",
@@ -664,13 +670,14 @@ sh = (mp: MutPtr<Malloc>, cmd: StringView) Output {
         ),
     })
 }
-slurp = (mp: MutPtr<Malloc>, path: StringView) StringView { mp.contents_in(path).or("") }
+slurp = (mp: Allocator, path: StringView) StringView { mp.addr().contents_in(path).or("") }
 // node ran: emit-js already returned 0, i.e. the backend believed it lowered this program. JS that
 // then fails to parse, throws, or (rc 124) never terminates is an emitter defect, and filing it as a
 // feature gap is how real miscompiles were being swallowed — a JS loop that does not terminate where
 // C does is a control-flow miscompile, not a gap.
-test_node = (mp: MutPtr<Malloc>, jf: StringView, jerr: StringView, cout: StringView, crc: i64) Res {
+test_node = (mp: Allocator, jf: StringView, jerr: StringView, cout: StringView, crc: i64) Res {
     cmd = mp
+        .addr()
         .sb()
         .s("timeout 30 node ")
         .s(jf)
@@ -684,7 +691,7 @@ test_node = (mp: MutPtr<Malloc>, jf: StringView, jerr: StringView, cout: StringV
         true  => Res(
             vid: V_JS_RUNTIME_FAIL,
             cout: cout,
-            jout: mp.cat_in(o.stdout, mp.slurp(jerr)),
+            jout: mp.addr().cat_in(o.stdout, mp.slurp(jerr)),
             crc: crc,
             jrc: o.exit,
             jrc_set: true,
@@ -702,7 +709,7 @@ test_node = (mp: MutPtr<Malloc>, jf: StringView, jerr: StringView, cout: StringV
 // A clean "this construct is not lowered yet" diagnostic AND a compiler crash both land here;
 // only a diagnosed refusal (rc 1) is a feature gap, anything else is the compiler failing.
 test_js = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     cfg: Cfg,
     zf: StringView,
     jf: StringView,
@@ -711,6 +718,7 @@ test_js = (
     crc: i64,
 ) Res {
     cmd = mp
+        .addr()
         .sb()
         .s("timeout 30 ")
         .s(cfg.zen)
@@ -736,7 +744,7 @@ test_js = (
 }
 // write the program out, run both backends, and return the verdict plus both captured stdouts
 test_one = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     cfg: Cfg,
     zf: StringView,
     jf: StringView,
@@ -745,6 +753,7 @@ test_one = (
 ) Res {
     save(zf, src, src.len()).expect("fuzz-diff: cannot write the generated program")
     cmd = mp
+        .addr()
         .sb()
         .s("timeout 30 ")
         .s(cfg.zen)
@@ -770,9 +779,10 @@ test_one = (
 // REPORTING
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // `  {k:16} {n}` — the label left-justified in 16 columns, exactly python's f-string alignment
-summary_row = (mp: MutPtr<Malloc>, id: i64, n: i64) void {
+summary_row = (mp: Allocator, id: i64, n: i64) void {
     nm = VERDICT_NAME[id]
     sout(mp
+        .addr()
         .sb()
         .s("  ")
         .s(nm)
@@ -783,8 +793,9 @@ summary_row = (mp: MutPtr<Malloc>, id: i64, n: i64) void {
         .done()
         .expect("fuzz-diff: oom"))
 }
-progress = (mp: MutPtr<Malloc>, cfg: Cfg, done: i64, counts: [i64]) void {
+progress = (mp: Allocator, cfg: Cfg, done: i64, counts: [i64]) void {
     eputs(mp
+        .addr()
         .sb()
         .s("  ...")
         .i(done)
@@ -809,7 +820,7 @@ progress = (mp: MutPtr<Malloc>, cfg: Cfg, done: i64, counts: [i64]) void {
 }
 // save the three repro files and print the finding line
 record = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     cfg: Cfg,
     outdir: StringView,
     i: i64,
@@ -818,6 +829,7 @@ record = (
     divs: [i64],
 ) void {
     base = mp
+        .addr()
         .sb()
         .s(outdir)
         .ch('/')
@@ -828,15 +840,15 @@ record = (
         .i(i)
         .done()
         .expect("fuzz-diff: oom")
-    save(mp.cat_in(base, ".zen"), src, src.len()).expect("fuzz-diff: cannot save the repro")
-    save(mp.cat_in(base, ".c.out"), r.cout, r.cout.len()).expect("fuzz-diff: cannot save the repro")
-    save(mp.cat_in(base, ".js.out"), r.jout, r.jout.len()).expect("fuzz-diff: cannot save the repro")
+    save(mp.addr().cat_in(base, ".zen"), src, src.len()).expect("fuzz-diff: cannot save the repro")
+    save(mp.addr().cat_in(base, ".c.out"), r.cout, r.cout.len()).expect("fuzz-diff: cannot save the repro")
+    save(mp.addr().cat_in(base, ".js.out"), r.jout, r.jout.len()).expect("fuzz-diff: cannot save the repro")
     format("[{}] seed={} i={}  -> {}.zen\n", [arg_str(VERDICT_NAME[r.vid]), arg_int(cfg.seed), arg_int(i), arg_str(base)])
     divs[g_ndiv] = i
     g_ndiv = g_ndiv + 1
 }
 run_one = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     cfg: Cfg,
     zf: StringView,
     jf: StringView,
@@ -857,7 +869,7 @@ run_one = (
     })
 }
 // `(i in [1, 5, 9])` — python's list repr of the finding indices
-divs_list = (b: Sb<Malloc>, divs: [i64], i: i64) Sb<Malloc> {
+divs_list = (b: Sb<Allocator>, divs: [i64], i: i64) Sb<Allocator> {
     (i >= g_ndiv).match ({
         true  => b,
         false => {
@@ -867,8 +879,9 @@ divs_list = (b: Sb<Malloc>, divs: [i64], i: i64) Sb<Malloc> {
     })
 }
 // `--only N`: print program N and its two backend outputs, then exit
-only_report = (mp: MutPtr<Malloc>, cfg: Cfg, src: StringView, r: Res) void {
+only_report = (mp: Allocator, cfg: Cfg, src: StringView, r: Res) void {
     head = mp
+        .addr()
         .sb()
         .s("# seed=")
         .i(cfg.seed)
@@ -893,7 +906,7 @@ only_report = (mp: MutPtr<Malloc>, cfg: Cfg, src: StringView, r: Res) void {
         .done()
         .expect("fuzz-diff: oom"))
 }
-only_mode = (mp: MutPtr<Malloc>, cfg: Cfg, zf: StringView, jf: StringView, jerr: StringView) i32 {
+only_mode = (mp: Allocator, cfg: Cfg, zf: StringView, jf: StringView, jerr: StringView) i32 {
     src = mp.gen_program(cfg.seed, cfg.only)
     r = mp.test_one(cfg, zf, jf, jerr, src)
     mp.only_report(cfg, src, r)
@@ -901,7 +914,7 @@ only_mode = (mp: MutPtr<Malloc>, cfg: Cfg, zf: StringView, jf: StringView, jerr:
 }
 // the closing block. exit 2 = nothing was compared on both backends (the run proves nothing);
 // exit 1 = there are findings; exit 0 = clean.
-finish = (mp: MutPtr<Malloc>, cfg: Cfg, outdir: StringView, counts: [i64], divs: [i64]) i32 {
+finish = (mp: Allocator, cfg: Cfg, outdir: StringView, counts: [i64], divs: [i64]) i32 {
     (counts[0] == 0).match ({
         true  => {
             sout("\nFAIL: not one program was compared on both backends — this run proves nothing.\n")
@@ -910,6 +923,7 @@ finish = (mp: MutPtr<Malloc>, cfg: Cfg, outdir: StringView, counts: [i64], divs:
         false => (g_ndiv > 0).match ({
             true  => {
                 sout(mp
+                    .addr()
                     .sb()
                     .s("\nFINDINGS (")
                     .i(g_ndiv)
@@ -927,6 +941,7 @@ finish = (mp: MutPtr<Malloc>, cfg: Cfg, outdir: StringView, counts: [i64], divs:
             },
             false => {
                 sout(mp
+                    .addr()
                     .sb()
                     .s("\nNo divergences. (repro dir: ")
                     .s(outdir)
@@ -939,19 +954,19 @@ finish = (mp: MutPtr<Malloc>, cfg: Cfg, outdir: StringView, counts: [i64], divs:
     })
 }
 full_mode = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     cfg: Cfg,
     zf: StringView,
     jf: StringView,
     jerr: StringView,
     outdir: StringView,
 ) i32 {
-    counts :: [i64] = mp.nbuf(to_i64(0), 6)
+    counts :: [i64] = mp.addr().nbuf(to_i64(0), 6)
     counts.loop((h, i, x) {
         counts[i] = 0
     })
-    divs: [i64] = mp.nbuf(to_i64(0), cfg.count + 1)
-    probe: [i64] = mp.nbuf(to_i64(0), cfg.count)
+    divs: [i64] = mp.addr().nbuf(to_i64(0), cfg.count + 1)
+    probe: [i64] = mp.addr().nbuf(to_i64(0), cfg.count)
     probe.loop((h, i, x) {
         mp.run_one(cfg, zf, jf, jerr, outdir, i, counts, divs)
     })
@@ -982,19 +997,23 @@ opt_int = (name: StringView, dflt: i64) i64 {
 }
 // python's os.path.abspath, for the `zen=` line of the summary and so the child processes are
 // launched by a path that does not depend on the cwd
-abs_path = (mp: MutPtr<Malloc>, p: StringView) StringView {
+abs_path = (mp: Allocator, p: StringView) StringView {
     p.starts_with("/").match ({
         true  => p,
         false => {
-            o = mp.sh(mp.cat_in("readlink -f ", p))
+            o = mp.sh(mp.addr().cat_in("readlink -f ", p))
             n = o.stdout.len()
-            (n > 0).then({ mp.substr_in(o.stdout, 0, n - 1).expect("fuzz-diff: oom") }, { p })
+            (n > 0).match ({
+                true  => mp.addr().substr_in(o.stdout, 0, n - 1).expect("fuzz-diff: oom"),
+                false => p,
+            })
         },
     })
 }
-dispatch = (mp: MutPtr<Malloc>, cfg: Cfg) i32 {
+dispatch = (mp: Allocator, cfg: Cfg) i32 {
     outdir = (cfg.out.len() == 0).match ({
         true  => mp
+            .addr()
             .sb()
             .s("/tmp/zen-fuzzdiff-")
             .i(to_i64(getpid()))
@@ -1002,19 +1021,18 @@ dispatch = (mp: MutPtr<Malloc>, cfg: Cfg) i32 {
             .expect("fuzz-diff: oom"),
         false => cfg.out,
     })
-    wd = mp.cat_in(outdir, "/.work")
-    mp.sh(mp.cat_in("mkdir -p ", wd))
-    zf = mp.cat_in(wd, "/prog.zen")
-    jf = mp.cat_in(wd, "/prog.js")
-    jerr = mp.cat_in(wd, "/prog.err")
+    wd = mp.addr().cat_in(outdir, "/.work")
+    mp.sh(mp.addr().cat_in("mkdir -p ", wd))
+    zf = mp.addr().cat_in(wd, "/prog.zen")
+    jf = mp.addr().cat_in(wd, "/prog.js")
+    jerr = mp.addr().cat_in(wd, "/prog.err")
     (cfg.only >= 0).match ({
         true  => mp.only_mode(cfg, zf, jf, jerr),
         false => mp.full_mode(cfg, zf, jf, jerr, outdir),
     })
 }
 main = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     cfg = Cfg(
         seed: opt_int("--seed", 1),
         count: opt_int("--count", 200),
@@ -1026,6 +1044,7 @@ main = () i32 {
         true  => mp.dispatch(cfg),
         false => {
             eputs(mp
+                .addr()
                 .sb()
                 .s("fuzz-diff: not executable: ")
                 .s(cfg.zen)

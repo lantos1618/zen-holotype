@@ -6,7 +6,7 @@
 // types + the resolve pipeline live in compiler.resolve.
 { at } = std.text.ascii
 { gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { String } = std.text.string
 { view } = std.text.str
 { render_diagnostic } = compiler.diagnostic
@@ -46,7 +46,7 @@ gm_word_end = (s: StringView, p: i32) i32 {
     (s.at(p) == 0 || s.at(p) == ' ' || s.at(p) == '\n').then({ p }, { s.gm_word_end(p + 1) })
 }
 // first `<dotted> <path>` registry line whose id matches → the path (own copy); "" when unregistered.
-gm_find = (a: MutPtr<Malloc>, g: StringView, p: i32, dotted: StringView) StringView {
+gm_find = (a: Allocator, g: StringView, p: i32, dotted: StringView) StringView {
     (g.at(p) == 0).match ({
         true  => "",
         false => {
@@ -60,7 +60,7 @@ gm_find = (a: MutPtr<Malloc>, g: StringView, p: i32, dotted: StringView) StringV
     })
 }
 // the registered-genmod path for a USER module id, or "" (std/compiler ids never match the map).
-genmod_lookup* = (a: MutPtr<Malloc>, id: String) StringView {
+genmod_lookup* = (a: Allocator, id: String) StringView {
     id.id_is_user().match ({
         true  => {
             dotted = a.mappend_id_name(a.gstr_string(24), id).gstr_finish(a)
@@ -160,7 +160,7 @@ ffi_foreign_fn = (src: StringView, sym: ProvidedSymbol) bool {
         false => false,
     })
 }
-ffi_dotted_id = (a: MutPtr<Malloc>, id: StringView) StringView {
+ffi_dotted_id = (a: Allocator, id: StringView) StringView {
     a.mappend_mid_display(a.gstr_string(24), id).gstr_finish(a)
 }
 ffi_module_granted = (mainsrc: StringView, dotted: StringView) bool {
@@ -168,7 +168,7 @@ ffi_module_granted = (mainsrc: StringView, dotted: StringView) bool {
     g.ffi_list_has(0, to_i32(g.view().len), dotted) || mainsrc.ffi_pragma_has(dotted)
 }
 ffi_fail = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     path: StringView,
     src: StringView,
     sym: ProvidedSymbol,
@@ -202,12 +202,7 @@ ffi_fail = (
         false => res_reject_text(d),
     })
 }
-enforce_ffi_grants* = (
-    a: MutPtr<Malloc>,
-    table: ModuleTable,
-    mainsrc: StringView,
-    report: bool,
-) i32 {
+enforce_ffi_grants* = (a: Allocator, table: ModuleTable, mainsrc: StringView, report: bool) i32 {
     table.modules.loop_at((i, entry) {
         (i > 0 && entry.id.mid_is_user()).then({
             dotted = a.ffi_dotted_id(entry.id)
@@ -282,7 +277,7 @@ link_implicit = (s: StringView, p: i32, e: i32) bool {
         || s.ffi_span_eq(p, e, "js", 0)
         || e - p > 2 && s.at(e - 2) == '.' && s.at(e - 1) == 'c'
 }
-link_add = (a: MutPtr<Malloc>, s: StringView, p: i32, e: i32) void {
+link_add = (a: Allocator, s: StringView, p: i32, e: i32) void {
     flag = a
         .gstr_string(24)
         .gstr_append(a, "-l")
@@ -299,7 +294,7 @@ link_add = (a: MutPtr<Malloc>, s: StringView, p: i32, e: i32) void {
     })
 }
 // fold one module's `//! link:` list (comma/space separated) into the program's flag set.
-link_collect = (a: MutPtr<Malloc>, src: StringView, p: i32, e: i32) void {
+link_collect = (a: Allocator, src: StringView, p: i32, e: i32) void {
     (p < e).then({
         ffi_delim(src.at(p)).match ({
             true  => a.link_collect(src, p + 1, e),
@@ -314,7 +309,7 @@ link_collect = (a: MutPtr<Malloc>, src: StringView, p: i32, e: i32) void {
     })
 }
 link_fail = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     path: StringView,
     src: StringView,
     sym: ProvidedSymbol,
@@ -341,7 +336,7 @@ link_fail = (
         false => res_reject_text(d),
     })
 }
-enforce_ffi_linkage* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 {
+enforce_ffi_linkage* = (a: Allocator, table: ModuleTable, report: bool) i32 {
     link_libs_reset()
     table.modules.loop_at((i, entry) {
         lp = entry.source.link_pragma_at()

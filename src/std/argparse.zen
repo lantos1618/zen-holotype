@@ -21,7 +21,7 @@
 // attached value `-ovalue`, and `--` as the end-of-options marker (every token after it is a positional,
 // even if it starts with `-`). `--help` / `-h` set `help_requested()` and suppress the required-argument
 // check, so `mytool --help` never errors.
-{ Allocator, try_acquire } = std.mem.alloc
+{ AllocatorBackend } = std.mem.alloc
 { Result, Opt, expect } = std.core.result
 { len, view, starts_with, trim_prefix, find, substr_in, nbuf } = std.text.str
 { Sb, sb } = std.text.sb
@@ -61,7 +61,7 @@ ap_no_value = (s: StringView) ArgError { .NoValueAllowed(s) }
 ap_some = (v: StringView) Opt<StringView> { .Some(v) }
 ap_none = () Opt<StringView> { .None }
 // append one element to a slice, copied into a fresh allocator-owned buffer of length +1.
-ap_add<T> = (a: Allocator, xs: [T], x: T) [T] {
+ap_add<T> = (a: AllocatorBackend, xs: [T], x: T) [T] {
     n = xs.len
     out :: [T] = slice(a.try_acquire((n + 1) * sizeof(T)).expect("std.argparse: out of memory"), n + 1)
     xs.loop_at((i, e) { out[i] = e })
@@ -69,13 +69,13 @@ ap_add<T> = (a: Allocator, xs: [T], x: T) [T] {
     out
 }
 // an all-false `[bool]` of length `n` (parallel to the flag specs).
-ap_bools = (a: Allocator, n: i64) [bool] {
+ap_bools = (a: AllocatorBackend, n: i64) [bool] {
     out :: [bool] = a.nbuf(false, n)
     out.loop_at((i, e) { out[i] = false })
     out
 }
 // an all-`.None` `[Opt<str>]` of length `n` (parallel to the option specs).
-ap_opts = (a: Allocator, n: i64) [Opt<StringView>] {
+ap_opts = (a: AllocatorBackend, n: i64) [Opt<StringView>] {
     seed: Opt<StringView> = .None
     out :: [Opt<StringView>] = a.nbuf(seed, n)
     out.loop_at((i, e) { out[i] = seed })
@@ -87,7 +87,7 @@ Parser*: {
     flags: [FlagSpec],
     opts: [OptSpec],
     poss: [PosSpec],
-    flag = (p: Parser, a: Allocator, name: StringView, short: u8, help: StringView) Parser {
+    flag = (p: Parser, a: AllocatorBackend, name: StringView, short: u8, help: StringView) Parser {
         Parser(
             prog: p.prog,
             flags: a.ap_add(p.flags, FlagSpec(
@@ -99,7 +99,13 @@ Parser*: {
             poss: p.poss,
         )
     }
-    option = (p: Parser, a: Allocator, name: StringView, short: u8, help: StringView) Parser {
+    option = (
+        p: Parser,
+        a: AllocatorBackend,
+        name: StringView,
+        short: u8,
+        help: StringView,
+    ) Parser {
         Parser(
             prog: p.prog,
             flags: p.flags,
@@ -112,7 +118,13 @@ Parser*: {
             poss: p.poss,
         )
     }
-    option_req = (p: Parser, a: Allocator, name: StringView, short: u8, help: StringView) Parser {
+    option_req = (
+        p: Parser,
+        a: AllocatorBackend,
+        name: StringView,
+        short: u8,
+        help: StringView,
+    ) Parser {
         Parser(
             prog: p.prog,
             flags: p.flags,
@@ -125,7 +137,7 @@ Parser*: {
             poss: p.poss,
         )
     }
-    positional = (p: Parser, a: Allocator, name: StringView, help: StringView) Parser {
+    positional = (p: Parser, a: AllocatorBackend, name: StringView, help: StringView) Parser {
         Parser(
             prog: p.prog,
             flags: p.flags,
@@ -137,7 +149,7 @@ Parser*: {
             )),
         )
     }
-    positional_req = (p: Parser, a: Allocator, name: StringView, help: StringView) Parser {
+    positional_req = (p: Parser, a: AllocatorBackend, name: StringView, help: StringView) Parser {
         Parser(
             prog: p.prog,
             flags: p.flags,
@@ -200,11 +212,11 @@ Parser*: {
         })
         c
     }
-    parse = (p: Parser, a: Allocator, args: [StringView]) Result<Parsed, ArgError> {
+    parse = (p: Parser, a: AllocatorBackend, args: [StringView]) Result<Parsed, ArgError> {
         // parse — see the free `ap_parse` below; this is the UFCS entry `p.parse(a, args)`.
         a.ap_parse(p, args)
     }
-    usage = (p: Parser, a: Allocator) StringView {
+    usage = (p: Parser, a: AllocatorBackend) StringView {
         // a one-line-per-item usage / help string, allocator-owned. Built with std.text.sb's
         // sticky builder: the chain records the first allocation failure and every later op
         // no-ops, so ONE `.expect` at the settle replaces an expect per append.
@@ -287,7 +299,7 @@ Parsed: {
 // ── the parse driver ─────────────────────────────────────────────────────────
 // Walk `args` (the arguments AFTER the program name). Returns the filled `Parsed`, or the first
 // `ArgError` encountered. `a` owns every allocation in the result.
-ap_parse = (a: Allocator, p: Parser, args: [StringView]) Result<Parsed, ArgError> {
+ap_parse = (a: AllocatorBackend, p: Parser, args: [StringView]) Result<Parsed, ArgError> {
     flags :: [bool] = a.ap_bools(p.flags.len)
     optvals :: [Opt<StringView>] = a.ap_opts(p.opts.len)
     poss :: [StringView] = a.nbuf("", args.len)    // upper bound: every arg a positional

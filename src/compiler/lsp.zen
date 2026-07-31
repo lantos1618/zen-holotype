@@ -2,7 +2,7 @@
 // Content-Length wire format, publishes diagnostics on open/change, and answers go-to-definition.
 // The JSON here is hand-rolled (std.format.json isn't in the seed manifest) and deliberately
 // minimal: enough of a reader to pull the fields the protocol needs out of a request body.
-{ Malloc, heap_scope_begin, heap_scope_end } = std.mem.alloc
+{ Allocator, RequestArena, heap_allocator, request_arena } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
 { contents_in } = std.io.file
@@ -57,7 +57,7 @@ lout = (s: StringView) i64 {
     write(1, v.ptr, v.len)
 }
 // frame + write one JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`.
-lsp_send = (mp: MutPtr<Malloc>, body: StringView) i64 {
+lsp_send = (mp: Allocator, body: StringView) i64 {
     lout(mp
         .gstr_string(48)
         .gstr_append(mp, "Content-Length: ")
@@ -67,7 +67,7 @@ lsp_send = (mp: MutPtr<Malloc>, body: StringView) i64 {
     lout(body)
 }
 // ── JSON string EMISSION (own escaper; the task sanctions building output as strings) ─────────────
-push_uesc = (sb: String, mp: MutPtr<Malloc>, b: u8) String {
+push_uesc = (sb: String, mp: Allocator, b: u8) String {
     bi = b.to_i64()
     sb
         .gstr_append(mp, "\\u00")
@@ -75,7 +75,7 @@ push_uesc = (sb: String, mp: MutPtr<Malloc>, b: u8) String {
         .gstr_push(mp, hex_char(bi & 15))
 }
 // append `s` as a JSON string LITERAL (surrounding quotes + escaped) to the builder.
-push_jstr = (sb: String, mp: MutPtr<Malloc>, s: StringView) String {
+push_jstr = (sb: String, mp: Allocator, s: StringView) String {
     cur ::= sb.gstr_push(mp, '"')
     v: Slice<u8> = s.view()
     v.loop_at((i, b) {
@@ -164,7 +164,7 @@ json_hexq = (v: [u8], at: i64) i64 {
     })
 }
 // UTF-8 encode a BMP code point into the builder (1–3 bytes).
-push_utf8 = (sb: String, mp: MutPtr<Malloc>, cp: i64) String {
+push_utf8 = (sb: String, mp: Allocator, cp: i64) String {
     (cp < 128).match ({
         true  => sb.gstr_push(mp, cp.to_u8()),
         false => (cp < 2048).match ({
@@ -179,7 +179,7 @@ push_utf8 = (sb: String, mp: MutPtr<Malloc>, cp: i64) String {
     })
 }
 // decode the JSON string opening at v[i]=='"' into an allocator-owned view (escapes resolved).
-json_decode_str = (mp: MutPtr<Malloc>, v: Slice<u8>, i: i64) StringView {
+json_decode_str = (mp: Allocator, v: Slice<u8>, i: i64) StringView {
     sb ::= mp.gstr_string(v.len - i + 1)
     (i + 1).step_while((j) { j < v.len && v[j] != '"' }, (j) {
         b = v[j]
@@ -245,7 +245,7 @@ json_decode_str = (mp: MutPtr<Malloc>, v: Slice<u8>, i: i64) StringView {
     sb.gstr_finish(mp)
 }
 // raw bytes of the value at v[i]: a quoted string (incl. quotes) or a bare token up to `,`/`}`/`]`/ws.
-json_raw_at = (mp: MutPtr<Malloc>, v: Slice<u8>, i: i64) StringView {
+json_raw_at = (mp: Allocator, v: Slice<u8>, i: i64) StringView {
     (i >= v.len).match ({
         true  => "null",
         false => (v[i] == '"').match ({
@@ -267,7 +267,7 @@ json_raw_at = (mp: MutPtr<Malloc>, v: Slice<u8>, i: i64) StringView {
     })
 }
 // the decoded string value of the first key `key`, or "" if absent / non-string.
-json_str_field = (mp: MutPtr<Malloc>, body: StringView, key: StringView) StringView {
+json_str_field = (mp: Allocator, body: StringView, key: StringView) StringView {
     v: Slice<u8> = body.view()
     p = v.json_find_key(key)
     (p < 0 || p >= v.len).match ({
@@ -276,7 +276,7 @@ json_str_field = (mp: MutPtr<Malloc>, body: StringView, key: StringView) StringV
     })
 }
 // the request id as a raw JSON fragment (number or quoted string), echoed verbatim into the reply.
-lsp_id = (mp: MutPtr<Malloc>, body: StringView) StringView {
+lsp_id = (mp: Allocator, body: StringView) StringView {
     v: Slice<u8> = body.view()
     p = v.json_find_key("id")
     (p < 0).then({ "null" }, { mp.json_raw_at(v, p) })
@@ -293,7 +293,7 @@ lsp_prefix_bytes = (sv: Slice<u8>, pv: Slice<u8>, i: i64) bool {
         false => (sv[i] == pv[i]).then({ sv.lsp_prefix_bytes(pv, i + 1) }, { false }),
     })
 }
-lsp_uri_path = (mp: MutPtr<Malloc>, uri: StringView) StringView {
+lsp_uri_path = (mp: Allocator, uri: StringView) StringView {
     uri.lsp_has_prefix("file://").match ({
         true  => mp.cstr_substr(uri, 7, to_i32(uri.view().len - 7)),
         false => uri,
@@ -360,7 +360,7 @@ DiagAcc: {
     n: i32,
 }
 lsp_push_diag = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     acc: DiagAcc,
     rp: ResolvedProgram,
     raw: [Decl],
@@ -450,7 +450,7 @@ lsp_push_diag = (
 // batch (names/types/arity/exhaustiveness/…) is collected, so an ownership error shows alongside type
 // errors rather than one channel hiding the rest. Empty array => clears old squiggles.
 // one whole-file diagnostic carrying `msg` verbatim — the shape a REJECTED resolve reports through.
-lsp_head_diag = (mp: MutPtr<Malloc>, msg: StringView) StringView {
+lsp_head_diag = (mp: Allocator, msg: StringView) StringView {
     mp
         .gstr_string(256)
         .gstr_append(mp, "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":1,\"code\":\"unresolved-import\",\"source\":\"zen\",\"message\":")
@@ -460,16 +460,11 @@ lsp_head_diag = (mp: MutPtr<Malloc>, msg: StringView) StringView {
 }
 // the latched rejection text is newline-terminated (it was written straight to stderr); an LSP
 // message keeps its internal newlines (hint lines) but never a trailing one.
-lsp_trim_nl = (mp: MutPtr<Malloc>, s: StringView) StringView {
+lsp_trim_nl = (mp: Allocator, s: StringView) StringView {
     v: Slice<u8> = s.view()
     (v.len > 0 && v[v.len - 1] == '\n').then({ mp.cstr_substr(s, 0, to_i32(v.len - 1)) }, { s })
 }
-lsp_diags_array = (
-    mp: MutPtr<Malloc>,
-    root: StringView,
-    path: StringView,
-    text: StringView,
-) StringView {
+lsp_diags_array = (mp: Allocator, root: StringView, path: StringView, text: StringView) StringView {
     rp = mp.resolve_program_data(root, mp.dirname(path), path, text)
     // A REJECTED resolve (unknown module / unknown name / dup-fn …) is reported ALONE and the server
     // stays up: half of every import line a user types names a module that does not exist yet, and the
@@ -516,7 +511,7 @@ lsp_diags_array = (
     })
     done.sb.gstr_finish(mp)
 }
-lsp_publish = (mp: MutPtr<Malloc>, root: StringView, uri: StringView, text: StringView) i64 {
+lsp_publish = (mp: Allocator, root: StringView, uri: StringView, text: StringView) i64 {
     arr = mp.lsp_diags_array(root, mp.lsp_uri_path(uri), text)
     mp.lsp_send(mp
         .gstr_string(512)
@@ -528,7 +523,7 @@ lsp_publish = (mp: MutPtr<Malloc>, root: StringView, uri: StringView, text: Stri
         .gstr_finish(mp))
 }
 // ── request/notification handlers ─────────────────────────────────────────────────────────────────
-lsp_reply_initialize = (mp: MutPtr<Malloc>, body: StringView) i64 {
+lsp_reply_initialize = (mp: Allocator, body: StringView) i64 {
     mp.lsp_send(mp
         .gstr_string(256)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
@@ -546,7 +541,7 @@ lsp_reply_initialize = (mp: MutPtr<Malloc>, body: StringView) i64 {
 // Cross-file targets, locals and overload-precise resolution are the documented next slices.
 // reply to a definition request with a Location for def at (line, col) spanning `nlen` bytes, or null.
 lsp_reply_location = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     body: StringView,
     uri: StringView,
     line: i64,
@@ -584,11 +579,11 @@ lsp_parse_dec = (v: Slice<u8>, i: i64, acc: i64) i64 {
 }
 // the text of `uri` AS THE CLIENT SEES IT: the open buffer when the document is in the store, the
 // file on disk otherwise (a jump target the editor never opened). "" = neither, i.e. unreadable.
-lsp_doc_text = (mp: MutPtr<Malloc>, uri: StringView) StringView {
+lsp_doc_text = (mp: Allocator, uri: StringView) StringView {
     i = lspd_find(uri)
     (i >= 0).match ({
         true  => lspd_text_at(i),
-        false => contents_in(mp, mp.lsp_uri_path(uri)).match ({
+        false => contents_in(mp.addr(), mp.lsp_uri_path(uri)).match ({
             .Ok(txt) => txt,
             .Err(er) => "",
         }),
@@ -596,7 +591,7 @@ lsp_doc_text = (mp: MutPtr<Malloc>, uri: StringView) StringView {
 }
 // `file://` URI for a filesystem path — the inverse of lsp_uri_path, needed for a jump target the
 // client never named (the file of an imported module).
-lsp_path_uri = (mp: MutPtr<Malloc>, path: StringView) StringView {
+lsp_path_uri = (mp: Allocator, path: StringView) StringView {
     mp
         .gstr_string(128)
         .gstr_append(mp, "file://")
@@ -628,7 +623,7 @@ lsp_decl_pos = (decls: [Decl], name: StringView) i32 {
 // parser HOISTS both a trait impl's methods and a type body's INHERENT methods into mangled
 // `impl_<Tr>_<Ty>_<m>` functions, so a bare `area` matches no decl name until it is un-mangled — the
 // same un-hoisting compiler.pretty_decl does to round-trip a type body.
-lsp_method_pos = (mp: MutPtr<Malloc>, decls: [Decl], name: StringView) i32 {
+lsp_method_pos = (mp: Allocator, decls: [Decl], name: StringView) i32 {
     found :: i32 = 0
     decls.loop_at((i, d) {
         d.match ({
@@ -652,7 +647,7 @@ lsp_method_pos = (mp: MutPtr<Malloc>, decls: [Decl], name: StringView) i32 {
 // false = could not answer (the program does not resolve, or the name is not a positioned
 // declaration), and the caller falls back to the textual scan.
 lsp_def_via_ast = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     root: StringView,
     body: StringView,
     path: StringView,
@@ -697,7 +692,7 @@ lsp_def_via_ast = (
 // Still answered null, deliberately: struct FIELDS and local bindings. A Field carries no source
 // position in compiler.ast.ast_types, so there is nothing to point at — closing that is an AST
 // change, not an LSP one.
-lsp_definition = (mp: MutPtr<Malloc>, root: StringView, body: StringView) i64 {
+lsp_definition = (mp: Allocator, root: StringView, body: StringView) i64 {
     uri = mp.json_str_field(body, "uri")
     txt = mp.lsp_doc_text(uri)
     v: Slice<u8> = txt.view()
@@ -720,7 +715,7 @@ lsp_definition = (mp: MutPtr<Malloc>, root: StringView, body: StringView) i64 {
 // HOVER: the declaration under the cursor as markdown — a fenced signature plus the doc comment
 // above it. compiler.lsp_query decides what that covers; "nothing to say" comes back as "" and is
 // answered with a null result, the protocol's own spelling of "no hover here" (never an empty popup).
-lsp_hover = (mp: MutPtr<Malloc>, body: StringView) i64 {
+lsp_hover = (mp: Allocator, body: StringView) i64 {
     txt = mp.lsp_doc_text(mp.json_str_field(body, "uri"))
     md = mp.lspq_hover(txt, body.lsp_json_int("line"), body.lsp_json_int("character"))
     is_empty(md).then({
@@ -739,7 +734,7 @@ lsp_hover = (mp: MutPtr<Malloc>, body: StringView) i64 {
 // promise that this IS the whole list for the position, so the client may filter it locally instead
 // of asking again on the next keystroke — true here precisely because the list does not depend on
 // the prefix being typed.
-lsp_completion = (mp: MutPtr<Malloc>, body: StringView) i64 {
+lsp_completion = (mp: Allocator, body: StringView) i64 {
     items = mp.lspq_items(mp.lsp_doc_text(mp.json_str_field(body, "uri")))
     sb ::= mp
         .gstr_string(2048)
@@ -786,7 +781,7 @@ lsp_bol_at = (v: [u8], off: i64) i64 {
     off.step_while((i) { i > 0 && v[i - 1] != '\n' }, (i) { i - 1 })
 }
 // one LSP Position for a byte offset. `character` is a UTF-16 code-unit column, not a byte column.
-lsp_push_pos = (sb: String, mp: MutPtr<Malloc>, v: [u8], off: i64) String {
+lsp_push_pos = (sb: String, mp: Allocator, v: [u8], off: i64) String {
     o = (off < v.len).then({ off }, { v.len })
     ls = v.lsp_bol_at(o)
     sb
@@ -796,7 +791,7 @@ lsp_push_pos = (sb: String, mp: MutPtr<Malloc>, v: [u8], off: i64) String {
         .push_int(mp, v.lsp_utf16_col(ls, o - ls))
         .gstr_append(mp, "}")
 }
-lsp_push_range = (sb: String, mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) String {
+lsp_push_range = (sb: String, mp: Allocator, v: [u8], s: i64, e: i64) String {
     sb
         .gstr_append(mp, "{\"start\":")
         .lsp_push_pos(mp, v, s)
@@ -810,7 +805,7 @@ lsp_push_range = (sb: String, mp: MutPtr<Malloc>, v: [u8], s: i64, e: i64) Strin
 // compiler.ast.ast_types carries an end offset, and inventing one by brace-matching would be a guess.
 lsp_push_sym = (
     sb: String,
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     v: [u8],
     name: StringView,
     kind: i64,
@@ -828,7 +823,7 @@ lsp_push_sym = (
         .lsp_push_range(mp, v, off, off + name.view().len)
 }
 // a childless DocumentSymbol.
-lsp_leaf_sym = (mp: MutPtr<Malloc>, v: [u8], name: StringView, kind: i64, off: i64) StringView {
+lsp_leaf_sym = (mp: Allocator, v: [u8], name: StringView, kind: i64, off: i64) StringView {
     mp
         .gstr_string(192)
         .lsp_push_sym(mp, v, name, kind, off, off + name.view().len)
@@ -839,7 +834,7 @@ lsp_leaf_sym = (mp: MutPtr<Malloc>, v: [u8], name: StringView, kind: i64, off: i
 // name emitted is the one the SOURCE writes: the parser HOISTS both a trait impl's methods and a type
 // body's INHERENT methods into mangled `impl_<Tr>_<Ty>_<m>` top-level functions, and that mangled name
 // must never reach the client — it supplies the position, the DImpl record supplies the name.
-lsp_impl_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], im: ImplData) StringView {
+lsp_impl_syms = (mp: Allocator, decls: [Decl], v: [u8], im: ImplData) StringView {
     sb ::= mp.gstr_string(256)
     n ::= 0
     im.methods.loop_at((k, m) {
@@ -856,7 +851,7 @@ lsp_impl_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], im: ImplData) Strin
 // every method the file declares FOR type `ty`. A `Type.impl(Trait, { … })` block and a type body's
 // inherent methods are both recorded as a DImpl (the inherent one names the type as its own trait),
 // so one walk over the impls covers both spellings.
-lsp_method_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], ty: StringView) StringView {
+lsp_method_syms = (mp: Allocator, decls: [Decl], v: [u8], ty: StringView) StringView {
     sb ::= mp.gstr_string(384)
     n ::= 0
     decls.loop_at((i, d) {
@@ -875,7 +870,7 @@ lsp_method_syms = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], ty: StringView) S
 }
 // the byte the method run of `ty` ends at, or `from` when it has none. A parent's `range` must ENCLOSE
 // its children's, so the type symbol's range is stretched to its last method's name.
-lsp_methods_end = (mp: MutPtr<Malloc>, decls: [Decl], ty: StringView, from: i64) i64 {
+lsp_methods_end = (mp: Allocator, decls: [Decl], ty: StringView, from: i64) i64 {
     last ::= from
     decls.loop_at((i, d) {
         d.match ({
@@ -897,7 +892,7 @@ lsp_methods_end = (mp: MutPtr<Malloc>, decls: [Decl], ty: StringView, from: i64)
 // name list. Its FIELDS are not listed: a Field carries no position (the same AST gap that keeps
 // go-to-definition off a field).
 lsp_type_sym = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     decls: [Decl],
     v: [u8],
     name: StringView,
@@ -939,7 +934,7 @@ lsp_has_type = (decls: [Decl], name: StringView) bool {
 // records and module aliases (they name another file), trait defaults, raw C escapes, every
 // SYNTHESIZED decl (pos 0 — the parser's anonymous-struct shapes and its syntax-error sentinel), and
 // every hoisted method function, which is re-emitted under its type instead.
-lsp_decl_sym = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], d: Decl) StringView {
+lsp_decl_sym = (mp: Allocator, decls: [Decl], v: [u8], d: Decl) StringView {
     d.match ({
         .DFunc(f)      => (f.pos == 0 || mp.ff_is_hoisted(decls, f.name)).match ({
             true  => "",
@@ -977,7 +972,7 @@ lsp_decl_sym = (mp: MutPtr<Malloc>, decls: [Decl], v: [u8], d: Decl) StringView 
 // the resolved program go-to-definition walks: that one flattens every imported module into a single
 // decl list, and an outline that listed std's declarations as this document's would be a lie. Parsing
 // alone also keeps the outline answering while an import line is half-typed.
-lsp_symbols_json = (mp: MutPtr<Malloc>, text: StringView) StringView {
+lsp_symbols_json = (mp: Allocator, text: StringView) StringView {
     decls = mp.parse_module(text)
     v: Slice<u8> = text.view()
     sb ::= mp.gstr_string(1024)
@@ -993,7 +988,7 @@ lsp_symbols_json = (mp: MutPtr<Malloc>, text: StringView) StringView {
 }
 // DOCUMENT SYMBOL (`gO`, and the `]m`/`[m` method motions built on it). Answered from the OPEN
 // BUFFER via lsp_doc_text, so an unsaved edit is in the outline the moment it is typed.
-lsp_document_symbol = (mp: MutPtr<Malloc>, body: StringView) i64 {
+lsp_document_symbol = (mp: Allocator, body: StringView) i64 {
     syms = mp.lsp_symbols_json(mp.lsp_doc_text(mp.json_str_field(body, "uri")))
     mp.lsp_send(mp
         .gstr_string(1024)
@@ -1004,7 +999,7 @@ lsp_document_symbol = (mp: MutPtr<Malloc>, body: StringView) i64 {
         .gstr_append(mp, "]}")
         .gstr_finish(mp))
 }
-lsp_send_tokens = (mp: MutPtr<Malloc>, body: StringView, data: StringView) i64 {
+lsp_send_tokens = (mp: Allocator, body: StringView, data: StringView) i64 {
     mp.lsp_send(mp
         .gstr_string(8192)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
@@ -1019,7 +1014,7 @@ lsp_send_tokens = (mp: MutPtr<Malloc>, body: StringView, data: StringView) i64 {
 // re-asks after a scroll) costs a lookup instead of a full lex of the file. A document the client
 // has NOT opened is still read from disk — and not cached, since nothing then tells us when it
 // changed. `lspd_set` drops the cache on every text write, so a hit can only ever be this text.
-lsp_semantic_tokens = (mp: MutPtr<Malloc>, body: StringView) i64 {
+lsp_semantic_tokens = (mp: Allocator, body: StringView) i64 {
     uri = mp.json_str_field(body, "uri")
     i = lspd_find(uri)
     (i >= 0).match ({
@@ -1035,13 +1030,13 @@ lsp_semantic_tokens = (mp: MutPtr<Malloc>, body: StringView) i64 {
             })
             mp.lsp_send_tokens(body, data)
         },
-        false => contents_in(mp, mp.lsp_uri_path(uri)).match ({
+        false => contents_in(mp.addr(), mp.lsp_uri_path(uri)).match ({
             .Ok(txt) => mp.lsp_send_tokens(body, mp.lspt_tokens(txt)),
             .Err(er) => mp.lsp_reply_null(body),
         }),
     })
 }
-lsp_reply_null = (mp: MutPtr<Malloc>, body: StringView) i64 {
+lsp_reply_null = (mp: Allocator, body: StringView) i64 {
     mp.lsp_send(mp
         .gstr_string(96)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
@@ -1051,7 +1046,7 @@ lsp_reply_null = (mp: MutPtr<Malloc>, body: StringView) i64 {
 }
 // JSON-RPC MethodNotFound for a REQUEST we don't implement. A request left unanswered stalls the
 // client (nvim blocks a hover round-trip until its timeout); the error reply fails it instantly.
-lsp_reply_method_not_found = (mp: MutPtr<Malloc>, body: StringView) i64 {
+lsp_reply_method_not_found = (mp: Allocator, body: StringView) i64 {
     mp.lsp_send(mp
         .gstr_string(128)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
@@ -1070,7 +1065,7 @@ lsp_is_notification = (method: StringView) bool {
         || method == "exit"
 }
 // publish an EMPTY diagnostics array for `uri` (didClose: the client keeps stale squiggles otherwise).
-lsp_publish_clear = (mp: MutPtr<Malloc>, uri: StringView) i64 {
+lsp_publish_clear = (mp: Allocator, uri: StringView) i64 {
     mp.lsp_send(mp
         .gstr_string(160)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":")
@@ -1083,7 +1078,7 @@ lsp_publish_clear = (mp: MutPtr<Malloc>, uri: StringView) i64 {
 // `version` is the client's monotonic edit counter. Both land in the store — which takes ownership of
 // the decoded uri/text and frees the pair they replace — and the publish then reads the text back
 // OUT of the store, so diagnostics and highlighting are provably answering about the same bytes.
-lsp_did_change = (mp: MutPtr<Malloc>, root: StringView, body: StringView) i64 {
+lsp_did_change = (mp: Allocator, root: StringView, body: StringView) i64 {
     uri = mp.json_str_field(body, "uri")
     i = lspd_set(uri, mp.json_str_field(body, "text"), body.lsp_json_int("version"))
     mp.lsp_publish(root, uri, lspd_text_at(i))
@@ -1091,7 +1086,7 @@ lsp_did_change = (mp: MutPtr<Malloc>, root: StringView, body: StringView) i64 {
 // dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown
 // NOTIFICATIONS are no-ops; an unknown REQUEST (an "id" key outside the notification families) gets
 // a MethodNotFound error so the client never waits on a reply that will not come.
-lsp_handle = (mp: MutPtr<Malloc>, root: StringView, body: StringView) i32 {
+lsp_handle = (mp: Allocator, root: StringView, body: StringView) i32 {
     method = mp.json_str_field(body, "method")
     (method == "initialize").then({
         mp.lsp_reply_initialize(body)
@@ -1148,7 +1143,7 @@ LSP_HDR_CAP = () i64 { 1024 }
 LSP_BODY_MAX = () i64 { 67108864 }
 // read stdin one byte at a time into `buf` until the CRLFCRLF terminator (so we never over-read into
 // the body). Returns the header length incl. terminator; 0 on clean EOF before any byte; -1 on error.
-lsp_read_headers = (mp: MutPtr<Malloc>, buf: RawPtr<u8>, off: i64) i64 {
+lsp_read_headers = (mp: Allocator, buf: RawPtr<u8>, off: i64) i64 {
     r = read(0, buf.offset(off), 1)
     (r <= 0).match ({
         true  => (off == 0).then({ 0 }, { 0 - 1 }),
@@ -1215,8 +1210,11 @@ lsp_read_body = (buf: RawPtr<u8>, off: i64, n: i64) i64 {
 }
 // the JSON-RPC stdio loop: frame -> dispatch, until `exit`. Exit code follows the LSP convention:
 // 0 if `exit` arrived after `shutdown`, else 1 (also 1 if the stream closes without a clean shutdown).
-lsp_cmd* = (mp: MutPtr<Malloc>, root: StringView) i32 {
+lsp_cmd* = (mp: Allocator, root: StringView) i32 {
     hbuf = mp.acquire_or_die(LSP_HDR_CAP())
+    request ::= request_arena(heap_allocator())
+    rp = request.addr()
+    request_mem = rp.allocator()
     shut ::= false
     code ::= 1
     repeat_while((frame) {
@@ -1231,19 +1229,13 @@ lsp_cmd* = (mp: MutPtr<Malloc>, root: StringView) i32 {
                 (n < 0 || n > LSP_BODY_MAX()).match ({
                     true  => true,
                     false => {
-                        // ONE REQUEST, ONE SCOPE: the frame buffer, the JSON decode, and the whole
-                        // check pipeline the handler runs all allocate inside the scope and are
-                        // reclaimed together here. A batch compile may leak — it exits — but this
-                        // loop runs that pipeline once per keystroke, where the same non-free is
-                        // ~58 MB of growth per edit. Only the document store outlives the scope,
-                        // and it owns durable copies (compiler.lsp_docs). `act` is a scalar, so it
-                        // survives the reclaim by value.
-                        heap_scope_begin()
-                        body = mp.acquire_or_die(n + 1)
+                        // The frame, decode, and compiler pipeline share this request arena.
+                        // lsp_docs owns durable copies; everything else is reclaimed after handling.
+                        body = request_mem.acquire_or_die(n + 1)
                         got = body.lsp_read_body(0, n)
                         body.offset(got).store(0)
-                        act = mp.lsp_handle(root, cstr(body))
-                        heap_scope_end()
+                        act = request_mem.lsp_handle(root, cstr(body))
+                        rp.reset()
                         (act == 1).then({
                             shut = true
                         })
@@ -1259,5 +1251,6 @@ lsp_cmd* = (mp: MutPtr<Malloc>, root: StringView) i32 {
             },
         })
     })
+    rp.deinit()
     code
 }

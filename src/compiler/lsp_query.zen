@@ -17,7 +17,7 @@
 // plain values so escaping lives in one place. The positional/definition scanners the go-to-
 // definition handler already used live here too, so hover and completion reuse ONE identifier
 // scanner rather than growing a second one that drifts.
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
 { is_upper } = std.text.ascii
@@ -187,7 +187,7 @@ lspq_doc_start = (v: Slice<u8>, d: i64) i64 {
     (p + 1 < d && v[p] == '/' && v[p + 1] == '/').then({ v.lspq_doc_start(p) }, { d })
 }
 // the doc run as markdown prose: each line's `//` marker (and the space after it) removed.
-lspq_push_doc = (sb: String, mp: MutPtr<Malloc>, v: Slice<u8>, s: i64, e: i64) String {
+lspq_push_doc = (sb: String, mp: Allocator, v: Slice<u8>, s: i64, e: i64) String {
     o ::= sb
     bol ::= true
     s.step_while((i) { i < e }, (i) {
@@ -223,7 +223,7 @@ lspq_names_has = (v: [u8], s: i64, e: i64, name: [u8]) bool {
     hit
 }
 // the `= std.text.str` tail of an import record whose `}` sits at `c`.
-lspq_module_after = (mp: MutPtr<Malloc>, v: [u8], c: i64) StringView {
+lspq_module_after = (mp: Allocator, v: [u8], c: i64) StringView {
     p = v.lsp_skip_sp(c + 1)
     (p >= v.len || v[p] != '=').then({
         return ""
@@ -234,7 +234,7 @@ lspq_module_after = (mp: MutPtr<Malloc>, v: [u8], c: i64) StringView {
 // the module path an import record binds `name` from, or "" — `{ a, b } = std.text.str` (the record
 // may wrap across lines). This is how hover says something true about an imported name that has no
 // declaration in this file.
-lspq_import_of = (mp: MutPtr<Malloc>, v: Slice<u8>, name: Slice<u8>) StringView {
+lspq_import_of = (mp: Allocator, v: Slice<u8>, name: Slice<u8>) StringView {
     found :: StringView = ""
     atcol0 ::= true
     zero: i64 = 0
@@ -250,16 +250,14 @@ lspq_import_of = (mp: MutPtr<Malloc>, v: Slice<u8>, name: Slice<u8>) StringView 
     })
     found
 }
-lspq_fence = (mp: MutPtr<Malloc>, cap: i64) String {
-    mp.gstr_string(cap).gstr_append(mp, "```zen\n")
-}
-lspq_push_docblock = (sb: String, mp: MutPtr<Malloc>, v: Slice<u8>, s: i64, e: i64) String {
+lspq_fence = (mp: Allocator, cap: i64) String { mp.gstr_string(cap).gstr_append(mp, "```zen\n") }
+lspq_push_docblock = (sb: String, mp: Allocator, v: Slice<u8>, s: i64, e: i64) String {
     (s >= e).then({
         return sb
     })
     sb.gstr_append(mp, "\n\n").lspq_push_doc(mp, v, s, e)
 }
-lspq_import_hover = (mp: MutPtr<Malloc>, v: Slice<u8>, name: Slice<u8>) StringView {
+lspq_import_hover = (mp: Allocator, v: Slice<u8>, name: Slice<u8>) StringView {
     m = mp.lspq_import_of(v, name)
     is_empty(m).then({
         return ""
@@ -277,7 +275,7 @@ lspq_import_hover = (mp: MutPtr<Malloc>, v: Slice<u8>, name: Slice<u8>) StringVi
 // top-level declarations, plus a name bound by one of its import records (rendered as its origin
 // module). Anything else — a local, a field, a declaration in another file — answers "" and the
 // caller replies null rather than guessing.
-lspq_hover* = (mp: MutPtr<Malloc>, text: StringView, line: i64, ch: i64) StringView {
+lspq_hover* = (mp: Allocator, text: StringView, line: i64, ch: i64) StringView {
     v: Slice<u8> = text.view()
     off = v.lsp_byte_of_pos(line, ch, 0, 0)
     s = v.lsp_ident_start(off)
@@ -310,7 +308,7 @@ LspqItem*: {
     kind: i64,
 }
 lspq_no_items = () [LspqItem] { slice(null_ptr(), 0) }
-lspq_alloc = (mp: MutPtr<Malloc>, n: i64) [LspqItem] {
+lspq_alloc = (mp: Allocator, n: i64) [LspqItem] {
     slice(mp.acquire_or_die(n * sizeof(LspqItem)), n)
 }
 // A sink that COUNTS when it has no room and FILLS when it does — so one collector body runs twice
@@ -335,7 +333,7 @@ lspq_put = (sk: LspqSink, label: StringView, detail: StringView, kind: i64) Lspq
 // every identifier in `v[s, e)` as an item. `kind` LSPQ_BY_CASE guesses from the initial letter —
 // the same lexical rule the highlighter uses, and all a textual scan of an import list can know.
 lspq_add_words = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     v: Slice<u8>,
     s: i64,
     e: i64,
@@ -372,7 +370,7 @@ lspq_decl_kind = (v: [u8], p: i64) i64 {
     q = v.lsp_skip_sp(p + 1)
     (q < v.len && (v[q] == '(' || v[q] == '<')).then({ LSPQ_FUNCTION() }, { LSPQ_VARIABLE() })
 }
-lspq_add_decl = (mp: MutPtr<Malloc>, v: [u8], i: i64, sk: LspqSink) LspqSink {
+lspq_add_decl = (mp: Allocator, v: [u8], i: i64, sk: LspqSink) LspqSink {
     e = v.lsp_ident_end(i)
     p = v.lspq_head_sigil(e)
     (p < 0).then({
@@ -387,7 +385,7 @@ LSPQ_TYPES = () StringView {
     "i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool void StringView StringLiteral StringCstr"
 }
 lspq_add_fixed = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     words: StringView,
     detail: StringView,
     kind: i64,
@@ -399,7 +397,7 @@ lspq_add_fixed = (
 // One pass over the buffer: every column-0 declaration head, every name an import record binds, then
 // the fixed word lists. Column 0 is what makes this cheap and honest — it is exactly the set of names
 // that are in scope everywhere in the file.
-lspq_collect = (mp: MutPtr<Malloc>, v: Slice<u8>, sk: LspqSink) LspqSink {
+lspq_collect = (mp: Allocator, v: Slice<u8>, sk: LspqSink) LspqSink {
     acc ::= sk
     atcol0 ::= true
     zero: i64 = 0
@@ -425,7 +423,7 @@ lspq_collect = (mp: MutPtr<Malloc>, v: Slice<u8>, sk: LspqSink) LspqSink {
 // names its import records bind (with the origin module as detail), and the language's keywords and
 // builtin type names. Locals, fields and members are NOT here — which is why the server advertises
 // no trigger characters: `.` would produce nothing this scan could honestly fill in.
-lspq_items* = (mp: MutPtr<Malloc>, text: StringView) [LspqItem] {
+lspq_items* = (mp: Allocator, text: StringView) [LspqItem] {
     v: Slice<u8> = text.view()
     n = mp.lspq_collect(v, LspqSink(
         items: lspq_no_items(),

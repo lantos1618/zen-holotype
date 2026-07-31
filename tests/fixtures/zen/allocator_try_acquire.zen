@@ -1,23 +1,27 @@
-{ Allocator, try_acquire } = std.mem.alloc
+{ AllocatorBackend } = std.mem.alloc
 { Result, IoError } = std.core.result
 { to_exit } = std.core.bool
 LimitAlloc: {
     _: i32,
 }
-LimitAlloc.impl(Allocator, {
+LimitAlloc.impl(AllocatorBackend, {
     acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> { null_ptr() }
     resize  = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
     release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { }
 })
 main = () i32 {
     lim = LimitAlloc(_: 0)
-    r: Result<RawPtr<u8>, IoError> = lim.addr().try_acquire(8)
-    ok = r.match ({
-        .Err(e) => e.match ({
-            .NotFound => true,
-            _         => false,
-        }),
+    acquire_failed = lim.addr().try_acquire(8).match ({
         .Ok(p)  => false,
+        .Err(e) => true,
     })
-    ok.to_exit()
+    resize_failed = lim.addr().try_resize(null_ptr(), 8).match ({
+        .Ok(p)  => false,
+        .Err(e) => true,
+    })
+    zero_succeeded = lim.addr().try_acquire(0).match ({
+        .Ok(p)  => true,
+        .Err(e) => false,
+    })
+    (acquire_failed && resize_failed && zero_succeeded).to_exit()
 }

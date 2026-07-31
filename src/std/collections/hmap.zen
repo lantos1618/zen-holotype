@@ -54,7 +54,7 @@
 //   2. NO IMPLICIT VALUE SEMANTICS: headers copied from one HMap share one backing store; in-place
 //      upserts are visible through every copy.
 { Result, IoError, Opt } = std.core.result
-{ Allocator, try_acquire3, DynAlloc, dyn_heap } = std.mem.alloc    // DynAlloc = the narrow Allocator stored by the AMBIENT form; try_acquire3 = all-or-nothing 3-buffer acquire
+{ AllocatorBackend, try_acquire3, Allocator, heap_allocator } = std.mem.alloc    // stored capability + atomic three-buffer acquisition
 { view } = std.text.str
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
 { hashidx_fold, hashidx_clear, hashidx_link } = std.collections.hashidx    // shared open-hash index mechanics over the 2*cap i64 buffer
@@ -168,7 +168,7 @@ HMap*<K, V>: {
         i = m.find(k)
         (i < 0).then({ dflt }, { m.vals()[i] })
     }
-    grow = (m: HMap<K, V>, a: Allocator) Result<HMap<K, V>, IoError> {
+    grow = (m: HMap<K, V>, a: AllocatorBackend) Result<HMap<K, V>, IoError> {
         cap = m.cap * 2 + 1
         a.try_acquire3(cap * sizeof(K), cap * sizeof(V), cap * 2 * sizeof(i64)).match ({
             .Ok(bufs) => {
@@ -232,7 +232,7 @@ HMap*<K, V>: {
         hashidx_link(m.index(), m.cap, slot, hbucket(m.keys()[slot], m.cap))
         m
     }
-    append = (m: HMap<K, V>, a: Allocator, k: K, v: V) Result<HMap<K, V>, IoError> {
+    append = (m: HMap<K, V>, a: AllocatorBackend, k: K, v: V) Result<HMap<K, V>, IoError> {
         k = k
         v = v
         out: Result<HMap<K, V>, IoError> = (m.len < m.cap).match ({
@@ -275,7 +275,7 @@ HMap*<K, V>: {
         })
         out
     }
-    put = (m: HMap<K, V>, a: Allocator, k: K, v: V) Result<HMap<K, V>, IoError> {
+    put = (m: HMap<K, V>, a: AllocatorBackend, k: K, v: V) Result<HMap<K, V>, IoError> {
         // Insert or upsert (allocation failure is a value). RETURNS the updated map — always
         // rebind (`m = m.put(...).expect("…")`): on grow the buffers are realloced, so a handle
         // captured before this call dangles (VALUE-MOLD CONTRACT). On an existing key the value
@@ -323,7 +323,7 @@ HMap*<K, V>: {
             },
         })
     }
-    free = (m: HMap<K, V>, a: Allocator) void {
+    free = (m: HMap<K, V>, a: AllocatorBackend) void {
         a.release(m.keys)
         a.release(m.vals)
         a.release(m.idx)
@@ -351,7 +351,7 @@ HMap*<K, V>: {
 // annotation (a one-line `.expect` chain can't reach them — see the header comment):
 //   r: Result<HMap<str, i64>, IoError> = hmap.empty(a)
 //   m = r.expect("empty")
-empty*<K, V> = (a: Allocator) Result<HMap<K, V>, IoError> {
+empty*<K, V> = (a: AllocatorBackend) Result<HMap<K, V>, IoError> {
     a.try_acquire3(sizeof(K), sizeof(V), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
             kp = bufs.b1
@@ -376,7 +376,7 @@ empty*<K, V> = (a: Allocator) Result<HMap<K, V>, IoError> {
 // Internal three-argument construction path. Its module-specific name must stay unique after std
 // modules are flattened: a bare `of` can otherwise bind std.mem.raw's two-argument constructor when
 // an entry imports std.sys.root before this module.
-hmap_seed_in<K, V> = (a: Allocator, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
+hmap_seed_in<K, V> = (a: AllocatorBackend, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
     a.try_acquire3(sizeof(K), sizeof(V), 2 * sizeof(i64)).match ({
         .Ok(bufs) => {
             kp = bufs.b1
@@ -405,35 +405,14 @@ hmap_seed_in<K, V> = (a: Allocator, seed_key: K, seed_val: V) Result<HMap<K, V>,
 // an `HMap<K, V>` seeded with one entry, its buffers acquired from `a`. K and V are inferred from
 // the seed pair (Zen has no call-site type args), so this one CHAINS:
 //   m = hmap.of(a, k, v).expect("of")
-of*<K, V> = (a: Allocator, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
+of*<K, V> = (a: AllocatorBackend, seed_key: K, seed_val: V) Result<HMap<K, V>, IoError> {
     hmap_seed_in(a, seed_key, seed_val)
 }
-// ── AMBIENT FORM (rt-drawn) ────────────────────────────────────────────────────────────────────────
-// The allocator-free twin of `HMap<K, V>`, in the exact `AVec<T>` mold (see std.collections.vec for the
-// full rationale). `AHMap<K, V>` STORES the narrow allocator captured at construction (the ambient rt
-// narrowed to a `DynAlloc`) and draws every later allocation (grow, free) from THAT allocator — it never
-// re-reads `current()` per op, so an AHMap is safe to outlive the scope it was born in (re-reading would
-// cross-allocator-free on grow).
-// Everything above (the explicit `HMap<K, V>` + `of(a, …)`/`m.put(a, k, v)`/`m.free(a)` forms) is
-// UNCHANGED; this section only adds new names on a new type. This is ALSO the user-facing ambient MAP:
-// `AHMap<str, V>` is the generic equivalent of the str-keyed `Map<T>` (which stays compiler-internal).
-//
-//   m = hmap.from("the", 1)           // seed one pair; K/V inferred → AHMap<str, i32>, chains
-//   m  = m.put("cat", 2)               // no allocator — bytes from the stored rt
-//   m  = m.put("the", 9)               // upsert
-//   m.get("the")                       // Opt<i32>: .Some(9)
-//   m.get_or("dog", 0)                 // 0
-//   m  = m.delete("the")
-//   m.each((k, v){ ... })   n = m.len()
-//   m.free()
-//
-//   e: hmap.AHMap<str, i64> = hmap.new()   // empty; K/V from the annotation (nothing to infer)
-//
-// Ambient ops are FAIL-FAST on OOM (`.expect`); the explicit `HMap` API keeps allocation failure as a
-// `Result<_, IoError>` value.
+// AHMap retains its birth allocator for every grow and release.
+// The allocator state must outlive the AHMap. Allocation failure is fail-fast.
 AHMap*<K, V>: {
     inner: HMap<K, V>,
-    alloc: DynAlloc,
+    alloc: Allocator,
     len    = (w: AHMap<K, V>) i64 { w.inner.len() }
     has    = (w: AHMap<K, V>, k: K) bool { w.inner.has(k) }
     get    = (w: AHMap<K, V>, k: K) Opt<V> { w.inner.get(k) }
@@ -461,11 +440,8 @@ AHMap*<K, V>: {
         w.inner.free(a.addr())
     }
 }
-// EXPLICIT-allocator constructor — THE REAL CONSTRUCTION PATH. Build a zero-entry `AHMap<K, V>` bound to
-// a caller-supplied NARROW Allocator (`a: DynAlloc`), with NO ambient draw (docs/MEMORY_MODEL.md:
-// explicit capability threading is the model). The ambient `new()` below is a one-line shim — the single
-// process-heap draw (`dyn_heap()`) on the hmap construction path.
-new_in*<K, V> = (a: DynAlloc) AHMap<K, V> {
+// Explicit construction never reads the ambient runtime.
+new_in*<K, V> = (a: Allocator) AHMap<K, V> {
     da = a
     ir: Result<HMap<K, V>, IoError> = empty(da.addr())
     AHMap<K, V>(
@@ -473,22 +449,17 @@ new_in*<K, V> = (a: DynAlloc) AHMap<K, V> {
         alloc: a,
     )
 }
-// a zero-entry ambient `AHMap<K, V>`. K/V appear only in the return type, so pin them via the LHS
-// annotation: `e: AHMap<str, i64> = hmap.new()`. The process heap is drawn ONCE here (as a DynAlloc)
-// and stored. `new_in`'s body is inlined (no bare `new_in` call — that bare name is ambiguous with
-// std.text.string's generic `new_in(a: Allocator)` once both flatten together; qualified `hmap.new_in`
-// stays the external real path).
+// K and V come from the result context. The body avoids a flat-namespace new_in collision.
 new*<K, V> = () AHMap<K, V> {
-    a = dyn_heap()
+    a = heap_allocator()
     ir: Result<HMap<K, V>, IoError> = empty(a.addr())
     AHMap<K, V>(
         inner: ir.expect("hmap.new: out of memory"),
         alloc: a,
     )
 }
-// EXPLICIT-allocator seed constructor: an `AHMap<K, V>` bound to `a`, seeded with one pair. No ambient
-// draw. (Mirrors `HMap.of`'s shape — there is no pair-slice literal, so it takes the pair directly.)
-from_in*<K, V> = (a: DynAlloc, k: K, v: V) AHMap<K, V> {
+// Explicit seed construction never reads the ambient runtime.
+from_in*<K, V> = (a: Allocator, k: K, v: V) AHMap<K, V> {
     da = a
     ih: HMap<K, V> = hmap_seed_in(da.addr(), k, v).expect("hmap.from: out of memory")
     AHMap<K, V>(
@@ -496,12 +467,9 @@ from_in*<K, V> = (a: DynAlloc, k: K, v: V) AHMap<K, V> {
         alloc: a,
     )
 }
-// an ambient `AHMap<K, V>` seeded with one pair. Narrow the process heap once; `from_in`'s body is inlined
-// (no bare `from_in` call — same string-`new_in` collision avoidance). K/V are inferred from the seed,
-// so this CHAINS: `m = hmap.from(k, v)`. (Named `from`, not `of`, since module `of` is the explicit
-// allocator-threaded seed constructor.)
+// Process-heap seed construction is fail-fast; K and V are inferred from the pair.
 from*<K, V> = (k: K, v: V) AHMap<K, V> {
-    a = dyn_heap()
+    a = heap_allocator()
     ih: HMap<K, V> = hmap_seed_in(a.addr(), k, v).expect("hmap.from: out of memory")
     AHMap<K, V>(
         inner: ih,

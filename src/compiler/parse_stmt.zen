@@ -10,7 +10,7 @@
 { comp_tmp_name } = compiler.mangle
 { Token, scan } = compiler.lex
 { at } = std.text.ascii
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { enode, is_dcolon, is_mut_walrus, is_op, is_op1, is_walrus, lexeme, op_str, parse_atom } = compiler.parse_atom
 { is_dot, parse_or_nested } = compiler.parse_postfix
 { is_field_colon } = compiler.parse_primary
@@ -35,14 +35,14 @@ scons_val = (h: Stmt, t: Ptr<SList>) SList {
         tail: t,
     ))
 }
-slbuf = (a: MutPtr<Malloc>) [SList] { slice(a.acquire_or_die(sizeof(SList)), 1) }
-slnode = (a: MutPtr<Malloc>, v: SList) Ptr<SList> {
+slbuf = (a: Allocator) [SList] { slice(a.acquire_or_die(sizeof(SList)), 1) }
+slnode = (a: Allocator, v: SList) Ptr<SList> {
     buf ::= a.slbuf()
     buf[0] = v
     buf[0].addr()
 }
-snil = (a: MutPtr<Malloc>) Ptr<SList> { a.slnode(snil_val()) }
-scons = (a: MutPtr<Malloc>, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
+snil = (a: Allocator) Ptr<SList> { a.slnode(snil_val()) }
+scons = (a: Allocator, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
 // ── local bindings: CONST BY DEFAULT ───────────────────────────────────────────────────────────
 // Four forms, three independently optional marks — `::` marks MUTABILITY, `:` introduces the TYPE,
 // `=` binds the VALUE:
@@ -203,7 +203,7 @@ stmt_kind = (src: StringView, pos: i32) SKind {
 }
 // parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
 // the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
-parse_stmts = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_stmts = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     // DEPTH CAP (see parse_type.zen): a function body's statement list recurses one frame per statement,
     // so a flood of garbage tokens (e.g. the trailing `)`s of a pathologically-nested expression, each
     // consumed as a one-token bad statement) would overflow the C stack. Past the cap, stop the list
@@ -215,7 +215,7 @@ parse_stmts = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
     pdepth_exit()
     r
 }
-parse_stmts_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_stmts_inner = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     src.at_body_end(pos).match ({
         true  => a.snil(),
         false => src.stmt_kind(pos).match ({
@@ -231,7 +231,7 @@ parse_stmts_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
     })
 }
 // `name[i] = value` — an index assignment. The element type is left void; compiler.check fills it.
-parse_idxset_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_idxset_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     nt = src.scan(pos)    // the array name
     name = a.lexeme(src, nt.tok)
     lb = src.scan(nt.next)    // '['
@@ -241,7 +241,7 @@ parse_idxset_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
     v = a.parse_or(src, eq.next)    // the value
     a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), v.expr, nt.tok.start), a.parse_stmts(src, v.next))
 }
-parse_set_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_set_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     start = src.scan(pos).tok.start
     lhs = a.parse_atom(src, pos)    // the lvalue target: a Var `x` or a Member chain `p.x.y`
     eq = src.scan(lhs.next)    // '='
@@ -282,10 +282,10 @@ CompDes: {
     next: i32,
 }
 // splice the lets (accumulated newest-first) back into SOURCE order ahead of the store + tail
-comp_prefix = (a: MutPtr<Malloc>, d: CompDes, tail: Ptr<SList>) Ptr<SList> {
+comp_prefix = (a: Allocator, d: CompDes, tail: Ptr<SList>) Ptr<SList> {
     a.lets_splice(d.lets, a.scons(d.stmt, tail))
 }
-lets_splice = (a: MutPtr<Malloc>, lets: Ptr<SList>, tail: Ptr<SList>) Ptr<SList> {
+lets_splice = (a: Allocator, lets: Ptr<SList>, tail: Ptr<SList>) Ptr<SList> {
     lets.match ({
         .SNil     => tail,
         .SCons(c) => a.lets_splice(c.tail, a.scons(c.head, tail)),
@@ -301,7 +301,7 @@ PlaceRw: {
     lets: Ptr<SList>,
     k: i32,
 }
-place_hoist = (a: MutPtr<Malloc>, e: Ptr<Expr>, start: i32, k: i32, lets: Ptr<SList>) PlaceRw {
+place_hoist = (a: Allocator, e: Ptr<Expr>, start: i32, k: i32, lets: Ptr<SList>) PlaceRw {
     e.match ({
         .Index(ix) => {
             b = a.place_hoist(ix.seq, start, k, lets)
@@ -339,7 +339,7 @@ place_hoist = (a: MutPtr<Malloc>, e: Ptr<Expr>, start: i32, k: i32, lets: Ptr<SL
 // `name[i] OP= rhs`  →  `name[i] = name[i] OP rhs`. A pure index is re-parsed for the left operand
 // so the two index expressions are independent AST (no shared node); a call-bearing index is bound
 // to a hidden temp first so it evaluates ONCE. Reuses sidxset_at, like parse_idxset_stmt.
-comp_idxset_desugar = (a: MutPtr<Malloc>, src: StringView, pos: i32) CompDes {
+comp_idxset_desugar = (a: Allocator, src: StringView, pos: i32) CompDes {
     nt = src.scan(pos)    // the array name
     name = a.lexeme(src, nt.tok)
     lb = src.scan(nt.next)    // '['
@@ -368,7 +368,7 @@ comp_idxset_desugar = (a: MutPtr<Malloc>, src: StringView, pos: i32) CompDes {
         },
     })
 }
-parse_comp_idxset_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_comp_idxset_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     d = a.comp_idxset_desugar(src, pos)
     a.comp_prefix(d, a.parse_stmts(src, d.next))
 }
@@ -376,7 +376,7 @@ parse_comp_idxset_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SLis
 // place twice from the same position yields two independent copies — one the target, one the operand.
 // A place whose index sub-exprs contain calls goes through place_hoist instead — twice, once per
 // copy (the second walk mints the same temp names and its duplicate lets are discarded).
-comp_set_desugar = (a: MutPtr<Malloc>, src: StringView, pos: i32) CompDes {
+comp_set_desugar = (a: Allocator, src: StringView, pos: i32) CompDes {
     start = src.scan(pos).tok.start
     lhs = a.parse_atom(src, pos)    // store target (Var or Member chain)
     cur = a.parse_atom(src, pos)    // identical copy, the left operand
@@ -400,7 +400,7 @@ comp_set_desugar = (a: MutPtr<Malloc>, src: StringView, pos: i32) CompDes {
         ),
     })
 }
-parse_comp_set_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_comp_set_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     d = a.comp_set_desugar(src, pos)
     a.comp_prefix(d, a.parse_stmts(src, d.next))
 }
@@ -423,7 +423,7 @@ LetParse*: {
     st: Stmt,
     next: i32,
 }
-parse_binding* = (a: MutPtr<Malloc>, src: StringView, pos: i32) LetParse {
+parse_binding* = (a: Allocator, src: StringView, pos: i32) LetParse {
     nt = src.scan(pos)    // the bound name
     name = a.lexeme(src, nt.tok)
     mk = src.scan(nt.next)    // the mark: `::=` / `::` / `:` (or the retired walrus)
@@ -468,7 +468,7 @@ parse_binding* = (a: MutPtr<Malloc>, src: StringView, pos: i32) LetParse {
         next: v.next,
     )
 }    // value
-parse_let_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_let_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     b = a.parse_binding(src, pos)
     a.scons(b.st, a.parse_stmts(src, b.next))
 }    // … then the rest of the body
@@ -481,14 +481,14 @@ at_body_end = (src: StringView, pos: i32) bool {
         _    => src.is_rbrace(sc.tok),
     })
 }
-parse_ret_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_ret_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     r = a.parse_or(src, pos)
     src.at_body_end(r.next).match ({
         true  => a.scons(sret(r.expr), a.snil()),
         false => a.scons(sexpr(r.expr), a.parse_stmts(src, r.next)),
     })
 }    // final expression -> return
-parse_return_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_return_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     kw = src.scan(pos)    // a bare expr statement
     // an EARLY `return <expr>` statement: the `return` keyword, then a value, then the rest of the body.
     // Produces the same Return Stmt as a trailing expression, but here it can sit mid-body (e.g. inside
@@ -519,7 +519,7 @@ WhileEnd: {
     stmt: Stmt,
     next: i32,
 }
-parse_while = (a: MutPtr<Malloc>, src: StringView, pos: i32) WhileEnd {
+parse_while = (a: Allocator, src: StringView, pos: i32) WhileEnd {
     at = src.scan(pos)    // '@'
     wk = src.scan(at.next)    // 'while'
     lp = src.skip_to_lparen(wk.next)    // pos just past '('
@@ -535,7 +535,7 @@ parse_while = (a: MutPtr<Malloc>, src: StringView, pos: i32) WhileEnd {
     )
 }    // statements until '}'
 // the top-level statement form: a While, then the rest of the function body
-parse_while_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) Ptr<SList> {
+parse_while_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     w = a.parse_while(src, pos)
     a.scons(w.stmt, a.parse_stmts(src, w.next))
 }
@@ -544,7 +544,7 @@ BlockEnd*: {
     list: Ptr<SList>,
     next: i32,
 }
-parse_block* = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+parse_block* = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     // DEPTH CAP (see parse_type.zen): loop/match-arm body nesting funnels through parse_block, so a guard
     // here bounds deeply-nested `@while`s. Past the cap, stop descending (an empty block, perr set) — like
     // the Eof case. The bail consumes no token, but the caller re-dispatches from a position that advances
@@ -562,7 +562,7 @@ parse_block* = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
     pdepth_exit()
     r
 }
-parse_block_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+parse_block_inner = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
@@ -583,7 +583,7 @@ parse_block_inner = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
 }    // '}' — block done
 // same flat dispatch as parse_stmts, but a body has no trailing-return rule — `SExpr` is a bare
 // statement. An explicit `return <expr>` (SRet) IS allowed inside a block (a guard arm's body).
-block_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+block_stmt = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     src.stmt_kind(pos).match ({
         .SLet   => a.block_let(src, pos),
         .SIdx   => a.block_idxset(src, pos),    // buf[i] = v  inside a loop/if body
@@ -595,7 +595,7 @@ block_stmt = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
         .SExpr  => a.block_expr(src, pos),
     })
 }    // a bare expression statement (e.g. putchar(b))
-block_return = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+block_return = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     kw = src.scan(pos)    // 'return'
     r = a.parse_or(src, kw.next)    // the returned value
     rest = a.parse_block(src, r.next)
@@ -604,7 +604,7 @@ block_return = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
         next: rest.next,
     )
 }
-block_idxset = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+block_idxset = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     nt = src.scan(pos)    // the array name
     name = a.lexeme(src, nt.tok)
     lb = src.scan(nt.next)    // '['
@@ -618,7 +618,7 @@ block_idxset = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
         next: rest.next,
     )
 }
-block_expr = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+block_expr = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     e = a.parse_or(src, pos)    // a bare expression, evaluated for effect
     rest = a.parse_block(src, e.next)
     BlockEnd(
@@ -626,7 +626,7 @@ block_expr = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
         next: rest.next,
     )
 }
-block_let = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+block_let = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     b = a.parse_binding(src, pos)
     rest = a.parse_block(src, b.next)
     BlockEnd(
@@ -634,7 +634,7 @@ block_let = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
         next: rest.next,
     )
 }
-block_set = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+block_set = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     start = src.scan(pos).tok.start
     lhs = a.parse_atom(src, pos)    // the lvalue target (Var or Member chain)
     eq = src.scan(lhs.next)    // '='
@@ -646,7 +646,7 @@ block_set = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
     )
 }
 // compound `name[i] OP= rhs` inside a block — the same desugar as parse_comp_idxset_stmt
-block_comp_idxset = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+block_comp_idxset = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     d = a.comp_idxset_desugar(src, pos)
     rest = a.parse_block(src, d.next)
     BlockEnd(
@@ -655,7 +655,7 @@ block_comp_idxset = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
     )
 }
 // compound `place OP= rhs` inside a block — the same desugar as parse_comp_set_stmt
-block_comp_set = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+block_comp_set = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     d = a.comp_set_desugar(src, pos)
     rest = a.parse_block(src, d.next)
     BlockEnd(
@@ -663,7 +663,7 @@ block_comp_set = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
         next: rest.next,
     )
 }
-block_while = (a: MutPtr<Malloc>, src: StringView, pos: i32) BlockEnd {
+block_while = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     w = a.parse_while(src, pos)
     rest = a.parse_block(src, w.next)
     BlockEnd(
@@ -690,12 +690,12 @@ sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
 }
 // a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
 // materialize a statement cons-list into a heap [Stmt] (counted, then filled in order)
-materialize* = (a: MutPtr<Malloc>, stmts: Ptr<SList>) [Stmt] {
+materialize* = (a: Allocator, stmts: Ptr<SList>) [Stmt] {
     body = cbuf<Stmt>(a, stmts.scount())
     body.sfill(stmts, 0)
     body
 }
 // parse a body [pos..] into a heap [Stmt] (the statement cons-list, counted + materialized)
-build_body* = (a: MutPtr<Malloc>, src: StringView, pos: i32) [Stmt] {
+build_body* = (a: Allocator, src: StringView, pos: i32) [Stmt] {
     a.materialize(a.parse_stmts(src, pos))
 }

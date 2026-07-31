@@ -81,7 +81,8 @@ is why `from_json` needed **no new intrinsic**.
 
 ```zen
 { to_json, from_json } = std.format.serde
-da = dyn_heap()
+{ heap_allocator } = std.mem.alloc
+da = heap_allocator()
 to_json(da.addr(), Point(x: 3, y: 4))          // .Ok("{\"x\":3,\"y\":4}")
 from_json(da.addr(), s, Point(x: 0, y: 0))     // .Ok(Point(x: 3, y: 4)); seed = defaults
 ```

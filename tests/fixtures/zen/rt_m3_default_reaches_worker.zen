@@ -8,7 +8,7 @@
 // never fire and the counter would stay 0. Unlike the explicit-runtime fixture, this rt is implicit,
 // carried by the process default. Exit N (== 40) means the propagation contract holds.
 { pool_open, Pool } = std.concurrent.pool
-{ malloc, free, realloc } = std.mem.alloc
+{ malloc, free, realloc, Allocator, AllocatorVTable, allocator_of } = std.mem.alloc
 { mem_rt, set_default, alloc, release } = std.rt
 pa = std.concurrent.pool_actor
 { Context, Receiver } = std.concurrent.pool_actor
@@ -26,6 +26,14 @@ count_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
 }
 count_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { realloc(p, n) }
 count_release = (state: RawPtr<u8>, p: RawPtr<u8>) void { free(p) }
+count_vtable ::= AllocatorVTable(
+    vt_alloc: count_acquire,
+    vt_remap: count_resize,
+    vt_free: count_release,
+)
+count_allocator = (state: RawPtr<u8>) Allocator {
+    allocator_of(state, count_vtable.addr().offset(0))
+}
 Probe.impl(Receiver, {
     receive = (pr: MutPtr<Probe>, ctx: Context<Msg>) void {
         ctx.msg.match ({
@@ -51,7 +59,7 @@ send_pings = (p: MutPtr<Pool>, h: pa.PooledHandle<Probe>, k: i64) void {
 }
 main = () i32 {
     store_i64(allocs, 0)
-    crt = mem_rt(count_acquire, count_resize, count_release, allocs)
+    crt = mem_rt(count_allocator(allocs))
     set_default(crt)    // configure the WHOLE program's runtime ONCE, before any spawn
     h = pa.spawn_actor_heap(64, Probe(hits: 0), tramp)    // DEFAULT path — no explicit rt threaded
     p = pool_open(2, 8)

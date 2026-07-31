@@ -1,0 +1,100 @@
+//! link: c
+{ Allocator, AllocatorVTable, allocator_of, request_arena, malloc, realloc, free } = std.mem.alloc
+{ to_exit } = std.core.bool
+MIB = 1048576
+Stats*: {
+    allocs: i64,
+    remaps: i64,
+    frees: i64,
+}
+stats_ptr = (state: RawPtr<u8>) MutPtr<Stats> {
+    slot: [Stats] = state.slice(1)
+    slot[0].addr()
+}
+stats_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
+    (n <= 0).match ({
+        true  => null_ptr(),
+        false => {
+            counterp ::= stats_ptr(state)
+            counterp.allocs = counterp.allocs + 1
+            malloc(n)
+        },
+    })
+}
+stats_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+    counterp ::= stats_ptr(state)
+    counterp.remaps = counterp.remaps + 1
+    realloc(p, n)
+}
+stats_release = (state: RawPtr<u8>, p: RawPtr<u8>) void {
+    (p != null_ptr()).then({
+        counterp ::= stats_ptr(state)
+        counterp.frees = counterp.frees + 1
+        free(p)
+    })
+}
+stats_vtable ::= AllocatorVTable(
+    vt_alloc: stats_acquire,
+    vt_remap: stats_resize,
+    vt_free: stats_release,
+)
+stats_allocator = (s: MutPtr<Stats>) Allocator {
+    allocator_of(s.offset(0), stats_vtable.addr().offset(0))
+}
+main = () i32 {
+    stats ::= Stats(
+        allocs: 0,
+        remaps: 0,
+        frees: 0,
+    )
+    backing = stats_allocator(stats.addr())
+    bp = assert_nonnull(backing.acquire(8))
+    store_i64(bp, 73)
+    bq = assert_nonnull(backing.resize(bp, 16))
+    adapter_ok = load_i64(bq) == 73
+    backing.release(bq)
+    adapter_balanced = stats.allocs == 1 && stats.remaps == 1 && stats.frees == 1
+    arena ::= request_arena(backing)
+    rp = arena.addr()
+    a = rp.allocator()
+    p = assert_nonnull(a.acquire(16))
+    store_i64(p, 11)
+    store_i64(p.offset(8), 29)
+    grown = assert_nonnull(a.resize(p, 32))
+    grow_ok = load_i64(grown) == 11 && load_i64(grown.offset(8)) == 29
+    shrunk = assert_nonnull(a.resize(grown, 8))
+    shrink_ok = load_i64(shrunk) == 11
+    zero_ok = a.resize(shrunk, 0) == null_ptr()
+    a.release(shrunk)
+    rp.reset()
+    first = assert_nonnull(a.acquire(MIB))
+    second = assert_nonnull(a.acquire(5 * MIB))
+    store_i64(first, 101)
+    store_i64(second, 202)
+    warm_allocs = stats.allocs
+    rp.reset()
+    large = assert_nonnull(a.acquire(5 * MIB))
+    small = assert_nonnull(a.acquire(3 * MIB))
+    store_i64(large, 303)
+    store_i64(small, 404)
+    varied_reuse = stats.allocs == warm_allocs && load_i64(large) == 303 && load_i64(small) == 404
+    rp.reset()
+    again_large = assert_nonnull(a.acquire(5 * MIB))
+    again_small = assert_nonnull(a.acquire(3 * MIB))
+    repeat_reuse = stats.allocs == warm_allocs
+        && again_large != null_ptr()
+        && again_small != null_ptr()
+    rp.deinit()
+    deinit_balanced = stats.allocs == stats.frees
+    empty_arena = arena.head == null_ptr() && arena.cur == null_ptr()
+    (sizeof(Allocator) == 16
+        && adapter_ok
+        && adapter_balanced
+        && grow_ok
+        && shrink_ok
+        && zero_ok
+        && varied_reuse
+        && repeat_reuse
+        && deinit_balanced
+        && empty_arena).to_exit()
+}

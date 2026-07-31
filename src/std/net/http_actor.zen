@@ -19,7 +19,7 @@
 { Context, Receiver, dispatch, ref_send_msg } = std.concurrent.pool_actor
 pa = std.concurrent.pool_actor
 { http_get, http_error_name, response_free } = std.net.http
-{ Allocator } = std.mem.alloc
+{ AllocatorBackend } = std.mem.alloc
 { expect } = std.core.result
 { substr, view, own_ptr } = std.text.str
 { gpa } = std.mem.heap
@@ -57,7 +57,7 @@ HttpFetcher*: {
 }
 // the one shape a reply body ever has: an owned copy. A parsed body dies with its Response and an
 // error name is a literal — copying both means the receiver frees `body` without asking which it got.
-reply_text = (a: Allocator, s: StringView) StringView {
+reply_text = (a: AllocatorBackend, s: StringView) StringView {
     a.substr(s, 0, s.view().len).expect("http_actor: oom")
 }
 // Deliver one reply, or TALLY the loss. A reply send is a real send: it returns `.Err(.MailboxFull)`
@@ -67,7 +67,7 @@ reply_text = (a: Allocator, s: StringView) StringView {
 // recorded as state instead: `f.dropped` mirrors the pool's own `pool_dropped` dead-letter counter, one
 // scope down, and is readable through `pa.actor_state(h).dropped`. The pool tallies the same drop, so
 // the loss is observable per-fetcher AND per-pool, never invisible.
-reply_or_drop = (f: MutPtr<HttpFetcher>, a: Allocator, req: HttpFetch, rep: HttpReply) void {
+reply_or_drop = (f: MutPtr<HttpFetcher>, a: AllocatorBackend, req: HttpFetch, rep: HttpReply) void {
     req.reply_to.ref_send_msg(HttpReplyMsg.Done(rep)).match ({
         .Ok(_)  => { },
         .Err(_) => {

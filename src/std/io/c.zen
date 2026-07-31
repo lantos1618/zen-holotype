@@ -3,7 +3,7 @@
 // `libc(alloc)` returns bodyless foreign declarations for the libc surface the stdlib
 // needs. The resolver can also namespace-bind this module (`c = std.io.c`) so
 // user code may call `c.malloc` while the backend still emits normal C prototypes.
-{ Allocator } = std.mem.alloc
+{ AllocatorBackend } = std.mem.alloc
 { dupx, node } = std.core.slice
 { expect } = std.core.result
 { Decl, Func, Param, Stmt, Ty } = compiler.ast.ast_types
@@ -12,11 +12,11 @@
 c_empty_params = () [Param] { slice(null_ptr(), 0) }
 c_empty_body = () [Stmt] { slice(null_ptr(), 0) }
 // Box Ty values before storing them behind Ptr<Ty> fields in the returned AST.
-c_tynode = (alloc: Allocator, t: Ty) Ptr<Ty> {
+c_tynode = (alloc: AllocatorBackend, t: Ty) Ptr<Ty> {
     alloc.node(t).expect("std.io.c: libc AST allocation failed")
 }
-ptr_u8_ty = (alloc: Allocator) Ty { tptr(alloc.c_tynode(tu8())) }
-foreign_decl = (alloc: Allocator, name: StringView, ps: [Param], ret: Ty) Decl {
+ptr_u8_ty = (alloc: AllocatorBackend) Ty { tptr(alloc.c_tynode(tu8())) }
+foreign_decl = (alloc: AllocatorBackend, name: StringView, ps: [Param], ret: Ty) Decl {
     dforeign(Func(
         name: name,
         params: alloc.dupx(ps).expect("std.io.c: libc AST allocation failed"),
@@ -25,24 +25,29 @@ foreign_decl = (alloc: Allocator, name: StringView, ps: [Param], ret: Ty) Decl {
         body: c_empty_body(),
     ))
 }
-binding0 = (alloc: Allocator, name: StringView, ret: Ty) Decl {
+binding0 = (alloc: AllocatorBackend, name: StringView, ret: Ty) Decl {
     alloc.foreign_decl(name, c_empty_params(), ret)
 }
-binding1 = (alloc: Allocator, name: StringView, p0: Param, ret: Ty) Decl {
+binding1 = (alloc: AllocatorBackend, name: StringView, p0: Param, ret: Ty) Decl {
     alloc.foreign_decl(name, [p0], ret)
 }
-binding2 = (alloc: Allocator, name: StringView, p0: Param, p1: Param, ret: Ty) Decl {
+binding2 = (alloc: AllocatorBackend, name: StringView, p0: Param, p1: Param, ret: Ty) Decl {
     alloc.foreign_decl(name, [p0, p1], ret)
 }
-binding3 = (alloc: Allocator, name: StringView, p0: Param, p1: Param, p2: Param, ret: Ty) Decl {
-    alloc.foreign_decl(name, [p0, p1, p2], ret)
-}
+binding3 = (
+    alloc: AllocatorBackend,
+    name: StringView,
+    p0: Param,
+    p1: Param,
+    p2: Param,
+    ret: Ty,
+) Decl { alloc.foreign_decl(name, [p0, p1, p2], ret) }
 p_i32 = (name: StringView) Param { param(name, ti32()) }
 p_i64 = (name: StringView) Param { param(name, ti64()) }
 p_str = (name: StringView) Param { param(name, tstr()) }
-p_ptr = (alloc: Allocator, name: StringView) Param { param(name, alloc.ptr_u8_ty()) }
+p_ptr = (alloc: AllocatorBackend, name: StringView) Param { param(name, alloc.ptr_u8_ty()) }
 // Canonical libc surface used by std memory, strings, I/O, and process code.
-libc* = (alloc: Allocator) [Decl] {
+libc* = (alloc: AllocatorBackend) [Decl] {
     alloc
         .dupx([alloc.binding1("malloc", p_i64("n"), alloc.ptr_u8_ty()), alloc.binding2("calloc", p_i64("n"), p_i64("size"), alloc.ptr_u8_ty()), alloc.binding2("realloc", alloc.p_ptr("p"), p_i64("n"), alloc.ptr_u8_ty()), alloc.binding1("free", alloc.p_ptr("p"), tvoid()), alloc.binding3("memcpy", alloc.p_ptr("dst"), alloc.p_ptr("src"), p_i64("n"), alloc.ptr_u8_ty()), alloc.binding3("memmove", alloc.p_ptr("dst"), alloc.p_ptr("src"), p_i64("n"), alloc.ptr_u8_ty()), alloc.binding3("memset", alloc.p_ptr("p"), p_i32("v"), p_i64("n"), alloc.ptr_u8_ty()), alloc.binding1("strlen", p_str("s"), ti64()), alloc.binding2("strcmp", p_str("a"), p_str("b"), ti32()), alloc.binding1("putchar", p_i32("c"), ti32()), alloc.binding0("getchar", ti32()), alloc.binding1("puts", p_str("s"), ti32()), alloc.binding0("abort", tvoid()), alloc.binding1("exit", p_i32("code"), tvoid())])
         .expect("std.io.c: libc AST allocation failed")

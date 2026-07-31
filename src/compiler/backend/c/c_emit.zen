@@ -7,7 +7,7 @@
 { Decl, EnumDecl, Expr, StructDecl, Ty } = compiler.ast.ast_types
 { cbuf, ty_cname_in, gstr_string, gstr_append } = compiler.genc
 { monomorphize } = compiler.mono
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { slice_any } = compiler.astops
 { emit_is_trait, gen_decl, gen_fnt_typedefs, gen_fwd, gen_proto, impld_set, main_is_sys } = compiler.backend.c.c_decl
 { Map } = std.collections.map
@@ -76,14 +76,14 @@ idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
         }),
     })
 }
-depth_cache = (a: MutPtr<Malloc>, decls: [Decl]) [DepthMemo] {
+depth_cache = (a: Allocator, decls: [Decl]) [DepthMemo] {
     c ::= cbuf<DepthMemo>(a, decls.slen())
     c.loop_at((i, x) { c[i] = DepthMemo(d: 0 - 1) })
     c
 }
 gen_types_at = (
     s: String,
-    alloc: MutPtr<Malloc>,
+    alloc: Allocator,
     decls: [Decl],
     impld: Map<i64>,
     cache: [DepthMemo],
@@ -107,7 +107,7 @@ gen_types_at = (
 }
 gen_types_upto = (
     s: String,
-    alloc: MutPtr<Malloc>,
+    alloc: Allocator,
     decls: [Decl],
     impld: Map<i64>,
     cache: [DepthMemo],
@@ -121,7 +121,7 @@ gen_types_upto = (
     })
     out
 }
-gen_funcs = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
+gen_funcs = (s: String, alloc: Allocator, decls: [Decl]) String {
     out ::= s
     decls.loop_at((i, d) {
         (d.is_template() == false).then({
@@ -155,7 +155,7 @@ is_const_init = (e: Ptr<Expr>) bool {
         _             => false,
     })
 }
-gen_global = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
+gen_global = (s: String, alloc: Allocator, d: Decl) String {
     out ::= s
     d.match ({
         .DGlobal(g) => {
@@ -185,7 +185,7 @@ gen_global = (s: String, alloc: MutPtr<Malloc>, d: Decl) String {
     })
     out
 }
-gen_global_inits = (s: String, alloc: MutPtr<Malloc>, decls: [Decl]) String {
+gen_global_inits = (s: String, alloc: Allocator, decls: [Decl]) String {
     out ::= s.gstr_append(alloc, "static void zen__init_globals(void) { ")
     decls.loop_at((i, d) {
         d.match ({
@@ -240,7 +240,7 @@ platform_prelude = () StringView {
     "/* generated host platform */\nstatic int32_t zen_platform_host_os(void){\n#if defined(__APPLE__)\nreturn 1;\n#elif defined(__linux__)\nreturn 2;\n#elif defined(_WIN32)\nreturn 3;\n#elif defined(__FreeBSD__)\nreturn 4;\n#else\nreturn 0;\n#endif\n}\nstatic int32_t zen_platform_host_arch(void){\n#if defined(__aarch64__) || defined(_M_ARM64)\nreturn 1;\n#elif defined(__x86_64__) || defined(_M_X64)\nreturn 2;\n#elif defined(__riscv) && __riscv_xlen == 64\nreturn 3;\n#elif defined(__wasm32__)\nreturn 4;\n#else\nreturn 0;\n#endif\n}\nstatic int32_t zen_platform_host_abi(void){\n#if defined(__APPLE__)\nreturn 1;\n#elif defined(__linux__) && defined(__GLIBC__)\nreturn 2;\n#elif defined(__linux__)\nreturn 3;\n#elif defined(_MSC_VER)\nreturn 4;\n#elif defined(__wasi__)\nreturn 5;\n#else\nreturn 0;\n#endif\n}\n"
 }
 // Whole translation unit emission.
-genModuleIn* = (a: MutPtr<Malloc>, raw: [Decl]) String {
+genModuleIn* = (a: Allocator, raw: [Decl]) String {
     decls = a.monomorphize(raw)
     a.slx_classify(decls)    // slice-literal escape verdicts, read by gen_call_args below
     // zslice is the EXACT leading HEAD; zfn (fn pointers, A2) and the malloc/memcpy prototypes follow so

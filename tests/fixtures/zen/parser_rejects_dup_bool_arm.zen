@@ -2,15 +2,15 @@
 // parser once discarded label identity and silently lowered it to `subj ? a : b`. It must now reject with
 // a positioned error[match-arm], while every complementary form ({true,false}, {false,true}, {true,_})
 // stays clean. Exit 0 only if all five verdicts hold.
-{ Malloc } = std.mem.alloc
+{ Allocator, request_arena, heap_allocator } = std.mem.alloc
 { parse_module } = compiler.parse
 { check_diagnostic_from_source, check_module_kind } = compiler.validate.core
-dup_kind = (a: MutPtr<Malloc>, src: StringView) StringView {
+dup_kind = (a: Allocator, src: StringView) StringView {
     src.check_diagnostic_from_source(a.check_module_kind(a.parse_module(src)), 1).kind
 }
 main = () i32 {
-    m = Malloc(_: 0)
-    a = m.addr()
+    m = request_arena(heap_allocator())
+    a = m.addr().allocator()
     ok = a.dup_kind("main = () i32 { true.match ({ true => 1, true => 2 }) }\n") == "match-arm"
         && a.dup_kind("main = () i32 { true.match ({ false => 1, false => 2 }) }\n") == "match-arm"
         && a.dup_kind("main = () i32 { true.match ({ true => 1, false => 2 }) }\n") == "ok"

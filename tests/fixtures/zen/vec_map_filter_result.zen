@@ -4,26 +4,46 @@
 // of writing through a null buffer.
 halloc = std.mem.heap
 vec = std.collections.vec
-{ Allocator } = std.mem.alloc
+{ AllocatorBackend, Allocator, AllocatorVTable, allocator_of } = std.mem.alloc
 { Result, IoError } = std.core.result
 { to_exit } = std.core.bool
 // an allocator that always fails — every acquire/resize yields null, which try_acquire maps to .Err.
 LimitAlloc: {
     _: i32,
 }
-LimitAlloc.impl(Allocator, {
+LimitAlloc.impl(AllocatorBackend, {
     acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> { null_ptr() }
     resize  = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
     release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { }
 })
+limit_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
+    a: MutPtr<LimitAlloc> = state
+    a.acquire(n)
+}
+limit_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
+    a: MutPtr<LimitAlloc> = state
+    a.resize(p, n)
+}
+limit_release = (state: RawPtr<u8>, p: RawPtr<u8>) void {
+    a: MutPtr<LimitAlloc> = state
+    a.release(p)
+}
+limit_vtable ::= AllocatorVTable(
+    vt_alloc: limit_acquire,
+    vt_remap: limit_resize,
+    vt_free: limit_release,
+)
+limit_allocator = (a: MutPtr<LimitAlloc>) Allocator {
+    allocator_of(a.offset(0), limit_vtable.addr().offset(0))
+}
 main = () i32 {
     alloc = halloc.gpa()
     a = alloc.addr()
     // happy path: of seeds [1,2,3,4]; map doubles → [2,4,6,8]; filter keeps evens (all four here).
-    v = vec.of(a, [1, 2, 3, 4]).expect("of")
-    doubled = v.map(a, (x) { x * 2 }).expect("map")
-    kept = v.filter(a, (x) { x % 2 == 0 }).expect("filter")
-    er: Result<vec.Vec<i32>, IoError> = vec.empty(a)
+    v = vec.of(a.allocator(), [1, 2, 3, 4]).expect("of")
+    doubled = v.map(a.allocator(), (x) { x * 2 }).expect("map")
+    kept = v.filter(a.allocator(), (x) { x % 2 == 0 }).expect("filter")
+    er: Result<vec.Vec<i32>, IoError> = vec.empty(a.allocator())
     e = er.expect("empty")
     good = doubled.len() == 4
         && doubled.get(0) == 2
@@ -38,15 +58,15 @@ main = () i32 {
     // OOM path: a failing allocator makes each op return .Err rather than write through null.
     lim = LimitAlloc(_: 0)
     l = lim.addr()
-    map_err = v.map(l, (x) { x * 2 }).match ({
+    map_err = v.map(limit_allocator(l), (x) { x * 2 }).match ({
         .Err(z) => true,
         .Ok(z)  => false,
     })
-    filter_err = v.filter(l, (x) { x % 2 == 0 }).match ({
+    filter_err = v.filter(limit_allocator(l), (x) { x % 2 == 0 }).match ({
         .Err(z) => true,
         .Ok(z)  => false,
     })
-    ler: Result<vec.Vec<i32>, IoError> = vec.empty(l)
+    ler: Result<vec.Vec<i32>, IoError> = vec.empty(limit_allocator(l))
     empty_err = ler.match ({
         .Err(z) => true,
         .Ok(z)  => false,

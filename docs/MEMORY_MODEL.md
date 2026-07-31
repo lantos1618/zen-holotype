@@ -16,10 +16,10 @@ first is a guarantee:
    [SPEC.md](SPEC.md)): folding case needs a fresh string, which would put an
    allocation behind a reflection intrinsic that otherwise returns a borrowed view.
 2. **Allocator-explicit by default — a default, not a law.** The real construction
-   paths (`new_in`, `from_in`, `make_in`, …) take an `Allocator` as a parameter, so
+   paths (`new_in`, `from_in`, `make_in`, …) take an `AllocatorBackend` as a parameter, so
    the *choice* of allocator is visible in the signature. But this is not universal:
    a zero-parameter function can reach the process heap (`std.mem.heap.gpa()`,
-   `dyn_heap()`), and the convenience wrappers named below do exactly that. Those
+   `heap_allocator()`), and the convenience wrappers named below do exactly that. Those
    calls still allocate visibly — they just do not let the caller pick where from.
 
 Do not read the pair as "the allocator is always a parameter". It is not.
@@ -28,21 +28,14 @@ The outside world enters through a
 **capability**: the entry `main = (sys: Sys) i32` receives a `Sys`
 (`std.sys.root` — there is no importable `std.sys` module; the directory
 `src/std/sys/` holds `root.zen`, `fs.zen`, `os.zen`, `platform.zen`, and
-`process.zen`) and hands out narrow capabilities, notably `sys.heap()` (the process
-`Allocator`) and `sys.stdout()`/`sys.stderr()` (`Writer`s). Libraries take the
-narrowest capability they need (an `Allocator`, a `Writer`), which is the same
-discipline one level up from threading `a: Allocator` allocators through container
-and ownership APIs.
+`process.zen`) and hands out narrow capabilities: `sys.heap()` returns the process `Heap`,
+while `sys.stdout()` and `sys.stderr()` return `Writer`s. Libraries accept the narrowest
+capability they need; generic allocation APIs use `AllocatorBackend`, while values that must
+store or pass an allocator use `Allocator`.
 
-> **The ambient runtime is not the model.** `std.rt` is a live thread-local `Rt`
-> substrate used by pooled actors, but the shipped, documented model is the explicit one
-> above. The A-wrapper convenience constructors (`vec.new`, `set.new`, `hmap.new`,
-> and their `from`/`from` variants) no longer draw from `std.rt` — they capture the
-> process heap once via `dyn_heap()` at construction and store that `DynAlloc` for
-> the container's lifetime. `new_in`/`from_in` remain the explicit real paths.
-> **These wrappers are the named exception to rule 2 above** — the allocation is
-> still written where it happens (`vec.new()` is a constructor; rule 1 holds), but
-> the allocator is not a parameter.
+> `std.rt` remains an ambient runtime substrate for actors. Default carrying constructors such
+> as `vec.new()` capture `heap_allocator()` once; their `_in` variants accept an explicit
+> `Allocator`.
 
 String bytes carry their own provenance discipline — static `StringLiteral`,
 borrowed NUL-terminated `StringCstr`, general borrowed `StringView`, the
@@ -74,8 +67,8 @@ The representation and module-boundary rationale is recorded in
 > a reviewer enforces, not the compiler** — code that breaks it still compiles.
 
 Allocation is explicit. **(Convention.)** User-facing containers, ownership types, and runtime APIs
-should take an allocator (`a: Allocator` — the implicit bounded generic, equivalently
-`<A: Allocator>(a: MutPtr<A>)`) or use a documented default-allocator convenience wrapper.
+should take an allocator (`a: AllocatorBackend` — the implicit bounded generic, equivalently
+`<A: AllocatorBackend>(a: MutPtr<A>)`) or use a documented default-allocator convenience wrapper.
 Raw `malloc`, `free`, pointer arithmetic, and `@` primitives are the substrate for
 bootstrap, FFI boundaries, and low-level std modules.
 `std.mem.raw` keeps direct `alloc`/`zeroed` escape hatches, and also exposes
@@ -95,24 +88,27 @@ allocator-aware API. Low-level thread and pool storage and the compiler's bootst
 shims route through the canonical heap floor rather than importing raw C allocation names. An
 unreadable file fails the scan rather than passing silently.
 
-`Allocator` and `DynAlloc` are two representations of that one capability, not two allocators:
-`Allocator` is a statically dispatched borrowed trait parameter; `DynAlloc` is its erased, storable
-value form for an owner that must remember where its bytes came from. `Rt` stores this same
-`DynAlloc` rather than declaring a second allocator vtable.
+`Allocator` is the public passable capability and is exactly two machine words:
 
-Arena backing storage follows the same rule. `arena.make_in(backing, cap)` and
-`Arena.free_in(backing)` acquire and release the arena's backing block through a
-caller allocator. `Arena.free` is **not** a default-heap convenience path — it is a
-one-line forwarder to `free_in` and takes the backing allocator as a required
-parameter (`free<A: Allocator> = (a: MutPtr<Arena>, backing: MutPtr<A>) void`,
-`src/std/mem/arena.zen:32`). There is no way to free an arena without naming the
-allocator its block came from.
+| field | meaning |
+|---|---|
+| `state: RawPtr<u8>` | borrowed concrete-backend state |
+| `vtable: RawPtr<u8>` | pointer to a durable module-level `AllocatorVTable` |
 
-The arena constructor is spelled `make_in`, not `new_in`, on purpose: Zen's
-namespace is flat, so two modules that both export a top-level `new_in` cannot
-reach one program. `std.text.string` already owns `new_in`, and a String builder
-sits beside the arena often enough (anything pulling in `std.concurrent.actor`
-drags the arena along) that the arena took the distinct name.
+`AllocatorBackend` is the static contract for concrete implementations. Use `.allocator()`
+to obtain the passable value. Custom backends call `allocator_of` with durable state and a
+module-level vtable; both must outlive every copied `Allocator`. `Rt` stores this same value.
+
+`RequestArena` is a growable chunk arena created with `request_arena(backing: Allocator)`.
+The LSP owns one for request-scoped work; callers pass its `Allocator` capability rather than
+coupling library APIs to the concrete arena. `reset()` invalidates one request's allocations and
+reuses any fitting retained chunk across varied request shapes; `deinit()` releases all chunks
+through the backing allocator. There is no process-global allocator mode, scope flag, or
+conditional heap fallback.
+
+`std.mem.arena` is a fixed-capacity arena. `make_in(backing, cap)` acquires its block and
+`free_in(backing)` returns it through the same backend. The constructor is named `make_in`
+to avoid a flat-namespace collision with `std.text.string.new_in`.
 
 **(Convention.)** Compiler-adjacent AST builders follow the same style where they return
 owned slices: `std.internal.ast.dbuf_in` and `derive_accessors_in` place
@@ -130,7 +126,7 @@ Ownership construction is allocator-first and fallible. `src/std/mem/own.zen`
 declares exactly **one** constructor —
 
 ```
-new_in*<T> = (a: Allocator, x: T) Result<Own<T>, IoError>
+new_in*<T> = (a: AllocatorBackend, x: T) Result<Own<T>, IoError>
 ```
 
 — so there is no infallible/fallible pair to choose between: `new_in` *is* the

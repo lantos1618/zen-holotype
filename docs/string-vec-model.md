@@ -12,8 +12,8 @@
 `String` and `Vec<u8>` have the same field layout — byte-for-byte identical today:
 
 ```zen
-Vec*<T>: { ptr: RawPtr<u8>, len: i64, cap: i64, carried: bool, oom: bool, alloc: DynAlloc }
-String*: { ptr: RawPtr<u8>, len: i64, cap: i64, carried: bool, oom: bool, alloc: DynAlloc }
+Vec*<T>: { ptr: RawPtr<u8>, len: i64, cap: i64, carried: bool, oom: bool, alloc: Allocator }
+String*: { ptr: RawPtr<u8>, len: i64, cap: i64, carried: bool, oom: bool, alloc: Allocator }
 ```
 
 They are **not** the same type. Zen's types are nominal, so identical layout buys
@@ -121,7 +121,7 @@ Naming it honestly as an outsider is better than a forced fit.
 The block below compiles today, inside a `Result`-returning function (for `or_return()`):
 
 ```zen
-gpa = alloc.dyn_heap()                          // the process heap, as a value the row can carry
+gpa = alloc.heap_allocator()                     // process heap as a passable Allocator
 
 // StringLiteral — no allocator, no ceremony; it is already in the binary.
 name = "zen"
@@ -134,7 +134,7 @@ v = name.view()
 // A SUB-view is NOT free today: there is no `name.slice(0, 2)` (`slice` is the two-argument
 // pointer intrinsic, and std.text.str has no `slice`). The live API is `substr_in`, and it
 // ALLOCATES — it copies the range through the allocator you hand it and returns a Result.
-part = h.substr_in(name, 0, 2).or_return()      // h: Allocator. One allocation, not zero.
+part = h.substr_in(name, 0, 2).or_return()      // h: AllocatorBackend; one allocation.
 
 // StringFixed — state the size once. Writable, never grows. One allocation, so it settles here.
 buf = gpa.string_fixed(64).or_return()
@@ -263,7 +263,7 @@ container-specific even where their allocation lifecycle delegates to `std.mem.b
 > **THE TREE.** This is the one section that reports the current state rather than the target
 > model. Where it disagrees with anything above, this section wins.
 
-**Real now:** `String`, `Vec<T>`, views (as `[T]` / `Slice<T>`), the `(a: Allocator)` sugar,
+**Real now:** `String`, `Vec<T>`, views (as `[T]` / `Slice<T>`), the `(a: AllocatorBackend)` sugar,
 `or_return`, and sticky-error chaining on the carrying `String` and `Vec<T>` APIs (with
 `std.text.sb` still present as the older builder surface).
 
@@ -347,29 +347,19 @@ deliberately ugly and deliberately greppable: `git grep own_ptr` is that migrati
 both spellings disappear when those helpers return `StringFixed`/`StringConst` and the capability
 comes from the type instead of from a claim.
 
-**2. The allocator decision.** DECIDED: the container carries it. The old rule was **carry the
-allocator and you give up errors-as-values** (`AVec`/`ASet`/`AHMap` store a `DynAlloc` and panic)
-versus **thread it and you keep them** (`Vec`/`String` return `Result`), with `std.text.sb` the one
-type that did both. Sb's shape won: the row carries a `DynAlloc` AND keeps errors as values,
-because the sticky flag defers them all to one settle point.
+**2. The allocator decision.** Carrying containers keep errors as values and store three fields:
 
-Three fields do it, in this order, identically on `Vec<T>` and `String`:
+- `carried: bool` — whether this transitional header owns an allocator.
+- `oom: bool` — sticky after the first failed allocation.
+- `alloc: Allocator` — the passable two-word capability; its backend state must outlive the container.
 
-- `carried: bool` — this header owns an allocator. Transitional; see above.
-- `oom: bool` — the sticky flag. Set by the first failed allocation, never cleared.
-- `alloc: DynAlloc` — the Allocator trait as a VALUE (three fn-pointers + state), which is what
-  lets the field exist at all: a `MutPtr<A>` allocator cannot be erased into a value, because a
-  generic function cannot be taken as a fn-pointer and an impl method cannot be named as one. So
-  the carrying constructors take a `DynAlloc` (`alloc.dyn_heap()`, or any `dyn_of(...)` vtable)
-  rather than the `a: Allocator` the threaded API takes. `Rt.allocator()` returns that same narrow
-  `DynAlloc` value, so an explicit runtime can construct an allocator-carrying container without
-  copying or rebuilding a second vtable representation.
+See [MEMORY_MODEL.md](MEMORY_MODEL.md) for backend adapters and vtable lifetime rules.
 
 `std.mem.buffer` is now the single implementation of those carrying storage semantics. It does not
 replace either public header: the String and Vec modules adapt their identical flat fields to the
 kernel while retaining their own nominal types and policy-specific methods.
 
-Deciding that for `String` also decides `AVec`: it either becomes the default or disappears.
+
 
 ## Why this is worth the churn
 

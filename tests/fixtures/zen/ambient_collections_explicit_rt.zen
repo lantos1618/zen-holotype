@@ -1,10 +1,5 @@
-// Phase-3 slice proof: the ambient container constructors (`vec.new`/`from`, `set.new`/`from`,
-// `hmap.new`/`from`) are THIN shims over the explicit-allocator real path (`*_in(a)`), drawing the
-// process heap via `dyn_heap()` once at construction (NOT `std.rt`). This fixture exercises BOTH
-// surfaces end-to-end: the ambient forms AND the explicit `new_in`/`from_in(a, …)` forms (which take a
-// caller-supplied NARROW Allocator — a `DynAlloc` — and never touch the thread-local). Both must
-// produce identical container behavior — construction, mutation, query, free — proving the shim
-// delegation is behavior-preserving AND that the container stores an Allocator, not an Rt.
+// Default constructors capture the process-heap `Allocator`; `_in` constructors store the supplied
+// one. This fixture verifies both paths without consulting `std.rt`.
 { println } = std.text.fmt
 vec = std.collections.vec
 set = std.collections.set
@@ -12,7 +7,7 @@ hmap = std.collections.hmap
 { AVec } = std.collections.vec
 { ASet } = std.collections.set
 { AHMap } = std.collections.hmap
-{ DynAlloc, dyn_heap } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 main = () i32 {
     // ── ambient forms (shims over new_in / from_in) ──
     v :: AVec<i32> = vec.new()
@@ -35,7 +30,7 @@ main = () i32 {
     e = e.put("x", 9)
     println(e.get_or("x", 0))    // 9
     // ── explicit-allocator path (NO ambient draw) — the real construction path ──
-    a: DynAlloc = dyn_heap()
+    a: Allocator = heap_allocator()
     ev :: AVec<i32> = vec.new_in(a)
     ev = ev.push(7)
     println(ev.get(0))    // 7

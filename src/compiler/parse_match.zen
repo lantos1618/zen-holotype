@@ -6,7 +6,7 @@
 { payload_fname } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
 { at } = std.text.ascii
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { PEnd, bopen_enter, bopen_exit, is_comma, is_lbrace, is_rbrace, is_rparen, perr_set_at,
   perr_set_kind_at, PE_ARROW, tok_eq } = compiler.parse_type
 { is_return_kw, materialize, parse_block } = compiler.parse_stmt
@@ -15,12 +15,12 @@
 { is_lparen } = compiler.parse_primary
 { PExpr } = compiler.parse_expr
 // A one-statement `[Stmt]` holding `return v` — so `=> return v` lowers exactly like `=> { return v }`.
-ret_arm_stmts = (a: MutPtr<Malloc>, v: Ptr<Expr>) [Stmt] {
+ret_arm_stmts = (a: Allocator, v: Ptr<Expr>) [Stmt] {
     buf ::= slice(a.acquire_or_die(sizeof(Stmt)), 1)
     buf[0] = sret(v)
     buf
 }
-parse_arm_return = (a: MutPtr<Malloc>, src: StringView, kw: Scan) PExpr {
+parse_arm_return = (a: Allocator, src: StringView, kw: Scan) PExpr {
     v = a.parse_or_nested(src, kw.next)
     PExpr(
         expr: a.enode(block(a.ret_arm_stmts(v.expr))),
@@ -28,7 +28,7 @@ parse_arm_return = (a: MutPtr<Malloc>, src: StringView, kw: Scan) PExpr {
     )
 }    // the returned value
 // Match arm body: brace block, a bare `return expr`, or a single expression.
-parse_arm_body = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_arm_body = (a: Allocator, src: StringView, pos: i32) PExpr {
     sc = src.scan(pos)
     src.is_lbrace(sc.tok).match ({
         true  => a.parse_arm_block(src, sc),
@@ -38,7 +38,7 @@ parse_arm_body = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
         }),
     })
 }
-parse_arm_block* = (a: MutPtr<Malloc>, src: StringView, open: Scan) PExpr {
+parse_arm_block* = (a: Allocator, src: StringView, open: Scan) PExpr {
     // Use parse_block so statement-position match arms do not turn trailing expressions into real returns.
     prev = bopen_enter(open.tok.start)    // anchor this `{` for the unclosed-block diagnostic
     blk = a.parse_block(src, open.next)
@@ -65,7 +65,7 @@ close_match = (src: StringView, e: PExpr) PExpr {
         next: src.skip_rparen(e.next),
     )
 }
-parse_match* = (a: MutPtr<Malloc>, src: StringView, subj: PExpr) PExpr {
+parse_match* = (a: Allocator, src: StringView, subj: PExpr) PExpr {
     dot = src.scan(subj.next)
     kw = src.scan(dot.next)
     lp = src.scan(kw.next)
@@ -86,7 +86,7 @@ parse_match* = (a: MutPtr<Malloc>, src: StringView, subj: PExpr) PExpr {
 // two-branch Cond node (oa = 0) the boolean `.match` builds — a single-expression arm block unwraps
 // to its bare expression (then_arm), so `c.then({ a }, { b })` is node-for-node identical to
 // `c.match ({ true => a, false => b })` and every downstream check/lowering is shared.
-parse_then* = (a: MutPtr<Malloc>, src: StringView, subj: PExpr) PExpr {
+parse_then* = (a: Allocator, src: StringView, subj: PExpr) PExpr {
     dot = src.scan(subj.next)
     kw = src.scan(dot.next)
     lp = src.scan(kw.next)
@@ -120,13 +120,7 @@ parse_then* = (a: MutPtr<Malloc>, src: StringView, subj: PExpr) PExpr {
 // the else arm of the two-arm form, after the `,`: exactly `{ b })`. Anything else — a non-block
 // second argument, or a THIRD argument after the else block — is a positioned parse error at the
 // offending token (`.then` takes one or two block arguments, never more).
-parse_then_else = (
-    a: MutPtr<Malloc>,
-    src: StringView,
-    subj: PExpr,
-    tstmts: [Stmt],
-    pos: i32,
-) PExpr {
+parse_then_else = (a: Allocator, src: StringView, subj: PExpr, tstmts: [Stmt], pos: i32) PExpr {
     ob = src.scan(pos)
     src.is_lbrace(ob.tok).match ({
         true  => {
@@ -155,7 +149,7 @@ parse_then_else = (
 // node a bool `.match` arm carries, so value-position semantics and the formatter's inline
 // `{ e }` re-print round-trip. Any other block (multi-statement, early return, empty) stays a
 // Block arm, exactly like a block-bodied match arm.
-then_arm = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
+then_arm = (a: Allocator, stmts: [Stmt]) Ptr<Expr> {
     (stmts.len == 1).match ({
         true  => stmts[0].match ({
             .ExprStmt(e) => e,
@@ -164,7 +158,7 @@ then_arm = (a: MutPtr<Malloc>, stmts: [Stmt]) Ptr<Expr> {
         false => a.enode(block(stmts)),
     })
 }
-parse_match_arms = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, open: Scan) PExpr {
+parse_match_arms = (a: Allocator, src: StringView, subj: PExpr, open: Scan) PExpr {
     first = src.scan(open.next)
     src.is_dot(first.tok).match ({
         true  => a.parse_variant_match(src, subj, open),
@@ -177,8 +171,8 @@ parse_match_arms = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, open: Scan)
 is_bool_label = (src: StringView, t: Token) bool { src.tok_eq(t, "true") || src.tok_eq(t, "false") }
 is_wild_label = (src: StringView, t: Token) bool { src.tok_eq(t, "_") }
 // Bad/non-exhaustive match forms become an unknown sentinel call for validation to reject.
-no_args = (a: MutPtr<Malloc>) [Expr] { slice(null_ptr(), 0) }
-reject_match* = (a: MutPtr<Malloc>, next: i32) PExpr {
+no_args = (a: Allocator) [Expr] { slice(null_ptr(), 0) }
+reject_match* = (a: Allocator, next: i32) PExpr {
     PExpr(
         expr: a.enode(call("__nonexhaustive_match", a.no_args())),
         next: next,
@@ -199,7 +193,7 @@ match_subj_pos = (e: Ptr<Expr>) i32 {
 // A literal-scalar `.match` with NO `_` wildcard is non-exhaustive: the value domain is unbounded, so
 // no finite set of literal labels covers every case. Distinct sentinel (`__nonexhaustive_lit`) carrying
 // the subject position — the validator maps it to a POSITIONED error[exhaustiveness], never undefined-name.
-reject_exhaust = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
+reject_exhaust = (a: Allocator, next: i32, pos: i32) PExpr {
     PExpr(
         expr: a.enode(call_at("__nonexhaustive_lit", a.no_args(), pos)),
         next: next,
@@ -208,7 +202,7 @@ reject_exhaust = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
 // A boolean `.match` arm labelled with a non-boolean literal (`true => 1, 0 => 2`) is a label-TYPE
 // error. Distinct sentinel (`__badmatchlabel`) carrying the offending LABEL's position — the validator
 // maps it to a POSITIONED error[match-label] with a caret on the bad label, never undefined-name.
-reject_label = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
+reject_label = (a: Allocator, next: i32, pos: i32) PExpr {
     PExpr(
         expr: a.enode(call_at("__badmatchlabel", a.no_args(), pos)),
         next: next,
@@ -218,7 +212,7 @@ reject_label = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
 // labels is discarded once the Cond is built, so no later pass can see it. Distinct sentinel
 // (`__dupmatcharm`) carrying the offending second LABEL's position — the validator maps it to a POSITIONED
 // error[match-arm], never a silent `x ? a : b`.
-reject_dupmatch = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
+reject_dupmatch = (a: Allocator, next: i32, pos: i32) PExpr {
     PExpr(
         expr: a.enode(call_at("__dupmatcharm", a.no_args(), pos)),
         next: next,
@@ -227,7 +221,7 @@ reject_dupmatch = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
 // A literal `.match` that repeats a label (`1 => …, 1 => …`) hides a dead arm — first wins, the later one
 // never fires. The lowered `subj == LIT` chain discards label identity, so a post-lowering walk recovers
 // the duplicate; `__duplitarm` carries the SECOND label's position for a positioned error[match-arm].
-reject_duplit = (a: MutPtr<Malloc>, next: i32, pos: i32) PExpr {
+reject_duplit = (a: Allocator, next: i32, pos: i32) PExpr {
     PExpr(
         expr: a.enode(call_at("__duplitarm", a.no_args(), pos)),
         next: next,
@@ -279,12 +273,12 @@ lit_dup_pos = (e: Ptr<Expr>) i32 {
     })
 }
 // Reject a literal `.match` with a repeated label; passes any other lowering (incl. reject sentinels) through.
-reject_lit_dup = (a: MutPtr<Malloc>, pe: PExpr) PExpr {
+reject_lit_dup = (a: Allocator, pe: PExpr) PExpr {
     d = pe.expr.lit_dup_pos()
     (d != 0).then({ a.reject_duplit(pe.next, d) }, { pe })
 }
 // Shared `=> body` parse step for bool/literal/variant arm walkers.
-arm_rhs = (a: MutPtr<Malloc>, src: StringView, pos: i32, bare_ok: bool) PExpr {
+arm_rhs = (a: Allocator, src: StringView, pos: i32, bare_ok: bool) PExpr {
     nx = src.scan(pos)
     src.is_fat_arrow(nx.tok).match ({
         true  => a.parse_arm_body(src, nx.next),
@@ -306,7 +300,7 @@ BoolArmEnd: {
     ok: bool,
     next: i32,
 }
-bool_arm = (a: MutPtr<Malloc>, src: StringView, pos: i32) BoolArmEnd {
+bool_arm = (a: Allocator, src: StringView, pos: i32) BoolArmEnd {
     lt = src.scan(pos)
     rhs = a.arm_rhs(src, lt.next, src.is_wild_label(lt.tok))
     BoolArmEnd(
@@ -316,7 +310,7 @@ bool_arm = (a: MutPtr<Malloc>, src: StringView, pos: i32) BoolArmEnd {
         next: rhs.next,
     )
 }
-parse_bool_match = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, open: Scan) PExpr {
+parse_bool_match = (a: Allocator, src: StringView, subj: PExpr, open: Scan) PExpr {
     a0 = a.bool_arm(src, open.next)
     sep = src.scan(a0.next)
     src.is_comma(sep.tok).match ({
@@ -330,7 +324,7 @@ parse_bool_match = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, open: Scan)
 // No comma after the only arm: `(c).match ({ true => … })` remains represented as a one-armed Cond so
 // validation can issue a targeted exhaustiveness diagnostic. Use `.then({ ... })` for an intentional
 // one-way effect, or spell the missing bool / `_` arm explicitly.
-bool_second = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, a0: BoolArmEnd, pos: i32) PExpr {
+bool_second = (a: Allocator, src: StringView, subj: PExpr, a0: BoolArmEnd, pos: i32) PExpr {
     nx = src.scan(pos)
     src.is_rbrace(nx.tok).match ({
         true  => a.bool_one(src, subj, a0, nx.next),
@@ -339,8 +333,8 @@ bool_second = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, a0: BoolArmEnd, 
 }    // trailing comma after the only arm — still one-armed
 // Build the invalid one-armed Cond, retaining a synthetic empty branch only so the ordinary AST can carry
 // the source through resolution to the targeted diagnostic. oa records the missing side.
-empty_arm = (a: MutPtr<Malloc>) Ptr<Expr> { a.enode(block(a.no_arm_stmts())) }
-bool_one = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, a0: BoolArmEnd, next: i32) PExpr {
+empty_arm = (a: Allocator) Ptr<Expr> { a.enode(block(a.no_arm_stmts())) }
+bool_one = (a: Allocator, src: StringView, subj: PExpr, a0: BoolArmEnd, next: i32) PExpr {
     a0.ok.match ({
         true  => src.tok_eq(a0.lab, "false").match ({
             true  => PExpr(
@@ -362,13 +356,7 @@ bool_arms_cover = (src: StringView, a0: BoolArmEnd, a1: BoolArmEnd) bool {
         || src.tok_eq(a0.lab, "true") && src.tok_eq(a1.lab, "false")
         || src.tok_eq(a0.lab, "false") && src.tok_eq(a1.lab, "true")
 }
-bool_close = (
-    a: MutPtr<Malloc>,
-    src: StringView,
-    subj: PExpr,
-    a0: BoolArmEnd,
-    a1: BoolArmEnd,
-) PExpr {
+bool_close = (a: Allocator, src: StringView, subj: PExpr, a0: BoolArmEnd, a1: BoolArmEnd) PExpr {
     c0 = src.scan(a1.next)
     close = src.is_comma(c0.tok).then({ src.scan(c0.next) }, { c0 })
     (a0.ok && a1.ok && src.is_rbrace(close.tok)).match ({
@@ -398,14 +386,14 @@ LitArmEnd: {
     wild: bool,
     next: i32,
 }
-parse_lit_match = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, open: Scan) PExpr {
+parse_lit_match = (a: Allocator, src: StringView, subj: PExpr, open: Scan) PExpr {
     first = src.scan(open.next)
     src.is_wild_label(first.tok).match ({
         true  => a.parse_lit_arms(src, subj, open.next, false),
         false => a.parse_lit_first(src, subj, open.next),
     })
 }
-parse_lit_first = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, pos: i32) PExpr {
+parse_lit_first = (a: Allocator, src: StringView, subj: PExpr, pos: i32) PExpr {
     arm = a.parse_lit_arm(src, subj, pos)
     after = src.scan(arm.next)
     src.is_rbrace(after.tok).match ({
@@ -415,13 +403,13 @@ parse_lit_first = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, pos: i32) PE
 }
 // `wild` = a `_` arm was already seen earlier in this match; once true the match is exhaustive, so a
 // non-wild terminal arm no longer needs a trailing `_` (a leading `_` covers every remaining case).
-parse_lit_arms = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, pos: i32, wild: bool) PExpr {
+parse_lit_arms = (a: Allocator, src: StringView, subj: PExpr, pos: i32, wild: bool) PExpr {
     arm = a.parse_lit_arm(src, subj, pos)
     after = src.scan(arm.next)
     a.parse_lit_after(src, subj, arm, after, wild)
 }
 parse_lit_after = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     subj: PExpr,
     arm: LitArmEnd,
@@ -453,7 +441,7 @@ parse_lit_after = (
 }
 // Trailing comma may close a literal match; otherwise parse the next arm.
 lit_arm_more = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     subj: PExpr,
     arm: LitArmEnd,
@@ -473,7 +461,7 @@ lit_arm_more = (
     })
 }
 cons_lit_arm = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     subj: PExpr,
     arm: LitArmEnd,
@@ -486,7 +474,7 @@ cons_lit_arm = (
         next: rest.next,
     )
 }
-parse_lit_arm = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, pos: i32) LitArmEnd {
+parse_lit_arm = (a: Allocator, src: StringView, subj: PExpr, pos: i32) LitArmEnd {
     sc = src.scan(pos)
     src.is_wild_label(sc.tok).match ({
         true  => a.parse_lit_arm_wild(src, sc),
@@ -494,7 +482,7 @@ parse_lit_arm = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, pos: i32) LitA
     })
 }
 // Wildcard literal arm is an always-true default.
-parse_lit_arm_wild = (a: MutPtr<Malloc>, src: StringView, us: Scan) LitArmEnd {
+parse_lit_arm_wild = (a: Allocator, src: StringView, us: Scan) LitArmEnd {
     rhs = a.arm_rhs(src, us.next, true)
     LitArmEnd(
         test: a.enode(lit(1)),
@@ -504,10 +492,10 @@ parse_lit_arm_wild = (a: MutPtr<Malloc>, src: StringView, us: Scan) LitArmEnd {
     )
 }
 // A non-wildcard value arm is a literal label followed by `=> body`.
-parse_lit_arm_val = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, pos: i32) LitArmEnd {
+parse_lit_arm_val = (a: Allocator, src: StringView, subj: PExpr, pos: i32) LitArmEnd {
     a.parse_lit_arm_lit(src, subj, pos)
 }
-parse_lit_arm_lit = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, pos: i32) LitArmEnd {
+parse_lit_arm_lit = (a: Allocator, src: StringView, subj: PExpr, pos: i32) LitArmEnd {
     le = a.parse_atom(src, pos)    // the literal label (0, 'a', -5, …)
     rhs = a.arm_rhs(src, le.next, false)
     LitArmEnd(
@@ -524,7 +512,7 @@ subj_name* = (e: Ptr<Expr>) StringView {
     })
 }
 // Variant match arms; compiler.check fills the enum name.
-arm_buf = (a: MutPtr<Malloc>) [ArmData] { slice(a.acquire_or_die(1024 * sizeof(ArmData)), 1024) }
+arm_buf = (a: Allocator) [ArmData] { slice(a.acquire_or_die(1024 * sizeof(ArmData)), 1024) }
 take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }
 // A comma-separated payload binder list `(x, y, …)` — one entry for a single binder, N for a destructure.
 BindList: {
@@ -537,8 +525,8 @@ BindList: {
 NameSlot: {
     s: StringView,
 }
-bind_buf = (a: MutPtr<Malloc>) [StringView] { slice(a.acquire_or_die(64 * sizeof(NameSlot)), 64) }
-fill_binds = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [StringView], i: i32) BindList {
+bind_buf = (a: Allocator) [StringView] { slice(a.acquire_or_die(64 * sizeof(NameSlot)), 64) }
+fill_binds = (a: Allocator, src: StringView, pos: i32, buf: [StringView], i: i32) BindList {
     (i >= buf.len).then({
         perr_set_at(pos)
         return BindList(
@@ -568,26 +556,26 @@ fill_binds = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [StringView], i
         },
     })
 }
-arm_binds = (a: MutPtr<Malloc>, src: StringView, pos: i32) BindList {
+arm_binds = (a: Allocator, src: StringView, pos: i32) BindList {
     a.fill_binds(src, pos, a.bind_buf(), 0)
 }
 // Multi-binder destructure `.A(x, y) => body` desugars to ONE synthetic binder `__zen_payload` bound to
 // the anon-struct payload, plus prepended `x = __zen_payload._0  y = __zen_payload._1 …` lets, then the
 // original body as the trailing value — lowering to the existing single-binder + field-access form.
-fill_destr = (a: MutPtr<Malloc>, bl: BindList, stm: [Stmt], k: i32) void {
+fill_destr = (a: Allocator, bl: BindList, stm: [Stmt], k: i32) void {
     (k < bl.count).then({
         stm[k] = slet(bl.names[k], a.enode(member(a.enode(vref("__zen_payload")), a.payload_fname(k))))
         a.fill_destr(bl, stm, k + 1)
     })
 }
-destr_body = (a: MutPtr<Malloc>, bl: BindList, body: Ptr<Expr>) Ptr<Expr> {
+destr_body = (a: Allocator, bl: BindList, body: Ptr<Expr>) Ptr<Expr> {
     n = bl.count
     stm ::= slice(a.acquire_or_die((n + 1) * sizeof(Stmt)), n + 1)
     a.fill_destr(bl, stm, 0)
     stm[n] = sexpr(body)
     a.enode(block(stm))
 }
-fill_arms = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_arms = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
@@ -607,7 +595,7 @@ fill_arms = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i3
     })
 }
 // Variant or wildcard arm; the leading token tells them apart.
-fill_marm = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_marm = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
     // Guard fixed-size arm buffer.
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -621,7 +609,7 @@ fill_marm = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i3
         false => a.fill_wild(src, pos, buf, i),
     })
 }
-fill_varm = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_varm = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
     dot = src.scan(pos)
     vt = src.scan(dot.next)
     vn = a.lexeme(src, vt.tok)
@@ -637,7 +625,7 @@ fill_varm = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i3
 }
 // `.Variant(binders…) => body`: a single binder keeps the existing form; multiple binders desugar.
 fill_varm_bound = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     vn: StringView,
     pos: i32,
@@ -660,9 +648,9 @@ is_fat_arrow* = (src: StringView, t: Token) bool {
         _    => false,
     })
 }
-no_arm_stmts = (a: MutPtr<Malloc>) [Stmt] { slice(null_ptr(), 0) }
+no_arm_stmts = (a: Allocator) [Stmt] { slice(null_ptr(), 0) }
 // Wildcard arm or terminal bare `_`; non-wild labels here are parse errors.
-fill_wild = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_wild = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
     us = src.scan(pos)
     (src.is_wild_label(us.tok) == false).then({
         perr_set_at(us.tok.start)
@@ -672,7 +660,7 @@ fill_wild = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i3
     a.arm_tail(src, rhs.next, buf, i)
 }
 // Comma continues arm list; rbrace closes it; anything else is a parse error.
-arm_tail = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+arm_tail = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
     after = src.scan(pos)
     src.is_comma(after.tok).match ({
         true  => a.fill_arms(src, after.next, buf, i + 1),
@@ -687,7 +675,7 @@ arm_tail = (a: MutPtr<Malloc>, src: StringView, pos: i32, buf: [ArmData], i: i32
         },
     })
 }
-parse_variant_match = (a: MutPtr<Malloc>, src: StringView, subj: PExpr, open: Scan) PExpr {
+parse_variant_match = (a: Allocator, src: StringView, subj: PExpr, open: Scan) PExpr {
     buf = a.arm_buf()
     ae = a.fill_arms(src, open.next, buf, 0)
     PExpr(

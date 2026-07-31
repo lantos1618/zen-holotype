@@ -2,24 +2,19 @@
 // Fallible ops (`of`, `push`, `grow`) return Result<Vec<T>, IoError> — allocation failure is a
 // value: `.expect("…")` at fail-fast roots, `.or_return()` inside Result-returning fns.
 // @self-hosted-only: generic struct literals are covered by self-hosted tests.
-{ Allocator, try_acquire, try_resize, DynAlloc, dyn_from, dyn_heap } = std.mem.alloc
+{ AllocatorBackend, Allocator, heap_allocator } = std.mem.alloc
 { Result, IoError, Opt, ok, err, panic, expect } = std.core.result
 { loop_at } = std.core.count
 buf = std.mem.buffer
-// The carried allocator + sticky failure flag are the SAME three fields, in the same order, as
-// std.text.string's String, because `String` IS `Vec<u8>` and that identity is load-bearing. See
-// that struct for what each one means; the semantics here are identical over an element type.
-// One difference: EVERY Vec constructor carries. `of`/`empty`/`map`/`filter` take a threaded
-// `Allocator` and erase it with `dyn_from`, so the value they hand back is live — they used to omit
-// the three fields and let C zero-fill `carried` to false, which closed `live()` and made every
-// later `add`/`add_one` a silent no-op (they return `Vec<T>`, not `Result`, so nothing said so).
+// Every Vec carries its allocator and sticky-OOM state.
+// The allocator state must outlive the Vec and every derived owner.
 Vec*<T>: {
     ptr: RawPtr<u8>,
     len: i64,
     cap: i64,
     carried: bool,
     oom: bool,
-    alloc: DynAlloc,
+    alloc: Allocator,
     add = (v: Vec<T>, xs: [T]) Vec<T> {
         // append MANY elements; a no-op once sticky or uncarried.
         d = v.alloc
@@ -87,7 +82,7 @@ Vec*<T>: {
             },
         })
     }
-    grow = (v: Vec<T>, a: Allocator) Result<Vec<T>, IoError> {
+    grow = (v: Vec<T>, a: AllocatorBackend) Result<Vec<T>, IoError> {
         ncap = v.cap * 2 + 1
         a.try_resize(v.ptr, ncap * sizeof(T)).match ({
             .Ok(p)  => {
@@ -107,7 +102,7 @@ Vec*<T>: {
             },
         })
     }
-    push = (v: Vec<T>, a: Allocator, x: T) Result<Vec<T>, IoError> {
+    push = (v: Vec<T>, a: AllocatorBackend, x: T) Result<Vec<T>, IoError> {
         x = x
         out: Result<Vec<T>, IoError> = (v.len < v.cap).match ({
             true  => {
@@ -147,7 +142,7 @@ Vec*<T>: {
         })
         out
     }
-    free = (v: Vec<T>, a: Allocator) void { a.release(v.ptr) }
+    free = (v: Vec<T>, a: AllocatorBackend) void { a.release(v.ptr) }
     each = (v: Vec<T>, f: (T) void) void {
         // Higher-order helpers over the live elements (`view()`), backed by closures — inline lambdas and
         // stored closures both work. Spelled inline (over `view().loop`) rather than delegating to
@@ -190,7 +185,7 @@ Vec*<T>: {
                     cap: v.len,
                     carried: true,
                     oom: false,
-                    alloc: dyn_from(a),
+                    alloc: a,
                 ))
                 ok
             },
@@ -217,7 +212,7 @@ Vec*<T>: {
                     cap: v.len,
                     carried: true,
                     oom: false,
-                    alloc: dyn_from(a),
+                    alloc: a,
                 ))
                 ok
             },
@@ -261,7 +256,7 @@ empty*<T> = (a: Allocator) Result<Vec<T>, IoError> {
                 cap: 1,
                 carried: true,
                 oom: false,
-                alloc: dyn_from(a),
+                alloc: a,
             ))
             ok
         },
@@ -281,7 +276,7 @@ of*<T> = (a: Allocator, xs: [T]) Result<Vec<T>, IoError> {
                 cap: 0,
                 carried: true,
                 oom: false,
-                alloc: dyn_from(a),
+                alloc: a,
             ))
             vok
         },
@@ -294,7 +289,7 @@ of*<T> = (a: Allocator, xs: [T]) Result<Vec<T>, IoError> {
                         cap: xs.len,
                         carried: true,
                         oom: false,
-                        alloc: dyn_from(a),
+                        alloc: a,
                     )
                     b ::= v.buf()
                     xs.loop_at((i, x) { b[i] = x })
@@ -311,22 +306,20 @@ of*<T> = (a: Allocator, xs: [T]) Result<Vec<T>, IoError> {
 }
 // Grow `v` so `need` MORE elements fit, in one resize. Distinct from `grow`, which doubles blindly:
 // a bulk append knows exactly how much room it wants. Carried fields ride through untouched.
-reserve_cap*<T> = (a: Allocator, v: Vec<T>, need: i64) Result<Vec<T>, IoError> {
+reserve_cap*<T> = (a: AllocatorBackend, v: Vec<T>, need: i64) Result<Vec<T>, IoError> {
     buf.buffer_reserve(a, vec_buffer(v), need).match ({
         .Ok(b)  => .Ok(buffer_vec(b)),
         .Err(e) => .Err(e),
     })
 }
-// Append every element of `xs` under ONE reservation, leaving `spare` elements after the new live end.
-// String uses the spare slot for its trailing C NUL; ordinary Vec extension asks for zero. Keeping the
-// reservation/copy path here makes String's byte storage an actual Vec specialization instead of a
-// second growable-buffer implementation.
-//
-// `xs` may be a view into `v` itself. Record its byte offset BEFORE reserve: realloc may move the backing
-// block and make the old slice pointer dangle. After reserve, rebase an internal source onto the new ptr.
-// A recursive per-element fill is a stack overflow waiting to happen: the bootstrap and harness compile
-// paths carry no -O flag, so C tail calls are not eliminated.
-extend_spare_in*<T> = (a: Allocator, v: Vec<T>, xs: Slice<T>, spare: i64) Result<Vec<T>, IoError> {
+// Reserve once and leave `spare` elements after the appended slice.
+// If `xs` aliases v, rebase it after resize because realloc may move the block.
+extend_spare_in*<T> = (
+    a: AllocatorBackend,
+    v: Vec<T>,
+    xs: Slice<T>,
+    spare: i64,
+) Result<Vec<T>, IoError> {
     buf.buffer_extend(a, vec_buffer(v), xs, spare).match ({
         .Ok(b)  => .Ok(buffer_vec(b)),
         .Err(e) => {
@@ -335,18 +328,14 @@ extend_spare_in*<T> = (a: Allocator, v: Vec<T>, xs: Slice<T>, spare: i64) Result
         },
     })
 }
-extend_in*<T> = (a: Allocator, v: Vec<T>, xs: [T]) Result<Vec<T>, IoError> {
+extend_in*<T> = (a: AllocatorBackend, v: Vec<T>, xs: [T]) Result<Vec<T>, IoError> {
     a.extend_spare_in(v, xs, 0)
 }
-// ── the two `{ptr, len}` owned rows (docs/string-vec-model.md) ───────────────────────────────────
-// `VecFixed<T>` and `VecConst<T>` are `StringFixed`/`StringConst` over an element type, and the same
-// sentence explains both: no `cap`, so growth is impossible by construction; a fixed view is a
-// writable `[T]` and a frozen view is a read-only `Slice<T>`; each carries the allocator it was born
-// under so `drop()` takes no argument.
+// Fixed is writable; Const is read-only. Both retain their allocator for drop().
 VecFixed*<T>: {
     ptr: RawPtr<u8>,
     len: i64,
-    alloc: DynAlloc,
+    alloc: Allocator,
     view = (v: VecFixed<T>) [T] { slice(v.ptr, v.len) }
     get  = (v: VecFixed<T>, i: i64) T { v.view()[i] }
     set = (v: VecFixed<T>, i: i64, x: T) void {
@@ -358,7 +347,7 @@ VecFixed*<T>: {
 VecConst*<T>: {
     ptr: RawPtr<u8>,
     len: i64,
-    alloc: DynAlloc,
+    alloc: Allocator,
     view = (v: VecConst<T>) Slice<T> { slice(v.ptr, v.len) }
     get  = (v: VecConst<T>, i: i64) T { v.view()[i] }
     drop = (v: VecConst<T>) void { buf.buffer_const_drop(vec_const_buffer(v)) }
@@ -391,59 +380,29 @@ buffer_vec_const<T> = (b: buf.BufferConst<T>) VecConst<T> {
         alloc: b.alloc,
     )
 }
-// ── carrying constructors ────────────────────────────────────────────────────────────────────────
-// The allocator is named ONCE and rides inside the value. `vec` is INFALLIBLE — a failed birth
-// allocation becomes the sticky flag and settles at `freeze()`; `vec_fixed` has no chain to settle
-// into, so it reports its single allocation directly. T comes from the explicit type argument
-// (`gpa.vec<i64>(16)`): there is no element to infer it from.
-vec*<T> = (a: DynAlloc, cap: i64) Vec<T> {
+// vec records initial OOM for freeze(); vec_fixed reports it immediately.
+vec*<T> = (a: Allocator, cap: i64) Vec<T> {
     b: buf.Buffer<T> = buf.buffer_new(a, cap)
     buffer_vec(b)
 }
-vec_fixed*<T> = (a: DynAlloc, n: i64) Result<VecFixed<T>, IoError> {
+vec_fixed*<T> = (a: Allocator, n: i64) Result<VecFixed<T>, IoError> {
     r: Result<buf.BufferFixed<T>, IoError> = buf.buffer_fixed(a, n)
     r.match ({
         .Ok(b)  => .Ok(buffer_vec_fixed(b)),
         .Err(e) => .Err(e),
     })
 }
-// The only way back from frozen to growable — there is deliberately no `thaw()`, because going back
-// COPIES and the allocator is named so the allocation is visible at the point it happens.
-vec_from*<T> = (a: DynAlloc, c: VecConst<T>) Vec<T> {
+// Converting a frozen Vec back to growable storage always copies.
+vec_from*<T> = (a: Allocator, c: VecConst<T>) Vec<T> {
     src: [T] = slice(c.ptr, c.len)
     v: Vec<T> = vec(a, c.len)
     v.add(src)
 }
-// ── STORED-ALLOCATOR FORM (process-heap default) ─────────────────────────────────────────────────
-// An ADDITIVE surface that removes allocator threading: `v = vec.new()` then `v.push(x)` — no `a`
-// argument anywhere. Everything above (the explicit `Vec<T>` + `of(a, …)` / `v.push(a, x)` forms) is
-// UNCHANGED and remains the precise-control API; this section only adds new names on new types.
-//
-//   v: AVec<i32> = vec.new()          // T comes from the annotation (nothing to infer it from)
-//   v  = v.push(1)                     // no allocator argument — new() stored dyn_heap()
-//   v  = v.push(2)
-//   n = v.len()                      // 2
-//   x = v.get(0)                     // 1
-//   v.each((y){ ... })                 // iterate the live elements
-//   v.free()                           // hand storage back to the stored allocator
-//
-//   w = vec.from([10, 20, 30])        // seed from a slice; T inferred from the elements
-//
-// STORE-NOT-REREAD (why AVec carries its allocator). `new()` stores `dyn_heap()`; `new_in(a)` stores
-// the caller's `DynAlloc`. Every later grow/free uses that same value, avoiding cross-allocator frees.
-// A custom `DynAlloc.state` is a raw pointer, so the allocator state itself MUST outlive the AVec;
-// storing its vtable does not make a stack/arena-backed allocator immortal.
-//
-// These allocator-free-call-site ops are fail-fast on allocation failure (`.expect`, which panics). The
-// ergonomic path. Callers who need allocation failure as a value keep using the explicit `Vec<T>` API,
-// whose ops return `Result<Vec<T>, IoError>`.
-// AVec<T> = an explicit `Vec<T>` plus the NARROW allocator it was born under (`alloc: DynAlloc` — the
-// value form of the `Allocator` trait, std.mem.alloc). All ops delegate to the `Vec<T>` methods,
-// passing the stored allocator where an `a: Allocator` is expected, so there is ZERO duplicated
-// container logic AND the container stores an Allocator, never the whole `Rt` bundle.
+// AVec stores its birth allocator; all growth and release use that same value.
+// Its allocator state must outlive the AVec. Allocation failure is fail-fast.
 AVec*<T>: {
     inner: Vec<T>,
-    alloc: DynAlloc,
+    alloc: Allocator,
     len     = (w: AVec<T>) i64 { w.inner.len() }
     get     = (w: AVec<T>, i: i64) T { w.inner.get(i) }
     get_opt = (w: AVec<T>, i: i64) Opt<T> { w.inner.get_opt(i) }
@@ -452,9 +411,6 @@ AVec*<T>: {
     fold    = (w: AVec<T>, init: T, f: (T, T) T) T { w.inner.fold(init, f) }
     find    = (w: AVec<T>, pred: (T) bool) Opt<T> { w.inner.find(pred) }
     push = (w: AVec<T>, x: T) AVec<T> {
-        // In a chain (`v.push(1).push(2)`) the receiver `w` is the previous op's side-effecting
-        // result. The inliner binds such a multiply-used arg to one temp (evaluate-once), so
-        // referencing `w` several times below is safe — no local rebind needed here.
         a = w.alloc
         AVec<T>(
             inner: w.inner.push(a.addr(), x).expect("vec.push: out of memory"),
@@ -466,52 +422,37 @@ AVec*<T>: {
         w.inner.free(a.addr())
     }
 }
-// EXPLICIT-allocator constructor — THE REAL CONSTRUCTION PATH. Build a zero-element `AVec<T>` bound to
-// a caller-supplied narrow allocator (`a: DynAlloc`), with no implicit process-heap selection.
-// (docs/MEMORY_MODEL.md), an explicit capability handed in is the model: a caller who holds an
-// allocator (`std.mem.alloc.dyn_heap()`, an actor's `Rt.allocator()`, an arena)
-// calls this and the thread-local is never touched. The default `new()` below is a one-line shim over
-// it — the single process-heap draw (`dyn_heap()`) on the vec construction path.
-// `empty`'s T lives only in its return type; pin it via the annotation (nested-return inference can't
-// reach it through the struct-literal field). `empty` is fallible, so unwrap fail-fast here (the
-// default form is fail-fast on OOM by design).
-new_in*<T> = (a: DynAlloc) AVec<T> {
+// Explicit construction never reads the ambient runtime; T comes from the result context.
+new_in*<T> = (a: Allocator) AVec<T> {
     da = a
-    ivr: Result<Vec<T>, IoError> = empty(da.addr())
+    ivr: Result<Vec<T>, IoError> = empty(da)
     AVec<T>(
         inner: ivr.expect("vec.new: out of memory"),
         alloc: a,
     )
 }
-// a zero-element process-heap `AVec<T>` (capacity for one, like `empty`). T can't be inferred from an
-// argument, so it comes from the LHS annotation: `v: AVec<i32> = vec.new()`. The process heap is drawn
-// ONCE here (as a DynAlloc) and stored for the life of the vec (all later ops use the stored allocator).
-// The `new_in` body is inlined (rather than `new_in(dyn_heap())`) so the shim makes no bare `new_in`
-// call — that bare name is ambiguous with std.text.string's generic `new_in(a: Allocator)` once both
-// modules flatten together; the qualified `vec.new_in` stays the external real path.
+// T comes from the result context. The body avoids a flat-namespace new_in collision.
 new*<T> = () AVec<T> {
-    a = dyn_heap()
-    ivr: Result<Vec<T>, IoError> = empty(a.addr())
+    a = heap_allocator()
+    ivr: Result<Vec<T>, IoError> = empty(a)
     AVec<T>(
         inner: ivr.expect("vec.new: out of memory"),
         alloc: a,
     )
 }
-// EXPLICIT-allocator seed constructor: an `AVec<T>` bound to `a`, seeded from a slice (copies `xs`). No
-// implicit allocator selection. T is inferred from the elements.
-from_in*<T> = (a: DynAlloc, xs: [T]) AVec<T> {
+// Explicit seed construction copies xs and never reads the ambient runtime.
+from_in*<T> = (a: Allocator, xs: [T]) AVec<T> {
     da = a
-    iv: Vec<T> = of(da.addr(), xs).expect("vec.from: out of memory")
+    iv: Vec<T> = of(da, xs).expect("vec.from: out of memory")
     AVec<T>(
         inner: iv,
         alloc: a,
     )
 }
-// a process-heap `AVec<T>` seeded from a slice. Capture `dyn_heap()` once; `from_in`'s body is inlined
-// (no bare `from_in` call — same string-`new_in` collision avoidance as `new`). Fail-fast.
+// Process-heap seed construction is fail-fast.
 from*<T> = (xs: [T]) AVec<T> {
-    a = dyn_heap()
-    iv: Vec<T> = of(a.addr(), xs).expect("vec.from: out of memory")
+    a = heap_allocator()
+    iv: Vec<T> = of(a, xs).expect("vec.from: out of memory")
     AVec<T>(
         inner: iv,
         alloc: a,

@@ -222,7 +222,7 @@ scan_quote_end = (src: StringView, pos: i32) i32 {
 // `::` is the MUTABILITY mark of a local binding (`x :: T = e`); `::=` is its inferred-type
 // form and is the only three-byte operator (three_op, checked first so `::=` never splits
 // into `::` + `=`). Nothing else in the grammar puts two colons in a row — a type annotation,
-// a struct-literal field (`S(v: 7)`), a generic bound (`<A: Allocator>`), a match arm and a
+// a struct-literal field (`S(v: 7)`), a generic bound (`<A: AllocatorBackend>`), a match arm and a
 // trait body each spell a SINGLE `:` followed by a name/type, never by another `:`.
 two_op = (b0: u8, b1: u8) bool {
     b0 == ':' && b1 == '='
@@ -332,7 +332,7 @@ count_from = (src: StringView, pos: i32) i32 {
 }
 // ── a materialized token list ──────────────────────────────────────────────────
 // the comment sidecar below allocates its span buffer through the explicit allocator
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { acquire_or_die } = compiler.genc
 // ── comment sidecar: collect every `//` and `/* */` comment as a positioned span ──────────────────
 // The token scanner SKIPS comments (they carry no semantics), but the formatter must reproduce them.
@@ -350,9 +350,9 @@ Comment*: {
     len: i32,
     trailing: bool,
 }    // span [start, start+len); trailing = same-line code before it
-cmt_buf = (a: MutPtr<Malloc>, n: i32) [Comment] { slice(a.acquire_or_die(n * sizeof(Comment)), n) }
+cmt_buf = (a: Allocator, n: i32) [Comment] { slice(a.acquire_or_die(n * sizeof(Comment)), n) }
 // count comments first so the buffer is exact (no cap guesswork on a 100KB file).
-collect_comments* = (a: MutPtr<Malloc>, src: StringView) [Comment] {
+collect_comments* = (a: Allocator, src: StringView) [Comment] {
     n = src.count_comments()
     buf = a.cmt_buf(n + 1)    // +1 keeps a 0-comment file from a 0-size acquire
     src.fill_comments(buf, 0)

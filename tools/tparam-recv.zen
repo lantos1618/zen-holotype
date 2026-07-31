@@ -15,7 +15,7 @@
 //
 // WHAT IT DOES NOT FIND — the false-positive line, deliberately drawn:
 //   * a tparam that is never a receiver (element types: `Opt<T>`, `[T]`, `Box<T>`, an accumulator);
-//   * a BOUND tparam (`<A: Allocator>`) and the `(a: Allocator)` sugar, which is that same bound;
+//   * a BOUND tparam (`<A: AllocatorBackend>`) and the `(a: AllocatorBackend)` sugar, which is that same bound;
 //   * compiler intrinsics (`addr`/`load`/`store`/`offset`/`to_i64`/…) — those are typed by the
 //     compiler for every type, not resolved through an impl, so they assume nothing. The roster is
 //     IMPORTED from compiler.check (is_intrinsic), never re-listed here.
@@ -33,10 +33,10 @@
 //   src/std/text/str.zen:322: repeat_in: tparam `A` receiver `a` . acquire   [alloc]
 //
 // The `[alloc]` tag marks the allocator shape — a receiver whose method set is acquire/resize/release
-// — which is what `A: Allocator` is for. Everything else is tagged `[other]` and is a finding in its
+// — which is what `A: AllocatorBackend` is for. Everything else is tagged `[other]` and is a finding in its
 // own right. Exit status is the number of files with findings (0 = clean), so it gates.
 { arg, argc } = std.sys.os
-{ Malloc } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 { contents_in } = std.io.file
 { is_dir, read_dir } = std.sys.fs
 { cat_in, ends_with, view } = std.text.str
@@ -63,7 +63,7 @@ g_unparsed ::= 0
 // pass-through: calling it constrains the receiver not at all); 2 = at least one declaration wants a
 // concrete or bounded receiver (calling it DOES constrain); 0 = never seen (treated as 2 — a lint
 // that goes quiet on names it failed to index would fail open).
-idx_note = (m: Map<i64>, a: Allocator, name: StringView, passthru: bool) Map<i64> {
+idx_note = (m: Map<i64>, a: AllocatorBackend, name: StringView, passthru: bool) Map<i64> {
     prev = m.get(name, 0)
     next: i64 = (passthru && prev != 2).then({ 1 }, { 2 })
     m.put(a, name, next).expect("tparam-recv: index alloc")
@@ -80,16 +80,16 @@ decl_passthru = (f: Func) bool {
         },
     })
 }
-// an impl's methods bind a CONCRETE receiver type (`Heap.impl(Allocator, …)`), which is exactly the
+// an impl's methods bind a CONCRETE receiver type (`Heap.impl(AllocatorBackend, …)`), which is exactly the
 // constraint this lint is about — register every one under the simple name a UFCS call site writes.
-idx_impl = (m: Map<i64>, a: Allocator, im: ImplData) Map<i64> {
+idx_impl = (m: Map<i64>, a: AllocatorBackend, im: ImplData) Map<i64> {
     out ::= m
     im.methods.loop((h, k, p) {
         out = out.idx_note(a, p.name, false)
     })
     out
 }
-idx_module = (m: Map<i64>, a: Allocator, decls: [Decl]) Map<i64> {
+idx_module = (m: Map<i64>, a: AllocatorBackend, decls: [Decl]) Map<i64> {
     out ::= m
     decls.loop((h, i, d) {
         out = d.match ({
@@ -154,7 +154,7 @@ line_of = (src: StringView, pos: i32) i64 {
     })
     n
 }
-// an allocator-shaped assumption: the three methods the Allocator trait declares.
+// an allocator-shaped assumption: the three methods the AllocatorBackend trait declares.
 alloc_method = (m: StringView) bool { m == "acquire" || m == "resize" || m == "release" }
 report = (cx: Ctx, pos: i32, tp: StringView, recv: StringView, method: StringView) void {
     tag = method.alloc_method().then({ "alloc" }, { "other" })
@@ -265,10 +265,10 @@ scan_module = (m: Map<i64>, path: StringView, src: StringView, decls: [Decl]) vo
         })
     })
 }
-scan_file = (m: Map<i64>, a: Allocator, path: StringView) void {
+scan_file = (m: Map<i64>, a: AllocatorBackend, path: StringView) void {
     g_files = g_files + 1
     src = a.contents_in(path).expect("tparam-recv: cannot read file")
-    decls = a.parse_module(src)
+    decls = load(a).parse_module(src)
     // A file that does not PARSE is reported as such rather than silently scanned as empty: a lint
     // that fails open is the failure mode this repo has been bitten by.
     (perr_get() || lerr_get()).match ({
@@ -279,9 +279,9 @@ scan_file = (m: Map<i64>, a: Allocator, path: StringView) void {
         false => m.scan_module(path, src, decls),
     })
 }
-index_file = (m: Map<i64>, a: Allocator, path: StringView) Map<i64> {
+index_file = (m: Map<i64>, a: AllocatorBackend, path: StringView) Map<i64> {
     src = a.contents_in(path).expect("tparam-recv: cannot read file")
-    decls = a.parse_module(src)
+    decls = load(a).parse_module(src)
     (perr_get() || lerr_get()).then({ m }, { m.idx_module(a, decls) })
 }
 sv_lt_at = (xv: Slice<u8>, yv: Slice<u8>, i: i64) bool {
@@ -307,7 +307,7 @@ sort_from = (xs: [StringView], i: i64) void {
 }
 sort_names = (xs: [StringView]) void { xs.sort_from(1) }
 // phase 0 indexes, phase 1 scans — the same walk, as in tools/discards.zen.
-walk = (m: Map<i64>, a: Allocator, root: StringView, phase: i32) Map<i64> {
+walk = (m: Map<i64>, a: AllocatorBackend, root: StringView, phase: i32) Map<i64> {
     out ::= m
     root.is_dir().match ({
         true  => {
@@ -333,7 +333,7 @@ walk = (m: Map<i64>, a: Allocator, root: StringView, phase: i32) Map<i64> {
 // the roots named on the command line, at `phase` (0 = index, 1 = scan). Indexing them too is what
 // lets a scanned file's OWN helpers resolve — a fixture outside the fixed index roots would otherwise
 // have every local method call read as unknown, and unknown means reported.
-scan_roots = (m: Map<i64>, a: Allocator, i: i32, phase: i32) Map<i64> {
+scan_roots = (m: Map<i64>, a: AllocatorBackend, i: i32, phase: i32) Map<i64> {
     out ::= m
     (i < argc()).then({
         (arg(i) == "--quiet").match ({
@@ -349,7 +349,7 @@ scan_roots = (m: Map<i64>, a: Allocator, i: i32, phase: i32) Map<i64> {
     out
 }
 main = () i32 {
-    mm = Malloc(_: 0)
+    mm = heap_allocator()
     a = mm.addr()
     (argc() < 2).then({
         format("usage: zen run tools/tparam-recv.zen <scan-root> [<scan-root> …] [--quiet]\n", [])

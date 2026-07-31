@@ -1,31 +1,9 @@
-// lsp_docs.zen — the LSP DOCUMENT STORE: what the client has open, as the client last sent it.
-//
-// THE PROTOCOL CONTRACT this exists to honour: while a document is OPEN, the client's buffer — not
-// the file on disk — is the source of truth, and the server must not read disk for it. The client
-// pays for that guarantee by sending the whole text on every change (`textDocumentSync: 1`, Full
-// sync); a server that then re-reads disk is answering questions about the last SAVED state, which
-// is exactly the bug where diagnostics track your typing but highlighting does not. Disk stays the
-// right answer for a file that is NOT open (a cross-file go-to-definition target, say) — hence the
-// callers' `lspd_find(uri) < 0` fallback, and hence didClose really dropping the entry.
-//
-// LIFECYCLE: didOpen inserts (uri, version, text); didChange REPLACES text + version for the same
-// uri; didClose frees the entry and swap-removes it (order is irrelevant, lookups are by uri).
-//
-// TOKEN CACHE: semantic tokens are otherwise recomputed over the whole file on every keystroke. The
-// rendered token array is memoized against the document's LSP VERSION — the protocol's own
-// invalidation signal — so repeated requests at one version are answered from memory. Belt and
-// braces: every text write resets `tok_version` to -1, so a client that reuses (or omits) a version
-// number still can never be served a token array computed from different text.
-//
-// MEMORY: this store is the one thing in the server that OUTLIVES a request. Every string it is
-// handed was built inside the request scope (std.mem.alloc), which is reclaimed the instant the
-// request ends — so the store takes its own DURABLE-floor copy of each one and releases it there,
-// never through the request allocator. It holds one text and one token array per OPEN document, not
-// one per keystroke: each write releases what it replaces. `lspd_own` maps the empty view to the ""
-// literal, and `lspd_release` releases only a NON-EMPTY view, so that literal is never handed back
-// to the allocator. The entry array itself doubles geometrically and releases the buffer it
-// outgrew; it is sized by the number of SIMULTANEOUSLY OPEN documents, not by edits.
-{ heap_acquire, heap_release } = std.mem.alloc
+// LSP document store. An open document uses the client's latest full-sync text; otherwise callers
+// fall back to disk. didOpen/didChange replace the stored state, and didClose frees and removes it.
+// Token data is valid only when `tok_version == version`; every text write invalidates it.
+// The store outlives request-arena resets, so URI, text, and tokens are copied to the process heap.
+// Replacements and closes release those durable copies; one text and token buffer remain per open file.
+{ heap_allocator } = std.mem.alloc
 { memcpy } = std.c.libc
 { view } = std.text.str
 { then } = std.core.bool
@@ -38,11 +16,8 @@ LspDoc: {
     tok_version: i64,
 }    // -1 = no token array cached for `version`
 lspd_none = () [LspDoc] { slice(null_ptr(), 0) }
-// The store's own two allocation calls, spelled against the DURABLE floor rather than the `Malloc`
-// the rest of the server threads: `Malloc` answers out of the open request scope, and a document
-// must still be there on the next keystroke. The same floor `Heap` sits on.
-lspd_acquire = (n: i64) RawPtr<u8> { heap_acquire(null_ptr(), n) }
-lspd_free = (p: RawPtr<u8>) void { heap_release(null_ptr(), p) }
+lspd_acquire = (n: i64) RawPtr<u8> { allocator_dispatch_acquire(heap_allocator(), n) }
+lspd_free = (p: RawPtr<u8>) void { allocator_dispatch_release(heap_allocator(), p) }
 lspd_buf ::= lspd_none()
 lspd_n ::= 0
 lspd_alloc = (n: i64) [LspDoc] { slice(lspd_acquire(n * sizeof(LspDoc)), n) }

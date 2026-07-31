@@ -9,8 +9,8 @@
 { decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset, note_module_sig,
   module_sigs_reset, module_sig_flags, module_sig_alias_stamped } = compiler.parse
 { check_linked } = compiler.validate.core
-// Parser APIs still take MutPtr<Malloc>; scanner-only APIs can use any Allocator.
-{ Malloc } = std.mem.alloc
+// Compiler APIs take passable Allocator values; caller-owned scanner result buffers retain generic backend pointers.
+{ Allocator } = std.mem.alloc
 { Result, IoError, ok } = std.core.result
 { String } = std.text.string
 { Map, of } = std.collections.map    // O(1) presence sets for the shadow-rename pass (.has/.put are UFCS methods)
@@ -91,7 +91,7 @@ snext_line* = (set: String, i: i64) i64 {
     })
 }
 seen_name* = (set: String, name: String) bool { set.seen_scan(name, 0) }
-add_name* = (set: String, a: MutPtr<Malloc>, name: String) String {
+add_name* = (set: String, a: Allocator, name: String) String {
     set.rappend_string(a, name).rpush(a, '\n')
 }
 // O(1)-average presence set over the shadow-rename pass's symbol keys, replacing the newline-delimited
@@ -100,25 +100,25 @@ add_name* = (set: String, a: MutPtr<Malloc>, name: String) String {
 // mint, so a content-hashed Map matches the old explicit-length String comparison byte-for-byte. The
 // "" seed is a sentinel: identifiers are never empty, so it is never a real query. Val is a presence
 // marker (0); membership is by key.
-rset_new* = (a: MutPtr<Malloc>) Map<i64> {
+rset_new* = (a: Allocator) Map<i64> {
     seed: i64 = 0 - 1
-    of(a, "", seed).expect("compiler.resolve: rset alloc")
+    of(a.addr(), "", seed).expect("compiler.resolve: rset alloc")
 }
-rset_add* = (m: Map<i64>, a: MutPtr<Malloc>, key: String) Map<i64> {
-    m.put(a, cstr(key.ptr), 0).expect("compiler.resolve: rset alloc")
+rset_add* = (m: Map<i64>, a: Allocator, key: String) Map<i64> {
+    m.put(a.addr(), cstr(key.ptr), 0).expect("compiler.resolve: rset alloc")
 }
-rset_add_str* = (m: Map<i64>, a: MutPtr<Malloc>, name: StringView) Map<i64> {
-    m.put(a, name, 0).expect("compiler.resolve: rset alloc")
+rset_add_str* = (m: Map<i64>, a: Allocator, name: StringView) Map<i64> {
+    m.put(a.addr(), name, 0).expect("compiler.resolve: rset alloc")
 }
 rset_has* = (m: Map<i64>, key: String) bool { m.has(cstr(key.ptr)) }
 // resolve's allocator-first String helpers now delegate to compiler.genc's canonical generic
 // gstr_* builder (one implementation for the whole compiler). The only difference is the arg
 // convention: m* take the allocator first (s.gstr_push(a, b)); gstr_* take the String first.
-mappend_string* = (a: MutPtr<Malloc>, out: String, src: String) String {
+mappend_string* = (a: Allocator, out: String, src: String) String {
     // src carries its length — bulk append (one reserve, straight copy), no per-byte push.
     out.gstr_append_bytes(a, src.bytes())
 }
-mcopy_from = (a: MutPtr<Malloc>, out: String, src: String, i: i64) String {
+mcopy_from = (a: Allocator, out: String, src: String, i: i64) String {
     cur ::= out
     bs: [u8] = src.bytes()
     bs.loop_at((idx, b) {
@@ -131,7 +131,7 @@ mcopy_from = (a: MutPtr<Malloc>, out: String, src: String, i: i64) String {
 // Append s[p..e) (stopping early at NUL) to `out`. Iterates a sub-slice that starts at `p` — NOT a
 // scan from 0, and NOT recursive — so copying a span out of a large flattened source is O(e-p) and
 // uses constant stack regardless of span length.
-mappend_span = (a: MutPtr<Malloc>, out: String, s: StringView, p: i32, e: i32) String {
+mappend_span = (a: Allocator, out: String, s: StringView, p: i32, e: i32) String {
     cur ::= out
     (p < e).then({
         // Find the copy length first (the span, clipped at an embedded NUL), then bulk append —
@@ -148,13 +148,13 @@ mappend_span = (a: MutPtr<Malloc>, out: String, s: StringView, p: i32, e: i32) S
     })
     cur
 }
-rpush* = (s: String, a: MutPtr<Malloc>, b: u8) String { s.gstr_push(a, b) }
-rappend* = (s: String, a: MutPtr<Malloc>, t: StringView) String { s.gstr_append(a, t) }
-rappend_string* = (s: String, a: MutPtr<Malloc>, src: String) String { a.mappend_string(s, src) }
-rappend_span* = (s: String, a: MutPtr<Malloc>, src: StringView, p: i32, e: i32) String {
+rpush* = (s: String, a: Allocator, b: u8) String { s.gstr_push(a, b) }
+rappend* = (s: String, a: Allocator, t: StringView) String { s.gstr_append(a, t) }
+rappend_string* = (s: String, a: Allocator, src: String) String { a.mappend_string(s, src) }
+rappend_span* = (s: String, a: Allocator, src: StringView, p: i32, e: i32) String {
     a.mappend_span(s, src, p, e)
 }
-mcopy_id_dotted = (a: MutPtr<Malloc>, out: String, id: String, i: i64) String {
+mcopy_id_dotted = (a: Allocator, out: String, id: String, i: i64) String {
     cur ::= out
     bs: [u8] = id.bytes()
     bs.loop_at((idx, b) {
@@ -171,7 +171,7 @@ mcopy_id_dotted = (a: MutPtr<Malloc>, out: String, id: String, i: i64) String {
     })
     cur
 }
-mappend_id_name* = (a: MutPtr<Malloc>, out: String, id: String) String {
+mappend_id_name* = (a: Allocator, out: String, id: String) String {
     cur ::= out
     id.id_is_user().match ({
         true  => {
@@ -183,11 +183,11 @@ mappend_id_name* = (a: MutPtr<Malloc>, out: String, id: String) String {
     })
     cur
 }
-madd_name* = (a: MutPtr<Malloc>, set: String, name: String) String {
+madd_name* = (a: Allocator, set: String, name: String) String {
     hs = a.mappend_string(set, name)
     hs.gstr_push(a, '\n')
 }
-madd_str_name* = (a: MutPtr<Malloc>, set: String, name: StringView) String {
+madd_str_name* = (a: Allocator, set: String, name: StringView) String {
     hs = set.gstr_append(a, name)
     hs.gstr_push(a, '\n')
 }
@@ -199,12 +199,12 @@ Closure: {
     out: String,
     useen: Map<i64>,
 }
-empty_closure = (a: MutPtr<Malloc>) Closure {
+empty_closure = (a: Allocator) Closure {
     seed: i64 = 0 - 1
     Closure(
         seen: a.gstr_string(256),
         out: a.gstr_string(4096),
-        useen: of(a, "", seed).expect("compiler.resolve: useen alloc"),
+        useen: of(a.addr(), "", seed).expect("compiler.resolve: useen alloc"),
     )
 }
 ImportEdge*: {
@@ -423,7 +423,7 @@ res_reject_text* = (text: StringView) i32 {
     res_failed = true
     0
 }    // first rejection wins — the one the exiting process used to print is still the one printed
-res_reject = (a: MutPtr<Malloc>, msg: String) i32 {
+res_reject = (a: Allocator, msg: String) i32 {
     res_reject_text(msg.gstr_push(a, '\n').gstr_finish(a))
 }
 // ── NAMESPACE-IMPORT CYCLE GUARD ───────────────────────────────────────────────────────────────
@@ -434,7 +434,7 @@ res_reject = (a: MutPtr<Malloc>, msg: String) i32 {
 // and leaves the flattened output byte-identical; a genuine cycle trips the cap and exits cleanly.
 ns_depth ::= 0
 NS_DEPTH_CAP = 256
-fail_import_cycle = (a: MutPtr<Malloc>, inpath: StringView, id: String) i32 {
+fail_import_cycle = (a: Allocator, inpath: StringView, id: String) i32 {
     msg0 = a
         .gstr_string(160)
         .gstr_append(a, "zenc: ")
@@ -455,7 +455,7 @@ file_exists* = (path: StringView) bool {
         false => false,
     })
 }
-fail_unknown_module = (a: MutPtr<Malloc>, inpath: StringView, id: String, path: StringView) i32 {
+fail_unknown_module = (a: Allocator, inpath: StringView, id: String, path: StringView) i32 {
     msg = a.mappend_id_name(a
         .gstr_string(160)
         .gstr_append(a, "zenc: ")
@@ -475,7 +475,7 @@ fail_unknown_module = (a: MutPtr<Malloc>, inpath: StringView, id: String, path: 
     close_msg = m2.gstr_append(a, ")")
     a.res_reject(close_msg)
 }
-fail_unreadable = (a: MutPtr<Malloc>, inpath: StringView, path: StringView) StringView {
+fail_unreadable = (a: Allocator, inpath: StringView, path: StringView) StringView {
     msg = a
         .gstr_string(160)
         .gstr_append(a, "zenc: ")
@@ -485,16 +485,16 @@ fail_unreadable = (a: MutPtr<Malloc>, inpath: StringView, path: StringView) Stri
     a.res_reject(with_path)
     ""
 }
-read_module_file = (a: MutPtr<Malloc>, path: StringView) Result<StringView, IoError> {
-    a.contents_in(path)
+read_module_file = (a: Allocator, path: StringView) Result<StringView, IoError> {
+    a.addr().contents_in(path)
 }
-read_module = (a: MutPtr<Malloc>, inpath: StringView, path: StringView) StringView {
+read_module = (a: Allocator, inpath: StringView, path: StringView) StringView {
     a.read_module_file(path).match ({
         .Ok(s)  => s,
         .Err(e) => a.fail_unreadable(inpath, path),
     })
 }
-fail_unknown_name = (a: MutPtr<Malloc>, inpath: StringView, nm: String, id: String) i32 {
+fail_unknown_name = (a: Allocator, inpath: StringView, nm: String, id: String) i32 {
     msg0 = a
         .gstr_string(160)
         .gstr_append(a, "zenc: ")
@@ -506,13 +506,7 @@ fail_unknown_name = (a: MutPtr<Malloc>, inpath: StringView, nm: String, id: Stri
     tail = msg2.gstr_append(a, "' (no such top-level definition)")
     a.res_reject(tail)
 }
-fail_dup_user = (
-    a: MutPtr<Malloc>,
-    inpath: StringView,
-    id: String,
-    nm: String,
-    origin: String,
-) i32 {
+fail_dup_user = (a: Allocator, inpath: StringView, id: String, nm: String, origin: String) i32 {
     msg0 = a
         .gstr_string(256)
         .gstr_append(a, "zenc: ")
@@ -539,7 +533,7 @@ fail_dup_user = (
     h8 = h7.gstr_append(a, "(...)`")
     a.res_reject(h8)
 }
-fail_no_progdir = (a: MutPtr<Malloc>, inpath: StringView, id: String) i32 {
+fail_no_progdir = (a: Allocator, inpath: StringView, id: String) i32 {
     msg0 = a
         .gstr_string(160)
         .gstr_append(a, "zenc: ")
@@ -560,7 +554,7 @@ fail_no_progdir = (a: MutPtr<Malloc>, inpath: StringView, id: String) i32 {
 // (`utils.helpers`, never a relative/implicit sibling) — one registered source root, no ambiguity.
 // EXCEPTION, consulted first and only for user ids: the registered c_library genmod map (see
 // genmods_set below) — an id the build granted via `use()` resolves to its GENERATED file.
-module_path* = (a: MutPtr<Malloc>, root: StringView, progdir: StringView, id: String) StringView {
+module_path* = (a: Allocator, root: StringView, progdir: StringView, id: String) StringView {
     gp = a.genmod_lookup(id)
     (gp.at(0) == 0).match ({
         true  => {
@@ -585,7 +579,7 @@ module_path* = (a: MutPtr<Malloc>, root: StringView, progdir: StringView, id: St
     })
 }
 guard_module = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     progdir: StringView,
     inpath: StringView,
     id: String,
@@ -594,12 +588,12 @@ guard_module = (
     (id.id_is_user() && progdir.at(0) == 0).then({ a.fail_no_progdir(inpath, id) }, { 0 })
     file_exists(path).then({ 0 }, { a.fail_unknown_module(inpath, id, path) })
 }
-module_entry_buf = (a: MutPtr<Malloc>, n: i64) [ModuleEntry] {
+module_entry_buf = (a: Allocator, n: i64) [ModuleEntry] {
     slice(a.acquire_or_die(n * sizeof(ModuleEntry)), n)
 }
 // Append an entry, doubling the buffer when full (DFS preorder is preserved: an entry is pushed
 // BEFORE its own import edges are followed, exactly the order the old fill pass wrote).
-mload_push = (a: MutPtr<Malloc>, st: ModuleLoad, e: ModuleEntry) ModuleLoad {
+mload_push = (a: Allocator, st: ModuleLoad, e: ModuleEntry) ModuleLoad {
     buf ::= st.entries
     (st.n >= buf.len).then({
         grown ::= a.module_entry_buf(buf.len * 2)
@@ -614,7 +608,7 @@ mload_push = (a: MutPtr<Malloc>, st: ModuleLoad, e: ModuleEntry) ModuleLoad {
     )
 }
 fill_module_one = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     root: StringView,
     progdir: StringView,
     inpath: StringView,
@@ -649,7 +643,7 @@ fill_module_one = (
     })
 }
 fill_module_edges = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     root: StringView,
     progdir: StringView,
     inpath: StringView,
@@ -663,7 +657,7 @@ fill_module_edges = (
     cur
 }
 module_table_graph = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     root: StringView,
     progdir: StringView,
     inpath: StringView,
@@ -683,7 +677,7 @@ module_table_graph = (
     ModuleTable(modules: slice(st.entries.ptr, st.n))
 }
 load_closure_table = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     inpath: StringView,
     id: String,
@@ -721,7 +715,7 @@ load_closure_table = (
     })
 }
 load_import_edges_table = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     inpath: StringView,
     src: StringView,
@@ -746,7 +740,7 @@ load_import_edges_table = (
     cur
 }
 load_import_graph_table = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     inpath: StringView,
     src: StringView,
@@ -755,7 +749,7 @@ load_import_graph_table = (
     c: Closure,
 ) Closure { a.load_import_edges_table(table, inpath, src, graph.imports, 0, validate, c) }
 load_ns_edge_table = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     inpath: StringView,
     src: StringView,
@@ -785,7 +779,7 @@ load_ns_edge_table = (
     )
 }
 collect_ns_edges_table = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     inpath: StringView,
     src: StringView,
@@ -804,17 +798,17 @@ collect_ns_edges_table = (
     cur
 }
 collect_ns_graph_table = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     inpath: StringView,
     src: StringView,
     graph: ModuleGraph,
     st: NsScan,
 ) NsScan { a.collect_ns_edges_table(table, inpath, src, graph.imports, 0, st) }
-mimport_name_span* = (a: MutPtr<Malloc>, flat: StringView, p: i32, e: i32) String {
+mimport_name_span* = (a: Allocator, flat: StringView, p: i32, e: i32) String {
     a.mappend_span(a.gstr_string(16), flat, p, e)
 }
-mimport_head_name* = (a: MutPtr<Malloc>, src: StringView, p: i32, e: i32) String {
+mimport_head_name* = (a: Allocator, src: StringView, p: i32, e: i32) String {
     raw = a.mimport_name_span(src, p, e)
     out ::= raw
     src.is_c_kw_name_span(p, e).then({
@@ -824,7 +818,7 @@ mimport_head_name* = (a: MutPtr<Malloc>, src: StringView, p: i32, e: i32) String
 }
 check_import_names_table = (
     table: ModuleTable,
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     p: i32,
     id: String,
@@ -835,7 +829,7 @@ check_import_names_table = (
 }
 check_head = (
     src: StringView,
-    a: MutPtr<Malloc>,
+    a: Allocator,
     p: i32,
     provided: ModuleSig,
     id: String,
@@ -871,24 +865,24 @@ check_head = (
 // Register one module-defined symbol in `useen` (key → origin table index); a key already present
 // is a cross-module duplicate — fail naming BOTH the redefining module and the first provider.
 user_symbol_seen = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     useen: Map<i64>,
     s: ProvidedSymbol,
     table: ModuleTable,
     id: String,
     inpath: StringView,
 ) Map<i64> {
-    key = s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
+    key = s.symbol_key_in(a.addr()).expect("compiler.resolve: allocation failed")
     kv = cstr(key.ptr)
     prev = useen.get(kv, 0 - 1)
     (prev >= 0).then({
         origin = a.gstr_string(24).gstr_append(a, table.modules[prev].id)
         a.fail_dup_user(inpath, id, s.symbol_name_in(a), origin)
     })
-    useen.put(a, kv, table.index_of_id(id)).expect("compiler.resolve: useen alloc")
+    useen.put(a.addr(), kv, table.index_of_id(id)).expect("compiler.resolve: useen alloc")
 }
 user_decls_from_symbols = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     useen: Map<i64>,
     symbols: [ProvidedSymbol],
     i: i64,
@@ -906,11 +900,11 @@ user_decls_from_symbols = (
     })
     cur
 }
-first_user_import_in* = (a: MutPtr<Malloc>, src: StringView) StringView {
+first_user_import_in* = (a: Allocator, src: StringView) StringView {
     hs = fui_scan(a.gstr_string(16), a, src, 0)
     hs.gstr_finish(a)
 }
-fui_scan = (out: String, a: MutPtr<Malloc>, src: StringView, p: i32) String {
+fui_scan = (out: String, a: Allocator, src: StringView, p: i32) String {
     cur ::= out
     pos ::= p
     done ::= false
@@ -953,7 +947,7 @@ fui_scan = (out: String, a: MutPtr<Malloc>, src: StringView, p: i32) String {
 res_ident_end* = (flat: StringView, p: i32) i32 {
     flat.at(p).is_alnum().then({ flat.res_ident_end(p + 1) }, { p })
 }
-append_to_nul* = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32) String {
+append_to_nul* = (out: String, a: Allocator, s: StringView, p: i32) String {
     cur ::= out
     bs: Slice<u8> = s.view()
     bs.loop_at((i, b) {
@@ -986,7 +980,7 @@ internal_source_path = (path: StringView) bool {
         || path.path_contains("src/compiler/")
 }
 main_symbol_names = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     set: String,
     symbols: [ProvidedSymbol],
     i: i64,
@@ -997,7 +991,7 @@ main_symbol_names = (
     symbols.loop_at((idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
-                key = sym.symbol_key_in(a).expect("compiler.resolve: allocation failed")
+                key = sym.symbol_key_in(a.addr()).expect("compiler.resolve: allocation failed")
                 inmain = sym.start >= bodystart && sym.start < bodyend
                 cur = (inmain && cur.seen_name(key).then({ false }, { true })).match ({
                     true  => a.madd_name(cur, key),
@@ -1017,9 +1011,9 @@ main_symbol_names = (
 // EXPORTS `nm` as a value, never a re-export pass-through), so dedup keeps that module's decl and
 // drops the colliding others. A name bound by name from two DIFFERENT modules is contested (value 0):
 // no precedence, dedup falls back to first-seen. Value encoding: target index + 1 (>=1); 0 = contested.
-import_claims = (a: MutPtr<Malloc>, table: ModuleTable) Map<i64> {
+import_claims = (a: Allocator, table: ModuleTable) Map<i64> {
     seed: i64 = 0 - 1
-    m ::= of(a, "", seed).expect("compiler.resolve: import-claim alloc")
+    m ::= of(a.addr(), "", seed).expect("compiler.resolve: import-claim alloc")
     table.modules.loop_at((i, mod) {
         mod.graph.imports.loop_at((j, e) {
             (e.namespace == false).then({
@@ -1036,7 +1030,7 @@ import_claims = (a: MutPtr<Malloc>, table: ModuleTable) Map<i64> {
 // against a re-export `{ X } = M` where M merely passes X through — the real decl lives elsewhere, so
 // claiming M would drop the genuine copy and leave the name undefined).
 import_claim_head_exported = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     p0: i32,
     table: ModuleTable,
@@ -1066,7 +1060,9 @@ import_claim_head_exported = (
                                 false => (prev == enc).then({ enc }, { 0 }),
                             })
                             (val == prev == false).then({
-                                m = m.put(a, nm, val).expect("compiler.resolve: import-claim alloc")
+                                m = m
+                                    .put(a.addr(), nm, val)
+                                    .expect("compiler.resolve: import-claim alloc")
                             })
                         })
                         pos = ie
@@ -1086,15 +1082,15 @@ claim_owner_midx = (off: i64) i64 {
     ri = regions.fregion_find(off)
     (ri < 0).then({ 0 - 1 }, { regions[ri].midx })
 }
-empty_claims = (a: MutPtr<Malloc>) Map<i64> {
+empty_claims = (a: Allocator) Map<i64> {
     seed: i64 = 0 - 1
-    of(a, "", seed).expect("compiler.resolve: import-claim alloc")
+    of(a.addr(), "", seed).expect("compiler.resolve: import-claim alloc")
 }
-dedup_decls* = (a: MutPtr<Malloc>, flat: StringView, bodystart: i64, bodyend: i64) StringView {
+dedup_decls* = (a: Allocator, flat: StringView, bodystart: i64, bodyend: i64) StringView {
     a.dedup_decls_mode(flat, bodystart, bodyend, false)
 }
 dedup_decls_mode = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     flat: StringView,
     bodystart: i64,
     bodyend: i64,
@@ -1106,7 +1102,7 @@ dedup_decls_mode = (
 // expensive whole-flat module_graph scan runs once, not twice. `claim` is the by-name-import
 // precedence map (empty for the raw-source callers that carry no module table / flat regions).
 dedup_decls_syms = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     flat: StringView,
     symbols: [ProvidedSymbol],
     bodystart: i64,
@@ -1122,7 +1118,7 @@ dedup_decls_syms = (
     hs.gstr_finish(a)
 }
 dedup_symbols = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     out: String,
     flat: StringView,
     symbols: [ProvidedSymbol],
@@ -1143,7 +1139,7 @@ dedup_symbols = (
     symbols.loop_at((idx, sym) {
         (idx < i == false).then({
             (sym.imported == false).then({
-                nm = sym.symbol_key_in(a).expect("compiler.resolve: allocation failed")
+                nm = sym.symbol_key_in(a.addr()).expect("compiler.resolve: allocation failed")
                 inmain = sym.start >= bodystart && sym.start < bodyend
                 shadow = allow_main_shadow
                     && inmain.then({ false }, { true })
@@ -1192,7 +1188,7 @@ dedup_symbols = (
 // per-name dedup above never touches it. Once TYPE names are canonicalized (value_decl_names_in keeps
 // them bare across import paths), the SAME module reached two ways — a namespace alias `x = M` plus a
 // by-name/other-alias load of M — emits its impls twice with the SAME canonical receiver, e.g. two
-// `Heap.impl(Allocator)` → duplicate `impl_Allocator_Heap_*` functions. A trait has at most one impl per
+// `Heap.impl(AllocatorBackend)` → duplicate `impl_AllocatorBackend_Heap_*` functions. A trait has at most one impl per
 // (canonical) type, so two blocks with the same `<receiver>.<trait>` key that are copies of ONE source
 // block are redundant: keep the first, drop the rest. Distinct impls (different receiver OR trait) get
 // distinct keys and all survive. But a same-key block that is NOT a copy — a genuinely different body
@@ -1206,7 +1202,7 @@ impl_lparen = (s: StringView, p: i32) i32 {
         false => (s.at(p) == '(').then({ p + 1 }, { s.impl_lparen(p + 1) }),
     })
 }
-impl_key_in = (a: MutPtr<Malloc>, s: StringView, p: i32) String {
+impl_key_in = (a: Allocator, s: StringView, p: i32) String {
     re = s.res_ident_end(p)    // receiver ident `Heap`
     ts = s.lstrip(s.impl_lparen(re))    // first arg of `.impl(` — the trait
     te = s.res_ident_end(ts)
@@ -1251,7 +1247,7 @@ impl_path_eq = (x: StringView, y: StringView) bool {
 // error[dup-impl]: two DIFFERENT `T.impl(Trait, { … })` bodies for one (receiver, trait) — "first
 // wins" would silently drop the later body, so reject loudly, naming both source modules.
 fail_dup_impl = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     flat: StringView,
     second: i64,
@@ -1296,11 +1292,11 @@ fail_dup_impl = (
     h0 = l2.gstr_append(a, "hint: a type has one impl per trait — merge the two bodies or delete one block")
     a.res_reject(h0)
 }
-dedup_impls = (a: MutPtr<Malloc>, table: ModuleTable, flat: StringView) StringView {
+dedup_impls = (a: Allocator, table: ModuleTable, flat: StringView) StringView {
     a.dedup_impls_into(a.gstr_string(4096), table, flat, 0, a.rset_new()).gstr_finish(a)
 }
 dedup_impls_into = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     out: String,
     table: ModuleTable,
     flat: StringView,
@@ -1343,7 +1339,7 @@ dedup_impls_into = (
                                 },
                                 false => {
                                     seen2 = seen2
-                                        .put(a, key, to_i64(sp.start))
+                                        .put(a.addr(), key, to_i64(sp.start))
                                         .expect("compiler.resolve: impl-seen alloc")
                                     false
                                 },
@@ -1384,7 +1380,7 @@ NsScan: {
     strip_all_quals: String,
     c: Closure,
 }
-ns_scan = (a: MutPtr<Malloc>, c: Closure) NsScan {
+ns_scan = (a: Allocator, c: Closure) NsScan {
     NsScan(
         quals: a.gstr_string(64),
         qnames: a.gstr_string(128),
@@ -1398,7 +1394,7 @@ ns_scan = (a: MutPtr<Malloc>, c: Closure) NsScan {
 // the checker can enumerate an alias's exports without a compiler.resolve import. Stamped at the
 // same point the module's body joins the flat (append order = flat decl order). A rebind of the SAME
 // module under the SAME alias appends no new body, so it stamps nothing (see module_sig_alias_stamped).
-note_module_sigs = (a: MutPtr<Malloc>, alias: String, graph: ModuleGraph, origin: i64) void {
+note_module_sigs = (a: Allocator, alias: String, graph: ModuleGraph, origin: i64) void {
     an = a.gstr_string(16).rappend_string(a, alias).gstr_finish(a)
     (module_sig_alias_stamped(an, origin) == false).then({
         graph.symbols.loop_at((i, sym) {
@@ -1407,7 +1403,7 @@ note_module_sigs = (a: MutPtr<Malloc>, alias: String, graph: ModuleGraph, origin
     })
 }
 alias_module_body = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     graph: ModuleGraph,
     alias: String,
@@ -1426,20 +1422,20 @@ alias_module_body = (
     note_alias_prefix(a.gstr_string(16).rappend_string(a, alias).gstr_finish(a))
     a.gstr_string(4096).rename_ns_names(a, body, names, alias)
 }
-line_name* = (out: String, a: MutPtr<Malloc>, names: String, i: i64) String {
+line_name* = (out: String, a: Allocator, names: String, i: i64) String {
     (i >= names.len || names.res_sbyte(i) == '\n').match ({
         true  => out,
         false => out.rpush(a, names.res_sbyte(i)).line_name(a, names, i + 1),
     })
 }
-add_qual_name = (set: String, a: MutPtr<Malloc>, alias: String, name: String) String {
+add_qual_name = (set: String, a: Allocator, alias: String, name: String) String {
     set
         .rappend_string(a, alias)
         .rpush(a, '.')
         .rappend_string(a, name)
         .rpush(a, '\n')
 }
-add_qual_names = (set: String, a: MutPtr<Malloc>, alias: String, names: String, i: i64) String {
+add_qual_names = (set: String, a: Allocator, alias: String, names: String, i: i64) String {
     (i >= names.len).match ({
         true  => set,
         false => {
@@ -1449,7 +1445,7 @@ add_qual_names = (set: String, a: MutPtr<Malloc>, alias: String, names: String, 
     })
 }
 load_ns_closure_graph_table = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     inpath: StringView,
     id: String,
@@ -1478,7 +1474,7 @@ load_ns_closure_graph_table = (
         useen: ns.c.useen,
     )
 }
-strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32, first: bool) String {
+strip_ns_lines_into = (out: String, a: Allocator, s: StringView, p: i32, first: bool) String {
     cur ::= out
     pos ::= p
     is_first ::= first
@@ -1518,7 +1514,7 @@ strip_ns_lines_into = (out: String, a: MutPtr<Malloc>, s: StringView, p: i32, fi
 }
 strip_ns_into* = (
     out: String,
-    a: MutPtr<Malloc>,
+    a: Allocator,
     s: StringView,
     p: i32,
     quals: String,
@@ -1541,7 +1537,7 @@ strip_ns_into* = (
     })
 }
 module_body = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     inpath: StringView,
     entry: ModuleEntry,
@@ -1552,11 +1548,11 @@ module_body = (
         .strip_ns_into(a, entry.source, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, true)
     hs.gstr_finish(a)
 }
-parsed_module_buf = (a: MutPtr<Malloc>, n: i64) [ParsedModule] {
+parsed_module_buf = (a: Allocator, n: i64) [ParsedModule] {
     slice(a.acquire_or_die(n * sizeof(ParsedModule)), n)
 }
 parse_module_entry = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     inpath: StringView,
     entry: ModuleEntry,
@@ -1572,7 +1568,7 @@ parse_module_entry = (
     )
 }
 parse_resolved_program = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     resolved: ResolvedProgram,
     inpath: StringView,
 ) ParsedProgram {
@@ -1587,7 +1583,7 @@ parse_resolved_program = (
     )
 }
 resolve_parsed_program* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     root: StringView,
     progdir: StringView,
     inpath: StringView,
@@ -1595,9 +1591,7 @@ resolve_parsed_program* = (
 ) ParsedProgram {
     a.parse_resolved_program(a.resolve_program_data(root, progdir, inpath, mainsrc), inpath)
 }
-parsed_decl_buf = (a: MutPtr<Malloc>, n: i64) [Decl] {
-    slice(a.acquire_or_die(n * sizeof(Decl)), n)
-}
+parsed_decl_buf = (a: Allocator, n: i64) [Decl] { slice(a.acquire_or_die(n * sizeof(Decl)), n) }
 append_decls_to = (dst: [Decl], at: i64, src: [Decl]) i64 {
     j ::= at
     src.loop_at((i, d) {
@@ -1606,22 +1600,22 @@ append_decls_to = (dst: [Decl], at: i64, src: [Decl]) i64 {
     })
     j
 }
-alias_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] {
+alias_edge_decls = (a: Allocator, p: ParsedProgram, edge: ImportEdge) [Decl] {
     entry = p.resolved.table.module(edge.module)
     ns = a.collect_ns_graph_table(p.resolved.table, p.module("").path, entry.source, entry.graph, a.ns_scan(a.empty_closure()))
     hs = a.alias_module_body(entry.source, entry.graph, edge.edge_alias_in(a), ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
     body = hs.gstr_finish(a)
     a.parse_module(body)
 }
-root_link_edge_decls = (a: MutPtr<Malloc>, p: ParsedProgram, edge: ImportEdge) [Decl] {
+root_link_edge_decls = (a: Allocator, p: ParsedProgram, edge: ImportEdge) [Decl] {
     edge.namespace.then({ a.alias_edge_decls(p, edge) }, { p.module(edge.module).decls })
 }
-module_link_count = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) i64 {
+module_link_count = (a: Allocator, p: ParsedProgram, m: ParsedModule) i64 {
     n ::= 0
     m.graph.imports.loop_at((i, edge) { n = n + a.root_link_edge_decls(p, edge).len })
     n
 }
-module_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) [Decl] {
+module_link_decls* = (a: Allocator, p: ParsedProgram, m: ParsedModule) [Decl] {
     buf = a.parsed_decl_buf(a.module_link_count(p, m))
     j ::= 0
     m.graph.imports.loop_at((i, edge) {
@@ -1629,17 +1623,15 @@ module_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram, m: ParsedModule) [Dec
     })
     slice(buf.ptr, j)
 }
-root_link_decls* = (a: MutPtr<Malloc>, p: ParsedProgram) [Decl] {
-    a.module_link_decls(p, p.module(""))
-}
-check_parsed_program* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
+root_link_decls* = (a: Allocator, p: ParsedProgram) [Decl] { a.module_link_decls(p, p.module("")) }
+check_parsed_program* = (a: Allocator, p: ParsedProgram) i32 {
     root = p.module("")
     a.check_linked(root.decls, a.root_link_decls(p))
 }
 // Graph-linked validation for EVERY module body: each ParsedModule is checked against the import
 // library built from its own ModuleGraph edges (not only the root). Positions stay in the module's
 // stripped body — the incremental step toward a full symbol-table/module-world resolver (GOALS #5).
-check_all_parsed_modules* = (a: MutPtr<Malloc>, p: ParsedProgram) i32 {
+check_all_parsed_modules* = (a: Allocator, p: ParsedProgram) i32 {
     acc ::= 0
     p.modules.loop_at((i, m) { acc = acc + a.check_linked(m.decls, a.module_link_decls(p, m)) })
     acc
@@ -1660,7 +1652,7 @@ UREGION_CAP = 512
 no_uregions = () [UserRegion] { slice(null_ptr(), 0) }
 uregion_buf ::= no_uregions()
 uregion_n ::= 0
-uregions_reset = (a: MutPtr<Malloc>) void {
+uregions_reset = (a: Allocator) void {
     uregion_buf = slice(a.acquire_or_die(UREGION_CAP * sizeof(UserRegion)), UREGION_CAP)
     uregion_n = 0
 }
@@ -1693,12 +1685,12 @@ lsrc_n ::= 0
 no_ldrops = () [i64] { slice(null_ptr(), 0) }
 ldrop_buf ::= no_ldrops()    // flattened (start, end) pairs, ascending, from ONE dedup pass
 ldrop_n ::= 0
-freg_alloc = (a: MutPtr<Malloc>, n: i64) [FlatRegion] {
+freg_alloc = (a: Allocator, n: i64) [FlatRegion] {
     slice(a.acquire_or_die(n * sizeof(FlatRegion)), n)
 }
-lsrc_alloc = (a: MutPtr<Malloc>, n: i64) [i32] { slice(a.acquire_or_die(n * sizeof(i32)), n) }
-ldrop_alloc = (a: MutPtr<Malloc>, n: i64) [i64] { slice(a.acquire_or_die(n * sizeof(i64)), n) }
-lmap_reset = (a: MutPtr<Malloc>) void {
+lsrc_alloc = (a: Allocator, n: i64) [i32] { slice(a.acquire_or_die(n * sizeof(i32)), n) }
+ldrop_alloc = (a: Allocator, n: i64) [i64] { slice(a.acquire_or_die(n * sizeof(i64)), n) }
+lmap_reset = (a: Allocator) void {
     freg_buf = a.freg_alloc(64)
     freg_n = 0
     lsrc_buf = a.lsrc_alloc(1024)
@@ -1711,21 +1703,21 @@ lmap_off = () void { lmap_on = false }
 lmap_lines = () i64 { lsrc_n }
 fregions_get = () [FlatRegion] { slice(freg_buf.ptr, freg_n) }
 lsrc_get = () [i32] { slice(lsrc_buf.ptr, lsrc_n) }
-freg_grow = (a: MutPtr<Malloc>) void {
+freg_grow = (a: Allocator) void {
     (freg_n >= freg_buf.len).then({
         grown ::= a.freg_alloc(freg_buf.len * 2)
         freg_buf.loop_at((i, r) { grown[i] = r })
         freg_buf = grown
     })
 }
-lsrc_grow = (a: MutPtr<Malloc>) void {
+lsrc_grow = (a: Allocator) void {
     (lsrc_n >= lsrc_buf.len).then({
         grown ::= a.lsrc_alloc(lsrc_buf.len * 2)
         lsrc_buf.loop_at((i, v) { grown[i] = v })
         lsrc_buf = grown
     })
 }
-ldrop_grow = (a: MutPtr<Malloc>) void {
+ldrop_grow = (a: Allocator) void {
     (ldrop_n + 1 >= ldrop_buf.len).then({
         grown ::= a.ldrop_alloc(ldrop_buf.len * 2)
         ldrop_buf.loop_at((i, v) { grown[i] = v })
@@ -1745,7 +1737,7 @@ count_nl = (s: StringView, lo: i32, hi: i32) i64 {
     })
     n
 }
-lmap_note_line = (a: MutPtr<Malloc>, srcline: i32) void {
+lmap_note_line = (a: Allocator, srcline: i32) void {
     lmap_on.then({
         a.lsrc_grow()
         lsrc_buf[lsrc_n] = srcline
@@ -1757,7 +1749,7 @@ lmap_note_line = (a: MutPtr<Malloc>, srcline: i32) void {
 freg_lo = (out: String, blo: i64) i64 {
     (out.len > blo && out.res_sbyte(blo) == '\n').then({ blo + 1 }, { blo })
 }
-note_fregion = (a: MutPtr<Malloc>, midx: i64, lo: i64, hi: i64, line_lo: i64) void {
+note_fregion = (a: Allocator, midx: i64, lo: i64, hi: i64, line_lo: i64) void {
     (lmap_on && hi > lo && midx >= 0).then({
         a.freg_grow()
         freg_buf[freg_n] = FlatRegion(
@@ -1799,7 +1791,7 @@ fregions_splice* = (slo: i64, shi: i64, newlen: i64) void {
         })
     })
 }
-note_ldrop = (a: MutPtr<Malloc>, ds: i64, de: i64) void {
+note_ldrop = (a: Allocator, ds: i64, de: i64) void {
     (lmap_on && de > ds).then({
         a.ldrop_grow()
         ldrop_buf[ldrop_n] = ds
@@ -1817,7 +1809,7 @@ ldrops_get = () [i64] { slice(ldrop_buf.ptr, ldrop_n) }
 // (B) shrink region byte spans by the dropped bytes before them; (C) rebase each region's line
 // window by the dead entries before/inside it; (D) compact the line array with a cursor over the
 // dead intervals (each is non-empty, so the cursor advances at most once per index and never lags).
-lmap_apply_drops = (a: MutPtr<Malloc>, flat: StringView) void {
+lmap_apply_drops = (a: Allocator, flat: StringView) void {
     (lmap_on && ldrop_n > 0).then({
         regs = fregions_get()
         drops = ldrops_get()
@@ -1947,11 +1939,11 @@ fregion_src_line* = (
     })
 }
 // name-decl offset of `nm` in a module's ORIGINAL source graph (for error line/col attribution).
-symbol_start_of* = (a: MutPtr<Malloc>, syms: [ProvidedSymbol], nm: StringView) i32 {
+symbol_start_of* = (a: Allocator, syms: [ProvidedSymbol], nm: StringView) i32 {
     posn ::= 0
     syms.loop_at((i, s) {
         ((s.imported || s.foreign || s.is_type) == false && posn == 0).then({
-            key = s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
+            key = s.symbol_key_in(a.addr()).expect("compiler.resolve: allocation failed")
             (cstr(key.ptr) == nm).then({
                 posn = s.start
             })
@@ -1989,7 +1981,7 @@ edge_head_has_name* = (src: StringView, p0: i32, nm: StringView) bool {
     found
 }
 mid_is_user* = (id: StringView) bool { id.at(0) == 'u' && id.at(1) == '/' }
-fail_import_redef = (a: MutPtr<Malloc>, m: ModuleEntry, s: ProvidedSymbol, nm: String) i32 {
+fail_import_redef = (a: Allocator, m: ModuleEntry, s: ProvidedSymbol, nm: String) i32 {
     line = m.source.res_line_of(s.start)
     col = m.source.res_col_of(s.start)
     m0 = a
@@ -2010,13 +2002,13 @@ fail_import_redef = (a: MutPtr<Malloc>, m: ModuleEntry, s: ProvidedSymbol, nm: S
         .gstr_append(a, "` from the import list, or rename the local definition")
     a.res_reject(h1)
 }
-check_import_redefs = (a: MutPtr<Malloc>, table: ModuleTable) i32 {
+check_import_redefs = (a: Allocator, table: ModuleTable) i32 {
     table.modules.loop_at((i, m) {
         (is_empty(m.id) || m.id.mid_is_user()).then({
             imported = a.imported_value_name_set(a.rset_new(), m.graph.symbols)
             m.graph.symbols.loop_at((j, s) {
                 ((s.imported || s.foreign || s.is_type) == false).then({
-                    key = s.symbol_key_in(a).expect("compiler.resolve: allocation failed")
+                    key = s.symbol_key_in(a.addr()).expect("compiler.resolve: allocation failed")
                     imported.rset_has(key).then({
                         a.fail_import_redef(m, s, key)
                     })
@@ -2074,7 +2066,7 @@ res_col_of* = (src: StringView, off: i32) i32 {
 }
 // Thin i32 width-adapter over compiler.astops' one decimal writer (gstr_int) — callers thread
 // non-negative line/col/index i32s, so the widened i64 renders its plain decimal digits.
-res_udec* = (out: String, a: MutPtr<Malloc>, n: i32) String { out.gstr_int(a, to_i64(n)) }
+res_udec* = (out: String, a: Allocator, n: i32) String { out.gstr_int(a, to_i64(n)) }
 // index just past the matching `>` of a `<...>` generic list starting at `p` (the `<`). Method decl
 // headers carry only flat lists (`<A>`, `<A, B>`), so a scan to the first `>` is exact.
 skip_to_gt = (s: StringView, p: i32) i32 {
@@ -2094,7 +2086,7 @@ is_fn_decl_after = (s: StringView, ie: i32) bool {
 // Newline-separated set of INDENTED fn-decl names in `src` that also appear in `topnames` (the
 // module's top-level value decls) — i.e. every type method whose name shadows a top-level fn. Empty
 // String if the module has no such split name (the common case; then no collision is possible).
-split_names = (a: MutPtr<Malloc>, src: StringView, topnames: String) String {
+split_names = (a: Allocator, src: StringView, topnames: String) String {
     out ::= a.gstr_string(64)
     pos ::= 0
     bs: Slice<u8> = src.view()
@@ -2125,7 +2117,7 @@ split_names = (a: MutPtr<Malloc>, src: StringView, topnames: String) String {
 }
 // The first `.<name>(` method-call in `src` whose `name` is one of `names` — i.e. a call that WOULD
 // misresolve once the aliased module's matching method has been prefixed away. Empty String if none.
-has_method_call_of = (a: MutPtr<Malloc>, src: StringView, names: String) String {
+has_method_call_of = (a: Allocator, src: StringView, names: String) String {
     out ::= a.gstr_string(16)
     pos ::= 0
     bs: Slice<u8> = src.view()
@@ -2162,7 +2154,7 @@ AliasCollision: {
 // Scan every module in the closure EXCEPT the aliased module itself for a `.<split>(` call: that is
 // the site that will misresolve to the swapped-arg top-level fn once the alias prefixes the method.
 find_split_call_site = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     modid: StringView,
     splits: String,
@@ -2187,14 +2179,14 @@ find_split_call_site = (
     })
     res
 }
-mappend_id_str_dotted* = (a: MutPtr<Malloc>, out: String, id: StringView) String {
+mappend_id_str_dotted* = (a: Allocator, out: String, id: StringView) String {
     cur ::= out
     bs: Slice<u8> = id.view()
     bs.loop_at((i, b) { cur = (b == '/').then({ cur.gstr_push(a, '.') }, { cur.gstr_push(a, b) }) })
     cur
 }
 fail_alias_collision = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     inpath: StringView,
     mainsrc: StringView,
     edge: ImportEdge,
@@ -2240,7 +2232,7 @@ fail_alias_collision = (
     a.res_reject(h1)
 }
 check_alias_collisions = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     graph: ModuleGraph,
     mainsrc: StringView,
@@ -2267,25 +2259,20 @@ check_alias_collisions = (
 // in the table are searched (the import closure — exactly the modules whose exports bleed through
 // the flat under an alias prefix, the collision-adjacent confusion this hint retires). Returns ""
 // when no module exports the name (the caller keeps the generic hint).
-mappend_mid_display* = (a: MutPtr<Malloc>, out: String, id: StringView) String {
+mappend_mid_display* = (a: Allocator, out: String, id: StringView) String {
     id.mid_is_user().match ({
         true  => a.mappend_id_str_dotted(out, cstr(offset(id, 2))),
         false => a.mappend_id_str_dotted(out, id),
     })
 }
-undefined_name_hint* = (
-    a: MutPtr<Malloc>,
-    table: ModuleTable,
-    flat: StringView,
-    off: i32,
-) StringView {
+undefined_name_hint* = (a: Allocator, table: ModuleTable, flat: StringView, off: i32) StringView {
     (off < 0).match ({    // sentinel offset ⇒ no ident to walk; guard BEFORE the read
         true  => "",
         false => undefined_name_hint_at(a, table, flat, off, flat.res_ident_end(off)),
     })
 }
 undefined_name_hint_at = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     flat: StringView,
     off: i32,
@@ -2328,7 +2315,7 @@ undefined_name_hint_at = (
 // Public loader entry: collect namespace binds, strip imports/binds from the main
 // source, load transitive imports, then dedup names across the flat program.
 resolve_program_data* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     root: StringView,
     progdir: StringView,
     inpath: StringView,

@@ -2,7 +2,7 @@
 // declaration reachable from the program's entry points, then reports what nothing reached. The
 // bootstrap tree-shaker (`bs_shake` in driver.zen) reuses this same reachability closure, which is
 // why the walk, the roots, and the finding types are all exported rather than private here.
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { view, is_empty, starts_with, ends_with } = std.text.str
 { is_alnum, is_alpha } = std.text.ascii    // ident-byte classes (the audit scanner's own copies were dups)
 { then } = std.core.bool
@@ -58,7 +58,7 @@ AudImplM: {
     full: StringView,
 }    // type-liveness fanout: impl'd type -> hoisted method (or trait) name
 AudCtx*: {
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     decls: [Decl],
     rdecls: [Decl],
     ridx: Map<i64>,
@@ -112,13 +112,13 @@ aud_decl_kind = (d: Decl) StringView {
         _              => "",
     })
 }
-aud_index* = (mp: MutPtr<Malloc>, ds: [Decl]) Map<i64> {
+aud_index* = (mp: Allocator, ds: [Decl]) Map<i64> {
     seedv: i64 = 0 - 1
-    m ::= of(mp, "", seedv).expect("audit: oom")
+    m ::= of(mp.addr(), "", seedv).expect("audit: oom")
     ds.loop_at((i, d) {
         nm = d.aud_decl_name()
         (is_empty(nm) == false).then({
-            m = m.put(mp, nm, i).expect("audit: oom")
+            m = m.put(mp.addr(), nm, i).expect("audit: oom")
         })
     })
     m
@@ -139,9 +139,10 @@ aud_tail_at* = (name: StringView) i64 {
 // mark `name` live and (once) walk both its raw and resolved decls; a live TYPE also keeps every
 // impl-block method on it (aud_implms).
 aud_ref* = (ac: MutPtr<AudCtx>, name: StringView) void {
+    mem = ac.mp
     ((is_empty(name) || ac.seen.has(name)) == false).then({
         one: i64 = 1
-        ac.seen = ac.seen.put(ac.mp, name, one).expect("audit: oom")
+        ac.seen = ac.seen.put(mem.addr(), name, one).expect("audit: oom")
         ri = ac.ridx.get(name, 0 - 1)
         (ri >= 0).then({
             d = ac.decls[ri]
@@ -158,9 +159,10 @@ aud_ref* = (ac: MutPtr<AudCtx>, name: StringView) void {
 }
 // a METHOD-position name: the free fn `m`, plus every hoisted impl method / alias tail for `m`.
 aud_mref* = (ac: MutPtr<AudCtx>, m: StringView) void {
+    mem = ac.mp
     ((is_empty(m) || ac.mseen.has(m)) == false).then({
         one: i64 = 1
-        ac.mseen = ac.mseen.put(ac.mp, m, one).expect("audit: oom")
+        ac.mseen = ac.mseen.put(mem.addr(), m, one).expect("audit: oom")
         ac.aud_ref(m)
         ac.pairs.loop_at((i, p) {
             (p.bare == m).then({
@@ -202,7 +204,7 @@ aud_walk_fn* = (ac: MutPtr<AudCtx>, f: Func) void {
 }
 aud_walk_sig* = (ac: MutPtr<AudCtx>, f: Func) void {
     f.params.loop_at((i, p) { ac.aud_walk_ty(p.ty) })
-    f.tparams.loop_at((i, p) { ac.aud_walk_ty(p.ty) })    // generic BOUNDS (`f<A: Allocator>`) reference the trait
+    f.tparams.loop_at((i, p) { ac.aud_walk_ty(p.ty) })    // generic BOUNDS (`f<A: AllocatorBackend>`) reference the trait
     ac.aud_walk_ty(f.ret)
 }
 aud_walk_fields = (ac: MutPtr<AudCtx>, fs: [Field]) void {
@@ -342,7 +344,7 @@ aud_walk_expr = (ac: MutPtr<AudCtx>, e: Ptr<Expr>) void {
         _               => { },
     })
 }
-aud_join2 = (mp: MutPtr<Malloc>, a: StringView, b: StringView) StringView {
+aud_join2 = (mp: Allocator, a: StringView, b: StringView) StringView {
     mp
         .gstr_string(32)
         .gstr_append(mp, a)
@@ -355,7 +357,7 @@ aud_join2 = (mp: MutPtr<Malloc>, a: StringView, b: StringView) StringView {
 //   pairs  — (bare method/tail name -> hoisted decl name): every DImpl method, every trait-default
 //            materialization target per conforming impl, every `alias__name`-shaped decl tail.
 //   implms — (impl'd type -> hoisted method name / trait name): the type-liveness fanout.
-aud_td_idxs* = (mp: MutPtr<Malloc>, decls: [Decl]) [i64] {
+aud_td_idxs* = (mp: Allocator, decls: [Decl]) [i64] {
     n ::= 0
     decls.loop_at((i, d) {
         d.match ({
@@ -425,7 +427,7 @@ AudTables*: {
     pairs: [AudPair],
     implms: [AudImplM],
 }
-aud_tables* = (mp: MutPtr<Malloc>, decls: [Decl]) AudTables {
+aud_tables* = (mp: Allocator, decls: [Decl]) AudTables {
     tds = mp.aud_td_idxs(decls)
     pairs ::= cbuf<AudPair>(mp, decls.aud_pair_count(tds))
     implms ::= cbuf<AudImplM>(mp, decls.aud_implm_count(tds))
@@ -556,7 +558,7 @@ aud_tm_push_fields = (tms: [AudTM], k: i64, tr: StringView, fs: [Field]) i64 {
     })
     j
 }
-aud_tms = (mp: MutPtr<Malloc>, decls: [Decl]) [AudTM] {
+aud_tms = (mp: Allocator, decls: [Decl]) [AudTM] {
     tms ::= cbuf<AudTM>(mp, decls.aud_tm_count())
     k ::= 0
     decls.loop_at((i, d) {
@@ -589,7 +591,7 @@ aud_tms = (mp: MutPtr<Malloc>, decls: [Decl]) [AudTM] {
     tms
 }
 // the trait-method subset credited to imported name `name` (empty when `name` is not a trait).
-aud_tm_for = (mp: MutPtr<Malloc>, tms: [AudTM], name: StringView) [AudTM] {
+aud_tm_for = (mp: Allocator, tms: [AudTM], name: StringView) [AudTM] {
     n ::= 0
     tms.loop_at((i, t) {
         (t.tr == name).then({
@@ -661,7 +663,7 @@ aud_reportable = (d: Decl) bool {
         && nm.starts_with("impl_") == false
         && nm.starts_with("__") == false
 }
-aud_dead_msg = (mp: MutPtr<Malloc>, kind: StringView, nm: StringView) StringView {
+aud_dead_msg = (mp: Allocator, kind: StringView, nm: StringView) StringView {
     mp
         .gstr_string(64)
         .gstr_append(mp, "warning[dead-code]: ")
@@ -763,7 +765,7 @@ aud_step = (ents: [AudImp], nents: i64, v: [u8], i0: i64) i64 {
     })
     i0 + 1
 }
-aud_imp_msg = (mp: MutPtr<Malloc>, en: AudImp) StringView {
+aud_imp_msg = (mp: Allocator, en: AudImp) StringView {
     en.alias.match ({
         true  => mp
             .gstr_string(64)
@@ -784,13 +786,7 @@ aud_imp_msg = (mp: MutPtr<Malloc>, en: AudImp) StringView {
 // scan ONE module file: every `{ a, b } = mod` name and every `m = mod` alias that never occurs in
 // the module's own source outside the import statement itself (a trait name's methods count — see
 // AudTM). Appends findings; returns the count.
-aud_mod_imports = (
-    mp: MutPtr<Malloc>,
-    m: ModuleEntry,
-    tms: [AudTM],
-    fb: [AudFinding],
-    n0: i32,
-) i32 {
+aud_mod_imports = (mp: Allocator, m: ModuleEntry, tms: [AudTM], fb: [AudFinding], n0: i32) i32 {
     set_faithful_lexeme(true)    // report and match source identifiers, not C-keyword `_zk` spellings
     ds = mp.parse_module(m.source)
     set_faithful_lexeme(false)
@@ -874,7 +870,7 @@ aud_mod_imports = (
 // entry also reaches std.sys.root — genc emits the trampoline call); impl blocks on builtin
 // receivers (no type decl to anchor liveness on); when the entry has no `main` (a library), every
 // entry-module decl is a root instead.
-aud_analyze = (mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl], rdecls: [Decl]) AudCtx {
+aud_analyze = (mp: Allocator, rp: ResolvedProgram, raw: [Decl], rdecls: [Decl]) AudCtx {
     seedv: i64 = 0 - 1
     t = mp.aud_tables(raw)
     c = AudCtx(
@@ -883,8 +879,8 @@ aud_analyze = (mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl], rdecls: [De
         rdecls: rdecls,
         ridx: mp.aud_index(raw),
         xidx: mp.aud_index(rdecls),
-        seen: of(mp, "", seedv).expect("audit: oom"),
-        mseen: of(mp, "", seedv).expect("audit: oom"),
+        seen: of(mp.addr(), "", seedv).expect("audit: oom"),
+        mseen: of(mp.addr(), "", seedv).expect("audit: oom"),
         pairs: t.pairs,
         implms: t.implms,
     )
@@ -929,16 +925,16 @@ aud_analyze = (mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl], rdecls: [De
 // A module bound BOTH bare and under a namespace alias is appended twice (once as `f`, once as
 // `alias__f`) — both copies come from the SAME source line, so if EITHER copy is live the line
 // is live and neither may be reported. The suppression set: bare `__`-tails of the live names.
-aud_live_tails = (mp: MutPtr<Malloc>, c: AudCtx) Map<i64> {
+aud_live_tails = (mp: Allocator, c: AudCtx) Map<i64> {
     seedv: i64 = 0 - 1
-    tails ::= of(mp, "", seedv).expect("audit: oom")
+    tails ::= of(mp.addr(), "", seedv).expect("audit: oom")
     c.seen
         .keys()
         .loop_at((i, k) {
             ta = k.aud_tail_at()
             (ta > 0).then({
                 one: i64 = 1
-                tails = tails.put(mp, cstr(offset(k, ta)), one).expect("audit: oom")
+                tails = tails.put(mp.addr(), cstr(offset(k, ta)), one).expect("audit: oom")
             })
         })
     tails
@@ -955,7 +951,7 @@ aud_unreached = (c: AudCtx, tails: Map<i64>, nm: StringView) bool {
 // Fingerprint every function over the AST (compiler.clones) and report any two that canonicalise to
 // the same tree. This is a hash bucket, not a comparison of every pair: O(n) over the program, so it
 // can run on every audit rather than as an occasional sweep.
-aud_clone_msg = (mp: MutPtr<Malloc>, nm: StringView, other: StringView) StringView {
+aud_clone_msg = (mp: Allocator, nm: StringView, other: StringView) StringView {
     mp
         .gstr_string(96)
         .gstr_append(mp, "warning[clone]: fn '")
@@ -967,7 +963,7 @@ aud_clone_msg = (mp: MutPtr<Malloc>, nm: StringView, other: StringView) StringVi
 }
 // hash -> the name that claimed it first. A second claimant is the finding.
 // hex of the fingerprint, because Map is string-keyed. 16 nibbles, no allocation beyond the key.
-aud_hash_key = (mp: MutPtr<Malloc>, h: i64) StringView {
+aud_hash_key = (mp: Allocator, h: i64) StringView {
     s ::= mp.gstr_string(17)
     16.times((i) { s = s.gstr_push(mp, aud_hexd(h >> 60 - i * 4 & 15)) })
     s.gstr_finish(mp)
@@ -975,7 +971,7 @@ aud_hash_key = (mp: MutPtr<Malloc>, h: i64) StringView {
 aud_hexd = (v: i64) u8 { load(offset("0123456789abcdef", v)) }
 // hash -> index of the function that claimed it first. A second claimant is the finding.
 aud_clones = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     rp: ResolvedProgram,
     raw: [Decl],
     path: StringView,
@@ -984,7 +980,7 @@ aud_clones = (
     n0: i32,
 ) i32 {
     seedv: i64 = 0 - 1
-    seen ::= of(mp, "", seedv).expect("audit: oom")
+    seen ::= of(mp.addr(), "", seedv).expect("audit: oom")
     names ::= cbuf<StringView>(mp, raw.len + 8)
     n ::= n0
     k :: i64 = 0
@@ -1008,7 +1004,7 @@ aud_clones = (
                     }),
                     false => (fp == 0 == false).then({
                         names[k] = f.name
-                        seen = seen.put(mp, key, k).expect("audit: oom")
+                        seen = seen.put(mp.addr(), key, k).expect("audit: oom")
                         k = k + 1
                     }),
                 })
@@ -1019,7 +1015,7 @@ aud_clones = (
     n
 }
 aud_run* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     rp: ResolvedProgram,
     raw: [Decl],
     rdecls: [Decl],
@@ -1052,7 +1048,7 @@ aud_run* = (
 // sort, dedupe on (path, line, msg), print, summarize; returns the `--strict` exit code. The same
 // finding can be collected more than once (a module reached under several ids/regions), so equal
 // (path, line, msg) rows — adjacent after aud_sort — are emitted ONCE and counted once.
-aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
+aud_emit = (mp: Allocator, fb: [AudFinding], n: i64, strict: bool) i32 {
     fb.aud_sort(n)
     dead ::= 0
     clones ::= 0
@@ -1112,7 +1108,7 @@ aud_emit = (mp: MutPtr<Malloc>, fb: [AudFinding], n: i64, strict: bool) i32 {
 // trees are excluded from the sweep — fixture corpora are test INPUTS (often deliberately broken),
 // not workspace programs.
 AudWsFiles: {
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     fs: [StringView],
     n: i64,
 }
@@ -1125,7 +1121,7 @@ aud_ws_addf = (wf: MutPtr<AudWsFiles>, p: StringView) void {
     wf.fs[wf.n] = p
     wf.n = wf.n + 1
 }
-aud_join_path = (mp: MutPtr<Malloc>, dir: StringView, nm: StringView) StringView {
+aud_join_path = (mp: Allocator, dir: StringView, nm: StringView) StringView {
     mp
         .gstr_string(64)
         .gstr_append(mp, dir)
@@ -1147,7 +1143,7 @@ aud_sortp = (fs: [StringView], n: i64) void {
 // `struct dirent`: the NUL-terminated entry name (d_name) at +19 on this ABI (matches std.sys.fs).
 AUD_DNAME = 19
 // recursively collect the `*.zen` files under `dir` (skipping dot-entries and `fixtures/` corpora).
-aud_walk_tree = (mp: MutPtr<Malloc>, dir: StringView, wf: MutPtr<AudWsFiles>) void {
+aud_walk_tree = (mp: Allocator, dir: StringView, wf: MutPtr<AudWsFiles>) void {
     d = opendir(dir)
     (d == null_ptr() == false).then({
         repeat_while((n) {
@@ -1204,7 +1200,7 @@ aud_has_main = (src: StringView) bool {
 // embedded programs) folds the module id into `mods` so the caller can root that module's decls.
 aud_embed_lit = (
     ac: MutPtr<AudCtx>,
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     mods: Map<i64>,
     v: [u8],
     a: i64,
@@ -1257,7 +1253,7 @@ aud_embed_lit = (
                 })
                 (atbol && dotted && v[is].is_alpha()).then({
                     one: i64 = 1
-                    m = m.put(mp, mp.cstr_range(v, s0, q), one).expect("audit: oom")
+                    m = m.put(mp.addr(), mp.cstr_range(v, s0, q), one).expect("audit: oom")
                 })
             })
         })
@@ -1265,7 +1261,7 @@ aud_embed_lit = (
     m
 }
 // scan one module source for string literals, folding their import-shaped fragments into roots.
-aud_embed_src = (ac: MutPtr<AudCtx>, mp: MutPtr<Malloc>, mods: Map<i64>, src: StringView) Map<i64> {
+aud_embed_src = (ac: MutPtr<AudCtx>, mp: Allocator, mods: Map<i64>, src: StringView) Map<i64> {
     v: Slice<u8> = src.view()
     m ::= mods
     n = v.len
@@ -1316,9 +1312,9 @@ aud_id_matches = (id: StringView, dotted: StringView) bool {
 // the --workspace embedded-source heuristic (#595): harness files BUILD test programs as string
 // literals whose import lines the plain fixpoint cannot see. Root them: brace-form names aud_ref
 // directly; alias-form module ids root every decl the module owns (per its flat regions).
-aud_embed_roots = (ac: MutPtr<AudCtx>, mp: MutPtr<Malloc>, rp: ResolvedProgram, raw: [Decl]) void {
+aud_embed_roots = (ac: MutPtr<AudCtx>, mp: Allocator, rp: ResolvedProgram, raw: [Decl]) void {
     seedv: i64 = 0 - 1
-    mods ::= of(mp, "", seedv).expect("audit: oom")
+    mods ::= of(mp.addr(), "", seedv).expect("audit: oom")
     rp.table.modules.loop_at((i, m) { mods = ac.aud_embed_src(mp, mods, m.source) })
     // per-module rooted flags: some embedded dotted id names this module.
     rooted ::= cbuf<i64>(mp, rp.table.modules.len)
@@ -1349,7 +1345,7 @@ AudWsF: {
     f: AudFinding,
 }
 AudWs: {
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     live: Map<i64>,
     idx: Map<i64>,
     mods: Map<i64>,
@@ -1360,7 +1356,7 @@ AudWs: {
     entries: i64,
     skipped: i64,
 }
-aud_ws_key = (mp: MutPtr<Malloc>, path: StringView, line: i64, msg: StringView) StringView {
+aud_ws_key = (mp: Allocator, path: StringView, line: i64, msg: StringView) StringView {
     mp
         .gstr_string(96)
         .gstr_append(mp, path)
@@ -1399,7 +1395,7 @@ AudPre: {
     ok: bool,
 }
 aud_pre_one = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     root: StringView,
     progdir: StringView,
     id: StringView,
@@ -1413,7 +1409,7 @@ aud_pre_one = (
                 seen: st.seen.add_name(mp, idn),
                 ok: st.ok,
             )
-            contents_in(mp, mp.cache_module_path(root, progdir, id)).match ({
+            contents_in(mp.addr(), mp.cache_module_path(root, progdir, id)).match ({
                 .Ok(msrc) => mp.aud_pre_edges(root, progdir, mp.edges_of(msrc), next),
                 .Err(e)   => AudPre(
                     seen: next.seen,
@@ -1424,7 +1420,7 @@ aud_pre_one = (
     })
 }
 aud_pre_edges = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     root: StringView,
     progdir: StringView,
     edges: [ImportEdge],
@@ -1434,7 +1430,7 @@ aud_pre_edges = (
     edges.loop_at((i, e) { cur = mp.aud_pre_one(root, progdir, e.module, cur) })
     cur
 }
-aud_pre_ok = (mp: MutPtr<Malloc>, root: StringView, path: StringView, src: StringView) bool {
+aud_pre_ok = (mp: Allocator, root: StringView, path: StringView, src: StringView) bool {
     st = mp.aud_pre_edges(root, mp.dirname(path), mp.edges_of(src), AudPre(
         seen: mp.gstr_string(64),
         ok: true,
@@ -1444,7 +1440,7 @@ aud_pre_ok = (mp: MutPtr<Malloc>, root: StringView, path: StringView, src: Strin
 // analyze ONE workspace entry: fixpoint + embedded roots, then fold every reportable decl into the
 // cross-entry union (live-anywhere wins) and scan each not-yet-seen module file's imports.
 aud_ws_entry = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     root: StringView,
     path: StringView,
     src: StringView,
@@ -1471,7 +1467,7 @@ aud_ws_entry = (
                             key = mp.aud_ws_key(dl.path, to_i64(dl.sp.line), msg)
                             c.aud_unreached(tails, nm).match ({
                                 true  => (ws.idx.has(key) == false).then({
-                                    ws.idx = ws.idx.put(mp, key, one).expect("audit: oom")
+                                    ws.idx = ws.idx.put(mp.addr(), key, one).expect("audit: oom")
                                     ws.aud_ws_push(key, AudFinding(
                                         path: dl.path,
                                         line: to_i64(dl.sp.line),
@@ -1480,7 +1476,7 @@ aud_ws_entry = (
                                     ))
                                 }),
                                 false => {
-                                    ws.live = ws.live.put(mp, key, one).expect("audit: oom")
+                                    ws.live = ws.live.put(mp.addr(), key, one).expect("audit: oom")
                                 },
                             })
                         })
@@ -1488,7 +1484,7 @@ aud_ws_entry = (
                     tms = mp.aud_tms(raw)
                     rp.table.modules.loop_at((i, m) {
                         (ws.mods.has(m.path) == false).then({
-                            ws.mods = ws.mods.put(mp, m.path, one).expect("audit: oom")
+                            ws.mods = ws.mods.put(mp.addr(), m.path, one).expect("audit: oom")
                             scratch = cbuf<AudFinding>(mp, 4096)
                             k = mp.aud_mod_imports(m, tms, scratch, 0)
                             k.times((j) { ws.aud_ws_pushi(scratch[j]) })
@@ -1505,7 +1501,7 @@ aud_ws_entry = (
         },
     })
 }
-audit_ws_cmd = (mp: MutPtr<Malloc>, root: StringView, dir: StringView, strict: bool) i32 {
+audit_ws_cmd = (mp: Allocator, root: StringView, dir: StringView, strict: bool) i32 {
     seedv: i64 = 0 - 1
     wfc = AudWsFiles(
         mp: mp,
@@ -1517,9 +1513,9 @@ audit_ws_cmd = (mp: MutPtr<Malloc>, root: StringView, dir: StringView, strict: b
     wfc.fs.aud_sortp(wfc.n)
     wsc = AudWs(
         mp: mp,
-        live: of(mp, "", seedv).expect("audit: oom"),
-        idx: of(mp, "", seedv).expect("audit: oom"),
-        mods: of(mp, "", seedv).expect("audit: oom"),
+        live: of(mp.addr(), "", seedv).expect("audit: oom"),
+        idx: of(mp.addr(), "", seedv).expect("audit: oom"),
+        mods: of(mp.addr(), "", seedv).expect("audit: oom"),
         dfs: cbuf<AudWsF>(mp, 256),
         nd: 0,
         ifs: cbuf<AudFinding>(mp, 64),
@@ -1530,7 +1526,7 @@ audit_ws_cmd = (mp: MutPtr<Malloc>, root: StringView, dir: StringView, strict: b
     ws ::= wsc.addr()
     wfc.n.times((k) {
         p = wfc.fs[k]
-        contents_in(mp, p).match ({
+        contents_in(mp.addr(), p).match ({
             .Ok(s)  => s.aud_has_main().then({
                 mp.aud_pre_ok(root, p, s).match ({
                     true  => mp.aud_ws_entry(root, p, s, ws),
@@ -1569,13 +1565,7 @@ audit_ws_cmd = (mp: MutPtr<Malloc>, root: StringView, dir: StringView, strict: b
 // `zenc audit <file.zen> [--strict]` — check first (a broken program cannot be audited), then run
 // the dead-code + unused-import analysis. Exit 0 always (advisory); `--strict` exits 1 on findings.
 // `zenc audit --workspace <dir> [--strict]` unions dead-code across every entry under <dir>.
-audit_cmd* = (
-    mp: MutPtr<Malloc>,
-    root: StringView,
-    a2: StringView,
-    a3: StringView,
-    a4: StringView,
-) i32 {
+audit_cmd* = (mp: Allocator, root: StringView, a2: StringView, a3: StringView, a4: StringView) i32 {
     (a2 == "--workspace").then({
         (a3 == "").then({
             eprint("usage: zenc audit --workspace <dir> [--strict]\n")
@@ -1589,7 +1579,7 @@ audit_cmd* = (
         eprint("usage: zenc audit <file.zen> [--strict]\n")
         return 2
     })
-    contents_in(mp, path).match ({
+    contents_in(mp.addr(), path).match ({
         .Ok(src) => {
             rp = mp.resolve_prog_or_exit(root, path, src)
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({

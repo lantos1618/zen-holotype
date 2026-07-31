@@ -76,10 +76,10 @@ main = (sys: Sys) i32 { ... }    // capability entry (std.sys)
 For the capability entry, the compiler renames the user body to `zen_user_main`
 and emits a niladic `zen_main` trampoline that calls it with `std.sys.root()`, so
 the C boundary (`zenrt.c`) is byte-identical to the niladic case. `Sys`
-(`std.sys`) bundles narrow capabilities — `heap()` (the process `Allocator`),
+(`std.sys`) bundles narrow capabilities — `heap()` (the process `Heap` backend),
 `stdout()`/`stderr()` (`Writer`s), `env()`, `clock()`, `fs()` — and the intended
 style is attenuation: a function takes the narrowest capability it needs (a
-`Writer`, an `Allocator`), never the whole `Sys`. `Writer.write` returns
+`Writer`, an allocator backend), never the whole `Sys`. `Writer.write` returns
 `Result<i64, IoError>`; `write_or_panic` is the fatal script sink. Ambient `println` remains
 best-effort during migration (`docs/sys-phase2-print-writer.md`).
 
@@ -743,7 +743,7 @@ ParsedProgram*: { resolved: ResolvedProgram, modules: [ParsedModule], flat_decls
 
 `import_edges(a, src)` scans destructuring imports and namespace binds into
 source-order edges such as `std/text/fmt` or `u/helper`, preserving the source
-byte span for each edge. It only needs the `Allocator` trait, so callers can
+byte span for each edge. It only needs the `AllocatorBackend` trait, so callers can
 back the edge slice and each edge's normalized `module`/`alias` strings with
 heap, arena, or a custom allocator. `try_import_edges(a, src)` returns
 `Result<[ImportEdge], IoError>` and reports allocation failure for the edge
@@ -751,7 +751,7 @@ slice, module strings, or alias strings. The checked loader uses these edges to
 load destructuring dependencies and namespace-bound modules.
 `provided_symbols_in(scratch, alloc, src)` scans a module into source-order
 provided names, including import re-export heads and declarations. Parser
-boundary checks still need `scratch: Ptr<Malloc>`, but the returned symbol slice
+temporaries use the supplied scratch allocator, while the returned symbol slice
 and normalized `name` strings are backed by the caller allocator, so callers can
 use a heap, arena, or custom allocator for the data they keep. The compatibility
 `provided_symbols(scratch, src)` wrapper uses the scratch allocator for both.
@@ -917,12 +917,10 @@ ownership types:
 
 - raw intrinsics: `@addr`, `@load`, `@store`, `offset`, `slice`, `cstr`,
   `sizeof`, `load_i64`, `store_i64`, `atomic_add_i64`, `null_ptr`;
-- `std.mem.alloc`: `Allocator`, `Heap`, `Malloc`, namespace-bound
-  `default`, `try_acquire`, `try_resize`;
-- `std.mem.arena`: `Arena`, namespace-bound `make_in` — *not* `new_in`, because Zen's
-  namespace is flat and `new_in` is already taken by `std.text.string`; the two modules
-  reach one program whenever a String builder sits beside anything that pulls the arena
-  in transitively;
+- `std.mem.alloc`: passable `Allocator`, `AllocatorVTable`, static `AllocatorBackend`, `Heap`, `RequestArena`,
+  `allocator_of`, `heap_allocator`, and `request_arena(backing: Allocator)`;
+- `std.mem.arena`: fixed-capacity `Arena` and `make_in`; the distinct constructor name avoids
+  colliding with `std.text.string.new_in` in Zen.s flat namespace;
 - `std.core.slice`: allocator-first `alloc_buf`, `dup`, `node`, `concat`, their `_in`
   aliases, and fallible `try_*` variants for allocator-backed slice storage;
 - `std.mem.own`: `Own<T>` plus `Drop`, with `new_in`;
@@ -935,8 +933,8 @@ ownership types:
 Allocator-threaded std APIs make allocation visible in signatures. Examples:
 `vec.of(a, [1, 2])`, `v.push(a, x)`, `vec.try_of(a, [1, 2])`, `v.try_push(a, x)`,
 `maps.of(a, "k", 1)`, `m.try_put(a, "k", 2)`, `maps.try_of(a, "k", 1)`,
-`a.try_map_in([1, 2], (x) { x + 1 })`, `arena.new_in(a, 1024)`,
-`slice.dup(a, [1, 2])`, `a.try_dup_in([1, 2])`, `own.new_in(a, value)`, `rc.try_new_in(a, value)`,
+`a.try_map_in([1, 2], (x) { x + 1 })`, `arena.make_in(a, 1024)`,
+`slice.dup(a, [1, 2])`, `a.try_dup_in([1, 2])`, `own.new_in(a, value)`, `rc.new_in(a, value)`,
 `actor.cell(a, 16)`, and `cell.reply(a)` — the actor constructors return `Result`
 directly; there is no separate `try_*` doubling.
 

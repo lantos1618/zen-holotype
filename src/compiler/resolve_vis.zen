@@ -5,7 +5,7 @@
 // live in compiler.resolve.
 { at, block_comment_at, is_alpha, is_alnum, line_comment_at, rawstr_at } = std.text.ascii
 { gstr_string, gstr_append, gstr_finish } = compiler.genc
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { String } = std.text.string
 { is_empty, view } = std.text.str
 { render_diagnostic } = compiler.diagnostic
@@ -29,7 +29,7 @@
 // every violation, never exit) — the migration mode used to prove the tree clean before enforcing.
 vis_report_mode* = () bool { is_empty(getEnv("ZEN_VIS_REPORT")).then({ false }, { true }) }
 vis_fail = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     path: StringView,
     src: StringView,
     pos: i32,
@@ -61,7 +61,7 @@ vis_fail = (
 }
 // flat import head `{ a, b } = mod` at line start `p`: every name must be exported by `mod`.
 vis_check_head = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     path: StringView,
     src: StringView,
     p: i32,
@@ -172,7 +172,7 @@ vis_span_eq_at = (s: StringView, p: i32, e: i32, w: String, j: i64) bool {
 // Comment/string spans are skipped; the ident-boundary + dot shape mirrors rewrite_quals exactly,
 // so anything the rewriter WOULD have resolved is what gets visibility-checked.
 vis_scan_quals = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     path: StringView,
     src: StringView,
     alias: String,
@@ -234,7 +234,7 @@ vis_scan_quals = (
     0
 }
 vis_enforce_edge = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     table: ModuleTable,
     path: StringView,
     src: StringView,
@@ -256,7 +256,7 @@ vis_enforce_edge = (
         false => 0,
     })
 }
-enforce_visibility* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 {
+enforce_visibility* = (a: Allocator, table: ModuleTable, report: bool) i32 {
     table.modules.loop_at((i, entry) {
         entry.graph.imports.loop_at((j, edge) {
             a.vis_enforce_edge(table, entry.path, entry.source, edge, report)
@@ -290,7 +290,7 @@ sig_private_type = (s: ModuleSig, name: StringView) bool {
     })
 }
 leak_fail = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     path: StringView,
     src: StringView,
     pos: i32,
@@ -330,7 +330,7 @@ leak_fail = (
 // opening depth or any dedent below it closes it, and the params' closing `)` back at depth 0
 // opens the return-type region, which runs to the body `{`.
 leak_scan_decl = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     path: StringView,
     src: StringView,
     sym: ProvidedSymbol,
@@ -428,7 +428,7 @@ leak_scan_decl = (
     })
     0
 }
-enforce_private_leaks* = (a: MutPtr<Malloc>, table: ModuleTable, report: bool) i32 {
+enforce_private_leaks* = (a: Allocator, table: ModuleTable, report: bool) i32 {
     table.modules.loop_at((i, entry) {
         (i > 0).then({
             entry.graph.symbols.loop_at((j, sym) {

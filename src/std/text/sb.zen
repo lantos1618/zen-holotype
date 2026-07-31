@@ -6,7 +6,7 @@
 // failure flag, every op is a NO-OP once a failure has been recorded, and `done` settles the
 // whole chain as ONE Result — `.Ok(str)` or the first allocation failure:
 //
-//   m = Malloc(_: 0)
+//   m = std.mem.alloc.request_arena(std.mem.alloc.heap_allocator())
 //   a = m.addr()
 //   a.sb().s("os ").s(name).ch('(').s(abi).ch(')').done()    // Result<str, IoError>
 //
@@ -27,7 +27,7 @@
 // implemented by self-call segfaults there (verified), while this fill stays flat.
 { String, init, push_in, append_in, finish_in, free_in } = std.text.string
 { integer_in } = std.text.num
-{ Allocator, try_resize } = std.mem.alloc
+{ AllocatorBackend } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { view } = std.text.str
 { loop_at } = std.core.count
@@ -127,7 +127,7 @@ Sb*<A>: {
 // closure holding both modules (the harness does) would collide on the flat namespace.
 SB_ENOMEM = 12
 // start a builder on `a`; an initial-allocation failure is recorded as the sticky flag.
-sb*<A: Allocator> = (a: MutPtr<A>) Sb<A> {
+sb*<A: AllocatorBackend> = (a: MutPtr<A>) Sb<A> {
     a.init(16).match ({
         .Ok(g)  => Sb<A>(
             a: a,
@@ -146,7 +146,7 @@ sb*<A: Allocator> = (a: MutPtr<A>) Sb<A> {
     })
 }
 // grow `s` so `need + 1` more bytes fit (the +1 keeps done's NUL in-place, string.zen's invariant).
-sb_grow = (a: Allocator, s: String, need: i64) Result<String, IoError> {
+sb_grow = (a: AllocatorBackend, s: String, need: i64) Result<String, IoError> {
     s = s
     (s.len + need + 1 > s.cap).match ({
         true  => {

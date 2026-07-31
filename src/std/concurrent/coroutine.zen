@@ -1,7 +1,7 @@
 //! link: c
 // @self-hosted-only: stackful coroutines over glibc x86-64 ucontext.
 // Public code should checkpoint through Runtime.checkpoint; this module is substrate.
-{ Allocator, try_acquire } = std.mem.alloc
+{ AllocatorBackend } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { is_null } = std.core.ptr
 getcontext = (ctx: RawPtr<u8>) i32
@@ -45,7 +45,7 @@ init_context = (ctx: RawPtr<u8>, stack: RawPtr<u8>, link: RawPtr<u8>) void {
     ctx.offset(UC_LINK_OFF).store_i64(link)
 }
 spawn_cleanup = (
-    alloc: Allocator,
+    alloc: AllocatorBackend,
     stack: RawPtr<u8>,
     ctx: RawPtr<u8>,
     lnk: RawPtr<u8>,
@@ -81,7 +81,7 @@ finish_spawn = (
     ok(Coro(state: state))
 }
 spawn_with_link = (
-    alloc: Allocator,
+    alloc: AllocatorBackend,
     work: () void,
     stack: RawPtr<u8>,
     ctx: RawPtr<u8>,
@@ -93,7 +93,7 @@ spawn_with_link = (
     })
 }
 spawn_with_ctx = (
-    alloc: Allocator,
+    alloc: AllocatorBackend,
     work: () void,
     stack: RawPtr<u8>,
     ctx: RawPtr<u8>,
@@ -103,20 +103,24 @@ spawn_with_ctx = (
         .Err(e)  => alloc.spawn_cleanup(stack, ctx, null_ptr(), e),
     })
 }
-spawn_with_stack = (alloc: Allocator, work: () void, stack: RawPtr<u8>) Result<Coro, IoError> {
+spawn_with_stack = (
+    alloc: AllocatorBackend,
+    work: () void,
+    stack: RawPtr<u8>,
+) Result<Coro, IoError> {
     alloc.try_acquire(UC_CTX_SIZE).match ({
         .Ok(ctx) => alloc.spawn_with_ctx(work, stack, ctx),
         .Err(e)  => alloc.spawn_cleanup(stack, null_ptr(), null_ptr(), e),
     })
 }
-spawn_in* = (alloc: Allocator, work: () void) Result<Coro, IoError> {
+spawn_in* = (alloc: AllocatorBackend, work: () void) Result<Coro, IoError> {
     alloc.try_acquire(CORO_STACK).match ({
         .Ok(stack) => alloc.spawn_with_stack(work, stack),
         .Err(e)    => err(e),
     })
 }
-spawn* = (alloc: Allocator, work: () void) Result<Coro, IoError> { alloc.spawn_in(work) }
-destroy_in = (alloc: Allocator, c: Coro) void {
+spawn* = (alloc: AllocatorBackend, work: () void) Result<Coro, IoError> { alloc.spawn_in(work) }
+destroy_in = (alloc: AllocatorBackend, c: Coro) void {
     state = c.coro_state()
     cur_state = state[0]
     alloc.release(cur_state.stack)
@@ -124,7 +128,7 @@ destroy_in = (alloc: Allocator, c: Coro) void {
     alloc.release(cur_state.link)
     alloc.release(c.state)
 }
-destroy* = (alloc: Allocator, c: Coro) void { alloc.destroy_in(c) }
+destroy* = (alloc: AllocatorBackend, c: Coro) void { alloc.destroy_in(c) }
 checkpoint_current* = () void {
     (is_null(coro_cur) == false).then({
         coro_flag = 1

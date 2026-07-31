@@ -1,7 +1,6 @@
-// Rt stores the same DynAlloc value that allocator-carrying String/Vec expect. Narrowing through
-// `allocator()` must preserve the custom vtable and release both frozen owners through it.
+// `Rt.allocator()` must preserve the custom allocator used by stored String and Vec values.
 { mem_rt } = std.rt
-{ malloc, realloc, free } = std.mem.alloc
+{ malloc, realloc, free, Allocator, AllocatorVTable, allocator_of } = std.mem.alloc
 { StringConst, string } = std.text.string
 { Vec, VecConst, vec } = std.collections.vec
 { expect } = std.core.result
@@ -12,8 +11,16 @@ count_release = (state: RawPtr<u8>, p: RawPtr<u8>) void {
     releases = releases + 1
     free(p)
 }
+count_vtable ::= AllocatorVTable(
+    vt_alloc: count_acquire,
+    vt_remap: count_resize,
+    vt_free: count_release,
+)
+count_allocator = (state: RawPtr<u8>) Allocator {
+    allocator_of(state, count_vtable.addr().offset(0))
+}
 main = () i32 {
-    runtime = mem_rt(count_acquire, count_resize, count_release, null_ptr())
+    runtime = mem_rt(count_allocator(null_ptr()))
     a = runtime.allocator()
     text: StringConst = a
         .string(2)

@@ -6,16 +6,17 @@
   sexpr, sidxset_at, sif, slett_at, slett_atm, slit, sret, strlit_at, subst_ty_in, swhile, tvoid,
   ty_cname_in, vref_at } = compiler.genc
 { mangle_str_in } = compiler.mangle
-{ DeclIndex, VList, add_fnt_param, add_lambda_arg, add_subst_arg, add_subst_param, bind_fnret,
-  callee_subst_name, blockify, cat_stmts, fnret_of, gen_variant_payload, inline_lambda, is_void_ty,
-  enum_name, let_value_lambda, local_name_at, no_stmts, param_index, pbuf, recall, ref_pos, vcons } = compiler.check
+{ DeclIndex, VList, cebuf, cenode, add_fnt_param, add_lambda_arg, add_subst_arg, add_subst_param,
+  bind_fnret, callee_subst_name, blockify, cat_stmts, fnret_of, gen_variant_payload, inline_lambda,
+  is_void_ty, enum_name, let_value_lambda, local_name_at, no_stmts, param_index, pbuf, recall,
+  ref_pos, vcons } = compiler.check
 { light_ty } = compiler.check_infer
 { cs_or, maybe_template } = compiler.check_inline
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { map_slice, one_stmt } = compiler.astops
 { loop_at } = std.core.count
 subst_var = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     params: [Param],
     args: [Expr],
     name: StringView,
@@ -28,7 +29,7 @@ subst_var = (
 // the substitution target is a bare Var, carry the ORIGINAL reference's source position onto a fresh
 // node (so a later diagnostic — e.g. a non-exhaustive match on a local subject — still gets a caret);
 // a non-Var arg keeps its own node (and its own positions) unchanged.
-subst_keep_pos = (a: MutPtr<Malloc>, arg: Ptr<Expr>, p: i32) Ptr<Expr> {
+subst_keep_pos = (a: Allocator, arg: Ptr<Expr>, p: i32) Ptr<Expr> {
     load(arg).match ({
         .Var(v) => a.cenode(vref_at(v.name, (v.pos <= 0).then({ p }, { v.pos }))),
         _       => arg,
@@ -36,7 +37,7 @@ subst_keep_pos = (a: MutPtr<Malloc>, arg: Ptr<Expr>, p: i32) Ptr<Expr> {
 }
 // the source position of a substituted REFERENCE (always a Var at the xform `.Var` call site).
 xform_args = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     args: [Expr],
@@ -49,7 +50,7 @@ xform_args = (
     buf
 }
 xform_arm_payload = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     subj: Ty,
@@ -64,7 +65,7 @@ xform_arm_payload = (
     })
 }
 xform_arm_env* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     subj: Ty,
@@ -79,7 +80,7 @@ xform_arm_env* = (
     out
 }
 xform_arms = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     subj: Ty,
@@ -106,27 +107,21 @@ xform_arms = (
     })
     buf
 }
-subst_targs = (a: MutPtr<Malloc>, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
+subst_targs = (a: Allocator, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
     map_slice(a, xs, (t) { a.subst_ty_in(tparams, targs, t) })
 }
-subst_genlit_g = (
-    a: MutPtr<Malloc>,
-    cs: i32,
-    tparams: [Param],
-    targs: [Ty],
-    m: MakeStructData,
-) Expr {
+subst_genlit_g = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
     nt = a.subst_targs(tparams, targs, m.targs)
     mkstructg_at(m.ty, a.mangle_str_in(m.ty, nt), nt, a.subst_inits(cs, tparams, targs, m.inits), cs_or(cs, m.pos))
 }
-subst_genlit = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
+subst_genlit = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
     (m.targs.len > 0).match ({
         true  => a.subst_genlit_g(cs, tparams, targs, m),
         false => mkstruct_at(m.ty, a.subst_inits(cs, tparams, targs, m.inits), cs_or(cs, m.pos)),
     })
 }
 subst_inits = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     cs: i32,
     tparams: [Param],
     targs: [Ty],
@@ -134,21 +129,15 @@ subst_inits = (
 ) [FieldInit] {
     map_slice(a, inits, (fi) { finit(fi.name, a.subst_expr(cs, tparams, targs, fi.value)) })
 }
-subst_exprs = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], xs: [Expr]) [Expr] {
+subst_exprs = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], xs: [Expr]) [Expr] {
     buf ::= a.cebuf(xs.len)
     xs.loop_at((i, x) { buf[i] = load(a.subst_expr(cs, tparams, targs, x.addr())) })
     buf
 }
-subst_arms = (
-    a: MutPtr<Malloc>,
-    cs: i32,
-    tparams: [Param],
-    targs: [Ty],
-    arms: [ArmData],
-) [ArmData] {
+subst_arms = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] {
     map_slice(a, arms, (ar) { arm(ar.variant, ar.bind, a.subst_expr(cs, tparams, targs, ar.body)) })
 }
-subst_match = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], m: MatchData) Ptr<Expr> {
+subst_match = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], m: MatchData) Ptr<Expr> {
     subj = a.subst_expr(cs, tparams, targs, m.subj)
     arms = a.subst_arms(cs, tparams, targs, m.arms)
     m.ptr.match ({
@@ -158,7 +147,7 @@ subst_match = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], m: Mat
 }
 // Substitute and remangle generic-enum ctors/tags inside template bodies.
 subst_mkenum = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     tparams: [Param],
     targs: [Ty],
     ety: StringView,
@@ -172,7 +161,7 @@ subst_mkenum = (
     })
 }
 subst_mkenum_g = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     tparams: [Param],
     targs: [Ty],
     ety: StringView,
@@ -184,7 +173,7 @@ subst_mkenum_g = (
     mkenumg(ety, a.mangle_str_in(ety, nt), nt, variant, p)
 }
 subst_tag = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     tparams: [Param],
     targs: [Ty],
     ety: StringView,
@@ -197,7 +186,7 @@ subst_tag = (
     })
 }
 subst_tag_g = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     tparams: [Param],
     targs: [Ty],
     ety: StringView,
@@ -210,7 +199,7 @@ subst_tag_g = (
 // `sizeof(T)` uses the tparam name as a value; rewrite it to the concrete C type name. A non-tparam
 // Var is rebuilt (not passed through) so its position also retargets to the call site under `cs`.
 subst_tparam_var = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     cs: i32,
     tparams: [Param],
     targs: [Ty],
@@ -226,11 +215,11 @@ subst_tparam_var = (
 // A lambda body is ORDINARY code of the enclosing generic: its param/return/local annotations name
 // the enclosing tparams, so an instance must substitute through it. Passing the node through left
 // `MutPtr<T>` in the substituted copy, which then lifted to a top-level fn naming an undeclared `T`.
-subst_lam = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], lm: LambdaData) Expr {
+subst_lam = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], lm: LambdaData) Expr {
     ps = map_slice(a, lm.params, (p) { param(p.name, a.subst_ty_in(tparams, targs, p.ty)) })
     lam_r(ps, a.subst_body(cs, tparams, targs, lm.body), a.subst_ty_in(tparams, targs, lm.ret))
 }
-subst_expr = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
+subst_expr = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Var(v)        => a.subst_tparam_var(cs, tparams, targs, v, e),
         .Bin(b)        => a.cenode(bin_at(b.op, a.subst_expr(cs, tparams, targs, b.lhs), a.subst_expr(cs, tparams, targs, b.rhs), cs_or(cs, b.pos))),
@@ -249,7 +238,7 @@ subst_expr = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], e: Ptr<
         _              => e,
     })
 }
-subst_stmt = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
+subst_stmt = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
     st.match ({
         .Let(l)      => slett_atm(l.name, a.subst_ty_in(tparams, targs, l.ty), a.subst_expr(cs, tparams, targs, l.value), cs_or(cs, l.pos), l.mut),
         .Assign(x)   => sassign_at(a.subst_expr(cs, tparams, targs, x.target), a.subst_expr(cs, tparams, targs, x.value), cs_or(cs, x.pos)),
@@ -260,7 +249,7 @@ subst_stmt = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], st: Stm
         .IndexSet(x) => sidxset_at(a.subst_expr(cs, tparams, targs, x.seq), a.subst_expr(cs, tparams, targs, x.idx), a.subst_ty_in(tparams, targs, x.elem), a.subst_expr(cs, tparams, targs, x.value), cs_or(cs, x.pos)),
     })
 }
-subst_body* = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] {
+subst_body* = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] {
     map_slice(a, body, (st) { a.subst_stmt(cs, tparams, targs, st) })
 }
 // ── struct reflection intrinsics: field_eq / each_field / zip_fields ──────────────────────────────
@@ -274,14 +263,14 @@ subst_body* = (a: MutPtr<Malloc>, cs: i32, tparams: [Param], targs: [Ty], body: 
 // so genc/js emit them with NO backend change.
 // the per-field view a reflection intrinsic iterates: Named structs from the decl index, GENERIC
 // struct instances from the generic decl with tparams substituted per the instance's targs.
-reflect_fields* = (a: MutPtr<Malloc>, decls: [Decl], idx: DeclIndex, t: Ty) [Field] {
+reflect_fields* = (a: Allocator, decls: [Decl], idx: DeclIndex, t: Ty) [Field] {
     t.match ({
         .Named(n)   => idx.idx_struct_fields(decls, n),
         .Generic(g) => a.rf_subst_fields(idx.idx_genstruct(decls, g.name), g.args),
         _           => idx.idx_struct_fields(decls, ""),
     })
 }
-rf_subst_fields = (a: MutPtr<Malloc>, gs: GenStructDecl, targs: [Ty]) [Field] {
+rf_subst_fields = (a: Allocator, gs: GenStructDecl, targs: [Ty]) [Field] {
     buf ::= cbuf<Field>(a, gs.fields.len)
     gs.fields.loop_at((i, f) {
         buf[i] = Field(
@@ -292,9 +281,9 @@ rf_subst_fields = (a: MutPtr<Malloc>, gs: GenStructDecl, targs: [Ty]) [Field] {
     })
     buf
 }
-fe_true = (a: MutPtr<Malloc>, pos: i32) Ptr<Expr> { a.cenode(vref_at("true", pos)) }
+fe_true = (a: Allocator, pos: i32) Ptr<Expr> { a.cenode(vref_at("true", pos)) }
 fe_field_cmp = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     rx: Ptr<Expr>,
@@ -309,7 +298,7 @@ fe_field_cmp = (
     })
 }    // struct-typed field: recursive per-field fold on the nested struct
 fe_fold = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     rx: Ptr<Expr>,
@@ -325,7 +314,7 @@ fe_fold = (
     })
 }
 expand_field_eq = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     flds: [Field],
@@ -342,13 +331,13 @@ expand_field_eq = (
 // `x.zip_fields(y, f)` is the paired form: f("f0", x.f0, y.f0); …  Both are void: the expansion is a
 // Block of ExprStmts (ordinary nodes — NO backend change). Sibling copies land in sibling C scopes,
 // so the per-copy renamed locals never collide.
-ef_args = (a: MutPtr<Malloc>, name: StringView, vx: Expr, pos: i32) [Expr] {
+ef_args = (a: Allocator, name: StringView, vx: Expr, pos: i32) [Expr] {
     buf ::= a.cebuf(2)
     buf[0] = strlit_at(name, pos)
     buf[1] = vx
     buf
 }
-ef_args_zip = (a: MutPtr<Malloc>, name: StringView, vx: Expr, vy: Expr, pos: i32) [Expr] {
+ef_args_zip = (a: Allocator, name: StringView, vx: Expr, vy: Expr, pos: i32) [Expr] {
     buf ::= a.cebuf(3)
     buf[0] = strlit_at(name, pos)
     buf[1] = vx
@@ -356,7 +345,7 @@ ef_args_zip = (a: MutPtr<Malloc>, name: StringView, vx: Expr, vy: Expr, pos: i32
     buf
 }
 expand_each_field = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     flds: [Field],
@@ -372,7 +361,7 @@ expand_each_field = (
     a.cenode(block(buf))
 }
 expand_zip_fields = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     flds: [Field],
@@ -397,7 +386,7 @@ refl_needs_bind = (e: Expr) bool {
     })
 }
 refl_dispatch = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     fn: StringView,
@@ -419,7 +408,7 @@ refl_dispatch = (
 // concrete types, and a genuinely ill-formed call gets its positioned diagnostic from validation
 // (kv_reflect_kind: receiver class, subject-type match, lambda shape, arity).
 refl_hook = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     c: CallData,
@@ -497,7 +486,7 @@ reflect_variants* = (idx: DeclIndex, decls: [Decl], t: Ty) [VariantDef] {
     })
 }
 expand_variant_name = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     vs: [VariantDef],
     subj: Ptr<Expr>,
     ename: StringView,
@@ -511,7 +500,7 @@ expand_variant_name = (
 // template body re-reaches this hook at the call-site splice with the concrete type, and an
 // ill-formed receiver gets its positioned diagnostic from validation (kv_variant_name_kind).
 vn_hook = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     c: CallData,
@@ -530,7 +519,7 @@ vn_hook = (
 }
 // Empty Named marks a generic template currently being inlined.
 xform_call = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     c: CallData,
@@ -558,7 +547,7 @@ xform_call = (
 // an indirect call through a renamed local (a fn-value let): the substituted arg is the
 // renamed local's Var, so recall through its renamed C name (not the stale original).
 xform_match = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     m: MatchData,
@@ -577,7 +566,7 @@ xform_match = (
     out
 }
 xform_inits = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     inits: [FieldInit],
@@ -590,7 +579,7 @@ xform_inits = (
     })
 }
 xform_lambda = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     lm: LambdaData,
@@ -616,7 +605,7 @@ xform_lambda = (
     a.cenode(lam_r(nps, a.xform_body(decls, idx, lm.body, ps, xs, a.bind_fnret(env, lm.ret), tvoid()), lm.ret))
 }
 xform_expr = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     e: Ptr<Expr>,
@@ -625,7 +614,7 @@ xform_expr = (
     env: Ptr<VList>,
 ) Ptr<Expr> { a.xform_expr_exp(decls, idx, e, params, fargs, env, tvoid()) }
 xform_expr_exp = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     e: Ptr<Expr>,
@@ -690,7 +679,7 @@ xform_expr_exp = (
     out
 }
 xform_stmt = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     st: Stmt,
@@ -737,7 +726,7 @@ xform_stmt = (
 }
 // Thread local light types so generic call args can infer from Vars.
 xform_let_ext = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Ptr<VList>,
     st: Stmt,
     decls: [Decl],
@@ -757,7 +746,7 @@ xform_let_ext = (
     })
     out
 }
-xform_param_shadow = (a: MutPtr<Malloc>, params: [Param], st: Stmt) [Param] {
+xform_param_shadow = (a: Allocator, params: [Param], st: Stmt) [Param] {
     out ::= params
     st.match ({
         .Let(l) => {
@@ -771,7 +760,7 @@ xform_param_shadow = (a: MutPtr<Malloc>, params: [Param], st: Stmt) [Param] {
     out
 }
 xform_arg_shadow = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     args: [Expr],
@@ -792,7 +781,7 @@ xform_arg_shadow = (
     out
 }
 xform_body* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     body: [Stmt],

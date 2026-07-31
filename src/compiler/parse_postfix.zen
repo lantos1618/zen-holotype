@@ -6,7 +6,7 @@
 { chain_tmp_name, dotted_name_in, mangle_str_in } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
 { at, is_upper } = std.text.ascii
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { bopen_enter, bopen_exit, delim_enter, delim_exit, is_langle, is_lbrace, is_lbracket, is_rparen,
   parse_tyargs, pdepth_enter, pdepth_exit, pdepth_over, stmt_level, tok_eq, vbreak_note } = compiler.parse_type
 { materialize, parse_block } = compiler.parse_stmt
@@ -157,13 +157,13 @@ is_variant_break = (src: StringView, pos: i32) bool {
 // parse a full expression INSIDE an open delimiter (call/ctor/index/slice/struct-lit element,
 // paren group, match-arm value): a new statement cannot begin there, so the newline+`.Uppercase`
 // variant break is suppressed for the sub-parse (see is_variant_break / parse_type.delim_depth).
-parse_or_nested* = (a: MutPtr<Malloc>, src: StringView, pos: i32) PExpr {
+parse_or_nested* = (a: Allocator, src: StringView, pos: i32) PExpr {
     delim_enter()
     r = a.parse_or(src, pos)
     delim_exit()
     r
 }
-parse_postfix* = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
+parse_postfix* = (a: Allocator, src: StringView, base: PExpr) PExpr {
     // DEPTH CAP (see parse_type.zen): a postfix chain `.f.f.f…` / `f(f(f(…)))` recurses through
     // parse_postfix per suffix WITHOUT re-entering the guarded parse_atom, so it needs its own bound.
     // Past the cap, stop consuming suffixes and return `base` (perr already set) — the frames unwind.
@@ -172,7 +172,7 @@ parse_postfix* = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
     pdepth_exit()
     r
 }
-parse_postfix_chain = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
+parse_postfix_chain = (a: Allocator, src: StringView, base: PExpr) PExpr {
     src.is_match_at(base.next).match ({
         true  => a.parse_match(src, base),
         false => src.is_then_at(base.next).match ({
@@ -198,7 +198,7 @@ parse_postfix_chain = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
 // `({ __chaintmp_N = base  __chaintmp_N(args) })`: binding the callee to a LOCAL reuses the supported
 // closure-local-call path (compiler.check.clos_local_call_name rewrites `__chaintmp_N(args)` to the
 // generated `__clos_K_call(__chaintmp_N, args)`). The block's trailing call is its value.
-parse_chained_call = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
+parse_chained_call = (a: Allocator, src: StringView, base: PExpr) PExpr {
     lp = src.scan(base.next)
     at = lp.tok.start
     buf = a.arg_buf()
@@ -213,7 +213,7 @@ parse_chained_call = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
     ))
 }
 // Foreach over recv; compiler.check fills the element type.
-parse_loop = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
+parse_loop = (a: Allocator, src: StringView, base: PExpr) PExpr {
     dot = src.scan(base.next)
     kw = src.scan(dot.next)
     lp = src.scan(kw.next)
@@ -237,7 +237,7 @@ parse_loop = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
         next: rp.next,
     ))
 }
-parse_index = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
+parse_index = (a: Allocator, src: StringView, base: PExpr) PExpr {
     lb = src.scan(base.next)
     ie = a.parse_or_nested(src, lb.next)
     rb = src.scan(ie.next)
@@ -265,7 +265,7 @@ is_qual_struct_lit = (src: StringView, base: PExpr, name: StringView, fld: Scan)
         && src.paren_is_struct(nx.next)
 }
 parse_qual_struct_lit = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     base: PExpr,
     name: StringView,
@@ -322,7 +322,7 @@ is_qual_generic_ctor = (src: StringView, base: PExpr, name: StringView, fld: Sca
     })
 }
 parse_qual_generic_struct_lit = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     base: PExpr,
     name: StringView,
@@ -340,7 +340,7 @@ parse_qual_generic_struct_lit = (
     )
 }
 parse_qual_generic_ctor = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     base: PExpr,
     name: StringView,
@@ -354,7 +354,7 @@ parse_qual_generic_ctor = (
     vn = a.lexeme(src, vs.tok)
     a.finish_generic_ctor(src, qn, a.mangle_str_in(qn, ta.args), ta.args, vn, vs)
 }
-parse_field = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
+parse_field = (a: Allocator, src: StringView, base: PExpr) PExpr {
     dot = src.scan(base.next)
     fld = src.scan(dot.next)
     name = a.lexeme(src, fld.tok)
@@ -376,7 +376,7 @@ parse_field = (a: MutPtr<Malloc>, src: StringView, base: PExpr) PExpr {
 // as the `.field` — a NEWLINE before it makes `base.field` a plain member access and the `(` a new
 // statement (`nd = 10 + ed.w` ⏎ `(nd < 100).match(…)`), not `ed.w(nd < 100)`.
 parse_field_plain = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     base: PExpr,
     name: StringView,
@@ -395,7 +395,7 @@ parse_field_plain = (
 // payload `(` must sit on the same line as the variant — a NEWLINE before it makes `Type.Variant` a
 // nullary tag and the `(` a new statement (`a = State.Idle` ⏎ `(a).q()`), not `State.Idle(a)`.
 parse_qual_ctor = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     tyname: StringView,
     vn: StringView,
@@ -417,7 +417,7 @@ parse_qual_ctor = (
     })
 }
 parse_qual_payload = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     tyname: StringView,
     vn: StringView,
@@ -433,7 +433,7 @@ parse_qual_payload = (
 // args here are the METHOD args only (recv is carried separately); compiler.check.desugar_method_calls
 // lowers it back to the flat `Call(fn: method, args: [recv] ++ args, pos: at)` the old parser produced.
 parse_method = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     src: StringView,
     base: PExpr,
     name: StringView,

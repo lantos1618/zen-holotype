@@ -44,7 +44,7 @@
 { out, contents_in, shell } = std.io.file
 { getEnv } = std.sys.os
 { is_empty, starts_with, try_parse_int } = std.text.str
-{ Malloc, malloc, free } = std.mem.alloc
+{ Allocator, heap_allocator, malloc, free } = std.mem.alloc
 { getpid } = std.c.libc
 // dispatch ONE category by name (child mode). Unknown names FAIL loudly — a typo in the parent's
 // suite list must never become a silently-green suite.
@@ -158,7 +158,7 @@ hp_inner = () i64 {
 // code, so it round-trips through a file — same convention as harness_lib's rc<gid> markers).
 // ZO_NWORKERS bounds the child's INNER case fan-out so pool×inner stays ≈ nproc-ish.
 hp_suite_cmd = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     self: StringView,
     name: StringView,
     inner: StringView,
@@ -184,7 +184,7 @@ hp_list_has = (hay: [StringLiteral], needle: StringLiteral) bool {
 // silently vanish), and one in `order` but not `sched` would be tallied though never run. This asserts
 // set-equality (same length AND mutual membership), names the offending suite, and returns the count
 // of discrepancies (0 == the two lists agree).
-hp_assert_sched_order = (mp: MutPtr<Malloc>, sched: [StringLiteral], order: [StringLiteral]) i32 {
+hp_assert_sched_order = (mp: Allocator, sched: [StringLiteral], order: [StringLiteral]) i32 {
     bad ::= 0
     sched.loop((h, i, s) {
         (hp_list_has(order, s) == false).then({
@@ -215,8 +215,7 @@ hp_assert_sched_order = (mp: MutPtr<Malloc>, sched: [StringLiteral], order: [Str
 // FULL run, parallel at the suite level: fan the categories out as child processes through a bounded
 // pool, then print each suite's captured block in the ORIGINAL serial order and count failed suites.
 hp_run_parallel = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     // SCHEDULING order — longest poles first so the pool never idles into a tail (measured on the
     // 16-core dev box: build ~32s, modules ~30s, misc ~15s, fmt_roundtrip/fixpoint ~12s, rest ≤3s).
     sched = ["build", "modules", "misc", "fmt_roundtrip", "fixpoint", "stdsurface", "value", "argparse", "verdict", "datetime", "boundaries", "fuzz", "lsp", "sort", "rand", "iter", "math"]
@@ -256,7 +255,7 @@ hp_run_parallel = () i32 {
     free(base)
     fails ::= 0
     order.loop((h, i, s) {
-        mp.contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".out"])).match ({
+        mp.addr().contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".out"])).match ({
             .Ok(txt) => out(txt),
             .Err(e)  => {
                 out("suite '")
@@ -264,7 +263,7 @@ hp_run_parallel = () i32 {
                 out("': no captured output (child crashed before writing?)\n")
             },
         })
-        ok = mp.contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".rc"])).match ({
+        ok = mp.addr().contents_in(mp.zo_join([mp.zo_dir(), "/s_", s, ".rc"])).match ({
             .Ok(t)  => t.starts_with("0"),
             .Err(e) => false,
         })    // missing exit marker = the child never finished — a failure, never a silent pass

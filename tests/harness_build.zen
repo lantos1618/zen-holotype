@@ -18,7 +18,7 @@
 //   check_out true => also assert stdout equals want_out; false => assert exit code only.
 //
 // For `zenc check` accept/reject fixtures we reuse harness_lib.run_verdict on the fixture SOURCE.
-{ Malloc, malloc, free } = std.mem.alloc
+{ Allocator, heap_allocator, malloc, free } = std.mem.alloc
 { out, contents_in, shell } = std.io.file
 { len, contains, starts_with } = std.text.str
 { VerdictCase, run_verdicts, DiagCase, run_diags, zo_par_run, zo_idpath, zo_join } = harness_lib
@@ -57,7 +57,7 @@ ShellCase*: {
 // PHASE A command: only the heavy `zenc build` (cc). Parallel-safe — a compile spawns no app threads.
 // The program is NOT run here: many build fixtures are CONCURRENCY/pool acceptance programs that spawn
 // their OWN pthreads, so running 16 at once oversubscribes threads and fails nondeterministically.
-fix_build_cmd = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) StringView {
+fix_build_cmd = (mp: Allocator, gid: i64, fc: FixtureCase) StringView {
     z: StringView = ""
     zob = mp.zo_idpath("zob", gid, "")
     brc = mp.zo_idpath("zobbrc", gid, ".txt")
@@ -65,8 +65,8 @@ fix_build_cmd = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) StringView {
 }
 // PHASE B (SERIAL, one fixture at a time): the build must have succeeded, then RUN the binary now (serially
 // — no thread oversubscription) and assert exit == want_exit (+ optional stdout).
-fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
-    built = mp.contents_in(mp.zo_idpath("zobbrc", gid, ".txt")).match ({
+fix_run_ok = (mp: Allocator, gid: i64, fc: FixtureCase) bool {
+    built = mp.addr().contents_in(mp.zo_idpath("zobbrc", gid, ".txt")).match ({
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
@@ -78,7 +78,7 @@ fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
             rc = shell(mp.zo_join([z, zob, " > ", o, " 2>/dev/null; test \"$?\" -eq ", fc.want_exit])).expect("harness: shell")
             (rc == 0).match ({
                 true  => fc.check_out.match ({
-                    true  => mp.contents_in(mp.zo_idpath("zobout", gid, ".txt")).match ({
+                    true  => mp.addr().contents_in(mp.zo_idpath("zobout", gid, ".txt")).match ({
                         .Ok(got) => got == fc.want_out,
                         .Err(e)  => false,
                     }),
@@ -95,8 +95,7 @@ fix_run_ok = (mp: MutPtr<Malloc>, gid: i64, fc: FixtureCase) bool {
 run_fixtures* = (name: StringView, cs: [FixtureCase]) i32 {
     out(name)
     out("\n")
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
     cmds :: [StringView] = base.slice(n)
@@ -133,19 +132,19 @@ all_present_absent = (txt: StringView, present: [StringView], absent: [StringVie
     })
     ok
 }
-emit_cmd = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) StringView {
+emit_cmd = (mp: Allocator, gid: i64, ec: EmitCase) StringView {
     z: StringView = ""
     c = mp.zo_idpath("zoeemit", gid, ".c")
     rc = mp.zo_idpath("zoeemitrc", gid, ".txt")
     mp.zo_join([z, "if ./zen emit ", ec.path, " > ", c, " 2>/dev/null; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
-emit_ok = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) bool {
-    passed = mp.contents_in(mp.zo_idpath("zoeemitrc", gid, ".txt")).match ({
+emit_ok = (mp: Allocator, gid: i64, ec: EmitCase) bool {
+    passed = mp.addr().contents_in(mp.zo_idpath("zoeemitrc", gid, ".txt")).match ({
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
     passed.match ({
-        true  => mp.contents_in(mp.zo_idpath("zoeemit", gid, ".c")).match ({
+        true  => mp.addr().contents_in(mp.zo_idpath("zoeemit", gid, ".c")).match ({
             .Ok(txt) => all_present_absent(txt, ec.present, ec.absent),
             .Err(e)  => false,
         }),
@@ -155,8 +154,7 @@ emit_ok = (mp: MutPtr<Malloc>, gid: i64, ec: EmitCase) bool {
 run_emits* = (name: StringView, cs: [EmitCase]) i32 {
     out(name)
     out("\n")
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
     cmds :: [StringView] = base.slice(n)
@@ -178,19 +176,19 @@ run_emits* = (name: StringView, cs: [EmitCase]) i32 {
     free(base)
     fails
 }
-doc_cmd = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) StringView {
+doc_cmd = (mp: Allocator, gid: i64, dc: DocCase) StringView {
     z: StringView = ""
     f = mp.zo_idpath("zoedoc", gid, ".txt")
     rc = mp.zo_idpath("zoedocrc", gid, ".txt")
     mp.zo_join([z, "if ./zen doc ", dc.target, " > ", f, " 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
-doc_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) bool {
-    passed = mp.contents_in(mp.zo_idpath("zoedocrc", gid, ".txt")).match ({
+doc_ok = (mp: Allocator, gid: i64, dc: DocCase) bool {
+    passed = mp.addr().contents_in(mp.zo_idpath("zoedocrc", gid, ".txt")).match ({
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
     passed.match ({
-        true  => mp.contents_in(mp.zo_idpath("zoedoc", gid, ".txt")).match ({
+        true  => mp.addr().contents_in(mp.zo_idpath("zoedoc", gid, ".txt")).match ({
             .Ok(txt) => all_present_absent(txt, dc.present, dc.absent),
             .Err(e)  => false,
         }),
@@ -200,8 +198,7 @@ doc_ok = (mp: MutPtr<Malloc>, gid: i64, dc: DocCase) bool {
 run_docs* = (name: StringView, cs: [DocCase]) i32 {
     out(name)
     out("\n")
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
     cmds :: [StringView] = base.slice(n)
@@ -244,14 +241,14 @@ shell_is_serial = (name: StringView) bool {
 // marker), everything a case needs it already redirects into `$ZT`, and a few fixtures otherwise leak a
 // stray line (a fixture's own program output, a `fmt --check` "needs formatting") that — under parallel
 // execution — would interleave with the dot stream at a timing-dependent point, breaking determinism.
-shell_wrap = (mp: MutPtr<Malloc>, gid: i64, cmd: StringView) StringView {
+shell_wrap = (mp: Allocator, gid: i64, cmd: StringView) StringView {
     z: StringView = ""
     zt = mp.zo_idpath("sh", gid, "")
     rc = mp.zo_idpath("shrc", gid, ".txt")
     mp.zo_join([z, "ZT=", zt, "; rm -rf \"$ZT\"; mkdir -p \"$ZT\"; if ( ", cmd, " ) >/dev/null 2>&1; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
-shell_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
-    mp.contents_in(mp.zo_idpath("shrc", gid, ".txt")).match ({
+shell_ok = (mp: Allocator, gid: i64) bool {
+    mp.addr().contents_in(mp.zo_idpath("shrc", gid, ".txt")).match ({
         .Ok(s)  => s.starts_with("P"),
         .Err(e) => false,
     })
@@ -260,8 +257,7 @@ shell_ok = (mp: MutPtr<Malloc>, gid: i64) bool {
 // all others run across the worker pool. Every case's body is gid-isolated (its own `$ZT` subdir), so the
 // fixed scratch names never collide. Phase C reads the P/F markers IN ORDER — byte-identical verdict to serial.
 run_shells* = (name: StringView, cs: [ShellCase]) i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     out(name)
     out("\n")
     n = cs.len
@@ -1019,7 +1015,7 @@ harness_build_run* = () i32 {
         ),
     ])
     // ATTENUATION past Writer: main(sys) mints two DIFFERENT narrow caps (Writer via sys.stdout(),
-    // Allocator via sys.heap().addr()) and hands each helper only its own authority — never the
+    // AllocatorBackend via sys.heap().addr()) and hands each helper only its own authority — never the
     // whole Sys. Proves least-authority generalizes across the cap set, not just the write facet.
     // #52: the Sys entry reached through a namespace alias (`sys = std.sys.root`; `main = (s: sys.Sys)`)
     // — the trampoline must call the alias-renamed `sys__root`, not a bare `root` (implicit-int → cc
@@ -1575,6 +1571,12 @@ harness_build_run* = () i32 {
             check_out: false,
         ),
         FixtureCase(
+            path: "tests/fixtures/zen/request_arena_explicit.zen",
+            want_exit: "0",
+            want_out: "",
+            check_out: false,
+        ),
+        FixtureCase(
             path: "tests/fixtures/zen/arena_explicit_backing.zen",
             want_exit: "0",
             want_out: "",
@@ -1974,7 +1976,7 @@ harness_build_run* = () i32 {
         ),
         DiagCase(
             src: "{ repeat } = std.text.str\nCat*: { lives: i32 }\nmain = () i32 {\n    c = Cat(lives: 9)\n    s = c.addr().repeat(\"ab\", 2)\n    0\n}\n",
-            wants: [":5:18: error[trait-bound]: type `Cat` does not satisfy the bound `Allocator` required by `repeat` — missing method(s): acquire, resize, release", "      s = c.addr().repeat(\"ab\", 2)", "                   ^~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
+            wants: [":5:18: error[trait-bound]: type `Cat` does not satisfy the bound `AllocatorBackend` required by `repeat` — missing method(s): acquire, resize, release", "      s = c.addr().repeat(\"ab\", 2)", "                   ^~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
         DiagCase(
             src: "main = () i32 {\n    x: str = \"a\"\n    0\n}\n",
@@ -2125,7 +2127,7 @@ harness_build_run* = () i32 {
             wants: [":8:5: error[ownership]: use of an owner after it was consumed (moved, released, or dropped)", "      a.get()", "      ^"],
         ),
         DiagCase(
-            src: "{ Malloc } = std.mem.alloc\nhalloc = std.mem.heap\nHolder: { ptr: RawPtr<u8> }\nmain = () i32 {\n    a = halloc.gpa()\n    p = a.addr().acquire(64)\n    h ::= Holder(ptr: null_ptr())\n    h.ptr = p\n    a.addr().release(p)\n    v = load(h.ptr)\n    v.to_i32()\n}\n",
+            src: "{ Allocator, heap_allocator } = std.mem.alloc\nhalloc = std.mem.heap\nHolder: { ptr: RawPtr<u8> }\nmain = () i32 {\n    a = halloc.gpa()\n    p = a.addr().acquire(64)\n    h ::= Holder(ptr: null_ptr())\n    h.ptr = p\n    a.addr().release(p)\n    v = load(h.ptr)\n    v.to_i32()\n}\n",
             wants: [":10:16: error[ownership]: use of an owner after it was consumed (moved, released, or dropped)", "      v = load(h.ptr)", "                 ^~~"],
         ),
         DiagCase(
@@ -2178,7 +2180,7 @@ harness_build_run* = () i32 {
     // all of them — but the MESSAGE must name the type the user actually wrote. These two cases
     // are deliberately identical except for the receiver's provenance: if the printer ever folds
     // them back together (it printed `StringView` for both before), one of them goes red.
-    // The STDLIB's own allocator generics carry the bound (`(a: Allocator)`, the implicit-generic
+    // The STDLIB's own allocator generics carry the bound (`(a: AllocatorBackend)`, the implicit-generic
     // sugar), so handing a non-allocator to `std.text.str.repeat` is diagnosed HERE, at the call
     // site, naming the caller's own type — not 300 lines into src/std at the `a.acquire` that
     // finally noticed. Revert the bound on `repeat` and this case goes red with the library's line.
@@ -2242,37 +2244,37 @@ harness_build_run* = () i32 {
     dc = run_docs("build doc", [
         DocCase(
             target: "std.text.fmt",
-            present: ["# std.text.fmt", "Display*: {", "write_int_in* = (a: Allocator, n: i64) Result<i64, IoError>", "write_float_in* = (a: Allocator, x: f64) Result<i64, IoError>", "print*<T: Display> = (x: T) i64 { x.fmt_print() }", "println*<T: Display> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
+            present: ["# std.text.fmt", "Display*: {", "write_int_in* = (a: AllocatorBackend, n: i64) Result<i64, IoError>", "write_float_in* = (a: AllocatorBackend, x: f64) Result<i64, IoError>", "print*<T: Display> = (x: T) i64 { x.fmt_print() }", "println*<T: Display> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
             absent: ["print_owned", "print_int", "println_int", "try_write_int_in", "try_write_float_in"],
         ),
         DocCase(
             target: "std.text.string",
-            present: ["init* = (a: Allocator, cap: i64) Result<String, IoError>", "new_in* = (a: Allocator) Result<String, IoError>"],
+            present: ["init* = (a: AllocatorBackend, cap: i64) Result<String, IoError>", "new_in* = (a: AllocatorBackend) Result<String, IoError>"],
             absent: ["try_init", "try_new", "new* = "],
         ),
         DocCase(
             target: "std.mem.own",
-            present: ["new_in*<T> = (a: Allocator, x: T) Result<Own<T>, IoError>"],
+            present: ["new_in*<T> = (a: AllocatorBackend, x: T) Result<Own<T>, IoError>"],
             absent: ["new*<T>", "try_new", "release = (o: Own<T>)", "own_new", "own_clone", "own_ptr", "own_release"],
         ),
         DocCase(
             target: "std.mem.rc",
-            present: ["new_in*<T> = (a: Allocator, x: T) Result<Rc<T>, IoError>"],
+            present: ["new_in*<T> = (a: AllocatorBackend, x: T) Result<Rc<T>, IoError>"],
             absent: ["new*<T>", "try_new", "drop = (r: Rc<T>)", "rc_new", "rc_get", "rc_clone", "rc_drop", "rc_count"],
         ),
         DocCase(
             target: "std.mem.arc",
-            present: ["new_in*<T> = (a: Allocator, x: T) Result<Arc<T>, IoError>"],
+            present: ["new_in*<T> = (a: AllocatorBackend, x: T) Result<Arc<T>, IoError>"],
             absent: ["new*<T>", "try_new", "drop = (r: Arc<T>)", "arc_new", "arc_get", "arc_clone", "arc_drop", "arc_count"],
         ),
         DocCase(
             target: "std.concurrent.actor",
-            present: ["CellRef*<M>: {", "ReplyRef*<T>: {", "ActorEngine*<M>: {", "ActorCell*<M>: {", "cell*<M> = (alloc: Allocator, cap: i64)", "spawn_handle*<M, ActorT>"],
+            present: ["CellRef*<M>: {", "ReplyRef*<T>: {", "ActorEngine*<M>: {", "ActorCell*<M>: {", "cell*<M> = (alloc: AllocatorBackend, cap: i64)", "spawn_handle*<M, ActorT>"],
             absent: ["ActorRef*<M>", "spawn*<A", "reply*<", "try_reply", "try_spawn", "try_cell", "try_engine", "Mailbox", "ActorSystem", "ActorState", "actor_ref", "actor_system", "run_actor", "make_reply"],
         ),
         DocCase(
             target: "std.core.slice",
-            present: ["buf_in*<T> = (a: Allocator", "alloc_buf*<T> = (a: Allocator", "dup*<T> = (a: Allocator", "node*<T> = (a: Allocator", "concat*<T> = (a: Allocator"],
+            present: ["buf_in*<T> = (a: AllocatorBackend", "alloc_buf*<T> = (a: AllocatorBackend", "dup*<T> = (a: AllocatorBackend", "node*<T> = (a: AllocatorBackend", "concat*<T> = (a: AllocatorBackend"],
             absent: ["buf*<T> = (n", "try_buf", "dup*<T> = (xs", "try_dup", "node*<T> = (v", "try_node", "concat*<T> = (xs", "try_concat", "nbuf"],
         ),
         DocCase(
@@ -2282,12 +2284,12 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.concurrent.runtime",
-            present: ["sync_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena", "coro_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) CoroArena", "sync*<A: Allocator> = (backing: MutPtr<A>, cap: i64) SyncArena", "coro*<A: Allocator> = (backing: MutPtr<A>, cap: i64) CoroArena"],
+            present: ["sync_in*<A: AllocatorBackend> = (backing: MutPtr<A>, cap: i64) SyncArena", "coro_in*<A: AllocatorBackend> = (backing: MutPtr<A>, cap: i64) CoroArena", "sync*<A: AllocatorBackend> = (backing: MutPtr<A>, cap: i64) SyncArena", "coro*<A: AllocatorBackend> = (backing: MutPtr<A>, cap: i64) CoroArena"],
             absent: ["sync* = (cap: i64) SyncArena", "coro* = (cap: i64) CoroArena", "sync_arena", "async_arena"],
         ),
         DocCase(
             target: "std.concurrent.coroutine",
-            present: ["spawn_in* = (alloc: Allocator", "spawn* = (alloc: Allocator"],
+            present: ["spawn_in* = (alloc: AllocatorBackend", "spawn* = (alloc: AllocatorBackend"],
             absent: ["try_spawn"],
         ),
         DocCase(
@@ -2302,7 +2304,7 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.mem.arena",
-            present: ["make_in*<A: Allocator> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError>"],
+            present: ["make_in*<A: AllocatorBackend> = (backing: MutPtr<A>, cap: i64) Result<Arena, IoError>"],
             absent: ["try_make_in", "arena_new", "try_arena_new"],
         ),
         DocCase(
@@ -2312,27 +2314,27 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.collections.map",
-            present: ["of*<T> = (a: Allocator, seed_key: StringView, seed_val: T) Result<Map<T>, IoError>"],
+            present: ["of*<T> = (a: AllocatorBackend, seed_key: StringView, seed_val: T) Result<Map<T>, IoError>"],
             absent: ["try_of", "try_put", "try_append", "IntMap", "int_of", "map*<T", "try_map", "map_of", "try_map_of", "mput", "mget", "mhas", "mlen", "mfree"],
         ),
         DocCase(
             target: "std.collections.iter",
-            present: ["find*<T> = (xs: [T], pred: (T) bool) Opt<T>", "map*<T, U> = (a: Allocator, xs: [T], f: (T) U) Result<[U], IoError>", "filter*<T> = (a: Allocator, xs: [T], keep: (T) bool) Result<[T], IoError>"],
-            absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]", "map*<T, U> = (a: Allocator, xs: [i32]", "try_map", "try_filter"],
+            present: ["find*<T> = (xs: [T], pred: (T) bool) Opt<T>", "map*<T, U> = (a: AllocatorBackend, xs: [T], f: (T) U) Result<[U], IoError>", "filter*<T> = (a: AllocatorBackend, xs: [T], keep: (T) bool) Result<[T], IoError>"],
+            absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]", "map*<T, U> = (a: AllocatorBackend, xs: [i32]", "try_map", "try_filter"],
         ),
         DocCase(
             target: "std.text.str",
-            present: ["dup_bytes* = (a: Allocator, s: StringView) Result<[u8], IoError>", "dup_bytes_in* = (a: Allocator, s: StringView) Result<[u8], IoError>", "substr* = (a: Allocator, s: StringView, start: i64, n: i64) Result<StringView, IoError>", "substr_in* = (a: Allocator, s: StringView, start: i64, n: i64) Result<StringView, IoError>", "at* = (s: StringView, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: StringView) Result<i64, ParseError>", "what made try_parse_int refuse"],
+            present: ["dup_bytes* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError>", "dup_bytes_in* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError>", "substr* = (a: AllocatorBackend, s: StringView, start: i64, n: i64) Result<StringView, IoError>", "substr_in* = (a: AllocatorBackend, s: StringView, start: i64, n: i64) Result<StringView, IoError>", "at* = (s: StringView, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: StringView) Result<i64, ParseError>", "what made try_parse_int refuse"],
             absent: ["try_dup_bytes", "try_substr", "char_at", "str_parse_int"],
         ),
         DocCase(
             target: "std.text.num",
-            present: ["integer_in* = (a: Allocator, n: i64) Result<String, IoError>", "integer* = (a: Allocator, n: i64) Result<String, IoError>", "uinteger_in* = (a: Allocator, n: u64) Result<String, IoError>", "float_in* = (a: Allocator, x: f64) Result<String, IoError>", "float* = (a: Allocator, x: f64) Result<String, IoError>"],
+            present: ["integer_in* = (a: AllocatorBackend, n: i64) Result<String, IoError>", "integer* = (a: AllocatorBackend, n: i64) Result<String, IoError>", "uinteger_in* = (a: AllocatorBackend, n: u64) Result<String, IoError>", "float_in* = (a: AllocatorBackend, x: f64) Result<String, IoError>", "float* = (a: AllocatorBackend, x: f64) Result<String, IoError>"],
             absent: ["try_integer", "try_uinteger", "try_float", "int_string", "float_string", "int_to_str", "float_to_str"],
         ),
         DocCase(
             target: "std.io.file",
-            present: ["out* = (s: StringView) Result<i64, IoError>", "out_bytes* = (bytes: Slice<u8>) Result<i64, IoError>", "contents_bytes_in* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_bytes* = (a: Allocator, path: StringView) Result<[u8], IoError>", "contents_in* = (a: Allocator, path: StringView) Result<StringView, IoError>", "contents* = (a: Allocator, path: StringView) Result<StringView, IoError>", "save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError>", "O_WRTRUNC* = O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: StringView) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
+            present: ["out* = (s: StringView) Result<i64, IoError>", "out_bytes* = (bytes: Slice<u8>) Result<i64, IoError>", "contents_bytes_in* = (a: AllocatorBackend, path: StringView) Result<[u8], IoError>", "contents_bytes* = (a: AllocatorBackend, path: StringView) Result<[u8], IoError>", "contents_in* = (a: AllocatorBackend, path: StringView) Result<StringView, IoError>", "contents* = (a: AllocatorBackend, path: StringView) Result<StringView, IoError>", "save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError>", "O_WRTRUNC* = O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: StringView) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
             absent: ["contents* = (path: StringView) Result<StringView, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"],
         ),
         DocCase(
@@ -2818,7 +2820,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "slice_elem_width_matches_storage",
-            cmd: "{ ./zen check tests/fixtures/zen/slice_elem_width.zen > $ZT/zsew.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[slice-elem\\]' $ZT/zsew.txt)\" = 4 && grep -Fq ':12:19:' $ZT/zsew.txt && grep -Fq ':16:39:' $ZT/zsew.txt && grep -Fq ':26:19:' $ZT/zsew.txt && grep -Fq ':32:19:' $ZT/zsew.txt && grep -Fq '      ys :: [i64] = slice(xs.ptr, 4)' $ZT/zsew.txt && printf '{ Allocator, Malloc } = std.mem.alloc\\n{ view } = std.text.str\\nsame_elem = (xs: [i32]) i32 {\\n    ys :: [i32] = slice(xs.ptr, xs.len)\\n    ys[0]\\n}\\nbytes_from_typed = (xs: [i32]) u8 {\\n    bs :: [u8] = slice(xs.ptr, xs.len * 4)\\n    bs[0]\\n}\\ntyped_from_raw = (a: MutPtr<Malloc>, n: i64) [i64] {\\n    slice(assert_nonnull(a.acquire(n * sizeof(i64))), n)\\n}\\nbytes_window = (s: StringView) u8 {\\n    v = s.view()\\n    w: Slice<u8> = slice(v.ptr, v.len)\\n    w[0]\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zsewok.zen && ./zen check $ZT/zsewok.zen",
+            cmd: "{ ./zen check tests/fixtures/zen/slice_elem_width.zen > $ZT/zsew.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[slice-elem\\]' $ZT/zsew.txt)\" = 4 && grep -Fq ':12:19:' $ZT/zsew.txt && grep -Fq ':16:39:' $ZT/zsew.txt && grep -Fq ':26:19:' $ZT/zsew.txt && grep -Fq ':32:19:' $ZT/zsew.txt && grep -Fq '      ys :: [i64] = slice(xs.ptr, 4)' $ZT/zsew.txt && printf '{ Allocator } = std.mem.alloc\\n{ view } = std.text.str\\nsame_elem = (xs: [i32]) i32 {\\n    ys :: [i32] = slice(xs.ptr, xs.len)\\n    ys[0]\\n}\\nbytes_from_typed = (xs: [i32]) u8 {\\n    bs :: [u8] = slice(xs.ptr, xs.len * 4)\\n    bs[0]\\n}\\ntyped_from_raw = (a: Allocator, n: i64) [i64] {\\n    slice(assert_nonnull(a.acquire(n * sizeof(i64))), n)\\n}\\nbytes_window = (s: StringView) u8 {\\n    v = s.view()\\n    w: Slice<u8> = slice(v.ptr, v.len)\\n    w[0]\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zsewok.zen && ./zen check $ZT/zsewok.zen",
         ),
         ShellCase(
             name: "outparam_escape_rejected",

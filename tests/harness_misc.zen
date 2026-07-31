@@ -18,7 +18,7 @@
 { VCase, VerdictCase, run_value, run_values, run_verdict, run_verdicts, run_suite, zo_path, zo_cmd,
   zo_cat2, zo_itoa, zo_par_run, zo_idpath, zo_join } = harness_lib
 { harness_matrix_run } = harness_matrix
-{ Malloc } = std.mem.alloc
+{ Allocator, heap_allocator } = std.mem.alloc
 { is_alpha } = std.text.ascii
 { out, out_bytes, save, contents_in, shell } = std.io.file
 { len, contains, starts_with, view, substr } = std.text.str
@@ -29,8 +29,8 @@
 // the zslice header every emission must begin with (mirrors _oracle.HEAD).
 HEAD = "typedef struct { void* ptr; int64_t len; } zslice; "
 // ── shared helpers ────────────────────────────────────────────────────────────
-om_read_file = (mp: MutPtr<Malloc>, path: StringView) StringView {
-    mp.contents_in(path).match ({
+om_read_file = (mp: Allocator, path: StringView) StringView {
+    mp.addr().contents_in(path).match ({
         .Ok(t)  => t,
         .Err(e) => "",
     })
@@ -63,7 +63,7 @@ om_count = (s: StringView, needle: StringView) i64 {
     n
 }
 // concat 2 / 3 strs into a fresh allocator-owned cstr (for building shell commands with a path arg).
-om_cat3 = (mp: MutPtr<Malloc>, a: StringView, b: StringView, c: StringView) StringView {
+om_cat3 = (mp: Allocator, a: StringView, b: StringView, c: StringView) StringView {
     mp.zo_cat2(a, mp.zo_cat2(b, c))
 }
 // ════════════════════════════════════════════════════════════════════════════════
@@ -413,8 +413,7 @@ harness_misc_slice_mut = () i32 {
 // ════════════════════════════════════════════════════════════════════════════════
 NP_PROG = "{ put } = std.text.fmt\n{ hex_value, parse_f64, parse_i64_checked, parse_i64_radix } = std.text.num\n{ ParseError } = std.text.str\nemit_f = (label: StringView, r: Result<f64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").f(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nemit_i = (label: StringView, r: Result<i64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").i(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nmain = () i32 {\n    emit_f(\"f_pi|\",   parse_f64(\"3.14\"))\n    emit_f(\"f_neg|\",  parse_f64(\"-2.5\"))\n    emit_f(\"f_exp|\",  parse_f64(\"1e3\"))\n    emit_f(\"f_int|\",  parse_f64(\"42\"))\n    emit_f(\"f_bad|\",  parse_f64(\"abc\"))\n    emit_f(\"f_mt|\",   parse_f64(\"\"))\n    emit_f(\"f_dot2|\", parse_f64(\"1.2.3\"))\n    emit_i(\"i_ok|\",   parse_i64_checked(\"123\"))\n    emit_i(\"i_bad|\",  parse_i64_checked(\"12x\"))\n    emit_i(\"i_mt|\",   parse_i64_checked(\"\"))\n    emit_i(\"r_hex|\",  parse_i64_radix(\"ff\", 16))\n    emit_i(\"r_bin|\",  parse_i64_radix(\"1010\", 2))\n    emit_i(\"r_bad|\",  parse_i64_radix(\"zz\", 16))\n    hx: [u8] = ['1', 'f', 'f', 'f', 'f', 'f', 'f', 'f', 'f']\n    put(\"hexwide|=\").i(hex_value(hx)).nl()\n    0\n}\n"
 harness_misc_num_parse = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     save(mp.zo_path("zo_misc_np.zen"), NP_PROG, len(NP_PROG))
     save(mp.zo_path("zo_misc_np.out"), "", 0)
     shell(mp.zo_cmd("./zen run $ZT/zo_misc_np.zen > $ZT/zo_misc_np.out 2>/dev/null"))
@@ -431,10 +430,9 @@ harness_misc_num_parse = () i32 {
 // The value-case harness can't drive this (no module resolver + it clashes with libc redecls), so this
 // mirrors num_parse's custom `zenc run` + stdout-substring runner. These are the crypto correctness gate.
 // ════════════════════════════════════════════════════════════════════════════════
-HASH_PROG = "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Malloc } = std.mem.alloc\n{ is_alpha } = std.text.ascii\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    m = Malloc(_: 0)\n    mp = m.addr()\n    empty :: StringView = \"\"\n    abc :: StringView = \"abc\"\n    abd: StringView = \"abd\"\n    hello: StringView = \"hello\"\n    fox :: StringView = \"The quick brown fox jumps over the lazy dog\"\n    put(\"empty=\").s(mp.sha256_hex(empty.view())).nl()\n    put(\"abc=\").s(mp.sha256_hex(abc.view())).nl()\n    put(\"fox=\").s(mp.sha256_hex(fox.view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(abc.view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(hello.view()) == fnv1a(hello.view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(abc.view()) != fnv1a(abd.view())).nl()\n    0\n}\n"
+HASH_PROG = "{ put } = std.text.fmt\n{ view } = std.text.str\n{ Allocator, heap_allocator } = std.mem.alloc\n{ is_alpha } = std.text.ascii\n{ sha256_hex, fnv1a } = std.hash\nmain = () i32 {\n    mp = heap_allocator()\n    empty :: StringView = \"\"\n    abc :: StringView = \"abc\"\n    abd: StringView = \"abd\"\n    hello: StringView = \"hello\"\n    fox :: StringView = \"The quick brown fox jumps over the lazy dog\"\n    put(\"empty=\").s(mp.addr().sha256_hex(empty.view())).nl()\n    put(\"abc=\").s(mp.addr().sha256_hex(abc.view())).nl()\n    put(\"fox=\").s(mp.addr().sha256_hex(fox.view())).nl()\n    put(\"fnv_abc=\").b(fnv1a(abc.view()) == 16654208175385433931).nl()\n    put(\"fnv_det=\").b(fnv1a(hello.view()) == fnv1a(hello.view())).nl()\n    put(\"fnv_ne=\").b(fnv1a(abc.view()) != fnv1a(abd.view())).nl()\n    0\n}\n"
 harness_misc_hash = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     save(mp.zo_path("zo_misc_hash.zen"), HASH_PROG, len(HASH_PROG))
     save(mp.zo_path("zo_misc_hash.out"), "", 0)
     shell(mp.zo_cmd("./zen run $ZT/zo_misc_hash.zen > $ZT/zo_misc_hash.out 2>/dev/null"))
@@ -462,9 +460,9 @@ om_param_end = (sv: Slice<u8>, q: i64, depth: i64) i64 {
         })),
     })
 }
-om_param_list = (mp: MutPtr<Malloc>, src: StringView, q: i64) StringView {
+om_param_list = (mp: Allocator, src: StringView, q: i64) StringView {
     e = src.view().om_param_end(q + 1, 1)
-    mp.substr(src, q, e - q).expect("harness: oom")
+    mp.addr().substr(src, q, e - q).expect("harness: oom")
 }
 // Mirror of `_DECL_RE = ^([a-zA-Z_]\w*)\s*=\s*\(` (re.M): scan `src` for each line-initial
 // `name = (` declaration (col-0 only; `name*`/`name = <T>(` are excluded since the char after the
@@ -472,7 +470,7 @@ om_param_list = (mp: MutPtr<Malloc>, src: StringView, q: i64) StringView {
 // `\s` is approximated by space/tab between the tokens (the only whitespace real source uses there);
 // this only ever matches a SUBSET of the regex, so it can never raise a failure the regex wouldn't.
 // Byte access goes through a single `[u8]` view (O(1) index) — NOT `at` (which re-strlens per call).
-om_decls_survive = (mp: MutPtr<Malloc>, src: StringView, c: StringView) bool {
+om_decls_survive = (mp: Allocator, src: StringView, c: StringView) bool {
     sv: Slice<u8> = src.view()
     n = sv.len
     ls ::= true    // at a line start?
@@ -487,16 +485,16 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: StringView, c: StringView) bool {
             (q < n && sv[q] == '=').then({
                 // skip spaces/tabs, expect '('
                 q2 = (q + 1).advance_while((p) { p < n && (sv[p] == ' ' || sv[p] == '\t') })
-                // An IMPLICIT generic (`f = (a: Allocator, …)` — the trait-typed-param sugar for
-                // `f<A: Allocator> = (a: MutPtr<A>, …)`) is a template like any other generic: it emits
+                // An IMPLICIT generic (`f = (a: AllocatorBackend, …)` — the trait-typed-param sugar for
+                // `f<A: AllocatorBackend> = (a: MutPtr<A>, …)`) is a template like any other generic: it emits
                 // no standalone C symbol, only per-instantiation ones. The `<A>` spelling kept those
                 // decls out of this scan for free; the sugar hides the angle brackets, so the param
-                // list has to be read. Only a trait-typed param can do this, and Allocator is the one
+                // list has to be read. Only a trait-typed param can do this, and AllocatorBackend is the one
                 // std threads — a param `x: Trait` for any other declared trait would need adding here.
                 (q2 < n
                     && sv[q2] == '('
-                    && mp.om_param_list(src, q2).contains(": Allocator") == false).then({
-                    name = mp.substr(src, i, e - i).expect("harness: oom")
+                    && mp.om_param_list(src, q2).contains(": AllocatorBackend") == false).then({
+                    name = mp.addr().substr(src, i, e - i).expect("harness: oom")
                     (contains(c, name) == false).then({
                         ok = false
                     })
@@ -512,13 +510,13 @@ om_decls_survive = (mp: MutPtr<Malloc>, src: StringView, c: StringView) bool {
 // across the worker pool, each writing a gid-namespaced C output + P/F marker; Phase C reads them IN ORDER
 // and applies the SAME check (rc 0 AND output starts with HEAD AND every top-level decl name survives) —
 // byte-identical verdict to the old serial loop. Emitting the big compiler files serially was ~21s.
-om_acid_cmd = (mp: MutPtr<Malloc>, gid: i64, path: StringView) StringView {
+om_acid_cmd = (mp: Allocator, gid: i64, path: StringView) StringView {
     z: StringView = ""
     outp = mp.zo_idpath("zo_acid", gid, ".c")
     rc = mp.zo_idpath("zo_acidrc", gid, ".txt")
     mp.zo_join([z, "if ./zen emit ", path, " > ", outp, " 2>/dev/null; then echo P > ", rc, "; else echo F > ", rc, "; fi"])
 }
-om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: StringView) bool {
+om_acid_ok = (mp: Allocator, gid: i64, path: StringView) bool {
     passed = mp.om_read_file(mp.zo_idpath("zo_acidrc", gid, ".txt")).starts_with("P")
     passed.match ({
         true  => {
@@ -530,8 +528,7 @@ om_acid_ok = (mp: MutPtr<Malloc>, gid: i64, path: StringView) bool {
     })
 }
 harness_misc_acid = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     files = ["src/std/build.zen", "src/std/format/json.zen", "src/std/math.zen", "src/std/sys/os.zen", "src/std/rand.zen", "src/std/concurrent/sync.zen", "src/std/concurrent/thread.zen", "src/compiler/check.zen", "src/compiler/passes/ptrkind.zen", "src/compiler/passes/lift.zen", "src/compiler/passes/orreturn.zen", "src/compiler/passes/subst.zen", "src/compiler/passes/closures.zen", "src/compiler/passes/refcount.zen", "src/compiler/validate/util.zen", "src/compiler/validate/diag.zen", "src/compiler/validate/ownership.zen", "src/compiler/validate/args.zen", "src/compiler/validate/kinds.zen", "src/compiler/validate/enrich.zen", "src/compiler/validate/core.zen", "src/compiler/diagnostic.zen", "src/compiler/genc.zen", "src/compiler/backend/c/c_emit.zen", "src/compiler/pretty.zen", "src/compiler/lex.zen", "src/compiler/mono.zen", "src/compiler/parse.zen", "src/compiler/parse_expr.zen", "src/compiler/parse_stmt.zen", "src/compiler/parse_type.zen"]
     out("acid (emit real sources)")
     out("\n")
@@ -563,44 +560,44 @@ harness_misc_acid = () i32 {
 // strings here, then run through the VALUE harness.
 // ════════════════════════════════════════════════════════════════════════════════
 // append a 2-digit identifier suffix ("00".."79") — leading zeros are fine inside an identifier.
-om_app2 = (mp: MutPtr<Malloc>, s: String, n: i32) String {
+om_app2 = (mp: Allocator, s: String, n: i32) String {
     tens: u8 = ('0' + n / 10).to_u8()
     ones: u8 = ('0' + (n - n / 10 * 10)).to_u8()
-    s2 = mp.push_in(s, tens).expect("harness: oom")
-    mp.push_in(s2, ones).expect("harness: oom")
+    s2 = mp.addr().push_in(s, tens).expect("harness: oom")
+    mp.addr().push_in(s2, ones).expect("harness: oom")
 }
 // append a decimal integer VALUE (no leading zeros) — for argument / arm constants.
-om_app_int = (mp: MutPtr<Malloc>, s: String, n: i32) String {
+om_app_int = (mp: Allocator, s: String, n: i32) String {
     (n < 10).match ({
         true  => {
             d: u8 = ('0' + n).to_u8()
-            mp.push_in(s, d).expect("harness: oom")
+            mp.addr().push_in(s, d).expect("harness: oom")
         },
         false => {
             s2 = mp.om_app_int(s, n / 10)
             d2: u8 = ('0' + (n - n / 10 * 10)).to_u8()
-            mp.push_in(s2, d2).expect("harness: oom")
+            mp.addr().push_in(s2, d2).expect("harness: oom")
         },
     })
 }
-om_sep = (mp: MutPtr<Malloc>, s: String, i: i32) String {
-    (i == 0).then({ s }, { s.append_in(mp, ", ").expect("harness: oom") })
+om_sep = (mp: Allocator, s: String, i: i32) String {
+    (i == 0).then({ s }, { s.append_in(mp.addr(), ", ").expect("harness: oom") })
 }
 // "p00: i32, p01: i32, ..." — param declarations
-om_decl_params = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
+om_decl_params = (mp: Allocator, s: String, i: i32, n: i32) String {
     (i >= n).match ({
         true  => s,
         false => {
             s1 = mp.om_sep(s, i)
-            s2 = s1.append_in(mp, "p").expect("harness: oom")
+            s2 = s1.append_in(mp.addr(), "p").expect("harness: oom")
             s3 = mp.om_app2(s2, i)
-            s4 = s3.append_in(mp, ": i32").expect("harness: oom")
+            s4 = s3.append_in(mp.addr(), ": i32").expect("harness: oom")
             mp.om_decl_params(s4, i + 1, n)
         },
     })
 }
 // "0, 1, ..., 79" — call argument values
-om_call_args = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
+om_call_args = (mp: Allocator, s: String, i: i32, n: i32) String {
     (i >= n).match ({
         true  => s,
         false => {
@@ -611,73 +608,72 @@ om_call_args = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
     })
 }
 // "x00: i32, x01: i32, ..." — field declarations
-om_decl_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
+om_decl_fields = (mp: Allocator, s: String, i: i32, n: i32) String {
     (i >= n).match ({
         true  => s,
         false => {
             s1 = mp.om_sep(s, i)
-            s2 = s1.append_in(mp, "x").expect("harness: oom")
+            s2 = s1.append_in(mp.addr(), "x").expect("harness: oom")
             s3 = mp.om_app2(s2, i)
-            s4 = s3.append_in(mp, ": i32").expect("harness: oom")
+            s4 = s3.append_in(mp.addr(), ": i32").expect("harness: oom")
             mp.om_decl_fields(s4, i + 1, n)
         },
     })
 }
 // "x00: 0, x01: 1, ..." — struct-literal field inits
-om_init_fields = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
+om_init_fields = (mp: Allocator, s: String, i: i32, n: i32) String {
     (i >= n).match ({
         true  => s,
         false => {
             s1 = mp.om_sep(s, i)
-            s2 = s1.append_in(mp, "x").expect("harness: oom")
+            s2 = s1.append_in(mp.addr(), "x").expect("harness: oom")
             s3 = mp.om_app2(s2, i)
-            s4 = s3.append_in(mp, ": ").expect("harness: oom")
+            s4 = s3.append_in(mp.addr(), ": ").expect("harness: oom")
             s5 = mp.om_app_int(s4, i)
             mp.om_init_fields(s5, i + 1, n)
         },
     })
 }
 // "0 => 0, 1 => 2, ..." — match arms (value i => 2*i)
-om_arms = (mp: MutPtr<Malloc>, s: String, i: i32, n: i32) String {
+om_arms = (mp: Allocator, s: String, i: i32, n: i32) String {
     (i >= n).match ({
         true  => s,
         false => {
             s1 = mp.om_sep(s, i)
             s2 = mp.om_app_int(s1, i)
-            s3 = s2.append_in(mp, " => ").expect("harness: oom")
+            s3 = s2.append_in(mp.addr(), " => ").expect("harness: oom")
             s4 = mp.om_app_int(s3, i * 2)
             mp.om_arms(s4, i + 1, n)
         },
     })
 }
-om_gen_many_params = (mp: MutPtr<Malloc>) StringView {
-    s ::= mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, "f* = (").expect("harness: oom")
+om_gen_many_params = (mp: Allocator) StringView {
+    s ::= mp.addr().new_in().expect("harness: oom")
+    s = s.append_in(mp.addr(), "f* = (").expect("harness: oom")
     s = mp.om_decl_params(s, 0, 80)
-    s = s.append_in(mp, ") i32 { p79 }\ntest* = () i32 { f(").expect("harness: oom")
+    s = s.append_in(mp.addr(), ") i32 { p79 }\ntest* = () i32 { f(").expect("harness: oom")
     s = mp.om_call_args(s, 0, 80)
-    s = s.append_in(mp, ") }").expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
+    s = s.append_in(mp.addr(), ") }").expect("harness: oom")
+    mp.addr().finish_in(s).expect("harness: oom")
 }
-om_gen_many_fields = (mp: MutPtr<Malloc>) StringView {
-    s ::= mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, "S*: { ").expect("harness: oom")
+om_gen_many_fields = (mp: Allocator) StringView {
+    s ::= mp.addr().new_in().expect("harness: oom")
+    s = s.append_in(mp.addr(), "S*: { ").expect("harness: oom")
     s = mp.om_decl_fields(s, 0, 80)
-    s = s.append_in(mp, " }\ntest* = () i32 { S(").expect("harness: oom")
+    s = s.append_in(mp.addr(), " }\ntest* = () i32 { S(").expect("harness: oom")
     s = mp.om_init_fields(s, 0, 80)
-    s = s.append_in(mp, ").x79 }").expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
+    s = s.append_in(mp.addr(), ").x79 }").expect("harness: oom")
+    mp.addr().finish_in(s).expect("harness: oom")
 }
-om_gen_many_arms = (mp: MutPtr<Malloc>) StringView {
-    s ::= mp.new_in().expect("harness: oom")
-    s = s.append_in(mp, "test* = () i32 { (50).match({ ").expect("harness: oom")
+om_gen_many_arms = (mp: Allocator) StringView {
+    s ::= mp.addr().new_in().expect("harness: oom")
+    s = s.append_in(mp.addr(), "test* = () i32 { (50).match({ ").expect("harness: oom")
     s = mp.om_arms(s, 0, 80)
-    s = s.append_in(mp, ", _ => 999 }) }").expect("harness: oom")
-    mp.finish_in(s).expect("harness: oom")
+    s = s.append_in(mp.addr(), ", _ => 999 }) }").expect("harness: oom")
+    mp.addr().finish_in(s).expect("harness: oom")
 }
 harness_misc_differential = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     r1 = run_value(VCase(
         src: mp.om_gen_many_params(),
         want: "79",
@@ -699,14 +695,14 @@ harness_misc_differential = () i32 {
 // is idempotent, and on a REAL corpus emit(fmt F) == emit(F) and fmt(fmt F) == fmt(F).
 // ════════════════════════════════════════════════════════════════════════════════
 // fmt --ast a source string, returning the formatted output.
-om_do_fmt = (mp: MutPtr<Malloc>, src: StringView) StringView {
+om_do_fmt = (mp: Allocator, src: StringView) StringView {
     save(mp.zo_path("zo_misc_fa.zen"), src, len(src))
     save(mp.zo_path("zo_misc_fa.out"), "", 0)
     shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_fa.zen > $ZT/zo_misc_fa.out 2>/dev/null"))
     mp.om_read_file(mp.zo_path("zo_misc_fa.out"))
 }
 // emit a source string, returning the emitted C.
-om_do_emit = (mp: MutPtr<Malloc>, src: StringView) StringView {
+om_do_emit = (mp: Allocator, src: StringView) StringView {
     save(mp.zo_path("zo_misc_em.zen"), src, len(src))
     save(mp.zo_path("zo_misc_em.c"), "", 0)
     shell(mp.zo_cmd("./zen emit $ZT/zo_misc_em.zen > $ZT/zo_misc_em.c 2>/dev/null"))
@@ -716,13 +712,12 @@ om_do_emit = (mp: MutPtr<Malloc>, src: StringView) StringView {
 // `shell` already DECODES the wait status (WEXITSTATUS, or 128 + signal), so its `.Ok` is the exit code
 // a normally-terminating program returned.
 om_run_rc = (src: StringView) i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     save(mp.zo_path("zo_misc_run.zen"), src, len(src))
     shell(mp.zo_cmd("./zen run $ZT/zo_misc_run.zen > /dev/null 2>&1")).expect("harness: shell")
 }
 // fmt --ast a source, then run the FORMATTED output; returns its exit code.
-om_fmt_then_run = (mp: MutPtr<Malloc>, src: StringView) i32 {
+om_fmt_then_run = (mp: Allocator, src: StringView) i32 {
     save(mp.zo_path("zo_misc_ftr.zen"), src, len(src))
     shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_ftr.zen > $ZT/zo_misc_ftr_f.zen 2>/dev/null"))
     shell(mp.zo_cmd("./zen run $ZT/zo_misc_ftr_f.zen > /dev/null 2>&1")).expect("harness: shell")
@@ -733,24 +728,22 @@ om_fmt_then_run = (mp: MutPtr<Malloc>, src: StringView) i32 {
 // and returns 0. Proven on the corpus variant below — pointing it at a nonexistent path left the
 // idempotency assertion green. Every producer must now succeed and produce bytes.
 om_fmt_idem = (src: StringView) bool {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     save(mp.zo_path("zo_misc_id.zen"), src, len(src))
     shell(mp.zo_cmd("./zen fmt --ast $ZT/zo_misc_id.zen > $ZT/zo_misc_id1.zen 2>/dev/null && test -s $ZT/zo_misc_id1.zen && ./zen fmt --ast $ZT/zo_misc_id1.zen > $ZT/zo_misc_id2.zen 2>/dev/null && test -s $ZT/zo_misc_id2.zen && cmp -s $ZT/zo_misc_id1.zen $ZT/zo_misc_id2.zen")).expect("harness: shell") == 0
 }
 // fmt(fmt F) == fmt(F) on a real corpus file at repo path `rel`.
-om_corpus_idem = (mp: MutPtr<Malloc>, rel: StringView) bool {
+om_corpus_idem = (mp: Allocator, rel: StringView) bool {
     shell(mp.zo_cmd(mp.om_cat3("./zen fmt --ast ", rel, " > $ZT/zo_misc_c1.zen 2>/dev/null && test -s $ZT/zo_misc_c1.zen && ./zen fmt --ast $ZT/zo_misc_c1.zen > $ZT/zo_misc_c2.zen 2>/dev/null && test -s $ZT/zo_misc_c2.zen && cmp -s $ZT/zo_misc_c1.zen $ZT/zo_misc_c2.zen"))).expect("harness: shell") == 0
 }
 // emit(fmt F) == emit(F): the formatted AST resolves to byte-identical C (ZEN_ROOT=. resolves the
 // repo's std/compiler imports for both the original copy and the formatted copy identically).
-om_corpus_emit_eq = (mp: MutPtr<Malloc>, rel: StringView) bool {
+om_corpus_emit_eq = (mp: Allocator, rel: StringView) bool {
     z: StringView = ""
     shell(mp.zo_cmd(mp.zo_join([z, "./zen fmt --ast ", rel, " > $ZT/zo_misc_cf.zen 2>/dev/null && test -s $ZT/zo_misc_cf.zen && cp ", rel, " $ZT/zo_misc_co.zen && ZEN_ROOT=. ./zen emit --force $ZT/zo_misc_co.zen > $ZT/zo_misc_eo.c 2>/dev/null && test -s $ZT/zo_misc_eo.c && ZEN_ROOT=. ./zen emit --force $ZT/zo_misc_cf.zen > $ZT/zo_misc_ef.c 2>/dev/null && test -s $ZT/zo_misc_ef.c && cmp -s $ZT/zo_misc_eo.c $ZT/zo_misc_ef.c"]))).expect("harness: shell") == 0
 }
 harness_misc_faithful = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     // fmt-output / emit / run scenarios (one bool per pytest assertion class).
     o_ufcs = mp.om_do_fmt("len = (s: StringView) i32 { 5 }\nmain = () i32 { x = \"hi\"\n x.len() }\n")
     o_chain = mp.om_do_fmt("add = (a: i32, b: i32) i32 { a + b }\nmain = () i32 { 1.add(2).add(3) }\n")
@@ -816,8 +809,7 @@ harness_misc_faithful = () i32 {
 // value) all normalize to the one-line `Type.Variant(…)` under fmt; the formatted source must
 // recompile and run to the SAME value, and formatting must be a fixpoint on the raw shapes.
 harness_misc_vbreak = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     s_cmt = "Res: Okv(i32) | Nov\nmain = () i32 {\n    x = Res /* continuation\n    comment */ .Okv(42)\n    x.match ({ .Okv(v) => v, .Nov => 9, })\n}\n"
     s_arm = "Res: Okv(i32) | Nov\npick = (c: bool) Res {\n    c.match ({\n        true => Res\n        .Okv(1),\n        false => Res.Nov,\n    })\n}\nmain = () i32 { pick(true).match ({ .Okv(v) => v + 41, .Nov => 9, }) }\n"
     s_paren = "Res: Okv(i32) | Nov\nmain = () i32 {\n    x = (Res\n    .Okv(2))\n    x.match ({ .Okv(v) => v + 40, .Nov => 9, })\n}\n"
@@ -858,8 +850,7 @@ om_out_bytes_ok = () bool {
     })
 }
 harness_misc_iofile = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     saved = save(mp.zo_path("zo_misc_save.txt"), "hello", 5).match ({
         .Ok(n)  => n == 5,
         .Err(e) => false,
@@ -873,8 +864,7 @@ harness_misc_iofile = () i32 {
 // The script exits 0 with a notice on non-Linux hosts or without gcc/g++ (a clean SKIP), so
 // this case only bites where the system headers exist — CI always has them.
 harness_misc_ffi_verify = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     run_suite("ffi-verify (foreign prototypes match system headers)", [shell(mp.zo_cmd("scripts/ffi_verify.sh ./zen > /dev/null 2>&1")).expect("harness: shell") == 0])
 }
 // ── capacity: fixed-registry overflow is a LOUD rejection, never silent data loss or a crash ────
@@ -883,15 +873,14 @@ harness_misc_ffi_verify = () i32 {
 // de-recursion this input died with a stack-overflow panic. The source is generated (16385 one-line
 // fns), not a fixture.
 harness_misc_capacity = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
-    s ::= mp.new_in().expect("harness: oom")
+    mp = heap_allocator()
+    s ::= mp.addr().new_in().expect("harness: oom")
     to_i64(16385).times((i) {
-        s = s.append_in(mp, "f").expect("harness: oom")
-        s = s.append_in(mp, mp.zo_itoa(i)).expect("harness: oom")
-        s = s.append_in(mp, "* = () i32 { 0 }\n").expect("harness: oom")
+        s = s.append_in(mp.addr(), "f").expect("harness: oom")
+        s = s.append_in(mp.addr(), mp.zo_itoa(i)).expect("harness: oom")
+        s = s.append_in(mp.addr(), "* = () i32 { 0 }\n").expect("harness: oom")
     })
-    src = mp.finish_in(s).expect("harness: oom")
+    src = mp.addr().finish_in(s).expect("harness: oom")
     run_suite("capacity (oversized module rejects with error[capacity])", [
         run_verdict(VerdictCase(
             src: src,
@@ -912,8 +901,7 @@ AUD_HELP = "AudT*: { tickle: (Ptr<AudLive>) i32 }\nAudLive*: { n: i32 }\nAudLive
 AUD_MAIN = "{ aud_used, aud_extra, AudLive, AudT, default } = zo_misc_aud_help\nmain = () i32 {\n    v = AudLive(n: 20)\n    aud_used(v.n) + v.addr().tickle() + default()\n}\n"
 AUD_CLEAN = "main = () i32 { 0 }\n"
 harness_misc_audit = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     save(mp.zo_path("zo_misc_aud_help.zen"), AUD_HELP, len(AUD_HELP))
     save(mp.zo_path("zo_misc_aud_main.zen"), AUD_MAIN, len(AUD_MAIN))
     save(mp.zo_path("zo_misc_aud_clean.zen"), AUD_CLEAN, len(AUD_CLEAN))
@@ -943,8 +931,7 @@ WS_MOD2 = "ws_m* = (x: i32) i32 { x + 5 }\nws_n* = (x: i32) i32 { x + 6 }\n"
 WS_A = "{ ws_f } = zo_ws_help\n{ ws_m } = sub.mod2\nEMB2 = \"m2 = sub.mod2\\n\"\nuse_sa = (s: StringView) i32 { 0 }\nmain = () i32 { ws_f(1) + ws_m(2) + EMB2.use_sa() }\n"
 WS_B = "{ ws_g } = zo_ws_help\nEMBED = \"{ ws_k } = zo_ws_help\\n\"\nuse_sb = (s: StringView) i32 { 0 }\nmain = () i32 { ws_g(2) + EMBED.use_sb() }\n"
 harness_misc_audit_ws = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     shell(mp.zo_cmd("mkdir -p $ZT/zo_ws/sub")).expect("harness: shell")
     save(mp.zo_path("zo_ws/zo_ws_help.zen"), WS_HELP, len(WS_HELP))
     save(mp.zo_path("zo_ws/sub/mod2.zen"), WS_MOD2, len(WS_MOD2))
@@ -1054,8 +1041,7 @@ main = () i32 {
 }
 """
 harness_misc_clones = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     save(mp.zo_path("zo_misc_clone.zen"), CLONE_SRC, len(CLONE_SRC))
     save(mp.zo_path("zo_misc_clone.out"), "", 0)
     rc = shell(mp.zo_cmd("./zen audit $ZT/zo_misc_clone.zen > $ZT/zo_misc_clone.out 2>&1")).expect("harness: shell")
@@ -1074,15 +1060,14 @@ harness_misc_clones = () i32 {
 //                   receiver-type question is deferred to monomorphization, so the nonsense ships;
 //   tpr_passthru    must stay silent — every decl of the callee takes its own first param as an
 //                   unbounded tparam, so calling it constrains nothing;
-//   tpr_grab        must stay silent — `<A: Allocator>` is the fixed case;
+//   tpr_grab        must stay silent — `<A: AllocatorBackend>` is the fixed case;
 //   tpr_first       must stay silent — `<E>` is an element type, never a receiver.
 // The second run is the DURABLE gate: src/std must stay at zero, so re-introducing a bare `<A>` on
 // an allocator parameter fails `make harness` instead of waiting for a user's monomorphization.
 // ════════════════════════════════════════════════════════════════════════════════
-TPR_SRC = "{ Allocator } = std.mem.alloc\nTprCat*: { lives: i32 }\ntpr_meow = (c: MutPtr<TprCat>, n: i64) i64 { c.lives.to_i64() + n }\ntpr_frobnicate<T> = (x: MutPtr<T>, n: i64) i64 { x.tpr_meow(n) }\ntpr_identity<T> = (x: MutPtr<T>) i64 { 1 }\ntpr_passthru<T> = (x: MutPtr<T>) i64 { x.tpr_identity() }\ntpr_grab<A: Allocator> = (a: MutPtr<A>, n: i64) RawPtr<u8> { a.acquire(n) }\ntpr_first<E> = (xs: [E], dflt: E) E { (xs.len == 0).then({ dflt }, { xs[0] }) }\nmain = () i32 {\n    c = TprCat(lives: 9)\n    c.addr().tpr_frobnicate(1).to_i32() + c.addr().tpr_passthru().to_i32()\n}\n"
+TPR_SRC = "{ AllocatorBackend } = std.mem.alloc\nTprCat*: { lives: i32 }\ntpr_meow = (c: MutPtr<TprCat>, n: i64) i64 { c.lives.to_i64() + n }\ntpr_frobnicate<T> = (x: MutPtr<T>, n: i64) i64 { x.tpr_meow(n) }\ntpr_identity<T> = (x: MutPtr<T>) i64 { 1 }\ntpr_passthru<T> = (x: MutPtr<T>) i64 { x.tpr_identity() }\ntpr_grab<A: AllocatorBackend> = (a: MutPtr<A>, n: i64) RawPtr<u8> { a.acquire(n) }\ntpr_first<E> = (xs: [E], dflt: E) E { (xs.len == 0).then({ dflt }, { xs[0] }) }\nmain = () i32 {\n    c = TprCat(lives: 9)\n    c.addr().tpr_frobnicate(1).to_i32() + c.addr().tpr_passthru().to_i32()\n}\n"
 harness_misc_tparam_recv = () i32 {
-    m = Malloc(_: 0)
-    mp = m.addr()
+    mp = heap_allocator()
     save(mp.zo_path("zo_tpr.zen"), TPR_SRC, len(TPR_SRC))
     save(mp.zo_path("zo_tpr.out"), "", 0)
     save(mp.zo_path("zo_tpr_std.out"), "", 0)

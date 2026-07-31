@@ -2,7 +2,7 @@
 // pushes onto a genc String, and path slicing. Split out of driver.zen so the extracted verbs
 // (lsp, profile, buildproj) can reach them without importing the driver itself, which would be a
 // cycle: the driver imports each verb's entry point.
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
 { out, out_bytes } = std.io.file
@@ -53,7 +53,7 @@ pid_digit = (d: i64) u8 { load(offset("0123456789", d)) }
 // `pid_digit` INDEXES a literal, so a negative `n` reads before it — undefined, and in practice a NUL
 // that truncates the whole built string at `cstr()`. A caller that slips a negative in deserves `-12`,
 // not a silently half-written JSON frame.
-push_int* = (s: String, mp: MutPtr<Malloc>, n: i64) String {
+push_int* = (s: String, mp: Allocator, n: i64) String {
     (n < 0).then({
         return s.gstr_push(mp, '-').push_int(mp, 0 - n)
     })
@@ -65,7 +65,7 @@ push_int* = (s: String, mp: MutPtr<Malloc>, n: i64) String {
         },
     })
 }    // hoist (gstr_reserve re-evals the receiver)
-pid_path* = (mp: MutPtr<Malloc>, pre: StringView, suf: StringView) StringView {
+pid_path* = (mp: Allocator, pre: StringView, suf: StringView) StringView {
     mp
         .gstr_string(64)
         .gstr_append(mp, pre)
@@ -74,7 +74,7 @@ pid_path* = (mp: MutPtr<Malloc>, pre: StringView, suf: StringView) StringView {
         .gstr_finish(mp)
 }
 // ── path helpers ────────────────────────────────────────────────────────────────────────────────
-dirname* = (mp: MutPtr<Malloc>, p: StringView) StringView {
+dirname* = (mp: Allocator, p: StringView) StringView {
     v = p.view()
     cut = last_slash(v, 0, 0 - 1)
     (cut < 0).then({ "." }, { mp.cstr_prefix(p, cut) })
@@ -83,24 +83,24 @@ last_slash* = (v: Slice<u8>, i: i64, best: i64) i64 {
     (i >= v.len).then({ best }, { v.last_slash(i + 1, (v[i] == '/').then({ i }, { best })) })
 }
 // the first `n` bytes of `p` as an owned str — built through the allocator (no raw malloc).
-cstr_prefix* = (mp: MutPtr<Malloc>, p: StringView, n: i64) StringView {
+cstr_prefix* = (mp: Allocator, p: StringView, n: i64) StringView {
     push_prefix(mp.gstr_string(n + 1), mp, p.view(), 0, n).gstr_finish(mp)
 }
-push_prefix* = (s: String, mp: MutPtr<Malloc>, v: Slice<u8>, i: i64, n: i64) String {
+push_prefix* = (s: String, mp: Allocator, v: Slice<u8>, i: i64, n: i64) String {
     (i >= n).then({ s }, { push_prefix(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
 }
-pad_sp* = (s: String, mp: MutPtr<Malloc>, n: i64) String {
+pad_sp* = (s: String, mp: Allocator, n: i64) String {
     (n <= 0).then({ s }, { s.gstr_push(mp, ' ').pad_sp(mp, n - 1) })
 }
-finish_cstr* = (s: String, mp: MutPtr<Malloc>) StringView { cstr(s.ptr) }
+finish_cstr* = (s: String, mp: Allocator) StringView { cstr(s.ptr) }
 // bytes [a, b) as an owned str (through the allocator, like cstr_prefix).
-push_span* = (s: String, mp: MutPtr<Malloc>, v: [u8], i: i64, n: i64) String {
+push_span* = (s: String, mp: Allocator, v: [u8], i: i64, n: i64) String {
     (i >= n).then({ s }, { push_span(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
 }
-bs_push_range* = (mp: MutPtr<Malloc>, out: String, v: Slice<u8>, p: i64, e: i64) String {
+bs_push_range* = (mp: Allocator, out: String, v: Slice<u8>, p: i64, e: i64) String {
     (p >= e).then({ out }, { mp.bs_push_range(out.gstr_push(mp, v[p]), v, p + 1, e) })
 }
-join2* = (mp: MutPtr<Malloc>, a: StringView, b: StringView) StringView {
+join2* = (mp: Allocator, a: StringView, b: StringView) StringView {
     mp
         .gstr_string(256)
         .gstr_append(mp, a)
@@ -110,7 +110,7 @@ join2* = (mp: MutPtr<Malloc>, a: StringView, b: StringView) StringView {
 }
 // the bytes [s,e) of `v` as a fresh owned cstr — the loader/LSP/audit substring verb. ITERATIVE:
 // a JSON body or module region is arbitrarily long, so it must not recurse the C stack per byte.
-cstr_range* = (mp: MutPtr<Malloc>, v: Slice<u8>, s: i64, e: i64) StringView {
+cstr_range* = (mp: Allocator, v: Slice<u8>, s: i64, e: i64) StringView {
     o ::= mp.gstr_string(e - s + 1)
     s.upto(e, (i) { o = o.gstr_push(mp, v[i]) })
     o.gstr_finish(mp)
@@ -118,7 +118,7 @@ cstr_range* = (mp: MutPtr<Malloc>, v: Slice<u8>, s: i64, e: i64) StringView {
 // src[start .. start+n) as an owned str. (named cstr_* to avoid colliding with std.text.str's
 // generic `substr` once the modules are flattened together — a plain `substr` would emit a second
 // C `substr` definition.)
-cstr_substr* = (mp: MutPtr<Malloc>, s: StringView, start: i32, n: i32) StringView {
+cstr_substr* = (mp: Allocator, s: StringView, start: i32, n: i32) StringView {
     v: Slice<u8> = s.view()
     mp.bs_push_range(mp.gstr_string(n + 1), v, start, start + n).gstr_finish(mp)
 }
@@ -129,7 +129,7 @@ cstr_substr* = (mp: MutPtr<Malloc>, s: StringView, start: i32, n: i32) StringVie
 // it. `zt_log` prints "zenc: time <stage> <ms>ms" when ZENC_TIME is set and returns the new reading,
 // so stages chain: `t1 = mp.zt_log("parse", t0)`.
 zt_on* = () bool { is_empty(getEnv("ZENC_TIME")) == false }
-zt_log* = (mp: MutPtr<Malloc>, name: StringView, start_ms: i64) i64 {
+zt_log* = (mp: Allocator, name: StringView, start_ms: i64) i64 {
     now = clock_ms()
     zt_on().then({
         eprint(mp
@@ -153,7 +153,7 @@ zt_log* = (mp: MutPtr<Malloc>, name: StringView, start_ms: i64) i64 {
 // output — reproduces the old in-library `exit(1)` byte for byte. The server calls
 // `resolve_program_data` + `resolve_failed()` directly instead, and keeps serving.
 resolve_prog_or_exit* = (
-    mp: MutPtr<Malloc>,
+    mp: Allocator,
     root: StringView,
     path: StringView,
     src: StringView,

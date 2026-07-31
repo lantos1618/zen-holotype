@@ -7,7 +7,7 @@
   gsdef_at, genumdef_at, acquire_or_die } = compiler.genc
 { param_names_has, slice_any } = compiler.astops
 { at, is_digit, is_upper } = std.text.ascii
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { field_is_method } = compiler.parse_type_decl
 { param_buf, take_params } = compiler.parse_type
 { loop_at } = std.core.count
@@ -15,7 +15,7 @@
 //    param / field / payload TYPE position introduces the type parameter, so the `<A>` declaration list
 //    becomes OPTIONAL (the existing explicit lists keep working untouched). Two gates make this safe:
 //    (1) the name matches the type-variable CONVENTION — a single upper letter, optionally one digit —
-//    so a real multi-letter type (Vec, Malloc, Strng, Widget) is never collected and a multi-letter typo
+//    so a real multi-letter type (Vec, RequestArena, Strng, Widget) is never collected and a multi-letter typo
 //    still errors; (2) the name is NOT a type DECLARED or IMPORTED in this module — so a single-letter
 //    struct/enum name (`P*: {…}`, `R*: Ok|Err`) used as a param type is a real reference, not a tyvar.
 //    Both gates require the whole module, so this runs as a post-parse pass over the [Decl] list (not in
@@ -114,14 +114,14 @@ collect_decltype = (buf: [Param], cnt: i32, d: Decl) i32 {
         _              => cnt,
     })
 }
-collect_decltypes = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
+collect_decltypes = (a: Allocator, decls: [Decl]) [Param] {
     buf = cbuf<Param>(a, decls.len + 8)
     n ::= 0
     decls.loop_at((i, d) { n = buf.collect_decltype(n, d) })
     buf.take_params(n)
 }
 // ── implicit trait-bound params: a param `name: Trait` (Trait a DECLARED trait) is sugar for a
-//    bounded implicit generic — `(a: Allocator)` ≡ `<A: Allocator>(a: MutPtr<A>)`. We synthesize a
+//    bounded implicit generic — `(a: AllocatorBackend)` ≡ `<A: AllocatorBackend>(a: MutPtr<A>)`. We synthesize a
 //    fresh single-letter tparam bounded by Named(Trait), rewrite the param's type to MutPtr<fresh>,
 //    and let the existing bounded-generic + monomorphization machinery do everything else. Two params
 //    of the SAME trait get two DISTINCT tparams. A trait is detected as a trait-shaped DStruct (all
@@ -153,23 +153,23 @@ collect_trait = (buf: [Param], decls: [Decl], cnt: i32, d: Decl) i32 {
         _                  => cnt,
     })
 }
-collect_traits = (a: MutPtr<Malloc>, decls: [Decl]) [Param] {
+collect_traits = (a: Allocator, decls: [Decl]) [Param] {
     buf = cbuf<Param>(a, decls.len + 8)
     n ::= 0
     decls.loop_at((i, d) { n = buf.collect_trait(decls, n, d) })
     buf.take_params(n)
 }
 // MutPtr<T> lowers to T* — the same Ty an explicit `MutPtr<A>` produces.
-mutptr_of = (a: MutPtr<Malloc>, t: Ty) Ty { tptr(a.tnode(t)) }
+mutptr_of = (a: Allocator, t: Ty) Ty { tptr(a.tnode(t)) }
 // a one-character, NUL-terminated tparam name (`A`, `B`, …).
-make_letter = (a: MutPtr<Malloc>, c: u8) StringView {
+make_letter = (a: Allocator, c: u8) StringView {
     p: RawPtr<u8> = a.acquire_or_die(2)
     p.offset(0).store(c)
     p.offset(1).store(0)
     cstr(p)
 }
 // the next single-letter name (from `c`) not already used as a tparam in buf[0..cnt].
-fresh_tparam_name = (a: MutPtr<Malloc>, buf: [Param], cnt: i32, c: u8) StringView {
+fresh_tparam_name = (a: Allocator, buf: [Param], cnt: i32, c: u8) StringView {
     nm = a.make_letter(c)
     (buf.tv_seen(cnt, nm) && c < 'Z').then({ a.fresh_tparam_name(buf, cnt, c + 1) }, { nm })
 }
@@ -186,7 +186,7 @@ TDesugar: {
     ntp: i32,
 }
 desugar_trait_params = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     traits: [Param],
     buf: [Param],
     cnt: i32,
@@ -212,7 +212,7 @@ desugar_trait_params = (
         ntp: n,
     )
 }
-augment_func = (a: MutPtr<Malloc>, types: [Param], traits: [Param], f: Func) Func {
+augment_func = (a: Allocator, types: [Param], traits: [Param], f: Func) Func {
     buf = a.param_buf()
     n0 = buf.copy_tparams(f.tparams)
     n1 = buf.collect_tv_params(types, n0, f.params)
@@ -227,7 +227,7 @@ augment_func = (a: MutPtr<Malloc>, types: [Param], traits: [Param], f: Func) Fun
         pos: f.pos,
     )
 }
-augment_dstruct = (a: MutPtr<Malloc>, types: [Param], sd: StructDecl) Decl {
+augment_dstruct = (a: Allocator, types: [Param], sd: StructDecl) Decl {
     buf = a.param_buf()
     n = buf.collect_tv_fields(types, 0, sd.fields)
     (n > 0).match ({
@@ -235,13 +235,13 @@ augment_dstruct = (a: MutPtr<Malloc>, types: [Param], sd: StructDecl) Decl {
         false => dstruct(sd),
     })
 }
-augment_dgenstruct = (a: MutPtr<Malloc>, types: [Param], g: GenStructDecl) Decl {
+augment_dgenstruct = (a: Allocator, types: [Param], g: GenStructDecl) Decl {
     buf = a.param_buf()
     n0 = buf.copy_tparams(g.tparams)
     n1 = buf.collect_tv_fields(types, n0, g.fields)
     dgenstruct(gsdef_at(g.name, buf.take_params(n1), g.fields, g.pos))
 }
-augment_denum = (a: MutPtr<Malloc>, types: [Param], ed: EnumDecl) Decl {
+augment_denum = (a: Allocator, types: [Param], ed: EnumDecl) Decl {
     buf = a.param_buf()
     n = buf.collect_tv_variants(types, 0, ed.variants)
     (n > 0).match ({
@@ -249,13 +249,13 @@ augment_denum = (a: MutPtr<Malloc>, types: [Param], ed: EnumDecl) Decl {
         false => denum(ed),
     })
 }
-augment_dgenenum = (a: MutPtr<Malloc>, types: [Param], g: GenEnumDecl) Decl {
+augment_dgenenum = (a: Allocator, types: [Param], g: GenEnumDecl) Decl {
     buf = a.param_buf()
     n0 = buf.copy_tparams(g.tparams)
     n1 = buf.collect_tv_variants(types, n0, g.variants)
     dgenenum(genumdef_at(g.name, buf.take_params(n1), g.variants, g.pos))
 }
-rewrite_decl = (a: MutPtr<Malloc>, types: [Param], traits: [Param], d: Decl) Decl {
+rewrite_decl = (a: Allocator, types: [Param], traits: [Param], d: Decl) Decl {
     d.match ({
         .DFunc(f)      => dfunc(a.augment_func(types, traits, f)),
         .DForeign(f)   => dforeign(a.augment_func(types, traits, f)),
@@ -266,7 +266,7 @@ rewrite_decl = (a: MutPtr<Malloc>, types: [Param], traits: [Param], d: Decl) Dec
         _              => d,
     })
 }
-implicit_tparams* = (a: MutPtr<Malloc>, decls: [Decl]) [Decl] {
+implicit_tparams* = (a: Allocator, decls: [Decl]) [Decl] {
     types = a.collect_decltypes(decls)
     traits = a.collect_traits(decls)
     decls.loop_at((i, d) { decls[i] = a.rewrite_decl(types, traits, d) })

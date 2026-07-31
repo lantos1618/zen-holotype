@@ -4,7 +4,7 @@
 { gstr_append, gstr_finish, gstr_push, gstr_string } = compiler.genc
 { DeclIndex, Env, arm_env, bind_tparams, build_decl_index, dispatch_recv_name, extend_env,
   is_intrinsic, loop_env, params_env, recv_name, show_name, the_func } = compiler.check
-{ Malloc } = std.mem.alloc
+{ Allocator } = std.mem.alloc
 { at } = std.text.ascii
 { is_empty } = std.text.str
 { String } = std.text.string
@@ -35,7 +35,7 @@ fn_dup_before* = (decls: [Decl], name: StringView, upto: i64) bool {
 // ── fit-mismatch enrichment: name the TWO types the checker already had in hand ────────────────
 // `expected `<want>`, got `<got>``, both rendered in USER spelling via zty. Reused by arg-type /
 // assign-fit / return-fit so a mismatch says what fits and what was supplied, not just "does not fit".
-denrich_fit_msg = (a: MutPtr<Malloc>, want: Ty, got: Ty) StringView {
+denrich_fit_msg = (a: Allocator, want: Ty, got: Ty) StringView {
     a
         .gstr_string(48)
         .gstr_append(a, "expected `")
@@ -100,10 +100,10 @@ denrich_argfit_msg = (env: Env, c: CallData, off: i32) StringView {
 }
 // one comma-list step: the first name bare, every later one prefixed with ", ". Shared by the
 // field-list and missing-method-list renderers so the list shape cannot drift between them.
-denrich_comma_name = (s: String, a: MutPtr<Malloc>, first: bool, name: StringView) String {
+denrich_comma_name = (s: String, a: Allocator, first: bool, name: StringView) String {
     first.then({ s.gstr_append(a, name) }, { s.gstr_append(a, ", ").gstr_append(a, name) })
 }
-denrich_fieldlist = (a: MutPtr<Malloc>, fields: [Field]) StringView {
+denrich_fieldlist = (a: Allocator, fields: [Field]) StringView {
     s ::= a.gstr_string(64)
     fields.loop_at((i, f) { s = s.denrich_comma_name(a, i == 0, f.name) })
     s.gstr_finish(a)
@@ -111,7 +111,7 @@ denrich_fieldlist = (a: MutPtr<Malloc>, fields: [Field]) StringView {
 // `struct `S` has no field `f` (fields: …)` — ONE builder for the two sites that name a bad field
 // against a struct's real field list (member access and struct-literal init).
 denrich_struct_nofield = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     sname: StringView,
     field: StringView,
     fields: [Field],
@@ -127,7 +127,7 @@ denrich_struct_nofield = (
         .gstr_append(a, ")")
         .gstr_finish(a)
 }
-denrich_member_noty = (a: MutPtr<Malloc>, field: StringView, objty: Ty) StringView {
+denrich_member_noty = (a: Allocator, field: StringView, objty: Ty) StringView {
     a
         .gstr_string(64)
         .gstr_append(a, "type `")
@@ -138,7 +138,7 @@ denrich_member_noty = (a: MutPtr<Malloc>, field: StringView, objty: Ty) StringVi
         .gstr_finish(a)
 }
 // An enum/Result receiver: name the type and steer to `.match` (enums have variants, not fields).
-denrich_enum_member_msg = (a: MutPtr<Malloc>, name: StringView, field: StringView) StringView {
+denrich_enum_member_msg = (a: Allocator, name: StringView, field: StringView) StringView {
     a
         .gstr_string(112)
         .gstr_append(a, "enum `")
@@ -149,7 +149,7 @@ denrich_enum_member_msg = (a: MutPtr<Malloc>, name: StringView, field: StringVie
         .gstr_finish(a)
 }
 // A fieldless string receiver (any of the three `string_*`): accessors are UFCS METHODS, so steer to `.field()`.
-denrich_str_member_msg = (a: MutPtr<Malloc>, field: StringView, objty: Ty) StringView {
+denrich_str_member_msg = (a: Allocator, field: StringView, objty: Ty) StringView {
     a
         .gstr_string(96)
         .gstr_append(a, "`")
@@ -194,12 +194,7 @@ denrich_notcallable_msg = (env: Env, name: StringView) StringView {
 }
 // the comma-list of methods trait `tr` requires that (tn, tr) does not provide: every FnT field of
 // the trait struct with neither an impl method nor a trait default body covering it.
-denrich_missing_list = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    tn: StringView,
-    tr: StringView,
-) StringView {
+denrich_missing_list = (a: Allocator, decls: [Decl], tn: StringView, tr: StringView) StringView {
     provided = decls.impl_methods_of(tn, tr)
     s ::= a.gstr_string(64)
     n ::= 0
@@ -216,12 +211,7 @@ denrich_missing_list = (
         })
     s.gstr_finish(a)
 }
-denrich_missing_tail = (
-    a: MutPtr<Malloc>,
-    decls: [Decl],
-    tn: StringView,
-    tr: StringView,
-) StringView {
+denrich_missing_tail = (a: Allocator, decls: [Decl], tn: StringView, tr: StringView) StringView {
     list = a.denrich_missing_list(decls, tn, tr)
     is_empty(list).match ({
         true  => "",
@@ -346,7 +336,7 @@ denrich_makestruct_msg = (env: Env, sd: MakeStructData) StringView {
 // ambiguous alias-UFCS call: TWO+ `alias__fn` decls match the receiver's head type, so
 // dispatch_name refused to pick one and the call stayed an undefined name. Name the candidates
 // in their surface (dotted) form so the fix — a qualified call — is copy-pasteable.
-denrich_dotted = (s: String, a: MutPtr<Malloc>, name: StringView, p: i32) String {
+denrich_dotted = (s: String, a: Allocator, name: StringView, p: i32) String {
     b = at(name, p)
     (b == 0).match ({
         true  => s,
@@ -409,7 +399,7 @@ denrich_arity_msg = (env: Env, c: CallData) StringView {
     })
 }
 // ── targ-arity enrichment: name the expected vs the supplied TYPE-argument count ───────────────
-denrich_targ_count_msg = (a: MutPtr<Malloc>, exp: i64, got: i64) StringView {
+denrich_targ_count_msg = (a: Allocator, exp: i64, got: i64) StringView {
     a
         .gstr_string(64)
         .gstr_append(a, "expected ")
@@ -470,7 +460,7 @@ denrich_undef_method_msg = (env: Env, c: CallData) StringView {
             .gstr_finish(a),
     })
 }
-denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) StringView {
+denrich_expr = (a: Allocator, env: Env, e: Ptr<Expr>, off: i32, code: i32) StringView {
     load(e).match ({
         .Bin(b)         => (code == KOPERAND() && b.pos.pos_or(load(b.lhs).expr_pos()) == off).match ({
             true  => env.denrich_operand_msg(b),
@@ -509,7 +499,7 @@ denrich_expr = (a: MutPtr<Malloc>, env: Env, e: Ptr<Expr>, off: i32, code: i32) 
 }
 // the `.Call` arm of denrich_expr: the per-kind positioned messages as a flat early-return table,
 // then (for the arg-carrying kinds and the fall-through) the recursive walk over the call's args.
-denrich_call = (a: MutPtr<Malloc>, env: Env, c: CallData, off: i32, code: i32) StringView {
+denrich_call = (a: Allocator, env: Env, c: CallData, off: i32, code: i32) StringView {
     (code == KNOTCALLABLE() && c.pos == off).then({
         return env.denrich_notcallable_msg(c.fn)
     })
@@ -533,18 +523,18 @@ denrich_call = (a: MutPtr<Malloc>, env: Env, c: CallData, off: i32, code: i32) S
     })
     a.denrich_args(env, c.args, off, code)
 }
-denrich_args = (a: MutPtr<Malloc>, env: Env, args: [Expr], off: i32, code: i32) StringView {
+denrich_args = (a: Allocator, env: Env, args: [Expr], off: i32, code: i32) StringView {
     res ::= ""
     args.loop_at((i, ar) { res = desc_or(res, a.denrich_expr(env, ar.addr(), off, code)) })
     res
 }
-denrich_inits = (a: MutPtr<Malloc>, env: Env, inits: [FieldInit], off: i32, code: i32) StringView {
+denrich_inits = (a: Allocator, env: Env, inits: [FieldInit], off: i32, code: i32) StringView {
     res ::= ""
     inits.loop_at((i, fi) { res = desc_or(res, a.denrich_expr(env, fi.value, off, code)) })
     res
 }
 denrich_arms = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     env: Env,
     subjty: Ty,
     arms: [ArmData],
@@ -557,7 +547,7 @@ denrich_arms = (
     })
     res
 }
-denrich_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, off: i32, code: i32) StringView {
+denrich_stmt = (a: Allocator, env: Env, st: Stmt, off: i32, code: i32) StringView {
     st.match ({
         .Let(l)      => desc_or((code == KASSIGNFIT() && load(l.value).expr_pos() == off).match ({
             true  => env.denrich_valfit(l.ty, l.value),
@@ -589,7 +579,7 @@ denrich_stmt = (a: MutPtr<Malloc>, env: Env, st: Stmt, off: i32, code: i32) Stri
         },
     })
 }
-denrich_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], off: i32, code: i32) StringView {
+denrich_body = (a: Allocator, env: Env, body: [Stmt], off: i32, code: i32) StringView {
     res ::= ""
     e ::= env
     body.loop_at((i, st) {
@@ -599,7 +589,7 @@ denrich_body = (a: MutPtr<Malloc>, env: Env, body: [Stmt], off: i32, code: i32) 
     res
 }
 denrich_func = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     decls: [Decl],
     idx: DeclIndex,
     f: Func,
@@ -618,7 +608,7 @@ denrich_func = (
 // dup-fn enrichment: NAME the symbol that is defined twice. `off` is the LATER definition's name
 // offset (kv_dup_name_kind anchors there), so the decl whose pos matches — and whose name an
 // EARLIER decl already binds — is the colliding one; the render already points file:line:col at it.
-denrich_dupfn = (a: MutPtr<Malloc>, decls: [Decl], off: i32) StringView {
+denrich_dupfn = (a: Allocator, decls: [Decl], off: i32) StringView {
     res ::= ""
     decls.loop_at((i, d) {
         nm = d.fn_name_of()
@@ -640,7 +630,7 @@ denrich_dupfn = (a: MutPtr<Malloc>, decls: [Decl], off: i32) StringView {
 }
 // the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound/
 // dup-fn/undefined-name error at `off`, else "".
-denrich_module = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) StringView {
+denrich_module = (a: Allocator, decls: [Decl], off: i32, code: i32) StringView {
     (off <= 0
         || code != KSTRUCTFIELD()
             && code != KOPERAND()
@@ -679,7 +669,7 @@ denrich_module = (a: MutPtr<Malloc>, decls: [Decl], off: i32, code: i32) StringV
 // the kind name confines enrichment to ladder-rendered diagnostics and never overwrites a custom
 // channel's message.
 denrich_check* = (
-    a: MutPtr<Malloc>,
+    a: Allocator,
     raw: [Decl],
     decls: [Decl],
     off: i32,
