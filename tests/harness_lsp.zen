@@ -30,11 +30,13 @@
 //  (13) TYPING AN IMPORT: every prefix of `std.text.str` is an unknown module, and each one must get
 //       its own diagnostic while the server keeps answering requests — resolution reports and returns
 //       instead of killing the process
-{ Allocator, heap_allocator } = std.mem.alloc
+{ Allocator, heap_allocator, request_arena } = std.mem.alloc
+{ memcpy } = std.c.libc
 { save, contents_in, shell } = std.io.file
 { len, contains } = std.text.str
 { expect } = std.core.result
 { zo_cmd, zo_dir, zo_idpath, zo_join, zo_itoa, run_suite } = harness_lib
+{ lspd_init, lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at, lspd_tokens_at } = compiler.lsp_docs
 // ── session plumbing ──────────────────────────────────────────────────────────────────────────────
 // one framed JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`.
 lz_frame = (mp: Allocator, body: StringView) StringView {
@@ -106,6 +108,44 @@ lz_close = (mp: Allocator, uri: StringView) StringView {
 // document texts as they sit INSIDE the JSON body (\n are JSON escapes the server decodes).
 LZ_BAD = () StringView { "main = () i32 {\\n    x = undefined_name\\n    0\\n}\\n" }
 LZ_GOOD = () StringView { "main = () i32 {\\n    7\\n}\\n" }
+lz_temp = (a: Allocator, s: StringView) StringView {
+    n = len(s)
+    p = assert_nonnull(a.acquire(n + 1))
+    memcpy(p, s.offset(0), n)
+    p.offset(n).store(0)
+    cstr(p)
+}
+lz_docs_owned = (mp: Allocator) bool {
+    one ::= lspd_init(mp)
+    two ::= lspd_init(mp)
+    request ::= request_arena(mp)
+    rm = request.addr().allocator()
+    uri = rm.lz_temp("file:///one")
+    text = rm.lz_temp("first")
+    i = one.addr().lspd_set(uri, text, 1)
+    j = two.addr().lspd_set("file:///two", "second", 4)
+    tokens = rm.lz_temp("[1]")
+    one.addr().lspd_cache_tokens(i, tokens)
+    same = one.addr().lspd_tokens_at(i)
+    one.addr().lspd_cache_tokens(i, same)
+    request.addr().reset()
+    junk = assert_nonnull(rm.acquire(64))
+    memcpy(junk, "xxxxxxxxxxxxxxxx".offset(0), 16)
+    cached = one.addr().lspd_tokens_at(i) == "[1]"
+    durable = one.addr().lspd_text_at(i) == "first"
+        && two.addr().lspd_text_at(j) == "second"
+        && one.addr().lspd_find("file:///two") < 0
+    one.addr().lspd_set("file:///one", "changed", 2)
+    invalidated = one.addr().lspd_tokens_at(i) == ""
+    one.addr().lspd_close("file:///one")
+    isolated = one.addr().lspd_find("file:///one") < 0 && two.addr().lspd_find("file:///two") == j
+    one.addr().deinit()
+    one.addr().deinit()
+    survives = two.addr().lspd_text_at(j) == "second"
+    two.addr().deinit()
+    request.addr().deinit()
+    cached && durable && invalidated && isolated && survives
+}
 // ── the cases ─────────────────────────────────────────────────────────────────────────────────────
 // (1) initialize: framed reply, echoed id, full-sync capability advertised, clean shutdown/exit.
 lz_init_ok = (mp: Allocator) bool {
@@ -608,5 +648,5 @@ lz_comp_auto_import = (mp: Allocator) bool {
 }
 harness_lsp_run* = () i32 {
     mp = heap_allocator()
-    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown(), mp.lz_gd_same_file_fn(), mp.lz_gd_same_file_type(), mp.lz_gd_inherent_method(), mp.lz_gd_struct_field(), mp.lz_gd_cross_module(), mp.lz_gd_imported_std(), mp.lz_gd_qualified(), mp.lz_hover_motion(), mp.lz_unimplemented_motions(), mp.lz_docsym_top_level(), mp.lz_docsym_nests_methods(), mp.lz_docsym_omits(), mp.lz_comp_empty_buffer(), mp.lz_comp_top_level(), mp.lz_comp_after_std_dot(), mp.lz_comp_receiver_members(), mp.lz_comp_auto_import()])
+    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_docs_owned(), mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown(), mp.lz_gd_same_file_fn(), mp.lz_gd_same_file_type(), mp.lz_gd_inherent_method(), mp.lz_gd_struct_field(), mp.lz_gd_cross_module(), mp.lz_gd_imported_std(), mp.lz_gd_qualified(), mp.lz_hover_motion(), mp.lz_unimplemented_motions(), mp.lz_docsym_top_level(), mp.lz_docsym_nests_methods(), mp.lz_docsym_omits(), mp.lz_comp_empty_buffer(), mp.lz_comp_top_level(), mp.lz_comp_after_std_dot(), mp.lz_comp_receiver_members(), mp.lz_comp_auto_import()])
 }

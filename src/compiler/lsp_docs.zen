@@ -1,9 +1,5 @@
-// LSP document store. An open document uses the client's latest full-sync text; otherwise callers
-// fall back to disk. didOpen/didChange replace the stored state, and didClose frees and removes it.
-// Token data is valid only when `tok_version == version`; every text write invalidates it.
-// The store outlives request-arena resets, so URI, text, and tokens are copied to the process heap.
-// Replacements and closes release those durable copies; one text and token buffer remain per open file.
-{ heap_allocator } = std.mem.alloc
+// Durable state for documents currently owned by the editor.
+{ Allocator } = std.mem.alloc
 { memcpy } = std.c.libc
 { view } = std.text.str
 { then } = std.core.bool
@@ -14,30 +10,41 @@ LspDoc: {
     tokens: StringView,
     version: i64,
     tok_version: i64,
-}    // -1 = no token array cached for `version`
+}
+LspDocs*: {
+    alloc: Allocator,
+    buf: [LspDoc],
+    n: i64,
+    deinit = (docs: MutPtr<LspDocs>) void { lspd_deinit(docs) }
+}
 lspd_none = () [LspDoc] { slice(null_ptr(), 0) }
-lspd_acquire = (n: i64) RawPtr<u8> { allocator_dispatch_acquire(heap_allocator(), n) }
-lspd_free = (p: RawPtr<u8>) void { allocator_dispatch_release(heap_allocator(), p) }
-lspd_buf ::= lspd_none()
-lspd_n ::= 0
-lspd_alloc = (n: i64) [LspDoc] { slice(lspd_acquire(n * sizeof(LspDoc)), n) }
-lspd_grow = () void {
-    (lspd_n >= lspd_buf.len).then({
-        grown ::= lspd_alloc((lspd_buf.len < 4).then({ 4 }, { lspd_buf.len * 2 }))
-        old = lspd_buf.ptr
-        lspd_buf.loop_at((i, d) { grown[i] = d })
-        lspd_buf = grown
-        lspd_free(old)
+lspd_init* = (alloc: Allocator) LspDocs {
+    LspDocs(
+        alloc: alloc,
+        buf: lspd_none(),
+        n: 0,
+    )
+}
+lspd_alloc = (docs: MutPtr<LspDocs>, n: i64) [LspDoc] {
+    slice(assert_nonnull(docs.alloc.acquire(n * sizeof(LspDoc))), n)
+}
+lspd_grow = (docs: MutPtr<LspDocs>) void {
+    (docs.n >= docs.buf.len).then({
+        grown ::= docs.lspd_alloc((docs.buf.len < 4).then({ 4 }, { docs.buf.len * 2 }))
+        old = docs.buf.ptr
+        docs.buf.loop_at((i, d) { grown[i] = d })
+        docs.buf = grown
+        (old != null_ptr()).then({
+            docs.alloc.release(old)
+        })
     })
 }
-// a DURABLE copy of a request-scoped view — NUL-terminated, so it reads back as a plain StringView.
-// The empty view keeps the "" literal (nothing to own, nothing to release).
-lspd_own = (s: StringView) StringView {
+lspd_own = (docs: MutPtr<LspDocs>, s: StringView) StringView {
     v: Slice<u8> = s.view()
     (v.len == 0).match ({
         true  => "",
         false => {
-            p = lspd_acquire(v.len + 1)
+            p = docs.alloc.acquire(v.len + 1)
             (p == null_ptr()).match ({
                 true  => "",
                 false => {
@@ -49,79 +56,78 @@ lspd_own = (s: StringView) StringView {
         },
     })
 }
-// release an OWNED copy. "" is the literal miss/absent marker and is never heap — see MEMORY above.
-lspd_release = (s: StringView) void {
-    v: Slice<u8> = s.view()
-    (v.len > 0).then({
-        lspd_free(s.offset(0))
+lspd_release = (docs: MutPtr<LspDocs>, s: StringView) void {
+    (s.view().len > 0).then({
+        docs.alloc.release(s.offset(0))
     })
-}    // `s.offset(0)` is std.text.str's `own_ptr` respelled: this file is in the bootstrap
-// manifest, which does not carry std.text.str, so the name cannot be imported here. `v.ptr` is a
-// BORROWED `Ptr<u8>` and will not free; `lspd_own` allocated this block, so the claim is honest.
-lspd_free_entry = (i: i64) void {
-    d = lspd_buf[i]
-    lspd_release(d.uri)
-    lspd_release(d.text)
-    lspd_release(d.tokens)
 }
-lspd_scan = (i: i64, uri: StringView) i64 {
-    (i >= lspd_n).match ({
+lspd_free_entry = (docs: MutPtr<LspDocs>, i: i64) void {
+    d = docs.buf[i]
+    docs.lspd_release(d.uri)
+    docs.lspd_release(d.text)
+    docs.lspd_release(d.tokens)
+}
+lspd_scan = (docs: MutPtr<LspDocs>, i: i64, uri: StringView) i64 {
+    (i >= docs.n).match ({
         true  => 0 - 1,
-        false => (lspd_buf[i].uri == uri).then({ i }, { lspd_scan(i + 1, uri) }),
+        false => (docs.buf[i].uri == uri).then({ i }, { docs.lspd_scan(i + 1, uri) }),
     })
 }
-// index of the OPEN document `uri`, or -1 — the callers' "is the client's buffer authoritative?" test.
-lspd_find* = (uri: StringView) i64 { lspd_scan(0, uri) }
-lspd_text_at* = (i: i64) StringView { lspd_buf[i].text }
-// the memoized token array for the document's CURRENT version, or "" when nothing is cached for it.
-lspd_tokens_at* = (i: i64) StringView {
-    d = lspd_buf[i]
+lspd_find* = (docs: MutPtr<LspDocs>, uri: StringView) i64 { docs.lspd_scan(0, uri) }
+lspd_text_at* = (docs: MutPtr<LspDocs>, i: i64) StringView { docs.buf[i].text }
+lspd_tokens_at* = (docs: MutPtr<LspDocs>, i: i64) StringView {
+    d = docs.buf[i]
     (d.tok_version == d.version).then({ d.tokens }, { "" })
 }
-// didOpen / didChange: keep a durable copy of `uri` + `text`, free what they replace, drop the token
-// cache, and return the entry's index.
-lspd_set* = (uri: StringView, text: StringView, version: i64) i64 {
-    i = lspd_find(uri)
+lspd_set* = (docs: MutPtr<LspDocs>, uri: StringView, text: StringView, version: i64) i64 {
+    i = docs.lspd_find(uri)
     fresh = LspDoc(
-        uri: lspd_own(uri),
-        text: lspd_own(text),
+        uri: docs.lspd_own(uri),
+        text: docs.lspd_own(text),
         tokens: "",
         version: version,
         tok_version: 0 - 1,
     )
     (i < 0).match ({
         true  => {
-            lspd_grow()
-            lspd_buf[lspd_n] = fresh
-            lspd_n = lspd_n + 1
-            lspd_n - 1
+            docs.lspd_grow()
+            docs.buf[docs.n] = fresh
+            docs.n = docs.n + 1
+            docs.n - 1
         },
         false => {
-            lspd_free_entry(i)
-            lspd_buf[i] = fresh
+            docs.lspd_free_entry(i)
+            docs.buf[i] = fresh
             i
         },
     })
 }
-// memoize `toks` against the document's current version, as a durable copy.
-lspd_cache_tokens* = (i: i64, toks: StringView) void {
-    d = lspd_buf[i]
-    lspd_release(d.tokens)
-    lspd_buf[i] = LspDoc(
+lspd_cache_tokens* = (docs: MutPtr<LspDocs>, i: i64, toks: StringView) void {
+    d = docs.buf[i]
+    owned = docs.lspd_own(toks)
+    docs.lspd_release(d.tokens)
+    docs.buf[i] = LspDoc(
         uri: d.uri,
         text: d.text,
-        tokens: lspd_own(toks),
+        tokens: owned,
         version: d.version,
         tok_version: d.version,
     )
 }
-// didClose: free the entry's buffers and swap the last entry into its slot. After this the document
-// is no longer open, so disk is once again the source of truth for it.
-lspd_close* = (uri: StringView) void {
-    i = lspd_find(uri)
+lspd_close* = (docs: MutPtr<LspDocs>, uri: StringView) void {
+    i = docs.lspd_find(uri)
     (i >= 0).then({
-        lspd_free_entry(i)
-        lspd_buf[i] = lspd_buf[lspd_n - 1]
-        lspd_n = lspd_n - 1
+        docs.lspd_free_entry(i)
+        docs.buf[i] = docs.buf[docs.n - 1]
+        docs.n = docs.n - 1
     })
+}
+lspd_deinit = (docs: MutPtr<LspDocs>) void {
+    live: [LspDoc] = slice(docs.buf.ptr, docs.n)
+    live.loop_at((i, d) { docs.lspd_free_entry(i) })
+    (docs.buf.ptr != null_ptr()).then({
+        docs.alloc.release(docs.buf.ptr)
+    })
+    docs.buf = lspd_none()
+    docs.n = 0
 }

@@ -2,7 +2,7 @@
 // Content-Length wire format, publishes diagnostics on open/change, and answers go-to-definition.
 // The JSON here is hand-rolled (std.format.json isn't in the seed manifest) and deliberately
 // minimal: enough of a reader to pull the fields the protocol needs out of a request body.
-{ Allocator, RequestArena, heap_allocator, request_arena } = std.mem.alloc
+{ Allocator, RequestArena, request_arena } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
 { contents_in } = std.io.file
@@ -30,11 +30,28 @@
 { gstr_string, gstr_append, gstr_finish, gstr_push, acquire_or_die } = compiler.genc
 { push_int, dirname, cstr_range, cstr_substr } = compiler.drvutil
 { lspt_legend, lspt_tokens } = compiler.lsp_tokens
-{ lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at, lspd_tokens_at } = compiler.lsp_docs
+{ LspDocs, lspd_init, lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at,
+  lspd_tokens_at } = compiler.lsp_docs
 { cd_or, locate_diag } = compiler.drvdiag
 { ff_is_hoisted } = compiler.pretty_decl
 { lsp_byte_of_pos, lsp_col_of, lsp_find_def, lsp_ident_end, lsp_ident_start, lsp_line_of,
   lspq_hover, lspq_items } = compiler.lsp_query
+LspSession: {
+    durable: Allocator,
+    requests: RequestArena,
+    docs: LspDocs,
+    deinit = (s: MutPtr<LspSession>) void {
+        s.docs.addr().deinit()
+        s.requests.addr().deinit()
+    }
+}
+lsp_session = (durable: Allocator) LspSession {
+    LspSession(
+        durable: durable,
+        requests: request_arena(durable),
+        docs: lspd_init(durable),
+    )
+}
 // ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 1) ─────────────────────────
 // A JSON-RPC 2.0 loop: read `Content-Length: N\r\n\r\n<N-byte JSON body>` frames from stdin, run the
 // EXISTING check pipeline (resolve -> parse -> the diagnostic channels) on each opened/changed
@@ -579,10 +596,10 @@ lsp_parse_dec = (v: Slice<u8>, i: i64, acc: i64) i64 {
 }
 // the text of `uri` AS THE CLIENT SEES IT: the open buffer when the document is in the store, the
 // file on disk otherwise (a jump target the editor never opened). "" = neither, i.e. unreadable.
-lsp_doc_text = (mp: Allocator, uri: StringView) StringView {
-    i = lspd_find(uri)
+lsp_doc_text = (mp: Allocator, docs: MutPtr<LspDocs>, uri: StringView) StringView {
+    i = docs.lspd_find(uri)
     (i >= 0).match ({
-        true  => lspd_text_at(i),
+        true  => docs.lspd_text_at(i),
         false => contents_in(mp.addr(), mp.lsp_uri_path(uri)).match ({
             .Ok(txt) => txt,
             .Err(er) => "",
@@ -692,9 +709,9 @@ lsp_def_via_ast = (
 // Still answered null, deliberately: struct FIELDS and local bindings. A Field carries no source
 // position in compiler.ast.ast_types, so there is nothing to point at — closing that is an AST
 // change, not an LSP one.
-lsp_definition = (mp: Allocator, root: StringView, body: StringView) i64 {
+lsp_definition = (mp: Allocator, docs: MutPtr<LspDocs>, root: StringView, body: StringView) i64 {
     uri = mp.json_str_field(body, "uri")
-    txt = mp.lsp_doc_text(uri)
+    txt = mp.lsp_doc_text(docs, uri)
     v: Slice<u8> = txt.view()
     off = v.lsp_byte_of_pos(body.lsp_json_int("line"), body.lsp_json_int("character"), 0, 0)
     s = v.lsp_ident_start(off)
@@ -715,8 +732,8 @@ lsp_definition = (mp: Allocator, root: StringView, body: StringView) i64 {
 // HOVER: the declaration under the cursor as markdown — a fenced signature plus the doc comment
 // above it. compiler.lsp_query decides what that covers; "nothing to say" comes back as "" and is
 // answered with a null result, the protocol's own spelling of "no hover here" (never an empty popup).
-lsp_hover = (mp: Allocator, body: StringView) i64 {
-    txt = mp.lsp_doc_text(mp.json_str_field(body, "uri"))
+lsp_hover = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
+    txt = mp.lsp_doc_text(docs, mp.json_str_field(body, "uri"))
     md = mp.lspq_hover(txt, body.lsp_json_int("line"), body.lsp_json_int("character"))
     is_empty(md).then({
         return mp.lsp_reply_null(body)
@@ -734,8 +751,8 @@ lsp_hover = (mp: Allocator, body: StringView) i64 {
 // promise that this IS the whole list for the position, so the client may filter it locally instead
 // of asking again on the next keystroke — true here precisely because the list does not depend on
 // the prefix being typed.
-lsp_completion = (mp: Allocator, body: StringView) i64 {
-    items = mp.lspq_items(mp.lsp_doc_text(mp.json_str_field(body, "uri")))
+lsp_completion = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
+    items = mp.lspq_items(mp.lsp_doc_text(docs, mp.json_str_field(body, "uri")))
     sb ::= mp
         .gstr_string(2048)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
@@ -988,8 +1005,8 @@ lsp_symbols_json = (mp: Allocator, text: StringView) StringView {
 }
 // DOCUMENT SYMBOL (`gO`, and the `]m`/`[m` method motions built on it). Answered from the OPEN
 // BUFFER via lsp_doc_text, so an unsaved edit is in the outline the moment it is typed.
-lsp_document_symbol = (mp: Allocator, body: StringView) i64 {
-    syms = mp.lsp_symbols_json(mp.lsp_doc_text(mp.json_str_field(body, "uri")))
+lsp_document_symbol = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
+    syms = mp.lsp_symbols_json(mp.lsp_doc_text(docs, mp.json_str_field(body, "uri")))
     mp.lsp_send(mp
         .gstr_string(1024)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
@@ -1014,16 +1031,16 @@ lsp_send_tokens = (mp: Allocator, body: StringView, data: StringView) i64 {
 // re-asks after a scroll) costs a lookup instead of a full lex of the file. A document the client
 // has NOT opened is still read from disk — and not cached, since nothing then tells us when it
 // changed. `lspd_set` drops the cache on every text write, so a hit can only ever be this text.
-lsp_semantic_tokens = (mp: Allocator, body: StringView) i64 {
+lsp_semantic_tokens = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
     uri = mp.json_str_field(body, "uri")
-    i = lspd_find(uri)
+    i = docs.lspd_find(uri)
     (i >= 0).match ({
         true  => {
-            cached = lspd_tokens_at(i)
+            cached = docs.lspd_tokens_at(i)
             data = is_empty(cached).match ({
                 true  => {
-                    fresh = mp.lspt_tokens(lspd_text_at(i))
-                    lspd_cache_tokens(i, fresh)
+                    fresh = mp.lspt_tokens(docs.lspd_text_at(i))
+                    docs.lspd_cache_tokens(i, fresh)
                     fresh
                 },
                 false => cached,
@@ -1078,15 +1095,17 @@ lsp_publish_clear = (mp: Allocator, uri: StringView) i64 {
 // `version` is the client's monotonic edit counter. Both land in the store — which takes ownership of
 // the decoded uri/text and frees the pair they replace — and the publish then reads the text back
 // OUT of the store, so diagnostics and highlighting are provably answering about the same bytes.
-lsp_did_change = (mp: Allocator, root: StringView, body: StringView) i64 {
+lsp_did_change = (mp: Allocator, docs: MutPtr<LspDocs>, root: StringView, body: StringView) i64 {
     uri = mp.json_str_field(body, "uri")
-    i = lspd_set(uri, mp.json_str_field(body, "text"), body.lsp_json_int("version"))
-    mp.lsp_publish(root, uri, lspd_text_at(i))
+    i = docs.lspd_set(uri, mp.json_str_field(body, "text"), body.lsp_json_int("version"))
+    mp.lsp_publish(root, uri, docs.lspd_text_at(i))
 }
 // dispatch one message. Returns 0 = keep serving, 1 = shutdown received, 2 = exit. Unknown
 // NOTIFICATIONS are no-ops; an unknown REQUEST (an "id" key outside the notification families) gets
 // a MethodNotFound error so the client never waits on a reply that will not come.
-lsp_handle = (mp: Allocator, root: StringView, body: StringView) i32 {
+lsp_handle = (session: MutPtr<LspSession>, root: StringView, body: StringView) i32 {
+    mp = session.requests.addr().allocator()
+    docs = session.docs.addr()
     method = mp.json_str_field(body, "method")
     (method == "initialize").then({
         mp.lsp_reply_initialize(body)
@@ -1100,33 +1119,33 @@ lsp_handle = (mp: Allocator, root: StringView, body: StringView) i32 {
         return 2
     })
     (method == "textDocument/didOpen" || method == "textDocument/didChange").then({
-        mp.lsp_did_change(root, body)
+        mp.lsp_did_change(docs, root, body)
         return 0
     })
     (method == "textDocument/didClose").then({
         closed = mp.json_str_field(body, "uri")
-        lspd_close(closed)
+        docs.lspd_close(closed)
         mp.lsp_publish_clear(closed)
         return 0
     })
     (method == "textDocument/definition").then({
-        mp.lsp_definition(root, body)
+        mp.lsp_definition(docs, root, body)
         return 0
     })
     (method == "textDocument/hover").then({
-        mp.lsp_hover(body)
+        mp.lsp_hover(docs, body)
         return 0
     })
     (method == "textDocument/completion").then({
-        mp.lsp_completion(body)
+        mp.lsp_completion(docs, body)
         return 0
     })
     (method == "textDocument/documentSymbol").then({
-        mp.lsp_document_symbol(body)
+        mp.lsp_document_symbol(docs, body)
         return 0
     })
     (method == "textDocument/semanticTokens/full").then({
-        mp.lsp_semantic_tokens(body)
+        mp.lsp_semantic_tokens(docs, body)
         return 0
     })
     v: Slice<u8> = body.view()
@@ -1211,10 +1230,10 @@ lsp_read_body = (buf: RawPtr<u8>, off: i64, n: i64) i64 {
 // the JSON-RPC stdio loop: frame -> dispatch, until `exit`. Exit code follows the LSP convention:
 // 0 if `exit` arrived after `shutdown`, else 1 (also 1 if the stream closes without a clean shutdown).
 lsp_cmd* = (mp: Allocator, root: StringView) i32 {
-    hbuf = mp.acquire_or_die(LSP_HDR_CAP())
-    request ::= request_arena(heap_allocator())
-    rp = request.addr()
-    request_mem = rp.allocator()
+    session ::= lsp_session(mp)
+    sp = session.addr()
+    hbuf = sp.durable.acquire_or_die(LSP_HDR_CAP())
+    request_mem = sp.requests.addr().allocator()
     shut ::= false
     code ::= 1
     repeat_while((frame) {
@@ -1229,13 +1248,11 @@ lsp_cmd* = (mp: Allocator, root: StringView) i32 {
                 (n < 0 || n > LSP_BODY_MAX()).match ({
                     true  => true,
                     false => {
-                        // The frame, decode, and compiler pipeline share this request arena.
-                        // lsp_docs owns durable copies; everything else is reclaimed after handling.
                         body = request_mem.acquire_or_die(n + 1)
                         got = body.lsp_read_body(0, n)
                         body.offset(got).store(0)
-                        act = request_mem.lsp_handle(root, cstr(body))
-                        rp.reset()
+                        act = sp.lsp_handle(root, cstr(body))
+                        sp.requests.addr().reset()
                         (act == 1).then({
                             shut = true
                         })
@@ -1251,6 +1268,7 @@ lsp_cmd* = (mp: Allocator, root: StringView) i32 {
             },
         })
     })
-    rp.deinit()
+    sp.deinit()
+    sp.durable.release(hbuf)
     code
 }
