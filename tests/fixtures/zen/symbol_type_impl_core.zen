@@ -1,0 +1,112 @@
+{ heap_allocator, Allocator } = std.mem.alloc
+{ to_exit } = std.core.bool
+{ find } = std.text.str
+{ SourceOverlay } = compiler.resolve
+{ SymbolIndex, SymbolKey, resolve_symbol_index, SYMBOL_FUNCTION, SYMBOL_GLOBAL, SYMBOL_TYPE,
+  SYMBOL_METHOD, SYMBOL_LET, SYMBOL_PARAM } = compiler.symbols
+typed_as = (
+    idx: SymbolIndex,
+    name: StringView,
+    owner: StringView,
+    kind: i32,
+    want: StringView,
+) bool {
+    found ::= 0
+    ok ::= false
+    idx.decls.loop_at((i, d) {
+        (d.name == name && d.key.owner == owner && d.key.kind == kind).then({
+            found = found + 1
+            ok = d.has_type && d.type_key.name == want
+        })
+    })
+    found == 1 && ok
+}
+untyped = (idx: SymbolIndex, name: StringView, owner: StringView, kind: i32) bool {
+    found ::= 0
+    ok ::= false
+    idx.decls.loop_at((i, d) {
+        (d.name == name && d.key.owner == owner && d.key.kind == kind).then({
+            found = found + 1
+            ok = d.has_type == false
+        })
+    })
+    found == 1 && ok
+}
+impl_count = (
+    a: Allocator,
+    idx: SymbolIndex,
+    module: StringView,
+    name: StringView,
+    owner: StringView,
+    kind: i32,
+) i64 {
+    found ::= false
+    key ::= SymbolKey(
+        module: "",
+        owner: "",
+        name: "",
+        kind: 0,
+        pos: 0,
+    )
+    idx.decls.loop_at((i, d) {
+        (d.key.module == module && d.name == name && d.key.owner == owner && d.key.kind == kind).then({
+            found = true
+            key = d.key
+        })
+    })
+    found.then({ idx.implementations_of(a, key).len }, { 0 })
+}
+main = () i32 {
+    a = heap_allocator()
+    types = "Area*: {\n    area: (Ptr<Self>) i32,\n}\nCircle*: {\n    r: i32,\n    diameter = (c: Circle) i32 { c.r * 2 }\n}\nSquare*: {\n    s: i32,\n}\nBox*<T>: {\n    value: T,\n}\norigin*: Circle = Circle(r: 1)\n"
+    impls = "{ Area, Circle, Square } = types\nCircle.impl(Area, {\n    area = (c: Ptr<Circle>) i32 { c.load().r }\n})\nSquare.impl(Area, {\n    area = (s: Ptr<Square>) i32 { s.load().s }\n})\n"
+    root = "{ Area, Circle, Square, Box, origin } = types\nix = impls\nmain = (p: Circle, boxed: Box<Circle>, n: i32) i32 {\n    explicit: Circle = p\n    inferred = Circle(r: origin.r)\n    generic: Box<Circle> = Box<Circle>(value: p)\n    builtin = 0\n    inferred.diameter() + boxed.value.r + generic.value.r + explicit.r + n\n}\n"
+    idx = a.resolve_symbol_index(".", "/virtual", "/virtual/subject.zen", root, [
+        SourceOverlay(
+            path: "/virtual/types.zen",
+            source: types,
+        ),
+        SourceOverlay(
+            path: "/virtual/impls.zen",
+            source: impls,
+        ),
+    ])
+    trait_spans ::= 0
+    idx.implementations.loop_at((i, site) {
+        site.has_trait_span.then({
+            trait_spans = trait_spans + 1
+        })
+    })
+    ctor = root.find("Circle(r:")
+    method = root.find("diameter")
+    ctor_type = idx.type_definition_at("/virtual/subject.zen", to_i32(ctor)).match ({
+        .Some(d) => d.name == "Circle" && d.key.module == "u/types",
+        .None    => false,
+    })
+    method_type = idx.type_definition_at("/virtual/subject.zen", to_i32(method)).match ({
+        .Some(d) => d.name == "Circle" && d.key.module == "u/types",
+        .None    => false,
+    })
+    ok = idx.untyped("main", "", SYMBOL_FUNCTION)
+        && idx.typed_as("origin", "", SYMBOL_GLOBAL, "Circle")
+        && idx.typed_as("p", "main", SYMBOL_PARAM, "Circle")
+        && idx.typed_as("boxed", "main", SYMBOL_PARAM, "Box")
+        && idx.untyped("n", "main", SYMBOL_PARAM)
+        && idx.typed_as("explicit", "main", SYMBOL_LET, "Circle")
+        && idx.typed_as("inferred", "main", SYMBOL_LET, "Circle")
+        && idx.typed_as("generic", "main", SYMBOL_LET, "Box")
+        && idx.untyped("builtin", "main", SYMBOL_LET)
+        && idx.typed_as("diameter", "Circle", SYMBOL_METHOD, "Circle")
+        && ctor_type
+        && method_type
+        && trait_spans == 2
+        && a.impl_count(idx, "u/types", "Area", "", SYMBOL_TYPE) == 2
+        && a.impl_count(idx, "u/types", "Circle", "", SYMBOL_TYPE) == 2
+        && a.impl_count(idx, "u/types", "Square", "", SYMBOL_TYPE) == 1
+        && a.impl_count(idx, "u/types", "area", "Area", SYMBOL_METHOD) == 2
+        && a.impl_count(idx, "u/types", "diameter", "Circle", SYMBOL_METHOD) == 1
+        && a.impl_count(idx, "u/impls", "area", "Circle", SYMBOL_METHOD) == 1
+        && a.impl_count(idx, "u/impls", "area", "Square", SYMBOL_METHOD) == 1
+        && a.impl_count(idx, "", "main", "", SYMBOL_FUNCTION) == 0
+    ok.to_exit()
+}

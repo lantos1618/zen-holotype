@@ -1,30 +1,10 @@
-// compiler.astops — AST-node query traits, extracted from compiler.genc.
-// These predicates were free functions on Ty/Func/Decl/StructDecl (the AST node types defined
-// in compiler.genc). Grouping each into a trait IMPL'd on its receiver type (an out-of-module
-// impl: the types live in compiler.ast.ast_types) lets cross-module callers dispatch `t.is_fnt()`,
-// `f.is_generic_fn()`, `d.is_template()`, `d.is_trait()` &c. by UFCS through the GLOBAL IMPL
-// INDEX — so callers need NEITHER the method names NOR the trait imported, and the long
-// `= compiler.genc` import lists simply shrink. Each method is emitted as a distinct mangled C
-// function (`impl_<Trait>_<Ty>_<m>`), so unlike same-named free functions they never collide in
-// the flat C namespace. Sibling methods call each other by UFCS (`f.is_generic_fn()`), routed the
-// same way. The impl blocks live here, never in compiler.genc (which is imported by nearly
-// everything). This file imports ONLY compiler.ast.ast_types, compiler.genc, std.text.string and
-// std.mem.alloc, and none of those reach back here — so it can never sit inside an import cycle no
-// matter how many modules import it, which is what keeps it clear of the dup-impl-in-cycle trap.
-// That also makes it the natural OWNER for the small AST predicates/builders individual passes
-// would otherwise each define for themselves (field_in, param_names_has, is_logic_op, one_stmt, …).
-//
-// Only plain-named-value receivers are method-ified: the language does not support `.impl` on
-// pointer/slice receiver types, so genc's Ptr<Expr>/[Stmt] predicates (is_expr_null, blk_diverges,
-// stmts_diverge) necessarily stay free functions in compiler.genc.
 { Ty, Func, Decl, Field, StructDecl, Param, BinData, CallData, MethodCallData, Expr, Stmt } = compiler.ast.ast_types
 { sbyte, gstr_push, cbuf, dglobal_full, slett_atm, tvoid } = compiler.genc
 { String } = std.text.string
 { Allocator } = std.mem.alloc
 { expr_fold_children } = compiler.ast.expr_children
 { loop_at } = std.core.count
-// a function type marks a TEMPLATE parameter: a function with one is inlined at each call site
-// (compiler.check splices it), never emitted as a C function — so genModule skips it.
+// Functions with FnT parameters are templates and are not emitted directly.
 TyQuery*: {
     is_fnt: (Self) bool,
 }
@@ -42,13 +22,13 @@ Ty.impl(TyQuery, {
 // receiver `[Param]` is a slice type, which the language cannot carry a trait impl on).
 // the declared type of field `fname`, or Void when the struct has no such field — the shared
 // struct-field lookup behind generic field reads, ownership's struct-literal gate and arg fitting.
-field_in* = (fields: [Field], fname: StringView) Ty {
+field_in* = (fields: MutSlice<Field>, fname: StringView) Ty {
     found ::= tvoid()
     fields.loop_at((i, fl) { found = (fl.name == fname).then({ fl.ty }, { found }) })
     found
 }
 // the number of elements in an AST slice — the C and JS backends both size a slice literal with it.
-slice_count* = (items: [Expr]) i32 {
+slice_count* = (items: MutSlice<Expr>) i32 {
     n ::= 0
     items.loop_at((i, it) { n = n + 1 })
     n
@@ -57,7 +37,7 @@ slice_count* = (items: [Expr]) i32 {
 // declare X?" question in the pipeline is this one predicate: tparam membership (check, check_infer,
 // check_inline, validate.util), impl-method presence (check_desugar, validate.kinds/enrich), the
 // parser's implicit-tparam pass, and the formatter's export/tparam markers.
-param_names_has* = (ps: [Param], name: StringView) bool {
+param_names_has* = (ps: MutSlice<Param>, name: StringView) bool {
     found ::= false
     ps.loop_at((i, p) { found = found || p.name == name })
     found
@@ -76,7 +56,7 @@ is_logic_op* = (op: StringView) bool { op == "&&" || op == "||" }
 is_or_return_fn* = (c: CallData) bool { c.fn == "or_return" && c.args.len == 1 }
 // a one-statement body — `[Stmt]` of length 1. Statement lowering (check_lower), the or-return
 // rebuild (check_resolve) and reflection dispatch (passes.subst) all wrap a single Stmt this way.
-one_stmt* = (a: Allocator, st: Stmt) [Stmt] {
+one_stmt* = (a: Allocator, st: Stmt) MutSlice<Stmt> {
     buf ::= cbuf<Stmt>(a, 1)
     buf[0] = st
     buf
@@ -87,7 +67,7 @@ one_stmt* = (a: Allocator, st: Stmt) [Stmt] {
 // enclosing function. A walker that descends into a lambda body while asking "does this function
 // return X" must therefore skip it; every EARLIER return does hoist into the caller (the lambda is
 // inlined there) and stays checked.
-lam_stmt_body* = (body: [Stmt]) [Stmt] {
+lam_stmt_body* = (body: MutSlice<Stmt>) MutSlice<Stmt> {
     n = body.len
     (n == 0).match ({
         true  => body,
@@ -97,7 +77,7 @@ lam_stmt_body* = (body: [Stmt]) [Stmt] {
         }),
     })
 }
-has_fnt_param* = (ps: [Param]) bool {
+has_fnt_param* = (ps: MutSlice<Param>) bool {
     found ::= false
     ps.loop_at((i, p) { found = p.ty.is_fnt().then({ true }, { found }) })
     found
@@ -149,15 +129,11 @@ Decl.impl(DeclQuery, {
         })
     }
 })
-// ── decimal-integer emission (consolidated from ~16 re-rolled copies across the backends) ──────────
-// One digit-char lookup and one "emit a non-negative integer's decimal digits into a String" recursion,
-// formerly copy-pasted under many names — ddigit/di_digit/ffdigit/digit/jdigit/pf_digit/lift_digit for
-// the char; dnum/gstr_i64/gen_uint_nat/ff_uint_nat/jint_nat/orx_digits/lift_digits for the String sink.
+// Shared decimal digit conversion and non-negative integer emission.
 // Byte-identical output is load-bearing: these render diagnostic line/col numbers, emitted C/JS integer
 // literals, pretty-printed numbers, or_return/lifted-lambda indices, and mangled C symbol fragments — a
 // single changed digit breaks output or the ABI. Lives here (a low, widely-imported shared module) so
-// every backend routes through the same code; no import cycle (genc/std string+alloc never import this).
-//
+// every backend routes through the same code.
 // This trio is the COMPILER-side digit loop — one of exactly TWO tree-wide. The other lives in
 // std.text.num (RawPtr buffer writers backing std.text.fmt's streaming output). Two, not one, is the
 // SEED-CLOSURE boundary: compiler passes rendering line/col digits (check, compiler.resolve,
@@ -189,7 +165,7 @@ gstr_int* = (out: String, a: Allocator, n: i64) String {
 // map_slice: the pervasive cbuf-map idiom — allocate a fresh same-length `[U]` and fill slot i with
 // f(xs[i]). One generic replaces ~100 hand-rolled `buf = cbuf<U>(a, xs.len)  xs.loop(...)  buf`
 // blocks across the frontend. The alloc param is the concrete `Allocator` cbuf itself takes.
-map_slice*<T, U> = (a: Allocator, xs: [T], f: (T) U) [U] {
+map_slice*<T, U> = (a: Allocator, xs: MutSlice<T>, f: (T) U) MutSlice<U> {
     buf ::= cbuf<U>(a, xs.len)
     xs.loop_at((i, x) { buf[i] = f(x) })
     buf
@@ -197,7 +173,7 @@ map_slice*<T, U> = (a: Allocator, xs: [T], f: (T) U) [U] {
 // slice_any: the pervasive OR-fold — true iff some element satisfies p. One generic replaces ~50
 // hand-rolled `f = false  xs.loop(...)  f` blocks. Walks the whole slice (no early break), so the
 // visit order and count match the inlined form exactly.
-slice_any*<T> = (xs: [T], p: (T) bool) bool {
+slice_any*<T> = (xs: MutSlice<T>, p: (T) bool) bool {
     f ::= false
     xs.loop_at((i, y) { f = p(y).then({ true }, { f }) })
     f
@@ -335,7 +311,7 @@ wr_writes_stmt = (st: Stmt, nm: StringView) bool {
             || x.value.wr_writes_e(nm),
     })
 }
-wr_writes_name* = (body: [Stmt], nm: StringView) bool {
+wr_writes_name* = (body: MutSlice<Stmt>, nm: StringView) bool {
     body.slice_any((st) { st.wr_writes_stmt(nm) })
 }
 // ── const-by-default MIGRATION: infer every binding's mutability from the tree ──────────────────
@@ -360,7 +336,7 @@ mi_expr = (e: Ptr<Expr>) i32 {
     0.expr_fold_children(e, (acc, ch) { ch.mi_expr() }, (acc, body) { body.mi_body() })
 }
 mi_or = (a: i32, b: i32) i32 { a + b }    // the walk runs for EFFECT; the i32 only makes it foldable
-mi_stmt = (st: Stmt, scope: [Stmt]) i32 {
+mi_stmt = (st: Stmt, scope: MutSlice<Stmt>) i32 {
     st.match ({
         .Let(l)      => l.value.mi_expr(),
         .Assign(x)   => x.target.mi_expr().mi_or(x.value.mi_expr()),
@@ -371,7 +347,7 @@ mi_stmt = (st: Stmt, scope: [Stmt]) i32 {
         .IndexSet(x) => x.seq.mi_expr().mi_or(x.idx.mi_expr()).mi_or(x.value.mi_expr()),
     })
 }
-mi_body* = (body: [Stmt]) i32 {
+mi_body* = (body: MutSlice<Stmt>) i32 {
     body.loop_at((i, st) {
         st.match ({
             .Let(l) => {
@@ -383,7 +359,7 @@ mi_body* = (body: [Stmt]) i32 {
     })
     0
 }
-mi_global_written = (decls: [Decl], nm: StringView) bool {
+mi_global_written = (decls: MutSlice<Decl>, nm: StringView) bool {
     hit ::= false
     decls.loop_at((i, d) {
         d.match ({
@@ -395,7 +371,7 @@ mi_global_written = (decls: [Decl], nm: StringView) bool {
     })
     hit
 }
-mut_infer_decls* = (decls: [Decl]) void {
+mut_infer_decls* = (decls: MutSlice<Decl>) void {
     decls.loop_at((i, d) {
         d.match ({
             .DFunc(f) => f.body.mi_body(),
@@ -459,7 +435,7 @@ dbn = (a: Allocator, nm: StringView, t: Ptr<DbNames>) Ptr<DbNames> {
     })
     a.dbn_node(dbn_cons_val(nm, t))
 }
-dbn_params = (a: Allocator, ps: [Param], t: Ptr<DbNames>) Ptr<DbNames> {
+dbn_params = (a: Allocator, ps: MutSlice<Param>, t: Ptr<DbNames>) Ptr<DbNames> {
     out ::= t
     ps.loop_at((i, p) { out = a.dbn(p.name, out) })
     out
@@ -476,7 +452,7 @@ db_target_name = (e: Expr) StringView {
         _       => "",
     })
 }
-db_expr = (a: Allocator, e: Ptr<Expr>, sc: Ptr<DbNames>, gs: [StringView]) i32 {
+db_expr = (a: Allocator, e: Ptr<Expr>, sc: Ptr<DbNames>, gs: MutSlice<StringView>) i32 {
     load(e).match ({
         .Loop(l)    => a
             .db_expr(l.seq, sc, gs)
@@ -493,7 +469,7 @@ db_expr = (a: Allocator, e: Ptr<Expr>, sc: Ptr<DbNames>, gs: [StringView]) i32 {
     })
 }
 db_or = (x: i32, y: i32) i32 { x + y }    // the walk runs for EFFECT; the i32 only makes it foldable
-db_stmt = (a: Allocator, st: Stmt, sc: Ptr<DbNames>, gs: [StringView]) i32 {
+db_stmt = (a: Allocator, st: Stmt, sc: Ptr<DbNames>, gs: MutSlice<StringView>) i32 {
     st.match ({
         .Let(l)      => a.db_expr(l.value, sc, gs),
         .Assign(x)   => a.db_expr(x.value, sc, gs),
@@ -516,7 +492,7 @@ db_stmt_name = (st: Stmt) StringView {
         _       => "",
     })
 }
-db_body* = (a: Allocator, body: [Stmt], sc0: Ptr<DbNames>, gs: [StringView]) i32 {
+db_body* = (a: Allocator, body: MutSlice<Stmt>, sc0: Ptr<DbNames>, gs: MutSlice<StringView>) i32 {
     sc ::= sc0
     body.loop_at((i, st) {
         st.match ({
@@ -545,7 +521,7 @@ db_global_name = (d: Decl) StringView {
         _           => "",
     })
 }
-db_global_names = (a: Allocator, decls: [Decl]) [StringView] {
+db_global_names = (a: Allocator, decls: MutSlice<Decl>) MutSlice<StringView> {
     n ::= 0
     decls.loop_at((i, d) {
         d.db_assignable_global().then({
@@ -562,7 +538,7 @@ db_global_names = (a: Allocator, decls: [Decl]) [StringView] {
     })
     buf
 }
-declare_bare_assigns* = (a: Allocator, decls: [Decl]) void {
+declare_bare_assigns* = (a: Allocator, decls: MutSlice<Decl>) void {
     gs = a.db_global_names(decls)
     decls.loop_at((i, d) {
         d.match ({

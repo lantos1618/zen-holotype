@@ -1,8 +1,7 @@
-// compiler.passes.orreturn — or_return lowering sub-pass extracted from compiler.check.
 { BinData, CallData, Expr, FieldInit, MakeStructData, Stmt } = compiler.ast.ast_types
-{ cbuf, bin_at, cond_oa, eindex, eloop, finit, gstr_append, gstr_finish, gstr_string, mfield,
-  mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at, sif, slett_at, slett_atm, slit, sret, tvoid,
-  vref_at } = compiler.genc
+{ cbuf, bin_at, cond_oa, eindex, eloop_at, finit_at, gstr_append, gstr_finish, gstr_string, mfield,
+  mkenumg_at, mkstructg_at, sassign_at, sexpr, sidxset_at, sif, slett_at, slett_atm, slit, sret,
+  tvoid, vref_at } = compiler.genc
 { gstr_int, is_logic_op, is_or_return_fn } = compiler.astops
 { cebuf, cenode, recall } = compiler.check
 { is_or_return_call } = compiler.check_resolve
@@ -27,12 +26,12 @@ orx_count* = (e: Ptr<Expr>) i32 {
         _               => 0,
     })
 }
-orx_count_args = (args: [Expr]) i32 {
+orx_count_args = (args: MutSlice<Expr>) i32 {
     n ::= 0
     args.loop_at((i, ar) { n = n + args[i].addr().orx_count() })
     n
 }
-orx_count_inits = (inits: [FieldInit]) i32 {
+orx_count_inits = (inits: MutSlice<FieldInit>) i32 {
     n ::= 0
     inits.loop_at((i, fi) { n = n + fi.value.orx_count() })
     n
@@ -80,7 +79,7 @@ OrxRw*: {
     n: i32,
 }
 OrxRwA: {
-    args: [Expr],
+    args: MutSlice<Expr>,
     n: i32,
 }
 orx_rw_mk = (e: Ptr<Expr>, n: i32) OrxRw {
@@ -89,7 +88,7 @@ orx_rw_mk = (e: Ptr<Expr>, n: i32) OrxRw {
         n: n,
     )
 }
-orx_rw* = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) OrxRw {
+orx_rw* = (a: Allocator, hbuf: MutSlice<Stmt>, base: i32, n: i32, e: Ptr<Expr>) OrxRw {
     (e.orx_count() == 0).match ({
         true  => orx_rw_mk(e, n),
         false => load(e).match ({
@@ -109,7 +108,7 @@ orx_rw* = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) OrxRw {
             },
             .MakeEnum(mk)   => {
                 p2 = a.orx_rw(hbuf, base, n, mk.payload)
-                orx_rw_mk(a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, p2.e)), p2.n)
+                orx_rw_mk(a.cenode(mkenumg_at(mk.ty, mk.mty, mk.targs, mk.variant, p2.e, mk.ty_pos, mk.variant_pos)), p2.n)
             },
             .MakeStruct(sd) => a.orx_rw_mkstruct(hbuf, base, n, sd),
             .SliceLit(sd)   => {
@@ -123,13 +122,19 @@ orx_rw* = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, e: Ptr<Expr>) OrxRw {
             },
             .Loop(l)        => {
                 s2 = a.orx_rw(hbuf, base, n, l.seq)
-                orx_rw_mk(a.cenode(eloop(s2.e, l.idx, l.elem, l.elemTy, l.body, l.h)), s2.n)
+                orx_rw_mk(a.cenode(eloop_at(s2.e, l.idx, l.elem, l.elemTy, l.body, l.h, l.h_pos, l.idx_pos, l.elem_pos)), s2.n)
             },
             _               => orx_rw_mk(e, n),
         }),
     })
 }
-orx_rw_args = (a: Allocator, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]) OrxRwA {
+orx_rw_args = (
+    a: Allocator,
+    hbuf: MutSlice<Stmt>,
+    base: i32,
+    n0: i32,
+    args: MutSlice<Expr>,
+) OrxRwA {
     buf ::= a.cebuf(args.len)
     k ::= n0
     args.loop_at((i, ar) {
@@ -144,7 +149,7 @@ orx_rw_args = (a: Allocator, hbuf: [Stmt], base: i32, n0: i32, args: [Expr]) Orx
 }
 // args first (innermost-first: the receiver's own hoists land before this one), then hoist the
 // or_return call itself into a fresh temp let and read the temp at the original site.
-orx_rw_call = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, c: CallData) OrxRw {
+orx_rw_call = (a: Allocator, hbuf: MutSlice<Stmt>, base: i32, n: i32, c: CallData) OrxRw {
     r = a.orx_rw_args(hbuf, base, n, c.args)
     ncall = a.recall(c, c.fn, r.args)
     is_or_return_fn(c).match ({
@@ -157,7 +162,7 @@ orx_rw_call = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, c: CallData) OrxRw
     })
 }
 // a short-circuit rhs is conditionally evaluated: leave it for resolve_orx to wrap in place.
-orx_rw_bin = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, b: BinData) OrxRw {
+orx_rw_bin = (a: Allocator, hbuf: MutSlice<Stmt>, base: i32, n: i32, b: BinData) OrxRw {
     l2 = a.orx_rw(hbuf, base, n, b.lhs)
     is_logic_op(b.op).match ({
         true  => orx_rw_mk(a.cenode(bin_at(b.op, l2.e, b.rhs, b.pos)), l2.n),
@@ -167,19 +172,25 @@ orx_rw_bin = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, b: BinData) OrxRw {
         },
     })
 }
-orx_rw_mkstruct = (a: Allocator, hbuf: [Stmt], base: i32, n: i32, sd: MakeStructData) OrxRw {
+orx_rw_mkstruct = (
+    a: Allocator,
+    hbuf: MutSlice<Stmt>,
+    base: i32,
+    n: i32,
+    sd: MakeStructData,
+) OrxRw {
     buf ::= cbuf<FieldInit>(a, sd.inits.len)
     k ::= n
     sd.inits.loop_at((i, fi) {
         r = a.orx_rw(hbuf, base, k, fi.value)
-        buf[i] = finit(fi.name, r.e)
+        buf[i] = finit_at(fi.name, r.e, fi.pos)
         k = r.n
     })
     orx_rw_mk(a.cenode(mkstructg_at(sd.ty, sd.mty, sd.targs, buf, sd.pos)), k)
 }
 // rewrite ONE statement's expressions, hoisting into hbuf; the statement itself is rebuilt with the
 // temps substituted. A direct or_return let keeps its top call (only its receiver is rewritten).
-orx_rw_recv = (a: Allocator, hbuf: [Stmt], base: i32, e: Ptr<Expr>) Ptr<Expr> {
+orx_rw_recv = (a: Allocator, hbuf: MutSlice<Stmt>, base: i32, e: Ptr<Expr>) Ptr<Expr> {
     out ::= e
     load(e).match ({
         .Call(c) => {
@@ -190,7 +201,7 @@ orx_rw_recv = (a: Allocator, hbuf: [Stmt], base: i32, e: Ptr<Expr>) Ptr<Expr> {
     })
     out
 }
-orx_rw_stmt* = (a: Allocator, hbuf: [Stmt], base: i32, st: Stmt) Stmt {
+orx_rw_stmt* = (a: Allocator, hbuf: MutSlice<Stmt>, base: i32, st: Stmt) Stmt {
     out ::= st
     st.match ({
         .Let(l)      => {

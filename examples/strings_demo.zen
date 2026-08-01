@@ -77,7 +77,7 @@ show_borrow_vs_copy = (a: AllocatorBackend) void {
     mine = a.substr("shared bytes", 0, 12).expect("strings_demo: out of memory")
     // OWN: a WRITABLE window over mine's block. `view()` is the borrowed, read-only window and
     // would refuse the store below — `own_window` is the spelling that says "I allocated these".
-    port :: [u8] = mine.own_ptr().own_window(mine.len())
+    port :: MutSlice<u8> = mine.own_ptr().own_window(mine.len())
     // One store through the window. Nothing copies it back — the source simply IS those
     // bytes, so `mine` reads differently on the very next line.
     port[0] = 'S'
@@ -182,7 +182,7 @@ Widths*: {
 // (a) A buffer passed INTO a callee. The CALLER allocated `out`; this function only
 //     stores into it and never keeps the pointer, so ownership does NOT move — the
 //     caller still frees. Overwriting bytes in place: no allocation anywhere here.
-rule_into* = (out: [u8], fill: u8) void {
+rule_into* = (out: MutSlice<u8>, fill: u8) void {
     out.loop((h, i, b) {
         out[i] = fill
     })
@@ -215,7 +215,7 @@ Report*: {
     free = (r: Report, a: AllocatorBackend) void { r.body.free_in(a) }
 }
 // Print every row: a block out of render_row, parked in a Report, then given back.
-print_rows* = (a: AllocatorBackend, rows: [Fields], n: i64, w: Widths) void {
+print_rows* = (a: AllocatorBackend, rows: MutSlice<Fields>, n: i64, w: Widths) void {
     rows.loop((h, i, f) {
         (i < n).then({
             // ALLOC: ownership MOVED out of render_row and into this frame.
@@ -237,7 +237,7 @@ print_rows* = (a: AllocatorBackend, rows: [Fields], n: i64, w: Widths) void {
 // ── 5. release ───────────────────────────────────────────────────────────────
 // Three blocks per row. `msg` is never freed on its own: it is an interior pointer, and
 // the line block it aims into is the thing that owns those bytes.
-free_rows* = (a: AllocatorBackend, rows: [Fields], n: i64) void {
+free_rows* = (a: AllocatorBackend, rows: MutSlice<Fields>, n: i64) void {
     rows.loop((h, i, f) {
         (i < n).then({
             f.free(a)
@@ -246,7 +246,7 @@ free_rows* = (a: AllocatorBackend, rows: [Fields], n: i64) void {
 }
 // The per-line copies split handed out — and so the bytes every `msg` borrow points at.
 // Nothing may read a Fields after this runs.
-free_lines* = (a: AllocatorBackend, lines: [StringView]) void {
+free_lines* = (a: AllocatorBackend, lines: MutSlice<StringView>) void {
     lines.loop((h, i, ln) {
         a.release(ln.view().ptr)
     })
@@ -285,9 +285,9 @@ main = () i32 {
     // split ALLOCATES twice over: one block for the [StringView] backbone, and one
     // NUL-terminated copy per line (it cannot hand back views — a line ends at '\n' and
     // there is no NUL there). free_lines frees the copies, release_slice the backbone.
-    lines: [StringView] = a.split(src, '\n')
+    lines: MutSlice<StringView> = a.split(src, '\n')
     // ALLOC: the row array's backbone. Its freer is the release_slice at the end of main.
-    rows :: [Fields] = a.nbuf(blank_fields(), lines.len)
+    rows :: MutSlice<Fields> = a.nbuf(blank_fields(), lines.len)
     n :: i64 = 0
     w ::= Widths(
         ts: 0,
@@ -338,7 +338,7 @@ main = () i32 {
     // borrows and cannot know it is looking at a block the caller owns.
     total = w.ts + w.level + w.comp + w.msg + 6
     canvas = a.repeat(" ", total)
-    bar: [u8] = canvas.own_ptr().own_window(total)
+    bar: MutSlice<u8> = canvas.own_ptr().own_window(total)
     bar.rule_into('-')
     formatln("  {}", [arg_str(canvas)])
     // FREE: still ours. rule_into never took ownership, so nothing else can free it.

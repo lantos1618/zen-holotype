@@ -1,7 +1,5 @@
-// compiler.backend.c.c_decl — type, signature, function, struct, enum, and top-level decl C-emission.
-// Extracted from compiler.backend.c.c_emit. Consumes statement/block emission from compiler.backend.c.c_expr.
 { String } = std.text.string
-{ Map, of } = std.collections.map
+{ Map } = std.collections.map
 { expect } = std.core.result
 { Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FnTData } = compiler.ast.ast_types
 { ty_cname_in, gstr_append } = compiler.genc
@@ -9,7 +7,7 @@
 { Allocator } = std.mem.alloc
 { gen_block, gen_block_void } = compiler.backend.c.c_expr
 { loop_at } = std.core.count
-any_payload = (vs: [VariantDef]) bool {
+any_payload = (vs: MutSlice<VariantDef>) bool {
     found ::= false
     vs.loop_at((i, v) {
         found = v.payload.match ({
@@ -19,7 +17,7 @@ any_payload = (vs: [VariantDef]) bool {
     })
     found
 }
-gen_ty_list = (s: String, alloc: Allocator, ts: [Ty]) String {
+gen_ty_list = (s: String, alloc: Allocator, ts: MutSlice<Ty>) String {
     out ::= s
     ts.loop_at((i, t) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma-separated bare types: `A, B, C`
@@ -39,7 +37,7 @@ gen_fnptr_param = (s: String, alloc: Allocator, ft: FnTData, name: StringView) S
         .gen_ty_list(alloc, ft.params)
         .gstr_append(alloc, ")")
 }
-gen_params = (s: String, alloc: Allocator, ps: [Param]) String {
+gen_params = (s: String, alloc: Allocator, ps: MutSlice<Param>) String {
     out ::= s
     ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
@@ -112,7 +110,7 @@ gen_fnt_typedef_ret = (s: String, alloc: Allocator, ret: Ty) String {
         _        => s,
     })
 }
-gen_fnt_typedefs* = (s: String, alloc: Allocator, decls: [Decl]) String {
+gen_fnt_typedefs* = (s: String, alloc: Allocator, decls: MutSlice<Decl>) String {
     out ::= s
     decls.loop_at((i, d) {
         out = d.match ({
@@ -178,7 +176,7 @@ gen_proto* = (s: String, alloc: Allocator, d: Decl) String {
 }
 // emit a struct typedef: `typedef struct { int32_t x; int32_t y; } Point;`
 // the C arg list of a function type: `i32, i32` (empty -> `void`).
-gen_fnt_params = (s: String, alloc: Allocator, ps: [Ty]) String {
+gen_fnt_params = (s: String, alloc: Allocator, ps: MutSlice<Ty>) String {
     out ::= s
     ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })
@@ -211,7 +209,7 @@ gen_struct = (s: String, alloc: Allocator, sd: StructDecl) String {
     open.gstr_append(alloc, "};")
 }
 // emit an enum's union members (the payload-carrying variants) and tag constants
-gen_union = (s: String, alloc: Allocator, vs: [VariantDef]) String {
+gen_union = (s: String, alloc: Allocator, vs: MutSlice<VariantDef>) String {
     u ::= s.gstr_append(alloc, " union { ")
     vs.loop_at((i, v) {
         v.payload.match ({
@@ -227,7 +225,7 @@ gen_union = (s: String, alloc: Allocator, vs: [VariantDef]) String {
     })
     u.gstr_append(alloc, "} u;")
 }
-gen_tags = (s: String, alloc: Allocator, ename: StringView, vs: [VariantDef]) String {
+gen_tags = (s: String, alloc: Allocator, ename: StringView, vs: MutSlice<VariantDef>) String {
     e ::= s.gstr_append(alloc, " enum { ")
     vs.loop_at((i, v) {
         e = (i == 0).then({ e }, { e.gstr_append(alloc, ", ") })
@@ -251,9 +249,9 @@ gen_enum = (s: String, alloc: Allocator, ed: EnumDecl) String {
 // tells a closure record apart from a trait, since both are "structs with FnT fields" by shape.
 // The old per-query linear scan over the whole decl list ran per trait-shaped struct per depth
 // level (an O(decls^2) corner that showed up in the self-build profile).
-impld_set* = (a: Allocator, decls: [Decl]) Map<i64> {
+impld_set* = (a: Allocator, decls: MutSlice<Decl>) Map<i64> {
     seedv: i64 = 0 - 1
-    m ::= of(a.addr(), "", seedv).expect("c_decl: impld_set alloc")
+    m ::= a.map_of("", seedv).expect("c_decl: impld_set alloc")
     decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => {

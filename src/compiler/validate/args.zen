@@ -1,4 +1,3 @@
-// compiler.validate.args — argument, struct-field-init, and member/slice-literal checks.
 { ArmData, CallData, Decl, Expr, Field, FieldInit, Func, LoopData, MakeStructData, MethodCallData,
   Param, Stmt, Ty, VariantDef } = compiler.ast.ast_types
 { gstr_append, gstr_finish, gstr_push, gstr_string, subst_ty_in } = compiler.genc
@@ -37,7 +36,7 @@ slicelit_slot_verdict = (env: Env, ar: Expr, pty: Ty) i32 {
 // an argument check, given the callee's tparams: a slot typed by a tparam is shape-checked when it is a
 // pointer (else skipped); a CONCRETE slot of a generic fn is still fully checked (so `gen2(x: T, b: Box)`
 // rejects a non-Box second arg).
-arg_err_at* = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
+arg_err_at* = (env: Env, tps: MutSlice<Param>, params: MutSlice<Param>, i: i32, ar: Expr) i32 {
     (i < params.len).match ({
         true  => tps.ty_mentions_tparam(params[i].ty).match ({
             true  => env.tparam_shape_err(params[i].ty, ar),
@@ -63,7 +62,7 @@ arg_err_at* = (env: Env, tps: [Param], params: [Param], i: i32, ar: Expr) i32 {
 // impls in the module a required trait method fell through to undefined-name, hiding the real
 // story (the receiver type lacks an impl). Used only to pick the KIND and message of an already-
 // rejected call — it never flips accept/reject.
-fields_declare_method* = (fields: [Field], m: StringView) bool {
+fields_declare_method* = (fields: MutSlice<Field>, m: StringView) bool {
     found ::= false
     fields.loop_at((i, f) {
         found = (f.name == m).match ({
@@ -77,8 +76,8 @@ fields_declare_method* = (fields: [Field], m: StringView) bool {
     found
 }
 // Struct literals check known fields and value fits; imported/generic literals stay lenient.
-no_fields* = () [Field] { slice(null_ptr(), 0) }
-struct_fields* = (decls: [Decl], name: StringView) [Field] {
+no_fields* = () MutSlice<Field> { slice(null_ptr(), 0) }
+struct_fields* = (decls: MutSlice<Decl>, name: StringView) MutSlice<Field> {
     found ::= no_fields()
     decls.loop_at((i, d) {
         found = d.match ({
@@ -88,10 +87,10 @@ struct_fields* = (decls: [Decl], name: StringView) [Field] {
     })
     found
 }
-has_field* = (fields: [Field], fname: StringView) bool {
+has_field* = (fields: MutSlice<Field>, fname: StringView) bool {
     fields.slice_any((fl) { fl.name == fname })
 }
-field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
+field_fit_err = (env: Env, fields: MutSlice<Field>, fi: FieldInit) i32 {
     fty = fields.field_in(fi.name)
     sv = env.slicelit_slot_verdict(load(fi.value), fty)
     (sv >= 0).match ({
@@ -102,10 +101,10 @@ field_fit_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
         },
     })
 }
-init_err = (env: Env, fields: [Field], fi: FieldInit) i32 {
+init_err = (env: Env, fields: MutSlice<Field>, fi: FieldInit) i32 {
     fields.has_field(fi.name).then({ env.field_fit_err(fields, fi) }, { 1 })
 }    // unknown field -> 1
-struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
+struct_init_errs = (env: Env, fields: MutSlice<Field>, inits: MutSlice<FieldInit>) i32 {
     acc ::= 0
     inits.loop_at((i, fi) { acc = acc + env.init_err(fields, fi) })
     acc
@@ -114,7 +113,13 @@ struct_init_errs = (env: Env, fields: [Field], inits: [FieldInit]) i32 {
 // by a tparam (`v: T`) becomes CONCRETE (`v: i32`) and IS fit-checked — closing the hole where a wrong
 // value (`Box<i32>(v: P(…))`) slipped past SEMA and broke at cc. A field whose type stays a tparam after
 // substitution (no matching targ) remains lenient, deferred to monomorphization.
-gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: FieldInit) i32 {
+gen_field_fit_err = (
+    env: Env,
+    tps: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    fields: MutSlice<Field>,
+    fi: FieldInit,
+) i32 {
     fty = fields.field_in(fi.name)
     cty = (targs.len == tps.len).then({ env.a.subst_ty_in(tps, targs, fty) }, { fty })
     tps.ty_mentions_tparam(cty).match ({
@@ -134,10 +139,10 @@ gen_field_fit_err = (env: Env, tps: [Param], targs: [Ty], fields: [Field], fi: F
 }    // a concrete field -> check the fit
 gen_struct_init_errs = (
     env: Env,
-    tps: [Param],
-    targs: [Ty],
-    fields: [Field],
-    inits: [FieldInit],
+    tps: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    fields: MutSlice<Field>,
+    inits: MutSlice<FieldInit>,
 ) i32 {
     acc ::= 0
     inits.loop_at((i, fi) {
@@ -148,7 +153,7 @@ gen_struct_init_errs = (
     })
     acc
 }
-inits_has = (inits: [FieldInit], name: StringView) bool {
+inits_has = (inits: MutSlice<FieldInit>, name: StringView) bool {
     inits.slice_any((fi) { fi.name == name })
 }    // is this field named in the literal?
 // Would zero-filling a value of type `t` produce a NULL non-null `Ptr` — directly, or TRANSITIVELY
@@ -177,14 +182,14 @@ ty_zerofills_null_ptr = (env: Env, t: Ty, fuel: i32) bool {
         }),
     })
 }    // an omitted enum field reads tag 0 = variants[0]; its payload is the zeroed slot we must vet
-tag0_zerofills_null_ptr = (vs: [VariantDef], env: Env, fuel: i32) bool {
+tag0_zerofills_null_ptr = (vs: MutSlice<VariantDef>, env: Env, fuel: i32) bool {
     (vs.len > 0).then({ env.ty_zerofills_null_ptr(vs[0].payload, fuel) }, { false })
 }
 // A NON-NULL pointer field (`Ptr<T>`/`MutPtr<T>`) left out of the literal would be default-zeroed to a
 // null that the type promises can never happen → a deref segfault the checker currently misses. Require
 // it — and likewise reject a field whose type only TRANSITIVELY reaches such a pointer (nested struct,
 // enum tag-0 payload), since zero-filling it nulls that pointer just the same.
-field_missing_nonnull_ptr = (fields: [Field], env: Env, inits: [FieldInit]) i32 {
+field_missing_nonnull_ptr = (fields: MutSlice<Field>, env: Env, inits: MutSlice<FieldInit>) i32 {
     acc ::= 0
     fields.loop_at((i, fl) {
         acc = acc + (env.ty_zerofills_null_ptr(fl.ty, 64) && inits.inits_has(fl.name) == false).match ({
@@ -195,7 +200,7 @@ field_missing_nonnull_ptr = (fields: [Field], env: Env, inits: [FieldInit]) i32 
     acc
 }
 // A repeated initializer for the same field (`Box(v: 5, v: 9)`) is almost certainly a mistake.
-dup_init_errs = (inits: [FieldInit]) i32 {
+dup_init_errs = (inits: MutSlice<FieldInit>) i32 {
     acc ::= 0
     inits.loop_at((i, fi) {
         earlier ::= false
@@ -246,7 +251,7 @@ is_scalar_prim = (t: Ty) bool {
 // FIELDLESS receivers: scalars AND the string types (every `string_*` is `const char*`/`char*` in C,
 // with NO members). `s.len` FIELD access on one ICEs in cc ("member in something not a struct or union");
 // the accessor is a UFCS METHOD (`s.len()`, a `Call`), never a field. A slice `[T]` is `.Slice` (NOT here),
-// so `slice.len` on its `{ptr,len}` struct still passes. Closes census #60 (sibling of #58).
+// so `slice.len` on its `{ptr,len}` struct still passes.
 is_fieldless_prim = (t: Ty) bool {
     t.match ({
         .StringView    => true,
@@ -258,8 +263,7 @@ is_fieldless_prim = (t: Ty) bool {
 // Field access checks known concrete struct receivers AND generic-struct instances (field names don't
 // depend on the type args, so `Box<i32>.nope` is rejected the same as `Box.nope` would be). A KNOWN
 // enum receiver — concrete (`DEnum`) or generic (`DGenEnum` like `Result<i32,IoError>`) — has no fields
-// at all: you reach its variants via `.match`, so any `.field` on one is rejected (closes census #58/#41,
-// where `r.len` on a Result passed `check` then ICE'd in cc with only a `.c` column).
+// at all: you reach its variants via `.match`, so any `.field` on one is rejected.
 member_err* = (env: Env, obj: Ptr<Expr>, field: StringView) i32 {
     obj.is_lit_numeric().match ({
         true  => 1,
@@ -291,8 +295,7 @@ sl_elem_fit* = (env: Env, ety: Ty, it: Expr) i32 {
     ity = env.infer_expr(it.addr())
     (ety.ty_rank() >= 0 && ity.ty_rank() >= 0).then({ 0 }, { env.fit_err(ity, ety) })
 }
-// ── STRUCT-FIELD / SLICE-ELEMENT CONSUME (re-census #63) ───────────────────────────────────────────
-// #56 closed owner-PARAM moves but explicitly left the IDIOMATIC case open: moving an `Own<T>` into a
+// Moving an `Own<T>` into a
 // struct-LITERAL field (`Box(o: o)`) or a slice element (`[o]`, `arr[i] = o`). A struct/slice copy does
 // NOT bump the owner's refcount, so the field and the source name the ONE allocation: freeing through the
 // field (`b.o.release_in(a)`) then using the source (`o.get()`) is a use-after-free, and the same owner
@@ -304,7 +307,7 @@ sl_elem_fit* = (env: Env, ety: Ty, it: Expr) i32 {
 // generic-struct literal has no concrete field types here, so it under-rejects (honest, safe).
 // the owner moved by a struct-literal field init: the field's DECLARED type is `Own<T>` AND the init is a
 // bare `Own<T>` Var. The field-type gate is exactly what keeps a borrow field (`p: MutPtr<T>`) legal.
-struct_field_move_src* = (env: Env, fields: [Field], fi: FieldInit) StringView {
+struct_field_move_src* = (env: Env, fields: MutSlice<Field>, fi: FieldInit) StringView {
     (field_in(fields, fi.name).owner_base() == "Own").then({ env.own_moved_var(fi.value) }, { "" })
 }
 // kill every source owner moved into an Own field of a CONCRETE struct literal.
@@ -334,7 +337,7 @@ slicelit_elem_kills* = (
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
-    items: [Expr],
+    items: MutSlice<Expr>,
 ) Ptr<DeadList> {
     out ::= seen
     items.loop_at((i, it) {
@@ -365,7 +368,7 @@ arg_var_name* = (c: CallData, i: i32) StringView {
 // expression shape, threads that taint across `let`/assignment ALIASES (`q = x.addr()` taints `q`, and
 // naming `q`, `s.p` or `ps[0]` then launders the address back out), and flags it in return/trailing
 // position. NOT tracked: heap-store aliasing, escape through a global.
-ae_collect_arms = (a: Allocator, seen: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
+ae_collect_arms = (a: Allocator, seen: Ptr<DeadList>, arms: MutSlice<ArmData>) Ptr<DeadList> {
     out ::= seen
     arms.loop_at((i, ar) { out = a.ae_collect_expr(out, ar.body) })
     out
@@ -392,7 +395,7 @@ ae_collect_stmt = (a: Allocator, seen: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
         _            => seen,
     })
 }
-ae_collect = (a: Allocator, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
+ae_collect = (a: Allocator, seen: Ptr<DeadList>, body: MutSlice<Stmt>) Ptr<DeadList> {
     out ::= seen
     body.loop_at((i, st) { out = a.ae_collect_stmt(out, st) })
     out
@@ -404,9 +407,9 @@ ae_collect = (a: Allocator, seen: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
 // `outlives` is the third name set: locals proven to be a SECOND NAME for storage this frame does not
 // own, so a write through one is a write the caller can still read (see ae_root_outlives).
 AeCtx: {
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    params: [Param],
+    params: MutSlice<Param>,
     locals: Ptr<DeadList>,
     tainted: Ptr<DeadList>,
     outlives: Ptr<DeadList>,
@@ -482,7 +485,7 @@ ae_taint_step = (a: Allocator, cx: AeCtx, st: Stmt) Ptr<DeadList> {
 // `acc` for everything after the loop. The taint set only GROWS, so walking a body once is a sound
 // over-approximation of running it any number of times, and the walk is otherwise pure structural
 // descent — every statement list an expression carries gets the same threading as the top level.
-ae_taint_stmts = (a: Allocator, cx: AeCtx, body: [Stmt]) Ptr<DeadList> {
+ae_taint_stmts = (a: Allocator, cx: AeCtx, body: MutSlice<Stmt>) Ptr<DeadList> {
     cur ::= cx
     body.loop_at((i, st) { cur = cur.ae_taint(a.ae_taint_step(cur, st)) })
     cur.tainted
@@ -521,7 +524,13 @@ ae_taint_store = (a: Allocator, cx: AeCtx, target: Ptr<Expr>, value: Ptr<Expr>) 
 // trailing value. `let`s thread the taint set exactly as at the top level, so a block that aliases first
 // (`{ q = x.addr() ⏎ q }`) is caught. `tail` is false for a `.Loop` body, whose trailing value is
 // discarded — only its returns reach the caller.
-ae_stmts_val_escapes = (a: Allocator, cx: AeCtx, stmts: [Stmt], hop: bool, tail: bool) bool {
+ae_stmts_val_escapes = (
+    a: Allocator,
+    cx: AeCtx,
+    stmts: MutSlice<Stmt>,
+    hop: bool,
+    tail: bool,
+) bool {
     f ::= false
     cur ::= cx
     stmts.loop_at((i, st) {
@@ -535,12 +544,12 @@ ae_stmts_val_escapes = (a: Allocator, cx: AeCtx, stmts: [Stmt], hop: bool, tail:
     })
     f
 }
-ae_inits_escape = (a: Allocator, cx: AeCtx, inits: [FieldInit], hop: bool) bool {
+ae_inits_escape = (a: Allocator, cx: AeCtx, inits: MutSlice<FieldInit>, hop: bool) bool {
     inits.slice_any((fi) { a.ae_escapes(cx, fi.value, hop) })
 }
 // a match EXTRACTS: when the subject carries a frame address, the payload an arm binds carries it too,
 // so `ev = Cell.S(x.addr())` … `ev.match ({ .S(w) => w, … })` hands the address back out through `w`.
-ae_arms_escape = (a: Allocator, cx: AeCtx, arms: [ArmData], hop: bool, subj: bool) bool {
+ae_arms_escape = (a: Allocator, cx: AeCtx, arms: MutSlice<ArmData>, hop: bool, subj: bool) bool {
     arms.slice_any((ar) {
         a.ae_escapes(cx.ae_taint((subj && ar.bind == "" == false).match ({
             true  => a.dead_cons(ar.bind, cx.tainted),
@@ -548,10 +557,10 @@ ae_arms_escape = (a: Allocator, cx: AeCtx, arms: [ArmData], hop: bool, subj: boo
         })), ar.body, hop)
     })
 }
-ae_items_escape = (a: Allocator, cx: AeCtx, items: [Expr], hop: bool) bool {
+ae_items_escape = (a: Allocator, cx: AeCtx, items: MutSlice<Expr>, hop: bool) bool {
     items.slice_any((it) { a.ae_escapes(cx, it.addr(), hop) })
 }
-// ── ESCAPE THROUGH A FN (re-census #1: stack-escape via a wrapper) ─────────────────────────────────
+// Escape through a function.
 // The intra-procedural walk above flags `<local>.addr()` FORWARDED through slice/struct/match/cond/block
 // in a return/trailing. But a local's address laundered THROUGH A CALL — an identity/wrapper fn that
 // returns one of its pointer params (`id(x.addr())`, or `Box(p: id(x.addr()))`) — slipped past (the
@@ -563,7 +572,7 @@ ae_items_escape = (a: Allocator, cx: AeCtx, items: [Expr], hop: bool) bool {
 // does local fn `fn`'s return value derive from its param at index `pi`? (bounded interprocedural)
 ae_fn_returns_param = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     fn: StringView,
     pi: i32,
@@ -583,7 +592,7 @@ ae_fn_returns_param = (
 // value position: does expr `e` yield the tracked param `name` (directly, forwarded, or via one hop)?
 ae_ret_yields = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     name: StringView,
     e: Ptr<Expr>,
@@ -612,33 +621,33 @@ ae_ret_yields = (
 }
 ae_ret_inits = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    inits: [FieldInit],
+    inits: MutSlice<FieldInit>,
     name: StringView,
     depth: i32,
 ) bool { inits.slice_any((fi) { a.ae_ret_yields(decls, idx, name, fi.value, depth) }) }
 ae_ret_valarms = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
     name: StringView,
     depth: i32,
 ) bool { arms.slice_any((ar) { a.ae_ret_yields(decls, idx, name, ar.body, depth) }) }
 ae_ret_items = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    items: [Expr],
+    items: MutSlice<Expr>,
     name: StringView,
     depth: i32,
 ) bool { items.slice_any((it) { a.ae_ret_yields(decls, idx, name, it.addr(), depth) }) }
 ae_ret_blockval = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    stmts: [Stmt],
+    stmts: MutSlice<Stmt>,
     name: StringView,
     depth: i32,
 ) bool {
@@ -654,7 +663,7 @@ ae_ret_blockval = (
 // one interprocedural hop: a call whose arg[i] yields `name` AND whose callee returns its param `i`.
 ae_ret_call = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     c: CallData,
     name: StringView,
@@ -680,9 +689,9 @@ ae_ret_call = (
 // returns-only statement walker over the callee body (mirrors the escape walker; trailing handled by caller).
 ae_ret_body = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
     name: StringView,
     depth: i32,
 ) bool {
@@ -697,7 +706,7 @@ ae_ret_body = (
 }
 ae_ret_stmt = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     st: Stmt,
     name: StringView,
@@ -714,7 +723,7 @@ ae_ret_stmt = (
 }
 ae_ret_estmt = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     e: Ptr<Expr>,
     name: StringView,
@@ -731,9 +740,9 @@ ae_ret_estmt = (
 }
 ae_ret_stmtarms = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
     name: StringView,
     depth: i32,
 ) bool {
@@ -789,7 +798,7 @@ ae_ptr_param_idx = (f: Func, rn: StringView) i32 {
 // value yields param `si` (reuses the return-flow value walk). Stores nested in arms under-reject (safe).
 ae_fn_store_dest = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     fn: StringView,
     si: i32,
@@ -803,12 +812,12 @@ ae_fn_store_dest = (
 }
 ae_store_scan = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     f: Func,
     sname: StringView,
     si: i32,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
     depth: i32,
 ) i32 {
     dest ::= 0 - 1
@@ -827,7 +836,7 @@ ae_store_scan = (
 // a store whose place is rooted at a pointer param `di != si` and whose value yields `sname` → di, else -1.
 ae_store_hit = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     f: Func,
     sname: StringView,
@@ -868,7 +877,7 @@ ae_indirect_ty = (t: Ty) bool {
 // a PARAMETER named `rn` through which the callee reaches the caller's memory. A name that is not a
 // parameter yields false: a global is deliberately still out of scope for this walk (as it is for the
 // return path), and so are the loop-element / match-arm bindings that `ae_collect` never collects.
-ae_param_indirect = (params: [Param], rn: StringView) bool {
+ae_param_indirect = (params: MutSlice<Param>, rn: StringView) bool {
     f ::= false
     params.loop_at((i, p) {
         (p.name == rn && p.ty.ae_indirect_ty()).then({
@@ -1005,7 +1014,7 @@ ae_kv_arm = (a: Allocator, cx: AeCtx, body: Ptr<Expr>) i32 {
         _         => 0,
     })
 }
-ae_kv_arms = (a: Allocator, cx: AeCtx, arms: [ArmData]) i32 {
+ae_kv_arms = (a: Allocator, cx: AeCtx, arms: MutSlice<ArmData>) i32 {
     acc ::= 0
     arms.loop_at((i, ar) { acc = acc.or(a.ae_kv_arm(cx, ar.body)) })
     acc
@@ -1054,7 +1063,7 @@ ae_kv_stmt = (a: Allocator, cx: AeCtx, st: Stmt) i32 {
         _            => 0,
     })
 }
-ae_kv_stmts = (a: Allocator, cx: AeCtx, body: [Stmt]) i32 {
+ae_kv_stmts = (a: Allocator, cx: AeCtx, body: MutSlice<Stmt>) i32 {
     acc ::= 0
     cur ::= cx
     body.loop_at((i, st) {
@@ -1063,7 +1072,7 @@ ae_kv_stmts = (a: Allocator, cx: AeCtx, body: [Stmt]) i32 {
     })
     acc
 }
-ae_kv_body = (a: Allocator, cx: AeCtx, body: [Stmt]) i32 {
+ae_kv_body = (a: Allocator, cx: AeCtx, body: MutSlice<Stmt>) i32 {
     acc ::= 0
     cur ::= cx
     body.loop_at((i, st) {
@@ -1081,7 +1090,7 @@ ae_kv_body = (a: Allocator, cx: AeCtx, body: [Stmt]) i32 {
         }),
     }))
 }
-ae_check_func* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+ae_check_func* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func) i32 {
     a.ae_kv_body(AeCtx(
         decls: decls,
         idx: idx,
@@ -1102,17 +1111,17 @@ ae_check_func* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
 sv_call_pos = (env: Env, c: CallData, mode: i32) i32 {
     (mode == 0).then({ env.sd_call_pos(c) }, { env.sm_call_pos(c) })
 }
-sv_args = (a: Allocator, env: Env, args: [Expr], mode: i32) i32 {
+sv_args = (a: Allocator, env: Env, args: MutSlice<Expr>, mode: i32) i32 {
     acc ::= 0
     args.loop_at((i, ar) { acc = acc.or(a.sv_expr(env, ar.addr(), mode)) })
     acc
 }
-sv_arms = (a: Allocator, env: Env, subjty: Ty, arms: [ArmData], mode: i32) i32 {
+sv_arms = (a: Allocator, env: Env, subjty: Ty, arms: MutSlice<ArmData>, mode: i32) i32 {
     acc ::= 0
     arms.loop_at((i, ar) { acc = acc.or(a.sv_expr(a.arm_env(env, subjty, ar), ar.body, mode)) })
     acc
 }
-sv_inits = (a: Allocator, env: Env, inits: [FieldInit], mode: i32) i32 {
+sv_inits = (a: Allocator, env: Env, inits: MutSlice<FieldInit>, mode: i32) i32 {
     acc ::= 0
     inits.loop_at((i, fi) { acc = acc.or(a.sv_expr(env, fi.value, mode)) })
     acc
@@ -1166,7 +1175,7 @@ sv_stmt = (a: Allocator, env: Env, st: Stmt, mode: i32) i32 {
             .or(a.sv_expr(env, x.value, mode)),
     })
 }
-sv_body = (a: Allocator, env: Env, body: [Stmt], mode: i32) i32 {
+sv_body = (a: Allocator, env: Env, body: MutSlice<Stmt>, mode: i32) i32 {
     acc ::= 0
     e ::= env
     body.loop_at((i, st) {
@@ -1175,7 +1184,7 @@ sv_body = (a: Allocator, env: Env, body: [Stmt], mode: i32) i32 {
     })
     acc
 }
-sv_check_func* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func, mode: i32) i32 {
+sv_check_func* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func, mode: i32) i32 {
     env = Env(
         vars: a.params_env(f.params),
         decls: decls,
@@ -1271,7 +1280,7 @@ sx_step = (a: Allocator, taint: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
     })
 }
 // fresh binders (lambda params, loop idx/elem/handler, arm binds) shadow any same-named taint.
-sx_drop_params = (a: Allocator, taint: Ptr<DeadList>, ps: [Param]) Ptr<DeadList> {
+sx_drop_params = (a: Allocator, taint: Ptr<DeadList>, ps: MutSlice<Param>) Ptr<DeadList> {
     out ::= taint
     ps.loop_at((i, p) { out = a.dead_remove(out, p.name) })
     out
@@ -1298,7 +1307,7 @@ sx_payload_pos = (a: Allocator, taint: Ptr<DeadList>, e: Ptr<Expr>) i32 {
         }),
     })
 }
-sx_inits_pos = (a: Allocator, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
+sx_inits_pos = (a: Allocator, taint: Ptr<DeadList>, inits: MutSlice<FieldInit>) i32 {
     acc ::= 0
     inits.loop_at((i, fi) { acc = acc.or(a.sx_payload_pos(taint, fi.value)) })
     acc
@@ -1352,12 +1361,12 @@ sx_mcall_kind = (a: Allocator, taint: Ptr<DeadList>, mc: MethodCallData) i32 {
     })
     sk.or(st)
 }
-sx_args_kind = (a: Allocator, taint: Ptr<DeadList>, args: [Expr]) i32 {
+sx_args_kind = (a: Allocator, taint: Ptr<DeadList>, args: MutSlice<Expr>) i32 {
     acc ::= 0
     args.loop_at((i, ar) { acc = acc.or(a.sx_expr_kind(taint, ar.addr())) })
     acc
 }
-sx_arms_kind = (a: Allocator, taint: Ptr<DeadList>, arms: [ArmData]) i32 {
+sx_arms_kind = (a: Allocator, taint: Ptr<DeadList>, arms: MutSlice<ArmData>) i32 {
     acc ::= 0
     arms.loop_at((i, ar) {
         t2 = is_empty(ar.bind).then({ taint }, { a.dead_remove(taint, ar.bind) })
@@ -1365,7 +1374,7 @@ sx_arms_kind = (a: Allocator, taint: Ptr<DeadList>, arms: [ArmData]) i32 {
     })
     acc
 }
-sx_inits_kind = (a: Allocator, taint: Ptr<DeadList>, inits: [FieldInit]) i32 {
+sx_inits_kind = (a: Allocator, taint: Ptr<DeadList>, inits: MutSlice<FieldInit>) i32 {
     acc ::= 0
     inits.loop_at((i, fi) { acc = acc.or(a.sx_expr_kind(taint, fi.value)) })
     acc
@@ -1413,7 +1422,7 @@ sx_stmt_kind = (a: Allocator, taint: Ptr<DeadList>, st: Stmt) i32 {
             .or(a.sx_expr_kind(taint, x.value)),
     })
 }
-sx_body_kind = (a: Allocator, taint: Ptr<DeadList>, body: [Stmt]) i32 {
+sx_body_kind = (a: Allocator, taint: Ptr<DeadList>, body: MutSlice<Stmt>) i32 {
     acc ::= 0
     t ::= taint
     body.loop_at((i, st) {

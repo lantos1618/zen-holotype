@@ -1,225 +1,177 @@
-// std.format.csv — an RFC4180-ish CSV reader/writer built on the existing stdlib (the std.text.string
-// builder for field bytes, plus module-local growable buffers for the field/row backbones).
-//
-// SHAPE. A parsed document is `[[StringView]]` — rows of NUL-terminated field buffers.
-// `parse` decodes text into that shape; `write_rows` renders it back to one CSV view.
-//
-//   heap = std.mem.heap
-//   a = heap.gpa()
-//   csv.parse(a.addr(), "a,b,c\n1,\"x,y\",3").match ({
-//       .Ok(rows) => { ... [["a","b","c"],["1","x,y","3"]] ... },
-//       .Err(e)   => ...            // .Eof == an unterminated quoted field
-//   })
-//   text = csv.write_rows(a.addr(), rows).expect("oom")   // "a,b,c\n1,\"x,y\",3\n"
-//
-// QUOTING (RFC4180). A field may be wrapped in double quotes; inside a quoted field a literal
-// double quote is written as two ("" -> "), and commas / CR / LF are taken verbatim (so quoted
-// fields may embed the delimiter and span lines). `parse` decodes all of that; `write_rows` quotes any
-// field that contains a comma, a double quote, CR, or LF, doubling embedded quotes.
-//
-// LINE ENDINGS. Rows are separated by LF; a lone CR outside quotes is dropped, so both LF and CRLF
-// input parse identically. A trailing newline does NOT yield a spurious empty final row, and blank
-// lines between records are skipped (an empty record has no fields to carry).
-//
-// ALLOCATOR. parse/write_rows are generic over the allocator: every allocating entry takes `a: AllocatorBackend`
-// (heap, arena, fixed-buffer, test), threaded exactly like std.json / std.text.
-// Parsed field strings and the row/field backbones are allocator-owned; nothing here frees — parse,
-// consume, and drop (or back it with an arena and reset).
-//
-// ERRORS. The only structural error is an unterminated quoted field (a `"` opened but never closed
-// before EOF), surfaced as `.Err(.Eof)`. Allocation failure is fatal by policy (the same choice
-// std.json makes) and is unwrapped at the module boundary via the `c*` helpers below.
-{ AllocatorBackend } = std.mem.alloc
+// CSV rows are allocator-owned [[StringView]]. Quoted fields may contain delimiters and newlines;
+// doubled quotes decode to one quote. Unterminated quotes return .Eof; allocation failure is fatal.
+// LF and CRLF parse identically; blank lines and a trailing newline add no row. There is no release
+// helper for a successful parse: free field/backbone allocations with the same allocator, or parse
+// from an arena and reset it. A failed parse hands back no pointers, so it frees its own scratch.
+{ AllocatorBackend, release_slice } = std.mem.alloc
 { Result, IoError, expect } = std.core.result
 { String, new_in, push_in, append_in, finish_in, free_in } = std.text.string
-{ view } = std.text.str
-{ loop_at } = std.core.count
-// ── OOM policy ────────────────────────────────────────────────────────────────
-// The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
-// threads the caller's allocator whose exhaustion is fatal by policy, so those Results are unwrapped
-// here — parse/write_rows keep their observable behavior and reserve their own Err channel for real
-// structural faults (an unterminated quoted field).
+{ view, own_ptr } = std.text.str
+{ loop_at, step_while } = std.core.count
+{ Vec, vec_in } = std.collections.vec
 cok = (r: Result<String, IoError>) String { r.expect("std.csv: allocation failed") }
 cfin = (r: Result<StringCstr, IoError>) StringView { r.expect("std.csv: allocation failed") }
 cnew = (a: AllocatorBackend) String { a.new_in().expect("std.csv: allocation failed") }
-// ── module-local growable buffer (hand-rolled Vec) ────────────────────────────
-// The field/row backbones are built here rather than through std.collections.vec (whose foreign
-// generic struct hits the cross-module monomorphization limit). One same-module generic `CBuf<T>`
-// serves both backbones: fields as `CBuf<StringView>` (one row's fields) and rows as
-// `CBuf<[StringView]>` (the row list). `T` is phantom in the fields, mirroring std.collections.Vec;
-// the element size flows through `sizeof(T)` at each same-module instantiation.
-// KEEP verdict (re-verified 2026-07-23): instantiating std.collections.vec's `Vec<T>` against a
-// type defined in the importing module still fails to monomorphize (`need-annotation` inside
-// vec.zen's own body), so this local buffer is load-bearing, not redundant. Mirrors json.zen's JBuf
-// — the duplication is forced by the same-module requirement and cannot be hoisted to a shared file.
-CBuf<T>: {
-    ptr: RawPtr<u8>,
-    len: i64,
-    cap: i64,
+// Spelled out per element type rather than once over `<T>`: the element type has to reach `vec_in`
+// through an annotated binding, and a wrapper's own `T` is not that.
+crows = (a: AllocatorBackend) Vec<MutSlice<StringView>> {
+    v: Result<Vec<MutSlice<StringView>>, IoError> = a.vec_in(1)
+    v.expect("std.csv: allocation failed")
 }
-cbuf_new<T> = (a: AllocatorBackend) CBuf<T> {
-    CBuf<T>(
-        ptr: a.acquire(sizeof(T)),
-        len: 0,
-        cap: 1,
-    )
+crow = (a: AllocatorBackend) Vec<StringView> {
+    v: Result<Vec<StringView>, IoError> = a.vec_in(1)
+    v.expect("std.csv: allocation failed")
 }
-cbuf_push<T> = (a: AllocatorBackend, cb: CBuf<T>, x: T) CBuf<T> {
-    x = x
-    r = (cb.len < cb.cap).match ({
-        true  => cb,
-        false => CBuf<T>(
-            ptr: a.resize(cb.ptr, (cb.cap * 2 + 1) * sizeof(T)),
-            len: cb.len,
-            cap: cb.cap * 2 + 1,
-        ),
+cpush<T> = (v: Vec<T>, a: AllocatorBackend, x: T) Vec<T> {
+    v.push(a, x).expect("std.csv: allocation failed")
+}
+// ── parse ──────────────────────────────────────────────────────────────────────────
+// What one input byte means. `Escaped` is the `""` pair — the only token wider than a byte, which is
+// why the scan carries an explicit cursor instead of a plain index loop. `Skip` is a bare CR: the
+// carriage return of a CRLF, dropped so both line endings parse identically.
+CsvTok: Byte(u8) | Quote | Escaped | Sep | End | Skip
+csv_tok = (sv: Slice<u8>, i: i64, quoted: bool) CsvTok {
+    b = sv[i]
+    (b == '"').then({
+        (quoted && i + 1 < sv.len && sv[i + 1] == '"').then({
+            return .Escaped
+        })
+        return .Quote
     })
-    s :: [T] = slice(r.ptr, r.cap)
-    s[r.len] = x
-    CBuf<T>(
-        ptr: r.ptr,
-        len: r.len + 1,
-        cap: r.cap,
-    )
+    quoted.then({
+        return .Byte(b)
+    })    // commas / CR / LF are literal while quoted
+    (b == ',').then({
+        return .Sep
+    })
+    (b == '\n').then({
+        return .End
+    })
+    (b == '\r').then({
+        return .Skip
+    })
+    .Byte(b)
 }
-cbuf_slice<T> = (cb: CBuf<T>) [T] { slice(cb.ptr, cb.len) }
-// ── parse ─────────────────────────────────────────────────────────────────────
-// Decode CSV `text` into rows of fields. A single left-to-right pass over the bytes drives a small
-// state machine: `in_quotes` tracks whether we are inside a quoted field, `active` marks an
-// in-progress record that must be flushed (so trailing newlines / blank lines add no empty row),
-// and `resume` lets a two-byte token ("" or a CRLF pair) skip its second byte. Field bytes
-// accumulate in the `sb` String builder; a completed field joins `fields`, a completed record joins
-// `rows`. Returns `.Err(.Eof)` if a quoted field is never closed.
-parse* = (a: AllocatorBackend, text: StringView) Result<[[StringView]], IoError> {
+// An unterminated quote returns Err, so nothing built is reachable from the result: release every
+// field, every record backbone, and the in-progress builder rather than abandoning the scratch.
+csv_abandon = (
+    a: AllocatorBackend,
+    rows: Vec<MutSlice<StringView>>,
+    row: Vec<StringView>,
+    sb: String,
+) void {
+    rows
+        .view()
+        .loop_at((i, r) {
+            done: MutSlice<StringView> = r
+            done.loop_at((j, f) { a.release(f.own_ptr()) })
+            a.release_slice(done)
+        })
+    row.view().loop_at((j, f) { a.release(f.own_ptr()) })
+    sb.free_in(a)
+    row.free(a)
+    rows.free(a)
+}
+parse* = (a: AllocatorBackend, text: StringView) Result<MutSlice<MutSlice<StringView>>, IoError> {
     sv: Slice<u8> = text.view()
-    rows :: CBuf<[StringView]> = a.cbuf_new()
-    fields :: CBuf<StringView> = a.cbuf_new()
+    rows :: Vec<MutSlice<StringView>> = a.crows()
+    fields :: Vec<StringView> = a.crow()
     sb :: String = a.cnew()
-    in_quotes ::= false
-    active ::= false
-    resume :: i64 = 0
-    sv.loop_at((i, b) {
-        (i < resume == false).then({
-            in_quotes.match ({
-                true  => (b == '"').match ({
-                    true  => (i + 1 < sv.len && sv[i + 1] == '"').match ({
-                        true  => {
-                            sb = sb.push_in(a, '"').cok()    // "" inside a quoted field -> one literal quote
-                            resume = i + 2
-                        },
-                        false => {
-                            in_quotes = false    // a lone quote closes the field
-                            resume = i + 1
-                        },
-                    }),
-                    false => {
-                        sb = sb.push_in(a, b).cok()    // commas / CR / LF are literal while quoted
-                        resume = i + 1
-                    },
-                }),
-                false => (b == '"').match ({
-                    true  => {
-                        in_quotes = true
-                        active = true
-                        resume = i + 1
-                    },
-                    false => (b == ',').match ({
-                        true  => {
-                            fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // end field
-                            sb = a.cnew()
-                            active = true
-                            resume = i + 1
-                        },
-                        false => (b == '\n').match ({
-                            true  => {
-                                active.then({
-                                    fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // end field, then end record
-                                    rows = a.cbuf_push(rows, fields.cbuf_slice())
-                                    fresh: CBuf<StringView> = a.cbuf_new()
-                                    fields = fresh
-                                    sb = a.cnew()
-                                    active = false
-                                })    // an inactive newline (blank line / trailing LF) adds no row
-                                resume = i + 1
-                            },
-                            false => (b == '\r').match ({
-                                true  => {
-                                    resume = i + 1
-                                },
-                                false => {
-                                    sb = sb.push_in(a, b).cok()    // any other byte -> literal field content
-                                    active = true
-                                    resume = i + 1
-                                },
-                            }),
-                        }),
-                    }),
-                }),
-            })
+    quoted ::= false
+    active ::= false    // is a record in progress? a blank line and a trailing LF add no row
+    pos ::= 0
+    pos = pos.step_while((i) { i < sv.len }, (i) {
+        csv_tok(sv, i, quoted).match ({
+            .Byte(c) => {
+                sb = sb.push_in(a, c).cok()
+                active = true
+                i + 1
+            },
+            .Escaped => {
+                sb = sb.push_in(a, '"').cok()    // "" inside a quoted field -> one literal quote
+                i + 2
+            },
+            .Quote   => {
+                quoted = quoted == false
+                active = true
+                i + 1
+            },
+            .Sep     => {
+                fields = fields.cpush(a, sb.finish_in(a).cfin())    // end field
+                sb = a.cnew()
+                active = true
+                i + 1
+            },
+            .End     => {
+                active.then({
+                    fields = fields.cpush(a, sb.finish_in(a).cfin())    // end field, then end record
+                    rows = rows.cpush(a, fields.view())
+                    fields = a.crow()
+                    sb = a.cnew()
+                    active = false
+                })
+                i + 1
+            },
+            .Skip    => i + 1,
         })
     })
-    out: Result<[[StringView]], IoError> = in_quotes.match ({
-        true  => .Err(.Eof),
+    quoted.then({
+        a.csv_abandon(rows, fields, sb)
+        bad: Result<MutSlice<MutSlice<StringView>>, IoError> = .Err(.Eof)
+        return bad
+    })
+    active.match ({
+        true  => {
+            fields = fields.cpush(a, sb.finish_in(a).cfin())    // flush the final unterminated record
+            rows = rows.cpush(a, fields.view())
+        },
+        // No record in progress (the usual case — the text ended with a newline): the builder and
+        // field backbone opened for the NEXT record are dead, and neither is reachable from the
+        // returned rows. Free them, or every parse leaks one of each.
         false => {
-            active.match ({
-                true  => {
-                    fields = a.cbuf_push(fields, sb.finish_in(a).cfin())    // flush the final unterminated record
-                    rows = a.cbuf_push(rows, fields.cbuf_slice())
-                },
-                // No record in progress (the usual case — the text ended with a newline): the builder
-                // and field backbone opened for the NEXT record are dead, and neither is reachable
-                // from the returned rows. Free them, or every parse leaks one of each.
-                false => {
-                    sb.free_in(a)
-                    a.release(fields.ptr)
-                },
-            })
-            .Ok(rows.cbuf_slice())
+            sb.free_in(a)
+            fields.free(a)
         },
     })
+    out: Result<MutSlice<MutSlice<StringView>>, IoError> = .Ok(rows.view())
     out
 }
 // ── write_rows ─────────────────────────────────────────────────────────────────────
 // does `s` need quoting? (contains a delimiter, a quote, or a line break)
 field_needs_quote = (s: StringView) bool {
     sv: Slice<u8> = s.view()
-    need ::= false
-    sv.loop((h, i, b) {
+    sv.loop_at((i, b) {
         (b == ',' || b == '"' || b == '\n' || b == '\r').then({
-            need = true
-            h.break
+            return true
         })
     })
-    need
+    false
 }
 // append `s` to the builder as one CSV field, quoting (and doubling embedded quotes) if required.
 write_field = (a: AllocatorBackend, sb: String, s: StringView) String {
-    sv: Slice<u8> = s.view()
-    s.field_needs_quote().match ({
-        true  => {
-            out :: String = sb.push_in(a, '"').cok()
-            sv.loop_at((i, b) {
-                out = (b == '"').match ({
-                    true  => out
-                        .push_in(a, '"')
-                        .cok()
-                        .push_in(a, '"')
-                        .cok(),
-                    false => out.push_in(a, b).cok(),
-                })
-            })
-            out.push_in(a, '"').cok()
-        },
-        false => sb.append_in(a, s).cok(),
+    (s.field_needs_quote() == false).then({
+        return sb.append_in(a, s).cok()
     })
+    sv: Slice<u8> = s.view()
+    out :: String = sb.push_in(a, '"').cok()
+    sv.loop_at((i, b) {
+        (b == '"').then({
+            out = out.push_in(a, '"').cok()
+        })    // an embedded quote is doubled
+        out = out.push_in(a, b).cok()
+    })
+    out.push_in(a, '"').cok()
 }
 // Render `rows` to a single CSV view: fields joined by commas, records terminated by LF (including
 // a trailing LF after the last record). Round-trips through `parse`. Returns Ok always (allocation
 // failure is fatal by policy); the Result signature mirrors parse and the rest of std.
-write_rows* = (a: AllocatorBackend, rows: [[StringView]]) Result<StringView, IoError> {
+write_rows* = (
+    a: AllocatorBackend,
+    rows: MutSlice<MutSlice<StringView>>,
+) Result<StringView, IoError> {
     out :: String = a.cnew()
     rows.loop_at((i, row) {
-        r: [StringView] = row
+        r: MutSlice<StringView> = row
         r.loop_at((j, f) {
             (j > 0).then({
                 out = out.push_in(a, ',').cok()

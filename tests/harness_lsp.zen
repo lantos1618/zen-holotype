@@ -33,10 +33,12 @@
 { Allocator, heap_allocator, request_arena } = std.mem.alloc
 { memcpy } = std.c.libc
 { save, contents_in, shell } = std.io.file
-{ len, contains } = std.text.str
+{ len, contains, view } = std.text.str
 { expect } = std.core.result
 { zo_cmd, zo_dir, zo_idpath, zo_join, zo_itoa, run_suite } = harness_lib
 { lspd_init, lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at, lspd_tokens_at } = compiler.lsp_docs
+{ lsp_init_params, lsp_position_params } = compiler.lsp
+{ lsp_byte_of_pos } = compiler.lsp_query
 // ── session plumbing ──────────────────────────────────────────────────────────────────────────────
 // one framed JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`.
 lz_frame = (mp: Allocator, body: StringView) StringView {
@@ -73,9 +75,12 @@ lz_uri = (mp: Allocator, name: StringView) StringView {
     z: StringView = ""
     mp.zo_join([z, "file://", mp.zo_dir(), "/", name])
 }
-lz_open = (mp: Allocator, uri: StringView, text: StringView) StringView {
+lz_open_v = (mp: Allocator, uri: StringView, text: StringView, version: i64) StringView {
     z: StringView = ""
-    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"languageId\":\"zen\",\"version\":1,\"text\":\"", text, "\"}}}"])
+    mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\",\"languageId\":\"zen\",\"version\":", mp.zo_itoa(version), ",\"text\":\"", text, "\"}}}"])
+}
+lz_open = (mp: Allocator, uri: StringView, text: StringView) StringView {
+    mp.lz_open_v(uri, text, 1)
 }
 lz_change_v = (mp: Allocator, uri: StringView, text: StringView, ver: i64) StringView {
     z: StringView = ""
@@ -146,6 +151,137 @@ lz_docs_owned = (mp: Allocator) bool {
     request.addr().deinit()
     cached && durable && invalidated && isolated && survives
 }
+lz_protocol_params = (mp: Allocator) bool {
+    request ::= request_arena(mp)
+    a = request.addr().allocator()
+    init = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file:///fallback\",\"workspaceFolders\":[{\"name\":\"w\",\"uri\":\"file:///workspace\"}],\"capabilities\":{\"textDocument\":{\"rename\":{\"prepareSupport\":true}},\"workspace\":{\"workspaceEdit\":{\"documentChanges\":true}}}}}"
+    cfg = a.lsp_init_params(init)
+    fallback = a.lsp_init_params("{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"rootUri\":\"file:///root-only\",\"capabilities\":{}}}")
+    good = "{\"jsonrpc\":\"2.0\",\"line\":99,\"params\":{\"textDocument\":{\"uri\":\"file:///good.zen\"},\"position\":{\"line\":1,\"character\":2}}}"
+    pos = a.lsp_position_params(good)
+    missing = a.lsp_position_params("{\"jsonrpc\":\"2.0\",\"params\":{\"textDocument\":{\"uri\":\"file:///bad.zen\"},\"position\":{\"line\":0}}}")
+    wrong = a.lsp_position_params("{\"jsonrpc\":\"2.0\",\"params\":{\"textDocument\":{\"uri\":7},\"position\":{\"line\":\"0\",\"character\":0}}}")
+    unicode = a.lsp_init_params("{\"jsonrpc\":\"2.0\",\"method\":\"initialize\",\"params\":{\"rootUri\":\"a\\u00e9\\ud83d\\ude00name\\nxy\"}}")
+    uv: Slice<u8> = unicode.workspace_uri.view()
+    offsets = uv.lsp_byte_of_pos(0, 4, 0, 0) == 7
+        && uv.lsp_byte_of_pos(0, 3, 0, 0) == 3
+        && uv.lsp_byte_of_pos(0, 99, 0, 0) == 11
+        && uv.lsp_byte_of_pos(1, 1, 0, 0) == 13
+    ok = cfg.workspace_uri == "file:///workspace"
+        && cfg.rename_prepare
+        && cfg.document_changes
+        && fallback.workspace_uri == "file:///root-only"
+        && pos.ok
+        && pos.uri == "file:///good.zen"
+        && pos.line == 1
+        && pos.character == 2
+        && missing.ok == false
+        && wrong.ok == false
+        && offsets
+    request.addr().deinit()
+    ok
+}
+lz_protocol_validation = (mp: Allocator) bool {
+    z: StringView = ""
+    uri = mp.lz_uri("lzproto.zen")
+    src = "foo* = () i32 { 1 }\nmain = () i32 { foo() }\n"
+    bad = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":\"bad\",\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":1}}}"])
+    good = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":\"jump\",\"method\":\"textDocument/definition\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":1,\"character\":18},\"context\":{\"id\":99}}}"])
+    o = mp.lz_run(37, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, src)), mp.lz_frame(bad), mp.lz_frame(good), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"positionEncoding\":\"utf-16\"")
+        && o.contains("\"id\":\"bad\",\"error\":{\"code\":-32602")
+        && o.contains("\"id\":\"jump\",\"result\":{\"uri\":")
+        && mp.lz_rc(37) == "0"
+}
+lz_utf16_request = (mp: Allocator) bool {
+    z: StringView = ""
+    uri = mp.lz_uri("lzutfreq.zen")
+    src = "foo* = () i32 { 1 }\npair = (s: StringView, x: i32) i32 { x }\nmain = () i32 { pair(\\\"\\u00e9\\ud83d\\ude00\\\", foo()) }\n"
+    req = mp.lz_posreq(uri, "definition", 2, 2, 30)
+    o = mp.lz_run(38, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, src)), mp.lz_frame(req), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"id\":2,\"result\":{\"uri\":")
+        && o.contains("\"start\":{\"line\":0,\"character\":0}")
+        && mp.lz_rc(38) == "0"
+}
+lz_semantic_local = (mp: Allocator) bool {
+    z: StringView = ""
+    uri = mp.lz_uri("lzsemantic.zen")
+    src = "foo* = (x: i32) i32 { x }\nbar* = (x: i32) i32 { x }\nmain = () i32 { foo(1) }\nThing*: { v: i32 }\n"
+    init = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"capabilities\":{\"textDocument\":{\"rename\":{\"prepareSupport\":true}}}}}"
+    refs_no = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"textDocument/references\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":2,\"character\":17},\"context\":{\"includeDeclaration\":false}}}"])
+    refs_yes = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":43,\"method\":\"textDocument/references\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":2,\"character\":17},\"context\":{\"includeDeclaration\":true}}}"])
+    rename = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":46,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":2,\"character\":17},\"newName\":\"zap\"}}"])
+    collision = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":47,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":2,\"character\":17},\"newName\":\"bar\"}}"])
+    reserved = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":48,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":2,\"character\":17},\"newName\":\"return\"}}"])
+    workspace = "{\"jsonrpc\":\"2.0\",\"id\":49,\"method\":\"workspace/symbol\",\"params\":{\"query\":\"foo\"}}"
+    invalid = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":50,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":2,\"character\":17},\"newName\":\"9bad\"}}"])
+    unsupported = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":51,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":3,\"character\":1},\"newName\":\"RenamedThing\"}}"])
+    o = mp.lz_run(39, mp.zo_join([z, mp.lz_frame(init), mp.lz_frame(mp.lz_open(uri, src)), mp.lz_frame(mp.lz_posreq(uri, "definition", 40, 0, 22)), mp.lz_frame(mp.lz_posreq(uri, "declaration", 41, 2, 17)), mp.lz_frame(refs_no), mp.lz_frame(refs_yes), mp.lz_frame(mp.lz_posreq(uri, "documentHighlight", 44, 2, 17)), mp.lz_frame(mp.lz_posreq(uri, "prepareRename", 45, 2, 17)), mp.lz_frame(rename), mp.lz_frame(collision), mp.lz_frame(reserved), mp.lz_frame(invalid), mp.lz_frame(unsupported), mp.lz_frame(workspace), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"renameProvider\":{\"prepareProvider\":true}")
+        && o.contains("\"id\":40,\"result\":{\"uri\":")
+        && o.contains("\"start\":{\"line\":0,\"character\":8}")
+        && o.contains("\"id\":41,\"result\":{\"uri\":")
+        && o.contains(mp.zo_join([z, "\"id\":42,\"result\":[{\"uri\":\"", uri, "\",\"range\":{\"start\":{\"line\":2"]))
+        && o.contains(mp.zo_join([z, "\"id\":43,\"result\":[{\"uri\":\"", uri, "\",\"range\":{\"start\":{\"line\":0"]))
+        && o.contains("\"id\":44,\"result\":[{\"range\":")
+        && o.contains("\"kind\":1")
+        && o.contains("\"id\":45,\"result\":{\"range\":")
+        && o.contains("\"placeholder\":\"foo\"")
+        && o.contains("\"id\":46,\"result\":{\"changes\":{")
+        && o.contains("\"newText\":\"zap\"")
+        && o.contains("\"id\":47,\"error\":{\"code\":-32602")
+        && o.contains("\"id\":48,\"error\":{\"code\":-32602")
+        && o.contains("\"id\":49,\"result\":[{\"name\":\"foo\"")
+        && o.contains("\"id\":50,\"error\":{\"code\":-32602")
+        && o.contains("\"id\":51,\"error\":{\"code\":-32602")
+        && mp.lz_rc(39) == "0"
+}
+lz_semantic_overlay = (mp: Allocator) bool {
+    z: StringView = ""
+    main_uri = mp.lz_uri("semroot.zen")
+    lib_uri = mp.lz_uri("semlib.zen")
+    extra_uri = mp.lz_uri("semextra.zen")
+    disk = "old* = () i32 { 0 }\n"
+    save(mp.zo_join([mp.zo_dir(), z, "/semlib.zen"]), disk, len(disk))
+    main_src = "{ foo } = semlib\nm = semlib\nmain = () i32 { foo(\\\"x\\\") + \\\"\\u00e9\\ud83d\\ude00\\\".foo() + m.foo(\\\"x\\\") }\n"
+    lib_src = "foo* = (s: StringView) i32 { 1 }\n"
+    extra_src = "extra* = () i32 { 2 }\n"
+    init = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"rootUri\":\"file://", mp.zo_dir(), "\",\"capabilities\":{\"textDocument\":{\"rename\":{\"prepareSupport\":true}},\"workspace\":{\"workspaceEdit\":{\"documentChanges\":true}}}}} "])
+    refs_no = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":63,\"method\":\"textDocument/references\",\"params\":{\"textDocument\":{\"uri\":\"", main_uri, "\"},\"position\":{\"line\":2,\"character\":17},\"context\":{\"includeDeclaration\":false}}}"])
+    refs_yes = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":64,\"method\":\"textDocument/references\",\"params\":{\"textDocument\":{\"uri\":\"", main_uri, "\"},\"position\":{\"line\":2,\"character\":17},\"context\":{\"includeDeclaration\":true}}}"])
+    rename = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":65,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"", main_uri, "\"},\"position\":{\"line\":2,\"character\":17},\"newName\":\"zap\"}}"])
+    workspace = "{\"jsonrpc\":\"2.0\",\"id\":66,\"method\":\"workspace/symbol\",\"params\":{\"query\":\"foo\"}}"
+    workspace_extra = "{\"jsonrpc\":\"2.0\",\"id\":67,\"method\":\"workspace/symbol\",\"params\":{\"query\":\"extra\"}}"
+    o = mp.lz_run(40, mp.zo_join([z, mp.lz_frame(init), mp.lz_frame(mp.lz_open_v(main_uri, main_src, 9)), mp.lz_frame(mp.lz_open_v(lib_uri, lib_src, 4)), mp.lz_frame(mp.lz_open_v(extra_uri, extra_src, 2)), mp.lz_frame(mp.lz_posreq(main_uri, "definition", 60, 2, 17)), mp.lz_frame(mp.lz_posreq(main_uri, "definition", 61, 2, 34)), mp.lz_frame(mp.lz_posreq(main_uri, "definition", 62, 2, 43)), mp.lz_frame(refs_no), mp.lz_frame(refs_yes), mp.lz_frame(rename), mp.lz_frame(workspace), mp.lz_frame(workspace_extra), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains(mp.zo_join([z, "\"id\":60,\"result\":{\"uri\":\"", lib_uri]))
+        && o.contains(mp.zo_join([z, "\"id\":61,\"result\":{\"uri\":\"", lib_uri]))
+        && o.contains(mp.zo_join([z, "\"id\":62,\"result\":{\"uri\":\"", lib_uri]))
+        && o.contains(mp.zo_join([z, "\"id\":63,\"result\":[{\"uri\":\"", main_uri]))
+        && o.contains(mp.zo_join([z, "\"id\":64,\"result\":[{\"uri\":\"", lib_uri]))
+        && o.contains("\"id\":65,\"result\":{\"documentChanges\":[")
+        && o.contains(mp.zo_join([z, "\"uri\":\"", lib_uri, "\",\"version\":4"]))
+        && o.contains(mp.zo_join([z, "\"uri\":\"", main_uri, "\",\"version\":9"]))
+        && o.contains("\"start\":{\"line\":2,\"character\":33}")
+        && o.contains("\"start\":{\"line\":1,\"character\":0}") == false
+        && o.contains("\"id\":66,\"result\":[{\"name\":\"foo\"")
+        && o.contains("\"id\":67,\"result\":[{\"name\":\"extra\"")
+        && mp.lz_rc(40) == "0"
+}
+lz_semantic_methods = (mp: Allocator) bool {
+    z: StringView = ""
+    uri = mp.lz_uri("lzmethods.zen")
+    src = "A*: { v: i32,\n    ping = (a: A) i32 { a.v }\n}\nB*: { v: i32,\n    ping = (b: B) i32 { b.v }\n}\nmain = () i32 {\n    a = A(v: 1)\n    b = B(v: 2)\n    x = a.ping()\n    y = b.ping()\n    x + y\n}\n"
+    rename = mp.zo_join([z, "{\"jsonrpc\":\"2.0\",\"id\":72,\"method\":\"textDocument/rename\",\"params\":{\"textDocument\":{\"uri\":\"", uri, "\"},\"position\":{\"line\":9,\"character\":11},\"newName\":\"pong\"}}"])
+    o = mp.lz_run(41, mp.zo_join([z, mp.lz_frame(LZ_INIT()), mp.lz_frame(mp.lz_open(uri, src)), mp.lz_frame(mp.lz_posreq(uri, "definition", 70, 9, 11)), mp.lz_frame(mp.lz_posreq(uri, "definition", 71, 10, 11)), mp.lz_frame(rename), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
+    o.contains("\"id\":70,\"result\":{\"uri\":")
+        && o.contains("\"start\":{\"line\":1,\"character\":4}")
+        && o.contains("\"id\":71,\"result\":{\"uri\":")
+        && o.contains("\"start\":{\"line\":4,\"character\":4}")
+        && o.contains("\"id\":72,\"result\":{\"changes\":{")
+        && o.contains("\"newText\":\"pong\"")
+        && o.contains("\"start\":{\"line\":10,\"character\":10}") == false
+        && mp.lz_rc(41) == "0"
+}
 // ── the cases ─────────────────────────────────────────────────────────────────────────────────────
 // (1) initialize: framed reply, echoed id, full-sync capability advertised, clean shutdown/exit.
 lz_init_ok = (mp: Allocator) bool {
@@ -176,7 +312,7 @@ lz_change_clears = (mp: Allocator) bool {
 }
 // (4) unknown REQUEST: -32601 with the echoed id; the server keeps serving afterwards.
 lz_unknown_method = (mp: Allocator) bool {
-    probe = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/references\",\"params\":{\"position\":{\"line\":0,\"character\":0}}}"
+    probe = "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"textDocument/notReal\",\"params\":{}}"
     o = mp.lz_run(3, mp.zo_join([mp.lz_frame(LZ_INIT()), mp.lz_frame(probe), mp.lz_frame(LZ_SHUT()), mp.lz_frame(LZ_EXIT())]))
     o.contains("\"id\":7")
         && o.contains("-32601")
@@ -362,7 +498,7 @@ lz_completion_items = (mp: Allocator) bool {
 // just stops"). Every keystroke must now get its own diagnostic, a request issued MID-typing must
 // still come back, and the session must reach a clean shutdown with the squiggles cleared once the
 // import finally names a real module.
-LZ_TYPED = () [StringView] {
+LZ_TYPED = () MutSlice<StringView> {
     ["s", "st", "std", "std.", "std.t", "std.te", "std.tex", "std.text", "std.text.", "std.text.s", "std.text.st"]
 }
 lz_import_keystrokes = (mp: Allocator) bool {
@@ -494,9 +630,7 @@ lz_hover_motion = (mp: Allocator) bool {
 // is what replaced its line here, and it is also what `]m`/`[m` are bound to (Zen has no tree-sitter
 // grammar since the Python purge, so the `]f [f ]c [c` textobject motions have nothing to bind to).
 // Each probe carries its own request id, so one method becoming real reddens exactly one line here.
-LZ_UNIMPL = () [StringView] {
-    ["declaration", "implementation", "references", "rename", "typeDefinition", "signatureHelp"]
-}
+LZ_UNIMPL = () MutSlice<StringView> { ["implementation", "typeDefinition", "signatureHelp"] }
 lz_unimplemented_motions = (mp: Allocator) bool {
     z: StringView = ""
     uri = mp.lz_uri("lzmot.zen")
@@ -516,10 +650,10 @@ lz_unimplemented_motions = (mp: Allocator) bool {
     })
     // and none of them is advertised — which is why a conforming client never even asks
     all
-        && o.contains("declarationProvider") == false
+        && o.contains("declarationProvider\":true")
         && o.contains("implementationProvider") == false
-        && o.contains("referencesProvider") == false
-        && o.contains("renameProvider") == false
+        && o.contains("referencesProvider\":true")
+        && o.contains("renameProvider\":true")
         && mp.lz_rc(28) == "0"
 }
 // ── gO: the DOCUMENT SYMBOL OUTLINE ───────────────────────────────────────────────────────────────
@@ -648,5 +782,5 @@ lz_comp_auto_import = (mp: Allocator) bool {
 }
 harness_lsp_run* = () i32 {
     mp = heap_allocator()
-    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_docs_owned(), mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown(), mp.lz_gd_same_file_fn(), mp.lz_gd_same_file_type(), mp.lz_gd_inherent_method(), mp.lz_gd_struct_field(), mp.lz_gd_cross_module(), mp.lz_gd_imported_std(), mp.lz_gd_qualified(), mp.lz_hover_motion(), mp.lz_unimplemented_motions(), mp.lz_docsym_top_level(), mp.lz_docsym_nests_methods(), mp.lz_docsym_omits(), mp.lz_comp_empty_buffer(), mp.lz_comp_top_level(), mp.lz_comp_after_std_dot(), mp.lz_comp_receiver_members(), mp.lz_comp_auto_import()])
+    run_suite("lsp (JSON-RPC stdio conformance: handshake, diagnostics, robustness)", [mp.lz_docs_owned(), mp.lz_protocol_params(), mp.lz_protocol_validation(), mp.lz_utf16_request(), mp.lz_semantic_local(), mp.lz_semantic_overlay(), mp.lz_semantic_methods(), mp.lz_init_ok(), mp.lz_open_bad(), mp.lz_change_clears(), mp.lz_unknown_method(), mp.lz_garbage_cl(), mp.lz_huge_cl(), mp.lz_didclose_clears(), mp.lz_utf16_cols(), mp.lz_multifile_sibling(), mp.lz_foreign_module_error(), mp.lz_goto_def(), mp.lz_semantic_tokens(), mp.lz_unsaved_buffer_tokens(), mp.lz_close_reverts_to_disk(), mp.lz_rawstring_token_order(), mp.lz_hover_buffer(), mp.lz_completion_items(), mp.lz_import_keystrokes(), mp.lz_exit_no_shutdown(), mp.lz_gd_same_file_fn(), mp.lz_gd_same_file_type(), mp.lz_gd_inherent_method(), mp.lz_gd_struct_field(), mp.lz_gd_cross_module(), mp.lz_gd_imported_std(), mp.lz_gd_qualified(), mp.lz_hover_motion(), mp.lz_unimplemented_motions(), mp.lz_docsym_top_level(), mp.lz_docsym_nests_methods(), mp.lz_docsym_omits(), mp.lz_comp_empty_buffer(), mp.lz_comp_top_level(), mp.lz_comp_after_std_dot(), mp.lz_comp_receiver_members(), mp.lz_comp_auto_import()])
 }

@@ -1,30 +1,5 @@
-// std.text.sb — Sb: the STICKY-ERROR chainable string builder.
-//
-// std.text.string's String is honestly fallible, but honest is verbose: every append is its own
-// `s = s.append_in(a, …).expect("oom")` line, so building "os zen(x86)" costs six statements.
-// Sb collapses the ceremony without giving up errors-as-values: the builder carries a sticky
-// failure flag, every op is a NO-OP once a failure has been recorded, and `done` settles the
-// whole chain as ONE Result — `.Ok(str)` or the first allocation failure:
-//
-//   m = std.mem.alloc.request_arena(std.mem.alloc.heap_allocator())
-//   a = m.addr()
-//   a.sb().s("os ").s(name).ch('(').s(abi).ch(')').done()    // Result<str, IoError>
-//
-// The allocator is named ONCE (`a.sb()`) and rides inside the builder, so the chain stays flat.
-// The ops are METHODS on Sb (fmt.zen's Printer pattern): short names like `s`/`i` would collide
-// on the flat import namespace as top-level fns, but as struct methods they are namespaced under
-// the receiver type — Printer.s (streaming stdout) and Sb.s (allocating builder) coexist.
-//
-//   .s(t)       append a str            .i(n)      append an i64 (std.text.num digits)
-//   .ch(b)      append a single byte    .rep(t, n) append t, n times (iterative — see below)
-//   .done()     settle: Ok(NUL-terminated str) or the sticky Err; the buffer is FREED on Err
-//
-// Growth, digits, and finishing all reuse std.text.string / std.text.num — Sb adds policy
-// (stickiness), not a second builder. `rep` is the one low-level op: it reserves the full block
-// once, then fills BY ITERATION (a `.loop` over the destination slice, like str.zen's repeat_in).
-// Recursion would be a stack overflow: the plain-cc paths (bootstrap CFLAGS, the harness's
-// `cc -std=gnu11 -w`) carry no -O flag, so C tail calls are NOT eliminated — a rep(t, 1_000_000)
-// implemented by self-call segfaults there (verified), while this fill stays flat.
+// Chainable string builder with sticky allocation failure. done() returns the first error and frees
+// the partial buffer; later operations are no-ops after failure.
 { String, init, push_in, append_in, finish_in, free_in } = std.text.string
 { integer_in } = std.text.num
 { AllocatorBackend } = std.mem.alloc
@@ -36,7 +11,6 @@ Sb*<A>: {
     buf: String,
     oom: bool,
     s = (b: Sb<A>, t: StringView) Sb<A> {
-        // append a str; a no-op once sticky.
         b.oom.match ({
             true  => b,
             false => b.a.append_in(b.buf, t).match ({
@@ -54,7 +28,6 @@ Sb*<A>: {
         })
     }
     ch = (b: Sb<A>, c: u8) Sb<A> {
-        // append one byte; a no-op once sticky.
         b.oom.match ({
             true  => b,
             false => b.a.push_in(b.buf, c).match ({
@@ -169,7 +142,7 @@ sb_grow = (a: AllocatorBackend, s: String, need: i64) Result<String, IoError> {
 sb_fill<A> = (b: Sb<A>, tv: Slice<u8>, total: i64) Sb<A> {
     b.a.sb_grow(b.buf, total).match ({
         .Ok(g)  => {
-            dst :: [u8] = g.ptr.offset(g.len).slice(total)
+            dst :: MutSlice<u8> = g.ptr.offset(g.len).slice(total)
             dst.loop_at((k, x) { dst[k] = tv[k % tv.len] })
             Sb<A>(
                 a: b.a,

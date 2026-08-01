@@ -61,11 +61,11 @@ b64_pad = (sv: Slice<u8>) i64 {
     })
 }
 // base64-encode `data`. Output length is 4*ceil(n/3) with `=` padding; empty input yields "".
-base64_encode* = (a: AllocatorBackend, data: [u8]) StringView {
+base64_encode* = (a: AllocatorBackend, data: MutSlice<u8>) StringView {
     n = data.len
     ngroups = (n + 2) / 3
     olen = ngroups * 4
-    out :: [u8] = a
+    out :: MutSlice<u8> = a
         .try_acquire(olen + 1)
         .expect("std.format.encoding: out of memory")
         .slice(olen + 1)
@@ -114,10 +114,10 @@ base64_encode* = (a: AllocatorBackend, data: [u8]) StringView {
     out[olen] = 0
     cstr(out.ptr)
 }
-base64_encode_in* = (a: AllocatorBackend, data: [u8]) StringView { a.base64_encode(data) }
+base64_encode_in* = (a: AllocatorBackend, data: MutSlice<u8>) StringView { a.base64_encode(data) }
 // base64-decode `s`. `.Err(.Errno(ENC_BAD_LEN))` when the length is not a multiple of 4;
 // `.Err(.Errno(ENC_BAD_CHAR))` on any byte outside the alphabet (incl. a misplaced `=`).
-base64_decode* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> {
+base64_decode* = (a: AllocatorBackend, s: StringView) Result<MutSlice<u8>, IoError> {
     sv = s.view()
     n = sv.len
     (n == 0).match ({
@@ -130,7 +130,7 @@ base64_decode* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> {
                 olen = ngroups * 3 - pad
                 a.try_acquire(olen).match ({
                     .Ok(p)  => {
-                        out :: [u8] = p.slice(olen)
+                        out :: MutSlice<u8> = p.slice(olen)
                         oi :: i64 = 0
                         s0 :: i64 = 0
                         s1 :: i64 = 0
@@ -212,15 +212,15 @@ base64_decode* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> {
         }),
     })
 }
-base64_decode_in* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> {
+base64_decode_in* = (a: AllocatorBackend, s: StringView) Result<MutSlice<u8>, IoError> {
     a.base64_decode(s)
 }
 // ── hex ───────────────────────────────────────────────────────────────────────
 // lowercase-hex-encode `data`. Output length is 2*n; empty input yields "".
-hex_encode* = (a: AllocatorBackend, data: [u8]) StringView {
+hex_encode* = (a: AllocatorBackend, data: MutSlice<u8>) StringView {
     n = data.len
     olen = n * 2
-    out :: [u8] = a
+    out :: MutSlice<u8> = a
         .try_acquire(olen + 1)
         .expect("std.format.encoding: out of memory")
         .slice(olen + 1)
@@ -232,10 +232,10 @@ hex_encode* = (a: AllocatorBackend, data: [u8]) StringView {
     out[olen] = 0
     cstr(out.ptr)
 }
-hex_encode_in* = (a: AllocatorBackend, data: [u8]) StringView { a.hex_encode(data) }
+hex_encode_in* = (a: AllocatorBackend, data: MutSlice<u8>) StringView { a.hex_encode(data) }
 // hex-decode `s` (either case). `.Err(.Errno(ENC_BAD_LEN))` when the length is odd;
 // `.Err(.Errno(ENC_BAD_CHAR))` on any non-hex byte.
-hex_decode* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> {
+hex_decode* = (a: AllocatorBackend, s: StringView) Result<MutSlice<u8>, IoError> {
     sv = s.view()
     n = sv.len
     (n % 2 != 0).match ({
@@ -246,7 +246,7 @@ hex_decode* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> {
                 true  => ok(slice(null_ptr(), 0)),
                 false => a.try_acquire(olen).match ({
                     .Ok(p)  => {
-                        out :: [u8] = p.slice(olen)
+                        out :: MutSlice<u8> = p.slice(olen)
                         bad ::= false
                         out.loop((h, i, b) {
                             hi = sv[i * 2].hex_nibble()
@@ -275,4 +275,6 @@ hex_decode* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> {
         },
     })
 }
-hex_decode_in* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> { a.hex_decode(s) }
+hex_decode_in* = (a: AllocatorBackend, s: StringView) Result<MutSlice<u8>, IoError> {
+    a.hex_decode(s)
+}

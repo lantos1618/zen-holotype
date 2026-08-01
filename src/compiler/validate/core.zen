@@ -1,4 +1,3 @@
-// compiler.validate.core — orchestration: the kv_* validation walk, check_module*, public entry points.
 { ArmData, AssignData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, ImplData, IndexData,
   IndexSetData, LetData, MakeStructData, MatchData, Param, Stmt, StructDecl, Ty } = compiler.ast.ast_types
 { cbuf, gstr_append, gstr_finish, gstr_string, tvoid, acquire_or_die } = compiler.genc
@@ -51,7 +50,6 @@ kv_own_assign_target_kind = (
         _          => a.kv_own_expr_kind(env, seen, al, t),
     })
 }
-// ── FREE-IN-LOOP ─────────────────────────────────────────────────────────────────────────────────
 // A loop body runs N times, but the lexical walk sees it once: a body that frees a local declared
 // OUTSIDE the loop and does not rebind it before the iteration ends frees the same pointer again on
 // the next iteration — a double-free the single walk misses. The net kill-set of ONE body walk
@@ -61,7 +59,7 @@ kv_own_assign_target_kind = (
 // statement, so it nets to alive and stays legal; free-then-`return` arms are excluded by the usual
 // fall-through rule (the loop is exited, no second free).
 // every `let` name anywhere in a body (incl. nested arms/blocks/loops): fresh per iteration.
-loop_lets = (a: Allocator, acc: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
+loop_lets = (a: Allocator, acc: Ptr<DeadList>, body: MutSlice<Stmt>) Ptr<DeadList> {
     out ::= acc
     body.loop_at((i, st) { out = a.loop_lets_stmt(out, st) })
     out
@@ -91,7 +89,7 @@ loop_lets_expr = (a: Allocator, acc: Ptr<DeadList>, e: Ptr<Expr>) Ptr<DeadList> 
         }),
     })
 }
-loop_lets_arms = (a: Allocator, acc: Ptr<DeadList>, arms: [ArmData]) Ptr<DeadList> {
+loop_lets_arms = (a: Allocator, acc: Ptr<DeadList>, arms: MutSlice<ArmData>) Ptr<DeadList> {
     out ::= acc
     arms.loop_at((i, ar) { out = a.loop_lets_expr(out, ar.body) })
     out
@@ -101,7 +99,7 @@ loop_body_outer_frees = (
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
     binds: Ptr<DeadList>,
 ) i32 {
     net = a.own_dead_body(env, seen, al, body)
@@ -118,7 +116,7 @@ loop_outer_frees = (
 }
 // Compatibility verdict API: 0 = clean, 1 = rejected. Detailed callers consume `check_module_kind`,
 // `check_module_batch`, or a structured diagnostic, so the old parallel count traversal is redundant.
-check_module = (a: Allocator, decls: [Decl]) i32 {
+check_module = (a: Allocator, decls: MutSlice<Decl>) i32 {
     (a.check_module_kind(decls) == 0).then({ 0 }, { 1 })
 }
 check_diagnostic_none* = () CheckDiagnostic {
@@ -236,7 +234,7 @@ check_to_diagnostic* = (d: CheckDiagnostic) Diagnostic {
 // error in traversal order, so chains read like `||` without losing the payload. Method on the
 // primitive (not a wrapping struct) so every existing i32 signature stays untouched; NOT lazy —
 // both sides are evaluated, same as the old kv_kor combinator (laziness would change evaluation
-// order; possible follow-up via a block arg).
+// order).
 Verdict: {
     or: (Self, i32) i32,
 }
@@ -269,7 +267,7 @@ kv_own_args_kind = (
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
-    args: [Expr],
+    args: MutSlice<Expr>,
 ) i32 {
     acc ::= 0
     args.loop_at((i, ar) { acc = acc.or(a.kv_own_expr_kind(env, seen, al, ar.addr())) })
@@ -280,7 +278,7 @@ kv_own_inits_kind = (
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
-    inits: [FieldInit],
+    inits: MutSlice<FieldInit>,
 ) i32 {
     acc ::= 0
     inits.loop_at((i, fi) { acc = acc.or(a.kv_own_expr_kind(env, seen, al, fi.value)) })
@@ -292,7 +290,7 @@ kv_own_arms_kind = (
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
     subjty: Ty,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
 ) i32 {
     acc ::= 0
     arms.loop_at((i, ar) {
@@ -300,7 +298,7 @@ kv_own_arms_kind = (
     })
     acc
 }
-// the DOUBLE-MOVE (re-census #63) in the kind pass: the same owner moved into two Own fields of one
+// The same owner moved into two Own fields of one
 // struct literal reports KOWNERSHIP at the second-moved value's position (mirrors own_struct_dupmove_err).
 kv_own_struct_dupmove_kind = (a: Allocator, env: Env, s: MakeStructData) i32 {
     acc ::= 0
@@ -320,7 +318,7 @@ kv_own_struct_dupmove_kind = (a: Allocator, env: Env, s: MakeStructData) i32 {
     })
     acc
 }
-kv_own_slice_dupmove_kind = (a: Allocator, env: Env, items: [Expr]) i32 {
+kv_own_slice_dupmove_kind = (a: Allocator, env: Env, items: MutSlice<Expr>) i32 {
     acc ::= 0
     d ::= a.dead_nil()
     items.loop_at((i, it) {
@@ -414,7 +412,7 @@ kv_own_body_kind = (
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
 ) i32 {
     acc ::= 0
     e ::= env
@@ -428,7 +426,7 @@ kv_own_body_kind = (
     })
     acc
 }
-kv_own_check_func_kind = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+kv_own_check_func_kind = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func) i32 {
     env = Env(
         vars: a.params_env(f.params),
         decls: decls,
@@ -438,7 +436,7 @@ kv_own_check_func_kind = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) 
     )
     a.kv_own_body_kind(env, a.dead_nil(), a.alias_nil(), f.body)
 }
-check_module_ownership_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_ownership_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     acc ::= 0
     idx = a.build_decl_index(decls)
     decls.loop_at((i, d) {
@@ -451,7 +449,12 @@ check_module_ownership_kind = (a: Allocator, decls: [Decl]) i32 {
 }
 // ── a CALL: authoritative arity, argument-type, and undefined-name classification.
 // arg-type position: which arg first fails to fit (so a bad arg reports KARGTYPE not a blanket code).
-kv_arg_type_kind = (env: Env, tps: [Param], params: [Param], args: [Expr]) i32 {
+kv_arg_type_kind = (
+    env: Env,
+    tps: MutSlice<Param>,
+    params: MutSlice<Param>,
+    args: MutSlice<Expr>,
+) i32 {
     acc ::= 0
     args.loop_at((i, ar) {
         acc = acc.or(env.arg_err_at(tps, params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos()))
@@ -474,72 +477,70 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
     })
 }
 kv_check_call_kind = (env: Env, c: CallData) i32 {
-    c.is_nonexhaust_lit_call().match ({
-        true  => kv_at(KLITEXHAUST(), c.pos),
-        false => c.is_badmatchlabel_call().match ({
-            true  => kv_at(KMATCHLABEL(), c.pos),
-            false => c.is_dupmatcharm_call().match ({
-                true  => kv_at(KDUPMATCHARM(), c.pos),
-                false => c.is_duplitarm_call().match ({
-                    true  => kv_at(KDUPLITARM(), c.pos),
-                    false => c.is_forbidden_raw_call().match ({
-                        true  => KUNDEFINED(),
-                        false => env.is_unresolved_trait_call(c).match ({
-                            true  => 0,
-                            false => env.shadows_toplevel(c.fn).match ({
-                                true  => env.var_or_global(c.fn).is_fnt().match ({
-                                    true  => env.kv_fnval_call_kind(c),
-                                    false => env.shadow_not_callable(c.fn).match ({
-                                        true  => KNOTCALLABLE(),
-                                        false => 0,
-                                    }),
-                                }),
-                                false => env.env_known_fn(c.fn).match ({
-                                    true  => env.recv_typed_miss(c).match ({
-                                        true  => KMETHODNOTFOUND(),
-                                        false => env.ufcs_vis_miss(c).match ({
-                                            true  => env.undef_is_method(c).match ({
-                                                true  => KMETHODNOTFOUND(),
-                                                false => KUNDEFINED(),
-                                            }),
-                                            false => env.kv_call_errs_kind(c),
-                                        }),
-                                    }),
-                                    false => c.fn.is_intrinsic().match ({
-                                        true  => (c.args.len == c.fn.intrinsic_arity()).match ({
-                                            true  => env.kv_reflect_kind(c),
-                                            false => KARITY(),
-                                        }),
-                                        false => (env.env_imported(c.fn)
-                                            || env.env_trait_method(c.fn)).match ({
-                                            true  => env.trait_recv_missing(c).match ({
-                                                true  => kv_at(KTRAITBOUND(), c.pos),
-                                                false => 0,
-                                            }),
-                                            false => env.var_or_global(c.fn).is_fnt().match ({
-                                                true  => env.kv_fnval_call_kind(c),
-                                                false => env.is_bound(c.fn).match ({
-                                                    true  => KNOTCALLABLE(),
-                                                    false => (c.args.len > 0
-                                                        && is_empty(env.decls.trait_declaring(c.fn)) == false).match ({
-                                                        true  => KTRAITBOUND(),
-                                                        false => env.undef_is_method(c).match ({
-                                                            true  => KMETHODNOTFOUND(),
-                                                            false => KUNDEFINED(),
-                                                        }),
-                                                    }),
-                                                }),
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    // Parser-lowered match/literal sentinels deliberately outrank every ordinary name/call error.
+    c.is_nonexhaust_lit_call().then({
+        return kv_at(KLITEXHAUST(), c.pos)
     })
+    c.is_badmatchlabel_call().then({
+        return kv_at(KMATCHLABEL(), c.pos)
+    })
+    c.is_dupmatcharm_call().then({
+        return kv_at(KDUPMATCHARM(), c.pos)
+    })
+    c.is_duplitarm_call().then({
+        return kv_at(KDUPLITARM(), c.pos)
+    })
+    c.is_forbidden_raw_call().then({
+        return KUNDEFINED()
+    })
+    // An unresolved call in an abstract trait body is deferred until a concrete receiver exists.
+    env.is_unresolved_trait_call(c).then({
+        return 0
+    })
+    // Lexical bindings shadow every same-named top-level, imported, or intrinsic callable.
+    env.shadows_toplevel(c.fn).then({
+        env.var_or_global(c.fn).is_fnt().then({
+            return env.kv_fnval_call_kind(c)
+        })
+        env.shadow_not_callable(c.fn).then({
+            return KNOTCALLABLE()
+        })
+        return 0
+    })
+    env.env_known_fn(c.fn).then({
+        env.recv_typed_miss(c).then({
+            return KMETHODNOTFOUND()
+        })
+        env.ufcs_vis_miss(c).then({
+            return env.undef_is_method(c).then({ KMETHODNOTFOUND() }, { KUNDEFINED() })
+        })
+        return env.kv_call_errs_kind(c)
+    })
+    c.fn.is_intrinsic().then({
+        (c.args.len == c.fn.intrinsic_arity()).then({
+            return env.kv_reflect_kind(c)
+        })
+        return KARITY()
+    })
+    (env.env_imported(c.fn) || env.env_trait_method(c.fn)).then({
+        env.trait_recv_missing(c).then({
+            return kv_at(KTRAITBOUND(), c.pos)
+        })
+        return 0
+    })
+    env.var_or_global(c.fn).is_fnt().then({
+        return env.kv_fnval_call_kind(c)
+    })
+    env.is_bound(c.fn).then({
+        return KNOTCALLABLE()
+    })
+    (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).then({
+        return KTRAITBOUND()
+    })
+    env.undef_is_method(c).then({
+        return KMETHODNOTFOUND()
+    })
+    KUNDEFINED()
 }
 // #574: the flat fn exists, but the module the call lives in neither
 // defines nor imports the name — a method-shaped call bound by
@@ -620,7 +621,7 @@ kv_reflect_kind = (env: Env, c: CallData) i32 {
         false => 0,
     })
 }
-kv_fnt_arg_kind = (env: Env, ptys: [Ty], args: [Expr]) i32 {
+kv_fnt_arg_kind = (env: Env, ptys: MutSlice<Ty>, args: MutSlice<Expr>) i32 {
     acc ::= 0
     args.loop_at((i, ar) {
         acc = acc.or(env.fnt_arg_err_at(ptys, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos()))
@@ -636,12 +637,12 @@ kv_fnval_call_kind = (env: Env, c: CallData) i32 {
         _        => KUNDEFINED(),
     })
 }
-kv_check_args_kind = (env: Env, args: [Expr]) i32 {
+kv_check_args_kind = (env: Env, args: MutSlice<Expr>) i32 {
     acc ::= 0
     args.loop_at((i, ar) { acc = acc.or(env.kv_check_expr_kind(ar.addr())) })
     acc
 }
-kv_check_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
+kv_check_arms_kind = (env: Env, subjty: Ty, arms: MutSlice<ArmData>) i32 {
     acc ::= 0
     arms.loop_at((i, ar) {
         acc = acc.or(env.a.arm_env(env, subjty, ar).kv_check_expr_kind(ar.body))
@@ -651,7 +652,7 @@ kv_check_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
 kv_arm_result_kind = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
     env.arm_result_err(subjty, want, ar).kv_one(KRETURNFIT()).kv_at(load(ar.body).expr_pos())
 }
-kv_match_arm_result_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
+kv_match_arm_result_kind = (env: Env, subjty: Ty, arms: MutSlice<ArmData>) i32 {
     want = env.match_result_ty(subjty, arms)
     acc ::= 0
     arms.loop_at((i, ar) { acc = acc.or(env.kv_arm_result_kind(subjty, want, ar)) })
@@ -669,7 +670,7 @@ kv_value_void_arm_kind = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
                     acc = acc.or(env
                         .novalue_arm_leaf(ar.body)
                         .kv_one(KARMVOID())
-                        .kv_at(ar.pos.pos_or(load(ar.body).expr_pos())))
+                        .kv_at(load(ar.body).expr_pos().pos_or(ar.pos)))
                 })
                 acc
             },
@@ -682,13 +683,13 @@ kv_value_void_arm_kind = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
         }),
     })
 }
-kv_arm_return_kind = (arms: [ArmData]) i32 {
+kv_arm_return_kind = (arms: MutSlice<ArmData>) i32 {
     acc ::= 0
     arms.loop_at((i, ar) { acc = acc.or(ar.body.expr_drops_return().kv_one(KVALPOSRETURN())) })
     acc
 }
 // struct-literal init fields: an unknown field OR a mistyped value is KSTRUCTFIELD.
-kv_check_inits_kind = (env: Env, inits: [FieldInit]) i32 {
+kv_check_inits_kind = (env: Env, inits: MutSlice<FieldInit>) i32 {
     acc ::= 0
     inits.loop_at((i, fi) { acc = acc.or(env.kv_check_expr_kind(fi.value)) })
     acc
@@ -801,7 +802,7 @@ kv_check_block_stmt_kind = (env: Env, st: Stmt) i32 {
             .or(env.kv_slice_elem_kind(x.elem, x.value)),
     })
 }
-kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
+kv_check_block_kind = (env: Env, stmts: MutSlice<Stmt>) i32 {
     acc ::= 0
     e ::= env
     stmts.loop_at((i, st) {
@@ -811,7 +812,7 @@ kv_check_block_kind = (env: Env, stmts: [Stmt]) i32 {
     acc
 }
 // A slice-literal element whose type doesn't fit the first element's produces KARGTYPE.
-kv_slicelit_kind = (env: Env, items: [Expr]) i32 {
+kv_slicelit_kind = (env: Env, items: MutSlice<Expr>) i32 {
     (items.len == 0).match ({
         true  => 0,
         false => {
@@ -831,7 +832,7 @@ lkv_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
     r = env.name_errors_expr(e)
     (r.first_pos > 0).then({ r.first_kind.kv_at(r.first_pos) }, { 0 })
 }
-lkv_body_kind = (a: Allocator, env: Env, body: [Stmt]) i32 {
+lkv_body_kind = (a: Allocator, env: Env, body: MutSlice<Stmt>) i32 {
     r = a.name_errors_body(env, body)
     (r.first_pos > 0).then({ r.first_kind.kv_at(r.first_pos) }, { 0 })
 }
@@ -967,7 +968,7 @@ kv_check_stmt_kind = (a: Allocator, env: Env, st: Stmt) i32 {
             .or(env.kv_slice_elem_kind(x.elem, x.value)),
     })
 }
-kv_check_body_kind = (a: Allocator, env: Env, body: [Stmt]) i32 {
+kv_check_body_kind = (a: Allocator, env: Env, body: MutSlice<Stmt>) i32 {
     acc ::= 0
     e ::= env
     body.loop_at((i, st) {
@@ -988,7 +989,7 @@ kv_last_stmt_kind = (env: Env, st: Stmt) i32 {
         _            => KFALLTHROUGH().kv_at(st.stmt_pos()),
     })
 }    // a let/assign/loop tail: caret on that statement
-kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
+kv_trailing_kind = (env: Env, body: MutSlice<Stmt>) i32 {
     env.exp.is_void_ty().match ({
         true  => 0,
         false => (body.len == 0).match ({
@@ -997,7 +998,7 @@ kv_trailing_kind = (env: Env, body: [Stmt]) i32 {
         }),
     })
 }
-check_module_bound_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_bound_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     idx = a.build_decl_index(decls)
     acc ::= 0
     decls.loop_at((i, d) {
@@ -1010,13 +1011,13 @@ check_module_bound_kind = (a: Allocator, decls: [Decl]) i32 {
 }
 check_module_bound_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = a.check_module_bound_kind(decls)
     (packed == 0).then({ check_diagnostic_none() }, { src.check_diagnostic_from_source(packed, 1) })
 }
-check_module_arg_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_arg_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     idx = a.build_decl_index(decls)
     acc ::= 0
     decls.loop_at((i, d) {
@@ -1033,13 +1034,13 @@ check_module_arg_kind = (a: Allocator, decls: [Decl]) i32 {
 }
 check_module_arg_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = a.check_module_arg_kind(decls)
     (packed == 0).then({ check_diagnostic_none() }, { src.check_diagnostic_from_source(packed, 1) })
 }
-check_module_or_return_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_or_return_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     idx = a.build_decl_index(decls)
     acc ::= 0
     decls.loop_at((i, d) {
@@ -1053,13 +1054,13 @@ check_module_or_return_kind = (a: Allocator, decls: [Decl]) i32 {
 }
 check_module_or_return_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = a.check_module_or_return_kind(decls)
     (packed == 0).then({ check_diagnostic_none() }, { src.check_diagnostic_from_source(packed, 1) })
 }
-check_module_unknown_type_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_unknown_type_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     idx = a.build_decl_index(decls)
     env = Env(
         vars: a.params_env(cv_no_params()),
@@ -1082,7 +1083,7 @@ check_module_unknown_type_kind = (a: Allocator, decls: [Decl]) i32 {
     })
     acc
 }
-check_module_unknown_type_name = (a: Allocator, decls: [Decl]) StringView {
+check_module_unknown_type_name = (a: Allocator, decls: MutSlice<Decl>) StringView {
     idx = a.build_decl_index(decls)
     env = Env(
         vars: a.params_env(cv_no_params()),
@@ -1107,7 +1108,7 @@ check_module_unknown_type_name = (a: Allocator, decls: [Decl]) StringView {
 }
 check_module_unknown_type_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = a.check_module_unknown_type_kind(decls)
@@ -1129,7 +1130,7 @@ check_module_unknown_type_diagnostic_from_source* = (
         ),
     })
 }
-check_module_ffi_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_ffi_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     idx = a.build_decl_index(decls)
     env = Env(
         vars: a.params_env(cv_no_params()),
@@ -1147,7 +1148,7 @@ check_module_ffi_kind = (a: Allocator, decls: [Decl]) i32 {
     })
     acc
 }
-check_module_ffi_name = (a: Allocator, decls: [Decl]) StringView {
+check_module_ffi_name = (a: Allocator, decls: MutSlice<Decl>) StringView {
     idx = a.build_decl_index(decls)
     env = Env(
         vars: a.params_env(cv_no_params()),
@@ -1167,7 +1168,7 @@ check_module_ffi_name = (a: Allocator, decls: [Decl]) StringView {
 }
 check_module_ffi_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = a.check_module_ffi_kind(decls)
@@ -1189,7 +1190,7 @@ check_module_ffi_diagnostic_from_source* = (
         ),
     })
 }
-check_module_infinite_type_kind = (decls: [Decl]) i32 {
+check_module_infinite_type_kind = (decls: MutSlice<Decl>) i32 {
     acc ::= 0
     decls.loop_at((i, d) {
         acc = acc.or(d.match ({
@@ -1215,7 +1216,7 @@ check_module_infinite_type_kind = (decls: [Decl]) i32 {
     acc
 }
 check_module_infinite_type_diagnostic_from_source* = (
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = decls.check_module_infinite_type_kind()
@@ -1239,7 +1240,7 @@ main_param_is_sys = (f: Func) bool {
         false => false,
     })
 }
-main_params_kind = (decls: [Decl]) i32 {
+main_params_kind = (decls: MutSlice<Decl>) i32 {
     k ::= 0
     decls.loop_at((i, d) {
         k = (k == 0).match ({
@@ -1255,13 +1256,16 @@ main_params_kind = (decls: [Decl]) i32 {
     })
     k
 }
-check_module_main_diagnostic_from_source* = (decls: [Decl], src: StringView) CheckDiagnostic {
+check_module_main_diagnostic_from_source* = (
+    decls: MutSlice<Decl>,
+    src: StringView,
+) CheckDiagnostic {
     packed = decls.main_params_kind()
     (packed == 0).then({ check_diagnostic_none() }, { src.check_diagnostic_from_source(packed, 1) })
 }
 check_module_reserved_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = decls.reserved_name_kind()
@@ -1297,7 +1301,7 @@ check_module_reserved_diagnostic_from_source* = (
         },
     })
 }
-check_module_mustuse_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_mustuse_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     idx = a.build_decl_index(decls)
     mvm = a.mu_build_index(decls, idx)
     acc ::= 0
@@ -1311,22 +1315,22 @@ check_module_mustuse_kind = (a: Allocator, decls: [Decl]) i32 {
 }
 check_module_mustuse_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = a.check_module_mustuse_kind(decls)
     (packed == 0).then({ check_diagnostic_none() }, { src.check_diagnostic_from_source(packed, 1) })
 }
 // trait conformance, kind-flavoured (mirrors impl_errs/trait_conformance/method_err).
-kv_method_kind = (a: Allocator, decls: [Decl], im: ImplData, f: Field) i32 {
+kv_method_kind = (a: Allocator, decls: MutSlice<Decl>, im: ImplData, f: Field) i32 {
     a.method_err(decls, im, f).kv_one(KCONFORMANCE())
 }
-kv_conformance_kind = (a: Allocator, decls: [Decl], im: ImplData, sd: StructDecl) i32 {
+kv_conformance_kind = (a: Allocator, decls: MutSlice<Decl>, im: ImplData, sd: StructDecl) i32 {
     acc ::= 0
     sd.fields.loop_at((i, f) { acc = acc.or(a.kv_method_kind(decls, im, f)) })
     acc
 }
-kv_impl_kind = (a: Allocator, decls: [Decl], im: ImplData) i32 {
+kv_impl_kind = (a: Allocator, decls: MutSlice<Decl>, im: ImplData) i32 {
     acc ::= 0
     decls.loop_at((i, d) {
         acc = acc.or(d.match ({
@@ -1344,7 +1348,7 @@ kv_impl_kind = (a: Allocator, decls: [Decl], im: ImplData) i32 {
 // a caret at the colliding definition — even when it lives in an imported module (pick_render maps
 // the flat offset to whichever module's source contains it). pos 0 (synthesized) degrades to the
 // bare kind, exactly the pre-position behavior.
-kv_dup_name_kind = (decls: [Decl]) i32 {
+kv_dup_name_kind = (decls: MutSlice<Decl>) i32 {
     acc ::= 0
     decls.loop_at((i, d) {
         nm = d.fn_name_of()
@@ -1355,18 +1359,18 @@ kv_dup_name_kind = (decls: [Decl]) i32 {
 }
 // Return the first packed diagnostic from the same collector used by batch mode. A one-slot sink
 // preserves first-error behavior without maintaining a second module/function traversal.
-check_module_kind* = (a: Allocator, decls: [Decl]) i32 {
-    buf: [i32] = slice(a.acquire_or_die(sizeof(i32)), 1)
+check_module_kind* = (a: Allocator, decls: MutSlice<Decl>) i32 {
+    buf: MutSlice<i32> = slice(a.acquire_or_die(sizeof(i32)), 1)
     cnt = a.check_module_kind_all(decls, a.ufcs_vis_off(), buf, 0)
     (cnt == 0).then({ 0 }, { buf[0] })
 }
 // One function's errors, per top-level statement. The trailing-value check is anchored on the fn name.
 kv_check_func_kind_all = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     f: Func,
-    buf: [i32],
+    buf: MutSlice<i32>,
     cnt: i32,
 ) i32 {
     env = Env(
@@ -1402,7 +1406,7 @@ kca_expr = (e: Ptr<Expr>) i32 {
         acc.or(body.kca_body())
     })
 }
-kca_stmt = (st: Stmt, scope: [Stmt]) i32 {
+kca_stmt = (st: Stmt, scope: MutSlice<Stmt>) i32 {
     st.match ({
         .Let(l)      => ((l.mut == false && scope.wr_writes_name(l.name)).match ({
             true  => KASSIGNCONST().kv_at(l.pos),
@@ -1416,12 +1420,18 @@ kca_stmt = (st: Stmt, scope: [Stmt]) i32 {
         .IndexSet(x) => x.seq.kca_expr().or(x.idx.kca_expr()).or(x.value.kca_expr()),
     })
 }
-kca_body = (body: [Stmt]) i32 {
+kca_body = (body: MutSlice<Stmt>) i32 {
     acc ::= 0
     body.loop_at((i, st) { acc = acc.or(st.kca_stmt(body)) })
     acc
 }
-check_module_kind_all = (a: Allocator, decls: [Decl], vis: UfcsVis, buf: [i32], cnt: i32) i32 {
+check_module_kind_all = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    vis: UfcsVis,
+    buf: MutSlice<i32>,
+    cnt: i32,
+) i32 {
     idx = a.build_decl_index_vis(decls, vis)
     c ::= buf.kdiag_add(cnt, decls.kv_dup_name_kind())
     decls.loop_at((i, d) {
@@ -1437,10 +1447,10 @@ check_module_kind_all = (a: Allocator, decls: [Decl], vis: UfcsVis, buf: [i32], 
 // the batch with a LIVE per-module UFCS visibility (#574) — the driver's checked paths use this.
 check_module_batch_vis* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
     vis: UfcsVis,
-) [CheckDiagnostic] {
+) MutSlice<CheckDiagnostic> {
     buf = a.kdiag_buf()
     cnt = a.check_module_kind_all(decls, vis, buf, 0)
     out ::= slice(a.acquire_or_die(to_i64(cnt) * sizeof(CheckDiagnostic)), to_i64(cnt))
@@ -1454,7 +1464,7 @@ check_module_batch_vis* = (
 // the parse-sentinel diagnostic ALONE (KPARSE/KVBREAK from __syntax_error; none if the module
 // parsed cleanly): the driver reports it FIRST — a syntax error precedes (and usually CAUSES) any
 // downstream type error in the same module, so it must not be shadowed by one.
-check_module_parse_kind = (decls: [Decl]) i32 {
+check_module_parse_kind = (decls: MutSlice<Decl>) i32 {
     acc ::= 0
     decls.loop_at((i, d) {
         acc = acc.or(d.match ({
@@ -1466,7 +1476,7 @@ check_module_parse_kind = (decls: [Decl]) i32 {
 }
 check_module_parse_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = decls.check_module_parse_kind()
@@ -1474,16 +1484,18 @@ check_module_parse_diagnostic_from_source* = (
 }
 check_module_ownership_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = a.check_module_ownership_kind(decls)
     (packed == 0).then({ check_diagnostic_none() }, { src.check_diagnostic_from_source(packed, 1) })
 }
-module_header = (a: Allocator, decls: [Decl]) [Decl] { map_slice(a, decls, (d) { a.as_sig(d) }) }
+module_header = (a: Allocator, decls: MutSlice<Decl>) MutSlice<Decl> {
+    map_slice(a, decls, (d) { a.as_sig(d) })
+}
 // check `decls` (one file) against an imported module's `lib` decls: the file is resolved as usual,
 // then checked in a WORLD that prepends lib's header, so its imported calls resolve to real sigs.
-check_linked* = (a: Allocator, decls: [Decl], lib: [Decl]) i32 {
+check_linked* = (a: Allocator, decls: MutSlice<Decl>, lib: MutSlice<Decl>) i32 {
     hdr = a.module_header(lib)
     rfile = a.resolve_module(decls)
     world ::= cbuf<Decl>(a, hdr.len + rfile.len)
@@ -1503,17 +1515,17 @@ name_read_in_expr* = (nm: StringView, e: Ptr<Expr>) bool {
         }),
     })
 }
-name_read_in_args* = (nm: StringView, args: [Expr]) bool {
+name_read_in_args* = (nm: StringView, args: MutSlice<Expr>) bool {
     f ::= false
     args.loop_at((i, ar) { f = nm.name_read_in_expr(ar.addr()).then({ true }, { f }) })
     f
 }
-name_read_in_inits = (nm: StringView, inits: [FieldInit]) bool {
+name_read_in_inits = (nm: StringView, inits: MutSlice<FieldInit>) bool {
     f ::= false
     inits.loop_at((i, fi) { f = nm.name_read_in_expr(fi.value).then({ true }, { f }) })
     f
 }
-name_read_in_arms = (nm: StringView, arms: [ArmData]) bool {
+name_read_in_arms = (nm: StringView, arms: MutSlice<ArmData>) bool {
     f ::= false
     arms.loop_at((i, ar) { f = nm.name_read_in_expr(ar.body).then({ true }, { f }) })
     f
@@ -1533,19 +1545,19 @@ name_read_in_stmt = (nm: StringView, st: Stmt) bool {
         .ExprStmt(e) => nm.name_read_in_expr(e),
     })
 }
-name_read_in_body* = (nm: StringView, body: [Stmt]) bool {
+name_read_in_body* = (nm: StringView, body: MutSlice<Stmt>) bool {
     f ::= false
     body.loop_at((i, st) { f = nm.name_read_in_stmt(st).then({ true }, { f }) })
     f
 }
 // a top-level `let` binding a FRESH owner that is never named again → the leak position (0 = none).
-kv_leak_let = (a: Allocator, env: Env, body: [Stmt], k: i32, l: LetData) i32 {
+kv_leak_let = (a: Allocator, env: Env, body: MutSlice<Stmt>, k: i32, l: LetData) i32 {
     (is_owner_base(env.infer_expr(l.value).owner_base()) && l.value.leak_alias_value() == false).match ({
         true  => nm_read_or_leak(env, body, k, l),
         false => 0,
     })
 }
-kv_leak_stmt = (a: Allocator, env: Env, body: [Stmt], k: i32, st: Stmt) i32 {
+kv_leak_stmt = (a: Allocator, env: Env, body: MutSlice<Stmt>, k: i32, st: Stmt) i32 {
     st.match ({
         .Let(l)      => a.kv_leak_let(env, body, k, l).or(a.kv_leak_expr(env, l.value)),
         .Assign(x)   => a.kv_leak_expr(env, x.value),
@@ -1566,7 +1578,7 @@ kv_leak_expr = (a: Allocator, env: Env, e: Ptr<Expr>) i32 {
         acc.or(a.kv_leak_body(env, body))
     })
 }
-kv_leak_body = (a: Allocator, env: Env, body: [Stmt]) i32 {
+kv_leak_body = (a: Allocator, env: Env, body: MutSlice<Stmt>) i32 {
     acc ::= 0
     e ::= env
     body.loop_at((k, st) {
@@ -1575,7 +1587,7 @@ kv_leak_body = (a: Allocator, env: Env, body: [Stmt]) i32 {
     })
     acc
 }
-kv_leak_check_func = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+kv_leak_check_func = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func) i32 {
     a.kv_leak_body(Env(
         vars: a.params_env(f.params),
         decls: decls,
@@ -1584,7 +1596,7 @@ kv_leak_check_func = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 
         a: a,
     ), f.body)
 }
-check_module_leak_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_leak_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     acc ::= 0
     idx = a.build_decl_index(decls)
     decls.loop_at((i, d) {
@@ -1597,7 +1609,7 @@ check_module_leak_kind = (a: Allocator, decls: [Decl]) i32 {
 }
 check_module_leak_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     pos = a.check_module_leak_kind(decls)
@@ -1616,7 +1628,7 @@ check_module_leak_diagnostic_from_source* = (
         },
     })
 }
-check_module_addr_escape_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_addr_escape_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     idx = a.build_decl_index(decls)
     acc ::= 0
     decls.loop_at((i, d) {
@@ -1629,7 +1641,7 @@ check_module_addr_escape_kind = (a: Allocator, decls: [Decl]) i32 {
 }
 check_module_addr_escape_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     pos = a.check_module_addr_escape_kind(decls)
@@ -1646,7 +1658,7 @@ check_module_addr_escape_diagnostic_from_source* = (
         ),
     })
 }
-check_module_send_kind = (a: Allocator, decls: [Decl], mode: i32) i32 {
+check_module_send_kind = (a: Allocator, decls: MutSlice<Decl>, mode: i32) i32 {
     acc ::= 0
     idx = a.build_decl_index(decls)
     decls.loop_at((i, d) {
@@ -1657,10 +1669,12 @@ check_module_send_kind = (a: Allocator, decls: [Decl], mode: i32) i32 {
     })
     acc
 }
-check_module_send_rc_kind = (a: Allocator, decls: [Decl]) i32 { a.check_module_send_kind(decls, 0) }
+check_module_send_rc_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
+    a.check_module_send_kind(decls, 0)
+}
 check_module_send_rc_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     pos = a.check_module_send_rc_kind(decls)
@@ -1677,12 +1691,12 @@ check_module_send_rc_diagnostic_from_source* = (
         ),
     })
 }
-check_module_send_mut_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_send_mut_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     a.check_module_send_kind(decls, 1)
 }
 check_module_send_mut_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     pos = a.check_module_send_mut_kind(decls)
@@ -1699,7 +1713,7 @@ check_module_send_mut_diagnostic_from_source* = (
         ),
     })
 }
-check_module_scratch_kind = (a: Allocator, decls: [Decl]) i32 {
+check_module_scratch_kind = (a: Allocator, decls: MutSlice<Decl>) i32 {
     acc ::= 0
     decls.loop_at((i, d) {
         acc = acc.or(d.match ({
@@ -1711,7 +1725,7 @@ check_module_scratch_kind = (a: Allocator, decls: [Decl]) i32 {
 }
 check_module_scratch_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = a.check_module_scratch_kind(decls)

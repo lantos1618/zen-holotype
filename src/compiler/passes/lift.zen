@@ -1,15 +1,15 @@
-// compiler.passes.lift — lambda lifting sub-pass extracted from compiler.check.
 { ArmData, Decl, Expr, FieldInit, FnTData, Func, LambdaData, Param, Stmt, Ty } = compiler.ast.ast_types
-{ cbuf, arm, bin_at, block, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit, gstr_append,
-  gstr_finish, gstr_string, lam_r, mfield, mkenumg, mkstructg_at, sassign_at, sexpr, sidxset_at,
-  sif, slett_atm, slit, sret, swhile, tvoid, vref, acquire_or_die } = compiler.genc
+{ cbuf, arm_spans, bin_at, block, cond_oa, dfunc, eindex, eloop_at, ematch, ematchp, finit,
+  finit_at, gstr_append, gstr_finish, gstr_string, lam_r, mfield, mkenumg_at, mkstructg_at,
+  param_at, sassign_at, sexpr, sidxset_at, sif, slett_atm, slit, sret, swhile, tvoid, vref,
+  acquire_or_die } = compiler.genc
 { gstr_int, map_slice } = compiler.astops
 { DeclIndex, VList, cebuf, cenode, empty_params, is_intrinsic, pbuf, recall, var_bound, vcons, vnil } = compiler.check
 { field_fnt } = compiler.check_inline
 { Allocator } = std.mem.alloc
 { expr_fold_children } = compiler.ast.expr_children
 { loop_at } = std.core.count
-lift_toplevel = (idx: DeclIndex, decls: [Decl], n: StringView) bool {
+lift_toplevel = (idx: DeclIndex, decls: MutSlice<Decl>, n: StringView) bool {
     idx.func_idx.get(n, 0 - 1) >= 0 || idx.global_idx.get(n, 0 - 1) >= 0
 }
 // A CALLED name that some impl (or trait default) provides is a METHOD dispatch, not a captured
@@ -21,7 +21,7 @@ lift_method = (idx: DeclIndex, n: StringView) bool { idx.tmethod_idx.get(n, 0 - 
 // declaration at all to find, so `lift_toplevel` missed and EVERY lambda that dereferences a pointer
 // looked like it captured. genc lowers them by NAME, so a lifted body still means the intrinsic —
 // but only while nothing in scope SHADOWS the name; `lift_shadows_intrinsic` is that side condition.
-lift_is_captured* = (decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, n: StringView) bool {
+lift_is_captured* = (decls: MutSlice<Decl>, idx: DeclIndex, bound: Ptr<VList>, n: StringView) bool {
     (bound.var_bound(n) || idx.lift_toplevel(decls, n) || n == "true" || n == "false").match ({
         true  => false,
         false => true,
@@ -33,12 +33,18 @@ lift_extend* = (a: Allocator, bound: Ptr<VList>, st: Stmt) Ptr<VList> {
         _       => bound,
     })
 }
-lift_lamparams* = (a: Allocator, bound: Ptr<VList>, ps: [Param]) Ptr<VList> {
+lift_lamparams* = (a: Allocator, bound: Ptr<VList>, ps: MutSlice<Param>) Ptr<VList> {
     out ::= bound
     ps.loop_at((i, p) { out = a.vcons(p.name, tvoid(), out) })
     out
 }
-lift_args_cap = (a: Allocator, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, xs: [Expr]) bool {
+lift_args_cap = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+    bound: Ptr<VList>,
+    xs: MutSlice<Expr>,
+) bool {
     found ::= false
     xs.loop_at((i, x) {
         found = found.then({ true }, { a.lift_expr_cap(decls, idx, bound, x.addr()) })
@@ -47,10 +53,10 @@ lift_args_cap = (a: Allocator, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>,
 }
 lift_arms_cap = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     bound: Ptr<VList>,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
 ) bool {
     found ::= false
     arms.loop_at((i, ar) {
@@ -63,10 +69,10 @@ lift_arms_cap = (
 }
 lift_body_cap = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     bound: Ptr<VList>,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
 ) bool {
     found ::= false
     b ::= bound
@@ -76,7 +82,13 @@ lift_body_cap = (
     })
     found
 }
-lift_stmt_cap = (a: Allocator, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>, st: Stmt) bool {
+lift_stmt_cap = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+    bound: Ptr<VList>,
+    st: Stmt,
+) bool {
     st.match ({
         .Let(l)      => a.lift_expr_cap(decls, idx, bound, l.value),
         .Assign(x)   => a.lift_expr_cap(decls, idx, bound, x.target)
@@ -95,7 +107,7 @@ lift_stmt_cap = (a: Allocator, decls: [Decl], idx: DeclIndex, bound: Ptr<VList>,
 }
 lift_expr_cap = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     bound: Ptr<VList>,
     e: Ptr<Expr>,
@@ -119,7 +131,7 @@ lift_expr_cap = (
     })
 }
 // a lambda is liftable iff it does NOT capture (only its own params + body binders + top-level names).
-lift_liftable* = (a: Allocator, decls: [Decl], idx: DeclIndex, lm: LambdaData) bool {
+lift_liftable* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, lm: LambdaData) bool {
     a.lift_body_cap(decls, idx, a.lift_lamparams(a.vnil(), lm.params), lm.body) == false
 }
 // ── the side condition on the intrinsic exemption above ──────────────────────────────────────────
@@ -131,17 +143,17 @@ lift_liftable* = (a: Allocator, decls: [Decl], idx: DeclIndex, lm: LambdaData) b
 // BINDS an intrinsic name anywhere keeps the pre-exemption answer for all of its lambdas — they stay
 // put and report the honest error[lambda-value]. Costs nothing real: no src/ function that binds one
 // (`offset`, `addr`) holds a liftable lambda.
-lift_shadow_params = (ps: [Param]) bool {
+lift_shadow_params = (ps: MutSlice<Param>) bool {
     found ::= false
     ps.loop_at((i, p) { found = found || p.name.is_intrinsic() })
     found
 }
-lift_shadow_arms = (arms: [ArmData]) bool {
+lift_shadow_arms = (arms: MutSlice<ArmData>) bool {
     found ::= false
     arms.loop_at((i, ar) { found = found || ar.bind.is_intrinsic() || ar.body.lift_shadow_expr() })
     found
 }
-lift_shadow_body = (body: [Stmt]) bool {
+lift_shadow_body = (body: MutSlice<Stmt>) bool {
     found ::= false
     body.loop_at((i, st) { found = found || st.lift_shadow_stmt() })
     found
@@ -189,7 +201,7 @@ lift_name = (a: Allocator, k: i64) StringView {
 lift_func_of = (a: Allocator, lm: LambdaData, ft: FnTData, name: StringView) Decl {
     ps ::= a.pbuf(lm.params.len)
     lm.params.loop_at((i, p) {
-        ps[i] = param(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }))
+        ps[i] = param_at(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }), p.pos)
     })
     dfunc(Func(
         name: name,
@@ -204,7 +216,7 @@ lift_func_of = (a: Allocator, lm: LambdaData, ft: FnTData, name: StringView) Dec
 // decls generated while rewriting ONE function are exactly gen[lo..hi), so stamping that range covers
 // every nesting depth. A tparam'd lifted fn is a TEMPLATE (genc skips it); the mono INSTANCE of the
 // enclosing fn was copied before this pass and lifts its own already-substituted lambda.
-lift_tag_tparams = (gen: [Decl], lo: i32, hi: i32, tps: [Param]) void {
+lift_tag_tparams = (gen: MutSlice<Decl>, lo: i32, hi: i32, tps: MutSlice<Param>) void {
     (tps.len > 0).then({
         gen.loop_at((i, g) {
             (i >= lo && i < hi).then({
@@ -226,10 +238,10 @@ lift_tag_tparams = (gen: [Decl], lo: i32, hi: i32, tps: [Param]) void {
 // recurse so nested lift sites are still found.
 lift_at = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     gcp: RawPtr<u8>,
-    gen: [Decl],
+    gen: MutSlice<Decl>,
     fnt: Ty,
     val: Ptr<Expr>,
 ) Ptr<Expr> {
@@ -252,48 +264,48 @@ lift_at = (
 }
 lift_rw_args = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     gcp: RawPtr<u8>,
-    gen: [Decl],
-    xs: [Expr],
-) [Expr] {
+    gen: MutSlice<Decl>,
+    xs: MutSlice<Expr>,
+) MutSlice<Expr> {
     buf ::= a.cebuf(xs.len)
     xs.loop_at((i, x) { buf[i] = load(a.lift_rw_expr(decls, idx, gcp, gen, x.addr())) })
     buf
 }
 lift_rw_inits = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     gcp: RawPtr<u8>,
-    gen: [Decl],
+    gen: MutSlice<Decl>,
     sty: StringView,
-    targs: [Ty],
-    inits: [FieldInit],
-) [FieldInit] {
+    targs: MutSlice<Ty>,
+    inits: MutSlice<FieldInit>,
+) MutSlice<FieldInit> {
     map_slice(a, inits, (fi) {
-        finit(fi.name, a.lift_at(decls, idx, gcp, gen, a.field_fnt(decls, idx, sty, targs, fi.name), fi.value))
+        finit_at(fi.name, a.lift_at(decls, idx, gcp, gen, a.field_fnt(decls, idx, sty, targs, fi.name), fi.value), fi.pos)
     })
 }
 lift_rw_arms = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     gcp: RawPtr<u8>,
-    gen: [Decl],
-    arms: [ArmData],
-) [ArmData] {
+    gen: MutSlice<Decl>,
+    arms: MutSlice<ArmData>,
+) MutSlice<ArmData> {
     map_slice(a, arms, (ar) {
-        arm(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body))
+        arm_spans(ar.variant, ar.bind, a.lift_rw_expr(decls, idx, gcp, gen, ar.body), ar.pos, ar.variant_pos, ar.bind_pos)
     })
 }
 lift_rw_expr = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     gcp: RawPtr<u8>,
-    gen: [Decl],
+    gen: MutSlice<Decl>,
     e: Ptr<Expr>,
 ) Ptr<Expr> {
     load(e).match ({
@@ -302,14 +314,14 @@ lift_rw_expr = (
         .Cond(d)       => a.cenode(cond_oa(a.lift_rw_expr(decls, idx, gcp, gen, d.c), a.lift_rw_expr(decls, idx, gcp, gen, d.t), a.lift_rw_expr(decls, idx, gcp, gen, d.e), d.oa)),
         .Member(m)     => a.cenode(mfield(a.lift_rw_expr(decls, idx, gcp, gen, m.obj), m.field, m.pos, m.ptr)),
         .Call(c)       => a.recall(c, c.fn, a.lift_rw_args(decls, idx, gcp, gen, c.args)),
-        .MakeEnum(mk)  => a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.lift_rw_expr(decls, idx, gcp, gen, mk.payload))),
+        .MakeEnum(mk)  => a.cenode(mkenumg_at(mk.ty, mk.mty, mk.targs, mk.variant, a.lift_rw_expr(decls, idx, gcp, gen, mk.payload), mk.ty_pos, mk.variant_pos)),
         .Match(m)      => m.ptr.match ({
             true  => a.cenode(ematchp(a.lift_rw_expr(decls, idx, gcp, gen, m.subj), m.ename, a.lift_rw_arms(decls, idx, gcp, gen, m.arms))),
             false => a.cenode(ematch(a.lift_rw_expr(decls, idx, gcp, gen, m.subj), m.ename, a.lift_rw_arms(decls, idx, gcp, gen, m.arms))),
         }),
         .Index(ix)     => a.cenode(eindex(a.lift_rw_expr(decls, idx, gcp, gen, ix.seq), a.lift_rw_expr(decls, idx, gcp, gen, ix.idx), ix.elem)),
         .SliceLit(sd)  => a.cenode(slit(sd.elem, a.lift_rw_args(decls, idx, gcp, gen, sd.items))),
-        .Loop(l)       => a.cenode(eloop(a.lift_rw_expr(decls, idx, gcp, gen, l.seq), l.idx, l.elem, l.elemTy, a.lift_rw_body(decls, idx, gcp, gen, tvoid(), l.body), l.h)),
+        .Loop(l)       => a.cenode(eloop_at(a.lift_rw_expr(decls, idx, gcp, gen, l.seq), l.idx, l.elem, l.elemTy, a.lift_rw_body(decls, idx, gcp, gen, tvoid(), l.body), l.h, l.h_pos, l.idx_pos, l.elem_pos)),
         .Block(bl)     => a.cenode(block(a.lift_rw_body(decls, idx, gcp, gen, tvoid(), bl.stmts))),
         .Lambda(lm)    => a.cenode(lam_r(lm.params, a.lift_rw_body(decls, idx, gcp, gen, tvoid(), lm.body), lm.ret)),
         _              => e,
@@ -320,10 +332,10 @@ lift_rw_expr = (
 // function type — `fnret` carries that type; `tail` marks the body's last (implicit-return) statement.
 lift_rw_stmt = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     gcp: RawPtr<u8>,
-    gen: [Decl],
+    gen: MutSlice<Decl>,
     fnret: Ty,
     tail: bool,
     st: Stmt,
@@ -343,13 +355,13 @@ lift_rw_stmt = (
 }
 lift_rw_body = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     gcp: RawPtr<u8>,
-    gen: [Decl],
+    gen: MutSlice<Decl>,
     fnret: Ty,
-    body: [Stmt],
-) [Stmt] {
+    body: MutSlice<Stmt>,
+) MutSlice<Stmt> {
     buf ::= cbuf<Stmt>(a, body.len)
     body.loop_at((i, st) {
         buf[i] = a.lift_rw_stmt(decls, idx, gcp, gen, fnret, i == body.len - 1, st)
@@ -358,10 +370,10 @@ lift_rw_body = (
 }
 lift_rw_decl = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     gcp: RawPtr<u8>,
-    gen: [Decl],
+    gen: MutSlice<Decl>,
     d: Decl,
 ) Decl {
     d.match ({
@@ -384,7 +396,7 @@ lift_rw_decl = (
         _         => d,
     })
 }
-lift_lambdas* = (a: Allocator, decls: [Decl], idx: DeclIndex) [Decl] {
+lift_lambdas* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex) MutSlice<Decl> {
     gcp: RawPtr<u8> = a.acquire_or_die(8)
     store_i64(gcp, 0)
     gen = cbuf<Decl>(a, 4096)

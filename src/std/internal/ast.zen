@@ -35,12 +35,12 @@ binop_in = (a: AllocatorBackend, l: Ptr<Expr>, op: StringView, r: Ptr<Expr>) Ptr
 add_in = (a: AllocatorBackend, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, "+", r) }
 eqx_in = (a: AllocatorBackend, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, "==", r) }
 and_in = (a: AllocatorBackend, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.binop_in(l, "&&", r) }
-callx_in = (a: AllocatorBackend, fn: StringView, args: [Expr]) Ptr<Expr> {
+callx_in = (a: AllocatorBackend, fn: StringView, args: MutSlice<Expr>) Ptr<Expr> {
     a
         .node_in(call(fn, a.dupx_in(args).expect("std.internal.ast: AST allocation failed")))
         .expect("std.internal.ast: AST allocation failed")
 }
-estruct_in = (a: AllocatorBackend, ty: StringView, fi: [FieldInit]) Ptr<Expr> {
+estruct_in = (a: AllocatorBackend, ty: StringView, fi: MutSlice<FieldInit>) Ptr<Expr> {
     a
         .node_in(mkstruct(ty, a.dupx_in(fi).expect("std.internal.ast: AST allocation failed")))
         .expect("std.internal.ast: AST allocation failed")
@@ -54,8 +54,12 @@ binop = (a: AllocatorBackend, l: Ptr<Expr>, op: StringView, r: Ptr<Expr>) Ptr<Ex
 add* = (a: AllocatorBackend, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.add_in(l, r) }
 eqx* = (a: AllocatorBackend, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.eqx_in(l, r) }
 and = (a: AllocatorBackend, l: Ptr<Expr>, r: Ptr<Expr>) Ptr<Expr> { a.and_in(l, r) }
-callx = (a: AllocatorBackend, fn: StringView, args: [Expr]) Ptr<Expr> { a.callx_in(fn, args) }
-estruct = (a: AllocatorBackend, ty: StringView, fi: [FieldInit]) Ptr<Expr> { a.estruct_in(ty, fi) }
+callx = (a: AllocatorBackend, fn: StringView, args: MutSlice<Expr>) Ptr<Expr> {
+    a.callx_in(fn, args)
+}
+estruct = (a: AllocatorBackend, ty: StringView, fi: MutSlice<FieldInit>) Ptr<Expr> {
+    a.estruct_in(ty, fi)
+}
 // Types
 named = (name: StringView) Ty { tnamed(name) }
 ptrto_in = (a: AllocatorBackend, inner: Ty) Ty {
@@ -70,7 +74,13 @@ letb = (name: StringView, v: Ptr<Expr>) Stmt { slet(name, v) }
 set_in = (a: AllocatorBackend, name: StringView, v: Ptr<Expr>) Stmt { sassign(a.var_in(name), v) }
 set* = (a: AllocatorBackend, name: StringView, v: Ptr<Expr>) Stmt { a.set_in(name, v) }
 // Declarations
-func_in = (a: AllocatorBackend, name: StringView, ps: [Param], ret: Ty, body: [Stmt]) Decl {
+func_in = (
+    a: AllocatorBackend,
+    name: StringView,
+    ps: MutSlice<Param>,
+    ret: Ty,
+    body: MutSlice<Stmt>,
+) Decl {
     dfunc(Func(
         name: name,
         params: a.dupx_in(ps).expect("std.internal.ast: AST allocation failed"),
@@ -78,23 +88,27 @@ func_in = (a: AllocatorBackend, name: StringView, ps: [Param], ret: Ty, body: [S
         body: a.dupx_in(body).expect("std.internal.ast: AST allocation failed"),
     ))
 }
-func = (a: AllocatorBackend, name: StringView, ps: [Param], ret: Ty, body: [Stmt]) Decl {
-    a.func_in(name, ps, ret, body)
-}
-struct_in = (a: AllocatorBackend, name: StringView, fs: [Field]) Decl {
+func = (
+    a: AllocatorBackend,
+    name: StringView,
+    ps: MutSlice<Param>,
+    ret: Ty,
+    body: MutSlice<Stmt>,
+) Decl { a.func_in(name, ps, ret, body) }
+struct_in = (a: AllocatorBackend, name: StringView, fs: MutSlice<Field>) Decl {
     dstruct(StructDecl(
         name: name,
         fields: a.dupx_in(fs).expect("std.internal.ast: AST allocation failed"),
     ))
 }
-struct = (a: AllocatorBackend, name: StringView, fs: [Field]) Decl { a.struct_in(name, fs) }
+struct = (a: AllocatorBackend, name: StringView, fs: MutSlice<Field>) Decl { a.struct_in(name, fs) }
 accessor_in = (a: AllocatorBackend, sname: StringView, f: Field) Decl {
     recv = a.ptrto_in(named(sname))
     body = a.dot_in(a.var_in("s"), f.name)
     a.func_in(f.name, [param("s", recv)], f.ty, [body.ret()])
 }
-empty_fields = () [Field] { slice(null_ptr(), 0) }
-decl_seed = () [Decl] {
+empty_fields = () MutSlice<Field> { slice(null_ptr(), 0) }
+decl_seed = () MutSlice<Decl> {
     [
         dstruct(StructDecl(
             name: "",
@@ -102,17 +116,19 @@ decl_seed = () [Decl] {
         )),
     ]
 }
-dbuf_in* = (a: AllocatorBackend, n: i64) [Decl] {
+dbuf_in* = (a: AllocatorBackend, n: i64) MutSlice<Decl> {
     a.buf_in(n, decl_seed()).expect("std.internal.ast: AST allocation failed")
 }
-fill_accessors_in = (a: AllocatorBackend, buf: [Decl], sd: StructDecl) [Decl] {
+fill_accessors_in = (a: AllocatorBackend, buf: MutSlice<Decl>, sd: StructDecl) MutSlice<Decl> {
     sd.fields.loop_at((i, f) { buf[i] = a.accessor_in(sd.name, f) })
     buf
 }
-derive_accessors_in* = (a: AllocatorBackend, sd: StructDecl) [Decl] {
+derive_accessors_in* = (a: AllocatorBackend, sd: StructDecl) MutSlice<Decl> {
     a.fill_accessors_in(a.dbuf_in(sd.fields.len), sd)
 }
-derive_accessors = (a: AllocatorBackend, sd: StructDecl) [Decl] { a.derive_accessors_in(sd) }
+derive_accessors = (a: AllocatorBackend, sd: StructDecl) MutSlice<Decl> {
+    a.derive_accessors_in(sd)
+}
 field_eq_in = (a: AllocatorBackend, fname: StringView) Ptr<Expr> {
     a.eqx_in(a.dot_in(a.var_in("x"), fname), a.dot_in(a.var_in("y"), fname))
 }

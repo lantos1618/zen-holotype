@@ -15,7 +15,7 @@ Vec*<T>: {
     carried: bool,
     oom: bool,
     alloc: Allocator,
-    add = (v: Vec<T>, xs: [T]) Vec<T> {
+    add = (v: Vec<T>, xs: MutSlice<T>) Vec<T> {
         // append MANY elements; a no-op once sticky or uncarried.
         d = v.alloc
         v.live().then({ v.settle(d.addr().extend_in(v, xs)) }, { v })
@@ -48,8 +48,8 @@ Vec*<T>: {
         br: Result<buf.Buffer<T>, IoError> = .Err(.NotFound)
         buffer_vec(buf.buffer_settle(vec_buffer(v), br))
     }
-    buf = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }
-    view = (v: Vec<T>) [T] {
+    buf = (v: Vec<T>) MutSlice<T> { slice(v.ptr, v.cap) }
+    view = (v: Vec<T>) MutSlice<T> {
         // a slice over exactly the `len` live elements (NOT `cap` — excludes uninitialized storage).
         // Use this to iterate, just like any `[T]`: `v.view().loop((h, i, x) { ... })`.
         slice(v.ptr, v.len)
@@ -151,18 +151,18 @@ Vec*<T>: {
         // and map. `each`/`fold`/`find` allocate nothing; `map`/`filter` thread the allocator and return a
         // fresh Vec wrapped in `Result` (no hidden heap; OOM is a value). The `vw: [T] =` intermediate
         // pins the element type for the loop.
-        vw: [T] = v.view()
+        vw: MutSlice<T> = v.view()
         vw.loop_at((i, x) { f(x) })
     }
     fold = (v: Vec<T>, init: T, f: (T, T) T) T {
         acc ::= init
-        vw: [T] = v.view()
+        vw: MutSlice<T> = v.view()
         vw.loop_at((i, x) { acc = f(acc, x) })
         acc
     }
     find = (v: Vec<T>, pred: (T) bool) Opt<T> {
         out :: Opt<T> = .None
-        vw: [T] = v.view()
+        vw: MutSlice<T> = v.view()
         vw.loop((h, i, x) {
             pred(x).then({
                 out = .Some(x)
@@ -176,8 +176,8 @@ Vec*<T>: {
         // null `p` the loop would write through. Explicit `.match` threads the Err (matching `grow`/`push`).
         a.try_acquire(v.len * sizeof(U)).match ({
             .Ok(p)  => {
-                out :: [U] = slice(p, v.len)
-                vw: [T] = v.view()
+                out :: MutSlice<U> = slice(p, v.len)
+                vw: MutSlice<T> = v.view()
                 vw.loop_at((i, x) { out[i] = f(x) })
                 ok: Result<Vec<U>, IoError> = .Ok(Vec<U>(
                     ptr: p,
@@ -199,8 +199,8 @@ Vec*<T>: {
         // Fallible for the same reason as `map`: OOM on the result buffer surfaces as `.Err`, never null.
         a.try_acquire(v.len * sizeof(T)).match ({
             .Ok(p)  => {
-                out :: [T] = slice(p, v.len)
-                vw: [T] = v.view()
+                out :: MutSlice<T> = slice(p, v.len)
+                vw: MutSlice<T> = v.view()
                 n ::= 0
                 vw.loop_at((i, x) {
                     out[n] = x
@@ -247,7 +247,7 @@ buffer_vec<T> = (b: buf.Buffer<T>) Vec<T> {
 // before the first grow). T can't be read off any argument, so it comes from the LHS annotation:
 // `r: Result<Vec<i32>, IoError> = vecs.empty(a)`. Fallible like `of`: the seed
 // buffer is `try_acquire`d, so OOM is a value, not a null buffer. Pair with `push`/`free`.
-empty*<T> = (a: Allocator) Result<Vec<T>, IoError> {
+vec_empty_in<T> = (a: Allocator) Result<Vec<T>, IoError> {
     a.try_acquire(sizeof(T)).match ({
         .Ok(p)  => {
             ok: Result<Vec<T>, IoError> = .Ok(Vec<T>(
@@ -266,8 +266,25 @@ empty*<T> = (a: Allocator) Result<Vec<T>, IoError> {
         },
     })
 }
+empty*<T> = (a: Allocator) Result<Vec<T>, IoError> {
+    out: Result<Vec<T>, IoError> = vec_empty_in(a)
+    out
+}
+// `empty` for code that holds a raw backend rather than a carryable `Allocator`, mirroring
+// `string.init`: the header is UNCARRIED, so `add`/`drop` stay inert and every later step threads the
+// same `a` through `push`/`free`. T comes from the result context, as in `empty`.
+vec_in*<T> = (a: AllocatorBackend, cap: i64) Result<Vec<T>, IoError> {
+    a.try_acquire(cap * sizeof(T)).match ({
+        .Ok(p)  => ok(Vec<T>(
+            ptr: p,
+            len: 0,
+            cap: cap,
+        )),
+        .Err(e) => err(e),
+    })
+}
 // a `Vec<T>` seeded from a slice (copies `xs`), its buffer acquired from `a`. T inferred from `xs`, A from `a`.
-of*<T> = (a: Allocator, xs: [T]) Result<Vec<T>, IoError> {
+of*<T> = (a: Allocator, xs: MutSlice<T>) Result<Vec<T>, IoError> {
     (xs.len <= 0).match ({
         true  => {
             vok: Result<Vec<T>, IoError> = .Ok(Vec<T>(
@@ -328,7 +345,7 @@ extend_spare_in*<T> = (
         },
     })
 }
-extend_in*<T> = (a: AllocatorBackend, v: Vec<T>, xs: [T]) Result<Vec<T>, IoError> {
+extend_in*<T> = (a: AllocatorBackend, v: Vec<T>, xs: MutSlice<T>) Result<Vec<T>, IoError> {
     a.extend_spare_in(v, xs, 0)
 }
 // Fixed is writable; Const is read-only. Both retain their allocator for drop().
@@ -336,10 +353,10 @@ VecFixed*<T>: {
     ptr: RawPtr<u8>,
     len: i64,
     alloc: Allocator,
-    view = (v: VecFixed<T>) [T] { slice(v.ptr, v.len) }
+    view = (v: VecFixed<T>) MutSlice<T> { slice(v.ptr, v.len) }
     get  = (v: VecFixed<T>, i: i64) T { v.view()[i] }
     set = (v: VecFixed<T>, i: i64, x: T) void {
-        w :: [T] = v.view()
+        w :: MutSlice<T> = v.view()
         w[i] = x
     }
     drop = (v: VecFixed<T>) void { buf.buffer_fixed_drop(vec_fixed_buffer(v)) }
@@ -394,7 +411,7 @@ vec_fixed*<T> = (a: Allocator, n: i64) Result<VecFixed<T>, IoError> {
 }
 // Converting a frozen Vec back to growable storage always copies.
 vec_from*<T> = (a: Allocator, c: VecConst<T>) Vec<T> {
-    src: [T] = slice(c.ptr, c.len)
+    src: MutSlice<T> = slice(c.ptr, c.len)
     v: Vec<T> = vec(a, c.len)
     v.add(src)
 }
@@ -406,7 +423,7 @@ AVec*<T>: {
     len     = (w: AVec<T>) i64 { w.inner.len() }
     get     = (w: AVec<T>, i: i64) T { w.inner.get(i) }
     get_opt = (w: AVec<T>, i: i64) Opt<T> { w.inner.get_opt(i) }
-    view    = (w: AVec<T>) [T] { w.inner.view() }
+    view    = (w: AVec<T>) MutSlice<T> { w.inner.view() }
     each    = (w: AVec<T>, f: (T) void) void { w.inner.each(f) }
     fold    = (w: AVec<T>, init: T, f: (T, T) T) T { w.inner.fold(init, f) }
     find    = (w: AVec<T>, pred: (T) bool) Opt<T> { w.inner.find(pred) }
@@ -425,7 +442,7 @@ AVec*<T>: {
 // Explicit construction never reads the ambient runtime; T comes from the result context.
 new_in*<T> = (a: Allocator) AVec<T> {
     da = a
-    ivr: Result<Vec<T>, IoError> = empty(da)
+    ivr: Result<Vec<T>, IoError> = vec_empty_in(da)
     AVec<T>(
         inner: ivr.expect("vec.new: out of memory"),
         alloc: a,
@@ -434,14 +451,14 @@ new_in*<T> = (a: Allocator) AVec<T> {
 // T comes from the result context. The body avoids a flat-namespace new_in collision.
 new*<T> = () AVec<T> {
     a = heap_allocator()
-    ivr: Result<Vec<T>, IoError> = empty(a)
+    ivr: Result<Vec<T>, IoError> = vec_empty_in(a)
     AVec<T>(
         inner: ivr.expect("vec.new: out of memory"),
         alloc: a,
     )
 }
 // Explicit seed construction copies xs and never reads the ambient runtime.
-from_in*<T> = (a: Allocator, xs: [T]) AVec<T> {
+from_in*<T> = (a: Allocator, xs: MutSlice<T>) AVec<T> {
     da = a
     iv: Vec<T> = of(da, xs).expect("vec.from: out of memory")
     AVec<T>(
@@ -450,7 +467,7 @@ from_in*<T> = (a: Allocator, xs: [T]) AVec<T> {
     )
 }
 // Process-heap seed construction is fail-fast.
-from*<T> = (xs: [T]) AVec<T> {
+from*<T> = (xs: MutSlice<T>) AVec<T> {
     a = heap_allocator()
     iv: Vec<T> = of(a, xs).expect("vec.from: out of memory")
     AVec<T>(

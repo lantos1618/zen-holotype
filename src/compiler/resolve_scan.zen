@@ -1,17 +1,11 @@
 // @self-hosted-only
-// Checked-mode resolver — source-text SCANNING (extracted from compiler.resolve): the pure
-// lexers that turn raw module source into stripped text, import edges, and provided symbols.
-// strip_into/strip_imports (comment/literal-aware import stripping), import_edges + edge_* parsing,
-// provided_symbols_in + symbol_* scanning, sig_of_symbols and the ModuleGraph builder/name-sets.
-// No disk I/O, no ModuleTable, no mutable globals — those stay in compiler.resolve, which also
-// owns the shared types these signatures reference (imported back below).
 { at, is_alpha, is_alnum, line_comment_at, rawstr_at } = std.text.ascii
 { gstr_string, gstr_append } = compiler.genc
 { decl_span } = compiler.parse
 { Allocator } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { String } = std.text.string
-{ Map, of } = std.collections.map
+{ Map } = std.collections.map
 { view } = std.text.str
 { upto, advance_while, loop_at } = std.core.count
 { lstrip, is_import_line, next_line, STD_MARKER_LEN, COMPILER_MARKER_LEN, USER_MARKER_LEN, rset_add,
@@ -80,9 +74,7 @@ is_user_marker_at = (s: StringView, p: i32) bool {
 }
 is_any_marker_at* = (s: StringView, p: i32) bool { s.is_marker_at(p) || s.is_user_marker_at(p) }
 import_end = (s: StringView, p: i32) i32 { s.next_line(s.import_marker_from(s.lstrip(p))) }
-// Position of the next '\n' at or after `p` (end-of-string if none). Walks bytes directly and stops
-// at the NUL terminator — the old body called `s.view()` (a strlen over the WHOLE source) on every
-// call, quadratic for per-line callers. Reads only [p, first NUL], never past the terminator.
+// Position of the next '\n' at or after `p`; reads only [p, first NUL].
 line_end = (s: StringView, p: i32) i32 {
     p.advance_while((q) { load(offset(s, q)) != 0 && load(offset(s, q)) != '\n' })
 }
@@ -258,7 +250,7 @@ import_edge_count = (src: StringView) i32 { src.import_edge_count_from(0, 0) }
 edge_next = (src: StringView, p: i32) i32 {
     src.is_import_line(p).then({ src.import_end(p) }, { src.next_line(p) })
 }
-edge_buf<A> = (a: MutPtr<A>, n: i64) Result<[ImportEdge], IoError> {
+edge_buf<A> = (a: MutPtr<A>, n: i64) Result<MutSlice<ImportEdge>, IoError> {
     a.try_acquire(n * sizeof(ImportEdge)).match ({
         .Ok(p)  => ok(slice(p, n)),
         .Err(e) => err(e),
@@ -437,9 +429,9 @@ fill_import_edges<A> = (
     a: MutPtr<A>,
     src: StringView,
     p: i32,
-    out: [ImportEdge],
+    out: MutSlice<ImportEdge>,
     i: i32,
-) Result<[ImportEdge], IoError> {
+) Result<MutSlice<ImportEdge>, IoError> {
     pos ::= p
     idx ::= i
     failed ::= false
@@ -478,7 +470,7 @@ fill_import_edges<A> = (
     })
     failed.then({ err(last_err) }, { ok(out) })
 }
-import_edges*<A> = (a: MutPtr<A>, src: StringView) Result<[ImportEdge], IoError> {
+import_edges*<A> = (a: MutPtr<A>, src: StringView) Result<MutSlice<ImportEdge>, IoError> {
     a.edge_buf(src.import_edge_count()).match ({
         .Ok(buf) => a.fill_import_edges(src, 0, buf, 0),
         .Err(e)  => err(e),
@@ -549,7 +541,7 @@ provided_symbol_count_from = (a: Allocator, src: StringView, p: i32, n: i32) i32
 provided_symbol_count = (a: Allocator, src: StringView) i32 {
     a.provided_symbol_count_from(src, 0, 0)
 }
-symbol_buf<A> = (a: MutPtr<A>, n: i64) Result<[ProvidedSymbol], IoError> {
+symbol_buf<A> = (a: MutPtr<A>, n: i64) Result<MutSlice<ProvidedSymbol>, IoError> {
     a.try_acquire(n * sizeof(ProvidedSymbol)).match ({
         .Ok(p)  => ok(slice(p, n)),
         .Err(e) => err(e),
@@ -564,7 +556,7 @@ symbol_name_len = (src: StringView, p: i32, e: i32, escape: bool) i64 {
 copy_symbol_span_to = (buf: RawPtr<u8>, src: StringView, p: i32, e: i32) i64 {
     cur :: i64 = 0
     (p < e).then({
-        span: [u8] = slice(src.offset(p), to_i64(e - p))
+        span: MutSlice<u8> = slice(src.offset(p), to_i64(e - p))
         span.loop_at((i, b) {
             buf.offset(cur).store(b)
             cur = cur + 1
@@ -599,7 +591,7 @@ fill_head_symbols_in<A> = (
     alloc: MutPtr<A>,
     src: StringView,
     p: i32,
-    out: [ProvidedSymbol],
+    out: MutSlice<ProvidedSymbol>,
     i: i32,
 ) Result<i32, IoError> {
     pos ::= p
@@ -661,9 +653,9 @@ fill_provided_symbols_in<A> = (
     alloc: MutPtr<A>,
     src: StringView,
     p: i32,
-    out: [ProvidedSymbol],
+    out: MutSlice<ProvidedSymbol>,
     i: i32,
-) Result<[ProvidedSymbol], IoError> {
+) Result<MutSlice<ProvidedSymbol>, IoError> {
     pos ::= p
     idx ::= i
     failed ::= false
@@ -742,7 +734,7 @@ provided_symbols_in*<A> = (
     a: Allocator,
     alloc: MutPtr<A>,
     src: StringView,
-) Result<[ProvidedSymbol], IoError> {
+) Result<MutSlice<ProvidedSymbol>, IoError> {
     alloc.symbol_buf(a.provided_symbol_count(src)).match ({
         .Ok(buf) => a.fill_provided_symbols_in(alloc, src, 0, buf, 0),
         .Err(e)  => err(e),
@@ -767,9 +759,9 @@ sym_sig_flags = (s: ProvidedSymbol) i64 {
 }
 // Build the sig map from one symbol scan: first occurrence wins, and a raw C-keyword decl name is
 // additionally registered under its `_zk`-escaped key (see ModuleSig).
-sig_of_symbols = (a: Allocator, symbols: [ProvidedSymbol]) ModuleSig {
+sig_of_symbols = (a: Allocator, symbols: MutSlice<ProvidedSymbol>) ModuleSig {
     seed: i64 = 0 - 1
-    m ::= of(a.addr(), "", seed).expect("compiler.resolve: sig alloc")
+    m ::= a.map_of("", seed).expect("compiler.resolve: sig alloc")
     symbols.loop_at((i, s) {
         f = s.sym_sig_flags()
         (m.has(s.name) == false).then({
@@ -830,7 +822,7 @@ symbol_allowed = (s: ProvidedSymbol, include_imported: bool, include_foreign: bo
 symbol_names_into_in = (
     a: Allocator,
     set: String,
-    symbols: [ProvidedSymbol],
+    symbols: MutSlice<ProvidedSymbol>,
     i: i64,
     include_imported: bool,
     include_foreign: bool,
@@ -846,7 +838,12 @@ symbol_names_into_in = (
     cur
 }
 // Module-DEFINED value/fn decl names only: non-imported, non-foreign, and NOT a type (struct/enum).
-value_symbol_names_into_in = (a: Allocator, set: String, symbols: [ProvidedSymbol], i: i64) String {
+value_symbol_names_into_in = (
+    a: Allocator,
+    set: String,
+    symbols: MutSlice<ProvidedSymbol>,
+    i: i64,
+) String {
     cur ::= set
     symbols.loop_at((idx, sym) {
         (idx < i == false).then({
@@ -860,7 +857,7 @@ value_symbol_names_into_in = (a: Allocator, set: String, symbols: [ProvidedSymbo
 // Map-set forms of imported_value_names / value_symbol_names_into_in — same filters, O(1)-membership
 // presence sets for shadow_rename_set (see rset_*). value_symbol_name_set keys on `sym.name` (the raw
 // clean identifier), matching the original allnames String that shadow_mangled(key) is looked up against.
-imported_value_name_set* = (a: Allocator, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
+imported_value_name_set* = (a: Allocator, m: Map<i64>, symbols: MutSlice<ProvidedSymbol>) Map<i64> {
     cur ::= m
     symbols.loop_at((idx, sym) {
         (sym.imported && sym.is_type.then({ false }, { true })).then({
@@ -871,7 +868,7 @@ imported_value_name_set* = (a: Allocator, m: Map<i64>, symbols: [ProvidedSymbol]
     })
     cur
 }
-value_symbol_name_set* = (a: Allocator, m: Map<i64>, symbols: [ProvidedSymbol]) Map<i64> {
+value_symbol_name_set* = (a: Allocator, m: Map<i64>, symbols: MutSlice<ProvidedSymbol>) Map<i64> {
     cur ::= m
     symbols.loop_at((idx, sym) {
         (sym.symbol_allowed(false, false) && sym.is_type.then({ false }, { true })).then({

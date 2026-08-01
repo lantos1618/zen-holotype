@@ -1,5 +1,3 @@
-// compiler.check_infer — generic type-argument inference: lightweight typing + tparam unification.
-// Extracted from compiler.check (pure move). Feeds the template inliner (compiler.check_inline).
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, Field, ImplData, MatchData, CallData, MethodCallData,
   BlockData, LambdaData, SliceData } = compiler.ast.ast_types
 { cbuf, stmts_diverge, subst_ty_in, tgeneric, ti32, ti64, tu8, tf64, tbool, tstring_cstr,
@@ -13,10 +11,20 @@
   is_direct_tparam, is_lit_numeric, is_str_t, is_void_ty, is_weak_targ_arg, lookup_var,
   slice_member, ty_under_ptr, vcons } = compiler.check
 { loop_at } = std.core.count
-light_sl_elem = (a: Allocator, items: [Expr], env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
-    (items.len == 0).then({ tvoid() }, { items[0].addr().light_ty(a, env, decls, idx) })
-}
-light_slice = (a: Allocator, sd: SliceData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+light_sl_elem = (
+    a: Allocator,
+    items: MutSlice<Expr>,
+    env: Ptr<VList>,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+) Ty { (items.len == 0).then({ tvoid() }, { items[0].addr().light_ty(a, env, decls, idx) }) }
+light_slice = (
+    a: Allocator,
+    sd: SliceData,
+    env: Ptr<VList>,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+) Ty {
     sd.elem.is_void_ty().match ({
         true  => tslice(a.tnode(a.light_sl_elem(sd.items, env, decls, idx))),
         false => tslice(a.tnode(sd.elem)),
@@ -26,12 +34,12 @@ light_slice = (a: Allocator, sd: SliceData, env: Ptr<VList>, decls: [Decl], idx:
 // `lits` mirrors targ_of: false scans only typed (non-literal) args, true only literals — the
 // weakest binding source, consulted after the expected return type (see call_targ).
 light_one = (
-    params: [Param],
+    params: MutSlice<Param>,
     a: Allocator,
-    args: [Expr],
+    args: MutSlice<Expr>,
     tp: StringView,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     lits: bool,
 ) Ty {
@@ -53,11 +61,11 @@ light_ret_one = (ret: Ty, exp: Ty, tp: StringView) Ty {
 light_targ = (
     f: Func,
     a: Allocator,
-    args: [Expr],
+    args: MutSlice<Expr>,
     exp: Ty,
     tp: StringView,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
 ) Ty {
     arg ::= f.params.light_one(a, args, tp, env, decls, idx, false)
@@ -67,16 +75,22 @@ light_targ = (
 light_targs = (
     f: Func,
     a: Allocator,
-    args: [Expr],
+    args: MutSlice<Expr>,
     exp: Ty,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-) [Ty] {
+) MutSlice<Ty> {
     buf = map_slice(a, f.tparams, (tp) { f.light_targ(a, args, exp, tp.name, env, decls, idx) })
     a.deep_targs(f.tparams, buf, f.params, args, env, decls, idx)
 }
-light_call_ty = (decls: [Decl], idx: DeclIndex, a: Allocator, c: CallData, env: Ptr<VList>) Ty {
+light_call_ty = (
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+    a: Allocator,
+    c: CallData,
+    env: Ptr<VList>,
+) Ty {
     // conversion/size intrinsics (not in the decl index) mirror infer_call, so e.g. `to_i64(0)`
     // as a generic-call arg PINS that tparam instead of light-typing to void (need-annotation).
     (c.fn == "each_field" || c.fn == "zip_fields").then({
@@ -111,9 +125,9 @@ light_call_ty = (decls: [Decl], idx: DeclIndex, a: Allocator, c: CallData, env: 
 }
 light_last_stmt_ty = (
     a: Allocator,
-    stmts: [Stmt],
+    stmts: MutSlice<Stmt>,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
 ) Ty {
     stmts[stmts.len - 1].match ({
@@ -122,7 +136,13 @@ light_last_stmt_ty = (
         _            => tvoid(),
     })
 }
-light_extend = (a: Allocator, env: Ptr<VList>, st: Stmt, decls: [Decl], idx: DeclIndex) Ptr<VList> {
+light_extend = (
+    a: Allocator,
+    env: Ptr<VList>,
+    st: Stmt,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+) Ptr<VList> {
     st.match ({
         .Let(l) => a.vcons(l.name, l.ty.is_void_ty().match ({
             true  => l.value.light_ty(a, env, decls, idx),
@@ -133,9 +153,9 @@ light_extend = (a: Allocator, env: Ptr<VList>, st: Stmt, decls: [Decl], idx: Dec
 }
 light_block_ty_from = (
     a: Allocator,
-    stmts: [Stmt],
+    stmts: MutSlice<Stmt>,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     i: i32,
 ) Ty {
@@ -148,20 +168,38 @@ light_block_ty_from = (
     })
 }
 // mirrors block_ty: a diverging value block (trailing explicit `return`) has no value type.
-light_block_ty = (a: Allocator, b: BlockData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+light_block_ty = (
+    a: Allocator,
+    b: BlockData,
+    env: Ptr<VList>,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+) Ty {
     b.stmts.stmts_diverge().match ({
         true  => tvoid(),
         false => a.light_block_ty_from(b.stmts, env, decls, idx, 0),
     })
 }
-light_member_ty = (a: Allocator, decls: [Decl], idx: DeclIndex, obj: Ty, field: StringView) Ty {
+light_member_ty = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+    obj: Ty,
+    field: StringView,
+) Ty {
     obj.ty_under_ptr().match ({
         .Generic(g) => idx.idx_genstruct_field(a, decls, g.name, field, g.args),
         .Slice(e)   => a.slice_member(field, e.kind),
         _           => idx.idx_struct_field(decls, obj.enum_name(), field),
     })
 }
-light_ty* = (e: Ptr<Expr>, a: Allocator, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+light_ty* = (
+    e: Ptr<Expr>,
+    a: Allocator,
+    env: Ptr<VList>,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+) Ty {
     load(e).match ({
         .Int(n)        => ti32(),
         .Block(b)      => a.light_block_ty(b, env, decls, idx),
@@ -202,7 +240,13 @@ light_ty* = (e: Ptr<Expr>, a: Allocator, env: Ptr<VList>, decls: [Decl], idx: De
 // a Match (`good.map_err(f)` → `({ … r.match({…}) })`), so the NEXT call in the chain
 // (`.expect(msg)`) must be able to light-type it or its tparams silently default to void. Fold the
 // same safe join as full inference; taking the first arm makes string provenance depend on arm order.
-light_match_ty = (a: Allocator, m: MatchData, env: Ptr<VList>, decls: [Decl], idx: DeclIndex) Ty {
+light_match_ty = (
+    a: Allocator,
+    m: MatchData,
+    env: Ptr<VList>,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+) Ty {
     st = m.subj.light_ty(a, env, decls, idx)
     found ::= tvoid()
     m.arms.loop_at((i, ar) {
@@ -229,7 +273,7 @@ unify_ty* = (pty: Ty, aty: Ty, tp: StringView) Ty {
         _           => tvoid(),
     })
 }
-unify_args = (pargs: [Ty], aargs: [Ty], tp: StringView) Ty {
+unify_args = (pargs: MutSlice<Ty>, aargs: MutSlice<Ty>, tp: StringView) Ty {
     found ::= tvoid()
     pargs.loop_at((i, pa) {
         found = found.is_void_ty().match ({
@@ -240,7 +284,7 @@ unify_args = (pargs: [Ty], aargs: [Ty], tp: StringView) Ty {
     found
 }
 // The declared payload type of variant `vn`, scanning every enum decl (concrete or generic).
-variant_payload_ty = (decls: [Decl], vn: StringView) Ty {
+variant_payload_ty = (decls: MutSlice<Decl>, vn: StringView) Ty {
     found ::= tvoid()
     decls.loop_at((i, d) {
         found = found.is_void_ty().match ({
@@ -263,14 +307,14 @@ enum_variant_payload = (ed: EnumDecl, vn: StringView) Ty {
 // variant declares the payload type (e.g. `Get(ReplyRef<i32>)`), so the param `(reply){...}` that is
 // passed straight into `.Get(reply)` is ReplyRef<i32>. This lets a generic FnT param `(ReplyRef<T>) R`
 // recover T even with no return to flow it from — the actor ask/request inline-closure reply handler.
-lam_param_payload = (decls: [Decl], body: [Stmt], pname: StringView) Ty {
+lam_param_payload = (decls: MutSlice<Decl>, body: MutSlice<Stmt>, pname: StringView) Ty {
     found ::= tvoid()
     body.loop_at((i, st) {
         found = found.is_void_ty().then({ decls.lpp_stmt(st, pname) }, { found })
     })
     found
 }
-lpp_stmt = (decls: [Decl], st: Stmt, pname: StringView) Ty {
+lpp_stmt = (decls: MutSlice<Decl>, st: Stmt, pname: StringView) Ty {
     st.match ({
         .ExprStmt(e) => decls.lpp_expr(e, pname),
         .Return(r)   => decls.lpp_expr(r, pname),
@@ -279,7 +323,7 @@ lpp_stmt = (decls: [Decl], st: Stmt, pname: StringView) Ty {
         _            => tvoid(),
     })
 }
-lpp_expr = (decls: [Decl], e: Ptr<Expr>, pname: StringView) Ty {
+lpp_expr = (decls: MutSlice<Decl>, e: Ptr<Expr>, pname: StringView) Ty {
     load(e).match ({
         .MakeEnum(mk)   => decls.lpp_payload(mk.variant, mk.payload, pname),
         .Call(c)        => decls.lpp_args(c.args, pname),
@@ -288,26 +332,31 @@ lpp_expr = (decls: [Decl], e: Ptr<Expr>, pname: StringView) Ty {
         _               => tvoid(),
     })
 }
-lpp_payload = (decls: [Decl], variant: StringView, payload: Ptr<Expr>, pname: StringView) Ty {
+lpp_payload = (
+    decls: MutSlice<Decl>,
+    variant: StringView,
+    payload: Ptr<Expr>,
+    pname: StringView,
+) Ty {
     load(payload).match ({
         .Var(v) => (v.name == pname).then({ decls.variant_payload_ty(variant) }, { tvoid() }),
         _       => tvoid(),
     })
 }
-lpp_args = (decls: [Decl], args: [Expr], pname: StringView) Ty {
+lpp_args = (decls: MutSlice<Decl>, args: MutSlice<Expr>, pname: StringView) Ty {
     found ::= tvoid()
     args.loop_at((i, ar) {
         found = found.is_void_ty().then({ decls.lpp_expr(ar.addr(), pname) }, { found })
     })
     found
 }
-lpp_mcall = (decls: [Decl], mc: MethodCallData, pname: StringView) Ty {
+lpp_mcall = (decls: MutSlice<Decl>, mc: MethodCallData, pname: StringView) Ty {
     r = decls.lpp_expr(mc.recv, pname)
     r.is_void_ty().then({ decls.lpp_args(mc.args, pname) }, { r })
 }
 // Unify a generic FnT param `(ReplyRef<T>) R` against a lambda argument by inferring each lambda
 // param's concrete type from its body (the `.Variant(param)` site that declares it).
-lam_unify = (decls: [Decl], fpty: Ty, lm: LambdaData, tp: StringView) Ty {
+lam_unify = (decls: MutSlice<Decl>, fpty: Ty, lm: LambdaData, tp: StringView) Ty {
     fpty.match ({
         .FnT(ft) => {
             found ::= tvoid()
@@ -333,7 +382,7 @@ lam_unify = (decls: [Decl], fpty: Ty, lm: LambdaData, tp: StringView) Ty {
 // `lits` mirrors targ_of: numeric and string literal args are the weakest binding source.
 weak_targ_light = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     pty: Ty,
     arg: Ptr<Expr>,
@@ -344,12 +393,12 @@ weak_targ_light = (
         || pty.is_direct_tparam(tp) && arg.light_ty(a, env, decls, idx).is_str_t()
 }
 infer_one = (
-    params: [Param],
+    params: MutSlice<Param>,
     a: Allocator,
-    cargs: [Expr],
+    cargs: MutSlice<Expr>,
     tp: StringView,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     lits: bool,
 ) Ty {
@@ -370,7 +419,7 @@ infer_one = (
 // param position from the lambda body instead. Other args unify against their light type as before.
 unify_carg = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     pty: Ty,
     carg: Ptr<Expr>,
@@ -383,14 +432,14 @@ unify_carg = (
     })
 }
 infer_one_exp = (
-    params: [Param],
+    params: MutSlice<Param>,
     ret: Ty,
     exp: Ty,
     a: Allocator,
-    cargs: [Expr],
+    cargs: MutSlice<Expr>,
     tp: StringView,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
 ) Ty {
     arg ::= params.infer_one(a, cargs, tp, env, decls, idx, false)
@@ -412,12 +461,12 @@ ty_mentions* = (t: Ty, n: StringView) bool {
         _           => false,
     })
 }
-tys_mention = (ts: [Ty], n: StringView) bool {
+tys_mention = (ts: MutSlice<Ty>, n: StringView) bool {
     f ::= false
     ts.loop_at((i, t) { f = f || t.ty_mentions(n) })
     f
 }
-ty_mentions_any* = (t: Ty, tparams: [Param]) bool {
+ty_mentions_any* = (t: Ty, tparams: MutSlice<Param>) bool {
     f ::= false
     tparams.loop_at((i, tp) { f = f || t.ty_mentions(tp.name) })
     f
@@ -428,13 +477,13 @@ ty_mentions_any* = (t: Ty, tparams: [Param]) bool {
 // and unify. Bails (void) if the body's type still mentions any tparam (nothing concrete was learned).
 lam_body_targ = (
     a: Allocator,
-    tparams: [Param],
-    targs: [Ty],
-    params: [Param],
-    cargs: [Expr],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    params: MutSlice<Param>,
+    cargs: MutSlice<Expr>,
     tp: StringView,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
 ) Ty {
     found ::= tvoid()
@@ -451,13 +500,13 @@ lam_body_targ = (
 }
 lam_body_one = (
     a: Allocator,
-    tparams: [Param],
-    targs: [Ty],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
     pty: Ty,
     carg: Ptr<Expr>,
     tp: StringView,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
 ) Ty {
     pty.match ({
@@ -492,10 +541,10 @@ lam_body_one = (
 // only place the instantiation survives). Solves only traits whose tparam NAME matches `tp`.
 impl_trait_targ* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    tparams: [Param],
-    targs: [Ty],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
     tp: StringView,
 ) Ty {
     found ::= tvoid()
@@ -509,7 +558,7 @@ impl_trait_targ* = (
 }
 impl_trait_targ_of = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     tyname: StringView,
     tp: StringView,
@@ -534,7 +583,13 @@ impl_trait_targ_of = (
         },
     })
 }
-impl_trait_solve = (a: Allocator, decls: [Decl], idx: DeclIndex, im: ImplData, tp: StringView) Ty {
+impl_trait_solve = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+    im: ImplData,
+    tp: StringView,
+) Ty {
     g = idx.idx_genstruct(decls, im.trname)
     (is_empty(g.name) || g.tparams.param_names_has(tp) == false).match ({
         true  => tvoid(),
@@ -552,7 +607,7 @@ impl_trait_solve = (a: Allocator, decls: [Decl], idx: DeclIndex, im: ImplData, t
 }
 impl_method_solve = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     im: ImplData,
     f: Field,
@@ -585,14 +640,14 @@ impl_method_solve = (
 // (so a later fallback sees everything earlier ones bound).
 deep_targs = (
     a: Allocator,
-    tparams: [Param],
-    buf: [Ty],
-    params: [Param],
-    cargs: [Expr],
+    tparams: MutSlice<Param>,
+    buf: MutSlice<Ty>,
+    params: MutSlice<Param>,
+    cargs: MutSlice<Expr>,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-) [Ty] {
+) MutSlice<Ty> {
     tparams.loop_at((i, tp) {
         buf[i] = buf[i].is_void_ty().match ({
             true  => a.lam_body_targ(tparams, buf, params, cargs, tp.name, env, decls, idx),
@@ -611,16 +666,16 @@ deep_targs = (
 // an absent one (i past etargs) is inferred from value args / expected type as before.
 infer_targs* = (
     a: Allocator,
-    tparams: [Param],
-    params: [Param],
+    tparams: MutSlice<Param>,
+    params: MutSlice<Param>,
     ret: Ty,
     exp: Ty,
-    cargs: [Expr],
+    cargs: MutSlice<Expr>,
     env: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    etargs: [Ty],
-) [Ty] {
+    etargs: MutSlice<Ty>,
+) MutSlice<Ty> {
     buf ::= cbuf<Ty>(a, tparams.len)
     tparams.loop_at((i, tp) {
         buf[i] = (i < etargs.len).match ({

@@ -1,59 +1,6 @@
-// std.collections.set — a generic hash set `Set<T>` with an EXPLICIT allocator, in the std.collections.map mold.
-// Allocating operations take an explicit backend and return Result<Set<T>, IoError> —
-// allocation failure (OOM) is a value, exactly like std.collections.hmap (`empty`/`of`/`add`/`append`/
-// `grow`/`clone` and the set-algebra `union`/`intersect`/`difference`). `remove` never reallocs (swap-
-// remove + in-place reindex — it can't OOM), so it stays a plain `Set<T>`, mirroring `HMap.delete`.
-//
-// Membership is O(1) AVERAGE via the SAME open hash index design as Map: FNV-1a over the element's bytes,
-// separate chaining into the insertion-ordered element column. The index lives in one i64 buffer of `2*cap`
-// slots: the first `cap` slots are bucket HEADS (entry index or -1), the next `cap` slots are the per-entry
-// NEXT links. The index is rebuilt on grow.
-//
-// Layout: one element buffer of `cap + 1` T slots (`elems`) — the final slot is a reusable SCRATCH cell so
-// `find`/`has` can hash/compare a query value without taking an allocator — plus `len` live entries and `idx`
-// (the 2*cap i64 hash index).
-//
-//   a = caller_allocator.addr()
-//   s = sets.of(a, 10).expect("of")       // Set<i64>; T inferred from the seed (of chains)
-//   s  = s.add(a, 20).expect("add")        // insert — grows through alloc when full
-//   s  = s.add(a, 10).expect("add")        // already present — no-op, len unchanged
-//   s.has(20)                              // true
-//   s  = s.remove(a, 10)                   // delete — never allocates, returns Set<T> directly
-//   s.len()                                // live element count
-//   s.free(a)                              // hand all buffers back to alloc
-//
-//   r: Result<Set<str>, IoError> = sets.empty(a)   // empty's T is return-only: pin via two-step annotation
-//   w = r.expect("empty")
-//
-// Allocator-threaded constructors (`empty`, `of`) and the set-algebra operators (`union`, `intersect`,
-// `difference`) remain free functions; Set-owned operations live on Set<T>, so callers use s.add(...),
-// s.remove(...), s.has(...), s.len(), s.clone(...), s.each(...), and s.free(...).
-//
-// ELEMENT HASHING / WHICH TYPES (read before choosing T). Hashing and equality are BYTE-WISE over the
-// element's `sizeof(T)` bytes. That is exactly right for value/POD element types — `i64`, `i32`, byte
-// structs — where the bit pattern IS the identity. It is also correct for `str` ELEMENTS as long as equal
-// strings share one pointer: Zen interns string LITERALS (verified), so literal-keyed string sets dedup
-// correctly. For sets keyed on COMPUTED strings (where two equal contents may sit at different pointers),
-// byte-hashing compares the pointer, not the content — use std.collections.map (a `Map<bool>`, whose hash
-// is content-based) for those. Supported and tested here: `i64` and `str` (literals).
-//
-// VALUE-MOLD CONTRACT (read before sharing a Set handle). A `Set<T>` is a small by-value header
-// {elems, idx, len, cap} over allocator-owned buffers, exactly like std.collections.map. Two consequences
-// follow — both by-design, not bugs:
-//   1. ALWAYS USE THE RETURNED SET. `add`/`remove` may grow/reindex, which reallocs the buffers and returns
-//      an updated header whose pointers differ from the input's. A handle captured BEFORE such a call then
-//      points at freed memory — reading or further mutating it is use-after-free. Treat a Set like a fresh
-//      value each op: `s = s.add(a, x).expect("add")`; never keep and reuse a pre-`add` copy.
-//   2. NO IMPLICIT VALUE SEMANTICS. Two headers copied from the same Set share one backing buffer. If you
-//      need an independent snapshot (e.g. a child scope that must not write through to its parent), take an
-//      explicit deep copy with `s.clone(a)` first, then mutate the copy.
-//
-// FLAT-NAMESPACE CAUTION. `add`, `has`, `remove`, `union`, `intersect`, `difference`, `each`, `len` are
-// common names. Methods are scoped to Set<T> (UFCS `s.add(...)`), but the free functions
-// (`empty`/`of`/`union`/`intersect`/`difference`) live at module scope — import this module qualified
-// (`sets = std.collections.set`) rather than destructuring, so `sets.union` can't collide with another
-// module's `union` after flattening.
-//
+// Byte-hashed generic set. Computed StringView values compare by pointer, so use Map<bool> when
+// content equality is required. Rebind returned sets after mutation; copied headers share storage.
+// Allocating operations return Result<_, IoError>; free with the same allocator.
 { Result, IoError } = std.core.result    // allocation failure is a Result value (OOM → .Err)
 { AllocatorBackend, try_acquire2, Allocator, heap_allocator } = std.mem.alloc    // stored capability + atomic two-buffer acquisition
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
@@ -65,16 +12,16 @@ Set*<T>: {
     idx: RawPtr<u8>,
     len: i64,
     cap: i64,
-    slots = (s: Set<T>) [T] {
+    slots = (s: Set<T>) MutSlice<T> {
         // cap + 1 T slots: [0,cap) live entries, slot `cap` is the reusable SCRATCH cell.
         slice(s.elems, s.cap + 1)
     }
-    index = (s: Set<T>) [i64] {
+    index = (s: Set<T>) MutSlice<i64> {
         // 2*cap i64 slots: [0,cap) bucket heads, [cap,2*cap) per-entry next links.
         slice(s.idx, s.cap * 2)
     }
     len = (s: Set<T>) i64 { s.len }
-    bytes_of = (s: Set<T>, slot: i64) [u8] {
+    bytes_of = (s: Set<T>, slot: i64) MutSlice<u8> {
         // a [u8] view of one slot's sizeof(T) bytes — the unit of hashing and equality.
         slice(s.elems.offset(slot * sizeof(T)), sizeof(T))
     }
@@ -84,8 +31,8 @@ Set*<T>: {
     }
     seq = (s: Set<T>, a: i64, b: i64) bool {
         // byte-wise equality of two slots.
-        ab: [u8] = s.bytes_of(a)
-        bb: [u8] = s.bytes_of(b)
+        ab: MutSlice<u8> = s.bytes_of(a)
+        bb: MutSlice<u8> = s.bytes_of(b)
         ab.ptr.compare(bb.ptr, ab.len) == 0
     }
     find = (s: Set<T>, x: T) i64 {
@@ -478,7 +425,7 @@ new*<T> = () ASet<T> {
     )
 }
 // Explicit seed construction deduplicates xs without reading the ambient runtime.
-from_in*<T> = (a: Allocator, xs: [T]) ASet<T> {
+from_in*<T> = (a: Allocator, xs: MutSlice<T>) ASet<T> {
     da = a
     sr: Result<Set<T>, IoError> = empty(da.addr())
     st ::= sr.expect("set.from: out of memory")
@@ -489,7 +436,7 @@ from_in*<T> = (a: Allocator, xs: [T]) ASet<T> {
     )
 }
 // Process-heap seed construction is fail-fast.
-from*<T> = (xs: [T]) ASet<T> {
+from*<T> = (xs: MutSlice<T>) ASet<T> {
     a = heap_allocator()
     sr: Result<Set<T>, IoError> = empty(a.addr())
     st ::= sr.expect("set.from: out of memory")

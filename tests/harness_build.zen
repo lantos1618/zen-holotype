@@ -32,15 +32,15 @@ FixtureCase*: {
 // an EMIT case: `zenc emit <path>` must emit C containing every `present` string and none of `absent`.
 EmitCase*: {
     path: StringView,
-    present: [StringView],
-    absent: [StringView],
+    present: MutSlice<StringView>,
+    absent: MutSlice<StringView>,
 }
 // a DOC case: `zenc doc <target>` must succeed (exit 0), its markdown containing every `present` string
 // and none of `absent` (target = a `std.x.y` module name OR a `file.zen` path, both relative to ROOT).
 DocCase*: {
     target: StringView,
-    present: [StringView],
-    absent: [StringView],
+    present: MutSlice<StringView>,
+    absent: MutSlice<StringView>,
 }
 // a SHELL case: a self-contained `/bin/sh` pipeline that encodes a whole procedural test (project mode,
 // fmt idempotency, --help/--version, bad-file, cross-module sibling diagnostics, emit byte-equality). It
@@ -92,13 +92,13 @@ fix_run_ok = (mp: Allocator, gid: i64, fc: FixtureCase) bool {
 }
 // batch BUILD runner + reporter: build the fixtures IN PARALLEL (the cc-heavy step), then run+check them
 // SERIALLY (thread-spawning concurrency fixtures must not be oversubscribed). Byte-identical verdict.
-run_fixtures* = (name: StringView, cs: [FixtureCase]) i32 {
+run_fixtures* = (name: StringView, cs: MutSlice<FixtureCase>) i32 {
     out(name)
     out("\n")
     mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
-    cmds :: [StringView] = base.slice(n)
+    cmds :: MutSlice<StringView> = base.slice(n)
     cs.loop((h, i, c) {
         cmds[i] = mp.fix_build_cmd(i, c)
     })
@@ -118,7 +118,11 @@ run_fixtures* = (name: StringView, cs: [FixtureCase]) i32 {
     fails
 }
 // check every `present` substring is in `txt` and every `absent` substring is NOT — return the AND.
-all_present_absent = (txt: StringView, present: [StringView], absent: [StringView]) bool {
+all_present_absent = (
+    txt: StringView,
+    present: MutSlice<StringView>,
+    absent: MutSlice<StringView>,
+) bool {
     ok ::= true
     present.loop((h, i, s) {
         (txt.contains(s) == false).then({
@@ -151,13 +155,13 @@ emit_ok = (mp: Allocator, gid: i64, ec: EmitCase) bool {
         false => false,
     })
 }
-run_emits* = (name: StringView, cs: [EmitCase]) i32 {
+run_emits* = (name: StringView, cs: MutSlice<EmitCase>) i32 {
     out(name)
     out("\n")
     mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
-    cmds :: [StringView] = base.slice(n)
+    cmds :: MutSlice<StringView> = base.slice(n)
     cs.loop((h, i, c) {
         cmds[i] = mp.emit_cmd(i, c)
     })
@@ -195,13 +199,13 @@ doc_ok = (mp: Allocator, gid: i64, dc: DocCase) bool {
         false => false,
     })
 }
-run_docs* = (name: StringView, cs: [DocCase]) i32 {
+run_docs* = (name: StringView, cs: MutSlice<DocCase>) i32 {
     out(name)
     out("\n")
     mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
-    cmds :: [StringView] = base.slice(n)
+    cmds :: MutSlice<StringView> = base.slice(n)
     cs.loop((h, i, c) {
         cmds[i] = mp.doc_cmd(i, c)
     })
@@ -231,6 +235,7 @@ shell_is_serial = (name: StringView) bool {
         || name == "pool_actor_panic_box_freed"
         || name == "main_oom_panic_with_live_pool_aborts"
         || name == "pool_rq_grow_oom_no_deadlock"
+        || name == "pool_typed_rq_oom_ownership"
         || name == "pool_supervisor_restart_oom_value"
 }
 // wrap ONE shell case's body so it is self-contained + gid-isolated: bind `$ZT` to a PER-CASE scratch
@@ -256,7 +261,7 @@ shell_ok = (mp: Allocator, gid: i64) bool {
 // run the shell cases: the pipeline must exit 0. Thread-spawning cases (shell_is_serial) run one at a time;
 // all others run across the worker pool. Every case's body is gid-isolated (its own `$ZT` subdir), so the
 // fixed scratch names never collide. Phase C reads the P/F markers IN ORDER — byte-identical verdict to serial.
-run_shells* = (name: StringView, cs: [ShellCase]) i32 {
+run_shells* = (name: StringView, cs: MutSlice<ShellCase>) i32 {
     mp = heap_allocator()
     out(name)
     out("\n")
@@ -264,7 +269,7 @@ run_shells* = (name: StringView, cs: [ShellCase]) i32 {
     // Phase A: build every case's wrapped command; partition into the parallel-safe batch (dense array
     // `pcmds`) and run the thread-spawning ones serially right here (their markers land the same way).
     pbase = assert_nonnull(malloc(n * 8))
-    pcmds :: [StringView] = pbase.slice(n)
+    pcmds :: MutSlice<StringView> = pbase.slice(n)
     pn :: i64 = 0
     cs.loop((h, i, c) {
         w = mp.shell_wrap(i, c.cmd)
@@ -298,6 +303,18 @@ harness_build_run* = () i32 {
     fp = "tests/fixtures/zen/"
     // ── (a) build+run+exit-only fixtures (concurrency / runtime acceptance programs) ─────────────
     ex = run_fixtures("build exit", [
+        FixtureCase(
+            path: "tests/fixtures/zen/symbol_index_core.zen",
+            want_exit: "0",
+            want_out: "",
+            check_out: false,
+        ),
+        FixtureCase(
+            path: "tests/fixtures/zen/symbol_type_impl_core.zen",
+            want_exit: "0",
+            want_out: "",
+            check_out: false,
+        ),
         FixtureCase(
             path: "tests/fixtures/zen/zero_size_alloc.zen",
             want_exit: "0",
@@ -891,6 +908,12 @@ harness_build_run* = () i32 {
             path: "tests/fixtures/zen/map_wordfreq.zen",
             want_exit: "0",
             want_out: "3\n2\n1\n-1\n1\n0\n5\n",
+            check_out: true,
+        ),
+        FixtureCase(
+            path: "tests/fixtures/zen/map_allocator_ufcs.zen",
+            want_exit: "0",
+            want_out: "",
             check_out: true,
         ),
         FixtureCase(
@@ -1903,8 +1926,8 @@ harness_build_run* = () i32 {
             wants: [":1:1: error[no-if]", "  if (true) { 1 }", "  ^~", "hint: in expression position write `cond.then({ yes }, { no })`"],
         ),
         DiagCase(
-            src: "//! link: c\n// a foreign decl with a slice param has no C ABI shape — the diagnostic names the offending\n// parameter and its type, positioned on the declaration, with the RawPtr-floor hint.\nfrob = (xs: [i32]) i64\nmain = () i32 { 0 }\n",
-            wants: [":4:1: error[ffi-type]: foreign declaration `frob`: parameter `xs` has non-FFI-safe type `[i32]`", "  frob = (xs: [i32]) i64", "  ^~~~", "hint: a bodyless (foreign) declaration is a raw C prototype", "pass buffers through the RawPtr<T> floor (pointer + length)"],
+            src: "//! link: c\n// a foreign decl with a slice param has no C ABI shape — the diagnostic names the offending\n// parameter and its type, positioned on the declaration, with the RawPtr-floor hint.\nfrob = (xs: MutSlice<i32>) i64\nmain = () i32 { 0 }\n",
+            wants: [":4:1: error[ffi-type]: foreign declaration `frob`: parameter `xs` has non-FFI-safe type `MutSlice<i32>`", "  frob = (xs: MutSlice<i32>) i64", "  ^~~~", "hint: a bodyless (foreign) declaration is a raw C prototype", "pass buffers through the RawPtr<T> floor (pointer + length)"],
         ),
         DiagCase(
             src: "// a foreign decl in a module that declares NO linkage: nothing says which library defines the\n// symbol, so `ld` would be the first thing to notice. error[ffi-unlinked] notices at check time.\nfrobnicate = (x: i64) i64\nmain = () i32 { 0 }\n",
@@ -2071,6 +2094,10 @@ harness_build_run* = () i32 {
             wants: [":2:7: error[parse]: expected an expression after the binding mark, found the end of the binding", "      y ::=", "        ^", "hint: give the binding a value (`name = <expr>`), or delete the binding"],
         ),
         DiagCase(
+            src: "main = () [i32] { [1] }\n",
+            wants: [":1:11: error[parse]: bracket syntax is not allowed in a type", "  main = () [i32] { [1] }", "            ^", "hint: write `Slice<T>` for a read-only window, `MutSlice<T>` for a writable window, or `Vec<T>` for owned growable storage"],
+        ),
+        DiagCase(
             src: "main = () i32 {\n    x := 7\n    x\n}\n",
             wants: [":2:7: error[parse]: `:=` is retired", "      x := 7", "        ^", "hint: write `x = v` for a constant binding or `x ::= v` for a mutable one; annotated, `x: T = v` and `x :: T = v`"],
         ),
@@ -2135,7 +2162,7 @@ harness_build_run* = () i32 {
             wants: [":3:29: error[ptr-write]: cannot write through a read-only `Ptr<T>`", "  poke = (b: Ptr<Box>) void { b.inner.v = 99 }", "                              ^", "hint: give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it"],
         ),
         DiagCase(
-            src: "Buf: { data: [i64] }\npoke = (b: Ptr<Buf>) void { b.data[0] = 99 }\nmain = () i32 { 0 }\n",
+            src: "Buf: { data: MutSlice<i64> }\npoke = (b: Ptr<Buf>) void { b.data[0] = 99 }\nmain = () i32 { 0 }\n",
             wants: [":2:29: error[ptr-write]: cannot write through a read-only `Ptr<T>`", "  poke = (b: Ptr<Buf>) void { b.data[0] = 99 }", "                              ^", "hint: give the pointer parameter/field the `MutPtr<T>` kind to permit writes through it"],
         ),
         DiagCase(
@@ -2309,22 +2336,22 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.collections.vec",
-            present: ["of*<T> = (a: Allocator, xs: [T]) Result<Vec<T>, IoError>", "empty*<T> = (a: Allocator"],
+            present: ["of*<T> = (a: Allocator, xs: MutSlice<T>) Result<Vec<T>, IoError>", "empty*<T> = (a: Allocator"],
             absent: ["try_of", "try_push", "try_grow", "vec_of", "try_vec_of", "vpush", "vgrow", "vfree", "vitems", "vlen"],
         ),
         DocCase(
             target: "std.collections.map",
-            present: ["of*<T> = (a: AllocatorBackend, seed_key: StringView, seed_val: T) Result<Map<T>, IoError>"],
-            absent: ["try_of", "try_put", "try_append", "IntMap", "int_of", "map*<T", "try_map", "map_of", "try_map_of", "mput", "mget", "mhas", "mlen", "mfree"],
+            present: ["map_of_in*<T> = (a: AllocatorBackend, seed_key: StringView, seed_val: T) Result<Map<T>, IoError>", "MapFactory*:"],
+            absent: ["of*<T>", "try_of", "try_put", "try_append", "IntMap", "int_of", "map*<T", "try_map", "try_map_of", "mput", "mget", "mhas", "mlen", "mfree"],
         ),
         DocCase(
             target: "std.collections.iter",
-            present: ["find*<T> = (xs: [T], pred: (T) bool) Opt<T>", "map*<T, U> = (a: AllocatorBackend, xs: [T], f: (T) U) Result<[U], IoError>", "filter*<T> = (a: AllocatorBackend, xs: [T], keep: (T) bool) Result<[T], IoError>"],
-            absent: ["map* = (xs: [i32]", "filter* = (xs: [i32]", "map*<T, U> = (a: AllocatorBackend, xs: [i32]", "try_map", "try_filter"],
+            present: ["find*<T> = (xs: MutSlice<T>, pred: (T) bool) Opt<T>", "map*<T, U> = (a: AllocatorBackend, xs: MutSlice<T>, f: (T) U) Result<MutSlice<U>, IoError>", "filter*<T> = (a: AllocatorBackend, xs: MutSlice<T>, keep: (T) bool) Result<MutSlice<T>, IoError>"],
+            absent: ["map* = (xs: MutSlice<i32>", "filter* = (xs: MutSlice<i32>", "map*<T, U> = (a: AllocatorBackend, xs: MutSlice<i32>", "try_map", "try_filter"],
         ),
         DocCase(
             target: "std.text.str",
-            present: ["dup_bytes* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError>", "dup_bytes_in* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError>", "substr* = (a: AllocatorBackend, s: StringView, start: i64, n: i64) Result<StringView, IoError>", "substr_in* = (a: AllocatorBackend, s: StringView, start: i64, n: i64) Result<StringView, IoError>", "at* = (s: StringView, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: StringView) Result<i64, ParseError>", "what made try_parse_int refuse"],
+            present: ["dup_bytes* = (a: AllocatorBackend, s: StringView) Result<MutSlice<u8>, IoError>", "dup_bytes_in* = (a: AllocatorBackend, s: StringView) Result<MutSlice<u8>, IoError>", "substr* = (a: AllocatorBackend, s: StringView, start: i64, n: i64) Result<StringView, IoError>", "substr_in* = (a: AllocatorBackend, s: StringView, start: i64, n: i64) Result<StringView, IoError>", "at* = (s: StringView, i: i64) u8", "ParseError*: NoDigits | Trailing(u8) | Overflow", "try_parse_int* = (s: StringView) Result<i64, ParseError>", "what made try_parse_int refuse"],
             absent: ["try_dup_bytes", "try_substr", "char_at", "str_parse_int"],
         ),
         DocCase(
@@ -2334,7 +2361,7 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.io.file",
-            present: ["out* = (s: StringView) Result<i64, IoError>", "out_bytes* = (bytes: Slice<u8>) Result<i64, IoError>", "contents_bytes_in* = (a: AllocatorBackend, path: StringView) Result<[u8], IoError>", "contents_bytes* = (a: AllocatorBackend, path: StringView) Result<[u8], IoError>", "contents_in* = (a: AllocatorBackend, path: StringView) Result<StringView, IoError>", "contents* = (a: AllocatorBackend, path: StringView) Result<StringView, IoError>", "save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError>", "O_WRTRUNC* = O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: StringView) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
+            present: ["out* = (s: StringView) Result<i64, IoError>", "out_bytes* = (bytes: Slice<u8>) Result<i64, IoError>", "contents_bytes_in* = (a: AllocatorBackend, path: StringView) Result<MutSlice<u8>, IoError>", "contents_bytes* = (a: AllocatorBackend, path: StringView) Result<MutSlice<u8>, IoError>", "contents_in* = (a: AllocatorBackend, path: StringView) Result<StringView, IoError>", "contents* = (a: AllocatorBackend, path: StringView) Result<StringView, IoError>", "save* = (path: StringView, data: StringView, n: i64) Result<i64, IoError>", "O_WRTRUNC* = O_WRONLY | O_CREAT | O_TRUNC", "shell* = (cmd: StringView) Result<i32, IoError>", "Reads a whole file into an allocator-owned length-carrying"],
             absent: ["contents* = (path: StringView) Result<StringView, IoError>", "stdout*", "stdout_bytes*", "run*", "read_file", "write_file", "run_cmd", "write_stdout", "write_stdout_bytes"],
         ),
         DocCase(
@@ -2413,6 +2440,10 @@ harness_build_run* = () i32 {
         ShellCase(
             name: "pool_rq_grow_oom_no_deadlock",
             cmd: "cc -shared -fPIC -O2 scripts/alloc-fuzz/oom-shim.c -ldl -o $ZT/oom.so 2>/dev/null && ./zen build tests/fixtures/zen/pool_rq_grow_oom_no_deadlock.zen -o $ZT/zrqg 2>/dev/null && { timeout 60 $ZT/zrqg; test \"$?\" = 42; } && { FAIL_SIZE=2768 LD_PRELOAD=$ZT/oom.so timeout 60 $ZT/zrqg 2>$ZT/zrqg_e.txt; test \"$?\" = 43; } && ! grep -Fq \"zen: panic:\" $ZT/zrqg_e.txt",
+        ),
+        ShellCase(
+            name: "pool_typed_rq_oom_ownership",
+            cmd: "cc -shared -fPIC -O2 scripts/alloc-fuzz/oom-shim.c -ldl -o $ZT/oom.so 2>/dev/null && ./zen build tests/fixtures/zen/pool_typed_rq_oom_ownership.zen -o $ZT/ztrqo 2>/dev/null && { timeout 60 $ZT/ztrqo; test \"$?\" = 42; } && { FAIL_SIZE=2768 FAIL_COUNT=1 MALLOC_CHECK_=3 LD_PRELOAD=$ZT/oom.so timeout 60 $ZT/ztrqo 2>$ZT/ztrqo_e.txt; test \"$?\" = 43; } && ! grep -Fq \"zen: panic:\" $ZT/ztrqo_e.txt",
         ),
         ShellCase(
             name: "pool_supervisor_restart_oom_value",
@@ -2644,7 +2675,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "project_clib_badsig",
-            cmd: "rm -rf $ZT/zcb && cp -r tests/fixtures/project/clib_demo $ZT/zcb && sed -i 's#c_fn(\"cbrt\", \"(x: f64) f64\")#c_fn(\"frob\", \"(xs: [i32]) i32\")#' $ZT/zcb/build.zen && printf 'cm = cmath\\nmain = () i32 { xs: [i32] = [1, 2]  cm.frob(xs) }\\n' >$ZT/zcb/src/main.zen && { ./zen check $ZT/zcb >$ZT/zcb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-type]' $ZT/zcb.txt && grep -Fq '.zen/gen/cmath.zen:3:1' $ZT/zcb.txt",
+            cmd: "rm -rf $ZT/zcb && cp -r tests/fixtures/project/clib_demo $ZT/zcb && sed -i 's#c_fn(\"cbrt\", \"(x: f64) f64\")#c_fn(\"frob\", \"(xs: MutSlice<i32>) i32\")#' $ZT/zcb/build.zen && printf 'cm = cmath\\nmain = () i32 { xs: MutSlice<i32> = [1, 2]  cm.frob(xs) }\\n' >$ZT/zcb/src/main.zen && { ./zen check $ZT/zcb >$ZT/zcb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-type]' $ZT/zcb.txt && grep -Fq '.zen/gen/cmath.zen:3:1' $ZT/zcb.txt",
         ),
         ShellCase(
             name: "project_clib_cache",
@@ -2812,7 +2843,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "readonly_ptr_no_launder",
-            cmd: "{ ./zen check tests/fixtures/zen/readonly_ptr_launder.zen > $ZT/zrpl.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[assign-fit\\]: expected `\\[u8\\]`, got `Slice<u8>`' $ZT/zrpl.txt)\" = 4 && test \"$(grep -c 'error\\[ptr-write\\]: cannot write through a read-only' $ZT/zrpl.txt)\" = 1 && grep -Fq ':12:23:' $ZT/zrpl.txt && grep -Fq ':19:23:' $ZT/zrpl.txt && grep -Fq ':26:23:' $ZT/zrpl.txt && grep -Fq ':33:11:' $ZT/zrpl.txt && grep -Fq ':39:33:' $ZT/zrpl.txt && grep -Fq '  w :: [u8] = v.ptr.slice(v.len)' $ZT/zrpl.txt && grep -Fq '  w :: [u8] = v.ptr.offset(0).slice(v.len)' $ZT/zrpl.txt && grep -Fq \"  v.ptr.store('H')\" $ZT/zrpl.txt && printf '{ view } = std.text.str\\n{ copy } = std.mem.raw\\nfrom_ro = (s: StringCstr, d: [u8]) void {\\n    v = s.view()\\n    d.ptr.copy(v.ptr, v.len)\\n}\\nstill_readonly = (s: StringView) Slice<u8> {\\n    v = s.view()\\n    v.ptr.slice(v.len)\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zrpok.zen && ./zen check $ZT/zrpok.zen",
+            cmd: "{ ./zen check tests/fixtures/zen/readonly_ptr_launder.zen > $ZT/zrpl.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[assign-fit\\]: expected `MutSlice<u8>`, got `Slice<u8>`' $ZT/zrpl.txt)\" = 4 && test \"$(grep -c 'error\\[ptr-write\\]: cannot write through a read-only' $ZT/zrpl.txt)\" = 1 && grep -Fq ':12:31:' $ZT/zrpl.txt && grep -Fq ':19:31:' $ZT/zrpl.txt && grep -Fq ':26:31:' $ZT/zrpl.txt && grep -Fq ':33:11:' $ZT/zrpl.txt && grep -Fq ':39:41:' $ZT/zrpl.txt && grep -Fq '  w :: MutSlice<u8> = v.ptr.slice(v.len)' $ZT/zrpl.txt && grep -Fq '  w :: MutSlice<u8> = v.ptr.offset(0).slice(v.len)' $ZT/zrpl.txt && grep -Fq \"  v.ptr.store('H')\" $ZT/zrpl.txt && printf '{ view } = std.text.str\\n{ copy } = std.mem.raw\\nfrom_ro = (s: StringCstr, d: MutSlice<u8>) void {\\n    v = s.view()\\n    d.ptr.copy(v.ptr, v.len)\\n}\\nstill_readonly = (s: StringView) Slice<u8> {\\n    v = s.view()\\n    v.ptr.slice(v.len)\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zrpok.zen && ./zen check $ZT/zrpok.zen",
         ),
         ShellCase(
             name: "store_obeys_assign_fit",
@@ -2820,15 +2851,19 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "slice_elem_width_matches_storage",
-            cmd: "{ ./zen check tests/fixtures/zen/slice_elem_width.zen > $ZT/zsew.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[slice-elem\\]' $ZT/zsew.txt)\" = 4 && grep -Fq ':12:19:' $ZT/zsew.txt && grep -Fq ':16:39:' $ZT/zsew.txt && grep -Fq ':26:19:' $ZT/zsew.txt && grep -Fq ':32:19:' $ZT/zsew.txt && grep -Fq '      ys :: [i64] = slice(xs.ptr, 4)' $ZT/zsew.txt && printf '{ Allocator } = std.mem.alloc\\n{ view } = std.text.str\\nsame_elem = (xs: [i32]) i32 {\\n    ys :: [i32] = slice(xs.ptr, xs.len)\\n    ys[0]\\n}\\nbytes_from_typed = (xs: [i32]) u8 {\\n    bs :: [u8] = slice(xs.ptr, xs.len * 4)\\n    bs[0]\\n}\\ntyped_from_raw = (a: Allocator, n: i64) [i64] {\\n    slice(assert_nonnull(a.acquire(n * sizeof(i64))), n)\\n}\\nbytes_window = (s: StringView) u8 {\\n    v = s.view()\\n    w: Slice<u8> = slice(v.ptr, v.len)\\n    w[0]\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zsewok.zen && ./zen check $ZT/zsewok.zen",
+            cmd: "{ ./zen check tests/fixtures/zen/slice_elem_width.zen > $ZT/zsew.txt 2>&1; test \"$?\" = 1; } && test \"$(grep -c 'error\\[slice-elem\\]' $ZT/zsew.txt)\" = 4 && grep -Fq ':12:27:' $ZT/zsew.txt && grep -Fq ':16:55:' $ZT/zsew.txt && grep -Fq ':26:27:' $ZT/zsew.txt && grep -Fq ':32:27:' $ZT/zsew.txt && grep -Fq '      ys :: MutSlice<i64> = slice(xs.ptr, 4)' $ZT/zsew.txt && printf '{ Allocator } = std.mem.alloc\\n{ view } = std.text.str\\nsame_elem = (xs: MutSlice<i32>) i32 {\\n    ys :: MutSlice<i32> = slice(xs.ptr, xs.len)\\n    ys[0]\\n}\\nbytes_from_typed = (xs: MutSlice<i32>) u8 {\\n    bs :: MutSlice<u8> = slice(xs.ptr, xs.len * 4)\\n    bs[0]\\n}\\ntyped_from_raw = (a: Allocator, n: i64) MutSlice<i64> {\\n    slice(assert_nonnull(a.acquire(n * sizeof(i64))), n)\\n}\\nbytes_window = (s: StringView) u8 {\\n    v = s.view()\\n    w: Slice<u8> = slice(v.ptr, v.len)\\n    w[0]\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zsewok.zen && ./zen check $ZT/zsewok.zen",
         ),
         ShellCase(
             name: "outparam_escape_rejected",
-            cmd: "{ ./zen check tests/fixtures/zen/outparam_escape.zen > $ZT/zope.txt 2>&1; test \"$?\" = 1; } && grep -Fq ':19:5: error[escape]: pointer to a local escapes the function' $ZT/zope.txt && grep -Fq '      out.v = x.addr()' $ZT/zope.txt && printf 'Box: {\\n    v: MutPtr<i32>,\\n}\\nleak = (out: MutPtr<Box>) void {\\n    x ::= 41\\n    out.v = x.addr()\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe1.zen && { ./zen check $ZT/zoe1.zen > $ZT/zoe1.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe1.txt && printf 'leak = (out: MutPtr<MutPtr<i32>>) void {\\n    x ::= 42\\n    store(out, x.addr())\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe2.zen && { ./zen check $ZT/zoe2.zen > $ZT/zoe2.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe2.txt && printf 'leak = (dst: [MutPtr<i32>]) void {\\n    x ::= 43\\n    dst[0] = x.addr()\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe3.zen && { ./zen check $ZT/zoe3.zen > $ZT/zoe3.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe3.txt && printf 'Cell: {\\n    p: MutPtr<i32>,\\n}\\nleak = (dst: MutPtr<Cell>) void {\\n    x ::= 44\\n    store(dst, Cell(p: x.addr()))\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe4.zen && { ./zen check $ZT/zoe4.zen > $ZT/zoe4.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe4.txt && printf 'Box: {\\n    v: MutPtr<i32>,\\n}\\nleak = (out: MutPtr<Box>) void {\\n    q ::= out\\n    x ::= 45\\n    q.v = x.addr()\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe5.zen && { ./zen check $ZT/zoe5.zen > $ZT/zoe5.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe5.txt && printf 'Box: { v: MutPtr<i32> }\\nrebind = (out: MutPtr<Box>, other: MutPtr<Box>) void { out = other }\\nlocal_pair = () i32 {\\n    b ::= Box(v: null_ptr())\\n    x ::= 7\\n    b.v = x.addr()\\n    load(b.v)\\n}\\nforward = (out: MutPtr<Box>, p: MutPtr<i32>) void { out.v = p }\\nfill = (dst: [i32], v: i32) void { dst[0] = v }\\nmain = () i32 { local_pair() }\\n' > $ZT/zopeok.zen && ./zen check $ZT/zopeok.zen",
+            cmd: "{ ./zen check tests/fixtures/zen/outparam_escape.zen > $ZT/zope.txt 2>&1; test \"$?\" = 1; } && grep -Fq ':19:5: error[escape]: pointer to a local escapes the function' $ZT/zope.txt && grep -Fq '      out.v = x.addr()' $ZT/zope.txt && printf 'Box: {\\n    v: MutPtr<i32>,\\n}\\nleak = (out: MutPtr<Box>) void {\\n    x ::= 41\\n    out.v = x.addr()\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe1.zen && { ./zen check $ZT/zoe1.zen > $ZT/zoe1.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe1.txt && printf 'leak = (out: MutPtr<MutPtr<i32>>) void {\\n    x ::= 42\\n    store(out, x.addr())\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe2.zen && { ./zen check $ZT/zoe2.zen > $ZT/zoe2.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe2.txt && printf 'leak = (dst: MutSlice<MutPtr<i32>>) void {\\n    x ::= 43\\n    dst[0] = x.addr()\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe3.zen && { ./zen check $ZT/zoe3.zen > $ZT/zoe3.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe3.txt && printf 'Cell: {\\n    p: MutPtr<i32>,\\n}\\nleak = (dst: MutPtr<Cell>) void {\\n    x ::= 44\\n    store(dst, Cell(p: x.addr()))\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe4.zen && { ./zen check $ZT/zoe4.zen > $ZT/zoe4.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe4.txt && printf 'Box: {\\n    v: MutPtr<i32>,\\n}\\nleak = (out: MutPtr<Box>) void {\\n    q ::= out\\n    x ::= 45\\n    q.v = x.addr()\\n}\\nmain = () i32 { 0 }\\n' > $ZT/zoe5.zen && { ./zen check $ZT/zoe5.zen > $ZT/zoe5.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[escape]: pointer to a local escapes the function' $ZT/zoe5.txt && printf 'Box: { v: MutPtr<i32> }\\nrebind = (out: MutPtr<Box>, other: MutPtr<Box>) void { out = other }\\nlocal_pair = () i32 {\\n    b ::= Box(v: null_ptr())\\n    x ::= 7\\n    b.v = x.addr()\\n    load(b.v)\\n}\\nforward = (out: MutPtr<Box>, p: MutPtr<i32>) void { out.v = p }\\nfill = (dst: MutSlice<i32>, v: i32) void { dst[0] = v }\\nmain = () i32 { local_pair() }\\n' > $ZT/zopeok.zen && ./zen check $ZT/zopeok.zen",
         ),
         ShellCase(
             name: "c_target_rejects_js_platform_module",
             cmd: "{ ./zen build examples/dom_demo.zen -o $ZT/zdom >/dev/null 2>$ZT/zdom_e.txt; test \"$?\" = 1; } && ! test -e $ZT/zdom && grep -Fq 'error[c-target]: `std.web.dom` is a JavaScript-platform binding' $ZT/zdom_e.txt && grep -Fq '^~~~~~~~~~~' $ZT/zdom_e.txt && grep -Fq 'hint: build this program for the js target instead' $ZT/zdom_e.txt && ! grep -Fq 'undefined reference' $ZT/zdom_e.txt && ! grep -Fq 'unknown type name' $ZT/zdom_e.txt && { ./zen emit examples/dom_demo.zen >$ZT/zdom.c 2>$ZT/zdom_ce.txt; test \"$?\" = 1; } && ! test -s $ZT/zdom.c && grep -Fq 'error[c-target]' $ZT/zdom_ce.txt && ./zen check examples/dom_demo.zen >/dev/null && ./zen emit-js examples/dom_demo.zen >$ZT/zdom.js 2>/dev/null && grep -Fq 'document.createElement' $ZT/zdom.js",
+        ),
+        ShellCase(
+            name: "js_dom_dispatch_requires_provider_origin",
+            cmd: "./zen emit-js tests/fixtures/zen/js_dom_name_collisions.zen >$ZT/zdom_names.js 2>/dev/null && grep -Fq 'fetch(10)' $ZT/zdom_names.js && grep -Fq 'remove(20)' $ZT/zdom_names.js && grep -Fq 'log(1, 2)' $ZT/zdom_names.js && ! grep -Fq '__zr.jstr(10)' $ZT/zdom_names.js && ! grep -Fq '20.remove()' $ZT/zdom_names.js && node $ZT/zdom_names.js; test \"$?\" = 36",
         ),
         ShellCase(
             name: "foreign_decl_generic_return_emits_its_mono_struct",

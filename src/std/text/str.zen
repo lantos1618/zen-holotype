@@ -31,7 +31,7 @@ eq_ignore_case* = (a: StringView, b: StringView) bool {
     })
 }
 // ── bytes: borrow or own ────────────────────────────────────────────────────
-view* = (s: StringView) [u8] { s.slice(s.strlen()) }
+view* = (s: StringView) MutSlice<u8> { s.slice(s.strlen()) }
 // `s`'s base address AS OWNED STORAGE — the release path for the allocating helpers that still hand
 // their block back typed as a BORROWED `StringView` (`substr_in`, `trim_in`, `join_in`, … ~62 of
 // them). `s.view().ptr` is a `Ptr<u8>` on purpose and cannot be freed: a view frees nothing, which is
@@ -45,22 +45,24 @@ own_ptr* = (s: StringView) RawPtr<u8> { s.offset(0) }
 // `trim_view("lit")[0] = 'H'` from reaching `.rodata`), so writability has to come from a value that
 // carries it. `s.own_ptr().own_window(s.len())` therefore reads as what it is — assert ownership once,
 // then take the window at the capability the pointer has. Same Phase-2 debt as `own_ptr`.
-own_window* = (p: RawPtr<u8>, n: i64) [u8] { slice(p, n) }
+own_window* = (p: RawPtr<u8>, n: i64) MutSlice<u8> { slice(p, n) }
 alloc_size = (n: i64) i64 { (n == 0).then({ 1 }, { n }) }
 // `out` is always a FRESH allocation here, so it never overlaps `src` — `copy`, not `move`.
-copy_bytes = (src: Slice<u8>, out: [u8]) void { out.ptr.copy(src.ptr, src.len) }
-dup_bytes_in* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> {
+copy_bytes = (src: Slice<u8>, out: MutSlice<u8>) void { out.ptr.copy(src.ptr, src.len) }
+dup_bytes_in* = (a: AllocatorBackend, s: StringView) Result<MutSlice<u8>, IoError> {
     src = s.view()
     a.try_acquire(src.len.alloc_size()).match ({
         .Ok(p)  => {
-            out: [u8] = p.slice(src.len)
+            out: MutSlice<u8> = p.slice(src.len)
             src.copy_bytes(out)
             ok(out)
         },
         .Err(e) => err(e),
     })
 }
-dup_bytes* = (a: AllocatorBackend, s: StringView) Result<[u8], IoError> { a.dup_bytes_in(s) }
+dup_bytes* = (a: AllocatorBackend, s: StringView) Result<MutSlice<u8>, IoError> {
+    a.dup_bytes_in(s)
+}
 // ── search ──────────────────────────────────────────────────────────────────
 // do needle's bytes (pv) appear at sv[at..]? (caller guards at + pv.len <= sv.len)
 has_at = (sv: Slice<u8>, pv: Slice<u8>, at: i64) bool {
@@ -127,7 +129,7 @@ pin = (x: i64, lo: i64, hi: i64) i64 {
         false => (x > hi).then({ hi }, { x }),
     })
 }
-copy_substr = (sv: Slice<u8>, out: [u8], lo: i64, m: i64) void {
+copy_substr = (sv: Slice<u8>, out: MutSlice<u8>, lo: i64, m: i64) void {
     out.ptr.copy(sv.ptr.offset(lo), m)
     out[m] = 0
 }
@@ -138,7 +140,7 @@ substr_in* = (a: AllocatorBackend, s: StringView, start: i64, n: i64) Result<Str
     m = n.pin(0, sv.len - lo)
     a.try_acquire(m + 1).match ({
         .Ok(p)  => {
-            out: [u8] = p.slice(m + 1)
+            out: MutSlice<u8> = p.slice(m + 1)
             sv.copy_substr(out, lo, m)
             ok(cstr(out.ptr))
         },
@@ -232,12 +234,12 @@ trim_suffix* = (a: AllocatorBackend, s: StringView, suffix: StringView) StringVi
 // and every field are acquired from the caller's allocator (reusing `substr_in` for each copy).
 // an allocator-owned `[T]` of `n` slots, uninitialised. `seed` is unread — it only pins T (sizeof(T)
 // is rewritten per concrete element type at monomorphization). `n == 0` yields an empty slice.
-nbuf*<T> = (a: AllocatorBackend, seed: T, n: i64) [T] {
+nbuf*<T> = (a: AllocatorBackend, seed: T, n: i64) MutSlice<T> {
     slice(a.try_acquire(n * sizeof(T)).expect("std.text.str: out of memory"), n)
 }
 // split `s` into the `sep`-delimited fields. The field count is (separators + 1), so empty fields are
 // kept: "a,b,c" -> ["a","b","c"]; "a,,b" -> ["a","","b"]; "abc" -> ["abc"]; "" -> [""].
-split_in* = (a: AllocatorBackend, s: StringView, sep: u8) [StringView] {
+split_in* = (a: AllocatorBackend, s: StringView, sep: u8) MutSlice<StringView> {
     sv = s.view()
     nf :: i64 = 1
     sv.loop_at((i, b) {
@@ -245,7 +247,7 @@ split_in* = (a: AllocatorBackend, s: StringView, sep: u8) [StringView] {
             nf = nf + 1
         })
     })
-    out :: [StringView] = a.nbuf("", nf)
+    out :: MutSlice<StringView> = a.nbuf("", nf)
     fi :: i64 = 0    // next field slot
     start :: i64 = 0
     sv.loop_at((i, b) {
@@ -258,10 +260,10 @@ split_in* = (a: AllocatorBackend, s: StringView, sep: u8) [StringView] {
     out[fi] = a.substr_in(s, start, sv.len - start).expect("std.text.str: allocation failed")
     out
 }
-split* = (a: AllocatorBackend, s: StringView, sep: u8) [StringView] { a.split_in(s, sep) }
+split* = (a: AllocatorBackend, s: StringView, sep: u8) MutSlice<StringView> { a.split_in(s, sep) }
 // split `s` on RUNS of ASCII whitespace, dropping empty fields: "  the  cat sat " -> ["the","cat","sat"];
 // "" / all-whitespace -> [] (an empty slice).
-words_in = (a: AllocatorBackend, s: StringView) [StringView] {
+words_in = (a: AllocatorBackend, s: StringView) MutSlice<StringView> {
     sv = s.view()
     nw :: i64 = 0    // word count = whitespace(or start)->non-whitespace transitions
     inw ::= false
@@ -276,7 +278,7 @@ words_in = (a: AllocatorBackend, s: StringView) [StringView] {
             }),
         })
     })
-    out :: [StringView] = a.nbuf("", nw)
+    out :: MutSlice<StringView> = a.nbuf("", nw)
     wi :: i64 = 0    // next word slot
     start :: i64 = 0 - 1
     sv.loop_at((i, b) {
@@ -297,7 +299,7 @@ words_in = (a: AllocatorBackend, s: StringView) [StringView] {
     })
     out
 }
-words* = (a: AllocatorBackend, s: StringView) [StringView] { a.words_in(s) }
+words* = (a: AllocatorBackend, s: StringView) MutSlice<StringView> { a.words_in(s) }
 // ── building new strings: join / replace / case / repeat / pad ─────────────────
 //
 // Each op below ALLOCATES a fresh NUL-terminated `str` from the caller's allocator (an `a: AllocatorBackend`),
@@ -308,7 +310,7 @@ words* = (a: AllocatorBackend, s: StringView) [StringView] { a.words_in(s) }
 // common names. They are unique across std today (grepped) — the only near-miss is std.core.slice's
 // `index_of<T>`, which is why no `index_of` is defined here (use `find`). Keep new globals distinct.
 // copy `t`'s bytes into `out` starting at `at`; return the offset just past them.
-copy_at = (out: [u8], at: i64, t: StringView) i64 {
+copy_at = (out: MutSlice<u8>, at: i64, t: StringView) i64 {
     tv = t.view()
     out.ptr.offset(at).copy(tv.ptr, tv.len)
     at + tv.len
@@ -317,7 +319,10 @@ copy_at = (out: [u8], at: i64, t: StringView) i64 {
 // UTF-8 continuation bytes) is copied verbatim. to_upper("hi!") == "HI!".
 to_lower_in = (a: AllocatorBackend, s: StringView) StringView {
     sv = s.view()
-    out :: [u8] = a.try_acquire(sv.len + 1).expect("std.text.str: out of memory").slice(sv.len + 1)
+    out :: MutSlice<u8> = a
+        .try_acquire(sv.len + 1)
+        .expect("std.text.str: out of memory")
+        .slice(sv.len + 1)
     sv.loop_at((i, b) { out[i] = b.to_ascii_lower() })
     out[sv.len] = 0
     cstr(out.ptr)
@@ -325,7 +330,10 @@ to_lower_in = (a: AllocatorBackend, s: StringView) StringView {
 to_lower* = (a: AllocatorBackend, s: StringView) StringView { a.to_lower_in(s) }
 to_upper_in = (a: AllocatorBackend, s: StringView) StringView {
     sv = s.view()
-    out :: [u8] = a.try_acquire(sv.len + 1).expect("std.text.str: out of memory").slice(sv.len + 1)
+    out :: MutSlice<u8> = a
+        .try_acquire(sv.len + 1)
+        .expect("std.text.str: out of memory")
+        .slice(sv.len + 1)
     sv.loop_at((i, b) { out[i] = b.to_ascii_upper() })
     out[sv.len] = 0
     cstr(out.ptr)
@@ -336,7 +344,10 @@ repeat_in = (a: AllocatorBackend, s: StringView, n: i64) StringView {
     sv = s.view()
     cnt = (n < 0).then({ 0 }, { n })
     total = sv.len * cnt
-    out :: [u8] = a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
+    out :: MutSlice<u8> = a
+        .try_acquire(total + 1)
+        .expect("std.text.str: out of memory")
+        .slice(total + 1)
     out.loop((h, i, b) {
         (i < total).match ({
             true  => {
@@ -353,13 +364,16 @@ repeat_in = (a: AllocatorBackend, s: StringView, n: i64) StringView {
 repeat* = (a: AllocatorBackend, s: StringView, n: i64) StringView { a.repeat_in(s, n) }
 // join a slice of `str`s with `sep` between each: join(["a","b","c"], ",") == "a,b,c".
 // An empty slice yields "", a one-element slice yields that element (no separator).
-join_in* = (a: AllocatorBackend, parts: [StringView], sep: StringView) StringView {
+join_in* = (a: AllocatorBackend, parts: MutSlice<StringView>, sep: StringView) StringView {
     np = parts.len
     total :: i64 = 0
     parts.loop_at((i, p) { total = total + p.len() })
     seps = (np > 0).then({ np - 1 }, { 0 })
     total = total + sep.len() * seps
-    out :: [u8] = a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
+    out :: MutSlice<u8> = a
+        .try_acquire(total + 1)
+        .expect("std.text.str: out of memory")
+        .slice(total + 1)
     pos :: i64 = 0
     parts.loop_at((i, p) {
         (i > 0).then({
@@ -370,7 +384,7 @@ join_in* = (a: AllocatorBackend, parts: [StringView], sep: StringView) StringVie
     out[total] = 0
     cstr(out.ptr)
 }
-join* = (a: AllocatorBackend, parts: [StringView], sep: StringView) StringView {
+join* = (a: AllocatorBackend, parts: MutSlice<StringView>, sep: StringView) StringView {
     a.join_in(parts, sep)
 }
 // ── concatenation: explicit allocator, NO hidden heap ─────────────────────────
@@ -391,7 +405,10 @@ cat_in* = (a: AllocatorBackend, x: StringView, y: StringView) StringView {
     xv = x.view()
     yv = y.view()
     total = xv.len + yv.len
-    out :: [u8] = a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
+    out :: MutSlice<u8> = a
+        .try_acquire(total + 1)
+        .expect("std.text.str: out of memory")
+        .slice(total + 1)
     p = out.copy_at(0, x)
     out.copy_at(p, y)
     out[total] = 0
@@ -422,7 +439,7 @@ replace_in = (a: AllocatorBackend, s: StringView, from: StringView, to: StringVi
         false => {
             cnt = sv.count_occ(fv)    // empty pattern: unchanged copy (no infinite loop)
             total = sv.len + cnt * (to.len() - fv.len)
-            out :: [u8] = a
+            out :: MutSlice<u8> = a
                 .try_acquire(total + 1)
                 .expect("std.text.str: out of memory")
                 .slice(total + 1)
@@ -456,7 +473,10 @@ pad_left_in = (a: AllocatorBackend, s: StringView, width: i64, fill: u8) StringV
     sv = s.view()
     pad = (width > sv.len).then({ width - sv.len }, { 0 })
     total = pad + sv.len
-    out :: [u8] = a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
+    out :: MutSlice<u8> = a
+        .try_acquire(total + 1)
+        .expect("std.text.str: out of memory")
+        .slice(total + 1)
     out.loop((h, i, b) {
         (i < total).match ({
             true  => {
@@ -477,7 +497,10 @@ pad_right_in = (a: AllocatorBackend, s: StringView, width: i64, fill: u8) String
     sv = s.view()
     pad = (width > sv.len).then({ width - sv.len }, { 0 })
     total = sv.len + pad
-    out :: [u8] = a.try_acquire(total + 1).expect("std.text.str: out of memory").slice(total + 1)
+    out :: MutSlice<u8> = a
+        .try_acquire(total + 1)
+        .expect("std.text.str: out of memory")
+        .slice(total + 1)
     out.loop((h, i, b) {
         (i < total).match ({
             true  => {

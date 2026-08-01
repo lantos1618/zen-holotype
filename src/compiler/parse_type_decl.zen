@@ -1,35 +1,30 @@
-// compiler.parse_type_decl — TYPE-DECLARATION parsing: struct/enum/field/variant bodies plus the
-// type-parameter list (`<A, B: Trait>`). Produces StructEnd/EnumEnd/TParamEnd for the top-level
-// dispatch in compiler.parse. Distinct from compiler.parse_type, which parses type EXPRESSIONS.
-// Split out of the compiler.parse god file. Style: UFCS throughout.
 { Expr, Field, StructDecl, EnumDecl, VariantDef, Ty, Param, Func } = compiler.ast.ast_types
-{ param, field, field_default, expr_null, sdef_at, edef_at, vdef, vdef_default, tnamed, tvoid,
-  fnt_from_func_in, acquire_or_die } = compiler.genc
+{ param, param_at, field, field_at, field_default, field_default_at, expr_null, sdef_at, edef_at,
+  vdef, vdef_at, vdef_default, vdef_default_at, tnamed, tvoid, fnt_from_func_in, acquire_or_die } = compiler.genc
 { Scan, scan } = compiler.lex
 { Allocator } = std.mem.alloc
-{ is_op1, lexeme } = compiler.parse_atom
+{ is_op, is_op1, lexeme } = compiler.parse_atom
 { is_ident_tok } = compiler.parse_postfix
-{ is_lparen } = compiler.parse_primary
 { parse_bxor } = compiler.parse_expr
-{ parse_ty, parse_variant_payload, perr_set_at, perr_set_kind_at, PE_FIELDDEFAULT, PEnd, is_langle,
-  is_rangle, is_rbrace, is_comma, param_buf, skip_to_brace, take_params } = compiler.parse_type
+{ parse_ty, parse_variant_payload, perr_set_at, perr_set_kind_at, PEnd, is_langle, is_rangle,
+  is_rbrace, is_comma, param_buf, skip_to_brace, take_params } = compiler.parse_type
 { parse_decl_at, decl_marker, is_colon, is_star } = compiler.parse
 { loop_at } = std.core.count
 StructEnd*: {
     sd: StructDecl,
-    tparams: [Param],
+    tparams: MutSlice<Param>,
     ntp: i32,
     next: i32,
-    defaults: [Func],
+    defaults: MutSlice<Func>,
 }
-no_tparams = (a: Allocator) [Param] { slice(null_ptr(), 0) }
+no_tparams = (a: Allocator) MutSlice<Param> { slice(null_ptr(), 0) }
 skip_name_star* = (src: StringView, pos: i32) i32 {
     nt = src.scan(pos)
     a1 = src.scan(nt.next)
     src.is_star(a1.tok).then({ a1.next }, { nt.next })
 }
 TParamEnd*: {
-    names: [Param],
+    names: MutSlice<Param>,
     count: i32,
     next: i32,
 }
@@ -56,7 +51,7 @@ parse_tparam_list = (a: Allocator, src: StringView, pos: i32) TParamEnd {
 // A tparam may carry a trait bound: `<A: AllocatorBackend>`. The bound is stored in the Param's `ty`
 // slot as a `Named(traitname)` (tparams otherwise leave `ty` = tvoid()); the checker enforces it
 // at call sites. No bound => tvoid(), exactly the prior behaviour, so plain `<A>` is unchanged.
-record_tparam = (a: Allocator, src: StringView, sc: Scan, buf: [Param], i: i32) PEnd {
+record_tparam = (a: Allocator, src: StringView, sc: Scan, buf: MutSlice<Param>, i: i32) PEnd {
     // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
     (i >= buf.len).then({
         perr_set_at(sc.tok.start)
@@ -70,16 +65,16 @@ record_tparam = (a: Allocator, src: StringView, sc: Scan, buf: [Param], i: i32) 
     src.is_colon(colon.tok).match ({
         true  => {
             tr = src.scan(colon.next)    // the bound trait name
-            buf[i] = param(nm, tnamed(a.lexeme(src, tr.tok)))
+            buf[i] = param_at(nm, tnamed(a.lexeme(src, tr.tok)), sc.tok.start)
             a.fill_tparams(src, tr.next, buf, i + 1)
         },
         false => {
-            buf[i] = param(nm, tvoid())
+            buf[i] = param_at(nm, tvoid(), sc.tok.start)
             a.fill_tparams(src, sc.next, buf, i + 1)
         },
     })
 }
-fill_tparams = (a: Allocator, src: StringView, pos: i32, buf: [Param], i: i32) PEnd {
+fill_tparams = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<Param>, i: i32) PEnd {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
@@ -101,10 +96,10 @@ fill_tparams = (a: Allocator, src: StringView, pos: i32, buf: [Param], i: i32) P
         }),
     })
 }
-field_buf = (a: Allocator) [Field] { slice(a.acquire_or_die(1024 * sizeof(Field)), 1024) }
-take_fields = (buf: [Field], n: i32) [Field] { slice(buf.ptr, n) }
-dfn_buf = (a: Allocator) [Func] { slice(a.acquire_or_die(256 * sizeof(Func)), 256) }
-take_dfns = (buf: [Func], n: i32) [Func] { slice(buf.ptr, n) }
+field_buf = (a: Allocator) MutSlice<Field> { slice(a.acquire_or_die(1024 * sizeof(Field)), 1024) }
+take_fields = (buf: MutSlice<Field>, n: i32) MutSlice<Field> { slice(buf.ptr, n) }
+dfn_buf = (a: Allocator) MutSlice<Func> { slice(a.acquire_or_die(256 * sizeof(Func)), 256) }
+take_dfns = (buf: MutSlice<Func>, n: i32) MutSlice<Func> { slice(buf.ptr, n) }
 // `m = (...) Ret {}` inside a pure method record is a trait default; inside a data record
 // it is an inherent method attached to the struct.
 FieldsEnd: {
@@ -116,9 +111,9 @@ fill_fields = (
     a: Allocator,
     src: StringView,
     pos: i32,
-    buf: [Field],
+    buf: MutSlice<Field>,
     i: i32,
-    dbuf: [Func],
+    dbuf: MutSlice<Func>,
     dn: i32,
 ) FieldsEnd {
     sc = src.scan(pos)
@@ -146,20 +141,19 @@ fill_field_default = (
     a: Allocator,
     src: StringView,
     pos: i32,
-    buf: [Field],
+    buf: MutSlice<Field>,
     i: i32,
-    dbuf: [Func],
+    dbuf: MutSlice<Func>,
     dn: i32,
     nm: StringView,
 ) FieldsEnd {
     de = a.parse_decl_at(src, pos)
-    buf[i] = field(nm, a.fnt_from_func_in(de.func))
+    buf[i] = field_at(nm, a.fnt_from_func_in(de.func), de.func.pos)
     dbuf[dn] = de.func
     after = src.scan(de.next)
     nxt = src.is_comma(after.tok).then({ after.next }, { de.next })
     a.fill_fields(src, nxt, buf, i + 1, dbuf, dn + 1)
 }
-// ── FIELD DEFAULTS `total: i64 = 0` ─────────────────────────────────────────────────────────────
 // A struct literal that omits the field gets this value instead of C's zero-fill (compiler
 // .check_resolve.fill_field_defaults). The value must be a CONSTANT — a literal, `true`/`false`, or
 // arithmetic over them (`-1` parses as `0 - 1`). A default is re-evaluated at every construction, so
@@ -186,7 +180,7 @@ field_dflt = (a: Allocator, src: StringView, pos: i32) FDflt {
         true  => {
             de = a.parse_bxor(src, eq.next)
             (de.expr.field_dflt_const() == false).then({
-                perr_set_kind_at(src.scan(eq.next).tok.start, PE_FIELDDEFAULT())
+                perr_set_kind_at(src.scan(eq.next).tok.start, .FieldDefault)
             })
             FDflt(
                 expr: de.expr,
@@ -203,9 +197,9 @@ fill_field = (
     a: Allocator,
     src: StringView,
     pos: i32,
-    buf: [Field],
+    buf: MutSlice<Field>,
     i: i32,
-    dbuf: [Func],
+    dbuf: MutSlice<Func>,
     dn: i32,
 ) FieldsEnd {
     // Guard both field and default-method buffers.
@@ -225,7 +219,7 @@ fill_field = (
         false => {
             te = a.parse_ty(src, mk.next)
             df = a.field_dflt(src, te.next)
-            buf[i] = field_default(nm, te.ty, df.expr)
+            buf[i] = field_default_at(nm, te.ty, df.expr, nt.tok.start)
             after = src.scan(df.next)
             src.is_comma(after.tok).match ({
                 true  => a.fill_fields(src, after.next, buf, i + 1, dbuf, dn),
@@ -270,7 +264,7 @@ field_is_method* = (f: Field) bool {
         _        => false,
     })
 }
-has_data_field* = (fields: [Field]) bool {
+has_data_field* = (fields: MutSlice<Field>) bool {
     found ::= false
     fields.loop_at((i, f) { found = f.field_is_method().then({ found }, { true }) })
     found
@@ -280,12 +274,12 @@ has_data_field* = (fields: [Field]) bool {
 // fields. Match on name AND FnT type: a user-written fn-typed field (`cb: (i32) i32`) is a real
 // data field (filtering on FnT alone silently dropped it), while a data field that merely SHARES a
 // method's name (Map<T> has both a `keys` pointer field and a `keys = (…)` method) is not FnT.
-is_default_field = (defaults: [Func], f: Field) bool {
+is_default_field = (defaults: MutSlice<Func>, f: Field) bool {
     found ::= false
     defaults.loop_at((i, df) { found = found || df.name == f.name && f.field_is_method() })
     found
 }
-data_field_count = (fields: [Field], defaults: [Func]) i32 {
+data_field_count = (fields: MutSlice<Field>, defaults: MutSlice<Func>) i32 {
     n ::= 0
     fields.loop_at((i, f) {
         (defaults.is_default_field(f) == false).then({
@@ -294,7 +288,7 @@ data_field_count = (fields: [Field], defaults: [Func]) i32 {
     })
     n
 }
-data_fields* = (a: Allocator, fields: [Field], defaults: [Func]) [Field] {
+data_fields* = (a: Allocator, fields: MutSlice<Field>, defaults: MutSlice<Func>) MutSlice<Field> {
     buf ::= a.field_buf()
     j ::= 0
     fields.loop_at((i, f) {
@@ -308,7 +302,7 @@ data_fields* = (a: Allocator, fields: [Field], defaults: [Func]) [Field] {
 // Enum variants end at the first token that is not `|`.
 EnumEnd*: {
     ed: EnumDecl,
-    tparams: [Param],
+    tparams: MutSlice<Param>,
     ntp: i32,
     next: i32,
 }
@@ -320,10 +314,10 @@ VDf: {
     vdf: VariantDef,
     next: i32,
 }
-variant_buf = (a: Allocator) [VariantDef] {
+variant_buf = (a: Allocator) MutSlice<VariantDef> {
     slice(a.acquire_or_die(1024 * sizeof(VariantDef)), 1024)
 }
-take_variants = (buf: [VariantDef], n: i32) [VariantDef] { slice(buf.ptr, n) }
+take_variants = (buf: MutSlice<VariantDef>, n: i32) MutSlice<VariantDef> { slice(buf.ptr, n) }
 variant_payload = (a: Allocator, src: StringView, pos: i32) VPay {
     te = a.parse_variant_payload(src, pos)
     VPay(
@@ -331,7 +325,7 @@ variant_payload = (a: Allocator, src: StringView, pos: i32) VPay {
         next: te.next,
     )
 }    // `(T)` single, or `(T1, T2, …)` -> anon struct
-fill_variants = (a: Allocator, src: StringView, pos: i32, buf: [VariantDef], i: i32) PEnd {
+fill_variants = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<VariantDef>, i: i32) PEnd {
     nt = src.scan(pos)
     nt.tok.kind.match ({
         .Eof => {
@@ -344,7 +338,7 @@ fill_variants = (a: Allocator, src: StringView, pos: i32, buf: [VariantDef], i: 
         _    => a.fill_variant(src, nt, buf, i),
     })
 }
-fill_variant = (a: Allocator, src: StringView, nt: Scan, buf: [VariantDef], i: i32) PEnd {
+fill_variant = (a: Allocator, src: StringView, nt: Scan, buf: MutSlice<VariantDef>, i: i32) PEnd {
     // Guard the variant buffer.
     (i >= buf.len).then({
         perr_set_at(nt.tok.start)
@@ -355,8 +349,8 @@ fill_variant = (a: Allocator, src: StringView, nt: Scan, buf: [VariantDef], i: i
     })
     // A variant NAME must be an identifier. Without this guard `lexeme` happily reads whatever
     // token sits here (a stray `|`, a literal, a mid-list empty `| |`) as a bogus variant name,
-    // desyncing the parse and SILENTLY swallowing the following top-level decl (task #34, sibling
-    // of #411). Mirror the .Eof branch: flag a positioned parse error and stop.
+    // desyncing the parse and swallowing the following top-level decl. Mirror the .Eof branch:
+    // flag a positioned parse error and stop.
     (is_ident_tok(nt.tok) == false).then({
         perr_set_at(nt.tok.start)
         return PEnd(
@@ -379,11 +373,11 @@ fill_variant = (a: Allocator, src: StringView, nt: Scan, buf: [VariantDef], i: i
 }
 // After the variant name, dispatch on the next token: `(Type)` payload, `= expr` default, or bare.
 variant_after = (a: Allocator, src: StringView, nm: StringView, nt: Scan, pk: Scan) VDf {
-    src.is_lparen(pk.tok).match ({
+    src.is_op(pk.tok, '(').match ({
         true  => {
             vp = a.variant_payload(src, pk.next)
             VDf(
-                vdf: vdef(nm, vp.ty),
+                vdf: vdef_at(nm, vp.ty, nt.tok.start),
                 next: vp.next,
             )
         },
@@ -391,12 +385,12 @@ variant_after = (a: Allocator, src: StringView, nm: StringView, nt: Scan, pk: Sc
             true  => {
                 de = a.parse_bxor(src, pk.next)
                 VDf(
-                    vdf: vdef_default(nm, tvoid(), de.expr),
+                    vdf: vdef_default_at(nm, tvoid(), de.expr, nt.tok.start),
                     next: de.next,
                 )
             },
             false => VDf(
-                vdf: vdef(nm, tvoid()),
+                vdf: vdef_at(nm, tvoid(), nt.tok.start),
                 next: nt.next,
             ),
         }),

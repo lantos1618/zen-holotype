@@ -1,4 +1,3 @@
-// compiler.validate.util — leaf predicates: literals, type/fnt shape, env-index wrappers, source spans.
 { ArmData, CallData, CondData, Decl, Expr, Field, Func, LetData, Param, Stmt, Ty, VariantDef } = compiler.ast.ast_types
 { gstr_append, gstr_finish, gstr_string } = compiler.genc
 { Env, is_intrinsic, is_lit_numeric, is_void_ty, the_func, tparam_declared } = compiler.check
@@ -15,9 +14,9 @@
 { kv_at, kv_one } = compiler.validate.core
 // Local fn is known iff the_func finds it by name (sentinel name is ""). The linear `is_known_fn`
 // remains for the few decls-only callers; Env-reachable sites use `env_known_fn` (O(1) via the index).
-is_known_fn* = (decls: [Decl], fn: StringView) bool { decls.the_func(fn).name == fn }
+is_known_fn* = (decls: MutSlice<Decl>, fn: StringView) bool { decls.the_func(fn).name == fn }
 env_known_fn* = (env: Env, fn: StringView) bool { env.env_func(fn).name == fn }
-env_params* = (env: Env, fn: StringView) [Param] { env.env_func(fn).params }
+env_params* = (env: Env, fn: StringView) MutSlice<Param> { env.env_func(fn).params }
 // O(1) indexed forms of the linear is_trait_method / is_imported scans below (same presence result:
 // tmethod_idx folds every DImpl.methods name + every DTraitDefault fn name; import_idx every DImport name).
 env_trait_method* = (env: Env, fn: StringView) bool { env.didx.tmethod_idx.get(fn, 0 - 1) >= 0 }
@@ -31,7 +30,7 @@ env_is_struct* = (env: Env, name: StringView) bool { env.didx.struct_idx.get(nam
 // A CONCRETE enum (`DEnum`) by name — enums carry variants, not fields, so `e.field` on one is always
 // a mistake (you reach variants via `.match`). Generic enums (Result) are caught via cv_is_gen_enum.
 env_is_enum* = (env: Env, name: StringView) bool { env.didx.enum_idx.get(name, 0 - 1) >= 0 }
-env_struct_fields* = (env: Env, name: StringView) [Field] {
+env_struct_fields* = (env: Env, name: StringView) MutSlice<Field> {
     i = env.didx.struct_idx.get(name, 0 - 1)
     (i >= 0 && i < env.decls.len).match ({
         true  => env.decls[i].match ({
@@ -65,7 +64,7 @@ is_uninferable = (t: Ty) bool {
     })
 }
 // Undeclared Named types are treated as uninferable template residue.
-named_declared = (decls: [Decl], n: StringView) bool {
+named_declared = (decls: MutSlice<Decl>, n: StringView) bool {
     decls.slice_any((d) {
         d.match ({
             .DStruct(sd)   => sd.name == n,
@@ -97,13 +96,13 @@ unknown_ty* = (env: Env, t: Ty) bool {
         }),
     })
 }
-gen_args_unknown = (env: Env, args: [Ty]) bool { args.slice_any((t) { env.unknown_ty(t) }) }
+gen_args_unknown = (env: Env, args: MutSlice<Ty>) bool { args.slice_any((t) { env.unknown_ty(t) }) }
 // FnT-vs-FnT signature compatibility: same arity, each param type and the return type equal —
 // EXCEPT a position whose type is unknown (an unbound tparam like `S`, generic residue) stays lenient,
 // since its concrete type is only known after monomorphization. (Function pointers are not implicitly
 // convertible in C, so the CONCRETE positions demand exact structural equality.)
 fnt_pos_eq = (env: Env, g: Ty, w: Ty) bool { env.unknown_ty(g) || env.unknown_ty(w) || g.ty_eq(w) }
-fnt_tys_eq = (env: Env, ga: [Ty], wa: [Ty], i: i64) bool {
+fnt_tys_eq = (env: Env, ga: MutSlice<Ty>, wa: MutSlice<Ty>, i: i64) bool {
     (i >= ga.len).match ({
         true  => true,
         false => env.fnt_pos_eq(ga[i], wa[i]).then({ env.fnt_tys_eq(ga, wa, i + 1) }, { false }),
@@ -313,10 +312,10 @@ lit_slot_verdict* = (e: Ptr<Expr>, t: Ty) i32 {
 // does a type MENTION an (unbound) generic type param? recurses Ptr/Slice/Generic-args. Concrete
 // params (bool/Box/i32/…) do NOT mention a tparam → they are still arg/field-checked; only slots
 // typed by the callee's own tparam are skipped (their concrete type is known only after mono).
-tys_mention_tparam = (tps: [Param], ts: [Ty]) bool {
+tys_mention_tparam = (tps: MutSlice<Param>, ts: MutSlice<Ty>) bool {
     ts.slice_any((t) { tps.ty_mentions_tparam(t) })
 }
-ty_mentions_tparam* = (tps: [Param], t: Ty) bool {
+ty_mentions_tparam* = (tps: MutSlice<Param>, t: Ty) bool {
     t.match ({
         .Named(n)   => tps.param_names_has(n),
         .Ptr(pd)    => tps.ty_mentions_tparam(load(pd.pointee)),
@@ -329,7 +328,7 @@ ty_mentions_tparam* = (tps: [Param], t: Ty) bool {
 // — has its pointee-TYPE deferred to mono (T binds from the argument), but its outer SHAPE is already
 // known: the argument must itself be a pointer of a compatible KIND. This mirrors `fits`' pointer branch
 // with pointee-equality (`ty_eq`) relaxed to "is any pointer", so a plain value where a pointer is wanted
-// (the census cc-ICE "invalid type argument of unary `*`") is rejected, a read-only `Ptr` can't launder
+// is rejected, a read-only `Ptr` cannot launder
 // into a `MutPtr` slot, and the `RawPtr<u8>` floor (`null_ptr()`) still fits.
 gen_ptr_arg_fits* = (g: Ty, w: Ty) bool {
     g.is_raw_ptr_ty().match ({
@@ -355,7 +354,7 @@ tparam_shape_err* = (env: Env, pty: Ty, ar: Expr) i32 {
         false => 0,
     })
 }
-trait_declaring* = (decls: [Decl], m: StringView) StringView {
+trait_declaring* = (decls: MutSlice<Decl>, m: StringView) StringView {
     found ::= ""
     decls.loop_at((i, d) {
         found = d.match ({
@@ -534,7 +533,7 @@ tparam_bound* = (tp: Param) StringView {
 // against the FnT's params, then each CONCRETE param's arg type. Param positions typed by an unbound
 // tparam stay lenient (generic FnT-param templates resolve those at mono). Without this, a wrong-arity
 // indirect call slipped past SEMA and broke at cc ("too few arguments to function …").
-fnt_arg_err_at* = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
+fnt_arg_err_at* = (env: Env, ptys: MutSlice<Ty>, i: i32, ar: Expr) i32 {
     (i < ptys.len).match ({
         true  => {
             lv = ar.addr().lit_slot_verdict(ptys[i])
@@ -549,7 +548,7 @@ fnt_arg_err_at* = (env: Env, ptys: [Ty], i: i32, ar: Expr) i32 {
         false => 0,
     })
 }
-is_struct* = (decls: [Decl], name: StringView) bool {
+is_struct* = (decls: MutSlice<Decl>, name: StringView) bool {
     f ::= false
     decls.loop_at((i, d) {
         f = d.match ({
@@ -561,7 +560,7 @@ is_struct* = (decls: [Decl], name: StringView) bool {
 }
 // generic-struct-literal support: look up the GenStructDecl by base name; a field typed by a struct
 // tparam stays lenient, a CONCRETE field (bool/i32/Box/…) is still fit-checked.
-cv_no_params* = () [Param] { slice(null_ptr(), 0) }
+cv_no_params* = () MutSlice<Param> { slice(null_ptr(), 0) }
 // An enum lowers to a C `struct { int32_t tag; union {…} u; }` (c_emit emit_enum), so `.tag` and `.u`
 // ARE its only real members. The match/or_return lowering resolve_module runs BEFORE this validator
 // synthesizes exactly those two accesses on enum values (`subj.tag`, `subj.u`); they compile cleanly and
@@ -781,7 +780,7 @@ stmt_pos* = (st: Stmt) i32 {
         .IndexSet(x) => x.pos.pos_or(load(x.seq).expr_pos()),
     })
 }
-body_pos* = (body: [Stmt]) i32 { (body.len == 0).then({ 0 }, { body[0].stmt_pos() }) }
+body_pos* = (body: MutSlice<Stmt>) i32 { (body.len == 0).then({ 0 }, { body[0].stmt_pos() }) }
 // ── arity enrichment: name the expected vs the supplied argument count ─────────────────────────
 // The declared count comes from the callee (a known local fn's params, an intrinsic's fixed arity, or
 // an FnT value's parameter list); -1 = a callee whose arity we can't state here, so keep the generic
@@ -813,7 +812,7 @@ is_ctx_typed_arg* = (e: Expr) bool {
 // cross-module / pre-mono "uninferable residue" the core validator deliberately tolerates. It is NOT
 // part of check_module's count/kind (the harness runs that on NON-flattened source), so the harness is
 // untouched. Pointer/slice elements and generic args recurse; FnT internals are left to later checks.
-ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
+ut_unknown_ty = (env: Env, tparams: MutSlice<Param>, t: Ty) i32 {
     t.match ({
         .Named(n)   => (n == "Self"
             || is_prim_width(n)
@@ -831,7 +830,7 @@ ut_unknown_ty = (env: Env, tparams: [Param], t: Ty) i32 {
         _           => 0,
     })
 }
-ut_unknown_tys* = (env: Env, tparams: [Param], ts: [Ty]) i32 {
+ut_unknown_tys* = (env: Env, tparams: MutSlice<Param>, ts: MutSlice<Ty>) i32 {
     acc ::= 0
     ts.loop_at((i, t) { acc = acc.or(env.ut_unknown_ty(tparams, t)) })
     acc
@@ -839,21 +838,21 @@ ut_unknown_tys* = (env: Env, tparams: [Param], ts: [Ty]) i32 {
 // Params/fields/payloads/return carry no per-type source position (a `Ty` node has none), so anchor
 // their unknown-type caret on the enclosing declaration's name offset (`pos`) — always located, even
 // though it points at the decl name rather than the bare type token.
-ut_params_kind = (env: Env, tparams: [Param], ps: [Param], pos: i32) i32 {
+ut_params_kind = (env: Env, tparams: MutSlice<Param>, ps: MutSlice<Param>, pos: i32) i32 {
     acc ::= 0
     ps.loop_at((i, p) {
         acc = acc.or(env.ut_unknown_ty(tparams, p.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
-ut_fields_kind* = (env: Env, tparams: [Param], fs: [Field], pos: i32) i32 {
+ut_fields_kind* = (env: Env, tparams: MutSlice<Param>, fs: MutSlice<Field>, pos: i32) i32 {
     acc ::= 0
     fs.loop_at((i, f) {
         acc = acc.or(env.ut_unknown_ty(tparams, f.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
     })
     acc
 }
-ut_payloads_kind* = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32 {
+ut_payloads_kind* = (env: Env, tparams: MutSlice<Param>, vs: MutSlice<VariantDef>, pos: i32) i32 {
     acc ::= 0
     vs.loop_at((i, v) {
         acc = acc.or(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE()).kv_at(pos))
@@ -863,12 +862,12 @@ ut_payloads_kind* = (env: Env, tparams: [Param], vs: [VariantDef], pos: i32) i32
 // also walk the body: a LOCAL `let` with an explicit annotation (`x: Foo = e`) names a type, and an
 // undefined one leaked an unknown C type just like a param/field/return would. Recurse through nested
 // control flow (Block/Loop/Match/Cond) so a deeply-nested `let` annotation is checked too.
-ut_arms_kind = (a: Allocator, env: Env, tparams: [Param], arms: [ArmData]) i32 {
+ut_arms_kind = (a: Allocator, env: Env, tparams: MutSlice<Param>, arms: MutSlice<ArmData>) i32 {
     acc ::= 0
     arms.loop_at((i, ar) { acc = acc.or(a.ut_expr_kind(env, tparams, ar.body)) })
     acc
 }
-ut_expr_kind = (a: Allocator, env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
+ut_expr_kind = (a: Allocator, env: Env, tparams: MutSlice<Param>, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Block(b) => a.ut_body_kind(env, tparams, b.stmts),
         .Loop(l)  => a.ut_body_kind(env, tparams, l.body),
@@ -878,7 +877,7 @@ ut_expr_kind = (a: Allocator, env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
     })
 }
 // a LOCAL `let` annotation (`x: T = e`); tvoid means unannotated, so nothing to check.
-ut_let_kind = (a: Allocator, env: Env, tparams: [Param], l: LetData) i32 {
+ut_let_kind = (a: Allocator, env: Env, tparams: MutSlice<Param>, l: LetData) i32 {
     l.ty.is_void_ty().match ({
         true  => 0,
         false => env
@@ -887,7 +886,7 @@ ut_let_kind = (a: Allocator, env: Env, tparams: [Param], l: LetData) i32 {
             .kv_at(l.pos.pos_or(load(l.value).expr_pos())),
     })
 }
-ut_stmt_kind = (a: Allocator, env: Env, tparams: [Param], st: Stmt) i32 {
+ut_stmt_kind = (a: Allocator, env: Env, tparams: MutSlice<Param>, st: Stmt) i32 {
     st.match ({
         .Let(l)      => a.ut_let_kind(env, tparams, l).or(a.ut_expr_kind(env, tparams, l.value)),
         .Assign(x)   => a.ut_expr_kind(env, tparams, x.value),
@@ -901,7 +900,7 @@ ut_stmt_kind = (a: Allocator, env: Env, tparams: [Param], st: Stmt) i32 {
         .IndexSet(x) => a.ut_expr_kind(env, tparams, x.value),
     })
 }
-ut_body_kind = (a: Allocator, env: Env, tparams: [Param], body: [Stmt]) i32 {
+ut_body_kind = (a: Allocator, env: Env, tparams: MutSlice<Param>, body: MutSlice<Stmt>) i32 {
     acc ::= 0
     body.loop_at((i, st) { acc = acc.or(a.ut_stmt_kind(env, tparams, st)) })
     acc
@@ -917,7 +916,7 @@ ut_func_kind* = (a: Allocator, env: Env, f: Func) i32 {
 // parallel walk recovers the actual bad type name for the message. It mirrors the kind walk exactly
 // (structure + order) and takes the first non-empty via desc_or, so the name it returns is the SAME
 // unknown type the kind walk positioned on.
-utn_ty = (env: Env, tparams: [Param], t: Ty) StringView {
+utn_ty = (env: Env, tparams: MutSlice<Param>, t: Ty) StringView {
     t.match ({
         .Named(n)   => (n == "Self"
             || is_prim_width(n)
@@ -935,32 +934,32 @@ utn_ty = (env: Env, tparams: [Param], t: Ty) StringView {
         _           => "",
     })
 }
-utn_tys = (env: Env, tparams: [Param], ts: [Ty]) StringView {
+utn_tys = (env: Env, tparams: MutSlice<Param>, ts: MutSlice<Ty>) StringView {
     r ::= ""
     ts.loop_at((i, t) { r = desc_or(r, env.utn_ty(tparams, t)) })
     r
 }
-utn_params = (env: Env, tparams: [Param], ps: [Param]) StringView {
+utn_params = (env: Env, tparams: MutSlice<Param>, ps: MutSlice<Param>) StringView {
     r ::= ""
     ps.loop_at((i, p) { r = desc_or(r, env.utn_ty(tparams, p.ty)) })
     r
 }
-utn_fields* = (env: Env, tparams: [Param], fs: [Field]) StringView {
+utn_fields* = (env: Env, tparams: MutSlice<Param>, fs: MutSlice<Field>) StringView {
     r ::= ""
     fs.loop_at((i, f) { r = desc_or(r, env.utn_ty(tparams, f.ty)) })
     r
 }
-utn_payloads* = (env: Env, tparams: [Param], vs: [VariantDef]) StringView {
+utn_payloads* = (env: Env, tparams: MutSlice<Param>, vs: MutSlice<VariantDef>) StringView {
     r ::= ""
     vs.loop_at((i, v) { r = desc_or(r, env.utn_ty(tparams, v.payload)) })
     r
 }
-utn_arms = (a: Allocator, env: Env, tparams: [Param], arms: [ArmData]) StringView {
+utn_arms = (a: Allocator, env: Env, tparams: MutSlice<Param>, arms: MutSlice<ArmData>) StringView {
     r ::= ""
     arms.loop_at((i, ar) { r = desc_or(r, a.utn_expr(env, tparams, ar.body)) })
     r
 }
-utn_expr = (a: Allocator, env: Env, tparams: [Param], e: Ptr<Expr>) StringView {
+utn_expr = (a: Allocator, env: Env, tparams: MutSlice<Param>, e: Ptr<Expr>) StringView {
     load(e).match ({
         .Block(b) => a.utn_body(env, tparams, b.stmts),
         .Loop(l)  => a.utn_body(env, tparams, l.body),
@@ -969,10 +968,10 @@ utn_expr = (a: Allocator, env: Env, tparams: [Param], e: Ptr<Expr>) StringView {
         _         => "",
     })
 }
-utn_let = (a: Allocator, env: Env, tparams: [Param], l: LetData) StringView {
+utn_let = (a: Allocator, env: Env, tparams: MutSlice<Param>, l: LetData) StringView {
     l.ty.is_void_ty().then({ "" }, { env.utn_ty(tparams, l.ty) })
 }
-utn_stmt = (a: Allocator, env: Env, tparams: [Param], st: Stmt) StringView {
+utn_stmt = (a: Allocator, env: Env, tparams: MutSlice<Param>, st: Stmt) StringView {
     st.match ({
         .Let(l)      => desc_or(a.utn_let(env, tparams, l), a.utn_expr(env, tparams, l.value)),
         .Assign(x)   => a.utn_expr(env, tparams, x.value),
@@ -983,7 +982,7 @@ utn_stmt = (a: Allocator, env: Env, tparams: [Param], st: Stmt) StringView {
         .IndexSet(x) => a.utn_expr(env, tparams, x.value),
     })
 }
-utn_body = (a: Allocator, env: Env, tparams: [Param], body: [Stmt]) StringView {
+utn_body = (a: Allocator, env: Env, tparams: MutSlice<Param>, body: MutSlice<Stmt>) StringView {
     r ::= ""
     body.loop_at((i, st) { r = desc_or(r, a.utn_stmt(env, tparams, st)) })
     r
@@ -1044,7 +1043,7 @@ inf_edge_name = (t: Ty) StringView {
 }    // Ptr/Slice/Generic/primitive/FnT all break the cycle
 // does the member type `t` reach `target` by value? `depth` bounds the walk (= max distinct names) so a
 // cycle terminates instead of looping forever.
-inf_edge_reaches = (decls: [Decl], target: StringView, t: Ty, depth: i64) bool {
+inf_edge_reaches = (decls: MutSlice<Decl>, target: StringView, t: Ty, depth: i64) bool {
     en = t.inf_edge_name()
     en.is_empty().match ({
         true  => false,
@@ -1057,14 +1056,24 @@ inf_edge_reaches = (decls: [Decl], target: StringView, t: Ty, depth: i64) bool {
         }),
     })
 }
-inf_fields_reach = (decls: [Decl], target: StringView, fields: [Field], depth: i64) bool {
+inf_fields_reach = (
+    decls: MutSlice<Decl>,
+    target: StringView,
+    fields: MutSlice<Field>,
+    depth: i64,
+) bool {
     hit ::= false
     fields.loop_at((i, fl) {
         hit = hit.then({ true }, { decls.inf_edge_reaches(target, fl.ty, depth) })
     })
     hit
 }
-inf_variants_reach = (decls: [Decl], target: StringView, vs: [VariantDef], depth: i64) bool {
+inf_variants_reach = (
+    decls: MutSlice<Decl>,
+    target: StringView,
+    vs: MutSlice<VariantDef>,
+    depth: i64,
+) bool {
     hit ::= false
     vs.loop_at((i, v) {
         hit = hit.then({ true }, { decls.inf_edge_reaches(target, v.payload, depth) })
@@ -1072,7 +1081,7 @@ inf_variants_reach = (decls: [Decl], target: StringView, vs: [VariantDef], depth
     hit
 }
 // expand the named type `cur` (a struct's fields or an enum's variant payloads) and recurse.
-inf_named_reaches* = (decls: [Decl], target: StringView, cur: StringView, depth: i64) bool {
+inf_named_reaches* = (decls: MutSlice<Decl>, target: StringView, cur: StringView, depth: i64) bool {
     decls.is_struct(cur).match ({
         true  => decls.inf_fields_reach(target, decls.struct_fields(cur), depth),
         false => decls.inf_variants_reach(target, decls.enum_variants(cur), depth),
@@ -1086,10 +1095,10 @@ inf_gen_self = (t: Ty, name: StringView) bool {
         _           => false,
     })
 }
-inf_gen_fields* = (fields: [Field], name: StringView) bool {
+inf_gen_fields* = (fields: MutSlice<Field>, name: StringView) bool {
     fields.slice_any((fl) { fl.ty.inf_gen_self(name) })
 }
-inf_gen_variants* = (vs: [VariantDef], name: StringView) bool {
+inf_gen_variants* = (vs: MutSlice<VariantDef>, name: StringView) bool {
     vs.slice_any((v) { v.payload.inf_gen_self(name) })
 }
 // ── v2: USE vs DISCHARGE (widen from never-named to used-but-never-discharged) ─────────────────────
@@ -1108,7 +1117,7 @@ inf_gen_variants* = (vs: [VariantDef], name: StringView) bool {
 // The ONLY thing treated as a non-discharging read is `o` as the arg-0 receiver of a whitelisted getter
 // (which returns a borrow/scalar/fresh-clone and never moves `o`'s ownership out) — everything else,
 // including every shape not enumerated, defaults to impure/absent, so no discharge can be misread as a
-// pure read. DEFERRED to v3: may-leak (discharged on some exit paths, not all — v2 only flags owners
+// pure read. Known under-report: may-leak (discharged on some exit paths, not all — this pass flags owners
 // with NO discharge on ANY path, i.e. all-getter-reads); a per-callee "retains/returns param" summary
 // (would let non-getter reader calls count as pure without escape risk).
 is_pure_owner_getter* = (fn: StringView) bool {
@@ -1125,9 +1134,12 @@ is_pure_owner_getter* = (fn: StringView) bool {
 // modules tripped dup-impl; #576 dedups impls by module path, so they live here with the other leaf
 // Env queries.
 // Lowered statement-match tag constants count as generated names.
-variant_tags_has = (vs: [VariantDef], a: Allocator, ename: StringView, name: StringView) bool {
-    vs.slice_any((v) { name == a.tag_const(ename, v.name) })
-}
+variant_tags_has = (
+    vs: MutSlice<VariantDef>,
+    a: Allocator,
+    ename: StringView,
+    name: StringView,
+) bool { vs.slice_any((v) { name == a.tag_const(ename, v.name) }) }
 // A lowered match over a GENERIC enum instance compares against `<mangled>_<variant>` — e.g.
 // `Result_i32_IoError_Err`. The concrete EnumDecl is created only at backend monomorphization, so the
 // validator recognizes such a tag by shape: it starts with the gen-enum base name and ends with one
@@ -1138,7 +1150,7 @@ variant_affix = (a: Allocator, lead: StringView, vn: StringView) StringView {
     s = s.gstr_append(a, vn)
     s.gstr_finish(a)
 }
-gen_tag_match = (a: Allocator, vs: [VariantDef], base: StringView, name: StringView) bool {
+gen_tag_match = (a: Allocator, vs: MutSlice<VariantDef>, base: StringView, name: StringView) bool {
     found ::= false
     pre = a.variant_affix(base, "_")
     vs.loop_at((i, v) {
@@ -1149,7 +1161,7 @@ gen_tag_match = (a: Allocator, vs: [VariantDef], base: StringView, name: StringV
     })
     found
 }
-is_tag_const = (decls: [Decl], a: Allocator, name: StringView) bool {
+is_tag_const = (decls: MutSlice<Decl>, a: Allocator, name: StringView) bool {
     found ::= false
     decls.loop_at((i, d) {
         found = d.match ({

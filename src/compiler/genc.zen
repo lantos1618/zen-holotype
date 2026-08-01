@@ -1,10 +1,5 @@
-// compiler.genc — AST constructors + shared base helpers (constructors-only since the
-// type definitions moved to compiler.ast.ast_types).
-//
-// The AST TYPES (Expr/Stmt/Ty/Decl + their *Data payloads) live in compiler.ast.ast_types;
-// this module keeps everything with logic: the value constructors (vref/bin_at/call_full/…),
-// the canonical allocator-explicit String builder (gstr_*), the pointer-kind constants,
-// C-type-name helpers, and the tparam→arg type substitution shared by check and mono.
+// Shared AST constructors and codegen helpers. AST types live in compiler.ast.ast_types;
+// compiler.mangle imports these buffer helpers back, a cycle supported by the flat bootstrap TU.
 { Expr, VarData, BinData, CallData, MethodCallData, CondData, MemberData, MakeEnumData,
   MakeStructData, FieldInit, TagData, ArmData, MatchData, StrData, SliceData, IndexData, LoopData,
   LambdaData, BlockData, Stmt, LetData, AssignData, IfData, WhileData, IndexSetData, Ty, FnTData,
@@ -15,17 +10,9 @@
 { step_while, loop_at } = std.core.count
 { Allocator } = std.mem.alloc
 { panic } = std.core.result
-// mangle_str_in lives in compiler.mangle (the Ty→C-name family split out of this file); subst_generic_in
-// re-mangles a nested generic instance after substitution. compiler.mangle imports the shared AST
-// types from compiler.ast.ast_types and this file's buffer helpers back — a cycle the flat
-// translation unit tolerates.
 { mangle_str_in } = compiler.mangle
-// ── shared low-level helpers ────────────────────────────────────────────────
-// cbuf<T>: allocate a fresh `[T]` buffer of n elements. ONE generic replaces the ~20 per-type
-// `Xbuf = (a, n) [X] { slice(a.acquire(n * sizeof(X)), n) }` copies that used to live across the
-// compiler. T sits only in return position, so callers pass an explicit turbofish: `cbuf<Ty>(a, n)`.
-cbuf*<T> = (a: Allocator, n: i64) [T] { slice(a.acquire_or_die(n * sizeof(T)), n) }
-// sbyte: the i-th byte of a StringView. ONE accessor replaces the sbyte/jbyte/dsbyte/ffbyte copies.
+// T appears only in the return type, so callers use an explicit turbofish.
+cbuf*<T> = (a: Allocator, n: i64) MutSlice<T> { slice(a.acquire_or_die(n * sizeof(T)), n) }
 sbyte* = (v: StringView, i: i64) u8 { load(offset(v, i)) }
 // pointer KIND tag (safety-goal-D). All three spellings still lower to `T*`; their semantic/mono
 // names remain distinct so a generic wrapper cannot erase a nested capability. Direct pointer
@@ -127,7 +114,11 @@ gstr_append_bytes* = (s: String, a: Allocator, bs: Slice<u8>) String {
         cap: r.cap,
     )
 }
-gstr_append* = (s: String, a: Allocator, t: StringView) String { s.gstr_append_bytes(a, t.view()) }
+gstr_append* = (s: String, a: Allocator, parts: ...StringView) String {
+    out ::= s
+    parts.loop_at((i, t) { out = out.gstr_append_bytes(a, t.view()) })
+    out
+}
 gstr_finish* = (s: String, a: Allocator) StringCstr { cstr(s.gstr_push(a, '\0').ptr) }
 // constructors — return a value; the caller calls `.addr()` on an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", e.addr()), sret(r.addr())]`
@@ -187,25 +178,38 @@ narrow_op* = (op: StringView) bool {
 arith_rty* = (op: StringView, rty: Ty) Ty {
     (narrow_op(op) && subword_ty(rty)).then({ rty }, { tvoid() })
 }
-call_full* = (fn: StringView, args: [Expr], targs: [Ty], p: i32, raw: bool) Expr {
+call_origin_full* = (
+    fn: StringView,
+    args: MutSlice<Expr>,
+    targs: MutSlice<Ty>,
+    p: i32,
+    raw: bool,
+    origin: StringView,
+) Expr {
     .Call(CallData(
         fn: fn,
         args: args,
         targs: targs,
         pos: p,
         raw: raw,
+        origin: origin,
     ))
 }
-call* = (fn: StringView, args: [Expr]) Expr { call_full(fn, args, no_tys(), 0, false) }
-call_at* = (fn: StringView, args: [Expr], p: i32) Expr { call_full(fn, args, no_tys(), p, false) }
-raw_call_at* = (fn: StringView, args: [Expr], p: i32) Expr {
+call_full* = (fn: StringView, args: MutSlice<Expr>, targs: MutSlice<Ty>, p: i32, raw: bool) Expr {
+    call_origin_full(fn, args, targs, p, raw, "")
+}
+call* = (fn: StringView, args: MutSlice<Expr>) Expr { call_full(fn, args, no_tys(), 0, false) }
+call_at* = (fn: StringView, args: MutSlice<Expr>, p: i32) Expr {
+    call_full(fn, args, no_tys(), p, false)
+}
+raw_call_at* = (fn: StringView, args: MutSlice<Expr>, p: i32) Expr {
     call_full(fn, args, no_tys(), p, true)
 }
 // explicit turbofish call `fn<T, …>(args)` — type args pinned at the call site.
-call_targs_at* = (fn: StringView, args: [Expr], targs: [Ty], p: i32) Expr {
+call_targs_at* = (fn: StringView, args: MutSlice<Expr>, targs: MutSlice<Ty>, p: i32) Expr {
     call_full(fn, args, targs, p, false)
 }
-emcall* = (recv: Ptr<Expr>, method: StringView, args: [Expr], p: i32) Expr {
+emcall* = (recv: Ptr<Expr>, method: StringView, args: MutSlice<Expr>, p: i32) Expr {
     .MethodCall(MethodCallData(
         recv: recv,
         method: method,
@@ -238,31 +242,56 @@ mfield* = (o: Ptr<Expr>, f: StringView, p: i32, ptr: bool) Expr {
 member* = (o: Ptr<Expr>, f: StringView) Expr { mfield(o, f, 0, false) }
 member_at* = (o: Ptr<Expr>, f: StringView, p: i32) Expr { mfield(o, f, p, false) }
 arrow* = (o: Ptr<Expr>, f: StringView) Expr { mfield(o, f, 0, true) }
-mkenum* = (ty: StringView, v: StringView, p: Ptr<Expr>) Expr {
-    .MakeEnum(MakeEnumData(
-        ty: ty,
-        mty: ty,
-        variant: v,
-        targs: no_tys(),
-        payload: p,
-    ))
-}
-mkenumg* = (ty: StringView, mty: StringView, targs: [Ty], v: StringView, p: Ptr<Expr>) Expr {
+mkenum_full = (
+    ty: StringView,
+    mty: StringView,
+    targs: MutSlice<Ty>,
+    v: StringView,
+    p: Ptr<Expr>,
+    tp: i32,
+    vp: i32,
+) Expr {
     .MakeEnum(MakeEnumData(
         ty: ty,
         mty: mty,
         variant: v,
         targs: targs,
         payload: p,
+        ty_pos: tp,
+        variant_pos: vp,
     ))
 }
-finit* = (nm: StringView, v: Ptr<Expr>) FieldInit {
+mkenum* = (ty: StringView, v: StringView, p: Ptr<Expr>) Expr {
+    mkenum_full(ty, ty, no_tys(), v, p, 0, 0)
+}
+mkenum_at* = (ty: StringView, v: StringView, p: Ptr<Expr>, tp: i32, vp: i32) Expr {
+    mkenum_full(ty, ty, no_tys(), v, p, tp, vp)
+}
+mkenumg* = (
+    ty: StringView,
+    mty: StringView,
+    targs: MutSlice<Ty>,
+    v: StringView,
+    p: Ptr<Expr>,
+) Expr { mkenum_full(ty, mty, targs, v, p, 0, 0) }
+mkenumg_at* = (
+    ty: StringView,
+    mty: StringView,
+    targs: MutSlice<Ty>,
+    v: StringView,
+    p: Ptr<Expr>,
+    tp: i32,
+    vp: i32,
+) Expr { mkenum_full(ty, mty, targs, v, p, tp, vp) }
+finit* = (nm: StringView, v: Ptr<Expr>) FieldInit { finit_at(nm, v, 0) }
+finit_at* = (nm: StringView, v: Ptr<Expr>, p: i32) FieldInit {
     FieldInit(
         name: nm,
         value: v,
+        pos: p,
     )
 }
-mkstruct* = (ty: StringView, inits: [FieldInit]) Expr {
+mkstruct* = (ty: StringView, inits: MutSlice<FieldInit>) Expr {
     .MakeStruct(MakeStructData(
         ty: ty,
         mty: ty,
@@ -271,7 +300,7 @@ mkstruct* = (ty: StringView, inits: [FieldInit]) Expr {
         pos: 0,
     ))
 }
-mkstruct_at* = (ty: StringView, inits: [FieldInit], p: i32) Expr {
+mkstruct_at* = (ty: StringView, inits: MutSlice<FieldInit>, p: i32) Expr {
     .MakeStruct(MakeStructData(
         ty: ty,
         mty: ty,
@@ -280,7 +309,13 @@ mkstruct_at* = (ty: StringView, inits: [FieldInit], p: i32) Expr {
         pos: p,
     ))
 }
-mkstructg_at* = (ty: StringView, mty: StringView, targs: [Ty], inits: [FieldInit], p: i32) Expr {
+mkstructg_at* = (
+    ty: StringView,
+    mty: StringView,
+    targs: MutSlice<Ty>,
+    inits: MutSlice<FieldInit>,
+    p: i32,
+) Expr {
     .MakeStruct(MakeStructData(
         ty: ty,
         mty: mty,
@@ -289,8 +324,8 @@ mkstructg_at* = (ty: StringView, mty: StringView, targs: [Ty], inits: [FieldInit
         pos: p,
     ))
 }
-no_tys* = () [Ty] { slice(null_ptr(), 0) }    // an empty [Ty] (non-generic literal's targs)
-slit* = (elem: Ty, items: [Expr]) Expr {
+no_tys* = () MutSlice<Ty> { slice(null_ptr(), 0) }    // an empty [Ty] (non-generic literal's targs)
+slit* = (elem: Ty, items: MutSlice<Expr>) Expr {
     .SliceLit(SliceData(
         elem: elem,
         items: items,
@@ -308,8 +343,19 @@ eloop* = (
     idx: StringView,
     elem: StringView,
     elemTy: Ty,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
     h: StringView,
+) Expr { eloop_at(seq, idx, elem, elemTy, body, h, 0, 0, 0) }
+eloop_at* = (
+    seq: Ptr<Expr>,
+    idx: StringView,
+    elem: StringView,
+    elemTy: Ty,
+    body: MutSlice<Stmt>,
+    h: StringView,
+    hp: i32,
+    ip: i32,
+    ep: i32,
 ) Expr {
     .Loop(LoopData(
         seq: seq,
@@ -318,23 +364,26 @@ eloop* = (
         elemTy: elemTy,
         body: body,
         h: h,
+        h_pos: hp,
+        idx_pos: ip,
+        elem_pos: ep,
     ))
 }
-lam_r* = (params: [Param], body: [Stmt], ret: Ty) Expr {
+lam_r* = (params: MutSlice<Param>, body: MutSlice<Stmt>, ret: Ty) Expr {
     .Lambda(LambdaData(
         params: params,
         body: body,
         ret: ret,
     ))
 }
-block* = (stmts: [Stmt]) Expr { .Block(BlockData(stmts: stmts)) }
+block* = (stmts: MutSlice<Stmt>) Expr { .Block(BlockData(stmts: stmts)) }
 // A braced value-position body (match/cond arm) whose LAST statement is an explicit `return`
 // DIVERGES: it yields no value (control leaves the enclosing function), so it contributes nothing
 // to the surrounding match/cond value type and must emit as real statements, never be flattened to
 // an expression. Only arm/loop blocks (parse_block) can look like this: fn/lambda BODIES also end
 // in .Return (the parser's implicit trailing return), but those never reach value positions intact —
 // the inliner's blockify strips the trailing return (ret_to_expr / cps_value) before splicing.
-stmts_diverge* = (stmts: [Stmt]) bool {
+stmts_diverge* = (stmts: MutSlice<Stmt>) bool {
     (stmts.len > 0).match ({
         true  => stmts[stmts.len - 1].match ({
             .Return(r) => true,
@@ -352,45 +401,61 @@ blk_diverges* = (e: Ptr<Expr>) bool {
 // is_fnt (Ty), is_generic_fn (Func), is_template/is_trait (Decl), struct_is_trait (StructDecl) and
 // has_fnt_param ([Param]) moved to compiler.astops (grouped with the Ty::is_fnt trait impl they use),
 // so this base module carries no reference to a method defined outside its own import closure.
-fntype* = (params: [Ty], ret: Ptr<Ty>) Ty {
+fntype* = (params: MutSlice<Ty>, ret: Ptr<Ty>) Ty {
     .FnT(FnTData(
         params: params,
         ret: ret,
     ))
 }
-mktag* = (ty: StringView, v: StringView) Expr {
-    .Tag(TagData(
-        ty: ty,
-        mty: ty,
-        variant: v,
-        targs: no_tys(),
-    ))
-}
-mktagg* = (ty: StringView, mty: StringView, targs: [Ty], v: StringView) Expr {
+mktag_full = (
+    ty: StringView,
+    mty: StringView,
+    targs: MutSlice<Ty>,
+    v: StringView,
+    tp: i32,
+    vp: i32,
+) Expr {
     .Tag(TagData(
         ty: ty,
         mty: mty,
         variant: v,
         targs: targs,
+        ty_pos: tp,
+        variant_pos: vp,
     ))
 }
+mktag* = (ty: StringView, v: StringView) Expr { mktag_full(ty, ty, no_tys(), v, 0, 0) }
+mktag_at* = (ty: StringView, v: StringView, tp: i32, vp: i32) Expr {
+    mktag_full(ty, ty, no_tys(), v, tp, vp)
+}
+mktagg* = (ty: StringView, mty: StringView, targs: MutSlice<Ty>, v: StringView) Expr {
+    mktag_full(ty, mty, targs, v, 0, 0)
+}
+mktagg_at* = (
+    ty: StringView,
+    mty: StringView,
+    targs: MutSlice<Ty>,
+    v: StringView,
+    tp: i32,
+    vp: i32,
+) Expr { mktag_full(ty, mty, targs, v, tp, vp) }
 arm* = (v: StringView, bind: StringView, body: Ptr<Expr>) ArmData {
-    ArmData(
-        variant: v,
-        bind: bind,
-        body: body,
-        pos: 0,
-    )
+    arm_spans(v, bind, body, 0, 0, 0)
 }
 arm_at* = (v: StringView, bind: StringView, body: Ptr<Expr>, p: i32) ArmData {
+    arm_spans(v, bind, body, p, 0, 0)
+}
+arm_spans* = (v: StringView, bind: StringView, body: Ptr<Expr>, p: i32, vp: i32, bp: i32) ArmData {
     ArmData(
         variant: v,
         bind: bind,
         body: body,
         pos: p,
+        variant_pos: vp,
+        bind_pos: bp,
     )
 }    // source-backed (formatter anchors arm comments)
-ematch* = (subj: Ptr<Expr>, ename: StringView, arms: [ArmData]) Expr {
+ematch* = (subj: Ptr<Expr>, ename: StringView, arms: MutSlice<ArmData>) Expr {
     .Match(MatchData(
         subj: subj,
         ename: ename,
@@ -398,7 +463,7 @@ ematch* = (subj: Ptr<Expr>, ename: StringView, arms: [ArmData]) Expr {
         ptr: false,
     ))
 }
-ematchp* = (subj: Ptr<Expr>, ename: StringView, arms: [ArmData]) Expr {
+ematchp* = (subj: Ptr<Expr>, ename: StringView, arms: MutSlice<ArmData>) Expr {
     .Match(MatchData(
         subj: subj,
         ename: ename,
@@ -458,14 +523,14 @@ sidxset_at* = (seq: Ptr<Expr>, i: Ptr<Expr>, elem: Ty, v: Ptr<Expr>, p: i32) Stm
         pos: p,
     ))
 }
-sif* = (c: Ptr<Expr>, t: [Stmt], e: [Stmt]) Stmt {
+sif* = (c: Ptr<Expr>, t: MutSlice<Stmt>, e: MutSlice<Stmt>) Stmt {
     .If(IfData(
         c: c,
         then: t,
         els: e,
     ))
 }
-swhile* = (c: Ptr<Expr>, b: [Stmt]) Stmt {
+swhile* = (c: Ptr<Expr>, b: MutSlice<Stmt>) Stmt {
     .While(WhileData(
         c: c,
         body: b,
@@ -477,7 +542,7 @@ tu8* = () Ty { .U8 }
 tf64* = () Ty { .F64 }
 tbool* = () Ty { .Bool }
 tnamed* = (n: StringView) Ty { .Named(n) }
-tgeneric* = (nm: StringView, args: [Ty], mangled: StringView) Ty {
+tgeneric* = (nm: StringView, args: MutSlice<Ty>, mangled: StringView) Ty {
     .Generic(GenericData(
         name: nm,
         args: args,
@@ -506,54 +571,62 @@ tslice_k* = (e: Ptr<Ty>, k: i32) Ty {
     ))
 }
 // slice mutability, spelled with the SAME kind tags as pointers: `Slice<T>` is the read-only window
-// (k_ptr) and `MutSlice<T>` — for which `[T]` is the sugar — is the writable one (k_mut_ptr). A
-// read-only slice is what `.view()` of a `StringLiteral`/`StringCstr` yields, so writing into
+// (k_ptr) and `MutSlice<T>` is the writable one (k_mut_ptr). Brackets are value syntax only.
+// A read-only slice is what `.view()` of a `StringLiteral`/`StringCstr` yields, so writing into
 // `.rodata` is a checker error instead of a segfault.
 k_slice_dflt* = () i32 { k_mut_ptr() }
 slice_kw* = (kind: i32) StringView { (kind == k_ptr()).then({ "Slice" }, { "MutSlice" }) }
-param* = (nm: StringView, t: Ty) Param {
+param* = (nm: StringView, t: Ty) Param { param_at(nm, t, 0) }
+param_at* = (nm: StringView, t: Ty, p: i32) Param {
     Param(
         name: nm,
         ty: t,
         variadic: false,
+        pos: p,
     )
 }
-pvariadic* = (nm: StringView, t: Ty) Param {
+pvariadic* = (nm: StringView, t: Ty) Param { pvariadic_at(nm, t, 0) }
+pvariadic_at* = (nm: StringView, t: Ty, p: i32) Param {
     Param(
         name: nm,
         ty: t,
         variadic: true,
+        pos: p,
     )
 }    // a `...T` param: ty = the collected `[T]`
-field* = (nm: StringView, t: Ty) Field {
+field* = (nm: StringView, t: Ty) Field { field_at(nm, t, 0) }
+field_at* = (nm: StringView, t: Ty, p: i32) Field {
     Field(
         name: nm,
         ty: t,
         dflt: null_ptr(),
+        pos: p,
     )
 }
-field_default* = (nm: StringView, t: Ty, e: Ptr<Expr>) Field {
+field_default* = (nm: StringView, t: Ty, e: Ptr<Expr>) Field { field_default_at(nm, t, e, 0) }
+field_default_at* = (nm: StringView, t: Ty, e: Ptr<Expr>, p: i32) Field {
     Field(
         name: nm,
         ty: t,
         dflt: e,
+        pos: p,
     )
 }
-sdef* = (nm: StringView, fs: [Field]) StructDecl {
+sdef* = (nm: StringView, fs: MutSlice<Field>) StructDecl {
     StructDecl(
         name: nm,
         fields: fs,
         pos: 0,
     )
 }
-sdef_at* = (nm: StringView, fs: [Field], p: i32) StructDecl {
+sdef_at* = (nm: StringView, fs: MutSlice<Field>, p: i32) StructDecl {
     StructDecl(
         name: nm,
         fields: fs,
         pos: p,
     )
 }    // source-backed (formatter anchors a leading comment above the struct)
-gsdef_at* = (nm: StringView, tps: [Param], fs: [Field], p: i32) GenStructDecl {
+gsdef_at* = (nm: StringView, tps: MutSlice<Param>, fs: MutSlice<Field>, p: i32) GenStructDecl {
     GenStructDecl(
         name: nm,
         tparams: tps,
@@ -561,7 +634,12 @@ gsdef_at* = (nm: StringView, tps: [Param], fs: [Field], p: i32) GenStructDecl {
         pos: p,
     )
 }
-genumdef_at* = (nm: StringView, tps: [Param], vs: [VariantDef], p: i32) GenEnumDecl {
+genumdef_at* = (
+    nm: StringView,
+    tps: MutSlice<Param>,
+    vs: MutSlice<VariantDef>,
+    p: i32,
+) GenEnumDecl {
     GenEnumDecl(
         name: nm,
         tparams: tps,
@@ -570,23 +648,27 @@ genumdef_at* = (nm: StringView, tps: [Param], vs: [VariantDef], p: i32) GenEnumD
     )
 }
 tvoid* = () Ty { .Void }
-vdef* = (nm: StringView, p: Ty) VariantDef {
+vdef* = (nm: StringView, p: Ty) VariantDef { vdef_at(nm, p, 0) }
+vdef_at* = (nm: StringView, p: Ty, pos: i32) VariantDef {
     VariantDef(
         name: nm,
         payload: p,
         dflt: null_ptr(),
+        pos: pos,
     )
 }
-vdef_default* = (nm: StringView, p: Ty, e: Ptr<Expr>) VariantDef {
+vdef_default* = (nm: StringView, p: Ty, e: Ptr<Expr>) VariantDef { vdef_default_at(nm, p, e, 0) }
+vdef_default_at* = (nm: StringView, p: Ty, e: Ptr<Expr>, pos: i32) VariantDef {
     VariantDef(
         name: nm,
         payload: p,
         dflt: e,
+        pos: pos,
     )
 }
 expr_null* = () Ptr<Expr> { vdef("", tvoid()).dflt }    // a null Ptr<Expr> carrying the right static type
 is_expr_null* = (e: Ptr<Expr>) bool { e == null_ptr() }
-edef_at* = (nm: StringView, vs: [VariantDef], p: i32) EnumDecl {
+edef_at* = (nm: StringView, vs: MutSlice<VariantDef>, p: i32) EnumDecl {
     EnumDecl(
         name: nm,
         variants: vs,
@@ -597,7 +679,7 @@ dfunc* = (f: Func) Decl { .DFunc(f) }
 dstruct* = (sd: StructDecl) Decl { .DStruct(sd) }
 denum* = (ed: EnumDecl) Decl { .DEnum(ed) }
 dforeign* = (f: Func) Decl { .DForeign(f) }
-dimport_at* = (names: [Param], module: StringView, p: i32) Decl {
+dimport_at* = (names: MutSlice<Param>, module: StringView, p: i32) Decl {
     .DImport(ImportData(
         names: names,
         module: module,
@@ -606,22 +688,38 @@ dimport_at* = (names: [Param], module: StringView, p: i32) Decl {
 }    // source-backed import (formatter anchors a file-header comment above it)
 dgenstruct* = (gsd: GenStructDecl) Decl { .DGenStruct(gsd) }
 dgenenum* = (ged: GenEnumDecl) Decl { .DGenEnum(ged) }
-dimpl* = (ty: StringView, trname: StringView, methods: [Param]) Decl {
+dimpl* = (ty: StringView, trname: StringView, methods: MutSlice<Param>) Decl {
     .DImpl(ImplData(
         ty: ty,
         trname: trname,
         trty: tnamed(trname),
         methods: methods,
         pos: 0,
+        trait_pos: 0,
     ))
 }
-dimpl_at* = (ty: StringView, trname: StringView, trty: Ty, methods: [Param], pos: i32) Decl {
+dimpl_at* = (
+    ty: StringView,
+    trname: StringView,
+    trty: Ty,
+    methods: MutSlice<Param>,
+    pos: i32,
+) Decl { dimpl_spans(ty, trname, trty, methods, pos, 0) }
+dimpl_spans* = (
+    ty: StringView,
+    trname: StringView,
+    trty: Ty,
+    methods: MutSlice<Param>,
+    pos: i32,
+    trait_pos: i32,
+) Decl {
     .DImpl(ImplData(
         ty: ty,
         trname: trname,
         trty: trty,
         methods: methods,
         pos: pos,
+        trait_pos: trait_pos,
     ))
 }
 // The ONE global constructor: `m` records the `::` mutability mark, mirroring slett_atm for locals.
@@ -676,7 +774,7 @@ tnode* = (a: Allocator, t: Ty) Ptr<Ty> {
 }
 // the FnT SIGNATURE of a function (its param types + ret) — used to give a default-bodied trait method
 // a Field type so conformance sees a normal method signature. Allocates a [Ty] of the param types.
-fnt_param_tys_in = (a: Allocator, ps: [Param]) [Ty] {
+fnt_param_tys_in = (a: Allocator, ps: MutSlice<Param>) MutSlice<Ty> {
     buf ::= cbuf<Ty>(a, ps.len)
     ps.loop_at((i, p) { buf[i] = p.ty })
     buf
@@ -754,7 +852,7 @@ ty_cname_in* = (a: Allocator, t: Ty) StringView {
 //    monomorphize pass (compiler.mono). A tiny stack of [Ty] buffer helpers + the recursive
 //    substitution + the generic-enum lookup; they're TYPE helpers, so they live in the base. ──
 // substitute tparam→arg in a type (recursing Ptr/Slice); a Named that IS a tparam becomes its arg.
-tparam_arg = (tparams: [Param], args: [Ty], n: StringView, dflt: Ty) Ty {
+tparam_arg = (tparams: MutSlice<Param>, args: MutSlice<Ty>, n: StringView, dflt: Ty) Ty {
     found ::= dflt
     tparams.loop_at((i, tp) {
         // Guard `i < args.len`: a WRONG-ARITY explicit targ list (too few `<…>` args for the declared
@@ -764,7 +862,7 @@ tparam_arg = (tparams: [Param], args: [Ty], n: StringView, dflt: Ty) Ty {
     })
     found
 }
-subst_ty_in* = (a: Allocator, tparams: [Param], args: [Ty], t: Ty) Ty {
+subst_ty_in* = (a: Allocator, tparams: MutSlice<Param>, args: MutSlice<Ty>, t: Ty) Ty {
     t.match ({
         .Named(n)   => tparams.tparam_arg(args, n, t),
         .Ptr(pd)    => tptr_k(a.tnode(a.subst_ty_in(tparams, args, load(pd.pointee))), pd.kind),
@@ -775,20 +873,20 @@ subst_ty_in* = (a: Allocator, tparams: [Param], args: [Ty], t: Ty) Ty {
     })
 }
 // substitute tparam→arg inside a function type `(S, i32) S` -> `(AppState, i32) AppState`.
-subst_fnt_in = (a: Allocator, tparams: [Param], args: [Ty], ft: FnTData) Ty {
+subst_fnt_in = (a: Allocator, tparams: MutSlice<Param>, args: MutSlice<Ty>, ft: FnTData) Ty {
     ptys ::= cbuf<Ty>(a, ft.params.len)
     ft.params.loop_at((i, p) { ptys[i] = a.subst_ty_in(tparams, args, p) })
     fntype(ptys, a.tnode(a.subst_ty_in(tparams, args, load(ft.ret))))
 }
 // substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
-subst_generic_in = (a: Allocator, tparams: [Param], args: [Ty], g: GenericData) Ty {
+subst_generic_in = (a: Allocator, tparams: MutSlice<Param>, args: MutSlice<Ty>, g: GenericData) Ty {
     // `tys` (not `buf`): mangle_str_in inlines a local `buf: RawPtr<u8>`, and the inliner
     // substitutes args by name — a caller arg also named `buf` would be captured by that local.
     tys ::= cbuf<Ty>(a, g.args.len)
     g.args.loop_at((i, gt) { tys[i] = a.subst_ty_in(tparams, args, gt) })
     tgeneric(g.name, tys, a.mangle_str_in(g.name, tys))
 }
-find_genenum* = (decls: [Decl], name: StringView) GenEnumDecl {
+find_genenum* = (decls: MutSlice<Decl>, name: StringView) GenEnumDecl {
     found ::= GenEnumDecl(
         name: "",
         tparams: slice(null_ptr(), 0),

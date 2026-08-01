@@ -1,5 +1,3 @@
-// compiler.mono — the shared monomorphization pass, split out of compiler.genc.
-//
 // A `Box<T>: {…}` (DGenStruct) / `Opt<T>: …` (DGenEnum) is a template; instead, for
 // every distinct concrete instance the module uses, this pass creates one concrete StructDecl/
 // EnumDecl with tparam→arg substituted. Instances are DISCOVERED from typed positions AND from
@@ -9,31 +7,25 @@
 { panic } = std.core.result
 { Expr, Stmt, Decl, Func, Param, Ty, Field, StructDecl, GenStructDecl, EnumDecl, VariantDef,
   GenericData, FieldInit, ArmData, TagData, MakeStructData, MakeEnumData } = compiler.ast.ast_types
-{ cbuf, field_default, dstruct, denum, subst_ty_in, find_genenum, tgeneric, tnamed } = compiler.genc
+{ cbuf, field_default_at, dstruct, denum, subst_ty_in, find_genenum, tgeneric, tnamed } = compiler.genc
 { mangle_str_in } = compiler.mangle
 // is_generic_fn (Func) is a compiler.astops trait method; importing FuncQuery pulls astops's whole
 // impl set into this closure (and, via modules that import compiler.mono, into c_emit/js too).
 { map_slice, slice_any } = compiler.astops
 { gd_has_mangled, gd_tys_max_depth } = compiler.generics
 { loop_at } = std.core.count
-// ── monomorphization: instantiate generic structs/enums per concrete use ─────────
-// Backend prepass. A `Box<T>: {…}` decl (DGenStruct) emits no concrete type by itself; instead, for
-// every distinct `Box<concrete>` the module uses, we create one concrete StructDecl `Box_i32` with tparam→arg
-// substituted in the field types. Instances are DISCOVERED from typed positions — function params,
-// returns, and struct fields (so a generic used through a typed API is found); a generic struct
-// LITERAL already carries its monomorphized name (MakeStruct.mty), so it just references the result.
 // the concrete StructDecl for one instance: the matching DGenStruct's fields, tparam→arg substituted.
-mono_struct = (a: Allocator, decls: [Decl], g: GenericData) Decl {
+mono_struct = (a: Allocator, decls: MutSlice<Decl>, g: GenericData) Decl {
     gsd = decls.find_genstruct(g.name)
     buf = map_slice(a, gsd.fields, (f) {
-        field_default(f.name, a.subst_ty_in(gsd.tparams, g.args, f.ty), f.dflt)
+        field_default_at(f.name, a.subst_ty_in(gsd.tparams, g.args, f.ty), f.dflt, f.pos)
     })
     dstruct(StructDecl(
         name: g.mangled,
         fields: buf,
     ))
 }
-find_genstruct = (decls: [Decl], name: StringView) GenStructDecl {
+find_genstruct = (decls: MutSlice<Decl>, name: StringView) GenStructDecl {
     found ::= GenStructDecl(
         name: "",
         tparams: slice(null_ptr(), 0),
@@ -56,7 +48,13 @@ find_genstruct = (decls: [Decl], name: StringView) GenStructDecl {
 // payload as the concrete `.Generic` instance (each anon-struct tparam substituted through the enum's
 // tparam→arg map, then re-mangled), so the union member, its definition, and the ctor all agree — and the
 // instance is discovered (collect_pays) even when the enum is only matched, never explicitly constructed.
-mono_payload = (a: Allocator, decls: [Decl], tparams: [Param], args: [Ty], payload: Ty) Ty {
+mono_payload = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    tparams: MutSlice<Param>,
+    args: MutSlice<Ty>,
+    payload: Ty,
+) Ty {
     sub = a.subst_ty_in(tparams, args, payload)
     sub.match ({
         .Named(n) => decls.is_genstruct_name(n).match ({
@@ -72,13 +70,14 @@ mono_payload = (a: Allocator, decls: [Decl], tparams: [Param], args: [Ty], paylo
         _         => sub,
     })
 }
-mono_enum = (a: Allocator, decls: [Decl], g: GenericData) Decl {
+mono_enum = (a: Allocator, decls: MutSlice<Decl>, g: GenericData) Decl {
     ged = decls.find_genenum(g.name)
     buf = map_slice(a, ged.variants, (v) {
         VariantDef(
             name: v.name,
             payload: a.mono_payload(decls, ged.tparams, g.args, v.payload),
             dflt: v.dflt,
+            pos: v.pos,
         )
     })
     denum(EnumDecl(
@@ -87,7 +86,7 @@ mono_enum = (a: Allocator, decls: [Decl], g: GenericData) Decl {
     ))
 }
 // is `name` a generic STRUCT (vs a generic enum)? — picks which monomorphizer an instance needs.
-is_genstruct_name = (decls: [Decl], name: StringView) bool {
+is_genstruct_name = (decls: MutSlice<Decl>, name: StringView) bool {
     decls.slice_any((d) {
         d.match ({
             .DGenStruct(g) => g.name == name,
@@ -99,13 +98,13 @@ is_genstruct_name = (decls: [Decl], name: StringView) bool {
 // HOLLOW decl. That is deliberate for the emit-only pipeline (the acid gate feeds real stdlib files
 // whose imported generics aren't loaded); the CHECKED pipeline rejects an undefined generic ctor
 // up front (check_validate's mkenum_err/KUNDEFINED), so a hollow decl never reaches a user build.
-mono_inst = (a: Allocator, decls: [Decl], g: GenericData) Decl {
+mono_inst = (a: Allocator, decls: MutSlice<Decl>, g: GenericData) Decl {
     decls.is_genstruct_name(g.name).then({ a.mono_struct(decls, g) }, { a.mono_enum(decls, g) })
 }
 // discovery: scan all typed positions for generic instances, deduped by mangled name.
 // gd_has_mangled (dedup scan) + gd_ty_depth/gd_tys_max_depth (type-arg nesting depth) are
 // shared leaves; they live in compiler.generics (imported above) alongside their rc_* twins.
-add_inst = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
+add_inst = (buf: MutSlice<GenericData>, cnt: i32, g: GenericData) i32 {
     // bounded two ways against a MALFORMED polymorphic-recursive generic — a type whose field/payload
     // names the SAME generic with a strictly-deeper arg (`Box<T>: { next: Box<Box<T>> }`). Each mono step
     // produces a brand-new, ever-deeper instance (Box_i32 → Box_Box_i32 → …), so has_mangled dedup never
@@ -125,7 +124,7 @@ add_inst = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
     buf[cnt] = g
     cnt + 1
 }
-collect_ty = (buf: [GenericData], cnt: i32, t: Ty) i32 {
+collect_ty = (buf: MutSlice<GenericData>, cnt: i32, t: Ty) i32 {
     t.match ({
         .Generic(g) => buf.gd_has_mangled(cnt, g.mangled).then({ cnt }, { buf.add_inst(cnt, g) }),
         .Ptr(pd)    => buf.collect_ty(cnt, load(pd.pointee)),
@@ -133,12 +132,12 @@ collect_ty = (buf: [GenericData], cnt: i32, t: Ty) i32 {
         _           => cnt,
     })
 }
-collect_tys = (buf: [GenericData], cnt: i32, ts: [Ty]) i32 {
+collect_tys = (buf: MutSlice<GenericData>, cnt: i32, ts: MutSlice<Ty>) i32 {
     c ::= cnt
     ts.loop_at((i, t) { c = buf.collect_ty(c, t) })
     c
 }
-collect_decl = (buf: [GenericData], cnt: i32, d: Decl) i32 {
+collect_decl = (buf: MutSlice<GenericData>, cnt: i32, d: Decl) i32 {
     d.match ({
         .DStruct(sd) => buf.collect_flds(cnt, sd.fields),
         .DEnum(ed)   => buf.collect_pays(cnt, ed.variants),    // a generic instance can hide in a variant payload
@@ -147,17 +146,17 @@ collect_decl = (buf: [GenericData], cnt: i32, d: Decl) i32 {
         _            => cnt,
     })
 }
-collect_flds = (buf: [GenericData], cnt: i32, fields: [Field]) i32 {
+collect_flds = (buf: MutSlice<GenericData>, cnt: i32, fields: MutSlice<Field>) i32 {
     c ::= cnt
     fields.loop_at((i, f) { c = buf.collect_ty(c, f.ty) })
     c
 }
-collect_pays = (buf: [GenericData], cnt: i32, variants: [VariantDef]) i32 {
+collect_pays = (buf: MutSlice<GenericData>, cnt: i32, variants: MutSlice<VariantDef>) i32 {
     c ::= cnt
     variants.loop_at((i, v) { c = buf.collect_ty(c, v.payload) })
     c
 }
-collect_func = (buf: [GenericData], cnt: i32, f: Func) i32 {
+collect_func = (buf: MutSlice<GenericData>, cnt: i32, f: Func) i32 {
     c ::= cnt
     f.params.loop_at((i, p) { c = buf.collect_ty(c, p.ty) })
     buf.collect_body(buf.collect_ty(c, f.ret), f.body)
@@ -165,25 +164,25 @@ collect_func = (buf: [GenericData], cnt: i32, f: Func) i32 {
 // ── body walk: discover generic instances from struct LITERALS in expressions, not just from typed
 //    signatures. A `b = Box<i32>{…}` with no typed param/return still needs Box_i32 emitted. A
 //    MakeStruct with type args carries its instance (ty + targs + mangled mty); recurse everywhere. ──
-add_gen = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
+add_gen = (buf: MutSlice<GenericData>, cnt: i32, g: GenericData) i32 {
     buf.gd_has_mangled(cnt, g.mangled).then({ cnt }, { buf.add_inst(cnt, g) })
 }
-collect_exprs = (buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
+collect_exprs = (buf: MutSlice<GenericData>, cnt: i32, xs: MutSlice<Expr>) i32 {
     c ::= cnt
     xs.loop_at((i, x) { c = buf.collect_expr(c, x) })
     c
 }
-collect_arms = (buf: [GenericData], cnt: i32, arms: [ArmData]) i32 {
+collect_arms = (buf: MutSlice<GenericData>, cnt: i32, arms: MutSlice<ArmData>) i32 {
     c ::= cnt
     arms.loop_at((i, a) { c = buf.collect_expr(c, load(a.body)) })
     c
 }
-collect_inits = (buf: [GenericData], cnt: i32, inits: [FieldInit]) i32 {
+collect_inits = (buf: MutSlice<GenericData>, cnt: i32, inits: MutSlice<FieldInit>) i32 {
     c ::= cnt
     inits.loop_at((i, fi) { c = buf.collect_expr(c, load(fi.value)) })
     c
 }
-collect_makestruct = (buf: [GenericData], cnt: i32, m: MakeStructData) i32 {
+collect_makestruct = (buf: MutSlice<GenericData>, cnt: i32, m: MakeStructData) i32 {
     c = (m.targs.len > 0).match ({
         true  => buf.add_gen(cnt, GenericData(
             name: m.ty,
@@ -195,7 +194,7 @@ collect_makestruct = (buf: [GenericData], cnt: i32, m: MakeStructData) i32 {
     buf.collect_inits(c, m.inits)
 }
 // a generic enum CONSTRUCTOR carries its instance the same way a struct literal does (ty + targs + mty)
-collect_mkenum = (buf: [GenericData], cnt: i32, m: MakeEnumData) i32 {
+collect_mkenum = (buf: MutSlice<GenericData>, cnt: i32, m: MakeEnumData) i32 {
     c = (m.targs.len > 0).match ({
         true  => buf.add_gen(cnt, GenericData(
             name: m.ty,
@@ -206,7 +205,7 @@ collect_mkenum = (buf: [GenericData], cnt: i32, m: MakeEnumData) i32 {
     })
     buf.collect_expr(c, load(m.payload))
 }
-collect_tag = (buf: [GenericData], cnt: i32, t: TagData) i32 {
+collect_tag = (buf: MutSlice<GenericData>, cnt: i32, t: TagData) i32 {
     (t.targs.len > 0).match ({
         true  => buf.add_gen(cnt, GenericData(
             name: t.ty,
@@ -216,7 +215,7 @@ collect_tag = (buf: [GenericData], cnt: i32, t: TagData) i32 {
         false => cnt,
     })
 }
-collect_expr = (buf: [GenericData], cnt: i32, e: Expr) i32 {
+collect_expr = (buf: MutSlice<GenericData>, cnt: i32, e: Expr) i32 {
     e.match ({
         .MakeStruct(m) => buf.collect_makestruct(cnt, m),
         .Bin(b)        => buf.collect_expr(buf.collect_expr(cnt, load(b.lhs)), load(b.rhs)),
@@ -234,7 +233,7 @@ collect_expr = (buf: [GenericData], cnt: i32, e: Expr) i32 {
         _              => cnt,
     })
 }
-collect_stmt = (buf: [GenericData], cnt: i32, st: Stmt) i32 {
+collect_stmt = (buf: MutSlice<GenericData>, cnt: i32, st: Stmt) i32 {
     st.match ({
         .Let(l)      => buf.collect_expr(cnt, load(l.value)),
         .Assign(x)   => buf.collect_expr(buf.collect_expr(cnt, load(x.target)), load(x.value)),
@@ -245,16 +244,16 @@ collect_stmt = (buf: [GenericData], cnt: i32, st: Stmt) i32 {
         .IndexSet(x) => buf.collect_expr(buf.collect_expr(buf.collect_expr(cnt, load(x.seq)), load(x.idx)), load(x.value)),
     })
 }
-collect_body = (buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
+collect_body = (buf: MutSlice<GenericData>, cnt: i32, body: MutSlice<Stmt>) i32 {
     c ::= cnt
     body.loop_at((i, st) { c = buf.collect_stmt(c, st) })
     c
 }
 GBufEnd: {
-    buf: [GenericData],
+    buf: MutSlice<GenericData>,
     count: i32,
 }
-collect_insts = (a: Allocator, decls: [Decl]) GBufEnd {
+collect_insts = (a: Allocator, decls: MutSlice<Decl>) GBufEnd {
     buf = cbuf<GenericData>(a, 2048)
     cnt ::= 0
     decls.loop_at((i, d) { cnt = buf.collect_decl(cnt, d) })
@@ -279,15 +278,25 @@ is_gen_template = (d: Decl) bool { d.is_gen_struct() || d.is_gen_enum() }
 // transitive discovery: an instance's CONCRETE form (substituted fields/payloads) may name FURTHER
 // instances (`Outer<i32>` has field `Inner<i32>`). Walk the growing list — for each, collect the
 // generics inside its monomorphized decl — until no new ones appear (collect_ty dedups by mangled).
-expand_one = (a: Allocator, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
+expand_one = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    buf: MutSlice<GenericData>,
+    count: i32,
+    i: i32,
+) i32 {
     nc = buf.collect_decl(count, a.mono_inst(decls, buf[i]))
     a.expand_insts(decls, buf, nc, i + 1)
 }
-expand_insts = (a: Allocator, decls: [Decl], buf: [GenericData], count: i32, i: i32) i32 {
-    (i >= count).then({ count }, { a.expand_one(decls, buf, count, i) })
-}
+expand_insts = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    buf: MutSlice<GenericData>,
+    count: i32,
+    i: i32,
+) i32 { (i >= count).then({ count }, { a.expand_one(decls, buf, count, i) }) }
 // monomorphize: drop the generic templates, append one concrete struct/enum per discovered instance.
-monomorphize* = (a: Allocator, decls: [Decl]) [Decl] {
+monomorphize* = (a: Allocator, decls: MutSlice<Decl>) MutSlice<Decl> {
     ce = a.collect_insts(decls)
     cnt = a.expand_insts(decls, ce.buf, ce.count, 0)    // transitively close over nested generic instances
     out = cbuf<Decl>(a, decls.len + cnt)
@@ -296,7 +305,7 @@ monomorphize* = (a: Allocator, decls: [Decl]) [Decl] {
     ce.buf.loop_at((i, g) { k = (i < cnt).then({ out.put_decl(k, a.mono_inst(decls, g)) }, { k }) })
     slice(out.ptr, k)
 }
-put_decl = (out: [Decl], k: i32, d: Decl) i32 {
+put_decl = (out: MutSlice<Decl>, k: i32, d: Decl) i32 {
     out[k] = d
     k + 1
 }

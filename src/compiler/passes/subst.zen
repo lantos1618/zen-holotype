@@ -1,10 +1,9 @@
-// compiler.passes.subst — generic substitution + xform sub-pass extracted from compiler.check.
 { ArmData, CallData, Decl, Expr, Field, FieldInit, GenStructDecl, LambdaData, MakeStructData,
   MatchData, Param, Stmt, Ty, VarData, VariantDef } = compiler.ast.ast_types
-{ cbuf, arm, bin_at, block, call_full, cond_oa, eindex, eloop, ematch, ematchp, finit, lam_r,
-  member_at, mfield, mkenum, mkenumg, mkstruct_at, mkstructg_at, mktag, mktagg, param, sassign_at,
-  sexpr, sidxset_at, sif, slett_at, slett_atm, slit, sret, strlit_at, subst_ty_in, swhile, tvoid,
-  ty_cname_in, vref_at } = compiler.genc
+{ cbuf, arm, arm_spans, bin_at, block, call_origin_full, cond_oa, eindex, eloop_at, ematch, ematchp,
+  finit, finit_at, lam_r, member_at, mfield, mkenum_at, mkenumg_at, mkstruct_at, mkstructg_at,
+  mktag, mktag_at, mktagg, mktagg_at, param, param_at, sassign_at, sexpr, sidxset_at, sif, slett_at,
+  slett_atm, slit, sret, strlit_at, subst_ty_in, swhile, tvoid, ty_cname_in, vref_at } = compiler.genc
 { mangle_str_in } = compiler.mangle
 { DeclIndex, VList, cebuf, cenode, add_fnt_param, add_lambda_arg, add_subst_arg, add_subst_param,
   bind_fnret, callee_subst_name, blockify, cat_stmts, fnret_of, gen_variant_payload, inline_lambda,
@@ -17,8 +16,8 @@
 { loop_at } = std.core.count
 subst_var = (
     a: Allocator,
-    params: [Param],
-    args: [Expr],
+    params: MutSlice<Param>,
+    args: MutSlice<Expr>,
     name: StringView,
     e: Ptr<Expr>,
 ) Ptr<Expr> {
@@ -38,20 +37,20 @@ subst_keep_pos = (a: Allocator, arg: Ptr<Expr>, p: i32) Ptr<Expr> {
 // the source position of a substituted REFERENCE (always a Var at the xform `.Var` call site).
 xform_args = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    args: [Expr],
-    params: [Param],
-    fargs: [Expr],
+    args: MutSlice<Expr>,
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
-) [Expr] {
+) MutSlice<Expr> {
     buf ::= a.cebuf(args.len)
     args.loop_at((i, ar) { buf[i] = load(a.xform_expr(decls, idx, ar.addr(), params, fargs, env)) })
     buf
 }
 xform_arm_payload = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     subj: Ty,
     ename: StringView,
@@ -66,7 +65,7 @@ xform_arm_payload = (
 }
 xform_arm_env* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     subj: Ty,
     ename: StringView,
@@ -81,16 +80,16 @@ xform_arm_env* = (
 }
 xform_arms = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     subj: Ty,
     ename: StringView,
-    arms: [ArmData],
-    params: [Param],
-    fargs: [Expr],
+    arms: MutSlice<ArmData>,
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
     exp: Ty,
-) [ArmData] {
+) MutSlice<ArmData> {
     buf ::= cbuf<ArmData>(a, arms.len)
     arms.loop_at((i, ar) {
         bind ::= ""
@@ -101,20 +100,35 @@ xform_arms = (
             ps = a.add_subst_param(params, ar.bind)
             xs = a.add_subst_arg(fargs, bind)
         })
-        br = arm(ar.variant, bind, ar.body)
+        br = arm_spans(ar.variant, bind, ar.body, ar.pos, ar.variant_pos, ar.bind_pos)
         aenv = a.xform_arm_env(decls, idx, subj, ename, br, env)
-        buf[i] = arm(ar.variant, bind, a.xform_expr_exp(decls, idx, ar.body, ps, xs, aenv, exp))
+        buf[i] = arm_spans(ar.variant, bind, a.xform_expr_exp(decls, idx, ar.body, ps, xs, aenv, exp), ar.pos, ar.variant_pos, ar.bind_pos)
     })
     buf
 }
-subst_targs = (a: Allocator, tparams: [Param], targs: [Ty], xs: [Ty]) [Ty] {
-    map_slice(a, xs, (t) { a.subst_ty_in(tparams, targs, t) })
-}
-subst_genlit_g = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
+subst_targs = (
+    a: Allocator,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    xs: MutSlice<Ty>,
+) MutSlice<Ty> { map_slice(a, xs, (t) { a.subst_ty_in(tparams, targs, t) }) }
+subst_genlit_g = (
+    a: Allocator,
+    cs: i32,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    m: MakeStructData,
+) Expr {
     nt = a.subst_targs(tparams, targs, m.targs)
     mkstructg_at(m.ty, a.mangle_str_in(m.ty, nt), nt, a.subst_inits(cs, tparams, targs, m.inits), cs_or(cs, m.pos))
 }
-subst_genlit = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], m: MakeStructData) Expr {
+subst_genlit = (
+    a: Allocator,
+    cs: i32,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    m: MakeStructData,
+) Expr {
     (m.targs.len > 0).match ({
         true  => a.subst_genlit_g(cs, tparams, targs, m),
         false => mkstruct_at(m.ty, a.subst_inits(cs, tparams, targs, m.inits), cs_or(cs, m.pos)),
@@ -123,21 +137,43 @@ subst_genlit = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], m: MakeStr
 subst_inits = (
     a: Allocator,
     cs: i32,
-    tparams: [Param],
-    targs: [Ty],
-    inits: [FieldInit],
-) [FieldInit] {
-    map_slice(a, inits, (fi) { finit(fi.name, a.subst_expr(cs, tparams, targs, fi.value)) })
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    inits: MutSlice<FieldInit>,
+) MutSlice<FieldInit> {
+    map_slice(a, inits, (fi) {
+        finit_at(fi.name, a.subst_expr(cs, tparams, targs, fi.value), fi.pos)
+    })
 }
-subst_exprs = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], xs: [Expr]) [Expr] {
+subst_exprs = (
+    a: Allocator,
+    cs: i32,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    xs: MutSlice<Expr>,
+) MutSlice<Expr> {
     buf ::= a.cebuf(xs.len)
     xs.loop_at((i, x) { buf[i] = load(a.subst_expr(cs, tparams, targs, x.addr())) })
     buf
 }
-subst_arms = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], arms: [ArmData]) [ArmData] {
-    map_slice(a, arms, (ar) { arm(ar.variant, ar.bind, a.subst_expr(cs, tparams, targs, ar.body)) })
+subst_arms = (
+    a: Allocator,
+    cs: i32,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    arms: MutSlice<ArmData>,
+) MutSlice<ArmData> {
+    map_slice(a, arms, (ar) {
+        arm_spans(ar.variant, ar.bind, a.subst_expr(cs, tparams, targs, ar.body), ar.pos, ar.variant_pos, ar.bind_pos)
+    })
 }
-subst_match = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], m: MatchData) Ptr<Expr> {
+subst_match = (
+    a: Allocator,
+    cs: i32,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    m: MatchData,
+) Ptr<Expr> {
     subj = a.subst_expr(cs, tparams, targs, m.subj)
     arms = a.subst_arms(cs, tparams, targs, m.arms)
     m.ptr.match ({
@@ -148,61 +184,69 @@ subst_match = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], m: MatchDat
 // Substitute and remangle generic-enum ctors/tags inside template bodies.
 subst_mkenum = (
     a: Allocator,
-    tparams: [Param],
-    targs: [Ty],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
     ety: StringView,
-    etargs: [Ty],
+    etargs: MutSlice<Ty>,
     variant: StringView,
     p: Ptr<Expr>,
+    ty_pos: i32,
+    variant_pos: i32,
 ) Ptr<Expr> {
     (etargs.len > 0).match ({
-        true  => a.cenode(a.subst_mkenum_g(tparams, targs, ety, etargs, variant, p)),
-        false => a.cenode(mkenum(ety, variant, p)),
+        true  => a.cenode(a.subst_mkenum_g(tparams, targs, ety, etargs, variant, p, ty_pos, variant_pos)),
+        false => a.cenode(mkenum_at(ety, variant, p, ty_pos, variant_pos)),
     })
 }
 subst_mkenum_g = (
     a: Allocator,
-    tparams: [Param],
-    targs: [Ty],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
     ety: StringView,
-    etargs: [Ty],
+    etargs: MutSlice<Ty>,
     variant: StringView,
     p: Ptr<Expr>,
+    ty_pos: i32,
+    variant_pos: i32,
 ) Expr {
     nt = a.subst_targs(tparams, targs, etargs)
-    mkenumg(ety, a.mangle_str_in(ety, nt), nt, variant, p)
+    mkenumg_at(ety, a.mangle_str_in(ety, nt), nt, variant, p, ty_pos, variant_pos)
 }
 subst_tag = (
     a: Allocator,
-    tparams: [Param],
-    targs: [Ty],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
     ety: StringView,
-    etargs: [Ty],
+    etargs: MutSlice<Ty>,
     variant: StringView,
+    ty_pos: i32,
+    variant_pos: i32,
 ) Ptr<Expr> {
     (etargs.len > 0).match ({
-        true  => a.cenode(a.subst_tag_g(tparams, targs, ety, etargs, variant)),
-        false => a.cenode(mktag(ety, variant)),
+        true  => a.cenode(a.subst_tag_g(tparams, targs, ety, etargs, variant, ty_pos, variant_pos)),
+        false => a.cenode(mktag_at(ety, variant, ty_pos, variant_pos)),
     })
 }
 subst_tag_g = (
     a: Allocator,
-    tparams: [Param],
-    targs: [Ty],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
     ety: StringView,
-    etargs: [Ty],
+    etargs: MutSlice<Ty>,
     variant: StringView,
+    ty_pos: i32,
+    variant_pos: i32,
 ) Expr {
     nt = a.subst_targs(tparams, targs, etargs)
-    mktagg(ety, a.mangle_str_in(ety, nt), nt, variant)
+    mktagg_at(ety, a.mangle_str_in(ety, nt), nt, variant, ty_pos, variant_pos)
 }
 // `sizeof(T)` uses the tparam name as a value; rewrite it to the concrete C type name. A non-tparam
 // Var is rebuilt (not passed through) so its position also retargets to the call site under `cs`.
 subst_tparam_var = (
     a: Allocator,
     cs: i32,
-    tparams: [Param],
-    targs: [Ty],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
     v: VarData,
     e: Ptr<Expr>,
 ) Ptr<Expr> {
@@ -215,30 +259,44 @@ subst_tparam_var = (
 // A lambda body is ORDINARY code of the enclosing generic: its param/return/local annotations name
 // the enclosing tparams, so an instance must substitute through it. Passing the node through left
 // `MutPtr<T>` in the substituted copy, which then lifted to a top-level fn naming an undeclared `T`.
-subst_lam = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], lm: LambdaData) Expr {
-    ps = map_slice(a, lm.params, (p) { param(p.name, a.subst_ty_in(tparams, targs, p.ty)) })
+subst_lam = (
+    a: Allocator,
+    cs: i32,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    lm: LambdaData,
+) Expr {
+    ps = map_slice(a, lm.params, (p) {
+        param_at(p.name, a.subst_ty_in(tparams, targs, p.ty), p.pos)
+    })
     lam_r(ps, a.subst_body(cs, tparams, targs, lm.body), a.subst_ty_in(tparams, targs, lm.ret))
 }
-subst_expr = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], e: Ptr<Expr>) Ptr<Expr> {
+subst_expr = (
+    a: Allocator,
+    cs: i32,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    e: Ptr<Expr>,
+) Ptr<Expr> {
     load(e).match ({
         .Var(v)        => a.subst_tparam_var(cs, tparams, targs, v, e),
         .Bin(b)        => a.cenode(bin_at(b.op, a.subst_expr(cs, tparams, targs, b.lhs), a.subst_expr(cs, tparams, targs, b.rhs), cs_or(cs, b.pos))),
         .Cond(d)       => a.cenode(cond_oa(a.subst_expr(cs, tparams, targs, d.c), a.subst_expr(cs, tparams, targs, d.t), a.subst_expr(cs, tparams, targs, d.e), d.oa)),
         .Member(m)     => a.cenode(mfield(a.subst_expr(cs, tparams, targs, m.obj), m.field, cs_or(cs, m.pos), m.ptr)),
-        .Call(c)       => a.cenode(call_full(c.fn, a.subst_exprs(cs, tparams, targs, c.args), a.subst_targs(tparams, targs, c.targs), cs_or(cs, c.pos), c.raw)),
-        .MakeEnum(mk)  => a.subst_mkenum(tparams, targs, mk.ty, mk.targs, mk.variant, a.subst_expr(cs, tparams, targs, mk.payload)),
-        .Tag(t)        => a.subst_tag(tparams, targs, t.ty, t.targs, t.variant),
+        .Call(c)       => a.cenode(call_origin_full(c.fn, a.subst_exprs(cs, tparams, targs, c.args), a.subst_targs(tparams, targs, c.targs), cs_or(cs, c.pos), c.raw, c.origin)),
+        .MakeEnum(mk)  => a.subst_mkenum(tparams, targs, mk.ty, mk.targs, mk.variant, a.subst_expr(cs, tparams, targs, mk.payload), mk.ty_pos, mk.variant_pos),
+        .Tag(t)        => a.subst_tag(tparams, targs, t.ty, t.targs, t.variant, t.ty_pos, t.variant_pos),
         .MakeStruct(m) => a.cenode(a.subst_genlit(cs, tparams, targs, m)),
         .Match(mm)     => a.subst_match(cs, tparams, targs, mm),
         .Index(ix)     => a.cenode(eindex(a.subst_expr(cs, tparams, targs, ix.seq), a.subst_expr(cs, tparams, targs, ix.idx), a.subst_ty_in(tparams, targs, ix.elem))),
-        .Loop(l)       => a.cenode(eloop(a.subst_expr(cs, tparams, targs, l.seq), l.idx, l.elem, a.subst_ty_in(tparams, targs, l.elemTy), a.subst_body(cs, tparams, targs, l.body), l.h)),
+        .Loop(l)       => a.cenode(eloop_at(a.subst_expr(cs, tparams, targs, l.seq), l.idx, l.elem, a.subst_ty_in(tparams, targs, l.elemTy), a.subst_body(cs, tparams, targs, l.body), l.h, l.h_pos, l.idx_pos, l.elem_pos)),
         .SliceLit(sd)  => a.cenode(slit(a.subst_ty_in(tparams, targs, sd.elem), a.subst_exprs(cs, tparams, targs, sd.items))),
         .Block(b)      => a.cenode(block(a.subst_body(cs, tparams, targs, b.stmts))),
         .Lambda(lm)    => a.cenode(a.subst_lam(cs, tparams, targs, lm)),
         _              => e,
     })
 }
-subst_stmt = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], st: Stmt) Stmt {
+subst_stmt = (a: Allocator, cs: i32, tparams: MutSlice<Param>, targs: MutSlice<Ty>, st: Stmt) Stmt {
     st.match ({
         .Let(l)      => slett_atm(l.name, a.subst_ty_in(tparams, targs, l.ty), a.subst_expr(cs, tparams, targs, l.value), cs_or(cs, l.pos), l.mut),
         .Assign(x)   => sassign_at(a.subst_expr(cs, tparams, targs, x.target), a.subst_expr(cs, tparams, targs, x.value), cs_or(cs, x.pos)),
@@ -249,9 +307,13 @@ subst_stmt = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], st: Stmt) St
         .IndexSet(x) => sidxset_at(a.subst_expr(cs, tparams, targs, x.seq), a.subst_expr(cs, tparams, targs, x.idx), a.subst_ty_in(tparams, targs, x.elem), a.subst_expr(cs, tparams, targs, x.value), cs_or(cs, x.pos)),
     })
 }
-subst_body* = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], body: [Stmt]) [Stmt] {
-    map_slice(a, body, (st) { a.subst_stmt(cs, tparams, targs, st) })
-}
+subst_body* = (
+    a: Allocator,
+    cs: i32,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    body: MutSlice<Stmt>,
+) MutSlice<Stmt> { map_slice(a, body, (st) { a.subst_stmt(cs, tparams, targs, st) }) }
 // ── struct reflection intrinsics: field_eq / each_field / zip_fields ──────────────────────────────
 // `x.field_eq(y)` is desugared (check_desugar) to Call{fn:"field_eq", args:[x,y]}; during INLINING
 // the receiver's concrete type is known, so it EXPANDS here to a per-field `==` fold:
@@ -263,20 +325,21 @@ subst_body* = (a: Allocator, cs: i32, tparams: [Param], targs: [Ty], body: [Stmt
 // so genc/js emit them with NO backend change.
 // the per-field view a reflection intrinsic iterates: Named structs from the decl index, GENERIC
 // struct instances from the generic decl with tparams substituted per the instance's targs.
-reflect_fields* = (a: Allocator, decls: [Decl], idx: DeclIndex, t: Ty) [Field] {
+reflect_fields* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, t: Ty) MutSlice<Field> {
     t.match ({
         .Named(n)   => idx.idx_struct_fields(decls, n),
         .Generic(g) => a.rf_subst_fields(idx.idx_genstruct(decls, g.name), g.args),
         _           => idx.idx_struct_fields(decls, ""),
     })
 }
-rf_subst_fields = (a: Allocator, gs: GenStructDecl, targs: [Ty]) [Field] {
+rf_subst_fields = (a: Allocator, gs: GenStructDecl, targs: MutSlice<Ty>) MutSlice<Field> {
     buf ::= cbuf<Field>(a, gs.fields.len)
     gs.fields.loop_at((i, f) {
         buf[i] = Field(
             name: f.name,
             ty: a.subst_ty_in(gs.tparams, targs, f.ty),
             dflt: f.dflt,
+            pos: f.pos,
         )
     })
     buf
@@ -284,7 +347,7 @@ rf_subst_fields = (a: Allocator, gs: GenStructDecl, targs: [Ty]) [Field] {
 fe_true = (a: Allocator, pos: i32) Ptr<Expr> { a.cenode(vref_at("true", pos)) }
 fe_field_cmp = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     rx: Ptr<Expr>,
     ry: Ptr<Expr>,
@@ -299,11 +362,11 @@ fe_field_cmp = (
 }    // struct-typed field: recursive per-field fold on the nested struct
 fe_fold = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     rx: Ptr<Expr>,
     ry: Ptr<Expr>,
-    flds: [Field],
+    flds: MutSlice<Field>,
     i: i32,
     acc: Ptr<Expr>,
     pos: i32,
@@ -315,10 +378,10 @@ fe_fold = (
 }
 expand_field_eq = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    flds: [Field],
-    cargs: [Expr],
+    flds: MutSlice<Field>,
+    cargs: MutSlice<Expr>,
     pos: i32,
 ) Ptr<Expr> {
     a.fe_fold(decls, idx, cargs[0].addr(), cargs[1].addr(), flds, 0, a.fe_true(pos), pos)
@@ -331,13 +394,13 @@ expand_field_eq = (
 // `x.zip_fields(y, f)` is the paired form: f("f0", x.f0, y.f0); …  Both are void: the expansion is a
 // Block of ExprStmts (ordinary nodes — NO backend change). Sibling copies land in sibling C scopes,
 // so the per-copy renamed locals never collide.
-ef_args = (a: Allocator, name: StringView, vx: Expr, pos: i32) [Expr] {
+ef_args = (a: Allocator, name: StringView, vx: Expr, pos: i32) MutSlice<Expr> {
     buf ::= a.cebuf(2)
     buf[0] = strlit_at(name, pos)
     buf[1] = vx
     buf
 }
-ef_args_zip = (a: Allocator, name: StringView, vx: Expr, vy: Expr, pos: i32) [Expr] {
+ef_args_zip = (a: Allocator, name: StringView, vx: Expr, vy: Expr, pos: i32) MutSlice<Expr> {
     buf ::= a.cebuf(3)
     buf[0] = strlit_at(name, pos)
     buf[1] = vx
@@ -346,10 +409,10 @@ ef_args_zip = (a: Allocator, name: StringView, vx: Expr, vy: Expr, pos: i32) [Ex
 }
 expand_each_field = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    flds: [Field],
-    cargs: [Expr],
+    flds: MutSlice<Field>,
+    cargs: MutSlice<Expr>,
     env: Ptr<VList>,
     pos: i32,
 ) Ptr<Expr> {
@@ -362,10 +425,10 @@ expand_each_field = (
 }
 expand_zip_fields = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    flds: [Field],
-    cargs: [Expr],
+    flds: MutSlice<Field>,
+    cargs: MutSlice<Expr>,
     env: Ptr<VList>,
     pos: i32,
 ) Ptr<Expr> {
@@ -387,11 +450,11 @@ refl_needs_bind = (e: Expr) bool {
 }
 refl_dispatch = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     fn: StringView,
-    flds: [Field],
-    cargs: [Expr],
+    flds: MutSlice<Field>,
+    cargs: MutSlice<Expr>,
     env: Ptr<VList>,
     pos: i32,
 ) Ptr<Expr> {
@@ -409,11 +472,11 @@ refl_dispatch = (
 // (kv_reflect_kind: receiver class, subject-type match, lambda shape, arity).
 refl_hook = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     c: CallData,
-    cargs: [Expr],
-    params: [Param],
+    cargs: MutSlice<Expr>,
+    params: MutSlice<Param>,
     env: Ptr<VList>,
 ) Ptr<Expr> {
     want = (c.fn == "zip_fields").then({ 3 }, { 2 })
@@ -478,7 +541,7 @@ refl_hook = (
 // once with no temp of our own (unlike each_field, which reads the subject once per field). The
 // result is ordinary Match/StrLit nodes, so genc and genjs emit it exactly as they emit a
 // hand-written match — NO backend change.
-reflect_variants* = (idx: DeclIndex, decls: [Decl], t: Ty) [VariantDef] {
+reflect_variants* = (idx: DeclIndex, decls: MutSlice<Decl>, t: Ty) MutSlice<VariantDef> {
     t.match ({
         .Named(n)   => idx.idx_enum_variants(decls, n),
         .Generic(g) => idx.idx_genenum(decls, g.name).variants,
@@ -487,7 +550,7 @@ reflect_variants* = (idx: DeclIndex, decls: [Decl], t: Ty) [VariantDef] {
 }
 expand_variant_name = (
     a: Allocator,
-    vs: [VariantDef],
+    vs: MutSlice<VariantDef>,
     subj: Ptr<Expr>,
     ename: StringView,
     pos: i32,
@@ -501,10 +564,10 @@ expand_variant_name = (
 // ill-formed receiver gets its positioned diagnostic from validation (kv_variant_name_kind).
 vn_hook = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     c: CallData,
-    cargs: [Expr],
+    cargs: MutSlice<Expr>,
     env: Ptr<VList>,
 ) Ptr<Expr> {
     (cargs.len == 1 == false).then({
@@ -520,11 +583,11 @@ vn_hook = (
 // Empty Named marks a generic template currently being inlined.
 xform_call = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     c: CallData,
-    params: [Param],
-    fargs: [Expr],
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
     exp: Ty,
 ) Ptr<Expr> {
@@ -548,11 +611,11 @@ xform_call = (
 // renamed local's Var, so recall through its renamed C name (not the stale original).
 xform_match = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     m: MatchData,
-    params: [Param],
-    fargs: [Expr],
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
     exp: Ty,
 ) Ptr<Expr> {
@@ -567,24 +630,24 @@ xform_match = (
 }
 xform_inits = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    inits: [FieldInit],
-    params: [Param],
-    fargs: [Expr],
+    inits: MutSlice<FieldInit>,
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
-) [FieldInit] {
+) MutSlice<FieldInit> {
     map_slice(a, inits, (fi) {
-        finit(fi.name, a.xform_expr(decls, idx, fi.value, params, fargs, env))
+        finit_at(fi.name, a.xform_expr(decls, idx, fi.value, params, fargs, env), fi.pos)
     })
 }
 xform_lambda = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     lm: LambdaData,
-    params: [Param],
-    fargs: [Expr],
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
 ) Ptr<Expr> {
     // RENAME the lambda's own params, exactly as `.Loop` renames idx/elem/h. A lambda is the only
@@ -596,7 +659,7 @@ xform_lambda = (
     nps ::= a.pbuf(lm.params.len)
     lm.params.loop_at((i, p) {
         nm = a.local_name_at(p.name, env, params.len + to_i64(i))
-        nps[i] = param(nm, p.ty)
+        nps[i] = param_at(nm, p.ty, p.pos)
         ps = a.add_subst_param(ps, p.name)
         xs = a.add_subst_arg(xs, nm)
     })
@@ -606,20 +669,20 @@ xform_lambda = (
 }
 xform_expr = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     e: Ptr<Expr>,
-    params: [Param],
-    fargs: [Expr],
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
 ) Ptr<Expr> { a.xform_expr_exp(decls, idx, e, params, fargs, env, tvoid()) }
 xform_expr_exp = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     e: Ptr<Expr>,
-    params: [Param],
-    fargs: [Expr],
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
     exp: Ty,
 ) Ptr<Expr> {
@@ -641,7 +704,7 @@ xform_expr_exp = (
             out = a.cenode(mfield(a.xform_expr(decls, idx, m.obj, params, fargs, env), m.field, m.pos, m.ptr))
         },
         .MakeEnum(mk)   => {
-            out = a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.xform_expr(decls, idx, mk.payload, params, fargs, env)))
+            out = a.cenode(mkenumg_at(mk.ty, mk.mty, mk.targs, mk.variant, a.xform_expr(decls, idx, mk.payload, params, fargs, env), mk.ty_pos, mk.variant_pos))
         },
         .MakeStruct(sd) => {
             out = a.cenode(mkstructg_at(sd.ty, sd.mty, sd.targs, a.xform_inits(decls, idx, sd.inits, params, fargs, env), sd.pos))
@@ -663,7 +726,7 @@ xform_expr_exp = (
             // vn_hook finds no variants and preserves the call for a template splice that never
             // comes — `zen check` passes and the link fails on an undefined `variant_name`.
             env1 = a.vcons(elem, l.elemTy, env)
-            out = a.cenode(eloop(a.xform_expr(decls, idx, l.seq, params, fargs, env), lidx, elem, l.elemTy, a.xform_body(decls, idx, l.body, ps1, xs1, env1, tvoid()), hnd))
+            out = a.cenode(eloop_at(a.xform_expr(decls, idx, l.seq, params, fargs, env), lidx, elem, l.elemTy, a.xform_body(decls, idx, l.body, ps1, xs1, env1, tvoid()), hnd, l.h_pos, l.idx_pos, l.elem_pos))
         },
         .Lambda(lm)     => {
             out = a.xform_lambda(decls, idx, lm, params, fargs, env)
@@ -680,11 +743,11 @@ xform_expr_exp = (
 }
 xform_stmt = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     st: Stmt,
-    params: [Param],
-    fargs: [Expr],
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
     exp: Ty,
 ) Stmt {
@@ -729,9 +792,9 @@ xform_let_ext = (
     a: Allocator,
     env: Ptr<VList>,
     st: Stmt,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    params: [Param],
+    params: MutSlice<Param>,
 ) Ptr<VList> {
     out ::= env
     st.match ({
@@ -746,7 +809,7 @@ xform_let_ext = (
     })
     out
 }
-xform_param_shadow = (a: Allocator, params: [Param], st: Stmt) [Param] {
+xform_param_shadow = (a: Allocator, params: MutSlice<Param>, st: Stmt) MutSlice<Param> {
     out ::= params
     st.match ({
         .Let(l) => {
@@ -761,13 +824,13 @@ xform_param_shadow = (a: Allocator, params: [Param], st: Stmt) [Param] {
 }
 xform_arg_shadow = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    args: [Expr],
+    args: MutSlice<Expr>,
     st: Stmt,
-    params: [Param],
+    params: MutSlice<Param>,
     env: Ptr<VList>,
-) [Expr] {
+) MutSlice<Expr> {
     out ::= args
     st.match ({
         .Let(l) => {
@@ -782,14 +845,14 @@ xform_arg_shadow = (
 }
 xform_body* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    body: [Stmt],
-    params: [Param],
-    fargs: [Expr],
+    body: MutSlice<Stmt>,
+    params: MutSlice<Param>,
+    fargs: MutSlice<Expr>,
     env: Ptr<VList>,
     exp: Ty,
-) [Stmt] {
+) MutSlice<Stmt> {
     buf ::= cbuf<Stmt>(a, body.len)
     e ::= env
     ps ::= params

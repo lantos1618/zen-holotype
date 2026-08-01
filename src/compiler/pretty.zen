@@ -1,5 +1,3 @@
-// compiler.pretty — an AST pretty-printer (canonical Zen text) over the shared genc AST.  @self-hosted-only
-//
 // Unlike c_emit/js (which consume the LOWERED AST), pretty consumes the FAITHFUL parse_module
 // output — the parser keeps `recv.method(args)` as a `MethodCall` node, so the formatter prints it back
 // as `recv.method(args)` with the UFCS surface syntax PRESERVED (the whole point: `s.len()` formats as
@@ -9,13 +7,11 @@
 // trailing comma on the last arm; multi-field struct literals split one field per line; short single-arm
 // / single-expr bodies stay inline.
 //
-// Same fluent UFCS String-builder walk as js, allocator explicit: `s.ff_append(a, x).ff_expr(a, e)`.
 { String } = std.text.string
 { view } = std.text.str
 { Allocator } = std.mem.alloc
 { Stmt, Decl, Param, Ty, PtrData, CondData, LetData } = compiler.ast.ast_types
-{ ptr_kw, slice_kw, k_slice_dflt, gstr_string, gstr_push, gstr_append, gstr_finish, acquire_or_die,
-  sbyte } = compiler.genc
+{ ptr_kw, slice_kw, gstr_string, gstr_push, gstr_append, gstr_finish, acquire_or_die, sbyte } = compiler.genc
 { gstr_int, left_pos_of, stmt_left_pos } = compiler.astops
 { Comment, rawstr_end } = compiler.lex
 { at, rawstr_at } = std.text.ascii
@@ -23,14 +19,13 @@
 { ff_cond_inline, ff_cond_is_then, ff_cond_multiline, ff_cond_nested, ff_current_col, ff_expr,
   ff_fits_width, ff_recv, ff_then } = compiler.pretty_expr
 { ff_decl, ff_is_anon_payload_name, ff_is_hoisted } = compiler.pretty_decl
-// ── comment sidecar state ──────────────────────────────────────────────────────
 // The formatter weaves SOURCE comments back into its AST walk. Comments live in a position-sorted
 // table (compiler.lex.collect_comments) keyed by byte offset; this module holds the source + table +
 // a cursor (the next un-emitted comment). As the walk reaches each statement / decl it FLUSHES every
 // leading comment whose start precedes that node, and after a statement it emits a same-line trailing
 // comment. Comments never enter the AST, so the lowered tree (and emitted C) is identical with or
 // without them — only the formatted text changes. State is module-level (mirrors parse's exports_buf).
-gf_no_cmts = () [Comment] { slice(null_ptr(), 0) }
+gf_no_cmts = () MutSlice<Comment> { slice(null_ptr(), 0) }
 gf_empty_str = () StringView { "" }    // a str-typed (not fixed-array) empty literal
 gf_src ::= gf_empty_str()
 gf_cmts ::= gf_no_cmts()
@@ -40,7 +35,7 @@ gf_idx ::= 0
 // past it into the following decl. Set per top-level decl in pretty_module_in; 0 = the final decl.
 gf_block_end ::= 0
 pretty_set_block_end* = (e: i32) void { gf_block_end = e }
-pretty_set_comments* = (src: StringView, cmts: [Comment]) void {
+pretty_set_comments* = (src: StringView, cmts: MutSlice<Comment>) void {
     gf_src = src
     gf_cmts = cmts
     gf_idx = 0
@@ -371,19 +366,16 @@ ff_ty* = (s: String, a: Allocator, t: Ty) String {
             .ff_append(a, ">"),
     })
 }
-// `[T]` is the sugar for the DEFAULT slice kind, so print that spelling back verbatim (every
-// existing source writes it); only the non-default kind needs its keyword form.
+// Slice types are always explicit. Brackets belong to values (`xs[i]` and slice literals), never
+// type declarations; `Slice<T>` names a read-only window and `MutSlice<T>` a writable one.
 ff_slice_ty = (s: String, a: Allocator, pd: PtrData) String {
-    (pd.kind == k_slice_dflt()).match ({
-        true  => s.ff_append(a, "[").ff_ty(a, load(pd.pointee)).ff_append(a, "]"),
-        false => s
-            .ff_append(a, slice_kw(pd.kind))
-            .ff_append(a, "<")
-            .ff_ty(a, load(pd.pointee))
-            .ff_append(a, ">"),
-    })
+    s
+        .ff_append(a, slice_kw(pd.kind))
+        .ff_append(a, "<")
+        .ff_ty(a, load(pd.pointee))
+        .ff_append(a, ">")
 }
-ff_tys* = (s: String, a: Allocator, ts: [Ty]) String {
+ff_tys* = (s: String, a: Allocator, ts: MutSlice<Ty>) String {
     out ::= s
     ts.loop_at((i, t) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
@@ -473,7 +465,7 @@ ff_no_lead_cmt = (sp: i32) bool {
 // stays inline — `{ s.len() }` — matching the codebase's one-liner style and keeping `zenc doc`'s first
 // line intact. STATEMENT blocks (match arms / loop / if / while, drop_ret = false) ALWAYS expand, as the
 // fixtures require. Inlining is suppressed when a leading comment sits inside the body (it would be dropped).
-ff_block* = (s: String, a: Allocator, body: [Stmt], ind: i32, drop_ret: bool) String {
+ff_block* = (s: String, a: Allocator, body: MutSlice<Stmt>, ind: i32, drop_ret: bool) String {
     (body.len == 0).match ({
         true  => s.ff_append(a, "{ }"),
         false => (drop_ret
@@ -490,7 +482,7 @@ ff_block* = (s: String, a: Allocator, body: [Stmt], ind: i32, drop_ret: bool) St
         }),
     })
 }
-ff_stmts = (s: String, a: Allocator, body: [Stmt], ind: i32, drop_ret: bool) String {
+ff_stmts = (s: String, a: Allocator, body: MutSlice<Stmt>, ind: i32, drop_ret: bool) String {
     out ::= s
     last = body.len - 1
     body.loop_at((i, st) {
@@ -569,7 +561,7 @@ ff_let = (s: String, a: Allocator, l: LetData, ind: i32) String {
 }
 // ── module: each decl on its own line; hoisted methods + inherent-impl markers are skipped (their
 // bodies print inside the owning struct / trait impl instead). ───────────────────────────────────
-pretty_module_in* = (a: Allocator, decls: [Decl], exp: [Param]) String {
+pretty_module_in* = (a: Allocator, decls: MutSlice<Decl>, exp: MutSlice<Param>) String {
     s = a.ff_string(8192)
     out ::= s
     decls.loop_at((i, d) {
@@ -596,7 +588,7 @@ pretty_module_in* = (a: Allocator, decls: [Decl], exp: [Param]) String {
 // the source position of the next decl at or after index `i` that HAS one (skips position-less decls,
 // e.g. inherent-impl markers, so the boundary is a real source offset). 0 = none left. Used only to cap
 // which trailing comment belongs to the decl just printed — a slightly loose bound is harmless.
-gf_next_decl_pos = (a: Allocator, decls: [Decl], i: i32) i32 {
+gf_next_decl_pos = (a: Allocator, decls: MutSlice<Decl>, i: i32) i32 {
     (i >= decls.len).then({
         return 0
     })
@@ -614,7 +606,14 @@ gf_next_decl_pos = (a: Allocator, decls: [Decl], i: i32) i32 {
     (p > 0).then({ p }, { a.gf_next_decl_pos(decls, i + 1) })
 }
 // one top-level decl: leading comments (col 0) → the decl → its trailing comment (bounded by `nb`) → newline.
-ff_top_decl = (a: Allocator, s: String, exp: [Param], decls: [Decl], d: Decl, nb: i32) String {
+ff_top_decl = (
+    a: Allocator,
+    s: String,
+    exp: MutSlice<Param>,
+    decls: MutSlice<Decl>,
+    d: Decl,
+    nb: i32,
+) String {
     lead = s.ff_flush_leading(a, gf_decl_pos(d), 0)
     body = lead.ff_decl(a, exp, decls, d)
     withc = body.ff_trailing(a, nb)    // a decl gets only an inline same-line comment; own-line

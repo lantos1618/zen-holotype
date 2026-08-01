@@ -1,4 +1,4 @@
-// std.sort — in-place, NON-RECURSIVE comparison sorting + binary search over a mutable `[T]` slice.
+// std.sort — in-place, NON-RECURSIVE comparison sorting + binary search over a `MutSlice<T>`.
 //
 // ALGORITHM = HEAPSORT (in-place, O(1) extra space, guaranteed O(n log n), NO recursion). This is a
 // deliberate choice forced by the test/dev build: the generated C is compiled with NO optimization
@@ -36,8 +36,8 @@
 //   binary_search_by — the [lo,hi) window halves each pass (≤⌈log2(n)⌉ times, bounded by the 0..xs.len
 //     `.loop`), breaking when the window empties or a match is found. Empty slice ⇒ `.None`.
 { Opt } = std.core.result
-{ Ord } = std.cmp
-sort_sift_down<T> = (xs: [T], start: i64, end: i64, less: (T, T) bool) void {
+{ Ord, is_lt } = std.cmp
+sort_sift_down<T> = (xs: MutSlice<T>, start: i64, end: i64, less: (T, T) bool) void {
     root ::= start
     xs.loop((h, step, _) {
         child = 2 * root + 1
@@ -61,7 +61,7 @@ sort_sift_down<T> = (xs: [T], start: i64, end: i64, less: (T, T) bool) void {
         })
     })
 }
-sort_by*<T> = (xs: [T], less: (T, T) bool) void {
+sort_by*<T> = (xs: MutSlice<T>, less: (T, T) bool) void {
     n = xs.len
     (n <= 1 == false).then({
         half = n / 2
@@ -83,8 +83,8 @@ sort_by*<T> = (xs: [T], less: (T, T) bool) void {
         })
     })
 }
-sort*<T> = (xs: [T]) void { xs.sort_by((a: T, b: T) bool { a < b }) }
-is_sorted_by*<T> = (xs: [T], less: (T, T) bool) bool {
+sort*<T> = (xs: MutSlice<T>) void { xs.sort_by((a: T, b: T) bool { a < b }) }
+is_sorted_by*<T> = (xs: MutSlice<T>, less: (T, T) bool) bool {
     ok ::= true
     xs.loop((h, i, x) {
         (i > 0).then({
@@ -96,8 +96,8 @@ is_sorted_by*<T> = (xs: [T], less: (T, T) bool) bool {
     })
     ok
 }
-is_sorted*<T> = (xs: [T]) bool { xs.is_sorted_by((a: T, b: T) bool { a < b }) }
-binary_search_by*<T> = (xs: [T], target: T, less: (T, T) bool) Opt<i64> {
+is_sorted*<T> = (xs: MutSlice<T>) bool { xs.is_sorted_by((a: T, b: T) bool { a < b }) }
+binary_search_by*<T> = (xs: MutSlice<T>, target: T, less: (T, T) bool) Opt<i64> {
     lo ::= 0
     hi ::= xs.len
     found :: Opt<i64> = .None
@@ -125,12 +125,12 @@ binary_search_by*<T> = (xs: [T], target: T, less: (T, T) bool) Opt<i64> {
     })
     found
 }
-binary_search*<T> = (xs: [T], target: T) Opt<i64> {
+binary_search*<T> = (xs: MutSlice<T>, target: T) Opt<i64> {
     xs.binary_search_by(target, (a: T, b: T) bool { a < b })
 }
 // First index in sorted `ks` whose key is NOT LESS THAN `k` (insertion point; equals `k`'s index
 // when present). Iterative binary search — O(log n), bounded stack.
-lower_bound*<K: Ord> = (ks: [K], k: K) i64 {
+lower_bound*<K: Ord> = (ks: MutSlice<K>, k: K) i64 {
     lo ::= 0
     hi ::= ks.len
     ks.loop((h, step, _) {
@@ -138,9 +138,13 @@ lower_bound*<K: Ord> = (ks: [K], k: K) i64 {
             true  => h.break,
             false => {
                 mid = lo + (hi - lo) / 2
-                (ks[mid].cmp(k) < 0).match ({
-                    true  => { lo = mid + 1 },
-                    false => { hi = mid },
+                ks[mid].cmp(k).is_lt().match ({
+                    true  => {
+                        lo = mid + 1
+                    },
+                    false => {
+                        hi = mid
+                    },
                 })
             },
         })

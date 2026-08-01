@@ -1,19 +1,8 @@
-// compiler.lex — turn zen source text into a token stream. Two forms, both in this file:
-//   • scan(src, pos) — the default: one token at a time, PURE (position in, position
-//     out). Allocation-free and slice-free — the source is read raw (a `str` is a const
-//     char*, so load(offset(src,i)) gives byte i), and a token is just a span
-//     { kind, start, len } into it. So genc can lower this. Iterate to Eof.
-//     allocated through an explicit allocator (bottom of the file). Use it when you want
-//     to hand a file's tokens around; the scan form is better when you just consume them.
-// C strings are NUL-terminated, so byte 0 ends the scan and no length is threaded.
-//
-//   sc = scan(src, 0)        // one token + where to resume
-//   sc.tok.kind               // Ident | Int | Float | Str | Sym | Eof
-//   sc.next                   // feed back into scan for the next token
+// `scan(src, pos)` is allocation-free: it returns one source span and the next position. NUL ends
+// the source. The buffered form at the end of this file is for consumers that retain tokens.
 { at, block_comment_at, is_digit, is_hex, is_bin, is_oct, is_alpha, is_alnum, is_space,
   line_comment_at, rawstr_at } = std.text.ascii
 { advance_while, repeat_while, step_while } = std.core.count
-// ── tokens ───────────────────────────────────────────────────────────────────
 TokKind: Ident | Int | Float | Str | Char | Sym | Eof
 Token*: {
     kind: TokKind,
@@ -24,7 +13,6 @@ Scan*: {
     tok: Token,
     next: i32,
 }    // one scan step: the token + resume pos
-// ── the lexer's one failure flag ───────────────────────────────────────────────
 // Set when a `/*` never closes: the rest of the file vanishes into the comment and the stream
 // silently ENDS at the typo — every later decl would be dropped with no error. The parser reads
 // this (lerr_get, mirroring parse_type's perr_get) and rejects the module as a parse error
@@ -350,9 +338,11 @@ Comment*: {
     len: i32,
     trailing: bool,
 }    // span [start, start+len); trailing = same-line code before it
-cmt_buf = (a: Allocator, n: i32) [Comment] { slice(a.acquire_or_die(n * sizeof(Comment)), n) }
+cmt_buf = (a: Allocator, n: i32) MutSlice<Comment> {
+    slice(a.acquire_or_die(n * sizeof(Comment)), n)
+}
 // count comments first so the buffer is exact (no cap guesswork on a 100KB file).
-collect_comments* = (a: Allocator, src: StringView) [Comment] {
+collect_comments* = (a: Allocator, src: StringView) MutSlice<Comment> {
     n = src.count_comments()
     buf = a.cmt_buf(n + 1)    // +1 keeps a 0-comment file from a 0-size acquire
     src.fill_comments(buf, 0)
@@ -460,7 +450,7 @@ line_is_blank_before = (src: StringView, s: i32) bool {
     blank
 }
 // record each comment span into `buf` (exactly count_comments() of them); same scanner as the count.
-fill_comments = (src: StringView, buf: [Comment], k0: i32) void {
+fill_comments = (src: StringView, buf: MutSlice<Comment>, k0: i32) void {
     zero: i32 = 0
     k ::= k0
     in_str ::= false

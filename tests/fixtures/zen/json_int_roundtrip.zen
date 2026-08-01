@@ -9,6 +9,7 @@
 //
 // Exit 0 = every case matched expectation.
 { to_exit } = std.core.bool
+{ eq } = std.text.str
 { Heap } = std.mem.alloc
 heap = std.mem.heap
 json = std.format.json
@@ -38,6 +39,59 @@ num_of = (a: MutPtr<Heap>, src: StringView, miss: f64) f64 {
         }),
         .Err(_) => miss,
     })
+}
+str_is = (a: MutPtr<Heap>, src: StringView, want: StringView) bool {
+    json.parse(a, src).match ({
+        .Ok(v)  => json.as_str(v).match ({
+            .Some(got) => got.eq(want),
+            .None      => false,
+        }),
+        .Err(_) => false,
+    })
+}
+bad_string_at = (a: MutPtr<Heap>, src: StringView, at: i64) bool {
+    json.parse(a, src).match ({
+        .Ok(_)  => false,
+        .Err(e) => e.match ({
+            .BadString(p) => p == at,
+            _             => false,
+        }),
+    })
+}
+unexpected_at = (a: MutPtr<Heap>, src: StringView, at: i64) bool {
+    json.parse(a, src).match ({
+        .Ok(_)  => false,
+        .Err(e) => e.match ({
+            .Unexpected(p) => p == at,
+            _              => false,
+        }),
+    })
+}
+trailing_at = (a: MutPtr<Heap>, src: StringView, at: i64) bool {
+    json.parse(a, src).match ({
+        .Ok(_)  => false,
+        .Err(e) => e.match ({
+            .TrailingGarbage(p) => p == at,
+            _                   => false,
+        }),
+    })
+}
+escape_ok = (a: MutPtr<Heap>) bool {
+    a.str_is("\"\\u0041\"", "A")
+        && a.str_is("\"line\\nnext\"", "line\nnext")
+        && a.str_is("\"tab\\tnext\"", "tab\tnext")
+        && a.str_is("\"return\\rnext\"", "return\rnext")
+        && a.str_is("\"back\\bspace\"", "back\x08space")
+        && a.str_is("\"form\\ffeed\"", "form\x0cfeed")
+        && a.str_is("\"\\/\"", "/")
+        && a.str_is("\"\\\"\"", "\"")
+        && a.str_is("\"\\\\\"", "\\")
+        && a.bad_string_at("\"\\q\"", 1)
+        && a.bad_string_at("\"\\u12x4\"", 1)
+        && a.unexpected_at("[1,]", 3)
+        && a.unexpected_at("{\"a\" 1}", 5)
+        && a.unexpected_at("{\"a\":}", 5)
+        && a.trailing_at("true x", 5)
 }
 // TEXT: what went in comes back out, byte for byte.
 //   "9007199254740993" is the acid test — 2^53 + 1 has no exact f64.
@@ -92,5 +146,5 @@ pretty_ok = (a: MutPtr<Heap>) bool {
 main = () i32 {
     h = heap.gpa()
     a = h.addr()
-    (a.text_ok() && a.huge_ok() && a.acc_ok() && a.eq_ok() && a.pretty_ok()).to_exit()
+    (a.escape_ok() && a.text_ok() && a.huge_ok() && a.acc_ok() && a.eq_ok() && a.pretty_ok()).to_exit()
 }

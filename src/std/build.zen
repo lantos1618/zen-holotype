@@ -16,7 +16,7 @@ Build*: {
     alloc_: Heap,
     host_: Platform,
     target_: Platform,
-    targets_: [Target],
+    targets_: MutSlice<Target>,
     count_: i64,
     host   = (b: Ptr<Build>) Platform { b.host_ }
     target = (b: Ptr<Build>) Platform { b.target_ }
@@ -32,7 +32,7 @@ Build*: {
     }
     emit_spec = (b: Ptr<Build>) void {
         println(b.count_)
-        installed: [Target] = slice(b.targets_.ptr, b.count_)
+        installed: MutSlice<Target> = slice(b.targets_.ptr, b.count_)
         installed.loop_at((i, target) { target.emit_target() })
         // trailing genmod section: count line, then the use()-records verbatim (their stored
         // format IS the plan framing — see the c_library block below).
@@ -44,7 +44,7 @@ Build*: {
 build_context = () Build {
     a = Heap(_: 0)
     p = host()
-    slots: [Target] = slice(assert_nonnull(a.addr().acquire(256 * sizeof(Target))), 256)
+    slots: MutSlice<Target> = slice(assert_nonnull(a.addr().acquire(256 * sizeof(Target))), 256)
     Build(
         alloc_: a,
         host_: p,
@@ -59,9 +59,9 @@ Target*: {
     main_: StringView,
     out_: StringView,
     links_: StringView,
-    sources_: [StringView],
-    frameworks_: [StringView],
-    libraries_: [StringView],
+    sources_: MutSlice<StringView>,
+    frameworks_: MutSlice<StringView>,
+    libraries_: MutSlice<StringView>,
     platform_: Platform,
     ffi_: StringView,
     cflags_: StringView,
@@ -140,7 +140,7 @@ Target*: {
             cflags_: t.cflags_,
         )
     }
-    sources = (t: Target, xs: [StringView]) Target {
+    sources = (t: Target, xs: MutSlice<StringView>) Target {
         Target(
             name: t.name,
             root_: t.root_,
@@ -155,7 +155,7 @@ Target*: {
             cflags_: t.cflags_,
         )
     }
-    frameworks = (t: Target, xs: [StringView]) Target {
+    frameworks = (t: Target, xs: MutSlice<StringView>) Target {
         Target(
             name: t.name,
             root_: t.root_,
@@ -170,7 +170,7 @@ Target*: {
             cflags_: t.cflags_,
         )
     }
-    libraries = (t: Target, xs: [StringView]) Target {
+    libraries = (t: Target, xs: MutSlice<StringView>) Target {
         Target(
             name: t.name,
             root_: t.root_,
@@ -244,13 +244,13 @@ Target*: {
         s = s.append_in(mp, c.src_).expect(cb_oom())
         cuse_records = s.finish_in(mp).cb_fin()
     }
-    sources_on = (t: Target, os: Os, xs: [StringView]) Target {
+    sources_on = (t: Target, os: Os, xs: MutSlice<StringView>) Target {
         (t.platform_.os == os).then({ t.sources(xs) }, { t })
     }
-    frameworks_on = (t: Target, os: Os, xs: [StringView]) Target {
+    frameworks_on = (t: Target, os: Os, xs: MutSlice<StringView>) Target {
         (t.platform_.os == os).then({ t.frameworks(xs) }, { t })
     }
-    libraries_on = (t: Target, os: Os, xs: [StringView]) Target {
+    libraries_on = (t: Target, os: Os, xs: MutSlice<StringView>) Target {
         (t.platform_.os == os).then({ t.libraries(xs) }, { t })
     }
     emit_target = (t: Target) void {
@@ -325,7 +325,7 @@ build_abi_code = (abi: Abi) i32 {
     })
 }
 exe* = (name: StringView) Target {
-    empty: [StringView] = []
+    empty: MutSlice<StringView> = []
     Target(
         name: name,
         root_: "",
@@ -372,7 +372,7 @@ c_opaque* = (name: StringView) CDecl {
 CLib*: {
     lib: StringView,
     name: StringView,
-    decls: [CDecl],
+    decls: MutSlice<CDecl>,
 }
 CLibrary*: {
     lib_: StringView,

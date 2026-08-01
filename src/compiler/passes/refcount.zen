@@ -1,6 +1,5 @@
-// compiler.passes.refcount — refcount insertion sub-pass extracted from compiler.check.
 { CallData, Decl, Expr, FieldInit, Func, GenericData, LoopData, MatchData, Param, Stmt, Ty } = compiler.ast.ast_types
-{ dfunc, no_tys, subst_ty_in, tvoid, acquire_or_die } = compiler.genc
+{ dfunc, no_tys, param_at, subst_ty_in, tvoid, acquire_or_die } = compiler.genc
 { mangle_semantic_in } = compiler.mangle
 { Env, arm_env, bind_fnret, empty_params, extend_env, fnret_of, is_void_ty, params_env, pbuf,
   tloop_index, vcons } = compiler.check
@@ -11,7 +10,7 @@
 { expr_fold_children } = compiler.ast.expr_children
 { gd_has_mangled, gd_tys_max_depth } = compiler.generics
 { loop_at } = std.core.count
-rc_calls_es = (xs: [Expr], nm: StringView) bool {
+rc_calls_es = (xs: MutSlice<Expr>, nm: StringView) bool {
     f ::= false
     xs.loop_at((i, x) { f = f.then({ true }, { x.addr().rc_calls_e(nm) }) })
     f
@@ -37,7 +36,7 @@ rc_calls_stmt = (st: Stmt, nm: StringView) bool {
         .IndexSet(x) => x.seq.rc_calls_e(nm) || x.idx.rc_calls_e(nm) || x.value.rc_calls_e(nm),
     })
 }
-rc_calls_body* = (body: [Stmt], nm: StringView) bool {
+rc_calls_body* = (body: MutSlice<Stmt>, nm: StringView) bool {
     f ::= false
     body.loop_at((i, st) { f = f.then({ true }, { st.rc_calls_stmt(nm) }) })
     f
@@ -46,7 +45,7 @@ rc_calls_body* = (body: [Stmt], nm: StringView) bool {
 // FnT-param generic: the intrinsic expands in the inliner with the receiver's CONCRETE type, which
 // only the call-site inline provides. Lives here (beside its rc_calls_body walker) so both the
 // inline router (check_inline.no_inline_gen_f) and the validator (kinds.ka_rec_hof_kind) share it.
-calls_reflect* = (body: [Stmt]) bool {
+calls_reflect* = (body: MutSlice<Stmt>) bool {
     body.rc_calls_body("field_eq")
         || body.rc_calls_body("each_field")
         || body.rc_calls_body("zip_fields")
@@ -66,13 +65,13 @@ calls_reflect* = (body: [Stmt]) bool {
 // an honest function return. Statement-level returns (top level / If branches) stay inlinable — the
 // existing lift handles those (or_return_expr_generic_inline relies on it). FnT-param generics can't
 // monomorphize (their lambda args must splice), so they are out of scope here, as before.
-rc_gbuf* = (a: Allocator, n: i64) [GenericData] {
+rc_gbuf* = (a: Allocator, n: i64) MutSlice<GenericData> {
     slice(a.acquire_or_die(n * sizeof(GenericData)), n)
 }
 // dedup scan (gd_has_mangled) + type-arg nesting depth (gd_ty_depth/gd_tys_max_depth) are shared
 // leaves; they live in compiler.generics (imported above) alongside their mono twins. rc_add stays
 // local — it differs from mono's add_inst only in its panic message, so it is NOT byte-identical.
-rc_add = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
+rc_add = (buf: MutSlice<GenericData>, cnt: i32, g: GenericData) i32 {
     // a polymorphic-recursive self-call (deeper targs each step) would grow the worklist forever; drop
     // the absurdly-deep instance (a well-formed one is shallow) and never write past the buffer.
     (1 + g.args.gd_tys_max_depth() > 24).then({
@@ -86,23 +85,23 @@ rc_add = (buf: [GenericData], cnt: i32, g: GenericData) i32 {
 }
 // discovery: walk concrete bodies (Env-threaded for full type inference incl. addr/dispatch), recording
 // one instance per recursive-generic call site (targs inferred exactly as resolve_call will mangle them).
-rc_col_es = (env: Env, buf: [GenericData], cnt: i32, xs: [Expr]) i32 {
+rc_col_es = (env: Env, buf: MutSlice<GenericData>, cnt: i32, xs: MutSlice<Expr>) i32 {
     c ::= cnt
     xs.loop_at((i, x) { c = env.rc_col_e(buf, c, x.addr()) })
     c
 }
-rc_col_inits = (env: Env, buf: [GenericData], cnt: i32, inits: [FieldInit]) i32 {
+rc_col_inits = (env: Env, buf: MutSlice<GenericData>, cnt: i32, inits: MutSlice<FieldInit>) i32 {
     c ::= cnt
     inits.loop_at((i, fi) { c = env.rc_col_e(buf, c, fi.value) })
     c
 }
-rc_col_match = (env: Env, buf: [GenericData], cnt: i32, m: MatchData) i32 {
+rc_col_match = (env: Env, buf: MutSlice<GenericData>, cnt: i32, m: MatchData) i32 {
     c ::= env.clr_exp().rc_col_e(buf, cnt, m.subj)
     t = env.infer_expr(m.subj)
     m.arms.loop_at((i, ar) { c = env.a.arm_env(env, t, ar).rc_col_e(buf, c, ar.body) })
     c
 }
-rc_col_loop = (env: Env, buf: [GenericData], cnt: i32, l: LoopData) i32 {
+rc_col_loop = (env: Env, buf: MutSlice<GenericData>, cnt: i32, l: LoopData) i32 {
     c = env.clr_exp().rc_col_e(buf, cnt, l.seq)
     e = Env(
         vars: env.a.vcons(l.elem, l.elemTy, env.a.vcons(l.idx, tloop_index(), env.vars)),
@@ -113,7 +112,7 @@ rc_col_loop = (env: Env, buf: [GenericData], cnt: i32, l: LoopData) i32 {
     )
     e.rc_col_body(buf, c, l.body)
 }
-rc_lam_env = (env: Env, ps: [Param]) Env {
+rc_lam_env = (env: Env, ps: MutSlice<Param>) Env {
     e ::= env
     ps.loop_at((i, p) {
         // bind as Void (opaque), NOT p.ty: a lambda param's ty is only its formatter-round-trip `: Type`
@@ -128,7 +127,7 @@ rc_lam_env = (env: Env, ps: [Param]) Env {
     })
     e
 }
-rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
+rc_col_call = (env: Env, buf: MutSlice<GenericData>, cnt: i32, c: CallData) i32 {
     dn = env.dispatch_name(c)
     f = env.env_func(dn)
     known = f.name == dn && f.params.len == c.args.len
@@ -157,7 +156,7 @@ rc_col_call = (env: Env, buf: [GenericData], cnt: i32, c: CallData) i32 {
 // each position walks under the SAME expected type resolve_expr_plain threads there (cleared for
 // operands/receivers/payloads, kept for cond branches, the element type for slice items), so a
 // generic call's return-position tparam infers — and mangles — exactly as resolve will.
-rc_col_e = (env: Env, buf: [GenericData], cnt: i32, e: Ptr<Expr>) i32 {
+rc_col_e = (env: Env, buf: MutSlice<GenericData>, cnt: i32, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)       => env.rc_col_call(buf, cnt, c),
         .Bin(b)        => env
@@ -180,7 +179,7 @@ rc_col_e = (env: Env, buf: [GenericData], cnt: i32, e: Ptr<Expr>) i32 {
 }
 // mirror resolve_stmt's expected-type discipline: a Let's value under its declared type, a Return's
 // operand under the enclosing fn's return, a non-tail ExprStmt under disc_env, conditions cleared.
-rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt, last: bool) i32 {
+rc_col_stmt = (env: Env, buf: MutSlice<GenericData>, cnt: i32, st: Stmt, last: bool) i32 {
     st.match ({
         .Let(l)      => env.let_exp(l.ty).rc_col_e(buf, cnt, l.value),
         .Assign(x)   => env.clr_exp().rc_col_e(buf, env.rc_col_e(buf, cnt, x.target), x.value),
@@ -204,7 +203,7 @@ rc_col_stmt = (env: Env, buf: [GenericData], cnt: i32, st: Stmt, last: bool) i32
                 .rc_col_e(buf, env.clr_exp().rc_col_e(buf, cnt, x.seq), x.idx), x.value),
     })
 }
-rc_col_body = (env: Env, buf: [GenericData], cnt: i32, body: [Stmt]) i32 {
+rc_col_body = (env: Env, buf: MutSlice<GenericData>, cnt: i32, body: MutSlice<Stmt>) i32 {
     c ::= cnt
     e ::= env
     body.loop_at((i, st) {
@@ -225,7 +224,7 @@ rc_fn_env = (env: Env, f: Func) Env {
 }
 // `from` skips decls already seeded by an earlier mono_close round: only the tail appended (and
 // HOF-spliced) since the previous round can surface NEW instances — the head's bodies are unchanged.
-rc_seed* = (env: Env, buf: [GenericData], cnt: i32, from: i64) i32 {
+rc_seed* = (env: Env, buf: MutSlice<GenericData>, cnt: i32, from: i64) i32 {
     c ::= cnt
     env.decls.loop_at((i, d) {
         c = (i >= from).match ({
@@ -242,14 +241,19 @@ rc_seed* = (env: Env, buf: [GenericData], cnt: i32, from: i64) i32 {
     c
 }
 // the substituted param list of one instance (tparam→arg in each param type).
-rc_subst_params = (a: Allocator, tparams: [Param], targs: [Ty], ps: [Param]) [Param] {
+rc_subst_params = (
+    a: Allocator,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    ps: MutSlice<Param>,
+) MutSlice<Param> {
     buf ::= a.pbuf(ps.len)
-    ps.loop_at((i, p) { buf[i] = param(p.name, a.subst_ty_in(tparams, targs, p.ty)) })
+    ps.loop_at((i, p) { buf[i] = param_at(p.name, a.subst_ty_in(tparams, targs, p.ty), p.pos) })
     buf
 }
 // transitive closure: each instance's substituted body may name further instances (its own self-call,
 // or a call to another recursive generic), so walk every instance body until no new ones appear.
-rc_expand_one = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
+rc_expand_one = (env: Env, buf: MutSlice<GenericData>, count: i32, i: i32) i32 {
     g = buf[i]
     tf = env.didx.idx_func(env.decls, g.name)
     iparams = env.a.rc_subst_params(tf.tparams, g.args, tf.params)
@@ -264,7 +268,7 @@ rc_expand_one = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
     )
     env.rc_expand(buf, ienv.rc_col_body(buf, count, ibody), i + 1)
 }
-rc_expand* = (env: Env, buf: [GenericData], count: i32, i: i32) i32 {
+rc_expand* = (env: Env, buf: MutSlice<GenericData>, count: i32, i: i32) i32 {
     (i >= count).then({ count }, { env.rc_expand_one(buf, count, i) })
 }
 // the concrete DFunc for one instance: template params/ret/body with tparam→arg substituted, given the

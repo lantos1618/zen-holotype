@@ -1,21 +1,18 @@
-// compiler.parse_match — match/then expressions — arm parsing, boolean/literal/variant matches, pattern binds & destructuring.
-// Split out of compiler.parse_expr (god-file split); pure move, no logic changes.
 { ArmData, Expr, Stmt } = compiler.ast.ast_types
-{ arm, arm_at, bin_at, block, call, call_at, cond, cond_at, ematch, lit, member, sexpr, slet, sret,
-  vref, acquire_or_die } = compiler.genc
+{ arm, arm_at, arm_spans, bin_at, block, call, call_at, cond, cond_at, ematch, lit, member, sexpr,
+  slet, slet_at, sret, vref, acquire_or_die } = compiler.genc
 { payload_fname } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
 { at } = std.text.ascii
 { Allocator } = std.mem.alloc
 { PEnd, bopen_enter, bopen_exit, is_comma, is_lbrace, is_rbrace, is_rparen, perr_set_at,
-  perr_set_kind_at, PE_ARROW, tok_eq } = compiler.parse_type
+  perr_set_kind_at, tok_eq } = compiler.parse_type
 { is_return_kw, materialize, parse_block } = compiler.parse_stmt
-{ enode, lexeme, parse_atom } = compiler.parse_atom
+{ enode, is_op, lexeme, parse_atom } = compiler.parse_atom
 { is_dot, is_ident_tok, parse_or_nested, parse_postfix } = compiler.parse_postfix
-{ is_lparen } = compiler.parse_primary
 { PExpr } = compiler.parse_expr
-// A one-statement `[Stmt]` holding `return v` — so `=> return v` lowers exactly like `=> { return v }`.
-ret_arm_stmts = (a: Allocator, v: Ptr<Expr>) [Stmt] {
+// A one-statement `MutSlice<Stmt>` holding `return v` — so `=> return v` lowers exactly like `=> { return v }`.
+ret_arm_stmts = (a: Allocator, v: Ptr<Expr>) MutSlice<Stmt> {
     buf ::= slice(a.acquire_or_die(sizeof(Stmt)), 1)
     buf[0] = sret(v)
     buf
@@ -70,7 +67,7 @@ parse_match* = (a: Allocator, src: StringView, subj: PExpr) PExpr {
     kw = src.scan(dot.next)
     lp = src.scan(kw.next)
     open = src.scan(lp.next)
-    (src.is_lparen(lp.tok) && src.is_lbrace(open.tok)).match ({
+    (src.is_op(lp.tok, '(') && src.is_lbrace(open.tok)).match ({
         true  => src.close_match(a.parse_match_arms(src, subj, open)),
         false => {
             perr_set_at(lp.tok.start)
@@ -91,7 +88,7 @@ parse_then* = (a: Allocator, src: StringView, subj: PExpr) PExpr {
     kw = src.scan(dot.next)
     lp = src.scan(kw.next)
     open = src.scan(lp.next)
-    (src.is_lparen(lp.tok) && src.is_lbrace(open.tok)).match ({
+    (src.is_op(lp.tok, '(') && src.is_lbrace(open.tok)).match ({
         true  => {
             prev = bopen_enter(open.tok.start)
             body = a.parse_block(src, open.next)
@@ -120,7 +117,13 @@ parse_then* = (a: Allocator, src: StringView, subj: PExpr) PExpr {
 // the else arm of the two-arm form, after the `,`: exactly `{ b })`. Anything else — a non-block
 // second argument, or a THIRD argument after the else block — is a positioned parse error at the
 // offending token (`.then` takes one or two block arguments, never more).
-parse_then_else = (a: Allocator, src: StringView, subj: PExpr, tstmts: [Stmt], pos: i32) PExpr {
+parse_then_else = (
+    a: Allocator,
+    src: StringView,
+    subj: PExpr,
+    tstmts: MutSlice<Stmt>,
+    pos: i32,
+) PExpr {
     ob = src.scan(pos)
     src.is_lbrace(ob.tok).match ({
         true  => {
@@ -149,7 +152,7 @@ parse_then_else = (a: Allocator, src: StringView, subj: PExpr, tstmts: [Stmt], p
 // node a bool `.match` arm carries, so value-position semantics and the formatter's inline
 // `{ e }` re-print round-trip. Any other block (multi-statement, early return, empty) stays a
 // Block arm, exactly like a block-bodied match arm.
-then_arm = (a: Allocator, stmts: [Stmt]) Ptr<Expr> {
+then_arm = (a: Allocator, stmts: MutSlice<Stmt>) Ptr<Expr> {
     (stmts.len == 1).match ({
         true  => stmts[0].match ({
             .ExprStmt(e) => e,
@@ -171,7 +174,7 @@ parse_match_arms = (a: Allocator, src: StringView, subj: PExpr, open: Scan) PExp
 is_bool_label = (src: StringView, t: Token) bool { src.tok_eq(t, "true") || src.tok_eq(t, "false") }
 is_wild_label = (src: StringView, t: Token) bool { src.tok_eq(t, "_") }
 // Bad/non-exhaustive match forms become an unknown sentinel call for validation to reject.
-no_args = (a: Allocator) [Expr] { slice(null_ptr(), 0) }
+no_args = (a: Allocator) MutSlice<Expr> { slice(null_ptr(), 0) }
 reject_match* = (a: Allocator, next: i32) PExpr {
     PExpr(
         expr: a.enode(call("__nonexhaustive_match", a.no_args())),
@@ -284,7 +287,7 @@ arm_rhs = (a: Allocator, src: StringView, pos: i32, bare_ok: bool) PExpr {
         true  => a.parse_arm_body(src, nx.next),
         false => {
             (bare_ok == false).then({
-                perr_set_kind_at(nx.tok.start, PE_ARROW())
+                perr_set_kind_at(nx.tok.start, .ExpectedArrow)
             })
             PExpr(
                 expr: a.enode(block(a.no_arm_stmts())),
@@ -511,26 +514,33 @@ subj_name* = (e: Ptr<Expr>) StringView {
         _       => "",
     })
 }
+subj_pos* = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Var(v) => v.pos,
+        _       => 0,
+    })
+}
 // Variant match arms; compiler.check fills the enum name.
-arm_buf = (a: Allocator) [ArmData] { slice(a.acquire_or_die(1024 * sizeof(ArmData)), 1024) }
-take_arms = (buf: [ArmData], n: i32) [ArmData] { slice(buf.ptr, n) }
+arm_buf = (a: Allocator) MutSlice<ArmData> { slice(a.acquire_or_die(1024 * sizeof(ArmData)), 1024) }
+take_arms = (buf: MutSlice<ArmData>, n: i32) MutSlice<ArmData> { slice(buf.ptr, n) }
 // A comma-separated payload binder list `(x, y, …)` — one entry for a single binder, N for a destructure.
 BindList: {
-    names: [StringView],
+    binds: MutSlice<BindName>,
     count: i32,
     next: i32,
 }
 // One binder slot: a borrowed string view. Kept as a named struct for generic buffer element sizing;
 // a one-pointer struct is exactly one binder slot (see map.zen).
-NameSlot: {
-    s: StringView,
+BindName: {
+    name: StringView,
+    pos: i32,
 }
-bind_buf = (a: Allocator) [StringView] { slice(a.acquire_or_die(64 * sizeof(NameSlot)), 64) }
-fill_binds = (a: Allocator, src: StringView, pos: i32, buf: [StringView], i: i32) BindList {
+bind_buf = (a: Allocator) MutSlice<BindName> { slice(a.acquire_or_die(64 * sizeof(BindName)), 64) }
+fill_binds = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<BindName>, i: i32) BindList {
     (i >= buf.len).then({
         perr_set_at(pos)
         return BindList(
-            names: buf,
+            binds: buf,
             count: i,
             next: pos,
         )
@@ -540,7 +550,10 @@ fill_binds = (a: Allocator, src: StringView, pos: i32, buf: [StringView], i: i32
     (is_ident_tok(bt.tok) == false).then({
         perr_set_at(bt.tok.start)
     })
-    buf[i] = a.lexeme(src, bt.tok)
+    buf[i] = BindName(
+        name: a.lexeme(src, bt.tok),
+        pos: bt.tok.start,
+    )
     nx = src.scan(bt.next)
     src.is_comma(nx.tok).match ({
         true  => a.fill_binds(src, nx.next, buf, i + 1),
@@ -549,7 +562,7 @@ fill_binds = (a: Allocator, src: StringView, pos: i32, buf: [StringView], i: i32
                 perr_set_at(nx.tok.start)
             })
             BindList(
-                names: buf,
+                binds: buf,
                 count: i + 1,
                 next: nx.next,
             )
@@ -562,9 +575,9 @@ arm_binds = (a: Allocator, src: StringView, pos: i32) BindList {
 // Multi-binder destructure `.A(x, y) => body` desugars to ONE synthetic binder `__zen_payload` bound to
 // the anon-struct payload, plus prepended `x = __zen_payload._0  y = __zen_payload._1 …` lets, then the
 // original body as the trailing value — lowering to the existing single-binder + field-access form.
-fill_destr = (a: Allocator, bl: BindList, stm: [Stmt], k: i32) void {
+fill_destr = (a: Allocator, bl: BindList, stm: MutSlice<Stmt>, k: i32) void {
     (k < bl.count).then({
-        stm[k] = slet(bl.names[k], a.enode(member(a.enode(vref("__zen_payload")), a.payload_fname(k))))
+        stm[k] = slet_at(bl.binds[k].name, a.enode(member(a.enode(vref("__zen_payload")), a.payload_fname(k))), bl.binds[k].pos)
         a.fill_destr(bl, stm, k + 1)
     })
 }
@@ -575,7 +588,7 @@ destr_body = (a: Allocator, bl: BindList, body: Ptr<Expr>) Ptr<Expr> {
     stm[n] = sexpr(body)
     a.enode(block(stm))
 }
-fill_arms = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_arms = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<ArmData>, i: i32) PEnd {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Eof => {
@@ -595,7 +608,7 @@ fill_arms = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PE
     })
 }
 // Variant or wildcard arm; the leading token tells them apart.
-fill_marm = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_marm = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<ArmData>, i: i32) PEnd {
     // Guard fixed-size arm buffer.
     (i >= buf.len).then({
         perr_set_at(pos)
@@ -609,16 +622,16 @@ fill_marm = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PE
         false => a.fill_wild(src, pos, buf, i),
     })
 }
-fill_varm = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_varm = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<ArmData>, i: i32) PEnd {
     dot = src.scan(pos)
     vt = src.scan(dot.next)
     vn = a.lexeme(src, vt.tok)
     pk = src.scan(vt.next)
-    src.is_lparen(pk.tok).match ({
-        true  => a.fill_varm_bound(src, vn, pk.next, buf, i, dot.tok.start),
+    src.is_op(pk.tok, '(').match ({
+        true  => a.fill_varm_bound(src, vn, pk.next, buf, i, dot.tok.start, vt.tok.start),
         false => {
             rhs = a.arm_rhs(src, vt.next, false)
-            buf[i] = arm_at(vn, "", rhs.expr, dot.tok.start)
+            buf[i] = arm_spans(vn, "", rhs.expr, dot.tok.start, vt.tok.start, 0)
             a.arm_tail(src, rhs.next, buf, i)
         },
     })
@@ -629,15 +642,16 @@ fill_varm_bound = (
     src: StringView,
     vn: StringView,
     pos: i32,
-    buf: [ArmData],
+    buf: MutSlice<ArmData>,
     i: i32,
     dpos: i32,
+    variant_pos: i32,
 ) PEnd {
     bl = a.arm_binds(src, pos)
     rhs = a.arm_rhs(src, bl.next, false)
     buf[i] = (bl.count == 1).match ({
-        true  => arm_at(vn, bl.names[0], rhs.expr, dpos),
-        false => arm_at(vn, "__zen_payload", a.destr_body(bl, rhs.expr), dpos),
+        true  => arm_spans(vn, bl.binds[0].name, rhs.expr, dpos, variant_pos, bl.binds[0].pos),
+        false => arm_spans(vn, "__zen_payload", a.destr_body(bl, rhs.expr), dpos, variant_pos, 0),
     })
     a.arm_tail(src, rhs.next, buf, i)
 }
@@ -648,19 +662,19 @@ is_fat_arrow* = (src: StringView, t: Token) bool {
         _    => false,
     })
 }
-no_arm_stmts = (a: Allocator) [Stmt] { slice(null_ptr(), 0) }
+no_arm_stmts = (a: Allocator) MutSlice<Stmt> { slice(null_ptr(), 0) }
 // Wildcard arm or terminal bare `_`; non-wild labels here are parse errors.
-fill_wild = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+fill_wild = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<ArmData>, i: i32) PEnd {
     us = src.scan(pos)
     (src.is_wild_label(us.tok) == false).then({
         perr_set_at(us.tok.start)
     })
     rhs = a.arm_rhs(src, us.next, true)
-    buf[i] = arm_at("_", "", rhs.expr, us.tok.start)
+    buf[i] = arm_spans("_", "", rhs.expr, us.tok.start, us.tok.start, 0)
     a.arm_tail(src, rhs.next, buf, i)
 }
 // Comma continues arm list; rbrace closes it; anything else is a parse error.
-arm_tail = (a: Allocator, src: StringView, pos: i32, buf: [ArmData], i: i32) PEnd {
+arm_tail = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<ArmData>, i: i32) PEnd {
     after = src.scan(pos)
     src.is_comma(after.tok).match ({
         true  => a.fill_arms(src, after.next, buf, i + 1),

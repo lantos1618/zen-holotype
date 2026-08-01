@@ -1,59 +1,7 @@
-// std.format.json — a JSON value type with a recursive-descent parser and a compact serializer.
-//
-// JSON is the default config/data interchange format; this module gives Zen first-class
-// encode/decode built entirely on the existing stdlib (enums + payloads, the std.text.string
-// builder, and std.text.num's parse_f64/float).
-//
-// VALUE SHAPE. A `Value` is a tagged union over the six JSON kinds:
-//
-//   Entry*:  { key: StringView, val: Value }
-//   Object*: { entries: [Entry] }
-//   Value*:  Null | Bool(bool) | Int(i64) | Num(f64) | Str(StringView) | Arr([Value]) | Obj(Object)
-//
-// Objects are an insertion-ordered slice of (key, value) Entry pairs, and growable
-// arrays/objects accumulate through the module-local generic `JBuf<T>` buffer.
-//
-// ── COMPILER LIMITS HIT (and the design forced by each, all verified by bisection) ──
-// This module is the proverbial "two hard things" stress test for the self-hosted compiler.
-// Two real limits shaped the value type; neither is a JSON design choice:
-//   1. Objects can't be `Obj(Map<Value>)`. It compiles and round-trips WITHIN one file, but
-//      instantiating ANOTHER module's generic struct (`Map<T>`) against a recursive enum defined
-//      here fails to monomorphize once this module is imported (cross-module generic-struct-param).
-//   2. Objects can't use a parallel `Vec<StringView>` across this module boundary: that foreign
-//      generic string-element buffer still hits the cross-module monomorphization limit.
-//      Wrapping the key in the local `Entry` struct dodges it.
-//
-// ALLOCATOR. parse/stringify are generic over the allocator: every allocating entry takes
-// `a: AllocatorBackend` (heap, arena, fixed-buffer, test), threaded exactly like
-// std.collections' vec/hmap and std.sys.os. Pass `heap.gpa().addr()`, an arena, or any other allocator;
-// callers who already passed a `RequestArena` keep working unchanged (`RequestArena` still satisfies `A`).
-//
-// MEMORY. Parsed strings and object keys are allocator-owned NUL-terminated copies. On the SUCCESS
-// path `a.value_free(v)` gives the whole tree back; on the ERROR path nothing here frees the partial
-// tree, so back a fallible parse with an arena and reset it.
-//
-//   heap = std.mem.heap
-//   a = heap.gpa()
-//   json.parse(a.addr(), "{\"x\":[1,2,3]}").match ({
-//       .Ok(v)  => { ... json.get(v, "x") ... json.stringify(a.addr(), v) ... },
-//       .Err(e) => ...
-//   })
-//
-// NUMBERS. JSON has ONE number type, but f64 alone cannot round-trip it: `9007199254740993` has no
-// exact f64, and even `2` would come back as `2.0`. So `Value` keeps the two apart at the point of
-// parse — a token with no `.`/`e`/`E` whose magnitude fits i64 becomes `.Int(i64)` and re-serializes
-// byte-identically; everything else (fractions, exponents, i64-overflowing integers) becomes
-// `.Num(f64)` via std.text.num.parse_f64 (sign, fraction, e/E exponents — hand-rolled, ~15
-// significant digits, NOT correctly-rounded). `.Int` serializes through std.text.num.integer, `.Num`
-// through std.text.num.float ("1.0", "3.14", "1.0e+20"); `as_num` widens an `.Int` to f64 for callers
-// that just want a number, `as_int` reads the exact integer. `stringify` is compact; `pretty` is the
-// 2-space-indented form. (One boundary: std.text.str.try_parse_int documents |INT64_MIN| as an
-// overflow, so `-9223372036854775808` is the one in-range i64 that lands in `.Num`.)
-//
-// STRINGS. Decode handles the standard escapes \" \\ \/ \b \f \n \r \t and \uXXXX (a single BMP
-// code point, UTF-8 encoded; surrogate PAIRS are not recombined). Encode re-escapes \" \\ \n \r
-// \t and emits \u00XX for the remaining control bytes (< 0x20); all other bytes (incl. UTF-8
-// continuation bytes) pass through verbatim.
+// Recursive JSON values with compact and pretty serializers. Parsed trees own strings and keys;
+// value_free releases successful parses, while failed partial parses should use an arena reset.
+// Integers remain exact i64 values; other numbers use f64. Unicode escapes decode one BMP code point
+// and do not recombine surrogate pairs.
 { AllocatorBackend, release_slice } = std.mem.alloc
 { Result, Opt, IoError, err, expect } = std.core.result
 { String, new_in, push_in, append_in, append_slice_in, finish_in } = std.text.string
@@ -62,10 +10,6 @@
 { parse_f64, parse_i64_checked, float_in, integer_in } = std.text.num
 { loop_while } = std.core.count
 { loop_at } = std.core.count
-// ── OOM policy ────────────────────────────────────────────────────────────────
-// The String builder's ops return Result<_, IoError> (allocation failure is a value). This module
-// threads the caller's allocator whose exhaustion is fatal by policy, so builder Results are unwrapped
-// at the module boundary with these two helpers — parse/stringify keep their observable behavior.
 jok = (r: Result<String, IoError>) String { r.expect("std.json: allocation failed") }
 jfin = (r: Result<StringCstr, IoError>) StringView { r.expect("std.json: allocation failed") }
 // ── the value type ───────────────────────────────────────────────────────────
@@ -76,9 +20,9 @@ Entry*: {
     val: Value,
 }
 Object*: {
-    entries: [Entry],
+    entries: MutSlice<Entry>,
 }
-Value*: Null | Bool(bool) | Int(i64) | Num(f64) | Str(StringView) | Arr([Value]) | Obj(Object)
+Value*: Null | Bool(bool) | Int(i64) | Num(f64) | Str(StringView) | Arr(MutSlice<Value>) | Obj(Object)
 // A parse error, carrying the byte offset where it was detected (UnexpectedEof carries none).
 JsonError*: Unexpected(i64) | BadString(i64) | BadNumber(i64) | BadLiteral(i64) | TrailingGarbage(i64) | UnexpectedEof | TooDeep
 // nesting cap so a pathological "[[[[…" can't blow the native stack.
@@ -108,11 +52,9 @@ sstep_ok = (s: StringView, pos: i64) Result<StrStep, JsonError> {
 // One same-module generic `JBuf<T>` serves both array/object backbones: array elements as
 // `JBuf<Value>` and object entries as `JBuf<Entry>`. `T` is phantom in the fields, mirroring
 // std.collections.Vec; the element size flows through `sizeof(T)` at each same-module instantiation.
-// (A FOREIGN generic buffer still hits limit #2 above; a same-module one does not.)
-// KEEP verdict (re-verified 2026-07-23): instantiating std.collections.vec's `Vec<T>` against a
-// type defined in the importing module still fails to monomorphize (`need-annotation` inside
-// vec.zen's own body), so this local buffer is load-bearing, not redundant. Mirrors csv.zen's CBuf
-// — the duplication is forced by the same-module requirement and cannot be hoisted to a shared file.
+// STALE (re-checked 2026-08-01): the monomorphization limit this buffer was written around is gone —
+// `Vec<T>` now instantiates cross-module against an importer-declared type, recursive enums included.
+// csv.zen dropped its twin for `vec.vec_in`; this one should follow, and the local generic goes away.
 JBuf<T>: {
     ptr: RawPtr<u8>,
     len: i64,
@@ -135,7 +77,7 @@ jbuf_push<T> = (a: AllocatorBackend, jb: JBuf<T>, x: T) JBuf<T> {
             cap: jb.cap * 2 + 1,
         ),
     })
-    s :: [T] = slice(r.ptr, r.cap)
+    s :: MutSlice<T> = slice(r.ptr, r.cap)
     s[r.len] = x
     JBuf<T>(
         ptr: r.ptr,
@@ -143,7 +85,7 @@ jbuf_push<T> = (a: AllocatorBackend, jb: JBuf<T>, x: T) JBuf<T> {
         cap: r.cap,
     )
 }
-jbuf_slice<T> = (jb: JBuf<T>) [T] { slice(jb.ptr, jb.len) }
+jbuf_slice<T> = (jb: JBuf<T>) MutSlice<T> { slice(jb.ptr, jb.len) }
 // ── byte classes ──────────────────────────────────────────────────────────────
 json_ws = (b: u8) bool { b == ' ' || b == '\t' || b == '\n' || b == '\r' }
 is_num_start = (b: u8) bool { b == '-' || b >= '0' && b <= '9' }
@@ -169,7 +111,7 @@ skip_ws = (sv: Slice<u8>, pos: i64) i64 {
 }
 // ── string decoding (allocator-owned, escapes resolved) ───────────────────────
 // the code point of the 4 hex digits at sv[at..at+4], or -1 if any byte is not hex.
-hex4 = (sv: [u8], at: i64) i64 {
+hex4 = (sv: Slice<u8>, at: i64) i64 {
     d0 = hex_nibble(sv[at])
     d1 = hex_nibble(sv[at + 1])
     d2 = hex_nibble(sv[at + 2])
@@ -196,8 +138,78 @@ push_utf8 = (a: AllocatorBackend, sb: String, cp: i64) String {
         }),
     })
 }
+EscapeStep: {
+    sb: String,
+    next: i64,
+    valid: bool,
+}
+escape_bad = (sb: String, at: i64) EscapeStep {
+    EscapeStep(
+        sb: sb,
+        next: at,
+        valid: false,
+    )
+}
+escape_ok = (sb: String, at: i64) EscapeStep {
+    EscapeStep(
+        sb: sb,
+        next: at,
+        valid: true,
+    )
+}
+escape_byte = (b: u8) i32 {
+    (b == '"').then({
+        return to_i32('"')
+    })
+    (b == '\\').then({
+        return to_i32('\\')
+    })
+    (b == '/').then({
+        return to_i32('/')
+    })
+    (b == 'n').then({
+        return to_i32('\n')
+    })
+    (b == 't').then({
+        return to_i32('\t')
+    })
+    (b == 'r').then({
+        return to_i32('\r')
+    })
+    (b == 'b').then({
+        return to_i32('\x08')
+    })
+    (b == 'f').then({
+        return to_i32('\x0c')
+    })
+    0 - 1
+}
+decode_unicode = (a: AllocatorBackend, sb: String, sv: Slice<u8>, at: i64) EscapeStep {
+    (at + 5 >= sv.len).then({
+        return sb.escape_bad(at)
+    })
+    cp = hex4(sv, at + 2)
+    (cp < 0).then({
+        return sb.escape_bad(at)
+    })
+    a.push_utf8(sb, cp).escape_ok(at + 6)
+}
+decode_escape = (a: AllocatorBackend, sb: String, sv: Slice<u8>, at: i64) EscapeStep {
+    (at + 1 >= sv.len).then({
+        return sb.escape_bad(at)
+    })
+    esc = sv[at + 1]
+    (esc == 'u').then({
+        return a.decode_unicode(sb, sv, at)
+    })
+    decoded = esc.escape_byte()
+    (decoded < 0).then({
+        return sb.escape_bad(at)
+    })
+    sb.push_in(a, decoded.to_u8()).jok().escape_ok(at + 2)
+}
 // decode the JSON string starting at sv[pos] == '"'; returns the decoded view + the offset
-// just past the closing quote. The decoded bytes are accumulated through `a`.
+// just past the closing quote.
 parse_string_raw = (
     a: AllocatorBackend,
     src: StringView,
@@ -210,91 +222,24 @@ parse_string_raw = (
     resume :: i64 = pos + 1
     sv.loop_while((i, b) {
         (i < resume == false).then({
-            (b == '"').match ({
-                true  => {
-                    endpos = i + 1
-                },
-                false => (b == '\\').match ({
-                    true  => (i + 1 >= sv.len).match ({
-                        true  => {
-                            errpos = i
-                        },
-                        false => (sv[i + 1] == '"').match ({
-                            true  => {
-                                sb = sb.push_in(a, '"').jok()
-                                resume = i + 2
-                            },
-                            false => (sv[i + 1] == '\\').match ({
-                                true  => {
-                                    sb = sb.push_in(a, '\\').jok()
-                                    resume = i + 2
-                                },
-                                false => (sv[i + 1] == '/').match ({
-                                    true  => {
-                                        sb = sb.push_in(a, '/').jok()
-                                        resume = i + 2
-                                    },
-                                    false => (sv[i + 1] == 'n').match ({
-                                        true  => {
-                                            sb = sb.push_in(a, '\n').jok()
-                                            resume = i + 2
-                                        },
-                                        false => (sv[i + 1] == 't').match ({
-                                            true  => {
-                                                sb = sb.push_in(a, '\t').jok()
-                                                resume = i + 2
-                                            },
-                                            false => (sv[i + 1] == 'r').match ({
-                                                true  => {
-                                                    sb = sb.push_in(a, '\r').jok()
-                                                    resume = i + 2
-                                                },
-                                                false => (sv[i + 1] == 'b').match ({
-                                                    true  => {
-                                                        sb = sb.push_in(a, '\x08').jok()
-                                                        resume = i + 2
-                                                    },
-                                                    false => (sv[i + 1] == 'f').match ({
-                                                        true  => {
-                                                            sb = sb.push_in(a, '\x0c').jok()
-                                                            resume = i + 2
-                                                        },
-                                                        false => (sv[i + 1] == 'u').match ({
-                                                            true  => (i + 5 >= sv.len).match ({
-                                                                true  => {
-                                                                    errpos = i
-                                                                },
-                                                                false => {
-                                                                    cp = hex4(sv, i + 2)
-                                                                    (cp < 0).match ({
-                                                                        true  => {
-                                                                            errpos = i
-                                                                        },
-                                                                        false => {
-                                                                            sb = a.push_utf8(sb, cp)
-                                                                            resume = i + 6
-                                                                        },
-                                                                    })
-                                                                },
-                                                            }),
-                                                            false => {
-                                                                errpos = i
-                                                            },
-                                                        }),
-                                                    }),
-                                                }),
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    }),
-                    false => {
-                        sb = sb.push_in(a, b).jok()
-                        resume = i + 1
+            (b == '"').then({
+                endpos = i + 1
+            })
+            (b == '\\').then({
+                step = a.decode_escape(sb, sv, i)
+                step.valid.match ({
+                    true  => {
+                        sb = step.sb
+                        resume = step.next
                     },
-                }),
+                    false => {
+                        errpos = i
+                    },
+                })
+            })
+            (b != '"' && b != '\\').then({
+                sb = sb.push_in(a, b).jok()
+                resume = i + 1
             })
         })
         endpos < 0 && errpos < 0
@@ -379,10 +324,8 @@ parse_str_value = (
     sv: Slice<u8>,
     pos: i64,
 ) Result<Step, JsonError> {
-    a.parse_string_raw(src, sv, pos).match ({
-        .Ok(ss) => step_ok(.Str(ss.s), ss.pos),
-        .Err(e) => err(e),
-    })
+    ss = a.parse_string_raw(src, sv, pos).or_return()
+    step_ok(.Str(ss.s), ss.pos)
 }
 // ── aggregate parsers (mutually recursive with parse_value; OK because concrete) ──
 parse_array = (
@@ -393,19 +336,15 @@ parse_array = (
     depth: i64,
 ) Result<Step, JsonError> {
     p = sv.skip_ws(pos + 1)
-    (p >= sv.len).match ({
-        true  => err(.UnexpectedEof),
-        false => (sv[p] == ']').match ({
-            true  => {
-                empty: JBuf<Value> = a.jbuf_new()
-                step_ok(.Arr(empty.jbuf_slice()), p + 1)
-            },
-            false => {
-                seed: JBuf<Value> = a.jbuf_new()
-                a.arr_loop(src, sv, p, depth, seed)
-            },
-        }),
+    (p >= sv.len).then({
+        return err(.UnexpectedEof)
     })
+    (sv[p] == ']').then({
+        empty: JBuf<Value> = a.jbuf_new()
+        return step_ok(.Arr(empty.jbuf_slice()), p + 1)
+    })
+    seed: JBuf<Value> = a.jbuf_new()
+    a.arr_loop(src, sv, p, depth, seed)
 }
 arr_loop = (
     a: AllocatorBackend,
@@ -415,23 +354,19 @@ arr_loop = (
     depth: i64,
     vb: JBuf<Value>,
 ) Result<Step, JsonError> {
-    a.parse_value(src, sv, p, depth + 1).match ({
-        .Err(e) => err(e),
-        .Ok(st) => {
-            vb2 = a.jbuf_push(vb, st.v)
-            q = sv.skip_ws(st.pos)
-            (q >= sv.len).match ({
-                true  => err(.UnexpectedEof),
-                false => (sv[q] == ',').match ({
-                    true  => a.arr_loop(src, sv, sv.skip_ws(q + 1), depth, vb2),
-                    false => (sv[q] == ']').match ({
-                        true  => step_ok(.Arr(vb2.jbuf_slice()), q + 1),
-                        false => err(.Unexpected(q)),
-                    }),
-                }),
-            })
-        },
+    st = a.parse_value(src, sv, p, depth + 1).or_return()
+    vb2 = a.jbuf_push(vb, st.v)
+    q = sv.skip_ws(st.pos)
+    (q >= sv.len).then({
+        return err(.UnexpectedEof)
     })
+    (sv[q] == ',').then({
+        return a.arr_loop(src, sv, sv.skip_ws(q + 1), depth, vb2)
+    })
+    (sv[q] == ']').then({
+        return step_ok(.Arr(vb2.jbuf_slice()), q + 1)
+    })
+    err(.Unexpected(q))
 }
 parse_object = (
     a: AllocatorBackend,
@@ -441,19 +376,15 @@ parse_object = (
     depth: i64,
 ) Result<Step, JsonError> {
     p = sv.skip_ws(pos + 1)
-    (p >= sv.len).match ({
-        true  => err(.UnexpectedEof),
-        false => (sv[p] == '}').match ({
-            true  => {
-                empty: JBuf<Entry> = a.jbuf_new()
-                step_ok(.Obj(Object(entries: empty.jbuf_slice())), p + 1)
-            },
-            false => {
-                seed: JBuf<Entry> = a.jbuf_new()
-                a.obj_loop(src, sv, p, depth, seed)
-            },
-        }),
+    (p >= sv.len).then({
+        return err(.UnexpectedEof)
     })
+    (sv[p] == '}').then({
+        empty: JBuf<Entry> = a.jbuf_new()
+        return step_ok(.Obj(Object(entries: empty.jbuf_slice())), p + 1)
+    })
+    seed: JBuf<Entry> = a.jbuf_new()
+    a.obj_loop(src, sv, p, depth, seed)
 }
 obj_loop = (
     a: AllocatorBackend,
@@ -463,44 +394,36 @@ obj_loop = (
     depth: i64,
     eb: JBuf<Entry>,
 ) Result<Step, JsonError> {
-    (p >= sv.len).match ({
-        true  => err(.UnexpectedEof),
-        false => (sv[p] == '"').match ({
-            true  => a.parse_string_raw(src, sv, p).match ({
-                .Err(e) => err(e),
-                .Ok(ks) => {
-                    q = sv.skip_ws(ks.pos)
-                    (q >= sv.len || sv[q] != ':').match ({
-                        true  => (q >= sv.len).match ({
-                            true  => err(.UnexpectedEof),
-                            false => err(.Unexpected(q)),
-                        }),
-                        false => a.parse_value(src, sv, q + 1, depth + 1).match ({
-                            .Err(e) => err(e),
-                            .Ok(st) => {
-                                eb2 = a.jbuf_push(eb, Entry(
-                                    key: ks.s,
-                                    val: st.v,
-                                ))
-                                r = sv.skip_ws(st.pos)
-                                (r >= sv.len).match ({
-                                    true  => err(.UnexpectedEof),
-                                    false => (sv[r] == ',').match ({
-                                        true  => a.obj_loop(src, sv, sv.skip_ws(r + 1), depth, eb2),
-                                        false => (sv[r] == '}').match ({
-                                            true  => step_ok(.Obj(Object(entries: eb2.jbuf_slice())), r + 1),
-                                            false => err(.Unexpected(r)),
-                                        }),
-                                    }),
-                                })
-                            },
-                        }),
-                    })
-                },
-            }),
-            false => err(.Unexpected(p)),
-        }),
+    (p >= sv.len).then({
+        return err(.UnexpectedEof)
     })
+    (sv[p] != '"').then({
+        return err(.Unexpected(p))
+    })
+    ks = a.parse_string_raw(src, sv, p).or_return()
+    q = sv.skip_ws(ks.pos)
+    (q >= sv.len).then({
+        return err(.UnexpectedEof)
+    })
+    (sv[q] != ':').then({
+        return err(.Unexpected(q))
+    })
+    st = a.parse_value(src, sv, q + 1, depth + 1).or_return()
+    eb2 = a.jbuf_push(eb, Entry(
+        key: ks.s,
+        val: st.v,
+    ))
+    r = sv.skip_ws(st.pos)
+    (r >= sv.len).then({
+        return err(.UnexpectedEof)
+    })
+    (sv[r] == ',').then({
+        return a.obj_loop(src, sv, sv.skip_ws(r + 1), depth, eb2)
+    })
+    (sv[r] == '}').then({
+        return step_ok(.Obj(Object(entries: eb2.jbuf_slice())), r + 1)
+    })
+    err(.Unexpected(r))
 }
 // the core recursive-descent dispatcher: parse ONE value at sv[pos..].
 parse_value = (
@@ -510,40 +433,36 @@ parse_value = (
     pos: i64,
     depth: i64,
 ) Result<Step, JsonError> {
-    (depth > MAX_DEPTH).match ({
-        true  => err(.TooDeep),
-        false => {
-            p = sv.skip_ws(pos)
-            (p >= sv.len).match ({
-                true  => err(.UnexpectedEof),
-                false => {
-                    b = sv[p]
-                    b.is_num_start().match ({
-                        true  => a.parse_number(src, sv, p),
-                        false => (b == '{').match ({
-                            true  => a.parse_object(src, sv, p, depth),
-                            false => (b == '[').match ({
-                                true  => a.parse_array(src, sv, p, depth),
-                                false => (b == '"').match ({
-                                    true  => a.parse_str_value(src, sv, p),
-                                    false => (b == 't').match ({
-                                        true  => parse_lit(sv, p, "true", .Bool(true)),
-                                        false => (b == 'f').match ({
-                                            true  => parse_lit(sv, p, "false", .Bool(false)),
-                                            false => (b == 'n').match ({
-                                                true  => parse_lit(sv, p, "null", .Null),
-                                                false => err(.Unexpected(p)),
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            }),
-                        }),
-                    })
-                },
-            })
-        },
+    (depth > MAX_DEPTH).then({
+        return err(.TooDeep)
     })
+    p = sv.skip_ws(pos)
+    (p >= sv.len).then({
+        return err(.UnexpectedEof)
+    })
+    b = sv[p]
+    b.is_num_start().then({
+        return a.parse_number(src, sv, p)
+    })
+    (b == '{').then({
+        return a.parse_object(src, sv, p, depth)
+    })
+    (b == '[').then({
+        return a.parse_array(src, sv, p, depth)
+    })
+    (b == '"').then({
+        return a.parse_str_value(src, sv, p)
+    })
+    (b == 't').then({
+        return parse_lit(sv, p, "true", .Bool(true))
+    })
+    (b == 'f').then({
+        return parse_lit(sv, p, "false", .Bool(false))
+    })
+    (b == 'n').then({
+        return parse_lit(sv, p, "null", .Null)
+    })
+    err(.Unexpected(p))
 }
 // Release a parsed `Value` and everything hanging off it. What `parse` builds is a pure OWNING tree —
 // every `.Str`, every object key, and both backbones are their own fresh block, and no two nodes share
@@ -572,21 +491,12 @@ value_free* = (a: AllocatorBackend, v: Value) void {
 // trailing non-whitespace after the value.
 parse* = (a: AllocatorBackend, s: StringView) Result<Value, JsonError> {
     sv = s.view()
-    out: Result<Value, JsonError> = a.parse_value(s, sv, 0, 0).match ({
-        .Err(e) => {
-            r: Result<Value, JsonError> = .Err(e)
-            r
-        },
-        .Ok(st) => {
-            p = sv.skip_ws(st.pos)
-            r: Result<Value, JsonError> = (p < sv.len).match ({
-                true  => .Err(.TrailingGarbage(p)),
-                false => .Ok(st.v),
-            })
-            r
-        },
+    st = a.parse_value(s, sv, 0, 0).or_return()
+    p = sv.skip_ws(st.pos)
+    (p < sv.len).then({
+        return err(.TrailingGarbage(p))
     })
-    out
+    ok(st.v)
 }
 // ── serialization ──────────────────────────────────────────────────────────────
 write_u_esc = (a: AllocatorBackend, sb: String, b: u8) String {
@@ -673,7 +583,7 @@ write_str_lit = (a: AllocatorBackend, sb: String, s: StringView) String {
     })
     out.push_in(a, '"').jok()
 }
-write_arr = (a: AllocatorBackend, sb: String, xs: [Value]) String {
+write_arr = (a: AllocatorBackend, sb: String, xs: MutSlice<Value>) String {
     out :: String = sb.push_in(a, '[').jok()
     xs.loop_at((i, x) {
         (i > 0).then({
@@ -729,7 +639,7 @@ push_indent = (a: AllocatorBackend, sb: String, n: i64) String {
 }
 // one array element / object member per line, children indented `depth+1` levels (2 spaces each);
 // an empty array/object stays on one line ("[]" / "{}").
-pwrite_arr = (a: AllocatorBackend, sb: String, xs: [Value], depth: i64) String {
+pwrite_arr = (a: AllocatorBackend, sb: String, xs: MutSlice<Value>, depth: i64) String {
     (xs.len == 0).match ({
         true  => sb.append_in(a, "[]").jok(),
         false => {
@@ -871,8 +781,8 @@ as_bool* = (v: Value) Opt<bool> {
     })
     out
 }
-as_arr* = (v: Value) Opt<[Value]> {
-    out: Opt<[Value]> = v.match ({
+as_arr* = (v: Value) Opt<MutSlice<Value>> {
+    out: Opt<MutSlice<Value>> = v.match ({
         .Arr(xs) => .Some(xs),
         _        => .None,
     })
@@ -882,15 +792,15 @@ as_arr* = (v: Value) Opt<[Value]> {
 // The one-call way to enumerate an object's keys/values (named `members`, not `entries`, so the
 // public fn does not collide with `Object`'s public `entries` field in the flat namespace):
 //   json.members(v).loop((h, i, e) { …e.key… json.stringify(a, e.val)… })
-members* = (v: Value) [Entry] {
-    out: [Entry] = v.match ({
+members* = (v: Value) MutSlice<Entry> {
+    out: MutSlice<Entry> = v.match ({
         .Obj(o) => o.entries,
         _       => slice(null_ptr(), 0),
     })
     out
 }
 // ── structural equality (handy for round-trip checks) ───────────────────────────
-arr_eq = (xs: [Value], ys: [Value]) bool {
+arr_eq = (xs: MutSlice<Value>, ys: MutSlice<Value>) bool {
     (xs.len != ys.len).match ({
         true  => false,
         false => {

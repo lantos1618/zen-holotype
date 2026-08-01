@@ -1,10 +1,5 @@
-// std.text.regex — a small, correct regular-expression engine (Thompson-NFA / Pike VM).
-//
-// This is a usable SUBSET, chosen for correctness over completeness. It compiles a pattern to a
-// linear NFA program and simulates it breadth-first, so there is NO catastrophic backtracking —
-// matching is O(len(text) * len(program)) in the worst case, never exponential.
-//
-// SUPPORTED SYNTAX
+// Thompson-NFA regex engine with leftmost-longest matching and no exponential backtracking.
+// Supported syntax:
 //   literals            abc
 //   any byte            .            (matches any byte EXCEPT '\n')
 //   quantifiers         a*  a+  a?   (greedy)
@@ -15,30 +10,12 @@
 //   escapes             \d \w \s     digit / word / whitespace  (and \D \W \S for the negations)
 //                       \. \* \\ …   any punctuation escapes to its literal byte
 //                       \n \t \r     the usual control bytes
-//
-// SEMANTICS. `find` returns the LEFTMOST-LONGEST match (POSIX-style, deterministic): the earliest
-// start position that matches, and at that start the longest run reaching an accept state. So
-// `a|ab` on "ab" yields [0,2), not [0,1).
-//
-// ALLOCATOR. `compile` is generic over any AllocatorBackend: it takes `a: AllocatorBackend` and allocates
-// the program, class tables, and the match-time scratch buffers through it. Pass `heap.gpa().addr()`,
-// an arena, or any other allocator. `re.regex_free(a)` hands every buffer back to the SAME allocator.
-// Errors are values: a malformed pattern is `.Err(RegexError)`, OOM is `.Err(.Oom)`.
-//
-//   regex = std.text.regex
-//   heap  = std.mem.heap
-//   a = heap.gpa()
-//   regex.compile(a.addr(), "\\d+").match ({
-//       .Ok(re)  => re.find("x42y").match ({ .Some(m) => …m.start…m.end…, .None => … }),
-//       .Err(e)  => … regex.error_name(e) …,
-//   })
 { Result, Opt, IoError, ok, err } = std.core.result
 { AllocatorBackend } = std.mem.alloc
 { set } = std.mem.raw
 { view } = std.text.str
 { sub } = std.core.slice
 { loop_at } = std.core.count
-// ── public types ────────────────────────────────────────────────────────────────
 // A match is a half-open byte range [start, end) into the searched string.
 Match*: {
     start: i64,
@@ -58,10 +35,11 @@ ClassRec: {
     start: i64,
     count: i64,
 }
-// One NFA instruction. `op` selects the fields that matter: CHAR uses `c`; CLASS uses `cls`;
-// SPLIT uses `x` and `y`; JMP uses `x`; ANY/BOL/EOL/MATCH use none.
+InstOp: Char | Any | Class | Split | Jmp | Match | Bol | Eol
+// One NFA instruction. `op` selects the fields that matter: Char uses `c`; Class uses `cls`;
+// Split uses `x` and `y`; Jmp uses `x`; Any/Bol/Eol/Match use none.
 Inst: {
-    op: i64,
+    op: InstOp,
     c: u8,
     x: i64,
     y: i64,
@@ -71,37 +49,18 @@ Inst: {
 // the two thread frontiers, seen is the per-column visited stamp). Matching mutates the scratch
 // through the stored pointers, so it is NOT safe to match the same Regex from two threads at once.
 Regex*: {
-    insts: [Inst],
+    insts: MutSlice<Inst>,
     ninst: i64,
-    classes: [ClassRec],
-    ranges: [Range],
-    clist: [i64],
-    nlist: [i64],
-    seen: [i64],
+    classes: MutSlice<ClassRec>,
+    ranges: MutSlice<Range>,
+    clist: MutSlice<i64>,
+    nlist: MutSlice<i64>,
+    seen: MutSlice<i64>,
 }
-// ── instruction opcodes ──────────────────────────────────────────────────────────
-OP_CHAR = 1
-OP_ANY = 2
-OP_CLASS = 3
-OP_SPLIT = 4
-OP_JMP = 5
-OP_MATCH = 6
-OP_BOL = 7
-OP_EOL = 8
 // ── AST node ops (parse builds a flat node array; children are indices, -1 for none) ──
-N_EMPTY = 0
-N_CHAR = 1
-N_ANY = 2
-N_CLASS = 3
-N_BOL = 4
-N_EOL = 5
-N_CAT = 6
-N_ALT = 7
-N_STAR = 8
-N_PLUS = 9
-N_QUEST = 10
+NodeOp: Empty | Char | Any | Class | Bol | Eol | Cat | Alt | Star | Plus | Quest
 Node*: {
-    op: i64,
+    op: NodeOp,
     c: u8,
     cls: i64,
     a: i64,
@@ -120,13 +79,13 @@ Cx: {
     pat: Slice<u8>,
     pos: i64,
     plen: i64,
-    nodes: [Node],
+    nodes: MutSlice<Node>,
     nc: i64,
-    ranges: [Range],
+    ranges: MutSlice<Range>,
     rc: i64,
-    classes: [ClassRec],
+    classes: MutSlice<ClassRec>,
     cc: i64,
-    insts: [Inst],
+    insts: MutSlice<Inst>,
     ic: i64,
     err: i64,
     errpos: i64,
@@ -142,7 +101,7 @@ set_err = (cx: MutPtr<Cx>, code: i64) void {
     })
 }
 // append an AST node, return its index.
-mk_node = (cx: MutPtr<Cx>, op: i64, c: u8, cls: i64, a: i64, b: i64) i64 {
+mk_node = (cx: MutPtr<Cx>, op: NodeOp, c: u8, cls: i64, a: i64, b: i64) i64 {
     idx = cx.nc
     cx.nodes[idx] = Node(
         op: op,
@@ -213,7 +172,7 @@ parse_alt_rest = (cx: MutPtr<Cx>, left: i64) i64 {
         true  => {
             cx.adv()
             right = cx.parse_concat()
-            cx.parse_alt_rest(cx.mk_node(N_ALT, 0, 0, left, right))
+            cx.parse_alt_rest(cx.mk_node(.Alt, 0, 0, left, right))
         },
         false => left,
     })
@@ -223,12 +182,12 @@ concat_more = (cx: MutPtr<Cx>) bool {
     b = cx.peek()
     (b == 0 || b == '|' || b == ')').then({ false }, { true })
 }
-parse_concat = (cx: MutPtr<Cx>) i64 { cx.parse_concat_rest(cx.mk_node(N_EMPTY, 0, 0, 0, 0), false) }
+parse_concat = (cx: MutPtr<Cx>) i64 { cx.parse_concat_rest(cx.mk_node(.Empty, 0, 0, 0, 0), false) }
 parse_concat_rest = (cx: MutPtr<Cx>, acc: i64, has: bool) i64 {
     (cx.err == E_NONE && cx.concat_more()).match ({
         true  => {
             r = cx.parse_repeat()
-            cx.parse_concat_rest(has.then({ cx.mk_node(N_CAT, 0, 0, acc, r) }, { r }), true)
+            cx.parse_concat_rest(has.then({ cx.mk_node(.Cat, 0, 0, acc, r) }, { r }), true)
         },
         false => acc,
     })
@@ -243,17 +202,17 @@ parse_quant = (cx: MutPtr<Cx>, a: i64) i64 {
     (b == '*').match ({
         true  => {
             cx.adv()
-            cx.parse_quant(cx.mk_node(N_STAR, 0, 0, a, 0))
+            cx.parse_quant(cx.mk_node(.Star, 0, 0, a, 0))
         },
         false => (b == '+').match ({
             true  => {
                 cx.adv()
-                cx.parse_quant(cx.mk_node(N_PLUS, 0, 0, a, 0))
+                cx.parse_quant(cx.mk_node(.Plus, 0, 0, a, 0))
             },
             false => (b == '?').match ({
                 true  => {
                     cx.adv()
-                    cx.parse_quant(cx.mk_node(N_QUEST, 0, 0, a, 0))
+                    cx.parse_quant(cx.mk_node(.Quest, 0, 0, a, 0))
                 },
                 false => a,
             }),
@@ -263,62 +222,48 @@ parse_quant = (cx: MutPtr<Cx>, a: i64) i64 {
 // atom = '(' alt ')' | '[' class ']' | '.' | '^' | '$' | '\' esc | literal
 parse_atom = (cx: MutPtr<Cx>) i64 {
     b = cx.peek()
-    (b == '(').match ({
-        true  => {
+    (b == '(').then({
+        cx.adv()
+        inner = cx.parse_alt()
+        (cx.peek() == ')').then({
             cx.adv()
-            inner = cx.parse_alt()
-            (cx.peek() == ')').match ({
-                true  => {
-                    cx.adv()
-                },
-                false => {
-                    cx.set_err(E_UNBALANCED)
-                },
-            })
-            inner
-        },
-        false => (b == '[').match ({
-            true  => cx.parse_class(),
-            false => (b == '.').match ({
-                true  => {
-                    cx.adv()
-                    cx.mk_node(N_ANY, 0, 0, 0, 0)
-                },
-                false => (b == '^').match ({
-                    true  => {
-                        cx.adv()
-                        cx.mk_node(N_BOL, 0, 0, 0, 0)
-                    },
-                    false => (b == '$').match ({
-                        true  => {
-                            cx.adv()
-                            cx.mk_node(N_EOL, 0, 0, 0, 0)
-                        },
-                        false => (b == '\\').match ({
-                            true  => cx.parse_escape(),
-                            false => (b == ')').match ({
-                                true  => {
-                                    cx.set_err(E_UNEXPECTED_RPAREN)
-                                    cx.mk_node(N_EMPTY, 0, 0, 0, 0)
-                                },
-                                false => (b == '*' || b == '+' || b == '?').match ({
-                                    true  => {
-                                        cx.set_err(E_NOTHING_TO_REPEAT)
-                                        cx.adv()
-                                        cx.mk_node(N_EMPTY, 0, 0, 0, 0)
-                                    },
-                                    false => {
-                                        cx.adv()
-                                        cx.mk_node(N_CHAR, b, 0, 0, 0)
-                                    },
-                                }),
-                            }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+            return inner
+        })
+        cx.set_err(E_UNBALANCED)
+        return inner
     })
+    (b == '[').then({
+        return cx.parse_class()
+    })
+    (b == '.').then({
+        cx.adv()
+        return cx.mk_node(.Any, 0, 0, 0, 0)
+    })
+    (b == '^').then({
+        cx.adv()
+        return cx.mk_node(.Bol, 0, 0, 0, 0)
+    })
+    (b == '$').then({
+        cx.adv()
+        return cx.mk_node(.Eol, 0, 0, 0, 0)
+    })
+    (b == '\\').then({
+        return cx.parse_escape()
+    })
+    (b == ')').then({
+        cx.set_err(E_UNEXPECTED_RPAREN)
+        return cx.mk_node(.Empty, 0, 0, 0, 0)
+    })
+    (b == '*' || b == '+' || b == '?').then({
+        return cx.parse_bad_repeat()
+    })
+    cx.adv()
+    cx.mk_node(.Char, b, 0, 0, 0)
+}
+parse_bad_repeat = (cx: MutPtr<Cx>) i64 {
+    cx.set_err(E_NOTHING_TO_REPEAT)
+    cx.adv()
+    cx.mk_node(.Empty, 0, 0, 0, 0)
 }
 parse_escape = (cx: MutPtr<Cx>) i64 {
     cx.adv()    // consume the backslash
@@ -326,7 +271,7 @@ parse_escape = (cx: MutPtr<Cx>) i64 {
     (e == 0).match ({
         true  => {
             cx.set_err(E_TRAILING_BACKSLASH)
-            cx.mk_node(N_EMPTY, 0, 0, 0, 0)
+            cx.mk_node(.Empty, 0, 0, 0, 0)
         },
         false => {
             cx.adv()
@@ -337,9 +282,9 @@ parse_escape = (cx: MutPtr<Cx>) i64 {
                     start = cx.rc
                     cx.add_shorthand_ranges(e)
                     cls = cx.mk_class(neg, start, cx.rc - start)
-                    cx.mk_node(N_CLASS, 0, cls, 0, 0)
+                    cx.mk_node(.Class, 0, cls, 0, 0)
                 },
-                false => cx.mk_node(N_CHAR, esc_byte(e), 0, 0, 0),
+                false => cx.mk_node(.Char, esc_byte(e), 0, 0, 0),
             })
         },
     })
@@ -354,7 +299,7 @@ parse_class = (cx: MutPtr<Cx>) i64 {
     start = cx.rc
     cx.parse_class_items(true)
     cls = cx.mk_class(neg, start, cx.rc - start)
-    cx.mk_node(N_CLASS, 0, cls, 0, 0)
+    cx.mk_node(.Class, 0, cls, 0, 0)
 }
 // consume class items until the closing ']' (or end-of-pattern) — tail recursion, not a loop. `first`
 // lets a leading ']' be a literal ([]] / [^]]).
@@ -440,7 +385,7 @@ class_range_or_single = (cx: MutPtr<Cx>, lo: u8) void {
     })
 }
 // ── AST → NFA program (fall-through layout, absolute split/jmp targets) ──────────
-emit = (cx: MutPtr<Cx>, op: i64, c: u8, x: i64, y: i64, cls: i64) i64 {
+emit = (cx: MutPtr<Cx>, op: InstOp, c: u8, x: i64, y: i64, cls: i64) i64 {
     idx = cx.ic
     cx.insts[idx] = Inst(
         op: op,
@@ -464,73 +409,56 @@ set_y = (cx: MutPtr<Cx>, idx: i64, v: i64) void {
 }
 compile_node = (cx: MutPtr<Cx>, ni: i64) void {
     n = cx.nodes[ni]
-    (n.op == N_CHAR).match ({
-        true  => {
-            e = cx.emit(OP_CHAR, n.c, 0, 0, 0)
+    n.op.match ({
+        .Char  => {
+            e = cx.emit(.Char, n.c, 0, 0, 0)
         },
-        false => (n.op == N_ANY).match ({
-            true  => {
-                e = cx.emit(OP_ANY, 0, 0, 0, 0)
-            },
-            false => (n.op == N_CLASS).match ({
-                true  => {
-                    e = cx.emit(OP_CLASS, 0, 0, 0, n.cls)
-                },
-                false => (n.op == N_BOL).match ({
-                    true  => {
-                        e = cx.emit(OP_BOL, 0, 0, 0, 0)
-                    },
-                    false => (n.op == N_EOL).match ({
-                        true  => {
-                            e = cx.emit(OP_EOL, 0, 0, 0, 0)
-                        },
-                        false => (n.op == N_EMPTY == false).then({
-                            (n.op == N_CAT).match ({
-                                true  => {
-                                    cx.compile_node(n.a)
-                                    cx.compile_node(n.b)
-                                },
-                                false => (n.op == N_ALT).match ({
-                                    true  => {
-                                        s = cx.emit(OP_SPLIT, 0, 0, 0, 0)
-                                        cx.set_x(s, cx.ic)
-                                        cx.compile_node(n.a)
-                                        j = cx.emit(OP_JMP, 0, 0, 0, 0)
-                                        cx.set_y(s, cx.ic)
-                                        cx.compile_node(n.b)
-                                        cx.set_x(j, cx.ic)
-                                    },
-                                    false => (n.op == N_STAR).match ({
-                                        true  => {
-                                            l1 = cx.ic
-                                            s = cx.emit(OP_SPLIT, 0, 0, 0, 0)
-                                            cx.set_x(s, cx.ic)
-                                            cx.compile_node(n.a)
-                                            j = cx.emit(OP_JMP, 0, l1, 0, 0)
-                                            cx.set_y(s, cx.ic)
-                                        },
-                                        false => (n.op == N_PLUS).match ({
-                                            true  => {
-                                                l1 = cx.ic
-                                                cx.compile_node(n.a)
-                                                s = cx.emit(OP_SPLIT, 0, l1, 0, 0)
-                                                cx.set_y(s, cx.ic)
-                                            },
-                                            false => (n.op == N_QUEST).then({
-                                                s = cx.emit(OP_SPLIT, 0, 0, 0, 0)
-                                                cx.set_x(s, cx.ic)
-                                                cx.compile_node(n.a)
-                                                cx.set_y(s, cx.ic)
-                                            }),
-                                        }),
-                                    }),
-                                }),
-                            })
-                        }),
-                    }),
-                }),
-            }),
-        }),
+        .Any   => {
+            e = cx.emit(.Any, 0, 0, 0, 0)
+        },
+        .Class => {
+            e = cx.emit(.Class, 0, 0, 0, n.cls)
+        },
+        .Bol   => {
+            e = cx.emit(.Bol, 0, 0, 0, 0)
+        },
+        .Eol   => {
+            e = cx.emit(.Eol, 0, 0, 0, 0)
+        },
+        .Empty => { },
+        .Cat   => {
+            cx.compile_node(n.a)
+            cx.compile_node(n.b)
+        },
+        .Alt   => {
+            s = cx.emit(.Split, 0, 0, 0, 0)
+            cx.set_x(s, cx.ic)
+            cx.compile_node(n.a)
+            j = cx.emit(.Jmp, 0, 0, 0, 0)
+            cx.set_y(s, cx.ic)
+            cx.compile_node(n.b)
+            cx.set_x(j, cx.ic)
+        },
+        .Star  => {
+            l1 = cx.ic
+            s = cx.emit(.Split, 0, 0, 0, 0)
+            cx.set_x(s, cx.ic)
+            cx.compile_node(n.a)
+            j = cx.emit(.Jmp, 0, l1, 0, 0)
+            cx.set_y(s, cx.ic)
+        },
+        .Plus  => {
+            l1 = cx.ic
+            cx.compile_node(n.a)
+            s = cx.emit(.Split, 0, l1, 0, 0)
+            cx.set_y(s, cx.ic)
+        },
+        .Quest => {
+            s = cx.emit(.Split, 0, 0, 0, 0)
+            cx.set_x(s, cx.ic)
+            cx.compile_node(n.a)
+            cx.set_y(s, cx.ic)
+        },
     })
 }
 map_err_code = (code: i64) RegexError {
@@ -556,7 +484,8 @@ map_err_code = (code: i64) RegexError {
 }
 // human-readable name of a RegexError, for diagnostics.
 error_name* = (e: RegexError) StringView { e.variant_name() }
-// ── compile ─────────────────────────────────────────────────────────────────────
+// compile returns .Err(.Oom) on allocation failure. Release a successful Regex with regex_free and
+// the same allocator.
 compile* = (a: AllocatorBackend, pattern: StringView) Result<Regex, RegexError> {
     sv = pattern.view()
     plen = sv.len
@@ -578,10 +507,10 @@ compile* = (a: AllocatorBackend, pattern: StringView) Result<Regex, RegexError> 
             oom
         },
         false => {
-            nodes0: [Node] = slice(np, nodes_cap)
-            insts0: [Inst] = slice(ip, inst_cap)
-            classes0: [ClassRec] = slice(cp, class_cap)
-            ranges0: [Range] = slice(rp, range_cap)
+            nodes0: MutSlice<Node> = slice(np, nodes_cap)
+            insts0: MutSlice<Inst> = slice(ip, inst_cap)
+            classes0: MutSlice<ClassRec> = slice(cp, class_cap)
+            ranges0: MutSlice<Range> = slice(rp, range_cap)
             st = Cx(
                 pat: sv,
                 pos: 0,
@@ -605,7 +534,7 @@ compile* = (a: AllocatorBackend, pattern: StringView) Result<Regex, RegexError> 
             (cx.err == E_NONE).match ({
                 true  => {
                     cx.compile_node(root)
-                    m = cx.emit(OP_MATCH, 0, 0, 0, 0)
+                    m = cx.emit(.Match, 0, 0, 0, 0)
                     ninst = cx.ic
                     a.release(np)    // the AST is only needed during compilation
                     lp = a.acquire(ninst * sizeof(i64))
@@ -623,12 +552,12 @@ compile* = (a: AllocatorBackend, pattern: StringView) Result<Regex, RegexError> 
                             oom
                         },
                         false => {
-                            prog: [Inst] = slice(ip, ninst)
-                            cls_tab: [ClassRec] = slice(cp, cx.cc)
-                            rng_tab: [Range] = slice(rp, cx.rc)
-                            cl: [i64] = slice(lp, ninst)
-                            nl: [i64] = slice(mp, ninst)
-                            sn: [i64] = slice(spp, ninst)
+                            prog: MutSlice<Inst> = slice(ip, ninst)
+                            cls_tab: MutSlice<ClassRec> = slice(cp, cx.cc)
+                            rng_tab: MutSlice<Range> = slice(rp, cx.rc)
+                            cl: MutSlice<i64> = slice(lp, ninst)
+                            nl: MutSlice<i64> = slice(mp, ninst)
+                            sn: MutSlice<i64> = slice(spp, ninst)
                             re = Regex(
                                 insts: prog,
                                 ninst: ninst,
@@ -686,38 +615,24 @@ class_match = (re: Regex, cls: i64, b: u8) bool {
 // add `pc` to `list` (length `len`), taking the epsilon-closure through JMP/SPLIT and the zero-width
 // assertions BOL/EOL (evaluated at absolute offset `sp`). `seen[pc] == gen` deduplicates within this
 // column. Returns the new length.
-add_thread = (re: Regex, list: [i64], len: i64, pc: i64, sp: i64, n: i64, gen: i64) i64 {
+add_thread = (re: Regex, list: MutSlice<i64>, len: i64, pc: i64, sp: i64, n: i64, gen: i64) i64 {
     sn ::= re.seen
-    (sn[pc] == gen).match ({
-        true  => len,
-        false => {
-            sn[pc] = gen
-            inst = re.insts[pc]
-            (inst.op == OP_JMP).match ({
-                true  => re.add_thread(list, len, inst.x, sp, n, gen),
-                false => (inst.op == OP_SPLIT).match ({
-                    true  => {
-                        l2 = re.add_thread(list, len, inst.x, sp, n, gen)
-                        re.add_thread(list, l2, inst.y, sp, n, gen)
-                    },
-                    false => (inst.op == OP_BOL).match ({
-                        true  => (sp == 0).match ({
-                            true  => re.add_thread(list, len, pc + 1, sp, n, gen),
-                            false => len,
-                        }),
-                        false => (inst.op == OP_EOL).match ({
-                            true  => (sp == n).match ({
-                                true  => re.add_thread(list, len, pc + 1, sp, n, gen),
-                                false => len,
-                            }),
-                            false => {
-                                list[len] = pc
-                                len + 1
-                            },
-                        }),
-                    }),
-                }),
-            })
+    (sn[pc] == gen).then({
+        return len
+    })
+    sn[pc] = gen
+    inst = re.insts[pc]
+    inst.op.match ({
+        .Jmp   => re.add_thread(list, len, inst.x, sp, n, gen),
+        .Split => {
+            l2 = re.add_thread(list, len, inst.x, sp, n, gen)
+            re.add_thread(list, l2, inst.y, sp, n, gen)
+        },
+        .Bol   => (sp == 0).then({ re.add_thread(list, len, pc + 1, sp, n, gen) }, { len }),
+        .Eol   => (sp == n).then({ re.add_thread(list, len, pc + 1, sp, n, gen) }, { len }),
+        _      => {
+            list[len] = pc
+            len + 1
         },
     })
 }
@@ -731,7 +646,7 @@ MatchRes: {
 has_match = (re: Regex, clen: i64) bool {
     found ::= false
     re.clist.sub(0, clen).loop((h, i, pc) {
-        (re.insts[pc].op == OP_MATCH).then({
+        (re.insts[pc].op == .Match).then({
             found = true
             h.break
         })
@@ -740,26 +655,25 @@ has_match = (re: Regex, clen: i64) bool {
 }
 // consume byte `b` at column `sp`: advance every CHAR/ANY/CLASS thread in clist[0..clen) into nlist,
 // taking epsilon-closures at `sp+1`. Returns the new nlist length.
-build_next = (re: Regex, sv: [u8], clen: i64, sp: i64, n: i64, gen: i64, b: u8) i64 {
+build_next = (re: Regex, sv: MutSlice<u8>, clen: i64, sp: i64, n: i64, gen: i64, b: u8) i64 {
     nlen :: i64 = 0
     re.clist
         .sub(0, clen)
         .loop_at((i, pc) {
             inst = re.insts[pc]
-            (inst.op == OP_CHAR).match ({
-                true  => (b == inst.c).then({
+            inst.op.match ({
+                .Char  => (b == inst.c).then({
                     nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
                 }),
-                false => (inst.op == OP_ANY).match ({
-                    true  => (b == '\n' == false).then({
-                        nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-                    }),
-                    false => (inst.op == OP_CLASS).then({
-                        re.class_match(inst.cls, b).then({
-                            nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
-                        })
-                    }),
+                .Any   => (b == '\n' == false).then({
+                    nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
                 }),
+                .Class => {
+                    re.class_match(inst.cls, b).then({
+                        nlen = re.add_thread(re.nlist, nlen, pc + 1, sp + 1, n, gen)
+                    })
+                },
+                _      => { },
             })
         })
     nlen
@@ -930,7 +844,7 @@ count_matches = (re: Regex, sv: Slice<u8>, n: i64) i64 {
         },
     })
 }
-fill_matches = (re: Regex, sv: Slice<u8>, n: i64, out: [Match]) void {
+fill_matches = (re: Regex, sv: Slice<u8>, n: i64, out: MutSlice<Match>) void {
     re.zero_seen()
     idx :: i64 = 0
     pos :: i64 = 0
@@ -971,25 +885,25 @@ fill_matches = (re: Regex, sv: Slice<u8>, n: i64, out: [Match]) void {
     })
 }
 // every non-overlapping match, allocated through `a`. Empty when there are none.
-find_all* = (re: Regex, a: AllocatorBackend, s: StringView) Result<[Match], IoError> {
+find_all* = (re: Regex, a: AllocatorBackend, s: StringView) Result<MutSlice<Match>, IoError> {
     sv = s.view()
     n = sv.len
     cnt = re.count_matches(sv, n)
     (cnt == 0).match ({
         true  => {
-            empty: [Match] = slice(null_ptr(), 0)
-            e: Result<[Match], IoError> = ok(empty)
+            empty: MutSlice<Match> = slice(null_ptr(), 0)
+            e: Result<MutSlice<Match>, IoError> = ok(empty)
             e
         },
         false => a.try_acquire(cnt * sizeof(Match)).match ({
             .Ok(p)  => {
-                out: [Match] = slice(p, cnt)
+                out: MutSlice<Match> = slice(p, cnt)
                 re.fill_matches(sv, n, out)
-                r: Result<[Match], IoError> = ok(out)
+                r: Result<MutSlice<Match>, IoError> = ok(out)
                 r
             },
             .Err(e) => {
-                r: Result<[Match], IoError> = err(e)
+                r: Result<MutSlice<Match>, IoError> = err(e)
                 r
             },
         }),

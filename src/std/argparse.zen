@@ -1,32 +1,11 @@
-// std.argparse — a declarative command-line argument parser, built in the same style as the rest of
-// std: explicit allocator (no ambient rt), errors as values (Result), and match-only control flow.
-//
-// A `Parser` is assembled with a functional builder — each `.flag` / `.option` / `.positional` returns a
-// NEW `Parser` with the spec appended (the buffer is grown from the caller's allocator, the same contract
-// as std.text.string). Then `ap_parse(a, p, args)` walks a `[str]` of arguments (WITHOUT the program name)
-// and returns `Result<Parsed, ArgError>` — unknown flags, missing option values, and missing required
-// arguments all surface as `.Err(...)`, never a panic. Read results back with the `Parsed` methods:
-// `.get_flag(name)`, `.get_opt(name)`, `.positionals()`, `.help_requested()`.
-//
-//   p = ap_new("mytool")
-//       .flag(a, "verbose", 'v', "print more")
-//       .option(a, "output", 'o', "output file")
-//       .positional(a, "input", "input file")
-//   p.parse(a, ["-v", "--output=log.txt", "in.zen"]).match ({
-//       .Ok(r)  => { r.get_flag("verbose")  r.get_opt("output")  r.positionals() },
-//       .Err(e) => e.match ({ .UnknownFlag(n) => ..., ... }),
-//   })
-//
-// SUPPORTED SHAPES: `--name value`, `--name=value`, `-f`, bundled short flags `-abc`, short option with
-// attached value `-ovalue`, and `--` as the end-of-options marker (every token after it is a positional,
-// even if it starts with `-`). `--help` / `-h` set `help_requested()` and suppress the required-argument
-// check, so `mytool --help` never errors.
+// Declarative argument parser. parse() receives arguments without the program name and accepts long
+// options, bundled short flags, attached values, and -- as the end-of-options marker.
+// Parse failures are ArgError values, never panics. --help/-h suppress required-argument validation.
 { AllocatorBackend } = std.mem.alloc
 { Result, Opt, expect } = std.core.result
 { len, view, starts_with, trim_prefix, find, substr_in, nbuf } = std.text.str
 { Sb, sb } = std.text.sb
 { loop_at } = std.core.count
-// ── spec records ─────────────────────────────────────────────────────────────
 // A `short` of 0 means "no short form". `name` is the long name WITHOUT the leading `--`.
 FlagSpec: {
     name: StringView,
@@ -61,32 +40,34 @@ ap_no_value = (s: StringView) ArgError { .NoValueAllowed(s) }
 ap_some = (v: StringView) Opt<StringView> { .Some(v) }
 ap_none = () Opt<StringView> { .None }
 // append one element to a slice, copied into a fresh allocator-owned buffer of length +1.
-ap_add<T> = (a: AllocatorBackend, xs: [T], x: T) [T] {
+ap_add<T> = (a: AllocatorBackend, xs: MutSlice<T>, x: T) MutSlice<T> {
     n = xs.len
-    out :: [T] = slice(a.try_acquire((n + 1) * sizeof(T)).expect("std.argparse: out of memory"), n + 1)
+    out :: MutSlice<T> = slice(a
+        .try_acquire((n + 1) * sizeof(T))
+        .expect("std.argparse: out of memory"), n + 1)
     xs.loop_at((i, e) { out[i] = e })
     out[n] = x
     out
 }
-// an all-false `[bool]` of length `n` (parallel to the flag specs).
-ap_bools = (a: AllocatorBackend, n: i64) [bool] {
-    out :: [bool] = a.nbuf(false, n)
+// an all-false `MutSlice<bool>` of length `n` (parallel to the flag specs).
+ap_bools = (a: AllocatorBackend, n: i64) MutSlice<bool> {
+    out :: MutSlice<bool> = a.nbuf(false, n)
     out.loop_at((i, e) { out[i] = false })
     out
 }
-// an all-`.None` `[Opt<str>]` of length `n` (parallel to the option specs).
-ap_opts = (a: AllocatorBackend, n: i64) [Opt<StringView>] {
+// an all-`.None` `MutSlice<Opt<str>>` of length `n` (parallel to the option specs).
+ap_opts = (a: AllocatorBackend, n: i64) MutSlice<Opt<StringView>> {
     seed: Opt<StringView> = .None
-    out :: [Opt<StringView>] = a.nbuf(seed, n)
+    out :: MutSlice<Opt<StringView>> = a.nbuf(seed, n)
     out.loop_at((i, e) { out[i] = seed })
     out
 }
 // ── the parser spec ──────────────────────────────────────────────────────────
 Parser*: {
     prog: StringView,
-    flags: [FlagSpec],
-    opts: [OptSpec],
-    poss: [PosSpec],
+    flags: MutSlice<FlagSpec>,
+    opts: MutSlice<OptSpec>,
+    poss: MutSlice<PosSpec>,
     flag = (p: Parser, a: AllocatorBackend, name: StringView, short: u8, help: StringView) Parser {
         Parser(
             prog: p.prog,
@@ -212,7 +193,7 @@ Parser*: {
         })
         c
     }
-    parse = (p: Parser, a: AllocatorBackend, args: [StringView]) Result<Parsed, ArgError> {
+    parse = (p: Parser, a: AllocatorBackend, args: MutSlice<StringView>) Result<Parsed, ArgError> {
         // parse — see the free `ap_parse` below; this is the UFCS entry `p.parse(a, args)`.
         a.ap_parse(p, args)
     }
@@ -254,9 +235,9 @@ Parser*: {
 }
 // a fresh parser with no specs. Build it up with the `.flag` / `.option` / `.positional` methods.
 ap_new* = (prog: StringView) Parser {
-    fs: [FlagSpec] = slice(null_ptr(), 0)
-    os: [OptSpec] = slice(null_ptr(), 0)
-    ps: [PosSpec] = slice(null_ptr(), 0)
+    fs: MutSlice<FlagSpec> = slice(null_ptr(), 0)
+    os: MutSlice<OptSpec> = slice(null_ptr(), 0)
+    ps: MutSlice<PosSpec> = slice(null_ptr(), 0)
     Parser(
         prog: prog,
         flags: fs,
@@ -269,9 +250,9 @@ ap_new* = (prog: StringView) Parser {
 // (`.Some(value)` when the option was given). `poss` is the collected positionals, in order.
 Parsed: {
     spec: Parser,
-    flags: [bool],
-    opts: [Opt<StringView>],
-    poss: [StringView],
+    flags: MutSlice<bool>,
+    opts: MutSlice<Opt<StringView>>,
+    poss: MutSlice<StringView>,
     help: bool,
     get_flag = (r: Parsed, name: StringView) bool {
         // was `--<name>` / `-<short>` given? (unknown names read as false)
@@ -283,7 +264,7 @@ Parsed: {
         oi = r.spec.opt_index(name)
         (oi >= 0).then({ r.opts[oi] }, { ap_none() })
     }
-    positionals = (r: Parsed) [StringView] {
+    positionals = (r: Parsed) MutSlice<StringView> {
         // the positional arguments, in the order they appeared.
         r.poss
     }
@@ -299,10 +280,10 @@ Parsed: {
 // ── the parse driver ─────────────────────────────────────────────────────────
 // Walk `args` (the arguments AFTER the program name). Returns the filled `Parsed`, or the first
 // `ArgError` encountered. `a` owns every allocation in the result.
-ap_parse = (a: AllocatorBackend, p: Parser, args: [StringView]) Result<Parsed, ArgError> {
-    flags :: [bool] = a.ap_bools(p.flags.len)
-    optvals :: [Opt<StringView>] = a.ap_opts(p.opts.len)
-    poss :: [StringView] = a.nbuf("", args.len)    // upper bound: every arg a positional
+ap_parse = (a: AllocatorBackend, p: Parser, args: MutSlice<StringView>) Result<Parsed, ArgError> {
+    flags :: MutSlice<bool> = a.ap_bools(p.flags.len)
+    optvals :: MutSlice<Opt<StringView>> = a.ap_opts(p.opts.len)
+    poss :: MutSlice<StringView> = a.nbuf("", args.len)    // upper bound: every arg a positional
     np :: i64 = 0
     help ::= false
     end ::= false

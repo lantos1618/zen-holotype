@@ -4,7 +4,7 @@
 // returned header after mutate — same value-mold contract as Map/HMap/Set/Vec.
 { Result, IoError, Opt } = std.core.result
 { AllocatorBackend, try_acquire2 } = std.mem.alloc
-{ Ord } = std.cmp
+{ Ord, is_lt, is_eq, is_ge } = std.cmp
 { lower_bound } = std.sort
 { shift_up, shift_down } = std.core.slice
 BTreeMap*<K, V>: {
@@ -12,24 +12,24 @@ BTreeMap*<K, V>: {
     vals: RawPtr<u8>,
     len: i64,
     cap: i64,
-    keys = (m: BTreeMap<K, V>) [K] {
+    keys = (m: BTreeMap<K, V>) MutSlice<K> {
         // Live view over the LEN entries, ALREADY SORTED (slots [0, len), gap-free). Sized to `len` so
         // a `.loop` walks only real entries; the one-past-len insert write goes through keys_all().
         slice(m.keys, m.len)
     }
-    vals = (m: BTreeMap<K, V>) [V] { slice(m.vals, m.len) }
-    keys_all = (m: BTreeMap<K, V>) [K] {
+    vals = (m: BTreeMap<K, V>) MutSlice<V> { slice(m.vals, m.len) }
+    keys_all = (m: BTreeMap<K, V>) MutSlice<K> {
         // CAP-sized view for the one-past-len insert write (slot [len] is in-bounds in the backing
         // buffer, just past the len-sized keys()/vals() views).
         slice(m.keys, m.cap)
     }
-    vals_all = (m: BTreeMap<K, V>) [V] { slice(m.vals, m.cap) }
+    vals_all = (m: BTreeMap<K, V>) MutSlice<V> { slice(m.vals, m.cap) }
     len      = (m: BTreeMap<K, V>) i64 { m.len }
     pos_of   = (m: BTreeMap<K, V>, k: K) i64 { lower_bound(m.keys(), k) }
     found_at = (m: BTreeMap<K, V>, pos: i64, k: K) bool {
         // true iff slot `pos` holds exactly k (pos is a lower_bound result, so it may be == len or
         // point at the first key > k).
-        (pos < m.len).then({ m.keys()[pos].cmp(k) == 0 }, { false })
+        (pos < m.len).then({ m.keys()[pos].cmp(k).is_eq() }, { false })
     }
     contains = (m: BTreeMap<K, V>, k: K) bool { m.found_at(m.pos_of(k), k) }
     get = (m: BTreeMap<K, V>, k: K) Opt<V> {
@@ -211,9 +211,9 @@ BTreeMap*<K, V>: {
         ks.loop((h, i, k) {
             (i < m.len).match ({
                 true  => {
-                    (k.cmp(hi) < 0).match ({
+                    k.cmp(hi).is_lt().match ({
                         true  => {
-                            (k.cmp(lo) < 0 == false).then({
+                            k.cmp(lo).is_ge().then({
                                 f(k, vs[i])
                             })
                         },
@@ -289,16 +289,16 @@ BTreeSet*<K>: {
     keys: RawPtr<u8>,
     len: i64,
     cap: i64,
-    keys = (s: BTreeSet<K>) [K] {
+    keys = (s: BTreeSet<K>) MutSlice<K> {
         // Live, ALREADY-SORTED view over the LEN entries (gap-free). The one-past-len insert write
         // goes through keys_all().
         slice(s.keys, s.len)
     }
-    keys_all = (s: BTreeSet<K>) [K] { slice(s.keys, s.cap) }
+    keys_all = (s: BTreeSet<K>) MutSlice<K> { slice(s.keys, s.cap) }
     len      = (s: BTreeSet<K>) i64 { s.len }
     pos_of   = (s: BTreeSet<K>, k: K) i64 { lower_bound(s.keys(), k) }
     found_at = (s: BTreeSet<K>, pos: i64, k: K) bool {
-        (pos < s.len).then({ s.keys()[pos].cmp(k) == 0 }, { false })
+        (pos < s.len).then({ s.keys()[pos].cmp(k).is_eq() }, { false })
     }
     has      = (s: BTreeSet<K>, k: K) bool { s.found_at(s.pos_of(k), k) }
     contains = (s: BTreeSet<K>, k: K) bool { s.found_at(s.pos_of(k), k) }
@@ -429,9 +429,9 @@ BTreeSet*<K>: {
         ks.loop((h, i, k) {
             (i < s.len).match ({
                 true  => {
-                    (k.cmp(hi) < 0).match ({
+                    k.cmp(hi).is_lt().match ({
                         true  => {
-                            (k.cmp(lo) < 0 == false).then({
+                            k.cmp(lo).is_ge().then({
                                 f(k)
                             })
                         },

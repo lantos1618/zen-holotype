@@ -1,8 +1,6 @@
-// compiler.parse_postfix — postfix chains — call/member/index/method/loop suffixes, qualified ctor & struct-lit disambiguation, postfix token predicates.
-// Split out of compiler.parse_expr (god-file split); pure move, no logic changes.
 { Expr, Stmt } = compiler.ast.ast_types
-{ block, call_at, eindex, eloop, emcall, member_at, mkenum, mkstruct, mkstructg_at, mktag, sexpr,
-  slet, tvoid, acquire_or_die } = compiler.genc
+{ block, call_at, eindex, eloop, eloop_at, emcall, member_at, mkenum, mkenum_at, mkstruct,
+  mkstructg_at, mktag, mktag_at, sexpr, slet, tvoid, acquire_or_die } = compiler.genc
 { chain_tmp_name, dotted_name_in, mangle_str_in } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
 { at, is_upper } = std.text.ascii
@@ -11,9 +9,9 @@
   parse_tyargs, pdepth_enter, pdepth_exit, pdepth_over, stmt_level, tok_eq, vbreak_note } = compiler.parse_type
 { materialize, parse_block } = compiler.parse_stmt
 { enode, is_op, lexeme, parse_payload_args } = compiler.parse_atom
-{ parse_match, parse_then, subj_name } = compiler.parse_match
-{ a_lex_upper, arg_buf, fill_args, fill_pinits, finish_generic_ctor, finit_buf, is_lparen,
-  paren_is_struct, take_args, take_inits, tyargs_end } = compiler.parse_primary
+{ parse_match, parse_then, subj_name, subj_pos } = compiler.parse_match
+{ a_lex_upper, arg_buf, fill_args, fill_pinits, finish_generic_ctor, finit_buf, paren_is_struct,
+  take_args, take_inits, tyargs_end } = compiler.parse_primary
 { PExpr, parse_or } = compiler.parse_expr
 // a boolean `.match` lowers to genc's two-branch Cond: `(subj).match { true => X, false => Y }`
 is_dot* = (src: StringView, t: Token) bool { src.is_op(t, '.') }
@@ -42,17 +40,12 @@ is_then_at = (src: StringView, pos: i32) bool {
     open = src.scan(lp.next)
     src.is_dot(dot.tok)
         && src.is_then_kw(kw.tok)
-        && src.is_lparen(lp.tok)
+        && src.is_op(lp.tok, '(')
         && src.is_lbrace(open.tok)
 }
 // `.field` is field access (genc Member, chainable: `a.b.c`); `.match` is the Cond above.
 // match is checked first, so a `.match` is never mistaken for a field named `match`.
-is_ident_tok* = (t: Token) bool {
-    t.kind.match ({
-        .Ident => true,
-        _      => false,
-    })
-}
+is_ident_tok* = (t: Token) bool { t.kind == .Ident }
 // is the position followed by `.ident`? — a postfix FIELD access (`x.f`) and, in type position, a
 // QUALIFIED name (`io.Writer`); syntactically the same two-token lookahead.
 is_field_at* = (src: StringView, pos: i32) bool {
@@ -74,7 +67,7 @@ is_index_at = (src: StringView, pos: i32) bool {
 // whitespace-separated parenthesized statement onto the previous expression.
 is_call_at = (src: StringView, pos: i32) bool {
     sc = src.scan(pos)
-    src.is_lparen(sc.tok) && sc.tok.start == pos
+    src.is_op(sc.tok, '(') && sc.tok.start == pos
 }
 // Only a CALL-result (or a prior chain BLOCK, for `f(a)(b)(c)`) is a valid chained-call base: those are
 // the forms that can yield a closure VALUE. Restricting here (with adjacency above) keeps the suffix from
@@ -204,7 +197,7 @@ parse_chained_call = (a: Allocator, src: StringView, base: PExpr) PExpr {
     buf = a.arg_buf()
     ae = a.fill_args(src, lp.next, buf, 0)
     tmpname = a.chain_tmp_name(at)
-    sbuf :: [Stmt] = slice(a.acquire_or_die(2 * sizeof(Stmt)), 2)
+    sbuf :: MutSlice<Stmt> = slice(a.acquire_or_die(2 * sizeof(Stmt)), 2)
     sbuf[0] = slet(tmpname, base.expr)
     sbuf[1] = sexpr(a.enode(call_at(tmpname, buf.take_args(ae.count), at)))
     a.parse_postfix(src, PExpr(
@@ -233,7 +226,7 @@ parse_loop = (a: Allocator, src: StringView, base: PExpr) PExpr {
     bopen_exit(prev)
     rp = src.scan(blk.next)
     a.parse_postfix(src, PExpr(
-        expr: a.enode(eloop(base.expr, iname, xname, tvoid(), a.materialize(blk.list), hname)),
+        expr: a.enode(eloop_at(base.expr, iname, xname, tvoid(), a.materialize(blk.list), hname, ht.tok.start, it.tok.start, xt.tok.start)),
         next: rp.next,
     ))
 }
@@ -260,7 +253,7 @@ is_qual_struct_lit = (src: StringView, base: PExpr, name: StringView, fld: Scan)
     nx = src.scan(fld.next)
     subj_name(base.expr).at(0) != 0
         && name.at(0).is_upper()
-        && src.is_lparen(nx.tok)
+        && src.is_op(nx.tok, '(')
         && src.nl_between(fld.next, nx.tok.start).then({ false }, { true })
         && src.paren_is_struct(nx.next)
 }
@@ -298,7 +291,7 @@ is_qual_generic_struct_lit = (src: StringView, base: PExpr, name: StringView, fl
         true  => false,
         false => {
             sc = src.scan(after)
-            src.is_lparen(sc.tok)
+            src.is_op(sc.tok, '(')
                 && src.nl_between(after, sc.tok.start).then({ false }, { true })
                 && src.paren_is_struct(sc.next)
         },
@@ -352,7 +345,7 @@ parse_qual_generic_ctor = (
     dot = src.scan(ta.next)    // '.'
     vs = src.scan(dot.next)    // the variant name
     vn = a.lexeme(src, vs.tok)
-    a.finish_generic_ctor(src, qn, a.mangle_str_in(qn, ta.args), ta.args, vn, vs)
+    a.finish_generic_ctor(src, qn, a.mangle_str_in(qn, ta.args), ta.args, vn, vs, fld.tok.start)
 }
 parse_field = (a: Allocator, src: StringView, base: PExpr) PExpr {
     dot = src.scan(base.next)
@@ -365,7 +358,7 @@ parse_field = (a: Allocator, src: StringView, base: PExpr) PExpr {
             false => is_qual_struct_lit(src, base, name, fld).match ({
                 true  => a.parse_postfix(src, a.parse_qual_struct_lit(src, base, name, fld)),
                 false => is_qual_ctor(base, name).match ({
-                    true  => a.parse_postfix(src, a.parse_qual_ctor(src, subj_name(base.expr), name, fld)),
+                    true  => a.parse_postfix(src, a.parse_qual_ctor(src, subj_name(base.expr), name, fld, subj_pos(base.expr))),
                     false => a.parse_field_plain(src, base, name, fld),
                 }),
             }),
@@ -383,7 +376,7 @@ parse_field_plain = (
     fld: Scan,
 ) PExpr {
     nx = src.scan(fld.next)
-    (src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).then({ false }, { true })).match ({
+    (src.is_op(nx.tok, '(') && src.nl_between(fld.next, nx.tok.start).then({ false }, { true })).match ({
         true  => a.parse_method(src, base, name, nx, fld.tok.start),
         false => a.parse_postfix(src, PExpr(
             expr: a.enode(member_at(base.expr, name, fld.tok.start)),
@@ -400,18 +393,19 @@ parse_qual_ctor = (
     tyname: StringView,
     vn: StringView,
     fld: Scan,
+    ty_pos: i32,
 ) PExpr {
     nx = src.scan(fld.next)
-    (src.is_lparen(nx.tok) && src.nl_between(fld.next, nx.tok.start).then({ false }, { true })).match ({
+    (src.is_op(nx.tok, '(') && src.nl_between(fld.next, nx.tok.start).then({ false }, { true })).match ({
         true  => src.is_rparen(src.scan(nx.next).tok).match ({
             true  => PExpr(
-                expr: a.enode(mktag(tyname, vn)),
+                expr: a.enode(mktag_at(tyname, vn, ty_pos, fld.tok.start)),
                 next: src.scan(nx.next).next,
             ),
-            false => a.parse_qual_payload(src, tyname, vn, nx),
+            false => a.parse_qual_payload(src, tyname, vn, nx, ty_pos, fld.tok.start),
         }),
         false => PExpr(
-            expr: a.enode(mktag(tyname, vn)),
+            expr: a.enode(mktag_at(tyname, vn, ty_pos, fld.tok.start)),
             next: fld.next,
         ),
     })
@@ -422,16 +416,18 @@ parse_qual_payload = (
     tyname: StringView,
     vn: StringView,
     lp: Scan,
+    ty_pos: i32,
+    variant_pos: i32,
 ) PExpr {
     pl = a.parse_payload_args(src, lp)
     PExpr(
-        expr: a.enode(mkenum(tyname, vn, pl.expr)),
+        expr: a.enode(mkenum_at(tyname, vn, pl.expr, ty_pos, variant_pos)),
         next: pl.next,
     )
 }    // `Type.Variant(a, b, …)` payload
 // FAITHFUL: `recv.method(args)` -> MethodCall(recv, method, args) — keeps the UFCS surface form. The
 // args here are the METHOD args only (recv is carried separately); compiler.check.desugar_method_calls
-// lowers it back to the flat `Call(fn: method, args: [recv] ++ args, pos: at)` the old parser produced.
+// lowers it to the flat `Call(fn: method, args: [recv] ++ args, pos: at)`.
 parse_method = (
     a: Allocator,
     src: StringView,

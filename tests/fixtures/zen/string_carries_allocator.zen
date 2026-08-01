@@ -15,6 +15,7 @@
 { to_exit } = std.core.bool
 { Result, IoError, expect } = std.core.result
 { formatln, arg_int } = std.text.fmt
+{ gstr_string, gstr_append, gstr_finish } = compiler.genc
 // ── allocator A: a budgeted malloc floor that records what it was last asked to resize to ─────────
 a_budget ::= to_i64(0)
 a_releases ::= to_i64(0)
@@ -76,7 +77,7 @@ run_of = (n: i64) VecFixed<i64> {
             alloc: alloc_b(),
         ),
     })
-    w :: [i64] = v.view()
+    w :: MutSlice<i64> = v.view()
     w.loop((h, k, x) {
         w[k] = k + 1
     })
@@ -89,7 +90,7 @@ sticky_string = () bool {
     a_releases = 0
     s ::= alloc_a().string(4)
     born_ok = s.oom == false && s.cap == 5
-    s = s.add("hello world, far past four bytes")
+    s = s.add("hello world, far past four bytes", "ignored in the failed variadic call")
     failed_len = s.len
     // The allocator is HEALTHY again. A merely-broken builder would now succeed; a STICKY one
     // cannot, and `freeze` must still report the failure that already happened.
@@ -133,7 +134,7 @@ shrink_string = () bool {
     a_releases = 0
     a_last_resize = 0
     s ::= alloc_a().string(64)
-    s = s.add("hello").add(" world")
+    s = s.add("hello", " ", "world")
     cap_before = s.cap
     frozen = s.freeze().match ({
         .Ok(c)  => c,
@@ -268,7 +269,7 @@ buffer_backed_self_append = () bool {
     s ::= gpa.string(1).add("ab")
     whole = s.view()
     s = s.add_slice(whole)
-    middle: [u8] = slice(s.ptr.offset(1), 2)
+    middle: MutSlice<u8> = slice(s.ptr.offset(1), 2)
     s = s.add_slice(middle)
     carrying_ok = s.len == 6
         && s.view()[0] == 'a'
@@ -296,7 +297,7 @@ vec_self_append = () bool {
     v = v.add_one(1).add_one(2)
     whole = v.view()
     v = v.add(whole)
-    middle: [i64] = slice(v.ptr.offset(sizeof(i64)), 2)
+    middle: MutSlice<i64> = slice(v.ptr.offset(sizeof(i64)), 2)
     v = v.add(middle)
     ok = v.len == 6
         && v.get(0) == 1
@@ -308,6 +309,33 @@ vec_self_append = () bool {
     v.drop()
     ok
 }
+variadic_text_append = () bool {
+    a_budget = 64
+    a_releases = 0
+    gpa = alloc_a()
+    s ::= gpa.string(32)
+    string_budget = a_budget
+    s = s.add("hello", " ", "world")
+    string_ok = s.len == 11
+        && s.view()[0] == 'h'
+        && s.view()[10] == 'd'
+        && a_budget == string_budget
+    s.drop()
+    left: StringView = "zen"
+    dash: StringView = "-"
+    g ::= gpa.gstr_string(32)
+    gstr_budget = a_budget
+    g = g.gstr_append(gpa, left, dash, "compiler")
+    done = g.gstr_finish(gpa)
+    gstr_ok = g.len == 12
+        && g.ptr.offset(0).load() == 'z'
+        && g.ptr.offset(11).load() == 'r'
+        && g.ptr.offset(12).load() == 0
+        && done == cstr(g.ptr)
+        && a_budget == gstr_budget
+    gpa.release(g.ptr)
+    string_ok && gstr_ok && a_releases == 2
+}
 main = () i32 {
     ok ::= sticky_string()
     ok = sticky_vec() && ok
@@ -318,5 +346,6 @@ main = () i32 {
     ok = threaded_string_declines() && ok
     ok = buffer_backed_self_append() && ok
     ok = vec_self_append() && ok
+    ok = variadic_text_append() && ok
     ok.to_exit()
 }

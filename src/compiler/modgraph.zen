@@ -1,7 +1,3 @@
-// modgraph.zen — walking a program's import graph and folding it to one content hash. Shared by
-// the compile cache (is this program's closure unchanged since the last build?) and by `zen audit`'s
-// workspace pre-pass (which entry points reach which modules). Both need the SAME notion of "the
-// modules this file pulls in", so the walk lives in one place rather than once per caller.
 { Allocator } = std.mem.alloc
 { fnv1a64_fold } = std.hash    // shared FNV-1a-64 rolling byte fold (centralized in std.hash)
 { view } = std.text.str
@@ -11,7 +7,6 @@
 { ImportEdge, module_path, seen_name, add_name } = compiler.resolve
 { import_edges } = compiler.resolve_scan
 { loop_at } = std.core.count
-// ── content-hash compile cache ────────────────────────────────────────────────────────────────────
 // check/run/build re-frontend the WHOLE flattened import closure on every invocation (~27s for a
 // program importing the compiler). The cache keys a fully-SUCCESSFUL result by CONTENT: FNV-1a 64-bit
 // over the running zenc binary's own bytes (a rebuilt compiler invalidates everything it ever cached),
@@ -27,7 +22,7 @@
 // harness's cache cases point it at scratch). i64 wraps like the spec's u64: every build has -fwrapv.
 FNV_BASIS* = () i64 { 0 - 3750763034362895579 }    // 0xcbf29ce484222325, the FNV-1a-64 offset basis, as an i64
 fnv_str* = (h: i64, s: StringView) i64 { h.fnv1a64_fold(s.view()) }
-// ── the probe's light closure walk ── the resolver's own module walk (module_table) builds a full
+// The probe's light closure walk avoids the resolver's full symbol graph. It
 // per-module symbol graph twice over; the probe only needs BYTES, so it walks the same import edges
 // (the resolver's exported edge scanner — the one source of truth for what an import line is) and
 // folds each module's logical id + entire source into the key. Any edit to any imported file, however
@@ -37,7 +32,7 @@ CacheWalk*: {
     seen: String,
     h: i64,
 }
-edges_of* = (mp: Allocator, src: StringView) [ImportEdge] {
+edges_of* = (mp: Allocator, src: StringView) MutSlice<ImportEdge> {
     mp.addr().import_edges(src).expect("zenc: cache probe: allocation failed")
 }
 // id → file through the resolver's ONE exported module_path (the canonical ModuleId → path fn),
@@ -77,7 +72,7 @@ cache_walk_edges* = (
     mp: Allocator,
     root: StringView,
     progdir: StringView,
-    edges: [ImportEdge],
+    edges: MutSlice<ImportEdge>,
     st: CacheWalk,
 ) CacheWalk {
     cur ::= st

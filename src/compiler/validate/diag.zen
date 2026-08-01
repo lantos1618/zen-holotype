@@ -1,4 +1,3 @@
-// compiler.validate.diag — diagnostic primitives: error-kind constants, DiagInfo/Diagnostic, name errors.
 { ArmData, Expr, FieldInit, MemberData, Stmt, Ty } = compiler.ast.ast_types
 { Env, arm_env, extend_env, is_loop_handle_ty, is_loop_verb, loop_env } = compiler.check
 { Allocator } = std.mem.alloc
@@ -7,7 +6,6 @@
 { is_empty } = std.text.str
 { CondQuery, EnvQuery, SourceSpan, expr_pos, pos_or } = compiler.validate.util    // trait imports: enable UFCS `env.var_err()`/`d.cond_onearm_err()` via the impl index
 { check_diagnostic_from_source, check_to_diagnostic } = compiler.validate.core
-// ── narrowed LOOP/lambda-body walk: bare names + structural bool exhaustiveness ───────────────
 // Loop bodies are intentionally not fully type-checked before generic specialization. This walk reports
 // undefined bare `Var` references and the context-independent one-arm bool-match error. It deliberately
 // does NOT run fit / arg-type / operand checks, nor
@@ -47,7 +45,7 @@ name_error = (env: Env, name: StringView, pos: i32) NameErrors {
         false => name_errors_none(),
     })
 }
-// Field names are otherwise DEFERRED here (a generic body legitimately reaches fields of an unbound
+// Field names are otherwise deferred here (a generic body legitimately reaches fields of an unbound
 // type param). A LOOP HANDLE is the exception, and structurally so: `h`'s binder is the `.Loop` itself,
 // which loop_env gives the reserved handle type, so the receiver is known even pre-mono. Only the two
 // verbs lower — `h.anything_else` used to pass `check` and surface as a raw cc "undeclared identifier".
@@ -71,17 +69,17 @@ name_errors_onearm = (d: CondData) NameErrors {
         first_kind: (n == 0).then({ 0 }, { KBOOLARM() }),
     )
 }
-name_errors_args = (env: Env, args: [Expr]) NameErrors {
+name_errors_args = (env: Env, args: MutSlice<Expr>) NameErrors {
     acc ::= name_errors_none()
     args.loop_at((i, ar) { acc = acc.name_errors_merge(env.name_errors_expr(ar.addr())) })
     acc
 }
-name_errors_inits = (env: Env, inits: [FieldInit]) NameErrors {
+name_errors_inits = (env: Env, inits: MutSlice<FieldInit>) NameErrors {
     acc ::= name_errors_none()
     inits.loop_at((i, fi) { acc = acc.name_errors_merge(env.name_errors_expr(fi.value)) })
     acc
 }
-name_errors_arms = (env: Env, subjty: Ty, arms: [ArmData]) NameErrors {
+name_errors_arms = (env: Env, subjty: Ty, arms: MutSlice<ArmData>) NameErrors {
     acc ::= name_errors_none()
     arms.loop_at((i, ar) {
         acc = acc.name_errors_merge(env.a.arm_env(env, subjty, ar).name_errors_expr(ar.body))
@@ -143,7 +141,7 @@ name_errors_stmt = (a: Allocator, env: Env, st: Stmt) NameErrors {
             .name_errors_merge(env.name_errors_expr(x.value)),
     })
 }
-name_errors_body* = (a: Allocator, env: Env, body: [Stmt]) NameErrors {
+name_errors_body* = (a: Allocator, env: Env, body: MutSlice<Stmt>) NameErrors {
     acc ::= name_errors_none()
     e ::= env
     body.loop_at((i, st) {
@@ -219,6 +217,7 @@ KLETEQ* = () i32 { 64 }    // a local binding whose annotation is not followed b
 KASSIGNCONST* = () i32 { 65 }    // an assignment to a binding declared WITHOUT the `::` mutability mark. Zen locals are constants unless marked, so this is the whole content of the rule: `x = 0` binds once, `x ::= 0` binds a variable
 KWALRUS* = () i32 { 66 }    // the RETIRED `:=` binding spelling (the parser's `__retired_walrus` sentinel). One always-mutable form became four that say what they mean, so `:=` is not a binding form at all — it is recognized only to name its replacement
 KSLICEELEM* = () i32 { 67 }    // a `slice(p, n)` whose declared ELEMENT TYPE disagrees with the element type of the storage `p` was derived from. `zen__idx` guards the element COUNT; the element WIDTH came from an unchecked annotation, so a wider element read past the end of the allocation
+KBRACKETTYPE* = () i32 { 68 }    // the retired `[T]` type spelling; brackets are reserved for indexing and slice literals
 Diagnostic*: {
     code: i32,
     kind: StringView,
@@ -422,14 +421,14 @@ diag_info = (code: i32) DiagInfo {
         return DiagInfo(
             kind: "slice-write",
             message: "cannot write through a read-only `Slice<T>`",
-            hint: "a `.view()` of ANY string is read-only — it borrows, and borrowed bytes may be in `.rodata`; if you own the block, say so with `s.own_ptr().own_window(n)`, otherwise copy into an allocator-owned buffer to get a writable `[T]`",
+            hint: "a `.view()` of ANY string is read-only — it borrows, and borrowed bytes may be in `.rodata`; if you own the block, say so with `s.own_ptr().own_window(n)`, otherwise copy into an allocator-owned buffer to get a writable `MutSlice<T>`",
         )
     })
     (code == 22).then({
         return DiagInfo(
             kind: "infinite-type",
             message: "type contains itself by value, so it has infinite size",
-            hint: "break the cycle with indirection: store a `Ptr<T>` (or `[T]`) instead of the type by value",
+            hint: "break the cycle with indirection: store a `Ptr<T>` (or `Slice<T>` / `MutSlice<T>`) instead of the type by value",
         )
     })
     (code == 23).then({
@@ -664,6 +663,13 @@ diag_info = (code: i32) DiagInfo {
             hint: "declare the same element type the storage holds, or take the window from the value itself (`xs.view()`/`xs`) instead of re-widening its `.ptr`",
         )
     })
+    (code == 68).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "bracket syntax is not allowed in a type",
+            hint: "write `Slice<T>` for a read-only window, `MutSlice<T>` for a writable window, or `Vec<T>` for owned growable storage",
+        )
+    })
     (code == 47).then({
         return DiagInfo(
             kind: "capacity",
@@ -768,7 +774,7 @@ KESCAPE* = () i32 { 33 }    // unique code, formerly 16 (which collided with KTR
 //     safe direction is to find EVERY mention. Because any escape/consume necessarily NAMES the owner,
 //     "never named again" is a sound proof of leak with no escape-analysis blind spots.
 //
-// DEFERRED to v2 (all honest under-reports, never over-reports): owners bound inside a nested block/
+// Known under-reports: owners bound inside a nested block/
 // branch; owners whose only later use is a pure read (`o.get()`) with no free (leaks, but exempted
 // here); leak-on-SOME-paths (freed on one branch, forgotten on another); and the ARENA caveat — an
 // `Own<T>` from an arena/scratch allocator is freed wholesale at scope exit and needs no explicit

@@ -1,14 +1,10 @@
-// compiler.check_resolve — the resolve/lowering walk (pure move from compiler.check).
-// Rebuilds each expr/stmt/decl with resolved enum names, constructor types, UFCS dispatch,
-// generic instances, variadic collection, and or_return lowering. One-way dependency on
-// compiler.check (Env/infer/inline helpers); the check↔check_* cycles resolve via `*` exports.
 { ArmData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, GenStructDecl, GenericData,
   GlobalData, LetData, LoopData, MakeStructData, MatchData, MemberData, Param, SliceData, Stmt, Ty } = compiler.ast.ast_types
-{ arith_rty, arm_at, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc, dglobal,
-  dglobal_tl, eindex, eloop, ematch, ematchp, finit, flit, gstr_append, gstr_finish, gstr_string,
-  is_expr_null, lit, member, member_at, mkenumg, mkstruct_at, mkstructg_at, mktag, mfield, mktagg,
-  narrow_op, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett, slett_at, slett_atm, slit,
-  sret, subst_ty_in, swhile, tvoid, vref } = compiler.genc
+{ arith_rty, arm_at, arm_spans, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc,
+  dglobal, dglobal_tl, eindex, eloop, eloop_at, ematch, ematchp, finit, finit_at, flit, gstr_append,
+  gstr_finish, gstr_string, is_expr_null, lit, member, member_at, mkenumg, mkenumg_at, mkstruct_at,
+  mkstructg_at, mktag, mfield, mktagg, mktagg_at, narrow_op, no_tys, sassign_at, sexpr, sidxset_at,
+  sif, slet, slett, slett_at, slett_atm, slit, sret, subst_ty_in, swhile, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
 { gstr_int, is_prim_width, map_slice, one_stmt, param_names_has, slice_any } = compiler.astops
 { Allocator } = std.mem.alloc
@@ -22,13 +18,15 @@
 { reflect_fields } = compiler.passes.subst
 { eq_impl_provides, eq_struct_fields_ok } = compiler.validate.kinds
 { fold_wide_int } = compiler.validate.util
+{ fregion_find } = compiler.resolve
 { inline_decl, lower_closures, mono_close, no_inline_gen_f } = compiler.check_inline
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { lower_stmt_expr, subj_payload, subj_tag, tag_const } = compiler.check_lower
-{ DeclIndex, Env, arm_env, bin_res_ty, bind_fnret, build_decl_index, cebuf, cenode, dispatch_recv,
-  ctor_payload_exp, dispatch_recv_name, elem_of, empty_params, enum_inst_mk, enum_inst_tag,
-  enum_name, extend_env, fnret_of, gen_variant_payload, gsubst, is_str_t, is_void_ty, local_name_at,
-  no_stmts, params_env, pointee_of, recall, tloop_index, ty_is_ptr, vcons } = compiler.check
+{ DeclIndex, Env, UfcsVis, arm_env, bin_res_ty, bind_fnret, build_decl_index, build_decl_index_vis,
+  cebuf, cenode, dispatch_recv, ctor_payload_exp, dispatch_recv_name, elem_of, empty_params,
+  enum_inst_mk, enum_inst_tag, enum_name, extend_env, fnret_of, gen_variant_payload, gsubst,
+  is_str_t, is_void_ty, local_name_at, no_stmts, params_env, pointee_of, recall, recall_origin,
+  tloop_index, ty_is_ptr, ufcs_vis_off, vcons } = compiler.check
 { loop_at } = std.core.count
 // Stamp enum constructors with their concrete generic instance when needed.
 resolve_mkenum = (
@@ -36,26 +34,35 @@ resolve_mkenum = (
     env: Env,
     ety: StringView,
     emty: StringView,
-    etargs: [Ty],
+    etargs: MutSlice<Ty>,
     variant: StringView,
     payload: Ptr<Expr>,
+    ty_pos: i32,
+    variant_pos: i32,
 ) Ptr<Expr> {
     p = a.resolve_expr(env.with_exp(env.ctor_payload_exp(ety, etargs, variant)), payload)
     (etargs.len > 0).match ({
         true  => {
             p2 = a.restamp_enum_payload(env, ety, etargs, variant, p)
-            a.cenode(mkenumg(ety, emty, etargs, variant, p2))
+            a.cenode(mkenumg_at(ety, emty, etargs, variant, p2, ty_pos, variant_pos))
         },
         false => (ety == "").match ({
-            true  => a.resolve_mkenum_fresh(env, variant, p),
-            false => a.cenode(mkenumg(ety, emty, no_tys(), variant, p)),
+            true  => a.resolve_mkenum_fresh(env, variant, p, ty_pos, variant_pos),
+            false => a.cenode(mkenumg_at(ety, emty, no_tys(), variant, p, ty_pos, variant_pos)),
         }),
     })
 }
-resolve_mkenum_fresh = (a: Allocator, env: Env, variant: StringView, p: Ptr<Expr>) Ptr<Expr> {
+resolve_mkenum_fresh = (
+    a: Allocator,
+    env: Env,
+    variant: StringView,
+    p: Ptr<Expr>,
+    ty_pos: i32,
+    variant_pos: i32,
+) Ptr<Expr> {
     inst = env.enum_inst_mk(variant, p)
     p2 = a.restamp_enum_payload(env, inst.base, inst.targs, variant, p)
-    a.cenode(mkenumg(inst.base, inst.mty, inst.targs, variant, p2))
+    a.cenode(mkenumg_at(inst.base, inst.mty, inst.targs, variant, p2, ty_pos, variant_pos))
 }
 // A multi-field variant payload lowers to a positional anon struct whose tparams mirror the enum's.
 // resolve_genlit_bare infers the anon instance from the literal init types (integer literals → i32),
@@ -66,7 +73,7 @@ restamp_enum_payload = (
     a: Allocator,
     env: Env,
     ename: StringView,
-    etargs: [Ty],
+    etargs: MutSlice<Ty>,
     variant: StringView,
     p: Ptr<Expr>,
 ) Ptr<Expr> {
@@ -86,20 +93,28 @@ resolve_mktag = (
     env: Env,
     ety: StringView,
     emty: StringView,
-    etargs: [Ty],
+    etargs: MutSlice<Ty>,
     variant: StringView,
+    ty_pos: i32,
+    variant_pos: i32,
 ) Ptr<Expr> {
     (etargs.len > 0).match ({
-        true  => a.emit_tag_or_default(env, ety, emty, etargs, variant),
+        true  => a.emit_tag_or_default(env, ety, emty, etargs, variant, ty_pos, variant_pos),
         false => (ety == "").match ({
-            true  => a.resolve_mktag_fresh(env, variant),
-            false => a.emit_tag_or_default(env, ety, emty, no_tys(), variant),
+            true  => a.resolve_mktag_fresh(env, variant, ty_pos, variant_pos),
+            false => a.emit_tag_or_default(env, ety, emty, no_tys(), variant, ty_pos, variant_pos),
         }),
     })
 }
-resolve_mktag_fresh = (a: Allocator, env: Env, variant: StringView) Ptr<Expr> {
+resolve_mktag_fresh = (
+    a: Allocator,
+    env: Env,
+    variant: StringView,
+    ty_pos: i32,
+    variant_pos: i32,
+) Ptr<Expr> {
     inst = env.enum_inst_tag(variant)
-    a.emit_tag_or_default(env, inst.base, inst.mty, inst.targs, variant)
+    a.emit_tag_or_default(env, inst.base, inst.mty, inst.targs, variant, ty_pos, variant_pos)
 }
 // A zero-arg `.Name` / `Type.Name`: if the variant declares a default (`Name = expr`), build the
 // payload constructor with the baked-in constant; otherwise the bare tag.
@@ -108,16 +123,18 @@ emit_tag_or_default = (
     env: Env,
     base: StringView,
     mty: StringView,
-    targs: [Ty],
+    targs: MutSlice<Ty>,
     variant: StringView,
+    ty_pos: i32,
+    variant_pos: i32,
 ) Ptr<Expr> {
     def = env.didx.idx_variant_default(env.decls, base, variant)
     def.is_expr_null().match ({
-        true  => a.cenode(mktagg(base, mty, targs, variant)),
+        true  => a.cenode(mktagg_at(base, mty, targs, variant, ty_pos, variant_pos)),
         false => {
             p = a.resolve_expr(env.clr_exp(), def)
             p2 = a.restamp_enum_payload(env, base, targs, variant, p)
-            a.cenode(mkenumg(base, mty, targs, variant, p2))
+            a.cenode(mkenumg_at(base, mty, targs, variant, p2, ty_pos, variant_pos))
         },
     })
 }
@@ -131,13 +148,13 @@ set_elem = (env: Env, existing: Ty, seq: Ptr<Expr>, value: Ptr<Expr>) Ty {
     e.is_void_ty().then({ env.infer_expr(value) }, { e })
 }
 // A written targ that is just the struct's own type-param name (e.g. literal `A`) needs inference.
-is_placeholder_targ = (tparams: [Param], t: Ty) bool {
+is_placeholder_targ = (tparams: MutSlice<Param>, t: Ty) bool {
     t.match ({
         .Named(n) => tparams.param_names_has(n),
         _         => false,
     })
 }
-init_field_ty = (env: Env, inits: [FieldInit], fname: StringView) Ty {
+init_field_ty = (env: Env, inits: MutSlice<FieldInit>, fname: StringView) Ty {
     found ::= tvoid()
     inits.loop_at((i, fi) {
         found = (fi.name == fname).then({ env.infer_expr(fi.value) }, { found })
@@ -145,7 +162,12 @@ init_field_ty = (env: Env, inits: [FieldInit], fname: StringView) Ty {
     found
 }
 // Unify each declared field type against its init's inferred type to recover one tparam's concrete arg.
-struct_targ_one = (env: Env, fields: [Field], inits: [FieldInit], tp: StringView) Ty {
+struct_targ_one = (
+    env: Env,
+    fields: MutSlice<Field>,
+    inits: MutSlice<FieldInit>,
+    tp: StringView,
+) Ty {
     found ::= tvoid()
     fields.loop_at((i, f) {
         found = found.is_void_ty().match ({
@@ -160,9 +182,9 @@ infer_struct_targs = (
     a: Allocator,
     env: Env,
     gsd: GenStructDecl,
-    written: [Ty],
-    inits: [FieldInit],
-) [Ty] {
+    written: MutSlice<Ty>,
+    inits: MutSlice<FieldInit>,
+) MutSlice<Ty> {
     buf ::= cbuf<Ty>(a, written.len)
     written.loop_at((i, t) {
         buf[i] = (i < gsd.tparams.len && gsd.tparams.is_placeholder_targ(t)).match ({
@@ -172,13 +194,13 @@ infer_struct_targs = (
     })
     buf
 }
-genlit_g = (a: Allocator, env: Env, sd: MakeStructData, inits: [FieldInit]) Ptr<Expr> {
+genlit_g = (a: Allocator, env: Env, sd: MakeStructData, inits: MutSlice<FieldInit>) Ptr<Expr> {
     nt = a.infer_struct_targs(env, env.env_gstruct(sd.ty), sd.targs, inits)
     a.cenode(mkstructg_at(sd.ty, a.mangle_str_in(sd.ty, nt), nt, inits, sd.pos))
 }
 // the expected type's args, when it names generic struct `base` — the authoritative source for a bare
 // literal's type args under a `st: Store<AppState> = …` annotation (or any expected-type position).
-exp_targs_for = (exp: Ty, base: StringView) [Ty] {
+exp_targs_for = (exp: Ty, base: StringView) MutSlice<Ty> {
     exp.match ({
         .Generic(g) => (g.name == base).then({ g.args }, { no_tys() }),
         _           => no_tys(),
@@ -186,7 +208,12 @@ exp_targs_for = (exp: Ty, base: StringView) [Ty] {
 }
 // Type args for a BARE generic-struct literal (no explicit `<…>`): the expected/annotation type wins,
 // else infer each tparam by unifying its declared field types against the supplied field-value types.
-bare_struct_targs = (a: Allocator, env: Env, gsd: GenStructDecl, inits: [FieldInit]) [Ty] {
+bare_struct_targs = (
+    a: Allocator,
+    env: Env,
+    gsd: GenStructDecl,
+    inits: MutSlice<FieldInit>,
+) MutSlice<Ty> {
     exp_args = env.exp.exp_targs_for(gsd.name)
     (exp_args.len == gsd.tparams.len).match ({
         true  => exp_args,
@@ -196,7 +223,12 @@ bare_struct_targs = (a: Allocator, env: Env, gsd: GenStructDecl, inits: [FieldIn
 // A bare `Store(state: …)` literal of a GENERIC struct carries no type args; infer them so the instance
 // is mangled (mty) and discovered/emitted by compiler.mono, exactly like the explicit `Store<…>(…)` form.
 // A bare literal of a plain (non-generic) struct is unchanged.
-resolve_genlit_bare = (a: Allocator, env: Env, sd: MakeStructData, inits: [FieldInit]) Ptr<Expr> {
+resolve_genlit_bare = (
+    a: Allocator,
+    env: Env,
+    sd: MakeStructData,
+    inits: MutSlice<FieldInit>,
+) Ptr<Expr> {
     gsd = env.env_gstruct(sd.ty)
     is_empty(gsd.name).match ({
         true  => a.cenode(mkstructg_at(sd.ty, sd.mty, sd.targs, inits, sd.pos)),
@@ -224,8 +256,8 @@ resolve_expr = (a: Allocator, env: Env, e: Ptr<Expr>) Ptr<Expr> {
 resolve_expr_plain = (a: Allocator, env: Env, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Match(m)       => a.resolve_match(env, m),
-        .MakeEnum(mk)   => a.resolve_mkenum(env, mk.ty, mk.mty, mk.targs, mk.variant, mk.payload),
-        .Tag(t)         => a.resolve_mktag(env, t.ty, t.mty, t.targs, t.variant),
+        .MakeEnum(mk)   => a.resolve_mkenum(env, mk.ty, mk.mty, mk.targs, mk.variant, mk.payload, mk.ty_pos, mk.variant_pos),
+        .Tag(t)         => a.resolve_mktag(env, t.ty, t.mty, t.targs, t.variant, t.ty_pos, t.variant_pos),
         .Bin(b)         => a.resolve_bin(env, b),
         .Cond(c)        => a.cenode(cond_oa(a.resolve_expr(env.clr_exp(), c.c), a.resolve_expr(env, c.t), a.resolve_expr(env, c.e), c.oa)),
         .Call(c)        => a.resolve_call(env, c),
@@ -266,9 +298,9 @@ resolve_loop = (a: Allocator, env: Env, l: LoopData) Ptr<Expr> {
         exp: env.exp,
         a: env.a,
     )
-    a.cenode(eloop(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body), l.h))
+    a.cenode(eloop_at(a.resolve_expr(env.clr_exp(), l.seq), l.idx, l.elem, et, a.resolve_body(env2, l.body), l.h, l.h_pos, l.idx_pos, l.elem_pos))
 }
-fields_ty_of = (fields: [Field], fname: StringView) Ty {
+fields_ty_of = (fields: MutSlice<Field>, fname: StringView) Ty {
     found ::= tvoid()
     fields.loop_at((i, f) { found = (f.name == fname).then({ f.ty }, { found }) })
     found
@@ -293,9 +325,14 @@ init_exp_ty = (a: Allocator, env: Env, sd: MakeStructData, fname: StringView) Ty
         false => plain,
     })
 }
-resolve_inits = (a: Allocator, env: Env, sd: MakeStructData, inits: [FieldInit]) [FieldInit] {
+resolve_inits = (
+    a: Allocator,
+    env: Env,
+    sd: MakeStructData,
+    inits: MutSlice<FieldInit>,
+) MutSlice<FieldInit> {
     written = map_slice(a, inits, (fi) {
-        finit(fi.name, a.resolve_expr(env.with_exp(a.init_exp_ty(env, sd, fi.name)), fi.value))
+        finit_at(fi.name, a.resolve_expr(env.with_exp(a.init_exp_ty(env, sd, fi.name)), fi.value), fi.pos)
     })
     a.fill_field_defaults(env, sd, written)
 }
@@ -305,19 +342,19 @@ resolve_inits = (a: Allocator, env: Env, sd: MakeStructData, inits: [FieldInit])
 // byte-for-byte unchanged. The written inits come first and WIN — the appended slots only cover
 // names the literal never mentions — which also makes re-resolution idempotent (resolve_module
 // resolves several times; the later passes find nothing missing).
-struct_decl_fields = (env: Env, sd: MakeStructData) [Field] {
+struct_decl_fields = (env: Env, sd: MakeStructData) MutSlice<Field> {
     plain = env.didx.idx_struct_fields(env.decls, sd.ty)
     (plain.len > 0).then({ plain }, { env.env_gstruct(sd.ty).fields })
 }
-inits_have = (inits: [FieldInit], nm: StringView) bool {
+inits_have = (inits: MutSlice<FieldInit>, nm: StringView) bool {
     found ::= false
     inits.loop_at((i, fi) { found = found || fi.name == nm })
     found
 }
-dflt_is_missing = (f: Field, inits: [FieldInit]) bool {
+dflt_is_missing = (f: Field, inits: MutSlice<FieldInit>) bool {
     is_expr_null(f.dflt) == false && inits.inits_have(f.name) == false
 }
-dflt_missing_count = (fields: [Field], inits: [FieldInit]) i32 {
+dflt_missing_count = (fields: MutSlice<Field>, inits: MutSlice<FieldInit>) i32 {
     n ::= 0
     fields.loop_at((i, f) {
         f.dflt_is_missing(inits).then({
@@ -326,7 +363,12 @@ dflt_missing_count = (fields: [Field], inits: [FieldInit]) i32 {
     })
     n
 }
-fill_field_defaults = (a: Allocator, env: Env, sd: MakeStructData, inits: [FieldInit]) [FieldInit] {
+fill_field_defaults = (
+    a: Allocator,
+    env: Env,
+    sd: MakeStructData,
+    inits: MutSlice<FieldInit>,
+) MutSlice<FieldInit> {
     fields = env.struct_decl_fields(sd)
     n = fields.dflt_missing_count(inits)
     (n == 0).match ({
@@ -355,8 +397,8 @@ fill_field_defaults = (a: Allocator, env: Env, sd: MakeStructData, inits: [Field
 is_bare_struct_lit = (env: Env, nm: StringView) bool {
     env.didx.struct_idx.get(nm, 0 - 1) >= 0 && is_empty(env.env_func(nm).name)
 }
-no_field_inits = () [FieldInit] { slice(null_ptr(), 0) }
-enum_payload_mono_ty = (env: Env, ename: StringView, etargs: [Ty], variant: StringView) Ty {
+no_field_inits = () MutSlice<FieldInit> { slice(null_ptr(), 0) }
+enum_payload_mono_ty = (env: Env, ename: StringView, etargs: MutSlice<Ty>, variant: StringView) Ty {
     env
         .env_genenum(ename)
         .gen_variant_payload(variant)
@@ -377,13 +419,13 @@ resolve_match = (a: Allocator, env: Env, m: MatchData) Ptr<Expr> {
         false => a.cenode(ematch(subj2, en, arms)),
     })
 }
-resolve_args = (a: Allocator, env: Env, args: [Expr]) [Expr] {
+resolve_args = (a: Allocator, env: Env, args: MutSlice<Expr>) MutSlice<Expr> {
     buf ::= a.cebuf(args.len)
     args.loop_at((i, ar) { buf[i] = load(a.resolve_expr(env, ar.addr())) })
     buf
 }
-arg_exp = (ps: [Param], i: i32) Ty { (i < ps.len).then({ ps[i].ty }, { tvoid() }) }
-str_eq_args = (a: Allocator, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
+arg_exp = (ps: MutSlice<Param>, i: i32) Ty { (i < ps.len).then({ ps[i].ty }, { tvoid() }) }
+str_eq_args = (a: Allocator, lhs: Ptr<Expr>, rhs: Ptr<Expr>) MutSlice<Expr> {
     buf ::= a.cebuf(2)
     buf[0] = load(lhs)
     buf[1] = load(rhs)
@@ -395,7 +437,7 @@ str_eq_args = (a: Allocator, lhs: Ptr<Expr>, rhs: Ptr<Expr>) [Expr] {
 // not value equality — including Ptr here mis-lowered `e == null_ptr()` (e: Ptr<Expr>, Expr an enum)
 // to `e->tag == …`. NOTE: tag-only compares the active VARIANT, not the payload — `Run(1) == Run(2)`
 // is `true`; payloadless / state-style enums (the common case) compare exactly; full structural
-// (payload) equality is a deliberate follow-up.
+// Payload equality is not lowered here.
 is_enum_ty = (env: Env, t: Ty) bool {
     t.match ({
         .Named(n)   => env.didx.enum_idx.get(n, 0 - 1) >= 0,
@@ -465,7 +507,7 @@ SeqBind: {
     subj: Ptr<Expr>,
     bound: bool,
 }
-seq_fold = (a: Allocator, flds: [Field], lx: Ptr<Expr>, rx: Ptr<Expr>, pos: i32) Ptr<Expr> {
+seq_fold = (a: Allocator, flds: MutSlice<Field>, lx: Ptr<Expr>, rx: Ptr<Expr>, pos: i32) Ptr<Expr> {
     acc ::= a.cenode(vref_at("true", pos))
     flds.loop_at((i, f) {
         acc = a.cenode(bin_at("&&", acc, a.cenode(bin_at("==", a.cenode(member_at(lx, f.name, pos)), a.cenode(member_at(rx, f.name, pos)), pos)), pos))
@@ -558,7 +600,9 @@ narrow_rty = (env: Env, op: StringView, lty: Ty, lhs: Ptr<Expr>, rhs: Ptr<Expr>)
 // ── variadic params: a trailing `...T` param collects the surplus call args into a `[T]` ──
 // Detect the marker (set by the parser), the element type T, and the per-arg expected type
 // (T for a collected element). Lowering happens AFTER arg resolution, in resolve_call.
-last_variadic = (ps: [Param]) bool { (ps.len > 0).then({ ps[ps.len - 1].variadic }, { false }) }
+last_variadic = (ps: MutSlice<Param>) bool {
+    (ps.len > 0).then({ ps[ps.len - 1].variadic }, { false })
+}
 vararg_elem = (t: Ty) Ty {
     t.match ({
         .Slice(e) => load(e.pointee),
@@ -566,7 +610,7 @@ vararg_elem = (t: Ty) Ty {
     })
 }
 // expected type for arg i: the element type T for any arg in a variadic param's collected tail.
-arg_exp_v* = (ps: [Param], i: i32) Ty {
+arg_exp_v* = (ps: MutSlice<Param>, i: i32) Ty {
     last_variadic(ps).match ({
         true  => {
             fixed = ps.len - 1
@@ -589,7 +633,7 @@ is_slicelit_expr = (e: Expr) bool {
 // `formatln(t, [arg_int(n)])` spelling working after `args` becomes `...Arg`, and lets a variadic fn
 // forward its own collected slice to another (`formatln` -> `format`). The two readings never collide:
 // a `[T]` can only be an ELEMENT of a `...T` list when T = [T], which no type satisfies.
-already_collected = (env: Env, ps: [Param], args: [Expr]) bool {
+already_collected = (env: Env, ps: MutSlice<Param>, args: MutSlice<Expr>) bool {
     (args.len == ps.len && args.len > 0).match ({
         true  => {
             last = args[args.len - 1]
@@ -618,7 +662,7 @@ vararg_variant = (env: Env, ename: StringView, got: Ty) StringView {
         })
     (n == 1).then({ hit }, { "" })
 }
-vararg_wrap = (a: Allocator, env: Env, ps: [Param], i: i32, e: Expr) Expr {
+vararg_wrap = (a: Allocator, env: Env, ps: MutSlice<Param>, i: i32, e: Expr) Expr {
     (last_variadic(ps) && i >= ps.len - 1).match ({
         true  => {
             want = ps[ps.len - 1].ty.vararg_elem()
@@ -642,7 +686,12 @@ match_wrap = (variant: StringView, a: Allocator, ename: StringView, e: Expr) Exp
     })
 }
 // rewrite `f(a, b, c)` with `f = (x: X, ys: ...Y)` into `f(a, [b, c])`: surplus args → one SliceLit.
-collect_varargs = (a: Allocator, env: Env, ps: [Param], args: [Expr]) [Expr] {
+collect_varargs = (
+    a: Allocator,
+    env: Env,
+    ps: MutSlice<Param>,
+    args: MutSlice<Expr>,
+) MutSlice<Expr> {
     (last_variadic(ps) && env.already_collected(ps, args) == false).match ({
         true  => {
             fixed = ps.len - 1
@@ -682,7 +731,7 @@ collect_varargs = (a: Allocator, env: Env, ps: [Param], args: [Expr]) [Expr] {
 fnfield_ty = (env: Env, recv: Ptr<Expr>, field: StringView) Ty {
     env.infer_expr(env.a.cenode(member(recv, field)))
 }
-is_fn_field_call = (env: Env, dn: StringView, args: [Expr]) bool {
+is_fn_field_call = (env: Env, dn: StringView, args: MutSlice<Expr>) bool {
     (env.env_func(dn).name == "" && args.len > 0).match ({
         true  => env.fnfield_ty(args[0].addr(), dn).is_fnt(),
         false => false,
@@ -691,7 +740,7 @@ is_fn_field_call = (env: Env, dn: StringView, args: [Expr]) bool {
 // rewrite `op(b, x, y)` -> `({ __zclos_recv = b.op   __zclos_recv(x, y) })`: bind the field value to a
 // local, then call the local. This reuses the existing local-fn-value call path (C `__auto_type` +
 // native indirect call) — no new genc call node. Block scoping keeps the fixed temp name nesting-safe.
-rewrite_fn_field_call = (a: Allocator, env: Env, field: StringView, buf: [Expr]) Ptr<Expr> {
+rewrite_fn_field_call = (a: Allocator, env: Env, field: StringView, buf: MutSlice<Expr>) Ptr<Expr> {
     rest ::= a.cebuf(buf.len - 1)
     buf.loop_at((i, e) {
         (i > 0).then({
@@ -710,7 +759,7 @@ rewrite_fn_field_call = (a: Allocator, env: Env, field: StringView, buf: [Expr])
 // receiver is `str`, not `[T]`) — which otherwise yields a misleading arg-type error. Rewriting to the
 // `.len` Member reuses the fully-supported field path (infer/validate/genc) and stays idempotent: a
 // later resolve pass sees a Member, not a Call.
-is_slice_len_call = (env: Env, fn: StringView, buf: [Expr]) bool {
+is_slice_len_call = (env: Env, fn: StringView, buf: MutSlice<Expr>) bool {
     (fn == "len" && buf.len == 1).match ({
         true  => env.infer_expr(buf[0].addr()).match ({
             .Slice(e) => true,
@@ -731,7 +780,7 @@ is_auto_ref_lvalue = (e: Expr) bool {
         _          => false,
     })
 }
-needs_ufcs_auto_ref = (env: Env, ps: [Param], arg0: Expr) bool {
+needs_ufcs_auto_ref = (env: Env, ps: MutSlice<Param>, arg0: Expr) bool {
     (ps.len > 0 && ps[0].ty.is_nonnull_ptr_ty()).match ({
         true  => {
             want = ps[0].ty.pointee_of()
@@ -744,7 +793,13 @@ needs_ufcs_auto_ref = (env: Env, ps: [Param], arg0: Expr) bool {
         false => false,
     })
 }
-ufcs_auto_ref_arg0 = (a: Allocator, env: Env, ps: [Param], buf: [Expr], pos: i32) void {
+ufcs_auto_ref_arg0 = (
+    a: Allocator,
+    env: Env,
+    ps: MutSlice<Param>,
+    buf: MutSlice<Expr>,
+    pos: i32,
+) void {
     (buf.len > 0 && env.needs_ufcs_auto_ref(ps, buf[0])).then({
         ab ::= a.cebuf(1)
         ab[0] = buf[0]
@@ -779,17 +834,35 @@ resolve_call = (a: Allocator, env: Env, c: CallData) Ptr<Expr> {
         false => (cclos == "").match ({
             true  => env.is_fn_field_call(dn, buf).match ({
                 true  => a.rewrite_fn_field_call(env, c.fn, buf),
-                false => a.recall(c, env.rec_dispatch(dn, fn, c.args, c.targs), a.collect_varargs(env, ps, buf)),
+                false => a.recall_origin(c, env.rec_dispatch(dn, fn, c.args, c.targs), a.collect_varargs(env, ps, buf), env.callee_origin(c, fn)),
             }),
             false => a.clos_call_rewrite(c, cclos, buf),
         }),
     })
 }
+callee_origin = (env: Env, c: CallData, fn: Func) StringView {
+    (env.didx.vis.on && fn.pos > 0).then({
+        ri = env.didx.vis.regions.fregion_find(to_i64(fn.pos))
+        (ri >= 0 && ri < env.didx.vis.regions.len).then({
+            mi = env.didx.vis.regions[ri].midx
+            (mi >= 0 && mi < env.didx.vis.table.modules.len).then({
+                return env.didx.vis.table.modules[mi].id
+            })
+        })
+    })
+    c.origin
+}
 // A call to a recursive generic fn routes to the mangled monomorphic instance once mono_rec has emitted
 // it (the instance decl exists in the index). Until then — in resolve passes BEFORE mono_rec runs, and
 // for the never-instantiated template itself — it stays the bare template name. This guard keeps
 // resolve_call idempotent across passes and unchanged for every non-recursive call.
-rec_dispatch = (env: Env, dn: StringView, fn: Func, args: [Expr], etargs: [Ty]) StringView {
+rec_dispatch = (
+    env: Env,
+    dn: StringView,
+    fn: Func,
+    args: MutSlice<Expr>,
+    etargs: MutSlice<Ty>,
+) StringView {
     (fn.name == dn && fn.params.len == args.len && fn.no_inline_gen_f()).match ({
         true  => {
             m = env.a.mangle_semantic_in(dn, env.call_targs(fn, args, etargs))
@@ -798,10 +871,10 @@ rec_dispatch = (env: Env, dn: StringView, fn: Func, args: [Expr], etargs: [Ty]) 
         false => dn,
     })
 }
-resolve_arms = (a: Allocator, env: Env, t: Ty, arms: [ArmData]) [ArmData] {
+resolve_arms = (a: Allocator, env: Env, t: Ty, arms: MutSlice<ArmData>) MutSlice<ArmData> {
     map_slice(a, arms, (ar) {
         aenv = a.arm_env(env, t, ar)
-        arm_at(ar.variant, ar.bind, a.resolve_expr(aenv, ar.body), ar.pos)
+        arm_spans(ar.variant, ar.bind, a.resolve_expr(aenv, ar.body), ar.pos, ar.variant_pos, ar.bind_pos)
     })
 }
 // Resolve statements, preserving expected type only for value-producing tail expressions.
@@ -892,7 +965,7 @@ let_is_or_return = (st: Stmt) bool {
 stmt_out_span = (st: Stmt) i32 {
     st.orx_stmt_count() * 3 + st.let_is_or_return().then({ 3 }, { 1 })
 }    // each hoisted expression-position or_return adds a 3-stmt let-lowering
-body_out_len = (body: [Stmt]) i32 {
+body_out_len = (body: MutSlice<Stmt>) i32 {
     n ::= 0
     body.loop_at((i, st) { n = n + st.stmt_out_span() })
     n
@@ -926,7 +999,7 @@ or_temp_name = (a: Allocator, name: StringView) StringView {
 // validator, which keeps the strict full-Result requirement exactly there (ko_at's `cnd`).
 // The concreteness gate mirrors the validator's unknown_ty deferrals (plus the prim widths), so
 // every receiver/return pair the validator accepts with differing Ok payloads gets the rebuild.
-orret_gen_declared = (decls: [Decl], n: StringView) bool {
+orret_gen_declared = (decls: MutSlice<Decl>, n: StringView) bool {
     decls.slice_any((d) {
         d.match ({
             .DGenStruct(g) => g.name == n,
@@ -951,7 +1024,7 @@ orret_ty_known = (env: Env, t: Ty) bool {
         _           => true,
     })
 }
-orret_args_known = (env: Env, args: [Ty]) bool {
+orret_args_known = (env: Env, args: MutSlice<Ty>) bool {
     k ::= true
     args.loop_at((i, t) { k = env.orret_ty_known(t).then({ k }, { false }) })
     k
@@ -1000,7 +1073,7 @@ or_err_tag = (a: Allocator, t: Ty, variant: StringView) Ptr<Expr> {
         _           => a.cenode(vref(a.tag_const(t.enum_name(), variant))),
     })
 }
-lower_or_return_let = (a: Allocator, env: Env, l: LetData) [Stmt] {
+lower_or_return_let = (a: Allocator, env: Env, l: LetData) MutSlice<Stmt> {
     recv2 = a.resolve_expr(env.clr_exp(), a.or_return_recv(l.value))
     t = env.infer_expr(recv2)
     ptr = t.ty_is_ptr()
@@ -1012,7 +1085,7 @@ lower_or_return_let = (a: Allocator, env: Env, l: LetData) [Stmt] {
     buf[2] = slett(l.name, env.subj_variant_payload(t, "Ok"), a.subj_payload(a.cenode(vref(tmp)), "Ok", ptr))
     buf
 }
-lower_or_return = (a: Allocator, env: Env, st: Stmt) [Stmt] {
+lower_or_return = (a: Allocator, env: Env, st: Stmt) MutSlice<Stmt> {
     out ::= no_stmts()
     st.match ({
         .Let(l) => {
@@ -1049,21 +1122,37 @@ resolve_orx = (a: Allocator, env: Env, e: Ptr<Expr>) Ptr<Expr> {
 }
 // Resolve a statement sequence while threading let bindings.
 noop2 = () void { }
-resolve_body = (a: Allocator, env: Env, body: [Stmt]) [Stmt] { a.resolve_body_ex(env, body, false) }
+resolve_body = (a: Allocator, env: Env, body: MutSlice<Stmt>) MutSlice<Stmt> {
+    a.resolve_body_ex(env, body, false)
+}
 // resolve a VALUE-position block body: same as resolve_body but the trailing expression is kept as the
 // block's value (see resolve_stmt's `vtail`).
-resolve_value_body = (a: Allocator, env: Env, body: [Stmt]) [Stmt] {
+resolve_value_body = (a: Allocator, env: Env, body: MutSlice<Stmt>) MutSlice<Stmt> {
     a.resolve_body_ex(env, body, true)
 }
-resolve_body_ex = (a: Allocator, env: Env, body: [Stmt], vtail: bool) [Stmt] {
+resolve_body_ex = (a: Allocator, env: Env, body: MutSlice<Stmt>, vtail: bool) MutSlice<Stmt> {
     buf = cbuf<Stmt>(a, body.body_out_len())
     a.fill_stmts(env, body, buf, 0, 0, vtail)
     buf
 }
-fill_stmts = (a: Allocator, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
-    (i < body.len).then({ a.fill_stmt(env, body, buf, i, o, vtail) }, { noop2() })
-}
-fill_stmt = (a: Allocator, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, vtail: bool) void {
+fill_stmts = (
+    a: Allocator,
+    env: Env,
+    body: MutSlice<Stmt>,
+    buf: MutSlice<Stmt>,
+    i: i32,
+    o: i32,
+    vtail: bool,
+) void { (i < body.len).then({ a.fill_stmt(env, body, buf, i, o, vtail) }, { noop2() }) }
+fill_stmt = (
+    a: Allocator,
+    env: Env,
+    body: MutSlice<Stmt>,
+    buf: MutSlice<Stmt>,
+    i: i32,
+    o: i32,
+    vtail: bool,
+) void {
     st = body[i]
     k = st.orx_stmt_count()
     (k > 0).match ({
@@ -1085,8 +1174,8 @@ fill_stmt = (a: Allocator, env: Env, body: [Stmt], buf: [Stmt], i: i32, o: i32, 
 fill_orx = (
     a: Allocator,
     env: Env,
-    body: [Stmt],
-    buf: [Stmt],
+    body: MutSlice<Stmt>,
+    buf: MutSlice<Stmt>,
     i: i32,
     o: i32,
     vtail: bool,
@@ -1125,8 +1214,8 @@ fill_orx = (
 fill_or_return = (
     a: Allocator,
     env: Env,
-    body: [Stmt],
-    buf: [Stmt],
+    body: MutSlice<Stmt>,
+    buf: MutSlice<Stmt>,
     i: i32,
     o: i32,
     vtail: bool,
@@ -1139,7 +1228,7 @@ fill_or_return = (
     a.fill_stmts(env2, body, buf, i + 1, o + 3, vtail)
 }
 // Rebuild decls with resolved bodies/inits.
-resolve_func = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) Func {
+resolve_func = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func) Func {
     env = Env(
         vars: a.bind_fnret(a.params_env(f.params), f.ret),
         decls: decls,
@@ -1156,7 +1245,7 @@ resolve_func = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) Func {
         pos: f.pos,
     )
 }
-resolve_global = (a: Allocator, decls: [Decl], idx: DeclIndex, g: GlobalData) Decl {
+resolve_global = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, g: GlobalData) Decl {
     env = Env(
         vars: a.params_env(empty_params()),
         decls: decls,
@@ -1169,7 +1258,7 @@ resolve_global = (a: Allocator, decls: [Decl], idx: DeclIndex, g: GlobalData) De
         false => dglobal(g.name, env.infer_expr(g.init), a.resolve_expr(env, g.init)),
     })
 }
-resolve_decl* = (a: Allocator, decls: [Decl], idx: DeclIndex, d: Decl) Decl {
+resolve_decl* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, d: Decl) Decl {
     d.match ({
         .DFunc(f)   => dfunc(a.resolve_func(decls, idx, f)),
         .DGlobal(g) => a.resolve_global(decls, idx, g),
@@ -1193,26 +1282,29 @@ rm_log = (a: Allocator, name: StringView, start_ms: i64) i64 {
     })
     now
 }
-resolve_module* = (a: Allocator, raw: [Decl]) [Decl] {
+resolve_module* = (a: Allocator, raw: MutSlice<Decl>) MutSlice<Decl> {
+    a.resolve_module_vis(raw, a.ufcs_vis_off())
+}
+resolve_module_vis* = (a: Allocator, raw: MutSlice<Decl>, vis: UfcsVis) MutSlice<Decl> {
     t0 = clock_ms()
     decls0 = a.expand_defaults(a.desugar_method_calls(raw))
-    decls = a.fill_enum_defaults(decls0, a.build_decl_index(decls0))
+    decls = a.fill_enum_defaults(decls0, a.build_decl_index_vis(decls0, vis))
     t1 = a.rm_log("desugar", t0)
     // Decl order/count are stable across resolve+inline passes (each rebuilds bodies in place), so a
     // name→index map is rebuilt once per pass over the current slice.
-    didx = a.build_decl_index(decls)
+    didx = a.build_decl_index_vis(decls, vis)
     buf ::= cbuf<Decl>(a, decls.len)
     decls.loop_at((i, d) { buf[i] = a.resolve_decl(decls, didx, d) })
     t2 = a.rm_log("resolve-pass1", t1)
-    bidx = a.build_decl_index(buf)
+    bidx = a.build_decl_index_vis(buf, vis)
     inl ::= cbuf<Decl>(a, buf.len)
     buf.loop_at((i, d) { inl[i] = a.inline_decl(buf, bidx, d) })
     t3 = a.rm_log("inline-pass1", t2)
-    iidx = a.build_decl_index(inl)
+    iidx = a.build_decl_index_vis(inl, vis)
     out ::= cbuf<Decl>(a, inl.len)
     inl.loop_at((i, d) { out[i] = a.resolve_decl(inl, iidx, d) })
     t4 = a.rm_log("resolve-pass2", t3)
-    oidx = a.build_decl_index(out)
+    oidx = a.build_decl_index_vis(out, vis)
     inl2 ::= cbuf<Decl>(a, out.len)
     out.loop_at((i, d) { inl2[i] = a.inline_decl(out, oidx, d) })
     t5 = a.rm_log("inline-pass2", t4)
@@ -1230,7 +1322,7 @@ resolve_module* = (a: Allocator, raw: [Decl]) [Decl] {
     // resolved. Remaining capturing lambdas are left for check_validate's error[lambda-value].
     lifted = a.lift_lambdas(clos, a.build_decl_index(clos))
     t7 = a.rm_log("lower-lambdas", t6)
-    eidx = a.build_decl_index(lifted)
+    eidx = a.build_decl_index_vis(lifted, vis)
     out2 ::= cbuf<Decl>(a, lifted.len)
     lifted.loop_at((i, d) { out2[i] = a.resolve_decl(lifted, eidx, d) })
     a.rm_log("resolve-pass3", t7)

@@ -50,7 +50,7 @@
 { expr_fold_children } = compiler.ast.expr_children
 { is_intrinsic } = compiler.check
 { tparam_bound } = compiler.validate.util
-{ Map, of } = std.collections.map
+{ Map } = std.collections.map
 g_files ::= 0
 g_fns ::= 0
 g_sites ::= 0
@@ -89,7 +89,7 @@ idx_impl = (m: Map<i64>, a: AllocatorBackend, im: ImplData) Map<i64> {
     })
     out
 }
-idx_module = (m: Map<i64>, a: AllocatorBackend, decls: [Decl]) Map<i64> {
+idx_module = (m: Map<i64>, a: AllocatorBackend, decls: MutSlice<Decl>) Map<i64> {
     out ::= m
     decls.loop((h, i, d) {
         out = d.match ({
@@ -178,7 +178,7 @@ recv_var_name = (e: Ptr<Expr>) StringView {
         _       => "",
     })
 }
-scan_arms = (cx: Ctx, arms: [ArmData]) void {
+scan_arms = (cx: Ctx, arms: MutSlice<ArmData>) void {
     arms.loop((h, i, ar) {
         cx.scan_expr(ar.body)
     })
@@ -217,7 +217,7 @@ scan_expr = (cx: Ctx, e: Ptr<Expr>) void {
         },
     })
 }
-scan_body = (cx: Ctx, stmts: [Stmt]) void {
+scan_body = (cx: Ctx, stmts: MutSlice<Stmt>) void {
     stmts.loop((h, i, st) {
         st.match ({
             .ExprStmt(e) => cx.scan_expr(e),
@@ -257,7 +257,7 @@ scan_fn = (m: Map<i64>, path: StringView, src: StringView, f: Func) void {
         cx.scan_body(f.body)
     })
 }
-scan_module = (m: Map<i64>, path: StringView, src: StringView, decls: [Decl]) void {
+scan_module = (m: Map<i64>, path: StringView, src: StringView, decls: MutSlice<Decl>) void {
     decls.loop((h, i, d) {
         d.match ({
             .DFunc(f) => m.scan_fn(path, src, f),
@@ -291,7 +291,7 @@ sv_lt_at = (xv: Slice<u8>, yv: Slice<u8>, i: i64) bool {
     })
 }
 sv_lt = (x: StringView, y: StringView) bool { x.view().sv_lt_at(y.view(), 0) }
-sift_left = (xs: [StringView], j: i64) void {
+sift_left = (xs: MutSlice<StringView>, j: i64) void {
     (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
         t = xs[j]
         xs[j] = xs[j - 1]
@@ -299,13 +299,13 @@ sift_left = (xs: [StringView], j: i64) void {
         xs.sift_left(j - 1)
     })
 }
-sort_from = (xs: [StringView], i: i64) void {
+sort_from = (xs: MutSlice<StringView>, i: i64) void {
     (i < xs.len).then({
         xs.sift_left(i)
         xs.sort_from(i + 1)
     })
 }
-sort_names = (xs: [StringView]) void { xs.sort_from(1) }
+sort_names = (xs: MutSlice<StringView>) void { xs.sort_from(1) }
 // phase 0 indexes, phase 1 scans — the same walk, as in tools/discards.zen.
 walk = (m: Map<i64>, a: AllocatorBackend, root: StringView, phase: i32) Map<i64> {
     out ::= m
@@ -356,7 +356,7 @@ main = () i32 {
         return 2
     })
     seed: i64 = 0
-    m ::= of(a, "", seed).expect("tparam-recv: index alloc")
+    m :: Map<i64> = mm.map_of("", seed).expect("tparam-recv: index alloc")
     // phase 0: index the WHOLE repo, so a method call into another module resolves
     m = m.walk(a, "src", 0)
     m = m.walk(a, "driver.zen", 0)

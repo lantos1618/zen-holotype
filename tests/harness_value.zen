@@ -282,11 +282,11 @@ harness_value_run* = () i32 {
             want: "6",
         ),
         VCase(
-            src: "Box<M>: { buf: [M]  n: i32  at = (b: MutPtr<Box<M>>, i: i32) M { b.buf[i] } }\ntest* = () i32 { data = [111, 222, 333]  b = Box<i32>(buf: data, n: 3)  p = b.addr()  p.at(0) + p.at(1) }",
+            src: "Box<M>: { buf: MutSlice<M>  n: i32  at = (b: MutPtr<Box<M>>, i: i32) M { b.buf[i] } }\ntest* = () i32 { data = [111, 222, 333]  b = Box<i32>(buf: data, n: 3)  p = b.addr()  p.at(0) + p.at(1) }",
             want: "333",
         ),
         VCase(
-            src: "Box<M>: { buf: [M]  n: i32  sum = (b: Box<M>) M { ms: [M] = b.buf  ms[0] + ms[1] } }\ntest* = () i32 { data = [10, 20, 30]  b = Box<i32>(buf: data, n: 3)  b.sum() }",
+            src: "Box<M>: { buf: MutSlice<M>  n: i32  sum = (b: Box<M>) M { ms: MutSlice<M> = b.buf  ms[0] + ms[1] } }\ntest* = () i32 { data = [10, 20, 30]  b = Box<i32>(buf: data, n: 3)  b.sum() }",
             want: "30",
         ),
         VCase(
@@ -298,11 +298,11 @@ harness_value_run* = () i32 {
             want: "42",
         ),
         VCase(
-            src: "first<T> = (xs: [T]) T { xs[0] }\ntest* = () i32 { first([7, 8]) }",
+            src: "first<T> = (xs: MutSlice<T>) T { xs[0] }\ntest* = () i32 { first([7, 8]) }",
             want: "7",
         ),
         VCase(
-            src: "pick2<T> = (xs: [T], a: T) T { xs[1] + a }\ntest* = () i32 { pick2([3, 4], 5) }",
+            src: "pick2<T> = (xs: MutSlice<T>, a: T) T { xs[1] + a }\ntest* = () i32 { pick2([3, 4], 5) }",
             want: "9",
         ),
         VCase(
@@ -346,7 +346,7 @@ harness_value_run* = () i32 {
             want: "42",
         ),
         VCase(
-            src: "C*: { z: i32 }\nsumv<A> = (a: MutPtr<A>, xs: [i32], i: i64, acc: i32) i32 { (i >= xs.len).match({ true => acc, false => a.sumv(xs, i + 1, acc + xs[i]) }) }\ntest* = () i32 {\n  c = C(z: 0)\n  c.addr().sumv([1, 2, 3, 4], 0, 0)\n}",
+            src: "C*: { z: i32 }\nsumv<A> = (a: MutPtr<A>, xs: MutSlice<i32>, i: i64, acc: i32) i32 { (i >= xs.len).match({ true => acc, false => a.sumv(xs, i + 1, acc + xs[i]) }) }\ntest* = () i32 {\n  c = C(z: 0)\n  c.addr().sumv([1, 2, 3, 4], 0, 0)\n}",
             want: "10",
         ),
         VCase(
@@ -378,7 +378,7 @@ harness_value_run* = () i32 {
             want: "42",
         ),
         VCase(
-            src: "Cell*: { x: i64 }\nDoubler*: { dbl: (Self) i64 }\ni64.impl(Doubler, { dbl = (n: i64) i64 { n * 2 } })\napply<T> = (x: T) i64 { x.dbl() }\nW*: Obj([i32]) | None\ntest* = () i64 {\n  c = Cell(x: 0)\n  w = W.Obj([10, 20, 30])\n  w.match({ .Obj(ps) => store_i64(c.addr(), apply(ps.len)), .None => store_i64(c.addr(), 0-1) })\n  load_i64(c.addr())\n}",
+            src: "Cell*: { x: i64 }\nDoubler*: { dbl: (Self) i64 }\ni64.impl(Doubler, { dbl = (n: i64) i64 { n * 2 } })\napply<T> = (x: T) i64 { x.dbl() }\nW*: Obj(MutSlice<i32>) | None\ntest* = () i64 {\n  c = Cell(x: 0)\n  w = W.Obj([10, 20, 30])\n  w.match({ .Obj(ps) => store_i64(c.addr(), apply(ps.len)), .None => store_i64(c.addr(), 0-1) })\n  load_i64(c.addr())\n}",
             want: "6",
         ),
         VCase(
@@ -410,23 +410,23 @@ harness_value_run* = () i32 {
             want: "7",
         ),
         VCase(
-            src: "//! link: c\nVec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: [T]) Vec<T> {\n  v = Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b ::= v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v = of([10, 20, 30])\n  v.get(0) + v.get(2)\n}",
+            src: "//! link: c\nVec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) MutSlice<T> { slice(v.ptr, v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\nof<T> = (xs: MutSlice<T>) Vec<T> {\n  v = Vec<T>(ptr: malloc(xs.len * sizeof(T)), len: xs.len, cap: xs.len)\n  b ::= v.buf()\n  xs.loop((h, i, x) { b[i] = x })\n  v\n}\ntest* = () i32 {\n  v = of([10, 20, 30])\n  v.get(0) + v.get(2)\n}",
             want: "40",
         ),
         VCase(
-            src: "srt<T> = (xs: [T], less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j = i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp = xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs ::= [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a < b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}",
+            src: "srt<T> = (xs: MutSlice<T>, less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j = i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp = xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs ::= [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a < b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}",
             want: "12345",
         ),
         VCase(
-            src: "srt<T> = (xs: [T], less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j = i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp = xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs ::= [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a > b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}",
+            src: "srt<T> = (xs: MutSlice<T>, less: (T, T) bool) void {\n  xs.loop((ho, i, e) {\n    xs.loop((hi, k, e2) {\n      j = i - k\n      (j <= 0).match ({\n        true  => { hi.break },\n        false => less(xs[j], xs[j - 1]).match ({\n          true => { tmp = xs[j]  xs[j] = xs[j - 1]  xs[j - 1] = tmp },\n          false => { hi.break }\n        })\n      })\n    })\n  })\n}\ntest* = () i32 {\n  xs ::= [3, 1, 2, 5, 4]\n  xs.srt((a, b){ a > b })\n  (xs[0] * 10000) + (xs[1] * 1000) + (xs[2] * 100) + (xs[3] * 10) + xs[4]\n}",
             want: "54321",
         ),
         VCase(
-            src: "//! link: c\nVec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) [T] { slice(v.ptr, v.cap) }\nempty<T> = () Vec<T> { Vec<T>(ptr: malloc(sizeof(T)), len: 0, cap: 1) }\npush<T> = (v: Vec<T>, x: T) Vec<T> { b ::= v.buf()  b[v.len] = x  Vec<T>(ptr: v.ptr, len: v.len + 1, cap: v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\ntest* = () i32 {\n  v :: Vec<i32> = empty()\n  v = v.push(42)\n  v.get(0)\n}",
+            src: "//! link: c\nVec<T>: { ptr: RawPtr<u8>, len: i64, cap: i64 }\nmalloc = (n: i64) RawPtr<u8>\nbuf<T> = (v: Vec<T>) MutSlice<T> { slice(v.ptr, v.cap) }\nempty<T> = () Vec<T> { Vec<T>(ptr: malloc(sizeof(T)), len: 0, cap: 1) }\npush<T> = (v: Vec<T>, x: T) Vec<T> { b ::= v.buf()  b[v.len] = x  Vec<T>(ptr: v.ptr, len: v.len + 1, cap: v.cap) }\nget<T> = (v: Vec<T>, i: i64) T { v.buf()[i] }\ntest* = () i32 {\n  v :: Vec<i32> = empty()\n  v = v.push(42)\n  v.get(0)\n}",
             want: "42",
         ),
         VCase(
-            src: "Pairs<T>: { ks: [StringView], vs: [T]\n    each_pair = (p: Pairs<T>, f: (StringView, T) void) void {\n        p.ks.loop((h, i, k) { f(k, p.vs[i]) })\n    }\n}\ntest* = () i32 {\n    p = Pairs<i32>(ks: [\"a\", \"b\", \"c\"], vs: [10, 20, 30])\n    s ::= 0\n    p.each_pair((k, v){ s = s + v })\n    s\n}",
+            src: "Pairs<T>: { ks: MutSlice<StringView>, vs: MutSlice<T>\n    each_pair = (p: Pairs<T>, f: (StringView, T) void) void {\n        p.ks.loop((h, i, k) { f(k, p.vs[i]) })\n    }\n}\ntest* = () i32 {\n    p = Pairs<i32>(ks: [\"a\", \"b\", \"c\"], vs: [10, 20, 30])\n    s ::= 0\n    p.each_pair((k, v){ s = s + v })\n    s\n}",
             want: "60",
         ),
         VCase(
@@ -490,7 +490,7 @@ harness_value_run* = () i32 {
             want: "9",
         ),
         VCase(
-            src: "//! link: c\nRc<T>: { base: RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\nrc_val<T> = (r: Rc<T>) [T] { slice(r.base.offset(8), 1) }\nrc_new<T> = (x: T) Rc<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  r = Rc<T>(base: base)  s ::= r.rc_val()  s[0] = x  r }\nrc_get<T> = (r: Rc<T>) T { r.rc_val()[0] }\nrc_clone<T> = (r: Rc<T>) Rc<T> { store_i64(r.base, load_i64(r.base) + 1)  Rc<T>(base: r.base) }\nrc_drop<T> = (r: Rc<T>) void { n = load_i64(r.base) - 1  store_i64(r.base, n)  (n == 0).match({ true => free(r.base), false => {} }) }\nrc_count<T> = (r: Rc<T>) i64 { load_i64(r.base) }\ntest* = () i64 {\n  r = rc_new(42)\n  r2 = r.rc_clone()\n  a = r.rc_count()\n  r.rc_drop()\n  b = r.rc_count()\n  v = r.rc_get()\n  r2.rc_drop()\n  a * 100 + b * 10 + v\n}",
+            src: "//! link: c\nRc<T>: { base: RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\nrc_val<T> = (r: Rc<T>) MutSlice<T> { slice(r.base.offset(8), 1) }\nrc_new<T> = (x: T) Rc<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  r = Rc<T>(base: base)  s ::= r.rc_val()  s[0] = x  r }\nrc_get<T> = (r: Rc<T>) T { r.rc_val()[0] }\nrc_clone<T> = (r: Rc<T>) Rc<T> { store_i64(r.base, load_i64(r.base) + 1)  Rc<T>(base: r.base) }\nrc_drop<T> = (r: Rc<T>) void { n = load_i64(r.base) - 1  store_i64(r.base, n)  (n == 0).match({ true => free(r.base), false => {} }) }\nrc_count<T> = (r: Rc<T>) i64 { load_i64(r.base) }\ntest* = () i64 {\n  r = rc_new(42)\n  r2 = r.rc_clone()\n  a = r.rc_count()\n  r.rc_drop()\n  b = r.rc_count()\n  v = r.rc_get()\n  r2.rc_drop()\n  a * 100 + b * 10 + v\n}",
             want: "252",
         ),
         VCase(
@@ -502,7 +502,7 @@ harness_value_run* = () i32 {
             want: "111111",
         ),
         VCase(
-            src: "//! link: c\ngetcontext  = (ctx: RawPtr<u8>) i32\nmakecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void\nswapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32\nmalloc = (n: i64) RawPtr<u8>\ng_cur ::= null_ptr()\ng_back ::= null_ptr()\ng_flag ::= 0\ng_log ::= 0\nCoro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }\ncoro_new = (work: () void) Coro { stack = assert_nonnull(malloc(65536))  ctx = assert_nonnull(malloc(1024))  link = assert_nonnull(malloc(1024))  getcontext(ctx)  store_i64(ctx.offset(16), stack)  store_i64(ctx.offset(32), 65536)  store_i64(ctx.offset(8), link)  makecontext(ctx, work, 0)  Coro(ctx: ctx, link: link, stack: stack) }\nresume = (c: Coro) i32 { g_cur = c.ctx  g_back = c.link  g_flag = 0  swapcontext(c.link, c.ctx)  g_flag }\ncoro_checkpoint = () void { g_flag = 1  swapcontext(g_cur, g_back) }\nawork = () void { g_log = g_log * 10 + 1  coro_checkpoint()  g_log = g_log * 10 + 1  coro_checkpoint()  g_log = g_log * 10 + 1 }\nbwork = () void { g_log = g_log * 10 + 2  coro_checkpoint()  g_log = g_log * 10 + 2 }\nmark_alive = (flags: RawPtr<u8>, i: i64, n: i64) void { store_i64(flags.offset(i * 8), 1)  init_flags(flags, i + 1, n) }\ninit_flags = (flags: RawPtr<u8>, i: i64, n: i64) void { (i < n).match({ true => mark_alive(flags, i, n), false => {} }) }\ndo_tick = (coros: [Coro], flags: RawPtr<u8>, i: i64) i32 { r = coros[i].resume()  store_i64(flags.offset(i * 8), r)  r }\ntick = (coros: [Coro], flags: RawPtr<u8>, i: i64) i32 { (load_i64(flags.offset(i * 8)) == 1).match({ true => do_tick(coros, flags, i), false => 0 }) }\npass = (coros: [Coro], flags: RawPtr<u8>, i: i64, n: i64) i32 { (i < n).match({ true => tick(coros, flags, i) + pass(coros, flags, i + 1, n), false => 0 }) }\ndrive = (coros: [Coro], flags: RawPtr<u8>, n: i64) void { (pass(coros, flags, 0, n) > 0).match({ true => drive(coros, flags, n), false => {} }) }\nrun = (coros: [Coro]) void { n = coros.len  flags = assert_nonnull(malloc(n * 8))  init_flags(flags, 0, n)  drive(coros, flags, n) }\ntest* = () i32 { a = coro_new(awork)  b = coro_new(bwork)  run([a, b])  g_log }",
+            src: "//! link: c\ngetcontext  = (ctx: RawPtr<u8>) i32\nmakecontext = (ctx: RawPtr<u8>, fn: () void, argc: i32) void\nswapcontext = (out: RawPtr<u8>, inc: RawPtr<u8>) i32\nmalloc = (n: i64) RawPtr<u8>\ng_cur ::= null_ptr()\ng_back ::= null_ptr()\ng_flag ::= 0\ng_log ::= 0\nCoro*: { ctx: RawPtr<u8>, link: RawPtr<u8>, stack: RawPtr<u8> }\ncoro_new = (work: () void) Coro { stack = assert_nonnull(malloc(65536))  ctx = assert_nonnull(malloc(1024))  link = assert_nonnull(malloc(1024))  getcontext(ctx)  store_i64(ctx.offset(16), stack)  store_i64(ctx.offset(32), 65536)  store_i64(ctx.offset(8), link)  makecontext(ctx, work, 0)  Coro(ctx: ctx, link: link, stack: stack) }\nresume = (c: Coro) i32 { g_cur = c.ctx  g_back = c.link  g_flag = 0  swapcontext(c.link, c.ctx)  g_flag }\ncoro_checkpoint = () void { g_flag = 1  swapcontext(g_cur, g_back) }\nawork = () void { g_log = g_log * 10 + 1  coro_checkpoint()  g_log = g_log * 10 + 1  coro_checkpoint()  g_log = g_log * 10 + 1 }\nbwork = () void { g_log = g_log * 10 + 2  coro_checkpoint()  g_log = g_log * 10 + 2 }\nmark_alive = (flags: RawPtr<u8>, i: i64, n: i64) void { store_i64(flags.offset(i * 8), 1)  init_flags(flags, i + 1, n) }\ninit_flags = (flags: RawPtr<u8>, i: i64, n: i64) void { (i < n).match({ true => mark_alive(flags, i, n), false => {} }) }\ndo_tick = (coros: MutSlice<Coro>, flags: RawPtr<u8>, i: i64) i32 { r = coros[i].resume()  store_i64(flags.offset(i * 8), r)  r }\ntick = (coros: MutSlice<Coro>, flags: RawPtr<u8>, i: i64) i32 { (load_i64(flags.offset(i * 8)) == 1).match({ true => do_tick(coros, flags, i), false => 0 }) }\npass = (coros: MutSlice<Coro>, flags: RawPtr<u8>, i: i64, n: i64) i32 { (i < n).match({ true => tick(coros, flags, i) + pass(coros, flags, i + 1, n), false => 0 }) }\ndrive = (coros: MutSlice<Coro>, flags: RawPtr<u8>, n: i64) void { (pass(coros, flags, 0, n) > 0).match({ true => drive(coros, flags, n), false => {} }) }\nrun = (coros: MutSlice<Coro>) void { n = coros.len  flags = assert_nonnull(malloc(n * 8))  init_flags(flags, 0, n)  drive(coros, flags, n) }\ntest* = () i32 { a = coro_new(awork)  b = coro_new(bwork)  run([a, b])  g_log }",
             want: "12121",
         ),
         VCase(
@@ -514,7 +514,7 @@ harness_value_run* = () i32 {
             want: "100",
         ),
         VCase(
-            src: "//! link: c\nArc<T>: { base: RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\narc_val<T> = (r: Arc<T>) [T] { slice(r.base.offset(8), 1) }\narc_new<T> = (x: T) Arc<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  r = Arc<T>(base: base)  sl ::= r.arc_val()  sl[0] = x  r }\narc_get<T> = (r: Arc<T>) T { r.arc_val()[0] }\narc_count<T> = (r: Arc<T>) i64 { load_i64(r.base) }\narc_clone<T> = (r: Arc<T>) Arc<T> { atomic_add_i64(r.base, 1)  Arc<T>(base: r.base) }\narc_drop<T> = (r: Arc<T>) void { (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => free(r.base), false => {} }) }\ntest* = () i64 {\n  r = arc_new(42)\n  r2 = r.arc_clone()\n  a = r.arc_count()\n  r.arc_drop()\n  b = r.arc_count()\n  v = r.arc_get()\n  r2.arc_drop()\n  a * 100 + b * 10 + v\n}",
+            src: "//! link: c\nArc<T>: { base: RawPtr<u8> }\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\narc_val<T> = (r: Arc<T>) MutSlice<T> { slice(r.base.offset(8), 1) }\narc_new<T> = (x: T) Arc<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  r = Arc<T>(base: base)  sl ::= r.arc_val()  sl[0] = x  r }\narc_get<T> = (r: Arc<T>) T { r.arc_val()[0] }\narc_count<T> = (r: Arc<T>) i64 { load_i64(r.base) }\narc_clone<T> = (r: Arc<T>) Arc<T> { atomic_add_i64(r.base, 1)  Arc<T>(base: r.base) }\narc_drop<T> = (r: Arc<T>) void { (atomic_add_i64(r.base, 0 - 1) == 0).match({ true => free(r.base), false => {} }) }\ntest* = () i64 {\n  r = arc_new(42)\n  r2 = r.arc_clone()\n  a = r.arc_count()\n  r.arc_drop()\n  b = r.arc_count()\n  v = r.arc_get()\n  r2.arc_drop()\n  a * 100 + b * 10 + v\n}",
             want: "252",
         ),
         VCase(
@@ -522,11 +522,11 @@ harness_value_run* = () i32 {
             want: "7",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_dropped ::= 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + 1 } })\nOwn*: { base: RawPtr<u8> }\nown_val = (o: Own) [Resource] { slice(o.base.offset(8), 1) }\nown_new = (x: Resource) Own { base = assert_nonnull(malloc(8 + sizeof(Resource)))  store_i64(base, 1)  o = Own(base: base)  s ::= o.own_val()  s[0] = x  o }\nown_clone = (o: Own) Own { store_i64(o.base, load_i64(o.base) + 1)  Own(base: o.base) }\nown_ptr = (o: Own) MutPtr<Resource> { o.own_val()[0].addr() }\nown_release = (o: Own) void { n = load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin = (o: Own) void { o.own_ptr().drop()  free(o.base) }\ntest* = () i32 {\n  o = own_new(Resource(id: 5))\n  o2 = o.own_clone()\n  o.own_release()\n  mid = g_dropped\n  o2.own_release()\n  mid * 10 + g_dropped\n}",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_dropped ::= 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + 1 } })\nOwn*: { base: RawPtr<u8> }\nown_val = (o: Own) MutSlice<Resource> { slice(o.base.offset(8), 1) }\nown_new = (x: Resource) Own { base = assert_nonnull(malloc(8 + sizeof(Resource)))  store_i64(base, 1)  o = Own(base: base)  s ::= o.own_val()  s[0] = x  o }\nown_clone = (o: Own) Own { store_i64(o.base, load_i64(o.base) + 1)  Own(base: o.base) }\nown_ptr = (o: Own) MutPtr<Resource> { o.own_val()[0].addr() }\nown_release = (o: Own) void { n = load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin = (o: Own) void { o.own_ptr().drop()  free(o.base) }\ntest* = () i32 {\n  o = own_new(Resource(id: 5))\n  o2 = o.own_clone()\n  o.own_release()\n  mid = g_dropped\n  o2.own_release()\n  mid * 10 + g_dropped\n}",
             want: "1",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_dropped ::= 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + 1 } })\nOwn<T>: { base: RawPtr<u8> }\nown_val<T> = (o: Own<T>) [T] { slice(o.base.offset(8), 1) }\nown_new<T> = (x: T) Own<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  o = Own<T>(base: base)  s ::= o.own_val()  s[0] = x  o }\nown_clone<T> = (o: Own<T>) Own<T> { store_i64(o.base, load_i64(o.base) + 1)  Own<T>(base: o.base) }\nown_ptr<T> = (o: Own<T>) MutPtr<T> { o.own_val()[0].addr() }\nown_release<T> = (o: Own<T>) void { n = load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin<T> = (o: Own<T>) void { o.own_ptr().drop()  free(o.base) }\ntest* = () i32 {\n  o = own_new(Resource(id: 5))\n  o2 = o.own_clone()\n  o.own_release()\n  mid = g_dropped\n  o2.own_release()\n  mid * 10 + g_dropped\n}",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_dropped ::= 0\nDrop*: { drop: (MutPtr<Self>) void }\nResource*: { id: i32 }\nResource.impl(Drop, { drop = (s: MutPtr<Resource>) void { g_dropped = g_dropped + 1 } })\nOwn<T>: { base: RawPtr<u8> }\nown_val<T> = (o: Own<T>) MutSlice<T> { slice(o.base.offset(8), 1) }\nown_new<T> = (x: T) Own<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  o = Own<T>(base: base)  s ::= o.own_val()  s[0] = x  o }\nown_clone<T> = (o: Own<T>) Own<T> { store_i64(o.base, load_i64(o.base) + 1)  Own<T>(base: o.base) }\nown_ptr<T> = (o: Own<T>) MutPtr<T> { o.own_val()[0].addr() }\nown_release<T> = (o: Own<T>) void { n = load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin<T> = (o: Own<T>) void { o.own_ptr().drop()  free(o.base) }\ntest* = () i32 {\n  o = own_new(Resource(id: 5))\n  o2 = o.own_clone()\n  o.own_release()\n  mid = g_dropped\n  o2.own_release()\n  mid * 10 + g_dropped\n}",
             want: "1",
         ),
         VCase(
@@ -554,19 +554,19 @@ harness_value_run* = () i32 {
             want: "20",
         ),
         VCase(
-            src: "test* = () i64 {\n xs: [i64] = [1, 2, 3]\n acc :: i64 = 0\n xs.loop((h, i, x) { acc = acc + x })\n acc\n}",
+            src: "test* = () i64 {\n xs: MutSlice<i64> = [1, 2, 3]\n acc :: i64 = 0\n xs.loop((h, i, x) { acc = acc + x })\n acc\n}",
             want: "6",
         ),
         VCase(
-            src: "test* = () i64 {\n bs: [u8] = [10, 20, 30]\n acc :: i64 = 0\n bs.loop((h, i, b) { acc = acc + b })\n acc\n}",
+            src: "test* = () i64 {\n bs: MutSlice<u8> = [10, 20, 30]\n acc :: i64 = 0\n bs.loop((h, i, b) { acc = acc + b })\n acc\n}",
             want: "60",
         ),
         VCase(
-            src: "fold = (xs: [i64], acc: i64) i64 { s ::= acc  xs.loop((h, i, x) { s = s + x })  s }\ntest* = () i64 { fold([100, 200, 300], 0) }",
+            src: "fold = (xs: MutSlice<i64>, acc: i64) i64 { s ::= acc  xs.loop((h, i, x) { s = s + x })  s }\ntest* = () i64 { fold([100, 200, 300], 0) }",
             want: "600",
         ),
         VCase(
-            src: "test* = () i32 {\n xs: [i32] = [4, 5, 6]\n acc :: i32 = 0\n xs.loop((h, i, x) { acc = acc + x })\n acc\n}",
+            src: "test* = () i32 {\n xs: MutSlice<i32> = [4, 5, 6]\n acc :: i32 = 0\n xs.loop((h, i, x) { acc = acc + x })\n acc\n}",
             want: "15",
         ),
         VCase(
@@ -586,15 +586,15 @@ harness_value_run* = () i32 {
             want: "1",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_freed ::= 0\nfree_obs = (p: RawPtr<u8>) void { g_freed = g_freed + 1  free(p) }\nDrop*: { drop: (MutPtr<Self>) void }\nOwn<T>: { base: RawPtr<u8> }\nown_val<T> = (o: Own<T>) [T] { slice(o.base.offset(8), 1) }\nown_get<T> = (o: Own<T>) T { o.own_val()[0] }\nown_new<T> = (x: T) Own<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  o = Own<T>(base: base)  s ::= o.own_val()  s[0] = x  o }\nown_clone<T> = (o: Own<T>) Own<T> { store_i64(o.base, load_i64(o.base) + 1)  Own<T>(base: o.base) }\nown_ptr<T> = (o: Own<T>) MutPtr<T> { o.own_val()[0].addr() }\nown_release<T> = (o: Own<T>) void { n = load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin<T> = (o: Own<T>) void { o.own_ptr().drop()  free(o.base) }\nBuf*: { p: RawPtr<u8>, len: i64 }\nbuf_alloc = (n: i64) Own<Buf> { own_new(Buf(p: malloc(n), len: n)) }\nbuf_set = (o: Own<Buf>, i: i64, v: u8) void { store(o.own_get().p.offset(i), v) }\nbuf_get = (o: Own<Buf>, i: i64) u8 { load(o.own_get().p.offset(i)) }\nBuf.impl(Drop, { drop = (b: MutPtr<Buf>) void { free_obs(b.p) } })\ntest* = () i32 {\n  o = buf_alloc(8)\n  o.buf_set(0, 65)\n  v = o.buf_get(0)\n  o2 = o.own_clone()\n  o.own_release()\n  mid = g_freed\n  o2.own_release()\n  end = g_freed\n  v + mid * 100 + end * 10\n}",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_freed ::= 0\nfree_obs = (p: RawPtr<u8>) void { g_freed = g_freed + 1  free(p) }\nDrop*: { drop: (MutPtr<Self>) void }\nOwn<T>: { base: RawPtr<u8> }\nown_val<T> = (o: Own<T>) MutSlice<T> { slice(o.base.offset(8), 1) }\nown_get<T> = (o: Own<T>) T { o.own_val()[0] }\nown_new<T> = (x: T) Own<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  o = Own<T>(base: base)  s ::= o.own_val()  s[0] = x  o }\nown_clone<T> = (o: Own<T>) Own<T> { store_i64(o.base, load_i64(o.base) + 1)  Own<T>(base: o.base) }\nown_ptr<T> = (o: Own<T>) MutPtr<T> { o.own_val()[0].addr() }\nown_release<T> = (o: Own<T>) void { n = load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin<T> = (o: Own<T>) void { o.own_ptr().drop()  free(o.base) }\nBuf*: { p: RawPtr<u8>, len: i64 }\nbuf_alloc = (n: i64) Own<Buf> { own_new(Buf(p: malloc(n), len: n)) }\nbuf_set = (o: Own<Buf>, i: i64, v: u8) void { store(o.own_get().p.offset(i), v) }\nbuf_get = (o: Own<Buf>, i: i64) u8 { load(o.own_get().p.offset(i)) }\nBuf.impl(Drop, { drop = (b: MutPtr<Buf>) void { free_obs(b.p) } })\ntest* = () i32 {\n  o = buf_alloc(8)\n  o.buf_set(0, 65)\n  v = o.buf_get(0)\n  o2 = o.own_clone()\n  o.own_release()\n  mid = g_freed\n  o2.own_release()\n  end = g_freed\n  v + mid * 100 + end * 10\n}",
             want: "75",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\nclose = (fd: i32) i32\ng_closed ::= 0\nclose_obs = (fd: i32) i32 { g_closed = g_closed + 1  0 }\nDrop*: { drop: (MutPtr<Self>) void }\nOwn<T>: { base: RawPtr<u8> }\nown_val<T> = (o: Own<T>) [T] { slice(o.base.offset(8), 1) }\nown_get<T> = (o: Own<T>) T { o.own_val()[0] }\nown_new<T> = (x: T) Own<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  o = Own<T>(base: base)  s ::= o.own_val()  s[0] = x  o }\nown_clone<T> = (o: Own<T>) Own<T> { store_i64(o.base, load_i64(o.base) + 1)  Own<T>(base: o.base) }\nown_ptr<T> = (o: Own<T>) MutPtr<T> { o.own_val()[0].addr() }\nown_release<T> = (o: Own<T>) void { n = load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin<T> = (o: Own<T>) void { o.own_ptr().drop()  free(o.base) }\nFile*: { fd: i32 }\nfile_wrap = (fd: i32) Own<File> { own_new(File(fd: fd)) }\nfile_fd = (o: Own<File>) i32 { o.own_get().fd }\nFile.impl(Drop, { drop = (f: MutPtr<File>) void { close_obs(f.fd) } })\ntest* = () i32 {\n  o = file_wrap(7)\n  fd = o.file_fd()\n  o2 = o.own_clone()\n  o.own_release()\n  mid = g_closed\n  o2.own_release()\n  end = g_closed\n  fd + mid * 100 + end * 10\n}",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\nclose = (fd: i32) i32\ng_closed ::= 0\nclose_obs = (fd: i32) i32 { g_closed = g_closed + 1  0 }\nDrop*: { drop: (MutPtr<Self>) void }\nOwn<T>: { base: RawPtr<u8> }\nown_val<T> = (o: Own<T>) MutSlice<T> { slice(o.base.offset(8), 1) }\nown_get<T> = (o: Own<T>) T { o.own_val()[0] }\nown_new<T> = (x: T) Own<T> { base = assert_nonnull(malloc(8 + sizeof(T)))  store_i64(base, 1)  o = Own<T>(base: base)  s ::= o.own_val()  s[0] = x  o }\nown_clone<T> = (o: Own<T>) Own<T> { store_i64(o.base, load_i64(o.base) + 1)  Own<T>(base: o.base) }\nown_ptr<T> = (o: Own<T>) MutPtr<T> { o.own_val()[0].addr() }\nown_release<T> = (o: Own<T>) void { n = load_i64(o.base) - 1  store_i64(o.base, n)  (n == 0).match({ true => own_fin(o), false => {} }) }\nown_fin<T> = (o: Own<T>) void { o.own_ptr().drop()  free(o.base) }\nFile*: { fd: i32 }\nfile_wrap = (fd: i32) Own<File> { own_new(File(fd: fd)) }\nfile_fd = (o: Own<File>) i32 { o.own_get().fd }\nFile.impl(Drop, { drop = (f: MutPtr<File>) void { close_obs(f.fd) } })\ntest* = () i32 {\n  o = file_wrap(7)\n  fd = o.file_fd()\n  o2 = o.own_clone()\n  o.own_release()\n  mid = g_closed\n  o2.own_release()\n  end = g_closed\n  fd + mid * 100 + end * 10\n}",
             want: "17",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nrealloc = (p: RawPtr<u8>, n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_freed ::= 0\ng_dropped ::= 0\nBLACK = 0\nGRAY = 1\nWHITE = 2\nstore_ptr = (b: RawPtr<u8>, p: RawPtr<u8>) void { store_i64(b, p) }\nload_ptr = (b: RawPtr<u8>) RawPtr<u8> { load_i64(b).offset(0) }\nhcount = (b: RawPtr<u8>) i64 { load_i64(b.offset(0)) }\nhset_count = (b: RawPtr<u8>, v: i64) void { store_i64(b.offset(0), v) }\nhcolor = (b: RawPtr<u8>) i64 { load_i64(b.offset(8)) }\nhset_color = (b: RawPtr<u8>, v: i64) void { store_i64(b.offset(8), v) }\ng_white ::= null_ptr()\nlist_new = () RawPtr<u8> { l = assert_nonnull(malloc(16 + 64))  store_i64(l.offset(0), 0)  store_i64(l.offset(8), 8)  l }\nlist_len = (l: RawPtr<u8>) i64 { load_i64(l.offset(0)) }\nlist_get = (l: RawPtr<u8>, i: i64) RawPtr<u8> { load_ptr(l.offset(16 + i * 8)) }\nlist_push = (l: RawPtr<u8>, p: RawPtr<u8>) RawPtr<u8> {\n  n = list_len(l)\n  r = (n == load_i64(l.offset(8))).match({ true => { nc = load_i64(l.offset(8)) * 2  g = assert_nonnull(realloc(l, 16 + nc * 8))  store_i64(g.offset(8), nc)  g }, false => l })\n  store_ptr(r.offset(16 + n * 8), p)\n  store_i64(r.offset(0), n + 1)\n  r\n}\nroots ::= null_ptr()\nroots_list = () RawPtr<u8> {\n  (roots == null_ptr()).match({ true => { roots = list_new()  roots }, false => roots })\n}\nroots_add = (b: RawPtr<u8>) void { roots = roots_list().list_push(b) }\nroots_clear = () void { store_i64(roots_list().offset(0), 0) }\nTracer*: { op: i32 }\nTrace*: { trace: (Ptr<Self>, MutPtr<Tracer>) void }\nDrop*: { drop: (MutPtr<Self>) void }\nRc<T>: { base: RawPtr<u8> }\nrc_val<T> = (r: Rc<T>) [T] { slice(r.base.offset(16), 1) }\nrc_get<T> = (r: Rc<T>) T { r.rc_val()[0] }\nrc_base<T> = (r: Rc<T>) RawPtr<u8> { r.base }\nrc_new<T> = (x: T) Rc<T> {\n  base = assert_nonnull(malloc(16 + sizeof(T)))\n  store_i64(base.offset(0), 0)\n  store_i64(base.offset(8), 0)\n  r = Rc<T>(base: base)\n  s ::= r.rc_val()\n  s[0] = x\n  r\n}\nrc_inc<T> = (r: Rc<T>) void { store_i64(r.base.offset(0), load_i64(r.base.offset(0)) + 1) }\ndo_drop<T> = (r: Rc<T>) void { s ::= r.rc_val()  s[0].addr().drop() }\ndo_trace<T> = (r: Rc<T>, t: MutPtr<Tracer>) void {\n  s ::= r.rc_val()\n  s[0].addr().trace(t)\n}\nvisit_child = (cb: RawPtr<u8>, t: MutPtr<Tracer>) void {\n  (t.op == 0).match({ true => { hset_count(cb, hcount(cb) - 1)  cc_mark(cb) }, false =>\n  (t.op == 1).match({ true => { cc_scan(cb) }, false =>\n  (t.op == 2).match({ true => { hset_count(cb, hcount(cb) + 1)  cc_scan_black(cb) }, false =>\n  { cc_gather(cb) } }) }) })\n}\ncc_mark = (b: RawPtr<u8>) void {\n  (hcolor(b) == GRAY).match({ true => {}, false => {\n    hset_color(b, GRAY)\n    mt = Tracer(op: 0)\n    blk_trace(b, mt.addr())\n  } })\n}\ncc_scan = (b: RawPtr<u8>) void {\n  (hcolor(b) == GRAY).match({ true => {\n    (hcount(b) > 0).match({ true => { cc_scan_black(b) }, false => {\n      hset_color(b, WHITE)\n      st = Tracer(op: 1)\n      blk_trace(b, st.addr())\n    } })\n  }, false => {} })\n}\ncc_scan_black = (b: RawPtr<u8>) void {\n  hset_color(b, BLACK)\n  bt = Tracer(op: 2)\n  blk_trace(b, bt.addr())\n}\ncc_gather = (b: RawPtr<u8>) void {\n  (hcolor(b) == WHITE).match({ true => {\n    hset_color(b, BLACK)\n    g_white = g_white.list_push(b)\n    gt = Tracer(op: 3)\n    blk_trace(b, gt.addr())\n  }, false => {} })\n}\nNode*: { has: i32, kid: RawPtr<u8> }\nNode.impl(Drop, { drop = (s: MutPtr<Node>) void { g_dropped = g_dropped + 1 } })\nNode.impl(Trace, { trace = (s: Ptr<Node>, t: MutPtr<Tracer>) void {\n  (s.has == 0).match({ true => {}, false => { visit_child(s.kid, t) } })\n} })\nblk_trace = (b: RawPtr<u8>, t: MutPtr<Tracer>) void { do_trace(Rc<Node>(base: b), t) }\nblk_drop = (b: RawPtr<u8>) void { do_drop(Rc<Node>(base: b)) }\nset_kid = (parent: Rc<Node>, child: Rc<Node>) void {\n  p ::= parent.rc_val()\n  p[0] = Node(has: 1, kid: child.base)\n  child.rc_inc()\n}\ndrive = (op: i32, i: i64) void {\n  (i < roots_list().list_len()).match({ true => {\n    b = roots_list().list_get(i)\n    (op == 0).match({ true => { cc_mark(b) }, false =>\n    (op == 1).match({ true => { cc_scan(b) }, false =>\n    { cc_gather(b) } }) })\n    drive(op, i + 1)\n  }, false => {} })\n}\nfree_all = (i: i64) void {\n  (i < g_white.list_len()).match({ true => { g_freed = g_freed + 1  blk_drop(g_white.list_get(i))  free(g_white.list_get(i))  free_all(i + 1) }, false => {} })\n}\ncollect = () void {\n  g_white = list_new()\n  drive(0, 0)\n  drive(1, 0)\n  drive(2, 0)\n  free_all(0)\n  roots_clear()\n}\ntest* = () i32 {\n  a = rc_new(Node(has: 0, kid: null_ptr()))\n  b = rc_new(Node(has: 0, kid: null_ptr()))\n  set_kid(a, b)\n  set_kid(b, a)\n  roots_add(a.base)\n  roots_add(b.base)\n  collect()\n  g_dropped\n}",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nrealloc = (p: RawPtr<u8>, n: i64) RawPtr<u8>\nfree = (p: RawPtr<u8>) void\ng_freed ::= 0\ng_dropped ::= 0\nBLACK = 0\nGRAY = 1\nWHITE = 2\nstore_ptr = (b: RawPtr<u8>, p: RawPtr<u8>) void { store_i64(b, p) }\nload_ptr = (b: RawPtr<u8>) RawPtr<u8> { load_i64(b).offset(0) }\nhcount = (b: RawPtr<u8>) i64 { load_i64(b.offset(0)) }\nhset_count = (b: RawPtr<u8>, v: i64) void { store_i64(b.offset(0), v) }\nhcolor = (b: RawPtr<u8>) i64 { load_i64(b.offset(8)) }\nhset_color = (b: RawPtr<u8>, v: i64) void { store_i64(b.offset(8), v) }\ng_white ::= null_ptr()\nlist_new = () RawPtr<u8> { l = assert_nonnull(malloc(16 + 64))  store_i64(l.offset(0), 0)  store_i64(l.offset(8), 8)  l }\nlist_len = (l: RawPtr<u8>) i64 { load_i64(l.offset(0)) }\nlist_get = (l: RawPtr<u8>, i: i64) RawPtr<u8> { load_ptr(l.offset(16 + i * 8)) }\nlist_push = (l: RawPtr<u8>, p: RawPtr<u8>) RawPtr<u8> {\n  n = list_len(l)\n  r = (n == load_i64(l.offset(8))).match({ true => { nc = load_i64(l.offset(8)) * 2  g = assert_nonnull(realloc(l, 16 + nc * 8))  store_i64(g.offset(8), nc)  g }, false => l })\n  store_ptr(r.offset(16 + n * 8), p)\n  store_i64(r.offset(0), n + 1)\n  r\n}\nroots ::= null_ptr()\nroots_list = () RawPtr<u8> {\n  (roots == null_ptr()).match({ true => { roots = list_new()  roots }, false => roots })\n}\nroots_add = (b: RawPtr<u8>) void { roots = roots_list().list_push(b) }\nroots_clear = () void { store_i64(roots_list().offset(0), 0) }\nTracer*: { op: i32 }\nTrace*: { trace: (Ptr<Self>, MutPtr<Tracer>) void }\nDrop*: { drop: (MutPtr<Self>) void }\nRc<T>: { base: RawPtr<u8> }\nrc_val<T> = (r: Rc<T>) MutSlice<T> { slice(r.base.offset(16), 1) }\nrc_get<T> = (r: Rc<T>) T { r.rc_val()[0] }\nrc_base<T> = (r: Rc<T>) RawPtr<u8> { r.base }\nrc_new<T> = (x: T) Rc<T> {\n  base = assert_nonnull(malloc(16 + sizeof(T)))\n  store_i64(base.offset(0), 0)\n  store_i64(base.offset(8), 0)\n  r = Rc<T>(base: base)\n  s ::= r.rc_val()\n  s[0] = x\n  r\n}\nrc_inc<T> = (r: Rc<T>) void { store_i64(r.base.offset(0), load_i64(r.base.offset(0)) + 1) }\ndo_drop<T> = (r: Rc<T>) void { s ::= r.rc_val()  s[0].addr().drop() }\ndo_trace<T> = (r: Rc<T>, t: MutPtr<Tracer>) void {\n  s ::= r.rc_val()\n  s[0].addr().trace(t)\n}\nvisit_child = (cb: RawPtr<u8>, t: MutPtr<Tracer>) void {\n  (t.op == 0).match({ true => { hset_count(cb, hcount(cb) - 1)  cc_mark(cb) }, false =>\n  (t.op == 1).match({ true => { cc_scan(cb) }, false =>\n  (t.op == 2).match({ true => { hset_count(cb, hcount(cb) + 1)  cc_scan_black(cb) }, false =>\n  { cc_gather(cb) } }) }) })\n}\ncc_mark = (b: RawPtr<u8>) void {\n  (hcolor(b) == GRAY).match({ true => {}, false => {\n    hset_color(b, GRAY)\n    mt = Tracer(op: 0)\n    blk_trace(b, mt.addr())\n  } })\n}\ncc_scan = (b: RawPtr<u8>) void {\n  (hcolor(b) == GRAY).match({ true => {\n    (hcount(b) > 0).match({ true => { cc_scan_black(b) }, false => {\n      hset_color(b, WHITE)\n      st = Tracer(op: 1)\n      blk_trace(b, st.addr())\n    } })\n  }, false => {} })\n}\ncc_scan_black = (b: RawPtr<u8>) void {\n  hset_color(b, BLACK)\n  bt = Tracer(op: 2)\n  blk_trace(b, bt.addr())\n}\ncc_gather = (b: RawPtr<u8>) void {\n  (hcolor(b) == WHITE).match({ true => {\n    hset_color(b, BLACK)\n    g_white = g_white.list_push(b)\n    gt = Tracer(op: 3)\n    blk_trace(b, gt.addr())\n  }, false => {} })\n}\nNode*: { has: i32, kid: RawPtr<u8> }\nNode.impl(Drop, { drop = (s: MutPtr<Node>) void { g_dropped = g_dropped + 1 } })\nNode.impl(Trace, { trace = (s: Ptr<Node>, t: MutPtr<Tracer>) void {\n  (s.has == 0).match({ true => {}, false => { visit_child(s.kid, t) } })\n} })\nblk_trace = (b: RawPtr<u8>, t: MutPtr<Tracer>) void { do_trace(Rc<Node>(base: b), t) }\nblk_drop = (b: RawPtr<u8>) void { do_drop(Rc<Node>(base: b)) }\nset_kid = (parent: Rc<Node>, child: Rc<Node>) void {\n  p ::= parent.rc_val()\n  p[0] = Node(has: 1, kid: child.base)\n  child.rc_inc()\n}\ndrive = (op: i32, i: i64) void {\n  (i < roots_list().list_len()).match({ true => {\n    b = roots_list().list_get(i)\n    (op == 0).match({ true => { cc_mark(b) }, false =>\n    (op == 1).match({ true => { cc_scan(b) }, false =>\n    { cc_gather(b) } }) })\n    drive(op, i + 1)\n  }, false => {} })\n}\nfree_all = (i: i64) void {\n  (i < g_white.list_len()).match({ true => { g_freed = g_freed + 1  blk_drop(g_white.list_get(i))  free(g_white.list_get(i))  free_all(i + 1) }, false => {} })\n}\ncollect = () void {\n  g_white = list_new()\n  drive(0, 0)\n  drive(1, 0)\n  drive(2, 0)\n  free_all(0)\n  roots_clear()\n}\ntest* = () i32 {\n  a = rc_new(Node(has: 0, kid: null_ptr()))\n  b = rc_new(Node(has: 0, kid: null_ptr()))\n  set_kid(a, b)\n  set_kid(b, a)\n  roots_add(a.base)\n  roots_add(b.base)\n  collect()\n  g_dropped\n}",
             want: "2",
         ),
         VCase(
@@ -750,31 +750,31 @@ harness_value_run* = () i32 {
             want: "24",
         ),
         VCase(
-            src: "sl_clamp = (v: i64, lo: i64, hi: i64) i64 { (v < lo).match({ true => lo, false => (v > hi).match({ true => hi, false => v }) }) }\nsub<T> = (xs: [T], lo: i64, hi: i64) [T] { l = sl_clamp(lo, 0, xs.len)  h = sl_clamp(hi, l, xs.len)  slice(xs.ptr.offset(l * sizeof(T)), h - l) }\ntake<T> = (xs: [T], n: i64) [T] { xs.sub(0, n) }\ndrop<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }\ntest* = () i32 {\n  s = [10, 20, 30, 40]\n  v: [i32] = s.sub(1, 3)\n  t: [i32] = s.take(2)\n  d: [i32] = s.drop(3)\n  o: [i32] = s.sub(2, 99)\n  v.len.to_i32() * 1000 + v[0] * 10 + v[1] + t[0] + d[0] + o.len.to_i32()\n}",
+            src: "sl_clamp = (v: i64, lo: i64, hi: i64) i64 { (v < lo).match({ true => lo, false => (v > hi).match({ true => hi, false => v }) }) }\nsub<T> = (xs: MutSlice<T>, lo: i64, hi: i64) MutSlice<T> { l = sl_clamp(lo, 0, xs.len)  h = sl_clamp(hi, l, xs.len)  slice(xs.ptr.offset(l * sizeof(T)), h - l) }\ntake<T> = (xs: MutSlice<T>, n: i64) MutSlice<T> { xs.sub(0, n) }\ndrop<T> = (xs: MutSlice<T>, n: i64) MutSlice<T> { xs.sub(n, xs.len) }\ntest* = () i32 {\n  s = [10, 20, 30, 40]\n  v: MutSlice<i32> = s.sub(1, 3)\n  t: MutSlice<i32> = s.take(2)\n  d: MutSlice<i32> = s.drop(3)\n  o: MutSlice<i32> = s.sub(2, 99)\n  v.len.to_i32() * 1000 + v[0] * 10 + v[1] + t[0] + d[0] + o.len.to_i32()\n}",
             want: "2282",
         ),
         VCase(
-            src: "mk = () [i32] { [1, 2, 3] }\ntest* = () i32 {\n  xs = mk()\n  xs[0] + xs[1] * 10 + xs[2] * 100\n}",
+            src: "mk = () MutSlice<i32> { [1, 2, 3] }\ntest* = () i32 {\n  xs = mk()\n  xs[0] + xs[1] * 10 + xs[2] * 100\n}",
             want: "321",
         ),
         VCase(
-            src: "keep = (xs: [i32]) [i32] { xs }\ntest* = () i32 {\n  r = keep([4, 5, 6])\n  r[0] + r[1] * 10 + r[2] * 100\n}",
+            src: "keep = (xs: MutSlice<i32>) MutSlice<i32> { xs }\ntest* = () i32 {\n  r = keep([4, 5, 6])\n  r[0] + r[1] * 10 + r[2] * 100\n}",
             want: "654",
         ),
         VCase(
-            src: "sum = (xs: [i32]) i32 {\n  t ::= 0\n  xs.loop((h, i, x) {\n    t = t + x\n  })\n  t\n}\ntest* = () i32 { sum([1, 2, 3]) }",
+            src: "sum = (xs: MutSlice<i32>) i32 {\n  t ::= 0\n  xs.loop((h, i, x) {\n    t = t + x\n  })\n  t\n}\ntest* = () i32 { sum([1, 2, 3]) }",
             want: "6",
         ),
         VCase(
-            src: "first = (xs: [i32]) i32 { xs[0] }\nvia = (ys: [i32]) i32 { first(ys) }\ntest* = () i32 { via([7, 8, 9]) }",
+            src: "first = (xs: MutSlice<i32>) i32 { xs[0] }\nvia = (ys: MutSlice<i32>) i32 { first(ys) }\ntest* = () i32 { via([7, 8, 9]) }",
             want: "7",
         ),
         VCase(
-            src: "Heap*: { z: i32 }\nhacq = (a: MutPtr<Heap>, n: i64) RawPtr<u8> { malloc(n) }\nhbuf<A, T> = (a: MutPtr<A>, n: i64, like: [T]) [T] { slice(a.hacq(n * sizeof(T)), n) }\nreverse_in<A, T> = (a: MutPtr<A>, xs: [T]) [T] { out ::= a.hbuf(xs.len, xs)  xs.loop((h, i, x) { out[xs.len - 1 - i] = x })  out }\ntest* = () i32 {\n  h = Heap(z: 0)\n  r: [i32] = h.addr().reverse_in([1, 2, 3, 4])\n  r[0] * 1000 + r[1] * 100 + r[2] * 10 + r[3]\n}",
+            src: "Heap*: { z: i32 }\nhacq = (a: MutPtr<Heap>, n: i64) RawPtr<u8> { malloc(n) }\nhbuf<A, T> = (a: MutPtr<A>, n: i64, like: MutSlice<T>) MutSlice<T> { slice(a.hacq(n * sizeof(T)), n) }\nreverse_in<A, T> = (a: MutPtr<A>, xs: MutSlice<T>) MutSlice<T> { out ::= a.hbuf(xs.len, xs)  xs.loop((h, i, x) { out[xs.len - 1 - i] = x })  out }\ntest* = () i32 {\n  h = Heap(z: 0)\n  r: MutSlice<i32> = h.addr().reverse_in([1, 2, 3, 4])\n  r[0] * 1000 + r[1] * 100 + r[2] * 10 + r[3]\n}",
             want: "4321",
         ),
         VCase(
-            src: "index_of<T> = (xs: [T], x: T) i64 { r ::= 0 - 1  xs.loop((h, i, e) { (e == x).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ncontains<T> = (xs: [T], x: T) bool { xs.index_of(x) >= 0 }\nis30 = (x: i32) bool { x == 30 }\nfind_by<T> = (xs: [T], pred: (T) bool) i64 { r ::= 0 - 1  xs.loop((h, i, e) { pred(e).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ntest* = () i32 {\n  s = [10, 20, 30, 40]\n  ix = s.index_of(30)\n  miss = s.index_of(99)\n  has = s.contains(40).match({ true => 1, false => 0 })\n  fb = s.find_by(is30)\n  ix.to_i32() * 1000 + (miss + 1).to_i32() * 100 + has * 10 + fb.to_i32()\n}",
+            src: "index_of<T> = (xs: MutSlice<T>, x: T) i64 { r ::= 0 - 1  xs.loop((h, i, e) { (e == x).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ncontains<T> = (xs: MutSlice<T>, x: T) bool { xs.index_of(x) >= 0 }\nis30 = (x: i32) bool { x == 30 }\nfind_by<T> = (xs: MutSlice<T>, pred: (T) bool) i64 { r ::= 0 - 1  xs.loop((h, i, e) { pred(e).match({ true => (r < 0).match({ true => { r = i }, false => {} }), false => {} }) })  r }\ntest* = () i32 {\n  s = [10, 20, 30, 40]\n  ix = s.index_of(30)\n  miss = s.index_of(99)\n  has = s.contains(40).match({ true => 1, false => 0 })\n  fb = s.find_by(is30)\n  ix.to_i32() * 1000 + (miss + 1).to_i32() * 100 + has * 10 + fb.to_i32()\n}",
             want: "2012",
         ),
         VCase(
@@ -1010,7 +1010,7 @@ harness_value_run* = () i32 {
             want: "7",
         ),
         VCase(
-            src: "fold<T> = (xs: [T], init: T, f: (T, T) T) T {\n  acc ::= init\n  xs.loop((h, i, x) { acc = f(acc, x) })\n  acc\n}\ntest* = () i32 { [1, 2, 3].fold(0, (x: i32, y: i32) { x + y }) }",
+            src: "fold<T> = (xs: MutSlice<T>, init: T, f: (T, T) T) T {\n  acc ::= init\n  xs.loop((h, i, x) { acc = f(acc, x) })\n  acc\n}\ntest* = () i32 { [1, 2, 3].fold(0, (x: i32, y: i32) { x + y }) }",
             want: "6",
         ),
         VCase(
@@ -1018,7 +1018,7 @@ harness_value_run* = () i32 {
             want: "9",
         ),
         VCase(
-            src: "S*: { buf: [i32] }\ntest* = () i32 { s ::= S(buf: [1, 2, 3])  s.buf[0] = 9  s.buf[0] + s.buf[1] }",
+            src: "S*: { buf: MutSlice<i32> }\ntest* = () i32 { s ::= S(buf: [1, 2, 3])  s.buf[0] = 9  s.buf[0] + s.buf[1] }",
             want: "11",
         ),
         VCase(
@@ -1026,7 +1026,7 @@ harness_value_run* = () i32 {
             want: "10",
         ),
         VCase(
-            src: "In*: { p: [i32] }\nS*: { inner: In }\ntest* = () i32 { s ::= S(inner: In(p: [10, 20]))  s.inner.p[1] = 5  s.inner.p[0] + s.inner.p[1] }",
+            src: "In*: { p: MutSlice<i32> }\nS*: { inner: In }\ntest* = () i32 { s ::= S(inner: In(p: [10, 20]))  s.inner.p[1] = 5  s.inner.p[0] + s.inner.p[1] }",
             want: "15",
         ),
         VCase(
@@ -1090,35 +1090,35 @@ harness_value_run* = () i32 {
             want: "13",
         ),
         VCase(
-            src: "//! link: c\nstrlen = (s: StringView) i64\nis_ws = (b: u8) bool { (b == ' ') || (b == '\\t') || (b == '\\n') || (b == '\\r') }\nws_start = (v: [u8]) i64 { lo :: i64 = v.len  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { lo = i  h.break } }) })  lo }\nws_end = (v: [u8]) i64 { hi :: i64 = 0  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { hi = i + 1 } }) })  hi }\ntest* = () i32 { s = \"  hi \\n\"  v: [u8] = slice(s, strlen(s))  to_i32(ws_start(v) * 100 + (ws_end(v) - ws_start(v))) }",
+            src: "//! link: c\nstrlen = (s: StringView) i64\nis_ws = (b: u8) bool { (b == ' ') || (b == '\\t') || (b == '\\n') || (b == '\\r') }\nws_start = (v: MutSlice<u8>) i64 { lo :: i64 = v.len  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { lo = i  h.break } }) })  lo }\nws_end = (v: MutSlice<u8>) i64 { hi :: i64 = 0  v.loop((h, i, b) { b.is_ws().match({ true => {}, false => { hi = i + 1 } }) })  hi }\ntest* = () i32 { s = \"  hi \\n\"  v: MutSlice<u8> = slice(s, strlen(s))  to_i32(ws_start(v) * 100 + (ws_end(v) - ws_start(v))) }",
             want: "202",
         ),
         VCase(
-            src: "//! link: c\nstrlen = (s: StringView) i64\ntest* = () i32 { s = \"a,,b\"  v: [u8] = slice(s, strlen(s))  acc :: i64 = 0  start :: i64 = 0  v.loop((h, i, b) { (b == ',').match ({ true => { acc = acc * 10 + (i - start)  start = i + 1 }, _ => {} }) })  acc = acc * 10 + (v.len - start)  to_i32(acc) }",
+            src: "//! link: c\nstrlen = (s: StringView) i64\ntest* = () i32 { s = \"a,,b\"  v: MutSlice<u8> = slice(s, strlen(s))  acc :: i64 = 0  start :: i64 = 0  v.loop((h, i, b) { (b == ',').match ({ true => { acc = acc * 10 + (i - start)  start = i + 1 }, _ => {} }) })  acc = acc * 10 + (v.len - start)  to_i32(acc) }",
             want: "101",
         ),
         VCase(
-            src: "//! link: c\nstrlen = (s: StringView) i64\nis_ws = (b: u8) bool { (b == ' ') || (b == '\\t') || (b == '\\n') || (b == '\\r') }\ntest* = () i32 { s = \"  the  cat sat \"  v: [u8] = slice(s, strlen(s))  acc :: i64 = 0  start :: i64 = 0 - 1  v.loop((h, i, b) { b.is_ws().match ({ true => (start >= 0).match ({ true => { acc = acc * 10 + (i - start)  start = 0 - 1 }, false => {} }), false => (start < 0).match ({ true => { start = i }, false => {} }) }) })  (start >= 0).match ({ true => { acc = acc * 10 + (v.len - start) }, false => {} })  to_i32(acc) }",
+            src: "//! link: c\nstrlen = (s: StringView) i64\nis_ws = (b: u8) bool { (b == ' ') || (b == '\\t') || (b == '\\n') || (b == '\\r') }\ntest* = () i32 { s = \"  the  cat sat \"  v: MutSlice<u8> = slice(s, strlen(s))  acc :: i64 = 0  start :: i64 = 0 - 1  v.loop((h, i, b) { b.is_ws().match ({ true => (start >= 0).match ({ true => { acc = acc * 10 + (i - start)  start = 0 - 1 }, false => {} }), false => (start < 0).match ({ true => { start = i }, false => {} }) }) })  (start >= 0).match ({ true => { acc = acc * 10 + (v.len - start) }, false => {} })  to_i32(acc) }",
             want: "333",
         ),
         VCase(
-            src: "//! link: c\nstrlen = (s: StringView) i64\nup = (b: u8) u8 { (b >= 'a' && b <= 'z').match({ true => b - ('a' - 'A'), false => b }) }\ntest* = () i32 { s = \"hi!\"  v: [u8] = slice(s, strlen(s))  acc :: i64 = 0  v.loop((h, i, b) { acc = acc + up(b) })  to_i32(acc) }",
+            src: "//! link: c\nstrlen = (s: StringView) i64\nup = (b: u8) u8 { (b >= 'a' && b <= 'z').match({ true => b - ('a' - 'A'), false => b }) }\ntest* = () i32 { s = \"hi!\"  v: MutSlice<u8> = slice(s, strlen(s))  acc :: i64 = 0  v.loop((h, i, b) { acc = acc + up(b) })  to_i32(acc) }",
             want: "178",
         ),
         VCase(
-            src: "//! link: c\nstrlen = (s: StringView) i64\nlo = (b: u8) u8 { (b >= 'A' && b <= 'Z').match({ true => b + ('a' - 'A'), false => b }) }\ntest* = () i32 { s = \"HeLLo\"  v: [u8] = slice(s, strlen(s))  acc :: i64 = 0  v.loop((h, i, b) { acc = acc + lo(b) })  to_i32(acc) }",
+            src: "//! link: c\nstrlen = (s: StringView) i64\nlo = (b: u8) u8 { (b >= 'A' && b <= 'Z').match({ true => b + ('a' - 'A'), false => b }) }\ntest* = () i32 { s = \"HeLLo\"  v: MutSlice<u8> = slice(s, strlen(s))  acc :: i64 = 0  v.loop((h, i, b) { acc = acc + lo(b) })  to_i32(acc) }",
             want: "532",
         ),
         VCase(
-            src: "//! link: c\nstrlen = (s: StringView) i64\ntest* = () i32 { s = \"ab\"  sv: [u8] = slice(s, strlen(s))  out ::= [0, 0, 0, 0, 0, 0]  out.loop((h, i, b) { out[i] = sv[i % sv.len] })  acc :: i64 = 0  out.loop((h, i, b) { acc = acc * 10 + (b - 'a') })  to_i32(acc) }",
+            src: "//! link: c\nstrlen = (s: StringView) i64\ntest* = () i32 { s = \"ab\"  sv: MutSlice<u8> = slice(s, strlen(s))  out ::= [0, 0, 0, 0, 0, 0]  out.loop((h, i, b) { out[i] = sv[i % sv.len] })  acc :: i64 = 0  out.loop((h, i, b) { acc = acc * 10 + (b - 'a') })  to_i32(acc) }",
             want: "10101",
         ),
         VCase(
-            src: "//! link: c\nstrlen = (s: StringView) i64\ntest* = () i32 { parts: [StringView] = [\"a\", \"bb\", \"c\"]  sep = \",\"  total :: i64 = 0  parts.loop((h, i, p) { total = total + strlen(p) })  total = total + strlen(sep) * (parts.len - 1)  to_i32(total) }",
+            src: "//! link: c\nstrlen = (s: StringView) i64\ntest* = () i32 { parts: MutSlice<StringView> = [\"a\", \"bb\", \"c\"]  sep = \",\"  total :: i64 = 0  parts.loop((h, i, p) { total = total + strlen(p) })  total = total + strlen(sep) * (parts.len - 1)  to_i32(total) }",
             want: "6",
         ),
         VCase(
-            src: "//! link: c\nstrlen = (s: StringView) i64\nhas_at = (sv: [u8], fv: [u8], at: i64) bool { ok ::= true  fv.loop((h, i, b) { ok.match({ true => (sv[at + i] == b).match({ true => {}, false => { ok = false  h.break } }), false => { h.break } }) })  ok }\ntest* = () i32 { s = \"aaaa\"  f = \"aa\"  sv: [u8] = slice(s, strlen(s))  fv: [u8] = slice(f, strlen(f))  cnt :: i64 = 0  nextpos :: i64 = 0  sv.loop((h, i, b) { ((i >= nextpos) && (i + fv.len <= sv.len) && has_at(sv, fv, i)).match({ true => { cnt = cnt + 1  nextpos = i + fv.len }, _ => {} }) })  tolen = 1  total = sv.len + cnt * (tolen - fv.len)  to_i32(total * 100 + cnt) }",
+            src: "//! link: c\nstrlen = (s: StringView) i64\nhas_at = (sv: MutSlice<u8>, fv: MutSlice<u8>, at: i64) bool { ok ::= true  fv.loop((h, i, b) { ok.match({ true => (sv[at + i] == b).match({ true => {}, false => { ok = false  h.break } }), false => { h.break } }) })  ok }\ntest* = () i32 { s = \"aaaa\"  f = \"aa\"  sv: MutSlice<u8> = slice(s, strlen(s))  fv: MutSlice<u8> = slice(f, strlen(f))  cnt :: i64 = 0  nextpos :: i64 = 0  sv.loop((h, i, b) { ((i >= nextpos) && (i + fv.len <= sv.len) && has_at(sv, fv, i)).match({ true => { cnt = cnt + 1  nextpos = i + fv.len }, _ => {} }) })  tolen = 1  total = sv.len + cnt * (tolen - fv.len)  to_i32(total * 100 + cnt) }",
             want: "202",
         ),
         VCase(
@@ -1234,7 +1234,7 @@ harness_value_run* = () i32 {
             want: "16",
         ),
         VCase(
-            src: "//! link: c\nstrlen = (s: StringView) i64\ncount_ph = (sv: [u8]) i64 {\n  ph :: i64 = 0\n  skip :: i64 = 0\n  sv.loop((h, i, b) {\n    (i < skip).match({ true => {}, false => {\n      pair = i + 1 < sv.len\n      isph = b == '{' && pair && sv[i + 1] == '}'\n      esc = pair && (b == '{' && sv[i + 1] == '{' || b == '}' && sv[i + 1] == '}')\n      isph.match({ true => { ph = ph + 100  skip = i + 2 }, false => esc.match({ true => { ph = ph + 1  skip = i + 2 }, false => {} }) })\n    } })\n  })\n  ph\n}\ntest* = () i64 {\n  s = \"a={} b={{}} c={} d=}}\"\n  v: [u8] = slice(s, strlen(s))\n  count_ph(v)\n}",
+            src: "//! link: c\nstrlen = (s: StringView) i64\ncount_ph = (sv: MutSlice<u8>) i64 {\n  ph :: i64 = 0\n  skip :: i64 = 0\n  sv.loop((h, i, b) {\n    (i < skip).match({ true => {}, false => {\n      pair = i + 1 < sv.len\n      isph = b == '{' && pair && sv[i + 1] == '}'\n      esc = pair && (b == '{' && sv[i + 1] == '{' || b == '}' && sv[i + 1] == '}')\n      isph.match({ true => { ph = ph + 100  skip = i + 2 }, false => esc.match({ true => { ph = ph + 1  skip = i + 2 }, false => {} }) })\n    } })\n  })\n  ph\n}\ntest* = () i64 {\n  s = \"a={} b={{}} c={} d=}}\"\n  v: MutSlice<u8> = slice(s, strlen(s))\n  count_ph(v)\n}",
             want: "203",
         ),
         VCase(
@@ -1302,43 +1302,43 @@ harness_value_run* = () i32 {
             want: "22",
         ),
         VCase(
-            src: "fold<T> = (xs: [T], init: T, f: (T, T) T) T { acc ::= init  xs.loop((h, i, x) { acc = f(acc, x) })  acc }\ntest* = () i32 { xs: [i32] = [1, 2, 3]  xs.fold(0, (a, x) { a + x }) }",
+            src: "fold<T> = (xs: MutSlice<T>, init: T, f: (T, T) T) T { acc ::= init  xs.loop((h, i, x) { acc = f(acc, x) })  acc }\ntest* = () i32 { xs: MutSlice<i32> = [1, 2, 3]  xs.fold(0, (a, x) { a + x }) }",
             want: "6",
         ),
         VCase(
-            src: "fold<T> = (xs: [T], init: T, f: (T, T) T) T { acc ::= init  xs.loop((h, i, x) { acc = f(acc, x) })  acc }\ntest* = () i32 { xs: [i32] = [1, 2, 3]  g = (a: i32, x: i32) i32 { a + x }  xs.fold(0, g) }",
+            src: "fold<T> = (xs: MutSlice<T>, init: T, f: (T, T) T) T { acc ::= init  xs.loop((h, i, x) { acc = f(acc, x) })  acc }\ntest* = () i32 { xs: MutSlice<i32> = [1, 2, 3]  g = (a: i32, x: i32) i32 { a + x }  xs.fold(0, g) }",
             want: "6",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out :: [U] = slice(assert_nonnull(malloc(xs.len * sizeof(U))), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i32 { xs: [i32] = [1, 2, 3]  d: [i32] = xs.map((x) { x * 2 })  d[0] + d[1] + d[2] }",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: MutSlice<T>, f: (T) U) MutSlice<U> { out :: MutSlice<U> = slice(assert_nonnull(malloc(xs.len * sizeof(U))), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i32 { xs: MutSlice<i32> = [1, 2, 3]  d: MutSlice<i32> = xs.map((x) { x * 2 })  d[0] + d[1] + d[2] }",
             want: "12",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out :: [U] = slice(assert_nonnull(malloc(xs.len * sizeof(U))), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i32] = [1, 2, 3]  d: [i64] = xs.map((x) { to_i64(x) * 1000000000 })  d[2] }",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: MutSlice<T>, f: (T) U) MutSlice<U> { out :: MutSlice<U> = slice(assert_nonnull(malloc(xs.len * sizeof(U))), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: MutSlice<i32> = [1, 2, 3]  d: MutSlice<i64> = xs.map((x) { to_i64(x) * 1000000000 })  d[2] }",
             want: "3000000000",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out :: [U] = slice(assert_nonnull(malloc(xs.len * sizeof(U))), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i64] = [1, 2, 3, 4]  ys = xs.map((x: i64) i64 { x + 10 })  s ::= 0  ys.loop((h, i, v) { s = s + v })  s }",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: MutSlice<T>, f: (T) U) MutSlice<U> { out :: MutSlice<U> = slice(assert_nonnull(malloc(xs.len * sizeof(U))), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: MutSlice<i64> = [1, 2, 3, 4]  ys = xs.map((x: i64) i64 { x + 10 })  s ::= 0  ys.loop((h, i, v) { s = s + v })  s }",
             want: "50",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: [T], f: (T) U) [U] { out :: [U] = slice(assert_nonnull(malloc(xs.len * sizeof(U))), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: [i32] = [1, 2, 3]  d = xs.map((x: i32) i64 { to_i64(x) * 1000000000 })  d[2] }",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nmap<T, U> = (xs: MutSlice<T>, f: (T) U) MutSlice<U> { out :: MutSlice<U> = slice(assert_nonnull(malloc(xs.len * sizeof(U))), xs.len)  xs.loop((h, i, x) { out[i] = f(x) })  out }\ntest* = () i64 { xs: MutSlice<i32> = [1, 2, 3]  d = xs.map((x: i32) i64 { to_i64(x) * 1000000000 })  d[2] }",
             want: "3000000000",
         ),
         VCase(
-            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfilter<T> = (xs: [T], keep: (T) bool) [T] { buf :: [T] = slice(assert_nonnull(malloc(xs.len * sizeof(T))), xs.len)  n ::= 0  xs.loop((h, i, x) { buf[n] = x  n = n + keep(x).match ({ true => 1, false => 0 }) })  slice(buf[0].addr(), n) }\ntest* = () i32 { xs: [i32] = [1, 2, 3, 4]  ev: [i32] = xs.filter((x) { x % 2 == 0 })  to_i32(ev.len) * 10 + ev[0] + ev[1] }",
+            src: "//! link: c\nmalloc = (n: i64) RawPtr<u8>\nfilter<T> = (xs: MutSlice<T>, keep: (T) bool) MutSlice<T> { buf :: MutSlice<T> = slice(assert_nonnull(malloc(xs.len * sizeof(T))), xs.len)  n ::= 0  xs.loop((h, i, x) { buf[n] = x  n = n + keep(x).match ({ true => 1, false => 0 }) })  slice(buf[0].addr(), n) }\ntest* = () i32 { xs: MutSlice<i32> = [1, 2, 3, 4]  ev: MutSlice<i32> = xs.filter((x) { x % 2 == 0 })  to_i32(ev.len) * 10 + ev[0] + ev[1] }",
             want: "26",
         ),
         VCase(
-            src: "each<T> = (xs: [T], f: (T) void) void { xs.loop((h, i, x) { f(x) }) }\ntest* = () i32 { xs: [i32] = [1, 2, 3, 4]  tot ::= 0  xs.each((x) { tot = tot + x })  tot }",
+            src: "each<T> = (xs: MutSlice<T>, f: (T) void) void { xs.loop((h, i, x) { f(x) }) }\ntest* = () i32 { xs: MutSlice<i32> = [1, 2, 3, 4]  tot ::= 0  xs.each((x) { tot = tot + x })  tot }",
             want: "10",
         ),
         VCase(
-            src: "Opt<T>: Some(T) | None\nfind<T> = (xs: [T], pred: (T) bool) Opt<T> { out :: Opt<T> = .None  xs.loop((h, i, x) { pred(x).match ({ true => { out = .Some(x)  h.break }, false => { } }) })  out }\ntest* = () i32 { xs: [i32] = [1, 2, 3, 4]  xs.find((x) { x > 2 }).match ({ .Some(v) => v, .None => 99 }) }",
+            src: "Opt<T>: Some(T) | None\nfind<T> = (xs: MutSlice<T>, pred: (T) bool) Opt<T> { out :: Opt<T> = .None  xs.loop((h, i, x) { pred(x).match ({ true => { out = .Some(x)  h.break }, false => { } }) })  out }\ntest* = () i32 { xs: MutSlice<i32> = [1, 2, 3, 4]  xs.find((x) { x > 2 }).match ({ .Some(v) => v, .None => 99 }) }",
             want: "3",
         ),
         VCase(
-            src: "Opt<T>: Some(T) | None\nfind<T> = (xs: [T], pred: (T) bool) Opt<T> { out :: Opt<T> = .None  xs.loop((h, i, x) { pred(x).match ({ true => { out = .Some(x)  h.break }, false => { } }) })  out }\ntest* = () i32 { xs: [i32] = [1, 2, 3]  xs.find((x) { x > 9 }).match ({ .Some(v) => v, .None => 99 }) }",
+            src: "Opt<T>: Some(T) | None\nfind<T> = (xs: MutSlice<T>, pred: (T) bool) Opt<T> { out :: Opt<T> = .None  xs.loop((h, i, x) { pred(x).match ({ true => { out = .Some(x)  h.break }, false => { } }) })  out }\ntest* = () i32 { xs: MutSlice<i32> = [1, 2, 3]  xs.find((x) { x > 9 }).match ({ .Some(v) => v, .None => 99 }) }",
             want: "99",
         ),
         VCase(
@@ -1378,7 +1378,7 @@ harness_value_run* = () i32 {
             want: "42",
         ),
         VCase(
-            src: "Res: Okv(i32) | Nov\ntest* = () i32 {\n    xs: [Res] = [Res.Okv(1), Res\n    .Okv(2)]\n    xs[1].match ({ .Okv(v) => v + 40, .Nov => 9, })\n}",
+            src: "Res: Okv(i32) | Nov\ntest* = () i32 {\n    xs: MutSlice<Res> = [Res.Okv(1), Res\n    .Okv(2)]\n    xs[1].match ({ .Okv(v) => v + 40, .Nov => 9, })\n}",
             want: "42",
         ),
         VCase(
@@ -1506,23 +1506,23 @@ harness_value_run* = () i32 {
             want: "123",
         ),
         VCase(
-            src: "H: { xs: [i64] }\ntest* = () i64 {\n  h = H(xs: [1, 2, 3])\n  h.xs[0] * 100 + h.xs[1] * 10 + h.xs[2]\n}",
+            src: "H: { xs: MutSlice<i64> }\ntest* = () i64 {\n  h = H(xs: [1, 2, 3])\n  h.xs[0] * 100 + h.xs[1] * 10 + h.xs[2]\n}",
             want: "123",
         ),
         VCase(
-            src: "H2: { bs: [u8] }\ntest* = () i64 {\n  h = H2(bs: [1, 2, 3])\n  h.bs[0].to_i64() * 100 + h.bs[1].to_i64() * 10 + h.bs[2].to_i64()\n}",
+            src: "H2: { bs: MutSlice<u8> }\ntest* = () i64 {\n  h = H2(bs: [1, 2, 3])\n  h.bs[0].to_i64() * 100 + h.bs[1].to_i64() * 10 + h.bs[2].to_i64()\n}",
             want: "123",
         ),
         VCase(
-            src: "B<T>: { xs: [T] }\ntest* = () i64 {\n  b = B<i64>(xs: [1, 2, 3])\n  b.xs[0] * 100 + b.xs[1] * 10 + b.xs[2]\n}",
+            src: "B<T>: { xs: MutSlice<T> }\ntest* = () i64 {\n  b = B<i64>(xs: [1, 2, 3])\n  b.xs[0] * 100 + b.xs[1] * 10 + b.xs[2]\n}",
             want: "123",
         ),
         VCase(
-            src: "C: Red | Green\ntest* = () i32 {\n  cs: [C] = [.Red, .Green]\n  (cs[1].variant_name() == \"Green\").match ({ true => 1, false => 0 })\n}",
+            src: "C: Red | Green\ntest* = () i32 {\n  cs: MutSlice<C> = [.Red, .Green]\n  (cs[1].variant_name() == \"Green\").match ({ true => 1, false => 0 })\n}",
             want: "1",
         ),
         VCase(
-            src: "C: Red | Green\ntest* = () i32 {\n  cs: [C] = [.Red, .Green]\n  n ::= 0\n  cs.loop((h, i, x) {\n    n = n + (x.variant_name() == \"Green\").match ({ true => 1, false => 0 })\n  })\n  n\n}",
+            src: "C: Red | Green\ntest* = () i32 {\n  cs: MutSlice<C> = [.Red, .Green]\n  n ::= 0\n  cs.loop((h, i, x) {\n    n = n + (x.variant_name() == \"Green\").match ({ true => 1, false => 0 })\n  })\n  n\n}",
             want: "1",
         ),
         VCase(
@@ -1612,11 +1612,11 @@ harness_value_run* = () i32 {
 // untyped-literal OPERAND width: products/shifts whose RESULT exceeds i32 must compute at >=64-bit
 // the widened comparison the bug used to get wrong (would be 0 at int width)
 // small i32 math must stay unchanged
-// A typed `[i64]` literal: the bare-int elements adopt the declared i64 width, so an i64
+// A typed `MutSlice<i64>` literal: the bare-int elements adopt the declared i64 width, so an i64
 // accumulator (`acc + x`) fits without error[assign-fit]. Regression for slice-literal-width.
-// A typed `[u8]` literal: elements adopt u8, summed into an i64 (u8 widens to fit).
+// A typed `MutSlice<u8>` literal: elements adopt u8, summed into an i64 (u8 widens to fit).
 // i64 fold-style accumulation seeded by an i64 literal `0`, over an i64 slice literal.
-// BOUNDARY: a bare (unannotated) `[i32]` literal + i32 math stays i32 — width unchanged.
+// BOUNDARY: a bare (unannotated) `MutSlice<i32>` literal + i32 math stays i32 — width unchanged.
 // M1 lambda-as-value: a NON-capturing lambda stored in a typed var, then called indirectly.
 // M1 lambda-as-value: RETURN a non-capturing lambda from a fn, bind it, call it.
 // M1 lambda-as-value: a fn value stored in a STRUCT FIELD, then called through the field.
@@ -1633,7 +1633,7 @@ harness_value_run* = () i32 {
 // a generic fn; 1+2+3 = 6. Locks the std.collections.iter.fold shape end to end.
 // M2 HOF — same generic `fold` but the reducer is a STORED closure (`g`), not an inline lambda.
 // Both call paths must yield 6: the stored-closure path is the M1 keystone non-inlined repr.
-// M2 HOF — allocating generic `map` (doubling). New slice of f(x); 2+4+6 = 12. The `out: [U] =`
+// M2 HOF — allocating generic `map` (doubling). New slice of f(x); 2+4+6 = 12. The `out: MutSlice<U> =`
 // annotation pins the element type off the raw allocator pointer (else a void-element miscompile).
 // M2 HOF — generic `map` with DISTINCT element types T=i32 -> U=i64 (the <T,U> proof). f widens
 // each i32 to i64 and scales past 2^31; d[2] = 3 * 1e9 = 3000000000 (would overflow i32).
@@ -1690,8 +1690,8 @@ harness_value_run* = () i32 {
 // whose variants CARRY payloads of different types. `.Oom` is tag 0 in Kind and tag 1 in Msg, so a
 // wrong pick can never coincidentally print 7.
 // Inliner tparam-subst keystone (inline_template threads the tparam->arg map through xform_*):
-//   - `[M]` element type in an Index reached via a MutPtr<Box<M>> receiver (was `sizeof(void)`),
-//   - a `ms: [M] =` let annotation in an inlined body,
+//   - `MutSlice<M>` element type in an Index reached via a MutPtr<Box<M>> receiver (was `sizeof(void)`),
+//   - a `ms: MutSlice<M> =` let annotation in an inlined body,
 //   - two-param `ok<T,E>` where E is inferred from the RETURN type (must be Result_i32_IoError,
 //     not Result_i32_void). These are silent-miscompile guards for that fix.
 // expected-type string-literal coercion: the literal is a weak generic inference source, so fs's

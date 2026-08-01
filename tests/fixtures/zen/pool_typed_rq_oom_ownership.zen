@@ -1,0 +1,106 @@
+// A first-send run-queue OOM must remove the typed message box from the mailbox before send frees it.
+// One worker stays inside fanout while 256 leaves fill a 173-slot queue. The unique 2768-byte growth
+// allocation is failed once; the refused leaf is then retried after growth becomes available.
+{ pool_open, pool_spawn, pool_actor_free, pool_view, Pool } = std.concurrent.pool
+{ malloc, free } = std.mem.alloc
+pa = std.concurrent.pool_actor
+{ Context, Receiver } = std.concurrent.pool_actor
+NLEAF = 256
+RQCAP = 173
+PH_SIZE = 16
+delivered = assert_nonnull(malloc(8))
+refused = assert_nonnull(malloc(8))
+retry_bad = assert_nonnull(malloc(8))
+failed_idx = assert_nonnull(malloc(8))
+poolcell = assert_nonnull(malloc(8))
+handles = assert_nonnull(malloc(NLEAF * PH_SIZE))
+Msg*: Hit(i64)
+Leaf*: {
+    acc: RawPtr<u8>,
+}
+Leaf.impl(Receiver, {
+    receive = (l: MutPtr<Leaf>, ctx: Context<Msg>) void {
+        ctx.msg.match ({
+            .Hit(n) => {
+                atomic_add_i64(l.acc, n)
+            },
+        })
+    }
+})
+leaf_tramp = (user: RawPtr<u8>, msg: i64) void {
+    a: MutSlice<Leaf> = user.slice(1)
+    b: MutSlice<Msg> = msg.offset(0).slice(1)
+    a[0].addr().receive(Context(msg: b[0]))
+    pa.free_msg(msg)
+}
+hslot = () MutSlice<pa.PooledHandle<Leaf>> { handles.slice(NLEAF) }
+spawn_leaves = (i: i64) void {
+    (i < NLEAF).then({
+        hs ::= hslot()
+        hs[i] = pa.spawn_actor_heap(4, Leaf(acc: delivered), leaf_tramp)
+        spawn_leaves(i + 1)
+    })
+}
+fan = (p: MutPtr<Pool>, i: i64) void {
+    (i < NLEAF).then({
+        hs = hslot()
+        p.send(hs[i], Msg.Hit(1)).match ({
+            .Ok(n)  => { },
+            .Err(e) => {
+                atomic_add_i64(refused, 1)
+                failed_idx.store_i64(i)
+            },
+        })
+        p.fan(i + 1)
+    })
+}
+fanout_behave = (user: RawPtr<u8>, msg: i64) void {
+    p = pool_view(load_i64(poolcell).offset(0))
+    p.fan(0)
+    ix = load_i64(failed_idx)
+    (ix >= 0).then({
+        hs = hslot()
+        p.send(hs[ix], Msg.Hit(1)).match ({
+            .Ok(n)  => { },
+            .Err(e) => {
+                atomic_add_i64(retry_bad, 1)
+            },
+        })
+    })
+    { }
+}
+close_leaves = (i: i64) void {
+    (i < NLEAF).then({
+        hs = hslot()
+        pa.close(hs[i])
+        close_leaves(i + 1)
+    })
+}
+main = () i32 {
+    delivered.store_i64(0)
+    refused.store_i64(0)
+    retry_bad.store_i64(0)
+    failed_idx.store_i64(0 - 1)
+    spawn_leaves(0)
+    fanout = pool_spawn(delivered, 4, fanout_behave)
+    p = pool_open(1, RQCAP)
+    poolcell.store_i64(p.pool_raw())
+    p.pool_send(fanout, 1)
+    p.pool_quiesce_stop()
+    got = load_i64(delivered)
+    refs = load_i64(refused)
+    rb = load_i64(retry_bad)
+    close_leaves(0)
+    pool_actor_free(fanout)
+    p.pool_close()
+    free(handles)
+    free(poolcell)
+    free(failed_idx)
+    free(retry_bad)
+    free(refused)
+    free(delivered)
+    (got == NLEAF && rb == 0).match ({
+        true  => (refs == 0).then({ 42 }, { 43 }),
+        false => 1,
+    })
+}

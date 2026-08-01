@@ -1,4 +1,3 @@
-// compiler.check_lower — statement-position match/cond → if lowering. Extracted from compiler.check (pure move).
 { Expr, Stmt, Decl, Ty, EnumDecl, ArmData, MatchData, CondData } = compiler.ast.ast_types
 { cbuf, bin, cond, member, arrow, mktag, slett, sexpr, sif, block, gstr_string, gstr_append,
   gstr_finish } = compiler.genc
@@ -13,7 +12,7 @@ ed_covered = (ed: EnumDecl, m: MatchData) bool {
     ed.variants.loop_at((i, v) { all = m.arm_covers_v(v.name).then({ all }, { false }) })
     all
 }
-enum_exhaustive = (decls: [Decl], m: MatchData) bool {
+enum_exhaustive = (decls: MutSlice<Decl>, m: MatchData) bool {
     found ::= false
     decls.loop_at((i, d) {
         found = d.match ({
@@ -23,10 +22,10 @@ enum_exhaustive = (decls: [Decl], m: MatchData) bool {
     })
     found
 }
-match_lowerable = (decls: [Decl], m: MatchData) bool {
+match_lowerable = (decls: MutSlice<Decl>, m: MatchData) bool {
     match_has_wild(m).then({ true }, { decls.enum_exhaustive(m) })
 }
-branch_stmts = (a: Allocator, env: Env, e: Ptr<Expr>) [Stmt] {
+branch_stmts = (a: Allocator, env: Env, e: Ptr<Expr>) MutSlice<Stmt> {
     out ::= a.one_stmt(a.lower_stmt_expr(env, e))
     load(e).match ({
         .Block(b) => {
@@ -48,12 +47,12 @@ relower_tail_stmt = (a: Allocator, env: Env, st: Stmt) Stmt {
         _            => st,
     })
 }
-env_over = (a: Allocator, env: Env, stmts: [Stmt], upto: i64) Env {
+env_over = (a: Allocator, env: Env, stmts: MutSlice<Stmt>, upto: i64) Env {
     out ::= env
     stmts.loop_at((i, st) { out = (i < upto).then({ a.extend_env(out, st) }, { out }) })
     out
 }
-relower_block_tail = (a: Allocator, env: Env, stmts: [Stmt]) [Stmt] {
+relower_block_tail = (a: Allocator, env: Env, stmts: MutSlice<Stmt>) MutSlice<Stmt> {
     n = stmts.len
     (n == 0).match ({
         true  => stmts,
@@ -88,7 +87,7 @@ subj_payload* = (a: Allocator, subj: Ptr<Expr>, variant: StringView, ptr: bool) 
     })
     a.cenode(member(u, variant))
 }
-arm_then = (a: Allocator, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
+arm_then = (a: Allocator, env: Env, t: Ty, m: MatchData, ar: ArmData) MutSlice<Stmt> {
     body = a.branch_stmts(a.arm_env(env, t, ar), ar.body)
     out ::= body
     (ar.bind == "" == false).then({
@@ -100,14 +99,14 @@ arm_then = (a: Allocator, env: Env, t: Ty, m: MatchData, ar: ArmData) [Stmt] {
     })
     out
 }
-cons_stmt = (a: Allocator, head: Stmt, rest: [Stmt]) [Stmt] {
+cons_stmt = (a: Allocator, head: Stmt, rest: MutSlice<Stmt>) MutSlice<Stmt> {
     buf ::= cbuf<Stmt>(a, rest.len + 1)
     buf[0] = head
     rest.loop_at((i, st) { buf[i + 1] = st })
     buf
 }
 // Build if/else chain over enum arms.
-lower_match_arms = (a: Allocator, env: Env, t: Ty, m: MatchData, i: i32) [Stmt] {
+lower_match_arms = (a: Allocator, env: Env, t: Ty, m: MatchData, i: i32) MutSlice<Stmt> {
     out ::= no_stmts()
     (i >= m.arms.len == false).then({
         ar = m.arms[i]
@@ -139,7 +138,7 @@ lower_match_stmt = (a: Allocator, env: Env, m: MatchData) Stmt {
 lower_cond_stmt = (a: Allocator, env: Env, d: CondData) Stmt {
     sif(d.c, a.branch_stmts(env, d.t), a.cond_else(env, d.e))
 }
-cond_else = (a: Allocator, env: Env, e: Ptr<Expr>) [Stmt] {
+cond_else = (a: Allocator, env: Env, e: Ptr<Expr>) MutSlice<Stmt> {
     out ::= a.branch_stmts(env, e)
     load(e).match ({
         .Cond(d) => {

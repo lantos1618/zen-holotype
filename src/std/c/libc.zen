@@ -1,30 +1,6 @@
 //! link: c, pthread
-// std.c.libc — the single home for the raw libc / POSIX foreign declarations.
-//
-// A bodyless `name = (params) Ret` decl IS the foreign-binding mechanism: the parser
-// tags it (resolve.is_foreign_span), genc lowers it to a bare C prototype, and libc's
-// own headers define the symbol — nothing is re-prototyped. Declaring each symbol HERE
-// exactly once keeps every libc name in one file; other std modules import what they
-// need (`{ malloc, free } = std.c.libc`) instead of re-declaring it.
-//
-// The `//! link:` line above is the other half: a bodyless decl says WHAT a symbol looks
-// like, and the pragma says WHERE it comes from. `c` is linked by default so it adds no
-// flag; `pthread` becomes `-lpthread` on the cc line of any program whose closure reaches
-// this module. Without a linkage line every decl here would fail error[ffi-unlinked] —
-// which is what makes a symbol nobody provides a positioned compiler error instead of a
-// linker dump. See docs/SPEC.md, "FFI is a build-granted capability".
-//
-// This module imports NOTHING (RawPtr, str, i32, i64, void are builtins), so it sits at
-// the very bottom of the std import graph and can be pulled in by even the lowest-level
-// modules (core.result, mem.raw, text.str, io.file) without forming a cycle.
-//
-// NOTE: malloc / realloc / free are deliberately NOT here. They are the std.mem.alloc
-// public API (`{ malloc, free } = std.mem.alloc`, asserted by the build/resolver tests and
-// used by the allocator impls), and the resolver does NOT re-export imported names — a
-// module only exports what it itself declares. So those three stay declared in
-// std.mem.alloc; every OTHER libc symbol funnels here. (Each symbol still lives in exactly
-// one file — no duplicates.)
-// ── memory ───────────────────────────────────────────────────────────────────
+// Bodyless libc/POSIX FFI declarations; the link directive is their ABI floor. Imports are not
+// re-exported, so malloc/realloc/free remain in std.mem.alloc as part of its public API.
 calloc* = (n: i64, size: i64) RawPtr<u8>
 // memcpy's two ranges MUST NOT overlap (C undefined behaviour); memmove's may. std.mem.raw wraps the
 // pair as `copy` / `move` — import those, not these, unless you are inside std.mem itself.
@@ -35,10 +11,8 @@ memcpy* = (dst: RawPtr<u8>, src: Ptr<u8>, n: i64) RawPtr<u8>
 memmove* = (dst: RawPtr<u8>, src: Ptr<u8>, n: i64) RawPtr<u8>
 memset* = (p: RawPtr<u8>, v: i32, n: i64) RawPtr<u8>
 memcmp* = (a: Ptr<u8>, b: Ptr<u8>, n: i64) i32
-// ── strings ──────────────────────────────────────────────────────────────────
 strlen* = (s: StringView) i64
 strcmp* = (a: StringView, b: StringView) i32
-// ── POSIX file descriptors ───────────────────────────────────────────────────
 open* = (path: StringView, flags: i32, mode: i32) i32
 read* = (fd: i32, buf: RawPtr<u8>, n: i64) i64
 // `write` only READS its buffer (C spells it `const void *`), so it takes the read-only floor: a

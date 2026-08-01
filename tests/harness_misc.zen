@@ -256,14 +256,14 @@ harness_misc_string_types = () i32 {
     ])
 }
 // ════════════════════════════════════════════════════════════════════════════════
-// Slice mutability. `[T]`/`MutSlice<T>` is the writable window, `Slice<T>` the read-only one, named
+// Slice mutability. `MutSlice<T>` is the writable window, `Slice<T>` the read-only one, named
 // off the `Ptr`/`MutPtr` pair (unmarked = read-only). The lattice runs ONE way: a writable slice
 // fits a read-only slot, never the reverse — and under a constructor neither fits the other. The
 // provenance half is `.view()`: a window over ANY of the three string spellings is read-only, so the
 // store that used to segfault in `.rodata` is a `zen check` error. `StringView` is in that list on
 // purpose — docs/string-vec-model.md's table says the borrowed row is not mutable, and it is the row
 // every literal WIDENS into at a call boundary, so leaving it writable let `poke("lit")` launder a
-// `.rodata` pointer into a writable `[u8]` with `zen check` reporting ok. To write bytes you own,
+// `.rodata` pointer into a writable `MutSlice<u8>` with `zen check` reporting ok. To write bytes you own,
 // name the ownership (`s.own_ptr().slice(n)`) — see examples/strings_demo.zen.
 // ════════════════════════════════════════════════════════════════════════════════
 harness_misc_slice_mut = () i32 {
@@ -289,7 +289,7 @@ harness_misc_slice_mut = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "widen = (p: Ptr<u8>, n: i64) i64 { v: [u8] = slice(p, n)  v.len }\nmain = () i32 { 0 }",
+            src: "widen = (p: Ptr<u8>, n: i64) i64 { v: MutSlice<u8> = slice(p, n)  v.len }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "assign-fit",
         ),
@@ -314,17 +314,17 @@ harness_misc_slice_mut = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\nbad = (s: StringCstr) i64 { v: [u8] = s.view()  v.len }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\nbad = (s: StringCstr) i64 { v: MutSlice<u8> = s.view()  v.len }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "assign-fit",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\nbad = (s: StringCstr) [u8] { s.view() }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\nbad = (s: StringCstr) MutSlice<u8> { s.view() }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "return-fit",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\ntake = (v: [u8]) i64 { v.len }\nmain = () i32 { s: StringCstr = \"hi\"  to_i32(s.view().take()) }",
+            src: "{ view } = std.text.str\ntake = (v: MutSlice<u8>) i64 { v.len }\nmain = () i32 { s: StringCstr = \"hi\"  to_i32(s.view().take()) }",
             should_pass: false,
             kind: "arg-type",
         ),
@@ -334,12 +334,12 @@ harness_misc_slice_mut = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "take = (v: Slice<u8>) i64 { v.len }\nmain = () i32 { b: [u8] = ['a', 'b']  to_i32(b.take()) }",
+            src: "take = (v: Slice<u8>) i64 { v.len }\nmain = () i32 { b: MutSlice<u8> = ['a', 'b']  to_i32(b.take()) }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "Box<T>: { v: T }\nneeds_mut = (b: Box<[u8]>) i64 { b.v.len }\nbad = (r: Box<Slice<u8>>) i64 { needs_mut(r) }\nmain = () i32 { 0 }",
+            src: "Box<T>: { v: T }\nneeds_mut = (b: Box<MutSlice<u8>>) i64 { b.v.len }\nbad = (r: Box<Slice<u8>>) i64 { needs_mut(r) }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "arg-type",
         ),
@@ -354,17 +354,17 @@ harness_misc_slice_mut = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\nbad = (s: StringCstr) i64 { v = s.view()  w: [u8] = v.ptr.slice(v.len)  w.len }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\nbad = (s: StringCstr) i64 { v = s.view()  w: MutSlice<u8> = v.ptr.slice(v.len)  w.len }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "assign-fit",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\n{ copy } = std.mem.raw\nfine = (s: StringCstr, d: [u8]) void { v = s.view()  d.ptr.copy(v.ptr, v.len) }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\n{ copy } = std.mem.raw\nfine = (s: StringCstr, d: MutSlice<u8>) void { v = s.view()  d.ptr.copy(v.ptr, v.len) }\nmain = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "{ view } = std.text.str\nbad = (s: StringView) [u8] { v = s.view()  v.ptr.slice(v.len) }\nmain = () i32 { 0 }",
+            src: "{ view } = std.text.str\nbad = (s: StringView) MutSlice<u8> { v = s.view()  v.ptr.slice(v.len) }\nmain = () i32 { 0 }",
             should_pass: false,
             kind: "return-fit",
         ),
@@ -377,7 +377,7 @@ harness_misc_slice_mut = () i32 {
 }    // was `should_pass: true` — that was THE hole: a literal widens into a `StringView`
 // parameter, so a writable window here is a writable window over `.rodata`
 // THE defect this pins: `trim_view` and friends hand back a window over BORROWED bytes, so
-// the window is `Slice<u8>`. Before, they returned `[u8]` and this compiled clean, wrote
+// the window is `Slice<u8>`. Before, they returned `MutSlice<u8>` and this compiled clean, wrote
 // `.rodata` and died with SIGABRT at run time.
 // the WIDENING case: a `StringLiteral` fits a `StringView` parameter, and inside the callee
 // nothing remembers where the bytes came from. Only `StringView` being read-only ITSELF
@@ -386,14 +386,14 @@ harness_misc_slice_mut = () i32 {
 // a read-only `Ptr<T>` may now be SLICED — it just yields a read-only window rather than
 // being refused outright. That is what lets `trim_view` exist at all.
 // a store through a view of a `StringCstr` -> rejected (this is the `.rodata` write)
-// the same view bound to a writable `[u8]` -> rejected at the binding
-// a read-only window returned where `[u8]` is declared -> rejected
-// a read-only window passed to a `[u8]` param -> rejected
+// the same view bound to a writable `MutSlice<u8>` -> rejected at the binding
+// a read-only window returned where `MutSlice<u8>` is declared -> rejected
+// a read-only window passed to a `MutSlice<u8>` param -> rejected
 // the same window passed to a `Slice<u8>` param -> accepted (that IS the read-only spelling)
-// a writable `[u8]` passed to a `Slice<u8>` param -> accepted (capability may be dropped)
-// slice kinds are INVARIANT under a constructor: `Box<Slice<u8>>` does not fit `Box<[u8]>`
+// a writable `MutSlice<u8>` passed to a `Slice<u8>` param -> accepted (capability may be dropped)
+// slice kinds are INVARIANT under a constructor: `Box<Slice<u8>>` does not fit `Box<MutSlice<u8>>`
 // a store through a view of a plain `StringView` -> still accepted (strings_demo's shape)
-// the `.ptr` LAUNDRY: a read-only window's pointer re-widened into `[u8]` -> rejected, because
+// the `.ptr` LAUNDRY: a read-only window's pointer re-widened into `MutSlice<u8>` -> rejected, because
 // `.ptr` carries the window's own kind (tests/fixtures/zen/readonly_ptr_launder.zen pins all four
 // shapes). The two accepts that must survive it: the read-only pointer is still a legal memcpy
 // SOURCE, and a writable window's `.ptr` still builds a writable slice.
@@ -411,7 +411,7 @@ harness_misc_slice_mut = () i32 {
 // never a silent 0). The value-case harness can't drive this (it has no module resolver), so this is
 // a small custom `zenc run` + stdout-substring runner.
 // ════════════════════════════════════════════════════════════════════════════════
-NP_PROG = "{ put } = std.text.fmt\n{ hex_value, parse_f64, parse_i64_checked, parse_i64_radix } = std.text.num\n{ ParseError } = std.text.str\nemit_f = (label: StringView, r: Result<f64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").f(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nemit_i = (label: StringView, r: Result<i64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").i(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nmain = () i32 {\n    emit_f(\"f_pi|\",   parse_f64(\"3.14\"))\n    emit_f(\"f_neg|\",  parse_f64(\"-2.5\"))\n    emit_f(\"f_exp|\",  parse_f64(\"1e3\"))\n    emit_f(\"f_int|\",  parse_f64(\"42\"))\n    emit_f(\"f_bad|\",  parse_f64(\"abc\"))\n    emit_f(\"f_mt|\",   parse_f64(\"\"))\n    emit_f(\"f_dot2|\", parse_f64(\"1.2.3\"))\n    emit_i(\"i_ok|\",   parse_i64_checked(\"123\"))\n    emit_i(\"i_bad|\",  parse_i64_checked(\"12x\"))\n    emit_i(\"i_mt|\",   parse_i64_checked(\"\"))\n    emit_i(\"r_hex|\",  parse_i64_radix(\"ff\", 16))\n    emit_i(\"r_bin|\",  parse_i64_radix(\"1010\", 2))\n    emit_i(\"r_bad|\",  parse_i64_radix(\"zz\", 16))\n    hx: [u8] = ['1', 'f', 'f', 'f', 'f', 'f', 'f', 'f', 'f']\n    put(\"hexwide|=\").i(hex_value(hx)).nl()\n    0\n}\n"
+NP_PROG = "{ put } = std.text.fmt\n{ hex_value, parse_f64, parse_i64_checked, parse_i64_radix } = std.text.num\n{ ParseError } = std.text.str\nemit_f = (label: StringView, r: Result<f64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").f(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nemit_i = (label: StringView, r: Result<i64, ParseError>) void {\n    r.match ({\n        .Ok(v)  => { put(label).s(\"=Ok\").i(v).nl()  {} },\n        .Err(e) => { put(label).s(\"=Err\").nl()  {} }\n    })\n}\nmain = () i32 {\n    emit_f(\"f_pi|\",   parse_f64(\"3.14\"))\n    emit_f(\"f_neg|\",  parse_f64(\"-2.5\"))\n    emit_f(\"f_exp|\",  parse_f64(\"1e3\"))\n    emit_f(\"f_int|\",  parse_f64(\"42\"))\n    emit_f(\"f_bad|\",  parse_f64(\"abc\"))\n    emit_f(\"f_mt|\",   parse_f64(\"\"))\n    emit_f(\"f_dot2|\", parse_f64(\"1.2.3\"))\n    emit_i(\"i_ok|\",   parse_i64_checked(\"123\"))\n    emit_i(\"i_bad|\",  parse_i64_checked(\"12x\"))\n    emit_i(\"i_mt|\",   parse_i64_checked(\"\"))\n    emit_i(\"r_hex|\",  parse_i64_radix(\"ff\", 16))\n    emit_i(\"r_bin|\",  parse_i64_radix(\"1010\", 2))\n    emit_i(\"r_bad|\",  parse_i64_radix(\"zz\", 16))\n    hx: MutSlice<u8> = ['1', 'f', 'f', 'f', 'f', 'f', 'f', 'f', 'f']\n    put(\"hexwide|=\").i(hex_value(hx)).nl()\n    0\n}\n"
 harness_misc_num_parse = () i32 {
     mp = heap_allocator()
     save(mp.zo_path("zo_misc_np.zen"), NP_PROG, len(NP_PROG))
@@ -469,7 +469,7 @@ om_param_list = (mp: Allocator, src: StringView, q: i64) StringView {
 // name is not `=`, and a generic's `<` is not `(`), and require every such `name` to appear in `c`.
 // `\s` is approximated by space/tab between the tokens (the only whitespace real source uses there);
 // this only ever matches a SUBSET of the regex, so it can never raise a failure the regex wouldn't.
-// Byte access goes through a single `[u8]` view (O(1) index) — NOT `at` (which re-strlens per call).
+// Byte access goes through a single `Slice<u8>` view (O(1) index) — NOT `at` (which re-strlens per call).
 om_decls_survive = (mp: Allocator, src: StringView, c: StringView) bool {
     sv: Slice<u8> = src.view()
     n = sv.len
@@ -534,7 +534,7 @@ harness_misc_acid = () i32 {
     out("\n")
     n = files.len
     base = assert_nonnull(malloc(n * 8))
-    cmds :: [StringView] = base.slice(n)
+    cmds :: MutSlice<StringView> = base.slice(n)
     files.loop((h, i, f) {
         cmds[i] = mp.om_acid_cmd(i, f)
     })
@@ -813,7 +813,7 @@ harness_misc_vbreak = () i32 {
     s_cmt = "Res: Okv(i32) | Nov\nmain = () i32 {\n    x = Res /* continuation\n    comment */ .Okv(42)\n    x.match ({ .Okv(v) => v, .Nov => 9, })\n}\n"
     s_arm = "Res: Okv(i32) | Nov\npick = (c: bool) Res {\n    c.match ({\n        true => Res\n        .Okv(1),\n        false => Res.Nov,\n    })\n}\nmain = () i32 { pick(true).match ({ .Okv(v) => v + 41, .Nov => 9, }) }\n"
     s_paren = "Res: Okv(i32) | Nov\nmain = () i32 {\n    x = (Res\n    .Okv(2))\n    x.match ({ .Okv(v) => v + 40, .Nov => 9, })\n}\n"
-    s_slice = "Res: Okv(i32) | Nov\nmain = () i32 {\n    xs: [Res] = [Res.Okv(1), Res\n    .Okv(2)]\n    xs[1].match ({ .Okv(v) => v + 40, .Nov => 9, })\n}\n"
+    s_slice = "Res: Okv(i32) | Nov\nmain = () i32 {\n    xs: MutSlice<Res> = [Res.Okv(1), Res\n    .Okv(2)]\n    xs[1].match ({ .Okv(v) => v + 40, .Nov => 9, })\n}\n"
     // #53: a VALUE-position bare ctor `.None` (RHS of the binding) directly before a parenthesized statement
     // must NOT fuse into a call `.None(cond)…` — the `(` starts a NEW statement. The same-line gate in
     // parse_ctor_named keeps `.None` a bare tag; the formatted source must run to the SAME value (5) and
@@ -842,7 +842,7 @@ om_shell_code = (cmd: StringView) i32 {
 // value case that prints via fmt.)
 om_out_bytes_ok = () bool {
     // `msg` is a `StringView`, not the literal itself: a view of a `StringLiteral`/`StringCstr` is
-    // a read-only `Slice<u8>`, and `out_bytes` still declares a writable `[u8]` it never writes.
+    // a read-only `Slice<u8>`, and `out_bytes` accepts that read-only window without writing it.
     msg: StringView = "hi\n"
     out_bytes(msg.view()).match ({
         .Ok(n)  => n == 3,
@@ -964,7 +964,7 @@ harness_misc_audit_ws = () i32 {
 CLONE_SRC = """
 CL_S*: { a: i32, b: i32 }
 CL_E*: A(i32) | B(i32)
-cl_scale_a = (xs: [i32], k: i32) i32 {
+cl_scale_a = (xs: MutSlice<i32>, k: i32) i32 {
     t ::= k
     xs.loop((h, i, x) {
         t = t + x * 2
@@ -972,7 +972,7 @@ cl_scale_a = (xs: [i32], k: i32) i32 {
     })
     t + k * 5
 }
-cl_scale_b = (ys: [i32], n: i32) i32 {
+cl_scale_b = (ys: MutSlice<i32>, n: i32) i32 {
     t ::= n
     ys.loop((h, j, y) {
         t = t + y * 2
@@ -980,7 +980,7 @@ cl_scale_b = (ys: [i32], n: i32) i32 {
     })
     t + n * 5
 }
-cl_near_op = (zs: [i32], q: i32) i32 {
+cl_near_op = (zs: MutSlice<i32>, q: i32) i32 {
     t ::= q
     zs.loop((h, i, z) {
         t = t + z + 2
@@ -1033,7 +1033,7 @@ cl_val = (e: CL_E) i32 {
     })
 }
 main = () i32 {
-    v: [i32] = [1, 2, 3]
+    v: MutSlice<i32> = [1, 2, 3]
     s = v.cl_scale_a(1) + v.cl_scale_b(2) + v.cl_near_op(3)
     p = cl_pt_a(1).a + cl_pt_b(2).b + cl_near_fld(3).a
     e = cl_mk_a(1).cl_val() + cl_mk_b(2).cl_val() + cl_near_var(3).cl_val()
@@ -1065,7 +1065,7 @@ harness_misc_clones = () i32 {
 // The second run is the DURABLE gate: src/std must stay at zero, so re-introducing a bare `<A>` on
 // an allocator parameter fails `make harness` instead of waiting for a user's monomorphization.
 // ════════════════════════════════════════════════════════════════════════════════
-TPR_SRC = "{ AllocatorBackend } = std.mem.alloc\nTprCat*: { lives: i32 }\ntpr_meow = (c: MutPtr<TprCat>, n: i64) i64 { c.lives.to_i64() + n }\ntpr_frobnicate<T> = (x: MutPtr<T>, n: i64) i64 { x.tpr_meow(n) }\ntpr_identity<T> = (x: MutPtr<T>) i64 { 1 }\ntpr_passthru<T> = (x: MutPtr<T>) i64 { x.tpr_identity() }\ntpr_grab<A: AllocatorBackend> = (a: MutPtr<A>, n: i64) RawPtr<u8> { a.acquire(n) }\ntpr_first<E> = (xs: [E], dflt: E) E { (xs.len == 0).then({ dflt }, { xs[0] }) }\nmain = () i32 {\n    c = TprCat(lives: 9)\n    c.addr().tpr_frobnicate(1).to_i32() + c.addr().tpr_passthru().to_i32()\n}\n"
+TPR_SRC = "{ AllocatorBackend } = std.mem.alloc\nTprCat*: { lives: i32 }\ntpr_meow = (c: MutPtr<TprCat>, n: i64) i64 { c.lives.to_i64() + n }\ntpr_frobnicate<T> = (x: MutPtr<T>, n: i64) i64 { x.tpr_meow(n) }\ntpr_identity<T> = (x: MutPtr<T>) i64 { 1 }\ntpr_passthru<T> = (x: MutPtr<T>) i64 { x.tpr_identity() }\ntpr_grab<A: AllocatorBackend> = (a: MutPtr<A>, n: i64) RawPtr<u8> { a.acquire(n) }\ntpr_first<E> = (xs: MutSlice<E>, dflt: E) E { (xs.len == 0).then({ dflt }, { xs[0] }) }\nmain = () i32 {\n    c = TprCat(lives: 9)\n    c.addr().tpr_frobnicate(1).to_i32() + c.addr().tpr_passthru().to_i32()\n}\n"
 harness_misc_tparam_recv = () i32 {
     mp = heap_allocator()
     save(mp.zo_path("zo_tpr.zen"), TPR_SRC, len(TPR_SRC))

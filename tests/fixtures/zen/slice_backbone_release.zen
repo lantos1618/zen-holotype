@@ -1,4 +1,4 @@
-// TEETH for std.mem.alloc's `release_slice`. A `[T]` is (ptr, len) over ONE block — the block
+// TEETH for std.mem.alloc's `release_slice`. A `MutSlice<T>` is (ptr, len) over ONE block — the block
 // `nbuf`/`split` acquired — and this program hands all three of its backbones back, so valgrind
 // reports `definitely lost: 0 bytes in 0 blocks`:
 //   ./zen build tests/fixtures/zen/slice_backbone_release.zen -o /tmp/sbr
@@ -6,7 +6,7 @@
 // Delete any one `release_slice` line below and that same command reports its backbone as
 // definitely lost (32 / 128 / 24 bytes) — which is the leak this fixture exists to keep closed.
 //
-// It prints NOTHING on purpose: a `formatln("{}", [arg_int(x)])` heap-promotes its `[Arg]` slice
+// It prints NOTHING on purpose: a `formatln("{}", [arg_int(x)])` heap-promotes its `MutSlice<Arg>` slice
 // literal and nothing frees it, which would drown the signal. The verdict is the exit code.
 { release_slice } = std.mem.alloc
 { nbuf, split, view } = std.text.str
@@ -22,11 +22,11 @@ main = () i32 {
     alloc = halloc.gpa()
     a = alloc.addr()
     // ALLOC: one block of 4 * sizeof(i64). Its freer is the release_slice below.
-    ns :: [i64] = a.nbuf(0, 4)
+    ns :: MutSlice<i64> = a.nbuf(0, 4)
     ns[3] = 9
     // ALLOC: 4 * sizeof(Row) — a STRUCT element type, so the backbone is 128 bytes wide while the
     // slice's ptr is still that block's base. Same freer.
-    rs :: [Row] = a.nbuf(Row(
+    rs :: MutSlice<Row> = a.nbuf(Row(
         a: 0,
         b: 0,
         c: 0,
@@ -38,8 +38,8 @@ main = () i32 {
         c: 3,
         d: 4,
     )
-    // ALLOC twice over: the [StringView] backbone AND one NUL-terminated copy per field.
-    parts: [StringView] = a.split("x,yy,zzz", ',')
+    // ALLOC twice over: the MutSlice<StringView> backbone AND one NUL-terminated copy per field.
+    parts: MutSlice<StringView> = a.split("x,yy,zzz", ',')
     total ::= 0
     parts.loop((h, i, p) {
         total = total + p.len()

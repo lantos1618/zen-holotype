@@ -1,54 +1,13 @@
-// std.collections.map — a StringView-keyed associative map with an EXPLICIT allocator.
-// Allocating operations take an explicit backend. Fallible operations return
-// Result<Map<T>, IoError> — allocation failure is a value: `.expect("…")` at fail-fast roots,
-// `.or_return()` inside Result-returning fns.
-//
-// LOOKUP: `get(k, dflt)` returns a caller-supplied default on a miss — convenient, but a stored value equal
-// to `dflt` is then indistinguishable from an absent key. When that distinction matters, use `get_opt(k)`,
-// which returns `Opt<T>` (`.Some(v)` present / `.None` absent).
-//
-// Lookup is O(1) AVERAGE via an open hash index (FNV-1a over the key bytes, separate chaining into the
-// insertion-ordered key/val columns). The index lives in one i64 buffer of `2*cap` slots: the first `cap`
-// slots are bucket HEADS (entry index or -1), the next `cap` slots are the per-entry NEXT links. The index
-// is rebuilt on grow. This keeps the O(n^2) decl scans in the compiler from dominating compile time.
-//
-// Layout: two PARALLEL buffers of `cap` slots — `keys` holds string pointers, `vals` holds T's —
-// plus `len` live entries, plus `idx` (the 2*cap i64 hash index). Keys are BORROWED views: the map
-// stores the pointer, not a copy, so a key must outlive the map (string literals always do; `dup` one from
-// std.text.str otherwise). Key comparison is byte-wise `eq` from std.text.str, never pointer `==`.
-//
-//   a = caller_allocator.addr()
-//   w = maps.of(a, "the", 1).expect("of")    // Map<i32>; T inferred from the seed
-//   w  = w.put(a, "cat", 2).expect("put")     // insert — grows through alloc when full
-//   w  = w.put(a, "the", 9).expect("put")     // upsert — same key overwrites in place
-//   n = w.get("the", 0)                   // 9; absent keys produce the default
-//   w.free(a)                              // hand all buffers back to alloc
-//
-// Allocator-threaded constructors remain free functions; Map-owned operations live on Map<T>, so
-// callers use w.put(...), w.free(...), w.get(...), w.has(...), and w.len().
-//
-// VALUE-MOLD CONTRACT (read before sharing a Map handle). A `Map<T>` is a small by-value header
-// {keys, vals, idx, len, cap} over allocator-owned buffers, exactly like std.collections.vec. Two
-// consequences follow from that — both are by-design, not bugs:
-//   1. ALWAYS USE THE RETURNED MAP. `put` may grow, which reallocs the buffers and returns
-//      an updated header whose pointers differ from the input's. A handle captured BEFORE such a grow
-//      then points at freed memory — reading or further mutating it is use-after-free. Treat a Map
-//      like a fresh value each op: `m = m.put(a, k, v)`; never keep and reuse a pre-`put` copy.
-//   2. NO IMPLICIT VALUE SEMANTICS. Two headers copied from the same Map share one backing buffer, so
-//      an in-place upsert (`put` on an existing key) is visible through every copy. If you need an
-//      independent snapshot (e.g. a child scope that must not write through to its parent), take an
-//      explicit deep copy with `m.clone(a).expect("clone")` first (clone is fallible — it allocates),
-//      then mutate the copy.
-//
-{ AllocatorBackend, try_acquire3 } = std.mem.alloc    // explicit allocator trait; try_acquire3 = all-or-nothing 3-buffer acquire
+// StringView-keyed hash map. Keys are borrowed and compared by bytes. Rebind maps returned by put;
+// copied headers share allocator-owned storage. Use get_opt when absence differs from a default value.
+// Allocating operations return Result<_, IoError>; free with the same allocator.
+{ Allocator, AllocatorBackend, try_acquire3 } = std.mem.alloc    // explicit allocator trait; try_acquire3 = all-or-nothing 3-buffer acquire
 { Result, IoError, Opt } = std.core.result
 { view } = std.text.str    // byte-wise equality (`==` on strings compares POINTERS) + hashing view
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
-// One key slot. The named one-pointer wrapper keeps this raw backing-store layout explicit.
 MKey: {
     k: StringView,
 }
-// one index slot: a single i64 (bucket head or next link).
 MIdx: {
     i: i64,
 }
@@ -58,7 +17,7 @@ Map*<T>: {
     idx: RawPtr<u8>,
     len: i64,
     cap: i64,
-    keys = (m: Map<T>) [StringView] {
+    keys = (m: Map<T>) Slice<StringView> {
         // Live view over the LEN live entries (stored compactly in slots [0, len) in insertion
         // order — there is no delete, so no gaps). Sized to `len`, NOT `cap`: a `.loop` over the
         // result iterates only real entries instead of walking the empty/NULL tail of the backing
@@ -68,14 +27,14 @@ Map*<T>: {
         // observe the tighter bound.
         slice(m.keys, m.len)
     }
-    vals = (m: Map<T>) [T] { slice(m.vals, m.len) }
-    keys_all = (m: Map<T>) [StringView] {
+    vals = (m: Map<T>) Slice<T> { slice(m.vals, m.len) }
+    keys_all = (m: Map<T>) MutSlice<StringView> {
         // CAP-sized views over the full backing buffers, for the one-past-len APPEND write (slot [len],
         // which is < cap and so in-bounds here, but past the len-sized `keys()`/`vals()` views).
         slice(m.keys, m.cap)
     }
-    vals_all = (m: Map<T>) [T] { slice(m.vals, m.cap) }
-    index = (m: Map<T>) [i64] {
+    vals_all = (m: Map<T>) MutSlice<T> { slice(m.vals, m.cap) }
+    index = (m: Map<T>) MutSlice<i64> {
         // 2*cap i64 slots: [0,cap) bucket heads, [cap,2*cap) per-entry next links.
         slice(m.idx, m.cap * 2)
     }
@@ -85,7 +44,7 @@ Map*<T>: {
         (m.cap == 0).then({ 0 - 1 }, { mfind(m.keys(), m.index(), m.cap, mhash(k, m.cap), k) })
     }
     set = (m: Map<T>, i: i64, v: T) Map<T> {
-        vals ::= m.vals()
+        vals ::= m.vals_all()
         vals[i] = v
         m
     }
@@ -115,8 +74,8 @@ Map*<T>: {
                     len: m.len,
                     cap: cap,
                 )
-                keys ::= next.keys()
-                vals ::= next.vals()
+                keys ::= next.keys_all()
+                vals ::= next.vals_all()
                 oldks.loop((h, i, k) {
                     (i < m.len).match ({
                         true  => {
@@ -266,8 +225,8 @@ Map*<T>: {
                 )
                 srcks = m.keys()
                 srcvs = m.vals()
-                dstks ::= next.keys()
-                dstvs ::= next.vals()
+                dstks ::= next.keys_all()
+                dstvs ::= next.vals_all()
                 srcks.loop((h, i, k) {
                     (i < m.len).match ({
                         true  => {
@@ -312,13 +271,13 @@ mhash = (k: StringView, cap: i64) i64 {
     (fnv1a32(k.view()) & 4611686018427387903) % cap
 }
 // Walk bucket chain b for key k in the index ix over key column ks (cap entries, links at [cap..]).
-mfind = (ks: [StringView], ix: [i64], cap: i64, b: i64, k: StringView) i64 {
+mfind = (ks: Slice<StringView>, ix: Slice<i64>, cap: i64, b: i64, k: StringView) i64 {
     mchain(ks, ix, cap, ix[b], k)
 }
 // First-byte prefilter before the full compare — map lookups run on every name/decl-index query in
 // the checker, and chain collisions almost always differ in byte 0. Same answers (equal strings
 // share their first byte).
-mchain = (ks: [StringView], ix: [i64], cap: i64, e: i64, k: StringView) i64 {
+mchain = (ks: Slice<StringView>, ix: Slice<i64>, cap: i64, e: i64, k: StringView) i64 {
     (e < 0).match ({
         true  => 0 - 1,
         false => (load(offset(ks[e], 0)) == load(offset(k, 0)) && ks[e] == k).match ({
@@ -328,13 +287,13 @@ mchain = (ks: [StringView], ix: [i64], cap: i64, e: i64, k: StringView) i64 {
     })
 }
 // a zero-entry `Map<T>` with capacity for at least one entry (so `put` has a slot before the first
-// grow). Allocation failure is a value — returns Result<Map<T>, IoError>. Unlike `of`, no seed pins T,
+// grow). Allocation failure is a value — returns Result<Map<T>, IoError>. Unlike map_of, no seed pins T,
 // and T appears only in the RETURN type, which inference can't reach through a `.expect` chain — pin it
 // with a two-step annotation (like hmap.empty):
 //   r: Result<Map<i32>, IoError> = maps.empty(a)
 //   m = r.expect("empty")
 // The index is reindexed (its single bucket head cleared to -1) so `find`/`get`
-// on the empty map return absent immediately. Pair with `put`/`get`/`free` like `of`.
+// on the empty map return absent immediately. Pair with put/get/free like map_of.
 empty*<T> = (a: AllocatorBackend) Result<Map<T>, IoError> {
     a.try_acquire3(sizeof(MKey), sizeof(T), 2 * sizeof(MIdx)).match ({
         .Ok(bufs) => {
@@ -348,18 +307,16 @@ empty*<T> = (a: AllocatorBackend) Result<Map<T>, IoError> {
                 len: 0,
                 cap: 1,
             )
-            ok: Result<Map<T>, IoError> = .Ok(m.reindex())
-            ok
+            .Ok(m.reindex())
         },
         .Err(e)   => {
-            err: Result<Map<T>, IoError> = .Err(e)
-            err
+            .Err(e)
         },
     })
 }
 // a `Map<T>` seeded with one entry, its buffers acquired from `a`. T inferred from the seed value
 // (Zen has no call-site type args). Starts at cap 1.
-of*<T> = (a: AllocatorBackend, seed_key: StringView, seed_val: T) Result<Map<T>, IoError> {
+map_of_in*<T> = (a: AllocatorBackend, seed_key: StringView, seed_val: T) Result<Map<T>, IoError> {
     a.try_acquire3(sizeof(MKey), sizeof(T), 2 * sizeof(MIdx)).match ({
         .Ok(bufs) => {
             kp = bufs.b1
@@ -372,16 +329,23 @@ of*<T> = (a: AllocatorBackend, seed_key: StringView, seed_val: T) Result<Map<T>,
                 len: 1,
                 cap: 1,
             )
-            keys ::= m.keys()
-            vals ::= m.vals()
+            keys ::= m.keys_all()
+            vals ::= m.vals_all()
             keys[0] = seed_key
             vals[0] = seed_val
-            ok: Result<Map<T>, IoError> = .Ok(m.reindex())
-            ok
+            .Ok(m.reindex())
         },
         .Err(e)   => {
-            err: Result<Map<T>, IoError> = .Err(e)
-            err
+            .Err(e)
         },
     })
 }
+// Importing this module installs the constructor on the passable allocator. The container-qualified
+// name prevents collisions with Set/Vec/HMap factories on the same receiver.
+MapFactory*: {
+    map_of<T> = (a: Self, seed_key: StringView, seed_val: T) Result<Map<T>, IoError> {
+        backend ::= a
+        map_of_in(backend.addr(), seed_key, seed_val)
+    },
+}
+Allocator.impl(MapFactory, { })

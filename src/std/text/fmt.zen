@@ -1,20 +1,11 @@
 // @self-hosted-only
-// Minimal formatted stdout output for Display values.
-// Default numeric printing streams bytes directly; allocator-backed helpers remain available
-// when callers need an owned temporary String — they return Result<_, IoError> so
-// allocation failure stays in the value flow.
+// Formatted stdout output. Default numeric paths stream; *_in helpers return owned-allocation errors.
 { AllocatorBackend } = std.mem.alloc
 { out_bytes } = std.io.file
 { view, at } = std.text.str
 { String } = std.text.string
 { integer_in, float_in, f64_special } = std.text.num
-// std's ONE integer digit loop (see the seed-closure note in std.text.num): the streaming
-// writers below render through these buffer writers into a small stack fmt_scratch, then stream
-// the finished digits in a single out_bytes — no digit recursion is re-rolled here.
 { num_write_integer, num_write_udigits, num_uwrite_udigits, num_write_fpad, num_write_zeros } = std.text.num
-// Shared, emit-agnostic float-decomposition core (defined once in std.text.num): exponent,
-// exact power-of-ten scaling, 15-digit significand, and trailing-zero strip / digit count.
-// The streaming writers below (write_ffixed/write_fsci/write_fabs_digits) render from these.
 { num_fexp, num_fsig, num_fstrip, num_fndig, num_fpow10i } = std.text.num
 { Result, IoError, ok, err, or, panic } = std.core.result
 { alloc } = std.mem.raw
@@ -276,7 +267,9 @@ write_run = (sv: Slice<u8>, lo: i64, hi: i64) i64 {
     out_bytes(slice(sv.ptr.offset(lo), hi - lo)).or(0)
 }
 // write the i-th arg, or nothing when the template has more `{}` than the slice has args.
-write_arg_at = (args: [Arg], i: i64) i64 { (i < args.len).then({ write_arg(args[i]) }, { 0 }) }
+write_arg_at = (args: MutSlice<Arg>, i: i64) i64 {
+    (i < args.len).then({ write_arg(args[i]) }, { 0 })
+}
 // splice `args` into `template` at each `{}`; `{{`/`}}` emit literal braces. Returns bytes written.
 format* = (template: StringView, args: ...Arg) i64 {
     sv = template.view()

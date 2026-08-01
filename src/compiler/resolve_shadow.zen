@@ -1,9 +1,4 @@
 // @self-hosted-only
-// Checked-mode resolver — user-name shadow-rename pass (extracted from compiler.resolve). A user's
-// top-level value decl that collides with an unimported transitive std/compiler export is renamed to
-// `zshadow__name` (bare + UFCS refs), so the flat single-symbol namespace never sees two same-named
-// decls. Only fires for USER programs (internal builds pass through untouched → seed unchanged). Shared
-// types + the resolve pipeline that calls shadow_flat/shadow_flat_users live in compiler.resolve.
 { gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
 { Allocator } = std.mem.alloc
 { String } = std.text.string
@@ -14,15 +9,8 @@
 { imported_value_name_set, value_symbol_name_set, symbol_key_in, module_graph } = compiler.resolve_scan
 { rename_ns_names } = compiler.resolve_rename
 { loop_at } = std.core.count
-// ── user-name shadow rename ────────────────────────────────────────────────────────────────────
-// THE #1 newcomer bounce: a user's top-level helper (`len`/`split`/`map`/…) collides with a
-// same-named PUBLIC decl pulled in TRANSITIVELY by an import the user never named (e.g. `std.io.file`
-// drags in `std.text.str`, which exports `len*`). In the flat single-symbol namespace both decls
-// survive → dup-fn (and a real C redefinition). Dropping the std decl is UNSAFE — std internals call
-// it (`str.trim_prefix` itself calls `prefix.len()`), so the user's `len` would hijack std's. Instead
-// we give the USER's colliding decl a distinct identity: rename it (and its in-body refs, bare + UFCS)
-// to `zshadow__name`, exactly like a namespace-qualified decl — the whole std closure stays byte-for-byte
-// untouched, the user's module simply shadows the unimported export. The `zshadow__`-prefix form is what
+// User declarations that collide with unimported transitive exports get a distinct `zshadow__`
+// identity; dropping the std declaration would let user names hijack std-internal calls. The prefix is what
 // diagnostic.zen's alias-`__`-removal inverse already un-mangles, so errors still render the user's name.
 // Only fires for USER programs (never internal sources → seed unchanged) and only when it is provably
 // safe (see shadow_rename_set). check_module never sees two same-named decls, so no dup-fn fires.
@@ -57,7 +45,7 @@ ShadowSets: {
 // form IS taken — those cannot be renamed, and silence is never allowed, so region callers fail loudly.
 shadow_name_sets = (
     a: Allocator,
-    syms: [ProvidedSymbol],
+    syms: MutSlice<ProvidedSymbol>,
     modsrc: StringView,
     lo: i64,
     hi: i64,
@@ -117,7 +105,7 @@ shadow_name_sets = (
 // kept main-body dup still surfaces as the checker's dup-fn).
 shadow_rename_set = (
     a: Allocator,
-    syms: [ProvidedSymbol],
+    syms: MutSlice<ProvidedSymbol>,
     mainsrc: StringView,
     lo: i64,
     hi: i64,
@@ -132,7 +120,7 @@ ShadowFlat*: {
 shadow_flat* = (
     a: Allocator,
     pre: StringView,
-    presyms: [ProvidedSymbol],
+    presyms: MutSlice<ProvidedSymbol>,
     mainsrc: StringView,
     lo: i64,
     hi: i64,

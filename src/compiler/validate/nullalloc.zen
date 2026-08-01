@@ -1,15 +1,10 @@
-// compiler.validate.nullalloc — the ALLOCATION-RESULT nullability rule (`alloc-null`).
-//
-// WHY A SECOND NULLABILITY PASS. compiler.passes.ptrkind exempts `RawPtr<u8>` from the type-based
-// rule (`is_nullable_ptr_ty`) and its comment states the reason exactly: `null_ptr()` and `malloc()`
-// have the SAME TYPE, so a pass that reads only types cannot tell a fresh allocation from a
-// deliberate null, and rejecting the whole spelling would reject the allocator/FFI floor itself.
-// That reasoning is correct and is left standing — this pass adds the axis the type does not carry:
-// PROVENANCE. A value is flagged only when it demonstrably came from an ALLOCATOR CALL and is
+// `null_ptr()` and `malloc()` have the same type, so type-based pointer validation cannot tell a
+// deliberate null from fresh allocation. This pass adds provenance: a value is flagged only when it
+// demonstrably came from an allocator call and is
 // dereferenced with no null proof anywhere in the function. `null_ptr()`, foreign returns, pointer
-// parameters and struct fields are all untouched, so the floor keeps every use it was exempted for.
+// parameters and struct fields are untouched.
 //
-// SCOPE, stated as under-reports (this pass never rejects a program that does check):
+// Scope is deliberately under-reporting:
 //   * BARE LOCALS only. A pointer stored into a struct field (`String(ptr: a.acquire(cap))`) or a
 //     slice element is not tracked — same bare-locals scope as the ownership/escape passes.
 //   * INTRAPROCEDURAL. An allocation returned through a wrapper is the wrapper's obligation; the
@@ -98,7 +93,7 @@ nz_proofs_stmt = (a: Allocator, acc: Ptr<DeadList>, st: Stmt) Ptr<DeadList> {
         .IndexSet(x) => a.nz_proofs_expr(a.nz_proofs_expr(a.nz_proofs_expr(acc, x.seq), x.idx), x.value),
     })
 }
-nz_proofs_body* = (a: Allocator, acc: Ptr<DeadList>, body: [Stmt]) Ptr<DeadList> {
+nz_proofs_body* = (a: Allocator, acc: Ptr<DeadList>, body: MutSlice<Stmt>) Ptr<DeadList> {
     out ::= acc
     body.loop_at((i, st) { out = a.nz_proofs_stmt(out, st) })
     out
@@ -146,7 +141,7 @@ nz_unproven_body* = (
     a: Allocator,
     proven: Ptr<DeadList>,
     acc: Ptr<DeadList>,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
 ) Ptr<DeadList> {
     out ::= acc
     body.loop_at((i, st) { out = a.nz_unproven_stmt(proven, out, st) })
@@ -203,7 +198,7 @@ nz_stmt_kind = (un: Ptr<DeadList>, st: Stmt) i32 {
             .nz_or(un.nz_expr_kind(x.value)),
     })
 }
-nz_body_kind* = (un: Ptr<DeadList>, body: [Stmt]) i32 {
+nz_body_kind* = (un: Ptr<DeadList>, body: MutSlice<Stmt>) i32 {
     acc ::= 0
     body.loop_at((i, st) { acc = acc.nz_or(un.nz_stmt_kind(st)) })
     acc
@@ -212,7 +207,7 @@ nz_func_kind* = (a: Allocator, f: Func) i32 {
     proven = a.nz_proofs_body(a.dead_nil(), f.body)
     a.nz_unproven_body(proven, a.dead_nil(), f.body).nz_body_kind(f.body)
 }
-check_module_nullalloc_kind* = (a: Allocator, decls: [Decl]) i32 {
+check_module_nullalloc_kind* = (a: Allocator, decls: MutSlice<Decl>) i32 {
     acc ::= 0
     decls.loop_at((i, d) {
         acc = acc.nz_or(d.match ({
@@ -224,7 +219,7 @@ check_module_nullalloc_kind* = (a: Allocator, decls: [Decl]) i32 {
 }
 check_module_nullalloc_diagnostic_from_source* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
     packed = a.check_module_nullalloc_kind(decls)

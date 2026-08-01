@@ -1,11 +1,8 @@
-// driver.zen — the zenc CLI, in Zen. Dispatches on the command line and drives the compiler
-// (resolve -> parse -> check -> genModule) and the C backend (cc). This replaces bootstrap/driver.c:
-// once it roots --build-self, the seed carries `main` (emitted as zen_main) and driver.c is deleted.
 { arg, argc, clock_ms, getEnv } = std.sys.os
 { Os, Arch, Abi, host } = std.sys.platform
 { Allocator, heap_allocator } = std.mem.alloc
 { view, is_empty, starts_with } = std.text.str
-{ Map, of } = std.collections.map    // bs_shake: name -> decl-index / seen-set maps
+{ Map } = std.collections.map    // bs_shake: name -> decl-index / seen-set maps
 { impl_cname_in } = compiler.mangle    // bs_shake: recompute hoisted impl-method names
 { fnv1a64_fold } = std.hash    // shared FNV-1a-64 rolling byte fold (centralized in std.hash)
 { gstr_string, gstr_append, gstr_finish, gstr_push, cbuf, acquire_or_die } = compiler.genc    // the seed's String API (string.zen isn't in the manifest)
@@ -18,7 +15,8 @@
 { set_faithful_lexeme } = compiler.parse_atom
 { perr_get, perr_off_get } = compiler.parse_type
 { lerr_get, lerr_off_get, collect_comments } = compiler.lex
-{ resolve_module } = compiler.check_resolve
+{ resolve_module, resolve_module_vis } = compiler.check_resolve
+{ ufcs_vis_of } = compiler.check
 { genModuleIn } = compiler.backend.c.c_emit
 { genJsModuleIn } = compiler.backend.js.js
 { pretty_module_in, pretty_set_comments } = compiler.pretty
@@ -346,7 +344,7 @@ cache_store_bin = (mp: Allocator, cb: StringView, out: StringView) i32 {
 // Wall-clock per driver-visible pipeline stage, printed as a compact table on stderr after the verb
 // finishes. Off by default: tm_mark/tm_lap return 0 without reading the clock, so the stamps woven
 // through compile_flat cost nothing when the flag is absent. Finer in-compiler splits (desugar/
-// inline/mono inside check+emit) are a follow-up — these are the honest driver-level boundaries.
+// inline/mono inside check+emit) are outside these driver-level boundaries.
 time_on ::= false
 time_enable = () void { time_on = true }
 tm_flatten ::= to_i64(0)
@@ -542,7 +540,7 @@ emit_checked = (mp: Allocator, root: StringView, path: StringView) i32 {
         },
     })
 }
-// ── js backend (task #46): Zen AST -> JavaScript. `emit-js` checks then emits the floor
+// `emit-js` checks then emits the JavaScript floor
 // (bootstrap/zenrt.js) + the module JS; `build --target js` writes the same to a .js file. Additive:
 // it reuses the exact resolve/parse/check pipeline, only swapping genModuleIn for genJsModuleIn. ──
 js_floor = (mp: Allocator, root: StringView) StringView {
@@ -562,7 +560,7 @@ emit_js = (mp: Allocator, root: StringView, path: StringView) i32 {
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
                     raw = mp.parse_module(rp.flat)
-                    decls = mp.resolve_module(raw)
+                    decls = mp.resolve_module_vis(raw, mp.ufcs_vis_of(rp.flat, rp.regions, rp.table))
                     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
                         true  => {
                             js_unsupported_reset()
@@ -597,7 +595,7 @@ build_js = (mp: Allocator, root: StringView, path: StringView, out_path: StringV
             (mp.report_no_if_resolved(rp, path, src) == 0).match ({
                 true  => {
                     raw = mp.parse_module(rp.flat)
-                    decls = mp.resolve_module(raw)
+                    decls = mp.resolve_module_vis(raw, mp.ufcs_vis_of(rp.flat, rp.regions, rp.table))
                     (mp.report_check(raw, decls, rp, path, src) == 0).match ({
                         true  => {
                             js = mp
@@ -879,7 +877,7 @@ ProfParse: {
 }
 ProfNames: {
     idx: Map<i64>,
-    disp: [StringView],
+    disp: MutSlice<StringView>,
 }
 prof_args = (i: i32, n: i32, acc: ProfArgs) ProfArgs {
     (i >= n).then({
@@ -910,22 +908,22 @@ prof_args = (i: i32, n: i32, acc: ProfArgs) ProfArgs {
     })
 }
 // ── report parsing: byte-level line scan (bounds are the line's [ls, le), never the whole file) ──
-prof_skip_sp = (v: [u8], i: i64, e: i64) i64 {
+prof_skip_sp = (v: MutSlice<u8>, i: i64, e: i64) i64 {
     (i < e && (v[i] == ' ' || v[i] == '\t')).then({ v.prof_skip_sp(i + 1, e) }, { i })
 }
-prof_skip_tok = (v: [u8], i: i64, e: i64) i64 {
+prof_skip_tok = (v: MutSlice<u8>, i: i64, e: i64) i64 {
     (i < e && v[i] == ' ' == false && v[i] == '\t' == false).match ({
         true  => v.prof_skip_tok(i + 1, e),
         false => i,
     })
 }
-prof_rtrim = (v: [u8], ls: i64, e: i64) i64 {
+prof_rtrim = (v: MutSlice<u8>, ls: i64, e: i64) i64 {
     (e > ls && (v[e - 1] == ' ' || v[e - 1] == '\t' || v[e - 1] == '\r')).match ({
         true  => v.prof_rtrim(ls, e - 1),
         false => e,
     })
 }
-prof_digits = (v: [u8], i: i64, e: i64, acc: i64) ProfPct {
+prof_digits = (v: MutSlice<u8>, i: i64, e: i64, acc: i64) ProfPct {
     (i < e && v[i] >= '0' && v[i] <= '9').match ({
         true  => v.prof_digits(i + 1, e, acc * 10 + to_i64(v[i]) - to_i64('0')),
         false => ProfPct(
@@ -936,7 +934,7 @@ prof_digits = (v: [u8], i: i64, e: i64, acc: i64) ProfPct {
 }
 // "12.34" at i -> 1234 hundredths (perf and gprof both print percentages as %.2f; anything else,
 // including a bare integer or a "7208/7208" calls token, is rejected with val -1).
-prof_pct = (v: [u8], i: i64, e: i64) ProfPct {
+prof_pct = (v: MutSlice<u8>, i: i64, e: i64) ProfPct {
     d1 = v.prof_digits(i, e, 0)
     (d1.end == i).then({
         return ProfPct(
@@ -964,10 +962,10 @@ prof_pct = (v: [u8], i: i64, e: i64) ProfPct {
         ),
     })
 }
-prof_span = (mp: Allocator, v: [u8], a: i64, b: i64) StringView {
+prof_span = (mp: Allocator, v: MutSlice<u8>, a: i64, b: i64) StringView {
     push_span(mp.gstr_string(b - a + 1), mp, v, a, b).gstr_finish(mp)
 }
-prof_starts = (v: [u8], ls: i64, le: i64, lit: StringView) bool {
+prof_starts = (v: MutSlice<u8>, ls: i64, le: i64, lit: StringView) bool {
     w: Slice<u8> = lit.view()
     (le - ls < w.len).then({
         return false
@@ -978,13 +976,13 @@ prof_starts = (v: [u8], ls: i64, le: i64, lit: StringView) bool {
     })
     ok
 }
-prof_token = (mp: Allocator, v: [u8], i: i64, e: i64) StringView {
+prof_token = (mp: Allocator, v: MutSlice<u8>, i: i64, e: i64) StringView {
     a = v.prof_skip_sp(i, e)
     mp.prof_span(v, a, v.prof_skip_tok(a, e))
 }
 // a perf data row: `   12.34%  cmd  dso  [.] symbol` (the `#` header/comment lines, callchain
 // residue, and anything not opening with a %.2f percent are all rejected).
-prof_perf_row = (mp: Allocator, v: [u8], ls: i64, le: i64) ProfRow {
+prof_perf_row = (mp: Allocator, v: MutSlice<u8>, ls: i64, le: i64) ProfRow {
     none = ProfRow(
         pct: 0 - 1,
         sym: "",
@@ -1024,7 +1022,7 @@ prof_perf_row = (mp: Allocator, v: [u8], ls: i64, le: i64) ProfRow {
         dso: dso,
     )
 }
-prof_parse_perf = (mp: Allocator, body: StringView, rows: [ProfRow]) ProfParse {
+prof_parse_perf = (mp: Allocator, body: StringView, rows: MutSlice<ProfRow>) ProfParse {
     v: Slice<u8> = body.view()
     n ::= 0
     samples ::= ""
@@ -1050,7 +1048,7 @@ prof_parse_perf = (mp: Allocator, body: StringView, rows: [ProfRow]) ProfParse {
     )
 }
 // first char of the last space-separated token in [lo, e); lo if the span is one token.
-prof_tok_back = (v: [u8], lo: i64, i: i64) i64 {
+prof_tok_back = (v: MutSlice<u8>, lo: i64, i: i64) i64 {
     (i <= lo).then({
         return lo
     })
@@ -1059,7 +1057,7 @@ prof_tok_back = (v: [u8], lo: i64, i: i64) i64 {
 // a gprof flat-profile data row: ` 33.34   0.02   0.02   7208  0.00  0.00  name` (numeric middle
 // columns vary — uncounted rows leave calls/ms blank — so the NAME is the last token, guarded to
 // not itself start with a digit).
-prof_gprof_row = (mp: Allocator, v: [u8], ls: i64, le: i64) ProfRow {
+prof_gprof_row = (mp: Allocator, v: MutSlice<u8>, ls: i64, le: i64) ProfRow {
     none = ProfRow(
         pct: 0 - 1,
         sym: "",
@@ -1084,7 +1082,7 @@ prof_gprof_row = (mp: Allocator, v: [u8], ls: i64, le: i64) ProfRow {
         dso: "",
     )
 }
-prof_parse_gprof = (mp: Allocator, body: StringView, rows: [ProfRow]) i64 {
+prof_parse_gprof = (mp: Allocator, body: StringView, rows: MutSlice<ProfRow>) i64 {
     v: Slice<u8> = body.view()
     n ::= 0
     ls ::= 0
@@ -1111,7 +1109,7 @@ prof_disp = (mp: Allocator, ty: StringView, mname: StringView) StringView {
         .gstr_append(mp, mname)
         .gstr_finish(mp)
 }
-prof_names = (mp: Allocator, decls: [Decl]) ProfNames {
+prof_names = (mp: Allocator, decls: MutSlice<Decl>) ProfNames {
     tds = mp.aud_td_idxs(decls)
     n ::= 0
     decls.loop((h, i, d) {
@@ -1124,7 +1122,7 @@ prof_names = (mp: Allocator, decls: [Decl]) ProfNames {
     })
     disp ::= cbuf<StringView>(mp, n + 1)
     seedv: i64 = 0 - 1
-    m ::= of(mp.addr(), "", seedv).expect("profile: oom")
+    m ::= mp.map_of("", seedv).expect("profile: oom")
     k ::= 0
     decls.loop((h, i, d) {
         d.match ({
@@ -1189,7 +1187,7 @@ prof_table = (
     source: StringView,
     engine: StringView,
     samples: StringView,
-    rows: [ProfRow],
+    rows: MutSlice<ProfRow>,
     n: i64,
     names: ProfNames,
     binname: StringView,
@@ -1434,7 +1432,7 @@ cmd_build_self = (mp: Allocator, root: StringView, cmd: StringView) i32 {
         false => mp.build_self(arg(3), arg(2), cmd == "--build-self"),
     })
 }
-COMMANDS = () [Cmd] {
+COMMANDS = () MutSlice<Cmd> {
     [
         Cmd(
             name: "init",
@@ -1509,7 +1507,7 @@ COMMANDS = () [Cmd] {
     ]
 }
 HELP = (mp: Allocator) StringView {
-    cs: [Cmd] = COMMANDS()
+    cs: MutSlice<Cmd> = COMMANDS()
     s ::= mp.gstr_string(2048).gstr_append(mp, "usage: zenc <")
     cs.loop((h, i, c) {
         s = (i > 0).then({ s.gstr_append(mp, "|") }, { s })
@@ -1530,7 +1528,7 @@ VERSION = () StringView { "zenc 0.2.0-dev (self-hosted; zen driver)" }    // als
 dispatch_cmd = (mp: Allocator, root: StringView, cmd: StringView) i32 {
     rc ::= 0
     hit ::= false
-    cs: [Cmd] = COMMANDS()
+    cs: MutSlice<Cmd> = COMMANDS()
     cs.loop((h, i, c) {
         (c.name == cmd).then({
             rc = c.run(mp, root, cmd)
@@ -1763,7 +1761,7 @@ bs_walk_manifest = (
         },
     })
 }
-bs_gen_end = (gv: [u8], n: i64) i64 {
+bs_gen_end = (gv: MutSlice<u8>, n: i64) i64 {
     (n <= 0).match ({
         true  => 0,
         false => bs_is_space(gv[n - 1]).then({ gv.bs_gen_end(n - 1) }, { n }),
@@ -1881,7 +1879,7 @@ bs_root_kept = (ac: MutPtr<AudCtx>, tails: Map<i64>, d: Decl) void {
 bs_tails = (ac: MutPtr<AudCtx>) Map<i64> {
     seedv: i64 = 0 - 1
     mem = ac.mp
-    tails ::= of(mem.addr(), "", seedv).expect("build-self: oom")
+    tails ::= mem.map_of("", seedv).expect("build-self: oom")
     ac.seen.keys().loop((h, i, k) {
         ta = k.aud_tail_at()
         (ta > 0).then({
@@ -1893,7 +1891,7 @@ bs_tails = (ac: MutPtr<AudCtx>) Map<i64> {
 }
 // iterate bs_root_kept sweeps to a fixpoint: newly-live names can make more types live, which keeps
 // more impl blocks, whose methods reference more names — stop when the seen set stops growing.
-bs_close = (ac: MutPtr<AudCtx>, raw: [Decl]) void {
+bs_close = (ac: MutPtr<AudCtx>, raw: MutSlice<Decl>) void {
     repeat_while((pass) {
         prev = ac.seen.keys().len
         tails = ac.bs_tails()
@@ -1921,7 +1919,7 @@ bs_keep = (ac: MutPtr<AudCtx>, d: Decl) bool {
 // the raw AND resolved decls, close over the always-kept classes, then keep only what bs_keep passes.
 // The kept subset is re-resolved by the caller, so mono instances, lowered closures and materialized
 // trait defaults are re-synthesized for the surviving decls only.
-bs_shake = (mp: Allocator, raw: [Decl]) [Decl] {
+bs_shake = (mp: Allocator, raw: MutSlice<Decl>) MutSlice<Decl> {
     rdecls = mp.resolve_module(raw)
     t = mp.aud_tables(raw)
     seedv: i64 = 0 - 1
@@ -1931,8 +1929,8 @@ bs_shake = (mp: Allocator, raw: [Decl]) [Decl] {
         rdecls: rdecls,
         ridx: mp.aud_index(raw),
         xidx: mp.aud_index(rdecls),
-        seen: of(mp.addr(), "", seedv).expect("build-self: oom"),
-        mseen: of(mp.addr(), "", seedv).expect("build-self: oom"),
+        seen: mp.map_of("", seedv).expect("build-self: oom"),
+        mseen: mp.map_of("", seedv).expect("build-self: oom"),
         pairs: t.pairs,
         implms: t.implms,
     )
@@ -2347,7 +2345,7 @@ zi_scan_args = (i: i32, n: i32, path: StringView, kind: i32, valid: bool) ZiInit
 zi_read_line = (mp: Allocator, prompt: StringView) StringView {
     eprint(prompt)
     s ::= mp.gstr_string(64)
-    cell: [u8] = [0]
+    cell: MutSlice<u8> = [0]
     repeat_while((k) {
         n = read(0, cell.ptr, 1)
         s = (n > 0 && cell[0] != '\n' && cell[0] != '\r').then({ s.gstr_push(mp, cell[0]) }, { s })
