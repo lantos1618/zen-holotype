@@ -86,9 +86,24 @@ jobs:
 
   # Sanitizer sweep: the compiler built with ASan+UBSan, run over the whole fixture corpus.
   # Separate job because the instrumented rebuild is slow and it must not gate the fast `gate` job.
+  #
+  # SHARDED across runners. The sweep is core-bound — the in-process pool already saturates one
+  # machine, so the only lever left is more machines: 513 probes over 4 runners is ~2 min of sweeping
+  # each instead of ~9 on one. Every shard rebuilds zen-asan (23s of cc over a single translation
+  # unit, which cannot itself be parallelized); that duplicated build is the cost of the split.
+  # `fail-fast: false` because a hit in one shard must not cancel the others — the value of the sweep
+  # is the COMPLETE hit list, not the first entry. Only `gate` is a required status check, so the
+  # per-shard job names (`sanitizers (0)` …) do not affect branch protection.
   sanitizers:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v4
-      - name: Build ASan+UBSan compiler and sweep the corpus
+      - name: Build ASan+UBSan compiler and sweep shard ${{ matrix.shard }}
+        env:
+          FUZZ_SHARDS: "4"
+          FUZZ_SHARD: ${{ matrix.shard }}
         run: make -f bootstrap/Makefile asan

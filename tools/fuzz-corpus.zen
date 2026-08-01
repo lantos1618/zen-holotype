@@ -19,8 +19,8 @@
 { is_dir, read_dir } = std.sys.fs
 { access } = std.c.libc
 { run } = std.sys.process
-{ arg, argc, set_env } = std.sys.os
-{ cat_in, contains, ends_with, len, split_in, sv_lt, try_parse_int, view } = std.text.str
+{ arg, argc, getEnv, set_env } = std.sys.os
+{ cat_in, contains, ends_with, is_empty, len, split_in, sv_lt, try_parse_int, view } = std.text.str
 { sort_by } = std.sort
 { String, init, append_in, finish_in } = std.text.string
 { arg_int, arg_str, format } = std.text.fmt
@@ -249,9 +249,33 @@ plan_probes = (mp: Allocator, corpus: MutSlice<StringView>) MutSlice<Probe> {
     ps
 }
 // Write the command list, run it through the pool, and fail closed if the pool itself could not run.
+// ── SHARDING: split the probe list across CI runners ─────────────────────────
+// The sweep is core-bound — the pool already saturates one machine, so the only lever left is more
+// machines. FUZZ_SHARDS=<n> FUZZ_SHARD=<i> runs the probes where `index % n == i`; the default 1/0 is
+// the whole sweep, so a plain `./zen run tools/fuzz-corpus.zen` is unchanged. Indices stay GLOBAL, so
+// scratch paths never collide and each shard reports its hits in corpus order.
+env_int = (name: StringView, dflt: i64) i64 {
+    e = getEnv(name)
+    is_empty(e).match ({
+        true  => dflt,
+        false => e.try_parse_int().match ({
+            .Ok(v)  => v,
+            .Err(x) => dflt,
+        }),
+    })
+}
+shards = () i64 {
+    n = env_int("FUZZ_SHARDS", 1)
+    (n < 1).then({ 1 }, { n })
+}
+shard_index = () i64 {
+    i = env_int("FUZZ_SHARD", 0)
+    (i < 0 || i >= shards()).then({ 0 }, { i })
+}
+mine = (i: i64) bool { i % shards() == shard_index() }
 run_probes = (mp: Allocator, asan: StringView, ps: MutSlice<Probe>) bool {
     cmds ::= mp.addr().init(ps.len * 256).expect("fuzz-corpus: oom")
-    ps.loop_at((i, p) { cmds = mp.probe_cmd(cmds, asan, p, i) })
+    ps.loop_at((i, p) { cmds = i.mine().then({ mp.probe_cmd(cmds, asan, p, i) }, { cmds }) })
     text = mp.addr().finish_in(cmds).expect("fuzz-corpus: oom")
     cmds_path = mp.addr().cat_in(RUN_DIR, "/cmds.txt")
     cmds_path.save(text, text.len()).expect("fuzz-corpus: cannot write the probe list")
@@ -273,12 +297,16 @@ sweep = (mp: Allocator, asan: StringView, corpus: MutSlice<StringView>) i32 {
         .expect("fuzz-corpus: cannot prepare the run directory")
     mp.write_edges()
     ps = mp.plan_probes(corpus)
-    g_files = (corpus.len + EDGE_SRCS().len).to_i32()
     (mp.run_probes(asan, ps) == false).then({
         return fail2("fuzz-corpus: FAIL — the probe pool did not run")
     })
-    ps.loop_at((i, p) { mp.classify(p, i) })
-    format("corpus: {} files, {} sanitizer hits\n", [arg_int(g_files), arg_int(g_hits)])
+    ps.loop_at((i, p) {
+        i.mine().then({
+            mp.classify(p, i)
+            g_files = g_files + 1
+        })
+    })
+    format("shard {}/{}: {} probes, {} sanitizer hits\n", [arg_int(shard_index()), arg_int(shards()), arg_int(g_files), arg_int(g_hits)])
     (g_hits == 0).then({ 0 }, { 1 })
 }
 run_sweep = (mp: Allocator, root: StringView, asan: StringView) i32 {
