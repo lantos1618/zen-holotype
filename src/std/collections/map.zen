@@ -5,6 +5,7 @@
 { Result, IoError, Opt } = std.core.result
 { view } = std.text.str    // byte-wise equality (`==` on strings compares POINTERS) + hashing view
 { fnv1a32 } = std.hash    // shared 32-bit FNV-1a byte fold (centralized in std.hash)
+{ hashidx_fold } = std.collections.hashidx    // the one hash → bucket fold (owns the non-negative mask)
 MKey: {
     k: StringView,
 }
@@ -266,10 +267,7 @@ Map*<T>: {
     }
 }
 // FNV-1a hash of k's bytes, folded into [0, cap). cap is always >= 1 at call sites.
-mhash = (k: StringView, cap: i64) i64 {
-    // mask to non-negative then mod into the bucket range
-    (fnv1a32(k.view()) & 4611686018427387903) % cap
-}
+mhash = (k: StringView, cap: i64) i64 { hashidx_fold(fnv1a32(k.view()), cap) }
 // Walk bucket chain b for key k in the index ix over key column ks (cap entries, links at [cap..]).
 mfind = (ks: Slice<StringView>, ix: Slice<i64>, cap: i64, b: i64, k: StringView) i64 {
     mchain(ks, ix, cap, ix[b], k)
