@@ -88,7 +88,7 @@ count_entries = (d: RawPtr<u8>) i64 {
 fill_entries = (
     a: AllocatorBackend,
     d: RawPtr<u8>,
-    out: [StringView],
+    out: MutSlice<StringView>,
     i: i64,
 ) Result<i64, IoError> {
     e = d.readdir()
@@ -105,22 +105,22 @@ fill_entries = (
 }
 // allocator-owned `[T]` backbone of `n` slots, surfacing an alloc failure as `.Err` — the `nbuf` that
 // reports (`sizeof(T)` monomorphizes per element type exactly as `nbuf` does; `n == 0` is empty `.Ok`).
-nbuf_r<T> = (a: AllocatorBackend, seed: T, n: i64) Result<[T], IoError> {
+nbuf_r<T> = (a: AllocatorBackend, seed: T, n: i64) Result<MutSlice<T>, IoError> {
     a.try_acquire(n * sizeof(T)).match ({
         .Ok(p)  => ok(p.slice(n)),
         .Err(e) => err(e),
     })
 }
 // allocate the backbone and fill it, threading any alloc failure out as `.Err` (never `.expect`-abort).
-fill_all = (a: AllocatorBackend, d: RawPtr<u8>, n: i64) Result<[StringView], IoError> {
-    buf: [StringView] = a.nbuf_r("", n).or_return()
+fill_all = (a: AllocatorBackend, d: RawPtr<u8>, n: i64) Result<MutSlice<StringView>, IoError> {
+    buf: MutSlice<StringView> = a.nbuf_r("", n).or_return()
     filled = a.fill_entries(d, buf, 0).or_return()
     ok(buf)
 }
 // list `path`'s entries as an allocator-owned `[str]` (each an owned NUL-terminated copy), excluding
 // "." and "..". The order is the directory's own (unsorted). .Err(.NotFound) if `path` can't be opened;
 // .Err on an allocation failure while sizing the backbone or copying a name (surfaced, not aborted).
-read_dir* = (a: AllocatorBackend, path: StringView) Result<[StringView], IoError> {
+read_dir* = (a: AllocatorBackend, path: StringView) Result<MutSlice<StringView>, IoError> {
     d = path.opendir()
     (d == null_ptr()).then({
         return err(IoError.NotFound)

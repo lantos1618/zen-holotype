@@ -1,8 +1,6 @@
-// compiler.validate.ownership — move/consume/escape/leak analysis + DeadList/AliasList worklists.
 { ArmData, CallData, Decl, Expr, Field, FieldInit, Func, GenericData, ImplData, LetData,
   MethodCallData, Param, Stmt, Ty, VariantDef } = compiler.ast.ast_types
-{ gstr_append, gstr_finish, gstr_string, k_mut_ptr, k_slice_dflt, ptr_kw, slice_kw, tnamed, tvoid,
-  acquire_or_die } = compiler.genc
+{ gstr_append, gstr_finish, gstr_string, k_mut_ptr, ptr_kw, slice_kw, tnamed, tvoid, acquire_or_die } = compiler.genc
 { impl_cname_in } = compiler.mangle
 { DeclIndex, Env, arm_env, dispatch_recv, dispatch_recv_name, extend_env, is_intrinsic, is_void_ty,
   pointee_of, recv_name } = compiler.check
@@ -10,7 +8,7 @@
 { slice_any } = compiler.astops
 { expr_fold_children } = compiler.ast.expr_children
 { expect } = std.core.result
-{ Map, of } = std.collections.map
+{ Map } = std.collections.map
 { is_empty } = std.text.str
 { env_imported, env_params, env_trait_method, expr_pos, is_deref_intrinsic, is_pure_owner_getter,
   pos_or, ty_is_ptr_t, ty_mentions_tparam, unknown_ty } = compiler.validate.util
@@ -27,7 +25,7 @@ DeadCell: {
     name: StringView,
     tail: Ptr<DeadList>,
 }
-dead_buf = (a: Allocator) [DeadList] { slice(a.acquire_or_die(sizeof(DeadList)), 1) }
+dead_buf = (a: Allocator) MutSlice<DeadList> { slice(a.acquire_or_die(sizeof(DeadList)), 1) }
 dead_node = (a: Allocator, v: DeadList) Ptr<DeadList> {
     buf ::= a.dead_buf()
     buf[0] = v
@@ -58,7 +56,6 @@ dead_remove* = (a: Allocator, seen: Ptr<DeadList>, name: StringView) Ptr<DeadLis
         }),
     })
 }
-// ── ALIAS CLASSES (name-only) ────────────────────────────────────────────────────────────────────
 // `q = p` copies a POINTER, not the allocation: freeing either name frees the ONE allocation, so a
 // later use (or second free) of the other name is a hole the per-name kill-set misses. We track
 // direct pointer-copy binds (`q = p` / `q = p`, both bare locals, pointer-typed) as ALIAS PAIRS;
@@ -72,7 +69,7 @@ AliasCell: {
     y: StringView,
     tail: Ptr<AliasList>,
 }
-alias_buf = (a: Allocator) [AliasList] { slice(a.acquire_or_die(sizeof(AliasList)), 1) }
+alias_buf = (a: Allocator) MutSlice<AliasList> { slice(a.acquire_or_die(sizeof(AliasList)), 1) }
 alias_node = (a: Allocator, v: AliasList) Ptr<AliasList> {
     buf ::= a.alias_buf()
     buf[0] = v
@@ -209,7 +206,7 @@ recv_move_name = (c: CallData) StringView {
 // identity/wrapper shape), that argument IS the moved owner — name it dead. Deliberately narrow: a multi-arg
 // or non-Own-returning call is left alone (honest under-reject over breaking a fn that borrows an Own and
 // returns a fresh one). A fresh `send(.Give(make(a)))` (no Own arg) kills nothing — correctly still legal.
-sm_own_arg_launder = (env: Env, args: [Expr]) StringView {
+sm_own_arg_launder = (env: Env, args: MutSlice<Expr>) StringView {
     (args.len == 1).match ({
         true  => args[0].match ({
             .Var(v) => (env.infer_expr(args[0].addr()).owner_base() == "Own").match ({
@@ -250,7 +247,7 @@ send_consume = (env: Env, c: CallData) StringView {
         false => "",
     })
 }
-// ── INTERPROCEDURAL CONSUME (census #56) ──────────────────────────────────────────────────────────
+// Interprocedural consume.
 // The consume machinery above is INTRA-procedural: it kills an owner only when THIS function releases/
 // drops/sends it. But `o` moved into a callee whose PARAMETER is `Own<T>` and whose body CONSUMES that
 // param (release/drop/send, transitively) is a real move — the caller keeps a live alias the callee
@@ -276,7 +273,7 @@ fn_consumes_param = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
     })
 }
 // does `body` consume the local named `nm` on ANY path? (branch-may rule: a conditional consume counts)
-body_consumes_name = (env: Env, body: [Stmt], nm: StringView, depth: i32) bool {
+body_consumes_name = (env: Env, body: MutSlice<Stmt>, nm: StringView, depth: i32) bool {
     body.slice_any((st) { env.stmt_consumes_name(st, nm, depth) })
 }
 stmt_consumes_name = (env: Env, st: Stmt, nm: StringView, depth: i32) bool {
@@ -317,10 +314,10 @@ expr_consumes_name = (env: Env, e: Ptr<Expr>, nm: StringView, depth: i32) bool {
         }),
     })
 }
-arms_consume_name = (env: Env, arms: [ArmData], nm: StringView, depth: i32) bool {
+arms_consume_name = (env: Env, arms: MutSlice<ArmData>, nm: StringView, depth: i32) bool {
     arms.slice_any((ar) { env.expr_consumes_name(ar.body, nm, depth) })
 }
-args_consume_name = (env: Env, args: [Expr], nm: StringView, depth: i32) bool {
+args_consume_name = (env: Env, args: MutSlice<Expr>, nm: StringView, depth: i32) bool {
     found ::= false
     args.loop_at((i, ar) {
         found = env.expr_consumes_name(ar.addr(), nm, depth).then({ true }, { found })
@@ -355,8 +352,7 @@ call_arg_consumes_name = (env: Env, c: CallData, nm: StringView, depth: i32) boo
     })
     found
 }
-// ── FREE-THROUGH-OWNER-POINTER (re-census #1: release via a borrow) ────────────────────────────────
-// #56 kills an owner MOVED BY VALUE into an `Own`-typed param. But an owner passed BY POINTER
+// An owner moved by value into an `Own`-typed param is killed. An owner passed BY POINTER
 // (`o.addr()` into a `MutPtr<Own<T>>`/`Ptr<Own<T>>` borrow) whose callee FREES the pointee THROUGH that
 // pointer (`load(p).release_in(a)`, directly or via a local bound to the deref) is ALSO consumed: the
 // pointer and the caller's `o` name the ONE allocation, so the callee's free leaves `o` dangling and a
@@ -421,7 +417,12 @@ cdl_expr = (env: Env, seen: Ptr<DeadList>, e: Ptr<Expr>, pname: StringView) Ptr<
         }),
     })
 }
-cdl_arms = (env: Env, seen: Ptr<DeadList>, arms: [ArmData], pname: StringView) Ptr<DeadList> {
+cdl_arms = (
+    env: Env,
+    seen: Ptr<DeadList>,
+    arms: MutSlice<ArmData>,
+    pname: StringView,
+) Ptr<DeadList> {
     out ::= seen
     arms.loop_at((i, ar) { out = env.cdl_expr(out, ar.body, pname) })
     out
@@ -439,7 +440,7 @@ cdl_stmt = (env: Env, seen: Ptr<DeadList>, st: Stmt, pname: StringView) Ptr<Dead
         _            => seen,
     })
 }
-cdl_body = (env: Env, seen: Ptr<DeadList>, body: [Stmt], pname: StringView) Ptr<DeadList> {
+cdl_body = (env: Env, seen: Ptr<DeadList>, body: MutSlice<Stmt>, pname: StringView) Ptr<DeadList> {
     out ::= seen
     body.loop_at((i, st) { out = env.cdl_stmt(out, st, pname) })
     out
@@ -477,12 +478,16 @@ bft_forward = (env: Env, c: CallData, pname: StringView, depth: i32) bool {
         },
     })
 }
-bft_args = (env: Env, args: [Expr], pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
+bft_args = (env: Env, args: MutSlice<Expr>, pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
     args.slice_any((ar) { env.bft_expr(ar.addr(), pname, dl, depth) })
 }
-bft_arms = (env: Env, arms: [ArmData], pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
-    arms.slice_any((ar) { env.bft_expr(ar.body, pname, dl, depth) })
-}
+bft_arms = (
+    env: Env,
+    arms: MutSlice<ArmData>,
+    pname: StringView,
+    dl: Ptr<DeadList>,
+    depth: i32,
+) bool { arms.slice_any((ar) { env.bft_expr(ar.body, pname, dl, depth) }) }
 bft_expr = (env: Env, e: Ptr<Expr>, pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
     load(e).match ({
         .Call(c)      => env.bft_call(c, pname, dl, depth),
@@ -517,10 +522,10 @@ bft_stmt = (env: Env, st: Stmt, pname: StringView, dl: Ptr<DeadList>, depth: i32
         _            => false,
     })
 }
-bft_body = (env: Env, body: [Stmt], pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
+bft_body = (env: Env, body: MutSlice<Stmt>, pname: StringView, dl: Ptr<DeadList>, depth: i32) bool {
     body.slice_any((st) { env.bft_stmt(st, pname, dl, depth) })
 }
-body_frees_through_ptr = (env: Env, body: [Stmt], pname: StringView, depth: i32) bool {
+body_frees_through_ptr = (env: Env, body: MutSlice<Stmt>, pname: StringView, depth: i32) bool {
     dl = env.cdl_body(env.a.dead_nil(), body, pname)
     env.bft_body(body, pname, dl, depth)
 }
@@ -539,7 +544,7 @@ fn_frees_through_ptr = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
 }
 // the CALL-SITE kill: for each bare-Var Own arg passed to an Own-typed, consuming param of a known
 // callee, mark that local dead (moved into the callee). Runs in own_step so both passes see the kill.
-// Also (re-census #1): an owner passed BY POINTER (`o.addr()`) to a borrow whose callee frees through it.
+// An owner passed by pointer to a borrow is consumed when the callee frees through it.
 own_call_kills = (
     a: Allocator,
     env: Env,
@@ -735,7 +740,7 @@ own_move_src = (env: Env, st: Stmt) StringView {
 // `ActorRef` (deliberately RawPtr-backed): their interior aliasing is governed by their own capability,
 // not by a structural alias, so we do NOT descend their args (descending `Arc<MutPtr<X>>` would wrongly
 // reject a legitimately-shared value). Bounded recursion (`depth`) terminates on recursive types.
-ty_reaches_mutptr = (decls: [Decl], t: Ty, depth: i32) bool {
+ty_reaches_mutptr = (decls: MutSlice<Decl>, t: Ty, depth: i32) bool {
     (depth <= 0).match ({
         true  => false,
         false => t.match ({
@@ -759,13 +764,13 @@ ty_reaches_mutptr = (decls: [Decl], t: Ty, depth: i32) bool {
 sm_is_opaque_cap = (name: StringView) bool {
     name == "Own" || name == "Arc" || name == "Rc" || name == "ReplyRef" || name == "CellRef"
 }
-fields_reach_mutptr = (decls: [Decl], fields: [Field], depth: i32) bool {
+fields_reach_mutptr = (decls: MutSlice<Decl>, fields: MutSlice<Field>, depth: i32) bool {
     fields.slice_any((fl) { decls.ty_reaches_mutptr(fl.ty, depth) })
 }
-variants_reach_mutptr = (decls: [Decl], variants: [VariantDef], depth: i32) bool {
+variants_reach_mutptr = (decls: MutSlice<Decl>, variants: MutSlice<VariantDef>, depth: i32) bool {
     variants.slice_any((v) { decls.ty_reaches_mutptr(v.payload, depth) })
 }
-tys_reach_mutptr = (decls: [Decl], tys: [Ty], depth: i32) bool {
+tys_reach_mutptr = (decls: MutSlice<Decl>, tys: MutSlice<Ty>, depth: i32) bool {
     tys.slice_any((ty) { decls.ty_reaches_mutptr(ty, depth) })
 }
 // ── THE MODE (effect-family) LATTICE — the aliasing effect a type carries, DERIVED not stored ──
@@ -786,7 +791,7 @@ md_read = () i32 { 3 }
 // otherwise the deep immutability walk decides frozen (reaches no MutPtr) vs read (reaches one behind a
 // readonly surface). Pure function of `(decls, Ty)` — no program point, so it classifies but does NOT
 // enforce use-once/escape (those stay flow-sensitive passes).
-mode_of = (decls: [Decl], t: Ty) i32 {
+mode_of = (decls: MutSlice<Decl>, t: Ty) i32 {
     (t.owner_base() == "Own").match ({
         true  => md_owned(),
         false => (t.ptr_kind_of() == k_mut_ptr()).match ({
@@ -877,7 +882,7 @@ fn_releases_param = (env: Env, fn: StringView, pi: i32, depth: i32) bool {
         false => false,
     })
 }
-body_releases_param = (env: Env, body: [Stmt], pname: StringView, depth: i32) bool {
+body_releases_param = (env: Env, body: MutSlice<Stmt>, pname: StringView, depth: i32) bool {
     body.slice_any((st) { env.stmt_releases_param(st, pname, depth) })
 }
 stmt_releases_param = (env: Env, st: Stmt, pname: StringView, depth: i32) bool {
@@ -1039,7 +1044,7 @@ dead_union = (a: Allocator, x: Ptr<DeadList>, y: Ptr<DeadList>) Ptr<DeadList> {
     })
 }
 // does control flow off the END of this body reach the next statement? false only when it ends in return.
-body_falls_through = (body: [Stmt]) bool {
+body_falls_through = (body: MutSlice<Stmt>) bool {
     (body.len == 0).match ({
         true  => true,
         false => body[body.len - 1].match ({
@@ -1062,7 +1067,7 @@ own_dead_body* = (
     env: Env,
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
 ) Ptr<DeadList> {
     e ::= env
     d ::= seen
@@ -1082,7 +1087,7 @@ own_dead_arms = (
     seen: Ptr<DeadList>,
     al: Ptr<AliasList>,
     subjty: Ty,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
 ) Ptr<DeadList> {
     out ::= seen
     arms.loop_at((i, ar) {
@@ -1171,10 +1176,10 @@ own_step* = (
         .ExprStmt(e) => a.own_dead_expr(env, out, al, e),
         _            => out,
     })
-    // 2c. INTERPROCEDURAL consume (census #56): an `Own<T>` local moved into an owner-typed param whose
+    // 2c. An `Own<T>` local moved into an owner-typed param whose
     //     callee CONSUMES it (release/drop/send, transitively) is dead after the call — later use → UAF.
     out = a.own_stmt_call_kills(env, out, al, st)
-    // 2c'. STRUCT-FIELD / SLICE-ELEMENT move (re-census #63): an `Own<T>` moved into an Own struct-literal
+    // 2c'. An `Own<T>` moved into an Own struct-literal
     //      field / slice element is consumed here — later use of the source binding → UAF / double-free.
     out = a.own_stmt_struct_kills(env, out, al, st)
     // 2d. AFFINE COPY: `c = o` / `c = o` (o an `Own<T>`) MOVES o — c is the live owner, o's binding dies.
@@ -1306,21 +1311,14 @@ zty* = (a: Allocator, t: Ty) StringView {
         .Named(n)      => n,
         .Generic(g)    => a.zty_generic(g),
         .FnT(ft)       => "fn",
-        .Slice(e)      => (e.kind == k_slice_dflt()).match ({
-            true  => a
-                .gstr_string(24)
-                .gstr_append(a, "[")
-                .gstr_append(a, a.zty(load(e.pointee)))
-                .gstr_append(a, "]")
-                .gstr_finish(a),
-            false => a
-                .gstr_string(24)
-                .gstr_append(a, slice_kw(e.kind))
-                .gstr_append(a, "<")
-                .gstr_append(a, a.zty(load(e.pointee)))
-                .gstr_append(a, ">")
-                .gstr_finish(a),
-        }),
+        // Always `Slice<T>` / `MutSlice<T>` — brackets are value syntax (`xs[i]`, `[1, 2]`), never a type.
+        .Slice(e)      => a
+            .gstr_string(24)
+            .gstr_append(a, slice_kw(e.kind))
+            .gstr_append(a, "<")
+            .gstr_append(a, a.zty(load(e.pointee)))
+            .gstr_append(a, ">")
+            .gstr_finish(a),
         .Ptr(pd)       => a
             .gstr_string(24)
             .gstr_append(a, ptr_kw(pd.kind))
@@ -1383,7 +1381,7 @@ mu_is_value_mold = (f: Func) bool {
 // the hoisted inherent func `impl_<Ty>_<Ty>_<m>` (fill_inherent_methods), looked up O(1) via the index.
 mu_func_value_mold = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     ty: StringView,
     m: StringView,
@@ -1401,11 +1399,11 @@ mu_func_value_mold = (
 // fold one inherent-struct impl's methods into the name→state map (0 unseen, 1 value-mold-only, 2 tainted).
 mu_index_methods = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     m: Map<i64>,
     ty: StringView,
-    methods: [Param],
+    methods: MutSlice<Param>,
     j: i32,
 ) Map<i64> {
     (j >= methods.len).match ({
@@ -1427,13 +1425,19 @@ mu_index_methods = (
         },
     })
 }
-mu_index_impl = (a: Allocator, decls: [Decl], idx: DeclIndex, m: Map<i64>, im: ImplData) Map<i64> {
+mu_index_impl = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    idx: DeclIndex,
+    m: Map<i64>,
+    im: ImplData,
+) Map<i64> {
     (im.ty == im.trname).then({ a.mu_index_methods(decls, idx, m, im.ty, im.methods, 0) }, { m })
 }
 // method name → 1 iff it is an inherent method AND value-mold on EVERY struct that declares it.
-mu_build_index* = (a: Allocator, decls: [Decl], idx: DeclIndex) Map<i64> {
+mu_build_index* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex) Map<i64> {
     seed: i64 = 0 - 1
-    m ::= of(a.addr(), "", seed).expect("check: method-mold index alloc")
+    m ::= a.map_of("", seed).expect("check: method-mold index alloc")
     decls.loop_at((i, d) {
         m = d.match ({
             .DImpl(im) => a.mu_index_impl(decls, idx, m, im),
@@ -1463,7 +1467,7 @@ mu_is_var = (e: Expr) bool {
 // decided by NAME alone: `bound` is the set of names bound in the enclosing function, carried down
 // the walk (params up front, each `=` as the walk passes it, lambda/loop bindings at their arm).
 // A `.MethodCall` names its receiver explicitly, so a like-named local does not shadow it.
-mu_bound_names = (a: Allocator, bound: Ptr<DeadList>, params: [Param]) Ptr<DeadList> {
+mu_bound_names = (a: Allocator, bound: Ptr<DeadList>, params: MutSlice<Param>) Ptr<DeadList> {
     out ::= bound
     params.loop_at((i, p) { out = a.dead_cons(p.name, out) })
     out
@@ -1484,7 +1488,7 @@ mu_call_kind = (mvm: Map<i64>, bound: Ptr<DeadList>, e: Ptr<Expr>) i32 {
         _               => 0,
     })
 }
-mu_arms_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, arms: [ArmData]) i32 {
+mu_arms_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, arms: MutSlice<ArmData>) i32 {
     acc ::= 0
     arms.loop_at((i, ar) { acc = acc.or(a.mu_expr_kind(mvm, bound, ar.body)) })    // arm body = the arm's VALUE (tail)
     acc
@@ -1539,7 +1543,7 @@ mu_stmts_kind = (
     a: Allocator,
     mvm: Map<i64>,
     bound: Ptr<DeadList>,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
     has_tail: bool,
 ) i32 {
     acc ::= 0
@@ -1555,13 +1559,16 @@ mu_stmts_kind = (
     acc
 }
 // the body's LAST statement is its produced value (tail) — never a discard; every earlier ExprStmt is.
-mu_body_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, body: [Stmt]) i32 {
+mu_body_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, body: MutSlice<Stmt>) i32 {
     a.mu_stmts_kind(mvm, bound, body, true)
 }
 // a body run purely for effect (`@while` / `xs.loop`) yields nothing, so no statement in it is a tail.
-mu_effect_body_kind = (a: Allocator, mvm: Map<i64>, bound: Ptr<DeadList>, body: [Stmt]) i32 {
-    a.mu_stmts_kind(mvm, bound, body, false)
-}
+mu_effect_body_kind = (
+    a: Allocator,
+    mvm: Map<i64>,
+    bound: Ptr<DeadList>,
+    body: MutSlice<Stmt>,
+) i32 { a.mu_stmts_kind(mvm, bound, body, false) }
 mu_func_kind* = (a: Allocator, mvm: Map<i64>, f: Func) i32 {
     a.mu_body_kind(mvm, a.mu_bound_names(a.dead_nil(), f.params), f.body)
 }
@@ -1611,11 +1618,11 @@ impure_use_in_expr = (nm: StringView, e: Ptr<Expr>) bool {
         _               => false,
     })
 }
-impure_use_in_args = (nm: StringView, args: [Expr]) bool {
+impure_use_in_args = (nm: StringView, args: MutSlice<Expr>) bool {
     args.slice_any((ar) { nm.impure_use_in_expr(ar.addr()) })
 }
 // args EXCEPT index 0 (the getter receiver already accounted for as a pure read).
-impure_use_in_args_from1 = (nm: StringView, args: [Expr]) bool {
+impure_use_in_args_from1 = (nm: StringView, args: MutSlice<Expr>) bool {
     f ::= false
     args.loop_at((i, ar) {
         (i > 0).then({
@@ -1624,10 +1631,10 @@ impure_use_in_args_from1 = (nm: StringView, args: [Expr]) bool {
     })
     f
 }
-impure_use_in_inits = (nm: StringView, inits: [FieldInit]) bool {
+impure_use_in_inits = (nm: StringView, inits: MutSlice<FieldInit>) bool {
     inits.slice_any((fi) { nm.impure_use_in_expr(fi.value) })
 }
-impure_use_in_arms = (nm: StringView, arms: [ArmData]) bool {
+impure_use_in_arms = (nm: StringView, arms: MutSlice<ArmData>) bool {
     arms.slice_any((ar) { nm.impure_use_in_expr(ar.body) })
 }
 impure_use_in_stmt = (nm: StringView, st: Stmt) bool {
@@ -1645,11 +1652,11 @@ impure_use_in_stmt = (nm: StringView, st: Stmt) bool {
         .ExprStmt(e) => nm.impure_use_in_expr(e),
     })
 }
-impure_use_in_body = (nm: StringView, body: [Stmt]) bool {
+impure_use_in_body = (nm: StringView, body: MutSlice<Stmt>) bool {
     body.slice_any((st) { nm.impure_use_in_stmt(st) })
 }
 // is `nm` used IMPURELY (discharged/escaped, not a pure getter read) in any statement strictly AFTER k?
-impure_use_after = (nm: StringView, body: [Stmt], k: i32) bool {
+impure_use_after = (nm: StringView, body: MutSlice<Stmt>, k: i32) bool {
     f ::= false
     body.loop_at((i, st) {
         (i > k).then({
@@ -1672,7 +1679,7 @@ leak_alias_value* = (e: Ptr<Expr>) bool {
 // split out so the owner-typed arm's inner match does not nest inside kv_leak_let's outer match.
 // v2: an owner leaks unless it is DISCHARGED (impurely used) on some path — a pure getter-only read
 // (or no mention at all, the v1 never-named case) is a leak. impure_use_after == false ⇒ leak.
-nm_read_or_leak* = (env: Env, body: [Stmt], k: i32, l: LetData) i32 {
+nm_read_or_leak* = (env: Env, body: MutSlice<Stmt>, k: i32, l: LetData) i32 {
     l.name.impure_use_after(body, k).then({ 0 }, { l.pos.pos_or(load(l.value).expr_pos()) })
 }
 // ── SENDABILITY rule 2: an Rc<T> may not be sent across actors. ───────────────────────────────────
@@ -1680,7 +1687,7 @@ nm_read_or_leak* = (env: Env, body: [Stmt], k: i32, l: LetData) i32 {
 // Flag `send(handle, msg)` whose message carries an Rc (sent directly, wrapped in an enum, or in a
 // struct field). Arc<T> (atomic) and value/Own messages are fine — only Rc is rejected, so ordinary
 // message sends keep zero friction.
-sd_inits_rc = (env: Env, inits: [FieldInit]) bool {
+sd_inits_rc = (env: Env, inits: MutSlice<FieldInit>) bool {
     inits.slice_any((fi) { env.sd_msg_rc(fi.value) })
 }
 sd_msg_rc = (env: Env, e: Ptr<Expr>) bool {
@@ -1711,7 +1718,7 @@ sd_call_pos* = (env: Env, c: CallData) i32 {
 // pass only refuses the mutable-reference kind. Same shape as the send-Rc pass (type-aware via
 // infer_expr, walks the same surfaces); runs AFTER scratch-escape so an addr-of-local (also a MutPtr)
 // gets the more specific lifetime remedy first.
-sm_inits_mut = (env: Env, inits: [FieldInit]) bool {
+sm_inits_mut = (env: Env, inits: MutSlice<FieldInit>) bool {
     inits.slice_any((fi) { env.sm_msg_mut(tvoid(), fi.value) })
 }
 // Classify a send-payload expression by the TYPE it reaches (Pony reference-capabilities), NOT its AST

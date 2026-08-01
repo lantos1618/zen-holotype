@@ -117,7 +117,7 @@ was reproducing by hand.
 
 The AST types (`Decl`, `Ty`, `Param`, `Field`, `StructDecl`, `EnumDecl`, `VariantDef`)
 are real and exported by `std.internal.ast`; `compiler.genc.genModuleIn` emits a
-`[Decl]` to C. Building a companion decl from a reflected struct (derive-accessors,
+`MutSlice<Decl>` to C. Building a companion decl from a reflected struct (derive-accessors,
 derive-eq style) works as a build program today.
 
 ## Remaining — known limits and future intrinsics
@@ -165,7 +165,7 @@ users = table<User>("users")   // reflect fields -> columns; SQL type from each 
 adults = db.from(users)
     .where(users.col(.active).eq(true))    // typed column ref, not "active"
     .order_by(users.col(.name))
-    .select()                              // -> [User], rows scanned back via reflection
+    .select()                              // -> MutSlice<User>, rows scanned back via reflection
 
 db.insert(users, User(id: 1, name: "ada", active: true))   // fields -> bind params
 ```

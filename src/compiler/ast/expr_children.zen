@@ -1,38 +1,6 @@
-// compiler.ast.expr_children — THE one exhaustive statement of "what hangs below an Expr node".
-//
-// Background. `Expr` has 20 variants and ~200 `.match` blocks over it live in compiler.**; only
-// three of them (gen_expr, js_expr, ff_expr) list every variant. The rest close with `_`, and that
-// `_` carries two DIFFERENT meanings that read identically in source:
-//
-//   * a narrow SHAPE PROBE — `is_lvalue`, `match_subj_pos`, `expr_consumes_name`, … — where `_`
-//     means "not the shape I am asking about", and `false`/`0` stays correct forever; and
-//   * a broad TRAVERSAL — a recursive walk over the whole tree — where `_` is claimed to mean
-//     "a leaf, nothing below" but ACTUALLY means "a variant I did not think about".
-//
-// The second kind is a silent-miss trap, and it has already fired: 89cf8a6 ("fix(check): walk
-// loop/lambda bodies for undefined names") records `.Loop` dropping through `_ => 0` in two name
-// walkers, so undefined names inside Zen's primary iteration construct passed `check` and only
-// exploded at `cc`. 59bbb76 records the same shape in the escape checker.
-//
-// expr_fold_children is the fix: ONE total, per-variant listing of an Expr's structural children,
-// which the broad traversals delegate their `_` arm to. Adding a 21st `Expr` variant then fails to
-// compile at exactly THIS match — one site, naming the variant — instead of being silently ignored
-// wherever a walker guessed. That is the whole point; keep this match exhaustive (no `_` arm).
-//
-// Shape: a FOLD over an FnT accumulator, not a `[Ptr<Expr>]`-returning function. Zen splices an
-// FnT-parameter template at its call site, so the callbacks cost nothing and no per-node buffer is
-// allocated — the check pipeline runs on every LSP keystroke and cannot afford the allocation.
-//
-//   fe(acc, child)  — one sub-EXPRESSION child (Bin operands, Call args, an arm body, …)
-//   fs(acc, body)   — one child STATEMENT LIST (a Loop/Lambda body, a Block's stmts)
-//
-// A walker that must extend an environment for the bindings a variant introduces (`Loop`'s
-// idx/elem/handler, `Lambda`'s params) keeps its own explicit `.Loop`/`.Lambda` arm and delegates
-// only the rest — the arms it names shrink to "variants I treat SPECIALLY", and the default stops
-// being a guess.
-//
-// Import floor: this module imports compiler.ast.ast_types and nothing else, so it adds no closure
-// to any of the ~50 files that already import the AST types.
+// Exhaustive structural child fold. Keep the match total: broad AST walks delegate here so a new
+// Expr variant cannot silently disappear behind a wildcard arm. The callbacks avoid allocating a
+// child array. Walkers with binding-sensitive Loop/Lambda handling keep those arms locally.
 //
 // KNOWN SUBTLETY — `MethodCall`. It is a composite (recv + args) that most post-desugar walkers
 // treat as a LEAF, on the unenforced assumption that compiler.check.desugar_method_calls already
@@ -42,7 +10,7 @@
 // skipping a whole subtree.
 { Expr, Stmt, ArmData, FieldInit } = compiler.ast.ast_types
 { loop_at } = std.core.count
-expr_fold_children*<A> = (acc: A, e: Ptr<Expr>, fe: (A, Ptr<Expr>) A, fs: (A, [Stmt]) A) A {
+expr_fold_children*<A> = (acc: A, e: Ptr<Expr>, fe: (A, Ptr<Expr>) A, fs: (A, MutSlice<Stmt>) A) A {
     load(e).match ({
         .Int(n)         => acc,
         .Byte(n)        => acc,
@@ -65,17 +33,17 @@ expr_fold_children*<A> = (acc: A, e: Ptr<Expr>, fe: (A, Ptr<Expr>) A, fs: (A, [S
         .Block(bk)      => fs(acc, bk.stmts),
     })
 }
-fold_child_exprs*<A> = (acc: A, xs: [Expr], fe: (A, Ptr<Expr>) A) A {
+fold_child_exprs*<A> = (acc: A, xs: MutSlice<Expr>, fe: (A, Ptr<Expr>) A) A {
     out ::= acc
     xs.loop_at((i, x) { out = fe(out, x.addr()) })
     out
 }
-fold_child_inits*<A> = (acc: A, inits: [FieldInit], fe: (A, Ptr<Expr>) A) A {
+fold_child_inits*<A> = (acc: A, inits: MutSlice<FieldInit>, fe: (A, Ptr<Expr>) A) A {
     out ::= acc
     inits.loop_at((i, fi) { out = fe(out, fi.value) })
     out
 }
-fold_child_arms*<A> = (acc: A, arms: [ArmData], fe: (A, Ptr<Expr>) A) A {
+fold_child_arms*<A> = (acc: A, arms: MutSlice<ArmData>, fe: (A, Ptr<Expr>) A) A {
     out ::= acc
     arms.loop_at((i, ar) { out = fe(out, ar.body) })
     out

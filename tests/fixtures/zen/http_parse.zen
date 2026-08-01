@@ -23,8 +23,8 @@
 { parse_request, build_response, respond, status_reason, no_headers, one_header } = std.net.http
 { http_listen, serve_once, serve_n, Request, Response } = std.net.http
 // turn every '\n' into a CRLF, so a readable `\n`-delimited canned response becomes wire-format HTTP.
-// Returns a length-carrying `[u8]` (parse_response's binary-safe input) via the String builder's `.bytes()`.
-crlfify = (a: AllocatorBackend, s: StringView) [u8] {
+// Returns a length-carrying `MutSlice<u8>` (parse_response's binary-safe input) via the String builder's `.bytes()`.
+crlfify = (a: AllocatorBackend, s: StringView) MutSlice<u8> {
     sb ::= a.new_in().expect("http_parse: oom")
     s.view().loop((h, i, b) {
         (b == '\n').match ({
@@ -41,7 +41,7 @@ crlfify = (a: AllocatorBackend, s: StringView) [u8] {
 }
 // A canned 200 response whose 7-byte body carries an EMBEDDED NUL ("ab\0cdef", NUL at index 2) — a
 // string literal can't hold a NUL, so the body bytes are pushed explicitly onto the CRLF'd head.
-nul_body = (a: AllocatorBackend) [u8] {
+nul_body = (a: AllocatorBackend) MutSlice<u8> {
     sb ::= a.new_in().expect("http_parse: oom")
     "HTTP/1.1 200 OK\nContent-Length: 7\n\n".view().loop((h, i, b) {
         (b == '\n').match ({
@@ -54,7 +54,7 @@ nul_body = (a: AllocatorBackend) [u8] {
             },
         })
     })
-    body: [u8] = ['a', 'b', 0, 'c', 'd', 'e', 'f']
+    body: MutSlice<u8> = ['a', 'b', 0, 'c', 'd', 'e', 'f']
     body.loop((h, i, b) {
         sb = a.push_in(sb, b).expect("http_parse: oom")
     })
@@ -195,7 +195,8 @@ main = () i32 {
     // (13) the reason phrases that ride the status line.
     c13 = status_reason(200) == "OK"
         && status_reason(404) == "Not Found"
-        && status_reason(418) == "OK"
+        && status_reason(500) == "Internal Server Error"
+        && status_reason(418) == ""
     // force-compile the live SERVER path too (guard is statically false).
     probe3 = false.match ({
         true  => http_listen("127.0.0.1", 0).match ({

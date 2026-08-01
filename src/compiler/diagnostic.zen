@@ -1,9 +1,5 @@
-// compiler.diagnostic — map a check error's FLAT-source byte offset back to the user file's
-// line:col. resolve_program strips import lines and rewrites `ns.name` -> `ns__name`, so the
-// flat offset is not the user's; we recover the user line by matching the flat line's TEXT
-// (exact, then an alias-`__`-removal inverse, then an on-the-fly `__`==`.` comparison).
-// Ported out of bootstrap/main.c — the C driver should not carry compiler logic. Allocation-free:
-// returns ints, so main.c keeps only the printf + caret rendering and the per-module search loop.
+// Map a flattened-source offset back to the original module's line and column. Import stripping and
+// namespace rewriting make offsets differ, so matching tries exact text and the `__`/alias inverse.
 { at, is_blank } = std.text.ascii
 { view } = std.text.str
 { Allocator } = std.mem.alloc
@@ -420,11 +416,7 @@ render_diagnostic* = (
             .gstr_push(a, ':')
             .gstr_int(a, col)
     })
-    s = s
-        .gstr_append(a, ": error[")
-        .gstr_append(a, kind)
-        .gstr_append(a, "]: ")
-        .gstr_append(a, message)
+    s = s.gstr_append(a, ": error[").gstr_append(a, kind, "]: ", message)
     (count > 1).then({
         s = s.gstr_append(a, " (+").gstr_int(a, count - 1).gstr_append(a, " more error")
         // no method chained after a .match (parser limitation): push the closing chars inside the arms

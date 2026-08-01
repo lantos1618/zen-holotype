@@ -43,9 +43,9 @@ is_boundary_before = (b: u8) bool {
     (b < 'a' || b > 'z') && (b < 'A' || b > 'Z') && (b < '0' || b > '9') && b != '_' && b != '.'
 }
 // `\b` boundary before index i (plain word boundary; `.` is allowed, matching a bare `\bNAME`).
-bb_plain = (sv: [u8], i: i64) bool { i == 0 || sv[i - 1].not_word() }
+bb_plain = (sv: MutSlice<u8>, i: i64) bool { i == 0 || sv[i - 1].not_word() }
 // `(?<!\.)\b` boundary before index i (word boundary that ALSO excludes a preceding `.`).
-bb_dot = (sv: [u8], i: i64) bool { i == 0 || sv[i - 1].is_boundary_before() }
+bb_dot = (sv: MutSlice<u8>, i: i64) bool { i == 0 || sv[i - 1].is_boundary_before() }
 // `\s` skip: advance past spaces/tabs/newlines/CRs, returning the next index (or len at EOF).
 skip_ws = (sv: Slice<u8>, j: i64) i64 {
     (j >= sv.len).match ({
@@ -58,7 +58,7 @@ skip_ws = (sv: Slice<u8>, j: i64) i64 {
 }
 // do `nv`'s bytes appear at sv[at..]? (caller guards at + nv.len <= sv.len). `nv` is a `Slice<u8>`:
 // a read-only window, so a needle taken from a literal (`"@while".view()`) is accepted here.
-tok_at = (sv: [u8], nv: Slice<u8>, at: i64) bool {
+tok_at = (sv: MutSlice<u8>, nv: Slice<u8>, at: i64) bool {
     ok ::= true
     nv.loop((h, i, b) {
         (sv[at + i] == b == false).then({
@@ -70,7 +70,7 @@ tok_at = (sv: [u8], nv: Slice<u8>, at: i64) bool {
 }
 // the `\bNAME\s*\(` tail: keyword `name` starts at sv[i] AND is followed by `\s*(`. The trailing `(`
 // is what rejects e.g. `mallocate` and distinguishes `load(` from `load_i64(`.
-name_matches = (sv: [u8], i: i64, name: StringView) bool {
+name_matches = (sv: MutSlice<u8>, i: i64, name: StringView) bool {
     nv = name.view()
     (i + nv.len > sv.len).match ({
         true  => false,
@@ -86,7 +86,7 @@ name_matches = (sv: [u8], i: i64, name: StringView) bool {
 // the `\bNAME\b` tail: keyword `name` starts at sv[i] AND the byte after it is a word boundary (a
 // non-word char or EOF). Written for the bare `break` / `continue` keywords; SUITE 11 is what
 // actually uses it (a retired type spelling is a bare word, not a call).
-word_matches = (sv: [u8], i: i64, name: StringView) bool {
+word_matches = (sv: MutSlice<u8>, i: i64, name: StringView) bool {
     nv = name.view()
     (i + nv.len > sv.len).match ({
         true  => false,
@@ -101,7 +101,7 @@ word_matches = (sv: [u8], i: i64, name: StringView) bool {
 }
 // the `@while\b` match anchored at i: literal `@while` followed by a word boundary (no before-anchor
 // — the `@` is a literal char in the pattern, not a `\b`).
-atwhile_at = (sv: [u8], i: i64) bool {
+atwhile_at = (sv: MutSlice<u8>, i: i64) bool {
     nv = "@while".view()
     (i + nv.len > sv.len).match ({
         true  => false,
@@ -121,7 +121,7 @@ atwhile_at = (sv: [u8], i: i64) bool {
 //                             which are not Zen keywords at all, so the check could never fire)
 //   3 = `@while\b`           (the literal @while token; `name` is ignored)
 //   _ = a byte-`push` call whose last argument is a bare decimal literal (`name` is ignored)
-matches_kind_at = (sv: [u8], i: i64, name: StringView, kind: i64) bool {
+matches_kind_at = (sv: MutSlice<u8>, i: i64, name: StringView, kind: i64) bool {
     (kind == 0).match ({
         true  => sv.bb_plain(i) && sv.name_matches(i, name),
         false => (kind == 1).match ({
@@ -145,7 +145,7 @@ matches_kind_at = (sv: [u8], i: i64, name: StringView, kind: i64) bool {
 // literal `'\x08'` back as the bare number `8`. The formatter round-trips `'\xNN'` now, so the cast
 // no longer buys anything and `to_u8_tail` below judges what it wraps.
 // the index of the `)` closing the `(` at `i`, or sv.len if the file ends first.
-close_paren = (sv: [u8], i: i64, depth: i64) i64 {
+close_paren = (sv: MutSlice<u8>, i: i64, depth: i64) i64 {
     (i >= sv.len).match ({
         true  => sv.len,
         false => (sv[i] == '(').match ({
@@ -157,21 +157,21 @@ close_paren = (sv: [u8], i: i64, depth: i64) i64 {
         }),
     })
 }
-back_space = (sv: [u8], j: i64) i64 {
+back_space = (sv: MutSlice<u8>, j: i64) i64 {
     (j >= 0 && sv[j] == ' ').then({ sv.back_space(j - 1) }, { j })
 }
-back_digits = (sv: [u8], j: i64) i64 {
+back_digits = (sv: MutSlice<u8>, j: i64) i64 {
     (j >= 0 && sv[j] >= '0' && sv[j] <= '9').then({ sv.back_digits(j - 1) }, { j })
 }
 // `push(mp, 8.to_u8())` — a decimal wearing a conversion. `zen fmt` now round-trips `'\xNN'` (see
 // `ff_char` in compiler.pretty), so `'\x08'` is writable and the cast buys nothing the char literal
 // cannot say. Step back over the `.to_u8()` suffix and judge what it wraps: a bare decimal is a
 // violation, while `cp.to_u8()` / `(192 | cp >> 6).to_u8()` walk back onto a non-digit and pass.
-to_u8_tail = (sv: [u8], end: i64) i64 {
+to_u8_tail = (sv: MutSlice<u8>, end: i64) i64 {
     (end >= 8 && end <= sv.len && sv.tok_at(".to_u8()".view(), end - 8)).then({ end - 8 }, { end })
 }
 // walking back from the closing `)`: spaces, then a digit run, then the `,`/`(` that opens the slot.
-last_arg_is_decimal = (sv: [u8], end0: i64) bool {
+last_arg_is_decimal = (sv: MutSlice<u8>, end0: i64) bool {
     end = sv.to_u8_tail(end0)
     j = sv.back_space(end - 1)
     d = sv.back_digits(j)
@@ -185,7 +185,7 @@ last_arg_is_decimal = (sv: [u8], end0: i64) bool {
 }
 // `push(` / `push_in(` anchored at i — a SUFFIX match, so `gstr_push(`, `rpush(` and `list_push(` all
 // land here, while `pushed(` and `push_uesc(` do not (the `(` must follow immediately).
-push_literal_at = (sv: [u8], i: i64) bool {
+push_literal_at = (sv: MutSlice<u8>, i: i64) bool {
     lp = sv.tok_at("push(".view(), i).match ({
         true  => i + 4,
         false => sv.tok_at("push_in(".view(), i).then({ i + 7 }, { 0 - 1 }),
@@ -350,7 +350,7 @@ alloc_suite = (mp: Allocator) i32 {
     mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
             files = mp.addr().split_in(listing, '\n')
-            results :: [bool] = mp.addr().nbuf(true, files.len)
+            results :: MutSlice<bool> = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.alloc_passes(path)
             })
@@ -401,7 +401,7 @@ example_suite = (mp: Allocator) i32 {
     mp.addr().contents_in(mp.zo_path("ob_examples.txt")).match ({
         .Ok(listing) => {
             files = mp.addr().split_in(listing, '\n')
-            results :: [bool] = mp.addr().nbuf(true, files.len)
+            results :: MutSlice<bool> = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.example_passes(path)
             })
@@ -463,7 +463,7 @@ checkpoint_suite = (mp: Allocator) i32 {
     mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
             files = mp.addr().split_in(listing, '\n')
-            results :: [bool] = mp.addr().nbuf(true, files.len)
+            results :: MutSlice<bool> = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.checkpoint_passes(path)
             })
@@ -517,7 +517,7 @@ atwhile_suite = (mp: Allocator) i32 {
     mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
             files = mp.addr().split_in(listing, '\n')
-            results :: [bool] = mp.addr().nbuf(true, files.len)
+            results :: MutSlice<bool> = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.atwhile_passes(path)
             })
@@ -541,7 +541,7 @@ io_suite = (mp: Allocator) i32 {
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 // SUITE 7: std.collections.map fallible paths (the unified Result API) use the Result allocator
-// helpers — grow/of go through the all-or-nothing try_acquire3 combinator (which rolls back partially
+// helpers — grow/map_of_in go through the all-or-nothing try_acquire3 combinator (which rolls back partially
 // acquired buffers on OOM), append grows through grow; never a bare panicking acquire.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 map_suite = (mp: Allocator) i32 {
@@ -550,9 +550,8 @@ map_suite = (mp: Allocator) i32 {
             src = mp.strip_comments_in(raw)
             grow = mp.region(src, "grow = (m: Map<T>", "reindex = ")
             appnd = mp.region(src, "append = (m: Map<T>", "put = (m: Map<T>")
-            // `of` is the last fn in map.zen, so its region runs to EOF (no following marker).
-            of = mp.after_marker(src, "of*<T> = (a: AllocatorBackend")
-            run_suite("boundaries: map fallible paths use result helpers", [grow.found(), appnd.found(), of.found(), grow.contains(".try_acquire3("), grow.not_contains(".acquire("), appnd.contains(".grow("), appnd.not_contains(".acquire("), of.contains(".try_acquire3("), of.not_contains(".acquire(")])
+            ctor = mp.region(src, "map_of_in*<T> = (a: AllocatorBackend", "MapFactory*:")
+            run_suite("boundaries: map fallible paths use result helpers", [grow.found(), appnd.found(), ctor.found(), grow.contains(".try_acquire3("), grow.not_contains(".acquire("), appnd.contains(".grow("), appnd.not_contains(".acquire("), ctor.contains(".try_acquire3("), ctor.not_contains(".acquire(")])
         },
         .Err(e)  => run_suite("boundaries: map (unreadable)", [false]),
     })
@@ -657,7 +656,7 @@ layering_suite = (mp: Allocator) i32 {
     mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
             files = mp.addr().split_in(listing, '\n')
-            results :: [bool] = mp.addr().nbuf(true, files.len)
+            results :: MutSlice<bool> = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.layering_passes(path)
             })
@@ -741,7 +740,7 @@ spelling_suite = (mp: Allocator) i32 {
     mp.addr().contents_in(mp.zo_path("ob_all.txt")).match ({
         .Ok(listing) => {
             files = mp.addr().split_in(listing, '\n')
-            results :: [bool] = mp.addr().nbuf(true, files.len)
+            results :: MutSlice<bool> = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.spelling_passes(path)
             })
@@ -789,7 +788,7 @@ walrus_allowed = (path: StringView) bool {
         || path == "docs/SPEC.md"
 }
 // `:=` at index i, with a leading `:` EXCLUDING the match — `::=` is the live mutable form.
-walrus_at = (sv: [u8], i: i64) bool {
+walrus_at = (sv: MutSlice<u8>, i: i64) bool {
     (i + 1 >= sv.len).match ({
         true  => false,
         false => sv[i] == ':' && sv[i + 1] == '=' && (i == 0 || sv[i - 1] != ':'),
@@ -842,7 +841,7 @@ walrus_suite = (mp: Allocator) i32 {
     mp.addr().contents_in(mp.zo_path("ob_all.txt")).match ({
         .Ok(listing) => {
             files = mp.addr().split_in(listing, '\n')
-            results :: [bool] = mp.addr().nbuf(true, files.len)
+            results :: MutSlice<bool> = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.walrus_passes(path)
             })
@@ -892,7 +891,7 @@ push_suite = (mp: Allocator) i32 {
     mp.addr().contents_in(mp.zo_path("ob_files.txt")).match ({
         .Ok(listing) => {
             files = mp.addr().split_in(listing, '\n')
-            results :: [bool] = mp.addr().nbuf(true, files.len)
+            results :: MutSlice<bool> = mp.addr().nbuf(true, files.len)
             files.loop((h, i, path) {
                 results[i] = mp.alloc_push_file(path)
             })

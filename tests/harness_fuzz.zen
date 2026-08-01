@@ -95,7 +95,7 @@ fz_trunc = (mp: Allocator, src: StringView, k: i64) StringView {
 fz_soup = (
     mp: Allocator,
     s: String,
-    toks: [StringView],
+    toks: MutSlice<StringView>,
     nt: i64,
     rp: MutPtr<Rng>,
     i: i64,
@@ -210,9 +210,9 @@ fz_crash_count = (mp: Allocator, gid: i64) i32 {
     })
 }
 // run every generated src through both probes in parallel, then report IN ORDER; returns total crashes.
-fz_batch = (mp: Allocator, srcs: [StringView], n: i64) i32 {
+fz_batch = (mp: Allocator, srcs: MutSlice<StringView>, n: i64) i32 {
     base = assert_nonnull(malloc(n * 8))
-    cmds :: [StringView] = base.slice(n)
+    cmds :: MutSlice<StringView> = base.slice(n)
     n.times((i) {
         save(mp.zo_idpath("fz", i, ".zen"), srcs[i], len(srcs[i]))
         cmds[i] = mp.fz_cmd(i)
@@ -236,9 +236,9 @@ fz_batch = (mp: Allocator, srcs: [StringView], n: i64) i32 {
 }
 // ── phase drivers: generate all srcs (serial, seeded RNG threaded in the SAME order as before → the
 // inputs are byte-identical to the serial suite), then run the whole phase across the worker pool. ──
-fz_soup_phase = (mp: Allocator, toks: [StringView], nt: i64, rp: MutPtr<Rng>, n: i64) i32 {
+fz_soup_phase = (mp: Allocator, toks: MutSlice<StringView>, nt: i64, rp: MutPtr<Rng>, n: i64) i32 {
     base = assert_nonnull(malloc(n * 8))
-    srcs :: [StringView] = base.slice(n)
+    srcs :: MutSlice<StringView> = base.slice(n)
     n.times((i) {
         srcs[i] = mp
             .addr()
@@ -251,7 +251,7 @@ fz_soup_phase = (mp: Allocator, toks: [StringView], nt: i64, rp: MutPtr<Rng>, n:
 }
 fz_noise_phase = (mp: Allocator, rp: MutPtr<Rng>, n: i64) i32 {
     base = assert_nonnull(malloc(n * 8))
-    srcs :: [StringView] = base.slice(n)
+    srcs :: MutSlice<StringView> = base.slice(n)
     n.times((i) {
         srcs[i] = mp
             .addr()
@@ -264,7 +264,7 @@ fz_noise_phase = (mp: Allocator, rp: MutPtr<Rng>, n: i64) i32 {
 }
 fz_target_phase = (mp: Allocator, rp: MutPtr<Rng>, n: i64) i32 {
     base = assert_nonnull(malloc(n * 8))
-    srcs :: [StringView] = base.slice(n)
+    srcs :: MutSlice<StringView> = base.slice(n)
     n.times((i) { srcs[i] = mp.fz_targeted(rp, rp.range(0, 8)) })
     r = mp.fz_batch(srcs, n)
     free(base)
@@ -272,7 +272,7 @@ fz_target_phase = (mp: Allocator, rp: MutPtr<Rng>, n: i64) i32 {
 }
 // crash-class REGRESSIONS: one minimal representative per known malformed-input non-termination bug.
 fz_seed_phase = (mp: Allocator) i32 {
-    seeds: [StringView] = ["g = g", "a = b\nb = a", "A*: { b: B } B*: { a: A }", "f = () i32 {", "f = () i32 { 0 .match ({ 1 => 2", "T*: { x: i32 } T.impl(Tr, { m = () void {", "f = () i32 { x = 5  x[0 ", "f = () i32 { s = [1,2]  s[0 = 3 }", "Foo<", "f<T> = (x: T) T { f(x) }", "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }", "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }", "P<T>: { a: T, n: P<P<T>> }  test* = () i32 { 0 }  use* = (b: P<i32>) i32 { 0 }"]    // self-referential global init
+    seeds: MutSlice<StringView> = ["g = g", "a = b\nb = a", "A*: { b: B } B*: { a: A }", "f = () i32 {", "f = () i32 { 0 .match ({ 1 => 2", "T*: { x: i32 } T.impl(Tr, { m = () void {", "f = () i32 { x = 5  x[0 ", "f = () i32 { s = [1,2]  s[0 = 3 }", "Foo<", "f<T> = (x: T) T { f(x) }", "a<T> = (x: T) T { b(x) }  b<T> = (x: T) T { a(x) }  test* = () i32 { a(1) }", "Box<T>: { next: Box<Box<T>> }  use* = (b: Box<i32>) i32 { 0 }", "P<T>: { a: T, n: P<P<T>> }  test* = () i32 { 0 }  use* = (b: P<i32>) i32 { 0 }"]    // self-referential global init
     // mutually-referential globals
     // struct A<->B by value
     // unterminated block
@@ -302,7 +302,7 @@ fz_deep_phase = (mp: Allocator) i32 {
         .addr()
         .finish_in(mp.fz_rep(c1, ")", 0, d).append_in(mp.addr(), " }").expect("fuzz: oom"))
         .expect("fuzz: oom")
-    srcs: [StringView] = [mp.fz_deep("test* = () i32 { ", "1+", d, "1 }"), mp.fz_deep("test* = () i32 { ", "1==", d, "1 }"), mp.fz_deep("test* = () i32 { x", ".f", d, " }"), callc]    // operator ladder (add chain)
+    srcs: MutSlice<StringView> = [mp.fz_deep("test* = () i32 { ", "1+", d, "1 }"), mp.fz_deep("test* = () i32 { ", "1==", d, "1 }"), mp.fz_deep("test* = () i32 { x", ".f", d, " }"), callc]    // operator ladder (add chain)
     // operator ladder (compare chain)
     // postfix member chain
     // postfix / call-arg descent
@@ -314,7 +314,7 @@ harness_fuzz_run* = () i32 {
     r = seed(FZ_SEED)
     rp = r.addr()
     // a grammar-flavoured alphabet (mirrors _fuzz_campaign.ALPHA): keywords, punctuation, names.
-    toks: [StringView] = ["test*", "f*", "=", "(", ")", "i32", "i64", "bool", "str", "{", "}", "x", "y", "p", "::=", ":", "5", "0", "1", ".match", "[", "]", "+", "-", "*", "/", "P", "C", "T", "f", "<", ">", "2", "return", "_", "=>", ",", ".", ".Some", ".None", "|", "impl", "Drop", "loop", "addr", "slice", "void", "Ptr", "MutPtr", "&&", "||", "==", "!=", "g", "h", ".Ok", ".Err", "@while", "sizeof", "use*", "Box", "n:"]
+    toks: MutSlice<StringView> = ["test*", "f*", "=", "(", ")", "i32", "i64", "bool", "str", "{", "}", "x", "y", "p", "::=", ":", "5", "0", "1", ".match", "[", "]", "+", "-", "*", "/", "P", "C", "T", "f", "<", ">", "2", "return", "_", "=>", ",", ".", ".Some", ".None", "|", "impl", "Drop", "loop", "addr", "slice", "void", "Ptr", "MutPtr", "&&", "||", "==", "!=", "g", "h", ".Ok", ".Err", "@while", "sizeof", "use*", "Box", "n:"]
     nt: i64 = toks.len
     out("fuzz: crash-resistance over generated malformed inputs\n")
     out("fuzz seeds (crash-class regressions)\n")

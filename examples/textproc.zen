@@ -19,7 +19,7 @@ halloc = std.mem.heap
 { AllocatorBackend, release_slice } = std.mem.alloc
 { formatln, arg_int, arg_str } = std.text.fmt
 // Count '\n' bytes — wc's line count (a final unterminated line is not counted, like `wc -l`).
-count_lines = (v: [u8]) i64 {
+count_lines = (v: MutSlice<u8>) i64 {
     n :: i64 = 0
     v.loop((h, i, b) {
         (b == '\n').then({
@@ -29,7 +29,7 @@ count_lines = (v: [u8]) i64 {
     n
 }
 // Count whitespace-separated words — a run of non-space bytes is one word.
-count_words = (v: [u8]) i64 {
+count_words = (v: MutSlice<u8>) i64 {
     n :: i64 = 0
     in_word ::= false
     v.loop((h, i, b) {
@@ -50,13 +50,13 @@ count_words = (v: [u8]) i64 {
 }
 // wc mode: print "<lines> <words> <bytes>" over the raw bytes, so an embedded NUL is counted
 // like any other byte instead of ending the input.
-run_wc = (v: [u8]) i32 {
+run_wc = (v: MutSlice<u8>) i32 {
     formatln("{} {} {}", [arg_int(v.count_lines()), arg_int(v.count_words()), arg_int(v.len)])
     0
 }
 // Print the selected lines through a buffered writer: one write(2) per 64 KiB instead of one per
 // line. `hits == 0` exits 1 like grep; a failed flush is reported and exits 2.
-emit_hits = (a: AllocatorBackend, lines: [StringView], keep: (StringView) bool) i32 {
+emit_hits = (a: AllocatorBackend, lines: MutSlice<StringView>, keep: (StringView) bool) i32 {
     w = a.stdout_bufw_in(64 * 1024).expect("textproc: oom")
     wp = w.addr()
     hits :: i64 = 0
@@ -76,7 +76,7 @@ emit_hits = (a: AllocatorBackend, lines: [StringView], keep: (StringView) bool) 
 }
 // `str.split` copies: every line is its own owned block, hanging off an owned backbone. `emit_hits`
 // only BORROWS them, so the caller that split is the one that frees — here, once printing is done.
-free_lines = (a: AllocatorBackend, lines: [StringView]) void {
+free_lines = (a: AllocatorBackend, lines: MutSlice<StringView>) void {
     lines.loop((h, i, line) {
         a.release(line.own_ptr())
     })
@@ -109,7 +109,7 @@ run_re = (a: AllocatorBackend, text: StringView, pat: StringView) i32 {
 src_path = (file_idx: i32) StringView { (argc() > file_idx).then({ arg(file_idx) }, { "" }) }
 // wc counts bytes, so it reads binary-safe: contents_bytes/read_all_bytes carry their length and
 // keep embedded NULs, where the text reads below stop at the first one.
-read_bytes = (a: AllocatorBackend, p: StringView) Result<[u8], IoError> {
+read_bytes = (a: AllocatorBackend, p: StringView) Result<MutSlice<u8>, IoError> {
     (p == "").then({ a.read_all_bytes() }, { a.contents_bytes(p) })
 }
 // grep/re read TEXT: std.text.str's search/split and std.text.regex take StringView and have no

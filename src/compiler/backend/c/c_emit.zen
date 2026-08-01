@@ -1,7 +1,3 @@
-// compiler.backend.c.c_emit — C emission driver over the genc AST: type-dependency ordering, module
-// assembly, and the genC / genModule entry points. Pipeline: genc -> mono -> c_emit.
-// Value/statement emission lives in compiler.backend.c.c_lit (integers/literals/escapes),
-// compiler.backend.c.c_expr (expressions/match/statements), and compiler.backend.c.c_decl (types/sigs/decls).
 { String } = std.text.string
 { ends_with } = std.text.str
 { Decl, EnumDecl, Expr, StructDecl, Ty } = compiler.ast.ast_types
@@ -16,7 +12,7 @@
 { loop_at } = std.core.count
 // Type dependency ordering: by-value contained types must emit before their users.
 maxi = (a: i32, b: i32) i32 { (a >= b).then({ a }, { b }) }
-slen = (decls: [Decl]) i32 {
+slen = (decls: MutSlice<Decl>) i32 {
     n ::= 0
     decls.loop_at((i, d) { n = n + 1 })
     n
@@ -32,42 +28,42 @@ is_type_named = (d: Decl, name: StringView) bool {
 DepthMemo: {
     d: i32,
 }
-ty_idx = (decls: [Decl], name: StringView) i32 {
+ty_idx = (decls: MutSlice<Decl>, name: StringView) i32 {
     found ::= 0 - 1
     decls.loop_at((i, d) { found = is_type_named(d, name).then({ i }, { found }) })
     found
 }
-slot_depth = (decls: [Decl], cache: [DepthMemo], t: Ty) i32 {
+slot_depth = (decls: MutSlice<Decl>, cache: MutSlice<DepthMemo>, t: Ty) i32 {
     t.match ({
         .Named(n)   => 1 + decls.idx_depth(cache, decls.ty_idx(n)),
         .Generic(g) => 1 + decls.idx_depth(cache, decls.ty_idx(g.mangled)),
         _           => 0,
     })
 }
-struct_depth = (decls: [Decl], cache: [DepthMemo], sd: StructDecl) i32 {
+struct_depth = (decls: MutSlice<Decl>, cache: MutSlice<DepthMemo>, sd: StructDecl) i32 {
     d ::= 0
     sd.fields.loop_at((i, f) { d = maxi(d, decls.slot_depth(cache, f.ty)) })
     d
 }
-enum_depth = (decls: [Decl], cache: [DepthMemo], ed: EnumDecl) i32 {
+enum_depth = (decls: MutSlice<Decl>, cache: MutSlice<DepthMemo>, ed: EnumDecl) i32 {
     d ::= 0
     ed.variants.loop_at((i, v) { d = maxi(d, decls.slot_depth(cache, v.payload)) })
     d
 }
-decl_body_depth = (decls: [Decl], cache: [DepthMemo], d: Decl) i32 {
+decl_body_depth = (decls: MutSlice<Decl>, cache: MutSlice<DepthMemo>, d: Decl) i32 {
     d.match ({
         .DStruct(sd) => decls.struct_depth(cache, sd),
         .DEnum(ed)   => decls.enum_depth(cache, ed),
         _            => 0,
     })
 }
-compute_idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
+compute_idx_depth = (decls: MutSlice<Decl>, cache: MutSlice<DepthMemo>, idx: i32) i32 {
     cache[idx] = DepthMemo(d: 0 - 2)
     r = decls.decl_body_depth(cache, decls[idx])
     cache[idx] = DepthMemo(d: r)
     r
 }
-idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
+idx_depth = (decls: MutSlice<Decl>, cache: MutSlice<DepthMemo>, idx: i32) i32 {
     (idx < 0).match ({
         true  => 0,
         false => (cache[idx].d >= 0).match ({
@@ -76,7 +72,7 @@ idx_depth = (decls: [Decl], cache: [DepthMemo], idx: i32) i32 {
         }),
     })
 }
-depth_cache = (a: Allocator, decls: [Decl]) [DepthMemo] {
+depth_cache = (a: Allocator, decls: MutSlice<Decl>) MutSlice<DepthMemo> {
     c ::= cbuf<DepthMemo>(a, decls.slen())
     c.loop_at((i, x) { c[i] = DepthMemo(d: 0 - 1) })
     c
@@ -84,9 +80,9 @@ depth_cache = (a: Allocator, decls: [Decl]) [DepthMemo] {
 gen_types_at = (
     s: String,
     alloc: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     impld: Map<i64>,
-    cache: [DepthMemo],
+    cache: MutSlice<DepthMemo>,
     k: i32,
 ) String {
     out ::= s
@@ -108,9 +104,9 @@ gen_types_at = (
 gen_types_upto = (
     s: String,
     alloc: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     impld: Map<i64>,
-    cache: [DepthMemo],
+    cache: MutSlice<DepthMemo>,
     k: i32,
     n: i32,
 ) String {
@@ -121,7 +117,7 @@ gen_types_upto = (
     })
     out
 }
-gen_funcs = (s: String, alloc: Allocator, decls: [Decl]) String {
+gen_funcs = (s: String, alloc: Allocator, decls: MutSlice<Decl>) String {
     out ::= s
     decls.loop_at((i, d) {
         (d.is_template() == false).then({
@@ -185,7 +181,7 @@ gen_global = (s: String, alloc: Allocator, d: Decl) String {
     })
     out
 }
-gen_global_inits = (s: String, alloc: Allocator, decls: [Decl]) String {
+gen_global_inits = (s: String, alloc: Allocator, decls: MutSlice<Decl>) String {
     out ::= s.gstr_append(alloc, "static void zen__init_globals(void) { ")
     decls.loop_at((i, d) {
         d.match ({
@@ -203,7 +199,7 @@ gen_global_inits = (s: String, alloc: Allocator, decls: [Decl]) String {
 }
 // The `main = (sys: Sys) i32` capability entry, if the program has one. Its body is emitted as
 // `zen_user_main` (see gen_func); a niladic `zen_main` trampoline feeds it `root()`.
-has_sys_main = (decls: [Decl]) bool {
+has_sys_main = (decls: MutSlice<Decl>) bool {
     decls.slice_any((d) {
         d.match ({
             .DFunc(f) => f.main_is_sys(),
@@ -216,7 +212,7 @@ has_sys_main = (decls: [Decl]) bool {
 // `<alias>__` prefix, so it becomes e.g. `sys__root`. Identify it STRUCTURALLY — a 0-param fn returning
 // the record `Sys`, whose name is `root` or ends `__root` — so the trampoline calls the actual emitted
 // name in both forms. Falls back to bare `root`.
-sys_root_cname = (decls: [Decl]) StringView {
+sys_root_cname = (decls: MutSlice<Decl>) StringView {
     nm ::= "root"
     decls.loop_at((i, d) {
         nm = d.match ({
@@ -240,7 +236,7 @@ platform_prelude = () StringView {
     "/* generated host platform */\nstatic int32_t zen_platform_host_os(void){\n#if defined(__APPLE__)\nreturn 1;\n#elif defined(__linux__)\nreturn 2;\n#elif defined(_WIN32)\nreturn 3;\n#elif defined(__FreeBSD__)\nreturn 4;\n#else\nreturn 0;\n#endif\n}\nstatic int32_t zen_platform_host_arch(void){\n#if defined(__aarch64__) || defined(_M_ARM64)\nreturn 1;\n#elif defined(__x86_64__) || defined(_M_X64)\nreturn 2;\n#elif defined(__riscv) && __riscv_xlen == 64\nreturn 3;\n#elif defined(__wasm32__)\nreturn 4;\n#else\nreturn 0;\n#endif\n}\nstatic int32_t zen_platform_host_abi(void){\n#if defined(__APPLE__)\nreturn 1;\n#elif defined(__linux__) && defined(__GLIBC__)\nreturn 2;\n#elif defined(__linux__)\nreturn 3;\n#elif defined(_MSC_VER)\nreturn 4;\n#elif defined(__wasi__)\nreturn 5;\n#else\nreturn 0;\n#endif\n}\n"
 }
 // Whole translation unit emission.
-genModuleIn* = (a: Allocator, raw: [Decl]) String {
+genModuleIn* = (a: Allocator, raw: MutSlice<Decl>) String {
     decls = a.monomorphize(raw)
     a.slx_classify(decls)    // slice-literal escape verdicts, read by gen_call_args below
     // zslice is the EXACT leading HEAD; zfn (fn pointers, A2) and the malloc/memcpy prototypes follow so

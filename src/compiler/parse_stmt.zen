@@ -1,9 +1,3 @@
-// compiler.parse_stmt — statement parsing: the SList cons-list, statement-kind classification,
-// let/set/idxset/return/while/block statements, build_body + materialize. Split out of
-// compiler.parse (god-file split). Statements pull the expression parser (parse_or/parse_atom)
-// from compiler.parse_expr and the type/brace helpers from compiler.parse_type.
-//
-// Style: UFCS throughout — the source flows as the receiver of scan/byte helpers.
 { Stmt, Expr, ArmData } = compiler.ast.ast_types
 { cbuf, slet, slett_atm, sassign_at, sidxset_at, swhile, sret, sexpr, vref, eindex, bin_at,
   member_at, tvoid, acquire_or_die } = compiler.genc
@@ -16,9 +10,8 @@
 { is_field_colon } = compiler.parse_primary
 { parse_or } = compiler.parse_expr
 { is_lbracket, is_rbracket, is_rbrace, lbrace_off, skip_to_brace, skip_to_lparen, tok_eq, parse_ty,
-  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, PE_INIT, PE_WALRUS, PE_LETTY, PE_LETEQ,
-  bopen_enter, bopen_exit, pdepth_enter, pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
-// ── statement sequence: zero or more `name = expr` lines, then a final expression ──
+  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, bopen_enter, bopen_exit, pdepth_enter,
+  pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
 // get materialized into a HEAP [Stmt] for genc. A stack `[…]` literal can't be used — it
 // dangles the moment the Func is returned (genc would then walk freed memory).
@@ -35,7 +28,7 @@ scons_val = (h: Stmt, t: Ptr<SList>) SList {
         tail: t,
     ))
 }
-slbuf = (a: Allocator) [SList] { slice(a.acquire_or_die(sizeof(SList)), 1) }
+slbuf = (a: Allocator) MutSlice<SList> { slice(a.acquire_or_die(sizeof(SList)), 1) }
 slnode = (a: Allocator, v: SList) Ptr<SList> {
     buf ::= a.slbuf()
     buf[0] = v
@@ -43,7 +36,6 @@ slnode = (a: Allocator, v: SList) Ptr<SList> {
 }
 snil = (a: Allocator) Ptr<SList> { a.slnode(snil_val()) }
 scons = (a: Allocator, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h, t)) }
-// ── local bindings: CONST BY DEFAULT ───────────────────────────────────────────────────────────
 // Four forms, three independently optional marks — `::` marks MUTABILITY, `:` introduces the TYPE,
 // `=` binds the VALUE:
 //     x = 0            constant, type inferred
@@ -56,10 +48,7 @@ scons = (a: Allocator, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h
 // assignment and turned into a constant binding by compiler.passes.declbind, which is the only
 // stage that knows whether `x` is already in scope.
 //
-// The classifier commits on TOKEN 2 — O(1), with no speculative type parse. The old typed-let
-// predicate ran a full recursive `parse_ty` just to CLASSIFY (allocating a type buffer and, through
-// parse_anon_ty → register_anon, writing into a global registry) and `parse_typed_let_stmt` then
-// parsed the very same type a second time. At statement position an Ident followed by `:` can only
+// The classifier commits on token 2 with no speculative type parse. At statement position an Ident followed by `:` can only
 // begin a declaration — an anonymous struct literal is decided before parse_stmts ever runs
 // (compiler.parse_primary.looks_anon_struct) and begins with `{`, not with a name.
 is_binding_here = (src: StringView, pos: i32) bool {
@@ -73,7 +62,7 @@ is_binding_mark = (src: StringView, t: Token) bool {
     src.is_field_colon(t) || src.is_dcolon(t) || src.is_mut_walrus(t) || src.is_walrus(t)
 }
 // can this token begin a TYPE? A name (`i32`, `Ptr<T>`), a `[T]` slice, a `{ a: T }` anonymous
-// struct, or a `(A) R` function type. Anything else after a binding's `:`/`::` is PE_LETTY.
+// struct, or a `(A) R` function type. Anything else after a binding's `:`/`::` is ExpectedLetType.
 ty_starts_at = (src: StringView, pos: i32) bool {
     sc = src.scan(pos)
     sc.tok.kind.match ({
@@ -123,7 +112,6 @@ is_idxset_here = (src: StringView, pos: i32) bool {
         _      => false,
     })
 }
-// ── compound assignment `+= -= *= /= %=` ────────────────────────────────────────
 // PURE desugar: `lhs OP= rhs` → `lhs = lhs OP rhs` (reuse Assign/IndexSet + Bin — no new AST).
 // The lexer fuses each compound op into one 2-byte Sym (an arith op then '='). is_compound_op
 // recognizes it; the byte at `start` names the binary op (op_str). The lhs is a simple place
@@ -181,25 +169,28 @@ is_return_here = (src: StringView, pos: i32) bool {
 // predicates), so the two dispatch sites (parse_stmts, block_stmt) are each a flat match.
 SKind: SLet | SIdx | SSet | SCIdx | SCSet | SWhile | SRet | SExpr
 stmt_kind = (src: StringView, pos: i32) SKind {
-    src.is_binding_here(pos).match ({
-        true  => .SLet,
-        false => src.is_idxset_here(pos).match ({
-            true  => .SIdx,
-            false => src.is_set_here(pos).match ({
-                true  => .SSet,
-                false => src.is_compound_idxset_here(pos).match ({
-                    true  => .SCIdx,
-                    false => src.is_compound_set_here(pos).match ({
-                        true  => .SCSet,
-                        false => src.is_while_here(pos).match ({
-                            true  => .SWhile,
-                            false => src.is_return_here(pos).then({ .SRet }, { .SExpr }),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    src.is_binding_here(pos).then({
+        return .SLet
     })
+    src.is_idxset_here(pos).then({
+        return .SIdx
+    })
+    src.is_set_here(pos).then({
+        return .SSet
+    })
+    src.is_compound_idxset_here(pos).then({
+        return .SCIdx
+    })
+    src.is_compound_set_here(pos).then({
+        return .SCSet
+    })
+    src.is_while_here(pos).then({
+        return .SWhile
+    })
+    src.is_return_here(pos).then({
+        return .SRet
+    })
+    .SExpr
 }
 // parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
 // the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
@@ -248,7 +239,6 @@ parse_set_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     v = a.parse_or(src, eq.next)    // value
     a.scons(sassign_at(lhs.expr, v.expr, start), a.parse_stmts(src, v.next))
 }
-// ── single-evaluation guard for compound places ─────────────────────────────────
 // The `place = place OP rhs` desugar reads the place TWICE, which is only harmless while the place
 // is PURE. An index sub-expression can call a function (`a[f()] += 1`, `s.buf[f()].n += 1`): naive
 // re-reading would run f() twice. has_call spots such places; the desugar then hoists each
@@ -271,7 +261,7 @@ has_call = (e: Ptr<Expr>) bool {
         _               => false,
     })
 }    // Int/Byte/FloatLit/Var/StrLit/Tag/Lambda — inert
-arms_have_call = (arms: [ArmData], i: i64) bool {
+arms_have_call = (arms: MutSlice<ArmData>, i: i64) bool {
     (i >= arms.len).then({ false }, { arms[i].body.has_call() || arms.arms_have_call(i + 1) })
 }
 // one desugared compound assignment: the hoisted-index bindings (SNil when the place is pure), the
@@ -427,16 +417,15 @@ parse_binding* = (a: Allocator, src: StringView, pos: i32) LetParse {
     nt = src.scan(pos)    // the bound name
     name = a.lexeme(src, nt.tok)
     mk = src.scan(nt.next)    // the mark: `::=` / `::` / `:` (or the retired walrus)
-    // The retired walrus is recognized ONLY to redirect it (PE_WALRUS names the four replacements),
-    // then parsed on as if it were `::=` — its old meaning — so ONE error is reported instead of a
+    // The retired walrus is recognized only for its targeted diagnostic, then parsed as `::=` so one error is reported instead of a
     // cascade from a body the parser could not enter.
     src.is_walrus(mk.tok).then({
-        perr_set_kind_at(mk.tok.start, PE_WALRUS())
+        perr_set_kind_at(mk.tok.start, .RetiredWalrus)
     })
     // inferred-type forms — the value follows the mark directly. `::=` is the mutable binding.
     (src.is_mut_walrus(mk.tok) || src.is_walrus(mk.tok)).then({
         src.init_missing(mk.next).then({
-            perr_set_kind_at(mk.tok.start, PE_INIT())
+            perr_set_kind_at(mk.tok.start, .ExpectedInit)
         })    // caret the mark that binds nothing
         v = a.parse_or(src, mk.next)
         return LetParse(
@@ -448,19 +437,19 @@ parse_binding* = (a: Allocator, src: StringView, pos: i32) LetParse {
     // We are already committed to a declaration, so every later token has a precise expectation.
     mut = src.is_dcolon(mk.tok)
     (src.ty_starts_at(mk.next) == false).then({
-        perr_set_kind_at(src.scan(mk.next).tok.start, PE_LETTY())
+        perr_set_kind_at(src.scan(mk.next).tok.start, .ExpectedLetType)
     })
     te = a.parse_ty(src, mk.next)    // the annotation, parsed ONCE
     op = src.scan(te.next)
     legacy = src.is_walrus(op.tok)    // the retired annotated walrus: redirect, then recover as `::`
     legacy.then({
-        perr_set_kind_at(op.tok.start, PE_WALRUS())
+        perr_set_kind_at(op.tok.start, .RetiredWalrus)
     })
     (src.is_op1(op.tok, '=') || legacy).match ({
         true  => src.init_missing(op.next).then({
-            perr_set_kind_at(op.tok.start, PE_INIT())
+            perr_set_kind_at(op.tok.start, .ExpectedInit)
         }),
-        false => perr_set_kind_at(op.tok.start, PE_LETEQ()),
+        false => perr_set_kind_at(op.tok.start, .ExpectedLetEq),
     })
     v = a.parse_or(src, op.next)
     LetParse(
@@ -497,7 +486,6 @@ parse_return_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     r = a.parse_or(src, kw.next)    // the returned value
     a.scons(sret(r.expr), a.parse_stmts(src, r.next))
 }
-// ── @while loops ─────────────────────────────────────────────────────────────────
 // `@while(cond) { stmts }` — a `@` Sym, the `while` Ident, a parenthesized condition,
 // then a brace block of statements (let / assign / nested-while; NO trailing return — a
 // loop body produces no value, unlike a function body). Lowers to genc's While. The block
@@ -678,24 +666,24 @@ scount = (l: Ptr<SList>) i32 {
         .SCons(c) => 1 + c.tail.scount(),
     })
 }
-sfill = (buf: [Stmt], l: Ptr<SList>, i: i32) i32 {
+sfill = (buf: MutSlice<Stmt>, l: Ptr<SList>, i: i32) i32 {
     l.match ({
         .SNil     => i,
         .SCons(c) => buf.sfill_cons(c, i),
     })
 }
-sfill_cons = (buf: [Stmt], c: SCell, i: i32) i32 {
+sfill_cons = (buf: MutSlice<Stmt>, c: SCell, i: i32) i32 {
     buf[i] = c.head
     buf.sfill(c.tail, i + 1)
 }
 // a heap [Stmt] of length n (a stack slice literal would dangle once we return the Func)
 // materialize a statement cons-list into a heap [Stmt] (counted, then filled in order)
-materialize* = (a: Allocator, stmts: Ptr<SList>) [Stmt] {
+materialize* = (a: Allocator, stmts: Ptr<SList>) MutSlice<Stmt> {
     body = cbuf<Stmt>(a, stmts.scount())
     body.sfill(stmts, 0)
     body
 }
 // parse a body [pos..] into a heap [Stmt] (the statement cons-list, counted + materialized)
-build_body* = (a: Allocator, src: StringView, pos: i32) [Stmt] {
+build_body* = (a: Allocator, src: StringView, pos: i32) MutSlice<Stmt> {
     a.materialize(a.parse_stmts(src, pos))
 }

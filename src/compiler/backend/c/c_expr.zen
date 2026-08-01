@@ -1,5 +1,3 @@
-// compiler.backend.c.c_expr — expression, match, and statement C-emission over the genc AST.
-// Extracted from compiler.backend.c.c_emit; leaf integer/literal/escape helpers live in compiler.backend.c.c_lit.
 { String } = std.text.string
 { is_empty } = std.text.str
 { Expr, Stmt, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData,
@@ -167,7 +165,7 @@ gen_loop = (s: String, alloc: Allocator, l: LoopData) String {
     out = out.gstr_append(alloc, " ").gstr_append(alloc, l.h).gstr_append(alloc, "__c: ; } ")
     out.gstr_append(alloc, l.h).gstr_append(alloc, "__b: ; 0; })")
 }
-gen_loop_body = (s: String, alloc: Allocator, body: [Stmt]) String {
+gen_loop_body = (s: String, alloc: Allocator, body: MutSlice<Stmt>) String {
     out ::= s
     body.loop_at((i, st) { out = out.gen_stmt(alloc, st).gstr_append(alloc, " ") })
     out
@@ -187,7 +185,7 @@ gen_loop_body = (s: String, alloc: Allocator, body: [Stmt]) String {
 // call before, 0 after. Still leaking, deliberately: a literal that is RETURNED or bound to a local
 // (`xs = [1, 2, 3]`), stored into a struct/slice/enum, passed to a foreign or unknown callee, or passed
 // to a callee this analysis cannot clear within its hop bound. Those keep the malloc because pure stack
-// storage reintroduces a verified use-after-return for `f() [i32] { [1, 2, 3] }` — heap-by-default means
+// storage reintroduces a verified use-after-return for `f() MutSlice<i32> { [1, 2, 3] }` — heap-by-default means
 // a misclassification is a leak, never a use-after-free.
 gen_slicelit = (s: String, alloc: Allocator, sd: SliceData) String {
     n = slice_count(sd.items)
@@ -445,7 +443,7 @@ gen_call_default = (s: String, alloc: Allocator, c: CallData) String {
 // Argument emission for an ORDINARY call — the one position where a slice literal can be proven not to
 // escape (c_escape). Identical to gen_args except for that one classification; every other argument, and
 // every intrinsic's arguments (they never reach here), go through gen_expr and stay heap-promoted.
-gen_call_args = (s: String, alloc: Allocator, fn: StringView, args: [Expr]) String {
+gen_call_args = (s: String, alloc: Allocator, fn: StringView, args: MutSlice<Expr>) String {
     out ::= s
     args.loop_at((i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
@@ -518,7 +516,7 @@ gen_call = (s: String, alloc: Allocator, c: CallData) String {
     })
 }
 // a call's argument list, comma-separated: `a, b, c` (each arg is an Expr value -> addr it)
-gen_args = (s: String, alloc: Allocator, args: [Expr]) String {
+gen_args = (s: String, alloc: Allocator, args: MutSlice<Expr>) String {
     out ::= s
     args.loop_at((i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
@@ -653,7 +651,7 @@ gen_armbody_stmt = (
 // struct/scalar arms keep their type. __typeof__ evaluates none of these arm expressions. DIVERGING
 // arms (body ends in `return`) yield no value: they are skipped here (their block would type void and
 // poison the chain) and emitted as statements in gen_switch_body. All arms diverging → dead int _out.
-next_live_arm = (arms: [ArmData], i: i64) i64 {
+next_live_arm = (arms: MutSlice<ArmData>, i: i64) i64 {
     (i >= arms.len).match ({
         true  => arms.len,
         false => arms[i].body.blk_diverges().then({ arms.next_live_arm(i + 1) }, { i }),
@@ -664,7 +662,7 @@ gen_match_type_expr = (
     alloc: Allocator,
     subj: StringView,
     sep: StringView,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
     i: i64,
 ) String {
     j = arms.next_live_arm(i)
@@ -691,7 +689,7 @@ gen_match_out_decl = (
     alloc: Allocator,
     subj: StringView,
     sep: StringView,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
 ) String {
     s
         .gstr_append(alloc, "__typeof__(")
@@ -821,7 +819,7 @@ gen_switch_arms = (
     subj: StringView,
     sep: StringView,
     ename: StringView,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
     i: i64,
 ) String {
     (i >= arms.len).match ({
@@ -841,7 +839,7 @@ gen_switch_stmt_arms = (
     subj: StringView,
     sep: StringView,
     ename: StringView,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
     i: i64,
 ) String {
     (i >= arms.len).match ({
@@ -966,12 +964,12 @@ gen_stmt_void = (s: String, alloc: Allocator, st: Stmt) String {
     })
 }
 // emit a brace-wrapped block: `{ s1; s2; … }`
-gen_block* = (s: String, alloc: Allocator, body: [Stmt]) String {
+gen_block* = (s: String, alloc: Allocator, body: MutSlice<Stmt>) String {
     open ::= s.gstr_append(alloc, "{ ")
     body.loop_at((i, st) { open = open.gen_stmt_effect(alloc, st).gstr_append(alloc, " ") })
     open.gstr_append(alloc, "}")
 }
-gen_block_void* = (s: String, alloc: Allocator, body: [Stmt]) String {
+gen_block_void* = (s: String, alloc: Allocator, body: MutSlice<Stmt>) String {
     open ::= s.gstr_append(alloc, "{ ")
     body.loop_at((i, st) { open = open.gen_stmt_void(alloc, st).gstr_append(alloc, " ") })
     open.gstr_append(alloc, "}")

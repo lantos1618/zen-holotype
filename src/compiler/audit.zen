@@ -1,13 +1,11 @@
-// audit.zen — `zen audit`: dead-code and unused-import analysis over the resolved AST. Walks every
-// declaration reachable from the program's entry points, then reports what nothing reached. The
-// bootstrap tree-shaker (`bs_shake` in driver.zen) reuses this same reachability closure, which is
-// why the walk, the roots, and the finding types are all exported rather than private here.
+// Dead-code and unused-import analysis over the resolved AST. driver.zen's bootstrap tree-shaker
+// reuses this reachability closure, so its walk, roots, and finding types remain exported.
 { Allocator } = std.mem.alloc
 { view, is_empty, starts_with, ends_with } = std.text.str
 { is_alnum, is_alpha } = std.text.ascii    // ident-byte classes (the audit scanner's own copies were dups)
 { then } = std.core.bool
 { expect } = std.core.result
-{ Map, of } = std.collections.map    // name -> decl-index / seen-set maps
+{ Map } = std.collections.map    // name -> decl-index / seen-set maps
 { contents_in } = std.io.file
 { opendir, readdir, closedir } = std.c.libc
 { impl_cname_in } = compiler.mangle    // recompute hoisted impl-method names
@@ -22,7 +20,6 @@
 { edges_of, cache_module_path } = compiler.modgraph
 { say, cstr_range, eprint, push_int, dir_exists, resolve_prog_or_exit, dirname } = compiler.drvutil
 { times, upto, advance_while, repeat_while, step_while, loop_at } = std.core.count
-// ── zen audit — dead-code + unused-import + clone reporter (`--strict` exits 1; clones advisory) ──
 // Dead-decl analysis runs over the SAME whole-program pipeline `check` uses (resolve imports ->
 // parse -> resolve_module), so alias qualification, UFCS dispatch and trait-default materialization
 // are all visible. It builds a conservative reachability fixpoint over top-level decl NAMES:
@@ -59,14 +56,14 @@ AudImplM: {
 }    // type-liveness fanout: impl'd type -> hoisted method (or trait) name
 AudCtx*: {
     mp: Allocator,
-    decls: [Decl],
-    rdecls: [Decl],
+    decls: MutSlice<Decl>,
+    rdecls: MutSlice<Decl>,
     ridx: Map<i64>,
     xidx: Map<i64>,
     seen: Map<i64>,
     mseen: Map<i64>,
-    pairs: [AudPair],
-    implms: [AudImplM],
+    pairs: MutSlice<AudPair>,
+    implms: MutSlice<AudImplM>,
 }
 aud_decl_name* = (d: Decl) StringView {
     d.match ({
@@ -112,9 +109,9 @@ aud_decl_kind = (d: Decl) StringView {
         _              => "",
     })
 }
-aud_index* = (mp: Allocator, ds: [Decl]) Map<i64> {
+aud_index* = (mp: Allocator, ds: MutSlice<Decl>) Map<i64> {
     seedv: i64 = 0 - 1
-    m ::= of(mp.addr(), "", seedv).expect("audit: oom")
+    m ::= mp.map_of("", seedv).expect("audit: oom")
     ds.loop_at((i, d) {
         nm = d.aud_decl_name()
         (is_empty(nm) == false).then({
@@ -207,10 +204,10 @@ aud_walk_sig* = (ac: MutPtr<AudCtx>, f: Func) void {
     f.tparams.loop_at((i, p) { ac.aud_walk_ty(p.ty) })    // generic BOUNDS (`f<A: AllocatorBackend>`) reference the trait
     ac.aud_walk_ty(f.ret)
 }
-aud_walk_fields = (ac: MutPtr<AudCtx>, fs: [Field]) void {
+aud_walk_fields = (ac: MutPtr<AudCtx>, fs: MutSlice<Field>) void {
     fs.loop_at((i, f) { ac.aud_walk_ty(f.ty) })
 }
-aud_walk_variants = (ac: MutPtr<AudCtx>, vs: [VariantDef]) void {
+aud_walk_variants = (ac: MutPtr<AudCtx>, vs: MutSlice<VariantDef>) void {
     vs.loop_at((i, v) {
         ac.aud_walk_ty(v.payload)
         (v.dflt.is_expr_null() == false).then({
@@ -234,7 +231,7 @@ aud_walk_ty = (ac: MutPtr<AudCtx>, t: Ty) void {
         _           => { },
     })
 }
-aud_walk_stmts = (ac: MutPtr<AudCtx>, body: [Stmt]) void {
+aud_walk_stmts = (ac: MutPtr<AudCtx>, body: MutSlice<Stmt>) void {
     body.loop_at((i, st) { ac.aud_walk_stmt(st) })
 }
 aud_walk_stmt = (ac: MutPtr<AudCtx>, st: Stmt) void {
@@ -357,7 +354,7 @@ aud_join2 = (mp: Allocator, a: StringView, b: StringView) StringView {
 //   pairs  — (bare method/tail name -> hoisted decl name): every DImpl method, every trait-default
 //            materialization target per conforming impl, every `alias__name`-shaped decl tail.
 //   implms — (impl'd type -> hoisted method name / trait name): the type-liveness fanout.
-aud_td_idxs* = (mp: Allocator, decls: [Decl]) [i64] {
+aud_td_idxs* = (mp: Allocator, decls: MutSlice<Decl>) MutSlice<i64> {
     n ::= 0
     decls.loop_at((i, d) {
         d.match ({
@@ -381,7 +378,7 @@ aud_td_idxs* = (mp: Allocator, decls: [Decl]) [i64] {
     buf
 }
 // defaults of impl `im`'s trait: how many DTraitDefault decls share its trait name.
-aud_impl_dflts* = (decls: [Decl], tds: [i64], trname: StringView) i64 {
+aud_impl_dflts* = (decls: MutSlice<Decl>, tds: MutSlice<i64>, trname: StringView) i64 {
     n ::= 0
     tds.loop_at((j, ti) {
         decls[ti].match ({
@@ -395,7 +392,7 @@ aud_impl_dflts* = (decls: [Decl], tds: [i64], trname: StringView) i64 {
     })
     n
 }
-aud_pair_count = (decls: [Decl], tds: [i64]) i64 {
+aud_pair_count = (decls: MutSlice<Decl>, tds: MutSlice<i64>) i64 {
     n ::= 0
     decls.loop_at((i, d) {
         d.match ({
@@ -411,7 +408,7 @@ aud_pair_count = (decls: [Decl], tds: [i64]) i64 {
     })
     n
 }
-aud_implm_count = (decls: [Decl], tds: [i64]) i64 {
+aud_implm_count = (decls: MutSlice<Decl>, tds: MutSlice<i64>) i64 {
     n ::= 0
     decls.loop_at((i, d) {
         d.match ({
@@ -424,10 +421,10 @@ aud_implm_count = (decls: [Decl], tds: [i64]) i64 {
     n
 }
 AudTables*: {
-    pairs: [AudPair],
-    implms: [AudImplM],
+    pairs: MutSlice<AudPair>,
+    implms: MutSlice<AudImplM>,
 }
-aud_tables* = (mp: Allocator, decls: [Decl]) AudTables {
+aud_tables* = (mp: Allocator, decls: MutSlice<Decl>) AudTables {
     tds = mp.aud_td_idxs(decls)
     pairs ::= cbuf<AudPair>(mp, decls.aud_pair_count(tds))
     implms ::= cbuf<AudImplM>(mp, decls.aud_implm_count(tds))
@@ -507,9 +504,9 @@ aud_tables* = (mp: Allocator, decls: [Decl]) AudTables {
 // fn-typed struct fields.
 AudTM*: {
     tr: StringView,
-    mv: [u8],
+    mv: MutSlice<u8>,
 }
-aud_fnt_fields = (fs: [Field]) i64 {
+aud_fnt_fields = (fs: MutSlice<Field>) i64 {
     n ::= 0
     fs.loop_at((i, f) {
         f.ty.match ({
@@ -521,7 +518,7 @@ aud_fnt_fields = (fs: [Field]) i64 {
     })
     n
 }
-aud_tm_count = (decls: [Decl]) i64 {
+aud_tm_count = (decls: MutSlice<Decl>) i64 {
     n ::= 0
     decls.loop_at((i, d) {
         d.match ({
@@ -542,7 +539,7 @@ aud_tm_count = (decls: [Decl]) i64 {
     })
     n
 }
-aud_tm_push_fields = (tms: [AudTM], k: i64, tr: StringView, fs: [Field]) i64 {
+aud_tm_push_fields = (tms: MutSlice<AudTM>, k: i64, tr: StringView, fs: MutSlice<Field>) i64 {
     j ::= k
     fs.loop_at((i, f) {
         f.ty.match ({
@@ -558,7 +555,7 @@ aud_tm_push_fields = (tms: [AudTM], k: i64, tr: StringView, fs: [Field]) i64 {
     })
     j
 }
-aud_tms = (mp: Allocator, decls: [Decl]) [AudTM] {
+aud_tms = (mp: Allocator, decls: MutSlice<Decl>) MutSlice<AudTM> {
     tms ::= cbuf<AudTM>(mp, decls.aud_tm_count())
     k ::= 0
     decls.loop_at((i, d) {
@@ -591,7 +588,7 @@ aud_tms = (mp: Allocator, decls: [Decl]) [AudTM] {
     tms
 }
 // the trait-method subset credited to imported name `name` (empty when `name` is not a trait).
-aud_tm_for = (mp: Allocator, tms: [AudTM], name: StringView) [AudTM] {
+aud_tm_for = (mp: Allocator, tms: MutSlice<AudTM>, name: StringView) MutSlice<AudTM> {
     n ::= 0
     tms.loop_at((i, t) {
         (t.tr == name).then({
@@ -644,7 +641,7 @@ aud_lt = (a: AudFinding, b: AudFinding) bool {
     c = a.path.aud_strcmp(b.path)
     c < 0 || c == 0 && (a.line < b.line || a.line == b.line && a.msg.aud_strcmp(b.msg) < 0)
 }
-aud_sort = (fb: [AudFinding], n: i64) void {
+aud_sort = (fb: MutSlice<AudFinding>, n: i64) void {
     1.upto(n, (i) {
         x = fb[i]
         j = (i - 1).step_while((p) { p >= 0 && x.aud_lt(fb[p]) }, (p) {
@@ -676,8 +673,8 @@ aud_dead_msg = (mp: Allocator, kind: StringView, nm: StringView) StringView {
 // ── unused-import scan (per original module source; tokenizer-disciplined) ────────────────────────
 AudImp: {
     name: StringView,
-    nv: [u8],
-    ms: [AudTM],
+    nv: MutSlice<u8>,
+    ms: MutSlice<AudTM>,
     mod: StringView,
     pos: i32,
     alias: bool,
@@ -686,7 +683,7 @@ AudImp: {
     hi: i64,
 }
 // 1-based line of byte `pos` (iterative — module sources are hundreds of KB).
-aud_line_of = (v: [u8], pos: i64) i64 {
+aud_line_of = (v: MutSlice<u8>, pos: i64) i64 {
     ln ::= 1
     zero: i64 = 0
     zero.step_while((i) { i < pos && i < v.len }, (i) {
@@ -698,7 +695,7 @@ aud_line_of = (v: [u8], pos: i64) i64 {
     ln
 }
 // end of an import statement's span: from `{` past the matching `}`, the `=`, and the dotted path.
-aud_imp_span_hi = (v: [u8], pos: i64) i64 {
+aud_imp_span_hi = (v: MutSlice<u8>, pos: i64) i64 {
     brace = pos.advance_while((p) { p < v.len && v[p] != '}' }) + 1
     dot = brace.advance_while((p) {
         p < v.len && (v[p] == ' ' || v[p] == '\t' || v[p] == '\n' || v[p] == '=')
@@ -706,7 +703,7 @@ aud_imp_span_hi = (v: [u8], pos: i64) i64 {
     dot.advance_while((p) { p < v.len && (v[p].is_alnum() || v[p] == '.') })
 }
 // identifier token [s,e) equals `nv`?
-aud_tok_eq = (v: [u8], s: i64, e: i64, nv: [u8]) bool {
+aud_tok_eq = (v: MutSlice<u8>, s: i64, e: i64, nv: MutSlice<u8>) bool {
     ok ::= nv.len == e - s
     zero: i64 = 0
     zero.step_while((k) { ok && k < nv.len }, (k) {
@@ -716,7 +713,7 @@ aud_tok_eq = (v: [u8], s: i64, e: i64, nv: [u8]) bool {
     ok
 }
 // does token [s,e) equal any credited trait-method name?
-aud_ms_eq = (v: [u8], s: i64, e: i64, ms: [AudTM]) bool {
+aud_ms_eq = (v: MutSlice<u8>, s: i64, e: i64, ms: MutSlice<AudTM>) bool {
     hit ::= false
     ms.loop((h, i, t) {
         v.aud_tok_eq(s, e, t.mv).then({
@@ -726,7 +723,7 @@ aud_ms_eq = (v: [u8], s: i64, e: i64, ms: [AudTM]) bool {
     })
     hit
 }
-aud_mark_used = (ents: [AudImp], nents: i64, v: [u8], s: i64, e: i64) void {
+aud_mark_used = (ents: MutSlice<AudImp>, nents: i64, v: MutSlice<u8>, s: i64, e: i64) void {
     nents.times((k) {
         en ::= ents[k]
         (en.used == false
@@ -739,7 +736,7 @@ aud_mark_used = (ents: [AudImp], nents: i64, v: [u8], s: i64, e: i64) void {
 }
 // one scanner step at byte i: skip a comment/string/char literal whole, consume an identifier and
 // match it against the imported names, else advance one byte. Returns the next position.
-aud_step = (ents: [AudImp], nents: i64, v: [u8], i0: i64) i64 {
+aud_step = (ents: MutSlice<AudImp>, nents: i64, v: MutSlice<u8>, i0: i64) i64 {
     n = v.len
     b = v[i0]
     (b == '/' && i0 + 1 < n && v[i0 + 1] == '/').then({
@@ -786,7 +783,13 @@ aud_imp_msg = (mp: Allocator, en: AudImp) StringView {
 // scan ONE module file: every `{ a, b } = mod` name and every `m = mod` alias that never occurs in
 // the module's own source outside the import statement itself (a trait name's methods count — see
 // AudTM). Appends findings; returns the count.
-aud_mod_imports = (mp: Allocator, m: ModuleEntry, tms: [AudTM], fb: [AudFinding], n0: i32) i32 {
+aud_mod_imports = (
+    mp: Allocator,
+    m: ModuleEntry,
+    tms: MutSlice<AudTM>,
+    fb: MutSlice<AudFinding>,
+    n0: i32,
+) i32 {
     set_faithful_lexeme(true)    // report and match source identifiers, not C-keyword `_zk` spellings
     ds = mp.parse_module(m.source)
     set_faithful_lexeme(false)
@@ -870,7 +873,12 @@ aud_mod_imports = (mp: Allocator, m: ModuleEntry, tms: [AudTM], fb: [AudFinding]
 // entry also reaches std.sys.root — genc emits the trampoline call); impl blocks on builtin
 // receivers (no type decl to anchor liveness on); when the entry has no `main` (a library), every
 // entry-module decl is a root instead.
-aud_analyze = (mp: Allocator, rp: ResolvedProgram, raw: [Decl], rdecls: [Decl]) AudCtx {
+aud_analyze = (
+    mp: Allocator,
+    rp: ResolvedProgram,
+    raw: MutSlice<Decl>,
+    rdecls: MutSlice<Decl>,
+) AudCtx {
     seedv: i64 = 0 - 1
     t = mp.aud_tables(raw)
     c = AudCtx(
@@ -879,8 +887,8 @@ aud_analyze = (mp: Allocator, rp: ResolvedProgram, raw: [Decl], rdecls: [Decl]) 
         rdecls: rdecls,
         ridx: mp.aud_index(raw),
         xidx: mp.aud_index(rdecls),
-        seen: of(mp.addr(), "", seedv).expect("audit: oom"),
-        mseen: of(mp.addr(), "", seedv).expect("audit: oom"),
+        seen: mp.map_of("", seedv).expect("audit: oom"),
+        mseen: mp.map_of("", seedv).expect("audit: oom"),
         pairs: t.pairs,
         implms: t.implms,
     )
@@ -927,7 +935,7 @@ aud_analyze = (mp: Allocator, rp: ResolvedProgram, raw: [Decl], rdecls: [Decl]) 
 // is live and neither may be reported. The suppression set: bare `__`-tails of the live names.
 aud_live_tails = (mp: Allocator, c: AudCtx) Map<i64> {
     seedv: i64 = 0 - 1
-    tails ::= of(mp.addr(), "", seedv).expect("audit: oom")
+    tails ::= mp.map_of("", seedv).expect("audit: oom")
     c.seen
         .keys()
         .loop_at((i, k) {
@@ -973,14 +981,14 @@ aud_hexd = (v: i64) u8 { load(offset("0123456789abcdef", v)) }
 aud_clones = (
     mp: Allocator,
     rp: ResolvedProgram,
-    raw: [Decl],
+    raw: MutSlice<Decl>,
     path: StringView,
     src: StringView,
-    fb: [AudFinding],
+    fb: MutSlice<AudFinding>,
     n0: i32,
 ) i32 {
     seedv: i64 = 0 - 1
-    seen ::= of(mp.addr(), "", seedv).expect("audit: oom")
+    seen ::= mp.map_of("", seedv).expect("audit: oom")
     names ::= cbuf<StringView>(mp, raw.len + 8)
     n ::= n0
     k :: i64 = 0
@@ -1017,8 +1025,8 @@ aud_clones = (
 aud_run* = (
     mp: Allocator,
     rp: ResolvedProgram,
-    raw: [Decl],
-    rdecls: [Decl],
+    raw: MutSlice<Decl>,
+    rdecls: MutSlice<Decl>,
     path: StringView,
     src: StringView,
     strict: bool,
@@ -1048,7 +1056,7 @@ aud_run* = (
 // sort, dedupe on (path, line, msg), print, summarize; returns the `--strict` exit code. The same
 // finding can be collected more than once (a module reached under several ids/regions), so equal
 // (path, line, msg) rows — adjacent after aud_sort — are emitted ONCE and counted once.
-aud_emit = (mp: Allocator, fb: [AudFinding], n: i64, strict: bool) i32 {
+aud_emit = (mp: Allocator, fb: MutSlice<AudFinding>, n: i64, strict: bool) i32 {
     fb.aud_sort(n)
     dead ::= 0
     clones ::= 0
@@ -1109,7 +1117,7 @@ aud_emit = (mp: Allocator, fb: [AudFinding], n: i64, strict: bool) i32 {
 // not workspace programs.
 AudWsFiles: {
     mp: Allocator,
-    fs: [StringView],
+    fs: MutSlice<StringView>,
     n: i64,
 }
 aud_ws_addf = (wf: MutPtr<AudWsFiles>, p: StringView) void {
@@ -1130,7 +1138,7 @@ aud_join_path = (mp: Allocator, dir: StringView, nm: StringView) StringView {
         .gstr_finish(mp)
 }
 // deterministic entry order regardless of readdir order.
-aud_sortp = (fs: [StringView], n: i64) void {
+aud_sortp = (fs: MutSlice<StringView>, n: i64) void {
     1.upto(n, (i) {
         x = fs[i]
         j = (i - 1).step_while((p) { p >= 0 && x.aud_strcmp(fs[p]) < 0 }, (p) {
@@ -1202,7 +1210,7 @@ aud_embed_lit = (
     ac: MutPtr<AudCtx>,
     mp: Allocator,
     mods: Map<i64>,
-    v: [u8],
+    v: MutSlice<u8>,
     a: i64,
     b: i64,
 ) Map<i64> {
@@ -1312,9 +1320,14 @@ aud_id_matches = (id: StringView, dotted: StringView) bool {
 // the --workspace embedded-source heuristic (#595): harness files BUILD test programs as string
 // literals whose import lines the plain fixpoint cannot see. Root them: brace-form names aud_ref
 // directly; alias-form module ids root every decl the module owns (per its flat regions).
-aud_embed_roots = (ac: MutPtr<AudCtx>, mp: Allocator, rp: ResolvedProgram, raw: [Decl]) void {
+aud_embed_roots = (
+    ac: MutPtr<AudCtx>,
+    mp: Allocator,
+    rp: ResolvedProgram,
+    raw: MutSlice<Decl>,
+) void {
     seedv: i64 = 0 - 1
-    mods ::= of(mp.addr(), "", seedv).expect("audit: oom")
+    mods ::= mp.map_of("", seedv).expect("audit: oom")
     rp.table.modules.loop_at((i, m) { mods = ac.aud_embed_src(mp, mods, m.source) })
     // per-module rooted flags: some embedded dotted id names this module.
     rooted ::= cbuf<i64>(mp, rp.table.modules.len)
@@ -1349,9 +1362,9 @@ AudWs: {
     live: Map<i64>,
     idx: Map<i64>,
     mods: Map<i64>,
-    dfs: [AudWsF],
+    dfs: MutSlice<AudWsF>,
     nd: i64,
-    ifs: [AudFinding],
+    ifs: MutSlice<AudFinding>,
     ni: i64,
     entries: i64,
     skipped: i64,
@@ -1423,7 +1436,7 @@ aud_pre_edges = (
     mp: Allocator,
     root: StringView,
     progdir: StringView,
-    edges: [ImportEdge],
+    edges: MutSlice<ImportEdge>,
     st: AudPre,
 ) AudPre {
     cur ::= st
@@ -1513,9 +1526,9 @@ audit_ws_cmd = (mp: Allocator, root: StringView, dir: StringView, strict: bool) 
     wfc.fs.aud_sortp(wfc.n)
     wsc = AudWs(
         mp: mp,
-        live: of(mp.addr(), "", seedv).expect("audit: oom"),
-        idx: of(mp.addr(), "", seedv).expect("audit: oom"),
-        mods: of(mp.addr(), "", seedv).expect("audit: oom"),
+        live: mp.map_of("", seedv).expect("audit: oom"),
+        idx: mp.map_of("", seedv).expect("audit: oom"),
+        mods: mp.map_of("", seedv).expect("audit: oom"),
         dfs: cbuf<AudWsF>(mp, 256),
         nd: 0,
         ifs: cbuf<AudFinding>(mp, 64),

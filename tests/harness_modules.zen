@@ -17,7 +17,7 @@
 //   tests/test_resolver_fixes.py    — the resolver triple-fix + unknown-type / must-use / lambda / value-mold
 //                                       driver checks, all through `zenc check`/`run`/`emit`/`doc`.
 //
-// CUSTOM RUNNER: a ModValCase / ModVerdictCase / ModEmitCase carries `files: [ModFile]` (name + source).
+// CUSTOM RUNNER: a ModValCase / ModVerdictCase / ModEmitCase carries `files: MutSlice<ModFile>` (name + source).
 // The runner `mkdir`s a fresh temp dir, `save`s each file, then drives the committed `./zen`:
 //   * VALUE   — `zenc run <entry>` exit code must equal `want` (the program's `main` return).
 //   * VERDICT — `zenc check <entry>`: should_pass => accept (rc 0); else reject (rc != 0), and if
@@ -41,36 +41,36 @@ ModFile*: {
 }
 // a VALUE case: write `files`, `zenc run <entry>`; the program's exit code must equal `want`.
 ModValCase*: {
-    files: [ModFile],
+    files: MutSlice<ModFile>,
     entry: StringView,
     want: i32,
 }
 // a VERDICT case: write `files`, `zenc check <entry>`. should_pass => accept; else reject, and when
 // `needle` is non-empty the diagnostic must contain it (error kind / loader message / user source span).
 ModVerdictCase*: {
-    files: [ModFile],
+    files: MutSlice<ModFile>,
     entry: StringView,
     should_pass: bool,
     needle: StringView,
 }
 // an EMIT case: write `files`, `zenc emit <entry>`; emitted C must contain every `present`, no `absent`.
 ModEmitCase*: {
-    files: [ModFile],
+    files: MutSlice<ModFile>,
     entry: StringView,
-    present: [StringView],
-    absent: [StringView],
+    present: MutSlice<StringView>,
+    absent: MutSlice<StringView>,
 }
 // a DOC case: `zenc doc <module>`; stdout must contain every `present` substring.
 ModDocCase*: {
     module: StringView,
-    present: [StringView],
+    present: MutSlice<StringView>,
 }
 // a STDIN case: pipe `src` into `./zen` (no file, no program dir); should_succeed => exit 0 else != 0;
 // the combined stdout+stderr must contain every `present` substring.
 ModStdinCase*: {
     src: StringView,
     should_succeed: bool,
-    present: [StringView],
+    present: MutSlice<StringView>,
 }
 // this run's private project dir (trailing slash), unique per process so concurrent runs never clash.
 mod_dir = (mp: Allocator) StringView { mp.zo_path("zo_mods/") }
@@ -174,7 +174,7 @@ ensure_file_dir = (mp: Allocator, dirslash: StringView, name: StringView) void {
 }
 // fresh temp project dir, then every file written into it (paths are mod_dir + name, which may
 // carry a subdirectory — `app/utils.zen` — for dotted-module fixtures).
-write_files = (mp: Allocator, files: [ModFile]) void {
+write_files = (mp: Allocator, files: MutSlice<ModFile>) void {
     shell(mp.zo_cmd("rm -rf $ZT/zo_mods && mkdir -p $ZT/zo_mods"))
     files.loop((h, i, f) {
         mp.ensure_file_dir(mp.mod_dir(), f.name)
@@ -256,7 +256,7 @@ mod_chk_path = (mp: Allocator, gid: i64) StringView {
     mp.zo_path(mp.join3("zo_mods_chk", mp.zo_itoa(gid), ".txt"))
 }
 // Phase A: fresh per-case project dir + write its files (serial, Zen-side).
-mod_write_files_id = (mp: Allocator, gid: i64, files: [ModFile]) void {
+mod_write_files_id = (mp: Allocator, gid: i64, files: MutSlice<ModFile>) void {
     dir = mp.mod_dir_id(gid)
     shell(mp.zo_cmd(mp.zo_cat2(mp.join3("rm -rf ", dir, " && mkdir -p "), dir)))
     files.loop((h, i, f) {
@@ -308,13 +308,13 @@ mod_verdict_ok = (mp: Allocator, gid: i64, mc: ModVerdictCase) bool {
     })
 }
 // batch runners + reporters: build+write (serial), run in parallel, check IN ORDER — same verdict as serial.
-run_mod_values = (name: StringView, cs: [ModValCase]) i32 {
+run_mod_values = (name: StringView, cs: MutSlice<ModValCase>) i32 {
     out(name)
     out("\n")
     mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
-    cmds :: [StringView] = base.slice(n)
+    cmds :: MutSlice<StringView> = base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
         cmds[i] = mp.mod_value_cmd(i, c.entry)
@@ -342,7 +342,7 @@ run_mod_values = (name: StringView, cs: [ModValCase]) i32 {
 // A DeepCase is the sibling module files + which resolver-API driver to generate (kind: 0=resolve_program_data
 // table, 1=resolve_parsed_program, 2=check_parsed_program); driver.zen is generated per-gid.
 DeepCase: {
-    base_files: [ModFile],
+    base_files: MutSlice<ModFile>,
     kind: i32,
 }
 deep_driver_src = (mp: Allocator, kind: i32, dir: StringView) StringView {
@@ -363,13 +363,13 @@ deep_ok = (mp: Allocator, gid: i64) bool {
         .Err(e) => false,
     })
 }
-run_mod_deep = (name: StringView, cs: [DeepCase]) i32 {
+run_mod_deep = (name: StringView, cs: MutSlice<DeepCase>) i32 {
     out(name)
     out("\n")
     mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
-    cmds :: [StringView] = base.slice(n)
+    cmds :: MutSlice<StringView> = base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.base_files)    // fresh per-gid dir + sibling module files
         dir = mp.zo_cat2(mp.mod_dir_id(i), "/")    // slash-terminated progdir baked into the driver
@@ -392,13 +392,13 @@ run_mod_deep = (name: StringView, cs: [DeepCase]) i32 {
     free(base)
     fails
 }
-run_mod_verdicts = (name: StringView, cs: [ModVerdictCase]) i32 {
+run_mod_verdicts = (name: StringView, cs: MutSlice<ModVerdictCase>) i32 {
     out(name)
     out("\n")
     mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
-    cmds :: [StringView] = base.slice(n)
+    cmds :: MutSlice<StringView> = base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
         cmds[i] = mp.mod_verdict_cmd(i, c.entry)
@@ -456,13 +456,13 @@ mod_emit_ok = (mp: Allocator, gid: i64, mc: ModEmitCase) bool {
         false => false,
     })
 }
-run_mod_emits = (name: StringView, cs: [ModEmitCase]) i32 {
+run_mod_emits = (name: StringView, cs: MutSlice<ModEmitCase>) i32 {
     out(name)
     out("\n")
     mp = heap_allocator()
     n = cs.len
     base = assert_nonnull(malloc(n * 8))
-    cmds :: [StringView] = base.slice(n)
+    cmds :: MutSlice<StringView> = base.slice(n)
     cs.loop((h, i, c) {
         mp.mod_write_files_id(i, c.files)
         cmds[i] = mp.mod_emit_cmd(i, c.entry)
@@ -482,7 +482,7 @@ run_mod_emits = (name: StringView, cs: [ModEmitCase]) i32 {
     free(base)
     fails
 }
-run_mod_docs = (name: StringView, cs: [ModDocCase]) i32 {
+run_mod_docs = (name: StringView, cs: MutSlice<ModDocCase>) i32 {
     out(name)
     out("\n")
     fails ::= 0
@@ -498,7 +498,7 @@ run_mod_docs = (name: StringView, cs: [ModDocCase]) i32 {
     out("\n")
     fails
 }
-run_mod_stdins = (name: StringView, cs: [ModStdinCase]) i32 {
+run_mod_stdins = (name: StringView, cs: MutSlice<ModStdinCase>) i32 {
     out(name)
     out("\n")
     fails ::= 0
@@ -516,7 +516,7 @@ run_mod_stdins = (name: StringView, cs: [ModStdinCase]) i32 {
 }
 harness_modules_run* = () i32 {
     mp = heap_allocator()
-    z: StringView = ""    // typed leading element so mixed literal/variable arrays infer as [StringView]
+    z: StringView = ""    // typed leading element so mixed literal/variable arrays infer as MutSlice<StringView>
     // ── generated stress sources (recursion-depth / stack-growth guards) ─────────────────────────
     big240 = mp.gen_decls(240)    // 240 top-level decls (symbol-consumer stress)
     big120 = mp.gen_decls(120)    // 120 decls + a 120-name import head
@@ -886,7 +886,7 @@ harness_modules_run* = () i32 {
                 ),
                 ModFile(
                     name: "p.zen",
-                    src: "vec = std.collections.vec\nmaps = std.collections.map\n{ expect } = std.core.result\nright = right\nhalloc = std.mem.heap\nmain = () i32 {\n  alloc = halloc.gpa()\n  a = alloc.addr()\n  v = vec.of(a.allocator(), [10, 20]).expect(\"of\")\n  m = maps.of(a, \"x\", 1).expect(\"of\")\n  ok = v.get(0) + v.get(1) + m.get(\"x\", 0) + right.of(6)\n  v.free(alloc.addr())\n  m.free(alloc.addr())\n  ok\n}\n",
+                    src: "vec = std.collections.vec\nmaps = std.collections.map\n{ expect } = std.core.result\nright = right\nhalloc = std.mem.heap\nmain = () i32 {\n  alloc = halloc.gpa()\n  a = alloc.addr()\n  v = vec.of(a.allocator(), [10, 20]).expect(\"of\")\n  m = a.allocator().map_of(\"x\", 1).expect(\"map\")\n  ok = v.get(0) + v.get(1) + m.get(\"x\", 0) + right.of(6)\n  v.free(alloc.addr())\n  m.free(alloc.addr())\n  ok\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1056,7 +1056,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "{ println } = std.text.fmt\nheap = std.mem.heap\n{ dup, node_in } = std.core.slice\n{ expect } = std.core.result\nmain = () i32 {\n  m = heap.gpa()\n  xs: [i32] = m.addr().dup([10, 20, 30]).expect(\"dup\")\n  p = m.addr().node_in(777).expect(\"node\")\n  println(xs[2] + p.load())\n  0\n}\n",
+                    src: "{ println } = std.text.fmt\nheap = std.mem.heap\n{ dup, node_in } = std.core.slice\n{ expect } = std.core.result\nmain = () i32 {\n  m = heap.gpa()\n  xs: MutSlice<i32> = m.addr().dup([10, 20, 30]).expect(\"dup\")\n  p = m.addr().node_in(777).expect(\"node\")\n  println(xs[2] + p.load())\n  0\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1118,7 +1118,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "{ AllocatorBackend, malloc, free } = std.mem.alloc\n{ to_exit } = std.core.bool\n{ derive_accessors_in } = std.internal.ast\n{ Decl } = compiler.ast.ast_types\n{ sdef, field, ti32 } = compiler.genc\nCounting: { acquired: i32, released: i32 }\nCounting.impl(AllocatorBackend, {\n    acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {\n        a.acquired = a.acquired + 1\n        malloc(n)\n    }\n    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\n    release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {\n        a.released = a.released + 1\n        free(p)\n    }\n})\nmain = () i32 {\n    backing = Counting(acquired: 0, released: 0)\n    a ::= backing.addr()\n    sd = sdef(\"Point\", [field(\"x\", ti32()), field(\"y\", ti32())])\n    ds: [Decl] = a.derive_accessors_in(sd)\n    ok = (backing.acquired > 1) && (ds.len == 2)\n    a.release(ds.ptr)\n    (ok && (backing.released == 1)).to_exit()\n}\n",
+                    src: "{ AllocatorBackend, malloc, free } = std.mem.alloc\n{ to_exit } = std.core.bool\n{ derive_accessors_in } = std.internal.ast\n{ Decl } = compiler.ast.ast_types\n{ sdef, field, ti32 } = compiler.genc\nCounting: { acquired: i32, released: i32 }\nCounting.impl(AllocatorBackend, {\n    acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {\n        a.acquired = a.acquired + 1\n        malloc(n)\n    }\n    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\n    release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {\n        a.released = a.released + 1\n        free(p)\n    }\n})\nmain = () i32 {\n    backing = Counting(acquired: 0, released: 0)\n    a ::= backing.addr()\n    sd = sdef(\"Point\", [field(\"x\", ti32()), field(\"y\", ti32())])\n    ds: MutSlice<Decl> = a.derive_accessors_in(sd)\n    ok = (backing.acquired > 1) && (ds.len == 2)\n    a.release(ds.ptr)\n    (ok && (backing.released == 1)).to_exit()\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1138,7 +1138,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "{ AllocatorBackend, Heap } = std.mem.alloc\nhalloc = std.mem.heap\n{ Result, IoError } = std.core.result\n{ ImportEdge } = compiler.resolve\n{ import_edges } = compiler.resolve_scan\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nLimitAlloc: { heap: Heap, left: i32 }\nLimitAlloc.impl(AllocatorBackend, {\n    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {\n        (a.left <= 0).match({\n            true => null_ptr(),\n            false => {\n                a.left = a.left - 1\n                a.heap.addr().acquire(n)\n            }\n        })\n    }\n    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\n    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { a.heap.addr().release(p) }\n})\nfailed = (r: Result<[ImportEdge], IoError>) bool {\n    r.match({ .Err(e) => true, .Ok(xs) => false })\n}\nmain = () i32 {\n    src = \"right = right\\n\"\n    none = LimitAlloc(heap: halloc.gpa(), left: 0)\n    only_slice = LimitAlloc(heap: halloc.gpa(), left: 1)\n    no_alias = LimitAlloc(heap: halloc.gpa(), left: 2)\n    enough = LimitAlloc(heap: halloc.gpa(), left: 3)\n    r0: Result<[ImportEdge], IoError> = none.addr().import_edges(src)\n    r1: Result<[ImportEdge], IoError> = only_slice.addr().import_edges(src)\n    r2: Result<[ImportEdge], IoError> = no_alias.addr().import_edges(src)\n    r3: Result<[ImportEdge], IoError> = enough.addr().import_edges(src)\n    ok3 = r3.match({\n        .Ok(edges) => (edges.len == 1) && edges[0].namespace && eq(edges[0].module, \"u/right\") && eq(edges[0].alias, \"right\"),\n        .Err(e) => false\n    })\n    (r0.failed() && r1.failed() && r2.failed() && ok3).to_exit()\n}\n",
+                    src: "{ AllocatorBackend, Heap } = std.mem.alloc\nhalloc = std.mem.heap\n{ Result, IoError } = std.core.result\n{ ImportEdge } = compiler.resolve\n{ import_edges } = compiler.resolve_scan\n{ eq } = std.text.str\n{ to_exit } = std.core.bool\nLimitAlloc: { heap: Heap, left: i32 }\nLimitAlloc.impl(AllocatorBackend, {\n    acquire = (a: MutPtr<LimitAlloc>, n: i64) RawPtr<u8> {\n        (a.left <= 0).match({\n            true => null_ptr(),\n            false => {\n                a.left = a.left - 1\n                a.heap.addr().acquire(n)\n            }\n        })\n    }\n    resize = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }\n    release = (a: MutPtr<LimitAlloc>, p: RawPtr<u8>) void { a.heap.addr().release(p) }\n})\nfailed = (r: Result<MutSlice<ImportEdge>, IoError>) bool {\n    r.match({ .Err(e) => true, .Ok(xs) => false })\n}\nmain = () i32 {\n    src = \"right = right\\n\"\n    none = LimitAlloc(heap: halloc.gpa(), left: 0)\n    only_slice = LimitAlloc(heap: halloc.gpa(), left: 1)\n    no_alias = LimitAlloc(heap: halloc.gpa(), left: 2)\n    enough = LimitAlloc(heap: halloc.gpa(), left: 3)\n    r0: Result<MutSlice<ImportEdge>, IoError> = none.addr().import_edges(src)\n    r1: Result<MutSlice<ImportEdge>, IoError> = only_slice.addr().import_edges(src)\n    r2: Result<MutSlice<ImportEdge>, IoError> = no_alias.addr().import_edges(src)\n    r3: Result<MutSlice<ImportEdge>, IoError> = enough.addr().import_edges(src)\n    ok3 = r3.match({\n        .Ok(edges) => (edges.len == 1) && edges[0].namespace && eq(edges[0].module, \"u/right\") && eq(edges[0].alias, \"right\"),\n        .Err(e) => false\n    })\n    (r0.failed() && r1.failed() && r2.failed() && ok3).to_exit()\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1294,11 +1294,11 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "sl.zen",
-                    src: "sum3* = (xs: [i32]) i32 { xs[0] + xs[1] + xs[2] }\n",
+                    src: "sum3* = (xs: MutSlice<i32>) i32 { xs[0] + xs[1] + xs[2] }\n",
                 ),
                 ModFile(
                     name: "p.zen",
-                    src: "s = sl\nmain = () i32 {\n  xs: [i32] = [1, 2, 3]\n  xs.sum3()\n}\n",
+                    src: "s = sl\nmain = () i32 {\n  xs: MutSlice<i32> = [1, 2, 3]\n  xs.sum3()\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -1799,7 +1799,7 @@ harness_modules_run* = () i32 {
                 ),
                 ModFile(
                     name: "p.zen",
-                    src: "{ len } = x\nmain = () i32 {\n  ws: [StringView] = [\"a\", \"b\"]\n  ws.len().to_i32()\n}\n",
+                    src: "{ len } = x\nmain = () i32 {\n  ws: MutSlice<StringView> = [\"a\", \"b\"]\n  ws.len().to_i32()\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -2414,7 +2414,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "halloc = std.mem.heap\nmaps = std.collections.map\n{ expect } = std.core.result\nmain = () i32 {\n  alloc = halloc.gpa()\n  a = alloc.addr()\n  m = maps.of(a, \"x\", 1).expect(\"of\")\n  m.put(a, \"y\", 2)\n  m.free(a)\n  0\n}\n",
+                    src: "halloc = std.mem.heap\nmaps = std.collections.map\n{ expect } = std.core.result\nmain = () i32 {\n  alloc = halloc.gpa()\n  a = alloc.addr()\n  m = a.allocator().map_of(\"x\", 1).expect(\"map\")\n  m.put(a, \"y\", 2)\n  m.free(a)\n  0\n}\n",
                 ),
             ],
             entry: "p.zen",
@@ -2425,7 +2425,7 @@ harness_modules_run* = () i32 {
             files: [
                 ModFile(
                     name: "p.zen",
-                    src: "halloc = std.mem.heap\nmaps = std.collections.map\n{ expect } = std.core.result\nmain = () i32 {\n  alloc = halloc.gpa()\n  a = alloc.addr()\n  m ::= maps.of(a, \"x\", 1).expect(\"of\")\n  m = m.put(a, \"y\", 2).expect(\"put\")\n  m.free(a)\n  0\n}\n",
+                    src: "halloc = std.mem.heap\nmaps = std.collections.map\n{ expect } = std.core.result\nmain = () i32 {\n  alloc = halloc.gpa()\n  a = alloc.addr()\n  m ::= a.allocator().map_of(\"x\", 1).expect(\"map\")\n  m = m.put(a, \"y\", 2).expect(\"put\")\n  m.free(a)\n  0\n}\n",
                 ),
             ],
             entry: "p.zen",

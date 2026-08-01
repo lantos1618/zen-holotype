@@ -8,7 +8,7 @@
 { Result, IoError, ok, err } = std.core.result
 { loop_at } = std.core.count
 { move } = std.mem.raw
-buf_in*<T> = (a: AllocatorBackend, n: i64, like: [T]) Result<[T], IoError> {
+buf_in*<T> = (a: AllocatorBackend, n: i64, like: MutSlice<T>) Result<MutSlice<T>, IoError> {
     (n <= 0).match ({
         true  => ok(slice(null_ptr(), 0)),
         false => a.try_acquire(n * sizeof(T)).match ({
@@ -17,7 +17,7 @@ buf_in*<T> = (a: AllocatorBackend, n: i64, like: [T]) Result<[T], IoError> {
         }),
     })
 }
-dup_in*<T> = (a: AllocatorBackend, xs: [T]) Result<[T], IoError> {
+dup_in*<T> = (a: AllocatorBackend, xs: MutSlice<T>) Result<MutSlice<T>, IoError> {
     a.buf_in(xs.len, xs).match ({
         .Ok(buf) => {
             xs.loop_at((i, x) { buf[i] = x })
@@ -26,18 +26,22 @@ dup_in*<T> = (a: AllocatorBackend, xs: [T]) Result<[T], IoError> {
         .Err(e)  => err(e),
     })
 }
-dupx_in*<T> = (a: AllocatorBackend, xs: [T]) Result<[T], IoError> { a.dup_in(xs) }
+dupx_in*<T> = (a: AllocatorBackend, xs: MutSlice<T>) Result<MutSlice<T>, IoError> { a.dup_in(xs) }
 node_in*<T> = (a: AllocatorBackend, v: T) Result<Ptr<T>, IoError> {
     a.dup_in([v]).match ({
         .Ok(buf) => {
-            vals: [T] = buf
+            vals: MutSlice<T> = buf
             p: Ptr<T> = vals[0].addr()
             ok(p)
         },
         .Err(e)  => err(e),
     })
 }
-concat_in*<T> = (a: AllocatorBackend, xs: [T], ys: [T]) Result<[T], IoError> {
+concat_in*<T> = (
+    a: AllocatorBackend,
+    xs: MutSlice<T>,
+    ys: MutSlice<T>,
+) Result<MutSlice<T>, IoError> {
     a.buf_in(xs.len + ys.len, xs).match ({
         .Ok(buf) => {
             xs.loop_at((i, x) { buf[i] = x })
@@ -47,11 +51,15 @@ concat_in*<T> = (a: AllocatorBackend, xs: [T], ys: [T]) Result<[T], IoError> {
         .Err(e)  => err(e),
     })
 }
-alloc_buf*<T> = (a: AllocatorBackend, n: i64, like: [T]) Result<[T], IoError> { a.buf_in(n, like) }
-dup*<T> = (a: AllocatorBackend, xs: [T]) Result<[T], IoError> { a.dup_in(xs) }
-dupx*<T> = (a: AllocatorBackend, xs: [T]) Result<[T], IoError> { a.dupx_in(xs) }
+alloc_buf*<T> = (a: AllocatorBackend, n: i64, like: MutSlice<T>) Result<MutSlice<T>, IoError> {
+    a.buf_in(n, like)
+}
+dup*<T> = (a: AllocatorBackend, xs: MutSlice<T>) Result<MutSlice<T>, IoError> { a.dup_in(xs) }
+dupx*<T> = (a: AllocatorBackend, xs: MutSlice<T>) Result<MutSlice<T>, IoError> { a.dupx_in(xs) }
 node*<T> = (a: AllocatorBackend, v: T) Result<Ptr<T>, IoError> { a.node_in(v) }
-concat*<T> = (a: AllocatorBackend, xs: [T], ys: [T]) Result<[T], IoError> { a.concat_in(xs, ys) }
+concat*<T> = (a: AllocatorBackend, xs: MutSlice<T>, ys: MutSlice<T>) Result<MutSlice<T>, IoError> {
+    a.concat_in(xs, ys)
+}
 // --- views (zero-copy) --------------------------------------------------------------------------
 // `offset` is BYTE arithmetic, so a sub-view advances the ptr by `lo * sizeof(T)`.
 sl_clamp = (v: i64, lo: i64, hi: i64) i64 {
@@ -62,16 +70,16 @@ sl_clamp = (v: i64, lo: i64, hi: i64) i64 {
 }
 // sub(xs, lo, hi) — a zero-copy view of xs[lo..hi). lo/hi are clamped to [0, xs.len] (and hi >= lo),
 // so out-of-range bounds yield a shorter/empty view rather than reading past the buffer.
-sub*<T> = (xs: [T], lo: i64, hi: i64) [T] {
+sub*<T> = (xs: MutSlice<T>, lo: i64, hi: i64) MutSlice<T> {
     l = sl_clamp(lo, 0, xs.len)
     h = sl_clamp(hi, l, xs.len)
     slice(xs.ptr.offset(l * sizeof(T)), h - l)
 }
 // take(xs, n) — the first n elements; drop(xs, n) — all but the first n. Both are views.
-take*<T> = (xs: [T], n: i64) [T] { xs.sub(0, n) }
-drop*<T> = (xs: [T], n: i64) [T] { xs.sub(n, xs.len) }
+take*<T> = (xs: MutSlice<T>, n: i64) MutSlice<T> { xs.sub(0, n) }
+drop*<T> = (xs: MutSlice<T>, n: i64) MutSlice<T> { xs.sub(n, xs.len) }
 // --- reverse (allocates a NEW slice) ------------------------------------------------------------
-reverse_in*<T> = (a: AllocatorBackend, xs: [T]) Result<[T], IoError> {
+reverse_in*<T> = (a: AllocatorBackend, xs: MutSlice<T>) Result<MutSlice<T>, IoError> {
     a.buf_in(xs.len, xs).match ({
         .Ok(out) => {
             xs.loop_at((i, x) { out[xs.len - 1 - i] = x })
@@ -80,12 +88,14 @@ reverse_in*<T> = (a: AllocatorBackend, xs: [T]) Result<[T], IoError> {
         .Err(e)  => err(e),
     })
 }
-reverse<T> = (a: AllocatorBackend, xs: [T]) Result<[T], IoError> { a.reverse_in(xs) }
+reverse<T> = (a: AllocatorBackend, xs: MutSlice<T>) Result<MutSlice<T>, IoError> {
+    a.reverse_in(xs)
+}
 // --- search -------------------------------------------------------------------------------------
 // index_of/contains rely on `==`, which lowers to C `==`: valid for scalar element types
 // (i8..i64, u8..u64, bool, ptr/enum-tag). For struct/aggregate elements use find_by with an
 // explicit predicate instead.
-index_of*<T> = (xs: [T], x: T) i64 {
+index_of*<T> = (xs: MutSlice<T>, x: T) i64 {
     r ::= 0 - 1
     xs.loop_at((i, e) {
         (e == x).then({
@@ -96,10 +106,10 @@ index_of*<T> = (xs: [T], x: T) i64 {
     })
     r
 }
-contains*<T> = (xs: [T], x: T) bool { xs.index_of(x) >= 0 }
+contains*<T> = (xs: MutSlice<T>, x: T) bool { xs.index_of(x) >= 0 }
 // find_by(xs, pred) — index of the first element satisfying pred, or -1. Works for ANY element
 // type (no equality needed).
-find_by*<T> = (xs: [T], pred: (T) bool) i64 {
+find_by*<T> = (xs: MutSlice<T>, pred: (T) bool) i64 {
     r ::= 0 - 1
     xs.loop_at((i, e) {
         pred(e).then({
@@ -113,14 +123,14 @@ find_by*<T> = (xs: [T], pred: (T) bool) i64 {
 // --- in-place shifts (overlapping `move`) -------------------------------------------------------
 // Open a hole at `pos` by shifting xs[pos .. end) up one slot. Source/dest always overlap — `move`,
 // never `copy`. Call with end == live len (slot `end` must be in the cap view).
-shift_up*<T> = (xs: [T], pos: i64, end: i64) void {
+shift_up*<T> = (xs: MutSlice<T>, pos: i64, end: i64) void {
     (end > pos).then({
         e = sizeof(T)
         xs.ptr.offset((pos + 1) * e).move(xs.ptr.offset(pos * e), (end - pos) * e)
     })
 }
 // Close the hole at `i` by shifting xs[i+1 .. len) down one slot.
-shift_down*<T> = (xs: [T], len: i64, i: i64) void {
+shift_down*<T> = (xs: MutSlice<T>, len: i64, i: i64) void {
     (i < len - 1).then({
         e = sizeof(T)
         xs.ptr.offset(i * e).move(xs.ptr.offset((i + 1) * e), (len - 1 - i) * e)

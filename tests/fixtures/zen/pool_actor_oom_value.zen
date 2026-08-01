@@ -61,8 +61,8 @@ Worker.impl(Receiver, {
     }
 })
 tramp = (user: RawPtr<u8>, msg: i64) void {
-    a: [Worker] = user.slice(1)
-    b: [Msg] = msg.offset(0).slice(1)
+    a: MutSlice<Worker> = user.slice(1)
+    b: MutSlice<Msg> = msg.offset(0).slice(1)
     a[0].addr().receive(Context(msg: b[0]))
     pa.free_msg(msg)
 }
@@ -97,7 +97,7 @@ huge_cap_is_value = (acc: RawPtr<u8>) bool {
 // drain every remaining heap chunk of `size` bytes into `ks` from slot `from`; report the new fill
 // level. Stops at the first null (nothing that big is left) or when the slot array fills. Nothing is
 // WRITTEN to the drained blocks, so this costs address space, not resident pages.
-drain_at = (ks: [RawPtr<u8>], from: i64, size: i64) i64 {
+drain_at = (ks: MutSlice<RawPtr<u8>>, from: i64, size: i64) i64 {
     from + (KEEP - from).times_while((i) {
         b = malloc(size)
         is_null(b).match ({
@@ -113,7 +113,7 @@ drain_at = (ks: [RawPtr<u8>], from: i64, size: i64) i64 {
 // thread leaves glibc a per-thread arena holding tens of MiB of already-mapped address space, and
 // growing THAT costs an mprotect, not an mmap — RLIMIT_AS never sees it. Big blocks swallow those
 // arenas in a few hundred calls; only the final fragments need message-sized requests.
-drain_all = (ks: [RawPtr<u8>], msgsz: i64) i64 {
+drain_all = (ks: MutSlice<RawPtr<u8>>, msgsz: i64) i64 {
     drain_at(ks, drain_at(ks, drain_at(ks, 0, 1048576), 4096), msgsz)
 }
 main = () i32 {
@@ -130,7 +130,7 @@ main = () i32 {
     huge_ok = huge_cap_is_value(acc)
     // 3. exhaust the heap, then the box mallocs must come back as `.Err(.Oom)`.
     keep = assert_nonnull(malloc(KEEP * 8))
-    ks: [RawPtr<u8>] = keep.slice(KEEP)
+    ks: MutSlice<RawPtr<u8>> = keep.slice(KEEP)
     rl = assert_nonnull(malloc(16))
     getrlimit(RLIMIT_AS, rl)
     saved = load_i64(rl)

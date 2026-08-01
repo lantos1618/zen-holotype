@@ -13,11 +13,11 @@ LspDoc: {
 }
 LspDocs*: {
     alloc: Allocator,
-    buf: [LspDoc],
+    buf: MutSlice<LspDoc>,
     n: i64,
     deinit = (docs: MutPtr<LspDocs>) void { lspd_deinit(docs) }
 }
-lspd_none = () [LspDoc] { slice(null_ptr(), 0) }
+lspd_none = () MutSlice<LspDoc> { slice(null_ptr(), 0) }
 lspd_init* = (alloc: Allocator) LspDocs {
     LspDocs(
         alloc: alloc,
@@ -25,7 +25,7 @@ lspd_init* = (alloc: Allocator) LspDocs {
         n: 0,
     )
 }
-lspd_alloc = (docs: MutPtr<LspDocs>, n: i64) [LspDoc] {
+lspd_alloc = (docs: MutPtr<LspDocs>, n: i64) MutSlice<LspDoc> {
     slice(assert_nonnull(docs.alloc.acquire(n * sizeof(LspDoc))), n)
 }
 lspd_grow = (docs: MutPtr<LspDocs>) void {
@@ -74,7 +74,10 @@ lspd_scan = (docs: MutPtr<LspDocs>, i: i64, uri: StringView) i64 {
     })
 }
 lspd_find* = (docs: MutPtr<LspDocs>, uri: StringView) i64 { docs.lspd_scan(0, uri) }
+lspd_count* = (docs: MutPtr<LspDocs>) i64 { docs.n }
+lspd_uri_at* = (docs: MutPtr<LspDocs>, i: i64) StringView { docs.buf[i].uri }
 lspd_text_at* = (docs: MutPtr<LspDocs>, i: i64) StringView { docs.buf[i].text }
+lspd_version_at* = (docs: MutPtr<LspDocs>, i: i64) i64 { docs.buf[i].version }
 lspd_tokens_at* = (docs: MutPtr<LspDocs>, i: i64) StringView {
     d = docs.buf[i]
     (d.tok_version == d.version).then({ d.tokens }, { "" })
@@ -123,7 +126,7 @@ lspd_close* = (docs: MutPtr<LspDocs>, uri: StringView) void {
     })
 }
 lspd_deinit = (docs: MutPtr<LspDocs>) void {
-    live: [LspDoc] = slice(docs.buf.ptr, docs.n)
+    live: MutSlice<LspDoc> = slice(docs.buf.ptr, docs.n)
     live.loop_at((i, d) { docs.lspd_free_entry(i) })
     (docs.buf.ptr != null_ptr()).then({
         docs.alloc.release(docs.buf.ptr)

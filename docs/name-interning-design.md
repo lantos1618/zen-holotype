@@ -27,7 +27,7 @@ for *architecture* (symbol tables, incremental compilation, LSP) more than for r
 
 - **`Interner`** — a new `src/compiler/intern.zen`: append-only string table.
   - `Sym` = `i32` newtype (0 = the empty/absent name; IDs are dense, allocation order).
-  - storage: one growable byte buffer (all names, NUL-separated) + `[i32]` offsets column +
+  - storage: one growable byte buffer (all names, NUL-separated) + `MutSlice<i32>` offsets column +
     a `Map<i32>`-style FNV index for text→Sym on first sight. `sym_text(s) StringView` is an
     O(1) offset load, so *display/emit paths keep working on views*.
   - ownership: the interner is allocated once in the driver and passed beside the compiler allocator; it is an

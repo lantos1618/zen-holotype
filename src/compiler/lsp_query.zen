@@ -1,22 +1,5 @@
-// lsp_query.zen — the server's TEXTUAL queries over a buffer: what identifier is under the cursor,
-// where is it declared, what does that declaration say, and what names can be typed here.
-//
-// Everything in this file is a pure function of (text, position) — no parse, no resolve, no disk.
-// That is a deliberate design choice, the same one compiler.lsp_tokens makes: the editor asks these
-// questions on a buffer that is usually MID-EDIT and does not parse, and an answer that requires a
-// successful parse is exactly the answer that disappears the moment you start typing. A textual
-// (ctags-shaped) query degrades to "I don't know" on the broken half of the file while still
-// answering about the intact half.
-//
-// What that buys and what it costs is stated plainly at each entry point: `lspq_hover` and
-// `lspq_items` see TOP-LEVEL declarations of the file they are given plus the names its import
-// records bind. Locals, fields, and declarations in other files are outside what a same-file
-// textual scan can honestly claim — the callers advertise exactly this and no more.
-//
-// compiler.lsp owns the protocol (framing, JSON, replies); this file owns the answers, returned as
-// plain values so escaping lives in one place. The positional/definition scanners the go-to-
-// definition handler already used live here too, so hover and completion reuse ONE identifier
-// scanner rather than growing a second one that drifts.
+// Pure textual queries for incomplete editor buffers. They intentionally see only same-file
+// top-level declarations and import bindings, and return no answer when the local scan is ambiguous.
 { Allocator } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
@@ -25,23 +8,61 @@
 { String } = std.text.string
 { gstr_string, gstr_append, gstr_push, gstr_finish, acquire_or_die } = compiler.genc
 { cstr_range } = compiler.drvutil
-// ── position / identifier scanning (shared by definition, hover and completion) ───────────────────
 lsp_is_ident_byte* = (b: u8) bool {
     b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
-// byte offset of (line, char): walk `line` newlines from 0, then advance `char` bytes (ASCII columns;
-// UTF-16 wide columns are a refinement).
-lsp_byte_of_pos* = (v: Slice<u8>, line: i64, ch: i64, i: i64, ln: i64) i64 {
-    (ln >= line).match ({
-        true  => (i + ch < v.len).then({ i + ch }, { v.len }),
-        false => (i >= v.len).match ({
-            true  => v.len,
-            false => (v[i] == '\n').match ({
-                true  => v.lsp_byte_of_pos(line, ch, i + 1, ln + 1),
-                false => v.lsp_byte_of_pos(line, ch, i + 1, ln),
-            }),
+// byte offset of a UTF-16 LSP position. Clamp at this line's end; never walk into the next line.
+lsp_utf8_bytes = (b: u8) i64 {
+    bi = b.to_i64()
+    (bi < 128).match ({
+        true  => 1,
+        false => (bi < 224).match ({
+            true  => 2,
+            false => (bi < 240).then({ 3 }, { 4 }),
         }),
     })
+}
+lsp_utf16_units = (b: u8) i64 { (b.to_i64() >= 240).then({ 2 }, { 1 }) }
+lsp_seek_utf16 = (v: Slice<u8>, i: i64, ch: i64) i64 {
+    pos ::= i
+    units ::= 0
+    done ::= false
+    i.step_while((p) { done == false && p < v.len }, (p) {
+        b = v[p]
+        (b == '\n' || b == '\r' || units >= ch).match ({
+            true  => {
+                done = true
+                p
+            },
+            false => {
+                w = b.lsp_utf16_units()
+                (units + w > ch).match ({
+                    true  => {
+                        done = true
+                        p
+                    },
+                    false => {
+                        units = units + w
+                        pos = p + b.lsp_utf8_bytes()
+                        pos
+                    },
+                })
+            },
+        })
+    })
+    pos
+}
+lsp_byte_of_pos* = (v: Slice<u8>, line: i64, ch: i64, i: i64, ln: i64) i64 {
+    pos ::= i
+    current ::= ln
+    i.step_while((p) { p < v.len && current < line }, (p) {
+        (v[p] == '\n').then({
+            current = current + 1
+        })
+        pos = p + 1
+        pos
+    })
+    (current < line).then({ v.len }, { v.lsp_seek_utf16(pos, ch) })
 }
 // start byte of the identifier surrounding `off` (scan left over identifier bytes).
 lsp_ident_start* = (v: Slice<u8>, off: i64) i64 {
@@ -206,15 +227,17 @@ lspq_push_doc = (sb: String, mp: Allocator, v: Slice<u8>, s: i64, e: i64) String
     })
     o
 }
-lspq_close_brace = (v: [u8], i: i64) i64 { i.advance_while((p) { p < v.len && v[p] != '}' }) }
-lspq_word_at = (v: [u8], i: i64, name: [u8]) bool {
+lspq_close_brace = (v: MutSlice<u8>, i: i64) i64 {
+    i.advance_while((p) { p < v.len && v[p] != '}' })
+}
+lspq_word_at = (v: Slice<u8>, i: i64, name: Slice<u8>) bool {
     (i + name.len > v.len || i > 0 && v[i - 1].lsp_is_ident_byte()).then({
         return false
     })
     v.lsp_bytes_eq(i, name, 0)
         && (i + name.len >= v.len || v[i + name.len].lsp_is_ident_byte() == false)
 }
-lspq_names_has = (v: [u8], s: i64, e: i64, name: [u8]) bool {
+lspq_names_has = (v: Slice<u8>, s: i64, e: i64, name: Slice<u8>) bool {
     hit ::= false
     s.step_while((i) { i < e && hit == false }, (i) {
         hit = v.lspq_word_at(i, name)
@@ -223,7 +246,7 @@ lspq_names_has = (v: [u8], s: i64, e: i64, name: [u8]) bool {
     hit
 }
 // the `= std.text.str` tail of an import record whose `}` sits at `c`.
-lspq_module_after = (mp: Allocator, v: [u8], c: i64) StringView {
+lspq_module_after = (mp: Allocator, v: MutSlice<u8>, c: i64) StringView {
     p = v.lsp_skip_sp(c + 1)
     (p >= v.len || v[p] != '=').then({
         return ""
@@ -307,14 +330,14 @@ LspqItem*: {
     detail: StringView,
     kind: i64,
 }
-lspq_no_items = () [LspqItem] { slice(null_ptr(), 0) }
-lspq_alloc = (mp: Allocator, n: i64) [LspqItem] {
+lspq_no_items = () MutSlice<LspqItem> { slice(null_ptr(), 0) }
+lspq_alloc = (mp: Allocator, n: i64) MutSlice<LspqItem> {
     slice(mp.acquire_or_die(n * sizeof(LspqItem)), n)
 }
 // A sink that COUNTS when it has no room and FILLS when it does — so one collector body runs twice
 // (measure, then write) instead of a growable array or a guessed ceiling.
 LspqSink: {
-    items: [LspqItem],
+    items: MutSlice<LspqItem>,
     n: i64,
 }
 lspq_put = (sk: LspqSink, label: StringView, detail: StringView, kind: i64) LspqSink {
@@ -359,7 +382,7 @@ lspq_add_words = (
     acc
 }
 // `Foo: {` is a type; `f = (` / `f<T> = (` / `f(` is a function; anything else bound with `=` is a value.
-lspq_decl_kind = (v: [u8], p: i64) i64 {
+lspq_decl_kind = (v: MutSlice<u8>, p: i64) i64 {
     b = v[p]
     (b == ':').then({
         return LSPQ_STRUCT()
@@ -370,7 +393,7 @@ lspq_decl_kind = (v: [u8], p: i64) i64 {
     q = v.lsp_skip_sp(p + 1)
     (q < v.len && (v[q] == '(' || v[q] == '<')).then({ LSPQ_FUNCTION() }, { LSPQ_VARIABLE() })
 }
-lspq_add_decl = (mp: Allocator, v: [u8], i: i64, sk: LspqSink) LspqSink {
+lspq_add_decl = (mp: Allocator, v: MutSlice<u8>, i: i64, sk: LspqSink) LspqSink {
     e = v.lsp_ident_end(i)
     p = v.lspq_head_sigil(e)
     (p < 0).then({
@@ -383,6 +406,12 @@ LSPQ_KEYWORDS = () StringView {
 }
 LSPQ_TYPES = () StringView {
     "i8 i16 i32 i64 u8 u16 u32 u64 f32 f64 bool void StringView StringLiteral StringCstr"
+}
+lspq_reserved_name* = (name: StringView) bool {
+    nv: Slice<u8> = name.view()
+    kw: Slice<u8> = LSPQ_KEYWORDS().view()
+    ty: Slice<u8> = LSPQ_TYPES().view()
+    kw.lspq_names_has(0, kw.len, nv) || ty.lspq_names_has(0, ty.len, nv) || name == "_"
 }
 lspq_add_fixed = (
     mp: Allocator,
@@ -423,7 +452,7 @@ lspq_collect = (mp: Allocator, v: Slice<u8>, sk: LspqSink) LspqSink {
 // names its import records bind (with the origin module as detail), and the language's keywords and
 // builtin type names. Locals, fields and members are NOT here — which is why the server advertises
 // no trigger characters: `.` would produce nothing this scan could honestly fill in.
-lspq_items* = (mp: Allocator, text: StringView) [LspqItem] {
+lspq_items* = (mp: Allocator, text: StringView) MutSlice<LspqItem> {
     v: Slice<u8> = text.view()
     n = mp.lspq_collect(v, LspqSink(
         items: lspq_no_items(),

@@ -1,5 +1,3 @@
-// compiler.backend.js.js — a JavaScript backend, sibling to c_emit. Pipeline: genc -> mono -> js.
-//
 // It walks the SAME post-monomorphization `[Decl]` AST the C backend consumes and emits JavaScript
 // (Node/browser) instead of C. Where c_emit maps Zen onto C's type system + memory, js maps
 // it onto JS's dynamic values plus a small linear-memory floor (bootstrap/zenrt.js, the JS analog of
@@ -11,7 +9,7 @@
 //     `offset`, `store`, `cstr`, `slice`, `write` all operate uniformly over MEM — exactly as C does
 //     over its flat address space. (A struct POINTER `MutPtr<T>` is just the JS object; JS objects are
 //     references, so `addr`/`load`/`->` are the identity — see js_call/js_arrow. Aliasing a *scalar*
-//     through MutPtr<i32> is the one thing this can't express; that needs boxed refs — DEFERRED.)
+//     through MutPtr<i32> is unsupported until scalar references are boxed.)
 //   • i32 / narrower → JS `number`; a fixed-width op wraps at its boundary (see js_expr int_width).
 //   • i64 / u64  → a (norm) BigInt: kept as a `number` while it fits +/- 2^53 exactly, promoted to BigInt
 //     past that. 64-bit operators run in BigInt (exact — full i64/u64 shifts, multiply, unsigned `>>>`).
@@ -28,10 +26,6 @@
 // The floor (`__zr`) provides the intrinsics + libc leaves (write/strlen/malloc/memcpy/…). Traits,
 // impls, templates, generic decls, imports and DRaw (verbatim C) emit NOTHING — same as genc skips them.
 //
-// Emission is split across flat siblings: value/name/escape leaves in compiler.backend.js.js_lit, expression /
-// match / statement + the fixed-width/typed-var machinery in compiler.backend.js.js_expr, std.web.dom lowering
-// in compiler.backend.js.js_dom, and function/global decl emission in compiler.backend.js.js_decl. This file is the
-// entry/driver: whole-module assembly + the `main` detection.
 { String } = std.text.string
 { Decl } = compiler.ast.ast_types
 { gstr_string, gstr_append } = compiler.genc
@@ -43,7 +37,7 @@
 { js_copy_defs } = compiler.backend.js.js_copy
 { loop_at } = std.core.count
 // does the module define a `main`? then the emitted JS invokes it.
-js_has_main = (decls: [Decl]) bool {
+js_has_main = (decls: MutSlice<Decl>) bool {
     decls.slice_any((d) {
         d.match ({
             .DFunc(f) => f.name == "main",
@@ -53,7 +47,7 @@ js_has_main = (decls: [Decl]) bool {
 }
 // whole translation unit -> JS. Globals first (const-init, mirrors genc), then functions (hoisted in
 // JS, so order is free), then the `zen_main()` invocation. The `__zr` floor is prepended by the driver.
-genJsModuleIn* = (a: Allocator, raw: [Decl]) String {
+genJsModuleIn* = (a: Allocator, raw: MutSlice<Decl>) String {
     decls = a.monomorphize(raw)
     js_size_set(decls)    // `sizeof(T)` resolves to a literal against THIS decl list
     s ::= a.gstr_string(4096).gstr_append(a, "\"use strict\";\n").js_copy_defs(a)

@@ -43,9 +43,9 @@ Receiver*<M>: {
 // shared ring abstraction, std.concurrent.ring) held behind the RawPtr state slot.
 ActorSystem<M>: {
     state: RawPtr<u8>,
-    state_slot = (sys: ActorSystem<M>) [Ring<M>] { sys.state.slice(1) }
+    state_slot = (sys: ActorSystem<M>) MutSlice<Ring<M>> { sys.state.slice(1) }
     ref        = (sys: ActorSystem<M>) CellRef<M> { CellRef<M>(state: sys.state) }
-    messages = (sys: ActorSystem<M>) [M] {
+    messages = (sys: ActorSystem<M>) MutSlice<M> {
         state = sys.state_slot()
         state[0].slots()
     }
@@ -84,7 +84,7 @@ ActorSystem<M>: {
 // Named CellRef, NOT ActorRef — std.concurrent.pool owns `ActorRef` (the sendable pool reply address).
 CellRef*<M>: {
     state: RawPtr<u8>,
-    ref_state = (ref: CellRef<M>) [Ring<M>] { ref.state.slice(1) }
+    ref_state = (ref: CellRef<M>) MutSlice<Ring<M>> { ref.state.slice(1) }
     send = (ref: CellRef<M>, message: M) bool {
         state ::= ref.ref_state()
         cur = state[0]
@@ -100,9 +100,9 @@ CellRef*<M>: {
 ReplyRef*<T>: {
     value: RawPtr<u8>,
     ready: RawPtr<u8>,
-    values = (reply: ReplyRef<T>) [T] { reply.value.slice(1) }
+    values = (reply: ReplyRef<T>) MutSlice<T> { reply.value.slice(1) }
     send = (reply: ReplyRef<T>, value: T) bool {
-        vals :: [T] = reply.value.slice(1)
+        vals :: MutSlice<T> = reply.value.slice(1)
         vals[0] = value
         reply.ready.store_i64(1)
         true
@@ -160,7 +160,7 @@ make_system<M> = (alloc: AllocatorBackend, cap: i64) Result<ActorSystem<M>, IoEr
         .Ok(state) => {
             mailbox: Result<Ring<M>, IoError> = alloc.ring(cap)
             mailbox.match ({
-                .Ok(r) => {
+                .Ok(r)  => {
                     slot ::= state.slice(1)
                     slot[0] = r
                     ok: Result<ActorSystem<M>, IoError> = .Ok(ActorSystem<M>(state: state))
@@ -288,11 +288,11 @@ ActorHandle*<M, ActorT>: {
     inner_cell: ActorCell<M>,
     state: RawPtr<u8>,
     actor = (handle: ActorHandle<M, ActorT>) MutPtr<ActorT> {
-        slot: [ActorT] = handle.state.slice(1)
+        slot: MutSlice<ActorT> = handle.state.slice(1)
         slot[0].addr()
     }
     send = (handle: ActorHandle<M, ActorT>, message: M) bool {
-        state :: [Ring<M>] = handle.inner_cell.inner.sys.state.slice(1)
+        state :: MutSlice<Ring<M>> = handle.inner_cell.inner.sys.state.slice(1)
         cur = state[0]
         cur.is_full().match ({
             true  => false,
@@ -303,10 +303,10 @@ ActorHandle*<M, ActorT>: {
         })
     }
     run = (handle: ActorHandle<M, ActorT>) void {
-        state :: [Ring<M>] = handle.inner_cell.inner.sys.state.slice(1)
-        actor_slot: [ActorT] = handle.state.slice(1)
+        state :: MutSlice<Ring<M>> = handle.inner_cell.inner.sys.state.slice(1)
+        actor_slot: MutSlice<ActorT> = handle.state.slice(1)
         actor = actor_slot[0].addr()
-        messages: [M] = state[0].slots()
+        messages: MutSlice<M> = state[0].slots()
         messages.loop((h, i, slot) {
             cur = state[0]
             cur.nonempty().match ({
@@ -386,7 +386,7 @@ ActorHandle*<M, ActorT>: {
         })
     }
     free = (handle: ActorHandle<M, ActorT>, alloc: AllocatorBackend) void {
-        state: [Ring<M>] = handle.inner_cell.inner.sys.state.slice(1)
+        state: MutSlice<Ring<M>> = handle.inner_cell.inner.sys.state.slice(1)
         state[0].free(alloc)
         alloc.release(handle.inner_cell.inner.sys.state)
         alloc.release(handle.state)
@@ -401,7 +401,7 @@ spawn_handle*<M, ActorT> = (
 ) Result<ActorHandle<M, ActorT>, IoError> {
     alloc.try_acquire(sizeof(ActorT)).match ({
         .Ok(state) => {
-            slot :: [ActorT] = state.slice(1)
+            slot :: MutSlice<ActorT> = state.slice(1)
             slot[0] = actor
             cell: Result<ActorCell<M>, IoError> = alloc.cell(cap)
             cell.match ({

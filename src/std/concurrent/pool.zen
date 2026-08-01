@@ -178,18 +178,6 @@ actor_mb = (a: MutPtr<PoolActor>) Ring<i64> {
         cap: a.cap,
     )
 }
-// GIVE BACK a `sched` false→true transition that could not be completed — the sender won the claim but
-// the run queue was full and could not grow, so the actor was never enqueued. Clearing the flag under the
-// mailbox lock RESTORES the central invariant (`sched == 1` ⇒ the actor is queued or running): leaving it
-// set would strand the actor forever, since every later sender would see `true` and decline to push it.
-// The message itself STAYS in the mailbox — it is not lost, only not runnable until a later send wins the
-// transition again and finds room. That is the honest degradation of a run queue that cannot grow, and it
-// is why `pool_send`'s `.Err(.Oom)` means "not scheduled", not "not enqueued".
-unschedule = (a: MutPtr<PoolActor>) void {
-    a.mbmu.lock()
-    a.sched = 0
-    a.mbmu.unlock()
-}
 // reset an actor's per-behavior SCRATCH arena (bump pointer -> 0), null-guarded for actors that never
 // opted into scratch (the raw pool path). Called at the behavior boundary on the worker's NORMAL stack —
 // so rewinding/reusing the backing here is safe even after a CAUGHT panic (the signal handler already
@@ -417,11 +405,12 @@ Pool*: {
             }),
             false => false,
         })
-        a.mbmu.unlock()
         // Put the actor on the run queue — only the false→true winner does this. A FULL queue that cannot
         // GROW is the one allocation failure on this path, and it is a VALUE (`.Err(.Oom)`): panicking here
         // would siglongjmp into the worker's per-behavior catch with `p.mu` still locked and deadlock the
-        // whole pool (this fn is reachable from inside a behavior via ActorRef.ref_send).
+        // whole pool (this fn is reachable from inside a behavior via ActorRef.ref_send). Keep mbmu held
+        // until this first scheduling attempt commits: on failure the just-appended mailbox slot is rolled
+        // back before a typed sender reclaims its box.
         queued = won.match ({
             true  => {
                 pool_actor_ref(actor)    // the run queue now OWNS a reference (the "scheduled" ref):
@@ -433,12 +422,19 @@ Pool*: {
                 })
                 p.mu.unlock()
                 (ok == false).then({
-                    a.unschedule()
+                    a.tail = a.tail - 1
+                    a.sched = 0
+                })
+                a.mbmu.unlock()
+                (ok == false).then({
                     pool_actor_unref(actor)
-                })    // could not queue it: hand back the "scheduled" ref and the claim we won
+                })    // could not queue it: remove the message and hand back the scheduled ref
                 ok
             },
-            false => true,
+            false => {
+                a.mbmu.unlock()
+                true
+            },
         })    // not our transition: another sender already owns the scheduling
         sent.match ({
             true  => queued.then({ .Ok(SENT_ONE) }, { .Err(ActorError.Oom) }),
@@ -691,7 +687,7 @@ new_pool = (nworkers: i64, rqcap: i64) RawPtr<u8> {
         false => heap_acquire(null_ptr(), nworkers * 16).or_die("pool: worker arg cell allocation failed"),
     })
     zero_stats(wstats, 0, nworkers)
-    pv :: [Pool] = blk.slice(1)
+    pv :: MutSlice<Pool> = blk.slice(1)
     pv[0] = Pool(
         rqbuf: rqbuf,
         rqhead: 0,

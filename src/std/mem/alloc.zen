@@ -31,7 +31,7 @@ allocator_of* = (state: RawPtr<u8>, vtable: RawPtr<u8>) Allocator {
     )
 }
 allocator_vtable = (a: Allocator) Ptr<AllocatorVTable> {
-    slot: [AllocatorVTable] = a.vtable.slice(1)
+    slot: MutSlice<AllocatorVTable> = a.vtable.slice(1)
     slot[0].addr()
 }
 allocator_dispatch_acquire* = (a: Allocator, n: i64) RawPtr<u8> {
@@ -235,12 +235,12 @@ request_arena* = (backing: Allocator) RequestArena {
     )
 }
 request_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> {
-    slot: [RequestArena] = state.slice(1)
+    slot: MutSlice<RequestArena> = state.slice(1)
     r = slot[0].addr()
     ra_alloc(r, n)
 }
 request_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> {
-    slot: [RequestArena] = state.slice(1)
+    slot: MutSlice<RequestArena> = state.slice(1)
     r = slot[0].addr()
     ra_resize(r, p, n)
 }
@@ -269,9 +269,9 @@ Allocator.impl(AllocatorBackend, {
 })
 // Release only an owning slice's base, never a window into another allocation.
 // Keeping the slice as the argument lets ownership validation invalidate the local.
-release_slice*<T, A: AllocatorBackend> = (a: MutPtr<A>, xs: [T]) void { a.release(xs.ptr) }
+release_slice*<T, A: AllocatorBackend> = (a: MutPtr<A>, xs: MutSlice<T>) void { a.release(xs.ptr) }
 // Shared rc/arc/own layout: [count:i64 | value:T].
-val_slot*<T> = (base: RawPtr<u8>) [T] { slice(base.offset(8), 1) }
+val_slot*<T> = (base: RawPtr<u8>) MutSlice<T> { slice(base.offset(8), 1) }
 // Returns the block base; callers apply their own pointer wrapper.
 rc_block_new_in*<T, A: AllocatorBackend> = (a: MutPtr<A>, x: T) Result<RawPtr<u8>, IoError> {
     v = x

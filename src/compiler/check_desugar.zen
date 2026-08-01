@@ -1,23 +1,21 @@
-// compiler.check_desugar — pre-resolve desugaring: trait-default materialization, MethodCall→Call
-// UFCS lowering, and enum-variant default payload inference. Extracted from compiler.check (pure move).
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, TraitDefData, ArmData, MatchData, VariantDef,
   MethodCallData, FieldInit, GlobalData } = compiler.ast.ast_types
-{ cbuf, bin_at, cond_oa, call_at, mfield, ematch, ematchp, arm_at, eindex, eloop, slett_atm,
-  sassign_at, sret, sexpr, sif, swhile, sidxset_at, finit, subst_ty_in, dfunc, mkenumg,
-  is_expr_null, tnamed, tvoid, acquire_or_die } = compiler.genc
+{ cbuf, bin_at, cond_oa, call_at, mfield, ematch, ematchp, arm_at, arm_spans, eindex, eloop,
+  eloop_at, slett_atm, sassign_at, sret, sexpr, sif, swhile, sidxset_at, finit, finit_at,
+  subst_ty_in, dfunc, mkenumg, mkenumg_at, is_expr_null, param_at, tnamed, tvoid, acquire_or_die } = compiler.genc
 { impl_cname_in } = compiler.mangle
 { Allocator } = std.mem.alloc
 { DeclIndex, cebuf, cenode, pbuf, vnil } = compiler.check
 { map_slice, param_names_has, slice_any } = compiler.astops
 { light_ty } = compiler.check_infer
 { loop_at } = std.core.count
-tybuf1 = (a: Allocator) [Ty] { slice(a.acquire_or_die(sizeof(Ty)), 1) }
-self_param = (a: Allocator) [Param] {
+tybuf1 = (a: Allocator) MutSlice<Ty> { slice(a.acquire_or_die(sizeof(Ty)), 1) }
+self_param = (a: Allocator) MutSlice<Param> {
     buf ::= a.pbuf(1)
     buf[0] = param("Self", tvoid())
     buf
 }
-self_arg = (a: Allocator, tyname: StringView) [Ty] {
+self_arg = (a: Allocator, tyname: StringView) MutSlice<Ty> {
     buf ::= a.tybuf1()
     buf[0] = tnamed(tyname)
     buf
@@ -27,7 +25,7 @@ default_for_type = (a: Allocator, td: TraitDefData, tyname: StringView) Func {
     sp = a.self_param()
     ag = a.self_arg(tyname)
     ps ::= a.pbuf(td.fn.params.len)
-    td.fn.params.loop_at((i, p) { ps[i] = param(p.name, a.subst_ty_in(sp, ag, p.ty)) })
+    td.fn.params.loop_at((i, p) { ps[i] = param_at(p.name, a.subst_ty_in(sp, ag, p.ty), p.pos) })
     Func(
         name: a.impl_cname_in(td.trname, tyname, td.fn.name),
         params: ps,
@@ -37,7 +35,7 @@ default_for_type = (a: Allocator, td: TraitDefData, tyname: StringView) Func {
     )
 }
 // Does this impl already provide method m?
-def_provided = (decls: [Decl], tyname: StringView, trname: StringView, m: StringView) bool {
+def_provided = (decls: MutSlice<Decl>, tyname: StringView, trname: StringView, m: StringView) bool {
     decls.slice_any((d) {
         d.match ({
             .DImpl(im) => (im.ty == tyname && im.trname == trname).match ({
@@ -48,7 +46,7 @@ def_provided = (decls: [Decl], tyname: StringView, trname: StringView, m: String
         })
     })
 }
-default_expansion_count = (decls: [Decl]) i64 {
+default_expansion_count = (decls: MutSlice<Decl>) i64 {
     n ::= 0
     decls.loop_at((i, d) {
         d.match ({
@@ -66,7 +64,13 @@ default_expansion_count = (decls: [Decl]) i64 {
     })
     n
 }
-emit_defaults_for = (a: Allocator, decls: [Decl], td: TraitDefData, buf: [Decl], j: i64) i64 {
+emit_defaults_for = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    td: TraitDefData,
+    buf: MutSlice<Decl>,
+    j: i64,
+) i64 {
     k ::= j
     decls.loop_at((i, d) {
         d.match ({
@@ -80,7 +84,7 @@ emit_defaults_for = (a: Allocator, decls: [Decl], td: TraitDefData, buf: [Decl],
     })
     k
 }
-expand_defaults* = (a: Allocator, decls: [Decl]) [Decl] {
+expand_defaults* = (a: Allocator, decls: MutSlice<Decl>) MutSlice<Decl> {
     extra = decls.default_expansion_count()
     (extra == 0).match ({
         true  => decls,
@@ -113,7 +117,7 @@ expand_defaults* = (a: Allocator, decls: [Decl]) [Decl] {
 // reconstructing it (rather than storing through that slot) keeps the rewriter sound under pointer-kind
 // checking — a read-only `Ptr` is never silently treated as a writable `MutPtr` (the R1 rule). Mutable
 // SLICE storage (a [Stmt]/[Expr]/[FieldInit]/[ArmData] element, reached via `.addr()`) is updated in place.
-desugar_method_calls* = (a: Allocator, decls: [Decl]) [Decl] {
+desugar_method_calls* = (a: Allocator, decls: MutSlice<Decl>) MutSlice<Decl> {
     decls.loop_at((i, d) { store(decls[i].addr(), a.dmc_decl(d)) })
     decls
 }
@@ -138,7 +142,7 @@ dmc_decl = (a: Allocator, d: Decl) Decl {
         _                  => d,
     })
 }
-dmc_body = (a: Allocator, body: [Stmt]) void {
+dmc_body = (a: Allocator, body: MutSlice<Stmt>) void {
     body.loop_at((i, st) { a.dmc_stmt(body[i].addr()) })
 }
 // `sp` is a MUTABLE slot (a [Stmt] slice element), so the rebuilt statement is stored back through it.
@@ -161,15 +165,17 @@ dmc_stmt = (a: Allocator, sp: MutPtr<Stmt>) void {
     })
 }
 // `args[i]` is a mutable [Expr] slot, so each lowered element is stored back in place.
-dmc_args = (a: Allocator, args: [Expr]) void {
+dmc_args = (a: Allocator, args: MutSlice<Expr>) void {
     args.loop_at((i, ar) { store(args[i].addr(), load(a.dmc_expr_val(args[i].addr()))) })
 }
-dmc_inits = (a: Allocator, inits: [FieldInit]) void {
-    inits.loop_at((i, fi) { store(inits[i].addr(), finit(fi.name, a.dmc_expr_val(fi.value))) })
+dmc_inits = (a: Allocator, inits: MutSlice<FieldInit>) void {
+    inits.loop_at((i, fi) {
+        store(inits[i].addr(), finit_at(fi.name, a.dmc_expr_val(fi.value), fi.pos))
+    })
 }
-dmc_arms = (a: Allocator, arms: [ArmData]) void {
+dmc_arms = (a: Allocator, arms: MutSlice<ArmData>) void {
     arms.loop_at((i, ar) {
-        store(arms[i].addr(), arm_at(ar.variant, ar.bind, a.dmc_expr_val(ar.body), ar.pos))
+        store(arms[i].addr(), arm_spans(ar.variant, ar.bind, a.dmc_expr_val(ar.body), ar.pos, ar.variant_pos, ar.bind_pos))
     })
 }
 // `recv.method(args)` -> `Call(fn: method, args: [recv, ...args], pos, raw: false)` — exactly what the
@@ -199,7 +205,7 @@ dmc_expr_val = (a: Allocator, ep: Ptr<Expr>) Ptr<Expr> {
         .MethodCall(mc) => a.cenode(a.dmc_lower(mc)),
         .Cond(d)        => a.cenode(cond_oa(a.dmc_expr_val(d.c), a.dmc_expr_val(d.t), a.dmc_expr_val(d.e), d.oa)),
         .Member(m)      => a.cenode(mfield(a.dmc_expr_val(m.obj), m.field, m.pos, m.ptr)),
-        .MakeEnum(m)    => a.cenode(mkenumg(m.ty, m.mty, m.targs, m.variant, a.dmc_expr_val(m.payload))),
+        .MakeEnum(m)    => a.cenode(mkenumg_at(m.ty, m.mty, m.targs, m.variant, a.dmc_expr_val(m.payload), m.ty_pos, m.variant_pos)),
         .MakeStruct(m)  => {
             a.dmc_inits(m.inits)
             ep
@@ -215,7 +221,7 @@ dmc_expr_val = (a: Allocator, ep: Ptr<Expr>) Ptr<Expr> {
         .Index(ix)      => a.cenode(eindex(a.dmc_expr_val(ix.seq), a.dmc_expr_val(ix.idx), ix.elem)),
         .Loop(l)        => {
             a.dmc_body(l.body)
-            a.cenode(eloop(a.dmc_expr_val(l.seq), l.idx, l.elem, l.elemTy, l.body, l.h))
+            a.cenode(eloop_at(a.dmc_expr_val(l.seq), l.idx, l.elem, l.elemTy, l.body, l.h, l.h_pos, l.idx_pos, l.elem_pos))
         },
         .Lambda(lm)     => {
             a.dmc_body(lm.body)
@@ -231,24 +237,25 @@ dmc_expr_val = (a: Allocator, ep: Ptr<Expr>) Ptr<Expr> {
 // Enum-variant defaults (`Name = expr`) are parsed with a void payload + the default expr; before any
 // other pass, infer each default's type into the payload so codegen lays out the union slot and match
 // arms bind correctly.
-default_payload = (a: Allocator, decls: [Decl], idx: DeclIndex, v: VariantDef) Ty {
+default_payload = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, v: VariantDef) Ty {
     v.dflt.is_expr_null().then({ v.payload }, { v.dflt.light_ty(a, a.vnil(), decls, idx) })
 }
 fill_variant_defaults = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    vs: [VariantDef],
-) [VariantDef] {
+    vs: MutSlice<VariantDef>,
+) MutSlice<VariantDef> {
     map_slice(a, vs, (v) {
         VariantDef(
             name: v.name,
             payload: a.default_payload(decls, idx, v),
             dflt: v.dflt,
+            pos: v.pos,
         )
     })
 }
-fill_enum_defaults* = (a: Allocator, decls: [Decl], idx: DeclIndex) [Decl] {
+fill_enum_defaults* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex) MutSlice<Decl> {
     map_slice(a, decls, (d) {
         d.match ({
             .DEnum(ed) => .DEnum(EnumDecl(

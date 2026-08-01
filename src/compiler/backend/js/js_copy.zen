@@ -1,14 +1,11 @@
-// compiler.backend.js.js_copy — STRUCT VALUE SEMANTICS on the js target.
-//
 // A Zen struct is a VALUE: C copies it at every binding (`S b = a;` copies the bytes), so a write
-// through `b` cannot be seen through `a`. A JS object is a REFERENCE, so the js backend's `let b = a`
-// aliased and `b.v = 9` changed `a.v` — both backends exited 0 and printed different numbers.
+// through `b` cannot be seen through `a`. A JS object is a reference, so aggregate sinks must copy.
 //
 // The copy is emitted at the sinks C copies at (js_expr/js_decl call in here): a `let`, an assignment,
 // PARAMETER entry, a struct-literal field, an enum payload, a match-arm payload bind, a `return`, a
 // slice-literal item, and an indexed element store.
 //
-// DEPTH — what is copied and what is deliberately SHARED, field by field, from the static type:
+// What is copied and what is deliberately shared, field by field, from the static type:
 //   • a nested struct/enum field  -> copied (C copies the whole aggregate, so `b.inner.v = 9` is
 //     invisible through `a`). A shallow `{...a}` would alias it; this walks the declared field types.
 //   • a `[T]` slice field         -> its 16-byte {ptr,len} HEADER is copied and the BUFFER is shared,
@@ -60,12 +57,12 @@ jsc_name_mode = (n: StringView, depth: i32) i32 {
     })
     r
 }
-jsc_fields_mode = (fs: [Field], depth: i32) i32 {
+jsc_fields_mode = (fs: MutSlice<Field>, depth: i32) i32 {
     m ::= jsc_spread()
     fs.loop_at((i, f) { m = (jsc_mode(f.ty, depth + 1) == jsc_share()).then({ m }, { jsc_walk() }) })
     m
 }
-jsc_variants_mode = (vs: [VariantDef], depth: i32) i32 {
+jsc_variants_mode = (vs: MutSlice<VariantDef>, depth: i32) i32 {
     m ::= jsc_spread()
     vs.loop_at((i, v) {
         m = (jsc_mode(v.payload, depth + 1) == jsc_share()).then({ m }, { jsc_walk() })
@@ -176,12 +173,12 @@ jsc_member_ty* = (t: Ty, field: StringView) Ty {
     })
     r
 }
-jsc_field_ty = (fs: [Field], name: StringView) Ty {
+jsc_field_ty = (fs: MutSlice<Field>, name: StringView) Ty {
     r ::= tvoid()
     fs.loop_at((i, f) { r = (f.name == name).then({ f.ty }, { r }) })
     r
 }
-jsc_payload_ty = (vs: [VariantDef], name: StringView) Ty {
+jsc_payload_ty = (vs: MutSlice<VariantDef>, name: StringView) Ty {
     r ::= tvoid()
     vs.loop_at((i, v) { r = (v.name == name).then({ v.payload }, { r }) })
     r

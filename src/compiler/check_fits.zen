@@ -1,15 +1,8 @@
-// compiler.check_fits — the type lattice as TRAITS: assignability (fits), ty_eq, and the
-// mode/pointer-write checks. Extracted from compiler.check; methodified per the PtrKind/EnvKinds
-// precedent — TyFits is impl'd on Ty and EnvFits on Env (both out-of-module impls), so every
-// consumer dispatches `got.fits(want)` / `env.write_thru_readonly(obj)` by UFCS through the impl
-// index and imports NOTHING from this module (compiler.check keeps one `{ TyFits }` trait import
-// as the project-mode closure pull, mirroring the PtrKind import below).
 { Expr, Ty } = compiler.ast.ast_types
 { k_ptr, k_mut_ptr, k_raw_ptr } = compiler.genc
 { Env } = compiler.check
 { loop_at } = std.core.count
 { PtrKind } = compiler.passes.ptrkind    // trait import: enables UFCS `t.ptr_kind_of()` &c. via the impl index
-// ── the Ty lattice, as a trait ───────────────────────────────────────────────
 TyFits*: {
     ty_rank: (Self) i32,
     is_f64_ty: (Self) bool,
@@ -109,7 +102,7 @@ Ty.impl(TyFits, {
     slice_mode_fits = (g: Ty, w: Ty) bool {
         // The same direction one constructor out: a writable `[T]` fits a read-only `Slice<T>` slot
         // (capability may be dropped), a read-only slice never fits a writable one. This is the arm
-        // that makes `v: [u8] = lit.view()` a type error instead of a segfault three lines later.
+        // that makes `v: MutSlice<u8> = lit.view()` a type error instead of a segfault three lines later.
         (g.slice_kind_of() == k_ptr() && w.slice_kind_of() == k_mut_ptr()).then({ false }, { true })
     }
     fits = (g: Ty, w: Ty) bool {
@@ -192,7 +185,7 @@ invariant_ty_eq = (g: Ty, w: Ty) bool {
         }),
     })
 }
-invariant_tys_eq = (gs: [Ty], ws: [Ty]) bool {
+invariant_tys_eq = (gs: MutSlice<Ty>, ws: MutSlice<Ty>) bool {
     (gs.len != ws.len).match ({
         true  => false,
         false => {

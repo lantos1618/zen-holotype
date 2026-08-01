@@ -1,19 +1,15 @@
-// lsp.zen — `zenc lsp`: a Language Server Protocol server over stdio. Speaks the framed
-// Content-Length wire format, publishes diagnostics on open/change, and answers go-to-definition.
-// The JSON here is hand-rolled (std.format.json isn't in the seed manifest) and deliberately
-// minimal: enough of a reader to pull the fields the protocol needs out of a request body.
 { Allocator, RequestArena, request_arena } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
 { contents_in } = std.io.file
-{ read, write } = std.c.libc
+{ memcpy, read, write, strlen } = std.c.libc
 { hex_char, hex_nibble } = std.text.ascii    // shared hex nibble encode/decode
 { advance_while, repeat_while, step_while, loop_at } = std.core.count
 { CheckDiagnostic, desc_or } = compiler.validate.diag
 { denrich_check } = compiler.validate.enrich
 { parse_module } = compiler.parse
 { resolve_module } = compiler.check_resolve
-{ ufcs_vis_of } = compiler.check
+{ ufcs_vis_of, is_intrinsic } = compiler.check
 { check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source,
   check_module_no_if_diagnostic_from_source, check_module_no_ternary_diagnostic_from_source,
   check_module_no_coroutine_diagnostic_from_source, check_module_reserved_diagnostic_from_source,
@@ -25,23 +21,44 @@
   check_module_mustuse_diagnostic_from_source, check_module_infinite_type_diagnostic_from_source,
   check_module_main_diagnostic_from_source, check_module_batch_vis } = compiler.validate.core
 { DiagSpan } = compiler.diagnostic
-{ resolve_failed, resolve_message, resolve_program_data, undefined_name_hint, ResolvedProgram } = compiler.resolve
+{ resolve_failed, resolve_message, resolve_program_data, undefined_name_hint, ResolvedProgram,
+  SourceOverlay } = compiler.resolve
 { impl_cname_in } = compiler.mangle
-{ gstr_string, gstr_append, gstr_finish, gstr_push, acquire_or_die } = compiler.genc
+{ gstr_string, gstr_append, gstr_finish, gstr_push, acquire_or_die, cbuf } = compiler.genc
 { push_int, dirname, cstr_range, cstr_substr } = compiler.drvutil
 { lspt_legend, lspt_tokens } = compiler.lsp_tokens
-{ LspDocs, lspd_init, lspd_cache_tokens, lspd_close, lspd_find, lspd_set, lspd_text_at,
-  lspd_tokens_at } = compiler.lsp_docs
+{ LspDocs, lspd_init, lspd_cache_tokens, lspd_close, lspd_count, lspd_find, lspd_set, lspd_text_at,
+  lspd_tokens_at, lspd_uri_at, lspd_version_at } = compiler.lsp_docs
 { cd_or, locate_diag } = compiler.drvdiag
+{ SymbolIndex, SymbolKey, SymbolSourceSpan, SymbolOccurrence, SymbolDecl, resolve_symbol_index,
+  symbol_key_eq, SYMBOL_FUNCTION, SYMBOL_GLOBAL, SYMBOL_TYPE, SYMBOL_METHOD, SYMBOL_LET,
+  SYMBOL_PARAM } = compiler.symbols
 { ff_is_hoisted } = compiler.pretty_decl
-{ lsp_byte_of_pos, lsp_col_of, lsp_find_def, lsp_ident_end, lsp_ident_start, lsp_line_of,
-  lspq_hover, lspq_items } = compiler.lsp_query
+{ lsp_byte_of_pos, lsp_find_def, lsp_ident_end, lsp_ident_start, lspq_hover, lspq_items,
+  lspq_reserved_name } = compiler.lsp_query
+LspInit*: {
+    workspace_uri: StringView,
+    rename_prepare: bool,
+    document_changes: bool,
+}
+LspPosition*: {
+    ok: bool,
+    uri: StringView,
+    line: i64,
+    character: i64,
+}
 LspSession: {
     durable: Allocator,
     requests: RequestArena,
     docs: LspDocs,
+    workspace_uri: StringView,
+    rename_prepare: bool,
+    document_changes: bool,
     deinit = (s: MutPtr<LspSession>) void {
         s.docs.addr().deinit()
+        (is_empty(s.workspace_uri) == false).then({
+            s.durable.release(s.workspace_uri.offset(0))
+        })
         s.requests.addr().deinit()
     }
 }
@@ -50,6 +67,9 @@ lsp_session = (durable: Allocator) LspSession {
         durable: durable,
         requests: request_arena(durable),
         docs: lspd_init(durable),
+        workspace_uri: "",
+        rename_prepare: false,
+        document_changes: false,
     )
 }
 // ── `zenc lsp` — diagnostics-only Language Server over stdio (LSP Stage 1) ─────────────────────────
@@ -130,18 +150,18 @@ json_str_end = (v: Slice<u8>, i: i64) i64 {
     })
     (e < v.len).then({ e + 1 }, { v.len })
 }
-json_skip_ws = (v: [u8], p: i64) i64 {
+json_skip_ws = (v: Slice<u8>, p: i64) i64 {
     p.advance_while((q) {
         q < v.len && (v[q] == ' ' || v[q] == '\t' || v[q] == '\n' || v[q] == '\r')
     })
 }
-json_range_eq = (v: [u8], start: i64, kv: [u8], k: i64) bool {
+json_range_eq = (v: Slice<u8>, start: i64, kv: Slice<u8>, k: i64) bool {
     (k >= kv.len).match ({
         true  => true,
         false => (v[start + k] == kv[k]).then({ v.json_range_eq(start, kv, k + 1) }, { false }),
     })
 }
-json_str_eq_range = (v: [u8], start: i64, end: i64, kv: [u8]) bool {
+json_str_eq_range = (v: Slice<u8>, start: i64, end: i64, kv: Slice<u8>) bool {
     (end - start != kv.len).then({ false }, { v.json_range_eq(start, kv, 0) })
 }
 // the byte offset of the VALUE for the first object key named `key`, or -1. Strings are consumed whole,
@@ -165,7 +185,131 @@ json_find_key = (v: Slice<u8>, key: StringView) i64 {
     })
     result
 }
-json_hexq = (v: [u8], at: i64) i64 {
+// end of one JSON value. Composite values are skipped as a unit so direct-field lookup never
+// mistakes a nested key for a sibling.
+json_nested_end = (v: Slice<u8>, p: i64) i64 {
+    depth ::= 0
+    stop :: i64 = 0 - 1
+    p.step_while((i) { stop < 0 && i < v.len }, (i) {
+        b = v[i]
+        (b == '"').match ({
+            true  => v.json_str_end(i),
+            false => {
+                (b == '{' || b == '[').then({
+                    depth = depth + 1
+                })
+                (b == '}' || b == ']').then({
+                    depth = depth - 1
+                    (depth == 0).then({
+                        stop = i + 1
+                    })
+                })
+                i + 1
+            },
+        })
+    })
+    (stop < 0).then({ v.len }, { stop })
+}
+json_value_end = (v: Slice<u8>, p: i64) i64 {
+    q = v.json_skip_ws(p)
+    (q >= v.len).match ({
+        true  => v.len,
+        false => (v[q] == '"').match ({
+            true  => v.json_str_end(q),
+            false => (v[q] == '{' || v[q] == '[').match ({
+                true  => v.json_nested_end(q),
+                false => q.advance_while((i) {
+                    i < v.len
+                        && v[i] != ','
+                        && v[i] != '}'
+                        && v[i] != ']'
+                        && v[i] != ' '
+                        && v[i] != '\t'
+                        && v[i] != '\n'
+                        && v[i] != '\r'
+                }),
+            }),
+        }),
+    })
+}
+// value position for a DIRECT field of the object opening at obj, or -1.
+json_field_in* = (v: Slice<u8>, obj: i64, key: StringView) i64 {
+    (obj < 0 || obj >= v.len || v[obj] != '{').then({
+        return 0 - 1
+    })
+    kv: Slice<u8> = key.view()
+    found :: i64 = 0 - 1
+    (obj + 1).step_while((i) { found < 0 && i < v.len }, (i) {
+        q = v.json_skip_ws(i)
+        (q >= v.len || v[q] == '}' || v[q] != '"').match ({
+            true  => v.len,
+            false => {
+                se = v.json_str_end(q)
+                cs = v.json_skip_ws(se)
+                (cs >= v.len || v[cs] != ':').match ({
+                    true  => v.len,
+                    false => {
+                        val = v.json_skip_ws(cs + 1)
+                        v.json_str_eq_range(q + 1, se - 1, kv).then({
+                            found = val
+                        })
+                        after = v.json_skip_ws(v.json_value_end(val))
+                        (after < v.len && v[after] == ',').then({ after + 1 }, { v.len })
+                    },
+                })
+            },
+        })
+    })
+    found
+}
+json_top_field* = (body: StringView, key: StringView) i64 {
+    v: Slice<u8> = body.view()
+    q = v.json_skip_ws(0)
+    v.json_field_in(q, key)
+}
+json_uint_at* = (v: Slice<u8>, p: i64) i64 {
+    (p < 0 || p >= v.len || v[p] < '0' || v[p] > '9').then({
+        return 0 - 1
+    })
+    e = p.advance_while((i) { i < v.len && v[i] >= '0' && v[i] <= '9' })
+    q = v.json_skip_ws(e)
+    (q < v.len && v[q] != ',' && v[q] != '}' && v[q] != ']').then({
+        return 0 - 1
+    })
+    v.lsp_parse_dec(p, 0)
+}
+json_bool_at* = (v: Slice<u8>, p: i64) i32 {
+    (p < 0 || p >= v.len).then({
+        return 0 - 1
+    })
+    v.lsp_match_word(p, "true").then({
+        return 1
+    })
+    v.lsp_match_word(p, "false").then({ 0 }, { 0 - 1 })
+}
+lsp_match_word = (v: Slice<u8>, p: i64, word: StringView) bool {
+    w: Slice<u8> = word.view()
+    (p + w.len > v.len).then({
+        return false
+    })
+    v.json_range_eq(p, w, 0)
+        && (p + w.len >= v.len
+            || v[p + w.len] == ','
+            || v[p + w.len] == '}'
+            || v[p + w.len] == ']'
+            || v[p + w.len] == ' '
+            || v[p + w.len] == '\t'
+            || v[p + w.len] == '\n'
+            || v[p + w.len] == '\r')
+}
+json_first_array_value = (v: Slice<u8>, p: i64) i64 {
+    (p < 0 || p >= v.len || v[p] != '[').then({
+        return 0 - 1
+    })
+    q = v.json_skip_ws(p + 1)
+    (q >= v.len || v[q] == ']').then({ 0 - 1 }, { q })
+}
+json_hexq = (v: Slice<u8>, at: i64) i64 {
     (at + 3 >= v.len).match ({
         true  => 0 - 1,
         false => {
@@ -180,7 +324,7 @@ json_hexq = (v: [u8], at: i64) i64 {
         },
     })
 }
-// UTF-8 encode a BMP code point into the builder (1–3 bytes).
+// UTF-8 encode one Unicode scalar into the builder.
 push_utf8 = (sb: String, mp: Allocator, cp: i64) String {
     (cp < 128).match ({
         true  => sb.gstr_push(mp, cp.to_u8()),
@@ -188,10 +332,17 @@ push_utf8 = (sb: String, mp: Allocator, cp: i64) String {
             true  => sb
                 .gstr_push(mp, (192 | cp >> 6).to_u8())
                 .gstr_push(mp, (128 | cp & 63).to_u8()),
-            false => sb
-                .gstr_push(mp, (224 | cp >> 12).to_u8())
-                .gstr_push(mp, (128 | cp >> 6 & 63).to_u8())
-                .gstr_push(mp, (128 | cp & 63).to_u8()),
+            false => (cp < 65536).match ({
+                true  => sb
+                    .gstr_push(mp, (224 | cp >> 12).to_u8())
+                    .gstr_push(mp, (128 | cp >> 6 & 63).to_u8())
+                    .gstr_push(mp, (128 | cp & 63).to_u8()),
+                false => sb
+                    .gstr_push(mp, (240 | cp >> 18).to_u8())
+                    .gstr_push(mp, (128 | cp >> 12 & 63).to_u8())
+                    .gstr_push(mp, (128 | cp >> 6 & 63).to_u8())
+                    .gstr_push(mp, (128 | cp & 63).to_u8()),
+            }),
         }),
     })
 }
@@ -237,8 +388,24 @@ json_decode_str = (mp: Allocator, v: Slice<u8>, i: i64) StringView {
                                                     j + 2
                                                 },
                                                 false => {
-                                                    sb = sb.push_utf8(mp, cp)
-                                                    j + 6
+                                                    low = (cp >= 55296
+                                                        && cp <= 56319
+                                                        && j + 11 < v.len
+                                                        && v[j + 6] == '\\'
+                                                        && v[j + 7] == 'u').match ({
+                                                        true  => v.json_hexq(j + 8),
+                                                        false => 0 - 1,
+                                                    })
+                                                    (low >= 56320 && low <= 57343).match ({
+                                                        true  => {
+                                                            sb = sb.push_utf8(mp, 65536 + (cp - 55296) * 1024 + low - 56320)
+                                                            j + 12
+                                                        },
+                                                        false => {
+                                                            sb = sb.push_utf8(mp, cp)
+                                                            j + 6
+                                                        },
+                                                    })
                                                 },
                                             })
                                         },
@@ -292,10 +459,61 @@ json_str_field = (mp: Allocator, body: StringView, key: StringView) StringView {
         false => (v[p] == '"').then({ mp.json_decode_str(v, p) }, { "" }),
     })
 }
-// the request id as a raw JSON fragment (number or quoted string), echoed verbatim into the reply.
+json_string_at* = (mp: Allocator, v: Slice<u8>, p: i64) StringView {
+    (p < 0 || p >= v.len || v[p] != '"').then({ "" }, { mp.json_decode_str(v, p) })
+}
+json_top_string = (mp: Allocator, body: StringView, key: StringView) StringView {
+    v: Slice<u8> = body.view()
+    mp.json_string_at(v, body.json_top_field(key))
+}
+lsp_init_params* = (mp: Allocator, body: StringView) LspInit {
+    v: Slice<u8> = body.view()
+    params = body.json_top_field("params")
+    folders = v.json_field_in(params, "workspaceFolders")
+    first = v.json_first_array_value(folders)
+    furi = v.json_field_in(first, "uri")
+    workspace ::= mp.json_string_at(v, furi)
+    is_empty(workspace).then({
+        workspace = mp.json_string_at(v, v.json_field_in(params, "rootUri"))
+    })
+    caps = v.json_field_in(params, "capabilities")
+    textdoc = v.json_field_in(caps, "textDocument")
+    rename = v.json_field_in(textdoc, "rename")
+    prep = v.json_bool_at(v.json_field_in(rename, "prepareSupport"))
+    wcap = v.json_field_in(caps, "workspace")
+    we = v.json_field_in(wcap, "workspaceEdit")
+    docs = v.json_bool_at(v.json_field_in(we, "documentChanges"))
+    LspInit(
+        workspace_uri: workspace,
+        rename_prepare: prep == 1,
+        document_changes: docs == 1,
+    )
+}
+lsp_position_params* = (mp: Allocator, body: StringView) LspPosition {
+    v: Slice<u8> = body.view()
+    params = body.json_top_field("params")
+    textdoc = v.json_field_in(params, "textDocument")
+    uri = mp.json_string_at(v, v.json_field_in(textdoc, "uri"))
+    pos = v.json_field_in(params, "position")
+    line = v.json_uint_at(v.json_field_in(pos, "line"))
+    ch = v.json_uint_at(v.json_field_in(pos, "character"))
+    LspPosition(
+        ok: is_empty(uri) == false && line >= 0 && ch >= 0,
+        uri: uri,
+        line: line,
+        character: ch,
+    )
+}
+lsp_document_uri = (mp: Allocator, body: StringView) StringView {
+    v: Slice<u8> = body.view()
+    params = body.json_top_field("params")
+    textdoc = v.json_field_in(params, "textDocument")
+    mp.json_string_at(v, v.json_field_in(textdoc, "uri"))
+}
+// the top-level request id as a raw JSON fragment, echoed verbatim into the reply.
 lsp_id = (mp: Allocator, body: StringView) StringView {
     v: Slice<u8> = body.view()
-    p = v.json_find_key("id")
+    p = body.json_top_field("id")
     (p < 0).then({ "null" }, { mp.json_raw_at(v, p) })
 }
 // ── URI -> filesystem path (strip a leading `file://`; percent-decoding is a later refinement) ─────
@@ -380,8 +598,8 @@ lsp_push_diag = (
     mp: Allocator,
     acc: DiagAcc,
     rp: ResolvedProgram,
-    raw: [Decl],
-    decls: [Decl],
+    raw: MutSlice<Decl>,
+    decls: MutSlice<Decl>,
     path: StringView,
     user: StringView,
     cd: CheckDiagnostic,
@@ -409,12 +627,7 @@ lsp_push_diag = (
             })
             full ::= is_empty(hint).match ({
                 true  => msg,
-                false => mp
-                    .gstr_string(128)
-                    .gstr_append(mp, msg)
-                    .gstr_append(mp, " — ")
-                    .gstr_append(mp, hint)
-                    .gstr_finish(mp),
+                false => mp.gstr_string(128).gstr_append(mp, msg, " — ", hint).gstr_finish(mp),
             })
             // an error living in an IMPORTED module (dl.path != the open document) must not squiggle
             // an unrelated range of the open file: pin it to the file head and name the real location
@@ -540,12 +753,36 @@ lsp_publish = (mp: Allocator, root: StringView, uri: StringView, text: StringVie
         .gstr_finish(mp))
 }
 // ── request/notification handlers ─────────────────────────────────────────────────────────────────
-lsp_reply_initialize = (mp: Allocator, body: StringView) i64 {
+lsp_session_own = (s: MutPtr<LspSession>, text: StringView) StringView {
+    v: Slice<u8> = text.view()
+    (v.len == 0).then({
+        return ""
+    })
+    p = s.durable.acquire(v.len + 1)
+    (p == null_ptr()).then({
+        return ""
+    })
+    memcpy(p, v.ptr, v.len)
+    p.offset(v.len).store(0)
+    cstr(p)
+}
+lsp_apply_init = (s: MutPtr<LspSession>, init: LspInit) void {
+    (is_empty(s.workspace_uri) == false).then({
+        s.durable.release(s.workspace_uri.offset(0))
+    })
+    s.workspace_uri = s.lsp_session_own(init.workspace_uri)
+    s.rename_prepare = init.rename_prepare
+    s.document_changes = init.document_changes
+}
+lsp_reply_initialize = (session: MutPtr<LspSession>, mp: Allocator, body: StringView) i64 {
+    session.lsp_apply_init(mp.lsp_init_params(body))
     mp.lsp_send(mp
-        .gstr_string(256)
+        .gstr_string(288)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
         .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"textDocumentSync\":1,\"definitionProvider\":true,\"hoverProvider\":true,\"documentSymbolProvider\":true,\"completionProvider\":{\"resolveProvider\":false},\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":")
+        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":1,\"definitionProvider\":true,\"declarationProvider\":true,\"referencesProvider\":true,\"documentHighlightProvider\":true,\"workspaceSymbolProvider\":true,\"renameProvider\":")
+        .gstr_append(mp, session.rename_prepare.then({ "{\"prepareProvider\":true}" }, { "true" }))
+        .gstr_append(mp, ",\"hoverProvider\":true,\"documentSymbolProvider\":true,\"completionProvider\":{\"resolveProvider\":false},\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":")
         .gstr_append(mp, lspt_legend())
         .gstr_append(mp, ",\"tokenModifiers\":[]},\"full\":true}},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
         .gstr_finish(mp))
@@ -556,31 +793,307 @@ lsp_reply_initialize = (mp: Allocator, body: StringView) i64 {
 // (ctags-style) rather than resolver-backed: it resolves same-file top-level decls (fn/type/const),
 // which is the common jump, and it keeps working on the half-typed buffer an editor actually holds.
 // Cross-file targets, locals and overload-precise resolution are the documented next slices.
-// reply to a definition request with a Location for def at (line, col) spanning `nlen` bytes, or null.
-lsp_reply_location = (
+// reply with one exact source byte span converted to a UTF-16 Location range.
+lsp_reply_location_span = (
     mp: Allocator,
     body: StringView,
     uri: StringView,
-    line: i64,
-    col: i64,
-    nlen: i64,
+    source: StringView,
+    start: i64,
+    end: i64,
 ) i64 {
-    mp.lsp_send(mp
+    sb = mp
         .gstr_string(256)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
         .gstr_append(mp, mp.lsp_id(body))
         .gstr_append(mp, ",\"result\":{\"uri\":")
         .push_jstr(mp, uri)
-        .gstr_append(mp, ",\"range\":{\"start\":{\"line\":")
-        .push_int(mp, line)
-        .gstr_append(mp, ",\"character\":")
-        .push_int(mp, col)
-        .gstr_append(mp, "},\"end\":{\"line\":")
-        .push_int(mp, line)
-        .gstr_append(mp, ",\"character\":")
-        .push_int(mp, col + nlen)
-        .gstr_append(mp, "}}}}")
-        .gstr_finish(mp))
+        .gstr_append(mp, ",\"range\":")
+    sv: Slice<u8> = source.view()
+    out = lsp_push_range(sb, mp, sv, start, end).gstr_append(mp, "}}").gstr_finish(mp)
+    mp.lsp_send(out)
+}
+lsp_push_location = (
+    sb: String,
+    mp: Allocator,
+    docs: MutPtr<LspDocs>,
+    span: SymbolSourceSpan,
+) String {
+    source = mp.lsp_source_for_path(docs, span.path)
+    sv: Slice<u8> = source.view()
+    sb
+        .gstr_append(mp, "{\"uri\":")
+        .push_jstr(mp, mp.lsp_path_uri(span.path))
+        .gstr_append(mp, ",\"range\":")
+        .lsp_push_range(mp, sv, span.start.to_i64(), span.end.to_i64())
+        .gstr_append(mp, "}")
+}
+lsp_push_text_edit = (
+    sb: String,
+    mp: Allocator,
+    docs: MutPtr<LspDocs>,
+    span: SymbolSourceSpan,
+    name: StringView,
+) String {
+    source = mp.lsp_source_for_path(docs, span.path)
+    sv: Slice<u8> = source.view()
+    sb
+        .gstr_append(mp, "{\"range\":")
+        .lsp_push_range(mp, sv, span.start.to_i64(), span.end.to_i64())
+        .gstr_append(mp, ",\"newText\":")
+        .push_jstr(mp, name)
+        .gstr_append(mp, "}")
+}
+LspTarget: {
+    ok: bool,
+    semantic: LspSemantic,
+    key: SymbolKey,
+}
+lsp_empty_key = () SymbolKey {
+    SymbolKey(
+        module: "",
+        owner: "",
+        name: "",
+        kind: 0,
+        pos: 0,
+    )
+}
+lsp_target_at = (
+    mp: Allocator,
+    docs: MutPtr<LspDocs>,
+    root: StringView,
+    workspace_uri: StringView,
+    pos: LspPosition,
+) LspTarget {
+    sem = mp.lsp_semantic_index(docs, root, workspace_uri, pos.uri)
+    out ::= LspTarget(
+        ok: false,
+        semantic: sem,
+        key: lsp_empty_key(),
+    )
+    sem.ok.then({
+        sv: Slice<u8> = sem.source.view()
+        off = sv.lsp_byte_of_pos(pos.line, pos.character, 0, 0)
+        sem.index.symbol_at(sem.path, off.to_i32()).match ({
+            .Some(key) => {
+                out.ok = true
+                out.key = key
+            },
+            .None      => { },
+        })
+    })
+    out
+}
+lsp_context_bool = (body: StringView, key: StringView) bool {
+    v: Slice<u8> = body.view()
+    params = body.json_top_field("params")
+    context = v.json_field_in(params, "context")
+    v.json_bool_at(v.json_field_in(context, key)) == 1
+}
+lsp_references = (
+    mp: Allocator,
+    session: MutPtr<LspSession>,
+    root: StringView,
+    body: StringView,
+) i64 {
+    pos = mp.lsp_position_params(body)
+    (pos.ok == false).then({
+        return mp.lsp_reply_invalid_params(body)
+    })
+    target = mp.lsp_target_at(session.docs.addr(), root, session.workspace_uri, pos)
+    (target.ok == false).then({
+        return mp.lsp_reply_null(body)
+    })
+    include_decl = body.lsp_context_bool("includeDeclaration")
+    occs = target.semantic.index.occurrences_of(mp, target.key)
+    sb ::= mp
+        .gstr_string(512)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":[")
+    first ::= true
+    occs.loop_at((i, o) {
+        (include_decl || o.declaration == false).then({
+            sb = sb
+                .gstr_append(mp, first.then({ "" }, { "," }))
+                .lsp_push_location(mp, session.docs.addr(), o.span)
+            first = false
+        })
+    })
+    mp.lsp_send(sb.gstr_append(mp, "]}").gstr_finish(mp))
+}
+lsp_document_highlight = (
+    mp: Allocator,
+    session: MutPtr<LspSession>,
+    root: StringView,
+    body: StringView,
+) i64 {
+    pos = mp.lsp_position_params(body)
+    (pos.ok == false).then({
+        return mp.lsp_reply_invalid_params(body)
+    })
+    target = mp.lsp_target_at(session.docs.addr(), root, session.workspace_uri, pos)
+    (target.ok == false).then({
+        return mp.lsp_reply_null(body)
+    })
+    occs = target.semantic.index.occurrences_of(mp, target.key)
+    sb ::= mp
+        .gstr_string(512)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":[")
+    first ::= true
+    occs.loop_at((i, o) {
+        (o.span.path == target.semantic.path).then({
+            source = mp.lsp_source_for_path(session.docs.addr(), o.span.path)
+            sv: Slice<u8> = source.view()
+            sb = sb
+                .gstr_append(mp, first.then({ "" }, { "," }))
+                .gstr_append(mp, "{\"range\":")
+                .lsp_push_range(mp, sv, o.span.start.to_i64(), o.span.end.to_i64())
+                .gstr_append(mp, ",\"kind\":1}")
+            first = false
+        })
+    })
+    mp.lsp_send(sb.gstr_append(mp, "]}").gstr_finish(mp))
+}
+lsp_prepare_rename = (
+    mp: Allocator,
+    session: MutPtr<LspSession>,
+    root: StringView,
+    body: StringView,
+) i64 {
+    pos = mp.lsp_position_params(body)
+    (pos.ok == false).then({
+        return mp.lsp_reply_invalid_params(body)
+    })
+    target = mp.lsp_target_at(session.docs.addr(), root, session.workspace_uri, pos)
+    (target.ok == false || target.key.lsp_renamable() == false).then({
+        return mp.lsp_reply_null(body)
+    })
+    target.semantic.index.declaration(target.key).match ({
+        .Some(d) => {
+            source = mp.lsp_source_for_path(session.docs.addr(), d.span.path)
+            sv: Slice<u8> = source.view()
+            mp.lsp_send(mp
+                .gstr_string(192)
+                .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+                .gstr_append(mp, mp.lsp_id(body))
+                .gstr_append(mp, ",\"result\":{\"range\":")
+                .lsp_push_range(mp, sv, d.span.start.to_i64(), d.span.end.to_i64())
+                .gstr_append(mp, ",\"placeholder\":")
+                .push_jstr(mp, d.name)
+                .gstr_append(mp, "}}")
+                .gstr_finish(mp))
+        },
+        .None    => mp.lsp_reply_null(body),
+    })
+}
+lsp_occ_first_path = (occs: MutSlice<SymbolOccurrence>, upto: i64, path: StringView) bool {
+    first ::= true
+    zero: i64 = 0
+    zero.step_while((i) { i < upto }, (i) {
+        (occs[i].span.path == path).then({
+            first = false
+        })
+        i + 1
+    })
+    first
+}
+lsp_push_path_edits = (
+    sb: String,
+    mp: Allocator,
+    docs: MutPtr<LspDocs>,
+    occs: MutSlice<SymbolOccurrence>,
+    path: StringView,
+    name: StringView,
+) String {
+    out ::= sb
+    first ::= true
+    occs.loop_at((i, o) {
+        (o.span.path == path).then({
+            out = out
+                .gstr_append(mp, first.then({ "" }, { "," }))
+                .lsp_push_text_edit(mp, docs, o.span, name)
+            first = false
+        })
+    })
+    out
+}
+lsp_reply_rename = (
+    mp: Allocator,
+    session: MutPtr<LspSession>,
+    body: StringView,
+    occs: MutSlice<SymbolOccurrence>,
+    name: StringView,
+) i64 {
+    sb ::= mp
+        .gstr_string(1024)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":{")
+    session.document_changes.match ({
+        true  => {
+            sb = sb.gstr_append(mp, "\"documentChanges\":[")
+            first ::= true
+            occs.loop_at((i, o) {
+                occs.lsp_occ_first_path(i, o.span.path).then({
+                    version = mp.lsp_version_for_path(session.docs.addr(), o.span.path)
+                    sb = sb
+                        .gstr_append(mp, first.then({ "" }, { "," }))
+                        .gstr_append(mp, "{\"textDocument\":{\"uri\":")
+                        .push_jstr(mp, mp.lsp_path_uri(o.span.path))
+                        .gstr_append(mp, ",\"version\":")
+                    sb = (version < 0).match ({
+                        true  => sb.gstr_append(mp, "null"),
+                        false => sb.push_int(mp, version),
+                    })
+                    sb = sb
+                        .gstr_append(mp, "},\"edits\":[")
+                        .lsp_push_path_edits(mp, session.docs.addr(), occs, o.span.path, name)
+                        .gstr_append(mp, "]}")
+                    first = false
+                })
+            })
+            sb = sb.gstr_append(mp, "]")
+        },
+        false => {
+            sb = sb.gstr_append(mp, "\"changes\":{")
+            first ::= true
+            occs.loop_at((i, o) {
+                occs.lsp_occ_first_path(i, o.span.path).then({
+                    sb = sb
+                        .gstr_append(mp, first.then({ "" }, { "," }))
+                        .push_jstr(mp, mp.lsp_path_uri(o.span.path))
+                        .gstr_append(mp, ":[")
+                        .lsp_push_path_edits(mp, session.docs.addr(), occs, o.span.path, name)
+                        .gstr_append(mp, "]")
+                    first = false
+                })
+            })
+            sb = sb.gstr_append(mp, "}")
+        },
+    })
+    mp.lsp_send(sb.gstr_append(mp, "}}").gstr_finish(mp))
+}
+lsp_rename = (mp: Allocator, session: MutPtr<LspSession>, root: StringView, body: StringView) i64 {
+    pos = mp.lsp_position_params(body)
+    (pos.ok == false).then({
+        return mp.lsp_reply_invalid_params(body)
+    })
+    v: Slice<u8> = body.view()
+    params = body.json_top_field("params")
+    name = mp.json_string_at(v, v.json_field_in(params, "newName"))
+    (name.lsp_ident_name() == false).then({
+        return mp.lsp_reply_invalid_params(body)
+    })
+    target = mp.lsp_target_at(session.docs.addr(), root, session.workspace_uri, pos)
+    (target.ok == false
+        || target.key.lsp_renamable() == false
+        || target.semantic.index.lsp_rename_collision(target.key, name)).then({
+        return mp.lsp_reply_invalid_params(body)
+    })
+    mp.lsp_reply_rename(session, body, target.semantic.index.occurrences_of(mp, target.key), name)
 }
 // read a non-negative integer JSON field by key (e.g. position.line / .character).
 lsp_json_int = (body: StringView, key: StringView) i64 {
@@ -615,9 +1128,152 @@ lsp_path_uri = (mp: Allocator, path: StringView) StringView {
         .gstr_append(mp, path)
         .gstr_finish(mp)
 }
-// byte offset of the NAME of the top-level declaration called `name`, or 0. Every decl kind spells
-// pos 0 as "synthesized", so 0 doubles as this scan's miss.
-lsp_decl_pos = (decls: [Decl], name: StringView) i32 {
+LspSemantic: {
+    ok: bool,
+    path: StringView,
+    source: StringView,
+    index: SymbolIndex,
+}
+lsp_empty_index = () SymbolIndex {
+    SymbolIndex(
+        decls: slice(null_ptr(), 0),
+        occurrences: slice(null_ptr(), 0),
+    )
+}
+lsp_doc_overlays = (mp: Allocator, docs: MutPtr<LspDocs>) MutSlice<SourceOverlay> {
+    n = docs.lspd_count()
+    (n <= 0).then({
+        return slice(null_ptr(), 0)
+    })
+    out ::= cbuf<SourceOverlay>(mp, n)
+    out.loop_at((i, o) {
+        out[i] = SourceOverlay(
+            path: mp.lsp_uri_path(docs.lspd_uri_at(i)),
+            source: docs.lspd_text_at(i),
+        )
+    })
+    out
+}
+lsp_progdir = (mp: Allocator, workspace_uri: StringView, path: StringView) StringView {
+    is_empty(workspace_uri).then({ mp.dirname(path) }, { mp.lsp_uri_path(workspace_uri) })
+}
+lsp_semantic_index = (
+    mp: Allocator,
+    docs: MutPtr<LspDocs>,
+    root: StringView,
+    workspace_uri: StringView,
+    uri: StringView,
+) LspSemantic {
+    path = mp.lsp_uri_path(uri)
+    source = mp.lsp_doc_text(docs, uri)
+    is_empty(source).then({
+        return LspSemantic(
+            ok: false,
+            path: path,
+            source: source,
+            index: lsp_empty_index(),
+        )
+    })
+    idx = mp.resolve_symbol_index(root, mp.lsp_progdir(workspace_uri, path), path, source, mp.lsp_doc_overlays(docs))
+    LspSemantic(
+        ok: resolve_failed() == false,
+        path: path,
+        source: source,
+        index: idx,
+    )
+}
+lsp_source_for_path = (mp: Allocator, docs: MutPtr<LspDocs>, path: StringView) StringView {
+    found ::= ""
+    zero: i64 = 0
+    zero.step_while((i) { i < docs.lspd_count() }, (i) {
+        (is_empty(found) && mp.lsp_uri_path(docs.lspd_uri_at(i)) == path).then({
+            found = docs.lspd_text_at(i)
+        })
+        i + 1
+    })
+    is_empty(found).match ({
+        true  => contents_in(mp.addr(), path).match ({
+            .Ok(src) => src,
+            .Err(e)  => "",
+        }),
+        false => found,
+    })
+}
+lsp_version_for_path = (mp: Allocator, docs: MutPtr<LspDocs>, path: StringView) i64 {
+    version ::= 0 - 1
+    zero: i64 = 0
+    zero.step_while((i) { i < docs.lspd_count() }, (i) {
+        (version < 0 && mp.lsp_uri_path(docs.lspd_uri_at(i)) == path).then({
+            version = docs.lspd_version_at(i)
+        })
+        i + 1
+    })
+    version
+}
+lsp_renamable = (key: SymbolKey) bool {
+    key.kind == SYMBOL_FUNCTION
+        || key.kind == SYMBOL_GLOBAL
+        || key.kind == SYMBOL_METHOD
+        || key.kind == SYMBOL_LET
+        || key.kind == SYMBOL_PARAM
+}
+lsp_ident_name = (name: StringView) bool {
+    v: Slice<u8> = name.view()
+    (v.len == 0).then({
+        return false
+    })
+    first = v[0]
+    (first != 95 && (first < 97 || first > 122) && (first < 65 || first > 90)).then({
+        return false
+    })
+    valid ::= true
+    v.loop_at((i, b) {
+        (b.lsp_is_ident_byte() == false).then({
+            valid = false
+        })
+    })
+    valid && name.lspq_reserved_name() == false && name.is_intrinsic() == false
+}
+lsp_rename_collision = (idx: SymbolIndex, key: SymbolKey, name: StringView) bool {
+    collision ::= false
+    idx.decls.loop_at((i, d) {
+        same_key = d.key.symbol_key_eq(key)
+        same_scope = (key.kind == SYMBOL_METHOD).match ({
+            true  => d.key.kind == SYMBOL_METHOD
+                && d.key.module == key.module
+                && d.key.owner == key.owner,
+            false => (key.kind == SYMBOL_LET).match ({
+                true  => (d.key.kind == SYMBOL_LET || d.key.kind == SYMBOL_PARAM)
+                    && d.key.module == key.module
+                    && d.key.owner == key.owner,
+                false => (key.kind == SYMBOL_PARAM).match ({
+                    true  => (d.key.kind == SYMBOL_LET || d.key.kind == SYMBOL_PARAM)
+                        && d.key.module == key.module
+                        && d.key.owner == key.owner,
+                    false => d.key.module == key.module && is_empty(d.key.owner),
+                }),
+            }),
+        })
+        (same_key == false && same_scope && d.name == name).then({
+            collision = true
+        })
+    })
+    (key.kind == SYMBOL_FUNCTION || key.kind == SYMBOL_GLOBAL).then({
+        idx.occurrences.loop_at((i, target) {
+            target.key.symbol_key_eq(key).then({
+                idx.occurrences.loop_at((j, other) {
+                    (other.key.symbol_key_eq(key) == false
+                        && other.span.module == target.span.module
+                        && other.key.name == name).then({
+                        collision = true
+                    })
+                })
+            })
+        })
+    })
+    collision
+}
+lsp_decl_pos = (decls: MutSlice<Decl>, name: StringView) i32 {
     found :: i32 = 0
     decls.loop_at((i, d) {
         p = d.match ({
@@ -636,105 +1292,161 @@ lsp_decl_pos = (decls: [Decl], name: StringView) i32 {
     })
     found
 }
-// a METHOD's declaration, reached through the DImpl record that still carries its ORIGINAL name. The
-// parser HOISTS both a trait impl's methods and a type body's INHERENT methods into mangled
-// `impl_<Tr>_<Ty>_<m>` functions, so a bare `area` matches no decl name until it is un-mangled — the
-// same un-hoisting compiler.pretty_decl does to round-trip a type body.
-lsp_method_pos = (mp: Allocator, decls: [Decl], name: StringView) i32 {
-    found :: i32 = 0
-    decls.loop_at((i, d) {
-        d.match ({
-            .DImpl(im) => im.methods.loop_at((k, m) {
-                (found == 0 && m.name == name).then({
-                    found = decls.lsp_decl_pos(mp.impl_cname_in(im.trname, im.ty, m.name))
-                })
-            }),
-            _          => { },
+// Semantic definition/declaration covers every positioned symbol the index understands. The textual
+// top-level scan is retained only for unsupported syntax or a temporarily broken buffer.
+lsp_definition = (
+    mp: Allocator,
+    session: MutPtr<LspSession>,
+    root: StringView,
+    body: StringView,
+) i64 {
+    pos = mp.lsp_position_params(body)
+    (pos.ok == false).then({
+        return mp.lsp_reply_invalid_params(body)
+    })
+    target = mp.lsp_target_at(session.docs.addr(), root, session.workspace_uri, pos)
+    target.ok.then({
+        target.semantic.index.declaration(target.key).match ({
+            .Some(d) => {
+                source = mp.lsp_source_for_path(session.docs.addr(), d.span.path)
+                return mp.lsp_reply_location_span(body, mp.lsp_path_uri(d.span.path), source, d.span.start, d.span.end)
+            },
+            .None    => { },
         })
+    })
+    txt = mp.lsp_doc_text(session.docs.addr(), pos.uri)
+    v: Slice<u8> = txt.view()
+    off = v.lsp_byte_of_pos(pos.line, pos.character, 0, 0)
+    start = v.lsp_ident_start(off)
+    end = v.lsp_ident_end(off)
+    (end <= start).then({
+        return mp.lsp_reply_null(body)
+    })
+    name: Slice<u8> = v.ptr.offset(start).slice(end - start)
+    decl = v.lsp_find_def(name, 0, true)
+    (decl < 0).match ({
+        true  => mp.lsp_reply_null(body),
+        false => mp.lsp_reply_location_span(body, pos.uri, txt, decl, decl + end - start),
+    })
+}
+lsp_workspace_symbol_kind = (kind: i32) i64 {
+    (kind == SYMBOL_FUNCTION).match ({
+        true  => 12,
+        false => (kind == SYMBOL_GLOBAL).match ({
+            true  => 13,
+            false => (kind == SYMBOL_TYPE).match ({
+                true  => 23,
+                false => (kind == SYMBOL_METHOD).then({ 6 }, { 0 }),
+            }),
+        }),
+    })
+}
+lsp_workspace_seen = (indexes: MutSlice<SymbolIndex>, upto: i64, decl: SymbolDecl) bool {
+    seen ::= false
+    zero: i64 = 0
+    zero.step_while((i) { i < upto }, (i) {
+        indexes[i].decls.loop_at((j, d) {
+            (d.span.path == decl.span.path
+                && d.span.start == decl.span.start
+                && d.span.end == decl.span.end).then({
+                seen = true
+            })
+        })
+        i + 1
+    })
+    seen
+}
+lsp_sv_contains = (haystack: StringView, needle: StringView) bool {
+    hn = strlen(haystack)
+    nn = strlen(needle)
+    (nn == 0).then({
+        return true
+    })
+    (nn > hn).then({
+        return false
+    })
+    hs: Slice<u8> = haystack.slice(hn)
+    ns: Slice<u8> = needle.slice(nn)
+    found ::= false
+    zero: i64 = 0
+    zero.step_while((i) { found == false && i + nn <= hn }, (i) {
+        same ::= true
+        ns.loop_at((j, b) {
+            (same && hs[i + j] != b).then({
+                same = false
+            })
+        })
+        same.then({
+            found = true
+        })
+        i + 1
     })
     found
 }
-// resolve `name` THROUGH THE COMPILER and answer with its real file:line:col. The pipeline is the one
-// the diagnostics already run: resolve_program_data flattens every imported module into a single
-// program, parse_module + resolve_module hand back declarations that each carry the byte offset of
-// their own name, and `locate_diag` maps such an offset back to the module it actually came from —
-// the identical machinery that puts a cross-module diagnostic in the right file. So "where is this
-// declared" is exactly "find the decl, locate its pos", and an imported name, a sibling module's fn
-// and a type's inherent method all become reachable; none of them is a column-0 head of the open file.
-// false = could not answer (the program does not resolve, or the name is not a positioned
-// declaration), and the caller falls back to the textual scan.
-lsp_def_via_ast = (
+lsp_workspace_symbol = (
     mp: Allocator,
+    session: MutPtr<LspSession>,
     root: StringView,
     body: StringView,
-    path: StringView,
-    text: StringView,
-    name: StringView,
-) bool {
-    rp = mp.resolve_program_data(root, mp.dirname(path), path, text)
-    resolve_failed().then({
-        return false
+) i64 {
+    v: Slice<u8> = body.view()
+    params = body.json_top_field("params")
+    query_at = v.json_field_in(params, "query")
+    (query_at < 0 || query_at >= v.len || v[query_at] != 34).then({
+        return mp.lsp_reply_invalid_params(body)
     })
-    decls = mp.resolve_module(mp.parse_module(rp.flat))
-    off ::= decls.lsp_decl_pos(name)
-    (off == 0).then({
-        off = mp.lsp_method_pos(decls, name)
+    query = mp.json_string_at(v, query_at)
+    sb ::= mp
+        .gstr_string(1024)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"result\":[")
+    first ::= true
+    n = session.docs.lspd_count()
+    (n > 0).then({
+        indexes ::= cbuf<SymbolIndex>(mp, n)
+        zero: i64 = 0
+        zero.step_while((i) { i < n }, (i) {
+            uri = session.docs.addr().lspd_uri_at(i)
+            sem = mp.lsp_semantic_index(session.docs.addr(), root, session.workspace_uri, uri)
+            indexes[i] = sem.ok.then({ sem.index }, { lsp_empty_index() })
+            i + 1
+        })
+        indexes.loop_at((ri, idx) {
+            idx.decls.loop_at((di, d) {
+                kind = d.key.kind.lsp_workspace_symbol_kind()
+                (kind > 0
+                    && lsp_sv_contains(d.name, query)
+                    && indexes.lsp_workspace_seen(ri, d) == false).then({
+                    sb = sb
+                        .gstr_append(mp, first.then({ "" }, { "," }))
+                        .gstr_append(mp, "{\"name\":")
+                        .push_jstr(mp, d.name)
+                        .gstr_append(mp, ",\"kind\":")
+                        .push_int(mp, kind)
+                        .gstr_append(mp, ",\"location\":")
+                        .lsp_push_location(mp, session.docs.addr(), d.span)
+                    (is_empty(d.key.owner) == false).then({
+                        sb = sb.gstr_append(mp, ",\"containerName\":").push_jstr(mp, d.key.owner)
+                    })
+                    sb = sb.gstr_append(mp, "}")
+                    first = false
+                })
+            })
+        })
     })
-    (off == 0).then({
-        return false
-    })
-    dl = rp.locate_diag(off, to_i32(name.view().len), path, text)
-    (dl.sp.line <= 0).then({
-        return false
-    })
-    z = lsp_zero_span(dl.sp)
-    sv: Slice<u8> = dl.src.view()
-    ls = sv.lsp_line_start(z.l)
-    zc = sv.lsp_utf16_col(ls, z.c)
-    ze = sv.lsp_utf16_col(ls, z.e)
-    mp.lsp_reply_location(body, mp.lsp_path_uri(dl.path), z.l, zc, (ze > zc).match ({
-        true  => ze - zc,
-        false => 1,
-    }))
-    true
-}
-// GO-TO-DEFINITION. Two resolvers, in this order:
-//
-//   1. THROUGH THE COMPILER (lsp_def_via_ast) — the authoritative answer, and the only one that can
-//      leave the open file.
-//   2. THE TEXTUAL SCAN, when the buffer does not RESOLVE: a half-typed import names no module, so
-//      resolution reports and returns instead of producing a program. compiler.lsp_query keeps
-//      answering about the intact half of the file, which is what it was written for.
-//
-// Still answered null, deliberately: struct FIELDS and local bindings. A Field carries no source
-// position in compiler.ast.ast_types, so there is nothing to point at — closing that is an AST
-// change, not an LSP one.
-lsp_definition = (mp: Allocator, docs: MutPtr<LspDocs>, root: StringView, body: StringView) i64 {
-    uri = mp.json_str_field(body, "uri")
-    txt = mp.lsp_doc_text(docs, uri)
-    v: Slice<u8> = txt.view()
-    off = v.lsp_byte_of_pos(body.lsp_json_int("line"), body.lsp_json_int("character"), 0, 0)
-    s = v.lsp_ident_start(off)
-    e = v.lsp_ident_end(off)
-    (e <= s).then({
-        return mp.lsp_reply_null(body)
-    })
-    mp.lsp_def_via_ast(root, body, mp.lsp_uri_path(uri), txt, mp.cstr_range(v, s, e)).then({
-        return 0
-    })
-    name: Slice<u8> = v.ptr.offset(s).slice(e - s)
-    d = v.lsp_find_def(name, 0, true)
-    (d < 0).match ({
-        true  => mp.lsp_reply_null(body),
-        false => mp.lsp_reply_location(body, uri, v.lsp_line_of(d, 0, 0, 0), v.lsp_col_of(d, 0, 0), e - s),
-    })
+    mp.lsp_send(sb.gstr_append(mp, "]}").gstr_finish(mp))
 }
 // HOVER: the declaration under the cursor as markdown — a fenced signature plus the doc comment
 // above it. compiler.lsp_query decides what that covers; "nothing to say" comes back as "" and is
 // answered with a null result, the protocol's own spelling of "no hover here" (never an empty popup).
 lsp_hover = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
-    txt = mp.lsp_doc_text(docs, mp.json_str_field(body, "uri"))
-    md = mp.lspq_hover(txt, body.lsp_json_int("line"), body.lsp_json_int("character"))
+    pos = mp.lsp_position_params(body)
+    (pos.ok == false).then({
+        return mp.lsp_reply_invalid_params(body)
+    })
+    txt = mp.lsp_doc_text(docs, pos.uri)
+    md = mp.lspq_hover(txt, pos.line, pos.character)
     is_empty(md).then({
         return mp.lsp_reply_null(body)
     })
@@ -752,7 +1464,11 @@ lsp_hover = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
 // of asking again on the next keystroke — true here precisely because the list does not depend on
 // the prefix being typed.
 lsp_completion = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
-    items = mp.lspq_items(mp.lsp_doc_text(docs, mp.json_str_field(body, "uri")))
+    pos = mp.lsp_position_params(body)
+    (pos.ok == false).then({
+        return mp.lsp_reply_invalid_params(body)
+    })
+    items = mp.lspq_items(mp.lsp_doc_text(docs, pos.uri))
     sb ::= mp
         .gstr_string(2048)
         .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
@@ -782,7 +1498,7 @@ LSP_SK_VARIABLE = () i64 { 13 }
 LSP_SK_STRUCT = () i64 { 23 }
 // 0-based line of byte `off`, walked ITERATIVELY — lsp_line_of recurses once per byte, which a
 // definition can afford (one conversion per request) and an outline cannot (four per symbol).
-lsp_line_at = (v: [u8], off: i64) i64 {
+lsp_line_at = (v: Slice<u8>, off: i64) i64 {
     ln :: i64 = 0
     zero: i64 = 0
     zero.step_while((i) { i < off && i < v.len }, (i) {
@@ -794,11 +1510,11 @@ lsp_line_at = (v: [u8], off: i64) i64 {
     ln
 }
 // byte offset of the start of the line `off` sits on.
-lsp_bol_at = (v: [u8], off: i64) i64 {
+lsp_bol_at = (v: Slice<u8>, off: i64) i64 {
     off.step_while((i) { i > 0 && v[i - 1] != '\n' }, (i) { i - 1 })
 }
 // one LSP Position for a byte offset. `character` is a UTF-16 code-unit column, not a byte column.
-lsp_push_pos = (sb: String, mp: Allocator, v: [u8], off: i64) String {
+lsp_push_pos = (sb: String, mp: Allocator, v: Slice<u8>, off: i64) String {
     o = (off < v.len).then({ off }, { v.len })
     ls = v.lsp_bol_at(o)
     sb
@@ -808,7 +1524,7 @@ lsp_push_pos = (sb: String, mp: Allocator, v: [u8], off: i64) String {
         .push_int(mp, v.lsp_utf16_col(ls, o - ls))
         .gstr_append(mp, "}")
 }
-lsp_push_range = (sb: String, mp: Allocator, v: [u8], s: i64, e: i64) String {
+lsp_push_range = (sb: String, mp: Allocator, v: Slice<u8>, s: i64, e: i64) String {
     sb
         .gstr_append(mp, "{\"start\":")
         .lsp_push_pos(mp, v, s)
@@ -823,7 +1539,7 @@ lsp_push_range = (sb: String, mp: Allocator, v: [u8], s: i64, e: i64) String {
 lsp_push_sym = (
     sb: String,
     mp: Allocator,
-    v: [u8],
+    v: MutSlice<u8>,
     name: StringView,
     kind: i64,
     off: i64,
@@ -840,7 +1556,7 @@ lsp_push_sym = (
         .lsp_push_range(mp, v, off, off + name.view().len)
 }
 // a childless DocumentSymbol.
-lsp_leaf_sym = (mp: Allocator, v: [u8], name: StringView, kind: i64, off: i64) StringView {
+lsp_leaf_sym = (mp: Allocator, v: MutSlice<u8>, name: StringView, kind: i64, off: i64) StringView {
     mp
         .gstr_string(192)
         .lsp_push_sym(mp, v, name, kind, off, off + name.view().len)
@@ -851,7 +1567,7 @@ lsp_leaf_sym = (mp: Allocator, v: [u8], name: StringView, kind: i64, off: i64) S
 // name emitted is the one the SOURCE writes: the parser HOISTS both a trait impl's methods and a type
 // body's INHERENT methods into mangled `impl_<Tr>_<Ty>_<m>` top-level functions, and that mangled name
 // must never reach the client — it supplies the position, the DImpl record supplies the name.
-lsp_impl_syms = (mp: Allocator, decls: [Decl], v: [u8], im: ImplData) StringView {
+lsp_impl_syms = (mp: Allocator, decls: MutSlice<Decl>, v: MutSlice<u8>, im: ImplData) StringView {
     sb ::= mp.gstr_string(256)
     n ::= 0
     im.methods.loop_at((k, m) {
@@ -868,7 +1584,12 @@ lsp_impl_syms = (mp: Allocator, decls: [Decl], v: [u8], im: ImplData) StringView
 // every method the file declares FOR type `ty`. A `Type.impl(Trait, { … })` block and a type body's
 // inherent methods are both recorded as a DImpl (the inherent one names the type as its own trait),
 // so one walk over the impls covers both spellings.
-lsp_method_syms = (mp: Allocator, decls: [Decl], v: [u8], ty: StringView) StringView {
+lsp_method_syms = (
+    mp: Allocator,
+    decls: MutSlice<Decl>,
+    v: MutSlice<u8>,
+    ty: StringView,
+) StringView {
     sb ::= mp.gstr_string(384)
     n ::= 0
     decls.loop_at((i, d) {
@@ -887,7 +1608,7 @@ lsp_method_syms = (mp: Allocator, decls: [Decl], v: [u8], ty: StringView) String
 }
 // the byte the method run of `ty` ends at, or `from` when it has none. A parent's `range` must ENCLOSE
 // its children's, so the type symbol's range is stretched to its last method's name.
-lsp_methods_end = (mp: Allocator, decls: [Decl], ty: StringView, from: i64) i64 {
+lsp_methods_end = (mp: Allocator, decls: MutSlice<Decl>, ty: StringView, from: i64) i64 {
     last ::= from
     decls.loop_at((i, d) {
         d.match ({
@@ -910,8 +1631,8 @@ lsp_methods_end = (mp: Allocator, decls: [Decl], ty: StringView, from: i64) i64 
 // go-to-definition off a field).
 lsp_type_sym = (
     mp: Allocator,
-    decls: [Decl],
-    v: [u8],
+    decls: MutSlice<Decl>,
+    v: MutSlice<u8>,
     name: StringView,
     kind: i64,
     off: i64,
@@ -926,7 +1647,7 @@ lsp_type_sym = (
 }
 // does THIS file declare the type `name`? An impl whose type lives in another file has no parent
 // symbol here, so its methods are emitted at top level rather than dropped.
-lsp_has_type = (decls: [Decl], name: StringView) bool {
+lsp_has_type = (decls: MutSlice<Decl>, name: StringView) bool {
     found ::= false
     decls.loop_at((i, d) {
         d.match ({
@@ -951,7 +1672,7 @@ lsp_has_type = (decls: [Decl], name: StringView) bool {
 // records and module aliases (they name another file), trait defaults, raw C escapes, every
 // SYNTHESIZED decl (pos 0 — the parser's anonymous-struct shapes and its syntax-error sentinel), and
 // every hoisted method function, which is re-emitted under its type instead.
-lsp_decl_sym = (mp: Allocator, decls: [Decl], v: [u8], d: Decl) StringView {
+lsp_decl_sym = (mp: Allocator, decls: MutSlice<Decl>, v: MutSlice<u8>, d: Decl) StringView {
     d.match ({
         .DFunc(f)      => (f.pos == 0 || mp.ff_is_hoisted(decls, f.name)).match ({
             true  => "",
@@ -1053,6 +1774,14 @@ lsp_semantic_tokens = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i
         }),
     })
 }
+lsp_reply_invalid_params = (mp: Allocator, body: StringView) i64 {
+    mp.lsp_send(mp
+        .gstr_string(144)
+        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
+        .gstr_append(mp, mp.lsp_id(body))
+        .gstr_append(mp, ",\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}")
+        .gstr_finish(mp))
+}
 lsp_reply_null = (mp: Allocator, body: StringView) i64 {
     mp.lsp_send(mp
         .gstr_string(96)
@@ -1106,9 +1835,9 @@ lsp_did_change = (mp: Allocator, docs: MutPtr<LspDocs>, root: StringView, body: 
 lsp_handle = (session: MutPtr<LspSession>, root: StringView, body: StringView) i32 {
     mp = session.requests.addr().allocator()
     docs = session.docs.addr()
-    method = mp.json_str_field(body, "method")
+    method = mp.json_top_string(body, "method")
     (method == "initialize").then({
-        mp.lsp_reply_initialize(body)
+        session.lsp_reply_initialize(mp, body)
         return 0
     })
     (method == "shutdown").then({
@@ -1128,8 +1857,28 @@ lsp_handle = (session: MutPtr<LspSession>, root: StringView, body: StringView) i
         mp.lsp_publish_clear(closed)
         return 0
     })
-    (method == "textDocument/definition").then({
-        mp.lsp_definition(docs, root, body)
+    (method == "textDocument/definition" || method == "textDocument/declaration").then({
+        mp.lsp_definition(session, root, body)
+        return 0
+    })
+    (method == "textDocument/references").then({
+        mp.lsp_references(session, root, body)
+        return 0
+    })
+    (method == "textDocument/documentHighlight").then({
+        mp.lsp_document_highlight(session, root, body)
+        return 0
+    })
+    (method == "textDocument/prepareRename").then({
+        mp.lsp_prepare_rename(session, root, body)
+        return 0
+    })
+    (method == "textDocument/rename").then({
+        mp.lsp_rename(session, root, body)
+        return 0
+    })
+    (method == "workspace/symbol").then({
+        mp.lsp_workspace_symbol(session, root, body)
         return 0
     })
     (method == "textDocument/hover").then({
@@ -1149,7 +1898,7 @@ lsp_handle = (session: MutPtr<LspSession>, root: StringView, body: StringView) i
         return 0
     })
     v: Slice<u8> = body.view()
-    (v.json_find_key("id") >= 0 && lsp_is_notification(method) == false).then({
+    (body.json_top_field("id") >= 0 && lsp_is_notification(method) == false).then({
         mp.lsp_reply_method_not_found(body)
     })
     0

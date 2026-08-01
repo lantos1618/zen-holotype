@@ -1,10 +1,9 @@
-// compiler.passes.closures — closure conversion sub-pass extracted from compiler.check.
 { ArmData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, LambdaData, Param, Stmt,
   StructDecl, VarData } = compiler.ast.ast_types
-{ cbuf, arm_at, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop, ematch, ematchp, finit,
-  gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mfield, mkenumg, mkstruct,
-  mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_atm, slit, sret, swhile,
-  tnamed, tnode, tvoid, vref, vref_at, acquire_or_die } = compiler.genc
+{ cbuf, arm_spans, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop_at, ematch, ematchp,
+  field_at, finit_at, gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mfield,
+  mkenumg_at, mkstruct, mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_atm,
+  slit, sret, swhile, param_at, tnamed, tnode, tvoid, vref, vref_at, acquire_or_die } = compiler.genc
 { DeclIndex, Env, VList, cebuf, cenode, empty_params, no_stmts, param_index, pbuf, recall, vcons,
   vnil } = compiler.check
 { lift_extend, lift_is_captured, lift_lamparams, lift_liftable } = compiler.passes.lift
@@ -23,7 +22,7 @@ clos_local_call_name* = (env: Env, name: StringView) StringView {
         false => "",
     })
 }
-clos_call_rewrite* = (a: Allocator, c: CallData, cn: StringView, buf: [Expr]) Ptr<Expr> {
+clos_call_rewrite* = (a: Allocator, c: CallData, cn: StringView, buf: MutSlice<Expr>) Ptr<Expr> {
     args ::= a.cebuf(buf.len + 1)
     args[0] = vref(c.fn)
     buf.loop_at((i, e) { args[i + 1] = e })
@@ -43,16 +42,16 @@ clos_call_name = (a: Allocator, structn: StringView) StringView {
         .gstr_append(a, "_call")
         .gstr_finish(a)
 }
-clos_params_has = (ps: [Param], n: StringView) bool { ps.param_index(n) >= 0 }
+clos_params_has = (ps: MutSlice<Param>, n: StringView) bool { ps.param_index(n) >= 0 }
 // Does the lambda body capture a FREE name that is NOT one of the enclosing function's params (and not
 // a lambda-bound name / top-level / true|false)? Such a closure is unsupported here → leave it be.
 clos_bad_args = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     bound: Ptr<VList>,
-    ps: [Param],
-    xs: [Expr],
+    ps: MutSlice<Param>,
+    xs: MutSlice<Expr>,
 ) bool {
     found ::= false
     xs.loop_at((i, x) {
@@ -62,11 +61,11 @@ clos_bad_args = (
 }
 clos_bad_inits = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     bound: Ptr<VList>,
-    ps: [Param],
-    inits: [FieldInit],
+    ps: MutSlice<Param>,
+    inits: MutSlice<FieldInit>,
 ) bool {
     found ::= false
     inits.loop_at((i, fi) {
@@ -76,11 +75,11 @@ clos_bad_inits = (
 }
 clos_bad_arms = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     bound: Ptr<VList>,
-    ps: [Param],
-    arms: [ArmData],
+    ps: MutSlice<Param>,
+    arms: MutSlice<ArmData>,
 ) bool {
     found ::= false
     arms.loop_at((i, ar) {
@@ -93,11 +92,11 @@ clos_bad_arms = (
 }
 clos_bad_body = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     bound: Ptr<VList>,
-    ps: [Param],
-    body: [Stmt],
+    ps: MutSlice<Param>,
+    body: MutSlice<Stmt>,
 ) bool {
     found ::= false
     b ::= bound
@@ -109,10 +108,10 @@ clos_bad_body = (
 }
 clos_bad_stmt = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     bound: Ptr<VList>,
-    ps: [Param],
+    ps: MutSlice<Param>,
     st: Stmt,
 ) bool {
     st.match ({
@@ -133,10 +132,10 @@ clos_bad_stmt = (
 }
 clos_bad_expr = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     bound: Ptr<VList>,
-    ps: [Param],
+    ps: MutSlice<Param>,
     e: Ptr<Expr>,
 ) bool {
     load(e).match ({
@@ -168,7 +167,7 @@ clos_bad_expr = (
 // substitute every reference to a captured param `p` with `__clenv.p` (a member access) in the lifted
 // body. Captured-param names never collide with the lambda's own params (those are bound, not free), so
 // a flat name-keyed substitution is correct for the supported shape.
-clos_sub_var = (a: Allocator, ps: [Param], v: VarData) Ptr<Expr> {
+clos_sub_var = (a: Allocator, ps: MutSlice<Param>, v: VarData) Ptr<Expr> {
     ps.clos_params_has(v.name).match ({
         true  => a.cenode(member_at(a.cenode(vref("__clenv")), v.name, v.pos)),
         false => a.cenode(vref_at(v.name, v.pos)),
@@ -178,7 +177,7 @@ clos_sub_var = (a: Allocator, ps: [Param], v: VarData) Ptr<Expr> {
 // indirect call through that field: `f(args) -> ({ __zclos_recv = __clenv.f  __zclos_recv(args) })`.
 // Same shape as check.rewrite_fn_field_call (the proven local-fn-value genc path — C `__auto_type` +
 // native indirect call); the fixed temp name is block-scoped, so nested closure calls never collide.
-clos_sub_fncall = (a: Allocator, ps: [Param], c: CallData) Ptr<Expr> {
+clos_sub_fncall = (a: Allocator, ps: MutSlice<Param>, c: CallData) Ptr<Expr> {
     rest = a.clos_sub_args(ps, c.args)
     letst = slet("__zclos_recv", a.cenode(member(a.cenode(vref("__clenv")), c.fn)))
     callx = a.cenode(call_at("__zclos_recv", rest, c.pos))
@@ -187,18 +186,24 @@ clos_sub_fncall = (a: Allocator, ps: [Param], c: CallData) Ptr<Expr> {
     sbuf2[1] = sexpr(callx)
     a.cenode(block(sbuf2))
 }
-clos_sub_args = (a: Allocator, ps: [Param], xs: [Expr]) [Expr] {
+clos_sub_args = (a: Allocator, ps: MutSlice<Param>, xs: MutSlice<Expr>) MutSlice<Expr> {
     buf ::= a.cebuf(xs.len)
     xs.loop_at((i, x) { buf[i] = load(a.clos_sub_expr(ps, x.addr())) })
     buf
 }
-clos_sub_inits = (a: Allocator, ps: [Param], inits: [FieldInit]) [FieldInit] {
-    map_slice(a, inits, (fi) { finit(fi.name, a.clos_sub_expr(ps, fi.value)) })
+clos_sub_inits = (
+    a: Allocator,
+    ps: MutSlice<Param>,
+    inits: MutSlice<FieldInit>,
+) MutSlice<FieldInit> {
+    map_slice(a, inits, (fi) { finit_at(fi.name, a.clos_sub_expr(ps, fi.value), fi.pos) })
 }
-clos_sub_arms = (a: Allocator, ps: [Param], arms: [ArmData]) [ArmData] {
-    map_slice(a, arms, (ar) { arm_at(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos) })
+clos_sub_arms = (a: Allocator, ps: MutSlice<Param>, arms: MutSlice<ArmData>) MutSlice<ArmData> {
+    map_slice(a, arms, (ar) {
+        arm_spans(ar.variant, ar.bind, a.clos_sub_expr(ps, ar.body), ar.pos, ar.variant_pos, ar.bind_pos)
+    })
 }
-clos_sub_expr = (a: Allocator, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
+clos_sub_expr = (a: Allocator, ps: MutSlice<Param>, e: Ptr<Expr>) Ptr<Expr> {
     load(e).match ({
         .Var(v)        => a.clos_sub_var(ps, v),
         .MakeStruct(s) => a.cenode(mkstructg_at(s.ty, s.mty, s.targs, a.clos_sub_inits(ps, s.inits), s.pos)),
@@ -209,20 +214,20 @@ clos_sub_expr = (a: Allocator, ps: [Param], e: Ptr<Expr>) Ptr<Expr> {
             true  => a.clos_sub_fncall(ps, c),
             false => a.recall(c, c.fn, a.clos_sub_args(ps, c.args)),
         }),
-        .MakeEnum(mk)  => a.cenode(mkenumg(mk.ty, mk.mty, mk.targs, mk.variant, a.clos_sub_expr(ps, mk.payload))),
+        .MakeEnum(mk)  => a.cenode(mkenumg_at(mk.ty, mk.mty, mk.targs, mk.variant, a.clos_sub_expr(ps, mk.payload), mk.ty_pos, mk.variant_pos)),
         .Match(m)      => m.ptr.match ({
             true  => a.cenode(ematchp(a.clos_sub_expr(ps, m.subj), m.ename, a.clos_sub_arms(ps, m.arms))),
             false => a.cenode(ematch(a.clos_sub_expr(ps, m.subj), m.ename, a.clos_sub_arms(ps, m.arms))),
         }),
         .Index(ix)     => a.cenode(eindex(a.clos_sub_expr(ps, ix.seq), a.clos_sub_expr(ps, ix.idx), ix.elem)),
         .SliceLit(sd)  => a.cenode(slit(sd.elem, a.clos_sub_args(ps, sd.items))),
-        .Loop(l)       => a.cenode(eloop(a.clos_sub_expr(ps, l.seq), l.idx, l.elem, l.elemTy, a.clos_sub_body(ps, l.body), l.h)),
+        .Loop(l)       => a.cenode(eloop_at(a.clos_sub_expr(ps, l.seq), l.idx, l.elem, l.elemTy, a.clos_sub_body(ps, l.body), l.h, l.h_pos, l.idx_pos, l.elem_pos)),
         .Block(bl)     => a.cenode(block(a.clos_sub_body(ps, bl.stmts))),
         .Lambda(lm)    => a.cenode(lam_r(lm.params, a.clos_sub_body(ps, lm.body), lm.ret)),
         _              => e,
     })
 }
-clos_sub_stmt = (a: Allocator, ps: [Param], st: Stmt) Stmt {
+clos_sub_stmt = (a: Allocator, ps: MutSlice<Param>, st: Stmt) Stmt {
     st.match ({
         .Let(l)      => slett_atm(l.name, l.ty, a.clos_sub_expr(ps, l.value), l.pos, l.mut),
         .Assign(x)   => sassign_at(a.clos_sub_expr(ps, x.target), a.clos_sub_expr(ps, x.value), x.pos),
@@ -233,12 +238,12 @@ clos_sub_stmt = (a: Allocator, ps: [Param], st: Stmt) Stmt {
         .IndexSet(x) => sidxset_at(a.clos_sub_expr(ps, x.seq), a.clos_sub_expr(ps, x.idx), x.elem, a.clos_sub_expr(ps, x.value), x.pos),
     })
 }
-clos_sub_body = (a: Allocator, ps: [Param], body: [Stmt]) [Stmt] {
+clos_sub_body = (a: Allocator, ps: MutSlice<Param>, body: MutSlice<Stmt>) MutSlice<Stmt> {
     map_slice(a, body, (st) { a.clos_sub_stmt(ps, st) })
 }
 // the tail (implicit-return) lambda of a body, if any: the last statement is a bare expression that is
 // itself a lambda literal. (a `return <lambda>` tail works too.)
-clos_tail_lambda = (body: [Stmt]) bool {
+clos_tail_lambda = (body: MutSlice<Stmt>) bool {
     (body.len == 0).match ({
         true  => false,
         false => body[body.len - 1].match ({
@@ -254,7 +259,7 @@ clos_tail_lambda = (body: [Stmt]) bool {
         }),
     })
 }
-clos_tail_lam_of = (body: [Stmt]) LambdaData {
+clos_tail_lam_of = (body: MutSlice<Stmt>) LambdaData {
     none = LambdaData(
         params: empty_params(),
         body: no_stmts(),
@@ -273,34 +278,39 @@ clos_tail_lam_of = (body: [Stmt]) LambdaData {
     })
 }
 // build the lifted call fn's params: `__clenv: __clos_K` then each lambda param typed from the FnT sig.
-clos_call_params = (a: Allocator, structn: StringView, lm: LambdaData, ft: FnTData) [Param] {
+clos_call_params = (
+    a: Allocator,
+    structn: StringView,
+    lm: LambdaData,
+    ft: FnTData,
+) MutSlice<Param> {
     ps ::= a.pbuf(lm.params.len + 1)
     ps[0] = param("__clenv", tnamed(structn))
     lm.params.loop_at((i, p) {
-        ps[i + 1] = param(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }))
+        ps[i + 1] = param_at(p.name, (i < ft.params.len).then({ ft.params[i] }, { tvoid() }), p.pos)
     })
     ps
 }
 // the closure struct's fields = the enclosing function's params (captured by value).
-clos_struct_fields = (a: Allocator, fps: [Param]) [Field] {
+clos_struct_fields = (a: Allocator, fps: MutSlice<Param>) MutSlice<Field> {
     fs = a.acquire_or_die(fps.len * sizeof(Field))
-    out :: [Field] = slice(fs, fps.len)
-    fps.loop_at((i, p) { out[i] = field(p.name, p.ty) })
+    out :: MutSlice<Field> = slice(fs, fps.len)
+    fps.loop_at((i, p) { out[i] = field_at(p.name, p.ty, p.pos) })
     out
 }
 // the closure literal's field inits = each captured param bound to its own current value.
-clos_struct_inits = (a: Allocator, fps: [Param]) [FieldInit] {
-    map_slice(a, fps, (p) { finit(p.name, a.cenode(vref(p.name))) })
+clos_struct_inits = (a: Allocator, fps: MutSlice<Param>) MutSlice<FieldInit> {
+    map_slice(a, fps, (p) { finit_at(p.name, a.cenode(vref(p.name)), p.pos) })
 }
 // rebuild the enclosing body with its tail lambda replaced by the closure struct literal.
-clos_replace_tail = (a: Allocator, body: [Stmt], mk: Ptr<Expr>) [Stmt] {
+clos_replace_tail = (a: Allocator, body: MutSlice<Stmt>, mk: Ptr<Expr>) MutSlice<Stmt> {
     buf ::= cbuf<Stmt>(a, body.len)
     body.loop_at((i, st) { buf[i] = (i == body.len - 1).then({ sret(mk) }, { st }) })
     buf
 }
 // does `f` return a capturing-over-params closure we can lower? (FnT return + tail lambda + it captures
 // at least one param + it captures NOTHING but params).
-clos_lowerable* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) bool {
+clos_lowerable* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func) bool {
     f.ret.match ({
         .FnT(ft) => f.body.clos_tail_lambda().match ({
             true  => {
@@ -317,7 +327,7 @@ clos_lowerable* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) bool {
 // lower one function (caller checked clos_lowerable): emit the struct + call fn into `gen` (2 decls at
 // 2*id and 2*id+1), bump the closure counter, and return the rewritten enclosing function (returns the
 // struct by value; ret type becomes the closure struct).
-clos_lower_func* = (a: Allocator, ccp: RawPtr<u8>, gen: [Decl], f: Func) Decl {
+clos_lower_func* = (a: Allocator, ccp: RawPtr<u8>, gen: MutSlice<Decl>, f: Func) Decl {
     ft = f.ret.match ({
         .FnT(g) => g,
         _       => FnTData(

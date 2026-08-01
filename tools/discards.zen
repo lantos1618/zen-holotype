@@ -28,7 +28,7 @@
 { expect } = std.core.result
 { then } = std.core.bool
 { arg_int, arg_str, format } = std.text.fmt
-{ Map, of } = std.collections.map
+{ Map } = std.collections.map
 { parse_module } = compiler.parse
 { perr_get } = compiler.parse_type
 { lerr_get } = compiler.lex
@@ -61,7 +61,7 @@ idx_note = (m: Map<i64>, a: Allocator, name: StringView, res: bool) Map<i64> {
     m.put(a.addr(), name, next).expect("discards: index alloc")
 }
 // the return type of the fn named `name` among `decls` (Void when absent)
-find_ret = (decls: [Decl], name: StringView) Ty {
+find_ret = (decls: MutSlice<Decl>, name: StringView) Ty {
     res :: Ty = .Void
     found ::= false
     decls.loop((h, i, d) {
@@ -76,7 +76,7 @@ find_ret = (decls: [Decl], name: StringView) Ty {
     res
 }
 // an impl's methods, registered under the SIMPLE method name (the UFCS call-site spelling)
-idx_impl = (m: Map<i64>, a: Allocator, decls: [Decl], im: ImplData) Map<i64> {
+idx_impl = (m: Map<i64>, a: Allocator, decls: MutSlice<Decl>, im: ImplData) Map<i64> {
     out ::= m
     im.methods.loop((h, k, p) {
         r = decls.find_ret(a.impl_cname_in(im.trname, im.ty, p.name))
@@ -84,7 +84,7 @@ idx_impl = (m: Map<i64>, a: Allocator, decls: [Decl], im: ImplData) Map<i64> {
     })
     out
 }
-idx_module = (m: Map<i64>, a: Allocator, decls: [Decl]) Map<i64> {
+idx_module = (m: Map<i64>, a: Allocator, decls: MutSlice<Decl>) Map<i64> {
     out ::= m
     decls.loop((h, i, d) {
         out = d.match ({
@@ -139,7 +139,7 @@ is_result_call = (cx: Ctx, e: Ptr<Expr>) bool {
 report = (cx: Ctx, e: Ptr<Expr>, tag: StringView) void {
     format("{}:{}: {} in {} [{}]\n", [arg_str(cx.path), arg_int(cx.src.line_of(callee_pos(e))), arg_str(callee_of(e)), arg_str(cx.fname), arg_str(tag)])
 }
-scan_arms = (cx: Ctx, arms: [ArmData], mode: i32) void {
+scan_arms = (cx: Ctx, arms: MutSlice<ArmData>, mode: i32) void {
     arms.loop((h, i, ar) {
         cx.scan_expr(ar.body, mode)
     })
@@ -188,7 +188,7 @@ scan_expr = (cx: Ctx, e: Ptr<Expr>, mode: i32) void {
         },
     })
 }
-scan_body = (cx: Ctx, stmts: [Stmt], mode: i32) void {
+scan_body = (cx: Ctx, stmts: MutSlice<Stmt>, mode: i32) void {
     stmts.loop((h, i, st) {
         tail = i == stmts.len - 1
         st.match ({
@@ -244,7 +244,7 @@ scan_fn = (cx: Ctx, f: Func) void {
     )
     c2.scan_body(f.body, vf)
 }
-scan_module = (cx: Ctx, decls: [Decl]) void {
+scan_module = (cx: Ctx, decls: MutSlice<Decl>) void {
     decls.loop((h, i, d) {
         d.match ({
             .DFunc(f) => cx.scan_fn(f),
@@ -260,7 +260,7 @@ sv_lt_at = (xv: Slice<u8>, yv: Slice<u8>, i: i64) bool {
     })
 }
 sv_lt = (x: StringView, y: StringView) bool { x.view().sv_lt_at(y.view(), 0) }
-sift_left = (xs: [StringView], j: i64) void {
+sift_left = (xs: MutSlice<StringView>, j: i64) void {
     (j > 0 && sv_lt(xs[j], xs[j - 1])).then({
         t = xs[j]
         xs[j] = xs[j - 1]
@@ -268,13 +268,13 @@ sift_left = (xs: [StringView], j: i64) void {
         xs.sift_left(j - 1)
     })
 }
-sort_from = (xs: [StringView], i: i64) void {
+sort_from = (xs: MutSlice<StringView>, i: i64) void {
     (i < xs.len).then({
         xs.sift_left(i)
         xs.sort_from(i + 1)
     })
 }
-sort_names = (xs: [StringView]) void { xs.sort_from(1) }
+sort_names = (xs: MutSlice<StringView>) void { xs.sort_from(1) }
 // index one file into `m` (phase 0)
 index_file = (m: Map<i64>, a: Allocator, path: StringView) Map<i64> {
     src = a.addr().contents_in(path).expect("discards: cannot read file")
@@ -288,7 +288,7 @@ scan_file = (m: Map<i64>, a: Allocator, path: StringView) void {
     decls = a.parse_module(src)
     ((perr_get() || lerr_get()) == false).then({
         seed: i64 = 0
-        loc = of(a.addr(), "", seed).expect("discards: local index alloc").idx_module(a, decls)
+        loc = a.map_of("", seed).expect("discards: local index alloc").idx_module(a, decls)
         cx = Ctx(
             path: path,
             src: src,
@@ -343,7 +343,7 @@ main = () i32 {
     mm = heap_allocator()
     a = mm
     seed: i64 = 0
-    m ::= of(a.addr(), "", seed).expect("discards: index alloc")
+    m ::= a.map_of("", seed).expect("discards: index alloc")
     // phase 0: index the WHOLE repo, so a call into another module resolves
     m = m.walk(a, "src", 0)
     m = m.walk(a, "driver.zen", 0)

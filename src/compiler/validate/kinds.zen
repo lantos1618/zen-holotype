@@ -1,4 +1,3 @@
-// compiler.validate.kinds — per-node kind checks: enums, matches, operands, indices, methods, FFI.
 { ArmData, AssignData, BinData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, GlobalData,
   ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData, MethodCallData, Param, Stmt,
   Ty, VariantDef } = compiler.ast.ast_types
@@ -19,10 +18,10 @@
 { env_imported, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn,
   env_struct_fields, env_trait_method, expr_pos, fit_err, is_ctx_typed_arg, is_ptr_ty, is_struct,
   lit_slot_verdict, pos_or, tparam_bound, ty_mentions_tparam, unknown_ty, ut_unknown_tys } = compiler.validate.util
-{ KARGTYPE, KARITY, KBADBIND, KCAPACITY, KDIAG_CAP, KEOFINPUT, KEXPECTARROW, KEXPECTDECL,
-  KEXPECTEXPR, KEXPECTINIT, KFFITYPE, KFIELDDEFAULT, KLETEQ, KLETTYPE, KMISGEN, KNOTYPEARGS,
-  KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND, KUNCLOSED,
-  KUNKNOWNTYPE, KUNREACHABLEARM, KPTRWRITE, KSLICEWRITE, KVBREAK, KWALRUS, desc_or } = compiler.validate.diag
+{ KARGTYPE, KARITY, KBADBIND, KBRACKETTYPE, KCAPACITY, KDIAG_CAP, KEOFINPUT, KEXPECTARROW,
+  KEXPECTDECL, KEXPECTEXPR, KEXPECTINIT, KFFITYPE, KFIELDDEFAULT, KLETEQ, KLETTYPE, KMISGEN,
+  KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND,
+  KUNCLOSED, KUNKNOWNTYPE, KUNREACHABLEARM, KPTRWRITE, KSLICEWRITE, KVBREAK, KWALRUS, desc_or } = compiler.validate.diag
 // which read-only thing the lvalue walk stopped on -> the diagnostic that names it. `[T]` and
 // `Ptr<T>` are different mistakes with different fixes, so they get different messages.
 write_diag_kind = (c: i32) i32 {
@@ -37,7 +36,7 @@ write_diag_kind = (c: i32) i32 {
 { kv_at, kv_one } = compiler.validate.core
 { loop_at } = std.core.count
 // Does some `Type.impl(Trait)` exist? i.e. a DImpl naming this type + trait.
-type_impls_trait = (decls: [Decl], tyname: StringView, trname: StringView) bool {
+type_impls_trait = (decls: MutSlice<Decl>, tyname: StringView, trname: StringView) bool {
     found ::= false
     decls.loop_at((i, d) {
         found = d.match ({
@@ -111,7 +110,7 @@ known_void_call = (env: Env, c: CallData) bool {
     f = env.env_func(c.fn)
     (f.name == c.fn).then({ f.tparams.len == 0 && f.ret.is_void_ty() }, { false })
 }
-novalue_block_tail = (env: Env, stmts: [Stmt]) i32 {
+novalue_block_tail = (env: Env, stmts: MutSlice<Stmt>) i32 {
     (stmts.len == 0).match ({
         true  => 1,
         false => stmts[stmts.len - 1].match ({
@@ -127,7 +126,7 @@ novalue_match_arms = (env: Env, m: MatchData) i32 {
     acc
 }
 // Early returns inside value-position block arms would be dropped by expression emission.
-early_returns = (stmts: [Stmt]) bool {
+early_returns = (stmts: MutSlice<Stmt>) bool {
     found ::= false
     stmts.loop_at((i, st) {
         found = (i < stmts.len - 1).match ({
@@ -147,8 +146,8 @@ expr_drops_return* = (e: Ptr<Expr>) i32 {
     })
 }
 // Enum matches must be exhaustive and have no duplicate arms.
-no_variants = () [VariantDef] { slice(null_ptr(), 0) }
-enum_variants* = (decls: [Decl], ename: StringView) [VariantDef] {
+no_variants = () MutSlice<VariantDef> { slice(null_ptr(), 0) }
+enum_variants* = (decls: MutSlice<Decl>, ename: StringView) MutSlice<VariantDef> {
     found ::= no_variants()
     decls.loop_at((i, d) {
         found = d.match ({
@@ -159,30 +158,30 @@ enum_variants* = (decls: [Decl], ename: StringView) [VariantDef] {
     })
     found
 }
-has_wildcard* = (arms: [ArmData]) bool { arms.slice_any((a) { a.variant == "_" }) }
-arm_covers = (arms: [ArmData], vname: StringView) bool {
+has_wildcard* = (arms: MutSlice<ArmData>) bool { arms.slice_any((a) { a.variant == "_" }) }
+arm_covers = (arms: MutSlice<ArmData>, vname: StringView) bool {
     arms.slice_any((a) { a.variant == vname })
 }
-missing_count = (variants: [VariantDef], arms: [ArmData]) i32 {
+missing_count = (variants: MutSlice<VariantDef>, arms: MutSlice<ArmData>) i32 {
     n ::= 0
     variants.loop_at((i, v) { n = arms.arm_covers(v.name).then({ n }, { n + 1 }) })
     n
 }
 // the NAME of the first declared variant the arms do not cover, else "" — the uncovered
 // variant an exhaustiveness diagnostic names so the fix is a copy-pasteable `.Variant => …` arm.
-first_missing_variant* = (variants: [VariantDef], arms: [ArmData]) StringView {
+first_missing_variant* = (variants: MutSlice<VariantDef>, arms: MutSlice<ArmData>) StringView {
     r ::= ""
     variants.loop_at((i, v) {
         r = (is_empty(r) && arms.arm_covers(v.name) == false).then({ v.name }, { r })
     })
     r
 }
-dup_before = (arms: [ArmData], vname: StringView, upto: i32) bool {
+dup_before = (arms: MutSlice<ArmData>, vname: StringView, upto: i32) bool {
     f ::= false
     arms.loop_at((i, a) { f = (i < upto && a.variant == vname).then({ true }, { f }) })
     f
 }
-dup_arm_errs* = (arms: [ArmData]) i32 {
+dup_arm_errs* = (arms: MutSlice<ArmData>) i32 {
     n ::= 0
     arms.loop_at((i, a) {
         n = n + (a.variant == "_").match ({
@@ -196,18 +195,18 @@ dup_arm_errs* = (arms: [ArmData]) i32 {
 // default case (gen_switch_arms), so such an arm is silently DROPPED. Report it instead of
 // letting code that looks reachable vanish. (A duplicate variant arm — the other never-fires
 // shape — is already KDUPVARIANT, whether or not a wildcard is present.)
-wildcard_before = (arms: [ArmData], upto: i32) bool {
+wildcard_before = (arms: MutSlice<ArmData>, upto: i32) bool {
     f ::= false
     arms.loop_at((i, a) { f = (i < upto && a.variant == "_").then({ true }, { f }) })
     f
 }
-unreachable_arm_errs* = (arms: [ArmData]) i32 {
+unreachable_arm_errs* = (arms: MutSlice<ArmData>) i32 {
     n ::= 0
     arms.loop_at((i, a) { n = n + arms.wildcard_before(i).then({ 1 }, { 0 }) })
     n
 }
 // Reject constructors whose variant is not declared in the linked decl set.
-enum_declares = (decls: [Decl], vn: StringView) bool {
+enum_declares = (decls: MutSlice<Decl>, vn: StringView) bool {
     decls.slice_any((d) {
         d.match ({
             .DEnum(ed)   => ed.variants.arm_known(vn),
@@ -217,7 +216,9 @@ enum_declares = (decls: [Decl], vn: StringView) bool {
     })
 }
 // Every non-wildcard arm must name a declared variant.
-arm_known = (vs: [VariantDef], vname: StringView) bool { vs.slice_any((v) { v.name == vname }) }
+arm_known = (vs: MutSlice<VariantDef>, vname: StringView) bool {
+    vs.slice_any((v) { v.name == vname })
+}
 // Operand checking stays lenient for uninferable operands.
 is_arith_op = (op: StringView) bool {
     b = op.at(0)
@@ -399,30 +400,32 @@ ty_has_void_targ = (t: Ty) bool {
         _           => false,
     })
 }
-tys_mention_void = (ts: [Ty]) bool { ts.slice_any((t) { t.is_void_ty() || t.ty_has_void_targ() }) }
+tys_mention_void = (ts: MutSlice<Ty>) bool {
+    ts.slice_any((t) { t.is_void_ty() || t.ty_has_void_targ() })
+}
 // rewrite `Self` to the implementing type throughout a trait method's type (recursing Ptr/Slice).
 impl_ty = (tyname: StringView) Ty {
-    (tyname == "i32").match ({
-        true  => ti32(),
-        false => (tyname == "i64").match ({
-            true  => ti64(),
-            false => (tyname == "u8").match ({
-                true  => tu8(),
-                false => (tyname == "f64").match ({
-                    true  => tf64(),
-                    false => (tyname == "bool").match ({
-                        true  => tbool(),
-                        // Only `StringView` appears here: parse_impl canonicalizes every
-                        // string-family impl receiver onto it, so `Self` in a string impl is a view.
-                        false => (tyname == "StringView").match ({
-                            true  => tstring_view(),
-                            false => tnamed(tyname),
-                        }),
-                    }),
-                }),
-            }),
-        }),
+    (tyname == "i32").then({
+        return ti32()
     })
+    (tyname == "i64").then({
+        return ti64()
+    })
+    (tyname == "u8").then({
+        return tu8()
+    })
+    (tyname == "f64").then({
+        return tf64()
+    })
+    (tyname == "bool").then({
+        return tbool()
+    })
+    // Only `StringView` appears here: parse_impl canonicalizes every string-family impl receiver
+    // onto it, so `Self` in a string impl is a view.
+    (tyname == "StringView").then({
+        return tstring_view()
+    })
+    tnamed(tyname)
 }
 subst_self = (a: Allocator, t: Ty, tyname: StringView) Ty {
     t.match ({
@@ -433,7 +436,13 @@ subst_self = (a: Allocator, t: Ty, tyname: StringView) Ty {
     })
 }
 // each declared param type (Self→tyname) must equal the impl method's, left to right.
-params_match = (a: Allocator, tps: [Ty], ips: [Param], tyname: StringView, i: i32) bool {
+params_match = (
+    a: Allocator,
+    tps: MutSlice<Ty>,
+    ips: MutSlice<Param>,
+    tyname: StringView,
+    i: i32,
+) bool {
     (i == tps.len).match ({
         true  => true,
         false => a.subst_self(tps[i], tyname).ty_eq(ips[i].ty).match ({
@@ -453,7 +462,7 @@ sig_matches = (a: Allocator, fd: FnTData, f: Func, tyname: StringView) bool {
     })
 }
 // does the trait `trname` declare a DEFAULT body for method `m`? (then an impl may OMIT it.)
-trait_has_default* = (decls: [Decl], trname: StringView, m: StringView) bool {
+trait_has_default* = (decls: MutSlice<Decl>, trname: StringView, m: StringView) bool {
     found ::= false
     decls.loop_at((i, d) {
         found = d.match ({
@@ -471,7 +480,7 @@ trait_has_default* = (decls: [Decl], trname: StringView, m: StringView) bool {
 // method bodies are top-level DFuncs found by name. So per declared method: missing → 1 error;
 // present but signature-mismatched → 1 error; present and matching → 0. The check is tied to THIS
 // impl (im.methods), not a global function search, so an unrelated same-named fn never satisfies it.
-method_err* = (a: Allocator, decls: [Decl], im: ImplData, f: Field) i32 {
+method_err* = (a: Allocator, decls: MutSlice<Decl>, im: ImplData, f: Field) i32 {
     f.ty.match ({
         .FnT(fd) => im.methods.param_names_has(f.name).match ({
             true  => a.sig_matches(fd, decls.the_func(a.impl_cname_in(im.trname, im.ty, f.name)), im.ty).match ({
@@ -485,10 +494,10 @@ method_err* = (a: Allocator, decls: [Decl], im: ImplData, f: Field) i32 {
 }
 // a match: exhaustiveness vs duplicate-variant, split out from match_err. The caret points at the
 // matched subject (arms carry no source position); the subject bottoms at a Var, which survives resolve.
-arms_first_pos* = (arms: [ArmData]) i32 { (arms.len == 0).then({ 0 }, { arms[0].pos }) }
+arms_first_pos* = (arms: MutSlice<ArmData>) i32 { (arms.len == 0).then({ 0 }, { arms[0].pos }) }
 // ── trait-bound enrichment ─────────────────────────────────────────────────────────────────────
 // the method names an impl of (type `tn`, trait `tr`) provides; empty when no such impl exists.
-impl_methods_of* = (decls: [Decl], tn: StringView, tr: StringView) [Param] {
+impl_methods_of* = (decls: MutSlice<Decl>, tn: StringView, tr: StringView) MutSlice<Param> {
     found ::= empty_params()
     decls.loop_at((i, d) {
         found = d.match ({
@@ -525,17 +534,17 @@ kvb_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         }),
     })
 }
-kvb_args_kind = (env: Env, args: [Expr]) i32 {
+kvb_args_kind = (env: Env, args: MutSlice<Expr>) i32 {
     acc ::= 0
     args.loop_at((i, ar) { acc = acc.or(env.kvb_expr_kind(ar.addr())) })
     acc
 }
-kvb_inits_kind = (env: Env, inits: [FieldInit]) i32 {
+kvb_inits_kind = (env: Env, inits: MutSlice<FieldInit>) i32 {
     acc ::= 0
     inits.loop_at((i, fi) { acc = acc.or(env.kvb_expr_kind(fi.value)) })
     acc
 }
-kvb_arms_kind = (env: Env, subjty: Ty, arms: [ArmData]) i32 {
+kvb_arms_kind = (env: Env, subjty: Ty, arms: MutSlice<ArmData>) i32 {
     acc ::= 0
     arms.loop_at((i, ar) { acc = acc.or(env.a.arm_env(env, subjty, ar).kvb_expr_kind(ar.body)) })
     acc
@@ -557,7 +566,7 @@ kvb_stmt_kind = (a: Allocator, env: Env, st: Stmt) i32 {
             .or(env.kvb_expr_kind(x.value)),
     })
 }
-kvb_body_kind = (a: Allocator, env: Env, body: [Stmt]) i32 {
+kvb_body_kind = (a: Allocator, env: Env, body: MutSlice<Stmt>) i32 {
     acc ::= 0
     e ::= env
     body.loop_at((i, st) {
@@ -566,7 +575,7 @@ kvb_body_kind = (a: Allocator, env: Env, body: [Stmt]) i32 {
     })
     acc
 }
-kvb_func_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+kvb_func_kind* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func) i32 {
     env = Env(
         vars: a.bind_tparams(a.params_env(f.params), f.tparams),
         decls: decls,
@@ -581,7 +590,7 @@ kvb_func_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
 // the call's full type-arg buffer: an explicit turbofish `<…>` PINS position i; an absent one is
 // inferred from the value args (exactly as the resolver's call_targs does) so a closure FnT param
 // substitutes to its concrete types for the arity/return check below.
-ka_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
+ka_targs = (env: Env, f: Func, args: MutSlice<Expr>, etargs: MutSlice<Ty>) MutSlice<Ty> {
     buf ::= cbuf<Ty>(env.a, f.tparams.len)
     f.tparams.loop_at((i, tp) {
         buf[i] = (i < etargs.len).then({ etargs[i] }, { env.call_targ(f, args, tp.name) })
@@ -591,7 +600,7 @@ ka_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
 // a UFCS method call `recv.method(args)` lowers to `method(recv, …args)` — the SAME flat shape the
 // resolver's desugar produces. Rebuild the flat arg list here (without mutating the shared raw decls,
 // which a later pass still reads in surface form) so the closure/arg checks see the receiver as arg 0.
-ka_mcall_args = (a: Allocator, mc: MethodCallData) [Expr] {
+ka_mcall_args = (a: Allocator, mc: MethodCallData) MutSlice<Expr> {
     buf ::= slice(a.acquire_or_die((mc.args.len + 1) * sizeof(Expr)), mc.args.len + 1)
     buf[0] = load(mc.recv)
     mc.args.loop_at((i, ar) { buf[i + 1] = mc.args[i] })
@@ -600,7 +609,14 @@ ka_mcall_args = (a: Allocator, mc: MethodCallData) [Expr] {
 // (c) explicit-vs-inferred mismatch: with every tparam pinned by turbofish, substitute the bindings into
 // each tparam-typed param slot and require the value arg to fit the now-CONCRETE type. A literal flowing
 // into an int slot is range-decided (so `id<i32>(5)` still fits); a lambda / still-unknown slot defers.
-ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i32, ar: Expr) i32 {
+ka_mismatch_at = (
+    env: Env,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    params: MutSlice<Param>,
+    i: i32,
+    ar: Expr,
+) i32 {
     (i < params.len).match ({
         true  => tparams.ty_mentions_tparam(params[i].ty).match ({
             true  => {
@@ -621,18 +637,19 @@ ka_mismatch_at = (env: Env, tparams: [Param], targs: [Ty], params: [Param], i: i
 // (R5) a lambda bound to an FnT parameter: its declared param COUNT must match the FnT's, and — when the
 // FnT's concrete (substituted) param/return types are known — the lambda's body value must fit the FnT
 // return type. Bind each lambda param to the FnT's substituted param type, then infer the body's value.
-ka_lam_params = (a: Allocator, lmps: [Param], fps: [Ty]) [Param] {
+ka_lam_params = (a: Allocator, lmps: MutSlice<Param>, fps: MutSlice<Ty>) MutSlice<Param> {
     buf ::= cbuf<Param>(a, lmps.len)
     lmps.loop_at((i, p) {
         buf[i] = Param(
             name: p.name,
             ty: (i < fps.len).then({ fps[i] }, { tvoid() }),
             variadic: false,
+            pos: p.pos,
         )
     })
     buf
 }
-ka_lam_body_ty = (env: Env, lm: LambdaData, fps: [Ty]) Ty {
+ka_lam_body_ty = (env: Env, lm: LambdaData, fps: MutSlice<Ty>) Ty {
     (lm.body.len == 0).match ({
         true  => tvoid(),
         false => {
@@ -659,7 +676,7 @@ ka_last_ty = (env: Env, st: Stmt) Ty {
     })
 }
 // the lambda's body return doesn't fit the FnT's return type — only when both are concrete-known.
-ka_lam_ret_err = (env: Env, fd: FnTData, lm: LambdaData, fps: [Ty]) i32 {
+ka_lam_ret_err = (env: Env, fd: FnTData, lm: LambdaData, fps: MutSlice<Ty>) i32 {
     rty = load(fd.ret)
     (env.unknown_ty(rty) || lm.ret.is_void_ty() == false).match ({
         true  => env.unknown_ty(rty).then({ 0 }, { env.fit_err(lm.ret, rty) }),
@@ -671,9 +688,9 @@ ka_lam_ret_err = (env: Env, fd: FnTData, lm: LambdaData, fps: [Ty]) i32 {
 }
 ka_lambda_at = (
     env: Env,
-    ftparams: [Param],
-    targs: [Ty],
-    params: [Param],
+    ftparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    params: MutSlice<Param>,
     i: i32,
     ar: Expr,
     cpos: i32,
@@ -723,11 +740,11 @@ ka_concrete_arg_err = (env: Env, authoritative: bool, f: Func, i: i32, ar: Expr,
 }
 ka_args_check = (
     env: Env,
-    tparams: [Param],
+    tparams: MutSlice<Param>,
     authoritative: bool,
     f: Func,
-    args: [Expr],
-    etargs: [Ty],
+    args: MutSlice<Expr>,
+    etargs: MutSlice<Ty>,
     pos: i32,
 ) i32 {
     targs = env.ka_targs(f, args, etargs)
@@ -754,10 +771,10 @@ ka_args_check = (
 // skipped, not re-judged: pre-inline generic bodies can't always type the local (lenient by design).
 ka_call_core = (
     env: Env,
-    tparams: [Param],
+    tparams: MutSlice<Param>,
     fn: StringView,
-    args: [Expr],
-    etargs: [Ty],
+    args: MutSlice<Expr>,
+    etargs: MutSlice<Ty>,
     pos: i32,
 ) i32 {
     (env.env_known_fn(fn) && env.is_local(fn) == false).match ({
@@ -790,7 +807,7 @@ ka_call_core = (
         false => 0,
     })
 }
-ka_expr_kind = (env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
+ka_expr_kind = (env: Env, tparams: MutSlice<Param>, e: Ptr<Expr>) i32 {
     load(e).match ({
         .Call(c)        => env
             .ka_call_core(tparams, c.fn, c.args, c.targs, c.pos)
@@ -830,24 +847,24 @@ ka_expr_kind = (env: Env, tparams: [Param], e: Ptr<Expr>) i32 {
         _               => 0,
     })
 }
-ka_args_kind = (env: Env, tparams: [Param], args: [Expr]) i32 {
+ka_args_kind = (env: Env, tparams: MutSlice<Param>, args: MutSlice<Expr>) i32 {
     acc ::= 0
     args.loop_at((i, ar) { acc = acc.or(env.ka_expr_kind(tparams, ar.addr())) })
     acc
 }
-ka_inits_kind = (env: Env, tparams: [Param], inits: [FieldInit]) i32 {
+ka_inits_kind = (env: Env, tparams: MutSlice<Param>, inits: MutSlice<FieldInit>) i32 {
     acc ::= 0
     inits.loop_at((i, fi) { acc = acc.or(env.ka_expr_kind(tparams, fi.value)) })
     acc
 }
-ka_arms_kind = (env: Env, tparams: [Param], subjty: Ty, arms: [ArmData]) i32 {
+ka_arms_kind = (env: Env, tparams: MutSlice<Param>, subjty: Ty, arms: MutSlice<ArmData>) i32 {
     acc ::= 0
     arms.loop_at((i, ar) {
         acc = acc.or(env.a.arm_env(env, subjty, ar).ka_expr_kind(tparams, ar.body))
     })
     acc
 }
-ka_stmt_kind = (a: Allocator, env: Env, tparams: [Param], st: Stmt) i32 {
+ka_stmt_kind = (a: Allocator, env: Env, tparams: MutSlice<Param>, st: Stmt) i32 {
     st.match ({
         .Let(l)      => env.ka_expr_kind(tparams, l.value),
         .Assign(x)   => env.ka_expr_kind(tparams, x.target).or(env.ka_expr_kind(tparams, x.value)),
@@ -864,7 +881,7 @@ ka_stmt_kind = (a: Allocator, env: Env, tparams: [Param], st: Stmt) i32 {
             .or(env.ka_expr_kind(tparams, x.value)),
     })
 }
-ka_body_kind = (a: Allocator, env: Env, tparams: [Param], body: [Stmt]) i32 {
+ka_body_kind = (a: Allocator, env: Env, tparams: MutSlice<Param>, body: MutSlice<Stmt>) i32 {
     acc ::= 0
     e ::= env
     body.loop_at((i, st) {
@@ -873,7 +890,7 @@ ka_body_kind = (a: Allocator, env: Env, tparams: [Param], body: [Stmt]) i32 {
     })
     acc
 }
-ka_func_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+ka_func_kind* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func) i32 {
     env = Env(
         vars: a.params_env(f.params),
         decls: decls,
@@ -916,9 +933,13 @@ krr_any_ret_e = (e: Ptr<Expr>) bool {
         _              => false,
     })
 }
-krr_any_ret_es = (xs: [Expr]) bool { xs.slice_any((x) { x.addr().krr_any_ret_e() }) }
-krr_any_ret_inits = (inits: [FieldInit]) bool { inits.slice_any((fi) { fi.value.krr_any_ret_e() }) }
-krr_any_ret_arms = (arms: [ArmData]) bool { arms.slice_any((ar) { ar.body.krr_any_ret_e() }) }
+krr_any_ret_es = (xs: MutSlice<Expr>) bool { xs.slice_any((x) { x.addr().krr_any_ret_e() }) }
+krr_any_ret_inits = (inits: MutSlice<FieldInit>) bool {
+    inits.slice_any((fi) { fi.value.krr_any_ret_e() })
+}
+krr_any_ret_arms = (arms: MutSlice<ArmData>) bool {
+    arms.slice_any((ar) { ar.body.krr_any_ret_e() })
+}
 krr_any_ret_stmt = (st: Stmt) bool {
     st.match ({
         .Let(l)      => l.value.krr_any_ret_e(),
@@ -930,7 +951,7 @@ krr_any_ret_stmt = (st: Stmt) bool {
         .IndexSet(x) => x.seq.krr_any_ret_e() || x.idx.krr_any_ret_e() || x.value.krr_any_ret_e(),
     })
 }
-krr_any_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_any_ret_stmt() }) }
+krr_any_ret_body = (body: MutSlice<Stmt>) bool { body.slice_any((st) { st.krr_any_ret_stmt() }) }
 // does the body hold a Loop/While whose body (or a lambda spliced under it) contains a return?
 krr_loop_ret_e = (e: Ptr<Expr>) bool {
     load(e).match ({
@@ -949,11 +970,13 @@ krr_loop_ret_e = (e: Ptr<Expr>) bool {
         _              => false,
     })
 }
-krr_loop_ret_es = (xs: [Expr]) bool { xs.slice_any((x) { x.addr().krr_loop_ret_e() }) }
-krr_loop_ret_inits = (inits: [FieldInit]) bool {
+krr_loop_ret_es = (xs: MutSlice<Expr>) bool { xs.slice_any((x) { x.addr().krr_loop_ret_e() }) }
+krr_loop_ret_inits = (inits: MutSlice<FieldInit>) bool {
     inits.slice_any((fi) { fi.value.krr_loop_ret_e() })
 }
-krr_loop_ret_arms = (arms: [ArmData]) bool { arms.slice_any((ar) { ar.body.krr_loop_ret_e() }) }
+krr_loop_ret_arms = (arms: MutSlice<ArmData>) bool {
+    arms.slice_any((ar) { ar.body.krr_loop_ret_e() })
+}
 krr_loop_ret_stmt = (st: Stmt) bool {
     st.match ({
         .Let(l)      => l.value.krr_loop_ret_e(),
@@ -967,7 +990,7 @@ krr_loop_ret_stmt = (st: Stmt) bool {
         .IndexSet(x) => x.seq.krr_loop_ret_e() || x.idx.krr_loop_ret_e() || x.value.krr_loop_ret_e(),
     })
 }
-krr_loop_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_loop_ret_stmt() }) }
+krr_loop_ret_body = (body: MutSlice<Stmt>) bool { body.slice_any((st) { st.krr_loop_ret_stmt() }) }
 // ── reflect-write: an ASSIGNMENT through a TEMP-BOUND reflection subject ──────────────────────────
 // The inliner binds a non-Var reflection subject to a hidden temp ONCE (subst.refl_needs_bind — so
 // a side-effecting receiver evaluates once); an enclosing reflection lambda's VALUE param becomes a
@@ -981,18 +1004,18 @@ krr_loop_ret_body = (body: [Stmt]) bool { body.slice_any((st) { st.krr_loop_ret_
 krw_refl_shape = (c: CallData) bool {
     c.fn == "each_field" && c.args.len == 2 || c.fn == "zip_fields" && c.args.len == 3
 }
-krw_value_param = (ps: [Param], nm: StringView) bool {
+krw_value_param = (ps: MutSlice<Param>, nm: StringView) bool {
     f ::= false
     ps.loop_at((i, p) { f = (i >= 1 && p.name == nm).then({ true }, { f }) })
     f
 }
-krw_subject_bound = (e: Ptr<Expr>, ps: [Param]) bool {
+krw_subject_bound = (e: Ptr<Expr>, ps: MutSlice<Param>) bool {
     load(e).match ({
         .Var(v) => ps.krw_value_param(v.name),
         _       => true,
     })
 }
-krw_call = (c: CallData, ps: [Param]) i32 {
+krw_call = (c: CallData, ps: MutSlice<Param>) i32 {
     nsub = (c.fn == "each_field").then({ 1 }, { 2 })
     bound ::= false
     c.args.loop_at((i, x) {
@@ -1003,7 +1026,7 @@ krw_call = (c: CallData, ps: [Param]) i32 {
         false => 0,
     })
 }
-krw_e = (e: Ptr<Expr>, ps: [Param]) i32 {
+krw_e = (e: Ptr<Expr>, ps: MutSlice<Param>) i32 {
     load(e).match ({
         .Bin(b)        => b.lhs.krw_e(ps).or(b.rhs.krw_e(ps)),
         .Cond(d)       => d.c.krw_e(ps).or(d.t.krw_e(ps)).or(d.e.krw_e(ps)),
@@ -1039,12 +1062,12 @@ krw_e = (e: Ptr<Expr>, ps: [Param]) i32 {
 }
 // walk the first n exprs of xs (a reflection call's SUBJECT args; the lambda arg is walked
 // separately with ITS params as the bound set).
-krw_subj_es = (xs: [Expr], n: i64, ps: [Param]) i32 {
+krw_subj_es = (xs: MutSlice<Expr>, n: i64, ps: MutSlice<Param>) i32 {
     acc ::= 0
     xs.loop_at((i, x) { acc = (i < n).then({ acc.or(x.addr().krw_e(ps)) }, { acc }) })
     acc
 }
-krw_stmt = (st: Stmt, ps: [Param]) i32 {
+krw_stmt = (st: Stmt, ps: MutSlice<Param>) i32 {
     st.match ({
         .Let(l)      => l.value.krw_e(ps),
         .Assign(x)   => x.target.krw_e(ps).or(x.value.krw_e(ps)),
@@ -1055,7 +1078,7 @@ krw_stmt = (st: Stmt, ps: [Param]) i32 {
         .IndexSet(x) => x.seq.krw_e(ps).or(x.idx.krw_e(ps)).or(x.value.krw_e(ps)),
     })
 }
-krw_body = (body: [Stmt], ps: [Param]) i32 {
+krw_body = (body: MutSlice<Stmt>, ps: MutSlice<Param>) i32 {
     acc ::= 0
     body.loop_at((i, st) { acc = acc.or(st.krw_stmt(ps)) })
     acc
@@ -1074,7 +1097,7 @@ ko_is_or_mcall = (mc: MethodCallData) bool { mc.method == "or_return" && mc.args
 //     receiver in a `Result<i32, E>` fn emits `return <Result_bool_E>` and dies at cc in positions
 //     the return-fit scan never reaches — #377's miscompile).
 // A tparam-typed / unknown side defers (concrete only after monomorphization).
-ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32) i32 {
+ko_at = (env: Env, tps: MutSlice<Param>, want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32) i32 {
     (tps.ty_mentions_tparam(want) || env.unknown_ty(want)).match ({
         true  => 0,
         false => {
@@ -1107,7 +1130,7 @@ ko_at = (env: Env, tps: [Param], want: Ty, recv: Ptr<Expr>, cnd: bool, pos: i32)
 }
 // the Ok side of the same judgment (CONDITIONAL positions only), entered once both Err payloads are
 // known and agree. Same leniency: an unknown / tparam-typed / payloadless (void) Ok side defers.
-ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
+ko_ok_at = (env: Env, tps: MutSlice<Param>, want: Ty, rt: Ty, pos: i32) i32 {
     fO = env.subj_variant_payload(want, "Ok")
     rO = env.subj_variant_payload(rt, "Ok")
     (fO.is_void_ty()
@@ -1120,11 +1143,11 @@ ko_ok_at = (env: Env, tps: [Param], want: Ty, rt: Ty, pos: i32) i32 {
         false => (fO.ty_eq(rO) || rO.ty_eq(fO)).then({ 0 }, { KORRETURN().kv_at(pos) }),
     })
 }
-ko_call_kind = (env: Env, tps: [Param], want: Ty, c: CallData, cnd: bool) i32 {
+ko_call_kind = (env: Env, tps: MutSlice<Param>, want: Ty, c: CallData, cnd: bool) i32 {
     own = is_or_return_fn(c).then({ env.ko_at(tps, want, c.args[0].addr(), cnd, c.pos) }, { 0 })
     own.or(env.ko_args_kind(tps, want, c.args, cnd))
 }
-ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData, cnd: bool) i32 {
+ko_mcall_kind = (env: Env, tps: MutSlice<Param>, want: Ty, mc: MethodCallData, cnd: bool) i32 {
     own = ko_is_or_mcall(mc).then({ env.ko_at(tps, want, mc.recv, cnd, mc.pos) }, { 0 })
     own.or(env.ko_expr_kind(tps, want, mc.recv, cnd)).or(env.ko_args_kind(tps, want, mc.args, cnd))
 }
@@ -1133,7 +1156,7 @@ ko_mcall_kind = (env: Env, tps: [Param], want: Ty, mc: MethodCallData, cnd: bool
 // It is set on entry and never cleared — a statement nested under a conditional value is still
 // conditional. `&&`/`||` LEFT operands and cond/match SUBJECTS evaluate unconditionally and hoist,
 // so they inherit.
-ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
+ko_expr_kind = (env: Env, tps: MutSlice<Param>, want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
     load(e).match ({
         .Call(c)        => env.ko_call_kind(tps, want, c, cnd),
         .MethodCall(mc) => env.ko_mcall_kind(tps, want, mc, cnd),
@@ -1162,26 +1185,32 @@ ko_expr_kind = (env: Env, tps: [Param], want: Ty, e: Ptr<Expr>, cnd: bool) i32 {
         _               => 0,
     })
 }
-ko_args_kind = (env: Env, tps: [Param], want: Ty, args: [Expr], cnd: bool) i32 {
+ko_args_kind = (env: Env, tps: MutSlice<Param>, want: Ty, args: MutSlice<Expr>, cnd: bool) i32 {
     acc ::= 0
     args.loop_at((i, ar) { acc = acc.or(env.ko_expr_kind(tps, want, args[i].addr(), cnd)) })
     acc
 }
-ko_inits_kind = (env: Env, tps: [Param], want: Ty, inits: [FieldInit], cnd: bool) i32 {
+ko_inits_kind = (
+    env: Env,
+    tps: MutSlice<Param>,
+    want: Ty,
+    inits: MutSlice<FieldInit>,
+    cnd: bool,
+) i32 {
     acc ::= 0
     inits.loop_at((i, fi) { acc = acc.or(env.ko_expr_kind(tps, want, fi.value, cnd)) })
     acc
 }
 // Arm bodies are always conditional (only the selected arm evaluates), and a statement-position
 // match resolves its arms under a cleared expected type, so the rebuild cannot fire there either.
-ko_arms_kind = (env: Env, tps: [Param], want: Ty, subjty: Ty, arms: [ArmData]) i32 {
+ko_arms_kind = (env: Env, tps: MutSlice<Param>, want: Ty, subjty: Ty, arms: MutSlice<ArmData>) i32 {
     acc ::= 0
     arms.loop_at((i, ar) {
         acc = acc.or(env.a.arm_env(env, subjty, ar).ko_expr_kind(tps, want, ar.body, true))
     })
     acc
 }
-ko_stmt_kind = (a: Allocator, env: Env, tps: [Param], want: Ty, st: Stmt, cnd: bool) i32 {
+ko_stmt_kind = (a: Allocator, env: Env, tps: MutSlice<Param>, want: Ty, st: Stmt, cnd: bool) i32 {
     st.match ({
         .Let(l)      => env.ko_expr_kind(tps, want, l.value, cnd),
         .Assign(x)   => env
@@ -1202,7 +1231,14 @@ ko_stmt_kind = (a: Allocator, env: Env, tps: [Param], want: Ty, st: Stmt, cnd: b
             .or(env.ko_expr_kind(tps, want, x.value, cnd)),
     })
 }
-ko_body_kind = (a: Allocator, env: Env, tps: [Param], want: Ty, body: [Stmt], cnd: bool) i32 {
+ko_body_kind = (
+    a: Allocator,
+    env: Env,
+    tps: MutSlice<Param>,
+    want: Ty,
+    body: MutSlice<Stmt>,
+    cnd: bool,
+) i32 {
     acc ::= 0
     e ::= env
     body.loop_at((i, st) {
@@ -1211,7 +1247,7 @@ ko_body_kind = (a: Allocator, env: Env, tps: [Param], want: Ty, body: [Stmt], cn
     })
     acc
 }
-ko_func_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
+ko_func_kind* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func) i32 {
     env = Env(
         vars: a.params_env(f.params),
         decls: decls,
@@ -1226,7 +1262,7 @@ ko_func_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, f: Func) i32 {
 // zero-initialized (no diagnostic, wrong exit values). Walk the initializer with a non-Result `want`
 // (i32) so ANY or_return inside it reports KORRETURN at its own position — the same "no matching
 // Result to propagate into" judgment the fn-body walk makes, with nothing lenient to defer to.
-ko_global_kind* = (a: Allocator, decls: [Decl], idx: DeclIndex, g: GlobalData) i32 {
+ko_global_kind* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, g: GlobalData) i32 {
     env = Env(
         vars: a.params_env(empty_params()),
         decls: decls,
@@ -1273,12 +1309,12 @@ ffi_ty_ok = (env: Env, t: Ty, depth: i64) bool {
         _           => true,
     })
 }    // I32/I64/U8/F64/Bool/Void/string_*/Ptr(any kind) — direct C shapes
-ffi_tys_ok = (env: Env, ts: [Ty], depth: i64) bool {
+ffi_tys_ok = (env: Env, ts: MutSlice<Ty>, depth: i64) bool {
     ok ::= true
     ts.loop_at((i, t) { ok = env.ffi_ty_ok(t, depth) && ok })
     ok
 }
-ffi_fields_ok = (env: Env, fs: [Field], depth: i64) bool {
+ffi_fields_ok = (env: Env, fs: MutSlice<Field>, depth: i64) bool {
     ok ::= true
     fs.loop_at((i, f) { ok = env.ffi_ty_ok(f.ty, depth) && ok })
     ok
@@ -1335,11 +1371,11 @@ ffi_func_msg* = (a: Allocator, env: Env, f: Func) StringView {
         false => a.ffi_ret_msg(f.name, a.zty(f.ret)),
     }))
 }
-kdiag_buf* = (a: Allocator) [i32] {
+kdiag_buf* = (a: Allocator) MutSlice<i32> {
     slice(a.acquire_or_die(KDIAG_CAP() * sizeof(i32)), KDIAG_CAP())
 }
 // already collected? (dedup: two channels can position the same packed kind at one site)
-kdiag_seen = (buf: [i32], cnt: i32, packed: i32) bool {
+kdiag_seen = (buf: MutSlice<i32>, cnt: i32, packed: i32) bool {
     found ::= false
     buf.loop_at((i, e) {
         found = (i < cnt).match ({
@@ -1350,7 +1386,7 @@ kdiag_seen = (buf: [i32], cnt: i32, packed: i32) bool {
     found
 }
 // append `packed` unless it is 0 (no error), a duplicate, or the buffer is full; return the new count.
-kdiag_add* = (buf: [i32], cnt: i32, packed: i32) i32 {
+kdiag_add* = (buf: MutSlice<i32>, cnt: i32, packed: i32) i32 {
     (packed == 0 || cnt >= buf.len || buf.kdiag_seen(cnt, packed)).match ({
         true  => cnt,
         false => {
@@ -1404,6 +1440,9 @@ taxonomy_kind = (nm: StringView, init: Ptr<Expr>) i32 {
     (nm == "__retired_walrus").then({
         return KWALRUS().ksent_at(init.kparse_off())
     })
+    (nm == "__retired_bracket_type").then({
+        return KBRACKETTYPE().ksent_at(init.kparse_off())
+    })
     (nm == "__unexpected_eof").then({
         return KEOFINPUT().ksent_at(init.kparse_off())
     })
@@ -1420,19 +1459,19 @@ taxonomy_kind = (nm: StringView, init: Ptr<Expr>) i32 {
 }
 // packed kind for whichever parse sentinel a top-level DGlobal is (0 if it is an ordinary global).
 parse_sentinel_kind* = (nm: StringView, init: Ptr<Expr>) i32 {
-    (nm == "__syntax_error").match ({
-        true  => init.kparse_kind(),
-        false => (nm == "__bad_binding").match ({
-            true  => init.kbadbind_kind(),
-            false => (nm == "__misordered_generic").match ({
-                true  => init.kmisgen_kind(),
-                false => (nm == "__capacity").match ({
-                    true  => init.kcapacity_kind(),
-                    false => nm.taxonomy_kind(init),
-                }),
-            }),
-        }),
+    (nm == "__syntax_error").then({
+        return init.kparse_kind()
     })
+    (nm == "__bad_binding").then({
+        return init.kbadbind_kind()
+    })
+    (nm == "__misordered_generic").then({
+        return init.kmisgen_kind()
+    })
+    (nm == "__capacity").then({
+        return init.kcapacity_kind()
+    })
+    nm.taxonomy_kind(init)
 }
 // ── cross-module linking (Goal Arc 1) ───────────────────────────────────────────────
 // The self-hosted "module loader". A module's HEADER is its public surface reduced to signatures:
@@ -1475,7 +1514,7 @@ mkenum_subj_ty* = (mk: MakeEnumData) Ty {
 // `env.operand_err(b)` through the global impl index and import NOTHING from this module for them.
 EnvKinds: {
     trait_recv_missing: (Self, CallData) bool,
-    match_result_ty: (Self, Ty, [ArmData]) Ty,
+    match_result_ty: (Self, Ty, MutSlice<ArmData>) Ty,
     cond_result_err: (Self, CondData) i32,
     cond_bool_err: (Self, CondData) i32,
     arm_result_err: (Self, Ty, Ty, ArmData) i32,
@@ -1518,7 +1557,7 @@ Env.impl(EnvKinds, {
             false => false,
         })
     }
-    match_result_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
+    match_result_ty = (env: Env, subjty: Ty, arms: MutSlice<ArmData>) Ty {
         out ::= tvoid()
         arms.loop_at((i, ar) {
             aenv = env.a.arm_env(env, subjty, ar)

@@ -353,7 +353,12 @@ scan_line = (a: AllocatorBackend, st: Asm, raw_line: StringView, ln: i64) Result
     out.pc = cur.pc + 1
     .Ok(out)
 }
-scan_all = (a: AllocatorBackend, lines: [StringView], i: i64, st: Asm) Result<Asm, AsmError> {
+scan_all = (
+    a: AllocatorBackend,
+    lines: MutSlice<StringView>,
+    i: i64,
+    st: Asm,
+) Result<Asm, AsmError> {
     (i >= lines.len).then({
         return .Ok(st)
     })
@@ -415,7 +420,7 @@ resolve_row = (r: Raw, labels: Map<i64>) Result<Instr, AsmError> {
 }
 resolve_all = (
     a: AllocatorBackend,
-    rows: [Raw],
+    rows: MutSlice<Raw>,
     labels: Map<i64>,
     i: i64,
     code: Vec<Instr>,
@@ -427,7 +432,7 @@ resolve_all = (
     a.resolve_all(rows, labels, i + 1, code.push(a, ins).expect("zvm: oom"))
 }
 Program*: {
-    code: [Instr],
+    code: MutSlice<Instr>,
     labels: Map<i64>,
 }
 assemble = (a: AllocatorBackend, src: StringView) Result<Program, AsmError> {
@@ -440,7 +445,7 @@ assemble = (a: AllocatorBackend, src: StringView) Result<Program, AsmError> {
         pc: 0,
     )
     st: Asm = a.scan_all(a.split(src, '\n'), 0, st0).or_return()
-    rows: [Raw] = st.rows.view()
+    rows: MutSlice<Raw> = st.rows.view()
     code = a.resolve_all(rows, st.labels, 0, cr.expect("zvm: oom")).or_return()
     .Ok(Program(
         code: code.view(),
@@ -496,19 +501,19 @@ vm_fault_text = (f: VmFault) StringView {
     })
 }
 Vm*: {
-    stack: [i64],
+    stack: MutSlice<i64>,
     sp: i64,
-    locals: [i64],
+    locals: MutSlice<i64>,
     fp: i64,
     lp: i64,
-    calls: [i64],
+    calls: MutSlice<i64>,
     csp: i64,
     pc: i64,
     at: i64,
     steps: i64,
     halted: bool,
 }
-vm_new = (stack: [i64], locals: [i64], calls: [i64]) Vm {
+vm_new = (stack: MutSlice<i64>, locals: MutSlice<i64>, calls: MutSlice<i64>) Vm {
     Vm(
         stack: stack,
         sp: 0,
@@ -708,7 +713,7 @@ vm_drop = (v: Vm) Result<Vm, VmError> {
 }
 // Fetch, advance, execute. `pc` already points past the instruction when an arm runs, so
 // a jump arm simply overwrites it.
-exec_one = (v: Vm, code: [Instr]) Result<Vm, VmError> {
+exec_one = (v: Vm, code: MutSlice<Instr>) Result<Vm, VmError> {
     (v.pc < 0 || v.pc >= code.len).then({
         return .Err(v.vm_err(.BadJump))
     })
@@ -742,7 +747,7 @@ exec_one = (v: Vm, code: [Instr]) Result<Vm, VmError> {
 // Zen's only iteration form is `xs.loop`, so the fetch-execute loop runs a fixed quantum
 // of steps per slice pass and the driver below recurses once per quantum. Straight
 // recursion per instruction blows the C stack somewhere past 100k frames.
-run_quantum = (v: Vm, code: [Instr], ticks: [i64]) Result<Vm, VmError> {
+run_quantum = (v: Vm, code: MutSlice<Instr>, ticks: MutSlice<i64>) Result<Vm, VmError> {
     res :: Result<Vm, VmError> = .Ok(v)
     ticks.loop((h, i, t) {
         res.match ({
@@ -761,7 +766,7 @@ run_quantum = (v: Vm, code: [Instr], ticks: [i64]) Result<Vm, VmError> {
     })
     res
 }
-vm_run = (v: Vm, code: [Instr], ticks: [i64], budget: i64) Result<Vm, VmError> {
+vm_run = (v: Vm, code: MutSlice<Instr>, ticks: MutSlice<i64>, budget: i64) Result<Vm, VmError> {
     (v.steps > budget).then({
         return .Err(v.vm_err(.OutOfFuel))
     })
@@ -773,10 +778,10 @@ vm_run = (v: Vm, code: [Instr], ticks: [i64], budget: i64) Result<Vm, VmError> {
 }
 // ── wiring ────────────────────────────────────────────────────────────────────────────
 Machine*: {
-    stack: [i64],
-    locals: [i64],
-    calls: [i64],
-    ticks: [i64],
+    stack: MutSlice<i64>,
+    locals: MutSlice<i64>,
+    calls: MutSlice<i64>,
+    ticks: MutSlice<i64>,
 }
 // `alloc_buf` reads its `like` argument for nothing but the element type, and a slice literal
 // written inline as a borrowed call argument gets stack storage — binding `[0]` to a local first
@@ -795,7 +800,7 @@ machine_free = (a: AllocatorBackend, m: Machine) void {
     a.release(m.calls.ptr)
     a.release(m.ticks.ptr)
 }
-vm_error_print = (e: VmError, code: [Instr]) i64 {
+vm_error_print = (e: VmError, code: MutSlice<Instr>) i64 {
     src = (e.pc >= 0 && e.pc < code.len).then({ code[e.pc].line }, { 0 })
     formatln("zvm: runtime error at pc {} (source line {}): {}", [arg_int(e.pc), arg_int(src), arg_str(e.fault.vm_fault_text())])
 }

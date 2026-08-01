@@ -1,7 +1,3 @@
-// compiler.pretty_decl — declaration / type / struct / enum / impl / func / import formatting for the
-// AST pretty-printer. Extracted from compiler.pretty (pure move): the top-level decl walk's node formatters
-// (called from ff_top_decl / pretty_module_in and from nested-func statements). Mutually recursive with the
-// expression / statement walks in compiler.pretty / compiler.pretty_expr (flat-TU cycle, `*` exports).
 { String } = std.text.string
 { starts_with, view } = std.text.str
 { Allocator } = std.mem.alloc
@@ -13,7 +9,6 @@
 { ff_append, ff_block, ff_flush_leading, ff_indent, ff_str_has_nl, ff_string, ff_ty, ff_tys } = compiler.pretty
 { ff_current_col, ff_expr, ff_fits_width, ff_pad } = compiler.pretty_expr
 { loop_at } = std.core.count
-// ── declarations ────────────────────────────────────────────────────────────────
 // a trailing `...T` param stores its type as the collected `[T]`; recover the element T to re-print `...T`.
 ff_slice_elem = (t: Ty) Ty {
     t.match ({
@@ -27,7 +22,7 @@ ff_param_one = (s: String, a: Allocator, p: Param) String {
         false => s.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
     })
 }
-ff_params = (s: String, a: Allocator, ps: [Param]) String {
+ff_params = (s: String, a: Allocator, ps: MutSlice<Param>) String {
     out ::= s
     ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
@@ -40,7 +35,7 @@ ff_params = (s: String, a: Allocator, ps: [Param]) String {
 // trailing comma on every param EXCEPT a variadic `...T` last param (the parser rejects a comma
 // there). Trial render measures the inline form at the caller's current column; params/types weave
 // no comments, so no gf_idx save is needed (the trial is naturally side-effect-free).
-ff_sig = (s: String, a: Allocator, ps: [Param], ret: Ty, ind: i32) String {
+ff_sig = (s: String, a: Allocator, ps: MutSlice<Param>, ret: Ty, ind: i32) String {
     trial = a
         .ff_string(256)
         .ff_append(a, " = (")
@@ -66,7 +61,7 @@ ff_sig = (s: String, a: Allocator, ps: [Param], ret: Ty, ind: i32) String {
 // lambda params: a param's ty is its declared `: Type` annotation (Void when the source wrote none —
 // the FnT context supplies the real types when the lambda is spliced). Print the annotation back when
 // present; an unannotated param prints as its bare NAME — `(x)`, never `(x: void)`.
-ff_lparams* = (s: String, a: Allocator, ps: [Param]) String {
+ff_lparams* = (s: String, a: Allocator, ps: MutSlice<Param>) String {
     out ::= s
     ps.loop_at((i, p) {
         out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
@@ -78,7 +73,7 @@ ff_lparams* = (s: String, a: Allocator, ps: [Param]) String {
     out
 }
 // generic type params `<A, B>` (with optional bound `<A: Bound>`)
-ff_tparams = (s: String, a: Allocator, ps: [Param]) String {
+ff_tparams = (s: String, a: Allocator, ps: MutSlice<Param>) String {
     (ps.len == 0).match ({
         true  => s,
         false => {
@@ -97,7 +92,7 @@ ff_tparams = (s: String, a: Allocator, ps: [Param]) String {
 }
 // the `*` export marker: appended right after a top-level decl name when it was starred in the
 // source — a param_names_has membership test over the export list.
-ff_name = (s: String, a: Allocator, exp: [Param], name: StringView) String {
+ff_name = (s: String, a: Allocator, exp: MutSlice<Param>, name: StringView) String {
     exp.param_names_has(name).match ({
         true  => s.ff_append(a, name).ff_append(a, "*"),
         false => s.ff_append(a, name),
@@ -105,11 +100,11 @@ ff_name = (s: String, a: Allocator, exp: [Param], name: StringView) String {
 }
 // The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
 // an anonymous-struct return type `{ field: T }`, changing the AST.
-ff_func = (s: String, a: Allocator, exp: [Param], f: Func) String {
+ff_func = (s: String, a: Allocator, exp: MutSlice<Param>, f: Func) String {
     sig = s.ff_name(a, exp, f.name).ff_tparams(a, f.tparams).ff_sig(a, f.params, f.ret, 0)
     sig.ff_append(a, " ").ff_block(a, f.body, 0, true)
 }
-ff_foreign = (s: String, a: Allocator, exp: [Param], f: Func) String {
+ff_foreign = (s: String, a: Allocator, exp: MutSlice<Param>, f: Func) String {
     s.ff_name(a, exp, f.name).ff_sig(a, f.params, f.ret, 0)
 }
 // ── un-hoisting inherent + trait methods ────────────────────────────────────────
@@ -117,8 +112,8 @@ ff_foreign = (s: String, a: Allocator, exp: [Param], f: Func) String {
 // DFuncs (`impl_<Tr>_<Ty>_<m>`) plus a DImpl marker carrying the ORIGINAL method names. To round-trip,
 // the formatter REASSEMBLES them: inherent methods print inside the struct body, trait-impl methods
 // inside `Ty.impl(Tr, { … })`, and the hoisted DFuncs / inherent DImpl markers are SKIPPED at top level.
-ff_no_params* = () [Param] { slice(null_ptr(), 0) }
-ff_find_func = (a: Allocator, decls: [Decl], name: StringView) Func {
+ff_no_params* = () MutSlice<Param> { slice(null_ptr(), 0) }
+ff_find_func = (a: Allocator, decls: MutSlice<Decl>, name: StringView) Func {
     res ::= Func(
         name: "",
         params: ff_no_params(),
@@ -137,7 +132,7 @@ ff_find_func = (a: Allocator, decls: [Decl], name: StringView) Func {
     res
 }
 // the type's own tparams (so a method's print drops them, keeping only the method's OWN tparams)
-ff_type_tparams = (decls: [Decl], tyname: StringView) [Param] {
+ff_type_tparams = (decls: MutSlice<Decl>, tyname: StringView) MutSlice<Param> {
     res ::= ff_no_params()
     decls.loop_at((i, d) {
         d.match ({
@@ -152,7 +147,7 @@ ff_type_tparams = (decls: [Decl], tyname: StringView) [Param] {
     })
     res
 }
-ff_minus_tparams = (a: Allocator, full: [Param], drop: [Param]) [Param] {
+ff_minus_tparams = (a: Allocator, full: MutSlice<Param>, drop: MutSlice<Param>) MutSlice<Param> {
     buf ::= slice(a.acquire_or_die((full.len + 1) * sizeof(Param)), full.len + 1)
     n ::= 0
     full.loop_at((i, p) {
@@ -167,7 +162,7 @@ ff_minus_tparams = (a: Allocator, full: [Param], drop: [Param]) [Param] {
 // record into a synthesized FnT requirement field PLUS a DTraitDefault sibling carrying the body.
 // The formatter re-inlines that body at the field's own slot (and skips the sibling at top level) —
 // printing it as a standalone fn would hoist the body out of the record, where `Self` is unbound.
-ff_has_default = (decls: [Decl], trname: StringView, fname: StringView) bool {
+ff_has_default = (decls: MutSlice<Decl>, trname: StringView, fname: StringView) bool {
     found ::= false
     decls.loop_at((i, d) {
         d.match ({
@@ -179,7 +174,12 @@ ff_has_default = (decls: [Decl], trname: StringView, fname: StringView) bool {
     })
     found
 }
-ff_find_default = (a: Allocator, decls: [Decl], trname: StringView, fname: StringView) Func {
+ff_find_default = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    trname: StringView,
+    fname: StringView,
+) Func {
     res ::= Func(
         name: "",
         params: ff_no_params(),
@@ -198,7 +198,7 @@ ff_find_default = (a: Allocator, decls: [Decl], trname: StringView, fname: Strin
     res
 }
 // is `fname` a hoisted impl method (so it must NOT print as a standalone top-level fn)?
-ff_is_hoisted* = (a: Allocator, decls: [Decl], fname: StringView) bool {
+ff_is_hoisted* = (a: Allocator, decls: MutSlice<Decl>, fname: StringView) bool {
     found ::= false
     decls.loop_at((i, d) {
         d.match ({
@@ -228,7 +228,13 @@ MethodFact: {
 }
 // The dry pass ADVANCES the comment cursor exactly as the real pass will, so every method's trial sees
 // the comments it will really see; ff_methods snapshots gf_idx around it and rewinds.
-ff_method_facts = (a: Allocator, decls: [Decl], im: ImplData, ctp: [Param], ind: i32) [MethodFact] {
+ff_method_facts = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    im: ImplData,
+    ctp: MutSlice<Param>,
+    ind: i32,
+) MutSlice<MethodFact> {
     buf ::= slice(a.acquire_or_die((im.methods.len + 1) * sizeof(MethodFact)), im.methods.len + 1)
     im.methods.loop_at((k, mp) {
         f = a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
@@ -256,7 +262,7 @@ ff_method_facts = (a: Allocator, decls: [Decl], im: ImplData, ctp: [Param], ind:
 // pass measured it, and the padding cannot cascade into a reflow.
 ff_run_admits = (lo: i32, hi: i32, tail: i32) bool { hi - lo <= 20 && hi + tail <= 100 }
 // extend the run at `e` while the next method still fits it; `lo`/`hi`/`tl` carry the run so far
-ff_run_grow = (fs: [MethodFact], e: i64, lo: i32, hi: i32, tl: i32) i64 {
+ff_run_grow = (fs: MutSlice<MethodFact>, e: i64, lo: i32, hi: i32, tl: i32) i64 {
     (e >= fs.len || fs[e].one == false || fs[e].lead).then({
         return e
     })
@@ -266,26 +272,26 @@ ff_run_grow = (fs: [MethodFact], e: i64, lo: i32, hi: i32, tl: i32) i64 {
     nlo.ff_run_admits(nhi, ntl).then({ fs.ff_run_grow(e + 1, nlo, nhi, ntl) }, { e })
 }
 // index one past the last method aligned with `start` — a method that is not one-line is its own run
-ff_run_end = (fs: [MethodFact], start: i64) i64 {
+ff_run_end = (fs: MutSlice<MethodFact>, start: i64) i64 {
     fs[start].one.match ({
         true  => fs.ff_run_grow(start + 1, fs[start].w, fs[start].w, fs[start].tail),
         false => start + 1,
     })
 }
-ff_run_maxw = (fs: [MethodFact], from: i64, end: i64) i32 {
+ff_run_maxw = (fs: MutSlice<MethodFact>, from: i64, end: i64) i32 {
     (from + 1 >= end).then({
         return fs[from].w
     })
     rest = fs.ff_run_maxw(from + 1, end)
     (fs[from].w > rest).then({ fs[from].w }, { rest })
 }
-ff_fill_pads = (fs: [MethodFact], pads: [i32], k: i64, end: i64, mx: i32) void {
+ff_fill_pads = (fs: MutSlice<MethodFact>, pads: MutSlice<i32>, k: i64, end: i64, mx: i32) void {
     (k < end).then({
         pads[k] = mx - fs[k].w
         fs.ff_fill_pads(pads, k + 1, end, mx)
     })
 }
-ff_pad_runs = (fs: [MethodFact], pads: [i32], i: i64) void {
+ff_pad_runs = (fs: MutSlice<MethodFact>, pads: MutSlice<i32>, i: i64) void {
     (i < fs.len).then({
         e = fs.ff_run_end(i)
         fs.ff_fill_pads(pads, i, e, fs.ff_run_maxw(i, e))
@@ -293,14 +299,21 @@ ff_pad_runs = (fs: [MethodFact], pads: [i32], i: i64) void {
     })
 }
 // spaces to insert after each method's name so a run's `=` line up (0 for a run of one)
-ff_method_pads = (a: Allocator, fs: [MethodFact]) [i32] {
+ff_method_pads = (a: Allocator, fs: MutSlice<MethodFact>) MutSlice<i32> {
     pads = slice(a.acquire_or_die((fs.len + 1) * sizeof(i32)), fs.len + 1)
     fs.ff_pad_runs(pads, 0)
     pads
 }
 // print an impl's methods (each demangled to its original name; the type's tparams dropped from the
 // method's own tparam list). Reused for inherent (inside the struct) and trait impls (inside `.impl`).
-ff_methods = (s: String, a: Allocator, decls: [Decl], im: ImplData, ctp: [Param], ind: i32) String {
+ff_methods = (
+    s: String,
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    im: ImplData,
+    ctp: MutSlice<Param>,
+    ind: i32,
+) String {
     save = gf_idx
     facts = a.ff_method_facts(decls, im, ctp, ind)
     gf_idx = save
@@ -326,9 +339,9 @@ ff_methods = (s: String, a: Allocator, decls: [Decl], im: ImplData, ctp: [Param]
 ff_inherent_methods = (
     s: String,
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     tyname: StringView,
-    ctp: [Param],
+    ctp: MutSlice<Param>,
     ind: i32,
 ) String {
     out ::= s
@@ -348,9 +361,9 @@ ff_inherent_methods = (
 ff_record_field = (
     s: String,
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     owner: StringView,
-    ctp: [Param],
+    ctp: MutSlice<Param>,
     fl: Field,
 ) String {
     decls.ff_has_default(owner, fl.name).match ({
@@ -380,13 +393,25 @@ ff_record_field = (
 ff_field_dflt = (s: String, a: Allocator, e: Ptr<Expr>) String {
     is_expr_null(e).then({ s }, { s.ff_append(a, " = ").ff_expr(a, e, 1) })
 }
-ff_struct = (s: String, a: Allocator, exp: [Param], decls: [Decl], sd: StructDecl) String {
+ff_struct = (
+    s: String,
+    a: Allocator,
+    exp: MutSlice<Param>,
+    decls: MutSlice<Decl>,
+    sd: StructDecl,
+) String {
     open = s.ff_name(a, exp, sd.name).ff_append(a, ": {\n")
     body ::= open
     sd.fields.loop_at((i, fl) { body = body.ff_record_field(a, decls, sd.name, ff_no_params(), fl) })
     body.ff_inherent_methods(a, decls, sd.name, ff_no_params(), 1).ff_append(a, "}")
 }
-ff_genstruct = (s: String, a: Allocator, exp: [Param], decls: [Decl], g: GenStructDecl) String {
+ff_genstruct = (
+    s: String,
+    a: Allocator,
+    exp: MutSlice<Param>,
+    decls: MutSlice<Decl>,
+    g: GenStructDecl,
+) String {
     open = s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": {\n")
     body ::= open
     g.fields.loop_at((i, fl) { body = body.ff_record_field(a, decls, g.name, g.tparams, fl) })
@@ -395,7 +420,7 @@ ff_genstruct = (s: String, a: Allocator, exp: [Param], decls: [Decl], g: GenStru
 // the impl head prints im.trty — the trait reference AS WRITTEN (qualifier + type args, e.g.
 // `actor.Receiver<Msg>`) — never the bare im.trname mangle key, which drops the `.Receiver<Msg>` part
 // of a qualified reference and would silently change the code's meaning.
-ff_trait_impl = (s: String, a: Allocator, decls: [Decl], im: ImplData) String {
+ff_trait_impl = (s: String, a: Allocator, decls: MutSlice<Decl>, im: ImplData) String {
     ctp = decls.ff_type_tparams(im.ty)
     (im.methods.len == 0).match ({
         true  => s
@@ -413,14 +438,14 @@ ff_trait_impl = (s: String, a: Allocator, decls: [Decl], im: ImplData) String {
         },
     })
 }
-ff_no_fields = () [Field] { slice(null_ptr(), 0) }
+ff_no_fields = () MutSlice<Field> { slice(null_ptr(), 0) }
 // A multi-field variant payload `Ask(t0, t1, …)` is DESUGARED at parse time into a synthesized anon
 // struct `__anon__0__1…` with positional fields `_0, _1, …` (compiler.parse_type.parse_variant_payload
 // + compiler.genc.payload_fname). The surface type list does not survive on the AST, so the formatter
 // re-derives it here: a payload struct is recognised by its `__anon` name AND ordered positional field
 // names, then re-rendered as the `(t0, t1, …)` tuple and the hoisted struct is suppressed at top level
 // (pretty_module_in) — the surface form round-trips and no `__anon…` internal name ever leaks.
-ff_is_positional_fields = (a: Allocator, fields: [Field]) bool {
+ff_is_positional_fields = (a: Allocator, fields: MutSlice<Field>) bool {
     (fields.len == 0).match ({
         true  => false,
         false => {
@@ -430,13 +455,13 @@ ff_is_positional_fields = (a: Allocator, fields: [Field]) bool {
         },
     })
 }
-ff_is_anon_payload_name* = (a: Allocator, decls: [Decl], nm: StringView) bool {
+ff_is_anon_payload_name* = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) bool {
     nm.starts_with("__anon").match ({
         true  => a.ff_is_positional_fields(a.ff_anon_payload_fields(decls, nm)),
         false => false,
     })
 }
-ff_anon_payload_fields = (a: Allocator, decls: [Decl], nm: StringView) [Field] {
+ff_anon_payload_fields = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) MutSlice<Field> {
     res ::= ff_no_fields()
     decls.loop_at((i, d) {
         d.match ({
@@ -450,7 +475,7 @@ ff_anon_payload_fields = (a: Allocator, decls: [Decl], nm: StringView) [Field] {
 }
 // the payload rendering for a variant: the surface `(t0, t1, …)` tuple when the payload is a
 // synthesized anon struct, else the payload type verbatim.
-ff_variant_payload = (s: String, a: Allocator, decls: [Decl], t: Ty) String {
+ff_variant_payload = (s: String, a: Allocator, decls: MutSlice<Decl>, t: Ty) String {
     t.match ({
         .Named(nm) => a.ff_is_anon_payload_name(decls, nm).match ({
             true  => s
@@ -462,7 +487,7 @@ ff_variant_payload = (s: String, a: Allocator, decls: [Decl], t: Ty) String {
         _          => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
     })
 }
-ff_anon_payload_tys = (a: Allocator, decls: [Decl], nm: StringView) [Ty] {
+ff_anon_payload_tys = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) MutSlice<Ty> {
     fields = a.ff_anon_payload_fields(decls, nm)
     buf ::= slice(a.acquire_or_die((fields.len + 1) * sizeof(Ty)), fields.len + 1)
     n ::= 0
@@ -473,14 +498,14 @@ ff_anon_payload_tys = (a: Allocator, decls: [Decl], nm: StringView) [Ty] {
     slice(buf.ptr, n)
 }
 // one variant: `Name`, `Name(Payload)`, or — for a zero-arg ctor with a default constant — `Name = expr`.
-ff_variant = (s: String, a: Allocator, decls: [Decl], vd: VariantDef) String {
+ff_variant = (s: String, a: Allocator, decls: MutSlice<Decl>, vd: VariantDef) String {
     base = vd.payload.match ({
         .Void => s.ff_append(a, vd.name),
         _     => s.ff_append(a, vd.name).ff_variant_payload(a, decls, vd.payload),
     })
     vd.dflt.is_expr_null().then({ base }, { base.ff_append(a, " = ").ff_expr(a, vd.dflt, 0) })
 }
-ff_variants = (s: String, a: Allocator, decls: [Decl], vs: [VariantDef]) String {
+ff_variants = (s: String, a: Allocator, decls: MutSlice<Decl>, vs: MutSlice<VariantDef>) String {
     body ::= s
     vs.loop_at((i, vd) {
         body = (i == 0).then({ body }, { body.ff_append(a, " | ") })
@@ -488,17 +513,27 @@ ff_variants = (s: String, a: Allocator, decls: [Decl], vs: [VariantDef]) String 
     })
     body
 }
-ff_enum = (s: String, a: Allocator, exp: [Param], decls: [Decl], ed: EnumDecl) String {
-    s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, decls, ed.variants)
-}
-ff_genenum = (s: String, a: Allocator, exp: [Param], decls: [Decl], g: GenEnumDecl) String {
+ff_enum = (
+    s: String,
+    a: Allocator,
+    exp: MutSlice<Param>,
+    decls: MutSlice<Decl>,
+    ed: EnumDecl,
+) String { s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, decls, ed.variants) }
+ff_genenum = (
+    s: String,
+    a: Allocator,
+    exp: MutSlice<Param>,
+    decls: MutSlice<Decl>,
+    g: GenEnumDecl,
+) String {
     s
         .ff_name(a, exp, g.name)
         .ff_tparams(a, g.tparams)
         .ff_append(a, ": ")
         .ff_variants(a, decls, g.variants)
 }
-ff_decl* = (s: String, a: Allocator, exp: [Param], decls: [Decl], d: Decl) String {
+ff_decl* = (s: String, a: Allocator, exp: MutSlice<Param>, decls: MutSlice<Decl>, d: Decl) String {
     d.match ({
         .DFunc(f)          => s.ff_func(a, exp, f),
         .DStruct(sd)       => s.ff_struct(a, exp, decls, sd),

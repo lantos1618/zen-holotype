@@ -4,6 +4,7 @@
 { len, view } = std.text.str
 { AllocatorBackend, Allocator } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
+{ loop_at } = std.core.count
 buf = std.mem.buffer
 // Carried strings retain their birth allocator; its state must outlive every derived owner.
 // OOM is sticky until freeze(). Uncarried headers never dispatch through an empty vtable.
@@ -14,13 +15,10 @@ String*: {
     carried: bool,
     oom: bool,
     alloc: Allocator,
-    add = (s: String, t: StringView) String {
-        v = s.string_buffer()
-        d = v.alloc
-        buf.buffer_live(v).match ({
-            true  => buf.buffer_settle(v, buf.buffer_extend(d.addr(), v, t.view(), 1)).buffer_string(),
-            false => s,
-        })
+    add = (s: String, parts: ...StringView) String {
+        out ::= s
+        parts.loop_at((i, t) { out = string_add_one(out, t) })
+        out
     }
     add_one = (s: String, b: u8) String {
         v = s.string_buffer()
@@ -31,7 +29,7 @@ String*: {
             false => s,
         })
     }
-    add_slice = (s: String, t: [u8]) String {
+    add_slice = (s: String, t: MutSlice<u8>) String {
         // t is length-delimited and need not be NUL-terminated.
         v = s.string_buffer()
         d = v.alloc
@@ -40,7 +38,7 @@ String*: {
             false => s,
         })
     }
-    view = (s: String) [u8] { slice(s.ptr, s.len) }
+    view = (s: String) MutSlice<u8> { slice(s.ptr, s.len) }
     freeze = (s: String) Result<StringConst, IoError> {
         buf.buffer_freeze(s.string_buffer()).match ({
             .Ok(c)  => ok(c.buffer_string_const()),
@@ -64,13 +62,23 @@ String*: {
         br: Result<buf.Buffer<u8>, IoError> = .Err(.NotFound)
         buf.buffer_settle(s.string_buffer(), br).buffer_string()
     }
-    bytes   = (s: String) [u8] { s.ptr.slice(s.len) }
+    bytes   = (s: String) MutSlice<u8> { s.ptr.slice(s.len) }
     push_in = (s: String, a: AllocatorBackend, b: u8) Result<String, IoError> { a.push_in(s, b) }
     append_in = (s: String, a: AllocatorBackend, t: StringView) Result<String, IoError> {
         a.append_in(s, t)
     }
     finish_in = (s: String, a: AllocatorBackend) Result<StringCstr, IoError> { a.finish_in(s) }
     free_in   = (s: String, a: AllocatorBackend) void { a.free_in(s) }
+}
+// Private one-piece primitive: the variadic public method folds through this so each append keeps
+// the existing carried-allocator and sticky-OOM behavior.
+string_add_one = (s: String, t: StringView) String {
+    v = s.string_buffer()
+    d = v.alloc
+    buf.buffer_live(v).match ({
+        true  => buf.buffer_settle(v, buf.buffer_extend(d.addr(), v, t.view(), 1)).buffer_string(),
+        false => s,
+    })
 }
 // Header adapters preserve String's public layout.
 string_buffer = (s: String) buf.Buffer<u8> {
@@ -155,7 +163,7 @@ StringFixed*: {
     ptr: RawPtr<u8>,
     len: i64,
     alloc: Allocator,
-    view = (s: StringFixed) [u8] { slice(s.ptr, s.len) }
+    view = (s: StringFixed) MutSlice<u8> { slice(s.ptr, s.len) }
     get  = (s: StringFixed, i: i64) u8 { s.view()[i] }
     set = (s: StringFixed, i: i64, b: u8) void {
         v ::= s.view()
@@ -213,6 +221,6 @@ string_fixed* = (a: Allocator, n: i64) Result<StringFixed, IoError> {
 }
 // Converting a frozen String back to growable storage always copies.
 string_from* = (a: Allocator, c: StringConst) String {
-    src: [u8] = slice(c.ptr, c.len)
+    src: MutSlice<u8> = slice(c.ptr, c.len)
     a.string(c.len).add_slice(src)
 }

@@ -1,7 +1,3 @@
-// drvutil.zen — the driver's small shared helpers: stdout/stderr writes, integer and byte-range
-// pushes onto a genc String, and path slicing. Split out of driver.zen so the extracted verbs
-// (lsp, profile, buildproj) can reach them without importing the driver itself, which would be a
-// cycle: the driver imports each verb's entry point.
 { Allocator } = std.mem.alloc
 { view, is_empty } = std.text.str
 { then } = std.core.bool
@@ -94,19 +90,14 @@ pad_sp* = (s: String, mp: Allocator, n: i64) String {
 }
 finish_cstr* = (s: String, mp: Allocator) StringView { cstr(s.ptr) }
 // bytes [a, b) as an owned str (through the allocator, like cstr_prefix).
-push_span* = (s: String, mp: Allocator, v: [u8], i: i64, n: i64) String {
+push_span* = (s: String, mp: Allocator, v: MutSlice<u8>, i: i64, n: i64) String {
     (i >= n).then({ s }, { push_span(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
 }
 bs_push_range* = (mp: Allocator, out: String, v: Slice<u8>, p: i64, e: i64) String {
     (p >= e).then({ out }, { mp.bs_push_range(out.gstr_push(mp, v[p]), v, p + 1, e) })
 }
 join2* = (mp: Allocator, a: StringView, b: StringView) StringView {
-    mp
-        .gstr_string(256)
-        .gstr_append(mp, a)
-        .gstr_append(mp, "/")
-        .gstr_append(mp, b)
-        .gstr_finish(mp)
+    mp.gstr_string(256).gstr_append(mp, a, "/", b).gstr_finish(mp)
 }
 // the bytes [s,e) of `v` as a fresh owned cstr — the loader/LSP/audit substring verb. ITERATIVE:
 // a JSON body or module region is arbitrarily long, so it must not recurse the C stack per byte.
@@ -135,8 +126,7 @@ zt_log* = (mp: Allocator, name: StringView, start_ms: i64) i64 {
         eprint(mp
             .gstr_string(64)
             .gstr_append(mp, "zenc: time ")
-            .gstr_append(mp, name)
-            .gstr_append(mp, " ")
+            .gstr_append(mp, name, " ")
             .push_int(mp, now - start_ms)
             .gstr_append(mp, "ms\n")
             .gstr_finish(mp))

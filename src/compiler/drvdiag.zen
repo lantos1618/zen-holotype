@@ -1,6 +1,3 @@
-// drvdiag.zen — how the driver turns a compiled module into user-facing diagnostics: run the
-// validation specs, pick the module and source text an error should render against, and print it.
-// Split out of driver.zen so `zenc lsp` can publish the same diagnostics the CLI prints.
 { Allocator } = std.mem.alloc
 { clock_ms } = std.sys.os
 { then } = std.core.bool
@@ -39,7 +36,12 @@ cd_or* = (a: CheckDiagnostic, b: CheckDiagnostic) CheckDiagnostic {
 // types / arity / fit / exhaustiveness / …) is batched separately — check_module_batch — so its
 // INDEPENDENT errors are all reported at once. A parse error, being here, always short-circuits the
 // batch (the flat sentinels would otherwise spray bogus type errors).
-check_diag_no_main = (mp: Allocator, raw: [Decl], decls: [Decl], flat: StringView) CheckDiagnostic {
+check_diag_no_main = (
+    mp: Allocator,
+    raw: MutSlice<Decl>,
+    decls: MutSlice<Decl>,
+    flat: StringView,
+) CheckDiagnostic {
     t0 = clock_ms()
     c0 = check_module_no_if_diagnostic_from_source(flat)
         .cd_or(check_module_no_ternary_diagnostic_from_source(flat))
@@ -78,7 +80,7 @@ RenderTarget*: {
 }
 pick_module = (
     flat: StringView,
-    mods: [ModuleEntry],
+    mods: MutSlice<ModuleEntry>,
     i: i64,
     off: i32,
     w: i32,
@@ -159,8 +161,8 @@ locate_diag* = (
 // only on the specialized-channel path, where a single root error stands in for a whole cascade.
 emit_one* = (
     mp: Allocator,
-    raw: [Decl],
-    decls: [Decl],
+    raw: MutSlice<Decl>,
+    decls: MutSlice<Decl>,
     rp: ResolvedProgram,
     path: StringView,
     user: StringView,
@@ -237,8 +239,7 @@ report_js_unsupported* = (
     msg = mp
         .gstr_string(192)
         .gstr_append(mp, "`")
-        .gstr_append(mp, nm)
-        .gstr_append(mp, "` is a compiler intrinsic the js backend cannot lower; the emitted JavaScript would call an undefined function")
+        .gstr_append(mp, nm, "` is a compiler intrinsic the js backend cannot lower; the emitted JavaScript would call an undefined function")
         .gstr_finish(mp)
     eprint(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, "js-target", msg, "build this program for the default C target, or keep the js-target path clear of it", 1))
     1
@@ -314,8 +315,7 @@ report_c_unsupported* = (
     msg = mp
         .gstr_string(192)
         .gstr_append(mp, "`")
-        .gstr_append(mp, JS_PLATFORM_MODULE())
-        .gstr_append(mp, "` is a JavaScript-platform binding: the browser implements its stubs, so a C build would link against symbols no C host defines")
+        .gstr_append(mp, JS_PLATFORM_MODULE(), "` is a JavaScript-platform binding: the browser implements its stubs, so a C build would link against symbols no C host defines")
         .gstr_finish(mp)
     eprint(mp.render_diagnostic(path, user, sp.line, sp.col, sp.end_col, "c-target", msg, "build this program for the js target instead — `zen emit-js <file>` or `zen build --target js <file>` — and load it in a browser page", 1))
     1
@@ -335,8 +335,8 @@ emit_more_trailer = (mp: Allocator, k: i32) i64 {
 // 0 if clean; else render EVERY main-channel diagnostic (capped, with a trailer) and return the count.
 report_check* = (
     mp: Allocator,
-    raw: [Decl],
-    decls: [Decl],
+    raw: MutSlice<Decl>,
+    decls: MutSlice<Decl>,
     rp: ResolvedProgram,
     path: StringView,
     user: StringView,
@@ -374,8 +374,8 @@ report_check* = (
 // would bury it. Only a program that is otherwise completely clean gets judged on this.
 report_alloc_null = (
     mp: Allocator,
-    raw: [Decl],
-    decls: [Decl],
+    raw: MutSlice<Decl>,
+    decls: MutSlice<Decl>,
     rp: ResolvedProgram,
     path: StringView,
     user: StringView,

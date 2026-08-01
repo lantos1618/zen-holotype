@@ -1,49 +1,34 @@
-// clones.zen — structural clone detection over the RESOLVED AST.
-//
 // Two functions are clones when their trees have the same shape once locally-bound names are
-// abstracted away. This is a tree walk, not a text match: `zen audit` already parses the program,
-// so the structure is right there and there is no reason to approximate it with a regex over
-// source text. Whitespace, comments, formatting and parameter naming cannot affect the result,
-// because none of them survive into the AST.
+// abstracted away. Whitespace, comments, formatting and parameter naming do not affect the result.
 //
-// CANONICALISATION — the whole design lives in these three rules, and each was calibrated against
-// this tree by measuring how many groups it produces and hand-checking the result:
-//
+// Canonicalisation:
 //   1. BOUND names (params, `let` locals) are replaced by their binding INDEX. This is what makes
 //      `is_walrus(t)` and `is_assign(tok)` hash equal — the only difference is a parameter name.
-//   2. FREE names (called functions, types, enum variants) are kept VERBATIM. This is the rule that
-//      matters most. Abstracting them too collapses every `t.match({ .X => true, _ => false })`
-//      predicate onto one hash: measured on this tree that inflates 14 real groups to 148, almost
-//      all false — `.Ptr` and `.Slice` are not interchangeable just because the shape matches.
+//   2. FREE names (called functions, types, enum variants) are kept VERBATIM.
 //   3. LITERALS are kept. Replacing them with a hole merges functions that differ only in a
-//      constant, which is usually a real distinction (measured: 14 groups -> 35).
+//      constant.
 //
 // The fingerprint is an FNV-1a fold over node tags plus those canonical leaves, so equal hash means
 // equal canonical tree. Collisions are astronomically unlikely at this scale and would surface as a
 // reviewable finding, never as a silent rewrite.
 //
-// EVERY child must be folded in. A node whose children are skipped is not an abstraction, it is a
-// lie: the first cut hashed a struct literal as its type name alone and duly reported `parse_not`
-// (which builds a `cond`) as identical to `parse_neg` (which builds a `bin_at("-")`) — the entire
-// difference sat in the unhashed fields. tests/harness_misc.zen plants that exact near-miss.
+// Every child must be folded; skipping children creates false clone groups.
 { Allocator } = std.mem.alloc
 { then } = std.core.bool
 { view } = std.text.str
-{ fnv1a64_fold } = std.hash
+{ fnv1a64_fold, FNV64_PRIME, FNV64_OFFSET_I64 } = std.hash
 { is_expr_null, acquire_or_die } = compiler.genc
 { Expr, FieldInit, Func, LambdaData, LoopData, MatchData, Stmt, Ty } = compiler.ast.ast_types
 { loop_at } = std.core.count
 // Binding scope: names bound by this function, in binding order. Small and linear — a function with
 // enough locals for the scan to matter is already a problem this tool wants to report.
 CloneCtx*: {
-    names: [StringView],
+    names: MutSlice<StringView>,
     n: i64,
     nodes: i64,
 }
-CLONE_BASIS = () i64 { 0 - 3750763034362895579 }    // the FNV-1a-64 offset basis as an i64
-CLONE_PRIME = () i64 { 1099511628211 }
 // fold a small structural tag (a node kind) into the running hash
-clone_tag = (h: i64, tag: i64) i64 { (h ^ tag) * CLONE_PRIME() }
+clone_tag = (h: i64, tag: i64) i64 { (h ^ tag) * FNV64_PRIME }
 // count a visited node — the size gate below is on TREE size, not statement count. A one-statement
 // body is the norm in this language (`f = (x) bool { x.match({ ... }) }`), so gating on statements
 // reports nothing at all.
@@ -96,12 +81,12 @@ clone_ty = (h: i64, t: Ty) i64 {
         .Generic(g)    => g.args.clone_tys(h.clone_tag(33).clone_text(g.name)),
     })
 }
-clone_tys = (ts: [Ty], h: i64) i64 {
+clone_tys = (ts: MutSlice<Ty>, h: i64) i64 {
     acc ::= h
     ts.loop_at((i, t) { acc = acc.clone_ty(t) })
     acc
 }
-clone_exprs = (cx: MutPtr<CloneCtx>, h: i64, xs: [Expr]) i64 {
+clone_exprs = (cx: MutPtr<CloneCtx>, h: i64, xs: MutSlice<Expr>) i64 {
     acc ::= h
     xs.loop_at((i, x) { acc = cx.clone_expr(acc, x.addr()) })
     acc
@@ -138,11 +123,9 @@ clone_arms = (cx: MutPtr<CloneCtx>, h: i64, m: MatchData) i64 {
     })
     acc
 }
-// A struct literal's field VALUES are real children. Hashing only the type name — as the first cut
-// did — makes every literal of one type identical, which merged `parse_not` with `parse_neg`: both
-// build a `PExpr(expr: …, next: …)` and everything that distinguishes them lives in the fields.
+// A struct literal's field values are real children; hashing only the type name creates false clones.
 // Field names follow rule 2 (free, verbatim), so `S(a: t, b: u)` and `S(a: u, b: t)` differ.
-clone_inits = (cx: MutPtr<CloneCtx>, h: i64, inits: [FieldInit]) i64 {
+clone_inits = (cx: MutPtr<CloneCtx>, h: i64, inits: MutSlice<FieldInit>) i64 {
     acc ::= h
     inits.loop_at((i, f) { acc = cx.clone_expr(acc.clone_tag(61).clone_text(f.name), f.value) })
     acc
@@ -171,7 +154,7 @@ clone_lambda = (cx: MutPtr<CloneCtx>, h: i64, l: LambdaData) i64 {
     })
     cx.clone_stmts(acc, l.body)
 }
-clone_stmts = (cx: MutPtr<CloneCtx>, h: i64, body: [Stmt]) i64 {
+clone_stmts = (cx: MutPtr<CloneCtx>, h: i64, body: MutSlice<Stmt>) i64 {
     acc ::= h
     body.loop_at((i, st) { acc = cx.clone_stmt(acc, st) })
     acc
@@ -196,14 +179,14 @@ CLONE_SCOPE_CAP = () i64 { 128 }
 // The fingerprint of one function: parameter TYPES (so a differing signature never collides), then
 // the body. Parameter NAMES are bound, not hashed — rule 1.
 clone_fn* = (mp: Allocator, f: Func) i64 {
-    buf: [StringView] = slice(mp.acquire_or_die(CLONE_SCOPE_CAP() * sizeof(StringView)), CLONE_SCOPE_CAP())
+    buf: MutSlice<StringView> = slice(mp.acquire_or_die(CLONE_SCOPE_CAP() * sizeof(StringView)), CLONE_SCOPE_CAP())
     c = CloneCtx(
         names: buf,
         n: 0,
         nodes: 0,
     )
     cx = c.addr()
-    h ::= CLONE_BASIS().clone_ty(f.ret)
+    h ::= FNV64_OFFSET_I64.clone_ty(f.ret)
     f.params.loop_at((i, p) {
         cx.clone_bind(p.name)
         h = h.clone_ty(p.ty)
@@ -241,15 +224,9 @@ clone_fn* = (mp: Allocator, f: Func) i64 {
 //             char-class/predicate de-duplication already on the roadmap.
 //   6  (+3)   tybuf == tybuf1, ff_slice_elem == vararg_elem. Real, marginal: single expressions.
 //   4  (+18)  the noise floor arrives — no_exports == empty_params == vw_none, all three
-//             `slice(null_ptr(), 0)`, and CLONE_BASIS == FNV_BASIS, two i64 CONSTANTS. "Structurally
+//             `slice(null_ptr(), 0)`, and CLONE_BASIS == FNV_BASIS (since merged into std.hash's
+//             FNV64_OFFSET_I64 — that pair was a REAL duplicate the noise floor hid). "Structurally
 //             identical" has stopped meaning "duplicated logic" by here.
 //
-// That whole 8-tier has since been merged away (the two de-duplication rounds this detector was
-// built to drive), so the gate now reports ZERO on this tree — the tool's own success condition,
-// and the reason `zen audit` keeps running it: the next copy-paste is what it is watching for.
-//
-// 6 is defensible (it admits 3 real pairs and no junk) and 4 is not (a majority of its tier is junk).
-// 8 is the shipped default because it is the last gate whose entire admitted tier is code that can
-// rot out of sync. Raising it hides real duplication rather than false findings: 12 — the first cut's
-// number — drops all 14 of the 8-tier pairs, which is 17 genuine clones traded for a shorter report.
+// Eight nodes is the smallest threshold whose reported tier remains reviewable without mostly noise.
 CLONE_MIN_NODES* = () i64 { 8 }

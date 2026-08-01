@@ -1,10 +1,3 @@
-// compiler.ast.ast_types — THE shared AST type definitions (moved verbatim out of compiler.genc,
-// which keeps the constructors/helpers and now imports these types back).
-//
-// Every stage of the compiler — parse, check, mono, the backends, the formatter — shares these
-// runtime values: Expr/Stmt/Ty/Decl plus their *Data payload structs. This module imports
-// nothing: the types are the base of the whole compiler graph.
-// ── the AST (runtime values; Expr is RECURSIVE via heap Ptr children) ───────
 // Type decls are toposorted by codegen, so order here is free; Bin embeds Ptr<Expr>,
 // which needs only a forward decl, so the recursion closes.
 VarData*: {
@@ -20,11 +13,12 @@ BinData*: {
 }    // lhs op rhs; pos = operator byte offset when source-backed; rty = declared sub-width int result type to re-truncate (Void = native width, no cast)
 CallData*: {
     fn: StringView,
-    args: [Expr],
-    targs: [Ty],
+    args: MutSlice<Expr>,
+    targs: MutSlice<Ty>,
     pos: i32,
     raw: bool,
-}    // fn(a, b, …) or @fn(a, b, …); targs = explicit turbofish type args `fn<T,…>(…)` (empty = inferred); pos = fn byte offset (0 = synthesized)
+    origin: StringView,
+}    // fn(a, b, …) or @fn(a, b, …); origin = resolved provider module id (empty before resolution/synthesized)
 // a FAITHFUL method call `recv.method(args)` — preserves the UFCS surface syntax that the parser would
 // otherwise FLATTEN into a `Call(fn: method, args: [recv] ++ args)`. parse_module keeps MethodCall (so the
 // formatter sees the surface form); compiler.check.desugar_method_calls lowers it to the flat Call before
@@ -32,7 +26,7 @@ CallData*: {
 MethodCallData*: {
     recv: Ptr<Expr>,
     method: StringView,
-    args: [Expr],
+    args: MutSlice<Expr>,
     pos: i32,
 }
 // oa = invalid one-arm marker for a bool `.match`: 0 = an explicit two-branch cond (including `.then`,
@@ -59,25 +53,31 @@ MakeEnumData*: {
     ty: StringView,
     mty: StringView,
     variant: StringView,
-    targs: [Ty],
+    targs: MutSlice<Ty>,
     payload: Ptr<Expr>,
+    ty_pos: i32,
+    variant_pos: i32,
 }    // (mty){ .tag=mty_V, .u.V=payload }; mty = monomorphized name (= ty unless generic)
 TagData*: {
     ty: StringView,
     mty: StringView,
     variant: StringView,
-    targs: [Ty],
+    targs: MutSlice<Ty>,
+    ty_pos: i32,
+    variant_pos: i32,
 }    // (mty){ .tag=mty_V }  (no payload)
 ArmData*: {
     variant: StringView,
     bind: StringView,
     body: Ptr<Expr>,
     pos: i32,
+    variant_pos: i32,
+    bind_pos: i32,
 }    // .Variant(bind) => body  (bind "" = none); pos = pattern byte offset (0 = synthesized), so the formatter can anchor comments above/after an arm even when its body is a position-less literal.
 MatchData*: {
     subj: Ptr<Expr>,
     ename: StringView,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
     ptr: bool,
 }    // subj a variable; ptr -> use ->; last arm = default
 StrData*: {
@@ -87,6 +87,7 @@ StrData*: {
 FieldInit*: {
     name: StringView,
     value: Ptr<Expr>,
+    pos: i32,
 }    // .name = value  (one struct-literal initializer)
 // `ty` is the base type name, `mty` the C name to emit (= ty for a plain struct, or the monomorphized
 // name `Box_i32` for a generic literal), and `targs` the type args of a generic literal (empty otherwise
@@ -94,15 +95,15 @@ FieldInit*: {
 MakeStructData*: {
     ty: StringView,
     mty: StringView,
-    targs: [Ty],
-    inits: [FieldInit],
+    targs: MutSlice<Ty>,
+    inits: MutSlice<FieldInit>,
     pos: i32,
 }    // (mty){ .a = …, .b = … }; pos = type-name byte offset (0 = synthesized)
-// a slice [T] is a fat pointer { void* ptr; int64_t len; } (the `zslice` typedef). The element
+// a `Slice<T>` or `MutSlice<T>` is a fat pointer { void* ptr; int64_t len; } (the `zslice` typedef). The element
 // type T is recovered at the literal (array type) and at indexing (the cast) — carried in the AST.
 SliceData*: {
     elem: Ty,
-    items: [Expr],
+    items: MutSlice<Expr>,
 }    // [a, b, c]  ->  (zslice){ .ptr = (T[]){…}, .len = N }
 IndexData*: {
     seq: Ptr<Expr>,
@@ -116,8 +117,11 @@ LoopData*: {
     idx: StringView,
     elem: StringView,
     elemTy: Ty,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
     h: StringView,
+    h_pos: i32,
+    idx_pos: i32,
+    elem_pos: i32,
 }    // h = the handler name; `h.break`/`h.continue` in the body are the loop controls
 // a lambda value `(a, x) { body }` — a param's ty is its DECLARED `: Type` annotation when the source
 // wrote one, Void otherwise. The annotation is kept ONLY so the formatter round-trips it: type checking
@@ -125,15 +129,15 @@ LoopData*: {
 // arguments to a template's FnT parameter, and are inlined at the call site so their bodies read
 // captured locals.
 LambdaData*: {
-    params: [Param],
-    body: [Stmt],
+    params: MutSlice<Param>,
+    body: MutSlice<Stmt>,
     ret: Ty,
 }    // `ret` = the lambda's DECLARED return type `(x) U {…}` (void when unannotated). Kept so a generic
 // call can infer a tparam that appears ONLY in a closure-param's return position `(T) U`.
 // a statement-expression `({ s1; s2; … sN; })` — its value is the last statement's. Produced by
 // inlining a (multi-statement) template body at a call site; the trailing return becomes a bare expr.
 BlockData*: {
-    stmts: [Stmt],
+    stmts: MutSlice<Stmt>,
 }
 // `Byte` is an integer literal that came from a CHAR literal `'a'` — emitted exactly like Int
 // (its byte value), but typed `u8` by the checker (a char is a byte, so `is_op(t, '+')` passing
@@ -157,12 +161,12 @@ AssignData*: {
 }    // <lvalue> = expr; pos = lvalue byte offset (0 = synthesized)
 IfData*: {
     c: Ptr<Expr>,
-    then: [Stmt],
-    els: [Stmt],
+    then: MutSlice<Stmt>,
+    els: MutSlice<Stmt>,
 }    // if (c) { then } else { els }
 WhileData*: {
     c: Ptr<Expr>,
-    body: [Stmt],
+    body: MutSlice<Stmt>,
 }    // while (c) { body }   (Stmt is recursive)
 IndexSetData*: {
     seq: Ptr<Expr>,
@@ -176,7 +180,7 @@ Stmt*: Let(LetData) | Assign(AssignData) | Return(Ptr<Expr>) | If(IfData) | Whil
 // a function type `(A, T) R` — ONLY a parameter type. A function that takes one is an inline
 // template (spliced per call site), never a C function pointer, so FnT has no standalone C type.
 FnTData*: {
-    params: [Ty],
+    params: MutSlice<Ty>,
     ret: Ptr<Ty>,
 }
 // a GENERIC INSTANCE type `Box<i32>` — a named type applied to concrete type args. `name` is the
@@ -185,7 +189,7 @@ FnTData*: {
 // string-building. The monomorphize pass turns each instance into a concrete StructDecl named `mangled`.
 GenericData*: {
     name: StringView,
-    args: [Ty],
+    args: MutSlice<Ty>,
     mangled: StringView,
 }
 PtrData*: {
@@ -193,21 +197,22 @@ PtrData*: {
     kind: i32,
 }    // a `Ptr`/`MutPtr`/`RawPtr` node: the pointee + which kind was spelled. A `Slice` reuses it: a
 // slice IS a fat pointer, so `pointee` is the ELEMENT type and `kind` carries the same read/write
-// distinction (k_ptr = `Slice<T>`, read-only; k_mut_ptr = `MutSlice<T>`/`[T]`, writable). Both
+// distinction (k_ptr = `Slice<T>`, read-only; k_mut_ptr = `MutSlice<T>`, writable). Both
 // slice kinds are the SAME `{ptr,len}` C layout — the bit only changes what the checker permits.
-Ty*: I32 | I64 | U8 | F64 | Bool | Named(StringView) | Void | StringView | StringCstr | StringLiteral | Ptr(PtrData) | Slice(PtrData) | FnT(FnTData) | Generic(GenericData)    // scalar/f64/struct/void/string_*, T*, [T], (A)R, or N<T>
+Ty*: I32 | I64 | U8 | F64 | Bool | Named(StringView) | Void | StringView | StringCstr | StringLiteral | Ptr(PtrData) | Slice(PtrData) | FnT(FnTData) | Generic(GenericData)    // scalar/f64/struct/void/string_*, T*, Slice<T>/MutSlice<T>, (A)R, or N<T>
 Param*: {
     name: StringView,
     ty: Ty,
     variadic: bool,
-}    // variadic = a trailing `...T` param (ty is the collected `[T]`); false otherwise
+    pos: i32,
+}    // variadic = a trailing `...T` param (ty is the collected `MutSlice<T>`); false otherwise
 // a function is a name, typed parameters, a return type, and a sequence of statements
 Func*: {
     name: StringView,
-    params: [Param],
+    params: MutSlice<Param>,
     ret: Ty,
-    tparams: [Param],
-    body: [Stmt],
+    tparams: MutSlice<Param>,
+    body: MutSlice<Stmt>,
     pos: i32,
 }    // ret name(params) { body }; tparams = generic type params (name-only), [] = monomorphic; pos = name byte offset (0 = synthesized), used by the formatter to anchor leading comments
 // a struct declaration, and a top-level Decl (a translation unit is a list of these)
@@ -215,10 +220,11 @@ Field*: {
     name: StringView,
     ty: Ty,
     dflt: Ptr<Expr>,
+    pos: i32,
 }    // dflt = the constant a struct literal omitting this field gets (`total: i64 = 0`); null_ptr() = no default (the field stays zero-filled). Named like VariantDef.dflt — `default` is a C keyword.
 StructDecl*: {
     name: StringView,
-    fields: [Field],
+    fields: MutSlice<Field>,
     pos: i32,
 }    // typedef struct { fields } name; pos = name byte offset (0 = synthesized), for the formatter's leading-comment anchor
 // a GENERIC struct declaration `Box<T>: { v: T }` — a template over type params `tparams` (["T"]).
@@ -226,8 +232,8 @@ StructDecl*: {
 // `Box<concrete>` used, substituting tparam→arg in the field types. genModule drops the DGenStruct.
 GenStructDecl*: {
     name: StringView,
-    tparams: [Param],
-    fields: [Field],
+    tparams: MutSlice<Param>,
+    fields: MutSlice<Field>,
     pos: i32,
 }    // tparams = name-only Params; pos = name byte offset (formatter leading-comment anchor)
 // an enum (tagged union): each variant has a name and a payload Ty (Void = no data)
@@ -235,18 +241,19 @@ VariantDef*: {
     name: StringView,
     payload: Ty,
     dflt: Ptr<Expr>,
+    pos: i32,
 }    // dflt = constant for the zero-arg ctor (`Name = expr`); null_ptr() = no default. NOT named `default` — that's a C keyword and collides with the `default()` allocator ctor under keyword-mangling.
 EnumDecl*: {
     name: StringView,
-    variants: [VariantDef],
+    variants: MutSlice<VariantDef>,
     pos: i32,
 }    // pos = name byte offset (0 = synthesized), formatter leading-comment anchor
 // a GENERIC enum declaration `Opt<T>: Some(T) | None` — like DGenStruct but over variant payloads.
 // The monomorphize pass emits one concrete EnumDecl per `Opt<concrete>` used (tparam→arg in payloads).
 GenEnumDecl*: {
     name: StringView,
-    tparams: [Param],
-    variants: [VariantDef],
+    tparams: MutSlice<Param>,
+    variants: MutSlice<VariantDef>,
     pos: i32,
 }    // pos = name byte offset (formatter leading-comment anchor)
 // records a `Type.impl(Trait, { … })` block: the type, the trait, and the method names THIS impl
@@ -257,8 +264,9 @@ ImplData*: {
     ty: StringView,
     trname: StringView,
     trty: Ty,
-    methods: [Param],
+    methods: MutSlice<Param>,
     pos: i32,
+    trait_pos: i32,
 }    // trty = the trait reference AS WRITTEN (qualifier + type args, e.g. `actor.Receiver<Msg>`) so the
 // formatter round-trips it; trname stays the single-token mangle key (`actor`/`Receiver`) the impl's
 // hoisted DFunc names were built from — checker/codegen lookups key on trname, never trty.
@@ -267,12 +275,12 @@ ImplData*: {
 // so genModule emits its signature but no body, and the checker knows its full signature.
 // DImport records a destructuring import `{ a, b } = std.x`: just the imported NAMES (carried as
 // name-only Params, the same idiom DImpl uses for method names — a Param is a real C struct, so a
-// `[Param]` buffer needs no special string-size workaround). It carries no code (modules link
+// `MutSlice<Param>` buffer needs no special string-size workaround). It carries no code (modules link
 // separately, so
 // genModule emits nothing), but the checker keeps it so a call to an imported name is KNOWN (not
 // flagged undefined) — its signature is unknown, so it's unchecked.
 ImportData*: {
-    names: [Param],
+    names: MutSlice<Param>,
     module: StringView,
     pos: i32,
 }    // module = the imported module path text ("std.text.fmt"), kept for the formatter; pos = the `{` byte offset (0 = synthesized)

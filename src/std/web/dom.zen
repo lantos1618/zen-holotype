@@ -1,102 +1,51 @@
 //! link: js
-// std.web.dom — the WEB-platform binding surface: the browser DOM as typed Zen declarations.
-//
-// This file is to the experimental `js` backend what std.c.libc is to `genc`: a header of
-// BODYLESS declarations (a `[Decl]` surface) that the code generator lowers to native platform
-// calls. genc turns a bodyless `name = (params) Ret` into a bare C prototype and libc defines the
-// symbol; js special-cases these names into JavaScript member access / method calls on live browser
-// objects (`document`, `Element`, `Event`, …). Nothing here is re-implemented in Zen — the browser is
-// the implementation. The current lowering is incomplete, especially for Opt and StringView return
-// conversion; docs/STATUS.md records the parity gates before this surface can be called shipped.
-//
-// ── DESIGN: opaque handles + upcast stubs (because Zen has no inheritance and no overloading) ──────
-// The DOM is a single-inheritance tree — EventTarget ← Node ← Element ← HTMLElement, etc. Zen has
-// neither subtyping NOR function overloading (the flat UFCS namespace holds each method name exactly
-// ONCE). So we cannot declare `add_event_listener` on both `EventTarget` and `Element`, nor make an
-// `Element` transparently usable where a `Node` is expected. The model instead is:
-//   • each DOM interface = a distinct OPAQUE HANDLE struct `{ handle: RawPtr<u8> }` (the JS object ref).
-//   • each method is declared EXACTLY ONCE, on the interface that MDN says introduces it.
-//   • the inheritance edges are expressed as `as_*` UPCAST stubs (`el.as_node()`, `el.as_event_target()`).
-//     In JavaScript an Element already *is* a Node, so js lowers every upcast to the IDENTITY (a
-//     no-op cast) — it exists only to satisfy Zen's type checker and to route UFCS to the base method.
-// So the idiomatic call for an inherited method is `el.as_event_target().add_event_listener(...)`.
-//
-// ── DESIGN: JS globals as zero-arg accessor stubs ─────────────────────────────────────────────────
-// `document`, `window`, and `console` are ambient JS singletons, not values you thread around. We model
-// each as a bodyless zero-arg accessor returning its handle — `document()`, `window()`, `console()` —
-// which js lowers to the bare global identifier (`document()` → `document`). This keeps them out of
-// every signature while staying UFCS-friendly: `document().get_element_by_id("app")`,
-// `console().log("hi")`. (An alternative — module-level handle constants — cannot express "read the
-// live global at use site", so accessor stubs are the honest choice.)
-//
-// This module imports ONLY `Opt` (for lookups that can miss); RawPtr / StringView / bool / i32 / f64 / void
-// are builtins. It declares no runtime state, so importing it pulls in nothing and affects nothing
-// until js consumes it.
+// Typed bodyless bindings lowered by the JS backend. Interfaces are opaque handles; explicit upcast
+// stubs model DOM inheritance, and zero-argument accessors model browser globals.
 { Opt } = std.core.result
-// ── Interface handles (the DOM inheritance tree, flattened to opaque JS object refs) ───────────────
-// EventTarget ← Node ← Element ← HTMLElement ;  Node ← Text ;  Node ← Document ;  EventTarget ← Window.
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/EventTarget
 EventTarget*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Node
 Node*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Element
 Element*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement
 HTMLElement*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Text
 Text*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Document
 Document*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Window
 Window*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Event
 Event*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/NodeList — the (static) result of querySelectorAll.
 NodeList*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/DOMTokenList — element.classList.
 DOMTokenList*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/CSSStyleDeclaration — element.style.
 CSSStyleDeclaration*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Console — the console global.
 Console*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Location — window.location.
 Location*: {
     handle: RawPtr<u8>,
 }
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Promise — returned by fetch (async is future js work).
 Promise*: {
     handle: RawPtr<u8>,
 }
-// ── Upcast stubs: the inheritance edges. js lowers each to the identity (an Element IS a Node). ─
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Node — Node is an EventTarget.
 node_target* = (n: Node) EventTarget
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Element — Element is a Node.
 as_node* = (e: Element) Node
-// MDN: https://developer.mozilla.org/en-US/docs/Web/API/Element — Element is an EventTarget.
 as_event_target* = (e: Element) EventTarget
 // MDN: https://developer.mozilla.org/en-US/docs/Web/API/HTMLElement — HTMLElement is an Element.
 as_element* = (h: HTMLElement) Element

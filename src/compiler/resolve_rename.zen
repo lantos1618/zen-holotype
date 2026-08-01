@@ -1,22 +1,13 @@
 // @self-hosted-only
-// compiler.resolve_rename — the namespace/shadow rename, decided on the AST.
-//
 // A module bound under an alias (`L = lib`) gets its own value decls — and every reference to them —
 // prefixed `L__name`, so two modules can export the same short name into Zen's flat C namespace. The
 // user-shadow pass (compiler.resolve_shadow) is the same rename under a `zshadow` alias.
 //
-// The rename used to be a byte rewrite over the module's source, keyed on "identifier that appears in
-// the export list". That spelling is shared by things which are NOT value references: a struct-literal
-// field label `Box(len: n)`, an enum's variant LIST `E: Some(i64) | None`, a qualified variant
-// `E.Some(n)` and a match arm `.Some(v)`. Each of those got prefixed too, so a module whose enum had a
-// variant named like one of its own functions checked clean standalone and broke every consumer that
-// aliased it — with the diagnostic pointing into the innocent file.
-//
-// The body is now PARSED and the rename is decided per AST NODE. Only a declared FUNCTION/GLOBAL name
+// The rename is decided per AST node. Only a declared FUNCTION/GLOBAL name
 // and a value REFERENCE — `Var`, `Call`, and a UFCS `MethodCall` method — can be renamed. `FieldInit`
 // labels, `Field` decls, `Member` field names, `VariantDef` variants and `ArmData` patterns are
 // DIFFERENT NODE KINDS: they have no marking site at all, so no guess is involved and no guard is
-// needed to compensate for one.
+// needed.
 //
 // The walk records byte OFFSETS into a mark array and one linear pass splices `alias__` in at exactly
 // those offsets. Staying a text substitution is deliberate: the flat program IS text downstream (the
@@ -85,7 +76,7 @@ ren_types_set* = (a: Allocator, table: ModuleTable) void {
 // A name bound by a param, a binding, a loop's index/element/handler, a lambda param or a match arm is a
 // LOCAL: it is not this module's decl, so it is never renamed and neither are the references it binds.
 // A stack with mark/drop gives real block scoping — a `x = …` shadows only the statements after it.
-ren_no_binds = () [StringView] { slice(null_ptr(), 0) }
+ren_no_binds = () MutSlice<StringView> { slice(null_ptr(), 0) }
 ren_binds ::= ren_no_binds()
 ren_bind_n ::= 0
 ren_binds_reset = (a: Allocator) void {
@@ -94,7 +85,7 @@ ren_binds_reset = (a: Allocator) void {
 }
 ren_bind_push = (a: Allocator, nm: StringView) void {
     (ren_bind_n >= ren_binds.len).then({
-        grown :: [StringView] = slice(a.acquire_or_die(ren_binds.len * 2 * sizeof(StringView)), ren_binds.len * 2)
+        grown :: MutSlice<StringView> = slice(a.acquire_or_die(ren_binds.len * 2 * sizeof(StringView)), ren_binds.len * 2)
         ren_binds.loop_at((i, v) { grown[i] = v })
         ren_binds = grown
     })
@@ -105,7 +96,7 @@ ren_bind_mark = () i32 { ren_bind_n }
 ren_bind_drop = (m: i32) void { ren_bind_n = m }
 ren_bind_has = (nm: StringView) bool {
     found ::= false
-    live: [StringView] = slice(ren_binds.ptr, ren_bind_n)
+    live: MutSlice<StringView> = slice(ren_binds.ptr, ren_bind_n)
     live.loop((h, i, v) {
         (v == nm).then({
             found = true
@@ -118,7 +109,7 @@ ren_bind_has = (nm: StringView) bool {
 // `bound` flips what the walk marks: false = the value decls/references being RENAMED, true = the
 // identifiers the binder stack knows are LOCALS (what the qualifier rewrite below needs to know).
 RenCtx: {
-    marks: [u8],
+    marks: MutSlice<u8>,
     sv: StringView,
     src: Slice<u8>,
     names: Slice<u8>,
@@ -220,7 +211,7 @@ ren_expr = (c: RenCtx, a: Allocator, e: Ptr<Expr>) i32 {
         }),
     })
 }
-ren_stmts = (c: RenCtx, a: Allocator, body: [Stmt]) i32 {
+ren_stmts = (c: RenCtx, a: Allocator, body: MutSlice<Stmt>) i32 {
     m = ren_bind_mark()
     body.loop_at((i, s) { c.ren_stmt(a, s) })
     ren_bind_drop(m)
@@ -263,7 +254,7 @@ ren_func = (c: RenCtx, a: Allocator, f: Func) i32 {
     ren_bind_drop(m)
     0
 }
-ren_variants = (c: RenCtx, a: Allocator, vs: [VariantDef]) i32 {
+ren_variants = (c: RenCtx, a: Allocator, vs: MutSlice<VariantDef>) i32 {
     vs.loop_at((i, v) { c.ren_expr(a, v.dflt) })
     0
 }
@@ -284,7 +275,7 @@ ren_decl = (c: RenCtx, a: Allocator, d: Decl) i32 {
 }
 // splice `alias__` in at the marked identifier starts — the only text edit the rename makes, so every
 // byte the walk did not name survives verbatim and no line boundary moves.
-ren_apply = (out: String, a: Allocator, s: StringView, marks: [u8], alias: String) String {
+ren_apply = (out: String, a: Allocator, s: StringView, marks: MutSlice<u8>, alias: String) String {
     cur ::= out
     pos :: i32 = 0
     bs: Slice<u8> = s.str_bytes()
@@ -306,8 +297,8 @@ ren_apply = (out: String, a: Allocator, s: StringView, marks: [u8], alias: Strin
     })
     cur
 }
-ren_marks = (a: Allocator, n: i64) [u8] {
-    ms :: [u8] = slice(a.acquire_or_die(n + 1), n + 1)
+ren_marks = (a: Allocator, n: i64) MutSlice<u8> {
+    ms :: MutSlice<u8> = slice(a.acquire_or_die(n + 1), n + 1)
     ms.loop_at((i, b) { ms[i] = 0 })
     ms
 }
@@ -344,8 +335,8 @@ rename_ns_names* = (out: String, a: Allocator, s: StringView, names: String, ali
 // param, a match-arm binding — and a marked identifier is never a qualifier. Candidate sites come
 // from the LEXER, so a comment or a string literal is not a site at all. Application stays a
 // marked-offset splice: `A.` and `A__` are the same line, so every `file:line:col` is untouched.
-ren_no_names = () [u8] { slice(null_ptr(), 0) }
-ns_local_marks = (a: Allocator, s: StringView) [u8] {
+ren_no_names = () MutSlice<u8> { slice(null_ptr(), 0) }
+ns_local_marks = (a: Allocator, s: StringView) MutSlice<u8> {
     sb: Slice<u8> = s.str_bytes()
     c = RenCtx(
         marks: a.ren_marks(sb.len),
@@ -387,8 +378,8 @@ qual_mark_tok = (
     a: Allocator,
     s: StringView,
     sc: Scan,
-    ms: [u8],
-    locals: [u8],
+    ms: MutSlice<u8>,
+    locals: MutSlice<u8>,
     quals: String,
     qnames: String,
     strip_qnames: String,
@@ -416,7 +407,7 @@ qual_marks = (
     qnames: String,
     strip_qnames: String,
     strip_all_quals: String,
-) [u8] {
+) MutSlice<u8> {
     locals = a.ns_local_marks(s)
     sb: Slice<u8> = s.str_bytes()
     ms = a.ren_marks(sb.len)
@@ -437,7 +428,7 @@ qual_marks = (
     })
     ms
 }
-qual_apply = (out: String, a: Allocator, s: StringView, marks: [u8]) String {
+qual_apply = (out: String, a: Allocator, s: StringView, marks: MutSlice<u8>) String {
     cur ::= out
     pos :: i32 = 0
     bs: Slice<u8> = s.str_bytes()

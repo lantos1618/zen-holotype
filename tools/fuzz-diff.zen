@@ -793,7 +793,7 @@ summary_row = (mp: Allocator, id: i64, n: i64) void {
         .done()
         .expect("fuzz-diff: oom"))
 }
-progress = (mp: Allocator, cfg: Cfg, done: i64, counts: [i64]) void {
+progress = (mp: Allocator, cfg: Cfg, done: i64, counts: MutSlice<i64>) void {
     eputs(mp
         .addr()
         .sb()
@@ -826,7 +826,7 @@ record = (
     i: i64,
     src: StringView,
     r: Res,
-    divs: [i64],
+    divs: MutSlice<i64>,
 ) void {
     base = mp
         .addr()
@@ -855,8 +855,8 @@ run_one = (
     jerr: StringView,
     outdir: StringView,
     i: i64,
-    counts: [i64],
-    divs: [i64],
+    counts: MutSlice<i64>,
+    divs: MutSlice<i64>,
 ) void {
     src = mp.gen_program(cfg.seed, i)
     r = mp.test_one(cfg, zf, jf, jerr, src)
@@ -869,7 +869,7 @@ run_one = (
     })
 }
 // `(i in [1, 5, 9])` — python's list repr of the finding indices
-divs_list = (b: Sb<Allocator>, divs: [i64], i: i64) Sb<Allocator> {
+divs_list = (b: Sb<Allocator>, divs: MutSlice<i64>, i: i64) Sb<Allocator> {
     (i >= g_ndiv).match ({
         true  => b,
         false => {
@@ -914,7 +914,13 @@ only_mode = (mp: Allocator, cfg: Cfg, zf: StringView, jf: StringView, jerr: Stri
 }
 // the closing block. exit 2 = nothing was compared on both backends (the run proves nothing);
 // exit 1 = there are findings; exit 0 = clean.
-finish = (mp: Allocator, cfg: Cfg, outdir: StringView, counts: [i64], divs: [i64]) i32 {
+finish = (
+    mp: Allocator,
+    cfg: Cfg,
+    outdir: StringView,
+    counts: MutSlice<i64>,
+    divs: MutSlice<i64>,
+) i32 {
     (counts[0] == 0).match ({
         true  => {
             sout("\nFAIL: not one program was compared on both backends — this run proves nothing.\n")
@@ -961,12 +967,12 @@ full_mode = (
     jerr: StringView,
     outdir: StringView,
 ) i32 {
-    counts :: [i64] = mp.addr().nbuf(to_i64(0), 6)
+    counts :: MutSlice<i64> = mp.addr().nbuf(to_i64(0), 6)
     counts.loop((h, i, x) {
         counts[i] = 0
     })
-    divs: [i64] = mp.addr().nbuf(to_i64(0), cfg.count + 1)
-    probe: [i64] = mp.addr().nbuf(to_i64(0), cfg.count)
+    divs: MutSlice<i64> = mp.addr().nbuf(to_i64(0), cfg.count + 1)
+    probe: MutSlice<i64> = mp.addr().nbuf(to_i64(0), cfg.count)
     probe.loop((h, i, x) {
         mp.run_one(cfg, zf, jf, jerr, outdir, i, counts, divs)
     })

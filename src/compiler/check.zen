@@ -1,13 +1,12 @@
-// compiler.check — resolve and infer over the shared genc AST.
-// This pass fills enum names, constructor types, UFCS dispatch, generic instances, and the
-// type facts the validator/backend need. Child nodes are rebuilt, not mutated in place.
+// Resolve and infer over the shared AST. The check_* siblings import this module and export helpers
+// back; --build-self resolves that cycle by concatenating compiler sources into one flat TU.
 { Expr, Stmt, Decl, Func, Param, Ty, EnumDecl, StructDecl, Field, ArmData, MatchData, VariantDef,
   IndexData, MemberData, VarData, CallData, CondData, BinData, BlockData, LambdaData, GenericData,
   MakeEnumData, TagData, LoopData, GenEnumDecl, GenStructDecl } = compiler.ast.ast_types
-{ cbuf, vref, cond, call_at, call_full, slett, sexpr, block, stmts_diverge, fnt_from_func_in,
-  fntype, subst_ty_in, no_tys, expr_null, tgeneric, ti32, ti64, tu8, tf64, tbool, tstring_cstr,
-  tstring_literal, tnamed, tnode, tptr_k, tslice, tslice_k, tvoid, k_ptr, k_mut_ptr, k_raw_ptr,
-  gstr_string, gstr_push, gstr_append, gstr_finish, acquire_or_die } = compiler.genc
+{ cbuf, vref, cond, call_at, call_full, call_origin_full, slett, sexpr, block, stmts_diverge,
+  fnt_from_func_in, fntype, subst_ty_in, no_tys, expr_null, tgeneric, ti32, ti64, tu8, tf64, tbool,
+  tstring_cstr, tstring_literal, tnamed, tnode, tptr_k, tslice, tslice_k, tvoid, k_ptr, k_mut_ptr,
+  k_raw_ptr, gstr_string, gstr_push, gstr_append, gstr_finish, acquire_or_die } = compiler.genc
 { mangle_str_in, impl_cname_in } = compiler.mangle
 { Allocator } = std.mem.alloc
 { exports_get, alias_prefixes_get, module_sigs_get } = compiler.parse
@@ -16,21 +15,15 @@
 { view, is_empty, ends_with } = std.text.str
 { String } = std.text.string
 { at, is_alnum } = std.text.ascii
-{ Map, of } = std.collections.map
+{ Map } = std.collections.map
 { xform_body } = compiler.passes.subst
-// AST-node query traits (is_fnt on Ty, is_generic_fn on Func). Importing from compiler.astops pulls
-// the WHOLE module (all its impls: Ty/Func/Decl/StructDecl) into check's import closure, so the impl
-// index resolves these UFCS methods here and in every module that imports check (validate/*, passes/*).
 { field_in, gstr_int, map_slice, param_names_has, slice_any, wr_writes_name } = compiler.astops
-// Cohesive families extracted into flat sibling files (pure moves). The check↔check_* cycles are
-// resolved by the `*` exports on both sides — --build-self concatenates all sources into one flat TU.
 { impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
 { is_empty_named } = compiler.check_inline
 { TyFits } = compiler.check_fits    // trait import: project-mode closure pull (dispatch itself needs no names)
 { FlatRegion, ModuleTable, fregion_find, is_import_line, lstrip, next_line, res_ident_end } = compiler.resolve
 { arg_exp_v } = compiler.check_resolve
 { loop_at } = std.core.count
-// ── DECLARATION INDEX ───────────────────────────────────────────────────────
 // name → decl array index, an O(1) hash map (std.collections.map). Built once per
 // resolve/check pass from the (immutable, within a pass) decls slice and threaded through Env,
 // replacing the O(n) linear `the_func`/sibling scans that dominated compile time. `put` overwrites,
@@ -49,7 +42,7 @@
 UfcsVis*: {
     on: bool,
     flat: StringView,
-    regions: [FlatRegion],
+    regions: MutSlice<FlatRegion>,
     table: ModuleTable,
     imports: Map<i64>,
     // is the byte before `pos` a `.` — i.e. was this call written `recv.name(...)`, not `name(recv)`?
@@ -114,7 +107,7 @@ ufcs_vis_off* = (a: Allocator) UfcsVis {
         flat: "",
         regions: slice(null_ptr(), 0),
         table: ModuleTable(modules: slice(null_ptr(), 0)),
-        imports: of(a.addr(), "", seed).expect("check: ufcs-vis alloc"),
+        imports: a.map_of("", seed).expect("check: ufcs-vis alloc"),
     )
 }
 // one module's import-HEAD names, by a dedicated line walk over its ORIGINAL source: an import line
@@ -125,7 +118,7 @@ vis_close_pos = (src: StringView, p: i32) i32 {
     out ::= p
     bs: Slice<u8> = src.view()
     (to_i64(p) < bs.len).then({
-        span: [u8] = slice(src.offset(p), bs.len - to_i64(p))
+        span: MutSlice<u8> = slice(src.offset(p), bs.len - to_i64(p))
         span.loop((h, i, b) {
             out = p + to_i32(i)
             (b == '}' || b == 0).then({
@@ -137,7 +130,7 @@ vis_close_pos = (src: StringView, p: i32) i32 {
 }
 vis_copy_name = (a: Allocator, src: StringView, p: i32, e: i32) StringView {
     s ::= a.gstr_string(to_i64(e - p) + 1)
-    span: [u8] = slice(src.offset(p), to_i64(e - p))
+    span: MutSlice<u8> = slice(src.offset(p), to_i64(e - p))
     span.loop_at((i, b) { s = s.gstr_push(a, b) })
     s.gstr_finish(a)
 }
@@ -211,9 +204,14 @@ vis_head_names = (a: Allocator, src: StringView, mi: i64, m0: Map<i64>) Map<i64>
 }
 // an identifier HEAD byte (letter or underscore) — digits can't open an identifier.
 is_alnum_head = (b: u8) bool { b.is_alnum() && (b >= '0' && b <= '9') == false }
-ufcs_vis_of* = (a: Allocator, flat: StringView, regions: [FlatRegion], table: ModuleTable) UfcsVis {
+ufcs_vis_of* = (
+    a: Allocator,
+    flat: StringView,
+    regions: MutSlice<FlatRegion>,
+    table: ModuleTable,
+) UfcsVis {
     seed: i64 = 0 - 1
-    m ::= of(a.addr(), "", seed).expect("check: ufcs-vis alloc")
+    m ::= a.map_of("", seed).expect("check: ufcs-vis alloc")
     table.modules.loop_at((i, e) { m = a.vis_head_names(e.source, i, m) })
     UfcsVis(
         on: true,
@@ -237,7 +235,7 @@ DeclIndex*: {
     genstruct_idx: Map<i64>,
     genenum_idx: Map<i64>,
     dispatch_idx: Map<i64>,
-    idx_func = (idx: DeclIndex, decls: [Decl], name: StringView) Func {
+    idx_func = (idx: DeclIndex, decls: MutSlice<Decl>, name: StringView) Func {
         i = idx.func_idx.get(name, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -260,7 +258,12 @@ DeclIndex*: {
             ),
         })
     }
-    idx_struct_field = (idx: DeclIndex, decls: [Decl], sname: StringView, fname: StringView) Ty {
+    idx_struct_field = (
+        idx: DeclIndex,
+        decls: MutSlice<Decl>,
+        sname: StringView,
+        fname: StringView,
+    ) Ty {
         i = idx.struct_idx.get(sname, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -272,7 +275,7 @@ DeclIndex*: {
     }
     // the full field list of a concrete struct `sname` (empty slice if `sname` is not a struct). Used by
     // the field_eq inliner (compiler.passes.subst) to expand `x.field_eq(y)` into a per-field `==` fold.
-    idx_struct_fields = (idx: DeclIndex, decls: [Decl], sname: StringView) [Field] {
+    idx_struct_fields = (idx: DeclIndex, decls: MutSlice<Decl>, sname: StringView) MutSlice<Field> {
         i = idx.struct_idx.get(sname, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -285,10 +288,10 @@ DeclIndex*: {
     idx_genstruct_field = (
         idx: DeclIndex,
         a: Allocator,
-        decls: [Decl],
+        decls: MutSlice<Decl>,
         gname: StringView,
         fname: StringView,
-        targs: [Ty],
+        targs: MutSlice<Ty>,
     ) Ty {
         g = idx.idx_genstruct(decls, gname)
         is_empty(g.name).match ({
@@ -299,7 +302,11 @@ DeclIndex*: {
     // the full variant list of a concrete enum `ename` (empty slice if `ename` is not an enum) — the
     // enum mirror of idx_struct_fields. The variant_name inliner (compiler.passes.subst) expands
     // `e.variant_name()` into one match arm per variant.
-    idx_enum_variants = (idx: DeclIndex, decls: [Decl], ename: StringView) [VariantDef] {
+    idx_enum_variants = (
+        idx: DeclIndex,
+        decls: MutSlice<Decl>,
+        ename: StringView,
+    ) MutSlice<VariantDef> {
         i = idx.enum_idx.get(ename, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -309,7 +316,12 @@ DeclIndex*: {
             false => slice(null_ptr(), 0),
         })
     }
-    idx_variant_payload = (idx: DeclIndex, decls: [Decl], ename: StringView, vn: StringView) Ty {
+    idx_variant_payload = (
+        idx: DeclIndex,
+        decls: MutSlice<Decl>,
+        ename: StringView,
+        vn: StringView,
+    ) Ty {
         i = idx.enum_idx.get(ename, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -319,10 +331,10 @@ DeclIndex*: {
             false => tvoid(),
         })
     }
-    idx_template_call = (idx: DeclIndex, decls: [Decl], name: StringView) bool {
+    idx_template_call = (idx: DeclIndex, decls: MutSlice<Decl>, name: StringView) bool {
         idx.idx_func(decls, name).is_generic_fn()
     }
-    idx_genstruct = (idx: DeclIndex, decls: [Decl], name: StringView) GenStructDecl {
+    idx_genstruct = (idx: DeclIndex, decls: MutSlice<Decl>, name: StringView) GenStructDecl {
         i = idx.genstruct_idx.get(name, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -340,7 +352,7 @@ DeclIndex*: {
             ),
         })
     }
-    idx_genenum = (idx: DeclIndex, decls: [Decl], name: StringView) GenEnumDecl {
+    idx_genenum = (idx: DeclIndex, decls: MutSlice<Decl>, name: StringView) GenEnumDecl {
         i = idx.genenum_idx.get(name, 0 - 1)
         (i >= 0 && i < decls.len).match ({
             true  => decls[i].match ({
@@ -360,7 +372,7 @@ DeclIndex*: {
     }
     idx_variant_default = (
         idx: DeclIndex,
-        decls: [Decl],
+        decls: MutSlice<Decl>,
         ename: StringView,
         vn: StringView,
     ) Ptr<Expr> {
@@ -431,28 +443,28 @@ alias_note = (m: Map<i64>, a: Allocator, name: StringView, i: i64) Map<i64> {
     })
 }
 // fold a name-only [Param] list (DImpl.methods / DImport.names) into a presence map.
-names_note = (m: Map<i64>, a: Allocator, names: [Param], i: i64) Map<i64> {
+names_note = (m: Map<i64>, a: Allocator, names: MutSlice<Param>, i: i64) Map<i64> {
     mm ::= m
     names.loop_at((j, p) { mm = mm.put(a.addr(), p.name, i).expect("check: decl-index alloc") })
     mm
 }
-build_decl_index* = (a: Allocator, decls: [Decl]) DeclIndex {
+build_decl_index* = (a: Allocator, decls: MutSlice<Decl>) DeclIndex {
     seed: i64 = 0 - 1    // DEnum.name → index
     // DGlobal.name → index
     // DImpl.ty → presence marker (a type with at least one impl)
     // (trait "\t" method) → presence: the trait provides a default for the method
     // the combined key for a trait-default lookup; trait/method are identifiers, so a TAB can't collide.
-    fm ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    sm ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    em ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    gm ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    im2 ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    tm ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    am ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    mm ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    pm ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    gsm ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
-    gem ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
+    fm ::= a.map_of("", seed).expect("check: decl-index alloc")
+    sm ::= a.map_of("", seed).expect("check: decl-index alloc")
+    em ::= a.map_of("", seed).expect("check: decl-index alloc")
+    gm ::= a.map_of("", seed).expect("check: decl-index alloc")
+    im2 ::= a.map_of("", seed).expect("check: decl-index alloc")
+    tm ::= a.map_of("", seed).expect("check: decl-index alloc")
+    am ::= a.map_of("", seed).expect("check: decl-index alloc")
+    mm ::= a.map_of("", seed).expect("check: decl-index alloc")
+    pm ::= a.map_of("", seed).expect("check: decl-index alloc")
+    gsm ::= a.map_of("", seed).expect("check: decl-index alloc")
+    gem ::= a.map_of("", seed).expect("check: decl-index alloc")
     decls.loop_at((i, d) {
         d.match ({
             .DFunc(f)          => {
@@ -519,7 +531,7 @@ build_decl_index* = (a: Allocator, decls: [Decl]) DeclIndex {
             _                  => { },
         })
     })
-    dm ::= of(a.addr(), "", seed).expect("check: decl-index alloc")
+    dm ::= a.map_of("", seed).expect("check: decl-index alloc")
     decls.loop_at((i, d) {
         d.match ({
             .DImpl(imd) => {
@@ -562,12 +574,12 @@ build_decl_index* = (a: Allocator, decls: [Decl]) DeclIndex {
 }
 // build_decl_index with a LIVE per-module visibility (driver check path); the plain builder keeps
 // the disabled default so its 20+ existing call sites are untouched.
-build_decl_index_vis* = (a: Allocator, decls: [Decl], vis: UfcsVis) DeclIndex {
+build_decl_index_vis* = (a: Allocator, decls: MutSlice<Decl>, vis: UfcsVis) DeclIndex {
     idx ::= a.build_decl_index(decls)
     idx.vis = vis
     idx
 }
-ibuf = (a: Allocator, n: i64) [i64] { slice(a.acquire_or_die((n + 1) * sizeof(i64)), n) }
+ibuf = (a: Allocator, n: i64) MutSlice<i64> { slice(a.acquire_or_die((n + 1) * sizeof(i64)), n) }
 // O(1) indexed generic-decl lookups (same last-match sentinels as the linear gstruct_of/find_genenum).
 // Variable environment: params plus prior lets, as a cons-list.
 VList*: VNil | VCons(VCell)
@@ -579,7 +591,7 @@ VCell: {
 // exp is the current expected type; tvoid() means no expectation.
 Env*: {
     vars: Ptr<VList>,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     didx: DeclIndex,
     exp: Ty,
     a: Allocator,
@@ -656,21 +668,34 @@ Env*: {
     // only the args it visits) makes it linear. infer_expr is pure for a fixed Env, so the memoized
     // types are exactly what re-inference would produce: same targs, byte-identical emitted C.
     // atys+done live in ONE allocation (n Ty slots, then n done bytes).
-    arg_ty_memo = (env: Env, args: [Expr], atys: [Ty], done: [u8], i: i64) Ty {
+    arg_ty_memo = (
+        env: Env,
+        args: MutSlice<Expr>,
+        atys: MutSlice<Ty>,
+        done: MutSlice<u8>,
+        i: i64,
+    ) Ty {
         (done[i] == 0).then({
             atys[i] = env.infer_expr(args[i].addr())
             done[i] = 1
         })
         atys[i]
     }
-    call_targ = (env: Env, f: Func, args: [Expr], tp: StringView) Ty {
+    call_targ = (env: Env, f: Func, args: MutSlice<Expr>, tp: StringView) Ty {
         raw = env.a.acquire_or_die(args.len * sizeof(Ty) + args.len)
-        atys: [Ty] = slice(raw, args.len)
-        done :: [u8] = slice(raw.offset(args.len * sizeof(Ty)), args.len)
+        atys: MutSlice<Ty> = slice(raw, args.len)
+        done :: MutSlice<u8> = slice(raw.offset(args.len * sizeof(Ty)), args.len)
         args.loop_at((i, x) { done[i] = 0 })
         env.call_targ_a(f, args, atys, done, tp)
     }
-    call_targ_a = (env: Env, f: Func, args: [Expr], atys: [Ty], done: [u8], tp: StringView) Ty {
+    call_targ_a = (
+        env: Env,
+        f: Func,
+        args: MutSlice<Expr>,
+        atys: MutSlice<Ty>,
+        done: MutSlice<u8>,
+        tp: StringView,
+    ) Ty {
         arg ::= env.targ_of(f.params, args, atys, done, tp, false)
         arg = arg.is_void_ty().then({ env.ret_targ_of(f.ret, tp) }, { arg })
         arg.is_void_ty().then({ env.targ_of(f.params, args, atys, done, tp, true) }, { arg })
@@ -704,7 +729,7 @@ Env*: {
     }
     // the inferred types of a call's arguments (arg0 = receiver included), for arg-typed narrowing
     // among same-receiver alias candidates. Inferred ONCE here, not per candidate.
-    alias_arg_tys = (env: Env, args: [Expr]) [Ty] {
+    alias_arg_tys = (env: Env, args: MutSlice<Expr>) MutSlice<Ty> {
         buf ::= cbuf<Ty>(env.a, args.len)
         args.loop_at((i, x) { buf[i] = env.infer_expr(args[i].addr()) })
         buf
@@ -714,10 +739,10 @@ Env*: {
     }
     targ_of = (
         env: Env,
-        params: [Param],
-        args: [Expr],
-        atys: [Ty],
-        done: [u8],
+        params: MutSlice<Param>,
+        args: MutSlice<Expr>,
+        atys: MutSlice<Ty>,
+        done: MutSlice<u8>,
         tp: StringView,
         lits: bool,
     ) Ty {
@@ -733,7 +758,7 @@ Env*: {
         })
         found
     }
-    sl_elem_exp = (env: Env, items: [Expr]) Ty {
+    sl_elem_exp = (env: Env, items: MutSlice<Expr>) Ty {
         env.exp.elem_of().is_void_ty().then({ env.sl_elem(items) }, { env.exp.elem_of() })
     }
     let_exp = (env: Env, t: Ty) Env {
@@ -849,17 +874,24 @@ Env*: {
         e.carries_return_e().then({ env }, { env.clr_exp() })
     }
     clr_exp = (env: Env) Env { env.with_exp(tvoid()) }
-    call_targs = (env: Env, f: Func, args: [Expr], etargs: [Ty]) [Ty] {
+    call_targs = (env: Env, f: Func, args: MutSlice<Expr>, etargs: MutSlice<Ty>) MutSlice<Ty> {
         env.call_targs_r(f, args, etargs, tvoid(), false)
     }
     // rty0/has0: the already-inferred receiver type from gen_call_ret (see arg_ty_memo above) —
     // seeds the memo so the dispatch infer and the targ scans share ONE arg0 inference.
-    call_targs_r = (env: Env, f: Func, args: [Expr], etargs: [Ty], rty0: Ty, has0: bool) [Ty] {
+    call_targs_r = (
+        env: Env,
+        f: Func,
+        args: MutSlice<Expr>,
+        etargs: MutSlice<Ty>,
+        rty0: Ty,
+        has0: bool,
+    ) MutSlice<Ty> {
         buf ::= cbuf<Ty>(env.a, f.tparams.len)
         // one lazy arg-type memo shared by every tparam's scans, in a single allocation.
         raw = env.a.acquire_or_die(args.len * sizeof(Ty) + args.len)
-        atys :: [Ty] = slice(raw, args.len)
-        done :: [u8] = slice(raw.offset(args.len * sizeof(Ty)), args.len)
+        atys :: MutSlice<Ty> = slice(raw, args.len)
+        done :: MutSlice<u8> = slice(raw.offset(args.len * sizeof(Ty)), args.len)
         args.loop_at((i, x) { done[i] = 0 })
         (has0 && args.len > 0).then({
             atys[0] = rty0
@@ -873,7 +905,14 @@ Env*: {
         })
         env.deep_targs_env(f.tparams, buf, f.params, args)
     }
-    call_arg_exp = (env: Env, tmpl: bool, tparams: [Param], targs: [Ty], ps: [Param], i: i32) Ty {
+    call_arg_exp = (
+        env: Env,
+        tmpl: bool,
+        tparams: MutSlice<Param>,
+        targs: MutSlice<Ty>,
+        ps: MutSlice<Param>,
+        i: i32,
+    ) Ty {
         pty = ps.arg_exp_v(i)
         tmpl.match ({
             true  => pty.is_fnt().then({ tvoid() }, { env.a.subst_ty_in(tparams, targs, pty) }),
@@ -888,21 +927,28 @@ Env*: {
 // O(1) indexed lookups, replacing the O(n) decls scans. `the_func`/`fn_ret`/etc. linear forms below
 // remain for the few decls-only callers (template inlining, trait conformance) that lack an Env.
 // Heap-node helpers. c* names avoid flat-TU collisions with parser helpers.
-cebuf* = (a: Allocator, n: i64) [Expr] { slice(a.acquire_or_die(n * sizeof(Expr)), n) }
+cebuf* = (a: Allocator, n: i64) MutSlice<Expr> { slice(a.acquire_or_die(n * sizeof(Expr)), n) }
 cenode* = (a: Allocator, v: Expr) Ptr<Expr> {
     buf ::= a.cebuf(1)
     buf[0] = v
     buf[0].addr()
 }
 // Pos-preserving rebuilds. Bare call()/vref() are only for synthesized nodes.
-recall* = (a: Allocator, c: CallData, fn: StringView, args: [Expr]) Ptr<Expr> {
-    a.cenode(call_full(fn, args, c.targs, c.pos, c.raw))
+recall* = (a: Allocator, c: CallData, fn: StringView, args: MutSlice<Expr>) Ptr<Expr> {
+    a.cenode(call_origin_full(fn, args, c.targs, c.pos, c.raw, c.origin))
 }
-var_call = (a: Allocator, v: VarData, args: [Expr]) Ptr<Expr> {
+recall_origin* = (
+    a: Allocator,
+    c: CallData,
+    fn: StringView,
+    args: MutSlice<Expr>,
+    origin: StringView,
+) Ptr<Expr> { a.cenode(call_origin_full(fn, args, c.targs, c.pos, c.raw, origin)) }
+var_call = (a: Allocator, v: VarData, args: MutSlice<Expr>) Ptr<Expr> {
     a.cenode(call_at(v.name, args, v.pos))
 }
 // Heap-own a Ty so Ptr<Ty> fields do not dangle.
-vlbuf = (a: Allocator) [VList] { slice(a.acquire_or_die(sizeof(VList)), 1) }
+vlbuf = (a: Allocator) MutSlice<VList> { slice(a.acquire_or_die(sizeof(VList)), 1) }
 vlnode = (a: Allocator, v: VList) Ptr<VList> {
     buf ::= a.vlbuf()
     buf[0] = v
@@ -920,12 +966,12 @@ vnil* = (a: Allocator) Ptr<VList> { a.vlnode(vnil_val()) }
 vcons* = (a: Allocator, nm: StringView, t: Ty, tail: Ptr<VList>) Ptr<VList> {
     a.vlnode(vcons_val(nm, t, tail))
 }
-params_onto* = (a: Allocator, ps: [Param], tail: Ptr<VList>) Ptr<VList> {
+params_onto* = (a: Allocator, ps: MutSlice<Param>, tail: Ptr<VList>) Ptr<VList> {
     e ::= tail
     ps.loop_at((i, p) { e = a.vcons(p.name, p.ty, e) })
     e
 }
-params_env* = (a: Allocator, ps: [Param]) Ptr<VList> { a.params_onto(ps, a.vnil()) }
+params_env* = (a: Allocator, ps: MutSlice<Param>) Ptr<VList> { a.params_onto(ps, a.vnil()) }
 // First-byte prefilter before the full string compare: lookup_var walks the cons-list env once per
 // variable reference (the single hottest checker fn), and almost every node on the chain fails the
 // compare — one byte load rejects it without the strcmp call. Byte-identical answers: names are
@@ -958,7 +1004,7 @@ fnret_of* = (v: Ptr<VList>) Ty { v.lookup_var("0return") }
 // same-named global type inside its own function body — the correct language scoping — and a user type
 // named `T` no longer poisons the stdlib generic that happens to name its tparam `T`. The cell carries
 // the tparam name as tnamed(...) so the membership test needs no per-query string allocation.
-bind_tparams* = (a: Allocator, vars: Ptr<VList>, tparams: [Param]) Ptr<VList> {
+bind_tparams* = (a: Allocator, vars: Ptr<VList>, tparams: MutSlice<Param>) Ptr<VList> {
     e ::= vars
     tparams.loop_at((i, tp) { e = a.vcons("0#tp", tnamed(tp.name), e) })
     e
@@ -1085,7 +1131,7 @@ pick_enum = (ed: EnumDecl, vn: StringView, found: StringView) StringView {
 }
 gen_enum_has = (g: GenEnumDecl, vn: StringView) bool { g.variants.slice_any((v) { v.name == vn }) }
 // Find the enum, concrete or generic, that declares variant `vn`.
-enum_of_variant = (decls: [Decl], vn: StringView) StringView {
+enum_of_variant = (decls: MutSlice<Decl>, vn: StringView) StringView {
     found ::= ""
     decls.loop_at((i, d) {
         found = d.match ({
@@ -1096,7 +1142,7 @@ enum_of_variant = (decls: [Decl], vn: StringView) StringView {
     })
     found
 }
-named_has = (decls: [Decl], ename: StringView, vn: StringView) bool {
+named_has = (decls: MutSlice<Decl>, ename: StringView, vn: StringView) bool {
     found ::= false
     decls.loop_at((i, d) {
         found = d.match ({
@@ -1130,7 +1176,7 @@ ctor_enum_plain = (env: Env, vn: StringView) StringView {
 // The enum TYPE a constructor names, type args included: an already-stamped instance keeps its own
 // args, while a bare `.Foo` takes the expected type when that type IS its enum (so `Result<i64, Kind>`
 // arrives whole) and otherwise the ambient pick.
-ctor_enum_ty = (env: Env, ety: StringView, etargs: [Ty], variant: StringView) Ty {
+ctor_enum_ty = (env: Env, ety: StringView, etargs: MutSlice<Ty>, variant: StringView) Ty {
     (etargs.len > 0).match ({
         true  => tgeneric(ety, etargs, ""),
         false => is_empty(ety).match ({
@@ -1147,7 +1193,7 @@ ctor_enum_ty = (env: Env, ety: StringView, etargs: [Ty], variant: StringView) Ty
 // `enum_of_variant`'s ambient last-definition-wins scan — silently the wrong enum when a user enum
 // repeats a stdlib variant name. Void unless the instance is CONCRETE: a payload still mentioning the
 // enum's own tparams is no expectation at all, and must not leak into generic-call inference.
-ctor_payload_exp* = (env: Env, ety: StringView, etargs: [Ty], variant: StringView) Ty {
+ctor_payload_exp* = (env: Env, ety: StringView, etargs: MutSlice<Ty>, variant: StringView) Ty {
     t = env.ctor_enum_ty(ety, etargs, variant)
     pty = env.subj_variant_payload(t, variant)
     pty.ty_mentions_any(env.env_genenum(t.exp_enum_base()).tparams).then({ tvoid() }, { pty })
@@ -1221,14 +1267,14 @@ cond_ty = (env: Env, d: CondData) Ty {
 EnumInst*: {
     base: StringView,
     mty: StringView,
-    targs: [Ty],
+    targs: MutSlice<Ty>,
 }
 gen_variant_payload* = (g: GenEnumDecl, vname: StringView) Ty {
     found ::= tvoid()
     g.variants.loop_at((i, v) { found = (v.name == vname).then({ v.payload }, { found }) })
     found
 }
-infer_enum_targs = (env: Env, g: GenEnumDecl, variant: StringView, pty: Ty) [Ty] {
+infer_enum_targs = (env: Env, g: GenEnumDecl, variant: StringView, pty: Ty) MutSlice<Ty> {
     vpt = g.gen_variant_payload(variant)
     map_slice(env.a, g.tparams, (tp) { vpt.unify_ty(pty, tp.name) })
 }
@@ -1283,7 +1329,7 @@ enum_inst_tag* = (env: Env, variant: StringView) EnumInst {
     env.enum_inst_of(env.ctor_enum_plain(variant), variant, tvoid())
 }
 // Block expressions take their trailing expression/return type.
-last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
+last_stmt_ty = (env: Env, stmts: MutSlice<Stmt>) Ty {
     stmts[stmts.len - 1].match ({
         .ExprStmt(e) => env.infer_expr(e),
         .Return(r)   => env.infer_expr(r),
@@ -1295,7 +1341,7 @@ last_stmt_ty = (env: Env, stmts: [Stmt]) Ty {
 // its type from the OTHER arms. Only arm/loop blocks can look like this; fn/lambda BODIES (where the
 // parser's implicit trailing return IS the value) are typed as [Stmt] via block_ty_from directly and
 // keep last_stmt_ty's Return-as-value rule. See genc.blk_diverges.
-block_ty_from = (env: Env, stmts: [Stmt], i: i32) Ty {
+block_ty_from = (env: Env, stmts: MutSlice<Stmt>, i: i32) Ty {
     (i >= stmts.len).match ({
         true  => tvoid(),
         false => (i == stmts.len - 1).match ({
@@ -1336,9 +1382,9 @@ is_direct_tparam* = (t: Ty, tp: StringView) bool {
 weak_targ_env = (
     env: Env,
     pty: Ty,
-    args: [Expr],
-    atys: [Ty],
-    done: [u8],
+    args: MutSlice<Expr>,
+    atys: MutSlice<Ty>,
+    done: MutSlice<u8>,
     i: i64,
     tp: StringView,
 ) bool {
@@ -1348,7 +1394,15 @@ weak_targ_env = (
 // A lambda arg has no inferrable value type (infer_expr -> void — what the memo holds for one).
 // When a tparam sits in the closure's RETURN position `(T) U`, bind it from the lambda's DECLARED
 // return type so it never defaults to void.
-unify_arg = (env: Env, pty: Ty, args: [Expr], atys: [Ty], done: [u8], i: i64, tp: StringView) Ty {
+unify_arg = (
+    env: Env,
+    pty: Ty,
+    args: MutSlice<Expr>,
+    atys: MutSlice<Ty>,
+    done: MutSlice<u8>,
+    i: i64,
+    tp: StringView,
+) Ty {
     load(args[i].addr()).match ({
         .Lambda(lm) => pty.lam_ret_unify(lm, tp),
         _           => pty.unify_ty(env.arg_ty_memo(args, atys, done, i), tp),
@@ -1369,7 +1423,13 @@ ret_targ_of = (env: Env, ret: Ty, tp: StringView) Ty {
 // arg's BODY type for a closure-return tparam, and a co-targ's generic-trait impl — the env-typed
 // mirror of the inliner's post-pass, so resolve (let typing, mono_rec instances) agrees with it.
 // env-typed twin of deep_targs (the resolver types lambda bodies with the full Env, not light types).
-deep_targs_env = (env: Env, tparams: [Param], buf: [Ty], params: [Param], args: [Expr]) [Ty] {
+deep_targs_env = (
+    env: Env,
+    tparams: MutSlice<Param>,
+    buf: MutSlice<Ty>,
+    params: MutSlice<Param>,
+    args: MutSlice<Expr>,
+) MutSlice<Ty> {
     tparams.loop_at((i, tp) {
         buf[i] = buf[i].is_void_ty().match ({
             true  => env.lam_body_targ_env(tparams, buf, params, args, tp.name),
@@ -1386,10 +1446,10 @@ deep_targs_env = (env: Env, tparams: [Param], buf: [Ty], params: [Param], args: 
 }
 lam_body_targ_env = (
     env: Env,
-    tparams: [Param],
-    targs: [Ty],
-    params: [Param],
-    args: [Expr],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    params: MutSlice<Param>,
+    args: MutSlice<Expr>,
     tp: StringView,
 ) Ty {
     found ::= tvoid()
@@ -1406,8 +1466,8 @@ lam_body_targ_env = (
 }
 lam_body_one_env = (
     env: Env,
-    tparams: [Param],
-    targs: [Ty],
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
     pty: Ty,
     arg: Ptr<Expr>,
     tp: StringView,
@@ -1445,7 +1505,7 @@ lam_body_one_env = (
 }
 dispatch_recv* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     didx: DeclIndex,
     fn: StringView,
     tyname: StringView,
@@ -1468,7 +1528,7 @@ dispatch_recv_name* = (t: Ty) StringView {
         _           => t.recv_name(),
     })
 }
-// A slice receiver (`[u8]`, possibly behind a pointer) has no head name but IS dispatchable — the
+// A slice receiver (`MutSlice<u8>`, possibly behind a pointer) has no head name but IS dispatchable — the
 // `fits`-based candidate scan keys on the element type instead.
 is_slice_recv = (t: Ty) bool {
     t.match ({
@@ -1586,7 +1646,7 @@ alias_cand_matches = (f: Func, fn: StringView, rty: Ty, exact: bool) bool {
 // i32-index ascii.at). A candidate that fails arg-fit stays a receiver-match only — so a lone
 // receiver-match still resolves (its arg-type error is then reported the normal way), but two
 // receiver-matches disambiguate by args before falling back to the positioned ambiguity error.
-alias_args_fit = (f: Func, atys: [Ty]) bool {
+alias_args_fit = (f: Func, atys: MutSlice<Ty>) bool {
     (f.params.len == atys.len).match ({
         true  => {
             ok ::= true
@@ -1600,7 +1660,7 @@ alias_args_fit = (f: Func, atys: [Ty]) bool {
         false => false,
     })
 }
-alias_cands_scan = (env: Env, fn: StringView, rty: Ty, exact: bool, atys: [Ty]) AliasCands {
+alias_cands_scan = (env: Env, fn: StringView, rty: Ty, exact: bool, atys: MutSlice<Ty>) AliasCands {
     rcnt ::= 0
     rfirst ::= ""
     rsecond ::= ""
@@ -1669,7 +1729,7 @@ gen_call_ret = (env: Env, c: CallData) Ty {
     env.a.window_ty(env.env_func(dn), ret, rty0)
 }
 // A slice RETURNED from a call on a read-only receiver is a read-only window over it. `view`,
-// `trim_view`, `substr_view` &c. are declared `(s: StringView) [u8]` — one signature for every
+// `trim_view`, `substr_view` &c. are declared `(s: StringView) Slice<u8>` — one signature for every
 // provenance, because Zen cannot yet spell "a slice as mutable as my receiver". So the propagation
 // lives here: the declared `[T]` says "a window over arg0" and this decides its mutability from
 // what arg0 actually is. Without it `.view()` launders a `StringLiteral`'s `.rodata` into a
@@ -1692,7 +1752,7 @@ window_ty = (a: Allocator, f: Func, ret: Ty, recv: Ty) Ty {
     })
 }
 // Is the returned slice a WINDOW over the receiver, or fresh storage that merely got LOOKED at?
-// `view = (s: StringView) [u8] { s.slice(s.strlen()) }` hands back its own argument's bytes, so its
+// `view = (s: StringView) Slice<u8> { s.slice(s.strlen()) }` hands back its own argument's bytes, so its
 // mutability is the argument's. A function that allocates and returns a new buffer names its
 // parameter nowhere in what it returns, and its result stays writable however read-only the
 // argument was. The test is the returned EXPRESSION only — a body that reads the parameter on the
@@ -1703,7 +1763,7 @@ returns_recv = (f: Func) bool {
     })
     f.body.ret_mentions_stmts(f.params[0].name)
 }
-ret_mentions_stmts = (body: [Stmt], nm: StringView) bool {
+ret_mentions_stmts = (body: MutSlice<Stmt>, nm: StringView) bool {
     hit ::= false
     body.loop_at((i, st) {
         st.match ({
@@ -1768,7 +1828,7 @@ ty_under_ptr* = (t: Ty) Ty {
     })
 }
 // `.ptr` INHERITS the window's read-only-ness — the slice's own `kind` is the pointer's kind. Without
-// it `.ptr` was a laundry: `v.ptr.slice(v.len)` handed a writable `[u8]` back over `.rodata` bytes and
+// it `.ptr` was a laundry: `v.ptr.slice(v.len)` handed a writable `MutSlice<u8>` back over `.rodata` bytes and
 // the store aborted at run time with `zen check` reporting ok. `store`/`slice` on a read-only `Ptr<T>`
 // were already rejected (store_writes_readonly); this is the missing half that makes them reachable.
 // The cost: `a.release(x.view().ptr)` now needs `x` to be a spelling whose window stays writable,
@@ -1817,7 +1877,7 @@ common_ty* = (a: Ty, b: Ty) Ty {
         }),
     })
 }
-infer_match_common_ty = (env: Env, subjty: Ty, arms: [ArmData]) Ty {
+infer_match_common_ty = (env: Env, subjty: Ty, arms: MutSlice<ArmData>) Ty {
     out ::= tvoid()
     arms.loop_at((i, ar) { out = out.common_ty(env.infer_arm_ty(subjty, ar)) })
     out
@@ -1829,17 +1889,17 @@ infer_match_ty = (env: Env, m: MatchData) Ty {
 // Slice literal element type: an expected `[T]` (declared/annotated) WINS, so a bare-int literal
 // `[1,2,3]` adopts the declared element width (`i64`/`u8`) instead of defaulting to i32 — the same
 // expected-type propagation a scalar int slot already gets. Falls back to the first item's type.
-sl_elem = (env: Env, items: [Expr]) Ty {
+sl_elem = (env: Env, items: MutSlice<Expr>) Ty {
     (items.len == 0).then({ tvoid() }, { env.infer_expr(items[0].addr()) })
 }
-vdef_payload = (vs: [VariantDef], vn: StringView) Ty {
+vdef_payload = (vs: MutSlice<VariantDef>, vn: StringView) Ty {
     found ::= tvoid()
     vs.loop_at((i, v) { found = (v.name == vn).then({ v.payload }, { found }) })
     found
 }
 // O(1) indexed variant-payload lookup for an enum named `ename`.
 // The default constant expr for a `Name = expr` variant, or a null Ptr<Expr> when the variant has none.
-vdef_default_of = (vs: [VariantDef], vn: StringView) Ptr<Expr> {
+vdef_default_of = (vs: MutSlice<VariantDef>, vn: StringView) Ptr<Expr> {
     found ::= expr_null()
     vs.loop_at((i, v) { found = (v.name == vn).then({ v.dflt }, { found }) })
     found
@@ -1934,16 +1994,16 @@ loop_env* = (a: Allocator, env: Env, l: LoopData) Env {
     )
 }
 // Template/lambda inlining pass.
-no_stmts* = () [Stmt] { slice(null_ptr(), 0) }
-empty_args* = () [Expr] { slice(null_ptr(), 0) }
-pidx = (params: [Param], name: StringView, found: i32, i: i32) i32 {
+no_stmts* = () MutSlice<Stmt> { slice(null_ptr(), 0) }
+empty_args* = () MutSlice<Expr> { slice(null_ptr(), 0) }
+pidx = (params: MutSlice<Param>, name: StringView, found: i32, i: i32) i32 {
     (i == params.len).match ({
         true  => found,
         false => (params[i].name == name).then({ i }, { params.pidx(name, found, i + 1) }),
     })
 }
-param_index* = (params: [Param], name: StringView) i32 { params.pidx(name, 0 - 1, 0) }
-hide_param = (a: Allocator, params: [Param], name: StringView) [Param] {
+param_index* = (params: MutSlice<Param>, name: StringView) i32 { params.pidx(name, 0 - 1, 0) }
+hide_param = (a: Allocator, params: MutSlice<Param>, name: StringView) MutSlice<Param> {
     idx = params.param_index(name)
     (idx < 0).match ({
         true  => params,
@@ -1955,6 +2015,7 @@ hide_param = (a: Allocator, params: [Param], name: StringView) [Param] {
                         name: "",
                         ty: p.ty,
                         variadic: p.variadic,
+                        pos: p.pos,
                     ),
                     false => p,
                 })
@@ -1995,7 +2056,7 @@ name_marks = (a: Allocator, s: String, name: StringView, env: Ptr<VList>, depth:
 local_name_at* = (a: Allocator, name: StringView, env: Ptr<VList>, depth: i64) StringView {
     a.name_marks(a.gstr_string(32).gstr_append(a, "_z"), name, env, depth)
 }
-add_subst_param* = (a: Allocator, params: [Param], name: StringView) [Param] {
+add_subst_param* = (a: Allocator, params: MutSlice<Param>, name: StringView) MutSlice<Param> {
     base = a.hide_param(params, name)
     buf ::= a.pbuf(base.len + 1)
     base.loop_at((i, p) { buf[i] = p })
@@ -2006,7 +2067,7 @@ add_subst_param* = (a: Allocator, params: [Param], name: StringView) [Param] {
     )
     buf
 }
-add_subst_arg* = (a: Allocator, args: [Expr], name: StringView) [Expr] {
+add_subst_arg* = (a: Allocator, args: MutSlice<Expr>, name: StringView) MutSlice<Expr> {
     buf ::= a.cebuf(args.len + 1)
     args.loop_at((i, e) { buf[i] = e })
     buf[args.len] = vref(name)
@@ -2016,7 +2077,7 @@ add_subst_arg* = (a: Allocator, args: [Expr], name: StringView) [Expr] {
 // local as a COMPILE-TIME ALIAS: shadow the name as an FnT "param" whose substituted "arg" is the
 // (already-xformed) lambda, so every later use — a direct call `g(x)` or a HOF arg `apply(g,…)` —
 // splices the lambda exactly like a directly-passed one. The `g = …` statement itself is dropped.
-add_fnt_param* = (a: Allocator, params: [Param], name: StringView) [Param] {
+add_fnt_param* = (a: Allocator, params: MutSlice<Param>, name: StringView) MutSlice<Param> {
     base = a.hide_param(params, name)
     buf ::= a.pbuf(base.len + 1)
     base.loop_at((i, p) { buf[i] = p })
@@ -2026,7 +2087,7 @@ add_fnt_param* = (a: Allocator, params: [Param], name: StringView) [Param] {
     )
     buf
 }
-add_lambda_arg* = (a: Allocator, args: [Expr], lamx: Ptr<Expr>) [Expr] {
+add_lambda_arg* = (a: Allocator, args: MutSlice<Expr>, lamx: Ptr<Expr>) MutSlice<Expr> {
     buf ::= a.cebuf(args.len + 1)
     args.loop_at((i, e) { buf[i] = e })
     buf[args.len] = load(lamx)
@@ -2042,7 +2103,7 @@ let_value_lambda* = (st: Stmt) bool {
         _       => false,
     })
 }
-the_func* = (decls: [Decl], name: StringView) Func {
+the_func* = (decls: MutSlice<Decl>, name: StringView) Func {
     found ::= Func(
         name: "",
         params: empty_params(),
@@ -2081,8 +2142,8 @@ ref_pos* = (e: Ptr<Expr>) i32 {
 // param uses them N>1 times they re-run N times (~3^depth over a chain → hang / slice-OOB / wrong
 // result). Binding them to ONE temp collapses each to a single evaluation.
 ArgBind*: {
-    fargs: [Expr],
-    binds: [Stmt],
+    fargs: MutSlice<Expr>,
+    binds: MutSlice<Stmt>,
     env: Ptr<VList>,
 }
 arg_needs_bind = (e: Expr) bool {
@@ -2098,7 +2159,7 @@ arg_needs_bind = (e: Expr) bool {
 }
 // must param i be COPY-bound because the template body writes it? (value semantics for inlined
 // params, #585). FnT params never bind — their lambda arg must splice literally.
-wr_param_bind = (params: [Param], wbody: [Stmt], i: i64) bool {
+wr_param_bind = (params: MutSlice<Param>, wbody: MutSlice<Stmt>, i: i64) bool {
     params[i].ty.is_fnt() == false && wbody.wr_writes_name(params[i].name)
 }
 // Fresh C name for an arg-binding local: distinct "_za" prefix (never a valid "_z<digits>_…" body
@@ -2129,13 +2190,13 @@ arg_local_name = (a: Allocator, name: StringView, env: Ptr<VList>, idx: i64) Str
 // (it passes no_stmts()): reflection lambda value params are PLACES of the subject by design.
 bind_args* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
-    params: [Param],
-    cargs: [Expr],
+    params: MutSlice<Param>,
+    cargs: MutSlice<Expr>,
     env: Ptr<VList>,
-    pins: [Ty],
-    wbody: [Stmt],
+    pins: MutSlice<Ty>,
+    wbody: MutSlice<Stmt>,
 ) ArgBind {
     nf ::= a.cebuf(cargs.len)
     nb ::= 0
@@ -2177,14 +2238,20 @@ bind_args* = (
     )
 }
 // pins for a NON-generic inline (and lambda inlines): none.
-no_pins* = (a: Allocator, n: i64) [Ty] {
+no_pins* = (a: Allocator, n: i64) MutSlice<Ty> {
     buf ::= cbuf<Ty>(a, n)
     buf.loop_at((i, t) { buf[i] = tvoid() })
     buf
 }
 // The pin for each arg of a GENERIC inline: literal-typed args whose param type mentions a tparam
 // adopt the (fully concrete) targ-substituted param type; everything else is unpinned.
-lit_pins* = (a: Allocator, tparams: [Param], targs: [Ty], params: [Param], cargs: [Expr]) [Ty] {
+lit_pins* = (
+    a: Allocator,
+    tparams: MutSlice<Param>,
+    targs: MutSlice<Ty>,
+    params: MutSlice<Param>,
+    cargs: MutSlice<Expr>,
+) MutSlice<Ty> {
     buf ::= cbuf<Ty>(a, params.len)
     params.loop_at((i, p) {
         buf[i] = tvoid()
@@ -2213,8 +2280,8 @@ ret_to_expr = (st: Stmt) Stmt {
         _          => st,
     })
 }
-block_of = (a: Allocator, stmts: [Stmt]) Ptr<Expr> {
-    buf :: [Stmt] = cbuf<Stmt>(a, stmts.len)
+block_of = (a: Allocator, stmts: MutSlice<Stmt>) Ptr<Expr> {
+    buf :: MutSlice<Stmt> = cbuf<Stmt>(a, stmts.len)
     stmts.loop_at((i, st) { buf[i] = (i == stmts.len - 1).then({ ret_to_expr(st) }, { st }) })
     a.cenode(block(buf))
 }
@@ -2228,13 +2295,13 @@ stmt_has_return = (st: Stmt) bool {
         _          => false,
     })
 }
-body_has_return = (stmts: [Stmt]) bool { stmts.slice_any((st) { st.stmt_has_return() }) }
+body_has_return = (stmts: MutSlice<Stmt>) bool { stmts.slice_any((st) { st.stmt_has_return() }) }
 // A body needs the early-return lift when a `return` appears anywhere except as the clean TRAILING
 // top-level statement: a non-final top-level `return`, or any If whose branch contains a `return`.
 // When inlined, the body is spliced into a GCC statement-expression `({ … })`, so a real C `return`
 // would exit the CALLER's function — a silent miscompile. The lift below rewrites such returns into
 // `?:` so control never escapes the block.
-needs_early_lift = (stmts: [Stmt]) bool {
+needs_early_lift = (stmts: MutSlice<Stmt>) bool {
     n = stmts.len
     found ::= false
     stmts.loop_at((i, st) {
@@ -2255,14 +2322,14 @@ needs_early_lift = (stmts: [Stmt]) bool {
     found
 }
 // Concatenate two statement slices into a fresh buffer.
-cat_stmts* = (a: Allocator, xs: [Stmt], ys: [Stmt]) [Stmt] {
+cat_stmts* = (a: Allocator, xs: MutSlice<Stmt>, ys: MutSlice<Stmt>) MutSlice<Stmt> {
     buf ::= cbuf<Stmt>(a, xs.len + ys.len)
     xs.loop_at((i, s) { buf[i] = s })
     ys.loop_at((i, s) { buf[xs.len + i] = s })
     buf
 }
 // stmts[1..] in a fresh buffer.
-stmt_tail = (a: Allocator, xs: [Stmt]) [Stmt] {
+stmt_tail = (a: Allocator, xs: MutSlice<Stmt>) MutSlice<Stmt> {
     buf ::= cbuf<Stmt>(a, xs.len - 1)
     xs.loop_at((i, s) {
         (i > 0).then({
@@ -2283,7 +2350,7 @@ block_cons = (a: Allocator, head: Stmt, value: Ptr<Expr>) Ptr<Expr> {
 // branch's value is the branch body followed by the remaining statements (the continuation) — so a
 // `return` simply stops the sequence (its tail is dead) and never lowers to a C `return`. Only ONE
 // branch runs at a time, so duplicating the continuation into both arms is sound (no double effects).
-cps_value = (a: Allocator, stmts: [Stmt]) Ptr<Expr> {
+cps_value = (a: Allocator, stmts: MutSlice<Stmt>) Ptr<Expr> {
     (stmts.len == 0).match ({
         true  => a.cenode(block(no_stmts())),
         false => {
@@ -2311,7 +2378,7 @@ cps_value = (a: Allocator, stmts: [Stmt]) Ptr<Expr> {
 }
 // One value statement inlines directly; larger bodies become block expressions. A body with a
 // non-tail return is lifted into `?:` first (early-return → exits only the inlined block, not the caller).
-blockify* = (a: Allocator, stmts: [Stmt]) Ptr<Expr> {
+blockify* = (a: Allocator, stmts: MutSlice<Stmt>) Ptr<Expr> {
     stmts.needs_early_lift().match ({
         true  => a.cps_value(stmts),
         false => (stmts.len == 1).match ({
@@ -2326,10 +2393,10 @@ blockify* = (a: Allocator, stmts: [Stmt]) Ptr<Expr> {
 }
 inline_lambda* = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     lamx: Expr,
-    cargs: [Expr],
+    cargs: MutSlice<Expr>,
     env: Ptr<VList>,
 ) Ptr<Expr> {
     lamx.match ({
@@ -2344,11 +2411,11 @@ inline_lambda* = (
     })
 }
 // Trait default methods are materialized for impls that omit them.
-pbuf* = (a: Allocator, n: i64) [Param] {
+pbuf* = (a: Allocator, n: i64) MutSlice<Param> {
     slice(a.acquire_or_die(n * sizeof(Param) + sizeof(Param)), n)
 }
 // Shared by resolve_module and check_validate.
-empty_params* = () [Param] { slice(null_ptr(), 0) }
+empty_params* = () MutSlice<Param> { slice(null_ptr(), 0) }
 is_void_ty* = (t: Ty) bool {
     t.match ({
         .Void => true,

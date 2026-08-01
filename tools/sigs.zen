@@ -8,7 +8,7 @@
 //
 //   ## src/std/text/str.zen
 //     len* = (s: StringView) i64
-//     dup_bytes_in*<A> = (a: MutPtr<A>, s: StringView) Result<[u8], IoError>
+//     dup_bytes_in*<A> = (a: MutPtr<A>, s: StringView) Result<MutSlice<u8>, IoError>
 //     Param*: { name: StringView, ty: Ty, variadic: bool }
 //     Expr*: Int(i64) | Byte(i32) | ...
 //
@@ -51,10 +51,10 @@ g_files ::= 0
 g_fns ::= 0
 g_types ::= 0
 // ── small local helpers over the compiler AST ─────────────────────────────────
-no_params = () [Param] { slice(null_ptr(), 0) }
+no_params = () MutSlice<Param> { slice(null_ptr(), 0) }
 // the fn named `name` among `decls` (name == "" when absent) — pretty_decl keeps its finder private,
 // so the lookup is re-stated here (~10 lines)
-find_fn = (decls: [Decl], name: StringView) Func {
+find_fn = (decls: MutSlice<Decl>, name: StringView) Func {
     res ::= Func(
         name: "",
         params: no_params(),
@@ -72,7 +72,7 @@ find_fn = (decls: [Decl], name: StringView) Func {
     })
     res
 }
-is_exported = (exp: [Param], name: StringView) bool {
+is_exported = (exp: MutSlice<Param>, name: StringView) bool {
     found ::= false
     exp.loop((h, i, p) {
         found = found || p.name == name
@@ -80,14 +80,14 @@ is_exported = (exp: [Param], name: StringView) bool {
     found
 }
 // `name` plus the trailing `*` export marker when the parse recorded it
-sig_name = (s: String, mp: Allocator, exp: [Param], name: StringView) String {
+sig_name = (s: String, mp: Allocator, exp: MutSlice<Param>, name: StringView) String {
     is_exported(exp, name).match ({
         true  => s.ff_append(mp, name).ff_append(mp, "*"),
         false => s.ff_append(mp, name),
     })
 }
 // `<A, B: Bound>` (empty tparams print nothing; a bound is carried as the tparam's Named ty)
-sig_tparams = (s: String, mp: Allocator, tps: [Param]) String {
+sig_tparams = (s: String, mp: Allocator, tps: MutSlice<Param>) String {
     (tps.len == 0).match ({
         true  => s,
         false => {
@@ -110,7 +110,7 @@ variadic_elem = (t: Ty) Ty {
         _         => t,
     })
 }
-sig_params = (s: String, mp: Allocator, ps: [Param]) String {
+sig_params = (s: String, mp: Allocator, ps: MutSlice<Param>) String {
     body ::= s
     ps.loop((h, i, p) {
         body = (i == 0).then({ body }, { body.ff_append(mp, ", ") })
@@ -135,17 +135,17 @@ sig_tail = (s: String, mp: Allocator, f: Func) String {
         .ff_ty(mp, f.ret)
         .ff_append(mp, "\n")
 }
-sig_fn = (s: String, mp: Allocator, exp: [Param], f: Func) String {
+sig_fn = (s: String, mp: Allocator, exp: MutSlice<Param>, f: Func) String {
     s.ff_append(mp, "  ").sig_name(mp, exp, f.name).sig_tail(mp, f)
 }
 // ── structs / enums ───────────────────────────────────────────────────────────
 sig_struct = (
     s: String,
     mp: Allocator,
-    exp: [Param],
+    exp: MutSlice<Param>,
     name: StringView,
-    tps: [Param],
-    fields: [Field],
+    tps: MutSlice<Param>,
+    fields: MutSlice<Field>,
 ) String {
     g_types = g_types + 1
     body ::= s
@@ -161,7 +161,7 @@ sig_struct = (
 }
 // a multi-payload variant `V(t0, t1)` is desugared at parse time into a synthesized `__anon…` struct;
 // re-inline its field types as the surface tuple (the struct itself is suppressed at top level)
-sig_tuple = (s: String, mp: Allocator, decls: [Decl], nm: StringView, t: Ty) String {
+sig_tuple = (s: String, mp: Allocator, decls: MutSlice<Decl>, nm: StringView, t: Ty) String {
     found ::= false
     body ::= s
     decls.loop((h, i, d) {
@@ -180,7 +180,7 @@ sig_tuple = (s: String, mp: Allocator, decls: [Decl], nm: StringView, t: Ty) Str
     })
     found.then({ body }, { body.ff_append(mp, "(").ff_ty(mp, t).ff_append(mp, ")") })
 }
-sig_payload = (s: String, mp: Allocator, decls: [Decl], t: Ty) String {
+sig_payload = (s: String, mp: Allocator, decls: MutSlice<Decl>, t: Ty) String {
     t.match ({
         .Named(nm) => nm.starts_with("__anon").match ({
             true  => s.sig_tuple(mp, decls, nm, t),
@@ -190,7 +190,7 @@ sig_payload = (s: String, mp: Allocator, decls: [Decl], t: Ty) String {
     })
 }
 // one variant: `Name`, `Name(Payload)`, or — zero-arg ctor with a default constant — `Name = expr`
-sig_variant = (s: String, mp: Allocator, decls: [Decl], vd: VariantDef) String {
+sig_variant = (s: String, mp: Allocator, decls: MutSlice<Decl>, vd: VariantDef) String {
     base = vd.payload.match ({
         .Void => s.ff_append(mp, vd.name),
         _     => s.ff_append(mp, vd.name).sig_payload(mp, decls, vd.payload),
@@ -200,11 +200,11 @@ sig_variant = (s: String, mp: Allocator, decls: [Decl], vd: VariantDef) String {
 sig_enum = (
     s: String,
     mp: Allocator,
-    exp: [Param],
-    decls: [Decl],
+    exp: MutSlice<Param>,
+    decls: MutSlice<Decl>,
     name: StringView,
-    tps: [Param],
-    vs: [VariantDef],
+    tps: MutSlice<Param>,
+    vs: MutSlice<VariantDef>,
 ) String {
     g_types = g_types + 1
     body ::= s
@@ -222,7 +222,7 @@ sig_enum = (
 // an impl marker: a `Ty.impl(Trait)` head (trait impls only — inherent impls have ty == trname),
 // then each method DEMANGLED back from its hoisted `impl_<Tr>_<Ty>_<m>` fn as `Ty.m = (params) ret`.
 // A method absent among the decls (satisfied by a trait default) prints nothing here.
-sig_impl = (s: String, mp: Allocator, decls: [Decl], im: ImplData) String {
+sig_impl = (s: String, mp: Allocator, decls: MutSlice<Decl>, im: ImplData) String {
     body ::= (im.ty == im.trname).match ({
         true  => s,
         false => s
@@ -249,7 +249,7 @@ sig_impl = (s: String, mp: Allocator, decls: [Decl], im: ImplData) String {
 // signature); `thread_local(...)` wrapping is restored; module aliases (`m = std.x`) are skipped.
 // The mark says what the declaration says: `::=` when it carries the mutability mark, `=` otherwise
 // — an unmarked global is a constant, exactly like an unmarked local.
-sig_global = (s: String, mp: Allocator, exp: [Param], g: GlobalData) String {
+sig_global = (s: String, mp: Allocator, exp: MutSlice<Param>, g: GlobalData) String {
     g.alias.match ({
         true  => s,
         false => {
@@ -267,7 +267,7 @@ sig_global = (s: String, mp: Allocator, exp: [Param], g: GlobalData) String {
     })
 }
 // ── the per-decl dispatch ─────────────────────────────────────────────────────
-sig_decl = (s: String, mp: Allocator, exp: [Param], decls: [Decl], d: Decl) String {
+sig_decl = (s: String, mp: Allocator, exp: MutSlice<Param>, decls: MutSlice<Decl>, d: Decl) String {
     d.match ({
         .DFunc(f)      => mp.ff_is_hoisted(decls, f.name).then({ s }, { s.sig_fn(mp, exp, f) }),    // a hoisted impl method — printed demangled via its DImpl marker
         .DForeign(f)   => s.sig_fn(mp, exp, f),
@@ -306,7 +306,7 @@ emit_file = (mp: Allocator, path: StringView) void {
     out(s.gstr_finish(mp)).or(0)
 }
 // directory listings are unsorted; sections must be stable
-sort_names = (xs: [StringView]) void {
+sort_names = (xs: MutSlice<StringView>) void {
     xs.sort_by((x: StringView, y: StringView) bool { x.sv_lt(y) })
 }
 // recurse into subdirectories, emit every `.zen` file, sorted at each level

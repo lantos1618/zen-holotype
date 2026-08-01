@@ -1,48 +1,10 @@
-// std.net.http — minimal blocking HTTP/1.1, both ends, over std.net.socket.
-//
-// Scope: one request per connection (`Connection: close`, read to EOF), no TLS, no keep-alive,
-// no redirects, no cookies. Chunked transfer-encoding is decoded; otherwise the body is trimmed
-// to `Content-Length` when present. Concurrency comes from actors running these blocking calls
-// on their own workers — the client has no event loop of its own. std.net.http_actor packages
-// the client as a ready-made pool actor (spawn it, send it a URL, receive the reply as a message).
-//
-//   http = std.net.http
-//   h = std.mem.heap.gpa()
-//   a = h.addr()
-//   r = a.http_get("http://93.184.216.34/").expect("http get")   // or a.get(host, port, path)
-//   r.status                                    // 200
-//   r.ok()                                      // true (2xx)
-//   r.header("Content-Type").some_or("")        // case-insensitive lookup
-//   r.body_bytes                                // body as length-carrying [u8] (binary-safe)
-//   r.body                                      // same buffer as NUL-terminated text
-//   a.response_free(r)                          // hand every buffer in it back (see below)
-//
-// A PARSED message owns memory, so it has a matching release: `a.response_free(r)` for what the
-// client parsed, `a.request_free(q)` for what the server parsed, `a.url_free(u)` for `parse_url`.
-// Nothing else here leaves an allocation behind — every intermediate is freed where it is made.
-//
-// The SERVER half answers requests. It is here and not in a sibling module because a request is a
-// response with a different first line: `parse_parts` — the CRLFCRLF split, the header list, the
-// chunked/Content-Length body — is one parser serving both, and `crlf`/`decimal`/`append_range`/
-// `own_bytes` are shared line by line. Splitting the file would not shrink what a client links (the
-// bare C names are emitted either way); it would only promote eight internals to public API to reach
-// across the boundary.
-//
-//   l = http_listen("127.0.0.1", 0).expect("listen")   // 0 = kernel-chosen ephemeral port
-//   hi = (a: MutPtr<Heap>, q: Request) Response { respond(200, a.no_headers(), "hi") }
-//   a.serve_once(l, hi)                        // accept one, answer it, close (its Ok is a Request:
-//                                              //   the caller's, and its `request_free`)
-//   a.serve_n(l, 0 - 1, hi)                    // ... or every connection until the listener dies
-//
-// Network/parse failures are `Result<_, HttpError>` values; internal allocation failures panic
-// via `.expect` (the std.text.str convention). `parse_response` is independently testable: it
-// takes the raw response as a length-carrying `[u8]` and needs no socket, so canned responses
-// (including bodies with embedded NULs) are the deterministic test gate.
+// Blocking HTTP/1.1, one request per connection: responses read to EOF; chunked bodies are decoded,
+// otherwise Content-Length trims the body. No TLS, redirects, cookies, or keep-alive.
+// Network and parse failures are HttpError values; internal allocation failure panics. Parsed
+// responses, requests, and URLs are released with response_free, request_free, and url_free.
 { AllocatorBackend, release_slice } = std.mem.alloc
 { Result, Opt, IoError, ok, err, expect } = std.core.result
 { TcpConn, TcpListener, serve, dial } = std.net.socket
-// `init`, NOT `new_in`: std.mem.arc also exports `new_in`, and a program combining this module
-// with the actor pool (std.concurrent.pool imports arc) would collide in the flat namespace.
 { String, init, append_in, push_in, finish_in } = std.text.string
 { view, find, substr, split, words, trim, starts_with, to_lower, contains, parse_int, nbuf,
   eq_ignore_case, own_ptr } = std.text.str
@@ -50,17 +12,12 @@
 { is_hex } = std.text.ascii
 { take, drop, sub } = std.core.slice
 { loop_at } = std.core.count
-{ step_while } = std.core.count    // THE loop — `@while` lives in the primitive, not here
-// ── error channel ────────────────────────────────────────────────────────────────────────────────────
-// Connect: the client's TCP handshake failed. Listen: the server's bind/listen/accept failed — a
-// listener-level fault, not one connection's. Io: a send/receive failed mid-exchange. Malformed: the
-// bytes arrived but are not a well-formed HTTP/1.1 message (the payload is the human reason).
+{ step_while } = std.core.count
 HttpError*: Connect(IoError) | Listen(IoError) | Io(IoError) | Malformed(StringView)
 connect_err = (e: IoError) HttpError { .Connect(e) }
 listen_err = (e: IoError) HttpError { .Listen(e) }
 io_err = (e: IoError) HttpError { .Io(e) }
 malformed = (m: StringView) HttpError { .Malformed(m) }
-// human-readable label; `.Malformed` renders its own reason string.
 http_error_name* = (e: HttpError) StringView {
     e.match ({
         .Connect(x)   => "Connect",
@@ -69,33 +26,28 @@ http_error_name* = (e: HttpError) StringView {
         .Malformed(m) => m,
     })
 }
-// a listener-level failure ends a serve loop; any other error was just one bad connection.
+// Only listener failures terminate serve_n.
 fatal* = (e: HttpError) bool {
     e.match ({
         .Listen(x) => true,
         _          => false,
     })
 }
-// ── response shape ────────────────────────────────────────────────────────────────────────────────────
-// one `Name: value` header pair (values trimmed of the leading space and trailing CR).
 Header*: {
     name: StringView,
     value: StringView,
 }
-// A parsed response. The body rides twice over one allocation: `body_bytes` is the length-carrying
-// `[u8]` truth (binary-safe, embedded NULs preserved); `body` is the same buffer as NUL-terminated
-// text (truncates at the first NUL — use `body_bytes` for binary payloads). `header` is a
-// case-insensitive lookup; `ok` is the 2xx test.
+// body and body_bytes share one allocation. body_bytes preserves embedded NULs; body truncates at
+// the first NUL and is for text only.
 Response*: {
     status: i32,
-    headers: [Header],
+    headers: MutSlice<Header>,
     body: StringView,
-    body_bytes: [u8],
+    body_bytes: MutSlice<u8>,
     header = (r: Response, name: StringView) Opt<StringView> { lookup_header(r.headers, name) }
     ok     = (r: Response) bool { r.status >= 200 && r.status < 300 }
 }
-// first header whose name case-insensitively equals `name`, or `.None`.
-lookup_header = (headers: [Header], name: StringView) Opt<StringView> {
+lookup_header = (headers: MutSlice<Header>, name: StringView) Opt<StringView> {
     res :: Opt<StringView> = .None
     headers.loop((h, i, hd) {
         hd.name.eq_ignore_case(name).then({
@@ -105,17 +57,12 @@ lookup_header = (headers: [Header], name: StringView) Opt<StringView> {
     })
     res
 }
-// Release a PARSED response — what `parse_response`/`http_get`/`get` handed back. Every buffer in it
-// came from `a`: each header name and value, the header backbone, and the one allocation `body` and
-// `body_bytes` share. A response a SERVER built with `respond` holds the handler's own strings and is
-// not freed here.
+// Frees parsed responses only; respond() borrows handler-owned strings.
 response_free* = (a: AllocatorBackend, r: Response) void {
     a.release_headers(r.headers)
     a.release_slice(r.body_bytes)
 }
-// ── response parsing (the testable core) ──────────────────────────────────────────────────────────────
-// byte index of the CRLFCRLF header/body boundary in `v`, or -1 if absent.
-crlfcrlf = (v: [u8]) i64 {
+crlfcrlf = (v: MutSlice<u8>) i64 {
     at :: i64 = 0 - 1
     v.loop((h, i, b) {
         (i + 4 > v.len).match ({
@@ -130,49 +77,38 @@ crlfcrlf = (v: [u8]) i64 {
     })
     at
 }
-// copy `b` into a fresh allocator-owned `[u8]` carrying its exact length plus one trailing NUL —
-// binary-safe (the length lives in the slice) and still viewable as text via `cstr(out.ptr)`.
-own_bytes = (a: AllocatorBackend, b: [u8]) [u8] {
+// Owns an exact-length byte copy followed by an uncounted NUL.
+own_bytes = (a: AllocatorBackend, b: MutSlice<u8>) MutSlice<u8> {
     p = a.try_acquire(b.len + 1).expect("std.net.http: out of memory")
-    out :: [u8] = p.slice(b.len)
+    out :: MutSlice<u8> = p.slice(b.len)
     b.loop_at((i, x) { out[i] = x })
     p.offset(b.len).store(0)
     out
 }
-// the inverse of `split`/`words`: a backbone of `n` slots plus one independent owned copy per field.
-// Every field this module cuts is either consumed into a fresh buffer or kept explicitly, so the
-// whole shape goes back through here.
-release_strs = (a: AllocatorBackend, xs: [StringView]) void {
+release_strs = (a: AllocatorBackend, xs: MutSlice<StringView>) void {
     xs.loop_at((i, x) { a.release(x.own_ptr()) })
     a.release_slice(xs)
 }
-// the inverse of `collect_headers`: backbone plus both halves of every pair. A header list a CALLER
-// built (`no_headers`/`one_header`) points at the caller's own strings and is NOT freed this way.
-release_headers = (a: AllocatorBackend, hs: [Header]) void {
+// Parsed headers own every name/value; caller-built headers do not.
+release_headers = (a: AllocatorBackend, hs: MutSlice<Header>) void {
     hs.loop_at((i, hd) {
         a.release(hd.name.own_ptr())
         a.release(hd.value.own_ptr())
     })
     a.release_slice(hs)
 }
-// Everything an HTTP/1.1 request and response have in common: a first line whose MEANING differs
-// (status line vs request line) but whose position does not, the header list, and the resolved body.
-// Requests and responses share one parser because they share one grammar below the first line.
 MsgParts: {
     first: StringView,
-    headers: [Header],
-    body: [u8],
+    headers: MutSlice<Header>,
+    body: MutSlice<u8>,
 }
-// split a raw message at its CRLFCRLF boundary. The head region is ASCII text, so it is copied to a
-// NUL-terminated str for the line scan; the body keeps its true length end-to-end so binary payloads
-// are not truncated.
-parse_parts = (a: AllocatorBackend, raw: [u8]) Result<MsgParts, HttpError> {
+parse_parts = (a: AllocatorBackend, raw: MutSlice<u8>) Result<MsgParts, HttpError> {
     sep = raw.crlfcrlf()
     out: Result<MsgParts, HttpError> = (sep < 0).match ({
         true  => err(malformed("http: no CRLFCRLF header terminator")),
         false => {
             head = a.own_bytes(raw.take(sep))
-            body_raw: [u8] = raw.drop(sep + 4)
+            body_raw: MutSlice<u8> = raw.drop(sep + 4)
             lines = a.split(cstr(head.ptr), '\n')    // each line still carries a trailing '\r'
             res: Result<MsgParts, HttpError> = a.collect_headers(lines).match ({
                 .Err(e)      => {
@@ -190,9 +126,6 @@ parse_parts = (a: AllocatorBackend, raw: [u8]) Result<MsgParts, HttpError> {
                 },
             })
             lines.loop_at((i, ln) {
-                // lines 1.. are consumed into the trimmed copies `collect_headers` cuts out of them —
-                // intermediates nothing above can reach. `lines[0]` is the exception: it leaves as
-                // `first`, so only the backbone around it goes.
                 (i > 0).then({
                     a.release(ln.own_ptr())
                 })
@@ -204,8 +137,7 @@ parse_parts = (a: AllocatorBackend, raw: [u8]) Result<MsgParts, HttpError> {
     })
     out
 }
-// parse a raw HTTP/1.1 response (status line, CRLF headers, blank line, body) into a `Response`.
-parse_response* = (a: AllocatorBackend, raw: [u8]) Result<Response, HttpError> {
+parse_response* = (a: AllocatorBackend, raw: MutSlice<u8>) Result<Response, HttpError> {
     out: Result<Response, HttpError> = a.parse_parts(raw).match ({
         .Err(e) => .Err(e),
         .Ok(p)  => {
@@ -232,7 +164,6 @@ parse_response* = (a: AllocatorBackend, raw: [u8]) Result<Response, HttpError> {
     })
     out
 }
-// status line -> numeric code: `HTTP/1.1 200 OK` -> 200. Rejects codes outside 100..599.
 parse_status = (a: AllocatorBackend, line: StringView) Result<i32, HttpError> {
     toks = a.words(line)
     out: Result<i32, HttpError> = (toks.len < 2).match ({
@@ -248,27 +179,24 @@ parse_status = (a: AllocatorBackend, line: StringView) Result<i32, HttpError> {
             false => err(malformed("http: status line does not start with HTTP/")),
         }),
     })
-    // an `i32` is all that leaves — the tokens are a pure intermediate, freed here.
     a.release_strs(toks)
     out
 }
-// `s[start .. start+n]` with surrounding whitespace stripped, as ONE owned buffer. `trim` allocates a
-// fresh buffer out of whatever it is handed, so the `substr` feeding it is a pure intermediate that
-// nothing above can reach — freed here rather than leaked twice per header line.
 trimmed_cut = (a: AllocatorBackend, s: StringView, start: i64, n: i64) StringView {
     cut = a.substr(s, start, n).expect("http: oom")
     out = a.trim(cut)
     a.release(cut.own_ptr())
     out
 }
-// every line after the status line -> a `[Header]`; a colon-less line is a malformed response.
-collect_headers = (a: AllocatorBackend, lines: [StringView]) Result<[Header], HttpError> {
+collect_headers = (
+    a: AllocatorBackend,
+    lines: MutSlice<StringView>,
+) Result<MutSlice<Header>, HttpError> {
     n = lines.len - 1
-    hs :: [Header] = a.nbuf(Header(
+    hs :: MutSlice<Header> = a.nbuf(Header(
         name: "",
         value: "",
     ), n)
-    // pairs written so far; short of `n` at the end means some line had no ':'
     filled :: i64 = 0
     lines.loop((h, i, line) {
         (i == 0 == false).then({
@@ -292,30 +220,27 @@ collect_headers = (a: AllocatorBackend, lines: [StringView]) Result<[Header], Ht
     (filled == n).match ({
         true  => ok(hs),
         false => {
-            // the `.Err` carries no headers, so the pairs already trimmed out are unreachable — they go
-            // back with the backbone. Only the written prefix is touched: `nbuf` leaves the rest unset.
             a.release_headers(hs.take(filled))
             err(malformed("http: header line missing ':'"))
         },
     })
 }
-// case-insensitive "does this Transfer-Encoding say chunked?". The lowercased copy is a one-question
-// intermediate — freed here, not left behind on every response that carries the header.
 te_is_chunked = (a: AllocatorBackend, te: StringView) bool {
     lo = a.to_lower(te)
     out = lo.contains("chunked")
     a.release(lo.own_ptr())
     out
 }
-// resolve the body: decode a `chunked` transfer-encoding, else trim to `Content-Length`, else take
-// the read-to-EOF remainder verbatim. The chosen run is copied once into an owned NUL-terminated
-// buffer, so `body_bytes` keeps the true length and `body`/`cstr` stays valid.
-decide_body = (a: AllocatorBackend, headers: [Header], body_raw: [u8]) [u8] {
+decide_body = (
+    a: AllocatorBackend,
+    headers: MutSlice<Header>,
+    body_raw: MutSlice<u8>,
+) MutSlice<u8> {
     chunked = lookup_header(headers, "Transfer-Encoding").match ({
         .Some(te) => a.te_is_chunked(te),
         .None     => false,
     })
-    logical: [u8] = chunked.match ({
+    logical: MutSlice<u8> = chunked.match ({
         true  => a.decode_chunked(body_raw),
         false => lookup_header(headers, "Content-Length").match ({
             .Some(cl) => body_raw.take(cl.parse_int()),
@@ -323,30 +248,20 @@ decide_body = (a: AllocatorBackend, headers: [Header], body_raw: [u8]) [u8] {
         }),
     })
     out = a.own_bytes(logical)
-    // the other two runs are views into `body_raw`, but a DECODED one is its own buffer — and `out`
-    // is the copy that leaves, so the decode's scratch goes back here.
     chunked.then({
         a.release_slice(logical)
     })
     out
 }
-// ── chunked transfer-encoding decode ──────────────────────────────────────────────────────────────────
-// The three `[u8]` SCANS still here (`crlfcrlf` above, `hex_end`, `after_lf`) are not HTTP either —
-// they are "find this needle / scan while this class" over bytes, and they stay only because no byte-
-// search module exists yet. When one lands they move together; the things they FIND are already home
-// (std.text.num's `hex_value` decodes the run `hex_end` delimits).
-// first index at/after `i` that is not a hex digit (the end of a chunk-size field).
-hex_end = (bv: [u8], i: i64) i64 {
+hex_end = (bv: MutSlice<u8>, i: i64) i64 {
     (i < bv.len && is_hex(bv[i])).then({ bv.hex_end(i + 1) }, { i })
 }
-// index just past the next '\n' at/after `i`, or `bv.len` if none remains.
-after_lf = (bv: [u8], i: i64) i64 {
+after_lf = (bv: MutSlice<u8>, i: i64) i64 {
     (i >= bv.len).match ({
         true  => bv.len,
         false => (bv[i] == '\n').then({ i + 1 }, { bv.after_lf(i + 1) }),
     })
 }
-// append bv[start .. start+n] (clamped to the view) onto the builder `sb`.
 append_range = (a: AllocatorBackend, bv: Slice<u8>, start: i64, n: i64, sb: String) String {
     avail = bv.len - start
     m = (n < avail).then({ n }, { avail })
@@ -355,9 +270,7 @@ append_range = (a: AllocatorBackend, bv: Slice<u8>, start: i64, n: i64, sb: Stri
     part.loop_at((i, b) { acc = a.push_in(acc, b).expect("http: oom") })
     acc
 }
-// walk the chunked body: at `i` read the hex size line, append that many data bytes, skip the
-// trailing CRLF, and recurse; stop at the terminating 0-size chunk (or end of input).
-chunk_loop = (a: AllocatorBackend, bv: [u8], i: i64, sb: String) String {
+chunk_loop = (a: AllocatorBackend, bv: MutSlice<u8>, i: i64, sb: String) String {
     (i >= bv.len).match ({
         true  => sb,
         false => {
@@ -374,14 +287,10 @@ chunk_loop = (a: AllocatorBackend, bv: [u8], i: i64, sb: String) String {
         },
     })
 }
-decode_chunked = (a: AllocatorBackend, bv: [u8]) [u8] {
+decode_chunked = (a: AllocatorBackend, bv: MutSlice<u8>) MutSlice<u8> {
     sb = a.init(16).expect("http: oom")
     a.chunk_loop(bv, 0, sb).bytes()
 }
-// ── request construction + the live socket path ───────────────────────────────────────────────────────
-// append `n` as decimal text — the header values that are numbers (Content-Length, a port, a status
-// code). The rendered digits are a pure intermediate: the builder copies them in, so they are freed
-// here rather than left behind once per number on every message this module builds.
 append_decimal = (a: AllocatorBackend, sb: String, n: i64) String {
     d: StringView = a
         .integer(n)
@@ -392,16 +301,13 @@ append_decimal = (a: AllocatorBackend, sb: String, n: i64) String {
     a.release(d.own_ptr())
     out
 }
-// append a CRLF line terminator to the builder.
 crlf = (a: AllocatorBackend, sb: String) String { a.append_in(sb, "\r\n").expect("http: oom") }
-// serialise a request: `<method> <path> HTTP/1.1`, a `Host` header, `Connection: close`, any caller
-// `headers`, an auto `Content-Length` when `body` is non-empty, the blank line, then the body.
 build_request = (
     a: AllocatorBackend,
     method: StringView,
     host: StringView,
     path: StringView,
-    headers: [Header],
+    headers: MutSlice<Header>,
     body: StringView,
 ) StringView {
     sb ::= a.init(16).expect("http: oom")
@@ -431,8 +337,6 @@ build_request = (
     a.finish_in(sb).expect("http: oom")
 }
 READ_CHUNK = 4096    // per-recv buffer size for draining the response
-// drain the connection into `sb` one recv at a time until the peer closes (recv returns 0) or
-// errors; `Connection: close` guarantees EOF once the full response has arrived.
 read_loop = (a: AllocatorBackend, c: TcpConn, buf: RawPtr<u8>, sb: String) String {
     c.recv_into(buf, READ_CHUNK).match ({
         .Ok(nr) => (nr <= 0).match ({
@@ -442,23 +346,19 @@ read_loop = (a: AllocatorBackend, c: TcpConn, buf: RawPtr<u8>, sb: String) Strin
         .Err(e) => sb,
     })
 }
-// drain the response into one length-carrying `[u8]` — the assembled buffer keeps its true byte
-// count, so a binary body with embedded NULs survives into `parse_response`.
-read_all = (a: AllocatorBackend, c: TcpConn) [u8] {
+read_all = (a: AllocatorBackend, c: TcpConn) MutSlice<u8> {
     buf = a.acquire(READ_CHUNK)
     full = a.read_loop(c, buf, a.init(16).expect("http: oom"))
     a.release(buf)
     full.bytes()
 }
-// the general form: connect to `host:port`, send `<method> <path>` with `headers`/`body`, read the
-// whole response, parse it. Any step's failure surfaces as the matching `HttpError`.
 request* = (
     a: AllocatorBackend,
     method: StringView,
     host: StringView,
     port: i32,
     path: StringView,
-    headers: [Header],
+    headers: MutSlice<Header>,
     body: StringView,
 ) Result<Response, HttpError> {
     req = a.build_request(method, host, path, headers, body)
@@ -473,7 +373,6 @@ request* = (
                 raw = a.read_all(c)
                 c.close_conn()
                 res = a.parse_response(raw)
-                // the parse COPIES everything it keeps, so the wire bytes end here.
                 a.release_slice(raw)
                 res
             },
@@ -482,16 +381,13 @@ request* = (
     a.release(req.own_ptr())    // the serialised request is on the wire (or the dial failed)
     out
 }
-// an empty header list — the common case for a plain GET.
-no_headers* = (a: AllocatorBackend) [Header] {
+no_headers* = (a: AllocatorBackend) MutSlice<Header> {
     a.nbuf(Header(
         name: "",
         value: "",
     ), 0)
 }
-// a one-element header list — the common case for a server that sets a Content-Type. `nbuf` hands
-// back UNINITIALISED slots (its seed is only a type witness), so the slot is written here.
-one_header* = (a: AllocatorBackend, name: StringView, value: StringView) [Header] {
+one_header* = (a: AllocatorBackend, name: StringView, value: StringView) MutSlice<Header> {
     hs ::= a.nbuf(Header(
         name: "",
         value: "",
@@ -502,23 +398,19 @@ one_header* = (a: AllocatorBackend, name: StringView, value: StringView) [Header
     )
     hs
 }
-// the common case: a GET with no extra headers and no body.
 get* = (
     a: AllocatorBackend,
     host: StringView,
     port: i32,
     path: StringView,
 ) Result<Response, HttpError> { a.request("GET", host, port, path, a.no_headers(), "") }
-// ── URLs: parse / build / the one-call surface ────────────────────────────────────────────────────────
-// A parsed http URL. Only `http://` (or scheme-less) URLs are accepted — there is no TLS.
 Url*: {
     host: StringView,
     port: i32,
     path: StringView,
 }
-// parse "http://host[:port][/path]" (scheme optional) into a Url. Port defaults to 80, path to "/".
-// `host` and `path` are cut fresh in EVERY shape of input — never a view into `url` and never into
-// each other — so `url_free` releases exactly two buffers and can never free a literal twice.
+// Accepts http:// or no scheme; defaults to port 80 and path "/". host and path are independent
+// owned cuts released by url_free.
 parse_url* = (a: AllocatorBackend, url: StringView) Result<Url, HttpError> {
     url.starts_with("https://").match ({
         true  => err(malformed("http: https is not supported (no TLS)")),
@@ -550,8 +442,6 @@ parse_url* = (a: AllocatorBackend, url: StringView) Result<Url, HttpError> {
                             n
                         },
                     })
-                    // "" is the accept; anything else is the rejection reason, and one test carries
-                    // both so the two owned cuts have a single place to go back.
                     why = (host.view().len == 0).match ({
                         true  => "http: empty host in url",
                         false => (port < 1 || port > 65535).match ({
@@ -581,12 +471,10 @@ parse_url* = (a: AllocatorBackend, url: StringView) Result<Url, HttpError> {
         },
     })
 }
-// release a parsed Url — `parse_url` owns `host` and `path` and nothing else in the struct.
 url_free* = (a: AllocatorBackend, u: Url) void {
     a.release(u.host.own_ptr())
     a.release(u.path.own_ptr())
 }
-// build "http://host:port/path" — the inverse of parse_url (handy when the port is ephemeral).
 url_of* = (a: AllocatorBackend, host: StringView, port: i32, path: StringView) StringView {
     sb ::= a.init(16).expect("http: oom")
     sb = a.append_in(sb, "http://").expect("http: oom")
@@ -596,53 +484,40 @@ url_of* = (a: AllocatorBackend, host: StringView, port: i32, path: StringView) S
     sb = a.append_in(sb, path).expect("http: oom")
     a.finish_in(sb).expect("http: oom")
 }
-// the one-liner: GET a URL, get a parsed Response back.
-//   r = a.http_get("http://127.0.0.1:8080/").expect("fetch")
 http_get* = (a: AllocatorBackend, url: StringView) Result<Response, HttpError> {
     a.http_request(url, "GET", a.no_headers(), "")
 }
-// the general URL form: any method, caller headers, optional body.
 http_request* = (
     a: AllocatorBackend,
     url: StringView,
     method: StringView,
-    headers: [Header],
+    headers: MutSlice<Header>,
     body: StringView,
 ) Result<Response, HttpError> {
     a.parse_url(url).match ({
         .Err(e) => err(e),
         .Ok(u)  => {
             out = a.request(method, u.host, u.port, u.path, headers, body)
-            // the Url is this call's private intermediate; only the Response is the caller's.
             a.url_free(u)
             out
         },
     })
 }
-// ── server side: answering a request ──────────────────────────────────────────────────────────────────
-// A parsed request — `Response`'s mirror image. Same headers, same two-faced body storage
-// (`body_bytes` is the binary-safe truth, `body` the NUL-terminated text view); only the first line
-// differs, carrying `method`/`path` where a response carries `status`.
 Request*: {
     method: StringView,
     path: StringView,
-    headers: [Header],
+    headers: MutSlice<Header>,
     body: StringView,
-    body_bytes: [u8],
+    body_bytes: MutSlice<u8>,
     header = (r: Request, name: StringView) Opt<StringView> { lookup_header(r.headers, name) }
 }
-// Release a PARSED request — `serve_once`'s `Ok` value. `response_free`'s mirror, plus the two
-// tokens cut out of the request line.
 request_free* = (a: AllocatorBackend, r: Request) void {
     a.release(r.method.own_ptr())
     a.release(r.path.own_ptr())
     a.release_headers(r.headers)
     a.release_slice(r.body_bytes)
 }
-// parse a raw HTTP/1.1 request (`<method> <target> HTTP/1.1`, CRLF headers, blank line, body). Only
-// the first line is parsed here — every other byte goes through the same `parse_parts` the client's
-// `parse_response` uses, so there is exactly one header parser in this module.
-parse_request* = (a: AllocatorBackend, raw: [u8]) Result<Request, HttpError> {
+parse_request* = (a: AllocatorBackend, raw: MutSlice<u8>) Result<Request, HttpError> {
     out: Result<Request, HttpError> = a.parse_parts(raw).match ({
         .Err(e) => .Err(e),
         .Ok(p)  => {
@@ -662,12 +537,6 @@ parse_request* = (a: AllocatorBackend, raw: [u8]) Result<Request, HttpError> {
                 },
             })
             toks.loop_at((i, t) {
-                // `words` owns a BACKBONE plus one owned copy per token, and each is an independent
-                // allocation. The Request keeps tokens 0 and 1 (method, path) and nothing else: the
-                // backbone and every token past the second — "HTTP/1.1" on every single request — are
-                // unreachable the moment this returns, so they are released here. The two kept tokens
-                // are NOT freed; they belong to the caller with the rest of the Request — unless there
-                // is no Request, in which case nothing at all escapes.
                 (i >= 2 || keep == false).then({
                     a.release(t.own_ptr())
                 })
@@ -683,30 +552,32 @@ parse_request* = (a: AllocatorBackend, raw: [u8]) Result<Request, HttpError> {
     })
     out
 }
-// the reason phrase for the codes a minimal server actually emits. HTTP/1.1 lets a client ignore the
-// phrase entirely, so an unlisted code borrows "OK" rather than growing a table nobody reads.
 status_reason* = (code: i32) StringView {
-    (code == 201).match ({
-        true  => "Created",
-        false => (code == 204).match ({
-            true  => "No Content",
-            false => (code == 400).match ({
-                true  => "Bad Request",
-                false => (code == 404).match ({
-                    true  => "Not Found",
-                    false => (code == 405).match ({
-                        true  => "Method Not Allowed",
-                        false => (code == 500).then({ "Internal Server Error" }, { "OK" }),
-                    }),
-                }),
-            }),
-        }),
+    (code == 200).then({
+        return "OK"
     })
+    (code == 201).then({
+        return "Created"
+    })
+    (code == 204).then({
+        return "No Content"
+    })
+    (code == 400).then({
+        return "Bad Request"
+    })
+    (code == 404).then({
+        return "Not Found"
+    })
+    (code == 405).then({
+        return "Method Not Allowed"
+    })
+    (code == 500).then({
+        return "Internal Server Error"
+    })
+    ""
 }
-// the answer a handler hands back. It is the same `Response` the client PARSES — one struct describes
-// a response on both sides of the wire. `body_bytes` mirrors `body`, so a body containing NULs must
-// build the struct directly instead of going through here.
-respond* = (status: i32, headers: [Header], body: StringView) Response {
+// For embedded-NUL bodies, construct Response directly with an explicit body_bytes length.
+respond* = (status: i32, headers: MutSlice<Header>, body: StringView) Response {
     Response(
         status: status,
         headers: headers,
@@ -714,10 +585,8 @@ respond* = (status: i32, headers: [Header], body: StringView) Response {
         body_bytes: body.own_ptr().slice(body.view().len),
     )
 }
-// serialise a response onto the wire: status line, the caller's headers, an auto `Content-Length` taken
-// from `body_bytes`, `Connection: close`, the blank line, then the body. Returns `[u8]` and not a str
-// (the mirror of `build_request`) because a body may be binary — a str would stop at the first NUL.
-build_response* = (a: AllocatorBackend, r: Response) [u8] {
+// Returns bytes because the body may contain NULs.
+build_response* = (a: AllocatorBackend, r: Response) MutSlice<u8> {
     sb ::= a.init(16).expect("http: oom")
     sb = a.append_in(sb, "HTTP/1.1 ").expect("http: oom")
     sb = a.append_decimal(sb, to_i64(r.status))
@@ -738,12 +607,9 @@ build_response* = (a: AllocatorBackend, r: Response) [u8] {
     sb = a.crlf(sb)    // blank line: end of headers
     a.append_range(r.body_bytes, 0, r.body_bytes.len, sb).bytes()
 }
-// how many bytes the message in `raw` occupies on the wire: head + CRLFCRLF + any `Content-Length`
-// body. -1 means the head has not fully arrived yet (keep reading). This is what a SERVER needs and a
-// client does not: the peer holds the connection open waiting to be answered, so there is no EOF to
-// read to — the message must be self-delimiting. A request body must therefore carry Content-Length;
-// a `Transfer-Encoding: chunked` request reads as body-less and is answered on its headers alone.
-wire_len = (a: AllocatorBackend, raw: [u8]) i64 {
+// Returns -1 until headers delimit the message. Request bodies require Content-Length; chunked
+// requests are treated as bodyless.
+wire_len = (a: AllocatorBackend, raw: MutSlice<u8>) i64 {
     sep = raw.crlfcrlf()
     (sep < 0).match ({
         true  => 0 - 1,
@@ -761,16 +627,12 @@ wire_len = (a: AllocatorBackend, raw: [u8]) i64 {
                 },
                 .Err(e) => 0,
             })
-            // a pure MEASUREMENT of `raw`: one `i64` leaves, and this runs once per recv, so every
-            // buffer the re-parse touched goes straight back.
             a.release_strs(lines)
             a.release(head.ptr)
             sep + 4 + body
         },
     })
 }
-// drain one whole request off `c`: recv until `wire_len` says the message is complete, or the peer
-// hangs up. The client's `read_loop` reads to EOF; a server must stop at the message boundary.
 read_msg_loop = (a: AllocatorBackend, c: TcpConn, buf: RawPtr<u8>, sb: String) String {
     raw = sb.bytes()
     want = a.wire_len(raw)
@@ -785,25 +647,19 @@ read_msg_loop = (a: AllocatorBackend, c: TcpConn, buf: RawPtr<u8>, sb: String) S
         }),
     })
 }
-read_request = (a: AllocatorBackend, c: TcpConn) [u8] {
+read_request = (a: AllocatorBackend, c: TcpConn) MutSlice<u8> {
     buf = a.acquire(READ_CHUNK)
     full = a.read_msg_loop(c, buf, a.init(16).expect("http: oom"))
     a.release(buf)
     full.bytes()
 }
-// bind an HTTP listener on `host:port` (port 0 = kernel-chosen ephemeral, read back with
-// `l.local_port()`). The one call that opens a socket, so an HTTP app never imports std.net.socket.
 http_listen* = (host: StringView, port: i32) Result<TcpListener, HttpError> {
     serve(host, port).match ({
         .Ok(l)  => ok(l),
         .Err(e) => err(listen_err(e)),
     })
 }
-// answer exactly ONE connection on `l`: accept, read the request, hand it to `handler`, write what the
-// handler returned, close. The listener stays open, so the caller decides whether to serve again —
-// that is what makes this composable (a demo serves one; an actor behaviour serves one per message).
-// A request that will not parse is still answered, with `400`, before its error is returned: an
-// accepted connection always gets a reply.
+// Malformed accepted requests receive 400 before their error is returned.
 serve_once*<A: AllocatorBackend> = (
     a: MutPtr<A>,
     l: TcpListener,
@@ -826,8 +682,6 @@ serve_once*<A: AllocatorBackend> = (
                         .Ok(n)  => ok(req),
                         .Err(e) => err(io_err(e)),
                     })
-                    // the serialised answer is on the wire; the Request that escapes is the
-                    // caller's to `request_free`, and a handler owns whatever IT allocated.
                     a.release_slice(wire)
                     sent
                 },
@@ -839,18 +693,13 @@ serve_once*<A: AllocatorBackend> = (
     })
     out
 }
-// serve `n` connections in sequence, or every connection until the listener dies when `n < 0` (the
-// forever server). One bad connection does not end the loop — it was answered and closed, and the
-// next accept carries on; only a `fatal` listener-level error stops it. Returns the count answered.
-// ITERATIVE, not recursive: a long-lived server must not grow the C stack once per request.
+// n < 0 serves until a listener-level error; per-connection errors do not stop the loop.
 serve_n*<A: AllocatorBackend> = (
     a: MutPtr<A>,
     l: TcpListener,
     n: i64,
     handler: (MutPtr<A>, Request) Response,
 ) i64 {
-    // `step_while`, NOT `repeat_while`: the guard must be tested BEFORE the first accept, since
-    // `serve_n(0)` answers zero connections. The cursor IS the served count, so the loop reports it.
     live ::= true
     zero: i64 = 0
     zero.step_while((served) { live && (n < 0 || served < n) }, (served) {

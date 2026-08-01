@@ -1,18 +1,10 @@
-// compiler.generics — leaf helpers shared by the two generic-instance collectors.
-//
 // Monomorphization (compiler.mono, collect_*/add_inst) and recursive-generic-function
-// analysis (compiler.passes.refcount, rc_col_*/rc_add) each independently walk the AST,
-// dedup GenericData instances by mangled name, and bound type-arg NESTING depth. These
-// three leaves were byte-identical across the two families (modulo local names), so they
-// live here once to kill the drift hazard. The walkers themselves stay in each file — the
-// rc_* ones thread an Env for type inference; mono's don't — and are NOT merged.
-//
-// Leaf module: imports ONLY the AST types (compiler.ast.ast_types) + std. It must NEVER import
-// compiler.mono or compiler.check, so it stays under the dependency floor (no cycle).
+// analysis share instance deduplication and type-argument depth. Keep this leaf below both passes
+// in the dependency graph.
 { Ty, GenericData } = compiler.ast.ast_types
 { loop_at } = std.core.count
 // dedup: is an instance whose mangled name is `m` already recorded in buf[0..cnt)?
-gd_has_mangled* = (buf: [GenericData], cnt: i32, m: StringView) bool {
+gd_has_mangled* = (buf: MutSlice<GenericData>, cnt: i32, m: StringView) bool {
     found ::= false
     buf.loop_at((i, e) {
         found = (i < cnt).match ({
@@ -33,7 +25,7 @@ gd_ty_depth = (t: Ty) i32 {
         _           => 0,
     })
 }
-gd_tys_max_depth* = (ts: [Ty]) i32 {
+gd_tys_max_depth* = (ts: MutSlice<Ty>) i32 {
     d ::= 0
     ts.loop_at((i, t) {
         nd = t.gd_ty_depth()

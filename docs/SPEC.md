@@ -91,7 +91,7 @@ Implemented scalar and structural types:
 i32 i64 u8 f64 bool void
 StringLiteral StringCstr StringView
 Ptr<T> MutPtr<T> RawPtr<T>
-[T] Slice<T> MutSlice<T>
+Slice<T> MutSlice<T>
 (A, B) C
 Name
 Name<T, U>
@@ -105,7 +105,7 @@ currently lower to `const char*`; a true `(ptr, len)` view is a later phase
 former `text`, `Cstr` and `str` aliases are gone, and a diagnostic names the
 type you wrote rather than folding all three onto `StringView`. (`str` remains
 the name of the `std.text.str` module, which is not a type.) The owned growable
-buffer remains `String`. `[T]` is a fat slice with a
+buffer remains `String`. `Slice<T>` and `MutSlice<T>` are fat slices with a
 pointer and length. Function types are parameter types for inline templates and
 closure arguments.
 
@@ -125,17 +125,17 @@ in C. `Ptr<T>` is non-null/read-only, `MutPtr<T>` is non-null/writable, and
 not the reverse; nested pointer, slice, and generic arguments are invariant.
 
 Slices carry the same read/write distinction under the same naming rule:
-`Slice<T>` is the read-only window and `MutSlice<T>` the writable one, for
-which `[T]` is the sugar. Both are one `{ptr, len}` layout — the kind changes
+`Slice<T>` is the read-only window and `MutSlice<T>` the writable one.
+Both are one `{ptr, len}` layout — the kind changes
 only what the checker permits, and it is absent from the ABI mangling for that
 reason (it is present in the SEMANTIC one, so a generic body that stores
-through a `[T]` parameter is never reused for a `Slice<T>` instantiation).
+through a `MutSlice<T>` parameter is never reused for a `Slice<T>` instantiation).
 `.view()` decides which kind you get from what you viewed: a window over a
 `StringLiteral` or `StringCstr` is a `Slice<T>`, so a store into `.rodata` is
 `error[slice-write]` at check time rather than a segfault at run time. More
 generally, a slice-returning call on a read-only receiver yields a read-only
 window when the callee's returned expression names its first parameter — a
-function that allocates a fresh buffer keeps handing back a writable `[T]`.
+function that allocates a fresh buffer keeps handing back a writable `MutSlice<T>`.
 `null_ptr()` has type `RawPtr<u8>`, the deliberately permissive allocator/FFI
 floor. Typed `RawPtr<T>` values require `assert_nonnull` before non-null use, and
 that assertion preserves an existing direction (`Ptr` stays `Ptr`, `MutPtr`
@@ -293,7 +293,7 @@ Sum.impl(Receiver, {
 main = () i32 {
     h = heap.gpa()
     sink = h.addr().spawn_handle(16, Sum(total: 0, seen: 0, closed: false)).expect("spawn")
-    xs: [i64] = [10, 20, 30]
+    xs: MutSlice<i64> = [10, 20, 30]
     xs.loop((hh, i, v) { sink.send(.Value(v)) })    // send returns bool: false = mailbox full
     sink.send(.Done)                                // end-of-stream is a message
     sink.run()
@@ -415,13 +415,13 @@ The entire implicit-conversion surface is one function: `fits` in
 - **String provenance is directional**: `StringLiteral` fits `StringCstr`
   and `StringView`, and `StringCstr` fits `StringView`, never the reverse
   (`ty_eq`).
-- **Slice capability only weakens** (`slice_mode_fits`): a writable `[T]` fits
-  a `Slice<T>` slot, but a read-only `Slice<T>` never fits `[T]`.
+- **Slice capability only weakens** (`slice_mode_fits`): a writable `MutSlice<T>` fits
+  a `Slice<T>` slot, but a read-only `Slice<T>` never fits `MutSlice<T>`.
 
 None of the above happens under a constructor. Pointees, slice elements,
 function types, and generic type arguments compare with `invariant_ty_eq`:
-`[i32]` does not fit `[i64]`, `MutPtr<u8>` does not fit a `MutPtr<i32>` or
-nested `Ptr<u8>` position, `Box<Slice<u8>>` does not fit `Box<[u8]>`, and the
+`MutSlice<i32>` does not fit `MutSlice<i64>`, `MutPtr<u8>` does not fit a `MutPtr<i32>` or
+nested `Ptr<u8>` position, `Box<Slice<u8>>` does not fit `Box<MutSlice<u8>>`, and the
 string provenances are distinct types inside aggregates. Widening and capability loss are outer-value coercions only.
 
 ### Evaluation order
@@ -733,12 +733,12 @@ work:
 ```zen
 ImportEdge*: { module: StringView, alias: StringView, namespace: bool, start: i32, next: i32 }
 ProvidedSymbol*: { name: StringView, start: i32, next: i32, decl_start: i32, decl_next: i32, imported: bool, foreign: bool }
-ModuleGraph*: { imports: [ImportEdge], symbols: [ProvidedSymbol] }
+ModuleGraph*: { imports: MutSlice<ImportEdge>, symbols: MutSlice<ProvidedSymbol> }
 ModuleEntry*: { id: StringView, path: StringView, source: StringView, graph: ModuleGraph }
-ModuleTable*: { modules: [ModuleEntry] }
+ModuleTable*: { modules: MutSlice<ModuleEntry> }
 ResolvedProgram*: { table: ModuleTable, flat: StringView, body_start: i64, body_end: i64 }
-ParsedModule*: { id: StringView, path: StringView, source: StringView, body: StringView, graph: ModuleGraph, decls: [Decl] }
-ParsedProgram*: { resolved: ResolvedProgram, modules: [ParsedModule], flat_decls: [Decl] }
+ParsedModule*: { id: StringView, path: StringView, source: StringView, body: StringView, graph: ModuleGraph, decls: MutSlice<Decl> }
+ParsedProgram*: { resolved: ResolvedProgram, modules: MutSlice<ParsedModule>, flat_decls: MutSlice<Decl> }
 ```
 
 `import_edges(a, src)` scans destructuring imports and namespace binds into
@@ -746,7 +746,7 @@ source-order edges such as `std/text/fmt` or `u/helper`, preserving the source
 byte span for each edge. It only needs the `AllocatorBackend` trait, so callers can
 back the edge slice and each edge's normalized `module`/`alias` strings with
 heap, arena, or a custom allocator. `try_import_edges(a, src)` returns
-`Result<[ImportEdge], IoError>` and reports allocation failure for the edge
+`Result<MutSlice<ImportEdge>, IoError>` and reports allocation failure for the edge
 slice, module strings, or alias strings. The checked loader uses these edges to
 load destructuring dependencies and namespace-bound modules.
 `provided_symbols_in(scratch, alloc, src)` scans a module into source-order
@@ -932,7 +932,7 @@ ownership types:
 
 Allocator-threaded std APIs make allocation visible in signatures. Examples:
 `vec.of(a, [1, 2])`, `v.push(a, x)`, `vec.try_of(a, [1, 2])`, `v.try_push(a, x)`,
-`maps.of(a, "k", 1)`, `m.try_put(a, "k", 2)`, `maps.try_of(a, "k", 1)`,
+`a.map_of("k", 1)`, `m.try_put(a.addr(), "k", 2)`, `maps.map_of_in(a.addr(), "k", 1)`,
 `a.try_map_in([1, 2], (x) { x + 1 })`, `arena.make_in(a, 1024)`,
 `slice.dup(a, [1, 2])`, `a.try_dup_in([1, 2])`, `own.new_in(a, value)`, `rc.new_in(a, value)`,
 `actor.cell(a, 16)`, and `cell.reply(a)` — the actor constructors return `Result`
@@ -1070,7 +1070,7 @@ The C backend (`compiler.backend.c` / `c_emit`) is the shipping/bootstrap backen
 checked, monomorphized AST to C and invokes `cc` for `build`/`run`. C is the intentional
 intermediate/bootstrap target.
 
-A second backend, `compiler.backend.js.js`, walks the **same** post-monomorphization `[Decl]` AST and
+A second backend, `compiler.backend.js.js`, walks the **same** post-monomorphization `MutSlice<Decl>` AST and
 emits JavaScript (Node/browser) over a small linear-memory floor (`bootstrap/zenrt.js`). It is
 driven by `zenc emit-js <file>` and `zenc build --target js <file> [-o out]`, and covers the
 computational subset — full i64 / 64-bit bitwise (needs BigInt) and scalar aliasing through

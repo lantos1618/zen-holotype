@@ -71,9 +71,9 @@ yet; the next section marks which.
 | `Vec<T>` / `String` | `{ptr, len, cap}` + allocator | yes | **yes** | runtime, changes | **yes** | **you** |
 | **NOT BUILT** `VecView<T>` / `StringView` | `{ptr, len}` | no | no | runtime | no | **not yours** |
 
-The `Vec` side of the borrowed row is spelled `Slice<T>` / `MutSlice<T>` (`[T]`) today — a slice, not a
+The `Vec` side of the borrowed row is spelled `Slice<T>` / `MutSlice<T>` today — a slice, not a
 named `VecView<T>` — and the literal row has no `Vec` spelling at all: a slice literal `[1, 2, 3]` is
-just a `[T]`.
+just a `MutSlice<T>`.
 
 Three axes decide the row, and every combination that makes sense has a name:
 
@@ -156,7 +156,7 @@ construction, and a UFCS receiver cannot carry an explicit type argument, so `T`
 binding's annotation:
 
 ```zen
-xs = [1, 2, 3]                                  // a `[i32]` slice literal — NOT a `VecLiteral`
+xs = [1, 2, 3]                                  // a `MutSlice<i32>` literal — NOT a `VecLiteral`
 scratch: Result<VecFixed<i64>, IoError> = gpa.vec_fixed(64)
 v :: Vec<i64> = gpa.vec(16)                     // infallible, like `string`
 v = v.add_one(1)
@@ -164,7 +164,7 @@ locked = v.freeze().or_return()                 // VecConst<i64>
 ```
 
 **NOT BUILT:** the `view = xs.view()` line that used to sit in that block is gone: a slice literal has no
-`.view()` method (`error[undefined-name]`, or `error[arg-type]: expected 'StringView', got '[i32]'`
+`.view()` method (`error[undefined-name]`, or `error[arg-type]: expected 'StringView', got 'MutSlice<i32>'`
 if `std.text.str`'s `view` is in scope). A slice literal already *is* the borrowed row.
 
 **Every op returns the updated value.** `s.add(…)` does not mutate `s` in place — the header moves
@@ -180,9 +180,9 @@ when the buffer is realloc'd, so a chain has to be bound back (`s = s.add(…).a
 
 ```
 literal ──gpa.string(n).add(lit)──▶ String ──freeze()──▶ StringConst
-                                      │                      │
-                                      │  .view() → [u8]      │  .view() → Slice<u8>
-                                      ▼                      ▼
+                                      │                         │
+                                      │  .view() → MutSlice<u8>  │  .view() → Slice<u8>
+                                      ▼                         ▼
                                     (two DIFFERENT view types — see below)
 ```
 
@@ -194,16 +194,16 @@ one claim in this document that most needs correcting. Today:
 
 | receiver | `.view()` yields |
 |---|---|
-| `String` | `[u8]` (writable — `MutSlice<u8>`) |
-| `StringFixed` | `[u8]` (writable) |
+| `String` | `MutSlice<u8>` (writable) |
+| `StringFixed` | `MutSlice<u8>` (writable) |
 | `StringView` | `Slice<u8>` (read-only) |
 | `StringConst` | `Slice<u8>` (read-only) |
 | `StringLiteral` / `StringCstr` | `Slice<u8>` (read-only) |
 
-So a `[u8]` parameter rejects a `StringConst`, `StringLiteral` or `StringCstr` view
-(`error[arg-type]: expected '[u8]', got 'Slice<u8>'`), and the writable rows and the read-only
+So a `MutSlice<u8>` parameter rejects a `StringConst`, `StringLiteral` or `StringCstr` view
+(`error[arg-type]: expected 'MutSlice<u8>', got 'Slice<u8>'`), and the writable rows and the read-only
 rows are not interchangeable at a call site. Also note the receiver, not the callee, decides:
-`std.text.str`'s `view` is declared once as `(s: StringView) [u8]`, and the checker narrows the
+`std.text.str`'s `view` is declared once as `(s: StringView) MutSlice<u8>`, and the checker narrows the
 result to `Slice<u8>` from the provenance of what you called it on.
 
 **A `StringView` parameter does not accept the owned kinds either.** `StringView` is the borrowed
@@ -263,7 +263,7 @@ container-specific even where their allocation lifecycle delegates to `std.mem.b
 > **THE TREE.** This is the one section that reports the current state rather than the target
 > model. Where it disagrees with anything above, this section wins.
 
-**Real now:** `String`, `Vec<T>`, views (as `[T]` / `Slice<T>`), the `(a: AllocatorBackend)` sugar,
+**Real now:** `String`, `Vec<T>`, views (as `MutSlice<T>` / `Slice<T>`), the `(a: AllocatorBackend)` sugar,
 `or_return`, and sticky-error chaining on the carrying `String` and `Vec<T>` APIs (with
 `std.text.sb` still present as the older builder surface).
 
@@ -295,8 +295,8 @@ when this document was written; one is DONE and the other is DECIDED. What is le
 work: naming and building the `Vec` counterparts, and deleting the threaded API.
 
 **1. Slices need a mutability bit.** DONE. Slices now carry the same kind tag pointers do:
-`Slice<T>` is the read-only window, `MutSlice<T>` the writable one, and `[T]` is the sugar for
-`MutSlice<T>`. Both are the same `{ptr, len}` layout. `.view()` propagates: a window over ANY of
+`Slice<T>` is the read-only window and `MutSlice<T>` the writable one.
+Both are the same `{ptr, len}` layout. `.view()` propagates: a window over ANY of
 the three string spellings is a `Slice<T>`, so this is now `error[slice-write]` at check time
 instead of a segfault:
 
@@ -306,14 +306,14 @@ v ::= s.view()           // Slice<u8> — a read-only window
 v[0] = 'H'               // error[slice-write]: cannot write through a read-only `Slice<T>`
 ```
 
-The default stayed on `[T]` = writable, measured: making `[T]` read-only broke 233 write sites in
-73 files, while making views-of-immutable read-only broke 5. Flipping it later is one line
-(`k_slice_dflt` in compiler.genc) now that both spellings exist.
+The writable spelling is explicit. During the mutability migration, making existing windows
+read-only broke 233 write sites in 73 files, while making views of immutable storage read-only
+broke 5.
 
 Immutability now has somewhere to live once you take a view, which is what `StringConst` and
 `StringFixed` needed — and both of those types have since landed (see "Real now, as of the
 carrying rebuild" above). `StringFixed` **is** the "owned, writable bytes" type this paragraph
-used to say was missing: `StringFixed.view` hands back a writable `[u8]`, `StringConst.view` a
+used to say was missing: `StringFixed.view` hands back a writable `MutSlice<u8>`, `StringConst.view` a
 read-only `Slice<u8>`.
 
 **And `str.view` on a plain `StringView` is read-only too, as of the provenance fix.** It used to
@@ -333,9 +333,9 @@ nullary variant carries a constant fact exactly as `StringLiteral` and `StringCs
 
 Making that stick needed one more thing. `slice(p, n)` over a read-only `Ptr<T>` was a blanket
 `error[ptr-write]`, so there was no way to build a read-only window over borrowed bytes at all —
-which is why `trim_view` and the other `*_view` helpers returned a writable `[u8]` in the first
+which is why `trim_view` and the other `*_view` helpers returned a writable `MutSlice<u8>` in the first
 place. It now yields a read-only `Slice<T>`, the way `offset` already keeps read-only-ness one
-address along. Asking for that window as a writable `[T]` is still refused, one constructor out,
+address along. Asking for that window as a writable `MutSlice<T>` is still refused, one constructor out,
 as `error[assign-fit]`.
 
 What remains is a representation wart and a typing debt, not a missing type. The wart: `StringCstr`

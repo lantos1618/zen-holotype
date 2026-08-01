@@ -1,7 +1,3 @@
-// compiler.backend.js.js_expr — expression, match, statement JS-emission over the genc AST, plus the fixed-width
-// integer-wrapping helpers and the per-function typed-variable table. Extracted from compiler.backend.js.js.
-// Leaf int/name/escape helpers live in compiler.backend.js.js_lit; DOM lowering in compiler.backend.js.js_dom; decl and
-// module assembly in compiler.backend.js.js.
 { String } = std.text.string
 { is_empty } = std.text.str
 { Expr, Stmt, Ty, Param, ArmData, BinData, CallData, CondData, MatchData, MemberData,
@@ -17,7 +13,6 @@
   js_is_defined_fn } = compiler.backend.js.js_copy
 { loop_at } = std.core.count
 { is_intrinsic } = compiler.check    // the ONE intrinsic roster; the parity gate below reads it, never a copy
-// ── expressions ───────────────────────────────────────────────────────────────────────────────────
 js_expr* = (s: String, a: Allocator, e: Ptr<Expr>) String {
     e.match ({
         .Int(n)         => s.js_int_lit(a, n),
@@ -429,7 +424,7 @@ js_mkenum = (s: String, a: Allocator, m: MakeEnumData) String {
         .gstr_append(a, " })")
 }
 // a call's comma-separated args (each Expr value -> a Ptr<Expr> child).
-js_args* = (s: String, a: Allocator, args: [Expr]) String {
+js_args* = (s: String, a: Allocator, args: MutSlice<Expr>) String {
     out ::= s
     args.loop_at((i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
@@ -438,7 +433,7 @@ js_args* = (s: String, a: Allocator, args: [Expr]) String {
     out
 }
 // a slice literal's items: C copies each ELEMENT into the array, so a struct item copies here too.
-js_cp_items = (s: String, a: Allocator, items: [Expr], elem: Ty) String {
+js_cp_items = (s: String, a: Allocator, items: MutSlice<Expr>, elem: Ty) String {
     out ::= s
     items.loop_at((i, arg) {
         out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
@@ -721,7 +716,13 @@ js_switch_case = (s: String, a: Allocator, ar: ArmData, last: bool, ename: Strin
         },
     })
 }
-js_switch_cases = (s: String, a: Allocator, arms: [ArmData], i: i64, ename: StringView) String {
+js_switch_cases = (
+    s: String,
+    a: Allocator,
+    arms: MutSlice<ArmData>,
+    i: i64,
+    ename: StringView,
+) String {
     (i >= arms.len).match ({
         true  => s,
         false => {
@@ -773,7 +774,7 @@ js_switch_stmt_case = (s: String, a: Allocator, ar: ArmData, last: bool, ename: 
 js_switch_stmt_cases = (
     s: String,
     a: Allocator,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
     i: i64,
     ename: StringView,
 ) String {
@@ -993,12 +994,12 @@ js_cond_stmt = (s: String, a: Allocator, d: CondData) String {
         .js_expr_stmt(a, d.e)
         .gstr_append(a, " }")
 }
-js_stmts* = (s: String, a: Allocator, body: [Stmt]) String {
+js_stmts* = (s: String, a: Allocator, body: MutSlice<Stmt>) String {
     out ::= s
     body.loop_at((i, st) { out = out.js_stmt(a, st).gstr_append(a, " ") })
     out
 }
-// ── FIXED-WIDTH INTEGER WRAPPING (census #64) ──────────────────────────────────────────────────────
+// Fixed-width integer wrapping.
 // A JS `number` never wraps, so ordinary integer arithmetic on a fixed-width Zen type disagrees with C
 // (which truncates at the type's width via -fwrapv): `100000*100000` is 10000000000 in JS but 1410065408
 // in a C `uint32_t`, an FNV-1a hash returns garbage, etc. We reproduce C's truncation-at-the-boundary by
@@ -1120,12 +1121,12 @@ js_mul32 = (s: String, a: Allocator, e: Expr, w: i32) String {
 // inlined before js — so one flat table per function is exact).
 vw_buf ::= vw_none()
 vw_n ::= 0
-vw_none = () [Param] { slice(null_ptr(), 0) }
+vw_none = () MutSlice<Param> { slice(null_ptr(), 0) }
 vw_reset* = (a: Allocator) void {
     vw_buf = slice(a.acquire_or_die(8192 * sizeof(Param)), 8192)
     vw_n = 0
 }
-vw_get = () [Param] { slice(vw_buf.ptr, vw_n) }
+vw_get = () MutSlice<Param> { slice(vw_buf.ptr, vw_n) }
 vw_note* = (name: StringView, ty: Ty) void {
     (vw_n < vw_buf.len).then({
         vw_buf[vw_n] = param(name, ty)

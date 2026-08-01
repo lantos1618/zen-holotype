@@ -1,10 +1,8 @@
 //! link: c
 // @self-hosted-only
-// Checked-mode resolver: flatten imports, load dependencies, and dedup provided names.
 { at, is_alpha, is_alnum, is_blank, rawstr_at } = std.text.ascii
 { Decl } = compiler.ast.ast_types
-{ gstr_string, gstr_push, gstr_append, gstr_append_bytes, gstr_finish, acquire_or_die,
-  acquire_or_die } = compiler.genc
+{ gstr_string, gstr_push, gstr_append, gstr_append_bytes, gstr_finish, acquire_or_die } = compiler.genc
 { gstr_int } = compiler.astops    // the compiler-side decimal writer (res_udec delegates to it)
 { decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset, note_module_sig,
   module_sigs_reset, module_sig_flags, module_sig_alias_stamped } = compiler.parse
@@ -13,12 +11,11 @@
 { Allocator } = std.mem.alloc
 { Result, IoError, ok } = std.core.result
 { String } = std.text.string
-{ Map, of } = std.collections.map    // O(1) presence sets for the shadow-rename pass (.has/.put are UFCS methods)
+{ Map } = std.collections.map    // O(1) presence sets for the shadow-rename pass (.has/.put are UFCS methods)
 { contents_in, O_RDONLY } = std.io.file
 { open, close, write } = std.c.libc
-{ ends_with, is_empty, starts_with, view } = std.text.str
+{ ends_with, eq, is_empty, starts_with, view } = std.text.str
 { advance_while, loop_at } = std.core.count
-// Extracted internal helper families (shared types + this pipeline stay here; see each module head).
 { enforce_visibility, enforce_private_leaks, vis_report_mode } = compiler.resolve_vis
 { enforce_ffi_grants, enforce_ffi_linkage, genmod_lookup } = compiler.resolve_ffi
 { shadow_flat, shadow_flat_users } = compiler.resolve_shadow
@@ -30,11 +27,8 @@ is_import_line* = (s: StringView, p: i32) bool {
     ls = s.lstrip(p)
     s.opens_import(ls).then({ s.has_import_marker(ls) }, { false })
 }
-// Position just past the next '\n' at or after `p` (end-of-string if none). Walks bytes directly and
-// stops at the NUL terminator — the old body called `s.view()` (a strlen over the WHOLE remaining
-// source) on every call, which made every per-line caller quadratic in file size (the top
-// resolve-imports hotspot). Reads only bytes in [p, first NUL], never past the terminator; `p` at or
-// past the NUL returns `p` unchanged, exactly like the old length-guarded body.
+// Position just past the next '\n' at or after `p`. Reads only [p, first NUL]; `p` at or past the
+// terminator is unchanged.
 next_line* = (s: StringView, p: i32) i32 {
     pos = p.advance_while((q) { load(offset(s, q)) != 0 && load(offset(s, q)) != '\n' })
     (load(offset(s, pos)) == '\n').then({ pos + 1 }, { pos })
@@ -102,7 +96,7 @@ add_name* = (set: String, a: Allocator, name: String) String {
 // marker (0); membership is by key.
 rset_new* = (a: Allocator) Map<i64> {
     seed: i64 = 0 - 1
-    of(a.addr(), "", seed).expect("compiler.resolve: rset alloc")
+    a.map_of("", seed).expect("compiler.resolve: rset alloc")
 }
 rset_add* = (m: Map<i64>, a: Allocator, key: String) Map<i64> {
     m.put(a.addr(), cstr(key.ptr), 0).expect("compiler.resolve: rset alloc")
@@ -120,7 +114,7 @@ mappend_string* = (a: Allocator, out: String, src: String) String {
 }
 mcopy_from = (a: Allocator, out: String, src: String, i: i64) String {
     cur ::= out
-    bs: [u8] = src.bytes()
+    bs: MutSlice<u8> = src.bytes()
     bs.loop_at((idx, b) {
         (idx < i == false).then({
             cur = cur.gstr_push(a, b)
@@ -136,7 +130,7 @@ mappend_span = (a: Allocator, out: String, s: StringView, p: i32, e: i32) String
     (p < e).then({
         // Find the copy length first (the span, clipped at an embedded NUL), then bulk append —
         // one reserve + straight copy instead of a capacity-checked gstr_push per byte.
-        span: [u8] = slice(s.offset(p), to_i64(e - p))
+        span: MutSlice<u8> = slice(s.offset(p), to_i64(e - p))
         n ::= span.len
         span.loop((h, i, b) {
             (b == 0).then({
@@ -156,7 +150,7 @@ rappend_span* = (s: String, a: Allocator, src: StringView, p: i32, e: i32) Strin
 }
 mcopy_id_dotted = (a: Allocator, out: String, id: String, i: i64) String {
     cur ::= out
-    bs: [u8] = id.bytes()
+    bs: MutSlice<u8> = id.bytes()
     bs.loop_at((idx, b) {
         (idx < i == false).then({
             (b == '/').match ({
@@ -204,7 +198,7 @@ empty_closure = (a: Allocator) Closure {
     Closure(
         seen: a.gstr_string(256),
         out: a.gstr_string(4096),
-        useen: of(a.addr(), "", seed).expect("compiler.resolve: useen alloc"),
+        useen: a.map_of("", seed).expect("compiler.resolve: useen alloc"),
     )
 }
 ImportEdge*: {
@@ -262,8 +256,8 @@ ModuleSig*: {
     }
 }
 ModuleGraph*: {
-    imports: [ImportEdge],
-    symbols: [ProvidedSymbol],
+    imports: MutSlice<ImportEdge>,
+    symbols: MutSlice<ProvidedSymbol>,
     sig: ModuleSig,
     import_count = (g: ModuleGraph) i64 { g.imports.len }
     symbol_count = (g: ModuleGraph) i64 { g.symbols.len }
@@ -275,9 +269,31 @@ ModuleEntry*: {
     source: StringView,
     graph: ModuleGraph,
 }
+SourceOverlay*: {
+    path: StringView,
+    source: StringView,
+}
+no_source_overlays* = () MutSlice<SourceOverlay> { slice(null_ptr(), 0) }
+overlay_source = (overlays: MutSlice<SourceOverlay>, path: StringView) Result<StringView, IoError> {
+    found ::= false
+    source ::= ""
+    overlays.loop_at((i, o) {
+        (found == false && o.path.eq(path)).then({
+            found = true
+            source = o.source
+        })
+    })
+    found.then({ .Ok(source) }, { .Err(.NotFound) })
+}
+overlay_has = (overlays: MutSlice<SourceOverlay>, path: StringView) bool {
+    overlays.overlay_source(path).match ({
+        .Ok(s)  => true,
+        .Err(e) => false,
+    })
+}
 string_eq_str = (name: String, s: StringView) bool {
     ok ::= true
-    bs: [u8] = name.bytes()
+    bs: MutSlice<u8> = name.bytes()
     bs.loop((h, i, b) {
         ok.match ({
             true  => (s.at(to_i32(i)) == b == false).then({
@@ -292,7 +308,7 @@ string_eq_str = (name: String, s: StringView) bool {
     ok && s.at(to_i32(name.len)) == 0
 }
 ModuleTable*: {
-    modules: [ModuleEntry],
+    modules: MutSlice<ModuleEntry>,
     count = (t: ModuleTable) i64 { t.modules.len }
     has = (t: ModuleTable, id: StringView) bool {
         found ::= false
@@ -351,8 +367,8 @@ ResolvedProgram*: {
     flat: StringView,
     body_start: i64,
     body_end: i64,
-    regions: [FlatRegion],
-    line_srcs: [i32],
+    regions: MutSlice<FlatRegion>,
+    line_srcs: MutSlice<i32>,
 }
 ParsedModule*: {
     id: StringView,
@@ -360,12 +376,12 @@ ParsedModule*: {
     source: StringView,
     body: StringView,
     graph: ModuleGraph,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
 }
 ParsedProgram*: {
     resolved: ResolvedProgram,
-    modules: [ParsedModule],
-    flat_decls: [Decl],
+    modules: MutSlice<ParsedModule>,
+    flat_decls: MutSlice<Decl>,
     count = (p: ParsedProgram) i64 { p.modules.len }
     module = (p: ParsedProgram, id: StringView) ParsedModule {
         found ::= p.modules[0]
@@ -379,7 +395,7 @@ ParsedProgram*: {
 // pass that read+scanned every dep, then a fill pass that read+scanned them all AGAIN).
 ModuleLoad: {
     seen: String,
-    entries: [ModuleEntry],
+    entries: MutSlice<ModuleEntry>,
     n: i64,
 }
 // The REAL libc prototype is `void exit(int)` — declaring it `i32` here was FFI drift (caught by
@@ -394,14 +410,8 @@ eprint* = (s: StringView) i64 {
     v = view(s)
     write(2, v.ptr, v.len)
 }
-// ── RESOLUTION FAILURE IS A VALUE, NOT PROCESS DEATH ──────────────────────────────────────────────
-// Every rejection below used to `exit(1)` from inside this library. That is survivable for `zen
-// check`, which was about to exit anyway, and FATAL for the language server: every intermediate
-// keystroke of an import line (`{ f } = std.te`) is an unknown module, so the server died
-// mid-session — no diagnostic published, in-flight requests abandoned. Rejections now PRINT AND
-// LATCH and the caller decides. `resolve_prog_or_exit` (the CLI path) exits the instant the latch is
-// set, so the driver's stderr and exit code are byte-identical: the first rejection is still the only
-// one printed, and no later pass gets to add output the old `exit(1)` pre-empted.
+// Resolution errors are latched so long-lived callers survive incomplete imports. The CLI uses
+// `resolve_prog_or_exit` for fail-fast behavior after the first rejection.
 res_failed ::= false
 res_no_msg = () StringView { "" }    // a module global takes its type from its initializer
 res_msg ::= res_no_msg()
@@ -494,6 +504,17 @@ read_module = (a: Allocator, inpath: StringView, path: StringView) StringView {
         .Err(e) => a.fail_unreadable(inpath, path),
     })
 }
+read_module_overlays = (
+    a: Allocator,
+    inpath: StringView,
+    path: StringView,
+    overlays: MutSlice<SourceOverlay>,
+) StringView {
+    overlays.overlay_source(path).match ({
+        .Ok(s)  => s,
+        .Err(e) => a.read_module(inpath, path),
+    })
+}
 fail_unknown_name = (a: Allocator, inpath: StringView, nm: String, id: String) i32 {
     msg0 = a
         .gstr_string(160)
@@ -584,11 +605,15 @@ guard_module = (
     inpath: StringView,
     id: String,
     path: StringView,
+    overlays: MutSlice<SourceOverlay>,
 ) i32 {
     (id.id_is_user() && progdir.at(0) == 0).then({ a.fail_no_progdir(inpath, id) }, { 0 })
-    file_exists(path).then({ 0 }, { a.fail_unknown_module(inpath, id, path) })
+    (overlays.overlay_has(path) || file_exists(path)).match ({
+        true  => 0,
+        false => a.fail_unknown_module(inpath, id, path),
+    })
 }
-module_entry_buf = (a: Allocator, n: i64) [ModuleEntry] {
+module_entry_buf = (a: Allocator, n: i64) MutSlice<ModuleEntry> {
     slice(a.acquire_or_die(n * sizeof(ModuleEntry)), n)
 }
 // Append an entry, doubling the buffer when full (DFS preorder is preserved: an entry is pushed
@@ -614,13 +639,14 @@ fill_module_one = (
     inpath: StringView,
     id: String,
     st: ModuleLoad,
+    overlays: MutSlice<SourceOverlay>,
 ) ModuleLoad {
     st.seen.seen_name(id).match ({
         true  => st,
         false => {
             path = a.module_path(root, progdir, id)
-            a.guard_module(progdir, inpath, id, path)
-            src = a.read_module(inpath, path)
+            a.guard_module(progdir, inpath, id, path, overlays)
+            src = a.read_module_overlays(inpath, path, overlays)
             graph = a.module_graph(src)
             // finish the id BEFORE appending it to the seen set: gstr_finish pushes the NUL, which
             // can grow (realloc) the id's buffer when its length lands exactly on the capacity —
@@ -638,7 +664,7 @@ fill_module_one = (
                 source: src,
                 graph: graph,
             ))
-            a.fill_module_edges(root, progdir, inpath, graph.imports, next)
+            a.fill_module_edges(root, progdir, inpath, graph.imports, next, overlays)
         },
     })
 }
@@ -647,12 +673,13 @@ fill_module_edges = (
     root: StringView,
     progdir: StringView,
     inpath: StringView,
-    edges: [ImportEdge],
+    edges: MutSlice<ImportEdge>,
     st: ModuleLoad,
+    overlays: MutSlice<SourceOverlay>,
 ) ModuleLoad {
     cur ::= st
     edges.loop_at((i, edge) {
-        cur = a.fill_module_one(root, progdir, inpath, edge.edge_id_in(a), cur)
+        cur = a.fill_module_one(root, progdir, inpath, edge.edge_id_in(a), cur, overlays)
     })
     cur
 }
@@ -663,6 +690,7 @@ module_table_graph = (
     inpath: StringView,
     mainsrc: StringView,
     graph: ModuleGraph,
+    overlays: MutSlice<SourceOverlay>,
 ) ModuleTable {
     st = a.fill_module_edges(root, progdir, inpath, graph.imports, a.mload_push(ModuleLoad(
         seen: a.gstr_string(256),
@@ -673,7 +701,7 @@ module_table_graph = (
         path: inpath,
         source: mainsrc,
         graph: graph,
-    )))
+    )), overlays)
     ModuleTable(modules: slice(st.entries.ptr, st.n))
 }
 load_closure_table = (
@@ -719,7 +747,7 @@ load_import_edges_table = (
     table: ModuleTable,
     inpath: StringView,
     src: StringView,
-    edges: [ImportEdge],
+    edges: MutSlice<ImportEdge>,
     i: i64,
     validate: bool,
     c: Closure,
@@ -783,7 +811,7 @@ collect_ns_edges_table = (
     table: ModuleTable,
     inpath: StringView,
     src: StringView,
-    edges: [ImportEdge],
+    edges: MutSlice<ImportEdge>,
     i: i64,
     st: NsScan,
 ) NsScan {
@@ -884,7 +912,7 @@ user_symbol_seen = (
 user_decls_from_symbols = (
     a: Allocator,
     useen: Map<i64>,
-    symbols: [ProvidedSymbol],
+    symbols: MutSlice<ProvidedSymbol>,
     i: i64,
     table: ModuleTable,
     id: String,
@@ -982,7 +1010,7 @@ internal_source_path = (path: StringView) bool {
 main_symbol_names = (
     a: Allocator,
     set: String,
-    symbols: [ProvidedSymbol],
+    symbols: MutSlice<ProvidedSymbol>,
     i: i64,
     bodystart: i64,
     bodyend: i64,
@@ -1013,7 +1041,7 @@ main_symbol_names = (
 // no precedence, dedup falls back to first-seen. Value encoding: target index + 1 (>=1); 0 = contested.
 import_claims = (a: Allocator, table: ModuleTable) Map<i64> {
     seed: i64 = 0 - 1
-    m ::= of(a.addr(), "", seed).expect("compiler.resolve: import-claim alloc")
+    m ::= a.map_of("", seed).expect("compiler.resolve: import-claim alloc")
     table.modules.loop_at((i, mod) {
         mod.graph.imports.loop_at((j, e) {
             (e.namespace == false).then({
@@ -1084,7 +1112,7 @@ claim_owner_midx = (off: i64) i64 {
 }
 empty_claims = (a: Allocator) Map<i64> {
     seed: i64 = 0 - 1
-    of(a.addr(), "", seed).expect("compiler.resolve: import-claim alloc")
+    a.map_of("", seed).expect("compiler.resolve: import-claim alloc")
 }
 dedup_decls* = (a: Allocator, flat: StringView, bodystart: i64, bodyend: i64) StringView {
     a.dedup_decls_mode(flat, bodystart, bodyend, false)
@@ -1104,7 +1132,7 @@ dedup_decls_mode = (
 dedup_decls_syms = (
     a: Allocator,
     flat: StringView,
-    symbols: [ProvidedSymbol],
+    symbols: MutSlice<ProvidedSymbol>,
     bodystart: i64,
     bodyend: i64,
     allow_main_shadow: bool,
@@ -1121,7 +1149,7 @@ dedup_symbols = (
     a: Allocator,
     out: String,
     flat: StringView,
-    symbols: [ProvidedSymbol],
+    symbols: MutSlice<ProvidedSymbol>,
     i: i64,
     p: i32,
     set: String,
@@ -1548,7 +1576,7 @@ module_body = (
         .strip_ns_into(a, entry.source, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, true)
     hs.gstr_finish(a)
 }
-parsed_module_buf = (a: Allocator, n: i64) [ParsedModule] {
+parsed_module_buf = (a: Allocator, n: i64) MutSlice<ParsedModule> {
     slice(a.acquire_or_die(n * sizeof(ParsedModule)), n)
 }
 parse_module_entry = (
@@ -1591,8 +1619,20 @@ resolve_parsed_program* = (
 ) ParsedProgram {
     a.parse_resolved_program(a.resolve_program_data(root, progdir, inpath, mainsrc), inpath)
 }
-parsed_decl_buf = (a: Allocator, n: i64) [Decl] { slice(a.acquire_or_die(n * sizeof(Decl)), n) }
-append_decls_to = (dst: [Decl], at: i64, src: [Decl]) i64 {
+resolve_parsed_program_overlays* = (
+    a: Allocator,
+    root: StringView,
+    progdir: StringView,
+    inpath: StringView,
+    mainsrc: StringView,
+    overlays: MutSlice<SourceOverlay>,
+) ParsedProgram {
+    a.parse_resolved_program(a.resolve_program_data_overlays(root, progdir, inpath, mainsrc, overlays), inpath)
+}
+parsed_decl_buf = (a: Allocator, n: i64) MutSlice<Decl> {
+    slice(a.acquire_or_die(n * sizeof(Decl)), n)
+}
+append_decls_to = (dst: MutSlice<Decl>, at: i64, src: MutSlice<Decl>) i64 {
     j ::= at
     src.loop_at((i, d) {
         dst[j] = d
@@ -1600,14 +1640,14 @@ append_decls_to = (dst: [Decl], at: i64, src: [Decl]) i64 {
     })
     j
 }
-alias_edge_decls = (a: Allocator, p: ParsedProgram, edge: ImportEdge) [Decl] {
+alias_edge_decls = (a: Allocator, p: ParsedProgram, edge: ImportEdge) MutSlice<Decl> {
     entry = p.resolved.table.module(edge.module)
     ns = a.collect_ns_graph_table(p.resolved.table, p.module("").path, entry.source, entry.graph, a.ns_scan(a.empty_closure()))
     hs = a.alias_module_body(entry.source, entry.graph, edge.edge_alias_in(a), ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
     body = hs.gstr_finish(a)
     a.parse_module(body)
 }
-root_link_edge_decls = (a: Allocator, p: ParsedProgram, edge: ImportEdge) [Decl] {
+root_link_edge_decls = (a: Allocator, p: ParsedProgram, edge: ImportEdge) MutSlice<Decl> {
     edge.namespace.then({ a.alias_edge_decls(p, edge) }, { p.module(edge.module).decls })
 }
 module_link_count = (a: Allocator, p: ParsedProgram, m: ParsedModule) i64 {
@@ -1615,7 +1655,7 @@ module_link_count = (a: Allocator, p: ParsedProgram, m: ParsedModule) i64 {
     m.graph.imports.loop_at((i, edge) { n = n + a.root_link_edge_decls(p, edge).len })
     n
 }
-module_link_decls* = (a: Allocator, p: ParsedProgram, m: ParsedModule) [Decl] {
+module_link_decls* = (a: Allocator, p: ParsedProgram, m: ParsedModule) MutSlice<Decl> {
     buf = a.parsed_decl_buf(a.module_link_count(p, m))
     j ::= 0
     m.graph.imports.loop_at((i, edge) {
@@ -1623,7 +1663,9 @@ module_link_decls* = (a: Allocator, p: ParsedProgram, m: ParsedModule) [Decl] {
     })
     slice(buf.ptr, j)
 }
-root_link_decls* = (a: Allocator, p: ParsedProgram) [Decl] { a.module_link_decls(p, p.module("")) }
+root_link_decls* = (a: Allocator, p: ParsedProgram) MutSlice<Decl> {
+    a.module_link_decls(p, p.module(""))
+}
 check_parsed_program* = (a: Allocator, p: ParsedProgram) i32 {
     root = p.module("")
     a.check_linked(root.decls, a.root_link_decls(p))
@@ -1649,7 +1691,7 @@ UserRegion*: {
     hi: i64,
 }
 UREGION_CAP = 512
-no_uregions = () [UserRegion] { slice(null_ptr(), 0) }
+no_uregions = () MutSlice<UserRegion> { slice(null_ptr(), 0) }
 uregion_buf ::= no_uregions()
 uregion_n ::= 0
 uregions_reset = (a: Allocator) void {
@@ -1666,7 +1708,7 @@ note_uregion = (id: StringView, lo: i64, hi: i64) void {
         uregion_n = uregion_n + 1
     })
 }
-uregions_get* = () [UserRegion] { slice(uregion_buf.ptr, uregion_n) }
+uregions_get* = () MutSlice<UserRegion> { slice(uregion_buf.ptr, uregion_n) }
 // ── FLAT-REGION / LINE map (identity-based diagnostics) ─────────────────────────────────────────
 // Every module-body append into the flat records a FlatRegion, and the strip walk records — for each
 // KEPT line — its 1-based line in the module's ORIGINAL source (import/ns lines are stripped whole,
@@ -1676,20 +1718,20 @@ uregions_get* = () [UserRegion] { slice(uregion_buf.ptr, uregion_n) }
 // (lmap_on), so parse_resolved_program's per-module strip never pollutes the maps. Reset per
 // program (see uregions_reset for the pattern); buffers grow geometrically via the mp allocator.
 lmap_on ::= false
-no_fregions = () [FlatRegion] { slice(null_ptr(), 0) }
+no_fregions = () MutSlice<FlatRegion> { slice(null_ptr(), 0) }
 freg_buf ::= no_fregions()
 freg_n ::= 0
-no_lsrc = () [i32] { slice(null_ptr(), 0) }
+no_lsrc = () MutSlice<i32> { slice(null_ptr(), 0) }
 lsrc_buf ::= no_lsrc()
 lsrc_n ::= 0
-no_ldrops = () [i64] { slice(null_ptr(), 0) }
+no_ldrops = () MutSlice<i64> { slice(null_ptr(), 0) }
 ldrop_buf ::= no_ldrops()    // flattened (start, end) pairs, ascending, from ONE dedup pass
 ldrop_n ::= 0
-freg_alloc = (a: Allocator, n: i64) [FlatRegion] {
+freg_alloc = (a: Allocator, n: i64) MutSlice<FlatRegion> {
     slice(a.acquire_or_die(n * sizeof(FlatRegion)), n)
 }
-lsrc_alloc = (a: Allocator, n: i64) [i32] { slice(a.acquire_or_die(n * sizeof(i32)), n) }
-ldrop_alloc = (a: Allocator, n: i64) [i64] { slice(a.acquire_or_die(n * sizeof(i64)), n) }
+lsrc_alloc = (a: Allocator, n: i64) MutSlice<i32> { slice(a.acquire_or_die(n * sizeof(i32)), n) }
+ldrop_alloc = (a: Allocator, n: i64) MutSlice<i64> { slice(a.acquire_or_die(n * sizeof(i64)), n) }
 lmap_reset = (a: Allocator) void {
     freg_buf = a.freg_alloc(64)
     freg_n = 0
@@ -1701,8 +1743,8 @@ lmap_reset = (a: Allocator) void {
 }
 lmap_off = () void { lmap_on = false }
 lmap_lines = () i64 { lsrc_n }
-fregions_get = () [FlatRegion] { slice(freg_buf.ptr, freg_n) }
-lsrc_get = () [i32] { slice(lsrc_buf.ptr, lsrc_n) }
+fregions_get = () MutSlice<FlatRegion> { slice(freg_buf.ptr, freg_n) }
+lsrc_get = () MutSlice<i32> { slice(lsrc_buf.ptr, lsrc_n) }
 freg_grow = (a: Allocator) void {
     (freg_n >= freg_buf.len).then({
         grown ::= a.freg_alloc(freg_buf.len * 2)
@@ -1728,7 +1770,7 @@ ldrop_grow = (a: Allocator) void {
 count_nl = (s: StringView, lo: i32, hi: i32) i64 {
     n :: i64 = 0
     (hi > lo).then({
-        span: [u8] = slice(s.offset(lo), to_i64(hi - lo))
+        span: MutSlice<u8> = slice(s.offset(lo), to_i64(hi - lo))
         span.loop_at((i, b) {
             (b == '\n').then({
                 n = n + 1
@@ -1799,7 +1841,7 @@ note_ldrop = (a: Allocator, ds: i64, de: i64) void {
         ldrop_n = ldrop_n + 2
     })
 }
-ldrops_get = () [i64] { slice(ldrop_buf.ptr, ldrop_n) }
+ldrops_get = () MutSlice<i64> { slice(ldrop_buf.ptr, ldrop_n) }
 // Apply one dedup pass's DROP list to the maps. `flat` is the PRE-drop flat that pass walked — drops
 // and regions are both in its coordinates. Dropped decl spans start at a line start, so a drop kills
 // exactly the line entries [k0, k0+dead) of the region(s) it overlaps (a drop running PAST a region's
@@ -1906,8 +1948,10 @@ lmap_apply_drops = (a: Allocator, flat: StringView) void {
 }
 // binary search: the index of the region whose [lo, hi) contains `off`, else -1 (regions are in
 // append order = ascending lo; separator newlines between regions belong to no region).
-fregion_find* = (regions: [FlatRegion], off: i64) i64 { regions.fregion_bs(off, 0, regions.len) }
-fregion_bs = (regions: [FlatRegion], off: i64, lo: i64, hi: i64) i64 {
+fregion_find* = (regions: MutSlice<FlatRegion>, off: i64) i64 {
+    regions.fregion_bs(off, 0, regions.len)
+}
+fregion_bs = (regions: MutSlice<FlatRegion>, off: i64, lo: i64, hi: i64) i64 {
     (lo >= hi).match ({
         true  => 0 - 1,
         false => {
@@ -1922,8 +1966,8 @@ fregion_bs = (regions: [FlatRegion], off: i64, lo: i64, hi: i64) i64 {
 }
 // the 1-based ORIGINAL source line for flat offset `off` inside region `ri`, else 0.
 fregion_src_line* = (
-    regions: [FlatRegion],
-    line_srcs: [i32],
+    regions: MutSlice<FlatRegion>,
+    line_srcs: MutSlice<i32>,
     flat: StringView,
     ri: i64,
     off: i64,
@@ -1939,7 +1983,7 @@ fregion_src_line* = (
     })
 }
 // name-decl offset of `nm` in a module's ORIGINAL source graph (for error line/col attribution).
-symbol_start_of* = (a: Allocator, syms: [ProvidedSymbol], nm: StringView) i32 {
+symbol_start_of* = (a: Allocator, syms: MutSlice<ProvidedSymbol>, nm: StringView) i32 {
     posn ::= 0
     syms.loop_at((i, s) {
         ((s.imported || s.foreign || s.is_type) == false && posn == 0).then({
@@ -2314,12 +2358,13 @@ undefined_name_hint_at = (
 }
 // Public loader entry: collect namespace binds, strip imports/binds from the main
 // source, load transitive imports, then dedup names across the flat program.
-resolve_program_data* = (
+resolve_program_data_overlays* = (
     a: Allocator,
     root: StringView,
     progdir: StringView,
     inpath: StringView,
     mainsrc: StringView,
+    overlays: MutSlice<SourceOverlay>,
 ) ResolvedProgram {
     res_fail_reset()    // fresh per program: a keystroke that fixes the import must clear the last one's rejection
     a.alias_prefixes_reset()    // fresh per program: the checker's UFCS-alias set is exactly the aliases stamped below
@@ -2327,7 +2372,7 @@ resolve_program_data* = (
     a.uregions_reset()    // fresh per program: user-module body spans recorded during closure load
     a.lmap_reset()    // fresh per program: flat-region + original-line maps recorded during closure load
     graph = a.module_graph(mainsrc)
-    table = a.module_table_graph(root, progdir, inpath, mainsrc, graph)
+    table = a.module_table_graph(root, progdir, inpath, mainsrc, graph, overlays)
     a.ren_types_set(table)    // fresh per program: the rename's "is this receiver a TYPE?" answer
     a.enforce_visibility(table, vis_report_mode())
     a.enforce_private_leaks(table, vis_report_mode())
@@ -2375,4 +2420,13 @@ resolve_program_data* = (
         regions: fregions_get(),
         line_srcs: lsrc_get(),
     )
+}
+resolve_program_data* = (
+    a: Allocator,
+    root: StringView,
+    progdir: StringView,
+    inpath: StringView,
+    mainsrc: StringView,
+) ResolvedProgram {
+    a.resolve_program_data_overlays(root, progdir, inpath, mainsrc, no_source_overlays())
 }

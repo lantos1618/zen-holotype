@@ -84,7 +84,7 @@ itos = (mp: Allocator, n: i64) StringView {
 // The mutated input is arbitrary bytes — NUL and 0xff included — so it cannot go through the
 // str-shaped writers (std.io.file.save measures its data with strlen and would stop at the first NUL).
 // Write the exact byte count straight to the fd instead.
-write_bytes = (path: StringView, b: [u8]) i64 {
+write_bytes = (path: StringView, b: MutSlice<u8>) i64 {
     fd = path.open(O_WRTRUNC, MODE_644)
     (fd < 0).match ({
         true  => 0 - 1,
@@ -147,21 +147,21 @@ pick_op = (p: f64) MOp {
         }),
     })
 }
-pick_tok = (rp: MutPtr<Rng>, toks: [[u8]]) [u8] {
-    t: [u8] = toks[rp.range(0, toks.len)]
+pick_tok = (rp: MutPtr<Rng>, toks: MutSlice<MutSlice<u8>>) MutSlice<u8> {
+    t: MutSlice<u8> = toks[rp.range(0, toks.len)]
     t
 }
 // how many of `want` bytes still fit under BUF_CAP
 room = (want: i64) i64 { imin(want, BUF_CAP - g_len) }
 // open a gap of `m` bytes at `i`, sliding the tail right
-shift_right = (b: [u8], i: i64, m: i64) void {
+shift_right = (b: MutSlice<u8>, i: i64, m: i64) void {
     memmove(b.ptr.offset(i + m), b.ptr.offset(i), g_len - i)
     g_len = g_len + m
 }
-op_flip = (rp: MutPtr<Rng>, b: [u8], i: i64) void {
+op_flip = (rp: MutPtr<Rng>, b: MutSlice<u8>, i: i64) void {
     b[i] = to_u8(to_i64(b[i]) ^ 1 << rp.range(0, 8))
 }
-op_ins = (b: [u8], i: i64, t: [u8]) void {
+op_ins = (b: MutSlice<u8>, i: i64, t: MutSlice<u8>) void {
     m = room(t.len)
     (m > 0).then({
         b.shift_right(i, m)
@@ -169,7 +169,7 @@ op_ins = (b: [u8], i: i64, t: [u8]) void {
     })
 }
 // `b[i:i] = b[i:j]` — the duplicated span lands at i+m after the shift, so it copies back from there
-op_dup = (rp: MutPtr<Rng>, b: [u8], i: i64) void {
+op_dup = (rp: MutPtr<Rng>, b: MutSlice<u8>, i: i64) void {
     j = imin(g_len, i + rp.range(1, 129))
     m = room(j - i)
     (m > 0).then({
@@ -177,20 +177,20 @@ op_dup = (rp: MutPtr<Rng>, b: [u8], i: i64) void {
         memcpy(b.ptr.offset(i), b.ptr.offset(i + m), m)
     })
 }
-op_del = (rp: MutPtr<Rng>, b: [u8], i: i64) void {
+op_del = (rp: MutPtr<Rng>, b: MutSlice<u8>, i: i64) void {
     e = imin(g_len, i + rp.range(1, 65))
     memmove(b.ptr.offset(i), b.ptr.offset(e), g_len - e)
     g_len = g_len - (e - i)
 }
 // `b[i:i + len(t)] = t` — same length in the middle, extends the buffer when it lands past the end
-op_over = (b: [u8], i: i64, t: [u8]) void {
+op_over = (b: MutSlice<u8>, i: i64, t: MutSlice<u8>) void {
     m = imin(t.len, BUF_CAP - i)
     (m > 0).then({
         memcpy(b.ptr.offset(i), t.ptr, m)
         g_len = imax(g_len, i + m)
     })
 }
-apply_op = (rp: MutPtr<Rng>, toks: [[u8]], b: [u8], op: MOp, i: i64) void {
+apply_op = (rp: MutPtr<Rng>, toks: MutSlice<MutSlice<u8>>, b: MutSlice<u8>, op: MOp, i: i64) void {
     op.match ({
         .Flip  => rp.op_flip(b, i),
         .Trunc => {
@@ -203,7 +203,7 @@ apply_op = (rp: MutPtr<Rng>, toks: [[u8]], b: [u8], op: MOp, i: i64) void {
     })
 }
 // an emptied buffer is refilled with a whole token, exactly as the Python's `if not b` branch does
-mutate_step = (rp: MutPtr<Rng>, toks: [[u8]], b: [u8]) void {
+mutate_step = (rp: MutPtr<Rng>, toks: MutSlice<MutSlice<u8>>, b: MutSlice<u8>) void {
     (g_len <= 0).match ({
         true  => {
             t = rp.pick_tok(toks)
@@ -217,13 +217,13 @@ mutate_step = (rp: MutPtr<Rng>, toks: [[u8]], b: [u8]) void {
         },
     })
 }
-mutate_n = (rp: MutPtr<Rng>, toks: [[u8]], b: [u8], k: i64) void {
+mutate_n = (rp: MutPtr<Rng>, toks: MutSlice<MutSlice<u8>>, b: MutSlice<u8>, k: i64) void {
     (k > 0).then({
         rp.mutate_step(toks, b)
         rp.mutate_n(toks, b, k - 1)
     })
 }
-mutate = (rp: MutPtr<Rng>, toks: [[u8]], b: [u8], src: [u8]) void {
+mutate = (rp: MutPtr<Rng>, toks: MutSlice<MutSlice<u8>>, b: MutSlice<u8>, src: MutSlice<u8>) void {
     g_len = imin(src.len, BUF_CAP)
     (g_len > 0).then({
         memcpy(b.ptr, src.ptr, g_len)
@@ -330,7 +330,7 @@ say_done = () void {
 crash_path = (mp: Allocator, s: StringView, ext: StringView) StringView {
     mp.addr().cat_in(mp.addr().cat_in(mp.addr().cat_in(g_cr, "/crash_"), s), ext)
 }
-record_hit = (mp: Allocator, data: [u8], out: StringView, rc: i64) void {
+record_hit = (mp: Allocator, data: MutSlice<u8>, out: StringView, rc: i64) void {
     s = mp.sig_of(out, rc)
     key = mp.addr().cat_in(mp.addr().cat_in("|", s), "|")
     (g_seen.find(key) >= 0 == false).then({
@@ -342,7 +342,7 @@ record_hit = (mp: Allocator, data: [u8], out: StringView, rc: i64) void {
     })
 }
 // only the FIRST hang is recorded — the Python keeps one "hang" entry in the same dedupe set
-record_hang = (mp: Allocator, data: [u8]) void {
+record_hang = (mp: Allocator, data: MutSlice<u8>) void {
     (g_hang_seen == false).then({
         g_hang_seen = true
         g_hangs = g_hangs + 1
@@ -354,23 +354,29 @@ record_hang = (mp: Allocator, data: [u8]) void {
     })
 }
 // a first 124 is only a suspicion; re-run at 4x and let a second 124 settle it
-reconfirm = (mp: Allocator, data: [u8]) void {
+reconfirm = (mp: Allocator, data: MutSlice<u8>) void {
     r = mp.addr().run(g_cmd_slow).expect("fuzz-mutate: cannot run the compiler")
     (r.exit == 124).then({
         mp.record_hang(data)
     })
 }
 // a sanitizer report, OR a crash-signal exit (>= 128, e.g. 139 SEGV / 134 SIGABRT)
-classify = (mp: Allocator, data: [u8], out: StringView, rc: i64) void {
+classify = (mp: Allocator, data: MutSlice<u8>, out: StringView, rc: i64) void {
     (is_hit(out) || rc >= 128).then({
         mp.record_hit(data, out, rc)
     })
 }
-one_iter = (mp: Allocator, rp: MutPtr<Rng>, toks: [[u8]], b: [u8], seeds: [[u8]]) void {
+one_iter = (
+    mp: Allocator,
+    rp: MutPtr<Rng>,
+    toks: MutSlice<MutSlice<u8>>,
+    b: MutSlice<u8>,
+    seeds: MutSlice<MutSlice<u8>>,
+) void {
     g_iter = g_iter + 1
-    src: [u8] = seeds[rp.range(0, seeds.len)]
+    src: MutSlice<u8> = seeds[rp.range(0, seeds.len)]
     rp.mutate(toks, b, src)
-    data: [u8] = b.ptr.slice(g_len)
+    data: MutSlice<u8> = b.ptr.slice(g_len)
     TMP_IN.write_bytes(data)
     r = mp.addr().run(g_cmd_fast).expect("fuzz-mutate: cannot run the compiler")
     (r.exit == 124).then({ mp.reconfirm(data) }, { mp.classify(data, r.stdout, r.exit) })
@@ -393,25 +399,25 @@ rep_tok = (mp: Allocator, pre: StringView, s: StringView, n: i64) Slice<u8> {
 // The 0x00 and 0xff tokens are built by hand: a NUL is not expressible as a str (it terminates one),
 // and `zen fmt` rewrites a `"\xff"` escape into a raw 0xff byte, which would leave this source file
 // non-UTF-8.
-byte_tok = (mp: Allocator, v: i64) [u8] {
-    p :: [u8] = assert_nonnull(mp.acquire(1)).slice(1)
+byte_tok = (mp: Allocator, v: i64) MutSlice<u8> {
+    p :: MutSlice<u8> = assert_nonnull(mp.acquire(1)).slice(1)
     p[0] = to_u8(v)
     p
 }
 // Adversarial tokens: unbalanced openers, huge digit/identifier runs, stray quotes/escapes, and Zen
 // keywords that drive the deepest parser/checker paths (match/loop/impl/generics).
-make_tokens = (mp: Allocator) [[u8]] {
-    ts: [[u8]] = ["{".view(), "[".view(), "(".view(), "<".view(), "}".view(), "]".view(), ")".view(), ">".view(), "\"".view(), "'".view(), "\\".view(), "`".view(), mp.rep_tok("", "9", 300), mp.rep_tok("0x", "f", 200), mp.rep_tok("", "a", 500), mp.rep_tok("", ".", 64), mp.rep_tok("", "=", 32), "match".view(), ".loop".view(), "impl".view(), "return".view(), "=>".view(), "<T>".view(), "::".view(), "or_return".view(), byte_tok(mp, 0), byte_tok(mp, 255), "//".view(), "/*".view(), "*/".view(), "\n\t".view(), mp.rep_tok("", "_", 100)]
+make_tokens = (mp: Allocator) MutSlice<MutSlice<u8>> {
+    ts: MutSlice<MutSlice<u8>> = ["{".view(), "[".view(), "(".view(), "<".view(), "}".view(), "]".view(), ")".view(), ">".view(), "\"".view(), "'".view(), "\\".view(), "`".view(), mp.rep_tok("", "9", 300), mp.rep_tok("0x", "f", 200), mp.rep_tok("", "a", 500), mp.rep_tok("", ".", 64), mp.rep_tok("", "=", 32), "match".view(), ".loop".view(), "impl".view(), "return".view(), "=>".view(), "<T>".view(), "::".view(), "or_return".view(), byte_tok(mp, 0), byte_tok(mp, 255), "//".view(), "/*".view(), "*/".view(), "\n\t".view(), mp.rep_tok("", "_", 100)]
     // the literal has automatic storage; copy it onto the heap so it outlives this frame
-    out :: [[u8]] = of(ts[0], ts.len)
+    out :: MutSlice<MutSlice<u8>> = of(ts[0], ts.len)
     ts.loop((h, i, t) {
         out[i] = t
     })
     out
 }
-load_seeds = (mp: Allocator, first: i32) [[u8]] {
+load_seeds = (mp: Allocator, first: i32) MutSlice<MutSlice<u8>> {
     n = to_i64(argc()) - to_i64(first)
-    out :: [[u8]] = of(mp
+    out :: MutSlice<MutSlice<u8>> = of(mp
         .addr()
         .contents_bytes_in(arg(first))
         .expect("fuzz-mutate: unreadable seed"), n)
@@ -463,8 +469,8 @@ fuzz = (mp: Allocator) i32 {
     format("fuzz-mutate: seed={} (FUZZ_SEED={} replays this exact stream)\n", [arg_int(sd), arg_int(sd)])
     r = seed(sd)
     rp = r.addr()
-    b: [u8] = assert_nonnull(mp.acquire(BUF_CAP)).slice(BUF_CAP)
-    ticks: [u8] = assert_nonnull(mp.acquire(imax(g_iters, 1))).slice(imax(g_iters, 1))
+    b: MutSlice<u8> = assert_nonnull(mp.acquire(BUF_CAP)).slice(BUF_CAP)
+    ticks: MutSlice<u8> = assert_nonnull(mp.acquire(imax(g_iters, 1))).slice(imax(g_iters, 1))
     ticks.loop((h, i, x) {
         (i < g_iters).then({
             mp.one_iter(rp, toks, b, seeds)

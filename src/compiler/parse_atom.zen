@@ -1,21 +1,19 @@
-// compiler.parse_atom — atom & literal parsing — buffer/lexeme helpers, int/float/char/string literals, leading-dot constructors.
-// Split out of compiler.parse_expr (god-file split); pure move, no logic changes.
 { Expr, FieldInit } = compiler.ast.ast_types
-{ byte_lit, finit, flit, lit, mkenum, mkstruct, mktag, strlit_at, acquire_or_die } = compiler.genc
+{ byte_lit, finit, flit, lit, mkenum_at, mkstruct, mktag_at, strlit_at, acquire_or_die } = compiler.genc
 { mangle_anon_in, payload_fname } = compiler.mangle
 { Scan, Token, is_bin_prefix, is_hex_prefix, is_oct_prefix, scan } = compiler.lex
 { at, is_digit, rawstr_at } = std.text.ascii
 { Allocator } = std.mem.alloc
 { PEnd, is_comma, is_lbrace, is_lbracket, is_rparen, pdepth_enter, pdepth_exit, pdepth_over,
-  perr_set_at, perr_set_kind_at, PE_EOF, PE_EXPR, tok_in } = compiler.parse_type
+  perr_set_at, perr_set_kind_at, tok_in } = compiler.parse_type
 { is_dot, nl_between, parse_or_nested, parse_postfix } = compiler.parse_postfix
 { parse_arm_block, reject_match } = compiler.parse_match
-{ finit_buf, inits_as_fields, is_lparen, is_minus, is_not, is_raw_at, lam_open, looks_anon_struct,
-  parse_anon_struct_lit, parse_ident, parse_lambda, parse_neg, parse_not, parse_paren,
-  parse_raw_call, parse_slicelit, take_inits } = compiler.parse_primary
+{ finit_buf, inits_as_fields, is_minus, is_not, lam_open, looks_anon_struct, parse_anon_struct_lit,
+  parse_ident, parse_lambda, parse_neg, parse_not, parse_paren, parse_raw_call, parse_slicelit,
+  take_inits } = compiler.parse_primary
 { PExpr } = compiler.parse_expr
 { times, upto } = std.core.count
-ebuf = (a: Allocator) [Expr] { slice(a.acquire_or_die(sizeof(Expr)), 1) }
+ebuf = (a: Allocator) MutSlice<Expr> { slice(a.acquire_or_die(sizeof(Expr)), 1) }
 enode* = (a: Allocator, v: Expr) Ptr<Expr> {
     buf ::= a.ebuf()
     buf[0] = v
@@ -27,19 +25,10 @@ copy_span = (src: StringView, start: i32, dst: RawPtr<u8>, n: i32) void {
 }
 // C keywords are mangled at the lexeme choke point so defs/refs stay consistent.
 is_c_kw = (src: StringView, t: Token) bool {
-    src.tok_in(t, "double|short|long|int|char|float|unsigned|signed").then({
-        return true
-    })
-    src.tok_in(t, "union|struct|enum|typedef|static|extern|const|volatile").then({
-        return true
-    })
-    src.tok_in(t, "register|auto|inline|restrict|if|else|for|while").then({
-        return true
-    })
-    src.tok_in(t, "do|switch|case|default|goto|void|continue|break").then({
-        return true
-    })
-    false
+    src.tok_in(t, "double|short|long|int|char|float|unsigned|signed")
+        || src.tok_in(t, "union|struct|enum|typedef|static|extern|const|volatile")
+        || src.tok_in(t, "register|auto|inline|restrict|if|else|for|while")
+        || src.tok_in(t, "do|switch|case|default|goto|void|continue|break")
 }
 // FAITHFUL mode: the FORMATTER parses RAW (pre-flatten) source and must round-trip every identifier
 // EXACTLY — including the few that collide with C keywords (`float`, `if`, `default`, …). The normal
@@ -101,8 +90,7 @@ is_op* = (src: StringView, t: Token, c: u8) bool {
 // the EXACT one-byte operator `c` — `is_op` alone matches any Sym STARTING with it, so `=` would
 // also fire on `==`/`=>` and `|` on `||`. Every single-char operator gate in the parser is this.
 is_op1* = (src: StringView, t: Token, c: u8) bool { t.len == 1 && src.is_op(t, c) }
-// the two-byte walrus — RETIRED as a binding form (const-by-default). Still recognized by every
-// stage that used to accept it, for one purpose: reporting PE_WALRUS, which names the replacement.
+// The retired two-byte walrus remains recognizable only for the targeted replacement diagnostic.
 is_walrus* = (src: StringView, t: Token) bool {
     t.kind.match ({
         .Sym => t.len == 2 && src.at(t.start) == ':' && src.at(t.start + 1) == '=',
@@ -255,13 +243,13 @@ parse_base = (a: Allocator, src: StringView, pos: i32) PExpr {
         }),
         .Ident => a.parse_ident(src, sc),
         .Eof   => {
-            perr_set_kind_at(sc.tok.start, PE_EOF())
+            perr_set_kind_at(sc.tok.start, .UnexpectedEof)
             PExpr(
                 expr: a.enode(lit(0)),
                 next: sc.next,
             )
         },
-        _      => src.is_raw_at(sc.tok).match ({
+        _      => src.is_op(sc.tok, '@').match ({
             true  => a.parse_raw_call(src, sc),
             false => a.parse_other(src, sc),
         }),
@@ -278,7 +266,7 @@ str_open = (src: StringView, t: Token) bool {
 // Bad atom: no rule can start an expression at this token. Flag it as EXPECTED-AN-EXPRESSION (with
 // the offending token's offset), consume one token for progress, placeholder.
 parse_garbage = (a: Allocator, src: StringView, sc: Scan) PExpr {
-    perr_set_kind_at(sc.tok.start, PE_EXPR())
+    perr_set_kind_at(sc.tok.start, .ExpectedExpr)
     PExpr(
         expr: a.enode(lit(0)),
         next: sc.next,
@@ -304,26 +292,23 @@ parse_other = (a: Allocator, src: StringView, sc: Scan) PExpr {
     src.is_lbracket(sc.tok).then({
         return a.parse_slicelit(src, sc)
     })
-    (src.is_lparen(sc.tok) == false).then({
+    (src.is_op(sc.tok, '(') == false).then({
         return a.parse_garbage(src, sc)
     })
     a.lam_open(src, sc).then({ a.parse_lambda(src, sc) }, { a.parse_paren(src, sc) })
 }
 // Backslash escape byte value. `\\ \" \'` fall through `_ => e` (the char itself).
 esc_byte = (e: u8) u8 {
-    (e == 'n').then({
-        return '\n'
+    (e == 'n').match ({
+        true  => '\n',
+        false => (e == 't').match ({
+            true  => '\t',
+            false => (e == 'r').match ({
+                true  => '\r',
+                false => (e == '0').then({ 0 }, { e }),
+            }),
+        }),
     })
-    (e == 't').then({
-        return '\t'
-    })
-    (e == 'r').then({
-        return '\r'
-    })
-    (e == '0').then({
-        return 0
-    })
-    e
 }
 // Two hex digits at `pos`,`pos+1` → one byte value (0..255) for `\xNN`. Returns i32 (the arithmetic
 // type); the store/char-lit sites narrow to the byte, matching how `char_val` carries byte values as i32.
@@ -421,28 +406,40 @@ parse_ctor = (a: Allocator, src: StringView, dot: Scan) PExpr {
 parse_ctor_named = (a: Allocator, src: StringView, vt: Scan) PExpr {
     vn = a.lexeme(src, vt.tok)
     nx = src.scan(vt.next)
-    (src.is_lparen(nx.tok) && src.nl_between(vt.next, nx.tok.start).then({ false }, { true })).match ({
+    (src.is_op(nx.tok, '(') && src.nl_between(vt.next, nx.tok.start).then({ false }, { true })).match ({
         true  => src.is_rparen(src.scan(nx.next).tok).match ({
-            true  => a.parse_ctor_empty(src, vn, nx),
-            false => a.parse_ctor_payload(src, vn, nx),
+            true  => a.parse_ctor_empty(src, vn, vt.tok.start, nx),
+            false => a.parse_ctor_payload(src, vn, vt.tok.start, nx),
         }),
         false => PExpr(
-            expr: a.enode(mktag("", vn)),
+            expr: a.enode(mktag_at("", vn, 0, vt.tok.start)),
             next: vt.next,
         ),
     })
 }
-parse_ctor_empty = (a: Allocator, src: StringView, vn: StringView, lp: Scan) PExpr {
+parse_ctor_empty = (
+    a: Allocator,
+    src: StringView,
+    vn: StringView,
+    variant_pos: i32,
+    lp: Scan,
+) PExpr {
     rp = src.scan(lp.next)
     PExpr(
-        expr: a.enode(mktag("", vn)),
+        expr: a.enode(mktag_at("", vn, 0, variant_pos)),
         next: rp.next,
     )
 }
-parse_ctor_payload = (a: Allocator, src: StringView, vn: StringView, lp: Scan) PExpr {
+parse_ctor_payload = (
+    a: Allocator,
+    src: StringView,
+    vn: StringView,
+    variant_pos: i32,
+    lp: Scan,
+) PExpr {
     pl = a.parse_payload_args(src, lp)
     PExpr(
-        expr: a.enode(mkenum("", vn, pl.expr)),
+        expr: a.enode(mkenum_at("", vn, pl.expr, 0, variant_pos)),
         next: pl.next,
     )
 }    // `.Variant(a, b, …)` payload
@@ -463,7 +460,13 @@ parse_payload_args* = (a: Allocator, src: StringView, lp: Scan) PExpr {
         ),
     })
 }    // single payload: the arg itself
-fill_payload_args = (a: Allocator, src: StringView, pos: i32, buf: [FieldInit], i: i32) PEnd {
+fill_payload_args = (
+    a: Allocator,
+    src: StringView,
+    pos: i32,
+    buf: MutSlice<FieldInit>,
+    i: i32,
+) PEnd {
     (i >= buf.len).then({
         perr_set_at(pos)
         return PEnd(

@@ -1,0 +1,53 @@
+{ heap_allocator } = std.mem.alloc
+{ to_exit } = std.core.bool
+{ SourceOverlay } = compiler.resolve
+{ resolve_symbol_index, SYMBOL_FUNCTION, SYMBOL_GLOBAL, SYMBOL_TYPE, SYMBOL_METHOD, SYMBOL_PARAM } = compiler.symbols
+count_name = (idx: SymbolIndex, name: StringView, kind: i32) i64 {
+    n ::= 0
+    idx.decls.loop_at((i, d) {
+        (d.name == name && d.key.kind == kind).then({
+            n = n + 1
+        })
+    })
+    n
+}
+count_owner_occ = (idx: SymbolIndex, owner: StringView, name: StringView, kind: i32) i64 {
+    n ::= 0
+    idx.occurrences.loop_at((i, o) {
+        (o.key.owner == owner && o.key.name == name && o.key.kind == kind).then({
+            n = n + 1
+        })
+    })
+    n
+}
+main = () i32 {
+    a = heap_allocator()
+    dep = "Circle*: {\n    r: i32,\n    area = (c: Circle) i32 { c.r }\n}\nSquare*: {\n    s: i32,\n    area = (s: Square) i32 { s.s }\n}\nhelper* = (x: i32) i32 { x }\n"
+    consumer = "{ helper } = shapes\nuse* = (x: i32) i32 { helper(x) }\n"
+    root = "sh = shapes\ncm = consumer\n{ helper } = shapes\nscore = 40\nmain = (score: i32) i32 {\n    c = sh.Circle(r: score)\n    q = sh.Square(s: 2)\n    x = c.area()\n    y = q.area()\n    helper(score) + x + y\n}\n"
+    idx = a.resolve_symbol_index(".", "/virtual", "/virtual/subject.zen", root, [
+        SourceOverlay(
+            path: "/virtual/shapes.zen",
+            source: dep,
+        ),
+        SourceOverlay(
+            path: "/virtual/consumer.zen",
+            source: consumer,
+        ),
+    ])
+    ok = idx.count_name("main", SYMBOL_FUNCTION) == 1
+        && idx.count_name("helper", SYMBOL_FUNCTION) == 1
+        && idx.count_name("use", SYMBOL_FUNCTION) == 1
+        && idx.count_name("score", SYMBOL_GLOBAL) == 1
+        && idx.count_name("Circle", SYMBOL_TYPE) == 1
+        && idx.count_name("Square", SYMBOL_TYPE) == 1
+        && idx.count_name("area", SYMBOL_METHOD) == 2
+        && idx.count_name("score", SYMBOL_PARAM) == 1
+        && idx.count_owner_occ("main", "score", SYMBOL_PARAM) == 3
+        && idx.count_owner_occ("", "score", SYMBOL_GLOBAL) == 1
+        && idx.count_owner_occ("Circle", "area", SYMBOL_METHOD) == 2
+        && idx.count_owner_occ("Square", "area", SYMBOL_METHOD) == 2
+        && idx.count_owner_occ("", "helper", SYMBOL_FUNCTION) == 5
+        && idx.decls.len == 17
+    ok.to_exit()
+}

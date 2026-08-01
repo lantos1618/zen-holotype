@@ -1,4 +1,3 @@
-// compiler.validate.enrich — decl enrichment (denrich_*) and duplicate-fn detection.
 { ArmData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, MakeStructData, MatchData, Param,
   Stmt, Ty } = compiler.ast.ast_types
 { gstr_append, gstr_finish, gstr_push, gstr_string } = compiler.genc
@@ -22,7 +21,7 @@
   trait_has_default } = compiler.validate.kinds
 { kv_at } = compiler.validate.core
 { loop_at } = std.core.count
-fn_dup_before* = (decls: [Decl], name: StringView, upto: i64) bool {
+fn_dup_before* = (decls: MutSlice<Decl>, name: StringView, upto: i64) bool {
     f ::= false
     decls.loop_at((i, d) {
         f = (i < upto).match ({
@@ -32,7 +31,6 @@ fn_dup_before* = (decls: [Decl], name: StringView, upto: i64) bool {
     })
     f
 }
-// ── fit-mismatch enrichment: name the TWO types the checker already had in hand ────────────────
 // `expected `<want>`, got `<got>``, both rendered in USER spelling via zty. Reused by arg-type /
 // assign-fit / return-fit so a mismatch says what fits and what was supplied, not just "does not fit".
 denrich_fit_msg = (a: Allocator, want: Ty, got: Ty) StringView {
@@ -103,7 +101,7 @@ denrich_argfit_msg = (env: Env, c: CallData, off: i32) StringView {
 denrich_comma_name = (s: String, a: Allocator, first: bool, name: StringView) String {
     first.then({ s.gstr_append(a, name) }, { s.gstr_append(a, ", ").gstr_append(a, name) })
 }
-denrich_fieldlist = (a: Allocator, fields: [Field]) StringView {
+denrich_fieldlist = (a: Allocator, fields: MutSlice<Field>) StringView {
     s ::= a.gstr_string(64)
     fields.loop_at((i, f) { s = s.denrich_comma_name(a, i == 0, f.name) })
     s.gstr_finish(a)
@@ -114,7 +112,7 @@ denrich_struct_nofield = (
     a: Allocator,
     sname: StringView,
     field: StringView,
-    fields: [Field],
+    fields: MutSlice<Field>,
 ) StringView {
     a
         .gstr_string(96)
@@ -194,7 +192,12 @@ denrich_notcallable_msg = (env: Env, name: StringView) StringView {
 }
 // the comma-list of methods trait `tr` requires that (tn, tr) does not provide: every FnT field of
 // the trait struct with neither an impl method nor a trait default body covering it.
-denrich_missing_list = (a: Allocator, decls: [Decl], tn: StringView, tr: StringView) StringView {
+denrich_missing_list = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    tn: StringView,
+    tr: StringView,
+) StringView {
     provided = decls.impl_methods_of(tn, tr)
     s ::= a.gstr_string(64)
     n ::= 0
@@ -211,7 +214,12 @@ denrich_missing_list = (a: Allocator, decls: [Decl], tn: StringView, tr: StringV
         })
     s.gstr_finish(a)
 }
-denrich_missing_tail = (a: Allocator, decls: [Decl], tn: StringView, tr: StringView) StringView {
+denrich_missing_tail = (
+    a: Allocator,
+    decls: MutSlice<Decl>,
+    tn: StringView,
+    tr: StringView,
+) StringView {
     list = a.denrich_missing_list(decls, tn, tr)
     is_empty(list).match ({
         true  => "",
@@ -312,7 +320,7 @@ denrich_operand_msg = (env: Env, b: BinData) StringView {
         .gstr_finish(a)
 }
 // first init field whose name is not a declared field (the unknown field a struct-literal error names)
-denrich_bad_init = (fields: [Field], inits: [FieldInit]) StringView {
+denrich_bad_init = (fields: MutSlice<Field>, inits: MutSlice<FieldInit>) StringView {
     bad ::= ""
     inits.loop_at((i, fi) {
         bad = is_empty(bad).match ({
@@ -523,12 +531,18 @@ denrich_call = (a: Allocator, env: Env, c: CallData, off: i32, code: i32) String
     })
     a.denrich_args(env, c.args, off, code)
 }
-denrich_args = (a: Allocator, env: Env, args: [Expr], off: i32, code: i32) StringView {
+denrich_args = (a: Allocator, env: Env, args: MutSlice<Expr>, off: i32, code: i32) StringView {
     res ::= ""
     args.loop_at((i, ar) { res = desc_or(res, a.denrich_expr(env, ar.addr(), off, code)) })
     res
 }
-denrich_inits = (a: Allocator, env: Env, inits: [FieldInit], off: i32, code: i32) StringView {
+denrich_inits = (
+    a: Allocator,
+    env: Env,
+    inits: MutSlice<FieldInit>,
+    off: i32,
+    code: i32,
+) StringView {
     res ::= ""
     inits.loop_at((i, fi) { res = desc_or(res, a.denrich_expr(env, fi.value, off, code)) })
     res
@@ -537,7 +551,7 @@ denrich_arms = (
     a: Allocator,
     env: Env,
     subjty: Ty,
-    arms: [ArmData],
+    arms: MutSlice<ArmData>,
     off: i32,
     code: i32,
 ) StringView {
@@ -579,7 +593,7 @@ denrich_stmt = (a: Allocator, env: Env, st: Stmt, off: i32, code: i32) StringVie
         },
     })
 }
-denrich_body = (a: Allocator, env: Env, body: [Stmt], off: i32, code: i32) StringView {
+denrich_body = (a: Allocator, env: Env, body: MutSlice<Stmt>, off: i32, code: i32) StringView {
     res ::= ""
     e ::= env
     body.loop_at((i, st) {
@@ -590,7 +604,7 @@ denrich_body = (a: Allocator, env: Env, body: [Stmt], off: i32, code: i32) Strin
 }
 denrich_func = (
     a: Allocator,
-    decls: [Decl],
+    decls: MutSlice<Decl>,
     idx: DeclIndex,
     f: Func,
     off: i32,
@@ -608,7 +622,7 @@ denrich_func = (
 // dup-fn enrichment: NAME the symbol that is defined twice. `off` is the LATER definition's name
 // offset (kv_dup_name_kind anchors there), so the decl whose pos matches — and whose name an
 // EARLIER decl already binds — is the colliding one; the render already points file:line:col at it.
-denrich_dupfn = (a: Allocator, decls: [Decl], off: i32) StringView {
+denrich_dupfn = (a: Allocator, decls: MutSlice<Decl>, off: i32) StringView {
     res ::= ""
     decls.loop_at((i, d) {
         nm = d.fn_name_of()
@@ -630,7 +644,7 @@ denrich_dupfn = (a: Allocator, decls: [Decl], off: i32) StringView {
 }
 // the driver's entry: an enriched message for a struct-field/operand/not-callable/trait-bound/
 // dup-fn/undefined-name error at `off`, else "".
-denrich_module = (a: Allocator, decls: [Decl], off: i32, code: i32) StringView {
+denrich_module = (a: Allocator, decls: MutSlice<Decl>, off: i32, code: i32) StringView {
     (off <= 0
         || code != KSTRUCTFIELD()
             && code != KOPERAND()
@@ -670,8 +684,8 @@ denrich_module = (a: Allocator, decls: [Decl], off: i32, code: i32) StringView {
 // channel's message.
 denrich_check* = (
     a: Allocator,
-    raw: [Decl],
-    decls: [Decl],
+    raw: MutSlice<Decl>,
+    decls: MutSlice<Decl>,
     off: i32,
     code: i32,
     kind: StringView,
@@ -700,7 +714,7 @@ reserved_ok_wrapper = (f: Func) bool {
         || f.name == "variant_name")
         && f.is_generic_fn()
 }
-reserved_name_kind* = (decls: [Decl]) i32 {
+reserved_name_kind* = (decls: MutSlice<Decl>) i32 {
     acc ::= 0
     decls.loop_at((i, d) {
         acc = acc.or(d.match ({
@@ -715,7 +729,7 @@ reserved_name_kind* = (decls: [Decl]) i32 {
 }
 // the offending fn's NAME, straight off the first colliding decl — exact even when its pos is 0
 // (a decl at byte 0 packs as "no position", so a source-copy subject would truncate).
-reserved_name_of* = (decls: [Decl]) StringView {
+reserved_name_of* = (decls: MutSlice<Decl>) StringView {
     n ::= ""
     decls.loop_at((i, d) {
         n = is_empty(n).match ({

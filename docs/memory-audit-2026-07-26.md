@@ -124,7 +124,7 @@ The read-only `Ptr<T>` discipline is real:
 | `p: Ptr<i64>; p.store(99)` | `error[ptr-write]` |
 | `q: MutPtr<i64> = p` | `error[assign-fit]` |
 | `poke = (c: Ptr<Cell>) void { c.v = 7 }` | `error[ptr-write]` |
-| `s: [i64] = slice(p, 1)` from a `Ptr` | `error[ptr-write]` — `slice` is in the write gate |
+| `s: MutSlice<i64> = slice(p, 1)` from a `Ptr` | `error[ptr-write]` — `slice` is in the write gate |
 
 That last row matters: someone thought about the laundering route through `slice` and closed it.
 
@@ -156,7 +156,7 @@ paired in one expression), **100 trust-me (46%)**.
 
 The lane machine-checked every alloc-inline site for element-type/size agreement and found **zero
 real mismatches** — the sizing discipline is genuinely good. One is fragile and worth noting:
-`parse_match.zen:535` declares `[StringView]` but sizes with `sizeof(NameSlot)`; correct today,
+`parse_match.zen:535` declares `MutSlice<StringView>` but sizes with `sizeof(NameSlot)`; correct today,
 silently under-allocates the moment `NameSlot` gains a field. That is exactly the shape of the
 `int32_t`-array-read-as-`int64_t` bug fixed in PR #699.
 
@@ -317,7 +317,7 @@ Five programs that compile clean and race for real on the parallel path:
 |---|---|
 | `Ptr<T>` sent while sender keeps a `MutPtr<T>` | receiver observed the sender's post-send write |
 | `RawPtr<u8>` — "frozen" because `u8` reaches no `MutPtr`, yet it has `store_i64` | both wrote |
-| mutable slice `[i64]` | both wrote |
+| mutable slice `MutSlice<i64>` | both wrote |
 | `Arena` value | both bump-allocate from one arena, unsynchronized |
 | `MutPtr<T>` boxed through the raw `ref_send` floor | both mutated — **legitimate hatch**, visible at the point of danger |
 | **generic forwarder** `fwd<T> = (p, h, m: T) void { p.send(h, m) }` | **`ok`, compiles, races — while the byte-identical CONCRETE forwarder is correctly rejected** **[L]** |
@@ -404,8 +404,8 @@ declaration-and-import together, file by file.
 > TSan; the static tool is narrowing `mode_sendable`. `std.mem.debug` is well-motivated on its own
 > terms — 26 hand-rolled counting allocators is real demand — and should be sold as what it is.
 
-**5. Rename `slice()` → `slice_unchecked` and add checked constructors.** `[T].sub(lo,hi)` for the
-20 sub-span sites and `[T].take(n)` for the 38 narrowing sites are pure wins — the length is
+**5. Rename `slice()` → `slice_unchecked` and add checked constructors.** `MutSlice<T>.sub(lo,hi)` for the
+20 sub-span sites and `MutSlice<T>.take(n)` for the 38 narrowing sites are pure wins — the length is
 derivable. That leaves ~42 genuinely-raw field-ptr sites. **The rename converts an invisible 46%
 into a greppable 19%** and is the highest-leverage single step in this document.
 
@@ -450,7 +450,7 @@ runtime catching belongs in step 4.
 
 | PR (open) | Fix |
 |---|---|
-| **#699** | Slice-literal element types — variadic packs read at wrong stride, **and** struct-field inits, an ASAN-confirmed heap-buffer-overflow (`Holder(xs:[1,2,3])` for `xs:[i64]` emitted a 12-byte `int32_t` array read with `sizeof(int64_t)`; `.len` was correct so the bounds check passed) |
+| **#699** | Slice-literal element types — variadic packs read at wrong stride, **and** struct-field inits, an ASAN-confirmed heap-buffer-overflow (`Holder(xs:[1,2,3])` for `xs:MutSlice<i64>` emitted a 12-byte `int32_t` array read with `sizeof(int64_t)`; `.len` was correct so the bounds check passed) |
 | **#700** | Indexed and loop-element receivers now light-type, so reflection expands — `cs[0].variant_name()` passed `zen check` then failed at link |
 | **#701** | `ScanBlack` colour guard — the cycle collector diverged on any surviving cycle |
 
@@ -480,11 +480,11 @@ address-keyed side table nobody has costed.
 **And the tree already contains the fix.** `genc.zen:25`:
 
 ```zen
-cbuf*<T> = (a: MutPtr<Malloc>, n: i64) [T] { slice(a.acquire(n * sizeof(T)), n) }
+cbuf*<T> = (a: MutPtr<Malloc>, n: i64) MutSlice<T> { slice(a.acquire(n * sizeof(T)), n) }
 ```
 
 Length and element size derive from one `T`; a mismatch is unrepresentable. Generalise it over the
-allocator as `alloc_n<T>() Result<[T], IoError>` with a **checked multiply** — which also fixes the
+allocator as `alloc_n<T>() Result<MutSlice<T>, IoError>` with a **checked multiply** — which also fixes the
 `STATUS.md:136` overflow-to-`Ok(null)` defect at all 68 alloc-paired sites at once — and migrate.
 That is §7 step 5 done properly; the rename is the residual 20%, not the step.
 
@@ -568,7 +568,7 @@ Synthesising the panel against §7:
 2. **ASAN + UBSan CI target** — the substrate every later step is verified against.
 3. **Delete dead surfaces** (step 3), then **steps 1+2 merged**, gated on a byte-diff of emitted C.
 4. **De-name the ownership checker** (§9.3) — protects everything else on the list.
-5. **Fix the `Allocator` trait** (§9.1): return `[T]`, take `[T]` in `release`, add alignment and
+5. **Fix the `Allocator` trait** (§9.1): return `MutSlice<T>`, take `MutSlice<T>` in `release`, add alignment and
    checked size arithmetic; land `alloc_n<T>`; migrate the 68 sites. Subsumes most of step 7.
 6. **`defer`** (§9.2) — language work, start in parallel; everything above patches around it.
 7. **Debug allocator**, now that `release` carries sizes, wired as the harness default.
