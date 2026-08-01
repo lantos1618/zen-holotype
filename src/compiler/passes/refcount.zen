@@ -45,11 +45,66 @@ rc_calls_body* = (body: MutSlice<Stmt>, nm: StringView) bool {
 // FnT-param generic: the intrinsic expands in the inliner with the receiver's CONCRETE type, which
 // only the call-site inline provides. Lives here (beside its rc_calls_body walker) so both the
 // inline router (check_inline.no_inline_gen_f) and the validator (kinds.ka_rec_hof_kind) share it.
-calls_reflect* = (body: MutSlice<Stmt>) bool {
+calls_reflect_direct = (body: MutSlice<Stmt>) bool {
     body.rc_calls_body("field_eq")
         || body.rc_calls_body("each_field")
         || body.rc_calls_body("zip_fields")
         || body.rc_calls_body("variant_name")
+}
+// Reflection is an INLINE requirement, so it propagates through generic wrappers: if `wrap2` calls
+// `wrap1`, and `wrap1` eventually calls `each_field`, both wrappers must splice at the concrete call
+// site. A module-level closure is seeded after method desugaring and reset for every resolve_module.
+rc_no_reflect_names = () MutSlice<StringView> { slice(null_ptr(), 0) }
+rc_reflect_names ::= rc_no_reflect_names()
+rc_reflect_name_has = (name: StringView) bool {
+    hit ::= false
+    rc_reflect_names.loop_at((i, n) { hit = hit || n == name })
+    hit
+}
+calls_marked_reflect = (body: MutSlice<Stmt>) bool {
+    hit ::= false
+    rc_reflect_names.loop_at((i, n) { hit = hit || body.rc_calls_body(n) })
+    hit
+}
+calls_reflect* = (body: MutSlice<Stmt>) bool {
+    body.calls_reflect_direct() || body.calls_marked_reflect()
+}
+func_calls_reflect* = (f: Func) bool {
+    f.name.rc_reflect_name_has() || f.body.calls_reflect_direct()
+}
+rc_reflect_close = (decls: MutSlice<Decl>, buf: MutSlice<StringView>, cnt: i32, rounds: i32) i32 {
+    rc_reflect_names = slice(buf.ptr, to_i64(cnt))
+    next ::= cnt
+    decls.loop_at((i, d) {
+        d.match ({
+            .DFunc(f) => (f.name.rc_reflect_name_has() == false && f.body.calls_reflect()).then({
+                buf[to_i64(next)] = f.name
+                next = next + 1
+                rc_reflect_names = slice(buf.ptr, to_i64(next))
+            }),
+            _         => { },
+        })
+    })
+    (next == cnt || rounds <= 1).then({ next }, { decls.rc_reflect_close(buf, next, rounds - 1) })
+}
+seed_reflect* = (a: Allocator, decls: MutSlice<Decl>) void {
+    rc_reflect_names = rc_no_reflect_names()
+    (decls.len > 0).then({
+        buf ::= slice(a.acquire_or_die(decls.len * sizeof(StringView)), decls.len)
+        cnt ::= 0
+        decls.loop_at((i, d) {
+            d.match ({
+                .DFunc(f) => f.body.calls_reflect_direct().then({
+                    buf[to_i64(cnt)] = f.name
+                    cnt = cnt + 1
+                }),
+                _         => { },
+            })
+        })
+        rc_reflect_names = slice(buf.ptr, to_i64(cnt))
+        n = decls.rc_reflect_close(buf, cnt, to_i32(decls.len))
+        rc_reflect_names = slice(buf.ptr, to_i64(n))
+    })
 }
 // ── HIDDEN early returns × inlining ──────────────────────────────────────────────────────────
 // resolve_orx lowers a CONDITIONAL-position `or_return` (a match/cond arm value, a `&&`/`||` rhs, a

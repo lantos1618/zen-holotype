@@ -7,7 +7,7 @@
 { DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params, elem_of,
   extend_env, is_lit_numeric, is_str_t, is_void_ty, no_stmts, params_env, params_onto, pointee_of,
   recv_name, the_func, tparam_declared } = compiler.check
-{ calls_reflect, rc_calls_body } = compiler.passes.refcount
+{ calls_reflect, func_calls_reflect, rc_calls_body } = compiler.passes.refcount
 { reflect_fields } = compiler.passes.subst
 { has_fnt_param, is_logic_op, is_or_return_fn, is_prim_width, param_names_has, slice_any,
   wr_lam_writes_value } = compiler.astops
@@ -903,7 +903,7 @@ ka_func_kind* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, f: Func) i
 // inline-only bodies: FnT-param generics (their lambda args must splice) and reflect-using generics
 // (their intrinsic needs the call site's concrete receiver type — see check_inline.no_inline_gen_f).
 ka_inline_only = (f: Func) bool {
-    f.params.has_fnt_param() || f.tparams.len > 0 && f.body.calls_reflect()
+    f.params.has_fnt_param() || f.tparams.len > 0 && f.func_calls_reflect()
 }
 // the sanctioned reflection WRAPPER (`field_eq<T> = (x: T, y: T) bool { x.field_eq(y) }`) is not
 // recursion: its same-named inner call targets the INTRINSIC (name-intercepted in the inliner) and
@@ -1893,13 +1893,13 @@ Func.impl(FuncKinds, {
         })
     }
     ka_reflect_ret_kind = (f: Func) i32 {
-        (f.tparams.len > 0 && f.body.calls_reflect() && f.body.krr_loop_ret_body()).match ({
+        (f.tparams.len > 0 && f.func_calls_reflect() && f.body.krr_loop_ret_body()).match ({
             true  => KREFLECTRETURN().kv_at(f.pos),
             false => 0,
         })
     }
     ka_reflect_write_kind = (f: Func) i32 {
-        (f.tparams.len > 0 && f.body.calls_reflect()).match ({
+        (f.tparams.len > 0 && f.func_calls_reflect()).match ({
             true  => f.body.krw_body(empty_params()),
             false => 0,
         })

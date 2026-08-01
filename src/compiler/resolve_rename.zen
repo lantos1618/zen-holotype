@@ -18,15 +18,15 @@
 { parse_module } = compiler.parse
 { gstr_string, gstr_finish, is_expr_null, acquire_or_die } = compiler.genc
 { Scan, scan } = compiler.lex
-{ is_ident_tok } = compiler.parse_postfix
+{ is_dot, is_ident_tok, nl_between } = compiler.parse_postfix
 { Allocator } = std.mem.alloc
 { String } = std.text.string
 { ModuleTable, mimport_name_span, rappend, rappend_span, rappend_string, res_ident_end, rpush,
   seen_name } = compiler.resolve
 { module_graph, str_bytes } = compiler.resolve_scan
-{ at, is_alpha } = std.text.ascii
+{ at, is_upper } = std.text.ascii
 { view } = std.text.str
-{ loop_at } = std.core.count
+{ loop_at, times } = std.core.count
 // ── membership over a newline-delimited name set, compared against a SOURCE span ────────────────
 // The rename set is built by the top-level symbol scan, so its entries are source spellings. Asking
 // it about the source bytes (never about an AST name) keeps the decl and its references in step even
@@ -349,8 +349,8 @@ ns_local_marks = (a: Allocator, s: StringView) MutSlice<u8> {
     a.parse_module(s).loop_at((i, d) { c.ren_decl(a, d) })
     c.marks
 }
-qual_name_at = (out: String, a: Allocator, s: StringView, p: i32, ie: i32) String {
-    out.rappend_span(a, s, p, ie).rpush(a, '.').rappend_span(a, s, ie + 1, s.res_ident_end(ie + 1))
+qual_name_at = (out: String, a: Allocator, s: StringView, p: i32, ie: i32, mp: i32) String {
+    out.rappend_span(a, s, p, ie).rpush(a, '.').rappend_span(a, s, mp, s.res_ident_end(mp))
 }
 // what becomes of `A.f`, where `A` spans [p, ie): 0 = leave it alone, 1 = `A__f`, 2 = `f`.
 qual_fate = (
@@ -358,11 +358,12 @@ qual_fate = (
     s: StringView,
     p: i32,
     ie: i32,
+    mp: i32,
     qnames: String,
     strip_qnames: String,
     strip_all_quals: String,
 ) u8 {
-    qn = qual_name_at(a.gstr_string(32), a, s, p, ie)
+    qn = qual_name_at(a.gstr_string(32), a, s, p, ie, mp)
     qnames.seen_name(qn).match ({
         true  => 1,
         false => (strip_qnames.seen_name(qn)
@@ -387,15 +388,25 @@ qual_mark_tok = (
 ) i32 {
     p = sc.tok.start
     ie = p + sc.tok.len
+    dot = s.scan(sc.next)
+    mem = s.scan(dot.next)
+    wrapped = dot.tok.start != ie
+    line_wrapped = s.nl_between(ie, dot.tok.start)
     (is_ident_tok(sc.tok)
         && locals[to_i64(p)] == 0
-        && at(s, ie) == '.'
-        && at(s, ie + 1).is_alpha()
+        && s.is_dot(dot.tok)
+        && is_ident_tok(mem.tok)
+        && (line_wrapped == false || is_upper(at(s, mem.tok.start)) == false)
         && quals.seen_name(a.mimport_name_span(s, p, ie))).match ({
         true  => {
-            f = a.qual_fate(s, p, ie, qnames, strip_qnames, strip_all_quals)
-            ms[to_i64(p)] = f
-            (f == 0).then({ s.res_ident_end(ie + 1) }, { ie + 1 })
+            f = a.qual_fate(s, p, ie, mem.tok.start, qnames, strip_qnames, strip_all_quals)
+            (f > 0).then({
+                ms[to_i64(p)] = wrapped.then({ f + 2 }, { f })
+                wrapped.then({
+                    ms[to_i64(dot.tok.start)] = f + 4
+                })
+            })
+            mem.tok.start
         },
         false => sc.next,
     })
@@ -431,6 +442,7 @@ qual_marks = (
 qual_apply = (out: String, a: Allocator, s: StringView, marks: MutSlice<u8>) String {
     cur ::= out
     pos :: i32 = 0
+    pending :: i32 = 0 - 1
     bs: Slice<u8> = s.str_bytes()
     bs.loop_at((i, b) {
         ii = to_i32(i)
@@ -441,12 +453,34 @@ qual_apply = (out: String, a: Allocator, s: StringView, marks: MutSlice<u8>) Str
                     pos = pos + 1
                 },
                 false => {
-                    ie = s.res_ident_end(pos)
-                    cur = (marks[i] == 1).match ({
-                        true  => cur.rappend_span(a, s, pos, ie).rappend(a, "__"),
-                        false => cur,
+                    m = marks[i]
+                    (m <= 2).match ({
+                        true  => {
+                            ie = s.res_ident_end(pos)
+                            cur = (m == 1).match ({
+                                true  => cur.rappend_span(a, s, pos, ie).rappend(a, "__"),
+                                false => cur,
+                            })
+                            pos = ie + 1
+                        },
+                        false => (m <= 4).match ({
+                            true  => {
+                                pending = pos
+                                ie = s.res_ident_end(pos)
+                                to_i64(ie - pos).times((k) { cur = cur.rpush(a, ' ') })
+                                pos = ie
+                            },
+                            false => {
+                                (m == 5 && pending >= 0).then({
+                                    cur = cur
+                                        .rappend_span(a, s, pending, s.res_ident_end(pending))
+                                        .rappend(a, "__")
+                                })
+                                pending = 0 - 1
+                                pos = pos + 1
+                            },
+                        }),
                     })
-                    pos = ie + 1
                 },
             })
         })
