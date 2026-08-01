@@ -1,37 +1,20 @@
-// std.concurrent.ring — ONE generic single-producer/single-consumer ring buffer over a RawPtr<u8>
-// slot buffer. This is the single shared shape `{ buf, head, tail, cap }` that the actor mailbox,
-// the actor run-queue read path, and the pool's i64 mailbox all open-coded before (the `tail - head
-// >= cap` full-check / `buf[tail % cap]` write / `buf[head % cap]` modulo read).
-//
-// THE IDIOM (proven-safe, value-load): callers keep the ring state behind a RawPtr (or as fields of a
-// larger struct), load a Ring<M> VALUE, call a method, and write the advanced indices back. Every
-// method slices the ring VALUE's `buf` as `[M]` (DOT access on the value), so codegen sees a concrete
-// `sizeof(M)` — it never takes a `MutPtr<Struct<M>>` arrow access and feeds it into `.slice()`.
-//
-// Methods are pure on the indices: `push`/`advance` RETURN a new ring with tail/head moved; the caller
-// stores back `state[0] = ring.push(v)` (typed slice) or `a.tail = ring.push(v).tail` (struct field).
-// The buffer write/read is the side effect; index motion is functional. This keeps the abstraction
-// usable both behind a `[Ring<M>]` slot and embedded as plain fields under a mutex.
+// Fixed-capacity single-producer/single-consumer ring.
+// `ring` acquires the slot buffer through the caller's allocator; `free` releases it through the
+// same allocator. Index-changing methods return updated values, which callers must store back.
+{ AllocatorBackend } = std.mem.alloc
+{ Result, IoError } = std.core.result
+RING_EINVAL = 22
 Ring*<M>: {
     buf: RawPtr<u8>,
     head: i64,
     tail: i64,
     cap: i64,
-    is_full = (r: Ring<M>) bool {
-        // the ring cannot accept another element (producer is a full lap ahead of the consumer).
-        r.tail - r.head >= r.cap
-    }
-    pending = (r: Ring<M>) i64 {
-        // queued-but-unconsumed element count.
-        r.tail - r.head
-    }
-    nonempty = (r: Ring<M>) bool {
-        // there is at least one element to consume.
-        r.head < r.tail
-    }
+    slots    = (r: Ring<M>) [M] { r.buf.slice(r.cap) }
+    is_full  = (r: Ring<M>) bool { r.tail - r.head >= r.cap }
+    pending  = (r: Ring<M>) i64 { r.tail - r.head }
+    nonempty = (r: Ring<M>) bool { r.head < r.tail }
     push = (r: Ring<M>, v: M) Ring<M> {
-        // write `v` at the producer slot, return the ring with tail advanced (caller checks is_full first).
-        slots :: [M] = r.buf.slice(r.cap)
+        slots ::= r.slots()
         slots[r.tail % r.cap] = v
         Ring<M>(
             buf: r.buf,
@@ -40,11 +23,7 @@ Ring*<M>: {
             cap: r.cap,
         )
     }
-    peek = (r: Ring<M>) M {
-        // the consumer-slot value (caller checks nonempty first); does NOT advance.
-        slots: [M] = r.buf.slice(r.cap)
-        slots[r.head % r.cap]
-    }
+    peek = (r: Ring<M>) M { r.slots()[r.head % r.cap] }
     advance = (r: Ring<M>) Ring<M> {
         Ring<M>(
             buf: r.buf,
@@ -53,14 +32,29 @@ Ring*<M>: {
             cap: r.cap,
         )
     }
+    free = (r: Ring<M>, alloc: AllocatorBackend) void { alloc.release(r.buf) }
 }
-// the ring with the head advanced by one (consumed the peeked element).
-// build an empty ring over an already-allocated slot buffer.
-ring<M> = (buf: RawPtr<u8>, cap: i64) Ring<M> {
-    Ring<M>(
-        buf: buf,
-        head: 0,
-        tail: 0,
-        cap: cap,
-    )
+ring*<M> = (alloc: AllocatorBackend, cap: i64) Result<Ring<M>, IoError> {
+    bytes = cap * sizeof(M)
+    (cap <= 0 || bytes <= 0 || bytes / sizeof(M) != cap).match ({
+        true  => {
+            invalid: Result<Ring<M>, IoError> = .Err(.Errno(RING_EINVAL))
+            invalid
+        },
+        false => alloc.try_acquire(bytes).match ({
+            .Ok(buf) => {
+                made: Result<Ring<M>, IoError> = .Ok(Ring<M>(
+                    buf: buf,
+                    head: 0,
+                    tail: 0,
+                    cap: cap,
+                ))
+                made
+            },
+            .Err(e)  => {
+                failed: Result<Ring<M>, IoError> = .Err(e)
+                failed
+            },
+        }),
+    })
 }

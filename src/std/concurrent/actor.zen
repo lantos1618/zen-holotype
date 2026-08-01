@@ -24,7 +24,7 @@
 { AllocatorBackend } = std.mem.alloc
 { Result, IoError } = std.core.result
 { runtime_checkpoint } = std.concurrent.runtime
-{ Ring } = std.concurrent.ring
+{ Ring, ring } = std.concurrent.ring
 ACTOR_STATE_SIZE = 32    // RawPtr<u8> buf + head/tail/cap i64 slots (one Ring<M>).
 // Back-pressure sentinel: a `request`/`ask` whose message could not be enqueued (mailbox FULL) surfaces
 // `.Err(.Errno(EAGAIN))` rather than reading an uninitialized reply. IoError has no dedicated "would
@@ -47,7 +47,7 @@ ActorSystem<M>: {
     ref        = (sys: ActorSystem<M>) CellRef<M> { CellRef<M>(state: sys.state) }
     messages = (sys: ActorSystem<M>) [M] {
         state = sys.state_slot()
-        state[0].buf.slice(state[0].cap)
+        state[0].slots()
     }
     has_messages = (sys: ActorSystem<M>) bool {
         state = sys.state_slot()
@@ -76,7 +76,7 @@ ActorSystem<M>: {
     }
     free = (sys: ActorSystem<M>, alloc: AllocatorBackend) void {
         state = sys.state_slot()
-        alloc.release(state[0].buf)
+        state[0].free(alloc)
         alloc.release(sys.state)
     }
 }
@@ -158,19 +158,15 @@ reply<T> = (alloc: AllocatorBackend) Result<ReplyRef<T>, IoError> {
 make_system<M> = (alloc: AllocatorBackend, cap: i64) Result<ActorSystem<M>, IoError> {
     alloc.try_acquire(ACTOR_STATE_SIZE).match ({
         .Ok(state) => {
-            alloc.try_acquire(cap * sizeof(M)).match ({
-                .Ok(messages) => {
+            mailbox: Result<Ring<M>, IoError> = alloc.ring(cap)
+            mailbox.match ({
+                .Ok(r) => {
                     slot ::= state.slice(1)
-                    slot[0] = Ring<M>(
-                        buf: messages,
-                        head: 0,
-                        tail: 0,
-                        cap: cap,
-                    )
+                    slot[0] = r
                     ok: Result<ActorSystem<M>, IoError> = .Ok(ActorSystem<M>(state: state))
                     ok
                 },
-                .Err(e)       => {
+                .Err(e) => {
                     alloc.release(state)
                     err: Result<ActorSystem<M>, IoError> = .Err(e)
                     err
@@ -310,7 +306,7 @@ ActorHandle*<M, ActorT>: {
         state :: [Ring<M>] = handle.inner_cell.inner.sys.state.slice(1)
         actor_slot: [ActorT] = handle.state.slice(1)
         actor = actor_slot[0].addr()
-        messages: [M] = state[0].buf.slice(state[0].cap)
+        messages: [M] = state[0].slots()
         messages.loop((h, i, slot) {
             cur = state[0]
             cur.nonempty().match ({
@@ -391,7 +387,7 @@ ActorHandle*<M, ActorT>: {
     }
     free = (handle: ActorHandle<M, ActorT>, alloc: AllocatorBackend) void {
         state: [Ring<M>] = handle.inner_cell.inner.sys.state.slice(1)
-        alloc.release(state[0].buf)
+        state[0].free(alloc)
         alloc.release(handle.inner_cell.inner.sys.state)
         alloc.release(handle.state)
     }

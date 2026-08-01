@@ -49,8 +49,8 @@
 { Mutex, CondVar, new_mutex, new_cond } = std.concurrent.sync
 { spawn, JoinHandle } = std.concurrent.thread
 { is_null } = std.core.ptr
-{ Result, panic } = std.core.result
-{ Ring } = std.concurrent.ring
+{ Result, IoError, panic } = std.core.result
+{ Ring, ring } = std.concurrent.ring
 { Arena } = std.mem.arena
 QUANTUM = 64    // max messages an actor runs per turn before yielding the worker (fairness)
 // CHECKED ABORT for the pool's own single-owner INFRASTRUCTURE blocks (the Pool block, the initial
@@ -249,15 +249,14 @@ pool_try_spawn_scratch_rt* = (
 ) RawPtr<u8> {
     mark_spawned()    // latch the rt.set_default guard: the process default is now frozen (workers read it)
     ha = Heap(_: 0)
-    mbuf = heap_acquire(null_ptr(), mbcap * 8)
-    is_null(mbuf).match ({
-        true  => null_ptr(),
-        false => new_in(ha.addr(), PoolActor(
+    mailbox: Result<Ring<i64>, IoError> = ha.addr().ring(mbcap)
+    mailbox.match ({
+        .Ok(mb) => new_in(ha.addr(), PoolActor(
             user: user,
-            mbuf: mbuf,
-            head: 0,
-            tail: 0,
-            cap: mbcap,
+            mbuf: mb.buf,
+            head: mb.head,
+            tail: mb.tail,
+            cap: mb.cap,
             mbmu: new_mutex(),
             sched: 0,
             behavior: behavior,
@@ -268,10 +267,11 @@ pool_try_spawn_scratch_rt* = (
         )).match ({
             .Ok(arc) => arc.base,
             .Err(e)  => {
-                heap_release(null_ptr(), mbuf)    // the actor block failed AFTER the ring landed — do not leak the ring
+                mb.free(ha.addr())    // the actor block failed AFTER the ring landed — do not leak the ring
                 null_ptr()
             },
         }),
+        .Err(e) => null_ptr(),
     })
 }
 // spawn an untyped pool actor with the process DEFAULT ambient rt (heap unless the program called
@@ -293,7 +293,8 @@ pool_actor_ref* = (raw: RawPtr<u8>) RawPtr<u8> {
 pool_actor_unref* = (raw: RawPtr<u8>) void {
     (atomic_add_i64(raw, 0 - 1) == 0).then({
         a = actor_view(raw)
-        heap_release(null_ptr(), a.mbuf)
+        ha = Heap(_: 0)
+        actor_mb(a).free(ha.addr())
         a.mbmu.destroy()
         heap_release(null_ptr(), raw)
     })
