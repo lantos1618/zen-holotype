@@ -5,7 +5,8 @@
 { is_empty } = std.text.str
 { subst_body, xform_body } = compiler.passes.subst
 { clos_lower_func, clos_lowerable } = compiler.passes.closures
-{ calls_reflect, rc_expand, rc_gbuf, rc_gen, rc_seed } = compiler.passes.refcount
+{ calls_reflect, func_calls_reflect, rc_expand, rc_gbuf, rc_gen, rc_seed } = compiler.passes.refcount
+{ mangle_str_in } = compiler.mangle
 { has_fnt_param, param_names_has, slice_any } = compiler.astops
 { Env, VList, DeclIndex, bind_args, bind_fnret, blockify, build_decl_index, cat_stmts, cenode,
   dispatch_recv, dispatch_recv_name, empty_args, empty_params, is_void_ty, lit_pins, no_pins,
@@ -51,7 +52,6 @@ inline_template = (
     cs: i32,
 ) Ptr<Expr> {
     tf = idx.idx_func(decls, name)
-    ienv = a.vcons(name, tnamed(""), env)
     // A function's body MUST produce its DECLARED return type, so that (targ-substituted) return is the
     // authoritative expected type for the body's tail — NOT the call-site `exp`. This matters when an
     // inlined fn is called WITHOUT expected context (e.g. `inner(..).match(..)`, the call as a match
@@ -63,11 +63,14 @@ inline_template = (
     (tf.tparams.len > 0).match ({
         true  => {
             targs = a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx, etargs)
+            mark = tf.func_calls_reflect().then({ a.mangle_str_in(name, targs) }, { name })
+            ienv = a.vcons(mark, tnamed(""), env)
             rsub = a.subst_ty_in(tf.tparams, targs, tf.ret)
             ab = a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, rsub), a.lit_pins(tf.tparams, targs, tf.params, cargs), tf.body)
             a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, a.subst_body(cs, tf.tparams, targs, tf.body), tf.params, ab.fargs, ab.env, rsub)))
         },
         false => {
+            ienv = a.vcons(name, tnamed(""), env)
             ab = a.bind_args(decls, idx, tf.params, cargs, a.bind_fnret(ienv, tf.ret), a.no_pins(tf.params.len), tf.body)
             a.blockify(a.cat_stmts(ab.binds, a.xform_body(decls, idx, a.subst_body(cs, empty_params(), no_tys(), tf.body), tf.params, ab.fargs, ab.env, tf.ret)))
         },
@@ -256,13 +259,26 @@ maybe_template* = (
     exp: Ty,
 ) Ptr<Expr> {
     idx.idx_template_call(decls, c.fn).match ({
-        true  => (env.is_inlining(c.fn) || idx.idx_func(decls, c.fn).no_inline_gen_f()).match ({
-            true  => a.pin_targs(decls, idx, c, cargs, env, exp, env.is_inlining(c.fn) == false),
-            false => (idx.idx_func(decls, c.fn).params.len == cargs.len).match ({
-                true  => a.inline_template(decls, idx, c.fn, cargs, env, exp, c.targs, c.pos),
-                false => a.recall(c, c.fn, cargs),
-            }),
-        }),
+        true  => {
+            tf = idx.idx_func(decls, c.fn)
+            reflect_gen = tf.tparams.len > 0
+                && tf.func_calls_reflect()
+                && tf.params.len == cargs.len
+            inprog = reflect_gen.match ({
+                true  => {
+                    its = a.infer_targs(tf.tparams, tf.params, tf.ret, exp, cargs, env, decls, idx, c.targs)
+                    env.is_inlining(a.mangle_str_in(c.fn, its))
+                },
+                false => env.is_inlining(c.fn),
+            })
+            (inprog || tf.no_inline_gen_f()).match ({
+                true  => a.pin_targs(decls, idx, c, cargs, env, exp, inprog == false),
+                false => (tf.params.len == cargs.len).match ({
+                    true  => a.inline_template(decls, idx, c.fn, cargs, env, exp, c.targs, c.pos),
+                    false => a.recall(c, c.fn, cargs),
+                }),
+            })
+        },
         false => a.recall(c, c.fn, cargs),
     })
 }
@@ -300,7 +316,7 @@ inline_decl* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, d: Decl) De
 // validator: self-recursion → error[recursive-hof] (kinds.ka_rec_hof_kind), a `return` inside a
 // loop → error[reflect-return] (kinds.ka_reflect_ret_kind).
 no_inline_gen_f* = (f: Func) bool {
-    f.is_generic_fn() && f.params.has_fnt_param() == false && f.body.calls_reflect() == false
+    f.is_generic_fn() && f.params.has_fnt_param() == false && f.func_calls_reflect() == false
 }
 // instance buffer: deduped by mangled name, bounded against polymorphic-recursion blowup (like mono).
 mono_rec = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, from: i64) MutSlice<Decl> {
