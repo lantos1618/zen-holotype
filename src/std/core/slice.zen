@@ -7,6 +7,7 @@
 { AllocatorBackend } = std.mem.alloc
 { Result, IoError, ok, err } = std.core.result
 { loop_at } = std.core.count
+{ move } = std.mem.raw
 buf_in*<T> = (a: AllocatorBackend, n: i64, like: [T]) Result<[T], IoError> {
     (n <= 0).match ({
         true  => ok(slice(null_ptr(), 0)),
@@ -108,4 +109,20 @@ find_by*<T> = (xs: [T], pred: (T) bool) i64 {
         })
     })
     r
+}
+// --- in-place shifts (overlapping `move`) -------------------------------------------------------
+// Open a hole at `pos` by shifting xs[pos .. end) up one slot. Source/dest always overlap — `move`,
+// never `copy`. Call with end == live len (slot `end` must be in the cap view).
+shift_up*<T> = (xs: [T], pos: i64, end: i64) void {
+    (end > pos).then({
+        e = sizeof(T)
+        xs.ptr.offset((pos + 1) * e).move(xs.ptr.offset(pos * e), (end - pos) * e)
+    })
+}
+// Close the hole at `i` by shifting xs[i+1 .. len) down one slot.
+shift_down*<T> = (xs: [T], len: i64, i: i64) void {
+    (i < len - 1).then({
+        e = sizeof(T)
+        xs.ptr.offset(i * e).move(xs.ptr.offset((i + 1) * e), (len - 1 - i) * e)
+    })
 }

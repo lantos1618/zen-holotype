@@ -18,6 +18,7 @@
 //   xs.is_sorted_by(less)          non-decreasing by `less`?            (bool)
 //   xs.binary_search(target)       index of a match, else `.None`       (Opt<i64>; requires sorted input)
 //   xs.binary_search_by(t, less)   comparator form of the above         (Opt<i64>)
+//   xs.lower_bound(k)              first index not less than k (`Ord`)  (i64; requires sorted input)
 //
 // The comparator `less(a, b)` returns true when `a` must sort BEFORE `b`. binary_search treats
 // `!less(a,b) && !less(b,a)` as equality, so it needs no separate `==` on T.
@@ -35,6 +36,7 @@
 //   binary_search_by — the [lo,hi) window halves each pass (≤⌈log2(n)⌉ times, bounded by the 0..xs.len
 //     `.loop`), breaking when the window empties or a match is found. Empty slice ⇒ `.None`.
 { Opt } = std.core.result
+{ Ord } = std.cmp
 sort_sift_down<T> = (xs: [T], start: i64, end: i64, less: (T, T) bool) void {
     root ::= start
     xs.loop((h, step, _) {
@@ -125,4 +127,23 @@ binary_search_by*<T> = (xs: [T], target: T, less: (T, T) bool) Opt<i64> {
 }
 binary_search*<T> = (xs: [T], target: T) Opt<i64> {
     xs.binary_search_by(target, (a: T, b: T) bool { a < b })
+}
+// First index in sorted `ks` whose key is NOT LESS THAN `k` (insertion point; equals `k`'s index
+// when present). Iterative binary search — O(log n), bounded stack.
+lower_bound*<K: Ord> = (ks: [K], k: K) i64 {
+    lo ::= 0
+    hi ::= ks.len
+    ks.loop((h, step, _) {
+        (lo >= hi).match ({
+            true  => h.break,
+            false => {
+                mid = lo + (hi - lo) / 2
+                (ks[mid].cmp(k) < 0).match ({
+                    true  => { lo = mid + 1 },
+                    false => { hi = mid },
+                })
+            },
+        })
+    })
+    lo
 }

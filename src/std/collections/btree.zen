@@ -1,120 +1,12 @@
-// std.collections.btree — `BTreeMap<K, V>` + `BTreeSet<K>`, the ORDERED associative map and set.
-// The sorted twin of the hash-based std.collections.{hmap,set}: those store entries in hash/insertion
-// order (iteration order is unspecified and perturbed by delete); these keep entries SORTED BY KEY at
-// all times, so iteration, `min`/`max` and `range` are exact and cheap. Same allocator threading and
-// Result-valued fallible ops as the rest of std.collections — nothing here hides a malloc.
-//
-// KEYS ARE TRAIT-DISPATCHED on `Ord` (a three-way compare, `cmp(a, b) < 0 / == 0 / > 0`). Impls for
-// i64/i32/u8/str ship right here, so scalar and (literal) string keys work out of the box. A STRUCT
-// key is one impl away — compare fields lexicographically:
-//
-//   Pt: { x: i64, y: i64 }
-//   Pt.impl(Ord, {
-//       cmp = (a: Pt, b: Pt) i64 { (a.x == b.x).match ({ true => a.y.cmp(b.y), false => a.x.cmp(b.x) }) }
-//   })
-//
-// IMPLEMENTATION: a sorted, gap-free array (two parallel `keys`/`vals` buffers for the map, one `keys`
-// buffer for the set). `get`/`contains`/`insert`-position are O(log n) binary search; `insert`/`remove`
-// are O(n) (shift the tail) but ALWAYS-SORTED, which is what makes ordered iteration and range queries
-// trivially correct — the array IS the sorted order. (A true B-tree would trade the shift for O(log n)
-// structural updates; the sorted array is the same external contract with far less machinery, and
-// correctness — not asymptotics — is this collection's job.)
-//
-// Every op that allocates returns Result<_, IoError> — allocation failure is a value. `of` seeds one
-// entry and infers K/V from it, so it chains: `m = btree.of(a, k, v).expect("of")`. `empty`'s K/V
-// appear only in its RETURN type, which inference can't reach through a `.expect` chain — pin them with
-// a two-step annotation instead:
-//
-//   r: Result<BTreeMap<i64, i64>, IoError> = btree.empty(a)
-//   m = r.expect("empty")
-//   m = m.insert(a, 5, 50).expect("insert")   // insert — grows through alloc when full
-//   m = m.insert(a, 5, 90).expect("insert")   // upsert — same key overwrites in place
-//   m.get(5)                                   // Opt<i64>: .Some(90); absent keys are .None
-//   m.contains(5)                              // true
-//   m = m.remove(a, 5)                         // remove — closes the gap, stays sorted
-//   m.min()   m.max()                          // Opt<K>: smallest / largest key
-//   m.each((k, v) { ... })                     // visit every pair IN SORTED KEY ORDER
-//   m.keys()                                   // the [K] key column — already sorted
-//   m.range(2, 8, (k, v) { ... })              // visit keys in [2, 8) (lo inclusive, hi exclusive)
-//   m.free(a)                                  // hand all buffers back to alloc
-//
-// VALUE-MOLD CONTRACT (same as Map<T>/HMap/Set — by-design, not bugs): a BTreeMap/BTreeSet is a small
-// by-value header over allocator-owned buffers.
-//   1. ALWAYS USE THE RETURNED VALUE: `insert` may grow (realloc) and `remove` drops len — a stale
-//      pre-call header points at freed memory or lies about len. Rebind every time:
-//      `m = m.insert(...).expect("…")`, `m = m.remove(a, k)`.
-//   2. NO IMPLICIT VALUE SEMANTICS: headers copied from one tree share one backing store.
+// std.collections.btree — ordered `BTreeMap<K, V>` + `BTreeSet<K>` over a sorted, gap-free array.
+// Keys are `Ord` (std.cmp). Lookup / insert-position are O(log n) via `lower_bound`; insert/remove
+// shift the tail (O(n)) and stay sorted. Fallible ops return Result<_, IoError>. Always rebind the
+// returned header after mutate — same value-mold contract as Map/HMap/Set/Vec.
 { Result, IoError, Opt } = std.core.result
-{ AllocatorBackend, try_acquire2 } = std.mem.alloc    // explicit allocator trait; try_acquire2 = all-or-nothing 2-buffer acquire (BTreeSet's 1-buffer sites keep plain try_acquire)
-{ strcmp } = std.c.libc    // three-way byte compare for str keys
-{ move } = std.mem.raw    // the OVERLAP-safe bulk shift behind bt_shift_up / bt_shift_down
-// `Ord` — total order on keys as a THREE-WAY compare: `cmp(a, b)` is < 0 when a < b, 0 when a == b,
-// > 0 when a > b. Everything sorted (binary search, insert position, range bounds) is expressed
-// through this one method. Impls for the scalar/str keys ship below.
-Ord: {
-    cmp: (Self, Self) i64,
-}
-i64.impl(Ord, {
-    cmp = (a: i64, b: i64) i64 {
-        (a < b).match ({
-            true  => 0 - 1,
-            false => (a > b).then({ 1 }, { 0 }),
-        })
-    }
-})
-i32.impl(Ord, {
-    cmp = (a: i32, b: i32) i64 {
-        (a < b).match ({
-            true  => 0 - 1,
-            false => (a > b).then({ 1 }, { 0 }),
-        })
-    }
-})
-u8.impl(Ord, {
-    cmp = (a: u8, b: u8) i64 {
-        (a < b).match ({
-            true  => 0 - 1,
-            false => (a > b).then({ 1 }, { 0 }),
-        })
-    }
-})
-StringView.impl(Ord, {
-    cmp = (a: StringView, b: StringView) i64 {
-        // Byte-wise three-way compare via libc strcmp (sign is what matters; equal LITERALS also share a
-        // pointer, but the byte compare is content-based so computed-equal strings order correctly too).
-        to_i64(a.strcmp(b))
-    }
-})
-// first index in [lo, hi) whose key is NOT LESS THAN k (i.e. the insertion point that keeps `ks` sorted
-// and, when k is present, the index k already occupies). Standard binary search — O(log(hi - lo)).
-bt_lower_bound<K: Ord> = (ks: [K], lo: i64, hi: i64, k: K) i64 {
-    (lo >= hi).match ({
-        true  => lo,
-        false => {
-            mid = lo + (hi - lo) / 2
-            (ks[mid].cmp(k) < 0).match ({
-                true  => bt_lower_bound(ks, mid + 1, hi, k),
-                false => bt_lower_bound(ks, lo, mid, k),
-            })
-        },
-    })
-}
-// shift xs[pos .. i) up by one slot to open a hole at `pos`. Source and destination are windows on
-// ONE buffer one slot apart — always overlapping — so this is `move`, never `copy`.
-// Call with i == len (slot `len` must be in the cap view).
-bt_shift_up<T> = (xs: [T], pos: i64, i: i64) void {
-    (i > pos).then({
-        e = sizeof(T)
-        xs.ptr.offset((pos + 1) * e).move(xs.ptr.offset(pos * e), (i - pos) * e)
-    })
-}
-// shift xs[i+1 .. len) down by one slot, closing the hole at `i`. Overlapping, same as above.
-bt_shift_down<T> = (xs: [T], len: i64, i: i64) void {
-    (i < len - 1).then({
-        e = sizeof(T)
-        xs.ptr.offset(i * e).move(xs.ptr.offset((i + 1) * e), (len - 1 - i) * e)
-    })
-}
+{ AllocatorBackend, try_acquire2 } = std.mem.alloc
+{ Ord } = std.cmp
+{ lower_bound } = std.sort
+{ shift_up, shift_down } = std.core.slice
 BTreeMap*<K, V>: {
     keys: RawPtr<u8>,
     vals: RawPtr<u8>,
@@ -133,7 +25,7 @@ BTreeMap*<K, V>: {
     }
     vals_all = (m: BTreeMap<K, V>) [V] { slice(m.vals, m.cap) }
     len      = (m: BTreeMap<K, V>) i64 { m.len }
-    pos_of   = (m: BTreeMap<K, V>, k: K) i64 { bt_lower_bound(m.keys(), 0, m.len, k) }
+    pos_of   = (m: BTreeMap<K, V>, k: K) i64 { lower_bound(m.keys(), k) }
     found_at = (m: BTreeMap<K, V>, pos: i64, k: K) bool {
         // true iff slot `pos` holds exactly k (pos is a lower_bound result, so it may be == len or
         // point at the first key > k).
@@ -213,8 +105,8 @@ BTreeMap*<K, V>: {
             true  => {
                 ks ::= m.keys_all()
                 vs ::= m.vals_all()
-                bt_shift_up(ks, pos, m.len)
-                bt_shift_up(vs, pos, m.len)
+                shift_up(ks, pos, m.len)
+                shift_up(vs, pos, m.len)
                 ks[pos] = k
                 vs[pos] = v
                 ok: Result<BTreeMap<K, V>, IoError> = .Ok(BTreeMap<K, V>(
@@ -230,8 +122,8 @@ BTreeMap*<K, V>: {
                     .Ok(next) => {
                         ks ::= next.keys_all()
                         vs ::= next.vals_all()
-                        bt_shift_up(ks, pos, next.len)
-                        bt_shift_up(vs, pos, next.len)
+                        shift_up(ks, pos, next.len)
+                        shift_up(vs, pos, next.len)
                         ks[pos] = k
                         vs[pos] = v
                         ok: Result<BTreeMap<K, V>, IoError> = .Ok(BTreeMap<K, V>(
@@ -278,8 +170,8 @@ BTreeMap*<K, V>: {
             true  => {
                 ks = m.keys()
                 vs = m.vals()
-                bt_shift_down(ks, m.len, pos)
-                bt_shift_down(vs, m.len, pos)
+                shift_down(ks, m.len, pos)
+                shift_down(vs, m.len, pos)
                 BTreeMap<K, V>(
                     keys: m.keys,
                     vals: m.vals,
@@ -404,7 +296,7 @@ BTreeSet*<K>: {
     }
     keys_all = (s: BTreeSet<K>) [K] { slice(s.keys, s.cap) }
     len      = (s: BTreeSet<K>) i64 { s.len }
-    pos_of   = (s: BTreeSet<K>, k: K) i64 { bt_lower_bound(s.keys(), 0, s.len, k) }
+    pos_of   = (s: BTreeSet<K>, k: K) i64 { lower_bound(s.keys(), k) }
     found_at = (s: BTreeSet<K>, pos: i64, k: K) bool {
         (pos < s.len).then({ s.keys()[pos].cmp(k) == 0 }, { false })
     }
@@ -454,7 +346,7 @@ BTreeSet*<K>: {
         out: Result<BTreeSet<K>, IoError> = (s.len < s.cap).match ({
             true  => {
                 ks ::= s.keys_all()
-                bt_shift_up(ks, pos, s.len)
+                shift_up(ks, pos, s.len)
                 ks[pos] = k
                 ok: Result<BTreeSet<K>, IoError> = .Ok(BTreeSet<K>(
                     keys: s.keys,
@@ -467,7 +359,7 @@ BTreeSet*<K>: {
                 s.grow(a).match ({
                     .Ok(next) => {
                         ks ::= next.keys_all()
-                        bt_shift_up(ks, pos, next.len)
+                        shift_up(ks, pos, next.len)
                         ks[pos] = k
                         ok: Result<BTreeSet<K>, IoError> = .Ok(BTreeSet<K>(
                             keys: next.keys,
@@ -505,7 +397,7 @@ BTreeSet*<K>: {
         s.found_at(pos, k).match ({
             true  => {
                 ks = s.keys()
-                bt_shift_down(ks, s.len, pos)
+                shift_down(ks, s.len, pos)
                 BTreeSet<K>(
                     keys: s.keys,
                     len: s.len - 1,
