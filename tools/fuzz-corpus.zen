@@ -20,7 +20,7 @@
 { access } = std.c.libc
 { run } = std.sys.process
 { arg, argc, set_env } = std.sys.os
-{ cat_in, contains, ends_with, len, split_in, sv_lt, view } = std.text.str
+{ cat_in, contains, ends_with, len, split_in, sv_lt, try_parse_int, view } = std.text.str
 { sort_by } = std.sort
 { String, init, append_in, finish_in } = std.text.string
 { arg_int, arg_str, format } = std.text.fmt
@@ -107,25 +107,66 @@ report_hit = (mp: Allocator, mode: StringView, f: StringView, o: StringView, rc:
     mp.print_excerpt(o)
     g_hits = g_hits + 1
 }
-// One probe: `$ASAN <mode> <file> -o /tmp/fuzz-corpus.out 2>&1`. std.sys.process captures stdout only,
-// so stderr — where every sanitizer banner lands — is folded in with an explicit `2>&1`.
-probe = (mp: Allocator, asan: StringView, mode: StringView, f: StringView) void {
-    cmd = mp
-        .addr()
-        .cat_in(mp
-            .addr()
-            .cat_in(mp.addr().cat_in(mp.addr().cat_in(asan, " "), mode), mp.addr().cat_in(" ", f)), " -o /tmp/fuzz-corpus.out 2>&1")
-    mp.addr().run(cmd).match ({
-        .Err(e) => mp.report_hit(mode, f, "spawn failed", 0 - 1),
-        .Ok(o)  => (is_sanitizer(o.stdout) || o.exit >= 128).then({
-            mp.report_hit(mode, f, o.stdout, o.exit)
-        }),
-    })
+// ── the probe plan ────────────────────────────────────────────────────────────
+// A probe is one `$ASAN <mode> <file>` invocation. They are ENUMERATED first and RUN second (see
+// run_probes) so the run can fan out: each probe is independent, and 500-odd sequential compiler
+// invocations under ASan were the whole cost of this gate.
+Probe*: {
+    mode: StringView,
+    path: StringView,
 }
-sweep_file = (mp: Allocator, asan: StringView, f: StringView) void {
-    g_files = g_files + 1
-    mp.probe(asan, "check", f)
-    mp.probe(asan, "build", f)
+probe_buf = (mp: Allocator, n: i64) MutSlice<Probe> {
+    slice(mp.addr().acquire(n * sizeof(Probe)).assert_nonnull(), n)
+}
+// Per-probe scratch, keyed by INDEX: `p_<i>.txt` is the probe's combined stdout+stderr and `p_<i>.rc`
+// its exit status. Both are per-probe because the sweep is concurrent — the old single
+// `-o /tmp/fuzz-corpus.out` was a shared output path, which is what made a parallel sweep unsound
+// rather than merely un-attempted.
+RUN_DIR = "/tmp/fuzz-corpus-run"
+itoa = (mp: Allocator, n: i64) StringView {
+    mp.addr().finish_in(mp.addr().integer(n).expect("fuzz-corpus: oom")).expect("fuzz-corpus: oom")
+}
+probe_path = (mp: Allocator, stem: StringView, i: i64, ext: StringView) StringView {
+    mp.addr().cat_in(mp.addr().cat_in(mp.addr().cat_in(RUN_DIR, stem), mp.itoa(i)), ext)
+}
+// std.text.string's append_in takes ONE part; the command lines are built from many, so join here
+// rather than nesting a dozen calls at each site.
+add_all = (mp: Allocator, s: String, parts: MutSlice<StringView>) String {
+    out ::= s
+    parts.loop_at((i, t) { out = mp.addr().append_in(out, t).expect("fuzz-corpus: oom") })
+    out
+}
+// One command line: run the probe, fold stderr in (std.sys.process captures stdout only, and every
+// sanitizer banner lands on stderr), then record the exit status. `-o` goes to a per-probe path.
+probe_cmd = (mp: Allocator, s: String, asan: StringView, p: Probe, i: i64) String {
+    mp.add_all(s, [asan, " ", p.mode, " ", p.path, " -o ", mp.probe_path("/o_", i, ""), " > ", mp.probe_path("/p_", i, ".txt"), " 2>&1; printf %s $? > ", mp.probe_path("/p_", i, ".rc"), "\n"])
+}
+// A balanced worker pool: `nproc` shells, each running every n'th command line. Round-robin (rather
+// than contiguous blocks) keeps the mix even — a `check` is fast and a `build` forks cc — so no worker
+// is left holding all the slow probes. Results are keyed by index, so completion order is irrelevant
+// and the REPORT stays in corpus order.
+POOL_RUNNER = () StringView {
+    "set -u\nT=\"$1\"\nN=\"$(nproc 2>/dev/null || echo 4)\"\nw=0\nwhile [ \"$w\" -lt \"$N\" ]; do\n  awk -v w=\"$w\" -v n=\"$N\" 'NR % n == w' \"$T/cmds.txt\" | sh &\n  w=$((w + 1))\ndone\nwait\n"
+}
+// Classify ONE finished probe from its recorded output and exit status. A missing `.rc` means the
+// probe never ran to completion — reported as a hit, never silently skipped.
+classify = (mp: Allocator, p: Probe, i: i64) void {
+    mp.addr().contents_in(mp.probe_path("/p_", i, ".rc")).match ({
+        .Err(e)  => mp.report_hit(p.mode, p.path, "probe produced no exit status", 0 - 1),
+        .Ok(rcs) => {
+            o = mp.addr().contents_in(mp.probe_path("/p_", i, ".txt")).match ({
+                .Ok(t)  => t,
+                .Err(e) => "",
+            })
+            rc = rcs.try_parse_int().match ({
+                .Ok(v)  => v,
+                .Err(x) => 0 - 1,
+            })
+            (is_sanitizer(o) || rc >= 128 || rc < 0).then({
+                mp.report_hit(p.mode, p.path, o, rc)
+            })
+        },
+    })
 }
 // ── the EOF-adjacent edge shapes, carried here as literal bytes ───────────────
 // `at` is a raw indexed load whose ONLY bound is the NUL terminator, so a lookahead past the byte the
@@ -138,16 +179,19 @@ sweep_file = (mp: Allocator, asan: StringView, f: StringView) void {
 // A corpus FILE cannot pin them: each ends mid-token with no trailing newline, and the fmt gate (which
 // covers tests/, examples/ and tools/) would rewrite that ending away. So they are written out and
 // swept through the same ASan `check` as everything else.
-EDGE_PATH = "/tmp/fuzz-corpus-edge.zen"
-sweep_edge = (mp: Allocator, asan: StringView, src: StringView) void {
-    EDGE_PATH.save(src, src.len()).expect("fuzz-corpus: cannot write the edge-shape input")
-    g_files = g_files + 1
-    mp.probe(asan, "check", EDGE_PATH)
+EDGE_SRCS = () MutSlice<StringView> {
+    ["main = () void {\n    x = 1\n    x.println()\n}", "main = () void {\n    s = \"hi\\", "main = () void {\n    c = '\\x"]
 }
-sweep_edges = (mp: Allocator, asan: StringView) void {
-    mp.sweep_edge(asan, "main = () void {\n    x = 1\n    x.println()\n}")
-    mp.sweep_edge(asan, "main = () void {\n    s = \"hi\\")
-    mp.sweep_edge(asan, "main = () void {\n    c = '\\x")
+// Each edge shape gets its OWN file: they are swept concurrently with everything else, so a single
+// rewritten scratch path would race.
+edge_path = (mp: Allocator, i: i64) StringView { mp.probe_path("/edge_", i, ".zen") }
+write_edges = (mp: Allocator) void {
+    EDGE_SRCS().loop_at((i, src) {
+        mp
+            .edge_path(i)
+            .save(src, src.len())
+            .expect("fuzz-corpus: cannot write the edge-shape input")
+    })
 }
 // ── setup: the ASan compiler must exist, or the sweep proves nothing ──────────
 fail2 = (msg: StringView) i32 {
@@ -181,12 +225,59 @@ ensure_asan = (mp: Allocator, root: StringView, asan: StringView) i32 {
         }),
     })
 }
+// Enumerate the plan: `check` and `build` for every corpus file, then `check` for each edge shape.
+// Corpus order is preserved, so the hit list reads the same as the serial sweep did.
+plan_probes = (mp: Allocator, corpus: MutSlice<StringView>) MutSlice<Probe> {
+    ne = EDGE_SRCS().len
+    ps :: MutSlice<Probe> = mp.probe_buf(corpus.len * 2 + ne)
+    corpus.loop_at((i, f) {
+        ps[i * 2] = Probe(
+            mode: "check",
+            path: f,
+        )
+        ps[i * 2 + 1] = Probe(
+            mode: "build",
+            path: f,
+        )
+    })
+    EDGE_SRCS().loop_at((i, src) {
+        ps[corpus.len * 2 + i] = Probe(
+            mode: "check",
+            path: mp.edge_path(i),
+        )
+    })
+    ps
+}
+// Write the command list, run it through the pool, and fail closed if the pool itself could not run.
+run_probes = (mp: Allocator, asan: StringView, ps: MutSlice<Probe>) bool {
+    cmds ::= mp.addr().init(ps.len * 256).expect("fuzz-corpus: oom")
+    ps.loop_at((i, p) { cmds = mp.probe_cmd(cmds, asan, p, i) })
+    text = mp.addr().finish_in(cmds).expect("fuzz-corpus: oom")
+    cmds_path = mp.addr().cat_in(RUN_DIR, "/cmds.txt")
+    cmds_path.save(text, text.len()).expect("fuzz-corpus: cannot write the probe list")
+    runner = mp.addr().cat_in(RUN_DIR, "/pool.sh")
+    runner
+        .save(POOL_RUNNER(), POOL_RUNNER().len())
+        .expect("fuzz-corpus: cannot write the pool runner")
+    mp.addr().cat_in(mp.addr().cat_in("sh ", runner), mp.addr().cat_in(" ", RUN_DIR)).shell().match ({
+        .Ok(rc) => rc == 0,
+        .Err(e) => false,
+    })
+}
 sweep = (mp: Allocator, asan: StringView, corpus: MutSlice<StringView>) i32 {
     corpus.sort_paths()
-    corpus.loop((h, i, f) {
-        mp.sweep_file(asan, f)
+    mp
+        .addr()
+        .cat_in(mp.addr().cat_in("rm -rf ", RUN_DIR), mp.addr().cat_in(" && mkdir -p ", RUN_DIR))
+        .shell()
+        .expect("fuzz-corpus: cannot prepare the run directory")
+    mp.write_edges()
+    ps = mp.plan_probes(corpus)
+    g_files = (corpus.len + EDGE_SRCS().len).to_i32()
+    (mp.run_probes(asan, ps) == false).then({
+        return fail2("fuzz-corpus: FAIL — the probe pool did not run")
     })
-    mp.sweep_edges(asan)
+    ps.loop_at((i, p) { mp.classify(p, i) })
     format("corpus: {} files, {} sanitizer hits\n", [arg_int(g_files), arg_int(g_hits)])
     (g_hits == 0).then({ 0 }, { 1 })
 }
