@@ -1,16 +1,16 @@
 { Expr, Field, FieldInit, Param, Ty } = compiler.ast.ast_types
-{ bin_at, call_at, call_targs_at, cond, field, field_at, finit, finit_at, lam_r, lit, mkenumg,
-  mkenumg_at, mkstruct, mkstruct_at, mkstructg_at, mktagg, mktagg_at, param, param_at, raw_call_at,
+{ bin_at, call_at, call_targs_at, cond, field_at, finit, finit_at, lam_r, lit, mkenumg,
+  mkenumg_at, mkstruct_at, mkstructg_at, mktagg, mktagg_at, param, param_at, raw_call_at,
   slit, tf64, ti32, ti64, tnamed, tstring_literal, tu8, tvoid, vref, vref_at, acquire_or_die } = compiler.genc
-{ mangle_anon_in, mangle_str_in } = compiler.mangle
+{ mangle_str_in } = compiler.mangle
 { Scan, Token, scan } = compiler.lex
 { at, is_upper } = std.text.ascii
 { Allocator } = std.mem.alloc
-{ PEnd, TyEnd, is_comma, is_langle, is_lbrace, is_lbracket, is_rangle, is_rbrace, is_rbracket,
+{ PEnd, TyEnd, is_comma, is_langle, is_lbrace, is_lbracket, is_rangle, is_rbracket,
   is_rparen, is_shr_close, bopen_enter, bopen_exit, param_buf, parse_ty, parse_tyargs, perr_set_at,
-  register_anon, skip_block, take_params } = compiler.parse_type
+  skip_block, take_params } = compiler.parse_type
 { build_body } = compiler.parse_stmt
-{ enode, is_op, is_op1, is_walrus, lexeme, parse_atom, parse_payload_args } = compiler.parse_atom
+{ enode, is_op, lexeme, parse_atom, parse_payload_args } = compiler.parse_atom
 { is_dot, is_ident_tok, nl_between, parse_or_nested, parse_postfix } = compiler.parse_postfix
 { PExpr } = compiler.parse_expr
 { loop_at } = std.core.count
@@ -192,7 +192,7 @@ is_tyarg_tok = (src: StringView, t: Token) bool {
         || src.is_op(t, '(')
         || src.is_rparen(t)
         || src.is_op(t, ':')
-}    // fn-type args `() R` — a `(A,B) R` element inside `Name<…>`; `:` = a decl tparam bound `<T: Trait>`
+}    // fn-type args `() R` — a `(left: A, right: B) R` element inside `Name<…>`; `:` = a decl tparam bound `<T: Trait>`
 // Generic struct construction is `Name<...>(f: v)`.
 parse_generic_struct_lit = (
     a: Allocator,
@@ -211,56 +211,6 @@ parse_generic_struct_lit = (
         expr: a.enode(mkstructg_at(name, mty, ta.args, inits, tnpos)),
         next: fe.next,
     )
-}
-// Distinguished from a brace BLOCK (`{ stmts }`) by the leading shape `ident :` (single colon) whose
-// first top-level separator is a `,` or the closing `}` — NOT a binding mark. A top-level single `=`
-// or a walrus before the first `,`/`}` proves the brace is a BLOCK whose first statement is a typed
-// binding (`{ x: T = 1  x }`): a struct-literal field value can never contain a bare `=`, because
-// assignment is a statement in Zen and every `=`-shaped OPERATOR (`==`, `=>`, `<=`, `+=`, …) lexes as
-// a two-byte token that `is_op1` rejects. `{ x ::= 1 … }` / `{ x :: T = 1 … }` are rejected one step
-// earlier — `is_field_colon` requires a SINGLE colon, and the lexer fuses `::`/`::=` into one token. The literal's structural name (mangle_anon_in over the field names) matches
-// the one parse_type synthesizes for the corresponding `{ q: T, r: T }` TYPE, so they share a C struct.
-looks_anon_struct* = (src: StringView, pos: i32) bool {
-    id = src.scan(pos)    // pos just past '{'
-    is_ident_tok(id.tok).match ({
-        true  => {
-            c = src.scan(id.next)
-            src.is_field_colon(c.tok).then({ src.anon_scan_kind(c.next, 0) == 1 }, { false })
-        },
-        false => false,
-    })
-}
-// 1 = anon struct (a top-level ',' or the closing '}'), 0 = block (a top-level binding), -1 = EOF/garbage.
-anon_scan_kind = (src: StringView, pos: i32, depth: i32) i32 {
-    sc = src.scan(pos)
-    sc.tok.kind.match ({
-        .Eof => 0 - 1,
-        _    => src.is_lbrace(sc.tok).match ({
-            true  => src.anon_scan_kind(sc.next, depth + 1),
-            false => src.is_rbrace(sc.tok).match ({
-                true  => (depth == 0).then({ 1 }, { src.anon_scan_kind(sc.next, depth - 1) }),
-                false => src.anon_scan_open(sc, depth),
-            }),
-        }),
-    })
-}
-anon_scan_open = (src: StringView, sc: Scan, depth: i32) i32 {
-    (src.is_op(sc.tok, '(') || src.is_lbracket(sc.tok)).match ({
-        true  => src.anon_scan_kind(sc.next, depth + 1),
-        false => (src.is_rparen(sc.tok) || src.is_rbracket(sc.tok)).match ({
-            true  => src.anon_scan_kind(sc.next, depth - 1),
-            false => (depth == 0).match ({
-                true  => (src.is_walrus(sc.tok) || src.is_op1(sc.tok, '=')).match ({
-                    true  => 0,
-                    false => src.is_comma(sc.tok).match ({
-                        true  => 1,
-                        false => src.anon_scan_kind(sc.next, depth),
-                    }),
-                }),
-                false => src.anon_scan_kind(sc.next, depth),
-            }),
-        }),
-    })
 }
 afield_buf* = (a: Allocator) MutSlice<Field> { slice(a.acquire_or_die(256 * sizeof(Field)), 256) }
 // Syntactically infer a literal field VALUE's type, mirroring the checker's infer_expr for the forms a
@@ -281,62 +231,6 @@ inits_as_fields* = (a: Allocator, inits: MutSlice<FieldInit>) MutSlice<Field> {
     buf ::= a.afield_buf()
     inits.loop_at((i, fi) { buf[i] = field_at(fi.name, infer_lit_ty(fi.value), fi.pos) })    // names-only mangle; types feed the hoisted StructDecl
     slice(buf.ptr, inits.len)
-}
-parse_anon_struct_lit* = (a: Allocator, src: StringView, pos: i32) PExpr {
-    buf = a.finit_buf()    // pos just past '{'
-    fe = a.fill_ainits(src, pos, buf, 0)
-    inits = buf.take_inits(fe.count)
-    fields = a.inits_as_fields(inits)
-    name = a.mangle_anon_in(fields)
-    register_anon(name, fields)
-    PExpr(
-        expr: a.enode(mkstruct(name, inits)),
-        next: fe.next,
-    )
-}    // hoist the synthesized struct decl (a bare literal has no type-position decl)
-fill_ainits = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<FieldInit>, i: i32) PEnd {
-    sc = src.scan(pos)
-    sc.tok.kind.match ({
-        .Eof => {
-            perr_set_at(pos)
-            PEnd(
-                count: i,
-                next: sc.next,
-            )
-        },
-        _    => src.is_rbrace(sc.tok).match ({
-            true  => PEnd(
-                count: i,
-                next: sc.next,
-            ),
-            false => a.fill_ainit(src, pos, buf, i),
-        }),
-    })
-}
-fill_ainit = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<FieldInit>, i: i32) PEnd {
-    (i >= buf.len).then({
-        perr_set_at(pos)
-        return PEnd(
-            count: i,
-            next: pos,
-        )
-    })
-    nt = src.scan(pos)    // field name
-    nm = a.lexeme(src, nt.tok)
-    colon = src.scan(nt.next)    // ':'
-    v = a.parse_or_nested(src, colon.next)    // the value expression
-    buf[i] = finit_at(nm, v.expr, nt.tok.start)
-    after = src.scan(v.next)    // ',' / next field / '}'
-    src.is_comma(after.tok).match ({
-        true  => a.fill_ainits(src, after.next, buf, i + 1),
-        false => is_ident_tok(after.tok).match ({
-            true  => a.fill_ainits(src, v.next, buf, i + 1),
-            false => PEnd(
-                count: i + 1,
-                next: after.next,
-            ),
-        }),
-    })
 }
 // Paren struct construction: `Name(field: value, ...)`.
 finit_buf* = (a: Allocator) MutSlice<FieldInit> {
@@ -643,7 +537,7 @@ parse_lambda* = (a: Allocator, src: StringView, open: Scan) PExpr {
     buf = a.param_buf()
     pe = a.fill_lnames(src, open.next, buf, 0)
     // optional return type before the body '{' — KEEP it (lam_r) so a generic call can infer a tparam
-    // bound only by a closure-param's return position `(T) U`.
+    // bound only by a closure-param's return position `(value: T) U`.
     rt = src.is_lbrace(src.scan(pe.next).tok).match ({
         true  => TyEnd(
             ty: tvoid(),

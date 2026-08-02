@@ -16,7 +16,7 @@
 //   • every top-level fn (and foreign decl) as `name[*][<tparams>] = (params) ret` — no body;
 //     trailing `*` = exported (recovered via compiler.parse.exports_get after the parse)
 //   • every struct with its FULL field list on one line; every enum with its full variant chain
-//     (multi-payload variants are re-inlined from their synthesized `__anon…` tuple structs, which
+//     (multi-payload variants are re-inlined from their synthesized `__payload…` tuple structs, which
 //     are themselves suppressed at top level — no internal name leaks)
 //   • impl methods (the parser hoists them to mangled top-level DFuncs) print DEMANGLED as
 //     `Ty.m = (params) ret` under a `Ty.impl(Trait)` head; the hoisted mangled fns are skipped
@@ -35,14 +35,14 @@
 { sort_by } = std.sort
 { expect, or } = std.core.result
 { then } = std.core.bool
-{ arg_int, arg_str, format } = std.text.fmt
+{ arg_int, arg_str, format } = std.io.print
 { String } = std.text.string
 { exports_get, parse_module } = compiler.parse
 { perr_get } = compiler.parse_type
 { lerr_get } = compiler.lex
 { Decl, Field, Func, GlobalData, ImplData, Param, Ty, VariantDef } = compiler.ast.ast_types
-{ gstr_finish, is_expr_null, tvoid } = compiler.genc
-{ ff_append, ff_string, ff_ty } = compiler.pretty
+{ is_expr_null, tvoid } = compiler.genc
+{ ff_ty } = compiler.pretty
 { ff_expr } = compiler.pretty_expr
 { ff_is_hoisted } = compiler.pretty_decl
 { impl_cname_in } = compiler.mangle
@@ -82,8 +82,8 @@ is_exported = (exp: MutSlice<Param>, name: StringView) bool {
 // `name` plus the trailing `*` export marker when the parse recorded it
 sig_name = (s: String, mp: Allocator, exp: MutSlice<Param>, name: StringView) String {
     is_exported(exp, name).match ({
-        true  => s.ff_append(mp, name).ff_append(mp, "*"),
-        false => s.ff_append(mp, name),
+        true  => s.add(name).add("*"),
+        false => s.add(name),
     })
 }
 // `<A, B: Bound>` (empty tparams print nothing; a bound is carried as the tparam's Named ty)
@@ -91,15 +91,15 @@ sig_tparams = (s: String, mp: Allocator, tps: MutSlice<Param>) String {
     (tps.len == 0).match ({
         true  => s,
         false => {
-            body ::= s.ff_append(mp, "<")
+            body ::= s.add("<")
             tps.loop((h, i, p) {
-                body = (i == 0).then({ body }, { body.ff_append(mp, ", ") })
+                body = (i == 0).then({ body }, { body.add(", ") })
                 body = p.ty.match ({
-                    .Void => body.ff_append(mp, p.name),
-                    _     => body.ff_append(mp, p.name).ff_append(mp, ": ").ff_ty(mp, p.ty),
+                    .Void => body.add(p.name),
+                    _     => body.add(p.name).add(": ").ff_ty(mp, p.ty),
                 })
             })
-            body.ff_append(mp, ">")
+            body.add(">")
         },
     })
 }
@@ -113,13 +113,13 @@ variadic_elem = (t: Ty) Ty {
 sig_params = (s: String, mp: Allocator, ps: MutSlice<Param>) String {
     body ::= s
     ps.loop((h, i, p) {
-        body = (i == 0).then({ body }, { body.ff_append(mp, ", ") })
+        body = (i == 0).then({ body }, { body.add(", ") })
         body = p.variadic.match ({
             true  => body
-                .ff_append(mp, p.name)
-                .ff_append(mp, ": ...")
+                .add(p.name)
+                .add(": ...")
                 .ff_ty(mp, variadic_elem(p.ty)),
-            false => body.ff_append(mp, p.name).ff_append(mp, ": ").ff_ty(mp, p.ty),
+            false => body.add(p.name).add(": ").ff_ty(mp, p.ty),
         })
     })
     body
@@ -129,14 +129,14 @@ sig_tail = (s: String, mp: Allocator, f: Func) String {
     g_fns = g_fns + 1
     s
         .sig_tparams(mp, f.tparams)
-        .ff_append(mp, " = (")
+        .add(" = (")
         .sig_params(mp, f.params)
-        .ff_append(mp, ") ")
+        .add(") ")
         .ff_ty(mp, f.ret)
-        .ff_append(mp, "\n")
+        .add("\n")
 }
 sig_fn = (s: String, mp: Allocator, exp: MutSlice<Param>, f: Func) String {
-    s.ff_append(mp, "  ").sig_name(mp, exp, f.name).sig_tail(mp, f)
+    s.add("  ").sig_name(mp, exp, f.name).sig_tail(mp, f)
 }
 // ── structs / enums ───────────────────────────────────────────────────────────
 sig_struct = (
@@ -149,17 +149,17 @@ sig_struct = (
 ) String {
     g_types = g_types + 1
     body ::= s
-        .ff_append(mp, "  ")
+        .add("  ")
         .sig_name(mp, exp, name)
         .sig_tparams(mp, tps)
-        .ff_append(mp, ": {")
+        .add(": {")
     fields.loop((h, i, fl) {
-        body = (i == 0).then({ body.ff_append(mp, " ") }, { body.ff_append(mp, ", ") })
-        body = body.ff_append(mp, fl.name).ff_append(mp, ": ").ff_ty(mp, fl.ty)
+        body = (i == 0).then({ body.add(" ") }, { body.add(", ") })
+        body = body.add(fl.name).add(": ").ff_ty(mp, fl.ty)
     })
-    body.ff_append(mp, " }\n")
+    body.add(" }\n")
 }
-// a multi-payload variant `V(t0, t1)` is desugared at parse time into a synthesized `__anon…` struct;
+// a multi-payload variant `V(t0, t1)` is desugared at parse time into a synthesized `__payload…` struct;
 // re-inline its field types as the surface tuple (the struct itself is suppressed at top level)
 sig_tuple = (s: String, mp: Allocator, decls: MutSlice<Decl>, nm: StringView, t: Ty) String {
     found ::= false
@@ -168,34 +168,34 @@ sig_tuple = (s: String, mp: Allocator, decls: MutSlice<Decl>, nm: StringView, t:
         d.match ({
             .DStruct(sd) => (sd.name == nm && found == false).then({
                 found = true
-                body = body.ff_append(mp, "(")
+                body = body.add("(")
                 sd.fields.loop((h2, k, fl) {
-                    body = (k == 0).then({ body }, { body.ff_append(mp, ", ") })
+                    body = (k == 0).then({ body }, { body.add(", ") })
                     body = body.ff_ty(mp, fl.ty)
                 })
-                body = body.ff_append(mp, ")")
+                body = body.add(")")
             }),
             _            => { },
         })
     })
-    found.then({ body }, { body.ff_append(mp, "(").ff_ty(mp, t).ff_append(mp, ")") })
+    found.then({ body }, { body.add("(").ff_ty(mp, t).add(")") })
 }
 sig_payload = (s: String, mp: Allocator, decls: MutSlice<Decl>, t: Ty) String {
     t.match ({
-        .Named(nm) => nm.starts_with("__anon").match ({
+        .Named(nm) => nm.starts_with("__payload").match ({
             true  => s.sig_tuple(mp, decls, nm, t),
-            false => s.ff_append(mp, "(").ff_ty(mp, t).ff_append(mp, ")"),
+            false => s.add("(").ff_ty(mp, t).add(")"),
         }),
-        _          => s.ff_append(mp, "(").ff_ty(mp, t).ff_append(mp, ")"),
+        _          => s.add("(").ff_ty(mp, t).add(")"),
     })
 }
 // one variant: `Name`, `Name(Payload)`, or — zero-arg ctor with a default constant — `Name = expr`
 sig_variant = (s: String, mp: Allocator, decls: MutSlice<Decl>, vd: VariantDef) String {
     base = vd.payload.match ({
-        .Void => s.ff_append(mp, vd.name),
-        _     => s.ff_append(mp, vd.name).sig_payload(mp, decls, vd.payload),
+        .Void => s.add(vd.name),
+        _     => s.add(vd.name).sig_payload(mp, decls, vd.payload),
     })
-    vd.dflt.is_expr_null().then({ base }, { base.ff_append(mp, " = ").ff_expr(mp, vd.dflt, 0) })
+    vd.dflt.is_expr_null().then({ base }, { base.add(" = ").ff_expr(mp, vd.dflt, 0) })
 }
 sig_enum = (
     s: String,
@@ -208,15 +208,15 @@ sig_enum = (
 ) String {
     g_types = g_types + 1
     body ::= s
-        .ff_append(mp, "  ")
+        .add("  ")
         .sig_name(mp, exp, name)
         .sig_tparams(mp, tps)
-        .ff_append(mp, ": ")
+        .add(": ")
     vs.loop((h, i, vd) {
-        body = (i == 0).then({ body }, { body.ff_append(mp, " | ") })
+        body = (i == 0).then({ body }, { body.add(" | ") })
         body = body.sig_variant(mp, decls, vd)
     })
-    body.ff_append(mp, "\n")
+    body.add("\n")
 }
 // ── impls / globals ───────────────────────────────────────────────────────────
 // an impl marker: a `Ty.impl(Trait)` head (trait impls only — inherent impls have ty == trname),
@@ -226,20 +226,20 @@ sig_impl = (s: String, mp: Allocator, decls: MutSlice<Decl>, im: ImplData) Strin
     body ::= (im.ty == im.trname).match ({
         true  => s,
         false => s
-            .ff_append(mp, "  ")
-            .ff_append(mp, im.ty)
-            .ff_append(mp, ".impl(")
+            .add("  ")
+            .add(im.ty)
+            .add(".impl(")
             .ff_ty(mp, im.trty)
-            .ff_append(mp, ")\n"),
+            .add(")\n"),
     })
     im.methods.loop((h, k, p) {
         f = find_fn(decls, mp.impl_cname_in(im.trname, im.ty, p.name))
         (f.name == "" == false).then({
             body = body
-                .ff_append(mp, "  ")
-                .ff_append(mp, im.ty)
-                .ff_append(mp, ".")
-                .ff_append(mp, p.name)
+                .add("  ")
+                .add(im.ty)
+                .add(".")
+                .add(p.name)
                 .sig_tail(mp, f)
         })
     })
@@ -254,15 +254,15 @@ sig_global = (s: String, mp: Allocator, exp: MutSlice<Param>, g: GlobalData) Str
         true  => s,
         false => {
             mark = g.mut.then({ " ::= " }, { " = " })
-            head = s.ff_append(mp, "  ").sig_name(mp, exp, g.name).ff_append(mp, mark)
+            head = s.add("  ").sig_name(mp, exp, g.name).add(mark)
             body = g.tl.match ({
                 true  => head
-                    .ff_append(mp, "thread_local(")
+                    .add("thread_local(")
                     .ff_expr(mp, g.init, 0)
-                    .ff_append(mp, ")"),
+                    .add(")"),
                 false => head.ff_expr(mp, g.init, 0),
             })
-            body.ff_append(mp, "\n")
+            body.add("\n")
         },
     })
 }
@@ -271,7 +271,7 @@ sig_decl = (s: String, mp: Allocator, exp: MutSlice<Param>, decls: MutSlice<Decl
     d.match ({
         .DFunc(f)      => mp.ff_is_hoisted(decls, f.name).then({ s }, { s.sig_fn(mp, exp, f) }),    // a hoisted impl method — printed demangled via its DImpl marker
         .DForeign(f)   => s.sig_fn(mp, exp, f),
-        .DStruct(sd)   => sd.name.starts_with("__anon").match ({
+        .DStruct(sd)   => sd.name.starts_with("__payload").match ({
             true  => s,
             false => s.sig_struct(mp, exp, sd.name, no_params(), sd.fields),
         }),    // synthesized tuple-payload struct — re-inlined at its variant
@@ -291,19 +291,19 @@ emit_file = (mp: Allocator, path: StringView) void {
     decls = mp.parse_module(src)
     exp = exports_get()
     s ::= mp
-        .ff_string(4096)
-        .ff_append(mp, "## ")
-        .ff_append(mp, path)
-        .ff_append(mp, "\n")
+        .String(4096)
+        .add("## ")
+        .add(path)
+        .add("\n")
     (perr_get() || lerr_get()).match ({
         true  => {
-            s = s.ff_append(mp, "  !! parse error, module skipped\n")
+            s = s.add("  !! parse error, module skipped\n")
         },
         false => decls.loop((h, i, d) {
             s = s.sig_decl(mp, exp, decls, d)
         }),
     })
-    out(s.gstr_finish(mp)).or(0)
+    out(s.finish_cstr()).or(0)
 }
 // directory listings are unsorted; sections must be stable
 sort_names = (xs: MutSlice<StringView>) void {

@@ -195,7 +195,7 @@ string and so do not appear in `--help`:
 | `--build-self` | Regenerate the seed, tree-shaken to what `main` reaches. |
 | `--build-self-full` | Regenerate the full seed, no tree-shake. |
 
-Underneath those it reads a single file or resolves `zen.toml`/`build.zen` projects, runs the checked
+Underneath those it reads a single file or resolves `build.zen` projects, runs the checked
 compiler pipeline, renders mapped diagnostics from flattened offsets back to source files, invokes
 `cc` for C builds, emits JS with `bootstrap/zenrt.js`, and assembles compiler sources for
 `--build-self`.
@@ -206,11 +206,12 @@ The `lsp` command is a compiler surface, not a driver detail: it is backed by fo
 same check pipeline and diagnostic mapping as `check`, so it is a client of the semantic layer rather
 than a parallel implementation of it.
 
-`build.zen` is itself compiled and run to emit a target specification, which wins over `zen.toml`. The
-Zen-side `Target*` record carries eleven fields (`src/std/build.zen:57`: `name`, `root_`, `main_`,
-`out_`, `links_`, `sources_`, `frameworks_`, `libraries_`, `platform_`, `ffi_`, `cflags_`). Those
+`build.zen` is itself compiled and run to emit a target specification. It is the only project
+configuration surface. The Zen-side `Target*` record carries twelve fields: `name`, `library_`,
+`root_`, `main_`, `out_`, `links_`, `sources_`, `frameworks_`, `libraries_`, `platform_`, `ffi_`,
+and `cflags_`. Those
 cross the process boundary as a printed ten-line record per target (`std.build::emit_target`) —
-name, root, main, out, linker flags, compiler inputs, os, arch, abi, ffi grants — with the
+name, root, main, out (or the reserved library marker), linker flags, compiler inputs, os, arch, abi, ffi grants — with the
 multi-valued fields flattened into the linker-flags and compiler-inputs lines. `driver.zen` parses
 that back (`parse_spec_at`) into a nine-field `Spec*` (`driver.zen:2616`: `source`, `out`, `ccflags`,
 `links`, `ffi`, `genmods`, `target`, `library`, `ok`). This is a useful proof that build configuration

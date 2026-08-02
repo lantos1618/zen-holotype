@@ -1,49 +1,47 @@
 { String } = std.text.string
-{ gstr_push, gstr_append } = compiler.genc
 { dec_digit } = compiler.astops
 { Allocator } = std.mem.alloc
 { escape_into } = std.text.ascii    // the shared scan-and-emit loop; the C escape TABLE stays here
 // A non-printable byte as a 3-digit octal C escape `\ooo`. Octal (not `\xNN`) is used deliberately:
 // hex escapes are greedy in C and would swallow a following literal hex digit, whereas an octal escape
 // is capped at 3 digits, so any byte followed by any byte round-trips. dec_digit() only sees 0..7 here.
-gen_oct_byte = (s: String, alloc: Allocator, b: u8) String {
+gen_oct_byte = (s: String, b: u8) String {
     n = b.to_i64()
     s
-        .gstr_push(alloc, '\\')
-        .gstr_push(alloc, dec_digit(n / 64))
-        .gstr_push(alloc, dec_digit(n / 8 % 8))
-        .gstr_push(alloc, dec_digit(n % 8))
+        .add_one('\\')
+        .add_one(dec_digit(n / 64))
+        .add_one(dec_digit(n / 8 % 8))
+        .add_one(dec_digit(n % 8))
 }
 // escape one byte for a C string literal. `"`/`\` are quoted; the common control bytes get their short
 // escapes (\n \r \t); printable ASCII (0x20..0x7E) passes through; every other byte — CR was the bug
 // (#50), plus \t, NUL, DEL and all non-printables/high bytes — is emitted as a 3-digit octal escape so
 // any byte value in a Zen string survives the emitted C literal verbatim.
 gen_escape_byte = (s: String, ap: MutPtr<Allocator>, b: u8) String {
-    alloc = load(ap)
     (b == '"').then({
-        return s.gstr_append(alloc, "\\\"")
+        return s.add("\\\"")
     })
     (b == '\\').then({
-        return s.gstr_append(alloc, "\\\\")
+        return s.add("\\\\")
     })
     (b == '\n').then({
-        return s.gstr_append(alloc, "\\n")
+        return s.add("\\n")
     })
     (b == '\r').then({
-        return s.gstr_append(alloc, "\\r")
+        return s.add("\\r")
     })
     (b == '\t').then({
-        return s.gstr_append(alloc, "\\t")
+        return s.add("\\t")
     })
     (b >= ' ' && b <= '~').then({
-        return s.gstr_push(alloc, b)
+        return s.add_one(b)
     })
-    s.gen_oct_byte(alloc, b)
+    s.gen_oct_byte(b)
 }
 // a C string literal: `"` + each byte escaped (via the shared std.text.ascii scan loop) + `"`
 gen_strlit* = (s: String, alloc: Allocator, v: StringView) String {
     s
-        .gstr_append(alloc, "\"")
+        .add("\"")
         .escape_into(alloc.addr(), v, gen_escape_byte)
-        .gstr_append(alloc, "\"")
+        .add("\"")
 }

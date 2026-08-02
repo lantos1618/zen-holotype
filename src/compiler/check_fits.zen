@@ -4,12 +4,12 @@
 { loop_at } = std.core.count
 { PtrKind } = compiler.passes.ptrkind    // trait import: enables UFCS `t.ptr_kind_of()` &c. via the impl index
 TyFits*: {
-    ty_rank: (Self) i32,
-    is_f64_ty: (Self) bool,
-    ty_eq: (Self, Ty) bool,
-    mode_fits: (Self, Ty) bool,
-    slice_mode_fits: (Self, Ty) bool,
-    fits: (Self, Ty) bool,
+    ty_rank: (self: Self) i32,
+    is_f64_ty: (self: Self) bool,
+    ty_eq: (self: Self, other: Ty) bool,
+    mode_fits: (self: Self, other: Ty) bool,
+    slice_mode_fits: (self: Self, other: Ty) bool,
+    fits: (self: Self, other: Ty) bool,
 }
 Ty.impl(TyFits, {
     ty_rank = (t: Ty) i32 {
@@ -199,23 +199,22 @@ invariant_tys_eq = (gs: MutSlice<Ty>, ws: MutSlice<Ty>) bool {
 is_any_ptr = (t: Ty) bool { t.ptr_kind_of() >= 0 }
 // ── lvalue write-provenance, as Env methods ──────────────────────────────────
 // The walk answers WHICH read-only thing a write passes through, not merely whether one exists, so
-// the diagnostic can name it: `w_ok` = writable, `w_ptr` = a read-only `Ptr<T>`, `w_slice` = a
-// read-only `Slice<T>` window. The two boolean wrappers keep every existing caller unchanged.
-w_ok* = () i32 { 0 }
-w_ptr* = () i32 { 1 }
-w_slice* = () i32 { 2 }
+// the diagnostic can distinguish a read-only `Ptr<T>` from a read-only `Slice<T>` window.
+WriteProvenance*: Writable | ReadonlyPointer | ReadonlySlice
 EnvFits*: {
-    write_thru_readonly: (Self, Ptr<Expr>) bool,
-    lvalue_writes_readonly: (Self, Ptr<Expr>) bool,
-    write_thru_code: (Self, Ptr<Expr>) i32,
-    lvalue_write_code: (Self, Ptr<Expr>) i32,
+    write_thru_readonly: (self: Self, expression: Ptr<Expr>) bool,
+    lvalue_writes_readonly: (self: Self, expression: Ptr<Expr>) bool,
+    write_thru_code: (self: Self, expression: Ptr<Expr>) WriteProvenance,
+    lvalue_write_code: (self: Self, expression: Ptr<Expr>) WriteProvenance,
 }
 Env.impl(EnvFits, {
-    write_thru_readonly = (env: Env, obj: Ptr<Expr>) bool { env.write_thru_code(obj) != w_ok() }
-    lvalue_writes_readonly = (env: Env, target: Ptr<Expr>) bool {
-        env.lvalue_write_code(target) != w_ok()
+    write_thru_readonly = (env: Env, obj: Ptr<Expr>) bool {
+        env.write_thru_code(obj) != .Writable
     }
-    write_thru_code = (env: Env, obj: Ptr<Expr>) i32 {
+    lvalue_writes_readonly = (env: Env, target: Ptr<Expr>) bool {
+        env.lvalue_write_code(target) != .Writable
+    }
+    write_thru_code = (env: Env, obj: Ptr<Expr>) WriteProvenance {
         // Preserve lvalue provenance across addr(): taking the address of storage reached through Ptr<T>
         // yields Ptr<U>, never MutPtr<U>. The walk stops at the first pointer indirection, matching writes.
         ot = env.infer_expr(obj)
@@ -223,21 +222,24 @@ Env.impl(EnvFits, {
         // writes through the window's own pointer, so no enclosing base decides it. Everything else
         // keeps the pre-existing pointer walk verbatim.
         ot.is_readonly_slice_ty().then({
-            return w_slice()
+            return .ReadonlySlice
         })
         ot.is_any_ptr().then({
-            return ot.is_readonly_ptr_ty().then({ w_ptr() }, { w_ok() })
+            return ot.is_readonly_ptr_ty().then({ .ReadonlyPointer }, { .Writable })
         })
         env.lvalue_write_code(obj)
     }
-    lvalue_write_code = (env: Env, target: Ptr<Expr>) i32 {
+    lvalue_write_code = (env: Env, target: Ptr<Expr>) WriteProvenance {
         load(target).match ({
             .Member(m) => m.ptr.match ({
-                true  => env.infer_expr(m.obj).is_readonly_ptr_ty().then({ w_ptr() }, { w_ok() }),
+                true  => env
+                    .infer_expr(m.obj)
+                    .is_readonly_ptr_ty()
+                    .then({ .ReadonlyPointer }, { .Writable }),
                 false => env.write_thru_code(m.obj),
             }),
             .Index(ix) => env.write_thru_code(ix.seq),
-            _          => w_ok(),
+            _          => .Writable,
         })
     }
 })

@@ -1,9 +1,9 @@
 // std.build — a build program registers targets into a runner-owned graph.
 // Target configuration remains plain borrowed data; the short-lived Build context owns only
 // the registry storage and releases it after emitting the graph.
-// Target.ffi_ (`.ffi("util, vendor.hooks")`) is the FFI grant list: the dotted module ids allowed
-// to hold foreign (bodyless) declarations — see error[ffi-ungranted]; mirrors zen.toml's `ffi = "…"`.
-{ print, println } = std.text.fmt
+// `.cimport("util, vendor.hooks")` sets the dotted module ids allowed to hold
+// foreign (bodyless) declarations; see error[ffi-ungranted].
+{ print, println } = std.io.print
 { Platform, Os, Arch, Abi, host } = std.sys.platform
 { Heap } = std.mem.alloc
 { panic, Result, IoError, expect, or } = std.core.result
@@ -21,6 +21,7 @@ Build*: {
     host   = (b: Ptr<Build>) Platform { b.host_ }
     target = (b: Ptr<Build>) Platform { b.target_ }
     exe    = (b: Ptr<Build>, name: StringView) Target { exe(name).target(b.target_) }
+    lib    = (b: Ptr<Build>, name: StringView) Target { lib(name).target(b.target_) }
     install = (b: MutPtr<Build>, target: Target) void {
         (b.count_ >= b.targets_.len).match ({
             true  => panic("std.build: target capacity exceeded"),
@@ -55,6 +56,7 @@ build_context = () Build {
 }
 Target*: {
     name: StringView,
+    library_: bool,
     root_: StringView,
     main_: StringView,
     out_: StringView,
@@ -68,6 +70,7 @@ Target*: {
     root = (t: Target, p: StringView) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: p,
             main_: t.main_,
             out_: t.out_,
@@ -83,6 +86,7 @@ Target*: {
     main = (t: Target, p: StringView) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: t.root_,
             main_: p,
             out_: t.out_,
@@ -98,6 +102,7 @@ Target*: {
     out = (t: Target, p: StringView) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: t.root_,
             main_: t.main_,
             out_: p,
@@ -113,6 +118,7 @@ Target*: {
     target = (t: Target, p: Platform) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: t.root_,
             main_: t.main_,
             out_: t.out_,
@@ -125,13 +131,14 @@ Target*: {
             cflags_: t.cflags_,
         )
     }
-    links = (t: Target, l: StringView) Target {
+    link = (t: Target, library: StringView) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: t.root_,
             main_: t.main_,
             out_: t.out_,
-            links_: l,
+            links_: library,
             sources_: t.sources_,
             frameworks_: t.frameworks_,
             libraries_: t.libraries_,
@@ -143,6 +150,7 @@ Target*: {
     sources = (t: Target, xs: MutSlice<StringView>) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: t.root_,
             main_: t.main_,
             out_: t.out_,
@@ -158,6 +166,7 @@ Target*: {
     frameworks = (t: Target, xs: MutSlice<StringView>) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: t.root_,
             main_: t.main_,
             out_: t.out_,
@@ -173,6 +182,7 @@ Target*: {
     libraries = (t: Target, xs: MutSlice<StringView>) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: t.root_,
             main_: t.main_,
             out_: t.out_,
@@ -185,9 +195,10 @@ Target*: {
             cflags_: t.cflags_,
         )
     }
-    ffi = (t: Target, g: StringView) Target {
+    cimport = (t: Target, modules: StringView) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: t.root_,
             main_: t.main_,
             out_: t.out_,
@@ -196,7 +207,7 @@ Target*: {
             frameworks_: t.frameworks_,
             libraries_: t.libraries_,
             platform_: t.platform_,
-            ffi_: g,
+            ffi_: modules,
             cflags_: t.cflags_,
         )
     }
@@ -206,6 +217,7 @@ Target*: {
     cflags = (t: Target, f: StringView) Target {
         Target(
             name: t.name,
+            library_: t.library_,
             root_: t.root_,
             main_: t.main_,
             out_: t.out_,
@@ -254,14 +266,14 @@ Target*: {
         (t.platform_.os == os).then({ t.libraries(xs) }, { t })
     }
     emit_target = (t: Target) void {
-        // Legacy single-library setter. Prefer `.libraries(["pthread", ...])`.
+        // `.link("m")` adds one library; `.libraries(["m", "pthread"])` adds several.
         // Ten fixed lines: name, root, main, out, linker flags, compiler inputs, os, arch, abi, ffi grants.
         // The compiler-inputs line carries the cc flags (cflags_, `-`-prefixed words the driver
         // passes through verbatim) followed by the extra .c sources (project-relative).
         println(t.name)
         println(t.root_)
         println(t.main_)
-        println(t.out_)
+        println(t.library_.then({ "__zen_library__" }, { t.out_ }))
         (t.links_ != "").then({
             print("-l")
             print(t.links_)
@@ -328,6 +340,7 @@ exe* = (name: StringView) Target {
     empty: MutSlice<StringView> = []
     Target(
         name: name,
+        library_: false,
         root_: "",
         main_: "",
         out_: "",
@@ -340,6 +353,23 @@ exe* = (name: StringView) Target {
         cflags_: "",
     )
 }
+lib* = (name: StringView) Target {
+    t = exe(name)
+    Target(
+        name: t.name,
+        library_: true,
+        root_: t.root_,
+        main_: t.main_,
+        out_: t.out_,
+        links_: t.links_,
+        sources_: t.sources_,
+        frameworks_: t.frameworks_,
+        libraries_: t.libraries_,
+        platform_: t.platform_,
+        ffi_: t.ffi_,
+        cflags_: t.cflags_,
+    )
+}
 // ── C libraries as build VALUES ───────────────────────────────────────────────────────────────────
 // A CLib declares a system C library as data: the `-l` name, the module id programs import, and the
 // typed surface — each c_fn signature is literal Zen text after the name; c_opaque mirrors
@@ -349,7 +379,7 @@ exe* = (name: StringView) Target {
 // a header line `<target> <id> <lib> <K>` followed by exactly K lines of generated source
 // (line-count-prefixed framing, so the body is opaque to the line-based transport); the driver
 // (genmods_extract) writes the body to <projdir>/.zen/gen/<id>.zen and registers id → path with
-// the resolver. c_library requires build.zen mode — zen.toml projects have no value to `use()`.
+// the resolver. `c_library` is available only through build.zen targets.
 CDecl*: {
     name: StringView,
     sig: StringView,
@@ -389,11 +419,6 @@ c_library* = (b: MutPtr<Build>, cl: CLib) CLibrary {
     mp = a.addr()
     s ::= mp.init(256).expect(cb_oom())
     s = s.append_in(mp, "// generated by zenc c_library — do not edit\n").expect(cb_oom())
-    // the generated module DECLARES its linkage (error[ffi-unlinked] demands it of every module
-    // holding foreign decls) — and the CLib value already carries the `-l` name, so it costs nothing.
-    s = s.append_in(mp, "//! link: ").expect(cb_oom())
-    s = s.append_in(mp, cl.lib).expect(cb_oom())
-    s = s.append_in(mp, "\n").expect(cb_oom())
     cl.decls.loop_at((i, d) {
         d.opaque.match ({
             true  => {

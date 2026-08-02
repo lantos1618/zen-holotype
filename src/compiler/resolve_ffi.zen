@@ -1,28 +1,24 @@
 // @self-hosted-only
 { at } = std.text.ascii
-{ gstr_string, gstr_append, gstr_finish } = compiler.genc
 { Allocator } = std.mem.alloc
 { String } = std.text.string
 { view } = std.text.str
 { render_diagnostic } = compiler.diagnostic
 { ModuleTable, ProvidedSymbol, eprint, id_is_user, mappend_id_name, mappend_mid_display,
-  res_reject_text, mid_is_user, next_line, rappend_span, res_col_of, res_line_of, res_ident_end } = compiler.resolve
+  res_reject_text, mid_is_user, rappend_span, res_col_of, res_line_of, res_ident_end } = compiler.resolve
 { loop_at } = std.core.count
 // A bodyless (foreign) declaration binds a raw C symbol — any module holding one can reach ANY
 // linked C function (`system`, `unlink`, …). The supply-chain hole: a TRANSITIVE dependency could
 // declare an extern and shell out without the build ever saying so. So foreign declarations are
-// gated per MODULE by an explicit build grant, one of:
-//   • zen.toml:            ffi = "vendor.hooks, util"     (comma-separated dotted module ids)
-//   • build.zen:           b.exe(…).ffi("vendor.hooks")   (the Target's grant field)
-//   • entry-file pragma:   //! ffi: vendor.hooks          (single-file programs; ENTRY file only)
+// gated per MODULE by an explicit build.zen target grant:
+//   b.exe(…).cimport("vendor.hooks")
 // Implicitly trusted, no grant needed: repo-tree modules (non-`u/` ids — std./compiler., the audited
 // stdlib IS the sanctioned FFI surface) and the ENTRY module itself (an extern in the program's own
 // file is visible to its author; the threat model is dependencies, not the program). Only fn-shaped
 // decls (`name = (…) Ret`, no body) count as foreign here — a bare module global (`X = 5`) also
-// scans as "has `=`, no `{`" but is not an FFI surface. The driver stamps the manifest/registry
-// grants into the module-level cell below before resolving (see uregions_reset for the pattern);
-// the entry pragma is read from the entry SOURCE directly, so it folds into content-keyed caches
-// for free. ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly like error[private-name].
+// scans as "has `=`, no `{`" but is not an FFI surface. The driver stamps the build-plan/registry
+// grants into the module-level cell below before resolving (see uregions_reset for the pattern).
+// ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly like error[private-name].
 ffi_no_grants = () StringView { "" }
 ffi_grants ::= ffi_no_grants()
 ffi_grants_set* = (g: StringView) void { ffi_grants = g }
@@ -46,7 +42,7 @@ gm_find = (a: Allocator, g: StringView, p: i32, dotted: StringView) StringView {
             we = g.gm_word_end(p)
             le = g.ffi_line_end(we)
             g.ffi_span_eq(p, we, dotted, 0).match ({
-                true  => a.gstr_string(64).rappend_span(a, g, we + 1, le).gstr_finish(a),
+                true  => a.String(64).rappend_span(a, g, we + 1, le).finish_cstr(),
                 false => (g.at(le) == 0).then({ "" }, { a.gm_find(g, le + 1, dotted) }),
             })
         },
@@ -56,7 +52,7 @@ gm_find = (a: Allocator, g: StringView, p: i32, dotted: StringView) StringView {
 genmod_lookup* = (a: Allocator, id: String) StringView {
     id.id_is_user().match ({
         true  => {
-            dotted = a.mappend_id_name(a.gstr_string(24), id).gstr_finish(a)
+            dotted = a.mappend_id_name(a.String(24), id).finish_cstr()
             a.gm_find(genmods, 0, dotted)
         },
         false => "",
@@ -91,30 +87,6 @@ ffi_list_has = (s: StringView, p: i32, e: i32, name: StringView) bool {
 }
 ffi_line_end = (s: StringView, p: i32) i32 {
     (s.at(p) == 0 || s.at(p) == '\n').then({ p }, { s.ffi_line_end(p + 1) })
-}
-FFI_PRAGMA = () StringView { "//! ffi:" }
-// does the ENTRY source carry a `//! ffi: modid, modid` pragma line granting `name`?
-ffi_pragma_has = (src: StringView, name: StringView) bool {
-    found ::= false
-    pos ::= 0
-    bs: Slice<u8> = src.view()
-    bs.loop((h, i, b) {
-        ii = to_i32(i)
-        (ii < pos == false).then({
-            found.match ({
-                true  => {
-                    h.break
-                },
-                false => {
-                    src.ffi_span_eq(ii, ii + 8, FFI_PRAGMA(), 0).then({
-                        found = src.ffi_list_has(ii + 8, src.ffi_line_end(ii + 8), name)
-                    })
-                    pos = src.next_line(ii)
-                },
-            })
-        })
-    })
-    found
 }
 ffi_skip_sp = (s: StringView, p: i32) i32 {
     (s.at(p) == ' ' || s.at(p) == '\t' || s.at(p) == '\n' || s.at(p) == '\r').match ({
@@ -154,11 +126,11 @@ ffi_foreign_fn = (src: StringView, sym: ProvidedSymbol) bool {
     })
 }
 ffi_dotted_id = (a: Allocator, id: StringView) StringView {
-    a.mappend_mid_display(a.gstr_string(24), id).gstr_finish(a)
+    a.mappend_mid_display(a.String(24), id).finish_cstr()
 }
-ffi_module_granted = (mainsrc: StringView, dotted: StringView) bool {
+ffi_module_granted = (dotted: StringView) bool {
     g = ffi_grants
-    g.ffi_list_has(0, to_i32(g.view().len), dotted) || mainsrc.ffi_pragma_has(dotted)
+    g.ffi_list_has(0, to_i32(g.view().len), dotted)
 }
 ffi_fail = (
     a: Allocator,
@@ -170,22 +142,18 @@ ffi_fail = (
 ) i32 {
     line = src.res_line_of(sym.start)
     col = src.res_col_of(sym.start)
-    msg = a
-        .gstr_string(192)
-        .gstr_append(a, "module '")
-        .gstr_append(a, dotted)
-        .gstr_append(a, "' declares foreign function `")
-        .gstr_append(a, sym.name)
-        .gstr_append(a, "` without a build grant")
-        .gstr_finish(a)
-    hint = a
-        .gstr_string(192)
-        .gstr_append(a, "grant it: `ffi = \"")
-        .gstr_append(a, dotted)
-        .gstr_append(a, "\"` in zen.toml, or `//! ffi: ")
-        .gstr_append(a, dotted)
-        .gstr_append(a, "` in the entry file")
-        .gstr_finish(a)
+    msg = a.String(192)
+        .add("module '")
+        .add(dotted)
+        .add("' declares foreign function `")
+        .add(sym.name)
+        .add("` without a build grant")
+        .finish_cstr()
+    hint = a.String(192)
+        .add("grant it in build.zen: `.cimport(\"")
+        .add(dotted)
+        .add("\")`")
+        .finish_cstr()
     d = a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-ungranted", msg, hint, 1)
     report.match ({
         true  => {
@@ -195,11 +163,11 @@ ffi_fail = (
         false => res_reject_text(d),
     })
 }
-enforce_ffi_grants* = (a: Allocator, table: ModuleTable, mainsrc: StringView, report: bool) i32 {
+enforce_ffi_grants* = (a: Allocator, table: ModuleTable, report: bool) i32 {
     table.modules.loop_at((i, entry) {
         (i > 0 && entry.id.mid_is_user()).then({
             dotted = a.ffi_dotted_id(entry.id)
-            (mainsrc.ffi_module_granted(dotted) == false).then({
+            (ffi_module_granted(dotted) == false).then({
                 entry.graph.symbols.loop_at((j, sym) {
                     entry.source.ffi_foreign_fn(sym).then({
                         a.ffi_fail(entry.path, entry.source, sym, dotted, report)
@@ -210,136 +178,36 @@ enforce_ffi_grants* = (a: Allocator, table: ModuleTable, mainsrc: StringView, re
     })
     0
 }
-// ── error[ffi-unlinked]: a foreign decl must NAME its provider ───────────────────────────────────
-// A bodyless decl says WHAT a symbol looks like and nothing about WHERE it comes from; it worked only
-// because `cc` links libc by default, so a typo'd or nonexistent symbol surfaced as an `ld` dump with
-// no file, no line and no hint. A module that holds foreign declarations therefore states its linkage
-// once, at the top, as a pragma line — the same shape as the `//! ffi:` grant, so no keyword and no
-// parser change:
-//
-//     //! link: c, pthread          std.c.libc — the C standard library plus -lpthread
-//     //! link: m                   std.math   — -lm
-//     //! link: zenrt               the compiler's own C runtime (bootstrap/zenrt.c)
-//     //! link: js                  std.web.dom — the JavaScript host implements these stubs
-//     //! link: native.c            a .c source this project compiles in
-//
-// Token → link flag: `c` (linked by default), `zenrt` (always compiled in), `js` (not a C library at
-// all) and any `*.c` source name contribute NO flag; every other token `X` becomes `-lX`. The union
-// over the resolved closure is what the driver puts on the cc line — the build links exactly what the
-// declarations claim, instead of a hard-coded `-lm` that was there whether anything needed it or not.
-// The check itself is per MODULE and covers the entry file too: the point is that every foreign decl
-// in a program has a named provider, and the program's own file is no more self-evident than a
-// dependency's. ZEN_VIS_REPORT=1 downgrades to a report-only sweep, exactly like error[ffi-ungranted].
-LINK_PRAGMA = () StringView { "//! link:" }
-LINK_PRAGMA_LEN = () i32 { 9 }
-// offset just past `//! link:` on the first line that starts with it, or -1 when the module declares none.
-link_pragma_at = (src: StringView) i32 {
-    found ::= 0 - 1
-    pos ::= 0
-    bs: Slice<u8> = src.view()
-    bs.loop((h, i, b) {
-        ii = to_i32(i)
-        (ii < pos == false).then({
-            (found < 0).match ({
-                true  => {
-                    src.ffi_span_eq(ii, ii + LINK_PRAGMA_LEN(), LINK_PRAGMA(), 0).then({
-                        found = ii + LINK_PRAGMA_LEN()
-                    })
-                    pos = src.next_line(ii)
-                },
-                false => {
-                    h.break
-                },
-            })
-        })
-    })
-    found
-}
-// ── the resolved closure's declared link flags ───────────────────────────────────────────────────
-// Collected during the linkage sweep and read back by the driver just before it builds the cc line
-// (same module-cell channel as ffi_grants/genmods above, and safe for the build cache: the set is a
-// pure function of the closure sources the cache key already hashes).
+// ── built-in module link flags ────────────────────────────────────────────────────────────────────
+// User and native libraries belong to build.zen. The compiler derives only its own
+// audited standard-library dependencies from resolved module identities, never from source comments.
+// The driver reads this set after resolution when it builds the C linker command.
 link_libs ::= ffi_no_grants()
 link_libs_get* = () StringView { link_libs }
 link_libs_reset* = () void { link_libs = ffi_no_grants() }
-// providers that contribute no `-l`: the default-linked C library, the always-compiled Zen runtime,
-// the JavaScript host, and any `<name>.c` source the target already compiles.
-link_implicit = (s: StringView, p: i32, e: i32) bool {
-    s.ffi_span_eq(p, e, "c", 0)
-        || s.ffi_span_eq(p, e, "zenrt", 0)
-        || s.ffi_span_eq(p, e, "js", 0)
-        || e - p > 2 && s.at(e - 2) == '.' && s.at(e - 1) == 'c'
-}
-link_add = (a: Allocator, s: StringView, p: i32, e: i32) void {
-    flag = a
-        .gstr_string(24)
-        .gstr_append(a, "-l")
-        .rappend_span(a, s, p, e)
-        .gstr_finish(a)
+link_add = (a: Allocator, name: StringView) void {
+    flag = a.String(24)
+        .add("-l")
+        .add(name)
+        .finish_cstr()
     cur = link_libs
     (cur.ffi_list_has(0, to_i32(cur.view().len), flag) == false).then({
-        link_libs = a
-            .gstr_string(64)
-            .gstr_append(a, cur)
-            .gstr_append(a, flag)
-            .gstr_append(a, " ")
-            .gstr_finish(a)
+        link_libs = a.String(64)
+            .add(cur)
+            .add(flag)
+            .add(" ")
+            .finish_cstr()
     })
 }
-// fold one module's `//! link:` list (comma/space separated) into the program's flag set.
-link_collect = (a: Allocator, src: StringView, p: i32, e: i32) void {
-    (p < e).then({
-        ffi_delim(src.at(p)).match ({
-            true  => a.link_collect(src, p + 1, e),
-            false => {
-                te = src.ffi_token_end(p, e)
-                (src.link_implicit(p, te) == false).then({
-                    a.link_add(src, p, te)
-                })
-                a.link_collect(src, te, e)
-            },
-        })
-    })
-}
-link_fail = (
-    a: Allocator,
-    path: StringView,
-    src: StringView,
-    sym: ProvidedSymbol,
-    report: bool,
-) i32 {
-    line = src.res_line_of(sym.start)
-    col = src.res_col_of(sym.start)
-    msg = a
-        .gstr_string(192)
-        .gstr_append(a, "foreign declaration `")
-        .gstr_append(a, sym.name)
-        .gstr_append(a, "` names no library: this module declares no linkage, so nothing says which library defines the symbol")
-        .gstr_finish(a)
-    hint = a
-        .gstr_string(192)
-        .gstr_append(a, "declare it at the top of this file: `//! link: c` (the C standard library), `//! link: m` for -lm, `//! link: zenrt`, `//! link: js`, or `//! link: <file>.c`")
-        .gstr_finish(a)
-    d = a.render_diagnostic(path, src, line, col, col + sym.next - sym.start - 1, "ffi-unlinked", msg, hint, 1)
-    report.match ({
-        true  => {
-            eprint(d)
-            0
-        },
-        false => res_reject_text(d),
-    })
-}
-enforce_ffi_linkage* = (a: Allocator, table: ModuleTable, report: bool) i32 {
+collect_builtin_links* = (a: Allocator, table: ModuleTable) i32 {
     link_libs_reset()
     table.modules.loop_at((i, entry) {
-        lp = entry.source.link_pragma_at()
-        (lp < 0).match ({
-            true  => entry.graph.symbols.loop_at((j, sym) {
-                entry.source.ffi_foreign_fn(sym).then({
-                    a.link_fail(entry.path, entry.source, sym, report)
-                })
-            }),
-            false => a.link_collect(entry.source, lp, entry.source.ffi_line_end(lp)),
+        dotted = a.ffi_dotted_id(entry.id)
+        (dotted == "std.math").then({
+            a.link_add("m")
+        })
+        (dotted == "std.c.libc").then({
+            a.link_add("pthread")
         })
     })
     0

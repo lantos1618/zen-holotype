@@ -1,0 +1,58 @@
+// Carried String's chainable API, end to end. The happy path pins the exact bytes of mixed add,
+// byte, integer, and repeat operations. The sticky path drives every operation through a failing
+// allocator and verifies freeze settles the allocation failure as a value.
+{ request_arena, heap_allocator, AllocatorVTable, allocator_of } = std.mem.alloc
+{ String } = std.text.string
+{ to_exit } = std.core.bool
+limit_acquire = (state: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+limit_resize = (state: RawPtr<u8>, p: RawPtr<u8>, n: i64) RawPtr<u8> { null_ptr() }
+limit_release = (state: RawPtr<u8>, p: RawPtr<u8>) void { }
+limit_vtable ::= AllocatorVTable(
+    vt_alloc: limit_acquire,
+    vt_remap: limit_resize,
+    vt_free: limit_release,
+)
+main = () i32 {
+    m = request_arena(heap_allocator())
+    a = m.addr()
+    gpa = a.allocator()
+    name = "zen"
+    abi = "x86"
+    chain_ok = gpa
+        .String()
+        .add("os ", name)
+        .add_one('(')
+        .add(abi)
+        .add_one(')')
+        .finish_cstr() == "os zen(x86)"
+    // Mixed ops: repeat, byte, and negative / zero i64 digits.
+    mixed_ok = gpa
+        .String()
+        .repeat("ab", 3)
+        .add_one(':')
+        .add_i64(0 - 42)
+        .add_one(' ')
+        .add_i64(0)
+        .finish_cstr() == "ababab:-42 0"
+    // Repeat edge cases: n <= 0 and an empty source both append nothing.
+    edge_ok = gpa
+        .String()
+        .add("x")
+        .repeat("ab", 0 - 1)
+        .repeat("", 5)
+        .add("y")
+        .finish_cstr() == "xy"
+    // Sticky path: the initial allocation fails, later operations no-op, and freeze returns Err.
+    l = allocator_of(null_ptr(), limit_vtable.addr().offset(0))
+    sticky_ok = l
+        .String()
+        .add("os ")
+        .add_i64(7)
+        .repeat("ab", 3)
+        .add_one('!')
+        .freeze().match ({
+        .Ok(t)  => false,
+        .Err(e) => true,
+    })
+    (chain_ok && mixed_ok && edge_ok && sticky_ok).to_exit()
+}

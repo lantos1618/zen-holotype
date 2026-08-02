@@ -1,6 +1,6 @@
 { ArmData, CallData, Decl, Expr, Field, FieldInit, Func, LoopData, MakeStructData, MethodCallData,
   Param, Stmt, Ty, VariantDef } = compiler.ast.ast_types
-{ gstr_append, gstr_finish, gstr_push, gstr_string, subst_ty_in } = compiler.genc
+{ subst_ty_in } = compiler.genc
 { DeclIndex, Env, arm_env, enum_name, extend_env, is_lit_numeric, params_env } = compiler.check
 { Allocator } = std.mem.alloc
 { field_in, lam_stmt_body, slice_any, wr_root_name } = compiler.astops
@@ -11,7 +11,7 @@
 { env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_struct_fields, expr_pos,
   fit_err, is_enum_repr_field, is_ptr_ty, is_write_intrinsic, lit_slot_verdict, pos_or,
   tparam_shape_err, ty_carries_ptr, ty_mentions_tparam } = compiler.validate.util
-{ KSCRATCHSEND, KSCRATCHSTATE } = compiler.validate.diag
+{ diagnostic_code } = compiler.validate.diag
 { AliasList, DeadList, consume_depth, dead_cons, dead_has, dead_kill, dead_nil, dead_remove,
   own_moved_var, owner_base, sd_call_pos, sm_call_pos, sm_mcall_pos } = compiler.validate.ownership
 { kv_at } = compiler.validate.core
@@ -20,17 +20,18 @@
 // A slice LITERAL may be element-wise coerced into an expected slice type while stored slice types
 // remain invariant. This accepts `["a", "b"]` at a `[StringView]` call slot without allowing a
 // named `[StringLiteral]` variable to flow to mutable `[StringView]` storage.
-slicelit_slot_verdict = (env: Env, ar: Expr, pty: Ty) i32 {
+SlotVerdict*: NotApplicable | Fits | Rejects
+slicelit_slot_verdict = (env: Env, ar: Expr, pty: Ty) SlotVerdict {
     ar.match ({
         .SliceLit(sd) => pty.match ({
             .Slice(ep) => {
                 errs ::= 0
                 sd.items.loop_at((i, it) { errs = errs + env.sl_elem_fit(load(ep.pointee), it) })
-                (errs == 0).then({ 0 }, { 1 })
+                (errs == 0).then({ .Fits }, { .Rejects })
             },
-            _          => 0 - 1,
+            _          => .NotApplicable,
         }),
-        _             => 0 - 1,
+        _             => .NotApplicable,
     })
 }
 // an argument check, given the callee's tparams: a slot typed by a tparam is shape-checked when it is a
@@ -40,19 +41,17 @@ arg_err_at* = (env: Env, tps: MutSlice<Param>, params: MutSlice<Param>, i: i32, 
     (i < params.len).match ({
         true  => tps.ty_mentions_tparam(params[i].ty).match ({
             true  => env.tparam_shape_err(params[i].ty, ar),
-            false => {
-                sv = env.slicelit_slot_verdict(ar, params[i].ty)
-                (sv >= 0).match ({
-                    true  => sv,
-                    false => {
+            false => env.slicelit_slot_verdict(ar, params[i].ty).match ({
+                .Fits         => 0,
+                .Rejects      => 1,
+                .NotApplicable => {
                         lv = ar.addr().lit_slot_verdict(params[i].ty)
                         (lv >= 0).match ({
                             true  => lv,
                             false => env.fit_err(env.infer_expr(ar.addr()), params[i].ty),
                         })
-                    },
-                })
-            },
+                },
+            }),
         }),
         false => 0,
     })
@@ -92,10 +91,10 @@ has_field* = (fields: MutSlice<Field>, fname: StringView) bool {
 }
 field_fit_err = (env: Env, fields: MutSlice<Field>, fi: FieldInit) i32 {
     fty = fields.field_in(fi.name)
-    sv = env.slicelit_slot_verdict(load(fi.value), fty)
-    (sv >= 0).match ({
-        true  => sv,
-        false => {
+    env.slicelit_slot_verdict(load(fi.value), fty).match ({
+        .Fits          => 0,
+        .Rejects       => 1,
+        .NotApplicable => {
             lv = fi.value.lit_slot_verdict(fty)    // a numeric literal must fit the field width
             (lv >= 0).then({ lv }, { env.fit_err(env.infer_expr(fi.value), fty) })
         },
@@ -124,17 +123,15 @@ gen_field_fit_err = (
     cty = (targs.len == tps.len).then({ env.a.subst_ty_in(tps, targs, fty) }, { fty })
     tps.ty_mentions_tparam(cty).match ({
         true  => 0,
-        false => {
-            sv = env.slicelit_slot_verdict(load(fi.value), cty)
-            (sv >= 0).match ({
-                true  => sv,
-                false => {
+        false => env.slicelit_slot_verdict(load(fi.value), cty).match ({
+            .Fits          => 0,
+            .Rejects       => 1,
+            .NotApplicable => {
                     lv = fi.value.lit_slot_verdict(cty)    // still a tparam -> lenient
                     // a numeric literal must fit the field width
                     (lv >= 0).then({ lv }, { env.fit_err(env.infer_expr(fi.value), cty) })
-                },
-            })
-        },
+            },
+        }),
     })
 }    // a concrete field -> check the fit
 gen_struct_init_errs = (
@@ -1336,12 +1333,12 @@ sx_call_kind = (a: Allocator, taint: Ptr<DeadList>, c: CallData) i32 {
     sk = (c.fn.sx_named("send", "__send") && c.args.len >= 2
         || c.fn.sx_named("pool_send", "__pool_send") && c.args.len == 3
         || c.fn.sx_named("ref_send_msg", "__ref_send_msg") && c.args.len == 2).match ({
-        true  => a.sx_payload_pos(taint, c.args[c.args.len - 1].addr()).sx_kv(KSCRATCHSEND()),
+        true  => a.sx_payload_pos(taint, c.args[c.args.len - 1].addr()).sx_kv(diagnostic_code(.ScratchSend)),
         false => 0,
     })
     st = ((c.fn.sx_named("spawn", "__spawn") || c.fn.sx_named("spawn_handle", "__spawn_handle"))
         && c.args.len == 3).match ({
-        true  => a.sx_payload_pos(taint, c.args[2].addr()).sx_kv(KSCRATCHSTATE()),
+        true  => a.sx_payload_pos(taint, c.args[2].addr()).sx_kv(diagnostic_code(.ScratchState)),
         false => 0,
     })
     sk.or(st)
@@ -1350,13 +1347,13 @@ sx_mcall_kind = (a: Allocator, taint: Ptr<DeadList>, mc: MethodCallData) i32 {
     sk = (mc.method.sx_named("send", "__send") && mc.args.len >= 1
         || mc.method.sx_named("pool_send", "__pool_send") && mc.args.len == 2
         || mc.method.sx_named("ref_send_msg", "__ref_send_msg") && mc.args.len == 1).match ({
-        true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSEND()),
+        true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(diagnostic_code(.ScratchSend)),
         false => 0,
     })
     st = ((mc.method.sx_named("spawn", "__spawn")
         || mc.method.sx_named("spawn_handle", "__spawn_handle"))
         && (mc.args.len == 2 || mc.args.len == 3)).match ({
-        true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(KSCRATCHSTATE()),
+        true  => a.sx_payload_pos(taint, mc.args[mc.args.len - 1].addr()).sx_kv(diagnostic_code(.ScratchState)),
         false => 0,
     })
     sk.or(st)
@@ -1436,29 +1433,27 @@ sx_func_kind* = (a: Allocator, f: Func) i32 { a.sx_body_kind(a.dead_nil(), f.bod
 // out of the source; a non-identifier anchor (a slice literal's first item, a synthesized pos)
 // falls back to a generic subject.
 sx_push_name = (s: String, a: Allocator, src: StringView, pos: i32, i: i32, w: i32) String {
-    (i >= w).then({ s }, { sx_push_name(s.gstr_push(a, src.at(pos + i)), a, src, pos, i + 1, w) })
+    (i >= w).then({ s }, { sx_push_name(s.add_one(src.at(pos + i)), a, src, pos, i + 1, w) })
 }
 sx_subject* = (a: Allocator, src: StringView, pos: i32, w: i32) StringView {
     src.at(pos).is_alnum().match ({
-        true  => a
-            .gstr_string(w + 4)
-            .gstr_append(a, "`")
+        true  => a.String(w + 4)
+            .add("`")
             .sx_push_name(a, src, pos, 0, w)
-            .gstr_append(a, "`")
-            .gstr_finish(a),
+            .add("`")
+            .finish_cstr(),
         false => "this value",
     })
 }
 sx_message* = (a: Allocator, code: i32, subject: StringView) StringView {
-    tail = (code == KSCRATCHSEND()).match ({
+    tail = (code == diagnostic_code(.ScratchSend)).match ({
         true  => " is spawner-local scratch memory (allocator/arena/stack storage) and crosses an actor boundary in this send; the sender frees it independently of the receiving actor (use-after-free)",
         false => " is spawner-local scratch memory (allocator/arena/stack storage) embedded in the initial actor state; the actor outlives the spawner's scratch (use-after-free)",
     })
-    a
-        .gstr_string(256)
-        .gstr_append(a, subject)
-        .gstr_append(a, tail)
-        .gstr_finish(a)
+    a.String(256)
+        .add(subject)
+        .add(tail)
+        .finish_cstr()
 }
 // Name only remedies that EXIST today. There are no region-promotion verbs (no `.share`/`.give`) and
 // no typed regions — `sx_is_source` rejects four literal source shapes (`acquire(…)`, arena
@@ -1467,7 +1462,7 @@ sx_message* = (a: Allocator, code: i32, subject: StringView) StringView {
 // result, and refcounted so the receiver keeps it alive). `Rc` is NOT a remedy — the send-Rc pass
 // rejects it. docs/STATUS.md's scratch/shared row is the ledger entry for this gap.
 sx_hint* = (code: i32) StringView {
-    (code == KSCRATCHSEND()).match ({
+    (code == diagnostic_code(.ScratchSend)).match ({
         true  => "construct it inside the actor's `receive`, send a plain value, or share long-lived data as an `Arc` (`std.mem.arc.new_in`) — see the scratch/shared row in docs/STATUS.md",
         false => "construct it inside the actor's `receive`, pass plain values as the initial state, or share long-lived data as an `Arc` (`std.mem.arc.new_in`) — see the scratch/shared row in docs/STATUS.md",
     })

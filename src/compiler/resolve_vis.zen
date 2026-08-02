@@ -1,6 +1,5 @@
 // @self-hosted-only
-{ at, block_comment_at, is_alpha, is_alnum, line_comment_at, rawstr_at } = std.text.ascii
-{ gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ at, block_comment_at, is_alpha, is_alnum, is_upper, line_comment_at, rawstr_at } = std.text.ascii
 { Allocator } = std.mem.alloc
 { String } = std.text.string
 { is_empty, view } = std.text.str
@@ -12,6 +11,8 @@
   res_reject_text, res_sbyte } = compiler.resolve
 { edge_alias_in, edge_id_in } = compiler.resolve_scan
 { loop_at } = std.core.count
+{ scan } = compiler.lex
+{ nl_between } = compiler.parse_postfix
 // A top-level name is cross-module visible only when its declaration carries the `*` export marker
 // (`name* = …`, `Type*: …`, `GLOBAL* ::= …`). Both consumption forms are checked per module, over the
 // ORIGINAL module sources, so the diagnostic points at the exact user line:col:
@@ -35,16 +36,16 @@ vis_fail = (
 ) i32 {
     line = src.res_line_of(pos)
     col = src.res_col_of(pos)
-    m0 = a.gstr_string(192).gstr_append(a, "`")
+    m0 = a.String(192).add("`")
     m1 = a.mappend_string(m0, name)
-    m2 = m1.gstr_append(a, "` is private in module '")
+    m2 = m1.add("` is private in module '")
     m3 = a.mappend_id_name(m2, id)
-    msg = m3.gstr_append(a, "' (its declaration has no `*` export)").gstr_finish(a)
-    h0 = a.gstr_string(128).gstr_append(a, "export it with `")
+    msg = m3.add("' (its declaration has no `*` export)").finish_cstr()
+    h0 = a.String(128).add("export it with `")
     h1 = a.mappend_string(h0, name)
     hint = h1
-        .gstr_append(a, "*` in the defining module, or use the module's public surface")
-        .gstr_finish(a)
+        .add("*` in the defining module, or use the module's public surface")
+        .finish_cstr()
     d = a.render_diagnostic(path, src, line, col, col + width - 1, "private-name", msg, hint, 1)
     report.match ({
         true  => {
@@ -77,7 +78,7 @@ vis_check_head = (
                     true  => {
                         ie = src.res_ident_end(pos)
                         hd = a.mimport_head_name(src, pos, ie)
-                        target.sig.private(hd.gstr_finish(a)).then({
+                        target.sig.private(hd.finish_cstr()).then({
                             a.vis_fail(path, src, pos, ie - pos, a.mimport_name_span(src, pos, ie), id, report)
                         })
                         pos = ie
@@ -200,14 +201,18 @@ vis_scan_quals = (
                                 && (pos == 0 || src.at(pos - 1).is_alnum().then({ false }, { true }))).match ({
                                 true  => {
                                     ie = src.res_ident_end(pos)
+                                    dot = src.scan(ie)
+                                    mem = src.scan(dot.next)
                                     (src.vis_span_eq_at(pos, ie, alias, 0)
-                                        && src.at(ie) == '.'
-                                        && src.at(ie + 1).is_alpha()).match ({
+                                        && src.at(dot.tok.start) == '.'
+                                        && mem.tok.kind == .Ident
+                                        && (src.nl_between(ie, dot.tok.start) == false
+                                            || is_upper(src.at(mem.tok.start)) == false)).match ({
                                         true  => {
-                                            me = src.res_ident_end(ie + 1)
-                                            nm = a.mimport_name_span(src, ie + 1, me)
-                                            target.sig.private(nm.gstr_finish(a)).then({
-                                                a.vis_fail(path, src, ie + 1, me - ie - 1, a.mimport_name_span(src, ie + 1, me), id, report)
+                                            me = src.res_ident_end(mem.tok.start)
+                                            nm = a.mimport_name_span(src, mem.tok.start, me)
+                                            target.sig.private(nm.finish_cstr()).then({
+                                                a.vis_fail(path, src, mem.tok.start, me - mem.tok.start, a.mimport_name_span(src, mem.tok.start, me), id, report)
                                             })
                                             pos = me
                                         },
@@ -295,19 +300,18 @@ leak_fail = (
 ) i32 {
     line = src.res_line_of(pos)
     col = src.res_col_of(pos)
-    m0 = a
-        .gstr_string(192)
-        .gstr_append(a, "exported `")
-        .gstr_append(a, fname)
-        .gstr_append(a, "` exposes private type `")
-    msg = a.mappend_string(m0, tname).gstr_append(a, "`").gstr_finish(a)
-    h0 = a.gstr_string(128).gstr_append(a, "export `")
+    m0 = a.String(192)
+        .add("exported `")
+        .add(fname)
+        .add("` exposes private type `")
+    msg = a.mappend_string(m0, tname).add("`").finish_cstr()
+    h0 = a.String(128).add("export `")
     hint = a
         .mappend_string(h0, tname)
-        .gstr_append(a, "*` or make `")
-        .gstr_append(a, fname)
-        .gstr_append(a, "` private")
-        .gstr_finish(a)
+        .add("*` or make `")
+        .add(fname)
+        .add("` private")
+        .finish_cstr()
     d = a.render_diagnostic(path, src, line, col, col + width - 1, "private-leak", msg, hint, 1)
     report.match ({
         true  => {
@@ -362,7 +366,7 @@ leak_scan_decl = (
                                         ie = src.res_ident_end(ii)
                                         (in_type && src.at(ii - 1) != '.').then({
                                             nm = a.mimport_name_span(src, ii, ie)
-                                            sig.sig_private_type(nm.gstr_finish(a)).then({
+                                            sig.sig_private_type(nm.finish_cstr()).then({
                                                 a.leak_fail(path, src, ii, ie - ii, sym.name, a.mimport_name_span(src, ii, ie), report)
                                             })
                                         })

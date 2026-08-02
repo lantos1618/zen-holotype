@@ -7,26 +7,32 @@
 { Opt } = std.core.result
 { eq, starts_with, ends_with } = std.text.str
 { strlen } = std.c.libc
-{ cbuf, gstr_string, gstr_append, gstr_push, gstr_finish, tvoid, acquire_or_die } = compiler.genc
+{ cbuf, tvoid, acquire_or_die } = compiler.genc
 { parse_module } = compiler.parse
 { desugar_method_calls, expand_defaults, fill_enum_defaults } = compiler.check_desugar
 { DeclIndex, Env, build_decl_index, params_env, bind_fnret, bind_tparams, params_onto, vcons,
   extend_env, arm_env, loop_env, vnil, recv_name } = compiler.check
 { impl_cname_in } = compiler.mangle
 { loop_at } = std.core.count
-{ gstr_int, StructDeclQuery, TyQuery } = compiler.astops
+{ StructDeclQuery, TyQuery } = compiler.astops
 { expr_fold_children } = compiler.ast.expr_children
-SYMBOL_FUNCTION* = 1
-SYMBOL_GLOBAL* = 2
-SYMBOL_TYPE* = 3
-SYMBOL_METHOD* = 4
-SYMBOL_LET* = 5
-SYMBOL_PARAM* = 6
+SymbolKind*: Unknown | Function | Global | Type | Method | Let | Param
+symbol_kind_code = (kind: SymbolKind) i64 {
+    kind.match ({
+        .Unknown  => 0,
+        .Function => 1,
+        .Global   => 2,
+        .Type     => 3,
+        .Method   => 4,
+        .Let      => 5,
+        .Param    => 6,
+    })
+}
 SymbolKey*: {
     module: StringView,
     owner: StringView,
     name: StringView,
-    kind: i32,
+    kind: SymbolKind,
     pos: i32,
 }
 SymbolSourceSpan*: {
@@ -121,7 +127,7 @@ SymbolIndex*: {
         })
     }
     type_definition = (idx: SymbolIndex, key: SymbolKey) Opt<SymbolDecl> {
-        (key.kind == SYMBOL_TYPE).then({
+        (key.kind == .Type).then({
             return idx.declaration(key)
         })
         idx.declaration(key).match ({
@@ -170,7 +176,7 @@ SymbolIndex*: {
             .None      => slice(null_ptr(), 0),
         })
     }
-    declarations_of = (idx: SymbolIndex, a: Allocator, kind: i32) MutSlice<SymbolDecl> {
+    declarations_of = (idx: SymbolIndex, a: Allocator, kind: SymbolKind) MutSlice<SymbolDecl> {
         buf ::= cbuf<SymbolDecl>(a, idx.decls.len)
         n ::= 0
         idx.decls.loop_at((i, d) {
@@ -187,7 +193,7 @@ symbol_key_none = () SymbolKey {
         module: "",
         owner: "",
         name: "",
-        kind: 0,
+        kind: .Unknown,
         pos: 0,
     )
 }
@@ -221,7 +227,13 @@ span_for = (m: ParsedModule, pos: i32, name: StringView) SymbolSourceSpan {
         end: pos + to_i32(strlen(name)),
     )
 }
-key_for = (m: ParsedModule, owner: StringView, name: StringView, kind: i32, pos: i32) SymbolKey {
+key_for = (
+    m: ParsedModule,
+    owner: StringView,
+    name: StringView,
+    kind: SymbolKind,
+    pos: i32,
+) SymbolKey {
     SymbolKey(
         module: m.id,
         owner: owner,
@@ -313,26 +325,25 @@ sym_stamp = (
     declaration: bool,
     write: bool,
 ) StringView {
-    a
-        .gstr_string(128)
-        .gstr_append(a, key.module)
-        .gstr_push(a, '\t')
-        .gstr_append(a, key.owner)
-        .gstr_push(a, '\t')
-        .gstr_append(a, key.name)
-        .gstr_push(a, '\t')
-        .gstr_int(a, key.kind)
-        .gstr_push(a, '\t')
-        .gstr_int(a, key.pos)
-        .gstr_push(a, '\t')
-        .gstr_append(a, occurrence_module)
-        .gstr_push(a, '\t')
-        .gstr_append(a, occurrence_path)
-        .gstr_push(a, '\t')
-        .gstr_int(a, start)
-        .gstr_push(a, declaration.then({ 'd' }, { 'r' }))
-        .gstr_push(a, write.then({ 'w' }, { 'n' }))
-        .gstr_finish(a)
+    a.String(128)
+        .add(key.module)
+        .add_one('\t')
+        .add(key.owner)
+        .add_one('\t')
+        .add(key.name)
+        .add_one('\t')
+        .add_i64(symbol_kind_code(key.kind))
+        .add_one('\t')
+        .add_i64(key.pos)
+        .add_one('\t')
+        .add(occurrence_module)
+        .add_one('\t')
+        .add(occurrence_path)
+        .add_one('\t')
+        .add_i64(start)
+        .add_one(declaration.then({ 'd' }, { 'r' }))
+        .add_one(write.then({ 'w' }, { 'n' }))
+        .finish_cstr()
 }
 sym_decl_stamp = (a: Allocator, key: SymbolKey) StringView {
     a.sym_stamp(key, "", "", 0 - 1, true, false)
@@ -475,21 +486,21 @@ sym_collect_toplevel = (b: SymBuild, sm: SymModule) SymBuild {
         out = d.match ({
             .DFunc(f)          => out.sym_is_impl_link(m, f.name).match ({
                 true  => out,
-                false => out.sym_add_decl(m, m.key_for("", f.name, SYMBOL_FUNCTION, f.pos), f.name, f.name),
+                false => out.sym_add_decl(m, m.key_for("", f.name, .Function, f.pos), f.name, f.name),
             }),
-            .DForeign(f)       => out.sym_add_decl(m, m.key_for("", f.name, SYMBOL_FUNCTION, f.pos), f.name, f.name),
+            .DForeign(f)       => out.sym_add_decl(m, m.key_for("", f.name, .Function, f.pos), f.name, f.name),
             .DGlobal(g)        => g.alias.match ({
                 true  => out,
-                false => out.sym_add_decl(m, m.key_for("", g.name, SYMBOL_GLOBAL, g.pos), g.name, g.name),
+                false => out.sym_add_decl(m, m.key_for("", g.name, .Global, g.pos), g.name, g.name),
             }),
             .DStruct(s)        => out.sym_collect_struct(m, s),
-            .DEnum(e)          => out.sym_add_decl(m, m.key_for("", e.name, SYMBOL_TYPE, e.pos), e.name, e.name),
-            .DGenStruct(s)     => out.sym_add_decl(m, m.key_for("", s.name, SYMBOL_TYPE, s.pos), s.name, s.name),
-            .DGenEnum(e)       => out.sym_add_decl(m, m.key_for("", e.name, SYMBOL_TYPE, e.pos), e.name, e.name),
+            .DEnum(e)          => out.sym_add_decl(m, m.key_for("", e.name, .Type, e.pos), e.name, e.name),
+            .DGenStruct(s)     => out.sym_add_decl(m, m.key_for("", s.name, .Type, s.pos), s.name, s.name),
+            .DGenEnum(e)       => out.sym_add_decl(m, m.key_for("", e.name, .Type, e.pos), e.name, e.name),
             .DImpl(im)         => out.sym_collect_methods(m, im),
             .DTraitDefault(td) => {
                 link = out.a.impl_cname_in(td.trname, td.trname, td.fn.name)
-                key = m.key_for(td.trname, td.fn.name, SYMBOL_METHOD, td.fn.pos)
+                key = m.key_for(td.trname, td.fn.name, .Method, td.fn.pos)
                 out.sym_add_decl(m, key, td.fn.name, link)
             },
             _                  => out,
@@ -498,11 +509,11 @@ sym_collect_toplevel = (b: SymBuild, sm: SymModule) SymBuild {
     out
 }
 sym_collect_struct = (b: SymBuild, m: ParsedModule, s: StructDecl) SymBuild {
-    out ::= b.sym_add_decl(m, m.key_for("", s.name, SYMBOL_TYPE, s.pos), s.name, s.name)
+    out ::= b.sym_add_decl(m, m.key_for("", s.name, .Type, s.pos), s.name, s.name)
     s.struct_is_trait().then({
         s.fields.loop_at((i, field) {
             field.ty.is_fnt().then({
-                key = m.key_for(s.name, field.name, SYMBOL_METHOD, field.pos)
+                key = m.key_for(s.name, field.name, .Method, field.pos)
                 link = out.a.impl_cname_in(s.name, s.name, field.name)
                 out = out.sym_add_decl(m, key, field.name, link)
             })
@@ -514,19 +525,19 @@ sym_collect_methods = (b: SymBuild, m: ParsedModule, im: ImplData) SymBuild {
     out ::= b
     im.methods.loop_at((i, p) {
         link = b.a.impl_cname_in(im.trname, im.ty, p.name)
-        key = m.key_for(im.ty, p.name, SYMBOL_METHOD, p.pos)
+        key = m.key_for(im.ty, p.name, .Method, p.pos)
         out = out.sym_add_decl(m, key, p.name, link)
     })
     out
 }
-sym_find_decl = (b: SymBuild, module: StringView, name: StringView, kind: i32) SymLookup {
+sym_find_decl = (b: SymBuild, module: StringView, name: StringView, kind: SymbolKind) SymLookup {
     found ::= false
     ambiguous ::= false
     key ::= symbol_key_none()
     b
         .sym_decl_view()
         .loop_at((i, d) {
-            (d.key.module.eq(module) && d.name.eq(name) && (kind == 0 || d.key.kind == kind)).then({
+            (d.key.module.eq(module) && d.name.eq(name) && d.key.kind == kind).then({
                 found.match ({
                     true  => (key.symbol_key_eq(d.key) == false).then({
                         ambiguous = true
@@ -669,7 +680,7 @@ sym_namespace_edge = (m: ParsedModule, alias: StringView) Opt<ImportEdge> {
     })
     (found && ambiguous == false).then({ .Some(out) }, { .None })
 }
-sym_imported_decl = (b: SymBuild, m: ParsedModule, name: StringView, kind: i32) SymLookup {
+sym_imported_decl = (b: SymBuild, m: ParsedModule, name: StringView, kind: SymbolKind) SymLookup {
     own = b.sym_find_decl(m.id, name, kind)
     own.found.match ({
         true  => own,
@@ -718,7 +729,7 @@ sym_initial_env = (a: Allocator, sm: SymModule, f: Func) Env {
 }
 sym_function_key = (b: SymBuild, sm: SymModule, f: Func) SymLookup {
     bylink = b.sym_find_link_in(sm.module, f.name)
-    bylink.found.then({ bylink }, { b.sym_find_decl(sm.module.id, f.name, SYMBOL_FUNCTION) })
+    bylink.found.then({ bylink }, { b.sym_find_decl(sm.module.id, f.name, .Function) })
 }
 sym_add_params = (
     b: SymBuild,
@@ -730,7 +741,7 @@ sym_add_params = (
     out ::= b
     sc ::= scope
     ps.loop_at((i, p) {
-        key = sm.module.key_for(owner, p.name, SYMBOL_PARAM, p.pos)
+        key = sm.module.key_for(owner, p.name, .Param, p.pos)
         out = out.sym_add_decl(sm.module, key, p.name, p.name)
         type_decl = out.sym_type_from_ty(sm, p.ty)
         out = out.sym_set_decl_type(key, type_decl)
@@ -760,7 +771,7 @@ sym_collect_decl_types = (b: SymBuild, sm: SymModule) SymBuild {
             .DGlobal(g)        => g.alias.match ({
                 true  => out,
                 false => {
-                    key = sm.module.key_for("", g.name, SYMBOL_GLOBAL, g.pos)
+                    key = sm.module.key_for("", g.name, .Global, g.pos)
                     ty = empty_env.sym_value_ty(g.ty, g.init)
                     out.sym_set_decl_type(key, out.sym_type_from_ty(sm, ty))
                 },
@@ -777,7 +788,7 @@ sym_collect_decl_types = (b: SymBuild, sm: SymModule) SymBuild {
             },
             .DStruct(sd)       => sd.struct_is_trait().match ({
                 true  => {
-                    trait = out.sym_find_decl(sm.module.id, sd.name, SYMBOL_TYPE)
+                    trait = out.sym_find_decl(sm.module.id, sd.name, .Type)
                     sd.fields.loop_at((j, field) {
                         method = out.sym_find_method_module(sm.module.id, sd.name, field.name)
                         method.found.then({
@@ -789,7 +800,7 @@ sym_collect_decl_types = (b: SymBuild, sm: SymModule) SymBuild {
                 false => out,
             }),
             .DTraitDefault(td) => {
-                trait = out.sym_find_decl(sm.module.id, td.trname, SYMBOL_TYPE)
+                trait = out.sym_find_decl(sm.module.id, td.trname, .Type)
                 method = out.sym_find_method_module(sm.module.id, td.trname, td.fn.name)
                 method.found.then({ out.sym_set_decl_type(method.key, trait) }, { out })
             },
@@ -922,16 +933,16 @@ sym_note = (
     write: bool,
 ) SymBuild { x.found.then({ b.sym_add_occ(m, x.key, pos, name, false, write) }, { b }) }
 sym_module_target = (b: SymBuild, module: StringView, name: StringView) SymLookup {
-    f = b.sym_find_decl(module, name, SYMBOL_FUNCTION)
+    f = b.sym_find_decl(module, name, .Function)
     f.found.match ({
         true  => f,
         false => {
-            t = b.sym_find_decl(module, name, SYMBOL_TYPE)
-            t.found.then({ t }, { b.sym_find_decl(module, name, SYMBOL_GLOBAL) })
+            t = b.sym_find_decl(module, name, .Type)
+            t.found.then({ t }, { b.sym_find_decl(module, name, .Global) })
         },
     })
 }
-sym_import_target = (b: SymBuild, m: ParsedModule, name: StringView, kind: i32) SymLookup {
+sym_import_target = (b: SymBuild, m: ParsedModule, name: StringView, kind: SymbolKind) SymLookup {
     found ::= false
     ambiguous ::= false
     key ::= symbol_key_none()
@@ -963,12 +974,12 @@ sym_import_target = (b: SymBuild, m: ParsedModule, name: StringView, kind: i32) 
     })
 }
 sym_import_any = (b: SymBuild, m: ParsedModule, name: StringView) SymLookup {
-    f = b.sym_import_target(m, name, SYMBOL_FUNCTION)
+    f = b.sym_import_target(m, name, .Function)
     f.found.match ({
         true  => f,
         false => {
-            g = b.sym_import_target(m, name, SYMBOL_GLOBAL)
-            g.found.then({ g }, { b.sym_import_target(m, name, SYMBOL_TYPE) })
+            g = b.sym_import_target(m, name, .Global)
+            g.found.then({ g }, { b.sym_import_target(m, name, .Type) })
         },
     })
 }
@@ -985,7 +996,7 @@ sym_find_method_module = (
         .sym_decl_view()
         .loop_at((i, d) {
             (d.key.module.eq(module)
-                && d.key.kind == SYMBOL_METHOD
+                && d.key.kind == .Method
                 && d.key.owner.eq(owner)
                 && d.name.eq(name)).then({
                 found.match ({
@@ -1097,20 +1108,20 @@ sym_call_target = (
             )
         })
     })
-    target = b.sym_imported_decl(sm.module, c.fn, SYMBOL_FUNCTION)
+    target = b.sym_imported_decl(sm.module, c.fn, .Function)
     target.found.match ({
         true  => SymCallTarget(
             lookup: target,
             skip_first: false,
         ),
         false => SymCallTarget(
-            lookup: b.sym_imported_decl(sm.module, c.fn, SYMBOL_TYPE),
+            lookup: b.sym_imported_decl(sm.module, c.fn, .Type),
             skip_first: false,
         ),
     })
 }
 sym_type_name = (b: SymBuild, m: ParsedModule, name: StringView) StringView {
-    direct = b.sym_imported_decl(m, name, SYMBOL_TYPE)
+    direct = b.sym_imported_decl(m, name, .Type)
     direct.found.then({
         return direct.key.name
     })
@@ -1118,13 +1129,12 @@ sym_type_name = (b: SymBuild, m: ParsedModule, name: StringView) StringView {
     ambiguous ::= false
     m.graph.imports.loop_at((i, e) {
         e.namespace.then({
-            prefix = b.a
-                .gstr_string(strlen(e.alias) + 3)
-                .gstr_append(b.a, e.alias)
-                .gstr_append(b.a, "__")
-                .gstr_finish(b.a)
+            prefix = b.a.String(strlen(e.alias) + 3)
+                .add(e.alias)
+                .add("__")
+                .finish_cstr()
             bare = name.starts_with(prefix).then({ cstr(offset(name, strlen(prefix))) }, { name })
-            candidate = b.sym_find_decl(e.module, bare, SYMBOL_TYPE)
+            candidate = b.sym_find_decl(e.module, bare, .Type)
             candidate.found.then({
                 found.eq("").match ({
                     true  => {
@@ -1141,17 +1151,15 @@ sym_type_name = (b: SymBuild, m: ParsedModule, name: StringView) StringView {
         b
             .sym_decl_view()
             .loop_at((i, d) {
-                suffix = b.a
-                    .gstr_string(strlen(d.name) + 3)
-                    .gstr_append(b.a, "__")
-                    .gstr_append(b.a, d.name)
-                    .gstr_finish(b.a)
-                dotted = b.a
-                    .gstr_string(strlen(d.name) + 2)
-                    .gstr_append(b.a, ".")
-                    .gstr_append(b.a, d.name)
-                    .gstr_finish(b.a)
-                (d.key.kind == SYMBOL_TYPE
+                suffix = b.a.String(strlen(d.name) + 3)
+                    .add("__")
+                    .add(d.name)
+                    .finish_cstr()
+                dotted = b.a.String(strlen(d.name) + 2)
+                    .add(".")
+                    .add(d.name)
+                    .finish_cstr()
+                (d.key.kind == .Type
                     && (d.name.eq(name) || name.ends_with(suffix) || name.ends_with(dotted))).then({
                     found.eq("").match ({
                         true  => {
@@ -1167,7 +1175,7 @@ sym_type_name = (b: SymBuild, m: ParsedModule, name: StringView) StringView {
     (ambiguous == false).then({ found }, { "" })
 }
 sym_type_lookup = (b: SymBuild, m: ParsedModule, name: StringView) SymLookup {
-    direct = b.sym_imported_decl(m, name, SYMBOL_TYPE)
+    direct = b.sym_imported_decl(m, name, .Type)
     direct.found.then({
         return direct
     })
@@ -1176,22 +1184,20 @@ sym_type_lookup = (b: SymBuild, m: ParsedModule, name: StringView) SymLookup {
     key ::= symbol_key_none()
     m.graph.imports.loop_at((i, e) {
         e.namespace.then({
-            dotted = b.a
-                .gstr_string(strlen(e.alias) + 2)
-                .gstr_append(b.a, e.alias)
-                .gstr_append(b.a, ".")
-                .gstr_finish(b.a)
-            flat = b.a
-                .gstr_string(strlen(e.alias) + 3)
-                .gstr_append(b.a, e.alias)
-                .gstr_append(b.a, "__")
-                .gstr_finish(b.a)
+            dotted = b.a.String(strlen(e.alias) + 2)
+                .add(e.alias)
+                .add(".")
+                .finish_cstr()
+            flat = b.a.String(strlen(e.alias) + 3)
+                .add(e.alias)
+                .add("__")
+                .finish_cstr()
             bare = name.starts_with(dotted).match ({
                 true  => cstr(offset(name, strlen(dotted))),
                 false => name.starts_with(flat).then({ cstr(offset(name, strlen(flat))) }, { "" }),
             })
             (bare.eq("") == false).then({
-                candidate = b.sym_find_decl(e.module, bare, SYMBOL_TYPE)
+                candidate = b.sym_find_decl(e.module, bare, .Type)
                 candidate.found.then({
                     found.match ({
                         true  => (key.symbol_key_eq(candidate.key) == false).then({
@@ -1210,17 +1216,15 @@ sym_type_lookup = (b: SymBuild, m: ParsedModule, name: StringView) SymLookup {
         b
             .sym_decl_view()
             .loop_at((i, d) {
-                suffix = b.a
-                    .gstr_string(strlen(d.name) + 3)
-                    .gstr_append(b.a, "__")
-                    .gstr_append(b.a, d.name)
-                    .gstr_finish(b.a)
-                dotted = b.a
-                    .gstr_string(strlen(d.name) + 2)
-                    .gstr_append(b.a, ".")
-                    .gstr_append(b.a, d.name)
-                    .gstr_finish(b.a)
-                (d.key.kind == SYMBOL_TYPE
+                suffix = b.a.String(strlen(d.name) + 3)
+                    .add("__")
+                    .add(d.name)
+                    .finish_cstr()
+                dotted = b.a.String(strlen(d.name) + 2)
+                    .add(".")
+                    .add(d.name)
+                    .finish_cstr()
+                (d.key.kind == .Type
                     && (d.name.eq(name) || name.ends_with(suffix) || name.ends_with(dotted))).then({
                     found.match ({
                         true  => (key.symbol_key_eq(d.key) == false).then({
@@ -1300,7 +1304,7 @@ sym_expr_type = (
             named.eq("").match ({
                 true  => {
                     target = b.sym_call_target(sm, env, scope, c)
-                    (target.lookup.found && target.lookup.key.kind == SYMBOL_TYPE).match ({
+                    (target.lookup.found && target.lookup.key.kind == .Type).match ({
                         true  => target.lookup.key.name,
                         false => b.sym_type_name(sm.module, env.infer_expr(e).recv_name()),
                     })
@@ -1343,7 +1347,7 @@ sym_walk_body = (
         st.match ({
             .Let(l)      => {
                 out = out.sym_walk_expr(sm, en, sc, owner, l.value, false)
-                key = sm.module.key_for(owner, l.name, SYMBOL_LET, l.pos)
+                key = sm.module.key_for(owner, l.name, .Let, l.pos)
                 inferred = en.sym_value_ty(l.ty, l.value)
                 type_decl = out.sym_type_from_ty(sm, inferred)
                 lty = type_decl.found.match ({
@@ -1402,7 +1406,7 @@ sym_walk_match = (
         aenv = out.a.arm_env(env, sty, ar)
         asc ::= scope
         (ar.bind.eq("") == false).then({
-            key = sm.module.key_for(owner, ar.bind, SYMBOL_LET, ar.bind_pos)
+            key = sm.module.key_for(owner, ar.bind, .Let, ar.bind_pos)
             out = out.sym_add_decl(sm.module, key, ar.bind, ar.bind)
             asc = out.a.sym_scope_push(asc, key, "")
         })
@@ -1421,17 +1425,17 @@ sym_walk_loop = (
     out ::= b.sym_walk_expr(sm, env, scope, owner, l.seq, false)
     sc ::= scope
     (l.idx.eq("") == false).then({
-        key = sm.module.key_for(owner, l.idx, SYMBOL_LET, l.idx_pos)
+        key = sm.module.key_for(owner, l.idx, .Let, l.idx_pos)
         out = out.sym_add_decl(sm.module, key, l.idx, l.idx)
         sc = out.a.sym_scope_push(sc, key, "")
     })
     (l.elem.eq("") == false).then({
-        key = sm.module.key_for(owner, l.elem, SYMBOL_LET, l.elem_pos)
+        key = sm.module.key_for(owner, l.elem, .Let, l.elem_pos)
         out = out.sym_add_decl(sm.module, key, l.elem, l.elem)
         sc = out.a.sym_scope_push(sc, key, "")
     })
     (l.h.eq("") == false).then({
-        key = sm.module.key_for(owner, l.h, SYMBOL_LET, l.h_pos)
+        key = sm.module.key_for(owner, l.h, .Let, l.h_pos)
         out = out.sym_add_decl(sm.module, key, l.h, l.h)
         sc = out.a.sym_scope_push(sc, key, "")
     })
@@ -1470,10 +1474,10 @@ sym_walk_expr = (
             local.found.match ({
                 true  => b.sym_note(sm.module, local, v.pos, v.name, write),
                 false => {
-                    g = b.sym_imported_decl(sm.module, v.name, SYMBOL_GLOBAL)
+                    g = b.sym_imported_decl(sm.module, v.name, .Global)
                     g.found.match ({
                         true  => b.sym_note(sm.module, g, v.pos, v.name, write),
-                        false => b.sym_note(sm.module, b.sym_imported_decl(sm.module, v.name, SYMBOL_FUNCTION), v.pos, v.name, write),
+                        false => b.sym_note(sm.module, b.sym_imported_decl(sm.module, v.name, .Function), v.pos, v.name, write),
                     })
                 },
             })
@@ -1499,16 +1503,16 @@ sym_walk_expr = (
             qualified.then({ out }, { out.sym_walk_expr(sm, env, scope, owner, d.obj, false) })
         },
         .MakeEnum(d)   => b
-            .sym_note(sm.module, b.sym_imported_decl(sm.module, d.ty, SYMBOL_TYPE), d.ty_pos, d.ty, false)
+            .sym_note(sm.module, b.sym_imported_decl(sm.module, d.ty, .Type), d.ty_pos, d.ty, false)
             .sym_walk_expr(sm, env, scope, owner, d.payload, false),
         .MakeStruct(d) => {
-            out ::= b.sym_note(sm.module, b.sym_imported_decl(sm.module, d.ty, SYMBOL_TYPE), d.pos, d.ty, false)
+            out ::= b.sym_note(sm.module, b.sym_imported_decl(sm.module, d.ty, .Type), d.pos, d.ty, false)
             d.inits.loop_at((i, fi) {
                 out = out.sym_walk_expr(sm, env, scope, owner, fi.value, false)
             })
             out
         },
-        .Tag(d)        => b.sym_note(sm.module, b.sym_imported_decl(sm.module, d.ty, SYMBOL_TYPE), d.ty_pos, d.ty, false),
+        .Tag(d)        => b.sym_note(sm.module, b.sym_imported_decl(sm.module, d.ty, .Type), d.ty_pos, d.ty, false),
         .Match(m)      => b.sym_walk_match(sm, env, scope, owner, m.subj, m.arms),
         .Loop(l)       => b.sym_walk_loop(sm, env, scope, owner, l),
         .Lambda(lm)    => b.sym_walk_lambda(sm, env, scope, owner, lm),

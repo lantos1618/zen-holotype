@@ -305,7 +305,7 @@ enum_variant_payload = (ed: EnumDecl, vn: StringView) Ty {
 }
 // Infer a lambda parameter's concrete type from a `.Variant(param)` constructor in the body: the
 // variant declares the payload type (e.g. `Get(ReplyRef<i32>)`), so the param `(reply){...}` that is
-// passed straight into `.Get(reply)` is ReplyRef<i32>. This lets a generic FnT param `(ReplyRef<T>) R`
+// passed straight into `.Get(reply)` is ReplyRef<i32>. This lets a generic FnT param `(reply: ReplyRef<T>) R`
 // recover T even with no return to flow it from — the actor ask/request inline-closure reply handler.
 lam_param_payload = (decls: MutSlice<Decl>, body: MutSlice<Stmt>, pname: StringView) Ty {
     found ::= tvoid()
@@ -354,7 +354,7 @@ lpp_mcall = (decls: MutSlice<Decl>, mc: MethodCallData, pname: StringView) Ty {
     r = decls.lpp_expr(mc.recv, pname)
     r.is_void_ty().then({ decls.lpp_args(mc.args, pname) }, { r })
 }
-// Unify a generic FnT param `(ReplyRef<T>) R` against a lambda argument by inferring each lambda
+// Unify a generic FnT param `(reply: ReplyRef<T>) R` against a lambda argument by inferring each lambda
 // param's concrete type from its body (the `.Variant(param)` site that declares it).
 lam_unify = (decls: MutSlice<Decl>, fpty: Ty, lm: LambdaData, tp: StringView) Ty {
     fpty.match ({
@@ -369,7 +369,7 @@ lam_unify = (decls: MutSlice<Decl>, fpty: Ty, lm: LambdaData, tp: StringView) Ty
                     false => found,
                 })
             })
-            // A tparam appearing ONLY in the closure's RETURN position `(T) U` binds from the lambda's
+            // A tparam appearing ONLY in the closure's RETURN position `(value: T) U` binds from the lambda's
             // DECLARED return type (else it would default to void -> a `[void]` result, a silent miscompile).
             found.is_void_ty().match ({
                 true  => lm.ret.is_void_ty().then({ found }, { load(ft.ret).unify_ty(lm.ret, tp) }),
@@ -472,7 +472,7 @@ ty_mentions_any* = (t: Ty, tparams: MutSlice<Param>) bool {
     f
 }
 // FALLBACK 1 — closure-return inference: a tparam that appears in an FnT param's RETURN position
-// (`on_err: (E) F`) whose argument is an UNANNOTATED lambda binds from the lambda BODY's type: bind
+// (`on_err: (error: E) F`) whose argument is an UNANNOTATED lambda binds from the lambda BODY's type: bind
 // the lambda params to their (already-inferred-targ-substituted) declared types, light-type the body,
 // and unify. Bails (void) if the body's type still mentions any tparam (nothing concrete was learned).
 lam_body_targ = (

@@ -32,12 +32,11 @@
 { Rng, seed } = std.rand
 { sha256_hex } = std.hash
 { cat_in, find, len, parse_int, split_in, substr_in, view } = std.text.str
-{ finish_in } = std.text.string
+{ String, finish_in } = std.text.string
 { integer_in } = std.text.num
-{ sb } = std.text.sb
 { expect, or } = std.core.result
 { then } = std.core.bool
-{ arg_int, arg_str, format } = std.text.fmt
+{ arg_int, arg_str, format } = std.io.print
 // The mutation scratch buffer holds 1 MiB of output plus slack for the inserts still in flight (an op
 // can add at most 500 bytes and there are at most 6 per iteration); everything is clamped to it, so a
 // pathological seed truncates rather than running off the end.
@@ -388,12 +387,10 @@ one_iter = (
 // "9" * 300, "0x" + "f" * 200, "a" * 500 … — a prefix plus a repeated run, as one byte slice
 rep_tok = (mp: Allocator, pre: StringView, s: StringView, n: i64) Slice<u8> {
     mp
-        .addr()
-        .sb()
-        .s(pre)
-        .rep(s, n)
-        .done()
-        .expect("fuzz-mutate: oom")
+        .String()
+        .add(pre)
+        .repeat(s, n)
+        .finish_cstr()
         .view()
 }
 // The 0x00 and 0xff tokens are built by hand: a NUL is not expressible as a str (it terminates one),
@@ -433,17 +430,11 @@ load_seeds = (mp: Allocator, first: i32) MutSlice<MutSlice<u8>> {
 // `timeout` gives us exit 124 on a blown budget
 cmd_for = (mp: Allocator, asan: StringView, secs: i64) StringView {
     mp
-        .addr()
-        .sb()
-        .s("timeout ")
-        .i(secs)
-        .s(" ")
-        .s(asan)
-        .s(" check ")
-        .s(TMP_IN)
-        .s(" 2>&1")
-        .done()
-        .expect("fuzz-mutate: oom")
+        .String()
+        .add("timeout ")
+        .add_i64(secs)
+        .add(" ", asan, " check ", TMP_IN, " 2>&1")
+        .finish_cstr()
 }
 // The mutation stream's seed. Default: the wall clock, so successive campaigns explore DIFFERENT
 // mutations — the property the entropy-seeded Python had, and the whole point of running the fuzzer

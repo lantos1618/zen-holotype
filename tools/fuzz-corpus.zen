@@ -23,7 +23,7 @@
 { cat_in, contains, ends_with, is_empty, len, split_in, sv_lt, try_parse_int, view } = std.text.str
 { sort_by } = std.sort
 { String, init, append_in, finish_in } = std.text.string
-{ arg_int, arg_str, format } = std.text.fmt
+{ arg_int, arg_str, format } = std.io.print
 { expect } = std.core.result
 { then } = std.core.bool
 // access(path, X_OK) is the `[ -x ]` test. Named ACCESS_X_OK, not X_OK: a top-level Zen global lowers
@@ -251,9 +251,9 @@ plan_probes = (mp: Allocator, corpus: MutSlice<StringView>) MutSlice<Probe> {
 // Write the command list, run it through the pool, and fail closed if the pool itself could not run.
 // ── SHARDING: split the probe list across CI runners ─────────────────────────
 // The sweep is core-bound — the pool already saturates one machine, so the only lever left is more
-// machines. FUZZ_SHARDS=<n> FUZZ_SHARD=<i> runs the probes where `index % n == i`; the default 1/0 is
-// the whole sweep, so a plain `./zen run tools/fuzz-corpus.zen` is unchanged. Indices stay GLOBAL, so
-// scratch paths never collide and each shard reports its hits in corpus order.
+// machines. FUZZ_SHARDS=<n> FUZZ_SHARD=<i> runs probes where `index % n == i`; the default 1/0 is the
+// whole sweep, so a plain `./zen run tools/fuzz-corpus.zen` is unchanged. Indices stay GLOBAL, so
+// scratch paths never collide and each shard's hit list is still in corpus order.
 env_int = (name: StringView, dflt: i64) i64 {
     e = getEnv(name)
     is_empty(e).match ({
@@ -300,12 +300,7 @@ sweep = (mp: Allocator, asan: StringView, corpus: MutSlice<StringView>) i32 {
     (mp.run_probes(asan, ps) == false).then({
         return fail2("fuzz-corpus: FAIL — the probe pool did not run")
     })
-    ps.loop_at((i, p) {
-        i.mine().then({
-            mp.classify(p, i)
-            g_files = g_files + 1
-        })
-    })
+    ps.loop_at((i, p) { i.mine().then({ mp.classify(p, i) g_files = g_files + 1 }) })
     format("shard {}/{}: {} probes, {} sanitizer hits\n", [arg_int(shard_index()), arg_int(shards()), arg_int(g_files), arg_int(g_hits)])
     (g_hits == 0).then({ 0 }, { 1 })
 }

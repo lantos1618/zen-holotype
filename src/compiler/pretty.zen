@@ -7,18 +7,18 @@
 // trailing comma on the last arm; multi-field struct literals split one field per line; short single-arm
 // / single-expr bodies stay inline.
 //
-{ String } = std.text.string
+{ String, StringFormat } = std.text.string
 { view } = std.text.str
 { Allocator } = std.mem.alloc
-{ Stmt, Decl, Param, Ty, PtrData, CondData, LetData } = compiler.ast.ast_types
-{ ptr_kw, slice_kw, gstr_string, gstr_push, gstr_append, gstr_finish, acquire_or_die, sbyte } = compiler.genc
-{ gstr_int, left_pos_of, stmt_left_pos } = compiler.astops
+{ Stmt, Decl, Param, Ty, FnTData, PtrData, CondData, LetData } = compiler.ast.ast_types
+{ ptr_kw, slice_kw, sbyte } = compiler.genc
+{ left_pos_of, stmt_left_pos } = compiler.astops
 { Comment, rawstr_end } = compiler.lex
 { at, rawstr_at } = std.text.ascii
 { times, upto, step_while, loop_at } = std.core.count
 { ff_cond_inline, ff_cond_is_then, ff_cond_multiline, ff_cond_nested, ff_current_col, ff_expr,
   ff_fits_width, ff_recv, ff_then } = compiler.pretty_expr
-{ ff_decl, ff_is_anon_payload_name, ff_is_hoisted } = compiler.pretty_decl
+{ ff_decl, ff_is_payload_name, ff_is_hoisted } = compiler.pretty_decl
 // The formatter weaves SOURCE comments back into its AST walk. Comments live in a position-sorted
 // table (compiler.lex.collect_comments) keyed by byte offset; this module holds the source + table +
 // a cursor (the next un-emitted comment). As the walk reaches each statement / decl it FLUSHES every
@@ -97,7 +97,7 @@ gf_cmt_end = (c: Comment) i32 {
 ff_cmt_text = (s: String, a: Allocator, c: Comment) String {
     out ::= s
     e = gf_cmt_end(c)
-    c.start.upto(e, (i) { out = out.ff_push(a, at(gf_src, i)) })
+    c.start.upto(e, (i) { out = out.add_one(at(gf_src, i)) })
     out
 }
 // flush every LEADING (own-line) comment whose start is before `before` — each on its own indented line.
@@ -112,7 +112,7 @@ ff_flush_leading* = (s: String, a: Allocator, before: i32, ind: i32) String {
             && gf_cmts[k].start < before
             && gf_cmts[k].trailing.then({ false }, { true })
     }, (k) {
-        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[k]).ff_append(a, "\n")
+        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[k]).add("\n")
         k + 1
     })
     out
@@ -126,7 +126,7 @@ ff_flush_leading* = (s: String, a: Allocator, before: i32, ind: i32) String {
 ff_open_trailing* = (s: String, a: Allocator, line: i32) String {
     (gf_idx < gf_cmts.len && gf_cmts[gf_idx].trailing && gf_line_of(gf_cmts[gf_idx].start) == line).match ({
         true  => {
-            out = s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])
+            out = s.add("    ").ff_cmt_text(a, gf_cmts[gf_idx])
             gf_idx = gf_idx + 1
             out
         },
@@ -182,7 +182,7 @@ gf_cond_interior_cmt* = (d: CondData) bool {
 ff_trailing* = (s: String, a: Allocator, boundary: i32) String {
     (gf_idx < gf_cmts.len && gf_cmts[gf_idx].trailing && gf_before(gf_cmts[gf_idx].start, boundary)).match ({
         true  => {
-            out = s.ff_append(a, "    ").ff_cmt_text(a, gf_cmts[gf_idx])
+            out = s.add("    ").ff_cmt_text(a, gf_cmts[gf_idx])
             gf_idx = gf_idx + 1
             out
         },
@@ -213,7 +213,7 @@ ff_drain = (s: String, a: Allocator, db: i32, ib: i32, ind: i32) String {
         return out
     })
     gf_idx = gf_idx.step_while((k) { k < gf_cmts.len && gf_cmts[k].start < db }, (k) {
-        out = out.ff_append(a, "\n").ff_indent(a, ind).ff_cmt_text(a, gf_cmts[k])    // no own-line drain without a real next-stmt boundary
+        out = out.add("\n").ff_indent(a, ind).ff_cmt_text(a, gf_cmts[k])    // no own-line drain without a real next-stmt boundary
         k + 1
     })
     out
@@ -222,7 +222,7 @@ ff_drain = (s: String, a: Allocator, db: i32, ib: i32, ind: i32) String {
 ff_flush_rest = (s: String, a: Allocator, ind: i32) String {
     out ::= s
     gf_idx = gf_idx.step_while((k) { k < gf_cmts.len }, (k) {
-        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[k]).ff_append(a, "\n")
+        out = out.ff_indent(a, ind).ff_cmt_text(a, gf_cmts[k]).add("\n")
         k + 1
     })
     out
@@ -253,15 +253,6 @@ gf_decl_pos = (d: Decl) i32 {
         _                 => 0,
     })
 }
-// ── String builder shims (reuse the canonical genc String API) ───────────────
-ff_string* = (a: Allocator, cap: i64) String {
-    String(
-        ptr: a.acquire_or_die(cap),
-        len: 0,
-        cap: cap,
-    )
-}
-ff_append* = (s: String, a: Allocator, t: StringView) String { s.gstr_append(a, t) }
 // A `"""…"""` literal is reproduced from SOURCE, byte for byte. Re-rendering it through the normal
 // string path would escape the contents back into `\"` and `\n` — turning the user's raw text into
 // exactly the form the raw literal exists to avoid, and silently rewriting their file. Returns the
@@ -273,23 +264,26 @@ gf_raw_lit* = (a: Allocator, pos: i32) StringView {
         return ""
     })
     end = gf_src.rawstr_end(pos + 3)
-    out ::= a.gstr_string(end - pos + 1)
-    pos.upto(end, (i) { out = out.ff_push(a, at(gf_src, i)) })
-    out.gstr_finish(a)
+    out ::= a.String(end - pos + 1)
+    pos.upto(end, (i) { out = out.add_one(at(gf_src, i)) })
+    out.finish_cstr()
 }
-ff_push* = (s: String, a: Allocator, b: u8) String { s.gstr_push(a, b) }
-// integer rendering is the shared gstr_int/gstr_uint (compiler.astops); a `.Int` node with the top bit
+// A `.Int` node with the top bit
 // set (n<0 as i64) is a u64 literal ABOVE i64-max — real negatives are `0 - x` Bin nodes, never a
-// negative `.Int` — so gstr_int reinterprets its exact bit pattern and prints UNSIGNED decimal
+// negative `.Int` — reinterpret its exact bit pattern and print UNSIGNED decimal
 // (`0xcbf29ce484222325` → `14695981039346656037`, not the wrong signed `-3750763034362895579`).
 // A non-printable byte as a `\xNN` hex escape — the ONLY numeric escape the Zen lexer accepts, in both
 // a string literal (parse_atom.unescape) and a char literal (parse_atom.char_val); there is no octal
 // form, so genc's `\ooo` cannot be reused here. Shared by `ff_char` below and `ff_escape_byte` in
 // compiler.pretty_expr.
 ffhex = (d: i64) u8 { sbyte("0123456789abcdef", d) }
+ff_ast_int* = (s: String, n: i64) String {
+    u: u64 = n
+    s.add_u64(u)
+}
 ff_hex_byte* = (s: String, a: Allocator, b: u8) String {
     n = b.to_i64()
-    s.ff_append(a, "\\x").ff_push(a, ffhex(n / 16)).ff_push(a, ffhex(n % 16))
+    s.add("\\x").add_one(ffhex(n / 16)).add_one(ffhex(n % 16))
 }
 // render a char-literal byte `n` back as a `'x'` literal (a `.Byte` AST node ONLY ever comes from a
 // char literal, so this round-trips `'a'` → `'a'` instead of leaking the raw byte value `97`). Common
@@ -306,83 +300,98 @@ ff_hex_byte* = (s: String, a: Allocator, b: u8) String {
 // only so an out-of-range `.Byte` would still emit its exact value rather than a truncated escape.
 ff_char* = (s: String, a: Allocator, n: i32) String {
     (n == '\n').then({
-        return s.ff_append(a, "'\\n'")
+        return s.add("'\\n'")
     })
     (n == '\t').then({
-        return s.ff_append(a, "'\\t'")
+        return s.add("'\\t'")
     })
     (n == '\r').then({
-        return s.ff_append(a, "'\\r'")
+        return s.add("'\\r'")
     })
     (n == '\0').then({
-        return s.ff_append(a, "'\\0'")
+        return s.add("'\\0'")
     })
     (n == '\\').then({
-        return s.ff_append(a, "'\\\\'")
+        return s.add("'\\\\'")
     })
     (n == '\'').then({
-        return s.ff_append(a, "'\\''")
+        return s.add("'\\''")
     })
     (n >= ' ' && n <= '~').then({
-        return s.ff_append(a, "'").ff_push(a, to_u8(n)).ff_append(a, "'")
+        return s.add("'").add_one(to_u8(n)).add("'")
     })
     (n >= 0 && n <= 255).match ({
-        true  => s.ff_append(a, "'").ff_hex_byte(a, to_u8(n)).ff_append(a, "'"),
-        false => s.gstr_int(a, n),
+        true  => s.add("'").ff_hex_byte(a, to_u8(n)).add("'"),
+        false => s.ff_ast_int(n),
     })
 }
 // n levels of 4-space indentation
 ff_indent* = (s: String, a: Allocator, n: i32) String {
-    (n <= 0).then({ s }, { s.ff_append(a, "    ").ff_indent(a, n - 1) })
+    (n <= 0).then({ s }, { s.add("    ").ff_indent(a, n - 1) })
 }
 // ── types ────────────────────────────────────────────────────────────────────
 ff_ty* = (s: String, a: Allocator, t: Ty) String {
     t.match ({
-        .I32           => s.ff_append(a, "i32"),
-        .I64           => s.ff_append(a, "i64"),
-        .U8            => s.ff_append(a, "u8"),
-        .F64           => s.ff_append(a, "f64"),
-        .Bool          => s.ff_append(a, "bool"),
-        .Void          => s.ff_append(a, "void"),
-        .StringView    => s.ff_append(a, "StringView"),
-        .StringCstr    => s.ff_append(a, "StringCstr"),
-        .StringLiteral => s.ff_append(a, "StringLiteral"),
-        .Named(nm)     => s.ff_append(a, nm),
+        .I32           => s.add("i32"),
+        .I64           => s.add("i64"),
+        .U8            => s.add("u8"),
+        .F64           => s.add("f64"),
+        .Bool          => s.add("bool"),
+        .Void          => s.add("void"),
+        .StringView    => s.add("StringView"),
+        .StringCstr    => s.add("StringCstr"),
+        .StringLiteral => s.add("StringLiteral"),
+        .Named(nm)     => s.add(nm),
         .Ptr(pd)       => s
-            .ff_append(a, ptr_kw(pd.kind))
-            .ff_append(a, "<")
+            .add(ptr_kw(pd.kind))
+            .add("<")
             .ff_ty(a, load(pd.pointee))
-            .ff_append(a, ">"),
+            .add(">"),
         .Slice(p)      => s.ff_slice_ty(a, p),
         .FnT(ft)       => s
-            .ff_append(a, "(")
-            .ff_tys(a, ft.params)
-            .ff_append(a, ") ")
+            .add("(")
+            .ff_fnt_params(a, ft, 0)
+            .add(") ")
             .ff_ty(a, load(ft.ret)),
         .Generic(g)    => s
-            .ff_append(a, g.name)
-            .ff_append(a, "<")
+            .add(g.name)
+            .add("<")
             .ff_tys(a, g.args)
-            .ff_append(a, ">"),
+            .add(">"),
     })
+}
+ff_fnt_params = (s: String, a: Allocator, ft: FnTData, i: i32) String {
+    (to_i64(i) >= ft.params.len).then({
+        return s
+    })
+    labeled = ft.labels.len == ft.params.len
+    out ::= (i == 0).then({ s }, { s.add(", ") })
+    out = labeled.match({
+        true  => out.add(ft.labels[to_i64(i)]),
+        false => out.add("arg").add_i64(i),
+    })
+    out.add(": ").ff_ty(a, ft.params[to_i64(i)]).ff_fnt_params(a, ft, i + 1)
 }
 // Slice types are always explicit. Brackets belong to values (`xs[i]` and slice literals), never
 // type declarations; `Slice<T>` names a read-only window and `MutSlice<T>` a writable one.
 ff_slice_ty = (s: String, a: Allocator, pd: PtrData) String {
     s
-        .ff_append(a, slice_kw(pd.kind))
-        .ff_append(a, "<")
+        .add(slice_kw(pd.kind))
+        .add("<")
         .ff_ty(a, load(pd.pointee))
-        .ff_append(a, ">")
+        .add(">")
 }
 ff_tys* = (s: String, a: Allocator, ts: MutSlice<Ty>) String {
     out ::= s
     ts.loop_at((i, t) {
-        out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
+        out = (i == 0).then({ out }, { out.add(", ") })
         out = out.ff_ty(a, t)
     })
     out
 }
+Ty.impl(StringFormat, {
+    string_format = (t: Ty, s: String) String { s.ff_ty(s.alloc, t) }
+})
 ff_cond* = (s: String, a: Allocator, d: CondData, ind: i32) String {
     d.ff_cond_is_then().then({
         return s.ff_then(a, d, ind)
@@ -400,7 +409,7 @@ ff_cond* = (s: String, a: Allocator, d: CondData, ind: i32) String {
         return s.ff_cond_multiline(a, d, ind)
     })
     saved_comment = gf_idx
-    trial = a.ff_string(256).ff_cond_inline(a, d, ind)
+    trial = a.String(256).ff_cond_inline(a, d, ind)
     gf_idx = saved_comment
     single_line = trial.ff_str_has_nl().then({ false }, { true })
     (single_line && trial.ff_fits_width(s.ff_current_col(), 100)).match ({
@@ -433,13 +442,13 @@ ff_str_has_nl* = (s: String) bool { ff_scan_nl(s.ptr, 0, s.len) }
 // chain-wrapping in ff_bin / the MethodCall spine takes over (compiler.pretty_expr).
 ff_one_line_fits = (a: Allocator, s: String, st: Stmt, drop: bool, ind: i32) bool {
     save = gf_idx
-    trial = a.ff_string(256).ff_stmt_at(a, st, drop, ind)
+    trial = a.String(256).ff_stmt_at(a, st, drop, ind)
     gf_idx = save
     trial.ff_fits_width(s.ff_current_col() + 2, 98)
 }
 ff_one_line = (a: Allocator, st: Stmt, drop: bool, ind: i32) bool {
     save = gf_idx
-    r = ff_str_has_nl(a.ff_string(256).ff_stmt_at(a, st, drop, ind)).then({ false }, { true })
+    r = ff_str_has_nl(a.String(256).ff_stmt_at(a, st, drop, ind)).then({ false }, { true })
     gf_idx = save
     r
 }
@@ -467,17 +476,17 @@ ff_no_lead_cmt = (sp: i32) bool {
 // fixtures require. Inlining is suppressed when a leading comment sits inside the body (it would be dropped).
 ff_block* = (s: String, a: Allocator, body: MutSlice<Stmt>, ind: i32, drop_ret: bool) String {
     (body.len == 0).match ({
-        true  => s.ff_append(a, "{ }"),
+        true  => s.add("{ }"),
         false => (drop_ret
             && body.len == 1
             && ff_no_lead_cmt(stmt_left_pos(body[0]))
             && a.ff_one_line(body[0], drop_ret, ind)
             && a.ff_one_line_fits(s, body[0], drop_ret, ind)).match ({
-            true  => s.ff_append(a, "{ ").ff_stmt_at(a, body[0], drop_ret, ind).ff_append(a, " }"),
+            true  => s.add("{ ").ff_stmt_at(a, body[0], drop_ret, ind).add(" }"),
             false => {
-                open = s.ff_append(a, "{\n")
+                open = s.add("{\n")
                 inner = open.ff_stmts(a, body, ind + 1, drop_ret)
-                inner.ff_indent(a, ind).ff_append(a, "}")
+                inner.ff_indent(a, ind).add("}")
             },
         }),
     })
@@ -504,7 +513,7 @@ ff_one_stmt = (s: String, a: Allocator, st: Stmt, drop: bool, ind: i32, db: i32,
     lead = s.ff_flush_leading(a, sp, ind)
     body = lead.ff_indent(a, ind).ff_stmt_at(a, st, drop, ind)
     withc = body.ff_drain(a, db, ib, ind)
-    withc.ff_append(a, "\n")
+    withc.add("\n")
 }
 ff_stmt_at = (s: String, a: Allocator, st: Stmt, drop: bool, ind: i32) String {
     drop.match ({
@@ -518,29 +527,29 @@ ff_stmt_at = (s: String, a: Allocator, st: Stmt, drop: bool, ind: i32) String {
 ff_stmt = (s: String, a: Allocator, st: Stmt, ind: i32) String {
     st.match ({
         .Let(l)      => s.ff_let(a, l, ind),
-        .Assign(asn) => s.ff_expr(a, asn.target, ind).ff_append(a, " = ").ff_expr(a, asn.value, ind),
-        .Return(e)   => s.ff_append(a, "return ").ff_expr(a, e, ind),
+        .Assign(asn) => s.ff_expr(a, asn.target, ind).add(" = ").ff_expr(a, asn.value, ind),
+        .Return(e)   => s.add("return ").ff_expr(a, e, ind),
         .ExprStmt(e) => s.ff_expr(a, e, ind),
         // Internal branch IR is never parsed from Zen source. If a resolved tree is printed through
         // this API, preserve the language invariant by spelling it as a boolean `.match`.
         .If(f)       => s
-            .ff_append(a, "(")
+            .add("(")
             .ff_expr(a, f.c, ind)
-            .ff_append(a, ").match ({ true => ")
+            .add(").match ({ true => ")
             .ff_block(a, f.then, ind, false)
-            .ff_append(a, ", false => ")
+            .add(", false => ")
             .ff_block(a, f.els, ind, false)
-            .ff_append(a, " })"),
+            .add(" })"),
         .While(w)    => s
-            .ff_append(a, "@while (")
+            .add("@while (")
             .ff_expr(a, w.c, ind)
-            .ff_append(a, ") ")
+            .add(") ")
             .ff_block(a, w.body, ind, false),
         .IndexSet(x) => s
             .ff_recv(a, x.seq, ind)
-            .ff_append(a, "[")
+            .add("[")
             .ff_expr(a, x.idx, ind)
-            .ff_append(a, "] = ")
+            .add("] = ")
             .ff_expr(a, x.value, ind),
     })
 }
@@ -550,19 +559,19 @@ ff_stmt = (s: String, a: Allocator, st: Stmt, ind: i32) String {
 // because a mutable binding with no annotation would otherwise have to be spelled `x :: = v`.
 ff_let = (s: String, a: Allocator, l: LetData, ind: i32) String {
     head = l.ty.match ({
-        .Void => s.ff_append(a, l.name).ff_append(a, l.mut.then({ " ::= " }, { " = " })),
+        .Void => s.add(l.name).add(l.mut.then({ " ::= " }, { " = " })),
         _     => s
-            .ff_append(a, l.name)
-            .ff_append(a, l.mut.then({ " :: " }, { ": " }))
+            .add(l.name)
+            .add(l.mut.then({ " :: " }, { ": " }))
             .ff_ty(a, l.ty)
-            .ff_append(a, " = "),
+            .add(" = "),
     })
     head.ff_expr(a, l.value, ind)
 }
 // ── module: each decl on its own line; hoisted methods + inherent-impl markers are skipped (their
 // bodies print inside the owning struct / trait impl instead). ───────────────────────────────────
 pretty_module_in* = (a: Allocator, decls: MutSlice<Decl>, exp: MutSlice<Param>) String {
-    s = a.ff_string(8192)
+    s = a.String(8192)
     out ::= s
     decls.loop_at((i, d) {
         nb = a.gf_next_decl_pos(decls, i + 1)    // the next EMITTED decl's pos → trailing-comment boundary
@@ -575,7 +584,7 @@ pretty_module_in* = (a: Allocator, decls: MutSlice<Decl>, exp: MutSlice<Param>) 
                 out = a.ff_top_decl(out, exp, decls, d, nb)
             }),
             .DTraitDefault(td) => { },    // body re-inlined at its record's field slot (ff_record_field)
-            .DStruct(sd)       => (a.ff_is_anon_payload_name(decls, sd.name) == false).then({
+            .DStruct(sd)       => (a.ff_is_payload_name(decls, sd.name) == false).then({
                 out = a.ff_top_decl(out, exp, decls, d, nb)
             }),    // suppress synthesized multi-field variant-payload structs (rendered inline as `(t0, …)`)
             _                  => {
@@ -617,5 +626,5 @@ ff_top_decl = (
     lead = s.ff_flush_leading(a, gf_decl_pos(d), 0)
     body = lead.ff_decl(a, exp, decls, d)
     withc = body.ff_trailing(a, nb)    // a decl gets only an inline same-line comment; own-line
-    withc.ff_append(a, "\n")
+    withc.add("\n")
 }    // comments between decls are LEADING for the next decl

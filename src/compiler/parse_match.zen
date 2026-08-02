@@ -230,6 +230,14 @@ reject_duplit = (a: Allocator, next: i32, pos: i32) PExpr {
         next: next,
     )
 }
+// Once a literal wildcard arm is seen, every following arm is dead. Literal matches lower to Cond
+// nodes and would otherwise lose this ordering fact, so retain the first dead label position in a sentinel.
+reject_unreachable_lit = (a: Allocator, next: i32, pos: i32) PExpr {
+    PExpr(
+        expr: a.enode(call_at("__unreachable_lit_arm", a.no_args(), pos)),
+        next: next,
+    )
+}
 // Value equality of two literal labels — int, char (`Byte`), or StringView; distinct Expr shapes differ.
 lit_val_eq = (x: Ptr<Expr>, y: Ptr<Expr>) bool {
     load(x).match ({
@@ -460,7 +468,14 @@ lit_arm_more = (
             ),
             false => a.reject_exhaust(nx.next, subj.expr.match_subj_pos()),
         }),
-        false => a.cons_lit_arm(src, subj, arm, after, wild),
+        false => {
+            rest = a.cons_lit_arm(src, subj, arm, after, wild)
+            (arm.wild || wild).then({
+                a.reject_unreachable_lit(rest.next, nx.tok.start)
+            }, {
+                rest
+            })
+        },
     })
 }
 cons_lit_arm = (
@@ -573,7 +588,7 @@ arm_binds = (a: Allocator, src: StringView, pos: i32) BindList {
     a.fill_binds(src, pos, a.bind_buf(), 0)
 }
 // Multi-binder destructure `.A(x, y) => body` desugars to ONE synthetic binder `__zen_payload` bound to
-// the anon-struct payload, plus prepended `x = __zen_payload._0  y = __zen_payload._1 …` lets, then the
+// the indexed-payload-record payload, plus prepended `x = __zen_payload._0  y = __zen_payload._1 …` lets, then the
 // original body as the trailing value — lowering to the existing single-binder + field-access form.
 fill_destr = (a: Allocator, bl: BindList, stm: MutSlice<Stmt>, k: i32) void {
     (k < bl.count).then({

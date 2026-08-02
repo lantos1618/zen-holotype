@@ -8,6 +8,36 @@
 harness_verdict_run* = () i32 {
     a = run_verdicts("verdict", [
         VerdictCase(
+            src: "main = () i32 { \x27\x27 }",
+            should_pass: false,
+            kind: "parse",
+        ),
+        VerdictCase(
+            src: "main = () i32 { \x27ab\x27 }",
+            should_pass: false,
+            kind: "parse",
+        ),
+        VerdictCase(
+            src: "main = () i32 { \x27é\x27 }",
+            should_pass: false,
+            kind: "parse",
+        ),
+        VerdictCase(
+            src: "main = () i32 { \x27\\q\x27 }",
+            should_pass: false,
+            kind: "parse",
+        ),
+        VerdictCase(
+            src: "main = () i32 { \x27\\xG0\x27 }",
+            should_pass: false,
+            kind: "parse",
+        ),
+        VerdictCase(
+            src: "main = () i32 { s = \"a\\x0G\"  0 }",
+            should_pass: false,
+            kind: "parse",
+        ),
+        VerdictCase(
             src: "{ Allocator, heap_allocator } = std.mem.alloc\nhalloc = std.mem.heap\nHolder: { ptr: RawPtr<u8> }\nmain = () i32 {\n    a = halloc.gpa()\n    p = a.addr().acquire(64)\n    h ::= Holder(ptr: p)\n    a.addr().release(p)\n    q = a.addr().acquire(64)\n    h.ptr = q\n    v = load(h.ptr)\n    a.addr().release(q)\n    v.to_i32()\n}\n",
             should_pass: true,
             kind: "",
@@ -233,12 +263,12 @@ harness_verdict_run* = () i32 {
             kind: "arity",
         ),
         VerdictCase(
-            src: "//! link: c\nbad = (xs: ...i32, y: i32) i32 { y }\ntest* = () i32 { bad(1, 2, 3) }",
+            src: "bad = (xs: ...i32, y: i32) i32 { y }\ntest* = () i32 { bad(1, 2, 3) }",
             should_pass: false,
             kind: "parse",
         ),
         VerdictCase(
-            src: "//! link: c\nbad = (xs: ...i32, ys: ...i32) i32 { 0 }\ntest* = () i32 { bad(1) }",
+            src: "bad = (xs: ...i32, ys: ...i32) i32 { 0 }\ntest* = () i32 { bad(1) }",
             should_pass: false,
             kind: "parse",
         ),
@@ -294,6 +324,11 @@ harness_verdict_run* = () i32 {
         ),
         VerdictCase(
             src: "{ malloc } = std.mem.alloc\ntest* = () i32 { p = malloc(64)\n b :: MutSlice<i64> = p.slice(1)\n b[0] = 1\n 0 }",
+            should_pass: false,
+            kind: "alloc-null",
+        ),
+        VerdictCase(
+            src: "{ malloc } = std.mem.alloc\ntest* = () i32 { p = malloc(64)\n q = p\n b :: MutSlice<i64> = q.slice(1)\n b[0] = 1\n 0 }",
             should_pass: false,
             kind: "alloc-null",
         ),
@@ -394,13 +429,13 @@ harness_verdict_run* = () i32 {
         ),
         VerdictCase(
             src: "S*: A | B\nf* = (s: S) i32 {\n s.match({ _ => 3, .B => 1 })\n}\ntest* = () i32 { f(.A) }",
-            should_pass: true,
-            kind: "",
+            should_pass: false,
+            kind: "unreachable-arm",
         ),
         VerdictCase(
             src: "f* = (n: i32) i32 {\n n.match({ _ => 5, 2 => 20 })\n}\ntest* = () i32 { f(9) }",
-            should_pass: true,
-            kind: "",
+            should_pass: false,
+            kind: "unreachable-arm",
         ),
         VerdictCase(
             src: "f* = (b: bool) i32 {\n b.match({ false => 0, true => 1 })\n}\ntest* = () i32 { f(false) }",
@@ -613,32 +648,32 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "S*: { op: (i32) i32 }\ng* = (a: i64) i32 { 0 }\ntest* = () i32 { s = S(op: g)  s.op(3) }",
+            src: "S*: { op: (arg0: i32) i32 }\ng* = (a: i64) i32 { 0 }\ntest* = () i32 { s = S(op: g)  s.op(3) }",
             should_pass: false,
             kind: "struct-field",
         ),
         VerdictCase(
-            src: "S*: { op: (i32) i32 }\ng* = (a: i32, b: i32) i32 { 0 }\ntest* = () i32 { s = S(op: g)  0 }",
+            src: "S*: { op: (arg0: i32) i32 }\ng* = (a: i32, b: i32) i32 { 0 }\ntest* = () i32 { s = S(op: g)  0 }",
             should_pass: false,
             kind: "struct-field",
         ),
         VerdictCase(
-            src: "S*: { op: (i32) i64 }\ng* = (a: i32) i32 { 0 }\ntest* = () i32 { s = S(op: g)  0 }",
+            src: "S*: { op: (arg0: i32) i64 }\ng* = (a: i32) i32 { 0 }\ntest* = () i32 { s = S(op: g)  0 }",
             should_pass: false,
             kind: "struct-field",
         ),
         VerdictCase(
-            src: "S*: { op: (i32) i32 }\ntest* = () i32 { s = S(op: 5)  0 }",
+            src: "S*: { op: (arg0: i32) i32 }\ntest* = () i32 { s = S(op: 5)  0 }",
             should_pass: false,
             kind: "struct-field",
         ),
         VerdictCase(
-            src: "S*: { op: (i32) i32 }\ng* = (a: i32) i32 { a + 1 }\ntest* = () i32 { s = S(op: g)  s.op(41) }",
+            src: "S*: { op: (arg0: i32) i32 }\ng* = (a: i32) i32 { a + 1 }\ntest* = () i32 { s = S(op: g)  s.op(41) }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "Store*<S>: { reducer: (S, i32) S }\nA*: { c: i32 }\nred* = (s: A, n: i32) A { A(c: s.c + n) }\ntest* = () i32 { st = Store<A>(reducer: red)  st.reducer(A(c: 0), 5).c }",
+            src: "Store*<S>: { reducer: (arg0: S, arg1: i32) S }\nA*: { c: i32 }\nred* = (s: A, n: i32) A { A(c: s.c + n) }\ntest* = () i32 { st = Store<A>(reducer: red)  st.reducer(A(c: 0), 5).c }",
             should_pass: true,
             kind: "",
         ),
@@ -718,7 +753,7 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "apply* = (f: (i32) i32, x: i32) i32 { f(x) }\ng* = (a: i32) i32 { a + 1 }\ntest* = () i32 { apply(g, 5) }",
+            src: "apply* = (f: (arg0: i32) i32, x: i32) i32 { f(x) }\ng* = (a: i32) i32 { a + 1 }\ntest* = () i32 { apply(g, 5) }",
             should_pass: true,
             kind: "",
         ),
@@ -888,32 +923,32 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { })\ntest* = () i32 { 0 }",
+            src: "Show*: { area: (arg0: Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { })\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "conformance",
         ),
         VerdictCase(
-            src: "Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i64 { 0 } })\ntest* = () i32 { 0 }",
+            src: "Show*: { area: (arg0: Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i64 { 0 } })\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "conformance",
         ),
         VerdictCase(
-            src: "Dbl*: { f: (Ptr<Self>, i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }",
+            src: "Dbl*: { f: (arg0: Ptr<Self>, arg1: i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "conformance",
         ),
         VerdictCase(
-            src: "Dbl*: { f: (Ptr<Self>, i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>, k: i64) i32 { a.v } })\ntest* = () i32 { 0 }",
+            src: "Dbl*: { f: (arg0: Ptr<Self>, arg1: i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>, k: i64) i32 { a.v } })\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "conformance",
         ),
         VerdictCase(
-            src: "Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }",
+            src: "Show*: { area: (arg0: Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "Eq*: { eq: (Ptr<Self>, Ptr<Self>) bool }\nA*: { v: i32 }\nA.impl(Eq, { eq = (a: Ptr<A>, b: Ptr<A>) bool { 1 < 2 } })\ntest* = () i32 { 0 }",
+            src: "Eq*: { eq: (arg0: Ptr<Self>, arg1: Ptr<Self>) bool }\nA*: { v: i32 }\nA.impl(Eq, { eq = (a: Ptr<A>, b: Ptr<A>) bool { 1 < 2 } })\ntest* = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
@@ -928,12 +963,12 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "T*: { a = (s: Ptr<Self>) i32 { 1 }, b: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(T, { })\ntest* = () i32 { 0 }",
+            src: "T*: { a = (s: Ptr<Self>) i32 { 1 }, b: (arg0: Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(T, { })\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "conformance",
         ),
         VerdictCase(
-            src: "T*: { a = (s: Ptr<Self>) i32 { 1 }, b: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(T, { b = (s: Ptr<A>) i32 { 2 } })\ntest* = () i32 { 0 }",
+            src: "T*: { a = (s: Ptr<Self>) i32 { 1 }, b: (arg0: Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(T, { b = (s: Ptr<A>) i32 { 2 } })\ntest* = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
@@ -1123,17 +1158,17 @@ harness_verdict_run* = () i32 {
             kind: "operand-type",
         ),
         VerdictCase(
-            src: "Box*: { op: (i32) i32 }\ntest* = () i32 {\n  k = 10\n  b = Box(op: (n) { n + k })\n  b.op(5)\n}",
+            src: "Box*: { op: (arg0: i32) i32 }\ntest* = () i32 {\n  k = 10\n  b = Box(op: (n) { n + k })\n  b.op(5)\n}",
             should_pass: false,
             kind: "lambda-value",
         ),
         VerdictCase(
-            src: "Box*: { op: (i64) i64 }\nmk* = (load: (i64) i64) Box { Box(op: (k: i64) i64 { load(k) }) }\ntest* = () i32 { to_i32(mk((v: i64) i64 { v + 1 }).op(41)) }",
+            src: "Box*: { op: (arg0: i64) i64 }\nmk* = (load: (arg0: i64) i64) Box { Box(op: (k: i64) i64 { load(k) }) }\ntest* = () i32 { to_i32(mk((v: i64) i64 { v + 1 }).op(41)) }",
             should_pass: false,
             kind: "lambda-value",
         ),
         VerdictCase(
-            src: "Box*: { op: (RawPtr<u8>) i64 }\nmk* = () Box { Box(op: (s: RawPtr<u8>) i64 { r: MutPtr<i64> = s\nload(r) }) }\ntest* = () i32 { v = 42\nto_i32(mk().op(v.addr().offset(0))) }",
+            src: "Box*: { op: (arg0: RawPtr<u8>) i64 }\nmk* = () Box { Box(op: (s: RawPtr<u8>) i64 { r: MutPtr<i64> = s\nload(r) }) }\ntest* = () i32 { v = 42\nto_i32(mk().op(v.addr().offset(0))) }",
             should_pass: true,
             kind: "",
         ),
@@ -1168,27 +1203,27 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "Area*: { area: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nBox*: { w: i32 }\nCircle.impl(Area, { area = (c: Ptr<Circle>) i32 { c.r * c.r } })\ntest* = () i32 { b = Box(w: 3)  b.addr().area() }",
+            src: "Area*: { area: (arg0: Ptr<Self>) i32 }\nCircle*: { r: i32 }\nBox*: { w: i32 }\nCircle.impl(Area, { area = (c: Ptr<Circle>) i32 { c.r * c.r } })\ntest* = () i32 { b = Box(w: 3)  b.addr().area() }",
             should_pass: false,
             kind: "trait-bound",
         ),
         VerdictCase(
-            src: "Area*: { area: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Area, { area = (c: Ptr<Circle>) i32 { c.r * c.r } })\ntest* = () i32 { c = Circle(r: 4)  c.addr().area() }",
+            src: "Area*: { area: (arg0: Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Area, { area = (c: Ptr<Circle>) i32 { c.r * c.r } })\ntest* = () i32 { c = Circle(r: 4)  c.addr().area() }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { b = Blob(v: 3)  draw(b) }",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { b = Blob(v: 3)  draw(b) }",
             should_pass: false,
             kind: "trait-bound",
         ),
         VerdictCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { c = Circle(r: 2)  draw(c) }",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { c = Circle(r: 2)  draw(c) }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nBlob*: { v: i32 }\ntest* = () i32 { b = Blob(v: 3)  b.render() }",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nBlob*: { v: i32 }\ntest* = () i32 { b = Blob(v: 3)  b.render() }",
             should_pass: false,
             kind: "trait-bound",
         ),
@@ -1198,12 +1233,12 @@ harness_verdict_run* = () i32 {
             kind: "trait-bound",
         ),
         VerdictCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { b = Blob(v: 3)  xs: MutSlice<i32> = [draw(b)]  xs[0] }",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { b = Blob(v: 3)  xs: MutSlice<i32> = [draw(b)]  xs[0] }",
             should_pass: false,
             kind: "trait-bound",
         ),
         VerdictCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\napply* = (f: () i32) i32 { f() }\ntest* = () i32 { b = Blob(v: 3)  apply(() i32 { draw(b) }) }",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\napply* = (f: () i32) i32 { f() }\ntest* = () i32 { b = Blob(v: 3)  apply(() i32 { draw(b) }) }",
             should_pass: false,
             kind: "trait-bound",
         ),
@@ -1238,7 +1273,7 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "ap<T> = (x: T, f: (T, T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a, b){ a + b }) }",
+            src: "ap<T> = (x: T, f: (arg0: T, arg1: T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a, b){ a + b }) }",
             should_pass: true,
             kind: "",
         ),
@@ -1253,17 +1288,17 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "f* = (a: i32, b: i32) i32 { a + b }\napply<T> = (x: T, f: (T) T) T { f(x) }\ntest* = () i32 { apply(5, (v: i32) i32 { v * 2 }) }",
+            src: "f* = (a: i32, b: i32) i32 { a + b }\napply<T> = (x: T, f: (arg0: T) T) T { f(x) }\ntest* = () i32 { apply(5, (v: i32) i32 { v * 2 }) }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "f* = (a: i64, b: i64) i64 { a + b }\napply<T> = (x: T, f: (T) T) T { f(x) }\ntest* = () i64 { f(1, 2) }",
+            src: "f* = (a: i64, b: i64) i64 { a + b }\napply<T> = (x: T, f: (arg0: T) T) T { f(x) }\ntest* = () i64 { f(1, 2) }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "f* = (a: i64, b: i64) i64 { a + b }\napply* = (x: i64, f: (i64) i64) i64 { f(x) }\ntest* = () i64 { apply(5, (v: i64) i64 { v * 3 }) }",
+            src: "f* = (a: i64, b: i64) i64 { a + b }\napply* = (x: i64, f: (arg0: i64) i64) i64 { f(x) }\ntest* = () i64 { apply(5, (v: i64) i64 { v * 3 }) }",
             should_pass: true,
             kind: "",
         ),
@@ -1273,7 +1308,7 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "dbl* = (v: i64) i64 { v * 2 }\ng* = (store_i64: (i64) i64) i64 { store_i64(21) }\ntest* = () i32 { to_i32(g(dbl)) }",
+            src: "dbl* = (v: i64) i64 { v * 2 }\ng* = (store_i64: (arg0: i64) i64) i64 { store_i64(21) }\ntest* = () i32 { to_i32(g(dbl)) }",
             should_pass: true,
             kind: "",
         ),
@@ -1308,12 +1343,12 @@ harness_verdict_run* = () i32 {
             kind: "no-if",
         ),
         VerdictCase(
-            src: "{ println } = std.text.fmt\nT: { x: i32 }\nmain = () i32 { v = T(x: 5)  println(\"hi\")  v.x }\n",
+            src: "{ println } = std.io.print\nT: { x: i32 }\nmain = () i32 { v = T(x: 5)  println(\"hi\")  v.x }\n",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "{ println } = std.text.fmt\nT: { x: i32 }\nmain = () i32 { v = T(x: 5)  println(v)  0 }\n",
+            src: "{ println } = std.io.print\nT: { x: i32 }\nmain = () i32 { v = T(x: 5)  println(v)  0 }\n",
             should_pass: false,
             kind: "trait-bound",
         ),
@@ -1324,7 +1359,7 @@ harness_verdict_run* = () i32 {
     // the honest lambda-value rejection, an unshadowed intrinsic lifts.
     // alloc-null (compiler.validate.nullalloc): the PROVENANCE rule that `RawPtr<u8>`'s type-level
     // exemption cannot express. The allocator's result is `RawPtr<u8>` exactly like `null_ptr()`, so
-    // these four cases pin what the flow rule sees: an allocation dereferenced bare is rejected, and
+    // these five cases pin what the flow rule sees: an allocation dereferenced bare is rejected, and
     // each of the three discharges (is_null test / assert_nonnull / try_acquire-as-value) is accepted.
     // the SAME violated bound, but the call sits inside a SLICE LITERAL / a LAMBDA body. Both
     // used to pass: kvb_expr_kind's hand-written arm list had no `.SliceLit` and no `.Lambda`
@@ -1363,7 +1398,7 @@ harness_verdict_run* = () i32 {
     // a trait method with ZERO impls in the module: the call is a trait-bound gap on the
     // receiver type, NOT an undefined name (the trait declaration alone makes it a method).
     // a bound naming a NONEXISTENT trait can never be satisfied: trait-bound at the call site.
-    // SHADOWING accept: an FnT param NAMED AFTER AN INTRINSIC (`store_i64: (i64) i64`) is a
+    // SHADOWING accept: an FnT param NAMED AFTER AN INTRINSIC (`store_i64: (arg0: i64) i64`) is a
     // genuine function-valued shadow — checked via the indirect-call path, never intrinsic arity.
     // glue-fix reject: `x = Res` ⏎ `.Okv(1)` is TWO statements (no silent glue into
     // `Res.Okv(1)`), so the bare type name `Res` used as a value is surfaced as an error.
@@ -1602,12 +1637,12 @@ harness_verdict_run* = () i32 {
             kind: "arg-type",
         ),
         VerdictCase(
-            src: "find* = (s: StringView, n: StringView) i64 { 0 }\nSeeker*: { find: (Ptr<Self>, i32) i32 }\nColl*: { n: i32 }\nColl.impl(Seeker, { find = (c: Ptr<Coll>, k: i32) i32 { c.n } })\ntest* = () i32 { xs: MutSlice<i32> = [1, 2]  to_i32(xs.find(3)) }",
+            src: "find* = (s: StringView, n: StringView) i64 { 0 }\nSeeker*: { find: (arg0: Ptr<Self>, arg1: i32) i32 }\nColl*: { n: i32 }\nColl.impl(Seeker, { find = (c: Ptr<Coll>, k: i32) i32 { c.n } })\ntest* = () i32 { xs: MutSlice<i32> = [1, 2]  to_i32(xs.find(3)) }",
             should_pass: false,
             kind: "method-not-found",
         ),
         VerdictCase(
-            src: "find* = (s: StringView, n: StringView) i64 { 0 }\nSeeker*: { find: (Ptr<Self>, i32) i32 }\nColl*: { n: i32 }\nColl.impl(Seeker, { find = (c: Ptr<Coll>, k: i32) i32 { c.n } })\ntest* = () i32 { c = Coll(n: 7)  c.addr().find(3) }",
+            src: "find* = (s: StringView, n: StringView) i64 { 0 }\nSeeker*: { find: (arg0: Ptr<Self>, arg1: i32) i32 }\nColl*: { n: i32 }\nColl.impl(Seeker, { find = (c: Ptr<Coll>, k: i32) i32 { c.n } })\ntest* = () i32 { c = Coll(n: 7)  c.addr().find(3) }",
             should_pass: true,
             kind: "",
         ),
@@ -1882,22 +1917,22 @@ harness_verdict_run* = () i32 {
             kind: "assign-fit",
         ),
         VerdictCase(
-            src: "Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { })\ntest* = () i32 { 0 }",
+            src: "Show*: { area: (arg0: Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { })\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "conformance",
         ),
         VerdictCase(
-            src: "Show*: { area: (Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i64 { 0 } })\ntest* = () i32 { 0 }",
+            src: "Show*: { area: (arg0: Ptr<Self>) i32 }\nA*: { v: i32 }\nA.impl(Show, { area = (a: Ptr<A>) i64 { 0 } })\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "conformance",
         ),
         VerdictCase(
-            src: "Dbl*: { f: (Ptr<Self>, i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }",
+            src: "Dbl*: { f: (arg0: Ptr<Self>, arg1: i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>) i32 { a.v } })\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "conformance",
         ),
         VerdictCase(
-            src: "Dbl*: { f: (Ptr<Self>, i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>, k: i64) i32 { a.v } })\ntest* = () i32 { 0 }",
+            src: "Dbl*: { f: (arg0: Ptr<Self>, arg1: i32) i32 }\nA*: { v: i32 }\nA.impl(Dbl, { f = (a: Ptr<A>, k: i64) i32 { a.v } })\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "conformance",
         ),
@@ -2272,12 +2307,12 @@ harness_verdict_run* = () i32 {
             kind: "arg-type",
         ),
         VerdictCase(
-            src: "ap<T> = (x: T, f: (T, T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a){ a + 1 }) }",
+            src: "ap<T> = (x: T, f: (arg0: T, arg1: T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a){ a + 1 }) }",
             should_pass: false,
             kind: "arity",
         ),
         VerdictCase(
-            src: "ap<T> = (x: T, f: (T, T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a, b){ a < b }) }",
+            src: "ap<T> = (x: T, f: (arg0: T, arg1: T) T) T { f(x, x) }\ntest* = () i32 { ap(5, (a, b){ a < b }) }",
             should_pass: false,
             kind: "arg-type",
         ),
@@ -2327,12 +2362,12 @@ harness_verdict_run* = () i32 {
             kind: "return-fit",
         ),
         VerdictCase(
-            src: "f* = (a: i64, b: i64) i64 { a + b }\napply* = (x: i64, f: (i64) i64) i64 { f(x, x) }\ntest* = () i64 { apply(5, (v: i64) i64 { v * 2 }) }",
+            src: "f* = (a: i64, b: i64) i64 { a + b }\napply* = (x: i64, f: (arg0: i64) i64) i64 { f(x, x) }\ntest* = () i64 { apply(5, (v: i64) i64 { v * 2 }) }",
             should_pass: false,
             kind: "arity",
         ),
         VerdictCase(
-            src: "f* = (a: i64, b: i64) i64 { a + b }\napply<T> = (x: T, f: (T) T) T { f(x) }\ntest* = () i64 { apply(5, (a, b){ a }) }",
+            src: "f* = (a: i64, b: i64) i64 { a + b }\napply<T> = (x: T, f: (arg0: T) T) T { f(x) }\ntest* = () i64 { apply(5, (a, b){ a }) }",
             should_pass: false,
             kind: "arity",
         ),
@@ -2357,12 +2392,12 @@ harness_verdict_run* = () i32 {
             kind: "not-callable",
         ),
         VerdictCase(
-            src: "dbl* = (v: i64) i64 { v * 2 }\napply* = (n: i64, f: (i64) i64) i64 { (n == 0).match ({ true => f(7), false => apply(n - 1, f) }) }\ntest* = () i32 { to_i32(apply(4, dbl)) }",
+            src: "dbl* = (v: i64) i64 { v * 2 }\napply* = (n: i64, f: (arg0: i64) i64) i64 { (n == 0).match ({ true => f(7), false => apply(n - 1, f) }) }\ntest* = () i32 { to_i32(apply(4, dbl)) }",
             should_pass: false,
             kind: "recursive-hof",
         ),
         VerdictCase(
-            src: "apply* = (n: i64, apply: (i64) i64) i64 { apply(n) }\ntest* = () i64 { apply(5, (v: i64) i64 { v * 2 }) }",
+            src: "apply* = (n: i64, apply: (arg0: i64) i64) i64 { apply(n) }\ntest* = () i64 { apply(5, (v: i64) i64 { v * 2 }) }",
             should_pass: true,
             kind: "",
         ),
@@ -3092,6 +3127,16 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
+            src: "main = () i32 { 2.match ({ _ => 7, 2 => 9 }) }",
+            should_pass: false,
+            kind: "unreachable-arm",
+        ),
+        VerdictCase(
+            src: "main = () i32 {\n    2.match ({ _ => { }, 2 => { } })\n    0\n}",
+            should_pass: false,
+            kind: "unreachable-arm",
+        ),
+        VerdictCase(
             src: "E*: A | B | C\nf = (e: E) i32 { e.match ({ .A => 1, _ => 2, .B => 3 }) }\ntest* = () i32 { f(E.A) }",
             should_pass: false,
             kind: "unreachable-arm",
@@ -3132,17 +3177,17 @@ harness_verdict_run* = () i32 {
             kind: "",
         ),
         VerdictCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { draw(5) }",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { draw(5) }",
             should_pass: false,
             kind: "trait-bound",
         ),
         VerdictCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nE*: A | B\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { draw(E.A) }",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nE*: A | B\ndraw<A: Show> = (a: A) i32 { 0 }\ntest* = () i32 { draw(E.A) }",
             should_pass: false,
             kind: "trait-bound",
         ),
         VerdictCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\nwrap<T: Show> = (x: T) i32 { draw(x) }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\ntest* = () i32 { wrap(Circle(r: 2)) }",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\nwrap<T: Show> = (x: T) i32 { draw(x) }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\ntest* = () i32 { wrap(Circle(r: 2)) }",
             should_pass: true,
             kind: "",
         ),
@@ -3162,27 +3207,27 @@ harness_verdict_run* = () i32 {
             kind: "ffi-type",
         ),
         VerdictCase(
-            src: "//! link: c\n// ffi: a slice param is the zslice fat pointer — no C ABI contract; use RawPtr + len.\nfrob = (xs: MutSlice<i32>) i64\ntest* = () i32 { 0 }",
+            src: "// ffi: a slice param is the zslice fat pointer — no C ABI contract; use RawPtr + len.\nfrob = (xs: MutSlice<i32>) i64\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "ffi-type",
         ),
         VerdictCase(
-            src: "//! link: c\n// ffi: a struct param whose FIELDS are not FFI-safe is equally rejected (recursion).\nS*: { a: i32, b: MutSlice<i32> }\nfrob = (s: S) i64\ntest* = () i32 { 0 }",
+            src: "// ffi: a struct param whose FIELDS are not FFI-safe is equally rejected (recursion).\nS*: { a: i32, b: MutSlice<i32> }\nfrob = (s: S) i64\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "ffi-type",
         ),
         VerdictCase(
-            src: "//! link: c\n// ffi chain order: an UNDECLARED named type in a foreign sig is the unknown-type error (which\n// runs before the ffi pass), not a misleading ffi-type reject.\nfrob = (cb: (RawPtr<u8>) RawPtr<u8>) Widget\ntest* = () i32 { 0 }",
+            src: "// ffi chain order: an UNDECLARED named type in a foreign sig is the unknown-type error (which\n// runs before the ffi pass), not a misleading ffi-type reject.\nfrob = (cb: (arg0: RawPtr<u8>) RawPtr<u8>) Widget\ntest* = () i32 { 0 }",
             should_pass: false,
             kind: "unknown-type",
         ),
         VerdictCase(
-            src: "//! link: c\n// ffi: the libc.zen shapes — scalars, StringView, RawPtr<T>, fn-pointer params, void return — accept.\nmy_open = (path: StringView, flags: i32, mode: i32) i32\nmy_calloc = (n: i64, size: i64) RawPtr<u8>\nmy_abort = () void\nmy_sin = (x: f64) f64\nmy_pthread_create = (thread: RawPtr<u8>, attr: RawPtr<u8>, start: (RawPtr<u8>) RawPtr<u8>, arg: RawPtr<u8>) i32\ntest* = () i32 { 0 }",
+            src: "// ffi: the libc.zen shapes — scalars, StringView, RawPtr<T>, fn-pointer params, void return — accept.\nmy_open = (path: StringView, flags: i32, mode: i32) i32\nmy_calloc = (n: i64, size: i64) RawPtr<u8>\nmy_abort = () void\nmy_sin = (x: f64) f64\nmy_pthread_create = (thread: RawPtr<u8>, attr: RawPtr<u8>, start: (arg0: RawPtr<u8>) RawPtr<u8>, arg: RawPtr<u8>) i32\ntest* = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "//! link: c\n// ffi: the std.web.dom shapes — opaque handle structs by value, bool, width ints — accept.\nHandle*: { h: RawPtr<u8> }\nclick2 = (e: Handle) void\nvisible = (e: Handle) bool\nnarrow = (a: i8, b: u16, c: u32, d: u64, e: f32) i8\ntest* = () i32 { 0 }",
+            src: "// ffi: the std.web.dom shapes — opaque handle structs by value, bool, width ints — accept.\nHandle*: { h: RawPtr<u8> }\nclick2 = (e: Handle) void\nvisible = (e: Handle) bool\nnarrow = (a: i8, b: u16, c: u32, d: u64, e: f32) i8\ntest* = () i32 { 0 }",
             should_pass: true,
             kind: "",
         ),
@@ -3232,12 +3277,12 @@ harness_verdict_run* = () i32 {
             kind: "must-use",
         ),
         VerdictCase(
-            src: "{ put } = std.text.fmt\nrun = (n: i64, f: (i64) void) void {\n    i ::= 0\n    @while (i < n) {\n        f(i)\n        i = i + 1\n    }\n}\ntest* = () i32 {\n    run(3, (x) { })\n    0\n}\n",
+            src: "{ put } = std.io.print\nrun = (n: i64, f: (arg0: i64) void) void {\n    i ::= 0\n    @while (i < n) {\n        f(i)\n        i = i + 1\n    }\n}\ntest* = () i32 {\n    run(3, (x) { })\n    0\n}\n",
             should_pass: true,
             kind: "",
         ),
         VerdictCase(
-            src: "{ put } = std.text.fmt\ntest* = () i32 {\n    f = (x: i64) void { }\n    i = 0\n    f(i)\n    0\n}\n",
+            src: "{ put } = std.io.print\ntest* = () i32 {\n    f = (x: i64) void { }\n    i = 0\n    f(i)\n    0\n}\n",
             should_pass: true,
             kind: "",
         ),
@@ -3347,7 +3392,7 @@ harness_verdict_run* = () i32 {
             kind: "parse",
         ),
         VerdictCase(
-            src: "S: { v: i32 }\nTr*: { m: (MutPtr<Self>, i32) i32 }\nS.impl(Tr, {\n    m = (s, k) i32 { s.v }\n})\ntest* = () i32 { 0 }\n",
+            src: "S: { v: i32 }\nTr*: { m: (arg0: MutPtr<Self>, arg1: i32) i32 }\nS.impl(Tr, {\n    m = (s, k) i32 { s.v }\n})\ntest* = () i32 { 0 }\n",
             should_pass: false,
             kind: "parse",
         ),
@@ -3396,7 +3441,7 @@ harness_verdict_run* = () i32 {
     // exemption. The mirror pair pins the false POSITIVE that exemption was masking: UFCS only
     // desugars to a TOP-LEVEL name, so a call through a locally bound callee (an FnT param, or a
     // local `f = (x: i64) void { … }`) is never a method call — it must check clean even when the
-    // import closure declares a value-mold method of the same name (std.text.fmt's `Printer.f`).
+    // import closure declares a value-mold method of the same name (std.io.print's `Printer.f`).
     // explicit by-name import wins: `{ at } = std.text.str` designates str's at(_, i64) as the
     // authoritative `at`, so `s.at(i64)` type-checks even though ascii's at(_, i32) is pulled into
     // the flat program (str imports ascii for is_space). Regression pin for UFCS dispatch precedence.
@@ -3569,7 +3614,7 @@ harness_verdict_run* = () i32 {
     // recursive-hof leniency: an FnT PARAM named after the fn itself SHADOWS it — the body's
     // `apply(n)` is an indirect call through the param, not recursion. Must stay accepted.
     // SHADOWING does not blunt the checks: a wrong-arity call THROUGH the shadowed FnT param
-    // (`f: (i64) i64` called with two args) is still an arity error — via the indirect-call path,
+    // (`f: (arg0: i64) i64` called with two args) is still an arity error — via the indirect-call path,
     // not top-level `f`'s signature.
     // SHADOWING does not blunt M5 R5: a wrong-arity LAMBDA passed to a HOF whose FnT param is
     // named after a top-level fn is still rejected against the HOF's declared FnT.

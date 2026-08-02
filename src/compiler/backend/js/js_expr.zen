@@ -2,9 +2,9 @@
 { is_empty } = std.text.str
 { Expr, Stmt, Ty, Param, ArmData, BinData, CallData, CondData, MatchData, MemberData,
   MakeStructData, MakeEnumData, LoopData, BlockData, LetData, AssignData } = compiler.ast.ast_types
-{ param, tvoid, tnamed, gstr_append, acquire_or_die } = compiler.genc
+{ param, tvoid, tnamed, acquire_or_die } = compiler.genc
 { Allocator } = std.mem.alloc
-{ slice_count } = compiler.astops
+{ lit_chain_is, lit_chain_subj, lit_subj_key, slice_count } = compiler.astops
 { jint, jname, jstrlit } = compiler.backend.js.js_lit
 { js_dom_dispatch } = compiler.backend.js.js_dom
 { js_box_taken } = compiler.backend.js.js_box
@@ -13,62 +13,89 @@
   js_is_defined_fn } = compiler.backend.js.js_copy
 { loop_at } = std.core.count
 { is_intrinsic } = compiler.check    // the ONE intrinsic roster; the parity gate below reads it, never a copy
+// Active literal-match subject during recursive emission (address identity, 0 when inactive).
+js_lit_active ::= false
+js_lit_subj ::= to_i64(0)
 js_expr* = (s: String, a: Allocator, e: Ptr<Expr>) String {
+    (js_lit_active && e.lit_subj_key() == js_lit_subj).then({
+        return s.add("__zen_lit_subj")
+    })
     e.match ({
         .Int(n)         => s.js_int_lit(a, n),
         .Byte(n)        => s.jint(a, n),
-        .FloatLit(ft)   => s.gstr_append(a, ft),
+        .FloatLit(ft)   => s.add(ft),
         .Var(v)         => s.js_var_ref(a, v.name),
         .Bin(b)         => s.js_bin(a, b),
         .Call(c)        => s.js_call(a, c),
-        .MethodCall(mc) => s.gstr_append(a, "__zr.undesugared_method_call"),
-        .Cond(d)        => s
-            .gstr_append(a, "(")
-            .js_expr(a, d.c)
-            .gstr_append(a, " ? ")
-            .js_expr(a, d.t)
-            .gstr_append(a, " : ")
-            .js_expr(a, d.e)
-            .gstr_append(a, ")"),
+        .MethodCall(mc) => s.add("__zr.undesugared_method_call"),
+        .Cond(d)        => s.js_cond(a, d),
         .Member(m)      => s.js_member(a, m),
         .MakeEnum(m)    => s.js_mkenum(a, m),
         .MakeStruct(m)  => s.js_mkstruct(a, m),
         .Tag(t)         => s
-            .gstr_append(a, "({ tag: \"")
-            .gstr_append(a, t.variant)
-            .gstr_append(a, "\" })"),
+            .add("({ tag: \"")
+            .add(t.variant)
+            .add("\" })"),
         .Match(m)       => s.js_match_expr(a, m),
         .StrLit(sl)     => s.jstrlit(a, sl.value),
         // A [u8] literal is a BYTE BUFFER: back it with linear memory (__zr.u8lit copies the items
         // into MEM and returns the offset), so `.ptr` supports the full RawPtr surface — offset/
-        // store/load/slice/write — exactly as C's stack compound literal does (std.text.fmt's digit
+        // store/load/slice/write — exactly as C's stack compound literal does (std.io.print's digit
         // scratch depends on this). Non-byte element types keep the JS-array fat pointer; __zr.idx/
         // setidx dispatch on the backing, taking the element width (js_elem_w) for the MEM case.
         .SliceLit(sd)   => sd.elem.match ({
             .U8 => s
-                .gstr_append(a, "({ ptr: __zr.u8lit([")
+                .add("({ ptr: __zr.u8lit([")
                 .js_args(a, sd.items)
-                .gstr_append(a, "]), len: ")
+                .add("]), len: ")
                 .jint(a, slice_count(sd.items))
-                .gstr_append(a, " })"),
+                .add(" })"),
             _   => s
-                .gstr_append(a, "({ ptr: [")
+                .add("({ ptr: [")
                 .js_cp_items(a, sd.items, sd.elem)
-                .gstr_append(a, "], len: ")
+                .add("], len: ")
                 .jint(a, slice_count(sd.items))
-                .gstr_append(a, " })"),
+                .add(" })"),
         }),
         .Index(ix)      => s
-            .gstr_append(a, "__zr.idx(")
+            .add("__zr.idx(")
             .js_expr(a, ix.seq)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_expr(a, ix.idx)
-            .gstr_append(a, ", ")
+            .add(", ")
             .jint(a, js_elem_w(ix.elem))
-            .gstr_append(a, ")"),
+            .add(")"),
         .Loop(l)        => s.js_loop(a, l),
-        .Lambda(lm)     => s.gstr_append(a, "__zr.unlowered_lambda"),
+        .Lambda(lm)     => s.add("__zr.unlowered_lambda"),
         .Block(b)       => s.js_block_expr(a, b),
+    })
+}
+js_cond_plain = (s: String, a: Allocator, d: CondData) String {
+    s
+        .add("(")
+        .js_expr(a, d.c)
+        .add(" ? ")
+        .js_expr(a, d.t)
+        .add(" : ")
+        .js_expr(a, d.e)
+        .add(")")
+}
+js_cond = (s: String, a: Allocator, d: CondData) String {
+    subj = d.lit_chain_subj()
+    cache = d.lit_chain_is() && (js_lit_active == false || subj.lit_subj_key() != js_lit_subj)
+    cache.match ({
+        false => s.js_cond_plain(a, d),
+        true  => {
+            out = s.add("(() => { const __zen_lit_subj = ").js_expr(a, subj).add("; return ")
+            prev_active = js_lit_active
+            prev_subj = js_lit_subj
+            js_lit_active = true
+            js_lit_subj = subj.lit_subj_key()
+            body = out.js_cond_plain(a, d)
+            js_lit_active = prev_active
+            js_lit_subj = prev_subj
+            body.add("; })()")
+        },
     })
 }
 // ── BOXED (address-taken) SCALAR LOCALS ───────────────────────────────────────────────────────────
@@ -124,11 +151,11 @@ js_var_ref = (s: String, a: Allocator, name: StringView) String {
     (w == 0).match ({
         true  => s.jname(a, name),
         false => s
-            .gstr_append(a, "__zr.ld(")
+            .add("__zr.ld(")
             .jname(a, name)
-            .gstr_append(a, ", ")
+            .add(", ")
             .jint(a, w)
-            .gstr_append(a, ")"),
+            .add(")"),
     })
 }
 // Loop control may cross match IIFEs and nested loop IIFEs, so bare JS break/continue cannot represent
@@ -139,16 +166,16 @@ js_var_ref = (s: String, a: Allocator, name: StringView) String {
 // to identity: `subj.u.Ok` emits as `subj.Ok`. (`break_zk`/`continue_zk` are the loop-handler verbs.)
 js_loop_token = (s: String, a: Allocator, obj: Ptr<Expr>, suffix: StringView) String {
     load(obj).match ({
-        .Var(v) => s.jname(a, v.name).gstr_append(a, suffix),
-        _       => s.gstr_append(a, "__zen_invalid_loop_handler"),
+        .Var(v) => s.jname(a, v.name).add(suffix),
+        _       => s.add("__zen_invalid_loop_handler"),
     })
 }
 js_loop_throw = (s: String, a: Allocator, obj: Ptr<Expr>, suffix: StringView) String {
-    s.gstr_append(a, "(() => { throw ").js_loop_token(a, obj, suffix).gstr_append(a, "; })()")
+    s.add("(() => { throw ").js_loop_token(a, obj, suffix).add("; })()")
 }
 js_member = (s: String, a: Allocator, m: MemberData) String {
     m.ptr.then({
-        return s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field)
+        return s.js_expr(a, m.obj).add(".").add(m.field)
     })
     (m.field == "break_zk").match ({
         true  => s.js_loop_throw(a, m.obj, "__b"),
@@ -156,7 +183,7 @@ js_member = (s: String, a: Allocator, m: MemberData) String {
             true  => s.js_loop_throw(a, m.obj, "__c"),
             false => (m.field == "u").match ({
                 true  => s.js_expr(a, m.obj),
-                false => s.js_expr(a, m.obj).gstr_append(a, ".").gstr_append(a, m.field),
+                false => s.js_expr(a, m.obj).add(".").add(m.field),
             }),
         }),
     })
@@ -174,11 +201,11 @@ js_bin = (s: String, a: Allocator, b: BinData) String {
     big = is_w64(iw_of(load(b.lhs))) || is_w64(iw_of(load(b.rhs)))
     (b.op == "/.").then({
         return s
-            .gstr_append(a, "(")
+            .add("(")
             .js_expr(a, b.lhs)
-            .gstr_append(a, " / ")
+            .add(" / ")
             .js_expr(a, b.rhs)
-            .gstr_append(a, ")")
+            .add(")")
     })
     // PER-OP WIDTH TRUNCATION: a JS `number` never wraps, so a narrow-int (i8/i16/i32, u8/u16/u32)
     // `+ - * / %` RESULT is truncated to its declared width right here — else an overflowing
@@ -197,28 +224,28 @@ js_bin = (s: String, a: Allocator, b: BinData) String {
 js_bin_core = (s: String, a: Allocator, b: BinData, big: bool) String {
     (b.op == "/").then({
         return s
-            .gstr_append(a, "__zr.div(")
+            .add("__zr.div(")
             .js_bexpr(a, b.lhs, big)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_bexpr(a, b.rhs, big)
-            .gstr_append(a, ")")
+            .add(")")
     })
     (b.op == "%").then({
         return s
-            .gstr_append(a, "__zr.mod(")
+            .add("__zr.mod(")
             .js_bexpr(a, b.lhs, big)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_bexpr(a, b.rhs, big)
-            .gstr_append(a, ")")
+            .add(")")
     })
     s
-        .gstr_append(a, "(")
+        .add("(")
         .js_bexpr(a, b.lhs, big)
-        .gstr_append(a, " ")
-        .gstr_append(a, js_bin_op(b, big))
-        .gstr_append(a, " ")
+        .add(" ")
+        .add(js_bin_op(b, big))
+        .add(" ")
         .js_bexpr(a, b.rhs, big)
-        .gstr_append(a, ")")
+        .add(")")
 }
 // the width to truncate a bin RESULT to: only the arithmetic ops overflow a JS number (bitwise ops
 // self-coerce); `iw_bin` gives 0 for a comparison or unknown-width operand → no wrap.
@@ -231,9 +258,9 @@ js_leak_op = (op: StringView) bool { op == "+" || op == "-" || op == "*" || op =
 js_bexpr = (s: String, a: Allocator, e: Ptr<Expr>, big: bool) String {
     big.match ({
         true  => load(e).match ({
-            .Int(n)  => s.jint(a, n).gstr_append(a, "n"),
-            .Byte(n) => s.jint(a, n).gstr_append(a, "n"),
-            _        => s.gstr_append(a, "__zr.big(").js_expr(a, e).gstr_append(a, ")"),
+            .Int(n)  => s.jint(a, n).add("n"),
+            .Byte(n) => s.jint(a, n).add("n"),
+            _        => s.add("__zr.big(").js_expr(a, e).add(")"),
         }),
         false => s.js_expr(a, e),
     })
@@ -259,24 +286,36 @@ js_op = (op: StringView) StringView {
 // literal `Nn` (they only ever occur in an i64/u64 context, whose boundary keeps them BigInt).
 js_int_lit = (s: String, a: Allocator, n: i64) String {
     (n > 9007199254740992 || n < 0 - 9007199254740992).then({
-        return s.jint(a, n).gstr_append(a, "n")
+        return s.jint(a, n).add("n")
     })
     s.jint(a, n)
 }
 // ── static width reconstruction (the type C carries on each value, rebuilt for the erased JS one) ────
 // The js value model keeps i32-and-narrower as a JS `number`, i64/u64 as a (norm) BigInt. An operator
-// needs its operands' static width to pick the BigInt vs number path; widths come from the per-function
-// typed-var table (vars), the cast intrinsics, and structurally through bin/cond. A struct field or slice
-// element is width 0 (unknown) — a rare inline i64-field-mixed-with-i32 is a documented gap (bind it to a
-// typed local first); it is still recovered whenever the sibling operand is a detected 64-bit value.
+// needs its operands' static width to pick the BigInt vs number path. Widths come from typed locals,
+// declared aggregate fields and slice elements, function returns, casts, and bin/cond structure.
 iw_of = (e: Expr) i32 {
     e.match ({
-        .Var(v)  => int_width(vw_lookup(v.name)),
-        .Bin(b)  => iw_bin(b),
-        .Cond(d) => iw_join(iw_of(load(d.t)), iw_of(load(d.e))),
-        .Call(c) => iw_call(c),
-        _        => 0,
+        .Var(v)    => int_width(vw_lookup(v.name)),
+        .Bin(b)    => iw_bin(b),
+        .Cond(d)   => iw_join(iw_of(load(d.t)), iw_of(load(d.e))),
+        .Call(c)   => iw_join(iw_call(c), int_width(js_call_ty(c))),
+        .Member(m) => iw_member(m),
+        .Index(ix) => int_width(ix.elem),
+        _          => 0,
     })
+}
+// Built-in slice headers are not declared structs, but their `len` field has the same i64 type on
+// every backend. Ordinary aggregate members recover their declared field type from the emitted decls.
+iw_member = (m: MemberData) i32 {
+    t = js_deref(js_ty_of(load(m.obj)))
+    (m.field == "len").then({
+        return t.match ({
+            .Slice(e) => 8,
+            _         => int_width(jsc_member_ty(t, m.field)),
+        })
+    })
+    int_width(jsc_member_ty(t, m.field))
 }
 // the cast intrinsics are the only width-changing calls the js backend cares about; a user call's width
 // is unknown here (0) — an unbound i64 call result mixed inline with a literal is the documented gap.
@@ -402,32 +441,34 @@ js_expr_fresh = (e: Expr) bool {
 }
 // a struct literal's field takes a COPY of its initializer, exactly as C's `(S){ .f = v }` does.
 js_mkstruct = (s: String, a: Allocator, m: MakeStructData) String {
-    out ::= s.gstr_append(a, "({ ")
+    out ::= s.add("({ ")
     m.inits.loop_at((i, fi) {
-        out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
+        out = (i == 0).then({ out }, { out.add(", ") })
+        ity = js_init_ty(m.mty, fi.name)
         out = out
-            .gstr_append(a, fi.name)
-            .gstr_append(a, ": ")
-            .js_sink(a, fi.value, js_init_ty(m.mty, fi.name), 0)
+            .add(fi.name)
+            .add(": ")
+            .js_sink(a, fi.value, ity, int_width(ity))
     })
-    out.gstr_append(a, " })")
+    out.add(" })")
 }
 // …and so does an enum PAYLOAD (C writes it into the union).
 js_mkenum = (s: String, a: Allocator, m: MakeEnumData) String {
+    pty = js_variant_ty(m.mty, m.variant)
     s
-        .gstr_append(a, "({ tag: \"")
-        .gstr_append(a, m.variant)
-        .gstr_append(a, "\", ")
-        .gstr_append(a, m.variant)
-        .gstr_append(a, ": ")
-        .js_sink(a, m.payload, js_variant_ty(m.mty, m.variant), 0)
-        .gstr_append(a, " })")
+        .add("({ tag: \"")
+        .add(m.variant)
+        .add("\", ")
+        .add(m.variant)
+        .add(": ")
+        .js_sink(a, m.payload, pty, int_width(pty))
+        .add(" })")
 }
 // a call's comma-separated args (each Expr value -> a Ptr<Expr> child).
 js_args* = (s: String, a: Allocator, args: MutSlice<Expr>) String {
     out ::= s
     args.loop_at((i, arg) {
-        out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
+        out = (i == 0).then({ out }, { out.add(", ") })
         out = out.js_expr(a, arg.addr())
     })
     out
@@ -436,13 +477,13 @@ js_args* = (s: String, a: Allocator, args: MutSlice<Expr>) String {
 js_cp_items = (s: String, a: Allocator, items: MutSlice<Expr>, elem: Ty) String {
     out ::= s
     items.loop_at((i, arg) {
-        out = (i == 0).then({ out }, { out.gstr_append(a, ", ") })
-        out = out.js_sink(a, arg.addr(), elem, 0)
+        out = (i == 0).then({ out }, { out.add(", ") })
+        out = out.js_sink(a, arg.addr(), elem, int_width(elem))
     })
     out
 }
 js_arg_at* = (s: String, a: Allocator, c: CallData, i: i32) String {
-    (i < c.args.len).then({ s.js_expr(a, c.args[i].addr()) }, { s.gstr_append(a, "0") })
+    (i < c.args.len).then({ s.js_expr(a, c.args[i].addr()) }, { s.add("0") })
 }
 js_zero_lit = (e: Ptr<Expr>) bool {
     e.match ({
@@ -455,35 +496,35 @@ js_zero_lit = (e: Ptr<Expr>) bool {
 js_call = (s: String, a: Allocator, c: CallData) String {
     (c.fn == "__str_eq").then({
         return s
-            .gstr_append(a, "__zr.eq(")
+            .add("__zr.eq(")
             .js_arg_at(a, c, 0)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, ")")
+            .add(")")
     })
     (c.fn == "__str_ne").then({
         return s
-            .gstr_append(a, "(!__zr.eq(")
+            .add("(!__zr.eq(")
             .js_arg_at(a, c, 0)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, "))")
+            .add("))")
     })
     // Allocator vtables are object-backed on JS. The source helper only casts the raw pointer
     // back to its struct type; the object already is that reference on this target.
     (c.fn == "allocator_vtable").then({
-        return s.gstr_append(a, "(").js_arg_at(a, c, 0).gstr_append(a, ").vtable")
+        return s.add("(").js_arg_at(a, c, 0).add(").vtable")
     })
     (c.fn == "load").then({
-        return s.gstr_append(a, "__zr.load(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.add("__zr.load(").js_arg_at(a, c, 0).add(")")
     })
     (c.fn == "store").then({
         return s
-            .gstr_append(a, "__zr.store(")
+            .add("__zr.store(")
             .js_arg_at(a, c, 0)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, ")")
+            .add(")")
     })
     (c.fn == "offset").then({
         // Pointer plus zero is identity for both linear-memory and object-backed pointers.
@@ -493,54 +534,54 @@ js_call = (s: String, a: Allocator, c: CallData) String {
             return s.js_arg_at(a, c, 0)
         })
         return s
-            .gstr_append(a, "__zr.offset(")
+            .add("__zr.offset(")
             .js_arg_at(a, c, 0)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, ")")
+            .add(")")
     })
     (c.fn == "slice").then({
         return s
-            .gstr_append(a, "__zr.slice(")
+            .add("__zr.slice(")
             .js_arg_at(a, c, 0)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, ")")
+            .add(")")
     })
     (c.fn == "cstr").then({
-        return s.gstr_append(a, "(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.add("(").js_arg_at(a, c, 0).add(")")
     })
     (c.fn == "null_ptr").then({
-        return s.gstr_append(a, "0")
+        return s.add("0")
     })
     (c.fn == "addr").then({
         return s.js_addr(a, c)
     })
     (c.fn == "assert_nonnull").then({
-        return s.gstr_append(a, "__zr.nn(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.add("__zr.nn(").js_arg_at(a, c, 0).add(")")
     })
     (c.fn == "to_i32").then({
-        return s.gstr_append(a, "__zr.i32(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.add("__zr.i32(").js_arg_at(a, c, 0).add(")")
     })
     (c.fn == "to_i64").then({
-        return s.gstr_append(a, "__zr.i64(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.add("__zr.i64(").js_arg_at(a, c, 0).add(")")
     })
     (c.fn == "to_u8").then({
-        return s.gstr_append(a, "__zr.u8(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.add("__zr.u8(").js_arg_at(a, c, 0).add(")")
     })
     (c.fn == "to_f64").then({
-        return s.gstr_append(a, "Number(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.add("Number(").js_arg_at(a, c, 0).add(")")
     })
     (c.fn == "load_i64").then({
-        return s.gstr_append(a, "__zr.load_i64(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.add("__zr.load_i64(").js_arg_at(a, c, 0).add(")")
     })
     (c.fn == "store_i64").then({
         return s
-            .gstr_append(a, "__zr.store_i64(")
+            .add("__zr.store_i64(")
             .js_arg_at(a, c, 0)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, ")")
+            .add(")")
     })
     (c.fn == "sizeof").then({
         return s.js_sizeof(a, c)
@@ -549,36 +590,36 @@ js_call = (s: String, a: Allocator, c: CallData) String {
     // discharges the seq-cst contract exactly with plain cell ops — see the atomic_* block in
     // bootstrap/zenrt.js for why that is an implementation, not a stub.
     (c.fn == "atomic_load_i64").then({
-        return s.gstr_append(a, "__zr.atomic_load(").js_arg_at(a, c, 0).gstr_append(a, ")")
+        return s.add("__zr.atomic_load(").js_arg_at(a, c, 0).add(")")
     })
     (c.fn == "atomic_store_i64").then({
         return s
-            .gstr_append(a, "__zr.atomic_store(")
+            .add("__zr.atomic_store(")
             .js_arg_at(a, c, 0)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, ")")
+            .add(")")
     })
     (c.fn == "atomic_add_i64").then({
         return s
-            .gstr_append(a, "__zr.atomic_add(")
+            .add("__zr.atomic_add(")
             .js_arg_at(a, c, 0)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, ")")
+            .add(")")
     })
     (c.fn == "atomic_cas_i64").then({
         return s
-            .gstr_append(a, "__zr.atomic_cas(")
+            .add("__zr.atomic_cas(")
             .js_arg_at(a, c, 0)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 1)
-            .gstr_append(a, ", ")
+            .add(", ")
             .js_arg_at(a, c, 2)
-            .gstr_append(a, ")")
+            .add(")")
     })
     (c.fn == "atomic_fence").then({
-        return s.gstr_append(a, "__zr.atomic_fence()")
+        return s.add("__zr.atomic_fence()")
     })
     c.fn.js_unlowered_intrinsic().then({
         js_unsupported_note(c.fn, c.pos)
@@ -632,14 +673,14 @@ js_unsupported_reset* = () void {
 // Every other shape keeps the identity lowering (`__zr.addr`), which is exactly right for a struct.
 js_addr = (s: String, a: Allocator, c: CallData) String {
     (c.args.len == 0).then({
-        return s.gstr_append(a, "__zr.addr(0)")
+        return s.add("__zr.addr(0)")
     })
     c.args[0].addr().match ({
         .Var(v) => (js_boxed_w(v.name) == 0).match ({
-            true  => s.gstr_append(a, "__zr.addr(").jname(a, v.name).gstr_append(a, ")"),
+            true  => s.add("__zr.addr(").jname(a, v.name).add(")"),
             false => s.jname(a, v.name),
         }),
-        _       => s.gstr_append(a, "__zr.addr(").js_arg_at(a, c, 0).gstr_append(a, ")"),
+        _       => s.add("__zr.addr(").js_arg_at(a, c, 0).add(")"),
     })
 }
 // `sizeof(T)` is resolved to a LITERAL byte count at emit time (compiler.backend.js.js_size), because the
@@ -662,7 +703,7 @@ js_size_lit = (s: String, a: Allocator, name: StringView, pos: i32) String {
 }
 js_size_refuse = (s: String, a: Allocator, pos: i32) String {
     js_unsupported_note("sizeof", pos)
-    s.gstr_append(a, "__zen_js_unsized_type")
+    s.add("__zen_js_unsized_type")
 }
 // ── match: value position -> an IIFE returning an arm value; statement position -> a real `switch` (so
 //    an arm's early `return` leaves the enclosing function, not just the IIFE). Enum tag is the variant
@@ -674,14 +715,14 @@ js_arm_bind = (s: String, a: Allocator, ar: ArmData, ename: StringView) String {
     pty = js_variant_ty(ename, ar.variant)
     vw_note(ar.bind, js_agg_ty_or(pty))
     s
-        .gstr_append(a, "const ")
+        .add("const ")
         .jname(a, ar.bind)
-        .gstr_append(a, " = ")
+        .add(" = ")
         .js_cp_open(a, pty)
-        .gstr_append(a, "_subj.")
-        .gstr_append(a, ar.variant)
+        .add("_subj.")
+        .add(ar.variant)
         .js_cp_close(a, pty)
-        .gstr_append(a, "; ")
+        .add("; ")
 }
 // the bind's type enters the typed-var table only when it is an aggregate — same rule as a let's.
 js_agg_ty_or = (t: Ty) Ty { js_cp_needed(t).then({ t }, { tvoid() }) }
@@ -689,29 +730,29 @@ js_arm_body_expr = (s: String, a: Allocator, ar: ArmData, ename: StringView) Str
     is_empty(ar.bind).match ({
         true  => s.js_expr(a, ar.body),
         false => s
-            .gstr_append(a, "(() => { ")
+            .add("(() => { ")
             .js_arm_bind(a, ar, ename)
-            .gstr_append(a, "return ")
+            .add("return ")
             .js_expr(a, ar.body)
-            .gstr_append(a, "; })()"),
+            .add("; })()"),
     })
 }
 js_switch_panic_default = (s: String, a: Allocator) String {
-    s.gstr_append(a, "default: __zr.panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ")
+    s.add("default: __zr.panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ")
 }
 js_switch_case = (s: String, a: Allocator, ar: ArmData, last: bool, ename: StringView) String {
     (ar.variant == "_").match ({
         true  => s
-            .gstr_append(a, "default: return ")
+            .add("default: return ")
             .js_arm_body_expr(a, ar, ename)
-            .gstr_append(a, "; "),
+            .add("; "),
         false => {
             out = s
-                .gstr_append(a, "case \"")
-                .gstr_append(a, ar.variant)
-                .gstr_append(a, "\": return ")
+                .add("case \"")
+                .add(ar.variant)
+                .add("\": return ")
                 .js_arm_body_expr(a, ar, ename)
-                .gstr_append(a, "; ")
+                .add("; ")
             last.then({ out.js_switch_panic_default(a) }, { out })
         },
     })
@@ -733,21 +774,21 @@ js_switch_cases = (
 }
 js_match_expr = (s: String, a: Allocator, m: MatchData) String {
     s
-        .gstr_append(a, "(() => { const _subj = ")
+        .add("(() => { const _subj = ")
         .js_expr(a, m.subj)
-        .gstr_append(a, "; switch (_subj.tag) { ")
+        .add("; switch (_subj.tag) { ")
         .js_switch_cases(a, m.arms, 0, m.ename)
-        .gstr_append(a, "} })()")
+        .add("} })()")
 }
 // statement-position match: arms run as statements so a diverging arm's `return` propagates.
 js_arm_stmt = (s: String, a: Allocator, ar: ArmData, ename: StringView) String {
     is_empty(ar.bind).match ({
         true  => s.js_arm_stmt_body(a, ar.body),
         false => s
-            .gstr_append(a, "{ ")
+            .add("{ ")
             .js_arm_bind(a, ar, ename)
             .js_arm_stmt_body(a, ar.body)
-            .gstr_append(a, " }"),
+            .add(" }"),
     })
 }
 // a braced value-position body is a Block: splice its statements; otherwise it's a bare expr statement.
@@ -759,14 +800,14 @@ js_arm_stmt_body = (s: String, a: Allocator, body: Ptr<Expr>) String {
 }
 js_switch_stmt_case = (s: String, a: Allocator, ar: ArmData, last: bool, ename: StringView) String {
     (ar.variant == "_").match ({
-        true  => s.gstr_append(a, "default: ").js_arm_stmt(a, ar, ename).gstr_append(a, " break; "),
+        true  => s.add("default: ").js_arm_stmt(a, ar, ename).add(" break; "),
         false => {
             out = s
-                .gstr_append(a, "case \"")
-                .gstr_append(a, ar.variant)
-                .gstr_append(a, "\": ")
+                .add("case \"")
+                .add(ar.variant)
+                .add("\": ")
                 .js_arm_stmt(a, ar, ename)
-                .gstr_append(a, " break; ")
+                .add(" break; ")
             last.then({ out.js_switch_panic_default(a) }, { out })
         },
     })
@@ -791,63 +832,63 @@ js_switch_stmt_cases = (
 }
 js_match_stmt = (s: String, a: Allocator, m: MatchData) String {
     s
-        .gstr_append(a, "{ const _subj = ")
+        .add("{ const _subj = ")
         .js_expr(a, m.subj)
-        .gstr_append(a, "; switch (_subj.tag) { ")
+        .add("; switch (_subj.tag) { ")
         .js_switch_stmt_cases(a, m.arms, 0, m.ename)
-        .gstr_append(a, "} }")
+        .add("} }")
 }
 // A foreach loop is still an expression-valued IIFE. Handler-specific identity tokens make control
 // expression-safe and let it cross nested match/loop IIFEs; the iteration catch consumes only THIS
 // loop's continue/break and rethrows every outer-loop token or ordinary exception unchanged.
 js_loop = (s: String, a: Allocator, l: LoopData) String {
     out ::= s
-        .gstr_append(a, "(() => { const _seq = ")
+        .add("(() => { const _seq = ")
         .js_expr(a, l.seq)
-        .gstr_append(a, "; const ")
+        .add("; const ")
         .jname(a, l.h)
-        .gstr_append(a, "__b = {}; const ")
+        .add("__b = {}; const ")
         .jname(a, l.h)
-        .gstr_append(a, "__c = {}; for (let ")
+        .add("__c = {}; for (let ")
         .jname(a, l.idx)
-        .gstr_append(a, " = 0; ")
+        .add(" = 0; ")
         .jname(a, l.idx)
-        .gstr_append(a, " < _seq.len; ")
+        .add(" < _seq.len; ")
         .jname(a, l.idx)
-        .gstr_append(a, "++) { const ")
+        .add("++) { const ")
         .jname(a, l.elem)
-        .gstr_append(a, " = __zr.idx(_seq, ")
+        .add(" = __zr.idx(_seq, ")
         .jname(a, l.idx)
-        .gstr_append(a, ", ")
+        .add(", ")
         .jint(a, js_elem_w(l.elemTy))
-        .gstr_append(a, "); try { ")
+        .add("); try { ")
     out = out.js_stmts(a, l.body)
     out = out
-        .gstr_append(a, " } catch (__zen_loop_ctl) { if (__zen_loop_ctl === ")
+        .add(" } catch (__zen_loop_ctl) { if (__zen_loop_ctl === ")
         .jname(a, l.h)
-        .gstr_append(a, "__c) { continue; } if (__zen_loop_ctl === ")
+        .add("__c) { continue; } if (__zen_loop_ctl === ")
         .jname(a, l.h)
-        .gstr_append(a, "__b) { break; } throw __zen_loop_ctl; } }")
-    out.gstr_append(a, " return 0; })()")
+        .add("__b) { break; } throw __zen_loop_ctl; } }")
+    out.add(" return 0; })()")
 }
 js_block_expr = (s: String, a: Allocator, b: BlockData) String {
-    out ::= s.gstr_append(a, "(() => { ")
+    out ::= s.add("(() => { ")
     b.stmts.loop_at((i, st) {
         one = (i == b.stmts.len - 1).then({ out.js_block_last(a, st) }, { out.js_stmt(a, st) })
-        out = one.gstr_append(a, " ")
+        out = one.add(" ")
     })
-    out.gstr_append(a, "})()")
+    out.add("})()")
 }
 // the LAST statement of a block-expr yields the block's value: a bare expr becomes `return expr;`.
 js_block_last = (s: String, a: Allocator, st: Stmt) String {
     st.match ({
-        .ExprStmt(e) => s.gstr_append(a, "return ").js_expr(a, e).gstr_append(a, ";"),
+        .ExprStmt(e) => s.add("return ").js_expr(a, e).add(";"),
         _            => s.js_stmt(a, st),
     })
 }
 js_block_stmts = (s: String, a: Allocator, b: BlockData) String {
     out ::= s
-    b.stmts.loop_at((i, st) { out = out.js_stmt(a, st).gstr_append(a, " ") })
+    b.stmts.loop_at((i, st) { out = out.js_stmt(a, st).add(" ") })
     out
 }
 // ── statements ────────────────────────────────────────────────────────────────────────────────────
@@ -859,17 +900,17 @@ js_let = (s: String, a: Allocator, l: LetData) String {
     lty = js_let_ty(l)
     vw_note(l.name, lty)
     bw = js_boxed_w(l.name)
-    open = s.gstr_append(a, "let ").jname(a, l.name).gstr_append(a, " = ")
+    open = s.add("let ").jname(a, l.name).add(" = ")
     boxed = (bw == 0).match ({
         true  => open.js_sink(a, l.value, lty, int_width(l.ty)),
         false => open
-            .gstr_append(a, "__zr.box(")
+            .add("__zr.box(")
             .js_expr_w(a, l.value, int_width(l.ty))
-            .gstr_append(a, ", ")
+            .add(", ")
             .jint(a, bw)
-            .gstr_append(a, ")"),
+            .add(")"),
     })
-    boxed.gstr_append(a, ";")
+    boxed.add(";")
 }
 // the binding's type: its annotation, or — unannotated (`b = a`, where C writes `__auto_type`) — the
 // initializer's reconstructed aggregate type. That is the case the struct-aliasing bug lived in.
@@ -893,18 +934,18 @@ js_assign = (s: String, a: Allocator, x: AssignData) String {
     (bw == 0).then({
         return s
             .js_expr(a, x.target)
-            .gstr_append(a, " = ")
+            .add(" = ")
             .js_sink(a, x.value, js_ty_of(load(x.target)), js_assign_width(load(x.target)))
-            .gstr_append(a, ";")
+            .add(";")
     })
     s
-        .gstr_append(a, "__zr.st(")
+        .add("__zr.st(")
         .js_assign_target_name(a, load(x.target))
-        .gstr_append(a, ", ")
+        .add(", ")
         .js_expr_w(a, x.value, js_assign_width(load(x.target)))
-        .gstr_append(a, ", ")
+        .add(", ")
         .jint(a, bw)
-        .gstr_append(a, ");")
+        .add(");")
 }
 js_assign_boxed_w = (e: Expr) i32 {
     e.match ({
@@ -915,7 +956,7 @@ js_assign_boxed_w = (e: Expr) i32 {
 js_assign_target_name = (s: String, a: Allocator, e: Expr) String {
     e.match ({
         .Var(v) => s.jname(a, v.name),
-        _       => s.gstr_append(a, "__zen_invalid_boxed_target"),
+        _       => s.add("__zen_invalid_boxed_target"),
     })
 }
 js_assign_width = (e: Expr) i32 {
@@ -929,24 +970,24 @@ js_stmt = (s: String, a: Allocator, st: Stmt) String {
         .Let(l)      => s.js_let(a, l),
         .Assign(x)   => s.js_assign(a, x),
         .Return(e)   => s
-            .gstr_append(a, "return ")
+            .add("return ")
             .js_sink(a, e, js_agg_ty(load(e)), ret_coerce_w())
-            .gstr_append(a, ";"),
+            .add(";"),
         .ExprStmt(e) => s.js_expr_stmt(a, e),
         .If(f)       => s
-            .gstr_append(a, "if (")
+            .add("if (")
             .js_expr(a, f.c)
-            .gstr_append(a, ") { ")
+            .add(") { ")
             .js_stmts(a, f.then)
-            .gstr_append(a, "} else { ")
+            .add("} else { ")
             .js_stmts(a, f.els)
-            .gstr_append(a, "}"),
+            .add("}"),
         .While(w)    => s
-            .gstr_append(a, "while (")
+            .add("while (")
             .js_expr(a, w.c)
-            .gstr_append(a, ") { ")
+            .add(") { ")
             .js_stmts(a, w.body)
-            .gstr_append(a, "}"),
+            .add("}"),
         .IndexSet(x) => s.js_setidx(a, x.seq, x.idx, x.value, x.elem),
     })
 }
@@ -965,38 +1006,38 @@ js_setidx = (
     elem: Ty,
 ) String {
     s
-        .gstr_append(a, "__zr.setidx(")
+        .add("__zr.setidx(")
         .js_expr(a, seq)
-        .gstr_append(a, ", ")
+        .add(", ")
         .js_expr(a, idx)
-        .gstr_append(a, ", ")
-        .js_sink(a, value, elem, 0)
-        .gstr_append(a, ", ")
+        .add(", ")
+        .js_sink(a, value, elem, int_width(elem))
+        .add(", ")
         .jint(a, js_elem_w(elem))
-        .gstr_append(a, ");")
+        .add(");")
 }
 // a bare expression statement; a match here becomes a real `switch` (so arm returns fire).
 js_expr_stmt = (s: String, a: Allocator, e: Ptr<Expr>) String {
     load(e).match ({
         .Match(m) => s.js_match_stmt(a, m),
         .Cond(d)  => s.js_cond_stmt(a, d),
-        .Block(b) => s.gstr_append(a, "{ ").js_stmts(a, b.stmts).gstr_append(a, "}"),
-        _         => s.js_expr(a, e).gstr_append(a, ";"),
+        .Block(b) => s.add("{ ").js_stmts(a, b.stmts).add("}"),
+        _         => s.js_expr(a, e).add(";"),
     })
 }
 js_cond_stmt = (s: String, a: Allocator, d: CondData) String {
     s
-        .gstr_append(a, "if (")
+        .add("if (")
         .js_expr(a, d.c)
-        .gstr_append(a, ") { ")
+        .add(") { ")
         .js_expr_stmt(a, d.t)
-        .gstr_append(a, " } else { ")
+        .add(" } else { ")
         .js_expr_stmt(a, d.e)
-        .gstr_append(a, " }")
+        .add(" }")
 }
 js_stmts* = (s: String, a: Allocator, body: MutSlice<Stmt>) String {
     out ::= s
-    body.loop_at((i, st) { out = out.js_stmt(a, st).gstr_append(a, " ") })
+    body.loop_at((i, st) { out = out.js_stmt(a, st).add(" ") })
     out
 }
 // Fixed-width integer wrapping.
@@ -1040,34 +1081,34 @@ iw_named = (n: StringView) i32 {
 }
 js_w_open* = (s: String, a: Allocator, w: i32) String {
     (w == 7).then({
-        return s.gstr_append(a, "__zr.wu64((")
+        return s.add("__zr.wu64((")
     })
     (w == 8).then({
-        return s.gstr_append(a, "__zr.wi64((")
+        return s.add("__zr.wi64((")
     })
-    (w == 0).then({ s }, { s.gstr_append(a, "((") })
+    (w == 0).then({ s }, { s.add("((") })
 }
 js_w_close* = (s: String, a: Allocator, w: i32) String {
     (w == 1).then({
-        return s.gstr_append(a, ") & 255)")
+        return s.add(") & 255)")
     })
     (w == 2).then({
-        return s.gstr_append(a, ") & 0xffff)")
+        return s.add(") & 0xffff)")
     })
     (w == 3).then({
-        return s.gstr_append(a, ") >>> 0)")
+        return s.add(") >>> 0)")
     })
     (w == 4).then({
-        return s.gstr_append(a, ") | 0)")
+        return s.add(") | 0)")
     })
     (w == 5).then({
-        return s.gstr_append(a, ") << 16 >> 16)")
+        return s.add(") << 16 >> 16)")
     })
     (w == 6).then({
-        return s.gstr_append(a, ") << 24 >> 24)")
+        return s.add(") << 24 >> 24)")
     })
     (w == 7 || w == 8).then({
-        return s.gstr_append(a, "))")
+        return s.add("))")
     })
     s
 }
@@ -1098,17 +1139,17 @@ js_mul32 = (s: String, a: Allocator, e: Expr, w: i32) String {
     e.match ({
         .Bin(b) => (w == 3).match ({
             true  => s
-                .gstr_append(a, "((Math.imul(")
+                .add("((Math.imul(")
                 .js_expr(a, b.lhs)
-                .gstr_append(a, ", ")
+                .add(", ")
                 .js_expr(a, b.rhs)
-                .gstr_append(a, ")) >>> 0)"),
+                .add(")) >>> 0)"),
             false => s
-                .gstr_append(a, "Math.imul(")
+                .add("Math.imul(")
                 .js_expr(a, b.lhs)
-                .gstr_append(a, ", ")
+                .add(", ")
                 .js_expr(a, b.rhs)
-                .gstr_append(a, ")"),
+                .add(")"),
         }),
         _       => s,
     })

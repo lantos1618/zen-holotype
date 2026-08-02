@@ -108,7 +108,7 @@ and both would be lies about what the type is for.
 
 So `StringCstr` keeps the family prefix for spelling consistency and nothing else changed about
 it: it is the FFI-boundary spelling, it covers both `.rodata` literals and heap blocks from
-`sb().done()`, and a view of one is read-only. When the five roles land it will still be a
+`String.finish_cstr()`, and a view of one is read-only. When the five roles land it will still be a
 separate axis, most likely a property carried alongside a role rather than a role of its own.
 Naming it honestly as an outsider is better than a forced fit.
 
@@ -169,7 +169,7 @@ if `std.text.str`'s `view` is in scope). A slice literal already *is* the borrow
 
 **Every op returns the updated value.** `s.add(…)` does not mutate `s` in place — the header moves
 when the buffer is realloc'd, so a chain has to be bound back (`s = s.add(…).add(…)`), exactly as
-`std.text.sb` and `Vec.push` already do. Only the settle points (`freeze`) and the readers
+the `String` and `Vec` fluent operations do. Only the settle points (`freeze`) and the readers
 (`view`, `get`, `drop`) can be left un-bound.
 
 ## Conversions
@@ -225,8 +225,8 @@ and an immutability guarantee.
 **`freeze()` is also the ONE settle point.** Construction cannot fail into your hands and neither
 can any `add`: a failed allocation trips a sticky flag, every later `add` is a no-op, and the whole
 chain becomes a single `Result` here — `.Ok(StringConst)` or the first failure, with the partial
-buffer freed on the way out. That is `std.text.sb`'s policy, moved onto the type it was a builder
-for. It is why there is no `or_return` per step, and why there is exactly one per chain.
+buffer freed on the way out. The policy now lives directly on the owning type. It is why there is
+no `or_return` per step, and why there is exactly one per chain.
 
 **There is deliberately no `thaw()`.** Going back means copying, so it is spelled
 `gpa.string_from(frozen)` — the allocation is visible because the allocator is named.
@@ -264,8 +264,8 @@ container-specific even where their allocation lifecycle delegates to `std.mem.b
 > model. Where it disagrees with anything above, this section wins.
 
 **Real now:** `String`, `Vec<T>`, views (as `MutSlice<T>` / `Slice<T>`), the `(a: AllocatorBackend)` sugar,
-`or_return`, and sticky-error chaining on the carrying `String` and `Vec<T>` APIs (with
-`std.text.sb` still present as the older builder surface).
+`or_return`, and sticky-error chaining on the carrying `String` and `Vec<T>` APIs. The older
+standalone string-builder surface has been removed.
 
 **Real but partial:** the borrowed/static string family — `StringLiteral`, `StringView`,
 `StringCstr` — each of which a diagnostic prints as itself. (The `str`, `text` and `Cstr` aliases
@@ -281,12 +281,11 @@ reappears. The harness does **not** gate the short aliases.)
 freeze and drop mechanics live in `std.mem.buffer`; String and Vec retain distinct nominal flat
 layouts and adapt to that kernel privately.
 
-**Not done:** the threaded API (`init`/`push_in`/`append_in`/`finish_in`/`free_in`) and
-`std.text.sb` are still present and still work, and every consumer still uses them. Until they are
-deleted a `String` can arrive from either surface, which is what the `carried` field records: false
-means "built by the threaded API, no allocator inside", and the carrying ops refuse rather than
-call through an empty vtable. That field exists only to make the transition safe and goes away with
-the threaded API.
+**Not done:** the threaded API (`init`/`push_in`/`append_in`/`finish_in`/`free_in`) is still present
+and still works for explicit fallible construction. A `String` can therefore arrive from either
+surface, which is what the `carried` field records: false means "built by the threaded API, no
+allocator inside", and the carrying ops refuse rather than call through an empty vtable. That field
+exists only to make the transition safe and goes away with the threaded API.
 
 ### The two language changes that used to gate this — both resolved
 
@@ -339,7 +338,7 @@ address along. Asking for that window as a writable `MutSlice<T>` is still refus
 as `error[assign-fit]`.
 
 What remains is a representation wart and a typing debt, not a missing type. The wart: `StringCstr`
-still covers BOTH `.rodata` literals and heap blocks from `sb().done()`, so a view of one is
+still covers BOTH `.rodata` literals and heap blocks from `String.finish_cstr()`, so a view of one is
 conservatively read-only. The debt: the ~62 allocating helpers still hand their block back typed as
 a borrowed `StringView`, so the places that free or write through one have to say so out loud —
 `own_ptr()` on the release path, `own_ptr().own_window(n)` for a writable window. Both are

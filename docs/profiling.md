@@ -91,7 +91,7 @@ ZEN_BENCH_SCALE=4 make -f bootstrap/Makefile bench  # longer loops
 ```
 case                  iters      total_ns       ns/op   liveB/op             sink
 slicelit_sum        1000000      43473370          43         48    1000002000000
-sb_chain             500000     156234913         312          0          9388890
+string_chain         500000     156234913         312          0          9388890
 string_append        500000     124400806         248          0          9388890
 println_int          200000     232889292        1164         32           200000
 formatln_int         200000     361511804        1807         80          1888890
@@ -138,7 +138,7 @@ Time columns move; allocation columns do not. Measure the floor on your machine 
 `ZEN_BENCH_REPS=9` before believing a regression. On the 16-core dev box at load average ~7, the
 min-to-max spread *within one process* over 9 reps was 1.5–2.4% for most cases and 6.4% at worst
 (`map_put_get`). *Across* processes it is much wider: one whole-suite run taken while a `cc` was
-finishing in the background read `sb_chain` at 519 ns/op against a 303–317 baseline — a 1.7x
+finishing in the background read `string_chain` at 519 ns/op against a 303–317 baseline — a 1.7x
 excursion from contention alone, with every allocation column unchanged.
 
 So never act on a single run. Re-run with `ZEN_BENCH_REPS` and check the reps agree with each

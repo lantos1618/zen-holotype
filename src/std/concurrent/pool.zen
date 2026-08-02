@@ -1,4 +1,3 @@
-//! link: zenrt
 // std.concurrent.pool — PARALLELISM Cut 1: a multi-threaded GLOBAL-RUN-QUEUE scheduler that runs the
 // actor model across M real OS threads (genuine N-core parallelism), per
 // docs/archive/parallel-scheduler-design.md.
@@ -119,7 +118,7 @@ STDERR_FD = 2    // fd 2 for the "actor marked dead" note (mirrors std.core.resu
 // before the panic, and still-queued boxes in a dead actor's mailbox (drained-and-discarded, not freed) —
 // the real fix is a per-actor arena rt reset on death. No lock is held across the call (behavior runs
 // outside the mailbox lock).
-__zen_actor_call = (behavior: (RawPtr<u8>, i64) void, user: RawPtr<u8>, msg: i64) i64
+__zen_actor_call = (behavior: (user: RawPtr<u8>, message: i64) void, user: RawPtr<u8>, msg: i64) i64
 // Register THIS worker pthread's own per-thread sigaltstack (bootstrap/zenrt.c). A stack-overflow SIGSEGV
 // is delivered on the alt stack (SA_ONSTACK), but sigaltstack is a PER-THREAD setting — a worker that
 // never registered one would take the overflow on its already-exhausted stack → raw process kill (exit
@@ -153,7 +152,7 @@ PoolActor: {
     cap: i64,
     mbmu: Mutex,
     sched: i64,
-    behavior: (RawPtr<u8>, i64) void,
+    behavior: (user: RawPtr<u8>, message: i64) void,
     art: Rt,
     dead: i64,
     scratch: MutPtr<Arena>,
@@ -198,7 +197,7 @@ scratch_reset = (a: MutPtr<PoolActor>) void {
 pool_spawn_rt* = (
     user: RawPtr<u8>,
     mbcap: i64,
-    behavior: (RawPtr<u8>, i64) void,
+    behavior: (user: RawPtr<u8>, message: i64) void,
     art: Rt,
 ) RawPtr<u8> { pool_spawn_scratch_rt(user, mbcap, behavior, art, null_ptr()) }
 // as pool_spawn_rt, but with a per-actor SCRATCH arena (a MutPtr<Arena> the caller owns): the worker
@@ -208,7 +207,7 @@ pool_spawn_rt* = (
 pool_spawn_scratch_rt* = (
     user: RawPtr<u8>,
     mbcap: i64,
-    behavior: (RawPtr<u8>, i64) void,
+    behavior: (user: RawPtr<u8>, message: i64) void,
     art: Rt,
     scratch: MutPtr<Arena>,
 ) RawPtr<u8> {
@@ -231,7 +230,7 @@ pool_spawn_scratch_rt* = (
 pool_try_spawn_scratch_rt* = (
     user: RawPtr<u8>,
     mbcap: i64,
-    behavior: (RawPtr<u8>, i64) void,
+    behavior: (user: RawPtr<u8>, message: i64) void,
     art: Rt,
     scratch: MutPtr<Arena>,
 ) RawPtr<u8> {
@@ -266,7 +265,7 @@ pool_try_spawn_scratch_rt* = (
 // `rt.set_default`). Delegates to pool_spawn_rt with `default()` — heap-when-unset is observationally
 // the unset default, so every existing pool fixture stays byte-identical. The typed pool-actor path
 // (std.concurrent.pool_actor) calls pool_spawn_rt directly to give each actor its own rt.
-pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (RawPtr<u8>, i64) void) RawPtr<u8> {
+pool_spawn* = (user: RawPtr<u8>, mbcap: i64, behavior: (user: RawPtr<u8>, message: i64) void) RawPtr<u8> {
     pool_spawn_rt(user, mbcap, behavior, default())
 }
 // clone a handle: bump the Arc refcount (atomic +1) and return the same base. Any party that shares the
@@ -748,7 +747,7 @@ count_busy = (w: RawPtr<u8>, i: i64, n: i64, acc: i64) i64 {
 // ── with_pool: the colorless parallel combinator (3rd driver, alongside with_sync/with_coro) ──
 // Start M workers, run the SAME actor-spawning body across the pool, drain to quiescence, shut down,
 // free. `spawn`/`send` (pool_spawn/pool_send) are unchanged from the single-thread surface.
-with_pool*<R> = (nworkers: i64, rqcap: i64, body: (MutPtr<Pool>) R) R {
+with_pool*<R> = (nworkers: i64, rqcap: i64, body: (pool: MutPtr<Pool>) R) R {
     p = pool_open(nworkers, rqcap)
     out = body(p)
     p.pool_quiesce_stop()

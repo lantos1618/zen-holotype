@@ -46,7 +46,7 @@ There is no system-wide installer yet.
 ## A small Zen program
 
 ```zen
-{ println } = std.text.fmt
+{ println } = std.io.print
 
 Shape: Circle(i32) | Rect(Rect)
 Rect: {
@@ -124,10 +124,10 @@ Create a project with:
 ./zen build hello
 ```
 
-`zen.toml` describes a conventional project. A `build.zen` file provides
-programmatic targets through `std.build`; this repository uses that path to
-self-build the compiler. Local and dotted modules work, but dependency metadata,
-registered package roots, and package distribution do not yet exist.
+Every project is defined by `build.zen`, a Zen program that registers targets
+through `std.build`. There is no second metadata format. Local and dotted modules
+work, but dependency metadata, registered package roots, and package distribution
+do not yet exist.
 
 Development builds use `-O1 -g`. Release builds use `-O2` with strict aliasing
 disabled because the generated C intentionally performs pointer punning.
@@ -218,7 +218,8 @@ and leave a second regeneration byte-identical.
 
 | Document | Use it for |
 |---|---|
-| [Language specification](docs/SPEC.md) | Syntax, types, semantics, modules, tooling, and test mapping. |
+| [Syntax reference](docs/SYNTAX.md) | The complete, syntax-first guide to writing Zen in one file. |
+| [Language specification](docs/SPEC.md) | Types, semantics, modules, tooling, and test mapping. |
 | [Compiler architecture](docs/ARCHITECTURE.md) | Pipeline, layering, bootstrap, runtime surfaces, and change discipline. |
 | [Memory model](docs/MEMORY_MODEL.md) | Allocators, pointer capabilities, ownership, sendability, and current enforcement. |
 | [Status and roadmap](docs/STATUS.md) | Shipped features, limitations, confirmed defects, and planned work. |

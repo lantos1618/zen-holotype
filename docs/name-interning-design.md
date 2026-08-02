@@ -33,7 +33,8 @@ for *architecture* (symbol tables, incremental compilation, LSP) more than for r
   - ownership: the interner is allocated once in the driver and passed beside the compiler allocator; it is an
     extra field on parser/checker state, not a global (flat-namespace globals would collide across modules).
 - **Producers**: the lexer/parser interns at identifier-token creation (`parse_primary`/
-  `parse_type`); resolve interns the names it mints (mangled/shadow names) at `gstr_finish` time.
+  `parse_type`); resolve interns the names it mints (mangled/shadow names) when the canonical
+  `String` is finalized with `finish_cstr`.
 - **Consumers**: `Param.name`, `VarData.name`, `CallData.fn`, `Func.name`, struct/enum/field/
   variant names, `Ty.Named`/`.Generic` heads, VList cells, didx map keys.
 

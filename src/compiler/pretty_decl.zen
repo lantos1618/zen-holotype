@@ -6,7 +6,7 @@
 { param_names_has } = compiler.astops
 { is_expr_null, tvoid, acquire_or_die } = compiler.genc
 { impl_cname_in, payload_fname } = compiler.mangle
-{ ff_append, ff_block, ff_flush_leading, ff_indent, ff_str_has_nl, ff_string, ff_ty, ff_tys } = compiler.pretty
+{ ff_block, ff_flush_leading, ff_indent, ff_str_has_nl, ff_ty, ff_tys } = compiler.pretty
 { ff_current_col, ff_expr, ff_fits_width, ff_pad } = compiler.pretty_expr
 { loop_at } = std.core.count
 // a trailing `...T` param stores its type as the collected `[T]`; recover the element T to re-print `...T`.
@@ -18,14 +18,14 @@ ff_slice_elem = (t: Ty) Ty {
 }
 ff_param_one = (s: String, a: Allocator, p: Param) String {
     p.variadic.match ({
-        true  => s.ff_append(a, p.name).ff_append(a, ": ...").ff_ty(a, ff_slice_elem(p.ty)),
-        false => s.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
+        true  => s.add(p.name).add(": ...").ff_ty(a, ff_slice_elem(p.ty)),
+        false => s.add(p.name).add(": ").ff_ty(a, p.ty),
     })
 }
 ff_params = (s: String, a: Allocator, ps: MutSlice<Param>) String {
     out ::= s
     ps.loop_at((i, p) {
-        out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
+        out = (i == 0).then({ out }, { out.add(", ") })
         out = out.ff_param_one(a, p)
     })
     out
@@ -36,25 +36,24 @@ ff_params = (s: String, a: Allocator, ps: MutSlice<Param>) String {
 // there). Trial render measures the inline form at the caller's current column; params/types weave
 // no comments, so no gf_idx save is needed (the trial is naturally side-effect-free).
 ff_sig = (s: String, a: Allocator, ps: MutSlice<Param>, ret: Ty, ind: i32) String {
-    trial = a
-        .ff_string(256)
-        .ff_append(a, " = (")
+    trial = a.String(256)
+        .add(" = (")
         .ff_params(a, ps)
-        .ff_append(a, ") ")
+        .add(") ")
         .ff_ty(a, ret)
     (ps.len == 0 || trial.ff_fits_width(s.ff_current_col(), 98)).match ({
         true  => s
-            .ff_append(a, " = (")
+            .add(" = (")
             .ff_params(a, ps)
-            .ff_append(a, ") ")
+            .add(") ")
             .ff_ty(a, ret),
         false => {
-            out ::= s.ff_append(a, " = (\n")
+            out ::= s.add(" = (\n")
             ps.loop_at((i, p) {
                 sep = p.variadic.then({ "\n" }, { ",\n" })
-                out = out.ff_indent(a, ind + 1).ff_param_one(a, p).ff_append(a, sep)
+                out = out.ff_indent(a, ind + 1).ff_param_one(a, p).add(sep)
             })
-            out.ff_indent(a, ind).ff_append(a, ") ").ff_ty(a, ret)
+            out.ff_indent(a, ind).add(") ").ff_ty(a, ret)
         },
     })
 }
@@ -64,10 +63,10 @@ ff_sig = (s: String, a: Allocator, ps: MutSlice<Param>, ret: Ty, ind: i32) Strin
 ff_lparams* = (s: String, a: Allocator, ps: MutSlice<Param>) String {
     out ::= s
     ps.loop_at((i, p) {
-        out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
+        out = (i == 0).then({ out }, { out.add(", ") })
         out = p.ty.match ({
-            .Void => out.ff_append(a, p.name),
-            _     => out.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
+            .Void => out.add(p.name),
+            _     => out.add(p.name).add(": ").ff_ty(a, p.ty),
         })
     })
     out
@@ -77,16 +76,16 @@ ff_tparams = (s: String, a: Allocator, ps: MutSlice<Param>) String {
     (ps.len == 0).match ({
         true  => s,
         false => {
-            open = s.ff_append(a, "<")
+            open = s.add("<")
             body ::= open
             ps.loop_at((i, p) {
-                body = (i == 0).then({ body }, { body.ff_append(a, ", ") })
+                body = (i == 0).then({ body }, { body.add(", ") })
                 body = p.ty.match ({
-                    .Void => body.ff_append(a, p.name),
-                    _     => body.ff_append(a, p.name).ff_append(a, ": ").ff_ty(a, p.ty),
+                    .Void => body.add(p.name),
+                    _     => body.add(p.name).add(": ").ff_ty(a, p.ty),
                 })
             })
-            body.ff_append(a, ">")
+            body.add(">")
         },
     })
 }
@@ -94,18 +93,17 @@ ff_tparams = (s: String, a: Allocator, ps: MutSlice<Param>) String {
 // source — a param_names_has membership test over the export list.
 ff_name = (s: String, a: Allocator, exp: MutSlice<Param>, name: StringView) String {
     exp.param_names_has(name).match ({
-        true  => s.ff_append(a, name).ff_append(a, "*"),
-        false => s.ff_append(a, name),
+        true  => s.add(name).add("*"),
+        false => s.add(name),
     })
 }
-// The return type is ALWAYS printed (incl. `void`): omitting it would let the body `{ … }` reparse as
-// an anonymous-struct return type `{ field: T }`, changing the AST.
+// The return type is always printed, including `void`, so every function signature is explicit.
 ff_func = (s: String, a: Allocator, exp: MutSlice<Param>, f: Func) String {
     sig = s.ff_name(a, exp, f.name).ff_tparams(a, f.tparams).ff_sig(a, f.params, f.ret, 0)
-    sig.ff_append(a, " ").ff_block(a, f.body, 0, true)
+    sig.add(" ").ff_block(a, f.body, 0, true)
 }
 ff_foreign = (s: String, a: Allocator, exp: MutSlice<Param>, f: Func) String {
-    s.ff_name(a, exp, f.name).ff_sig(a, f.params, f.ret, 0)
+    s.ff_name(a, exp, f.name).ff_tparams(a, f.tparams).ff_sig(a, f.params, f.ret, 0)
 }
 // ── un-hoisting inherent + trait methods ────────────────────────────────────────
 // The parser HOISTS a struct's inherent methods (and a trait impl's methods) into separate mangled
@@ -239,13 +237,12 @@ ff_method_facts = (
     im.methods.loop_at((k, mp) {
         f = a.ff_find_func(decls, a.impl_cname_in(im.trname, im.ty, mp.name))
         own = a.ff_minus_tparams(f.tparams, ctp)
-        above = a.ff_string(64).ff_flush_leading(a, f.pos, ind)
-        head = a
-            .ff_string(256)
+        above = a.String(64).ff_flush_leading(a, f.pos, ind)
+        head = a.String(256)
             .ff_indent(a, ind)
-            .ff_append(a, mp.name)
+            .add(mp.name)
             .ff_tparams(a, own)
-        line = head.ff_sig(a, f.params, f.ret, ind).ff_append(a, " ").ff_block(a, f.body, ind, true)
+        line = head.ff_sig(a, f.params, f.ret, ind).add(" ").ff_block(a, f.body, ind, true)
         buf[k] = MethodFact(
             w: to_i32(head.len),
             tail: to_i32(line.len) - to_i32(head.len),
@@ -327,11 +324,11 @@ ff_methods = (
         lead = out.ff_flush_leading(a, f.pos, ind)
         sig = lead
             .ff_indent(a, ind)
-            .ff_append(a, mp.name)
+            .add(mp.name)
             .ff_tparams(a, own)
             .ff_pad(a, pads[k])
             .ff_sig(a, f.params, f.ret, ind)
-        out = sig.ff_append(a, " ").ff_block(a, f.body, ind, true).ff_append(a, "\n")
+        out = sig.add(" ").ff_block(a, f.body, ind, true).add("\n")
     })
     out
 }
@@ -375,23 +372,23 @@ ff_record_field = (
             lead = s.ff_flush_leading(a, f.pos, 1)
             sig = lead
                 .ff_indent(a, 1)
-                .ff_append(a, fl.name)
+                .add(fl.name)
                 .ff_tparams(a, own)
                 .ff_sig(a, f.params, f.ret, 1)
-            sig.ff_append(a, " ").ff_block(a, f.body, 1, true).ff_append(a, ",\n")
+            sig.add(" ").ff_block(a, f.body, 1, true).add(",\n")
         },
         false => s
             .ff_indent(a, 1)
-            .ff_append(a, fl.name)
-            .ff_append(a, ": ")
+            .add(fl.name)
+            .add(": ")
             .ff_ty(a, fl.ty)
             .ff_field_dflt(a, fl.dflt)
-            .ff_append(a, ",\n"),
+            .add(",\n"),
     })
 }
 // ` = <constant>` for a field that declares a default; nothing for one that does not.
 ff_field_dflt = (s: String, a: Allocator, e: Ptr<Expr>) String {
-    is_expr_null(e).then({ s }, { s.ff_append(a, " = ").ff_expr(a, e, 1) })
+    is_expr_null(e).then({ s }, { s.add(" = ").ff_expr(a, e, 1) })
 }
 ff_struct = (
     s: String,
@@ -400,10 +397,10 @@ ff_struct = (
     decls: MutSlice<Decl>,
     sd: StructDecl,
 ) String {
-    open = s.ff_name(a, exp, sd.name).ff_append(a, ": {\n")
+    open = s.ff_name(a, exp, sd.name).add(": {\n")
     body ::= open
     sd.fields.loop_at((i, fl) { body = body.ff_record_field(a, decls, sd.name, ff_no_params(), fl) })
-    body.ff_inherent_methods(a, decls, sd.name, ff_no_params(), 1).ff_append(a, "}")
+    body.ff_inherent_methods(a, decls, sd.name, ff_no_params(), 1).add("}")
 }
 ff_genstruct = (
     s: String,
@@ -412,10 +409,10 @@ ff_genstruct = (
     decls: MutSlice<Decl>,
     g: GenStructDecl,
 ) String {
-    open = s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).ff_append(a, ": {\n")
+    open = s.ff_name(a, exp, g.name).ff_tparams(a, g.tparams).add(": {\n")
     body ::= open
     g.fields.loop_at((i, fl) { body = body.ff_record_field(a, decls, g.name, g.tparams, fl) })
-    body.ff_inherent_methods(a, decls, g.name, g.tparams, 1).ff_append(a, "}")
+    body.ff_inherent_methods(a, decls, g.name, g.tparams, 1).add("}")
 }
 // the impl head prints im.trty — the trait reference AS WRITTEN (qualifier + type args, e.g.
 // `actor.Receiver<Msg>`) — never the bare im.trname mangle key, which drops the `.Receiver<Msg>` part
@@ -424,27 +421,27 @@ ff_trait_impl = (s: String, a: Allocator, decls: MutSlice<Decl>, im: ImplData) S
     ctp = decls.ff_type_tparams(im.ty)
     (im.methods.len == 0).match ({
         true  => s
-            .ff_append(a, im.ty)
-            .ff_append(a, ".impl(")
+            .add(im.ty)
+            .add(".impl(")
             .ff_ty(a, im.trty)
-            .ff_append(a, ", { })"),
+            .add(", { })"),
         false => {
             open = s
-                .ff_append(a, im.ty)
-                .ff_append(a, ".impl(")
+                .add(im.ty)
+                .add(".impl(")
                 .ff_ty(a, im.trty)
-                .ff_append(a, ", {\n")
-            open.ff_methods(a, decls, im, ctp, 1).ff_append(a, "})")
+                .add(", {\n")
+            open.ff_methods(a, decls, im, ctp, 1).add("})")
         },
     })
 }
 ff_no_fields = () MutSlice<Field> { slice(null_ptr(), 0) }
-// A multi-field variant payload `Ask(t0, t1, …)` is DESUGARED at parse time into a synthesized anon
-// struct `__anon__0__1…` with positional fields `_0, _1, …` (compiler.parse_type.parse_variant_payload
+// A multi-field variant payload `Ask(t0, t1, …)` is DESUGARED at parse time into a synthesized indexed payload
+// record `__payload__0__1…` with positional fields `_0, _1, …` (compiler.parse_type.parse_variant_payload
 // + compiler.genc.payload_fname). The surface type list does not survive on the AST, so the formatter
-// re-derives it here: a payload struct is recognised by its `__anon` name AND ordered positional field
+// re-derives it here: a payload struct is recognised by its `__payload` name AND ordered positional field
 // names, then re-rendered as the `(t0, t1, …)` tuple and the hoisted struct is suppressed at top level
-// (pretty_module_in) — the surface form round-trips and no `__anon…` internal name ever leaks.
+// (pretty_module_in) — the surface form round-trips and no `__payload…` internal name ever leaks.
 ff_is_positional_fields = (a: Allocator, fields: MutSlice<Field>) bool {
     (fields.len == 0).match ({
         true  => false,
@@ -455,13 +452,13 @@ ff_is_positional_fields = (a: Allocator, fields: MutSlice<Field>) bool {
         },
     })
 }
-ff_is_anon_payload_name* = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) bool {
-    nm.starts_with("__anon").match ({
-        true  => a.ff_is_positional_fields(a.ff_anon_payload_fields(decls, nm)),
+ff_is_payload_name* = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) bool {
+    nm.starts_with("__payload").match ({
+        true  => a.ff_is_positional_fields(a.ff_payload_fields(decls, nm)),
         false => false,
     })
 }
-ff_anon_payload_fields = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) MutSlice<Field> {
+ff_payload_fields = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) MutSlice<Field> {
     res ::= ff_no_fields()
     decls.loop_at((i, d) {
         d.match ({
@@ -474,21 +471,21 @@ ff_anon_payload_fields = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) M
     res
 }
 // the payload rendering for a variant: the surface `(t0, t1, …)` tuple when the payload is a
-// synthesized anon struct, else the payload type verbatim.
+// synthesized indexed payload record, else the payload type verbatim.
 ff_variant_payload = (s: String, a: Allocator, decls: MutSlice<Decl>, t: Ty) String {
     t.match ({
-        .Named(nm) => a.ff_is_anon_payload_name(decls, nm).match ({
+        .Named(nm) => a.ff_is_payload_name(decls, nm).match ({
             true  => s
-                .ff_append(a, "(")
-                .ff_tys(a, a.ff_anon_payload_tys(decls, nm))
-                .ff_append(a, ")"),
-            false => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
+                .add("(")
+                .ff_tys(a, a.ff_payload_tys(decls, nm))
+                .add(")"),
+            false => s.add("(").ff_ty(a, t).add(")"),
         }),
-        _          => s.ff_append(a, "(").ff_ty(a, t).ff_append(a, ")"),
+        _          => s.add("(").ff_ty(a, t).add(")"),
     })
 }
-ff_anon_payload_tys = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) MutSlice<Ty> {
-    fields = a.ff_anon_payload_fields(decls, nm)
+ff_payload_tys = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) MutSlice<Ty> {
+    fields = a.ff_payload_fields(decls, nm)
     buf ::= slice(a.acquire_or_die((fields.len + 1) * sizeof(Ty)), fields.len + 1)
     n ::= 0
     fields.loop_at((i, fl) {
@@ -500,15 +497,15 @@ ff_anon_payload_tys = (a: Allocator, decls: MutSlice<Decl>, nm: StringView) MutS
 // one variant: `Name`, `Name(Payload)`, or — for a zero-arg ctor with a default constant — `Name = expr`.
 ff_variant = (s: String, a: Allocator, decls: MutSlice<Decl>, vd: VariantDef) String {
     base = vd.payload.match ({
-        .Void => s.ff_append(a, vd.name),
-        _     => s.ff_append(a, vd.name).ff_variant_payload(a, decls, vd.payload),
+        .Void => s.add(vd.name),
+        _     => s.add(vd.name).ff_variant_payload(a, decls, vd.payload),
     })
-    vd.dflt.is_expr_null().then({ base }, { base.ff_append(a, " = ").ff_expr(a, vd.dflt, 0) })
+    vd.dflt.is_expr_null().then({ base }, { base.add(" = ").ff_expr(a, vd.dflt, 0) })
 }
 ff_variants = (s: String, a: Allocator, decls: MutSlice<Decl>, vs: MutSlice<VariantDef>) String {
     body ::= s
     vs.loop_at((i, vd) {
-        body = (i == 0).then({ body }, { body.ff_append(a, " | ") })
+        body = (i == 0).then({ body }, { body.add(" | ") })
         body = body.ff_variant(a, decls, vd)
     })
     body
@@ -519,7 +516,7 @@ ff_enum = (
     exp: MutSlice<Param>,
     decls: MutSlice<Decl>,
     ed: EnumDecl,
-) String { s.ff_name(a, exp, ed.name).ff_append(a, ": ").ff_variants(a, decls, ed.variants) }
+) String { s.ff_name(a, exp, ed.name).add(": ").ff_variants(a, decls, ed.variants) }
 ff_genenum = (
     s: String,
     a: Allocator,
@@ -530,7 +527,7 @@ ff_genenum = (
     s
         .ff_name(a, exp, g.name)
         .ff_tparams(a, g.tparams)
-        .ff_append(a, ": ")
+        .add(": ")
         .ff_variants(a, decls, g.variants)
 }
 ff_decl* = (s: String, a: Allocator, exp: MutSlice<Param>, decls: MutSlice<Decl>, d: Decl) String {
@@ -545,27 +542,27 @@ ff_decl* = (s: String, a: Allocator, exp: MutSlice<Param>, decls: MutSlice<Decl>
         .DGlobal(g)        => g.tl.match ({
             true  => s
                 .ff_name(a, exp, g.name)
-                .ff_append(a, g.mut.then({ " ::= thread_local(" }, { " = thread_local(" }))
+                .add(g.mut.then({ " ::= thread_local(" }, { " = thread_local(" }))
                 .ff_expr(a, g.init, 0)
-                .ff_append(a, ")"),
+                .add(")"),
             false => s
                 .ff_name(a, exp, g.name)
-                .ff_append(a, g.mut.then({ " ::= " }, { " = " }))
+                .add(g.mut.then({ " ::= " }, { " = " }))
                 .ff_expr(a, g.init, 0),
         }),    // const-by-default at top level too: a module alias and a constant global both print `=`; `::=` marks a mutable one
         .DImport(im)       => s.ff_import(a, im),
         .DTraitDefault(td) => s.ff_func(a, exp, td.fn),
-        .DRaw(c)           => s.ff_append(a, c),
+        .DRaw(c)           => s.add(c),
     })
 }
 ff_import_inline = (s: String, a: Allocator, im: ImportData) String {
-    open = s.ff_append(a, "{ ")
+    open = s.add("{ ")
     body ::= open
     im.names.loop_at((i, p) {
-        body = (i == 0).then({ body }, { body.ff_append(a, ", ") })
-        body = body.ff_append(a, p.name)
+        body = (i == 0).then({ body }, { body.add(", ") })
+        body = body.add(p.name)
     })
-    body.ff_append(a, " } = ").ff_append(a, im.module)
+    body.add(" } = ").add(im.module)
 }
 // An import list that would overflow 100 columns greedy-fills names per line, breaking BEFORE the
 // name that would push the line (incl. its trailing comma) past 100; continuation lines indent 2
@@ -573,29 +570,29 @@ ff_import_inline = (s: String, a: Allocator, im: ImportData) String {
 // The parser (and the textual import scanner in compiler.resolve_scan, which seeks the `} =`
 // marker across newlines) both accept the wrapped form — verified end-to-end before shipping.
 ff_import_wrapped = (s: String, a: Allocator, im: ImportData) String {
-    out ::= s.ff_append(a, "{ ")
+    out ::= s.add("{ ")
     col ::= 2
     im.names.loop_at((i, p) {
         w = to_i32(view(p.name).len)
         out = (i == 0).match ({
-            true  => out.ff_append(a, p.name),
+            true  => out.add(p.name),
             false => (col + 2 + w > 99).match ({
                 true  => {
                     col = 2
-                    out.ff_append(a, ",\n  ").ff_append(a, p.name)
+                    out.add(",\n  ").add(p.name)
                 },
                 false => {
                     col = col + 2
-                    out.ff_append(a, ", ").ff_append(a, p.name)
+                    out.add(", ").add(p.name)
                 },
             }),
         })
         col = col + w
     })
-    out.ff_append(a, " } = ").ff_append(a, im.module)
+    out.add(" } = ").add(im.module)
 }
 ff_import = (s: String, a: Allocator, im: ImportData) String {
-    trial = a.ff_string(256).ff_import_inline(a, im)
+    trial = a.String(256).ff_import_inline(a, im)
     trial.ff_fits_width(s.ff_current_col(), 100).match ({
         true  => s.ff_import_inline(a, im),
         false => s.ff_import_wrapped(a, im),

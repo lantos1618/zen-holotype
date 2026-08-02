@@ -4,8 +4,6 @@
 { view } = std.text.str
 { Allocator } = std.mem.alloc
 { String } = std.text.string
-{ gstr_string, gstr_append, gstr_push, gstr_finish } = compiler.genc
-{ gstr_int } = compiler.astops
 { upto, advance_while, step_while } = std.core.count
 // line:col span in the USER source; line == 0 means "could not locate".
 DiagSpan*: {
@@ -271,86 +269,6 @@ duser_line_alias = (
     lead: i32,
     rn: i32,
 ) i32 { user.duser_line_alias_at(0, flat, ls, llen, lead, rn, 1) }
-// ── zen.toml manifest value lookup — moved out of the C driver (driver.c) ──────────────────────
-// Scan a manifest source for a `key = "value"` line and return the value's span (start<0 = absent);
-// the driver dup_range's src[start..start+len] into a NUL-terminated string. Pure char-scan, no alloc.
-MfSpan*: {
-    start: i32,
-    len: i32,
-}
-mf_none = () MfSpan {
-    MfSpan(
-        start: 0 - 1,
-        len: 0,
-    )
-}
-mf_skip_ws = (s: StringView, p: i32, e: i32) i32 {
-    (p < e && s.at(p).is_blank()).then({ s.mf_skip_ws(p + 1, e) }, { p })
-}
-// match `key` literally at p; return pos just past it, or -1
-mf_key_at = (s: StringView, p: i32, e: i32, key: StringView, k: i32) i32 {
-    (key.at(k) == 0).match ({
-        true  => p,
-        false => (p < e && s.at(p) == key.at(k)).match ({
-            true  => s.mf_key_at(p + 1, e, key, k + 1),
-            false => 0 - 1,
-        }),
-    })
-}
-// the closing-quote position from `i`, or -1
-mf_close = (s: StringView, i: i32, e: i32) i32 {
-    (i >= e).match ({
-        true  => 0 - 1,
-        false => (s.at(i) == '"').then({ i }, { s.mf_close(i + 1, e) }),
-    })
-}
-// parse one line [p,e) for `key = "value"` -> the value span, or mf_none
-mf_line = (s: StringView, p: i32, e: i32, key: StringView) MfSpan {
-    i0 = s.mf_skip_ws(p, e)
-    (i0 >= e || s.at(i0) == '#').then({
-        return mf_none()
-    })
-    ak = s.mf_key_at(i0, e, key, 0)
-    (ak < 0).then({
-        return mf_none()
-    })
-    i1 = s.mf_skip_ws(ak, e)
-    (i1 >= e || s.at(i1) != '=').then({
-        return mf_none()
-    })
-    i2 = s.mf_skip_ws(i1 + 1, e)
-    (i2 >= e || s.at(i2) != '"').then({
-        return mf_none()
-    })
-    start = i2 + 1
-    ce = s.mf_close(start, e)
-    (ce < 0).match ({
-        true  => mf_none(),
-        false => MfSpan(
-            start: start,
-            len: ce - start,
-        ),
-    })
-}
-mf_line_end = (s: StringView, p: i32, len: i32) i32 {
-    (p < len && s.at(p) != '\n' && s.at(p) != '\r').then({ s.mf_line_end(p + 1, len) }, { p })
-}
-// scan `src` (length `len`) for `key`'s value, starting at line `p`. The driver calls with p=0.
-manifest_value_span* = (src: StringView, len: i32, key: StringView, p: i32) MfSpan {
-    (p >= len).then({
-        return mf_none()
-    })
-    e = src.mf_line_end(p, len)
-    r = src.mf_line(p, e, key)
-    (r.start >= 0).then({
-        return r
-    })
-    np = (e < len && src.at(e) == '\r' && e + 1 < len && src.at(e + 1) == '\n').match ({
-        true  => e + 2,
-        false => e + 1,
-    })
-    (e >= len).then({ mf_none() }, { src.manifest_value_span(len, key, np) })
-}
 // ── error rendering (message line + source caret) — moved out of the C driver ──────────────────
 // Builds the full "zenc: path:line:col: error[kind]: message" line, the source line + ^~~~ caret,
 // and the hint, into one NUL-terminated string the driver writes to stderr. The driver keeps only
@@ -369,7 +287,7 @@ dline_off = (user: StringView, line: i32, p: i32) i32 {
 dput_line = (s: String, a: Allocator, user: StringView, p: i32) String {
     acc ::= s
     p.step_while((q) { user.at(q) != 0 && user.at(q) != '\n' && user.at(q) != '\r' }, (q) {
-        acc = acc.gstr_push(a, user.at(q))
+        acc = acc.add_one(user.at(q))
         q + 1
     })
     acc
@@ -379,14 +297,14 @@ dput_blanks = (s: String, a: Allocator, user: StringView, ls: i32, col: i32, i: 
     acc ::= s
     i.upto(col - 1, (k) {
         c = user.at(ls + k)
-        acc = acc.gstr_push(a, (c == '\t').then({ '\t' }, { ' ' }))
+        acc = acc.add_one((c == '\t').then({ '\t' }, { ' ' }))
     })
     acc
 }
 // append `^` then `n-1` `~`
 dput_carets = (s: String, a: Allocator, n: i32, i: i32) String {
     acc ::= s
-    i.upto(n, (k) { acc = acc.gstr_push(a, (k == 0).then({ '^' }, { '~' })) })
+    i.upto(n, (k) { acc = acc.add_one((k == 0).then({ '^' }, { '~' })) })
     acc
 }
 // render one diagnostic to a NUL-terminated string (line<=0 / col<=0 => no caret)
@@ -403,45 +321,45 @@ render_diagnostic* = (
     count: i32,
 ) StringView {
     // Pre-size to bound the whole rendered diagnostic (header + message + source line + carets + hint)
-    // so the buffer NEVER grows: a gstr_grow/resize mid-render reallocs the buffer and the inlined
+    // so the buffer NEVER grows: a resize mid-render reallocs the buffer and the inlined
     // append chain would then write through the freed pointer (heap-use-after-free). The content is
     // at most a fixed overhead + the str args + a few times the rendered source line (<= user.len).
     cap = 1024 + in_path.view().len + kind.view().len + message.view().len + hint.view().len + user.view().len * 4
-    s ::= a.gstr_string(cap)
-    s = s.gstr_append(a, "zenc: ").gstr_append(a, in_path)
+    s ::= a.String(cap)
+    s = s.add("zenc: ").add(in_path)
     (line > 0 && col > 0).then({
         s = s
-            .gstr_push(a, ':')
-            .gstr_int(a, line)
-            .gstr_push(a, ':')
-            .gstr_int(a, col)
+            .add_one(':')
+            .add_i64(line)
+            .add_one(':')
+            .add_i64(col)
     })
-    s = s.gstr_append(a, ": error[").gstr_append(a, kind, "]: ", message)
+    s = s.add(": error[").add(kind, "]: ", message)
     (count > 1).then({
-        s = s.gstr_append(a, " (+").gstr_int(a, count - 1).gstr_append(a, " more error")
+        s = s.add(" (+").add_i64(count - 1).add(" more error")
         // no method chained after a .match (parser limitation): push the closing chars inside the arms
         s = (count - 1 == 1).match ({
-            true  => s.gstr_push(a, ')'),
-            false => s.gstr_push(a, 's').gstr_push(a, ')'),
+            true  => s.add_one(')'),
+            false => s.add_one('s').add_one(')'),
         })
     })
-    s = s.gstr_push(a, '\n')
+    s = s.add_one('\n')
     (line > 0 && col > 0).then({
         ls = user.dline_off(line, 0)
         width = (end_col >= col).then({ end_col - col + 1 }, { 1 })
-        s = s.gstr_append(a, "  ").dput_line(a, user, ls).gstr_push(a, '\n')
+        s = s.add("  ").dput_line(a, user, ls).add_one('\n')
         s = s
-            .gstr_append(a, "  ")
+            .add("  ")
             .dput_blanks(a, user, ls, col, 0)
             .dput_carets(a, width, 0)
-            .gstr_push(a, '\n')
+            .add_one('\n')
     })
     (hint.at(0) == 0).match ({
-        true  => s.gstr_finish(a),
+        true  => s.finish_cstr(),
         false => s
-            .gstr_append(a, "hint: ")
-            .gstr_append(a, hint)
-            .gstr_push(a, '\n')
-            .gstr_finish(a),
+            .add("hint: ")
+            .add(hint)
+            .add_one('\n')
+            .finish_cstr(),
     })
 }

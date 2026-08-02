@@ -134,14 +134,14 @@ matches_kind_at = (sv: MutSlice<u8>, i: i64, name: StringView, kind: i64) bool {
     })
 }
 // ── the byte-`push` decimal-literal needle (kind 4) ───────────────────────────────────────────────
-// `gstr_push`/`rpush`/`push_in` all take a `b: u8` — a BYTE. Zen has char literals (`'a'` is that
+// The compiler's byte-push helpers take a `b: u8` — a BYTE. Zen has char literals (`'a'` is that
 // byte's value), and a raw decimal in that slot hides what the byte IS: `.rpush(a, 10)` and
 // `.rpush(a, '.')` sat two lines apart in compiler.resolve, one of them unreadable. Nothing else
 // about the call is checkable — a byte-typed parameter can legitimately take a computed number — so
 // the rule is exactly this shape and no wider: a BARE DECIMAL LITERAL as the LAST argument.
 //
 // It DOES see through one conversion, `.to_u8()`, because that was the whole escape hatch: the JSON
-// `\b`/`\f` decoders wrote `gstr_push(mp, 8.to_u8())` only because `zen fmt` used to print the char
+// `\b`/`\f` decoders historically wrote a converted decimal byte only because `zen fmt` used to print the char
 // literal `'\x08'` back as the bare number `8`. The formatter round-trips `'\xNN'` now, so the cast
 // no longer buys anything and `to_u8_tail` below judges what it wraps.
 // the index of the `)` closing the `(` at `i`, or sv.len if the file ends first.
@@ -183,7 +183,7 @@ last_arg_is_decimal = (sv: MutSlice<u8>, end0: i64) bool {
         },
     })
 }
-// `push(` / `push_in(` anchored at i — a SUFFIX match, so `gstr_push(`, `rpush(` and `list_push(` all
+// `push(` / `push_in(` anchored at i — a SUFFIX match, so prefixed and collection push calls all
 // land here, while `pushed(` and `push_uesc(` do not (the `(` must follow immediately).
 push_literal_at = (sv: MutSlice<u8>, i: i64) bool {
     lp = sv.tok_at("push(".view(), i).match ({
@@ -311,7 +311,7 @@ not_contains = (s: StringView, needle: StringView) bool {
 }
 // A region whose START marker no longer occurs is the EMPTY string, and every `not_contains` over the
 // empty string is trivially true — so a rename in the file under audit silently retires the rule
-// instead of failing it. Proven: renaming `write_int` to `write_i64` in src/std/text/fmt.zen while
+// instead of failing it. Proven: renaming `write_int` to `write_i64` in src/std/io/print.zen while
 // ALSO introducing the forbidden `.integer_in(` call left the fmt sub-suite green (7 dots, exit 0).
 // Every sliced region therefore carries this presence assertion beside its content assertions.
 found = (region: StringView) bool { region.is_empty().then({ false }, { true }) }
@@ -557,11 +557,11 @@ map_suite = (mp: Allocator) i32 {
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
-// SUITE 8: std.text.fmt allocator-backed numeric writes (Result-always) go through the unified
+// SUITE 8: std.io.print allocator-backed numeric writes (Result-always) go through the unified
 // Result num helpers (never a bare acquire); the plain streaming writes never touch an allocator.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────
 fmt_suite = (mp: Allocator) i32 {
-    mp.addr().contents_in("src/std/text/fmt.zen").match ({
+    mp.addr().contents_in("src/std/io/print.zen").match ({
         .Ok(raw) => {
             src = mp.strip_comments_in(raw)
             ti = mp.region(src, "write_int_in", "write_float_in")
@@ -862,11 +862,11 @@ walrus_suite = (mp: Allocator) i32 {
 // literals in this tree are genuinely numbers (diagnostic codes 1..66, errnos, buffer capacities,
 // SHA-256 rotations, UTF-8 masks, HTTP statuses, calendar ranges) and a wider scan would be a wall of
 // false positives nobody would keep green. What IS checkable is a slot whose TYPE is a byte: the
-// `push` family (`gstr_push`, `rpush`, `push_in` — all `(…, b: u8)`) takes one, so a bare decimal
+// byte-push family (all `(…, b: u8)`) takes one, so a bare decimal
 // literal there is always an ASCII code wearing a number's clothes. Comments and string literals are
 // skipped (file_has), because prose about byte 10 is prose.
 //
-// Not covered, and it must not be: a byte behind a conversion (`gstr_push(mp, 8.to_u8())`, the JSON
+// Not covered, and it must not be: a byte behind a conversion (the JSON
 // `\b`/`\f` escapes in lsp.zen and json.zen). `'\x08'` IS a legal char literal, but `zen fmt` prints
 // it back as `8`, so the fmt gate and this rule would contradict each other. The formatter has to
 // round-trip `'\xNN'` before those sites can be asked to change.

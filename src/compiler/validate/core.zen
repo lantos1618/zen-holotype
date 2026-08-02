@@ -1,6 +1,6 @@
 { ArmData, AssignData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, ImplData, IndexData,
   IndexSetData, LetData, MakeStructData, MatchData, Param, Stmt, StructDecl, Ty } = compiler.ast.ast_types
-{ cbuf, gstr_append, gstr_finish, gstr_string, tvoid, acquire_or_die } = compiler.genc
+{ cbuf, tvoid, acquire_or_die } = compiler.genc
 { DeclIndex, Env, UfcsVis, arm_env, bind_tparams, build_decl_index, build_decl_index_vis,
   extend_env, is_intrinsic, is_void_ty, loop_env, params_env, ufcs_vis_off } = compiler.check
 { resolve_module } = compiler.check_resolve
@@ -13,16 +13,13 @@
   first_coroutine_offset, first_if_offset, first_qmark_offset, fn_name_of, fn_pos_of,
   fnt_arg_err_at, inf_gen_fields, inf_gen_variants, inf_named_reaches, intrinsic_arity,
   is_badmatchlabel_call, is_dupmatcharm_call, is_duplitarm_call, is_forbidden_raw_call,
+  is_unreachable_lit_call,
   is_imported_generic, is_nonexhaust_lit_call, is_unresolved_trait_call, null_deref_kind, pos_or,
   positive_count, shadow_not_callable, shadows_toplevel, source_span, stmt_pos, store_mut_kind,
   trait_declaring, unknown_ty, unknown_type_message, ut_fields_kind, ut_func_kind, ut_payloads_kind,
   utn_fields, utn_func, utn_payloads } = compiler.validate.util
-{ CheckDiagnostic, Diagnostic, KARGTYPE, KARITY, KARMVOID, KASSIGNFIT, KBOOLARM, KCONFORMANCE,
-  KDUPFN, KDUPVARIANT, KESCAPE, KEXHAUST, KFALLTHROUGH, KINDEX, KINFINITETYPE, KLAMBDAVALUE, KLEAK,
-  KDUPLITARM, KDUPMATCHARM, KLITEXHAUST, KMAINPARAMS, KMATCHLABEL, KMETHODNOTFOUND, KNEEDANNOT,
-  KNOCOROUTINE, KNOIF, KNOTCALLABLE, KNOTERNARY, KNULLDEREF, KOPERAND, KOWNERSHIP, KRETURNFIT,
-  KSLICEELEM, KSTRUCTFIELD, KTARGARITY, KTRAITBOUND, KUNDEFINED, KUNREACHABLEARM, KVALPOSRETURN,
-  desc_or, diagnostic_hint, diagnostic_kind_name, diagnostic_message, diagnostic_span_width,
+{ CheckDiagnostic, Diagnostic, desc_or, diagnostic_code, diagnostic_hint, diagnostic_kind_name,
+  diagnostic_message, diagnostic_span_width,
   name_errors_body, name_errors_expr } = compiler.validate.diag
 { AliasList, DeadList, alias_nil, alias_step, count_loop_freed, dead_cons, dead_has, dead_nil,
   is_default_owner_method, is_owner_base, leak_alias_value, member_path_dead, mu_build_index,
@@ -135,7 +132,7 @@ check_module_no_if_diagnostic_from_source* = (src: StringView) CheckDiagnostic {
     (pos < 0).match ({
         true  => check_diagnostic_none(),
         false => CheckDiagnostic(
-            code: KNOIF(),
+            code: diagnostic_code(.NoIf),
             kind: "no-if",
             source_offset: pos,
             span_width: 2,
@@ -153,7 +150,7 @@ check_module_no_ternary_diagnostic_from_source* = (src: StringView) CheckDiagnos
     (pos < 0).match ({
         true  => check_diagnostic_none(),
         false => CheckDiagnostic(
-            code: KNOTERNARY(),
+            code: diagnostic_code(.NoTernary),
             kind: "no-ternary",
             source_offset: pos,
             span_width: 1,
@@ -173,7 +170,7 @@ check_module_no_coroutine_diagnostic_from_source* = (src: StringView) CheckDiagn
     (pos < 0).match ({
         true  => check_diagnostic_none(),
         false => CheckDiagnostic(
-            code: KNOCOROUTINE(),
+            code: diagnostic_code(.NoCoroutine),
             kind: "no-coroutine",
             source_offset: pos,
             span_width: 5,
@@ -236,7 +233,7 @@ check_to_diagnostic* = (d: CheckDiagnostic) Diagnostic {
 // both sides are evaluated, same as the old kv_kor combinator (laziness would change evaluation
 // order).
 Verdict: {
-    or: (Self, i32) i32,
+    or: (self: Self, value: i32) i32,
 }
 i32.impl(Verdict, {
     or = (a: i32, b: i32) i32 { (a == 0).then({ b }, { a }) }
@@ -309,7 +306,7 @@ kv_own_struct_dupmove_kind = (a: Allocator, env: Env, s: MakeStructData) i32 {
             nm = env.struct_field_move_src(fields, fi)
             (nm.is_empty() == false).then({
                 acc = acc.or(d.dead_has(nm).match ({
-                    true  => KOWNERSHIP().kv_at(load(fi.value).expr_pos()),
+                    true  => diagnostic_code(.Ownership).kv_at(load(fi.value).expr_pos()),
                     false => 0,
                 }))
                 d = a.dead_cons(nm, d)
@@ -324,7 +321,7 @@ kv_own_slice_dupmove_kind = (a: Allocator, env: Env, items: MutSlice<Expr>) i32 
     items.loop_at((i, it) {
         nm = env.own_moved_var(it.addr())
         (nm.is_empty() == false).then({
-            acc = acc.or(d.dead_has(nm).then({ KOWNERSHIP().kv_at(it.expr_pos()) }, { 0 }))
+            acc = acc.or(d.dead_has(nm).then({ diagnostic_code(.Ownership).kv_at(it.expr_pos()) }, { 0 }))
             d = a.dead_cons(nm, d)
         })
     })
@@ -338,10 +335,10 @@ kv_own_expr_kind = (
     e: Ptr<Expr>,
 ) i32 {
     load(e).match ({
-        .Var(v)        => seen.dead_has(v.name).then({ KOWNERSHIP().kv_at(v.pos) }, { 0 }),
+        .Var(v)        => seen.dead_has(v.name).then({ diagnostic_code(.Ownership).kv_at(v.pos) }, { 0 }),
         .Call(c)       => a
             .kv_own_args_kind(env, seen, al, c.args)
-            .or(env.is_default_owner_method(c).then({ KOWNERSHIP().kv_at(c.pos) }, { 0 })),
+            .or(env.is_default_owner_method(c).then({ diagnostic_code(.Ownership).kv_at(c.pos) }, { 0 })),
         .Index(ix)     => a
             .kv_own_expr_kind(env, seen, al, ix.seq)
             .or(a.kv_own_expr_kind(env, seen, al, ix.idx)),
@@ -353,7 +350,7 @@ kv_own_expr_kind = (
             .or(a.kv_own_expr_kind(env, seen, al, d.t))
             .or(a.kv_own_expr_kind(env, seen, al, d.e)),
         .Member(m)     => (m.ptr == false && a.member_path_dead(seen, e)).match ({
-            true  => KOWNERSHIP().kv_at(m.pos.pos_or(load(m.obj).expr_pos())),
+            true  => diagnostic_code(.Ownership).kv_at(m.pos.pos_or(load(m.obj).expr_pos())),
             false => a.kv_own_expr_kind(env, seen, al, m.obj),
         }),
         .Match(m)      => a
@@ -371,7 +368,7 @@ kv_own_expr_kind = (
             .or(a.kv_own_body_kind(env, seen, al, l.body))
             .or(a
                 .loop_outer_frees(env, seen, al, l)
-                .kv_one(KOWNERSHIP())
+                .kv_one(diagnostic_code(.Ownership))
                 .kv_at(load(l.seq).expr_pos().pos_or(body_pos(l.body)))),
         .Block(b)      => a.kv_own_body_kind(env, seen, al, b.stmts),
         // every other shape is a plain structural descent, so it delegates to the one exhaustive child
@@ -399,7 +396,7 @@ kv_own_stmt_kind = (a: Allocator, env: Env, seen: Ptr<DeadList>, al: Ptr<AliasLi
             .or(a.kv_own_body_kind(env, seen, al, w.body))
             .or(a
                 .loop_body_outer_frees(env, seen, al, w.body, a.dead_nil())
-                .kv_one(KOWNERSHIP())
+                .kv_one(diagnostic_code(.Ownership))
                 .kv_at(load(w.c).expr_pos().pos_or(body_pos(w.body)))),
         .IndexSet(x) => a
             .kv_own_expr_kind(env, seen, al, x.seq)
@@ -457,7 +454,7 @@ kv_arg_type_kind = (
 ) i32 {
     acc ::= 0
     args.loop_at((i, ar) {
-        acc = acc.or(env.arg_err_at(tps, params, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos()))
+        acc = acc.or(env.arg_err_at(tps, params, i, ar).kv_one(diagnostic_code(.ArgType)).kv_at(ar.expr_pos()))
     })
     acc
 }
@@ -473,25 +470,28 @@ kv_call_errs_kind = (env: Env, c: CallData) i32 {
             true  => 0,
             false => env.kv_arg_type_kind(f.tparams, ps, c.args),
         }),
-        false => KARITY(),
+        false => diagnostic_code(.Arity),
     })
 }
 kv_check_call_kind = (env: Env, c: CallData) i32 {
     // Parser-lowered match/literal sentinels deliberately outrank every ordinary name/call error.
     c.is_nonexhaust_lit_call().then({
-        return kv_at(KLITEXHAUST(), c.pos)
+        return kv_at(diagnostic_code(.LiteralExhaustiveness), c.pos)
     })
     c.is_badmatchlabel_call().then({
-        return kv_at(KMATCHLABEL(), c.pos)
+        return kv_at(diagnostic_code(.MatchLabel), c.pos)
     })
     c.is_dupmatcharm_call().then({
-        return kv_at(KDUPMATCHARM(), c.pos)
+        return kv_at(diagnostic_code(.DuplicateBooleanArm), c.pos)
     })
     c.is_duplitarm_call().then({
-        return kv_at(KDUPLITARM(), c.pos)
+        return kv_at(diagnostic_code(.DuplicateLiteralArm), c.pos)
+    })
+    c.is_unreachable_lit_call().then({
+        return kv_at(diagnostic_code(.UnreachableArm), c.pos)
     })
     c.is_forbidden_raw_call().then({
-        return KUNDEFINED()
+        return diagnostic_code(.Undefined)
     })
     // An unresolved call in an abstract trait body is deferred until a concrete receiver exists.
     env.is_unresolved_trait_call(c).then({
@@ -503,16 +503,16 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
             return env.kv_fnval_call_kind(c)
         })
         env.shadow_not_callable(c.fn).then({
-            return KNOTCALLABLE()
+            return diagnostic_code(.NotCallable)
         })
         return 0
     })
     env.env_known_fn(c.fn).then({
         env.recv_typed_miss(c).then({
-            return KMETHODNOTFOUND()
+            return diagnostic_code(.MethodNotFound)
         })
         env.ufcs_vis_miss(c).then({
-            return env.undef_is_method(c).then({ KMETHODNOTFOUND() }, { KUNDEFINED() })
+            return env.undef_is_method(c).then({ diagnostic_code(.MethodNotFound) }, { diagnostic_code(.Undefined) })
         })
         return env.kv_call_errs_kind(c)
     })
@@ -520,11 +520,11 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
         (c.args.len == c.fn.intrinsic_arity()).then({
             return env.kv_reflect_kind(c)
         })
-        return KARITY()
+        return diagnostic_code(.Arity)
     })
     (env.env_imported(c.fn) || env.env_trait_method(c.fn)).then({
         env.trait_recv_missing(c).then({
-            return kv_at(KTRAITBOUND(), c.pos)
+            return kv_at(diagnostic_code(.TraitBound), c.pos)
         })
         return 0
     })
@@ -532,15 +532,15 @@ kv_check_call_kind = (env: Env, c: CallData) i32 {
         return env.kv_fnval_call_kind(c)
     })
     env.is_bound(c.fn).then({
-        return KNOTCALLABLE()
+        return diagnostic_code(.NotCallable)
     })
     (c.args.len > 0 && is_empty(env.decls.trait_declaring(c.fn)) == false).then({
-        return KTRAITBOUND()
+        return diagnostic_code(.TraitBound)
     })
     env.undef_is_method(c).then({
-        return KMETHODNOTFOUND()
+        return diagnostic_code(.MethodNotFound)
     })
-    KUNDEFINED()
+    diagnostic_code(.Undefined)
 }
 // #574: the flat fn exists, but the module the call lives in neither
 // defines nor imports the name — a method-shaped call bound by
@@ -571,7 +571,7 @@ kv_reflect_recv_kind = (env: Env, c: CallData) i32 {
         _           => true,
     })
     bad.then({
-        return KARGTYPE().kv_at(c.args[0].expr_pos().pos_or(c.pos))
+        return diagnostic_code(.ArgType).kv_at(c.args[0].expr_pos().pos_or(c.pos))
     })
     (c.fn == "field_eq" || c.fn == "zip_fields").match ({
         true  => {
@@ -579,7 +579,7 @@ kv_reflect_recv_kind = (env: Env, c: CallData) i32 {
             yn = env.infer_expr(c.args[1].addr()).kv_refl_tyname()
             (xn == "" || yn == "" || xn == yn).match ({
                 true  => 0,
-                false => KARGTYPE().kv_at(c.args[1].expr_pos().pos_or(c.pos)),
+                false => diagnostic_code(.ArgType).kv_at(c.args[1].expr_pos().pos_or(c.pos)),
             })
         },
         false => 0,
@@ -597,10 +597,10 @@ kv_reflect_fn_kind = (env: Env, c: CallData) i32 {
     c.args[li].match ({
         .Lambda(lm) => (lm.params.len == want).match ({
             true  => 0,
-            false => KARGTYPE().kv_at(c.args[li].expr_pos().pos_or(c.pos)),
+            false => diagnostic_code(.ArgType).kv_at(c.args[li].expr_pos().pos_or(c.pos)),
         }),
         .Var(v)     => 0,
-        _           => KARGTYPE().kv_at(c.args[li].expr_pos().pos_or(c.pos)),
+        _           => diagnostic_code(.ArgType).kv_at(c.args[li].expr_pos().pos_or(c.pos)),
     })
 }
 kv_variant_name_kind = (env: Env, c: CallData) i32 {
@@ -610,7 +610,7 @@ kv_variant_name_kind = (env: Env, c: CallData) i32 {
         .Void       => false,
         _           => true,
     })
-    bad.then({ KARGTYPE().kv_at(c.args[0].expr_pos().pos_or(c.pos)) }, { 0 })
+    bad.then({ diagnostic_code(.ArgType).kv_at(c.args[0].expr_pos().pos_or(c.pos)) }, { 0 })
 }
 kv_reflect_kind = (env: Env, c: CallData) i32 {
     (c.fn == "variant_name" && c.args.len == 1).then({
@@ -624,7 +624,7 @@ kv_reflect_kind = (env: Env, c: CallData) i32 {
 kv_fnt_arg_kind = (env: Env, ptys: MutSlice<Ty>, args: MutSlice<Expr>) i32 {
     acc ::= 0
     args.loop_at((i, ar) {
-        acc = acc.or(env.fnt_arg_err_at(ptys, i, ar).kv_one(KARGTYPE()).kv_at(ar.expr_pos()))
+        acc = acc.or(env.fnt_arg_err_at(ptys, i, ar).kv_one(diagnostic_code(.ArgType)).kv_at(ar.expr_pos()))
     })
     acc
 }
@@ -632,9 +632,9 @@ kv_fnval_call_kind = (env: Env, c: CallData) i32 {
     env.var_or_global(c.fn).match ({
         .FnT(ft) => (ft.params.len == c.args.len).match ({
             true  => env.kv_fnt_arg_kind(ft.params, c.args),
-            false => KARITY(),
+            false => diagnostic_code(.Arity),
         }),
-        _        => KUNDEFINED(),
+        _        => diagnostic_code(.Undefined),
     })
 }
 kv_check_args_kind = (env: Env, args: MutSlice<Expr>) i32 {
@@ -650,7 +650,7 @@ kv_check_arms_kind = (env: Env, subjty: Ty, arms: MutSlice<ArmData>) i32 {
     acc
 }
 kv_arm_result_kind = (env: Env, subjty: Ty, want: Ty, ar: ArmData) i32 {
-    env.arm_result_err(subjty, want, ar).kv_one(KRETURNFIT()).kv_at(load(ar.body).expr_pos())
+    env.arm_result_err(subjty, want, ar).kv_one(diagnostic_code(.ReturnFit)).kv_at(load(ar.body).expr_pos())
 }
 kv_match_arm_result_kind = (env: Env, subjty: Ty, arms: MutSlice<ArmData>) i32 {
     want = env.match_result_ty(subjty, arms)
@@ -669,23 +669,23 @@ kv_value_void_arm_kind = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
                 m.arms.loop_at((i, ar) {
                     acc = acc.or(env
                         .novalue_arm_leaf(ar.body)
-                        .kv_one(KARMVOID())
+                        .kv_one(diagnostic_code(.ArmVoid))
                         .kv_at(load(ar.body).expr_pos().pos_or(ar.pos)))
                 })
                 acc
             },
             .Cond(d)  => env
                 .novalue_arm_leaf(d.t)
-                .kv_one(KARMVOID())
+                .kv_one(diagnostic_code(.ArmVoid))
                 .kv_at(load(d.t).expr_pos())
-                .or(env.novalue_arm_leaf(d.e).kv_one(KARMVOID()).kv_at(load(d.e).expr_pos())),
+                .or(env.novalue_arm_leaf(d.e).kv_one(diagnostic_code(.ArmVoid)).kv_at(load(d.e).expr_pos())),
             _         => 0,
         }),
     })
 }
 kv_arm_return_kind = (arms: MutSlice<ArmData>) i32 {
     acc ::= 0
-    arms.loop_at((i, ar) { acc = acc.or(ar.body.expr_drops_return().kv_one(KVALPOSRETURN())) })
+    arms.loop_at((i, ar) { acc = acc.or(ar.body.expr_drops_return().kv_one(diagnostic_code(.ValuePositionReturn))) })
     acc
 }
 // struct-literal init fields: an unknown field OR a mistyped value is KSTRUCTFIELD.
@@ -699,7 +699,7 @@ kv_check_inits_kind = (env: Env, inits: MutSlice<FieldInit>) i32 {
 kv_makestruct_kind = (env: Env, m: MakeStructData) i32 {
     env
         .makestruct_err(m)
-        .kv_one(KSTRUCTFIELD())
+        .kv_one(diagnostic_code(.StructField))
         .kv_at(m.pos.pos_or((m.inits.len == 0).then({ 0 }, { load(m.inits[0].value).expr_pos() })))
 }
 // A generic-struct literal's explicit `<…>` list must pin EVERY tparam (`Box<i32,i32>(…)` on a
@@ -714,13 +714,13 @@ kv_makestruct_targ_kind = (env: Env, m: MakeStructData) i32 {
         }),
     })
     n
-        .kv_one(KTARGARITY())
+        .kv_one(diagnostic_code(.TypeArgumentArity))
         .kv_at(m.pos.pos_or((m.inits.len == 0).then({ 0 }, { load(m.inits[0].value).expr_pos() })))
 }
 // member access caret on the receiver object (a Var/Call survives resolve).
 kv_nullable_obj_kind = (env: Env, obj: Ptr<Expr>, pos: i32) i32 {
     env.infer_expr(obj).is_nullable_ptr_ty().match ({
-        true  => KNULLDEREF().kv_at(pos.pos_or(load(obj).expr_pos())),
+        true  => diagnostic_code(.NullDereference).kv_at(pos.pos_or(load(obj).expr_pos())),
         false => 0,
     })
 }
@@ -729,12 +729,12 @@ kv_member_kind = (env: Env, obj: Ptr<Expr>, field: StringView, pos: i32) i32 {
         .kv_nullable_obj_kind(obj, pos)
         .or(env
             .member_err(obj, field)
-            .kv_one(KSTRUCTFIELD())
+            .kv_one(diagnostic_code(.StructField))
             .kv_at(pos.pos_or(load(obj).expr_pos())))
 }
 kv_match_null_kind = (env: Env, m: MatchData) i32 {
     env.infer_expr(m.subj).is_nullable_ptr_ty().match ({
-        true  => KNULLDEREF().kv_at(load(m.subj).expr_pos()),
+        true  => diagnostic_code(.NullDereference).kv_at(load(m.subj).expr_pos()),
         false => 0,
     })
 }
@@ -743,20 +743,20 @@ kv_match_kind = (env: Env, m: MatchData) i32 {
     // (the *_at-ctor pitfall), so fall back to the first arm's pattern pos — the error is always located.
     sp = load(m.subj).expr_pos().pos_or(m.arms.arms_first_pos())
     base = m.arms.has_wildcard().match ({
-        true  => m.arms.dup_arm_errs().kv_one(KDUPVARIANT()).kv_at(sp),
+        true  => m.arms.dup_arm_errs().kv_one(diagnostic_code(.DuplicateVariant)).kv_at(sp),
         false => env
             .exhaustive_err(m)
-            .kv_one(KEXHAUST())
+            .kv_one(diagnostic_code(.Exhaustiveness))
             .kv_at(sp)
-            .or(m.arms.dup_arm_errs().kv_one(KDUPVARIANT()).kv_at(sp)),
+            .or(m.arms.dup_arm_errs().kv_one(diagnostic_code(.DuplicateVariant)).kv_at(sp)),
     })
     base
-        .or(m.arms.unreachable_arm_errs().kv_one(KUNREACHABLEARM()).kv_at(sp))
-        .or(env.unknown_arm_errs(m).kv_one(KUNDEFINED()).kv_at(sp))
+        .or(m.arms.unreachable_arm_errs().kv_one(diagnostic_code(.UnreachableArm)).kv_at(sp))
+        .or(env.unknown_arm_errs(m).kv_one(diagnostic_code(.Undefined)).kv_at(sp))
 }
-kv_index_kind = (env: Env, ix: IndexData) i32 { env.index_err(ix).kv_one(KINDEX()) }
+kv_index_kind = (env: Env, ix: IndexData) i32 { env.index_err(ix).kv_one(diagnostic_code(.Index)) }
 kv_operand_kind = (env: Env, b: BinData) i32 {
-    env.operand_err(b).kv_one(KOPERAND()).kv_at(b.pos.pos_or(load(b.lhs).expr_pos()))
+    env.operand_err(b).kv_one(diagnostic_code(.Operand)).kv_at(b.pos.pos_or(load(b.lhs).expr_pos()))
 }
 // targ-arity: the error is judged on the RAW call site (`<…>` survives only pre-inline);
 // the resolved view holds a REWRITTEN call whose targ/tparam counts are meaningless — walk
@@ -819,7 +819,7 @@ kv_slicelit_kind = (env: Env, items: MutSlice<Expr>) i32 {
             ety = env.infer_expr(items[0].addr())
             acc ::= 0
             items.loop_at((i, it) {
-                acc = acc.or(env.sl_elem_fit(ety, it).kv_one(KARGTYPE()).kv_at(it.expr_pos()))
+                acc = acc.or(env.sl_elem_fit(ety, it).kv_one(diagnostic_code(.ArgType)).kv_at(it.expr_pos()))
             })
             acc
         },
@@ -843,10 +843,10 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
             .kv_check_call_kind(c)
             .kv_at(c.pos)
             .or(env.store_mut_kind(c))
-            .or(env.store_fit_err(c).kv_one(KASSIGNFIT()).kv_at(c.pos))
+            .or(env.store_fit_err(c).kv_one(diagnostic_code(.AssignFit)).kv_at(c.pos))
             .or(env.null_deref_kind(c))
             .or(env.assert_nonnull_kind(c))
-            .or(env.call_void_arm_errs(c).kv_one(KARMVOID()).kv_at(c.pos))
+            .or(env.call_void_arm_errs(c).kv_one(diagnostic_code(.ArmVoid)).kv_at(c.pos))
             .or((c.fn == "sizeof"
                 || c.fn == "field_eq"
                 || c.fn == "each_field"
@@ -867,11 +867,11 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
             .kv_check_expr_kind(d.c)
             .or(env.kv_check_expr_kind(d.t))
             .or(env.kv_check_expr_kind(d.e))
-            .or(d.t.expr_drops_return().kv_one(KVALPOSRETURN()))
-            .or(d.e.expr_drops_return().kv_one(KVALPOSRETURN()))
-            .or(env.cond_result_err(d).kv_one(KRETURNFIT()).kv_at(load(d.t).expr_pos()))
-            .or(d.cond_onearm_err().kv_one(KBOOLARM()).kv_at(load(d.c).expr_pos()))
-            .or(env.cond_bool_err(d).kv_one(KOPERAND()).kv_at(load(d.c).expr_pos())),
+            .or(d.t.expr_drops_return().kv_one(diagnostic_code(.ValuePositionReturn)))
+            .or(d.e.expr_drops_return().kv_one(diagnostic_code(.ValuePositionReturn)))
+            .or(env.cond_result_err(d).kv_one(diagnostic_code(.ReturnFit)).kv_at(load(d.t).expr_pos()))
+            .or(d.cond_onearm_err().kv_one(diagnostic_code(.BooleanArm)).kv_at(load(d.c).expr_pos()))
+            .or(env.cond_bool_err(d).kv_one(diagnostic_code(.Operand)).kv_at(load(d.c).expr_pos())),
         .Member(m)      => env
             .kv_check_expr_kind(m.obj)
             .or(env.kv_member_kind(m.obj, m.field, m.pos)),
@@ -887,41 +887,41 @@ kv_check_expr_kind = (env: Env, e: Ptr<Expr>) i32 {
         },
         .MakeEnum(mk)   => env
             .kv_check_expr_kind(mk.payload)
-            .or(env.mkenum_err(mk.ty, mk.variant).kv_one(KUNDEFINED()))
-            .or(env.enum_payload_err(mk).kv_one(KARGTYPE()).kv_at(load(mk.payload).expr_pos())),
-        .Tag(t)         => env.mkenum_err(t.ty, t.variant).kv_one(KUNDEFINED()),
+            .or(env.mkenum_err(mk.ty, mk.variant).kv_one(diagnostic_code(.Undefined)))
+            .or(env.enum_payload_err(mk).kv_one(diagnostic_code(.ArgType)).kv_at(load(mk.payload).expr_pos())),
+        .Tag(t)         => env.mkenum_err(t.ty, t.variant).kv_one(diagnostic_code(.Undefined)),
         .MakeStruct(sd) => env
             .kv_check_inits_kind(sd.inits)
             .or(env.kv_makestruct_targ_kind(sd))
             .or(env.kv_makestruct_kind(sd)),
         .Block(b)       => env.kv_check_block_kind(b.stmts),
-        .Var(v)         => env.var_err(v.name).kv_one(KUNDEFINED()).kv_at(v.pos),
+        .Var(v)         => env.var_err(v.name).kv_one(diagnostic_code(.Undefined)).kv_at(v.pos),
         .Loop(l)        => env
             .lkv_expr_kind(l.seq)
             .or(env.a.lkv_body_kind(env.a.loop_env(env, l), l.body)),
-        .Lambda(lm)     => KLAMBDAVALUE(),    // a surviving lambda = used as a value (see check_expr)
+        .Lambda(lm)     => diagnostic_code(.LambdaValue),    // a surviving lambda = used as a value (see check_expr)
         _               => 0,
     })
 }
 // the slice-element-width check, kind-flavoured: the caret lands on the `slice` call that made the
 // claim, not on the annotation that received it.
 kv_slice_elem_kind = (env: Env, want: Ty, e: Ptr<Expr>) i32 {
-    env.slice_elem_err(want, e).kv_one(KSLICEELEM()).kv_at(load(e).expr_pos())
+    env.slice_elem_err(want, e).kv_one(diagnostic_code(.SliceElement)).kv_at(load(e).expr_pos())
 }
 kv_ret_kind = (env: Env, r: Ptr<Expr>) i32 {
-    env.ret_err(r).kv_one(KRETURNFIT()).kv_at(load(r).expr_pos())
+    env.ret_err(r).kv_one(diagnostic_code(.ReturnFit)).kv_at(load(r).expr_pos())
 }
 kv_let_fit_kind = (env: Env, l: LetData) i32 {
-    env.let_fit_err(l).kv_one(KASSIGNFIT()).kv_at(load(l.value).expr_pos())
+    env.let_fit_err(l).kv_one(diagnostic_code(.AssignFit)).kv_at(load(l.value).expr_pos())
 }
 kv_let_needannot_kind = (env: Env, l: LetData) i32 {
-    env.let_needannot_err(l).kv_one(KNEEDANNOT()).kv_at(load(l.value).expr_pos())
+    env.let_needannot_err(l).kv_one(diagnostic_code(.NeedAnnotation)).kv_at(load(l.value).expr_pos())
 }
 kv_assign_kind = (env: Env, x: AssignData) i32 {
     ap = x.pos.pos_or(load(x.target).expr_pos()).pos_or(load(x.value).expr_pos())
     env
         .assign_err(x)
-        .kv_one(KASSIGNFIT())
+        .kv_one(diagnostic_code(.AssignFit))
         .kv_at(ap)
         .or(env.assign_write_kind(x).kv_at(ap))
 }
@@ -929,7 +929,7 @@ kv_idxset_kind = (env: Env, x: IndexSetData) i32 {
     ip = x.pos.pos_or(load(x.value).expr_pos()).pos_or(load(x.seq).expr_pos())
     env
         .idxset_err(x)
-        .kv_one(KASSIGNFIT())
+        .kv_one(diagnostic_code(.AssignFit))
         .kv_at(ip)
         .or(env.idxset_write_kind(x).kv_at(ip))
 }
@@ -986,14 +986,14 @@ kv_last_stmt_kind = (env: Env, st: Stmt) i32 {
             .or(env.kv_value_void_arm_kind(env.exp, e))
             .or(env.kv_slice_elem_kind(env.exp, e)),
         .Return(r)   => 0,
-        _            => KFALLTHROUGH().kv_at(st.stmt_pos()),
+        _            => diagnostic_code(.Fallthrough).kv_at(st.stmt_pos()),
     })
 }    // a let/assign/loop tail: caret on that statement
 kv_trailing_kind = (env: Env, body: MutSlice<Stmt>) i32 {
     env.exp.is_void_ty().match ({
         true  => 0,
         false => (body.len == 0).match ({
-            true  => KFALLTHROUGH(),
+            true  => diagnostic_code(.Fallthrough),
             false => env.kv_last_stmt_kind(body[body.len - 1]),
         }),
     })
@@ -1195,19 +1195,19 @@ check_module_infinite_type_kind = (decls: MutSlice<Decl>) i32 {
     decls.loop_at((i, d) {
         acc = acc.or(d.match ({
             .DStruct(sd)   => decls.inf_named_reaches(sd.name, sd.name, decls.len).match ({
-                true  => KINFINITETYPE().kv_at(sd.pos),
+                true  => diagnostic_code(.InfiniteType).kv_at(sd.pos),
                 false => 0,
             }),
             .DEnum(ed)     => decls.inf_named_reaches(ed.name, ed.name, decls.len).match ({
-                true  => KINFINITETYPE().kv_at(ed.pos),
+                true  => diagnostic_code(.InfiniteType).kv_at(ed.pos),
                 false => 0,
             }),
             .DGenStruct(g) => g.fields.inf_gen_fields(g.name).match ({
-                true  => KINFINITETYPE().kv_at(g.pos),
+                true  => diagnostic_code(.InfiniteType).kv_at(g.pos),
                 false => 0,
             }),
             .DGenEnum(g)   => g.variants.inf_gen_variants(g.name).match ({
-                true  => KINFINITETYPE().kv_at(g.pos),
+                true  => diagnostic_code(.InfiniteType).kv_at(g.pos),
                 false => 0,
             }),
             _              => 0,
@@ -1228,8 +1228,8 @@ check_module_infinite_type_diagnostic_from_source* = (
 //   `main = (sys: Sys) i32` — the capability entry; c_emit renames it and emits a niladic `zen_main`
 //                             trampoline that feeds it `std.sys.root()` (see c_emit.gen_func). The C
 //                             boundary stays niladic, so no parameter ever reads garbage.
-// Any OTHER parameter shape (2+ params, or a single non-`Sys` param) still compiled clean and then read
-// GARBAGE for the declared parameters — undefined behavior behind a green build — so it stays rejected.
+// Any other parameter shape can read garbage because the OS entry is niladic; any non-`i32` return
+// type disagrees with the integer process boundary. Reject both before either backend emits code.
 // The accepted `(sys: Sys)` form must carry exactly one parameter whose type is the record `Sys`.
 main_param_is_sys = (f: Func) bool {
     (f.params.len == 1).match ({
@@ -1240,13 +1240,22 @@ main_param_is_sys = (f: Func) bool {
         false => false,
     })
 }
-main_params_kind = (decls: MutSlice<Decl>) i32 {
+main_return_is_i32 = (f: Func) bool {
+    f.ret.match ({
+        .I32 => true,
+        _    => false,
+    })
+}
+main_signature_ok = (f: Func) bool {
+    f.main_return_is_i32() && (f.params.len == 0 || f.main_param_is_sys())
+}
+main_signature_kind = (decls: MutSlice<Decl>) i32 {
     k ::= 0
     decls.loop_at((i, d) {
         k = (k == 0).match ({
             true  => d.match ({
-                .DFunc(f) => (f.name == "main" && f.params.len > 0).match ({
-                    true  => f.main_param_is_sys().then({ 0 }, { KMAINPARAMS().kv_at(f.pos) }),
+                .DFunc(f) => (f.name == "main").match ({
+                    true  => f.main_signature_ok().then({ 0 }, { diagnostic_code(.MainParameters).kv_at(f.pos) }),
                     false => 0,
                 }),
                 _         => 0,
@@ -1260,7 +1269,7 @@ check_module_main_diagnostic_from_source* = (
     decls: MutSlice<Decl>,
     src: StringView,
 ) CheckDiagnostic {
-    packed = decls.main_params_kind()
+    packed = decls.main_signature_kind()
     (packed == 0).then({ check_diagnostic_none() }, { src.check_diagnostic_from_source(packed, 1) })
 }
 check_module_reserved_diagnostic_from_source* = (
@@ -1274,29 +1283,26 @@ check_module_reserved_diagnostic_from_source* = (
         false => {
             pos = packed.kv_pos()
             w = src.diagnostic_span_width(pos)
-            subject = a
-                .gstr_string(32)
-                .gstr_append(a, "`")
-                .gstr_append(a, decls.reserved_name_of())
-                .gstr_append(a, "`")
-                .gstr_finish(a)
+            subject = a.String(32)
+                .add("`")
+                .add(decls.reserved_name_of())
+                .add("`")
+                .finish_cstr()
             CheckDiagnostic(
                 code: packed & 127,
                 kind: "reserved-name",
                 source_offset: pos,
                 span_width: w,
                 count: 1,
-                message: a
-                    .gstr_string(192)
-                    .gstr_append(a, subject)
-                    .gstr_append(a, " is a compiler intrinsic; a top-level function may not redefine it — calls would compile to the intrinsic, not this function")
-                    .gstr_finish(a),
-                hint: a
-                    .gstr_string(64)
-                    .gstr_append(a, "rename — ")
-                    .gstr_append(a, subject)
-                    .gstr_append(a, " is a compiler intrinsic")
-                    .gstr_finish(a),
+                message: a.String(192)
+                    .add(subject)
+                    .add(" is a compiler intrinsic; a top-level function may not redefine it — calls would compile to the intrinsic, not this function")
+                    .finish_cstr(),
+                hint: a.String(64)
+                    .add("rename — ")
+                    .add(subject)
+                    .add(" is a compiler intrinsic")
+                    .finish_cstr(),
             )
         },
     })
@@ -1323,7 +1329,7 @@ check_module_mustuse_diagnostic_from_source* = (
 }
 // trait conformance, kind-flavoured (mirrors impl_errs/trait_conformance/method_err).
 kv_method_kind = (a: Allocator, decls: MutSlice<Decl>, im: ImplData, f: Field) i32 {
-    a.method_err(decls, im, f).kv_one(KCONFORMANCE())
+    a.method_err(decls, im, f).kv_one(diagnostic_code(.Conformance))
 }
 kv_conformance_kind = (a: Allocator, decls: MutSlice<Decl>, im: ImplData, sd: StructDecl) i32 {
     acc ::= 0
@@ -1353,7 +1359,7 @@ kv_dup_name_kind = (decls: MutSlice<Decl>) i32 {
     decls.loop_at((i, d) {
         nm = d.fn_name_of()
         dup = is_empty(nm).then({ false }, { decls.fn_dup_before(nm, i) })
-        acc = acc.or(dup.then({ KDUPFN().kv_at(d.fn_pos_of()) }, { 0 }))
+        acc = acc.or(dup.then({ diagnostic_code(.DuplicateFunction).kv_at(d.fn_pos_of()) }, { 0 }))
     })
     acc
 }
@@ -1409,7 +1415,7 @@ kca_expr = (e: Ptr<Expr>) i32 {
 kca_stmt = (st: Stmt, scope: MutSlice<Stmt>) i32 {
     st.match ({
         .Let(l)      => ((l.mut == false && scope.wr_writes_name(l.name)).match ({
-            true  => KASSIGNCONST().kv_at(l.pos),
+            true  => diagnostic_code(.AssignConst).kv_at(l.pos),
             false => 0,
         })).or(l.value.kca_expr()),
         .Assign(x)   => x.target.kca_expr().or(x.value.kca_expr()),
@@ -1617,7 +1623,7 @@ check_module_leak_diagnostic_from_source* = (
         true  => check_diagnostic_none(),
         false => {
             CheckDiagnostic(
-                code: KLEAK(),
+                code: diagnostic_code(.Leak),
                 kind: "leak",
                 source_offset: pos,
                 span_width: src.diagnostic_span_width(pos),
@@ -1648,7 +1654,7 @@ check_module_addr_escape_diagnostic_from_source* = (
     (pos == 0).match ({
         true  => check_diagnostic_none(),
         false => CheckDiagnostic(
-            code: KESCAPE(),
+            code: diagnostic_code(.Escape),
             kind: "escape",
             source_offset: pos,
             span_width: src.diagnostic_span_width(pos),
@@ -1681,7 +1687,7 @@ check_module_send_rc_diagnostic_from_source* = (
     (pos == 0).match ({
         true  => check_diagnostic_none(),
         false => CheckDiagnostic(
-            code: KOWNERSHIP(),
+            code: diagnostic_code(.Ownership),
             kind: "sendable",
             source_offset: pos,
             span_width: src.diagnostic_span_width(pos),
@@ -1703,7 +1709,7 @@ check_module_send_mut_diagnostic_from_source* = (
     (pos == 0).match ({
         true  => check_diagnostic_none(),
         false => CheckDiagnostic(
-            code: KOWNERSHIP(),
+            code: diagnostic_code(.Ownership),
             kind: "sendable",
             source_offset: pos,
             span_width: src.diagnostic_span_width(pos),

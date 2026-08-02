@@ -10,8 +10,8 @@
 { is_field_colon } = compiler.parse_primary
 { parse_or } = compiler.parse_expr
 { is_lbracket, is_rbracket, is_rbrace, lbrace_off, skip_to_brace, skip_to_lparen, tok_eq, parse_ty,
-  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, bopen_enter, bopen_exit, pdepth_enter,
-  pdepth_exit, pdepth_over, delim_save, delim_restore } = compiler.parse_type
+  perr_set_at, perr_set_kind_at, perr_set_unclosed_at, bopen_enter, bopen_exit, pdepth_enter, pdepth_exit, pdepth_over, delim_save,
+  delim_restore } = compiler.parse_type
 // The count is unknown while parsing, so statements accumulate into a cons-list, then
 // get materialized into a HEAP [Stmt] for genc. A stack `[…]` literal can't be used — it
 // dangles the moment the Func is returned (genc would then walk freed memory).
@@ -49,8 +49,7 @@ scons = (a: Allocator, h: Stmt, t: Ptr<SList>) Ptr<SList> { a.slnode(scons_val(h
 // stage that knows whether `x` is already in scope.
 //
 // The classifier commits on token 2 with no speculative type parse. At statement position an Ident followed by `:` can only
-// begin a declaration — an anonymous struct literal is decided before parse_stmts ever runs
-// (compiler.parse_primary.looks_anon_struct) and begins with `{`, not with a name.
+// begin a declaration. A leading `{` is always a block; Zen has no anonymous record literal.
 is_binding_here = (src: StringView, pos: i32) bool {
     sc = src.scan(pos)
     sc.tok.kind.match ({
@@ -61,13 +60,13 @@ is_binding_here = (src: StringView, pos: i32) bool {
 is_binding_mark = (src: StringView, t: Token) bool {
     src.is_field_colon(t) || src.is_dcolon(t) || src.is_mut_walrus(t) || src.is_walrus(t)
 }
-// can this token begin a TYPE? A name (`i32`, `Ptr<T>`), a `[T]` slice, a `{ a: T }` anonymous
-// struct, or a `(A) R` function type. Anything else after a binding's `:`/`::` is ExpectedLetType.
+// can this token begin a TYPE? A name (`i32`, `Ptr<T>`), a retired `[T]` slice spelling, or a
+// labeled `(value: A) R` function type. Anything else after a binding's `:`/`::` is ExpectedLetType.
 ty_starts_at = (src: StringView, pos: i32) bool {
     sc = src.scan(pos)
     sc.tok.kind.match ({
         .Ident => true,
-        _      => src.is_lbracket(sc.tok) || src.is_op1(sc.tok, '{') || src.is_op1(sc.tok, '('),
+        _      => src.is_lbracket(sc.tok) || src.is_op1(sc.tok, '('),
     })
 }
 // Skip a place-expression suffix: a chain of `.field` and `[index]` postfixes after the head ident, so
@@ -195,15 +194,9 @@ stmt_kind = (src: StringView, pos: i32) SKind {
 // parse statements [pos..] into a cons-list: dispatch flat on the classified kind. `SExpr` at
 // the top level is the final-expression-or-bare-statement case (parse_ret_stmt decides which).
 parse_stmts = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
-    // DEPTH CAP (see parse_type.zen): a function body's statement list recurses one frame per statement,
-    // so a flood of garbage tokens (e.g. the trailing `)`s of a pathologically-nested expression, each
-    // consumed as a one-token bad statement) would overflow the C stack. Past the cap, stop the list
-    // (perr already set) — the same effect as reaching the body's end.
-    pdepth_enter()
     d = delim_save()    // a body is STATEMENT level even inside an open delimiter (a lambda/block arg)
-    r = pdepth_over().then({ a.snil() }, { a.parse_stmts_inner(src, pos) })
+    r = a.parse_stmts_inner(src, pos)
     delim_restore(d)
-    pdepth_exit()
     r
 }
 parse_stmts_inner = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
@@ -230,14 +223,14 @@ parse_idxset_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     rb = src.scan(ie.next)    // ']'
     eq = src.scan(rb.next)    // '='
     v = a.parse_or(src, eq.next)    // the value
-    a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), v.expr, nt.tok.start), a.parse_stmts(src, v.next))
+    a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), v.expr, nt.tok.start), a.parse_stmts_inner(src, v.next))
 }
 parse_set_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     start = src.scan(pos).tok.start
     lhs = a.parse_atom(src, pos)    // the lvalue target: a Var `x` or a Member chain `p.x.y`
     eq = src.scan(lhs.next)    // '='
     v = a.parse_or(src, eq.next)    // value
-    a.scons(sassign_at(lhs.expr, v.expr, start), a.parse_stmts(src, v.next))
+    a.scons(sassign_at(lhs.expr, v.expr, start), a.parse_stmts_inner(src, v.next))
 }
 // The `place = place OP rhs` desugar reads the place TWICE, which is only harmless while the place
 // is PURE. An index sub-expression can call a function (`a[f()] += 1`, `s.buf[f()].n += 1`): naive
@@ -360,7 +353,7 @@ comp_idxset_desugar = (a: Allocator, src: StringView, pos: i32) CompDes {
 }
 parse_comp_idxset_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     d = a.comp_idxset_desugar(src, pos)
-    a.comp_prefix(d, a.parse_stmts(src, d.next))
+    a.comp_prefix(d, a.parse_stmts_inner(src, d.next))
 }
 // `place OP= rhs`  →  `place = place OP rhs` (non-index lvalue). parse_atom is pure, so reading the
 // place twice from the same position yields two independent copies — one the target, one the operand.
@@ -392,7 +385,7 @@ comp_set_desugar = (a: Allocator, src: StringView, pos: i32) CompDes {
 }
 parse_comp_set_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     d = a.comp_set_desugar(src, pos)
-    a.comp_prefix(d, a.parse_stmts(src, d.next))
+    a.comp_prefix(d, a.parse_stmts_inner(src, d.next))
 }
 // a binding mark with nothing left to bind: the very next token CLOSES the enclosing construct (`}` `)` `]`
 // `,`) or the file ends. Zen has no statement terminator, so `x =` followed by a value on the NEXT
@@ -459,7 +452,7 @@ parse_binding* = (a: Allocator, src: StringView, pos: i32) LetParse {
 }    // value
 parse_let_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     b = a.parse_binding(src, pos)
-    a.scons(b.st, a.parse_stmts(src, b.next))
+    a.scons(b.st, a.parse_stmts_inner(src, b.next))
 }    // … then the rest of the body
 // the final expression of a body is its return; a non-final expression (something else
 // follows before the closing `}`) is a bare statement, evaluated for effect (e.g. `f()`).
@@ -474,7 +467,7 @@ parse_ret_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     r = a.parse_or(src, pos)
     src.at_body_end(r.next).match ({
         true  => a.scons(sret(r.expr), a.snil()),
-        false => a.scons(sexpr(r.expr), a.parse_stmts(src, r.next)),
+        false => a.scons(sexpr(r.expr), a.parse_stmts_inner(src, r.next)),
     })
 }    // final expression -> return
 parse_return_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
@@ -484,7 +477,7 @@ parse_return_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     // a nested match arm) — genc emits `return expr;`, which actually leaves the enclosing function.
     // the 'return' keyword
     r = a.parse_or(src, kw.next)    // the returned value
-    a.scons(sret(r.expr), a.parse_stmts(src, r.next))
+    a.scons(sret(r.expr), a.parse_stmts_inner(src, r.next))
 }
 // `@while(cond) { stmts }` — a `@` Sym, the `while` Ident, a parenthesized condition,
 // then a brace block of statements (let / assign / nested-while; NO trailing return — a
@@ -525,7 +518,7 @@ parse_while = (a: Allocator, src: StringView, pos: i32) WhileEnd {
 // the top-level statement form: a While, then the rest of the function body
 parse_while_stmt = (a: Allocator, src: StringView, pos: i32) Ptr<SList> {
     w = a.parse_while(src, pos)
-    a.scons(w.stmt, a.parse_stmts(src, w.next))
+    a.scons(w.stmt, a.parse_stmts_inner(src, w.next))
 }
 // a loop-body block: statements until `}` (no return). Returns the list + pos past `}`.
 BlockEnd*: {
@@ -533,10 +526,8 @@ BlockEnd*: {
     next: i32,
 }
 parse_block* = (a: Allocator, src: StringView, pos: i32) BlockEnd {
-    // DEPTH CAP (see parse_type.zen): loop/match-arm body nesting funnels through parse_block, so a guard
-    // here bounds deeply-nested `@while`s. Past the cap, stop descending (an empty block, perr set) — like
-    // the Eof case. The bail consumes no token, but the caller re-dispatches from a position that advances
-    // by a full cap's worth of nesting each outer pass, so the retry chain stays shallow and terminates.
+    // Only entry into a nested block spends depth. Recursive traversal of that block's flat
+    // statement list calls parse_block_inner directly, so statement count is not nesting.
     pdepth_enter()
     d = delim_save()    // a brace block re-enters STATEMENT level (see parse_type.delim_depth)
     r = pdepth_over().match ({
@@ -586,7 +577,7 @@ block_stmt = (a: Allocator, src: StringView, pos: i32) BlockEnd {
 block_return = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     kw = src.scan(pos)    // 'return'
     r = a.parse_or(src, kw.next)    // the returned value
-    rest = a.parse_block(src, r.next)
+    rest = a.parse_block_inner(src, r.next)
     BlockEnd(
         list: a.scons(sret(r.expr), rest.list),
         next: rest.next,
@@ -600,7 +591,7 @@ block_idxset = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     rb = src.scan(ie.next)    // ']'
     eq = src.scan(rb.next)    // '='
     v = a.parse_or(src, eq.next)    // value
-    rest = a.parse_block(src, v.next)
+    rest = a.parse_block_inner(src, v.next)
     BlockEnd(
         list: a.scons(sidxset_at(a.enode(vref(name)), ie.expr, tvoid(), v.expr, nt.tok.start), rest.list),
         next: rest.next,
@@ -608,7 +599,7 @@ block_idxset = (a: Allocator, src: StringView, pos: i32) BlockEnd {
 }
 block_expr = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     e = a.parse_or(src, pos)    // a bare expression, evaluated for effect
-    rest = a.parse_block(src, e.next)
+    rest = a.parse_block_inner(src, e.next)
     BlockEnd(
         list: a.scons(sexpr(e.expr), rest.list),
         next: rest.next,
@@ -616,7 +607,7 @@ block_expr = (a: Allocator, src: StringView, pos: i32) BlockEnd {
 }
 block_let = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     b = a.parse_binding(src, pos)
-    rest = a.parse_block(src, b.next)
+    rest = a.parse_block_inner(src, b.next)
     BlockEnd(
         list: a.scons(b.st, rest.list),
         next: rest.next,
@@ -627,7 +618,7 @@ block_set = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     lhs = a.parse_atom(src, pos)    // the lvalue target (Var or Member chain)
     eq = src.scan(lhs.next)    // '='
     v = a.parse_or(src, eq.next)
-    rest = a.parse_block(src, v.next)
+    rest = a.parse_block_inner(src, v.next)
     BlockEnd(
         list: a.scons(sassign_at(lhs.expr, v.expr, start), rest.list),
         next: rest.next,
@@ -636,7 +627,7 @@ block_set = (a: Allocator, src: StringView, pos: i32) BlockEnd {
 // compound `name[i] OP= rhs` inside a block — the same desugar as parse_comp_idxset_stmt
 block_comp_idxset = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     d = a.comp_idxset_desugar(src, pos)
-    rest = a.parse_block(src, d.next)
+    rest = a.parse_block_inner(src, d.next)
     BlockEnd(
         list: a.comp_prefix(d, rest.list),
         next: rest.next,
@@ -645,7 +636,7 @@ block_comp_idxset = (a: Allocator, src: StringView, pos: i32) BlockEnd {
 // compound `place OP= rhs` inside a block — the same desugar as parse_comp_set_stmt
 block_comp_set = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     d = a.comp_set_desugar(src, pos)
-    rest = a.parse_block(src, d.next)
+    rest = a.parse_block_inner(src, d.next)
     BlockEnd(
         list: a.comp_prefix(d, rest.list),
         next: rest.next,
@@ -653,7 +644,7 @@ block_comp_set = (a: Allocator, src: StringView, pos: i32) BlockEnd {
 }
 block_while = (a: Allocator, src: StringView, pos: i32) BlockEnd {
     w = a.parse_while(src, pos)
-    rest = a.parse_block(src, w.next)
+    rest = a.parse_block_inner(src, w.next)
     BlockEnd(
         list: a.scons(w.stmt, rest.list),
         next: rest.next,

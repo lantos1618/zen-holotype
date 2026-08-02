@@ -6,7 +6,7 @@
 { is_upper } = std.text.ascii
 { advance_while, step_while } = std.core.count
 { String } = std.text.string
-{ gstr_string, gstr_append, gstr_push, gstr_finish, acquire_or_die } = compiler.genc
+{ acquire_or_die } = compiler.genc
 { cstr_range } = compiler.drvutil
 lsp_is_ident_byte* = (b: u8) bool {
     b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
@@ -219,7 +219,7 @@ lspq_push_doc = (sb: String, mp: Allocator, v: Slice<u8>, s: i64, e: i64) String
                 (i + 2 < e && v[i + 2] == ' ').then({ i + 3 }, { i + 2 })
             },
             false => {
-                o = o.gstr_push(mp, b)
+                o = o.add_one(b)
                 bol = b == '\n'
                 i + 1
             },
@@ -273,12 +273,12 @@ lspq_import_of = (mp: Allocator, v: Slice<u8>, name: Slice<u8>) StringView {
     })
     found
 }
-lspq_fence = (mp: Allocator, cap: i64) String { mp.gstr_string(cap).gstr_append(mp, "```zen\n") }
+lspq_fence = (mp: Allocator, cap: i64) String { mp.String(cap).add("```zen\n") }
 lspq_push_docblock = (sb: String, mp: Allocator, v: Slice<u8>, s: i64, e: i64) String {
     (s >= e).then({
         return sb
     })
-    sb.gstr_append(mp, "\n\n").lspq_push_doc(mp, v, s, e)
+    sb.add("\n\n").lspq_push_doc(mp, v, s, e)
 }
 lspq_import_hover = (mp: Allocator, v: Slice<u8>, name: Slice<u8>) StringView {
     m = mp.lspq_import_of(v, name)
@@ -287,11 +287,11 @@ lspq_import_hover = (mp: Allocator, v: Slice<u8>, name: Slice<u8>) StringView {
     })
     mp
         .lspq_fence(128)
-        .gstr_append(mp, mp.cstr_range(name, 0, name.len))
-        .gstr_append(mp, "\n```\n\nimported from `")
-        .gstr_append(mp, m)
-        .gstr_append(mp, "`")
-        .gstr_finish(mp)
+        .add(mp.cstr_range(name, 0, name.len))
+        .add("\n```\n\nimported from `")
+        .add(m)
+        .add("`")
+        .finish_cstr()
 }
 // HOVER over (line, ch) of `text`, as markdown: a fenced `zen` block holding the declaration's
 // signature (a type's field block in full) followed by its doc comment. COVERS the file's own
@@ -313,10 +313,10 @@ lspq_hover* = (mp: Allocator, text: StringView, line: i64, ch: i64) StringView {
     })
     mp
         .lspq_fence(256)
-        .gstr_append(mp, mp.cstr_range(v, d, v.lspq_head_end(d)))
-        .gstr_append(mp, "\n```")
+        .add(mp.cstr_range(v, d, v.lspq_head_end(d)))
+        .add("\n```")
         .lspq_push_docblock(mp, v, v.lspq_doc_start(d), d)
-        .gstr_finish(mp)
+        .finish_cstr()
 }
 // ── completion ───────────────────────────────────────────────────────────────────────────────────
 // LSP CompletionItemKind values, spelled once.

@@ -2,61 +2,67 @@
 { is_empty } = std.text.str
 { Expr, Stmt, ArmData, BinData, CallData, CondData, MatchData, MemberData, MakeStructData,
   MakeEnumData, SliceData, IndexData, LoopData, BlockData, IfData } = compiler.ast.ast_types
-{ ty_cname_in, blk_diverges, field, gstr_append, subword_ty } = compiler.genc
+{ ty_cname_in, blk_diverges, field, subword_ty } = compiler.genc
 { Allocator } = std.mem.alloc
 { gen_strlit } = compiler.backend.c.c_lit
 { slx_arg_is_borrowed } = compiler.backend.c.c_escape
-{ gstr_int, slice_count } = compiler.astops
+{ lit_chain_is, lit_chain_subj, lit_subj_key, slice_count } = compiler.astops
 { loop_at } = std.core.count
+// Active literal-match subject during recursive emission (address identity, 0 when inactive).
+c_lit_active ::= false
+c_lit_subj ::= to_i64(0)
 // Suffix `LL` so an UNTYPED integer literal is a 64-bit C constant: bare literals are C `int`
 // (32-bit), so `100000 * 100000` (or `1 << 40`) would overflow at int width BEFORE any i64
 // assignment. With `LL` the arithmetic happens at >=64-bit, then the final assign/cast truncates
 // (the C-correct widen-then-narrow). Small i32 math is unchanged: int32_t op long long promotes,
 // computes, and the i32 store/cast narrows back.
 //
-// A NEGATIVE `n` must stay SIGNED. gstr_int prints the u64 bit pattern (i64-MIN has no decimal
+// A NEGATIVE `n` must stay SIGNED. The String numeric methods print the supplied domain (i64-MIN has no decimal
 // spelling, and a written u64 magnitude above i64-max arrives here as a negative `n`), so the plain
 // pattern + `ULL` is an UNSIGNED constant — and C's usual conversions then drag any signed operand
 // beside it up to unsigned, turning `n < -9007199254740992` into an always-true unsigned compare.
 // Emitting the negated MAGNITUDE is correct in both worlds: signed neighbours compare as written, and
 // an unsigned slot converts it back to the same bit pattern. i64-MIN, whose magnitude has no i64
 // spelling, takes C's standard `MIN+1 - 1` form.
-gen_int_lit = (s: String, alloc: Allocator, n: i64) String {
+gen_int_lit = (s: String, n: i64) String {
     (n >= 0).then({
-        return s.gstr_int(alloc, n).gstr_append(alloc, "LL")
+        return s.add_i64(n).add("LL")
     })
     (n == 0 - 9223372036854775807 - 1).then({
-        return s.gstr_append(alloc, "(-9223372036854775807LL - 1LL)")
+        return s.add("(-9223372036854775807LL - 1LL)")
     })
-    s.gstr_append(alloc, "(-").gstr_int(alloc, 0 - n).gstr_append(alloc, "LL)")
+    s.add("(-").add_i64(0 - n).add("LL)")
 }
 gen_expr* = (s: String, alloc: Allocator, e: Ptr<Expr>) String {
+    (c_lit_active && e.lit_subj_key() == c_lit_subj).then({
+        return s.add("__zen_lit_subj")
+    })
     e.match ({
-        .Int(n)         => s.gen_int_lit(alloc, n),
-        .Byte(n)        => s.gstr_int(alloc, n),
-        .FloatLit(ft)   => s.gstr_append(alloc, ft),
-        .Var(v)         => s.gstr_append(alloc, v.name),
+        .Int(n)         => s.gen_int_lit(n),
+        .Byte(n)        => s.add_i64(n),
+        .FloatLit(ft)   => s.add(ft),
+        .Var(v)         => s.add(v.name),
         .Bin(b)         => s.gen_bin(alloc, b),
         .Call(c)        => s.gen_call(alloc, c),
-        .MethodCall(mc) => s.gstr_append(alloc, "zen__undesugared_method_call"),    // desugared to Call before codegen — marker if the invariant ever breaks
+        .MethodCall(mc) => s.add("zen__undesugared_method_call"),    // desugared to Call before codegen — marker if the invariant ever breaks
         .Cond(d)        => s.gen_cond(alloc, d),
         .Member(m)      => s.gen_member(alloc, m),
         .MakeEnum(m)    => s.gen_mkenum(alloc, m),
         .MakeStruct(m)  => s.gen_mkstruct(alloc, m),
         .Tag(t)         => s
-            .gstr_append(alloc, "(")
-            .gstr_append(alloc, t.mty)
-            .gstr_append(alloc, "){ .tag = ")
-            .gstr_append(alloc, t.mty)
-            .gstr_append(alloc, "_")
-            .gstr_append(alloc, t.variant)
-            .gstr_append(alloc, " }"),
+            .add("(")
+            .add(t.mty)
+            .add("){ .tag = ")
+            .add(t.mty)
+            .add("_")
+            .add(t.variant)
+            .add(" }"),
         .Match(m)       => s.gen_match(alloc, m),
         .StrLit(sl)     => s.gen_strlit(alloc, sl.value),
         .SliceLit(sd)   => s.gen_slicelit(alloc, sd),
         .Index(ix)      => s.gen_index(alloc, ix),
         .Loop(l)        => s.gen_loop(alloc, l),
-        .Lambda(lm)     => s.gstr_append(alloc, "zen__unlowered_lambda"),
+        .Lambda(lm)     => s.add("zen__unlowered_lambda"),
         .Block(b)       => s.gen_blockexpr(alloc, b),
     })
 }
@@ -65,16 +71,16 @@ gen_expr* = (s: String, alloc: Allocator, e: Ptr<Expr>) String {
 // returns before splicing — see blk_diverges) and emits as a REAL `return`, leaving the enclosing C
 // function. Such a block diverges: its emitters (gen_switch_body / gen_cond) never use its value.
 gen_blockexpr = (s: String, alloc: Allocator, b: BlockData) String {
-    out ::= s.gstr_append(alloc, "({ ")
+    out ::= s.add("({ ")
     b.stmts.loop_at((i, st) {
-        out = out.gen_block_one(alloc, st, i == b.stmts.len - 1).gstr_append(alloc, " ")
+        out = out.gen_block_one(alloc, st, i == b.stmts.len - 1).add(" ")
     })
-    out.gstr_append(alloc, "})")
+    out.add("})")
 }
 gen_block_one = (s: String, alloc: Allocator, st: Stmt, last: bool) String {
     last.match ({
         true  => st.match ({
-            .ExprStmt(e) => s.gen_expr(alloc, e).gstr_append(alloc, ";"),
+            .ExprStmt(e) => s.gen_expr(alloc, e).add(";"),
             _            => s.gen_stmt(alloc, st),
         }),
         false => s.gen_stmt(alloc, st),
@@ -96,7 +102,7 @@ member_is_tag_const = (m: MemberData) bool {
 }
 gen_tag_const = (s: String, alloc: Allocator, obj: Ptr<Expr>) String {
     load(obj).match ({
-        .Tag(t) => s.gstr_append(alloc, t.mty).gstr_append(alloc, "_").gstr_append(alloc, t.variant),
+        .Tag(t) => s.add(t.mty).add("_").add(t.variant),
         _       => s,
     })
 }
@@ -106,19 +112,19 @@ gen_tag_const = (s: String, alloc: Allocator, obj: Ptr<Expr>) String {
 // statement-expression. The dead `0` gives __typeof__/conditional arm typing an ordinary value.
 gen_loop_label = (s: String, alloc: Allocator, obj: Ptr<Expr>, suffix: StringView) String {
     load(obj).match ({
-        .Var(v) => s.gstr_append(alloc, v.name).gstr_append(alloc, suffix),
-        _       => s.gstr_append(alloc, "zen__invalid_loop_handler"),
+        .Var(v) => s.add(v.name).add(suffix),
+        _       => s.add("zen__invalid_loop_handler"),
     })
 }
 gen_loop_jump = (s: String, alloc: Allocator, obj: Ptr<Expr>, suffix: StringView) String {
     s
-        .gstr_append(alloc, "({ goto ")
+        .add("({ goto ")
         .gen_loop_label(alloc, obj, suffix)
-        .gstr_append(alloc, "; 0; })")
+        .add("; 0; })")
 }
 gen_member = (s: String, alloc: Allocator, m: MemberData) String {
     m.ptr.then({
-        return s.gen_expr(alloc, m.obj).gstr_append(alloc, "->").gstr_append(alloc, m.field)
+        return s.gen_expr(alloc, m.obj).add("->").add(m.field)
     })
     (m.field == "break_zk").match ({
         true  => s.gen_loop_jump(alloc, m.obj, "__b"),
@@ -128,8 +134,8 @@ gen_member = (s: String, alloc: Allocator, m: MemberData) String {
                 true  => s.gen_tag_const(alloc, m.obj),
                 false => s
                     .gen_expr(alloc, m.obj)
-                    .gstr_append(alloc, ".")
-                    .gstr_append(alloc, m.field),
+                    .add(".")
+                    .add(m.field),
             }),
         }),
     })
@@ -140,34 +146,34 @@ gen_loop = (s: String, alloc: Allocator, l: LoopData) String {
     // (and therefore its handler spelling) multiple times in one C function; ordinary labels would
     // collide function-wide and could bind a jump to the wrong clone.
     out = out
-        .gstr_append(alloc, "({ __label__ ")
-        .gstr_append(alloc, l.h)
-        .gstr_append(alloc, "__b, ")
-        .gstr_append(alloc, l.h)
-        .gstr_append(alloc, "__c; __auto_type _seq = ")
+        .add("({ __label__ ")
+        .add(l.h)
+        .add("__b, ")
+        .add(l.h)
+        .add("__c; __auto_type _seq = ")
     out = out.gen_expr(alloc, l.seq)
-    out = out.gstr_append(alloc, "; for (int64_t ")
-    out = out.gstr_append(alloc, l.idx)
-    out = out.gstr_append(alloc, " = 0; ")
-    out = out.gstr_append(alloc, l.idx)
-    out = out.gstr_append(alloc, " < _seq.len; ")
-    out = out.gstr_append(alloc, l.idx)
-    out = out.gstr_append(alloc, " = ")
-    out = out.gstr_append(alloc, l.idx)
-    out = out.gstr_append(alloc, " + 1) { __auto_type ")
-    out = out.gstr_append(alloc, l.elem)
-    out = out.gstr_append(alloc, " = ((")
-    out = out.gstr_append(alloc, alloc.ty_cname_in(l.elemTy))
-    out = out.gstr_append(alloc, "*)_seq.ptr)[")
-    out = out.gstr_append(alloc, l.idx)
-    out = out.gstr_append(alloc, "]; ")
+    out = out.add("; for (int64_t ")
+    out = out.add(l.idx)
+    out = out.add(" = 0; ")
+    out = out.add(l.idx)
+    out = out.add(" < _seq.len; ")
+    out = out.add(l.idx)
+    out = out.add(" = ")
+    out = out.add(l.idx)
+    out = out.add(" + 1) { __auto_type ")
+    out = out.add(l.elem)
+    out = out.add(" = ((")
+    out = out.add(alloc.ty_cname_in(l.elemTy))
+    out = out.add("*)_seq.ptr)[")
+    out = out.add(l.idx)
+    out = out.add("]; ")
     out = out.gen_loop_body(alloc, l.body)
-    out = out.gstr_append(alloc, " ").gstr_append(alloc, l.h).gstr_append(alloc, "__c: ; } ")
-    out.gstr_append(alloc, l.h).gstr_append(alloc, "__b: ; 0; })")
+    out = out.add(" ").add(l.h).add("__c: ; } ")
+    out.add(l.h).add("__b: ; 0; })")
 }
 gen_loop_body = (s: String, alloc: Allocator, body: MutSlice<Stmt>) String {
     out ::= s
-    body.loop_at((i, st) { out = out.gen_stmt(alloc, st).gstr_append(alloc, " ") })
+    body.loop_at((i, st) { out = out.gen_stmt(alloc, st).add(" ") })
     out
 }
 // Slice literal -> heap-promoted zslice. A bare C compound literal `(T[]){…}` has AUTOMATIC storage,
@@ -190,16 +196,16 @@ gen_loop_body = (s: String, alloc: Allocator, body: MutSlice<Stmt>) String {
 gen_slicelit = (s: String, alloc: Allocator, sd: SliceData) String {
     n = slice_count(sd.items)
     (n == 0).match ({
-        true  => s.gstr_append(alloc, "(zslice){ .ptr = (void*)0, .len = 0 }"),
+        true  => s.add("(zslice){ .ptr = (void*)0, .len = 0 }"),
         false => {
             tn = alloc.ty_cname_in(sd.elem)
             out = s
-                .gstr_append(alloc, "({ ")
-                .gstr_append(alloc, tn)
-                .gstr_append(alloc, " _zsa[] = { ")
+                .add("({ ")
+                .add(tn)
+                .add(" _zsa[] = { ")
                 .gen_args(alloc, sd.items)
-                .gstr_append(alloc, " }; uint8_t* _zsp = zen__salloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
-            out.gstr_int(alloc, n).gstr_append(alloc, " }; })")
+                .add(" }; uint8_t* _zsp = zen__salloc(sizeof(_zsa)); memcpy(_zsp, (uint8_t*)_zsa, sizeof(_zsa)); (zslice){ .ptr = (void*)_zsp, .len = ")
+            out.add_i64(n).add(" }; })")
         },
     })
 }
@@ -209,15 +215,15 @@ gen_slicelit = (s: String, alloc: Allocator, sd: SliceData) String {
 gen_slicelit_stack = (s: String, alloc: Allocator, sd: SliceData) String {
     n = slice_count(sd.items)
     (n == 0).match ({
-        true  => s.gstr_append(alloc, "(zslice){ .ptr = (void*)0, .len = 0 }"),
+        true  => s.add("(zslice){ .ptr = (void*)0, .len = 0 }"),
         false => {
             out = s
-                .gstr_append(alloc, "(zslice){ .ptr = (void*)(")
-                .gstr_append(alloc, alloc.ty_cname_in(sd.elem))
-                .gstr_append(alloc, "[]){ ")
+                .add("(zslice){ .ptr = (void*)(")
+                .add(alloc.ty_cname_in(sd.elem))
+                .add("[]){ ")
                 .gen_args(alloc, sd.items)
-                .gstr_append(alloc, " }, .len = ")
-            out.gstr_int(alloc, n).gstr_append(alloc, " }")
+                .add(" }, .len = ")
+            out.add_i64(n).add(" }")
         },
     })
 }
@@ -228,15 +234,15 @@ gen_slicelit_stack = (s: String, alloc: Allocator, sd: SliceData) String {
 gen_index = (s: String, alloc: Allocator, ix: IndexData) String {
     tn = alloc.ty_cname_in(ix.elem)
     s
-        .gstr_append(alloc, "(*(")
-        .gstr_append(alloc, tn)
-        .gstr_append(alloc, "*)zen__idx(")
+        .add("(*(")
+        .add(tn)
+        .add("*)zen__idx(")
         .gen_expr(alloc, ix.seq)
-        .gstr_append(alloc, ", ")
+        .add(", ")
         .gen_expr(alloc, ix.idx)
-        .gstr_append(alloc, ", sizeof(")
-        .gstr_append(alloc, tn)
-        .gstr_append(alloc, ")))")
+        .add(", sizeof(")
+        .add(tn)
+        .add(")))")
 }
 // `/` and `%` emit a statement-expression that binds both operands once, then dispatches on operand
 // type with `_Generic`: integer operands hit a checked helper that panics on divide-by-zero and on the
@@ -247,42 +253,42 @@ gen_index = (s: String, alloc: Allocator, ix: IndexData) String {
 gen_bin = (s: String, alloc: Allocator, b: BinData) String {
     (b.op == "/.").match ({
         true  => s
-            .gstr_append(alloc, "(")
+            .add("(")
             .gen_expr(alloc, b.lhs)
-            .gstr_append(alloc, " / ")
+            .add(" / ")
             .gen_expr(alloc, b.rhs)
-            .gstr_append(alloc, ")"),
+            .add(")"),
         false => (b.op == "/").match ({
             true  => s
-                .gstr_append(alloc, "({ __auto_type _zdl = (")
+                .add("({ __auto_type _zdl = (")
                 .gen_expr(alloc, b.lhs)
-                .gstr_append(alloc, "); __auto_type _zdr = (")
+                .add("); __auto_type _zdr = (")
                 .gen_expr(alloc, b.rhs)
-                .gstr_append(alloc, "); _Generic(_zdl + _zdr, double:(double)(_zdl/_zdr), float:(float)(_zdl/_zdr), unsigned int: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), int: zen__divz32((int32_t)_zdl, (int32_t)_zdr), default: zen__divz((int64_t)_zdl, (int64_t)_zdr)); })"),
+                .add("); _Generic(_zdl + _zdr, double:(double)(_zdl/_zdr), float:(float)(_zdl/_zdr), unsigned int: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), unsigned long long: zen__udivz((uint64_t)_zdl, (uint64_t)_zdr), int: zen__divz32((int32_t)_zdl, (int32_t)_zdr), default: zen__divz((int64_t)_zdl, (int64_t)_zdr)); })"),
             false => (b.op == "%").match ({
                 true  => s
-                    .gstr_append(alloc, "({ __auto_type _zml = (")
+                    .add("({ __auto_type _zml = (")
                     .gen_expr(alloc, b.lhs)
-                    .gstr_append(alloc, "); __auto_type _zmr = (")
+                    .add("); __auto_type _zmr = (")
                     .gen_expr(alloc, b.rhs)
-                    .gstr_append(alloc, "); _Generic(_zml + _zmr, double:(int64_t)0, float:(int64_t)0, unsigned int: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), default: zen__modz((int64_t)_zml, (int64_t)_zmr)); })"),
+                    .add("); _Generic(_zml + _zmr, double:(int64_t)0, float:(int64_t)0, unsigned int: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), unsigned long long: zen__umodz((uint64_t)_zml, (uint64_t)_zmr), default: zen__modz((int64_t)_zml, (int64_t)_zmr)); })"),
                 false => {
                     cast = b.rty.subword_ty()
                     lead = cast.match ({
                         true  => s
-                            .gstr_append(alloc, "((")
-                            .gstr_append(alloc, alloc.ty_cname_in(b.rty))
-                            .gstr_append(alloc, ")("),
-                        false => s.gstr_append(alloc, "("),
+                            .add("((")
+                            .add(alloc.ty_cname_in(b.rty))
+                            .add(")("),
+                        false => s.add("("),
                     })
                     mid = lead
                         .gen_expr(alloc, b.lhs)
-                        .gstr_append(alloc, " ")
-                        .gstr_append(alloc, b.op)
-                        .gstr_append(alloc, " ")
+                        .add(" ")
+                        .add(b.op)
+                        .add(" ")
                         .gen_expr(alloc, b.rhs)
-                        .gstr_append(alloc, ")")
-                    cast.then({ mid.gstr_append(alloc, ")") }, { mid })
+                        .add(")")
+                    cast.then({ mid.add(")") }, { mid })
                 },
             }),
         }),
@@ -290,7 +296,7 @@ gen_bin = (s: String, alloc: Allocator, b: BinData) String {
 }
 // Intrinsics erase to C pointer/cast ops; missing intrinsic args degrade to literal 0.
 gen_arg_at = (s: String, alloc: Allocator, c: CallData, i: i32) String {
-    (i < c.args.len).then({ s.gen_expr(alloc, c.args[i].addr()) }, { s.gstr_append(alloc, "0") })
+    (i < c.args.len).then({ s.gen_expr(alloc, c.args[i].addr()) }, { s.add("0") })
 }
 EmitCallKind: Normal | StrEq | StrNe | Load | Offset | Store | LoadI64 | StoreI64 | AtomicAddI64 | AtomicLoadI64 | AtomicStoreI64 | AtomicCasI64 | AtomicFence | Addr | AssertNonnull | CStr | Slice | NullPtr | ToI32 | ToI64 | ToU8 | ToF64 | Sizeof
 // map a sizeof type-arg name to its C type name. Primitives (i64→int64_t, bool→…) must NOT leak the
@@ -325,15 +331,36 @@ sizeof_cname = (n: StringView) StringView {
 }
 // `sizeof(<type>)`: route a bare type-name Var through sizeof_cname; any other arg form emits as-is.
 gen_sizeof = (s: String, alloc: Allocator, c: CallData) String {
-    out = s.gstr_append(alloc, "sizeof(")
+    out = s.add("sizeof(")
     body = (c.args.len > 0).match ({
         true  => c.args[0].addr().match ({
-            .Var(v) => out.gstr_append(alloc, sizeof_cname(v.name)),
+            .Var(v) => out.add(sizeof_cname(v.name)),
             _       => out.gen_arg_at(alloc, c, 0),
         }),
-        false => out.gstr_append(alloc, "0"),
+        false => out.add("0"),
     })
-    body.gstr_append(alloc, ")")
+    body.add(")")
+}
+// `offset` is a byte cast, but a plain `load(offset(typed_ptr, n))` promises to load the
+// original pointee. Reapply that pointer type around the byte address; adding zero inside `__typeof__`
+// also applies normal array-to-pointer decay for string literals. The expression remains unevaluated,
+// so the base still executes only inside the offset itself.
+gen_load = (s: String, alloc: Allocator, c: CallData) String {
+    (c.args.len > 0).match ({
+        true  => c.args[0].match ({
+            .Call(off) => (off.fn == "offset" && off.args.len > 0).match ({
+                true  => s
+                    .add("(*(__typeof__((")
+                    .gen_arg_at(alloc, off, 0)
+                    .add(") + 0))(")
+                    .gen_arg_at(alloc, c, 0)
+                    .add("))"),
+                false => s.gen_intr1(alloc, c, "(*(", "))"),
+            }),
+            _          => s.gen_intr1(alloc, c, "(*(", "))"),
+        }),
+        false => s.gen_intr1(alloc, c, "(*(", "))"),
+    })
 }
 call_kind = (name: StringView) EmitCallKind {
     kind ::= EmitCallKind.Normal
@@ -424,21 +451,21 @@ is_lvalue = (e: Ptr<Expr>) bool {
 // so the inner expression runs exactly once (in the initializer).
 gen_addr = (s: String, alloc: Allocator, c: CallData) String {
     (c.args.len > 0 && is_lvalue(c.args[0].addr())).match ({
-        true  => s.gstr_append(alloc, "(&(").gen_arg_at(alloc, c, 0).gstr_append(alloc, "))"),
+        true  => s.add("(&(").gen_arg_at(alloc, c, 0).add("))"),
         false => s
-            .gstr_append(alloc, "((__typeof__(")
+            .add("((__typeof__(")
             .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, ")[1]){ ")
+            .add(")[1]){ ")
             .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, " })"),
+            .add(" })"),
     })
 }
 gen_call_default = (s: String, alloc: Allocator, c: CallData) String {
     s
-        .gstr_append(alloc, c.fn)
-        .gstr_append(alloc, "(")
+        .add(c.fn)
+        .add("(")
         .gen_call_args(alloc, c.fn, c.args)
-        .gstr_append(alloc, ")")
+        .add(")")
 }
 // Argument emission for an ORDINARY call — the one position where a slice literal can be proven not to
 // escape (c_escape). Identical to gen_args except for that one classification; every other argument, and
@@ -446,7 +473,7 @@ gen_call_default = (s: String, alloc: Allocator, c: CallData) String {
 gen_call_args = (s: String, alloc: Allocator, fn: StringView, args: MutSlice<Expr>) String {
     out ::= s
     args.loop_at((i, arg) {
-        out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
+        out = (i == 0).then({ out }, { out.add(", ") })    // comma between, not before
         out = arg.match ({
             .SliceLit(sd) => fn.slx_arg_is_borrowed(i).match ({
                 true  => out.gen_slicelit_stack(alloc, sd),
@@ -459,10 +486,10 @@ gen_call_args = (s: String, alloc: Allocator, fn: StringView, args: MutSlice<Exp
 }
 // Every intrinsic expansion below is the SAME shape — fixed C text with the call's arguments spliced
 // between it — so one helper per argument count spells that shape once and each arm keeps only the
-// delimiters that actually distinguish it. The `gstr_append`/`gen_arg_at` chains these replace were
+// delimiters that actually distinguish it. The `add`/`gen_arg_at` chains these replace were
 // byte-for-byte identical apart from those string constants.
 gen_intr1 = (s: String, alloc: Allocator, c: CallData, pre: StringView, post: StringView) String {
-    s.gstr_append(alloc, pre).gen_arg_at(alloc, c, 0).gstr_append(alloc, post)
+    s.add(pre).gen_arg_at(alloc, c, 0).add(post)
 }
 gen_intr2 = (
     s: String,
@@ -471,7 +498,7 @@ gen_intr2 = (
     pre: StringView,
     mid: StringView,
     post: StringView,
-) String { s.gen_intr1(alloc, c, pre, mid).gen_arg_at(alloc, c, 1).gstr_append(alloc, post) }
+) String { s.gen_intr1(alloc, c, pre, mid).gen_arg_at(alloc, c, 1).add(post) }
 gen_intr3 = (
     s: String,
     alloc: Allocator,
@@ -480,12 +507,12 @@ gen_intr3 = (
     mid1: StringView,
     mid2: StringView,
     post: StringView,
-) String { s.gen_intr2(alloc, c, pre, mid1, mid2).gen_arg_at(alloc, c, 2).gstr_append(alloc, post) }
+) String { s.gen_intr2(alloc, c, pre, mid1, mid2).gen_arg_at(alloc, c, 2).add(post) }
 gen_call = (s: String, alloc: Allocator, c: CallData) String {
     c.fn.call_kind().match ({
         .StrEq          => s.gen_intr2(alloc, c, "eq(", ", ", ")"),
         .StrNe          => s.gen_intr2(alloc, c, "(!eq(", ", ", "))"),
-        .Load           => s.gen_intr1(alloc, c, "(*(", "))"),
+        .Load           => s.gen_load(alloc, c),
         .Offset         => s.gen_intr2(alloc, c, "((uint8_t*)(", ") + (", "))"),
         .Store          => s.gen_intr2(alloc, c, "(*(", ") = ", ")"),
         .LoadI64        => s.gen_intr1(alloc, c, "(*(int64_t*)(", "))"),
@@ -494,19 +521,19 @@ gen_call = (s: String, alloc: Allocator, c: CallData) String {
         .AtomicLoadI64  => s.gen_intr1(alloc, c, "__atomic_load_n((int64_t*)(", "), 5)"),
         .AtomicStoreI64 => s.gen_intr2(alloc, c, "__atomic_store_n((int64_t*)(", "), (", "), 5)"),
         .AtomicCasI64   => s.gen_intr3(alloc, c, "__atomic_compare_exchange_n((int64_t*)(", "), &(int64_t){ ", " }, (", "), 0, 5, 5)"),
-        .AtomicFence    => s.gstr_append(alloc, "__atomic_thread_fence(5)"),
+        .AtomicFence    => s.add("__atomic_thread_fence(5)"),
         .Addr           => s.gen_addr(alloc, c),
         // Stage 3 null guard: panics if the RawPtr is null, else yields it unchanged (preserving its
         // T*). The one arm that repeats arg0, so it spells its own chain.
         .AssertNonnull  => s
-            .gstr_append(alloc, "({ __typeof__(")
+            .add("({ __typeof__(")
             .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, ") _znn = (")
+            .add(") _znn = (")
             .gen_arg_at(alloc, c, 0)
-            .gstr_append(alloc, "); if(!_znn){ zen__panic(\"zen: panic: null pointer deref\\n\"); } _znn; })"),
+            .add("); if(!_znn){ zen__panic(\"zen: panic: null pointer deref\\n\"); } _znn; })"),
         .CStr           => s.gen_intr1(alloc, c, "((const char*)(", "))"),
         .Slice          => s.gen_intr2(alloc, c, "(zslice){ .ptr = (void*)(", "), .len = (", ") }"),
-        .NullPtr        => s.gstr_append(alloc, "0"),
+        .NullPtr        => s.add("0"),
         .ToI32          => s.gen_intr1(alloc, c, "((int32_t)(", "))"),
         .ToI64          => s.gen_intr1(alloc, c, "((int64_t)(", "))"),
         .ToU8           => s.gen_intr1(alloc, c, "((uint8_t)(", "))"),
@@ -519,22 +546,40 @@ gen_call = (s: String, alloc: Allocator, c: CallData) String {
 gen_args = (s: String, alloc: Allocator, args: MutSlice<Expr>) String {
     out ::= s
     args.loop_at((i, arg) {
-        out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
+        out = (i == 0).then({ out }, { out.add(", ") })    // comma between, not before
         out = out.gen_expr(alloc, arg.addr())
     })
     out
 }
-gen_cond = (s: String, alloc: Allocator, d: CondData) String {
+gen_cond_plain = (s: String, alloc: Allocator, d: CondData) String {
     (blk_diverges(d.t) || blk_diverges(d.e)).match ({
         true  => s.gen_cond_div(alloc, d),
         false => s
-            .gstr_append(alloc, "(")
+            .add("(")
             .gen_expr(alloc, d.c)
-            .gstr_append(alloc, " ? ")
+            .add(" ? ")
             .gen_expr(alloc, d.t)
-            .gstr_append(alloc, " : ")
+            .add(" : ")
             .gen_expr(alloc, d.e)
-            .gstr_append(alloc, ")"),
+            .add(")"),
+    })
+}
+gen_cond = (s: String, alloc: Allocator, d: CondData) String {
+    subj = d.lit_chain_subj()
+    cache = d.lit_chain_is() && (c_lit_active == false || subj.lit_subj_key() != c_lit_subj)
+    cache.match ({
+        false => s.gen_cond_plain(alloc, d),
+        true  => {
+            out = s.add("({ __auto_type __zen_lit_subj = ").gen_expr(alloc, subj).add("; ")
+            prev_active = c_lit_active
+            prev_subj = c_lit_subj
+            c_lit_active = true
+            c_lit_subj = subj.lit_subj_key()
+            body = out.gen_cond_plain(alloc, d)
+            c_lit_active = prev_active
+            c_lit_subj = prev_subj
+            body.add("; })")
+        },
     })
 }
 // A value cond with a DIVERGING branch (its block ends in `return`) cannot be a `?:` — a void arm in
@@ -543,74 +588,74 @@ gen_cond = (s: String, alloc: Allocator, d: CondData) String {
 // branch runs as statements and leaves the function. Both diverging → `_out` is a dead int.
 gen_cond_branch_div = (s: String, alloc: Allocator, e: Ptr<Expr>) String {
     blk_diverges(e).match ({
-        true  => s.gstr_append(alloc, "{ ").gen_expr(alloc, e).gstr_append(alloc, "; }"),
-        false => s.gstr_append(alloc, "{ _out = ").gen_expr(alloc, e).gstr_append(alloc, "; }"),
+        true  => s.add("{ ").gen_expr(alloc, e).add("; }"),
+        false => s.add("{ _out = ").gen_expr(alloc, e).add("; }"),
     })
 }
 gen_cond_div_ty = (s: String, alloc: Allocator, d: CondData) String {
     blk_diverges(d.t).match ({
-        true  => blk_diverges(d.e).then({ s.gstr_append(alloc, "0") }, { s.gen_expr(alloc, d.e) }),
+        true  => blk_diverges(d.e).then({ s.add("0") }, { s.gen_expr(alloc, d.e) }),
         false => s.gen_expr(alloc, d.t),
     })
 }
 gen_cond_div = (s: String, alloc: Allocator, d: CondData) String {
     s
-        .gstr_append(alloc, "({ __typeof__(")
+        .add("({ __typeof__(")
         .gen_cond_div_ty(alloc, d)
-        .gstr_append(alloc, ") _out; if (")
+        .add(") _out; if (")
         .gen_expr(alloc, d.c)
-        .gstr_append(alloc, ") ")
+        .add(") ")
         .gen_cond_branch_div(alloc, d.t)
-        .gstr_append(alloc, " else ")
+        .add(" else ")
         .gen_cond_branch_div(alloc, d.e)
-        .gstr_append(alloc, " _out; })")
+        .add(" _out; })")
 }
 gen_mkenum = (s: String, alloc: Allocator, m: MakeEnumData) String {
     head = s
-        .gstr_append(alloc, "(")
-        .gstr_append(alloc, m.mty)
-        .gstr_append(alloc, "){ .tag = ")
-        .gstr_append(alloc, m.mty)
-        .gstr_append(alloc, "_")
-        .gstr_append(alloc, m.variant)
+        .add("(")
+        .add(m.mty)
+        .add("){ .tag = ")
+        .add(m.mty)
+        .add("_")
+        .add(m.variant)
     head
-        .gstr_append(alloc, ", .u.")
-        .gstr_append(alloc, m.variant)
-        .gstr_append(alloc, " = ")
+        .add(", .u.")
+        .add(m.variant)
+        .add(" = ")
         .gen_expr(alloc, m.payload)
-        .gstr_append(alloc, " }")
+        .add(" }")
 }
 // a struct literal: `(T){ .a = …, .b = … }` (a C compound literal, designated initializers)
 gen_mkstruct = (s: String, alloc: Allocator, m: MakeStructData) String {
-    out ::= s.gstr_append(alloc, "(").gstr_append(alloc, m.mty).gstr_append(alloc, "){ ")
+    out ::= s.add("(").add(m.mty).add("){ ")
     m.inits.loop_at((i, fi) {
-        out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // mty = the monomorphized name for a generic literal
+        out = (i == 0).then({ out }, { out.add(", ") })    // mty = the monomorphized name for a generic literal
         // comma between, not before
         out = out
-            .gstr_append(alloc, ".")
-            .gstr_append(alloc, fi.name)
-            .gstr_append(alloc, " = ")
+            .add(".")
+            .add(fi.name)
+            .add(" = ")
             .gen_expr(alloc, fi.value)
     })
-    out.gstr_append(alloc, " }")
+    out.add(" }")
 }
 // an arm's body: bind the payload (GCC __auto_type, so no payload type needed here), then the body
 gen_armbind = (s: String, alloc: Allocator, subj: StringView, sep: StringView, a: ArmData) String {
     s
-        .gstr_append(alloc, "({ __auto_type ")
-        .gstr_append(alloc, a.bind)
-        .gstr_append(alloc, " = ")
-        .gstr_append(alloc, subj)
-        .gstr_append(alloc, sep)
-        .gstr_append(alloc, "u.")
-        .gstr_append(alloc, a.variant)
-        .gstr_append(alloc, "; ")
+        .add("({ __auto_type ")
+        .add(a.bind)
+        .add(" = ")
+        .add(subj)
+        .add(sep)
+        .add("u.")
+        .add(a.variant)
+        .add("; ")
         .gen_expr(alloc, a.body)
-        .gstr_append(alloc, "; })")
+        .add("; })")
 }
 gen_armbody = (s: String, alloc: Allocator, subj: StringView, sep: StringView, a: ArmData) String {
     is_empty(a.bind).match ({
-        true  => s.gstr_append(alloc, "(").gen_expr(alloc, a.body).gstr_append(alloc, ")"),
+        true  => s.add("(").gen_expr(alloc, a.body).add(")"),
         false => s.gen_armbind(alloc, subj, sep, a),
     })
 }
@@ -624,16 +669,16 @@ gen_armbind_stmt = (
     a: ArmData,
 ) String {
     s
-        .gstr_append(alloc, "{ __auto_type ")
-        .gstr_append(alloc, a.bind)
-        .gstr_append(alloc, " = ")
-        .gstr_append(alloc, subj)
-        .gstr_append(alloc, sep)
-        .gstr_append(alloc, "u.")
-        .gstr_append(alloc, a.variant)
-        .gstr_append(alloc, "; ")
+        .add("{ __auto_type ")
+        .add(a.bind)
+        .add(" = ")
+        .add(subj)
+        .add(sep)
+        .add("u.")
+        .add(a.variant)
+        .add("; ")
         .gen_expr_stmt(alloc, a.body)
-        .gstr_append(alloc, " }")
+        .add(" }")
 }
 gen_armbody_stmt = (
     s: String,
@@ -667,20 +712,20 @@ gen_match_type_expr = (
 ) String {
     j = arms.next_live_arm(i)
     (j >= arms.len).match ({
-        true  => s.gstr_append(alloc, "0"),
+        true  => s.add("0"),
         false => (arms.next_live_arm(j + 1) >= arms.len).match ({
             true  => s
-                .gstr_append(alloc, "(1 ? ")
+                .add("(1 ? ")
                 .gen_armbody(alloc, subj, sep, arms[j])
-                .gstr_append(alloc, " : ")
+                .add(" : ")
                 .gen_armbody(alloc, subj, sep, arms[j])
-                .gstr_append(alloc, ")"),
+                .add(")"),
             false => s
-                .gstr_append(alloc, "(1 ? ")
+                .add("(1 ? ")
                 .gen_armbody(alloc, subj, sep, arms[j])
-                .gstr_append(alloc, " : ")
+                .add(" : ")
                 .gen_match_type_expr(alloc, subj, sep, arms, j + 1)
-                .gstr_append(alloc, ")"),
+                .add(")"),
         }),
     })
 }
@@ -692,9 +737,9 @@ gen_match_out_decl = (
     arms: MutSlice<ArmData>,
 ) String {
     s
-        .gstr_append(alloc, "__typeof__(")
+        .add("__typeof__(")
         .gen_match_type_expr(alloc, subj, sep, arms, 0)
-        .gstr_append(alloc, ") _out; ")
+        .add(") _out; ")
 }
 // a diverging arm's body runs for CONTROL FLOW only (its trailing `return` leaves the function) —
 // no `_out` assignment (its statement-expr would be void).
@@ -708,9 +753,9 @@ gen_switch_body = (
     a.body.blk_diverges().match ({
         true  => s.gen_switch_stmt_body(alloc, subj, sep, a),
         false => s
-            .gstr_append(alloc, "{ _out = ")
+            .add("{ _out = ")
             .gen_armbody(alloc, subj, sep, a)
-            .gstr_append(alloc, "; break; } "),
+            .add("; break; } "),
     })
 }
 gen_switch_stmt_body = (
@@ -721,9 +766,9 @@ gen_switch_stmt_body = (
     a: ArmData,
 ) String {
     s
-        .gstr_append(alloc, "{ ")
+        .add("{ ")
         .gen_armbody_stmt(alloc, subj, sep, a)
-        .gstr_append(alloc, " break; } ")
+        .add(" break; } ")
 }
 gen_switch_case = (
     s: String,
@@ -734,11 +779,11 @@ gen_switch_case = (
     a: ArmData,
 ) String {
     s
-        .gstr_append(alloc, "case ")
-        .gstr_append(alloc, ename)
-        .gstr_append(alloc, "_")
-        .gstr_append(alloc, a.variant)
-        .gstr_append(alloc, ": ")
+        .add("case ")
+        .add(ename)
+        .add("_")
+        .add(a.variant)
+        .add(": ")
         .gen_switch_body(alloc, subj, sep, a)
 }
 gen_switch_default = (
@@ -747,7 +792,7 @@ gen_switch_default = (
     subj: StringView,
     sep: StringView,
     a: ArmData,
-) String { s.gstr_append(alloc, "default: ").gen_switch_body(alloc, subj, sep, a) }
+) String { s.add("default: ").gen_switch_body(alloc, subj, sep, a) }
 gen_switch_stmt_case = (
     s: String,
     alloc: Allocator,
@@ -757,11 +802,11 @@ gen_switch_stmt_case = (
     a: ArmData,
 ) String {
     s
-        .gstr_append(alloc, "case ")
-        .gstr_append(alloc, ename)
-        .gstr_append(alloc, "_")
-        .gstr_append(alloc, a.variant)
-        .gstr_append(alloc, ": ")
+        .add("case ")
+        .add(ename)
+        .add("_")
+        .add(a.variant)
+        .add(": ")
         .gen_switch_stmt_body(alloc, subj, sep, a)
 }
 gen_switch_stmt_default = (
@@ -770,14 +815,14 @@ gen_switch_stmt_default = (
     subj: StringView,
     sep: StringView,
     a: ArmData,
-) String { s.gstr_append(alloc, "default: ").gen_switch_stmt_body(alloc, subj, sep, a) }
+) String { s.add("default: ").gen_switch_stmt_body(alloc, subj, sep, a) }
 // A match with no explicit `_` arm was proved exhaustive by the CHECKER; the emitter must not silently
 // re-route stray tags into the last arm's body (the old last-arm-as-`default:` trick — the #377 class
 // of silent miscompiles). Every arm gets its own `case`, and `default:` traps: a tag outside the listed
 // variants at runtime means the checker and emitter disagree. zen__panic diverges (write + abort), so
 // value-position `_out` is never read on this path.
 gen_switch_panic_default = (s: String, alloc: Allocator) String {
-    s.gstr_append(alloc, "default: zen__panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ")
+    s.add("default: zen__panic(\"zen: panic: non-exhaustive match — checker/emitter disagreement\\n\"); ")
 }
 gen_switch_arm = (
     s: String,
@@ -858,26 +903,26 @@ gen_switch_stmt_arms = (
 gen_match = (s: String, alloc: Allocator, m: MatchData) String {
     sep = m.ptr.then({ "->" }, { "." })
     s
-        .gstr_append(alloc, "({ __auto_type _subj = ")
+        .add("({ __auto_type _subj = ")
         .gen_expr(alloc, m.subj)
-        .gstr_append(alloc, "; ")
+        .add("; ")
         .gen_match_out_decl(alloc, "_subj", sep, m.arms)
-        .gstr_append(alloc, "switch (_subj")
-        .gstr_append(alloc, sep)
-        .gstr_append(alloc, "tag) { ")
+        .add("switch (_subj")
+        .add(sep)
+        .add("tag) { ")
         .gen_switch_arms(alloc, "_subj", sep, m.ename, m.arms, 0)
-        .gstr_append(alloc, "} _out; })")
+        .add("} _out; })")
 }
 gen_match_stmt = (s: String, alloc: Allocator, m: MatchData) String {
     sep = m.ptr.then({ "->" }, { "." })
     s
-        .gstr_append(alloc, "{ __auto_type _subj = ")
+        .add("{ __auto_type _subj = ")
         .gen_expr(alloc, m.subj)
-        .gstr_append(alloc, "; switch (_subj")
-        .gstr_append(alloc, sep)
-        .gstr_append(alloc, "tag) { ")
+        .add("; switch (_subj")
+        .add(sep)
+        .add("tag) { ")
         .gen_switch_stmt_arms(alloc, "_subj", sep, m.ename, m.arms, 0)
-        .gstr_append(alloc, "} }")
+        .add("} }")
 }
 // ── emit a statement, a block, a parameter list, a function, a struct, a decl ─
 gen_expr_stmt = (s: String, alloc: Allocator, e: Ptr<Expr>) String {
@@ -885,7 +930,7 @@ gen_expr_stmt = (s: String, alloc: Allocator, e: Ptr<Expr>) String {
         .Match(m) => s.gen_match_stmt(alloc, m),
         .Cond(d)  => s.gen_cond_stmt(alloc, d),
         .Block(b) => s.gen_block(alloc, b.stmts),
-        _         => s.gen_expr(alloc, e).gstr_append(alloc, ";"),
+        _         => s.gen_expr(alloc, e).add(";"),
     })
 }
 // A discarded boolean match has no common result type requirement. Emit it as control flow and keep
@@ -893,59 +938,59 @@ gen_expr_stmt = (s: String, alloc: Allocator, e: Ptr<Expr>) String {
 // assignment (their expression values deliberately have unrelated C types).
 gen_cond_stmt = (s: String, alloc: Allocator, d: CondData) String {
     s
-        .gstr_append(alloc, "if (")
+        .add("if (")
         .gen_expr(alloc, d.c)
-        .gstr_append(alloc, ") { ")
+        .add(") { ")
         .gen_expr_stmt(alloc, d.t)
-        .gstr_append(alloc, " } else { ")
+        .add(" } else { ")
         .gen_expr_stmt(alloc, d.e)
-        .gstr_append(alloc, " }")
+        .add(" }")
 }
 gen_void_return = (s: String, alloc: Allocator, e: Ptr<Expr>) String {
-    s.gen_expr_stmt(alloc, e).gstr_append(alloc, " return;")
+    s.gen_expr_stmt(alloc, e).add(" return;")
 }
 gen_stmt = (s: String, alloc: Allocator, st: Stmt) String {
     st.match ({
         .Let(l)      => l.ty.match ({
             .Void => s
-                .gstr_append(alloc, "__auto_type ")
-                .gstr_append(alloc, l.name)
-                .gstr_append(alloc, " = ")
+                .add("__auto_type ")
+                .add(l.name)
+                .add(" = ")
                 .gen_expr(alloc, l.value)
-                .gstr_append(alloc, ";"),
+                .add(";"),
             _     => s
-                .gstr_append(alloc, alloc.ty_cname_in(l.ty))
-                .gstr_append(alloc, " ")
-                .gstr_append(alloc, l.name)
-                .gstr_append(alloc, " = ")
+                .add(alloc.ty_cname_in(l.ty))
+                .add(" ")
+                .add(l.name)
+                .add(" = ")
                 .gen_expr(alloc, l.value)
-                .gstr_append(alloc, ";"),
+                .add(";"),
         }),    // an annotation emits the REAL C type (an `a: i64 = 0` accumulator IS int64_t); .Void = unannotated (no cross-layer is_void_ty here)
         .Assign(a)   => s
             .gen_expr(alloc, a.target)
-            .gstr_append(alloc, " = ")
+            .add(" = ")
             .gen_expr(alloc, a.value)
-            .gstr_append(alloc, ";"),    // <lvalue> = value;
-        .Return(e)   => s.gstr_append(alloc, "return ").gen_expr(alloc, e).gstr_append(alloc, ";"),
+            .add(";"),    // <lvalue> = value;
+        .Return(e)   => s.add("return ").gen_expr(alloc, e).add(";"),
         .ExprStmt(e) => s.gen_expr_stmt(alloc, e),
         .If(f)       => s.gen_if(alloc, f),
         .While(w)    => s
-            .gstr_append(alloc, "while (")
+            .add("while (")
             .gen_expr(alloc, w.c)
-            .gstr_append(alloc, ") ")
+            .add(") ")
             .gen_block(alloc, w.body),
         .IndexSet(x) => s
-            .gstr_append(alloc, "(*(")
-            .gstr_append(alloc, alloc.ty_cname_in(x.elem))
-            .gstr_append(alloc, "*)zen__idx(")
+            .add("(*(")
+            .add(alloc.ty_cname_in(x.elem))
+            .add("*)zen__idx(")
             .gen_expr(alloc, x.seq)
-            .gstr_append(alloc, ", ")
+            .add(", ")
             .gen_expr(alloc, x.idx)
-            .gstr_append(alloc, ", sizeof(")
-            .gstr_append(alloc, alloc.ty_cname_in(x.elem))
-            .gstr_append(alloc, "))) = ")
+            .add(", sizeof(")
+            .add(alloc.ty_cname_in(x.elem))
+            .add("))) = ")
             .gen_expr(alloc, x.value)
-            .gstr_append(alloc, ";"),
+            .add(";"),
     })
 }
 gen_stmt_effect = (s: String, alloc: Allocator, st: Stmt) String {
@@ -962,21 +1007,21 @@ gen_stmt_void = (s: String, alloc: Allocator, st: Stmt) String {
 }
 // emit a brace-wrapped block: `{ s1; s2; … }`
 gen_block* = (s: String, alloc: Allocator, body: MutSlice<Stmt>) String {
-    open ::= s.gstr_append(alloc, "{ ")
-    body.loop_at((i, st) { open = open.gen_stmt_effect(alloc, st).gstr_append(alloc, " ") })
-    open.gstr_append(alloc, "}")
+    open ::= s.add("{ ")
+    body.loop_at((i, st) { open = open.gen_stmt_effect(alloc, st).add(" ") })
+    open.add("}")
 }
 gen_block_void* = (s: String, alloc: Allocator, body: MutSlice<Stmt>) String {
-    open ::= s.gstr_append(alloc, "{ ")
-    body.loop_at((i, st) { open = open.gen_stmt_void(alloc, st).gstr_append(alloc, " ") })
-    open.gstr_append(alloc, "}")
+    open ::= s.add("{ ")
+    body.loop_at((i, st) { open = open.gen_stmt_void(alloc, st).add(" ") })
+    open.add("}")
 }
 gen_if = (s: String, alloc: Allocator, f: IfData) String {
     s
-        .gstr_append(alloc, "if (")
+        .add("if (")
         .gen_expr(alloc, f.c)
-        .gstr_append(alloc, ") ")
+        .add(") ")
         .gen_block(alloc, f.then)
-        .gstr_append(alloc, " else ")
+        .add(" else ")
         .gen_block(alloc, f.els)
 }

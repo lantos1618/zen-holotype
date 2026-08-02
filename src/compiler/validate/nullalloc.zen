@@ -16,7 +16,7 @@
 { DeadList, dead_cons, dead_has, dead_nil, expr_root_var } = compiler.validate.ownership
 { expr_pos, is_deref_intrinsic, pos_or } = compiler.validate.util
 { sx_named } = compiler.validate.args
-{ CheckDiagnostic, KALLOCNULL } = compiler.validate.diag
+{ CheckDiagnostic, diagnostic_code } = compiler.validate.diag
 { check_diagnostic_from_source, check_diagnostic_none, kv_at } = compiler.validate.core
 { loop_at } = std.core.count
 nz_or = (a: i32, b: i32) i32 { (a == 0).then({ b }, { a }) }
@@ -99,6 +99,10 @@ nz_proofs_body* = (a: Allocator, acc: Ptr<DeadList>, body: MutSlice<Stmt>) Ptr<D
     out
 }
 // ── pass 2: every local BOUND to an allocation and never proven ───────────────────────────────────
+nz_value_is_unproven = (un: Ptr<DeadList>, value: Ptr<Expr>) bool {
+    root = value.expr_root_var()
+    value.is_alloc_expr() || (root == "" == false && un.dead_has(root))
+}
 nz_bind = (
     a: Allocator,
     proven: Ptr<DeadList>,
@@ -106,7 +110,7 @@ nz_bind = (
     name: StringView,
     value: Ptr<Expr>,
 ) Ptr<DeadList> {
-    (name == "" == false && value.is_alloc_expr() && proven.dead_has(name) == false).match ({
+    (name == "" == false && acc.nz_value_is_unproven(value) && proven.dead_has(name) == false).match ({
         true  => a.dead_cons(name, acc),
         false => acc,
     })
@@ -153,9 +157,9 @@ nz_unproven_body* = (
 nz_subject_kind = (un: Ptr<DeadList>, s: Ptr<Expr>, pos: i32) i32 {
     at = load(s).expr_pos().pos_or(pos)
     s.is_alloc_expr().match ({
-        true  => KALLOCNULL().kv_at(at),
+        true  => diagnostic_code(.AllocationNull).kv_at(at),
         false => load(s).match ({
-            .Var(v) => un.dead_has(v.name).then({ KALLOCNULL().kv_at(at) }, { 0 }),
+            .Var(v) => un.dead_has(v.name).then({ diagnostic_code(.AllocationNull).kv_at(at) }, { 0 }),
             _       => 0,
         }),
     })

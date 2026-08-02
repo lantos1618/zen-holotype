@@ -12,8 +12,8 @@
 { parse_ty, fill_params, param_buf, take_params, skip_block, skip_to_brace, skip_to_lparen,
   lbrace_off, bopen_enter, bopen_exit, is_lbrace, is_rbrace, is_langle, tok_eq, perr_set,
   perr_set_at, perr_set_kind_at, perr_set_misgen_at, perr_reset, perr_get, perr_off_get,
-  perr_kind_get, pdepth_reset, delim_reset, ParseErrorKind, vbreak_reset, vbreak_get, anon_reset,
-  anon_decls_get } = compiler.parse_type
+  perr_kind_get, pdepth_reset, delim_reset, ParseErrorKind, vbreak_reset, vbreak_get, payload_reset,
+  payload_decls_get } = compiler.parse_type
 { parse_tparams, skip_name_star, parse_struct_at, parse_enum_at, has_data_field } = compiler.parse_type_decl
 { fill_impl, fill_impl_methods, fill_defaults, fill_inherent_struct } = compiler.parse_impl
 { implicit_tparams } = compiler.parse_implicit
@@ -284,7 +284,7 @@ decl_buf = (a: Allocator) MutSlice<Decl> { slice(a.acquire_or_die(16384 * sizeof
 take_decls = (buf: MutSlice<Decl>, n: i32) MutSlice<Decl> { slice(buf.ptr, n) }
 // `skip_name_star` discards the `*` from the AST, but it is load-bearing (cross-module export +
 // flatten dedup). The formatter needs it, so parse_module records the starred top-level names in a
-// module-level buffer (mirroring the anon-struct state) — NOT in the AST, so the compiler pipeline is
+// module-level buffer (mirroring the indexed-payload-record state) — NOT in the AST, so the compiler pipeline is
 // untouched. The driver reads `exports_get()` after parse_module and hands it to the formatter.
 // The fixed-capacity registries below (exports / alias prefixes / module sigs) must never DROP data
 // silently: a full registry sets this STICKY flag and parse_module plants a `__capacity` sentinel, so
@@ -643,7 +643,7 @@ fill_import = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<Decl>, i: 
     nbuf = a.import_buf()
     ie = a.fill_import_names(src, src.scan(pos).next, nbuf, 0)
     eq = src.scan(ie.next)
-    pth = a.read_import_path(src, eq.next)    // capture `std.text.fmt` text (kept for the formatter)
+    pth = a.read_import_path(src, eq.next)    // capture `std.io.print` text (kept for the formatter)
     buf[i] = dimport_at(nbuf.take_params(ie.count), pth.text, src.scan(pos).tok.start)
     DCont(
         next: pth.next,
@@ -684,11 +684,11 @@ parse_module* = (a: Allocator, src: StringView) MutSlice<Decl> {
     delim_reset()
     vbreak_reset()
     lerr_reset()
-    a.anon_reset()
+    a.payload_reset()
     a.exports_reset()
     buf = a.decl_buf()
     n = a.fill_decls(src, 0, buf, 0)
-    n2 = a.append_anon_decls(buf, n)    // hoist synthesized anon-struct decls
+    n2 = a.append_payload_decls(buf, n)    // hoist synthesized indexed-payload-record decls
     decls = (perr_get() || lerr_get() || reg_overflow_get()).match ({
         true  => a.prepend_syntax_error(buf, n2),
         false => buf.take_decls(n2),
@@ -699,11 +699,11 @@ parse_module* = (a: Allocator, src: StringView) MutSlice<Decl> {
     a.declare_bare_assigns(decls)
     a.implicit_tparams(decls)
 }
-// Append the distinct anonymous-struct shapes collected during the parse as ordinary DStructs, so the
-// checker + codegen treat them as named structs. Guarded against the decl buffer's syntax-error slot.
-append_anon_decls = (a: Allocator, buf: MutSlice<Decl>, n: i32) i32 {
+// Append the distinct indexed enum-payload records collected during parsing as ordinary DStructs,
+// so the checker and code generator use the same named representation. Guarded against the decl buffer's syntax-error slot.
+append_payload_decls = (a: Allocator, buf: MutSlice<Decl>, n: i32) i32 {
     i ::= n
-    anon_decls_get().loop_at((j, sd) {
+    payload_decls_get().loop_at((j, sd) {
         (i < buf.len - 1).match ({
             true  => {
                 buf[i] = dstruct(sd)
@@ -735,6 +735,7 @@ sentinel_name = (kind: ParseErrorKind) StringView {
         .FieldDefault       => "__field_default",
         .ExpectedLetType    => "__expected_let_type",
         .ExpectedLetEq      => "__expected_let_eq",
+        .InvalidLiteral     => "__invalid_literal",
     })
 }
 // Parser totality: any parse/lex failure plants a leading syntax sentinel.

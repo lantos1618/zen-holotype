@@ -9,7 +9,7 @@
 { contents_in } = std.io.file
 { opendir, readdir, closedir } = std.c.libc
 { impl_cname_in } = compiler.mangle    // recompute hoisted impl-method names
-{ gstr_string, gstr_append, gstr_finish, gstr_push, is_expr_null } = compiler.genc
+{ is_expr_null } = compiler.genc
 { parse_module } = compiler.parse
 { set_faithful_lexeme } = compiler.parse_atom
 { clone_fn } = compiler.clones
@@ -342,12 +342,11 @@ aud_walk_expr = (ac: MutPtr<AudCtx>, e: Ptr<Expr>) void {
     })
 }
 aud_join2 = (mp: Allocator, a: StringView, b: StringView) StringView {
-    mp
-        .gstr_string(32)
-        .gstr_append(mp, a)
-        .gstr_append(mp, "__")
-        .gstr_append(mp, b)
-        .gstr_finish(mp)
+    mp.String(32)
+        .add(a)
+        .add("__")
+        .add(b)
+        .finish_cstr()
 }
 // ── audit fanout tables ───────────────────────────────────────────────────────────────────────────
 // One prepass over the raw decls builds:
@@ -661,14 +660,13 @@ aud_reportable = (d: Decl) bool {
         && nm.starts_with("__") == false
 }
 aud_dead_msg = (mp: Allocator, kind: StringView, nm: StringView) StringView {
-    mp
-        .gstr_string(64)
-        .gstr_append(mp, "warning[dead-code]: ")
-        .gstr_append(mp, kind)
-        .gstr_append(mp, " '")
-        .gstr_append(mp, nm)
-        .gstr_append(mp, "' is never reachable from main")
-        .gstr_finish(mp)
+    mp.String(64)
+        .add("warning[dead-code]: ")
+        .add(kind)
+        .add(" '")
+        .add(nm)
+        .add("' is never reachable from main")
+        .finish_cstr()
 }
 // ── unused-import scan (per original module source; tokenizer-disciplined) ────────────────────────
 AudImp: {
@@ -764,20 +762,18 @@ aud_step = (ents: MutSlice<AudImp>, nents: i64, v: MutSlice<u8>, i0: i64) i64 {
 }
 aud_imp_msg = (mp: Allocator, en: AudImp) StringView {
     en.alias.match ({
-        true  => mp
-            .gstr_string(64)
-            .gstr_append(mp, "warning[unused-import]: namespace alias '")
-            .gstr_append(mp, en.name)
-            .gstr_append(mp, "' is never used")
-            .gstr_finish(mp),
-        false => mp
-            .gstr_string(64)
-            .gstr_append(mp, "warning[unused-import]: '")
-            .gstr_append(mp, en.name)
-            .gstr_append(mp, "' imported from '")
-            .gstr_append(mp, en.mod)
-            .gstr_append(mp, "' but never used")
-            .gstr_finish(mp),
+        true  => mp.String(64)
+            .add("warning[unused-import]: namespace alias '")
+            .add(en.name)
+            .add("' is never used")
+            .finish_cstr(),
+        false => mp.String(64)
+            .add("warning[unused-import]: '")
+            .add(en.name)
+            .add("' imported from '")
+            .add(en.mod)
+            .add("' but never used")
+            .finish_cstr(),
     })
 }
 // scan ONE module file: every `{ a, b } = mod` name and every `m = mod` alias that never occurs in
@@ -960,21 +956,20 @@ aud_unreached = (c: AudCtx, tails: Map<i64>, nm: StringView) bool {
 // the same tree. This is a hash bucket, not a comparison of every pair: O(n) over the program, so it
 // can run on every audit rather than as an occasional sweep.
 aud_clone_msg = (mp: Allocator, nm: StringView, other: StringView) StringView {
-    mp
-        .gstr_string(96)
-        .gstr_append(mp, "warning[clone]: fn '")
-        .gstr_append(mp, nm)
-        .gstr_append(mp, "' is structurally identical to '")
-        .gstr_append(mp, other)
-        .gstr_append(mp, "' — keep one and import it")
-        .gstr_finish(mp)
+    mp.String(96)
+        .add("warning[clone]: fn '")
+        .add(nm)
+        .add("' is structurally identical to '")
+        .add(other)
+        .add("' — keep one and import it")
+        .finish_cstr()
 }
 // hash -> the name that claimed it first. A second claimant is the finding.
 // hex of the fingerprint, because Map is string-keyed. 16 nibbles, no allocation beyond the key.
 aud_hash_key = (mp: Allocator, h: i64) StringView {
-    s ::= mp.gstr_string(17)
-    16.times((i) { s = s.gstr_push(mp, aud_hexd(h >> 60 - i * 4 & 15)) })
-    s.gstr_finish(mp)
+    s ::= mp.String(17)
+    16.times((i) { s = s.add_one(aud_hexd(h >> 60 - i * 4 & 15)) })
+    s.finish_cstr()
 }
 aud_hexd = (v: i64) u8 { load(offset("0123456789abcdef", v)) }
 // hash -> index of the function that claimed it first. A second claimant is the finding.
@@ -1075,26 +1070,24 @@ aud_emit = (mp: Allocator, fb: MutSlice<AudFinding>, n: i64, strict: bool) i32 {
                 clones = clones + 1
             })
             shown = shown + 1
-            say(mp
-                .gstr_string(96)
-                .gstr_append(mp, f.path)
-                .gstr_push(mp, ':')
+            say(mp.String(96)
+                .add(f.path)
+                .add_one(':')
                 .push_int(mp, f.line)
-                .gstr_append(mp, ": ")
-                .gstr_append(mp, f.msg)
-                .gstr_finish(mp))
+                .add(": ")
+                .add(f.msg)
+                .finish_cstr())
         })
     })
-    say(mp
-        .gstr_string(64)
-        .gstr_append(mp, "zen audit: ")
+    say(mp.String(64)
+        .add("zen audit: ")
         .push_int(mp, dead)
-        .gstr_append(mp, " dead decls, ")
+        .add(" dead decls, ")
         .push_int(mp, shown - dead - clones)
-        .gstr_append(mp, " unused imports, ")
+        .add(" unused imports, ")
         .push_int(mp, clones)
-        .gstr_append(mp, " clones")
-        .gstr_finish(mp))
+        .add(" clones")
+        .finish_cstr())
     // SEVERITY: dead code and unused imports are DEFECTS — a name that cannot be reached is a lie
     // about the program, and `--strict` has always failed on them. A clone is a JUDGEMENT: the two
     // functions both work, and whether they should become one is a design call a human makes. So
@@ -1130,12 +1123,11 @@ aud_ws_addf = (wf: MutPtr<AudWsFiles>, p: StringView) void {
     wf.n = wf.n + 1
 }
 aud_join_path = (mp: Allocator, dir: StringView, nm: StringView) StringView {
-    mp
-        .gstr_string(64)
-        .gstr_append(mp, dir)
-        .gstr_push(mp, '/')
-        .gstr_append(mp, nm)
-        .gstr_finish(mp)
+    mp.String(64)
+        .add(dir)
+        .add_one('/')
+        .add(nm)
+        .finish_cstr()
 }
 // deterministic entry order regardless of readdir order.
 aud_sortp = (fs: MutSlice<StringView>, n: i64) void {
@@ -1370,14 +1362,13 @@ AudWs: {
     skipped: i64,
 }
 aud_ws_key = (mp: Allocator, path: StringView, line: i64, msg: StringView) StringView {
-    mp
-        .gstr_string(96)
-        .gstr_append(mp, path)
-        .gstr_push(mp, ':')
+    mp.String(96)
+        .add(path)
+        .add_one(':')
         .push_int(mp, line)
-        .gstr_push(mp, ':')
-        .gstr_append(mp, msg)
-        .gstr_finish(mp)
+        .add_one(':')
+        .add(msg)
+        .finish_cstr()
 }
 aud_ws_push = (ws: MutPtr<AudWs>, key: StringView, f: AudFinding) void {
     (ws.nd >= ws.dfs.len).then({
@@ -1414,7 +1405,7 @@ aud_pre_one = (
     id: StringView,
     st: AudPre,
 ) AudPre {
-    idn = mp.gstr_string(24).gstr_append(mp, id)
+    idn = mp.String(24).add(id)
     st.seen.seen_name(idn).match ({
         true  => st,
         false => {
@@ -1445,7 +1436,7 @@ aud_pre_edges = (
 }
 aud_pre_ok = (mp: Allocator, root: StringView, path: StringView, src: StringView) bool {
     st = mp.aud_pre_edges(root, mp.dirname(path), mp.edges_of(src), AudPre(
-        seen: mp.gstr_string(64),
+        seen: mp.String(64),
         ok: true,
     ))
     st.ok
@@ -1551,14 +1542,13 @@ audit_ws_cmd = (mp: Allocator, root: StringView, dir: StringView, strict: bool) 
             .Err(e) => { },
         })
     })
-    say(mp
-        .gstr_string(64)
-        .gstr_append(mp, "zen audit --workspace: ")
+    say(mp.String(64)
+        .add("zen audit --workspace: ")
         .push_int(mp, wsc.entries)
-        .gstr_append(mp, " entries analyzed, ")
+        .add(" entries analyzed, ")
         .push_int(mp, wsc.skipped)
-        .gstr_append(mp, " skipped")
-        .gstr_finish(mp))
+        .add(" skipped")
+        .finish_cstr())
     // survivors: dead candidates no entry proved live, then the per-file import findings.
     fb ::= cbuf<AudFinding>(mp, wsc.nd + wsc.ni)
     n ::= 0

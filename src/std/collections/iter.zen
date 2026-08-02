@@ -11,13 +11,13 @@ IdxPair*<T>: {
     i: i64,
     v: T,
 }
-fold*<T> = (xs: MutSlice<T>, init: T, f: (T, T) T) T {
+fold*<T> = (xs: MutSlice<T>, init: T, f: (left: T, right: T) T) T {
     acc ::= init
     xs.loop_at((i, x) { acc = f(acc, x) })
     acc
 }
-each*<T> = (xs: MutSlice<T>, f: (T) void) void { xs.loop_at((i, x) { f(x) }) }
-find*<T> = (xs: MutSlice<T>, pred: (T) bool) Opt<T> {
+each*<T> = (xs: MutSlice<T>, f: (value: T) void) void { xs.loop_at((i, x) { f(x) }) }
+find*<T> = (xs: MutSlice<T>, pred: (value: T) bool) Opt<T> {
     out :: Opt<T> = .None
     xs.loop((h, i, x) {
         pred(x).then({
@@ -27,7 +27,7 @@ find*<T> = (xs: MutSlice<T>, pred: (T) bool) Opt<T> {
     })
     out
 }
-map_in*<T, U> = (a: AllocatorBackend, xs: MutSlice<T>, f: (T) U) Result<MutSlice<U>, IoError> {
+map_in*<T, U> = (a: AllocatorBackend, xs: MutSlice<T>, f: (value: T) U) Result<MutSlice<U>, IoError> {
     (xs.len <= 0).match ({
         true  => {
             empty: MutSlice<U> = slice(null_ptr(), 0)
@@ -46,7 +46,7 @@ map_in*<T, U> = (a: AllocatorBackend, xs: MutSlice<T>, f: (T) U) Result<MutSlice
 filter_in*<T> = (
     a: AllocatorBackend,
     xs: MutSlice<T>,
-    keep: (T) bool,
+    keep: (value: T) bool,
 ) Result<MutSlice<T>, IoError> {
     (xs.len <= 0).match ({
         true  => {
@@ -73,7 +73,7 @@ filter_in*<T> = (
 // `xs = [3,1,2]  xs.sort((a, b){ a < b })` leaves `xs` == [1,2,3]; a `(a,b){ a > b }` comparator
 // sorts descending. The comparator `less` is invoked DIRECTLY in the loop body (never forwarded to a
 // helper) so an inline lambda splices in, exactly as it does for `fold`/`each`.
-sort<T> = (xs: MutSlice<T>, less: (T, T) bool) void {
+sort<T> = (xs: MutSlice<T>, less: (left: T, right: T) bool) void {
     xs.loop_at((i, _) {
         xs.loop((hi, k, _) {
             // Outer pass: insert each xs[i] into the already-sorted prefix [0, i).
@@ -98,17 +98,17 @@ sort<T> = (xs: MutSlice<T>, less: (T, T) bool) void {
         })
     })
 }
-map*<T, U> = (a: AllocatorBackend, xs: MutSlice<T>, f: (T) U) Result<MutSlice<U>, IoError> {
+map*<T, U> = (a: AllocatorBackend, xs: MutSlice<T>, f: (value: T) U) Result<MutSlice<U>, IoError> {
     a.map_in(xs, f)
 }
-filter*<T> = (a: AllocatorBackend, xs: MutSlice<T>, keep: (T) bool) Result<MutSlice<T>, IoError> {
+filter*<T> = (a: AllocatorBackend, xs: MutSlice<T>, keep: (value: T) bool) Result<MutSlice<T>, IoError> {
     a.filter_in(xs, keep)
 }
 // ── SCALAR COMBINATORS (allocator-free) ──────────────────────────────────────────────────────────
 // None of these allocate, so none thread an allocator. They are the everyday reductions over a `[T]`.
 // `fold_to` is the GENERAL fold — accumulate into a DIFFERENT type `U` than the element `T`; the older
 // `fold` above (init and accumulator both `T`) stays for its existing callers (Vec.fold delegates to it).
-fold_to*<T, U> = (xs: MutSlice<T>, init: U, f: (U, T) U) U {
+fold_to*<T, U> = (xs: MutSlice<T>, init: U, f: (accumulator: U, value: T) U) U {
     acc ::= init
     xs.loop_at((i, x) { acc = f(acc, x) })
     acc
@@ -130,7 +130,7 @@ product*<T> = (xs: MutSlice<T>) T {
 // element count. Identical to `xs.len`; kept for API parity with `count_if`.
 count*<T> = (xs: MutSlice<T>) i64 { xs.len }
 // how many elements satisfy `pred`.
-count_if*<T> = (xs: MutSlice<T>, pred: (T) bool) i64 {
+count_if*<T> = (xs: MutSlice<T>, pred: (value: T) bool) i64 {
     n ::= 0
     xs.loop_at((i, x) {
         pred(x).then({
@@ -140,7 +140,7 @@ count_if*<T> = (xs: MutSlice<T>, pred: (T) bool) i64 {
     n
 }
 // `any`: does at least one element satisfy `pred`? Stops at the first hit via `h.break`. Empty → false.
-any*<T> = (xs: MutSlice<T>, pred: (T) bool) bool {
+any*<T> = (xs: MutSlice<T>, pred: (value: T) bool) bool {
     out ::= false
     xs.loop((h, i, x) {
         pred(x).then({
@@ -151,7 +151,7 @@ any*<T> = (xs: MutSlice<T>, pred: (T) bool) bool {
     out
 }
 // `all`: do ALL elements satisfy `pred`? Stops at the first miss. Empty → true (vacuous truth).
-all*<T> = (xs: MutSlice<T>, pred: (T) bool) bool {
+all*<T> = (xs: MutSlice<T>, pred: (value: T) bool) bool {
     out ::= true
     xs.loop((h, i, x) {
         (pred(x) == false).then({
@@ -162,10 +162,10 @@ all*<T> = (xs: MutSlice<T>, pred: (T) bool) bool {
     out
 }
 // `none`: does NO element satisfy `pred`? Empty → true.
-none*<T> = (xs: MutSlice<T>, pred: (T) bool) bool { xs.any(pred) == false }
+none*<T> = (xs: MutSlice<T>, pred: (value: T) bool) bool { xs.any(pred) == false }
 // `min_by`/`max_by`: the minimum/maximum element under the comparator `less(a, b)` (true when `a`
 // orders before `b`, exactly like `sort`). Empty slice → `.None`. Ties keep the FIRST occurrence.
-min_by*<T> = (xs: MutSlice<T>, less: (T, T) bool) Opt<T> {
+min_by*<T> = (xs: MutSlice<T>, less: (left: T, right: T) bool) Opt<T> {
     out :: Opt<T> = .None
     xs.loop_at((i, x) {
         keep = out.match ({
@@ -178,7 +178,7 @@ min_by*<T> = (xs: MutSlice<T>, less: (T, T) bool) Opt<T> {
     })
     out
 }
-max_by*<T> = (xs: MutSlice<T>, less: (T, T) bool) Opt<T> {
+max_by*<T> = (xs: MutSlice<T>, less: (left: T, right: T) bool) Opt<T> {
     out :: Opt<T> = .None
     xs.loop_at((i, x) {
         keep = out.match ({
@@ -200,7 +200,7 @@ min_of*<T> = (xs: MutSlice<T>) Opt<T> { xs.min_by((a, b) { a < b }) }
 max_of*<T> = (xs: MutSlice<T>) Opt<T> { xs.max_by((a, b) { a < b }) }
 // `reduce`: fold with NO init — the accumulator seeds from the first element, so an empty slice is
 // `.None` (unlike `fold`, which always has `init`). `f` combines the running accumulator with the next.
-reduce*<T> = (xs: MutSlice<T>, f: (T, T) T) Opt<T> {
+reduce*<T> = (xs: MutSlice<T>, f: (left: T, right: T) T) Opt<T> {
     out :: Opt<T> = .None
     xs.loop_at((i, x) {
         out = out.match ({
@@ -218,7 +218,7 @@ reduce*<T> = (xs: MutSlice<T>, f: (T, T) T) Opt<T> {
 }
 // `position`: index of the FIRST element satisfying `pred`, as `Opt<i64>` (`.None` if none). Stops at
 // the hit via `h.break`. (For value equality use core.slice's `index_of`; for the element itself, `find`.)
-position*<T> = (xs: MutSlice<T>, pred: (T) bool) Opt<i64> {
+position*<T> = (xs: MutSlice<T>, pred: (value: T) bool) Opt<i64> {
     out :: Opt<i64> = .None
     xs.loop((h, i, x) {
         pred(x).then({

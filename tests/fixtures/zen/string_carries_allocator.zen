@@ -10,12 +10,24 @@
 //   frozen   — a `StringConst`/`VecConst` view is read-only; that half is a check-time verdict
 //              (harness_misc slice_mut), because a rejected program cannot also be run here.
 { Allocator, AllocatorVTable, allocator_of, malloc, realloc, free, request_arena, heap_allocator } = std.mem.alloc
-{ string, string_fixed, string_from, String, StringConst, StringFixed, init, append_in, free_in } = std.text.string
+{ string, string_with_capacity, string_fixed, string_from, string_args, string_arg, string_named,
+  add_value, String, StringConst, StringFixed, StringFormat, init, append_in, free_in } = std.text.string
 { vec, vec_fixed, vec_from, Vec, VecConst, VecFixed } = std.collections.vec
 { to_exit } = std.core.bool
 { Result, IoError, expect } = std.core.result
-{ formatln, arg_int } = std.text.fmt
-{ gstr_string, gstr_append, gstr_finish } = compiler.genc
+{ formatln, arg_int } = std.io.print
+FmtThing*: {
+    n: i64,
+}
+FmtThing.impl(StringFormat, {
+    string_format = (value: FmtThing, out: String) String { out.add("thing=").add_i64(value.n) }
+})
+CustomText: {
+    text: StringView,
+}
+CustomText.impl(StringFormat, {
+    string_format = (value: CustomText, out: String) String { out.add("<").add(value.text).add(">") }
+})
 // ── allocator A: a budgeted malloc floor that records what it was last asked to resize to ─────────
 a_budget ::= to_i64(0)
 a_releases ::= to_i64(0)
@@ -321,20 +333,45 @@ variadic_text_append = () bool {
         && s.view()[10] == 'd'
         && a_budget == string_budget
     s.drop()
-    left: StringView = "zen"
-    dash: StringView = "-"
-    g ::= gpa.gstr_string(32)
-    gstr_budget = a_budget
-    g = g.gstr_append(gpa, left, dash, "compiler")
-    done = g.gstr_finish(gpa)
-    gstr_ok = g.len == 12
-        && g.ptr.offset(0).load() == 'z'
-        && g.ptr.offset(11).load() == 'r'
-        && g.ptr.offset(12).load() == 0
-        && done == cstr(g.ptr)
-        && a_budget == gstr_budget
-    gpa.release(g.ptr)
-    string_ok && gstr_ok && a_releases == 2
+    string_ok && a_releases == 1
+}
+modern_string_surface = () bool {
+    a_budget = 64
+    a_releases = 0
+    gpa = alloc_a()
+    empty = gpa.String()
+    empty_ok = empty.len == 0 && empty.cap == 17 && empty.live()
+    empty.drop()
+    sized = gpa.String(3)
+    sized_ok = sized.cap == 4
+    sized.drop()
+    built = gpa
+        .string()
+        .add("n=")
+        .add_i64(0 - 42)
+        .add(" u=")
+        .add_u64(18446744073709551615)
+        .add(" f=")
+        .add_f64(3.25)
+        .add(" rep=")
+        .repeat("ab", 3)
+    done = built.finish_cstr()
+    terminated = built.ptr.offset(built.len).load() == 0
+    built_ok = done == "n=-42 u=18446744073709551615 f=3.25 rep=ababab" && terminated
+    built.drop()
+    formatted = gpa.string_args(string_arg(.Text("{} {1} {name} {{ok}} {missing}")), string_arg(.Text("zen")), string_arg(.Int(42)), string_named("name", .Bool(true)))
+    formatted_ok = formatted.finish_cstr() == "zen 42 true {ok} {missing}"
+    formatted.drop()
+    name ::= "zen"
+    custom = FmtThing(n: 9)
+    direct = gpa.String("{0} {1} {name} {custom}", name, 42, custom)
+    direct_ok = direct.finish_cstr() == "zen 42 zen thing=9"
+    direct.drop()
+    temp = CustomText(text: "custom").string_format(gpa.string())
+    copied = gpa.string().add_value(.Temp(temp))
+    temp_ok = copied.finish_cstr() == "<custom>"
+    copied.drop()
+    empty_ok && sized_ok && built_ok && formatted_ok && direct_ok && temp_ok && a_releases == 8
 }
 main = () i32 {
     ok ::= sticky_string()
@@ -347,5 +384,6 @@ main = () i32 {
     ok = buffer_backed_self_append() && ok
     ok = vec_self_append() && ok
     ok = variadic_text_append() && ok
+    ok = modern_string_surface() && ok
     ok.to_exit()
 }

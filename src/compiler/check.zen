@@ -6,7 +6,7 @@
 { cbuf, vref, cond, call_at, call_full, call_origin_full, slett, sexpr, block, stmts_diverge,
   fnt_from_func_in, fntype, subst_ty_in, no_tys, expr_null, tgeneric, ti32, ti64, tu8, tf64, tbool,
   tstring_cstr, tstring_literal, tnamed, tnode, tptr_k, tslice, tslice_k, tvoid, k_ptr, k_mut_ptr,
-  k_raw_ptr, gstr_string, gstr_push, gstr_append, gstr_finish, acquire_or_die } = compiler.genc
+  k_raw_ptr, acquire_or_die } = compiler.genc
 { mangle_str_in, impl_cname_in } = compiler.mangle
 { Allocator } = std.mem.alloc
 { exports_get, alias_prefixes_get, module_sigs_get } = compiler.parse
@@ -17,7 +17,7 @@
 { at, is_alnum } = std.text.ascii
 { Map } = std.collections.map
 { xform_body } = compiler.passes.subst
-{ field_in, gstr_int, map_slice, param_names_has, slice_any, wr_writes_name } = compiler.astops
+{ field_in, map_slice, param_names_has, slice_any, wr_writes_name } = compiler.astops
 { impl_trait_targ, light_ty, ty_mentions, ty_mentions_any, unify_ty } = compiler.check_infer
 { is_empty_named } = compiler.check_inline
 { TyFits } = compiler.check_fits    // trait import: project-mode closure pull (dispatch itself needs no names)
@@ -63,7 +63,7 @@ UfcsVis*: {
         })
     }
     // does the flat source at `pos` literally spell `name` (followed by a non-identifier byte)?
-    // False for every DISPATCH-REWRITTEN call — impl/mono/alias rewrites (`gstr_append_Malloc`,
+    // False for every DISPATCH-REWRITTEN call — impl/mono/alias rewrites (`impl_String_String_add`,
     // `impl_Verdict_i32_or`, …) keep the surface method's pos but carry a mangled fn, and a rewrite
     // means dispatch RESOLVED the call, so the visibility check must not judge it.
     vis_name_at = (vis: UfcsVis, pos: i32, name: StringView) bool {
@@ -129,21 +129,21 @@ vis_close_pos = (src: StringView, p: i32) i32 {
     out
 }
 vis_copy_name = (a: Allocator, src: StringView, p: i32, e: i32) StringView {
-    s ::= a.gstr_string(to_i64(e - p) + 1)
+    s ::= a.String(to_i64(e - p) + 1)
     span: MutSlice<u8> = slice(src.offset(p), to_i64(e - p))
-    span.loop_at((i, b) { s = s.gstr_push(a, b) })
-    s.gstr_finish(a)
+    span.loop_at((i, b) { s = s.add_one(b) })
+    s.finish_cstr()
 }
 // import-head entries are keyed `<midx>\t<name>` in ONE map (a slice of per-module maps would need
 // sizeof over a generic instance); the stored value is midx+1 so the absent-sentinel 0 can never
 // collide with a real module index.
-// the module index renders through compiler.astops' one decimal writer (gstr_int; mi is a
+// the module index renders through String.add_i64 (mi is a
 // non-negative index, so the bit-reinterpreting u64 path prints its plain decimal digits).
 vis_key = (a: Allocator, mi: i64, name: StringView) StringView {
-    s ::= a.gstr_string(name.view().len + 8).gstr_int(a, mi).gstr_push(a, '\t')
+    s ::= a.String(name.view().len + 8).add_i64(mi).add_one('\t')
     nb: Slice<u8> = name.view()
-    nb.loop_at((i, b) { s = s.gstr_push(a, b) })
-    s.gstr_finish(a)
+    nb.loop_at((i, b) { s = s.add_one(b) })
+    s.finish_cstr()
 }
 vis_head_fill = (a: Allocator, src: StringView, mi: i64, p: i32, m0: Map<i64>) Map<i64> {
     m ::= m0
@@ -387,12 +387,7 @@ DeclIndex*: {
     }
 }    // DFunc.name | DForeign.name → index
 tdkey = (a: Allocator, tr: StringView, m: StringView) StringView {
-    a
-        .gstr_string(64)
-        .gstr_append(a, tr)
-        .gstr_append(a, "\t")
-        .gstr_append(a, m)
-        .gstr_finish(a)
+    a.String(64).add(tr).add("\t").add(m).finish_cstr()
 }    // DStruct.name → index
 // ── alias-name index (UFCS through module aliases) ──────────────────────────────────────────────
 // compiler.resolve loads `m = std.collections.hmap` by prefixing hmap's top-level value decls
@@ -774,6 +769,9 @@ Env*: {
         })
     }
     infer_call = (env: Env, c: CallData) Ty {
+        (c.fn == "String").then({
+            return tnamed("String")
+        })
         (c.fn == "each_field" || c.fn == "zip_fields").then({
             return tvoid()
         })
@@ -794,7 +792,7 @@ Env*: {
             return ti64()
         })
         (c.fn == "load").then({
-            return env.arg0_ty(c).pointee_of()
+            return env.load_ty(c)
         })
         // `offset` is BYTE address arithmetic and stays deliberately untyped (void): its result is read
         // back at whatever type the field it lands on has, which is why the same call reaches an i64
@@ -1392,7 +1390,7 @@ weak_targ_env = (
         || pty.is_direct_tparam(tp) && env.arg_ty_memo(args, atys, done, i).is_str_t()
 }
 // A lambda arg has no inferrable value type (infer_expr -> void — what the memo holds for one).
-// When a tparam sits in the closure's RETURN position `(T) U`, bind it from the lambda's DECLARED
+// When a tparam sits in the closure's RETURN position `(value: T) U`, bind it from the lambda's DECLARED
 // return type so it never defaults to void.
 unify_arg = (
     env: Env,
@@ -1671,12 +1669,7 @@ alias_cands_scan = (env: Env, fn: StringView, rty: Ty, exact: bool, atys: MutSli
             && e.sig_foreign() == false
             && e.sig_type() == false
             && e.name.ends_with(fn)).then({
-            fname = env.a
-                .gstr_string(32)
-                .gstr_append(env.a, e.alias)
-                .gstr_append(env.a, "__")
-                .gstr_append(env.a, e.name)
-                .gstr_finish(env.a)
+            fname = env.a.String(32).add(e.alias).add("__").add(e.name).finish_cstr()
             f = env.env_func(fname)
             (is_empty(f.name) == false && f.alias_cand_matches(fn, rty, exact)).then({
                 rsecond = (rcnt == 1).then({ f.name }, { rsecond })
@@ -1792,6 +1785,25 @@ ret_mentions_e = (e: Ptr<Expr>, nm: StringView) bool {
 arg0_ty = (env: Env, c: CallData) Ty {
     (c.args.len > 0).then({ env.infer_expr(c.args[0].addr()) }, { tvoid() })
 }
+// A bare `offset` is intentionally an untyped byte address, but `load(offset(p, n))` still has
+// the pointee type of typed `p`. Recover it here so checking and backend selection cannot fall
+// through to `void`; RawPtr<u8> naturally remains u8.
+load_ty = (env: Env, c: CallData) Ty {
+    direct = env.arg0_ty(c).pointee_of()
+    direct.is_void_ty().match ({
+        true  => (c.args.len > 0).match ({
+            true  => c.args[0].match ({
+                .Call(off) => (off.fn == "offset").match ({
+                    true  => env.arg0_ty(off).pointee_of(),
+                    false => direct,
+                }),
+                _          => direct,
+            }),
+            false => direct,
+        }),
+        false => direct,
+    })
+}
 addr_ty = (env: Env, c: CallData) Ty {
     base = env.arg0_ty(c)
     readonly = (c.args.len > 0).then({ env.lvalue_writes_readonly(c.args[0].addr()) }, { false })
@@ -1833,7 +1845,8 @@ ty_under_ptr* = (t: Ty) Ty {
 // were already rejected (store_writes_readonly); this is the missing half that makes them reachable.
 // The cost: `a.release(x.view().ptr)` now needs `x` to be a spelling whose window stays writable,
 // because `release` takes the `RawPtr<u8>` floor and a read-only `Ptr<u8>` does not fit it. Every
-// such site in std already frees a `StringView`'s block; only `sb().done()`'s `StringCstr` did not.
+// such site in std already frees a `StringView`'s block; only a carried String finalized with
+// `finish_cstr()` yields a `StringCstr` view directly.
 slice_member* = (a: Allocator, field: StringView, kind: i32) Ty {
     (field == "len").match ({
         true  => ti64(),
@@ -2033,7 +2046,7 @@ inline_marks = (a: Allocator, s: String, env: Ptr<VList>) String {
     env.match ({
         .VNil     => s,
         .VCons(c) => c.ty.is_empty_named().match ({
-            true  => a.inline_marks(s.gstr_append(a, "_").gstr_append(a, c.name), c.tail),
+            true  => a.inline_marks(s.add("_").add(c.name), c.tail),
             false => a.inline_marks(s, c.tail),
         }),
     })
@@ -2047,14 +2060,14 @@ inline_marks = (a: Allocator, s: String, env: Ptr<VList>) String {
 // the old scheme wrapped, so capture-avoidance across levels is unchanged. Accumulated renamed
 // identifiers were 38% of the emitted seed's bytes (avg 31 chars, worst 83) before this encoding.
 name_marks = (a: Allocator, s: String, name: StringView, env: Ptr<VList>, depth: i64) StringView {
-    out ::= (depth > 0).then({ s.gstr_int(a, depth) }, { s })
+    out ::= (depth > 0).then({ s.add_i64(depth) }, { s })
     out = a.inline_marks(out, env)
-    out = out.gstr_append(a, "_")
-    out = out.gstr_append(a, name)
-    out.gstr_finish(a)
+    out = out.add("_")
+    out = out.add(name)
+    out.finish_cstr()
 }
 local_name_at* = (a: Allocator, name: StringView, env: Ptr<VList>, depth: i64) StringView {
-    a.name_marks(a.gstr_string(32).gstr_append(a, "_z"), name, env, depth)
+    a.name_marks(a.String(32).add("_z"), name, env, depth)
 }
 add_subst_param* = (a: Allocator, params: MutSlice<Param>, name: StringView) MutSlice<Param> {
     base = a.hide_param(params, name)
@@ -2166,7 +2179,7 @@ wr_param_bind = (params: MutSlice<Param>, wbody: MutSlice<Stmt>, i: i64) bool {
 // local, since 'a' is neither a digit nor the marker separator), inline_marks keep it distinct
 // across nested inline depths, the index keeps each arg distinct within one inline.
 arg_local_name = (a: Allocator, name: StringView, env: Ptr<VList>, idx: i64) StringView {
-    a.name_marks(a.gstr_string(32).gstr_append(a, "_za"), name, env, idx)
+    a.name_marks(a.String(32).add("_za"), name, env, idx)
 }
 // Bind every non-trivial arg to a generated local; return the rewritten fargs (the param-use
 // substitution targets), the binding Let statements to prepend to the body, and the env extended with

@@ -1,12 +1,12 @@
 { ArmData, BinData, CallData, Decl, Expr, Field, FieldInit, Func, GenStructDecl, GenericData,
   GlobalData, LetData, LoopData, MakeStructData, MatchData, MemberData, Param, SliceData, Stmt, Ty } = compiler.ast.ast_types
 { arith_rty, arm_at, arm_spans, bin, bin_at, bin_rty, block, call, call_at, cbuf, cond_oa, dfunc,
-  dglobal, dglobal_tl, eindex, eloop, eloop_at, ematch, ematchp, finit, finit_at, flit, gstr_append,
-  gstr_finish, gstr_string, is_expr_null, lit, member, member_at, mkenumg, mkenumg_at, mkstruct_at,
+  dglobal, dglobal_tl, eindex, eloop, eloop_at, ematch, ematchp, finit, finit_at, flit,
+  is_expr_null, lit, member, member_at, mkenumg, mkenumg_at, mkstruct_at,
   mkstructg_at, mktag, mfield, mktagg, mktagg_at, narrow_op, no_tys, sassign_at, sexpr, sidxset_at,
-  sif, slet, slett, slett_at, slett_atm, slit, sret, subst_ty_in, swhile, tvoid, vref } = compiler.genc
+  sif, slet, slett, slett_at, slett_atm, slit, sret, strlit_at, subst_ty_in, swhile, tvoid, vref } = compiler.genc
 { mangle_semantic_in, mangle_str_in } = compiler.mangle
-{ gstr_int, is_prim_width, map_slice, one_stmt, param_names_has, slice_any } = compiler.astops
+{ is_prim_width, map_slice, one_stmt, param_names_has, slice_any } = compiler.astops
 { Allocator } = std.mem.alloc
 { is_empty, view } = std.text.str
 { getenv, write } = std.c.libc
@@ -65,8 +65,8 @@ resolve_mkenum_fresh = (
     p2 = a.restamp_enum_payload(env, inst.base, inst.targs, variant, p)
     a.cenode(mkenumg_at(inst.base, inst.mty, inst.targs, variant, p2, ty_pos, variant_pos))
 }
-// A multi-field variant payload lowers to a positional anon struct whose tparams mirror the enum's.
-// resolve_genlit_bare infers the anon instance from the literal init types (integer literals → i32),
+// A multi-field variant payload lowers to a positional indexed payload record whose tparams mirror the enum's.
+// resolve_genlit_bare infers the payload instance from the literal init types (integer literals → i32),
 // which can disagree with the enum instance (Tree<i64>, Two<i32,i64>). Re-stamp the payload
 // MakeStruct with the monomorphized payload type from the enum's tparam→arg map — same rebuild as
 // compiler.mono.mono_payload, but on the constructor side so collect_ty discovers one instance.
@@ -631,7 +631,7 @@ is_slicelit_expr = (e: Expr) bool {
 }
 // The same test doubles as SPREAD: a value of the collected `[T]` type passed in the variadic slot is
 // forwarded as-is instead of being wrapped one level deeper. That keeps the pre-varargs
-// `formatln(t, [arg_int(n)])` spelling working after `args` becomes `...Arg`, and lets a variadic fn
+// `formatln(t, [arg_int(n)])` spelling working after `args` becomes `...StringArg`, and lets a variadic fn
 // forward its own collected slice to another (`formatln` -> `format`). The two readings never collide:
 // a `[T]` can only be an ELEMENT of a `...T` list when T = [T], which no type satisfies.
 already_collected = (env: Env, ps: MutSlice<Param>, args: MutSlice<Expr>) bool {
@@ -644,7 +644,7 @@ already_collected = (env: Env, ps: MutSlice<Param>, args: MutSlice<Expr>) bool {
     })
 }
 // ── implicit variant wrapping in the variadic tail ───────────────────────────
-// `formatln("{} {}", n, s)` against `args: ...Arg` wraps each surplus argument as the `Arg` variant
+// `formatln("{} {}", n, s)` against `args: ...StringArg` wraps each surplus argument as the `StringArg` variant
 // that carries its static type — `.Int(n)`, `.Str(s)` — so no call site spells `arg_int`/`arg_str`.
 // It fires only when the element type is a concrete enum, the argument is not already that enum, and
 // EXACTLY ONE variant's payload accepts the argument's type under the ordinary `fits` lattice (so an
@@ -663,18 +663,63 @@ vararg_variant = (env: Env, ename: StringView, got: Ty) StringView {
         })
     (n == 1).then({ hit }, { "" })
 }
-vararg_wrap = (a: Allocator, env: Env, ps: MutSlice<Param>, i: i32, e: Expr) Expr {
+string_source_name = (e: Expr) StringView {
+    e.match ({
+        .Var(v)    => v.name,
+        .Member(m) => m.field,
+        _          => "",
+    })
+}
+string_arg_value = (a: Allocator, name: StringView, value: Ptr<Expr>) Expr {
+    fields ::= cbuf<FieldInit>(a, 2)
+    fields[0] = finit("name", a.cenode(strlit_at(name, 0)))
+    fields[1] = finit("value", value)
+    load(a.cenode(mkstruct_at("StringArg", fields, 0)))
+}
+string_format_arg = (a: Allocator, env: Env, allocator: Expr, name: StringView, e: Expr, got: Ty) Expr {
+    dn = a.dispatch_recv(env.decls, env.didx, "string_format", got.dispatch_recv_name())
+    (dn == "string_format").then({
+        return e
+    })
+    sbuf ::= a.cebuf(1)
+    sbuf[0] = allocator
+    seed = a.resolve_expr(env.with_exp(tvoid()), a.cenode(call_at("string_args", sbuf, 0)))
+    fbuf ::= a.cebuf(2)
+    fbuf[0] = e
+    fbuf[1] = load(seed)
+    rendered = a.resolve_expr(env.with_exp(tvoid()), a.cenode(call_at("string_format", fbuf, 0)))
+    value = a.cenode(mkenumg("StringValue", "StringValue", no_tys(), "Temp", rendered))
+    a.string_arg_value(name, value)
+}
+string_arg_wrap = (a: Allocator, env: Env, want: Ty, collected: Ty, allocator: Expr, name: StringView, e: Expr) Expr {
+    got = env.infer_expr(e.addr())
+    (got.ty_eq(want) || got.is_void_ty() || got.fits(collected)).then({
+        return e
+    })
+    variant = (got.dispatch_recv_name() == "String").then({ "Owned" }, { env.vararg_variant("StringValue", got) })
+    (variant == "").then({
+        return a.string_format_arg(env, allocator, name, e, got)
+    })
+    value = a.cenode(mkenumg("StringValue", "StringValue", no_tys(), variant, a.cenode(e)))
+    a.string_arg_value(name, value)
+}
+vararg_wrap = (a: Allocator, env: Env, ps: MutSlice<Param>, resolved: MutSlice<Expr>, i: i32, name: StringView, e: Expr) Expr {
     (last_variadic(ps) && i >= ps.len - 1).match ({
         true  => {
-            want = ps[ps.len - 1].ty.vararg_elem()
-            ename = want.enum_name()
+            collected = ps[ps.len - 1].ty
+            want = collected.vararg_elem()
             got = env.infer_expr(e.addr())
-            // `got.fits(collected)` is the SPREAD arm of already_collected: skip it here too, so a
-            // re-resolve pass (or an explicit `[T]`) is never wrapped as one more element — which an
-            // enum carrying a `[Self]` payload would otherwise accept.
-            (ename == "" || got.ty_eq(want) || got.is_void_ty() || got.fits(ps[ps.len - 1].ty)).match ({
-                true  => e,
-                false => env.vararg_variant(ename, got).match_wrap(a, ename, e),
+            (want.dispatch_recv_name() == "StringArg" && i > 0).match ({
+                true  => a.string_arg_wrap(env, want, collected, resolved[0], name, e),
+                false => {
+                    ename = want.enum_name()
+                    // `got.fits(collected)` is the SPREAD arm of already_collected: skip it here too, so a
+                    // re-resolve pass (or an explicit `[T]`) is never wrapped as one more element.
+                    (ename == "" || got.ty_eq(want) || got.is_void_ty() || got.fits(collected)).match ({
+                        true  => e,
+                        false => env.vararg_variant(ename, got).match_wrap(a, ename, e),
+                    })
+                },
             })
         },
         false => e,
@@ -781,14 +826,14 @@ is_auto_ref_lvalue = (e: Expr) bool {
         _          => false,
     })
 }
-needs_ufcs_auto_ref = (env: Env, ps: MutSlice<Param>, arg0: Expr) bool {
+needs_ufcs_auto_ref = (env: Env, ps: MutSlice<Param>, argument: Expr) bool {
     (ps.len > 0 && ps[0].ty.is_nonnull_ptr_ty()).match ({
         true  => {
             want = ps[0].ty.pointee_of()
-            got = env.infer_expr(arg0.addr())
+            got = env.infer_expr(argument.addr())
             (want.is_void_ty() || got.is_void_ty() || got.is_ptr_ty_g()).match ({
                 true  => false,
-                false => got.ty_eq(want) && arg0.is_auto_ref_lvalue(),
+                false => got.ty_eq(want) && argument.is_auto_ref_lvalue(),
             })
         },
         false => false,
@@ -815,7 +860,7 @@ resolve_call = (a: Allocator, env: Env, c: CallData) Ptr<Expr> {
     (c.args.len == 0 && env.is_bare_struct_lit(c.fn)).then({
         return a.resolve_expr(env, a.cenode(mkstruct_at(c.fn, no_field_inits(), c.pos)))
     })
-    dn = env.dispatch_name(c)
+    dn = (c.fn == "String" && c.raw == false).then({ "string_args" }, { env.dispatch_name(c) })
     fn = env.env_func(dn)
     ps = fn.params
     tmpl = fn.is_generic_fn()
@@ -823,7 +868,7 @@ resolve_call = (a: Allocator, env: Env, c: CallData) Ptr<Expr> {
     buf ::= a.cebuf(c.args.len)
     c.args.loop_at((i, ar) {
         ex = env.call_arg_exp(tmpl, fn.tparams, targs, ps, i)
-        buf[i] = a.vararg_wrap(env, ps, i, load(a.resolve_expr(env.with_exp(ex), ar.addr())))
+        buf[i] = a.vararg_wrap(env, ps, buf, i, ar.string_source_name(), load(a.resolve_expr(env.with_exp(ex), ar.addr())))
     })
     // After args resolve: value→Ptr/MutPtr auto-ref on arg0 (UFCS MutPtr receivers like r.next()).
     (ps.len == buf.len).then({
@@ -982,10 +1027,10 @@ or_return_recv = (a: Allocator, e: Ptr<Expr>) Ptr<Expr> {
     out
 }
 or_temp_name = (a: Allocator, name: StringView) StringView {
-    s ::= a.gstr_string(64)
-    s = s.gstr_append(a, "_orret_")
-    s = s.gstr_append(a, name)
-    s.gstr_finish(a)
+    s ::= a.String(64)
+    s = s.add("_orret_")
+    s = s.add(name)
+    s.finish_cstr()
 }
 // ── the Err-guard's return value ──
 // VERBATIM receiver when its whole Result type is the enclosing fn's, or when either side is not
@@ -1269,14 +1314,13 @@ resolve_decl* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, d: Decl) D
 rm_log = (a: Allocator, name: StringView, start_ms: i64) i64 {
     now = clock_ms()
     (getenv("ZENC_TIME") == null_ptr() == false).then({
-        s = a
-            .gstr_string(64)
-            .gstr_append(a, "zenc: time   ")
-            .gstr_append(a, name)
-            .gstr_append(a, " ")
-            .gstr_int(a, now - start_ms)
-            .gstr_append(a, "ms\n")
-            .gstr_finish(a)
+        s = a.String(64)
+            .add("zenc: time   ")
+            .add(name)
+            .add(" ")
+            .add_i64(now - start_ms)
+            .add("ms\n")
+            .finish_cstr()
         v = s.view()
         write(2, v.ptr, v.len)
         { }

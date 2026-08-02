@@ -1,0 +1,30 @@
+{ diagnostic_code, diagnostic_from_source, diagnostic_kind_from_code } = compiler.validate.diag
+{ kv_at, kv_pos } = compiler.validate.core
+{ to_exit } = std.core.bool
+main = () i32 {
+    code ::= 1
+    valid ::= true
+    @while (code <= 70) {
+        valid = code.diagnostic_kind_from_code().match ({
+            .Some(kind) => valid && diagnostic_code(kind) == code,
+            .None       => false,
+        })
+        code = code + 1
+    }
+    bounds = diagnostic_kind_from_code(0).match ({
+        .Some(kind) => false,
+        .None       => diagnostic_kind_from_code(71).match ({
+            .Some(kind) => false,
+            .None       => true,
+        }),
+    })
+    packed = kv_at(diagnostic_code(.Undefined), 16)
+    diag = diagnostic_from_source("main = () i32 { missing_name() }\n", packed, 1)
+    (valid
+        && bounds
+        && packed & 127 == 3
+        && packed.kv_pos() == 16
+        && diag.code == 3
+        && diag.kind == "undefined-name"
+        && diag.span.start == 16).to_exit()
+}

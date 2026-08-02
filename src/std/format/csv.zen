@@ -1,29 +1,23 @@
 // CSV rows are allocator-owned [[StringView]]. Quoted fields may contain delimiters and newlines;
 // doubled quotes decode to one quote. Unterminated quotes return .Eof; allocation failure is fatal.
-// LF and CRLF parse identically; blank lines and a trailing newline add no row. There is no release
-// helper for a successful parse: free field/backbone allocations with the same allocator, or parse
-// from an arena and reset it. A failed parse hands back no pointers, so it frees its own scratch.
+// LF and CRLF parse identically; blank lines and a trailing newline add no row. `release_parse`
+// releases a successful result with the same allocator. A failed parse hands back no pointers, so
+// it frees its own scratch.
 { AllocatorBackend, release_slice } = std.mem.alloc
 { Result, IoError, expect } = std.core.result
 { String, new_in, push_in, append_in, finish_in, free_in } = std.text.string
 { view, own_ptr } = std.text.str
 { loop_at, step_while } = std.core.count
 { Vec, vec_in } = std.collections.vec
-cok = (r: Result<String, IoError>) String { r.expect("std.csv: allocation failed") }
-cfin = (r: Result<StringCstr, IoError>) StringView { r.expect("std.csv: allocation failed") }
-cnew = (a: AllocatorBackend) String { a.new_in().expect("std.csv: allocation failed") }
 // Spelled out per element type rather than once over `<T>`: the element type has to reach `vec_in`
 // through an annotated binding, and a wrapper's own `T` is not that.
-crows = (a: AllocatorBackend) Vec<MutSlice<StringView>> {
+new_rows = (a: AllocatorBackend) Vec<MutSlice<StringView>> {
     v: Result<Vec<MutSlice<StringView>>, IoError> = a.vec_in(1)
     v.expect("std.csv: allocation failed")
 }
-crow = (a: AllocatorBackend) Vec<StringView> {
+new_fields = (a: AllocatorBackend) Vec<StringView> {
     v: Result<Vec<StringView>, IoError> = a.vec_in(1)
     v.expect("std.csv: allocation failed")
-}
-cpush<T> = (v: Vec<T>, a: AllocatorBackend, x: T) Vec<T> {
-    v.push(a, x).expect("std.csv: allocation failed")
 }
 // ── parse ──────────────────────────────────────────────────────────────────────────
 // What one input byte means. `Escaped` is the `""` pair — the only token wider than a byte, which is
@@ -74,21 +68,21 @@ csv_abandon = (
 }
 parse* = (a: AllocatorBackend, text: StringView) Result<MutSlice<MutSlice<StringView>>, IoError> {
     sv: Slice<u8> = text.view()
-    rows :: Vec<MutSlice<StringView>> = a.crows()
-    fields :: Vec<StringView> = a.crow()
-    sb :: String = a.cnew()
+    rows :: Vec<MutSlice<StringView>> = a.new_rows()
+    fields :: Vec<StringView> = a.new_fields()
+    sb :: String = a.new_in().expect("std.csv: allocation failed")
     quoted ::= false
     active ::= false    // is a record in progress? a blank line and a trailing LF add no row
     start: i64 = 0
     start.step_while((i) { i < sv.len }, (i) {
         csv_tok(sv, i, quoted).match ({
             .Byte(c) => {
-                sb = sb.push_in(a, c).cok()
+                sb = sb.push_in(a, c).expect("std.csv: allocation failed")
                 active = true
                 i + 1
             },
             .Escaped => {
-                sb = sb.push_in(a, '"').cok()    // "" inside a quoted field -> one literal quote
+                sb = sb.push_in(a, '"').expect("std.csv: allocation failed")
                 i + 2
             },
             .Quote   => {
@@ -97,17 +91,19 @@ parse* = (a: AllocatorBackend, text: StringView) Result<MutSlice<MutSlice<String
                 i + 1
             },
             .Sep     => {
-                fields = fields.cpush(a, sb.finish_in(a).cfin())    // end field
-                sb = a.cnew()
+                field: StringView = sb.finish_in(a).expect("std.csv: allocation failed")
+                fields = fields.push(a, field).expect("std.csv: allocation failed")
+                sb = a.new_in().expect("std.csv: allocation failed")
                 active = true
                 i + 1
             },
             .End     => {
                 active.then({
-                    fields = fields.cpush(a, sb.finish_in(a).cfin())    // end field, then end record
-                    rows = rows.cpush(a, fields.view())
-                    fields = a.crow()
-                    sb = a.cnew()
+                    field: StringView = sb.finish_in(a).expect("std.csv: allocation failed")
+                    fields = fields.push(a, field).expect("std.csv: allocation failed")
+                    rows = rows.push(a, fields.view()).expect("std.csv: allocation failed")
+                    fields = a.new_fields()
+                    sb = a.new_in().expect("std.csv: allocation failed")
                     active = false
                 })
                 i + 1
@@ -122,8 +118,9 @@ parse* = (a: AllocatorBackend, text: StringView) Result<MutSlice<MutSlice<String
     })
     active.match ({
         true  => {
-            fields = fields.cpush(a, sb.finish_in(a).cfin())    // flush the final unterminated record
-            rows = rows.cpush(a, fields.view())
+            field: StringView = sb.finish_in(a).expect("std.csv: allocation failed")
+            fields = fields.push(a, field).expect("std.csv: allocation failed")
+            rows = rows.push(a, fields.view()).expect("std.csv: allocation failed")
         },
         // No record in progress (the usual case — the text ended with a newline): the builder and
         // field backbone opened for the NEXT record are dead, and neither is reachable from the
@@ -135,6 +132,14 @@ parse* = (a: AllocatorBackend, text: StringView) Result<MutSlice<MutSlice<String
     })
     out: Result<MutSlice<MutSlice<StringView>>, IoError> = .Ok(rows.view())
     out
+}
+// Release every allocation reachable from a successful parse, including the outer Vec backbone.
+release_parse* = (a: AllocatorBackend, rows: MutSlice<MutSlice<StringView>>) void {
+    rows.loop_at((i, row) {
+        row.loop_at((j, field) { a.release(field.own_ptr()) })
+        a.release_slice(row)
+    })
+    a.release_slice(rows)
 }
 // ── write_rows ─────────────────────────────────────────────────────────────────────
 // does `s` need quoting? (contains a delimiter, a quote, or a line break)
@@ -150,17 +155,17 @@ field_needs_quote = (s: StringView) bool {
 // append `s` to the builder as one CSV field, quoting (and doubling embedded quotes) if required.
 write_field = (a: AllocatorBackend, sb: String, s: StringView) String {
     (s.field_needs_quote() == false).then({
-        return sb.append_in(a, s).cok()
+        return sb.append_in(a, s).expect("std.csv: allocation failed")
     })
     sv: Slice<u8> = s.view()
-    out :: String = sb.push_in(a, '"').cok()
+    out :: String = sb.push_in(a, '"').expect("std.csv: allocation failed")
     sv.loop_at((i, b) {
         (b == '"').then({
-            out = out.push_in(a, '"').cok()
+            out = out.push_in(a, '"').expect("std.csv: allocation failed")
         })    // an embedded quote is doubled
-        out = out.push_in(a, b).cok()
+        out = out.push_in(a, b).expect("std.csv: allocation failed")
     })
-    out.push_in(a, '"').cok()
+    out.push_in(a, '"').expect("std.csv: allocation failed")
 }
 // Render `rows` to a single CSV view: fields joined by commas, records terminated by LF (including
 // a trailing LF after the last record). Round-trips through `parse`. Returns Ok always (allocation
@@ -169,16 +174,17 @@ write_rows* = (
     a: AllocatorBackend,
     rows: MutSlice<MutSlice<StringView>>,
 ) Result<StringView, IoError> {
-    out :: String = a.cnew()
+    out :: String = a.new_in().expect("std.csv: allocation failed")
     rows.loop_at((i, row) {
         r: MutSlice<StringView> = row
         r.loop_at((j, f) {
             (j > 0).then({
-                out = out.push_in(a, ',').cok()
+                out = out.push_in(a, ',').expect("std.csv: allocation failed")
             })
             out = a.write_field(out, f)
         })
-        out = out.push_in(a, '\n').cok()
+        out = out.push_in(a, '\n').expect("std.csv: allocation failed")
     })
-    .Ok(out.finish_in(a).cfin())
+    text: StringView = out.finish_in(a).expect("std.csv: allocation failed")
+    .Ok(text)
 }

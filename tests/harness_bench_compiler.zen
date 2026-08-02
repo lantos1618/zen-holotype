@@ -106,7 +106,7 @@
 //   zen_startup   ./zen --version                  compiler process startup, zero compilation
 //   check_hello   ./zen check $DIR/hello.zen       5 lines, written by this suite into its own
 //                 scratch dir so the corpus is byte-stable forever regardless of repo churn. The
-//                 smallest thing a real user does, and it still pulls in std.text.fmt's closure.
+//                 smallest thing a real user does, and it still pulls in std.io.print's closure.
 //   check_tool    ./zen check tools/fuzz-diff.zen  1 050 lines, the largest file under tools/ — a
 //                 real mid-size program over std, and tools/ is quiet enough to stay comparable.
 //   check_big     ./zen check src/compiler/resolve.zen   2 586 lines, the largest single source in
@@ -155,8 +155,8 @@
 // ── NO BASELINE FILE, NO GATE, ON PURPOSE ────────────────────────────────────────────────────────
 // Nothing here exits nonzero for a slow number. The process exit status is 0 unless the harness
 // itself could not run at all. Benchmarks record; humans compare.
-{ put } = std.text.fmt
-{ sb } = std.text.sb
+{ put } = std.io.print
+{ String } = std.text.string
 { sort_by } = std.sort
 { times, step_while, advance_while } = std.core.count
 { Heap, malloc, free } = std.mem.alloc
@@ -175,7 +175,7 @@ DEFAULT_REPS = () i64 { 3 }
 // The five-line corpus. Byte-stable by construction: it is this literal, not a repo file, so the
 // small-input rows stay comparable across every future edit to examples/ and tests/.
 HELLO_SRC = () StringView {
-    "{ println } = std.text.fmt\n\nmain* = () i32 {\n    println(\"hello\")\n    0\n}\n"
+    "{ println } = std.io.print\n\nmain* = () i32 {\n    println(\"hello\")\n    0\n}\n"
 }
 // cache-state tags (the `cache` column). NA = the verb never consults the compile cache.
 CACHE_NA = () i64 { 0 }
@@ -380,43 +380,40 @@ cb_time_us = (mp: MutPtr<Heap>, cmd: StringView) i64 {
 // deliberate and the developer's own cache is never touched.
 cb_timed_cmd = (mp: MutPtr<Heap>, bare: StringView) StringView {
     mp
-        .sb()
-        .s("ZENC_CACHE_DIR=")
-        .s(g_cache)
-        .s(" ")
-        .s(bare)
-        .s(" >/dev/null 2>&1")
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("ZENC_CACHE_DIR=")
+        .add(g_cache)
+        .add(" ")
+        .add(bare)
+        .add(" >/dev/null 2>&1")
+        .finish_cstr()
 }
 // `/usr/bin/time -f '@RSS %M'` around the same command; the `grep` keeps our marker line and drops
 // whatever the compiler wrote to stderr, and `tail -1` keeps the outermost (last-exiting) process.
 cb_rss_cmd = (mp: MutPtr<Heap>, bare: StringView) StringView {
     mp
-        .sb()
-        .s("/usr/bin/time -f '@RSS %M' sh -c 'ZENC_CACHE_DIR=")
-        .s(g_cache)
-        .s(" ")
-        .s(bare)
-        .s(" >/dev/null 2>&1' 2>&1 | grep '^@RSS' | tail -1")
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("/usr/bin/time -f '@RSS %M' sh -c 'ZENC_CACHE_DIR=")
+        .add(g_cache)
+        .add(" ")
+        .add(bare)
+        .add(" >/dev/null 2>&1' 2>&1 | grep '^@RSS' | tail -1")
+        .finish_cstr()
 }
 // The shim prints ZALLOC_TOTAL on stderr, so stderr goes to the pipe and the child's stdout to
 // /dev/null (`2>&1 >/dev/null`, in that order). A forked cc inherits the preload and prints its own
 // total first; the zen process exits last, so `tail -1` is the zen count.
 cb_alloc_cmd = (mp: MutPtr<Heap>, bare: StringView) StringView {
     mp
-        .sb()
-        .s("ZENC_CACHE_DIR=")
-        .s(g_cache)
-        .s(" ZALLOC_COUNT=1 LD_PRELOAD=")
-        .s(g_shim)
-        .s(" ")
-        .s(bare)
-        .s(" 2>&1 >/dev/null | grep '^ZALLOC_TOTAL=' | tail -1")
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("ZENC_CACHE_DIR=")
+        .add(g_cache)
+        .add(" ZALLOC_COUNT=1 LD_PRELOAD=")
+        .add(g_shim)
+        .add(" ")
+        .add(bare)
+        .add(" 2>&1 >/dev/null | grep '^ZALLOC_TOTAL=' | tail -1")
+        .finish_cstr()
 }
 cb_free_str = (s: StringView) void {
     free(s.own_ptr())
@@ -424,11 +421,10 @@ cb_free_str = (s: StringView) void {
 }
 cb_wipe = (mp: MutPtr<Heap>) void {
     cmd = mp
-        .sb()
-        .s("rm -rf ")
-        .s(g_cache)
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("rm -rf ")
+        .add(g_cache)
+        .finish_cstr()
     mp.cb_quiet(cmd)
     cb_free_str(cmd)
 }
@@ -514,14 +510,13 @@ cb_stage = (mp: MutPtr<Heap>, name: StringView, bare: StringView, cache: i64) vo
         false => mp.cb_wipe(),
     })
     cmd = mp
-        .sb()
-        .s("ZENC_CACHE_DIR=")
-        .s(g_cache)
-        .s(" ")
-        .s(bare)
-        .s(" 2>&1 >/dev/null")
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("ZENC_CACHE_DIR=")
+        .add(g_cache)
+        .add(" ")
+        .add(bare)
+        .add(" 2>&1 >/dev/null")
+        .finish_cstr()
     out = mp.cb_capture(cmd)
     cb_text(name, NAME_W())
     cb_rtext(cb_cache_name(cache), CACHE_W() - 1)
@@ -542,12 +537,11 @@ cb_stage = (mp: MutPtr<Heap>, name: StringView, bare: StringView, cache: i64) vo
 // Re-derive from the filesystem what the table above claims, on every run.
 cb_count_cache = (mp: MutPtr<Heap>) i64 {
     cmd = mp
-        .sb()
-        .s("ls -1 ")
-        .s(g_cache)
-        .s(" 2>/dev/null | wc -l")
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("ls -1 ")
+        .add(g_cache)
+        .add(" 2>/dev/null | wc -l")
+        .finish_cstr()
     v = mp.cb_scrape(cmd, "")
     cb_free_str(cmd)
     v
@@ -574,22 +568,20 @@ cb_proof = (mp: MutPtr<Heap>, hello_check: StringView) void {
     cb_proof_line("cache entries after a warm re-check      (want 1: same key reused)", mp.cb_count_cache())
     cb_free_str(wrapped)
     emit_cmd = mp
-        .sb()
-        .s("./zen emit driver.zen 2>/dev/null | wc -c")
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("./zen emit driver.zen 2>/dev/null | wc -c")
+        .finish_cstr()
     cb_proof_line("bytes of C from `zen emit driver.zen`    (want millions)", mp.cb_scrape(emit_cmd, ""))
     cb_free_str(emit_cmd)
     mp.cb_wipe()
     build_self = mp
-        .sb()
-        .s("ZENC_CACHE_DIR=")
-        .s(g_cache)
-        .s(" ./zen --build-self ")
-        .s(g_dir)
-        .s("/seed.c . >/dev/null 2>&1")
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("ZENC_CACHE_DIR=")
+        .add(g_cache)
+        .add(" ./zen --build-self ")
+        .add(g_dir)
+        .add("/seed.c . >/dev/null 2>&1")
+        .finish_cstr()
     mp.cb_quiet(build_self)
     cb_proof_line("cache entries after --build-self         (want 0: `n/a` is verified)", mp.cb_count_cache())
     cb_free_str(build_self)
@@ -612,22 +604,20 @@ cb_env_s = (name: StringView, dflt: StringView) StringView {
 }
 cb_join = (mp: MutPtr<Heap>, a: StringView, b: StringView) StringView {
     mp
-        .sb()
-        .s(a)
-        .s(b)
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add(a)
+        .add(b)
+        .finish_cstr()
 }
 // Compile the repo's LD_PRELOAD allocation counter into the scratch dir. A box without a working
 // `cc` still gets every other column; the allocs column then reads -1 on every row.
 cb_setup_shim = (mp: MutPtr<Heap>) void {
     cmd = mp
-        .sb()
-        .s("cc -shared -fPIC -O2 scripts/alloc-fuzz/oom-shim.c -ldl -o ")
-        .s(g_shim)
-        .s(" 2>/dev/null")
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("cc -shared -fPIC -O2 scripts/alloc-fuzz/oom-shim.c -ldl -o ")
+        .add(g_shim)
+        .add(" 2>/dev/null")
+        .finish_cstr()
     mp.cb_quiet(cmd)
     cb_free_str(cmd)
     g_have_shim = exists(g_shim)
@@ -640,13 +630,12 @@ cb_setup = (mp: MutPtr<Heap>) StringView {
     g_cache = mp.cb_join(g_dir, "/cache")
     g_shim = mp.cb_join(g_dir, "/alloc-shim.so")
     reset = mp
-        .sb()
-        .s("rm -rf ")
-        .s(g_dir)
-        .s(" && mkdir -p ")
-        .s(g_dir)
-        .done()
-        .expect("bench-compiler: oom")
+        .allocator().String()
+        .add("rm -rf ")
+        .add(g_dir)
+        .add(" && mkdir -p ")
+        .add(g_dir)
+        .finish_cstr()
     mp.cb_quiet(reset)
     cb_free_str(reset)
     hello = mp.cb_join(g_dir, "/hello.zen")

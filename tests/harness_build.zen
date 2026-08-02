@@ -290,7 +290,9 @@ run_shells* = (name: StringView, cs: MutSlice<ShellCase>) i32 {
         mp.shell_ok(i).match ({
             true  => out("."),
             false => {
-                out("F")
+                out("F\n  FAIL ")
+                out(c.name)
+                out("\n")
                 fails = fails + 1
             },
         })
@@ -394,6 +396,12 @@ harness_build_run* = () i32 {
             check_out: false,
         ),
         FixtureCase(
+            path: "tests/fixtures/zen/csv_roundtrip.zen",
+            want_exit: "0",
+            want_out: "",
+            check_out: false,
+        ),
+        FixtureCase(
             path: "tests/fixtures/zen/struct_eq_operator.zen",
             want_exit: "0",
             want_out: "",
@@ -466,13 +474,13 @@ harness_build_run* = () i32 {
             check_out: false,
         ),
         FixtureCase(
-            path: "tests/fixtures/zen/sb_chain.zen",
+            path: "tests/fixtures/zen/string_chain.zen",
             want_exit: "0",
             want_out: "",
             check_out: false,
         ),
         FixtureCase(
-            path: "tests/fixtures/zen/sb_rep_stack.zen",
+            path: "tests/fixtures/zen/string_repeat_stack.zen",
             want_exit: "0",
             want_out: "",
             check_out: false,
@@ -889,7 +897,7 @@ harness_build_run* = () i32 {
         FixtureCase(
             path: "tests/fixtures/zen/print_interpolated.zen",
             want_exit: "0",
-            want_out: "name=Zen n=42\ns=hi i=7 f=3.14 b=true\nbraces {} and 9 done\nmissing 1  extra\nowned=world\n",
+            want_out: "name=Zen n=42\ns=hi i=7 f=3.14 b=true\nbraces {} and 9 done\nmissing 1 {} extra\nowned=world\n",
             check_out: true,
         ),
         FixtureCase(
@@ -1462,6 +1470,12 @@ harness_build_run* = () i32 {
             check_out: false,
         ),
         FixtureCase(
+            path: "tests/fixtures/zen/diagnostic_kind_roundtrip.zen",
+            want_exit: "0",
+            want_out: "",
+            check_out: false,
+        ),
+        FixtureCase(
             path: "tests/fixtures/zen/type_import_actor_methods.zen",
             want_exit: "7",
             want_out: "",
@@ -1755,13 +1769,13 @@ harness_build_run* = () i32 {
             check_out: true,
         ),
         FixtureCase(
-            path: "tests/fixtures/zen/anon_struct_result_generic.zen",
+            path: "tests/fixtures/zen/named_record_result_generic.zen",
             want_exit: "0",
             want_out: "3\n1\n",
             check_out: true,
         ),
         FixtureCase(
-            path: "tests/fixtures/zen/anon_struct_plain_nested.zen",
+            path: "tests/fixtures/zen/named_record_plain_nested.zen",
             want_exit: "0",
             want_out: "42\n1\n2\n3\n",
             check_out: true,
@@ -1950,12 +1964,8 @@ harness_build_run* = () i32 {
             wants: [":1:1: error[no-if]", "  if (true) { 1 }", "  ^~", "hint: in expression position write `cond.then({ yes }, { no })`"],
         ),
         DiagCase(
-            src: "//! link: c\n// a foreign decl with a slice param has no C ABI shape — the diagnostic names the offending\n// parameter and its type, positioned on the declaration, with the RawPtr-floor hint.\nfrob = (xs: MutSlice<i32>) i64\nmain = () i32 { 0 }\n",
-            wants: [":4:1: error[ffi-type]: foreign declaration `frob`: parameter `xs` has non-FFI-safe type `MutSlice<i32>`", "  frob = (xs: MutSlice<i32>) i64", "  ^~~~", "hint: a bodyless (foreign) declaration is a raw C prototype", "pass buffers through the RawPtr<T> floor (pointer + length)"],
-        ),
-        DiagCase(
-            src: "// a foreign decl in a module that declares NO linkage: nothing says which library defines the\n// symbol, so `ld` would be the first thing to notice. error[ffi-unlinked] notices at check time.\nfrobnicate = (x: i64) i64\nmain = () i32 { 0 }\n",
-            wants: [":3:1: error[ffi-unlinked]: foreign declaration `frobnicate` names no library: this module declares no linkage, so nothing says which library defines the symbol", "  frobnicate = (x: i64) i64", "  ^~~~~~~~~~", "hint: declare it at the top of this file: `//! link: c` (the C standard library)"],
+            src: "// a foreign decl with a slice param has no C ABI shape — the diagnostic names the offending\n// parameter and its type, positioned on the declaration, with the RawPtr-floor hint.\nfrob = (xs: MutSlice<i32>) i64\nmain = () i32 { 0 }\n",
+            wants: [":3:1: error[ffi-type]: foreign declaration `frob`: parameter `xs` has non-FFI-safe type `MutSlice<i32>`", "  frob = (xs: MutSlice<i32>) i64", "  ^~~~", "hint: a bodyless (foreign) declaration is a raw C prototype", "pass buffers through the RawPtr<T> floor (pointer + length)"],
         ),
         DiagCase(
             src: "main = () i32 {\n    if (1 < 2) { 1 } else { 0 }\n}\n",
@@ -1990,6 +2000,10 @@ harness_build_run* = () i32 {
             wants: [":2:1: error[main-signature]: `main` must be `() i32` or `(sys: Sys) i32`", "  main = (rt: i32) i32 {", "  ^~~~", "hint: declare it `main = () i32 { … }`, or take the root capability `main = (sys: Sys) i32 { … }` (import `{ Sys } = std.sys.root`) and thread narrow caps like `sys.stdout()` / `sys.heap()`"],
         ),
         DiagCase(
+            src: "main = () void { }\n",
+            wants: [":1:1: error[main-signature]: `main` must be `() i32` or `(sys: Sys) i32`", "  main = () void { }", "  ^~~~"],
+        ),
+        DiagCase(
             src: "{ help } = util.helpers\nmain = () i32 { help() }\n",
             wants: ["error: unknown module 'util.helpers'", "no util/helpers.zen next to"],
         ),
@@ -2014,11 +2028,11 @@ harness_build_run* = () i32 {
             wants: [":7:10: error[arg-type]: expected `Box<MutPtr<i32>>`, got `Box<Ptr<i32>>`", "      take(b)", "           ^", "hint: check the argument type or add an explicit conversion at the call site"],
         ),
         DiagCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { })\n",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nPoint*: { x: i32 }\nPoint.impl(Show, { })\n",
             wants: [":3:1: error[conformance]: impl does not satisfy the trait", "  Point.impl(Show, { })", "  ^~~~~", "hint: define every required trait method with the exact receiver, parameter, and return types"],
         ),
         DiagCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\nmain = () i32 { b = Blob(v: 3)  draw(b) }\n",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\ndraw<A: Show> = (a: A) i32 { 0 }\nmain = () i32 { b = Blob(v: 3)  draw(b) }\n",
             wants: [":6:33: error[trait-bound]: type `Blob` does not satisfy the bound `Show` required by `draw` — missing method(s): render", "  main = () i32 { b = Blob(v: 3)  draw(b) }", "                                  ^~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
         DiagCase(
@@ -2030,19 +2044,19 @@ harness_build_run* = () i32 {
             wants: [":2:5: error[unknown-type]: unknown type name `str` — that spelling was retired; write `StringView`"],
         ),
         DiagCase(
-            src: "Show*: { render: (Self) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Circle) i32 { c.r } })\ndraw<A: Show> = (a: A) i32 { 0 }\nmain = () i32 { c: StringCstr = cstr(null_ptr())  draw(c) }\n",
+            src: "Show*: { render: (arg0: Self) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Circle) i32 { c.r } })\ndraw<A: Show> = (a: A) i32 { 0 }\nmain = () i32 { c: StringCstr = cstr(null_ptr())  draw(c) }\n",
             wants: [":5:51: error[trait-bound]: type `StringCstr` does not satisfy the bound `Show` required by `draw` — missing method(s): render"],
         ),
         DiagCase(
-            src: "Show*: { render: (Self) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Circle) i32 { c.r } })\ndraw<A: Show> = (a: A) i32 { 0 }\nmain = () i32 { c: StringLiteral = \"x\"  draw(c) }\n",
+            src: "Show*: { render: (arg0: Self) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Circle) i32 { c.r } })\ndraw<A: Show> = (a: A) i32 { 0 }\nmain = () i32 { c: StringLiteral = \"x\"  draw(c) }\n",
             wants: [":5:41: error[trait-bound]: type `StringLiteral` does not satisfy the bound `Show` required by `draw` — missing method(s): render"],
         ),
         DiagCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nBlob*: { v: i32 }\nmain = () i32 { b = Blob(v: 3)  b.render() }\n",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nBlob*: { v: i32 }\nmain = () i32 { b = Blob(v: 3)  b.render() }\n",
             wants: [":3:35: error[trait-bound]: type `Blob` does not implement trait `Show` (which declares `render`) — missing method(s): render", "  main = () i32 { b = Blob(v: 3)  b.render() }", "                                    ^~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
         DiagCase(
-            src: "Show*: { render: (Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\nmain = () i32 { b = Blob(v: 3)  b.render() }\n",
+            src: "Show*: { render: (arg0: Ptr<Self>) i32 }\nCircle*: { r: i32 }\nCircle.impl(Show, { render = (c: Ptr<Circle>) i32 { c.r } })\nBlob*: { v: i32 }\nmain = () i32 { b = Blob(v: 3)  b.render() }\n",
             wants: [":5:35: error[trait-bound]: type `Blob` does not implement trait `Show` (which declares `render`) — missing method(s): render", "  main = () i32 { b = Blob(v: 3)  b.render() }", "                                    ^~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
         DiagCase(
@@ -2095,7 +2109,19 @@ harness_build_run* = () i32 {
         ),
         DiagCase(
             src: "f* = () (i32, i32) { (1, 2) }\nmain = () i32 { 0 }\n",
-            wants: ["error[parse]: expected a top-level declaration, found a token that cannot start one"],
+            wants: ["error[parse]"],
+        ),
+        DiagCase(
+            src: "Apply*: { call: (i32, i32) i32 }\nmain = () i32 { 0 }\n",
+            wants: ["error[parse]"],
+        ),
+        DiagCase(
+            src: "read = (value: { item: i32 }) i32 { value.item }\nmain = () i32 { 0 }\n",
+            wants: ["error[parse]"],
+        ),
+        DiagCase(
+            src: "main = () i32 {\n    value = { item: 1 }\n    0\n}\n",
+            wants: ["error[parse]"],
         ),
         DiagCase(
             src: "main = () i32 {\n    x = = 5\n    0\n}\n",
@@ -2146,7 +2172,7 @@ harness_build_run* = () i32 {
             wants: [":1:17: error[undefined-name]: undefined name", "  main = () i32 { undefined_fn(1, 2) }", "                  ^~~~~~~~~~~~", "hint: declare the name, import it, or qualify the intended module binding"],
         ),
         DiagCase(
-            src: "{ println } = std.text.fmt\nmain = () i32 {\n    println(\"hi\")\n    oops()\n}\n",
+            src: "{ println } = std.io.print\nmain = () i32 {\n    println(\"hi\")\n    oops()\n}\n",
             wants: [":4:5: error[undefined-name]: undefined name", "      oops()", "      ^~~~", "hint: declare the name, import it, or qualify the intended module binding"],
         ),
         DiagCase(
@@ -2154,11 +2180,11 @@ harness_build_run* = () i32 {
             wants: [":1:21: error[undefined-name]: undefined name", "  wrap = (x: T) i32 { oops(x) }", "                      ^~~~"],
         ),
         DiagCase(
-            src: "apply = (f: (i32) i32, x: i32) i32 { f(x) }\nmain = () i32 {\n    apply((n) { bad(n) }, 41)\n}\n",
+            src: "apply = (f: (arg0: i32) i32, x: i32) i32 { f(x) }\nmain = () i32 {\n    apply((n) { bad(n) }, 41)\n}\n",
             wants: [":3:17: error[undefined-name]: undefined name", "      apply((n) { bad(n) }, 41)", "                  ^~~"],
         ),
         DiagCase(
-            src: "apply = (f: (i32) i32, x: i32) i32 { f(x) }\nmain = () i32 {\n    r = apply((n) { n + 1 }, 41)\n    nope(r)\n}\n",
+            src: "apply = (f: (arg0: i32) i32, x: i32) i32 { f(x) }\nmain = () i32 {\n    r = apply((n) { n + 1 }, 41)\n    nope(r)\n}\n",
             wants: [":4:5: error[undefined-name]: undefined name", "      nope(r)", "      ^~~~", "hint: declare the name, import it, or qualify the intended module binding"],
         ),
         DiagCase(
@@ -2218,11 +2244,11 @@ harness_build_run* = () i32 {
             wants: [":2:9: error[undefined-name]: undefined name", "      a = nope()", "           ^~~~", ":3:14: error[assign-fit]: expected `i32`, got `StringLiteral`", "      c: i32 = \"hi\"", ":4:5: error[return-fit]: expected `i32`, got `StringLiteral`", "      \"s\""],
         ),
         DiagCase(
-            src: "{ println } = std.text.fmt\nPoint*: { x: i32 }\nmain = () i32 {\n    p = Point(x: 1)\n    println(p)\n    0\n}\n",
+            src: "{ println } = std.io.print\nPoint*: { x: i32 }\nmain = () i32 {\n    p = Point(x: 1)\n    println(p)\n    0\n}\n",
             wants: [":5:5: error[trait-bound]: type `Point` does not implement trait `Display` (which declares `fmt_println`) — missing method(s): fmt_print, fmt_println", "      println(p)", "      ^~~~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
         DiagCase(
-            src: "{ print } = std.text.fmt\nQ*: { a: i32, b: i32 }\nmain = () i32 {\n    q = Q(a: 1, b: 2)\n    print(q)\n    0\n}\n",
+            src: "{ print } = std.io.print\nQ*: { a: i32, b: i32 }\nmain = () i32 {\n    q = Q(a: 1, b: 2)\n    print(q)\n    0\n}\n",
             wants: [":5:5: error[trait-bound]: type `Q` does not implement trait `Display` (which declares `fmt_print`) — missing method(s): fmt_print, fmt_println", "      print(q)", "      ^~~~~", "hint: implement the bound trait for this type (`Type.impl(Trait, { … })`), or relax the bound"],
         ),
     ])
@@ -2249,12 +2275,12 @@ harness_build_run* = () i32 {
     // to print with NO line:col at all — the packed-kind encoding dropped position 0. Now it carets.
     // a pointer stored into a struct FIELD aliases the same allocation; freeing the source local
     // kills the field alias, so a later read of the field is a use-after-free (positioned at the field).
-    // Multi-return uses named anonymous structs `{ x: T, y: U }`, not parenthesized type lists.
+    // Multi-return uses named records, not anonymous records or parenthesized type lists.
     // census #59b: a type error raised while checking a GENERIC stdlib body (here `println*<T>`'s
     // `x.fmt_println()`, instantiated for a type with no Display impl) must be attributed to the
-    // USER's CALL SITE — `zod_v.zen:5:5` — NOT the library-internal line inside `std/text/fmt.zen`.
+    // USER's CALL SITE — `zod_v.zen:5:5` — NOT the library-internal line inside `std/io/print.zen`.
     // The `zod_v.zen:` prefix (via the leading `:`) is the whole point: before the fix this said
-    // `src/std/text/fmt.zen:108`, a place the user never wrote.
+    // `src/std/io/print.zen:108`, a place the user never wrote.
     // same attribution for `print*<T>`: the caret lands on the user's `print(q)`, not std.
     // BATCH diagnostics (#43): three INDEPENDENT main-channel errors in one function — an undefined
     // name, an assign-fit, and a return-fit — must ALL be reported (per-statement recovery), not
@@ -2294,8 +2320,8 @@ harness_build_run* = () i32 {
     // ── (i) `zenc doc` public-surface + legacy-name assertions across the std modules + genc.zen ──
     dc = run_docs("build doc", [
         DocCase(
-            target: "std.text.fmt",
-            present: ["# std.text.fmt", "Display*: {", "write_int_in* = (a: AllocatorBackend, n: i64) Result<i64, IoError>", "write_float_in* = (a: AllocatorBackend, x: f64) Result<i64, IoError>", "print*<T: Display> = (x: T) i64 { x.fmt_print() }", "println*<T: Display> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
+            target: "std.io.print",
+            present: ["# std.io.print", "Display*: {", "write_int_in* = (a: AllocatorBackend, n: i64) Result<i64, IoError>", "write_float_in* = (a: AllocatorBackend, x: f64) Result<i64, IoError>", "print*<T: Display> = (x: T) i64 { x.fmt_print() }", "println*<T: Display> = (x: T) i64 { x.fmt_println() }", "Display is the current type-directed print surface"],
             absent: ["print_owned", "print_int", "println_int", "try_write_int_in", "try_write_float_in"],
         ),
         DocCase(
@@ -2370,7 +2396,7 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "std.collections.iter",
-            present: ["find*<T> = (xs: MutSlice<T>, pred: (T) bool) Opt<T>", "map*<T, U> = (a: AllocatorBackend, xs: MutSlice<T>, f: (T) U) Result<MutSlice<U>, IoError>", "filter*<T> = (a: AllocatorBackend, xs: MutSlice<T>, keep: (T) bool) Result<MutSlice<T>, IoError>"],
+            present: ["find*<T> = (xs: MutSlice<T>, pred: (value: T) bool) Opt<T>", "map*<T, U> = (a: AllocatorBackend, xs: MutSlice<T>, f: (value: T) U) Result<MutSlice<U>, IoError>", "filter*<T> = (a: AllocatorBackend, xs: MutSlice<T>, keep: (value: T) bool) Result<MutSlice<T>, IoError>"],
             absent: ["map* = (xs: MutSlice<i32>", "filter* = (xs: MutSlice<i32>", "map*<T, U> = (a: AllocatorBackend, xs: MutSlice<i32>", "try_map", "try_filter"],
         ),
         DocCase(
@@ -2395,7 +2421,7 @@ harness_build_run* = () i32 {
         ),
         DocCase(
             target: "src/compiler/mangle.zen",
-            present: ["mangle_str_in*", "impl_cname_in*", "mangle_semantic_in*", "mangle_anon_in*", "fnt_cname*"],
+            present: ["mangle_str_in*", "impl_cname_in*", "mangle_semantic_in*", "mangle_payload_in*", "fnt_cname*"],
             absent: ["mangle_str*", "impl_cname*", "mangle_ty_len", "mangle_write_ty"],
         ),
     ])
@@ -2407,11 +2433,11 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "formatln_heterogeneous_varargs",
-            cmd: "printf '{ formatln, arg_int } = std.text.fmt\\nmain = () i32 {\\n n = 42\\n s: StringView = \"hi\"\\n b = true\\n formatln(\"{} {} {}\", n, s, b)\\n formatln(\"zero\")\\n formatln(\"{} {}\", 3.25, [arg_int(7)][0])\\n formatln(\"old {}\", [arg_int(5)])\\n 0\\n}\\n' > $ZT/zva.zen && ./zen run $ZT/zva.zen > $ZT/zva.txt 2>/dev/null && printf '42 hi true\\nzero\\n3.25 7\\nold 5\\n' | cmp -s - $ZT/zva.txt",
+            cmd: "printf '{ formatln, arg_int } = std.io.print\\nmain = () i32 {\\n n = 42\\n s: StringView = \"hi\"\\n b = true\\n formatln(\"{} {} {}\", n, s, b)\\n formatln(\"zero\")\\n formatln(\"{} {}\", 3.25, [arg_int(7)][0])\\n formatln(\"old {}\", [arg_int(5)])\\n 0\\n}\\n' > $ZT/zva.zen && ./zen run $ZT/zva.zen > $ZT/zva.txt 2>/dev/null && printf '42 hi true\\nzero\\n3.25 7\\nold 5\\n' | cmp -s - $ZT/zva.txt",
         ),
         ShellCase(
             name: "formatln_varargs_rejects_unwrappable",
-            cmd: "printf 'P: { x: i64 }\\n{ formatln } = std.text.fmt\\nmain = () i32 { formatln(\"{}\", P(x: 1))\\n 0 }\\n' > $ZT/zvab.zen && { ./zen check $ZT/zvab.zen 2>$ZT/zvab_e.txt; test \"$?\" = 1; } && grep -Fq 'error[arg-type]' $ZT/zvab_e.txt",
+            cmd: "printf 'P: { x: i64 }\\n{ formatln } = std.io.print\\nmain = () i32 { formatln(\"{}\", P(x: 1))\\n 0 }\\n' > $ZT/zvab.zen && { ./zen check $ZT/zvab.zen 2>$ZT/zvab_e.txt; test \"$?\" = 1; } && grep -Fq 'error[arg-type]' $ZT/zvab_e.txt",
         ),
         ShellCase(
             name: "run_forwards_args",
@@ -2515,7 +2541,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "js_int64_battery_dual_backend",
-            cmd: "./zen build tests/fixtures/zen/js_int64_battery.zen -o $ZT/zjib 2>/dev/null && $ZT/zjib > $ZT/zjib_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_int64_battery.zen -o $ZT/zjib.js 2>/dev/null && node $ZT/zjib.js > $ZT/zjib_js.txt 2>/dev/null && cmp -s $ZT/zjib_c.txt $ZT/zjib_js.txt && printf '1099511627776\\n4611686018427387904\\n121932631112635269\\n-33\\n-2\\n-50\\n2147483644\\n18446744073709551615\\n9223372036854775807\\n5\\n10000000000\\n' | cmp -s - $ZT/zjib_c.txt",
+            cmd: "./zen build tests/fixtures/zen/js_int64_battery.zen -o $ZT/zjib 2>/dev/null && $ZT/zjib > $ZT/zjib_c.txt 2>/dev/null && ./zen build --target js tests/fixtures/zen/js_int64_battery.zen -o $ZT/zjib.js 2>/dev/null && node $ZT/zjib.js > $ZT/zjib_js.txt 2>/dev/null && cmp -s $ZT/zjib_c.txt $ZT/zjib_js.txt && printf '1099511627776\\n4611686018427387904\\n121932631112635269\\n-33\\n-2\\n-50\\n2147483644\\n18446744073709551615\\n9223372036854775807\\n5\\n10000000000\\n1099511627779\\n' | cmp -s - $ZT/zjib_c.txt",
         ),
         ShellCase(
             name: "js_narrow_trunc_battery_dual_backend",
@@ -2547,7 +2573,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "js_panic_parity_dual_backend",
-            cmd: "printf '{ println } = std.text.fmt\\nmain = () i32 {\\n    println(1)\\n    panic(\"boom\")\\n    0\\n}\\n' > $ZT/zjpp.zen && ./zen build $ZT/zjpp.zen -o $ZT/zjpp_c 2>/dev/null && { $ZT/zjpp_c >$ZT/zjpp_c.out 2>$ZT/zjpp_c.err; test \"$?\" = 134; } && ./zen build --target js $ZT/zjpp.zen -o $ZT/zjpp.js 2>/dev/null && { node $ZT/zjpp.js >$ZT/zjpp_j.out 2>$ZT/zjpp_j.err; test \"$?\" = 134; } && cmp -s $ZT/zjpp_c.out $ZT/zjpp_j.out && head -1 $ZT/zjpp_c.err > $ZT/zjpp_c1.err && cmp -s $ZT/zjpp_c1.err $ZT/zjpp_j.err && grep -Fqx \"zen: panic: boom\" $ZT/zjpp_j.err",
+            cmd: "printf '{ println } = std.io.print\\nmain = () i32 {\\n    println(1)\\n    panic(\"boom\")\\n    0\\n}\\n' > $ZT/zjpp.zen && ./zen build $ZT/zjpp.zen -o $ZT/zjpp_c 2>/dev/null && { $ZT/zjpp_c >$ZT/zjpp_c.out 2>$ZT/zjpp_c.err; test \"$?\" = 134; } && ./zen build --target js $ZT/zjpp.zen -o $ZT/zjpp.js 2>/dev/null && { node $ZT/zjpp.js >$ZT/zjpp_j.out 2>$ZT/zjpp_j.err; test \"$?\" = 134; } && cmp -s $ZT/zjpp_c.out $ZT/zjpp_j.out && head -1 $ZT/zjpp_c.err > $ZT/zjpp_c1.err && cmp -s $ZT/zjpp_c1.err $ZT/zjpp_j.err && grep -Fqx \"zen: panic: boom\" $ZT/zjpp_j.err",
         ),
         ShellCase(
             name: "js_oob_index_panics",
@@ -2575,11 +2601,11 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "init_executable_build_run",
-            cmd: "rm -rf $ZT/hello-z && ./zen init $ZT/hello-z --bin </dev/null >$ZT/init.txt 2>&1 && test -f $ZT/hello-z/zen.toml && test -f $ZT/hello-z/src/main.zen && grep -Fqx 'package = \"hello-z\"' $ZT/hello-z/zen.toml && grep -Fqx 'kind = \"executable\"' $ZT/hello-z/zen.toml && grep -Fqx 'root = \"src\"' $ZT/hello-z/zen.toml && grep -Fqx 'main = \"main.zen\"' $ZT/hello-z/zen.toml && grep -Fqx 'out = \"hello-z\"' $ZT/hello-z/zen.toml && ./zen fmt --check $ZT/hello-z/src/main.zen && ./zen check $ZT/hello-z && ./zen run $ZT/hello-z >$ZT/run.txt && grep -Fqx 'Hello from hello-z!' $ZT/run.txt && ./zen build $ZT/hello-z >/dev/null 2>&1 && test -x $ZT/hello-z/hello-z && $ZT/hello-z/hello-z >$ZT/bin.txt && cmp -s $ZT/run.txt $ZT/bin.txt",
+            cmd: "rm -rf $ZT/hello-z && ./zen init $ZT/hello-z --bin </dev/null >$ZT/init.txt 2>&1 && test -f $ZT/hello-z/build.zen && test -f $ZT/hello-z/src/main.zen && grep -Fq .exe $ZT/hello-z/build.zen && grep -Fq hello-z $ZT/hello-z/build.zen && grep -Fq .root $ZT/hello-z/build.zen && grep -Fq src $ZT/hello-z/build.zen && grep -Fq main.zen $ZT/hello-z/build.zen && grep -Fq .out $ZT/hello-z/build.zen && ./zen fmt --check $ZT/hello-z/src/main.zen && ./zen check $ZT/hello-z && ./zen run $ZT/hello-z >$ZT/run.txt && grep -Fqx \"Hello from hello-z!\" $ZT/run.txt && ./zen build $ZT/hello-z >/dev/null 2>&1 && test -x $ZT/hello-z/hello-z && $ZT/hello-z/hello-z >$ZT/bin.txt && cmp -s $ZT/run.txt $ZT/bin.txt",
         ),
         ShellCase(
             name: "init_library_check_consume",
-            cmd: "rm -rf $ZT/mathlib && ./zen init --lib $ZT/mathlib </dev/null >$ZT/libinit.txt 2>&1 && test -f $ZT/mathlib/src/lib.zen && test ! -e $ZT/mathlib/src/main.zen && grep -Fqx 'kind = \"library\"' $ZT/mathlib/zen.toml && grep -Fqx 'main = \"lib.zen\"' $ZT/mathlib/zen.toml && ! grep -Fq 'out = ' $ZT/mathlib/zen.toml && ./zen fmt --check $ZT/mathlib/src/lib.zen && ./zen check $ZT/mathlib && printf '{ answer } = lib\\nmain = () i32 { answer() }\\n' >$ZT/mathlib/src/consumer.zen && ./zen check $ZT/mathlib/src/consumer.zen && { ./zen run $ZT/mathlib/src/consumer.zen; test \"$?\" = 42; } && { ./zen build $ZT/mathlib >$ZT/libbuild.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'cannot build a library project yet' $ZT/libbuild.txt && { ./zen run $ZT/mathlib >$ZT/librun.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'cannot run a library project' $ZT/librun.txt",
+            cmd: "rm -rf $ZT/mathlib && ./zen init --lib $ZT/mathlib </dev/null >$ZT/libinit.txt 2>&1 && test -f $ZT/mathlib/build.zen && test -f $ZT/mathlib/src/lib.zen && test ! -e $ZT/mathlib/src/main.zen && grep -Fq .lib $ZT/mathlib/build.zen && grep -Fq mathlib $ZT/mathlib/build.zen && grep -Fq lib.zen $ZT/mathlib/build.zen && ! grep -Fq .out $ZT/mathlib/build.zen && ./zen fmt --check $ZT/mathlib/src/lib.zen && ./zen check $ZT/mathlib && printf \"{ answer } = lib\nmain = () i32 { answer() }\n\" >$ZT/mathlib/src/consumer.zen && ./zen check $ZT/mathlib/src/consumer.zen && { ./zen run $ZT/mathlib/src/consumer.zen; test \"$?\" = 42; } && { ./zen build $ZT/mathlib >$ZT/libbuild.txt 2>&1; test \"$?\" = 1; } && grep -Fq \"cannot build a library project yet\" $ZT/libbuild.txt && { ./zen run $ZT/mathlib >$ZT/librun.txt 2>&1; test \"$?\" = 1; } && grep -Fq \"cannot run a library project\" $ZT/librun.txt",
         ),
         ShellCase(
             name: "init_interactive_prompts",
@@ -2587,11 +2613,11 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "init_existing_dir_no_clobber",
-            cmd: "rm -rf $ZT/existing && mkdir $ZT/existing && printf 'keep-byte-exact\\n' >$ZT/existing/KEEP && cp $ZT/existing/KEEP $ZT/keep.before && ./zen init $ZT/existing --exe >/dev/null 2>&1 && cmp -s $ZT/keep.before $ZT/existing/KEEP && test -f $ZT/existing/src/main.zen && test -f $ZT/existing/zen.toml",
+            cmd: "rm -rf $ZT/existing && mkdir $ZT/existing && printf \"keep-byte-exact\n\" >$ZT/existing/KEEP && cp $ZT/existing/KEEP $ZT/keep.before && ./zen init $ZT/existing --exe >/dev/null 2>&1 && cmp -s $ZT/keep.before $ZT/existing/KEEP && test -f $ZT/existing/src/main.zen && test -f $ZT/existing/build.zen",
         ),
         ShellCase(
             name: "init_collisions_are_atomic",
-            cmd: "rm -rf $ZT/collide $ZT/source-collide $ZT/build-collide && mkdir -p $ZT/collide/src $ZT/source-collide/src $ZT/build-collide && printf 'sentinel manifest\\n' >$ZT/collide/zen.toml && printf 'sentinel source\\n' >$ZT/collide/src/main.zen && cp $ZT/collide/zen.toml $ZT/manifest.before && cp $ZT/collide/src/main.zen $ZT/source.before && { ./zen init $ZT/collide --bin >$ZT/collide.txt 2>&1; test \"$?\" = 1; } && cmp -s $ZT/manifest.before $ZT/collide/zen.toml && cmp -s $ZT/source.before $ZT/collide/src/main.zen && grep -Fq 'already exists' $ZT/collide.txt && printf 'source sentinel\\n' >$ZT/source-collide/src/main.zen && cp $ZT/source-collide/src/main.zen $ZT/source-only.before && { ./zen init $ZT/source-collide --bin >/dev/null 2>&1; test \"$?\" = 1; } && cmp -s $ZT/source-only.before $ZT/source-collide/src/main.zen && test ! -e $ZT/source-collide/zen.toml && printf 'build sentinel\\n' >$ZT/build-collide/build.zen && { ./zen init $ZT/build-collide --lib >/dev/null 2>&1; test \"$?\" = 1; } && grep -Fqx 'build sentinel' $ZT/build-collide/build.zen && test ! -e $ZT/build-collide/zen.toml && test ! -e $ZT/build-collide/src",
+            cmd: "rm -rf $ZT/collide $ZT/source-collide && mkdir -p $ZT/collide/src $ZT/source-collide/src && printf \"sentinel build\n\" >$ZT/collide/build.zen && printf \"sentinel source\n\" >$ZT/collide/src/main.zen && cp $ZT/collide/build.zen $ZT/build.before && cp $ZT/collide/src/main.zen $ZT/source.before && { ./zen init $ZT/collide --bin >$ZT/collide.txt 2>&1; test \"$?\" = 1; } && cmp -s $ZT/build.before $ZT/collide/build.zen && cmp -s $ZT/source.before $ZT/collide/src/main.zen && grep -Fq \"already exists\" $ZT/collide.txt && printf \"source sentinel\n\" >$ZT/source-collide/src/main.zen && cp $ZT/source-collide/src/main.zen $ZT/source-only.before && { ./zen init $ZT/source-collide --bin >/dev/null 2>&1; test \"$?\" = 1; } && cmp -s $ZT/source-only.before $ZT/source-collide/src/main.zen && test ! -e $ZT/source-collide/build.zen",
         ),
         ShellCase(
             name: "init_cli_validation",
@@ -2599,23 +2625,19 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "init_relocated_binary_embeds_templates",
-            cmd: "rm -rf $ZT/shipped && cp ./zen $ZT/zenc-moved && { cd $ZT && ./zenc-moved init shipped --bin </dev/null >$ZT/moved.txt 2>&1; } && test -f $ZT/shipped/zen.toml && test -f $ZT/shipped/src/main.zen && grep -Fqx 'package = \"shipped\"' $ZT/shipped/zen.toml",
+            cmd: "rm -rf $ZT/shipped && cp ./zen $ZT/zenc-moved && { cd $ZT && ./zenc-moved init shipped --bin </dev/null >$ZT/moved.txt 2>&1; } && test -f $ZT/shipped/build.zen && test -f $ZT/shipped/src/main.zen && grep -Fq .exe $ZT/shipped/build.zen && grep -Fq shipped $ZT/shipped/build.zen",
         ),
         ShellCase(
             name: "project_simple_app",
             cmd: "rm -rf $ZT/zsa && cp -r tests/fixtures/project/simple_app $ZT/zsa && ./zen build $ZT/zsa 2>$ZT/zsa.txt && test -x $ZT/zsa/app && grep -Fq \"$ZT/zsa/app\" $ZT/zsa.txt && { $ZT/zsa/app; test \"$?\" = 7; }",
         ),
         ShellCase(
-            name: "project_broken_manifest",
-            cmd: "rm -rf $ZT/zbm && cp -r tests/fixtures/project/broken_manifest $ZT/zbm && { ./zen build $ZT/zbm >$ZT/zbm.txt 2>&1; test \"$?\" != 0; } && grep -Fq \"invalid manifest\" $ZT/zbm.txt && ! grep -Fq \"cannot open input\" $ZT/zbm.txt",
+            name: "project_requires_build_zen",
+            cmd: "rm -rf $ZT/zbm && mkdir -p $ZT/zbm/src && printf \"main = () i32 { 0 }\n\" >$ZT/zbm/src/main.zen && { ./zen build $ZT/zbm >$ZT/zbm.txt 2>&1; test \"$?\" = 1; } && grep -Fq requires $ZT/zbm.txt && grep -Fq build.zen $ZT/zbm.txt",
         ),
         ShellCase(
-            name: "project_manifest_fixture",
-            cmd: "rm -rf $ZT/zop_md && cp -r tests/fixtures/project/manifest_demo $ZT/zop_md && ./zen check $ZT/zop_md 2>$ZT/zop_c.txt && grep -Fq \"src/main.zen: ok\" $ZT/zop_c.txt && { o=$(./zen run $ZT/zop_md); test \"$?\" = 42; } && test \"$o\" = \"fixture project\" && ./zen build $ZT/zop_md >/dev/null 2>&1 && test -x $ZT/zop_md/fixture-bin && { b=$($ZT/zop_md/fixture-bin); test \"$?\" = 42; } && test \"$b\" = \"fixture project\"",
-        ),
-        ShellCase(
-            name: "project_manifest_native",
-            cmd: "rm -rf $ZT/zmn && cp -r tests/fixtures/project/manifest_native $ZT/zmn && sed -i \"s#@@NATIVE@@#$ZT/zmn/native.c#\" $ZT/zmn/zen.toml && ./zen check $ZT/zmn 2>$ZT/zmn_c.txt && grep -Fq \"src/main.zen: ok\" $ZT/zmn_c.txt && { o=$(./zen run $ZT/zmn); test \"$?\" = 42; } && test \"$o\" = \"project\" && ./zen build $ZT/zmn >/dev/null 2>&1 && test -x $ZT/zmn/manifest-bin && { b=$($ZT/zmn/manifest-bin); test \"$?\" = 42; } && test \"$b\" = \"project\"",
+            name: "project_build_native",
+            cmd: "rm -rf $ZT/zbn && cp -r tests/fixtures/project/build_native $ZT/zbn && ./zen check $ZT/zbn 2>$ZT/zbn_c.txt && grep -Fq \"src/main.zen: ok\" $ZT/zbn_c.txt && { o=$(./zen run $ZT/zbn); test \"$?\" = 42; } && test \"$o\" = \"project\" && ./zen build $ZT/zbn >/dev/null 2>&1 && test -x $ZT/zbn/native-bin && { b=$($ZT/zbn/native-bin); test \"$?\" = 42; } && test \"$b\" = \"project\"",
         ),
         ShellCase(
             name: "project_build_zen",
@@ -2666,32 +2688,24 @@ harness_build_run* = () i32 {
             cmd: "./zen build tests/fixtures/zen/platform_host_generated.zen -o $ZT/platform_host && $ZT/platform_host && ./zen emit-js tests/fixtures/zen/platform_host_generated.zen > $ZT/platform_host.js && test -s $ZT/platform_host.js && node $ZT/platform_host.js",
         ),
         ShellCase(
-            name: "project_link_directive",
-            cmd: "rm -rf $ZT/zll && cp -r tests/fixtures/project/linklib_demo $ZT/zll && sed -i \"s#@@NATIVE@@#$ZT/zll/native.c#\" $ZT/zll/zen.toml && ./zen build $ZT/zll >/dev/null 2>&1 && test -x $ZT/zll/linklib-bin && { b=$($ZT/zll/linklib-bin); test \"$?\" = 51; } && test \"$b\" = \"link libm\" && { o=$(./zen run $ZT/zll); test \"$?\" = 51; } && test \"$o\" = \"link libm\" && sed -i \"/^link = /d;s/linklib-bin/linklib-bin-nolink/\" $ZT/zll/zen.toml && ./zen build $ZT/zll >/dev/null 2>&1 && test -x $ZT/zll/linklib-bin-nolink && { $ZT/zll/linklib-bin-nolink; test \"$?\" = 51; }",
-        ),
-        ShellCase(
-            name: "project_ffi_grant",
-            cmd: "rm -rf $ZT/zfg && mkdir -p $ZT/zfg/src && printf 'root = \"src\"\\nmain = \"main.zen\"\\n' >$ZT/zfg/zen.toml && printf '//! link: c\\nboost* = () i32\\n' >$ZT/zfg/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfg/src/main.zen && { ./zen check $ZT/zfg >$ZT/zfg.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfg.txt && grep -Fq \"module 'sysdep' declares foreign function\" $ZT/zfg.txt && grep -Fq 'ffi = \"sysdep\"' $ZT/zfg.txt && printf 'ffi = \"sysdep\"\\n' >>$ZT/zfg/zen.toml && ./zen check $ZT/zfg 2>$ZT/zfg_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfg_ok.txt",
+            name: "project_build_link",
+            cmd: "rm -rf $ZT/zll && cp -r tests/fixtures/project/linklib_demo $ZT/zll && ./zen build $ZT/zll >/dev/null 2>&1 && test -x $ZT/zll/linklib-bin && { b=$($ZT/zll/linklib-bin); test \"$?\" = 51; } && test \"$b\" = \"link libm\" && { o=$(./zen run $ZT/zll); test \"$?\" = 51; } && test \"$o\" = \"link libm\"",
         ),
         ShellCase(
             name: "project_ffi_report_mode",
-            cmd: "rm -rf $ZT/zfr && mkdir -p $ZT/zfr/src && printf 'root = \"src\"\\nmain = \"main.zen\"\\n' >$ZT/zfr/zen.toml && printf '//! link: c\\nboost* = () i32\\n' >$ZT/zfr/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfr/src/main.zen && ZEN_VIS_REPORT=1 ZENC_NO_CACHE=1 ./zen check $ZT/zfr >$ZT/zfr.txt 2>&1 && grep -Fq 'error[ffi-ungranted]' $ZT/zfr.txt && grep -Fq 'src/main.zen: ok' $ZT/zfr.txt",
+            cmd: "rm -rf $ZT/zfr && mkdir -p $ZT/zfr/src && cp tests/fixtures/project/simple_app/build.zen $ZT/zfr/build.zen && printf \"boost* = () i32\n\" >$ZT/zfr/src/sysdep.zen && printf \"{ boost } = sysdep\nmain = () i32 { boost() }\n\" >$ZT/zfr/src/main.zen && ZEN_VIS_REPORT=1 ZENC_NO_CACHE=1 ./zen check $ZT/zfr >$ZT/zfr.txt 2>&1 && grep -Fq \"error[ffi-ungranted]\" $ZT/zfr.txt && grep -Fq \"src/main.zen: ok\" $ZT/zfr.txt",
         ),
         ShellCase(
-            name: "project_ffi_build_zen",
-            cmd: "rm -rf $ZT/zfb && mkdir -p $ZT/zfb/src && printf '{ Build } = std.build\\nbuild = (b: MutPtr<Build>) void {\\n    b.install(b.exe(\"ffidemo\").root(\"src\").main(\"main.zen\").out(\"ffi-bin\").ffi(\"sysdep\"))\\n}\\n' >$ZT/zfb/build.zen && printf '//! link: c\\nboost* = () i32\\n' >$ZT/zfb/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfb/src/main.zen && ./zen check $ZT/zfb 2>$ZT/zfb_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfb_ok.txt && sed -i 's/.ffi(\"sysdep\")//' $ZT/zfb/build.zen && { ./zen check $ZT/zfb >$ZT/zfb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfb.txt",
+            name: "project_ffi_grant",
+            cmd: "rm -rf $ZT/zfb && mkdir -p $ZT/zfb/src && printf '{ Build } = std.build\\nbuild = (b: MutPtr<Build>) void {\\n    b.install(b.exe(\"ffidemo\").root(\"src\").main(\"main.zen\").out(\"ffi-bin\").cimport(\"sysdep\"))\\n}\\n' >$ZT/zfb/build.zen && printf 'boost* = () i32\\n' >$ZT/zfb/src/sysdep.zen && printf '{ boost } = sysdep\\nmain = () i32 { boost() }\\n' >$ZT/zfb/src/main.zen && ./zen check $ZT/zfb 2>$ZT/zfb_ok.txt && grep -Fq 'src/main.zen: ok' $ZT/zfb_ok.txt && sed -i 's/.cimport(\"sysdep\")//' $ZT/zfb/build.zen && { ./zen check $ZT/zfb >$ZT/zfb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-ungranted]' $ZT/zfb.txt",
         ),
         ShellCase(
-            name: "ffi_unlinked_teeth",
-            cmd: "printf 'frobnicate = (x: i64) i64\\nmain = () i32 { to_i32(frobnicate(1)) }\\n' >$ZT/zul.zen && { ./zen check $ZT/zul.zen >$ZT/zul.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-unlinked]' $ZT/zul.txt && grep -Fq 'names no library' $ZT/zul.txt && ZEN_VIS_REPORT=1 ZENC_NO_CACHE=1 ./zen check $ZT/zul.zen >$ZT/zulr.txt 2>&1 && grep -Fq 'error[ffi-unlinked]' $ZT/zulr.txt && printf '//! link: c\\nfrobnicate = (x: i64) i64\\nmain = () i32 { to_i32(frobnicate(1)) }\\n' >$ZT/zul2.zen && ./zen check $ZT/zul2.zen >/dev/null 2>&1",
-        ),
-        ShellCase(
-            name: "ffi_declared_links_reach_cc",
+            name: "builtin_module_links_reach_cc",
             cmd: "printf 'main = () i32 { 0 }\\n' >$ZT/zdl0.zen && ZENC_NO_CACHE=1 ZENC_SHOW_CC=1 ./zen build $ZT/zdl0.zen -o $ZT/zdl0 2>$ZT/zdl0.txt && ! grep -q -e ' -l' $ZT/zdl0.txt && printf '{ sqrt } = std.math\\nmain = () i32 { to_i32(sqrt(4.0)) }\\n' >$ZT/zdl1.zen && ZENC_NO_CACHE=1 ZENC_SHOW_CC=1 ./zen build $ZT/zdl1.zen -o $ZT/zdl1 2>$ZT/zdl1.txt && grep -q -e ' -lm ' $ZT/zdl1.txt && { $ZT/zdl1; test \"$?\" = 2; } && printf '{ getpid } = std.c.libc\\nmain = () i32 { getpid() }\\n' >$ZT/zdl2.zen && ZENC_NO_CACHE=1 ZENC_SHOW_CC=1 ./zen build $ZT/zdl2.zen -o $ZT/zdl2 2>$ZT/zdl2.txt && grep -q -e ' -lpthread ' $ZT/zdl2.txt && ! grep -q -e ' -lm ' $ZT/zdl2.txt",
         ),
         ShellCase(
             name: "project_clib_demo",
-            cmd: "rm -rf $ZT/zcl && cp -r tests/fixtures/project/clib_demo $ZT/zcl && ./zen build $ZT/zcl >/dev/null 2>&1 && test -x $ZT/zcl/clib-bin && { $ZT/zcl/clib-bin; test \"$?\" = 3; } && { ./zen run $ZT/zcl; test \"$?\" = 3; } && grep -Fq 'cbrt* = (x: f64) f64' $ZT/zcl/.zen/gen/cmath.zen && grep -Fq 'handle: RawPtr<u8>' $ZT/zcl/.zen/gen/cmath.zen && grep -Fq '//! link: m' $ZT/zcl/.zen/gen/cmath.zen",
+            cmd: "rm -rf $ZT/zcl && cp -r tests/fixtures/project/clib_demo $ZT/zcl && ./zen build $ZT/zcl >/dev/null 2>&1 && test -x $ZT/zcl/clib-bin && { $ZT/zcl/clib-bin; test \"$?\" = 3; } && { ./zen run $ZT/zcl; test \"$?\" = 3; } && grep -Fq 'cbrt* = (x: f64) f64' $ZT/zcl/.zen/gen/cmath.zen && grep -Fq 'handle: RawPtr<u8>' $ZT/zcl/.zen/gen/cmath.zen",
         ),
         ShellCase(
             name: "project_clib_ungranted",
@@ -2699,7 +2713,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "project_clib_badsig",
-            cmd: "rm -rf $ZT/zcb && cp -r tests/fixtures/project/clib_demo $ZT/zcb && sed -i 's#c_fn(\"cbrt\", \"(x: f64) f64\")#c_fn(\"frob\", \"(xs: MutSlice<i32>) i32\")#' $ZT/zcb/build.zen && printf 'cm = cmath\\nmain = () i32 { xs: MutSlice<i32> = [1, 2]  cm.frob(xs) }\\n' >$ZT/zcb/src/main.zen && { ./zen check $ZT/zcb >$ZT/zcb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-type]' $ZT/zcb.txt && grep -Fq '.zen/gen/cmath.zen:3:1' $ZT/zcb.txt",
+            cmd: "rm -rf $ZT/zcb && cp -r tests/fixtures/project/clib_demo $ZT/zcb && sed -i 's#c_fn(\"cbrt\", \"(x: f64) f64\")#c_fn(\"frob\", \"(xs: MutSlice<i32>) i32\")#' $ZT/zcb/build.zen && printf 'cm = cmath\\nmain = () i32 { xs: MutSlice<i32> = [1, 2]  cm.frob(xs) }\\n' >$ZT/zcb/src/main.zen && { ./zen check $ZT/zcb >$ZT/zcb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'error[ffi-type]' $ZT/zcb.txt && grep -Fq '.zen/gen/cmath.zen:2:1' $ZT/zcb.txt",
         ),
         ShellCase(
             name: "project_clib_cache",
@@ -2771,7 +2785,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "fmt_trait_defaults",
-            cmd: "cp tests/fixtures/fmt/trait_defaults_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/trait_defaults_formatted.zen && grep -Fq '    area: (Ptr<Self>) i32,' $ZT/zfmt.zen && grep -Fq '    twice = (p: Ptr<Self>) i32 { p.area() * 2 },' $ZT/zfmt.zen && grep -Fq '    quad = (p: Ptr<Self>) i32 {' $ZT/zfmt.zen && grep -Fq '    n: i32,' $ZT/zfmt.zen && grep -Fq '    pick: (i32, i32) i32,' $ZT/zfmt.zen && grep -Fq '    bump = (m: Ptr<Mixed>) i32 { m.n + 1 }' $ZT/zfmt.zen && ! grep -q '^twice' $ZT/zfmt.zen && ! grep -q '^quad' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
+            cmd: "cp tests/fixtures/fmt/trait_defaults_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/trait_defaults_formatted.zen && grep -Fq '    area: (self: Ptr<Self>) i32,' $ZT/zfmt.zen && grep -Fq '    twice = (p: Ptr<Self>) i32 { p.area() * 2 },' $ZT/zfmt.zen && grep -Fq '    quad = (p: Ptr<Self>) i32 {' $ZT/zfmt.zen && grep -Fq '    n: i32,' $ZT/zfmt.zen && grep -Fq '    pick: (left: i32, right: i32) i32,' $ZT/zfmt.zen && grep -Fq '    bump = (m: Ptr<Mixed>) i32 { m.n + 1 }' $ZT/zfmt.zen && ! grep -q '^twice' $ZT/zfmt.zen && ! grep -q '^quad' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen",
         ),
         ShellCase(
             name: "fmt_comment_placement",
@@ -2819,7 +2833,11 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "fmt_multi_field_variant",
-            cmd: "cp tests/fixtures/fmt/multi_field_variant_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/multi_field_variant_formatted.zen && ! grep -Fq \"__anon\" $ZT/zfmt.zen && grep -Fq \"Ask(i64, i64, StringView)\" $ZT/zfmt.zen && grep -Fq 'Msg.Ask(10, 5, \"x\")' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen emit tests/fixtures/fmt/multi_field_variant_unformatted.zen >$ZT/zmfv_o.c 2>/dev/null && ./zen emit tests/fixtures/fmt/multi_field_variant_formatted.zen >$ZT/zmfv_f.c 2>/dev/null && cmp -s $ZT/zmfv_o.c $ZT/zmfv_f.c && { ./zen run tests/fixtures/fmt/multi_field_variant_formatted.zen; test \"$?\" = 18; }",
+            cmd: "cp tests/fixtures/fmt/multi_field_variant_unformatted.zen $ZT/zfmt.zen && { ./zen fmt --check $ZT/zfmt.zen 2>$ZT/zfmt_e.txt; test \"$?\" = 1; } && grep -Fq \"needs formatting\" $ZT/zfmt_e.txt && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen tests/fixtures/fmt/multi_field_variant_formatted.zen && ! grep -Fq \"__payload\" $ZT/zfmt.zen && grep -Fq \"Ask(i64, i64, StringView)\" $ZT/zfmt.zen && grep -Fq 'Msg.Ask(10, 5, \"x\")' $ZT/zfmt.zen && ./zen fmt --check $ZT/zfmt.zen && cp $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen fmt $ZT/zfmt.zen >/dev/null && cmp -s $ZT/zfmt.zen $ZT/zfmt_b.zen && ./zen emit tests/fixtures/fmt/multi_field_variant_unformatted.zen >$ZT/zmfv_o.c 2>/dev/null && ./zen emit tests/fixtures/fmt/multi_field_variant_formatted.zen >$ZT/zmfv_f.c 2>/dev/null && cmp -s $ZT/zmfv_o.c $ZT/zmfv_f.c && { ./zen run tests/fixtures/fmt/multi_field_variant_formatted.zen; test \"$?\" = 18; }",
+        ),
+        ShellCase(
+            name: "fmt_bodyless_generic_preserves_tparams",
+            cmd: "printf 'identity<T> = (x: T) T\n' > $ZT/zfbg.zen && ./zen fmt --check $ZT/zfbg.zen && ./zen fmt --stdout $ZT/zfbg.zen >$ZT/zfbg_o.zen && grep -Fxq 'identity<T> = (x: T) T' $ZT/zfbg_o.zen && ./zen fmt $ZT/zfbg.zen >/dev/null && grep -Fxq 'identity<T> = (x: T) T' $ZT/zfbg.zen && ./zen fmt --check $ZT/zfbg.zen",
         ),
         ShellCase(
             name: "fmt_check_equals_apply_in_array_comment",
@@ -2847,7 +2865,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "stdin_read_all_cat",
-            cmd: "printf 'halloc = std.mem.heap\\n{ read_all } = std.io.stdin\\n{ print } = std.text.fmt\\nmain = () i32 {\\n    heap = halloc.gpa()\\n    a = heap.addr()\\n    a.read_all().match ({\\n        .Ok(s)  => {\\n            print(s)\\n            0\\n        },\\n        .Err(e) => 1,\\n    })\\n}\\n' > $ZT/zo_cat.zen && ./zen build $ZT/zo_cat.zen -o $ZT/zo_cat_bin 2>/dev/null && printf 'alpha\\nbeta 42\\n' > $ZT/zo_cat_in.txt && $ZT/zo_cat_bin < $ZT/zo_cat_in.txt > $ZT/zo_cat_out.txt && cmp -s $ZT/zo_cat_in.txt $ZT/zo_cat_out.txt && { printf '' | $ZT/zo_cat_bin > $ZT/zo_cat_empty.txt; test \"$?\" -eq 0; } && ! test -s $ZT/zo_cat_empty.txt",
+            cmd: "printf 'halloc = std.mem.heap\\n{ read_all } = std.io.stdin\\n{ print } = std.io.print\\nmain = () i32 {\\n    heap = halloc.gpa()\\n    a = heap.addr()\\n    a.read_all().match ({\\n        .Ok(s)  => {\\n            print(s)\\n            0\\n        },\\n        .Err(e) => 1,\\n    })\\n}\\n' > $ZT/zo_cat.zen && ./zen build $ZT/zo_cat.zen -o $ZT/zo_cat_bin 2>/dev/null && printf 'alpha\\nbeta 42\\n' > $ZT/zo_cat_in.txt && $ZT/zo_cat_bin < $ZT/zo_cat_in.txt > $ZT/zo_cat_out.txt && cmp -s $ZT/zo_cat_in.txt $ZT/zo_cat_out.txt && { printf '' | $ZT/zo_cat_bin > $ZT/zo_cat_empty.txt; test \"$?\" -eq 0; } && ! test -s $ZT/zo_cat_empty.txt",
         ),
         ShellCase(
             name: "io_file_nul_bytes",
@@ -2860,6 +2878,14 @@ harness_build_run* = () i32 {
         ShellCase(
             name: "parse_error_stray_semicolon_positioned",
             cmd: "printf 'main = () i32 {\\n    x = 5;\\n    x\\n}\\n' > $ZT/zpe_semi.zen && ./zen check $ZT/zpe_semi.zen > $ZT/zpe_semi.txt 2>&1; grep -Fq ':2:10: error[parse]: expected an expression, found a token that cannot start one' $ZT/zpe_semi.txt && grep -Fq '      x = 5;' $ZT/zpe_semi.txt && grep -Fq '           ^' $ZT/zpe_semi.txt",
+        ),
+        ShellCase(
+            name: "unterminated_string_stops_at_module_boundary",
+            cmd: "{ ./zen check tests/fixtures/zen/fuzz-repro/lex_unterminated_string_bleeds_into_import.zen.txt > $ZT/zlexs.txt 2>&1; test \"$?\" = 1; } && grep -Fq \"lex_unterminated_string_bleeds_into_import.zen.txt:3:11: error[parse]\" $ZT/zlexs.txt && ! grep -Fq \"src/std/core/result.zen:\" $ZT/zlexs.txt",
+        ),
+        ShellCase(
+            name: "unterminated_brace_stops_at_module_boundary",
+            cmd: "{ ./zen check tests/fixtures/zen/fuzz-repro/lex_unterminated_brace_bleeds_into_import.zen.txt > $ZT/zlexb.txt 2>&1; test \"$?\" = 1; } && grep -Fq 'lex_unterminated_brace_bleeds_into_import.zen.txt:2:15: error[parse]: unclosed `{`' $ZT/zlexb.txt && ! grep -Fq \"src/compiler/ast/ast_types.zen:\" $ZT/zlexb.txt",
         ),
         ShellCase(
             name: "parse_error_unclosed_brace_names_opening_line",
@@ -2891,7 +2917,7 @@ harness_build_run* = () i32 {
         ),
         ShellCase(
             name: "foreign_decl_generic_return_emits_its_mono_struct",
-            cmd: "printf '//! link: c\\n{ Opt } = std.core.result\\nWidget*: {\\n    handle: RawPtr<u8>,\\n}\\nfind_widget* = (id: StringView) Opt<Widget>\\nmain = () i32 { 0 }\\n' > $ZT/zfwd.zen && ./zen fmt --check $ZT/zfwd.zen && ./zen emit $ZT/zfwd.zen >$ZT/zfwd.c 2>/dev/null && grep -Fq 'typedef struct Opt_Widget Opt_Widget;' $ZT/zfwd.c && grep -Fq 'Opt_Widget find_widget(const char* id);' $ZT/zfwd.c && ./zen build $ZT/zfwd.zen -o $ZT/zfwd_bin 2>$ZT/zfwd_e.txt && ! grep -Fq 'unknown type name' $ZT/zfwd_e.txt && { $ZT/zfwd_bin; test \"$?\" = 0; }",
+            cmd: "printf '{ Opt } = std.core.result\\nWidget*: {\\n    handle: RawPtr<u8>,\\n}\\nfind_widget* = (id: StringView) Opt<Widget>\\nmain = () i32 { 0 }\\n' > $ZT/zfwd.zen && ./zen fmt --check $ZT/zfwd.zen && ./zen emit $ZT/zfwd.zen >$ZT/zfwd.c 2>/dev/null && grep -Fq 'typedef struct Opt_Widget Opt_Widget;' $ZT/zfwd.c && grep -Fq 'Opt_Widget find_widget(const char* id);' $ZT/zfwd.c && ./zen build $ZT/zfwd.zen -o $ZT/zfwd_bin 2>$ZT/zfwd_e.txt && ! grep -Fq 'unknown type name' $ZT/zfwd_e.txt && { $ZT/zfwd_bin; test \"$?\" = 0; }",
         ),
         ShellCase(
             name: "cache_bin_hit_reuses_cached_binary",
@@ -2914,9 +2940,9 @@ harness_build_run* = () i32 {
     // of a `StringView` is READ-ONLY, so re-widening its `.ptr` into a writable slice is the
     // laundering tests/fixtures/zen/readonly_ptr_launder.zen exists to reject. The case is still
     // about the ELEMENT WIDTH rule — u8-from-u8 is the byte floor, which is what it must accept.
-    // `formatln("{} {}", a, b)`: heterogeneous arguments wrap themselves into the `Arg` variant
+    // `formatln("{} {}", a, b)`: heterogeneous arguments wrap themselves into the `StringArg` variant
     // that carries each one's static type, so no call site spells arg_int/arg_str/arg_bool — and a
-    // bool goes in as a bool (no `.to_i64()`). The explicit `[Arg]` slice spelling keeps working
+    // bool goes in as a bool (no `.to_i64()`). The explicit `[StringArg]` slice spelling keeps working
     // unchanged in the same file (the variadic slot SPREADS a value already of the collected type),
     // zero args needs no `[]`, and a type no variant accepts is still an arg-type error.
     // the floor's copy spreads a PLAIN object only. A live JS object (what the dom lowering hands

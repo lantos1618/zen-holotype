@@ -1,0 +1,57 @@
+// CSV acceptance: byte-token parsing, quoted delimiters/newlines, doubled quotes, CRLF,
+// serialization round-trip, malformed input, and complete successful-result cleanup.
+heap = std.mem.heap
+csv = std.format.csv
+{ AllocatorBackend, Heap } = std.mem.alloc
+{ expect } = std.core.result
+{ eq, own_ptr } = std.text.str
+{ to_exit } = std.core.bool
+Counting: {
+    heap: Heap,
+    acquires: i64,
+    releases: i64,
+}
+Counting.impl(AllocatorBackend, {
+    acquire = (a: MutPtr<Counting>, n: i64) RawPtr<u8> {
+        a.acquires = a.acquires + 1
+        a.heap.addr().acquire(n)
+    }
+    resize = (a: MutPtr<Counting>, p: RawPtr<u8>, n: i64) RawPtr<u8> { a.heap.addr().resize(p, n) }
+    release = (a: MutPtr<Counting>, p: RawPtr<u8>) void {
+        a.releases = a.releases + 1
+        a.heap.addr().release(p)
+    }
+})
+main = () i32 {
+    mem = Counting(
+        heap: heap.gpa(),
+        acquires: 0,
+        releases: 0,
+    )
+    a = mem.addr()
+    src = "a,\"b,b\",\"c\"\"d\"\r\nx,\"line\nbreak\",z"
+    rows = csv.parse(a, src).expect("parse")
+    parsed_ok = rows.len == 2
+        && rows[0].len == 3
+        && rows[1].len == 3
+        && rows[0][0].eq("a")
+        && rows[0][1].eq("b,b")
+        && rows[0][2].eq("c\"d")
+        && rows[1][1].eq("line\nbreak")
+    rendered = csv.write_rows(a, rows).expect("write")
+    written_ok = rendered.eq("a,\"b,b\",\"c\"\"d\"\nx,\"line\nbreak\",z\n")
+    round = csv.parse(a, rendered).expect("round")
+    round_ok = round.len == 2 && round[1][1].eq("line\nbreak")
+    bad_ok = csv.parse(a, "a,\"unterminated").match ({
+        .Ok(unexpected) => {
+            csv.release_parse(a, unexpected)
+            false
+        },
+        .Err(e)         => true,
+    })
+    csv.release_parse(a, round)
+    csv.release_parse(a, rows)
+    a.release(rendered.own_ptr())
+    balanced = mem.acquires == mem.releases
+    (parsed_ok && written_ok && round_ok && bad_ok && balanced).to_exit()
+}

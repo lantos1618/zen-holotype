@@ -24,15 +24,14 @@
 { resolve_failed, resolve_message, resolve_program_data, undefined_name_hint, ResolvedProgram,
   SourceOverlay } = compiler.resolve
 { impl_cname_in } = compiler.mangle
-{ gstr_string, gstr_append, gstr_finish, gstr_push, acquire_or_die, cbuf } = compiler.genc
+{ acquire_or_die, cbuf } = compiler.genc
 { push_int, dirname, cstr_range, cstr_substr } = compiler.drvutil
 { lspt_legend, lspt_tokens } = compiler.lsp_tokens
 { LspDocs, lspd_init, lspd_cache_tokens, lspd_close, lspd_count, lspd_find, lspd_set, lspd_text_at,
   lspd_tokens_at, lspd_uri_at, lspd_version_at } = compiler.lsp_docs
 { cd_or, locate_diag } = compiler.drvdiag
-{ SymbolIndex, SymbolKey, SymbolSourceSpan, SymbolOccurrence, SymbolDecl, resolve_symbol_index,
-  symbol_key_eq, SYMBOL_FUNCTION, SYMBOL_GLOBAL, SYMBOL_TYPE, SYMBOL_METHOD, SYMBOL_LET,
-  SYMBOL_PARAM } = compiler.symbols
+{ SymbolIndex, SymbolKey, SymbolKind, SymbolSourceSpan, SymbolOccurrence, SymbolDecl,
+  resolve_symbol_index, symbol_key_eq } = compiler.symbols
 { ff_is_hoisted } = compiler.pretty_decl
 { lsp_byte_of_pos, lsp_find_def, lsp_ident_end, lsp_ident_start, lspq_hover, lspq_items,
   lspq_reserved_name } = compiler.lsp_query
@@ -95,40 +94,32 @@ lout = (s: StringView) i64 {
 }
 // frame + write one JSON-RPC message: `Content-Length: <bytes>\r\n\r\n<body>`.
 lsp_send = (mp: Allocator, body: StringView) i64 {
-    lout(mp
-        .gstr_string(48)
-        .gstr_append(mp, "Content-Length: ")
-        .push_int(mp, body.view().len)
-        .gstr_append(mp, "\r\n\r\n")
-        .gstr_finish(mp))
+    lout(mp.String(48).add("Content-Length: ").push_int(mp, body.view().len).add("\r\n\r\n").finish_cstr())
     lout(body)
 }
 // ── JSON string EMISSION (own escaper; the task sanctions building output as strings) ─────────────
 push_uesc = (sb: String, mp: Allocator, b: u8) String {
     bi = b.to_i64()
-    sb
-        .gstr_append(mp, "\\u00")
-        .gstr_push(mp, hex_char(bi >> 4 & 15))
-        .gstr_push(mp, hex_char(bi & 15))
+    sb.add("\\u00").add_one(hex_char(bi >> 4 & 15)).add_one(hex_char(bi & 15))
 }
 // append `s` as a JSON string LITERAL (surrounding quotes + escaped) to the builder.
 push_jstr = (sb: String, mp: Allocator, s: StringView) String {
-    cur ::= sb.gstr_push(mp, '"')
+    cur ::= sb.add_one('"')
     v: Slice<u8> = s.view()
     v.loop_at((i, b) {
         cur = (b == '"').match ({
-            true  => cur.gstr_append(mp, "\\\""),
+            true  => cur.add("\\\""),
             false => (b == '\\').match ({
-                true  => cur.gstr_append(mp, "\\\\"),
+                true  => cur.add("\\\\"),
                 false => (b == '\n').match ({
-                    true  => cur.gstr_append(mp, "\\n"),
+                    true  => cur.add("\\n"),
                     false => (b == '\r').match ({
-                        true  => cur.gstr_append(mp, "\\r"),
+                        true  => cur.add("\\r"),
                         false => (b == '\t').match ({
-                            true  => cur.gstr_append(mp, "\\t"),
+                            true  => cur.add("\\t"),
                             false => (b < 32).match ({
                                 true  => cur.push_uesc(mp, b),
-                                false => cur.gstr_push(mp, b),
+                                false => cur.add_one(b),
                             }),
                         }),
                     }),
@@ -136,7 +127,7 @@ push_jstr = (sb: String, mp: Allocator, s: StringView) String {
             }),
         })
     })
-    cur.gstr_push(mp, '"')
+    cur.add_one('"')
 }
 // ── incoming JSON extraction (hand-rolled; std.json's `parse`/`get` collide with the compiler's own
 // flat `parse`/`get` names once this closure imports compiler.parse, so a targeted scanner is used).
@@ -327,28 +318,28 @@ json_hexq = (v: Slice<u8>, at: i64) i64 {
 // UTF-8 encode one Unicode scalar into the builder.
 push_utf8 = (sb: String, mp: Allocator, cp: i64) String {
     (cp < 128).match ({
-        true  => sb.gstr_push(mp, cp.to_u8()),
+        true  => sb.add_one(cp.to_u8()),
         false => (cp < 2048).match ({
             true  => sb
-                .gstr_push(mp, (192 | cp >> 6).to_u8())
-                .gstr_push(mp, (128 | cp & 63).to_u8()),
+                .add_one((192 | cp >> 6).to_u8())
+                .add_one((128 | cp & 63).to_u8()),
             false => (cp < 65536).match ({
                 true  => sb
-                    .gstr_push(mp, (224 | cp >> 12).to_u8())
-                    .gstr_push(mp, (128 | cp >> 6 & 63).to_u8())
-                    .gstr_push(mp, (128 | cp & 63).to_u8()),
+                    .add_one((224 | cp >> 12).to_u8())
+                    .add_one((128 | cp >> 6 & 63).to_u8())
+                    .add_one((128 | cp & 63).to_u8()),
                 false => sb
-                    .gstr_push(mp, (240 | cp >> 18).to_u8())
-                    .gstr_push(mp, (128 | cp >> 12 & 63).to_u8())
-                    .gstr_push(mp, (128 | cp >> 6 & 63).to_u8())
-                    .gstr_push(mp, (128 | cp & 63).to_u8()),
+                    .add_one((240 | cp >> 18).to_u8())
+                    .add_one((128 | cp >> 12 & 63).to_u8())
+                    .add_one((128 | cp >> 6 & 63).to_u8())
+                    .add_one((128 | cp & 63).to_u8()),
             }),
         }),
     })
 }
 // decode the JSON string opening at v[i]=='"' into an allocator-owned view (escapes resolved).
 json_decode_str = (mp: Allocator, v: Slice<u8>, i: i64) StringView {
-    sb ::= mp.gstr_string(v.len - i + 1)
+    sb ::= mp.String(v.len - i + 1)
     (i + 1).step_while((j) { j < v.len && v[j] != '"' }, (j) {
         b = v[j]
         (b == '\\' && j + 1 < v.len).match ({
@@ -356,27 +347,27 @@ json_decode_str = (mp: Allocator, v: Slice<u8>, i: i64) StringView {
                 e = v[j + 1]
                 (e == 'n').match ({
                     true  => {
-                        sb = sb.gstr_push(mp, '\n')
+                        sb = sb.add_one('\n')
                         j + 2
                     },
                     false => (e == 't').match ({
                         true  => {
-                            sb = sb.gstr_push(mp, '\t')
+                            sb = sb.add_one('\t')
                             j + 2
                         },
                         false => (e == 'r').match ({
                             true  => {
-                                sb = sb.gstr_push(mp, '\r')
+                                sb = sb.add_one('\r')
                                 j + 2
                             },
                             false => (e == 'b').match ({
                                 true  => {
-                                    sb = sb.gstr_push(mp, '\x08')
+                                    sb = sb.add_one('\x08')
                                     j + 2
                                 },
                                 false => (e == 'f').match ({
                                     true  => {
-                                        sb = sb.gstr_push(mp, '\x0c')
+                                        sb = sb.add_one('\x0c')
                                         j + 2
                                     },
                                     false => (e == 'u').match ({
@@ -384,7 +375,7 @@ json_decode_str = (mp: Allocator, v: Slice<u8>, i: i64) StringView {
                                             cp = v.json_hexq(j + 2)
                                             (cp < 0).match ({
                                                 true  => {
-                                                    sb = sb.gstr_push(mp, e)
+                                                    sb = sb.add_one(e)
                                                     j + 2
                                                 },
                                                 false => {
@@ -410,7 +401,7 @@ json_decode_str = (mp: Allocator, v: Slice<u8>, i: i64) StringView {
                                             })
                                         },
                                         false => {
-                                            sb = sb.gstr_push(mp, e)
+                                            sb = sb.add_one(e)
                                             j + 2
                                         },
                                     }),
@@ -421,12 +412,12 @@ json_decode_str = (mp: Allocator, v: Slice<u8>, i: i64) StringView {
                 })
             },
             false => {
-                sb = sb.gstr_push(mp, b)
+                sb = sb.add_one(b)
                 j + 1
             },
         })
     })
-    sb.gstr_finish(mp)
+    sb.finish_cstr()
 }
 // raw bytes of the value at v[i]: a quoted string (incl. quotes) or a bare token up to `,`/`}`/`]`/ws.
 json_raw_at = (mp: Allocator, v: Slice<u8>, i: i64) StringView {
@@ -627,7 +618,7 @@ lsp_push_diag = (
             })
             full ::= is_empty(hint).match ({
                 true  => msg,
-                false => mp.gstr_string(128).gstr_append(mp, msg, " — ", hint).gstr_finish(mp),
+                false => mp.String(128).add(msg, " — ", hint).finish_cstr(),
             })
             // an error living in an IMPORTED module (dl.path != the open document) must not squiggle
             // an unrelated range of the open file: pin it to the file head and name the real location
@@ -639,34 +630,33 @@ lsp_push_diag = (
                     line = 0
                     zc = 0
                     ze = 1
-                    full = mp
-                        .gstr_string(128)
-                        .gstr_append(mp, "in imported module ")
-                        .gstr_append(mp, dl.path)
-                        .gstr_append(mp, ":")
+                    full = mp.String(128)
+                        .add("in imported module ")
+                        .add(dl.path)
+                        .add(":")
                         .push_int(mp, to_i64(dl.sp.line))
-                        .gstr_append(mp, ": ")
-                        .gstr_append(mp, full)
-                        .gstr_finish(mp)
+                        .add(": ")
+                        .add(full)
+                        .finish_cstr()
                     0
                 },
             })
             sep = (acc.n > 0).then({ "," }, { "" })
             sb2 = acc.sb
-                .gstr_append(mp, sep)
-                .gstr_append(mp, "{\"range\":{\"start\":{\"line\":")
+                .add(sep)
+                .add("{\"range\":{\"start\":{\"line\":")
                 .push_int(mp, line)
-                .gstr_append(mp, ",\"character\":")
+                .add(",\"character\":")
                 .push_int(mp, zc)
-                .gstr_append(mp, "},\"end\":{\"line\":")
+                .add("},\"end\":{\"line\":")
                 .push_int(mp, line)
-                .gstr_append(mp, ",\"character\":")
+                .add(",\"character\":")
                 .push_int(mp, ze)
-                .gstr_append(mp, "}},\"severity\":1,\"code\":")
+                .add("}},\"severity\":1,\"code\":")
                 .push_jstr(mp, cd.kind)
-                .gstr_append(mp, ",\"source\":\"zen\",\"message\":")
+                .add(",\"source\":\"zen\",\"message\":")
                 .push_jstr(mp, full)
-                .gstr_append(mp, "}")
+                .add("}")
             DiagAcc(
                 sb: sb2,
                 n: acc.n + 1,
@@ -681,12 +671,11 @@ lsp_push_diag = (
 // errors rather than one channel hiding the rest. Empty array => clears old squiggles.
 // one whole-file diagnostic carrying `msg` verbatim — the shape a REJECTED resolve reports through.
 lsp_head_diag = (mp: Allocator, msg: StringView) StringView {
-    mp
-        .gstr_string(256)
-        .gstr_append(mp, "{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":1,\"code\":\"unresolved-import\",\"source\":\"zen\",\"message\":")
+    mp.String(256)
+        .add("{\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}},\"severity\":1,\"code\":\"unresolved-import\",\"source\":\"zen\",\"message\":")
         .push_jstr(mp, mp.lsp_trim_nl(msg))
-        .gstr_append(mp, "}")
-        .gstr_finish(mp)
+        .add("}")
+        .finish_cstr()
 }
 // the latched rejection text is newline-terminated (it was written straight to stderr); an LSP
 // message keeps its internal newlines (hint lines) but never a trailing one.
@@ -709,7 +698,7 @@ lsp_diags_array = (mp: Allocator, root: StringView, path: StringView, text: Stri
         .cd_or(check_module_no_coroutine_diagnostic_from_source(rp.flat))
     pars = mp.check_module_parse_diagnostic_from_source(decls, rp.flat)
     acc = DiagAcc(
-        sb: mp.gstr_string(256),
+        sb: mp.String(256),
         n: 0,
     )
     done = (nif.code != 0).match ({
@@ -739,18 +728,11 @@ lsp_diags_array = (mp: Allocator, root: StringView, path: StringView, text: Stri
             },
         }),
     })
-    done.sb.gstr_finish(mp)
+    done.sb.finish_cstr()
 }
 lsp_publish = (mp: Allocator, root: StringView, uri: StringView, text: StringView) i64 {
     arr = mp.lsp_diags_array(root, mp.lsp_uri_path(uri), text)
-    mp.lsp_send(mp
-        .gstr_string(512)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":")
-        .push_jstr(mp, uri)
-        .gstr_append(mp, ",\"diagnostics\":[")
-        .gstr_append(mp, arr)
-        .gstr_append(mp, "]}}")
-        .gstr_finish(mp))
+    mp.lsp_send(mp.String(512).add("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":").push_jstr(mp, uri).add(",\"diagnostics\":[").add(arr).add("]}}").finish_cstr())
 }
 // ── request/notification handlers ─────────────────────────────────────────────────────────────────
 lsp_session_own = (s: MutPtr<LspSession>, text: StringView) StringView {
@@ -776,16 +758,10 @@ lsp_apply_init = (s: MutPtr<LspSession>, init: LspInit) void {
 }
 lsp_reply_initialize = (session: MutPtr<LspSession>, mp: Allocator, body: StringView) i64 {
     session.lsp_apply_init(mp.lsp_init_params(body))
-    mp.lsp_send(mp
-        .gstr_string(288)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":1,\"definitionProvider\":true,\"declarationProvider\":true,\"referencesProvider\":true,\"documentHighlightProvider\":true,\"workspaceSymbolProvider\":true,\"renameProvider\":")
-        .gstr_append(mp, session.rename_prepare.then({ "{\"prepareProvider\":true}" }, { "true" }))
-        .gstr_append(mp, ",\"hoverProvider\":true,\"documentSymbolProvider\":true,\"completionProvider\":{\"resolveProvider\":false},\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":")
-        .gstr_append(mp, lspt_legend())
-        .gstr_append(mp, ",\"tokenModifiers\":[]},\"full\":true}},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}")
-        .gstr_finish(mp))
+    mp.lsp_send(mp.String(288).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":{\"capabilities\":{\"positionEncoding\":\"utf-16\",\"textDocumentSync\":1,\"definitionProvider\":true,\"declarationProvider\":true,\"referencesProvider\":true,\"documentHighlightProvider\":true,\"workspaceSymbolProvider\":true,\"renameProvider\":").add(session.rename_prepare.match ({
+        true  => "{\"prepareProvider\":true}",
+        false => "true",
+    })).add(",\"hoverProvider\":true,\"documentSymbolProvider\":true,\"completionProvider\":{\"resolveProvider\":false},\"semanticTokensProvider\":{\"legend\":{\"tokenTypes\":").add(lspt_legend()).add(",\"tokenModifiers\":[]},\"full\":true}},\"serverInfo\":{\"name\":\"zenc-lsp\",\"version\":\"0.2.0-dev\"}}}").finish_cstr())
 }
 // ── go-to-definition / hover / completion (the textual query features) ──────────────────────────
 // The scanning these share — cursor position → the identifier under it → the FILE's top-level
@@ -802,15 +778,14 @@ lsp_reply_location_span = (
     start: i64,
     end: i64,
 ) i64 {
-    sb = mp
-        .gstr_string(256)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"uri\":")
+    sb = mp.String(256)
+        .add("{\"jsonrpc\":\"2.0\",\"id\":")
+        .add(mp.lsp_id(body))
+        .add(",\"result\":{\"uri\":")
         .push_jstr(mp, uri)
-        .gstr_append(mp, ",\"range\":")
+        .add(",\"range\":")
     sv: Slice<u8> = source.view()
-    out = lsp_push_range(sb, mp, sv, start, end).gstr_append(mp, "}}").gstr_finish(mp)
+    out = lsp_push_range(sb, mp, sv, start, end).add("}}").finish_cstr()
     mp.lsp_send(out)
 }
 lsp_push_location = (
@@ -822,11 +797,11 @@ lsp_push_location = (
     source = mp.lsp_source_for_path(docs, span.path)
     sv: Slice<u8> = source.view()
     sb
-        .gstr_append(mp, "{\"uri\":")
+        .add("{\"uri\":")
         .push_jstr(mp, mp.lsp_path_uri(span.path))
-        .gstr_append(mp, ",\"range\":")
+        .add(",\"range\":")
         .lsp_push_range(mp, sv, span.start.to_i64(), span.end.to_i64())
-        .gstr_append(mp, "}")
+        .add("}")
 }
 lsp_push_text_edit = (
     sb: String,
@@ -838,11 +813,11 @@ lsp_push_text_edit = (
     source = mp.lsp_source_for_path(docs, span.path)
     sv: Slice<u8> = source.view()
     sb
-        .gstr_append(mp, "{\"range\":")
+        .add("{\"range\":")
         .lsp_push_range(mp, sv, span.start.to_i64(), span.end.to_i64())
-        .gstr_append(mp, ",\"newText\":")
+        .add(",\"newText\":")
         .push_jstr(mp, name)
-        .gstr_append(mp, "}")
+        .add("}")
 }
 LspTarget: {
     ok: bool,
@@ -854,7 +829,7 @@ lsp_empty_key = () SymbolKey {
         module: "",
         owner: "",
         name: "",
-        kind: 0,
+        kind: .Unknown,
         pos: 0,
     )
 }
@@ -906,21 +881,17 @@ lsp_references = (
     })
     include_decl = body.lsp_context_bool("includeDeclaration")
     occs = target.semantic.index.occurrences_of(mp, target.key)
-    sb ::= mp
-        .gstr_string(512)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":[")
+    sb ::= mp.String(512).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":[")
     first ::= true
     occs.loop_at((i, o) {
         (include_decl || o.declaration == false).then({
             sb = sb
-                .gstr_append(mp, first.then({ "" }, { "," }))
+                .add(first.then({ "" }, { "," }))
                 .lsp_push_location(mp, session.docs.addr(), o.span)
             first = false
         })
     })
-    mp.lsp_send(sb.gstr_append(mp, "]}").gstr_finish(mp))
+    mp.lsp_send(sb.add("]}").finish_cstr())
 }
 lsp_document_highlight = (
     mp: Allocator,
@@ -937,25 +908,21 @@ lsp_document_highlight = (
         return mp.lsp_reply_null(body)
     })
     occs = target.semantic.index.occurrences_of(mp, target.key)
-    sb ::= mp
-        .gstr_string(512)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":[")
+    sb ::= mp.String(512).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":[")
     first ::= true
     occs.loop_at((i, o) {
         (o.span.path == target.semantic.path).then({
             source = mp.lsp_source_for_path(session.docs.addr(), o.span.path)
             sv: Slice<u8> = source.view()
             sb = sb
-                .gstr_append(mp, first.then({ "" }, { "," }))
-                .gstr_append(mp, "{\"range\":")
+                .add(first.then({ "" }, { "," }))
+                .add("{\"range\":")
                 .lsp_push_range(mp, sv, o.span.start.to_i64(), o.span.end.to_i64())
-                .gstr_append(mp, ",\"kind\":1}")
+                .add(",\"kind\":1}")
             first = false
         })
     })
-    mp.lsp_send(sb.gstr_append(mp, "]}").gstr_finish(mp))
+    mp.lsp_send(sb.add("]}").finish_cstr())
 }
 lsp_prepare_rename = (
     mp: Allocator,
@@ -975,16 +942,7 @@ lsp_prepare_rename = (
         .Some(d) => {
             source = mp.lsp_source_for_path(session.docs.addr(), d.span.path)
             sv: Slice<u8> = source.view()
-            mp.lsp_send(mp
-                .gstr_string(192)
-                .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-                .gstr_append(mp, mp.lsp_id(body))
-                .gstr_append(mp, ",\"result\":{\"range\":")
-                .lsp_push_range(mp, sv, d.span.start.to_i64(), d.span.end.to_i64())
-                .gstr_append(mp, ",\"placeholder\":")
-                .push_jstr(mp, d.name)
-                .gstr_append(mp, "}}")
-                .gstr_finish(mp))
+            mp.lsp_send(mp.String(192).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":{\"range\":").lsp_push_range(mp, sv, d.span.start.to_i64(), d.span.end.to_i64()).add(",\"placeholder\":").push_jstr(mp, d.name).add("}}").finish_cstr())
         },
         .None    => mp.lsp_reply_null(body),
     })
@@ -1012,9 +970,7 @@ lsp_push_path_edits = (
     first ::= true
     occs.loop_at((i, o) {
         (o.span.path == path).then({
-            out = out
-                .gstr_append(mp, first.then({ "" }, { "," }))
-                .lsp_push_text_edit(mp, docs, o.span, name)
+            out = out.add(first.then({ "" }, { "," })).lsp_push_text_edit(mp, docs, o.span, name)
             first = false
         })
     })
@@ -1027,54 +983,47 @@ lsp_reply_rename = (
     occs: MutSlice<SymbolOccurrence>,
     name: StringView,
 ) i64 {
-    sb ::= mp
-        .gstr_string(1024)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{")
+    sb ::= mp.String(1024).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":{")
     session.document_changes.match ({
         true  => {
-            sb = sb.gstr_append(mp, "\"documentChanges\":[")
+            sb = sb.add("\"documentChanges\":[")
             first ::= true
             occs.loop_at((i, o) {
                 occs.lsp_occ_first_path(i, o.span.path).then({
                     version = mp.lsp_version_for_path(session.docs.addr(), o.span.path)
                     sb = sb
-                        .gstr_append(mp, first.then({ "" }, { "," }))
-                        .gstr_append(mp, "{\"textDocument\":{\"uri\":")
+                        .add(first.then({ "" }, { "," }))
+                        .add("{\"textDocument\":{\"uri\":")
                         .push_jstr(mp, mp.lsp_path_uri(o.span.path))
-                        .gstr_append(mp, ",\"version\":")
-                    sb = (version < 0).match ({
-                        true  => sb.gstr_append(mp, "null"),
-                        false => sb.push_int(mp, version),
-                    })
+                        .add(",\"version\":")
+                    sb = (version < 0).then({ sb.add("null") }, { sb.push_int(mp, version) })
                     sb = sb
-                        .gstr_append(mp, "},\"edits\":[")
+                        .add("},\"edits\":[")
                         .lsp_push_path_edits(mp, session.docs.addr(), occs, o.span.path, name)
-                        .gstr_append(mp, "]}")
+                        .add("]}")
                     first = false
                 })
             })
-            sb = sb.gstr_append(mp, "]")
+            sb = sb.add("]")
         },
         false => {
-            sb = sb.gstr_append(mp, "\"changes\":{")
+            sb = sb.add("\"changes\":{")
             first ::= true
             occs.loop_at((i, o) {
                 occs.lsp_occ_first_path(i, o.span.path).then({
                     sb = sb
-                        .gstr_append(mp, first.then({ "" }, { "," }))
+                        .add(first.then({ "" }, { "," }))
                         .push_jstr(mp, mp.lsp_path_uri(o.span.path))
-                        .gstr_append(mp, ":[")
+                        .add(":[")
                         .lsp_push_path_edits(mp, session.docs.addr(), occs, o.span.path, name)
-                        .gstr_append(mp, "]")
+                        .add("]")
                     first = false
                 })
             })
-            sb = sb.gstr_append(mp, "}")
+            sb = sb.add("}")
         },
     })
-    mp.lsp_send(sb.gstr_append(mp, "}}").gstr_finish(mp))
+    mp.lsp_send(sb.add("}}").finish_cstr())
 }
 lsp_rename = (mp: Allocator, session: MutPtr<LspSession>, root: StringView, body: StringView) i64 {
     pos = mp.lsp_position_params(body)
@@ -1122,11 +1071,7 @@ lsp_doc_text = (mp: Allocator, docs: MutPtr<LspDocs>, uri: StringView) StringVie
 // `file://` URI for a filesystem path — the inverse of lsp_uri_path, needed for a jump target the
 // client never named (the file of an imported module).
 lsp_path_uri = (mp: Allocator, path: StringView) StringView {
-    mp
-        .gstr_string(128)
-        .gstr_append(mp, "file://")
-        .gstr_append(mp, path)
-        .gstr_finish(mp)
+    mp.String(128).add("file://").add(path).finish_cstr()
 }
 LspSemantic: {
     ok: bool,
@@ -1211,11 +1156,11 @@ lsp_version_for_path = (mp: Allocator, docs: MutPtr<LspDocs>, path: StringView) 
     version
 }
 lsp_renamable = (key: SymbolKey) bool {
-    key.kind == SYMBOL_FUNCTION
-        || key.kind == SYMBOL_GLOBAL
-        || key.kind == SYMBOL_METHOD
-        || key.kind == SYMBOL_LET
-        || key.kind == SYMBOL_PARAM
+    key.kind == .Function
+        || key.kind == .Global
+        || key.kind == .Method
+        || key.kind == .Let
+        || key.kind == .Param
 }
 lsp_ident_name = (name: StringView) bool {
     v: Slice<u8> = name.view()
@@ -1238,16 +1183,14 @@ lsp_rename_collision = (idx: SymbolIndex, key: SymbolKey, name: StringView) bool
     collision ::= false
     idx.decls.loop_at((i, d) {
         same_key = d.key.symbol_key_eq(key)
-        same_scope = (key.kind == SYMBOL_METHOD).match ({
-            true  => d.key.kind == SYMBOL_METHOD
-                && d.key.module == key.module
-                && d.key.owner == key.owner,
-            false => (key.kind == SYMBOL_LET).match ({
-                true  => (d.key.kind == SYMBOL_LET || d.key.kind == SYMBOL_PARAM)
+        same_scope = (key.kind == .Method).match ({
+            true  => d.key.kind == .Method && d.key.module == key.module && d.key.owner == key.owner,
+            false => (key.kind == .Let).match ({
+                true  => (d.key.kind == .Let || d.key.kind == .Param)
                     && d.key.module == key.module
                     && d.key.owner == key.owner,
-                false => (key.kind == SYMBOL_PARAM).match ({
-                    true  => (d.key.kind == SYMBOL_LET || d.key.kind == SYMBOL_PARAM)
+                false => (key.kind == .Param).match ({
+                    true  => (d.key.kind == .Let || d.key.kind == .Param)
                         && d.key.module == key.module
                         && d.key.owner == key.owner,
                     false => d.key.module == key.module && is_empty(d.key.owner),
@@ -1258,7 +1201,7 @@ lsp_rename_collision = (idx: SymbolIndex, key: SymbolKey, name: StringView) bool
             collision = true
         })
     })
-    (key.kind == SYMBOL_FUNCTION || key.kind == SYMBOL_GLOBAL).then({
+    (key.kind == .Function || key.kind == .Global).then({
         idx.occurrences.loop_at((i, target) {
             target.key.symbol_key_eq(key).then({
                 idx.occurrences.loop_at((j, other) {
@@ -1329,16 +1272,15 @@ lsp_definition = (
         false => mp.lsp_reply_location_span(body, pos.uri, txt, decl, decl + end - start),
     })
 }
-lsp_workspace_symbol_kind = (kind: i32) i64 {
-    (kind == SYMBOL_FUNCTION).match ({
-        true  => 12,
-        false => (kind == SYMBOL_GLOBAL).match ({
-            true  => 13,
-            false => (kind == SYMBOL_TYPE).match ({
-                true  => 23,
-                false => (kind == SYMBOL_METHOD).then({ 6 }, { 0 }),
-            }),
-        }),
+lsp_workspace_symbol_kind = (kind: SymbolKind) i64 {
+    kind.match ({
+        .Function => 12,
+        .Global   => 13,
+        .Type     => 23,
+        .Method   => 6,
+        .Unknown  => 0,
+        .Let      => 0,
+        .Param    => 0,
     })
 }
 lsp_workspace_seen = (indexes: MutSlice<SymbolIndex>, upto: i64, decl: SymbolDecl) bool {
@@ -1396,11 +1338,7 @@ lsp_workspace_symbol = (
         return mp.lsp_reply_invalid_params(body)
     })
     query = mp.json_string_at(v, query_at)
-    sb ::= mp
-        .gstr_string(1024)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":[")
+    sb ::= mp.String(1024).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":[")
     first ::= true
     n = session.docs.lspd_count()
     (n > 0).then({
@@ -1419,23 +1357,23 @@ lsp_workspace_symbol = (
                     && lsp_sv_contains(d.name, query)
                     && indexes.lsp_workspace_seen(ri, d) == false).then({
                     sb = sb
-                        .gstr_append(mp, first.then({ "" }, { "," }))
-                        .gstr_append(mp, "{\"name\":")
+                        .add(first.then({ "" }, { "," }))
+                        .add("{\"name\":")
                         .push_jstr(mp, d.name)
-                        .gstr_append(mp, ",\"kind\":")
+                        .add(",\"kind\":")
                         .push_int(mp, kind)
-                        .gstr_append(mp, ",\"location\":")
+                        .add(",\"location\":")
                         .lsp_push_location(mp, session.docs.addr(), d.span)
                     (is_empty(d.key.owner) == false).then({
-                        sb = sb.gstr_append(mp, ",\"containerName\":").push_jstr(mp, d.key.owner)
+                        sb = sb.add(",\"containerName\":").push_jstr(mp, d.key.owner)
                     })
-                    sb = sb.gstr_append(mp, "}")
+                    sb = sb.add("}")
                     first = false
                 })
             })
         })
     })
-    mp.lsp_send(sb.gstr_append(mp, "]}").gstr_finish(mp))
+    mp.lsp_send(sb.add("]}").finish_cstr())
 }
 // HOVER: the declaration under the cursor as markdown — a fenced signature plus the doc comment
 // above it. compiler.lsp_query decides what that covers; "nothing to say" comes back as "" and is
@@ -1450,14 +1388,7 @@ lsp_hover = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
     is_empty(md).then({
         return mp.lsp_reply_null(body)
     })
-    mp.lsp_send(mp
-        .gstr_string(512)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":")
-        .push_jstr(mp, md)
-        .gstr_append(mp, "}}}")
-        .gstr_finish(mp))
+    mp.lsp_send(mp.String(512).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":{\"contents\":{\"kind\":\"markdown\",\"value\":").push_jstr(mp, md).add("}}}").finish_cstr())
 }
 // COMPLETION: the names compiler.lsp_query can see from the buffer alone. `isIncomplete:false` is a
 // promise that this IS the whole list for the position, so the client may filter it locally instead
@@ -1469,23 +1400,22 @@ lsp_completion = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
         return mp.lsp_reply_invalid_params(body)
     })
     items = mp.lspq_items(mp.lsp_doc_text(docs, pos.uri))
-    sb ::= mp
-        .gstr_string(2048)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"isIncomplete\":false,\"items\":[")
+    sb ::= mp.String(2048)
+        .add("{\"jsonrpc\":\"2.0\",\"id\":")
+        .add(mp.lsp_id(body))
+        .add(",\"result\":{\"isIncomplete\":false,\"items\":[")
     items.loop_at((i, it) {
         sb = sb
-            .gstr_append(mp, (i > 0).then({ "," }, { "" }))
-            .gstr_append(mp, "{\"label\":")
+            .add((i > 0).then({ "," }, { "" }))
+            .add("{\"label\":")
             .push_jstr(mp, it.label)
-            .gstr_append(mp, ",\"kind\":")
+            .add(",\"kind\":")
             .push_int(mp, it.kind)
-            .gstr_append(mp, ",\"detail\":")
+            .add(",\"detail\":")
             .push_jstr(mp, it.detail)
-            .gstr_append(mp, "}")
+            .add("}")
     })
-    mp.lsp_send(sb.gstr_append(mp, "]}}").gstr_finish(mp))
+    mp.lsp_send(sb.add("]}}").finish_cstr())
 }
 // ── documentSymbol: the OUTLINE of the open buffer ────────────────────────────────────────────────
 // LSP SymbolKind numbers (protocol §DocumentSymbol), spelled once so no call site carries a bare
@@ -1518,19 +1448,19 @@ lsp_push_pos = (sb: String, mp: Allocator, v: Slice<u8>, off: i64) String {
     o = (off < v.len).then({ off }, { v.len })
     ls = v.lsp_bol_at(o)
     sb
-        .gstr_append(mp, "{\"line\":")
+        .add("{\"line\":")
         .push_int(mp, v.lsp_line_at(o))
-        .gstr_append(mp, ",\"character\":")
+        .add(",\"character\":")
         .push_int(mp, v.lsp_utf16_col(ls, o - ls))
-        .gstr_append(mp, "}")
+        .add("}")
 }
 lsp_push_range = (sb: String, mp: Allocator, v: Slice<u8>, s: i64, e: i64) String {
     sb
-        .gstr_append(mp, "{\"start\":")
+        .add("{\"start\":")
         .lsp_push_pos(mp, v, s)
-        .gstr_append(mp, ",\"end\":")
+        .add(",\"end\":")
         .lsp_push_pos(mp, v, e)
-        .gstr_append(mp, "}")
+        .add("}")
 }
 // one DocumentSymbol, up to but NOT including its `children` key — the caller closes the object.
 // `selectionRange` is exactly the name (what the editor jumps to); `range` runs to `last`, which the
@@ -1546,40 +1476,39 @@ lsp_push_sym = (
     last: i64,
 ) String {
     sb
-        .gstr_append(mp, "{\"name\":")
+        .add("{\"name\":")
         .push_jstr(mp, name)
-        .gstr_append(mp, ",\"kind\":")
+        .add(",\"kind\":")
         .push_int(mp, kind)
-        .gstr_append(mp, ",\"range\":")
+        .add(",\"range\":")
         .lsp_push_range(mp, v, off, last)
-        .gstr_append(mp, ",\"selectionRange\":")
+        .add(",\"selectionRange\":")
         .lsp_push_range(mp, v, off, off + name.view().len)
 }
 // a childless DocumentSymbol.
 lsp_leaf_sym = (mp: Allocator, v: MutSlice<u8>, name: StringView, kind: i64, off: i64) StringView {
-    mp
-        .gstr_string(192)
+    mp.String(192)
         .lsp_push_sym(mp, v, name, kind, off, off + name.view().len)
-        .gstr_append(mp, "}")
-        .gstr_finish(mp)
+        .add("}")
+        .finish_cstr()
 }
 // the methods of ONE impl record, comma-joined ("" when it declares none that is positioned). The
 // name emitted is the one the SOURCE writes: the parser HOISTS both a trait impl's methods and a type
 // body's INHERENT methods into mangled `impl_<Tr>_<Ty>_<m>` top-level functions, and that mangled name
 // must never reach the client — it supplies the position, the DImpl record supplies the name.
 lsp_impl_syms = (mp: Allocator, decls: MutSlice<Decl>, v: MutSlice<u8>, im: ImplData) StringView {
-    sb ::= mp.gstr_string(256)
+    sb ::= mp.String(256)
     n ::= 0
     im.methods.loop_at((k, m) {
         off = to_i64(decls.lsp_decl_pos(mp.impl_cname_in(im.trname, im.ty, m.name)))
         (off > 0).then({
             sb = sb
-                .gstr_append(mp, (n > 0).then({ "," }, { "" }))
-                .gstr_append(mp, mp.lsp_leaf_sym(v, m.name, LSP_SK_METHOD(), off))
+                .add((n > 0).then({ "," }, { "" }))
+                .add(mp.lsp_leaf_sym(v, m.name, LSP_SK_METHOD(), off))
             n = n + 1
         })
     })
-    sb.gstr_finish(mp)
+    sb.finish_cstr()
 }
 // every method the file declares FOR type `ty`. A `Type.impl(Trait, { … })` block and a type body's
 // inherent methods are both recorded as a DImpl (the inherent one names the type as its own trait),
@@ -1590,21 +1519,21 @@ lsp_method_syms = (
     v: MutSlice<u8>,
     ty: StringView,
 ) StringView {
-    sb ::= mp.gstr_string(384)
+    sb ::= mp.String(384)
     n ::= 0
     decls.loop_at((i, d) {
         d.match ({
             .DImpl(im) => (im.ty == ty).then({
                 one = mp.lsp_impl_syms(decls, v, im)
                 (is_empty(one) == false).then({
-                    sb = sb.gstr_append(mp, (n > 0).then({ "," }, { "" })).gstr_append(mp, one)
+                    sb = sb.add((n > 0).then({ "," }, { "" })).add(one)
                     n = n + 1
                 })
             }),
             _          => { },
         })
     })
-    sb.gstr_finish(mp)
+    sb.finish_cstr()
 }
 // the byte the method run of `ty` ends at, or `from` when it has none. A parent's `range` must ENCLOSE
 // its children's, so the type symbol's range is stretched to its last method's name.
@@ -1637,13 +1566,12 @@ lsp_type_sym = (
     kind: i64,
     off: i64,
 ) StringView {
-    mp
-        .gstr_string(384)
+    mp.String(384)
         .lsp_push_sym(mp, v, name, kind, off, mp.lsp_methods_end(decls, name, off + name.view().len))
-        .gstr_append(mp, ",\"children\":[")
-        .gstr_append(mp, mp.lsp_method_syms(decls, v, name))
-        .gstr_append(mp, "]}")
-        .gstr_finish(mp)
+        .add(",\"children\":[")
+        .add(mp.lsp_method_syms(decls, v, name))
+        .add("]}")
+        .finish_cstr()
 }
 // does THIS file declare the type `name`? An impl whose type lives in another file has no parent
 // symbol here, so its methods are emitted at top level rather than dropped.
@@ -1670,7 +1598,7 @@ lsp_has_type = (decls: MutSlice<Decl>, name: StringView) bool {
 }
 // the DocumentSymbol JSON for one top-level declaration, "" when it is not one. Skipped: import
 // records and module aliases (they name another file), trait defaults, raw C escapes, every
-// SYNTHESIZED decl (pos 0 — the parser's anonymous-struct shapes and its syntax-error sentinel), and
+// SYNTHESIZED decl (pos 0 — the parser.s indexed payload records and its syntax-error sentinel), and
 // every hoisted method function, which is re-emitted under its type instead.
 lsp_decl_sym = (mp: Allocator, decls: MutSlice<Decl>, v: MutSlice<u8>, d: Decl) StringView {
     d.match ({
@@ -1713,39 +1641,25 @@ lsp_decl_sym = (mp: Allocator, decls: MutSlice<Decl>, v: MutSlice<u8>, d: Decl) 
 lsp_symbols_json = (mp: Allocator, text: StringView) StringView {
     decls = mp.parse_module(text)
     v: Slice<u8> = text.view()
-    sb ::= mp.gstr_string(1024)
+    sb ::= mp.String(1024)
     n ::= 0
     decls.loop_at((i, d) {
         one = mp.lsp_decl_sym(decls, v, d)
         (is_empty(one) == false).then({
-            sb = sb.gstr_append(mp, (n > 0).then({ "," }, { "" })).gstr_append(mp, one)
+            sb = sb.add((n > 0).then({ "," }, { "" })).add(one)
             n = n + 1
         })
     })
-    sb.gstr_finish(mp)
+    sb.finish_cstr()
 }
 // DOCUMENT SYMBOL (`gO`, and the `]m`/`[m` method motions built on it). Answered from the OPEN
 // BUFFER via lsp_doc_text, so an unsaved edit is in the outline the moment it is typed.
 lsp_document_symbol = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i64 {
     syms = mp.lsp_symbols_json(mp.lsp_doc_text(docs, mp.json_str_field(body, "uri")))
-    mp.lsp_send(mp
-        .gstr_string(1024)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":[")
-        .gstr_append(mp, syms)
-        .gstr_append(mp, "]}")
-        .gstr_finish(mp))
+    mp.lsp_send(mp.String(1024).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":[").add(syms).add("]}").finish_cstr())
 }
 lsp_send_tokens = (mp: Allocator, body: StringView, data: StringView) i64 {
-    mp.lsp_send(mp
-        .gstr_string(8192)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":{\"data\":")
-        .gstr_append(mp, data)
-        .gstr_append(mp, "}}")
-        .gstr_finish(mp))
+    mp.lsp_send(mp.String(8192).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":{\"data\":").add(data).add("}}").finish_cstr())
 }
 // Semantic tokens for an OPEN document come from the client's buffer and are memoized against its
 // LSP version, so the keystroke that does not change the version (a repeat request, a client that
@@ -1775,30 +1689,15 @@ lsp_semantic_tokens = (mp: Allocator, docs: MutPtr<LspDocs>, body: StringView) i
     })
 }
 lsp_reply_invalid_params = (mp: Allocator, body: StringView) i64 {
-    mp.lsp_send(mp
-        .gstr_string(144)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}")
-        .gstr_finish(mp))
+    mp.lsp_send(mp.String(144).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"error\":{\"code\":-32602,\"message\":\"invalid params\"}}").finish_cstr())
 }
 lsp_reply_null = (mp: Allocator, body: StringView) i64 {
-    mp.lsp_send(mp
-        .gstr_string(96)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"result\":null}")
-        .gstr_finish(mp))
+    mp.lsp_send(mp.String(96).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"result\":null}").finish_cstr())
 }
 // JSON-RPC MethodNotFound for a REQUEST we don't implement. A request left unanswered stalls the
 // client (nvim blocks a hover round-trip until its timeout); the error reply fails it instantly.
 lsp_reply_method_not_found = (mp: Allocator, body: StringView) i64 {
-    mp.lsp_send(mp
-        .gstr_string(128)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"id\":")
-        .gstr_append(mp, mp.lsp_id(body))
-        .gstr_append(mp, ",\"error\":{\"code\":-32601,\"message\":\"method not found\"}}")
-        .gstr_finish(mp))
+    mp.lsp_send(mp.String(128).add("{\"jsonrpc\":\"2.0\",\"id\":").add(mp.lsp_id(body)).add(",\"error\":{\"code\":-32601,\"message\":\"method not found\"}}").finish_cstr())
 }
 // notification families we deliberately swallow WITHOUT a reply (replying to a notification is a
 // protocol violation). `id` presence alone is not the test: e.g. workspace/didChangeConfiguration
@@ -1812,12 +1711,7 @@ lsp_is_notification = (method: StringView) bool {
 }
 // publish an EMPTY diagnostics array for `uri` (didClose: the client keeps stale squiggles otherwise).
 lsp_publish_clear = (mp: Allocator, uri: StringView) i64 {
-    mp.lsp_send(mp
-        .gstr_string(160)
-        .gstr_append(mp, "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":")
-        .push_jstr(mp, uri)
-        .gstr_append(mp, ",\"diagnostics\":[]}}")
-        .gstr_finish(mp))
+    mp.lsp_send(mp.String(160).add("{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":").push_jstr(mp, uri).add(",\"diagnostics\":[]}}").finish_cstr())
 }
 // didOpen/didChange (full-sync) both carry the whole document text; the first `text` key is the
 // document content (the URI's `text` in didOpen, the single contentChange's `text` in didChange) and

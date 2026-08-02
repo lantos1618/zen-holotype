@@ -1,12 +1,12 @@
-{ Ty, Func, Decl, Field, StructDecl, Param, BinData, CallData, MethodCallData, Expr, Stmt } = compiler.ast.ast_types
-{ sbyte, gstr_push, cbuf, dglobal_full, slett_atm, tvoid } = compiler.genc
+{ Ty, Func, Decl, Field, StructDecl, Param, BinData, CallData, MethodCallData, CondData, Expr, Stmt } = compiler.ast.ast_types
+{ sbyte, cbuf, dglobal_full, slett_atm, tvoid } = compiler.genc
 { String } = std.text.string
 { Allocator } = std.mem.alloc
 { expr_fold_children } = compiler.ast.expr_children
 { loop_at } = std.core.count
 // Functions with FnT parameters are templates and are not emitted directly.
 TyQuery*: {
-    is_fnt: (Self) bool,
+    is_fnt: (self: Self) bool,
 }
 Ty.impl(TyQuery, {
     is_fnt = (t: Ty) bool {
@@ -32,6 +32,55 @@ slice_count* = (items: MutSlice<Expr>) i32 {
     n ::= 0
     items.loop_at((i, it) { n = n + 1 })
     n
+}
+// Literal `.match` parsing reuses one source subject as the lhs of every generated equality. Resolution
+// rebuilds those nodes, but preserves their leftmost source position; independently written nested
+// conditions have distinct positions. Use that stable position when present and pointer identity only for
+// synthesized position-less nodes. One literal plus `_` already evaluates once, so require a repeated key.
+lit_is_eq = (e: Ptr<Expr>) bool {
+    load(e).match ({
+        .Bin(b) => b.op == "==",
+        _       => false,
+    })
+}
+lit_eq_lhs* = (e: Ptr<Expr>) Ptr<Expr> {
+    load(e).match ({
+        .Bin(b) => b.lhs,
+        _       => e,
+    })
+}
+lit_node_pos = (e: Ptr<Expr>) i32 {
+    load(e).match ({
+        .Var(v)         => v.pos,
+        .Bin(b)         => b.pos,
+        .Call(c)        => c.pos,
+        .MethodCall(mc) => mc.pos,
+        .Member(m)      => m.pos,
+        .StrLit(sl)     => sl.pos,
+        .Index(ix)      => left_pos_of(ix.seq),
+        _               => 0,
+    })
+}
+lit_subj_key* = (e: Ptr<Expr>) i64 {
+    p = e.lit_node_pos()
+    (p > 0).then({ 0 - to_i64(p) }, { to_i64(e) })
+}
+lit_same_subj* = (e: Ptr<Expr>, subj: Ptr<Expr>) bool { e.lit_subj_key() == subj.lit_subj_key() }
+lit_chain_reuses = (e: Ptr<Expr>, subj: Ptr<Expr>) bool {
+    load(e).match ({
+        .Cond(d) => d.c.lit_is_eq() && d.c.lit_eq_lhs().lit_same_subj(subj) || d.e.lit_chain_reuses(subj),
+        _        => false,
+    })
+}
+lit_chain_is* = (d: CondData) bool {
+    d.c.lit_is_eq() && d.e.lit_chain_reuses(d.c.lit_eq_lhs())
+}
+lit_chain_subj* = (d: CondData) Ptr<Expr> { d.c.lit_eq_lhs() }
+lit_test_pos* = (d: CondData) i32 {
+    load(d.c).match ({
+        .Bin(b) => b.pos,
+        _       => 0,
+    })
 }
 // is `name` one of `ps`? the shared param/field-name membership test — every "does this fn/impl
 // declare X?" question in the pipeline is this one predicate: tparam membership (check, check_infer,
@@ -87,7 +136,7 @@ has_fnt_param* = (ps: MutSlice<Param>) bool {
 // makecontext, with an FnT param for a real C function-pointer arg) is a normal callable, NOT a
 // template to inline away.
 FuncQuery*: {
-    is_generic_fn: (Self) bool,
+    is_generic_fn: (self: Self) bool,
 }
 Func.impl(FuncQuery, {
     is_generic_fn = (f: Func) bool {
@@ -101,7 +150,7 @@ Func.impl(FuncQuery, {
 // the emit pipeline (c_emit) disambiguates by USAGE — a constructed struct is real, a trait is
 // only impl'd, never constructed — via `struct_is_trait_emit`.
 StructDeclQuery*: {
-    struct_is_trait: (Self) bool,
+    struct_is_trait: (self: Self) bool,
 }
 StructDecl.impl(StructDeclQuery, {
     struct_is_trait = (sd: StructDecl) bool {
@@ -112,8 +161,8 @@ StructDecl.impl(StructDeclQuery, {
 })
 // is_template / is_trait classify a top-level Decl by its kind (template function or trait struct).
 DeclQuery*: {
-    is_template: (Self) bool,
-    is_trait: (Self) bool,
+    is_template: (self: Self) bool,
+    is_trait: (self: Self) bool,
 }
 Decl.impl(DeclQuery, {
     is_template = (d: Decl) bool {
@@ -129,43 +178,12 @@ Decl.impl(DeclQuery, {
         })
     }
 })
-// Shared decimal digit conversion and non-negative integer emission.
-// Byte-identical output is load-bearing: these render diagnostic line/col numbers, emitted C/JS integer
-// literals, pretty-printed numbers, or_return/lifted-lambda indices, and mangled C symbol fragments — a
-// single changed digit breaks output or the ABI. Lives here (a low, widely-imported shared module) so
-// every backend routes through the same code.
-// This trio is the COMPILER-side digit loop — one of exactly TWO tree-wide. The other lives in
-// std.text.num (RawPtr buffer writers backing std.text.fmt's streaming output). Two, not one, is the
-// SEED-CLOSURE boundary: compiler passes rendering line/col digits (check, compiler.resolve,
-// diagnostics) must not pull std.text.num's module closure (Result/IoError/alloc/parse) into the
-// self-hosting seed, and user-facing std must not import compiler internals. Everything else
-// (check's vis_key, resolve's res_udec, fmt's write_int family) delegates to one of the two.
+// Shared decimal digit conversion used by parsers and fixed-buffer emitters.
 dec_digit* = (d: i64) u8 { sbyte("0123456789", d) }
-// The unsigned recursion. `n` is u64 so a `.Int` literal above i64-max (real negatives are `0 - x` Bin
-// nodes, never a negative `.Int`) renders in its full unsigned range; non-negative i64 callers pass
-// value-preservingly (u64 treated leniently by the checker; C widens int64→uint64 for a non-negative n).
-gstr_uint* = (out: String, a: Allocator, n: u64) String {
-    (n < 10).match ({
-        true  => out.gstr_push(a, dec_digit(to_i64(n))),
-        false => {
-            // hoist the recursive call: a <call>.gstr_push receiver is re-evaluated by gstr_reserve (UAF)
-            hs = out.gstr_uint(a, n / 10)
-            hs.gstr_push(a, dec_digit(to_i64(n % 10)))
-        },
-    })
-}
-// The signed wrapper: reinterpret the i64 bit pattern as u64 and render unsigned — so a negative `.Int`
-// (a u64 literal above i64-max) prints its exact bits as unsigned decimal, with NO minus sign. This is
-// the genc/pretty semantics; the js backend's minus-sign form (jint/jint_neg) is deliberately kept
-// separate (its INT64_MIN-safe negative walk cannot go through `-n`).
-gstr_int* = (out: String, a: Allocator, n: i64) String {
-    u: u64 = n
-    out.gstr_uint(a, u)
-}
 // map_slice: the pervasive cbuf-map idiom — allocate a fresh same-length `[U]` and fill slot i with
 // f(xs[i]). One generic replaces ~100 hand-rolled `buf = cbuf<U>(a, xs.len)  xs.loop(...)  buf`
 // blocks across the frontend. The alloc param is the concrete `Allocator` cbuf itself takes.
-map_slice*<T, U> = (a: Allocator, xs: MutSlice<T>, f: (T) U) MutSlice<U> {
+map_slice*<T, U> = (a: Allocator, xs: MutSlice<T>, f: (value: T) U) MutSlice<U> {
     buf ::= cbuf<U>(a, xs.len)
     xs.loop_at((i, x) { buf[i] = f(x) })
     buf
@@ -173,7 +191,7 @@ map_slice*<T, U> = (a: Allocator, xs: MutSlice<T>, f: (T) U) MutSlice<U> {
 // slice_any: the pervasive OR-fold — true iff some element satisfies p. One generic replaces ~50
 // hand-rolled `f = false  xs.loop(...)  f` blocks. Walks the whole slice (no early break), so the
 // visit order and count match the inlined form exactly.
-slice_any*<T> = (xs: MutSlice<T>, p: (T) bool) bool {
+slice_any*<T> = (xs: MutSlice<T>, p: (value: T) bool) bool {
     f ::= false
     xs.loop_at((i, y) { f = p(y).then({ true }, { f }) })
     f

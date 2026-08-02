@@ -1,5 +1,4 @@
 { ArmData, CallData, CondData, Decl, Expr, Field, Func, LetData, Param, Stmt, Ty, VariantDef } = compiler.ast.ast_types
-{ gstr_append, gstr_finish, gstr_string } = compiler.genc
 { Env, is_intrinsic, is_lit_numeric, is_void_ty, the_func, tparam_declared } = compiler.check
 { tag_const } = compiler.check_lower
 { Token, scan } = compiler.lex
@@ -8,7 +7,7 @@
 { Allocator } = std.mem.alloc
 { at } = std.text.ascii
 { ends_with, is_empty, starts_with, view } = std.text.str
-{ KARGTYPE, KNULLDEREF, KPTRWRITE, KUNKNOWNTYPE, desc_or } = compiler.validate.diag
+{ desc_or, diagnostic_code } = compiler.validate.diag
 { fields_declare_method, no_fields, struct_fields, sx_named } = compiler.validate.args
 { enum_variants } = compiler.validate.kinds
 { kv_at, kv_one } = compiler.validate.core
@@ -422,6 +421,7 @@ is_nonexhaust_lit_call* = (c: CallData) bool { c.fn == "__nonexhaustive_lit" }
 is_badmatchlabel_call* = (c: CallData) bool { c.fn == "__badmatchlabel" }
 is_dupmatcharm_call* = (c: CallData) bool { c.fn == "__dupmatcharm" }
 is_duplitarm_call* = (c: CallData) bool { c.fn == "__duplitarm" }
+is_unreachable_lit_call* = (c: CallData) bool { c.fn == "__unreachable_lit_arm" }
 // A fn's OWN params and locals SHADOW same-named top-level names in its body: a call through a
 // locally-bound name (e.g. a closure param `f` while a top-level `f` exists) must NEVER be judged
 // against the top-level fn / intrinsic / import — the emitted C scopes the local as the call target.
@@ -462,9 +462,9 @@ store_writes_readonly = (env: Env, c: CallData) bool {
     })
 }
 store_mut_kind* = (env: Env, c: CallData) i32 {
-    kv_at(env.store_writes_readonly(c).then({ KPTRWRITE() }, { 0 }), c.pos)
+    kv_at(env.store_writes_readonly(c).then({ diagnostic_code(.PointerWrite) }, { 0 }), c.pos)
 }
-// every intrinsic that DEREFERENCES its pointer arg0: the typed load/store/offset trio AND the raw
+// every intrinsic that DEREFERENCES its pointer argument: the typed load/store/offset trio AND the raw
 // word intrinsics (load_i64/store_i64/atomic_*) — the latter crash on null exactly the same way.
 is_deref_intrinsic* = (fn: StringView) bool {
     fn == "load"
@@ -492,7 +492,7 @@ derefs_nullable = (env: Env, c: CallData) bool {
 // `q = assert_nonnull(p)` yields `q: MutPtr<T>`, so `load(q)` sees a non-nullable kind and passes.
 // `RawPtr<u8>` (the byte-buffer floor) and `Ptr`/`MutPtr` are never nullable, so they are exempt.
 null_deref_kind* = (env: Env, c: CallData) i32 {
-    kv_at(env.derefs_nullable(c).then({ KNULLDEREF() }, { 0 }), c.pos)
+    kv_at(env.derefs_nullable(c).then({ diagnostic_code(.NullDereference) }, { 0 }), c.pos)
 }
 // `assert_nonnull(p)` narrows a nullable pointer to a non-null `MutPtr<T>`; its argument MUST be a
 // pointer. A NON-pointer arg (e.g. a scalar) makes the result's `pointee_of` collapse to void and the
@@ -511,7 +511,7 @@ assert_nonnull_badarg = (env: Env, c: CallData) bool {
     })
 }
 assert_nonnull_kind* = (env: Env, c: CallData) i32 {
-    kv_at(env.assert_nonnull_badarg(c).then({ KARGTYPE() }, { 0 }), (c.args.len >= 1).match ({
+    kv_at(env.assert_nonnull_badarg(c).then({ diagnostic_code(.ArgType) }, { 0 }), (c.args.len >= 1).match ({
         true  => c.args[0].expr_pos().pos_or(c.pos),
         false => c.pos,
     }))
@@ -806,7 +806,7 @@ is_ctx_typed_arg* = (e: Expr) bool {
 // ── undefined type names in annotations (a standalone, driver-only pass) ───────────────────────────
 // `m: MutPtr<TotallyUndefinedType>` type-checked "ok" then leaked an unknown C type name. A Named (or
 // Generic-base) type in a signature / field / payload that is NOT a primitive, a DECLARED type
-// (struct/enum/gen-struct/gen-enum, incl. anon structs), an in-scope tparam, or `Self` is a real
+// (struct/enum/gen-struct/gen-enum, incl. indexed payload records), an in-scope tparam, or `Self` is a real
 // "unknown type". Runs ONLY in the driver check chain, on the FULLY-FLATTENED decls — where every
 // legitimate (incl. imported) type is present — so an undeclared name is genuinely undefined, not the
 // cross-module / pre-mono "uninferable residue" the core validator deliberately tolerates. It is NOT
@@ -841,21 +841,21 @@ ut_unknown_tys* = (env: Env, tparams: MutSlice<Param>, ts: MutSlice<Ty>) i32 {
 ut_params_kind = (env: Env, tparams: MutSlice<Param>, ps: MutSlice<Param>, pos: i32) i32 {
     acc ::= 0
     ps.loop_at((i, p) {
-        acc = acc.or(env.ut_unknown_ty(tparams, p.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
+        acc = acc.or(env.ut_unknown_ty(tparams, p.ty).kv_one(diagnostic_code(.UnknownType)).kv_at(pos))
     })
     acc
 }
 ut_fields_kind* = (env: Env, tparams: MutSlice<Param>, fs: MutSlice<Field>, pos: i32) i32 {
     acc ::= 0
     fs.loop_at((i, f) {
-        acc = acc.or(env.ut_unknown_ty(tparams, f.ty).kv_one(KUNKNOWNTYPE()).kv_at(pos))
+        acc = acc.or(env.ut_unknown_ty(tparams, f.ty).kv_one(diagnostic_code(.UnknownType)).kv_at(pos))
     })
     acc
 }
 ut_payloads_kind* = (env: Env, tparams: MutSlice<Param>, vs: MutSlice<VariantDef>, pos: i32) i32 {
     acc ::= 0
     vs.loop_at((i, v) {
-        acc = acc.or(env.ut_unknown_ty(tparams, v.payload).kv_one(KUNKNOWNTYPE()).kv_at(pos))
+        acc = acc.or(env.ut_unknown_ty(tparams, v.payload).kv_one(diagnostic_code(.UnknownType)).kv_at(pos))
     })
     acc
 }
@@ -882,7 +882,7 @@ ut_let_kind = (a: Allocator, env: Env, tparams: MutSlice<Param>, l: LetData) i32
         true  => 0,
         false => env
             .ut_unknown_ty(tparams, l.ty)
-            .kv_one(KUNKNOWNTYPE())
+            .kv_one(diagnostic_code(.UnknownType))
             .kv_at(l.pos.pos_or(load(l.value).expr_pos())),
     })
 }
@@ -908,7 +908,7 @@ ut_body_kind = (a: Allocator, env: Env, tparams: MutSlice<Param>, body: MutSlice
 ut_func_kind* = (a: Allocator, env: Env, f: Func) i32 {
     env
         .ut_params_kind(f.tparams, f.params, f.pos)
-        .or(env.ut_unknown_ty(f.tparams, f.ret).kv_one(KUNKNOWNTYPE()).kv_at(f.pos))
+        .or(env.ut_unknown_ty(f.tparams, f.ret).kv_one(diagnostic_code(.UnknownType)).kv_at(f.pos))
         .or(a.ut_body_kind(env, f.tparams, f.body))
 }
 // ── unknown-type NAME walk: the offending type's NAME, in the SAME traversal order as the kind walk ──
@@ -1011,18 +1011,17 @@ retired_string_alias = (nm: StringView) StringView {
 // ladder message when the name walk found nothing (should not happen when the kind walk fired).
 unknown_type_message* = (a: Allocator, nm: StringView) StringView {
     canon = nm.retired_string_alias()
-    head = a
-        .gstr_string(96)
-        .gstr_append(a, "unknown type name `")
-        .gstr_append(a, nm)
-        .gstr_append(a, "`")
+    head = a.String(96)
+        .add("unknown type name `")
+        .add(nm)
+        .add("`")
     is_empty(canon).match ({
-        true  => head.gstr_finish(a),
+        true  => head.finish_cstr(),
         false => head
-            .gstr_append(a, " — that spelling was retired; write `")
-            .gstr_append(a, canon)
-            .gstr_append(a, "`")
-            .gstr_finish(a),
+            .add(" — that spelling was retired; write `")
+            .add(canon)
+            .add("`")
+            .finish_cstr(),
     })
 }
 // ── infinite type: a struct/enum that contains ITSELF by VALUE (transitively) ──────────────────────────
@@ -1145,10 +1144,10 @@ variant_tags_has = (
 // validator recognizes such a tag by shape: it starts with the gen-enum base name and ends with one
 // of its variant names (`Result_…` + `…_Err`). Keeps lowered generic-enum guards from false-rejecting.
 variant_affix = (a: Allocator, lead: StringView, vn: StringView) StringView {
-    s ::= a.gstr_string(64)
-    s = s.gstr_append(a, lead)
-    s = s.gstr_append(a, vn)
-    s.gstr_finish(a)
+    s ::= a.String(64)
+    s = s.add(lead)
+    s = s.add(vn)
+    s.finish_cstr()
 }
 gen_tag_match = (a: Allocator, vs: MutSlice<VariantDef>, base: StringView, name: StringView) bool {
     found ::= false
@@ -1174,7 +1173,7 @@ is_tag_const = (decls: MutSlice<Decl>, a: Allocator, name: StringView) bool {
 }
 // Bare identifiers in value position must resolve to a local/global/function/import/trait/intrinsic.
 EnvQuery*: {
-    var_err: (Self, StringView) i32,
+    var_err: (self: Self, name: StringView) i32,
 }
 Env.impl(EnvQuery, {
     var_err = (env: Env, name: StringView) i32 {
@@ -1194,7 +1193,7 @@ Env.impl(EnvQuery, {
 // A one-armed bool `.match` is always non-exhaustive. Resolution deliberately leaves oa != 0 intact even
 // in statement position; `.then({ ... })` is the explicit lazy one-way construct and carries oa=0.
 CondQuery*: {
-    cond_onearm_err: (Self) i32,
+    cond_onearm_err: (self: Self) i32,
 }
 CondData.impl(CondQuery, {
     cond_onearm_err = (d: CondData) i32 { (d.oa == 0).then({ 0 }, { 1 }) }

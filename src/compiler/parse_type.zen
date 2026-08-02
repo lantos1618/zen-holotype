@@ -1,8 +1,8 @@
 { Param, Ty, Field, StructDecl } = compiler.ast.ast_types
-{ param, param_at, pvariadic, pvariadic_at, field, field_at, sdef, fntype, tgeneric, ti32, ti64,
+{ param, param_at, pvariadic, pvariadic_at, field, field_at, sdef, fntype_params, tgeneric, ti32, ti64,
   tu8, tf64, tbool, tstring_view, tstring_cstr, tstring_literal, tvoid, tnamed, tptr_k, tslice,
   tslice_k, k_raw_ptr, k_ptr, k_mut_ptr, acquire_or_die } = compiler.genc
-{ mangle_str_in, mangle_anon_in, payload_fname } = compiler.mangle
+{ mangle_str_in, mangle_payload_in, payload_fname } = compiler.mangle
 { Token, Scan, scan } = compiler.lex
 { at } = std.text.ascii
 { Allocator } = std.mem.alloc
@@ -24,7 +24,7 @@ parse_err_off ::= 0
 // (same first-wins guard) so the sentinel NAME parse_module plants — hence the diagnostic code —
 // matches the offset it carets, and the failure is a CLEAN error rather than a silent mis-parse
 // that swallows the next decl.
-ParseErrorKind*: Generic | BadBinding | MisorderedGeneric | Unclosed | ExpectedArrow | ExpectedExpr | ExpectedDecl | ExpectedInit | UnexpectedEof | RetiredWalrus | RetiredBracketType | FieldDefault | ExpectedLetType | ExpectedLetEq
+ParseErrorKind*: Generic | BadBinding | MisorderedGeneric | Unclosed | ExpectedArrow | ExpectedExpr | ExpectedDecl | ExpectedInit | UnexpectedEof | RetiredWalrus | RetiredBracketType | FieldDefault | ExpectedLetType | ExpectedLetEq | InvalidLiteral
 parse_err_kind ::= ParseErrorKind.Generic
 // Every value below is a `parse_err_kind`; parse.sentinel_name maps it to the sentinel decl
 // parse_module plants, and compiler.validate.kinds maps that name to the diagnostic that NAMES WHAT
@@ -86,15 +86,15 @@ perr_off_get* = () i32 { parse_err_off }
 perr_kind_get* = () ParseErrorKind { parse_err_kind }
 // error instead of a C-stack overflow (SIGSEGV). The recursive-descent parsers funnel every nested
 // construct through a small set of entry points — parse_atom (parens/neg/not/slice/match/lambda),
-// parse_while (loop nesting), parse_ty (Ptr/slice/fn/anon type nesting), the operator-precedence
+// parse_while (loop nesting), parse_ty (Ptr/slice/fn/indexed payload type nesting), the operator-precedence
 // ladder (parse_expr's `*_more` steps — flat `1+1+…` / `1==1==…` chains) and postfix chains
 // (parse_postfix — `.f.f.f…` members, `f(f(f(…)))` call-arg nesting) — each of which calls
 // pdepth_enter on entry, pdepth_exit before returning, and bails (with perr_set) once pdepth_over.
-// The cap (400) sits far below the measured overflow point of the tightest path (~1000 nested
-// binary/postfix frames) yet orders of magnitude above any real program's nesting, so it never
-// over-rejects. Reset (with the parse-failure flags) at every parse_module entry. Mirrors `tyargs_end`'s 256 cap.
+// Flat statement lists deliberately do not spend this budget: sequence length is not syntactic
+// nesting. The cap (256) leaves ample unwind headroom below the measured ~630-frame overflow in the
+// tightest combined call-argument/operator path. Reset at every parse_module entry.
 parse_depth ::= 0
-PARSE_DEPTH_CAP = 400
+PARSE_DEPTH_CAP = 256
 pdepth_enter* = () void { parse_depth = parse_depth + 1 }
 pdepth_exit* = () void { parse_depth = parse_depth - 1 }
 // flag + report once we are nested too deep; the caller returns a placeholder instead of recursing.
@@ -132,32 +132,30 @@ vbreak_off ::= 0
 vbreak_note* = (off: i32) void { vbreak_off = off }
 vbreak_get* = () i32 { vbreak_off }
 vbreak_reset* = () void { vbreak_off = 0 }
-// Anonymous struct TYPES `{ q: i32, r: i32 }` are desugared, at parse time, to a synthesized named
-// StructDecl (`__anon_q_r`, the structural name from mangle_anon_in) referenced as a `Named` type.
-// Each distinct shape is registered ONCE here (dedup by name); parse_module hoists the collected
-// StructDecls into the module decl list, so the checker + codegen see ordinary named structs.
-// The buffer is (re)allocated per parse_module run; registration is a no-op until then (so the
-// resolver's decl-span probes, which call parse_ty without a buffer, never write through null).
-anon_decls ::= no_sdecls()
-anon_n ::= 0
+// A multi-value enum payload is lowered internally to an indexed record (`_0`, `_1`, ...).
+// Each generated payload layout is registered once and hoisted as an ordinary named StructDecl, so
+// the checker and backends never need a second representation. This registry is compiler-internal:
+// source-level anonymous record types and literals are not part of Zen.
+payload_decls ::= no_sdecls()
+payload_n ::= 0
 no_sdecls = () MutSlice<StructDecl> { slice(null_ptr(), 0) }
-anon_reset* = (a: Allocator) void {
-    anon_decls = slice(a.acquire_or_die(4096 * sizeof(StructDecl)), 4096)
-    anon_n = 0
+payload_reset* = (a: Allocator) void {
+    payload_decls = slice(a.acquire_or_die(4096 * sizeof(StructDecl)), 4096)
+    payload_n = 0
 }
-anon_decls_get* = () MutSlice<StructDecl> { slice(anon_decls.ptr, anon_n) }
-anon_has = (name: StringView) bool {
+payload_decls_get* = () MutSlice<StructDecl> { slice(payload_decls.ptr, payload_n) }
+payload_has = (name: StringView) bool {
     found ::= false
-    anon_decls.loop_at((i, sd) {
-        found = (i < anon_n).then({ found || sd.name == name }, { found })
+    payload_decls.loop_at((i, sd) {
+        found = (i < payload_n).then({ found || sd.name == name }, { found })
     })
     found
 }
-register_anon* = (name: StringView, fields: MutSlice<Field>) void {
-    (anon_n < anon_decls.len).then({
-        (anon_has(name) == false).then({
-            anon_decls[anon_n] = sdef(name, fields)
-            anon_n = anon_n + 1
+register_payload* = (name: StringView, fields: MutSlice<Field>) void {
+    (payload_n < payload_decls.len).then({
+        (payload_has(name) == false).then({
+            payload_decls[payload_n] = sdef(name, fields)
+            payload_n = payload_n + 1
         })
     })
 }
@@ -180,7 +178,7 @@ lbrace_off* = (src: StringView, pos: i32) i32 {
 }
 // map a type token to genc's Ty: a primitive keyword, else a Named type (the lexeme
 // materialized — a `Pt` becomes Named("Pt"), lowering to a `struct Pt`). Composite types
-// (`Ptr<T>`, `[T]`, `(A) R`) are parsed by parse_ty below.
+// (`Ptr<T>`, `[T]`, `(value: A) R`) are parsed by parse_ty below.
 span_eq = (src: StringView, start: i32, len: i32, kw: StringView, i: i32) bool {
     (i == len).match ({
         true  => kw.at(i) == 0,
@@ -279,7 +277,15 @@ parse_ty* = (a: Allocator, src: StringView, pos: i32) TyEnd {
 parse_ty_inner = (a: Allocator, src: StringView, pos: i32) TyEnd {
     tt = src.scan(pos)    // the head type token
     src.is_lbrace(tt.tok).match ({
-        true  => a.parse_anon_ty(src, tt.next),
+        true  => {
+            // Records are nominal in Zen. Consume the retired anonymous-record form only far
+            // enough to resume parsing; it never enters the AST or the indexed-payload registry.
+            perr_set_at(tt.tok.start)
+            TyEnd(
+                ty: tvoid(),
+                next: src.skip_block(tt.next),
+            )
+        },
         false => src.is_lbracket(tt.tok).match ({
             true  => {
                 // Consume the retired form so parsing stays synchronized, but reject the module with
@@ -299,26 +305,10 @@ parse_ty_inner = (a: Allocator, src: StringView, pos: i32) TyEnd {
             }),
         }),
     })
-}    // { name: T, … } -> a structural anon struct
-take_afields = (buf: MutSlice<Field>, n: i32) MutSlice<Field> { slice(buf.ptr, n) }    // ( A, T ) R -> FnT (a closure/template param)
-parse_anon_ty = (a: Allocator, src: StringView, pos: i32) TyEnd {
-    buf = a.afield_buf()    // Ptr<inner> / MutPtr<inner> / RawPtr<inner> -> inner* (kind from the keyword)
-    // a leaf type, maybe a generic instance N<…>
-    // An anonymous struct type `{ name: T, … }` -> a synthesized named struct (structural identity by
-    // ordered field names). `pos` is just past the opening `{`. Registers the shape so parse_module hoists
-    // its StructDecl, and returns the type as `Named(__anon_…)` so the rest of the pipeline is unchanged.
-    // pos just past '{'
-    fe = a.fill_anon_fields(src, pos, buf, 0)
-    fields = buf.take_afields(fe.count)
-    name = a.mangle_anon_in(fields)
-    register_anon(name, fields)
-    TyEnd(
-        ty: tnamed(name),
-        next: fe.next,
-    )
 }
-// A variant payload: `(T)` keeps the single type as-is; `(T1, T2, …)` synthesizes an anon struct
-// `{_0: T1, _1: T2, …}` (positional fields) so multi-field payloads reuse the existing anon-struct
+take_afields = (buf: MutSlice<Field>, n: i32) MutSlice<Field> { slice(buf.ptr, n) }
+// A variant payload: `(T)` keeps the single type as-is; `(T1, T2, …)` synthesizes an indexed payload record
+// `{_0: T1, _1: T2, …}` (positional fields) so multi-field payloads reuse the existing indexed-payload-record
 // lowering with NO checker/codegen changes. `pos` is just past the '('; returns the type + pos past ')'.
 parse_variant_payload* = (a: Allocator, src: StringView, pos: i32) TyEnd {
     buf = a.afield_buf()
@@ -330,8 +320,8 @@ parse_variant_payload* = (a: Allocator, src: StringView, pos: i32) TyEnd {
         ),
         false => {
             fields = buf.take_afields(fe.count)    // single payload: the bare type
-            name = a.mangle_anon_in(fields)
-            register_anon(name, fields)
+            name = a.mangle_payload_in(fields)
+            register_payload(name, fields)
             TyEnd(
                 ty: tnamed(name),
                 next: fe.next,
@@ -363,51 +353,6 @@ fill_payload_tys = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<Field
         },
     })
 }    // past ')'
-fill_anon_fields = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<Field>, i: i32) PEnd {
-    sc = src.scan(pos)
-    sc.tok.kind.match ({
-        .Eof => {
-            perr_set_at(pos)
-            PEnd(
-                count: i,
-                next: sc.next,
-            )
-        },    // unterminated `{…`: flag, terminate
-        _    => src.is_rbrace(sc.tok).match ({
-            true  => PEnd(
-                count: i,
-                next: sc.next,
-            ),
-            false => a.fill_anon_field(src, pos, buf, i),
-        }),
-    })
-}
-fill_anon_field = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<Field>, i: i32) PEnd {
-    // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
-    (i >= buf.len).then({
-        perr_set_at(pos)
-        return PEnd(
-            count: i,
-            next: pos,
-        )
-    })
-    nt = src.scan(pos)    // field name
-    nm = a.lexeme(src, nt.tok)
-    colon = src.scan(nt.next)    // ':'
-    te = a.parse_ty(src, colon.next)    // the field type (may be Ptr<…>, nested anon, …)
-    buf[i] = field_at(nm, te.ty, nt.tok.start)
-    after = src.scan(te.next)    // ',' / next field / '}'
-    src.is_comma(after.tok).match ({
-        true  => a.fill_anon_fields(src, after.next, buf, i + 1),
-        false => is_ident_tok(after.tok).match ({
-            true  => a.fill_anon_fields(src, te.next, buf, i + 1),
-            false => PEnd(
-                count: i + 1,
-                next: after.next,
-            ),
-        }),
-    })
-}    // whitespace-separated fields (no comma)
 // copy the raw source span `[start, endpos)` into a fresh NUL-terminated string. Used to materialize a
 // QUALIFIED type name (`io.Writer`) verbatim — the `.` and the segments are contiguous in source.
 lexeme_range = (a: Allocator, src: StringView, start: i32, endpos: i32) StringView {
@@ -509,53 +454,16 @@ parse_generic_ty = (a: Allocator, src: StringView, nameTok: Scan, pos: i32) TyEn
         next: ta.next,
     )
 }
-// a function type `(A, T) R`: a `)`-terminated type list, then the return type. Only ever a
+// a function type `(left: A, right: T) R`: a labeled parameter list, then the return type. Only ever a
 // parameter type — a function with one is an inline template (lowered at the call site).
-ty_buf = (a: Allocator) MutSlice<Ty> { slice(a.acquire_or_die(256 * sizeof(Ty)), 256) }    // cap 256
+ty_buf = (a: Allocator) MutSlice<Ty> { slice(a.acquire_or_die(256 * sizeof(Ty)), 256) }
 take_tys = (buf: MutSlice<Ty>, n: i32) MutSlice<Ty> { slice(buf.ptr, n) }
-fill_tys = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<Ty>, i: i32) PEnd {
-    sc = src.scan(pos)
-    src.is_rparen(sc.tok).match ({
-        true  => PEnd(
-            count: i,
-            next: sc.next,
-        ),
-        false => a.fill_ty(src, pos, buf, i),
-    })
-}
-fill_ty = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<Ty>, i: i32) PEnd {
-    // OVERFLOW GUARD: at the buffer's cap, flag and stop instead of writing past the heap block.
-    (i >= buf.len).then({
-        perr_set_at(pos)
-        return PEnd(
-            count: i,
-            next: pos,
-        )
-    })
-    te = a.parse_ty(src, pos)    // one parameter type
-    buf[i] = te.ty
-    after = src.scan(te.next)    // ',' or ')'
-    src.is_comma(after.tok).match ({
-        true  => a.fill_tys(src, after.next, buf, i + 1),
-        false => {
-            // A function-type param list `(A, B) R` must close on ')'; a missing ')' is a parse error, not a
-            // silent terminator (mirrors fill_payload_tys).
-            (src.is_rparen(after.tok) == false).then({
-                perr_set_at(after.tok.start)
-            })
-            PEnd(
-                count: i + 1,
-                next: after.next,
-            )
-        },
-    })
-}
 parse_fn_ty = (a: Allocator, src: StringView, pos: i32) TyEnd {
-    buf = a.ty_buf()    // pos just past '('
-    pe = a.fill_tys(src, pos, buf, 0)    // param types, pos just past ')'
+    buf = a.param_buf()    // pos just past '('
+    pe = a.fill_params(src, pos, buf, 0)    // labeled params, pos just past ')'
     rt = a.parse_ty(src, pe.next)
     TyEnd(
-        ty: fntype(buf.take_tys(pe.count), a.tynode(rt.ty)),
+        ty: a.fntype_params(buf.take_params(pe.count), a.tynode(rt.ty)),
         next: rt.next,
     )
 }    // the return type
@@ -674,6 +582,9 @@ fill_one = (a: Allocator, src: StringView, pos: i32, buf: MutSlice<Param>, i: i3
     colon = src.scan(nt.next)    // ':'
     (irecv_on() && i == 0 && src.is_field_colon(colon.tok) == false).then({
         return a.fill_recv(src, nm, nt.tok.start, nt.next, buf, i)
+    })
+    (src.is_field_colon(colon.tok) == false).then({
+        perr_set_at(colon.tok.start)
     })
     src.is_ellipsis(colon.next).match ({
         true  => a.fill_variadic(src, nm, nt.tok.start, colon.next, buf, i),

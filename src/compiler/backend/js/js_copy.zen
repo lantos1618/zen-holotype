@@ -21,7 +21,7 @@
 // those fields.
 { String } = std.text.string
 { Ty, StructDecl, EnumDecl, Field, VariantDef } = compiler.ast.ast_types
-{ gstr_append, tvoid, tnamed } = compiler.genc
+{ tvoid, tnamed } = compiler.genc
 { Allocator } = std.mem.alloc
 { js_size_decls } = compiler.backend.js.js_size
 { loop_at } = std.core.count
@@ -70,7 +70,7 @@ jsc_variants_mode = (vs: MutSlice<VariantDef>, depth: i32) i32 {
     m
 }
 jsc_helper = (s: String, a: Allocator, t: Ty) String {
-    s.gstr_append(a, "__zc_").gstr_append(a, jsc_ty_name(t))
+    s.add("__zc_").add(jsc_ty_name(t))
 }
 jsc_ty_name = (t: Ty) StringView {
     t.match ({
@@ -83,12 +83,12 @@ jsc_ty_name = (t: Ty) StringView {
 js_cp_open* = (s: String, a: Allocator, t: Ty) String {
     m = js_cp_mode(t)
     (m == jsc_spread()).then({
-        return s.gstr_append(a, "__zr.cp(")
+        return s.add("__zr.cp(")
     })
-    (m == jsc_walk()).then({ s.jsc_helper(a, t).gstr_append(a, "(") }, { s })
+    (m == jsc_walk()).then({ s.jsc_helper(a, t).add("(") }, { s })
 }
 js_cp_close* = (s: String, a: Allocator, t: Ty) String {
-    (js_cp_mode(t) == jsc_share()).then({ s }, { s.gstr_append(a, ")") })
+    (js_cp_mode(t) == jsc_share()).then({ s }, { s.add(")") })
 }
 // ── the generated per-type walks ──────────────────────────────────────────────────────────────────
 // One `function __zc_<Name>(x)` per declared type that has a field to copy. Emitted at the top of the
@@ -112,52 +112,52 @@ js_copy_defs* = (s: String, a: Allocator) String {
 }
 jsc_struct_def = (s: String, a: Allocator, sd: StructDecl) String {
     out ::= s
-        .gstr_append(a, "function __zc_")
-        .gstr_append(a, sd.name)
-        .gstr_append(a, "(x) { return ({ ...x")
+        .add("function __zc_")
+        .add(sd.name)
+        .add("(x) { return ({ ...x")
     sd.fields.loop_at((i, f) {
         out = (js_cp_mode(f.ty) == jsc_share()).match ({
             true  => out,
             false => out
-                .gstr_append(a, ", ")
-                .gstr_append(a, f.name)
-                .gstr_append(a, ": ")
+                .add(", ")
+                .add(f.name)
+                .add(": ")
                 .jsc_field_copy(a, f),
         })
     })
-    out.gstr_append(a, " }); }\n")
+    out.add(" }); }\n")
 }
 jsc_field_copy = (s: String, a: Allocator, f: Field) String {
     s
         .js_cp_open(a, f.ty)
-        .gstr_append(a, "x.")
-        .gstr_append(a, f.name)
+        .add("x.")
+        .add(f.name)
         .js_cp_close(a, f.ty)
 }
 // an enum is `{ tag, <Variant>: payload }`: spread the tag, and override only the payload of the
 // variants that carry something to copy — a `.None` must not grow a payload key it never had.
 jsc_enum_def = (s: String, a: Allocator, ed: EnumDecl) String {
     out ::= s
-        .gstr_append(a, "function __zc_")
-        .gstr_append(a, ed.name)
-        .gstr_append(a, "(x) { switch (x.tag) { ")
+        .add("function __zc_")
+        .add(ed.name)
+        .add("(x) { switch (x.tag) { ")
     ed.variants.loop_at((i, v) {
         out = (js_cp_mode(v.payload) == jsc_share()).then({ out }, { out.jsc_variant_case(a, v) })
     })
-    out.gstr_append(a, "} return ({ ...x }); }\n")
+    out.add("} return ({ ...x }); }\n")
 }
 jsc_variant_case = (s: String, a: Allocator, v: VariantDef) String {
     s
-        .gstr_append(a, "case \"")
-        .gstr_append(a, v.name)
-        .gstr_append(a, "\": return ({ ...x, ")
-        .gstr_append(a, v.name)
-        .gstr_append(a, ": ")
+        .add("case \"")
+        .add(v.name)
+        .add("\": return ({ ...x, ")
+        .add(v.name)
+        .add(": ")
         .js_cp_open(a, v.payload)
-        .gstr_append(a, "x.")
-        .gstr_append(a, v.name)
+        .add("x.")
+        .add(v.name)
         .js_cp_close(a, v.payload)
-        .gstr_append(a, " }); ")
+        .add(" }); ")
 }
 // ── decl lookups the type reconstruction (js_expr.js_ty_of) needs ─────────────────────────────────
 // `obj.field` where obj is a struct — or, after genc's `.u` union level, an enum PAYLOAD (`subj.u.Ok`).

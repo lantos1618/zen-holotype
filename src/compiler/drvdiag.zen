@@ -1,11 +1,11 @@
 { Allocator } = std.mem.alloc
+{ parse_module } = compiler.parse
 { clock_ms } = std.sys.os
 { then } = std.core.bool
 { Map } = std.collections.map
 { view } = std.text.str
 { at } = std.text.ascii
-{ gstr_string, gstr_push, gstr_append, gstr_finish } = compiler.genc
-{ CheckDiagnostic, desc_or } = compiler.validate.diag
+{ CheckDiagnostic, desc_or, diagnostic_code } = compiler.validate.diag
 { check_module_ownership_diagnostic_from_source, check_module_parse_diagnostic_from_source,
   check_module_no_if_diagnostic_from_source, check_module_no_ternary_diagnostic_from_source,
   check_module_no_coroutine_diagnostic_from_source, check_module_reserved_diagnostic_from_source,
@@ -197,6 +197,29 @@ report_no_if_plain* = (mp: Allocator, path: StringView, src: StringView) i32 {
         },
     })
 }
+// Parse one real module against its own NUL terminator before any flat-source scan. This prevents an
+// unterminated string, comment, or block in one file from consuming bytes in the next module.
+report_parse_plain = (mp: Allocator, path: StringView, src: StringView) i32 {
+    raw = mp.parse_module(src)
+    cd = mp.check_module_parse_diagnostic_from_source(raw, src)
+    (cd.code == 0 || cd.code == diagnostic_code(.UnexpectedEof)).match ({
+        true  => 0,
+        false => {
+            sp = diag_user_span(src, src, cd.source_offset, cd.span_width)
+            eprint(mp.render_diagnostic(path, src, sp.line, sp.col, sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
+            1
+        },
+    })
+}
+report_module_parses = (mp: Allocator, rp: ResolvedProgram) i32 {
+    failed ::= 0
+    rp.table.modules.loop_at((i, m) {
+        (failed == 0).then({
+            failed = mp.report_parse_plain(m.path, m.source)
+        })
+    })
+    failed
+}
 // Checked commands preflight the resolved flat source before parsing or semantic lowering. This keeps
 // the obsolete guard parser/lowerer out of the execution path and still maps an `if` (or a ternary
 // `?`) in an imported module back to that module's real file.
@@ -210,7 +233,7 @@ report_no_if_resolved* = (
         .cd_or(check_module_no_ternary_diagnostic_from_source(rp.flat))
         .cd_or(check_module_no_coroutine_diagnostic_from_source(rp.flat))
     (cd.code == 0).match ({
-        true  => 0,
+        true  => mp.report_module_parses(rp),
         false => {
             dl = locate_diag(rp, cd.source_offset, cd.span_width, path, user)
             eprint(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, cd.kind, cd.message, cd.hint, cd.count))
@@ -236,11 +259,10 @@ report_js_unsupported* = (
     })
     pos = js_unsupported_pos_get()
     dl = locate_diag(rp, pos, rp.flat.diagnostic_span_width(pos), path, user)
-    msg = mp
-        .gstr_string(192)
-        .gstr_append(mp, "`")
-        .gstr_append(mp, nm, "` is a compiler intrinsic the js backend cannot lower; the emitted JavaScript would call an undefined function")
-        .gstr_finish(mp)
+    msg = mp.String(192)
+        .add("`")
+        .add(nm, "` is a compiler intrinsic the js backend cannot lower; the emitted JavaScript would call an undefined function")
+        .finish_cstr()
     eprint(mp.render_diagnostic(dl.path, dl.src, dl.sp.line, dl.sp.col, dl.sp.end_col, "js-target", msg, "build this program for the default C target, or keep the js-target path clear of it", 1))
     1
 }
@@ -312,11 +334,10 @@ report_c_unsupported* = (
         return 0
     })
     sp = user.js_platform_import_span()
-    msg = mp
-        .gstr_string(192)
-        .gstr_append(mp, "`")
-        .gstr_append(mp, JS_PLATFORM_MODULE(), "` is a JavaScript-platform binding: the browser implements its stubs, so a C build would link against symbols no C host defines")
-        .gstr_finish(mp)
+    msg = mp.String(192)
+        .add("`")
+        .add(JS_PLATFORM_MODULE(), "` is a JavaScript-platform binding: the browser implements its stubs, so a C build would link against symbols no C host defines")
+        .finish_cstr()
     eprint(mp.render_diagnostic(path, user, sp.line, sp.col, sp.end_col, "c-target", msg, "build this program for the js target instead — `zen emit-js <file>` or `zen build --target js <file>` — and load it in a browser page", 1))
     1
 }
@@ -324,13 +345,12 @@ report_c_unsupported* = (
 DIAG_CAP = () i32 { 20 }
 // after the cap, one line naming the K un-rendered errors (so the tail is never silently dropped).
 emit_more_trailer = (mp: Allocator, k: i32) i64 {
-    s = mp
-        .gstr_string(48)
-        .gstr_append(mp, "zenc: (+")
+    s = mp.String(48)
+        .add("zenc: (+")
         .push_int(mp, to_i64(k))
-        .gstr_append(mp, " more error")
-    s2 = (k == 1).then({ s.gstr_push(mp, ')') }, { s.gstr_push(mp, 's').gstr_push(mp, ')') })
-    eprint(s2.gstr_push(mp, '\n').gstr_finish(mp))
+        .add(" more error")
+    s2 = (k == 1).then({ s.add_one(')') }, { s.add_one('s').add_one(')') })
+    eprint(s2.add_one('\n').finish_cstr())
 }
 // 0 if clean; else render EVERY main-channel diagnostic (capped, with a trailer) and return the count.
 report_check* = (

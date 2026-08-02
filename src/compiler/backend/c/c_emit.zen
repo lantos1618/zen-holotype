@@ -1,7 +1,7 @@
 { String } = std.text.string
 { ends_with } = std.text.str
 { Decl, EnumDecl, Expr, StructDecl, Ty } = compiler.ast.ast_types
-{ cbuf, ty_cname_in, gstr_string, gstr_append } = compiler.genc
+{ cbuf, ty_cname_in } = compiler.genc
 { monomorphize } = compiler.mono
 { Allocator } = std.mem.alloc
 { slice_any } = compiler.astops
@@ -90,11 +90,11 @@ gen_types_at = (
         d.match ({
             .DStruct(sd) => (impld.emit_is_trait(d) == false).then({
                 (decls.idx_depth(cache, i) == k).then({
-                    out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
+                    out = out.gen_decl(alloc, d).add(" ")
                 })
             }),
             .DEnum(ed)   => (decls.idx_depth(cache, i) == k).then({
-                out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
+                out = out.gen_decl(alloc, d).add(" ")
             }),
             _            => { },
         })
@@ -123,10 +123,10 @@ gen_funcs = (s: String, alloc: Allocator, decls: MutSlice<Decl>) String {
         (d.is_template() == false).then({
             d.match ({
                 .DFunc(f) => {
-                    out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
+                    out = out.gen_decl(alloc, d).add(" ")
                 },
                 .DRaw(c)  => {
-                    out = out.gen_decl(alloc, d).gstr_append(alloc, " ")
+                    out = out.gen_decl(alloc, d).add(" ")
                 },
                 _         => { },
             })
@@ -159,21 +159,21 @@ gen_global = (s: String, alloc: Allocator, d: Decl) String {
             g.init.is_const_init().match ({
                 true  => {
                     out = out
-                        .gstr_append(alloc, stor)
-                        .gstr_append(alloc, alloc.ty_cname_in(g.ty))
-                        .gstr_append(alloc, " ")
-                        .gstr_append(alloc, g.name)
-                        .gstr_append(alloc, " = ")
+                        .add(stor)
+                        .add(alloc.ty_cname_in(g.ty))
+                        .add(" ")
+                        .add(g.name)
+                        .add(" = ")
                         .gen_expr(alloc, g.init)
-                        .gstr_append(alloc, "; ")
+                        .add("; ")
                 },
                 false => {
                     out = out
-                        .gstr_append(alloc, stor)
-                        .gstr_append(alloc, alloc.ty_cname_in(g.ty))
-                        .gstr_append(alloc, " ")
-                        .gstr_append(alloc, g.name)
-                        .gstr_append(alloc, "; ")
+                        .add(stor)
+                        .add(alloc.ty_cname_in(g.ty))
+                        .add(" ")
+                        .add(g.name)
+                        .add("; ")
                 },
             })
         },
@@ -182,20 +182,20 @@ gen_global = (s: String, alloc: Allocator, d: Decl) String {
     out
 }
 gen_global_inits = (s: String, alloc: Allocator, decls: MutSlice<Decl>) String {
-    out ::= s.gstr_append(alloc, "static void zen__init_globals(void) { ")
+    out ::= s.add("static void zen__init_globals(void) { ")
     decls.loop_at((i, d) {
         d.match ({
             .DGlobal(g) => (g.init.is_const_init() == false).then({
                 out = out
-                    .gstr_append(alloc, g.name)
-                    .gstr_append(alloc, " = ")
+                    .add(g.name)
+                    .add(" = ")
                     .gen_expr(alloc, g.init)
-                    .gstr_append(alloc, "; ")
+                    .add("; ")
             }),
             _           => { },
         })
     })
-    out.gstr_append(alloc, "} ")
+    out.add("} ")
 }
 // The `main = (sys: Sys) i32` capability entry, if the program has one. Its body is emitted as
 // `zen_user_main` (see gen_func); a niladic `zen_main` trampoline feeds it `root()`.
@@ -242,10 +242,9 @@ genModuleIn* = (a: Allocator, raw: MutSlice<Decl>) String {
     // zslice is the EXACT leading HEAD; zfn (fn pointers, A2) and the malloc/memcpy prototypes follow so
     // heap-promoted slice literals (gen_slicelit) link in standalone programs that don't import std.mem
     // (types match std.mem/std.string foreign decls — compatible redecl).
-    s ::= a
-        .gstr_string(4096)
-        .gstr_append(a, "typedef struct { void* ptr; int64_t len; } zslice; typedef void (*zfn)(void); uint8_t* malloc(int64_t); uint8_t* memcpy(uint8_t*, uint8_t*, int64_t); void abort(void); int64_t write(int32_t, uint8_t*, int64_t); __attribute__((weak)) void __zen_panic_unwind(void){ } static void zen__panic(const char* m){ int64_t n=0; while(m[n]){ n=n+1; } write(2,(uint8_t*)m,n); __zen_panic_unwind(); abort(); } static int64_t zen__divz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } if(b==-1 && a==(-9223372036854775807LL-1)){ zen__panic(\"zen: panic: integer division overflow\\n\"); } return a/b; } static int32_t zen__divz32(int32_t a, int32_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } if(b==-1 && a==(-2147483647-1)){ zen__panic(\"zen: panic: integer division overflow\\n\"); } return a/b; } static int64_t zen__modz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } if(b==-1){ return 0; } return a%b; } static uint64_t zen__udivz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } return a/b; } static uint64_t zen__umodz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } return a%b; } static uint8_t* zen__idx(zslice z, int64_t i, int64_t esz){ if(i<0 || i>=z.len){ zen__panic(\"zen: panic: slice index out of bounds\\n\"); } return (uint8_t*)z.ptr + i*esz; } static uint8_t* zen__salloc(int64_t n){ uint8_t* p = malloc(n); if(!p){ zen__panic(\"zen: panic: out of memory\\n\"); } return p; }")
-        .gstr_append(a, platform_prelude())
+    s ::= a.String(4096)
+        .add("typedef struct { void* ptr; int64_t len; } zslice; typedef void (*zfn)(void); uint8_t* malloc(int64_t); uint8_t* memcpy(uint8_t*, uint8_t*, int64_t); void abort(void); int64_t write(int32_t, uint8_t*, int64_t); __attribute__((weak)) void __zen_panic_unwind(void){ } static void zen__panic(const char* m){ int64_t n=0; while(m[n]){ n=n+1; } write(2,(uint8_t*)m,n); __zen_panic_unwind(); abort(); } static int64_t zen__divz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } if(b==-1 && a==(-9223372036854775807LL-1)){ zen__panic(\"zen: panic: integer division overflow\\n\"); } return a/b; } static int32_t zen__divz32(int32_t a, int32_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } if(b==-1 && a==(-2147483647-1)){ zen__panic(\"zen: panic: integer division overflow\\n\"); } return a/b; } static int64_t zen__modz(int64_t a, int64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } if(b==-1){ return 0; } return a%b; } static uint64_t zen__udivz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer divide by zero\\n\"); } return a/b; } static uint64_t zen__umodz(uint64_t a, uint64_t b){ if(b==0){ zen__panic(\"zen: panic: integer modulo by zero\\n\"); } return a%b; } static uint8_t* zen__idx(zslice z, int64_t i, int64_t esz){ if(i<0 || i>=z.len){ zen__panic(\"zen: panic: slice index out of bounds\\n\"); } return (uint8_t*)z.ptr + i*esz; } static uint8_t* zen__salloc(int64_t n){ uint8_t* p = malloc(n); if(!p){ zen__panic(\"zen: panic: out of memory\\n\"); } return p; }")
+        .add(platform_prelude())
     impld = a.impld_set(decls)
     decls.loop_at((i, d) { s = s.gen_fwd(a, impld, d) })
     s = s.gen_fnt_typedefs(a, decls)
@@ -259,9 +258,9 @@ genModuleIn* = (a: Allocator, raw: MutSlice<Decl>) String {
     // even when std.sys.root was reached through a namespace alias (`sys__root`).
     has_sys_main(decls).match ({
         true  => out
-            .gstr_append(a, " int32_t zen_main(void){ zen__init_globals(); return zen_user_main(")
-            .gstr_append(a, sys_root_cname(decls))
-            .gstr_append(a, "()); }"),
+            .add(" int32_t zen_main(void){ zen__init_globals(); return zen_user_main(")
+            .add(sys_root_cname(decls))
+            .add("()); }"),
         false => out,
     })
 }

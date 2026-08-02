@@ -1,19 +1,18 @@
 // @self-hosted-only
-// Formatted stdout output. Default numeric paths stream; *_in helpers return owned-allocation errors.
-{ AllocatorBackend } = std.mem.alloc
+// Stdout output. Direct numeric paths stream; format/formatln use canonical String interpolation.
+{ AllocatorBackend, heap_allocator } = std.mem.alloc
 { out_bytes } = std.io.file
 { view, at } = std.text.str
-{ String } = std.text.string
-{ integer_in, float_in, f64_special } = std.text.num
-{ num_write_integer, num_write_udigits, num_uwrite_udigits, num_write_fpad, num_write_zeros } = std.text.num
-{ num_fexp, num_fsig, num_fstrip, num_fndig, num_fpow10i } = std.text.num
+{ String, StringArg, string_arg, string, add_format } = std.text.string
+{ integer_in, float_in } = std.text.num
+{ f64_special, num_write_integer, num_write_udigits, num_uwrite_udigits, num_write_fpad,
+  num_write_zeros, num_fexp, num_fsig, num_fstrip, num_fndig, num_fpow10i } = std.text.num_render
 { Result, IoError, ok, err, or, panic } = std.core.result
 { alloc } = std.mem.raw
 { is_null } = std.core.ptr
-{ loop_at } = std.core.count
 Display*: {
-    fmt_print: (Self) i64,
-    fmt_println: (Self) i64,
+    fmt_print: (self: Self) i64,
+    fmt_println: (self: Self) i64,
 }
 // Print an owned temporary String and release its buffer.
 print_owned_in = (a: AllocatorBackend, t: String) i64 {
@@ -37,11 +36,11 @@ write_float_in* = (a: AllocatorBackend, x: f64) Result<i64, IoError> {
     })
 }
 write_digit = (d: i64) i64 { out_bytes("0123456789".offset(d).slice(1)).or(0) }
-// Stream the first `len` bytes of the digit fmt_scratch in one out_bytes call.
-// The digit loops themselves live ONCE in std.text.num (see the seed-closure note there);
+// Stream the first `len` bytes of the digit print_scratch in one out_bytes call.
+// The digit loops themselves live ONCE in std.text.num_render;
 // output is byte-identical to the old per-digit streaming — same digits, one write call.
 write_scratch = (p: RawPtr<u8>, len: i64) i64 { out_bytes(slice(p, len)).or(0) }
-// ONE digit fmt_scratch per OS thread, allocated on first use and reused by every writer below.
+// ONE digit print_scratch per OS thread, allocated on first use and reused by every writer below.
 // 21 bytes covers the widest render: "-9223372036854775808" and u64-max are both 20 bytes.
 //
 // It is NOT a `b: [u8] = [0, …]` local: a slice literal is heap-promoted (the C backend cannot yet
@@ -51,21 +50,21 @@ write_scratch = (p: RawPtr<u8>, len: i64) i64 { out_bytes(slice(p, len)).or(0) }
 //
 // `thread_local`, so actors printing on different pool workers never interleave digits — and the
 // const `null_ptr()` init means a freshly spawned worker starts unset rather than sharing the main
-// thread's cell. Sharing ONE cell across the writers is safe because none of them holds the fmt_scratch
+// thread's cell. Sharing ONE cell across the writers is safe because none of them holds the print_scratch
 // across a call to another: each fills it and streams it before the next writer runs.
 SCRATCH_LEN = 21
 // PREFIXED name: Zen's namespace is flat and const-by-default makes a bare `x = v` an ASSIGNMENT
 // whenever `x` names a module global, so a global called `scratch` would silently claim that word
-// in every module that reaches std.text.fmt.
-fmt_scratch ::= thread_local(null_ptr())
+// in every module that reaches std.io.print.
+print_scratch ::= thread_local(null_ptr())
 digits = () RawPtr<u8> {
-    fmt_scratch.is_null().then({
-        fmt_scratch = alloc(SCRATCH_LEN)
+    print_scratch.is_null().then({
+        print_scratch = alloc(SCRATCH_LEN)
     })
-    fmt_scratch.is_null().then({
-        panic("fmt: out of memory")
+    print_scratch.is_null().then({
+        panic("print: out of memory")
     })
-    fmt_scratch
+    print_scratch
 }
 // Non-negative n (callers: float significand/exponent paths and the sign-split below).
 write_uint = (n: i64) i64 {
@@ -100,7 +99,7 @@ write_fpad = (n: i64, w: i64) i64 {
 //
 // The pure numeric decomposition (num_fexp / num_fsig / num_fstrip / num_fndig / num_fpow10i,
 // plus their num_fexp_up/down, num_fpow10x, num_fscale_up/dn internals) lives ONCE in
-// std.text.num and is imported above — only the streaming render below is fmt-specific.
+// std.text.num_render and is imported above — only the streaming render below is print-specific.
 fzeros = (n: i64) i64 {
     b = digits()
     b.write_scratch(num_write_zeros(b, 0, n))
@@ -214,99 +213,31 @@ Printer*: {
 // raw byte writer) — a same-named free function in another module would shadow this
 // one's Printer return type at the call site.
 put* = (t: StringView) Printer { Printer(n: t.write_text()) }
-// ── {}-template interpolation: format / formatln ─────────────────────────────
-//
-// The streaming Printer mixes types but reads as a chain; the first thing most
-// newcomers reach for is a printf-style ONE-CALL template — `"name={} n={}"` with
-// the values supplied positionally. `args` is variadic over `Arg`, and `Arg` is a
-// concrete enum whose variant payloads are pairwise distinct, so each value wraps
-// itself into the variant that carries its static type:
-//
-//   format("name={} n={}", name, n)          // name=Zen n=42
-//   formatln("{} + {} = {}", a, b, a + b)
-//   formatln("closed={}", st.closed)         // a bool goes in AS a bool
-//
-// The pre-variadic spelling — an explicit `[Arg]` built with the `arg_*` ctors —
-// still works unchanged, because a value already of the collected `[Arg]` type is
-// SPREAD into the variadic slot rather than wrapped one level deeper:
-//
-//   format("name={} n={}", [arg_str(name), arg_int(n)])
-//
-// Use it when the args are assembled at runtime, or for a value no single variant
-// accepts. A value that fits no variant, or several, is left alone and reported as
-// an ordinary arg-type error — there is no stringify-anything fallback.
-//
-// Each `{}` consumes the next `Arg` in order and writes it with the matching typed
-// writer (the SAME ones backing the Printer ops) — straight to stdout, no buffer,
-// no allocation beyond what an `arg_owned(String)` already owns. `{{` and `}}` are
-// literal braces. A missing arg (`{}` past the end of the slice) writes nothing; a
-// surplus arg is ignored. `format` returns the byte count; `formatln` adds a newline.
-//
-// `format` is NON-GENERIC (concrete `[Arg]` + `str`), so it resolves cleanly across
-// modules — it sidesteps the generic+struct-param dispatch gap noted below.
-Arg*: Int(i64) | Flt(f64) | Str(StringView) | Bool(bool) | Owned(String)
-// Arg constructors — named `arg_*` (not `i`/`s`/`f`) so they never clash on the flat
-// import namespace with an importer's own top-level `i`/`s`/`f` or the Printer methods.
-arg_int* = (n: i64) Arg { .Int(n) }
-arg_flt* = (x: f64) Arg { .Flt(x) }
-arg_str* = (s: StringView) Arg { .Str(s) }
-arg_bool* = (x: bool) Arg { .Bool(x) }
-arg_owned* = (g: String) Arg { .Owned(g) }
-// write one Arg with the writer matching its kind; returns the bytes written.
-write_arg = (a: Arg) i64 {
-    a.match ({
-        .Int(n)   => write_int(n),
-        .Flt(x)   => write_float(x),
-        .Str(s)   => s.write_text(),
-        .Bool(x)  => x.then({ "true".write_text() }, { "false".write_text() }),
-        .Owned(g) => write_string(g),
+// String-backed interpolation compatibility. a.String(template, values...) is the canonical
+// surface. These constructors and output helpers are thin adapters; parsing and value rendering
+// live only in std.text.string.
+arg_int* = (n: i64) StringArg { string_arg(.Int(n)) }
+arg_flt* = (x: f64) StringArg { string_arg(.Float(x)) }
+arg_str* = (s: StringView) StringArg { string_arg(.Text(s)) }
+arg_bool* = (x: bool) StringArg { string_arg(.Bool(x)) }
+arg_owned* = (g: String) StringArg { string_arg(.Owned(g)) }
+format* = (template: StringView, args: ...StringArg) i64 {
+    a = heap_allocator()
+    g = a.string().add_format(template, args)
+    g.live().match ({
+        true  => {
+            n = g.write_string()
+            g.drop()
+            n
+        },
+        false => {
+            g.drop()
+            panic("string: out of memory")
+            0
+        },
     })
 }
-// write the template sub-run sv[lo..hi) verbatim (a borrowed view, no copy).
-write_run = (sv: Slice<u8>, lo: i64, hi: i64) i64 {
-    out_bytes(slice(sv.ptr.offset(lo), hi - lo)).or(0)
-}
-// write the i-th arg, or nothing when the template has more `{}` than the slice has args.
-write_arg_at = (args: MutSlice<Arg>, i: i64) i64 {
-    (i < args.len).then({ write_arg(args[i]) }, { 0 })
-}
-// splice `args` into `template` at each `{}`; `{{`/`}}` emit literal braces. Returns bytes written.
-format* = (template: StringView, args: ...Arg) i64 {
-    sv = template.view()
-    n :: i64 = 0    // bytes written so far
-    ai :: i64 = 0    // next arg slot
-    start :: i64 = 0    // start of the pending literal run
-    skip :: i64 = 0
-    sv.loop_at((i, b) {
-        (i < skip == false).then({
-            pair = i + 1 < sv.len    // resume index (skips the 2nd byte of a `{}`/`{{`/`}}` pair)
-            ph = b == '{' && pair && sv[i + 1] == '}'
-            esc = pair && (b == '{' && sv[i + 1] == '{' || b == '}' && sv[i + 1] == '}')
-            (ph || esc).then({
-                (i > start).then({
-                    n = n + sv.write_run(start, i)
-                })    // flush the literal run before the brace
-                ph.match ({
-                    true  => {
-                        n = n + args.write_arg_at(ai)
-                        ai = ai + 1
-                    },
-                    false => {
-                        n = n + sv.write_run(i, i + 1)
-                    },
-                })    // a `{{`/`}}` escape → one literal brace
-                skip = i + 2
-                start = i + 2
-            })
-        })
-    })
-    (sv.len > start).then({
-        n = n + sv.write_run(start, sv.len)
-    })    // flush the trailing literal run
-    n
-}
-// `format` plus a trailing newline — the println-shaped one-call interpolator.
-formatln* = (template: StringView, args: ...Arg) i64 { format(template, args) + newline() }
+formatln* = (template: StringView, args: ...StringArg) i64 { format(template, args) + newline() }
 // LIMITATION — why typed ops (.i/.f/.s) and not one generic `.v(x)` or printf:
 //
 //   1. A single generic `v<T>(p: Printer, x: T) Printer` would read cleanest —
@@ -317,15 +248,8 @@ formatln* = (template: StringView, args: ...Arg) i64 { format(template, args) + 
 //      work cross-module — only the threaded-Printer generic trips the gap. Typed
 //      ops sidestep it entirely: no generics involved.
 //
-//   2. (CLOSED) `format("x={} y={}", x, y)` carrying args of DIFFERENT types is what
-//      `args: ...Arg` above gives: varargs stay single-type, and `Arg` IS that one
-//      type — the tag is chosen per argument from its static type, so nothing is
-//      stringified and no allocator is threaded. The remaining limit is that `Arg`'s
-//      variant set is closed: only a type one variant's payload accepts can go in.
-//
-// The streaming Printer still earns its place for gap (1) and for values outside
-// `Arg` — it composes mixed types one typed op at a time and writes straight to
-// stdout. When the compiler closes gap (1) — generic + struct-param dispatch across
+// The streaming Printer still earns its place for gap (1) and allocation-free output.
+// When the compiler closes gap (1) — generic + struct-param dispatch across
 // modules — a single `.v(x)` can layer on without changing this core.
 StringView.impl(Display, {
     fmt_print   = (s: StringView) i64 { s.write_text() }

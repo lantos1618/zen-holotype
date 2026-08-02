@@ -4,14 +4,13 @@
 { out, out_bytes } = std.io.file
 { clock_ms, getEnv } = std.sys.os
 { getpid, opendir, closedir } = std.c.libc
-{ gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc    // the seed's String API
 { eprint, exit, resolve_failed, resolve_program_data, ResolvedProgram } = compiler.resolve    // eprint = the shared stderr write
 { upto } = std.core.count
 // stdout is a REAL sink, not a void. `zenc emit|doc|fmt|targets > file` on a full disk (or into a
 // closed pipe) used to exit 0 having written nothing: every write Result was discarded at the call
 // site. Route every driver stdout write through `stdout_put`/`stdout_put_bytes`, which record a lost
-// write in ONE sticky flag (the shape std.text.sb uses for its builder chain, so no caller has to
-// thread a Result back through the emit/doc/fmt printers), and settle it once in `main` with
+// write in ONE sticky flag (the sticky-error shape used by carried String builder chains, so no
+// caller has to thread a Result back through the emit/doc/fmt printers), and settle it once in `main` with
 // `out_status` — a lost write becomes a diagnostic plus exit 1 instead of a silent success.
 g_out_err ::= false
 stdout_put* = (s: StringView) void {
@@ -51,23 +50,22 @@ pid_digit = (d: i64) u8 { load(offset("0123456789", d)) }
 // not a silently half-written JSON frame.
 push_int* = (s: String, mp: Allocator, n: i64) String {
     (n < 0).then({
-        return s.gstr_push(mp, '-').push_int(mp, 0 - n)
+        return s.add_one('-').push_int(mp, 0 - n)
     })
     (n < 10).match ({
-        true  => s.gstr_push(mp, pid_digit(n)),
+        true  => s.add_one(pid_digit(n)),
         false => {
             hs = s.push_int(mp, n / 10)
-            hs.gstr_push(mp, pid_digit(n % 10))
+            hs.add_one(pid_digit(n % 10))
         },
     })
-}    // hoist (gstr_reserve re-evals the receiver)
+}    // hoist
 pid_path* = (mp: Allocator, pre: StringView, suf: StringView) StringView {
-    mp
-        .gstr_string(64)
-        .gstr_append(mp, pre)
+    mp.String(64)
+        .add(pre)
         .push_int(mp, getpid())
-        .gstr_append(mp, suf)
-        .gstr_finish(mp)
+        .add(suf)
+        .finish_cstr()
 }
 // ── path helpers ────────────────────────────────────────────────────────────────────────────────
 dirname* = (mp: Allocator, p: StringView) StringView {
@@ -80,38 +78,38 @@ last_slash* = (v: Slice<u8>, i: i64, best: i64) i64 {
 }
 // the first `n` bytes of `p` as an owned str — built through the allocator (no raw malloc).
 cstr_prefix* = (mp: Allocator, p: StringView, n: i64) StringView {
-    push_prefix(mp.gstr_string(n + 1), mp, p.view(), 0, n).gstr_finish(mp)
+    push_prefix(mp.String(n + 1), mp, p.view(), 0, n).finish_cstr()
 }
 push_prefix* = (s: String, mp: Allocator, v: Slice<u8>, i: i64, n: i64) String {
-    (i >= n).then({ s }, { push_prefix(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
+    (i >= n).then({ s }, { push_prefix(s.add_one(v[i]), mp, v, i + 1, n) })
 }
 pad_sp* = (s: String, mp: Allocator, n: i64) String {
-    (n <= 0).then({ s }, { s.gstr_push(mp, ' ').pad_sp(mp, n - 1) })
+    (n <= 0).then({ s }, { s.add_one(' ').pad_sp(mp, n - 1) })
 }
 finish_cstr* = (s: String, mp: Allocator) StringView { cstr(s.ptr) }
 // bytes [a, b) as an owned str (through the allocator, like cstr_prefix).
 push_span* = (s: String, mp: Allocator, v: MutSlice<u8>, i: i64, n: i64) String {
-    (i >= n).then({ s }, { push_span(s.gstr_push(mp, v[i]), mp, v, i + 1, n) })
+    (i >= n).then({ s }, { push_span(s.add_one(v[i]), mp, v, i + 1, n) })
 }
 bs_push_range* = (mp: Allocator, out: String, v: Slice<u8>, p: i64, e: i64) String {
-    (p >= e).then({ out }, { mp.bs_push_range(out.gstr_push(mp, v[p]), v, p + 1, e) })
+    (p >= e).then({ out }, { mp.bs_push_range(out.add_one(v[p]), v, p + 1, e) })
 }
 join2* = (mp: Allocator, a: StringView, b: StringView) StringView {
-    mp.gstr_string(256).gstr_append(mp, a, "/", b).gstr_finish(mp)
+    mp.String(256).add(a, "/", b).finish_cstr()
 }
 // the bytes [s,e) of `v` as a fresh owned cstr — the loader/LSP/audit substring verb. ITERATIVE:
 // a JSON body or module region is arbitrarily long, so it must not recurse the C stack per byte.
 cstr_range* = (mp: Allocator, v: Slice<u8>, s: i64, e: i64) StringView {
-    o ::= mp.gstr_string(e - s + 1)
-    s.upto(e, (i) { o = o.gstr_push(mp, v[i]) })
-    o.gstr_finish(mp)
+    o ::= mp.String(e - s + 1)
+    s.upto(e, (i) { o = o.add_one(v[i]) })
+    o.finish_cstr()
 }
 // src[start .. start+n) as an owned str. (named cstr_* to avoid colliding with std.text.str's
 // generic `substr` once the modules are flattened together — a plain `substr` would emit a second
 // C `substr` definition.)
 cstr_substr* = (mp: Allocator, s: StringView, start: i32, n: i32) StringView {
     v: Slice<u8> = s.view()
-    mp.bs_push_range(mp.gstr_string(n + 1), v, start, start + n).gstr_finish(mp)
+    mp.bs_push_range(mp.String(n + 1), v, start, start + n).finish_cstr()
 }
 // ── ZENC_TIME=1: coarse wall-clock per pipeline stage (stderr) ───────────────────────────────────
 // Reads CLOCK_MONOTONIC straight through libc (std.time isn't in the seed manifest). The timespec
@@ -123,13 +121,12 @@ zt_on* = () bool { is_empty(getEnv("ZENC_TIME")) == false }
 zt_log* = (mp: Allocator, name: StringView, start_ms: i64) i64 {
     now = clock_ms()
     zt_on().then({
-        eprint(mp
-            .gstr_string(64)
-            .gstr_append(mp, "zenc: time ")
-            .gstr_append(mp, name, " ")
+        eprint(mp.String(64)
+            .add("zenc: time ")
+            .add(name, " ")
             .push_int(mp, now - start_ms)
-            .gstr_append(mp, "ms\n")
-            .gstr_finish(mp))
+            .add("ms\n")
+            .finish_cstr())
         { }
     })
     now

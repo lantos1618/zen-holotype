@@ -66,60 +66,6 @@ finish_buf* = (dst: RawPtr<u8>, n: i64) StringView {
     dst.offset(n).store(0)
     cstr(dst)
 }
-// ── THE canonical String builder: allocator-explicit + generic over the allocator type, so a caller
-// passes whatever allocator it has (heap/arena/test). One implementation for the whole compiler — the
-// per-module emit_*/check_*/m* builders are thin aliases onto these. Safe to inline now that the
-// inliner namespaces inlined locals by their inline-marker chain (see check.inline_marks).
-gstr_string* = (a: Allocator, cap: i64) String {
-    String(
-        ptr: a.acquire_or_die(cap),
-        len: 0,
-        cap: cap,
-    )
-}
-gstr_grow = (a: Allocator, s: String, ncap: i64) String {
-    String(
-        ptr: a.resize_or_die(s.ptr, ncap),
-        len: s.len,
-        cap: ncap,
-    )
-}
-gstr_reserve = (a: Allocator, s: String, need: i64) String {
-    out ::= s
-    (s.len + need > s.cap).then({
-        out = a.gstr_grow(s, (s.cap + need) * 2)
-    })
-    out
-}
-gstr_push* = (s: String, a: Allocator, b: u8) String {
-    r = a.gstr_reserve(s, 1)
-    r.ptr.offset(r.len).store(b)
-    String(
-        ptr: r.ptr,
-        len: r.len + 1,
-        cap: r.cap,
-    )
-}
-// One reserve for the WHOLE input, then a straight byte-store loop — not a gstr_push per byte,
-// whose per-byte capacity check dominated self-compile profiles (gstr_append ~8.7% of samples).
-// Same bytes appended, so emitted C is unchanged; only the capacity growth schedule differs.
-// The [u8] form is the primitive: a caller that already knows the length (a String, a sub-slice)
-// appends without re-measuring; the StringView form pays its one unavoidable strlen in view().
-gstr_append_bytes* = (s: String, a: Allocator, bs: Slice<u8>) String {
-    r = a.gstr_reserve(s, bs.len)
-    bs.loop_at((i, b) { r.ptr.offset(r.len + i).store(b) })
-    String(
-        ptr: r.ptr,
-        len: r.len + bs.len,
-        cap: r.cap,
-    )
-}
-gstr_append* = (s: String, a: Allocator, parts: ...StringView) String {
-    out ::= s
-    parts.loop_at((i, t) { out = out.gstr_append_bytes(a, t.view()) })
-    out
-}
-gstr_finish* = (s: String, a: Allocator) StringCstr { cstr(s.gstr_push(a, '\0').ptr) }
 // constructors — return a value; the caller calls `.addr()` on an Expr to make a child, and
 // builds the body as a slice of statements: `[slet("y", e.addr()), sret(r.addr())]`
 lit* = (n: i64) Expr { .Int(n) }
@@ -401,11 +347,23 @@ blk_diverges* = (e: Ptr<Expr>) bool {
 // is_fnt (Ty), is_generic_fn (Func), is_template/is_trait (Decl), struct_is_trait (StructDecl) and
 // has_fnt_param ([Param]) moved to compiler.astops (grouped with the Ty::is_fnt trait impl they use),
 // so this base module carries no reference to a method defined outside its own import closure.
-fntype* = (params: MutSlice<Ty>, ret: Ptr<Ty>) Ty {
+no_fnt_labels = () MutSlice<StringView> { slice(null_ptr(), 0) }
+fntype_labeled* = (params: MutSlice<Ty>, labels: MutSlice<StringView>, ret: Ptr<Ty>) Ty {
     .FnT(FnTData(
         params: params,
+        labels: labels,
         ret: ret,
     ))
+}
+fntype* = (params: MutSlice<Ty>, ret: Ptr<Ty>) Ty { fntype_labeled(params, no_fnt_labels(), ret) }
+fntype_params* = (a: Allocator, params: MutSlice<Param>, ret: Ptr<Ty>) Ty {
+    tys ::= cbuf<Ty>(a, params.len)
+    labels ::= cbuf<StringView>(a, params.len)
+    params.loop_at((i, p) {
+        tys[i] = p.ty
+        labels[i] = p.name
+    })
+    fntype_labeled(tys, labels, ret)
 }
 mktag_full = (
     ty: StringView,
@@ -779,10 +737,7 @@ fnt_param_tys_in = (a: Allocator, ps: MutSlice<Param>) MutSlice<Ty> {
     ps.loop_at((i, p) { buf[i] = p.ty })
     buf
 }
-fnt_from_func_in* = (a: Allocator, f: Func) Ty {
-    fntype(a.fnt_param_tys_in(f.params), a.tnode(f.ret))
-}
-// pragma, intrinsic decl, anything
+fnt_from_func_in* = (a: Allocator, f: Func) Ty { a.fntype_params(f.params, a.tnode(f.ret)) }
 // map a narrow int/float type name to its C type; any other name passes through unchanged.
 // the checker accepts i8/i16/u16/u32/u64/f32 but they reach genc as Named(name), so without
 // this they'd leak the Zen name (`u32`, `f32`, …) straight to cc as an unknown C type.
@@ -868,15 +823,15 @@ subst_ty_in* = (a: Allocator, tparams: MutSlice<Param>, args: MutSlice<Ty>, t: T
         .Ptr(pd)    => tptr_k(a.tnode(a.subst_ty_in(tparams, args, load(pd.pointee))), pd.kind),
         .Slice(e)   => tslice_k(a.tnode(a.subst_ty_in(tparams, args, load(e.pointee))), e.kind),
         .Generic(g) => a.subst_generic_in(tparams, args, g),    // a nested generic field: substitute its args, re-mangle
-        .FnT(ft)    => a.subst_fnt_in(tparams, args, ft),    // a function-VALUE field `(S, i32) S`: substitute inside the signature
+        .FnT(ft)    => a.subst_fnt_in(tparams, args, ft),    // a function-VALUE field `(state: S, value: i32) S`: substitute inside the signature
         _           => t,
     })
 }
-// substitute tparam→arg inside a function type `(S, i32) S` -> `(AppState, i32) AppState`.
+// substitute tparam→arg inside a function type `(state: S, value: i32) S` -> `(state: AppState, value: i32) AppState`.
 subst_fnt_in = (a: Allocator, tparams: MutSlice<Param>, args: MutSlice<Ty>, ft: FnTData) Ty {
     ptys ::= cbuf<Ty>(a, ft.params.len)
     ft.params.loop_at((i, p) { ptys[i] = a.subst_ty_in(tparams, args, p) })
-    fntype(ptys, a.tnode(a.subst_ty_in(tparams, args, load(ft.ret))))
+    fntype_labeled(ptys, ft.labels, a.tnode(a.subst_ty_in(tparams, args, load(ft.ret))))
 }
 // substitute tparam→arg inside a nested generic instance `Inner<T>` -> `Inner<i32>` (new mangled name).
 subst_generic_in = (a: Allocator, tparams: MutSlice<Param>, args: MutSlice<Ty>, g: GenericData) Ty {

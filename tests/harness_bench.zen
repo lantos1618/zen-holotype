@@ -1,4 +1,3 @@
-//! link: c
 // tests/harness_bench.zen — Zen's BENCHMARK suite: the standing record of what a named operation
 // costs, in TIME and in HEAP BYTES. It is deliberately NOT part of `make harness`: benchmarks are
 // noisy, and a noisy number must never gate a merge. Run it by hand, keep the output, diff it later.
@@ -62,13 +61,14 @@
 // 16-core dev box at load average ~7 (other work running) — min-to-max ns/op over 9 reps:
 //
 //   slicelit_sum  42–43         2.4%      sort_by_i64  854160–866570   1.5%
-//   sb_chain      308–313       1.6%      map_put_get  125–133         6.4%
+//   string_chain  308–313       1.6%      map_put_get  125–133         6.4%
 //   string_append 245–250       2.0%      println_int  1157–1178       1.8%
 //   formatln_int  1799–1826     1.5%
 //
 // WITHIN one process the floor is tight: ~2% for most cases, ~6% worst (map_put_get). ACROSS
 // processes it is not. One whole-suite run taken while a `cc` was finishing in the background read
-// sb_chain at 519 ns/op against a 303–317 baseline — a 1.7x excursion from contention alone, with
+// string_chain at 519 ns/op against a 303–317 baseline — a 1.7x excursion from contention alone,
+// with
 // the allocation columns unchanged. So: never act on a single run. Re-run with ZEN_BENCH_REPS and
 // compare the reps to each other before comparing to yesterday, and re-measure the floor on the
 // machine you are judging on — the table above is one box on one day.
@@ -83,8 +83,8 @@
 //
 // followed by two bounds-checked `zen__idx` reads folded into `_z__z_acc`, which is returned as
 // `.sink` and printed. Each iteration therefore performs a real malloc and a real memcpy, and its
-// result is observable — cc cannot delete the loop at any -O level. `bn_sb_chain` likewise crosses
-// the string-builder, view, and allocator-release call boundaries, so its work cannot be dropped.
+// result is observable — cc cannot delete the loop at any -O level. `bn_string_chain` likewise
+// crosses the string-builder, view, and allocator-release boundaries, so its work cannot be dropped.
 //
 // ── NO BASELINE FILE, ON PURPOSE ─────────────────────────────────────────────────────────────────
 // There is deliberately no committed file of "expected" numbers and nothing compares against one.
@@ -102,14 +102,13 @@
 // ── PORTABILITY ──────────────────────────────────────────────────────────────────────────────────
 // Linux/glibc only. `mallinfo2` is a glibc symbol, and it is bound here through the SysV x86-64
 // large-struct-return convention (the hidden result pointer is passed as arg 0 and returned in rax),
-// which is why its Zen decl is `(RawPtr<u8>) RawPtr<u8>`. `bn_abi_ok` verifies that at startup by
+// which is why its Zen decl is `(arg0: RawPtr<u8>) RawPtr<u8>`. `bn_abi_ok` verifies that at startup by
 // checking the returned pointer equals the one passed in; if it ever does not, every liveB/op prints
 // as -1 rather than a fabricated number. These three foreign decls (`mallinfo2`, `dup`, `dup2`) live
 // here rather than in std.c.libc because they are bench-harness tooling, and tests/ is outside the
 // std FFI/boundary gates — nothing in the language or stdlib depends on them.
-{ put, println, formatln, arg_int } = std.text.fmt
-{ sb } = std.text.sb
-{ new_in, append_in, finish_in, free_in } = std.text.string
+{ put, println, formatln, arg_int } = std.io.print
+{ String, new_in, append_in, finish_in, free_in } = std.text.string
 { integer_in } = std.text.num
 { sort_by } = std.sort
 citer = std.core.count
@@ -160,7 +159,7 @@ BenchRes: {
 // Every writer returns the byte count fmt's Printer already threads, and every chain ends in `.n`.
 // That trailing `.n` is load-bearing, not decoration: this file imports std.collections.map, whose
 // `Map.put` is a value-mold method, and the must-use check is NAME-based — so a bare statement-
-// position `put("…")` (std.text.fmt's Printer opener) is rejected as a discarded self-mutating
+// position `put("…")` (std.io.print's Printer opener) is rejected as a discarded self-mutating
 // container method. Consuming the Printer with `.n` states that the result was used.
 NAME_W = () i64 { 16 }
 ITERS_W = () i64 { 12 }
@@ -319,23 +318,22 @@ bn_count_times = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
         sink: acc,
     )
 }
-// ONE OP = build "id=<n> name=zen!" with the std.text.sb chain and free the result.
-// Paired with bn_string_append below: same output bytes, same allocator, different surface. The
-// delta between the two rows is what Sb's sticky-error wrapper costs over raw String appends.
-bn_sb_chain = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
+// ONE OP = build "id=<n> name=zen!" with the carried String chain and free the result.
+// Paired with bn_string_append below: same output bytes and allocator, but a carried fluent surface
+// versus the explicitly threaded fallible surface.
+bn_string_chain = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     acc ::= to_i64(0)
     b0 = bn_live(cell)
     t0 = mono_ns()
     i ::= to_i64(0)
     @while (i < n) {
         s: StringView = mp
-            .sb()
-            .s("id=")
-            .i(i)
-            .s(" name=zen")
-            .ch('!')
-            .done()
-            .expect("bench: sb")
+            .allocator().String()
+            .add("id=")
+            .add_i64(i)
+            .add(" name=zen")
+            .add_one('!')
+            .finish_cstr()
         v = s.view()
         acc = acc + v.len
         free(s.own_ptr())
@@ -348,9 +346,9 @@ bn_sb_chain = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
         sink: acc,
     )
 }
-// ONE OP = build the SAME "id=<n> name=zen!" with raw std.text.string appends and free it.
-// The digits go through `integer_in` + `finish_in` + `free_in`, which is exactly what `Sb.i` does
-// internally — so this measures the ceremony, not a different algorithm.
+// ONE OP = build the SAME "id=<n> name=zen!" with explicitly threaded String appends and free it.
+// The digits go through `integer_in` + `finish_in` + `free_in`, matching the carried chain's
+// rendering algorithm so this measures the surface ceremony, not a different conversion.
 bn_string_append = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     acc ::= to_i64(0)
     b0 = bn_live(cell)
@@ -403,7 +401,7 @@ bn_println_int = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
     )
 }
 // ONE OP = `formatln("id={}", [arg_int(<i64>)])` with fd 1 pointed at /dev/null.
-// THE case this whole suite was built for. Two heap blocks leak per call — the `[Arg]` slice literal
+// THE case this whole suite was built for. Two heap blocks leak per call — the `[StringArg]` slice literal
 // and `write_int`'s digit scratch, both heap-promoted by gen_slicelit and never freed — so liveB/op
 // reads ~80 (53 payload bytes rounded up to glibc chunks). It must go to 0 when that is fixed.
 bn_formatln_int = (mp: MutPtr<Heap>, cell: RawPtr<u8>, n: i64) BenchRes {
@@ -517,7 +515,7 @@ bn_run = (
     name: StringView,
     iters: i64,
     warm: i64,
-    f: (MutPtr<Heap>, RawPtr<u8>, i64) BenchRes,
+    f: (arg0: MutPtr<Heap>, arg1: RawPtr<u8>, arg2: i64) BenchRes,
 ) void {
     warmup = f(mp, cell, warm)    // discarded: first-touch faults and arena growth belong to no op
     bn_row(name, iters, f(mp, cell, iters), ok)
@@ -540,7 +538,7 @@ bn_all = (mp: MutPtr<Heap>, cell: RawPtr<u8>, ok: bool, scale: i64) void {
     mp.bn_run(cell, ok, "slicelit_sum", 1000000 * scale, 1000, bn_slicelit)
     mp.bn_run(cell, ok, "count_while", 20000000 * scale, 1000, bn_count_while)
     mp.bn_run(cell, ok, "count_times", 20000000 * scale, 1000, bn_count_times)
-    mp.bn_run(cell, ok, "sb_chain", 500000 * scale, 1000, bn_sb_chain)
+    mp.bn_run(cell, ok, "string_chain", 500000 * scale, 1000, bn_string_chain)
     mp.bn_run(cell, ok, "string_append", 500000 * scale, 1000, bn_string_append)
     mp.bn_run(cell, ok, "println_int", 200000 * scale, 1000, bn_println_int)
     mp.bn_run(cell, ok, "formatln_int", 200000 * scale, 1000, bn_formatln_int)

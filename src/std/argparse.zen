@@ -1,10 +1,10 @@
 // Declarative argument parser. parse() receives arguments without the program name and accepts long
 // options, bundled short flags, attached values, and -- as the end-of-options marker.
 // Parse failures are ArgError values, never panics. --help/-h suppress required-argument validation.
-{ AllocatorBackend } = std.mem.alloc
+{ AllocatorBackend, Allocator } = std.mem.alloc
 { Result, Opt, expect } = std.core.result
 { len, view, starts_with, trim_prefix, find, substr_in, nbuf } = std.text.str
-{ Sb, sb } = std.text.sb
+{ String } = std.text.string
 { loop_at } = std.core.count
 // A `short` of 0 means "no short form". `name` is the long name WITHOUT the leading `--`.
 FlagSpec: {
@@ -197,40 +197,28 @@ Parser*: {
         // parse — see the free `ap_parse` below; this is the UFCS entry `p.parse(a, args)`.
         a.ap_parse(p, args)
     }
-    usage = (p: Parser, a: AllocatorBackend) StringView {
-        // a one-line-per-item usage / help string, allocator-owned. Built with std.text.sb's
-        // sticky builder: the chain records the first allocation failure and every later op
-        // no-ops, so ONE `.expect` at the settle replaces an expect per append.
-        b ::= a
-            .sb()
-            .s("usage: ")
-            .s(p.prog)
-            .s(" [options]")
+    usage = (p: Parser, a: Allocator) StringView {
+        // A one-line-per-item allocator-owned usage / help string. Carried String records the first
+        // allocation failure and later operations no-op; finish_cstr reports OOM consistently.
+        b ::= a.String()
+            .add("usage: ").add(p.prog).add(" [options]")
         p.poss.loop_at((i, ps) {
             b = b
-                .s(" ")
-                .s(ps.req.then({ "<" }, { "[" }))
-                .s(ps.name)
-                .s(ps.req.then({ ">" }, { "]" }))
+                .add(" ").add(ps.req.then({ "<" }, { "[" })).add(ps.name)
+                .add(ps.req.then({ ">" }, { "]" }))
         })
-        b = b.ch('\n')
+        b = b.add_one('\n')
         p.flags.loop_at((i, f) {
             b = b
-                .s("  --")
-                .s(f.name)
-                .s("  ")
-                .s(f.help)
-                .ch('\n')
+                .add("  --").add(f.name).add("  ").add(f.help)
+                .add_one('\n')
         })
         p.opts.loop_at((i, o) {
             b = b
-                .s("  --")
-                .s(o.name)
-                .s(" VALUE  ")
-                .s(o.help)
-                .ch('\n')
+                .add("  --").add(o.name).add(" VALUE  ").add(o.help)
+                .add_one('\n')
         })
-        b.done().expect("argparse: oom")
+        b.finish_cstr()
     }
 }
 // a fresh parser with no specs. Build it up with the `.flag` / `.option` / `.positional` methods.

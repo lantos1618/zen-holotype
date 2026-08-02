@@ -51,11 +51,11 @@
 { Output, run } = std.sys.process
 { access, getpid } = std.c.libc
 { cat_in, len, nbuf, parse_int, starts_with, substr_in } = std.text.str
-{ Sb, sb } = std.text.sb
+{ String } = std.text.string
 { Rng, seed } = std.rand
 { expect, or } = std.core.result
 { then } = std.core.bool
-{ arg_int, arg_str, format } = std.text.fmt
+{ arg_int, arg_str, format } = std.io.print
 // access(path, X_OK) tests executability. Named ACCESS_X_OK, not X_OK: a top-level Zen global lowers
 // to a C global of the same name and `X_OK` is already a <unistd.h> macro.
 ACCESS_X_OK = 1
@@ -126,8 +126,8 @@ rlit_draw = (rp: MutPtr<Rng>, t: i64) i64 {
     rp.range(lo, hi + 1)
 }
 // negatives are parenthesized for safety (python's `f"({v})" if v < 0`)
-ilit = (b: Sb<Allocator>, v: i64) Sb<Allocator> {
-    (v < 0).then({ b.ch('(').i(v).ch(')') }, { b.i(v) })
+ilit = (b: String, v: i64) String {
+    (v < 0).then({ b.add_one('(').add_i64(v).add_one(')') }, { b.add_i64(v) })
 }
 // ── float literals ───────────────────────────────────────────────────────────────────────────
 // python drew one of nine fixed constants AND one uniform(-50,50) rounded to 3 decimals, then
@@ -149,18 +149,18 @@ flit_draw = (rp: MutPtr<Rng>) Flit {
     )
 }
 // non-negative thousandths as `<int>.<3 digits>`
-fnum = (b: Sb<Allocator>, mils: i64) Sb<Allocator> {
+fnum = (b: String, mils: i64) String {
     b
-        .i(mils / 1000)
-        .ch('.')
-        .i(mils / 100 % 10)
-        .i(mils / 10 % 10)
-        .i(mils % 10)
+        .add_i64(mils / 1000)
+        .add_one('.')
+        .add_i64(mils / 100 % 10)
+        .add_i64(mils / 10 % 10)
+        .add_i64(mils % 10)
 }
-flit_emit = (b: Sb<Allocator>, f: Flit) Sb<Allocator> {
+flit_emit = (b: String, f: Flit) String {
     f.fixed.match ({
-        true  => b.s(FLIT_CONST[f.j]),
-        false => (f.mils < 0).then({ b.s("(-").fnum(0 - f.mils).ch(')') }, { b.fnum(f.mils) }),
+        true  => b.add(FLIT_CONST[f.j]),
+        false => (f.mils < 0).then({ b.add("(-").fnum(0 - f.mils).add_one(')') }, { b.fnum(f.mils) }),
     })
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -184,49 +184,49 @@ int_op = (j: i64, sg: bool) StringView { sg.then({ INT_OP_S[j] }, { INT_OP_U[j] 
 op_is_divmod = (j: i64, sg: bool) bool { sg.then({ j >= 8 }, { j >= 7 }) }
 op_is_shift = (j: i64, sg: bool) bool { j == 6 || sg && j == 7 }
 // a declared operand `a{n}_{k}`; an SSA step result `a{n}_t{s}`
-ivar = (b: Sb<Allocator>, n: i64, k: i64) Sb<Allocator> {
+ivar = (b: String, n: i64, k: i64) String {
     b
-        .ch('a')
-        .i(n)
-        .ch('_')
-        .i(k)
+        .add_one('a')
+        .add_i64(n)
+        .add_one('_')
+        .add_i64(k)
 }
-itmp = (b: Sb<Allocator>, n: i64, s: i64) Sb<Allocator> {
+itmp = (b: String, n: i64, s: i64) String {
     b
-        .ch('a')
-        .i(n)
-        .s("_t")
-        .i(s)
+        .add_one('a')
+        .add_i64(n)
+        .add("_t")
+        .add_i64(s)
 }
-icur = (b: Sb<Allocator>, n: i64) Sb<Allocator> {
+icur = (b: String, n: i64) String {
     g_res_temp.then({ b.itmp(n, g_res_idx) }, { b.ivar(n, g_res_idx) })
 }
-decl_ints = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, t: i64, k: i64, count: i64) Sb<Allocator> {
+decl_ints = (b: String, rp: MutPtr<Rng>, n: i64, t: i64, k: i64, count: i64) String {
     (k >= count).match ({
         true  => b,
         false => {
             v = rp.rlit_draw(t)
             b1 = b
-                .s(IND)
+                .add(IND)
                 .ivar(n, k)
-                .s(": ")
-                .s(ITY_NAME[t])
-                .s(" = ")
+                .add(": ")
+                .add(ITY_NAME[t])
+                .add(" = ")
                 .ilit(v)
-                .ch('\n')
+                .add_one('\n')
             b1.decl_ints(rp, n, t, k + 1, count)
         },
     })
 }
 int_steps = (
-    b: Sb<Allocator>,
+    b: String,
     rp: MutPtr<Rng>,
     n: i64,
     t: i64,
     count: i64,
     s: i64,
     total: i64,
-) Sb<Allocator> {
+) String {
     (s >= total).match ({
         true  => b,
         false => {
@@ -240,24 +240,24 @@ int_steps = (
                 false => sh.then({ rp.range(0, ity_width(t)) }, { rp.range(0, count) }),
             })
             head = b
-                .s(IND)
+                .add(IND)
                 .itmp(n, s)
-                .s(": ")
-                .s(ITY_NAME[t])
-                .s(" = ")
+                .add(": ")
+                .add(ITY_NAME[t])
+                .add(" = ")
                 .icur(n)
-                .ch(' ')
-            b1 = head.s(int_op(j, sg)).ch(' ')
-            b2 = (dm || sh).then({ b1.i(rhs) }, { b1.ivar(n, rhs) })
+                .add_one(' ')
+            b1 = head.add(int_op(j, sg)).add_one(' ')
+            b2 = (dm || sh).then({ b1.add_i64(rhs) }, { b1.ivar(n, rhs) })
             g_res_temp = true
             g_res_idx = s
-            b2.ch('\n').int_steps(rp, n, t, count, s + 1, total)
+            b2.add_one('\n').int_steps(rp, n, t, count, s + 1, total)
         },
     })
 }
 // emit SSA narrowed arithmetic of type `t`; the result var is left in g_res_temp / g_res_idx —
 // read it back with `.icur(n)`.
-build_int = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, t: i64) Sb<Allocator> {
+build_int = (b: String, rp: MutPtr<Rng>, n: i64, t: i64) String {
     count = rp.range(2, 4)
     b1 = b.decl_ints(rp, n, t, 0, count)
     pick = rp.range(0, count)
@@ -269,7 +269,7 @@ build_int = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, t: i64) Sb<Allocator> {
 // ── f64 expression tree ──────────────────────────────────────────────────────────────────────
 F64_OP = ["+", "-", "*", "/"]
 F64_DIV = ["2.0", "4.0", "3.0", "10.0", "7.0"]
-f64_expr = (b: Sb<Allocator>, rp: MutPtr<Rng>, depth: i64) Sb<Allocator> {
+f64_expr = (b: String, rp: MutPtr<Rng>, depth: i64) String {
     stop = depth <= 0 || rp.next_f64() < 0.4
     stop.match ({
         true  => {
@@ -279,20 +279,20 @@ f64_expr = (b: Sb<Allocator>, rp: MutPtr<Rng>, depth: i64) Sb<Allocator> {
         false => {
             j = rp.range(0, 4)
             b1 = b
-                .ch('(')
+                .add_one('(')
                 .f64_expr(rp, depth - 1)
-                .ch(' ')
-                .s(F64_OP[j])
-                .ch(' ')
+                .add_one(' ')
+                .add(F64_OP[j])
+                .add_one(' ')
             // a `/` always takes a nonzero constant divisor
             b2 = (j == 3).match ({
                 true  => {
                     d = rp.range(0, 5)
-                    b1.s(F64_DIV[d])
+                    b1.add(F64_DIV[d])
                 },
                 false => b1.f64_expr(rp, depth - 1),
             })
-            b2.ch(')')
+            b2.add_one(')')
         },
     })
 }
@@ -301,9 +301,9 @@ f64_expr = (b: Sb<Allocator>, rp: MutPtr<Rng>, depth: i64) Sb<Allocator> {
 // It is split around the loop keyword only because tests/harness_boundaries.zen greps every
 // tools/*.zen for that literal token; the emitted text is byte-identical to the python's.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
-PRELUDE_A = "{ println } = std.text.fmt\nBox3*: { a: i32, b: i32, c: i32 }\nCol*: R(i32) | G | B(i32)\nPair*<T>: { p: T, q: T }\nidv<T> = (v: T) T { v }\npick<T> = (a: T, b: T, c: bool) T { c.then({ a }, { b }) }\nfib = (n: i32) i32 { (n < 2).then({ n }, { fib(n - 1) + fib(n - 2) }) }\nsumto = (n: i32, acc: i32) i32 { (n <= 0).then({ acc }, { sumto(n - 1, acc + n) }) }\ncolval = (c: Col) i32 { c.match ({ .R(v) => v, .G => 0, .B(v) => v * 2 }) }\nfnv = (data: StringView, n: i32) u32 {\n    hash :: u32 = 2166136261\n    i :: i32 = 0\n    "
+PRELUDE_A = "{ println } = std.io.print\nBox3*: { a: i32, b: i32, c: i32 }\nCol*: R(i32) | G | B(i32)\nPair*<T>: { p: T, q: T }\nidv<T> = (v: T) T { v }\npick<T> = (a: T, b: T, c: bool) T { c.then({ a }, { b }) }\nfib = (n: i32) i32 { (n < 2).then({ n }, { fib(n - 1) + fib(n - 2) }) }\nsumto = (n: i32, acc: i32) i32 { (n <= 0).then({ acc }, { sumto(n - 1, acc + n) }) }\ncolval = (c: Col) i32 { c.match ({ .R(v) => v, .G => 0, .B(v) => v * 2 }) }\nfnv = (data: StringView, n: i32) u32 {\n    hash :: u32 = 2166136261\n    i :: i32 = 0\n    "
 PRELUDE_B = "while (i < n) {\n        b: u8 = load(offset(data, i))\n        hash = (hash ^ b) * 16777619\n        i = i + 1\n    }\n    hash\n}\n"
-prelude = (b: Sb<Allocator>) Sb<Allocator> { b.s(PRELUDE_A).ch('@').s(PRELUDE_B) }
+prelude = (b: String) String { b.add(PRELUDE_A).add_one('@').add(PRELUDE_B) }
 // the string-hash corpus (python's WORDS)
 WORD = ["hello", "zen", "the quick brown fox", "abc", "", "aa", "differential", "backend", "0123456789", "xyz"]
 // ─────────────────────────────────────────────────────────────────────────────────────────────
@@ -314,272 +314,272 @@ WORD = ["hello", "zen", "the quick brown fox", "abc", "", "aa", "differential", 
 // emit unbound int arithmetic — see the header.
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // i32 arithmetic chain (ops / wrap)
-st0 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st0 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     b1 = b.build_int(rp, n, 2)
     b1
-        .s(IND)
-        .s("println(")
+        .add(IND)
+        .add("println(")
         .icur(n)
-        .s(")\n")
+        .add(")\n")
 }
 // arithmetic over a random int width
-st1 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st1 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     t = rp.range(0, 6)
     b1 = b.build_int(rp, n, t)
     b1
-        .s(IND)
-        .s("println(")
+        .add(IND)
+        .add("println(")
         .icur(n)
-        .s(")\n")
+        .add(")\n")
 }
 // width-wrap: the add pushes past the type's range
-st2 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st2 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     t = rp.range(0, 6)
     v1 = rp.rlit_draw(t)
     v2 = rp.rlit_draw(t)
     decl = b
-        .s(IND)
-        .ch('v')
-        .i(n)
-        .s(" :: ")
-        .s(ITY_NAME[t])
-        .s(" = ")
+        .add(IND)
+        .add_one('v')
+        .add_i64(n)
+        .add(" :: ")
+        .add(ITY_NAME[t])
+        .add(" = ")
         .ilit(v1)
-        .ch('\n')
+        .add_one('\n')
     add = decl
-        .s(IND)
-        .ch('v')
-        .i(n)
-        .s(" = v")
-        .i(n)
-        .s(" + ")
+        .add(IND)
+        .add_one('v')
+        .add_i64(n)
+        .add(" = v")
+        .add_i64(n)
+        .add(" + ")
         .ilit(v2)
-        .ch('\n')
+        .add_one('\n')
     add
-        .s(IND)
-        .s("println(v")
-        .i(n)
-        .s(")\n")
+        .add(IND)
+        .add("println(v")
+        .add_i64(n)
+        .add(")\n")
 }
 // bounded accumulate loop
-st3 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st3 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     lim = rp.range(1, 31)
     mul = rp.range(1, 8)
     decl = b
-        .s(IND)
-        .ch('s')
-        .i(n)
-        .s(" :: i32 = 0\n")
-        .s(IND)
-        .ch('i')
-        .i(n)
-        .s(" :: i32 = 0\n")
+        .add(IND)
+        .add_one('s')
+        .add_i64(n)
+        .add(" :: i32 = 0\n")
+        .add(IND)
+        .add_one('i')
+        .add_i64(n)
+        .add(" :: i32 = 0\n")
     head = decl
-        .s(IND)
-        .ch('@')
-        .s("while (i")
-        .i(n)
-        .s(" < ")
-        .i(lim)
-        .s(") { s")
-        .i(n)
-        .s(" = s")
-        .i(n)
+        .add(IND)
+        .add_one('@')
+        .add("while (i")
+        .add_i64(n)
+        .add(" < ")
+        .add_i64(lim)
+        .add(") { s")
+        .add_i64(n)
+        .add(" = s")
+        .add_i64(n)
     body = head
-        .s(" + i")
-        .i(n)
-        .s(" * ")
-        .i(mul)
-        .s("  i")
-        .i(n)
-        .s(" = i")
-        .i(n)
-        .s(" + 1 }\n")
+        .add(" + i")
+        .add_i64(n)
+        .add(" * ")
+        .add_i64(mul)
+        .add("  i")
+        .add_i64(n)
+        .add(" = i")
+        .add_i64(n)
+        .add(" + 1 }\n")
     body
-        .s(IND)
-        .s("println(s")
-        .i(n)
-        .s(")\n")
+        .add(IND)
+        .add("println(s")
+        .add_i64(n)
+        .add(")\n")
 }
 // match on an int literal
-st4 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st4 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     x = rp.range(0, 5)
     decl = b
-        .s(IND)
-        .ch('x')
-        .i(n)
-        .s(": i32 = ")
-        .i(x)
-        .ch('\n')
+        .add(IND)
+        .add_one('x')
+        .add_i64(n)
+        .add(": i32 = ")
+        .add_i64(x)
+        .add_one('\n')
     decl
-        .s(IND)
-        .s("println(x")
-        .i(n)
-        .s(".match ({ 0 => 10, 1 => 20, 2 => 30, _ => 99 }))\n")
+        .add(IND)
+        .add("println(x")
+        .add_i64(n)
+        .add(".match ({ 0 => 10, 1 => 20, 2 => 30, _ => 99 }))\n")
 }
 // match on a bool (an int comparison)
-st5 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st5 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     t = rp.range(0, 6)
     b1 = b.build_int(rp, n, t)
     v = rp.rlit_draw(t)
     cmp = b1
-        .s(IND)
-        .s("println((")
+        .add(IND)
+        .add("println((")
         .icur(n)
-        .s(" > ")
+        .add(" > ")
         .ilit(v)
-    cmp.s(").match ({ true => 1, false => 0 }))\n")
+    cmp.add(").match ({ true => 1, false => 0 }))\n")
 }
 // recursion: fib
-st6 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st6 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     v = rp.range(0, 23)
     b
-        .s(IND)
-        .s("println(fib(")
-        .i(v)
-        .s("))\n")
+        .add(IND)
+        .add("println(fib(")
+        .add_i64(v)
+        .add("))\n")
 }
 // recursion: sumto
-st7 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st7 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     v = rp.range(0, 101)
     b
-        .s(IND)
-        .s("println(sumto(")
-        .i(v)
-        .s(", 0))\n")
+        .add(IND)
+        .add("println(sumto(")
+        .add_i64(v)
+        .add(", 0))\n")
 }
 // enum + match dispatch
-st8 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st8 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     rv = rp.range(0 - 5, 51)
     bv = rp.range(0 - 5, 51)
     j = rp.range(0, 3)
-    head = b.s(IND).s("println(colval(")
+    head = b.add(IND).add("println(colval(")
     body = (j == 0).match ({
-        true  => head.s(".R(").i(rv).ch(')'),
-        false => (j == 1).then({ head.s(".G") }, { head.s(".B(").i(bv).ch(')') }),
+        true  => head.add(".R(").add_i64(rv).add_one(')'),
+        false => (j == 1).then({ head.add(".G") }, { head.add(".B(").add_i64(bv).add_one(')') }),
     })
-    body.s("))\n")
+    body.add("))\n")
 }
 // struct field arithmetic
-st9 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st9 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     av = rp.range(0 - 100, 101)
     bv = rp.range(0 - 100, 101)
     cv = rp.range(0 - 100, 101)
     decl = b
-        .s(IND)
-        .s("bx")
-        .i(n)
-        .s(" ::= Box3(a: ")
-        .i(av)
-        .s(", b: ")
-        .i(bv)
-        .s(", c: ")
-        .i(cv)
-        .s(")\n")
+        .add(IND)
+        .add("bx")
+        .add_i64(n)
+        .add(" ::= Box3(a: ")
+        .add_i64(av)
+        .add(", b: ")
+        .add_i64(bv)
+        .add(", c: ")
+        .add_i64(cv)
+        .add(")\n")
     decl
-        .s(IND)
-        .s("println(bx")
-        .i(n)
-        .s(".a * bx")
-        .i(n)
-        .s(".b - bx")
-        .i(n)
-        .s(".c)\n")
+        .add(IND)
+        .add("println(bx")
+        .add_i64(n)
+        .add(".a * bx")
+        .add_i64(n)
+        .add(".b - bx")
+        .add_i64(n)
+        .add(".c)\n")
 }
 // generics instantiated at 2+ types (i32 AND f64)
-st10 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st10 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     iv = rp.range(0 - 1000, 1001)
     f = rp.flit_draw()
     p1 = rp.range(0, 10)
     p2 = rp.range(0, 10)
     tf = rp.range(0, 2)
     l1 = b
-        .s(IND)
-        .s("println(idv(")
-        .i(iv)
-        .s("))\n")
+        .add(IND)
+        .add("println(idv(")
+        .add_i64(iv)
+        .add("))\n")
     l2 = l1
-        .s(IND)
-        .s("println(idv(")
+        .add(IND)
+        .add("println(idv(")
         .flit_emit(f)
-        .s("))\n")
+        .add("))\n")
     l3 = l2
-        .s(IND)
-        .s("println(pick(")
-        .i(p1)
-        .s(", ")
-        .i(p2)
-        .s(", ")
-    l3.s((tf == 0).then({ "true" }, { "false" })).s("))\n")
+        .add(IND)
+        .add("println(pick(")
+        .add_i64(p1)
+        .add(", ")
+        .add_i64(p2)
+        .add(", ")
+    l3.add((tf == 0).then({ "true" }, { "false" })).add("))\n")
 }
 // a generic struct at 2 types
-st11 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st11 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     p = rp.range(0, 51)
     q = rp.range(0, 51)
     decl = b
-        .s(IND)
-        .s("pr")
-        .i(n)
-        .s(" ::= Pair<i32>(p: ")
-        .i(p)
-        .s(", q: ")
-        .i(q)
-        .s(")\n")
+        .add(IND)
+        .add("pr")
+        .add_i64(n)
+        .add(" ::= Pair<i32>(p: ")
+        .add_i64(p)
+        .add(", q: ")
+        .add_i64(q)
+        .add(")\n")
     decl
-        .s(IND)
-        .s("println(pr")
-        .i(n)
-        .s(".p + pr")
-        .i(n)
-        .s(".q)\n")
+        .add(IND)
+        .add("println(pr")
+        .add_i64(n)
+        .add(".p + pr")
+        .add_i64(n)
+        .add(".q)\n")
 }
 // string byte hash (fnv over a literal)
-st12 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st12 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     j = rp.range(0, 10)
     w = WORD[j]
     b
-        .s(IND)
-        .s("println(fnv(")
-        .ch('"')
-        .s(w)
-        .ch('"')
-        .s(", ")
-        .i(w.len())
-        .s("))\n")
+        .add(IND)
+        .add("println(fnv(")
+        .add_one('"')
+        .add(w)
+        .add_one('"')
+        .add(", ")
+        .add_i64(w.len())
+        .add("))\n")
 }
 // nested match (the arm re-matches the payload)
-st13 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st13 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     v = rp.range(0, 7)
-    head = b.s(IND).s("println(Col.R(").i(v)
-    head.s(").match ({ .R(w) => w.match ({ 0 => 100, _ => w * 3 }), .G => 0, .B(w) => w }))\n")
+    head = b.add(IND).add("println(Col.R(").add_i64(v)
+    head.add(").match ({ .R(w) => w.match ({ 0 => 100, _ => w * 3 }), .G => 0, .B(w) => w }))\n")
 }
 // f64 expression tree
-st14 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st14 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     d = rp.range(2, 6)
-    b1 = b.s(IND).s("println(").f64_expr(rp, d)
-    b1.s(")\n")
+    b1 = b.add(IND).add("println(").f64_expr(rp, d)
+    b1.add(")\n")
 }
 // a generic struct at f64
-st15 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+st15 = (b: String, rp: MutPtr<Rng>, n: i64) String {
     f1 = rp.flit_draw()
     f2 = rp.flit_draw()
     head = b
-        .s(IND)
-        .s("pf")
-        .i(n)
-        .s(" ::= Pair<f64>(p: ")
+        .add(IND)
+        .add("pf")
+        .add_i64(n)
+        .add(" ::= Pair<f64>(p: ")
         .flit_emit(f1)
-        .s(", q: ")
-    decl = head.flit_emit(f2).s(")\n")
+        .add(", q: ")
+    decl = head.flit_emit(f2).add(")\n")
     decl
-        .s(IND)
-        .s("println(pf")
-        .i(n)
-        .s(".p + pf")
-        .i(n)
-        .s(".q)\n")
+        .add(IND)
+        .add("println(pf")
+        .add_i64(n)
+        .add(".p + pf")
+        .add_i64(n)
+        .add(".q)\n")
 }
-stmt_0_3 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
+stmt_0_3 = (b: String, rp: MutPtr<Rng>, n: i64, k: i64) String {
     (k == 0).match ({
         true  => b.st0(rp, n),
         false => (k == 1).match ({
@@ -588,7 +588,7 @@ stmt_0_3 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
         }),
     })
 }
-stmt_4_7 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
+stmt_4_7 = (b: String, rp: MutPtr<Rng>, n: i64, k: i64) String {
     (k == 4).match ({
         true  => b.st4(rp, n),
         false => (k == 5).match ({
@@ -597,7 +597,7 @@ stmt_4_7 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
         }),
     })
 }
-stmt_8_11 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
+stmt_8_11 = (b: String, rp: MutPtr<Rng>, n: i64, k: i64) String {
     (k == 8).match ({
         true  => b.st8(rp, n),
         false => (k == 9).match ({
@@ -606,7 +606,7 @@ stmt_8_11 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
         }),
     })
 }
-stmt_12_15 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
+stmt_12_15 = (b: String, rp: MutPtr<Rng>, n: i64, k: i64) String {
     (k == 12).match ({
         true  => b.st12(rp, n),
         false => (k == 13).match ({
@@ -615,7 +615,7 @@ stmt_12_15 = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64, k: i64) Sb<Allocator> {
         }),
     })
 }
-stmt = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
+stmt = (b: String, rp: MutPtr<Rng>, n: i64) String {
     k = rp.range(0, 16)
     (k < 4).match ({
         true  => b.stmt_0_3(rp, n, k),
@@ -625,7 +625,7 @@ stmt = (b: Sb<Allocator>, rp: MutPtr<Rng>, n: i64) Sb<Allocator> {
         }),
     })
 }
-stmts = (b: Sb<Allocator>, rp: MutPtr<Rng>, i: i64, total: i64) Sb<Allocator> {
+stmts = (b: String, rp: MutPtr<Rng>, i: i64, total: i64) String {
     (i >= total).match ({
         true  => b,
         false => {
@@ -641,16 +641,14 @@ gen_program = (mp: Allocator, s: i64, i: i64) StringView {
     rp = r.addr()
     nst = rp.range(4, 11)
     head = mp
-        .addr()
-        .sb()
+        .String()
         .prelude()
-        .s("main = () i32 {\n")
+        .add("main = () i32 {\n")
     body = head.stmts(rp, 0, nst)
     body
-        .s(IND)
-        .s("0\n}\n")
-        .done()
-        .expect("fuzz-diff: out of memory building the program")
+        .add(IND)
+        .add("0\n}\n")
+        .finish_cstr()
 }
 // ─────────────────────────────────────────────────────────────────────────────────────────────
 // RUNNER
@@ -677,15 +675,13 @@ slurp = (mp: Allocator, path: StringView) StringView { mp.addr().contents_in(pat
 // C does is a control-flow miscompile, not a gap.
 test_node = (mp: Allocator, jf: StringView, jerr: StringView, cout: StringView, crc: i64) Res {
     cmd = mp
-        .addr()
-        .sb()
-        .s("timeout 30 node ")
-        .s(jf)
-        .s(" 2>")
-        .s(jerr)
-        .s(" </dev/null")
-        .done()
-        .expect("fuzz-diff: oom")
+        .String()
+        .add("timeout 30 node ")
+        .add(jf)
+        .add(" 2>")
+        .add(jerr)
+        .add(" </dev/null")
+        .finish_cstr()
     o = mp.sh(cmd)
     (o.exit != 0).match ({
         true  => Res(
@@ -718,17 +714,15 @@ test_js = (
     crc: i64,
 ) Res {
     cmd = mp
-        .addr()
-        .sb()
-        .s("timeout 30 ")
-        .s(cfg.zen)
-        .s(" emit-js ")
-        .s(zf)
-        .s(" > ")
-        .s(jf)
-        .s(" 2>/dev/null </dev/null")
-        .done()
-        .expect("fuzz-diff: oom")
+        .String()
+        .add("timeout 30 ")
+        .add(cfg.zen)
+        .add(" emit-js ")
+        .add(zf)
+        .add(" > ")
+        .add(jf)
+        .add(" 2>/dev/null </dev/null")
+        .finish_cstr()
     o = mp.sh(cmd)
     (o.exit != 0).match ({
         true  => Res(
@@ -753,15 +747,13 @@ test_one = (
 ) Res {
     save(zf, src, src.len()).expect("fuzz-diff: cannot write the generated program")
     cmd = mp
-        .addr()
-        .sb()
-        .s("timeout 30 ")
-        .s(cfg.zen)
-        .s(" run ")
-        .s(zf)
-        .s(" 2>/dev/null </dev/null")
-        .done()
-        .expect("fuzz-diff: oom")
+        .String()
+        .add("timeout 30 ")
+        .add(cfg.zen)
+        .add(" run ")
+        .add(zf)
+        .add(" 2>/dev/null </dev/null")
+        .finish_cstr()
     o = mp.sh(cmd)
     (o.exit != 0).match ({
         true  => Res(
@@ -782,41 +774,37 @@ test_one = (
 summary_row = (mp: Allocator, id: i64, n: i64) void {
     nm = VERDICT_NAME[id]
     sout(mp
-        .addr()
-        .sb()
-        .s("  ")
-        .s(nm)
-        .rep(" ", 16 - nm.len())
-        .ch(' ')
-        .i(n)
-        .ch('\n')
-        .done()
-        .expect("fuzz-diff: oom"))
+        .String()
+        .add("  ")
+        .add(nm)
+        .repeat(" ", 16 - nm.len())
+        .add_one(' ')
+        .add_i64(n)
+        .add_one('\n')
+        .finish_cstr())
 }
 progress = (mp: Allocator, cfg: Cfg, done: i64, counts: MutSlice<i64>) void {
     eputs(mp
-        .addr()
-        .sb()
-        .s("  ...")
-        .i(done)
-        .ch('/')
-        .i(cfg.count)
-        .s("  ")
-        .s("AGREE=")
-        .i(counts[0])
-        .s(" DIVERGENCE=")
-        .i(counts[1])
-        .s(" JS-RUNTIME-FAIL=")
-        .i(counts[2])
-        .s(" JS-EMIT-CRASH=")
-        .i(counts[3])
-        .s(" JS-UNSUPPORTED=")
-        .i(counts[4])
-        .s(" C-FAIL=")
-        .i(counts[5])
-        .ch('\n')
-        .done()
-        .expect("fuzz-diff: oom"))
+        .String()
+        .add("  ...")
+        .add_i64(done)
+        .add_one('/')
+        .add_i64(cfg.count)
+        .add("  ")
+        .add("AGREE=")
+        .add_i64(counts[0])
+        .add(" DIVERGENCE=")
+        .add_i64(counts[1])
+        .add(" JS-RUNTIME-FAIL=")
+        .add_i64(counts[2])
+        .add(" JS-EMIT-CRASH=")
+        .add_i64(counts[3])
+        .add(" JS-UNSUPPORTED=")
+        .add_i64(counts[4])
+        .add(" C-FAIL=")
+        .add_i64(counts[5])
+        .add_one('\n')
+        .finish_cstr())
 }
 // save the three repro files and print the finding line
 record = (
@@ -829,17 +817,15 @@ record = (
     divs: MutSlice<i64>,
 ) void {
     base = mp
-        .addr()
-        .sb()
-        .s(outdir)
-        .ch('/')
-        .s(VERDICT_LOWER[r.vid])
-        .s("_s")
-        .i(cfg.seed)
-        .s("_i")
-        .i(i)
-        .done()
-        .expect("fuzz-diff: oom")
+        .String()
+        .add(outdir)
+        .add_one('/')
+        .add(VERDICT_LOWER[r.vid])
+        .add("_s")
+        .add_i64(cfg.seed)
+        .add("_i")
+        .add_i64(i)
+        .finish_cstr()
     save(mp.addr().cat_in(base, ".zen"), src, src.len()).expect("fuzz-diff: cannot save the repro")
     save(mp.addr().cat_in(base, ".c.out"), r.cout, r.cout.len()).expect("fuzz-diff: cannot save the repro")
     save(mp.addr().cat_in(base, ".js.out"), r.jout, r.jout.len()).expect("fuzz-diff: cannot save the repro")
@@ -869,42 +855,40 @@ run_one = (
     })
 }
 // `(i in [1, 5, 9])` — python's list repr of the finding indices
-divs_list = (b: Sb<Allocator>, divs: MutSlice<i64>, i: i64) Sb<Allocator> {
+divs_list = (b: String, divs: MutSlice<i64>, i: i64) String {
     (i >= g_ndiv).match ({
         true  => b,
         false => {
-            b1 = (i == 0).then({ b }, { b.s(", ") })
-            b1.i(divs[i]).divs_list(divs, i + 1)
+            b1 = (i == 0).then({ b }, { b.add(", ") })
+            b1.add_i64(divs[i]).divs_list(divs, i + 1)
         },
     })
 }
 // `--only N`: print program N and its two backend outputs, then exit
 only_report = (mp: Allocator, cfg: Cfg, src: StringView, r: Res) void {
     head = mp
-        .addr()
-        .sb()
-        .s("# seed=")
-        .i(cfg.seed)
-        .s(" only=")
-        .i(cfg.only)
-        .s(" verdict=")
-        .s(VERDICT_NAME[r.vid])
-        .ch('\n')
-        .s(src)
-        .ch('\n')
-        .s("--- C  [rc=")
-        .i(r.crc)
-        .s("] ---\n")
-        .s(r.cout)
-        .ch('\n')
-        .s("--- JS [rc=")
-    tail = r.jrc_set.then({ head.i(r.jrc) }, { head.s("None") })
+        .String()
+        .add("# seed=")
+        .add_i64(cfg.seed)
+        .add(" only=")
+        .add_i64(cfg.only)
+        .add(" verdict=")
+        .add(VERDICT_NAME[r.vid])
+        .add_one('\n')
+        .add(src)
+        .add_one('\n')
+        .add("--- C  [rc=")
+        .add_i64(r.crc)
+        .add("] ---\n")
+        .add(r.cout)
+        .add_one('\n')
+        .add("--- JS [rc=")
+    tail = r.jrc_set.then({ head.add_i64(r.jrc) }, { head.add("None") })
     sout(tail
-        .s("] ---\n")
-        .s(r.jout)
-        .ch('\n')
-        .done()
-        .expect("fuzz-diff: oom"))
+        .add("] ---\n")
+        .add(r.jout)
+        .add_one('\n')
+        .finish_cstr())
 }
 only_mode = (mp: Allocator, cfg: Cfg, zf: StringView, jf: StringView, jerr: StringView) i32 {
     src = mp.gen_program(cfg.seed, cfg.only)
@@ -929,31 +913,27 @@ finish = (
         false => (g_ndiv > 0).match ({
             true  => {
                 sout(mp
-                    .addr()
-                    .sb()
-                    .s("\nFINDINGS (")
-                    .i(g_ndiv)
-                    .s("): repros in ")
-                    .s(outdir)
-                    .ch('\n')
-                    .s("  reproduce one:  ./zen run tools/fuzz-diff.zen --seed ")
-                    .i(cfg.seed)
-                    .s(" --only <i>   (i in [")
+                    .String()
+                    .add("\nFINDINGS (")
+                    .add_i64(g_ndiv)
+                    .add("): repros in ")
+                    .add(outdir)
+                    .add_one('\n')
+                    .add("  reproduce one:  ./zen run tools/fuzz-diff.zen --seed ")
+                    .add_i64(cfg.seed)
+                    .add(" --only <i>   (i in [")
                     .divs_list(divs, 0)
-                    .s("])\n")
-                    .done()
-                    .expect("fuzz-diff: oom"))
+                    .add("])\n")
+                    .finish_cstr())
                 1
             },
             false => {
                 sout(mp
-                    .addr()
-                    .sb()
-                    .s("\nNo divergences. (repro dir: ")
-                    .s(outdir)
-                    .s(")\n")
-                    .done()
-                    .expect("fuzz-diff: oom"))
+                    .String()
+                    .add("\nNo divergences. (repro dir: ")
+                    .add(outdir)
+                    .add(")\n")
+                    .finish_cstr())
                 0
             },
         }),
@@ -1019,12 +999,10 @@ abs_path = (mp: Allocator, p: StringView) StringView {
 dispatch = (mp: Allocator, cfg: Cfg) i32 {
     outdir = (cfg.out.len() == 0).match ({
         true  => mp
-            .addr()
-            .sb()
-            .s("/tmp/zen-fuzzdiff-")
-            .i(to_i64(getpid()))
-            .done()
-            .expect("fuzz-diff: oom"),
+            .String()
+            .add("/tmp/zen-fuzzdiff-")
+            .add_i64(to_i64(getpid()))
+            .finish_cstr(),
         false => cfg.out,
     })
     wd = mp.addr().cat_in(outdir, "/.work")
@@ -1050,13 +1028,11 @@ main = () i32 {
         true  => mp.dispatch(cfg),
         false => {
             eputs(mp
-                .addr()
-                .sb()
-                .s("fuzz-diff: not executable: ")
-                .s(cfg.zen)
-                .s("  (run `make` first)\n")
-                .done()
-                .expect("fuzz-diff: oom"))
+                .String()
+                .add("fuzz-diff: not executable: ")
+                .add(cfg.zen)
+                .add("  (run `make` first)\n")
+                .finish_cstr())
             1
         },
     })

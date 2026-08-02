@@ -466,7 +466,7 @@ are more important than most of §7, and several **correct** it.
 ### 9.1 `Allocator` returns a pointer, not a slice — the root cause under §3.3  **[V]**
 
 ```zen
-Allocator: { acquire: (MutPtr<Self>, i64) RawPtr<u8>, release: (MutPtr<Self>, RawPtr<u8>) void }
+Allocator: { acquire: (self: MutPtr<Self>, size: i64) RawPtr<u8>, release: (self: MutPtr<Self>, pointer: RawPtr<u8>) void }
 ```
 
 Length is discarded at `acquire`, and `release` never learns a size. **That is why `slice()` has to

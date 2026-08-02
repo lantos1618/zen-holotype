@@ -1,9 +1,7 @@
-//! link: c
 // @self-hosted-only
 { at, is_alpha, is_alnum, is_blank, rawstr_at } = std.text.ascii
 { Decl } = compiler.ast.ast_types
-{ gstr_string, gstr_push, gstr_append, gstr_append_bytes, gstr_finish, acquire_or_die } = compiler.genc
-{ gstr_int } = compiler.astops    // the compiler-side decimal writer (res_udec delegates to it)
+{ acquire_or_die } = compiler.genc
 { decl_span, parse_module, decl_is_impl, note_alias_prefix, alias_prefixes_reset, note_module_sig,
   module_sigs_reset, module_sig_flags, module_sig_alias_stamped } = compiler.parse
 { check_linked } = compiler.validate.core
@@ -17,7 +15,7 @@
 { ends_with, eq, is_empty, starts_with, view } = std.text.str
 { advance_while, loop_at } = std.core.count
 { enforce_visibility, enforce_private_leaks, vis_report_mode } = compiler.resolve_vis
-{ enforce_ffi_grants, enforce_ffi_linkage, genmod_lookup } = compiler.resolve_ffi
+{ collect_builtin_links, enforce_ffi_grants, genmod_lookup } = compiler.resolve_ffi
 { shadow_flat, shadow_flat_users } = compiler.resolve_shadow
 { rename_ns_names, ren_types_set, rewrite_ns_quals } = compiler.resolve_rename
 { all_decl_names_in, edge_alias_in, edge_id_in, is_any_marker_at, is_c_kw_name_span,
@@ -105,19 +103,17 @@ rset_add_str* = (m: Map<i64>, a: Allocator, name: StringView) Map<i64> {
     m.put(a.addr(), name, 0).expect("compiler.resolve: rset alloc")
 }
 rset_has* = (m: Map<i64>, key: String) bool { m.has(cstr(key.ptr)) }
-// resolve's allocator-first String helpers now delegate to compiler.genc's canonical generic
-// gstr_* builder (one implementation for the whole compiler). The only difference is the arg
-// convention: m* take the allocator first (s.gstr_push(a, b)); gstr_* take the String first.
+// Resolve's allocator-first helpers delegate to the canonical String methods in std.text.string.
 mappend_string* = (a: Allocator, out: String, src: String) String {
     // src carries its length — bulk append (one reserve, straight copy), no per-byte push.
-    out.gstr_append_bytes(a, src.bytes())
+    out.add_slice(src.bytes())
 }
 mcopy_from = (a: Allocator, out: String, src: String, i: i64) String {
     cur ::= out
     bs: MutSlice<u8> = src.bytes()
     bs.loop_at((idx, b) {
         (idx < i == false).then({
-            cur = cur.gstr_push(a, b)
+            cur = cur.add_one(b)
         })
     })
     cur
@@ -129,7 +125,7 @@ mappend_span = (a: Allocator, out: String, s: StringView, p: i32, e: i32) String
     cur ::= out
     (p < e).then({
         // Find the copy length first (the span, clipped at an embedded NUL), then bulk append —
-        // one reserve + straight copy instead of a capacity-checked gstr_push per byte.
+        // one reserve + straight copy instead of a per-byte capacity check.
         span: MutSlice<u8> = slice(s.offset(p), to_i64(e - p))
         n ::= span.len
         span.loop((h, i, b) {
@@ -138,12 +134,12 @@ mappend_span = (a: Allocator, out: String, s: StringView, p: i32, e: i32) String
                 h.break
             })
         })
-        cur = cur.gstr_append_bytes(a, slice(s.offset(p), n))
+        cur = cur.add_slice(slice(s.offset(p), n))
     })
     cur
 }
-rpush* = (s: String, a: Allocator, b: u8) String { s.gstr_push(a, b) }
-rappend* = (s: String, a: Allocator, t: StringView) String { s.gstr_append(a, t) }
+rpush* = (s: String, a: Allocator, b: u8) String { s.add_one(b) }
+rappend* = (s: String, a: Allocator, t: StringView) String { s.add(t) }
 rappend_string* = (s: String, a: Allocator, src: String) String { a.mappend_string(s, src) }
 rappend_span* = (s: String, a: Allocator, src: StringView, p: i32, e: i32) String {
     a.mappend_span(s, src, p, e)
@@ -155,10 +151,10 @@ mcopy_id_dotted = (a: Allocator, out: String, id: String, i: i64) String {
         (idx < i == false).then({
             (b == '/').match ({
                 true  => {
-                    cur = cur.gstr_push(a, '.')
+                    cur = cur.add_one('.')
                 },
                 false => {
-                    cur = cur.gstr_push(a, b)
+                    cur = cur.add_one(b)
                 },
             })
         })
@@ -179,11 +175,11 @@ mappend_id_name* = (a: Allocator, out: String, id: String) String {
 }
 madd_name* = (a: Allocator, set: String, name: String) String {
     hs = a.mappend_string(set, name)
-    hs.gstr_push(a, '\n')
+    hs.add_one('\n')
 }
 madd_str_name* = (a: Allocator, set: String, name: StringView) String {
-    hs = set.gstr_append(a, name)
-    hs.gstr_push(a, '\n')
+    hs = set.add(name)
+    hs.add_one('\n')
 }
 // `useen` is the cross-module duplicate-definition map: dedup key → table index of the module that
 // FIRST provided that name (so a later redefinition names BOTH modules in the diagnostic). An O(1)
@@ -196,8 +192,8 @@ Closure: {
 empty_closure = (a: Allocator) Closure {
     seed: i64 = 0 - 1
     Closure(
-        seen: a.gstr_string(256),
-        out: a.gstr_string(4096),
+        seen: a.String(256),
+        out: a.String(4096),
         useen: a.map_of("", seed).expect("compiler.resolve: useen alloc"),
     )
 }
@@ -434,7 +430,7 @@ res_reject_text* = (text: StringView) i32 {
     0
 }    // first rejection wins — the one the exiting process used to print is still the one printed
 res_reject = (a: Allocator, msg: String) i32 {
-    res_reject_text(msg.gstr_push(a, '\n').gstr_finish(a))
+    res_reject_text(msg.add_one('\n').finish_cstr())
 }
 // ── NAMESPACE-IMPORT CYCLE GUARD ───────────────────────────────────────────────────────────────
 // The namespace-closure loader (load_ns_closure_graph_table ↔ collect_ns_*_table) follows `m = pkg.mod`
@@ -445,13 +441,12 @@ res_reject = (a: Allocator, msg: String) i32 {
 ns_depth ::= 0
 NS_DEPTH_CAP = 256
 fail_import_cycle = (a: Allocator, inpath: StringView, id: String) i32 {
-    msg0 = a
-        .gstr_string(160)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, inpath)
-        .gstr_append(a, ": error: import cycle through namespace alias '")
+    msg0 = a.String(160)
+        .add("zenc: ")
+        .add(inpath)
+        .add(": error: import cycle through namespace alias '")
     msg1 = a.mappend_id_name(msg0, id)
-    tail = msg1.gstr_append(a, "' (a module cannot namespace-import itself, directly or transitively)")
+    tail = msg1.add("' (a module cannot namespace-import itself, directly or transitively)")
     a.res_reject(tail)
 }
 // Probe first so missing modules get a distinct error from unreadable modules.
@@ -466,32 +461,30 @@ file_exists* = (path: StringView) bool {
     })
 }
 fail_unknown_module = (a: Allocator, inpath: StringView, id: String, path: StringView) i32 {
-    msg = a.mappend_id_name(a
-        .gstr_string(160)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, inpath)
-        .gstr_append(a, ": error: unknown module '"), id)
+    msg = a.mappend_id_name(a.String(160)
+        .add("zenc: ")
+        .add(inpath)
+        .add(": error: unknown module '"), id)
     m2 ::= msg
     id.id_is_user().match ({
         true  => {
-            u0 = msg.gstr_append(a, "' (no ")
+            u0 = msg.add("' (no ")
             u1 = a.mcopy_from(u0, id, 2)
-            m2 = u1.gstr_append(a, ".zen next to ").gstr_append(a, inpath)
+            m2 = u1.add(".zen next to ").add(inpath)
         },
         false => {
-            m2 = msg.gstr_append(a, "' (no ").gstr_append(a, path)
+            m2 = msg.add("' (no ").add(path)
         },
     })
-    close_msg = m2.gstr_append(a, ")")
+    close_msg = m2.add(")")
     a.res_reject(close_msg)
 }
 fail_unreadable = (a: Allocator, inpath: StringView, path: StringView) StringView {
-    msg = a
-        .gstr_string(160)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, inpath)
-        .gstr_append(a, ": error: cannot read module file ")
-    with_path = msg.gstr_append(a, path)
+    msg = a.String(160)
+        .add("zenc: ")
+        .add(inpath)
+        .add(": error: cannot read module file ")
+    with_path = msg.add(path)
     a.res_reject(with_path)
     ""
 }
@@ -516,52 +509,49 @@ read_module_overlays = (
     })
 }
 fail_unknown_name = (a: Allocator, inpath: StringView, nm: String, id: String) i32 {
-    msg0 = a
-        .gstr_string(160)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, inpath)
-        .gstr_append(a, ": error: unknown name '")
+    msg0 = a.String(160)
+        .add("zenc: ")
+        .add(inpath)
+        .add(": error: unknown name '")
     msg1 = a.mappend_string(msg0, nm)
-    in_mod = msg1.gstr_append(a, "' in module '")
+    in_mod = msg1.add("' in module '")
     msg2 = a.mappend_id_name(in_mod, id)
-    tail = msg2.gstr_append(a, "' (no such top-level definition)")
+    tail = msg2.add("' (no such top-level definition)")
     a.res_reject(tail)
 }
 fail_dup_user = (a: Allocator, inpath: StringView, id: String, nm: String, origin: String) i32 {
-    msg0 = a
-        .gstr_string(256)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, inpath)
-        .gstr_append(a, ": error: duplicate top-level definition '")
+    msg0 = a.String(256)
+        .add("zenc: ")
+        .add(inpath)
+        .add(": error: duplicate top-level definition '")
     msg1 = a.mappend_string(msg0, nm)
-    in_mod = msg1.gstr_append(a, "' (module '")
+    in_mod = msg1.add("' (module '")
     msg2 = a.mappend_id_name(in_mod, id)
-    redef = msg2.gstr_append(a, "' redefines '")
+    redef = msg2.add("' redefines '")
     rnm = a.mappend_string(redef, nm)
-    from = rnm.gstr_append(a, "', already provided by '")
+    from = rnm.add("', already provided by '")
     msg3 = a.mappend_id_name(from, origin)
-    tail = msg3.gstr_append(a, "')")
-    l1 = tail.gstr_push(a, '\n')
+    tail = msg3.add("')")
+    l1 = tail.add_one('\n')
     // actionable hint: rename, or reach the original through a namespace alias instead of a bare import
-    h0 = l1.gstr_append(a, "hint: rename '")
+    h0 = l1.add("hint: rename '")
     h1 = a.mappend_string(h0, nm)
-    h2 = h1.gstr_append(a, "', or import '")
+    h2 = h1.add("', or import '")
     h3 = a.mappend_id_name(h2, origin)
-    h4 = h3.gstr_append(a, "' qualified — e.g. `m = ")
+    h4 = h3.add("' qualified — e.g. `m = ")
     h5 = a.mappend_id_name(h4, origin)
-    h6 = h5.gstr_append(a, "` then `m.")
+    h6 = h5.add("` then `m.")
     h7 = a.mappend_string(h6, nm)
-    h8 = h7.gstr_append(a, "(...)`")
+    h8 = h7.add("(...)`")
     a.res_reject(h8)
 }
 fail_no_progdir = (a: Allocator, inpath: StringView, id: String) i32 {
-    msg0 = a
-        .gstr_string(160)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, inpath)
-        .gstr_append(a, ": error: sibling import '")
+    msg0 = a.String(160)
+        .add("zenc: ")
+        .add(inpath)
+        .add(": error: sibling import '")
     msg1 = a.mappend_id_name(msg0, id)
-    tail = msg1.gstr_append(a, "' needs a source file on disk (stdin has no directory to load it from)")
+    tail = msg1.add("' needs a source file on disk (stdin has no directory to load it from)")
     a.res_reject(tail)
 }
 // ── CANONICAL ModuleId → path ────────────────────────────────────────────────────────────────
@@ -579,22 +569,22 @@ module_path* = (a: Allocator, root: StringView, progdir: StringView, id: String)
     gp = a.genmod_lookup(id)
     (gp.at(0) == 0).match ({
         true  => {
-            out ::= a.gstr_string(64)
+            out ::= a.String(64)
             id.id_is_user().match ({
                 true  => {
-                    p0 = out.gstr_append(a, progdir)
-                    p1 = p0.gstr_append(a, "/")
+                    p0 = out.add(progdir)
+                    p1 = p0.add("/")
                     p2 = a.mcopy_from(p1, id, 2)
-                    out = p2.gstr_append(a, ".zen")
+                    out = p2.add(".zen")
                 },
                 false => {
-                    p0 = out.gstr_append(a, root)
-                    p1 = p0.gstr_append(a, "/src/")
+                    p0 = out.add(root)
+                    p1 = p0.add("/src/")
                     p2 = a.mappend_string(p1, id)
-                    out = p2.gstr_append(a, ".zen")
+                    out = p2.add(".zen")
                 },
             })
-            out.gstr_finish(a)
+            out.finish_cstr()
         },
         false => gp,
     })
@@ -648,12 +638,12 @@ fill_module_one = (
             a.guard_module(progdir, inpath, id, path, overlays)
             src = a.read_module_overlays(inpath, path, overlays)
             graph = a.module_graph(src)
-            // finish the id BEFORE appending it to the seen set: gstr_finish pushes the NUL, which
+            // finish the id BEFORE appending it to the seen set: finish_cstr establishes the trailing NUL, which
             // can grow (realloc) the id's buffer when its length lands exactly on the capacity —
             // the old in-argument order evaluated the finish first and then add_name read the id
             // through the FREED pre-grow block (ASAN-caught UAF; the garbage bytes corrupted the
             // seen set and flipped downstream verdicts with code layout).
-            fid = id.gstr_finish(a)
+            fid = id.finish_cstr()
             next = a.mload_push(ModuleLoad(
                 seen: a.madd_str_name(st.seen, fid),
                 entries: st.entries,
@@ -693,7 +683,7 @@ module_table_graph = (
     overlays: MutSlice<SourceOverlay>,
 ) ModuleTable {
     st = a.fill_module_edges(root, progdir, inpath, graph.imports, a.mload_push(ModuleLoad(
-        seen: a.gstr_string(256),
+        seen: a.String(256),
         entries: a.module_entry_buf(8),
         n: 0,
     ), ModuleEntry(
@@ -834,13 +824,13 @@ collect_ns_graph_table = (
     st: NsScan,
 ) NsScan { a.collect_ns_edges_table(table, inpath, src, graph.imports, 0, st) }
 mimport_name_span* = (a: Allocator, flat: StringView, p: i32, e: i32) String {
-    a.mappend_span(a.gstr_string(16), flat, p, e)
+    a.mappend_span(a.String(16), flat, p, e)
 }
 mimport_head_name* = (a: Allocator, src: StringView, p: i32, e: i32) String {
     raw = a.mimport_name_span(src, p, e)
     out ::= raw
     src.is_c_kw_name_span(p, e).then({
-        out = raw.gstr_append(a, "_zk")
+        out = raw.add("_zk")
     })
     out
 }
@@ -877,7 +867,7 @@ check_head = (
                         ie = src.res_ident_end(pos)
                         raw = a.mimport_name_span(src, pos, ie)
                         hd = a.mimport_head_name(src, pos, ie)
-                        nm = hd.gstr_finish(a)
+                        nm = hd.finish_cstr()
                         provided.has(nm).then({ 0 }, { a.fail_unknown_name(inpath, raw, id) })
                         pos = ie
                     },
@@ -904,7 +894,7 @@ user_symbol_seen = (
     kv = cstr(key.ptr)
     prev = useen.get(kv, 0 - 1)
     (prev >= 0).then({
-        origin = a.gstr_string(24).gstr_append(a, table.modules[prev].id)
+        origin = a.String(24).add(table.modules[prev].id)
         a.fail_dup_user(inpath, id, s.symbol_name_in(a), origin)
     })
     useen.put(a.addr(), kv, table.index_of_id(id)).expect("compiler.resolve: useen alloc")
@@ -929,8 +919,8 @@ user_decls_from_symbols = (
     cur
 }
 first_user_import_in* = (a: Allocator, src: StringView) StringView {
-    hs = fui_scan(a.gstr_string(16), a, src, 0)
-    hs.gstr_finish(a)
+    hs = fui_scan(a.String(16), a, src, 0)
+    hs.finish_cstr()
 }
 fui_scan = (out: String, a: Allocator, src: StringView, p: i32) String {
     cur ::= out
@@ -1079,7 +1069,7 @@ import_claim_head_exported = (
                 false => b.is_alpha().match ({
                     true  => {
                         ie = src.res_ident_end(pos)
-                        nm = a.mimport_name_span(src, pos, ie).gstr_finish(a)
+                        nm = a.mimport_name_span(src, pos, ie).finish_cstr()
                         tsig.exports_value(nm).then({
                             prev = m.get(nm, 0 - 1)
                             enc = tgt + 1
@@ -1139,11 +1129,11 @@ dedup_decls_syms = (
     claim: Map<i64>,
 ) StringView {
     main_names = allow_main_shadow.match ({
-        true  => a.main_symbol_names(a.gstr_string(256), symbols, 0, bodystart, bodyend),
-        false => a.gstr_string(64),
+        true  => a.main_symbol_names(a.String(256), symbols, 0, bodystart, bodyend),
+        false => a.String(64),
     })
-    hs = a.dedup_symbols(a.gstr_string(4096), flat, symbols, 0, 0, a.gstr_string(256), a.gstr_string(64), main_names, bodystart, bodyend, allow_main_shadow, claim)
-    hs.gstr_finish(a)
+    hs = a.dedup_symbols(a.String(4096), flat, symbols, 0, 0, a.String(256), a.String(64), main_names, bodystart, bodyend, allow_main_shadow, claim)
+    hs.finish_cstr()
 }
 dedup_symbols = (
     a: Allocator,
@@ -1234,10 +1224,9 @@ impl_key_in = (a: Allocator, s: StringView, p: i32) String {
     re = s.res_ident_end(p)    // receiver ident `Heap`
     ts = s.lstrip(s.impl_lparen(re))    // first arg of `.impl(` — the trait
     te = s.res_ident_end(ts)
-    a
-        .gstr_string(40)
+    a.String(40)
         .rappend_span(a, s, p, re)
-        .gstr_append(a, ".")
+        .add(".")
         .rappend_span(a, s, ts, te)
 }
 // One impl block's ORIGIN identity: the module (table index) and 1-based ORIGINAL source line the
@@ -1288,40 +1277,39 @@ fail_dup_impl = (
     te = flat.res_ident_end(ts)
     m1 = table.modules[o1.midx]
     m2 = table.modules[o2.midx]
-    m0 = a
-        .gstr_string(320)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, m2.path)
-        .gstr_push(a, ':')
+    m0 = a.String(320)
+        .add("zenc: ")
+        .add(m2.path)
+        .add_one(':')
         .res_udec(a, to_i32(o2.line))
-        .gstr_append(a, ":1: error[dup-impl]: conflicting impl blocks for `")
+        .add(":1: error[dup-impl]: conflicting impl blocks for `")
         .rappend_span(a, flat, p, re)
-        .gstr_push(a, '.')
+        .add_one('.')
         .rappend_span(a, flat, ts, te)
-        .gstr_push(a, '`')
-    l1 = m0.gstr_push(a, '\n')
+        .add_one('`')
+    l1 = m0.add_one('\n')
     d0 = l1
-        .gstr_append(a, "  a different `")
+        .add("  a different `")
         .rappend_span(a, flat, p, re)
-        .gstr_append(a, ".impl(")
+        .add(".impl(")
         .rappend_span(a, flat, ts, te)
-        .gstr_append(a, ", { ... })` already exists in ")
+        .add(", { ... })` already exists in ")
     d1 = is_empty(m1.id).match ({
-        true  => d0.gstr_append(a, "your program"),
+        true  => d0.add("your program"),
         false => a.mappend_mid_display(d0, m1.id),
     })
     d2 = d1
-        .gstr_append(a, " (")
-        .gstr_append(a, m1.path)
-        .gstr_push(a, ':')
+        .add(" (")
+        .add(m1.path)
+        .add_one(':')
         .res_udec(a, to_i32(o1.line))
-        .gstr_push(a, ')')
-    l2 = d2.gstr_push(a, '\n')
-    h0 = l2.gstr_append(a, "hint: a type has one impl per trait — merge the two bodies or delete one block")
+        .add_one(')')
+    l2 = d2.add_one('\n')
+    h0 = l2.add("hint: a type has one impl per trait — merge the two bodies or delete one block")
     a.res_reject(h0)
 }
 dedup_impls = (a: Allocator, table: ModuleTable, flat: StringView) StringView {
-    a.dedup_impls_into(a.gstr_string(4096), table, flat, 0, a.rset_new()).gstr_finish(a)
+    a.dedup_impls_into(a.String(4096), table, flat, 0, a.rset_new()).finish_cstr()
 }
 dedup_impls_into = (
     a: Allocator,
@@ -1347,7 +1335,7 @@ dedup_impls_into = (
                     cur = cur.rappend_span(a, flat, pos, sp.start)
                     drop = flat.decl_is_impl(sp.start).match ({
                         true  => {
-                            key = a.impl_key_in(flat, sp.start).gstr_finish(a)
+                            key = a.impl_key_in(flat, sp.start).finish_cstr()
                             firstoff = seen2.get(key, 0 - 1)
                             (firstoff >= 0).match ({
                                 true  => {
@@ -1410,10 +1398,10 @@ NsScan: {
 }
 ns_scan = (a: Allocator, c: Closure) NsScan {
     NsScan(
-        quals: a.gstr_string(64),
-        qnames: a.gstr_string(128),
-        strip_qnames: a.gstr_string(128),
-        strip_all_quals: a.gstr_string(64),
+        quals: a.String(64),
+        qnames: a.String(128),
+        strip_qnames: a.String(128),
+        strip_all_quals: a.String(64),
         c: c,
     )
 }
@@ -1423,7 +1411,7 @@ ns_scan = (a: Allocator, c: Closure) NsScan {
 // same point the module's body joins the flat (append order = flat decl order). A rebind of the SAME
 // module under the SAME alias appends no new body, so it stamps nothing (see module_sig_alias_stamped).
 note_module_sigs = (a: Allocator, alias: String, graph: ModuleGraph, origin: i64) void {
-    an = a.gstr_string(16).rappend_string(a, alias).gstr_finish(a)
+    an = a.String(16).rappend_string(a, alias).finish_cstr()
     (module_sig_alias_stamped(an, origin) == false).then({
         graph.symbols.loop_at((i, sym) {
             note_module_sig(an, sym.name, module_sig_flags(sym.is_pub, sym.is_type, sym.imported, sym.foreign), origin)
@@ -1441,14 +1429,13 @@ alias_module_body = (
     strip_all_quals: String,
 ) String {
     names = graph.value_decl_names_in(a)
-    hs = a
-        .gstr_string(4096)
+    hs = a.String(4096)
         .strip_ns_into(a, src, 0, quals, qnames, strip_qnames, strip_all_quals, true)
-    body = hs.gstr_finish(a)
+    body = hs.finish_cstr()
     // Record this alias prefix so the checker's UFCS-alias fallback treats only `alias__` decls as
     // alias-shaped (never a plain user fn that merely has `__` in its name). Fresh NUL-terminated copy.
-    note_alias_prefix(a.gstr_string(16).rappend_string(a, alias).gstr_finish(a))
-    a.gstr_string(4096).rename_ns_names(a, body, names, alias)
+    note_alias_prefix(a.String(16).rappend_string(a, alias).finish_cstr())
+    a.String(4096).rename_ns_names(a, body, names, alias)
 }
 line_name* = (out: String, a: Allocator, names: String, i: i64) String {
     (i >= names.len || names.res_sbyte(i) == '\n').match ({
@@ -1467,7 +1454,7 @@ add_qual_names = (set: String, a: Allocator, alias: String, names: String, i: i6
     (i >= names.len).match ({
         true  => set,
         false => {
-            nm = line_name(a.gstr_string(16), a, names, i)
+            nm = line_name(a.String(16), a, names, i)
             set.add_qual_name(a, alias, nm).add_qual_names(a, alias, names, names.snext_line(i))
         },
     })
@@ -1551,8 +1538,8 @@ strip_ns_into* = (
     strip_all_quals: String,
     first: bool,
 ) String {
-    hs = a.gstr_string(4096).strip_ns_lines_into(a, s, p, true)
-    raw = hs.gstr_finish(a)
+    hs = a.String(4096).strip_ns_lines_into(a, s, p, true)
+    raw = hs.finish_cstr()
     (raw.at(0) == 0).match ({
         true  => out,
         false => {
@@ -1571,10 +1558,9 @@ module_body = (
     entry: ModuleEntry,
 ) StringView {
     ns = a.collect_ns_graph_table(table, inpath, entry.source, entry.graph, a.ns_scan(a.empty_closure()))
-    hs = a
-        .gstr_string(4096)
+    hs = a.String(4096)
         .strip_ns_into(a, entry.source, 0, ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals, true)
-    hs.gstr_finish(a)
+    hs.finish_cstr()
 }
 parsed_module_buf = (a: Allocator, n: i64) MutSlice<ParsedModule> {
     slice(a.acquire_or_die(n * sizeof(ParsedModule)), n)
@@ -1644,7 +1630,7 @@ alias_edge_decls = (a: Allocator, p: ParsedProgram, edge: ImportEdge) MutSlice<D
     entry = p.resolved.table.module(edge.module)
     ns = a.collect_ns_graph_table(p.resolved.table, p.module("").path, entry.source, entry.graph, a.ns_scan(a.empty_closure()))
     hs = a.alias_module_body(entry.source, entry.graph, edge.edge_alias_in(a), ns.quals, ns.qnames, ns.strip_qnames, ns.strip_all_quals)
-    body = hs.gstr_finish(a)
+    body = hs.finish_cstr()
     a.parse_module(body)
 }
 root_link_edge_decls = (a: Allocator, p: ParsedProgram, edge: ImportEdge) MutSlice<Decl> {
@@ -2028,22 +2014,21 @@ mid_is_user* = (id: StringView) bool { id.at(0) == 'u' && id.at(1) == '/' }
 fail_import_redef = (a: Allocator, m: ModuleEntry, s: ProvidedSymbol, nm: String) i32 {
     line = m.source.res_line_of(s.start)
     col = m.source.res_col_of(s.start)
-    m0 = a
-        .gstr_string(256)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, m.path)
-        .gstr_push(a, ':')
+    m0 = a.String(256)
+        .add("zenc: ")
+        .add(m.path)
+        .add_one(':')
         .res_udec(a, line)
-        .gstr_push(a, ':')
+        .add_one(':')
         .res_udec(a, col)
-        .gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `")
-    m1 = a.mappend_string(m0, nm).gstr_append(a, "` — this module also imports `")
-    m2 = a.mappend_string(m1, nm).gstr_append(a, "` by name")
-    l1 = m2.gstr_push(a, '\n')
-    h0 = l1.gstr_append(a, "hint: drop `")
+        .add(": error[dup-fn]: duplicate top-level definition of `")
+    m1 = a.mappend_string(m0, nm).add("` — this module also imports `")
+    m2 = a.mappend_string(m1, nm).add("` by name")
+    l1 = m2.add_one('\n')
+    h0 = l1.add("hint: drop `")
     h1 = a
         .mappend_string(h0, nm)
-        .gstr_append(a, "` from the import list, or rename the local definition")
+        .add("` from the import list, or rename the local definition")
     a.res_reject(h1)
 }
 check_import_redefs = (a: Allocator, table: ModuleTable) i32 {
@@ -2108,9 +2093,9 @@ res_col_of* = (src: StringView, off: i32) i32 {
     })
     off - ls + 1
 }
-// Thin i32 width-adapter over compiler.astops' one decimal writer (gstr_int) — callers thread
+// Thin i32 width-adapter over String.add_i64 — callers thread
 // non-negative line/col/index i32s, so the widened i64 renders its plain decimal digits.
-res_udec* = (out: String, a: Allocator, n: i32) String { out.gstr_int(a, to_i64(n)) }
+res_udec* = (out: String, a: Allocator, n: i32) String { out.add_i64(to_i64(n)) }
 // index just past the matching `>` of a `<...>` generic list starting at `p` (the `<`). Method decl
 // headers carry only flat lists (`<A>`, `<A, B>`), so a scan to the first `>` is exact.
 skip_to_gt = (s: StringView, p: i32) i32 {
@@ -2131,7 +2116,7 @@ is_fn_decl_after = (s: StringView, ie: i32) bool {
 // module's top-level value decls) — i.e. every type method whose name shadows a top-level fn. Empty
 // String if the module has no such split name (the common case; then no collision is possible).
 split_names = (a: Allocator, src: StringView, topnames: String) String {
-    out ::= a.gstr_string(64)
+    out ::= a.String(64)
     pos ::= 0
     bs: Slice<u8> = src.view()
     bs.loop((h, i, b) {
@@ -2162,7 +2147,7 @@ split_names = (a: Allocator, src: StringView, topnames: String) String {
 // The first `.<name>(` method-call in `src` whose `name` is one of `names` — i.e. a call that WOULD
 // misresolve once the aliased module's matching method has been prefixed away. Empty String if none.
 has_method_call_of = (a: Allocator, src: StringView, names: String) String {
-    out ::= a.gstr_string(16)
+    out ::= a.String(16)
     pos ::= 0
     bs: Slice<u8> = src.view()
     bs.loop((h, i, b) {
@@ -2204,7 +2189,7 @@ find_split_call_site = (
     splits: String,
 ) AliasCollision {
     res ::= AliasCollision(
-        name: a.gstr_string(1),
+        name: a.String(1),
         importer: "",
         found: false,
     )
@@ -2226,7 +2211,7 @@ find_split_call_site = (
 mappend_id_str_dotted* = (a: Allocator, out: String, id: StringView) String {
     cur ::= out
     bs: Slice<u8> = id.view()
-    bs.loop_at((i, b) { cur = (b == '/').then({ cur.gstr_push(a, '.') }, { cur.gstr_push(a, b) }) })
+    bs.loop_at((i, b) { cur = (b == '/').then({ cur.add_one('.') }, { cur.add_one(b) }) })
     cur
 }
 fail_alias_collision = (
@@ -2239,40 +2224,39 @@ fail_alias_collision = (
 ) i32 {
     line = mainsrc.res_line_of(edge.start)
     col = mainsrc.res_col_of(edge.start)
-    m0 = a
-        .gstr_string(320)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, inpath)
-        .gstr_push(a, ':')
+    m0 = a.String(320)
+        .add("zenc: ")
+        .add(inpath)
+        .add_one(':')
         .res_udec(a, line)
-        .gstr_push(a, ':')
+        .add_one(':')
         .res_udec(a, col)
-        .gstr_append(a, ": error[import-collision]: module alias `")
-    m1 = m0.gstr_append(a, edge.alias).gstr_append(a, " = ")
-    m2 = a.mappend_id_str_dotted(m1, edge.module).gstr_append(a, "` collides in the flat namespace")
-    l1 = m2.gstr_push(a, '\n')
+        .add(": error[import-collision]: module alias `")
+    m1 = m0.add(edge.alias).add(" = ")
+    m2 = a.mappend_id_str_dotted(m1, edge.module).add("` collides in the flat namespace")
+    l1 = m2.add_one('\n')
     // detail: which other module pulls the same names in unqualified, and the shared name that breaks
-    d0 = l1.gstr_append(a, "  `")
+    d0 = l1.add("  `")
     d1 = a
         .mappend_id_str_dotted(d0, edge.module)
-        .gstr_append(a, "` is also imported unqualified by `")
+        .add("` is also imported unqualified by `")
     d2 = (importer == "").match ({
-        true  => d1.gstr_append(a, "your program"),
+        true  => d1.add("your program"),
         false => a.mappend_id_str_dotted(d1, importer),
     })
-    d3 = d2.gstr_append(a, "`, and its method `")
+    d3 = d2.add("`, and its method `")
     d4 = a
         .mappend_string(d3, split)
-        .gstr_append(a, "` shares a name with a top-level function; the alias renames the method (to `")
-    d5 = d4.gstr_append(a, edge.alias).gstr_append(a, "__")
-    d6 = a.mappend_string(d5, split).gstr_append(a, "`), so `.")
-    d7 = a.mappend_string(d6, split).gstr_append(a, "(...)` calls elsewhere no longer resolve")
-    l2 = d7.gstr_push(a, '\n')
+        .add("` shares a name with a top-level function; the alias renames the method (to `")
+    d5 = d4.add(edge.alias).add("__")
+    d6 = a.mappend_string(d5, split).add("`), so `.")
+    d7 = a.mappend_string(d6, split).add("(...)` calls elsewhere no longer resolve")
+    l2 = d7.add_one('\n')
     // actionable fix
-    h0 = l2.gstr_append(a, "hint: replace the module alias with a selective import — e.g. `{ ... } = ")
+    h0 = l2.add("hint: replace the module alias with a selective import — e.g. `{ ... } = ")
     h1 = a
         .mappend_id_str_dotted(h0, edge.module)
-        .gstr_append(a, "` — or qualify the conflicting usage")
+        .add("` — or qualify the conflicting usage")
     a.res_reject(h1)
 }
 check_alias_collisions = (
@@ -2325,7 +2309,7 @@ undefined_name_hint_at = (
     (ie <= off).match ({
         true  => "",
         false => {
-            nm = a.mimport_name_span(flat, off, ie).gstr_finish(a)
+            nm = a.mimport_name_span(flat, off, ie).finish_cstr()
             hit :: i64 = 0 - 1
             table.modules.loop_at((i, m) {
                 (hit < 0 && i > 0).then({
@@ -2338,19 +2322,18 @@ undefined_name_hint_at = (
                 true  => "",
                 false => {
                     m = table.modules[hit]
-                    h0 = a
-                        .gstr_string(192)
-                        .gstr_append(a, "`")
-                        .gstr_append(a, nm)
-                        .gstr_append(a, "` is exported by ")
+                    h0 = a.String(192)
+                        .add("`")
+                        .add(nm)
+                        .add("` is exported by ")
                     h1 = a.mappend_mid_display(h0, m.id)
                     h2 = h1
-                        .gstr_append(a, " — import it (`{ ")
-                        .gstr_append(a, nm)
-                        .gstr_append(a, " } = ")
+                        .add(" — import it (`{ ")
+                        .add(nm)
+                        .add(" } = ")
                     h3 = a.mappend_mid_display(h2, m.id)
-                    h4 = h3.gstr_append(a, "`) or qualify it through a module alias")
-                    h4.gstr_finish(a)
+                    h4 = h3.add("`) or qualify it through a module alias")
+                    h4.finish_cstr()
                 },
             })
         },
@@ -2376,8 +2359,8 @@ resolve_program_data_overlays* = (
     a.ren_types_set(table)    // fresh per program: the rename's "is this receiver a TYPE?" answer
     a.enforce_visibility(table, vis_report_mode())
     a.enforce_private_leaks(table, vis_report_mode())
-    a.enforce_ffi_grants(table, mainsrc, vis_report_mode())
-    a.enforce_ffi_linkage(table, vis_report_mode())
+    a.enforce_ffi_grants(table, vis_report_mode())
+    a.collect_builtin_links(table)
     inpath.internal_source_path().match ({
         true  => 0,
         false => {
@@ -2398,7 +2381,7 @@ resolve_program_data_overlays* = (
     internal = inpath.internal_source_path()
     // one whole-flat symbol scan, shared by the shadow-rename pass and (when no rename fired,
     // the common case) the dedup pass — the graph is recomputed only over a REWRITTEN flat.
-    pre = cN.out.gstr_finish(a)
+    pre = cN.out.finish_cstr()
     fsyms = a.module_graph(pre).symbols
     sf = a.shadow_flat(pre, fsyms, mainsrc, nsl, body.len, internal.then({ false }, { true }))
     fregions_splice(nsl, body.len, sf.bodyend - nsl)    // main-body rename shifts every later region

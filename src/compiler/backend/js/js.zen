@@ -1,7 +1,7 @@
 // It walks the SAME post-monomorphization `[Decl]` AST the C backend consumes and emits JavaScript
 // (Node/browser) instead of C. Where c_emit maps Zen onto C's type system + memory, js maps
 // it onto JS's dynamic values plus a small linear-memory floor (bootstrap/zenrt.js, the JS analog of
-// zenrt.c). The two backends share genc.zen's AST + String builder; only the emission differs.
+// zenrt.c). The two backends share the compiler AST and unified String builder; only the emission differs.
 //
 // ── VALUE MODEL (the lowering map, in one place) ──────────────────────────────────────────────────
 //   • str / RawPtr / all pointers → an INTEGER offset into a shared Uint8Array (`__zr.MEM`). A string
@@ -28,7 +28,6 @@
 //
 { String } = std.text.string
 { Decl } = compiler.ast.ast_types
-{ gstr_string, gstr_append } = compiler.genc
 { monomorphize } = compiler.mono
 { Allocator } = std.mem.alloc
 { slice_any } = compiler.astops
@@ -50,7 +49,7 @@ js_has_main = (decls: MutSlice<Decl>) bool {
 genJsModuleIn* = (a: Allocator, raw: MutSlice<Decl>) String {
     decls = a.monomorphize(raw)
     js_size_set(decls)    // `sizeof(T)` resolves to a literal against THIS decl list
-    s ::= a.gstr_string(4096).gstr_append(a, "\"use strict\";\n").js_copy_defs(a)
+    s ::= a.String(4096).add("\"use strict\";\n").js_copy_defs(a)
     decls.loop_at((i, d) {
         s = d.match ({
             .DGlobal(g) => s.js_global(a, g),
@@ -62,7 +61,7 @@ genJsModuleIn* = (a: Allocator, raw: MutSlice<Decl>) String {
     // `zen_main();` this replaces THREW IT AWAY, so node exited 0 for every program whose verdict is
     // its exit code (the release_slice/actor fixtures print nothing and return 0-or-1) — the same
     // shape of silent disagreement as the stubs above.
-    decls.js_has_main().then({ s.gstr_append(a, "\n__zr.exit_main(zen_main());\n") }, { s })
+    decls.js_has_main().then({ s.add("\n__zr.exit_main(zen_main());\n") }, { s })
 }
 // functions only (globals already emitted first, so a global's init never forward-refs a fn body at TDZ).
 js_decl_fn = (s: String, a: Allocator, d: Decl) String {

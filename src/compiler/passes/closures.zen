@@ -1,15 +1,16 @@
 { ArmData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, LambdaData, Param, Stmt,
   StructDecl, VarData } = compiler.ast.ast_types
 { cbuf, arm_spans, bin_at, block, call_at, cond_oa, dfunc, eindex, eloop_at, ematch, ematchp,
-  field_at, finit_at, gstr_append, gstr_finish, gstr_string, lam_r, member, member_at, mfield,
+  field_at, finit_at, lam_r, member, member_at, mfield,
   mkenumg_at, mkstruct, mkstructg_at, no_tys, sassign_at, sexpr, sidxset_at, sif, slet, slett_atm,
   slit, sret, swhile, param_at, tnamed, tnode, tvoid, vref, vref_at, acquire_or_die } = compiler.genc
 { DeclIndex, Env, VList, cebuf, cenode, empty_params, no_stmts, param_index, pbuf, recall, vcons,
   vnil } = compiler.check
 { lift_extend, lift_is_captured, lift_lamparams, lift_liftable } = compiler.passes.lift
-{ gstr_int, map_slice } = compiler.astops
+{ map_slice } = compiler.astops
 { Allocator } = std.mem.alloc
 { loop_at } = std.core.count
+no_closure_labels = () MutSlice<StringView> { slice(null_ptr(), 0) }
 clos_local_call_name* = (env: Env, name: StringView) StringView {
     (env.env_func(name).name == "").match ({
         true  => env.var_ty(name).match ({
@@ -29,18 +30,16 @@ clos_call_rewrite* = (a: Allocator, c: CallData, cn: StringView, buf: MutSlice<E
     a.cenode(call_at(cn, args, c.pos))
 }
 clos_struct_name = (a: Allocator, k: i64) StringView {
-    a
-        .gstr_string(24)
-        .gstr_append(a, "__clos_")
-        .gstr_int(a, k)
-        .gstr_finish(a)
+    a.String(24)
+        .add("__clos_")
+        .add_i64(k)
+        .finish_cstr()
 }
 clos_call_name = (a: Allocator, structn: StringView) StringView {
-    a
-        .gstr_string(32)
-        .gstr_append(a, structn)
-        .gstr_append(a, "_call")
-        .gstr_finish(a)
+    a.String(32)
+        .add(structn)
+        .add("_call")
+        .finish_cstr()
 }
 clos_params_has = (ps: MutSlice<Param>, n: StringView) bool { ps.param_index(n) >= 0 }
 // Does the lambda body capture a FREE name that is NOT one of the enclosing function's params (and not
@@ -332,6 +331,7 @@ clos_lower_func* = (a: Allocator, ccp: RawPtr<u8>, gen: MutSlice<Decl>, f: Func)
         .FnT(g) => g,
         _       => FnTData(
             params: no_tys(),
+            labels: no_closure_labels(),
             ret: a.tnode(tvoid()),
         ),
     })

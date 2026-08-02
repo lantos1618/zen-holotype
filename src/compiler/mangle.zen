@@ -5,7 +5,7 @@
 { view } = std.text.str
 { Allocator } = std.mem.alloc
 { Ty, Field, FnTData } = compiler.ast.ast_types
-{ k_mut_ptr, k_raw_ptr, gstr_string, gstr_append, gstr_finish, write_str, finish_buf,
+{ k_mut_ptr, k_raw_ptr, write_str, finish_buf,
   acquire_or_die } = compiler.genc
 { dec_digit } = compiler.astops
 { loop_at } = std.core.count
@@ -15,10 +15,10 @@
 // A C identifier fragment per arg (prims by name, a nested generic by its own mangled name).
 ptr_mangle_prefix = (s: String, a: Allocator, kind: i32) String {
     (kind == k_raw_ptr()).match ({
-        true  => s.gstr_append(a, "rawptr_"),
+        true  => s.add("rawptr_"),
         false => (kind == k_mut_ptr()).match ({
-            true  => s.gstr_append(a, "mutptr_"),
-            false => s.gstr_append(a, "ptr_"),
+            true  => s.add("mutptr_"),
+            false => s.add("ptr_"),
         }),
     })
 }
@@ -27,43 +27,43 @@ ptr_mangle_prefix = (s: String, a: Allocator, kind: i32) String {
 // semantic key — a generic body that STORES through its `[T]` parameter must not be reused for a
 // read-only `Slice<T>` instantiation, which is exactly what this mangler exists to prevent.
 slice_mangle_prefix = (s: String, a: Allocator, kind: i32) String {
-    (kind == k_mut_ptr()).then({ s.gstr_append(a, "slice_") }, { s.gstr_append(a, "roslice_") })
+    (kind == k_mut_ptr()).then({ s.add("slice_") }, { s.add("roslice_") })
 }
 mangle_ty = (s: String, a: Allocator, t: Ty) String {
     t.match ({
-        .I32           => s.gstr_append(a, "i32"),
-        .I64           => s.gstr_append(a, "i64"),
-        .U8            => s.gstr_append(a, "u8"),
-        .F64           => s.gstr_append(a, "f64"),
-        .Bool          => s.gstr_append(a, "bool"),
+        .I32           => s.add("i32"),
+        .I64           => s.add("i64"),
+        .U8            => s.add("u8"),
+        .F64           => s.add("f64"),
+        .Bool          => s.add("bool"),
         // ABI/layout name: the family is still `const char*` in Phase 1, so aggregate C instances may
         // share one layout. Recursive generic FUNCTIONS use mangle_semantic_in below instead.
-        .StringView    => s.gstr_append(a, "str"),
-        .StringCstr    => s.gstr_append(a, "str"),
-        .StringLiteral => s.gstr_append(a, "str"),
-        .Void          => s.gstr_append(a, "void"),
-        .Named(n)      => s.gstr_append(a, n),
-        .Generic(g)    => s.gstr_append(a, g.mangled),
+        .StringView    => s.add("str"),
+        .StringCstr    => s.add("str"),
+        .StringLiteral => s.add("str"),
+        .Void          => s.add("void"),
+        .Named(n)      => s.add(n),
+        .Generic(g)    => s.add(g.mangled),
         .Ptr(pd)       => s.ptr_mangle_prefix(a, pd.kind).mangle_ty(a, load(pd.pointee)),
-        .Slice(e)      => s.gstr_append(a, "slice_").mangle_ty(a, load(e.pointee)),
-        .FnT(ft)       => s.gstr_append(a, "fn"),
+        .Slice(e)      => s.add("slice_").mangle_ty(a, load(e.pointee)),
+        .FnT(ft)       => s.add("fn"),
     })
 }
 // the C typedef name for a function type, used when a function VALUE needs a precise C type that an
 // append-style declarator can't spell (a function RETURN type): `(AppState,i32)AppState` ->
 // `__fnt_AppState_i32_r_AppState`. The matching `typedef Ret (*name)(Args);` is emitted by c_emit.
 fnt_cname* = (a: Allocator, ft: FnTData) StringView {
-    s ::= a.gstr_string(48).gstr_append(a, "__fnt")
-    ft.params.loop_at((i, p) { s = s.gstr_append(a, "_").mangle_ty(a, p) })
-    s.gstr_append(a, "_r_").mangle_ty(a, load(ft.ret)).gstr_finish(a)
+    s ::= a.String(48).add("__fnt")
+    ft.params.loop_at((i, p) { s = s.add("_").mangle_ty(a, p) })
+    s.add("_r_").mangle_ty(a, load(ft.ret)).finish_cstr()
 }
 // `base<args…>` -> `base_<arg0>_<arg1>…`. Built by appending `mangle_ty` per arg into a String, so the
 // name's length is EXACTLY the bytes written — a single ABI cascade (mangle_ty) with no parallel
 // measure/write copies to desync (the seed fixpoint would surface any mismatch as a re-keyed symbol).
 mangle_str_in* = (a: Allocator, base: StringView, args: MutSlice<Ty>) StringView {
-    out ::= a.gstr_string(base.view().len + 16).gstr_append(a, base)
-    args.loop_at((i, t) { out = out.gstr_append(a, "_").mangle_ty(a, t) })
-    out.gstr_finish(a)
+    out ::= a.String(base.view().len + 16).add(base)
+    args.loop_at((i, t) { out = out.add("_").mangle_ty(a, t) })
+    out.finish_cstr()
 }
 // Semantic instance key for recursive/hidden-return generic FUNCTIONS. Aggregate ABI names may share
 // a layout while string_* all lower to const char*, but function bodies carry checker-stamped return
@@ -71,34 +71,34 @@ mangle_str_in* = (a: Allocator, base: StringView, args: MutSlice<Ty>) StringView
 // `expect(Result<StringCstr, E>)` reuses a StringView-specialized body.
 mangle_semantic_ty = (s: String, a: Allocator, t: Ty) String {
     t.match ({
-        .I32           => s.gstr_append(a, "i32"),
-        .I64           => s.gstr_append(a, "i64"),
-        .U8            => s.gstr_append(a, "u8"),
-        .F64           => s.gstr_append(a, "f64"),
-        .Bool          => s.gstr_append(a, "bool"),
-        .StringView    => s.gstr_append(a, "StringView"),
-        .StringCstr    => s.gstr_append(a, "StringCstr"),
-        .StringLiteral => s.gstr_append(a, "StringLiteral"),
-        .Void          => s.gstr_append(a, "void"),
-        .Named(n)      => s.gstr_append(a, n),
+        .I32           => s.add("i32"),
+        .I64           => s.add("i64"),
+        .U8            => s.add("u8"),
+        .F64           => s.add("f64"),
+        .Bool          => s.add("bool"),
+        .StringView    => s.add("StringView"),
+        .StringCstr    => s.add("StringCstr"),
+        .StringLiteral => s.add("StringLiteral"),
+        .Void          => s.add("void"),
+        .Named(n)      => s.add(n),
         .Generic(g)    => {
-            out ::= s.gstr_append(a, g.name)
-            g.args.loop_at((i, x) { out = out.gstr_append(a, "_").mangle_semantic_ty(a, x) })
+            out ::= s.add(g.name)
+            g.args.loop_at((i, x) { out = out.add("_").mangle_semantic_ty(a, x) })
             out
         },
-        .Ptr(pd)       => s.gstr_append(a, "ptr_").mangle_semantic_ty(a, load(pd.pointee)),
+        .Ptr(pd)       => s.add("ptr_").mangle_semantic_ty(a, load(pd.pointee)),
         .Slice(e)      => s.slice_mangle_prefix(a, e.kind).mangle_semantic_ty(a, load(e.pointee)),
         .FnT(ft)       => {
-            out ::= s.gstr_append(a, "fn")
-            ft.params.loop_at((i, x) { out = out.gstr_append(a, "_").mangle_semantic_ty(a, x) })
-            out.gstr_append(a, "_r_").mangle_semantic_ty(a, load(ft.ret))
+            out ::= s.add("fn")
+            ft.params.loop_at((i, x) { out = out.add("_").mangle_semantic_ty(a, x) })
+            out.add("_r_").mangle_semantic_ty(a, load(ft.ret))
         },
     })
 }
 mangle_semantic_in* = (a: Allocator, base: StringView, args: MutSlice<Ty>) StringView {
-    out ::= a.gstr_string(64).gstr_append(a, base)
-    args.loop_at((i, x) { out = out.gstr_append(a, "_").mangle_semantic_ty(a, x) })
-    out.gstr_finish(a)
+    out ::= a.String(64).add(base)
+    args.loop_at((i, x) { out = out.add("_").mangle_semantic_ty(a, x) })
+    out.finish_cstr()
 }
 // `ns.Type` — a dotted qualified name. The FAITHFUL parser (fmt) keeps a namespace-qualified struct
 // literal's `ns.` prefix (`trace.Node(has: 0)`) so the formatter round-trips it verbatim; the flatten
@@ -109,19 +109,16 @@ dotted_name_in* = (a: Allocator, ns: StringView, name: StringView) StringView {
     end = buf.write_str(buf.write_str(buf.write_str(0, ns), "."), name)
     buf.finish_buf(end)
 }
-// ── anonymous (structural) struct naming ──────────────────────────────────────────
-// An anon struct `{ q: i32, r: i32 }` (type position) and its literal `{ q: …, r: … }` are given a
-// STRUCTURAL name synthesized from the ORDERED field NAMES: `__anon_q_r`. The type position and the
-// literal both produce the SAME name (the literal has no field types at parse time, so the scheme is
-// names-only), so two identical shapes share one synthesized C struct and compose inside generics
-// (`Result<{q,r}, E>`). The synthesized StructDecl (carrying the real field types from the type
-// position) is hoisted into the module decl list by the parser.
-anon_fields_len = (fields: MutSlice<Field>) i64 {
+// ── indexed enum-payload record naming ──────────────────────────────────────────
+// Multi-value enum payloads lower to records with ordered `_0`, `_1`, ... fields. The declaration
+// and constructor use the same generated `__payload...` name, and the parser hoists each distinct
+// payload record as an ordinary StructDecl for checking and code generation.
+payload_fields_len = (fields: MutSlice<Field>) i64 {
     n ::= 0
     fields.loop_at((i, f) { n = n + 1 + f.name.view().len })    // 1 for the '_' separator
     n
 }
-anon_write_fields = (dst: RawPtr<u8>, at: i64, fields: MutSlice<Field>) i64 {
+payload_write_fields = (dst: RawPtr<u8>, at: i64, fields: MutSlice<Field>) i64 {
     out ::= at
     fields.loop_at((i, f) {
         out = dst.write_str(out, "_")
@@ -129,15 +126,15 @@ anon_write_fields = (dst: RawPtr<u8>, at: i64, fields: MutSlice<Field>) i64 {
     })
     out
 }
-mangle_anon_in* = (a: Allocator, fields: MutSlice<Field>) StringView {
-    n = 6 + fields.anon_fields_len()    // "__anon" = 6 bytes
+mangle_payload_in* = (a: Allocator, fields: MutSlice<Field>) StringView {
+    n = 9 + fields.payload_fields_len()    // "__payload" = 9 bytes
     buf: RawPtr<u8> = a.acquire_or_die(n + 1)
-    end = buf.anon_write_fields(buf.write_str(0, "__anon"), fields)
+    end = buf.payload_write_fields(buf.write_str(0, "__payload"), fields)
     buf.finish_buf(end)
 }
 // The positional field name `_<i>` (`_0`, `_1`, …) for a synthesized multi-field variant payload struct
 // (`B(i32, i32)` ≡ `B({_0: i32, _1: i32})`). The SAME generator feeds the enum-decl payload type and the
-// `.B(a, b)` constructor, so their anon-struct names mangle identically.
+// `.B(a, b)` constructor, so their payload-record names mangle identically.
 pf_write = (dst: RawPtr<u8>, at: i64, v: i32) i64 {
     (v < 10).match ({
         true  => {
@@ -165,6 +162,11 @@ chain_tmp_name* = (a: Allocator, pos: i32) StringView {
 comp_tmp_name* = (a: Allocator, pos: i32, k: i32) StringView {
     buf: RawPtr<u8> = a.acquire_or_die(40)
     buf.finish_buf(buf.pf_write(buf.write_str(buf.pf_write(buf.write_str(0, "__comptmp_"), pos), "_"), k))
+}
+// Unique local for evaluate-once match lowering. The first arm/literal position is source-unique.
+match_tmp_name* = (a: Allocator, pos: i32) StringView {
+    buf: RawPtr<u8> = a.acquire_or_die(32)
+    buf.finish_buf(buf.pf_write(buf.write_str(0, "__matchtmp_"), pos))
 }
 payload_fname* = (a: Allocator, idx: i32) StringView {
     buf: RawPtr<u8> = a.acquire_or_die(24)

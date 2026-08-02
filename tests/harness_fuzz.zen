@@ -286,7 +286,7 @@ fz_seed_phase = (mp: Allocator) i32 {
 }
 // DEEP-NESTING recursion bombs: flat operator chains (`1+1+…`, `1==1==…`) and postfix chains
 // (`x.f.f.f…`, `f(f(f(…)))`) that overflowed the C stack (SIGSEGV) before the parser's recursion-depth
-// cap. Each nests 600 deep — well past the 400 cap — so the parser must REJECT cleanly (exit 1), never
+// cap. Each nests 600 deep — well past the 256 cap — so the parser must REJECT cleanly (exit 1), never
 // crash: parse never builds the pathological tree, so `check`/`emit`/`fmt` all terminate without a signal.
 fz_deep_phase = (mp: Allocator) i32 {
     d: i64 = 600
@@ -302,10 +302,12 @@ fz_deep_phase = (mp: Allocator) i32 {
         .addr()
         .finish_in(mp.fz_rep(c1, ")", 0, d).append_in(mp.addr(), " }").expect("fuzz: oom"))
         .expect("fuzz: oom")
-    srcs: MutSlice<StringView> = [mp.fz_deep("test* = () i32 { ", "1+", d, "1 }"), mp.fz_deep("test* = () i32 { ", "1==", d, "1 }"), mp.fz_deep("test* = () i32 { x", ".f", d, " }"), callc]    // operator ladder (add chain)
+    argc = mp.fz_deep("f = (x: i32) i32 { x }  test* = () i32 { f(", "1+", d, "1) }")
+    srcs: MutSlice<StringView> = [mp.fz_deep("test* = () i32 { ", "1+", d, "1 }"), mp.fz_deep("test* = () i32 { ", "1==", d, "1 }"), mp.fz_deep("test* = () i32 { x", ".f", d, " }"), callc, argc]    // operator ladder (add chain)
     // operator ladder (compare chain)
     // postfix member chain
     // postfix / call-arg descent
+    // operator ladder inside a call argument (the tightest measured stack path)
     mp.fz_batch(srcs, srcs.len)
 }
 // ── category entry: run every phase, sum crashes (a non-zero result is a REAL bug to report) ──────

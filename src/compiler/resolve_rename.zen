@@ -16,7 +16,7 @@
 { Decl, Expr, Func, MethodCallData, Stmt, VariantDef } = compiler.ast.ast_types
 { expr_fold_children } = compiler.ast.expr_children
 { parse_module } = compiler.parse
-{ gstr_string, gstr_finish, is_expr_null, acquire_or_die } = compiler.genc
+{ is_expr_null, acquire_or_die } = compiler.genc
 { Scan, scan } = compiler.lex
 { is_dot, is_ident_tok, nl_between } = compiler.parse_postfix
 { Allocator } = std.mem.alloc
@@ -26,7 +26,7 @@
 { module_graph, str_bytes } = compiler.resolve_scan
 { at, is_upper } = std.text.ascii
 { view } = std.text.str
-{ loop_at, times } = std.core.count
+{ loop_at } = std.core.count
 // ── membership over a newline-delimited name set, compared against a SOURCE span ────────────────
 // The rename set is built by the top-level symbol scan, so its entries are source spellings. Asking
 // it about the source bytes (never about an AST name) keeps the decl and its references in step even
@@ -62,7 +62,7 @@ ren_seen = (set: Slice<u8>, src: Slice<u8>, p: i64, e: i64, i: i64) bool {
 ren_no_types = () StringView { "" }
 ren_types ::= ren_no_types()
 ren_types_set* = (a: Allocator, table: ModuleTable) void {
-    out ::= a.gstr_string(512)
+    out ::= a.String(512)
     table.modules.loop_at((i, m) {
         m.graph.symbols.loop_at((j, sym) {
             sym.is_type.then({
@@ -70,7 +70,7 @@ ren_types_set* = (a: Allocator, table: ModuleTable) void {
             })
         })
     })
-    ren_types = out.gstr_finish(a)
+    ren_types = out.finish_cstr()
 }
 // ── binder scope ────────────────────────────────────────────────────────────────────────────────
 // A name bound by a param, a binding, a loop's index/element/handler, a lambda param or a match arm is a
@@ -363,7 +363,7 @@ qual_fate = (
     strip_qnames: String,
     strip_all_quals: String,
 ) u8 {
-    qn = qual_name_at(a.gstr_string(32), a, s, p, ie, mp)
+    qn = qual_name_at(a.String(32), a, s, p, ie, mp)
     qnames.seen_name(qn).match ({
         true  => 1,
         false => (strip_qnames.seen_name(qn)
@@ -402,9 +402,7 @@ qual_mark_tok = (
             f = a.qual_fate(s, p, ie, mem.tok.start, qnames, strip_qnames, strip_all_quals)
             (f > 0).then({
                 ms[to_i64(p)] = wrapped.then({ f + 2 }, { f })
-                wrapped.then({
-                    ms[to_i64(dot.tok.start)] = f + 4
-                })
+                wrapped.then({ ms[to_i64(dot.tok.start)] = f + 4 })
             })
             mem.tok.start
         },

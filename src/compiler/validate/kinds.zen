@@ -1,7 +1,7 @@
 { ArmData, AssignData, BinData, CallData, Decl, Expr, Field, FieldInit, FnTData, Func, GlobalData,
   ImplData, IndexData, IndexSetData, LambdaData, LetData, MatchData, MethodCallData, Param, Stmt,
   Ty, VariantDef } = compiler.ast.ast_types
-{ cbuf, dforeign, gstr_append, gstr_finish, gstr_string, is_expr_null, no_tys, subst_ty_in, tbool,
+{ cbuf, dforeign, is_expr_null, no_tys, subst_ty_in, tbool,
   tf64, tgeneric, ti32, ti64, tnamed, tnode, tptr_k, tstring_view, tu8, tvoid, acquire_or_die } = compiler.genc
 { impl_cname_in } = compiler.mangle
 { DeclIndex, Env, arm_env, bind_tparams, dispatch_recv, dispatch_recv_name, empty_params, elem_of,
@@ -18,19 +18,17 @@
 { env_imported, env_is_enum, env_is_gen_enum, env_is_gen_struct, env_is_struct, env_known_fn,
   env_struct_fields, env_trait_method, expr_pos, fit_err, is_ctx_typed_arg, is_ptr_ty, is_struct,
   lit_slot_verdict, pos_or, tparam_bound, ty_mentions_tparam, unknown_ty, ut_unknown_tys } = compiler.validate.util
-{ KARGTYPE, KARITY, KBADBIND, KBRACKETTYPE, KCAPACITY, KDIAG_CAP, KEOFINPUT, KEXPECTARROW,
-  KEXPECTDECL, KEXPECTEXPR, KEXPECTINIT, KFFITYPE, KFIELDDEFAULT, KLETEQ, KLETTYPE, KMISGEN,
-  KNOTYPEARGS, KORRETURN, KPARSE, KRECHOF, KREFLECTRETURN, KREFLECTWRITE, KTARGARITY, KTRAITBOUND,
-  KUNCLOSED, KUNKNOWNTYPE, KUNREACHABLEARM, KPTRWRITE, KSLICEWRITE, KVBREAK, KWALRUS, desc_or } = compiler.validate.diag
+{ KDIAG_CAP, desc_or, diagnostic_code } = compiler.validate.diag
+{ WriteProvenance } = compiler.check_fits
 // which read-only thing the lvalue walk stopped on -> the diagnostic that names it. `[T]` and
 // `Ptr<T>` are different mistakes with different fixes, so they get different messages.
-write_diag_kind = (c: i32) i32 {
-    (c == w_ok()).then({
-        return 0
+write_diag_kind = (p: WriteProvenance) i32 {
+    p.match ({
+        .Writable        => 0,
+        .ReadonlyPointer => diagnostic_code(.PointerWrite),
+        .ReadonlySlice   => diagnostic_code(.SliceWrite),
     })
-    (c == w_slice()).then({ KSLICEWRITE() }, { KPTRWRITE() })
 }
-{ w_ok, w_slice } = compiler.check_fits
 { zty } = compiler.validate.ownership
 { arg_err_at } = compiler.validate.args
 { kv_at, kv_one } = compiler.validate.core
@@ -517,7 +515,7 @@ op_display* = (op: StringView) StringView { (op == "/.").then({ "/" }, { op }) }
 // false-positives the other validation kinds. Imported/foreign generics defer (bound_errs is 0).
 kvb_call_kind = (env: Env, c: CallData) i32 {
     env.env_known_fn(c.fn).match ({
-        true  => env.bound_errs(env.env_func(c.fn), c).kv_one(KTRAITBOUND()).kv_at(c.pos),
+        true  => env.bound_errs(env.env_func(c.fn), c).kv_one(diagnostic_code(.TraitBound)).kv_at(c.pos),
         false => 0,
     })
 }
@@ -699,8 +697,8 @@ ka_lambda_at = (
         .Lambda(lm) => (i < params.len).match ({
             true  => env.a.subst_ty_in(ftparams, targs, params[i].ty).match ({
                 .FnT(fd) => (fd.params.len == lm.params.len).match ({
-                    true  => env.ka_lam_ret_err(fd, lm, fd.params).kv_one(KARGTYPE()).kv_at(cpos),
-                    false => KARITY().kv_at(cpos),
+                    true  => env.ka_lam_ret_err(fd, lm, fd.params).kv_one(diagnostic_code(.ArgType)).kv_at(cpos),
+                    false => diagnostic_code(.Arity).kv_at(cpos),
                 }),
                 _        => 0,
             }),
@@ -733,7 +731,7 @@ ka_concrete_arg_err = (env: Env, authoritative: bool, f: Func, i: i32, ar: Expr,
     (authoritative && f.tparams.len > 0).match ({
         true  => env
             .arg_err_at(f.tparams, f.params, i, ar)
-            .kv_one(KARGTYPE())
+            .kv_one(diagnostic_code(.ArgType))
             .kv_at(ar.expr_pos().pos_or(pos)),
         false => 0,
     })
@@ -755,7 +753,7 @@ ka_args_check = (
             .or(tf.match ({
                 true  => env
                     .ka_mismatch_at(f.tparams, targs, f.params, i, ar)
-                    .kv_one(KARGTYPE())
+                    .kv_one(diagnostic_code(.ArgType))
                     .kv_at(ar.expr_pos().pos_or(pos)),
                 false => 0,
             }))
@@ -788,12 +786,12 @@ ka_call_core = (
             tf = (etargs.len == 0).match ({
                 true  => 0,
                 false => (f.tparams.len == 0).match ({
-                    true  => KNOTYPEARGS().kv_at(pos),
+                    true  => diagnostic_code(.NoTypeArguments).kv_at(pos),
                     false => (etargs.len != f.tparams.len).match ({
-                        true  => KTARGARITY().kv_at(pos),
+                        true  => diagnostic_code(.TypeArgumentArity).kv_at(pos),
                         false => env
                             .ut_unknown_tys(tparams, etargs)
-                            .kv_one(KUNKNOWNTYPE())
+                            .kv_one(diagnostic_code(.UnknownType))
                             .kv_at(pos),
                     }),
                 }),
@@ -833,7 +831,7 @@ ka_expr_kind = (env: Env, tparams: MutSlice<Param>, e: Ptr<Expr>) i32 {
             .ka_expr_kind(tparams, m.subj)
             .or(m.arms
                 .unreachable_arm_errs()
-                .kv_one(KUNREACHABLEARM())
+                .kv_one(diagnostic_code(.UnreachableArm))
                 .kv_at(load(m.subj).expr_pos().pos_or(m.arms.arms_first_pos())))
             .or(env.ka_arms_kind(tparams, env.infer_expr(m.subj), m.arms)),
         .MakeEnum(mk)   => env.ka_expr_kind(tparams, mk.payload),
@@ -1022,7 +1020,7 @@ krw_call = (c: CallData, ps: MutSlice<Param>) i32 {
         bound = (i < to_i64(nsub) && x.addr().krw_subject_bound(ps)).then({ true }, { bound })
     })
     (bound && c.args[c.args.len - 1].wr_lam_writes_value()).match ({
-        true  => KREFLECTWRITE().kv_at(c.pos),
+        true  => diagnostic_code(.ReflectWrite).kv_at(c.pos),
         false => 0,
     })
 }
@@ -1103,7 +1101,7 @@ ko_at = (env: Env, tps: MutSlice<Param>, want: Ty, recv: Ptr<Expr>, cnd: bool, p
         false => {
             fE = env.subj_variant_payload(want, "Err")
             fE.is_void_ty().match ({
-                true  => KORRETURN().kv_at(pos),
+                true  => diagnostic_code(.OrReturn).kv_at(pos),
                 false => {
                     rt = env.infer_expr(recv)
                     (rt.is_void_ty() || env.unknown_ty(rt) || tps.ty_mentions_tparam(rt)).match ({
@@ -1118,7 +1116,7 @@ ko_at = (env: Env, tps: MutSlice<Param>, want: Ty, recv: Ptr<Expr>, cnd: bool, p
                                 true  => 0,
                                 false => (fE.ty_eq(rE) || rE.ty_eq(fE)).match ({
                                     true  => cnd.then({ env.ko_ok_at(tps, want, rt, pos) }, { 0 }),
-                                    false => KORRETURN().kv_at(pos),
+                                    false => diagnostic_code(.OrReturn).kv_at(pos),
                                 }),
                             })
                         },
@@ -1140,7 +1138,7 @@ ko_ok_at = (env: Env, tps: MutSlice<Param>, want: Ty, rt: Ty, pos: i32) i32 {
         || tps.ty_mentions_tparam(fO)
         || tps.ty_mentions_tparam(rO)).match ({
         true  => 0,
-        false => (fO.ty_eq(rO) || rO.ty_eq(fO)).then({ 0 }, { KORRETURN().kv_at(pos) }),
+        false => (fO.ty_eq(rO) || rO.ty_eq(fO)).then({ 0 }, { diagnostic_code(.OrReturn).kv_at(pos) }),
     })
 }
 ko_call_kind = (env: Env, tps: MutSlice<Param>, want: Ty, c: CallData, cnd: bool) i32 {
@@ -1326,34 +1324,31 @@ ffi_bad_generic = (f: Func) i32 { (f.tparams.len > 0).then({ 1 }, { 0 }) }
 // the NAME walk (same traversal order as the kind walk): the message naming the offending
 // parameter/return type, in user spelling.
 ffi_param_msg = (a: Allocator, fname: StringView, pname: StringView, tname: StringView) StringView {
-    a
-        .gstr_string(96)
-        .gstr_append(a, "foreign declaration `")
-        .gstr_append(a, fname)
-        .gstr_append(a, "`: parameter `")
-        .gstr_append(a, pname)
-        .gstr_append(a, "` has non-FFI-safe type `")
-        .gstr_append(a, tname)
-        .gstr_append(a, "`")
-        .gstr_finish(a)
+    a.String(96)
+        .add("foreign declaration `")
+        .add(fname)
+        .add("`: parameter `")
+        .add(pname)
+        .add("` has non-FFI-safe type `")
+        .add(tname)
+        .add("`")
+        .finish_cstr()
 }
 ffi_ret_msg = (a: Allocator, fname: StringView, tname: StringView) StringView {
-    a
-        .gstr_string(96)
-        .gstr_append(a, "foreign declaration `")
-        .gstr_append(a, fname)
-        .gstr_append(a, "`: return type `")
-        .gstr_append(a, tname)
-        .gstr_append(a, "` is not FFI-safe")
-        .gstr_finish(a)
+    a.String(96)
+        .add("foreign declaration `")
+        .add(fname)
+        .add("`: return type `")
+        .add(tname)
+        .add("` is not FFI-safe")
+        .finish_cstr()
 }
 ffi_generic_msg = (a: Allocator, fname: StringView) StringView {
-    a
-        .gstr_string(96)
-        .gstr_append(a, "foreign declaration `")
-        .gstr_append(a, fname)
-        .gstr_append(a, "` declares type parameters — a foreign symbol binds ONE concrete C signature")
-        .gstr_finish(a)
+    a.String(96)
+        .add("foreign declaration `")
+        .add(fname)
+        .add("` declares type parameters — a foreign symbol binds ONE concrete C signature")
+        .finish_cstr()
 }
 ffi_func_msg* = (a: Allocator, env: Env, f: Func) StringView {
     (f.tparams.len > 0).then({
@@ -1407,53 +1402,56 @@ kparse_off = (init: Ptr<Expr>) i32 {
 // the `.` of a newline+`.Uppercase` statement break, so report the rule (KVBREAK) at that dot.
 kparse_kind = (init: Ptr<Expr>) i32 {
     off = init.kparse_off()
-    (off < 0).then({ KVBREAK().kv_at(0 - off) }, { KPARSE().ksent_at(off) })
+    (off < 0).then({ diagnostic_code(.VariantBreak).kv_at(0 - off) }, { diagnostic_code(.Parse).ksent_at(off) })
 }
 // A sentinel's Int init uses 0 for "no offset was recorded" (compiler.parse_type's parse_err_off),
 // so — unlike an AST pos, where byte 0 is real (kv_at) — a 0 here means the diagnostic has NO caret.
 ksent_at = (k: i32, off: i32) i32 { (off == 0).then({ k }, { k.kv_at(off) }) }
 // the `__bad_binding` sentinel: a malformed top-level `=` binding, caret at its RHS offset (always ≥ 0).
-kbadbind_kind = (init: Ptr<Expr>) i32 { KBADBIND().ksent_at(init.kparse_off()) }
+kbadbind_kind = (init: Ptr<Expr>) i32 { diagnostic_code(.BadBinding).ksent_at(init.kparse_off()) }
 // the `__misordered_generic` sentinel: a `Name<T>*:` head, caret at the `<` offset (always ≥ 0).
-kmisgen_kind = (init: Ptr<Expr>) i32 { KMISGEN().ksent_at(init.kparse_off()) }
+kmisgen_kind = (init: Ptr<Expr>) i32 { diagnostic_code(.MisorderedGeneric).ksent_at(init.kparse_off()) }
 // the `__capacity` sentinel: a fixed-capacity compiler registry overflowed (no meaningful caret — the
 // offense is program SIZE, not a token; the sentinel's offset is 0).
-kcapacity_kind = (init: Ptr<Expr>) i32 { KCAPACITY().ksent_at(init.kparse_off()) }
+kcapacity_kind = (init: Ptr<Expr>) i32 { diagnostic_code(.Capacity).ksent_at(init.kparse_off()) }
 // the PARSE TAXONOMY sentinels (compiler.parse.sentinel_name): each names what the parser EXPECTED
 // where it failed, so the diagnostic says WHAT is wrong, not only where. All carry a real caret pos.
 taxonomy_kind = (nm: StringView, init: Ptr<Expr>) i32 {
     (nm == "__unclosed_block").then({
-        return KUNCLOSED().ksent_at(init.kparse_off())
+        return diagnostic_code(.Unclosed).ksent_at(init.kparse_off())
     })
     (nm == "__expected_arrow").then({
-        return KEXPECTARROW().ksent_at(init.kparse_off())
+        return diagnostic_code(.ExpectedArrow).ksent_at(init.kparse_off())
     })
     (nm == "__expected_expr").then({
-        return KEXPECTEXPR().ksent_at(init.kparse_off())
+        return diagnostic_code(.ExpectedExpression).ksent_at(init.kparse_off())
     })
     (nm == "__expected_decl").then({
-        return KEXPECTDECL().ksent_at(init.kparse_off())
+        return diagnostic_code(.ExpectedDeclaration).ksent_at(init.kparse_off())
     })
     (nm == "__expected_init").then({
-        return KEXPECTINIT().ksent_at(init.kparse_off())
+        return diagnostic_code(.ExpectedInitializer).ksent_at(init.kparse_off())
     })
     (nm == "__retired_walrus").then({
-        return KWALRUS().ksent_at(init.kparse_off())
+        return diagnostic_code(.RetiredWalrus).ksent_at(init.kparse_off())
     })
     (nm == "__retired_bracket_type").then({
-        return KBRACKETTYPE().ksent_at(init.kparse_off())
+        return diagnostic_code(.RetiredBracketType).ksent_at(init.kparse_off())
     })
     (nm == "__unexpected_eof").then({
-        return KEOFINPUT().ksent_at(init.kparse_off())
+        return diagnostic_code(.UnexpectedEof).ksent_at(init.kparse_off())
     })
     (nm == "__field_default").then({
-        return KFIELDDEFAULT().ksent_at(init.kparse_off())
+        return diagnostic_code(.FieldDefault).ksent_at(init.kparse_off())
     })
     (nm == "__expected_let_type").then({
-        return KLETTYPE().ksent_at(init.kparse_off())
+        return diagnostic_code(.ExpectedLetType).ksent_at(init.kparse_off())
     })
     (nm == "__expected_let_eq").then({
-        return KLETEQ().ksent_at(init.kparse_off())
+        return diagnostic_code(.ExpectedLetEquals).ksent_at(init.kparse_off())
+    })
+    (nm == "__invalid_literal").then({
+        return diagnostic_code(.InvalidLiteral).ksent_at(init.kparse_off())
     })
     0
 }
@@ -1513,35 +1511,35 @@ mkenum_subj_ty* = (mk: MakeEnumData) Ty {
 // out-of-module trait impl, so callers (core.zen's kv_* walk, enrich.zen, …) dispatch
 // `env.operand_err(b)` through the global impl index and import NOTHING from this module for them.
 EnvKinds: {
-    trait_recv_missing: (Self, CallData) bool,
-    match_result_ty: (Self, Ty, MutSlice<ArmData>) Ty,
-    cond_result_err: (Self, CondData) i32,
-    cond_bool_err: (Self, CondData) i32,
-    arm_result_err: (Self, Ty, Ty, ArmData) i32,
-    novalue_arm_leaf: (Self, Ptr<Expr>) i32,
-    value_void_arm_err: (Self, Ty, Ptr<Expr>) i32,
-    call_void_arm_errs: (Self, CallData) i32,
-    exhaustive_err: (Self, MatchData) i32,
-    mkenum_err: (Self, StringView, StringView) i32,
-    enum_payload_err: (Self, MakeEnumData) i32,
-    unknown_arm_errs: (Self, MatchData) i32,
-    operand_err: (Self, BinData) i32,
-    index_err: (Self, IndexData) i32,
-    ret_err: (Self, Ptr<Expr>) i32,
-    slot_fit_err: (Self, Ty, Ptr<Expr>) i32,
-    slice_elem_err: (Self, Ty, Ptr<Expr>) i32,
-    slice_prov_elem: (Self, Ptr<Expr>) Ty,
-    elem_claim_err: (Self, Ty, Ty) i32,
-    assign_err: (Self, AssignData) i32,
-    assign_write_kind: (Self, AssignData) i32,
-    idxset_write_kind: (Self, IndexSetData) i32,
-    idxset_err: (Self, IndexSetData) i32,
-    store_fit_err: (Self, CallData) i32,
-    let_fit_err: (Self, LetData) i32,
-    let_needannot_err: (Self, LetData) i32,
-    undef_is_method: (Self, CallData) bool,
-    ffi_func_kind: (Self, Func) i32,
-    bound_err: (Self, Func, CallData, Param) i32,
+    trait_recv_missing: (self: Self, call: CallData) bool,
+    match_result_ty: (self: Self, expected: Ty, arms: MutSlice<ArmData>) Ty,
+    cond_result_err: (self: Self, condition: CondData) i32,
+    cond_bool_err: (self: Self, condition: CondData) i32,
+    arm_result_err: (self: Self, expected: Ty, actual: Ty, arm: ArmData) i32,
+    novalue_arm_leaf: (self: Self, expression: Ptr<Expr>) i32,
+    value_void_arm_err: (self: Self, expected: Ty, expression: Ptr<Expr>) i32,
+    call_void_arm_errs: (self: Self, call: CallData) i32,
+    exhaustive_err: (self: Self, match_data: MatchData) i32,
+    mkenum_err: (self: Self, type_name: StringView, variant: StringView) i32,
+    enum_payload_err: (self: Self, constructor: MakeEnumData) i32,
+    unknown_arm_errs: (self: Self, match_data: MatchData) i32,
+    operand_err: (self: Self, binary: BinData) i32,
+    index_err: (self: Self, index: IndexData) i32,
+    ret_err: (self: Self, expression: Ptr<Expr>) i32,
+    slot_fit_err: (self: Self, expected: Ty, expression: Ptr<Expr>) i32,
+    slice_elem_err: (self: Self, expected: Ty, expression: Ptr<Expr>) i32,
+    slice_prov_elem: (self: Self, expression: Ptr<Expr>) Ty,
+    elem_claim_err: (self: Self, expected: Ty, actual: Ty) i32,
+    assign_err: (self: Self, assignment: AssignData) i32,
+    assign_write_kind: (self: Self, assignment: AssignData) i32,
+    idxset_write_kind: (self: Self, assignment: IndexSetData) i32,
+    idxset_err: (self: Self, assignment: IndexSetData) i32,
+    store_fit_err: (self: Self, call: CallData) i32,
+    let_fit_err: (self: Self, binding: LetData) i32,
+    let_needannot_err: (self: Self, binding: LetData) i32,
+    undef_is_method: (self: Self, call: CallData) bool,
+    ffi_func_kind: (self: Self, function: Func) i32,
+    bound_err: (self: Self, function: Func, call: CallData, parameter: Param) i32,
 }
 Env.impl(EnvKinds, {
     trait_recv_missing = (env: Env, c: CallData) bool {
@@ -1852,11 +1850,11 @@ Env.impl(EnvKinds, {
     }
     ffi_func_kind = (env: Env, f: Func) i32 {
         // the kind walk: first offending foreign decl, caret on the decl (a Ty carries no source position).
-        acc ::= f.ffi_bad_generic().kv_one(KFFITYPE()).kv_at(f.pos)
+        acc ::= f.ffi_bad_generic().kv_one(diagnostic_code(.FfiType)).kv_at(f.pos)
         f.params.loop_at((i, p) {
-            acc = acc.or(env.ffi_bad_ty(p.ty).kv_one(KFFITYPE()).kv_at(f.pos))
+            acc = acc.or(env.ffi_bad_ty(p.ty).kv_one(diagnostic_code(.FfiType)).kv_at(f.pos))
         })
-        acc.or(env.ffi_bad_ty(f.ret).kv_one(KFFITYPE()).kv_at(f.pos))
+        acc.or(env.ffi_bad_ty(f.ret).kv_one(diagnostic_code(.FfiType)).kv_at(f.pos))
     }
     bound_err = (env: Env, f: Func, c: CallData, tp: Param) i32 {
         tr = tp.tparam_bound()
@@ -1877,9 +1875,9 @@ Env.impl(EnvKinds, {
 })    // unresolved / abstract: defer
 // Func-receiver kind checks (`f.ka_rec_hof_kind()` call shape) get the same treatment on Func.
 FuncKinds: {
-    ka_rec_hof_kind: (Self) i32,
-    ka_reflect_ret_kind: (Self) i32,
-    ka_reflect_write_kind: (Self) i32,
+    ka_rec_hof_kind: (self: Self) i32,
+    ka_reflect_ret_kind: (self: Self) i32,
+    ka_reflect_write_kind: (self: Self) i32,
 }
 Func.impl(FuncKinds, {
     ka_rec_hof_kind = (f: Func) i32 {
@@ -1888,13 +1886,13 @@ Func.impl(FuncKinds, {
             && f.params.param_names_has(f.name) == false
             && ka_reflect_name(f.name) == false
             && f.body.rc_calls_body(f.name)).match ({
-            true  => KRECHOF().kv_at(f.pos),
+            true  => diagnostic_code(.RecursiveHigherOrder).kv_at(f.pos),
             false => 0,
         })
     }
     ka_reflect_ret_kind = (f: Func) i32 {
         (f.tparams.len > 0 && f.func_calls_reflect() && f.body.krr_loop_ret_body()).match ({
-            true  => KREFLECTRETURN().kv_at(f.pos),
+            true  => diagnostic_code(.ReflectReturn).kv_at(f.pos),
             false => 0,
         })
     }

@@ -3,6 +3,7 @@
 { Allocator } = std.mem.alloc
 { at, is_alnum } = std.text.ascii
 { advance_while, loop_at } = std.core.count
+{ Opt } = std.core.result
 { is_empty } = std.text.str
 { CondQuery, EnvQuery, SourceSpan, expr_pos, pos_or } = compiler.validate.util    // trait imports: enable UFCS `env.var_err()`/`d.cond_onearm_err()` via the impl index
 { check_diagnostic_from_source, check_to_diagnostic } = compiler.validate.core
@@ -39,7 +40,7 @@ name_error = (env: Env, name: StringView, pos: i32) NameErrors {
             NameErrors(
                 count: n,
                 first_pos: (n == 0).then({ 0 }, { pos }),
-                first_kind: (n == 0).then({ 0 }, { KUNDEFINED() }),
+                first_kind: (n == 0).then({ 0 }, { diagnostic_code(.Undefined) }),
             )
         },
         false => name_errors_none(),
@@ -55,7 +56,7 @@ loop_verb_error = (env: Env, m: MemberData) NameErrors {
         true  => NameErrors(
             count: 1,
             first_pos: p,
-            first_kind: KSTRUCTFIELD(),
+            first_kind: diagnostic_code(.StructField),
         ),
         false => name_errors_none(),
     })
@@ -66,7 +67,7 @@ name_errors_onearm = (d: CondData) NameErrors {
     NameErrors(
         count: n,
         first_pos: (n == 0).then({ 0 }, { p }),
-        first_kind: (n == 0).then({ 0 }, { KBOOLARM() }),
+        first_kind: (n == 0).then({ 0 }, { diagnostic_code(.BooleanArm) }),
     )
 }
 name_errors_args = (env: Env, args: MutSlice<Expr>) NameErrors {
@@ -150,74 +151,300 @@ name_errors_body* = (a: Allocator, env: Env, body: MutSlice<Stmt>) NameErrors {
     })
     acc
 }
-// ════════════════════════════════════════════════════════════════════════════════════════
-// ── DIAGNOSTIC ERROR KINDS (authoritative validation traversal) ─────────────────────────
-KARITY* = () i32 { 1 }    // a call's arg COUNT ≠ the declared parameter count
-KARGTYPE* = () i32 { 2 }    // an arg's type doesn't fit its parameter
-KUNDEFINED* = () i32 { 3 }    // a call to a non-local, non-intrinsic, non-imported, non-trait name
-KSTRUCTFIELD* = () i32 { 4 }    // a struct-literal init field / a member access that names no real field
-KEXHAUST* = () i32 { 5 }    // a non-wildcard enum match misses a variant
-KDUPVARIANT* = () i32 { 6 }    // a match arm repeats a variant
-KOPERAND* = () i32 { 7 }    // an arith/logic operator on the wrong operand category
-KINDEX* = () i32 { 8 }    // seq[idx] with a non-slice seq or a non-numeric idx
-KRETURNFIT* = () i32 { 9 }    // a returned / trailing value doesn't fit the declared return type
-KASSIGNFIT* = () i32 { 10 }    // x = v where v doesn't fit x's let-inferred type (incl. xs[i]=v)
-KCONFORMANCE* = () i32 { 11 }    // a Type.impl(Trait) misses a method or its signature differs
-KDUPFN* = () i32 { 12 }    // two top-level fns share a name (Zen has no overloading)
-KVALPOSRETURN* = () i32 { 13 }    // an early (dropped) return in a value-position block arm
-KPARSE* = () i32 { 14 }    // unparseable top-level input (the parser's __syntax_error sentinel)
-KOWNERSHIP* = () i32 { 15 }    // use of a local owner after it was consumed (release/drop, send, move into an owner param, or a bare `c = o` copy)
-KTRAITBOUND* = () i32 { 16 }    // a type bound to `A: Trait` at a call site does not impl Trait
-KUNKNOWNTYPE* = () i32 { 17 }    // a type annotation names a type that is not declared/imported/a tparam
-KLAMBDAVALUE* = () i32 { 18 }    // a lambda used as a value the inliner can't splice (stored/returned)
-KMUSTUSE* = () i32 { 19 }    // a value-mold `(Self,…) Self` self-mutation whose result is discarded
-KNEEDANNOT* = () i32 { 20 }    // an unannotated let whose inferred type leaves a tparam uninferred (-> T=void)
-KPTRWRITE* = () i32 { 21 }    // a write or writable-view construction through read-only `Ptr<T>`
-KINFINITETYPE* = () i32 { 22 }    // a struct/enum that contains ITSELF by value (transitively) — infinite size
-KNULLDEREF* = () i32 { 23 }    // a load/store/offset through a nullable `RawPtr<T>` (T != u8) not proven non-null
-KNOTCALLABLE* = () i32 { 24 }    // a call whose target name IS defined but holds a non-function value (a scalar/struct), so it cannot be called
-KSLICEWRITE* = () i32 { 60 }    // a write through a read-only `Slice<T>` window — the `.view()` of a `StringLiteral`/`StringCstr`, whose bytes live in `.rodata`
-KALLOCNULL* = () i32 { 59 }    // an ALLOCATOR result (`RawPtr<u8>` from acquire/resize/malloc/…) dereferenced with no null proof — the provenance rule `RawPtr<u8>`'s type-level exemption cannot express (compiler.validate.nullalloc)
-KFALLTHROUGH* = () i32 { 25 }    // a non-void function body that ends in a no-value statement (let/assign/loop) — no produced value
-KVBREAK* = () i32 { 29 }    // a top-level parse failure at a newline+`.Uppercase` statement break (the split-statement shape)
-KMAINPARAMS* = () i32 { 30 }    // `main` declared with parameters — the OS entry calls zen_main() with none, so they'd read garbage
-KARMVOID* = () i32 { 31 }    // a value-consumed match/cond arm that yields no value and does not diverge
-KBADBIND* = () i32 { 32 }    // a top-level `name = <expr>` binding that is neither a module alias (ident RHS) nor a function (`(` RHS) (the parser's __bad_binding sentinel). UNREACHABLE since const-by-default routed every surviving `name = <expr>` to fill_global as a constant
-KMISGEN* = () i32 { 44 }    // a misordered generic-decl head `Name<T>*:` (type params before the `*`); canonical is `Name*<T>:` (the parser's __misordered_generic sentinel)
-KUNREACHABLEARM* = () i32 { 37 }    // a match arm after a wildcard `_` arm can never fire (the emitter drops it)
-KMETHODNOTFOUND* = () i32 { 38 }    // an undefined CALL whose first argument is a concrete struct/enum receiver: reads as `recv.method()` UFCS with no such method (and no free function of that name) — distinct from a bare undefined name
-KBOOLARM* = () i32 { 39 }    // a bool `.match` omits true/false (or `_`); use an explicit arm or `.then` for a one-way effect
-KNOIF* = () i32 { 40 }    // source contains the forbidden `if` token; Zen uses bool `.match` for conditional control flow
-KNOTERNARY* = () i32 { 50 }    // CUSTOM channel (like KNOIF): source contains a `?` symbol token — the forbidden C-style ternary; Zen conditionals are visible postfix methods (`.match`, two-arm `.then`), never punctuation. Permanent law beside no-if.
-KNOCOROUTINE* = () i32 { 61 }    // CUSTOM channel (like KNOIF/KNOTERNARY): source contains a `yield`/`async`/`await` identifier token — each names a mid-body SUSPENSION, and Zen behaviours run to completion (Pony actors), so there is no such point. Permanent law beside no-if.
-KTARGARITY* = () i32 { 41 }    // an explicit `<…>` type-arg list whose COUNT ≠ the declared type-parameter count
-KFFITYPE* = () i32 { 42 }    // a FOREIGN (bodyless) declaration whose signature uses a type outside the FFI-safe set
-KLITEXHAUST* = () i32 { 45 }    // a literal-scalar `.match` (i32/…) with no `_` wildcard — the value domain is unbounded, so it is non-exhaustive. Kind label is "exhaustiveness" (same family as KEXHAUST); the parser plants a positioned `__nonexhaustive_lit` sentinel the call-classifier maps here
-KMATCHLABEL* = () i32 { 46 }    // a boolean `.match` arm labelled with a non-boolean literal (`true => 1, 0 => 2`) — a label-TYPE error, caret on the bad label (the parser's positioned `__badmatchlabel` sentinel)
-KDUPMATCHARM* = () i32 { 51 }    // a boolean `.match` whose two arms repeat a label (`true => …, true => …`) — covers only one case, caret on the duplicate label (the parser's positioned `__dupmatcharm` sentinel)
-KDUPLITARM* = () i32 { 52 }    // a literal `.match` that repeats a label (`1 => …, 1 => …`) — the later arm is dead (first wins), caret on the duplicate label (the parser's positioned `__duplitarm` sentinel)
-KREFLECTRETURN* = () i32 { 48 }    // a reflect-using generic with a `return` inside a loop body — inline-only, so the return would escape into the caller (mirror of KRECHOF for the loop-return hazard)
-KREFLECTWRITE* = () i32 { 49 }    // an each_field/zip_fields whose SUBJECT is temp-bound (a non-Var expr, or an enclosing reflection lambda's value param — a member place) while its lambda ASSIGNS a value param: the writes would land on the discarded temp (silent no-op, #587)
-KCAPACITY* = () i32 { 47 }    // a fixed-capacity compiler registry (exports / alias prefixes / module sigs) overflowed — the parser's sticky `__capacity` sentinel; the program is REJECTED rather than compiled with silently dropped registry data
+DiagnosticKind*: Arity | ArgType | Undefined | StructField | Exhaustiveness | DuplicateVariant | Operand | Index | ReturnFit | AssignFit | Conformance | DuplicateFunction | ValuePositionReturn | Parse | Ownership | TraitBound | UnknownType | LambdaValue | MustUse | NeedAnnotation | PointerWrite | InfiniteType | NullDereference | NotCallable | Fallthrough | NoTypeArguments | OrReturn | RecursiveHigherOrder | VariantBreak | MainParameters | ArmVoid | BadBinding | Escape | ScratchSend | ScratchState | ReservedName | UnreachableArm | MethodNotFound | BooleanArm | NoIf | TypeArgumentArity | FfiType | Leak | MisorderedGeneric | LiteralExhaustiveness | MatchLabel | Capacity | ReflectReturn | ReflectWrite | NoTernary | DuplicateBooleanArm | DuplicateLiteralArm | Unclosed | ExpectedArrow | ExpectedExpression | ExpectedDeclaration | ExpectedInitializer | UnexpectedEof | AllocationNull | SliceWrite | NoCoroutine | ExpectedLetType | FieldDefault | ExpectedLetEquals | AssignConst | RetiredWalrus | SliceElement | RetiredBracketType | DuplicateMethod | InvalidLiteral
+diagnostic_code* = (kind: DiagnosticKind) i32 {
+    kind.match ({
+        .Arity                 => 1,
+        .ArgType               => 2,
+        .Undefined             => 3,
+        .StructField           => 4,
+        .Exhaustiveness        => 5,
+        .DuplicateVariant      => 6,
+        .Operand               => 7,
+        .Index                 => 8,
+        .ReturnFit             => 9,
+        .AssignFit             => 10,
+        .Conformance           => 11,
+        .DuplicateFunction     => 12,
+        .ValuePositionReturn   => 13,
+        .Parse                 => 14,
+        .Ownership             => 15,
+        .TraitBound            => 16,
+        .UnknownType           => 17,
+        .LambdaValue           => 18,
+        .MustUse               => 19,
+        .NeedAnnotation        => 20,
+        .PointerWrite          => 21,
+        .InfiniteType          => 22,
+        .NullDereference       => 23,
+        .NotCallable           => 24,
+        .Fallthrough           => 25,
+        .NoTypeArguments       => 26,
+        .OrReturn              => 27,
+        .RecursiveHigherOrder  => 28,
+        .VariantBreak          => 29,
+        .MainParameters        => 30,
+        .ArmVoid               => 31,
+        .BadBinding            => 32,
+        .Escape                => 33,
+        .ScratchSend           => 34,
+        .ScratchState          => 35,
+        .ReservedName          => 36,
+        .UnreachableArm        => 37,
+        .MethodNotFound        => 38,
+        .BooleanArm            => 39,
+        .NoIf                  => 40,
+        .TypeArgumentArity     => 41,
+        .FfiType               => 42,
+        .Leak                  => 43,
+        .MisorderedGeneric     => 44,
+        .LiteralExhaustiveness => 45,
+        .MatchLabel            => 46,
+        .Capacity              => 47,
+        .ReflectReturn         => 48,
+        .ReflectWrite          => 49,
+        .NoTernary             => 50,
+        .DuplicateBooleanArm   => 51,
+        .DuplicateLiteralArm   => 52,
+        .Unclosed              => 53,
+        .ExpectedArrow         => 54,
+        .ExpectedExpression    => 55,
+        .ExpectedDeclaration   => 56,
+        .ExpectedInitializer   => 57,
+        .UnexpectedEof         => 58,
+        .AllocationNull        => 59,
+        .SliceWrite            => 60,
+        .NoCoroutine           => 61,
+        .ExpectedLetType       => 62,
+        .FieldDefault          => 63,
+        .ExpectedLetEquals     => 64,
+        .AssignConst           => 65,
+        .RetiredWalrus         => 66,
+        .SliceElement          => 67,
+        .RetiredBracketType    => 68,
+        .DuplicateMethod       => 69,
+        .InvalidLiteral        => 70,
+    })
+}
+diagnostic_kind_from_code* = (code: i32) Opt<DiagnosticKind> {
+    (code == 1).then({
+        return .Some(.Arity)
+    })
+    (code == 2).then({
+        return .Some(.ArgType)
+    })
+    (code == 3).then({
+        return .Some(.Undefined)
+    })
+    (code == 4).then({
+        return .Some(.StructField)
+    })
+    (code == 5).then({
+        return .Some(.Exhaustiveness)
+    })
+    (code == 6).then({
+        return .Some(.DuplicateVariant)
+    })
+    (code == 7).then({
+        return .Some(.Operand)
+    })
+    (code == 8).then({
+        return .Some(.Index)
+    })
+    (code == 9).then({
+        return .Some(.ReturnFit)
+    })
+    (code == 10).then({
+        return .Some(.AssignFit)
+    })
+    (code == 11).then({
+        return .Some(.Conformance)
+    })
+    (code == 12).then({
+        return .Some(.DuplicateFunction)
+    })
+    (code == 13).then({
+        return .Some(.ValuePositionReturn)
+    })
+    (code == 14).then({
+        return .Some(.Parse)
+    })
+    (code == 15).then({
+        return .Some(.Ownership)
+    })
+    (code == 16).then({
+        return .Some(.TraitBound)
+    })
+    (code == 17).then({
+        return .Some(.UnknownType)
+    })
+    (code == 18).then({
+        return .Some(.LambdaValue)
+    })
+    (code == 19).then({
+        return .Some(.MustUse)
+    })
+    (code == 20).then({
+        return .Some(.NeedAnnotation)
+    })
+    (code == 21).then({
+        return .Some(.PointerWrite)
+    })
+    (code == 22).then({
+        return .Some(.InfiniteType)
+    })
+    (code == 23).then({
+        return .Some(.NullDereference)
+    })
+    (code == 24).then({
+        return .Some(.NotCallable)
+    })
+    (code == 25).then({
+        return .Some(.Fallthrough)
+    })
+    (code == 26).then({
+        return .Some(.NoTypeArguments)
+    })
+    (code == 27).then({
+        return .Some(.OrReturn)
+    })
+    (code == 28).then({
+        return .Some(.RecursiveHigherOrder)
+    })
+    (code == 29).then({
+        return .Some(.VariantBreak)
+    })
+    (code == 30).then({
+        return .Some(.MainParameters)
+    })
+    (code == 31).then({
+        return .Some(.ArmVoid)
+    })
+    (code == 32).then({
+        return .Some(.BadBinding)
+    })
+    (code == 33).then({
+        return .Some(.Escape)
+    })
+    (code == 34).then({
+        return .Some(.ScratchSend)
+    })
+    (code == 35).then({
+        return .Some(.ScratchState)
+    })
+    (code == 36).then({
+        return .Some(.ReservedName)
+    })
+    (code == 37).then({
+        return .Some(.UnreachableArm)
+    })
+    (code == 38).then({
+        return .Some(.MethodNotFound)
+    })
+    (code == 39).then({
+        return .Some(.BooleanArm)
+    })
+    (code == 40).then({
+        return .Some(.NoIf)
+    })
+    (code == 41).then({
+        return .Some(.TypeArgumentArity)
+    })
+    (code == 42).then({
+        return .Some(.FfiType)
+    })
+    (code == 43).then({
+        return .Some(.Leak)
+    })
+    (code == 44).then({
+        return .Some(.MisorderedGeneric)
+    })
+    (code == 45).then({
+        return .Some(.LiteralExhaustiveness)
+    })
+    (code == 46).then({
+        return .Some(.MatchLabel)
+    })
+    (code == 47).then({
+        return .Some(.Capacity)
+    })
+    (code == 48).then({
+        return .Some(.ReflectReturn)
+    })
+    (code == 49).then({
+        return .Some(.ReflectWrite)
+    })
+    (code == 50).then({
+        return .Some(.NoTernary)
+    })
+    (code == 51).then({
+        return .Some(.DuplicateBooleanArm)
+    })
+    (code == 52).then({
+        return .Some(.DuplicateLiteralArm)
+    })
+    (code == 53).then({
+        return .Some(.Unclosed)
+    })
+    (code == 54).then({
+        return .Some(.ExpectedArrow)
+    })
+    (code == 55).then({
+        return .Some(.ExpectedExpression)
+    })
+    (code == 56).then({
+        return .Some(.ExpectedDeclaration)
+    })
+    (code == 57).then({
+        return .Some(.ExpectedInitializer)
+    })
+    (code == 58).then({
+        return .Some(.UnexpectedEof)
+    })
+    (code == 59).then({
+        return .Some(.AllocationNull)
+    })
+    (code == 60).then({
+        return .Some(.SliceWrite)
+    })
+    (code == 61).then({
+        return .Some(.NoCoroutine)
+    })
+    (code == 62).then({
+        return .Some(.ExpectedLetType)
+    })
+    (code == 63).then({
+        return .Some(.FieldDefault)
+    })
+    (code == 64).then({
+        return .Some(.ExpectedLetEquals)
+    })
+    (code == 65).then({
+        return .Some(.AssignConst)
+    })
+    (code == 66).then({
+        return .Some(.RetiredWalrus)
+    })
+    (code == 67).then({
+        return .Some(.SliceElement)
+    })
+    (code == 68).then({
+        return .Some(.RetiredBracketType)
+    })
+    (code == 69).then({
+        return .Some(.DuplicateMethod)
+    })
+    (code == 70).then({
+        return .Some(.InvalidLiteral)
+    })
+    .None
+}
 // ── the PARSE-ERROR TAXONOMY (compiler.parse_type's PE_* kinds) ─────────────────────────────────
 // One `error[parse]` sentence for every syntax mistake told the user WHERE but never WHAT. These
 // codes carry what the parser EXPECTED at that token. The kind LABEL stays `parse` — the class is
 // the label and the expectation is the message, the same split the checker uses for `arg-type`
 // (`expected `str`, got `[i32]``). Each is planted by a distinct parser sentinel (parse.sentinel_name).
-KUNCLOSED* = () i32 { 53 }    // end of input with a `{` still open; the caret is the OPENING brace, so the diagnostic names the line the block opened on (the parser's `__unclosed_block` sentinel)
-KEXPECTARROW* = () i32 { 54 }    // a match-arm label not followed by `=>` (the parser's `__expected_arrow` sentinel)
-KEXPECTEXPR* = () i32 { 55 }    // a token that can begin no expression (the parser's `__expected_expr` sentinel)
-KEXPECTDECL* = () i32 { 56 }    // a token that can begin no top-level declaration (the parser's `__expected_decl` sentinel)
-KEXPECTINIT* = () i32 { 57 }    // a binding mark with no expression after it; caret on the mark (the parser's `__expected_init` sentinel)
-KEOFINPUT* = () i32 { 58 }    // end of input in the middle of an expression (the parser's `__unexpected_eof` sentinel)
-KFIELDDEFAULT* = () i32 { 63 }    // a struct field default (`total: i64 = 0`) whose value is not a constant — a computed/allocating default would be a hidden per-construction effect (the parser's `__field_default` sentinel)
-KLETTYPE* = () i32 { 62 }    // a local binding's `:`/`::` mark with no type after it (the parser's `__expected_let_type` sentinel)
-KLETEQ* = () i32 { 64 }    // a local binding whose annotation is not followed by the `=` that binds its value (the parser's `__expected_let_eq` sentinel)
 // ── const-by-default ────────────────────────────────────────────────────────────────────────────
-KASSIGNCONST* = () i32 { 65 }    // an assignment to a binding declared WITHOUT the `::` mutability mark. Zen locals are constants unless marked, so this is the whole content of the rule: `x = 0` binds once, `x ::= 0` binds a variable
-KWALRUS* = () i32 { 66 }    // the RETIRED `:=` binding spelling (the parser's `__retired_walrus` sentinel). One always-mutable form became four that say what they mean, so `:=` is not a binding form at all — it is recognized only to name its replacement
-KSLICEELEM* = () i32 { 67 }    // a `slice(p, n)` whose declared ELEMENT TYPE disagrees with the element type of the storage `p` was derived from. `zen__idx` guards the element COUNT; the element WIDTH came from an unchecked annotation, so a wider element read past the end of the allocation
-KBRACKETTYPE* = () i32 { 68 }    // the retired `[T]` type spelling; brackets are reserved for indexing and slice literals
 Diagnostic*: {
     code: i32,
     kind: StringView,
@@ -247,7 +474,7 @@ diagnostic_strlit_width = (src: StringView, pos: i32, n: i32) i32 {
     (src.at(pos + e) == '"').then({ e + 1 }, { e })
 }    // iterative — a ~50KB string literal must not recurse per byte to size its caret
 diagnostic_span_width* = (src: StringView, pos: i32) i32 {
-    (pos <= 0).match ({
+    (pos < 0).match ({
         true  => 1,
         false => (src.at(pos) == '"').match ({
             true  => src.diagnostic_strlit_width(pos, 1),
@@ -269,7 +496,8 @@ DiagInfo: {
     message: StringView,
     hint: StringView,
 }
-diag_info = (code: i32) DiagInfo {
+diag_info = (kind: DiagnosticKind) DiagInfo {
+    code = diagnostic_code(kind)
     (code == 1).then({
         return DiagInfo(
             kind: "arity",
@@ -490,7 +718,7 @@ diag_info = (code: i32) DiagInfo {
     (code == 30).then({
         return DiagInfo(
             kind: "main-signature",
-            message: "`main` must be `() i32` or `(sys: Sys) i32` — any other parameter shape would read garbage (the OS entry passes at most the `Sys` capability)",
+            message: "`main` must be `() i32` or `(sys: Sys) i32` — the process boundary is niladic and integer-returning",
             hint: "declare it `main = () i32 { … }`, or take the root capability `main = (sys: Sys) i32 { … }` (import `{ Sys } = std.sys.root`) and thread narrow caps like `sys.stdout()` / `sys.heap()`",
         )
     })
@@ -670,6 +898,13 @@ diag_info = (code: i32) DiagInfo {
             hint: "write `Slice<T>` for a read-only window, `MutSlice<T>` for a writable window, or `Vec<T>` for owned growable storage",
         )
     })
+    (code == 70).then({
+        return DiagInfo(
+            kind: "parse",
+            message: "invalid byte character literal or malformed `\\xNN` escape",
+            hint: "write exactly one byte (`'A'`, `'\\n'`, or `'\\x41'`); use a string for multibyte UTF-8 text",
+        )
+    })
     (code == 47).then({
         return DiagInfo(
             kind: "capacity",
@@ -697,9 +932,19 @@ diag_info = (code: i32) DiagInfo {
         hint: "",
     )
 }
-diagnostic_kind_name* = (code: i32) StringView { code.diag_info().kind }
-diagnostic_message* = (code: i32) StringView { code.diag_info().message }
-diagnostic_hint* = (code: i32) StringView { code.diag_info().hint }
+diag_info_from_code = (code: i32) DiagInfo {
+    code.diagnostic_kind_from_code().match ({
+        .Some(kind) => kind.diag_info(),
+        .None       => DiagInfo(
+            kind: "type",
+            message: "type error",
+            hint: "",
+        ),
+    })
+}
+diagnostic_kind_name* = (code: i32) StringView { code.diag_info_from_code().kind }
+diagnostic_message* = (code: i32) StringView { code.diag_info_from_code().message }
+diagnostic_hint* = (code: i32) StringView { code.diag_info_from_code().hint }
 diagnostic_from_source* = (src: StringView, packed: i32, count: i32) Diagnostic {
     src.check_diagnostic_from_source(packed, count).check_to_diagnostic()
 }
@@ -715,7 +960,6 @@ desc_or* = (x: StringView, y: StringView) StringView { is_empty(x).then({ y }, {
 // tparams so a turbofish that names an IN-SCOPE tparam (`sz<T>()` inside `g<T>`) is not a false
 // unknown-type, and reports only these argument kinds (no other validator judgment), so an
 // unresolved generic body never false-positives.
-KNOTYPEARGS* = () i32 { 26 }    // turbofish `f<T>(…)` on a callee that declares NO type parameters
 // ── recursive HOF: a self-recursive fn with an FnT param ─────────────────────────────────────────
 // A bodied fn with an FnT param is a TEMPLATE (genc.is_generic_fn): it is inlined at each call site
 // and NEVER emitted as a standalone C function. The inliner unrolls a bounded number of self-call
@@ -724,7 +968,6 @@ KNOTYPEARGS* = () i32 { 26 }    // turbofish `f<T>(…)` on a callee that declar
 // shallow recursion only "works" when cc constant-folds the dead residual call). Until such fns are
 // monomorphized per FnT arg, reject them with a positioned error. Lenient guard: a PARAM named after
 // the fn itself shadows it (see shadows_toplevel), so its calls are indirect, not recursion.
-KRECHOF* = () i32 { 28 }    // a recursive function with a function-typed parameter (inline-only, so the self-call can never be emitted)
 // ── or_return CONTEXT validation over RAW decls (driver-only) ────────────────────────────────────
 // `.or_return()` lowers to `if Err → return <receiver>` from the ENCLOSING function, so it is only
 // meaningful inside a function whose return type is a Result carrying the SAME error type E as the
@@ -733,7 +976,6 @@ KRECHOF* = () i32 { 28 }    // a recursive function with a function-typed parame
 // the RAW (pre-resolve, still-MethodCall) FLATTENED decls, where every call site is intact. It is
 // deliberately LENIENT where raw inference is weak: a receiver whose type (or Err payload) cannot be
 // inferred here is skipped — reject only what is PROVABLY wrong, never over-reject.
-KORRETURN* = () i32 { 27 }    // `.or_return()` in a function whose return type is not a matching Result
 // ── reserved-name: a top-level fn redefining a compiler intrinsic (KRESERVEDNAME) ──────────────────
 // Call emission dispatches on the NAME (genc call_kind / is_intrinsic), so a user top-level
 // `load = (x: i64) i64 { … }` never receives its calls: `load(41)` still compiles to the intrinsic
@@ -743,7 +985,6 @@ KORRETURN* = () i32 { 27 }    // `.or_return()` in a function whose return type 
 // hoisted under mangled `impl_…` names, and FOREIGN decls stay allowed (std.mem.alloc re-declares
 // `malloc`/`free` as bodyless prototypes) — so the reject is scoped to BODIED top-level DFuncs,
 // the one shape whose calls are unwinnably captured by the intrinsic.
-KRESERVEDNAME* = () i32 { 36 }    // a top-level fn named after a compiler intrinsic (its calls would hit the intrinsic). CUSTOM channel (own struct), NOT the diag_info ladder — unique code, was 31 (collided with KARMVOID)
 // ── BATCH diagnostics (report ALL type errors, not just the first) ──────────────────────────────
 // Append each unit's first error into a fixed-cap packed buffer, recovering at natural boundaries — one error per
 // top-level statement inside a function, then per decl across the module. The inner recursion is
@@ -752,7 +993,6 @@ KRESERVEDNAME* = () i32 { 36 }    // a top-level fn named after a compiler intri
 // Consumers unpack each entry with the same `& 127` / `(>> 7) - 1` scheme (check_diagnostic_from_source).
 KDIAG_CAP* = () i32 { 512 }
 // Address-of-local escape uses a custom diagnostic channel with a hand-built message and hint.
-KESCAPE* = () i32 { 33 }    // unique code, formerly 16 (which collided with KTRAITBOUND)
 // ════════════════════════════════════════════════════════════════════════════════════════
 // ── UNDER-FREE (LEAK) CHECK — the DUAL of the over-free ownership pass ────────────────────
 // The ownership pass above is over-free-SOUND: it catches double-free / use-after-consume. Its blind
@@ -782,7 +1022,6 @@ KESCAPE* = () i32 { 33 }    // unique code, formerly 16 (which collided with KTR
 // binding is also never-named-again, the FRESH-PRODUCTION gate would still flag it, so this pass is
 // only enabled once the sweep confirms none exists (see report). Rc/Arc share the same soundness (an
 // undropped initial count leaks) and the same never-named-again proof.
-KLEAK* = () i32 { 43 }    // CUSTOM channel: a local owner created here is never released/moved/returned before the function exits. Own diagnostic (own kind/message/hint), never kv_at, never the diag_info ladder. Unique code in the 6-bit space.
 // ── SPAWNER SCRATCH ACROSS AN ACTOR BOUNDARY ─────────────────────────────────────────────────────
 // Memory that must not cross an actor boundary, crossing it — a cross-actor use-after-free: memory in
 // the SPAWNER's scratch handed to an actor that outlives it. (The scoped-runtime design notes and the
@@ -802,5 +1041,3 @@ KLEAK* = () i32 { 43 }    // CUSTOM channel: a local owner created here is never
 // a rebind to anything clean REVIVES the name. Only the blatant textbook shapes reject.
 // Arity guards keep unrelated `spawn`s out: std.thread's `spawn(fn, arg)` is a 2-arg Call and the
 // coroutine `h.spawn(fn)` a 1-arg MethodCall — neither matches the 3-arg actor `spawn` surface.
-KSCRATCHSEND* = () i32 { 34 }    // a send payload carries spawner-local scratch. CUSTOM channel (own struct + sx_message), NOT the diag_info ladder — unique code, was 29 (collided with KVBREAK)
-KSCRATCHSTATE* = () i32 { 35 }    // spawn's initial actor state embeds spawner-local scratch. CUSTOM channel — unique code, was 30 (collided with KMAINPARAMS)

@@ -92,7 +92,7 @@ i32 i64 u8 f64 bool void
 StringLiteral StringCstr StringView
 Ptr<T> MutPtr<T> RawPtr<T>
 Slice<T> MutSlice<T>
-(A, B) C
+(left: A, right: B) C
 Name
 Name<T, U>
 ```
@@ -109,15 +109,24 @@ buffer remains `String`. `Slice<T>` and `MutSlice<T>` are fat slices with a
 pointer and length. Function types are parameter types for inline templates and
 closure arguments.
 
-Assembling text goes through `std.text.sb`'s sticky builder `Sb`: the allocator
-is named once, each op (`.s` str, `.i` i64, `.ch` byte, `.rep` iterated repeat)
-no-ops after a recorded failure, and `.done()` settles the chain as one
-`Result<StringCstr, IoError>` — so allocation failure stays a value without an
-`.expect` per append:
+Assembling text goes through allocator-carried `String`: the allocator is named
+once, each operation (`.add`, `.add_i64`, `.add_one`, `.repeat`) no-ops after a
+recorded failure, and `.freeze()` settles the chain as one
+`Result<StringConst, IoError>`. When a NUL-terminated result is required,
+`.finish_cstr()` returns `StringCstr` and reports a recorded OOM consistently:
 
 ```zen
-a.sb().s("os ").s(name).ch('(').s(abi).ch(')').done()    // .Ok("os zen(x86)")
+empty = a.String()                       // default capacity
+reserved = a.String(400)                 // capacity hint
+typed = a.String("({})", ty)             // positional interpolation
+message = a.String("{msg}: {0}", value, msg)
+legacy_chain = a.String().add("os ", name).add_one('(').add(abi).add_one(')')
 ```
+
+`{}` consumes the next value, `{0}` selects a positional value, `{msg}` selects the
+argument whose binding is named `msg`, and `{{` / `}}` emit literal braces. Custom values
+implement `StringFormat`; the formatter appends into the same allocator-carried `String`.
+`std.io.print` delegates interpolation to this implementation and owns no second template scanner.
 
 Pointer kinds are enforced by the checker even though all three lower to `T*`
 in C. `Ptr<T>` is non-null/read-only, `MutPtr<T>` is non-null/writable, and
@@ -232,7 +241,7 @@ obj.field = v    // field assignment
 xs[i] = v        // slice element assignment
 expr             // expression statement, trailing expression returns
 return expr      // early return
-@while(cond) { } // compiler/substrate primitive, not public style
+@while(cond) { } // reserved implementation primitive for the loop substrate
 ```
 
 A bare `x = value` is a DECLARATION or an ASSIGNMENT depending on what is
@@ -320,6 +329,11 @@ xs.loop((h, i, x) {
 
 Raw `break`, `continue`, and `yield` are not public control flow. Loop control
 is routed through the loop handle.
+
+`@while` exists only to implement the `loop` substrate. It is not an alternate
+source-level iteration form. Application code, examples, compiler code, and
+standard-library code outside that implementation use `.loop` or a loop
+combinator. Remaining compiler/bootstrap uses are migration debt.
 
 UFCS is part of call syntax: `x.f(a)` parses as `f(x, a)`. The checker can route
 that call to receiver-specific inherent or trait methods.
@@ -540,7 +554,7 @@ A trait is a record of method requirements. There are no `trait`, `impl`, or
 `for` keywords:
 
 ```zen
-Area*: { area: (Ptr<Self>) i32 }
+Area*: { area: (self: Ptr<Self>) i32 }
 Circle*: { r: i32 }
 
 Circle.impl(Area, {
@@ -707,7 +721,7 @@ a scalar, a string, a slice, a pointer, or a struct — is rejected with
 Imports destructure a module path:
 
 ```zen
-{ println } = std.text.fmt
+{ println } = std.io.print
 { helper } = util
 c = std.io.c
 left = left
@@ -742,7 +756,7 @@ ParsedProgram*: { resolved: ResolvedProgram, modules: MutSlice<ParsedModule>, fl
 ```
 
 `import_edges(a, src)` scans destructuring imports and namespace binds into
-source-order edges such as `std/text/fmt` or `u/helper`, preserving the source
+source-order edges such as `std/io/print` or `u/helper`, preserving the source
 byte span for each edge. It only needs the `AllocatorBackend` trait, so callers can
 back the edge slice and each edge's normalized `module`/`alias` strings with
 heap, arena, or a custom allocator. `try_import_edges(a, src)` returns
@@ -790,19 +804,26 @@ This is still a source-text flattening loader at the parse/check boundary, not
 the final AST/symbol-table module system. Destructuring imports still share a
 flat short-name space.
 
-Project directories can contain `zen.toml`:
+Project directories contain `build.zen`, which is ordinary Zen code:
 
-```toml
-package = "hello"
-root = "src"
-main = "main.zen"
-out = "hello"
-ccflags = "native.c"
-ffi = "util, vendor.hooks"
+```zen
+{ Build } = std.build
+build = (b: MutPtr<Build>) void {
+    b.install(b
+        .exe("hello")
+        .root("src")
+        .main("main.zen")
+        .out("hello")
+        .sources(["native.c"])
+        .cimport("util, vendor.hooks")
+        .link("m"))
+}
 ```
 
-`check`/`build`/`run <project-dir>` resolve `<root>/<main>`, use `out` for
-build output when `-o` is omitted, and pass `ccflags` through to `cc`.
+`check` and `run <project-dir>` select the first installed target. `build` builds
+all installed targets unless `--target <name>` selects one. Target functions
+provide output paths, native sources, foreign-module grants, libraries, and
+platform selection.
 
 `Target.target(platform)` in `build.zen` selects a CROSS target. A platform
 equal to the build host (std.build's default) compiles natively — the host
@@ -824,53 +845,26 @@ reports the TARGET platform.
 FFI is a build-granted capability. A module may contain foreign (bodyless)
 declarations only when the build grants it, closing the supply-chain hole where
 a transitive dependency declares `system` and shells out without the build ever
-saying so. The grant surfaces are:
+saying so. Grants are build configuration, never Zen source syntax:
 
-- `zen.toml`: `ffi = "util, vendor.hooks"` — comma-separated dotted user
-  module ids;
-- `build.zen`: `b.exe(…).ffi("util, vendor.hooks")` — the `Target`'s grant
-  field, threaded through the emitted plan;
-- single-file programs: an entry-file-only pragma line `//! ffi: util,
-  vendor.hooks` (the pragma is ignored in dependency files).
+Use `b.exe(…).cimport("util, vendor.hooks")`; the argument is a comma-separated
+list of dotted user module ids stored on that target.
 
-Implicitly granted, with no declaration needed: repo-tree modules (`std.*` /
-`compiler.*` — the audited stdlib is the sanctioned FFI surface) and the entry
-module itself (an extern in the program's own file is visible to its author;
-the threat model is dependencies, not the program). A grant names the
-DECLARING module: granting `mid` does not grant `mid`'s own dependency. An
-ungranted foreign declaration rejects during resolution as
-`error[ffi-ungranted]` at the declaration's line, naming the module and the
-symbol; `ZEN_VIS_REPORT=1` downgrades it to a report-only sweep, exactly like
-`error[private-name]`. The manifest/registry grant text folds into the content
-cache key (the entry pragma lives in the keyed source already).
+A single-file entry module is implicitly trusted, but a foreign declaration in
+one of its user dependencies has no source-level escape hatch; use a `build.zen` project when dependency grants are required.
 
-A grant says a module MAY hold foreign declarations; it does not say where the
-symbols come from. That is a second, separate declaration: a module holding
-foreign declarations states its linkage once, at the top, as a pragma line of
-the same shape — no keyword, no new syntax.
+Repo-tree modules (`std.*` and `compiler.*`) are also implicitly trusted
+because the audited standard library is the sanctioned FFI surface. A grant
+names the DECLARING module: granting `mid` does not grant a dependency of
+`mid`. An ungranted foreign declaration rejects during resolution as
+`error[ffi-ungranted]` at the declaration line, naming the module and symbol.
+`ZEN_VIS_REPORT=1` downgrades it to a report-only sweep. Build-plan grant text folds into the content cache key.
 
-```zen
-//! link: c, pthread          // std.c.libc — the C standard library, plus -lpthread
-//! link: m                   // std.math   — -lm
-//! link: zenrt               // the compiler's own C runtime (bootstrap/zenrt.c)
-//! link: js                  // std.web.dom — the JavaScript host implements these stubs
-//! link: native.c            // a .c source this project compiles in
-```
-
-Token to link flag: `c` (linked by default), `zenrt` (always compiled in), `js`
-(not a C library at all) and any `<name>.c` source contribute NO flag; every
-other token `X` becomes `-lX`. The union over the resolved closure is what the
-driver puts on the cc line, so a build links exactly what its declarations
-claim — `-lm` appears when `std.math` is in the closure and not otherwise. The
-set is derived from sources the content cache key already hashes.
-
-A foreign declaration in a module that declares no linkage rejects during
-resolution as `error[ffi-unlinked]` at the declaration's line, so a symbol
-nothing provides is a positioned compiler error instead of an `ld` dump with no
-file and no line; `ZEN_VIS_REPORT=1` downgrades it to a report-only sweep. This
-check covers the ENTRY module too — unlike the grant, whose threat model is
-dependencies, the question "which library defines this?" is no more self-evident
-in the program's own file than in a dependency's.
+Linkage is build configuration too. A `build.zen` target uses `.link("m")` for one library, `.libraries([...])` for
+several, `.cimport("module")` for foreign-module grants, and `.sources(...)` for
+native inputs. The compiler derives its own audited built-in dependencies from the resolved module graph: importing `std.math` contributes
+`-lm`, and importing `std.c.libc` contributes `-lpthread`. Source files do
+not declare libraries or FFI grants.
 
 On top of the grant system, `build.zen` projects can declare a C library as a
 VALUE (`std.build`): a typed module, its link flag, and its grant travel as one
@@ -907,8 +901,7 @@ its plain module id (`cm = cmath`), the generated declarations pass the normal
 `error[ffi-type]` gate (a bad `c_fn` signature reports at the generated file's
 line), a genmod id never resolves without `use()`, and the generated bytes fold
 into the content cache key through the ordinary module walk (editing a `c_fn`
-is a cache miss). `c_library` requires `build.zen` mode — a `zen.toml` project
-has no build program in which to `use()` a library value.
+is a cache miss). `c_library` is a build.zen value and is registered on a target with `use()`.
 
 ## Memory And Ownership
 
@@ -1101,7 +1094,7 @@ unknown methods are no-ops. On open/change it runs the same check pipeline as
 
 | Spec area | Primary tests |
 |---|---|
-| CLI build/run/check/project manifest | [tests/harness_build.zen](../tests/harness_build.zen) |
+| CLI build/run/check/build.zen project | [tests/harness_build.zen](../tests/harness_build.zen) |
 | Examples | [tests/harness_build.zen](../tests/harness_build.zen) |
 | Lexer/parser/bootstrap/fixpoint | [tests/harness.zen](../tests/harness.zen) (`fixpoint` suite) |
 | Accepted/rejected core language behavior | [tests/harness_verdict.zen](../tests/harness_verdict.zen), [tests/harness_value.zen](../tests/harness_value.zen) |

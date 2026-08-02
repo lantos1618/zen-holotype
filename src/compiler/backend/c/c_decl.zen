@@ -2,7 +2,7 @@
 { Map } = std.collections.map
 { expect } = std.core.result
 { Decl, Func, Param, Ty, Field, StructDecl, EnumDecl, VariantDef, FnTData } = compiler.ast.ast_types
-{ ty_cname_in, gstr_append } = compiler.genc
+{ ty_cname_in } = compiler.genc
 { fnt_cname } = compiler.mangle
 { Allocator } = std.mem.alloc
 { gen_block, gen_block_void } = compiler.backend.c.c_expr
@@ -20,8 +20,8 @@ any_payload = (vs: MutSlice<VariantDef>) bool {
 gen_ty_list = (s: String, alloc: Allocator, ts: MutSlice<Ty>) String {
     out ::= s
     ts.loop_at((i, t) {
-        out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma-separated bare types: `A, B, C`
-        out = out.gstr_append(alloc, alloc.ty_cname_in(t))
+        out = (i == 0).then({ out }, { out.add(", ") })    // comma-separated bare types: `A, B, C`
+        out = out.add(alloc.ty_cname_in(t))
     })
     out
 }
@@ -30,23 +30,23 @@ gen_ty_list = (s: String, alloc: Allocator, ts: MutSlice<Ty>) String {
 // callback like makecontext's `void(*func)()` — must render as an actual function pointer here.
 gen_fnptr_param = (s: String, alloc: Allocator, ft: FnTData, name: StringView) String {
     s
-        .gstr_append(alloc, alloc.ty_cname_in(load(ft.ret)))
-        .gstr_append(alloc, "(*")
-        .gstr_append(alloc, name)
-        .gstr_append(alloc, ")(")
+        .add(alloc.ty_cname_in(load(ft.ret)))
+        .add("(*")
+        .add(name)
+        .add(")(")
         .gen_ty_list(alloc, ft.params)
-        .gstr_append(alloc, ")")
+        .add(")")
 }
 gen_params = (s: String, alloc: Allocator, ps: MutSlice<Param>) String {
     out ::= s
     ps.loop_at((i, p) {
-        out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })    // comma between, not before
+        out = (i == 0).then({ out }, { out.add(", ") })    // comma between, not before
         out = p.ty.match ({
             .FnT(ft) => out.gen_fnptr_param(alloc, ft, p.name),
             _        => out
-                .gstr_append(alloc, alloc.ty_cname_in(p.ty))
-                .gstr_append(alloc, " ")
-                .gstr_append(alloc, p.name),
+                .add(alloc.ty_cname_in(p.ty))
+                .add(" ")
+                .add(p.name),
         })
     })
     out
@@ -86,12 +86,12 @@ ret_cname = (alloc: Allocator, ret: Ty) StringView {
 }
 gen_sig = (s: String, alloc: Allocator, f: Func) String {
     s
-        .gstr_append(alloc, alloc.ret_cname(f.ret))
-        .gstr_append(alloc, " ")
-        .gstr_append(alloc, c_func_name_f(f))
-        .gstr_append(alloc, "(")
+        .add(alloc.ret_cname(f.ret))
+        .add(" ")
+        .add(c_func_name_f(f))
+        .add("(")
         .gen_params(alloc, f.params)
-        .gstr_append(alloc, ")")
+        .add(")")
 }
 // `typedef Ret (*__fnt_…)(Args);` for every function-RETURN type that is itself a function type, so a
 // fn returning a function value has a precise, callable C return type. C11 allows an identical typedef
@@ -100,13 +100,13 @@ gen_sig = (s: String, alloc: Allocator, f: Func) String {
 gen_fnt_typedef_ret = (s: String, alloc: Allocator, ret: Ty) String {
     ret.match ({
         .FnT(ft) => s
-            .gstr_append(alloc, "typedef ")
-            .gstr_append(alloc, alloc.ty_cname_in(load(ft.ret)))
-            .gstr_append(alloc, " (*")
-            .gstr_append(alloc, alloc.fnt_cname(ft))
-            .gstr_append(alloc, ")(")
+            .add("typedef ")
+            .add(alloc.ty_cname_in(load(ft.ret)))
+            .add(" (*")
+            .add(alloc.fnt_cname(ft))
+            .add(")(")
             .gen_fnt_params(alloc, ft.params)
-            .gstr_append(alloc, "); "),
+            .add("); "),
         _        => s,
     })
 }
@@ -131,17 +131,17 @@ gen_func = (s: String, alloc: Allocator, f: Func) String {
             // it can name `root` correctly even when std.sys.root was reached through a namespace alias, which
             // renames the module's value decls (`root` -> `<alias>__root`). zenrt.c calls `zen_main()`
             // unchanged — the C boundary never sees `Sys`.
-            out = out.gstr_append(alloc, " ")
+            out = out.add(" ")
             out = out.gen_func_body(alloc, f)
         },
         false => (f.name == "main").match ({
             true  => {
-                out = out.gstr_append(alloc, " { zen__init_globals(); ")
+                out = out.add(" { zen__init_globals(); ")
                 out = out.gen_func_body(alloc, f)
-                out = out.gstr_append(alloc, " }")
+                out = out.add(" }")
             },
             false => {
-                out = out.gstr_append(alloc, " ")
+                out = out.add(" ")
                 out = out.gen_func_body(alloc, f)
             },
         }),
@@ -164,10 +164,10 @@ gen_proto* = (s: String, alloc: Allocator, d: Decl) String {
     (d.is_template() == false).then({
         d.match ({
             .DFunc(f)    => {
-                out = out.gen_sig(alloc, f).gstr_append(alloc, "; ")
+                out = out.gen_sig(alloc, f).add("; ")
             },
             .DForeign(f) => {
-                out = out.gen_sig(alloc, f).gstr_append(alloc, "; ")
+                out = out.gen_sig(alloc, f).add("; ")
             },
             _            => { },
         })
@@ -179,10 +179,10 @@ gen_proto* = (s: String, alloc: Allocator, d: Decl) String {
 gen_fnt_params = (s: String, alloc: Allocator, ps: MutSlice<Ty>) String {
     out ::= s
     ps.loop_at((i, p) {
-        out = (i == 0).then({ out }, { out.gstr_append(alloc, ", ") })
-        out = out.gstr_append(alloc, alloc.ty_cname_in(p))
+        out = (i == 0).then({ out }, { out.add(", ") })
+        out = out.add(alloc.ty_cname_in(p))
     })
-    (ps.len == 0).then({ out.gstr_append(alloc, "void") }, { out })
+    (ps.len == 0).then({ out.add("void") }, { out })
 }
 // a struct field declaration. A function-VALUE field (FnT) is emitted as a precise C function-pointer
 // declarator `Ret (*name)(Args)` — so the field is natively callable and a same-signature function or
@@ -190,59 +190,59 @@ gen_fnt_params = (s: String, alloc: Allocator, ps: MutSlice<Ty>) String {
 gen_field_decl = (s: String, alloc: Allocator, fld: Field) String {
     fld.ty.match ({
         .FnT(ft) => s
-            .gstr_append(alloc, alloc.ty_cname_in(load(ft.ret)))
-            .gstr_append(alloc, " (*")
-            .gstr_append(alloc, fld.name)
-            .gstr_append(alloc, ")(")
+            .add(alloc.ty_cname_in(load(ft.ret)))
+            .add(" (*")
+            .add(fld.name)
+            .add(")(")
             .gen_fnt_params(alloc, ft.params)
-            .gstr_append(alloc, "); "),
+            .add("); "),
         _        => s
-            .gstr_append(alloc, alloc.ty_cname_in(fld.ty))
-            .gstr_append(alloc, " ")
-            .gstr_append(alloc, fld.name)
-            .gstr_append(alloc, "; "),
+            .add(alloc.ty_cname_in(fld.ty))
+            .add(" ")
+            .add(fld.name)
+            .add("; "),
     })
 }
 gen_struct = (s: String, alloc: Allocator, sd: StructDecl) String {
-    open ::= s.gstr_append(alloc, "struct ").gstr_append(alloc, sd.name).gstr_append(alloc, " { ")
+    open ::= s.add("struct ").add(sd.name).add(" { ")
     sd.fields.loop_at((i, fld) { open = open.gen_field_decl(alloc, fld) })
-    open.gstr_append(alloc, "};")
+    open.add("};")
 }
 // emit an enum's union members (the payload-carrying variants) and tag constants
 gen_union = (s: String, alloc: Allocator, vs: MutSlice<VariantDef>) String {
-    u ::= s.gstr_append(alloc, " union { ")
+    u ::= s.add(" union { ")
     vs.loop_at((i, v) {
         v.payload.match ({
             .Void => { },
             _     => {
                 u = u
-                    .gstr_append(alloc, alloc.ty_cname_in(v.payload))
-                    .gstr_append(alloc, " ")
-                    .gstr_append(alloc, v.name)
-                    .gstr_append(alloc, "; ")
+                    .add(alloc.ty_cname_in(v.payload))
+                    .add(" ")
+                    .add(v.name)
+                    .add("; ")
             },
         })
     })
-    u.gstr_append(alloc, "} u;")
+    u.add("} u;")
 }
 gen_tags = (s: String, alloc: Allocator, ename: StringView, vs: MutSlice<VariantDef>) String {
-    e ::= s.gstr_append(alloc, " enum { ")
+    e ::= s.add(" enum { ")
     vs.loop_at((i, v) {
-        e = (i == 0).then({ e }, { e.gstr_append(alloc, ", ") })
-        e = e.gstr_append(alloc, ename).gstr_append(alloc, "_").gstr_append(alloc, v.name)
+        e = (i == 0).then({ e }, { e.add(", ") })
+        e = e.add(ename).add("_").add(v.name)
     })
-    e.gstr_append(alloc, " };")
+    e.add(" };")
 }
 // emit an enum (tagged union): `typedef struct { int32_t tag; union { … } u; } E; enum { E_A, … };`
 gen_enum = (s: String, alloc: Allocator, ed: EnumDecl) String {
     out ::= s
-        .gstr_append(alloc, "struct ")
-        .gstr_append(alloc, ed.name)
-        .gstr_append(alloc, " { int32_t tag;")
+        .add("struct ")
+        .add(ed.name)
+        .add(" { int32_t tag;")
     any_payload(ed.variants).then({
         out = out.gen_union(alloc, ed.variants)
     })
-    out.gstr_append(alloc, " };").gen_tags(alloc, ed.name, ed.variants)
+    out.add(" };").gen_tags(alloc, ed.name, ed.variants)
 }
 // the set of names impl'd anywhere (every DImpl.trname), built ONCE per emission. A trait IS
 // impl'd; a data struct holding function-VALUE (closure) fields is NOT — that's how the emitter
@@ -280,19 +280,19 @@ gen_fwd* = (s: String, alloc: Allocator, impld: Map<i64>, d: Decl) String {
         d.match ({
             .DStruct(sd) => {
                 out = out
-                    .gstr_append(alloc, "typedef struct ")
-                    .gstr_append(alloc, sd.name)
-                    .gstr_append(alloc, " ")
-                    .gstr_append(alloc, sd.name)
-                    .gstr_append(alloc, "; ")
+                    .add("typedef struct ")
+                    .add(sd.name)
+                    .add(" ")
+                    .add(sd.name)
+                    .add("; ")
             },
             .DEnum(ed)   => {
                 out = out
-                    .gstr_append(alloc, "typedef struct ")
-                    .gstr_append(alloc, ed.name)
-                    .gstr_append(alloc, " ")
-                    .gstr_append(alloc, ed.name)
-                    .gstr_append(alloc, "; ")
+                    .add("typedef struct ")
+                    .add(ed.name)
+                    .add(" ")
+                    .add(ed.name)
+                    .add("; ")
             },
             _            => { },
         })
@@ -313,7 +313,7 @@ gen_decl* = (s: String, alloc: Allocator, d: Decl) String {
             out = out.gen_enum(alloc, ed)
         },
         .DRaw(c)     => {
-            out = out.gstr_append(alloc, c)
+            out = out.add(c)
         },
         _            => { },
     })

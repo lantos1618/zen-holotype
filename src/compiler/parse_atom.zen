@@ -1,16 +1,15 @@
 { Expr, FieldInit } = compiler.ast.ast_types
 { byte_lit, finit, flit, lit, mkenum_at, mkstruct, mktag_at, strlit_at, acquire_or_die } = compiler.genc
-{ mangle_anon_in, payload_fname } = compiler.mangle
+{ mangle_payload_in, payload_fname } = compiler.mangle
 { Scan, Token, is_bin_prefix, is_hex_prefix, is_oct_prefix, scan } = compiler.lex
-{ at, is_digit, rawstr_at } = std.text.ascii
+{ at, is_digit, is_hex, rawstr_at } = std.text.ascii
 { Allocator } = std.mem.alloc
 { PEnd, is_comma, is_lbrace, is_lbracket, is_rparen, pdepth_enter, pdepth_exit, pdepth_over,
   perr_set_at, perr_set_kind_at, tok_in } = compiler.parse_type
 { is_dot, nl_between, parse_or_nested, parse_postfix } = compiler.parse_postfix
 { parse_arm_block, reject_match } = compiler.parse_match
-{ finit_buf, inits_as_fields, is_minus, is_not, lam_open, looks_anon_struct, parse_anon_struct_lit,
-  parse_ident, parse_lambda, parse_neg, parse_not, parse_paren, parse_raw_call, parse_slicelit,
-  take_inits } = compiler.parse_primary
+{ finit_buf, inits_as_fields, is_minus, is_not, lam_open, parse_ident, parse_lambda, parse_neg,
+  parse_not, parse_paren, parse_raw_call, parse_slicelit, take_inits } = compiler.parse_primary
 { PExpr } = compiler.parse_expr
 { times, upto } = std.core.count
 ebuf = (a: Allocator) MutSlice<Expr> { slice(a.acquire_or_die(sizeof(Expr)), 1) }
@@ -219,6 +218,17 @@ parse_atom* = (a: Allocator, src: StringView, pos: i32) PExpr {
     pdepth_exit()
     r
 }
+// Diagnostics for an EOF token should point just after the final source token, not at a synthetic
+// blank line introduced by a trailing newline. Trim only trailing ASCII layout; interior whitespace
+// remains significant and an all-whitespace source correctly anchors at byte zero.
+eof_diag_pos = (src: StringView, pos: i32) i32 {
+    p ::= pos
+    @while (p > 0 && (src.at(p - 1) == ' ' || src.at(p - 1) == '\t'
+        || src.at(p - 1) == '\r' || src.at(p - 1) == '\n')) {
+        p = p - 1
+    }
+    p
+}
 parse_base = (a: Allocator, src: StringView, pos: i32) PExpr {
     sc = src.scan(pos)
     sc.tok.kind.match ({
@@ -230,12 +240,9 @@ parse_base = (a: Allocator, src: StringView, pos: i32) PExpr {
             expr: a.enode(flit(a.float_lexeme(src, sc.tok))),
             next: sc.next,
         ),
-        .Char  => PExpr(
-            expr: a.enode(byte_lit(src.char_val(sc.tok.start))),
-            next: sc.next,
-        ),
-        .Str   => src.str_open(sc.tok).match ({
-            true  => a.parse_garbage(src, sc),
+        .Char  => a.parse_char_token(src, sc),
+        .Str   => (src.str_open(sc.tok) || src.str_hex_valid(sc.tok) == false).match ({
+            true  => a.parse_bad_literal(src, sc),
             false => PExpr(
                 expr: a.enode(strlit_at(a.str_val(src, sc.tok), sc.tok.start)),
                 next: sc.next,
@@ -243,7 +250,7 @@ parse_base = (a: Allocator, src: StringView, pos: i32) PExpr {
         }),
         .Ident => a.parse_ident(src, sc),
         .Eof   => {
-            perr_set_kind_at(sc.tok.start, .UnexpectedEof)
+            perr_set_kind_at(src.eof_diag_pos(sc.tok.start), .UnexpectedEof)
             PExpr(
                 expr: a.enode(lit(0)),
                 next: sc.next,
@@ -263,6 +270,55 @@ str_open = (src: StringView, t: Token) bool {
         false => t.len < 2 || src.at(t.start + t.len - 1) != '"',
     })
 }
+esc_char_valid = (b: u8) bool {
+    b == 110 || b == 116 || b == 114 || b == 48 || b == 92 || b == 34 || b == 39
+}
+char_token_valid = (src: StringView, t: Token) bool {
+    b = src.at(t.start + 1)
+    (b == 92).match ({
+        true  => (src.at(t.start + 2) == 120).match ({
+            true  => t.len == 6 && is_hex(src.at(t.start + 3)) && is_hex(src.at(t.start + 4)),
+            false => t.len == 4 && esc_char_valid(src.at(t.start + 2)),
+        }),
+        false => t.len == 3 && b != 39 && b != 92 && b != 0,
+    })
+}
+str_hex_valid = (src: StringView, t: Token) bool {
+    (src.rawstr_at(t.start)).then({
+        return true
+    })
+    ok ::= true
+    end = t.start + t.len - 1
+    (t.start + 1).step_while((p) { ok && p < end }, (p) {
+        (src.at(p) == 92).match ({
+            true  => (src.at(p + 1) == 120).match ({
+                true  => {
+                    ok = p + 3 < end && is_hex(src.at(p + 2)) && is_hex(src.at(p + 3))
+                    p + 4
+                },
+                false => p + 2,
+            }),
+            false => p + 1,
+        })
+    })
+    ok
+}
+parse_bad_literal = (a: Allocator, src: StringView, sc: Scan) PExpr {
+    perr_set_kind_at(sc.tok.start, .InvalidLiteral)
+    PExpr(
+        expr: a.enode(lit(0)),
+        next: sc.next,
+    )
+}
+parse_char_token = (a: Allocator, src: StringView, sc: Scan) PExpr {
+    src.char_token_valid(sc.tok).match ({
+        true  => PExpr(
+            expr: a.enode(byte_lit(src.char_val(sc.tok.start))),
+            next: sc.next,
+        ),
+        false => a.parse_bad_literal(src, sc),
+    })
+}
 // Bad atom: no rule can start an expression at this token. Flag it as EXPECTED-AN-EXPRESSION (with
 // the offending token's offset), consume one token for progress, placeholder.
 parse_garbage = (a: Allocator, src: StringView, sc: Scan) PExpr {
@@ -275,10 +331,7 @@ parse_garbage = (a: Allocator, src: StringView, sc: Scan) PExpr {
 // Non-literal atoms: ctor, prefix op, slice literal, lambda, parenthesized expr.
 parse_other = (a: Allocator, src: StringView, sc: Scan) PExpr {
     src.is_lbrace(sc.tok).then({
-        return a.parse_postfix(src, src.looks_anon_struct(sc.next).match ({
-            true  => a.parse_anon_struct_lit(src, sc.next),
-            false => a.parse_arm_block(src, sc),
-        }))
+        return a.parse_postfix(src, a.parse_arm_block(src, sc))
     })
     src.is_dot(sc.tok).then({
         return a.parse_ctor(src, sc)
@@ -444,7 +497,7 @@ parse_ctor_payload = (
     )
 }    // `.Variant(a, b, …)` payload
 // Parse the `(a, b, …)` args of a variant constructor into the payload EXPR: one arg is the payload
-// directly; 2+ args become an anon struct `{_0: a, _1: b, …}` matching the multi-field decl synthesis.
+// directly; 2+ args become an indexed payload record `{_0: a, _1: b, …}` matching the multi-field decl synthesis.
 parse_payload_args* = (a: Allocator, src: StringView, lp: Scan) PExpr {
     buf = a.finit_buf()
     pe = a.fill_payload_args(src, lp.next, buf, 0)
@@ -455,7 +508,7 @@ parse_payload_args* = (a: Allocator, src: StringView, lp: Scan) PExpr {
             next: pe.next,
         ),
         false => PExpr(
-            expr: a.enode(mkstruct(a.mangle_anon_in(a.inits_as_fields(inits)), inits)),
+            expr: a.enode(mkstruct(a.mangle_payload_in(a.inits_as_fields(inits)), inits)),
             next: pe.next,
         ),
     })

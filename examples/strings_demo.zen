@@ -23,9 +23,8 @@
 // And comments never trail after code, never sit directly above a `.loop(…)` / `.then(…)`
 // statement, and never end a function body: `zen fmt` relocates all three (HONEST NOTE 3).
 halloc = std.mem.heap
-{ println, formatln, arg_int, arg_str, arg_owned } = std.text.fmt
+{ println, formatln, arg_int, arg_str, arg_owned } = std.io.print
 { String, init, append_in, free_in } = std.text.string
-{ sb } = std.text.sb
 { view, len, find, substr, split, nbuf, pad_right, repeat, trim_view, trim_prefix, own_ptr,
   own_window } = std.text.str
 { Result, ok, expect } = std.core.result
@@ -264,7 +263,7 @@ log_text = () StringView {
 //
 // HONEST NOTE 2 — what valgrind actually says, and all that is left. 37 allocations, 36 frees,
 // ZERO bytes lost: every block named above goes back to `a`. The one survivor is 21 bytes STILL
-// REACHABLE — fmt's integer scratch, one buffer per thread for the process lifetime (std.text.fmt
+// REACHABLE — fmt's integer scratch, one buffer per thread for the process lifetime (std.io.print
 // `digits`), not a leak per integer and not this file's to free. Earlier revisions of this note
 // also charged the program ~800 bytes for the `[arg_int(x), …]` slice literals handed to formatln;
 // codegen no longer heap-promotes those, so that cost is gone. Re-measure before believing a
@@ -310,25 +309,23 @@ main = () i32 {
     // (a) formatln STREAMS. The formatted bytes never exist as a buffer at all: each
     //     template chunk and each arg goes straight to write(2). Nothing to free.
     formatln("  parsed {} of {} lines; column widths {}/{}/{}/{}", [arg_int(n), arg_int(lines.len), arg_int(w.ts), arg_int(w.level), arg_int(w.comp), arg_int(w.msg)])
-    // (b) std.text.sb BUILDS. The same pieces assembled into ONE owned, realloc'd heap
-    //     block; `done()` returns the NUL-terminated str aiming at it, and that block is
+    // (b) carried String BUILDS. The same pieces assembled into ONE owned, realloc'd heap
+    //     block; `finish_cstr()` returns the NUL-terminated str aiming at it, and that block is
     //     `a`'s until the release below. Use it when the text must be handed onwards.
-    // The `StringView` annotation says "borrowed bytes we own the block of": `done()` hands back a
+    // The `StringView` annotation says "borrowed bytes we own the block of": `finish_cstr()` hands back a
     // `StringCstr`, whose view is conservatively read-only because that one spelling covers BOTH
     // `.rodata` literals and heap blocks (docs/string-vec-model.md), and a read-only window has no
     // pointer to free through.
     head: StringView = a
-        .sb()
-        .s("  ")
-        .s("TIME")
-        .rep(" ", w.ts + 2 - "TIME".len())
-        .s("LEVEL")
-        .rep(" ", w.level + 2 - "LEVEL".len())
-        .s("WHERE")
-        .rep(" ", w.comp + 2 - "WHERE".len())
-        .s("MESSAGE")
-        .done()
-        .expect("strings_demo: out of memory")
+        .allocator().String()
+        .add("  ", "TIME")
+        .repeat(" ", w.ts + 2 - "TIME".len())
+        .add("LEVEL")
+        .repeat(" ", w.level + 2 - "LEVEL".len())
+        .add("WHERE")
+        .repeat(" ", w.comp + 2 - "WHERE".len())
+        .add("MESSAGE")
+        .finish_cstr()
     println(head)
     // FREE: the built header block.
     a.release(head.own_ptr())

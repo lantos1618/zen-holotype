@@ -1,5 +1,4 @@
 // @self-hosted-only
-{ gstr_string, gstr_append, gstr_finish, gstr_push } = compiler.genc
 { Allocator } = std.mem.alloc
 { String } = std.text.string
 { ModuleEntry, ModuleTable, ProvidedSymbol, append_to_nul, edge_head_has_name, res_reject_text,
@@ -14,23 +13,22 @@
 // diagnostic.zen's alias-`__`-removal inverse already un-mangles, so errors still render the user's name.
 // Only fires for USER programs (never internal sources → seed unchanged) and only when it is provably
 // safe (see shadow_rename_set). check_module never sees two same-named decls, so no dup-fn fires.
-shadow_alias_of = (a: Allocator) String { a.gstr_string(16).gstr_append(a, "zshadow") }
+shadow_alias_of = (a: Allocator) String { a.String(16).add("zshadow") }
 // per-region alias for USER-MODULE renames: `zshadow0`, `zshadow1`, … — the region index keeps two
 // modules that shadow the SAME std name (each defining its own `len`) from colliding on one mangled form.
 shadow_alias_idx = (a: Allocator, idx: i64) String {
-    a.gstr_string(20).gstr_append(a, "zshadow").res_udec(a, to_i32(idx))
+    a.String(20).add("zshadow").res_udec(a, to_i32(idx))
 }
 shadow_mangled = (a: Allocator, alias: String, name: String) String {
     // NUL-terminate: the one caller feeds this to rset_has, which hashes via cstr(ptr) → strlen.
     // Without the terminator strlen runs past the uninitialized tail of the buffer (ASAN-caught
     // heap-buffer-overflow), so the membership answer depended on heap garbage — layout-dependent
     // shadow renames.
-    a
-        .gstr_string(alias.len + name.len + 4)
+    a.String(alias.len + name.len + 4)
         .rappend_string(a, alias)
         .rappend(a, "__")
         .rappend_string(a, name)
-        .gstr_push(a, '\0')
+        .add_one('\0')
 }
 // the renameable set plus its unrenameable remainder (see shadow_name_sets).
 ShadowSets: {
@@ -75,8 +73,8 @@ shadow_name_sets = (
         })
     })
     // `out` stays the newline-delimited String the rewrite consumes; `outset` is its O(1) `fresh` mirror.
-    out ::= a.gstr_string(64)
-    bad ::= a.gstr_string(16)
+    out ::= a.String(64)
+    bad ::= a.String(16)
     outset ::= a.rset_new()
     syms.loop_at((i, s) {
         ((s.imported || s.foreign || s.is_type) == false).then({
@@ -136,17 +134,15 @@ shadow_flat* = (
                     renamed: false,
                 ),
                 false => {
-                    main = a
-                        .gstr_string(hi - lo + 1)
+                    main = a.String(hi - lo + 1)
                         .rappend_span(a, pre, to_i32(lo), to_i32(hi))
-                        .gstr_finish(a)
-                    rewS = a.gstr_string(4096).rename_ns_names(a, main, names, a.shadow_alias_of())
-                    nf = a
-                        .gstr_string(4096)
+                        .finish_cstr()
+                    rewS = a.String(4096).rename_ns_names(a, main, names, a.shadow_alias_of())
+                    nf = a.String(4096)
                         .rappend_span(a, pre, 0, to_i32(lo))
                         .rappend_string(a, rewS)
                         .append_to_nul(a, pre, to_i32(hi))
-                        .gstr_finish(a)
+                        .finish_cstr()
                     ShadowFlat(
                         flat: nf,
                         bodyend: lo + rewS.len,
@@ -169,67 +165,65 @@ fail_shadow_import = (a: Allocator, entry: ModuleEntry, importer: StringView, nm
     pos = a.symbol_start_of(entry.graph.symbols, nm)
     line = entry.source.res_line_of(pos)
     col = entry.source.res_col_of(pos)
-    m0 = a
-        .gstr_string(320)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, entry.path)
-        .gstr_push(a, ':')
+    m0 = a.String(320)
+        .add("zenc: ")
+        .add(entry.path)
+        .add_one(':')
         .res_udec(a, line)
-        .gstr_push(a, ':')
+        .add_one(':')
         .res_udec(a, col)
-        .gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `")
-        .gstr_append(a, nm)
-        .gstr_push(a, '`')
-    l1 = m0.gstr_push(a, '\n')
+        .add(": error[dup-fn]: duplicate top-level definition of `")
+        .add(nm)
+        .add_one('`')
+    l1 = m0.add_one('\n')
     d0 = l1
-        .gstr_append(a, "  `")
-        .gstr_append(a, nm)
-        .gstr_append(a, "` also exists in this module's import closure (an export it never imported by name), and `")
+        .add("  `")
+        .add(nm)
+        .add("` also exists in this module's import closure (an export it never imported by name), and `")
     d1 = (importer == "").match ({
-        true  => d0.gstr_append(a, "your program"),
+        true  => d0.add("your program"),
         false => a.mappend_id_str_dotted(d0, importer),
     })
     d2 = d1
-        .gstr_append(a, "` imports `")
-        .gstr_append(a, nm)
-        .gstr_append(a, "` from this module — the definition cannot be shadow-renamed")
-    l2 = d2.gstr_push(a, '\n')
+        .add("` imports `")
+        .add(nm)
+        .add("` from this module — the definition cannot be shadow-renamed")
+    l2 = d2.add_one('\n')
     h0 = l2
-        .gstr_append(a, "hint: rename `")
-        .gstr_append(a, nm)
-        .gstr_append(a, "`, or import this module under a namespace alias and qualify the call")
-    res_reject_text(h0.gstr_push(a, '\n').gstr_finish(a))
+        .add("hint: rename `")
+        .add(nm)
+        .add("`, or import this module under a namespace alias and qualify the call")
+    res_reject_text(h0.add_one('\n').finish_cstr())
 }
 // error[dup-fn] for a colliding decl whose mangled shadow form is already taken (never silent).
 fail_shadow_mangled = (a: Allocator, entry: ModuleEntry, bad: String, alias: String) i32 {
-    nm = line_name(a.gstr_string(16), a, bad, 0).gstr_finish(a)
+    nm = line_name(a.String(16), a, bad, 0).finish_cstr()
     pos = a.symbol_start_of(entry.graph.symbols, nm)
     line = entry.source.res_line_of(pos)
     col = entry.source.res_col_of(pos)
-    m0 = a
-        .gstr_string(320)
-        .gstr_append(a, "zenc: ")
-        .gstr_append(a, entry.path)
-        .gstr_push(a, ':')
+    m0 = a.String(320)
+        .add("zenc: ")
+        .add(entry.path)
+        .add_one(':')
         .res_udec(a, line)
-        .gstr_push(a, ':')
+        .add_one(':')
         .res_udec(a, col)
-        .gstr_append(a, ": error[dup-fn]: duplicate top-level definition of `")
-        .gstr_append(a, nm)
-        .gstr_push(a, '`')
-    l1 = m0.gstr_push(a, '\n')
+        .add(": error[dup-fn]: duplicate top-level definition of `")
+        .add(nm)
+        .add_one('`')
+    l1 = m0.add_one('\n')
     d0 = l1
-        .gstr_append(a, "  `")
-        .gstr_append(a, nm)
-        .gstr_append(a, "` collides with an unimported name from this module's import closure, and its shadow form `")
+        .add("  `")
+        .add(nm)
+        .add("` collides with an unimported name from this module's import closure, and its shadow form `")
     d1 = a
         .mappend_string(d0, alias)
-        .gstr_append(a, "__")
-        .gstr_append(a, nm)
-        .gstr_append(a, "` is already taken")
-    l2 = d1.gstr_push(a, '\n')
-    h0 = l2.gstr_append(a, "hint: rename `").gstr_append(a, nm).gstr_push(a, '`')
-    res_reject_text(h0.gstr_push(a, '\n').gstr_finish(a))
+        .add("__")
+        .add(nm)
+        .add("` is already taken")
+    l2 = d1.add_one('\n')
+    h0 = l2.add("hint: rename `").add(nm).add_one('`')
+    res_reject_text(h0.add_one('\n').finish_cstr())
 }
 // reject when ANY other module imports a to-be-renamed name from `entry` by name (see fail_shadow_import).
 shadow_guard_one = (a: Allocator, table: ModuleTable, entry: ModuleEntry, nm: StringView) i32 {
@@ -256,7 +250,7 @@ shadow_guard_names = (
     (i >= names.len).match ({
         true  => 0,
         false => {
-            nm = line_name(a.gstr_string(16), a, names, i).gstr_finish(a)
+            nm = line_name(a.String(16), a, names, i).finish_cstr()
             a.shadow_guard_one(table, entry, nm)
             a.shadow_guard_names(table, entry, names, names.snext_line(i))
         },
@@ -304,17 +298,15 @@ shadow_flat_users* = (
                 })
                 (ss.ren.len > 0).then({
                     a.shadow_guard_names(table, entry, ss.ren, 0)
-                    seg = a
-                        .gstr_string(hi - lo + 1)
+                    seg = a.String(hi - lo + 1)
                         .rappend_span(a, cur, to_i32(lo), to_i32(hi))
-                        .gstr_finish(a)
-                    rew = a.gstr_string(4096).rename_ns_names(a, seg, ss.ren, alias)
-                    cur = a
-                        .gstr_string(4096)
+                        .finish_cstr()
+                    rew = a.String(4096).rename_ns_names(a, seg, ss.ren, alias)
+                    cur = a.String(4096)
                         .rappend_span(a, cur, 0, to_i32(lo))
                         .rappend_string(a, rew)
                         .append_to_nul(a, cur, to_i32(hi))
-                        .gstr_finish(a)
+                        .finish_cstr()
                     fregions_splice(lo, hi, rew.len)
                     (hi <= nsl).then({
                         shift = shift + (rew.len - (hi - lo))

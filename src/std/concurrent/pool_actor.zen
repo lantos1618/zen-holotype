@@ -1,9 +1,8 @@
-//! link: zenrt
 // std.concurrent.pool_actor — typed actors that run on the multi-threaded pool. The pool currently
 // has one global mutex-guarded run queue, not per-worker work-stealing deques. This heals the
 // typed-vs-parallel split: std.concurrent.actor's typed
 // handles drain INLINE on the caller thread (h.send + h.run, no scheduling), while std.concurrent.pool
-// runs only UNTYPED `(RawPtr<u8>, i64) void` behaviors in parallel. pool_actor adapts typed→untyped at
+// runs only UNTYPED `(user: RawPtr<u8>, message: i64) void` behaviors in parallel. pool_actor adapts typed→untyped at
 // the boundary so a typed actor's `receive` runs on a pool worker, in parallel, exactly-once.
 //
 // It is the KEEP path: built on pool.zen + rt.zen, with no inline-drain baggage (std.concurrent.actor's
@@ -12,7 +11,7 @@
 // copy here would survive only via fragile first-occurrence-wins dedup in the flat namespace).
 //
 // ── THE TRAMPOLINE (why the user writes a tiny concrete stub) ────────────────────────────────────
-// The pool stores a type-ERASED `behavior: (RawPtr<u8>, i64) void` fn-ptr. Bridging to a typed
+// The pool stores a type-ERASED `behavior: (user: RawPtr<u8>, message: i64) void` fn-ptr. Bridging to a typed
 // `receive` needs a shim that reconstitutes the typed message + calls the typed receiver. That shim
 // MUST be a CONCRETE (non-generic) function: Zen INLINES generic fns (compiler.mono) — a generic fn
 // has no standalone C symbol, so its ADDRESS cannot be taken (a generic trampoline type-checks but
@@ -66,12 +65,12 @@ PooledHandle*<ActorT>: {
     state: RawPtr<u8>,
 }
 // spawn a typed actor onto the pool under ambient rt `art`. Allocates the actor-state block, copies the
-// actor in, registers it with the pool via `tramp` (the concrete per-(M,ActorT) trampoline — passed in
+// actor in, registers it with the pool via `tramp` (the concrete per-(M, ActorT) trampoline — passed in
 // because Zen can't take the address of a generic fn). NOT yet runnable — the first `send` schedules it.
 spawn_actor*<ActorT> = (
     cap: i64,
     actor: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
+    tramp: (user: RawPtr<u8>, message: i64) void,
     art: Rt,
 ) PooledHandle<ActorT> {
     try_spawn_actor(cap, actor, tramp, art).expect("pool_actor: actor spawn allocation failed")
@@ -87,7 +86,7 @@ spawn_actor*<ActorT> = (
 try_spawn_actor*<ActorT> = (
     cap: i64,
     actor: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
+    tramp: (user: RawPtr<u8>, message: i64) void,
     art: Rt,
 ) Result<PooledHandle<ActorT>, ActorError> {
     try_spawn_actor_scratch(cap, actor, tramp, art, null_ptr())
@@ -99,7 +98,7 @@ try_spawn_actor*<ActorT> = (
 spawn_actor_heap*<ActorT> = (
     cap: i64,
     actor: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
+    tramp: (user: RawPtr<u8>, message: i64) void,
 ) PooledHandle<ActorT> { spawn_actor(cap, actor, tramp, default()) }
 // ── PER-ACTOR SCRATCH (the two-memory model, S4-lite) ─────────────────────────────────────────────
 // `new_scratch(cap)` allocates a bump arena the actor uses for its OWN per-behavior temporaries: the
@@ -148,7 +147,7 @@ free_scratch* = (sc: MutPtr<Arena>) void {
 spawn_actor_scratch<ActorT> = (
     cap: i64,
     actor: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
+    tramp: (user: RawPtr<u8>, message: i64) void,
     art: Rt,
     sc: MutPtr<Arena>,
 ) PooledHandle<ActorT> {
@@ -163,7 +162,7 @@ spawn_actor_scratch<ActorT> = (
 try_spawn_actor_scratch*<ActorT> = (
     cap: i64,
     actor: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
+    tramp: (user: RawPtr<u8>, message: i64) void,
     art: Rt,
     sc: MutPtr<Arena>,
 ) Result<PooledHandle<ActorT>, ActorError> {
@@ -194,7 +193,7 @@ try_spawn_actor_scratch*<ActorT> = (
 spawn_actor_scratch_heap*<ActorT> = (
     cap: i64,
     actor: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
+    tramp: (user: RawPtr<u8>, message: i64) void,
     sc: MutPtr<Arena>,
 ) PooledHandle<ActorT> { spawn_actor_scratch(cap, actor, tramp, default(), sc) }
 // send a typed message to a pooled actor. The message must OUTLIVE the send (a worker consumes it
@@ -286,7 +285,7 @@ temporary* = () Policy { Policy.Temporary }
 ChildSpec*<ActorT>: {
     cap: i64,
     initial: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
+    tramp: (user: RawPtr<u8>, message: i64) void,
     art: Rt,
     policy: Policy,
 }
@@ -294,7 +293,7 @@ ChildSpec*<ActorT>: {
 child_spec*<ActorT> = (
     cap: i64,
     initial: ActorT,
-    tramp: (RawPtr<u8>, i64) void,
+    tramp: (user: RawPtr<u8>, message: i64) void,
     policy: Policy,
 ) ChildSpec<ActorT> {
     ChildSpec<ActorT>(

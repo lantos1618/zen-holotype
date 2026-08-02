@@ -1,10 +1,10 @@
 { Expr, Stmt, Decl, Ty, EnumDecl, ArmData, MatchData, CondData } = compiler.ast.ast_types
-{ cbuf, bin, cond, member, arrow, mktag, slett, sexpr, sif, block, gstr_string, gstr_append,
-  gstr_finish } = compiler.genc
+{ cbuf, bin, bin_rty, cond, member, arrow, mktag, slett, sexpr, sif, block, vref } = compiler.genc
 { Allocator } = std.mem.alloc
-{ one_stmt, slice_any } = compiler.astops
+{ lit_chain_is, lit_chain_subj, lit_same_subj, lit_test_pos, one_stmt, slice_any } = compiler.astops
 { Env, arm_env, cenode, extend_env, no_stmts } = compiler.check
 { loop_at } = std.core.count
+{ match_tmp_name } = compiler.mangle
 match_has_wild = (m: MatchData) bool { m.arms.slice_any((ar) { ar.variant == "_" }) }
 arm_covers_v = (m: MatchData, vn: StringView) bool { m.arms.slice_any((ar) { ar.variant == vn }) }
 ed_covered = (ed: EnumDecl, m: MatchData) bool {
@@ -67,11 +67,11 @@ relower_block_tail = (a: Allocator, env: Env, stmts: MutSlice<Stmt>) MutSlice<St
     })
 }
 tag_const* = (a: Allocator, ename: StringView, variant: StringView) StringView {
-    s ::= a.gstr_string(64)
-    s = s.gstr_append(a, ename)
-    s = s.gstr_append(a, "_")
-    s = s.gstr_append(a, variant)
-    s.gstr_finish(a)
+    s ::= a.String(64)
+    s = s.add(ename)
+    s = s.add("_")
+    s = s.add(variant)
+    s.finish_cstr()
 }
 subj_tag* = (a: Allocator, subj: Ptr<Expr>, ptr: bool) Ptr<Expr> {
     out ::= a.cenode(member(subj, "tag"))
@@ -127,16 +127,64 @@ lower_match_arms = (a: Allocator, env: Env, t: Ty, m: MatchData, i: i32) MutSlic
 }
 lower_match_stmt = (a: Allocator, env: Env, m: MatchData) Stmt {
     t = env.infer_expr(m.subj)
-    stmts = a.lower_match_arms(env, t, m, 0)
-    out ::= sexpr(a.cenode(block(stmts)))
-    (stmts.len == 1).then({
-        out = stmts[0]
+    tmp = a.match_tmp_name(m.arms[0].pos)
+    subj = a.cenode(vref(tmp))
+    mm = MatchData(
+        subj: subj,
+        ename: m.ename,
+        arms: m.arms,
+        ptr: m.ptr,
+    )
+    stmts = a.lower_match_arms(env, t, mm, 0)
+    buf ::= cbuf<Stmt>(a, 2)
+    buf[0] = slett(tmp, t, m.subj)
+    buf[1] = (stmts.len == 1).then({ stmts[0] }, { sexpr(a.cenode(block(stmts))) })
+    sexpr(a.cenode(block(buf)))
+}
+// Bool/literal match in statement position: bind parser-generated literal chains once, then
+// rebuild every equality test against the hidden local. Pointer identity distinguishes the parser reuse
+// from independently written nested conditions, whose repeated calls retain their source semantics.
+lit_test_once = (a: Allocator, e: Ptr<Expr>, subj: Ptr<Expr>, tmp: StringView) Ptr<Expr> {
+    out ::= e
+    load(e).match ({
+        .Bin(b) => {
+            (b.op == "==" && b.lhs.lit_same_subj(subj)).then({
+                out = a.cenode(bin_rty(b.op, a.cenode(vref(tmp)), b.rhs, b.pos, b.rty))
+            })
+        },
+        _ => { },
     })
     out
 }
-// Bool/literal match in statement position: Cond -> if/else, recursing for literal chains.
+lower_cond_once = (a: Allocator, env: Env, d: CondData, subj: Ptr<Expr>, tmp: StringView) Stmt {
+    sif(
+        a.lit_test_once(d.c, subj, tmp),
+        a.branch_stmts(env, d.t),
+        a.cond_else_once(env, d.e, subj, tmp),
+    )
+}
+cond_else_once = (a: Allocator, env: Env, e: Ptr<Expr>, subj: Ptr<Expr>, tmp: StringView) MutSlice<Stmt> {
+    out ::= a.branch_stmts(env, e)
+    load(e).match ({
+        .Cond(d) => {
+            out = a.one_stmt(a.lower_cond_once(env, d, subj, tmp))
+        },
+        _ => { },
+    })
+    out
+}
 lower_cond_stmt = (a: Allocator, env: Env, d: CondData) Stmt {
-    sif(d.c, a.branch_stmts(env, d.t), a.cond_else(env, d.e))
+    d.lit_chain_is().match ({
+        false => sif(d.c, a.branch_stmts(env, d.t), a.cond_else(env, d.e)),
+        true  => {
+            subj = d.lit_chain_subj()
+            tmp = a.match_tmp_name(d.lit_test_pos())
+            buf ::= cbuf<Stmt>(a, 2)
+            buf[0] = slett(tmp, env.infer_expr(subj), subj)
+            buf[1] = a.lower_cond_once(env, d, subj, tmp)
+            sexpr(a.cenode(block(buf)))
+        },
+    })
 }
 cond_else = (a: Allocator, env: Env, e: Ptr<Expr>) MutSlice<Stmt> {
     out ::= a.branch_stmts(env, e)

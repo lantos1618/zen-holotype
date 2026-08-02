@@ -5,10 +5,10 @@
   MakeStructData, MatchData, MethodCallData, StrData, TagData, Ty } = compiler.ast.ast_types
 { escape_into } = std.text.ascii    // the shared scan-and-emit loop; the Zen-source escape TABLE stays here
 { payload_fname } = compiler.mangle
-{ ff_append, ff_block, ff_char, ff_cond, ff_flush_leading, ff_hex_byte, ff_indent, ff_open_trailing,
-  ff_push, ff_str_has_nl, ff_string, ff_trailing, ff_ty, ff_tys, gf_is_alias, gf_cond_open_cmt,
+{ ff_ast_int, ff_block, ff_char, ff_cond, ff_flush_leading, ff_hex_byte, ff_indent,
+  ff_open_trailing, ff_str_has_nl, ff_trailing, ff_ty, ff_tys, gf_is_alias, gf_cond_open_cmt,
   gf_line_of, gf_raw_lit } = compiler.pretty
-{ gstr_int, left_pos_of } = compiler.astops
+{ left_pos_of } = compiler.astops
 { ff_lparams } = compiler.pretty_decl
 { times, step_while, loop_at } = std.core.count
 // Precedence mirrors the parser: || < && < cmp < | < ^ < & < shift < +- < */% < postfix.
@@ -65,15 +65,12 @@ ff_is_bin = (e: Expr) bool {
 // render as the multiline `c.match ({ … })`, and a postfix suffix does not chain onto that
 // rendering; the parens make the suffix bind to the WHOLE conditional on reparse.
 ff_recv* = (s: String, a: Allocator, e: Ptr<Expr>, ind: i32) String {
-    ff_is_bin(load(e)).match ({
-        true  => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"),
-        false => s.ff_expr(a, e, ind),
-    })
+    ff_is_bin(load(e)).then({ s.add("(").ff_expr(a, e, ind).add(")") }, { s.ff_expr(a, e, ind) })
 }
 ff_bin_inline = (s: String, a: Allocator, b: BinData, ind: i32) String {
     p = ff_op_prec(b.op)
     l = s.ff_operand(a, b.lhs, p, false, ind)
-    m = l.ff_append(a, " ").ff_append(a, b.op).ff_append(a, " ")
+    m = l.add(" ").add(b.op).add(" ")
     m.ff_operand(a, b.rhs, p, true, ind)
 }
 // A `||` / `&&` chain that would overflow 100 columns breaks OPERATOR-LEADING, one clause per line,
@@ -97,16 +94,16 @@ ff_bin_chain = (s: String, a: Allocator, b: BinData, ind: i32) String {
         false => s.ff_operand(a, b.lhs, p, false, ind),
     })
     l
-        .ff_append(a, "\n")
+        .add("\n")
         .ff_indent(a, ind + 1)
-        .ff_append(a, b.op)
-        .ff_append(a, " ")
+        .add(b.op)
+        .add(" ")
         .ff_operand(a, b.rhs, p, true, ind + 1)
 }
 ff_bin = (s: String, a: Allocator, b: BinData, ind: i32) String {
     (ff_op_prec(b.op) <= 2).then({
         save = gf_idx
-        trial = a.ff_string(256).ff_bin_inline(a, b, ind)
+        trial = a.String(256).ff_bin_inline(a, b, ind)
         gf_idx = save
         ((trial.ff_str_has_nl() == false && trial.ff_fits_width(s.ff_current_col(), 100)) == false).then({
             return s.ff_bin_chain(a, b, ind)
@@ -117,24 +114,21 @@ ff_bin = (s: String, a: Allocator, b: BinData, ind: i32) String {
 ff_operand = (s: String, a: Allocator, e: Ptr<Expr>, parent: i32, right: bool, ind: i32) String {
     cp = ff_expr_prec(load(e))
     needp = right.then({ cp <= parent }, { cp < parent })
-    needp.match ({
-        true  => s.ff_append(a, "(").ff_expr(a, e, ind).ff_append(a, ")"),
-        false => s.ff_expr(a, e, ind),
-    })
+    needp.then({ s.add("(").ff_expr(a, e, ind).add(")") }, { s.ff_expr(a, e, ind) })
 }
 // ── expressions ────────────────────────────────────────────────────────────────
 ff_expr* = (s: String, a: Allocator, e: Ptr<Expr>, ind: i32) String {
     e.match ({
-        .Int(n)         => s.gstr_int(a, n),
+        .Int(n)         => s.ff_ast_int(n),
         .Byte(n)        => s.ff_char(a, n),    // a Byte is ALWAYS a char literal — re-render `'x'`
-        .FloatLit(ft)   => s.ff_append(a, ft),
-        .Var(v)         => s.ff_append(a, v.name),
+        .FloatLit(ft)   => s.add(ft),
+        .Var(v)         => s.add(v.name),
         .StrLit(sl)     => s.ff_strlit(a, sl),
         .Bin(b)         => s.ff_bin(a, b, ind),
         .MethodCall(mc) => s.ff_mcall(a, mc, ind),
         .Call(c)        => s.ff_call(a, c, ind),
         .Cond(d)        => s.ff_cond(a, d, ind),
-        .Member(m)      => s.ff_recv(a, m.obj, ind).ff_append(a, ".").ff_append(a, m.field),
+        .Member(m)      => s.ff_recv(a, m.obj, ind).add(".").add(m.field),
         .MakeEnum(m)    => s.ff_mkenum(a, m, ind),
         .MakeStruct(m)  => s.ff_mkstruct(a, m, ind),
         .Tag(t)         => s.ff_tag(a, t),
@@ -142,9 +136,9 @@ ff_expr* = (s: String, a: Allocator, e: Ptr<Expr>, ind: i32) String {
         .SliceLit(sd)   => s.ff_slicelit(a, sd.items, ind),
         .Index(ix)      => s
             .ff_recv(a, ix.seq, ind)
-            .ff_append(a, "[")
+            .add("[")
             .ff_expr(a, ix.idx, ind)
-            .ff_append(a, "]"),
+            .add("]"),
         .Loop(l)        => s.ff_loop(a, l, ind),
         .Lambda(lm)     => s.ff_lambda(a, lm, ind),
         .Block(b)       => s.ff_block(a, b.stmts, ind, false),
@@ -153,7 +147,7 @@ ff_expr* = (s: String, a: Allocator, e: Ptr<Expr>, ind: i32) String {
 ff_args = (s: String, a: Allocator, args: MutSlice<Expr>, ind: i32) String {
     out ::= s
     args.loop_at((i, ar) {
-        out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
+        out = (i == 0).then({ out }, { out.add(", ") })
         out = out.ff_expr(a, ar.addr(), ind)
     })
     out
@@ -169,23 +163,21 @@ ff_args = (s: String, a: Allocator, args: MutSlice<Expr>, ind: i32) String {
 // leading-dot element like `.Some(…)` still glues to its literal.
 ff_slice_rows = (s: String, a: Allocator, items: MutSlice<Expr>, ind: i32) String {
     out ::= s
-    items.loop_at((i, it) {
-        out = out.ff_indent(a, ind).ff_expr(a, it.addr(), ind).ff_append(a, ",\n")
-    })
+    items.loop_at((i, it) { out = out.ff_indent(a, ind).ff_expr(a, it.addr(), ind).add(",\n") })
     out
 }
 ff_slicelit = (s: String, a: Allocator, items: MutSlice<Expr>, ind: i32) String {
     save = gf_idx
-    multi = a.ff_string(256).ff_slice_rows(a, items, ind + 1).ff_slice_row_split(items.len)
+    multi = a.String(256).ff_slice_rows(a, items, ind + 1).ff_slice_row_split(items.len)
     gf_idx = save
     multi.then({
         return s
-            .ff_append(a, "[\n")
+            .add("[\n")
             .ff_slice_rows(a, items, ind + 1)
             .ff_indent(a, ind)
-            .ff_append(a, "]")
+            .add("]")
     })
-    s.ff_append(a, "[").ff_args(a, items, ind).ff_append(a, "]")
+    s.add("[").ff_args(a, items, ind).add("]")
 }
 // The trial above emits one `\n` per element by construction, so "an element spans lines" is exactly
 // "the trial holds MORE newlines than there are elements".
@@ -198,11 +190,11 @@ ff_count_nl = (s: String) i64 {
 ff_mcall_inline = (s: String, a: Allocator, mc: MethodCallData, ind: i32) String {
     s
         .ff_recv(a, mc.recv, ind)
-        .ff_append(a, ".")
-        .ff_append(a, mc.method)
-        .ff_append(a, "(")
+        .add(".")
+        .add(mc.method)
+        .add("(")
         .ff_args(a, mc.args, ind)
-        .ff_append(a, ")")
+        .add(")")
 }
 // A method-call SPINE (>= 2 consecutive links) that overflows 100 columns breaks at the dots,
 // leading-dot, one call per line at one extra indent level. Lowercase method names glue across the
@@ -231,13 +223,13 @@ ff_mcall_chain = (s: String, a: Allocator, mc: MethodCallData, ind: i32) String 
         _               => s.ff_recv(a, mc.recv, ind),
     })
     pre
-        .ff_append(a, "\n")
+        .add("\n")
         .ff_indent(a, ind + 1)
-        .ff_append(a, ".")
-        .ff_append(a, mc.method)
-        .ff_append(a, "(")
+        .add(".")
+        .add(mc.method)
+        .add("(")
         .ff_args(a, mc.args, ind + 1)
-        .ff_append(a, ")")
+        .add(")")
 }
 // the deepest non-MethodCall receiver of a spine — a NAMESPACE-ALIAS base must stay glued to its
 // first `.member` (the alias qualification pass is textual), so such spines never wrap.
@@ -258,7 +250,7 @@ ff_mcall = (s: String, a: Allocator, mc: MethodCallData, ind: i32) String {
             return s.ff_mcall_chain(a, mc, ind)
         })
         save = gf_idx
-        trial = a.ff_string(256).ff_mcall_inline(a, mc, ind)
+        trial = a.String(256).ff_mcall_inline(a, mc, ind)
         gf_idx = save
         ((trial.ff_str_has_nl() == false && trial.ff_fits_width(s.ff_current_col(), 100)) == false).then({
             return s.ff_mcall_chain(a, mc, ind)
@@ -267,12 +259,12 @@ ff_mcall = (s: String, a: Allocator, mc: MethodCallData, ind: i32) String {
     s.ff_mcall_inline(a, mc, ind)
 }
 ff_call = (s: String, a: Allocator, c: CallData, ind: i32) String {
-    head = c.raw.then({ s.ff_append(a, "@") }, { s })
+    head = c.raw.then({ s.add("@") }, { s })
     head
         .ff_tyname(a, c.fn, c.targs)
-        .ff_append(a, "(")
+        .add("(")
         .ff_args(a, c.args, ind)
-        .ff_append(a, ")")
+        .add(")")
 }
 // Bool `.match` lowers to Cond. A short exhaustive two-arm form CANONICALIZES to the two-arm
 // conditional expression `c.then({ t }, { e })` (the parse-level sugar for the same node) when both
@@ -294,33 +286,33 @@ ff_cond_inline* = (s: String, a: Allocator, d: CondData, ind: i32) String {
     d.ff_cond_then2_ok().then({
         return s
             .ff_recv(a, d.c, ind)
-            .ff_append(a, ".then({ ")
+            .add(".then({ ")
             .ff_expr(a, d.t, ind)
-            .ff_append(a, " }, { ")
+            .add(" }, { ")
             .ff_expr(a, d.e, ind)
-            .ff_append(a, " })")
+            .add(" })")
     })
     (d.oa == 1).then({
         return s
             .ff_recv(a, d.c, ind)
-            .ff_append(a, ".match ({ true => ")
+            .add(".match ({ true => ")
             .ff_expr(a, d.t, ind)
-            .ff_append(a, " })")
+            .add(" })")
     })
     (d.oa == 2).then({
         return s
             .ff_recv(a, d.c, ind)
-            .ff_append(a, ".match ({ false => ")
+            .add(".match ({ false => ")
             .ff_expr(a, d.e, ind)
-            .ff_append(a, " })")
+            .add(" })")
     })
     s
         .ff_recv(a, d.c, ind)
-        .ff_append(a, ".match ({ true => ")
+        .add(".match ({ true => ")
         .ff_expr(a, d.t, ind)
-        .ff_append(a, ", false => ")
+        .add(", false => ")
         .ff_expr(a, d.e, ind)
-        .ff_append(a, " })")
+        .add(" })")
 }
 // render one boolean-match arm, mirroring ff_arms: flush the own-line comments written ABOVE it (bounded
 // by its label offset `apos`), emit `label => body,`, then weave a trailing comment bounded by the next
@@ -337,34 +329,28 @@ ff_cond_arm = (
     lead = s.ff_flush_leading(a, apos, ind)
     line = lead
         .ff_indent(a, ind)
-        .ff_append(a, label)
+        .add(label)
         .ff_expr(a, body, ind)
-        .ff_append(a, ",")
+        .add(",")
     withc = (nb > 0).then({ line.ff_trailing(a, nb) }, { line })
-    withc.ff_append(a, "\n")
+    withc.add("\n")
 }
 ff_cond_multiline* = (s: String, a: Allocator, d: CondData, ind: i32) String {
     rp = left_pos_of(d.c)
-    head = s.ff_recv(a, d.c, ind).ff_append(a, ".match ({")
+    head = s.ff_recv(a, d.c, ind).add(".match ({")
     withc = d.gf_cond_open_cmt().then({ head.ff_open_trailing(a, gf_line_of(rp)) }, { head })
-    open = withc.ff_append(a, "\n")
+    open = withc.add("\n")
     (d.oa == 1).then({
-        return open
-            .ff_cond_arm(a, "true => ", d.t, d.tpos, 0, ind + 1)
-            .ff_indent(a, ind)
-            .ff_append(a, "})")
+        return open.ff_cond_arm(a, "true => ", d.t, d.tpos, 0, ind + 1).ff_indent(a, ind).add("})")
     })
     (d.oa == 2).then({
-        return open
-            .ff_cond_arm(a, "false => ", d.e, d.epos, 0, ind + 1)
-            .ff_indent(a, ind)
-            .ff_append(a, "})")
+        return open.ff_cond_arm(a, "false => ", d.e, d.epos, 0, ind + 1).ff_indent(a, ind).add("})")
     })
     open
         .ff_cond_arm(a, "true  => ", d.t, d.tpos, d.epos, ind + 1)
         .ff_cond_arm(a, "false => ", d.e, d.epos, 0, ind + 1)
         .ff_indent(a, ind)
-        .ff_append(a, "})")
+        .add("})")
 }
 ff_empty_block = (e: Expr) bool {
     e.match ({
@@ -378,12 +364,12 @@ ff_then_body = (s: String, a: Allocator, e: Ptr<Expr>, ind: i32) String {
     load(e).match ({
         .Block(b) => s.ff_block(a, b.stmts, ind, false),
         _         => s
-            .ff_append(a, "{\n")
+            .add("{\n")
             .ff_indent(a, ind + 1)
             .ff_expr(a, e, ind + 1)
-            .ff_append(a, "\n")
+            .add("\n")
             .ff_indent(a, ind)
-            .ff_append(a, "}"),
+            .add("}"),
     })
 }
 ff_cond_then_negated = (d: CondData) bool {
@@ -397,14 +383,11 @@ ff_then* = (s: String, a: Allocator, d: CondData, ind: i32) String {
     // `((a == b) == false)` only collapses to `(a == b == false)` on the NEXT fmt pass (one-shot
     // idempotence bug, #607 finding 2).
     recv = neg.match ({
-        true  => s
-            .ff_append(a, "(")
-            .ff_operand(a, d.c, ff_op_prec("=="), false, ind)
-            .ff_append(a, " == false)"),
+        true  => s.add("(").ff_operand(a, d.c, ff_op_prec("=="), false, ind).add(" == false)"),
         false => s.ff_recv(a, d.c, ind),
     })
     body = neg.then({ d.e }, { d.t })
-    recv.ff_append(a, ".then(").ff_then_body(a, body, ind).ff_append(a, ")")
+    recv.add(".then(").ff_then_body(a, body, ind).add(")")
 }
 // `fmt` is the mechanical fix for either illegal one-arm spelling and for exhaustive matches whose other
 // arm is explicitly empty. A false-only effect becomes `(condition == false).then({ ... })`.
@@ -465,19 +448,19 @@ ff_cond_nested* = (d: CondData) bool {
 ff_tyname = (s: String, a: Allocator, name: StringView, targs: MutSlice<Ty>) String {
     (targs.len > 0).match ({
         true  => s
-            .ff_append(a, name)
-            .ff_append(a, "<")
+            .add(name)
+            .add("<")
             .ff_tys(a, targs)
-            .ff_append(a, ">"),
-        false => s.ff_append(a, name),
+            .add(">"),
+        false => s.add(name),
     })
 }
-// a MakeStruct literal that is really a synthesized multi-field variant payload — `__anon…` name with
-// ordered positional field inits `_0, _1, …` (see the decl-side ff_anon_payload_fields). A constructor
-// `Ask(a, b, c)` desugars to `.Ask(__anon…(_0: a, _1: b, _2: c))`; recognising it lets ff_mkenum print
+// a MakeStruct literal that is really a synthesized multi-field variant payload — `__payload…` name with
+// ordered positional field inits `_0, _1, …` (see the decl-side ff_payload_fields). A constructor
+// `Ask(a, b, c)` desugars to `.Ask(__payload…(_0: a, _1: b, _2: c))`; recognising it lets ff_mkenum print
 // the surface argument list `(a, b, c)` back instead of leaking the internal struct literal.
-ff_is_anon_positional_inits = (a: Allocator, ms: MakeStructData) bool {
-    ms.ty.starts_with("__anon").match ({
+ff_is_payload_positional_inits = (a: Allocator, ms: MakeStructData) bool {
+    ms.ty.starts_with("__payload").match ({
         true  => (ms.inits.len == 0).match ({
             true  => false,
             false => {
@@ -489,55 +472,52 @@ ff_is_anon_positional_inits = (a: Allocator, ms: MakeStructData) bool {
         false => false,
     })
 }
-ff_anon_ctor_args = (s: String, a: Allocator, inits: MutSlice<FieldInit>, ind: i32) String {
+ff_payload_ctor_args = (s: String, a: Allocator, inits: MutSlice<FieldInit>, ind: i32) String {
     out ::= s
     inits.loop_at((i, fi) {
-        out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
+        out = (i == 0).then({ out }, { out.add(", ") })
         out = out.ff_expr(a, fi.value, ind)
     })
     out
 }
 // `.variant(payload)` (or `Ty.variant(payload)` when the enum type is explicit)
 ff_mkenum = (s: String, a: Allocator, m: MakeEnumData, ind: i32) String {
-    head = is_empty(m.ty).match ({
-        true  => s.ff_append(a, "."),
-        false => s.ff_tyname(a, m.ty, m.targs).ff_append(a, "."),
-    })
-    open = head.ff_append(a, m.variant).ff_append(a, "(")
+    head = is_empty(m.ty).then({ s.add(".") }, { s.ff_tyname(a, m.ty, m.targs).add(".") })
+    open = head.add(m.variant).add("(")
     m.payload.match ({
-        .MakeStruct(ms) => a.ff_is_anon_positional_inits(ms).match ({
-            true  => open.ff_anon_ctor_args(a, ms.inits, ind).ff_append(a, ")"),
-            false => open.ff_expr(a, m.payload, ind).ff_append(a, ")"),
+        .MakeStruct(ms) => a.ff_is_payload_positional_inits(ms).match ({
+            true  => open.ff_payload_ctor_args(a, ms.inits, ind).add(")"),
+            false => open.ff_expr(a, m.payload, ind).add(")"),
         }),
-        _               => open.ff_expr(a, m.payload, ind).ff_append(a, ")"),
+        _               => open.ff_expr(a, m.payload, ind).add(")"),
     })
 }
 ff_tag = (s: String, a: Allocator, t: TagData) String {
     is_empty(t.ty).match ({
-        true  => s.ff_append(a, ".").ff_append(a, t.variant),
-        false => s.ff_tyname(a, t.ty, t.targs).ff_append(a, ".").ff_append(a, t.variant),
+        true  => s.add(".").add(t.variant),
+        false => s.ff_tyname(a, t.ty, t.targs).add(".").add(t.variant),
     })
 }
 // struct literal `Ty(f: v, …)` — split one field per line when there is more than one field.
 ff_mkstruct = (s: String, a: Allocator, m: MakeStructData, ind: i32) String {
     (m.inits.len > 1).match ({
         true  => {
-            open = s.ff_tyname(a, m.ty, m.targs).ff_append(a, "(\n")
+            open = s.ff_tyname(a, m.ty, m.targs).add("(\n")
             body = open.ff_struct_fields(a, m.inits, ind + 1)
-            body.ff_indent(a, ind).ff_append(a, ")")
+            body.ff_indent(a, ind).add(")")
         },
         false => s
             .ff_tyname(a, m.ty, m.targs)
-            .ff_append(a, "(")
+            .add("(")
             .ff_struct_inline(a, m.inits, ind)
-            .ff_append(a, ")"),
+            .add(")"),
     })
 }
 ff_struct_inline = (s: String, a: Allocator, inits: MutSlice<FieldInit>, ind: i32) String {
     out ::= s
     inits.loop_at((i, fi) {
-        out = (i == 0).then({ out }, { out.ff_append(a, ", ") })
-        out = out.ff_append(a, fi.name).ff_append(a, ": ").ff_expr(a, fi.value, ind)
+        out = (i == 0).then({ out }, { out.add(", ") })
+        out = out.add(fi.name).add(": ").ff_expr(a, fi.value, ind)
     })
     out
 }
@@ -546,10 +526,10 @@ ff_struct_fields = (s: String, a: Allocator, inits: MutSlice<FieldInit>, ind: i3
     inits.loop_at((i, fi) {
         out = out
             .ff_indent(a, ind)
-            .ff_append(a, fi.name)
-            .ff_append(a, ": ")
+            .add(fi.name)
+            .add(": ")
             .ff_expr(a, fi.value, ind)
-            .ff_append(a, ",\n")
+            .add(",\n")
     })
     out
 }
@@ -557,22 +537,22 @@ ff_struct_fields = (s: String, a: Allocator, inits: MutSlice<FieldInit>, ind: i3
 ff_loop = (s: String, a: Allocator, l: LoopData, ind: i32) String {
     head = s
         .ff_recv(a, l.seq, ind)
-        .ff_append(a, ".loop((")
-        .ff_append(a, l.h)
-        .ff_append(a, ", ")
-        .ff_append(a, l.idx)
-        .ff_append(a, ", ")
-        .ff_append(a, l.elem)
-        .ff_append(a, ") ")
-    head.ff_block(a, l.body, ind, false).ff_append(a, ")")
+        .add(".loop((")
+        .add(l.h)
+        .add(", ")
+        .add(l.idx)
+        .add(", ")
+        .add(l.elem)
+        .add(") ")
+    head.ff_block(a, l.body, ind, false).add(")")
 }
 // the declared return type `(x) U {…}` is printed back when the source wrote one. lm.ret is Void when
 // unannotated, so a written `(x) void {…}` formats to the equivalent bare `(x) {…}`.
 ff_lambda = (s: String, a: Allocator, lm: LambdaData, ind: i32) String {
-    sig = s.ff_append(a, "(").ff_lparams(a, lm.params).ff_append(a, ") ")
+    sig = s.add("(").ff_lparams(a, lm.params).add(") ")
     ret = lm.ret.match ({
         .Void => sig,
-        _     => sig.ff_ty(a, lm.ret).ff_append(a, " "),
+        _     => sig.ff_ty(a, lm.ret).add(" "),
     })
     ret.ff_block(a, lm.body, ind, true)
 }
@@ -596,26 +576,26 @@ arms_max_pat = (a: Allocator, arms: MutSlice<ArmData>) i32 {
 }
 ff_arm_pat = (s: String, a: Allocator, ar: ArmData) String {
     (ar.variant == "_").match ({
-        true  => s.ff_append(a, "_"),
+        true  => s.add("_"),
         false => is_empty(ar.bind).match ({
-            true  => s.ff_append(a, ".").ff_append(a, ar.variant),
+            true  => s.add(".").add(ar.variant),
             false => s
-                .ff_append(a, ".")
-                .ff_append(a, ar.variant)
-                .ff_append(a, "(")
-                .ff_append(a, ar.bind)
-                .ff_append(a, ")"),
+                .add(".")
+                .add(ar.variant)
+                .add("(")
+                .add(ar.bind)
+                .add(")"),
         }),
     })
 }
 ff_pad* = (s: String, a: Allocator, n: i32) String {
-    (n <= 0).then({ s }, { s.ff_append(a, " ").ff_pad(a, n - 1) })
+    (n <= 0).then({ s }, { s.add(" ").ff_pad(a, n - 1) })
 }
 ff_match = (s: String, a: Allocator, m: MatchData, ind: i32) String {
     maxw = a.arms_max_pat(m.arms)
-    open = s.ff_recv(a, m.subj, ind).ff_append(a, ".match ({\n")
+    open = s.ff_recv(a, m.subj, ind).add(".match ({\n")
     body = open.ff_arms(a, m.arms, maxw, ind + 1)
-    body.ff_indent(a, ind).ff_append(a, "})")
+    body.ff_indent(a, ind).add("})")
 }
 // an arm's representative offset = its PATTERN byte offset (the `.Variant` / `_` token), recorded by the
 // parser — used to anchor a comment written ABOVE the arm and to bound an arm's trailing comment. The
@@ -644,9 +624,9 @@ ff_arms = (s: String, a: Allocator, arms: MutSlice<ArmData>, maxw: i32, ind: i32
         lead = out.ff_flush_leading(a, gf_arm_pos(ar), ind)
         line = lead.ff_indent(a, ind).ff_arm_pat(a, ar)
         padded = line.ff_pad(a, maxw - a.arm_pat_len(ar))
-        bodied = padded.ff_append(a, " => ").ff_expr(a, ar.body, ind).ff_append(a, ",")
+        bodied = padded.add(" => ").ff_expr(a, ar.body, ind).add(",")
         withc = (nb > 0).then({ bodied.ff_trailing(a, nb) }, { bodied })
-        out = withc.ff_append(a, "\n")
+        out = withc.add("\n")
     })
     out
 }
@@ -662,32 +642,29 @@ ff_arms = (s: String, a: Allocator, arms: MutSlice<ArmData>, maxw: i32, ind: i32
 ff_escape_byte = (s: String, ap: MutPtr<Allocator>, b: u8) String {
     a = load(ap)
     (b == '"').then({
-        return s.ff_append(a, "\\\"")
+        return s.add("\\\"")
     })
     (b == '\\').then({
-        return s.ff_append(a, "\\\\")
+        return s.add("\\\\")
     })
     (b == '\n').then({
-        return s.ff_append(a, "\\n")
+        return s.add("\\n")
     })
     (b == '\r').then({
-        return s.ff_append(a, "\\r")
+        return s.add("\\r")
     })
     (b == '\t').then({
-        return s.ff_append(a, "\\t")
+        return s.add("\\t")
     })
     (b >= ' ' && b <= '~' || b >= 128).then({
-        return s.ff_push(a, b)
+        return s.add_one(b)
     })
     s.ff_hex_byte(a, b)
 }
 ff_strlit = (s: String, a: Allocator, sl: StrData) String {
     raw = a.gf_raw_lit(sl.pos)
     raw.is_empty().then({
-        return s
-            .ff_append(a, "\"")
-            .escape_into(a.addr(), sl.value, ff_escape_byte)
-            .ff_append(a, "\"")
+        return s.add("\"").escape_into(a.addr(), sl.value, ff_escape_byte).add("\"")
     })
-    s.ff_append(a, raw)
+    s.add(raw)
 }

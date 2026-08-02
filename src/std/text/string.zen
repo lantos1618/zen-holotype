@@ -1,11 +1,13 @@
-{ request_arena } = std.mem.alloc
 // Growable allocator-backed byte string.
 // Operations return updated headers because resize may move the backing allocation.
 { len, view } = std.text.str
 { AllocatorBackend, Allocator } = std.mem.alloc
-{ Result, IoError, ok, err } = std.core.result
+{ Result, IoError, ok, err, panic } = std.core.result
 { loop_at } = std.core.count
-buf = std.mem.buffer
+{ num_integer_len, num_write_integer, num_uudigit_count, num_uwrite_udigits, num_float_cap,
+  num_write_float } = std.text.num_render
+{ Buffer, BufferFixed, BufferConst, buffer_live, buffer_settle, buffer_drop, buffer_freeze,
+  buffer_reserve, buffer_extend, buffer_new, buffer_fixed, buffer_fixed_drop, buffer_const_drop } = std.mem.buffer
 // Carried strings retain their birth allocator; its state must outlive every derived owner.
 // OOM is sticky until freeze(). Uncarried headers never dispatch through an empty vtable.
 String*: {
@@ -24,43 +26,55 @@ String*: {
         v = s.string_buffer()
         d = v.alloc
         b = b
-        buf.buffer_live(v).match ({
-            true  => buf.buffer_settle(v, buf.buffer_extend(d.addr(), v, slice(b.addr(), 1), 1)).buffer_string(),
+        buffer_live(v).match ({
+            true  => buffer_settle(v, buffer_extend(d.addr(), v, slice(b.addr(), 1), 1)).buffer_string(),
             false => s,
         })
     }
-    add_slice = (s: String, t: MutSlice<u8>) String {
+    add_slice = (s: String, t: Slice<u8>) String {
         // t is length-delimited and need not be NUL-terminated.
         v = s.string_buffer()
         d = v.alloc
-        buf.buffer_live(v).match ({
-            true  => buf.buffer_settle(v, buf.buffer_extend(d.addr(), v, t, 1)).buffer_string(),
+        buffer_live(v).match ({
+            true  => buffer_settle(v, buffer_extend(d.addr(), v, t, 1)).buffer_string(),
             false => s,
         })
     }
-    view = (s: String) MutSlice<u8> { slice(s.ptr, s.len) }
+    repeat  = (s: String, t: StringView, n: i64) String { string_repeat(s, t.view(), n) }
+    add_i64 = (s: String, n: i64) String { string_add_i64(s, n) }
+    add_u64 = (s: String, n: u64) String { string_add_u64(s, n) }
+    add_f64 = (s: String, x: f64) String { string_add_f64(s, x) }
+    view    = (s: String) MutSlice<u8> { slice(s.ptr, s.len) }
     freeze = (s: String) Result<StringConst, IoError> {
-        buf.buffer_freeze(s.string_buffer()).match ({
+        buffer_freeze(s.string_buffer()).match ({
             .Ok(c)  => ok(c.buffer_string_const()),
             .Err(e) => err(e),
         })
     }
-    drop = (s: String) void { buf.buffer_drop(s.string_buffer()) }
-    live = (s: String) bool { buf.buffer_live(s.string_buffer()) }
+    drop = (s: String) void { buffer_drop(s.string_buffer()) }
+    finish_cstr = (s: String) StringCstr {
+        (s.live() == false).then({
+            s.drop()
+            panic("string: out of memory")
+        })
+        s.ptr.offset(s.len).store(0)
+        cstr(s.ptr)
+    }
+    live = (s: String) bool { buffer_live(s.string_buffer()) }
     settle = (s: String, r: Result<String, IoError>) String {
-        br: Result<buf.Buffer<u8>, IoError> = r.match ({
+        br: Result<Buffer<u8>, IoError> = r.match ({
             .Ok(g)  => .Ok(g.string_buffer()),
             .Err(e) => .Err(e),
         })
-        buf.buffer_settle(s.string_buffer(), br).buffer_string()
+        buffer_settle(s.string_buffer(), br).buffer_string()
     }
     relink = (s: String, g: String) String {
-        br: Result<buf.Buffer<u8>, IoError> = .Ok(g.string_buffer())
-        buf.buffer_settle(s.string_buffer(), br).buffer_string()
+        br: Result<Buffer<u8>, IoError> = .Ok(g.string_buffer())
+        buffer_settle(s.string_buffer(), br).buffer_string()
     }
     poison = (s: String) String {
-        br: Result<buf.Buffer<u8>, IoError> = .Err(.NotFound)
-        buf.buffer_settle(s.string_buffer(), br).buffer_string()
+        br: Result<Buffer<u8>, IoError> = .Err(.NotFound)
+        buffer_settle(s.string_buffer(), br).buffer_string()
     }
     bytes   = (s: String) MutSlice<u8> { s.ptr.slice(s.len) }
     push_in = (s: String, a: AllocatorBackend, b: u8) Result<String, IoError> { a.push_in(s, b) }
@@ -70,19 +84,249 @@ String*: {
     finish_in = (s: String, a: AllocatorBackend) Result<StringCstr, IoError> { a.finish_in(s) }
     free_in   = (s: String, a: AllocatorBackend) void { a.free_in(s) }
 }
+// Values accepted by allocated interpolation. Owned is observed without consuming it; Temp is an
+// eager custom-render result and is dropped after its bytes have been copied into the destination.
+StringValue*: Int(i64) | UInt(u64) | Float(f64) | Text(StringView) | Bool(bool) | Owned(String) | Temp(String)
+StringArg*: {
+    name: StringView,
+    value: StringValue,
+}
+StringFormat*: {
+    string_format: (value: Self, output: String) String,
+}
+String.impl(StringFormat, {
+    string_format = (value: String, out: String) String { out.add_slice(value.view()) }
+})
+string_arg* = (value: StringValue) StringArg {
+    StringArg(
+        name: "",
+        value: value,
+    )
+}
+string_named* = (name: StringView, value: StringValue) StringArg {
+    StringArg(
+        name: name,
+        value: value,
+    )
+}
+add_value* = (s: String, v: StringValue) String { string_add_value(s, v) }
+add_format* = (s: String, template: StringView, args: ...StringArg) String {
+    string_add_format(s, template, args)
+}
+string_add_i64 = (s: String, n: i64) String {
+    v = s.string_buffer()
+    d = v.alloc
+    need = num_integer_len(n)
+    v.buffer_live().match ({
+        true  => buffer_reserve(d.addr(), v, need + 1).match ({
+            .Ok(r)  => {
+                wrote = num_write_integer(r.ptr.offset(r.len), n)
+                String(
+                    ptr: r.ptr,
+                    len: r.len + wrote,
+                    cap: r.cap,
+                    carried: true,
+                    oom: false,
+                    alloc: r.alloc,
+                )
+            },
+            .Err(e) => buffer_settle(v, .Err(e)).buffer_string(),
+        }),
+        false => s,
+    })
+}
+string_add_u64 = (s: String, n: u64) String {
+    v = s.string_buffer()
+    d = v.alloc
+    need = num_uudigit_count(n)
+    v.buffer_live().match ({
+        true  => buffer_reserve(d.addr(), v, need + 1).match ({
+            .Ok(r)  => {
+                wrote = num_uwrite_udigits(r.ptr.offset(r.len), 0, n)
+                String(
+                    ptr: r.ptr,
+                    len: r.len + wrote,
+                    cap: r.cap,
+                    carried: true,
+                    oom: false,
+                    alloc: r.alloc,
+                )
+            },
+            .Err(e) => buffer_settle(v, .Err(e)).buffer_string(),
+        }),
+        false => s,
+    })
+}
+string_add_f64 = (s: String, x: f64) String {
+    v = s.string_buffer()
+    d = v.alloc
+    need = num_float_cap(x)
+    v.buffer_live().match ({
+        true  => buffer_reserve(d.addr(), v, need).match ({
+            .Ok(r)  => {
+                wrote = num_write_float(r.ptr.offset(r.len), x)
+                String(
+                    ptr: r.ptr,
+                    len: r.len + wrote,
+                    cap: r.cap,
+                    carried: true,
+                    oom: false,
+                    alloc: r.alloc,
+                )
+            },
+            .Err(e) => buffer_settle(v, .Err(e)).buffer_string(),
+        }),
+        false => s,
+    })
+}
+string_repeat = (s: String, t: Slice<u8>, n: i64) String {
+    cnt = (n < 0).then({ 0 }, { n })
+    total = t.len * cnt
+    (total == 0).match ({
+        true  => s,
+        false => {
+            v = s.string_buffer()
+            d = v.alloc
+            base = to_i64(v.ptr)
+            src = to_i64(t.ptr)
+            internal = src >= base && src < base + v.cap
+            source_off = src - base
+            v.buffer_live().match ({
+                true  => buffer_reserve(d.addr(), v, total + 1).match ({
+                    .Ok(r)  => {
+                        source: Slice<u8> = internal.match ({
+                            true  => slice(r.ptr.offset(source_off), t.len),
+                            false => t,
+                        })
+                        dst :: MutSlice<u8> = slice(r.ptr, r.cap)
+                        slice(r.ptr.offset(r.len), total).loop_at((i, x) {
+                            dst[r.len + i] = source[i % source.len]
+                        })
+                        String(
+                            ptr: r.ptr,
+                            len: r.len + total,
+                            cap: r.cap,
+                            carried: true,
+                            oom: false,
+                            alloc: r.alloc,
+                        )
+                    },
+                    .Err(e) => buffer_settle(v, .Err(e)).buffer_string(),
+                }),
+                false => s,
+            })
+        },
+    })
+}
+string_add_value = (s: String, v: StringValue) String {
+    v.match ({
+        .Int(n)   => s.add_i64(n),
+        .UInt(n)  => s.add_u64(n),
+        .Float(x) => s.add_f64(x),
+        .Text(t)  => s.add(t),
+        .Bool(b)  => s.add(b.then({ "true" }, { "false" })),
+        .Owned(g) => s.add_slice(g.view()),
+        .Temp(g)  => {
+            out = s.add_slice(g.view())
+            g.drop()
+            out
+        },
+    })
+}
+string_close_at = (tv: Slice<u8>, start: i64) i64 {
+    close :: i64 = 0 - 1
+    tv.loop((h, i, b) {
+        (i >= start && b == '}').then({
+            close = i
+            h.break
+        })
+    })
+    close
+}
+string_token_digits = (t: Slice<u8>) bool {
+    good ::= t.len > 0
+    t.loop_at((i, b) { good = good && b >= '0' && b <= '9' })
+    good
+}
+string_token_index = (t: Slice<u8>) i64 {
+    n :: i64 = 0
+    t.loop_at((i, b) { n = n * 10 + b - '0' })
+    n
+}
+string_token_eq = (t: Slice<u8>, name: StringView) bool {
+    nv = name.view()
+    same ::= t.len == nv.len
+    t.loop_at((i, b) { same = same && i < nv.len && b == nv[i] })
+    same
+}
+string_named_index = (args: MutSlice<StringArg>, token: Slice<u8>) i64 {
+    found :: i64 = 0 - 1
+    args.loop((h, i, a) {
+        token.string_token_eq(a.name).then({
+            found = i
+            h.break
+        })
+    })
+    found
+}
+string_add_run = (s: String, tv: Slice<u8>, lo: i64, hi: i64) String {
+    (hi > lo).then({ s.add_slice(slice(tv.ptr.offset(lo), hi - lo)) }, { s })
+}
+string_add_format = (s: String, template: StringView, args: MutSlice<StringArg>) String {
+    tv = template.view()
+    out ::= s
+    sequential :: i64 = 0
+    start :: i64 = 0
+    skip :: i64 = 0
+    tv.loop_at((i, b) {
+        (i >= skip).then({
+            pair = i + 1 < tv.len
+            escaped = pair && (b == '{' && tv[i + 1] == '{' || b == '}' && tv[i + 1] == '}')
+            escaped.match ({
+                true  => {
+                    out = out.string_add_run(tv, start, i).add_one(b)
+                    skip = i + 2
+                    start = skip
+                },
+                false => (b == '{').then({
+                    close = tv.string_close_at(i + 1)
+                    (close >= 0).then({
+                        token: Slice<u8> = slice(tv.ptr.offset(i + 1), close - i - 1)
+                        idx = (token.len == 0).match ({
+                            true  => sequential,
+                            false => token.string_token_digits().match ({
+                                true  => token.string_token_index(),
+                                false => args.string_named_index(token),
+                            }),
+                        })
+                        (idx >= 0 && idx < args.len).then({
+                            out = out.string_add_run(tv, start, i).add_value(args[idx].value)
+                            (token.len == 0).then({
+                                sequential = sequential + 1
+                            })
+                            skip = close + 1
+                            start = skip
+                        })
+                    })
+                }),
+            })
+        })
+    })
+    out.string_add_run(tv, start, tv.len)
+}
 // Private one-piece primitive: the variadic public method folds through this so each append keeps
 // the existing carried-allocator and sticky-OOM behavior.
 string_add_one = (s: String, t: StringView) String {
     v = s.string_buffer()
     d = v.alloc
-    buf.buffer_live(v).match ({
-        true  => buf.buffer_settle(v, buf.buffer_extend(d.addr(), v, t.view(), 1)).buffer_string(),
+    buffer_live(v).match ({
+        true  => buffer_settle(v, buffer_extend(d.addr(), v, t.view(), 1)).buffer_string(),
         false => s,
     })
 }
 // Header adapters preserve String's public layout.
-string_buffer = (s: String) buf.Buffer<u8> {
-    buf.Buffer<u8>(
+string_buffer = (s: String) Buffer<u8> {
+    Buffer<u8>(
         ptr: s.ptr,
         len: s.len,
         cap: s.cap,
@@ -91,7 +335,7 @@ string_buffer = (s: String) buf.Buffer<u8> {
         alloc: s.alloc,
     )
 }
-buffer_string = (v: buf.Buffer<u8>) String {
+buffer_string = (v: Buffer<u8>) String {
     String(
         ptr: v.ptr,
         len: v.len,
@@ -118,7 +362,7 @@ new_in* = (a: AllocatorBackend) Result<String, IoError> { a.init(16) }
 // Bind s once so inlining a builder expression remains linear.
 reserve_in = (a: AllocatorBackend, s: String, need: i64) Result<String, IoError> {
     s = s
-    buf.buffer_reserve(a, s.string_buffer(), need).match ({
+    buffer_reserve(a, s.string_buffer(), need).match ({
         .Ok(v)  => ok(v.buffer_string()),
         .Err(e) => err(e),
     })
@@ -126,14 +370,14 @@ reserve_in = (a: AllocatorBackend, s: String, need: i64) Result<String, IoError>
 // Force value args to locals first so callers may safely pass expressions that read `s`.
 push_in* = (a: AllocatorBackend, s: String, b: u8) Result<String, IoError> {
     b = b
-    buf.buffer_extend(a, s.string_buffer(), slice(b.addr(), 1), 1).match ({
+    buffer_extend(a, s.string_buffer(), slice(b.addr(), 1), 1).match ({
         .Ok(v)  => ok(v.buffer_string()),
         .Err(e) => err(e),
     })
 }
 append_in* = (a: AllocatorBackend, s: String, t: StringView) Result<String, IoError> {
     t = t
-    buf.buffer_extend(a, s.string_buffer(), t.view(), 1).match ({
+    buffer_extend(a, s.string_buffer(), t.view(), 1).match ({
         .Ok(v)  => ok(v.buffer_string()),
         .Err(e) => err(e),
     })
@@ -141,7 +385,7 @@ append_in* = (a: AllocatorBackend, s: String, t: StringView) Result<String, IoEr
 // Append a length-delimited slice; no NUL terminator is required.
 append_slice_in* = (a: AllocatorBackend, s: String, t: Slice<u8>) Result<String, IoError> {
     t = t
-    buf.buffer_extend(a, s.string_buffer(), t, 1).match ({
+    buffer_extend(a, s.string_buffer(), t, 1).match ({
         .Ok(v)  => ok(v.buffer_string()),
         .Err(e) => err(e),
     })
@@ -169,7 +413,7 @@ StringFixed*: {
         v ::= s.view()
         v[i] = b
     }
-    drop = (s: StringFixed) void { buf.buffer_fixed_drop(s.string_fixed_buffer()) }
+    drop = (s: StringFixed) void { buffer_fixed_drop(s.string_fixed_buffer()) }
 }
 StringConst*: {
     ptr: RawPtr<u8>,
@@ -177,43 +421,78 @@ StringConst*: {
     alloc: Allocator,
     view = (s: StringConst) Slice<u8> { slice(s.ptr, s.len) }
     get  = (s: StringConst, i: i64) u8 { s.view()[i] }
-    drop = (s: StringConst) void { buf.buffer_const_drop(s.string_const_buffer()) }
+    drop = (s: StringConst) void { buffer_const_drop(s.string_const_buffer()) }
 }
-string_fixed_buffer = (s: StringFixed) buf.BufferFixed<u8> {
-    buf.BufferFixed<u8>(
+string_fixed_buffer = (s: StringFixed) BufferFixed<u8> {
+    BufferFixed<u8>(
         ptr: s.ptr,
         len: s.len,
         alloc: s.alloc,
     )
 }
-buffer_string_fixed = (v: buf.BufferFixed<u8>) StringFixed {
+buffer_string_fixed = (v: BufferFixed<u8>) StringFixed {
     StringFixed(
         ptr: v.ptr,
         len: v.len,
         alloc: v.alloc,
     )
 }
-string_const_buffer = (s: StringConst) buf.BufferConst<u8> {
-    buf.BufferConst<u8>(
+string_const_buffer = (s: StringConst) BufferConst<u8> {
+    BufferConst<u8>(
         ptr: s.ptr,
         len: s.len,
         alloc: s.alloc,
     )
 }
-buffer_string_const = (v: buf.BufferConst<u8>) StringConst {
+buffer_string_const = (v: BufferConst<u8>) StringConst {
     StringConst(
         ptr: v.ptr,
         len: v.len,
         alloc: v.alloc,
     )
 }
-// string records initial OOM for freeze(); string_fixed reports it immediately.
-string* = (a: Allocator, cap: i64) String {
-    v: buf.Buffer<u8> = buf.buffer_new(a, cap + 1)
+// Carrying construction records initial OOM for the settle point. The optional capacity keeps the
+// pre-consolidation `a.string(n)` spelling valid while making `a.string()` the default form.
+string* = (a: Allocator, capacities: ...i64) String {
+    cap = (capacities.len > 0).then({ capacities[0] }, { 16 })
+    a.string_with_capacity(cap)
+}
+string_with_capacity* = (a: Allocator, cap: i64) String {
+    v: Buffer<u8> = buffer_new(a, cap + 1)
     v.buffer_string()
 }
+// Compiler lowering for `a.String(...)` targets this unique helper: no args uses the default,
+// one Int is capacity, and a leading Text is a template whose remaining arguments are values.
+string_args* = (a: Allocator, args: ...StringArg) String {
+    (args.len == 0).match ({
+        true  => a.string(),
+        false => (args.len == 1).match ({
+            true  => args[0].value.match ({
+                .Int(n)   => a.string_with_capacity(n),
+                .Text(t)  => a.string().add_format(t),
+                .UInt(n)  => a.string().add_u64(n),
+                .Float(x) => a.string().add_f64(x),
+                .Bool(b)  => a.string().add_value(.Bool(b)),
+                .Owned(g) => a.string().add_value(.Owned(g)),
+                .Temp(g)  => a.string().add_value(.Temp(g)),
+            }),
+            false => args[0].value.match ({
+                .Text(t)  => {
+                    rest: MutSlice<StringArg> = slice(args.ptr.offset(sizeof(StringArg)), args.len - 1)
+                    a.string().add_format(t, rest)
+                },
+                .Int(n)   => a.string_with_capacity(n),
+                .UInt(n)  => a.string().add_u64(n),
+                .Float(x) => a.string().add_f64(x),
+                .Bool(b)  => a.string().add_value(.Bool(b)),
+                .Owned(g) => a.string().add_value(.Owned(g)),
+                .Temp(g)  => a.string().add_value(.Temp(g)),
+            }),
+        }),
+    })
+}
 string_fixed* = (a: Allocator, n: i64) Result<StringFixed, IoError> {
-    r: Result<buf.BufferFixed<u8>, IoError> = buf.buffer_fixed(a, n)
+    r: Result<BufferFixed<u8>, IoError> = buffer_fixed(a, n)
     r.match ({
         .Ok(v)  => ok(v.buffer_string_fixed()),
         .Err(e) => err(e),

@@ -1,9 +1,9 @@
 { ArmData, Decl, Expr, FieldInit, FnTData, Func, LambdaData, Param, Stmt, Ty } = compiler.ast.ast_types
 { cbuf, arm_spans, bin_at, block, cond_oa, dfunc, eindex, eloop_at, ematch, ematchp, finit,
-  finit_at, gstr_append, gstr_finish, gstr_string, lam_r, mfield, mkenumg_at, mkstructg_at,
+  finit_at, lam_r, mfield, mkenumg_at, mkstructg_at,
   param_at, sassign_at, sexpr, sidxset_at, sif, slett_atm, slit, sret, swhile, tvoid, vref,
   acquire_or_die } = compiler.genc
-{ gstr_int, map_slice } = compiler.astops
+{ map_slice } = compiler.astops
 { DeclIndex, VList, cebuf, cenode, empty_params, is_intrinsic, pbuf, recall, var_bound, vcons, vnil } = compiler.check
 { field_fnt } = compiler.check_inline
 { Allocator } = std.mem.alloc
@@ -135,7 +135,7 @@ lift_liftable* = (a: Allocator, decls: MutSlice<Decl>, idx: DeclIndex, lm: Lambd
     a.lift_body_cap(decls, idx, a.lift_lamparams(a.vnil(), lm.params), lm.body) == false
 }
 // ── the side condition on the intrinsic exemption above ──────────────────────────────────────────
-// An intrinsic name IS a legal binder — `g = (store_i64: (i64) i64) i64 { store_i64(21) }` and
+// An intrinsic name IS a legal binder — `g = (store_i64: (value: i64) i64) i64 { store_i64(21) }` and
 // `load = (x: i64) i64 { x + 1 }` are both pinned green (harness_value, harness_build), and every
 // use site resolves to the binder, not to genc. A LIFTED body is a top-level fn, where that binder is
 // out of scope and genc re-reads the name as the intrinsic: `load(k)` becomes `*(k)` (a C error on the
@@ -194,8 +194,8 @@ lift_shadows_intrinsic = (f: Func) bool {
 // --- the lift transform: replace each liftable lambda (in a field-init / return value) with the name
 //     of a freshly generated top-level fn, collected (with a shared counter) for appending. ---
 lift_name = (a: Allocator, k: i64) StringView {
-    s = a.gstr_string(24).gstr_append(a, "__lam_")
-    s.gstr_int(a, k).gstr_finish(a)
+    s = a.String(24).add("__lam_")
+    s.add_i64(k).finish_cstr()
 }
 // the (function) type of struct `sty`'s field `fname` — substituted for a generic instance's targs.
 lift_func_of = (a: Allocator, lm: LambdaData, ft: FnTData, name: StringView) Decl {
