@@ -1,55 +1,17 @@
-# Top-level convenience Makefile — pure forwarding to bootstrap/Makefile so a newcomer can type
-# plain `make` (build the compiler), `make harness` (run the test harness), etc. from the repo root
-# without remembering the `-f bootstrap/Makefile` incantation. All real build logic lives in
-# bootstrap/Makefile; this file only delegates. CI uses `make -f bootstrap/Makefile <target>`
-# directly, so this wrapper never changes what CI builds.
+# Top-level convenience Makefile — pure forwarding to bootstrap/Makefile. Only the targets that
+# survive the reset are exposed here: everything else (regen, harness, bench, difftest, docs-check,
+# ffi-verify, resolve-seed) consumed sources that no longer exist in this tree. bootstrap/Makefile
+# still defines them; they will fail until there is a compiler to regenerate.
 
 BOOT := $(MAKE) -f bootstrap/Makefile
 
-.PHONY: all zen build regen harness harness-fast bench bench-valgrind difftest docs-check ffi-verify clean setup-git resolve-seed
+.PHONY: all zen clean
 
-# Default: build ./zen.
+# Default: cc the frozen stage-0 seed into ./zen.
 all: zen
 
 zen:
 	$(BOOT) zen
 
-# zen builds zen: run the repo-root build.zen through the compiler's own project mode
-# (equivalent to `./zen build`; writes a dev-profile ./zen-next — use `./zen build -r` for the
-# optimized release build).
-build:
-	$(BOOT) build
-
-regen:
-	$(BOOT) regen
-
-harness:
-	$(BOOT) harness
-
-harness-fast:
-	$(BOOT) harness-fast
-
-# Benchmarks: NOT a gate (noisy by nature) — records ns/op and live-heap bytes/op per operation.
-bench:
-	$(BOOT) bench
-
-bench-valgrind:
-	$(BOOT) bench-valgrind
-
-difftest:
-	$(BOOT) difftest
-
-docs-check:
-	$(BOOT) docs-check
-
-ffi-verify:
-	$(BOOT) ffi-verify
-
 clean:
 	$(BOOT) clean
-
-setup-git:
-	$(BOOT) setup-git
-
-resolve-seed:
-	$(BOOT) resolve-seed

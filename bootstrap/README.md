@@ -1,17 +1,15 @@
 # Bootstrap
 
-The compiler is Zen source. This directory contains the generated artifacts and small target floors
-needed to build it with a host C compiler and no Python.
+The frozen stage-0 compiler. Everything here is an artifact — there is no compiler source in this
+tree to regenerate it from.
 
 | File | Role |
 |---|---|
-| `zenc.gen.c` | Committed C emitted from the compiler source graph plus `driver.zen`. |
+| `zenc.gen.c` | Committed C, emitted from the compiler source graph plus `driver.zen` as they stood at `main`. Supplies `zen_main`; there is no separate C driver. |
 | `zenrt.h` / `zenrt.c` | Hand-written C process, OS, thread, and panic-isolation floor. |
-| `zenrt.js` | JavaScript runtime floor used by `emit-js`/the JS build target. |
-| `sources.txt` | Graph/SCC-checked source order for self-regeneration. |
-| `Makefile` | Build, regenerate, harness, and seed-merge helpers. |
-
-There is no separate C driver. `driver.zen` is emitted into `zenc.gen.c` and supplies `zen_main`.
+| `zenrt.js` | JavaScript runtime floor for the retired `emit-js` target. Kept only because stage-0 still advertises the flag. |
+| `sources.txt` | Provenance: the graph/SCC-ordered file list `zenc.gen.c` was generated from. Those files live on `main`, not here. |
+| `Makefile` | Retains every target; only `zen` and `clean` can run without the deleted sources. |
 
 ## Build
 
@@ -27,27 +25,11 @@ or directly:
 make -f bootstrap/Makefile zen
 ```
 
-The real output target is `./zen`; an unchanged build is an mtime no-op. If `ccache` is available it
-is used for the large generated translation unit, unless `CC` is explicitly set.
+The output is `./zen`; an unchanged build is an mtime no-op. If `ccache` is available it is used for
+the large generated translation unit, unless `CC` is explicitly set.
 
-## Regenerate and prove the fixpoint
+## Regenerating
 
-After changing `driver.zen`, `src/compiler/*`, or a std module in `sources.txt`:
-
-```sh
-make regen
-cp bootstrap/zenc.gen.c /tmp/zenc.fixpoint.c
-make regen
-cmp /tmp/zenc.fixpoint.c bootstrap/zenc.gen.c
-```
-
-`regen` writes a PID-specific temporary and replaces `zenc.gen.c` only when bytes changed. A second
-run must be identical. The full harness also contains a fixpoint suite and verifies that
-`sources.txt` agrees with the resolver graph order. `make docs-check` verifies the deliberate
-thirteen-file documentation inventory and every local Markdown link.
-
-Generated C is an artifact, not a merge authority. Register the local merge driver with
-`make setup-git`; after resolving source changes, `make resolve-seed` regenerates and stages the seed.
-
-See [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) for the pipeline and [../docs/STATUS.md](../docs/STATUS.md) for
-current limits.
+Not possible from this tree, by design. A new compiler must be written in Zen, compiled by stage-0,
+and then made to emit its own seed — at which point `zenc.gen.c` is replaced and this directory stops
+being frozen. Until then, treat stage-0 as a binary blob: do not edit the generated C.

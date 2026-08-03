@@ -1,230 +1,38 @@
 # Zen
 
-[![CI](https://github.com/lantos1618/zen-holotype/actions/workflows/ci.yml/badge.svg)](https://github.com/lantos1618/zen-holotype/actions/workflows/ci.yml)
+A reset. This tree is the frozen stage-0 compiler and the std floor it needs — nothing else.
 
-Zen is an experimental, self-hosted systems language and toolchain. The compiler,
-standard library, command-line interface, formatter, language server, and test
-harness are written in Zen. A committed C seed and a small C runtime make the
-repository bootstrappable with an ordinary C compiler.
+## Why
 
-> **Project status:** Zen is at `0.2.0-dev` and is under active development. The C
-> backend and repository workflow are the primary supported path. The JavaScript
-> backend is experimental, package management is not implemented, and known
-> correctness gaps remain. Read [the status ledger](docs/STATUS.md) before using Zen
-> for consequential work.
+The compiler tripled in five weeks (14.5k → 44.9k LOC, 12 → 73 files) while the language did not
+grow. The July decomposition split god files without breaking dependencies: `src/compiler/validate/`
+was eight files with eleven mutual import cycles, only linkable because `--build-self` concatenates
+every compiler source into one flat translation unit. That is not a module system, it is a build flag
+hiding a cycle. The full history is on `main`.
 
-## Quick start
+## What is here
 
-The primary development environment is Linux. You need a POSIX-like shell,
-`make`, and a C compiler with GNU C11 support. The full test harness also uses
-Valgrind.
-
-```sh
-git clone https://github.com/lantos1618/zen-holotype.git
-cd zen-holotype
-make
-./zen run examples/hello.zen
-```
-
-Expected output:
-
-```text
-hello, zen
-42
-```
-
-`make` compiles `bootstrap/zenc.gen.c` and the runtime into `./zen`. The
-compiler currently expects the standard library sources to remain available in
-the checkout. If you relocate the binary, set `ZEN_ROOT` to the repository root:
-
-```sh
-ZEN_ROOT=/path/to/zen-holotype /path/to/zen run program.zen
-```
-
-There is no system-wide installer yet.
-
-## A small Zen program
-
-```zen
-{ println } = std.text.fmt
-
-Shape: Circle(i32) | Rect(Rect)
-Rect: {
-    width: i32,
-    height: i32,
-}
-
-area = (shape: Shape) i32 {
-    shape.match ({
-        .Circle(radius) => 3 * radius * radius,
-        .Rect(rect)     => rect.width * rect.height,
-    })
-}
-
-main = () i32 {
-    println(area(.Circle(4)))
-    println(area(.Rect(Rect(width: 6, height: 7))))
-    0
-}
-```
-
-This demonstrates several of Zen's central choices:
-
-- `.match` is the conditional construct; ordinary `if` is rejected with a
-  diagnostic and rewrite guidance.
-- Functions return their trailing expression. Explicit `return` is available
-  for early exits.
-- Structs, enums, generics, traits, and receiver-style method dispatch share a
-  compact structural syntax.
-- Recoverable failures use `Result<T, E>` and `Opt<T>`; `.or_return()`
-  propagates an error.
-- Memory is explicit. The standard library exposes allocators, owned containers,
-  reference-counted values, and distinct `Ptr<T>`, `MutPtr<T>`, and
-  `RawPtr<T>` types.
-
-The ownership and escape analyses are useful but bounded; they are not a complete
-borrow proof. The exact language contract is in [the specification](docs/SPEC.md).
-
-## Command line
-
-The repository builds the compiler as `./zen`; the binary identifies itself as
-`zenc`.
-
-| Command | Purpose |
+| Path | Role |
 |---|---|
-| `./zen init PATH --bin` | Create a runnable project. Use `--lib` for a library-shaped project. |
-| `./zen run FILE [args]` | Check, compile, and run a file. A project directory is also accepted. |
-| `./zen check FILE` | Resolve and type-check without generating an executable. |
-| `./zen build [PROJECT]` | Build a project in the development profile. Add `-r` for release. |
-| `./zen targets PROJECT` | List targets registered by a project's `build.zen`. |
-| `./zen fmt FILE...` | Format files in place. Use `--check` or `--stdout` for non-mutating checks. |
-| `./zen emit FILE` | Write generated C to standard output. |
-| `./zen emit-js FILE` | Write experimental JavaScript output to standard output. |
-| `./zen doc MODULE` | Print the exported surface of a module or source file. |
-| `./zen audit FILE` | Report dead declarations, unused imports, and advisory clones. |
-| `./zen profile FILE` | Produce a sampling profile using `perf`, with a `gprof` fallback. |
-| `./zen lsp` | Start the language server over standard input/output. |
+| `bootstrap/zenc.gen.c` | The frozen stage-0 compiler: 4.4 MB of generated C. The only thing that can compile Zen. |
+| `bootstrap/zenrt.{c,h}` | Hand-written C process, OS, thread, and panic floor. |
+| `src/std/` | 13 files, 1,892 LOC — the std floor stage-0 reads from disk. |
 
-Run `./zen --help` for flags and the complete command syntax.
-
-## Files and projects
-
-Single-file programs can be checked or run directly:
+## Build
 
 ```sh
-./zen check examples/tour.zen
-./zen run examples/tour.zen
+make          # cc bootstrap/zenc.gen.c -> ./zen
+./zen run f.zen
 ```
 
-Create a project with:
+Stage-0 is a binary artifact with no source in this tree. It cannot be regenerated here; that is the
+point. `make regen`, the harness, and every other target are gone with the sources they consumed.
+`bootstrap/sources.txt` is kept as provenance — it lists the files stage-0 was generated from, all of
+which now live only on `main`.
 
-```sh
-./zen init hello --bin
-./zen run hello
-./zen build hello
-```
+## The rule for what comes back
 
-`zen.toml` describes a conventional project. A `build.zen` file provides
-programmatic targets through `std.build`; this repository uses that path to
-self-build the compiler. Local and dotted modules work, but dependency metadata,
-registered package roots, and package distribution do not yet exist.
+A split is real only if the new files form a DAG. Anything that reintroduces a mutual import cycle,
+or that needs whole-program concatenation to link, is not a module boundary.
 
-Development builds use `-O1 -g`. Release builds use `-O2` with strict aliasing
-disabled because the generated C intentionally performs pointer punning.
-
-## Self-hosting
-
-The committed seed is generated by the compiler from the Zen sources listed in
-`bootstrap/sources.txt`. On a clean checkout, this should reproduce the seed
-byte for byte:
-
-```sh
-make regen
-git diff --exit-code -- bootstrap/zenc.gen.c
-```
-
-The bootstrap chain is:
-
-```text
-bootstrap/zenc.gen.c + bootstrap/zenrt.c
-                    │ C compiler
-                    ▼
-                  ./zen
-                    │ --build-self
-                    ▼
-          bootstrap/zenc.gen.c
-```
-
-The byte-exact fixpoint is a core merge and release gate. It proves that the
-checked-in bootstrap artifact is reproducible from the checked-in Zen sources;
-it does not by itself prove that every accepted program is correct.
-
-## Examples
-
-The [examples guide](examples/README.md) contains exact invocation instructions.
-Representative programs include:
-
-| Example | Demonstrates |
-|---|---|
-| [`hello.zen`](examples/hello.zen) | Minimal imports, output, and an exit status. |
-| [`tour.zen`](examples/tour.zen) | Structs, enums, traits, generics, matches, results, and explicit allocation. |
-| [`zvm.zen`](examples/zvm.zen) | A stack virtual machine and two-pass assembler. |
-| [`jq.zen`](examples/jq.zen) | JSON parsing and path selection as a Unix-style filter. |
-| [`pool_actor_demo.zen`](examples/pool_actor_demo.zen) | Typed actors running on an OS-thread pool. |
-| [`dom_demo.zen`](examples/dom_demo.zen) | Browser DOM lowering through the experimental JavaScript backend. |
-
-## Editor support
-
-`./zen lsp` provides diagnostics, semantic tokens, go-to-definition, hover, and
-completion over JSON-RPC stdio.
-
-- [Neovim setup](editor/nvim/README.md)
-- [VS Code extension](editor/vscode/README.md)
-- Other editors can launch `zen lsp` from the repository checkout.
-
-## Developing Zen
-
-Useful local checks:
-
-```sh
-make harness-fast          # semantic smoke subset
-make harness               # full merge-gate harness
-bash scripts/fmt-check.sh  # formatter check for tracked Zen sources
-make docs-check            # documentation inventory and local links
-make ffi-verify            # FFI declarations against system headers
-make regen                 # regenerate the bootstrap seed
-make -f bootstrap/Makefile asan
-```
-
-`make harness` is the main local correctness gate. On Linux it expects
-Valgrind because the example leak sweep fails closed when Valgrind is absent.
-Compiler, driver, or bootstrap-source changes must include the regenerated seed
-and leave a second regeneration byte-identical.
-
-## Repository map
-
-| Path | Contents |
-|---|---|
-| `driver.zen` | CLI entry point, project driver, and command dispatch. |
-| `src/compiler/` | Lexer, parser, resolver, checker, validation passes, backends, formatter, audit, and LSP. |
-| `src/std/` | Standard library modules. |
-| `bootstrap/` | Generated C seed, runtime floors, source manifest, and bootstrap makefile. |
-| `tests/` | Zen-native harness and regression fixtures. |
-| `examples/` | Runnable programs and backend demonstrations. |
-| `tools/` | Repository audits and maintenance tools written in Zen. |
-| `editor/` | Neovim and VS Code integrations. |
-
-## Documentation
-
-| Document | Use it for |
-|---|---|
-| [Language specification](docs/SPEC.md) | Syntax, types, semantics, modules, tooling, and test mapping. |
-| [Compiler architecture](docs/ARCHITECTURE.md) | Pipeline, layering, bootstrap, runtime surfaces, and change discipline. |
-| [Memory model](docs/MEMORY_MODEL.md) | Allocators, pointer capabilities, ownership, sendability, and current enforcement. |
-| [Status and roadmap](docs/STATUS.md) | Shipped features, limitations, confirmed defects, and planned work. |
-| [Profiling guide](docs/profiling.md) | Compiler and program profiling workflows. |
-
-## License
-
-This repository does not currently include a license. Until one is added, do not
-assume permission to copy, modify, or redistribute the project.
+Recover any deleted file with `git checkout main -- <path>`.
