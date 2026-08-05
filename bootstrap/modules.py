@@ -1140,6 +1140,30 @@ def _member_span(info: ModuleInfo, node: Any) -> Any:
     return found or span
 
 
+def _plausible(info: ModuleInfo, candidates: tuple) -> list:
+    """The candidates whose receiver the reader could have written *here*.
+
+    Two modules declaring an unexported `grow` is the normal case once a real
+    standard library exists — `std.collections` has one and so does the program
+    being compiled. Which one an access means is a type question, and types are
+    sema's. But *which types are nameable here* is a scope question, and that is
+    exactly what this file already knows: a member is plausible when its owning
+    type is in scope as the same declaration. Free functions carry no owner and
+    always stay in, so narrowing can never invent an error for a UFCS call.
+    """
+    focused = []
+    for c in candidates:
+        if c.owner is None:
+            focused.append(c)
+            continue
+        for binding in info.scope.get(c.owner, ()):
+            owner = binding.entity
+            if owner.kind == TYPE and owner.module == c.module and owner.name == c.owner:
+                focused.append(c)
+                break
+    return focused or list(candidates)
+
+
 def _check_accesses(graph: Graph, info: ModuleInfo, diags: list) -> None:
     if info.node is None:
         return
@@ -1157,9 +1181,10 @@ def _check_accesses(graph: Graph, info: ModuleInfo, diags: list) -> None:
         name = getattr(node, "name", None)
         if not isinstance(name, str) or not name:
             continue
-        candidates = graph.members.get(name, ()) + graph.functions.get(name, ())
-        if not candidates:
+        found = graph.members.get(name, ()) + graph.functions.get(name, ())
+        if not found:
             continue  # not a name this program declares: not this gate's call
+        candidates = _plausible(info, found)
 
         reachable = [c for c in candidates if graph.visible(c, info.dotted)]
         if not reachable:

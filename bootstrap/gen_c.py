@@ -161,6 +161,7 @@ GEN = "zg_"
 
 MAX_INSTANCES = 4096  # infinite monomorphisation stops here, with a diagnostic
 MAX_EXPR_DEPTH = 24  # deeper than this spills to a temporary, per TESTING.md
+INLINE_DEPTH = 32  # a closure inlined into itself stops here, with a diagnostic
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +315,8 @@ INT_VALUES = {
     "usize": (0, 18446744073709551615, 64),
     "isize": (-9223372036854775808, 9223372036854775807, 64),
 }
+
+NUMERIC = frozenset(list(INT_VALUES) + ["f32", "f64", "bool"])
 
 UNIT = ("unit",)
 UNKNOWN = ("unknown",)
@@ -548,9 +551,16 @@ def module_parts(mod):
 class Decl:
     """One declaration, with everything gen_c needs to name and emit it."""
 
-    __slots__ = ("parts", "node", "dkind", "name", "tparams", "module", "owner")
+    __slots__ = ("parts", "node", "dkind", "name", "tparams", "module", "owner",
+                 "otparams")
 
-    def __init__(self, parts, node, dkind, name, tparams=(), owner=None, module=""):
+    def __init__(self, parts, node, dkind, name, tparams=(), owner=None, module="",
+                 otparams=()):
+        # A method of `Vec<T>` is generic in T whether or not it declares any
+        # type parameters of its own, so the owner's come FIRST and an
+        # instantiation is (receiver args + call args).
+        self.otparams = tuple(otparams)
+        tparams = self.otparams + tuple(tparams)
         self.parts = tuple(parts)
         self.node = node
         self.dkind = dkind  # "type" | "fn" | "value"
@@ -665,7 +675,8 @@ class Emitter:
                     if _is_fn_field(member):
                         self._add_decl(
                             Decl(base + (str(name), mname), member, "fn", mname,
-                                 _tparam_names(member), owner=str(name), module=dotted)
+                                 _tparam_names(member), owner=str(name), module=dotted,
+                                 otparams=_tparam_names(node))
                         )
                     elif f(member, "default") is not None and not f(member, "ty"):
                         self._add_decl(
@@ -710,23 +721,26 @@ class Emitter:
         and the local table is only the fallback for a caller that handed
         gen_c bare `ast.Module`s.
         """
-        cands = []
+        def keep(found):
+            return [d for d in found if not dkind or d.dkind == dkind]
+
+        # The kind asked for is part of the question, not a filter applied
+        # afterwards: `Alloc` declares a member named `Vec` and std declares a
+        # TYPE named `Vec`, and the member shadowing the type in expression
+        # position must not hide it in type position.
         if self.graph is not None and parts:
             for n in range(len(parts), 0, -1):
                 dotted = ".".join(parts[:n])
                 if dotted in getattr(self.graph, "modules", {}):
-                    cands = self.from_bindings(self.graph.lookup(dotted, name))
-                    break
-        if not cands and parts:
+                    got = keep(self.from_bindings(self.graph.lookup(dotted, name)))
+                    if got:
+                        return got
+        if parts:
             for n in range(len(parts), -1, -1):
-                cands = self.decls.get((tuple(parts[:n]), name), [])
-                if cands:
-                    break
-        if not cands:
-            cands = self.by_name.get(name, [])
-        if dkind:
-            cands = [d for d in cands if d.dkind == dkind]
-        return cands
+                got = keep(self.decls.get((tuple(parts[:n]), name), []))
+                if got:
+                    return got
+        return keep(self.by_name.get(name, []))
 
     def from_bindings(self, bindings):
         out = []
@@ -767,7 +781,7 @@ class Emitter:
 
     # -- types -------------------------------------------------------------
 
-    def resolve_type(self, node, subst=None, parts=()):
+    def resolve_type(self, node, subst=None, parts=(), self_ty=None):
         """An AST Type -> the tuple model."""
         subst = subst or {}
         if node is None:
@@ -776,7 +790,8 @@ class Emitter:
         if k == "Named":
             name = str(f(node, "name", ""))
             args = tuple(
-                self.resolve_type(a, subst, parts) for a in (f(node, "args", ()) or ())
+                self.resolve_type(a, subst, parts, self_ty)
+                for a in (f(node, "args", ()) or ())
             )
             if name in subst and not args:
                 return subst[name]
@@ -784,32 +799,44 @@ class Emitter:
                 return ("ptr", args[0] if args else prim("u8"))
             if name == "...":
                 return ("variadic",)
+            if name in NUMERIC:
+                # `std/core/num.zen` declares `i32`, `usize` and the rest as
+                # struct bodies so they can carry MIN/MAX/BITS -- "a constant
+                # declares one value per type, which is the only kind i32
+                # could have".  The declaration is where the constants live;
+                # the TYPE is still the machine one.
+                return prim(name)
             decl = self.type_decl(name, parts, len(args))
             if decl is None:
                 if name in PRIMS:
                     return prim(name)
-                if name == "@Self" and parts:
-                    return ("named", tuple(parts), ())
+                if name == "@Self":
+                    if self_ty is not None:
+                        return self_ty
+                    if parts:
+                        return ("named", tuple(parts), ())
                 if name not in subst:
                     self.error(node, "unknown type `%s`" % name)
                 return UNKNOWN
             if kind(decl.node) == "Alias":
-                return self.resolve_type(f(decl.node, "target"), subst, decl.scope_parts)
+                return self.resolve_type(f(decl.node, "target"), subst,
+                                         decl.scope_parts, self_ty)
             return ("named", decl.parts, args)
         if k == "Union":
             return union_of(
-                [self.resolve_type(m, subst, parts) for m in (f(node, "members", ()) or ())]
+                [self.resolve_type(m, subst, parts, self_ty)
+                 for m in (f(node, "members", ()) or ())]
             )
         if k == "FnType":
-            ret = self.resolve_type(f(node, "ret"), subst, parts)
+            ret = self.resolve_type(f(node, "ret"), subst, parts, self_ty)
             ps = tuple(
-                self.resolve_type(f(p, "ty"), subst, parts)
+                self.resolve_type(f(p, "ty"), subst, parts, self_ty)
                 for p in (f(node, "params", ()) or ())
             )
             return ("fn", ret, ps)
         if k == "ArrayType":
             count = self.const_int(f(node, "count"), parts)
-            elem = self.resolve_type(f(node, "elem"), subst, parts)
+            elem = self.resolve_type(f(node, "elem"), subst, parts, self_ty)
             return ("array", count if count is not None else 0, elem)
         if k == "Unit":
             return UNIT
@@ -948,6 +975,8 @@ class Emitter:
                 vname = str(f(v, "name", ""))
                 payload = f(v, "payload")
                 pty = self.resolve_type(payload, subst, base) if payload is not None else None
+                if pty == UNIT:
+                    pty = None  # `Ok(())` carries nothing; a void member is illegal C
                 variants.append((vname, pty))
             for i, (vname, _p) in enumerate(variants):
                 # The tag name is a function of the DECLARATION, not of the
@@ -1089,7 +1118,8 @@ class Emitter:
         if fnode is None:
             return ()
         return tuple(
-            self.resolve_type(f(p, "ty"), subst, decl.scope_parts)
+            self.resolve_type(f(p, "ty"), subst, decl.scope_parts,
+                              self.self_type(decl, subst))
             for p in self.params_of(fnode)
         )
 
@@ -1100,13 +1130,14 @@ class Emitter:
         subst = dict(zip(decl.tparams, targs))
         base = decl.scope_parts
         params = list(self.params_of(fnode))
-        ret = self.resolve_type(self.ret_of(fnode), subst, base)
-        ctx = FnCtx(self, decl, subst, ret)
+        self_ty = self.self_type(decl, subst)
+        ret = self.resolve_type(self.ret_of(fnode), subst, base, self_ty)
+        ctx = FnCtx(self, decl, subst, ret, self_ty)
 
         decls = []
         for p in params:
             pname = str(f(p, "name", "_"))
-            pty = self.resolve_type(f(p, "ty"), subst, base)
+            pty = self.resolve_type(f(p, "ty"), subst, base, self_ty)
             if pty == UNKNOWN and self.sema is not None:
                 pty = self.sema_type(p, base, subst) or pty
             if pty == ("variadic",):
@@ -1130,6 +1161,15 @@ class Emitter:
             ctx.line("return (%s){0};" % self.ctype(ret) if ret[0] != "prim" else "return 0;")
         ctx.pop()
         self.bodies[cname] = head + " {\n" + ctx.text() + "}\n"
+
+    def self_type(self, decl, subst):
+        """`@Self` for this declaration: the owning type, at the arguments
+        this instantiation was made with."""
+        if not decl.owner:
+            return None
+        base = tuple(decl.module.split(".")) if decl.module else ()
+        return ("named", base + (decl.owner,),
+                tuple(subst.get(tp, UNKNOWN) for tp in decl.otparams))
 
     def sema_type(self, node, parts=(), subst=None):
         if self.sema is None:
@@ -1326,11 +1366,12 @@ class Emitter:
 
 
 class FnCtx:
-    def __init__(self, emitter, decl, subst, ret):
+    def __init__(self, emitter, decl, subst, ret, self_ty=None):
         self.e = emitter
         self.decl = decl
         self.parts = decl.scope_parts
         self.subst = subst
+        self.self_ty = self_ty
         self.ret = ret
         self.lines = []
         self.indent = 1
@@ -1338,6 +1379,8 @@ class FnCtx:
         self.counts = {}
         self.tmp = 0
         self.depth = 0
+        self.loops = []      # (break label, continue label, result temp, type)
+        self.inlining = 0    # inline depth, so a recursive body cannot spin
 
     # -- output ------------------------------------------------------------
 
@@ -1459,7 +1502,7 @@ class FnCtx:
             return
         existing = self.find(name)
         want = (
-            self.e.resolve_type(declared, self.subst, self.parts)
+            self.e.resolve_type(declared, self.subst, self.parts, self.self_ty)
             if declared is not None
             else (existing[1] if existing else None)
         )
@@ -1595,11 +1638,16 @@ class FnCtx:
         if kind(base) == "Path":
             bname = str(f(base, "name", ""))
             if self.find(bname) is None:
-                got = self.e.builtin_type_const(bname, name)
-                if got is not None and not self.e.lookup(bname, self.parts, "type"):
-                    value, ty = got
-                    return (int_literal(value, ty), ty)
                 tdecl = self.e.type_decl(bname, self.parts)
+                if bname in NUMERIC:
+                    if tdecl is not None:
+                        lit = self.type_member(tdecl, name, node)
+                        if lit is not None:
+                            return lit
+                    got = self.e.builtin_type_const(bname, name)
+                    if got is not None:
+                        value, ty = got
+                        return (int_literal(value, ty), ty)
                 if tdecl is not None:
                     lit = self.type_member(tdecl, name, node)
                     if lit is not None:
@@ -1730,6 +1778,13 @@ class FnCtx:
             # a raw pointer carries no length: DESIGN.md bounds-checks fixed
             # arrays, and Vec.get returns a Res instead
             return ("%s[%s]" % (paren(bcode), icode), bty[1])
+        if bty is not None and bty[0] == "named":
+            # `s[i]` is `s.index(i)`: a type says what indexing means, and
+            # `str.index` is where str's bounds check lives
+            got = self.owned_decls(bty, "index", "fn")
+            if got:
+                return self.emit_call(got[0], node, [(icode, ity)], (), want,
+                                      receiver=(bcode, bty))
         self.e.error(node, "value is not indexable")
         return ("0", UNKNOWN)
 
@@ -1826,6 +1881,9 @@ class FnCtx:
 
         if ck == "Path":
             name = str(f(callee, "name", ""))
+            bound = self.find(name)
+            if bound is not None and bound[1] is not None and bound[1][0] == "lambda":
+                return self.inline_lambda(bound, self.arg_nodes(args), want, node)
             if name in ("println", "print") and not self.e.lookup(name, self.parts, "fn"):
                 return self.lower_print(node, args, newline=(name == "println"))
             built = self.try_construct(name, node, args, targs, want)
@@ -1859,7 +1917,7 @@ class FnCtx:
             return None
         if kind(tdecl.node) == "Enum":
             return None  # a bare enum name is not a constructor
-        targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts) for t in targs)
+        targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts, self.self_ty) for t in targs)
         if not targ_tys and tdecl.tparams:
             targ_tys = self.infer_targs(tdecl, args)
         ty = ("named", tdecl.parts, targ_tys)
@@ -1977,8 +2035,14 @@ class FnCtx:
                     argnodes = self.arg_nodes(args)
                     decl = self.pick_overload(cands, argnodes)
                     return self.emit_call(decl, node, argnodes, targs, want)
+        if kind(base) == "Path":
+            bound = self.find(str(f(base, "name", "")))
+            if bound is not None and bound[1] is not None and bound[1][0] == "loop":
+                return self.lower_handle(bound, name, self.arg_nodes(args), node)
         rcode, rty = self.expr(base)
         argnodes = self.arg_nodes(args)
+        if is_handle(rty):
+            return self.lower_handle((rcode, rty), name, argnodes, node)
         if rty is not None and rty[0] == "ptr":
             got = self.ptr_method(rcode, rty, name, argnodes, node)
             if got is not None:
@@ -1993,41 +2057,94 @@ class FnCtx:
                     if d.dkind == "fn" and len(d.parts) >= 2 and d.parts[-2] == rty[1][-1]
                 ]
             if cands:
-                decl = self.pick_overload(cands, argnodes)
+                decl = self.pick_overload(cands, argnodes, receiver=(rcode, rty))
                 return self.emit_call(decl, node, argnodes, targs, want, receiver=(rcode, rty))
         # a ufcs free function: the receiver is the first parameter
         cands = self.e.lookup(name, self.parts, "fn")
         if cands:
-            decl = self.pick_overload(cands, argnodes)
+            decl = self.pick_overload(cands, argnodes, receiver=(rcode, rty))
             return self.emit_call(decl, node, argnodes, targs, want, receiver=(rcode, rty))
         self.e.error(node, "no method `%s` on this value" % name)
         return ("0", UNKNOWN)
 
     def ptr_method(self, rcode, rty, name, argnodes, node):
-        """Ptr<T>.read(i) / .write(i, v) -- the raw floor, when std is absent."""
+        """`Ptr<T>`'s members ARE the backend.
+
+        mem_ptr.zen writes every one of them as a signature and says why:
+        "the bodies belong to the backend: gen_c lowers a Ptr<T> to a `T*`
+        and these members to dereference, indexed store, pointer arithmetic
+        and memcpy.  They are written as signatures because there is nothing
+        underneath to write them in."  This is that lowering.
+        """
+        elem = rty[1]
+        cell = self.e.ctype(elem)
+
+        def arg(i, ty=None):
+            value = argnodes[i]
+            if isinstance(value, tuple):
+                return value[0]
+            return self.expr(value, ty)[0]
+
         if name == "read" and len(argnodes) == 1:
-            icode, _ = self.expr(argnodes[0], prim("usize"))
-            return ("%s[%s]" % (paren(rcode), icode), rty[1])
+            return ("%s[%s]" % (paren(rcode), arg(0, prim("usize"))), elem)
         if name == "write" and len(argnodes) == 2:
-            icode, _ = self.expr(argnodes[0], prim("usize"))
-            vcode, _ = self.expr(argnodes[1], rty[1])
-            self.line("%s[%s] = %s;" % (paren(rcode), icode, vcode))
+            self.line("%s[%s] = %s;" % (paren(rcode), arg(0, prim("usize")), arg(1, elem)))
             return ("0", UNIT)
+        if name == "offset" and len(argnodes) == 1:
+            return ("(%s + %s)" % (paren(rcode), arg(0, prim("usize"))), rty)
+        if name == "back" and len(argnodes) == 1:
+            return ("(%s - %s)" % (paren(rcode), arg(0, prim("usize"))), rty)
+        if name == "bytes" and len(argnodes) == 1:
+            return ("(sizeof(%s) * (size_t)%s)" % (cell, arg(0, prim("usize"))),
+                    prim("usize"))
+        if name == "copy_from" and len(argnodes) == 2:
+            self.line("memcpy(%s, %s, sizeof(%s) * (size_t)%s);"
+                      % (rcode, arg(0, rty), cell, arg(1, prim("usize"))))
+            return ("0", UNIT)
+        if name == "is_null" and not argnodes:
+            return ("(%s == NULL)" % paren(rcode), prim("bool"))
+        if name == "to" and len(argnodes) == 0:
+            return (rcode, rty)
         return None
 
-    def pick_overload(self, cands, argnodes):
-        """Resolution on arity, then on declared parameter types."""
+    def pick_overload(self, cands, argnodes, receiver=None):
+        """Resolution on arity and on declared parameter types.
+
+        "a closure's type is its full signature", so a closure argument's
+        PARAMETER COUNT is part of the arity question -- it is what tells
+        `loop(range, (h, value) {..})` from `loop(range, (h, index, value)
+        {..})`, which are otherwise the same two-argument call.
+        """
         cands = sorted(cands, key=lambda d: d.parts)
         if len(cands) == 1:
             return cands[0]
-        want = len(argnodes)
-        by_arity = []
+        want = len(argnodes) + (1 if receiver is not None else 0)
+        exact = []
+        loose = []
         for d in cands:
             fnode = self.e.fn_node(d.node)
             n = len(self.e.params_of(fnode)) if fnode else -1
-            if n == want or n == want + 1:
-                by_arity.append(d)
-        return (by_arity or cands)[0]
+            if n == want:
+                exact.append(d)
+            elif n in (want + 1, want - 1):
+                loose.append(d)
+        pool = exact or loose or cands
+        shaped = []
+        for d in pool:
+            params = self.e.params_of(self.e.fn_node(d.node))
+            ok = True
+            for i, value in enumerate(argnodes):
+                idx = i + (1 if receiver is not None else 0)
+                if idx >= len(params) or kind(value) != "Lambda":
+                    continue
+                pty = f(params[idx], "ty")
+                if pty is None or kind(pty) != "FnType":
+                    continue
+                if len(f(pty, "params", ()) or ()) != len(f(value, "params", ()) or ()):
+                    ok = False
+            if ok:
+                shaped.append(d)
+        return (shaped or pool)[0]
 
     def build_variant(self, decls, payload_node, want, node):
         """`Ok(v)` / `None` / `Err(e)` written without their enum.
@@ -2080,7 +2197,7 @@ class FnCtx:
         return (self.make_variant(ty, vname, code), ty)
 
     def construct_variant(self, tdecl, vname, node, args, targs, want):
-        targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts) for t in targs)
+        targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts, self.self_ty) for t in targs)
         if not targ_tys and tdecl.tparams and want is not None and want[0] == "named":
             if want[1] == tdecl.parts:
                 targ_tys = want[2]
@@ -2101,6 +2218,9 @@ class FnCtx:
     def make_variant(self, ty, vname, payload):
         cname = self.e.ctype(ty)
         tag = sym_variant(self.e.variant_parts(ty, vname))
+        info = self.e.enum_info(ty)
+        if info is not None and dict(info[2]).get(vname) is None:
+            payload = None  # a `()` payload is no storage: `Ok(())` is a tag
         if payload is None:
             return "((%s){ .%stag = %s })" % (cname, GEN, tag)
         return "((%s){ .%stag = %s, .%sdata = { .%s = %s } })" % (
@@ -2118,29 +2238,350 @@ class FnCtx:
             self.e.error(node, "`%s` is not callable" % decl.name)
             return ("0", UNKNOWN)
         params = list(self.e.params_of(fnode))
-        targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts) for t in targs)
+        if f(fnode, "body") is None and is_loop_shape(self.e, fnode):
+            return self.lower_loop(decl, fnode, node, argnodes, want, receiver)
+        if any(kind(v) == "Lambda" for v in argnodes) and f(fnode, "body") is not None:
+            return self.inline_call(decl, fnode, node, argnodes, targs, want, receiver)
+        targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts, self.self_ty)
+                         for t in targs)
+        owner_tys = ()
+        if decl.otparams:
+            if receiver is not None and receiver[1] is not None and receiver[1][0] == "named":
+                owner_tys = tuple(receiver[1][2])
+            else:
+                owner_tys = tuple(UNKNOWN for _ in decl.otparams)
         values = list(argnodes)
         codes = []
         if receiver is not None:
             codes.append(receiver[0])
-        if decl.tparams and not targ_tys:
-            targ_tys = self.infer_fn_targs(decl, fnode, values, receiver)
+        own = decl.tparams[len(decl.otparams):]
+        if own and len(targ_tys) != len(own):
+            targ_tys = self.infer_fn_targs(decl, fnode, values, receiver, owner_tys)
+        targ_tys = owner_tys + tuple(targ_tys)
         subst = dict(zip(decl.tparams, targ_tys))
         for i, value in enumerate(values):
             idx = i + (1 if receiver is not None else 0)
             pty = (
-                self.e.resolve_type(f(params[idx], "ty"), subst, decl.scope_parts)
+                self.e.resolve_type(f(params[idx], "ty"), subst, decl.scope_parts,
+                                    self.e.self_type(decl, subst))
                 if idx < len(params)
                 else None
             )
-            codes.append(self.expr(value, pty)[0])
+            if isinstance(value, tuple):  # already lowered
+                codes.append(value[0])
+            else:
+                codes.append(self.expr(value, pty)[0])
         cname = self.e.request_fn(decl, targ_tys)
-        ret = self.e.resolve_type(self.e.ret_of(fnode), subst, decl.scope_parts)
+        ret = self.e.resolve_type(self.e.ret_of(fnode), subst, decl.scope_parts,
+                                  self.e.self_type(decl, subst))
         return ("%s(%s)" % (cname, ", ".join(codes)), ret)
 
-    def infer_fn_targs(self, decl, fnode, values, receiver):
+
+    # ---- closures ------------------------------------------------------
+    #
+    # "a body is a non-escaping stack closure, inlined at the call site, so
+    # there is no closure record to box" -- loop_iter.zen states the claim
+    # and tests/bench/bench_loop.zen gates it at allocs_op: 0.  So a lambda
+    # is never a value here: passing one inlines the callee, and calling the
+    # parameter it was bound to inlines the lambda.  Nothing is allocated and
+    # nothing is boxed, which is the same sentence as the budget.
+
+    def label(self, stem):
+        self.tmp += 1
+        return "%s%s%d" % (GEN, stem, self.tmp)
+
+    def bind_closure(self, name, lam, pty):
+        self.scopes[-1][name] = (name, ("lambda", lam, pty))
+
+    def inline_call(self, decl, fnode, node, argnodes, targs, want, receiver=None):
+        """Inline a function that was handed a closure."""
+        if self.inlining > INLINE_DEPTH:
+            self.e.error(node, "inlining `%s` did not terminate" % decl.name)
+            return ("0", UNKNOWN)
         params = list(self.e.params_of(fnode))
-        found = {}
+        offset = 1 if receiver is not None else 0
+        owner_tys = ()
+        if decl.otparams and receiver is not None and receiver[1] is not None \
+                and receiver[1][0] == "named":
+            owner_tys = tuple(receiver[1][2])
+        elif decl.otparams:
+            owner_tys = tuple(UNKNOWN for _ in decl.otparams)
+        own = decl.tparams[len(decl.otparams):]
+        targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts, self.self_ty)
+                         for t in targs)
+        if own and len(targ_tys) != len(own):
+            targ_tys = self.infer_fn_targs(decl, fnode, argnodes, receiver, owner_tys)
+        subst = dict(zip(decl.tparams, owner_tys + tuple(targ_tys)))
+        base = decl.scope_parts
+        self_ty = self.e.self_type(decl, subst)
+
+        # the callee's parameter types, resolved once
+        ptys = [self.e.resolve_type(f(p, "ty"), subst, base, self_ty) for p in params]
+        ret = refine(self.e.resolve_type(self.e.ret_of(fnode), subst, base, self_ty), want)
+
+        result = self.new_tmp(ret) if ret not in (None, UNIT, UNKNOWN) else None
+        self.push()
+        if receiver is not None and params:
+            self.scopes[-1][str(f(params[0], "name", "self"))] = receiver
+        for i, value in enumerate(argnodes):
+            idx = i + offset
+            if idx >= len(params):
+                break
+            pname = str(f(params[idx], "name", "_"))
+            pty = ptys[idx]
+            if kind(value) == "Lambda":
+                self.bind_closure(pname, value, pty)
+                continue
+            code, aty = self.expr(value, pty)
+            cn = self.declare(pname, pty if pty != UNKNOWN else aty)
+            self.line("%s = %s;" % (self.e.declarator(pty if pty != UNKNOWN else aty, cn), code))
+        saved_subst, saved_parts, saved_self = self.subst, self.parts, self.self_ty
+        self.subst, self.parts, self.self_ty = subst, base, self_ty
+        self.inlining += 1
+        self.open()
+        value = self.block_value(f(fnode, "body"), ret)
+        if result is not None and value is not None:
+            self.line("%s = %s;" % (result, value))
+        self.close()
+        self.inlining -= 1
+        self.subst, self.parts, self.self_ty = saved_subst, saved_parts, saved_self
+        self.pop()
+        return (result if result is not None else "0", ret or UNIT)
+
+    def inline_lambda(self, bound, argnodes, want, node):
+        """Call a parameter that a closure was bound to."""
+        _name, marker = bound
+        lam, pty = marker[1], marker[2]
+        params = list(f(lam, "params", ()) or ())
+        want_params = ()
+        ret = None
+        if pty is not None and pty != UNKNOWN and pty[0] == "fn":
+            ret, want_params = pty[1], pty[2]
+        if ret in (None, UNKNOWN):
+            ret = want
+        result = self.new_tmp(ret) if ret not in (None, UNIT, UNKNOWN) else None
+        self.push()
+        for i, p in enumerate(params):
+            pname = str(f(p, "name", "_"))
+            declared = self.e.resolve_type(f(p, "ty"), self.subst, self.parts, self.self_ty) \
+                if f(p, "ty") is not None else None
+            expect = declared if declared not in (None, UNKNOWN) else (
+                want_params[i] if i < len(want_params) else None)
+            if i < len(argnodes):
+                value = argnodes[i]
+                if isinstance(value, tuple):     # an already-lowered value
+                    code, aty = value
+                else:
+                    code, aty = self.expr(value, expect)
+                ty = expect if expect not in (None, UNKNOWN) else aty
+                if is_handle(ty) or (aty is not None and aty[0] == "loop"):
+                    self.scopes[-1][pname] = (code, aty)
+                    continue
+                cn = self.declare(pname, ty)
+                self.line("%s = %s;" % (self.e.declarator(ty, cn), code))
+            else:
+                self.e.error(node, "closure parameter `%s` has no argument" % pname)
+        self.inlining += 1
+        self.open()
+        value = self.block_value(f(lam, "body"), ret)
+        if result is not None and value is not None:
+            self.line("%s = %s;" % (result, value))
+        self.close()
+        self.inlining -= 1
+        self.pop()
+        return (result if result is not None else "0", ret or UNIT)
+
+    # ---- the loop intrinsic --------------------------------------------
+
+    def lower_loop(self, decl, fnode, node, argnodes, want, receiver=None):
+        """One of `loop_iter.zen`'s six signatures, as a C loop.
+
+        `h.break(v)` and `h.next()` are the general non-local exit, so they
+        are `goto`s rather than C's `break`/`continue`: an inlined body can
+        sit inside a `switch` that a match produced, where a C `break` would
+        leave the switch and not the loop.
+        """
+        args = list(argnodes)
+        if receiver is not None:
+            args = [receiver] + args
+        body = args[-1] if args else None
+        if body is None or (not isinstance(body, tuple) and kind(body) != "Lambda"):
+            self.e.error(node, "a loop body must be written at the call site")
+            return ("0", UNKNOWN)
+        params = list(self.e.params_of(fnode))
+        inner = f(f(params[-1], "ty"), "params", ()) or ()
+        names = [str(f(p, "name", "")) for p in inner]
+        wants_index = "index" in names[1:]
+        wants_value = "value" in names[1:]
+        wants_acc = "acc" in names[1:]
+
+        ret = want if want not in (None, UNKNOWN) else None
+        result = self.new_tmp(ret) if ret not in (None, UNIT, UNKNOWN) else None
+        brk, cnt = self.label("brk"), self.label("cnt")
+
+        lead = args[:-1]
+        cond_node = None
+        range_val = None
+        init_val = None
+        if lead:
+            first = lead[0]
+            if kind(first) == "Lambda" and not (f(first, "params", ()) or ()):
+                cond_node = first              # while cond
+            else:
+                range_val = self.expr(first, None) if not isinstance(first, tuple) else first
+            if len(lead) > 1:
+                init_val = self.expr(lead[1], None)
+
+        acc = None
+        if wants_acc and init_val is not None:
+            acc = self.new_tmp(init_val[1])
+            self.line("%s = %s;" % (acc, init_val[0]))
+        if result is not None:
+            self.line("%s = %s;" % (result, self.none_of(ret, node)))
+
+        counter = None
+        limit = None
+        if range_val is not None:
+            start, end = self.range_bounds(range_val, node)
+            counter = self.new_tmp(prim("usize"))
+            limit = self.new_tmp(prim("usize"))
+            self.line("%s = %s;" % (counter, start))
+            self.line("%s = %s;" % (limit, end))
+            self.open("while (%s < %s) {" % (counter, limit))
+        elif wants_index:
+            counter = self.new_tmp(prim("usize"))
+            self.line("%s = 0;" % counter)
+            self.open("for (;;) {")
+        elif cond_node is not None:
+            self.open("for (;;) {")
+            code, _ty = self.inline_lambda(("cond", ("lambda", cond_node, None)),
+                                           (), prim("bool"), node)
+            self.open("if (!%s) {" % paren(code))
+            self.line("goto %s;" % brk)
+            self.close()
+        else:
+            self.open("for (;;) {")
+
+        self.loops.append((brk, cnt, result, ret, acc))
+        handle = ("loop", len(self.loops))
+        values = [(handle[0] and "0", handle)]
+        if wants_index:
+            values.append((counter, prim("usize")))
+        if wants_value:
+            values.append(self.range_value(range_val, counter, node))
+        if wants_acc and acc is not None:
+            values.append((acc, init_val[1]))
+        got = self.inline_lambda(("body", ("lambda", body, None)), tuple(values), None, node)
+        if wants_acc and acc is not None and got[0] not in ("0", None):
+            self.line("%s = %s;" % (acc, got[0]))
+        self.line("%s: ;" % cnt)
+        if counter is not None:
+            self.line("%s = %s + 1;" % (counter, counter))
+        self.close()
+        self.loops.pop()
+        self.line("%s: ;" % brk)
+        if wants_acc and acc is not None and result is not None:
+            self.line("%s = %s;" % (result, self.ok_of(ret, acc, node)))
+        return (result if result is not None else "0", ret or UNIT)
+
+    def range_bounds(self, range_val, node):
+        """`start` and `end`, which every Range supplies -- stored on
+        `Range(0, n)` and computed by an impl on a Vec."""
+        code, ty = range_val
+        if ty is not None and ty[0] == "named":
+            tmp = self.new_tmp(ty)
+            self.line("%s = %s;" % (tmp, code))
+            start = self.member_of(tmp, ty, "start", node)
+            end = self.member_of(tmp, ty, "end", node)
+            self._range = (tmp, ty)
+            return (start, end)
+        self._range = None
+        self.e.error(node, "a loop needs a Range")
+        return ("0", "0")
+
+    def member_of(self, code, ty, name, node):
+        info = self.e.struct_info(ty)
+        if info:
+            for fname, _fty in info[2]:
+                if fname == name:
+                    return "%s.%s" % (paren(code), sym_member(name))
+        computed = self.computed_of(ty, name)
+        if computed is not None:
+            return self.read_computed(ty, code, computed)[0]
+        self.e.error(node, "a Range needs `%s`" % name)
+        return "0"
+
+    def range_value(self, range_val, counter, node):
+        """The element at the counter: `at` when the Range supplies one, and
+        the index itself when it does not -- `Range(0, 5)` walks its own
+        index space, which is what makes a fold a bare C for-loop."""
+        if range_val is None or counter is None:
+            return ("0", UNKNOWN)
+        code, ty = range_val
+        at = self.owned_decls(ty, "at", "fn") if ty is not None and ty[0] == "named" else []
+        at = [d for d in at if f(self.e.fn_node(d.node), "body") is not None]
+        if not at:
+            # "a Range that supplies no `at` walks its own index space" --
+            # which is what makes `Range(0, 5)` a bare C for-loop.
+            return (counter, prim("usize"))
+        got = self.emit_call(at[0], node, [(counter, prim("usize"))], (), None,
+                             receiver=(code, ty))
+        # `at` returns Res<T>: a None ends the walk early
+        info = self.e.enum_info(got[1]) if got[1] is not None and got[1][0] == "named" else None
+        if info is None:
+            return got
+        names = [v for v, _ in info[2]]
+        ok = "Ok" if "Ok" in names else names[0]
+        tmp = self.new_tmp(got[1])
+        self.line("%s = %s;" % (tmp, got[0]))
+        self.open("if (%s.%stag != %s) {" % (tmp, GEN, sym_variant(self.e.variant_parts(got[1], ok))))
+        self.line("goto %s;" % self.loops[-1][0] if self.loops else "break;")
+        self.close()
+        return ("%s.%sdata.%s" % (tmp, GEN, sym_member(ok)), dict(info[2]).get(ok))
+
+    def none_of(self, ty, node):
+        if ty is None or ty[0] != "named":
+            return "0"
+        info = self.e.enum_info(ty)
+        names = [v for v, p in info[2] if p is None] if info else []
+        if "None" in names:
+            return self.make_variant(ty, "None", None)
+        return "(%s){0}" % self.e.ctype(ty)
+
+    def ok_of(self, ty, code, node):
+        if ty is None or ty[0] != "named":
+            return code
+        info = self.e.enum_info(ty)
+        names = [v for v, _ in info[2]] if info else []
+        return self.make_variant(ty, "Ok", code) if "Ok" in names else code
+
+    def lower_handle(self, bound, name, argnodes, node):
+        """`h.break(v)` / `h.break()` / `h.next()` -- the same jump `.try()`
+        is, one frame down."""
+        depth = bound[1][1]
+        if depth < 1 or depth > len(self.loops):
+            self.e.error(node, "`%s` outside its loop" % name)
+            return ("0", UNIT)
+        brk, cnt, result, ret, _acc = self.loops[depth - 1]
+        if name == "next":
+            self.line("goto %s;" % cnt)
+            return ("0", UNIT)
+        if name == "break":
+            if argnodes and result is not None:
+                payload_ty = None
+                info = self.e.enum_info(ret) if ret is not None and ret[0] == "named" else None
+                if info:
+                    payload_ty = dict(info[2]).get("Ok")
+                code, aty = self.expr(argnodes[0], payload_ty)
+                self.line("%s = %s;" % (result, self.ok_of(ret, code, node)))
+            self.line("goto %s;" % brk)
+            return ("0", UNIT)
+        self.e.error(node, "LoopHandle has no `%s`" % name)
+        return ("0", UNKNOWN)
+
+    def infer_fn_targs(self, decl, fnode, values, receiver, owner_tys=()):
+        params = list(self.e.params_of(fnode))
+        found = dict(zip(decl.otparams, owner_tys))
         offset = 1 if receiver is not None else 0
         if receiver is not None and params:
             self.unify(f(params[0], "ty"), receiver[1], found)
@@ -2148,9 +2589,19 @@ class FnCtx:
             idx = i + offset
             if idx >= len(params):
                 break
+            pty = f(params[idx], "ty")
+            if not isinstance(value, tuple) and kind(value) == "Lambda" and pty is not None and kind(pty) == "FnType":
+                _c, rty = self.peek(f(value, "body"))
+                self.unify(f(pty, "ret"), rty, found)
+                for lp, dp in zip(f(value, "params", ()) or (), f(pty, "params", ()) or ()):
+                    if f(lp, "ty") is not None:
+                        self.unify(f(dp, "ty"), self.e.resolve_type(
+                            f(lp, "ty"), self.subst, self.parts, self.self_ty), found)
+                continue
             _c, aty = self.peek(value)
-            self.unify(f(params[idx], "ty"), aty, found)
-        return tuple(found.get(tp, UNKNOWN) for tp in decl.tparams)
+            self.unify(pty, aty, found)
+        return tuple(found.get(tp, UNKNOWN)
+                     for tp in decl.tparams[len(decl.otparams):])
 
     # print ---------------------------------------------------------------
 
@@ -2451,19 +2902,19 @@ class FnCtx:
         self.line("return %s;" % self.make_variant(ret, target, src))
 
     def ex_Lambda(self, node, want=None):
-        """A non-escaping closure: captured locals by pointer, one C function.
+        """A closure in value position.
 
-        DESIGN.md's escaping closures need an `Alloc` and are stage 3's
-        checker's business; this lowering is correct for the non-escaping case
-        the seed subset uses, and the capture record's name is derived from the
-        enclosing function's mangled name plus a per-function ordinal, so it is
-        a function of the program.
+        A closure passed to a call is inlined at the call site and never
+        reaches here; one that gets this far would have to outlive the frame
+        it captured, which is an escaping closure -- and an escaping closure
+        needs an `Alloc` and is stage 3's checker's business.
         """
-        self.e.error(node, "gen_c does not lower closures yet")
+        self.e.error(node, "a closure here would have to escape its frame; "
+                           "an escaping closure needs an Alloc (DESIGN.md)")
         return ("0", UNKNOWN)
 
     def ex_FixedArray(self, node, want=None):
-        ty = self.e.resolve_type(f(node, "ty"), self.subst, self.parts)
+        ty = self.e.resolve_type(f(node, "ty"), self.subst, self.parts, self.self_ty)
         elems = list(f(node, "elems", ()) or ())
         codes = [self.expr(e, ty[2] if ty[0] == "array" else None)[0] for e in elems]
         cname = self.e.ctype(ty)
@@ -2495,6 +2946,50 @@ class FnCtx:
         self.e.error(node, "`@meta` is not in the seed subset (PLAN.md 0.5)")
         return ("0", UNKNOWN)
 
+
+
+def is_loop_shape(emitter, fnode):
+    """A bodyless function whose last parameter is a body taking a LoopHandle.
+
+    `loop_iter.zen` declares six signatures and no definitions on purpose --
+    "a loop is the one thing that cannot be written in a language whose only
+    control flow is .match, .loop and recursion" -- so the compiler lowers
+    them.  This recognises them by SHAPE rather than by module and name, so
+    the six overloads and anything else built the same way are one case.
+    """
+    params = emitter.params_of(fnode)
+    if not params:
+        return False
+    ty = f(params[-1], "ty")
+    if ty is None or kind(ty) != "FnType":
+        return False
+    inner = f(ty, "params", ()) or ()
+    if not inner:
+        return False
+    first = f(inner[0], "ty")
+    return first is not None and kind(first) == "Named" and f(first, "name") == "LoopHandle"
+
+
+def refine(ty, want):
+    """Fill a type's unresolved arguments in from what the call site expected.
+
+    `then<T>` gets its T from the closure it was handed; when the closure's
+    body says nothing, the expected type does.  Only holes are filled -- a
+    known type is never overwritten by an expectation.
+    """
+    if want in (None, UNKNOWN):
+        return ty
+    if ty in (None, UNKNOWN):
+        return want
+    if ty[0] == "named" and want[0] == "named" and ty[1] == want[1] \
+            and len(ty[2]) == len(want[2]):
+        return ("named", ty[1],
+                tuple(w if a == UNKNOWN else a for a, w in zip(ty[2], want[2])))
+    return ty
+
+
+def is_handle(ty):
+    return ty is not None and ty[0] == "loop"
 
 ARITH = {"+", "-", "*", "/", "%"}
 WRAPPING = {"+%", "-%", "*%"}
