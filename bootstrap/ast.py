@@ -31,15 +31,41 @@ no field, and each is a place to look first if something reads oddly:
     a `+` bound list    `<K: Eq + Hash>`            ->  TParam(bound=Union(..))
                         (`+` is an intersection; `Union` is a stopgap here)
     variadic            `args: ...`                 ->  Named("...", ())
-    a method            `add* = (self :: @Self) T {..}` inside a struct body
-                        ->  Field(ty=FnType(..), mutable=(the `::=` form),
-                                  default=Lambda(..) or None)
-                        which is DESIGN.md's method table exactly:
-                        `= sig` required, `= sig {..}` sealed,
-                        `::= sig {..}` default, `::= sig` hook.
+    parentheses         `(a + b) * c`               ->  dropped; the printer
+                        re-inserts them from precedence
+
+`Struct.fields` is heterogeneous, exactly as `Impl.entries` is: a storage field
+is a `Field`, a method is a `Function` carrying its `form`. DESIGN.md's "there
+are no traits, only structs — a struct whose fields happen to be functions" is
+why they share one tuple, and `Function` rather than a function-typed `Field`
+is what keeps `<T>` on a generic method and the required/sealed/default/hook
+distinction from being lost. `Struct.consts` holds `MAX: i32 = 2147483647`.
 """
 
 from __future__ import annotations
+
+import os
+import sys
+
+# --- stdlib shield ---------------------------------------------------------
+# CONTRACT.md fixes this file's name and `ast` is also a standard-library
+# module. Run as `python3 bootstrap/bootstrap.py`, bootstrap/ lands on
+# sys.path[0] and THIS file answers every `import ast` in the process —
+# including the one `inspect`, and therefore `dataclasses`, performs. So when
+# we are the one answering to that name, load the real module first, under its
+# real name, then take the name back. `python3 -m bootstrap.bootstrap` from the
+# repository root avoids the question entirely and is the recommended form.
+if __name__ == "ast" and sys.modules.get("ast") is sys.modules.get(__name__):
+    _self = sys.modules.pop("ast")
+    _here = os.path.dirname(os.path.abspath(__file__))
+    _path = sys.path[:]
+    sys.path[:] = [p for p in sys.path if os.path.abspath(p or os.getcwd()) != _here]
+    try:
+        import ast as _stdlib_ast  # noqa: F401  the real one
+        import dataclasses  # noqa: F401  wants inspect, which wants the real ast
+    finally:
+        sys.path[:] = _path
+        sys.modules["ast"] = _self
 
 import dataclasses
 from dataclasses import dataclass, field as _field

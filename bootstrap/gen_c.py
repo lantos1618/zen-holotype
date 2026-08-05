@@ -56,7 +56,9 @@ Symbols, by site (the seven of PLAN.md 0.4 decision 3, plus module values):
     enum constant     zu_ e <path-of-enum + variant>
     struct member     zu_ m <comp>
     local / parameter zu_ l <comp> ["_" <n>]
-    module value      zu_ v <path>
+    module value      zu_ v <path>   (reserved: a module-level binding is a
+                                     constant in the seed subset and is
+                                     inlined at its use site)
     struct tag        the same string as the typedef (C tags are a separate
                       namespace, so `typedef struct X X;` is legal and keeps
                       the emitted C readable)
@@ -112,26 +114,44 @@ import re
 # may also be imported as a package.
 # ---------------------------------------------------------------------------
 
-if __package__:
-    from . import ast as zast  # type: ignore
-else:  # pragma: no cover - script layout
-    import ast as zast  # type: ignore  # bootstrap/ast.py, never the stdlib one
+def _sibling(name):
+    """Import a sibling of this file without ever picking up the stdlib.
 
-try:
+    `bootstrap/ast.py` shadows the standard library's `ast` whenever
+    `bootstrap/` is on `sys.path` -- and `dataclasses` imports `inspect`
+    imports `ast`, so the shadowing is not a style problem, it is an import
+    error at startup.  The package form is tried first and a file-path load is
+    the fallback, so this file works whether it is imported as
+    `bootstrap.gen_c` or as a bare script.
+    """
     if __package__:
-        from . import sema as zsema  # type: ignore  # noqa: F401
-    else:  # pragma: no cover
-        import sema as zsema  # type: ignore  # noqa: F401
-except ImportError:  # pragma: no cover - sema is optional at this layer
-    zsema = None
+        try:
+            return __import__(__package__ + "." + name, fromlist=[name])
+        except ImportError:
+            return None
+    import importlib.util
+    import sys
 
-try:
-    if __package__:
-        from . import modules as zmodules  # type: ignore  # noqa: F401
-    else:  # pragma: no cover
-        import modules as zmodules  # type: ignore  # noqa: F401
-except ImportError:  # pragma: no cover
-    zmodules = None
+    modname = "bootstrap_" + name
+    if modname in sys.modules:
+        return sys.modules[modname]
+    here = os.path.dirname(os.path.abspath(__file__))
+    spec = importlib.util.spec_from_file_location(modname, os.path.join(here, name + ".py"))
+    if spec is None or spec.loader is None:
+        return None
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[modname] = mod
+    try:
+        spec.loader.exec_module(mod)
+    except Exception:  # pragma: no cover - a sibling that is not written yet
+        sys.modules.pop(modname, None)
+        return None
+    return mod
+
+
+zast = _sibling("ast")
+zmodules = _sibling("modules")  # noqa: F841 - the layering, stated as an import
+zsema = _sibling("sema")  # noqa: F841
 
 
 C_STANDARD = "C99 (ISO/IEC 9899:1999)"
@@ -480,45 +500,68 @@ class Positions:
 
 
 def modules_of(program):
-    """Normalise whatever modules.py hands back into a sorted tuple."""
+    """Whatever modules.py hands back -> ((path components, ast.Module), ..).
+
+    Sorted by the module's identity, never by discovery order: `modules.py`
+    sorts its enumeration and this sorts again, because check 3 of
+    `tests/determinism/check.sh` shuffles the input order on purpose.
+    """
     mods = program
-    for attr in ("modules", "graph", "roots"):
-        got = getattr(program, attr, None)
-        if got is not None:
-            mods = got
-            break
+    got = getattr(program, "modules", None)
+    if got is not None:
+        mods = got
     if isinstance(mods, dict):
         mods = list(mods.values())
     try:
         mods = list(mods)
     except TypeError:
         mods = [mods]
-    mods = [m for m in mods if kind(m) == "Module" or f(m, "decls") is not None]
-    return tuple(sorted(mods, key=lambda m: (str(f(m, "name", "")), str(f(m, "path", "")))))
+
+    out = []
+    for m in mods:
+        dotted = f(m, "dotted", None)  # modules.ModuleInfo
+        if dotted is not None:
+            node = f(m, "node")
+            if node is None:
+                continue  # the file did not parse; modules.py already said so
+            out.append((tuple(str(dotted).split(".")), node))
+            continue
+        if kind(m) == "Module" or f(m, "decls") is not None:
+            out.append((module_parts(m), m))
+    return tuple(sorted(out, key=lambda pair: pair[0]))
 
 
 def module_parts(mod):
     """A module's mangling path: its dotted name, or its file path's stem."""
+    path = str(f(mod, "path", "") or "")
+    if path:
+        stem = path[:-4] if path.endswith(".zen") else path
+        stem = stem.replace(os.sep, ".").replace("/", ".")
+        if stem:
+            return tuple(stem.split("."))
     name = f(mod, "name", None)
     if name:
         return tuple(str(name).split("."))
-    path = str(f(mod, "path", "") or "")
-    stem = os.path.splitext(os.path.basename(path))[0]
-    return (stem or "module",)
+    return ("module",)
 
 
 class Decl:
     """One declaration, with everything gen_c needs to name and emit it."""
 
-    __slots__ = ("mod", "parts", "node", "dkind", "name", "tparams")
+    __slots__ = ("parts", "node", "dkind", "name", "tparams", "module", "owner")
 
-    def __init__(self, mod, parts, node, dkind, name, tparams=()):
-        self.mod = mod
+    def __init__(self, parts, node, dkind, name, tparams=(), owner=None, module=""):
         self.parts = tuple(parts)
         self.node = node
         self.dkind = dkind  # "type" | "fn" | "value"
         self.name = name
         self.tparams = tuple(tparams)
+        self.owner = owner
+        self.module = module
+
+    @property
+    def key(self):
+        return (self.module, self.owner or "", self.name)
 
 
 def _tparam_names(node):
@@ -552,6 +595,7 @@ class Emitter:
 
         self.mods = modules_of(program)
         self.types = {}  # name -> ("struct"|"enum"|"array"|"union", payload)
+        self.consts = {}  # enum constant -> value; one C enum for the program
         self.type_order = {}  # name -> deps (by-value)
         self.protos = {}  # cname -> prototype line
         self.bodies = {}  # cname -> body text
@@ -559,66 +603,94 @@ class Emitter:
         self.needs = set()  # generated runtime pieces actually used
 
         self.decls = {}  # (module parts, name) -> [Decl]
+        self.by_key = {}  # (module, owner, name) -> [Decl]
         self.by_name = {}  # name -> [Decl]  (module-agnostic fallback)
         self.worklist = []
         self.done = set()
         self.instances = 0
+        self.graph = program if getattr(program, "modules", None) and hasattr(
+            program, "lookup"
+        ) else None
         self._collect()
 
     # -- collection --------------------------------------------------------
 
     def _add_decl(self, decl):
         self.decls.setdefault((decl.parts[:-1], decl.name), []).append(decl)
+        self.by_key.setdefault(decl.key, []).append(decl)
         self.by_name.setdefault(decl.name, []).append(decl)
 
     def _collect(self):
-        for mod in self.mods:
-            base = module_parts(mod)
+        for base, mod in self.mods:
             for node in f(mod, "decls", ()) or ():
-                self._collect_decl(mod, base, node)
+                self._collect_decl(base, node)
 
-    def _collect_decl(self, mod, base, node):
+    def _collect_decl(self, base, node):
         k = kind(node)
+        dotted = ".".join(base)
         name = f(node, "name", None)
         if k in ("Struct", "Enum", "Alias") and name:
-            self._add_decl(Decl(mod, base + (str(name),), node, "type", str(name),
-                                _tparam_names(node)))
+            self._add_decl(Decl(base + (str(name),), node, "type", str(name),
+                                _tparam_names(node), module=dotted))
             if k == "Struct":
                 for member in f(node, "fields", ()) or ():
+                    mname = str(f(member, "name", ""))
                     if _is_fn_field(member):
-                        mname = str(f(member, "name", ""))
                         self._add_decl(
-                            Decl(mod, base + (str(name), mname), member, "fn", mname,
-                                 _tparam_names(member))
+                            Decl(base + (str(name), mname), member, "fn", mname,
+                                 _tparam_names(member), owner=str(name), module=dotted)
+                        )
+                    elif f(member, "default") is not None and not f(member, "ty"):
+                        self._add_decl(
+                            Decl(base + (str(name), mname), member, "value", mname,
+                                 owner=str(name), module=dotted)
                         )
                 for c in f(node, "consts", ()) or ():
                     cname = str(f(c, "name", ""))
                     self._add_decl(
-                        Decl(mod, base + (str(name), cname), c, "value", cname)
+                        Decl(base + (str(name), cname), c, "value", cname,
+                             owner=str(name), module=dotted)
                     )
         elif k == "Function" and name:
-            self._add_decl(Decl(mod, base + (str(name),), node, "fn", str(name),
-                                _tparam_names(node)))
+            self._add_decl(Decl(base + (str(name),), node, "fn", str(name),
+                                _tparam_names(node), module=dotted))
         elif k == "Impl":
+            # `A.impl(B, {..})` supplies a value for every field B declares:
+            # a function-typed field takes a function, an f64 field takes an
+            # f64 expression, which is read back as a computed field.
             target = str(f(node, "target", "") or "")
             trait = str(f(node, "trait", "") or "")
             for entry in f(node, "entries", ()) or ():
                 ename = str(f(entry, "name", "") or "")
                 if not ename:
                     continue
+                dk = "fn" if kind(entry) in ("Function", "Lambda") else "value"
                 self._add_decl(
-                    Decl(mod, base + (target, trait, ename), entry, "fn", ename,
-                         _tparam_names(entry))
+                    Decl(base + (target, trait, ename), entry, dk, ename,
+                         _tparam_names(entry), owner=target, module=dotted)
                 )
         elif k in ("Let", "Const") and isinstance(name, str):
-            self._add_decl(Decl(mod, base + (str(name),), node, "value", str(name)))
+            self._add_decl(Decl(base + (str(name),), node, "value", str(name),
+                                module=dotted))
 
     # -- lookup ------------------------------------------------------------
 
     def lookup(self, name, parts=(), dkind=None):
-        """Declarations for a name, preferring the module in scope."""
+        """Declarations for a name, as seen from `parts`.
+
+        modules.py owns visibility: its `scope` already carries imports,
+        re-exports, the prelude and the `*` gate, so the graph is asked first
+        and the local table is only the fallback for a caller that handed
+        gen_c bare `ast.Module`s.
+        """
         cands = []
-        if parts:
+        if self.graph is not None and parts:
+            for n in range(len(parts), 0, -1):
+                dotted = ".".join(parts[:n])
+                if dotted in getattr(self.graph, "modules", {}):
+                    cands = self.from_bindings(self.graph.lookup(dotted, name))
+                    break
+        if not cands and parts:
             for n in range(len(parts), -1, -1):
                 cands = self.decls.get((tuple(parts[:n]), name), [])
                 if cands:
@@ -628,6 +700,22 @@ class Emitter:
         if dkind:
             cands = [d for d in cands if d.dkind == dkind]
         return cands
+
+    def from_bindings(self, bindings):
+        out = []
+        for b in bindings or ():
+            entity = f(b, "entity")
+            if entity is None:
+                continue
+            key = (
+                str(f(entity, "module", "")),
+                str(f(entity, "owner", "") or ""),
+                str(f(entity, "name", "")),
+            )
+            for d in self.by_key.get(key, []):
+                if d not in out:
+                    out.append(d)
+        return out
 
     def type_decl(self, name, parts=()):
         got = self.lookup(name, parts, "type")
@@ -650,13 +738,17 @@ class Emitter:
                 return subst[name]
             if name in ("Ptr", "RawPtr"):
                 return ("ptr", args[0] if args else prim("u8"))
+            if name == "...":
+                return ("variadic",)
             decl = self.type_decl(name, parts)
             if decl is None:
                 if name in PRIMS:
                     return prim(name)
                 if name == "@Self" and parts:
                     return ("named", tuple(parts), ())
-                return UNKNOWN if name not in PRIMS else prim(name)
+                if name not in subst:
+                    self.error(node, "unknown type `%s`" % name)
+                return UNKNOWN
             if kind(decl.node) == "Alias":
                 return self.resolve_type(f(decl.node, "target"), subst, decl.parts[:-1])
             return ("named", decl.parts, args)
@@ -807,6 +899,11 @@ class Emitter:
                 payload = f(v, "payload")
                 pty = self.resolve_type(payload, subst, base) if payload is not None else None
                 variants.append((vname, pty))
+            for i, (vname, _p) in enumerate(variants):
+                # The tag name is a function of the DECLARATION, not of the
+                # instantiation: Res<i32, E> and Res<i32, F> share `Ok`, and
+                # emitting the constant per instance is a C redefinition.
+                self.consts[sym_variant(tuple(parts) + (vname,))] = i
             self.types[cname] = ("enum", t, tuple(variants), decl)
             self.type_order[cname] = self._deps([p for _, p in variants if p])
             for _, p in variants:
@@ -869,6 +966,11 @@ class Emitter:
         while self.worklist:
             guard += 1
             if guard > MAX_INSTANCES:
+                # `f<T> = (x: T) { f<Vec<T>>(..) }` must terminate with an
+                # error rather than consume all memory (TESTING.md, Sema).
+                cname, decl, _targs = self.worklist[0]
+                self.error(decl.node,
+                           "generic instantiation did not terminate at `%s`" % decl.name)
                 break
             self.worklist.sort(key=lambda item: item[0])
             cname, decl, targs = self.worklist.pop(0)
@@ -957,6 +1059,11 @@ class Emitter:
             pty = self.resolve_type(f(p, "ty"), subst, base)
             if pty == UNKNOWN and self.sema is not None:
                 pty = self.sema_type(p, base, subst) or pty
+            if pty == ("variadic",):
+                # `args: ...` — a variadic is resolved at the call site, and
+                # the only caller in the seed subset is `println`, which gen_c
+                # lowers to typed writes rather than to a C varargs call.
+                continue
             cn = ctx.declare(pname, pty)
             decls.append(self.declarator(pty, cn))
         if not decls:
@@ -1033,6 +1140,11 @@ class Emitter:
         for cname in sorted(self.types):
             out.append("typedef struct %s %s;\n" % (cname, cname))
         out.append("\n")
+        if self.consts:
+            out.append("enum {\n")
+            for name in sorted(self.consts):
+                out.append("    %s = %d,\n" % (name, self.consts[name]))
+            out.append("};\n\n")
         for cname in self.topo(sorted(bodies)):
             out.append(bodies[cname])
         return "".join(out)
@@ -1080,12 +1192,6 @@ class Emitter:
         if entry[0] == "enum":
             _, t, variants, _decl = entry
             lines = []
-            lines.append("enum {\n")
-            for i, (vname, _p) in enumerate(variants):
-                lines.append(
-                    "    %s = %d,\n" % (sym_variant(self.variant_parts(t, vname)), i)
-                )
-            lines.append("};\n")
             lines.append("struct %s {\n    int32_t %stag;\n" % (cname, GEN))
             payloads = [(v, p) for v, p in variants if p is not None]
             if payloads:
@@ -1240,8 +1346,28 @@ class FnCtx:
         value = f(block, "value")
         if value is None:
             return None
-        code, _ty = self.expr(value)
-        return code
+        code, ty = self.expr(value, want)
+        return self.coerce(code, ty, want)
+
+    def coerce(self, code, ty, want):
+        """Hoisting, and only in the direction DESIGN.md allows.
+
+        A bare `T` lifts into `Res<T>` wherever a `Res` is expected -- `0;`
+        closes a `Res<i32, E>` function exactly as `Ok(0);` does -- and it
+        fires only when exactly ONE variant carries the type.  Only success
+        lifts: `Err` and `None` are always written.
+        """
+        if want in (None, UNKNOWN) or ty == want:
+            return code
+        if want[0] != "named":
+            return code
+        info = self.e.enum_info(want)
+        if info is None:
+            return code
+        carriers = [v for v, p in info[2] if p is not None and p == ty]
+        if len(carriers) != 1:
+            return code
+        return self.make_variant(want, carriers[0], code)
 
     def stmt(self, node):
         k = kind(node)
@@ -1346,6 +1472,8 @@ class FnCtx:
             return (str(decode_char(text)), prim("u8"))
         if lk == "str":
             return (self.str_literal(decode_str(text)), self.str_type())
+        if lk == "unit":
+            return ("0", UNIT)
         self.e.error(node, "unknown literal kind %r" % lk)
         return ("0", UNKNOWN)
 
@@ -1422,6 +1550,9 @@ class FnCtx:
                 for fname, fty in info[2]:
                     if fname == name:
                         return ("%s.%s" % (paren(code), sym_member(name)), fty)
+                computed = self.computed_of(ty, name)
+                if computed is not None:
+                    return self.read_computed(ty, code, computed)
                 method = self.method_of(ty, name)
                 if method is not None:
                     return (method, UNKNOWN)
@@ -1445,13 +1576,21 @@ class FnCtx:
         return None
 
     def module_named(self, name):
-        for mod in self.e.mods:
-            if module_parts(mod)[-1] == name or str(f(mod, "name", "")) == name:
-                return mod
+        """The module a bare name refers to: `a = alpha` then `a.total()`.
+
+        A module alias is not a name imported *from* a module, so it does not
+        appear in `scope`; matching the last component of a module's path is
+        how `a` finds `alpha`, and the search is over a sorted tuple.
+        """
+        for base, _mod in self.e.mods:
+            if base[-1] == name or ".".join(base) == name:
+                return base
+        for base, _mod in self.e.mods:
+            if name in base:
+                return base
         return None
 
-    def module_member(self, mod, name, node):
-        base = module_parts(mod)
+    def module_member(self, base, name, node):
         for dkind in ("fn", "value", "type"):
             got = self.e.decls.get((base, name), [])
             got = [d for d in got if d.dkind == dkind]
@@ -1465,12 +1604,44 @@ class FnCtx:
         self.e.error(node, "module has no member `%s`" % name)
         return ("0", UNKNOWN)
 
+    def owned_decls(self, ty, name, dkind):
+        """Declarations owned by a type: its own members, and its impls'."""
+        owner = ty[1][-1]
+        module = ".".join(ty[1][:-1])
+        out = [d for d in self.e.by_key.get((module, owner, name), []) if d.dkind == dkind]
+        if not out:
+            out = [
+                d
+                for d in self.e.by_name.get(name, [])
+                if d.dkind == dkind and d.owner == owner
+            ]
+        return out
+
     def method_of(self, ty, name):
-        parts = tuple(ty[1]) + (name,)
-        for d in self.e.by_name.get(name, []):
-            if d.dkind == "fn" and d.parts == parts:
-                return self.e.request_fn(d, ())
-        return None
+        got = self.owned_decls(ty, name, "fn")
+        return self.e.request_fn(got[0], ()) if got else None
+
+    def computed_of(self, ty, name):
+        """An impl-supplied field: computed, read-only, non-addressable."""
+        got = self.owned_decls(ty, name, "value")
+        return got[0] if got else None
+
+    def read_computed(self, ty, code, decl):
+        """Re-evaluated on read, so it can never go stale (DESIGN.md)."""
+        value = f(decl.node, "value")
+        if value is None:
+            value = f(decl.node, "default")
+        if value is None:
+            self.e.error(decl.node, "impl supplies no value for `%s`" % decl.name)
+            return ("0", UNKNOWN)
+        tmp = self.new_tmp(ty)
+        self.line("%s = %s;" % (tmp, code))
+        self.push()
+        self.scopes[-1]["self"] = (tmp, ty)
+        try:
+            return self.expr(value)
+        finally:
+            self.pop()
 
     def ex_Index(self, node, want=None):
         base = f(node, "base")
@@ -1591,7 +1762,7 @@ class FnCtx:
 
         if ck == "Path":
             name = str(f(callee, "name", ""))
-            if name == "println" or name == "print":
+            if name in ("println", "print") and not self.e.lookup(name, self.parts, "fn"):
                 return self.lower_print(node, args, newline=(name == "println"))
             built = self.try_construct(name, node, args, targs, want)
             if built is not None:
@@ -1678,12 +1849,16 @@ class FnCtx:
         return tuple(found.get(tp, UNKNOWN) for tp in tdecl.tparams)
 
     def peek(self, node):
-        """Type of an expression without emitting anything."""
-        saved = (list(self.lines), self.tmp, self.indent)
+        """The type of an expression, speculatively: nothing is emitted and
+        nothing is reported.  A peek runs outside the scope the real lowering
+        will run in -- a match arm's binder is not bound yet -- so a
+        diagnostic from one would be an error about a program that is fine."""
+        saved = (list(self.lines), self.tmp, self.indent, len(self.e.diags))
         try:
             code, ty = self.expr(node)
         finally:
             self.lines, self.tmp, self.indent = saved[0], saved[1], saved[2]
+            del self.e.diags[saved[3] :]
         return (code, ty)
 
     def unify(self, tynode, actual, found):
@@ -1724,9 +1899,8 @@ class FnCtx:
             tdecl = self.e.type_decl(bname, self.parts)
             if tdecl is not None and kind(tdecl.node) == "Enum":
                 return self.construct_variant(tdecl, name, node, args, targs, want)
-            mod = self.module_named(bname)
-            if mod is not None:
-                base_parts = module_parts(mod)
+            base_parts = self.module_named(bname)
+            if base_parts is not None:
                 cands = [
                     d for d in self.e.decls.get((base_parts, name), []) if d.dkind == "fn"
                 ]
@@ -1917,7 +2091,11 @@ class FnCtx:
                     self.line("%sprint_u64((uint64_t)%s);" % (GEN, paren(code)))
                 return
             if name == "str":
-                self.line("%sprint_bytes((const char *)%s.data, %s.len);" % (GEN, paren(code), paren(code)))
+                tmp = self.new_tmp(ty)
+                self.line("%s = %s;" % (tmp, code))
+                self.line(
+                    "%sprint_bytes((const char *)%s.data, %s.len);" % (GEN, tmp, tmp)
+                )
                 return
         if ty is not None and ty[0] == "named":
             info = self.e.struct_info(ty)
@@ -2042,7 +2220,7 @@ class FnCtx:
                 binder = f(pat, "binder")
                 vname = str(f(pat, "name", ""))
                 pty = payloads.get(vname)
-                if binder and pty is not None:
+                if binder and binder != "_" and pty is not None:
                     cn = self.declare(str(binder), pty)
                     self.line(
                         "%s = %s.%sdata.%s;"
@@ -2183,6 +2361,12 @@ class FnCtx:
         ty = ("array", len(elems), elem_ty or prim("i32"))
         cname = self.e.ctype(ty)
         return ("((%s){ { %s } })" % (cname, ", ".join(codes) or "0"), ty)
+
+    def ex_Record(self, node, want=None):
+        # `{ src: .., deps: .. }` is a build-file literal: its type comes from
+        # the parameter it is passed to, which is std.build's business.
+        self.e.error(node, "a record literal has no type here")
+        return ("0", UNKNOWN)
 
     def ex_ScopeRef(self, node, want=None):
         self.e.error(node, "`@scope` is not in the seed subset")
@@ -2547,7 +2731,17 @@ def generate(program, sema=None, root=None, sources=None):
     """
     emitter = Emitter(program, sema=sema, root=root, sources=sources)
     text = emitter.emit()
-    return text, tuple(emitter.diags)
+    # One report per problem: a type resolved for a prototype and again for a
+    # body is one bug, and the run order must not be visible in the count.
+    seen = []
+    out = []
+    for diag in emitter.diags:
+        key = (str(f(diag, "span", "")), str(f(diag, "message", diag)))
+        if key in seen:
+            continue
+        seen.append(key)
+        out.append(diag)
+    return text, tuple(out)
 
 
 # `emit` reads better at a call site that already has a program in hand.

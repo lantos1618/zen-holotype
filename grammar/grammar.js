@@ -194,40 +194,33 @@ module.exports = grammar({
 
   extras: ($) => [/\s/, $.line_comment, $.block_comment],
 
+  // Every entry below was named by `tree-sitter generate`, and every entry it
+  // reported as unnecessary has been removed: this list is the real fork set,
+  // not a guess.
   conflicts: ($) => [
     // `Foo(T)` — the first variant of an enum, or a call bound to a name?
     // Closes at the first `|` (R1), or never opens when the bar leads.
-    [$.enum_variant, $._expression],
-    [$.enum_body, $._expression],
-    // `Vec<i32>` as a declaration value — an alias target, or `Vec < i32`?
-    // Decided at the token after `>`.
-    [$.generic_type, $.binary_expression],
+    [$.enum_variant, $._callee],
+    // `Vec<i32>` — an alias target / a type, or `Vec < i32`? Decided at the
+    // token after the `>`. (A-ANGLE)
+    [$.generic_type, $._expression, $._callee],
+    [$.generic_type, $._type],
+    // the payload of the enum fork: `str` in `Failed(str)` is a type on one
+    // side and an expression on the other.
     [$._type, $._expression],
-    // `x = (a: i32) i32` — a signature declaration (no `;`), or the start of
-    // a function with a body? Decided at the `{`. R2 makes this the only
-    // place the `;` rule needs a fork.
-    [$.function, $.function_signature],
-    // `x` at the head of a statement — a binding target, or an expression
-    // statement? Decided at the `=` / `::=` that may or may not follow.
-    [$.let_statement, $.expression_statement],
-    [$.declaration_statement, $.let_statement],
-    // the tail expression of a block against an expression statement:
-    // decided at `;` (statement) versus `}` (the block's value).
-    [$.block, $.expression_statement],
+    // D7: `x*` at the head of a statement — an export marker, or `x * y`?
+    // And `x<T> =` — type parameters, or `x < T`? Decided one token later.
+    [$.declaration_name, $._binding_target],
+    [$.declaration_name, $._expression],
+    [$.declaration_name, $._expression, $._callee],
     // `(x)` / `(x, y)` — a parameter list, or a parenthesized expression?
     // decided at the `{` or the return type that may follow.
-    [$.parameters, $.parenthesized_expression],
+    [$.parameter, $._expression],
     // `()` — the unit value/type, or an empty parameter list?
     [$.unit, $.parameters],
-    // `[a, b]` — a two-element array literal, or a `[type, count]` array
-    // type? decided at the `(` that may follow.
-    [$.array_literal, $.array_type],
-    // `{ .. }` as a call argument — record, or match arms? decided at the
-    // `:` / `=>` after the first entry.
-    [$.record, $.match_block],
-    // `f<T>(x)` — a generic call, or `f < T > (x)`? resolved by prec.dynamic
-    // on call_expression. (A-ANGLE)
-    [$.call_expression, $.binary_expression],
+    // an expression that may or may not turn out to be a callee: decided at
+    // the `(` — or at the `<` of a type argument list — that may follow.
+    [$._expression, $._callee],
   ],
 
   rules: {
@@ -277,7 +270,7 @@ module.exports = grammar({
 
     declaration: ($) =>
       seq(
-        field('name', comma_sep1($.declaration_name)),
+        comma_sep1(field('name', $.declaration_name)),
         optional(seq(':', field('type', $._type))),
         field('operator', choice('=', '::=')),
         field('value', $._declaration_value),
@@ -354,10 +347,16 @@ module.exports = grammar({
     // written apart" — so a payload never contains `name: value`, which is
     // what keeps `Package(url: "..", ..)` a call and not a variant. D15: one
     // payload type, never a list.
+    // prec.right: a `(` after a variant name is that variant's payload, never
+    // the start of the next statement. This is the ONE residue of R2 — a
+    // declaration takes no `;`, so a statement beginning `(` on the next line
+    // still forks — and it is resolved greedily, in favour of the payload.
     enum_variant: ($) =>
-      seq(
-        field('name', $.identifier),
-        optional(field('payload', $.variant_payload)),
+      prec.right(
+        seq(
+          field('name', $.identifier),
+          optional(field('payload', $.variant_payload)),
+        ),
       ),
 
     variant_payload: ($) => seq('(', field('type', $._type), ')'),
@@ -439,12 +438,17 @@ module.exports = grammar({
         ),
       ),
 
+    // A signature ALWAYS writes its return type: `() ()` "has nothing to name
+    // and stays as it is" (DESIGN.md:389), and every `= sig` in the document
+    // writes one. Requiring it is also what keeps a bare `()` the unit type
+    // rather than an empty parameter list — otherwise `Res<(), IoError>` reads
+    // as a function type.
     function_signature: ($) =>
       prec.right(
         seq(
           optional(field('type_parameters', $.type_parameters)),
           field('parameters', $.parameters),
-          optional(field('return_type', $._type)),
+          field('return_type', $._type),
         ),
       ),
 
