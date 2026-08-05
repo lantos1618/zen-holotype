@@ -96,6 +96,17 @@ Everything below follows from these. When two rules seem to conflict, the law wi
 | `::= sig {..}` | default: provided, impl may rebind it |
 | `::= sig` | optional hook: impl may provide it |
 
+**Sum types are written with `|`, always.** A nominal enum and an error union are the same construct — the doc already says a union "is an anonymous enum of two variants" — so they get one syntax and not two:
+
+```groovy
+Shape = Circle(Circle) | Rect(Rect) | Unit      // nominal, with payloads
+Error = AllocError | IoError | ArgError         // a union of existing types
+AllocError* = | OutOfMemory                     // one variant: the bar leads
+Alias = Shape                                   // no bar, so an alias. unambiguous.
+```
+
+The leading bar on a one-variant enum is the whole point: without it `AllocError = OutOfMemory` and `Alias = Shape` are the same three tokens, and `TestError = Failed(str)` and `Circle1 = AddFoo(Circle)` are the same five. With it, a parser needs no lookahead, no position rule, and no guess — and an enum may be declared anywhere, not only at module level.
+
 **One declaration form:** there are no traits, only structs. A struct whose fields happen to be functions, used as a bound, is what other languages call a trait — nothing marks it special, because nothing needs to. `A.impl(B, {..})` supplies a value for every field `B` declares: an `f64` field takes an `f64`, a function-typed field takes a function. One rule, no second mechanism — which is why the method table above and the field rules are the same table.
 
 **You satisfy requirements; you never impl storage.** A field a type declares for itself is storage. A field an impl supplies is computed, and is re-evaluated on read, so it can never go stale. Layout never depends on which impls are linked. When two impls declare the same name, the bound in scope selects which is in view; with no bound to disambiguate it is an error — never file order.
@@ -152,6 +163,20 @@ printers.add(circle.as(Display)).try();   // 2 words copied in, no alloc
 # Control flow
 
 **Control flow is one thing:** `.match`, a method — exactly as `loop` is a function. No `if`, no ternary, no `?` operator. Arms are `pattern => expr`, comma-separated, no leading `|`; `=>` already separates, so the bar is noise. Payloads bind in the pattern: `Ok(n) => n`. **Match is always exhaustive**, in every position: cover every case or write `_`. There is no partial form, so a missing arm is never ambiguous between "deliberate" and "forgot". When you really do want one side only, `bool.then` says so out loud — and being a different word, it cannot be a typo. Guards inside loops are usually a missing loop word (`find`, `filter`), not a conditional at all.
+
+**A statement ends with `;`. A declaration does not.** That is the whole rule, and it holds without a lexer that counts newlines:
+
+```groovy
+Vec*<T> = { .. }                 // declaration: struct. no semicolon.
+Shape = Circle(Circle) | Unit    // declaration: enum. no semicolon.
+area* = (c: Circle) f64 { .. }   // declaration: function with a body. no semicolon.
+
+v ::= alloc.Vec<i32>();          // statement. semicolon.
+Circle1 = AddFoo(Circle);        // a binding inside a body is a statement. semicolon.
+println("done");                 // statement. semicolon.
+```
+
+Optional semicolons were the alternative and they carry a real hazard, not an aesthetic one: a statement ending in an expression, followed by a line beginning `(` or `[`, silently becomes a call or an index of the previous line. Newline sensitivity was the other alternative, and it breaks the leading-dot continuation this doc already uses in `build.zen`.
 
 **Non-local exit** is one mechanism, not two special cases:
 
@@ -280,6 +305,8 @@ g = alloc.File(f.path).try();   // want another? construct it
 
 `val` is deeply immutable *forever* — not "you may not write it" but "no writer exists", so any number of actors may read at once. Literals are `val`. `iso` is unique: you may write through it precisely *because* you hold the only reference in the program. So **only `val` and `iso` cross actors** means *share what nobody can change, or hand over what only you have*. Both make races impossible by construction, and there are no locks anywhere in the language.
 
+**None of `ref`, `val`, `iso` is ever written.** There is no capability syntax, and that is deliberate: a behavior's parameters are sendable *by definition* — it is a behavior — so marking them would restate what the declaration already says. The constraint lives on the **argument**, and it is checked where the argument is passed. The checker proves one of two things at every send: the value is deeply immutable (`val`), or it is uniquely owned and handed over (`iso`), which you spell `consume`. The only thing you write is the `consume`.
+
 Sending an `iso` is the same `consume`, tracked the same way:
 
 ```groovy
@@ -331,6 +358,25 @@ A folder root is then just a file of starred bindings, which is why re-export is
 Declared types stay **nominal** — `Circle = {radius: f64}` and `Sphere = {radius: f64}` are different types, and an impl on one is not an impl on the other. Only *generated* types are identified by their generating call.
 
 **What runs at comptime:** the language minus io and actors. Comptime code **may allocate** (`@meta`-driven serialization has to build strings) and may loop, but the evaluator counts steps and fails the build rather than hanging. **No file reads in v1** — that is the fastest route to a build that is not reproducible.
+
+---
+
+# Constants on a type
+
+A struct body may bind a name to a **value** rather than a field, and it is read as `Type.NAME`. That access form already exists — `Shape.Unit`, `Os.Macos` — so this adds a spelling, not a concept:
+
+```groovy
+i32* = {
+    MAX*: i32 = 2147483647,     // starred: a constant crossing a module
+    MIN*: i32 = -2147483648,    // boundary obeys law 6 like everything else
+    BITS*: usize = 32,
+}
+
+x = i32.MAX;              // a constant, resolved at comptime
+buf: [u8, i32.BITS]       // usable wherever a comptime value is
+```
+
+The distinction from a field: a field declares storage per value, a constant declares one value per type. `MAX: i32 = 2147483647` inside `i32` is the second, because `i32` has no instances to give it storage in. Every primitive numeric type carries `MIN`, `MAX`, and `BITS` from the prelude.
 
 ---
 
@@ -403,13 +449,9 @@ Display* = {
 
 // std.core (prelude, auto-imported)
 
-Res*<T> =
-    Ok(T),
-    None
+Res*<T> = Ok(T) | None
 
-Res*<T, E> =
-    Ok(T),
-    Err(E)
+Res*<T, E> = Ok(T) | Err(E)
 
 // hoisting: a bare T lifts into Res<T> wherever a Res is
 // expected, so the obvious thing just works:
@@ -466,9 +508,8 @@ Scope* = {
 // resolved BY TYPE, not by the name of the binding. no Env in
 // scope is a compile error, so printing exists exactly where the
 // capability does and the law is not bent to make hello-world short
-ArgError* =
-    Missing(str),   // required field absent; names the field
-    Parse(str)      // value present but not the field's type
+ArgError* = Missing(str)   // required field absent; names the field
+          | Parse(str)     // value present but not the field's type
 
 Env* = {
     argv: Vec<str>,       // raw argv; argv.get(0) is the program path
@@ -511,8 +552,7 @@ Hash* = {
 // memory takes an Alloc, so "does this allocate?" is answered
 // by reading the signature. no Alloc parameter, no allocation
 
-AllocError* =
-    OutOfMemory
+AllocError* = | OutOfMemory
 
 // the allocator interface. everything that allocates takes one.
 // implementations: arena (mem.alloc()), fixed buffer, c malloc.
@@ -637,8 +677,7 @@ Map*<K: Eq + Hash, V> = {
 // registers Tester-taking functions as the test target. the
 // function name IS the test name. `zen test` just runs it
 
-TestError* =
-    Failed(str)
+TestError* = | Failed(str)
 
 Tester* = {
     env: Env,
@@ -672,11 +711,7 @@ BenchStats* = {
 
 // std.build.zen
 
-BuildError* =
-    NotFound,
-    FetchFailed,
-    VersionConflict,
-    HashMismatch
+BuildError* = NotFound | FetchFailed | VersionConflict | HashMismatch
 
 // a dependency, hash-locked: the url and version say what you
 // asked for, the hash pins what you actually got
@@ -808,9 +843,7 @@ loop*<K, V> = (map: Map<K, V>, body: (h: LoopHandle, key: K, value: V) ()) Res<(
 // exiting — main's drops run when main's scope ends, and the
 // runtime outlives it. nothing to join, nothing to wait on
 
-ActorError* =
-    Closed,
-    Full
+ActorError* = Closed | Full
 
 // the address of an actor. freely sendable. behavior calls on
 // a Ref are messages. every Ref also carries:
@@ -850,9 +883,7 @@ Actor* = {
 // creator — so it hangs off Env like io and pages do. there is
 // no ambient thread.spawn
 
-ThreadError* =
-    SpawnFailed,
-    Panicked
+ThreadError* = SpawnFailed | Panicked
 
 Thread* = {
     id: u64,
@@ -1058,10 +1089,7 @@ Rect = {
 
 // variants carry payload types; a default payload and a
 // discriminant are different things and are written apart
-Shape =
-    Circle(Circle),
-    Rect(Rect),
-    Unit
+Shape = Circle(Circle) | Rect(Rect) | Unit
 
 Shape.impl(Display, {
     // defining the outlined toString: pretty output for {}.

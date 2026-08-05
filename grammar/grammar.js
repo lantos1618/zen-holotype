@@ -14,7 +14,71 @@
 // NOT YET RUN THROUGH `tree-sitter generate` (instructed not to). The
 // `conflicts` list below is derived by reading the item sets, not by running
 // the generator; expect one iteration of "add/remove a conflict the generator
-// names" before it builds.
+// names" before it builds. bootstrap/cst.py keeps every node name it depends
+// on in ONE table at the top of the file, so a rename after the first real
+// generate is a one-file, one-table edit.
+//
+// ---------------------------------------------------------------------------
+// THE FOUR DECISIONS (settled after the first draft; bootstrap/CONTRACT.md
+// carries the same list, and it is binding)
+// ---------------------------------------------------------------------------
+//
+// R1. SUM TYPES USE `|`, NOT `,`.
+//
+//       Shape = Circle(Circle) | Rect(Rect) | Unit   // nominal, with payloads
+//       Error = AllocError | IoError | ArgError      // a union of existing types
+//       AllocError* = | OutOfMemory                  // one variant: the bar LEADS
+//       Alias = Shape                                // no bar at all: an alias
+//
+//     A declaration whose right-hand side contains a top-level `|` is an enum;
+//     one that does not is an alias (or an import, or a constant — see R1a).
+//     `|` is not an expression operator in Zen, so the fork between "call" and
+//     "first variant" always closes at the first bar, and the leading bar
+//     closes it before it opens. This one decision retires FOUR ambiguities
+//     from tests/parse/constructs.md at once: A-ALIAS, A-UNIONDECL, A-ENUMEND,
+//     and the enum half of A-CONSTRUCT. Enums are now declarable ANYWHERE —
+//     the module-level-only restriction (old D10) existed purely as a tiebreak
+//     and is deleted.
+//
+//     R1a. What is left of `Name = <thing>` is decided by the SHAPE of
+//     <thing>, in bootstrap/cst.py, not by more grammar:
+//       `{ .. }`            struct
+//       variants with `|`   enum
+//       `(..) T { .. }`     function, with a body
+//       `(..) T`            function, signature only
+//       `a.b.c`             import (dotted path)
+//       `Name` / `Name<T>`  alias
+//       anything else       a constant (module level) / a binding (in a body)
+//
+// R2. A STATEMENT ENDS WITH `;`. A DECLARATION DOES NOT.
+//
+//     Struct, enum, alias, function-with-body and signature declarations take
+//     no `;`, at module level and inside a body alike. Every statement inside
+//     a body takes one. There is NO newline sensitivity and NO semicolon
+//     insertion, so the hazard the old D4 recorded — a line beginning `(` or
+//     `[` silently becoming a call or an index of the line above — cannot
+//     occur. Retires A-SEMI and A-LEADDOT (a leading-dot continuation is now
+//     just whitespace; nothing about it is load-bearing).
+//
+//     A block is `statement* expression?`: the optional final expression, the
+//     one WITHOUT a `;`, is the block's value. DESIGN.md:405 also lets a
+//     `;`-terminated tail (`Ok(0);`) be the value; that is a typing rule, not
+//     a syntax one, so this grammar records only what is written and sema
+//     decides. A-TAIL is therefore narrowed, not closed.
+//
+// R3. `ref` / `val` / `iso` HAVE NO SYNTAX. Capabilities are inferred and the
+//     only thing ever written is `consume` (DESIGN.md:308). Nothing to add;
+//     recorded so the next reader does not add it.
+//
+// R4. A STRUCT BODY MAY BIND CONSTANTS, read as `Type.NAME`:
+//
+//       i32* = { MAX: i32 = 2147483647, MIN: i32 = -2147483648, BITS: usize = 32 }
+//
+//     A member with `:` (immutable) AND a value is a CONSTANT — one value per
+//     type. A member with `::` (mutable) and a value is a FIELD WITH A DEFAULT
+//     — storage per value, optional at construction (`verbose :: bool = false`).
+//     That is the only syntactic difference between them, and it leaves an
+//     immutable field with a default unspellable; reported, not invented.
 //
 // ---------------------------------------------------------------------------
 // DECISIONS DESIGN.md DOES NOT STATE (all reported; each is a doc bug)
@@ -25,39 +89,35 @@
 //       || < && < (== !=) < (< > <= >=) < (+ - +% -%) < (* / % *%) < unary
 //     `+%` sits at exactly the precedence of `+`, `*%` of `*` — DESIGN.md
 //     calls them "the wrapping forms", so they are the same operation with a
-//     different overflow rule, not a different binding strength.
+//     different overflow rule, not a different binding strength. (A-PREC)
 //
 // D2. `consume e` binds LOOSER than every other prefix operator and looser
 //     than binary operators (`prec.right(PREC.consume)`), so `consume f` and
 //     `consume buf` (the only two forms in DESIGN.md) parse, and
-//     `consume a.b` consumes the field rather than the base. DESIGN.md shows
-//     `consume` only on a bare name.
+//     `consume a.b` consumes the field rather than the base.
 //
-// D3. `|` in a type is left-associative and binds tighter than nothing else —
-//     it only ever appears at the top of a type. `A | B | C` is a flat
-//     left-nested union_type.
+// D3. `|` in a TYPE is left-associative and appears only at the top of a type
+//     (`Res<Cfg, IoError | ParseError>`). `A | B | C` is a flat left-nested
+//     union_type. In DECLARATION position `|` is the enum separator (R1) and
+//     never reaches this rule.
 //
-// D4. Statement terminators. `;` is OPTIONAL everywhere (DESIGN.md writes
-//     `Ok(());` but not `})` after a match, and never after a declaration).
-//     Consequence, reported: with no terminator a newline does not end a
-//     statement, so `f(x)` followed by a line starting with `(` or `[`
-//     parses as a call/index of the previous line. DESIGN.md would need to
-//     either require `;` or make the lexer newline-sensitive.
+// D4. Superseded by R2.
 //
 // D5. A trailing comma is allowed in argument lists, array literals, record
 //     bodies, match arms, parameter lists and struct bodies (all appear in
-//     DESIGN.md) but NOT in an enum variant list — an enum has no brackets,
-//     so a trailing comma would leave no way to know the variant list ended.
+//     DESIGN.md). An enum variant list has no trailing separator to allow:
+//     `|` separates and never terminates. (A-ENUMEND, closed by R1.)
 //
 // D6. Struct bodies separate members with an OPTIONAL comma: `Rect` uses
 //     commas between fields, `String` and `Alloc` use none between methods,
-//     `Tester` mixes both. So: `member (',')? member ...`.
+//     `Tester` mixes both. So: `member (',')? member ...`. (A-SEP, A-IMPLSEP)
 //
 // D7. `*` (the export marker) is the plain `*` token, not `token.immediate`.
-//     `a*b` therefore stays multiplication; `x* = e` stays an export. The two
-//     are distinguished by the token AFTER the star, which costs one GLR
-//     fork. Zen has no pointer sigil (raw pointers are `Ptr<T>`), so `*` has
-//     exactly two jobs: export marker and multiply.
+//     `a*b` therefore stays multiplication; `x* = e` stays an export. They are
+//     never in the same context: an export marker only ever follows the name
+//     of a declaration or a member, and no expression may begin a module item
+//     except an impl call. Zen has no pointer sigil (raw pointers are
+//     `Ptr<T>`), so `*` has exactly two jobs. (A-STAR)
 //
 // D8. Numeric literals: decimal integers and `d.d` floats ONLY. DESIGN.md
 //     shows no hex, no binary, no exponent, no digit separators, no type
@@ -66,22 +126,45 @@
 // D9. Block comments do not nest. TESTING.md explicitly says "decide, then
 //     test"; DESIGN.md does not decide, so this is the minimum.
 //
-// D10. `enum_declaration` and `alias_declaration` are MODULE-LEVEL only. This
-//      is what keeps `Circle1 = AddFoo(Circle)` (inside `main`) a binding to a
-//      comptime call rather than a one-variant enum. See A1 in the report.
+// D10. Withdrawn. Enum and alias declarations were module-level only as a
+//      tiebreak for A-ALIAS; R1 removes the reason, so they are declarable
+//      anywhere a declaration is.
 //
 // D11. `Name = { .. }` is ALWAYS a struct declaration, never a binding to a
-//      block value. DESIGN.md shows blocks as values (`@scope`) only in
-//      statement position, so no expression in this grammar may start with
-//      `{`. Records and match blocks are therefore only legal as call
-//      arguments, which is the only place DESIGN.md puts them.
+//      block value, and NO expression may begin with `{`. Records and match
+//      arm lists are therefore only legal as call arguments, which is the only
+//      place DESIGN.md puts them, and the four meanings of `{` (A-BRACE)
+//      become three positions plus one `:`/`=>` test inside an argument.
 //
-// D12. One `function` node covers lambdas AND function types: a function type
-//      is a function with no `body` field. That is exactly DESIGN.md's method
-//      table — `= sig` vs `= sig {..}` differ only by the body — so making
-//      them two nodes would put the same fact in two places. `iso` / `val` /
-//      `ref` have NO written syntax anywhere in DESIGN.md and are therefore
-//      NOT in this grammar.
+// D12. A function with a body and a function signature are two rules,
+//      `function` and `function_signature`, because R2 makes the body the
+//      thing that decides whether a `;` may follow. They still collapse to ONE
+//      ast node with an optional body (bootstrap/CONTRACT.md `Function.form`),
+//      which is DESIGN.md's method table — `= sig` vs `= sig {..}` differ only
+//      by the body. Per R3 there is no capability syntax on either.
+//
+// D13. Parameter types are OPTIONAL in the grammar, because a closure infers
+//      them from the call (DESIGN.md:254) and `(h, field)` must parse. A
+//      DECLARATION and a function TYPE must still write every type
+//      (DESIGN.md:223, 329); that is checked in bootstrap/cst.py, which is
+//      where the position is known, and it is a diagnostic rather than a parse
+//      error. Two fixtures in tests/parse/errors/ therefore fail one stage
+//      later than the rest — reported. (A-CLO)
+//
+// D14. A return type is optional on a function with a body (`started ::=
+//      (self :: @Self, ctx: Context) { .. }`, DESIGN.md:1165) and omitted
+//      means `()`. DESIGN.md writes the same method both ways; A-RET stays
+//      open, this grammar accepts both.
+//
+// D15. An enum variant carries AT MOST ONE payload type, per
+//      bootstrap/CONTRACT.md `Variant(name, payload)`. DESIGN.md never writes
+//      two.
+//
+// D16. `A.impl(B, { .. })` is its own rule at module level rather than a call,
+//      because module level has no expression statements at all under R2 — so
+//      giving it a rule costs no ambiguity and gains a node name the LSP and
+//      the formatter can match on. cst.py still checks the method is `impl`;
+//      `impl` is NOT a reserved word (A-KEYWORDS).
 // ---------------------------------------------------------------------------
 
 const PREC = {
@@ -101,8 +184,8 @@ const PREC = {
 /** @param {RuleOrLiteral} rule */
 const comma_sep1 = (rule) => seq(rule, repeat(seq(',', rule)));
 
-/** @param {RuleOrLiteral} rule */
-const comma_sep = (rule) => optional(comma_sep1(rule));
+/** trailing comma allowed, empty allowed — D5 @param {RuleOrLiteral} rule */
+const comma_list = (rule) => optional(seq(comma_sep1(rule), optional(',')));
 
 module.exports = grammar({
   name: 'zen',
@@ -112,51 +195,47 @@ module.exports = grammar({
   extras: ($) => [/\s/, $.line_comment, $.block_comment],
 
   conflicts: ($) => [
-    // `Name = Foo` / `Name = Foo(T)` — one-variant enum vs a binding to a
-    // name or a call. THE known ambiguity (A1). Resolved by prec.dynamic on
-    // enum_declaration, which is why the grammar can only carry this at
-    // module level (D10).
-    [$.binding, $.enum_declaration],
-    // the payload of that fork: `str` in `Failed(str)` is a type on one side
-    // of the fork and an expression on the other.
+    // `Foo(T)` — the first variant of an enum, or a call bound to a name?
+    // Closes at the first `|` (R1), or never opens when the bar leads.
+    [$.enum_variant, $._expression],
+    [$.enum_body, $._expression],
+    // `Vec<i32>` as a declaration value — an alias target, or `Vec < i32`?
+    // Decided at the token after `>`.
+    [$.generic_type, $.binary_expression],
     [$._type, $._expression],
-    // `self.len` — a binding target, or an expression statement? decided at
-    // the `=` that may or may not follow.
-    [$.binding, $.expression_statement],
-    // `Foo*` — export marker, or `Foo * ...`? and `Foo<T> =` — type
-    // parameters of a declaration, or `Foo < T > ..`? Both are decided by
-    // the token after the marker, one GLR fork later.
-    [$.declaration_name, $.binary_expression, $.call_expression],
-    // `(x)` / `(x, y)` — parameter list of a lambda, or a parenthesized
-    // expression? decided at the `{` or return type that may follow.
+    // `x = (a: i32) i32` — a signature declaration (no `;`), or the start of
+    // a function with a body? Decided at the `{`. R2 makes this the only
+    // place the `;` rule needs a fork.
+    [$.function, $.function_signature],
+    // `x` at the head of a statement — a binding target, or an expression
+    // statement? Decided at the `=` / `::=` that may or may not follow.
+    [$.let_statement, $.expression_statement],
+    [$.declaration_statement, $.let_statement],
+    // the tail expression of a block against an expression statement:
+    // decided at `;` (statement) versus `}` (the block's value).
+    [$.block, $.expression_statement],
+    // `(x)` / `(x, y)` — a parameter list, or a parenthesized expression?
+    // decided at the `{` or the return type that may follow.
     [$.parameters, $.parenthesized_expression],
     // `()` — the unit value/type, or an empty parameter list?
     [$.unit, $.parameters],
     // `[a, b]` — a two-element array literal, or a `[type, count]` array
-    // type? decided at the `(` that may follow (A4).
+    // type? decided at the `(` that may follow.
     [$.array_literal, $.array_type],
     // `{ .. }` as a call argument — record, or match arms? decided at the
     // `:` / `=>` after the first entry.
     [$.record, $.match_block],
     // `f<T>(x)` — a generic call, or `f < T > (x)`? resolved by prec.dynamic
-    // on call_expression (A5).
+    // on call_expression. (A-ANGLE)
     [$.call_expression, $.binary_expression],
   ],
 
   rules: {
     source_file: ($) => repeat($._module_item),
 
-    // enum and alias declarations are module-level only — D10 / A1.
-    _module_item: ($) =>
-      choice($.enum_declaration, $.alias_declaration, $._statement),
-
-    _statement: ($) =>
-      choice(
-        $.struct_declaration,
-        $.binding,
-        $.expression_statement,
-        $.block,
-      ),
+    // Module level is DECLARATIONS ONLY, so nothing here ends in `;` — R2.
+    // `A.impl(B, {..})` is the one call-shaped thing that declares (D16).
+    _module_item: ($) => choice($.declaration, $.impl_declaration),
 
     // ------------------------------------------------------------------
     // names
@@ -177,146 +256,203 @@ module.exports = grammar({
 
     // ------------------------------------------------------------------
     // declarations
+    //
+    // ONE rule for every module-level declaration. What it declares is read
+    // off the shape of the value (R1a) in bootstrap/cst.py, which is the
+    // only place that knowledge lives:
+    //
+    //   Vec*<T> = { .. }                     struct
+    //   Shape = Circle(Circle) | Unit        enum
+    //   AllocError* = | OutOfMemory          enum, one variant
+    //   Alias = Shape                        alias
+    //   Res*, Ok*, None* = std.core.result   import, re-exported
+    //   area* = (c: Circle) f64 { .. }       function, with a body
+    //   then* = <T>(b: bool, f: () T) Res<T> function, signature only
+    //   json_pkg = Package(url: "..", ..)    module constant
+    //
+    // The name list exists for imports: "Re-export is an import whose
+    // bindings are starred. No `export`, no `from`" (DESIGN.md:328).
+    // No `;` — a declaration does not take one (R2).
     // ------------------------------------------------------------------
 
-    // `x = e`, `x ::= e`, `x: T = e`, `x: T ::= e`
-    // `self.len = self.len + 1` — a member expression is a target too.
-    // `Res*, Ok*, None* = std.core.result` — re-export is an import whose
-    // bindings are starred, so the target is a LIST and the value is an
-    // ordinary path expression. No `export`, no `from`.
-    binding: ($) =>
+    declaration: ($) =>
       seq(
-        field('target', comma_sep1($._binding_target)),
+        field('name', comma_sep1($.declaration_name)),
         optional(seq(':', field('type', $._type))),
         field('operator', choice('=', '::=')),
-        field('value', $._expression),
-        optional(';'),
+        field('value', $._declaration_value),
       ),
 
-    _binding_target: ($) =>
-      choice($.declaration_name, $.member_expression, $.index_expression),
+    _declaration_value: ($) =>
+      choice(
+        $.struct_body,
+        $.enum_body,
+        $.function_signature,
+        $.generic_type,
+        $._expression,
+      ),
 
-    // `Name* = { field: T, field :: T, field: T = default, method* = sig {..} }`
-    struct_declaration: ($) =>
+    // `Circle.impl(Rect, { width: .., height: .. })` — D16. The shape is
+    // fixed (a target, a trait, and a record) because that is the only shape
+    // DESIGN.md writes; cst.py checks that the method really is `impl`.
+    impl_declaration: ($) =>
       seq(
-        field('name', $.declaration_name),
-        '=',
-        field('body', $.struct_body),
-        optional(';'),
+        field('target', $.identifier),
+        '.',
+        field('method', $.identifier),
+        '(',
+        field('trait', $._type),
+        ',',
+        field('body', $.record),
+        optional(','),
+        ')',
       ),
 
     // members are separated by an OPTIONAL comma — D6.
     struct_body: ($) =>
-      seq('{', repeat(seq($.field_declaration, optional(','))), '}'),
+      seq('{', repeat(seq($.member_declaration, optional(','))), '}'),
 
-    // one rule for fields and methods, because DESIGN.md has one rule:
-    // "a struct whose fields happen to be functions, used as a bound, is what
-    // other languages call a trait — nothing marks it special".
+    // one rule for fields, constants and methods, because DESIGN.md has one
+    // rule: "a struct whose fields happen to be functions, used as a bound, is
+    // what other languages call a trait — nothing marks it special".
     //
     //   width: f64                       storage, set at construction
     //   data :: Vec<u8>                  storage, mutable
-    //   verbose :: bool = false          storage with a default
+    //   verbose :: bool = false          storage with a default        (R4)
+    //   MAX: i32 = 2147483647            a CONSTANT, read as `i32.MAX` (R4)
     //   name* = sig                      required: impl must provide it
     //   name* = sig {..}                 sealed
     //   name* ::= sig {..}               default: impl may rebind
     //   name* ::= sig                    optional hook
-    field_declaration: ($) =>
+    member_declaration: ($) =>
       seq(
         field('name', $.declaration_name),
         choice(
           seq(
             field('mutability', choice(':', '::')),
             field('type', $._type),
-            optional(seq('=', field('default', $._expression))),
+            optional(seq('=', field('value', $._expression))),
           ),
           seq(
             field('operator', choice('=', '::=')),
-            field('value', $._expression),
+            field('value', choice($.function_signature, $._expression)),
           ),
         ),
       ),
 
-    // `Name* = A(T), B(T), C` — NO braces. The asymmetry against structs is
-    // deliberate in DESIGN.md and it is what makes A1 unresolvable here.
-    // No trailing comma (D5): there is no closing bracket, so a trailing
-    // comma would leave the end of the variant list undecidable.
-    enum_declaration: ($) =>
-      prec.dynamic(
-        2,
-        seq(
-          field('name', $.declaration_name),
-          '=',
-          field('variants', comma_sep1($.enum_variant)),
-          optional(';'),
-        ),
+    // R1. `|` separates variants and NEVER terminates the list, so there is
+    // no trailing-separator question and no "where does the list end". One
+    // variant takes the LEADING bar; no bar at all is not an enum.
+    enum_body: ($) =>
+      choice(
+        seq('|', $.enum_variant, repeat(seq('|', $.enum_variant))),
+        seq($.enum_variant, repeat1(seq('|', $.enum_variant))),
       ),
 
     // payloads are TYPES: `Circle(Circle)`, `Failed(str)`, `Missing(str)`.
     // "a default payload and a discriminant are different things and are
-    // written apart" — so a payload list never contains `name: value`, which
-    // is what keeps `Package(url: "..", ..)` a call and not a variant.
+    // written apart" — so a payload never contains `name: value`, which is
+    // what keeps `Package(url: "..", ..)` a call and not a variant. D15: one
+    // payload type, never a list.
     enum_variant: ($) =>
       seq(
         field('name', $.identifier),
         optional(field('payload', $.variant_payload)),
       ),
 
-    variant_payload: ($) => seq('(', comma_sep1($._type), ')'),
+    variant_payload: ($) => seq('(', field('type', $._type), ')'),
 
-    // `Error = AllocError | IoError | ArgError`
-    // Requires at least one `|`, which is the ONLY thing that distinguishes
-    // it from an enum declaration. A single-name right-hand side is not an
-    // alias here — see A1.
-    alias_declaration: ($) =>
+    // ------------------------------------------------------------------
+    // statements — R2. Every one of these ends with `;` EXCEPT a nested
+    // declaration (which is a declaration, wherever it stands) and a bare
+    // block (which ends with `}` and is not an expression, D11).
+    // ------------------------------------------------------------------
+
+    // "A block is a value too." The optional trailing expression — the one
+    // with no `;` — is the block's value.
+    block: ($) =>
       seq(
-        field('name', $.declaration_name),
-        '=',
-        field('type', $.union_type),
-        optional(';'),
+        '{',
+        repeat($._statement),
+        optional(field('value', $._expression)),
+        '}',
       ),
 
-    expression_statement: ($) => seq($._expression, optional(';')),
+    _statement: ($) =>
+      choice(
+        $.declaration_statement,
+        $.let_statement,
+        $.expression_statement,
+        $.block,
+      ),
 
-    // "A block is a value too." `@scope` stands for the enclosing block.
-    // Blocks nest, and a block in statement position is a scope, never a
-    // record — D11.
-    block: ($) => seq('{', repeat($._statement), '}'),
+    // a declaration inside a body: a struct, an enum, or a function with a
+    // body — `add_i32 = (a: i32, b: i32) i32 { a + b }` (DESIGN.md:1230).
+    // No `;`, exactly as at module level.
+    declaration_statement: ($) =>
+      seq(
+        field('name', $.declaration_name),
+        field('operator', choice('=', '::=')),
+        field('value', choice($.struct_body, $.enum_body, $.function, $.function_signature)),
+      ),
+
+    // `x = e;`, `x ::= e;`, `x: T = e;`, `x: T ::= e;`
+    // `self.len = self.len + 1;` — a member expression is a target too.
+    let_statement: ($) =>
+      seq(
+        field('target', $._binding_target),
+        optional(seq(':', field('type', $._type))),
+        field('operator', choice('=', '::=')),
+        field('value', $._expression),
+        ';',
+      ),
+
+    _binding_target: ($) =>
+      choice($.identifier, $.member_expression, $.index_expression),
+
+    expression_statement: ($) => seq($._expression, ';'),
 
     // ------------------------------------------------------------------
     // functions — D12
     //
-    //   (a: T, b: T) R { .. }          lambda
-    //   (a: i32, b: i32) i32           function TYPE (no body)
-    //   <T: Bound>(x: T) R { .. }      generic, params on the lambda
-    //   (h, field) { .. }              closure: parameter types optional
-    //   () ()                          no params, returns unit
+    //   (a: T, b: T) R { .. }          function with a body / lambda
+    //   (a: i32, b: i32) i32           signature: a function TYPE, or a
+    //                                  `= sig` declaration
+    //   <T: Bound>(x: T) R { .. }      generic, parameters on the value side
+    //   (h, field) { .. }              closure: parameter types inferred (D13)
+    //   () ()                          no parameters, returns unit
     //
-    // "Function types must name their parameters" — so a parameter always
-    // has a name, and only its TYPE is optional (closures infer it).
-    // prec.right resolves the shift/reduce on `{`: a brace after a return
-    // type is this function's body, never a following block statement.
+    // prec.dynamic prefers the form WITH a body when both fit, which is what
+    // `x = (a: i32) i32 { .. }` means.
     // ------------------------------------------------------------------
 
     function: ($) =>
-      prec.right(
-        seq(
-          optional(field('type_parameters', $.type_parameters)),
-          field('parameters', $.parameters),
-          choice(
-            seq(
-              field('return_type', $._type),
-              optional(field('body', $.block)),
-            ),
+      prec.dynamic(
+        1,
+        prec.right(
+          seq(
+            optional(field('type_parameters', $.type_parameters)),
+            field('parameters', $.parameters),
+            optional(field('return_type', $._type)),
             field('body', $.block),
           ),
         ),
       ),
 
-    parameters: ($) =>
-      seq('(', comma_sep($.parameter), optional(','), ')'),
+    function_signature: ($) =>
+      prec.right(
+        seq(
+          optional(field('type_parameters', $.type_parameters)),
+          field('parameters', $.parameters),
+          optional(field('return_type', $._type)),
+        ),
+      ),
+
+    parameters: ($) => seq('(', comma_list($.parameter), ')'),
 
     // `self :: @Self` is not a receiver rule — it is the ordinary binding
     // marker on the ordinary first parameter. `args: ...` is the variadic.
+    // The type is optional for closures only; cst.py enforces the rest (D13).
     parameter: ($) =>
       seq(
         field('name', $.identifier),
@@ -348,7 +484,7 @@ module.exports = grammar({
         $.identifier,
         $.generic_type,
         $.array_type,
-        $.function,
+        $.function_signature,
         $.unit,
         $.self_type,
         $.union_type,
@@ -369,7 +505,8 @@ module.exports = grammar({
     type_arguments: ($) => seq('<', comma_sep1($._type), '>'),
 
     // `[u8, 64]` — "fixed-size arrays are [type, count]: comptime length".
-    // The count is an expression: it is comptime, not necessarily a literal.
+    // The count is an expression: it is comptime, not necessarily a literal
+    // (`[u8, i32.BITS]`, DESIGN.md:376).
     array_type: ($) =>
       seq(
         '[',
@@ -379,8 +516,9 @@ module.exports = grammar({
         ']',
       ),
 
-    // `A | B` — "an anonymous enum of two variants — a structural enum, not
-    // a new kind of type". D3: left-associative.
+    // `A | B` in TYPE position only — "an anonymous enum of two variants — a
+    // structural enum, not a new kind of type". D3: left-associative. At
+    // declaration level the same bar builds an enum_body (R1).
     union_type: ($) =>
       prec.left(
         PREC.union,
@@ -390,13 +528,13 @@ module.exports = grammar({
     // `Res<Cfg, _>` — inferred inside a module, written at the boundary.
     inferred_type: (_) => '_',
 
-    // `args: ...`
+    // `args: ...` (A-VARIADIC: never defined in DESIGN.md; taken as a type)
     variadic_type: (_) => '...',
 
     // ------------------------------------------------------------------
     // expressions
     //
-    // NOTHING here starts with `{` — D11. Records and match blocks exist
+    // NOTHING here starts with `{` — D11. Records and match arm lists exist
     // only as call arguments.
     // ------------------------------------------------------------------
 
@@ -443,7 +581,7 @@ module.exports = grammar({
 
     // the ast node for a value or a type. `@meta(n)` takes a value;
     // `@meta(self: @Self)` takes a name and a type, which is the only place
-    // in the language where an argument carries a type annotation.
+    // in the language where an argument carries a type annotation. (A-META-ARG)
     meta_expression: ($) =>
       seq('@meta', '(', field('argument', $._meta_argument), ')'),
 
@@ -453,12 +591,12 @@ module.exports = grammar({
       seq(field('name', $.identifier), ':', field('type', $._type)),
 
     // `[0, 1, 2]`, `["/opt/homebrew/lib"]`, `[json, libsodium, extern_add]`
-    array_literal: ($) => seq('[', comma_sep($._expression), optional(','), ']'),
+    array_literal: ($) => seq('[', comma_list($._expression), ']'),
 
     // `[i32, 4](2, 3, 5, 7)` — a fixed-array TYPE applied to its elements.
-    // This is its own node rather than call(array_literal, ..) because an
-    // array literal is never a callee; that keeps the reading unambiguous
-    // once the `(` is seen. See A4.
+    // Its own node rather than call(array_literal, ..) because an array
+    // literal is never a callee; that keeps the reading unambiguous once the
+    // `(` is seen.
     fixed_array_expression: ($) =>
       prec.dynamic(
         1,
@@ -466,11 +604,7 @@ module.exports = grammar({
       ),
 
     // `f(a, b)`, `alloc.Vec<i32>()`, `env.args<Opts>().try()`,
-    // `Circle.impl(Rect, {..})`, `x.match({..})`.
-    //
-    // `A.impl(B, {..})` needs no rule of its own: it is a call in statement
-    // position whose second argument is a record. "One rule, no second
-    // mechanism."
+    // `x.match({..})`, `b.exe("name", {..})`.
     //
     // The callee is restricted (no array literals, no bare functions), which
     // is what makes `[i32, 4](..)` decidable.
@@ -502,14 +636,16 @@ module.exports = grammar({
     arguments: ($) =>
       seq(
         '(',
-        comma_sep(choice($.named_argument, $.record, $.match_block, $._expression)),
-        optional(','),
+        comma_list(
+          choice($.named_argument, $.record, $.match_block, $._expression),
+        ),
         ')',
       ),
 
     // `Budget(name: "vec_add", ns_op: 40)`, `Entry(hash: h, key: key)`,
     // `Circle1(radius: 1.0, foo: 1)` — construction is `name: value`, the
-    // same form an impl uses to supply a field.
+    // same form an impl uses to supply a field. (A-CONSTRUCT: positional
+    // arguments occur too, and both are accepted.)
     named_argument: ($) =>
       seq(field('name', $.identifier), ':', field('value', $._expression)),
 
@@ -526,7 +662,7 @@ module.exports = grammar({
           seq(':', field('value', $._expression)),
           seq(
             field('operator', choice('=', '::=')),
-            field('value', $._expression),
+            field('value', choice($.function_signature, $._expression)),
           ),
         ),
       ),
@@ -540,8 +676,7 @@ module.exports = grammar({
     // form, so exhaustiveness is sema's job and not the grammar's.
     // ------------------------------------------------------------------
 
-    match_block: ($) =>
-      seq('{', comma_sep1($.match_arm), optional(','), '}'),
+    match_block: ($) => seq('{', comma_sep1($.match_arm), optional(','), '}'),
 
     match_arm: ($) =>
       seq(
@@ -564,14 +699,14 @@ module.exports = grammar({
     // "cover every case or write `_`"
     wildcard_pattern: (_) => '_',
 
-    // `Ok(n) => n`, `Circle(circle) => ..`, `Enum(e) => ..` — the payload
-    // binds in the pattern, and the arm sees the typed node.
+    // `Ok(n) => n`, `Circle(circle) => ..`, `Ok(_) => ..` — the payload binds
+    // in the pattern, and the arm sees the typed node. One binder: the ast
+    // has `PatVariant(name, binder)` and DESIGN.md never nests a pattern.
     destructure_pattern: ($) =>
       seq(
         field('name', $.path_pattern),
         '(',
-        comma_sep1($._pattern),
-        optional(','),
+        field('binder', choice($.identifier, $.wildcard_pattern)),
         ')',
       ),
 
@@ -585,30 +720,40 @@ module.exports = grammar({
     member_expression: ($) =>
       prec.left(
         PREC.member,
-        seq(field('object', $._expression), '.', field('property', $.identifier)),
+        seq(
+          field('object', $._expression),
+          '.',
+          field('property', $.identifier),
+        ),
       ),
 
     // `buf[i]` — bounds-checked and traps. A fixed array has no `Res`
-    // escape hatch; that is the failure model, not the grammar.
+    // escape hatch; that is the failure model, not the grammar. (A-INDEX)
     index_expression: ($) =>
       prec.left(
         PREC.call,
-        seq(field('array', $._expression), '[', field('index', $._expression), ']'),
+        seq(
+          field('array', $._expression),
+          '[',
+          field('index', $._expression),
+          ']',
+        ),
       ),
 
-    // `&c.width`, `!self.eq(other)`, `-1`
+    // `&c.width`, `!self.eq(other)`, `-1` (A-AMP: `&` appears once, in an
+    // example marked ERROR for an unrelated reason, so it parses)
     unary_expression: ($) =>
       prec.right(
         PREC.unary,
-        seq(field('operator', choice('!', '-', '&')), field('operand', $._expression)),
+        seq(
+          field('operator', choice('!', '-', '&')),
+          field('operand', $._expression),
+        ),
       ),
 
     // "`consume` moves." Stated at the use site: `g = consume f`.
     consume_expression: ($) =>
-      prec.right(
-        PREC.consume,
-        seq('consume', field('value', $._expression)),
-      ),
+      prec.right(PREC.consume, seq('consume', field('value', $._expression))),
 
     // D1. `+ - *` trap on overflow; `+% -% *%` wrap, at the same
     // precedence, because they are the same operation with a different
@@ -661,7 +806,7 @@ module.exports = grammar({
 
     // `"{}"` placeholders are format-string content, not syntax: the format
     // machinery routes `{}` through toString at the call, so the lexer sees
-    // an ordinary string.
+    // an ordinary string. (A-FMT)
     string_literal: ($) =>
       seq(
         '"',

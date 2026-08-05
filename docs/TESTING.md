@@ -47,6 +47,16 @@ Line 1 is a **substring** of the message — loose enough to survive rewording, 
 
 Positions are 1-based line, 1-based **byte** column, and point at the first byte of the smallest offending node.
 
+**A single-file test may write `line:col` and omit the path**, which resolves against the test's entry file. Four suites reached for this independently before it was allowed, which is the tell that the long form was asking for something nobody wanted to write. A right-line/wrong-file match is still a failure.
+
+**A test's compilation root is its own directory.** Every asserted path is relative to that, and so is every path the compiler emits — which is what makes the determinism check comparing two copies of a tree at different absolute paths meaningful.
+
+**A directory test names its expectation `main.expected`**, matching the `main.zen` it already requires, and visible to `ls` in a way a dotfile is not. `.exit`, `.stderr` and `.count` follow the same rule.
+
+**`.count` bounds the number of diagnostics.** Extra diagnostics are otherwise always allowed — one file legitimately produces two — so "a single syntax error must not cascade into fifty" is inexpressible without it. Only write one where the count is the property under test.
+
+A `must-fail` test may also carry `.exit` and `.stderr`. An area directory may carry a `README.md`; the runner ignores it.
+
 **Assumptions the whole corpus rests on**, stated here so no test has to restate them: `Ok(0)` from `main` exits 0; `println` appends exactly one `\n`; `{}` on an integer prints decimal with no separators; stdout is compared byte-exactly including the trailing newline.
 
 ---
