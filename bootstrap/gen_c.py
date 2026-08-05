@@ -1037,10 +1037,14 @@ class Emitter:
 
     def emit(self):
         """The whole program, as one C99 translation unit."""
-        for decl in sorted(
-            [d for ds in self.by_name.values() for d in ds if d.dkind == "fn"],
-            key=lambda d: d.parts,
-        ):
+        # Whole-program compilation emits what the program reaches.  Seeding
+        # from `main` rather than from every declaration is what keeps an
+        # unused std member -- one supplied by an impl gen_c cannot dispatch
+        # yet -- from failing a program that never calls it.
+        roots = [d for d in self.by_name.get("main", []) if d.dkind == "fn"]
+        if not roots:
+            roots = [d for ds in self.by_name.values() for d in ds if d.dkind == "fn"]
+        for decl in sorted(roots, key=lambda d: d.parts):
             if decl.tparams:
                 continue  # a generic is emitted per instantiation
             self.request_fn(decl, ())
@@ -1604,7 +1608,7 @@ class FnCtx:
         data, length, user = self.str_names()
         dname = sym_member(data) if user else "data"
         lname = sym_member(length) if user else "len"
-        return "((%s){ .%s = (const unsigned char *)%s, .%s = %d })" % (
+        return "((%s){ .%s = (unsigned char *)%s, .%s = %d })" % (
             cname,
             dname,
             c_string(raw),
@@ -1633,6 +1637,9 @@ class FnCtx:
                 self.e.error(node, "constant cycle: %s"
                                    % " -> ".join(k[2] for k in ring))
                 return ("0", UNKNOWN)
+            declared = f(d.node, "ty")
+            if declared is not None:
+                want = self.e.resolve_type(declared, self.subst, d.scope_parts) or want
             self.e.expanding.append(d.key)
             try:
                 code, ty = self.expr(f(d.node, "value"), want)
@@ -1703,9 +1710,22 @@ class FnCtx:
                     return (self.make_variant(ty, name, None), ty)
                 if str(f(v, "name", "")) == name:
                     return None  # a payload variant: handled at the Call
-        for c in f(node_t, "consts", ()) or ():
-            if str(f(c, "name", "")) == name:
-                return self.expr(f(c, "value"))
+        for c in list(f(node_t, "consts", ()) or ()) + list(f(node_t, "fields", ()) or ()):
+            if str(f(c, "name", "")) != name:
+                continue
+            value = f(c, "value")
+            if value is None:
+                value = f(c, "default")
+            if value is None:
+                continue
+            # `MAX*: i64 = 9223372036854775807` is read AT ITS DECLARED TYPE.
+            # Lowering it at the literal's default width truncates the value
+            # and, worse, makes the arithmetic that follows unable to overflow
+            # -- the trap silently stops existing.
+            declared = f(c, "ty")
+            want = (self.e.resolve_type(declared, self.subst, tdecl.scope_parts)
+                    if declared is not None else None)
+            return self.expr(value, want)
         return None
 
     def module_named(self, name):
@@ -1905,7 +1925,10 @@ class FnCtx:
             bound = self.find(name)
             if bound is not None and bound[1] is not None and bound[1][0] == "lambda":
                 return self.inline_lambda(bound, self.arg_nodes(args), want, node)
-            if name in ("println", "print") and not self.e.lookup(name, self.parts, "fn"):
+            if name in ("println", "print") and not any(
+                f(self.e.fn_node(d.node), "body") is not None
+                for d in self.e.lookup(name, self.parts, "fn")
+            ):
                 return self.lower_print(node, args, newline=(name == "println"))
             built = self.try_construct(name, node, args, targs, want)
             if built is not None:
@@ -2261,6 +2284,10 @@ class FnCtx:
         params = list(self.e.params_of(fnode))
         if f(fnode, "body") is None and is_loop_shape(self.e, fnode):
             return self.lower_loop(decl, fnode, node, argnodes, want, receiver)
+        if f(fnode, "body") is None:
+            got = self.lower_intrinsic(decl, fnode, node, argnodes, want, receiver)
+            if got is not None:
+                return got
         if f(fnode, "body") is None and decl.owner:
             # "A trait value is a fat value: a receiver pointer plus one
             # function pointer per method."  Which function a bodyless member
@@ -2522,6 +2549,48 @@ class FnCtx:
             self.line("%s = %s;" % (result, self.ok_of(ret, acc, node)))
         return (result if result is not None else "0", ret or UNIT)
 
+    def lower_intrinsic(self, decl, fnode, node, argnodes, want, receiver):
+        if decl.name in ("println", "print") and decl.owner == "Console":
+            # "stdout / stderr.  This is what `println` resolves to."  Nothing
+            # impls Console: it is the capability itself, so its one method is
+            # the backend's, like Ptr's members are.
+            self.lower_print(node, [a for a in argnodes],
+                             newline=(decl.name == "println"))
+            ret = self.e.resolve_type(self.e.ret_of(fnode), {}, decl.scope_parts)
+            if ret in (None, UNIT, UNKNOWN):
+                return ("0", UNIT)
+            return (self.ok_of(ret, None, node), ret)
+        return self._lower_intrinsic(decl, fnode, node, argnodes, want, receiver)
+
+    def _lower_intrinsic(self, decl, fnode, node, argnodes, want, receiver):
+        """The bodyless declarations whose bodies ARE the backend.
+
+        `to_u64* = (self: u8) u64` and `null_ptr* = <T>() Ptr<T>` are written
+        as signatures for the same reason `Ptr`'s members are: there is
+        nothing underneath to write them in.  Conversions are methods rather
+        than a cast keyword, so this is where the cast lives.
+        """
+        name = decl.name
+        # speculative: the caller may not be an intrinsic at all, so an
+        # unresolved type parameter here is not an error to report
+        mark = len(self.e.diags)
+        subst = dict((tp, UNKNOWN) for tp in decl.tparams)
+        ret = self.e.resolve_type(self.e.ret_of(fnode), subst, decl.scope_parts)
+        del self.e.diags[mark:]
+        if name.startswith("to_") and (receiver is not None or argnodes):
+            target = name[3:]
+            if target in PRIMS:
+                value = receiver if receiver is not None else None
+                if value is None:
+                    v = argnodes[0]
+                    value = v if isinstance(v, tuple) else self.expr(v)
+                return ("(%s)%s" % (PRIMS[target], paren(value[0])), prim(target))
+        if name == "null_ptr":
+            ty = ret if ret is not None and ret[0] == "ptr" and ret[1] != UNKNOWN else (
+                want if want is not None and want[0] == "ptr" else ("ptr", prim("u8")))
+            return ("((%s)NULL)" % self.e.ctype(ty).strip(), ty)
+        return None
+
     def range_bounds(self, range_val, node):
         """`start` and `end`, which every Range supplies -- stored on
         `Range(0, n)` and computed by an impl on a Vec."""
@@ -2588,10 +2657,12 @@ class FnCtx:
 
     def ok_of(self, ty, code, node):
         if ty is None or ty[0] != "named":
-            return code
+            return code if code is not None else "0"
         info = self.e.enum_info(ty)
         names = [v for v, _ in info[2]] if info else []
-        return self.make_variant(ty, "Ok", code) if "Ok" in names else code
+        if "Ok" not in names:
+            return code if code is not None else "0"
+        return self.make_variant(ty, "Ok", code)
 
     def lower_handle(self, bound, name, argnodes, node):
         """`h.break(v)` / `h.break()` / `h.next()` -- the same jump `.try()`
@@ -2757,12 +2828,21 @@ class FnCtx:
         return (result if result is not None else "0", ty or UNIT)
 
     def arm_type(self, arms):
+        """The match's type, taken from the arm that carries the most
+        information: a bare integer literal defaults to i32 and would make
+        `(cap == 0).match({true => 8, false => cap * 2})` an i32 beside a
+        usize, so an arm that is not a literal decides."""
+        fallback = None
         for arm in arms:
             body = f(arm, "body")
             _code, ty = self.peek(body)
-            if ty not in (None, UNIT, UNKNOWN):
-                return ty
-        return UNIT
+            if ty in (None, UNIT, UNKNOWN):
+                continue
+            if kind(body) == "Literal":
+                fallback = fallback or ty
+                continue
+            return ty
+        return fallback or UNIT
 
     def arm_body(self, arm, result, ty):
         body = f(arm, "body")
@@ -2923,6 +3003,19 @@ class FnCtx:
             return
         src = "%s.%sdata.%s" % (tmp, GEN, sym_member(target))
         sty = dict(self.e.enum_info(ty)[2]).get(target)
+        if sty is not None and sty != pty and pty[0] == "named" and sty[0] == "named":
+            # Error sets merge: `WriteError = IoError | AllocError` is an enum
+            # whose variants are the member types, so propagating an
+            # AllocError into a WriteError selects the variant of that name.
+            # The error does not change identity -- there is no From here and
+            # no conversion invented, only the wider set naming the narrower.
+            info = self.e.enum_info(pty)
+            member = sty[1][-1]
+            if info is not None and member in [v for v, _ in info[2]]:
+                inner = dict(info[2]).get(member)
+                wrapped = self.make_variant(pty, member, src if inner else None)
+                self.line("return %s;" % self.make_variant(ret, target, wrapped))
+                return
         if pty[0] == "union" and sty is not None and sty != pty:
             # error sets merge: wrap the operand's error into this function's
             cname = self.e.ctype(pty)
@@ -3196,7 +3289,7 @@ INCLUDES = """\
 PRELUDE_TYPES = """\
 /* ---- runtime ---- */
 
-typedef struct zg_str { const unsigned char *data; size_t len; } zg_str;
+typedef struct zg_str { unsigned char *data; size_t len; } zg_str;
 
 /* A trait value is a fat value (DESIGN.md): a receiver plus function
  * pointers, copied by value, never boxed and never allocated. */

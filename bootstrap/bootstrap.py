@@ -201,21 +201,24 @@ def parser():
     raise Usage("bootstrap/cst.py exposes no parse entry point")
 
 
-def analyse(graph):
-    """sema, when it is there.  gen_c degrades to its own resolution."""
+def analyse(graph, root=""):
+    """sema.
+
+    `sema.analyse(graph)` hands back the `Sema` itself as well as its
+    diagnostics, because gen_c reads `type_of` / `ast_type_of` off it and
+    would otherwise have to redo the inference the checker just did.
+    """
     if zsema is None:
         return None, ()
-    for name in ("analyze", "analyse", "check", "run", "Sema"):
-        fn = getattr(zsema, name, None)
-        if fn is None:
-            continue
-        try:
-            got = fn(graph)
-        except TypeError:
-            continue
+    fn = getattr(zsema, "analyse", None) or getattr(zsema, "analyze", None)
+    if fn is not None:
+        got = fn(graph, root=root) if root else fn(graph)
         if isinstance(got, tuple) and len(got) == 2:
             return got[0], tuple(got[1] or ())
         return got, tuple(getattr(got, "diags", ()) or ())
+    check = getattr(zsema, "check_program", None)
+    if check is not None:
+        return None, tuple(check(graph, root=root) or ())
     return None, ()
 
 
@@ -266,7 +269,7 @@ def compile_once(root, files, whole_tree):
     graph = zmodules.build(root, parse=parser())
     if not whole_tree and files:
         graph = prune(graph, set(files))
-    sema, sema_diags = analyse(graph)
+    sema, sema_diags = analyse(graph, root)
     diags = list(getattr(graph, "diags", ()) or ()) + list(sema_diags)
     if diags:
         return "", diags
