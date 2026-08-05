@@ -61,6 +61,11 @@ try:
 except ImportError:  # pragma: no cover - sema arrives with its own agent
     zsema = None
 
+try:
+    from bootstrap import own as zown  # noqa: E402
+except ImportError:  # pragma: no cover - the ownership checker is stage 3
+    zown = None
+
 
 USAGE = """usage: bootstrap.py <root | file.zen ...> --emit-c -o <out.c> [--repeat N]
 
@@ -222,6 +227,20 @@ def analyse(graph, root=""):
     return None, ()
 
 
+def own(graph, sema, root=""):
+    """The ownership checker, `PLAN.md` stage 3.
+
+    After sema, because the receiver rule and `Drop` are both questions about
+    types; before gen_c, because a data race is a compile error and never a
+    runtime copy.  It runs even when sema already has something to say: a
+    `must-fail` test asserts its OWN diagnostic, and suppressing it behind an
+    unrelated one is how a gate stops being able to go red.
+    """
+    if zown is None or sema is None:
+        return ()
+    return tuple(zown.check(graph, sema=sema, root=root) or ())
+
+
 def prune(graph, keep):
     """Keep the named modules and what they import, and nothing else.
 
@@ -271,6 +290,7 @@ def compile_once(root, files, whole_tree):
         graph = prune(graph, set(files))
     sema, sema_diags = analyse(graph, root)
     diags = list(getattr(graph, "diags", ()) or ()) + list(sema_diags)
+    diags += list(own(graph, sema, root))
     if diags:
         return "", diags
     text, gen_diags = gen_c.generate(graph, sema=sema, root=root)

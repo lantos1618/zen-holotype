@@ -260,6 +260,7 @@ ANY = Ty("any")          # unknown / inference hole: unifies with everything
 ERR = Ty("error")        # poison: a diagnostic was already reported here
 UNIT = Ty("unit")
 NEVER = Ty("never")      # the empty error set
+VARIADIC = Ty("variadic")  # the `args: ...` tail: zero or more of anything
 INTLIT = Ty("intlit")
 FLOATLIT = Ty("floatlit")
 BOOL = Ty("prim", "bool")
@@ -343,6 +344,8 @@ def show(t):
         return "_"
     if k == "never":
         return "never"
+    if k == "variadic":
+        return "..."
     if k == "error":
         return "<error>"
     if k == "var":
@@ -427,7 +430,7 @@ def assignable(a, b):
         return True
     if a.kind in ("error", "any") or b.kind in ("error", "any"):
         return True
-    if a.kind == "never":
+    if a.kind == "never" or b.kind == "variadic":
         return True
     if a.kind == "var" or b.kind == "var":
         # unsubstituted parameters: leniency here beats a false positive in a
@@ -930,7 +933,7 @@ class _TypeReader:
             return arr_ty(elem, cnt)
         if v == "...":
             self.eat()
-            return ANY
+            return VARIADIC
         if v == "_":
             self.eat()
             return ANY
@@ -978,6 +981,8 @@ class Sema:
         self.prim_decls = {}     # "i32" -> the prelude's declaration of it
         self.global_by_name = {} # (name, arity|None) -> TypeDef, tree-wide
         self.impls_by_target = {}
+        self.node_type = {}      # id(expr) -> Ty as CHECKED  [gen_c, LSP]
+        self.call_target = {}    # id(Call | callee) -> FnDef  [gen_c, LSP]
         self.fn_instances = {}   # (id(fn), targs) -> (FnDef, targs)  [gen_c]
         self.type_instances = {} # (qname, args)   -> TypeDef         [gen_c]
 
@@ -1433,6 +1438,8 @@ class Sema:
     def resolve_named(self, name, args, ctx, node=None, want_error=True):
         if not isinstance(name, str):
             return ANY
+        if name == "...":
+            return VARIADIC
         sub = dict(ctx.subst)
         if name in sub:
             return sub[name]
@@ -2201,6 +2208,11 @@ class Sema:
         if assignable(ty, expect):
             if node is not None:
                 self._check_literal_fits(node, ty, expect, span)
+                # `Ok(0)` in a `Res<i32, Error>` position IS a Res<i32, Error>:
+                # the expectation is the only thing that knows the error set,
+                # and gen_c needs the whole type to lay the value out.
+                if ty.kind in ("ok", "err", "none", "intlit", "floatlit"):
+                    self._record_type(node, expect)
             return
         if expect.kind == "res":
             self._hoist(ty, expect, span)
@@ -2329,17 +2341,19 @@ class Sema:
     # ======================================================================
 
     def type_of(self, node, ctx=None, expect=None):
-        """The query. With no `ctx` it is an outside caller — the LSP asking
-        for a hover, gen_c asking what an expression is — so it answers
-        quietly: no diagnostic escapes a question."""
+        """The query.
+
+        With no `ctx` this is an outside caller — gen_c asking what an
+        expression is, the LSP asking for a hover — so it answers quietly (no
+        diagnostic escapes a question) and in the AST's own vocabulary, which
+        is what `gen_c.py` documents it wants: `sema.type_of(expr) -> a Type
+        node, or None`. `ty_of` is the same query in sema's richer type
+        language, for callers that want error sets and open `Ok`s.
+        """
         if node is None:
             return ANY
         if ctx is None:
-            self._muted += 1
-            try:
-                return self.type_of(node, self._quiet_ctx(node), expect)
-            finally:
-                self._muted -= 1
+            return self.as_ast_type(self.ty_of(node), _span(node))
         key = (id(node), ctx.key, expect)
         hit = self._memo.get(key, _MISS)
         if hit is not _MISS:
@@ -2354,7 +2368,32 @@ class Sema:
             self.error(_span(node), "internal error in sema: %s" % (exc,))
             ty = ERR
         self._memo[key] = ty
+        self._record_type(node, ty)
         return ty
+
+    @staticmethod
+    def _vagueness(ty):
+        """How much of a type is still unknown. Used to keep the most
+        informative answer when a node is checked more than once — a generic
+        body is checked per instantiation, and the instantiated answer is the
+        one gen_c and the LSP want."""
+        if ty is None:
+            return 99
+        if ty.kind in ("any", "error", "never", "var", "variadic", "intlit",
+                       "floatlit", "ok", "err", "none"):
+            return 1 + sum(Sema._vagueness(a) for a in ty.args)
+        n = sum(Sema._vagueness(a) for a in ty.args)
+        if ty.ret is not None:
+            n += Sema._vagueness(ty.ret)
+        return n
+
+    def _record_type(self, node, ty):
+        if node is None or ty is None or self._muted:
+            return
+        prev = self.node_type.get(id(node))
+        if prev is None or self._vagueness(ty) < self._vagueness(prev):
+            self._keep.append(node)
+            self.node_type[id(node)] = ty
 
     def _quiet_ctx(self, node):
         """A best-effort context for an outside query: the module the node was
@@ -2371,13 +2410,42 @@ class Sema:
             mi = self.mods[0] if self.mods else ModInfo("", "", None, (), "")
         return Ctx(mi, Scope(), quiet=True)
 
+    def ty_of(self, node, ctx=None):
+        """`type_of` in sema's own type language: error sets, open `Ok`s, and
+        the literal types the AST has no node for."""
+        if node is None:
+            return ANY
+        if ctx is not None:
+            return self.type_of(node, ctx)
+        got = self.node_type.get(id(node))
+        if got is not None:
+            return got      # what checking concluded, in the context it had
+        self._muted += 1
+        try:
+            return self.type_of(node, self._quiet_ctx(node))
+        finally:
+            self._muted -= 1
+
     def ast_type_of(self, node):
-        """`type_of` as an ast Type node, for gen_c — which wants the AST's own
-        vocabulary rather than sema's."""
-        return self.as_ast_type(self.type_of(node))
+        """`type_of` as an ast Type node. Kept as the explicit spelling."""
+        return self.as_ast_type(self.ty_of(node), _span(node))
+
+    @staticmethod
+    def _concrete(ty):
+        """gen_c documents `type_of -> a Type node, or None`. None is the
+        honest answer for anything still carrying a type parameter or an
+        inference hole: handing gen_c a bare `T` makes it report `unknown type
+        T` where it would otherwise have resolved the type itself."""
+        if ty is None:
+            return False
+        if ty.kind in ("var", "any", "error", "never", "variadic"):
+            return False
+        if not all(Sema._concrete(a) for a in ty.args):
+            return False
+        return ty.ret is None or Sema._concrete(ty.ret)
 
     def as_ast_type(self, ty, span=None):
-        if ty is None or A is None:
+        if ty is None or A is None or not self._concrete(ty):
             return None
         mk = lambda cls, *a: cls(*a, span=span or Span("", (1, 1), (1, 1)))
         if ty.kind == "unit":
@@ -2416,9 +2484,15 @@ class Sema:
         return None
 
     def resolve(self, node, module=None):
-        """The declaration a Path or Member names — go-to-definition."""
+        """The declaration a Path or Member names — go-to-definition.
+
+        A call resolved during checking answers from the table: overload
+        resolution already decided, and the name alone cannot say which."""
         if node is None:
             return None
+        fd = self.call_target.get(id(node))
+        if fd is not None:
+            return fd.node
         k = _k(node)
         mi = module or self._quiet_ctx(node).mod
         if k in ("Path", "Identifier"):
@@ -2887,8 +2961,15 @@ class Sema:
                 # do not report their uses as undefined names
                 actx = Ctx(actx.mod, actx.scope, actx.fn, actx.ret, actx.subst,
                            actx.bounds, actx.frame, True)
-            t = self.type_of(body, actx, expect=expect) \
-                if _k(body) != "Block" else self.check_block(body, actx, expect=expect)
+            if _k(body) == "Block":
+                t = self.check_block(body, actx, expect=expect)
+            else:
+                t = self.type_of(body, actx, expect=expect)
+                if expect is not None:
+                    # every arm produces the match's value, so every arm is
+                    # checked against it — and an `Ok(..)` arm learns the error
+                    # set from it, which is the only place that knows
+                    self.coerce(t, expect, _span(body), body)
             if result is None or result.kind in ("any", "error"):
                 result = t
         return result if result is not None else UNIT
@@ -3046,7 +3127,7 @@ class Sema:
             if mty is not None and mty.kind == "fn":
                 mty = self._apply_call_targs(mty, targs)
                 # the receiver is the first parameter; the rest line up
-                ps = mty.args[1:] if mty.args else ()
+                ps = self._spread(list(mty.args[1:]) if mty.args else [], len(vals))
                 for v, p in zip(vals, ps):
                     t = self.type_of(v, ctx, expect=p)
                     self.coerce(t, p, _span(v), v)
@@ -3077,9 +3158,10 @@ class Sema:
             t = cand.ty
             if t is None or t.kind != "fn":
                 continue
-            ps = t.args[1:]
-            if len(ps) != len(vals):
+            ps = list(t.args[1:])
+            if not self._fits_arity(ps, len(vals)):
                 continue
+            ps = self._spread(ps, len(vals))
             self._muted += 1
             try:
                 ok = all(assignable(self.type_of(v, ctx, expect=p), p)
@@ -3111,15 +3193,20 @@ class Sema:
         arg_types = ([receiver[1]] if receiver else []) + [
             self.type_of(v, ctx) for v in vals]
 
-        viable = []
+        n_args = len(arg_types)
+        sigs = []
         for fd in cands:
-            if fd.arity != len(arg_types):
-                continue
             fctx = self._fn_ctx(fd, {}, ctx.frame)
             ptys = [self.resolve_type(_g(p, "ty", "type"), fctx) for p in fd.params]
+            sigs.append((fd, ptys, self._fits_arity(ptys, n_args)))
+
+        viable = []
+        for fd, ptys, fits in sigs:
+            if not fits:
+                continue
             sub = {}
             ok = True
-            for want, got, n in zip(ptys, arg_types, arg_nodes):
+            for want, got, n in zip(self._spread(ptys, n_args), arg_types, arg_nodes):
                 if not self._unify(want, got, sub, n, ctx):
                     ok = False
                     break
@@ -3129,15 +3216,13 @@ class Sema:
             viable.append((score, fd, ptys, sub))
 
         if not viable:
-            same_arity = [fd for fd in cands if fd.arity == len(arg_types)]
+            same_arity = [(fd, ptys) for fd, ptys, fits in sigs if fits]
             if len(same_arity) == 1:
                 # one candidate, wrong argument: say which argument, not "no
                 # overload matches". The re-check below reports it precisely.
-                fd = same_arity[0]
-                fctx = self._fn_ctx(fd, {}, ctx.frame)
-                ptys = [self.resolve_type(_g(p, "ty", "type"), fctx) for p in fd.params]
+                fd, ptys = same_arity[0]
                 sub = {}
-                for want, got, n in zip(ptys, arg_types, arg_nodes):
+                for want, got, n in zip(self._spread(ptys, n_args), arg_types, arg_nodes):
                     self._unify(want, got, sub, n, ctx)
                 viable = [(0, fd, ptys, sub)]
             elif not cands:
@@ -3146,14 +3231,14 @@ class Sema:
                 self.error(span, "unknown function `%s`" % name)
                 return ERR
             else:
-                arities = sorted({fd.arity for fd in cands})
+                arities = sorted({self._arity_text(p) for _f, p, _x in sigs})
                 self.error(span,
                            "no overload matches `%s`: resolution is on declared "
                            "parameter types and arity — %d argument%s given, "
                            "%d declaration%s taking %s"
-                           % (name, len(arg_types), "" if len(arg_types) == 1 else "s",
+                           % (name, n_args, "" if n_args == 1 else "s",
                               len(cands), "" if len(cands) == 1 else "s",
-                              " or ".join(str(a) for a in arities)))
+                              " or ".join(arities)))
                 return ERR
         viable.sort(key=lambda v: (-v[0], _start(v[1].span)))
         _score, fd, ptys, sub = viable[0]
@@ -3167,7 +3252,7 @@ class Sema:
 
         # re-check the arguments against the substituted parameter types, so a
         # closure gets its parameter types from the signature it is passed to
-        for want, n in zip(ptys, arg_nodes):
+        for want, n in zip(self._spread(ptys, n_args), arg_nodes):
             w = subst_ty(want, sub)
             if n is None:
                 continue
@@ -3175,6 +3260,7 @@ class Sema:
             self.coerce(t, w, _span(n), n)
 
         self._check_bounds(fd, sub, span, ctx)
+        self._record_target(node, fd)
 
         if fd.tparams:
             key_args = tuple(sub.get(_name_of(_g(tp, "name")) or "", ANY)
@@ -3183,6 +3269,47 @@ class Sema:
         else:
             self.check_function(fd, {}, ctx.frame)
         return self.fn_ret(fd, fctx)
+
+    @staticmethod
+    def _is_variadic(ptys):
+        return bool(ptys) and ptys[-1].kind == "variadic"
+
+    @classmethod
+    def _fits_arity(cls, ptys, n):
+        """`add* = (self :: @Self, fmt: str, args: ...)` takes two arguments or
+        twenty. A variadic tail is zero-or-more, so it is a MINIMUM arity, and
+        treating it as one required parameter rejects every call that passes
+        nothing for it — which is most of them."""
+        if cls._is_variadic(ptys):
+            return n >= len(ptys) - 1
+        return n == len(ptys)
+
+    @classmethod
+    def _spread(cls, ptys, n):
+        """The parameter types laid out against `n` arguments, the variadic
+        tail repeated for each argument it swallows."""
+        if not cls._is_variadic(ptys):
+            return list(ptys)
+        fixed = list(ptys[:-1])
+        return fixed + [VARIADIC] * max(0, n - len(fixed))
+
+    @classmethod
+    def _arity_text(cls, ptys):
+        return ("%d+" % (len(ptys) - 1)) if cls._is_variadic(ptys) else str(len(ptys))
+
+    def _record_target(self, call, fd):
+        """Which declaration a CALL selected — overload resolution's answer,
+        which is not recoverable from the callee name alone. gen_c's
+        `sema.resolve(expr)` and the LSP's go-to-definition both need the
+        answer for the call, not the first declaration of the name."""
+        if call is None or fd is None:
+            return
+        self._keep.append(call)
+        self.call_target[id(call)] = fd
+        callee = _g(call, "callee", "function")
+        if callee is not None:
+            self._keep.append(callee)
+            self.call_target.setdefault(id(callee), fd)
 
     def _unify(self, want, got, sub, node, ctx):
         """One-way match of an argument against a declared parameter type,

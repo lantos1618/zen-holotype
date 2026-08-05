@@ -227,7 +227,7 @@ def tcode_named(parts, args=()) -> str:
     return out
 
 
-def sym_fn(parts, sig=(), targs=()) -> str:
+def sym_fn(parts, sig=(), targs=(), self_ty=None) -> str:
     out = USR + "f" + path_code(parts)
     sig = tuple(sig)
     if sig:
@@ -235,6 +235,12 @@ def sym_fn(parts, sig=(), targs=()) -> str:
     targs = tuple(targs)
     if targs:
         out += "I" + clist([tcode(t) for t in targs])
+    if self_ty is not None:
+        # A trait's own method, specialised on the receiver: `Eq.ne` compiled
+        # for `str` is a different function from `Eq.ne` compiled for `Key`,
+        # because `self.eq(..)` inside it resolves to a different impl.  That
+        # is case 1, and it is why Map pays nothing for dispatch.
+        out += "S" + tcode(self_ty)
     return out
 
 
@@ -908,6 +914,14 @@ class Emitter:
             return GEN + "closure"
         return "int"
 
+    def fnptr(self, ret, params, name):
+        """`ret (*name)(void *, params..)` -- the receiver is erased to a
+        pointer, so one slot serves every impl."""
+        args = ["void *"] + [self.ctype(p).strip() for p in params]
+        spelling = self.ctype(ret)
+        join = "" if spelling.endswith("*") else " "
+        return "%s%s(*%s)(%s)" % (spelling, join, name, ", ".join(args))
+
     def declarator(self, t, name):
         """A C declarator; pointers bind to the name, everything else does not."""
         spelling = self.ctype(t)
@@ -964,7 +978,13 @@ class Emitter:
             self.types[cname] = ("opaque", t)
             self.type_order[cname] = ()
             return
-        if kind(node) == "Struct":
+        if kind(node) == "Struct" and self.trait_decl(t) is not None:
+            self.types[cname] = ("trait", t, self.trait_slots(t), decl)
+            deps = []
+            for _slot, _name, _m, params, ret in self.types[cname][2]:
+                deps.extend(self._deps(list(params) + [ret]))
+            self.type_order[cname] = tuple(sorted(set(deps)))
+        elif kind(node) == "Struct":
             fields = []
             for member in f(node, "fields", ()) or ():
                 if _is_fn_field(member):
@@ -1011,6 +1031,97 @@ class Emitter:
                 out.append(self.ctype(t))
         return tuple(sorted(set(out)))
 
+    # -- traits ------------------------------------------------------------
+    #
+    # "There are no traits, only structs.  A struct whose fields happen to be
+    # functions, used as a bound, is what other languages call a trait --
+    # nothing marks it special, because nothing needs to."  So a trait is
+    # recognised by its shape: it declares behaviour and no storage.  A struct
+    # with storage is a concrete type, even when an impl supplies fields for
+    # it, and it is never a fat value.
+
+    def trait_decl(self, ty):
+        if ty is None or ty[0] != "named":
+            return None
+        for d in self.by_name.get(ty[1][-1], []):
+            if d.dkind == "type" and d.parts == ty[1]:
+                node = d.node
+                if kind(node) != "Struct":
+                    return None
+                members = [m for m in (f(node, "fields", ()) or ()) if _is_fn_field(m)]
+                storage = [m for m in (f(node, "fields", ()) or ()) if not _is_fn_field(m)]
+                if members and not storage:
+                    return d
+                return None
+        return None
+
+    def is_trait(self, ty):
+        return self.trait_decl(ty) is not None
+
+    def has_impl(self, ty):
+        """Does anything in the program impl this trait?
+
+        A trait with no impl anywhere is not a dispatch problem, it is a
+        CAPABILITY: `Console` and `Mem` are the authority itself, and
+        DESIGN.md's law is that all authority flows from Env.  Their members
+        have no Zen implementation to find because the runtime is the
+        implementation -- exactly like `Ptr`'s members.
+        """
+        name = ty[1][-1]
+        for ds in self.by_name.values():
+            for d in ds:
+                if len(d.parts) >= 3 and d.parts[-2] == name and d.owner \
+                        and d.owner != name:
+                    return True  # `C.impl(Trait, ..)`, not the trait's own member
+        return False
+
+    def trait_slots(self, ty):
+        """One slot per declared member, IN DECLARATION ORDER.
+
+        The layout is a pure function of the trait declaration and of nothing
+        else -- not of which impls exist, not of the order they were found in.
+        Determinism is the reason, and so is the ability to compile two
+        programs' records to the same shape.
+        """
+        decl = self.trait_decl(ty)
+        if decl is None:
+            return ()
+        subst = dict(zip(decl.tparams, ty[2]))
+        seen = {}
+        out = []
+        mark = len(self.diags)
+        for m in f(decl.node, "fields", ()) or ():
+            if not _is_fn_field(m):
+                continue
+            name = str(f(m, "name", ""))
+            seen[name] = seen.get(name, 0) + 1
+            slot = sym_member(name) + ("" if seen[name] == 1 else "_%d" % seen[name])
+            fnode = self.fn_node(m)
+            base = decl.scope_parts
+            self_ty = ("named", ty[1], ty[2])
+            # A member's OWN type parameters are what erasure erases, so they
+            # are resolved to the erased element type here rather than left
+            # unresolved -- `Ptr<T>` in the declaration IS `Ptr<u8>` in the slot.
+            local = dict(subst)
+            for tp in _tparam_names(m):
+                local[tp] = prim("u8")
+            params = [
+                erase(self.resolve_type(f(p, "ty"), local, base, self_ty))
+                for p in self.params_of(fnode)[1:]
+            ]
+            # One `size_t` per erased type parameter: the element size the
+            # erasure dropped.  "raw is bytes and nothing more -- size and
+            # alignment in, an address out.  Naming what the bytes are is
+            # `Ptr.to`, one level down."  The erased interface is the byte
+            # one, so the size travels beside the pointer, exactly as it does
+            # in Zig's std.mem.Allocator.
+            elems = len(_tparam_names(m))
+            params += [prim("usize")] * elems
+            ret = erase(self.resolve_type(self.ret_of(fnode), local, base, self_ty))
+            out.append((slot, name, m, tuple(params), ret))
+        del self.diags[mark:]
+        return tuple(out)
+
     def variant_parts(self, t, vname):
         return tuple(t[1]) + (vname,)
 
@@ -1027,6 +1138,147 @@ class Emitter:
         if entry and entry[0] == "struct":
             return entry
         return None
+
+    # -- building a fat value ----------------------------------------------
+
+    def impl_entry(self, concrete, trait, name):
+        """The impl's answer for one of a trait's members, if it supplies one."""
+        target = concrete[1][-1]
+        traitname = trait[1][-1]
+        out = []
+        for d in self.by_name.get(name, []):
+            if d.dkind != "fn" or d.owner != target:
+                continue
+            if len(d.parts) >= 3 and d.parts[-2] == traitname:
+                out.append(d)
+        return out
+
+    def convert(self, code, src, dst):
+        """Rebuild a value at another type -- never reinterpret one.
+
+        Erasure is what lets one slot serve every instantiation of a generic
+        member, and this is the way back: a pointer is cast, and a tagged
+        union is rebuilt variant by variant.  Nothing here assumes two
+        pointer types share a representation.
+        """
+        if src is None or dst is None or src == dst:
+            return code
+        if dst[0] == "ptr":
+            return "((%s)%s)" % (self.ctype(dst).strip(), paren(code))
+        if src[0] == "named" and dst[0] == "named" and src[1] == dst[1]:
+            sinfo, dinfo = self.enum_info(src), self.enum_info(dst)
+            if sinfo is None or dinfo is None:
+                return code
+            spay, dpay = dict(sinfo[2]), dict(dinfo[2])
+            out = None
+            for vname, _p in reversed(dinfo[2]):
+                inner = None
+                if dpay.get(vname) is not None:
+                    inner = self.convert(
+                        "%s.%sdata.%s" % (paren(code), GEN, sym_member(vname)),
+                        spay.get(vname), dpay.get(vname))
+                built = self.variant_literal(dst, vname, inner)
+                if out is None:
+                    out = built
+                else:
+                    out = "(%s.%stag == %s ? %s : %s)" % (
+                        paren(code), GEN, sym_variant(self.variant_parts(dst, vname)),
+                        built, out)
+            return out if out is not None else code
+        return code
+
+    def variant_literal(self, ty, vname, payload):
+        cname = self.ctype(ty)
+        tag = sym_variant(self.variant_parts(ty, vname))
+        if payload is None:
+            return "((%s){ .%stag = %s })" % (cname, GEN, tag)
+        return "((%s){ .%stag = %s, .%sdata = { .%s = %s } })" % (
+            cname, GEN, tag, GEN, sym_member(vname), payload)
+
+    def thunk(self, concrete, trait, slot, params, ret, decl, targs):
+        """One `void *`-receiving shim per (impl member, trait slot).
+
+        The record's slots are erased, the impl's function is not, so
+        something has to sit between them.  A cast of the function pointer
+        would be undefined; a shim is a call.
+        """
+        target = self.request_fn(decl, targs)
+        cname = GEN + "v" + target[len(USR):]
+        if cname in self.bodies or cname in self.protos:
+            return cname
+        fnode = self.fn_node(decl.node)
+        subst = dict(zip(decl.tparams, targs))
+        base = decl.scope_parts
+        real = [self.resolve_type(f(p, "ty"), subst, base, concrete)
+                for p in self.params_of(fnode)]
+        rret = self.resolve_type(self.ret_of(fnode), subst, base, concrete)
+        names = ["%sa%d" % (GEN, i) for i in range(len(params))]
+        args = ["(*(%s *)%sself)" % (self.ctype(concrete), GEN)]
+        nreal = max(0, len(real) - 1)
+        for i, (pname, pty) in enumerate(zip(names, params)):
+            if i >= nreal:
+                continue  # a trailing element size, consumed below
+            want = real[i + 1] if i + 1 < len(real) else pty
+            # A count beside an erased pointer is an ELEMENT count, and the
+            # instance being called was compiled for bytes.  The size the
+            # erasure dropped is the argument that puts it back.
+            if want == prim("usize") and i > 0 and params[i - 1][0] == "ptr" \
+                    and len(names) > nreal:
+                args.append("(%s * %s)" % (pname, names[nreal]))
+                continue
+            args.append(self.convert(pname, pty, want))
+        head = "static %s%s%s(void *%sself%s)" % (
+            self.ctype(ret), "" if self.ctype(ret).endswith("*") else " ", cname, GEN,
+            "".join(", " + self.declarator(p, n) for n, p in zip(names, params)))
+        call = "%s(%s)" % (target, ", ".join(args))
+        body = "    return %s;\n" % self.convert(call, rret, ret)
+        if ret in (None, UNIT):
+            head = "static void %s(void *%sself%s)" % (
+                cname, GEN,
+                "".join(", " + self.declarator(p, n) for n, p in zip(names, params)))
+            body = "    %s;\n" % call
+        self.protos[cname] = head + ";"
+        self.bodies[cname] = head + " {\n" + body + "}\n"
+        return cname
+
+    def fat_value(self, code, concrete, trait, ctx=None):
+        """`shape.as(Display)`, or any concrete value reaching a trait slot.
+
+        Two words plus a function pointer per method, built on the stack and
+        copied by value.  The receiver must outlive the record, which is the
+        ordinary rule for any pointer stored in anything.
+        """
+        slots = []
+        for slot, name, member, params, ret in self.trait_slots(trait):
+            entries = self.impl_entry(concrete, trait, name)
+            if not entries:
+                entries = [d for d in self.by_name.get(name, [])
+                           if d.dkind == "fn" and d.owner == concrete[1][-1]]
+            fn = None
+            for d in entries:
+                if self.fn_node(d.node) is not None:
+                    fn = d
+                    break
+            if fn is None and f(self.fn_node(member), "body") is not None:
+                # the trait's own default, specialised on this receiver
+                tdecl = self.trait_decl(trait)
+                for d in self.by_name.get(name, []):
+                    if d.dkind == "fn" and d.owner == trait[1][-1] and d.parts[:-1] == tdecl.parts:
+                        fn = d
+                        break
+            if fn is None:
+                slots.append((slot, "NULL"))
+                continue
+            # compiled at the erased element type: one byte, so a scaled
+            # count is already the byte count it needs
+            targs = tuple(prim("u8") for _ in fn.tparams)
+            if fn.otparams:
+                targs = tuple(concrete[2]) + tuple(
+                    prim("u8") for _ in fn.tparams[len(fn.otparams):])
+            slots.append((slot, self.thunk(concrete, trait, slot, params, ret, fn, targs)))
+        inits = [".%sself = (void *)%s" % (GEN, code)]
+        inits += [".%s = %s" % (slot, fn) for slot, fn in slots]
+        return "((%s){ %s })" % (self.ctype(trait), ", ".join(inits))
 
     # -- diagnostics -------------------------------------------------------
 
@@ -1058,27 +1310,29 @@ class Emitter:
             if guard > MAX_INSTANCES:
                 # `f<T> = (x: T) { f<Vec<T>>(..) }` must terminate with an
                 # error rather than consume all memory (TESTING.md, Sema).
-                cname, decl, _targs = self.worklist[0]
+                cname, decl = self.worklist[0][0], self.worklist[0][1]
                 self.error(decl.node,
                            "generic instantiation did not terminate at `%s`" % decl.name)
                 break
             self.worklist.sort(key=lambda item: item[0])
-            cname, decl, targs = self.worklist.pop(0)
-            self.emit_fn(cname, decl, targs)
+            cname, decl, targs, self_ty = self.worklist.pop(0)
+            self.emit_fn(cname, decl, targs, self_ty)
 
-    def request_fn(self, decl, targs=()):
+    def request_fn(self, decl, targs=(), self_ty=None):
         node = decl.node
         fnode = self.fn_node(node)
         subst = dict(zip(decl.tparams, targs))
         sig = self.overload_sig(decl, subst)
-        cname = sym_fn(decl.parts, sig, targs)
+        if self_ty is not None and self_ty == self.self_type(decl, subst):
+            self_ty = None  # the declaration's own Self: not a specialisation
+        cname = sym_fn(decl.parts, sig, targs, self_ty)
         if cname in self.done:
             return cname
         self.done.add(cname)
         if fnode is None or f(fnode, "body") is None:
             # required / hook forms have no body: no C function to emit
             return cname
-        self.worklist.append((cname, decl, tuple(targs)))
+        self.worklist.append((cname, decl, tuple(targs), self_ty))
         return cname
 
     def fn_node(self, node):
@@ -1136,12 +1390,12 @@ class Emitter:
 
     # ------------------------------------------------------- function bodies
 
-    def emit_fn(self, cname, decl, targs):
+    def emit_fn(self, cname, decl, targs, self_ty=None):
         fnode = self.fn_node(decl.node)
         subst = dict(zip(decl.tparams, targs))
         base = decl.scope_parts
         params = list(self.params_of(fnode))
-        self_ty = self.self_type(decl, subst)
+        self_ty = self_ty or self.self_type(decl, subst)
         ret = self.resolve_type(self.ret_of(fnode), subst, base, self_ty)
         ctx = FnCtx(self, decl, subst, ret, self_ty)
 
@@ -1156,8 +1410,16 @@ class Emitter:
                 # the only caller in the seed subset is `println`, which gen_c
                 # lowers to typed writes rather than to a C varargs call.
                 continue
-            cn = ctx.declare(pname, pty)
-            decls.append(self.declarator(pty, cn))
+            if f(p, "mutable", False):
+                # "`::` means the method writes the receiver's OWN BYTES" --
+                # so the receiver is passed by address.  By value, `self.grow()`
+                # would grow a copy: the Vec that called it would still hold a
+                # null data pointer, which is a segfault one line later.
+                cn = ctx.declare(pname, pty, byref=True)
+                decls.append(self.declarator(("ptr", pty), cn))
+            else:
+                cn = ctx.declare(pname, pty)
+                decls.append(self.declarator(pty, cn))
         if not decls:
             decls = ["void"]
         head = "static %s(%s)" % (self.declarator(ret, cname), ", ".join(decls))
@@ -1288,6 +1550,16 @@ class Emitter:
                 lines.append("    char %spad;\n" % GEN)
             for fname, fty in fields:
                 lines.append("    %s;\n" % self.declarator(fty, sym_member(fname)))
+            lines.append("};\n\n")
+            return "".join(lines)
+        if entry[0] == "trait":
+            _, t, slots, _decl = entry
+            # "a trait value is an ordinary record: a receiver pointer plus one
+            # function pointer per method, copied by value.  No dyn, no vtable
+            # concept, no boxing, NO ALLOCATION."
+            lines = ["struct %s {\n    void *%sself;\n" % (cname, GEN)]
+            for slot, _name, _m, params, ret in slots:
+                lines.append("    %s;\n" % self.fnptr(ret, params, slot))
             lines.append("};\n\n")
             return "".join(lines)
         if entry[0] == "enum":
@@ -1424,11 +1696,13 @@ class FnCtx:
     def pop(self):
         self.scopes.pop()
 
-    def declare(self, name, ty):
+    def declare(self, name, ty, byref=False):
         n = self.counts.get(name, 0) + 1
         self.counts[name] = n
         cname = sym_local(name, n)
-        self.scopes[-1][name] = (cname, ty)
+        # A by-reference binding reads as the pointee everywhere else, so
+        # nothing downstream has to know how it was passed.
+        self.scopes[-1][name] = ("(*%s)" % cname if byref else cname, ty)
         return cname
 
     def find(self, name):
@@ -1476,6 +1750,9 @@ class FnCtx:
             return code
         if want[0] != "named":
             return code
+        if self.e.is_trait(want) and ty not in (None, UNKNOWN) and ty[0] == "named" \
+                and not self.e.is_trait(ty):
+            return self.e.fat_value(self.addr_of(code, ty), ty, want)
         info = self.e.enum_info(want)
         if info is None:
             return code
@@ -1483,6 +1760,36 @@ class FnCtx:
         if len(carriers) != 1:
             return code
         return self.make_variant(want, carriers[0], code)
+
+    def by_ref(self, code, ty):
+        if _LVALUE.match(code):
+            return "&" + code
+        if code.startswith("(*") and code.endswith(")"):
+            return code[2:-1]
+        tmp = self.new_tmp(ty)
+        self.line("%s = %s;" % (tmp, code))
+        return "&" + tmp
+
+    def value(self, node, want=None):
+        """Lower an expression at the type its destination expects.
+
+        This is where a concrete value becomes a fat value: passing an Arena
+        where an Alloc is wanted builds the record, at the argument, at the
+        field, and at the return -- one rule, three sites.
+        """
+        if isinstance(node, tuple):
+            return self.coerce(node[0], node[1], want)
+        code, ty = self.expr(node, want)
+        return self.coerce(code, ty, want)
+
+    def addr_of(self, code, ty):
+        """The receiver's address, without copying it where that would move
+        the storage the record points at."""
+        if _LVALUE.match(code):
+            return "&" + code
+        tmp = self.new_tmp(ty)
+        self.line("%s = %s;" % (tmp, code))
+        return "&" + tmp
 
     def stmt(self, node):
         k = kind(node)
@@ -1518,6 +1825,8 @@ class FnCtx:
             else (existing[1] if existing else None)
         )
         code, ty = self.expr(value, want)
+        if want not in (None, UNKNOWN):
+            code = self.coerce(code, ty, want)
         if existing is not None and declared is None and not f(node, "mutable", False):
             # a second binding of a name already in scope is an assignment:
             # Zen writes a declaration and a store the same way
@@ -1930,9 +2239,18 @@ class FnCtx:
                 for d in self.e.lookup(name, self.parts, "fn")
             ):
                 return self.lower_print(node, args, newline=(name == "println"))
-            built = self.try_construct(name, node, args, targs, want)
-            if built is not None:
-                return built
+            named = any(kind(a) == "Arg" and f(a, "name") for a in args)
+            fns = [d for d in self.e.lookup(name, self.parts, "fn")
+                   if self.e.fn_node(d.node) is not None]
+            # `Vec(alloc: a)` builds the struct; `Vec<Entry<K,V>>(a)` calls the
+            # ufcs constructor beside it.  Named arguments are the
+            # construction form -- "the same `name: value` form used at
+            # construction" -- and a call never sees parameter names, so
+            # positional arguments mean the function.
+            if named or not fns:
+                built = self.try_construct(name, node, args, targs, want)
+                if built is not None:
+                    return built
             variants = self.e.lookup(name, self.parts, "variant")
             if variants:
                 payload = self.arg_nodes(args)
@@ -1962,6 +2280,9 @@ class FnCtx:
         if kind(tdecl.node) == "Enum":
             return None  # a bare enum name is not a constructor
         targ_tys = tuple(self.e.resolve_type(t, self.subst, self.parts, self.self_ty) for t in targs)
+        if not targ_tys and tdecl.tparams and want is not None and want[0] == "named" \
+                and want[1] == tdecl.parts and len(want[2]) == len(tdecl.tparams):
+            targ_tys = want[2]
         if not targ_tys and tdecl.tparams:
             targ_tys = self.infer_targs(tdecl, args)
         ty = ("named", tdecl.parts, targ_tys)
@@ -1985,7 +2306,7 @@ class FnCtx:
         inits = []
         for fname in order:
             if fname in values:
-                code, _ = self.expr(values[fname], fields.get(fname))
+                code = self.value(values[fname], fields.get(fname))
                 inits.append(".%s = %s" % (sym_member(fname), code))
         cname = self.e.ctype(ty)
         if not inits:
@@ -2092,6 +2413,10 @@ class FnCtx:
             if got is not None:
                 return got
         if rty is not None and rty[0] == "named":
+            if self.e.is_trait(rty) and self.e.has_impl(rty):
+                got = self.dispatch(rcode, rty, name, argnodes, targs, want, node)
+                if got is not None:
+                    return got
             parts = tuple(rty[1]) + (name,)
             cands = [d for d in self.e.by_name.get(name, []) if d.dkind == "fn" and d.parts == parts]
             if not cands:
@@ -2100,9 +2425,25 @@ class FnCtx:
                     for d in self.e.by_name.get(name, [])
                     if d.dkind == "fn" and len(d.parts) >= 2 and d.parts[-2] == rty[1][-1]
                 ]
+            cands = [d for d in cands if self.e.fn_node(d.node) is not None]
+            with_body = [d for d in cands if f(self.e.fn_node(d.node), "body") is not None]
+            if with_body:
+                decl = self.pick_overload(with_body, argnodes, receiver=(rcode, rty))
+                return self.emit_call(decl, node, argnodes, targs, want,
+                                      receiver=(rcode, rty))
+            # CASE 1, the static one: the receiver's type is known, so a
+            # method the type does not define itself is the trait's own,
+            # compiled for THIS receiver -- `self.eq(..)` inside it resolves
+            # to the impl, and no record and no indirection take part.
+            inherited = self.trait_method(rty, name, argnodes)
+            if inherited is not None:
+                decl, trait = inherited
+                return self.emit_call(decl, node, argnodes, targs, want,
+                                      receiver=(rcode, rty), self_ty=rty)
             if cands:
                 decl = self.pick_overload(cands, argnodes, receiver=(rcode, rty))
-                return self.emit_call(decl, node, argnodes, targs, want, receiver=(rcode, rty))
+                return self.emit_call(decl, node, argnodes, targs, want,
+                                      receiver=(rcode, rty))
         # a ufcs free function: the receiver is the first parameter
         cands = self.e.lookup(name, self.parts, "fn")
         if cands:
@@ -2110,6 +2451,95 @@ class FnCtx:
             return self.emit_call(decl, node, argnodes, targs, want, receiver=(rcode, rty))
         self.e.error(node, "no method `%s` on this value" % name)
         return ("0", UNKNOWN)
+
+    def trait_method(self, rty, name, argnodes):
+        """A method the receiver's type satisfies but does not declare.
+
+        The impl supplies the required members; everything sealed or default
+        on the trait comes along, compiled once per receiver type.
+        """
+        best = None
+        for d in sorted(self.e.by_name.get(name, []), key=lambda d: d.parts):
+            if d.dkind != "fn" or not d.owner:
+                continue
+            trait = self.e.trait_decl(("named", d.parts[:-1], ()))
+            if trait is None:
+                continue
+            fnode = self.e.fn_node(d.node)
+            if fnode is None or f(fnode, "body") is None:
+                continue
+            if not self.satisfies(rty, ("named", d.parts[:-1], ())):
+                continue
+            if best is None or len(self.e.params_of(fnode)) == len(argnodes) + 1:
+                best = (d, ("named", d.parts[:-1], ()))
+        return best
+
+    def satisfies(self, ty, trait):
+        """Does this type have an impl for that trait?  A concrete type that
+        declares the member itself counts too -- there is one declaration
+        form and an impl is not a second mechanism."""
+        if ty is None or ty[0] != "named":
+            return False
+        target = ty[1][-1]
+        traitname = trait[1][-1]
+        for d in self.e.by_name.values():
+            for x in d:
+                if x.owner == target and len(x.parts) >= 3 and x.parts[-2] == traitname:
+                    return True
+        for _slot, name, member, _p, _r in self.e.trait_slots(trait):
+            if f(self.e.fn_node(member), "body") is not None:
+                continue
+            if not [x for x in self.e.by_name.get(name, []) if x.owner == target]:
+                return False
+        return True
+
+    def dispatch(self, rcode, rty, name, argnodes, targs, want, node):
+        """CASE 2, the dynamic one: the value IS the trait, so the call goes
+        through the record it carries."""
+        slots = self.e.trait_slots(rty)
+        matching = [s for s in slots if s[1] == name]
+        if not matching:
+            return None
+        member = None
+        for cand in matching:
+            fnode = self.e.fn_node(cand[2])
+            if len(self.e.params_of(fnode)) == len(argnodes) + 1:
+                member = cand
+                break
+        member = member or matching[0]
+        slot, _name, mnode, params, ret = member
+        fnode = self.e.fn_node(mnode)
+        if f(fnode, "body") is not None:
+            return None  # sealed or default: an ordinary call, specialised
+        recv = self.new_tmp(rty)
+        self.line("%s = %s;" % (recv, rcode))
+        # the caller's own instantiation, so the erased result can be rebuilt
+        tdecl = self.e.trait_decl(rty)
+        mdecl = Decl(tdecl.parts + (name,), mnode, "fn", name,
+                     _tparam_names(mnode), owner=rty[1][-1], module=tdecl.module)
+        own = self.infer_fn_targs(mdecl, fnode, argnodes, (recv, rty))
+        subst = dict(zip(mdecl.tparams, own))
+        real_params = [self.e.resolve_type(f(p, "ty"), subst, tdecl.scope_parts, rty)
+                       for p in self.e.params_of(fnode)[1:]]
+        real_ret = self.e.resolve_type(self.e.ret_of(fnode), subst, tdecl.scope_parts, rty)
+        codes = []
+        for i, value in enumerate(argnodes):
+            pty = real_params[i] if i < len(real_params) else None
+            code, aty = (value if isinstance(value, tuple) else self.expr(value, pty))
+            codes.append(self.e.convert(code, pty or aty, params[i] if i < len(params) else None))
+        for tp in mdecl.tparams:
+            # the element size the slot's erasure dropped
+            elem = subst.get(tp)
+            codes.append("sizeof(%s)" % self.e.ctype(elem).strip()
+                         if elem not in (None, UNKNOWN) else "1")
+        call = "%s.%s(%s.%sself%s)" % (recv, slot, recv, GEN,
+                                       "".join(", " + c for c in codes))
+        if ret in (None, UNIT):
+            self.line("%s;" % call)
+            return ("0", UNIT)
+        tmp = self.new_tmp(ret)
+        self.line("%s = %s;" % (tmp, call))
+        return (self.e.convert(tmp, ret, real_ret), real_ret or ret)
 
     def ptr_method(self, rcode, rty, name, argnodes, node):
         """`Ptr<T>`'s members ARE the backend.
@@ -2276,7 +2706,7 @@ class FnCtx:
             payload,
         )
 
-    def emit_call(self, decl, node, argnodes, targs, want, receiver=None):
+    def emit_call(self, decl, node, argnodes, targs, want, receiver=None, self_ty=None):
         fnode = self.e.fn_node(decl.node)
         if fnode is None:
             self.e.error(node, "`%s` is not callable" % decl.name)
@@ -2318,7 +2748,14 @@ class FnCtx:
         values = list(argnodes)
         codes = []
         if receiver is not None:
-            codes.append(receiver[0])
+            rwant = None
+            if params:
+                rwant = self.e.resolve_type(f(params[0], "ty"), {}, decl.scope_parts,
+                                            self_ty or receiver[1])
+            if params and f(params[0], "mutable", False):
+                codes.append(self.by_ref(receiver[0], receiver[1]))
+            else:
+                codes.append(self.coerce(receiver[0], receiver[1], rwant))
         own = decl.tparams[len(decl.otparams):]
         if own and len(targ_tys) != len(own):
             targ_tys = self.infer_fn_targs(decl, fnode, values, receiver, owner_tys)
@@ -2328,17 +2765,18 @@ class FnCtx:
             idx = i + (1 if receiver is not None else 0)
             pty = (
                 self.e.resolve_type(f(params[idx], "ty"), subst, decl.scope_parts,
-                                    self.e.self_type(decl, subst))
+                                    self_ty or self.e.self_type(decl, subst))
                 if idx < len(params)
                 else None
             )
-            if isinstance(value, tuple):  # already lowered
-                codes.append(value[0])
+            if idx < len(params) and f(params[idx], "mutable", False):
+                code, aty = (value if isinstance(value, tuple) else self.expr(value, pty))
+                codes.append(self.by_ref(code, pty or aty))
             else:
-                codes.append(self.expr(value, pty)[0])
-        cname = self.e.request_fn(decl, targ_tys)
+                codes.append(self.value(value, pty))
+        cname = self.e.request_fn(decl, targ_tys, self_ty)
         ret = self.e.resolve_type(self.e.ret_of(fnode), subst, decl.scope_parts,
-                                  self.e.self_type(decl, subst))
+                                  self_ty or self.e.self_type(decl, subst))
         return ("%s(%s)" % (cname, ", ".join(codes)), ret)
 
 
@@ -2562,7 +3000,96 @@ class FnCtx:
             return (self.ok_of(ret, None, node), ret)
         return self._lower_intrinsic(decl, fnode, node, argnodes, want, receiver)
 
+    def field_of(self, ty, name):
+        info = self.e.struct_info(ty)
+        for fname, fty in (info[2] if info else ()):
+            if fname == name:
+                return sym_member(fname), fty
+        return None, None
+
+    def lower_mem(self, decl, fnode, node, argnodes, receiver):
+        """`Mem` is the page authority, and nothing impls it.
+
+        "page authority: env.mem.alloc() makes an arena" -- these three are
+        where memory enters the program, so they are the backend's, the same
+        way `Ptr`'s members and `Console.println` are.  Everything above them
+        is ordinary Zen.
+        """
+        name = decl.name
+        base = decl.scope_parts
+        ret = self.e.resolve_type(self.e.ret_of(fnode), {}, base)
+        recv = receiver[0] if receiver is not None else "0"
+
+        if name == "alloc":
+            arena = ret
+            state_m, state_t = self.field_of(arena, "state")
+            if state_m is None or state_t is None or state_t[0] != "ptr":
+                self.e.error(node, "Mem.alloc needs an Arena with a state pointer")
+                return ("0", ret)
+            st = state_t[1]
+            cell = self.e.ctype(st)
+            tmp = self.new_tmp(state_t)
+            self.line("%s = (%s *)malloc(sizeof(%s));" % (tmp, cell, cell))
+            for fname, value in (("mem", recv), ("head", "NULL"), ("next", "0")):
+                m, _t = self.field_of(st, fname)
+                if m:
+                    self.line("%s->%s = %s;" % (tmp, m, value))
+            return ("((%s){ .%s = %s })" % (self.e.ctype(arena), state_m, tmp), arena)
+
+        if name == "page":
+            info = self.e.enum_info(ret)
+            if info is None:
+                self.e.error(node, "Mem.page must return a Res")
+                return ("0", ret)
+            payload = dict(info[2])
+            pty = payload.get("Ok")
+            page = pty[1] if pty is not None and pty[0] == "ptr" else None
+            if page is None:
+                self.e.error(node, "Mem.page must return a Res<Ptr<Page>, E>")
+                return ("0", ret)
+            cell = self.e.ctype(page)
+            size = self.value(argnodes[0], prim("usize")) if argnodes else "0"
+            prev = self.value(argnodes[1], pty) if len(argnodes) > 1 else "NULL"
+            raw = self.new_tmp(("ptr", prim("u8")))
+            szt = self.new_tmp(prim("usize"))
+            out = self.new_tmp(ret)
+            self.line("%s = (size_t)%s;" % (szt, paren(size)))
+            self.line("%s = (unsigned char *)malloc(sizeof(%s) + %s);" % (raw, cell, szt))
+            self.open("if (%s == NULL) {" % raw)
+            self.line("%s = %s;" % (out, self.err_value(ret, payload.get("Err"), node)))
+            self.close("} else {")
+            self.indent += 1
+            for fname, value in (("prev", prev),
+                                 ("base", "(%s + sizeof(%s))" % (raw, cell)),
+                                 ("size", szt)):
+                m, mt = self.field_of(page, fname)
+                if m:
+                    self.line("((%s *)%s)->%s = %s;" % (
+                        cell, raw, m, self.e.convert(value, None, mt) if False else value))
+            self.line("%s = %s;" % (out, self.make_variant(ret, "Ok", "(%s *)%s" % (cell, raw))))
+            self.close()
+            return (out, ret)
+
+        if name == "release":
+            page = self.value(argnodes[0], None) if argnodes else "NULL"
+            self.line("free((void *)%s);" % paren(page))
+            return ("0", UNIT)
+        return None
+
+    def err_value(self, ret, ety, node):
+        """`Err(OutOfMemory)` -- the one failure a page request has."""
+        if ety is None:
+            return self.make_variant(ret, "Err", None)
+        info = self.e.enum_info(ety)
+        names = [v for v, p in (info[2] if info else ()) if p is None]
+        inner = self.make_variant(ety, names[0], None) if names else "(%s){0}" % self.e.ctype(ety)
+        return self.make_variant(ret, "Err", inner)
+
     def _lower_intrinsic(self, decl, fnode, node, argnodes, want, receiver):
+        if decl.owner == "Mem" and decl.name in ("alloc", "page", "release"):
+            got = self.lower_mem(decl, fnode, node, argnodes, receiver)
+            if got is not None:
+                return got
         """The bodyless declarations whose bodies ARE the backend.
 
         `to_u64* = (self: u8) u64` and `null_ptr* = <T>() Ptr<T>` are written
@@ -3101,6 +3628,26 @@ def is_loop_shape(emitter, fnode):
     return first is not None and kind(first) == "Named" and f(first, "name") == "LoopHandle"
 
 
+def erase(ty):
+    """A generic member gets ONE slot, with its type parameters erased.
+
+    `realloc*<T> = (self: @Self, p: Ptr<T>, count: usize) Res<Ptr<T>, E>` is
+    three of Alloc's four members' shape, and a record cannot carry a slot per
+    instantiation without its layout becoming a function of the program.  So a
+    pointer erases to `Ptr<u8>` and a Res carrying one erases with it -- the
+    same trade Zig's `std.mem.Allocator` makes.  The value is REBUILT on the
+    way in and out, never reinterpreted, so nothing here depends on two
+    pointer types sharing a representation.
+    """
+    if ty is None:
+        return ty
+    if ty[0] == "ptr":
+        return ("ptr", prim("u8"))
+    if ty[0] == "named" and ty[2]:
+        return ("named", ty[1], tuple(erase(a) for a in ty[2]))
+    return ty
+
+
 def refine(ty, want):
     """Fill a type's unresolved arguments in from what the call site expected.
 
@@ -3121,6 +3668,8 @@ def refine(ty, want):
 
 def is_handle(ty):
     return ty is not None and ty[0] == "loop"
+
+_LVALUE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 ARITH = {"+", "-", "*", "/", "%"}
 WRAPPING = {"+%", "-%", "*%"}
